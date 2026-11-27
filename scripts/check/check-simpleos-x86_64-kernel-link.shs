@@ -1,0 +1,84 @@
+#!/bin/sh
+# x86_64 SimpleOS kernel gate (link stage).
+#
+# Builds examples/09_embedded/simple_os/arch/x86_64/os_entry.spl as a
+# freestanding x86_64 kernel (seed native-build, LLVM backend,
+# no stub fallback) and reports every undefined symbol at link. Modelled on
+# check-simpleos-riscv32-kernel-link.shs / check-simpleos-riscv64-kernel-link.shs
+# (LLVM backend, like the arm32/riscv32/i686/arm64/riscv64 gates; the real build
+# scripts use cranelift). SIMPLE_BOOT_MINIMAL is NOT set: x86_64's real boot C
+# runtime lives in rt_extras.c, primitives.c, and freestanding_* rather than
+# baremetal_stubs.c alone.
+# Status: doc/08_tracking/bug/simpleos_x86_64_kernel_link_gate_compile_errors_2026-11-23.md
+#
+#   sh scripts/check/check-simpleos-x86_64-kernel-link.shs --link-only
+#
+# Env: SIMPLE_BIN (seed with --features llvm, required;
+#      SIMPLE_NATIVE_BUILD_RUST defaults to 1 for the seed Rust native-build path),
+#      OUT (default build/verify/simpleos-x86_64-kernel).
+# Needs llvm-nm and ld.lld on PATH (clang/LLVM only; never GNU binutils).
+#
+# Last stdout line is the verdict:
+#   PASS - kernel linked (<bytes> bytes), 0 undefined symbols      (exit 0)
+#   FAIL - <n> undefined symbol(s): <names>                        (exit 1)
+#   ERROR - nothing was checked (<reason>)                         (exit 2)
+set -eu
+verdict_error() { echo "ERROR - nothing was checked ($*)"; exit 2; }
+
+MODE=${1:-}
+[ "$MODE" = "--link-only" ] || verdict_error "only --link-only is implemented; boot stage lands separately"
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+SIMPLE_BIN=${SIMPLE_BIN:-}
+[ -n "$SIMPLE_BIN" ] && [ -x "$SIMPLE_BIN" ] || verdict_error "SIMPLE_BIN not set to an executable seed"
+for tool in llvm-nm ld.lld od openssl tail; do
+    command -v "$tool" >/dev/null 2>&1 || verdict_error "missing tool: $tool"
+done
+
+ENTRY=examples/09_embedded/simple_os/arch/x86_64/os_entry.spl
+LDS=examples/09_embedded/simple_os/arch/x86_64/linker.ld
+OUT=${OUT:-$ROOT/build/verify/simpleos-x86_64-kernel}
+mkdir -p "$OUT"
+
+# Pinned trust config: a throwaway Ed25519 key per run. The link stage needs
+# only the generated module's shape; the boot stage signs with the same key.
+openssl genpkey -algorithm ed25519 -out "$OUT/auth.pem" >/dev/null 2>&1 || verdict_error "openssl ed25519 keygen failed"
+openssl pkey -in "$OUT/auth.pem" -pubout -outform DER -out "$OUT/auth.der" >/dev/null 2>&1 || verdict_error "openssl pubkey export failed"
+tail -c 32 "$OUT/auth.der" > "$OUT/auth.raw"
+root_hex=$(od -An -tx1 -v "$OUT/auth.raw" | tr -d ' \n')
+root_hash=$(openssl dgst -sha256 -r "$OUT/auth.raw" | cut -d' ' -f1)
+GEN=$OUT/generated; mkdir -p "$GEN"
+{
+    printf 'pub fn x86_64_authenticated_pinned_key_id_v1() -> text: "x86-64-qemu-acceptance-v1"\n'
+    printf 'pub fn x86_64_authenticated_pinned_public_key_hex_v1() -> text: "%s"\n' "$root_hex"
+    printf 'pub fn x86_64_authenticated_pinned_public_key_hash_v1() -> text: "%s"\n' "$root_hash"
+    printf 'export x86_64_authenticated_pinned_key_id_v1, x86_64_authenticated_pinned_public_key_hex_v1, x86_64_authenticated_pinned_public_key_hash_v1\n'
+} > "$GEN/x86_64_auth_trust_config.spl"
+
+KERNEL=$OUT/kernel.elf
+LOG=$OUT/kernel-build.log
+rm -f "$KERNEL"
+set +e
+SIMPLE_NATIVE_BUILD_RUST=${SIMPLE_NATIVE_BUILD_RUST:-1} SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT/src" \
+"$SIMPLE_BIN" native-build --cache-dir "$OUT/native-cache" --source "$GEN" --source src/os \
+    --source src/lib --source examples/09_embedded/simple_os --backend llvm \
+    --opt-level=aggressive --log off --timeout 1200 --entry-closure --entry "$ENTRY" \
+    --target x86_64-unknown-none --linker-script "$LDS" --output "$KERNEL" \
+    >"$LOG" 2>&1
+rc=$?
+set -e
+
+undef=$(grep -o 'undefined symbol: [A-Za-z0-9_.$]*' "$LOG" | sed 's/undefined symbol: //' | sort -u)
+n=$(printf '%s\n' "$undef" | grep -c . || true)
+if [ "$n" -gt 0 ]; then
+    printf '%s\n' "$undef" > "$OUT/undefined.txt"
+    echo "FAIL - $n undefined symbol(s): $(printf '%s' "$undef" | tr '\n' ' ')"
+    exit 1
+fi
+[ "$rc" -eq 0 ] && [ -s "$KERNEL" ] || { tail -20 "$LOG" >&2; verdict_error "kernel native-build failed (rc=$rc), log $LOG"; }
+[ "$(od -An -tx1 -N4 "$KERNEL" | tr -d ' \n')" = 7f454c46 ] || verdict_error "$KERNEL is not ELF"
+# ELFCLASS64 (byte 4 = 02) and e_machine EM_X86_64 (0x3E at offset 18, LE).
+[ "$(od -An -tx1 -j4 -N1 "$KERNEL" | tr -d ' \n')" = 02 ] || verdict_error "$KERNEL is not ELF64"
+[ "$(od -An -tx1 -j18 -N2 "$KERNEL" | tr -d ' \n')" = 3e00 ] || verdict_error "$KERNEL is not EM_X86_64"
+echo "PASS - kernel linked ($(wc -c < "$KERNEL") bytes), 0 undefined symbols"

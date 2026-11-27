@@ -85,3 +85,16 @@ Runtime completion still needs a permitted incremental entry-closure check and
 focused specs on an admitted pure-Simple runtime, then live hosted/SimpleOS
 theme/frame evidence.
 
+
+## Triage 2026-11-25 (P3 fleet, release/1.0.0) — SKIP, unlanded-lane process record
+
+This record documents a rejected, never-integrated candidate series (the three
+shas are unrecoverable by design) plus a fresh-lane resume contract for the
+theme-catalog feature. There is no live defect in the current tree to bound and
+fix: the two P1 authority gaps existed only in the rejected candidates, and
+landing the catalog is a full feature lane (generated snapshot catalog +
+hosted/freestanding split + review), far beyond a bounded bug fix. The
+2026-09-16 normalization header ("no resolution evidence found") is
+bookkeeping boilerplate; the body is a complete hard-stop report. Resume
+belongs to a dedicated feature lane following the "Fresh-lane resume contract"
+above. No code change made.

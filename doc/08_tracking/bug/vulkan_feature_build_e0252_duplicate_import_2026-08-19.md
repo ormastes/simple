@@ -1,8 +1,14 @@
 # simple-runtime fails to compile with `--features vulkan --no-default-features` — E0252 duplicate imports
 
 - **Date:** 2026-08-19
-- **Status:** OPEN
+- **Status:** CLOSED (2026-11-08 revalidated)
 - **Severity:** high — blocks all four engine2d Vulkan 8K evidence lanes
+
+Resolution: `af117cb0820` cfg-gated the fallback-only imports in both owners.
+Current source retains those gates. On 2026-11-08,
+`cargo check -p simple-runtime --no-default-features --features vulkan` passed
+against byte-identical sources in `build/p1-bytespan-r8` (39.52s); no E0252
+diagnostics remain.
 - **Found by:** GPU/SIMD verification sweep (render-harden worktree, tip `24bcaa1965b`; identical in simple-main)
 
 ## Symptom

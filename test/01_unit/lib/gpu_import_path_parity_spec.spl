@@ -1,0 +1,37 @@
+# @tag:host-cuda
+# Repro/prevention: std_gpu_package_import_binds_cuda_externs_to_nocuda_stub_2026-08-25.
+# `use std.gpu.*` (package __init__ re-export) and the direct module import must
+# bind the same rt_cuda_* provider, so gpu_device_count() agrees. On a CUDA host
+# the bug showed package=0 vs direct=2. Vacuous (0 == 0) on a GPU-less host.
+# Verify on a CUDA host: bin/simple test test/01_unit/lib/gpu_import_path_parity_spec.spl
+use std.spec.{describe, it, expect}
+use std.env.{env_get}
+use std.io_runtime.{host_os, getpid}
+use std.io.process_ops.{process_run_bounded}
+use std.process.run
+
+fn _simple_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY")
+    if configured != "":
+        return configured
+    if host_os() == "windows":
+        val (out, _e, code) = process_run_bounded("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "(Get-Process -Id {getpid()}).Path"], 20000, 65536)
+        if code == 0:
+            return out.trim()
+        return ""
+    val (ps_out, _pe, ps_code) = process_run_bounded("ps", ["-o", "comm=", "-p", "{getpid()}"], 2000, 65536)
+    if ps_code == 0: ps_out.trim() else: ""
+
+fn _count_line(path: text) -> text:
+    val result = run(_simple_binary(), ["run", path])
+    for line in result.stdout.split("\n"):
+        if line.starts_with("COUNT="):
+            return line.trim()
+    "<no COUNT line>"
+
+describe "std.gpu import-path parity":
+    it "package import and direct import report the same device count":
+        val package_count = _count_line("test/fixtures/lib/gpu_import_parity/package_import.spl")
+        val direct_count = _count_line("test/fixtures/lib/gpu_import_parity/direct_import.spl")
+        expect(package_count.starts_with("COUNT=")).to_equal(true)
+        expect(package_count).to_equal(direct_count)

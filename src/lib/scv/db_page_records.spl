@@ -15,6 +15,12 @@ struct DbPageContext:
     schema_revision: text
     reducer_revision: text
 
+impl DbPageContext:
+    fn __eq__(other: DbPageContext) -> bool:
+        self.repository == other.repository and self.namespace == other.namespace and
+            self.epoch == other.epoch and self.schema_revision == other.schema_revision and
+            self.reducer_revision == other.reducer_revision
+
 struct DbPageRevision:
     context: DbPageContext
     semantic_revision: text
@@ -38,16 +44,16 @@ fn _typed_key(tag: u8, fields: [u8]) -> Result<text, text>:
     Ok(db_snapshot_hex(db_domain_bytes("typed-page-key", db_frame(tag, fields))?))
 
 fn db_page_row_key(entity: EntityRef) -> Result<text, text>:
-    if not entity_ref_validate(entity).valid or entity.provisional == nil: return Err("SCVDB_TYPED_UID")
+    if not entity_ref_validate(entity).valid or entity.provisional.is_none(): return Err("SCVDB_TYPED_UID")
     _typed_key(1u8, db_canonical_text(entity_ref_canonical(entity))?)
 
 fn db_page_batch_key(batch_id: text) -> Result<text, text>:
     if batch_id == "": return Err("SCVDB_TYPED_BATCH")
     _typed_key(2u8, db_canonical_text(batch_id)?)
 
-fn db_page_actor_counter_key(actor: text, counter: u64) -> Result<text, text>:
-    if not actor_incarnation_validate(ActorIncarnation(hex: actor)).valid or counter == 0: return Err("SCVDB_TYPED_ACTOR")
-    _typed_key(3u8, db_canonical_text(actor)? + db_frame(2u8, db_u64_bytes(counter)))
+fn db_page_actor_counter_key(actor_hex: text, counter: u64) -> Result<text, text>:
+    if not actor_incarnation_validate(ActorIncarnation(hex: actor_hex)).valid or counter == 0: return Err("SCVDB_TYPED_ACTOR")
+    _typed_key(3u8, db_canonical_text(actor_hex)? + db_frame(2u8, db_u64_bytes(counter)))
 
 fn db_page_alias_key(alias: SettledAlias) -> Result<text, text>:
     if not settled_alias_validate(alias).valid: return Err("SCVDB_TYPED_ALIAS")
@@ -127,7 +133,7 @@ fn db_typed_page_record_decode(record: DbPageRecord) -> Result<DbTypedPageRecord
         decoded = Some(if root.tag == 102u8: DbTypedPageRecord.Accepted(batch) else: DbTypedPageRecord.ActorCounter(batch))
     elif root.tag == 104u8 and fields.len() == 3:
         val entity = _typed_ref(fields[0])?
-        if entity.provisional == nil: return Err("SCVDB_TYPED_UID")
+        if entity.provisional.is_none(): return Err("SCVDB_TYPED_UID")
         val uid = entity.provisional.unwrap()
         decoded = Some(DbTypedPageRecord.Alias(DbPageAlias(namespace: uid.database_namespace, epoch: db_read_unsigned(fields[1])?, uid: uid, sequence: db_read_unsigned(fields[2])?)))
     elif root.tag == 105u8 and fields.len() == 4:

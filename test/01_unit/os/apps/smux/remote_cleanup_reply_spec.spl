@@ -1,0 +1,29 @@
+# Pure public reply boundary; no synthetic native owner or cleanup proof.
+use std.spec.{describe, it, expect}
+use os.apps.smux.smux_remote.{smux_remote_session_kill_reply_v1, smux_remote_window_kill_reply_v1}
+use app.hosted_apps.smux_client.smux_client_request_reply_ok
+
+describe "smux remote cleanup completion replies":
+    it "keeps pending session cleanup unsuccessful in the actual CLI classifier":
+        val pending = smux_remote_session_kill_reply_v1("s1", Ok(false))
+        expect(pending).to_equal("smux: session cleanup pending s1")
+        expect(smux_client_request_reply_ok("kill-session s1", pending)).to_equal(false)
+        val complete = smux_remote_session_kill_reply_v1("s1", Ok(true))
+        expect(complete).to_equal("smux: killed session s1")
+        expect(smux_client_request_reply_ok("kill-session s1", complete)).to_equal(true)
+
+    it "keeps pending window cleanup distinct from actual removal":
+        val pending = smux_remote_window_kill_reply_v1("s1", "w1", Ok(false))
+        expect(pending).to_equal("smux: window cleanup pending w1 from s1")
+        expect(smux_client_request_reply_ok("kill-window s1 w1", pending)).to_equal(false)
+        val complete = smux_remote_window_kill_reply_v1("s1", "w1", Ok(true))
+        expect(complete).to_equal("smux: killed window w1 from s1")
+        expect(smux_client_request_reply_ok("kill-window s1 w1", complete)).to_equal(true)
+
+    it "preserves explicit cleanup failure without reporting removal":
+        val session = smux_remote_session_kill_reply_v1("s1", Err("native owner retained"))
+        val window = smux_remote_window_kill_reply_v1("s1", "w1", Err("host release pending"))
+        expect(session).to_equal("smux: kill failed: native owner retained")
+        expect(window).to_equal("smux: kill-window failed: host release pending")
+        expect(smux_client_request_reply_ok("kill-session s1", session)).to_equal(false)
+        expect(smux_client_request_reply_ok("kill-window s1 w1", window)).to_equal(false)

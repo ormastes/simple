@@ -1,9 +1,10 @@
 # Text slicing at a mid-codepoint boundary: THREE divergent policies, one of them invalid UTF-8
 
-Status: OPEN — stage 1 (counting mode) LANDED `2ca6b4da3a9`; stage 2
-(blast-radius measurement) MEASURED, see "Stage 2". Stage 3 (fix the sites) and
-stage 4 (flip to a hard error) are NOT done: the flip is **deferred**, with the
-number that justifies deferring recorded below.
+Status: CORE DIVERGENCE RESOLVED 2026-08-21 (see "Resolution (2026-08-21)" at
+the bottom; re-verified 2026-11-25). Stage 1 (counting mode) LANDED
+`2ca6b4da3a9`; stage 2 (blast-radius measurement) MEASURED, see "Stage 2".
+Stage 3 (fix the sites) and stage 4 (flip to a hard error) are NOT done: the
+flip is **deferred**, with the number that justifies deferring recorded below.
 Measured: 2026-08-01
 
 **Re-verified 2026-08-07, unchanged.** Ran the "Reproduce" probe below (`s =
@@ -745,3 +746,33 @@ changed and why.
   an unrelated pre-existing reason (`method \`replace\` not found on type
   \`function\``, function `hash_text`), so it reports LANE_ERROR before any
   fixture runs. `rt_slice` itself was not modified.
+
+## Re-verified 2026-11-25 (release/1.0.0, Windows pinned seed)
+
+The 2026-08-21 resolution is real and in the tree. Ran the "Reproduce" probe
+(`s = "aé€𝄞z"`, no imports) via `bin/simple run`, bare and with
+`SIMPLE_EXECUTION_MODE=interpret`:
+
+| expression | interpret `.len()` | default `.len()` |
+|---|---|---|
+| `s[0:3]` (aligned control) | 3 | 3 |
+| `s[0:2]` (splits é) | 2 | 2 |
+| `s.slice(0,2)` | **2** (was 4 pre-fix) | 2 |
+| `s.substring(0,2)` | **2** (was 4 pre-fix) | 2 |
+
+The headline defect of this bug — the interpreter's lossy-U+FFFD
+`.slice`/`.substring` divergence — is gone: both spellings now agree with the
+bracket path on both engines for the split cases, matching the resolution
+table above.
+
+Caveat recorded for honesty: on this newer pinned seed the DEFAULT engine's
+`len()`/wide-slice numbers no longer match the 2026-08-21 JIT column
+(`s.len()` reports 5 — character units — and `s.slice(0,8).len()` reports 4
+vs interpret's 8). That is the later character-alignment work (the 2026-07-30
+owner decision), a separate semantic axis from this bug's divergence defect,
+and was not investigated here.
+
+Stage 3 (891-site scanner migration) and stage 4 (hard-error flip) remain
+**deferred by design**, exactly as the "Why the flip to a hard error is
+DEFERRED" section records — that is a standing plan, not an open regression.
+The status header now says so explicitly.

@@ -1,0 +1,27 @@
+# Supplemental production-provider proof; full SSpec remains a separate check.
+use std.env.{env_get}
+use app.devhub.adapter_minio.{MinioConfig, minio_put_bytes, minio_put_object, _minio_binary_payload_hash}
+
+fn main() -> i64:
+    val endpoint = env_get("DEVHUB_MINIO_LOOPBACK_URL")
+    val path = env_get("DEVHUB_MINIO_BINARY_FILE")
+    val empty_path = env_get("DEVHUB_MINIO_EMPTY_FILE")
+    assert(endpoint != "" and path != "" and empty_path != "")
+    val cfg = MinioConfig(url: endpoint, region: "us-east-1",
+        access_key: "fixture-access", secret_key: "fixture-signing-key", tls_skip_verify: false)
+    val bytes: [u8] = [0, 128, 255, 65, 10]
+    assert(_minio_binary_payload_hash(bytes) == "27041e6e01b219382c3f088ed30b721653d18a97734e7bad9ad05c97fcdff0fb")
+    print "PASS native binary canonical typed SHA256"
+    val direct: (bool, text, text) = minio_put_bytes(cfg, "bucket", "dir/../direct.bin", bytes, "application/x-fixture")
+    print "native binary direct accepted={direct.0} detail={direct.2}"
+    assert(direct.0)
+    assert(direct.2 == "uploaded")
+    val file: (bool, text, text) = minio_put_object(cfg, "bucket", "file.bin", path)
+    assert(file.0)
+    val empty: (bool, text, text) = minio_put_object(cfg, "bucket", "empty.bin", empty_path)
+    assert(empty.0)
+    val missing: (bool, text, text) = minio_put_object(cfg, "bucket", "missing.bin", path + ".absent")
+    assert(not missing.0)
+    assert(missing.2 != "")
+    print "PASS native MinIO binary, file, empty and missing-file contracts"
+    0

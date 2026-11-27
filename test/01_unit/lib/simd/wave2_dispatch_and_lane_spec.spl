@@ -1,0 +1,195 @@
+"""
+# SIMD Vec*.lane, Wave2Dispatcher, and ScalableVec static-method regression tests
+
+Verifies the runtime and MIR-lowering fixes for:
+- `Vec4f`, `Vec8f`, `Vec4d`, `Vec4i`, and `Vec8i` `.lane(index)` indexing.
+- `wave2_dispatch.spl` scalar fallback and width decomposition helpers + `Wave2Dispatcher`
+  exported through `std.nogc_sync_mut.simd.mod`.
+- `ScalableVec` static method dispatch (`from_array`, `splat`, `zero`, `mask_select`).
+"""
+
+use std.nogc_sync_mut.simd.{Vec4f, Vec8f, Vec4d, Vec4i, Vec8i}
+use std.nogc_sync_mut.simd.mod.{Wave2Dispatcher, FixedVec, ScalableVec, Mask, scalar_add_i32x4, scalar_sub_i32x4, scalar_mul_i32x4}
+use std.nogc_sync_mut.simd.mod.{scalar_add_i32x8, scalar_sub_i32x8, scalar_mul_i32x8}
+use std.nogc_sync_mut.simd.mod.{decompose_f32x8_add, decompose_f32x8_sub, decompose_f32x8_mul}
+use std.nogc_sync_mut.simd.mod.{decompose_f64x4_add, decompose_f64x4_sub, decompose_f64x4_mul}
+use std.nogc_async_mut.simd.mod.{FixedVec as AsyncFixedVec, ScalableVec as AsyncScalableVec, Mask as AsyncMask}
+use std.gc_async_mut.simd.mod.{FixedVec as GcFixedVec, ScalableVec as GcScalableVec, Mask as GcMask}
+
+describe "Vec4f, Vec8f, Vec4d, Vec4i, Vec8i lane indexing":
+
+    it "reads each lane of Vec4f in order":
+        val v = Vec4f.from_array([1.5, -2.25, 3.0, 4.75])
+        val arr = v.to_array()
+        expect(v.lane(0)).to_equal(1.5)
+        expect(v.lane(1)).to_equal(-2.25)
+        expect(v.lane(2)).to_equal(3.0)
+        expect(v.lane(3)).to_equal(4.75)
+        expect(v.lane(0)).to_equal(arr[0])
+        expect(v.lane(3)).to_equal(arr[3])
+
+    it "reads each lane of Vec8f in order":
+        val v = Vec8f.from_array([0.5, 1.5, -2.5, 3.5, 4.25, -5.75, 6.0, 7.5])
+        val arr = v.to_array()
+        expect(v.lane(0)).to_equal(0.5)
+        expect(v.lane(1)).to_equal(1.5)
+        expect(v.lane(2)).to_equal(-2.5)
+        expect(v.lane(3)).to_equal(3.5)
+        expect(v.lane(4)).to_equal(4.25)
+        expect(v.lane(5)).to_equal(-5.75)
+        expect(v.lane(6)).to_equal(6.0)
+        expect(v.lane(7)).to_equal(7.5)
+        expect(v.lane(4)).to_equal(arr[4])
+        expect(v.lane(7)).to_equal(arr[7])
+
+    it "reads each lane of Vec4d in order":
+        val v = Vec4d.from_array([10.5, -20.25, 30.125, 40.75])
+        val arr = v.to_array()
+        expect(v.lane(0)).to_equal(10.5)
+        expect(v.lane(1)).to_equal(-20.25)
+        expect(v.lane(2)).to_equal(30.125)
+        expect(v.lane(3)).to_equal(40.75)
+        expect(v.lane(2)).to_equal(arr[2])
+
+    it "reads each lane of Vec4i in order":
+        val v = Vec4i.from_array([11, -22, 33, 44])
+        val arr = v.to_array()
+        expect(v.lane(0)).to_equal(11)
+        expect(v.lane(1)).to_equal(-22)
+        expect(v.lane(2)).to_equal(33)
+        expect(v.lane(3)).to_equal(44)
+        expect(v.lane(1)).to_equal(arr[1])
+
+    it "reads each lane of Vec8i in order":
+        val v = Vec8i.from_array([10, 20, -30, 40, 50, -60, 70, 80])
+        val arr = v.to_array()
+        expect(v.lane(0)).to_equal(10)
+        expect(v.lane(1)).to_equal(20)
+        expect(v.lane(2)).to_equal(-30)
+        expect(v.lane(3)).to_equal(40)
+        expect(v.lane(4)).to_equal(50)
+        expect(v.lane(5)).to_equal(-60)
+        expect(v.lane(6)).to_equal(70)
+        expect(v.lane(7)).to_equal(80)
+        expect(v.lane(6)).to_equal(arr[6])
+
+describe "wave2_dispatch scalar fallback and width decomposition":
+
+    it "computes i32x4 add, sub, and mul via scalar helpers":
+        val a = Vec4i.from_array([10, 25, -8, 7])
+        val b = Vec4i.from_array([3, 5, 12, -2])
+        val sum = scalar_add_i32x4(a, b)
+        val diff = scalar_sub_i32x4(a, b)
+        val prod = scalar_mul_i32x4(a, b)
+        expect(sum.to_array()).to_equal([13, 30, 4, 5])
+        expect(diff.to_array()).to_equal([7, 20, -20, 9])
+        expect(prod.to_array()).to_equal([30, 125, -96, -14])
+
+    it "computes i32x8 add, sub, and mul via scalar helpers":
+        val a = Vec8i.from_array([1, 2, 3, 4, 5, 6, 7, 8])
+        val b = Vec8i.from_array([8, 7, 6, 5, -4, -3, -2, -1])
+        val sum = scalar_add_i32x8(a, b)
+        val diff = scalar_sub_i32x8(a, b)
+        val prod = scalar_mul_i32x8(a, b)
+        expect(sum.to_array()).to_equal([9, 9, 9, 9, 1, 3, 5, 7])
+        expect(diff.to_array()).to_equal([-7, -5, -3, -1, 9, 9, 9, 9])
+        expect(prod.to_array()).to_equal([8, 14, 18, 20, -20, -18, -14, -8])
+
+    it "computes f32x8 add, sub, and mul via width decomposition":
+        val a = Vec8f.from_array([1.0, 2.5, 4.0, 6.0, 8.0, 10.5, 12.0, 14.5])
+        val b = Vec8f.from_array([0.5, 1.5, 2.0, 3.0, 2.0, 2.5, 4.0, 0.5])
+        val sum = decompose_f32x8_add(a, b)
+        val diff = decompose_f32x8_sub(a, b)
+        val prod = decompose_f32x8_mul(a, b)
+        expect(sum.to_array()).to_equal([1.5, 4.0, 6.0, 9.0, 10.0, 13.0, 16.0, 15.0])
+        expect(diff.to_array()).to_equal([0.5, 1.0, 2.0, 3.0, 6.0, 8.0, 8.0, 14.0])
+        expect(prod.to_array()).to_equal([0.5, 3.75, 8.0, 18.0, 16.0, 26.25, 48.0, 7.25])
+
+    it "computes f64x4 add, sub, and mul via width decomposition":
+        val a = Vec4d.from_array([1.5, 6.0, -4.0, 9.5])
+        val b = Vec4d.from_array([2.5, 1.5, 2.0, 0.5])
+        val sum = decompose_f64x4_add(a, b)
+        val diff = decompose_f64x4_sub(a, b)
+        val prod = decompose_f64x4_mul(a, b)
+        expect(sum.to_array()).to_equal([4.0, 7.5, -2.0, 10.0])
+        expect(diff.to_array()).to_equal([-1.0, 4.5, -6.0, 9.0])
+        expect(prod.to_array()).to_equal([3.75, 9.0, -8.0, 4.75])
+
+    it "dispatches all operations cleanly under Wave2Dispatcher.force_scalar":
+        var disp = Wave2Dispatcher.force_scalar()
+        expect(disp.summary()).to_contain("tier=scalar")
+        expect(disp.summary()).to_contain("scalar_i32=true")
+        expect(disp.summary()).to_contain("scalar_f32x8=true")
+        expect(disp.summary()).to_contain("scalar_f64x4=true")
+
+        val i4a = Vec4i.from_array([2, 4, 6, 8])
+        val i4b = Vec4i.from_array([1, 2, 3, 4])
+        expect(disp.add_i32x4(i4a, i4b).to_array()).to_equal([3, 6, 9, 12])
+        expect(disp.sub_i32x4(i4a, i4b).to_array()).to_equal([1, 2, 3, 4])
+        expect(disp.mul_i32x4(i4a, i4b).to_array()).to_equal([2, 8, 18, 32])
+
+        val i8a = Vec8i.from_array([1, 2, 3, 4, 5, 6, 7, 8])
+        val i8b = Vec8i.splat(2)
+        expect(disp.add_i32x8(i8a, i8b).to_array()).to_equal([3, 4, 5, 6, 7, 8, 9, 10])
+        expect(disp.sub_i32x8(i8a, i8b).to_array()).to_equal([-1, 0, 1, 2, 3, 4, 5, 6])
+        expect(disp.mul_i32x8(i8a, i8b).to_array()).to_equal([2, 4, 6, 8, 10, 12, 14, 16])
+
+        val f8a = Vec8f.from_array([5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0])
+        val f8b = Vec8f.splat(1.5)
+        expect(disp.add_f32x8(f8a, f8b).to_array()).to_equal([6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5, 13.5])
+        expect(disp.sub_f32x8(f8a, f8b).to_array()).to_equal([3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5])
+        expect(disp.mul_f32x8(f8a, Vec8f.splat(2.0)).to_array()).to_equal([10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0])
+
+        val d4a = Vec4d.from_array([2.0, 4.0, 6.0, 8.0])
+        val d4b = Vec4d.splat(0.5)
+        expect(disp.add_f64x4(d4a, d4b).to_array()).to_equal([2.5, 4.5, 6.5, 8.5])
+        expect(disp.sub_f64x4(d4a, d4b).to_array()).to_equal([1.5, 3.5, 5.5, 7.5])
+        expect(disp.mul_f64x4(d4a, d4b).to_array()).to_equal([1.0, 2.0, 3.0, 4.0])
+
+        var tiered = Wave2Dispatcher.with_tier("sse2", false)
+        expect(tiered.summary()).to_contain("tier=sse2")
+        expect(tiered.summary()).to_contain("scalar_f32x8=true")
+        expect(tiered.summary()).to_contain("scalar_f64x4=true")
+        expect(tiered.add_f32x8(f8a, f8b).to_array()).to_equal([6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5, 13.5])
+
+        var auto_disp = Wave2Dispatcher.create()
+        expect(auto_disp.summary()).to_contain("scalar_i32=true")
+        val big_a = Vec4i.from_array([100000, -100000, 32768, -32768])
+        val big_b = Vec4i.from_array([25000, -50000, -10000, 10000])
+        expect(auto_disp.add_i32x4(big_a, big_b).to_array()).to_equal([125000, -150000, 22768, -22768])
+
+describe "FixedVec and ScalableVec static constructors and mask selection":
+
+    it "constructs via FixedVec.from_array and blends via FixedVec.mask_select across all families":
+        val ft = FixedVec.from_array([10, 20, 30, 40])
+        val ff = FixedVec.from_array([1, 2, 3, 4])
+        val fm = Mask.from_bits_n(0b0101, 4)
+        expect(FixedVec.mask_select(fm, ft, ff).to_array()).to_equal([10, 2, 30, 4])
+
+        val aft = AsyncFixedVec.from_array([11, 22, 33, 44])
+        val aff = AsyncFixedVec.from_array([1, 2, 3, 4])
+        val afm = AsyncMask.from_bits_n(0b1010, 4)
+        expect(AsyncFixedVec.mask_select(afm, aft, aff).to_array()).to_equal([1, 22, 3, 44])
+
+        val gft = GcFixedVec.from_array([100, 200, 300, 400])
+        val gff = GcFixedVec.from_array([5, 6, 7, 8])
+        val gfm = GcMask.from_bits_n(0b0101, 4)
+        expect(GcFixedVec.mask_select(gfm, gft, gff).to_array()).to_equal([100, 6, 300, 8])
+
+    it "constructs via ScalableVec.from_array and blends via ScalableVec.mask_select":
+        val t = ScalableVec.from_array([10, 20, 30, 40])
+        val f = ScalableVec.from_array([1, 2, 3, 4])
+        val m = Mask.from_bits_n(0b0101, 4)
+        val blended = ScalableVec.mask_select(m, t, f)
+        expect(blended.to_array()).to_equal([10, 2, 30, 4])
+
+    it "constructs via nogc_async_mut and gc_async_mut ScalableVec static methods":
+        val at = AsyncScalableVec.from_array([11, 22, 33, 44])
+        val af = AsyncScalableVec.from_array([1, 2, 3, 4])
+        val am = AsyncMask.from_bits_n(0b1010, 4)
+        expect(AsyncScalableVec.mask_select(am, at, af).to_array()).to_equal([1, 22, 3, 44])
+
+        val gt = GcScalableVec.from_array([100, 200, 300, 400])
+        val gf = GcScalableVec.from_array([5, 6, 7, 8])
+        val gm = GcMask.from_bits_n(0b0101, 4)
+        expect(GcScalableVec.mask_select(gm, gt, gf).to_array()).to_equal([100, 6, 300, 8])

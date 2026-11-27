@@ -1,0 +1,62 @@
+"""
+# Widget Draw IR Panel Title Bounds Prevention Specification
+
+Prevention tests for bug #170 (`widget_draw_ir_panel_title_not_rendered_2026-08-09`).
+Verifies exact height boundary (`PIXEL_PANEL_TITLE_HEIGHT + 2`), y-center alignment,
+empty-title suppression, and sibling panel isolation in `widget_tree_to_draw_ir_cpu`.
+"""
+
+use std.spec.*
+use common.ui.builder.{panel, button}
+use common.ui.layout.{PIXEL_PANEL_TITLE_HEIGHT}
+use common.ui.widget_draw_ir.{widget_tree_to_draw_ir_cpu}
+use common.ui.draw_ir.{DrawIrCommand}
+
+fn find_title_command(root_id: text, height: i32, title: text) -> DrawIrCommand?:
+    val node = panel(root_id, title, [button("{root_id}-btn", "Body", "ok")])
+    val comp = widget_tree_to_draw_ir_cpu(node, 180, height)
+    val expected_cid = "{root_id}-title"
+    for batch in comp.batches:
+        for cmd in batch.commands:
+            if cmd.component_id == expected_cid:
+                return Some(cmd)
+    nil
+
+describe "widget_draw_ir panel title bounds prevention":
+    """Verifies exact threshold and position invariants for panel title draw commands."""
+
+    it "emits title command exactly at PIXEL_PANEL_TITLE_HEIGHT + 2 threshold":
+        val min_height = PIXEL_PANEL_TITLE_HEIGHT + 2
+        val found = find_title_command("edge-ok", min_height, "Header")
+        var matched_text = ""
+        var matched_y: i32 = -1
+        var matched_h: i32 = -1
+        if val Some(cmd) = found:
+            matched_text = cmd.text_value
+            matched_y = cmd.y
+            matched_h = cmd.height
+        expect(matched_text).to_equal("Header")
+        expect(matched_h > 0).to_equal(true)
+        expect(matched_y).to_equal(1 + (PIXEL_PANEL_TITLE_HEIGHT - matched_h) / 2)
+
+    it "suppresses title command when panel height is below PIXEL_PANEL_TITLE_HEIGHT + 2":
+        val too_short = PIXEL_PANEL_TITLE_HEIGHT + 1
+        val found = find_title_command("edge-short", too_short, "Header")
+        expect(found).to_be_nil()
+
+    it "suppresses title command when panel title is empty despite tall height":
+        val found = find_title_command("blank-title", 80, "")
+        expect(found).to_be_nil()
+
+    it "keeps titled and untitled sibling panels distinct in one composition":
+        val titled = panel("left-p", "Inspector", [])
+        val untitled = panel("right-p", "", [])
+        val outer = panel("wrap-p", "", [titled, untitled])
+        val comp = widget_tree_to_draw_ir_cpu(outer, 320, 120)
+        var title_cids: [text] = []
+        for batch in comp.batches:
+            for cmd in batch.commands:
+                if cmd.component_id.ends_with("-title"):
+                    title_cids.push(cmd.component_id)
+        expect(title_cids.len()).to_equal(1)
+        expect(title_cids[0]).to_equal("left-p-title")

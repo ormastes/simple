@@ -1,0 +1,97 @@
+#!/bin/sh
+# Contract and perf-regression test for PR fast-gates and CI workflow queue hygiene.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/ci-fast-perf-test.XXXXXX")
+trap 'rm -rf "$SCRATCH"' EXIT HUP INT TERM
+
+# 1. required-gates.yml must run on pull_request WITHOUT a workflow-level paths:
+#    filter (required status check) and must not waste runners on push:.
+RG_YML="$ROOT/.github/workflows/required-gates.yml"
+rg_header=$(awk '/^jobs:/ { exit } { print }' "$RG_YML")
+printf '%s\n' "$rg_header" | grep -q '^[[:space:]]*pull_request:' || { echo 'FAIL: required-gates missing pull_request'; exit 1; }
+! printf '%s\n' "$rg_header" | grep -q '^[[:space:]]*push:' || { echo 'FAIL: required-gates must not run on push'; exit 1; }
+! printf '%s\n' "$rg_header" | grep -q '^[[:space:]]*paths:' || { echo 'FAIL: required-gates must never filter pull_request by paths'; exit 1; }
+! grep -q 'sparse-checkout add' "$RG_YML" || { echo 'FAIL: required-gates still runs sequential sparse-checkout add'; exit 1; }
+
+# 2. Non-required high-fanout PR workflows must carry paths: filters and cancel-in-progress.
+for wf in bootstrap-scripts-contract.yml riscv-rtl-truth.yml component-build.yml; do
+    p="$ROOT/.github/workflows/$wf"
+    grep -q '^[[:space:]]*paths:' "$p" || { echo "FAIL: $wf missing paths: filter"; exit 1; }
+    grep -q 'cancel-in-progress:' "$p" || { echo "FAIL: $wf missing cancel-in-progress"; exit 1; }
+done
+! grep -q 'fetch-depth: 0' "$ROOT/.github/workflows/component-build.yml" || { echo 'FAIL: component-build still clones fetch-depth: 0 in plan'; exit 1; }
+
+# 3. run-gate-tier.shs must dispatch 20 fast rows without multi-second sleep 1 stalls
+#    and prioritize heavyweight rows ahead of fast rows in select_rows.
+HDR='must_check_gates |id, tier, push_blocking, mode, command, ci_job, inputs, description|'
+{
+    printf '%s\n' "$HDR"
+    _i=1
+    while [ "$_i" -le 19 ]; do
+        printf '    fast-%02d, local, false, tree, "true", fast-gates, -, "fast"\n' "$_i"
+        _i=$((_i + 1))
+    done
+    printf '    local-runtime-link-completeness, local, false, tree, "true", fast-gates, -, "heavy"\n'
+} > "$SCRATCH/m.sdn"
+t0=$(date +%s)
+RUN_GATE_TIER_ROOT="$ROOT" sh "$ROOT/scripts/check/run-gate-tier.shs" --tier local --manifest-file "$SCRATCH/m.sdn" --jobs 4 --budget 20 --results "$SCRATCH/r.out" >/dev/null
+t1=$(date +%s)
+dt=$((t1 - t0))
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) max_dt=12 ;;
+    *) max_dt=4 ;;
+esac
+[ "$(wc -l < "$SCRATCH/r.out" | tr -d ' ')" -eq 20 ] || { echo 'FAIL: expected 20 results'; exit 1; }
+[ "$dt" -le "$max_dt" ] || { echo "FAIL: 20 no-op rows took ${dt}s > ${max_dt}s (sleep 1 stall regression)"; exit 1; }
+
+# Verify LPT-first ordering puts local-runtime-link-completeness before fast-01.
+cat > "$SCRATCH/m_lpt.sdn" <<EOF
+$HDR
+    fast-01, local, false, tree, "echo fast-01 >> $SCRATCH/order.log", fast-gates, -, "fast"
+    local-runtime-link-completeness, local, false, tree, "echo heavy >> $SCRATCH/order.log", fast-gates, -, "heavy"
+EOF
+RUN_GATE_TIER_ROOT="$ROOT" sh "$ROOT/scripts/check/run-gate-tier.shs" --tier local --manifest-file "$SCRATCH/m_lpt.sdn" --jobs 1 --budget 20 --results "$SCRATCH/r_lpt.out" >/dev/null
+first_ran=$(sed -n '1p' "$SCRATCH/order.log")
+[ "$first_ran" = 'heavy' ] || { echo "FAIL: expected heavy row first under LPT ordering, got '$first_ran'"; exit 1; }
+
+# Verify failing rows still exit 1 and record 'fail' (guards against MSYS setsid detaching).
+cat > "$SCRATCH/m_fail.sdn" <<EOF
+$HDR
+    g-ok, local, false, tree, "sh -c 'exit 0'", fast-gates, -, "ok"
+    g-fail, local, false, tree, "sh -c 'exit 1'", fast-gates, -, "fail"
+EOF
+set +e
+RUN_GATE_TIER_ROOT="$ROOT" sh "$ROOT/scripts/check/run-gate-tier.shs" --tier local --manifest-file "$SCRATCH/m_fail.sdn" --jobs 2 --budget 20 --results "$SCRATCH/r_fail.out" >/dev/null 2>&1
+fail_rc=$?
+set -e
+[ "$fail_rc" -eq 1 ] || { echo "FAIL: expected failing row to return 1, got rc=$fail_rc"; exit 1; }
+grep -q '^g-fail fail$' "$SCRATCH/r_fail.out" || { echo "FAIL: missing 'g-fail fail' in results"; exit 1; }
+
+# 4. check-module-file-dir-ambiguity.shs must detect an ambiguous pair in a
+#    sparse git checkout even when the package directory is outside the cone.
+REPO="$SCRATCH/sparse_repo"
+mkdir -p "$REPO/src/pkg/sub" "$REPO/scripts/check"
+printf 'fn p(): 1\n' > "$REPO/src/pkg/sub.spl"
+printf 'fn s(): 2\n' > "$REPO/src/pkg/sub/__init__.spl"
+: > "$REPO/scripts/check/module_file_dir_ambiguity_baseline.txt"
+git -C "$REPO" init -q
+git -C "$REPO" config user.email t@t.example
+git -C "$REPO" config user.name t
+git -C "$REPO" add -A
+git -C "$REPO" commit -q -m init
+
+mkdir -p "$SCRATCH/sparse_co"
+git clone --quiet --shared --filter=blob:none --no-checkout "$REPO" "$SCRATCH/sparse_co"
+git -C "$SCRATCH/sparse_co" sparse-checkout init --cone
+git -C "$SCRATCH/sparse_co" sparse-checkout set scripts/check
+git -C "$SCRATCH/sparse_co" checkout -q HEAD
+set +e
+amb_out=$(sh "$ROOT/scripts/check/check-module-file-dir-ambiguity.shs" --root "$SCRATCH/sparse_co" 2>&1)
+amb_rc=$?
+set -e
+[ "$amb_rc" -eq 1 ] || { echo "FAIL: sparse checkout missed unmaterialized ambiguous pair (rc=$amb_rc): $amb_out"; exit 1; }
+printf '%s\n' "$amb_out" | grep -Fq 'src/pkg/sub.spl' || { echo "FAIL: output did not name src/pkg/sub.spl: $amb_out"; exit 1; }
+
+echo "PASS: ci_fast_gates_perf_contract_test (dt=${dt}s)"

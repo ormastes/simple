@@ -1,0 +1,64 @@
+"""
+## Purpose and audience
+Purpose: Verify dashboard CLI shared log-mode, surface, and progress option handling.
+Audience: app.dashboard maintainers and CLI integration engineers.
+"""
+
+# @req: REQ-APP-DASHBOARD-CLI-002
+
+use std.spec.*
+use app.dashboard.main.{
+    dashboard_plan_cli,
+    dashboard_execute_plan,
+    run_dashboard
+}
+
+describe "Dashboard CLI log-mode and progress handling":
+
+    it "parses --log-mode=json and --json for usage and status output":
+        val usage_plan = dashboard_plan_cli(["--log-mode=json"])
+        expect(usage_plan.valid).to_equal(true)
+        expect(usage_plan.log_mode).to_equal("json")
+        expect(usage_plan.command).to_equal("usage")
+        val (usage_out, usage_code) = dashboard_execute_plan(usage_plan)
+        expect(usage_code).to_equal(0)
+        expect(usage_out).to_contain("\"command\":\"dashboard\"")
+        expect(usage_out).to_contain("\"status\":\"usage\"")
+
+        val status_plan = dashboard_plan_cli(["--json", "status"])
+        expect(status_plan.valid).to_equal(true)
+        expect(status_plan.log_mode).to_equal("json")
+        val (status_out, status_code) = dashboard_execute_plan(status_plan)
+        expect(status_code).to_equal(0)
+        expect(status_out).to_contain("\"command\":\"dashboard\"")
+        expect(status_out).to_contain("\"status\":\"ok\"")
+
+    it "renders dot progress prefix before help when --progress=dot is passed":
+        val plan = dashboard_plan_cli(["--progress=dot", "--help"])
+        expect(plan.valid).to_equal(true)
+        expect(plan.progress).to_equal("dot")
+        expect(plan.command).to_equal("help")
+        val (out, code) = dashboard_execute_plan(plan)
+        expect(code).to_equal(0)
+        expect(out).to_start_with(".")
+        expect(out).to_contain("Simple Dashboard CLI")
+
+    it "rejects invalid log-mode and surface values with exit code 1":
+        val bad_mode = dashboard_plan_cli(["--log-mode=noisy"])
+        expect(bad_mode.valid).to_equal(false)
+        expect(bad_mode.exit_code).to_equal(1)
+        expect(run_dashboard(["--log-mode=noisy"])).to_equal(1)
+
+        val bad_surface = dashboard_plan_cli(["--surface=invalid", "status"])
+        expect(bad_surface.valid).to_equal(false)
+        expect(bad_surface.exit_code).to_equal(1)
+        expect(run_dashboard(["--surface=invalid", "status"])).to_equal(1)
+
+    it "emits a JSON error envelope for unknown subcommands when --log-mode=json":
+        val plan = dashboard_plan_cli(["--log-mode=json", "bogus"])
+        expect(plan.valid).to_equal(false)
+        expect(plan.exit_code).to_equal(1)
+        val (out, code) = dashboard_execute_plan(plan)
+        expect(code).to_equal(1)
+        expect(out).to_contain("\"command\":\"dashboard\"")
+        expect(out).to_contain("\"status\":\"error\"")

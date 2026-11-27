@@ -1,6 +1,6 @@
 # Interpreter: unresolved enum import fails open — variant access and match work symbolically
 
-Status: OPEN (advisory; found while sabotage-testing check-bootstrap-preflight.shs)
+Status: SUPERSEDED (2026-11-11, lane int10) — fail-open behavior closed on origin/release/1.0.0; strict undefined-identifier resolution carried by `9e7e7a526edb` (PR #7597); see addenda below
 Date: 2026-08-18
 Area: seed interpreter, import/type resolution
 
@@ -41,3 +41,80 @@ entirely unresolved enum behaves like a real one.
 
 An unresolved imported type used as a value/pattern should be a hard error (or
 at minimum make `run` exit nonzero), not a WARN followed by symbolic execution.
+
+## Rejected selective-import candidate evidence (2026-11-03; no closure)
+
+A candidate validation patch was prepared against source base
+`deb089b0eae35329dcf8bcbb3782b483a6e79464`. The candidate file in its isolated
+worktree was
+`src/compiler_rust/compiler/src/hir/lower/import_loader.rs`, SHA-256
+`45B1D8D6D52200F9A82ACB4B470EAFC254AE919267DE96880A1DBF15C92B2039`. This
+source draft was rejected and is not included or proposed for landing.
+
+The four focused tests did not execute. The first bounded attempt stopped
+during setup because LLVM sys dynamic linking is unsupported in this Windows
+configuration; zero test assertions ran. Attempt 3 failed during Rust harness
+compilation after 174 seconds (rc 101), also with zero tests: the candidate
+passed a `PathBuf` to a `String` set, and the sparse checkout reported 11
+missing compile-time include-file references spanning fixtures and production
+Simple sources. This is a candidate/build setup failure, not a semantic test
+result. The retained attempt-3 receipt is
+`C:/dev/p3new/selective_import_validation_20261103/unit_attempt_03/result.sdn`,
+SHA-256
+`191E2680CBE34FBB71CE2AF94D0CCE053B24C97361F895C472254BF39C58C13E`; its
+stderr is `unit_attempt_03/cargo-no-run.log.err`, SHA-256
+`B630ED9C5C1EAFC20DB5CAD39BE1F8A451FEF36B0C229583F388D81DB6660FBB`.
+
+The four named focused tests—name validation, declarations and re-exports,
+missing re-export and cycle-only names, and incomplete package graphs—remain
+unexecuted. No retry or source repair is recorded here. The historical
+2026-08-18 behavior has not been remeasured against this release; this issue
+remains OPEN and unverified. Neither the rejected candidate nor its zero-test
+attempts establish runtime closure, and the existing bug database status
+remains open.
+
+## Addendum 2026-11-11 (lane interp6) — SUPERSEDED
+
+**Verdict: SUPERSEDED — remeasured against this release; the fail-open
+behavior is closed on the refreshed seed.**
+
+The record's exact repro (import of the nonexistent `ByteOrderX` from
+`std.binary_io`, used as a parameter type, a `case` pattern, and a value
+constructor) was run unmodified against the refreshed seed
+(build-commit 0791c2b7f4a7), plain run mode, fixture
+`build/p3fix-interp6/fx/enumfailopen.spl` (gitignored):
+
+```
+SIMPLE_LIB=src SIMPLE_EXECUTION_MODE=interpreter ./bin/simple.exe run enumfailopen.spl
+error: semantic: in call to `order_name` (declared at line 2): variable `ByteOrderX` not found
+exit=1
+```
+
+No WARN-and-continue, no `little,big`, exit nonzero — the expected
+fail-closed behavior this record asked for. Unresolved identifiers (enum
+type names included) now hard-error in the interpreter's name resolution
+(`variable `{}` not found`,
+`src/compiler_rust/compiler/src/interpreter/expr/literals.rs:449`), so a
+T0 "does this import/type resolve?" probe is vacuous no longer.
+
+Fixing lineage on this branch: the strict undefined-identifier resolution
+carried by squash-merge `9e7e7a526edb43ab29171d920449367e5fd48127`
+(2026-11-07, PR #7597) — confirmed by
+`git log -S 'Failed to load imported types'` and the literals.rs resolution
+arm both tracing to that merge. (The 2026-11-03 rejected candidate patch
+remains rejected and unneeded; the 2026-11-10 seedfix lane's four rows were
+other defects.)
+
+## Addendum 2026-11-11 (lane int10) — header flip; concurs with interp6 SUPERSEDED verdict
+
+Header Status flipped OPEN -> SUPERSEDED. Lane interp6's remeasurement above
+is the execution evidence (exact repro, plain run mode, refreshed seed
+0791c2b7f4a7: `error: semantic: ... variable 'ByteOrderX' not found`, exit=1 —
+no WARN-and-continue, no symbolic match). int10 confirms the strict
+undefined-identifier resolution is present at this lane's base
+(`9e7e7a526edb43ab29171d920449367e5fd48127` is an ancestor of HEAD
+`1771ca481337`; the resolution arm is at
+`src/compiler_rust/compiler/src/interpreter/expr/literals.rs:449`), and this
+lane's tracked seed (`bin/simple.exe` build-commit `46fe8f6b6def`) descends
+from interp6's verification build, so re-running the repro would re-print a
+green check (no-identical-rerun rule).

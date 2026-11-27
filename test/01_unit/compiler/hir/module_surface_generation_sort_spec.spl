@@ -1,4 +1,5 @@
 use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName}
 use compiler.hir.hir_lowering.module_surface_registry_index.{
@@ -72,3 +73,38 @@ describe "surface generation stable merge ordering":
             generation_registry([], []))).to_equal(sha256_text(""))
         expect(module_surface_stable_resolution_generation_v1(
             generation_registry(["invalid"], [-1]))).to_equal(sha256_text(""))
+
+    it "keeps caller input rows intact and unmutated across lengths 0, 1, 2, and 5":
+        """Preserve caller-owned row carriers across empty, singleton, pair, and odd merge passes."""
+        val empty_rows: [text] = []
+        expect(module_surface_resolution_rows_sorted_v1(empty_rows)).to_equal([])
+        expect(empty_rows).to_equal([])
+        expect(module_surface_resolution_rows_sorted_v1(empty_rows)).to_equal([])
+
+        val single_rows = ["only=src/only.spl"]
+        expect(module_surface_resolution_rows_sorted_v1(single_rows)).to_equal(["only=src/only.spl"])
+        expect(single_rows).to_equal(["only=src/only.spl"])
+        expect(module_surface_resolution_rows_sorted_v1(single_rows)).to_equal(["only=src/only.spl"])
+
+        val pair_rows = ["z=src/z.spl", "a=src/a.spl"]
+        expect(module_surface_resolution_rows_sorted_v1(pair_rows)).to_equal(["a=src/a.spl", "z=src/z.spl"])
+        expect(pair_rows).to_equal(["z=src/z.spl", "a=src/a.spl"])
+        expect(module_surface_resolution_rows_sorted_v1(pair_rows)).to_equal(["a=src/a.spl", "z=src/z.spl"])
+        expect(pair_rows).to_equal(["z=src/z.spl", "a=src/a.spl"])
+
+        val five_rows = ["e=5", "c=3", "a=1", "d=4", "b=2"]
+        expect(module_surface_resolution_rows_sorted_v1(five_rows)).to_equal(["a=1", "b=2", "c=3", "d=4", "e=5"])
+        expect(five_rows).to_equal(["e=5", "c=3", "a=1", "d=4", "b=2"])
+        expect(module_surface_resolution_rows_sorted_v1(five_rows)).to_equal(["a=1", "b=2", "c=3", "d=4", "e=5"])
+        expect(five_rows).to_equal(["e=5", "c=3", "a=1", "d=4", "b=2"])
+
+        val source = file_read("src/compiler/20.hir/hir_lowering/module_surface_registry_index.spl")
+        val fn_start = source.index_of("pub(package) fn module_surface_resolution_rows_sorted_v1(")
+        val fn_end = source.index_of("fn _module_surface_final_semantic_digest(", fn_start)
+        expect(fn_start).to_be_greater_than(0)
+        expect(fn_end).to_be_greater_than(fn_start)
+        val fn_body = source.substring(fn_start, fn_end)
+        expect(fn_body).to_contain("var owns_sorted = false")
+        expect(fn_body).to_contain("if owns_sorted:")
+        expect(fn_body).to_contain("owns_sorted = true")
+

@@ -53,3 +53,5 @@ of a directory as an inventory source row. Existing receipt selection tests
 already construct directory-root bindings and remain applicable. All native
 execution is UNRUN. Current Phase 2 and independent retry inputs are untouched.
 No forced one-shard workaround or validator bypass is introduced.
+
+**Revalidated 2026-11-02: still plausible because OPEN; source repair and regressions prepared, native verification pending; no merged fix commit with a passing regression is cited in this doc.**

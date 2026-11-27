@@ -1,0 +1,52 @@
+# Cleanup progress data only, never an owner, native proof or release grant.
+# The actual owner applies native results only to its originally held component.
+pub enum MachineCleanupComponentV1:
+    Machine
+    Principal
+
+enum MachineCleanupDispositionV1:
+    Released
+    ConsumedError
+    Stale
+    Retained
+
+pub struct MachineCleanupProgressV1:
+    machine_consumed: bool
+    principal_consumed: bool
+    first_diagnostic: text
+
+pub fn machine_cleanup_progress_initial_v1() -> MachineCleanupProgressV1:
+    MachineCleanupProgressV1(machine_consumed: false, principal_consumed: false, first_diagnostic: "")
+
+fn machine_cleanup_disposition_v1(state: text) -> MachineCleanupDispositionV1:
+    match state:
+        case "released": MachineCleanupDispositionV1.Released
+        case "consumed-error": MachineCleanupDispositionV1.ConsumedError
+        case "stale": MachineCleanupDispositionV1.Stale
+        case _: MachineCleanupDispositionV1.Retained
+
+pub fn machine_cleanup_progress_record_v1(progress: MachineCleanupProgressV1,
+        component: MachineCleanupComponentV1, state: text) -> MachineCleanupProgressV1:
+    val already_consumed = match component:
+        case MachineCleanupComponentV1.Machine: progress.machine_consumed
+        case MachineCleanupComponentV1.Principal: progress.principal_consumed
+    if already_consumed: return progress
+    val disposition = machine_cleanup_disposition_v1(state)
+    # Generic stale is not positive evidence of this component's consumption.
+    # Only this pair's previously recorded progress may skip native cleanup.
+    if disposition == MachineCleanupDispositionV1.Retained or disposition == MachineCleanupDispositionV1.Stale:
+        return progress
+    var next = progress
+    match component:
+        case MachineCleanupComponentV1.Machine: next.machine_consumed = true
+        case MachineCleanupComponentV1.Principal: next.principal_consumed = true
+    if disposition == MachineCleanupDispositionV1.ConsumedError and next.first_diagnostic == "":
+        next.first_diagnostic = match component:
+            case MachineCleanupComponentV1.Machine: "machine-authority-storage-consumed-error"
+            case MachineCleanupComponentV1.Principal: "machine-authority-principal-consumed-error"
+    next
+
+pub fn machine_cleanup_progress_status_v1(progress: MachineCleanupProgressV1) -> text:
+    if not progress.machine_consumed or not progress.principal_consumed: return "retained"
+    if progress.first_diagnostic != "": return "consumed-error"
+    "released"

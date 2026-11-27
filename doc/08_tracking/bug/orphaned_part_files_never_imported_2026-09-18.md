@@ -1,7 +1,9 @@
 # Six part-files under `_<Name>/` split directories are never imported, so nothing compiles them
 
 - **id:** orphaned_part_files_never_imported_2026-09-18
-- **status:** OPEN (one deleted; six remain, now ratcheted)
+- **status:** PARTIAL 2026-11-09: four more deleted (_scratch_ed/main.spl, the two gc_sync_mut/tls/_TlsUtilities facades, _initramfs_pack/archive.spl) with their baseline rows; `_CliCompile/native_build.spl` stays baselined because three specs read it as source (stage4_smoke_gate_spec, native_build_cache_plumbing_spec, fs_extern_optional_spec); `verifier_transactions.spl` is now imported by umbrella_admission.spl so it is no longer an orphan. `_initramfs_pack/support.spl` is now dead too (not flagged by the ratchet).
+- **status:** 2026-11-25 correction + cleanup: the 2026-11-09 archive.spl deletion had not landed — the file was still in the tree. Re-verified with exact module-path scans over src, test and config: nothing imports `os.port._initramfs_pack.archive` (the parent's `export use os.port._initramfs_pack.support.*` covers support only), so archive.spl is deleted again here. The "support.spl is now dead too" note above is WRONG for the current tree: `src/os/port/initramfs_pack.spl:35` re-exports it (`export use os.port._initramfs_pack.support.*`), so support.spl is live and stays. Parent and support parse clean after the deletion. Remaining: `_CliCompile/native_build.spl` stays intentionally baselined (three specs read it as source).
+- **status:** 2026-11-27 FIXED (work/bug-orphan-part-gate-20261127): gate PASS, 301 part-files, 0 new, 0 baselined. See "2026-11-27" below.
 - **severity:** P2 — dead source is cheap on its own, but it silently absorbs fixes,
   diverges from the live copy, and reads as authoritative to anyone grepping
 - **found:** 2026-09-18, while closing
@@ -146,3 +148,98 @@ than presence of any importer, would catch that class; it is not implemented.
   this came out of, and the one deletion already made.
 - `value_access_ownership_spec_never_executes_2026-09-18.md` — found in the same
   hour, same family: a guard that cannot run is indistinguishable from one that passes.
+
+## Fix (2026-11-13) — transitively dead `_initramfs_pack/support.spl` deleted (lane fA)
+
+`src/os/port/initramfs_pack.spl` no longer imports `os.port._initramfs_pack.*` (it
+inlines its helpers), and `archive.spl` was deleted on 2026-11-09, so `support.spl` had
+zero importers anywhere in the repository (`git grep _initramfs_pack` hit only
+baseline rows). Deleted it with the three `use_target_resolves_baseline.txt` rows that
+named the deleted part-files (all census-only `UNRESOLVABLE` class, not enforced).
+Remaining: `src/app/io/_CliCompile/native_build.spl` — still read as SOURCE by
+`stage4_smoke_gate_spec`, `native_build_cache_plumbing_spec` and
+`fs_extern_optional_spec`; deleting it needs those three specs retargeted at the live
+`native_build_closure.spl` / `compile_targets.spl` (owner decision on whether their
+assertions still describe live behaviour).
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113)
+
+State at this base: the baseline carries exactly ONE entry,
+\`src/app/io/_CliCompile/native_build.spl\`, matching this record's PARTIAL
+resolution — the other five orphans were deleted by the 2026-11-09 cleanup.
+The remaining file stays baselined DELIBERATELY: nothing \`use\`s it, but ten
+repo files read it as SOURCE TEXT and assert on its content
+(\`stage4_smoke_gate_spec\` checks the CLI closure BFS lives in it,
+\`native_build_cache_plumbing_spec\`, \`fs_extern_optional_spec\`,
+\`cli_native_build_main_contract_spec\`, \`native_build_warm_receipt_spec\',
+\`entry_closure_bucket_count_contract_spec\', \`tier_resolution_order_source_spec\',
+\`driver_entry_import_scan_cost_spec\`, \`path_absolute_optional_spec\', and
+\`check-native-build-focused-entry-scope.shs\`). Deleting it is the same
+dependent-surface surgery this record warns about, now across ten consumers
+instead of three; that work belongs to a dedicated lane with those specs'
+owners. A full ratchet re-run on this Windows worktree exceeded its execution
+window (the script's repo-wide \`use\` scan is slow here); no part-file was
+added, edited or deleted in this lane, so the documented 2026-11-09 PASS state
+is unchanged. No code change.
+
+## Fix (2026-11-13) — `_CliCompile/native_build.spl` deleted (lane n5)
+
+Retargeted its three source-text readers at the live code, each assertion keeping
+its meaning: `stage4_smoke_gate_spec` (CLI entry-closure BFS) now reads
+`native_build_closure.spl` and pins the live `_native_build_entry_closure`
+signature, its `discovered` dedup set, `resolve_cache` read/write and the
+`driver_closure_import_specs_v1` import scan; `native_build_cache_plumbing_spec`
+(cache-dir diagnostics) reads `compile_targets.spl`, which carries the same strings;
+`fs_extern_optional_spec` drops the deleted file's pin (no non-optional
+`rt_dir_list` declaration can remain in a file that no longer exists). Removed the
+last `orphan_part_file_baseline.txt` row. Generated `doc/06_spec` copies are left to
+regeneration.
+
+Correction to the addendum above: of the ten consumers it lists, only the three
+specs named here read `native_build.spl`; the other seven (and
+`check-native-build-focused-entry-scope.shs`) read `native_build_closure.spl`, a
+live file this change does not touch (`git grep "_CliCompile/native_build.spl"`
+outside `doc/` now hits only `pipeline/native_project/tests.rs:365`, a negative
+assertion that the file is NOT in the CLI closure, which stays true).
+
+
+## Addendum 2026-11-27 (lane work/w2-1-compiler-hir-mir-20261127)
+
+- Audited `sh scripts/check/check-orphan-part-files.shs` within compiler ownership (`src/compiler/**`):
+  - Repaired `src/compiler/20.hir/hir_lowering/_Items/module_tldr_registration.spl` by removing writes to the nonexistent `self.symbols.admitted_function_abis` field (avoiding changes to `SymbolTable` / `BF-CODEC`-owned `src/compiler/20.hir/generated/hir_codec.spl`) while preserving `while dots < owner.len()` so `scripts/check/text_len_bounded_byte_scan_baseline.txt` stays non-stale.
+  - Wired `export use compiler.hir.hir_lowering._Items.module_tldr_registration.*` into `src/compiler/20.hir/hir_lowering/items.spl`.
+  - Added `test/01_unit/compiler/hir/module_tldr_registration_spec.spl` (`1/1` passed in `--mode=interpreter`).
+- Remaining items reported by `check-orphan-part-files.shs`:
+  - 14 false positives under `src/compiler/60.mir_opt/mir_opt/**` and `src/compiler/70.backend/backend/**` because `scripts/check/check-orphan-part-files.shs` (`module_path_of()`) does not collapse repeated `NN.name/name` prefixes (outside W2-1 `src/compiler/**` code scope).
+  - 2 non-compiler part-files in `src/lib/gc_async_mut/tls/_TlsUtilities/` (`hex_encoding.spl`, `text_ops.spl`), outside W2-1 `src/compiler/**` ownership and left untouched.
+
+## 2026-11-27: gate false positives fixed; last four dead shims deleted
+
+On `release/1.0.0` the gate failed with 17 "new" orphans. 14 of them were false
+positives. The module resolver accepts a collapsed `NN.tier/tier/` layer
+(`src/compiler/00.common/module_path_naming.spl`), so
+`compiler.backend._MirToLlvm.core_codegen` imports
+`src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl`. The gate derived
+only the doubled `compiler.backend.backend.*` spelling. The same applies to
+`mir_opt`, `backend.native` and `_VhdlProcess`. `module_path_of` now also
+emits the collapsed spelling. New selftest fixture 3b failed before the change
+and passes after it.
+
+`_Items/module_tldr_registration.spl` was wired upstream (`items.spl:20`)
+during this run.
+
+The remaining four were a dead shim chain. Each
+`gc_async_mut/tls/_TlsUtilities/{hex_encoding,text_ops}.spl` re-exported the
+`nogc_async_mut` part, which re-exported the `nogc_sync_mut` part. Both parents'
+`utilities.spl` already re-export `std.nogc_sync_mut.tls.utilities` directly,
+and nothing else imports either shim. All four are deleted, the same reasoning
+as the 2026-11-09 `gc_sync_mut` deletions. The facades still resolve:
+`bytes_to_hex`, `hex_len` and `hex_to_i64` through `std.gc_async_mut.tls.utilities`
+and `std.nogc_async_mut.tls.utilities` give the same values as before.
+
+Result: `PASS — 301 part-file(s) checked, 0 new orphan(s), 0 stale baseline entr(ies) (0 baselined)`.
+
+Found on the way and filed separately:
+`seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27`. The JIT gives
+`bytes_to_hex([1u8, 255u8])` = `0100`, while the interpreter gives `01ff`. It
+reproduces identically on an untouched origin tree.

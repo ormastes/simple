@@ -1,0 +1,119 @@
+# Pure signed installation data. Policy schema/probing belongs exclusively to
+# Common Container providers; a digest/decoded object is not live capability.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
+use std.common.contracts.distributed_authority_codec_v2.*
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+
+pub struct HostExecControlInstallationIntentV3:
+    operation_id: text
+    enrollment_binding_digest: text
+    scope: ContainerHostScopeV2
+    provider_identity_digest: text
+    control_policy_bytes: text
+    control_policy_digest: text
+
+pub struct HostExecControlInstallationRequestV3:
+    intent: HostExecControlInstallationIntentV3
+    operation: OperationEnvelopeV2
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+
+pub fn host_exec_control_installation_policy_v3(bytes: text) -> Result<bool, text>:
+    if str_len(bytes) == 0 or str_len(bytes) > 1048576: return Err("host-exec-install-policy-size")
+    val parsed = match sdn_parse_strict_v1(bytes, SdnStrictLimitsV1(max_source_bytes: 1048576,
+            max_depth: 32, max_nodes: 65536, max_rows: 4096, max_cells: 65536, max_columns: 4096)):
+        case Ok(value): value
+        case Err(issue): return Err("host-exec-install-policy-syntax:" + issue.code)
+    match parsed.value:
+        case SdnValue.Dict(_): ()
+        case _: return Err("host-exec-install-policy-object-required")
+    if sdn_encode_canonical(parsed.value) + "\n" != bytes: return Err("host-exec-install-policy-noncanonical")
+    Ok(true)
+
+pub fn host_exec_control_installation_intent_encode_v3(value: HostExecControlInstallationIntentV3) -> Result<text, text>:
+    if not builder_identifier_valid_v1(value.operation_id): return Err("host-exec-install-operation-id")
+    for digest in [value.enrollment_binding_digest, value.provider_identity_digest, value.control_policy_digest]:
+        if str_len(digest) != 64 or not builder_digest_valid_v1(digest): return Err("host-exec-install-digest")
+    val policy = host_exec_control_installation_policy_v3(value.control_policy_bytes)?
+    if sha256_text(value.control_policy_bytes) != value.control_policy_digest: return Err("host-exec-install-policy-digest-mismatch")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("host-exec-control-installation-intent"),
+        "operationId": SdnValue.String(value.operation_id), "enrollmentBindingDigest": SdnValue.String(value.enrollment_binding_digest),
+        "scope": SdnValue.String(container_host_scope_bytes_v2(value.scope)?),
+        "providerIdentityDigest": SdnValue.String(value.provider_identity_digest),
+        "controlPolicyBytes": SdnValue.String(value.control_policy_bytes), "controlPolicyDigest": SdnValue.String(value.control_policy_digest)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(bytes) > 4194304: return Err("host-exec-install-source-size")
+    Ok(bytes)
+
+pub fn host_exec_control_installation_intent_digest_v3(value: HostExecControlInstallationIntentV3) -> Result<text, text>:
+    Ok(sha256_text(host_exec_control_installation_intent_encode_v3(value)?))
+
+fn installation_fields_v3(source: text, names: [text]) -> Result<Dict<text, SdnValue>, text>:
+    if str_len(source) == 0 or str_len(source) > 4194304: return Err("host-exec-install-source-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 4194304,
+            max_depth: 2, max_nodes: 32, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value
+        case Err(issue): return Err("host-exec-install-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("host-exec-install-object-required")
+    for name in fields.keys():
+        if not names.contains(name): return Err("host-exec-install-unknown-field:" + name)
+    for name in names:
+        if not fields.contains_key(name): return Err("host-exec-install-missing-field:" + name)
+    Ok(fields)
+
+fn installation_text_v3(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-exec-install-text-required:" + name)
+
+pub fn host_exec_control_installation_intent_decode_v3(source: text) -> Result<HostExecControlInstallationIntentV3, text>:
+    val fields = installation_fields_v3(source, ["version", "kind", "operationId", "enrollmentBindingDigest", "scope", "providerIdentityDigest", "controlPolicyBytes", "controlPolicyDigest"])?
+    if fields["version"] != SdnValue.Int(3) or installation_text_v3(fields, "kind")? != "host-exec-control-installation-intent": return Err("host-exec-install-version")
+    val value = HostExecControlInstallationIntentV3(operation_id: installation_text_v3(fields, "operationId")?,
+        enrollment_binding_digest: installation_text_v3(fields, "enrollmentBindingDigest")?,
+        scope: container_host_scope_decode_v2(installation_text_v3(fields, "scope")?)?,
+        provider_identity_digest: installation_text_v3(fields, "providerIdentityDigest")?,
+        control_policy_bytes: installation_text_v3(fields, "controlPolicyBytes")?, control_policy_digest: installation_text_v3(fields, "controlPolicyDigest")?)
+    if host_exec_control_installation_intent_encode_v3(value)? != source: return Err("host-exec-install-noncanonical")
+    Ok(value)
+
+pub fn host_exec_control_installation_match_operation_v3(intent: HostExecControlInstallationIntentV3,
+        operation: OperationEnvelopeV2) -> Result<bool, text>:
+    val encoded = distributed_encode_operation_v2(operation)?
+    if (operation.operation != "host_exec_control_install_v3" or operation.id != intent.operation_id or
+            operation.host_id != intent.scope.physical_host_id or operation.environment_digest != intent.provider_identity_digest or
+            operation.payload_digest != host_exec_control_installation_intent_digest_v3(intent)?):
+        return Err("host-exec-install-operation-mismatch")
+    Ok(true)
+
+pub fn host_exec_control_installation_request_encode_v3(value: HostExecControlInstallationRequestV3) -> Result<text, text>:
+    val matched = host_exec_control_installation_match_operation_v3(value.intent, value.operation)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("host-exec-control-installation-request"),
+        "intent": SdnValue.String(host_exec_control_installation_intent_encode_v3(value.intent)?),
+        "operation": SdnValue.String(distributed_encode_operation_v2(value.operation)?),
+        "signedGrant": SdnValue.String(distributed_encode_signed_grant_v2(value.signed)?),
+        "signedApproval": SdnValue.String(distributed_encode_signed_approval_v2(value.approval)?)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(bytes) > 4194304: return Err("host-exec-install-source-size")
+    Ok(bytes)
+
+pub fn host_exec_control_installation_request_decode_v3(source: text) -> Result<HostExecControlInstallationRequestV3, text>:
+    val fields = installation_fields_v3(source, ["version", "kind", "intent", "operation", "signedGrant", "signedApproval"])?
+    if fields["version"] != SdnValue.Int(3) or installation_text_v3(fields, "kind")? != "host-exec-control-installation-request": return Err("host-exec-install-version")
+    val value = HostExecControlInstallationRequestV3(intent: host_exec_control_installation_intent_decode_v3(installation_text_v3(fields, "intent")?)?,
+        operation: distributed_decode_operation_v2(installation_text_v3(fields, "operation")?)?,
+        signed: distributed_decode_signed_grant_v2(installation_text_v3(fields, "signedGrant")?)?,
+        approval: distributed_decode_signed_approval_v2(installation_text_v3(fields, "signedApproval")?)?)
+    if host_exec_control_installation_request_encode_v3(value)? != source: return Err("host-exec-install-noncanonical")
+    Ok(value)

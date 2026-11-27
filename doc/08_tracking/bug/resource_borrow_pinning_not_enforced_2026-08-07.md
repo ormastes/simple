@@ -171,3 +171,103 @@ this pass — implementing borrow-liveness tracking is a multi-day compiler
 architecture change, well beyond a per-bug TDD fix. Leaving OPEN, no code
 change made.
 
+
+## Re-verification 2026-11-04 (lane g-borrow-pinning)
+
+The title premise is stale: move/drop of a borrowed place IS rejected when the
+borrow is used afterwards ("cannot move out of `local(0)` because it is
+borrowed"), via the NLL conflict check plus `check_consumes_after_propagation`
+(db481c7d8ea). Pinned by the new passing
+`test/01_unit/compiler/resource/resource_move_while_borrowed_spec.spl` (3/3 on
+the seed interpreter). Not a bug: a borrow never used again is dead under NLL,
+so `Ref; Drop` with no later use is accepted.
+
+Remaining open (architectural, unchanged): foreign-call pinning needs a
+call-scoped region + foreign-call marker; `resource_borrow_pinning_spec.spl`
+stays RED for that reason. Also found: 2 "allows release after ... call
+completes" cases in `resource_pinning_lifetime_spec.spl` now fail because the
+short-borrow checker reports "call argument requires a checked non-retaining
+short contract" for the spec's indirect call (stale fixture vs newer checker).
+
+Update 2026-11-04: fixture fixed (branch work/g-pinning-lifetime-fixture). The checker is intended policy (indirect calls stay conservative: `record_indirect_call_contract_v1`, ea5f21cac2b/9bb344bb1cf). The spec now uses a direct call to a callee with a checked `read-short` contract in a strict body; 6/6 pass, assertions unchanged.
+
+## c28-w3 2026-11-04: no change
+
+Already re-triaged today (section above, lane g-borrow-pinning). Remaining scope is
+foreign-call pinning (call-scoped region + foreign-call marker), architectural;
+deferred, status stays open.
+
+## Re-verified 2026-11-05 (HB2) — still ARCHITECTURAL-OPEN
+
+`BorrowGraph.record_move` (`borrow_graph.spl:652`) still checks only
+`moved_now`; no `borrows_of`/`has_conflicting_borrow` consultation. `git grep`
+for `pinning|BorrowPin|foreign_call_borrow` in `55.borrow/` and `50.mir/`:
+0 hits. A local "reject move with outstanding borrow" check without borrow
+liveness would flag every move after any earlier borrow (borrows never
+expire), so it is not a safe local fix. Left OPEN.
+
+## 2026-11-10: exact foreign-call authority repair, execution pending
+
+Current source contains NLL consumption checks and call-wide short-loan
+infrastructure (`call_loans.spl`, `nll_short_calls.spl`). The remaining concrete
+boundary is that legacy direct calls skip contract checking, while MIR previously
+lost whether a named target was a declared extern. An unused `Ref; Drop` without
+a call cannot independently prove that boundary.
+
+The repair uses the shared `MirCallOrigin` operand field. Provider metadata marks
+actual externs Foreign, proven Simple functions Source, and missing declaration
+authority Unknown. Signature/ABI rewrites preserve the marker. The borrow checker
+checks Foreign and Unknown calls even in legacy bodies; they cannot inherit a
+same-spelled local function's checked short summary. Existing extern parameter
+analysis declares reference retention unknown, so passing a live loan to that
+unproved boundary emits the existing non-retaining-contract escape diagnostic.
+Scalar extern inputs without loans and proven local legacy calls remain valid.
+
+Executable regressions are in
+`test/01_unit/compiler/resource/foreign_call_borrow_origin_spec.spl` (eight
+cases, including actual source classification and NLL consumption). Design:
+`doc/05_design/language/resource/foreign_call_borrow_origin.md`.
+
+**Verification pending:** execute that spec plus `resource_move_while_borrowed`
+and `resource_pinning_lifetime` on a source-compatible self-hosted runner, then
+the required compiler/core/MCP checks and MCP stdio integration smoke. No test
+execution, runtime pinning, trusted foreign non-retention contract, platform
+qualification, or bug closure is inferred from these source changes.
+
+## Verification 2026-11-25 (p2w4-ad lane, release/1.0.0 @ ef6a94f8a03)
+
+The 2026-11-10 foreign-call-origin repair is present at HEAD:
+`MirCallOrigin` is threaded through MIR
+(`src/compiler/50.mir/mir_data.spl`, `mir_instructions.spl`, lowering), and
+the borrow checker consults it —
+`src/compiler/55.borrow/borrow_check/mod.spl:696` (Foreign/Unknown calls
+checked even in legacy bodies) and `:723` (only `MirCallOrigin.Source`
+callees may inherit a published short summary). The executable regressions
+(`foreign_call_borrow_origin_spec.spl`, `resource_move_while_borrowed_spec.spl`)
+and the still-RED-by-design `resource_borrow_pinning_spec.spl` are in the
+tree.
+
+Not executed: the pinned seed cannot load the test runner at this HEAD
+(`unknown decorator '@representation_boundary'`, cfd89933699), and the
+pure-Simple borrow checker cannot be exercised through the Rust seed's
+`run` path, so the 2026-11-10 section's "execution pending" stands.
+Verification here is by code inspection only.
+
+**Status unchanged: OPEN (architectural).** The call-scoped region +
+runtime pinning scope described in "What real enforcement would need"
+remains the open remainder; the landed repair narrows the concrete
+extern-boundary hole but, per its own note, infers no closure.
+
+## Verification 2026-11-26 (`work/bf-1-compiler-hir-sem-20261126`)
+
+Re-executed all four resource-borrow unit regressions on `origin/release/1.0.0`
+using the pure-Simple interpreter (`SIMPLE_LIB=src`, `simple.exe test ... --mode=interpreter --timeout 60`):
+- `test/01_unit/compiler/resource/resource_borrow_pinning_spec.spl`: 3 examples, 0 failures
+- `test/01_unit/compiler/resource/foreign_call_borrow_origin_spec.spl`: 8 examples, 0 failures
+- `test/01_unit/compiler/resource/resource_move_while_borrowed_spec.spl`: 3 examples, 0 failures
+- `test/01_unit/compiler/resource/resource_pinning_lifetime_spec.spl`: 6 examples, 0 failures
+
+Dispositions: the `55.borrow` static MIR / `BorrowGraph` / `MirCallOrigin`
+enforcement checks are verified and passing (`ALREADY-FIXED-VERIFIED` for the
+static borrow-checker suite; full runtime pinning / region infrastructure remains
+architectural multi-layer scope outside `55.borrow`).

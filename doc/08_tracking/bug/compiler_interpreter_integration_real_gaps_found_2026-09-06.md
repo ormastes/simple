@@ -1,7 +1,11 @@
 # Five real compiler/interpreter contract gaps found while modernizing the integration scaffold
 
 Date: 2026-09-06
-Status: open
+Status: LIVE (triaged 2026-11-11, lanes interp7/int9/int11) — gaps 1+2 FIXED on
+the fresh seed via `9e7e7a526edb` (PR #7597, re-verified in this lane's HEAD
+ancestry); gaps 3 (div-zero span diagnostics), 4 (export visibility), 5
+(circular-import detection) remain LIVE, owned by the compiler frontend lanes
+(`src/compiler/**`, `src/compiler_rust`). See the 2026-11-11 addenda below.
 Severity: P3 (each is a real but narrow correctness/diagnostics gap, not a crash)
 Location: found via
 `test/02_integration/compiler/compiler_interpreter_integration_spec.spl`,
@@ -78,3 +82,119 @@ compiler/interpreter stage (symbol resolution, type checking, diagnostics
 span tracking, module visibility, module graph construction respectively);
 none was attempted here, this is a test-file-only modernization batch. The
 spec scenarios above are the reproduction fixtures for each.
+
+## 2026-11-10 P3 triage (work/p3-interp-20261110) — all 5 gaps confirmed LIVE; out of interpreter lane
+
+Each gap re-reproduced on the deployed Windows Rust seed (worktree
+`bin/simple.exe`, fixtures under `build/p3fix/gap4/`):
+
+1. Ambiguous zero-arg `get()` across two `impl Box` blocks: no diagnostic;
+   silent resolution prints `10` (first impl wins on this build; either way
+   ambiguous). LIVE.
+2. `val x: i64 = "not a number"` compiles and runs exit 0, printing
+   `6207503407825` — a raw pointer/bits reinterpretation, i.e. silent
+   mis-coercion, worse than the original note ("prints the string"). LIVE.
+3. `print(10 / 0)` (line 3): process dies `Illegal instruction` (exit 132)
+   with NO diagnostic at all on this host — no E2001, no span. LIVE; on
+   Windows strictly worse than "no line/column".
+4. Non-exported `fn _secret_add` imported via `use secret_mod.{_secret_add}`
+   from another module: exit 0, prints `5`. LIVE.
+5. Circular `use` between moda/modb over top-level vals: exit 0, prints `3`,
+   no diagnostic. LIVE.
+
+All five fixes live in the compiler frontend (symbol resolution, type
+checking, diagnostics span tracking, module visibility, module graph) —
+`src/compiler/**` or the seed compiler frontend, both outside the P3
+interpreter lane's write scope. Routing to the compiler/compiler-seed lanes;
+no code change attempted here.
+
+## 2026-11-10 P3 triage (work/p3-interp2-20261110) — independently confirmed LIVE; out of lane
+
+Second-lane spot re-verification on the same deployed Windows Rust seed
+(worktree `bin/simple.exe`): gap 2 (`val x: i64 = "not a number"`)
+still compiles and runs exit 0, printing a raw pointer/bits value
+(`3854699993329`), i.e. silent mis-coercion unchanged from the
+work/p3-interp-20261110 note above. All five gaps remain owned by the
+compiler frontend (`src/compiler/**`, src/compiler_rust) — outside this
+lane's write scope. Concur with routing to the compiler lanes; no code
+change here.
+
+
+## 2026-11-11 P3 triage (work/p3-interp7-20261111) — gaps 1+2 FIXED on the fresh seed; gaps 3/4/5 remain LIVE (out of lane)
+
+Third-lane re-verification on the fresh seed (worktree `bin/simple.exe`,
+build-commit `46fe8f6b6def`; minimal fixtures under `build/p3fix-interp7/`):
+
+1. Ambiguous zero-arg `get()` across two `impl Box` blocks: NOW A HARD ERROR —
+   `error: semantic: duplicate method `get` in `impl` blocks of the same type
+   (the same signature is defined twice)`, exit 1 (JIT HIR lowering also
+   rejects it before any interpreter fallback). FIXED. Both new diagnostics
+   originate in `src/compiler_rust/compiler/src/impl_duplicate_check.rs`,
+   introduced by PR #7597 (`9e7e7a526edb`, in branch ancestry).
+2. `val x: i64 = "not a number"`: NOW A HARD ERROR — `error: semantic: type
+   mismatch: cannot initialize `i64` binding with a text literal`, exit 1.
+   FIXED (same PR #7597 file). The silent mis-coercion reported by both
+   2026-11-10 lanes is gone on this seed.
+3. `print(10 / 0)` (line 3 of the fixture): process still dies `Illegal
+   instruction` (exit 132) after printing `2`, with NO diagnostic and no
+   line/column. LIVE, unchanged on this host.
+4. Non-exported `fn _secret_add` imported via `use secret_mod.{_secret_add}`:
+   exit 0, prints `5`. LIVE, unchanged.
+5. Circular `use` between moda/modb over top-level vals: exit 0, prints `3`,
+   no diagnostic. LIVE, unchanged.
+
+Note: the tracked spec
+`test/02_integration/compiler/compiler_interpreter_integration_spec.spl`
+drives its scenarios through `src/compiler_rust/target/bootstrap/simple`,
+which does not exist in this worktree (no cargo build permitted in this lane),
+so its scenario verdicts were not refreshed here; the fixture repros above
+against `bin/simple.exe` are this lane's evidence. Gaps 3 (div-zero span
+diagnostics), 4 (export visibility), 5 (circular-import detection) remain
+owned by the compiler frontend (`src/compiler/**`, `src/compiler_rust`) —
+outside this lane's write scope; routing to the compiler/compiler-seed lanes
+stands. Status stays OPEN (partial closure only).
+
+
+## 2026-11-11 P3 triage (lane int9) — concurs LIVE; no re-run; out of interpreter lane
+
+Fourth-lane triage of this row. int9 re-read the record and verified fix
+ancestry only: the gap-1/gap-2 absorber `9e7e7a526edb` (PR #7597,
+`src/compiler_rust/compiler/src/impl_duplicate_check.rs`) is an ancestor of
+this lane's HEAD `9f3df4c125ad`, matching the 2026-11-11 interp7 note. The
+gap-3/4/5 repro fixtures were already re-verified LIVE twice today
+(2026-11-10 lanes interp/interp2, 2026-11-11 lane interp7) on the same seed
+build this lane runs; per the no-rerun rule int9 did not repeat them. Gaps 3
+(div-zero span diagnostics), 4 (export visibility), 5 (circular-import
+detection) remain owned by the compiler frontend (`src/compiler/**`,
+`src/compiler_rust`) — outside the interpreter lane's write scope. Status
+stays OPEN (partial closure only); routing to the compiler/compiler-seed
+lanes stands.
+
+## 2026-11-11 P3 triage (lane int11) — header flipped LIVE on fresh source checks
+
+Fifth-lane sweep flip. Prior-lane addenda (2026-11-10 interp/interp2,
+2026-11-11 interp7, 2026-11-11 int9) already recorded the verified
+disposition; the header was never flipped. Re-verified fresh at this lane's
+base `84f5076db138` with one source check, no re-runs: the gap-1/gap-2
+absorber `9e7e7a526edb` (PR #7597) is an ancestor of this base, and
+`src/compiler_rust/compiler/src/impl_duplicate_check.rs` is in-tree. Gaps
+3/4/5 were re-verified LIVE three times today on the same tracked seed
+(build `46fe8f6b6def`) — per the no-rerun rule int11 did not repeat them.
+Status flipped: LIVE (partial closure only); routing to the
+compiler/compiler-seed lanes stands.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the int-lane triage recorded in the body: gap 1 closed (duplicate
+check in-tree); gaps 2-5 re-verified LIVE on this lane's exact binary (tracked
+seed @ 46fe8f6b6def is the build the int lanes used), routed to the
+compiler/compiler-seed lanes. The remaining gaps are seed-side
+(src/compiler_rust) contract issues; outside this no-cargo lane's fix scope.
+Disposition stands: LIVE (partial closure only).
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**LIVE — partial closure only (confirmed)** — Gap-1/gap-2 absorber `9e7e7a526edb` (PR #7597, `impl_duplicate_check.rs`) verified ancestor of this base. Gaps 3 (div-zero span diagnostics), 4 (export visibility), 5 (circular-import detection) remain LIVE, seed-side (`src/compiler_rust`), owned by the compiler/compiler-seed lanes.

@@ -15,12 +15,14 @@ use os.services.launcher.launcher_catalog_projection.{
 }
 use os.services.launcher.launcher_registry.{
     _app_path, launcher_launch_path_with_args,
-    launcher_bind_process_app_id_v1
+    launcher_bind_process_app_id_v1,
+    launcher_app_has_scoped_ceiling_v1,
+    launcher_app_capability_mask_v1
 }
 use os.kernel.loader.artifact_manifest.{
     manifest_kind_elf, manifest_kind_smf, manifest_kind_native_simple,
-    manifest_for_kind, manifest_with_entrypoint, manifest_validate,
-    manifest_summary
+    manifest_for_kind, manifest_with_entrypoint, manifest_with_requested_rights,
+    manifest_validate, manifest_summary
 }
 use os.kernel.loader.spawn_recipes.{
     SPAWN_RECIPE_APP_LAUNCHER, spawn_recipe_exec_prefix
@@ -110,15 +112,19 @@ fn launcher_validate_app_launch_arena_v1(data: [u8]) -> LauncherAppLaunchPlanV1:
             SCI_APP_LAUNCH_ACTION_UNSUPPORTED,
             "SCI_APP_LAUNCH_ACTION_UNSUPPORTED",
         )
-    # Every non-empty word is denied, including words whose individual bits
-    # are currently unknown. Exact scoped-capability projection belongs in
-    # SimpleArtifactManifest; translating it into the current u32 mask here
-    # would create a weaker second policy surface.
     if decoded.capability_words.len() > 0:
-        return _plan_error_v1(
-            SCI_APP_LAUNCH_SCOPED_CAPABILITY_REQUIRED,
-            "SCI_APP_LAUNCH_MANIFEST_CAPABILITY_PROJECTION_REQUIRED",
-        )
+        if not launcher_app_has_scoped_ceiling_v1(decoded.app_id):
+            return _plan_error_v1(
+                SCI_APP_LAUNCH_SCOPED_CAPABILITY_REQUIRED,
+                "SCI_APP_LAUNCH_MANIFEST_CAPABILITY_PROJECTION_REQUIRED",
+            )
+        val granted_mask = launcher_app_capability_mask_v1(decoded.app_id).to_u64()
+        for word in decoded.capability_words:
+            if (word & (~granted_mask)) != 0u64:
+                return _plan_error_v1(
+                    SCI_APP_LAUNCH_SCOPED_CAPABILITY_REQUIRED,
+                    "SCI_APP_LAUNCH_CAPABILITY_EXCEEDS_CEILING",
+                )
     val slot = launcher_composition_app_slot_v1(decoded.app_id)
     if slot < 0:
         return _plan_error_v1(
@@ -143,7 +149,11 @@ fn launcher_validate_app_launch_arena_v1(data: [u8]) -> LauncherAppLaunchPlanV1:
             SCI_APP_LAUNCH_MANIFEST_REJECTED,
             "SCI_APP_LAUNCH_ARTIFACT_KIND_UNSUPPORTED",
         )
-    val manifest = manifest_with_entrypoint(manifest_for_kind(kind), current_path)
+    val requested_rights = launcher_app_capability_mask_v1(decoded.app_id)
+    val manifest = manifest_with_requested_rights(
+        manifest_with_entrypoint(manifest_for_kind(kind), current_path),
+        requested_rights,
+    )
     val checked = manifest_validate(manifest)
     if not checked.ok:
         return _plan_error_v1(

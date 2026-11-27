@@ -1,0 +1,139 @@
+"""
+# @req REQ-SSPEC-OS
+# @cover src/os/apps/sshd/sshd.spl
+# @cover src/os/apps/sshd/ssh_session.spl
+# @cover src/os/apps/sshd/ssh_session_helpers.spl
+# @cover src/os/apps/sshd/ssh_session_channel.spl
+# @cover src/os/apps/sshd/ssh_identification.spl
+# @cover src/os/apps/sshd/ssh_remote_shell.spl
+# @cover src/os/apps/sshd/host_key_loader.spl
+# @cover src/os/apps/sshd/ssh_sftp_v3.spl
+#
+# Host unit specification for BF-9 Bugs #7 & #8:
+#   - x64_freestanding_push_byte_reassign_byte_packed
+#   - x64_freestanding_text_char_at_starts_with
+#
+# Verifies that byte builders no longer use rt_push_byte reassignments, and that
+# text prefix / byte extraction avoids text.char_at() and text.starts_with().
+"""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{file_read}
+use os.apps.sshd.sshd.{_sshd_tokenize_command}
+use os.apps.sshd.ssh_session.{_live_openssh_client_version_bytes}
+use os.apps.sshd.ssh_session_helpers.{
+    _copy_prefix_stable,
+    _build_plain_packet_header,
+    _build_channel_open_confirmation_stable,
+    _build_channel_success_stable,
+    _build_channel_failure_stable,
+    _build_channel_eof_stable,
+    _build_channel_close_stable,
+    _build_channel_exit_status_stable
+}
+use os.apps.sshd.ssh_session_channel.{
+    _build_channel_data_stable,
+    _scp_last_token_bytes,
+    _scp_basename_bytes
+}
+use os.apps.sshd.ssh_identification.{
+    ssh_identification_text_to_bytes_stable,
+    ssh_text_starts_with_bytes
+}
+use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
+use os.apps.sshd.host_key_loader.{_strip_pem_framing}
+use os.apps.sshd.ssh_sftp_v3.{_namespace_error_status, _stat_error_status, SSH_FX_NO_SUCH_FILE}
+use os.apps.sshd.ssh_session_shell_test_ext.{ssh_exec_fat_launch_line}
+
+fn _ascii(s: text) -> [u8]:
+    var out: [u8] = []
+    for b in s.bytes():
+        out.push(b)
+    out
+
+fn _has_non_comment_call(src: text, needle: text) -> bool:
+    for line in src.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#") or trimmed.starts_with("\"\"\""):
+            continue
+        if trimmed.contains(needle):
+            return true
+    false
+
+describe "SimpleOS sshd BYTE_PACKED .push and byte-safe text handling":
+    it "builds SSH banner, channel frames, and SCP tokens without rt_push_byte reassignments":
+        step("verify refactored packet builders produce exact RFC byte layouts")
+        expect(_live_openssh_client_version_bytes()).to_equal(
+            _ascii("SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.16")
+        )
+        expect(_copy_prefix_stable(_ascii("abcdef"), 3u64)).to_equal(_ascii("abc"))
+
+        val hdr = _build_plain_packet_header(10u64, 8u64)
+        expect(hdr.header.len()).to_equal(5u64)
+        expect(hdr.padding_len).to_equal(9u64)
+
+        val open_conf = _build_channel_open_confirmation_stable(1u32, 2u32, 4096u32, 1024u32)
+        expect(open_conf.len()).to_equal(17u64)
+        expect(open_conf[0]).to_equal(91u8)
+        expect(_build_channel_success_stable(3u32)[0]).to_equal(99u8)
+        expect(_build_channel_failure_stable(3u32)[0]).to_equal(100u8)
+        expect(_build_channel_eof_stable(3u32)[0]).to_equal(96u8)
+        expect(_build_channel_close_stable(3u32)[0]).to_equal(97u8)
+
+        val exit_pkt = _build_channel_exit_status_stable(4u32, 42u32)
+        expect(exit_pkt.len()).to_equal(25u64)
+        expect(exit_pkt[0]).to_equal(98u8)
+        expect(exit_pkt[24]).to_equal(42u8)
+
+        val data_pkt = _build_channel_data_stable(5u32, _ascii("hi"))
+        expect(data_pkt.len()).to_equal(11u64)
+        expect(data_pkt[0]).to_equal(94u8)
+        expect(data_pkt[9]).to_equal(0x68u8)
+        expect(data_pkt[10]).to_equal(0x69u8)
+
+        expect(_sshd_tokenize_command("scp -f /dir/hello.o")).to_equal(["scp", "-f", "/dir/hello.o"])
+        val last_tok = _scp_last_token_bytes("scp -pf /dir/hello.o")
+        expect(last_tok).to_equal(_ascii("/dir/hello.o"))
+        expect(_scp_basename_bytes(last_tok)).to_equal(_ascii("hello.o"))
+
+    it "uses byte-backed text conversion and prefix matching instead of char_at/starts_with":
+        step("verify identification conversion, shell echo, PEM framing, and SFTP mount errors")
+        expect(ssh_identification_text_to_bytes_stable("SSH-2.0-client")).to_equal(_ascii("SSH-2.0-client"))
+        expect(ssh_text_starts_with_bytes("echo hello", "echo ")).to_equal(true)
+        expect(ssh_text_starts_with_bytes("ech", "echo ")).to_equal(false)
+
+        var shell = SshRemoteShell.new()
+        expect(shell.feed_remote_input("echo bf9_ok\n")).to_equal(true)
+        expect(shell.take_remote_output()).to_contain("bf9_ok\n")
+
+        val pem = "-----BEGIN PRIVATE KEY-----\nQUJD\n-----END PRIVATE KEY-----\n"
+        match _strip_pem_framing(pem):
+            Ok(body): expect(body).to_equal("QUJD")
+            Err(err): expect("unexpected PEM error: {err}").to_equal("")
+
+        expect(_namespace_error_status("no filesystem mounted for path: /tmp")).to_equal(SSH_FX_NO_SUCH_FILE)
+        expect(_stat_error_status("no filesystem mounted for path: /tmp")).to_equal(SSH_FX_NO_SUCH_FILE)
+        expect(ssh_exec_fat_launch_line("/nonexistent_bf9_bin")).to_equal("")
+
+    it "has zero active .char_at, .starts_with, or rt_push_byte calls in hardened sshd owners":
+        step("audit non-comment lines across sshd sources for char_at/starts_with/rt_push_byte")
+        val id_src = file_read("src/os/apps/sshd/ssh_identification.spl")
+        expect(_has_non_comment_call(id_src, ".char_at(")).to_equal(false)
+        val shell_src = file_read("src/os/apps/sshd/ssh_remote_shell.spl")
+        expect(_has_non_comment_call(shell_src, ".starts_with(")).to_equal(false)
+        val pem_src = file_read("src/os/apps/sshd/host_key_loader.spl")
+        expect(_has_non_comment_call(pem_src, ".starts_with(")).to_equal(false)
+        val sftp_src = file_read("src/os/apps/sshd/ssh_sftp_v3.spl")
+        expect(_has_non_comment_call(sftp_src, ".starts_with(")).to_equal(false)
+        val ext_src = file_read("src/os/apps/sshd/ssh_session_shell_test_ext.spl")
+        expect(_has_non_comment_call(ext_src, ".starts_with(")).to_equal(false)
+
+        val sshd_src = file_read("src/os/apps/sshd/sshd.spl")
+        expect(_has_non_comment_call(sshd_src, "rt_push_byte")).to_equal(false)
+        val sess_src = file_read("src/os/apps/sshd/ssh_session.spl")
+        expect(_has_non_comment_call(sess_src, "rt_push_byte")).to_equal(false)
+        val helpers_src = file_read("src/os/apps/sshd/ssh_session_helpers.spl")
+        expect(_has_non_comment_call(helpers_src, "rt_push_byte")).to_equal(false)
+        val chan_src = file_read("src/os/apps/sshd/ssh_session_channel.spl")
+        expect(_has_non_comment_call(chan_src, "rt_push_byte")).to_equal(false)

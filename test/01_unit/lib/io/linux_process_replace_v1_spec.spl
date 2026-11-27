@@ -1,0 +1,153 @@
+# SOURCE_AUTHORED_NOT_RUN. Production pure helpers; no native exec/cleanup claim.
+use std.spec.*
+use std.nogc_sync_mut.io.linux_process_replace_contract_v1.*
+use std.common.string_core.char_from_code
+
+fn replacement_request_v1() -> LinuxProcessReplaceRequestV1:
+    LinuxProcessReplaceRequestV1(program: "/installed/agent", expected_digest: "a".repeat(64),
+        expected_size_bytes: 128, max_image_bytes: 536870912, architecture: "linux-aarch64",
+        args: ["approved-agent-argv0", "--continuation", "exact value"],
+        environment: ["PATH=/installed", "HOME=/workspace", "LANG=C"],
+        expires_at_unix_ms: 9000, preparation_started_ns: 0, preparation_budget_ns: 1000)
+
+describe "Same-process replacement production DATA predicates":
+    it "uses the original absolute expiry and preparation budget with zero a valid start":
+        step("Apply the production deadline predicate to valid original samples")
+        expect(linux_process_replace_deadline_v1(9000, 0, 1000, 8999, 999)).to_equal(true)
+        expect(linux_process_replace_deadline_v1(9000, 0, 1000, 9000, 999)).to_equal(false)
+        expect(linux_process_replace_deadline_v1(9000, 0, 1000, 8999, 1000)).to_equal(false)
+
+    it "refuses clock regression and failed clock samples without granting a renewal":
+        step("Exercise the exact fail-closed production clock conditions")
+        expect(linux_process_replace_deadline_v1(9000, 100, 1000, 1000, 99)).to_equal(false)
+        expect(linux_process_replace_deadline_v1(9000, 100, 1000, -1, 100)).to_equal(false)
+        expect(linux_process_replace_deadline_v1(9000, 100, 0, 1000, 100)).to_equal(false)
+
+    it "admits complete explicit argv and ordered environment without shell expansion":
+        step("Validate the exact production request shape; this is not an image or grant proof")
+        val request = replacement_request_v1()
+        expect(linux_process_replace_request_validate_v1(request).is_ok()).to_equal(true)
+        expect(request.args[0]).to_equal("approved-agent-argv0")
+        expect(request.args[2]).to_equal("exact value")
+
+    it "rejects relative executable paths and malformed digest metadata before pinning":
+        step("Use actual validation to refuse unbounded or ambiguous image locators")
+        var request = replacement_request_v1()
+        request.program = "agent"
+        expect(linux_process_replace_request_validate_v1(request).is_err()).to_equal(true)
+        request.program = "/installed/agent"
+        request.expected_digest = "A".repeat(64)
+        expect(linux_process_replace_request_validate_v1(request).is_err()).to_equal(true)
+
+    it "refuses embedded NUL in arguments and program paths":
+        step("Validate the byte-level boundary before creating native C strings")
+        var request = replacement_request_v1()
+        request.args = ["agent", "prefix" + char_from_code(0) + "suffix"]
+        expect(linux_process_replace_request_validate_v1(request).is_err()).to_equal(true)
+        request.args = ["agent"]
+        request.program = "/installed/agent" + char_from_code(0)
+        expect(linux_process_replace_request_validate_v1(request).is_err()).to_equal(true)
+
+    it "refuses duplicate environment names and dynamic-loader environment overrides":
+        step("Use actual explicit-environment validation rather than inherited environment")
+        var request = replacement_request_v1()
+        request.environment = ["HOME=/a", "HOME=/b"]
+        expect(linux_process_replace_request_validate_v1(request).is_err()).to_equal(true)
+        request.environment = ["LD_PRELOAD=/unapproved.so"]
+        expect(linux_process_replace_request_validate_v1(request).is_err()).to_equal(true)
+
+    it "copies argv and environment with the same production freeze helper":
+        step("Mutate caller arrays after copying and require exact retained values")
+        var values = ["agent", "argument"]
+        val frozen = linux_process_replace_copy_texts_v1(values)
+        values[0] = "changed"
+        expect(frozen).to_equal(["agent", "argument"])
+        var environment = ["NAME=original"]
+        val retained = linux_process_replace_copy_texts_v1(environment)
+        environment[0] = "NAME=changed"
+        expect(retained).to_equal(["NAME=original"])
+
+    it "preserves conventional ignored signals and resets caught handlers":
+        step("Apply the same disposition decision used by the actual native reset loop")
+        expect(linux_process_replace_signal_handler_v1(0)).to_equal(0)
+        expect(linux_process_replace_signal_handler_v1(1)).to_equal(1)
+        expect(linux_process_replace_signal_handler_v1(4096)).to_equal(0)
+
+    it "retains the first diagnostic through later restore or cleanup errors":
+        step("Use the production first-error reducer, not fabricated native retirement")
+        val first = linux_process_replace_first_error_v1("", "exec-failed")
+        expect(linux_process_replace_first_error_v1(first, "restore-failed")).to_equal("exec-failed")
+        expect(linux_process_replace_first_error_v1(first, "")).to_equal("exec-failed")
+
+    it "checks explicit image sizes without minting a memory reservation":
+        step("Use the actual request policy for a290069784byte image and bounded ceiling")
+        var request = replacement_request_v1()
+        request.expected_size_bytes = 290069784
+        expect(linux_process_replace_request_validate_v1(request).is_ok()).to_equal(true)
+        request.max_image_bytes = 67108864
+        expect(linux_process_replace_request_validate_v1(request).is_err()).to_equal(true)
+        request.max_image_bytes = 536870913
+        expect(linux_process_replace_request_validate_v1(request).is_err()).to_equal(true)
+
+    it "validates actual production ELF header policy including target-machine mismatch":
+        step("Exercise the decoder used on the actual sealed descriptor, not native success")
+        var header: [u8] = [0u8; 64]
+        header[0] = 127u8
+        header[1] = 69u8
+        header[2] = 76u8
+        header[3] = 70u8
+        header[4] = 2u8
+        header[5] = 1u8
+        header[6] = 1u8
+        header[16] = 3u8
+        header[18] = 183u8
+        header[20] = 1u8
+        header[32] = 64u8
+        header[52] = 64u8
+        header[54] = 56u8
+        header[56] = 1u8
+        expect(linux_process_replace_elf_header_v1(header, 128, 183).is_ok()).to_equal(true)
+        expect(linux_process_replace_elf_header_v1(header, 128, 62).is_err()).to_equal(true)
+        header[56] = 2u8
+        expect(linux_process_replace_elf_header_v1(header, 128, 183).is_err()).to_equal(true)
+        header[0] = 35u8
+        expect(linux_process_replace_elf_header_v1(header, 128, 183).is_err()).to_equal(true)
+
+    it "checks512MiB ceiling and overflow metadata without allocating the image":
+        step("Apply actual production bounds at the approved exact limit and oversized metadata")
+        var request = replacement_request_v1()
+        request.expected_size_bytes = 536870912
+        expect(linux_process_replace_request_validate_v1(request).is_ok()).to_equal(true)
+        request.expected_size_bytes = 536870913
+        expect(linux_process_replace_request_validate_v1(request).is_err()).to_equal(true)
+        request.expected_size_bytes = 9223372036854775807
+        expect(linux_process_replace_request_validate_v1(request).is_err()).to_equal(true)
+
+    it "retains partial accepted suffix and never repeats its completed prefix":
+        step("Use the production pwrite-progress reducer with actual-prefix-shaped DATA")
+        val before = LinuxProcessReplaceCopyProgressV1(copied: 65536, pending: 4096, accepted: 0)
+        val partial = linux_process_replace_copy_accept_v1(before, 17).unwrap()
+        expect(partial.copied).to_equal(65536)
+        expect(partial.pending).to_equal(4096)
+        expect(partial.accepted).to_equal(17)
+        val complete = linux_process_replace_copy_accept_v1(partial, 4079).unwrap()
+        expect(complete.copied).to_equal(69632)
+        expect(complete.pending).to_equal(0)
+        expect(complete.accepted).to_equal(0)
+        expect(linux_process_replace_copy_accept_v1(partial, 4080).is_err()).to_equal(true)
+        expect(linux_process_replace_copy_accept_v1(partial, -1).is_err()).to_equal(true)
+
+    it "requires all seals after full copy and rejects negative native seal errors":
+        step("Use actual production hash-admission predicate; no native seal receipt is fabricated")
+        expect(linux_process_replace_hash_ready_v1(290069784, 290069784, 0, 15)).to_equal(true)
+        expect(linux_process_replace_hash_ready_v1(290069783, 290069784, 0, 15)).to_equal(false)
+        expect(linux_process_replace_hash_ready_v1(290069784, 290069784, 1, 15)).to_equal(false)
+        expect(linux_process_replace_hash_ready_v1(290069784, 290069784, 0, 7)).to_equal(false)
+        expect(linux_process_replace_hash_ready_v1(290069784, 290069784, 0, -1)).to_equal(false)
+
+    it "refuses wrong declared architecture through the same pre-effect matcher":
+        step("Compare approved profile DATA against an actual-target-shaped sample")
+        expect(linux_process_replace_target_matches_v1("linux-aarch64", "linux-aarch64")).to_equal(true)
+        expect(linux_process_replace_target_matches_v1("linux-aarch64", "linux-x86_64")).to_equal(false)
+        expect(linux_process_replace_target_matches_v1("linux-x86_64", "linux-aarch64")).to_equal(false)
+        expect(linux_process_replace_target_matches_v1("unknown", "unknown")).to_equal(false)

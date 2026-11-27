@@ -1,3 +1,4 @@
+#![allow(REQC004)]
 # CUDA Type Mapper - CUDA/PTX-Specific Type Mapping Implementation
 #
 # Maps MIR types to CUDA/PTX type strings.
@@ -6,7 +7,8 @@
 use compiler.mir.mir_data.*
 use compiler.backend.common.type_mapper.*
 use compiler.hir.hir_types.MemorySpace
-use compiler.mir.mir_types.{MirType}
+use compiler.mir.mir_types.{MirType, MirTypeKind}
+use compiler.hir.hir_types.{SymbolId}
 
 # ============================================================================
 # CUDA Type Mapper
@@ -32,141 +34,25 @@ class CudaTypeMapper:
     """
 
     compute_capability: (i64, i64)  # e.g., (8, 6) for SM 8.6
+    type_defs: Dict<SymbolId, MirTypeDef>  # MirModule.types; resolves Struct(SymbolId) layout
 
     static fn create() -> CudaTypeMapper:
         """Create mapper for default compute capability (SM 7.0)."""
-        CudaTypeMapper(compute_capability: (7, 0))
+        CudaTypeMapper(compute_capability: (7, 0), type_defs: {})
 
     static fn create_sm(major: i64, minor: i64) -> CudaTypeMapper:
         """Create mapper for specific compute capability."""
-        CudaTypeMapper(compute_capability: (major, minor))
+        CudaTypeMapper(compute_capability: (major, minor), type_defs: {})
+
+    fn with_type_defs(defs: Dict<SymbolId, MirTypeDef>) -> CudaTypeMapper:
+        """Copy of this mapper that resolves Struct(SymbolId) against the MIR module type table."""
+        CudaTypeMapper(compute_capability: self.compute_capability, type_defs: defs)
 
 fn cuda_type_mapper_create_sm(major: i64, minor: i64) -> CudaTypeMapper:
     CudaTypeMapper.create_sm(major, minor)
 
-impl TypeMapper for CudaTypeMapper:
-    fn map_primitive(ty: PrimitiveType) -> text:
-        """
-        Map primitive types to CUDA/C types.
-
-        CUDA primitives (C-style):
-        - Integers: long long (64), int (32), short (16), char (8)
-        - Unsigned: unsigned variants
-        - Floats: double (64), float (32), half (16)
-        - Boolean: bool
-        """
-        match ty:
-            case I64: "long long"
-            case I32: "int"
-            case I16: "short"
-            case I8: "signed char"
-            case U64: "unsigned long long"
-            case U32: "unsigned int"
-            case U16: "unsigned short"
-            case U8: "unsigned char"
-            case F64: "double"
-            case F32: "float"
-            case F16: "half"
-            case Bool: "bool"
-            case Unit: "void"
-
-    fn map_pointer(pointee: text, mutability: Mutability) -> text:
-        """
-        Map pointer types to CUDA representation.
-
-        CUDA pointers are C-style with optional const qualifier.
-        Memory space qualifiers are added separately.
-        """
-        match mutability:
-            case Mutable: "{pointee}*"
-            case Immutable: "const {pointee}*"
-
-    fn backend_name() -> text:
-        "CUDA"
-
-    fn map_memory_space(space: MemorySpace) -> text:
-        """
-        Map GPU memory space to CUDA qualifier.
-
-        CUDA memory qualifiers:
-        - __global__: Device global memory
-        - __shared__: Block shared memory
-        - __constant__: Constant memory (cached)
-        - (no qualifier): Thread-local/register
-        """
-        match space:
-            case Global: "__global__"
-            case Shared: "__shared__"
-            case Local: ""  # Thread-local is default
-            case Constant: "__constant__"
-            case Uniform: "__constant__"  # CUDA uses constant for uniform-like access
-
-    fn map_vector_type(elem: text, width: i64) -> text:
-        """
-        Map SIMD/vector type to CUDA vector type.
-
-        CUDA vector types: float2, float4, int2, int4, etc.
-        """
-        if width == 1:
-            elem
-        elif width == 2 or width == 4:
-            "{elem}{width}"
-        else:
-            # Fallback to array for non-standard widths
-            "{elem}[{width}]"
-
-    fn supports_half_precision() -> bool:
-        """
-        Check if compute capability supports half precision.
-        Half precision requires SM 5.3+ for full support.
-        """
-        val (major, minor) = self.compute_capability
-        major > 5 or (major == 5 and minor >= 3)
-
-    fn supports_gpu() -> bool:
-        val (major, _) = self.compute_capability
-        major == major
-
 impl CudaTypeMapper:
     # === CUDA-specific methods ===
-
-    fn map_struct(fields: [(text, MirType)]) -> text:
-        """
-        Map struct type to CUDA representation.
-
-        CUDA structs are C-style structs.
-        """
-        val field_types = fields.map(self.map_type(_.1))
-        "struct {{ {field_types.join('; ')}; }}"
-
-    fn map_array(element: MirType, size: i64) -> text:
-        """
-        Map array type to CUDA representation.
-
-        CUDA arrays are C-style fixed arrays.
-        """
-        val elem_ty = self.map_type(element)
-        "{elem_ty}[{size}]"
-
-    fn map_tuple(elements: [MirType]) -> text:
-        """
-        Map tuple type to CUDA struct representation.
-
-        CUDA doesn't have tuples, use struct with numbered fields.
-        """
-        if elements.len() == 0:
-            "struct {{}}"
-        else:
-            val field_decls = elements.enumerate().map("{self.map_type(_1.1)} _{_1.0}")
-            "struct {{ {field_decls.join('; ')}; }}"
-
-    fn map_function(params: [MirType], ret: MirType) -> text:
-        """
-        Map function type to CUDA function pointer.
-        """
-        val param_types = params.map(self.map_type(_))
-        val ret_type = self.map_type(ret)
-        "{ret_type} (*)({param_types.join(', ')})"
 
     fn map_kernel_signature(name: text, params: [MirType]) -> text:
         """
@@ -263,7 +149,126 @@ impl CudaTypeMapper:
         """Get warp size (always 32 for NVIDIA GPUs)."""
         32
 
-    # === Size and alignment (CUDA-specific) ===
+impl TypeMapper for CudaTypeMapper:
+    fn map_primitive(ty: PrimitiveType) -> text:
+        """
+        Map primitive types to CUDA/C types.
+
+        CUDA primitives (C-style):
+        - Integers: long long (64), int (32), short (16), char (8)
+        - Unsigned: unsigned variants
+        - Floats: double (64), float (32), half (16)
+        - Boolean: bool
+        """
+        match ty:
+            case I64: "long long"
+            case I32: "int"
+            case I16: "short"
+            case I8: "signed char"
+            case U64: "unsigned long long"
+            case U32: "unsigned int"
+            case U16: "unsigned short"
+            case U8: "unsigned char"
+            case F64: "double"
+            case F32: "float"
+            case F16: "half"
+            case Bool: "bool"
+            case Unit: "void"
+
+    fn map_pointer(pointee: text, mutability: Mutability) -> text:
+        """
+        Map pointer types to CUDA representation.
+
+        CUDA pointers are C-style with optional const qualifier.
+        Memory space qualifiers are added separately.
+        """
+        match mutability:
+            case Mutable: "{pointee}*"
+            case Immutable: "const {pointee}*"
+
+    fn backend_name() -> text:
+        "CUDA"
+
+    fn map_memory_space(space: MemorySpace) -> text:
+        """
+        Map GPU memory space to CUDA qualifier.
+
+        CUDA memory qualifiers:
+        - __global__: Device global memory
+        - __shared__: Block shared memory
+        - __constant__: Constant memory (cached)
+        - (no qualifier): Thread-local/register
+        """
+        match space:
+            case Global: "__global__"
+            case Shared: "__shared__"
+            case Local: ""  # Thread-local is default
+            case Constant: "__constant__"
+            case Uniform: "__constant__"  # CUDA uses constant for uniform-like access
+
+    fn map_vector_type(elem: text, width: i64) -> text:
+        """
+        Map SIMD/vector type to CUDA vector type.
+
+        CUDA vector types: float2, float4, int2, int4, etc.
+        """
+        if width == 1:
+            elem
+        elif width == 2 or width == 4:
+            "{elem}{width}"
+        else:
+            # Fallback to array for non-standard widths
+            "{elem}[{width}]"
+
+    fn supports_half_precision() -> bool:
+        """
+        Check if compute capability supports half precision.
+        Half precision requires SM 5.3+ for full support.
+        """
+        val (major, minor) = self.compute_capability
+        major > 5 or (major == 5 and minor >= 3)
+
+    fn supports_gpu() -> bool:
+        val (major, _) = self.compute_capability
+        major == major
+
+    fn map_struct(fields: [(text, MirType)]) -> text:
+        """
+        Map struct type to CUDA representation.
+
+        CUDA structs are C-style structs.
+        """
+        val field_types = fields.map(self.map_type(_.1))
+        "struct {{ {field_types.join('; ')}; }}"
+
+    fn map_array(element: MirType, size: i64) -> text:
+        """
+        Map array type to CUDA representation.
+
+        CUDA arrays are C-style fixed arrays.
+        """
+        val elem_ty = self.map_type(element)
+        "{elem_ty}[{size}]"
+
+    fn map_tuple(elements: [MirType]) -> text:
+        """
+        Map tuple type to CUDA struct representation.
+
+        CUDA doesn't have tuples, use struct with numbered fields.
+        """
+        if elements.len() == 0:
+            "struct {{}}"
+        else:
+            val field_decls = elements.enumerate().map("{self.map_type(_1.1)} _{_1.0}")
+            "struct {{ {field_decls.join('; ')}; }}"
+
+    fn map_function(params: [MirType], ret: MirType) -> text:
+        """
+        Map function type to CUDA function pointer.
+        """
+        val param_types = params.map(self.map_type(_))
+        val ret_type = self.map_type(ret)
+        "{ret_type} (*)({param_types.join(', ')})"
 
     fn size_of(ty: MirType) -> i64:
         """
@@ -276,13 +281,21 @@ impl CudaTypeMapper:
             case I8 | U8 | Bool: 1
             case Unit: 0
             case Ptr(_, _): 8  # 64-bit pointers
-            case Struct(fields):
-                var struct_total = 0
-                var struct_index = 0
-                while struct_index < fields.len():
-                    struct_total = struct_total + self.size_of(fields[struct_index].1)
-                    struct_index = struct_index + 1
-                struct_total
+            case Struct(sym):
+                if self.type_defs.contains_key(sym):
+                    val type_def: MirTypeDef = self.type_defs[sym]
+                    match type_def.kind:
+                        case MirTypeDefKind.Struct(fields):
+                            var struct_total = 0
+                            var struct_index = 0
+                            while struct_index < fields.len():
+                                struct_total = struct_total + self.size_of(fields[struct_index].type_)
+                                struct_index = struct_index + 1
+                            struct_total
+                        case _: 8
+                else:
+                    # symbol absent from the table: legacy pointer-passed slot
+                    8
             case Array(elem, size):
                 self.size_of(elem) * size
             case Tuple(elements):
@@ -304,13 +317,21 @@ impl CudaTypeMapper:
             case I32 | U32 | F32: 4
             case I16 | U16: 2
             case I8 | U8 | Bool: 1
-            case Struct(fields):
-                var max_align = 1
-                for field in fields:
-                    val alignment = self.align_of(field.1)
-                    if alignment > max_align:
-                        max_align = alignment
-                max_align
+            case Struct(sym):
+                if self.type_defs.contains_key(sym):
+                    val type_def: MirTypeDef = self.type_defs[sym]
+                    match type_def.kind:
+                        case MirTypeDefKind.Struct(fields):
+                            var max_align = 1
+                            for field in fields:
+                                val alignment = self.align_of(field.type_)
+                                if alignment > max_align:
+                                    max_align = alignment
+                            max_align
+                        case _: 8
+                else:
+                    # symbol absent from the table: legacy pointer-passed slot
+                    8
             case Array(elem, _):
                 self.align_of(elem)
             case Tuple(elements):

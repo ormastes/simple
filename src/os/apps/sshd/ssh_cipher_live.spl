@@ -121,8 +121,11 @@ fn _ssh_gcm_frame_allowed(data: [u8]) -> bool:
 fn ssh_encrypt_packet_aes_gcm(payload: [u8], seq_s2c: u32, enc_key_s2c: [u8], iv_s2c: [u8]) -> [u8]:
     if enc_key_s2c.len() != 32u64 or iv_s2c.len() != 12u64 or payload.len() > SSH_GCM_PACKET_BODY_MAX:
         return []
+    # RFC 5647: the whole frame (4-byte length field + body) must be a
+    # multiple of 16 bytes — `_validate_gcm_wire_packet` enforces the same
+    # rule on admission, so the padding target includes the length field.
     var padding_len: u64 = 4
-    while ((1 + payload.len() + padding_len) % 16) != 0:
+    while ((4 + 1 + payload.len() + padding_len) % 16) != 0:
         padding_len = padding_len + 1
     val packet_length: u64 = 1 + payload.len() + padding_len
     if packet_length > SSH_GCM_PACKET_BODY_MAX:
@@ -165,8 +168,11 @@ fn ssh_encrypt_packet_aes_gcm(payload: [u8], seq_s2c: u32, enc_key_s2c: [u8], iv
 fn ssh_encrypt_packet_aes128_gcm(payload: [u8], seq_s2c: u32, enc_key_s2c: [u8], iv_s2c: [u8]) -> [u8]:
     if enc_key_s2c.len() != 16u64 or iv_s2c.len() != 12u64 or payload.len() > SSH_GCM_PACKET_BODY_MAX:
         return []
+    # RFC 5647: the whole frame (4-byte length field + body) must be a
+    # multiple of 16 bytes — `_validate_gcm_wire_packet` enforces the same
+    # rule on admission, so the padding target includes the length field.
     var padding_len: u64 = 4
-    while ((1 + payload.len() + padding_len) % 16) != 0:
+    while ((4 + 1 + payload.len() + padding_len) % 16) != 0:
         padding_len = padding_len + 1
     val packet_length: u64 = 1 + payload.len() + padding_len
     if packet_length > SSH_GCM_PACKET_BODY_MAX:
@@ -248,8 +254,11 @@ fn ssh_decrypt_packet_aes_gcm(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv_c2
     if result.len() < 2:
         return Err("decrypted body empty")
     val padding_len = _u8_at(result, 1).to_u64()
-    # Every SSH transport packet carries at least its message-number byte.
-    if padding_len < 4u64 or 2u64 + padding_len >= result.len():
+    # Every SSH transport packet carries at least its message-number byte, and
+    # the padding must leave a non-negative payload — an empty payload is a
+    # legitimate degenerate body (payload_len == 0), so reject only when the
+    # padding strictly overruns the body, not when it exactly consumes it.
+    if padding_len < 4u64 or 2u64 + padding_len > result.len():
         return Err("invalid padding in decrypted packet")
     val payload_len = result.len() - 2 - padding_len
     var payload: [u8] = []
@@ -318,7 +327,9 @@ fn ssh_decrypt_packet_aes128_gcm(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv
             if data.len() < 1:
                 return Err("decrypted body empty")
             val padding_len = _u8_at(data, 0).to_u64()
-            if padding_len < 4u64 or 1u64 + padding_len >= data.len():
+            # An empty payload is a legitimate degenerate body (payload_len ==
+            # 0): reject only when the padding strictly overruns the body.
+            if padding_len < 4u64 or 1u64 + padding_len > data.len():
                 return Err("invalid padding in decrypted packet")
             val payload_len = data.len() - 1 - padding_len
             var payload: [u8] = []

@@ -51,6 +51,7 @@ impl Lowerer {
             "to_u64" => Some(TypeId::U64),
             "to_f32" => Some(TypeId::F32),
             "to_float" | "to_f64" => Some(TypeId::F64),
+            "max" | "min" | "clamp" | "abs" => Some(receiver_ty),
             _ => None,
         }
     }
@@ -89,17 +90,12 @@ impl Lowerer {
         }
     }
 
-    fn enum_variant_discriminant_for_builtin_method(&self, variant_name: &str) -> i64 {
-        // Step (d), 2026-08-02: delegate to the SINGLE authoritative definition
-        // in the runtime crate. This value is a RUNTIME ABI, not a
-        // compiler-internal convention: `rt_option_some`/`rt_option_none`
-        // (runtime/src/value/objects.rs) build Option values with it, the
-        // bytecode compiler emits it into the instruction stream, and the
-        // interpreter SFFI reads it back. A second copy here that drifted by
-        // one character would desynchronize compiled code from the runtime
-        // silently. See
-        // doc/08_tracking/bug/enum_bare_name_collision_registry_2026-08-01.md.
-        simple_runtime::value::hash_variant_discriminant(variant_name) as i64
+    /// #6953: `variant`'s index in the enum that owns it for a receiver of
+    /// type `owner_ty` (or the enum named `enum_name`). A user enum declaring
+    /// `Ok`/`None` answers its own index; the builtin Result/Option answers its
+    /// fixed ABI value.
+    fn enum_variant_discriminant_for_builtin_method(&self, owner_ty: TypeId, enum_name: Option<&str>, variant_name: &str) -> i64 {
+        self.owner_variant_discriminant(owner_ty, enum_name, variant_name, "hir builtin enum method")
     }
 
     fn build_result_method_projection(
@@ -128,7 +124,7 @@ impl Lowerer {
                         ty: TypeId::I64,
                     },
                     HirExpr {
-                        kind: HirExprKind::Integer(self.enum_variant_discriminant_for_builtin_method(variant)),
+                        kind: HirExprKind::Integer(self.enum_variant_discriminant_for_builtin_method(subject.ty, Some("Result"), variant)),
                         ty: TypeId::I64,
                     },
                 ],
@@ -209,7 +205,7 @@ impl Lowerer {
                 args: vec![
                     HirExpr { kind: HirExprKind::Integer(1), ty: TypeId::I64 },
                     HirExpr {
-                        kind: HirExprKind::Integer(self.enum_variant_discriminant_for_builtin_method("None")),
+                        kind: HirExprKind::Integer(self.enum_variant_discriminant_for_builtin_method(TypeId::ANY, Some("Option"), "None")),
                         ty: TypeId::I64,
                     },
                     HirExpr { kind: HirExprKind::Nil, ty: TypeId::NIL },
@@ -267,6 +263,7 @@ impl Lowerer {
             Expr::I18nTemplate { name, parts, args } => self.lower_i18n_template(name, parts, args),
             Expr::I18nRef(name) => self.lower_i18n_ref(name),
             Expr::Identifier(name) => self.lower_identifier(name, ctx),
+            Expr::GenericInst { expr, .. } => self.lower_expr(expr, ctx),
             Expr::Symbol(name) => {
                 if ctx.lookup(name).is_some()
                     || self.globals.contains_key(name)
@@ -321,8 +318,17 @@ impl Lowerer {
             Expr::ContractOld(inner) => self.lower_contract_old(inner, ctx),
             Expr::New { kind, expr, .. } => self.lower_new(kind, expr, ctx),
             Expr::MethodCall {
-                receiver, method, args, ..
-            } => self.lower_method_call(receiver, method, args, ctx),
+                receiver,
+                method,
+                args,
+                generic_args,
+            } => {
+                self.check_unit_method_call_args(receiver, method, args, ctx)?;
+                if let Some(lowered) = self.lower_trait_field_method_call(receiver, method, args, ctx)? {
+                    return Ok(lowered);
+                }
+                self.lower_method_call_with_generics(receiver, method, args, generic_args, ctx)
+            }
             Expr::StructInit { name, fields, spread } => self.lower_struct_init(name, fields, spread.as_deref(), ctx),
             // Simple Math: Grid and Tensor literals (#1920-#1929)
             Expr::GridLiteral { rows, device } => self.lower_grid_literal(rows, device, ctx),
@@ -344,11 +350,22 @@ impl Lowerer {
             Expr::Match { subject, arms } => self.lower_match(subject, arms, ctx),
             // Do block: do: statements... (block as expression)
             Expr::DoBlock(statements) => self.lower_do_block(statements, ctx),
+            // List comprehension: desugared to array-building loop
+            Expr::ListComprehension {
+                expr,
+                pattern,
+                iterable,
+                condition,
+            } => self.lower_list_comprehension(expr, pattern, iterable, condition.as_deref(), ctx),
             Expr::UnsafeBlock(statements, capabilities) => self.lower_unsafe_block(statements, capabilities, ctx),
             // Null coalescing: expr ?? default
             Expr::Coalesce { expr, default } => self.lower_coalesce(expr, default, ctx),
             // Existence check: expr.? (is present/non-empty)
             Expr::ExistsCheck(inner) => self.lower_exists_check(inner, ctx),
+            Expr::OptionalChain { expr, field } => self.lower_optional_chain(expr, field, None, ctx),
+            Expr::OptionalMethodCall { receiver, method, args } => {
+                self.lower_optional_chain(receiver, method, Some(args), ctx)
+            }
             // Await expression: await expr
             // Simple async is EAGER: await on a non-Future is the identity, so the
             // result type equals the operand type. No Future<T> representation exists
@@ -371,6 +388,15 @@ impl Lowerer {
             Expr::Range { start, end, bound } => self.lower_range(start.as_deref(), end.as_deref(), *bound, ctx),
             _ => {
                 if self.lenient_types {
+                    match expr {
+                        Expr::ListComprehension { .. } => {
+                            crate::hir::lower::record_dropped_unsupported_expr("ListComprehension")
+                        }
+                        Expr::DictComprehension { .. } => {
+                            crate::hir::lower::record_dropped_unsupported_expr("DictComprehension")
+                        }
+                        _ => {}
+                    }
                     Ok(HirExpr {
                         kind: HirExprKind::Nil,
                         ty: TypeId::ANY,
@@ -473,10 +499,18 @@ impl Lowerer {
                 .or_else(|| self.globals.get(&symbol).copied())?;
             Some((symbol, ty))
         }) {
+            self.gate_private_fn_ref(name);
             Ok(HirExpr {
                 kind: HirExprKind::Global(symbol),
                 ty,
             })
+        } else if let Some(message) = self.flatten_ambiguous_callable(name) {
+            // Cross-module collision that no rule above selects a definition
+            // for. Owner decision 2026-11-09: a compile error requiring
+            // qualification, never a fall-through to the bare name (= whichever
+            // definition happened to keep it). See
+            // doc/08_tracking/bug/jit_co_compiled_definition_ambiguity_debt_2026-09-15.md
+            Err(LowerError::AmbiguousCallable(message))
         } else if let Some((source, ty)) = self.resolve_import_alias(name).map(str::to_string).and_then(|source| {
             // Selective-import alias (`use m.{f as g}`): module flattening merged
             // the imported symbol in under its ORIGINAL name, so `g` names
@@ -511,6 +545,7 @@ impl Lowerer {
                 .or_else(|| self.globals.get(&source).copied())?;
             Some((source, ty))
         }) {
+            self.gate_private_fn_ref(name);
             Ok(HirExpr {
                 kind: HirExprKind::Global(source),
                 ty,
@@ -521,6 +556,7 @@ impl Lowerer {
             // was typed from `f` but still emitted `Global("g")` -- a symbol
             // nothing defines, because flattening merges the import under its
             // ORIGINAL name. Emit the symbol whose type we just took.
+            self.gate_private_fn_ref(name);
             let symbol = self.import_alias_symbol(name);
             Ok(HirExpr {
                 kind: HirExprKind::Global(symbol),
@@ -532,6 +568,7 @@ impl Lowerer {
             // global typed under the ALIAS name, so `use m.{f as g}` whose
             // target is not inlined into `module.functions` landed here and
             // emitted `Global("g")` -- unresolved at link time.
+            self.gate_private_fn_ref(name);
             let symbol = self.import_alias_symbol(name);
             Ok(HirExpr {
                 kind: HirExprKind::Global(symbol),
@@ -554,6 +591,12 @@ impl Lowerer {
                     )));
                 }
                 return Err(LowerError::SelfInStatic);
+            }
+            if self.active_fn_generic_params.iter().any(|p| p == name) {
+                return Ok(HirExpr {
+                    kind: HirExprKind::ConstGeneric(name.to_string()),
+                    ty: TypeId::I64,
+                });
             }
             if self.lenient_types {
                 // In lenient mode, treat unknown variables as globals with type ANY.
@@ -703,6 +746,87 @@ impl Lowerer {
         }
     }
 
+    /// `ret` for a call, refined for an erased generic identity-shaped callee
+    /// (`fn f<T>(x: T) -> T`): when the erased return is Any and the matching
+    /// argument is a class/struct, the call yields that class. Without this a
+    /// local bound from the call loses its owner, and native layout then
+    /// places fields without the vtable header word
+    /// (stage3_selfhost_vtable_field_offset_relro_segv_2026-08-06).
+    fn lookup_generic_identity_param_spec(
+        &self,
+        callee: &Expr,
+        resolved_symbol: Option<&str>,
+    ) -> Option<crate::hir::lower::lowerer::GenericIdentityParamSpec> {
+        if let Some(sym) = resolved_symbol {
+            if let Some(spec) = self.generic_identity_param.get(sym) {
+                return Some(spec.clone());
+            }
+        }
+        match callee {
+            Expr::Identifier(name) => {
+                if let Some(spec) = self.generic_identity_param.get(name) {
+                    return Some(spec.clone());
+                }
+                if let Some(orig) = self.resolve_function_alias(name) {
+                    return self.generic_identity_param.get(orig).cloned();
+                }
+                None
+            }
+            Expr::Path(segments) => self.generic_identity_param.get(&segments.join(".")).cloned(),
+            Expr::FieldAccess { receiver, field, .. } => {
+                if let Expr::Identifier(mod_name) = receiver.as_ref() {
+                    return self
+                        .generic_identity_param
+                        .get(&format!("{mod_name}.{field}"))
+                        .cloned();
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn refine_generic_identity_return(
+        &mut self,
+        callee: &Expr,
+        resolved_symbol: Option<&str>,
+        args: &[ast::Argument],
+        ret: TypeId,
+        ctx: &FunctionContext,
+    ) -> TypeId {
+        if ret != TypeId::ANY {
+            return ret;
+        }
+        let (base_callee, explicit_type_args) = match callee {
+            Expr::GenericInst { expr, type_args } => (expr.as_ref(), Some(type_args.as_slice())),
+            other => (other, None),
+        };
+        let Some(spec) = self.lookup_generic_identity_param_spec(base_callee, resolved_symbol) else {
+            return ret;
+        };
+        let arg = args
+            .iter()
+            .find(|a| a.name.as_deref() == Some(spec.name.as_str()))
+            .or_else(|| args.iter().filter(|a| a.name.is_none() && a.label.is_none()).nth(spec.index));
+        if let Some(arg) = arg {
+            if let Ok(ty) = self.infer_type(&arg.value, ctx) {
+                if matches!(self.module.types.get(ty), Some(HirType::Struct { .. })) {
+                    return ty;
+                }
+            }
+        }
+        if let (Some(type_args), Some(pos)) = (explicit_type_args, spec.generic_param_pos) {
+            if let Some(ast_ty) = type_args.get(pos) {
+                if let Ok(ty) = self.resolve_type(ast_ty) {
+                    if matches!(self.module.types.get(ty), Some(HirType::Struct { .. })) {
+                        return ty;
+                    }
+                }
+            }
+        }
+        ret
+    }
+
     fn call_return_type(&self, callee: &Expr, fallback: TypeId) -> TypeId {
         // An imported callee typed from `imported_function_value_types` keeps
         // the bare-name return resolution it had before that map existed
@@ -716,6 +840,18 @@ impl Lowerer {
             }
         }
         if let Some(HirType::Function { ret, .. }) = self.module.types.get(fallback) {
+            return *ret;
+        }
+        // A callee still typed `(fn(..) -> R)?` or `Option<fn(..) -> R>`: `if val f = self.cb` does not
+        // narrow a class-field `Option<fn>`, so `f` keeps the optional type.
+        // Calling it can only call the function, so the result is `R`, not
+        // the callee's own optional type.
+        let optional_callee_payload = match self.module.types.get(fallback) {
+            Some(HirType::Pointer { inner, .. }) => Some(*inner),
+            Some(HirType::Enum { name, type_bindings, .. }) if name == "Option" => type_bindings.get("T").copied(),
+            _ => None,
+        };
+        if let Some(HirType::Function { ret, .. }) = optional_callee_payload.and_then(|p| self.module.types.get(p)) {
             return *ret;
         }
         match callee {
@@ -760,6 +896,21 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        let expected = match self.module.types.get(type_id) {
+            Some(HirType::Enum { variants, .. }) => variants
+                .iter()
+                .find(|(name, _)| name == member)
+                .map(|(_, fields)| fields.as_ref().map_or(0, Vec::len)),
+            _ => None,
+        };
+        if let Some(expected) = expected {
+            if expected != args.len() {
+                return Err(LowerError::Unsupported(format!(
+                    "enum construction `{type_name}.{member}`: payload arity mismatch: expected {expected}, got {}",
+                    args.len()
+                )));
+            }
+        }
         let args_hir = self.lower_call_args(args, ctx)?;
         Ok(HirExpr {
             kind: HirExprKind::Call {
@@ -928,6 +1079,151 @@ impl Lowerer {
         );
     }
 
+    /// `base.field.method(..)` where `field` is declared with a TRAIT type.
+    /// Trait names alias to ANY in HIR, so the field read carries no owner and
+    /// MIR used to emit a bare `method` that the native linker matched against
+    /// every same-named impl (AMBIGUOUS-METHOD). Bind the field to a synthetic
+    /// local that carries the declared trait dispatch owner -- exactly what an
+    /// explicitly typed local (`val s: Trait = base.field`) gets -- so MIR
+    /// lowers the call through the trait vtable path.
+    /// doc/08_tracking/bug/native_codegen_trait_field_receiver_erased_ambiguous_2026_10_26.md
+    fn lower_trait_field_method_call(
+        &mut self,
+        receiver: &Expr,
+        method: &str,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Option<HirExpr>> {
+        let Expr::FieldAccess { receiver: base, field } = receiver else { return Ok(None) };
+        if !matches!(base.as_ref(), Expr::Identifier(_)) {
+            return Ok(None);
+        }
+        let Some(dispatch) = self.trait_field_dispatch(base, field, ctx) else { return Ok(None) };
+        let value = self.lower_expr(receiver, ctx)?;
+        let tmp_name = format!("__trait_field_recv_{}", ctx.locals.len());
+        let local_idx = ctx.add_local(tmp_name.clone(), value.ty, simple_parser::ast::Mutability::Immutable);
+        ctx.locals[local_idx].trait_dispatch_owner = Some(dispatch);
+        let body = self.lower_method_call(&Expr::Identifier(tmp_name), method, args, ctx)?;
+        let ty = body.ty;
+        Ok(Some(HirExpr {
+            kind: HirExprKind::LetIn { local_idx, value: Box::new(value), body: Box::new(body) },
+            ty,
+        }))
+    }
+
+    /// Recover the authored field type only through the receiver's declared
+    /// struct/class owner. No method-name or same-field-name search is allowed.
+    pub(super) fn receiver_field_declared_type(&self, base: &Expr, field: &str, ctx: &FunctionContext) -> Option<(&str, &ast::Type)> {
+        let Expr::Identifier(name) = base else { return None };
+        let idx = ctx.lookup(name)?;
+        let mut ty = ctx.locals.get(idx)?.ty;
+        if let Some(HirType::Pointer { inner, .. }) = self.module.types.get(ty) {
+            ty = *inner;
+        }
+        if !matches!(self.module.types.get(ty)?, HirType::Struct { .. }) { return None; }
+        let (owner, fields) = self.struct_field_declared_types.get(&ty)?.as_ref()?;
+        Some((owner.as_str(), fields.get(field)?))
+    }
+
+    /// Direct trait fields may dispatch through their declaration. Optional
+    /// fields deliberately return None: their carrier has Option semantics.
+    pub(super) fn trait_field_dispatch(&self, base: &Expr, field: &str, ctx: &FunctionContext) -> Option<crate::hir::HirTraitDispatch> {
+        let (owner, declared) = self.receiver_field_declared_type(base, field, ctx)?;
+        self.declared_trait_dispatch_in_owner(declared, owner)
+    }
+
+    /// Resolved callback parameter types for the lambda arguments of a
+    /// positional call to a user method, or `None` to lower the arguments the
+    /// ordinary way (no lambda argument, named arguments, unknown receiver
+    /// type or method, or a declared type that does not resolve here).
+    fn method_callback_types_for_call(
+        &mut self,
+        receiver: &HirExpr,
+        method: &str,
+        args: &[ast::Argument],
+    ) -> Option<Vec<Option<Vec<TypeId>>>> {
+        if !args.iter().any(|a| matches!(a.value, Expr::Lambda { .. })) || args.iter().any(|a| a.name.is_some()) {
+            return None;
+        }
+        let owner = self.module.types.get_type_name(receiver.ty)?;
+        let declared = self.method_callback_param_types.get(&format!("{}.{}", owner, method))?.clone();
+        let mut resolved = Vec::with_capacity(declared.len());
+        for callback in declared {
+            resolved.push(match callback {
+                None => None,
+                Some(param_types) => {
+                    let mut out = Vec::with_capacity(param_types.len());
+                    for ty in param_types {
+                        out.push(match ty {
+                            // Erased generic parameter: a tagged word.
+                            None => TypeId::ANY,
+                            Some(ty) => self.resolve_type(&ty).ok()?,
+                        });
+                    }
+                    Some(out)
+                }
+            });
+        }
+        Some(resolved)
+    }
+
+    pub(super) fn primitive_default_hir_expr(type_name: &str) -> Option<HirExpr> {
+        let (kind, ty) = match type_name {
+            "i8" => (HirExprKind::Integer(0), TypeId::I8),
+            "i16" => (HirExprKind::Integer(0), TypeId::I16),
+            "i32" => (HirExprKind::Integer(0), TypeId::I32),
+            "i64" => (HirExprKind::Integer(0), TypeId::I64),
+            "u8" => (HirExprKind::Integer(0), TypeId::U8),
+            "u16" => (HirExprKind::Integer(0), TypeId::U16),
+            "u32" => (HirExprKind::Integer(0), TypeId::U32),
+            "u64" => (HirExprKind::Integer(0), TypeId::U64),
+            "f32" => (HirExprKind::Float(0.0), TypeId::F32),
+            "f64" => (HirExprKind::Float(0.0), TypeId::F64),
+            "bool" => (HirExprKind::Bool(false), TypeId::BOOL),
+            "text" | "str" => (HirExprKind::String(String::new()), TypeId::STRING),
+            _ => return None,
+        };
+        Some(HirExpr { kind, ty })
+    }
+
+    fn method_has_generic_params(&self, method: &str) -> bool {
+        if method == "collect" {
+            return true;
+        }
+        if self
+            .module
+            .trait_infos
+            .values()
+            .any(|ti| ti.methods.get(method).is_some_and(|sig| !sig.generic_params.is_empty()))
+        {
+            return true;
+        }
+        let suffix = format!(".{method}");
+        self.module
+            .functions
+            .iter()
+            .any(|f| !f.generic_params.is_empty() && (f.name == method || f.name.ends_with(&suffix)))
+    }
+
+    fn method_returns_generic_param(&self, method: &str) -> bool {
+        if method == "collect" {
+            return true;
+        }
+        if self
+            .module
+            .trait_infos
+            .values()
+            .any(|ti| ti.methods.get(method).is_some_and(|sig| sig.generic_params.len() == 1))
+        {
+            return true;
+        }
+        let suffix = format!(".{method}");
+        self.module
+            .functions
+            .iter()
+            .any(|f| f.generic_params.len() == 1 && (f.name == method || f.name.ends_with(&suffix)))
+    }
+
     fn lower_method_call(
         &mut self,
         receiver: &Expr,
@@ -935,8 +1231,45 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        self.lower_method_call_with_generics(receiver, method, args, &[], ctx)
+    }
+
+    fn lower_method_call_with_generics(
+        &mut self,
+        receiver: &Expr,
+        method: &str,
+        args: &[ast::Argument],
+        generic_args: &[ast::Type],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        let inherited_target_type = self.expected_target_type.take();
+        let receiver_base = match receiver {
+            Expr::GenericInst { expr, .. } => expr.as_ref(),
+            other => other,
+        };
+        if method == "default" && args.is_empty() {
+            if let Expr::ArrayRepeat { value, count } = receiver_base {
+                let is_type_or_param = match value.as_ref() {
+                    Expr::Identifier(name) if ctx.lookup(name).is_none() => {
+                        self.active_fn_generic_params.iter().any(|p| p == name)
+                            || Self::primitive_default_hir_expr(name).is_some()
+                            || self.module.types.lookup(name).is_some()
+                    }
+                    _ => false,
+                };
+                if is_type_or_param {
+                    let elem_default = Expr::MethodCall {
+                        receiver: value.clone(),
+                        method: "default".to_string(),
+                        args: Vec::new(),
+                        generic_args: Vec::new(),
+                    };
+                    return self.lower_array_repeat(&elem_default, count, ctx);
+                }
+            }
+        }
         // Check for intrinsic calls on special identifiers
-        if let Expr::Identifier(recv_name) = receiver {
+        if let Expr::Identifier(recv_name) = receiver_base {
             // Module imports are compile-time namespaces. Resolve the exact
             // qualified free-function owner before lowering the receiver;
             // lenient receiver lowering would otherwise create
@@ -981,6 +1314,29 @@ impl Lowerer {
                         ty: ret_ty,
                     });
                 }
+                // Flattened (JIT) unit: `ns.f(...)` through a whole-module
+                // import. Without this the receiver lowered to Global("ns"),
+                // which codegen rejects and the program left the JIT.
+                // doc/08_tracking/bug/jit_module_namespace_member_access_unresolved_2026-11-13.md
+                if let Some(target) = self.resolve_flatten_namespace_callable(recv_name, method) {
+                    self.gate_private_namespace_ref(recv_name, method);
+                    let args_hir = self.lower_call_args(args, ctx)?;
+                    let ret_ty = self.named_callable_return_type(&target).unwrap_or(TypeId::ANY);
+                    return Ok(HirExpr {
+                        kind: HirExprKind::Call {
+                            func: Box::new(HirExpr {
+                                kind: HirExprKind::Global(target),
+                                ty: TypeId::ANY,
+                            }),
+                            args: args_hir,
+                        },
+                        ty: ret_ty,
+                    });
+                }
+                if let Some((type_name, struct_ty)) = self.resolve_flatten_namespace_type(recv_name, method) {
+                    self.gate_private_namespace_ref(recv_name, method);
+                    return self.lower_resolved_constructor(&type_name, struct_ty, args, ctx);
+                }
             }
             // this.* intrinsics
             if recv_name == "this" {
@@ -1006,6 +1362,30 @@ impl Lowerer {
                     return Ok(result);
                 }
             }
+            else if ctx.lookup(recv_name).is_none()
+                && self.active_fn_generic_params.iter().any(|p| p == recv_name)
+            {
+                let args_hir = self.lower_call_args(args, ctx)?;
+                let trait_name = self
+                    .active_fn_generic_bounds
+                    .iter()
+                    .find(|b| b.type_param == *recv_name)
+                    .and_then(|b| b.bounds.first().map(|tb| tb.trait_name.clone()));
+                return Ok(HirExpr {
+                    kind: HirExprKind::TypeParamStaticCall {
+                        type_param: recv_name.to_string(),
+                        trait_name,
+                        method: method.to_string(),
+                        args: args_hir,
+                    },
+                    ty: TypeId::ANY,
+                });
+            }
+            else if ctx.lookup(recv_name).is_none() && method == "default" && args.is_empty() {
+                if let Some(prim_default) = Self::primitive_default_hir_expr(recv_name) {
+                    return Ok(prim_default);
+                }
+            }
             // Static method calls on classes/structs
             // Only treat as static method if the name is NOT a local variable
             // (e.g., `text` is both a type alias and could be a variable name)
@@ -1023,7 +1403,43 @@ impl Lowerer {
                 if let Some(result) = self.lower_simd_static_method(recv_name, method, args, ctx)? {
                     return Ok(result);
                 }
-                return self.lower_static_member_call_with_sugar(recv_name, method, args, ctx);
+                let mut res = self.lower_static_member_call_with_sugar(recv_name, method, args, ctx)?;
+                if let Expr::GenericInst { type_args, .. } = receiver {
+                    if !type_args.is_empty() {
+                        if let Ok(concrete_ty) = self.resolve_type(&ast::Type::Generic {
+                            name: recv_name.to_string(),
+                            args: type_args.clone(),
+                        }) {
+                            if concrete_ty != TypeId::ANY {
+                                res.ty = concrete_ty;
+                            }
+                        }
+                    }
+                } else if let Some(target_ty) = inherited_target_type {
+                    if matches!(
+                        self.module.types.get(target_ty),
+                        Some(HirType::Struct { name, .. }) if name == recv_name || name.ends_with(&format!(".{recv_name}"))
+                    ) {
+                        res.ty = target_ty;
+                    }
+                }
+                return Ok(res);
+            }
+        } else if let Expr::FieldAccess {
+            receiver: inner_recv,
+            field: inner_field,
+        } = receiver_base
+        {
+            if let Expr::Identifier(ns) = inner_recv.as_ref() {
+                if ctx.lookup(ns).is_none() {
+                    if let Some((type_name, _)) = self.resolve_flatten_namespace_type(ns, inner_field) {
+                        self.gate_private_namespace_ref(ns, inner_field);
+                        if let Some(result) = self.lower_simd_static_method(&type_name, method, args, ctx)? {
+                            return Ok(result);
+                        }
+                        return self.lower_static_member_call_with_sugar(&type_name, method, args, ctx);
+                    }
+                }
             }
         }
 
@@ -1072,7 +1488,28 @@ impl Lowerer {
         }
 
         // Lower arguments for generic method call
-        let mut hir_args = self.lower_call_args(args, ctx)?;
+        // A lambda passed positionally to a `fn(...)`-typed METHOD parameter
+        // takes that parameter's declared callback parameter types, exactly
+        // as for a free function (`expr/calls.rs`). Without this an
+        // unannotated `\x` defaulted to I64 whatever the method declares, so
+        // `cell.with(\x: x * 2.0, 1.25)` on `fn with<T>(f: fn(T) -> T, ..)`
+        // decoded a boxed float as an integer.
+        let callback_param_types = self.method_callback_types_for_call(&receiver_hir, method, args);
+        let mut hir_args = match callback_param_types {
+            Some(callbacks) => {
+                let mut out = Vec::with_capacity(args.len());
+                for (i, arg) in args.iter().enumerate() {
+                    match (&arg.value, callbacks.get(i)) {
+                        (Expr::Lambda { params, body, capture_all, .. }, Some(Some(param_tys))) => {
+                            out.push(self.lower_lambda_with_param_types(params, body, *capture_all, ctx, param_tys)?);
+                        }
+                        _ => out.push(self.lower_expr(&arg.value, ctx)?),
+                    }
+                }
+                out
+            }
+            None => self.lower_call_args(args, ctx)?,
+        };
         // Use the concrete receiver owner in the default lookup.  A bare
         // method-name table would let same-named methods on unrelated classes
         // supply each other's defaults.  MethodCall args exclude the receiver,
@@ -1129,9 +1566,90 @@ impl Lowerer {
             }
         }
 
+        // Enum-slot admission for a user method (see
+        // `reject_callable_for_enum_slot`): only positional calls on a
+        // receiver whose class/struct is declared in this file, so the
+        // recorded `Owner.method` row is the one the author wrote.
+        if args.iter().all(|a| a.name.is_none() && !matches!(a.value, Expr::Spread(_))) {
+            // The float-into-int check can only reject a float argument.
+            let has_float_arg = hir_args.iter().any(|a| matches!(a.ty, TypeId::F32 | TypeId::F64));
+            if let Some(HirType::Struct { name: owner, .. }) = self.module.types.get(receiver_hir.ty) {
+                let bare_owner = owner.rsplit('.').next().unwrap_or(owner).to_string();
+                let declared_here = self
+                    .struct_decl_files
+                    .get(&bare_owner)
+                    .is_some_and(|decl_file| *decl_file == self.current_file);
+                if declared_here || has_float_arg {
+                    let slot_types: Vec<Option<TypeId>> = self
+                        .method_param_type_names
+                        .get(&format!("{bare_owner}.{method}"))
+                        .map(|names| names.iter().map(|n| n.as_deref().and_then(|n| self.module.types.lookup(n))).collect())
+                        .unwrap_or_default();
+                    for (i, (arg, pty)) in hir_args.iter().zip(slot_types.iter()).enumerate() {
+                        if let Some(pty) = pty {
+                            let slot = format!("argument {} of `{bare_owner}.{method}`", i + 1);
+                            if declared_here {
+                                self.reject_callable_for_enum_slot(*pty, arg, &slot)?;
+                            }
+                            // Float-into-int needs only a primitive slot type,
+                            // so it also holds for an imported owner.
+                            self.reject_float_for_int_slot(*pty, arg, &slot)?;
+                        }
+                    }
+                }
+            }
+            // A trait-typed receiver is erased to ANY. A `val x: Trait` local
+            // carries the exact declaring TraitDef; a parameter keeps only its
+            // declared type name, resolved the same way.
+            if let (true, HirExprKind::Local(idx)) = (has_float_arg, &receiver_hir.kind) {
+                let idx = *idx;
+                let trait_slots: Option<(String, Vec<Option<String>>)> = ctx
+                    .locals
+                    .get(idx)
+                    .and_then(|l| {
+                        l.trait_dispatch_owner.clone().or_else(|| {
+                            l.type_name_hint.as_deref().and_then(|n| self.trait_declaration_for_current_owner(n))
+                        })
+                    })
+                    .and_then(|d| {
+                        let m = d.declaration.methods.iter().find(|m| m.name == method)?;
+                        let user = if m.params.first().is_some_and(|p| p.name == "self") { &m.params[1..] } else { &m.params[..] };
+                        (!user.iter().any(|p| p.variadic))
+                            .then(|| (d.declaration.name.clone(), user.iter().map(|p| Self::simple_param_type_name(p.ty.as_ref())).collect()))
+                    });
+                if let Some((trait_name, names)) = trait_slots {
+                    for (i, (arg, name)) in hir_args.iter().zip(names.iter()).enumerate() {
+                        if let Some(pty) = name.as_deref().and_then(|n| self.module.types.lookup(n)) {
+                            self.reject_float_for_int_slot(pty, arg, &format!("argument {} of `{trait_name}.{method}`", i + 1))?;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut resolved_generic_args = Vec::with_capacity(generic_args.len());
+        for ga in generic_args {
+            resolved_generic_args.push(self.resolve_type(ga)?);
+        }
+        if resolved_generic_args.is_empty() && self.method_has_generic_params(method) {
+            if let Some(target_ty) = inherited_target_type.filter(|ty| *ty != TypeId::ANY && *ty != TypeId::VOID) {
+                resolved_generic_args.push(target_ty);
+            }
+        }
+
         // Look up return type from module functions
         let recv_ty = receiver_hir.ty;
-        let return_ty = tuple_get_return_ty.unwrap_or_else(|| self.lookup_method_return_type(recv_ty, method));
+        let mut return_ty = match tuple_get_return_ty {
+            Some(ty) => ty,
+            None => self.method_return_type_marking_guess(recv_ty, method),
+        };
+        if let Some(&first_generic) = resolved_generic_args.first() {
+            if first_generic != TypeId::ANY
+                && (method == "collect" || (return_ty == TypeId::ANY && self.method_returns_generic_param(method)))
+            {
+                return_ty = first_generic;
+            }
+        }
 
         // Generate generic method call for user-defined methods
         // Uses dynamic dispatch since we don't know the concrete type at compile time
@@ -1141,13 +1659,36 @@ impl Lowerer {
                 method: method.to_string(),
                 args: hir_args,
                 dispatch: DispatchMode::Dynamic,
+                generic_args: resolved_generic_args,
             },
             ty: return_ty,
         })
     }
 
+    /// `lookup_method_return_type`, except that a suffix-search guess which
+    /// is an Option (`T?` or `Option<T>`) gets its own type id, recorded in
+    /// `suffix_guessed_return_types`. The Option->scalar return rule skips
+    /// exactly that guess without also skipping a real `A.join() -> text?`
+    /// that shares the declared id.
+    pub(in crate::hir::lower) fn method_return_type_marking_guess(&mut self, recv_ty: TypeId, method: &str) -> TypeId {
+        let ty = self.lookup_method_return_type(recv_ty, method);
+        if !self.last_method_return_guessed.get() || !self.is_option_type(ty) {
+            return ty;
+        }
+        let fresh = match self.module.types.optional_inner(ty) {
+            Some(inner) => self.module.types.register_optional(inner),
+            None => match self.module.types.get(ty).cloned() {
+                Some(option_enum) => self.module.types.register(option_enum),
+                None => return ty,
+            },
+        };
+        self.suffix_guessed_return_types.insert(fresh);
+        fresh
+    }
+
     /// Look up the return type of a method from pre-registered signatures.
     fn lookup_method_return_type(&self, recv_ty: TypeId, method: &str) -> TypeId {
+        self.last_method_return_guessed.set(false);
         let ret = self.lookup_method_return_type_inner(recv_ty, method);
         if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
             eprintln!(
@@ -1261,9 +1802,27 @@ impl Lowerer {
                 }
             }
         }
-        // If receiver type is known, look up "TypeName.method"
-        if recv_ty != TypeId::ANY && recv_ty != TypeId::VOID {
-            if let Some(hir_ty) = self.module.types.get(recv_ty) {
+        // If receiver type is known, look up "TypeName.method".
+        // A flat-nullable `T?` receiver (`Pointer { inner: T }`, e.g. `var v =
+        // opt_field.?`) names its owner through `inner`: without peeling it,
+        // the lookup fell to the suffix search below, whose shortest-owner
+        // tiebreak typed `vulkan.end_frame()` (VulkanFontAdapter3D, returns
+        // evidence) as `Engine3D.end_frame() -> void`, and the next `.ready`
+        // dropped the module to the interpreter.
+        // doc/08_tracking/bug/seed_jit_nullable_receiver_method_typed_by_shorter_owner_2026-11-04.md
+        let owner_ty = match self.module.types.get(recv_ty) {
+            Some(HirType::Pointer { inner, .. })
+                if matches!(
+                    self.module.types.get(*inner),
+                    Some(HirType::Struct { .. }) | Some(HirType::Enum { .. })
+                ) =>
+            {
+                *inner
+            }
+            _ => recv_ty,
+        };
+        if owner_ty != TypeId::ANY && owner_ty != TypeId::VOID {
+            if let Some(hir_ty) = self.module.types.get(owner_ty) {
                 let type_name = match hir_ty {
                     HirType::Struct { name, .. } => Some(name.as_str()),
                     HirType::Enum { name, .. } => Some(name.as_str()),
@@ -1361,6 +1920,11 @@ impl Lowerer {
             .filter(|(name, _)| name.ends_with(&suffix) && owner_applies(name))
             .min_by_key(|(name, _)| name.len())
         {
+            // A guess borrowed from some same-named method (`xs.join(",")` on an
+            // untyped `xs` typed as an imported `A.join() -> text?`): flag it so
+            // the caller can give it a private type id the Option->scalar
+            // return rule skips.
+            self.last_method_return_guessed.set(true);
             return ret_ty;
         }
         // Builtin string methods that return a RAW native i64 (a code point /
@@ -1394,6 +1958,9 @@ impl Lowerer {
         // raw f64 bit pattern as an int under JIT.
         if matches!(method, "to_float" | "to_f64") && (recv_ty == TypeId::STRING || recv_ty == TypeId::ANY) {
             return TypeId::F64;
+        }
+        if method == "to_f32" && (recv_ty == TypeId::STRING || recv_ty == TypeId::ANY) {
+            return TypeId::F32;
         }
         // Builtin float MATH methods on a float receiver. Exactly the same
         // mechanism as the `to_float`/`to_f64` case directly above, one layer
@@ -1483,6 +2050,27 @@ impl Lowerer {
         {
             return recv_ty;
         }
+        // Integer/float predicates, `sign` and integer `pow` have real
+        // lowerings in `codegen/instr/methods.rs` (JIT/interpreter parity);
+        // stamp them so they take the static path instead of by-name dispatch
+        // (`Function 'i64.is_even' not found`).
+        // doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md
+        let is_int_recv = matches!(
+            recv_ty,
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+        );
+        if is_int_recv && crate::codegen::scalar_float_methods::is_int_predicate(method) {
+            return TypeId::BOOL;
+        }
+        if is_int_recv && matches!(method, "sign" | "signum" | "pow") {
+            return recv_ty;
+        }
+        if is_int_recv && method == "to_hex" {
+            return TypeId::STRING;
+        }
+        if matches!(recv_ty, TypeId::F32 | TypeId::F64) && matches!(method, "is_nan" | "is_finite" | "is_infinite") {
+            return TypeId::BOOL;
+        }
         TypeId::ANY
     }
 
@@ -1545,7 +2133,27 @@ impl Lowerer {
             Some(HirType::Array { element, .. }) => Some(*element),
             _ => None,
         };
-        let hir_args = match (method, element_ty, args) {
+        let callback_param_ty = element_ty.or_else(|| {
+            if method != "map" {
+                return None;
+            }
+            // Also propagate Ok / Some payload type into placeholder lambdas such
+            // as `inspect_ambient_storage_roots(...).map(_.roots)` so field access
+            // resolves against the payload struct rather than `TypeId::ANY`.
+            match self.module.types.get(receiver.ty) {
+                Some(HirType::Pointer { inner, .. }) if self.module.types.optional_inner(receiver.ty).is_some() => {
+                    Some(*inner)
+                }
+                Some(HirType::Enum { name, .. }) if name == "Option" => self
+                    .enum_variant_payload_type_for_builtin_method(receiver.ty, "Some")
+                    .or_else(|| self.enum_payload_type_for_builtin_method(receiver.ty)),
+                Some(HirType::Enum { name, .. }) if name == "Result" => {
+                    self.enum_variant_payload_type_for_builtin_method(receiver.ty, "Ok")
+                }
+                _ => None,
+            }
+        });
+        let hir_args = match (method, element_ty.or(callback_param_ty), args) {
             ("map" | "filter", Some(element_ty), [arg]) => {
                 if let Expr::Lambda {
                     params,
@@ -1626,6 +2234,42 @@ impl Lowerer {
                     }
                 }
                 "unwrap" => {
+                    // Only a source Optional<Char> owns this builtin dispatch.
+                    // A genuine shared pointer with the same representation
+                    // must retain its existing method-resolution behavior.
+                    if self.module.types.optional_inner(receiver.ty) == Some(TypeId::CHAR) {
+                        return Ok(Some(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_unwrap_or_trap".to_string(),
+                                args: vec![receiver.clone()],
+                            },
+                            ty: TypeId::CHAR,
+                        }));
+                    }
+                    // Nullable text. `text?` reaches here either as a source
+                    // Optional over STRING or already flattened to STRING (the
+                    // text slot is itself nullable, and no `impl text` exists
+                    // that could own `unwrap`). Either way the payload is a
+                    // text, so the result MUST be typed STRING and lowered to
+                    // the builtin checked unwrap. Left on the generic path it
+                    // was typed ANY; a chained text method
+                    // (`digest.byte_at(i)`) then could not be routed to
+                    // `rt_string_byte_at` in MIR and the LLVM suffix-match
+                    // fallback bound it to an unrelated same-leaf user method
+                    // (`StrictSdnReaderV1.byte_at`), so the rebuilt stage2
+                    // AV'd in every native-build worker.
+                    // doc/08_tracking/bug/stage2_new3_native_build_worker_av_c01_2026-11-07.md
+                    if receiver.ty == TypeId::STRING
+                        || self.module.types.optional_inner(receiver.ty) == Some(TypeId::STRING)
+                    {
+                        return Ok(Some(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_unwrap_or_trap".to_string(),
+                                args: vec![receiver.clone()],
+                            },
+                            ty: TypeId::STRING,
+                        }));
+                    }
                     let nullable_named_inner = match self.module.types.get(receiver.ty) {
                         Some(HirType::Pointer { inner, .. })
                             if matches!(self.module.types.get(*inner), Some(HirType::Struct { .. } | HirType::Enum { .. })) => Some(*inner),
@@ -1658,6 +2302,31 @@ impl Lowerer {
                             ty: inner,
                         }));
                     }
+                    // `f32?`/`f64?` unwrap: the same flat-nullable tagged
+                    // contract as the BoxInt arm above, but the payload
+                    // decoder is `UnboxFloat`, not `UnboxInt` -- the
+                    // name-keyed MIR tail (`lowering_expr_builtin.rs`,
+                    // `rt_unwrap_or_self` + `slot_holds_tagged_optional`)
+                    // already routes results typed F32/F64 through
+                    // `unbox_scalar_for_raw_slot`. Before this arm,
+                    // `.unwrap()` on a float optional fell through to generic
+                    // method dispatch and read a garbage register on BOTH
+                    // lanes (measured: `getf(true).unwrap()` on a `f64?`
+                    // holding 3.25 printed a nondeterministic denormal, with
+                    // different tails on JIT vs interpreter). Required by the
+                    // `parse_float`/`parse_f64` typing arm, whose results are
+                    // unwrapped by real callers.
+                    if let Some(HirType::Pointer { inner, .. }) = self.module.types.get(receiver.ty) {
+                        if matches!(*inner, TypeId::F32 | TypeId::F64) {
+                            return Ok(Some(HirExpr {
+                                kind: HirExprKind::BuiltinCall {
+                                    name: "rt_unwrap_or_self".to_string(),
+                                    args: vec![receiver.clone()],
+                                },
+                                ty: *inner,
+                            }));
+                        }
+                    }
                     if let Some(payload_ty) = self.enum_payload_type_for_builtin_method(receiver.ty) {
                         let name = match self.module.types.get(receiver.ty) {
                             Some(HirType::Enum { name, .. }) if name == "Result" || name == "Option" => {
@@ -1672,6 +2341,40 @@ impl Lowerer {
                             },
                             ty: payload_ty,
                         }));
+                    }
+                    // Slot-yielding array accessor typed bare `T`. The result
+                    // type table below deliberately types `[T].pop/first/last/
+                    // remove` as the element (seed_hirtype_optional_plan.md),
+                    // although the runtime value is a flat-nullable `T?`. Left
+                    // here, `.unwrap()` fell through to dynamic dispatch typed
+                    // ANY: no checked helper in MIR and no scalar unbox, so
+                    // `xs.pop().unwrap()` was wrong on the JIT and nil-bound in
+                    // the Stage-2 LLVM lane. Lower it to the CHECKED unwrap typed
+                    // `T` — the same staging `lower_coalesce` uses for these
+                    // accessors — mirroring the pure-Simple MIR checked unwrap
+                    // (`rt_is_some` + panic). MIR defers the accessor's scalar
+                    // unbox past the helper (`defer_accessor_unbox`).
+                    // `get`/`min`/`max` and dict accessors stay on the staged
+                    // plan: they have no shared typed-unbox site to defer.
+                    // doc/08_tracking/bug/stage2_unwrap_on_array_pop_yields_nil_2026-09-13.md
+                    if let HirExprKind::MethodCall { receiver: collection, method: accessor, args: accessor_args, .. } = &receiver.kind {
+                        let collection_shape = matches!(
+                            self.module.types.get(collection.ty),
+                            Some(HirType::Array { .. })
+                        );
+                        if collection_shape
+                            && receiver.ty != TypeId::ANY
+                            && ((accessor_args.is_empty() && matches!(accessor.as_str(), "pop" | "first" | "last"))
+                                || (accessor_args.len() == 1 && accessor == "remove"))
+                        {
+                            return Ok(Some(HirExpr {
+                                kind: HirExprKind::BuiltinCall {
+                                    name: "rt_unwrap_or_trap".to_string(),
+                                    args: vec![receiver.clone()],
+                                },
+                                ty: receiver.ty,
+                            }));
+                        }
                     }
                 }
                 "unwrap_err" => {
@@ -1723,7 +2426,7 @@ impl Lowerer {
                                     ty: TypeId::I64,
                                 },
                                 HirExpr {
-                                    kind: HirExprKind::Integer(self.enum_variant_discriminant_for_builtin_method("Ok")),
+                                    kind: HirExprKind::Integer(self.enum_variant_discriminant_for_builtin_method(receiver.ty, None, "Ok")),
                                     ty: TypeId::I64,
                                 },
                             ],
@@ -1746,7 +2449,7 @@ impl Lowerer {
                                 },
                                 HirExpr {
                                     kind: HirExprKind::Integer(
-                                        self.enum_variant_discriminant_for_builtin_method("Err"),
+                                        self.enum_variant_discriminant_for_builtin_method(receiver.ty, None, "Err"),
                                     ),
                                     ty: TypeId::I64,
                                 },
@@ -1756,6 +2459,67 @@ impl Lowerer {
                     }));
                 }
                 _ => {}
+            }
+        }
+
+        if method == "map" && hir_args.len() == 1 {
+            let mapped_payload_ty = hir_args.first().map_or(TypeId::ANY, |callback| {
+                if matches!(callback.kind, HirExprKind::Lambda { .. }) {
+                    callback.ty
+                } else {
+                    match self.module.types.get(callback.ty) {
+                        Some(HirType::Function { ret, .. }) => *ret,
+                        _ => TypeId::ANY,
+                    }
+                }
+            });
+            let mapped_result_ty = match self.module.types.get(receiver.ty) {
+                Some(HirType::Pointer { .. }) if self.module.types.optional_inner(receiver.ty).is_some() => {
+                    Some(self.module.types.register_optional(mapped_payload_ty))
+                }
+                Some(HirType::Enum { name, .. }) if name == "Option" => {
+                    Some(self.module.types.register(HirType::Enum {
+                        name: "Option".to_string(),
+                        variants: vec![
+                            ("Some".to_string(), Some(vec![mapped_payload_ty])),
+                            ("None".to_string(), None),
+                        ],
+                        generic_params: vec!["T".to_string()],
+                        is_generic_template: false,
+                        type_bindings: std::collections::HashMap::from([("T".to_string(), mapped_payload_ty)]),
+                    }))
+                }
+                Some(HirType::Enum { name, .. }) if name == "Result" => {
+                    let err_ty = self
+                        .enum_variant_payload_type_for_builtin_method(receiver.ty, "Err")
+                        .unwrap_or(TypeId::ANY);
+                    Some(self.module.types.register(HirType::Enum {
+                        name: "Result".to_string(),
+                        variants: vec![
+                            ("Ok".to_string(), Some(vec![mapped_payload_ty])),
+                            ("Err".to_string(), Some(vec![err_ty])),
+                        ],
+                        generic_params: vec!["T".to_string(), "E".to_string()],
+                        is_generic_template: false,
+                        type_bindings: std::collections::HashMap::from([
+                            ("T".to_string(), mapped_payload_ty),
+                            ("E".to_string(), err_ty),
+                        ]),
+                    }))
+                }
+                _ => None,
+            };
+            if let Some(ty) = mapped_result_ty {
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::MethodCall {
+                        receiver: Box::new(receiver.clone()),
+                        method: method.to_string(),
+                        args: hir_args,
+                        dispatch: DispatchMode::Static,
+                        generic_args: Vec::new(),
+                    },
+                    ty,
+                }));
             }
         }
 
@@ -1769,8 +2533,31 @@ impl Lowerer {
                     method: method.to_string(),
                     args: hir_args,
                     dispatch: DispatchMode::Static,
+                    generic_args: Vec::new(),
                 },
                 ty,
+            }));
+        }
+
+        // A tuple `.len()` is its arity (rt_tuple_len, raw i64). Left untyped it
+        // landed in an `any` slot undecoded and read as nil / a wrong count.
+        // Bug: seed_jit_len_bound_proof_accepts_non_array_receiver_2026-11-27
+        if method == "len"
+            && hir_args.is_empty()
+            && matches!(
+                self.module.types.get(receiver.ty),
+                Some(HirType::Tuple(_) | HirType::LabeledTuple(_))
+            )
+        {
+            return Ok(Some(HirExpr {
+                kind: HirExprKind::MethodCall {
+                    receiver: Box::new(receiver.clone()),
+                    method: method.to_string(),
+                    args: hir_args,
+                    dispatch: DispatchMode::Static,
+                    generic_args: Vec::new(),
+                },
+                ty: TypeId::I64,
             }));
         }
 
@@ -1840,7 +2627,10 @@ impl Lowerer {
                 // their result type declared here or the boxing step at the
                 // print()/call-arg lowering site is skipped, exactly as it was
                 // for `length` and the `is_*` predicates above.
-                "char_count" => Some(TypeId::I64),
+                // `byte_len` maps to the same raw-i64 `rt_string_len` as `len`; with
+                // no declared type its JIT result was printed/compared as a
+                // tagged word (jit_text_byte_len_untagged_int_boxing_2026-11-06).
+                "char_count" | "byte_len" => Some(TypeId::I64),
                 "capitalize" | "swapcase" | "title" | "titlecase" | "chomp" | "trim_start_matches"
                 | "trim_end_matches" | "removeprefix" | "remove_prefix" | "removesuffix" | "remove_suffix"
                 | "squeeze" | "replace_first" | "push_str" | "pad_left" | "pad_start" | "pad_right" | "pad_end"
@@ -1946,8 +2736,54 @@ impl Lowerer {
                 // ANY-typed and already behaved correctly — that working twin
                 // is the template this follows rather than a new invention.
                 // See doc/08_tracking/bug/parse_family_strips_option_jit_native_2026-08-02.md
+                // `to_i8`/`to_i16`/`to_i32` are the SAME string-parse family as
+                // `to_int`/`to_i64` (interpreter_method/string.rs matches
+                // `"to_int" | "to_i64" | "to_i32" | "to_i16" | "to_i8"` in one
+                // arm, and codegen routes the STRING receiver to
+                // `rt_string_to_int` for every width). Omitting them here is
+                // the identical gap class as the `parse_int` comment above:
+                // the call fell through to generic dynamic dispatch typed
+                // `TypeId::ANY`, so MIR print-lowering emitted no BoxInt and
+                // the raw narrowed word reached `rt_println_value`, which
+                // decoded it by bit pattern — `"42".to_i32()` printed the f64
+                // denormal of bit pattern 42, `print("5".to_i32())` printed
+                // `<value:0x5>`, while `+ 1` arithmetic was correct because
+                // the raw value was right; only the tag was missing. The
+                // interpreter half is fixed (8d100a8aa81); this is the JIT
+                // half. Bug row:
+                // jit_to_i32_returns_zero_and_leaks_mistagged_value_2026-08-26.md
                 "to_int" | "to_i64" => Some(TypeId::I64),
-                "parse_int" | "parse_i32" | "parse_i64" => Some(TypeId::ANY),
+                "to_i8" => Some(TypeId::I8),
+                "to_i16" => Some(TypeId::I16),
+                "to_i32" => Some(TypeId::I32),
+                "to_f32" => Some(TypeId::F32),
+                "to_float" | "to_f64" => Some(TypeId::F64),
+                // `parse_*` is `i64?` (pure Simple), not ANY: the runtime
+                // already returns a tagged int or NIL, and typing it as the
+                // flat optional lets interpolation render `Option::Some(v)` /
+                // `Option::None` like the interpreter. Bug:
+                // parse_family_strips_option_jit_native_2026-08-02.md
+                // `register_optional` (NOT raw `register`) is required: only
+                // source-Optional ids land in `optional_type_ids`, and
+                // `TypeRegistry::optional_inner` returns None for a bare
+                // anonymous Pointer -- which made the match-binder's
+                // `subject_is_optional` gate (stmt_lowering.rs) fall through
+                // to bare `rt_enum_payload`, binding the nil sentinel on a
+                // `case Some(n):` over a parse result (measured: 87 bound as
+                // nil/3 on both lanes, corrupting e.g. the pure_sql reopen
+                // validators). See
+                // doc/08_tracking/bug/pure_sql_reopen_checkpointed_file_stack_overflow_2026-08-25.md
+                "parse_int" | "parse_i32" | "parse_i64" => Some(self.module.types.register_optional(TypeId::I64)),
+                // Float twin of the `parse_*` int arm directly above: the alias
+                // tables route the whole family to `rt_string_to_float`, which
+                // already returns the tagged-nullable ABI (a heap-boxed float
+                // on success, `NIL` on failure) -- exactly what a flat `f64?`
+                // slot holds. Typing it `ANY` (the fall-through dynamic table)
+                // made BOTH lanes render a bare `1.5` / `nil` under
+                // interpolation, diverging from the interpreter oracle's
+                // `Option::Some(1.5)` / `Option::None` and from the int
+                // family. Same `register_optional` requirement as the int arm.
+                "parse_float" | "parse_f64" | "parse_f64_safe" => Some(self.module.types.register_optional(TypeId::F64)),
                 _ => None,
             };
 
@@ -1958,6 +2794,7 @@ impl Lowerer {
                         method: method.to_string(),
                         args: hir_args,
                         dispatch: DispatchMode::Static,
+                        generic_args: Vec::new(),
                     },
                     ty,
                 }));
@@ -1971,6 +2808,15 @@ impl Lowerer {
                 "len" | "length" => Some(TypeId::I64),
                 "push" => Some(receiver.ty), // Returns the new array (same type)
                 "clear" => Some(TypeId::VOID),
+                // `[T].reserve(additional)` is the std `Reserve` trait's
+                // capacity hint: unit return, never touches `len`. Without
+                // this entry the call fell through to generic dynamic
+                // dispatch typed ANY and codegen emitted a cross-module
+                // fallback call to "Array.reserve", which no runtime defines
+                // -- every seed-run spec touching `.reserve(...)` died with
+                // "Function 'Array.reserve' not found" (dispatch gap, see
+                // doc/08_tracking/bug/compiler_seed_missing_array_reserve_2026-11-12.md).
+                "reserve" => Some(TypeId::VOID),
                 // `pop` and `remove(index)` both yield the ELEMENT, so both take
                 // the element type. `remove` was MISSING from this table, which
                 // is the same gap class documented for `index_of` and `sum`
@@ -2006,13 +2852,21 @@ impl Lowerer {
                 // BoxInt and picks static dispatch, which codegen already
                 // routes to `rt_index_of`.
                 "index_of" => Some(TypeId::I64),
-                // `arr.sum()` (interpreter_method/collections.rs "sum") only
-                // accumulates Int elements and always returns an Int — same
+                // `arr.sum()` (interpreter_method/collections.rs "sum")
+                // accumulates signed and unsigned ints into an Int — same
                 // "raw i64 needs BoxInt" gap class as `index_of` above. The
                 // MIR lowering (lowering_expr_method.rs, task:
                 // jit_method_dispatch_audit_2026-07-29) unboxes
                 // `rt_array_sum`'s tag-boxed result to match this type.
-                "sum" => Some(TypeId::I64),
+                // `[f64]`/`[f32]`: `rt_array_sum` returns a boxed FLOAT, so the
+                // result is F64 (an I64 type read the box handle as an int).
+                // doc/08_tracking/bug/compiled_float_array_sum_reads_boxed_float_as_int_2026-11-24.md
+                "sum" => match self.module.types.get(receiver.ty) {
+                    Some(HirType::Array { element, .. }) if matches!(*element, TypeId::F32 | TypeId::F64) => {
+                        Some(TypeId::F64)
+                    }
+                    _ => Some(TypeId::I64),
+                },
                 "join" => Some(TypeId::STRING),
                 "slice" | "filter" => Some(receiver.ty),
                 "map" => hir_args.first().map(|callback| {
@@ -2050,7 +2904,12 @@ impl Lowerer {
                 // bound `v = 80` (10 << 3) instead of `10`.
                 //
                 // See doc/08_tracking/bug/array_at_returns_nil_for_every_index_2026-08-01.md.
-                "at" => {
+                //
+                // `get` joins `at` here (owner decision 2026-11-09,
+                // array_get_contract_drift_crypto_2026-10-18): `a.get(i)` is `T?`
+                // on every lane, `a[i]` the direct form. Typing `get` as bare
+                // `T` is what let the JIT bind the raw element against `Some(v)`.
+                "at" | "get" => {
                     let element_ty = match self.module.types.get(receiver.ty) {
                         Some(HirType::Array { element, .. }) => Some(*element),
                         _ => None,
@@ -2064,7 +2923,7 @@ impl Lowerer {
                         None => Some(TypeId::ANY),
                     }
                 }
-                "first" | "last" | "get" | "max" | "min" => {
+                "first" | "last" | "max" | "min" => {
                     // Returns element type (or Option<element>)
                     if let Some(HirType::Array { element, .. }) = self.module.types.get(receiver.ty) {
                         Some(*element)
@@ -2077,7 +2936,11 @@ impl Lowerer {
                 // all return a NEW array of the same element type as the
                 // receiver — same shape as `take`/`skip`/`drop`/`insert`
                 // above (see the MIR expansion in lowering_expr_method.rs).
-                "copy" | "clone" | "unique" | "sorted" | "reversed" => Some(receiver.ty),
+                // `sort` also returns a NEW sorted array (interpreter_method
+                // collections.rs). Untyped, a chained `xs.sort().join(",")` fell
+                // to the by-name `.join` suffix search and was typed as an
+                // unrelated user method returning `text?`.
+                "copy" | "clone" | "unique" | "sorted" | "sort" | "reversed" => Some(receiver.ty),
                 // `sort_desc` (lane BATCH3) is the interpreter's non-mutating
                 // "return a NEW descending-sorted array" sibling — same
                 // shape as `sorted`/`reversed` just above. The MIR lowering
@@ -2117,6 +2980,7 @@ impl Lowerer {
                         method: method.to_string(),
                         args: hir_args,
                         dispatch: DispatchMode::Static,
+                        generic_args: Vec::new(),
                     },
                     ty,
                 }));
@@ -2141,12 +3005,12 @@ impl Lowerer {
 
         if is_any {
             let result_ty = match method {
-                // Dict/Map operations. For a typed Dict<K,V>, `get`/`remove`
-                // return the bare value V (the erased builtin dict returns the
-                // bare stored word — NOT an Option; see the bug doc iteration
-                // 12). `keys`/`values` return typed arrays.
+                // Dict/Map operations. For a typed Dict<K,V>, `remove` returns
+                // the bare value V (the erased builtin dict returns the bare
+                // stored word); `get` is `V?` (arm below). `keys`/`values`
+                // return typed arrays.
                 // `get_or` returns the bare value V (or the caller-supplied
-                // default, itself V-typed) — same shape as `get`/`remove`.
+                // default, itself V-typed) — same shape as `remove`.
                 // Without this arm the whole `.get_or(...)` expr fell through
                 // to the untyped-ANY default below while the MIR lowering
                 // (lowering_expr_method.rs, task: dict_get_or_jit_not_found)
@@ -2155,9 +3019,21 @@ impl Lowerer {
                 // RuntimeValue and misdecoded it (nil / <invalid-heap> /
                 // garbage float) under the JIT — the exact ANY/unboxed-V
                 // mismatch class documented just above for `index_of`.
+                // `get` on a typed Dict<K, V> is `V?` (policy: Dict.get
+                // returns Option); MIR builds it (lower_dict_get_option). A
+                // `u64` value stays bare V: `u64? ?? d` is not decoded on the
+                // JIT yet (optional_boxint_scalar_inner excludes u64), so
+                // retyping it would regress `d.get(k) ?? 0` arithmetic.
+                "get" if dict_kv.is_some_and(|(_, v)| v != TypeId::U64) && hir_args.len() == 1 => {
+                    Some(self.module.types.register_optional(dict_kv.map(|(_, v)| v).unwrap()))
+                }
                 "get" | "remove" | "get_or" => Some(dict_kv.map(|(_, v)| v).unwrap_or(TypeId::ANY)),
                 "insert" | "set" | "put" | "clear" => Some(TypeId::VOID),
-                "contains_key" | "has" | "contains" => Some(TypeId::BOOL),
+                // `has_key` is the same raw-bool rt_contains route (MIR
+                // lowering_expr_method.rs matches all four). Left ANY, an `and`
+                // operand was re-decoded through rt_value_truthy as a tagged word
+                // and the raw 1 read as false.
+                "contains_key" | "has_key" | "has" | "contains" => Some(TypeId::BOOL),
                 // Same raw-result class on an untyped receiver: `any`/`all`
                 // return a raw 0/1 and `index_of` (rt_index_of, array or text)
                 // a raw i64 position, so they need the BOOL / BoxInt
@@ -2181,6 +3057,15 @@ impl Lowerer {
                 "starts_with" | "ends_with" => Some(TypeId::BOOL),
                 "rfind" | "last_index_of" => Some(TypeId::I64),
                 "find" if hir_args.len() == 1 && !self.is_callable_arg(&hir_args[0]) => Some(TypeId::I64),
+                // `byte_len`/`char_count` exist only on text and return a raw
+                // i64 (`rt_string_len` / `rt_string_char_count`). #7174 added
+                // them to the STRING-receiver table above but not here, so on
+                // an erased receiver `val n = value.byte_len()` stayed ANY and
+                // the raw word was misdecoded (20 -> `<value:0x14>`, 1 -> nil,
+                // `a - b` -> a float), making `while start <= a - b` never
+                // terminate. Bug row:
+                // seed_untyped_byte_len_binding_raw_i64_misdecoded_2026_11_09.
+                "byte_len" | "char_count" if hir_args.is_empty() => Some(TypeId::I64),
                 // "length" synonym — see the string-methods comment above.
                 "len" | "length" | "size" => Some(TypeId::I64),
                 "keys" => Some(match dict_kv {
@@ -2211,6 +3096,7 @@ impl Lowerer {
                 "to_u16" => Some(TypeId::U16),
                 "to_u32" => Some(TypeId::U32),
                 "to_u64" => Some(TypeId::U64),
+                "to_f32" => Some(TypeId::F32),
                 "to_float" | "to_f64" => Some(TypeId::F64),
                 "parse_f64" | "parse_float" | "parse_f64_safe" => Some(TypeId::ANY),
                 "to_bool" => Some(TypeId::BOOL),
@@ -2238,6 +3124,7 @@ impl Lowerer {
                         method: method.to_string(),
                         args: hir_args,
                         dispatch: DispatchMode::Dynamic, // Dynamic dispatch for Any types
+                        generic_args: Vec::new(),
                     },
                     ty,
                 }));
@@ -2258,7 +3145,10 @@ impl Lowerer {
     /// - Other static methods are not yet supported in native compilation
     fn lower_path(&mut self, segments: &[String], ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
         if segments.len() == 2 {
-            let class_name = &segments[0];
+            // Same-named flattened type: name the declaration the current
+            // owner sees (flatten_struct_owner.rs).
+            let scoped_class_name = self.module.types.scoped_name(&segments[0]).to_string();
+            let class_name = &scoped_class_name;
             let method_name = &segments[1];
 
             // Special case: ClassName.new() should be ClassName()

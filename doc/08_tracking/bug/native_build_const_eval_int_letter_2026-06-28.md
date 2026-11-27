@@ -1,4 +1,22 @@
 # native-build const-eval: hex-letter parse (FIXED) + residual typed/module-val gaps (OPEN)
+## Verification addendum 2026-11-25 (P3 ledger lane, Windows x86_64)
+
+- **measured** (tracked `bin/simple.exe`, `SIMPLE_LIB=src ... run --mode=interpreter`):
+  Part 1 stays fixed — a live probe prints
+  `0xca=202 0xff=255 0xDEAD=57005 0xAbCdEf=11259375 0x10=16 0b1010=10 0o17=15`
+  and a module-level typed `val MAGIC: u64 = 0xc5e77b6b397e7b43`
+  const-evaluates (`MAGIC=14260502445548272451`). The regression guard
+  `test/01_unit/compiler/hex_literal_const_eval_spec.spl` still exists
+  (harness re-run host-blocked by the tracked-seed/@representation_boundary
+  skew, same as the rest of this lane).
+- **not verifiable here**: the Part 2 acceptance (native-build emitting a
+  freestanding ELF for `simplebox_main.spl` at `--target x86_64-unknown-none`
+  linked against the SimpleOS sysroot, then `simplebox seq` executing
+  `libc_strtoul`) is a Linux cross-compile lane that does not exist on this
+  Windows host; no claim is made about it beyond the 2026-09-13 triage's.
+- The 2026-09-16 "Closed" header stands per that normalization pass, with
+  this note recording exactly what was and was not re-verified.
+
 ## Closed 2026-09-16 — ...-f digit fails const-eval — **FIXED 2026-06-28** `native-build` aborted with `error: seman
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is

@@ -106,3 +106,29 @@ spec should be rewritten to the boolean-flag model is a design decision.
   exercises `proton_session_request_new`/`proton_session_request_gate`,
   which DO match current source, and passes).
 
+
+## Verification note 2026-11-25 (p3-bar lane, worktree wt-p3-bar) — half stale, half still live
+
+Re-ran both named specs against the release/1.0.0 tip (`fcd95d41d60`) with the
+tracked self-hosted binary (`SIMPLE_LIB=src bin/simple.exe test <spec>
+--mode=interpreter`).
+
+**Section 1 (wine_hello_fixture) — RESOLVED, stale.** The source grew exactly
+the API the spec was written against: `wine_hello_exe_probe(data, gates)` and
+`wine_hello_exe_can_execute(data, gates)` exist
+(`src/lib/common/wine_hello_exe.spl:46,123`), `WineHelloExeProbeResult` now
+carries `stdout_handle`/`bytes_written`/`exit_code`
+(`wine_hello_exe.spl:33-39`), and `wine_hello_fixture_verified_gates()` exists
+(`src/lib/common/wine_hello_fixture.spl:108`). Spec run:
+`test/01_unit/lib/common/wine_hello_fixture_spec.spl` -> **1/1 passed**.
+
+**Section 2 (proton_session) — still LIVE, owner decision still required.**
+`proton_non_wine_runtime_evidence_new` still does not exist anywhere in
+`src/`; `ProtonNonWineRuntimeEvidence` remains the boolean-flag model with
+1-arg `new`/`all_verified`
+(`src/lib/common/proton_runtime_subsystems.spl:8`). Spec run:
+`test/01_unit/lib/common/proton_session_spec.spl` -> **2/5 passed, 3 failed**,
+each failure `semantic: function proton_non_wine_runtime_evidence_new not
+found` — the doc's diagnosis is unchanged. Choosing between redesigning the
+evidence model to carry detail strings and rewriting the spec to the boolean
+model remains a product/design decision, not a triage edit; left open.

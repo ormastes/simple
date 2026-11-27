@@ -1,8 +1,17 @@
 # gc-warning: family-mirror re-export shims reported as layering violations
 
 - Filed: 2026-08-31
-- Status: PARTIALLY FIXED (pure-Simple rule fixed; seed emitter unfixed — see "Seed half")
+- Status: FIXED (2026-11-08)
 - Component: `35.semantics/gc_boundary_check.spl`, seed `interpreter_module/{module_loader,path_resolution}.rs`
+
+Seed-half resolution: `path_resolution.rs` now normalizes native and mixed
+Windows separators before own-family matching. `module_loader.rs` exempts
+structural family-mirror facades only for `higher_layer_runtime_family`;
+non-mirror async-to-sync, GC, and no-alloc violations remain enforced. Focused
+Rust regressions cover all four cases. `cargo check -p simple-compiler --lib`
+passes. The focused test target remains unexecuted because unrelated existing
+test-code errors (`E0433`, `E0283`, `E0624`) stop `cargo test`; no focused-test
+pass is claimed.
 
 ## Symptom (measured)
 
@@ -83,33 +92,68 @@ no-alloc boundary still hard-fails, because those rules constrain what the
 forwarded-to code may *do*, not where it *sits*. Pinned by two new sdoctests on
 `check_gc_boundary_imports` (mirror exempt; non-mirror async->sync still fires).
 
-## Seed half — NOT fixed, patches recorded
+## Seed half — implemented 2026-11-08
 
-The 30 warnings observed above are emitted by the **Rust seed**
-(`module_loader.rs:197`), whose family table is a hardcoded enum with no config
-read, so there is no data-driven exemption. This session was barred from running
-cargo, and landing unbuilt seed edits is what `check-seed-builds-push.shs`
-exists to stop. Recorded rather than applied:
+1. `path_resolution.rs` `preferred_stdlib_variant` normalizes separators only
+   on Windows, so mixed-separator own-family matching works without changing
+   POSIX backslash filename-byte semantics. The POSIX regression is retained.
+2. `module_loader.rs` `gc_boundary_warning_message` ports the structural
+   `is_family_mirror_facade` comparison with the same platform-aware separator
+   handling. The exemption applies only to `higher_layer_runtime_family`;
+   genuine async-to-sync, GC, and no-alloc violations remain active.
 
-1. `path_resolution.rs` `preferred_stdlib_variant` — normalize separators before
-   matching, so the own-family preference works on Windows:
+Focused Rust regressions cover mirror exemption, non-mirror warnings,
+resource-boundary preservation, mixed Windows separators, and POSIX filename
+bytes. `cargo check -p simple-compiler --lib` passes. The focused test target
+is blocked by unrelated existing test-code errors (`E0433`, `E0283`, `E0624`),
+so these new tests are not claimed as executed.
 
-        let base = base_dir.to_string_lossy().replace('\', "/");
-
-   (markers stay as-is). This removes the round trip at its source and is the
-   higher-value half — it also fixes silently resolving to the wrong family.
-
-2. `module_loader.rs` `gc_boundary_warning_message` — port
-   `is_family_mirror_facade`: after computing both families, return `None` when
-   the two paths are equal with their family component stripped and the reason
-   is `higher_layer_runtime_family`.
-
-Until a seed is rebuilt, the observed count stays 30.
-
-## Verification
+## Historical pure-Simple verification
 
 | | before | after |
 |---|---|---|
 | `[gc-warning]` (seed emitter, frozen) | 30 | 30 |
 | `[use-warning]` manifest symbol loss | 2 | 0 |
 | spec result | 3 total, 3 passed, 0 failed | 3 total, 3 passed, 0 failed |
+
+## 2026-11-11 status — P3 rt2 lane triage (worktree simple-p3-rt2-20261111)
+
+**Verdict: FIXED — VERIFIED on refreshed seed (verification no longer
+pending).** This run is the seed-side verification the 2026-11-08 entry left
+pending.
+
+Repro on refreshed seed (build-commit 0791c2b7f4a7, 2026-11-11 build):
+`SIMPLE_LIB=src bin/simple.exe test
+test/01_unit/lib/common/crypto/bytes_to_hex_guard_spec.spl
+--mode=interpreter --no-cache` → exit 0, **3 total, 3 passed, 0 failed**.
+
+Warning analysis (full log captured):
+
+- **0 of 49 `[gc-warning]` lines name a `test_runner` module.** All 28
+  family-mirror facade false positives from the 2026-08-31 measurement are
+  eliminated — the exemption works on the refreshed seed.
+- The 49 lines name only 12 distinct modules — `nogc_sync_mut.io.{dir_ops,
+  external_text_io,file_ops,process_ops}`, `io_runtime`,
+  `sffi.{diag,env,fs,system_env_core}`, `shell.shebang_script`,
+  `simd_crypto`, `spec` — each verified to be a REAL implementation
+  (41–3289 source lines, no one-line `export use` re-export shim). These are
+  genuine async→sync higher-layer crossings, the class this doc deliberately
+  leaves firing ("left firing on purpose"); they belong to the broader
+  violation backlog, not to this bug. `nogc_sync_mut.spec` is one of the two
+  genuine warnings named in the 2026-08-31 body; the genuine set has simply
+  grown with the lib since then.
+
+Fix lineage cited:
+
+- Pure-Simple half: `ebcef7d2e368` (2026-08-31, `fix(semantics): exempt
+  family-mirror re-export shims from the layer-rank rule`) — `is_family_
+  mirror_facade` in `35.semantics/gc_boundary_check.spl` + sdoctests +
+  `test_manifest.spl` export-surface repair.
+- Seed half: `0ee4e247c0dd` (2026-11-08, `fix(runtime): align heap ABIs and
+  mirror facades`) — `path_resolution.rs` separator normalization +
+  `module_loader.rs` structural mirror exemption; confirmed an ancestor of
+  the refreshed seed's build-commit `0791c2b7f4a7`.
+
+Also per the 2026-11-08 entry: focused Rust regressions were written but not
+executed (unrelated E0433/E0283/E0624 test-code errors); that gap stands —
+this verification is the spec-level repro only. No change made in this lane.

@@ -1,0 +1,110 @@
+# AUTHORED_NOT_RUN. Mandatory genuine Windows service fixture; no skips/mocks.
+use std.spec.{describe, it, expect, step, fail}
+use std.sosix.host.sosix_file_read
+use std.sosix.time.{sosix_time_now_monotonic_ms, sosix_sleep_ms}
+use std.nogc_sync_mut.io.host_service_ready_reader_v1.*
+use std.nogc_sync_mut.io.host_service_auth_exchange_v6.*
+use std.common.contracts.orchestration.host_service_operation_v6.HostServiceOperationRequestV6
+use std.common.contracts.orchestration.host_service_operation_reply_v6.HostServiceOperationReplyV6
+use std.common.contracts.orchestration.host_controller_status_v3.host_controller_status_decode_v3
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+# Actual unresolved native owners survive any assertion failure in this process.
+# This is not persistent recovery after process exit and is not a fake owner.
+var _route_reader_v6: Option<HostServiceReadyReaderV1> = nil
+var _route_exchange_v6: Option<HostServiceAuthExchangeV6> = nil
+
+fn route_fixture_v6() -> Dict<text, text>:
+    val source = sosix_file_read("C:\\SimpleQualification\\host-auth-route-v6.sdn")
+    if source == "": fail("missing genuine configured host-auth-route-v6 fixture")
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 32768,
+        max_depth: 2, max_nodes: 24, max_rows: 0, max_cells: 0, max_columns: 6))
+    if parsed.is_err(): fail("invalid genuine route fixture SDN")
+    val fields = match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: fail("route fixture must be an object")
+    val keys = ["setupPath", "setupDigest", "hostDeploymentRoot", "hostAuthorityDigest",
+        "expectedScopeDigest", "expectedEnrollmentDigest"]
+    if fields.len() != keys.len(): fail("route fixture must contain exactly six public fields")
+    var result: Dict<text, text> = {}
+    for key in keys:
+        if not fields.contains_key(key): fail("missing public route fixture field")
+        match fields[key]:
+            case SdnValue.String(value): result[key] = value
+            case _: fail("route fixture field must be text")
+    result
+
+fn route_cleanup_v6() -> text:
+    var error = ""
+    var exchange_steps = 0
+    while _route_exchange_v6.is_some() and error == "" and exchange_steps < 64:
+        val closed = host_service_auth_exchange_close_v6(_route_exchange_v6.unwrap())
+        _route_exchange_v6 = closed.owner
+        exchange_steps = exchange_steps + 1
+        if closed.error != "": error = "actual exchange cleanup unconfirmed"
+        if closed.owner.is_none() and not closed.completed: error = "actual exchange close consumed but unconfirmed"
+    if _route_exchange_v6.is_some() and error == "": error = "actual exchange cleanup budget exhausted"
+    var reader_steps = 0
+    while _route_exchange_v6.is_none() and _route_reader_v6.is_some() and error == "" and reader_steps < 64:
+        val closed = host_service_ready_reader_close_v1(_route_reader_v6.unwrap())
+        _route_reader_v6 = closed.owner
+        reader_steps = reader_steps + 1
+        if closed.error != "": error = "actual reader cleanup unconfirmed"
+        if closed.owner.is_none() and not closed.completed: error = "actual reader close consumed but unconfirmed"
+    if _route_reader_v6.is_some() and error == "": error = "actual reader cleanup budget exhausted"
+    error
+
+describe "Actual configured V6 Host route":
+    it "authenticates a real current Host status and closes the exact client owners":
+        step("Open the protected setup and selected immutable ready record from the installed fixture")
+        if _route_reader_v6.is_some() or _route_exchange_v6.is_some(): fail("prior actual fixture cleanup remains retained")
+        val fixture = route_fixture_v6()
+        val opened = host_service_ready_reader_open_v1(fixture["setupPath"], fixture["setupDigest"],
+            fixture["hostDeploymentRoot"], fixture["hostAuthorityDigest"])
+        _route_reader_v6 = opened.owner
+        var failure = ""
+        if not opened.ready or opened.owner.is_none() or opened.error != "": failure = "genuine protected reader did not become ready"
+        var response: Option<HostServiceOperationReplyV6> = nil
+        if failure == "":
+            val incarnation = host_service_ready_reader_incarnation_v1(_route_reader_v6.unwrap())
+            if incarnation.is_err(): failure = "actual selected incarnation unavailable"
+            else:
+                step("Exchange a fresh challenge and exact canonical status request with the real listener")
+                val request = HostServiceOperationRequestV6("status", incarnation.unwrap(), "", "", "", "")
+                var turn = host_service_auth_exchange_begin_v6(_route_reader_v6.unwrap(), request, 2000)
+                _route_exchange_v6 = turn.owner
+                val started = sosix_time_now_monotonic_ms()
+                var steps = 0
+                while (not turn.completed and turn.owner.is_some() and turn.error == "" and
+                        sosix_time_now_monotonic_ms() - started <= 2100 and steps < 2100):
+                    turn = host_service_auth_exchange_step_v6(turn.owner.unwrap())
+                    _route_exchange_v6 = turn.owner
+                    steps = steps + 1
+                    if not turn.completed: sosix_sleep_ms(1)
+                if not turn.completed or turn.error != "" or turn.reply.is_none() or turn.owner.is_none():
+                    failure = "actual authenticated response unavailable or uncertain"
+                else:
+                    val taken = host_service_auth_exchange_take_v6(turn.owner.unwrap(), turn.reply.unwrap())
+                    if taken.is_err(): failure = "actual one-use response consumption refused"
+                    else: response = Some(taken.unwrap())
+        step("Consume socket cleanup before closing the retained protected credential reader")
+        val cleanup_error = route_cleanup_v6()
+        if failure == "" and cleanup_error != "": failure = cleanup_error
+        # Check only after cleanup attempts. On native failure, the exact owner
+        # remains in the fixture carrier above; no successful close is invented.
+        expect(failure).to_equal("")
+        expect(_route_exchange_v6.is_none()).to_equal(true)
+        expect(_route_reader_v6.is_none()).to_equal(true)
+        expect(response.is_some()).to_equal(true)
+        val reply = response.unwrap()
+        expect(reply.action).to_equal("status")
+        expect(reply.pending).to_equal(false)
+        expect(reply.exit_code).to_equal(0)
+        expect(reply.error).to_equal("")
+        val status = host_controller_status_decode_v3(reply.payload).unwrap()
+        expect(status.ready).to_equal(true)
+        expect(container_scope_fence_id_v2(status.scope).unwrap()).to_equal(fixture["expectedScopeDigest"])
+        expect(status.enrollment_digest).to_equal(fixture["expectedEnrollmentDigest"])

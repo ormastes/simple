@@ -1,0 +1,53 @@
+# `use unit.*` scope is per FILE in the interpreter, not per run: a unit suffix
+# imported by file A is not in scope in file B of the same run.
+# Runtime: src/compiler/10.frontend/core/unit_scope.spl,
+# src/compiler/10.frontend/core/interpreter/{eval_decls,eval_units}.spl.
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_write}
+use compiler.core.unit_scope.{unit_library_set_base, unit_scope_reset, unit_scope_record_use_in, unit_suffix_scope_error_in, unit_scope_record_use, unit_suffix_scope_error}
+
+val FIXTURE_ROOT: text = "build/tmp/unit_scope_per_file_spec/unit"
+
+fn setup_fixture():
+    file_write(FIXTURE_ROOT + "/simple-lang/pfspeed/pfkmph.spl", "# fixture\n")
+    file_write(FIXTURE_ROOT + "/simple-lang/pfspeed/__init__.spl", "# fixture\n")
+    unit_library_set_base(FIXTURE_ROOT)
+
+describe "unit scope per file":
+    it "scopes an import to the file that wrote it":
+        setup_fixture()
+        unit_scope_reset()
+        unit_scope_record_use_in("a.spl", "unit.pfspeed", ["pfkmph"])
+        val in_a = unit_suffix_scope_error_in("a.spl", "pfkmph")
+        val in_b = unit_suffix_scope_error_in("b.spl", "pfkmph")
+        unit_library_set_base("")
+        expect(in_a).to_equal("")
+        expect(in_b).to_contain("unit suffix 'pfkmph' is not in scope")
+
+    it "lets two files import the same suffix independently":
+        setup_fixture()
+        unit_scope_reset()
+        unit_scope_record_use_in("a.spl", "unit.pfspeed", ["pfkmph"])
+        unit_scope_record_use_in("b.spl", "unit.pfspeed", ["pfkmph"])
+        val in_a = unit_suffix_scope_error_in("a.spl", "pfkmph")
+        val in_b = unit_suffix_scope_error_in("b.spl", "pfkmph")
+        unit_library_set_base("")
+        expect(in_a).to_equal("")
+        expect(in_b).to_equal("")
+
+    it "keeps the file-less API working for the compiled path":
+        setup_fixture()
+        unit_scope_reset()
+        unit_scope_record_use("unit.pfspeed", ["pfkmph"])
+        val plain = unit_suffix_scope_error("pfkmph")
+        val other_file = unit_suffix_scope_error_in("a.spl", "pfkmph")
+        unit_library_set_base("")
+        expect(plain).to_equal("")
+        expect(other_file).to_contain("not in scope")
+
+    it "never applies import scope to a file of the unit library itself":
+        setup_fixture()
+        unit_scope_reset()
+        val lib_file = unit_suffix_scope_error_in("src/unit/simple-lang/pfspeed/c_light.spl", "pfkmph")
+        unit_library_set_base("")
+        expect(lib_file).to_equal("")

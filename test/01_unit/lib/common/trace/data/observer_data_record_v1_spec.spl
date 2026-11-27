@@ -1,0 +1,134 @@
+# @cover src/lib/common/trace/data/data_observation_contracts.spl 80%
+"""
+## Purpose and audience
+Data observations (field reads and writes, collection operations, node
+lifecycle) travel as their own versioned record family next to the frozen
+96-byte TraceEventV1. Readers are trace-provider and profile-tooling authors
+who must decode these records without confusing them with function edges and
+without reading an unmeasured counter as zero.
+Plan: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md
+(W0/W5, sections 10.3-10.5). Category: Infrastructure.
+## Operator workflow
+bin/simple test test/01_unit/lib/common/trace/data/observer_data_record_v1_spec.spl
+## Compatibility and limitations
+TraceEventKindV1 is frozen and gains no data variant: the data record is a
+versioned extension with its own frame. Pure codec; no provider or file I/O.
+## Verification guidance and troubleshooting
+A RED on the frame scenario means a data record could be mistaken for a V1
+event or the reverse; never resolve it by reusing a V1 event ordinal.
+"""
+# Lifecycle: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md ;
+# doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
+# @manual_section: Trace data record kind
+
+use std.spec.*
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_event_codec_v1.{trace_event_decode_v1}
+use std.common.trace.data.data_observation_contracts.*
+
+fn field_read() -> DataObservationV1:
+    DataObservationV1(kind: DataObservationKindV1.FieldRead, generation: 7, module_instance: 3,
+        site_id: 11, schema_index: 2, attr_ordinal: 4, op: DataCollectionOpV1.None,
+        count: data_metric_measured_v1(0), aux: data_metric_not_measured_v1(),
+        representation_epoch: 1)
+
+fn lookup() -> DataObservationV1:
+    DataObservationV1(kind: DataObservationKindV1.CollectionOp, generation: 7, module_instance: 3,
+        site_id: 12, schema_index: 0, attr_ordinal: 0, op: DataCollectionOpV1.Lookup,
+        count: data_metric_measured_v1(40), aux: data_metric_dropped_v1(),
+        representation_epoch: 2)
+
+# Fresh buffer per negative case so one corruption can never mask another.
+fn field_read_bytes_with(index: i64, value: u8) -> [u8]:
+    var bytes = data_observation_encode_v1(field_read()).unwrap()
+    bytes[index] = value
+    bytes
+
+describe "Trace data record kind":
+    it "encodes a field observation as its own record kind, never inside payload0..2":
+        # @req REQ-XR-02
+        step("Encode a field-read observation")
+        val bytes = data_observation_encode_v1(field_read()).unwrap()
+        step("Try to read the same bytes as a V1 trace event, then as a data record")
+        val as_v1 = trace_event_decode_v1(bytes)
+        val back = data_observation_decode_v1(bytes).unwrap()
+        # @capture(exec): encoded frame and decoded record
+        step("Verify the record has its own 64-byte frame that V1 decoding refuses")
+        expect(bytes.len()).to_equal(64)  # oracle: DATA_OBSERVATION_RECORD_BYTES_V1
+        expect(as_v1.is_err()).to_equal(true)
+        expect(bytes[0] == 1 and bytes[1] == 0).to_equal(false)
+        expect(bytes[4]).to_equal(1)  # oracle: DATA_RECORD_TAG_OBSERVATION_V1
+        expect(bytes[6]).to_equal(1)  # oracle: DATA_OBSERVATION_SCHEMA_V1
+        expect(back.site_id).to_equal(11)  # oracle: field_read() site
+        expect(back.attr_ordinal).to_equal(4)  # oracle: field_read() attribute
+        expect(back.schema_index).to_equal(2)  # oracle: field_read() schema index
+        val op = data_observation_decode_v1(data_observation_encode_v1(lookup()).unwrap()).unwrap()
+        expect(data_collection_op_code_v1(op.op)).to_equal(1)  # oracle: Lookup code
+        expect(data_metric_value_v1(op.count).unwrap()).to_equal(40)  # oracle: lookup() count
+
+    it "keeps measured zero distinct from not measured, unsupported, dropped and overflowed":
+        # @req REQ-XR-06
+        step("Build one metric in each state")
+        val zero = data_metric_measured_v1(0)
+        val decoded = data_observation_decode_v1(data_observation_encode_v1(field_read()).unwrap()).unwrap()
+        # @capture(exec): metric reads
+        step("Verify only the measured state yields a count")
+        expect(data_metric_value_v1(zero).unwrap()).to_equal(0)  # oracle: measured zero
+        expect(data_metric_value_v1(decoded.count).unwrap()).to_equal(0)  # oracle: field_read() measured zero
+        expect(data_metric_value_v1(decoded.aux).is_err()).to_equal(true)
+        expect(data_metric_value_v1(data_metric_not_measured_v1()).is_err()).to_equal(true)
+        expect(data_metric_value_v1(data_metric_unsupported_v1()).is_err()).to_equal(true)
+        expect(data_metric_value_v1(data_metric_dropped_v1()).is_err()).to_equal(true)
+        expect(data_metric_value_v1(data_metric_overflowed_v1()).is_err()).to_equal(true)
+
+    it "rejects corrupted frames, unknown kinds, hidden values and invalid identities":
+        # @req REQ-XR-02
+        step("Corrupt one byte at a time in a fresh copy of a valid record")
+        # @capture(exec): decode outcomes
+        step("Verify every corruption is refused and the untouched record still decodes")
+        expect(data_observation_decode_v1(field_read_bytes_with(0, 1)).is_err()).to_equal(true)
+        expect(data_observation_decode_v1(field_read_bytes_with(6, 2)).is_err()).to_equal(true)
+        expect(data_observation_decode_v1(field_read_bytes_with(42, 1)).is_err()).to_equal(true)
+        expect(data_observation_decode_v1(field_read_bytes_with(36, 99)).is_err()).to_equal(true)
+        expect(data_observation_decode_v1(field_read_bytes_with(56, 5)).is_err()).to_equal(true)
+        expect(data_observation_decode_v1(field_read_bytes_with(24, 0)).is_err()).to_equal(true)
+        expect(data_observation_decode_v1([]).is_err()).to_equal(true)
+        expect(data_observation_decode_v1(field_read_bytes_with(63, 0)).is_ok()).to_equal(true)
+        step("Try to encode observations whose identity does not fit their kind")
+        var no_attr = field_read()
+        no_attr.attr_ordinal = 0
+        var field_with_op = field_read()
+        field_with_op.op = DataCollectionOpV1.Insert
+        var op_without_op = lookup()
+        op_without_op.op = DataCollectionOpV1.None
+        var hidden = lookup()
+        hidden.aux = DataMetricV1(state: DataMetricStateV1.Dropped, value: 3)
+        expect(data_observation_encode_v1(no_attr).is_err()).to_equal(true)
+        expect(data_observation_encode_v1(field_with_op).is_err()).to_equal(true)
+        expect(data_observation_encode_v1(op_without_op).is_err()).to_equal(true)
+        expect(data_observation_encode_v1(hidden).is_err()).to_equal(true)
+
+    it "frames optional typed records so readers skip them and reject unknown tags":
+        # @req REQ-XR-02
+        step("Peek at a data record, a reserved optional record, and unknown or malformed frames")
+        val frame = data_record_frame_peek_v1(data_observation_encode_v1(field_read()).unwrap()).unwrap()
+        var summary: [u8] = [83, 68, 24, 0, 0, 1, 1, 0]
+        for i in 0..16:
+            summary.push(0)
+        val opt = data_record_frame_peek_v1(summary).unwrap()
+        val unknown: [u8] = [83, 68, 8, 0, 9, 0, 1, 0]
+        val short: [u8] = [83, 68, 200, 0, 1, 0, 1, 0]
+        var wrong_size: [u8] = [83, 68, 16, 0, 1, 0, 1, 0]
+        for i in 0..8:
+            wrong_size.push(0)
+        val v1_event: [u8] = [1, 0, 96, 0, 1, 0, 0, 0]
+        # @capture(exec): frame outcomes
+        step("Verify known and optional records frame, and everything else is refused")
+        expect(frame.known).to_equal(true)
+        expect(frame.size).to_equal(64)  # oracle: data observation record size
+        expect(opt.tag).to_equal(256)  # oracle: first reserved optional tag
+        expect(opt.known).to_equal(false)
+        expect(data_record_frame_peek_v1(unknown).is_err()).to_equal(true)
+        expect(data_record_frame_peek_v1(short).is_err()).to_equal(true)
+        expect(data_record_frame_peek_v1(wrong_size).is_err()).to_equal(true)
+        expect(data_record_frame_peek_v1(v1_event).is_err()).to_equal(true)

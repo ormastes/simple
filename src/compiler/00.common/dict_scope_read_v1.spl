@@ -1,0 +1,82 @@
+# Borrowed scope-binding view. Dict fields/arguments keep the canonical typed
+# dictionary ABI; no pointer cast, Any transport, or keys() array is involved.
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
+
+@unsafe(reason: "scope reader bounded registry-probe cost observation", capabilities: [ffi])
+extern fn rt_dict_scope_read_bound_v1() -> i64
+@unsafe(reason: "scope dictionary registered owner scalar read with probe fuel", capabilities: [ffi])
+extern fn rt_dict_scope_read_owner_v1(symbols: Dict<text, i64>, fuel: i64) -> i64
+@unsafe(reason: "scope dictionary owner-validated mutation epoch with probe fuel", capabilities: [ffi])
+extern fn rt_dict_scope_read_epoch_v1(symbols: Dict<text, i64>, owner: i64, fuel: i64) -> i64
+@unsafe(reason: "scope dictionary owner/epoch validated metadata with probe fuel", capabilities: [ffi])
+extern fn rt_dict_scope_read_meta_v1(symbols: Dict<text, i64>, owner: i64, epoch: i64, field: i64, fuel: i64) -> i64
+@unsafe(reason: "scope dictionary owner/epoch validated scalar slot with probe fuel", capabilities: [ffi])
+extern fn rt_dict_scope_read_slot_v1(symbols: Dict<text, i64>, owner: i64, epoch: i64, slot: i64, field: i64, byte_index: i64, fuel: i64) -> i64
+
+enum DictScopeReadErrorV1:
+    Resource
+    Unavailable
+    Stale
+
+fn dict_scope_read_fuel_v1(account: MirLoopResourceAccountV1) -> Result<i64, DictScopeReadErrorV1>:
+    match account.reserve(1):
+        case Err(_): return Err(DictScopeReadErrorV1.Resource)
+        case Ok(_): ()
+    var bound = -1
+    unsafe(capabilities: [ffi]):
+        bound = rt_dict_scope_read_bound_v1()
+    if bound < 1: return Err(DictScopeReadErrorV1.Unavailable)
+    match account.reserve(bound):
+        case Err(_): return Err(DictScopeReadErrorV1.Resource)
+        case Ok(_): ()
+    Ok(bound)
+
+class DictScopeReadV1:
+    symbols_: Dict<text, i64>
+    account_: MirLoopResourceAccountV1
+    owner_: i64
+    epoch_: i64
+    backing_: i64
+
+    static fn create(symbols: Dict<text, i64>, account: MirLoopResourceAccountV1) -> Result<DictScopeReadV1, DictScopeReadErrorV1>:
+        var fuel = dict_scope_read_fuel_v1(account)?
+        var owner = -1
+        unsafe(capabilities: [ffi]):
+            owner = rt_dict_scope_read_owner_v1(symbols, fuel)
+        if owner < 1: return Err(DictScopeReadErrorV1.Unavailable)
+        fuel = dict_scope_read_fuel_v1(account)?
+        var epoch = -1
+        unsafe(capabilities: [ffi]):
+            epoch = rt_dict_scope_read_epoch_v1(symbols, owner, fuel)
+        if epoch < 1: return Err(DictScopeReadErrorV1.Stale)
+        fuel = dict_scope_read_fuel_v1(account)?
+        var backing = -1
+        unsafe(capabilities: [ffi]):
+            backing = rt_dict_scope_read_meta_v1(symbols, owner, epoch, 4, fuel)
+        if backing < 1: return Err(DictScopeReadErrorV1.Stale)
+        # Five retained fields are charged before allocating the view itself.
+        match account.reserve(5, state_fields: 5):
+            case Err(_): return Err(DictScopeReadErrorV1.Resource)
+            case Ok(_): ()
+        Ok(DictScopeReadV1(symbols_: symbols, account_: account,
+            owner_: owner, epoch_: epoch, backing_: backing))
+
+    me meta(field: i64) -> Result<i64, DictScopeReadErrorV1>:
+        val fuel = dict_scope_read_fuel_v1(self.account_)?
+        var value = -1
+        unsafe(capabilities: [ffi]):
+            value = rt_dict_scope_read_meta_v1(self.symbols_, self.owner_, self.epoch_, field, fuel)
+        if value < 0: return Err(DictScopeReadErrorV1.Stale)
+        if field == 4 and value != self.backing_: return Err(DictScopeReadErrorV1.Stale)
+        Ok(value)
+
+    me slot(slot: i64, field: i64, byte_index: i64 = 0) -> Result<i64, DictScopeReadErrorV1>:
+        val fuel = dict_scope_read_fuel_v1(self.account_)?
+        var value = -1
+        unsafe(capabilities: [ffi]):
+            value = rt_dict_scope_read_slot_v1(self.symbols_, self.owner_, self.epoch_, slot, field, byte_index, fuel)
+        if value < 0: return Err(DictScopeReadErrorV1.Stale)
+        Ok(value)
+
+export DictScopeReadV1, DictScopeReadErrorV1
+export dict_scope_read_fuel_v1

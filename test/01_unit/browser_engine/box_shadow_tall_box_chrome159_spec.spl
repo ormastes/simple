@@ -1,0 +1,59 @@
+"""
+## Purpose and audience
+Purpose: Pin that a box far taller than the frame still paints its soft
+box-shadow. The Engine2D shadow admission bounded the WHOLE blur-expanded
+shadow rect (16,777,216 px), not the part inside the frame, so a long page
+panel lost its shadow entirely: every catalog page at device scale 4
+(852 x 16939 CSS px panel = 231M device px) and any page past ~18,800 px at
+scale 1. The shadow painter only ever reads and writes the frame region.
+Audience: maintainers of the Engine2D box-effect admission.
+"""
+
+"""
+Traceability: doc/00_llm_process/feature_expert/web_render_css_parity/skill.md
+("2026-11-22 -- a box taller than the frame lost its box-shadow").
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
+}
+
+# A 60 x 400000 #2050c0 box at (20,20) with `box-shadow: 0 0 8px
+# rgba(0,0,0,0.8)` on white; only its first 180 rows are in the frame.
+val TBS_PAGE = "<!DOCTYPE html><html><body style='margin:0;background:#ffffff'><div style='position:absolute;left:20px;top:20px;width:60px;height:400000px;background:#2050c0;box-shadow:0 0 8px rgba(0,0,0,0.8)'></div></body></html>"
+
+# Row y=150: x=12..19 left of the box, x=80..87 right of it.
+val TBS_XS: [i32] = [12, 13, 14, 15, 16, 17, 18, 19, 80, 81, 82, 83, 84, 85, 86, 87]
+# Chrome 159 at device scale 1, 400x300 window (grey: R = G = B).
+val TBS_CHROME: [i32] = [0xF8, 0xF3, 0xEB, 0xE1, 0xD4, 0xC5, 0xB5, 0xA2, 0xA2, 0xB5, 0xC5, 0xD4, 0xE1, 0xEB, 0xF3, 0xF8]
+
+fn tbs_mismatches(px: [u32]) -> i32:
+    if px.len() != 120 * 200:
+        return -1
+    var bad = 0
+    var i = 0
+    while i < TBS_CHROME.len():
+        val p = px[150 * 120 + TBS_XS[i]]
+        var sh = 0u32
+        while sh <= 16u32:
+            val d = ((p >> sh) & 0xFFu32) as i32 - TBS_CHROME[i]
+            if d > 2 or d < -2:
+                bad = bad + 1
+                sh = 24u32
+            else:
+                sh = sh + 8u32
+        i = i + 1
+    bad
+
+describe "box-shadow of a box taller than the frame (Chrome 159)":
+    it "raster paints the shadow beside a 400000px tall box":
+        expect(tbs_mismatches(simple_web_layout_render_html_software_pixels(TBS_PAGE, 120, 200, 600000))).to_equal(0)
+
+    it "cpu_simd paints the shadow beside a 400000px tall box":
+        expect(tbs_mismatches(simple_web_layout_render_html_pixels_engine2d_at_device_scale(TBS_PAGE, 120, 200, 1, "cpu_simd"))).to_equal(0)
+
+    it "vulkan paints the shadow beside a 400000px tall box":
+        expect(tbs_mismatches(simple_web_layout_render_html_pixels_engine2d_at_device_scale(TBS_PAGE, 120, 200, 1, "vulkan"))).to_equal(0)

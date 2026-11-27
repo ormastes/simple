@@ -157,7 +157,14 @@ begin
       dpc_o => dpc_s, step_o => step_s,
       sb_re_o => sb_re, sb_we_o => sb_we,
       sb_addr_o => sb_addr, sb_wdata_o => sb_wdata, sb_size_o => sb_size,
-      sb_rdata_i => sb_rdata, sb_ack_i => sb_ack, sb_err_i => sb_err);
+      sb_rdata_i => sb_rdata, sb_ack_i => sb_ack, sb_err_i => sb_err,
+      -- Development bring-up tie-off (OpenOCD sim has no authdata flow):
+      -- the device models an UNPROVISIONED part (OPEN), the documented
+      -- fab/test state. Production ties lifecycle_i/auth_key_i from OTP
+      -- fuses; a PROVISIONED part requires the challenge and a LOCKED
+      -- ("10") part denies System Bus Access entirely.
+      lifecycle_i => "00",
+      auth_key_i  => (others => '0'));
 
   u_mem : entity work.sba_test_mem
     generic map (ACK_DELAY => 2)

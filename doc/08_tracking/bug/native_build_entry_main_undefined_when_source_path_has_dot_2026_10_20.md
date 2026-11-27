@@ -1,6 +1,6 @@
 # native-build of an entry whose directory path contains a dot links without `__simple_main`
 
-- Status: OPEN (workaround in scripts/check/check-stage-binaries-runnable.shs)
+- Status: FIX IMPLEMENTED, VERIFICATION PENDING (source fix + spec landed in PR #4033, merge ab7088bc82c; workaround in scripts/check/check-stage-binaries-runnable.shs stays until a stage3 rebuild verifies native-build under a dotted dir)
 - Date: 2026-10-20
 - Platform: aarch64-unknown-linux-gnu
 - Severity: P2
@@ -74,3 +74,46 @@ Every compiler, test, docgen, link and runtime check remains UNRUN under the
 source-only protocol. Both existing stage-binary gate workaround tags and
 consumer spellings remain unchanged. This proposal requires higher review;
 it is not production, bootstrap or Phase3 PASS.
+
+## Resolution (2026-11-05)
+
+PR #4033 (`fix(compiler): preserve external dotted source entry identity`,
+merge ab7088bc82c) changed `src/compiler/80.driver/driver_source_loading.spl`
+and landed `test/01_unit/compiler/driver/dotted_source_entry_identity_spec.spl`.
+Current `driver_entry_closure_core.spl` `_driver_physical_module_identity`
+returns (name, repository_member) and only repository sources are
+canonicalized (digit-tier dropping), so external `dot.1` paths keep their
+identity. Verification pending: native-build of the repro under `<tmp>/dot.1/`
+with a rebuilt stage3; then remove the two `@workaround` tags in
+`check-stage-binaries-runnable.shs`.
+
+## Fix (2026-11-13) — Windows membership + neighbour-safe entry predicate
+
+On Windows, `dotted_source_entry_identity_spec` passed only 5 of 9 scenarios on the seed. There were two causes:
+
+1. `_driver_physical_module_identity` (`driver_entry_closure_core.spl`) tested
+   `resolved.starts_with(root + "/")` on raw `rt_path_absolute` output, which
+   uses `\` separators on Windows. No repository source was ever proven a member,
+   so `compiler.10.frontend...` was never folded. Paths are now compared on `/`
+   separators: the `\?\` prefix is stripped, the root is matched
+   case-insensitively, and the case of the relative remainder is kept.
+2. `llvm_module_is_native_entry` folded BOTH sides, so `dot.1/hello.spl` and
+   `dot.2/hello.spl` became the same native entry. This was not specific to
+   Windows. It now matches when the names are equal or when one side is the
+   canonical fold of the other.
+
+Seed: 9/9 passed. Neighbour specs `driver_source_loading_spec` (5 failures) and
+`entry_closure_authored_path_spec` (1 failure) fail identically with and without
+this change. `module_path_naming_scv_root_snapshot_spec` passed 7/7. The native-build
+repro under `<tmp>/dot.1/` still needs a rebuilt producer.
+
+## WA-W2-5 Audit (2026-11-26)
+
+- **Classification:** `KEPT-WITH-REASON`
+- **Disposition:** Kept `scripts/check/check-stage-binaries-runnable.shs:339,712` (`# @workaround bug=native_build_entry_main_undefined_when_source_path_has_dot_2026_10_20`) and the underscore temp/probe paths (`${SELF_NAME}_XXXXXX`, `probe_$_n`) intact. While the source fix (`PR #4033` + 2026-11-13 Windows fix) is in `src/compiler/80.driver/driver_entry_closure_core.spl` and `src/compiler/00.common/module_path_naming.spl`, native Stage 3 verification under `<tmp>/dot.1/` remains pending (`bug_db.sdn` `fix-implemented-verification-pending`), and `check-stage-binaries-runnable.shs` also probes tracked/historical Stage 1/2 binaries (`bootstrap/**/simple`, `--rev`) predating PR #4033.
+
+## WA-P9 Audit (2026-11-26)
+
+- **Source & driver verification:** Confirmed `module_canonical_fold_name`, `module_surface_admitted_logical_id_v1` (`src/compiler/80.driver/driver_source_parse_streaming.spl`), `driver_entry_closure_core.spl`, and `core_codegen.spl` uniformly preserve canonical identity for dotted paths.
+- **Checks run on `release/1.0.0`:** `dotted_source_entry_identity_spec.spl` (9/9 pass), `module_canonical_fold_name_spec.spl` (4/4 pass), `scripts/check/check-stage-binaries-runnable.shs --selftest` (11/11 fixtures pass), `sh -n scripts/check/check-stage-binaries-runnable.shs` (pass).
+- **Script disposition:** Kept `scripts/check/check-stage-binaries-runnable.shs:339,712` (`# @workaround bug=native_build_entry_main_undefined_when_source_path_has_dot_2026_10_20`); historical/tracked stage binaries and host `$TMPDIR` probing still depend on it until Stage 3 native `<tmp>/dot.1/` verification qualifies rebuilt producers.

@@ -1,7 +1,7 @@
 # PureDatabase treats total numeric conversions as optional parsers
 
-Status: OPEN — source repair and executable regressions authored; native and
-SSpec execution UNEXECUTED.
+Status: FIXED 2026-11-03 — spec 6/6 under bin/simple.exe test (was 4/6: negative INSERT literal stored as Text("-"); spec used /tmp and a clean checkpoint). Native
+execution still unexecuted.
 
 ## Actual failure
 
@@ -51,3 +51,5 @@ path with an isolated copy. Tests must use the source-bound pure-Simple compiler
 and natural runtime link. Static checks are not execution evidence. Independent
 DbValue owner, method, slice and enum-payload failures may still block this full
 closure; this repair does not claim all PostgreSQL errors are resolved.
+
+**Revalidated 2026-11-02: still plausible because OPEN — source repair and executable regressions authored; native and; no merged fix commit with a passing regression is cited in this doc.**

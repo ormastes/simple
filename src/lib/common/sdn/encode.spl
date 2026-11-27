@@ -31,10 +31,10 @@ pub fn sdn_encode_canonical(v: SdnValue) -> text:
 # Exact byte count using the same quote decision as the writer. Callers can
 # enforce output bounds before allocating escaped strings or table rows.
 pub fn sdn_encoded_text_size_v1(s: text) -> i64:
-    if _sdn_enc_bare_ok(s): return s.len()
-    var size = s.len() + 2
+    if _sdn_enc_bare_ok(s): return s.byte_len()
+    var size = s.byte_len() + 2
     var index = 0
-    while index < s.len():
+    while index < s.byte_len():
         val ch = s.byte_at(index)
         if ch == 92 or ch == 34 or ch == 10 or ch == 9 or ch == 13:
             size = size + 1
@@ -62,7 +62,7 @@ fn _sdn_enc(v: SdnValue) -> text:
             var parts: [text] = []
             for k in _sdn_sorted_keys(d.keys()):
                 parts.push(_sdn_enc_key(k) + ": " + _sdn_enc(d[k]))
-            "{" + parts.join(", ") + "}"
+            "{{" + parts.join(", ") + "}}"
         case SdnValue.Table(headers, rows):
             _sdn_enc_table(headers, rows)
 
@@ -88,13 +88,13 @@ fn _sdn_enc_key(k: text) -> text:
         "\"" + _sdn_enc_escape(k) + "\""
 
 fn _sdn_enc_table(headers: [text], rows: [[SdnValue]]) -> text:
-    var out = "|" + headers.join(", ") + "|"
+    var parts: [text] = ["|" + headers.join(", ") + "|"]
     for row in rows:
         var cells: [text] = []
         for cell in row:
             cells.push(_sdn_enc(cell))
-        out = out + "\n" + cells.join(", ")
-    out
+        parts.push(cells.join(", "))
+    parts.join("\n")
 
 # ---- quoting decisions ----
 
@@ -111,7 +111,7 @@ fn _sdn_enc_bare_ok(s: text) -> bool:
 fn _sdn_enc_all_safe_chars(s: text) -> bool:
     val allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-/"
     var i = 0
-    while i < s.len():
+    while i < s.byte_len():
         if not allowed.contains(s.substring(i, i + 1)):
             return false
         i = i + 1
@@ -123,57 +123,68 @@ fn _sdn_enc_is_int(s: text) -> bool:
     var i = 0
     if s.substring(0, 1) == "-":
         i = 1
-    if i >= s.len():
+    if i >= s.byte_len():
         return false
     val digits = "0123456789"
-    while i < s.len():
+    while i < s.byte_len():
         if not digits.contains(s.substring(i, i + 1)):
             return false
         i = i + 1
     true
 
 
+# Linear: unescaped runs are copied as one slice and all pieces joined once.
+# Appending per byte (`out = out + ch`) re-copied the whole prefix every
+# step — quadratic time and memory, OOM-killed on a 2 MB string
+# (doc/08_tracking/bug/sdn_encode_escape_quadratic_2mb_string_2026-11-15.md).
 fn _sdn_enc_escape(s: text) -> text:
-    var out = ""
+    val n = s.byte_len()
+    var parts: [text] = []
+    var run_start = 0
     var i = 0
-    while i < s.len():
-        val ch = s.substring(i, i + 1)
-        if ch == "\\":
-            out = out + "\\\\"
-        else:
-            if ch == "\"":
-                out = out + "\\\""
-            else:
-                if ch == "\n":
-                    out = out + "\\n"
-                else:
-                    if ch == "\t":
-                        out = out + "\\t"
-                    else:
-                        if ch == "\r":
-                            out = out + "\\r"
-                        else:
-                            out = out + ch
+    while i < n:
+        val b = s.byte_at(i)
+        var esc = ""
+        if b == 92:
+            esc = "\\\\"
+        elif b == 34:
+            esc = "\\\""
+        elif b == 10:
+            esc = "\\n"
+        elif b == 9:
+            esc = "\\t"
+        elif b == 13:
+            esc = "\\r"
+        if esc != "":
+            if i > run_start:
+                parts.push(s.substring(run_start, i))
+            parts.push(esc)
+            run_start = i + 1
         i = i + 1
-    out
+    if run_start == 0:
+        return s
+    if n > run_start:
+        parts.push(s.substring(run_start, n))
+    parts.join("")
 
 # ---- key ordering ----
 
 # Bytewise text comparison. Deliberately NOT the `<` operator: native codegen
 # compares text by raw pointer, which would make key order nondeterministic.
 fn _sdn_enc_text_lt(a: text, b: text) -> bool:
-    val ab = a.bytes()
-    val bb = b.bytes()
+    val alen = a.byte_len()
+    val blen = b.byte_len()
+    val min_len = if alen < blen: alen else: blen
     var i = 0
-    while i < ab.len() and i < bb.len():
-        val ca = ab[i].to_i64()
-        val cb = bb[i].to_i64()
+    while i < min_len:
+        val ca = a.byte_at(i)
+        val cb = b.byte_at(i)
         if ca < cb:
             return true
         if ca > cb:
             return false
         i = i + 1
-    ab.len() < bb.len()
+    alen < blen
 
 fn _sdn_sorted_keys(keys: [text]) -> [text]:
     var out: [text] = []

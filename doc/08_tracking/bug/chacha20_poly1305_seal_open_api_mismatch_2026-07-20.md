@@ -5,7 +5,7 @@
   `src/lib/common/crypto/typed/aead.spl`
 - **Severity:** medium (blocks all examples that call seal/open in both
   affected specs).
-- **Status:** OPEN.
+- **Status:** RESOLVED (verified 2026-11-25, see bottom note).
 
 ## Symptom
 
@@ -70,3 +70,21 @@ typed API) from whoever owns the AEAD surface.
 
 - `test/unit/lib/crypto/chacha20_poly1305_spec.spl` (all examples)
 - `test/unit/lib/crypto/chacha20_poly1305_wycheproof_spec.spl` (all examples)
+
+## Verification 2026-11-25 (fleet lane p2w1-ad, Windows host)
+
+STALE-CLOSED. The exact API both specs were written against now exists in the
+module the import path resolves to:
+`src/lib/common/crypto/chacha20_poly1305.spl:250`
+`fn chacha20_poly1305_seal(key: [u8], nonce: [u8], aad: [u8], plaintext: [u8]) -> ([u8], [u8])`
+and :276 `fn chacha20_poly1305_open(key, nonce, aad, ciphertext, tag) -> [u8]?`
+— raw `[u8]` parameters, tuple return, (key, nonce, aad, pt) argument order.
+
+Executed evidence (`bin/simple.exe run` probe, SIMPLE_LIB=src; `bin/simple.exe
+test` is blocked repo-wide at this HEAD by the seed's
+`@representation_boundary` rejection): RFC 7539 §2.8.2 canonical vector ->
+`CT_MATCH=true`, `TAG_MATCH=true` (byte-exact, 114-byte ct + 16-byte tag),
+`ROUNDTRIP=true` (open(seal(pt)) recovers pt), `TAMPER_REJECTED=true`
+(one-bit tag flip -> open returns none). Both affected specs
+(`chacha20_poly1305_spec.spl`, `chacha20_poly1305_wycheproof_spec.spl`) import
+exactly this function pair.

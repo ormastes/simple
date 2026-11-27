@@ -1,0 +1,138 @@
+# @req DAE-05-B DAE-05-E DAE-05-O
+# NOT_RUN: pure codec examples; independent byte expectations, no journal owner.
+use std.spec.{describe, it, expect}
+use std.common.contracts.distributed_operation_state_v2.*
+use std.common.contracts.distributed_operation_history_v2.*
+use std.common.contracts.distributed_operation_retention_v2.*
+use std.common.task_runner.distributed_operation_checkpoint_v2.*
+use std.common.task_runner.distributed_operation_checkpoint_schema_v2.*
+use std.nogc_sync_mut.database.wal_checkpoint_format_v1.*
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+
+fn checkpoint_codec_fixture_v2() -> OperationCheckpointSnapshotV2:
+    # Literal existing V2 envelope wire, independent of checkpoint serialization.
+    val envelope = ("DBC_OPERATION_V2\ngolden\n" + "b".repeat(64) +
+        "\nuser\nproject\nhost\nbuild\n" + "c".repeat(64) + "\n1\n0\n1\n1\n1\n")
+    val row = distributed_operation_initial_v2(envelope).unwrap()
+    val base = "f".repeat(64)
+    val edge = DistributedOperationHistoryV2(row.envelope_digest, 1, "", "admitted", "", 1, base)
+    val history = DistributedOperationJournalHistoryBatchV2("a".repeat(64), base, 1,
+        {base: 1}, {row.operation_id: edge})
+    OperationCheckpointSnapshotV2("a".repeat(64), base, 1,
+        DistributedOperationRetentionProfileV2(1, 4, 2), {row.operation_id: row}, history)
+
+fn checkpoint_codec_read_v2(objects: [OperationCheckpointObjectV2], digest: text) -> Result<text, text>:
+    for object in objects:
+        if object.digest == digest: return Ok(object.payload)
+    Err("checkpoint fixture object missing")
+
+fn checkpoint_codec_manifest_v2(objects: OperationCheckpointObjectsV2) -> text:
+    checkpoint_codec_read_v2(objects.objects, objects.manifest_digest).unwrap()
+
+describe "Bounded canonical operation checkpoint codec":
+    it "matches independent golden operation, endpoint and manifest bytes":
+        val snapshot = checkpoint_codec_fixture_v2()
+        val encoded = distributed_operation_checkpoint_encode_v2(snapshot).unwrap()
+        expect(encoded.objects.len()).to_equal(3)
+        val authority = snapshot.authority_digest
+        val base = snapshot.base_commit
+        val row = snapshot.rows["golden"]
+        val envelope = row.envelope.replace("\n", "\\n")
+        val entry = ("\{admitted_sequence: 1, envelope: \"" + envelope +
+            "\", envelope_digest: " + row.envelope_digest + ", last_commit_digest: " + base +
+            ", last_from_state: \"\", last_outcome_digest: \"\", last_sequence: 1, " +
+            "last_to_state: admitted, operation_id: golden, outcome_digest: \"\", state: admitted\}")
+        val operations = ("\{authority_digest: " + authority + ", base_commit: " + base +
+            ", base_sequence: 1, entries: [" + entry +
+            "], kind: DistributedOperationPageV2, ordinal: 0, version: 1\}\n")
+        val endpoints = ("\{authority_digest: " + authority + ", base_commit: " + base +
+            ", base_sequence: 1, entries: [\{commit_digest: " + base +
+            ", last_sequence: 1\}], kind: DistributedOperationEndpointsV2, ordinal: 0, version: 1\}\n")
+        expect(encoded.objects[0].payload).to_equal(operations)
+        expect(encoded.objects[1].payload).to_equal(endpoints)
+        val operation_digest = sha256_text(operations)
+        val endpoint_digest = sha256_text(endpoints)
+        val operation_bytes = operations.byte_len()
+        val endpoint_bytes = endpoints.byte_len()
+        val descriptors = ("[\{byte_count: " + operation_bytes.to_text() + ", digest: " +
+            operation_digest + ", entry_count: 1, kind: operations, ordinal: 0\}, \{byte_count: " +
+            endpoint_bytes.to_text() + ", digest: " + endpoint_digest +
+            ", entry_count: 1, kind: endpoints, ordinal: 0\}]")
+        val manifest = ("\{authority_digest: " + authority + ", base_commit: " + base +
+            ", base_sequence: 1, endpoint_count: 1, kind: DistributedOperationCheckpointV2, " +
+            "operation_count: 1, pages: " + descriptors +
+            ", retention_profile: \{maximum_lifetime_events: 4, maximum_tail_events: 2, version: 1\}, version: 1\}\n")
+        expect(encoded.objects[2].payload).to_equal(manifest)
+        expect(encoded.manifest_digest).to_equal(sha256_text(manifest))
+        val decoded = distributed_operation_checkpoint_decode_v2(manifest,
+            \digest: checkpoint_codec_read_v2(encoded.objects, digest)).unwrap()
+        expect(decoded.rows["golden"].envelope).to_equal(row.envelope)
+        expect(decoded.history.operations["golden"].last_commit_digest).to_equal(base)
+        expect(decoded.history.revision_endpoints[base]).to_equal(1)
+
+    it "counts canonical numeric-only digest quoting in the actual WAL control":
+        val marker = DatabaseWalCheckpointMarkerV1("a".repeat(64), "b".repeat(64), 1, "1".repeat(64))
+        val expected = ("\{base_commit: " + "b".repeat(64) + ", base_sequence: 1, checkpoint_digest: \"" +
+            "1".repeat(64) + "\", database_identity: " + "a".repeat(64) +
+            ", kind: SimpleDatabaseWalCheckpoint, version: 1\}\n")
+        val bytes = database_wal_checkpoint_marker_encode_v1(marker)
+        expect(bytes).to_equal(expected)
+        val parsed = database_wal_checkpoint_marker_decode_v1(bytes).unwrap()
+        expect(parsed.checkpoint_digest).to_equal(marker.checkpoint_digest)
+        expect(checkpoint_value_size_v2(checkpoint_parse_v2(bytes).unwrap()).unwrap() + 1).to_equal(bytes.byte_len())
+
+    it "rejects noncanonical framing, duplicate keys and unknown manifest fields":
+        val encoded = distributed_operation_checkpoint_encode_v2(checkpoint_codec_fixture_v2()).unwrap()
+        val manifest = checkpoint_codec_manifest_v2(encoded)
+        expect(distributed_operation_checkpoint_decode_v2(manifest + "\n",
+            \digest: checkpoint_codec_read_v2(encoded.objects, digest)).unwrap_err()).to_equal("OPERATION_CHECKPOINT_NONCANONICAL")
+        expect(checkpoint_parse_v2("\{a: 1, a: 2\}\n").unwrap_err()).to_equal("OPERATION_CHECKPOINT_SDN_INVALID")
+        expect(database_wal_checkpoint_marker_decode_v1(
+            "\{base_commit: b, base_sequence: 01, checkpoint_digest: c, database_identity: a, kind: SimpleDatabaseWalCheckpoint, version: 1\}\n").is_err()).to_equal(true)
+        val value = checkpoint_parse_v2(manifest).unwrap()
+        var fields = value.as_dict().unwrap()
+        fields["unrecognized"] = SdnValue.Int(1)
+        val unknown = checkpoint_payload_v2(SdnValue.Dict(fields)).unwrap()
+        expect(distributed_operation_checkpoint_decode_v2(unknown,
+            \digest: checkpoint_codec_read_v2(encoded.objects, digest)).unwrap_err()).to_equal("OPERATION_CHECKPOINT_SCHEMA_INVALID")
+
+    it "checks page bytes against their descriptor hash before decoding rows":
+        val encoded = distributed_operation_checkpoint_encode_v2(checkpoint_codec_fixture_v2()).unwrap()
+        val manifest = checkpoint_codec_manifest_v2(encoded)
+        expect(distributed_operation_checkpoint_decode_v2(manifest,
+            \digest: Ok("x".repeat(encoded.objects[0].payload.byte_len()))).unwrap_err()).to_equal("OPERATION_CHECKPOINT_PAGE_DIGEST_INVALID")
+        expect(distributed_operation_checkpoint_decode_v2(manifest,
+            \digest: Err("checkpoint fixture object missing")).unwrap_err()).to_equal("checkpoint fixture object missing")
+
+    it "rejects contradictory operation edges, outcomes and endpoint membership":
+        val snapshot = checkpoint_codec_fixture_v2()
+        val row = snapshot.rows["golden"]
+        val completed = DistributedOperationStateV2(row.operation_id, row.envelope_digest, row.envelope, "completed", "")
+        val edge = DistributedOperationHistoryV2(row.envelope_digest, 1, "executing", "completed", "", 2, snapshot.base_commit)
+        expect(checkpoint_operation_validate_v2(completed, edge, 2).unwrap_err()).to_equal("OUTCOME_DIGEST_REQUIRED")
+        val wrong_edge = DistributedOperationHistoryV2(row.envelope_digest, 1, "", "admitted", "", 1, "e".repeat(64))
+        val wrong_history = DistributedOperationJournalHistoryBatchV2(snapshot.authority_digest,
+            snapshot.base_commit, 1, snapshot.history.revision_endpoints, {row.operation_id: wrong_edge})
+        expect(distributed_operation_checkpoint_encode_v2(OperationCheckpointSnapshotV2(
+            snapshot.authority_digest, snapshot.base_commit, 1, snapshot.retention_profile,
+            snapshot.rows, wrong_history)).unwrap_err()).to_equal("OPERATION_CHECKPOINT_ENDPOINT_MISSING")
+        expect(checkpoint_sorted_keys_v2(["z", "a0", "a-", "a"])).to_equal(["a", "a-", "a0", "z"])
+
+    it "rejects exhausted endpoint and descriptor bounds before reading objects":
+        val encoded = distributed_operation_checkpoint_encode_v2(checkpoint_codec_fixture_v2()).unwrap()
+        val value = checkpoint_parse_v2(checkpoint_codec_manifest_v2(encoded)).unwrap()
+        var fields = value.as_dict().unwrap()
+        fields["endpoint_count"] = SdnValue.Int(100000)
+        val excessive = checkpoint_payload_v2(SdnValue.Dict(fields)).unwrap()
+        expect(distributed_operation_checkpoint_decode_v2(excessive,
+            \digest: Err("must reject before page read")).unwrap_err()).to_equal("OPERATION_CHECKPOINT_ENDPOINT_LIMIT")
+        fields["endpoint_count"] = SdnValue.Int(1)
+        var pages = fields["pages"].as_array().unwrap()
+        var descriptor = pages[0].as_dict().unwrap()
+        descriptor["byte_count"] = SdnValue.Int(9223372036854775807)
+        pages[0] = SdnValue.Dict(descriptor)
+        fields["pages"] = SdnValue.Array(pages)
+        val oversized = checkpoint_payload_v2(SdnValue.Dict(fields)).unwrap()
+        expect(distributed_operation_checkpoint_decode_v2(oversized,
+            \digest: Err("must reject before page read")).unwrap_err()).to_equal("OPERATION_CHECKPOINT_SIZE_INVALID")

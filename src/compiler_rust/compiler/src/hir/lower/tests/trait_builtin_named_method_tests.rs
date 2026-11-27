@@ -52,6 +52,11 @@ fn erased_and_typed_receivers_keep_builtin_types() {
 fn typed_dict_receiver_ignores_trait_named_get() {
     // A typed Dict is never a trait object, even when a trait declares `get`.
     let src = "trait Store:\n    me get(key: text) -> bool\n\nclass Mem:\n    var x: i64\n\nimpl Store for Mem:\n    me get(key: text) -> bool:\n        true\n\nfn probe(counts: Dict<text, i64>) -> i64:\n    val v = counts.get(\"a\")\n    0\n";
-    let (_, v_ty) = local_ty(src, "probe", "v");
-    assert_eq!(v_ty, TypeId::I64);
+    // Policy: Dict.get returns Option, so the builtin result is `i64?`.
+    let (module, v_ty) = local_ty(src, "probe", "v");
+    assert!(
+        matches!(module.types.get(v_ty), Some(HirType::Pointer { inner, .. }) if *inner == TypeId::I64),
+        "{:?}",
+        module.types.get(v_ty)
+    );
 }

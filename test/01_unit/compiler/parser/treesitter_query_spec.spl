@@ -1,82 +1,76 @@
-# Feature: Tree-sitter Query System
-# Category: Parser
-# Status: Complete
-#
-# Unit tests for Tree-sitter query system including query creation, pattern matching,
-# node capture, and cursor-based query execution.
+"""
+## Purpose and audience
+Purpose: Verify structural querying over `TreeSitter` outline and heuristic parse
+results (`OutlineModule` collections, inline blocks, asm blocks, and
+`parse_outline_heuristic`) against the real implementation.
+Audience: compiler and editor-outline maintainers.
 
-Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
-reading this spec to confirm the behavior still holds.
-
-# Mock Query class
-fn check(condition: bool):
-    expect(condition).to_equal(true)
-fn check_msg(condition: bool, message: text):
-    if not condition:
-        expect(message).to_equal("")
-class MockQuery:
-    pattern: text
-
+## Operator workflow
 1. Run `bin/simple test test/01_unit/compiler/parser/treesitter_query_spec.spl`.
-2. Every scenario must pass; a failure is a regression in the
-   behavior under test.
+2. Every scenario must pass with 0 failures.
 
 ## Compatibility and limitations
-
-Covers the interpreter and native lanes for the constructs
-asserted here; platform-specific behavior is out of scope.
+Tests pure-Simple outline and heuristic extraction; S-expression query cursors do
+not exist in `compiler.treesitter` and are not mocked.
 """
+# @req: REQ-COMPILER-PARSER-TREESITTER-002
+# @cover src/compiler/10.frontend/treesitter/outline.spl 80%
+# @cover src/compiler/10.frontend/treesitter/heuristic.spl 80%
 
-use std.spec
+use std.spec.*
+use std.spec.step
+use compiler.treesitter.*
+use compiler.frontend.treesitter.outline_lexer.{treesitter_with_heuristic_mode, treesitter_with_source}
 
-# doc-path: doc/01_research/local/treesitter_query.md
-# doc-path: doc/03_plan/sys_test/treesitter_query.md
-# doc-path: doc/04_architecture/treesitter_query.md
-# doc-path: doc/05_design/treesitter_query.md
+describe "TreeSitter Outline Queries":
+    it "extracts imports, exports, traits, impls, and type aliases from source":
+        step("Parse module outline containing import/export/type/trait/impl nodes")
+        val src = "use std.spec.{{describe}}\nexport Helper\ntype Count = i64\ntrait Named:\n    fn label() -> text\nclass Helper:\n    id: Count\nimpl Named for Helper:\n    fn label() -> text:\n        \"ok\"\n"
+        var ts = TreeSitter.new(src)
+        val outline = ts.parse_outline()
+        expect(outline.errors.len()).to_equal(0)
+        expect(outline.imports.len()).to_equal(1)
+        expect(outline.imports[0].module).to_equal("std.spec")
+        expect(outline.exports.len()).to_equal(1)
+        expect(outline.type_aliases.len()).to_equal(1)
+        expect(outline.type_aliases[0].name).to_equal("Count")
+        expect(outline.traits.len()).to_equal(1)
+        expect(outline.traits[0].name).to_equal("Named")
+        expect(outline.impls.len()).to_equal(1)
 
-# @manual: primary
+    it "queries embedded asm blocks and inline custom blocks inside function bodies":
+        step("Parse function body containing asm and m{{...}} inline block")
+        val src = "fn probe():\n    asm {{ nop }}\n    val expr = m{{ x + 1 }}\n    expr\n"
+        var ts = TreeSitter.new(src)
+        val outline = ts.parse_outline()
+        expect(outline.functions.len()).to_equal(1)
+        expect(outline.asm_blocks.len()).to_equal(1)
+        expect(outline.asm_blocks[0].payload).to_equal("nop")
 
-describe "Query Creation":
-    # Tests for creating and initializing Tree-sitter queries.
+    it "extracts declarations in heuristic mode even with unclosed punctuation":
+        step("Run treesitter_with_heuristic_mode over broken and valid declarations")
+        val src = "fn broken(a:\n    1\nclass Healthy:\n    x: i64\nfn recover() -> i64:\n    2\n"
+        val ts0 = treesitter_with_heuristic_mode(true)
+        var ts = treesitter_with_source(ts0, src)
+        val outline = ts.parse_outline()
+        var fn_names: [text] = []
+        for f in outline.functions:
+            fn_names.push(f.name)
+        expect(fn_names).to_contain("recover")
+        expect(outline.classes.len()).to_equal(1)
+        expect(outline.classes[0].name).to_equal("Healthy")
 
-    it "creates query for Simple language":
-        val query = MockQuery.new("(identifier) @name")
-        check(query.pattern.len() > 0)
-
-    it "handles invalid query":
-        val query = MockQuery.new("invalid pattern")
-        check(query.pattern.len() > 0)
-
-    it "Option payload binding":
-        step("Verify: Option payload binding")
-        # @req: REQ-COMPILER-PARSER-001
-        val opt = Some(99)
-        var chosen = 0
-        match opt:
-            Some(x): chosen = x
-            nil: chosen = -1
-        expect(chosen).to_equal(99)  # oracle: Some arm binds payload
-
-    it "matches patterns":
-        val query = MockQuery.new("(identifier)")
-        check(query.execute())
-
-    it "captures nodes":
-        val query = MockQuery.new("(identifier) @var")
-        val captures = query.get_captures()
-        check(captures.len() > 0)
-
-    it "supports predicates":
-        val query = MockQuery.new("(function_definition) @func")
-        check(query.execute())
-
-describe "QueryCursor":
-    # Tests for Tree-sitter query cursor operations.
-
-    it "iterates matches":
-        val cursor = MockQueryCursor.new()
-        check(cursor.next_match())
-
-    it "supports byte range":
-        val cursor = MockQueryCursor.new()
-        check(cursor.supports_byte_range())
+    it "matches Option payloads explicitly when inspecting optional outline fields":
+        step("Check has_return_type and Option pattern binding without nil")
+        val src = "fn typed(x: i64) -> text:\n    \"ok\"\nfn untyped():\n    pass\n"
+        var ts = TreeSitter.new(src)
+        val outline = ts.parse_outline()
+        expect(outline.functions.len()).to_equal(2)
+        expect(outline.functions[0].has_return_type).to_equal(true)
+        expect(outline.functions[1].has_return_type).to_equal(false)
+        val maybe = Some(outline.functions[0].name)
+        var bound = ""
+        match maybe:
+            Some(n): bound = n
+            None: bound = "none"
+        expect(bound).to_equal("typed")

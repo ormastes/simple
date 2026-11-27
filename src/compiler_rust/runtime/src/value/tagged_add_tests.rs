@@ -77,3 +77,23 @@ fn negative_child() {
     rt_tagged_add(value, RuntimeValue::from_int(1));
     panic!("negative numeric operand returned");
 }
+
+/// `rt_any_add` is what the seed JIT emits for `any + any`. It had the string
+/// and integer lanes only, so two floats were added as shifted heap pointers
+/// (`anyf(2) + anyf(4)` printed `657650110958`), while `rt_any_sub`/`mul`/`div`
+/// already promoted. A float operand must promote both sides to f64.
+#[test]
+fn any_add_promotes_float_operands_like_the_other_any_operators() {
+    for (left, right, expected) in [
+        (RuntimeValue::from_float(2.5), RuntimeValue::from_float(5.0), 7.5),
+        (RuntimeValue::from_float(2.5), RuntimeValue::from_int(1), 3.5),
+        (RuntimeValue::from_int(1), RuntimeValue::from_float(2.5), 3.5),
+    ] {
+        let sum = rt_any_add(left, right);
+        assert!(sum.is_float(), "float operand must give a float sum");
+        assert_eq!(sum.as_float(), expected);
+    }
+    // The integer and text lanes are unchanged.
+    assert_eq!(rt_any_add(RuntimeValue::from_int(40), RuntimeValue::from_int(2)).as_int(), 42);
+    assert_eq!(text_bytes(rt_any_add(text("a"), RuntimeValue::from_int(1))), b"a1");
+}

@@ -1,5 +1,5 @@
 # `bin/simple run` vs `bin/simple test` — harness divergence measurement (2026-07-28)
-## Open 2026-09-16 — needs owner triage
+## Measurement record — triaged 2026-11-25; remaining follow-ups are Rust-seed-only (see dated triage at bottom)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -882,3 +882,19 @@ regression to report for this run.
 
 All prior sections and artifacts are left in place.
 
+
+## Triage 2026-11-25 (work/p3-bao-20261125)
+
+This is a measurement record against the Rust bootstrap seed's Cranelift JIT,
+not a single fixable defect, and its remaining follow-ups are all
+Rust-seed-only work: `Dict.get_or` routing (the two still-DISAGREE rows),
+real JIT closure ABI for `map`/`filter`/`any`/`all` (currently masked by the
+`8b72b34f005` demotion guard), a `TestExecutionMode::Jit` variant, and
+collapsing the four parallel seed dispatch tables. Per repo policy the seed is
+bootstrap-only — default tooling is the pure-Simple self-hosted binary, whose
+interpreter is the engine this suite measures as correct — so none of these
+are P3-fixable on a Windows host without cargo builds. The "Open 2026-09-16 —
+needs owner triage" header misread the doc: the measurement task was complete
+when filed, and the 07-29 re-measurement shows 58/60 AGREE with zero
+regressions. Left as a historical measurement record; any JIT follow-up
+belongs to a seed-owner lane.

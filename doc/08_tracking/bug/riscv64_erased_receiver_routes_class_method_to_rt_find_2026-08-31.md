@@ -616,3 +616,18 @@ SEED ... kernel.elf (289776 bytes ELF) + kernel.Image (156344 bytes ...)`.
 ## Status
 
 All three defects on this row are now closed and the row is **4 of 4**.
+
+## Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105) — fixed at tip, fix-presence re-verified
+
+At `origin/release/1.0.0` @ `bc3e9b48cb4`:
+
+- `check-simpleos-riscv64-components-in-guest-opensbi.shs` builds the
+  component kernel cleanly with the current seed (`kernel.elf` 314704 bytes,
+  all 4 component row symbols). The OpenSBI firmware + QEMU boot stage is
+  host-blocked today (no riscv64 cross-gcc on this aarch64 host), so the
+  in-guest 4/4 boot was not re-run in this lane; the measured 2026-09-01
+  in-guest PASS recorded above remains the boot evidence.
+- `check-freestanding-byte-array-slot-tags.shs` PASS (10 definitions, 0
+  untagged), pinning the defect-2 byte-slot tagging fix in source.
+
+Status: FIXED at tip.

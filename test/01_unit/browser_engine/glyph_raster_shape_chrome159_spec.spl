@@ -1,0 +1,108 @@
+"""
+## Purpose and audience
+Purpose: Pin the per-glyph LCD raster SHAPE of 16 px Liberation Sans on the
+Engine2D CPU text path against Chrome 159, glyph by glyph at pen phase 0. After
+the hint knots and the round-stem fit, word positions matched Chrome within
+0.06 px but the ink of `l i o 5 3 9 s a` still differed by one to several LCD16
+steps per pixel (the dominant 1x residual on every catalog page). These pixels
+are the ones that differ by more than the 8-level tolerance.
+Audience: web renderer / font rasteriser maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--force-device-scale-factor=1 --window-size=400,300`, Liberation Sans 16 px,
+`color:#000` on white). One glyph per absolutely positioned span at a whole-px
+`left` (pen phase 0), `top:4px`, `line-height:20px`, so the baseline is row 19:
+`l` at 4, `i` 20, `o` 36, `5` 52, `3` 68, `9` 84, `s` 100, `a` 116.
+
+| glyph | pixel    | Chrome 159 | before |
+|-------|----------|------------|--------|
+| l stem right shoulder | (6,8)    | 2f77cf | 2f87cf |
+| i stem right shoulder | (22,10)  | 2f77cf | 3787cf |
+| o top arc, left       | (38,10)  | b7774f | 9f6f47 |
+| 5 bar/upright corner  | (55,11)  | f7ffff | 47270f |
+| 5 upright             | (54,11)  | 3787cf | 1f4757 |
+| 3 top arc             | (71,7)   | 371f0f | 270f00 |
+| 9 bowl top            | (87,8)   | 3f678f | 5f8faf |
+| s top arc             | (102,10) | 774f2f | 4f2f17 |
+| a top arc, left       | (119,10) | 371f0f | 170700 |
+
+Open (not pinned): the `a` top arc underside (120,11) is afafa7 in Chrome and
+bfbfbf here (0.31 vs 0.25 coverage): the inner edge of the arc hints to 7.875 px
+like FreeType 2.13.2 and snaps to the 7.75 quarter row; Chrome's edge is a
+little lower. The same round-top class shows on 18.72 px `m` humps.
+
+Tolerance: 8 levels per channel, the catalog differ's own tolerance
+(src/app/ui/chrome_showcase/pixel_diff.spl TOLERANCE).
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-HINT-003 - Draw IR LCD text rasterises each glyph's coverage like Chrome's Skia LCD16 path.
+"""
+# @tag: unit, browser_engine, text, engine2d, chrome159
+# @cover src/lib/common/encoding/sfnt_glyf.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 136
+val H: i32 = 28
+val TOL: i64 = 8
+
+fn _span(left: i32, glyph: text) -> text:
+    "<span style=\"position:absolute;left:{left}px;top:4px;font-size:16px;line-height:20px;color:#000\">{glyph}</span>"
+
+fn _page() -> text:
+    "<!doctype html><html><body style=\"margin:0;background:#fff;font-family:sans-serif\">" + _span(4, "l") + _span(20, "i") + _span(36, "o") + _span(52, "5") + _span(68, "3") + _span(84, "9") + _span(100, "s") + _span(116, "a") + "</body></html>"
+
+fn _chan(v: u32, shift: u32) -> i64:
+    ((v >> shift) & 0xFFu32).to_i64()
+
+# Every channel of pixel (x, y) is within TOL of Chrome's `want`.
+fn _near(px: [u32], x: i32, y: i32, want: u32) -> bool:
+    val got = px[y * W + x] & 0xFFFFFFu32
+    var ok = true
+    var shift: u32 = 0u32
+    while shift <= 16u32:
+        var d = _chan(got, shift) - _chan(want, shift)
+        if d < 0: d = 0 - d
+        if d > TOL: ok = false
+        shift = shift + 8u32
+    ok
+
+fn _render() -> [u32]:
+    simple_web_render_html_to_pixels_with_engine2d_backend(_page(), W, H, "cpu_simd")
+
+describe "per-glyph LCD raster shape against Chrome 159":
+    it "AC-1: straight stems carry Chrome's LCD filter profile":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = _render()
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("l (6,8) 2f77cf, i (22,10) 2f77cf")
+        expect(_near(px, 6, 8, 0x2f77cfu32)).to_equal(true)
+        expect(_near(px, 22, 10, 0x2f77cfu32)).to_equal(true)
+
+    it "AC-2: digit corners and arcs match Chrome":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = _render()
+        step("5 (55,11) f7ffff, (54,11) 3787cf; 3 (71,7) 371f0f; 9 (87,8) 3f678f")
+        expect(_near(px, 55, 11, 0xf7ffffu32)).to_equal(true)
+        expect(_near(px, 54, 11, 0x3787cfu32)).to_equal(true)
+        expect(_near(px, 71, 7, 0x371f0fu32)).to_equal(true)
+        expect(_near(px, 87, 8, 0x3f678fu32)).to_equal(true)
+
+    it "AC-3: lowercase top arcs match Chrome":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = _render()
+        step("o (38,10) b7774f; s (102,10) 774f2f; a (119,10) 371f0f")
+        expect(_near(px, 38, 10, 0xb7774fu32)).to_equal(true)
+        expect(_near(px, 102, 10, 0x774f2fu32)).to_equal(true)
+        expect(_near(px, 119, 10, 0x371f0fu32)).to_equal(true)

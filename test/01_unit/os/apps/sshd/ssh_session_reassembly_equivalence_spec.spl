@@ -1,0 +1,153 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# SSH session fragment reassembly equivalence spec
+#
+# Bug: networking_fragment_accumulator_quadratic_neighbors_2026-08-21
+#
+# recv_packet_payload in ssh_session.spl frames encrypted packets out of the
+# fixed-capacity SshRecvRing: length header -> rt_net_ssh_encrypted_read_plan
+# -> fill to total_frame_bytes -> take_front. This spec pins that framing the
+# same byte stream, split across arbitrarily small socket fragments, always
+# reassembles into exactly the frames a single coalesced feed produces — the
+# correctness contract the linear-accumulation rework must preserve.
+
+use std.spec.step
+
+use os.apps.sshd.ssh_recv_ring.{SshRecvRing, ssh_recv_ring_new}
+use os.apps.sshd.ssh_session.{ssh_recv_ring_u32_be}
+use os.kernel.net.rt_net_socket_facade.{rt_net_ssh_encrypted_read_plan}
+
+fn _frame(body_len: u32, seed: u64) -> [u8]:
+    """Build one admissible encrypted wire frame: BE length + body + 16-byte tag."""
+    var f: [u8] = []
+    f.push(((body_len >> 24) & 0xFFu32).to_u8())
+    f.push(((body_len >> 16) & 0xFFu32).to_u8())
+    f.push(((body_len >> 8) & 0xFFu32).to_u8())
+    f.push((body_len & 0xFFu32).to_u8())
+    var i: u64 = 0u64
+    while i < body_len.to_u64():
+        f.push(((seed + i) % 251u64).to_u8())
+        i = i + 1u64
+    i = 0u64
+    while i < 16u64:
+        f.push(0u8)
+        i = i + 1u64
+    f
+
+fn _concat_bytes(a: [u8], b: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0u64
+    while i < a.len():
+        out.push(a[i])
+        i = i + 1u64
+    i = 0u64
+    while i < b.len():
+        out.push(b[i])
+        i = i + 1u64
+    out
+
+fn _split_fragments(stream: [u8], size: u64) -> [[u8]]:
+    """Cut a byte stream into fixed-size socket fragments."""
+    var out: [[u8]] = []
+    var i: u64 = 0u64
+    while i < stream.len():
+        var piece: [u8] = []
+        var j: u64 = 0u64
+        while j < size and i + j < stream.len():
+            piece.push(stream[i + j])
+            j = j + 1u64
+        out.push(piece)
+        i = i + j
+    out
+
+fn _bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0u64
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1u64
+    true
+
+fn _frames_eq(a: [[u8]], b: [[u8]]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0u64
+    while i < a.len():
+        if not _bytes_eq(a[i], b[i]):
+            return false
+        i = i + 1u64
+    true
+
+fn _reassemble_frames(fragments: [[u8]]) -> [[u8]]:
+    """Replay recv_packet_payload framing over a fragment feed.
+
+    After every admitted fragment, extract every complete frame the ring can
+    now frame — the same interleave the live session loop performs.
+    """
+    var ring = ssh_recv_ring_new()
+    var frames: [[u8]] = []
+    var fi: u64 = 0u64
+    while fi < fragments.len():
+        expect(ring.push_bytes(fragments[fi])).to_be(true)
+        fi = fi + 1u64
+        var progress = true
+        while progress:
+            progress = false
+            if ring.len() >= 20u64:
+                val packet_length = ssh_recv_ring_u32_be(ring, 0u64)
+                val plan = rt_net_ssh_encrypted_read_plan(packet_length)
+                if plan != nil:
+                    val total = plan.unwrap().total_frame_bytes
+                    if ring.len() >= total:
+                        frames.push(ring.take_front(total))
+                        progress = true
+    frames
+
+fn _sample_stream() -> [u8]:
+    """Three back-to-back frames: typical, minimal, and larger body."""
+    val f1 = _frame(30u32, 7u64)
+    val f2 = _frame(2u32, 100u64)
+    val f3 = _frame(100u32, 13u64)
+    _concat_bytes(_concat_bytes(f1, f2), f3)
+
+describe "SSH session fragment reassembly matches coalesced feed":
+
+    it "reassembles one-byte fragments into the same frames as one coalesced feed":
+        # @req REQ-SSPEC-UNIT
+        step("reassembles one-byte fragments into the same frames as one coalesced feed")
+        val stream = _sample_stream()
+        val split_frames = _reassemble_frames(_split_fragments(stream, 1u64))
+        val whole_frames = _reassemble_frames(_split_fragments(stream, stream.len()))
+        expect(_frames_eq(split_frames, whole_frames)).to_be(true)
+
+    it "extracts all three back-to-back frames with byte-identical content":
+        # @req REQ-SSPEC-UNIT
+        step("extracts all three back-to-back frames with byte-identical content")
+        val expected: [[u8]] = [_frame(30u32, 7u64), _frame(2u32, 100u64), _frame(100u32, 13u64)]
+        val got = _reassemble_frames(_split_fragments(_sample_stream(), 3u64))
+        expect(_frames_eq(got, expected)).to_be(true)
+
+    it "splits the length header across fragments without changing the frame":
+        # @req REQ-SSPEC-UNIT
+        step("splits the length header across fragments without changing the frame")
+        # A 2-byte fragment size cuts the first frame's 4-byte length header
+        # in half: [0,0 | 0,30 | body...].
+        val expected: [[u8]] = [_frame(30u32, 7u64), _frame(2u32, 100u64), _frame(100u32, 13u64)]
+        val got = _reassemble_frames(_split_fragments(_sample_stream(), 2u64))
+        expect(_frames_eq(got, expected)).to_be(true)
+
+    it "performs one ring byte write per admitted byte at one-byte fragments":
+        # @req REQ-SSPEC-UNIT
+        step("performs one ring byte write per admitted byte at one-byte fragments")
+        val stream = _sample_stream()
+        var ring = ssh_recv_ring_new()
+        val fragments = _split_fragments(stream, 1u64)
+        var i: u64 = 0u64
+        while i < fragments.len():
+            expect(ring.push_bytes(fragments[i])).to_be(true)
+            i = i + 1u64
+        expect(ring.writes).to_be(stream.len())

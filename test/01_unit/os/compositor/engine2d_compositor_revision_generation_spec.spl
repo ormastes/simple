@@ -1,0 +1,63 @@
+use std.spec.{describe, it, expect}
+use common.ui.draw_ir.{
+    draw_ir_batch,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect
+}
+use os.compositor.compositor_engine2d.{
+    Engine2dCompositorBackend, engine2d_window_revision_exact_match
+}
+
+# Regression for doc/08_tracking/bug/
+# browser_composition_revision_counters_never_increment_2026-08-19.md:
+# every decoded wire frame gets a fresh DrawIrComposition.generation, so an
+# equality check that included the generation never matched a repeat frame
+# and the revision cache re-rastered every time (reuse_count == 0).
+
+fn generation_fixture(color: u32):
+    val embedding = draw_ir_embedding_config(
+        "web", "body", 0, 0, 4, 4, 0, 1000, true)
+    draw_ir_composition(
+        "revision-generation", "hosted-web", "software", [
+            draw_ir_batch("body", "software", embedding, [
+                draw_ir_rect("fill", 0, 0, 4, 4, color)
+            ])
+        ])
+
+describe "Engine2D revision cache across rebuilt compositions":
+    it "reuses an identical rebuilt composition under the same revision":
+        val first_composition = generation_fixture(0xFF2563EBu32)
+        val rebuilt = generation_fixture(0xFF2563EBu32)
+        expect(rebuilt.generation == first_composition.generation).to_equal(false)
+        var raster = Engine2dCompositorBackend.create_named(
+            4, 4, "software")
+        val first = raster.render_draw_ir_composition_resources_revision(
+            first_composition, [], 7, 1)
+        val reused = raster.render_draw_ir_composition_resources_revision(
+            rebuilt, [], 7, 1)
+        expect(reused.pixels).to_equal(first.pixels)
+        expect(raster.revision_render_count).to_equal(1)
+        expect(raster.revision_reuse_count).to_equal(1)
+
+        val receipt = raster.try_reuse_draw_ir_composition_revision(
+            generation_fixture(0xFF2563EBu32), [], 7, 1)
+        expect(receipt.reused).to_equal(true)
+        expect(raster.revision_reuse_count).to_equal(2)
+
+        val changed = raster.render_draw_ir_composition_resources_revision(
+            generation_fixture(0xFFDC2626u32), [], 7, 1)
+        expect(changed.pixels == first.pixels).to_equal(false)
+        expect(raster.revision_render_count).to_equal(2)
+        raster.shutdown()
+
+    it "treats rebuilt identical content as an exact window match":
+        val cached = generation_fixture(0xFF2563EBu32)
+        expect(engine2d_window_revision_exact_match(
+            7, 1, Some(cached), [],
+            7, 1, generation_fixture(0xFF2563EBu32), []
+        )).to_equal(true)
+        expect(engine2d_window_revision_exact_match(
+            7, 1, Some(cached), [],
+            7, 1, generation_fixture(0xFFDC2626u32), []
+        )).to_equal(false)

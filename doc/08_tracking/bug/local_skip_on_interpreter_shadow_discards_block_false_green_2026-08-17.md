@@ -4,8 +4,9 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN — root-caused and measured, not fixed (fixing it turns the
-affected examples honestly RED; see "Why not fixed here")
+**Status:** FIXED 2026-11-11 (lane interp10) — every shadow helper under
+`test/` now runs its block; a tree-wide prevention spec guards the class
+(verified on fresh seed 46fe8f6b6def, seed-smoke)
 **Found:** 2026-08-17, while closing the stale-`MirTerminator.Return` half of
 `vhdl_backend_block_temps_emit_process_variables_not_signals_2026-08-04.md`
 **Severity:** High — silent false green. Every assertion inside the block is
@@ -108,3 +109,33 @@ blast radius — HAS been fixed; see
   (`bin/simple --version` prints its own bootstrap-seed-only warning). Nothing
   here was re-checked against a freshly bootstrapped pure-Simple compiler.
 
+
+## 2026-11-11 triage addendum — lane interp10 (FIXED)
+
+Re-verified on the fresh seed (`bin/simple.exe`, build-commit `46fe8f6b6def`,
+`SIMPLE_LIB=src`, `test --mode=interpreter --no-cache`; all runs seed-smoke):
+
+- The shadow class is gone. Every local `skip_on_interpreter(name, block)`
+  under `test/` now calls `block()` — e.g.
+  `test/feature/lib/mcp/helpers_spec.spl:30-31` and
+  `test/03_system/feature/compiler/mir_native_spec.spl:188-189` (which also
+  carries a tracking comment citing this doc). The systemic guard is
+  `std.spec.skip_helper_lint.skip_helpers_discarding_block`
+  (`src/lib/nogc_sync_mut/spec/skip_helper_lint.spl`) plus
+  `test/01_unit/spec/skip_helper_discards_block_prevention_spec.spl`, whose
+  third example walks all of `test/` and asserts no discarding helper exists.
+  seed-smoke: that spec passes 3/3.
+- First appearance of the fix on this release line: merge `820631c6e5c7`
+  (PR #7545, 2026-11-07).
+- Honest-failure consequence, exactly as predicted here: `mir_native_spec.spl`
+  no longer false-greens — an explicit-path seed-smoke run reports
+  outcome=ERROR (the file is `@tag:in-development`, so a suite run
+  neutralises it honestly). Its current blocker is a 2026-11-09 visibility
+  tightening (`isel_module` is private to
+  `compiler.backend.native.isel_x86_64` and the spec can no longer import
+  it), not the original defect.
+- Still live, separately: the ISel SIMD-across-call gap
+  (`simd-value-across-call-unsupported`,
+  `src/compiler/70.backend/backend/native/isel_x86_64.spl:758`) — the
+  "second defect" this false green hid. It has no false-green cover anymore
+  but needs its own compiler-lane fix; flagged here, not re-diagnosed.

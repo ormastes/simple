@@ -122,3 +122,19 @@ real unregistered symbols — they were simply a ~3% sample of the family.
 Full machine-readable enumeration: `extern_backlog_enumeration.tsv`
 (`symbol<TAB>file:line`, 2377 rows).
 
+
+## mirp2-G 2026-11-05: closed (superseded by the ratchet)
+
+This file is a measurement record, not a defect. The population it enumerates
+is now frozen and enforced by `scripts/check/check-unbacked-extern-ratchet.shs`
+against `scripts/check/unbacked_extern_baseline.txt` (1339 lines, on
+release/1.0.0 at 8eea28a8180): any NEW unbacked extern fails, and a baselined
+symbol that becomes backed fails as stale. Individual symbols are tracked there.
+
+## Verification 2026-11-25 (P2 fleet, release/1.0.0)
+
+STALE-CLOSED confirmed by inspection on release/1.0.0 @ d1b74b3fa1d: both
+`scripts/check/check-unbacked-extern-ratchet.shs` and
+`scripts/check/unbacked_extern_baseline.txt` exist in-tree, so the enforcement
+mechanism this closure relies on is real. This entry stays CLOSED; the
+remaining per-symbol work is tracked by the ratchet baseline, not here.

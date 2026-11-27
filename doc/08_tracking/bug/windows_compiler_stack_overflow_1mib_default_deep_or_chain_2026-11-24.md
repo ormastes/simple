@@ -17,9 +17,9 @@
   `PeImagePolicy.default()` stack reserve raised to 64 MiB for the internal COFF linker.
 - **Still open:** `lower_expr` recursion on long binary-operator chains is unbounded in the source;
   an iterative lowering of left-assoc chains would remove the dependence on stack size entirely.
-- **Open gaps (review 2026-11-24):** the `extra_args` override check matches `/STACK:` exact-case only (lld-link also
-  accepts `/stack:`, `-STACK:`; the explicit flag still wins because it is pushed last). The windows-gnu lane
-  (`native_all_support.spl` `NATIVE_MINGW_STACK_RESERVE_BYTES`, 8 MiB) would recur the overflow for a mingw-built compiler.
+- **Open gaps (review 2026-11-24, closed 2026-11-25):** the `extra_args` override check matched `/STACK:` exact-case only (lld-link also
+  accepts `/stack:`, `-STACK:`, `-stack:`), and the windows-gnu lane (`native_all_support.spl` `NATIVE_MINGW_STACK_RESERVE_BYTES`) still
+  defaulted to 8 MiB instead of 64 MiB. Both remaining linker parity gaps are closed below.
 
 ## Fix (2026-11-24, lowering side)
 
@@ -53,3 +53,18 @@
   shape of the arm and helper, runtime `or`/`and`/mixed chains with side-effecting operands pinning evaluation
   order and short-circuit, and a pure-Simple `MirLowering` run over a 60-term `or` chain asserting 59
   `logic_merge`/`logic_short`/`logic_rhs` blocks for the function.
+
+## Fix (2026-11-25, remaining linker parity)
+
+- **MSVC/lld-link stack override detection (`src/compiler/70.backend/linker/msvc.spl`):** `MsvcConfig.build_args`
+  now normalizes `extra_args` entries with `arg.to_upper()` and checks both `/STACK:` and `-STACK:` prefixes
+  (covering `/STACK:`, `/stack:`, `-STACK:`, `-stack:` case-insensitively) before appending the default
+  `/STACK:{MSVC_DEFAULT_STACK_RESERVE}` (`67108864`).
+- **Windows GNU/MinGW stack reserve parity (`src/compiler/70.backend/linker/_LinkerWrapper/native_all_support.spl`):**
+  `NATIVE_MINGW_STACK_RESERVE_BYTES` raised from `8388608` (8 MiB) to `67108864` (64 MiB) in PR #11421, matching
+  `PeImagePolicy.default()` (`0x4000000`) and `MSVC_DEFAULT_STACK_RESERVE`; `native_mingw_stack_reserve_args`
+  now also checks case-insensitively (`flag.to_lower()`) for `--stack`, `--stack,`, `--stack=`, `-Wl,--stack`, and
+  comma-separated `-Wl,...,--stack,...` overrides so explicit caller settings always suppress the default.
+- **Guards:** `test/01_unit/compiler/linker/windows_mingw_stack_reserve_spec.spl`,
+  `test/01_unit/compiler/linker/windows_mingw_p3_parity_spec.spl`, and
+  `test/01_unit/compiler/backend/msvc_linker_candidate_spec.spl`.

@@ -1,0 +1,127 @@
+# Purpose and audience: verify BuildCache.load reclaims SDN parse scratch via
+# transient scope while preserving persistent BuildCache fidelity and never
+# leaking an open transient scope on missing, corrupt, or nested-scope loads.
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{cwd, dir_create_all, file_write_exact,
+    getpid, time_now_unix_micros}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
+    transient_scope_pause, transient_scope_end}
+use compiler.driver.driver_build.incremental.{
+    BuildCache, DependencyEntry, FileFingerprint, build_cache_module_witness
+}
+
+val BUILD_CACHE_LOAD_SPEC_ROOT: text = cwd() + "/build/test/build-cache-transient-load-" +
+    getpid().to_text() + "-" + time_now_unix_micros().to_text()
+
+fn _spec_scratch_churn() -> bool:
+    if not transient_scope_begin():
+        return false
+    var junk: [text] = []
+    var i = 0
+    while i < 2048:
+        junk = junk.push("build-cache-load-churn-{i}-" + sha256_text(i.to_text()))
+        i = i + 1
+    val ok = junk.len() == 2048
+    val ended = transient_scope_end()
+    ok and ended
+
+describe "BuildCache.load transient scratch reclamation":
+    it "round-trips persisted entries across transient scope reclamation and churn":
+        val root = BUILD_CACHE_LOAD_SPEC_ROOT + "/roundtrip"
+        expect(dir_create_all(root)).to_equal(true)
+        val out_a = root + "/mod_a.o"
+        val out_b = root + "/mod_b.o"
+        val dead_out = root + "/deleted_mod_c.o"
+        expect(file_write_exact(out_a, "obj-a")).to_equal(true)
+        expect(file_write_exact(out_b, "obj-b")).to_equal(true)
+
+        val cache_path = root + "/build_cache.sdn"
+        val hash_a = sha256_text("source-a")
+        val hash_b = sha256_text("source-b")
+        val iface_a = sha256_text("iface-a")
+        val deps_iface_a = sha256_text("deps-iface-a")
+        val sdn_body = [
+            "version: 7",
+            "entries: [",
+            "  { source: \"src/mod_a.spl\", fingerprint: { hash: \"sha256:" + hash_a + "\", size: 123, modified_time: 456 }, dependencies: [\"src/dep_1.spl\", \"src/dep_2.spl\"], outputs: [\"" + out_a + "\"], deps_iface: \"sha256:" + deps_iface_a + "\", interface_digest: \"sha256:" + iface_a + "\", module_witness: \"witness-a-v1\", macro_input_root: \"sha256:macro-a\" }",
+            "  { source: \"src/mod_b.spl\", fingerprint: { hash: \"sha256:" + hash_b + "\", size: 789, modified_time: 1011 }, dependencies: [], outputs: [\"" + out_b + "\"], deps_iface: \"\", interface_digest: \"\", module_witness: \"witness-b-v1\", macro_input_root: \"\" }",
+            "  { source: \"src/mod_dead.spl\", fingerprint: { hash: \"sha256:" + hash_b + "\", size: 10, modified_time: 20 }, dependencies: [\"src/dep_dead.spl\"], outputs: [\"" + dead_out + "\"], deps_iface: \"\", interface_digest: \"\", module_witness: \"witness-dead\", macro_input_root: \"\" }",
+            "]"
+        ].join("\n") + "\n"
+        expect(file_write_exact(cache_path, sdn_body)).to_equal(true)
+
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        val loaded = BuildCache.load(cache_path)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+
+        # Force heavy transient allocation + reclamation after BuildCache.load to
+        # verify every promoted string and nested [text] array in BuildCache is persistent.
+        expect(_spec_scratch_churn()).to_equal(true)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+
+        expect(loaded.version).to_equal(7)
+        expect(loaded.entries.keys().len()).to_equal(2)
+        expect(loaded.entries.contains_key("src/mod_dead.spl")).to_equal(false)
+
+        val entry_a: DependencyEntry = loaded.entries["src/mod_a.spl"]
+        val fp_a: FileFingerprint = loaded.fingerprints["src/mod_a.spl"]
+        expect(fp_a.content_hash).to_equal(hash_a)
+        expect(fp_a.size).to_equal(123)
+        expect(fp_a.modified_time).to_equal(456)
+        expect(entry_a.dependencies).to_equal(["src/dep_1.spl", "src/dep_2.spl"])
+        expect(entry_a.outputs).to_equal([out_a])
+        expect(entry_a.deps_iface).to_equal(deps_iface_a)
+        expect(entry_a.interface_digest).to_equal(iface_a)
+        expect(build_cache_module_witness(loaded, "src/mod_a.spl")).to_equal("witness-a-v1")
+        expect(entry_a.macro_input_root).to_equal("sha256:macro-a")
+
+        val entry_b: DependencyEntry = loaded.entries["src/mod_b.spl"]
+        expect(entry_b.dependencies.len()).to_equal(0)
+        expect(entry_b.outputs).to_equal([out_b])
+        expect(build_cache_module_witness(loaded, "src/mod_b.spl")).to_equal("witness-b-v1")
+
+    it "returns an empty cache and closes transient scope on missing or corrupt files":
+        val root = BUILD_CACHE_LOAD_SPEC_ROOT + "/corrupt"
+        expect(dir_create_all(root)).to_equal(true)
+
+        val missing_path = root + "/does_not_exist.sdn"
+        val from_missing = BuildCache.load(missing_path)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        expect(from_missing.entries.keys().len()).to_equal(0)
+
+        val corrupt_path = root + "/corrupt_cache.sdn"
+        expect(file_write_exact(corrupt_path, "version: [unterminated\nentries: { broken\n")).to_equal(true)
+        val from_corrupt = BuildCache.load(corrupt_path)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        expect(from_corrupt.entries.keys().len()).to_equal(0)
+        expect(from_corrupt.version).to_equal(0)
+
+        val wrong_schema_path = root + "/wrong_schema.sdn"
+        expect(file_write_exact(wrong_schema_path, "version: \"not-an-int\"\nentries: \"not-an-array\"\n")).to_equal(true)
+        val from_wrong_schema = BuildCache.load(wrong_schema_path)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        expect(from_wrong_schema.entries.keys().len()).to_equal(0)
+
+    it "preserves an active or paused caller transient scope without stealing it":
+        val root = BUILD_CACHE_LOAD_SPEC_ROOT + "/nested"
+        expect(dir_create_all(root)).to_equal(true)
+        val cache_path = root + "/nested_cache.sdn"
+        expect(file_write_exact(cache_path, "version: 3\nentries: []\n")).to_equal(true)
+
+        expect(transient_scope_begin()).to_equal(true)
+        val active_loaded = BuildCache.load(cache_path)
+        val state_after_active = transient_array_scope_state_v1()
+        val active_ver = active_loaded.version
+        expect(transient_scope_pause()).to_equal(true)
+        val paused_loaded = BuildCache.load(cache_path)
+        val state_after_paused = transient_array_scope_state_v1()
+        val paused_ver = paused_loaded.version
+        expect(transient_scope_end()).to_equal(true)
+
+        expect(state_after_active).to_equal(1)
+        expect(state_after_paused).to_equal(2)
+        expect(active_ver).to_equal(3)
+        expect(paused_ver).to_equal(3)
+        expect(transient_array_scope_state_v1()).to_equal(0)

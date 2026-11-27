@@ -130,3 +130,17 @@ Both carry a real `Results:` line with non-zero executed counts, so this is not
 the `exit 0 with no summary` silent-green mode. Confirms FIXED — unlike the
 sibling `hwir_foundation_spec` fix from the same week, this one is genuinely
 present in the tree.
+
+## Verification 2026-11-25 (p2w5-ad lane, release/1.0.0)
+
+The SSpec conversion is present in the current tree: both canonical files are
+Modern SSpec (`test/01_unit/os/smux_spec.spl` — 9 `describe` blocks, no
+`fn main`; `test/01_unit/os/smux/smux_dashboard_spec.spl` — 5 `describe`
+blocks, no `fn main`). The duplicate `test/unit/` mirror tree this record
+tracks no longer exists: it was retired wholesale by dedup commit
+`915549d23a6` ("test: dedup phase A 12/12 — delete last 184 identical legacy
+copies, retire mirror asserts"), so the byte-identical-mirror requirement is
+moot. Spec re-execution is environment-blocked at HEAD (pinned seed rejects
+`@representation_boundary` in the test runner); verified by code inspection.
+
+Status: RESOLVED, unchanged.

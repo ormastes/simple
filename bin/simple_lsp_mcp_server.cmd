@@ -42,6 +42,11 @@ if "%SIMPLE_LOG%"=="" set "SIMPLE_LOG=error"
 if "%RUST_LOG%"=="" set "RUST_LOG=error"
 if "%SIMPLE_EXECUTION_MODE%"=="" set "SIMPLE_EXECUTION_MODE=interpreter"
 call "%~dp0simple.cmd" run "%~dp0..\src\app\simple_lsp_mcp\main.spl" %*
+set "LSP_MCP_RC=%ERRORLEVEL%"
+rem Never write a JSON-RPC frame here: "id":null answers no request and MCP
+rem clients reject it as a schema error. stderr + non-zero exit signals death.
+if not "%LSP_MCP_RC%"=="0" 1>&2 echo simple_lsp_mcp_server: exited %LSP_MCP_RC%
+exit /b %LSP_MCP_RC%
 
 :done
 exit /b %ERRORLEVEL%

@@ -1,0 +1,35 @@
+# Pure-Simple core interpreter: `use unit.<family>[.{sfx}|.*]` resolves through
+# the unit-system routing in core/interpreter/module_loader_resolve.spl
+# (`unit.<...>` -> src/unit/<org>/<...>) and the imported suffixes evaluate via
+# core/interpreter/eval_units.spl (std.common.units catalog scales).
+# Note: import lists are passed as raw strings (r"..."): a plain "...{kmph}..."
+# literal interpolates `{kmph}` in the spec itself before the probe parses it.
+use std.spec.{describe, it, expect}
+use compiler.frontend.core.interpreter.mod.{core_interpret}
+use compiler.frontend.core.interpreter.value.{val_get_int}
+use compiler.frontend.core.interpreter.eval.{eval_get_error}
+
+fn probe(src: text) -> text:
+    val result = core_interpret(src + "\n", "use_unit_import_probe.spl")
+    val err = eval_get_error()
+    if err != "": return "ERR:" + err
+    "" + val_get_int(result)
+
+describe "core interpreter use unit import":
+    it "parses use unit.velocity.{kmph} and evaluates the suffix":
+        expect(probe(r"use unit.velocity.{kmph}" + "\nval s = 60_kmph\ns.value()")).to_equal("60")
+
+    it "imports several suffixes from one family":
+        expect(probe(r"use unit.length.{km, m}" + "\nval d = 2_km\nif d.to_m().value() > 1999.9: 1 else: 0")).to_equal("1")
+
+    it "imports a whole family with a glob":
+        expect(probe("use unit.velocity.*\nval s = 36.0_kmph\nif s.to_mps().value() > 9.99: 1 else: 0")).to_equal("1")
+
+    it "imports a family module path":
+        expect(probe("use unit.velocity\nval s = 60_kmph\ns.value()")).to_equal("60")
+
+    it "keeps chained conversion working after the import":
+        expect(probe(r"use unit.velocity.{kmph, mps}" + "\nval s = 60_kmph\nif s.to_mps().to_kmph().value() > 59.9: 1 else: 0")).to_equal("1")
+
+    it "rejects an unknown unit family":
+        expect(probe(r"use unit.nosuchfamily.{zz}" + "\n1")).to_start_with("ERR:")

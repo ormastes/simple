@@ -1,0 +1,56 @@
+# Workaround discovery must not enumerate build caches.
+# Bug: workaround_store_git_ls_files_timeout_scv_admission_2026_11_09
+# A tree with ~120k untracked files under build/scv made the unscoped
+# `git ls-files --others` exceed its 30 s / 16 MB bounds and kill native builds.
+use std.spec.*
+use app.bug.workaround_store.{workaround_fullscan_args, workaround_status_args, workaround_limit_from_env, workaround_tracked_paths}
+use std.nogc_async_mut.sosix.workaround_host.{workaround_host_process, workaround_host_temp_dir, workaround_host_mkdir}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+
+fn git_in(root: text, args: [text]) -> (text, i64):
+    var inv = ["-C", root]
+    for a in args: inv.push(a)
+    val (out, err, code) = workaround_host_process("git", inv, 60000, 67108864)
+    (out, code)
+
+fn make_fixture() -> text:
+    val parent = "build/wgit_scope_spec"
+    workaround_host_mkdir(parent)
+    val root: text = match workaround_host_temp_dir(parent, "wgitscope"):
+        case Ok(v): v
+        case Err(_): ""
+    workaround_host_mkdir(root + "/src")
+    workaround_host_mkdir(root + "/build/scv/cache")
+    workaround_host_mkdir(root + "/src/runtime/vendor")
+    file_write(root + "/src/a.spl", "fn a() -> i64:\n    1\n")
+    file_write(root + "/src/runtime/vendor/v.c", "int v;\n")
+    file_write(root + "/notes.txt", "x")
+    var i = 0
+    while i < 300:
+        file_write(root + "/build/scv/cache/obj_{i}.spl", "x")
+        i = i + 1
+    git_in(root, ["init", "-q"])
+    root
+
+describe "workaround git discovery scope":
+    it "full scan lists source files but never build caches or vendor":
+        val root = make_fixture()
+        expect(root != "").to_equal(true)
+        val (out, code) = git_in(root, workaround_fullscan_args())
+        expect(code).to_equal(0)
+        val paths = workaround_tracked_paths(out).unwrap()
+        expect(paths.contains("src/a.spl")).to_equal(true)
+        expect(paths.len()).to_equal(1)
+
+    it "status scan excludes build caches":
+        val root = make_fixture()
+        val (out, code) = git_in(root, workaround_status_args())
+        expect(code).to_equal(0)
+        expect(out.contains("build/")).to_equal(false)
+        expect(out.contains("src/a.spl")).to_equal(true)
+
+    it "limits are overridable and fall back safely":
+        expect(workaround_limit_from_env("", 7)).to_equal(7)
+        expect(workaround_limit_from_env("abc", 7)).to_equal(7)
+        expect(workaround_limit_from_env("-5", 7)).to_equal(7)
+        expect(workaround_limit_from_env("90000", 7)).to_equal(90000)

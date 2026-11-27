@@ -1,0 +1,61 @@
+# AUTHORED_NOT_RUN. Production reducer and empty-owner finalization only.
+# No fabricated native handles, claimed native faults or released workload debit.
+# @req REQ-WINDOWS-HOST-CLEANUP-DISPOSITION-001
+# @req REQ-WINDOWS-HOST-CLEANUP-DISPOSITION-002
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.orchestration.host_windows_deployment_v2.*
+use std.nogc_sync_mut.orchestration.host_windows_local_root_v3.*
+use std.nogc_sync_mut.orchestration.host_service_private_receipt_v2.HostServicePrivateCleanupV2
+
+describe "Host cleanup separates consumed resources from retained diagnostics":
+    it "keeps a consumed machine diagnostic while another component remains and later closes":
+        step("Classify the actual production consumed-error literal as consumed with a diagnostic")
+        val machine = host_windows_cleanup_disposition_v3("consumed-error")
+        expect(machine.consumed).to_equal(true)
+        expect(machine.error).to_equal("windows-deployment-machine-close:consumed-error")
+        step("Model the next native component remaining retained without replacing the original diagnostic")
+        val pending = host_windows_cleanup_disposition_v3("retained", machine.error, "windows-deployment-native-close")
+        expect(pending.consumed).to_equal(false)
+        expect(pending.error).to_equal(machine.error)
+        step("Retry only the retained partner and preserve the first diagnostic when it is consumed")
+        val completed = host_windows_cleanup_disposition_v3("released", pending.error, "windows-deployment-native-close")
+        expect(completed.consumed).to_equal(true)
+        expect(completed.error).to_equal(machine.error)
+        val another_error = host_windows_cleanup_disposition_v3("consumed-error", completed.error, "other-native-close")
+        expect(another_error.error).to_equal(machine.error)
+        val paired_pending = host_windows_cleanup_disposition_v3("retained", "machine-authority-storage-consumed-error")
+        val paired_done = host_windows_cleanup_disposition_v3("consumed-error", paired_pending.error)
+        expect(paired_pending.consumed).to_equal(false)
+        expect(paired_done.consumed).to_equal(true)
+        expect(paired_done.error).to_equal("machine-authority-storage-consumed-error")
+
+    it "leaves ordinary retention transient and keeps unproven stale or unknown ownership pending":
+        step("Keep retained ownership pending without inventing a permanent native error")
+        val pending = host_windows_cleanup_disposition_v3("retained")
+        val released = host_windows_cleanup_disposition_v3("released", pending.error)
+        val stale = host_windows_cleanup_disposition_v3("stale", released.error)
+        expect(pending.consumed).to_equal(false)
+        expect(pending.error).to_equal("")
+        expect(released.consumed).to_equal(true)
+        expect(released.error).to_equal("")
+        expect(stale.consumed).to_equal(false)
+        expect(stale.error).to_equal("windows-deployment-machine-close:stale")
+        val unknown = host_windows_cleanup_disposition_v3("unknown")
+        expect(unknown.consumed).to_equal(false)
+        expect(unknown.error).to_equal("windows-deployment-machine-close:unknown")
+
+    it "finishes actual empty deployment and local cleanup with the retained first diagnostic":
+        step("Finalize a deployment whose modeled machine component has already been consumed")
+        val diagnostic = host_windows_cleanup_disposition_v3("consumed-error")
+        val cleanup = HostWindowsDeploymentCleanupV2(native: HostServicePrivateCleanupV2(files: [], roots: []),
+            residue: nil, machine: nil, error: diagnostic.error)
+        val deployment = host_windows_deployment_cleanup_v2(cleanup)
+        expect(deployment.closed).to_equal(true)
+        expect(deployment.cleanup.is_none()).to_equal(true)
+        expect(deployment.error).to_equal(diagnostic.error)
+        step("Carry the same diagnostic through the actual local cleanup finalization")
+        val local = host_windows_local_cleanup_v3(HostWindowsLocalCleanupV3(deployment: nil,
+            deployment_cleanup: Some(cleanup), error: diagnostic.error))
+        expect(local.closed).to_equal(true)
+        expect(local.cleanup.is_none()).to_equal(true)
+        expect(local.error).to_equal(diagnostic.error)

@@ -1,5 +1,5 @@
 # BUG: test runner JSON format is not machine-readable
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-25 — JSON retired by design; SDN format verified fail-closed on Windows
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -49,3 +49,32 @@ blocker, then build one fresh incremental Stage 4 CLI and run the single
 whole-stdout contract through that exact binary. Do not retry the full CLI
 through the Rust seed or weaken the aggregate assertions.
 
+
+## Verification 2026-11-25 (Windows, worktree wt-p3-baa, tracked self-hosted bin/simple.exe)
+
+The defect as filed is moot: the JSON test-output surface no longer exists.
+
+- `--format json` (and `--json`, `--format=json`) is rejected at argument
+  validation (`src/app/test_runner_new/sdn_worker_args.spl:41-46`) with
+  `ERROR: JSON test output is retired; use --format sdn`, exit 2, nothing on
+  stdout. Measured with
+  `SIMPLE_LIB=src bin/simple.exe test test/00_quick/spec_it_accumulation_probe.spl --mode=interpreter --format json`.
+- The replacement machine-readable lane, `--format sdn`, emits exactly one
+  frame on stdout with diagnostics on stderr. On this Windows host the V4
+  scoped-environment process provider is unavailable, so the wrapper fails
+  closed; measured stdout was exactly one frame and exit 1:
+  `{error: "SDN worker scoped-environment process provider is unavailable or insufficient", schema: simple.test-runner.failure/v1, success: false, worker_exit_code: -1}`
+  (`src/app/test_runner_new/sdn_wrapper.spl:255-259`). This satisfies the
+  filed contract's shape — one final machine-readable object on stdout whose
+  `success` covers every lane, diagnostics on stderr — by failing closed
+  rather than emitting human text.
+- **Limit:** the SDN happy path (worker subprocess producing a passing
+  result frame) is environment-blocked on this host — the
+  `process_observation_capabilities_v4()` provider gate
+  (`src/lib/nogc_sync_mut/io/process_observation_v4.spl`) reports the V4
+  owner unavailable on Windows. That path was verified by code inspection
+  only; it needs a Linux run with an admitted binary for end-to-end
+  confirmation. The Stage-4 qualification blocker named above
+  (`cli_global_flags_check_timeout_2026-07-05.md`) is superseded here by the
+  deployed self-hosted binary, which parses current source and produced the
+  behavior recorded in this note.

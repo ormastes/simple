@@ -1,0 +1,76 @@
+"""
+CU-007 acceptance: extension deactivation cleans command/view/event subscribers
+and never deletes a session or worktree.
+
+Source: doc/03_plan/app/llm_caret/caret_suite_final_ui_extension_traceability_plan.md
+(acceptance table) and caret_workbench_ui_plan.md.
+"""
+# @req CU-007 REQ-CARET-EXT-004
+
+use std.spec.*
+use std.spec.step
+use std.editor.extensions.host.{ExtensionHost}
+use std.editor.extensions.manifest_sdn.{extension_manifest_decode}
+use std.io_runtime.{dir_exists, dir_create}
+
+fn cu007_sdn() -> text:
+    "extension:\n" +
+    "  schema: simple.ide.extension/2\n" +
+    "  id: cu7.ext\n" +
+    "  version: 1.0.0\n" +
+    "  host: in_process\n" +
+    "activation:\n" +
+    '  events: ["onCommand:cu7.run"]' + "\n" +
+    "contributes:\n" +
+    '  commands: [{id: "cu7.run", title: "Run", category: "Cu7"}]' + "\n" +
+    '  view_containers: [{id: "cu7.box", title: "Box", location: "activitybar", order: 1}]' + "\n" +
+    '  views: [{id: "cu7.view", kind: "tree", container: "cu7.box", provider: "cu7.p"}]' + "\n"
+
+fn cu007_handler(payload: text) -> Result<text, text>:
+    Ok("ok:" + payload)
+
+fn cu007_listener(payload: text):
+    pass_do_nothing
+
+fn cu007_host() -> ExtensionHost:
+    val host = ExtensionHost.new()
+    val load = extension_manifest_decode(cu007_sdn())
+    host.register_manifest(load.manifest, "<cu007>")
+    host.activate("cu7.ext")
+    host.register_command_handler("cu7.ext", "cu7.run", "Run", cu007_handler)
+    host.on_event("cu7.ext", "session.output", cu007_listener)
+    host
+
+describe "CU-007 extension deactivation cleanup":
+
+    it "removes command, view and event subscribers on deactivate":
+        # @req CU-007
+        step("activate with command handler, view and event listener")
+        val host = cu007_host()
+        expect(host.command_registry.len()).to_equal(1)
+        expect(host.view_registry.len()).to_equal(1)
+        expect(host.listeners.entries.len()).to_equal(1)
+        step("deactivate")
+        expect(host.deactivate("cu7.ext")).to_equal(true)
+        expect(host.command_registry.len()).to_equal(0)
+        expect(host.view_registry.len()).to_equal(0)
+        expect(host.listeners.entries.len()).to_equal(0)
+        expect(host.extension_leftover_count("cu7.ext")).to_equal(0)
+
+    it "keeps the extension record so the session can re-activate it":
+        # @req CU-007
+        val host = cu007_host()
+        host.deactivate("cu7.ext")
+        expect(host.extension_count()).to_equal(1)
+        expect(host.is_active("cu7.ext")).to_equal(false)
+
+    it "never deletes a session worktree directory":
+        # @req CU-007
+        step("create a worktree-like directory owned by the session")
+        val wt = "build/tmp/cu007_session_worktree"
+        dir_create(wt, true)
+        expect(dir_exists(wt)).to_equal(true)
+        step("deactivate the extension")
+        val host = cu007_host()
+        host.deactivate("cu7.ext")
+        expect(dir_exists(wt)).to_equal(true)

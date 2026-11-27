@@ -1,0 +1,167 @@
+# Pure protocol state vectors only. NOT_RUN; no authenticated channel or native IO.
+use std.spec.*
+use std.common.crypto.sha256.sha256_u8_hex
+use std.nogc_async_mut.container.providers.windows.docker_broker_frame_v3.*
+use std.nogc_async_mut.container.providers.windows.docker_broker_progress_v3.*
+
+fn progress_frame_v3(sequence: i64 = 1) -> WindowsDockerBrokerFrameV3:
+    val body: [u8] = [0u8, 255u8, 128u8, 10u8]
+    WindowsDockerBrokerFrameV3(kind: "input",
+        target_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        control_kind: "input", nonce_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        revision: 1, frame_sequence: sequence, payload_digest: sha256_u8_hex(body), payload_bytes: body.len(),
+        accepted_prefix: 0, rows: 0, cols: 0, stream: "", byte_offset: 0,
+        complete: false, unknown: false, body: body)
+
+fn progress_reply_v3(request: WindowsDockerBrokerFrameV3, prefix: i64,
+        complete: bool = false, unknown: bool = false) -> WindowsDockerBrokerFrameV3:
+    var reply = request
+    reply.kind = "progress"
+    reply.body = []
+    reply.accepted_prefix = prefix
+    reply.complete = complete
+    reply.unknown = unknown
+    reply
+
+fn output_frame_v3(sequence: i64, stream: text, offset: i64) -> WindowsDockerBrokerFrameV3:
+    var frame = progress_frame_v3(sequence)
+    frame.kind = "output"
+    frame.control_kind = ""
+    frame.nonce_digest = ""
+    frame.revision = 0
+    frame.stream = stream
+    frame.byte_offset = offset
+    frame
+
+describe "Windows broker retained frame progress":
+    it "reports actual prefix for stale retries and continues only the matching prefix":
+        step("Offer a binary input frame, observe a partial prefix, then replay old and current prefixes")
+        val frame = progress_frame_v3()
+        var progress = WindowsDockerBrokerProgressV3.create_v3(frame.target_digest).unwrap()
+        expect(progress.offer_v3(frame).unwrap().disposition).to_equal(WindowsDockerBrokerDispositionV3.NewFrame)
+        expect(progress.observe_progress_v3(progress_reply_v3(frame, 2)).unwrap().accepted_prefix).to_equal(2)
+        val stale = progress.offer_v3(frame).unwrap()
+        expect(stale.disposition).to_equal(WindowsDockerBrokerDispositionV3.ProgressOnly)
+        expect(stale.accepted_prefix).to_equal(2)
+        var remaining = frame
+        remaining.accepted_prefix = 2
+        expect(progress.offer_v3(remaining).unwrap().disposition).to_equal(WindowsDockerBrokerDispositionV3.ContinueFrame)
+        expect(progress.observe_progress_v3(progress_reply_v3(frame, 1)).unwrap().accepted_prefix).to_equal(2)
+
+    it "freezes unknown outcomes and never treats a later complete reply as permission":
+        step("Retain unknown input outcome across retry and a later contradictory completion")
+        val frame = progress_frame_v3()
+        var progress = WindowsDockerBrokerProgressV3.create_v3(frame.target_digest).unwrap()
+        val offered = progress.offer_v3(frame).unwrap()
+        expect(progress.observe_progress_v3(progress_reply_v3(frame, 1, false, true)).unwrap().disposition).to_equal(
+            WindowsDockerBrokerDispositionV3.Unknown)
+        expect(progress.offer_v3(frame).unwrap().disposition).to_equal(WindowsDockerBrokerDispositionV3.Unknown)
+        expect(progress.observe_progress_v3(progress_reply_v3(frame, 4, true)).unwrap().disposition).to_equal(
+            WindowsDockerBrokerDispositionV3.Unknown)
+        expect(progress.offer_v3(progress_frame_v3(2)).is_err()).to_equal(true)
+
+    it "rejects changed control identity or payload under an existing frame sequence":
+        step("Mutate nonce, revision, payload or target while retaining the frame number")
+        val frame = progress_frame_v3()
+        var progress = WindowsDockerBrokerProgressV3.create_v3(frame.target_digest).unwrap()
+        val offered = progress.offer_v3(frame).unwrap()
+        for mutation in ["nonce", "revision", "payload", "target"]:
+            var changed = frame
+            if mutation == "nonce": changed.nonce_digest = frame.target_digest
+            elif mutation == "revision": changed.revision = 2
+            elif mutation == "target": changed.target_digest = frame.nonce_digest
+            else:
+                changed.body = [1u8, 2u8, 3u8, 4u8]
+                changed.payload_digest = sha256_u8_hex(changed.body)
+            expect(progress.offer_v3(changed).is_err()).to_equal(true)
+
+    it "advances exactly one sequence after completion and rejects overlap or gaps":
+        step("Complete a frame before admitting its exact successor")
+        val frame = progress_frame_v3()
+        var progress = WindowsDockerBrokerProgressV3.create_v3(frame.target_digest).unwrap()
+        val offered = progress.offer_v3(frame).unwrap()
+        expect(progress.offer_v3(progress_frame_v3(2)).is_err()).to_equal(true)
+        expect(progress.observe_progress_v3(progress_reply_v3(frame, 4, true)).unwrap().disposition).to_equal(
+            WindowsDockerBrokerDispositionV3.Complete)
+        expect(progress.offer_v3(frame).unwrap().disposition).to_equal(WindowsDockerBrokerDispositionV3.Complete)
+        expect(progress.offer_v3(progress_frame_v3(3)).is_err()).to_equal(true)
+        expect(progress.offer_v3(progress_frame_v3(2)).unwrap().disposition).to_equal(WindowsDockerBrokerDispositionV3.NewFrame)
+        expect(progress.offer_v3(frame).is_err()).to_equal(true)
+
+    it "rejects unsolicited or incorrectly bound progress before changing the prefix":
+        step("Check exact retained request correlation for every incoming progress message")
+        val frame = progress_frame_v3()
+        var progress = WindowsDockerBrokerProgressV3.create_v3(frame.target_digest).unwrap()
+        expect(progress.observe_progress_v3(progress_reply_v3(frame, 1)).is_err()).to_equal(true)
+        val offered = progress.offer_v3(frame).unwrap()
+        var wrong = progress_reply_v3(frame, 1)
+        wrong.frame_sequence = 2
+        expect(progress.observe_progress_v3(wrong).is_err()).to_equal(true)
+        wrong = progress_reply_v3(frame, 5)
+        expect(progress.observe_progress_v3(wrong).is_err()).to_equal(true)
+        expect(progress.offer_v3(frame).unwrap().accepted_prefix).to_equal(0)
+
+    it "binds exact geometry independently from input bytes":
+        step("Track a geometry effect without interpreting it as an input prefix")
+        var frame = progress_frame_v3()
+        frame.kind = "geometry"
+        frame.control_kind = "geometry"
+        frame.body = []
+        frame.payload_bytes = 0
+        frame.rows = 24
+        frame.cols = 80
+        frame.payload_digest = windows_docker_broker_geometry_digest_v3(24, 80).unwrap()
+        var progress = WindowsDockerBrokerProgressV3.create_v3(frame.target_digest).unwrap()
+        val offered = progress.offer_v3(frame).unwrap()
+        var changed = frame
+        changed.cols = 81
+        changed.payload_digest = windows_docker_broker_geometry_digest_v3(24, 81).unwrap()
+        expect(progress.offer_v3(changed).is_err()).to_equal(true)
+        expect(progress.observe_progress_v3(progress_reply_v3(frame, 0, true)).unwrap().disposition).to_equal(
+            WindowsDockerBrokerDispositionV3.Complete)
+
+    it "retains the greatest known prefix when an older progress message reports uncertainty":
+        step("Freeze unknown without rewinding the already observed accepted prefix")
+        val frame = progress_frame_v3()
+        var progress = WindowsDockerBrokerProgressV3.create_v3(frame.target_digest).unwrap()
+        val offered = progress.offer_v3(frame).unwrap()
+        val partial = progress.observe_progress_v3(progress_reply_v3(frame, 3)).unwrap()
+        val unknown = progress.observe_progress_v3(progress_reply_v3(frame, 1, false, true)).unwrap()
+        expect(unknown.accepted_prefix).to_equal(3)
+        expect(unknown.disposition).to_equal(WindowsDockerBrokerDispositionV3.Unknown)
+
+describe "Windows sole-reader output ordering":
+    it "tracks distinct stdout and stderr offsets with one ordered output sequence":
+        step("Accept interleaved raw stdout and stderr chunks without merging their offsets")
+        val first = output_frame_v3(1, "stdout", 0)
+        var output = WindowsDockerBrokerOutputProgressV3.create_v3(first.target_digest, false).unwrap()
+        expect(output.accept_v3(first).unwrap()).to_equal(true)
+        expect(output.accept_v3(output_frame_v3(2, "stderr", 0)).unwrap()).to_equal(true)
+        expect(output.accept_v3(output_frame_v3(3, "stdout", 0)).is_err()).to_equal(true)
+        expect(output.accept_v3(output_frame_v3(3, "stdout", 4)).unwrap()).to_equal(true)
+        expect(output.accept_v3(output_frame_v3(5, "stderr", 4)).is_err()).to_equal(true)
+        expect(output.accept_v3(output_frame_v3(4, "stderr", 4)).unwrap()).to_equal(true)
+
+    it "rejects separate-channel claims for merged TTY output and rejects bytes after EOF":
+        step("Bind actual TTY mode and retain end-of-stream without interpreting workload completion")
+        val first = output_frame_v3(1, "tty", 0)
+        var output = WindowsDockerBrokerOutputProgressV3.create_v3(first.target_digest, true).unwrap()
+        expect(output.accept_v3(output_frame_v3(1, "stdout", 0)).is_err()).to_equal(true)
+        expect(output.accept_v3(first).unwrap()).to_equal(true)
+        var eof = output_frame_v3(2, "tty", 4)
+        eof.body = []
+        eof.payload_bytes = 0
+        eof.payload_digest = sha256_u8_hex(eof.body)
+        eof.complete = true
+        expect(output.accept_v3(eof).unwrap()).to_equal(true)
+        expect(output.accept_v3(output_frame_v3(3, "tty", 4)).is_err()).to_equal(true)
+
+    it "does not wrap the exhausted output sequence or admit a different target":
+        step("Check exact target correlation and the maximum positive sequence")
+        val last = output_frame_v3(9223372036854775807, "stdout", 0)
+        var output = WindowsDockerBrokerOutputProgressV3.create_v3(last.target_digest, false, 9223372036854775807).unwrap()
+        var wrong = last
+        wrong.target_digest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        expect(output.accept_v3(wrong).is_err()).to_equal(true)
+        expect(output.accept_v3(last).unwrap()).to_equal(true)
+        expect(output.accept_v3(last).is_err()).to_equal(true)

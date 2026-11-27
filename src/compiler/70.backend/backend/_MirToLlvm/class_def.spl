@@ -10,7 +10,7 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at}
 use compiler.backend.backend.backend_types.{BackendCompileOptions, CodegenTarget}
-use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
+use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig, llvm_hosted_windows_msvc_explicit}
 use compiler.backend.llvm_type_mapper.{LlvmTypeMapper, llvm_type_mapper_create_for_target}
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
     llvm_ir_builder_build}
@@ -19,7 +19,7 @@ use compiler.backend.linker.platform_defaults.{resolve_hardening}
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name, mir_runtime_owned_local_symbol}
 
 @unsafe(reason: "raw native-symbol policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
-extern fn rt_env_get(key: text) -> text
+extern fn rt_env_get(key: text) -> text?  # nil when unset; callers here use `?? ""` because unset == empty is the intended semantics
 
 # ============================================================================
 # MIR to LLVM IR Translation
@@ -28,7 +28,7 @@ extern fn rt_env_get(key: text) -> text
 class MirToLlvm:
     """Translates MIR to LLVM IR."""
     builder: LlvmIRBuilder
-    local_map: Dict
+    local_map: Dict<i64, text>
     target_arch: text
     target_os: text
     stack_protector_enabled: bool
@@ -36,7 +36,11 @@ class MirToLlvm:
     string_globals: [text]
     string_global_text: text
     string_counter: i64
+    inline_bytes_zero_global_emitted: bool
     local_types: Dict<i64, text>
+    # Opaque LLVM pointers erase pointee width. Keep declared raw Ptr/Ref
+    # element types separately so GEP scales byte/narrow/float addresses.
+    gep_element_types_by_name: Dict<text, text>
     value_types: Dict<text, text>
     defined_locals: Dict<i64, bool>
     return_locals: Dict<i64, bool>
@@ -132,9 +136,28 @@ class MirToLlvm:
     # emitted symbol: @naked / @section / @align / @global placement that
     # translate_function needs on the `define` line and at the terminator.
     fn_naked: Dict<text, bool>
+    fn_inline: Dict<text, bool>
     fn_section: Dict<text, text>
     fn_align: Dict<text, i64>
     fn_global: Dict<text, bool>
+    # module-scoped instances: `define linkonce_odr ... comdat`.
+    fn_comdat: Dict<text, bool> = {}
+    # XRay (design A.5): MirFunction.xray_mode keyed by MIR name AND emitted
+    # symbol; only non-zero modes are recorded. xray_module_on is true when
+    # any function of the module being translated has sleds (only possible
+    # with `--xray` on): only then do never-listed functions get `xray-never`.
+    fn_xray_mode: Dict<text, i64> = {}
+    xray_module_on: bool = false
+    xray_semantic_owner: text = ""
+    # Windows flag-guard route: no machine sleds; per-function activation slot
+    # (`xray_site` = MIR function name -> site id) loaded at entry and before each
+    # return. `xray_guard_seq` numbers the guard labels/temps of one module.
+    xray_flag_guard: bool = false
+    # Triple env ("msvc", "gnu", ...) of explicit-target translators; "" when
+    # unknown. Only XRay reads it: MSVC (no auto-export) gets an explicit /EXPORT list.
+    target_env: text = ""
+    xray_site: Dict<text, i64> = {}
+    xray_guard_seq: i64 = 0
     # DS3: line-table debug info toggle. Off by default; set via
     # enable_debug_info() by callers that resolve BackendCompileOptions.debug_info
     # (see llvm_codegen_adapter.spl / llvm_backend.spl compile_module).
@@ -147,6 +170,7 @@ class MirToLlvm:
         """Return the native integer type for the current target."""
         self.native_int_type
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in bootstrap_mode_enabled", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     me bootstrap_mode_enabled() -> bool:
         if self.group_bootstrap_mode_set:
             return self.group_bootstrap_mode
@@ -157,6 +181,7 @@ class MirToLlvm:
             enabled = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
         enabled
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in bootstrap_debug_enabled", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     me bootstrap_debug_enabled() -> bool:
         if not self.allow_ambient_codegen_policy:
             return false
@@ -165,6 +190,7 @@ class MirToLlvm:
             enabled = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         enabled
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in bootstrap_real_llvm_enabled", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     me bootstrap_real_llvm_enabled() -> bool:
         if not self.allow_ambient_codegen_policy:
             return false
@@ -183,6 +209,7 @@ class MirToLlvm:
         self.current_function_name = name
         self.defined_func_names[name] = true
         self.local_types = {}
+        self.gep_element_types_by_name = {}
         self.value_types = {}
         self.defined_locals = {}
         self.return_locals = {}
@@ -222,9 +249,13 @@ class MirToLlvm:
         # `@global` (design A.2): the unmangled Simple name IS the symbol.
         if self.fn_global.has(name):
             return name
+        # `--no-mangle` builds the C-ABI runtime provider itself: its `rt_*`
+        # definitions ARE the runtime symbols and must keep the bare name, so
+        # this check precedes the runtime-owned `__simple_local_` rename.
+        # See doc/08_tracking/bug/no_mangle_emits_module_qualified_symbols_2026-11-16.md
         if self.no_mangle:
             return name
-        if mir_runtime_owned_call_name(name) and self.owned_name_has_local.has(name):
+        if mir_runtime_owned_call_name(name):
             return mir_runtime_owned_local_symbol(name)
         # Cross-module linkability: a non-entry module's own functions are
         # emitted (and called) under `<logical module>.<fn>`, the same
@@ -247,6 +278,36 @@ class MirToLlvm:
             case _:
                 false
 
+    me llvm_pointer_element_type(ty: MirType) -> text:
+        match ty.kind:
+            case MirTypeKind.Ptr(element, _) | MirTypeKind.Ref(element, _):
+                val element_type = self.llvm_type_text(element)
+                if element_type != "void":
+                    return element_type
+            case _: ()
+        ""
+
+    me remember_gep_pointer_type(local_id: i64, ty: MirType):
+        val name = self.get_local(local_id)
+        val element = self.llvm_pointer_element_type(ty)
+        if element != "" or self.gep_element_types_by_name.contains_key(name):
+            self.gep_element_types_by_name[name] = element
+
+    me gep_element_type_for_value(name: text) -> text:
+        if self.gep_element_types_by_name.contains_key(name):
+            self.gep_element_types_by_name[name]
+        else:
+            ""
+
+    me remember_gep_element_type(name: text, element: text):
+        self.gep_element_types_by_name[name] = element
+
+    me inherit_gep_pointer_type(dest_name: text, source_name: text):
+        if self.gep_element_type_for_value(dest_name) == "":
+            val element = self.gep_element_type_for_value(source_name)
+            if element != "":
+                self.gep_element_types_by_name[dest_name] = element
+
     me llvm_type_text(ty: MirType) -> text:
         val kind: MirTypeKind = ty.kind
         match kind:
@@ -267,7 +328,7 @@ class MirToLlvm:
             case _:
                 return self.native_int_type
 
-    static fn create(module_name: text, target: CodegenTarget, cpu_override: text?) -> MirToLlvm:
+    static fn create(module_name: text, target: CodegenTarget, cpu_override: text? = None) -> MirToLlvm:
         val config: LlvmTargetConfig = LlvmTargetConfig.for_target_portable_numeric(target, cpu_override)
         MirToLlvm.create_with_policy(module_name, target, config, false, true)
 
@@ -310,9 +371,11 @@ class MirToLlvm:
         val builder = LlvmIRBuilder.create_explicit_from_scalars(
             module_name, target_arch, target_vendor, target_os,
             target_env, target_has_env, target_datalayout)
-        MirToLlvm.create_with_builder(
+        var translator = MirToLlvm.create_with_builder(
             target, builder, target_arch, target_os, bare_metal, false,
             hardening_preset)
+        translator.target_env = if target_has_env: target_env else: ""
+        translator
 
     static fn create_with_policy(
         module_name: text,
@@ -324,11 +387,18 @@ class MirToLlvm:
         val builder = LlvmIRBuilder.create(module_name, config.triple)
         val target_arch = config.triple.arch
         val target_os = config.triple.os
-        MirToLlvm.create_with_builder(
+        var translator = MirToLlvm.create_with_builder(
             target, builder, target_arch, target_os,
             bare_metal, allow_ambient_codegen_policy,
             if bare_metal then "baremetal" else: "hosted")
+        # The host default env is gnu; only an msvc SELECTED by the environment
+        # (target suffix / SIMPLE_LINKER_FLAVOR / SIMPLE_WINDOWS_ABI) counts
+        # for XRay admission.
+        val env = config.triple.env ?? ""
+        translator.target_env = if env == "msvc" and not llvm_hosted_windows_msvc_explicit(): "" else: env
+        translator
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in create_with_builder", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     static fn create_with_builder(
         target: CodegenTarget,
         builder: LlvmIRBuilder,
@@ -363,7 +433,9 @@ class MirToLlvm:
             string_globals: [],
             string_global_text: "",
             string_counter: 0,
+            inline_bytes_zero_global_emitted: false,
             local_types: {},
+            gep_element_types_by_name: {},
             value_types: {},
             defined_locals: {},
             return_locals: {},
@@ -385,7 +457,7 @@ class MirToLlvm:
             bootstrap_return_abi_active: false,
             current_function_name: "",
             codegen_errors: [],
-            current_inst_span: nil,
+            current_inst_span: None,
             current_bootstrap_module: -1,
             entry_main_symbol: true,
             no_mangle: no_mangle,
@@ -399,9 +471,17 @@ class MirToLlvm:
             export_symbol_names: {},
             module_qualified_symbol_names: {},
             fn_naked: {},
+            fn_inline: {},
             fn_section: {},
             fn_align: {},
             fn_global: {},
+            fn_comdat: {},
+            fn_xray_mode: {},
+            xray_module_on: false,
+            xray_semantic_owner: "",
+            xray_flag_guard: false,
+            xray_site: {},
+            xray_guard_seq: 0,
             debug_info: false
         )
 

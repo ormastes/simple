@@ -10,24 +10,18 @@
 # Uses:
 # - compiler.types.type_infer.HmInferContext for cross-module type unification
 # - ObjTaker for object extraction and instantiation
-# - LazyInstantiator for link-time instantiation
 # - SmfReaderImpl for reading input files
 # - MoldBackend for native binary generation
 
 use compiler.types.type_infer.*
-use compiler.mono.monomorphize.note_sdn.*
-use compiler.mono.monomorphize.note_sdn.{TypeInferenceEntry}
 use compiler.backend.linker.obj_taker.*
-use compiler.backend.linker.lazy_instantiator.*
 use compiler.backend.linker.smf_reader.*
 use compiler.backend.linker.mold.*
-use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write_bytes}
 use std.nogc_sync_mut.io.process_ops.{shell}
 use std.nogc_sync_mut.platform.{is_windows}
 use compiler.backend.linker.smf_header.{u32_to_bytes}
-# @workaround bug=block_scoped_use_no_op_symbol_resolution_2026-08-18 reason=flat frontend discards function-local imports
 use std.common.target.{TargetOS}
-# @workaround bug=block_scoped_use_no_op_symbol_resolution_2026-08-18 reason=flat frontend discards branch-local imports
 use compiler.backend.linker.msvc.{is_lld_link_available, is_msvc_available}
 
 fn _linker_remove_text(items: [text], value: text) -> [text]:
@@ -55,12 +49,7 @@ struct LinkConfig:
     target_flags: [text]        # CPU/arch flags (e.g., ["-march=x86-64-v3"])
     linker_flags: [text]        # Extra linker flags
 
-enum OutputFormat:
-    Smf      # Runtime SMF format
-    Native   # Native binary via mold
-    Both     # seed-compiler duplicate-name compatibility
-    SelfContained
-    SharedLib  # Shared library (.so/.dylib) for Lua/FFI embedding
+export use compiler.common.driver_core_modes.{OutputFormat}
 
 impl LinkConfig:
     static fn default() -> LinkConfig:
@@ -107,7 +96,6 @@ struct LinkStats:
     """Statistics from linking."""
     input_count: i32
     symbol_count: i32
-    instantiated_count: i32
     deferred_count: i32
     output_size: i64
 
@@ -123,7 +111,6 @@ enum LinkErrorKind:
     DuplicateSymbol
     TypeMismatch
     CircularDependency
-    InstantiationFailed
     OutputFailed
     InternalError
 
@@ -137,8 +124,6 @@ struct Linker:
     infer_ctx: HmInferContext
     # ObjTaker for object extraction
     obj_taker: ObjTaker
-    # Lazy instantiator for link-time instantiation
-    lazy_inst: LazyInstantiator
     # Loaded SMF readers
     readers: [SmfReaderImpl]
     # Collected symbols (name -> (reader_index, symbol))
@@ -164,7 +149,6 @@ impl Linker:
         Linker(
             infer_ctx: infer_ctx,
             obj_taker: ObjTaker.with_inference_context(infer_ctx, obj_taker_config),
-            lazy_inst: LazyInstantiator.new(LazyInstantiatorConfig.default()),
             readers: [],
             symbols: {},
             unresolved: {},
@@ -218,22 +202,15 @@ impl Linker:
                 errors: self.errors
             )
 
-        # 6. Generate instantiations for unresolved symbols
-        val inst_result = self.generate_instantiations()
-        if inst_result.is_err():
-            return LinkResult.Error(
-                message: "Instantiation failed",
-                errors: self.errors
-            )
-
-        # 7. Check for remaining unresolved
+        # 6. Check for remaining unresolved. Generics are erased, so an unresolved
+        # symbol is a plain link error, never a template to specialize.
         if not self.unresolved.is_empty() and not self.config.allow_deferred:
             for sym in self.unresolved:
                 self.errors = self.errors.push(LinkError(
                     kind: LinkErrorKind.SymbolNotFound,
                     message: "Undefined symbol: {sym}",
                     symbol: Some(sym),
-                    location: nil
+                    location: None
                 ))
             return LinkResult.Error(
                 message: "Unresolved symbols",
@@ -241,19 +218,19 @@ impl Linker:
             )
 
         # 8. Write output
-        val output_result = self.write_output()
-        if output_result.is_err():
+        val write_result = self.write_output()
+        if write_result.is_err():
             return LinkResult.Error(
                 message: "Output failed",
                 errors: self.errors
             )
+        val output_size = write_result.unwrap()
 
         val stats = LinkStats(
             input_count: self.readers.len() as i32,
             symbol_count: self.symbols.keys().len() as i32,
-            instantiated_count: self.lazy_inst.instantiated.len() as i32,
             deferred_count: self.unresolved.len() as i32,
-            output_size: output_result.unwrap()
+            output_size: output_size
         )
 
         LinkResult.Success(
@@ -271,31 +248,17 @@ impl Linker:
             if self.config.verbose:
                 print "[linker] Loading: {path}"
 
-            val reader_result = SmfReaderImpl.open(path)
-            if reader_result.is_err():
-                self.errors = self.errors.push(LinkError(
-                    kind: LinkErrorKind.InternalError,
-                    message: "Failed to open: {path}: {reader_result.unwrap_err()}",
-                    symbol: nil,
-                    location: Some(path)
-                ))
-                return Err("Failed to open {path}")
-
-            val reader = reader_result.unwrap()
-            self.readers = self.readers.push(reader)
-
-            # Load note.sdn metadata for lazy instantiation.
-            # `SmfReaderImpl.read_note_sdn` returns `NoteSdnMetadata` directly
-            # (smf_reader.spl:294), not a Result -- same bug class as
-            # collect_deferred_hints below (the previous `.is_ok()`/
-            # `.unwrap()` here left the value receiver-typed ANY). There is
-            # no failure case to gate on: an absent note.sdn section yields
-            # `NoteSdnMetadata.new()` (all-empty), and `load_metadata` is a
-            # no-op-safe merge over empty arrays plus an idempotent map
-            # write, so calling it unconditionally is the correct restored
-            # semantics, not a behavior change.
-            val metadata: NoteSdnMetadata = reader.read_note_sdn()
-            self.lazy_inst.load_metadata(path, metadata)
+            match SmfReaderImpl.open(path):
+                case Ok(reader):
+                    self.readers = self.readers.push(reader)
+                case Err(open_err):
+                    self.errors = self.errors.push(LinkError(
+                        kind: LinkErrorKind.InternalError,
+                        message: "Failed to open: {path}: {open_err}",
+                        symbol: None,
+                        location: Some(path)
+                    ))
+                    return Err("Failed to open {path}")
 
         Ok(())
 
@@ -312,7 +275,7 @@ impl Linker:
                             kind: LinkErrorKind.DuplicateSymbol,
                             message: "Duplicate symbol: {symbol.name}",
                             symbol: Some(symbol.name),
-                            location: nil
+                            location: None
                         ))
                     # Keep first definition (or prefer Global over Weak)
                 else:
@@ -320,45 +283,28 @@ impl Linker:
 
     me find_unresolved():
         """Find all unresolved symbol references."""
+        # Track already-recorded unresolved names in a Dict for O(1) dedup
+        # instead of scanning self.unresolved linearly on every symbol.
+        var seen_unresolved: Dict<text, bool> = {}
+        for existing in self.unresolved:
+            seen_unresolved[existing] = true
         # Scan all readers for undefined symbols (referenced but not defined)
         for reader in self.readers:
             val symbols = reader.symbols.values()
             for symbol in symbols:
                 if symbol.section_index < 0:
                     # Check if this symbol is defined in our merged table
-                    if not self.symbols.has(symbol.name) and not self.unresolved.contains(symbol.name):
+                    if not self.symbols.has(symbol.name) and not seen_unresolved.has(symbol.name):
+                        seen_unresolved[symbol.name] = true
                         self.unresolved = self.unresolved.push(symbol.name)
 
     fn collect_deferred_hints() -> [DeferredHints]:
-        """Collect all deferred type hints from all modules."""
-        var all_hints: [DeferredHints] = []
+        """Collect deferred type hints from all modules.
 
-        for reader in self.readers:
-            # `SmfReaderImpl.read_note_sdn` returns `NoteSdnMetadata` directly,
-            # NOT a Result (smf_reader.spl:294) -- there is no error case to
-            # check. Treating it as one (the previous `.is_ok()`/`.unwrap()`
-            # here) left `metadata_result`/`metadata` receiver-typed ANY,
-            # the same class of bug documented at lazy_instantiator.spl's
-            # `load_template` comment (GenericTemplate? mistaken for Result).
-            val metadata: NoteSdnMetadata = reader.read_note_sdn()
-            # Convert type_inferences to DeferredHints
-            var ti_idx = 0
-            while ti_idx < metadata.type_inferences.len():
-                val ti: TypeInferenceEntry = metadata.type_inferences[ti_idx]
-                val hint = DeferredHints(
-                    symbol: ti.expr,
-                    type_vars: [],
-                    constraints: [],
-                    usage_sites: [UsageSite(
-                        file: ti.from_file,
-                        loc: ti.from_loc,
-                        context_type: nil
-                    )]
-                )
-                all_hints = all_hints.push(hint)
-                ti_idx = ti_idx + 1
-
-        all_hints
+        The note.sdn `type_inferences` table that used to feed this was
+        written by a removed pass; SMF inputs no
+        longer carry it, so there are no cross-module hints to collect."""
+        []
 
     me resolve_cross_module(hints: [DeferredHints]) -> Result<(), text>:
         """Resolve cross-module type unifications."""
@@ -377,14 +323,16 @@ impl Linker:
         # For each symbol with multiple hints, unify across modules
         for (symbol, symbol_hints) in by_symbol:
             if symbol_hints.len() > 1:
-                val unify_result = self.unify_hints(symbol, symbol_hints)
-                if unify_result.is_err():
-                    self.errors = self.errors.push(LinkError(
-                        kind: LinkErrorKind.TypeMismatch,
-                        message: unify_result.unwrap_err(),
-                        symbol: Some(symbol),
-                        location: nil
-                    ))
+                match self.unify_hints(symbol, symbol_hints):
+                    case Ok(_):
+                        pass
+                    case Err(unify_err):
+                        self.errors = self.errors.push(LinkError(
+                            kind: LinkErrorKind.TypeMismatch,
+                            message: unify_err,
+                            symbol: Some(symbol),
+                            location: None
+                        ))
 
         # `self.errors.any(_.kind == ...)` desugars to a placeholder lambda
         # (10.frontend/desugar/placeholder_lambda.spl) whose parameter type
@@ -409,8 +357,11 @@ impl Linker:
         var context_types: [HirType] = []
         for hint in hints:
             for site in hint.usage_sites:
-                if site.context_type.?:
-                    context_types = context_types.push(site.context_type.unwrap())
+                match site.context_type:
+                    case Some(context_ty):
+                        context_types = context_types.push(context_ty)
+                    case _:
+                        pass
 
         # Unify all context types
         if context_types.len() >= 2:
@@ -420,58 +371,6 @@ impl Linker:
 
         Ok(())
 
-    me generate_instantiations() -> Result<(), text>:
-        """Generate instantiations for unresolved generic symbols."""
-        val results = self.lazy_inst.instantiate_all_missing(self.unresolved)
-
-        for result in results:
-            match result:
-                case Success(code, symbol, _):
-                    # Add to symbols
-                    self.symbols[symbol] = (-1, SmfSymbol(
-                        name: symbol,
-                        section_index: -1,
-                        offset: 0,
-                        size: code.len() as i64,
-                        ty: SymbolType.Function,
-                        binding: SymbolBinding.Global,
-                        is_generic_template: false,
-                        template_param_count: 0,
-                        template_offset: 0
-                    ))
-                    self.unresolved = _linker_remove_text(self.unresolved, symbol)
-
-                case Error(msg):
-                    self.errors = self.errors.push(LinkError(
-                        kind: LinkErrorKind.InstantiationFailed,
-                        message: msg,
-                        symbol: nil,
-                        location: nil
-                    ))
-
-                case CircularDependency(cycle):
-                    self.errors = self.errors.push(LinkError(
-                        kind: LinkErrorKind.CircularDependency,
-                        message: "Circular dependency: {cycle.join(\" -> \")}",
-                        symbol: nil,
-                        location: nil
-                    ))
-
-                case _:
-                    pass
-
-        # Same placeholder-lambda inference gap as resolve_cross_module above.
-        var has_instantiation_failure = false
-        for e in self.errors:
-            val err: LinkError = e
-            if err.kind == LinkErrorKind.InstantiationFailed:
-                has_instantiation_failure = true
-                break
-        if has_instantiation_failure:
-            Err("Instantiation failed")
-        else:
-            Ok(())
-
     me write_output() -> Result<i64, text>:
         """Write the linked output."""
         match self.config.output_format:
@@ -479,6 +378,12 @@ impl Linker:
                 self.write_smf_output()
             case Native:
                 self.write_native_output()
+            case Both:
+                Err("linker write_output: OutputFormat.Both is not supported by link.Linker; link SMF and native outputs separately")
+            case SelfContained:
+                Err("linker write_output: OutputFormat.SelfContained requires the self-contained pipeline (linker_wrapper link_to_self_contained), not link.Linker")
+            case SharedLib:
+                Err("linker write_output: OutputFormat.SharedLib requires the shared-linking pipeline (_LinkerWrapper shared_linking), not link.Linker")
 
     me write_smf_output() -> Result<i64, text>:
         """Write SMF format output."""
@@ -509,7 +414,7 @@ impl Linker:
                 buf.push(b)
 
         # Write output file
-        file_write_bytes(self.config.output_path, buf)
+        file_atomic_write_bytes(self.config.output_path, buf)
         Ok(buf.len())
 
     me write_native_output() -> Result<i64, text>:
@@ -527,13 +432,15 @@ impl Linker:
             val symbol = symbol_entry[1]
             if reader_idx >= 0:
                 val reader = self.readers[reader_idx as i32]
-                val code_result = reader.read_code(symbol)
-                if code_result.is_ok():
-                    objects = objects.push(ResolvedObject(
-                        name: symbol.name,
-                        code: code_result.unwrap(),
-                        symbol_type: symbol.ty
-                    ))
+                match reader.read_code(symbol):
+                    case Ok(code_bytes):
+                        objects = objects.push(ResolvedObject(
+                            name: symbol.name,
+                            code: code_bytes,
+                            symbol_type: symbol.ty
+                        ))
+                    case Err(_):
+                        pass
 
         # Link via mold
         backend.link(objects, self.config.output_path)?

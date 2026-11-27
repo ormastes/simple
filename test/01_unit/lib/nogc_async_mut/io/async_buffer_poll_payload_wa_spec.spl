@@ -1,0 +1,238 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+# Regression for doc/08_tracking/bug/stage2_poll_payload_typeparam_match_2026-11-01.md.
+# Frozen stage2 typed the `Poll.Ready(result)` payload binder of a
+# Poll<Result<..>> subject as unsubstituted `T`; when another enum with an `Ok`
+# / `Err` variant is in the closure the nested bare `case Ok(..)` match then
+# failed MIR as "bare variant 'Ok' is ambiguous". The colliding enum
+# AesGcmResult is imported here on purpose so this module reproduces that
+# closure shape. Covers all 8 rewritten sites in buffer.spl: Ok, Err, Pending.
+# Not executed in the landing session (only the stage2 native-build probe ran).
+
+use std.common.crypto.aes_gcm.{AesGcmResult}
+use std.spec.step
+use std.io.types.{IoError, IoErrorKind}
+use std.async.future.{Future}
+use std.async.poll.{Poll}
+use std.common.io.async_traits.{AsyncRead, AsyncWrite}
+use std.nogc_async_mut.io.buffer.{AsyncBufferedReader, AsyncBufferedWriter}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+# ---------------------------------------------------------------------------
+# Mocks. Futures are built by direct construction so the mocks themselves do
+# not depend on the generic static factories under test.
+# ---------------------------------------------------------------------------
+
+fn _bytes_ready(v: Result<[u8], IoError>) -> Future<Result<[u8], IoError>>:
+    Future(state: [], poll_result: Poll.Ready(v))
+
+fn _bytes_pending() -> Future<Result<[u8], IoError>>:
+    Future(state: [], poll_result: Poll.Pending)
+
+fn _text_ready(v: Result<text, IoError>) -> Future<Result<text, IoError>>:
+    Future(state: [], poll_result: Poll.Ready(v))
+
+fn _unit_ready(v: Result<(), IoError>) -> Future<Result<(), IoError>>:
+    Future(state: [], poll_result: Poll.Ready(v))
+
+fn _unit_pending() -> Future<Result<(), IoError>>:
+    Future(state: [], poll_result: Poll.Pending)
+
+fn _count_ready(v: Result<i64, IoError>) -> Future<Result<i64, IoError>>:
+    Future(state: [], poll_result: Poll.Ready(v))
+
+fn _bytes_text(b: [u8]) -> text:
+    var out = ""
+    var i = 0
+    while i < b.len():
+        if i > 0:
+            out = out + ","
+        out = out + (b[i] as i64).to_string()
+        i = i + 1
+    out
+
+# In-memory AsyncRead source; every call completes immediately.
+class MemReader with AsyncRead:
+    data: [u8]
+    pos: i64
+    reads: i64
+
+    fn read(size: i64) -> Future<Result<[u8], IoError>>:
+        self.reads = self.reads + 1
+        val end = if self.pos + size > self.data.len(): self.data.len() else: self.pos + size
+        val chunk = self.data.slice(self.pos, end)
+        self.pos = end
+        _bytes_ready(Ok(chunk))
+    fn read_exact(size: i64) -> Future<Result<[u8], IoError>>:
+        self.read(size)
+    fn read_all() -> Future<Result<[u8], IoError>>:
+        self.read(self.data.len() - self.pos)
+    fn read_text() -> Future<Result<text, IoError>>:
+        _text_ready(Ok(""))
+    fn read_line() -> Future<Result<text, IoError>>:
+        _text_ready(Ok(""))
+
+# AsyncRead source whose every operation stays pending.
+class PendingReader with AsyncRead:
+    label: text
+
+    fn read(size: i64) -> Future<Result<[u8], IoError>>:
+        _bytes_pending()
+    fn read_exact(size: i64) -> Future<Result<[u8], IoError>>:
+        _bytes_pending()
+    fn read_all() -> Future<Result<[u8], IoError>>:
+        _bytes_pending()
+    fn read_text() -> Future<Result<text, IoError>>:
+        Future(state: [], poll_result: Poll.Pending)
+    fn read_line() -> Future<Result<text, IoError>>:
+        Future(state: [], poll_result: Poll.Pending)
+
+# AsyncRead source whose reads fail.
+class FailingReader with AsyncRead:
+    label: text
+
+    fn read(size: i64) -> Future<Result<[u8], IoError>>:
+        _bytes_ready(Err(IoError.new(IoErrorKind.Other, "read boom")))
+    fn read_exact(size: i64) -> Future<Result<[u8], IoError>>:
+        self.read(size)
+    fn read_all() -> Future<Result<[u8], IoError>>:
+        self.read(0)
+    fn read_text() -> Future<Result<text, IoError>>:
+        _text_ready(Err(IoError.new(IoErrorKind.Other, "read boom")))
+    fn read_line() -> Future<Result<text, IoError>>:
+        _text_ready(Err(IoError.new(IoErrorKind.Other, "read boom")))
+
+# In-memory AsyncWrite sink; records everything that reaches it.
+class MemWriter with AsyncWrite:
+    written: [u8]
+    flushes: i64
+
+    fn write(data: [u8]) -> Future<Result<i64, IoError>>:
+        self.written = self.written + data
+        _count_ready(Ok(data.len()))
+    fn write_all(data: [u8]) -> Future<Result<(), IoError>>:
+        self.written = self.written + data
+        _unit_ready(Ok(()))
+    fn write_text(s: text) -> Future<Result<(), IoError>>:
+        _unit_ready(Ok(()))
+    fn flush() -> Future<Result<(), IoError>>:
+        self.flushes = self.flushes + 1
+        _unit_ready(Ok(()))
+
+# AsyncWrite sink whose write_all stays pending.
+class PendingWriter with AsyncWrite:
+    label: text
+
+    fn write(data: [u8]) -> Future<Result<i64, IoError>>:
+        Future(state: [], poll_result: Poll.Pending)
+    fn write_all(data: [u8]) -> Future<Result<(), IoError>>:
+        _unit_pending()
+    fn write_text(s: text) -> Future<Result<(), IoError>>:
+        _unit_pending()
+    fn flush() -> Future<Result<(), IoError>>:
+        _unit_pending()
+
+# AsyncWrite sink whose write_all fails.
+class FailingWriter with AsyncWrite:
+    label: text
+
+    fn write(data: [u8]) -> Future<Result<i64, IoError>>:
+        _count_ready(Err(IoError.new(IoErrorKind.Other, "write boom")))
+    fn write_all(data: [u8]) -> Future<Result<(), IoError>>:
+        _unit_ready(Err(IoError.new(IoErrorKind.Other, "write boom")))
+    fn write_text(s: text) -> Future<Result<(), IoError>>:
+        _unit_ready(Err(IoError.new(IoErrorKind.Other, "write boom")))
+    fn flush() -> Future<Result<(), IoError>>:
+        _unit_ready(Err(IoError.new(IoErrorKind.Other, "write boom")))
+
+# Poll observers: render the poll outcome as one comparable text.
+fn _show_bytes(f: Future<Result<[u8], IoError>>) -> text:
+    match f.poll():
+        Poll.Ready(result):
+            match result:
+                Ok(bytes):
+                    "ok:" + _bytes_text(bytes)
+                Err(err):
+                    "err:" + err.message
+        Poll.Pending:
+            "pending"
+
+fn _show_text(f: Future<Result<text, IoError>>) -> text:
+    match f.poll():
+        Poll.Ready(result):
+            match result:
+                Ok(value):
+                    "ok:" + value
+                Err(err):
+                    "err:" + err.message
+        Poll.Pending:
+            "pending"
+
+fn _show_unit(f: Future<Result<(), IoError>>) -> text:
+    match f.poll():
+        Poll.Ready(result):
+            match result:
+                Ok(_):
+                    "ok"
+                Err(err):
+                    "err:" + err.message
+        Poll.Pending:
+            "pending"
+
+fn _show_count(f: Future<Result<i64, IoError>>) -> text:
+    match f.poll():
+        Poll.Ready(result):
+            match result:
+                Ok(n):
+                    "ok:" + n.to_string()
+                Err(err):
+                    "err:" + err.message
+        Poll.Pending:
+            "pending"
+
+# ============================================================================
+# AsyncBufferedReader sites ([u8] and text helpers)
+# ============================================================================
+
+fn _colliding_ok_enum_is_distinct() -> text:
+    val r = AesGcmResult.Ok(data: [1u8])
+    match r:
+        case AesGcmResult.Ok(data): "aes-ok:" + data.len().to_string()
+        case AesGcmResult.Err(msg): "aes-err:" + msg
+
+describe "AsyncBufferedReader/Writer Poll payload workaround sites":
+    it "keeps a colliding Ok enum distinct from Result":
+        # @req REQ-SSPEC-UNIT
+        step("match the colliding AesGcmResult.Ok")
+        expect(_colliding_ok_enum_is_distinct()).to_equal("aes-ok:1")
+
+    it "reader read/read_all/read_text map Ok, Err and Pending":
+        # @req REQ-SSPEC-UNIT
+        step("reader sites poll_0, poll_1, poll_2")
+        val raw = MemReader(data: [1u8, 2u8, 3u8], pos: 0, reads: 0)
+        val reader = AsyncBufferedReader.with_capacity(raw, 2)
+        expect(_show_bytes(reader.read(1))).to_equal("ok:1")
+        expect(_show_bytes(reader.read_all())).to_equal("ok:2,3")
+        expect(_show_bytes(AsyncBufferedReader.new(FailingReader(label: "f")).read(1))).to_equal("err:read boom")
+        expect(_show_bytes(AsyncBufferedReader.new(PendingReader(label: "p")).read(1))).to_equal("pending")
+        expect(_show_text(AsyncBufferedReader.new(FailingReader(label: "f")).read_text())).to_equal("err:read boom")
+        expect(_show_text(AsyncBufferedReader.new(PendingReader(label: "p")).read_text())).to_equal("pending")
+
+    it "writer write/write_all/flush/close map Ok, Err and Pending":
+        # @req REQ-SSPEC-UNIT
+        step("writer sites poll_3 .. poll_7")
+        val sink = MemWriter(written: [], flushes: 0)
+        val writer = AsyncBufferedWriter.with_capacity(sink, 4)
+        expect(_show_count(writer.write([1u8, 2u8]))).to_equal("ok:2")
+        expect(_show_count(writer.write([3u8, 4u8, 5u8]))).to_equal("ok:3")
+        expect(_show_unit(writer.write_all([6u8]))).to_equal("ok")
+        expect(_show_unit(writer.flush())).to_equal("ok")
+        expect(_bytes_text(sink.written)).to_equal("1,2,3,4,5,6")
+        val failing = AsyncBufferedWriter.with_capacity(FailingWriter(label: "f"), 4)
+        expect(_show_unit(failing.write_all([1u8]))).to_equal("ok")
+        expect(_show_unit(failing.flush())).to_equal("err:write boom")
+        val pending = AsyncBufferedWriter.with_capacity(PendingWriter(label: "p"), 4)
+        expect(_show_unit(pending.write_all([1u8]))).to_equal("ok")
+        expect(_show_unit(pending.close())).to_equal("pending")

@@ -2,9 +2,7 @@
 
 **Date:** 2026-07-05
 **Area:** compiler/native-build, SimpleOS rv32, NVMe firmware evidence
-**Status:** OPEN — architectural (self-hosted native-build parse/front-end
-throughput), re-confirmed 2026-08-09 by evidence review, not re-run (see note
-at file end)
+**Status:** fix-implemented-verification-pending — 2026-11-26 BF-7 repaired modular `fw_rv32` duplication/script/BRAM `.nandram` defects; full self-hosted ELF build + QEMU RV32 boot pending target Linux environment (out-of-ownership `src/os/kernel/arch/riscv32/linker.ld` QEMU `.nandram` still separate).
 
 ## Symptom
 
@@ -1565,3 +1563,110 @@ a long reproduction. Findings hold up:
   re-verification, exactly as the doc's "Concrete next step" section already
   states. No code change made in this pass; not re-run to avoid a
   multi-minute-to-hour blocking build per task scoping.
+
+
+### 2026-11-05 aarch64 Linux host reproduction + script-side cross-toolchain fix
+
+Reproduced in an isolated worktree of `origin/release/1.0.0`
+(`/tmp/wt-libbug-nvmerv32`, branch `work/libbug-linux-nvmerv32-20261105`) on a
+shared aarch64 Linux host (20 cores, other LLM build sessions active).
+
+Host toolchain inventory (precise):
+
+- `riscv64-unknown-elf-gcc`: **absent**; no riscv32 libgcc or compiler-rt
+  builtins archive anywhere on the host (`-print-libgcc-file-name` under clang
+  prints a nonexistent path; only aarch64 builtins installed).
+- `clang-18` (system LLVM 18): **has** the RISC-V backend; assembles and
+  compiles `-march=rv32imac -mabi=ilp32` correctly.
+- `/home/yoon/dev/llvm/install/bin/clang` (dev build 23.1.0): **no RISC-V
+  target** ("No available targets are compatible with triple
+  riscv32-unknown-unknown-elf"); its `llvm-mc` likewise cannot assemble rv32.
+- Present: `ld.lld`, `llvm-objcopy`, `qemu-system-riscv32` (~/.local/bin),
+  `llvm-nm`.
+
+`bin/simple` does not exist in this worktree; the runs substituted
+`NVME_RV32_SIMPLE_BIN=/home/yoon/dev/simple/build/phase_snapshots/phase1_1793422538/simple`
+(aarch64 Rust-seed phase snapshot, "Simple Language v1.0.0-rc.1"), per the
+worktree-substitution note for this host.
+
+Repro command:
+
+```sh
+NVME_RV32_SIMPLE_BIN=/home/yoon/dev/simple/build/phase_snapshots/phase1_1793422538/simple \
+NVME_RV32_BUILD_TIMEOUT_SECS=600 \
+sh scripts/check/check-nvme-rv32-minimal-live.shs
+# STATUS: FAIL nvme-rv32-minimal-live build_rc=124 timeout=600s
+```
+
+Observed stall, matching the architectural root cause already documented above:
+the build subprocess churns at ~97% CPU / ~1.27 GB RSS for the full 600 s; the
+stderr log stops growing after 2115 lines of `[gc-warning]` module-load output
+for compiler-internal modules, and **zero** `[BOOTSTRAP-PHASE]` markers appear —
+not even `compile:start`. So on this host class the interpreted cold-load of
+the compiler graph (upstream of the tiny firmware closure) never reaches the
+first driver phase within 600 s. A longer 2400 s raw-build probe was still
+marker-free and CPU-bound when checked; the cold-load regression is not
+x86_64-specific.
+
+Second, independent host gap found and fixed script-side: even after the
+compiler cold-load is fixed, the wrapper's start-stub step hard-required
+`riscv64-unknown-elf-gcc` (start-stub assemble + `-print-libgcc-file-name`),
+which does not exist on LLVM-only aarch64 hosts. Fix landed in
+`scripts/check/check-nvme-rv32-minimal-live.shs` (worktree branch above):
+
+- Toolchain probe, canonical first: `riscv64-unknown-elf-gcc -march=rv32imac
+  -mabi=ilp32` when present; otherwise the first `clang` (overridable via
+  `NVME_RV32_CROSS_CLANG`) that accepts `--target=riscv32-unknown-elf
+  -march=rv32imac -mabi=ilp32` (compile-probed, so clangs without the RISC-V
+  backend are skipped); otherwise fail closed with a clear message.
+- Soft-arithmetic archive: gcc libgcc → clang per-target compiler-rt builtins
+  archive → link without any archive; `ld.lld` then fails closed only if an
+  object genuinely references an unprovided `__divdi3`/`__moddi3` symbol.
+
+Verification of the fixed chain on this host: with a stub `simple` binary that
+emits a real rv32 object via `clang-18` (returning 0 = all sections pass; the
+only substitution is the compiler output itself, which remains blocked by the
+cold-load above), the wrapper completes end-to-end:
+`NVME_RV32_MINIMAL_SECTIONS=1` run → start stub assembled by the clang-18
+fallback, `_start` renamed via `llvm-objcopy`, linked by `ld.lld` **without**
+any soft-arithmetic archive, QEMU rv32 boot prints
+`ALL RV32 NVME FW CHECKS PASS`, and the wrapper prints
+`STATUS: PASS nvme-rv32-minimal-live`.
+
+Remaining open (unchanged from the architectural prescription above): route
+`native-build` to a compiled dispatch path (or cache a compiled worker) so the
+self-hosted/seed binary stops re-interpreting the compiler graph per
+invocation; until then this wrapper cannot produce
+`build/nvme_fw_rv32_minimal.elf` with a real compiler on this host class
+regardless of timeout.
+
+### Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105)
+
+This lane independently re-ran the scalar host logic gate on
+`origin/release/1.0.0` @ `bc3e9b48cb4` with the aarch64 Rust seed:
+`run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl` prints
+`RV32 NVME FW LOGIC OK`. The 2026-11-05 aarch64 host reproduction and
+script-side cross-toolchain fix recorded above stands as the current status;
+the architectural blocker (interpreted compiler-graph cold-load per
+`native-build` invocation) remains open. No new build-loop attempt was made
+in this pass.
+
+## Fix Implemented 2026-11-26 (BF-7 lane, work/bf-7-riscv32-fpga-20261126)
+
+- **Status:** `fix-implemented-verification-pending`
+- **Root-cause fixes landed (within BF-7 ownership):**
+  - Restored modular `examples/09_embedded/simpleos_nvme_fw/fw_rv32/` `.spl` sources, `README.md`, and `boot.shs` from `3b4189d3b01` (preserving `nand_slot_drift_check.spl` and `nand_test_slots.spl`), removing the 54+ duplicated helper definitions and shell syntax break introduced during transplant `88aac2ffe28`.
+  - Repaired `examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs` and `fw_rv32/boot.shs`: added `resolve_rv32_toolchain` (GCC or Clang + compiler-rt builtins archive discovery), added fail-closed Rust bootstrap-seed refusal (`exit 127`) matching `fw_rv64/build.shs`, fixed CRLF-safe `check_fw_wiring`, deferred `mkdir -p` until actual build execution (keeping `--status`/`--self-test` clean), anchored `ROOT_DIR` via script path, guarded POSIX `timeout` against Windows `System32\timeout.exe` in `boot.shs`, exported `@export("C", name: "rt_rv32_boot_optional_nvme_fw_selftest")` in the override stub, and expanded `--self-test`.
+  - Restored `.nandram` (`_nandram_start`, `_nandram_end`) in `examples/09_embedded/fpga_riscv/rtl/nvme_fw_rv32_bram.ld`.
+- **Host verification evidence (Windows host):**
+  - `simple.exe run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl` -> `RV32 NVME FW LOGIC OK` (exit `0`).
+  - `sh -n` on `fw_rv32/build.shs` and `fw_rv32/boot.shs` -> exit `0`.
+  - `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs --self-test` -> `STATUS: PASS nvme-rv32-build self-test` (exit `0`).
+  - `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs --self-test` -> `STATUS: PASS nvme-rv32-boot self-test` (exit `0`).
+  - `simple.exe test test/01_unit/os/riscv_bf7/riscv_bf7_firmware_and_gates_spec.spl --mode=interpreter` -> `4 total, 4 passed, 0 failed` (`outcome=OK`, exit `0`).
+- **Remaining target/out-of-scope dependencies:** `src/os/kernel/arch/riscv32/linker.ld` (outside BF-7 ownership) still lacks the QEMU `.nandram` region; final build + QEMU verification requires a Linux host with deployed self-hosted `bin/simple`, RV32 cross-toolchain, and `qemu-system-riscv32`:
+  ```sh
+  NVME_RV32_SIMPLE_BIN=bin/simple sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
+  sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs
+  sh scripts/check/check-nvme-rv32-minimal-live.shs
+  ```

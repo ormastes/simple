@@ -1,0 +1,33 @@
+# Explicit scripted platform fixture. Actual signed executor/journal/common owner;
+# synthetic typed root metadata is NOT an enrolled/native platform claim.
+use test.fixtures.orchestration.host_authorized_execution_fixture_v2.*
+use test.fixtures.orchestration.host_enrollment_claim_fixture_v1.*
+use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.*
+use std.nogc_sync_mut.orchestration.host_local_root_v1.*
+use std.nogc_sync_mut.orchestration.host_enrollment_v1.HostEnrollmentBindingV1
+use std.common.contracts.orchestration.host_execute_request_v2.host_execute_request_encode_v2
+use std.common.contracts.orchestration.host_config_v1.decode_host_config
+use std.nogc_async_mut.container.api_v2.SimpleContainerOwnerV2
+use std.nogc_sync_mut.io_runtime.dir_remove
+
+pub fn host_local_resolver_fixture_v2(mode: text) -> HostLocalRootV1:
+    val fixture = host_execution_fixture_v2(mode)
+    val started = host_authorized_execute_v2(fixture.owner, fixture.container,
+        host_execute_request_encode_v2(fixture.envelope).unwrap(), fixture.policy,
+        fixture.provider_digest, fixture.scope.service_scope_id, fixture.context, host_execution_clock_v2)
+    expect(started.error).to_equal("")
+    val configuration = host_claim_fixture_v1()
+    var config = decode_host_config(configuration.configuration_bytes).unwrap()
+    config.physical_host_id = fixture.scope.physical_host_id
+    config.service_scope_id = fixture.scope.service_scope_id
+    dir_remove(configuration.parent, true)
+    val binding = HostEnrollmentBindingV1(config_digest: "a".repeat(64), policy_digest: fixture.policy.source_digest,
+        native_machine_id: fixture.scope.native_machine_id, native_boot_id: fixture.scope.boot_id,
+        provider_identity_digest: fixture.provider_digest, machine_parent: "/fixture-only")
+    HostLocalRootV1(root: fixture.root, binding: binding, config: config, policy: fixture.policy,
+        scope: fixture.scope, container: started.container, capacity: started.owner)
+
+pub fn host_local_resolver_consumed_fixture_v2(owner: SimpleContainerOwnerV2) -> i64:
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, adapter): adapter.provider.scripted_cursor
+        case _: fail("resolver fixture requires its actual Linux adapter")

@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: vector_bitmap_target_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 #include "../simple_vector_kernel_abi_v1.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -77,3 +82,5 @@ int main(int argc,char **argv) {
     printf("PASS bitmap-provider checks=%u vector_iterations=%llu supported=%d loads=%u\n",checks,(unsigned long long)ran,supported,loads);
     return 0;
 }
+
+#endif /* !_WIN32 */

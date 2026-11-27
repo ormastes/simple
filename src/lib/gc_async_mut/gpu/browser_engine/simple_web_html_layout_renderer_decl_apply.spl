@@ -1,5 +1,5 @@
-export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.*
-export use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.*
+export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{SIMPLE_WEB_STICKY_TOP_AUTO, Style, renderer_default_style, inherit_style_legacy, inherit_style, is_inline_tag, is_heading, is_non_rendered_tag, parse_font_shorthand_number, parse_font_shorthand_size_milli, parse_font_shorthand_family, BoxShadowAgg, text_list_prefix, split_top_level_commas, parse_float_to_255, shadow_layer_alpha, shadow_length_prefix, paren_matching_close, BgLayers, parse_background_layers, parse_box_shadow_agg, CssDeclarationPrioritySplit, css_important_marker_start, css_declaration_priority_split, ComputedStyleHot, computed_style_hot_from, simple_web_style_hot_is_display_none, css_math_fn_name, css_math_args, css_math_primary, css_math_implied_max_px, css_math_implied_min_px, WEB_STYLE_CASCADE_MEMO_LIMIT, web_style_cascade_memo_reset, web_style_cascade_memo_hits, web_style_cascade_memo_misses, web_style_cascade_memo_lookup, web_style_cascade_memo_store}
+export use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{CSS_INTEGER_PX_INVALID, CSS_INTEGER_PX_ABS_MAX, CssCornerRadii, WebBoxShadowLayer, WebBoxShadowParseResult, parse_border_radius_shorthand, resolve_authored_border_radii, parse_box_shadow_layers}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_declarations.{
     BackgroundShorthand, _apply_decls_dispatch,
     _background_exact_url_value, _background_is_exact_typed_linear_layer,
@@ -7,11 +7,16 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_declarat
     _decl_tbl_all_dispatch_handled, _parse_background_shorthand,
     _decl_tbl_resolve_writing_mode, parse_supported_nonnegative_px,
     sticky_top_inset_value, _background_shorthand_tokens, border_spacing_px,
-    _resolve_authored_padding, decl_tbl_get_last_valid_nonnegative_px,
-    parse_supported_outline_shorthand_width_px
+    _resolve_authored_padding, padding_slot, padding_slot_px, padding_slot_pct_milli,
+    decl_tbl_get_last_valid_nonnegative_px,
+    parse_supported_outline_shorthand_width_px, css_cascade_root_font_px
 }
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{BoxShadowAgg}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{GradientStopSpec}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{BoxShadowAgg, shadow_layer_alpha, shadow_length_prefix}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{GradientStopSpec, gradient_has_length_stop, gradient_layer_entries, gradient_layer_list_color_text, gradient_layer_list_apply_longhands}
+export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{_color_alpha_zero, _decl_transparent_color, _decl_top_level_tokens}
+use std.nogc_sync_mut.text_layout.font_provider.{browser_host_has_measured_linux_face_set}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, horizontal_margin_signed, gradient_rem_stops_to_px, parse_percent_permille, font_milli_of, font_milli_round_px, font_milli_store}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation_values.{parse_opacity_pct_or_neg1}
 
 fn _decl_is_current_color_token(raw: text) -> bool:
     """True when a background color declaration is the `currentColor` keyword,
@@ -88,9 +93,15 @@ fn _apply_decls_without_grid_inner(
     var background_image_uri_v = st.background_image_uri
     var fg_v = st.fg
     var font_size_v = st.font_size
+    var font_size_milli_v = st.font_size_milli
     var font_family_v = st.font_family
     var line_height_v = st.line_height_px
+    var line_height_em_milli_v = st.line_height_em_milli
     var width_v = st.width_px
+    # `width_milli` belongs to `width_v` as parsed; any later rewrite of
+    # width_v (aspect-ratio, clip, transform scale) drops it to -1 below.
+    var width_parsed_v = st.width_px
+    var width_milli_v = st.width_milli
     var height_v = st.height_px
     var border_box_v = st.border_box
     var border_collapse_v = st.border_collapse
@@ -103,6 +114,10 @@ fn _apply_decls_without_grid_inner(
     var flex_grow_v = st.flex_grow
     var flex_shrink_v = st.flex_shrink
     var flex_basis_px_v = st.flex_basis_px
+    var flex_basis_zero_v = st.flex_basis_zero
+    var flex_basis_permille_v = st.flex_basis_permille
+    var min_width_set_v = st.min_width_set
+    var width_zero_v = st.width_zero
     var order_v = st.order
     var flex_wrap_v = st.flex_wrap
     var justify_content_v = st.justify_content
@@ -113,6 +128,10 @@ fn _apply_decls_without_grid_inner(
     var pad_t_v = st.pad_t
     var pad_r_v = st.pad_r
     var pad_b_v = st.pad_b
+    var pad_l_pct_v = st.pad_l_pct
+    var pad_t_pct_v = st.pad_t_pct
+    var pad_r_pct_v = st.pad_r_pct
+    var pad_b_pct_v = st.pad_b_pct
     var border_w_v = st.border_w
     var border_color_v = st.border_color
     var border_l_v = st.border_l
@@ -125,6 +144,8 @@ fn _apply_decls_without_grid_inner(
     var border_color_b_v = st.border_color_b
     var border_style_l_v = st.border_style_l
     var border_style_r_v = st.border_style_r
+    var border_style_t_v = st.border_style_t
+    var border_style_b_v = st.border_style_b
     var outline_w_v = st.outline_w
     var outline_color_v = st.outline_color
     var outline_offset_px_v = st.outline_offset_px
@@ -148,12 +169,20 @@ fn _apply_decls_without_grid_inner(
     var margin_t_v = st.margin_t
     var margin_r_v = st.margin_r
     var margin_b_v = st.margin_b
+    # Author fractional (em/rem/px) block-axis margin, milli-px; 0 = none.
+    var margin_t_milli_v = 0
+    var margin_b_milli_v = 0
     var margin_l_auto_v = st.margin_l_auto
     var margin_r_auto_v = st.margin_r_auto
+    var margin_l_pct_v = st.margin_l_pct
+    var margin_l_milli_v = st.margin_l_milli
+    var margin_r_pct_v = st.margin_r_pct
+    var margin_r_milli_v = st.margin_r_milli
     var margin_t_auto_v = st.margin_t_auto
     var margin_b_auto_v = st.margin_b_auto
     var display_v = st.display
     var float_mode_v = st.float_mode
+    var clear_mode_v = st.clear_mode
     var list_style_none_v = st.list_style_none
     var overflow_hidden_v = st.overflow_hidden
     var overflow_auto_y_v = st.overflow_auto_y
@@ -163,6 +192,9 @@ fn _apply_decls_without_grid_inner(
     var text_overflow_ellipsis_v = st.text_overflow_ellipsis
     var visibility_hidden_v = st.visibility_hidden
     var content_visibility_hidden_v = st.content_visibility_hidden
+    var contain_size_v = st.contain_size
+    var contain_intrinsic_w_v = st.contain_intrinsic_w_px
+    var contain_intrinsic_h_v = st.contain_intrinsic_h_px
     var will_change_v = st.will_change
     var color_adjust_v = st.color_adjust
     var forced_color_adjust_v = st.forced_color_adjust
@@ -177,16 +209,23 @@ fn _apply_decls_without_grid_inner(
     var top_px_v = st.top_px
     var right_px_v = st.right_px
     var bottom_px_v = st.bottom_px
+    var left_milli_v = st.left_milli
+    var top_milli_v = st.top_milli
+    var right_milli_v = st.right_milli
+    var bottom_milli_v = st.bottom_milli
     var z_index_v = st.z_index
     var opacity_pct_v = st.opacity_pct
     var flex_direction_v = st.flex_direction
     var text_align_v = st.text_align
+    var text_align_set_v = st.text_align_set
     var text_align_last_v = st.text_align_last
     var text_justify_v = st.text_justify
     var text_transform_v = st.text_transform
     var text_indent_px_v = st.text_indent_px
     var letter_spacing_px_v = st.letter_spacing_px
     var word_spacing_px_v = st.word_spacing_px
+    var letter_spacing_milli_v = st.letter_spacing_milli
+    var word_spacing_milli_v = st.word_spacing_milli
     var font_size_adjust_v = st.font_size_adjust
     var font_palette_v = st.font_palette
     var font_feature_settings_v = st.font_feature_settings
@@ -217,6 +256,7 @@ fn _apply_decls_without_grid_inner(
     var text_shadow_x_px_v = st.text_shadow_x_px
     var text_shadow_y_px_v = st.text_shadow_y_px
     var text_shadow_color_v = st.text_shadow_color
+    var text_shadow_raw_v = st.text_shadow_raw
     var text_decoration_color_v = st.text_decoration_color
     var text_decoration_underline_v = st.text_decoration_underline
     var text_decoration_overline_v = st.text_decoration_overline
@@ -257,6 +297,10 @@ fn _apply_decls_without_grid_inner(
     var transform_origin_v = st.transform_origin
     var transform_box_v = st.transform_box
     var transform_style_v = st.transform_style
+    var transform_raw_v = st.transform_raw
+    var translate_raw_v = st.translate_raw
+    var scale_raw_v = st.scale_raw
+    var rotate_raw_v = st.rotate_raw
     var image_rendering_v = st.image_rendering
     var object_fit_v = st.object_fit
     var object_position_v = st.object_position
@@ -275,26 +319,58 @@ fn _apply_decls_without_grid_inner(
         # The size component of a `font:` shorthand is the number attached to
         # "px" — a bare leading number is the WEIGHT ("font: 600 11px system-ui"
         # must not become font-size 600px, which rendered screen-filling glyphs).
-        val parsed_font_size = parse_font_shorthand_size_px(font_norm)
+        val parsed_font_milli = parse_font_shorthand_size_milli(font_norm)
+        val parsed_font_size = font_milli_round_px(parsed_font_milli)
         if parsed_font_size > 0:
             font_size_v = parsed_font_size
+            font_size_milli_v = font_milli_store(parsed_font_milli)
         val shorthand_family = parse_font_shorthand_family(font_raw)
         if shorthand_family != "":
             font_family_v = shorthand_family
         val slash = find_from(font_norm, "/", 0)
-        if slash >= 0 and slash + 1 < font_norm.len():
-            val after_slash = font_norm.substring(slash + 1, font_norm.len()).trim()
+        if slash >= 0 and slash + 1 < font_norm.byte_len():
+            val after_slash = font_norm.substring(slash + 1, font_norm.byte_len()).trim()
             val slash_space = find_from(after_slash, " ", 0)
             val line_part = if slash_space >= 0: after_slash.substring(0, slash_space) else: after_slash
-            val parsed_line_height = parse_line_height_value(line_part)
-            if parsed_line_height != 0:
-                line_height_v = parsed_line_height
+            if line_height_value_is_normal(line_part):
+                line_height_v = line_height_after_normal_keyword(line_height_v, browser_host_has_measured_linux_face_set())
+                line_height_em_milli_v = 0
+            else:
+                val parsed_line_height = _decl_line_height(line_part)
+                val parsed_own_font_milli = _decl_line_height_own_font_milli(line_part)
+                if parsed_own_font_milli > 0:
+                    line_height_em_milli_v = parsed_own_font_milli
+                elif parsed_line_height != 0:
+                    line_height_v = parsed_line_height
+                    line_height_em_milli_v = 0
+        elif parsed_font_size > 0:
+            # A `font` shorthand with no `/line-height` part resets line-height
+            # to normal (CSS Fonts: every omitted sub-property takes its
+            # initial value). Chrome 159: `<div style="line-height:2"><p
+            # style="font:16px sans-serif">` is 18px tall, not 32. Only a
+            # shorthand that carries a size is a full shorthand; `font:
+            # inherit` and the system-font keywords are left alone.
+            line_height_v = line_height_after_normal_keyword(line_height_v, browser_host_has_measured_linux_face_set())
+            line_height_em_milli_v = 0
+    # `font: inherit` takes the parent's computed size, family, weight, style
+    # and line height (the values captured when this style inherited), which
+    # a tag default such as the form-control UA font may have replaced.
+    if font_decl.trim().lower() == "inherit":
+        if st.inherit_font_size > 0:
+            font_size_v = st.inherit_font_size
+            font_size_milli_v = st.inherit_font_size_milli
+        if st.inherit_font_family != "":
+            font_family_v = st.inherit_font_family
+        bold_v = st.inherit_bold
+        font_style_italic_v = st.inherit_italic
+        line_height_v = st.inherit_line_height_px
+        line_height_em_milli_v = 0
     val font_family_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-family").trim()
     if font_family_decl != "" and decl_tbl_last_index_p(decl_tbl, decl_present, "font-family") > font_pos:
-        font_family_v = font_family_decl
+        font_family_v = if font_family_decl.lower() == "inherit" and st.inherit_font_family != "": st.inherit_font_family else: font_family_decl
     val bg = decl_tbl_get_p(decl_tbl, decl_present, "background-color")
-    val bgs = decl_tbl_get_p(decl_tbl, decl_present, "background")
-    val bg_image = decl_tbl_get_p(decl_tbl, decl_present, "background-image")
+    val bgs = gradient_rem_stops_to_px(decl_tbl_get_p(decl_tbl, decl_present, "background"), css_cascade_root_font_px())
+    val bg_image = gradient_rem_stops_to_px(decl_tbl_get_p(decl_tbl, decl_present, "background-image"), css_cascade_root_font_px())
     val bg_repeat = decl_tbl_get_p(decl_tbl, decl_present, "background-repeat")
     val bg_size = decl_tbl_get_p(decl_tbl, decl_present, "background-size")
     val bg_position = decl_tbl_get_p(decl_tbl, decl_present, "background-position")
@@ -303,9 +379,10 @@ fn _apply_decls_without_grid_inner(
     val bgs_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "background")
     val bg_image_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "background-image")
     if bg_pos >= 0 or bgs_pos >= 0:
-        if bgs_pos > bg_pos:
+        if bgs_pos >= 0:
             # `background` resets every background longhand before parsing its
             # own layer, regardless of where earlier declarations were stored.
+            # A later `background-color` then overrides only the colour (below).
             background_image_uri_v = ""
             background_repeat_v = "repeat"
             background_size_w_px_v = 0
@@ -380,13 +457,33 @@ fn _apply_decls_without_grid_inner(
                                 over_typed = true
                                 background_gradient_from_v = over_from
                                 background_gradient_to_v = over_to
-                            elif is_radial_gradient(over_image):
+                            elif is_radial_gradient(over_image) and not gradient_has_length_stop(over_image):
                                 over_typed = true
                                 over_radial = true
                                 # A radial layer has no meaningful 2-colour
                                 # projection; the stop list below carries it.
                                 background_gradient_from_v = 0u32
                                 background_gradient_to_v = 0u32
+                elif over_layers.len() == 1:
+                    # `background: linear-gradient(...)` alone is one typed
+                    # image layer over a transparent color. It fell through
+                    # to the raw branch, which painted the FIRST STOP as a
+                    # flat color (the catalog `html` header).
+                    over_image = over_layers[0].trim()
+                    val one_from = parse_linear_gradient_color(over_image, 0)
+                    val one_to = parse_linear_gradient_color(over_image, 1)
+                    if _background_is_exact_typed_linear_layer(over_image, one_from, one_to, false):
+                        over_typed = true
+                        background_gradient_from_v = one_from
+                        background_gradient_to_v = one_to
+                    elif is_radial_gradient(over_image) and not gradient_has_length_stop(over_image):
+                        # `background: radial-gradient(...)` alone is one
+                        # typed radial layer over transparent; the raw branch
+                        # painted its first stop as a flat colour.
+                        over_typed = true
+                        over_radial = true
+                        background_gradient_from_v = 0u32
+                        background_gradient_to_v = 0u32
                 if over_typed:
                     bg_v = over_color
                     background_image_uri_v = ""
@@ -406,9 +503,20 @@ fn _apply_decls_without_grid_inner(
                         else: parse_gradient_angle_deg(over_image)
                     )
                     background_gradient_is_radial_v = over_radial
-                    bg_layers_raw_v = ""
+                    # Only the paintable linear projection clears the raw
+                    # witness; a radial-first layer keeps the authored text
+                    # observable (rejection witness, css-cascade spec).
+                    bg_layers_raw_v = if over_radial: bgs else: ""
                 else:
-                    bg_v = parse_color_alpha(bgs)
+                    # A gradient-only layer list keeps its raw text for the
+                    # gradient layer painters; only its final colour layer
+                    # (if any) is the background colour. `parse_color_alpha`
+                    # over the whole list took the first stop instead.
+                    if gradient_layer_entries(bgs).len() > 0:
+                        val list_color = gradient_layer_list_color_text(bgs)
+                        bg_v = if list_color != "": parse_color_alpha(list_color) else: 0u32
+                    else:
+                        bg_v = parse_color_alpha(bgs)
                     bg_current_color_v = _decl_is_current_color_token(bgs)
                     background_gradient_from_v = 0u32
                     background_gradient_to_v = 0u32
@@ -417,15 +525,11 @@ fn _apply_decls_without_grid_inner(
                     background_gradient_angle_deg_v = 180
                     background_gradient_is_radial_v = false
                     bg_layers_raw_v = bgs
-        else:
+        if bg_pos > bgs_pos:
+            # Chrome 159: the longhand replaces the colour and keeps every
+            # image layer the shorthand set.
             bg_v = parse_color_alpha(bg)
             bg_current_color_v = _decl_is_current_color_token(bg)
-            background_gradient_from_v = 0u32
-            background_gradient_to_v = 0u32
-            background_gradient_stop_colors_v = []
-            background_gradient_stop_positions_v = []
-            background_gradient_angle_deg_v = 180
-            background_gradient_is_radial_v = false
     # A later `background` shorthand resets `background-image`; do not replay
     # an earlier longhand merely because declarations are collected by name.
     if bg_image.len() > 0 and bg_image_pos > bgs_pos:
@@ -454,7 +558,10 @@ fn _apply_decls_without_grid_inner(
                 background_gradient_stop_positions_v = []
                 background_gradient_angle_deg_v = 180
                 background_gradient_is_radial_v = false
-                bg_layers_raw_v = ""
+                # A single url() layer stays raw: it is not a typed projection,
+                # and the authored text is the rejection witness the
+                # css-cascade spec pins (mirrors the two-url plan below).
+                bg_layers_raw_v = bg_image
             elif _background_is_exact_typed_linear_layer(
                 bg_image, gradient_from, gradient_to, false
             ):
@@ -481,7 +588,7 @@ fn _apply_decls_without_grid_inner(
                 background_gradient_stop_positions_v = stop_positions
                 background_gradient_angle_deg_v = parse_gradient_angle_deg(bg_image)
                 background_gradient_is_radial_v = false
-            elif is_radial_gradient(bg_image) and split_top_level_commas(bg_image.trim()).len() <= 1:
+            elif is_radial_gradient(bg_image) and split_top_level_commas(bg_image.trim()).len() <= 1 and not gradient_has_length_stop(bg_image):
                 # GAP-2: a single radial-gradient(...) layer never satisfies
                 # `_background_is_exact_typed_linear_layer` (it requires a
                 # `linear-gradient(` prefix), so it always fell through to the
@@ -490,7 +597,10 @@ fn _apply_decls_without_grid_inner(
                 background_image_uri_v = ""
                 background_gradient_from_v = 0u32
                 background_gradient_to_v = 0u32
-                bg_layers_raw_v = ""
+                # Radial stays fail-closed observable: keep the authored text
+                # as the rejection witness (css-cascade spec) while carrying
+                # the parsed stop list for the painter.
+                bg_layers_raw_v = bg_image
                 val stops: [GradientStopSpec] = parse_gradient_stops(bg_image)
                 var stop_colors: [u32] = []
                 var stop_positions: [i32] = []
@@ -531,7 +641,7 @@ fn _apply_decls_without_grid_inner(
             if sw >= 0:
                 background_size_w_px_v = sw
         if first_space >= 0:
-            val second_size = size_trimmed.substring(first_space + 1, size_trimmed.len()).trim()
+            val second_size = size_trimmed.substring(first_space + 1, size_trimmed.byte_len()).trim()
             val sh = if second_size.lower() == "auto": 0 else: parse_int(second_size)
             if sh >= 0:
                 background_size_h_px_v = sh
@@ -545,7 +655,7 @@ fn _apply_decls_without_grid_inner(
         if first_pos.len() > 0:
             background_position_x_px_v = _background_position_value(first_pos, true)
         if first_space >= 0:
-            val second_pos = pos_trimmed.substring(first_space + 1, pos_trimmed.len()).trim()
+            val second_pos = pos_trimmed.substring(first_space + 1, pos_trimmed.byte_len()).trim()
             background_position_y_px_v = _background_position_value(second_pos, false)
         else:
             background_position_y_px_v = -1050
@@ -592,36 +702,73 @@ fn _apply_decls_without_grid_inner(
             background_gradient_angle_deg_v = 180
             background_gradient_is_radial_v = false
             bg_layers_raw_v = two_url_plan
+    # Per-layer background-size / -position / -repeat of a gradient list
+    # (CSS Backgrounds 3 §2.2): each image layer takes its own entry of each
+    # longhand list (cyclically) or its own shorthand tail. The list is
+    # rewritten with a `<position> / <size> <repeat>` tail per layer, the form
+    # the gradient layer painters read, and any typed single-layer projection
+    # is dropped so the layer path paints it. Lists whose every layer keeps the
+    # default geometry are left untouched.
+    val layer_size_list = if bg_size.len() > 0 and bg_size_pos > bgs_pos: bg_size else: ""
+    val layer_position_list = if bg_position.len() > 0 and bg_position_pos > bgs_pos: bg_position else: ""
+    val layer_repeat_list = if bg_repeat.len() > 0 and bg_repeat_pos > bgs_pos: bg_repeat else: ""
+    var layer_src = bg_layers_raw_v
+    if layer_src == "":
+        if bg_image.len() > 0 and bg_image_pos > bgs_pos:
+            layer_src = bg_image
+        elif bgs_pos >= 0 and bgs_pos > bg_pos:
+            layer_src = bgs
+    if layer_src != "":
+        val layer_list = gradient_layer_list_apply_longhands(layer_src, layer_size_list, layer_position_list, layer_repeat_list)
+        if layer_list != "":
+            bg_layers_raw_v = layer_list
+            background_gradient_from_v = 0u32
+            background_gradient_to_v = 0u32
+            background_gradient_stop_colors_v = []
+            background_gradient_stop_positions_v = []
+            background_gradient_angle_deg_v = 180
+            background_gradient_is_radial_v = false
     val col = decl_tbl_get_p(decl_tbl, decl_present, "color")
     if col.len() > 0:
         val cv = parse_color(col)
         if cv != 0u32:
             fg_v = cv
-        elif col.trim().lower() == "transparent":
+        elif col.trim().lower() == "transparent" or _color_alpha_zero(col):
+            # `rgba(0,0,0,0)` paints no text, like `transparent`.
             fg_v = 0u32
     val fs = decl_tbl_get_p(decl_tbl, decl_present, "font-size")
     val fs_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "font-size")
     if fs.len() > 0 and (font_pos < 0 or fs_pos > font_pos):
         val fsl = fs.trim().lower()
-        if fsl.ends_with("rem"):
-            # rem is relative to the root font-size (16px default).
-            val computed = (16 * parse_decimal_x10(fsl)) / 10
-            if computed > 0:
-                font_size_v = computed
+        # Computed size in milli-px (i64: `120.5%` of a 512 px parent overflows
+        # i32 mid-product). `font_size` keeps the rounded px for every integer
+        # reader; `font_size_milli` carries the fraction (Chrome 159: 1.17em of
+        # 16 px is 18.72, not 17 or 19).
+        val parent_milli = if st.inherit_font_size == em_base and st.inherit_font_size > 0: font_milli_of(st.inherit_font_size, st.inherit_font_size_milli) else: em_base * 1000
+        var computed_milli: i64 = 0
+        if fsl == "inherit":
+            if st.inherit_font_size > 0:
+                font_size_v = st.inherit_font_size
+                font_size_milli_v = st.inherit_font_size_milli
+        elif fsl.ends_with("rem"):
+            # rem is relative to the root (html) computed font-size.
+            computed_milli = css_cascade_root_font_px().to_i64() * svg_number_milli(fsl)
         elif fsl.ends_with("em"):
             # em is relative to the inherited (parent) font-size.
-            val computed = (em_base * parse_decimal_x10(fsl)) / 10
-            if computed > 0:
-                font_size_v = computed
+            computed_milli = parent_milli.to_i64() * svg_number_milli(fsl) / 1000
         elif fsl.ends_with("%"):
             # percent font-size is relative to the inherited font-size.
-            val computed = (em_base * parse_int(fsl)) / 100
-            if computed > 0:
-                font_size_v = computed
+            computed_milli = parent_milli.to_i64() * svg_number_milli(fsl) / 100000
+        elif fsl.ends_with("px") and fsl.contains("."):
+            computed_milli = svg_number_milli(fsl)
         else:
             val v = parse_int(fs)
             if v > 0:
                 font_size_v = v
+                font_size_milli_v = 0
+        if computed_milli > 0 and computed_milli <= 512000:
+            font_size_v = font_milli_round_px(computed_milli as i32)
+            font_size_milli_v = font_milli_store(computed_milli as i32)
     val font_size_adjust_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-size-adjust")
     if font_size_adjust_decl.len() > 0:
         val font_size_adjust_norm = font_size_adjust_decl.trim().lower()
@@ -640,9 +787,24 @@ fn _apply_decls_without_grid_inner(
     val line_height = decl_tbl_get_p(decl_tbl, decl_present, "line-height")
     val line_height_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "line-height")
     if line_height.len() > 0 and (font_pos < 0 or line_height_pos > font_pos):
-        val parsed_line_height = parse_line_height_value(line_height)
-        if parsed_line_height != 0:
-            line_height_v = parsed_line_height
+        if line_height.trim().lower() == "inherit":
+            line_height_v = st.inherit_line_height_px
+            line_height_em_milli_v = 0
+        elif line_height_value_is_normal(line_height):
+            # `normal` is a value, not the absence of one: it must replace an
+            # inherited factor or length. It used to parse to 0 and be dropped,
+            # so `<div style="line-height:2"><p style="line-height:normal">`
+            # kept the 2x. Measured host only; see the helper.
+            line_height_v = line_height_after_normal_keyword(line_height_v, browser_host_has_measured_linux_face_set())
+            line_height_em_milli_v = 0
+        else:
+            val parsed_line_height = _decl_line_height(line_height)
+            val parsed_own_font_milli = _decl_line_height_own_font_milli(line_height)
+            if parsed_own_font_milli > 0:
+                line_height_em_milli_v = parsed_own_font_milli
+            elif parsed_line_height != 0:
+                line_height_v = parsed_line_height
+                line_height_em_milli_v = 0
     writing_mode_v = _decl_tbl_resolve_writing_mode(
         writing_mode_v, decl_tbl
     )
@@ -669,7 +831,14 @@ fn _apply_decls_without_grid_inner(
             val wv = parse_int(width)
             width_v = if wv > 0: 0 - wv else: 0
         else:
-            width_v = parse_int(width)
+            # `em`/`rem` are font-relative (see _decl_font_relative_length_px):
+            # `width:10em` was read as 10 px.
+            width_v = _decl_width_length_px(width, font_size_v)
+            width_milli_v = _decl_width_frac_milli(width, font_size_v, width_v)
+        width_zero_v = width_v == 0 and "0123456789.".contains(width.substring(0, 1))
+        if width.ends_with("%") or width.ends_with("vw"):
+            width_milli_v = -1
+        width_parsed_v = width_v
     val height = decl_tbl_get_p(decl_tbl, decl_present, "height")
     val height_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "height")
     if height.len() > 0:
@@ -677,7 +846,7 @@ fn _apply_decls_without_grid_inner(
             val hp = parse_int(height)
             height_v = if hp > 0: 0 - hp else: 0
         else:
-            height_v = parse_int(height)
+            height_v = _decl_font_relative_length_px(height, font_size_v)
     val inline_size = decl_tbl_get_p(decl_tbl, decl_present, "inline-size")
     val inline_size_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "inline-size")
     if inline_size.len() > 0:
@@ -687,6 +856,9 @@ fn _apply_decls_without_grid_inner(
             height_v = inline_size_v
         elif not logical_inline_is_height and inline_size_pos > width_pos:
             width_v = inline_size_v
+            # The exact width is the inline-size's own, not the earlier width's.
+            width_milli_v = if inline_size.ends_with("%"): -1 else: _decl_width_frac_milli(inline_size, font_size_v, inline_size_v)
+            width_parsed_v = width_v
     val block_size = decl_tbl_get_p(decl_tbl, decl_present, "block-size")
     val block_size_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "block-size")
     if block_size.len() > 0:
@@ -706,7 +878,9 @@ fn _apply_decls_without_grid_inner(
             elif height_v > 0 and width_v == 0:
                 width_v = (height_v * ar_num) / ar_den
     val box_sizing = decl_tbl_get_p(decl_tbl, decl_present, "box-sizing")
-    if box_sizing.len() > 0:
+    if box_sizing.trim().lower() == "inherit":
+        border_box_v = st.inherit_border_box
+    elif box_sizing.len() > 0:
         border_box_v = box_sizing == "border-box"
     val border_radius_shorthand: CssCornerRadii = parse_border_radius_shorthand(
         decl_tbl_get_p(decl_tbl, decl_present, "border-radius"))
@@ -723,18 +897,22 @@ fn _apply_decls_without_grid_inner(
     val min_width = decl_tbl_get_p(decl_tbl, decl_present, "min-width")
     val min_width_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "min-width")
     if min_width.len() > 0:
-        min_width_v = _decl_font_relative_length_px(min_width, font_size_v)
+        min_width_v = _decl_percent_sentinel_or_length_px(min_width, font_size_v)
+        min_width_set_v = min_width.trim() != "auto"
     val max_width = decl_tbl_get_p(decl_tbl, decl_present, "max-width")
     val max_width_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "max-width")
     if max_width.len() > 0:
-        max_width_v = _decl_font_relative_length_px(max_width, font_size_v)
+        # A percentage is stored as the negative sentinel `width` uses and
+        # resolved against the containing block at layout time
+        # (`style_with_resolved_percent_min_max`); it was read as that many px.
+        max_width_v = _decl_percent_sentinel_or_length_px(max_width, font_size_v)
     # min()/max()/clamp() on `width` desugar to the clamp slots (see
     # css_math_primary): they only fill a slot the author left unset.
     val width_implied_max = css_math_implied_max_px(width_raw)
     val width_implied_min = css_math_implied_min_px(width_raw)
-    if width_implied_max > 0 and max_width_v <= 0:
+    if width_implied_max > 0 and max_width_v == 0:
         max_width_v = width_implied_max
-    if width_implied_min > 0 and min_width_v <= 0:
+    if width_implied_min > 0 and min_width_v == 0:
         min_width_v = width_implied_min
     val min_height = decl_tbl_get_p(decl_tbl, decl_present, "min-height")
     val min_height_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "min-height")
@@ -743,11 +921,11 @@ fn _apply_decls_without_grid_inner(
             min_height_vh_v = true
         else:
             min_height_vh_v = false
-            min_height_v = parse_int(min_height)
+            min_height_v = _decl_percent_sentinel_or_px(min_height)
     val max_height = decl_tbl_get_p(decl_tbl, decl_present, "max-height")
     val max_height_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "max-height")
     if max_height.len() > 0:
-        max_height_v = parse_int(max_height)
+        max_height_v = _decl_percent_sentinel_or_px(max_height)
     val min_inline_size = decl_tbl_get_p(decl_tbl, decl_present, "min-inline-size")
     val min_inline_size_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "min-inline-size")
     if min_inline_size.len() > 0:
@@ -784,21 +962,58 @@ fn _apply_decls_without_grid_inner(
             max_width_v = parse_int(max_block_size)
         elif not logical_inline_is_height and max_block_size_pos > max_height_pos:
             max_height_v = parse_int(max_block_size)
-    val flex = decl_tbl_get_p(decl_tbl, decl_present, "flex")
-    if flex.len() > 0:
-        val flex_grow_raw = parse_nth_int(flex, 0)
-        if flex_grow_raw >= 0:
-            flex_grow_v = flex_grow_raw
-        val flex_shrink_raw = parse_nth_int(flex, 1)
-        if flex_shrink_raw >= 0:
-            flex_shrink_v = flex_shrink_raw
-        val flex_basis_raw = parse_nth_int(flex, 2)
-        if flex_basis_raw > 0:
-            flex_basis_px_v = flex_basis_raw
+    # `flex` shorthand (CSS Flexbox 7.1.1). Unitless numbers are grow then
+    # shrink; a length or `auto` is the basis. With NO basis token the basis is
+    # 0, not auto -- `flex: 1` is `1 1 0%` -- and that explicit zero overrides
+    # `width` (`flex_basis_zero`). `auto` is `1 1 auto`, `none` is `0 0 auto`.
+    val flex = decl_tbl_get_p(decl_tbl, decl_present, "flex").trim().lower()
+    if flex == "auto" or flex == "none" or flex == "initial":
+        flex_grow_v = if flex == "auto": 1 else: 0
+        flex_shrink_v = if flex == "none": 0 else: 1
+        flex_basis_px_v = 0
+        flex_basis_zero_v = false
+        flex_basis_permille_v = -1
+    elif flex.len() > 0:
+        var flex_numbers = 0
+        var flex_basis_given = false
+        for flex_token_raw in flex.split(" "):
+            val flex_token = flex_token_raw.trim()
+            if flex_token == "auto":
+                flex_basis_px_v = 0
+                flex_basis_zero_v = false
+                flex_basis_permille_v = -1
+                flex_basis_given = true
+            elif flex_token.len() > 0:
+                val flex_token_px = if flex_token == "0%": 0 else: parse_supported_nonnegative_px(flex_token)
+                val flex_factor = if flex_token.ends_with("px") or flex_token.ends_with("%"): -1 else: _decl_flex_factor(flex_token)
+                if flex_numbers < 2 and flex_factor >= 0:
+                    if flex_numbers == 0:
+                        flex_grow_v = flex_factor
+                    else:
+                        flex_shrink_v = flex_factor
+                    flex_numbers = flex_numbers + 1
+                elif flex_token_px >= 0:
+                    flex_basis_px_v = flex_token_px
+                    flex_basis_zero_v = flex_token_px == 0
+                    flex_basis_permille_v = -1
+                    flex_basis_given = true
+                else:
+                    # A basis this parser cannot size (`50%`, `12rem`,
+                    # `calc()`): leave it auto rather than call it zero.
+                    flex_basis_px_v = 0
+                    flex_basis_zero_v = false
+                    flex_basis_permille_v = -1
+                    if parse_percent_permille(flex_token) > 0:
+                        flex_basis_permille_v = parse_percent_permille(flex_token)
+                    flex_basis_given = true
+        if flex_numbers > 0 and not flex_basis_given:
+            flex_basis_px_v = 0
+            flex_basis_zero_v = true
+            flex_basis_permille_v = -1
     val flex_grow_decl = decl_tbl_get_p(decl_tbl, decl_present, "flex-grow")
     if flex_grow_decl.len() > 0:
-        val grow_v = parse_int(flex_grow_decl)
-        if grow_v > 0:
+        val grow_v = _decl_flex_factor(flex_grow_decl)
+        if grow_v >= 0:
             flex_grow_v = grow_v
     val flex_shrink_decl = decl_tbl_get_p(decl_tbl, decl_present, "flex-shrink")
     if flex_shrink_decl.len() > 0:
@@ -810,9 +1025,23 @@ fn _apply_decls_without_grid_inner(
         val basis_v = parse_supported_nonnegative_px(flex_basis_decl)
         if basis_v >= 0:
             flex_basis_px_v = basis_v
+            flex_basis_zero_v = basis_v == 0
+            flex_basis_permille_v = -1
+        elif flex_basis_decl.trim() == "0%":
+            flex_basis_px_v = 0
+            flex_basis_zero_v = true
+            flex_basis_permille_v = -1
+        elif flex_basis_decl.trim() == "auto":
+            flex_basis_px_v = 0
+            flex_basis_zero_v = false
+            flex_basis_permille_v = -1
+        elif parse_percent_permille(flex_basis_decl.trim()) > 0:
+            flex_basis_px_v = 0
+            flex_basis_zero_v = false
+            flex_basis_permille_v = parse_percent_permille(flex_basis_decl.trim())
     val order_decl = decl_tbl_get_p(decl_tbl, decl_present, "order")
     if order_decl.len() > 0:
-        order_v = parse_int(order_decl)
+        order_v = _decl_signed_int_or_zero(order_decl)
     val float_decl = decl_tbl_get_p(decl_tbl, decl_present, "float").trim()
     if float_decl.len() > 0:
         if float_decl == "left":
@@ -821,6 +1050,16 @@ fn _apply_decls_without_grid_inner(
             float_mode_v = 2
         elif float_decl == "none":
             float_mode_v = 0
+    val clear_decl = decl_tbl_get_p(decl_tbl, decl_present, "clear").trim()
+    if clear_decl.len() > 0:
+        if clear_decl == "left":
+            clear_mode_v = 1
+        elif clear_decl == "right":
+            clear_mode_v = 2
+        elif clear_decl == "both":
+            clear_mode_v = 3
+        elif clear_decl == "none":
+            clear_mode_v = 0
     val display_decl = decl_tbl_get_last_valid_display(decl_tbl)
     if apply_display and display_decl.len() > 0:
         if display_decl == "none":
@@ -835,6 +1074,8 @@ fn _apply_decls_without_grid_inner(
             display_v = "flex"
         elif display_decl == "grid":
             display_v = "grid"
+        elif display_decl == "flow-root":
+            display_v = "flow-root"
         elif display_decl == "contents":
             display_v = "contents"
         elif display_decl == "block":
@@ -871,6 +1112,26 @@ fn _apply_decls_without_grid_inner(
         val contain_norm = contain_decl.trim().lower()
         if contain_norm.contains("paint") or contain_norm == "content" or contain_norm == "strict":
             overflow_hidden_v = true
+        # `contain: size` (or `strict`, which includes it): the box must be
+        # sized independent of its contents. The block sizing pass in
+        # layout_engine reads `contain_size_v` and falls back to
+        # `contain-intrinsic-size` (parsed below) when no explicit height
+        # wins. `content` deliberately does NOT set size containment (CSS
+        # Contain L2: content = layout paint style).
+        if contain_norm == "strict" or contain_norm.contains("size"):
+            contain_size_v = true
+    val contain_intrinsic_decl = decl_tbl_get_p(decl_tbl, decl_present, "contain-intrinsic-size").trim().lower()
+    if contain_intrinsic_decl.len() > 0:
+        # `contain-intrinsic-size: <width> <height>` (one value applies to
+        # both). `auto` / unknown tokens leave the axis at 0, meaning "no
+        # intrinsic size" for that axis.
+        val ci_parts = contain_intrinsic_decl.split(" ")
+        if ci_parts.len() > 0:
+            contain_intrinsic_w_v = parse_int(ci_parts[0])
+            if ci_parts.len() > 1:
+                contain_intrinsic_h_v = parse_int(ci_parts[1])
+            else:
+                contain_intrinsic_h_v = contain_intrinsic_w_v
     val color_scheme_decl = decl_tbl_get_p(decl_tbl, decl_present, "color-scheme")
     if color_scheme_decl.len() > 0:
         val color_scheme_norm = color_scheme_decl.trim().lower()
@@ -974,25 +1235,45 @@ fn _apply_decls_without_grid_inner(
     val left_decl = decl_tbl_get_p(decl_tbl, decl_present, "left")
     val left_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "left")
     if left_decl.len() > 0:
-        left_px_v = parse_int(left_decl)
+        left_px_v = _decl_signed_int_or_zero(left_decl)
+        left_milli_v = 0
+        val left_exact = _decl_inset_exact_milli(left_decl, font_size_v)
+        if left_exact != INSET_NOT_LENGTH:
+            left_px_v = _inset_round_px(left_exact)
+            left_milli_v = (left_exact - (left_px_v as i64) * 1000) as i32
     val top_decl = decl_tbl_get_p(decl_tbl, decl_present, "top")
     val top_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "top")
     if top_decl.len() > 0:
+        top_milli_v = 0
         if top_decl.trim().lower() == "auto":
             top_px_v = if position_sticky_v:
                 SIMPLE_WEB_STICKY_TOP_AUTO
             else:
                 0
         else:
-            top_px_v = parse_int(top_decl)
+            top_px_v = _decl_signed_int_or_zero(top_decl)
+            val top_exact = _decl_inset_exact_milli(top_decl, font_size_v)
+            if top_exact != INSET_NOT_LENGTH:
+                top_px_v = _inset_round_px(top_exact)
+                top_milli_v = (top_exact - (top_px_v as i64) * 1000) as i32
     val right_decl = decl_tbl_get_p(decl_tbl, decl_present, "right")
     val right_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "right")
     if right_decl.len() > 0:
         right_px_v = parse_int(right_decl)
+        right_milli_v = 0
+        val right_exact = _decl_inset_exact_milli(right_decl, font_size_v)
+        if right_exact != INSET_NOT_LENGTH and right_exact >= 0:
+            right_px_v = _inset_round_px(right_exact)
+            right_milli_v = (right_exact - (right_px_v as i64) * 1000) as i32
     val bottom_decl = decl_tbl_get_p(decl_tbl, decl_present, "bottom")
     val bottom_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "bottom")
     if bottom_decl.len() > 0:
         bottom_px_v = parse_int(bottom_decl)
+        bottom_milli_v = 0
+        val bottom_exact = _decl_inset_exact_milli(bottom_decl, font_size_v)
+        if bottom_exact != INSET_NOT_LENGTH and bottom_exact >= 0:
+            bottom_px_v = _inset_round_px(bottom_exact)
+            bottom_milli_v = (bottom_exact - (bottom_px_v as i64) * 1000) as i32
     val inset_decl = decl_tbl_get_p(decl_tbl, decl_present, "inset")
     val inset_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "inset")
     if inset_decl.len() > 0:
@@ -1004,12 +1285,16 @@ fn _apply_decls_without_grid_inner(
             top_px_v = sticky_top_inset_value(
                 inset_decl, inset_top, position_sticky_v
             )
+            top_milli_v = 0
         if inset_pos > right_pos:
             right_px_v = inset_right
+            right_milli_v = 0
         if inset_pos > bottom_pos:
             bottom_px_v = inset_bottom
+            bottom_milli_v = 0
         if inset_pos > left_pos:
             left_px_v = inset_left
+            left_milli_v = 0
     val inset_block = decl_tbl_get_p(decl_tbl, decl_present, "inset-block")
     val inset_block_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "inset-block")
     if inset_block.len() > 0:
@@ -1019,8 +1304,10 @@ fn _apply_decls_without_grid_inner(
             top_px_v = sticky_top_inset_value(
                 inset_block, ib0, position_sticky_v
             )
+            top_milli_v = 0
         if inset_block_pos > bottom_pos:
             bottom_px_v = ib1
+            bottom_milli_v = 0
     val inset_inline = decl_tbl_get_p(decl_tbl, decl_present, "inset-inline")
     val inset_inline_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "inset-inline")
     if inset_inline.len() > 0:
@@ -1028,29 +1315,37 @@ fn _apply_decls_without_grid_inner(
         val ii1 = parse_nth_box_int(inset_inline, 1)
         if inset_inline_pos > left_pos:
             left_px_v = ii0
+            left_milli_v = 0
         if inset_inline_pos > right_pos:
             right_px_v = ii1
+            right_milli_v = 0
     val inset_block_start = decl_tbl_get_p(decl_tbl, decl_present, "inset-block-start")
     if inset_block_start.len() > 0 and decl_tbl_last_index_p(decl_tbl, decl_present, "inset-block-start") > top_pos:
         top_px_v = sticky_top_inset_value(
             inset_block_start, parse_int(inset_block_start),
             position_sticky_v
         )
+        top_milli_v = 0
     val inset_block_end = decl_tbl_get_p(decl_tbl, decl_present, "inset-block-end")
     if inset_block_end.len() > 0 and decl_tbl_last_index_p(decl_tbl, decl_present, "inset-block-end") > bottom_pos:
         bottom_px_v = parse_int(inset_block_end)
+        bottom_milli_v = 0
     val inset_inline_start = decl_tbl_get_p(decl_tbl, decl_present, "inset-inline-start")
     if inset_inline_start.len() > 0 and decl_tbl_last_index_p(decl_tbl, decl_present, "inset-inline-start") > left_pos:
         left_px_v = parse_int(inset_inline_start)
+        left_milli_v = 0
     val inset_inline_end = decl_tbl_get_p(decl_tbl, decl_present, "inset-inline-end")
     if inset_inline_end.len() > 0 and decl_tbl_last_index_p(decl_tbl, decl_present, "inset-inline-end") > right_pos:
         right_px_v = parse_int(inset_inline_end)
+        right_milli_v = 0
     val z_index_decl = decl_tbl_get_p(decl_tbl, decl_present, "z-index")
     if z_index_decl.len() > 0:
         z_index_v = parse_int(z_index_decl)
     val opacity_decl = decl_tbl_get_p(decl_tbl, decl_present, "opacity")
     if opacity_decl.len() > 0:
-        opacity_pct_v = parse_opacity_pct(opacity_decl)
+        val parsed_opacity = parse_opacity_pct_or_neg1(opacity_decl)
+        if parsed_opacity >= 0:
+            opacity_pct_v = parsed_opacity
     val filter_decl = decl_tbl_get_p(decl_tbl, decl_present, "filter")
     if filter_decl.len() > 0:
         val filter_opacity_pct = parse_filter_opacity_pct(filter_decl)
@@ -1068,18 +1363,25 @@ fn _apply_decls_without_grid_inner(
             height_v = clip_bottom
     val transform_decl = decl_tbl_get_p(decl_tbl, decl_present, "transform")
     if transform_decl.len() > 0:
+        val normalized = transform_decl.trim().lower()
+        if normalized != "":
+            transform_raw_v = normalized
         if (
             position_sticky_v and
             transform_decl.trim().lower() != "none"
         ):
             top_px_v = SIMPLE_WEB_STICKY_TOP_AUTO
         else:
-            val translate_x = parse_transform_translate_x(transform_decl, width_v)
-            val translate_y = parse_transform_translate_y(transform_decl, height_v)
+            val translate_x = parse_transform_translate_x_milli(transform_decl, width_v)
+            val translate_y = parse_transform_translate_y_milli(transform_decl, height_v)
             if translate_x != 0 or translate_y != 0:
-                left_px_v = left_px_v + translate_x
-                top_px_v = top_px_v + translate_y
-                position_relative_v = true
+                val moved = _translated_insets(position_absolute_v, left_px_v, left_milli_v, top_px_v, top_milli_v, translate_x, translate_y)
+                left_px_v = moved[0]
+                left_milli_v = moved[1]
+                top_px_v = moved[2]
+                top_milli_v = moved[3]
+                if not position_absolute_v:
+                    position_relative_v = true
             val transform_scale_pct = parse_transform_scale_pct(
                 transform_decl
             )
@@ -1097,24 +1399,34 @@ fn _apply_decls_without_grid_inner(
                 height_v = old_width
     val translate_decl = decl_tbl_get_p(decl_tbl, decl_present, "translate")
     if translate_decl.len() > 0:
+        val normalized = translate_decl.trim().lower()
+        if normalized != "":
+            translate_raw_v = normalized
         if (
             position_sticky_v and
             translate_decl.trim().lower() != "none"
         ):
             top_px_v = SIMPLE_WEB_STICKY_TOP_AUTO
         else:
-            val individual_translate_x = parse_individual_translate_x(
+            val individual_translate_x = parse_individual_translate_x_milli(
                 translate_decl, width_v
             )
-            val individual_translate_y = parse_individual_translate_y(
+            val individual_translate_y = parse_individual_translate_y_milli(
                 translate_decl, height_v
             )
             if individual_translate_x != 0 or individual_translate_y != 0:
-                left_px_v = left_px_v + individual_translate_x
-                top_px_v = top_px_v + individual_translate_y
-                position_relative_v = true
+                val moved = _translated_insets(position_absolute_v, left_px_v, left_milli_v, top_px_v, top_milli_v, individual_translate_x, individual_translate_y)
+                left_px_v = moved[0]
+                left_milli_v = moved[1]
+                top_px_v = moved[2]
+                top_milli_v = moved[3]
+                if not position_absolute_v:
+                    position_relative_v = true
     val scale_decl = decl_tbl_get_p(decl_tbl, decl_present, "scale")
     if scale_decl.len() > 0:
+        val normalized = scale_decl.trim().lower()
+        if normalized != "":
+            scale_raw_v = normalized
         val scale_pct = parse_scale_pct(scale_decl)
         if scale_pct != 100:
             if width_v > 0:
@@ -1123,6 +1435,9 @@ fn _apply_decls_without_grid_inner(
                 height_v = (height_v * scale_pct) / 100
     val rotate_decl = decl_tbl_get_p(decl_tbl, decl_present, "rotate")
     if rotate_decl.len() > 0:
+        val normalized = rotate_decl.trim().lower()
+        if normalized != "":
+            rotate_raw_v = normalized
         if parse_rotate_quarter_turn(rotate_decl) and width_v > 0 and height_v > 0:
             val old_width = width_v
             width_v = height_v
@@ -1157,6 +1472,8 @@ fn _apply_decls_without_grid_inner(
     if flex_direction_decl.len() > 0:
         if flex_direction_decl == "column":
             flex_direction_v = "column"
+        elif flex_direction_decl == "column-reverse":
+            flex_direction_v = "column-reverse"
         elif flex_direction_decl == "row-reverse":
             flex_direction_v = "row-reverse"
         else:
@@ -1169,6 +1486,8 @@ fn _apply_decls_without_grid_inner(
     if flex_flow_decl.len() > 0:
         if css_word_contains(flex_flow_decl, "row-reverse"):
             flex_direction_v = "row-reverse"
+        elif css_word_contains(flex_flow_decl, "column-reverse"):
+            flex_direction_v = "column-reverse"
         elif css_word_contains(flex_flow_decl, "column"):
             flex_direction_v = "column"
         elif css_word_contains(flex_flow_decl, "row"):
@@ -1202,11 +1521,13 @@ fn _apply_decls_without_grid_inner(
     val ta = decl_tbl_get_p(decl_tbl, decl_present, "text-align")
     if ta.len() > 0:
         text_align_v = ta
+        text_align_set_v = true
     val text_align_all_decl = decl_tbl_get_p(decl_tbl, decl_present, "text-align-all")
     if text_align_all_decl.len() > 0:
         val text_align_all_norm = text_align_all_decl.trim().lower()
         if text_align_all_norm == "left" or text_align_all_norm == "right" or text_align_all_norm == "center" or text_align_all_norm == "start" or text_align_all_norm == "end" or text_align_all_norm == "justify":
             text_align_v = text_align_all_norm
+            text_align_set_v = true
     val text_align_last_decl = decl_tbl_get_p(decl_tbl, decl_present, "text-align-last")
     if text_align_last_decl.len() > 0:
         val text_align_last_norm = text_align_last_decl.trim().lower()
@@ -1227,15 +1548,17 @@ fn _apply_decls_without_grid_inner(
         text_indent_px_v = parse_int(text_indent_decl)
     val letter_spacing_decl = decl_tbl_get_p(decl_tbl, decl_present, "letter-spacing")
     if letter_spacing_decl.len() > 0:
-        letter_spacing_px_v = parse_int(letter_spacing_decl)
+        letter_spacing_milli_v = _decl_signed_spacing_milli(letter_spacing_decl, font_size_v)
+        letter_spacing_px_v = letter_spacing_milli_v / 1000
     val word_spacing_decl = decl_tbl_get_p(decl_tbl, decl_present, "word-spacing")
     if word_spacing_decl.len() > 0:
-        word_spacing_px_v = parse_int(word_spacing_decl)
+        word_spacing_milli_v = _decl_signed_spacing_milli(word_spacing_decl, font_size_v)
+        word_spacing_px_v = word_spacing_milli_v / 1000
     val font_style_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-style")
     val font_style_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "font-style")
     if font_style_decl.len() > 0 and (font_pos < 0 or font_style_pos > font_pos):
         val font_style_norm = font_style_decl.trim().lower()
-        font_style_italic_v = font_style_norm == "italic" or font_style_norm == "oblique"
+        font_style_italic_v = if font_style_norm == "inherit": st.inherit_italic else: font_style_norm == "italic" or font_style_norm == "oblique"
     val font_kerning_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-kerning")
     if font_kerning_decl.len() > 0:
         val font_kerning_norm = font_kerning_decl.trim().lower()
@@ -1338,6 +1661,10 @@ fn _apply_decls_without_grid_inner(
         val direction_norm = direction_decl.trim().lower()
         if direction_norm == "rtl":
             direction_rtl_v = true
+            # The initial `text-align` is `start`: an RTL box whose alignment
+            # nobody declared -- here or on an ancestor -- aligns right.
+            if text_align_v == "left" and not text_align_set_v:
+                text_align_v = "start"
         elif direction_norm == "ltr":
             direction_rtl_v = false
     val text_orientation_decl = decl_tbl_get_p(decl_tbl, decl_present, "text-orientation")
@@ -1357,14 +1684,16 @@ fn _apply_decls_without_grid_inner(
             text_shadow_x_px_v = 0
             text_shadow_y_px_v = 0
             text_shadow_color_v = 0u32
+            text_shadow_raw_v = ""
         else:
+            text_shadow_raw_v = text_shadow_norm
             val shadow_x = parse_signed_nth_int(text_shadow_norm, 0)
             val shadow_y = parse_signed_nth_int(text_shadow_norm, 1)
             val shadow_color = parse_color_any(text_shadow_norm)
             if shadow_x != -1000000 and shadow_y != -1000000:
                 text_shadow_x_px_v = shadow_x
                 text_shadow_y_px_v = shadow_y
-                text_shadow_color_v = if shadow_color != 0u32: shadow_color else: st.fg
+                text_shadow_color_v = if shadow_color != 0u32: shadow_color elif _decl_transparent_color(text_shadow_norm): 0u32 else: st.fg
     val text_decoration_decl = decl_tbl_get_p(decl_tbl, decl_present, "text-decoration")
     if text_decoration_decl.len() > 0:
         val text_decoration_norm = text_decoration_decl.trim().lower()
@@ -1412,7 +1741,7 @@ fn _apply_decls_without_grid_inner(
     if text_decoration_thickness.len() > 0:
         val text_decoration_thickness_norm = text_decoration_thickness.trim().lower()
         if text_decoration_thickness_norm == "auto" or text_decoration_thickness_norm == "from-font":
-            text_decoration_thickness_px_v = 1
+            text_decoration_thickness_px_v = 0
         else:
             val parsed_thickness = parse_int(text_decoration_thickness_norm)
             if parsed_thickness > 0:
@@ -1423,7 +1752,11 @@ fn _apply_decls_without_grid_inner(
         if text_underline_offset_norm == "auto":
             text_underline_offset_px_v = 0
         else:
-            text_underline_offset_px_v = parse_int(text_underline_offset_norm)
+            # Negative offsets are valid CSS (underline above the default
+            # position); parse_int would drop the sign and mirror the ink
+            # downward instead of upward.
+            val parsed_offset = parse_signed_nth_int(text_underline_offset_norm, 0)
+            text_underline_offset_px_v = if parsed_offset == -1000000: 0 else: parsed_offset
     val text_underline_position = decl_tbl_get_p(decl_tbl, decl_present, "text-underline-position")
     if text_underline_position.len() > 0:
         val text_underline_position_norm = text_underline_position.trim().lower()
@@ -1720,17 +2053,24 @@ fn _apply_decls_without_grid_inner(
     val fw = decl_tbl_get_p(decl_tbl, decl_present, "font-weight")
     val fw_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "font-weight")
     if fw.len() > 0 and (font_pos < 0 or fw_pos > font_pos):
-        if fw == "normal" or fw == "400":
+        if fw.trim().lower() == "inherit":
+            bold_v = st.inherit_bold
+        elif fw == "normal" or fw == "400":
             bold_v = false
         elif fw == "bold" or fw == "700" or fw == "600" or fw == "800":
             bold_v = true
     val (resolved_pad_t, resolved_pad_r, resolved_pad_b, resolved_pad_l) = _resolve_authored_padding(
-        decl_tbl, pad_t_v, pad_r_v, pad_b_v, pad_l_v, font_size_v
+        decl_tbl, padding_slot(pad_t_v, pad_t_pct_v), padding_slot(pad_r_v, pad_r_pct_v),
+        padding_slot(pad_b_v, pad_b_pct_v), padding_slot(pad_l_v, pad_l_pct_v), font_size_v
     )
-    pad_t_v = resolved_pad_t
-    pad_r_v = resolved_pad_r
-    pad_b_v = resolved_pad_b
-    pad_l_v = resolved_pad_l
+    pad_t_v = padding_slot_px(resolved_pad_t)
+    pad_r_v = padding_slot_px(resolved_pad_r)
+    pad_b_v = padding_slot_px(resolved_pad_b)
+    pad_l_v = padding_slot_px(resolved_pad_l)
+    pad_t_pct_v = padding_slot_pct_milli(resolved_pad_t)
+    pad_r_pct_v = padding_slot_pct_milli(resolved_pad_r)
+    pad_b_pct_v = padding_slot_pct_milli(resolved_pad_b)
+    pad_l_pct_v = padding_slot_pct_milli(resolved_pad_l)
     val gap = decl_tbl_get_last_valid_nonnegative_px(decl_tbl, "gap")
     if val Some(gap_value) = gap:
         if (
@@ -1760,7 +2100,9 @@ fn _apply_decls_without_grid_inner(
         val style = css_border_style_token(border)
         if style != "":
             border_style_l_v = style
+            border_style_t_v = style
             border_style_r_v = style
+            border_style_b_v = style
         val bw = parse_int(border)
         if bw > 0:
             border_w_v = bw
@@ -1769,13 +2111,13 @@ fn _apply_decls_without_grid_inner(
             border_r_v = bw
             border_b_v = bw
         val bc = parse_color_any(border)
-        if bc != 0u32:
+        if bc != 0u32 or _decl_transparent_color(border):
             border_color_v = bc
             border_color_l_v = bc
             border_color_t_v = bc
             border_color_r_v = bc
             border_color_b_v = bc
-        if border_shorthand_disables_paint(border):
+        if border_shorthand_disables_paint(border) or style == "none" or style == "hidden":
             border_w_v = 0
             border_l_v = 0
             border_t_v = 0
@@ -1802,13 +2144,29 @@ fn _apply_decls_without_grid_inner(
                 border_l_v = bw3
     val border_color = decl_tbl_get_p(decl_tbl, decl_present, "border-color")
     if border_color.len() > 0:
-        val bcv = parse_color_any(border_color)
-        if bcv != 0u32:
-            border_color_v = bcv
-            border_color_l_v = bcv
-            border_color_t_v = bcv
-            border_color_r_v = bcv
-            border_color_b_v = bcv
+        # 1-4 values: top, right, bottom, left (`red transparent transparent
+        # transparent` is the other CSS-triangle idiom).
+        val bc_toks = _decl_top_level_tokens(border_color)
+        if bc_toks.len() >= 1 and bc_toks.len() <= 4:
+            val n = bc_toks.len()
+            val t_tok = bc_toks[0]
+            val r_tok = if n >= 2: bc_toks[1] else: t_tok
+            val b_tok = if n >= 3: bc_toks[2] else: t_tok
+            val l_tok = if n >= 4: bc_toks[3] else: r_tok
+            val tc = parse_color_any(t_tok)
+            if tc != 0u32 or _decl_transparent_color(t_tok):
+                border_color_t_v = tc
+                if n == 1:
+                    border_color_v = tc
+            val rc = parse_color_any(r_tok)
+            if rc != 0u32 or _decl_transparent_color(r_tok):
+                border_color_r_v = rc
+            val bc2 = parse_color_any(b_tok)
+            if bc2 != 0u32 or _decl_transparent_color(b_tok):
+                border_color_b_v = bc2
+            val lc = parse_color_any(l_tok)
+            if lc != 0u32 or _decl_transparent_color(l_tok):
+                border_color_l_v = lc
     val border_left = decl_tbl_get_p(decl_tbl, decl_present, "border-left")
     if border_left.len() > 0:
         val style = css_border_style_token(border_left)
@@ -1818,16 +2176,23 @@ fn _apply_decls_without_grid_inner(
         if blw >= 0:
             border_l_v = blw
         val blc = parse_color_any(border_left)
-        if blc != 0u32:
+        if blc != 0u32 or _decl_transparent_color(border_left):
             border_color_l_v = blc
+        if border_shorthand_disables_paint(border_left) or border_style_disables_paint(border_left):
+            border_l_v = 0
     val border_top = decl_tbl_get_p(decl_tbl, decl_present, "border-top")
     if border_top.len() > 0:
+        val style = css_border_style_token(border_top)
+        if style != "":
+            border_style_t_v = style
         val btw = parse_int(border_top)
         if btw >= 0:
             border_t_v = btw
         val btc = parse_color_any(border_top)
-        if btc != 0u32:
+        if btc != 0u32 or _decl_transparent_color(border_top):
             border_color_t_v = btc
+        if border_shorthand_disables_paint(border_top) or border_style_disables_paint(border_top):
+            border_t_v = 0
     val border_right = decl_tbl_get_p(decl_tbl, decl_present, "border-right")
     if border_right.len() > 0:
         val style = css_border_style_token(border_right)
@@ -1837,48 +2202,65 @@ fn _apply_decls_without_grid_inner(
         if brw >= 0:
             border_r_v = brw
         val brc = parse_color_any(border_right)
-        if brc != 0u32:
+        if brc != 0u32 or _decl_transparent_color(border_right):
             border_color_r_v = brc
+        if border_shorthand_disables_paint(border_right) or border_style_disables_paint(border_right):
+            border_r_v = 0
     val border_bottom = decl_tbl_get_p(decl_tbl, decl_present, "border-bottom")
     if border_bottom.len() > 0:
+        val style = css_border_style_token(border_bottom)
+        if style != "":
+            border_style_b_v = style
         val bbw = parse_int(border_bottom)
         if bbw >= 0:
             border_b_v = bbw
         val bbc = parse_color_any(border_bottom)
-        if bbc != 0u32:
+        if bbc != 0u32 or _decl_transparent_color(border_bottom):
             border_color_b_v = bbc
+        if border_shorthand_disables_paint(border_bottom) or border_style_disables_paint(border_bottom):
+            border_b_v = 0
     val border_block = decl_tbl_get_p(decl_tbl, decl_present, "border-block")
     if border_block.len() > 0:
+        val style = css_border_style_token(border_block)
+        if style != "":
+            border_style_t_v = style
+            border_style_b_v = style
         val bbw = parse_int(border_block)
         if bbw >= 0:
             border_t_v = bbw
             border_b_v = bbw
         val bbc = parse_color_any(border_block)
-        if bbc != 0u32:
+        if bbc != 0u32 or _decl_transparent_color(border_block):
             border_color_t_v = bbc
             border_color_b_v = bbc
-        if border_style_disables_paint(border_block):
+        if border_shorthand_disables_paint(border_block) or border_style_disables_paint(border_block):
             border_t_v = 0
             border_b_v = 0
     val border_block_start = decl_tbl_get_p(decl_tbl, decl_present, "border-block-start")
     if border_block_start.len() > 0:
+        val style = css_border_style_token(border_block_start)
+        if style != "":
+            border_style_t_v = style
         val bbsw = parse_int(border_block_start)
         if bbsw >= 0:
             border_t_v = bbsw
         val bbsc = parse_color_any(border_block_start)
-        if bbsc != 0u32:
+        if bbsc != 0u32 or _decl_transparent_color(border_block_start):
             border_color_t_v = bbsc
-        if border_style_disables_paint(border_block_start):
+        if border_shorthand_disables_paint(border_block_start) or border_style_disables_paint(border_block_start):
             border_t_v = 0
     val border_block_end = decl_tbl_get_p(decl_tbl, decl_present, "border-block-end")
     if border_block_end.len() > 0:
+        val style = css_border_style_token(border_block_end)
+        if style != "":
+            border_style_b_v = style
         val bbew = parse_int(border_block_end)
         if bbew >= 0:
             border_b_v = bbew
         val bbec = parse_color_any(border_block_end)
-        if bbec != 0u32:
+        if bbec != 0u32 or _decl_transparent_color(border_block_end):
             border_color_b_v = bbec
-        if border_style_disables_paint(border_block_end):
+        if border_shorthand_disables_paint(border_block_end) or border_style_disables_paint(border_block_end):
             border_b_v = 0
     val border_inline = decl_tbl_get_p(decl_tbl, decl_present, "border-inline")
     if border_inline.len() > 0:
@@ -1891,7 +2273,7 @@ fn _apply_decls_without_grid_inner(
             border_l_v = biw
             border_r_v = biw
         val bic = parse_color_any(border_inline)
-        if bic != 0u32:
+        if bic != 0u32 or _decl_transparent_color(border_inline):
             border_color_l_v = bic
             border_color_r_v = bic
         if border_style_disables_paint(border_inline):
@@ -1906,7 +2288,7 @@ fn _apply_decls_without_grid_inner(
         if bisw >= 0:
             border_l_v = bisw
         val bisc = parse_color_any(border_inline_start)
-        if bisc != 0u32:
+        if bisc != 0u32 or _decl_transparent_color(border_inline_start):
             border_color_l_v = bisc
         if border_style_disables_paint(border_inline_start):
             border_l_v = 0
@@ -1919,7 +2301,7 @@ fn _apply_decls_without_grid_inner(
         if biew >= 0:
             border_r_v = biew
         val biec = parse_color_any(border_inline_end)
-        if biec != 0u32:
+        if biec != 0u32 or _decl_transparent_color(border_inline_end):
             border_color_r_v = biec
         if border_style_disables_paint(border_inline_end):
             border_r_v = 0
@@ -1936,24 +2318,32 @@ fn _apply_decls_without_grid_inner(
     if border_bottom_width.len() > 0:
         border_b_v = parse_int(border_bottom_width)
     val border_left_color = decl_tbl_get_p(decl_tbl, decl_present, "border-left-color")
-    if border_left_color.len() > 0:
+    if border_left_color.trim().lower() == "currentcolor":
+        border_color_l_v = fg_v
+    elif border_left_color.len() > 0:
         val blcv = parse_color_any(border_left_color)
-        if blcv != 0u32:
+        if blcv != 0u32 or _decl_transparent_color(border_left_color):
             border_color_l_v = blcv
     val border_top_color = decl_tbl_get_p(decl_tbl, decl_present, "border-top-color")
-    if border_top_color.len() > 0:
+    if border_top_color.trim().lower() == "currentcolor":
+        border_color_t_v = fg_v
+    elif border_top_color.len() > 0:
         val btcv = parse_color_any(border_top_color)
-        if btcv != 0u32:
+        if btcv != 0u32 or _decl_transparent_color(border_top_color):
             border_color_t_v = btcv
     val border_right_color = decl_tbl_get_p(decl_tbl, decl_present, "border-right-color")
-    if border_right_color.len() > 0:
+    if border_right_color.trim().lower() == "currentcolor":
+        border_color_r_v = fg_v
+    elif border_right_color.len() > 0:
         val brcv = parse_color_any(border_right_color)
-        if brcv != 0u32:
+        if brcv != 0u32 or _decl_transparent_color(border_right_color):
             border_color_r_v = brcv
     val border_bottom_color = decl_tbl_get_p(decl_tbl, decl_present, "border-bottom-color")
-    if border_bottom_color.len() > 0:
+    if border_bottom_color.trim().lower() == "currentcolor":
+        border_color_b_v = fg_v
+    elif border_bottom_color.len() > 0:
         val bbcv = parse_color_any(border_bottom_color)
-        if bbcv != 0u32:
+        if bbcv != 0u32 or _decl_transparent_color(border_bottom_color):
             border_color_b_v = bbcv
     val border_block_width = decl_tbl_get_p(decl_tbl, decl_present, "border-block-width")
     if border_block_width.len() > 0:
@@ -1982,79 +2372,111 @@ fn _apply_decls_without_grid_inner(
     val border_block_color = decl_tbl_get_p(decl_tbl, decl_present, "border-block-color")
     if border_block_color.len() > 0:
         val bbcv = parse_color_any(border_block_color)
-        if bbcv != 0u32:
+        if bbcv != 0u32 or _decl_transparent_color(border_block_color):
             border_color_t_v = bbcv
             border_color_b_v = bbcv
     val border_block_start_color = decl_tbl_get_p(decl_tbl, decl_present, "border-block-start-color")
     if border_block_start_color.len() > 0:
         val bbscv = parse_color_any(border_block_start_color)
-        if bbscv != 0u32:
+        if bbscv != 0u32 or _decl_transparent_color(border_block_start_color):
             border_color_t_v = bbscv
     val border_block_end_color = decl_tbl_get_p(decl_tbl, decl_present, "border-block-end-color")
     if border_block_end_color.len() > 0:
         val bbecv = parse_color_any(border_block_end_color)
-        if bbecv != 0u32:
+        if bbecv != 0u32 or _decl_transparent_color(border_block_end_color):
             border_color_b_v = bbecv
     val border_inline_color = decl_tbl_get_p(decl_tbl, decl_present, "border-inline-color")
     if border_inline_color.len() > 0:
         val bicv = parse_color_any(border_inline_color)
-        if bicv != 0u32:
+        if bicv != 0u32 or _decl_transparent_color(border_inline_color):
             border_color_l_v = bicv
             border_color_r_v = bicv
     val border_inline_start_color = decl_tbl_get_p(decl_tbl, decl_present, "border-inline-start-color")
     if border_inline_start_color.len() > 0:
         val biscv = parse_color_any(border_inline_start_color)
-        if biscv != 0u32:
+        if biscv != 0u32 or _decl_transparent_color(border_inline_start_color):
             border_color_l_v = biscv
     val border_inline_end_color = decl_tbl_get_p(decl_tbl, decl_present, "border-inline-end-color")
     if border_inline_end_color.len() > 0:
         val biecv = parse_color_any(border_inline_end_color)
-        if biecv != 0u32:
+        if biecv != 0u32 or _decl_transparent_color(border_inline_end_color):
             border_color_r_v = biecv
     val border_style = decl_tbl_get_p(decl_tbl, decl_present, "border-style")
     if border_style.len() > 0:
-        val left_style = css_border_style_side(border_style, 3)
+        val top_style = css_border_style_side(border_style, 0)
         val right_style = css_border_style_side(border_style, 1)
-        if left_style != "":
-            border_style_l_v = left_style
+        val bottom_style = css_border_style_side(border_style, 2)
+        val left_style = css_border_style_side(border_style, 3)
+        if top_style != "":
+            border_style_t_v = top_style
         if right_style != "":
             border_style_r_v = right_style
+        if bottom_style != "":
+            border_style_b_v = bottom_style
+        if left_style != "":
+            border_style_l_v = left_style
+        # The side widths are zeroed by the per-side style longhands this
+        # shorthand stored at its own source position, so a later
+        # `border-top` can still give the top a border.
         if border_style_disables_paint(border_style):
             border_w_v = 0
-            border_l_v = 0
-            border_t_v = 0
-            border_r_v = 0
-            border_b_v = 0
     val border_left_style = decl_tbl_get_p(decl_tbl, decl_present, "border-left-style")
     if border_left_style.len() > 0:
         val style = css_border_style_token(border_left_style)
         if style != "":
             border_style_l_v = style
-        if border_style_disables_paint(border_left_style):
+        if border_style_disables_paint(border_left_style) or style == "none" or style == "hidden":
             border_l_v = 0
     val border_top_style = decl_tbl_get_p(decl_tbl, decl_present, "border-top-style")
-    if border_top_style.len() > 0 and border_style_disables_paint(border_top_style):
-        border_t_v = 0
+    if border_top_style.len() > 0:
+        val style = css_border_style_token(border_top_style)
+        if style != "":
+            border_style_t_v = style
+        if border_style_disables_paint(border_top_style) or style == "none" or style == "hidden":
+            border_t_v = 0
     val border_right_style = decl_tbl_get_p(decl_tbl, decl_present, "border-right-style")
     if border_right_style.len() > 0:
         val style = css_border_style_token(border_right_style)
         if style != "":
             border_style_r_v = style
-        if border_style_disables_paint(border_right_style):
+        if border_style_disables_paint(border_right_style) or style == "none" or style == "hidden":
             border_r_v = 0
     val border_bottom_style = decl_tbl_get_p(decl_tbl, decl_present, "border-bottom-style")
-    if border_bottom_style.len() > 0 and border_style_disables_paint(border_bottom_style):
-        border_b_v = 0
+    if border_bottom_style.len() > 0:
+        val style = css_border_style_token(border_bottom_style)
+        if style != "":
+            border_style_b_v = style
+        if border_style_disables_paint(border_bottom_style) or style == "none" or style == "hidden":
+            border_b_v = 0
     val border_block_style = decl_tbl_get_p(decl_tbl, decl_present, "border-block-style")
-    if border_block_style.len() > 0 and border_style_disables_paint(border_block_style):
-        border_t_v = 0
-        border_b_v = 0
+    if border_block_style.len() > 0:
+        val top_style = css_border_style_side(border_block_style, 0)
+        val bot_style = css_border_style_side(border_block_style, 1)
+        if top_style != "":
+            border_style_t_v = top_style
+            if top_style == "none" or top_style == "hidden":
+                border_t_v = 0
+        if bot_style != "":
+            border_style_b_v = bot_style
+            if bot_style == "none" or bot_style == "hidden":
+                border_b_v = 0
+        if border_style_disables_paint(border_block_style):
+            border_t_v = 0
+            border_b_v = 0
     val border_block_start_style = decl_tbl_get_p(decl_tbl, decl_present, "border-block-start-style")
-    if border_block_start_style.len() > 0 and border_style_disables_paint(border_block_start_style):
-        border_t_v = 0
+    if border_block_start_style.len() > 0:
+        val style = css_border_style_token(border_block_start_style)
+        if style != "":
+            border_style_t_v = style
+        if border_style_disables_paint(border_block_start_style) or style == "none" or style == "hidden":
+            border_t_v = 0
     val border_block_end_style = decl_tbl_get_p(decl_tbl, decl_present, "border-block-end-style")
-    if border_block_end_style.len() > 0 and border_style_disables_paint(border_block_end_style):
-        border_b_v = 0
+    if border_block_end_style.len() > 0:
+        val style = css_border_style_token(border_block_end_style)
+        if style != "":
+            border_style_b_v = style
+        if border_style_disables_paint(border_block_end_style) or style == "none" or style == "hidden":
+            border_b_v = 0
     val border_inline_style = decl_tbl_get_p(decl_tbl, decl_present, "border-inline-style")
     if border_inline_style.len() > 0:
         val left_style = css_border_style_side(border_inline_style, 3)
@@ -2086,31 +2508,38 @@ fn _apply_decls_without_grid_inner(
         border_r_v = 0
     val outline = decl_tbl_get_p(decl_tbl, decl_present, "outline")
     if outline.len() > 0:
-        val ow = parse_supported_outline_shorthand_width_px(outline)
-        if ow >= 0:
-            outline_w_v = ow
+        outline_w_v = outline_shorthand_paint_width_px(outline)
         val oc = parse_color_any(outline)
-        if oc != 0u32:
+        if oc != 0u32 or _decl_transparent_color(outline):
             outline_color_v = oc
-        if border_style_disables_paint(outline):
-            outline_w_v = 0
+        else:
+            # An omitted colour is currentColor.
+            outline_color_v = fg_v
     val outline_width = decl_tbl_get_p(decl_tbl, decl_present, "outline-width")
     if outline_width.len() > 0:
         outline_w_v = parse_int(outline_width)
     val outline_color = decl_tbl_get_p(decl_tbl, decl_present, "outline-color")
-    if outline_color.len() > 0:
+    if outline_color.trim().lower() == "currentcolor":
+        outline_color_v = fg_v
+    elif outline_color.len() > 0:
         val ocv = parse_color_any(outline_color)
-        if ocv != 0u32:
+        if ocv != 0u32 or _decl_transparent_color(outline_color):
             outline_color_v = ocv
     val outline_offset = decl_tbl_get_p(decl_tbl, decl_present, "outline-offset")
     if outline_offset.len() > 0:
         outline_offset_px_v = parse_int(outline_offset)
     val outline_style = decl_tbl_get_p(decl_tbl, decl_present, "outline-style")
     if outline_style.len() > 0:
+        # Chrome 159: `outline-style:solid` alone is medium (3px); `auto`
+        # paints the 1px ring whatever the width.
         if border_style_disables_paint(outline_style):
             outline_w_v = 0
-        elif outline_w_v == 0:
+        elif outline_style.trim().lower() == "auto":
             outline_w_v = 1
+        elif outline_w_v == 0 and decl_tbl_get_p(decl_tbl, decl_present, "outline-width").len() == 0:
+            outline_w_v = 3
+            if decl_tbl_get_p(decl_tbl, decl_present, "outline-color").len() == 0 and decl_tbl_get_p(decl_tbl, decl_present, "outline").len() == 0:
+                outline_color_v = fg_v
     val box_shadow_decl = decl_tbl_get_p(decl_tbl, decl_present, "box-shadow")
     if box_shadow_decl.len() > 0:
         val box_shadow_norm = box_shadow_decl.trim().lower()
@@ -2134,15 +2563,19 @@ fn _apply_decls_without_grid_inner(
                 box_shadow_alpha_v = agg.alpha
                 box_shadow_color_v = agg.color
             else:
-                val shadow_x = parse_signed_nth_int(box_shadow_norm, 0)
-                val shadow_y = parse_signed_nth_int(box_shadow_norm, 1)
+                val shadow_prefix = shadow_length_prefix(box_shadow_norm)
+                val shadow_x = parse_signed_nth_int(shadow_prefix, 0)
+                val shadow_y = parse_signed_nth_int(shadow_prefix, 1)
+                val shadow_blur_raw = parse_signed_nth_int(shadow_prefix, 2)
+                val shadow_blur = if shadow_blur_raw > 0: shadow_blur_raw else: 0
                 val shadow_color = parse_color_any(box_shadow_norm)
+                val shadow_alpha = shadow_layer_alpha(box_shadow_norm)
                 if shadow_x != -1000000 and shadow_y != -1000000:
                     box_shadow_x_px_v = shadow_x
                     box_shadow_y_px_v = shadow_y
-                    box_shadow_blur_px_v = 0
-                    box_shadow_alpha_v = 255
-                    box_shadow_color_v = if shadow_color != 0u32: shadow_color else: web_argb(0, 0, 0)
+                    box_shadow_blur_px_v = shadow_blur
+                    box_shadow_alpha_v = if shadow_alpha > 0: shadow_alpha else: 0
+                    box_shadow_color_v = if shadow_color != 0u32: shadow_color elif _decl_transparent_color(box_shadow_norm): 0u32 else: web_argb(0, 0, 0)
     val backdrop_filter_decl = decl_tbl_get_p(decl_tbl, decl_present, "backdrop-filter")
     val webkit_backdrop_filter_decl = decl_tbl_get_p(decl_tbl, decl_present, "-webkit-backdrop-filter")
     if backdrop_filter_decl.len() > 0:
@@ -2163,7 +2596,7 @@ fn _apply_decls_without_grid_inner(
     val margin = decl_tbl_get_p(decl_tbl, decl_present, "margin")
     if margin.len() > 0:
         # Token-aware shorthand so per-side "auto" (centering) and "%" survive.
-        val mtoks = ws_tokens(margin.trim().lower())
+        val mtoks = css_value_tokens(margin)
         val mn = mtoks.len()
         if mn > 0:
             var t_tok = mtoks[0]
@@ -2190,10 +2623,16 @@ fn _apply_decls_without_grid_inner(
             # (-(1000+N), resolved at layout via resolve_vertical_margin_px)
             # but otherwise stay plain px (matching prior behavior — no
             # negative-margin sign flip on `margin: 5% 10%`).
-            margin_t_v = if t_tok == "auto": 0 else: margin_token_vh_px(t_tok)
-            margin_r_v = if r_tok == "auto": 0 else: margin_token_px(r_tok)
-            margin_b_v = if b_tok == "auto": 0 else: margin_token_vh_px(b_tok)
-            margin_l_v = if l_tok == "auto": 0 else: margin_token_px(l_tok)
+            margin_t_v = if t_tok == "auto": 0 else: _decl_vertical_margin_px(t_tok, font_size_v, margin_token_vh_px(t_tok))
+            margin_r_v = if r_tok == "auto": 0 else: _decl_horizontal_margin_px(r_tok, font_size_v)
+            margin_r_pct_v = r_tok.ends_with("%")
+            margin_r_milli_v = if r_tok == "auto": 0 else: _decl_horizontal_margin_milli(r_tok, font_size_v)
+            margin_b_v = if b_tok == "auto": 0 else: _decl_vertical_margin_px(b_tok, font_size_v, margin_token_vh_px(b_tok))
+            margin_t_milli_v = if t_tok == "auto": 0 else: _decl_vertical_margin_milli(t_tok, font_size_v)
+            margin_b_milli_v = if b_tok == "auto": 0 else: _decl_vertical_margin_milli(b_tok, font_size_v)
+            margin_l_v = if l_tok == "auto": 0 else: _decl_horizontal_margin_px(l_tok, font_size_v)
+            margin_l_pct_v = l_tok.ends_with("%")
+            margin_l_milli_v = if l_tok == "auto": 0 else: _decl_horizontal_margin_milli(l_tok, font_size_v)
     val ml = decl_tbl_get_p(decl_tbl, decl_present, "margin-left")
     val ml_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-left")
     if ml.len() > 0 and ml_pos > margin_l_pos:
@@ -2201,37 +2640,35 @@ fn _apply_decls_without_grid_inner(
         if ml == "auto":
             margin_l_v = 0
             margin_l_auto_v = true
+            margin_l_pct_v = false
+            margin_l_milli_v = 0
         else:
-            margin_l_v = if ml.ends_with("%"): 0 - parse_int(ml) else: parse_int(ml)
+            margin_l_pct_v = ml.ends_with("%")
+            margin_l_v = _decl_horizontal_margin_px(ml, font_size_v)
+            margin_l_milli_v = _decl_horizontal_margin_milli(ml, font_size_v)
             margin_l_auto_v = false
     val margin_inline = decl_tbl_get_p(decl_tbl, decl_present, "margin-inline")
     val margin_inline_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-inline")
     if margin_inline.len() > 0:
         val apply_mi_l = margin_inline_pos > margin_l_pos
         val apply_mi_r = margin_inline_pos > margin_r_pos
-        val mi0 = margin_inline.trim()
-        val mi1_value = parse_nth_int(margin_inline, 1)
-        if mi0 == "auto":
+        # `margin-inline: <start> [<end>]`; one value sets both sides.
+        val mi_toks = css_value_tokens(margin_inline)
+        if mi_toks.len() > 0:
+            val mi_start = mi_toks[0]
+            val mi_end = if mi_toks.len() > 1: mi_toks[1] else: mi_start
             if apply_mi_l:
-                margin_l_v = 0
-                margin_l_auto_v = true
+                margin_l_auto_v = mi_start == "auto"
+                margin_l_pct_v = mi_start.ends_with("%")
+                margin_l_v = if margin_l_auto_v: 0 else: _decl_horizontal_margin_px(mi_start, font_size_v)
+                margin_l_milli_v = if margin_l_auto_v: 0 else: _decl_horizontal_margin_milli(mi_start, font_size_v)
                 margin_l_pos = margin_inline_pos
             if apply_mi_r:
-                margin_r_v = 0
-                margin_r_auto_v = true
+                margin_r_auto_v = mi_end == "auto"
+                margin_r_pct_v = mi_end.ends_with("%")
+                margin_r_v = if margin_r_auto_v: 0 else: _decl_horizontal_margin_px(mi_end, font_size_v)
+                margin_r_milli_v = if margin_r_auto_v: 0 else: _decl_horizontal_margin_milli(mi_end, font_size_v)
                 margin_r_pos = margin_inline_pos
-        else:
-            val parsed_mi0 = if mi0.ends_with("%"): 0 - parse_int(mi0) else: parse_int(mi0)
-            if apply_mi_l:
-                margin_l_v = parsed_mi0
-                margin_l_auto_v = false
-                margin_l_pos = margin_inline_pos
-            if apply_mi_r:
-                margin_r_v = parsed_mi0
-                margin_r_auto_v = false
-                margin_r_pos = margin_inline_pos
-                if mi1_value >= 0:
-                    margin_r_v = mi1_value
     val margin_inline_start = decl_tbl_get_p(decl_tbl, decl_present, "margin-inline-start")
     val mis_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-inline-start")
     if margin_inline_start.len() > 0 and mis_pos > margin_l_pos:
@@ -2239,8 +2676,12 @@ fn _apply_decls_without_grid_inner(
         if margin_inline_start == "auto":
             margin_l_v = 0
             margin_l_auto_v = true
+            margin_l_pct_v = false
+            margin_l_milli_v = 0
         else:
-            margin_l_v = if margin_inline_start.ends_with("%"): 0 - parse_int(margin_inline_start) else: parse_int(margin_inline_start)
+            margin_l_v = _decl_horizontal_margin_px(margin_inline_start, font_size_v)
+            margin_l_milli_v = _decl_horizontal_margin_milli(margin_inline_start, font_size_v)
+            margin_l_pct_v = margin_inline_start.ends_with("%")
             margin_l_auto_v = false
     val margin_inline_end = decl_tbl_get_p(decl_tbl, decl_present, "margin-inline-end")
     val mie_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-inline-end")
@@ -2249,8 +2690,12 @@ fn _apply_decls_without_grid_inner(
         if margin_inline_end == "auto":
             margin_r_v = 0
             margin_r_auto_v = true
+            margin_r_pct_v = false
+            margin_r_milli_v = 0
         else:
-            margin_r_v = if margin_inline_end.ends_with("%"): 0 - parse_int(margin_inline_end) else: parse_int(margin_inline_end)
+            margin_r_v = _decl_horizontal_margin_px(margin_inline_end, font_size_v)
+            margin_r_milli_v = _decl_horizontal_margin_milli(margin_inline_end, font_size_v)
+            margin_r_pct_v = margin_inline_end.ends_with("%")
             margin_r_auto_v = false
     val margin_block = decl_tbl_get_p(decl_tbl, decl_present, "margin-block")
     val margin_block_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-block")
@@ -2258,37 +2703,46 @@ fn _apply_decls_without_grid_inner(
         val apply_mb_t = margin_block_pos > margin_t_pos
         val apply_mb_b = margin_block_pos > margin_b_pos
         val mb0 = margin_block.trim()
-        val mb1_value = parse_nth_int(margin_block, 1)
         if mb0 == "auto":
             if apply_mb_t:
                 margin_t_v = 0
+                margin_t_milli_v = 0
                 margin_t_auto_v = true
                 margin_t_pos = margin_block_pos
             if apply_mb_b:
                 margin_b_v = 0
+                margin_b_milli_v = 0
                 margin_b_auto_v = true
                 margin_b_pos = margin_block_pos
         else:
-            val parsed_mb0 = parse_int(mb0)
+            val mb_toks = css_value_tokens(mb0)
+            val mb_start_tok = if mb_toks.len() > 0: mb_toks[0] else: mb0
+            val mb_end_tok = if mb_toks.len() > 1: mb_toks[1] else: mb_start_tok
+            val parsed_mb0 = _decl_vertical_margin_px(mb_start_tok, font_size_v, parse_int(mb0))
             if apply_mb_t:
                 margin_t_v = parsed_mb0
+                margin_t_milli_v = _decl_vertical_margin_milli(mb_start_tok, font_size_v)
                 margin_t_auto_v = false
                 margin_t_pos = margin_block_pos
             if apply_mb_b:
                 margin_b_v = parsed_mb0
+                margin_b_milli_v = _decl_vertical_margin_milli(mb_start_tok, font_size_v)
                 margin_b_auto_v = false
                 margin_b_pos = margin_block_pos
-                if mb1_value >= 0:
-                    margin_b_v = mb1_value
+                if mb_toks.len() > 1:
+                    margin_b_v = _decl_vertical_margin_px(mb_end_tok, font_size_v, parse_int(mb_end_tok))
+                    margin_b_milli_v = _decl_vertical_margin_milli(mb_end_tok, font_size_v)
     val margin_block_start = decl_tbl_get_p(decl_tbl, decl_present, "margin-block-start")
     val mbs_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-block-start")
     if margin_block_start.len() > 0 and mbs_pos > margin_t_pos:
         margin_t_pos = mbs_pos
         if margin_block_start == "auto":
             margin_t_v = 0
+            margin_t_milli_v = 0
             margin_t_auto_v = true
         else:
-            margin_t_v = parse_int(margin_block_start)
+            margin_t_v = _decl_vertical_margin_px(margin_block_start, font_size_v, parse_int(margin_block_start))
+            margin_t_milli_v = _decl_vertical_margin_milli(margin_block_start, font_size_v)
             margin_t_auto_v = false
     val margin_block_end = decl_tbl_get_p(decl_tbl, decl_present, "margin-block-end")
     val mbe_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-block-end")
@@ -2296,9 +2750,11 @@ fn _apply_decls_without_grid_inner(
         margin_b_pos = mbe_pos
         if margin_block_end == "auto":
             margin_b_v = 0
+            margin_b_milli_v = 0
             margin_b_auto_v = true
         else:
-            margin_b_v = parse_int(margin_block_end)
+            margin_b_v = _decl_vertical_margin_px(margin_block_end, font_size_v, parse_int(margin_block_end))
+            margin_b_milli_v = _decl_vertical_margin_milli(margin_block_end, font_size_v)
             margin_b_auto_v = false
     val mt = decl_tbl_get_p(decl_tbl, decl_present, "margin-top")
     val mt_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-top")
@@ -2306,9 +2762,11 @@ fn _apply_decls_without_grid_inner(
         margin_t_pos = mt_pos
         if mt == "auto":
             margin_t_v = 0
+            margin_t_milli_v = 0
             margin_t_auto_v = true
         else:
-            margin_t_v = margin_token_vh_px(mt)
+            margin_t_v = _decl_vertical_margin_px(mt, font_size_v, margin_token_vh_px(mt))
+            margin_t_milli_v = _decl_vertical_margin_milli(mt, font_size_v)
             margin_t_auto_v = false
     val mr = decl_tbl_get_p(decl_tbl, decl_present, "margin-right")
     val mr_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-right")
@@ -2317,8 +2775,12 @@ fn _apply_decls_without_grid_inner(
         if mr == "auto":
             margin_r_v = 0
             margin_r_auto_v = true
+            margin_r_pct_v = false
+            margin_r_milli_v = 0
         else:
-            margin_r_v = if mr.ends_with("%"): 0 - parse_int(mr) else: parse_int(mr)
+            margin_r_pct_v = mr.ends_with("%")
+            margin_r_v = _decl_horizontal_margin_px(mr, font_size_v)
+            margin_r_milli_v = _decl_horizontal_margin_milli(mr, font_size_v)
             margin_r_auto_v = false
     val mb = decl_tbl_get_p(decl_tbl, decl_present, "margin-bottom")
     val mb_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-bottom")
@@ -2326,9 +2788,11 @@ fn _apply_decls_without_grid_inner(
         margin_b_pos = mb_pos
         if mb == "auto":
             margin_b_v = 0
+            margin_b_milli_v = 0
             margin_b_auto_v = true
         else:
-            margin_b_v = margin_token_vh_px(mb)
+            margin_b_v = _decl_vertical_margin_px(mb, font_size_v, margin_token_vh_px(mb))
+            margin_b_milli_v = _decl_vertical_margin_milli(mb, font_size_v)
             margin_b_auto_v = false
     # CSS Color §5.2: `currentColor` on a background resolves to the element's
     # OWN computed `color`, so it can only be resolved once the whole
@@ -2344,6 +2808,10 @@ fn _apply_decls_without_grid_inner(
         pad_t_v = 0
         pad_r_v = 0
         pad_b_v = 0
+        pad_l_pct_v = 0
+        pad_t_pct_v = 0
+        pad_r_pct_v = 0
+        pad_b_pct_v = 0
         border_w_v = 0
         border_l_v = 0
         border_t_v = 0
@@ -2351,6 +2819,8 @@ fn _apply_decls_without_grid_inner(
         border_b_v = 0
         border_style_l_v = "none"
         border_style_r_v = "none"
+        border_style_t_v = "none"
+        border_style_b_v = "none"
         border_color_v = 0u32
         border_color_l_v = 0u32
         border_color_t_v = 0u32
@@ -2360,13 +2830,24 @@ fn _apply_decls_without_grid_inner(
         outline_color_v = 0u32
         margin_l_v = 0
         margin_t_v = 0
+        margin_t_milli_v = 0
+        margin_b_milli_v = 0
         margin_r_v = 0
         margin_b_v = 0
         margin_l_auto_v = false
+        margin_l_pct_v = false
+        margin_l_milli_v = 0
         margin_r_auto_v = false
+        margin_r_pct_v = false
+        margin_r_milli_v = 0
         margin_t_auto_v = false
         margin_b_auto_v = false
-    Style(bg: bg_v, background_gradient_from: background_gradient_from_v, background_gradient_to: background_gradient_to_v, background_gradient_stop_colors: background_gradient_stop_colors_v, background_gradient_stop_positions: background_gradient_stop_positions_v, background_gradient_angle_deg: background_gradient_angle_deg_v, background_gradient_is_radial: background_gradient_is_radial_v, background_repeat: background_repeat_v, background_size_w_px: background_size_w_px_v, background_size_h_px: background_size_h_px_v, background_position_x_px: background_position_x_px_v, background_position_y_px: background_position_y_px_v, background_clip: background_clip_v, background_origin: background_origin_v, background_attachment: background_attachment_v, background_image_uri: background_image_uri_v, fg: fg_v, font_size: font_size_v, font_family: font_family_v, resolved_font_identity: "", resolved_font_advances: [], resolved_font_width: 0, resolved_font_line_height: 0, line_height_px: line_height_v, width_px: width_v, height_px: height_v, border_box: border_box_v, min_width_px: min_width_v, max_width_px: max_width_v, min_height_px: min_height_v, max_height_px: max_height_v, min_height_vh: min_height_vh_v, flex_fill: flex_fill_v, flex_grow: flex_grow_v, flex_shrink: flex_shrink_v, flex_basis_px: flex_basis_px_v, order: order_v, flex_wrap: flex_wrap_v, justify_content: justify_content_v, align_items: align_items_v, align_self: align_self_v, align_content: align_content_v, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: border_w_v, border_color: border_color_v, border_l: border_l_v, border_t: border_t_v, border_r: border_r_v, border_b: border_b_v, border_color_l: border_color_l_v, border_color_t: border_color_t_v, border_color_r: border_color_r_v, border_color_b: border_color_b_v, border_style_l: border_style_l_v, border_style_r: border_style_r_v, outline_w: outline_w_v, outline_color: outline_color_v, outline_offset_px: outline_offset_px_v, box_shadow_x_px: box_shadow_x_px_v, box_shadow_y_px: box_shadow_y_px_v, box_shadow_color: box_shadow_color_v, box_shadow_blur_px: box_shadow_blur_px_v, box_shadow_alpha: box_shadow_alpha_v, box_shadow_raw: box_shadow_raw_v, bg_layers_raw: bg_layers_raw_v, backdrop_filter_raw: backdrop_filter_raw_v, border_radius_px: border_radius_px_v, border_radius_tl_px: border_radius_tl_px_v, border_radius_tr_px: border_radius_tr_px_v, border_radius_br_px: border_radius_br_px_v, border_radius_bl_px: border_radius_bl_px_v, gap_px: gap_v, row_gap_px: row_gap_v, column_gap_px: column_gap_v, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, margin_l_auto: margin_l_auto_v, margin_r_auto: margin_r_auto_v, margin_t_auto: margin_t_auto_v, margin_b_auto: margin_b_auto_v, display: display_v, overflow_hidden: overflow_hidden_v, overflow_auto_y: overflow_auto_y_v, overflow_scroll_y: overflow_scroll_y_v, scrollbar_thumb_color: scrollbar_thumb_color_v, scrollbar_track_color: scrollbar_track_color_v, text_overflow_ellipsis: text_overflow_ellipsis_v, visibility_hidden: visibility_hidden_v, content_visibility_hidden: content_visibility_hidden_v, will_change: will_change_v, color_adjust: color_adjust_v, forced_color_adjust: forced_color_adjust_v, print_color_adjust: print_color_adjust_v, orphans: orphans_v, widows: widows_v, position_relative: position_relative_v, position_absolute: position_absolute_v, position_sticky: position_sticky_v, position_fixed: position_fixed_v, left_px: left_px_v, top_px: top_px_v, right_px: right_px_v, bottom_px: bottom_px_v, z_index: z_index_v, opacity_pct: opacity_pct_v, flex_direction: flex_direction_v, text_align: text_align_v, text_align_last: text_align_last_v, text_justify: text_justify_v, text_transform: text_transform_v, text_indent_px: text_indent_px_v, letter_spacing_px: letter_spacing_px_v, word_spacing_px: word_spacing_px_v, font_size_adjust: font_size_adjust_v, font_palette: font_palette_v, font_feature_settings: font_feature_settings_v, font_language_override: font_language_override_v, font_variation_settings: font_variation_settings_v, font_variant: font_variant_v, font_variant_alternates: font_variant_alternates_v, font_variant_caps: font_variant_caps_v, font_variant_east_asian: font_variant_east_asian_v, font_variant_emoji: font_variant_emoji_v, font_variant_ligatures: font_variant_ligatures_v, font_variant_numeric: font_variant_numeric_v, font_variant_position: font_variant_position_v, font_style_italic: font_style_italic_v, font_kerning: font_kerning_v, font_optical_sizing: font_optical_sizing_v, font_stretch: font_stretch_v, font_width: font_width_v, font_synthesis: font_synthesis_v, font_synthesis_small_caps: font_synthesis_small_caps_v, font_synthesis_position: font_synthesis_position_v, font_synthesis_style: font_synthesis_style_v, font_synthesis_weight: font_synthesis_weight_v, direction_rtl: direction_rtl_v, writing_mode: writing_mode_v, text_orientation: text_orientation_v, text_combine_upright: text_combine_upright_v, text_shadow_x_px: text_shadow_x_px_v, text_shadow_y_px: text_shadow_y_px_v, text_shadow_color: text_shadow_color_v, text_decoration_color: text_decoration_color_v, text_decoration_underline: text_decoration_underline_v, text_decoration_overline: text_decoration_overline_v, text_decoration_line_through: text_decoration_line_through_v, text_decoration_style: text_decoration_style_v, text_decoration_thickness_px: text_decoration_thickness_px_v, text_underline_offset_px: text_underline_offset_px_v, text_underline_position: text_underline_position_v, white_space_nowrap: white_space_nowrap_v, white_space_pre: white_space_pre_v, overflow_wrap: overflow_wrap_v, line_break: line_break_v, hyphens: hyphens_v, word_break: word_break_v, cursor: cursor_v, resize: resize_v, table_layout: table_layout_v, border_collapse: border_collapse_v, border_spacing_x_px: border_spacing_x_px_v, border_spacing_y_px: border_spacing_y_px_v, caption_side: caption_side_v, vertical_align: vertical_align_v, caret_color: caret_color_v, accent_color: accent_color_v, tab_size: tab_size_v, unicode_bidi: unicode_bidi_v, transition_property: transition_property_v, transition_duration_ms: transition_duration_ms_v, transition_delay_ms: transition_delay_ms_v, transition_timing_function: transition_timing_function_v, animation_name: animation_name_v, animation_duration_ms: animation_duration_ms_v, animation_delay_ms: animation_delay_ms_v, animation_timing_function: animation_timing_function_v, animation_iteration_count: animation_iteration_count_v, animation_direction: animation_direction_v, animation_fill_mode: animation_fill_mode_v, animation_play_state: animation_play_state_v, transform_origin: transform_origin_v, transform_box: transform_box_v, transform_style: transform_style_v, image_rendering: image_rendering_v, object_fit: object_fit_v, object_position: object_position_v, bold: bold_v, float_mode: float_mode_v, list_style_none: list_style_none_v)
+    # A `%` / `em` line-height declared on this element: convert against the
+    # font-size as it stands after everything in this application.
+    if line_height_em_milli_v > 0:
+        val own_font_line_height = ((font_milli_of(font_size_v, font_size_milli_v).to_i64() * line_height_em_milli_v.to_i64() + 500000) / 1000000) as i32
+        line_height_v = if own_font_line_height > 0: own_font_line_height else: 1
+    Style(bg: bg_v, transform_raw: transform_raw_v, translate_raw: translate_raw_v, scale_raw: scale_raw_v, rotate_raw: rotate_raw_v, border_style_t: border_style_t_v, border_style_b: border_style_b_v, background_gradient_from: background_gradient_from_v, background_gradient_to: background_gradient_to_v, background_gradient_stop_colors: background_gradient_stop_colors_v, background_gradient_stop_positions: background_gradient_stop_positions_v, background_gradient_angle_deg: background_gradient_angle_deg_v, background_gradient_is_radial: background_gradient_is_radial_v, background_repeat: background_repeat_v, background_size_w_px: background_size_w_px_v, background_size_h_px: background_size_h_px_v, background_position_x_px: background_position_x_px_v, background_position_y_px: background_position_y_px_v, background_clip: background_clip_v, background_origin: background_origin_v, background_attachment: background_attachment_v, background_image_uri: background_image_uri_v, fg: fg_v, font_size: font_size_v, font_size_milli: font_size_milli_v, inherit_font_size_milli: st.inherit_font_size_milli, font_family: font_family_v, resolved_font_identity: "", resolved_font_advances: [], resolved_font_width: 0, resolved_font_line_height: 0, line_height_px: line_height_v, line_height_em_milli: line_height_em_milli_v, width_px: width_v, height_px: height_v, border_box: border_box_v, min_width_px: min_width_v, max_width_px: max_width_v, min_height_px: min_height_v, max_height_px: max_height_v, min_height_vh: min_height_vh_v, flex_fill: flex_fill_v, flex_grow: flex_grow_v, flex_shrink: flex_shrink_v, flex_basis_px: flex_basis_px_v, flex_basis_zero: flex_basis_zero_v, flex_basis_permille: flex_basis_permille_v, min_width_set: min_width_set_v, width_zero: width_zero_v and width_v == 0, width_milli: (if width_v <= 0: 0 elif width_v == width_parsed_v: width_milli_v else: -1), order: order_v, flex_wrap: flex_wrap_v, justify_content: justify_content_v, align_items: align_items_v, align_self: align_self_v, align_content: align_content_v, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, pad_l_pct: pad_l_pct_v, pad_t_pct: pad_t_pct_v, pad_r_pct: pad_r_pct_v, pad_b_pct: pad_b_pct_v, border_w: border_w_v, border_color: border_color_v, border_l: border_l_v, border_t: border_t_v, border_r: border_r_v, border_b: border_b_v, border_color_l: border_color_l_v, border_color_t: border_color_t_v, border_color_r: border_color_r_v, border_color_b: border_color_b_v, border_style_l: border_style_l_v, border_style_r: border_style_r_v, outline_w: outline_w_v, outline_color: outline_color_v, outline_offset_px: outline_offset_px_v, box_shadow_x_px: box_shadow_x_px_v, box_shadow_y_px: box_shadow_y_px_v, box_shadow_color: box_shadow_color_v, box_shadow_blur_px: box_shadow_blur_px_v, box_shadow_alpha: box_shadow_alpha_v, box_shadow_raw: box_shadow_raw_v, bg_layers_raw: bg_layers_raw_v, backdrop_filter_raw: backdrop_filter_raw_v, border_radius_px: border_radius_px_v, border_radius_tl_px: border_radius_tl_px_v, border_radius_tr_px: border_radius_tr_px_v, border_radius_br_px: border_radius_br_px_v, border_radius_bl_px: border_radius_bl_px_v, gap_px: gap_v, row_gap_px: row_gap_v, column_gap_px: column_gap_v, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, margin_t_milli: (if margin_t_pos >= 0: margin_t_milli_v elif margin_t_v == st.margin_t: st.margin_t_milli else: 0), margin_b_milli: (if margin_b_pos >= 0: margin_b_milli_v elif margin_b_v == st.margin_b: st.margin_b_milli else: 0), margin_l_auto: margin_l_auto_v, margin_r_auto: margin_r_auto_v, margin_l_pct: margin_l_pct_v, margin_r_pct: margin_r_pct_v, margin_l_milli: margin_l_milli_v, margin_r_milli: margin_r_milli_v, margin_t_auto: margin_t_auto_v, margin_b_auto: margin_b_auto_v, display: display_v, overflow_hidden: overflow_hidden_v, overflow_auto_y: overflow_auto_y_v, overflow_scroll_y: overflow_scroll_y_v, scrollbar_thumb_color: scrollbar_thumb_color_v, scrollbar_track_color: scrollbar_track_color_v, text_overflow_ellipsis: text_overflow_ellipsis_v, visibility_hidden: visibility_hidden_v, content_visibility_hidden: content_visibility_hidden_v, contain_size: contain_size_v, contain_intrinsic_w_px: contain_intrinsic_w_v, contain_intrinsic_h_px: contain_intrinsic_h_v, will_change: will_change_v, color_adjust: color_adjust_v, forced_color_adjust: forced_color_adjust_v, print_color_adjust: print_color_adjust_v, orphans: orphans_v, widows: widows_v, position_relative: position_relative_v, position_absolute: position_absolute_v, position_sticky: position_sticky_v, position_fixed: position_fixed_v, left_px: left_px_v, top_px: top_px_v, right_px: right_px_v, bottom_px: bottom_px_v, left_milli: left_milli_v, top_milli: top_milli_v, right_milli: right_milli_v, bottom_milli: bottom_milli_v, z_index: z_index_v, opacity_pct: opacity_pct_v, flex_direction: flex_direction_v, text_align: text_align_v, text_align_set: text_align_set_v, inherit_font_family: st.inherit_font_family, inherit_font_size: st.inherit_font_size, inherit_bold: st.inherit_bold, inherit_italic: st.inherit_italic, inherit_line_height_px: st.inherit_line_height_px, text_align_last: text_align_last_v, text_justify: text_justify_v, text_transform: text_transform_v, text_indent_px: text_indent_px_v, letter_spacing_px: letter_spacing_px_v, word_spacing_px: word_spacing_px_v, letter_spacing_milli: letter_spacing_milli_v, word_spacing_milli: word_spacing_milli_v, font_size_adjust: font_size_adjust_v, font_palette: font_palette_v, font_feature_settings: font_feature_settings_v, font_language_override: font_language_override_v, font_variation_settings: font_variation_settings_v, font_variant: font_variant_v, font_variant_alternates: font_variant_alternates_v, font_variant_caps: font_variant_caps_v, font_variant_east_asian: font_variant_east_asian_v, font_variant_emoji: font_variant_emoji_v, font_variant_ligatures: font_variant_ligatures_v, font_variant_numeric: font_variant_numeric_v, font_variant_position: font_variant_position_v, font_style_italic: font_style_italic_v, font_kerning: font_kerning_v, font_optical_sizing: font_optical_sizing_v, font_stretch: font_stretch_v, font_width: font_width_v, font_synthesis: font_synthesis_v, font_synthesis_small_caps: font_synthesis_small_caps_v, font_synthesis_position: font_synthesis_position_v, font_synthesis_style: font_synthesis_style_v, font_synthesis_weight: font_synthesis_weight_v, direction_rtl: direction_rtl_v, writing_mode: writing_mode_v, text_orientation: text_orientation_v, text_combine_upright: text_combine_upright_v, text_shadow_x_px: text_shadow_x_px_v, text_shadow_y_px: text_shadow_y_px_v, text_shadow_color: text_shadow_color_v, text_shadow_raw: text_shadow_raw_v, text_decoration_color: text_decoration_color_v, text_decoration_underline: text_decoration_underline_v, text_decoration_overline: text_decoration_overline_v, text_decoration_line_through: text_decoration_line_through_v, text_decoration_style: text_decoration_style_v, text_decoration_thickness_px: text_decoration_thickness_px_v, text_underline_offset_px: text_underline_offset_px_v, text_underline_position: text_underline_position_v, white_space_nowrap: white_space_nowrap_v, white_space_pre: white_space_pre_v, overflow_wrap: overflow_wrap_v, line_break: line_break_v, hyphens: hyphens_v, word_break: word_break_v, cursor: cursor_v, resize: resize_v, table_layout: table_layout_v, border_collapse: border_collapse_v, border_spacing_x_px: border_spacing_x_px_v, border_spacing_y_px: border_spacing_y_px_v, caption_side: caption_side_v, vertical_align: vertical_align_v, caret_color: caret_color_v, accent_color: accent_color_v, tab_size: tab_size_v, unicode_bidi: unicode_bidi_v, transition_property: transition_property_v, transition_duration_ms: transition_duration_ms_v, transition_delay_ms: transition_delay_ms_v, transition_timing_function: transition_timing_function_v, animation_name: animation_name_v, animation_duration_ms: animation_duration_ms_v, animation_delay_ms: animation_delay_ms_v, animation_timing_function: animation_timing_function_v, animation_iteration_count: animation_iteration_count_v, animation_direction: animation_direction_v, animation_fill_mode: animation_fill_mode_v, animation_play_state: animation_play_state_v, transform_origin: transform_origin_v, transform_box: transform_box_v, transform_style: transform_style_v, image_rendering: image_rendering_v, object_fit: object_fit_v, object_position: object_position_v, bold: bold_v, float_mode: float_mode_v, clear_mode: clear_mode_v, list_style_none: list_style_none_v)
 
 # min-width / max-width in font-relative units (gap C, 2026-10-05). These
 # used to go through parse_int, so `max-width: 26em` (example.com) became
@@ -2374,10 +2855,664 @@ fn _apply_decls_without_grid_inner(
 # computed font-size; rem uses the 16px root, matching the font-size rem rule
 # in _apply_decls_dispatch. Every other unit keeps the previous parse_int
 # reading unchanged.
+# A `min-` / `max-` size: a percentage as the negative sentinel (`-50` for
+# `50%`, resolved at layout time), anything else as a px length.
+fn _decl_percent_sentinel_or_length_px(raw: text, font_px: i32) -> i32:
+    if raw.trim().ends_with("%"):
+        val p = parse_int(raw)
+        return if p > 0: 0 - p else: 0
+    _decl_font_relative_length_px(raw, font_px)
+
+fn _decl_percent_sentinel_or_px(raw: text) -> i32:
+    if raw.trim().ends_with("%"):
+        val p = parse_int(raw)
+        return if p > 0: 0 - p else: 0
+    parse_int(raw)
+
 fn _decl_font_relative_length_px(raw: text, font_px: i32) -> i32:
     val v = raw.trim().lower()
     if v.ends_with("rem"):
-        return (16 * parse_decimal_x10(v)) / 10
+        return (css_cascade_root_font_px() * parse_decimal_x10(v)) / 10
     if v.ends_with("em"):
         return (font_px * parse_decimal_x10(v)) / 10
     parse_int(raw)
+
+# ---------------------------------------------------------------------------
+# Shared CSS length core. Margins, padding and width all read their number
+# here, so `1e1px`, `-.5em`, `+.5em` and `calc()` mean the same everywhere.
+# ---------------------------------------------------------------------------
+
+# Not a length this cascade resolves (a unit it does not know, `%`, `vw`,
+# `var()`, or garbage): the caller keeps its own legacy reading.
+val CSS_LENGTH_NONE: i64 = -4000000000000000000
+
+val CSS_CALC_OK: i64 = 0
+# Valid syntax, but an operand (`%`, `vw`, `var()`, `min()`) is only known
+# at layout time.
+val CSS_CALC_UNRESOLVED: i64 = 1
+# Not a valid calc(): Chrome drops the declaration.
+val CSS_CALC_INVALID: i64 = 2
+
+fn _css_ch(s: text, i: i64) -> text:
+    s.substring(i, i + 1)
+
+fn _css_is_digit_at(s: text, i: i64) -> bool:
+    i < s.byte_len() and dec_val(_css_ch(s, i)) < 10
+
+# The CSS length units Chrome 159 parses (Values 4 + container units),
+# lower-cased. A margin with any other letter run is dropped (`5pxx`, `5x`).
+val CSS_LENGTH_UNITS: [text] = [
+    "px", "in", "cm", "mm", "q", "pt", "pc",
+    "em", "rem", "ex", "rex", "ch", "rch", "cap", "rcap", "ic", "ric", "lh", "rlh",
+    "vw", "vh", "vi", "vb", "vmin", "vmax",
+    "svw", "svh", "svi", "svb", "svmin", "svmax",
+    "lvw", "lvh", "lvi", "lvb", "lvmin", "lvmax",
+    "dvw", "dvh", "dvi", "dvb", "dvmin", "dvmax",
+    "cqw", "cqh", "cqi", "cqb", "cqmin", "cqmax"
+]
+
+# Largest length magnitude in milli-px. Chrome's LayoutUnit tops out at
+# 33554431.98 px (Chrome 159: `width:1e10px` is 33554428 wide), so a longer
+# length clamps here instead of wrapping when a caller narrows it to i32.
+val CSS_LENGTH_MAX_MILLI: i64 = 33554431000
+# calc() works in micro (1e-6) units so a factor keeps its fourth decimal
+# (`calc(48px * 0.6667)` is 32.0016, not 31.968); `infinity` and every
+# intermediate clamp to +-1e18.
+val CSS_CALC_INFINITY: i64 = 1000000000000000000
+# Chrome 159 drops a calc() nested deeper than 100 levels (calc( is level 1).
+val CSS_CALC_MAX_DEPTH: i64 = 100
+# calc() operand kinds: a <number>, a <length>, or a function / var() whose
+# type is only known after substitution (compatible with both).
+val CSS_CALC_KIND_NUMBER: i64 = 0
+val CSS_CALC_KIND_LENGTH: i64 = 1
+val CSS_CALC_KIND_UNKNOWN: i64 = 2
+
+fn _css_clamp_milli(v: i64) -> i64:
+    if v > CSS_LENGTH_MAX_MILLI:
+        return CSS_LENGTH_MAX_MILLI
+    if v < 0 - CSS_LENGTH_MAX_MILLI:
+        return 0 - CSS_LENGTH_MAX_MILLI
+    v
+
+fn _css_calc_clamp(x: f64) -> i64:
+    if x >= 1000000000000000000.0:
+        return CSS_CALC_INFINITY
+    if x <= -1000000000000000000.0:
+        return 0 - CSS_CALC_INFINITY
+    x as i64
+
+# The CSS <number> at `start` of `s` (lower-case) as [value, end], scaled by
+# 10^`frac` (3 = milli, 6 = micro) and truncated:
+# `[+-]? (D+ (. D+)? | . D+) ([eE] [+-]? D+)?`. `end == start` when there is
+# none. `e` is an exponent only before `[+-]?digit`, so `1em` and `2ex` keep
+# their unit. The magnitude clamps at 10^(12 + frac).
+fn _css_number_scaled_at(s: text, start: i64, frac: i64) -> [i64]:
+    val n = s.byte_len()
+    var i = start
+    var negative = false
+    if i < n and (_css_ch(s, i) == "-" or _css_ch(s, i) == "+"):
+        negative = _css_ch(s, i) == "-"
+        i = i + 1
+    var mant: i64 = 0
+    var scale: i64 = 0
+    var sig = 0
+    var any_digit = false
+    while _css_is_digit_at(s, i):  # cpu-lane-loop-ok: the digits of ONE length token
+        if sig < 15:
+            mant = mant * 10 + dec_val(_css_ch(s, i)).to_i64()
+            sig = sig + 1
+        else:
+            scale = scale + 1
+        any_digit = true
+        i = i + 1
+    if i < n and _css_ch(s, i) == "." and _css_is_digit_at(s, i + 1):
+        i = i + 1
+        while _css_is_digit_at(s, i):  # cpu-lane-loop-ok: the fraction digits of ONE length token
+            if sig < 15:
+                mant = mant * 10 + dec_val(_css_ch(s, i)).to_i64()
+                sig = sig + 1
+                scale = scale - 1
+            any_digit = true
+            i = i + 1
+    if not any_digit:
+        return [0, start]
+    if i < n and _css_ch(s, i) == "e":
+        var j = i + 1
+        var exp_negative = false
+        if j < n and (_css_ch(s, j) == "-" or _css_ch(s, j) == "+"):
+            exp_negative = _css_ch(s, j) == "-"
+            j = j + 1
+        if _css_is_digit_at(s, j):
+            var e: i64 = 0
+            while _css_is_digit_at(s, j):  # cpu-lane-loop-ok: the exponent digits of ONE length token
+                if e < 1000:
+                    e = e * 10 + dec_val(_css_ch(s, j)).to_i64()
+                j = j + 1
+            scale = scale + (if exp_negative: 0 - e else: e)
+            i = j
+    var limit: i64 = 1000000000000
+    var f = 0
+    while f < frac:  # cpu-lane-loop-ok: at most 6 steps
+        limit = limit * 10
+        f = f + 1
+    var p = scale + frac
+    var value = mant
+    while p > 0 and value != 0:  # cpu-lane-loop-ok: bounded by the clamp
+        if value > limit / 10:
+            value = limit
+            p = 0
+        else:
+            value = value * 10
+            p = p - 1
+    while p < 0 and value != 0:  # cpu-lane-loop-ok: bounded by the digit count of `value`
+        value = value / 10
+        p = p + 1
+    if value > limit:
+        value = limit
+    [if negative: 0 - value else: value, i]
+
+fn _css_number_milli_at(s: text, start: i64) -> [i64]:
+    _css_number_scaled_at(s, start, 3)
+
+# `v` milli of `unit` as milli-px, or CSS_LENGTH_NONE. A unitless number reads
+# as px only with `allow_bare` (the legacy margin/width quirk); 0 always does.
+fn _css_unit_milli_px(v: i64, unit: text, font_px: i32, allow_bare: bool) -> i64:
+    if unit == "px":
+        return v
+    if unit == "em":
+        return v * font_px.to_i64()
+    if unit == "rem":
+        return v * css_cascade_root_font_px().to_i64()
+    if unit == "" and (allow_bare or v == 0):
+        return v
+    CSS_LENGTH_NONE
+
+fn _css_skip_ws(s: text, start: i64) -> i64:
+    var i = start
+    while i < s.byte_len() and (_css_ch(s, i) == " " or _css_ch(s, i) == "\t" or _css_ch(s, i) == "\n"):  # cpu-lane-loop-ok: whitespace inside ONE calc()
+        i = i + 1
+    i
+
+fn _css_is_ident_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or ch == "-" or ch == "%"
+
+# Index just past the `)` that closes the `(` at `open`, or -1.
+fn _css_paren_close(s: text, open: i64) -> i64:
+    var depth = 0
+    var i = open
+    while i < s.byte_len():  # cpu-lane-loop-ok: ONE nested function inside a calc()
+        val ch = _css_ch(s, i)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return i + 1
+        i = i + 1
+    -1
+
+# A calc() keyword constant in micro units, or -1 when `name` is none.
+# ponytail: `nan` is read as 0. Upgrade: carry NaN to the clamp.
+fn _css_calc_constant_micro(name: text) -> i64:
+    if name == "pi":
+        return 3141592
+    if name == "e":
+        return 2718281
+    if name == "infinity":
+        return CSS_CALC_INFINITY
+    if name == "-infinity":
+        return 0 - CSS_CALC_INFINITY
+    if name == "nan":
+        return 0
+    -1
+
+# calc() operand: `( sum )`, `calc( sum )`, a constant, another function
+# (unresolved, kind unknown), or a number with an optional unit. Result rows
+# are [status, value, kind, end], value in micro (number) or micro-px (length).
+fn _css_calc_operand(s: text, start: i64, font_px: i32, depth: i64) -> [i64]:
+    val i = _css_skip_ws(s, start)
+    val n = s.byte_len()
+    if i >= n:
+        return [CSS_CALC_INVALID, 0, 0, i]
+    var inner = -1
+    if _css_ch(s, i) == "(":
+        inner = i + 1
+    elif s.substring(i, n).starts_with("calc("):
+        inner = i + 5
+    if inner >= 0:
+        if depth >= CSS_CALC_MAX_DEPTH:
+            return [CSS_CALC_INVALID, 0, 0, inner]
+        val r = _css_calc_sum(s, inner, font_px, depth + 1)
+        if r[0] == CSS_CALC_INVALID:
+            return r
+        val close = _css_skip_ws(s, r[3])
+        if close >= n or _css_ch(s, close) != ")":
+            return [CSS_CALC_INVALID, 0, 0, close]
+        return [r[0], r[1], r[2], close + 1]
+    val num = _css_number_scaled_at(s, i, 6)
+    if num[1] == i:
+        var j = i
+        while j < n and (_css_is_ident_char(_css_ch(s, j)) or (j > i and _css_is_digit_at(s, j))):  # cpu-lane-loop-ok: ONE name (`atan2`) inside a calc()
+            j = j + 1
+        if j > i and j < n and _css_ch(s, j) == "(":
+            # `min(`, `var(`, `atan2(`: valid, sized only after substitution.
+            val close = _css_paren_close(s, j)
+            if close < 0:
+                return [CSS_CALC_INVALID, 0, 0, j]
+            return [CSS_CALC_UNRESOLVED, 0, CSS_CALC_KIND_UNKNOWN, close]
+        val constant = if j > i: _css_calc_constant_micro(s.substring(i, j)) else: -1
+        if constant == -1:
+            return [CSS_CALC_INVALID, 0, 0, i]
+        return [CSS_CALC_OK, constant, CSS_CALC_KIND_NUMBER, j]
+    var j = num[1]
+    while j < n and _css_is_ident_char(_css_ch(s, j)) and _css_ch(s, j) != "-":  # cpu-lane-loop-ok: the unit of ONE calc() operand
+        j = j + 1
+    val unit = s.substring(num[1], j)
+    if unit == "":
+        return [CSS_CALC_OK, num[0], CSS_CALC_KIND_NUMBER, j]
+    var factor: f64 = 0.0
+    if unit == "px":
+        factor = 1.0
+    elif unit == "em":
+        factor = font_px as f64
+    elif unit == "rem":
+        factor = css_cascade_root_font_px() as f64
+    else:
+        # `%` and every other length unit (`vw`, `pt`, `in`) is a <length>
+        # this cascade does not resolve, so the type checks still apply
+        # (Chrome 159 drops `calc(1px * 1vw)`, `calc(1vw + 2)`). A non-length
+        # dimension (`deg`, `s`) is of unknown kind: `atan2(..) / 1deg` is a
+        # number. ponytail: absolute units are not resolved and an unknown
+        # unit is not rejected. Upgrade: resolve pt/in/cm/mm/q/pc here.
+        val length_unit = unit == "%" or CSS_LENGTH_UNITS.contains(unit)
+        return [CSS_CALC_UNRESOLVED, 0, if length_unit: CSS_CALC_KIND_LENGTH else: CSS_CALC_KIND_UNKNOWN, j]
+    [CSS_CALC_OK, _css_calc_clamp((num[0] as f64) * factor), CSS_CALC_KIND_LENGTH, j]
+
+# product := operand ( ('*' | '/') operand )*
+fn _css_calc_product(s: text, start: i64, font_px: i32, depth: i64) -> [i64]:
+    var r = _css_calc_operand(s, start, font_px, depth)
+    if r[0] == CSS_CALC_INVALID:
+        return r
+    var status = r[0]
+    var value = r[1]
+    var kind = r[2]
+    var i = r[3]
+    var more = true
+    while more:  # cpu-lane-loop-ok: the operators of ONE calc()
+        val j = _css_skip_ws(s, i)
+        val op = if j < s.byte_len(): _css_ch(s, j) else: ""
+        if op != "*" and op != "/":
+            more = false
+        else:
+            val rhs = _css_calc_operand(s, j + 1, font_px, depth)
+            if rhs[0] == CSS_CALC_INVALID:
+                return rhs
+            val both_ok = status == CSS_CALC_OK and rhs[0] == CSS_CALC_OK
+            if op == "*":
+                if kind == CSS_CALC_KIND_LENGTH and rhs[2] == CSS_CALC_KIND_LENGTH:
+                    return [CSS_CALC_INVALID, 0, 0, rhs[3]]
+                if both_ok:
+                    value = _css_calc_clamp((value as f64) * (rhs[1] as f64) / 1000000.0)
+                if kind == CSS_CALC_KIND_LENGTH or rhs[2] == CSS_CALC_KIND_LENGTH:
+                    kind = CSS_CALC_KIND_LENGTH
+                elif kind == CSS_CALC_KIND_UNKNOWN or rhs[2] == CSS_CALC_KIND_UNKNOWN:
+                    kind = CSS_CALC_KIND_UNKNOWN
+            else:
+                if rhs[2] == CSS_CALC_KIND_LENGTH:
+                    return [CSS_CALC_INVALID, 0, 0, rhs[3]]
+                if both_ok:
+                    # Chrome 159: `calc(10px / 0)` is +infinity, clamped.
+                    if rhs[1] == 0:
+                        value = if value > 0: CSS_CALC_INFINITY elif value < 0: 0 - CSS_CALC_INFINITY else: 0
+                    else:
+                        value = _css_calc_clamp((value as f64) * 1000000.0 / (rhs[1] as f64))
+                if kind == CSS_CALC_KIND_NUMBER and rhs[2] == CSS_CALC_KIND_UNKNOWN:
+                    kind = CSS_CALC_KIND_UNKNOWN
+            if rhs[0] == CSS_CALC_UNRESOLVED:
+                status = CSS_CALC_UNRESOLVED
+            i = rhs[3]
+    [status, value, kind, i]
+
+# sum := product ( ws ('+' | '-') ws product )*; CSS needs the whitespace.
+fn _css_calc_sum(s: text, start: i64, font_px: i32, depth: i64) -> [i64]:
+    var r = _css_calc_product(s, start, font_px, depth)
+    if r[0] == CSS_CALC_INVALID:
+        return r
+    var status = r[0]
+    var value = r[1]
+    var kind = r[2]
+    var i = r[3]
+    var more = true
+    val n = s.byte_len()
+    while more:  # cpu-lane-loop-ok: the operators of ONE calc()
+        val j = _css_skip_ws(s, i)
+        val op = if j < n: _css_ch(s, j) else: ""
+        if op != "+" and op != "-":
+            more = false
+        else:
+            if j == i or j + 1 >= n or _css_skip_ws(s, j + 1) == j + 1:
+                return [CSS_CALC_INVALID, 0, 0, j]
+            val rhs = _css_calc_product(s, j + 1, font_px, depth)
+            if rhs[0] == CSS_CALC_INVALID:
+                return rhs
+            if rhs[2] != kind and kind != CSS_CALC_KIND_UNKNOWN and rhs[2] != CSS_CALC_KIND_UNKNOWN:
+                return [CSS_CALC_INVALID, 0, 0, rhs[3]]
+            if kind == CSS_CALC_KIND_UNKNOWN:
+                kind = rhs[2]
+            if rhs[0] == CSS_CALC_UNRESOLVED:
+                status = CSS_CALC_UNRESOLVED
+            elif status == CSS_CALC_OK:
+                value = _css_calc_clamp(if op == "+": (value as f64) + (rhs[1] as f64) else: (value as f64) - (rhs[1] as f64))
+            i = rhs[3]
+    [status, value, kind, i]
+
+# A whole `calc( ... )` length as [status, milli-px], clamped to
+# CSS_LENGTH_MAX_MILLI. A bare <number> result (`calc(5)`) is not a length
+# and is invalid.
+fn css_calc_length_milli(raw: text, font_px: i32) -> [i64]:
+    val t = raw.trim().lower()
+    if not t.starts_with("calc("):
+        return [CSS_CALC_INVALID, 0]
+    val r = _css_calc_sum(t, 5, font_px, 1)
+    if r[0] == CSS_CALC_INVALID:
+        return [CSS_CALC_INVALID, 0]
+    val close = _css_skip_ws(t, r[3])
+    if close + 1 != t.byte_len() or _css_ch(t, close) != ")":
+        return [CSS_CALC_INVALID, 0]
+    if r[0] == CSS_CALC_OK and r[2] == CSS_CALC_KIND_NUMBER and r[1] != 0:
+        return [CSS_CALC_INVALID, 0]
+    [r[0], _css_clamp_milli(r[1] / 1000)]
+
+# Whether a value token that opens `calc(` is a valid calc() (resolved or
+# not). The UA margin check uses this to drop `calc(1px +)`.
+fn css_calc_token_valid(tok: text) -> bool:
+    css_calc_length_milli(tok, 16)[0] != CSS_CALC_INVALID
+
+# One length token as signed, unfloored milli-px: a CSS <number> with `px`,
+# `em` or `rem` (or bare, see `_css_unit_milli_px`), or a calc() of them,
+# clamped to CSS_LENGTH_MAX_MILLI. CSS_LENGTH_NONE for anything else.
+fn css_length_milli(tok: text, font_px: i32, allow_bare: bool) -> i64:
+    val t = tok.trim().lower()
+    if t.starts_with("calc("):
+        val r = css_calc_length_milli(t, font_px)
+        return if r[0] == CSS_CALC_OK: r[1] else: CSS_LENGTH_NONE
+    val num = _css_number_milli_at(t, 0)
+    if num[1] == 0:
+        return CSS_LENGTH_NONE
+    val v = _css_unit_milli_px(num[0], t.substring(num[1], t.byte_len()), font_px, allow_bare)
+    if v == CSS_LENGTH_NONE: v else: _css_clamp_milli(v)
+
+# A shorthand value's tokens, lower-cased; a function (`calc(2px * 3)`)
+# stays one token. Plain values keep the allocation-light whitespace split.
+fn css_value_tokens(raw: text) -> [text]:
+    val v = raw.trim().lower()
+    if v.index_of("(") >= 0: _decl_top_level_tokens(v) else: ws_tokens(v)
+
+# A non-negative milli-px length floored to Chrome's LayoutUnit (1/64 px).
+fn _css_layout_unit_floor_milli(milli: i64) -> i64:
+    ((milli * 64) / 1000) * 1000 / 64
+
+# An authored `width` in whole px: the shared length core floored to a
+# LayoutUnit (Chrome 159: `6.33em` at 16 px is 101.28 -> 101.265625 -> 101,
+# `1e2px` 100, `calc(100px + 1em)` 116). A negative width, a percentage-
+# or viewport-dependent calc() and any other value keep the legacy
+# `_decl_font_relative_length_px` reading.
+fn _decl_width_length_px(raw: text, font_px: i32) -> i32:
+    val v = raw.trim().lower()
+    if not v.starts_with("-"):
+        val exact = css_length_milli(v, font_px, true)
+        if exact != CSS_LENGTH_NONE and exact >= 0:
+            return (_css_layout_unit_floor_milli(exact) / 1000) as i32
+    _decl_font_relative_length_px(raw, font_px)
+
+# The `Style.width_milli` of an authored `width` whose whole px
+# `_decl_width_length_px` gave as `whole`: the exact length floored
+# to a LayoutUnit (Chrome 159: `30.2px` is 30.1875, `30.25px` 30.25), minus
+# `whole * 1000`. -1 when the token is not a plain px / em / rem length or
+# `whole` is not its floor.
+fn _decl_width_frac_milli(raw: text, font_px: i32, whole: i32) -> i32:
+    val v = raw.trim().lower()
+    if v.byte_len() == 0 or dec_val(v.substring(0, 1)) >= 10 and not v.starts_with("."):
+        return -1
+    if not v.ends_with("em") and not v.ends_with("px"):
+        return -1
+    val exact = css_length_milli(v, font_px, false)
+    if exact == CSS_LENGTH_NONE or exact < 0:
+        return -1
+    val frac = _css_layout_unit_floor_milli(exact) - (whole as i64) * 1000
+    if frac >= 0 and frac < 1000: frac as i32 else: -1
+
+# A non-negative author vertical-margin length (`0.7em`, `1.3rem`, `10.5px`,
+# `1e1px`, `calc(10px + 0.5em)`, bare `12`) in milli-px floored to Chrome's
+# LayoutUnit 1/64 px, or -1 when the token is anything else (auto, %, vh,
+# negative, other units, an unresolvable calc) so the caller keeps its legacy
+# whole-px parse. Whole-px results come back too (a multiple of 1000); see
+# _decl_vertical_margin_milli.
+fn _decl_vertical_margin_exact_milli(tok: text, font_px: i32) -> i64:
+    val v = css_length_milli(tok, font_px, true)
+    if v == CSS_LENGTH_NONE or v < 0:
+        return -1
+    _css_layout_unit_floor_milli(v)
+
+# Sentinel of `_decl_inset_exact_milli`: the inset is not a plain length.
+val INSET_NOT_LENGTH: i64 = -1000000000000
+
+# An inset (`left` / `top` / `right` / `bottom`) as exact milli-px on Chrome's
+# LayoutUnit grid (1/64 px): `10.3px` -> 10296, `6.33em` at 16 px -> 101281,
+# `-2.5px` -> -2500. INSET_NOT_LENGTH for `auto`, a percentage or `calc()`,
+# which keep the whole-px path.
+# ponytail: inset calc() is not resolved here (no Chrome 159 rows yet).
+# Upgrade: measure `top: calc(...)` and drop the `(` guard.
+fn _decl_inset_exact_milli(tok: text, font_px: i32) -> i64:
+    val t = tok.trim().lower()
+    if t.index_of("(") >= 0:
+        return INSET_NOT_LENGTH
+    if t.starts_with("-"):
+        val magnitude = _decl_vertical_margin_exact_milli(t.substring(1, t.byte_len()), font_px)
+        return if magnitude < 0: INSET_NOT_LENGTH else: 0 - magnitude
+    val exact = _decl_vertical_margin_exact_milli(t, font_px)
+    if exact < 0: INSET_NOT_LENGTH else: exact
+
+# Whole px of an exact milli-px inset, rounded half up (Chrome snaps a box
+# edge at .5 to the next pixel); the rest goes to `Style.*_milli`.
+fn _inset_round_px(exact_milli: i64) -> i32:
+    val shifted = exact_milli + 500
+    var q = shifted / 1000
+    if shifted < 0 and q * 1000 != shifted:
+        q = q - 1
+    q as i32
+
+# `left` / `top` after a translation of (tx, ty) milli-px, as [left_px,
+# left_milli, top_px, top_milli]. An absolutely positioned box places itself
+# from its insets, so it takes the exact sum, split like an inset. Any other
+# box is moved by the relative-offset pass, which works in whole px.
+fn _translated_insets(absolute: bool, left_px: i32, left_milli: i32, top_px: i32, top_milli: i32, tx: i64, ty: i64) -> [i32]:
+    if not absolute:
+        return [left_px + _inset_round_px(tx), left_milli, top_px + _inset_round_px(ty), top_milli]
+    val x = (left_px as i64) * 1000 + (left_milli as i64) + tx
+    val y = (top_px as i64) * 1000 + (top_milli as i64) + ty
+    val xp = _inset_round_px(x)
+    val yp = _inset_round_px(y)
+    [xp, (x - (xp as i64) * 1000) as i32, yp, (y - (yp as i64) * 1000) as i32]
+
+# `2.5%` -> 2500 (percent x 1000); 0 for anything that is not a plain
+# non-negative percentage (`auto`, `-5%`, `calc(..)`, lengths, `0%`).
+fn _decl_vertical_margin_percent_x1000(tok: text) -> i32:
+    val t = tok.trim()
+    val n = t.byte_len()
+    if n < 2 or not t.ends_with("%") or t.starts_with("-") or t.starts_with("+"):
+        return 0
+    val body = t.substring(0, n - 1)
+    var i = 0
+    while i < body.byte_len():
+        val ch = body.substring(i, i + 1)
+        if ch != "." and dec_val(ch) >= 10:
+            return 0
+        i = i + 1
+    svg_number_milli(body) as i32
+
+# The sub-pixel part to carry in `Style.margin_t_milli` / `margin_b_milli`:
+# the floored milli-px value when it is fractional, else 0 (the whole-px
+# margin already says everything).
+fn _decl_vertical_margin_milli(tok: text, font_px: i32) -> i32:
+    # A non-negative `N%` (CSS 2.2 8.3: of the containing block WIDTH, known
+    # only at layout) is carried as a NEGATIVE milli: -(percent x 1000).
+    # block_margin_milli resolves it; `0%` is a plain zero margin.
+    val pct = _decl_vertical_margin_percent_x1000(tok)
+    if pct != 0:
+        return 0 - pct
+    val exact = _decl_vertical_margin_exact_milli(tok, font_px)
+    if exact < 0 or exact % 1000 == 0:
+        return 0
+    _css_milli_slot(exact)
+
+# A horizontal margin token's whole signed number: a percentage keeps its
+# percent (Style.margin_*_pct), a length resolves em/rem against the font.
+fn _decl_horizontal_margin_px(tok: text, font_px: i32) -> i32:
+    val t = tok.trim()
+    if t.ends_with("%"):
+        return horizontal_margin_signed(t, parse_int(t))
+    # The whole px of the same exact value `_decl_horizontal_margin_milli`
+    # carries (`0.375em` is 6px, where a one-decimal em parse reads 0.3em = 4).
+    val exact = _decl_signed_margin_exact_milli(t, font_px)
+    if exact != INSET_NOT_LENGTH:
+        val whole = ((if exact < 0: 0 - exact else: exact) / 1000) as i32
+        return if exact < 0: 0 - whole else: whole
+    if _css_calc_dropped(t):
+        return 0
+    horizontal_margin_signed(t, _decl_font_relative_length_px(t, font_px))
+
+# An invalid `calc()` margin (`calc(1px +)`, 101 levels deep) is dropped by
+# Chrome 159; the legacy digit scrape would read garbage, so it reads 0.
+fn _css_calc_dropped(tok: text) -> bool:
+    if tok.index_of("(") < 0:
+        return false
+    val t = tok.trim().lower()
+    t.starts_with("calc(") and not css_calc_token_valid(t)
+
+# A milli-px sub-pixel slot as i32, or 0 when it would not fit (a clamped
+# huge length keeps only its whole px).
+fn _css_milli_slot(exact: i64) -> i32:
+    if exact > 2147483647 or exact < -2147483647: 0 else: exact as i32
+
+# A signed margin length (calc() included) as milli-px with its magnitude
+# floored to the 1/64 px LayoutUnit, or INSET_NOT_LENGTH.
+fn _decl_signed_margin_exact_milli(tok: text, font_px: i32) -> i64:
+    val v = css_length_milli(tok, font_px, true)
+    if v == CSS_LENGTH_NONE:
+        return INSET_NOT_LENGTH
+    if v < 0: 0 - _css_layout_unit_floor_milli(0 - v) else: _css_layout_unit_floor_milli(v)
+
+# The sub-pixel number to carry in `Style.margin_l_milli` / `margin_r_milli`:
+# a fractional percentage in milli-percent (`12.5%` -> 12500), a fractional
+# length in milli-px on Chrome's 1/64 grid (`0.4em` at 16 px -> 6390), signed;
+# 0 when the token is whole (the whole number already says everything).
+fn _decl_horizontal_margin_milli(tok: text, font_px: i32) -> i32:
+    val t = tok.trim().lower()
+    if t.ends_with("%"):
+        val neg = t.starts_with("-")
+        val pct = _decl_vertical_margin_percent_x1000(if neg: t.substring(1, t.byte_len()) else: t)
+        if pct % 1000 == 0:
+            return 0
+        return if neg: 0 - pct else: pct
+    val exact = _decl_signed_margin_exact_milli(t, font_px)
+    if exact == INSET_NOT_LENGTH or exact % 1000 == 0:
+        return 0
+    _css_milli_slot(exact)
+
+# The whole-px margin that goes with `_decl_vertical_margin_milli` (round
+# half up of the exact value, so every reader that only knows whole px stays
+# within half a pixel); `legacy_px` when the token is not a plain length.
+# A negative length (`-.5em`, `calc(1px - 5px)`) is whole px only: a negative
+# `margin_*_milli` already means a percentage.
+fn _decl_vertical_margin_px(tok: text, font_px: i32, legacy_px: i32) -> i32:
+    val exact = _decl_vertical_margin_exact_milli(tok, font_px)
+    if exact >= 0:
+        return ((exact + 500) / 1000) as i32
+    val v = css_length_milli(tok, font_px, true)
+    if _css_calc_dropped(tok):
+        return 0
+    if v == CSS_LENGTH_NONE or v >= 0:
+        return legacy_px
+    (0 - (_css_layout_unit_floor_milli(0 - v) + 500) / 1000) as i32
+
+# A `%` or `em` `line-height` as thousandths of the declaring element's own
+# font-size (`150%` -> 1500, `1.5em` -> 1500, `112.5%` -> 1125); 0 for any
+# other value. Such a value computes to a LENGTH (CSS 2.2 10.8.1) that
+# children inherit, but the length depends on the element's FINAL font-size,
+# which may cascade in after the line-height -- so the factor is kept on the
+# Style (`line_height_em_milli`) and converted at the end of every
+# declaration application. `rem` is not `em`.
+fn _decl_line_height_own_font_milli(raw: text) -> i32:
+    val value = raw.trim().lower()
+    val percent = value.ends_with("%")
+    if not percent and (not value.ends_with("em") or value.ends_with("rem")):
+        return 0
+    val number = if percent: value.substring(0, value.byte_len() - 1) else: value.substring(0, value.byte_len() - 2)
+    val parts = number.trim().split(".")
+    if parts.len() == 0 or parts.len() > 2:
+        return 0
+    val whole = if parts[0].byte_len() == 0: 0 else: parse_supported_nonnegative_px(parts[0] + "px")
+    if whole < 0:
+        return 0
+    var frac_milli = 0
+    if parts.len() == 2 and parts[1].byte_len() > 0:
+        val digits = (parts[1] + "000").substring(0, 3)
+        frac_milli = parse_supported_nonnegative_px(digits + "px")
+        if frac_milli < 0:
+            return 0
+    val milli = whole * 1000 + frac_milli
+    if percent: milli / 100 else: milli
+
+# Any other `line-height` declaration as the Style encoding: a positive px
+# length, or minus ten times a unitless factor that each descendant
+# re-resolves against its own font; 0 when unusable.
+fn _decl_line_height(raw: text) -> i32:
+    if _decl_line_height_own_font_milli(raw) > 0:
+        return 0
+    parse_line_height_value(raw)
+
+# A unitless flex factor (`flex: 1.5`, `flex-grow: 2`), or -1 when `raw` is
+# not one. Factors are stored as integers: a fraction is rounded to the
+# nearest integer (half up), and a positive factor below 1 becomes 1 so that
+# it still grows. `flex: 1.5` beside `flex: 1` therefore shares 2:1, not 3:2.
+fn _decl_flex_factor(raw: text) -> i32:
+    val value = raw.trim()
+    val parts = value.split(".")
+    if parts.len() == 1:
+        return parse_supported_nonnegative_px(value + "px")
+    if parts.len() != 2:
+        return -1
+    val whole = if parts[0].byte_len() == 0: 0 else: parse_supported_nonnegative_px(parts[0] + "px")
+    val frac = if parts[1].byte_len() == 0: -1 else: parse_supported_nonnegative_px(parts[1] + "px")
+    if whole < 0 or frac < 0:
+        return -1
+    val tenth = parse_supported_nonnegative_px(parts[1].substring(0, 1) + "px")
+    val rounded = if tenth >= 5: whole + 1 else: whole
+    if rounded == 0 and frac > 0: 1 else: rounded
+
+# `left`, `top` and `order` are signed. `parse_int` skips every non-digit
+# before the first digit, the minus sign included, so `top:-5px` was laid out
+# as `top:5px` and `order:-1` sorted as `order:1`. A value with no digit at all
+# (`auto`) reads as 0, exactly as `parse_int` read it.
+# `right` and `bottom` are NOT routed through this: the layout reads
+# `right_px >= 0` as "right is set", so a negative `right`/`bottom` needs a
+# separate is-set flag before its sign can be kept.
+fn _decl_signed_int_or_zero(raw: text) -> i32:
+    val v = parse_signed_nth_int(raw, 0)
+    if v == -1000000:
+        return 0
+    v
+
+
+# `letter-spacing` / `word-spacing` length: signed (`-1px` tightens),
+# fractional (`1.5px`) and font-relative (`0.1em` at 16px = 1600), in milli-px.
+# `normal` and anything unreadable is 0.
+fn _decl_signed_spacing_milli(raw: text, font_px: i32) -> i32:
+    val v = raw.trim().lower()
+    var unit_px: i64 = 1
+    if v.ends_with("rem"):
+        unit_px = css_cascade_root_font_px().to_i64()
+    elif v.ends_with("em"):
+        unit_px = font_px.to_i64()
+    (svg_number_milli(v) * unit_px).to_i32()

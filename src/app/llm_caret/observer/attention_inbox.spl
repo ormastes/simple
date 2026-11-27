@@ -1,0 +1,67 @@
+# Caret observer -- attention inbox (design section 7.4), pure and immutable.
+# One entry per unique (session id, generation, operation id, kind); a new
+# generation of the same session is a different key.
+
+use app.llm_caret.observer.state_axes.*
+
+enum ReadState:
+    Unread
+    Acked
+    Snoozed
+
+struct AttentionEvent:
+    session_id: text
+    generation: i64
+    operation_id: text
+    kind: Attention
+    summary: text
+
+struct AttentionEntry:
+    session_id: text
+    generation: i64
+    operation_id: text
+    kind: Attention
+    summary: text
+    state: ReadState
+
+struct AttentionInbox:
+    entries: [AttentionEntry]
+
+fn attention_inbox_new() -> AttentionInbox:
+    AttentionInbox(entries: [])
+
+fn key_matches(e: AttentionEntry, session: text, generation: i64, op: text, kind: Attention) -> bool:
+    e.session_id == session and e.generation == generation and e.operation_id == op and e.kind == kind
+
+# A duplicate key keeps the existing entry (and its ack/snooze state).
+fn attention_add(inbox: AttentionInbox, ev: AttentionEvent) -> AttentionInbox:
+    for e in inbox.entries:
+        if key_matches(e, ev.session_id, ev.generation, ev.operation_id, ev.kind):
+            return inbox
+    val entry = AttentionEntry(session_id: ev.session_id, generation: ev.generation, operation_id: ev.operation_id, kind: ev.kind, summary: ev.summary, state: ReadState.Unread)
+    AttentionInbox(entries: inbox.entries + [entry])
+
+fn set_state(inbox: AttentionInbox, session: text, generation: i64, op: text, kind: Attention, state: ReadState) -> AttentionInbox:
+    var out: [AttentionEntry] = []
+    for e in inbox.entries:
+        if key_matches(e, session, generation, op, kind):
+            out = out + [AttentionEntry(session_id: e.session_id, generation: e.generation, operation_id: e.operation_id, kind: e.kind, summary: e.summary, state: state)]
+        else:
+            out = out + [e]
+    AttentionInbox(entries: out)
+
+fn attention_ack(inbox: AttentionInbox, session: text, generation: i64, op: text, kind: Attention) -> AttentionInbox:
+    set_state(inbox, session, generation, op, kind, ReadState.Acked)
+
+fn attention_snooze(inbox: AttentionInbox, session: text, generation: i64, op: text, kind: Attention) -> AttentionInbox:
+    set_state(inbox, session, generation, op, kind, ReadState.Snoozed)
+
+fn attention_unread(inbox: AttentionInbox) -> [AttentionEntry]:
+    var out: [AttentionEntry] = []
+    for e in inbox.entries:
+        if e.state == ReadState.Unread:
+            out = out + [e]
+    out
+
+export ReadState, AttentionEvent, AttentionEntry, AttentionInbox
+export attention_inbox_new, attention_add, attention_ack, attention_snooze, attention_unread

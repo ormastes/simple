@@ -1,5 +1,32 @@
 # Bug: LSP code-action edits never apply — emitter/parser mismatch (+ interp substring snag)
 
+## Note 2026-11-25 (p2w3-af lane, release/1.0.0 @ 7fc1bd04349)
+
+- **Defect 1 (parser reads flat keys nothing emits): fixed in source.**
+  `_parse_code_action` no longer exists; the conversion boundary is now
+  `lsp_code_actions_convert_output` (`src/lib/nogc_sync_mut/lsp/lsp_code_action.spl:282`),
+  which consumes the nested `edit`/`documentChanges` shape via structured
+  `JsonValue` parsing, preserves serialized empty-string deletion edits, and
+  marks malformed edits `disabled` instead of dropping them silently.
+- **Defect 2 (emitter brace imbalance): moot in source.** The emitter
+  (`src/app/cli/query_navigation.spl` `query_code_actions`) no longer builds
+  edit JSON from `ep.push("{\"range\":{")`-style string literals at all; it
+  constructs `JsonValue` trees (`lsp_query_code_action`,
+  `lsp_code_action_text_edit`) and serializes them, so the `}}`-collapse can
+  no longer corrupt the emitted JSON on this path.
+- **Defect 3 (root cause, `string_literal_double_brace_collapse_2026-06-16`):
+  still live on the pinned seed.** Re-probed 2026-11-25 with
+  `bin/simple.exe run`: `print("{{a}}")` prints `{a}` and `print("x}}y")`
+  prints `x}y` (Rust seed v1.0.0-rc.1, Windows). That lexer defect is
+  compiler-tree work outside this lane's scope.
+- **Verification remains blocked:** the six authored scenarios in
+  `test/01_unit/app/lsp/code_action_edit_roundtrip_spec.spl` (present in
+  tree) cannot run here — spec mode fails repo-wide at this HEAD with
+  `unknown decorator '@representation_boundary'` on the pinned seed, and no
+  qualified self-hosted runtime is deployed. Per the 2026-11-03 canonical
+  note, this row stays **OPEN — TEST_BLOCKED** pending those checks; the
+  notes above are code-inspection + probe evidence, not behavioral proof.
+
 ## Triage 2026-09-13 — STILL OPEN: its named root cause still reproduces
 - **measured** — the entry names `string_literal_double_brace_collapse_2026-06-16` as the
   blocker for the in-place fix, and that bug still reproduces: `print("{{a}}")` prints
@@ -71,3 +98,27 @@ build-via-concatenation workaround.
 1. Open a `.spl` file with a fixable construct (e.g. `Foo.new()`).
 2. Request a code action on that line; accept the offered quickfix.
 3. Observed: no text change. Expected: the constructor rewrite applies.
+
+## 2026-11-03 residual deletion-edit repair candidate
+
+Current source already forwards nested range edits, but both nested and legacy
+branches require decoded `newText != ""`. This drops valid deletion edits. The
+candidate distinguishes a serialized JSON string (including `""`) from a missing
+or null field, and forwards that serialized string without decoding/re-escaping
+it. This also retains escaped insertion text through the existing raw-field owner.
+
+`lsp_code_actions_from_query_output` is the pure conversion boundary shared by
+the live request handler and six authored regression scenarios in
+`test/01_unit/app/lsp/code_action_edit_roundtrip_spec.spl`.
+
+Status: source candidate, **verification pending**. No qualified self-hosted
+runtime is deployed in `bin/release`; tracked `bin/simple.exe` was independently
+identified as a Rust bootstrap seed and was not used for normal tests. No runtime
+PASS, client application success, producer qualification, or closure of the
+historical emitter/brace-collapse report is claimed. Core/library/MCP checks and
+native smoke remain pending. See the authored manual at
+`doc/06_spec/01_unit/app/lsp/code_action_edit_roundtrip_spec.md`.
+
+## Canonical database reconciliation — 2026-11-03
+
+OPEN; source candidate PR #6293 MERGED at aea5d7eecfc57d497c0fb860be11782d18366055. It preserves empty deletion edits and serialized escaped text. TEST_BLOCKED: six authored protocol scenarios, compiler/lib/MCP/LSP checks and native smoke UNRUN without a qualified self-hosted runtime. Await those checks; static checks are not behavioral proof. This merged residual deletion-edit repair does not prove closure of the historical emitter/brace-collapse umbrella.

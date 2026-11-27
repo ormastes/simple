@@ -621,7 +621,10 @@ const NATIVE_PTR_TAG_BITS: u64 = 0;
 fn native_word_exceeds_user_va(word: u64) -> bool {
     (word & !NATIVE_PTR_TAG_BITS) > NATIVE_USER_VA_MAX
 }
-const NATIVE_DIRECT_FUNCTION_RECORD_MARKER: usize = 0x5344_4952_4543_5446;
+// Codegen emits direct-function records as two 64-bit slots on every target
+// ([fn_addr, marker] at offsets 0 and 8), so the marker is a u64, not a usize.
+const NATIVE_DIRECT_FUNCTION_RECORD_MARKER: u64 = 0x5344_4952_4543_5446;
+const NATIVE_RECORD_SLOT_WORDS: usize = std::mem::size_of::<u64>() / std::mem::size_of::<usize>();
 
 enum NativeCallable {
     ClosureRecord {
@@ -635,20 +638,43 @@ enum NativeCallable {
     },
 }
 
-fn native_closure_payload(raw: u64) -> Option<u64> {
-    if raw < 4096 {
+// Explicit worker-closure ABI kind, chosen by the SPAWNER from the static type
+// of what it passes (doc/08_tracking/bug/
+// isolated_thread_raw_worker_argument_heuristic_flake_2026-08-12.md). The
+// runtime never infers it from the word's value. Twin: runtime_thread.c
+// RT_WORKER_CLOSURE_*.
+//   ADDRESS  the word is a machine address of a code entry or a closure
+//            record; worker arguments are passed through unchanged.
+//   VALUE    the word is a tagged Simple RuntimeValue, decoded by its own tag:
+//            TAG_INT  (addr << 3) -> raw native record/entry, raw i64 args;
+//            TAG_HEAP (addr | 1)  -> heap record, RuntimeValue args;
+//            any other tag is not a callable and is rejected.
+// Any other kind is rejected (spawn returns 0).
+pub const RT_WORKER_CLOSURE_ADDRESS: i64 = 1;
+pub const RT_WORKER_CLOSURE_VALUE: i64 = 2;
+
+/// (payload address, raw_worker_args) for an explicitly kinded closure word.
+fn native_worker_closure_word(kind: i64, word: u64) -> Option<(u64, bool)> {
+    let decoded = match kind {
+        RT_WORKER_CLOSURE_ADDRESS => {
+            // Validity, not a guess: a word above the user-VA ceiling is not
+            // an address of this process.
+            if native_word_exceeds_user_va(word) {
+                return None;
+            }
+            (word, false)
+        }
+        RT_WORKER_CLOSURE_VALUE => match word & 0x7 {
+            0x0 => (word >> 3, true),
+            0x1 => (word & !0x7, false),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if decoded.0 < 4096 {
         return None;
     }
-
-    if native_word_exceeds_user_va(raw) {
-        Some(raw >> 3)
-    } else if raw & 0x7 == 0x1 && !unsafe { native_address_is_code(raw as usize) } {
-        // TAG_HEAP record pointer (an odd raw code address stays as is);
-        // twin of runtime_thread.c rt_native_closure_payload.
-        Some(raw & !0x7)
-    } else {
-        Some(raw)
-    }
+    Some(decoded)
 }
 
 fn native_worker_arg(value: RuntimeValue, raw_worker_args: bool) -> RuntimeValue {
@@ -703,16 +729,100 @@ unsafe fn native_address_is_code(addr: usize) -> bool {
     libc::dladdr(addr as *const libc::c_void, &mut info) != 0 && !info.dli_fname.is_null()
 }
 
-#[cfg(not(unix))]
+// Windows: committed, executable pages. VirtualQuery never faults on any
+// address and takes no lock of ours, so the classifier stays lockless.
+#[cfg(windows)]
+unsafe fn native_address_is_code(addr: usize) -> bool {
+    use windows_sys::Win32::System::Memory::{
+        PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_GUARD,
+    };
+    match native_query_region(addr) {
+        Some((_, protect)) => {
+            protect & PAGE_GUARD == 0
+                && protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY) != 0
+        }
+        None => false,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 unsafe fn native_address_is_code(_addr: usize) -> bool {
     false
 }
 
-unsafe fn native_callable(closure_arg: u64) -> Option<NativeCallable> {
-    let raw_worker_args = native_word_exceeds_user_va(closure_arg);
-    let payload = native_closure_payload(closure_arg)?;
-    if payload < 4096 {
+// (region end, protection) of the committed region containing `addr`.
+#[cfg(windows)]
+fn native_query_region(addr: usize) -> Option<(usize, u32)> {
+    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT};
+    let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<MEMORY_BASIC_INFORMATION>();
+    let n = unsafe { VirtualQuery(addr as *const std::ffi::c_void, &mut info, size) };
+    if n == 0 || info.State != MEM_COMMIT {
         return None;
+    }
+    let end = (info.BaseAddress as usize).checked_add(info.RegionSize)?;
+    if end <= addr {
+        return None;
+    }
+    Some((end, info.Protect))
+}
+
+// Some(true) when `words` machine words at `addr` are committed and readable,
+// Some(false) when they provably are not, None when this host has no
+// fault-free probe (the record is then read as the spawner declared it).
+#[cfg(windows)]
+fn native_words_readable(addr: usize, words: usize) -> Option<bool> {
+    use windows_sys::Win32::System::Memory::{PAGE_GUARD, PAGE_NOACCESS};
+    let Some(end) = addr.checked_add(words * std::mem::size_of::<usize>()) else {
+        return Some(false);
+    };
+    let mut cur = addr;
+    while cur < end {
+        match native_query_region(cur) {
+            Some((region_end, protect)) if protect != 0 && protect & (PAGE_GUARD | PAGE_NOACCESS) == 0 => {
+                cur = region_end;
+            }
+            _ => return Some(false),
+        }
+    }
+    Some(true)
+}
+
+#[cfg(not(windows))]
+fn native_words_readable(_addr: usize, _words: usize) -> Option<bool> {
+    None
+}
+
+// The explicit kind decides the word's encoding; the record SHAPE (bare
+// entry / direct-function record / closure record) is then read from the
+// payload itself (code-segment test + the record's marker word). A record that
+// is provably not readable is rejected, never dereferenced.
+unsafe fn native_callable(kind: i64, closure_arg: u64) -> Option<NativeCallable> {
+    let (payload, raw_worker_args) = native_worker_closure_word(kind, closure_arg)?;
+
+    // Runtime-facing closure convention (seed codegen, 2026-08-21): a JIT
+    // closure is a registered `HeapObjectType::Closure` whose word 0 is the
+    // HeapHeader, not an entry. Its `func_ptr` is the `$boxed` entry
+    // `extern "C" fn(closure: RuntimeValue, args: RuntimeValue..)`, so the
+    // tagged closure word itself is the hidden first argument and worker
+    // arguments stay tagged. Registry-validated, so a native record whose
+    // word 0 happens to look like a header is never misread.
+    // bug: seed_jit_spawned_thread_never_runs_join_segv_2026-11-09
+    if kind == RT_WORKER_CLOSURE_VALUE && closure_arg & 0x7 == 0x1 {
+        let closure_value = RuntimeValue(closure_arg);
+        if let Some(clos) =
+            crate::value::heap::get_typed_ptr::<crate::value::RuntimeClosure>(closure_value, crate::value::HeapObjectType::Closure)
+        {
+            let entry = (*clos).func_ptr as usize;
+            if entry < 4096 {
+                return None;
+            }
+            return Some(NativeCallable::ClosureRecord {
+                entry,
+                closure_ptr: closure_arg,
+                raw_worker_args: false,
+            });
+        }
     }
 
     let payload_addr = payload as usize;
@@ -730,11 +840,16 @@ unsafe fn native_callable(closure_arg: u64) -> Option<NativeCallable> {
         });
     }
 
-    let entry = *(payload as *const usize);
+    if native_words_readable(payload_addr, 2 * NATIVE_RECORD_SLOT_WORDS) == Some(false) {
+        return None;
+    }
+    let Ok(entry) = usize::try_from(*(payload as *const u64)) else {
+        return None;
+    };
     if entry < 4096 {
         return None;
     }
-    if *((payload as *const usize).add(1)) == NATIVE_DIRECT_FUNCTION_RECORD_MARKER {
+    if *((payload as *const u64).add(1)) == NATIVE_DIRECT_FUNCTION_RECORD_MARKER {
         return Some(NativeCallable::DirectFunction { entry, raw_worker_args });
     }
 
@@ -759,8 +874,20 @@ unsafe fn native_callable(closure_arg: u64) -> Option<NativeCallable> {
 /// A thread handle that can be used to join the thread
 #[no_mangle]
 pub extern "C" fn rt_thread_spawn_isolated(closure_ptr: u64, data: RuntimeValue) -> u64 {
+    // Simple-facing: generated code passes the closure as a tagged RuntimeValue.
+    spawn_isolated_kind(RT_WORKER_CLOSURE_VALUE, closure_ptr, data)
+}
+
+/// Spawn with an explicit closure-word kind (`RT_WORKER_CLOSURE_*`) chosen by
+/// the spawner; an unknown kind is rejected (returns 0).
+#[no_mangle]
+pub extern "C" fn rt_thread_spawn_isolated_kind(kind: i64, closure_ptr: u64, data: RuntimeValue) -> u64 {
+    spawn_isolated_kind(kind, closure_ptr, data)
+}
+
+fn spawn_isolated_kind(kind: i64, closure_ptr: u64, data: RuntimeValue) -> u64 {
     crate::value::note_user_threads_started();
-    let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
+    let Some(callable) = (unsafe { native_callable(kind, closure_ptr) }) else {
         return 0;
     };
 
@@ -808,8 +935,23 @@ pub extern "C" fn rt_thread_spawn_isolated_with_args(
     data1: RuntimeValue,
     data2: RuntimeValue,
 ) -> u64 {
+    spawn_isolated_with_args_kind(RT_WORKER_CLOSURE_VALUE, closure_ptr, data1, data2)
+}
+
+/// Two-argument spawn with an explicit closure-word kind (`RT_WORKER_CLOSURE_*`).
+#[no_mangle]
+pub extern "C" fn rt_thread_spawn_isolated_with_args_kind(
+    kind: i64,
+    closure_ptr: u64,
+    data1: RuntimeValue,
+    data2: RuntimeValue,
+) -> u64 {
+    spawn_isolated_with_args_kind(kind, closure_ptr, data1, data2)
+}
+
+fn spawn_isolated_with_args_kind(kind: i64, closure_ptr: u64, data1: RuntimeValue, data2: RuntimeValue) -> u64 {
     crate::value::note_user_threads_started();
-    let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
+    let Some(callable) = (unsafe { native_callable(kind, closure_ptr) }) else {
         return 0;
     };
 
@@ -1046,7 +1188,7 @@ pub extern "C" fn rt_thread_spawn_limited(
     thread_limit: i64,
 ) -> u64 {
     crate::value::note_user_threads_started();
-    let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
+    let Some(callable) = (unsafe { native_callable(RT_WORKER_CLOSURE_VALUE, closure_ptr) }) else {
         return 0;
     };
 
@@ -1139,7 +1281,7 @@ pub extern "C" fn rt_thread_spawn_limited_with_args(
     thread_limit: i64,
 ) -> u64 {
     crate::value::note_user_threads_started();
-    let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
+    let Some(callable) = (unsafe { native_callable(RT_WORKER_CLOSURE_VALUE, closure_ptr) }) else {
         return 0;
     };
 

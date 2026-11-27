@@ -79,3 +79,21 @@ Fixed at the .spl call sites (nil-guard + typed-route shutdown guard);
 underlying JIT missing-vtable duck-dispatch defect remains open (tracked by
 jit_game2d_backend_method_dispatch_sigsegv_2026-07-02).
 
+## Verification 2026-11-25 — fix confirmed present at release/1.0.0 HEAD
+
+Code inspection on worktree at release/1.0.0 HEAD (`a19165ae174`):
+
+- `src/lib/nogc_async_mut/env/platform.spl:41` `detect_os()` carries the
+  2026-08-02 NIL-GUARD comment and guards before `.lower()`; the sibling
+  `src/lib/nogc_sync_mut/env/platform.spl` copy is in the same tree.
+- `src/lib/gc_async_mut/gpu/engine2d/engine.spl:193` defines
+  `engine2d_shutdown_has_typed_route` and `:2217` gates the mismatch-branch
+  `engine.shutdown()` on it, exactly as the Fix section describes.
+
+The end-to-end engine2d `"auto"` resolution probe was not re-run: it needs
+the engine2d/GPU stack and the self-hosted lane (no deployed self-hosted
+binary on this Windows host; the pinned seed cannot run `bin/simple.exe test`
+at HEAD due to the known `@representation_boundary` seed/source skew).
+Closure rests on the 2026-09-16 both-engines verification plus today's
+source confirmation.
+

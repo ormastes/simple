@@ -7,8 +7,40 @@ name: Component Builds
 on:
   push:
     branches: [main, 'release/**', release_phase3]
+    paths:
+      - 'src/os/**'
+      - 'src/lib/**'
+      - 'examples/09_embedded/simple_os/**'
+      - 'scripts/os/**'
+      - 'src/plugins/backend_wasm/**'
+      - 'src/compiler/70.backend/**'
+      - 'src/compiler/60.mir_opt/mir_opt/simd_recipe_infra.spl'
+      - 'src/compiler/85.mdsoc/feature/optimization/simd_provider.spl'
+      - 'src/app/provider_cli/**'
+      - 'targets.sdn'
+      - 'config/ci/**'
+      - 'config/bootstrap.sdn'
+      - 'scripts/ci/**'
+      - 'scripts/bootstrap/resolve-bootstrap-compiler.shs'
+      - '.github/workflows/component-build.yml'
   pull_request:
     branches: [main, 'release/**', release_phase3]
+    paths:
+      - 'src/os/**'
+      - 'src/lib/**'
+      - 'examples/09_embedded/simple_os/**'
+      - 'scripts/os/**'
+      - 'src/plugins/backend_wasm/**'
+      - 'src/compiler/70.backend/**'
+      - 'src/compiler/60.mir_opt/mir_opt/simd_recipe_infra.spl'
+      - 'src/compiler/85.mdsoc/feature/optimization/simd_provider.spl'
+      - 'src/app/provider_cli/**'
+      - 'targets.sdn'
+      - 'config/ci/**'
+      - 'config/bootstrap.sdn'
+      - 'scripts/ci/**'
+      - 'scripts/bootstrap/resolve-bootstrap-compiler.shs'
+      - '.github/workflows/component-build.yml'
   workflow_dispatch:
     inputs:
       components:
@@ -21,7 +53,7 @@ permissions:
 
 concurrency:
   group: component-build-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   plan:
@@ -34,7 +66,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          sparse-checkout: |
+            config
+            scripts
+          sparse-checkout-cone-mode: true
           persist-credentials: false
       - name: Select touched components
         id: plan
@@ -50,8 +85,15 @@ jobs:
             workflow_dispatch)
               if [ "${REQUESTED:-all}" = all ]; then sh scripts/ci/plan-components.shs --all
               else sh scripts/ci/plan-components.shs --only "$REQUESTED"; fi ;;
-            pull_request) sh scripts/ci/plan-components.shs "$PR_BASE" "$HEAD" ;;
-            *) sh scripts/ci/plan-components.shs "${PUSH_BASE:-0}" "$HEAD" ;;
+            pull_request)
+              git fetch --filter=blob:none --no-tags --no-recurse-submodules --quiet --depth=50 origin "$PR_BASE" || true
+              git fetch --filter=blob:none --no-tags --no-recurse-submodules --quiet --depth=1 origin "$HEAD" || true
+              sh scripts/ci/plan-components.shs "$PR_BASE" "$HEAD" ;;
+            *)
+              if [ -n "${PUSH_BASE:-}" ] && [ -n "$(echo "$PUSH_BASE" | tr -d 0)" ]; then
+                git fetch --filter=blob:none --no-tags --no-recurse-submodules --quiet --depth=50 origin "$PUSH_BASE" "$HEAD" || true
+              fi
+              sh scripts/ci/plan-components.shs "${PUSH_BASE:-0}" "$HEAD" ;;
           esac
       # Components build only with a compiler resolve-bootstrap-compiler.shs
       # proves (it must build and run a hello world). Before any RC carries

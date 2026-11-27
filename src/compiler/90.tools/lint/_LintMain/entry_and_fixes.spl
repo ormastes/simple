@@ -4,7 +4,26 @@
 # test-runner's phantom file-level-failure defect (a wildcard-resolved import
 # chain reaching a module that declares a top-level `fn main`). See
 # doc/08_tracking/bug/test_runner_wildcard_imported_main_phantom_failure_2026-08-01.md.
-use compiler.tools.lint.main.*
+use std.tooling.easy_fix.types.{easyfix_id, easyfix_description, easyfix_replacements}
+use compiler.tools.lint._LintMain.config_and_model.{
+    LintCliPolicy, LintConfig, LintDiag, LintEvidenceTier, LintFileResult,
+    LintProfile, LintReadFileResult, LintRunResult, Linter, all_lint_names,
+    any_rule_relay_level, lint_evidence_tier_name, lint_policy_decision,
+    lint_read_file, lint_run_result_apply_cli_policy, lint_run_result_drop_noop_fix, linter_find_project_sdn,
+    resolve_lint_config
+}
+# `impl Linter` (Linter.new, lint_source_for_parsed_append,
+# release_combined_lint_view) lives in lint_checks; import it directly so
+# this module does not depend on another module's facade wildcard to load it.
+use compiler.tools.lint._LintMain.rule_cost_tier.{
+    lint_admit_and_record_v1, lint_apply_fast_profile, lint_apply_diagnostic_profile,
+    lint_record_ast_parse_skipped_v1, lint_record_ast_parse_v1,
+    lint_rule_admitted_for_config
+}
+use compiler.tools.lint._LintMain.lint_checks.{lint_rule_code_from_easyfix_id}
+use compiler.tools.lint._LintMain.semantic_markdown_lints.{
+    apply_semantic_markdown_lint_fix_v1, semantic_markdown_lint_sources_v1
+}
 # Simple Language Linter
 # Semantic lints for code quality and safety
 # Usage: simple_lint <file.spl> [--deny-all] [--warn-all]
@@ -28,12 +47,17 @@ use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debugga
 use compiler.core.ast.{module_get_decls}
 use compiler.core.ast_expr.{ast_generation}
 use compiler.core.parser.{parse_module_silent_checked, parser_has_errors, parser_set_had_error, parser_first_error_get}
+use compiler.core.types.{unit_decl_pool_reset}
+use compiler.types.units.unit_registry.{unit_registry_build, unit_registry_collisions}
 use compiler.semantics.lint.argument_count.{check_argument_count}
 use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
 use compiler.semantics.lint.star_import.{check_star_export_file}
 use compiler.semantics.lint.stub_impl.{check_stub_impl}
 use compiler.semantics.lint.wide_public.{check_wide_public_file}
-use compiler.semantics.lint.option_me_call.{check_option_me_call_source}
+use compiler.semantics.lint.semantic_api.exported_graph.{check_semantic_api_decls_for_package}
+use compiler.semantics.lint.semantic_api.package_manifest.{semantic_api_manifest_text_for, semantic_api_module_stem}
+use compiler.tools.fix.rules.impl_.lint_allow.{lines_allow_rule, line_is_allowed}
+use compiler.semantics.lint.option_me_call.{check_option_me_call_source, OptionMeCallWarning}
 use compiler.semantics.lint.required_comment.{check_required_comment, required_comment_source_may_match}
 use compiler.common.assurance.mc_exceptions.{mc_exception_report_line}
 
@@ -56,11 +80,64 @@ fn _lint_profile_to_assurance_name(profile: Option<LintProfile>) -> text:
                     return "strict"
                 case Moderate:
                     return "moderate"
-        case nil:
+        case None:
             return ""
     ""
 
 use compiler.frontend.core.representation_declarations_v1.{representation_checked_parse_receipt_v1}
+
+fn lint_cli_unit_results(config: LintConfig, path: String) -> [LintRunResult]:
+    """SPL-UNIT-004 suffix collisions among the unit declarations of the parse
+    just done. SPL-UNIT-001/003 are already reported by the text EasyFix
+    producers (fix registry), so they are not repeated from parser_warn."""
+    var results: [LintRunResult] = []
+    for message in unit_registry_collisions(unit_registry_build()):
+        val policy = lint_policy_decision(
+            config, "SPL-UNIT-004", LintLevel.Deny, LintEvidenceTier.ParsedStructural)
+        if not policy.keep: continue
+        val lint = LintDiag.new("SPL-UNIT-004", policy.level, LintCategory.Correctness, message[14:])
+        results.push(LintRunResult.new(path, 1, 0, lint))
+    results
+
+fn _any_ast_rule_admitted(config: LintConfig, content: String) -> bool:
+    if lint_rule_admitted_for_config(config, "undeclared_derived_unit"):
+        return true
+    if lint_rule_admitted_for_config(config, "too_many_arguments"):
+        return true
+    if lint_rule_admitted_for_config(config, "collection_performance"):
+        return true
+    if lint_rule_admitted_for_config(config, "stub_impl"):
+        return true
+    if lint_rule_admitted_for_config(config, "required_comment") and required_comment_source_may_match(content):
+        return true
+    if lint_rule_admitted_for_config(config, "visibility_boundary"):
+        return true
+    if lint_rule_admitted_for_config(config, "semantic_api_exported_graph") and not lines_allow_rule(content.split("\n"), "primitive_api"):
+        return true
+    false
+
+fn _record_unadmitted_ast_rules(config: LintConfig):
+    val _ = lint_admit_and_record_v1(config, "undeclared_derived_unit")
+    val _ = lint_admit_and_record_v1(config, "too_many_arguments")
+    val _ = lint_admit_and_record_v1(config, "collection_performance")
+    val _ = lint_admit_and_record_v1(config, "stub_impl")
+    val _ = lint_admit_and_record_v1(config, "required_comment")
+    val _ = lint_admit_and_record_v1(config, "visibility_boundary")
+    val _ = lint_admit_and_record_v1(config, "semantic_api_exported_graph")
+
+fn _append_option_me_results(
+    config: LintConfig, path: String, content: String, initial_results: [LintRunResult]
+) -> [LintRunResult]:
+    var results = initial_results
+    for warning in check_option_me_call_source(path, content):
+        val policy = lint_policy_decision(
+            config, warning.code, LintLevel.Warn, LintEvidenceTier.SourcePattern)
+        if not policy.keep: continue
+        val level = policy.level
+        val message = "{warning.message} — {warning.hint}"
+        val lint = LintDiag.new(warning.code, level, LintCategory.Correctness, message)
+        results.push(LintRunResult.new(path, warning.line_num, 0, lint))
+    results
 
 fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunResult]:
     val previous_parse_error = parser_has_errors()
@@ -69,12 +146,30 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunRes
         linter.release_combined_lint_view()
         return results
 
+    val file_config = if linter.last_resolved_path == path and linter.last_resolved_config.?:
+        linter.last_resolved_config.unwrap()
+    else:
+        resolve_lint_config(linter.config, path, content)
+
+    if not _any_ast_rule_admitted(file_config, content):
+        lint_record_ast_parse_skipped_v1()
+        _record_unadmitted_ast_rules(file_config)
+        val _ = lint_admit_and_record_v1(file_config, "written_any_decl")
+        val _ = lint_admit_and_record_v1(file_config, "any_fallback_use")
+        val _ = lint_admit_and_record_v1(file_config, "any_receiver_use")
+        if lint_admit_and_record_v1(file_config, "option_me_call"):
+            results = _append_option_me_results(file_config, path, content, results)
+        linter.release_combined_lint_view()
+        return results
+
     # Must use the *_checked form: `parse_module_silent` + `parser_has_errors()`
     # reads back a module-level flag that does not survive the return across the
     # module boundary, which made this gate fail open — lint reported
     # `all files clean` on files the compiler rejects outright. See
     # doc/08_tracking/bug/lint_does_not_detect_syntax_errors_2026-07-28.md.
-    val parse_failed = if val receipt = representation_checked_parse_receipt_v1(content, path):
+    lint_record_ast_parse_v1()
+    unit_decl_pool_reset()
+    val parse_failed =if val receipt = representation_checked_parse_receipt_v1(content, path):
         receipt
     else:
         parse_module_silent_checked(content, path)
@@ -123,11 +218,10 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunRes
         linter.release_combined_lint_view()
         return results
 
-    # Any-rule gate is read BEFORE the AST pass releases the resolved config.
-    val any_config = if linter.last_resolved_path == path and linter.last_resolved_config.?:
-        linter.last_resolved_config.unwrap()
-    else:
-        resolve_lint_config(linter.config, path, content)
+    val any_config = file_config
+    val any_decl_admitted = lint_admit_and_record_v1(any_config, "written_any_decl")
+    val any_fallback_admitted = lint_admit_and_record_v1(any_config, "any_fallback_use")
+    val any_receiver_admitted = lint_admit_and_record_v1(any_config, "any_receiver_use")
     val any_decl = lint_policy_decision(
         any_config, "W-ANY-DECL-001", LintLevel.Allow, LintEvidenceTier.SourcePattern)
     val any_fallback = lint_policy_decision(
@@ -135,9 +229,12 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunRes
     val any_receiver = lint_policy_decision(
         any_config, "W-ANY-USE-001", LintLevel.Allow, LintEvidenceTier.ParsedStructural)
     val any_env_level = any_rules_env_level()
-    val any_decl_level = any_rule_relay_level(any_config, "written_any_decl", any_decl.keep, any_decl.level, any_env_level)
-    val any_fallback_level = any_rule_relay_level(any_config, "any_fallback_use", any_fallback.keep, any_fallback.level, any_env_level)
-    val any_receiver_level = any_rule_relay_level(any_config, "any_receiver_use", any_receiver.keep, any_receiver.level, any_env_level)
+    val any_decl_level = if any_decl_admitted: any_rule_relay_level(any_config, "written_any_decl", any_decl.keep, any_decl.level, any_env_level) else: LintLevel.Allow
+    val any_fallback_level = if any_fallback_admitted: any_rule_relay_level(any_config, "any_fallback_use", any_fallback.keep, any_fallback.level, any_env_level) else: LintLevel.Allow
+    val any_receiver_level = if any_receiver_admitted: any_rule_relay_level(any_config, "any_receiver_use", any_receiver.keep, any_receiver.level, any_env_level) else: LintLevel.Allow
+    if lint_admit_and_record_v1(any_config, "undeclared_derived_unit"):
+        for unit_result in lint_cli_unit_results(any_config, path):
+            results.push(unit_result)
     var parsed_results = lint_cli_append_parsed_results(linter, path, content, module_get_decls(), results)
     # Robust/critical default to warnings. Moderate/strict and explicit allow
     # keep an empty mask: no checker process, HIR lowering, or walk.
@@ -218,6 +315,80 @@ fn lint_cli_source_with_parsed_revision(
         return results
     lint_cli_append_parsed_results(linter, path, content, revision.decls, results)
 
+fn _append_semantic_api_results(
+    config: LintConfig, path: String, content: String, decls: [i64],
+    initial_results: [LintRunResult]
+) -> [LintRunResult]:
+    """primitive_api — the recursive exported-type-graph checker
+    (compiler.semantics.lint.semantic_api.exported_graph) is the live
+    authority: public fns/fields/enum payloads/aliases/class-body members,
+    nested generics, tuples, aliases, export lists. It emits exactly one
+    finding per (item, member, type path). Private items are silent. The
+    shallow text rule (lint_checks.spl `check_primitive_api`) is the quick
+    scanner; a text finding on a line this checker also reports is dropped so
+    one leak is reported once. `@allow(primitive_api)` is honoured per line
+    and file-wide. Extern/FFI signatures (MC-API-003) are a boundary, not an
+    API leak: reported as `primitive_api_boundary` only under Critical, never
+    denied. Robust/Critical keep `primitive_api=deny` (config_and_model
+    `_strict_robust_levels`), which is what fails admission closed."""
+    var results = initial_results
+    val lines = content.split("\n")
+    if lines_allow_rule(lines, "primitive_api"):
+        return results
+    val findings = check_semantic_api_decls_for_package(
+        decls, semantic_api_module_stem(path), semantic_api_manifest_text_for(path))
+    val critical = config.profile.? and config.profile.unwrap() == LintProfile.Critical
+    var reported_slots: Dict<text, bool> = {}
+    for f in findings:
+        if f.line > 0 and line_is_allowed(lines, f.line - 1, "primitive_api"):
+            continue
+        # A direct public bool slot is owned by the quick scanner (SPL-BOOL-001,
+        # its own lint name and tier); the semantic pass does not repeat it.
+        if f.leaf == "bool" and f.type_text == "bool" and not f.boundary:
+            continue
+        val code = if f.boundary: "primitive_api_boundary" else: "primitive_api"
+        if f.boundary and not critical:
+            continue
+        val policy = lint_policy_decision(config, code, LintLevel.Warn, LintEvidenceTier.ParsedStructural)
+        if not policy.keep: continue
+        val level = if f.boundary and policy.level == LintLevel.Deny: LintLevel.Warn else: policy.level
+        val lint = LintDiag.new(code, level, LintCategory.Warning, f.fmt())
+            .with_evidence_tier(LintEvidenceTier.ParsedStructural)
+        results.push(LintRunResult.new(path, f.line, 0, lint))
+        if not f.boundary:
+            reported_slots[api_slot_key_of_message(f.fmt())] = true
+    if reported_slots.len() == 0:
+        return results
+    # One owner per type slot (file + symbol + type path): a quick-scanner
+    # finding for a slot the semantic pass reports is dropped. Semantic-owned
+    # results are the ones pushed above (they carry column 0).
+    var deduped: [LintRunResult] = []
+    for r in results:
+        val quick = (r.lint.code == "primitive_api" or r.lint.code == "bare_bool") and r.column > 0
+        if quick and reported_slots.contains_key(api_slot_key_of_message(r.lint.message)):
+            continue
+        deduped.push(r)
+    deduped
+
+# "F.param.X" / "F.return" from either a quick-scanner or a semantic message
+# ("... API parameter 'X' of 'F' ...", "... API param 'X' of 'F' ...",
+# "... API return type of 'F' ...", "... API return of 'F' ..."); "" if neither.
+pub fn api_slot_key_of_message(msg: text) -> text:
+    val at = msg.find("public API ")
+    if at < 0:
+        return ""
+    val rest = msg.slice(at + 11)
+    val parts = rest.split("'")
+    if rest.starts_with("param"):
+        if parts.len() < 4:
+            return ""
+        return "{parts[3]}.param.{parts[1]}"
+    if rest.starts_with("return"):
+        if parts.len() < 2:
+            return ""
+        return "{parts[1]}.return"
+    ""
+
 fn lint_cli_append_parsed_results(
     linter: Linter, path: String, content: String, decls: [i64],
     initial_results: [LintRunResult]
@@ -229,16 +400,27 @@ fn lint_cli_append_parsed_results(
         linter.last_resolved_config.unwrap()
     else:
         resolve_lint_config(linter.config, path, content)
-    val source_locations = if (linter.last_resolved_path == path
-        and linter.last_source_locations_valid):
+    val run_arg_count = lint_admit_and_record_v1(config, "too_many_arguments")
+    val run_coll = lint_admit_and_record_v1(config, "collection_performance")
+    val run_stub = lint_admit_and_record_v1(config, "stub_impl")
+    val run_reqc = lint_admit_and_record_v1(config, "required_comment")
+    val run_vis = lint_admit_and_record_v1(config, "visibility_boundary")
+    val run_sem_api = lint_admit_and_record_v1(config, "semantic_api_exported_graph")
+    val run_opt_me = lint_admit_and_record_v1(config, "option_me_call")
+
+    val need_locations = run_coll or run_reqc or run_vis
+    val source_locations = if not need_locations:
+        LintSourceLocationIndex({}, {}, {})
+    elif (linter.last_resolved_path == path and linter.last_source_locations_valid):
         LintSourceLocationIndex(
             linter.last_source_function_lines,
             linter.last_source_collection_fix_lines,
             linter.last_source_export_star_lines)
     else:
         lint_source_location_index(content.split("\n"))
-    val option_me_warnings = if (linter.last_resolved_path == path
-        and linter.last_source_locations_valid):
+    val option_me_warnings: [OptionMeCallWarning] = if not run_opt_me:
+        []
+    elif (linter.last_resolved_path == path and linter.last_source_locations_valid):
         linter.last_option_me_warnings
     else:
         check_option_me_call_source(path, content)
@@ -247,114 +429,94 @@ fn lint_cli_append_parsed_results(
     # diagnostic production; the tail release remains deliberately idempotent.
     linter.release_combined_lint_view()
     val stub_profile_name = _lint_profile_to_assurance_name(config.profile)
-    for warning in check_argument_count(decls):
-        val base_level = if warning.code == "ARG002": LintLevel.Deny else: LintLevel.Warn
-        val policy = lint_policy_decision(
-            config, warning.code, base_level, LintEvidenceTier.ParsedStructural)
-        if not policy.keep: continue
-        # This producer is the AST compatibility fallback. A deny policy is
-        # reserved for typed, high-confidence evidence; never turn unresolved
-        # receiver/effect/alias facts into a build error.
-        val level = if policy.level == LintLevel.Deny: LintLevel.Warn else: policy.level
-        val lint = LintDiag.new(warning.code, level, LintCategory.Style, warning.message)
-            .with_fix(warning.hint)
-        results.push(LintRunResult.new(path, warning.line, 0, lint))
-    for warning in check_collection_patterns(decls):
-        # This is the AST compatibility fallback.  Robust/critical deny policy
-        # is reserved for typed, high-confidence evidence; unresolved receiver,
-        # effect, alias, and mutation facts must never become a build error.
-        val base_level = LintLevel.Warn
-        val policy = lint_policy_decision(
-            config, warning.code, base_level, LintEvidenceTier.SourcePattern)
-        if not policy.keep: continue
-        val level = policy.level
-        val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
-            .with_fix(warning.hint)
-            .with_evidence(["item=" + warning.item_name, "source_severity=" + warning.severity])
-            .with_uncertainty("source-pattern fallback; receiver type, effects, aliasing, and mutation version are unresolved")
-            .with_evidence_tier(LintEvidenceTier.SourcePattern)
-        # Locate the offending line textually; the AST span pool is empty on
-        # this path (verified: expr/stmt spans all read 0 and span_is_valid is
-        # false), so line recovery here works the same way lint_cli_find_fn_line
-        # already does.
-        val hit = lint_source_collection_fix_line(source_locations, warning.code)
-        var coll_line = lint_source_function_line(source_locations, warning.item_name)
-        if hit >= 0:
-            coll_line = hit + 1
-        results.push(LintRunResult.new(path, coll_line, 0, lint))
-    for warning in check_stub_impl(decls, stub_profile_name):
-        # The line-scan text reimplementation in lint_checks.spl (`pass_todo`
-        # substring scan) remains the ONE live STUB003 source for this CLI
-        # path — see flight_rules.spl's note that the live STUB003 emitter is
-        # the text reimplementation, not this AST checker. This filter is
-        # what keeps it that way: it drops every STUB003 this AST pass would
-        # otherwise also emit (explicit placeholder bodies AND, since WP-8,
-        # the empty-body-under-critical case), so a placeholder still emits
-        # exactly once, not twice. See
-        # test/01_unit/compiler/lint/lint_cli_stub_impl_contract_check.spl
-        # (`cli_stub003_count != 1`) for the regression probe.
-        if warning.code != "STUB001" and warning.code != "STUB002":
-            continue
-        val base_level = if warning.code == "STUB001": LintLevel.Warn else: LintLevel.Allow
-        val policy = lint_policy_decision(
-            config, warning.code, base_level, LintEvidenceTier.ParsedStructural)
-        if not policy.keep: continue
-        val level = policy.level
-        val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
-            .with_fix(warning.hint)
-        results.push(LintRunResult.new(path, warning.line, 0, lint))
-    # REQC00x — WP-7: the AST-based `check_required_comment` (35.semantics)
-    # is now the ONLY live REQC001-004 emitter. Its predicate walks the real
-    # `pass_*`/`todo`/dangerous-keyword/wildcard-arm AST nodes rather than
-    # scanning source text line-by-line, so it does not false-positive on a
-    # call whose rationale string is on a different physical line than the
-    # opening paren (the old `lint_checks.spl` text scanner did — see
-    # doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md
-    # WP-7). The old text reimplementation (lint_checks.spl
-    # `check_required_comment_source` + helpers) has been deleted, so this
-    # loop is the single source of REQC001-004 diagnostics.
-    if required_comment_source_may_match(content):
-        for warning in check_required_comment(decls):
+    if run_arg_count:
+        for warning in check_argument_count(decls):
+            val base_level = if warning.code == "ARG002": LintLevel.Deny else: LintLevel.Warn
             val policy = lint_policy_decision(
-                config, warning.code, LintLevel.Warn, LintEvidenceTier.ParsedStructural)
+                config, warning.code, base_level, LintEvidenceTier.ParsedStructural)
+            if not policy.keep: continue
+            # This producer is the AST compatibility fallback. A deny policy is
+            # reserved for typed, high-confidence evidence; never turn unresolved
+            # receiver/effect/alias facts into a build error.
+            val level = if policy.level == LintLevel.Deny: LintLevel.Warn else: policy.level
+            val lint = LintDiag.new(warning.code, level, LintCategory.Style, warning.message)
+                .with_fix(warning.hint)
+            results.push(LintRunResult.new(path, warning.line, 0, lint))
+    if run_coll:
+        for warning in check_collection_patterns(decls):
+            # This is the AST compatibility fallback.  Robust/critical deny policy
+            # is reserved for typed, high-confidence evidence; unresolved receiver,
+            # effect, alias, and mutation facts must never become a build error.
+            val base_level = LintLevel.Warn
+            val policy = lint_policy_decision(
+                config, warning.code, base_level, LintEvidenceTier.SourcePattern)
+            if not policy.keep: continue
+            val level = policy.level
+            val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
+                .with_fix(warning.hint)
+                .with_evidence(["item=" + warning.item_name, "source_severity=" + warning.severity])
+                .with_uncertainty("source-pattern fallback; receiver type, effects, aliasing, and mutation version are unresolved")
+                .with_evidence_tier(LintEvidenceTier.SourcePattern)
+            val hit = lint_source_collection_fix_line(source_locations, warning.code)
+            var coll_line = lint_source_function_line(source_locations, warning.item_name)
+            if hit >= 0:
+                coll_line = hit + 1
+            results.push(LintRunResult.new(path, coll_line, 0, lint))
+    if run_stub:
+        for warning in check_stub_impl(decls, stub_profile_name):
+            if warning.code != "STUB001" and warning.code != "STUB002":
+                continue
+            val base_level = if warning.code == "STUB001": LintLevel.Warn else: LintLevel.Allow
+            val policy = lint_policy_decision(
+                config, warning.code, base_level, LintEvidenceTier.ParsedStructural)
             if not policy.keep: continue
             val level = policy.level
             val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
                 .with_fix(warning.hint)
             results.push(LintRunResult.new(path, warning.line, 0, lint))
-    # W0406 already comes from the text EasyFix owner. Add only the parsed
-    # export sibling here so wildcard imports are not reported twice.
-    for warning in check_star_export_file(decls, path):
-        val policy = lint_policy_decision(
-            config, warning.code, LintLevel.Warn, LintEvidenceTier.ParsedStructural)
-        if not policy.keep: continue
-        val level = policy.level
-        val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
-        results.push(LintRunResult.new(
-            path, lint_source_export_star_line(source_locations, warning.module_path), 0, lint))
-    for warning in check_wide_public_file(decls, path):
-        val policy = lint_policy_decision(
-            config, warning.code, LintLevel.Warn, LintEvidenceTier.ParsedStructural)
-        if not policy.keep: continue
-        val level = policy.level
-        val message = "{warning.message} ({warning.export_count} symbols, threshold {warning.threshold})"
-        val lint = LintDiag.new(warning.code, level, LintCategory.Warning, message)
-        results.push(LintRunResult.new(path, warning.line, 0, lint))
-    # OPTME001 — a `me` (mutating) method called through a `T?` receiver
-    # silently discards the write. Single-file index: this path only resolves
-    # classes declared in the SAME file. The cross-file census (most real sites
-    # call a backend class declared elsewhere) is
-    # `src/app/optme_lint/optme_scan.spl`, which calls the same rule function
-    # with a repo-wide index. See doc/08_tracking/bug/
-    # me_method_mutation_through_optional_binding_discarded_2026-08-04.md.
-    for warning in option_me_warnings:
-        val policy = lint_policy_decision(
-            config, warning.code, LintLevel.Warn, LintEvidenceTier.SourcePattern)
-        if not policy.keep: continue
-        val level = policy.level
-        val message = "{warning.message} — {warning.hint}"
-        val lint = LintDiag.new(warning.code, level, LintCategory.Correctness, message)
-        results.push(LintRunResult.new(path, warning.line_num, 0, lint))
+    if run_reqc and required_comment_source_may_match(content):
+        for warning in check_required_comment(decls):
+            val policy = lint_policy_decision(
+                config, warning.code, LintLevel.Warn, LintEvidenceTier.ParsedStructural)
+            if not policy.keep: continue
+            val level = policy.level
+            var req_line = warning.line
+            var req_message = warning.message
+            if req_line <= 0:
+                req_line = lint_source_req_comment_line(
+                    source_locations, content.split("\n"), warning.code, warning.site_name)
+                req_message = "{warning.message} in `{warning.site_name}`"
+            val lint = LintDiag.new(warning.code, level, LintCategory.Warning, req_message)
+                .with_fix(warning.hint)
+            results.push(LintRunResult.new(path, req_line, 0, lint))
+    if run_vis:
+        for warning in check_star_export_file(decls, path):
+            val policy = lint_policy_decision(
+                config, warning.code, LintLevel.Warn, LintEvidenceTier.ParsedStructural)
+            if not policy.keep: continue
+            val level = policy.level
+            val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
+            results.push(LintRunResult.new(
+                path, lint_source_export_star_line(source_locations, warning.module_path), 0, lint))
+        for warning in check_wide_public_file(decls, path):
+            val policy = lint_policy_decision(
+                config, warning.code, LintLevel.Warn, LintEvidenceTier.ParsedStructural)
+            if not policy.keep: continue
+            val level = policy.level
+            val message = "{warning.message} ({warning.export_count} symbols, threshold {warning.threshold})"
+            val lint = LintDiag.new(warning.code, level, LintCategory.Warning, message)
+            results.push(LintRunResult.new(path, warning.line, 0, lint))
+    if run_sem_api:
+        results = _append_semantic_api_results(config, path, content, decls, results)
+    if run_opt_me:
+        for warning in option_me_warnings:
+            val policy = lint_policy_decision(
+                config, warning.code, LintLevel.Warn, LintEvidenceTier.SourcePattern)
+            if not policy.keep: continue
+            val level = policy.level
+            val message = "{warning.message} — {warning.hint}"
+            val lint = LintDiag.new(warning.code, level, LintCategory.Correctness, message)
+            results.push(LintRunResult.new(path, warning.line_num, 0, lint))
     linter.release_combined_lint_view()
     results
 
@@ -447,6 +609,36 @@ fn lint_source_collection_fix_line(index: LintSourceLocationIndex, code: text) -
 fn lint_source_export_star_line(index: LintSourceLocationIndex, module_path: text) -> i64:
     index.export_star_lines[module_path] ?? 1
 
+# Textual last-resort locator for REQC00x warnings whose AST span pool was
+# empty: anchor on the enclosing function declaration line, then scan forward
+# for the construct the code flags. Returns 0 when nothing matches (the
+# diagnostic then keeps the function name the message carries).
+fn lint_source_req_comment_line(
+    index: LintSourceLocationIndex, lines: [text], code: text, site_name: text
+) -> i64:
+    val fn_line = lint_source_function_line(index, site_name)
+    if fn_line <= 0:
+        return 0
+    if code == "REQC002":
+        # The dangerous-keyword name lives only in the AST message; a bare
+        # textual call scan is too fuzzy. The function line is the honest
+        # fallback and the message names the function.
+        return fn_line
+    var i = fn_line - 1
+    while i < lines.len():
+        val t = lines[i].trim()
+        if code == "REQC004":
+            if t.starts_with("case _"):
+                return i + 1
+        elif code == "REQC003":
+            if t.contains("todo("):
+                return i + 1
+        else:
+            if t.starts_with("pass_todo") or t.starts_with("pass_do_nothing") or t.starts_with("pass_dn"):
+                return i + 1
+        i = i + 1
+    0
+
 # ---------------------------------------------------------------------------
 # Source-location recovery for collection-efficiency lints (COLL0xx).
 #
@@ -473,7 +665,7 @@ fn collection_split_assign(line: text) -> (text, text):
     if eq <= 0:
         return ("", "")
     val lhs = line.slice(0, eq).trim()
-    val rhs = line.slice(eq + 3, line.len()).trim()
+    val rhs = line.slice(eq + 3, line.byte_len()).trim()
     if lhs == "" or lhs.contains(" ") or lhs.contains("(") or lhs.contains("["):
         return ("", "")
     (lhs, rhs)
@@ -529,15 +721,15 @@ fn lint_evidence_json(evidence: [text]) -> text:
 fn lint_uncertainty_json(uncertainty: text?) -> text:
     match uncertainty:
         case Some(reason): "\"" + escape_json(reason) + "\""
-        case nil: "null"
+        case None: "null"
 
-fn lint_main() -> Int:
+fn lint_main() -> i64:
     val args = get_args()
     val json_output = args.contains("--json")
 
     if args.len() < 2:
         if json_output:
-            print("{\"type\":\"lint-error\",\"message\":\"no input files\"}")
+            print("{{\"type\":\"lint-error\",\"message\":\"no input files\"}")
             return 2
         print("Usage: simple_lint <file.spl> [options]")
         print("")
@@ -566,7 +758,7 @@ fn lint_main() -> Int:
     # Verify file exists
     if not file_exists(file_path):
         if json_output:
-            print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"file not found\"}")
+            print("{{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"file not found\"}")
         else:
             error("lint", "File not found: " + file_path)
         return 1
@@ -584,7 +776,7 @@ fn lint_main() -> Int:
 # `simple_lint` entry above and the `simple lint` CLI wrapper
 # (app.io.cli_lint_commands.run_lint_command). Returns 0 when the file is
 # clean (or only warnings, unless --deny-all is set), 1 otherwise.
-fn run_lint_file(file_path: String, args: [text]) -> Int:
+pub fn run_lint_file(file_path: String, args: [text]) -> i64:
     # The target-scoped command path resolves its manifest below. Do not first
     # discover/read/parse an unrelated cwd manifest only to overwrite it.
     var linter = Linter.new(false)
@@ -594,28 +786,28 @@ fn run_lint_file(file_path: String, args: [text]) -> Int:
 # immutable rule descriptors and bounded parsed-project cache are reused.
 fn run_lint_file_with_linter(
     linter: Linter, file_path: String, args: [text]
-) -> Int:
+) -> i64:
     _run_lint_with_linter_source(
-        linter, file_path, LintCliPolicy.from_args(args), nil)
+        linter, file_path, LintCliPolicy.from_args(args), None)
 
 # Source-owned command entrypoint. Batch callers that already validated and
 # loaded the file use this to share the exact payload with sibling analyses.
 fn run_lint_source_with_linter(
     linter: Linter, file_path: String, args: [text], content: String
-) -> Int:
+) -> i64:
     _run_lint_with_linter_source(
         linter, file_path, LintCliPolicy.from_args(args), Some(content))
 
 # Command-scoped entrypoint: the caller parses invariant CLI policy once and
 # reuses it for every source. Positional targets never enter the file hot path.
-fn run_lint_source_with_linter_policy(
+pub fn run_lint_source_with_linter_policy(
     linter: Linter, file_path: String, policy: LintCliPolicy, content: String
-) -> Int:
+) -> i64:
     _run_lint_with_linter_source(linter, file_path, policy, Some(content))
 
 fn _run_lint_with_linter_source(
     linter: Linter, file_path: String, policy: LintCliPolicy, content: String?
-) -> Int:
+) -> i64:
     linter.last_diagnostic_count = 0
     linter.last_error_count = 0
     linter.last_warning_count = 0
@@ -646,14 +838,14 @@ fn _run_lint_with_linter_source(
     linter.prepared_config_path = file_path
     if linter.config.error != "":
         if json_output:
-            print("{\"type\":\"lint-error\",\"message\":\"{escape_json(linter.config.error)}\"}")
+            print("{{\"type\":\"lint-error\",\"message\":\"{escape_json(linter.config.error)}\"}")
         else:
             error("lint", linter.config.error)
         return 2
 
     if policy.error != "":
         if json_output:
-            print("{\"type\":\"lint-error\",\"message\":\"{escape_json(policy.error)}\"}")
+            print("{{\"type\":\"lint-error\",\"message\":\"{escape_json(policy.error)}\"}")
         else:
             error("lint", policy.error)
         return 2
@@ -664,7 +856,7 @@ fn _run_lint_with_linter_source(
     # A file-header @profile() may still override this (most-local-wins).
     match policy.profile:
         case Some(profile): linter.config.set_profile(profile)
-        case nil: pass_do_nothing
+        case None: pass_do_nothing
 
     # Mission-critical EXCEPTION: a file the project lists under
     # `lints: mc_exceptions:` is not held to the critical tier yet. It is
@@ -676,10 +868,10 @@ fn _run_lint_with_linter_source(
     if mc_reason != "":
         val at_critical = match linter.config.profile:
             case Some(p): p == LintProfile.Critical
-            case nil: false
+            case None: false
         if at_critical:
             if json_output:
-                print("{\"type\":\"lint-mc-exception\",\"file\":\"{escape_json(file_path)}\",\"reason\":\"{escape_json(mc_reason)}\"}")
+                print("{{\"type\":\"lint-mc-exception\",\"file\":\"{escape_json(file_path)}\",\"reason\":\"{escape_json(mc_reason)}\"}")
             else:
                 info("lint", mc_exception_report_line(file_path, mc_reason))
             linter.config.set_profile(LintProfile.Strict)
@@ -704,14 +896,30 @@ fn _run_lint_with_linter_source(
                 case _:
                     val _ = 0
 
-    var analyzed_source: String? = nil
+    # NormalBuild (`--fast`) ceiling MUST run AFTER CLI escalation flags so
+    # `--warn-all`, `--wm-lane`, and `--gpu-2d-perf` never promote Medium/High
+    # rules back above the Low cost ceiling.
+    if policy.fast:
+        lint_apply_fast_profile(linter.config)
+    if policy.diagnostic != "":
+        lint_apply_diagnostic_profile(linter.config, policy.diagnostic)
+
+    linter.semantic_markdown_sources = []
+    if file_path.ends_with(".md"):
+        match semantic_markdown_lint_sources_v1(policy.semantic_options):
+            case Ok(sources): linter.semantic_markdown_sources = sources
+            case Err(failure):
+                val _ = lint_fix_refused(file_path, failure.message, json_output)
+                return 1
+
+    var analyzed_source: String? = None
     var lint_result = LintFileResult.LintFileErr("Failed to read file: {file_path}")
     match content:
         case Some(source):
             analyzed_source = Some(source)
             lint_result = LintFileResult.LintFileOk(
                 lint_cli_source(linter, file_path, source))
-        case nil:
+        case None:
             match lint_read_file(file_path):
                 case LintReadFileResult.ReadFileErr(error):
                     lint_result = LintFileResult.LintFileErr(error)
@@ -723,7 +931,7 @@ fn _run_lint_with_linter_source(
         case LintFileResult.LintFileOk(results):
             if results.is_empty():
                 if json_output:
-                    print("{\"type\":\"lint-file-summary\",\"file\":\"{escape_json(file_path)}\",\"errors\":0,\"warnings\":0,\"fixes\":0}")
+                    print("{{\"type\":\"lint-file-summary\",\"file\":\"{escape_json(file_path)}\",\"errors\":0,\"warnings\":0,\"fixes\":0}")
                 else:
                     info("lint", "No issues found in " + file_path)
                 return 0
@@ -732,11 +940,24 @@ fn _run_lint_with_linter_source(
                 var warning_count = 0
                 var fix_count = 0
                 var not_linted = false
+                # Several producers can flag the same site (AST pass plus
+                # per-importing-module relays), which re-emitted one warning
+                # multiple times per run. Emit each (file, line, code) once,
+                # attributed to the owning file, in both human and JSON modes.
+                var emitted_keys: {text: bool} = {}
 
                 for lint_item in results:
                     if lint_item.lint.code == "PARSE001":
                         not_linted = true
-                    val effective_item = lint_run_result_apply_cli_policy(lint_item, deny_all)
+                    val effective_item = lint_run_result_drop_noop_fix(
+                        lint_run_result_apply_cli_policy(lint_item, deny_all),
+                        analyzed_source ?? "")
+                    # The message is part of the key: two distinct sites on one
+                    # line (e.g. a bool param and a bool return) are two findings.
+                    val diag_key = "{effective_item.file_path}|{effective_item.line}|{effective_item.lint.code}|{effective_item.lint.message}"
+                    if emitted_keys.contains_key(diag_key):
+                        continue
+                    emitted_keys[diag_key] = true
                     if json_output:
                         var level_text = "allow"
                         match effective_item.lint.level:
@@ -746,7 +967,7 @@ fn _run_lint_with_linter_source(
                         val evidence_json = lint_evidence_json(effective_item.lint.evidence)
                         val uncertainty_json = lint_uncertainty_json(effective_item.lint.uncertainty)
                         val confidence = lint_evidence_tier_name(effective_item.lint.evidence_tier)
-                        print("{\"type\":\"lint-diagnostic\",\"file\":\"{escape_json(effective_item.file_path)}\",\"line\":{effective_item.line},\"column\":{effective_item.column},\"level\":\"{level_text}\",\"code\":\"{escape_json(effective_item.lint.code)}\",\"message\":\"{escape_json(effective_item.lint.message)}\",\"confidence\":\"{confidence}\",\"evidence\":{evidence_json},\"uncertainty\":{uncertainty_json}}")
+                        print("{{\"type\":\"lint-diagnostic\",\"file\":\"{escape_json(effective_item.file_path)}\",\"line\":{effective_item.line},\"column\":{effective_item.column},\"level\":\"{level_text}\",\"code\":\"{escape_json(effective_item.lint.code)}\",\"message\":\"{escape_json(effective_item.lint.message)}\",\"confidence\":\"{confidence}\",\"evidence\":{evidence_json},\"uncertainty\":{uncertainty_json}}")
                     else:
                         print(effective_item.format())
 
@@ -761,7 +982,7 @@ fn _run_lint_with_linter_source(
                     if effective_item.has_easy_fix():
                         fix_count = fix_count + 1
 
-                # Render the flag as text rather than interpolating the Bool:
+                # Render the flag as text rather than interpolating the bool:
                 # to_text on an erased Any bool is corrupt (true -> "nil"), which
                 # would emit invalid JSON. See
                 # .claude/memory reference_to_to_text_on_erased_any_bool_corrupt.
@@ -772,13 +993,33 @@ fn _run_lint_with_linter_source(
                 linter.last_not_analyzed = not_linted
                 if json_output:
                     if not_linted:
-                        print("{\"type\":\"lint-not-linted\",\"file\":\"{escape_json(file_path)}\",\"reason\":\"parse failure\"}")
-                    print("{\"type\":\"lint-file-summary\",\"file\":\"{escape_json(file_path)}\",\"errors\":{error_count},\"warnings\":{warning_count},\"fixes\":{fix_count},\"not_linted\":{not_linted_json}}")
+                        print("{{\"type\":\"lint-not-linted\",\"file\":\"{escape_json(file_path)}\",\"reason\":\"parse failure\"}")
+                    print("{{\"type\":\"lint-file-summary\",\"file\":\"{escape_json(file_path)}\",\"errors\":{error_count},\"warnings\":{warning_count},\"fixes\":{fix_count},\"not_linted\":{not_linted_json}}")
                 else:
                     print("")
                     if not_linted:
                         print("NOT LINTED: {file_path} - source did not parse, so no AST-based lint ran on it")
                     print("Found {error_count} error(s), {warning_count} warning(s), {fix_count} auto-fix(es) available")
+
+                # Semantic edits retain their revision-authenticated owner plan.
+                if file_path.ends_with(".md") and (fix_mode or fix_all or fix_dry_run):
+                    var semantic_enabled = false
+                    for finding in results:
+                        if finding.lint.code == "W-DOC-AST-001" and finding.lint.level != LintLevel.Allow:
+                            semantic_enabled = true
+                    if semantic_enabled:
+                        val generic_fixes = collect_easy_fixes(results, fix_all)
+                        if not generic_fixes.is_empty():
+                            val _ = lint_fix_refused(file_path, "mixed semantic and generic fixes require separate reviewed edits; no changes applied", json_output)
+                            return 1
+                        match analyzed_source:
+                            case Some(source):
+                                match apply_semantic_markdown_lint_fix_v1(file_path, source, linter.semantic_markdown_sources, fix_dry_run):
+                                    case Ok(_): pass_do_nothing("semantic owner validated all edits")
+                                    case Err(failure):
+                                        val _ = lint_fix_refused(file_path, failure.message, json_output)
+                                        return 1
+                            case None: return 1
 
                 # Apply fixes if requested
                 if (fix_mode or fix_all or fix_dry_run) and fix_count > 0 and not not_linted:
@@ -800,16 +1041,16 @@ fn _run_lint_with_linter_source(
                 else:
                     return 0
 
-        case LintFileResult.LintFileErr(error):
+        case LintFileResult.LintFileErr(lint_file_error):
             if json_output:
-                print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"{escape_json(error)}\"}")
+                print("{{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"{escape_json(lint_file_error)}\"}")
             else:
-                error("lint", error)
+                error("lint", lint_file_error)
             return 1
 
     return 0
 
-fn collect_easy_fixes(results: [LintRunResult], include_all: Bool) -> [EasyFix]:
+fn collect_easy_fixes(results: [LintRunResult], include_all: bool) -> [EasyFix]:
     var fixes: [EasyFix] = []
     for result in results:
         if result.lint.level == LintLevel.Allow: continue
@@ -817,19 +1058,19 @@ fn collect_easy_fixes(results: [LintRunResult], include_all: Bool) -> [EasyFix]:
             case Some(fix):
                 if include_all or fix.is_safe():
                     fixes.push(fix)
-            case nil:
+            case None:
                 val _ = 0
     fixes
 
-fn lint_fix_refused(file_path: String, message: String, json_output: Bool) -> Bool:
+fn lint_fix_refused(file_path: String, message: String, json_output: bool) -> bool:
     if json_output:
-        print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"{escape_json(message)}\"}")
+        print("{{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"{escape_json(message)}\"}")
     else:
         error("lint", message)
     false
 
-fn apply_collected_fixes(file_path: String, fixes: [EasyFix], dry_run: Bool, json_output: Bool, analyzed_source: String? = nil) -> Bool:
-    if analyzed_source == nil:
+fn apply_collected_fixes(file_path: String, fixes: [EasyFix], dry_run: bool, json_output: bool, analyzed_source: String? = None) -> bool:
+    if analyzed_source.is_none():
         return lint_fix_refused(file_path, "{file_path}:1:1: missing analyzed source revision; rerun lint before applying fixes", json_output)
     val source: String = analyzed_source.unwrap()
     var sources: Dict<text, text> = {}
@@ -844,7 +1085,7 @@ fn apply_collected_fixes(file_path: String, fixes: [EasyFix], dry_run: Bool, jso
 
     if dry_run:
         if json_output:
-            print("{\"type\":\"lint-fix-summary\",\"file\":\"{escape_json(file_path)}\",\"mode\":\"dry-run\",\"fixes\":{fixes.len()}}")
+            print("{{\"type\":\"lint-fix-summary\",\"file\":\"{escape_json(file_path)}\",\"mode\":\"dry-run\",\"fixes\":{fixes.len()}}")
         else:
             print("\nDry run - would apply {fixes.len()} fix(es):")
             for fix in fixes:
@@ -854,12 +1095,12 @@ fn apply_collected_fixes(file_path: String, fixes: [EasyFix], dry_run: Bool, jso
             return lint_fix_refused(file_path, "{file_path}:1:1: source changed before fix write; rerun lint", json_output)
         if not file_atomic_write(file_path, new_source):
             if json_output:
-                print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"atomic fix write failed\"}")
+                print("{{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"atomic fix write failed\"}")
             else:
                 error("lint", "atomic fix write failed: {file_path}")
             return false
         if json_output:
-            print("{\"type\":\"lint-fix-summary\",\"file\":\"{escape_json(file_path)}\",\"mode\":\"applied\",\"fixes\":{fixes.len()}}")
+            print("{{\"type\":\"lint-fix-summary\",\"file\":\"{escape_json(file_path)}\",\"mode\":\"applied\",\"fixes\":{fixes.len()}}")
         else:
             print("\nApplied {fixes.len()} fix(es):")
             for fix in fixes:

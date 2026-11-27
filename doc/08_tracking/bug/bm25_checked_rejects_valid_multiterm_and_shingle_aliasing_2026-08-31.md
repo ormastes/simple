@@ -1,11 +1,8 @@
 # Two real defects in the landed search primitives
-## Open 2026-09-16 — needs owner triage
-
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+## Fixed 2026-11-13 — resolution and spec pins below
 
 **Date:** 2026-08-31
-**Status:** OPEN — both found during integration wiring, both worked around locally
+**Status:** fixed (code verified 2026-11-11, P3 lane ne2; spec pins landed 2026-11-13) — both defects verified non-reproducing on release/1.0.0 tip; evidence below
 **Found by:** Q2 (duplicate-check LSH wiring + real in-process search provider)
 
 ---
@@ -73,3 +70,89 @@ Neither defect was visible to the package that owned the code — both required 
 integration paths alongside primitives rather than after them; a green package
 suite proved less than it appeared to.
 
+
+
+## Verdict addendum — 2026-11-11 (P3 lane ne2)
+
+Verdict: **FIXED** — both defects verified non-reproducing on `release/1.0.0` tip.
+All runs this lane: refreshed seed (`bin/simple.exe`, build-commit `0791c2b7f4a7`),
+seed-smoke, `--mode=interpreter --no-cache`. Scratch probes live (uncommitted,
+under gitignored `build/p3ne2/`) with logs.
+
+**Defect 2 (shingle aliasing) — fixed in code.** `shingles_of_tokens` now joins
+windows with byte `0x1F` (unit separator), not an empty separator — see
+`src/lib/common/search/fingerprint.spl:63` (`joined = joined + "\u001F"`,
+byte content verified with `od -c`: `037` between the quotes). That is exactly
+this record's fix direction: a separator that cannot occur inside a token, making
+the token-sequence → shingle mapping injective. Probe results
+(`build/p3ne2/shingle_probe.spl`, 2/2 passed):
+
+- Doc example: `["ab","c"]` vs `["a","bc"]` at k=2 → **different** shingles.
+- Residual edge this lane probed: `["a b","c"]` vs `["a","b c"]` (tokens that
+  themselves contain a space) → **different** shingles (the 0x1F separator
+  disambiguates where a plain space could not).
+
+Not landed: the spec pin this record asked for — an assertion that `["ab","c"]`
+and `["a","bc"]` produce different shingles — is still absent from
+`test/01_unit/lib/common/search/fingerprint_spec.spl`. Recorded as follow-up;
+the code behavior is verified above.
+
+**Defect 1 (`invalid_parallel_arrays` on caller-built multi-term input) — not a
+defect in the entry point.** Probe (`build/p3ne2/bm25_two_field_probe.spl`, 2/2
+passed): two `Bm25FieldV1` in canonical order (`identifier` ordinal 0, `title`
+ordinal 1) sharing one identical 2-term `term_keys` array `["alpha","search"]`
+→ `bm25_fixed_v1_score_checked` **ACCEPTED** (`raw=26897`); single-field
+two-term baseline also accepted (`raw=5870`). The `invalid_parallel_arrays`
+paths in `ranking.spl:489-525` fire only for the pinned rejection shapes —
+length mismatch, non-canonical field order, differing keys — all intended and
+locked by `test/01_unit/lib/common/search/ranking_spec.spl` ("rejects array
+mismatch, noncanonical field order, and unknown weight"). The 2026-08-31 caller
+repro (`test/01_unit/app/spipe/search/dbg2_spec.spl`) no longer exists in the
+tree; `index_engine_provider.spl` retains its functional per-term summation
+workaround, which is suboptimal but not defective. The doc's own correction
+("the defect is in how that caller constructs its parallel arrays, or in a
+narrower shape the validation rejects") resolves to: valid shapes are accepted;
+no validation change warranted.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — Source-checked fresh: `shingles_of_tokens` joins windows with a raw 0x1F unit-separator byte (ne2 verified byte content with od). Missing spec pin in fingerprint_spec recorded as follow-up by ne2.
+
+## Resolution — 2026-11-13 (P3 lane work/p3-bm25-20261113)
+
+**Status: fixed.** Both follow-ups left by the ne2 addendum are closed with
+spec pins; no `src/lib` change was needed (the shingle separator fix was already
+on `release/1.0.0`).
+
+**Defect 2 — spec pin landed.** `test/01_unit/lib/common/search/fingerprint_spec.spl`
+"keeps k>1 shingles injective across token boundaries" asserts `["ab","c"]` vs
+`["a","bc"]` and `["a b","c"]` vs `["a","b c"]` at k=2 hash to different
+shingles, and that their MinHash Jaccard estimate is below `SIMILARITY_SCALE`.
+Red→green (seed `seed-fix`): with the `0x1F` separator in
+`src/lib/common/search/fingerprint.spl` temporarily reverted to `""`, the spec
+went **9/10** (the new pin fails); restored, **10/10**. Residual, stated not
+hidden: a token that itself contains byte `0x1F` can still alias; tokenizer
+output never contains that control byte, so length-prefixing (which would change
+every persisted shingle hash) is not warranted.
+
+**Defect 1 — most likely cause (consistent with the validator contract; not reproduced against the original caller, whose repro `dbg2_spec.spl` no longer exists).** `_validate_prepared_field` in
+`src/lib/common/search/ranking.spl` (~line 445) requires each field's
+`term_keys` to be **strictly ascending in UTF-8 order** — one check that proves
+canonical order and rejects duplicates — and `bm25_fixed_v1_score_checked`
+additionally requires every field to share the identical key list in canonical
+field order. A caller that passes terms in *query order* (e.g.
+`["search","alpha"]`) or with duplicates gets `invalid_parallel_arrays`; that is
+one of the narrower shapes this record's correction anticipated (alongside differing key lists, length mismatch, non-canonical field order), and it is the intended
+contract (already pinned single-field by ranking_spec "scores each distinct
+ordered term once and rejects duplicates"). No validation change.
+New pin in `test/01_unit/lib/common/search/ranking_spec.spl`: "accepts canonical
+multi-term input shared across multiple fields" — `identifier`+`title` sharing
+`["alpha","search"]` is accepted and outscores `identifier` alone; the same two
+fields with query-order keys are rejected with `invalid_parallel_arrays`.
+ranking_spec **31/31** (green before and after — no code defect to make red).
+
+Neighbouring specs green on the same seed: explain_recompute 6/6,
+index_engine 17/17, prefilter 5/5, multi 10/10.
+`index_engine_provider.spl` keeps its per-term summation via
+`bm25_fixed_v1_term_checked`; switching it to the multi-field entry point would
+require it to sort/dedupe its term keys first — optional cleanup, not a defect.

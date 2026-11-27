@@ -1,0 +1,71 @@
+# Static regression for co_compiled_duplicate_signature_dispatch_class_2026-08-31.
+# Raw SFFI wrappers must not share names with the higher-level IO/atomic APIs.
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn src(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn raw_sources() -> text:
+    src("src/lib/nogc_sync_mut/sffi/concurrent.spl")
+        + src("src/lib/nogc_sync_mut/sffi/system.spl")
+        + src("src/lib/nogc_sync_mut/sffi/system_env_core.spl")
+        + src("src/lib/nogc_sync_mut/sffi/system_hosted_extras.spl")
+        + src("src/lib/nogc_sync_mut/sffi/coverage.spl")
+
+fn facade_sources() -> text:
+    src("src/lib/nogc_sync_mut/sffi/__init__.spl")
+        + src("src/lib/nogc_sync_mut/ffi/system.spl")
+        + src("src/lib/nogc_sync_mut/ffi/__init__.spl")
+        + src("src/lib/nogc_async_mut/sffi/system.spl")
+        + src("src/lib/nogc_async_mut/sffi/__init__.spl")
+
+fn expect_raw_name_absent(source: text, name: text):
+    assert_false(source.contains("fn " + name + "("))
+
+describe "raw SFFI and high-level duplicate signature regression":
+    it "keeps every historically conflicting bare name out of raw wrappers":
+        val source = raw_sources()
+        expect(source.len()).to_be_greater_than(0)
+        expect_raw_name_absent(source, "atomic_bool_new")
+        expect_raw_name_absent(source, "atomic_i64_new")
+        expect_raw_name_absent(source, "env_get")
+        expect_raw_name_absent(source, "env_vars")
+        expect_raw_name_absent(source, "mcdc_condition_key")
+        expect_raw_name_absent(source, "process_run_with_limits")
+        expect_raw_name_absent(source, "process_wait")
+        expect_raw_name_absent(source, "shell")
+        assert_false(source.contains(" as env_get"))
+
+    it "exposes unique names for the five raw wrappers that were live":
+        val source = raw_sources()
+        expect(source).to_contain("fn sffi_atomic_bool_new(initial: bool) -> i64:")
+        expect(source).to_contain("env_get_nilable as sffi_env_get")
+        expect(source).to_contain("fn sffi_env_vars() -> [(text, text)]:")
+        expect(source).to_contain("fn sffi_process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64) -> (text, text, i32):")
+        expect(source).to_contain("fn sffi_process_wait(pid: i64) -> i64:")
+
+    it "does not re-export the renamed wrappers under their bare names":
+        val source = facade_sources()
+        expect(source.len()).to_be_greater_than(0)
+        assert_false(source.contains(" env_get,"))
+        assert_false(source.contains(" env_vars,"))
+        assert_false(source.contains(" process_run_with_limits,"))
+        assert_false(source.contains(" process_wait,"))
+
+    it "preserves the public high-level API names":
+        val atomic = src("src/lib/nogc_sync_mut/atomic.spl")
+        val env = src("src/lib/nogc_sync_mut/io/env_ops.spl")
+        val process = src("src/lib/nogc_sync_mut/io/process_ops.spl")
+        val mcdc = src("src/lib/nogc_sync_mut/test_runner/test_runner_mcdc_report.spl")
+        expect(atomic).to_contain("fn atomic_i64_new(value: i64) -> AtomicI64:")
+        expect(atomic).to_contain("fn atomic_bool_new(value: bool) -> AtomicBool:")
+        expect(env).to_contain("fn env_get(key: text) -> text:")
+        expect(env).to_contain("fn env_vars() -> [(text, text)]?:")
+        expect(process).to_contain("pub fn process_run_with_limits(")
+        expect(process).to_contain("pub fn shell(command: text) -> ProcessResult:")
+        expect(process).to_contain("fn process_wait(pid: i64, timeout_ms: i64) -> i64:")
+        expect(mcdc).to_contain("fn mcdc_condition_key(row: McdcConditionResult) -> text:")

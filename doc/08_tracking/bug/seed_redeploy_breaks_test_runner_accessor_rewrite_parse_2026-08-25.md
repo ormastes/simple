@@ -4,7 +4,11 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN (observed; owner = the session that redeployed). **Binary:** `bin/release/x86_64-unknown-linux-gnu/simple`, 60,641,352 bytes, mtime 2026-08-25 05:16:29.
+**Status:** STALE 2026-11-11 — not reproducible on current tip; the fix described
+below is landed in the seed source and the current seed binary handles every
+form. See the dated addendum at the end of this file.
+
+**Binary (at filing):** `bin/release/x86_64-unknown-linux-gnu/simple`, 60,641,352 bytes, mtime 2026-08-25 05:16:29.
 
 ## Symptom
 Every `bin/simple test <spec|md>` — including the trivial fixture `test/fixtures/doctest/green.md`
@@ -149,3 +153,26 @@ should rebase onto these hunks rather than re-deploying its own build.
 - `test/01_unit/compiler/parser/unsafe_identifier_block_header_spec.spl` —
   Simple-level behavioural regression exercising the same headers.
 
+
+---
+
+## Addendum 2026-11-11 — lane runner7: STALE (not reproducible on current tip)
+
+Verified on the refreshed Windows seed (`bin/simple.exe`, worktree-local tracked
+binary at HEAD `68ab3383080f`, 2026-11-11) — i.e. the defect no longer exists on
+the current release tip:
+
+1. The doc's 6-line minimal repro (`for existing in unsafe:` /
+   `if unsafe.len() > 0:` with a local named `unsafe`) now parses and runs:
+   `bin/simple.exe run` prints `a` / `done`, rc=0
+   (probe: `build/p3-runner7-probes/unsafe_header_repro.spl`).
+2. The behavioural regression spec the fix added passes on the current seed:
+   `bin/simple.exe test test/01_unit/compiler/parser/unsafe_identifier_block_header_spec.spl --mode=interpreter --no-cache`
+   -> `SPEC FILE VERDICT ... outcome=OK declared>=4 executed=4 passed=4 failed=0`.
+3. The fixed parser source is landed: the expression-position arm at
+   `src/compiler_rust/parser/src/expressions/primary/mod.rs:201` gates on
+   `unsafe_block_header_is_valid()` alone (no bare-`:` disjunct), matching the
+   "Fix" section of this doc.
+
+Conclusion: the 2026-08-25 redeploy regression was repaired in the seed; every
+`unsafe`/`danger` header form named here works on the current binary.

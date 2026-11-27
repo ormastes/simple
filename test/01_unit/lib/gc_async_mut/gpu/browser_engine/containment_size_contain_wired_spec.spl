@@ -1,0 +1,99 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Proves `contain: size` is honoured by the REAL sizing pass
+# (simple_web_html_layout_renderer_layout_engine.spl's `layout_with_style`
+# block-path height finalisation), not merely parsed as a token.
+#
+# Bug: browser_engine_css_contain_size_unimplemented_2026-08-08.
+# Per CSS Contain L2, a box with `contain: size` sizes independently of its
+# contents: an explicit height still wins; otherwise the fallback is
+# `contain-intrinsic-size` (content-box), and without either the box
+# collapses to its own padding+border. Children may still paint (clipped by
+# other mechanisms), but the box's own height must not depend on them.
+#
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_style.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/containment.spl
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir}
+use common.ui.draw_ir.{DrawIrCommand}
+
+fn _cmd(commands: [DrawIrCommand], component_id: text) -> DrawIrCommand:
+    var idx = 0
+    while idx < commands.len():
+        if commands[idx].component_id == component_id:
+            return commands[idx]
+        idx = idx + 1
+    commands[0]
+
+describe "contain: size wired into the block sizing pass":
+    it "sizes the box from contain-intrinsic-size, independent of a taller child":
+        step("Render a contain:size box with contain-intrinsic-size:20px 5px and a 40px-tall child")
+        val html = (
+            "<html><head><style>" +
+            "html{margin:0;padding:0}body{margin:0;padding:0;background:#ffffff}" +
+            "#s{display:block;width:20px;contain:size;contain-intrinsic-size:20px 5px}" +
+            "#s #inner{display:block;width:10px;height:40px;background:#123456}" +
+            "</style></head><body><div id='s'><div id='inner'></div></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val s = _cmd(composition.batches[0].commands, "s")
+
+        step("Assert the box's own height is the intrinsic 5px, not the child's 40px")
+        expect(s.height).to_equal(5)
+        expect(s.width).to_equal(20)
+
+    it "lets an explicit height win over contain-intrinsic-size":
+        step("Render the same shape but with an explicit height:8px on the contain:size box")
+        val html = (
+            "<html><head><style>" +
+            "html{margin:0;padding:0}body{margin:0;padding:0;background:#ffffff}" +
+            "#s{display:block;width:20px;height:8px;contain:size;contain-intrinsic-size:20px 5px}" +
+            "#s #inner{display:block;width:10px;height:40px;background:#123456}" +
+            "</style></head><body><div id='s'><div id='inner'></div></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val s = _cmd(composition.batches[0].commands, "s")
+
+        step("Assert the explicit height won, exactly like a normal block")
+        expect(s.height).to_equal(8)
+
+    it "collapses to zero content height without contain-intrinsic-size":
+        step("Render a contain:size box with padding but no intrinsic size and a 40px-tall child")
+        val html = (
+            "<html><head><style>" +
+            "html{margin:0;padding:0}body{margin:0;padding:0;background:#ffffff}" +
+            "#s{display:block;width:20px;contain:size;padding-top:2px}" +
+            "#s #inner{display:block;width:10px;height:40px;background:#123456}" +
+            "</style></head><body><div id='s'><div id='inner'></div></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val s = _cmd(composition.batches[0].commands, "s")
+
+        step("Assert the box's own height is just its padding (2px), not the child's 40px")
+        expect(s.height).to_equal(2)
+
+    it "advances following siblings by the intrinsic height, not the content height":
+        step("Render a contain:size box between two plain siblings")
+        val html = (
+            "<html><head><style>" +
+            "html{margin:0;padding:0}body{margin:0;padding:0;background:#ffffff}" +
+            "#a{display:block;width:20px;height:10px;background:#111111}" +
+            "#s{display:block;width:20px;contain:size;contain-intrinsic-size:20px 5px}" +
+            "#s #inner{display:block;width:10px;height:40px;background:#123456}" +
+            "#c{display:block;width:20px;height:10px;background:#333333}" +
+            "</style></head><body><div id='a'></div><div id='s'><div id='inner'></div></div><div id='c'></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val commands = composition.batches[0].commands
+        val a = _cmd(commands, "a")
+        val c = _cmd(commands, "c")
+
+        step("Assert the last sibling sits right after the contained box's 5px, proving flow advanced by the intrinsic height")
+        expect(c.y).to_equal(a.y + a.height + 5)

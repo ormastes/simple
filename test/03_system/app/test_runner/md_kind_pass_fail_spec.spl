@@ -1,0 +1,125 @@
+# @req REQ-TESTRUNNER-MD-KIND
+# @cover src/lib/nogc_sync_mut/test_runner/sdoctest/runner.spl 10%
+"""
+# Test runner md kind: green is PASS, red is FAIL
+
+**Feature IDs:** #test-runner-md-kind
+**Category:** Tooling
+
+## Overview
+
+An author writes a tiny Markdown file with one ```simple fence and runs it with
+`simple test --no-session-daemon <file>.md`. A fence that runs cleanly is
+reported PASS with exit 0. A fence that fails is reported FAIL with exit 1 and
+the failure names the fence's line in the Markdown file.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY")
+    if b != "":
+        return b
+    "bin/simple"
+
+fn fixture_dir(name: text) -> text:
+    val dir = "build/md_kind/pass_fail_" + name
+    process_run_bounded("rm", ["-rf", dir], 10000, 65536)
+    process_run_bounded("mkdir", ["-p", dir], 10000, 65536)
+    dir
+
+fn write_md(name: text, lines: [text]) -> text:
+    val path = fixture_dir(name) + "/doc.md"
+    file_write(path, lines.join("\n") + "\n")
+    path
+
+fn run_md(md: text) -> (text, i64):
+    val (out, err, code) = process_run_bounded(real_binary(), ["test", "--no-session-daemon", md], 300000, 4194304)
+    (out + err, code)
+
+describe "simple test on a markdown file":
+    # @capture(exec)
+    it "reports a green fence as PASS with exit 0":
+        step("Write a markdown file with one passing fence")
+        val md = write_md("green", ["# Doc", "", "```simple", "val x = 6 * 7", "assert x == 42", "```"])
+        step("Run the md file")
+        val (report, code) = run_md(md)
+        expect(code).to_equal(0)
+        expect(report).to_contain("PASS")
+        expect(report).to_contain("SDoctest Results: 1 total, 1 passed, 0 failed")
+
+    # @capture(exec)
+    it "reports a red fence as FAIL with exit 1":
+        step("Write a markdown file with one failing fence")
+        val md = write_md("red", ["# Doc", "", "```simple", "val x = 6 * 7", "assert x == 43", "```"])
+        step("Run the md file")
+        val (report, code) = run_md(md)
+        expect(code).to_equal(1)
+        expect(report).to_contain("FAIL")
+        expect(report).to_contain("SDoctest Results: 1 total, 0 passed, 1 failed")
+
+    # @capture(exec)
+    it "names the markdown file in the report":
+        val md = write_md("names_file", ["```simple", "val x = 1", "```"])
+        val (report, code) = run_md(md)
+        expect(report).to_contain("doc.md")
+
+    # @capture(exec)
+    it "reports the line of the failing fence":
+        step("Write a failing fence that opens on line 5")
+        val md = write_md("fail_line", ["# Doc", "", "Some prose.", "", "```simple", "assert 1 == 2", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(1)
+        expect(report).to_contain("Line 5:")
+
+    # @capture(exec)
+    it "reports the line of the failing fence after earlier green fences":
+        val md = write_md("fail_line_second", ["```simple", "val a = 1", "```", "", "```simple", "assert 1 == 2", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(1)
+        expect(report).to_contain("Line 5:")
+        expect(report.contains("Line 1:")).to_equal(false)
+
+    # @capture(exec)
+    it "passes a fence that prints output":
+        val md = write_md("prints", ["```simple", "print \"hello\"", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(0)
+
+    # @capture(exec)
+    it "fails a fence that references an undefined name":
+        val md = write_md("undefined", ["```simple", "print nonexistent_name_zzz", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(1)
+        expect(report).to_contain("FAIL")
+
+    # @capture(exec)
+    it "fails a fence with a syntax error":
+        val md = write_md("syntax", ["```simple", "fn (:", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(1)
+
+    # @capture(exec)
+    it "passes a spl fence the same as a simple fence":
+        val md = write_md("spl_fence", ["```spl", "assert 1 == 1", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(0)
+
+    # @capture(exec)
+    it "ignores a red python fence":
+        step("Write a file whose only failing content is in a python fence")
+        val md = write_md("python_red", ["```python", "assert 1 == 2", "```", "```simple", "val a = 1", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(0)
+        expect(report).to_contain("1 total, 1 passed, 0 failed")
+
+    # @capture(exec)
+    it "does not run a simple fence quoted inside a python fence":
+        val md = write_md("nested_quote", ["```python", "```simple", "assert 1 == 2", "```", "```simple", "val a = 1", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(0)
+        expect(report).to_contain("1 total, 1 passed, 0 failed")

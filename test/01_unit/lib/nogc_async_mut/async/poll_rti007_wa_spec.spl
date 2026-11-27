@@ -1,0 +1,37 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+# Regression: phase-3 run 12 failed MIR for lib.nogc_async_mut.async.poll with
+# `E-RTI-007: callee 'enum:Poll::unwrap' ... type parameter 'T' is not bound`
+# (frozen stage2 has no enum owner binders; bug
+# doc/08_tracking/bug/rti007_any_return_rows_2026-11-01.md). #5741 removed the
+# `Poll::unwrap` method under `@workaround bug=rti007_any_return_rows_2026-11-01`;
+# the free `poll_unwrap` stays the supported spelling. This spec pins the free
+# helpers and guards that no generic enum method returning the owner binder `T`
+# comes back to `impl Poll<T>` while bootstrapping on that stage2.
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.nogc_async_mut.async.poll.{Poll, poll_unwrap, poll_is_ready}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn _poll_source() -> text:
+    val src = rt_file_read_text("src/lib/nogc_async_mut/async/poll.spl") ?? ""
+    expect(src.len() > 0).to_equal(true)
+    src
+
+describe "Poll free helpers replace the removed Poll::unwrap":
+    it "unwraps a ready value through poll_unwrap":
+        val p: Poll<i64> = Poll.Ready(42)
+        expect(poll_is_ready(p)).to_equal(true)
+        expect(poll_unwrap(p)).to_equal(42)
+
+    it "reports a pending poll as not ready":
+        val p: Poll<i64> = Poll.Pending
+        expect(poll_is_ready(p)).to_equal(false)
+
+    it "keeps Poll::unwrap absent from the impl block":
+        val src = _poll_source()
+        expect(src.contains("fn unwrap(")).to_equal(false)
+        expect(src.contains("fn poll_unwrap<T>(poll: Poll<T>) -> T:")).to_equal(true)

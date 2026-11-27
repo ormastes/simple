@@ -16,7 +16,10 @@
 #   val pixels = engine.read_pixels()
 
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_identity}
-use std.gpu.engine2d.color.{color_r, color_g, color_b, color_a, rgba}
+use std.gpu.engine2d.color.{color_r, color_g, color_b, color_a, rgba, blend}
+use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_composite_region, css_opacity_group_alpha8_milli}
+use std.gc_async_mut.gpu.engine2d.backend_emu_adv.{emu_draw_shadow_rect_outside}
+use std.gc_async_mut.gpu.engine2d.helpers.lcd_s32_tables.{engine2d_lcd_s32_tables}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_text_bg,
     emu_draw_ellipse, emu_draw_ellipse_filled,
@@ -24,7 +27,8 @@ use std.gpu.engine2d.backend_emu.{
     emu_draw_polygon_filled, emu_draw_polyline,
     emu_draw_rect_thick, emu_draw_circle_thick, emu_draw_rounded_rect_outline,
     emu_draw_gradient_rect_h, emu_draw_radial_gradient,
-    emu_draw_linear_gradient_stops, emu_draw_radial_gradient_stops,
+    emu_draw_linear_gradient_stops, emu_draw_radial_gradient_stops, radial_gradient_pixels,
+    linear_gradient_pixels, radial_gradient_device_tables, linear_gradient_device_tables,
     emu_draw_rect_blend, emu_draw_image_blend,
     emu_draw_image_scaled, emu_draw_image_scaled_blend,
     emu_draw_triangle_outline,
@@ -36,6 +40,7 @@ use std.gpu.engine2d.backend_baremetal.{BaremetalBackend}
 use std.gpu.engine2d.backend_virtio_gpu.{VirtioGpuBackend}
 use std.gpu.engine2d.backend_cpu.{CpuBackend}
 use std.gpu.engine2d.backend_cuda.{CudaBackend}
+use std.gc_async_mut.gpu.engine2d.backend_cuda_ext
 use std.gpu.engine2d.backend_cuda_font_ptx.{FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256, FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_CUDA_SEMANTICS_VERSION, cuda_font_atlas_composite_ptx, cuda_font_atlas_composite_ptx_trusted}
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CUDA_FONT_PTX_MAX_BYTES}
 use std.gpu.engine2d.backend_vulkan.{VulkanBackend, VulkanFrameReceipt, vulkan_submitted_framebuffer_handle, vulkan_submitted_device_identity, vulkan_submitted_generation, vulkan_accepted_compute_submits, vulkan_framebuffer_ownership_handle, vulkan_cancel_submitted_present_source}
@@ -44,6 +49,7 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{vulkan_rect_upload_las
     vulkan_image_pack_counts, vulkan_image_pack_counts_reset}
 use std.gpu.engine2d.backend_vulkan_font
 use std.gpu.engine2d.backend_vulkan_font_types.{VulkanFontCompositeEvidence}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{vulkan_font_promote_flushed_batch}
 use std.gpu.engine2d.helpers_text.{text_aa_blit_buffer}
 use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
 use std.gpu.engine2d.backend_directx.{DirectXBackend}
@@ -64,10 +70,9 @@ use std.gpu.engine2d.wm_frame_pacing.{FramePacingCounters, make_frame_pacing_cou
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION, font_atlas_composite_program_version_valid, font_atlas_subrect_pixels}
 use std.common.crypto.sha256.{sha256_text}
 use std.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_default}
-use std.gc_async_mut.io.mod_stub.{env_get}
-use std.io_runtime.{platform_name}
+use std.gc_async_mut.gpu.engine2d_host_io.{env_get, platform_name, file_exists, file_read_bytes_result}
 use std.gc_async_mut.text_layout.font_renderer.{
-    FontCacheStats, FontGlyphRun, FontRenderBatch, FontRenderConfig, FontRenderer,
+    FontCacheStats, FontGlyphRun, FontRenderBatch, FontRenderConfig, FontRenderQuad, FontRenderer,
     FontExecutionPolicy,
     font_execution_plan, font_execution_plan_into, font_render_config_selection_supported,
     font_renderer_registered_selected_bytes_only
@@ -93,6 +98,16 @@ use std.gc_async_mut.gpu.engine2d.vulkan_context_admission.{
     VulkanDrawIrAdmission, vulkan_context_admit,
     vulkan_context_admission_without_backend
 }
+use std.common.encoding.sfnt.{OtFont, OtTable}
+use std.common.encoding.sfnt_glyf.{
+    SFNT_GLYF_MOVE, SFNT_GLYF_LINE, SFNT_GLYF_QUAD, SFNT_GLYF_CLOSE,
+    SfntGlyfCommand, SfntGlyfOutline,
+    sfnt_glyf_parse_offset_table, sfnt_glyf_find_table,
+    sfnt_glyf_read_u16_be, sfnt_glyf_read_i16_be,
+    sfnt_glyf_cmap_ids_into, sfnt_glyf_parse_outline,
+    sfnt_rasterize_glyph_baseline_aligned
+}
+use std.common.encoding.utf8.{text_codepoints}
 
 # ============================================================================
 # Config / environment backend selection
@@ -108,12 +123,18 @@ pub fn engine2d_vulkan_font_batch_admits(status: text, quad_count: i64,
     A "failed" status is never admitted, even when the fence was waited (oracle-parity or cleanup failures set status="failed" with device_executed=true). The older predicate rejected every multi-glyph packed batch and silently
     demoted vulkan font execution to cpu (gui-vulkan-window gate red,
     2026-08-31). dispatch_count must still be positive: zero dispatches means
-    nothing was recorded.
+    nothing was recorded. "promoted" is an executed batch whose oracle
+    parity and stage evidence were proven (`_vulkan_font_completion`); before
+    it was admitted, the best outcome demoted the frame to the CPU lane.
+    "clipped-out" is the one zero-dispatch success: every quad lay outside the
+    clip rect, so there was nothing to draw (`composite_font_batch`).
     """
-    (status == "executed" or status == "recorded") and
+    if status == "clipped-out":
+        return quad_count == batch_quads
+    (status == "executed" or status == "recorded" or status == "promoted") and
         quad_count == batch_quads and dispatch_count > 0
 
-fn engine2d_env_backend_override() -> text:
+pub fn engine2d_env_backend_override() -> text:
     """Config/environment override for the auto-selected 2D backend.
 
     The 2D API is one surface; which lane runs it — SIMD CPU vs a GPU backend —
@@ -127,6 +148,24 @@ fn engine2d_env_backend_override() -> text:
 fn engine2d_env_get(key: text) -> text:
     env_get(key)
 
+fn engine2d_injected_probe_fault(canon: text) -> bool:
+    """Fault-injection hook: SIMPLE_2D_PROBE_FAULT names ONE canonical backend
+    whose probe_backend answer is forced to Unavailable while every other lane
+    (and the create path) stays healthy. Empty/unset = inactive. Used by
+    test/01_unit/lib/gpu/engine2d/engine_strict_create_toctou_spec.spl to make
+    the probe-then-create TOCTOU divergence deterministic on GPU-less hosts;
+    same disclosed-test-hook precedent as the SIMPLE_VK_*_SABOTAGE knobs."""
+    val raw = engine2d_env_get("SIMPLE_2D_PROBE_FAULT") ?? ""
+    raw != "" and backend_canonical_name(raw) == canon
+
+fn engine2d_injected_create_fault(canon: text) -> bool:
+    """Fault-injection hook: SIMPLE_2D_CREATE_FAULT names ONE canonical backend
+    whose create_requested_backend is forced to fail while its probe stays
+    healthy. Empty/unset = inactive. Same disclosure contract as
+    engine2d_injected_probe_fault; see that function's doc and the TOCTOU spec."""
+    val raw = engine2d_env_get("SIMPLE_2D_CREATE_FAULT") ?? ""
+    raw != "" and backend_canonical_name(raw) == canon
+
 fn engine2d_platform_allows_hosted_gpu_probes(platform: text) -> bool:
     """Whether a runtime platform identity can use hosted GPU services.
 
@@ -137,6 +176,23 @@ fn engine2d_platform_allows_hosted_gpu_probes(platform: text) -> bool:
     """
     val canonical = platform.trim().lower()
     not canonical.contains("baremetal") and not canonical.contains("simpleos")
+
+fn engine2d_is_hosted_hardware_backend(canonical: text) -> bool:
+    if canonical == "baremetal" or canonical == "virtio_gpu":
+        return false
+    backend_is_hardware(canonical) or canonical == "directx-on-vulkan" or canonical == "metal-on-vulkan"
+
+pub fn engine2d_baremetal_hardware_refusal(backend_name: text, platform: text) -> BackendProbeResult?:
+    """Fail closed before hardware probe/create when hosted GPU probes are disallowed."""
+    val canonical = backend_canonical_name(backend_name)
+    if engine2d_platform_allows_hosted_gpu_probes(platform):
+        return None
+    if not engine2d_is_hosted_hardware_backend(canonical):
+        return None
+    Some(BackendProbeResult.unavailable(
+        canonical,
+        "Hosted GPU backend '" + canonical + "' disabled on baremetal/SimpleOS platform: " + platform
+    ))
 
 fn engine2d_hosted_backend_probes_available() -> bool:
     engine2d_platform_allows_hosted_gpu_probes(platform_name())
@@ -150,7 +206,7 @@ fn engine2d_auto_probe_order_for_platform(platform: text) -> [text]:
 fn engine2d_auto_probe_order() -> [text]:
     engine2d_auto_probe_order_for_platform(platform_name())
 
-fn engine2d_shutdown_has_typed_route(selected_name: text) -> bool:
+pub fn engine2d_shutdown_has_typed_route(selected_name: text) -> bool:
     """True when Engine2D.shutdown() reaches the backend through a typed
     field arm; anything else falls to the duck-typed self.backend.shutdown()
     dispatch, which dies under the Cranelift JIT when the trait impl's vtable
@@ -160,7 +216,7 @@ fn engine2d_shutdown_has_typed_route(selected_name: text) -> bool:
         or selected_name == "opencl" or selected_name == "rocm"
         or selected_name == "software")
 
-fn engine2d_scale_pixel_alpha(pixels: [u32], opacity_milli: i32) -> [u32]:
+pub fn engine2d_scale_pixel_alpha(pixels: [u32], opacity_milli: i32) -> [u32]:
     """Scale every pixel's alpha channel by opacity_milli/1000 (1000 = no
     change), used by draw_engine_opacity() to fade an embedded surface before
     compositing it into a parent Engine2D."""
@@ -174,20 +230,17 @@ fn engine2d_scale_pixel_alpha(pixels: [u32], opacity_milli: i32) -> [u32]:
         i = i + 1
     out
 
-fn engine2d_composite_region_milli(src: [u32], fb: [u32], fb_width: i32, fb_height: i32,
+pub fn engine2d_composite_region_milli(src: [u32], fb: [u32], fb_width: i32, fb_height: i32,
                                    dst_x: i32, dst_y: i32, width: i32, height: i32,
                                    opacity_milli: i32) -> [u32]:
-    """Canonical opacity_milli readback composite, per channel:
-        a8  = opacity_milli * 255 / 1000            (floor)
-        out = (src*a8 + dst*(256 - a8)) >> 8        (truncate)
-    This single truncating >>8 contract is what the spec oracles pin
-    (half 500 -> 63, inactive 930 -> 117 for src=127 over dst=0); both the
-    exact-/255 blend and a milli /1000 floor land one HIGH at 930 (118), and
-    the SIMD span's rounding (+128) >>8 also lands one high. Replaces the
-    alpha-scale + draw_image_blend double-blend (see
-    doc/08_tracking/bug/engine2d_parent_sampling_embed_opacity_one_ulp_parity_2026-08-16.md)."""
-    val a8 = (opacity_milli * 255) / 1000
-    val inv8 = 256 - a8
+    """Canonical opacity_milli readback composite: each layer pixel's alpha
+    is scaled with rounding, ea = (src_alpha * opacity_milli + 500) / 1000
+    (an opaque layer at 500 gets 128 = round(0.5*255), the alpha Chrome 159
+    paints `opacity:0.5` with), then composited with color.blend (Chrome's
+    image rule). The Vulkan blit kernel (_glsl_blit, composite mode 1) runs
+    the identical integer steps. Spec oracle pair (src 126 over 0): 500 -> 63,
+    930 -> 117 (doc/08_tracking/bug/
+    engine2d_parent_sampling_embed_opacity_one_ulp_parity_2026-08-16.md)."""
     # i64 product: the i32 multiply wraps past ~46341^2 (same guard as
     # compositor.spl Layer.create). Only w*h entries are ever written here and
     # the sole caller (draw_ir_composite_readback) guarantees
@@ -206,13 +259,116 @@ fn engine2d_composite_region_milli(src: [u32], fb: [u32], fb_width: i32, fb_heig
             var d = 0u32
             if fx >= 0 and fx < fb_width and fy >= 0 and fy < fb_height:
                 d = fb[(fy * fb_width + fx).to_i64()]
-            val r = (color_r(s) * a8 + color_r(d) * inv8) >> 8
-            val g = (color_g(s) * a8 + color_g(d) * inv8) >> 8
-            val b = (color_b(s) * a8 + color_b(d) * inv8) >> 8
-            val a = (color_a(s) * a8 + color_a(d) * inv8) >> 8
-            out[idx] = rgba(r, g, b, a)
+            # The layer's own per-pixel alpha scales the group opacity: a
+            # transparent child pixel leaves the parent untouched. ece10b378c8
+            # dropped this (the replaced alpha-scale path kept it), so a
+            # full-viewport opacity layer darkened every uncovered pixel.
+            val ea = (color_a(s) * opacity_milli + 500) / 1000
+            out[idx] = blend(rgba(color_r(s), color_g(s), color_b(s), ea), d)
             col = col + 1
         row = row + 1
+    out
+
+# LCD subpixel composite of one glyph quad over the destination pixels `dst`
+# (row-major w*h, read back from the frame). Returns w*h OPAQUE pixels, or []
+# when the quad carries no LCD cell or a destination pixel is not opaque (LCD
+# coverage needs a known opaque background; Chrome itself drops to grayscale
+# there), so the caller keeps the grayscale composite.
+#
+# Blend = Skia blend_lcd16 (Chrome 159): each channel's 8-bit coverage is cut
+# to 5 bits like the LCD16 mask, upscaled 31 -> 32 (s + (s >> 4)), scaled by
+# the text alpha as (alpha + 1) >> 8, and mixed as dst + ((src - dst) * s >> 5)
+# with a flooring shift. Alpha after the upscale: rgba(0,0,0,.5) at full
+# coverage is s = 16, #7f7f7f over white as in Chrome (alpha first gave s = 17,
+# #777777).
+# Measured: black text over white gives exactly 255 - 8k per channel,
+# e.g. 0xf7 for s=1 and 0x07 for s=31.
+# True when the quad's atlas cells hold LCD coverage: a cell that is not
+# empty and not a gray cell (low 24 bits 0xFFFFFF). Without one the LCD
+# composite always returns [], so callers skip it (and its destination read).
+# A subrect outside the atlas answers true: the composite keeps its own path.
+fn engine2d_lcd_quad_has_lcd_cell(atlas_pixels: [u32], atlas_width: i32, atlas_x: i32, atlas_y: i32,
+                                  width: i32, height: i32) -> bool:
+    val atlas_w = atlas_width.to_i64()
+    if atlas_x < 0 or atlas_y < 0 or width <= 0 or height <= 0 or
+            atlas_x.to_i64() + width.to_i64() > atlas_w or
+            (atlas_y + height).to_i64() * atlas_w > atlas_pixels.len():
+        return true
+    var row = 0
+    while row < height:
+        # Index reads, not `atlas_pixels.slice(...)`: a slice of the atlas
+        # parameter raised peak RSS of 4x css-layout from 2.96 to 3.78 GB.
+        val start = (atlas_y + row).to_i64() * atlas_w + atlas_x.to_i64()
+        for i in start..(start + width.to_i64()):
+            # low 24 bits not 0 and not 0xFFFFFF, as one test: +1 maps
+            # them to 1 and 0, every other value above 1 (i64: no wrap).
+            if (((atlas_pixels[i] as i64) + 1) & 0xFFFFFF) > 1:
+                return true
+        row = row + 1
+    false
+
+fn engine2d_lcd_quad_composite(atlas_pixels: [u32], atlas_width: i32, atlas_x: i32, atlas_y: i32,
+                               width: i32, height: i32, color: u32, dst: [u32]) -> [u32]:
+    val count = width.to_i64() * height.to_i64()
+    if width <= 0 or height <= 0 or dst.len() != count:
+        return []
+    if not engine2d_lcd_quad_has_lcd_cell(atlas_pixels, atlas_width, atlas_x, atlas_y, width, height):
+        return []
+    val src_r = ((color >> 16) & 0xFFu32).to_i64()
+    val src_g = ((color >> 8) & 0xFFu32).to_i64()
+    val src_b = (color & 0xFFu32).to_i64()
+    # Coverage -> Skia s32 (0..32) per channel, preblend and text alpha folded
+    # in once per text colour, so the pixel loop is three lookups and blends.
+    val s_rgb = engine2d_lcd_s32_tables(color)
+    val atlas_w = atlas_width.to_i64()
+    val quad_w = width.to_i64()
+    # Full coverage with an opaque colour: every s32 is 32, so the blend
+    # returns the text colour exactly.
+    val solid_ok = s_rgb[255] == 32 and s_rgb[511] == 32 and s_rgb[767] == 32
+    val solid = 0xFF000000u32 | (color & 0x00FFFFFFu32)
+    var out: [u32] = [0u32; count]
+    var has_lcd = false
+    var row = 0
+    while row < height:
+        var col = 0
+        val out_row = row.to_i64() * quad_w
+        val atlas_row = (atlas_y + row).to_i64() * atlas_w + atlas_x.to_i64()
+        while col < width:
+            val i = out_row + col.to_i64()
+            val d = dst[i]
+            if ((d >> 24) & 0xFFu32) != 0xFFu32:
+                return []
+            val cell = atlas_pixels[atlas_row + col.to_i64()]
+            if cell == 0u32 or cell == 0x00FFFFFFu32:
+                # zero coverage (LCD or gray cell): every s32 is 0, so the
+                # blend returns d, which is already opaque
+                out[i] = d
+                col = col + 1
+                continue
+            if cell == 0xFFFFFFFFu32 and solid_ok:
+                out[i] = solid
+                col = col + 1
+                continue
+            val a = ((cell >> 24) & 0xFFu32).to_i64()
+            var cr = a
+            var cg = a
+            var cb = a
+            if (cell & 0x00FFFFFFu32) != 0x00FFFFFFu32:
+                has_lcd = true
+                cr = ((cell >> 16) & 0xFFu32).to_i64()
+                cg = ((cell >> 8) & 0xFFu32).to_i64()
+                cb = (cell & 0xFFu32).to_i64()
+            val dr = ((d >> 16) & 0xFFu32).to_i64()
+            val dg = ((d >> 8) & 0xFFu32).to_i64()
+            val db = (d & 0xFFu32).to_i64()
+            val r = dr + (((src_r - dr) * s_rgb[cr]) >> 5)
+            val g = dg + (((src_g - dg) * s_rgb[256 + cg]) >> 5)
+            val b = db + (((src_b - db) * s_rgb[512 + cb]) >> 5)
+            out[i] = 0xFF000000u32 | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
+            col = col + 1
+        row = row + 1
+    if not has_lcd:
+        return []
     out
 
 fn engine2d_font_atlas_subrect_pixels(atlas_pixels: [u32], atlas_width: i32, atlas_height: i32,
@@ -247,7 +403,7 @@ fn engine2d_font_atlas_subrect_pixels(atlas_pixels: [u32], atlas_width: i32, atl
 # path validates it. See doc/08_tracking/bug/ for the enum-equality compiler
 # defect this papers over -- it likely also affects hosted/GPU builds using
 # FontExecutionPolicy.Preferred/Required and should be root-caused separately.
-fn engine2d_default_font_config_for(font_size: i32, force_cpu_target: bool) -> FontRenderConfig:
+pub fn engine2d_default_font_config_for(font_size: i32, force_cpu_target: bool) -> FontRenderConfig:
     val base = FontRenderConfig.default_for_size(font_size)
     if not force_cpu_target:
         return base
@@ -255,7 +411,7 @@ fn engine2d_default_font_config_for(font_size: i32, force_cpu_target: bool) -> F
     # rebuild the config by reading all eleven fields off `base`
     # (`language: base.language`, ...). On the freestanding entry-closure lane
     # -- the ONLY lane that takes this branch, since `force_cpu_target` is
-    # `self.baremetal_backend != nil` -- that cross-struct field-read copy
+    # `self.baremetal_backend.is_some()` -- that cross-struct field-read copy
     # delivered `language="normal"` (the value of the `weight`/`style` slots)
     # while `family`/`category`/`script` copied correctly. Serial evidence:
     # `[font-select] no-candidate family='auto' category='auto'
@@ -286,11 +442,842 @@ var _vec_text_probe_count: i32 = 0
 var _vec_blit_probe_count: i32 = 0
 var _vec_entry_probe_count: i32 = 0
 var _font_batch_receipt_count: i32 = 0
+# Glyph-quad memo (Engine2D._draw_glyph_quad_memo): composited quads keyed by
+# "w:h:atlas_x:atlas_y:color:bg", each slot holding the atlas cells it was
+# made from (the validation) and the composited pixels. Cleared whole when
+# full. Every entry is a pure function of its cells and colors, so the memo is
+# shared by all engines.
+val _GLYPH_QUAD_MEMO_LIMIT: i64 = 512
+val _GLYPH_QUAD_MEMO_MAX_PIXELS: i64 = 65536
+var _glyph_quad_memo_slots: Dict<text, i64> = {}
+var _glyph_quad_memo_cells: [[u32]] = []
+var _glyph_quad_memo_pixels: [[u32]] = []
+var _glyph_quad_memo_lcd: [bool] = []
+
+# `composed` (the quad over `bg`) with every pixel whose destination is not
+# `bg` recomposed over its own destination, exactly as the composite does:
+# LCD cells through `engine2d_lcd_quad_composite`'s per-pixel rule, gray cells
+# through `_engine2d_glyph_quad_over`'s. Rows equal to `bg` are skipped by a
+# native compare. Empty when a destination pixel is translucent (the LCD
+# composite declines those; the caller falls back to the per-pixel paths).
+fn _engine2d_glyph_quad_patch(composed: [u32], cells: [u32], dst: [u32], w: i64, bg: u32,
+                              color: u32, kind_lcd: bool) -> [u32]:
+    val n = composed.len()
+    var out: [u32] = [0u32; n]
+    out.write_span(composed, 0, 0, n)
+    val bg_row: [u32] = [bg; w]
+    var row_buf: [u32] = [0u32; w]
+    val rgb = color & 0x00FFFFFFu32
+    val color_alpha = (color >> 24) & 0xFFu32
+    val src_r = ((color >> 16) & 0xFFu32).to_i64()
+    val src_g = ((color >> 8) & 0xFFu32).to_i64()
+    val src_b = (color & 0xFFu32).to_i64()
+    val s_rgb: [i64] = if kind_lcd: engine2d_lcd_s32_tables(color) else: []
+    var solid_ok = false
+    if kind_lcd:
+        solid_ok = s_rgb[255] == 32 and s_rgb[511] == 32 and s_rgb[767] == 32
+    val solid = 0xFF000000u32 | rgb
+    var row_at: i64 = 0
+    # cpu-lane-loop-ok: per-pixel work only on rows that differ from bg
+    while row_at < n:
+        row_buf.write_span(dst, 0, row_at, w)
+        if not (row_buf == bg_row):
+            var i = row_at
+            while i < row_at + w:
+                val d = dst[i]
+                if d != bg:
+                    if (d >> 24) != 0xFFu32:
+                        return []
+                    val cell = cells[i]
+                    if kind_lcd:
+                        if cell == 0u32 or cell == 0x00FFFFFFu32:
+                            out[i] = d
+                        else if cell == 0xFFFFFFFFu32 and solid_ok:
+                            out[i] = solid
+                        else:
+                            val a = ((cell >> 24) & 0xFFu32).to_i64()
+                            var cr = a
+                            var cg = a
+                            var cb = a
+                            if (cell & 0x00FFFFFFu32) != 0x00FFFFFFu32:
+                                cr = ((cell >> 16) & 0xFFu32).to_i64()
+                                cg = ((cell >> 8) & 0xFFu32).to_i64()
+                                cb = (cell & 0xFFu32).to_i64()
+                            val dr = ((d >> 16) & 0xFFu32).to_i64()
+                            val dg = ((d >> 8) & 0xFFu32).to_i64()
+                            val db = (d & 0xFFu32).to_i64()
+                            val r = dr + (((src_r - dr) * s_rgb[cr]) >> 5)
+                            val g = dg + (((src_g - dg) * s_rgb[256 + cg]) >> 5)
+                            val b = db + (((src_b - db) * s_rgb[512 + cb]) >> 5)
+                            out[i] = 0xFF000000u32 | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
+                    else:
+                        val coverage = (cell >> 24) & 0xFFu32
+                        val alpha = (coverage * color_alpha + 127u32) / 255u32
+                        out[i] = if coverage == 0u32 or alpha == 0u32: d else: blend((alpha << 24) | rgb, d)
+                i = i + 1
+        row_at = row_at + w
+    out
+
+# One gray glyph quad composited over an opaque `bg`, pixel for pixel what
+# `font_atlas_subrect_pixels` + `draw_image_blend` paint there: the source is
+# the cell coverage times the color alpha (0 -> the destination stays), then
+# `blend`. The result depends on the coverage byte alone, so it is computed
+# once per distinct coverage. The
+# per-coverage table is kept per (color, bg) across quads: exact-area gray
+# cells carry up to 255 coverage levels, and one `blend` per level per quad
+# was most of a cold quad's cost on the interpreter lane.
+var _glyph_over_tables: Dict<text, [u32]> = {}
+var _glyph_over_table_count: i64 = 0
+
+fn _engine2d_glyph_quad_over(cells: [u32], color: u32, bg: u32) -> [u32]:
+    val rgb = color & 0x00FFFFFFu32
+    val color_alpha = (color >> 24) & 0xFFu32
+    val table_key = "{color}:{bg}"
+    var table: [u32] = [0u32; 256]
+    if val Some(hit) = _glyph_over_tables.get(table_key):
+        table = hit
+    var out: [u32] = [bg; cells.len()]
+    var i: i64 = 0
+    # cpu-lane-loop-ok: one pass per quad on a memo miss; hits copy spans
+    while i < cells.len():
+        val coverage = (cells[i] >> 24) & 0xFFu32
+        if coverage != 0u32:
+            val slot = coverage.to_i64()
+            var composed = table[slot]
+            if composed == 0u32:
+                val alpha = (coverage * color_alpha + 127u32) / 255u32
+                composed = if alpha == 0u32: bg else: blend((alpha << 24) | rgb, bg)
+                table[slot] = composed
+            out[i] = composed
+        i = i + 1
+    if _glyph_over_table_count >= 64:
+        _glyph_over_tables = {}
+        _glyph_over_table_count = 0
+    if not _glyph_over_tables.contains_key(table_key):
+        _glyph_over_table_count = _glyph_over_table_count + 1
+    _glyph_over_tables[table_key] = table
+    out
+# CSS gradient layers whose pixels the HOST evaluated (radial_gradient_pixels /
+# linear_gradient_pixels) inside draw_radial_gradient_ellipse /
+# draw_linear_gradient_line. On Vulkan these stay put while
+# vulkan_device_gradient_count() rises: the device evaluated the layer.
+var _e2d_host_gradient_evals: i64 = 0
+
+# reason: process-global instrumentation counter read by specs; a plain count of host gradient evaluations
+# @allow(primitive_api)
+pub fn engine2d_host_gradient_eval_count() -> i64:
+    _e2d_host_gradient_evals
 # Memoized result of Engine2D.detect_best_backend_viable(). Empty = not yet
 # resolved this process. The deep viability probe (init + draw + present +
 # provenance readback) runs at most once per process; per-render cost is a
 # single text compare afterwards.
 var _viable_auto_backend_cache: text = ""
+
+# ============================================================================
+# Bounded 4-slot SFNT pixel-level AA text cache & 4x4 scanline rasterizer
+# ============================================================================
+
+val _E2D_SFNT_CACHE_CAP: i64 = 4
+val _E2D_TAG_HEAD: u32 = 1751474532u32
+val _E2D_TAG_HHEA: u32 = 1751672161u32
+val _E2D_TAG_HMTX: u32 = 1752003704u32
+
+class _E2dSfntSlot:
+    path: text
+    bytes: [u8]
+    font: OtFont
+    upem: i64
+    asc: i64
+    desc: i64
+    num_hm: i64
+    hmtx_off: i64
+    hmtx_len: i64
+
+pub class SfntRasterBitmap:
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    pixels: [u32]
+
+var _e2d_sfnt_cache: [_E2dSfntSlot] = []
+var _e2d_sfnt_cache_next: i64 = 0
+
+val _E2D_SFNT_RUN_CACHE_CAP: i64 = 64
+
+class _E2dSfntRunSlot:
+    hash: i64
+    text_val: text
+    color: u32
+    font_size: f64
+    font_path: text
+    use_ctm: bool
+    axis_unit_exact: bool
+    x: f64
+    baseline_y: f64
+    origin_x: f64
+    baseline_y_i: i32
+    m00: f64
+    m01: f64
+    m02: f64
+    m10: f64
+    m11: f64
+    m12: f64
+    bitmap: SfntRasterBitmap
+    image_key: i64
+
+var _e2d_sfnt_run_cache: [_E2dSfntRunSlot] = []
+var _e2d_sfnt_run_cache_next: i64 = 0
+var _e2d_sfnt_run_next_image_key: i64 = 0x53464E5400000001
+var _e2d_sfnt_last_run_key: i64 = 0
+
+fn _e2d_fnv_mix_i64(hash: i64, value: i64) -> i64:
+    ((hash ^ value) * 1099511628211)
+
+fn _e2d_sfnt_run_hash(text_val: text, color: u32, font_size: f64, font_path: text, use_ctm: bool, axis_unit_exact: bool, x: f64, baseline_y: f64, origin_x: f64, m00: f64, m01: f64, m02: f64, m10: f64, m11: f64, m12: f64) -> i64:
+    var h: i64 = 1469598103934665603
+    h = _e2d_fnv_mix_i64(h, text_val.len())
+    for ch in text_val.chars():
+        h = _e2d_fnv_mix_i64(h, ch.to_i64())
+    h = _e2d_fnv_mix_i64(h, color.to_i64())
+    h = _e2d_fnv_mix_i64(h, (font_size * 10000.0) as i64)
+    h = _e2d_fnv_mix_i64(h, font_path.len())
+    for ch in font_path.chars():
+        h = _e2d_fnv_mix_i64(h, ch.to_i64())
+    h = _e2d_fnv_mix_i64(h, if use_ctm: 1 else: 0)
+    h = _e2d_fnv_mix_i64(h, if axis_unit_exact: 1 else: 0)
+    if axis_unit_exact:
+        h = _e2d_fnv_mix_i64(h, (origin_x * 10000.0) as i64)
+    else:
+        h = _e2d_fnv_mix_i64(h, (x * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (baseline_y * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (m00 * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (m01 * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (m02 * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (m10 * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (m11 * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (m12 * 10000.0) as i64)
+    if h == 0: 1 else: h
+
+# reason: returns monotonic GPU image key for last SFNT rasterized run
+# @allow(primitive_api)
+pub fn engine2d_sfnt_last_run_image_key() -> i64:
+    _e2d_sfnt_last_run_key
+
+fn _e2d_floor_i32(v: f64) -> i32:
+    val iv = v as i64
+    val r = if (iv as f64) > v: iv - 1 else: iv
+    r as i32
+
+fn _e2d_ceil_i32(v: f64) -> i32:
+    val iv = v as i64
+    val r = if (iv as f64) < v: iv + 1 else: iv
+    r as i32
+
+fn _e2d_abs_f64(v: f64) -> f64:
+    if v < 0.0: 0.0 - v else: v
+
+pub fn engine2d_sfnt_resolve_path(font_path: text) -> text:
+    if font_path != "":
+        if file_exists(font_path):
+            return font_path
+        return ""
+    val reg_path = selected_font_asset_local_path_for_identity("NOTOSANS")
+    if reg_path != "" and file_exists(reg_path):
+        return reg_path
+    val mono_path = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
+    if file_exists(mono_path):
+        return mono_path
+    val bungee_path = "assets/fonts/google-fonts/ofl/bungee/Bungee-Regular.ttf"
+    if file_exists(bungee_path):
+        return bungee_path
+    ""
+
+fn _e2d_sfnt_load_slot(path: text) -> i64:
+    if path == "":
+        return -1
+    var ci: i64 = 0
+    while ci < _e2d_sfnt_cache.len():
+        if _e2d_sfnt_cache[ci].path == path:
+            return ci
+        ci = ci + 1
+    var blob: [u8] = []
+    match file_read_bytes_result(path):
+        Ok(b):
+            blob = b
+        Err(_):
+            return -1
+    if blob.len() < 12:
+        return -1
+    val font_opt = sfnt_glyf_parse_offset_table(blob)
+    var parsed_font = OtFont(blob: [], tables: [])
+    var has_font = false
+    match font_opt:
+        Some(f):
+            parsed_font = f
+            has_font = true
+        None:
+            return -1
+    if not has_font:
+        return -1
+    var upem: i64 = 1000
+    var asc: i64 = 800
+    var desc: i64 = -200
+    var num_hm: i64 = 0
+    var hmtx_off: i64 = -1
+    var hmtx_len: i64 = 0
+    match sfnt_glyf_find_table(parsed_font, _E2D_TAG_HEAD):
+        Some(t):
+            val toff = t.offset as i64
+            if toff + 20 <= blob.len():
+                val u = sfnt_glyf_read_u16_be(blob, toff + 18) as i64
+                if u > 0:
+                    upem = u
+        None: ()
+    match sfnt_glyf_find_table(parsed_font, _E2D_TAG_HHEA):
+        Some(t):
+            val toff = t.offset as i64
+            if toff + 36 <= blob.len():
+                asc = sfnt_glyf_read_i16_be(blob, toff + 4) as i64
+                desc = sfnt_glyf_read_i16_be(blob, toff + 6) as i64
+                num_hm = sfnt_glyf_read_u16_be(blob, toff + 34) as i64
+        None: ()
+    match sfnt_glyf_find_table(parsed_font, _E2D_TAG_HMTX):
+        Some(t):
+            hmtx_off = t.offset as i64
+            hmtx_len = t.length as i64
+        None: ()
+    val slot = _E2dSfntSlot(
+        path: path,
+        bytes: blob,
+        font: parsed_font,
+        upem: upem,
+        asc: asc,
+        desc: desc,
+        num_hm: num_hm,
+        hmtx_off: hmtx_off,
+        hmtx_len: hmtx_len
+    )
+    if _e2d_sfnt_cache.len() < _E2D_SFNT_CACHE_CAP:
+        _e2d_sfnt_cache.push(slot)
+        return _e2d_sfnt_cache.len() - 1
+    val idx = _e2d_sfnt_cache_next
+    _e2d_sfnt_cache[idx] = slot
+    _e2d_sfnt_cache_next = (_e2d_sfnt_cache_next + 1) % _E2D_SFNT_CACHE_CAP
+    idx
+
+# reason: low-level SFNT ascender metric takes f64 pixel font_size matching Engine2D draw_text_sfnt_aa
+# @allow(primitive_api)
+pub fn engine2d_sfnt_ascender_px(font_size: f64, font_path: text) -> f64:
+    val resolved = engine2d_sfnt_resolve_path(font_path)
+    val slot_idx = _e2d_sfnt_load_slot(resolved)
+    if slot_idx < 0:
+        return font_size * 0.8
+    val slot = _e2d_sfnt_cache[slot_idx]
+    (slot.asc as f64) * font_size / (slot.upem as f64)
+
+fn _e2d_sfnt_glyph_advance_fu(slot: _E2dSfntSlot, gid: i64) -> i64:
+    if slot.hmtx_off < 0 or slot.num_hm <= 0:
+        return slot.upem / 2
+    val metric_idx = if gid < 0: 0 else: if gid < slot.num_hm: gid else: slot.num_hm - 1
+    val byte_off = slot.hmtx_off + metric_idx * 4
+    if byte_off < slot.hmtx_off or byte_off + 2 > slot.hmtx_off + slot.hmtx_len or byte_off + 2 > slot.bytes.len():
+        return slot.upem / 2
+    sfnt_glyf_read_u16_be(slot.bytes, byte_off) as i64
+
+fn _e2d_sfnt_xform_x(lx: f64, ly: f64, use_ctm: bool, m00: f64, m01: f64, m02: f64) -> f64:
+    if use_ctm:
+        m00 * lx + m01 * ly + m02
+    else:
+        lx
+
+fn _e2d_sfnt_xform_y(lx: f64, ly: f64, use_ctm: bool, m10: f64, m11: f64, m12: f64) -> f64:
+    if use_ctm:
+        m10 * lx + m11 * ly + m12
+    else:
+        ly
+
+fn _e2d_sfnt_rasterize_edges_cov(ex0: [f64], ey0: [f64], ex1: [f64], ey1: [f64], gx0: i32, gy0: i32, gw: i32, gh: i32) -> [i32]:
+    val total = (gw as i64) * (gh as i64)
+    var cov: [i32] = [0i32; total]
+    if gw <= 0 or gh <= 0 or ex0.len() == 0:
+        return cov
+    val edge_count = ex0.len()
+    var row: i32 = 0
+    while row < gh:
+        val row_off = (row as i64) * (gw as i64)
+        var sub_y: i32 = 0
+        while sub_y < 4:
+            val sy_px = ((gy0 + row) as f64) + ((sub_y as f64) + 0.5) * 0.25
+            var xs: [f64] = []
+            var dirs: [i32] = []
+            var ei: i64 = 0
+            while ei < edge_count:
+                val y0 = ey0[ei]
+                val y1 = ey1[ei]
+                var dir: i32 = 0
+                if y0 <= sy_px and y1 > sy_px:
+                    dir = 1
+                elif y1 <= sy_px and y0 > sy_px:
+                    dir = -1
+                if dir != 0:
+                    val x0 = ex0[ei]
+                    val x1 = ex1[ei]
+                    val xi = x0 + (sy_px - y0) * (x1 - x0) / (y1 - y0)
+                    xs.push(xi)
+                    dirs.push(dir)
+                ei = ei + 1
+            val n_cross = xs.len()
+            if n_cross >= 2:
+                var si: i64 = 1
+                while si < n_cross:
+                    val key_x = xs[si]
+                    val key_d = dirs[si]
+                    var sj: i64 = si - 1
+                    while sj >= 0 and xs[sj] > key_x:
+                        xs[sj + 1] = xs[sj]
+                        dirs[sj + 1] = dirs[sj]
+                        sj = sj - 1
+                    xs[sj + 1] = key_x
+                    dirs[sj + 1] = key_d
+                    si = si + 1
+                var winding: i32 = 0
+                var ki: i64 = 0
+                while ki + 1 < n_cross:
+                    winding = winding + dirs[ki]
+                    if winding != 0:
+                        val span_l = xs[ki]
+                        val span_r = xs[ki + 1]
+                        if span_r > span_l:
+                            var c_start = _e2d_floor_i32(span_l) - gx0
+                            var c_end = _e2d_ceil_i32(span_r) - gx0
+                            if c_start < 0: c_start = 0
+                            if c_end > gw: c_end = gw
+                            var col = c_start
+                            while col < c_end:
+                                val cell_x0 = (gx0 + col) as f64
+                                var sub_x: i32 = 0
+                                while sub_x < 4:
+                                    val sx_px = cell_x0 + ((sub_x as f64) + 0.5) * 0.25
+                                    if sx_px >= span_l and sx_px < span_r:
+                                        val ci = row_off + (col as i64)
+                                        if cov[ci] < 16:
+                                            cov[ci] = cov[ci] + 1
+                                    sub_x = sub_x + 1
+                                col = col + 1
+                    ki = ki + 1
+            sub_y = sub_y + 1
+        row = row + 1
+    cov
+
+# reason: low-level SFNT 4x4 supersampled text rasterizer takes affine matrix/color/size scalars
+# @allow(primitive_api)
+pub fn engine2d_sfnt_rasterize_run(x: f64, baseline_y: f64, text_val: text, color: u32, font_size: f64, font_path: text, use_ctm: bool, m00: f64, m01: f64, m02: f64, m10: f64, m11: f64, m12: f64) -> SfntRasterBitmap:
+    if text_val.len() == 0 or font_size <= 0.0:
+        _e2d_sfnt_last_run_key = 0
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    if color_a(color) <= 0:
+        _e2d_sfnt_last_run_key = 0
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    val axis_unit_exact = (not use_ctm) or (m00 == 1.0 and m01 == 0.0 and m10 == 0.0 and m11 == 1.0)
+    val origin_x = if axis_unit_exact: (if use_ctm: x + m02 else: x) else: x
+    val origin_y = if axis_unit_exact: (if use_ctm: baseline_y + m12 else: baseline_y) else: baseline_y
+    val baseline_y_i = _e2d_floor_i32(origin_y + 0.5)
+    val h = _e2d_sfnt_run_hash(
+        text_val, color, font_size, font_path, use_ctm, axis_unit_exact,
+        x, baseline_y, origin_x, m00, m01, m02, m10, m11, m12
+    )
+    var ci: i64 = 0
+    val clen = _e2d_sfnt_run_cache.len()
+    while ci < clen:
+        val slot = _e2d_sfnt_run_cache[ci]
+        if (slot.hash == h and slot.axis_unit_exact == axis_unit_exact and
+            slot.color == color and slot.font_size == font_size and
+            slot.text_val == text_val and slot.font_path == font_path):
+            if axis_unit_exact:
+                if slot.origin_x == origin_x:
+                    _e2d_sfnt_last_run_key = slot.image_key
+                    if slot.bitmap.width <= 0 or slot.bitmap.height <= 0 or baseline_y_i == slot.baseline_y_i:
+                        return slot.bitmap
+                    val dy = baseline_y_i - slot.baseline_y_i
+                    return SfntRasterBitmap(
+                        x: slot.bitmap.x,
+                        y: slot.bitmap.y + dy,
+                        width: slot.bitmap.width,
+                        height: slot.bitmap.height,
+                        pixels: slot.bitmap.pixels
+                    )
+            else:
+                if (slot.use_ctm == use_ctm and slot.x == x and slot.baseline_y == baseline_y and
+                    slot.m00 == m00 and slot.m01 == m01 and slot.m02 == m02 and
+                    slot.m10 == m10 and slot.m11 == m11 and slot.m12 == m12):
+                    _e2d_sfnt_last_run_key = slot.image_key
+                    return slot.bitmap
+        ci = ci + 1
+
+    val rb = _engine2d_sfnt_rasterize_run_uncached(
+        x, baseline_y, text_val, color, font_size, font_path,
+        use_ctm, m00, m01, m02, m10, m11, m12
+    )
+    var img_key: i64 = 0
+    if rb.width > 0 and rb.height > 0:
+        img_key = _e2d_sfnt_run_next_image_key
+        _e2d_sfnt_run_next_image_key = _e2d_sfnt_run_next_image_key + 1
+        if _e2d_sfnt_run_next_image_key == 0:
+            _e2d_sfnt_run_next_image_key = 1
+    _e2d_sfnt_last_run_key = img_key
+    val new_slot = _E2dSfntRunSlot(
+        hash: h,
+        text_val: text_val,
+        color: color,
+        font_size: font_size,
+        font_path: font_path,
+        use_ctm: use_ctm,
+        axis_unit_exact: axis_unit_exact,
+        x: x,
+        baseline_y: baseline_y,
+        origin_x: origin_x,
+        baseline_y_i: baseline_y_i,
+        m00: m00,
+        m01: m01,
+        m02: m02,
+        m10: m10,
+        m11: m11,
+        m12: m12,
+        bitmap: rb,
+        image_key: img_key
+    )
+    if _e2d_sfnt_run_cache.len() < _E2D_SFNT_RUN_CACHE_CAP:
+        _e2d_sfnt_run_cache.push(new_slot)
+    else:
+        val dst = _e2d_sfnt_run_cache_next
+        _e2d_sfnt_run_cache[dst] = new_slot
+        _e2d_sfnt_run_cache_next = (_e2d_sfnt_run_cache_next + 1) % _E2D_SFNT_RUN_CACHE_CAP
+    rb
+
+fn _engine2d_sfnt_rasterize_run_uncached(x: f64, baseline_y: f64, text_val: text, color: u32, font_size: f64, font_path: text, use_ctm: bool, m00: f64, m01: f64, m02: f64, m10: f64, m11: f64, m12: f64) -> SfntRasterBitmap:
+    if text_val.len() == 0 or font_size <= 0.0:
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    val cr = color_r(color)
+    val cg = color_g(color)
+    val cb = color_b(color)
+    val ca = color_a(color)
+    if ca <= 0:
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    val resolved = engine2d_sfnt_resolve_path(font_path)
+    val slot_idx = _e2d_sfnt_load_slot(resolved)
+    if slot_idx < 0:
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    val slot = _e2d_sfnt_cache[slot_idx]
+    val scale = font_size / (slot.upem as f64)
+    val cps = text_codepoints(text_val)
+    if cps.len() == 0:
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    var gids: [i64] = [0i64; cps.len()]
+    sfnt_glyf_cmap_ids_into(slot.font, cps, gids)
+
+    val is_axis_unit = (not use_ctm) or (_e2d_abs_f64(m00 - 1.0) <= 0.0001 and _e2d_abs_f64(m01) <= 0.0001 and _e2d_abs_f64(m10) <= 0.0001 and _e2d_abs_f64(m11 - 1.0) <= 0.0001)
+    if is_axis_unit:
+        val origin_x = if use_ctm: m00 * x + m01 * baseline_y + m02 else: x
+        val origin_y = if use_ctm: m10 * x + m11 * baseline_y + m12 else: baseline_y
+        val baseline_y_i = _e2d_floor_i32(origin_y + 0.5)
+        var ag_off: [i64] = []
+        var ag_x0: [i32] = []
+        var ag_y0: [i32] = []
+        var ag_w: [i32] = []
+        var ag_h: [i32] = []
+        var ag_cov: [u8] = []
+        var has_au = false
+        var aux0: i32 = 0
+        var auy0: i32 = 0
+        var aux1: i32 = 0
+        var auy1: i32 = 0
+        var pen_x_a = origin_x
+        var ai: i64 = 0
+        while ai < cps.len():
+            val gid = gids[ai]
+            val pen_base = _e2d_floor_i32(pen_x_a)
+            val sub_x = pen_x_a - (pen_base as f64)
+            var adv_px = (_e2d_sfnt_glyph_advance_fu(slot, gid) as f64) * scale
+            if gid >= 0:
+                match sfnt_rasterize_glyph_baseline_aligned(slot.font, gid as u32, font_size, sub_x):
+                    Some(g):
+                        adv_px = g.advance_px
+                        if g.width > 0 and g.height > 0:
+                            val gx0 = pen_base + g.x0_px
+                            val gy0 = baseline_y_i + g.y0_px
+                            val gx1 = gx0 + g.width
+                            val gy1 = gy0 + g.height
+                            ag_off.push(ag_cov.len())
+                            ag_x0.push(gx0)
+                            ag_y0.push(gy0)
+                            ag_w.push(g.width)
+                            ag_h.push(g.height)
+                            var gp_i: i64 = 0
+                            while gp_i < g.pixels.len():
+                                ag_cov.push(g.pixels[gp_i])
+                                gp_i = gp_i + 1
+                            if not has_au:
+                                aux0 = gx0
+                                auy0 = gy0
+                                aux1 = gx1
+                                auy1 = gy1
+                                has_au = true
+                            else:
+                                if gx0 < aux0: aux0 = gx0
+                                if gy0 < auy0: auy0 = gy0
+                                if gx1 > aux1: aux1 = gx1
+                                if gy1 > auy1: auy1 = gy1
+                    None: ()
+            pen_x_a = pen_x_a + adv_px
+            ai = ai + 1
+        if not has_au:
+            return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+        val auw = aux1 - aux0
+        val auh = auy1 - auy0
+        if auw <= 0 or auh <= 0 or auw > 8192 or auh > 8192:
+            return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+        val autotal = (auw as i64) * (auh as i64)
+        var a_acc: [i32] = [0i32; autotal]
+        var ak: i64 = 0
+        while ak < ag_off.len():
+            val off = ag_off[ak]
+            val gx0 = ag_x0[ak]
+            val gy0 = ag_y0[ak]
+            val gw = ag_w[ak]
+            val gh = ag_h[ak]
+            var r: i32 = 0
+            while r < gh:
+                val dst_y = (gy0 - auy0 + r) as i64
+                var c: i32 = 0
+                while c < gw:
+                    val cov = ag_cov[off + (r as i64) * (gw as i64) + (c as i64)] as i32
+                    if cov > 0:
+                        val g_a = if ca == 255: cov else: (cov * ca + 127) / 255
+                        if g_a > 0:
+                            val dst_x = (gx0 - aux0 + c) as i64
+                            val dst_idx = dst_y * (auw as i64) + dst_x
+                            val prev_a = a_acc[dst_idx]
+                            var next_a = if prev_a == 0: g_a else: prev_a + ((g_a * (255 - prev_a) + 127) / 255)
+                            if next_a > 255: next_a = 255
+                            a_acc[dst_idx] = next_a
+                    c = c + 1
+                r = r + 1
+            ak = ak + 1
+        var apixels: [u32] = [0u32; autotal]
+        var api: i64 = 0
+        while api < autotal:
+            val a_val = a_acc[api]
+            if a_val > 0:
+                apixels[api] = rgba(cr, cg, cb, a_val)
+            api = api + 1
+        return SfntRasterBitmap(x: aux0, y: auy0, width: auw, height: auh, pixels: apixels)
+
+    val base_ox = if use_ctm: x else: 0.0
+    val base_oy = if use_ctm: baseline_y else: 0.0
+    val out_dx: i32 = if use_ctm: 0 else: _e2d_floor_i32(x + 0.5)
+    val out_dy: i32 = if use_ctm: 0 else: _e2d_floor_i32(baseline_y + 0.5)
+
+    var all_cov: [i32] = []
+    var g_off: [i64] = []
+    var g_x0: [i32] = []
+    var g_y0: [i32] = []
+    var g_w: [i32] = []
+    var g_h: [i32] = []
+    var has_union = false
+    var ux0: i32 = 0
+    var uy0: i32 = 0
+    var ux1: i32 = 0
+    var uy1: i32 = 0
+
+    var pen_x: f64 = 0.0
+    var gi: i64 = 0
+    while gi < cps.len():
+        val gid = gids[gi]
+        val adv_fu = _e2d_sfnt_glyph_advance_fu(slot, gid)
+        if gid >= 0:
+            match sfnt_glyf_parse_outline(slot.font, gid as u32):
+                Some(outline):
+                    if outline.commands.len() > 0:
+                        var ex0: [f64] = []
+                        var ey0: [f64] = []
+                        var ex1: [f64] = []
+                        var ey1: [f64] = []
+                        var cur_x: f64 = 0.0
+                        var cur_y: f64 = 0.0
+                        var start_x: f64 = 0.0
+                        var start_y: f64 = 0.0
+                        var has_contour = false
+                        var min_x: f64 = 0.0
+                        var min_y: f64 = 0.0
+                        var max_x: f64 = 0.0
+                        var max_y: f64 = 0.0
+                        var has_pt = false
+                        var oi: i64 = 0
+                        while oi < outline.commands.len():
+                            val cmd = outline.commands[oi]
+                            if cmd.verb == SFNT_GLYF_CLOSE:
+                                if has_contour and (cur_x != start_x or cur_y != start_y):
+                                    ex0.push(cur_x)
+                                    ey0.push(cur_y)
+                                    ex1.push(start_x)
+                                    ey1.push(start_y)
+                                    cur_x = start_x
+                                    cur_y = start_y
+                            else:
+                                val lx1 = base_ox + pen_x + cmd.x1 * scale
+                                val ly1 = base_oy - cmd.y1 * scale
+                                val px1 = _e2d_sfnt_xform_x(lx1, ly1, use_ctm, m00, m01, m02)
+                                val py1 = _e2d_sfnt_xform_y(lx1, ly1, use_ctm, m10, m11, m12)
+                                if cmd.verb == SFNT_GLYF_MOVE:
+                                    if has_contour and (cur_x != start_x or cur_y != start_y):
+                                        ex0.push(cur_x)
+                                        ey0.push(cur_y)
+                                        ex1.push(start_x)
+                                        ey1.push(start_y)
+                                    cur_x = px1
+                                    cur_y = py1
+                                    start_x = px1
+                                    start_y = py1
+                                    has_contour = true
+                                    if not has_pt:
+                                        min_x = px1
+                                        max_x = px1
+                                        min_y = py1
+                                        max_y = py1
+                                        has_pt = true
+                                    else:
+                                        if px1 < min_x: min_x = px1
+                                        if px1 > max_x: max_x = px1
+                                        if py1 < min_y: min_y = py1
+                                        if py1 > max_y: max_y = py1
+                                elif cmd.verb == SFNT_GLYF_LINE:
+                                    ex0.push(cur_x)
+                                    ey0.push(cur_y)
+                                    ex1.push(px1)
+                                    ey1.push(py1)
+                                    cur_x = px1
+                                    cur_y = py1
+                                    if not has_pt:
+                                        min_x = px1
+                                        max_x = px1
+                                        min_y = py1
+                                        max_y = py1
+                                        has_pt = true
+                                    else:
+                                        if px1 < min_x: min_x = px1
+                                        if px1 > max_x: max_x = px1
+                                        if py1 < min_y: min_y = py1
+                                        if py1 > max_y: max_y = py1
+                                elif cmd.verb == SFNT_GLYF_QUAD:
+                                    val lx2 = base_ox + pen_x + cmd.x2 * scale
+                                    val ly2 = base_oy - cmd.y2 * scale
+                                    val px2 = _e2d_sfnt_xform_x(lx2, ly2, use_ctm, m00, m01, m02)
+                                    val py2 = _e2d_sfnt_xform_y(lx2, ly2, use_ctm, m10, m11, m12)
+                                    val dev = _e2d_abs_f64(0.5 * (cur_x + px2) - px1) + _e2d_abs_f64(0.5 * (cur_y + py2) - py1)
+                                    val steps: i64 = if dev < 1.0: 4 elif dev < 6.0: 8 elif dev < 24.0: 16 else: 24
+                                    var prev_qx = cur_x
+                                    var prev_qy = cur_y
+                                    var step: i64 = 1
+                                    while step <= steps:
+                                        val t = (step as f64) / (steps as f64)
+                                        val it = 1.0 - t
+                                        val qx = it * it * cur_x + 2.0 * it * t * px1 + t * t * px2
+                                        val qy = it * it * cur_y + 2.0 * it * t * py1 + t * t * py2
+                                        ex0.push(prev_qx)
+                                        ey0.push(prev_qy)
+                                        ex1.push(qx)
+                                        ey1.push(qy)
+                                        if qx < min_x: min_x = qx
+                                        if qx > max_x: max_x = qx
+                                        if qy < min_y: min_y = qy
+                                        if qy > max_y: max_y = qy
+                                        prev_qx = qx
+                                        prev_qy = qy
+                                        step = step + 1
+                                    cur_x = px2
+                                    cur_y = py2
+                            oi = oi + 1
+                        if has_contour and (cur_x != start_x or cur_y != start_y):
+                            ex0.push(cur_x)
+                            ey0.push(cur_y)
+                            ex1.push(start_x)
+                            ey1.push(start_y)
+                        if has_pt and ex0.len() > 0:
+                            val gx0 = _e2d_floor_i32(min_x)
+                            val gy0 = _e2d_floor_i32(min_y)
+                            val gx1 = _e2d_ceil_i32(max_x)
+                            val gy1 = _e2d_ceil_i32(max_y)
+                            val gw = gx1 - gx0
+                            val gh = gy1 - gy0
+                            if gw > 0 and gh > 0 and gw <= 4096 and gh <= 4096:
+                                val g_cov = _e2d_sfnt_rasterize_edges_cov(ex0, ey0, ex1, ey1, gx0, gy0, gw, gh)
+                                val off = all_cov.len()
+                                g_off.push(off)
+                                g_x0.push(gx0)
+                                g_y0.push(gy0)
+                                g_w.push(gw)
+                                g_h.push(gh)
+                                var ci: i64 = 0
+                                while ci < g_cov.len():
+                                    all_cov.push(g_cov[ci])
+                                    ci = ci + 1
+                                if not has_union:
+                                    ux0 = gx0
+                                    uy0 = gy0
+                                    ux1 = gx1
+                                    uy1 = gy1
+                                    has_union = true
+                                else:
+                                    if gx0 < ux0: ux0 = gx0
+                                    if gy0 < uy0: uy0 = gy0
+                                    if gx1 > ux1: ux1 = gx1
+                                    if gy1 > uy1: uy1 = gy1
+                None: ()
+        pen_x = pen_x + (adv_fu as f64) * scale
+        gi = gi + 1
+
+    if not has_union:
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    val uw = ux1 - ux0
+    val uh = uy1 - uy0
+    if uw <= 0 or uh <= 0 or uw > 8192 or uh > 8192:
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    val utotal = (uw as i64) * (uh as i64)
+    var alpha_acc: [i32] = [0i32; utotal]
+    var k: i64 = 0
+    while k < g_off.len():
+        val off = g_off[k]
+        val gx0 = g_x0[k]
+        val gy0 = g_y0[k]
+        val gw = g_w[k]
+        val gh = g_h[k]
+        var r: i32 = 0
+        while r < gh:
+            val dst_y = (gy0 - uy0 + r) as i64
+            var c: i32 = 0
+            while c < gw:
+                val c16 = all_cov[off + (r as i64) * (gw as i64) + (c as i64)]
+                if c16 > 0:
+                    val g_a = (c16 * ca + 8) / 16
+                    if g_a > 0:
+                        val dst_x = (gx0 - ux0 + c) as i64
+                        val dst_idx = dst_y * (uw as i64) + dst_x
+                        val prev_a = alpha_acc[dst_idx]
+                        var next_a = if prev_a == 0: g_a else: prev_a + ((g_a * (255 - prev_a) + 127) / 255)
+                        if next_a > 255: next_a = 255
+                        alpha_acc[dst_idx] = next_a
+                c = c + 1
+            r = r + 1
+        k = k + 1
+    var pixels: [u32] = [0u32; utotal]
+    var pi: i64 = 0
+    while pi < utotal:
+        val a_val = alpha_acc[pi]
+        if a_val > 0:
+            pixels[pi] = rgba(cr, cg, cb, a_val)
+        pi = pi + 1
+    SfntRasterBitmap(x: out_dx + ux0, y: out_dy + uy0, width: uw, height: uh, pixels: pixels)
 # ============================================================================
 # Engine2D
 # ============================================================================
@@ -331,19 +1318,19 @@ class Engine2D with DrawIrRenderTarget:
     capability: BackendCapability
     baremetal_backend: BaremetalBackend?
     virtio_gpu_backend: VirtioGpuBackend?
-    cuda_backend: CudaBackend? = nil
-    vulkan_backend: VulkanBackend? = nil
+    cuda_backend: CudaBackend? = None
+    vulkan_backend: VulkanBackend? = None
     vulkan_font_state_unknown: bool = false
-    last_vulkan_font_evidence: VulkanFontCompositeEvidence? = nil
-    metal_backend: MetalBackend? = nil
-    opencl_backend: OpenClBackend? = nil
-    rocm_backend: RocmBackend? = nil
+    last_vulkan_font_evidence: VulkanFontCompositeEvidence? = None
+    metal_backend: MetalBackend? = None
+    opencl_backend: OpenClBackend? = None
+    rocm_backend: RocmBackend? = None
     # Set explicitly by create_offscreen() (a software-only embedding target).
     # Declared with an explicit Option type so its slot is real and its type is
     # inferable at read sites (draw_software_offscreen_opacity_consume); the
     # constructor already names it, but without this declaration the read fails
     # HIR field-type inference and the store may not land in a real slot.
-    software_backend: SoftwareBackend? = nil
+    software_backend: SoftwareBackend? = None
     w: i32
     h: i32
     pacing: FramePacingCounters
@@ -352,6 +1339,14 @@ class Engine2D with DrawIrRenderTarget:
     last_font_execution_attempts: [text] = []
     last_font_execution_target: text = ""
     last_font_plan_admitted: bool = false
+    # LCD subpixel text (Chrome LCD16 parity). Off by default; the Draw IR
+    # web lane turns it on. Applies only on CPU-composited backends, whose
+    # font composite blends per channel (_draw_font_batch_cpu_suffix).
+    lcd_text: bool = false
+    # True between set_mask and clear_mask. A masked blend scales each source
+    # alpha, so the glyph-quad memo (which draws pre-composited pixels) is
+    # off while a mask is set.
+    mask_active: bool = false
     last_font_size_is_100: bool = false
     # Acceptance item 4 of
     # doc/08_tracking/bug/macos_vulkan_2d_vector_font_empty_batch_native_fault_2026-07-26.md:
@@ -413,8 +1408,8 @@ class Engine2D with DrawIrRenderTarget:
         self.font_owner = Engine2DFontOwner(active: [fonts])
         identity
 
-    fn font_execution_attempts() -> [text]: self.last_font_execution_attempts
-    fn font_execution_target() -> text: self.last_font_execution_target
+    me font_execution_attempts() -> [text]: self.last_font_execution_attempts
+    me font_execution_target() -> text: self.last_font_execution_target
 
     # `me`, not `fn`: a `fn` that reads `self` is the nil-receiver trap the
     # bug record above documents on the native lane.
@@ -437,9 +1432,9 @@ class Engine2D with DrawIrRenderTarget:
     me install_cuda_font_ptx(ptx: text) -> bool:
         """Install one verified generated font companion on a real CUDA engine."""
         val active = self.cuda_backend
-        if active == nil:
+        if active.is_none():
             return false
-        val cuda = active
+        val cuda = active.unwrap()
         val installed = cuda.install_font_atlas_ptx(ptx)
         self.cuda_backend = cuda
         installed
@@ -526,7 +1521,7 @@ class Engine2D with DrawIrRenderTarget:
         i.e. the fallback surface that actually paints.
         """
         if self.vulkan_font_state_unknown:
-            return nil
+            return None
         # An attached-but-never-initialized Vulkan backend (unavailable
         # device, or a test harness probing the fallback route) has no
         # framebuffer: every primitive/readback dispatched into it is a
@@ -535,7 +1530,7 @@ class Engine2D with DrawIrRenderTarget:
         # an initialized backend; otherwise fall through to self.backend.
         if val Some(vulkan) = self.vulkan_backend:
             if not vulkan.initialized:
-                return nil
+                return None
         self.vulkan_backend
 
     # ========================================================================
@@ -587,7 +1582,7 @@ class Engine2D with DrawIrRenderTarget:
                 var sw = SoftwareBackend.create()
                 sw.init(width, height)
                 val capability = sw.capability()
-                Engine2D(backend: sw, capability: capability, software_backend: Some(sw), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
+                Engine2D(backend: sw, capability: capability, software_backend: Some(sw), baremetal_backend: None, virtio_gpu_backend: None, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
 
     static fn create_with_backend_fast(width: i32, height: i32, backend_name: text) -> Engine2D:
         """Create an engine in native-only ("no mirror") fast mode.
@@ -609,6 +1604,9 @@ class Engine2D with DrawIrRenderTarget:
         create_with_backend() path for them — correct, but not accelerated.
         """
         val requested_backend = backend_canonical_name(backend_name)
+        val baremetal_refusal = engine2d_baremetal_hardware_refusal(requested_backend, platform_name())
+        if baremetal_refusal.is_some():
+            return Engine2D.create_with_backend(width, height, backend_name)
         if requested_backend == "metal":
             var metal = MetalBackend.create()
             if metal.init(width, height):
@@ -616,12 +1614,12 @@ class Engine2D with DrawIrRenderTarget:
                 val capability = metal.capability()
                 return Engine2D(
                     backend: metal, capability: capability,
-                    baremetal_backend: nil, virtio_gpu_backend: nil,
-                    cuda_backend: nil, vulkan_backend: nil,
+                    baremetal_backend: None, virtio_gpu_backend: None,
+                    cuda_backend: None, vulkan_backend: None,
                     vulkan_font_state_unknown: false,
-                    last_vulkan_font_evidence: nil,
-                    metal_backend: Some(metal), opencl_backend: nil,
-                    rocm_backend: nil, software_backend: nil,
+                    last_vulkan_font_evidence: None,
+                    metal_backend: Some(metal), opencl_backend: None,
+                    rocm_backend: None, software_backend: None,
                     font_owner: Engine2DFontOwner.new(), last_font_execution_attempts: [],
                     last_font_execution_target: "",
                     w: width, h: height, pacing: make_frame_pacing_counters(),
@@ -689,7 +1687,7 @@ class Engine2D with DrawIrRenderTarget:
         # offscreen's software rasterizer and skip the two full-surface scratch
         # buffers draw_engine_opacity() would otherwise allocate per translucent
         # window (the residual first-frame heap pressure).
-        Engine2D(backend: sw, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, cuda_backend: nil, vulkan_backend: nil, vulkan_font_state_unknown: false, last_vulkan_font_evidence: nil, metal_backend: nil, opencl_backend: nil, rocm_backend: nil, software_backend: sw, font_owner: Engine2DFontOwner.new(), last_font_execution_attempts: [], last_font_execution_target: "", w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
+        Engine2D(backend: sw, capability: capability, baremetal_backend: None, virtio_gpu_backend: None, cuda_backend: None, vulkan_backend: None, vulkan_font_state_unknown: false, last_vulkan_font_evidence: None, metal_backend: None, opencl_backend: None, rocm_backend: None, software_backend: sw, font_owner: Engine2DFontOwner.new(), last_font_execution_attempts: [], last_font_execution_target: "", w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
 
     me create_shared_vulkan_offscreen(width: i32, height: i32) -> Result<Engine2D, text>:
         """Create one transparent child framebuffer on this engine's Vulkan session."""
@@ -697,7 +1695,7 @@ class Engine2D with DrawIrRenderTarget:
         if width <= 0 or height <= 0 or pixel_count <= 0 or pixel_count > 2147483647:
             return Err("invalid-shared-vulkan-surface-size")
         val active = self.vulkan_backend
-        if active == nil:
+        if active.is_none():
             return Err("shared-vulkan-parent-required")
         val parent = active
         if not parent.owns_session or not parent.session.is_valid():
@@ -708,11 +1706,11 @@ class Engine2D with DrawIrRenderTarget:
         vulkan.enable_frame_batching()
         var child = Engine2D(
             backend: vulkan, capability: backend_capability_default(),
-            baremetal_backend: nil, virtio_gpu_backend: nil,
-            cuda_backend: nil, vulkan_backend: Some(vulkan),
+            baremetal_backend: None, virtio_gpu_backend: None,
+            cuda_backend: None, vulkan_backend: Some(vulkan),
             vulkan_font_state_unknown: false,
-            last_vulkan_font_evidence: nil, metal_backend: nil,
-            opencl_backend: nil, rocm_backend: nil, software_backend: nil,
+            last_vulkan_font_evidence: None, metal_backend: None,
+            opencl_backend: None, rocm_backend: None, software_backend: None,
             font_owner: Engine2DFontOwner.new(), last_font_execution_attempts: [],
             last_font_execution_target: "",
             w: width, h: height, pacing: make_frame_pacing_counters(),
@@ -726,7 +1724,7 @@ class Engine2D with DrawIrRenderTarget:
         if width <= 0 or height <= 0 or pixel_count <= 0 or pixel_count > 2147483647:
             return Err("invalid-shared-metal-surface-size")
         val active = self.metal_backend
-        if active == nil:
+        if active.is_none():
             return Err("shared-metal-parent-required")
         val parent = active
         if not parent.session.is_valid():
@@ -737,11 +1735,11 @@ class Engine2D with DrawIrRenderTarget:
         val capability = metal.capability()
         Ok(Engine2D(
             backend: metal, capability: capability,
-            baremetal_backend: nil, virtio_gpu_backend: nil,
-            cuda_backend: nil, vulkan_backend: nil,
-            vulkan_font_state_unknown: false, last_vulkan_font_evidence: nil,
-            metal_backend: Some(metal), opencl_backend: nil,
-            rocm_backend: nil, software_backend: nil, font_owner: Engine2DFontOwner.new(),
+            baremetal_backend: None, virtio_gpu_backend: None,
+            cuda_backend: None, vulkan_backend: None,
+            vulkan_font_state_unknown: false, last_vulkan_font_evidence: None,
+            metal_backend: Some(metal), opencl_backend: None,
+            rocm_backend: None, software_backend: None, font_owner: Engine2DFontOwner.new(),
             last_font_execution_attempts: [], last_font_execution_target: "",
             w: width, h: height, pacing: make_frame_pacing_counters(),
             selected_backend_name: "metal"))
@@ -749,10 +1747,15 @@ class Engine2D with DrawIrRenderTarget:
     static fn create_requested_backend(width: i32, height: i32, backend_name: text) -> Result<Engine2D, text>:
         """Create one canonical backend without silently falling back."""
         val requested_backend = backend_canonical_name(backend_name)
+        if engine2d_injected_create_fault(requested_backend):
+            return Err("injected create fault (SIMPLE_2D_CREATE_FAULT) for " + requested_backend)
+        val baremetal_refusal = engine2d_baremetal_hardware_refusal(requested_backend, platform_name())
+        if baremetal_refusal.?:
+            return Err(baremetal_refusal.unwrap().reason)
         if requested_backend == "cuda":
             var cuda = CudaBackend.create()
             if cuda.init(width, height):
-                var engine = Engine2D(backend: cuda, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, cuda_backend: cuda, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cuda")
+                var engine = Engine2D(backend: cuda, capability: backend_capability_default(), baremetal_backend: None, virtio_gpu_backend: None, cuda_backend: cuda, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cuda")
                 engine.install_pinned_cuda_font_artifact()
                 return Ok(engine)
 
@@ -762,12 +1765,12 @@ class Engine2D with DrawIrRenderTarget:
                 vulkan.enable_frame_batching()
                 return Ok(Engine2D(
                     backend: vulkan, capability: backend_capability_default(),
-                    baremetal_backend: nil, virtio_gpu_backend: nil,
-                    cuda_backend: nil, vulkan_backend: Some(vulkan),
+                    baremetal_backend: None, virtio_gpu_backend: None,
+                    cuda_backend: None, vulkan_backend: Some(vulkan),
                     vulkan_font_state_unknown: false,
-                    last_vulkan_font_evidence: nil, metal_backend: nil,
-                    opencl_backend: nil, rocm_backend: nil,
-                    software_backend: nil, font_owner: Engine2DFontOwner.new(),
+                    last_vulkan_font_evidence: None, metal_backend: None,
+                    opencl_backend: None, rocm_backend: None,
+                    software_backend: None, font_owner: Engine2DFontOwner.new(),
                     last_font_execution_attempts: [],
                     last_font_execution_target: "",
                     w: width, h: height,
@@ -782,7 +1785,7 @@ class Engine2D with DrawIrRenderTarget:
                 # its internal SoftwareBackend even when the D3D11/DXVK device
                 # chain initializes. "directx" stays valid as the REQUESTED key.
                 val selected_name = directx.name()
-                return Ok(Engine2D(backend: directx, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: selected_name))
+                return Ok(Engine2D(backend: directx, capability: backend_capability_default(), baremetal_backend: None, virtio_gpu_backend: None, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: selected_name))
 
         if requested_backend == "directx-on-vulkan":
             # DirectX-on-Vulkan emulation: serve a DirectX API request through the
@@ -796,17 +1799,17 @@ class Engine2D with DrawIrRenderTarget:
             var dx_vk = VulkanBackend.create()
             if dx_vk.init(width, height):
                 dx_vk.enable_frame_batching()
-                return Ok(Engine2D(backend: dx_vk, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "directx-on-vulkan"))
+                return Ok(Engine2D(backend: dx_vk, capability: backend_capability_default(), baremetal_backend: None, virtio_gpu_backend: None, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "directx-on-vulkan"))
 
         if requested_backend == "opencl":
             var opencl = OpenClBackend.create()
             if opencl.init(width, height):
-                return Ok(Engine2D(backend: opencl, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, opencl_backend: opencl, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opencl"))
+                return Ok(Engine2D(backend: opencl, capability: backend_capability_default(), baremetal_backend: None, virtio_gpu_backend: None, opencl_backend: opencl, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opencl"))
 
         if requested_backend == "opengl":
             var opengl = OpenGLBackend.create()
             if opengl.init(width, height):
-                return Ok(Engine2D(backend: opengl, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opengl"))
+                return Ok(Engine2D(backend: opengl, capability: backend_capability_default(), baremetal_backend: None, virtio_gpu_backend: None, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opengl"))
 
         if requested_backend == "metal":
             var metal = MetalBackend.create()
@@ -814,12 +1817,12 @@ class Engine2D with DrawIrRenderTarget:
                 val capability = metal.capability()
                 return Ok(Engine2D(
                     backend: metal, capability: capability,
-                    baremetal_backend: nil, virtio_gpu_backend: nil,
-                    cuda_backend: nil, vulkan_backend: nil,
+                    baremetal_backend: None, virtio_gpu_backend: None,
+                    cuda_backend: None, vulkan_backend: None,
                     vulkan_font_state_unknown: false,
-                    last_vulkan_font_evidence: nil,
-                    metal_backend: Some(metal), opencl_backend: nil,
-                    rocm_backend: nil, software_backend: nil,
+                    last_vulkan_font_evidence: None,
+                    metal_backend: Some(metal), opencl_backend: None,
+                    rocm_backend: None, software_backend: None,
                     font_owner: Engine2DFontOwner.new(), last_font_execution_attempts: [],
                     last_font_execution_target: "",
                     w: width, h: height, pacing: make_frame_pacing_counters(),
@@ -830,33 +1833,33 @@ class Engine2D with DrawIrRenderTarget:
             var metal_vk = VulkanBackend.create()
             if metal_vk.init(width, height):
                 metal_vk.enable_frame_batching()
-                return Ok(Engine2D(backend: metal_vk, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal-on-vulkan"))
+                return Ok(Engine2D(backend: metal_vk, capability: backend_capability_default(), baremetal_backend: None, virtio_gpu_backend: None, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal-on-vulkan"))
 
         if requested_backend == "rocm":
             var rocm = RocmBackend.create()
             if rocm.init(width, height):
-                return Ok(Engine2D(backend: rocm, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, rocm_backend: rocm, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "rocm"))
+                return Ok(Engine2D(backend: rocm, capability: backend_capability_default(), baremetal_backend: None, virtio_gpu_backend: None, rocm_backend: rocm, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "rocm"))
 
         if requested_backend == "intel":
             var intel = IntelBackend.create()
             if intel.init(width, height):
-                return Ok(Engine2D(backend: intel, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "intel"))
+                return Ok(Engine2D(backend: intel, capability: backend_capability_default(), baremetal_backend: None, virtio_gpu_backend: None, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "intel"))
 
         if requested_backend == "qualcomm":
             var qualcomm = QualcommBackend.create()
             if qualcomm.init(width, height):
-                return Ok(Engine2D(backend: qualcomm, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "qualcomm"))
+                return Ok(Engine2D(backend: qualcomm, capability: backend_capability_default(), baremetal_backend: None, virtio_gpu_backend: None, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "qualcomm"))
 
         if requested_backend == "webgpu":
             var webgpu = WebGpuBackend.create()
             if webgpu.init(width, height):
-                return Ok(Engine2D(backend: webgpu, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "webgpu"))
+                return Ok(Engine2D(backend: webgpu, capability: backend_capability_default(), baremetal_backend: None, virtio_gpu_backend: None, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "webgpu"))
 
         if requested_backend == "software":
             var sw = SoftwareBackend.create()
             if sw.init(width, height):
                 val capability = sw.capability()
-                return Ok(Engine2D(backend: sw, capability: capability, software_backend: Some(sw), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software"))
+                return Ok(Engine2D(backend: sw, capability: capability, software_backend: Some(sw), baremetal_backend: None, virtio_gpu_backend: None, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software"))
 
         # Note: "baremetal" is NOT auto-detected. It requires a pre-initialized
         # FramebufferDriver and must be created via create_with_baremetal_backend().
@@ -868,13 +1871,13 @@ class Engine2D with DrawIrRenderTarget:
             var cpu_simd = CpuBackend.create_simd()
             if not cpu_simd.init(width, height):
                 return Err("backend unavailable: cpu_simd init failed")
-            return Ok(Engine2D(backend: cpu_simd, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu_simd"))
+            return Ok(Engine2D(backend: cpu_simd, capability: backend_capability_default(), baremetal_backend: None, virtio_gpu_backend: None, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu_simd"))
 
         if requested_backend == "cpu":
             var cpu = CpuBackend.create()
             if not cpu.init(width, height):
                 return Err("backend unavailable: cpu init failed")
-            return Ok(Engine2D(backend: cpu, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu"))
+            return Ok(Engine2D(backend: cpu, capability: backend_capability_default(), baremetal_backend: None, virtio_gpu_backend: None, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu"))
 
         Err("backend unavailable: " + requested_backend)
 
@@ -885,17 +1888,66 @@ class Engine2D with DrawIrRenderTarget:
             vulkan.enable_frame_batching()
             return Ok(Engine2D(
                 backend: vulkan, capability: backend_capability_default(),
-                baremetal_backend: nil, virtio_gpu_backend: nil,
-                cuda_backend: nil, vulkan_backend: Some(vulkan),
+                baremetal_backend: None, virtio_gpu_backend: None,
+                cuda_backend: None, vulkan_backend: Some(vulkan),
                 vulkan_font_state_unknown: false,
-                last_vulkan_font_evidence: nil, metal_backend: nil,
-                opencl_backend: nil, rocm_backend: nil,
-                software_backend: nil, font_owner: Engine2DFontOwner.new(),
+                last_vulkan_font_evidence: None, metal_backend: None,
+                opencl_backend: None, rocm_backend: None,
+                software_backend: None, font_owner: Engine2DFontOwner.new(),
                 last_font_execution_attempts: [],
                 last_font_execution_target: "",
                 w: width, h: height, pacing: make_frame_pacing_counters(),
                 selected_backend_name: "vulkan"))
         Err("backend unavailable: vulkan")
+
+    static fn create_vulkan_window_present(width: i32, height: i32, vsync: bool = true) -> Result<Engine2D, text>:
+        """Create one same-device Vulkan compute + visible-window session.
+
+        Surface creation must precede device selection, so this cannot be
+        retrofitted onto an Engine2D created by `create_with_backend`. The
+        returned engine owns both the device framebuffer and swapchain.
+        """
+        var vulkan = VulkanBackend.create()
+        if vulkan.init_window_present(width, height, vsync):
+            vulkan.enable_frame_batching()
+            return Ok(Engine2D(
+                backend: vulkan, capability: backend_capability_default(),
+                baremetal_backend: None, virtio_gpu_backend: None,
+                cuda_backend: None, vulkan_backend: Some(vulkan),
+                vulkan_font_state_unknown: false,
+                last_vulkan_font_evidence: None, metal_backend: None,
+                opencl_backend: None, rocm_backend: None,
+                software_backend: None, font_owner: Engine2DFontOwner.new(),
+                last_font_execution_attempts: [],
+                last_font_execution_target: "",
+                w: width, h: height, pacing: make_frame_pacing_counters(),
+                selected_backend_name: "vulkan"))
+        Err(if vulkan.last_error == "":
+            "backend unavailable: vulkan window presentation"
+        else:
+            vulkan.last_error)
+
+    static fn create_vulkan_external_window_present(kind: i64, display: i64, window: i64, width: i32, height: i32, vsync: bool = true) -> Result<Engine2D, text>:
+        """Create Vulkan compute/swapchain ownership for an existing window."""
+        var vulkan = VulkanBackend.create()
+        if vulkan.init_external_window_present(
+            kind, display, window, width, height, vsync):
+            vulkan.enable_frame_batching()
+            return Ok(Engine2D(
+                backend: vulkan, capability: backend_capability_default(),
+                baremetal_backend: None, virtio_gpu_backend: None,
+                cuda_backend: None, vulkan_backend: Some(vulkan),
+                vulkan_font_state_unknown: false,
+                last_vulkan_font_evidence: None, metal_backend: None,
+                opencl_backend: None, rocm_backend: None,
+                software_backend: None, font_owner: Engine2DFontOwner.new(),
+                last_font_execution_attempts: [], last_font_execution_target: "",
+                w: width, h: height, pacing: make_frame_pacing_counters(),
+                selected_backend_name: "vulkan"))
+        Err(if vulkan.last_error == "":
+            "backend unavailable: external Vulkan window presentation"
+        else:
+            vulkan.last_error)
 
     static fn create_with_baremetal_backend(backend: BaremetalBackend) -> Engine2D:
         """Create engine with a pre-initialized BaremetalBackend.
@@ -942,40 +1994,48 @@ class Engine2D with DrawIrRenderTarget:
         same category) explicitly rather than adding more fields to the
         growing exception list.
         """
-        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: Some(backend), virtio_gpu_backend: nil, cuda_backend: nil, vulkan_backend: nil, vulkan_font_state_unknown: false, last_vulkan_font_evidence: nil, metal_backend: nil, opencl_backend: nil, rocm_backend: nil, software_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "baremetal")
+        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: Some(backend), virtio_gpu_backend: None, cuda_backend: None, vulkan_backend: None, vulkan_font_state_unknown: false, last_vulkan_font_evidence: None, metal_backend: None, opencl_backend: None, rocm_backend: None, software_backend: None, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "baremetal")
 
     static fn create_with_virtio_gpu_backend(backend: VirtioGpuBackend) -> Engine2D:
         """Create engine with a pre-initialized VirtioGpuBackend."""
-        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: Some(backend), cuda_backend: nil, vulkan_backend: nil, metal_backend: nil, opencl_backend: nil, font_owner: Engine2DFontOwner.new(), w: backend.w, h: backend.h, pacing: make_frame_pacing_counters(), selected_backend_name: "virtio_gpu")
+        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: None, virtio_gpu_backend: Some(backend), cuda_backend: None, vulkan_backend: None, metal_backend: None, opencl_backend: None, font_owner: Engine2DFontOwner.new(), w: backend.w, h: backend.h, pacing: make_frame_pacing_counters(), selected_backend_name: "virtio_gpu")
 
     static fn create_with_backend_strict(width: i32, height: i32, backend_name: text) -> Result<Engine2D, BackendProbeResult>:
         """Create engine with a specific backend, returning diagnostics on failure.
 
         Unlike create() which silently falls back to CPU, this returns a typed
         BackendProbeResult explaining exactly why the requested backend is unavailable.
+
+        TOCTOU (doc/08_tracking/bug/gpu_probe_then_create_toctou_2026-08-04.md):
+        the create IS the validation. This factory deliberately does NOT ask a
+        separate probe_backend() to predict the create outcome: the probe runs
+        its own independent create+init+shutdown and caches nothing, so its
+        answer is a prediction that does not survive the gap to the create. A
+        probe that transiently fails must not false-RED a create that would
+        succeed, and a probe that succeeds must not be the authority when the
+        create then fails. On create failure the typed error is built from a
+        diagnostic probe taken AFTER the failed create (so its reason describes
+        the failure moment, never a pre-create prediction), falling back to the
+        create's own error message when the backend still probes healthy.
         """
-        # NOTE(2026-08-15): compare probe status via backend_probe_initialized()
-        # (defined in backend_probe.spl itself), NOT `probe.status ==
-        # BackendStatus.Initialized` in this module. engine.spl imports
-        # BackendStatus through the `std.gpu.engine2d.backend_probe` alias path
-        # while the probe object is constructed in the canonically-imported
-        # module; under native codegen the two enum identities do not compare
-        # equal, so the equality was always false and strict create returned
-        # Err(probe) with status=Initialized inside the error. See
-        # doc/08_tracking/bug/engine2d_strict_create_enum_identity_alias_path_2026-08-15.md
-        var probe = Engine2D.probe_backend(width, height, backend_name)
-        if not backend_probe_initialized(probe):
-            return Err(probe)
         match Engine2D.create_requested_backend(width, height, backend_name):
             Ok(eng):
                 return Ok(eng)
             Err(message):
+                val diag = Engine2D.probe_backend(width, height, backend_name)
+                if not backend_probe_initialized(diag):
+                    return Err(diag)
                 return Err(BackendProbeResult.failed(backend_canonical_name(backend_name), message))
         Err(BackendProbeResult.failed(backend_canonical_name(backend_name), "unreachable"))
 
     static fn probe_backend(width: i32, height: i32, backend_name: text) -> BackendProbeResult:
         """Probe whether a backend is available without creating an engine."""
         val requested_backend = backend_canonical_name(backend_name)
+        if engine2d_injected_probe_fault(requested_backend):
+            return BackendProbeResult.unavailable(requested_backend, "injected probe fault (SIMPLE_2D_PROBE_FAULT)")
+        val baremetal_refusal = engine2d_baremetal_hardware_refusal(requested_backend, platform_name())
+        if baremetal_refusal.?:
+            return baremetal_refusal.unwrap()
         if requested_backend == "cuda":
             var b = CudaBackend.create()
             if b.init(width, height):
@@ -1024,6 +2084,16 @@ class Engine2D with DrawIrRenderTarget:
                 b.shutdown()
                 return BackendProbeResult.success("metal", "Metal initialized")
             return b.last_probe
+
+        if requested_backend == "metal-on-vulkan":
+            # Disclosed lane: Vulkan executes; Apple Metal semantics are NOT provided.
+            var b = VulkanBackend.create()
+            if b.init(width, height):
+                b.shutdown()
+                return BackendProbeResult.success("metal-on-vulkan", "Vulkan execution emulating the Metal backend surface (not Apple Metal semantics)")
+            if b.last_error != "":
+                return BackendProbeResult.unavailable("metal-on-vulkan", "Vulkan unavailable for metal-on-vulkan: " + b.last_error)
+            return BackendProbeResult.unavailable("metal-on-vulkan", "Vulkan unavailable for metal-on-vulkan: vkCreateInstance failed or no devices")
 
         if requested_backend == "qualcomm":
             var b = QualcommBackend.create()
@@ -1394,6 +2464,17 @@ class Engine2D with DrawIrRenderTarget:
             return vulkan.session.device_name
         ""
 
+    fn vulkan_affine_coverage_ready() -> bool:
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            return vulkan.affine_coverage_ready()
+        false
+
+    fn vulkan_device_type() -> text:
+        """Selected Vulkan physical-device type, empty without an active owner."""
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            return vulkan.session.device_type
+        ""
+
     fn vulkan_driver_identity() -> text:
         """Stable Vulkan driver identity used to correlate benchmark processes."""
         if val Some(vulkan) = self._vulkan_primitive_target():
@@ -1548,7 +2629,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             bm.clear(color)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             cuda.clear(color)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -1566,7 +2647,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             bm.draw_rect(x, y, w, h, color)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             cuda.draw_rect(x, y, w, h, color)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -1584,7 +2665,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             bm.draw_rect_filled(x, y, w, h, color)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             cuda.draw_rect_filled(x, y, w, h, color)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -1594,6 +2675,17 @@ class Engine2D with DrawIrRenderTarget:
             self.backend = vulkan
         else:
             self.backend.draw_rect_filled(x, y, w, h, color)
+
+    me draw_affine_rect_coverage_vulkan_only(rx: i32, ry: i32, rw: i32, rh: i32,
+        local_w: f64, local_h: f64, a: f64, b: f64, c: f64, d: f64,
+        tx: f64, ty: f64, color: u32) -> bool:
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            val drawn = vulkan.draw_affine_rect_coverage(
+                rx, ry, rw, rh, local_w, local_h, a, b, c, d, tx, ty, color)
+            self.vulkan_backend = Some(vulkan)
+            self.backend = vulkan
+            return drawn
+        false
 
     me draw_rect_list_filled(rects: [i32], colors: [u32]):
         """Draw N filled rects in ONE call. Packed, frozen layout:
@@ -1647,7 +2739,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             bm.draw_line(x1, y1, x2, y2, color, thickness)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             cuda.draw_line(x1, y1, x2, y2, color, thickness)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -1665,7 +2757,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             bm.draw_circle(cx, cy, r, color)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             cuda.draw_circle(cx, cy, r, color)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -1683,7 +2775,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             bm.draw_circle_filled(cx, cy, r, color)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             cuda.draw_circle_filled(cx, cy, r, color)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -1701,7 +2793,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             bm.draw_rounded_rect(x, y, w, h, radius, color)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             cuda.draw_rounded_rect(x, y, w, h, radius, color)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -1719,7 +2811,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             bm.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             cuda.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -1737,7 +2829,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             bm.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             cuda.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -1751,14 +2843,129 @@ class Engine2D with DrawIrRenderTarget:
     me _draw_font_batch(x: i32, y: i32, batch: FontRenderBatch) -> bool:
         self._draw_font_batch_plan(x, y, batch, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"])
 
+    # Count the atlas pixels with nonzero alpha under one quad's atlas rect.
+    # Answers 0 for a rect outside the atlas or an empty atlas. This is the
+    # ink-coverage witness for the fail-closed check in _draw_font_batch_plan:
+    # a staged batch whose quads all reference fully transparent atlas cells
+    # rasterized NOTHING (observed live 2026-11-05: the bundled Noto Sans SC
+    # variable instance at wght=100 produced zero-alpha glyphs at 16px while
+    # staging and every backend receipt reported success), and compositing it
+    # paints nothing while claiming cpu:success.
+    fn _engine2d_font_quad_atlas_ink(batch: FontRenderBatch, quad: FontRenderQuad) -> i64:
+        if batch.atlas_pixels.len() == 0 or quad.width <= 0 or quad.height <= 0:
+            return 0
+        val aw = batch.atlas_width.to_i64()
+        val ah = batch.atlas_height.to_i64()
+        val ax = quad.atlas_x.to_i64()
+        val ay = quad.atlas_y.to_i64()
+        if aw <= 0 or ah <= 0 or ax < 0 or ay < 0 or ax + quad.width.to_i64() > aw or ay + quad.height.to_i64() > ah:
+            return 0
+        var ink: i64 = 0
+        var row: i64 = 0
+        while row < quad.height.to_i64():
+            var col: i64 = 0
+            val base = (ay + row) * aw + ax
+            while col < quad.width.to_i64():
+                if ((batch.atlas_pixels[base + col] >> 24) & 0xFFu32) > 0u32:
+                    ink = ink + 1
+                col = col + 1
+            row = row + 1
+        ink
+
+    # The glyph-quad memo reads the destination rows natively and writes
+    # whole spans; it applies only on the software surfaces (cpu, cpu_simd,
+    # software) with no mask set.
+    fn _glyph_quad_memo_eligible() -> bool:
+        if self.mask_active or self.vulkan_font_state_unknown:
+            return false
+        if self.virtio_gpu_backend.is_some() or self.baremetal_backend.is_some():
+            return false
+        val name = self.selected_backend_name
+        name == "cpu" or name == "cpu_simd" or name == "software"
+
+    # A glyph quad over an OPAQUE destination is a pixel-wise function of
+    # (cell, color, destination pixel, LCD on/off): the LCD composite when it
+    # applies (`engine2d_lcd_quad_composite`, opaque output; whether it
+    # applies depends on the cells alone), else each pixel is `blend(src, d)`
+    # with src = the subrect pixel (`font_atlas_subrect_pixels`), and d where
+    # the cell is empty. Both are opaque over an opaque destination, so the
+    # blend that would follow is a plain copy inside the clip. Pages repeat
+    # glyphs, so the quad composited over one background color `bg` is kept
+    # and drawn with one span per row (`draw_image`, same clip and damage as
+    # the blend). Keyed by atlas position, size, colors and the LCD flag, and
+    # validated by comparing the cells themselves, so an atlas reset or a face
+    # switch cannot serve stale pixels. Pixels whose destination is not `bg`
+    # (a neighbouring glyph overlapping the cell box) are recomposed one by
+    # one; rows equal to `bg` are found by native row compares. Returns false
+    # (nothing drawn) when any destination pixel is translucent, so those
+    # quads, and quads off the surface, take the per-pixel paths.
+    me _draw_glyph_quad_memo(dst_x: i32, dst_y: i32, atlas: [u32], atlas_width: i32,
+                             atlas_height: i32, quad: FontRenderQuad, lcd: bool) -> bool:
+        val w = quad.width.to_i64()
+        val h = quad.height.to_i64()
+        val aw = atlas_width.to_i64()
+        val ax = quad.atlas_x.to_i64()
+        val ay = quad.atlas_y.to_i64()
+        if ax < 0 or ay < 0 or ax + w > aw or ay + h > atlas_height.to_i64() or
+                atlas.len() < aw * atlas_height.to_i64():
+            return false
+        val n = w * h
+        if n <= 0 or n > _GLYPH_QUAD_MEMO_MAX_PIXELS:
+            return false
+        val dst = self.backend.read_pixels_region_raw(dst_x, dst_y, quad.width, quad.height)
+        if dst.len() != n:
+            return false
+        # Top-right: a left neighbour's overlap lands in the first columns.
+        val bg = dst[w - 1]
+        if (bg >> 24) != 0xFFu32:
+            return false
+        val uniform: [u32] = [bg; n]
+        val all_bg = dst == uniform
+        var cells: [u32] = [0u32; n]
+        var row: i64 = 0
+        # cpu-lane-loop-ok: one native span copy per quad row
+        while row < h:
+            cells.write_span(atlas, row * w, (ay + row) * aw + ax, w)
+            row = row + 1
+        val key = "{lcd}:{w}:{h}:{ax}:{ay}:{quad.color}:{bg}"
+        var composed: [u32] = []
+        var kind_lcd = false
+        if val Some(slot) = _glyph_quad_memo_slots.get(key):
+            if _glyph_quad_memo_cells[slot] == cells:
+                composed = _glyph_quad_memo_pixels[slot]
+                kind_lcd = _glyph_quad_memo_lcd[slot]
+        if composed.len() != n:
+            kind_lcd = false
+            if lcd and engine2d_lcd_quad_has_lcd_cell(atlas, atlas_width, quad.atlas_x, quad.atlas_y, quad.width, quad.height):
+                composed = engine2d_lcd_quad_composite(atlas, atlas_width, quad.atlas_x, quad.atlas_y,
+                    quad.width, quad.height, quad.color, uniform)
+                kind_lcd = composed.len() == n
+            if composed.len() != n:
+                composed = _engine2d_glyph_quad_over(cells, quad.color, bg)
+            if _glyph_quad_memo_cells.len() >= _GLYPH_QUAD_MEMO_LIMIT:
+                _glyph_quad_memo_slots = {}
+                _glyph_quad_memo_cells = []
+                _glyph_quad_memo_pixels = []
+                _glyph_quad_memo_lcd = []
+            _glyph_quad_memo_slots[key] = _glyph_quad_memo_cells.len()
+            _glyph_quad_memo_cells = _glyph_quad_memo_cells.push(cells)
+            _glyph_quad_memo_pixels = _glyph_quad_memo_pixels.push(composed)
+            _glyph_quad_memo_lcd = _glyph_quad_memo_lcd.push(kind_lcd)
+        if all_bg:
+            self.draw_image(dst_x, dst_y, quad.width, quad.height, composed)
+            return true
+        val patched = _engine2d_glyph_quad_patch(composed, cells, dst, w, bg, quad.color, kind_lcd)
+        if patched.len() != n:
+            return false
+        self.draw_image(dst_x, dst_y, quad.width, quad.height, patched)
+        true
+
     me _draw_font_batch_cpu_suffix(x: i32, y: i32, batch: FontRenderBatch, submitted: i64) -> i64:
         var quad_index = if submitted < 0 or submitted > batch.quads.len(): 0 else: submitted
+        val memo_ok = self._glyph_quad_memo_eligible()
+        val lcd_active = self._lcd_text_active()
         while quad_index < batch.quads.len():
             val quad = batch.quads[quad_index]
-            val pixels = engine2d_font_atlas_subrect_pixels(
-                batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
-                quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color
-            )
             # See doc/08_tracking/bug/font_render_batch_transform_identity_default_not_applied_2026-07-19.md
             # (BLOCKER B): the Option<i32>-returning font_destination_origin(...).?
             # round-trip decoded to a CONSTANT (1, 1) for every quad of every
@@ -1779,6 +2986,48 @@ class Engine2D with DrawIrRenderTarget:
                 dst_x_end >= -2147483648 and dst_x_end <= 2147483647 and
                 dst_y_i64 >= -2147483648 and dst_y_i64 <= 2147483647 and
                 dst_y_end >= -2147483648 and dst_y_end <= 2147483647)
+            if dst_in_range and memo_ok and self._draw_glyph_quad_memo(
+                    dst_x_i64 as i32, dst_y_i64 as i32, batch.atlas_pixels,
+                    batch.atlas_width, batch.atlas_height, quad, lcd_active):
+                quad_index = quad_index + 1
+                continue
+            # LCD first: the grayscale subrect below is built only when the LCD
+            # composite declines (no LCD cell, translucent destination, or a
+            # quad outside the atlas or the surface).
+            # On the software surfaces the LCD-cell prescan is skipped: the
+            # composite runs the same scan itself, and the prescan only spared
+            # a readback that costs a checksum elsewhere.
+            var lcd_drawn = false
+            if dst_in_range and lcd_active and
+                    quad.atlas_x >= 0 and quad.atlas_y >= 0 and
+                    quad.atlas_x.to_i64() + quad.width.to_i64() <= batch.atlas_width.to_i64() and
+                    quad.atlas_y.to_i64() + quad.height.to_i64() <= batch.atlas_height.to_i64() and
+                    batch.atlas_pixels.len() >= batch.atlas_width.to_i64() * batch.atlas_height.to_i64() and
+                    (memo_ok or engine2d_lcd_quad_has_lcd_cell(batch.atlas_pixels, batch.atlas_width, quad.atlas_x, quad.atlas_y, quad.width, quad.height)):
+                # The software surfaces answer the rows alone; the readback
+                # identity's checksum is an interpreted pass over the quad.
+                val dst = if memo_ok:
+                    self.backend.read_pixels_region_raw(dst_x_i64 as i32, dst_y_i64 as i32, quad.width, quad.height)
+                else:
+                    self.read_pixels_region(dst_x_i64 as i32, dst_y_i64 as i32, quad.width, quad.height).pixels
+                val lcd_pixels = engine2d_lcd_quad_composite(
+                    batch.atlas_pixels, batch.atlas_width, quad.atlas_x, quad.atlas_y,
+                    quad.width, quad.height, quad.color, dst)
+                if lcd_pixels.len() > 0:
+                    # Opaque over an opaque destination: with no mask the
+                    # blend is a copy inside the clip.
+                    if memo_ok:
+                        self.draw_image(dst_x_i64 as i32, dst_y_i64 as i32, quad.width, quad.height, lcd_pixels)
+                    else:
+                        self.draw_image_blend(dst_x_i64 as i32, dst_y_i64 as i32, quad.width, quad.height, lcd_pixels)
+                    lcd_drawn = true
+            if lcd_drawn:
+                quad_index = quad_index + 1
+                continue
+            val pixels = engine2d_font_atlas_subrect_pixels(
+                batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
+                quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color
+            )
             if _VEC_TEXT_PROBE and _vec_blit_probe_count < 8:
                 _vec_blit_probe_count = _vec_blit_probe_count + 1
                 var pnz = 0
@@ -1797,6 +3046,18 @@ class Engine2D with DrawIrRenderTarget:
                 self.draw_image_blend(dst_x_i64 as i32, dst_y_i64 as i32, quad.width, quad.height, pixels)
             quad_index = quad_index + 1
         quad_index
+
+    me set_lcd_text(enabled: bool):
+        """Request LCD subpixel text (Chrome's default for text <= 48 device
+        px). Takes effect only on CPU-composited backends; GPU font kernels
+        read one coverage alpha per atlas cell and keep grayscale."""
+        self.lcd_text = enabled
+
+    fn _lcd_text_active() -> bool:
+        if not self.lcd_text:
+            return false
+        val name = self.selected_backend_name
+        name == "cpu" or name == "cpu_simd" or name == "software" or name == "vulkan"
 
     me _font_batch_receipt(source: text, content_count: i64):
         """Print only when a staged batch lost its payload (see _font_batch_receipt_count)."""
@@ -1904,16 +3165,36 @@ class Engine2D with DrawIrRenderTarget:
         # inline rather than through a zero-arg FontRenderBatch method: see
         # the receiver-materialization note at the top of this function.
         var drawable_quads: i64 = 0
+        var ink_pixels: i64 = 0
         var scan_i: i64 = 0
         while scan_i < n_quads_total:
             if batch.quads[scan_i].width > 0 and batch.quads[scan_i].height > 0:
                 drawable_quads = drawable_quads + 1
+                # Ink-coverage witness: a drawable quad whose atlas rect is
+                # fully transparent means the rasterizer produced no glyph
+                # pixels (broken variable-font instance, observed 2026-11-05
+                # with the bundled Noto Sans SC wght=100 at 16px). Compositing
+                # such a batch reports success while painting nothing, so it
+                # must be refused here with a named reason. Scanning stops at
+                # the first ink pixel; a healthy batch costs ~one glyph cell.
+                if ink_pixels == 0:
+                    ink_pixels = self._engine2d_font_quad_atlas_ink(batch, batch.quads[scan_i])
             scan_i = scan_i + 1
         if drawable_quads == 0:
             val skip_reason = if n_quads_total == 0: "empty-quads" else: "zero-area-quads"
             self.font_batches_skipped_empty = self.font_batches_skipped_empty + 1
             self.last_font_skip_reason = skip_reason
             self.last_font_execution_attempts = ["nothing-to-draw:" + skip_reason]
+            self.last_font_execution_target = ""
+            return false
+        if ink_pixels == 0:
+            # Every drawable quad references a fully transparent atlas rect:
+            # nothing will hit the framebuffer. Refuse loudly (typed reason +
+            # attempts receipt) instead of returning a cpu:success receipt for
+            # a silent no-op composite.
+            self.font_batches_skipped_empty = self.font_batches_skipped_empty + 1
+            self.last_font_skip_reason = "transparent-atlas"
+            self.last_font_execution_attempts = ["nothing-to-draw:transparent-atlas"]
             self.last_font_execution_target = ""
             return false
         self.last_font_skip_reason = ""
@@ -1929,10 +3210,10 @@ class Engine2D with DrawIrRenderTarget:
                 attempts.push(target + ":skipped-partial")
             elif target == "cuda":
                 val active = self.cuda_backend
-                if active == nil:
+                if active.is_none():
                     attempts.push("cuda:unavailable")
                 else:
-                    val cuda = active
+                    val cuda = active.unwrap()
                     self.font_backend_dispatches = self.font_backend_dispatches + 1
                     quad_index = cuda.draw_font_batch(x, y, batch)
                     self.cuda_backend = cuda
@@ -1953,10 +3234,10 @@ class Engine2D with DrawIrRenderTarget:
                     attempts.push("metal:unavailable")
             elif target == "opencl":
                 val active = self.opencl_backend
-                if active == nil:
+                if active.is_none():
                     attempts.push("opencl:unavailable")
                 else:
-                    val opencl = active
+                    val opencl = active.unwrap()
                     self.font_backend_dispatches = self.font_backend_dispatches + 1
                     quad_index = opencl.draw_font_batch(x, y, batch)
                     self.opencl_backend = opencl
@@ -2009,10 +3290,10 @@ class Engine2D with DrawIrRenderTarget:
                     attempts.push("vulkan:unavailable")
             elif target == "rocm":
                 val active = self.rocm_backend
-                if active == nil:
+                if active.is_none():
                     attempts.push("rocm:unavailable")
                 else:
-                    val rocm = active
+                    val rocm = active.unwrap()
                     self.font_backend_dispatches = self.font_backend_dispatches + 1
                     quad_index = rocm.draw_font_batch(x, y, batch)
                     self.rocm_backend = rocm
@@ -2045,6 +3326,7 @@ class Engine2D with DrawIrRenderTarget:
         # nested in-place mutation form relies on reference semantics that the
         # interpreter lane does not guarantee for nested element receivers.
         var run_fonts = self.font_owner.active[0]
+        run_fonts.set_lcd_text(self._lcd_text_active())
         run_fonts.stage_glyph_run(run, color, font_size)
         self._install_active_fonts(run_fonts)
         self._font_batch_receipt("glyph-run", run.glyph_ids.len())
@@ -2072,12 +3354,21 @@ class Engine2D with DrawIrRenderTarget:
                 _vec_entry_probe_count = _vec_entry_probe_count + 1
                 print("[vec-text-probe] about-to-call-draw_text_configured")
             val configured_ok = self.draw_text_configured(
-                x, y, text_val, color, engine2d_default_font_config_for(font_size, self.baremetal_backend != nil)
+                x, y, text_val, color, engine2d_default_font_config_for(font_size, self.baremetal_backend.is_some())
             )
             if _VEC_TEXT_PROBE and _vec_entry_probe_count < 24:
                 _vec_entry_probe_count = _vec_entry_probe_count + 1
                 print("[vec-text-probe] returned-from-draw_text_configured ok={configured_ok}")
-            return
+            if configured_ok:
+                return
+            # The selected vector face staged nothing drawable (typed receipts
+            # are on the engine: last_font_skip_reason / attempts). Falling
+            # through to the zero-config bitmap chain below degrades the run
+            # to the built-in bitmap font instead of returning with nothing
+            # painted -- the silent no-ink outcome this path had before when a
+            # face selected OK but its rasterizer produced no glyph pixels
+            # (transparent atlas, observed 2026-11-05 with a bundled variable
+            # font instance).
         # NOTE(2026-08-02): a poisoned lane used to `return` here, silently
         # DROPPING the bitmap text draw. It only existed because the router
         # chain below would otherwise dispatch into the dead Vulkan backend;
@@ -2089,7 +3380,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             bm.draw_text(x, y, text_val, color, font_size)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             cuda.draw_text(x, y, text_val, color, font_size)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -2127,6 +3418,7 @@ class Engine2D with DrawIrRenderTarget:
         self.last_font_plan_admitted = true
         self.ensure_font_renderer()
         var fonts: FontRenderer = self.font_owner.active[0]
+        fonts.set_lcd_text(self._lcd_text_active())
         fonts.stage_text_configured(text_val, color, config)
         self._install_active_fonts(fonts)
         self._font_batch_receipt("text", text_val.len())
@@ -2165,13 +3457,13 @@ class Engine2D with DrawIrRenderTarget:
             vulkan.mark_cpu_fallback(reason)
             self.vulkan_backend = Some(vulkan)
 
-    me draw_text_with_advances(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, font_size: i32) -> bool:
+    me draw_text_with_advances(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, font_size: i32, pen_origin_milli: i64 = 0, size_milli: i64 = 0, letter_milli: i64 = 0, word_milli: i64 = 0) -> bool:
         """Draw producer-resolved text through the selected vector face."""
         self.draw_text_with_advances_configured(
-            x, y, text_val, advance_widths, color, engine2d_default_font_config_for(font_size, self.baremetal_backend != nil)
+            x, y, text_val, advance_widths, color, engine2d_default_font_config_for(font_size, self.baremetal_backend.is_some()), pen_origin_milli, size_milli, letter_milli, word_milli
         )
 
-    me draw_text_with_advances_vulkan_only(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, font_size: i32) -> bool:
+    me draw_text_with_advances_vulkan_only(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, font_size: i32, pen_origin_milli: i64 = 0, size_milli: i64 = 0, letter_milli: i64 = 0, word_milli: i64 = 0) -> bool:
         """Draw resolved text through the canonical Vulkan font batch only.
 
         This is the strict DrawIR device primitive boundary: unlike the normal
@@ -2184,12 +3476,12 @@ class Engine2D with DrawIrRenderTarget:
             return false
         self.ensure_font_renderer()
         var fonts: FontRenderer = self.font_owner.active[0]
-        fonts.stage_text_with_advances_configured(text_val, advance_widths, color, config)
+        fonts.stage_text_with_advances_configured(text_val, advance_widths, color, config, pen_origin_milli, size_milli, letter_milli, word_milli)
         self._install_active_fonts(fonts)
         self._font_batch_receipt("text-advances-vulkan-only", text_val.len())
         self._draw_font_batch_staged(x, y, ["vulkan"])
 
-    me draw_text_with_advances_configured(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, config: FontRenderConfig) -> bool:
+    me draw_text_with_advances_configured(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, config: FontRenderConfig, pen_origin_milli: i64 = 0, size_milli: i64 = 0, letter_milli: i64 = 0, word_milli: i64 = 0) -> bool:
         # Mut-param plan (font_execution_plan_into): the [text] array RETURN of
         # font_execution_plan arrived empty at THIS call site on the
         # freestanding lane while the identical shaped-path call survived
@@ -2209,7 +3501,8 @@ class Engine2D with DrawIrRenderTarget:
             return false
         self.ensure_font_renderer()
         var fonts: FontRenderer = self.font_owner.active[0]
-        fonts.stage_text_with_advances_configured(text_val, advance_widths, color, config)
+        fonts.set_lcd_text(self._lcd_text_active())
+        fonts.stage_text_with_advances_configured(text_val, advance_widths, color, config, pen_origin_milli, size_milli, letter_milli, word_milli)
         self._install_active_fonts(fonts)
         self._font_batch_receipt("text-advances", text_val.len())
         val advances_drawn = self._draw_font_batch_staged(x, y, plan)
@@ -2220,7 +3513,7 @@ class Engine2D with DrawIrRenderTarget:
     me draw_shaped_text(x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> bool:
         """Draw a semantic shaped run through the canonical selected face."""
         self.draw_shaped_text_configured(
-            x, y, glyph_run, color, engine2d_default_font_config_for(font_size, self.baremetal_backend != nil)
+            x, y, glyph_run, color, engine2d_default_font_config_for(font_size, self.baremetal_backend.is_some())
         )
 
     me draw_shaped_text_vulkan_only(x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> bool:
@@ -2237,13 +3530,14 @@ class Engine2D with DrawIrRenderTarget:
         self._font_batch_receipt("shaped-vulkan-only", glyph_run.glyph_ids.len())
         self._draw_font_batch_staged(x, y, ["vulkan"])
 
-    me draw_shaped_text_configured(x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload, color: u32, config: FontRenderConfig) -> bool:
+    me draw_shaped_text_configured(x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload, color: u32, config: FontRenderConfig, pen_q4: [i32] = []) -> bool:
         val plan = font_execution_plan(config, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"])
         if plan.len() == 0 or not font_render_config_selection_supported(config):
             return false
         self.ensure_font_renderer()
         var fonts: FontRenderer = self.font_owner.active[0]
-        fonts.stage_selected_glyph_run_configured(glyph_run, color, config)
+        fonts.set_lcd_text(self._lcd_text_active())
+        fonts.stage_selected_glyph_run_configured(glyph_run, color, config, pen_q4)
         self._install_active_fonts(fonts)
         self._font_batch_receipt("shaped", glyph_run.glyph_ids.len())
         self._draw_font_batch_staged(x, y, plan)
@@ -2251,21 +3545,21 @@ class Engine2D with DrawIrRenderTarget:
     me load_font(path: text) -> bool:
         """Select one trusted TTF/OTF for process-wide Simple 2D text."""
         val active_cuda = self.cuda_backend
-        if active_cuda != nil:
-            val cuda = active_cuda
+        if active_cuda.is_some():
+            val cuda = active_cuda.unwrap()
             cuda.invalidate_font_atlas()
             self.cuda_backend = cuda
         val active_opencl = self.opencl_backend
-        if active_opencl != nil:
-            val opencl = active_opencl
+        if active_opencl.is_some():
+            val opencl = active_opencl.unwrap()
             opencl.invalidate_font_atlas()
             self.opencl_backend = opencl
         if val Some(metal) = self.metal_backend:
             metal.invalidate_font_atlas()
             self.metal_backend = Some(metal)
         val active_rocm = self.rocm_backend
-        if active_rocm != nil:
-            val rocm = active_rocm
+        if active_rocm.is_some():
+            val rocm = active_rocm.unwrap()
             rocm.invalidate_font_atlas()
             self.rocm_backend = rocm
             if rocm.initialized:
@@ -2321,21 +3615,21 @@ class Engine2D with DrawIrRenderTarget:
     me unload_font():
         """Restore the zero-config bitmap text path."""
         val active_cuda = self.cuda_backend
-        if active_cuda != nil:
-            val cuda = active_cuda
+        if active_cuda.is_some():
+            val cuda = active_cuda.unwrap()
             cuda.invalidate_font_atlas()
             self.cuda_backend = cuda
         val active_opencl = self.opencl_backend
-        if active_opencl != nil:
-            val opencl = active_opencl
+        if active_opencl.is_some():
+            val opencl = active_opencl.unwrap()
             opencl.invalidate_font_atlas()
             self.opencl_backend = opencl
         if val Some(metal) = self.metal_backend:
             metal.invalidate_font_atlas()
             self.metal_backend = Some(metal)
         val active_rocm = self.rocm_backend
-        if active_rocm != nil:
-            val rocm = active_rocm
+        if active_rocm.is_some():
+            val rocm = active_rocm.unwrap()
             rocm.invalidate_font_atlas()
             self.rocm_backend = rocm
             if rocm.initialized:
@@ -2572,13 +3866,24 @@ class Engine2D with DrawIrRenderTarget:
     me font_receipt_execution_target_cpu() -> bool:
         self.last_font_execution_target == "cpu"
 
+    me set_vulkan_font_oracle_mode(enabled: bool):
+        """Opt an evidence collector into the Vulkan font CPU-oracle path.
+
+        Production leaves this off (no full-surface readback, packed frame
+        batching). With it on, each font batch submits immediately and is
+        compared against the CPU raster, which is the only way the saved
+        evidence can reach `promoted`."""
+        if val Some(vulkan) = self.vulkan_backend:
+            vulkan.set_font_oracle_mode(enabled)
+            self.vulkan_backend = Some(vulkan)
+
     fn vulkan_font_performance_evidence() -> VulkanFontCompositeEvidence?:
         self.last_vulkan_font_evidence
 
-    fn draw_ir_font_evidence() -> DrawIrTargetFontEvidence?:
+    me draw_ir_font_evidence() -> DrawIrTargetFontEvidence?:
         val vulkan = self.last_vulkan_font_evidence
-        if vulkan == nil:
-            return nil
+        if vulkan.is_none():
+            return None
         val evidence = vulkan
         Some(DrawIrTargetFontEvidence(
             batch_identity: evidence.batch_identity,
@@ -2619,7 +3924,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             emu_draw_text_bg(self.backend, x, y, text_val, fg, bg, font_size)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             cuda.draw_text_bg(x, y, text_val, fg, bg, font_size)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -2644,7 +3949,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             bm.draw_image(x, y, w, h, pixels)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             cuda.draw_image(x, y, w, h, pixels)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -2661,7 +3966,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             emu_draw_ellipse(self.backend, cx, cy, rx, ry, color)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_ellipse(cuda, cx, cy, rx, ry, color)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -2674,7 +3979,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             emu_draw_ellipse_filled(self.backend, cx, cy, rx, ry, color)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_ellipse_filled(cuda, cx, cy, rx, ry, color)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -2687,7 +3992,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             emu_draw_arc(self.backend, cx, cy, r, start_deg, end_deg, color, thickness)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_arc(cuda, cx, cy, r, start_deg, end_deg, color, thickness)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -2700,7 +4005,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             emu_draw_bezier(self.backend, x1, y1, cx1, cy1, cx2, cy2, x2, y2, color, thickness)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_bezier(cuda, x1, y1, cx1, cy1, cx2, cy2, x2, y2, color, thickness)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -2713,7 +4018,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             emu_draw_polygon_filled(self.backend, xs, ys, count, color)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_polygon_filled(cuda, xs, ys, count, color)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -2726,7 +4031,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             emu_draw_polyline(self.backend, xs, ys, count, color, thickness)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_polyline(cuda, xs, ys, count, color, thickness)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -2739,7 +4044,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             emu_draw_rect_thick(self.backend, x, y, w, h, color, thickness)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_rect_thick(cuda, x, y, w, h, color, thickness)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -2752,7 +4057,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             emu_draw_circle_thick(self.backend, cx, cy, r, color, thickness)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_circle_thick(cuda, cx, cy, r, color, thickness)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -2765,7 +4070,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             emu_draw_rounded_rect_outline(self.backend, x, y, w, h, radius, color, thickness)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_rounded_rect_outline(cuda, x, y, w, h, radius, color, thickness)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -2778,7 +4083,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             emu_draw_gradient_rect_h(self.backend, x, y, w, h, left_color, right_color)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_gradient_rect_h(cuda, x, y, w, h, left_color, right_color)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -2797,7 +4102,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             emu_draw_radial_gradient(self.backend, cx, cy, r, center_color, edge_color)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_radial_gradient(cuda, cx, cy, r, center_color, edge_color)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -2810,7 +4115,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             emu_draw_linear_gradient_stops(self.backend, x, y, w, h, stop_colors, stop_positions, angle_deg)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_linear_gradient_stops(cuda, x, y, w, h, stop_colors, stop_positions, angle_deg)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -2823,12 +4128,92 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             emu_draw_radial_gradient_stops(self.backend, cx, cy, r, stop_colors, stop_positions)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_radial_gradient_stops(cuda, cx, cy, r, stop_colors, stop_positions)
             self.cuda_backend = cuda
             self.backend = cuda
         else:
             emu_draw_radial_gradient_stops(self.backend, cx, cy, r, stop_colors, stop_positions)
+
+    # One CSS gradient layer evaluated AND composited on the Vulkan device
+    # (`gradient_layer.comp`): only `tables` (header, 1025-entry stop ramp,
+    # per-column / per-row geometry terms) are uploaded. False when there is
+    # no Vulkan primitive target or the device declined; nothing was drawn.
+    me _draw_gradient_layer_on_device(x0: i32, y0: i32, w: i32, h: i32, mode: i32, tables: [u32]) -> bool:
+        if tables.len() == 0:
+            return false
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            var vulkan_typed: VulkanBackend = vulkan
+            val done = vulkan_typed.draw_gradient_layer_device(x0, y0, w, h, mode, tables)
+            self.vulkan_backend = Some(vulkan_typed)
+            self.backend = vulkan_typed
+            return done
+        false
+
+    # True when gradient layers should try the Vulkan device kernel: the same
+    # backend precedence as `draw_image_blend` (virtio, baremetal and cuda
+    # keep the host evaluator), and a Vulkan primitive target exists.
+    me _gradient_layer_device_candidate() -> bool:
+        if val Some(vg) = self.virtio_gpu_backend:
+            return false
+        if val Some(bm) = self.baremetal_backend:
+            return false
+        if self.selected_backend_name == "cuda":
+            return false
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            return true
+        false
+
+    # CSS radial gradient (Q10 px geometry) composited src-over the paint
+    # rect. On Vulkan the device evaluates and composites it
+    # (`_draw_gradient_layer_on_device`); otherwise, or when the device
+    # declines, the colours come from the shared host evaluator
+    # (`radial_gradient_pixels`, also used by the browser-engine raster) and
+    # `draw_image_blend` routes the composite to the selected backend.
+    me draw_radial_gradient_ellipse(ax: i32, ay: i32, aw: i32, ah: i32, cx_q: i64, cy_q: i64, rx_q: i64, ry_q: i64, stop_colors: [u32], stop_positions: [i32]):
+        var x0 = ax
+        var y0 = ay
+        var x1 = ax + aw
+        var y1 = ay + ah
+        if x0 < 0: x0 = 0
+        if y0 < 0: y0 = 0
+        if x1 > self.w: x1 = self.w
+        if y1 > self.h: y1 = self.h
+        if x1 <= x0 or y1 <= y0:
+            return
+        if self._gradient_layer_device_candidate():
+            val tables = radial_gradient_device_tables(x0, y0, x1 - x0, y1 - y0, cx_q, cy_q, rx_q, ry_q, stop_colors, stop_positions)
+            if self._draw_gradient_layer_on_device(x0, y0, x1 - x0, y1 - y0, 0, tables):
+                return
+        _e2d_host_gradient_evals = _e2d_host_gradient_evals + 1
+        val pixels = radial_gradient_pixels(x0, y0, x1 - x0, y1 - y0, cx_q, cy_q, rx_q, ry_q, stop_colors, stop_positions)
+        if pixels.len() > 0:
+            self.draw_image_blend(x0, y0, x1 - x0, y1 - y0, pixels)
+
+    # CSS linear gradient along the line (sx, sy) -> (ex, ey) (Q10 px)
+    # composited src-over the paint rect: the radial twin above (Vulkan: the
+    # device kernel; otherwise the shared host evaluator
+    # `linear_gradient_pixels`, also used by the browser-engine raster, with
+    # the composite routed by `draw_image_blend`).
+    me draw_linear_gradient_line(ax: i32, ay: i32, aw: i32, ah: i32, sx_q: i64, sy_q: i64, ex_q: i64, ey_q: i64, stop_colors: [u32], stop_positions: [i32]):
+        var x0 = ax
+        var y0 = ay
+        var x1 = ax + aw
+        var y1 = ay + ah
+        if x0 < 0: x0 = 0
+        if y0 < 0: y0 = 0
+        if x1 > self.w: x1 = self.w
+        if y1 > self.h: y1 = self.h
+        if x1 <= x0 or y1 <= y0:
+            return
+        if self._gradient_layer_device_candidate():
+            val tables = linear_gradient_device_tables(x0, y0, x1 - x0, y1 - y0, sx_q, sy_q, ex_q, ey_q, stop_colors, stop_positions)
+            if self._draw_gradient_layer_on_device(x0, y0, x1 - x0, y1 - y0, 1, tables):
+                return
+        _e2d_host_gradient_evals = _e2d_host_gradient_evals + 1
+        val pixels = linear_gradient_pixels(x0, y0, x1 - x0, y1 - y0, sx_q, sy_q, ex_q, ey_q, stop_colors, stop_positions)
+        if pixels.len() > 0:
+            self.draw_image_blend(x0, y0, x1 - x0, y1 - y0, pixels)
 
     me draw_rect_blend(x: i32, y: i32, w: i32, h: i32, color: u32):
         if val Some(vg) = self.virtio_gpu_backend:
@@ -2836,7 +4221,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             emu_draw_rect_blend(self.backend, x, y, w, h, color)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_rect_blend(cuda, x, y, w, h, color)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -2860,7 +4245,7 @@ class Engine2D with DrawIrRenderTarget:
             var bm_typed: BaremetalBackend = bm
             bm_typed.draw_image_blend(x, y, w, h, pixels)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             cuda.draw_image_blend(x, y, w, h, pixels)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -2874,6 +4259,16 @@ class Engine2D with DrawIrRenderTarget:
             # also flags the `self.backend.<method>` trait-object call as a
             # bare 28-candidate ambiguity (2026-07-18).
             emu_draw_image_blend(self.backend, x, y, w, h, pixels)
+
+    me hint_image_key(key: i64):
+        """Attach a producer-supplied cache key to the next draw_image_blend."""
+        if key == 0:
+            return
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            var vulkan_typed: VulkanBackend = vulkan
+            vulkan_typed.hint_image_key(key)
+            self.vulkan_backend = Some(vulkan_typed)
+            self.backend = vulkan_typed
 
     me draw_engine(dst_x: i32, dst_y: i32, src: Engine2D):
         """Composite an embedded render target (typically an offscreen Engine2D
@@ -2996,9 +4391,9 @@ class Engine2D with DrawIrRenderTarget:
                 dst_x, dst_y, width, height, readback.pixels, opacity_milli)
         var pixels = readback.pixels
         if opacity_milli < 1000:
-            # Milli-exact composite (floor /1000) against the current
-            # framebuffer, then an opaque draw — never the 8-bit alpha-scale
-            # + /255 double-floor, which is one ulp off the milli oracle.
+            # Milli composite (alpha rounded, (a*milli+500)/1000, then the
+            # Chrome image rule) against the current framebuffer, then an
+            # opaque draw.
             # Only the dst rect is read back (D9 region read; backends
             # without a native region read fall back to one whole-frame
             # read + host crop). The region result is indexed locally, so
@@ -3014,12 +4409,65 @@ class Engine2D with DrawIrRenderTarget:
         self.draw_image_blend(dst_x, dst_y, width, height, pixels)
         true
 
+    me draw_ir_composite_device_css_group(layer: Engine2D, dst_x: i32, dst_y: i32, width: i32, height: i32, opacity_milli: i32) -> bool:
+        """Vulkan twin of `draw_ir_composite_readback_css_group`: restore the
+        group layer rendered into the shared offscreen `layer` straight from
+        its device buffer (`css_group_restore.comp`), with no readback and no
+        upload. False leaves the framebuffer untouched; the caller then takes
+        the readback path, which paints the same pixels."""
+        if width <= 0 or height <= 0 or opacity_milli <= 0 or opacity_milli > 1000:
+            return false
+        if self.backend_name() != "vulkan" or layer.backend_name() != "vulkan":
+            return false
+        if self.vulkan_font_state_unknown or layer.vulkan_font_state_unknown:
+            return false
+        if val Some(lvk) = layer._vulkan_primitive_target():
+            if lvk.w != width or lvk.h != height or lvk.completion_unknown:
+                return false
+            # The layer's recorded draws must have landed before the kernel
+            # reads its buffer; a host-side fallback means the device buffer
+            # is not the layer.
+            val flushed = lvk._flush_pending_compute_at("css-group-layer")
+            if flushed < 0:
+                lvk.mark_completion_unknown()
+            if flushed != 1 or lvk.cpu_fallback_used:
+                return false
+            if val Some(vk) = self._vulkan_primitive_target():
+                val restored = vk.draw_css_group_restore_device(
+                    lvk.d_framebuffer, dst_x, dst_y, width, height,
+                    css_opacity_group_alpha8_milli(opacity_milli))
+                self.vulkan_backend = Some(vk)
+                self.backend = vk
+                return restored
+        false
+
+    me draw_ir_composite_readback_css_group(dst_x: i32, dst_y: i32, width: i32, height: i32, readback: Engine2DReadback, opacity_milli: i32) -> bool:
+        """Restore a CSS opacity group layer as Chrome 159 does
+        (`css_opacity_group.spl`): read the destination region back, run the
+        SkBlendARGB32 restore in .spl, write the result as an opaque copy. Every
+        backend, Vulkan and Metal included, takes this one path, so a device
+        lane is pixel-identical to cpu_simd; the native image-blend shaders
+        implement the embedded-surface milli rule, not this one."""
+        if width <= 0 or height <= 0 or opacity_milli <= 0 or opacity_milli > 1000:
+            return false
+        val total = width.to_i64() * height.to_i64()
+        if readback.pixels.len() != total:
+            return false
+        val fb = self.read_pixels_region(dst_x, dst_y, width, height)
+        if fb.pixels.len() != total:
+            return false
+        val pixels = css_opacity_group_composite_region(
+            readback.pixels, fb.pixels, width, height,
+            css_opacity_group_alpha8_milli(opacity_milli))
+        self.draw_image(dst_x, dst_y, width, height, pixels)
+        true
+
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
         if dst_w == src_w and dst_h == src_h:
             self.draw_image(dst_x, dst_y, dst_w, dst_h, pixels)
             return
         if self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_image_scaled(cuda, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -3044,7 +4492,7 @@ class Engine2D with DrawIrRenderTarget:
             self.draw_image_blend(dst_x, dst_y, dst_w, dst_h, pixels)
             return
         if self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_image_scaled_blend(cuda, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -3063,7 +4511,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             emu_draw_triangle_outline(self.backend, x1, y1, x2, y2, x3, y3, color, thickness)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_triangle_outline(cuda, x1, y1, x2, y2, x3, y3, color, thickness)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -3076,7 +4524,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             emu_draw_blur_rect(self.backend, x, y, w, h, radius)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_blur_rect(cuda, x, y, w, h, radius)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -3094,7 +4542,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             emu_draw_shadow_rect(self.backend, x, y, w, h, offset_x, offset_y, blur_r, color)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_shadow_rect(cuda, x, y, w, h, offset_x, offset_y, blur_r, color)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -3107,13 +4555,30 @@ class Engine2D with DrawIrRenderTarget:
         else:
             emu_draw_shadow_rect(self.backend, x, y, w, h, offset_x, offset_y, blur_r, color)
 
+    # draw_shadow_rect with the hole (hx, hy, hw, hh) left as it is. The
+    # host painter skips the hole; a device lane paints the whole shadow,
+    # which callers accept because they pass only a hole the box paint
+    # repaints opaque or restores.
+    me draw_shadow_rect_outside(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32, hx: i32, hy: i32, hw: i32, hh: i32):
+        if val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_shadow_rect_outside(self.backend, x, y, w, h, offset_x, offset_y, blur_r, color, hx, hy, hw, hh)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_shadow_rect_outside(self.backend, x, y, w, h, offset_x, offset_y, blur_r, color, hx, hy, hw, hh)
+        elif self.selected_backend_name == "cuda":
+            self.draw_shadow_rect(x, y, w, h, offset_x, offset_y, blur_r, color)
+        elif val Some(vulkan) = self._vulkan_primitive_target():
+            self.draw_shadow_rect(x, y, w, h, offset_x, offset_y, blur_r, color)
+        else:
+            emu_draw_shadow_rect_outside(self.backend, x, y, w, h, offset_x, offset_y, blur_r, color, hx, hy, hw, hh)
+
+
     me draw_image_transform(dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels: [u32]):
         if val Some(vg) = self.virtio_gpu_backend:
             emu_draw_image_transform(self.backend, dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
         elif val Some(bm) = self.baremetal_backend:
             emu_draw_image_transform(self.backend, dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_image_transform(cuda, dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -3132,7 +4597,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             emu_draw_rect_blend_mode(self.backend, x, y, w, h, color, mode)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             emu_draw_rect_blend_mode(cuda, x, y, w, h, color, mode)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -3145,12 +4610,13 @@ class Engine2D with DrawIrRenderTarget:
             emu_draw_rect_blend_mode(self.backend, x, y, w, h, color, mode)
 
     me set_mask(mask_pixels: [u8], w: i32, h: i32):
+        self.mask_active = true
         if val Some(vg) = self.virtio_gpu_backend:
             vg.set_mask(mask_pixels, w, h)
         elif val Some(bm) = self.baremetal_backend:
             bm.set_mask(mask_pixels, w, h)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             cuda.set_mask(mask_pixels, w, h)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -3163,12 +4629,13 @@ class Engine2D with DrawIrRenderTarget:
             self.backend.set_mask(mask_pixels, w, h)
 
     me clear_mask():
+        self.mask_active = false
         if val Some(vg) = self.virtio_gpu_backend:
             vg.clear_mask()
         elif val Some(bm) = self.baremetal_backend:
             bm.clear_mask()
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             cuda.clear_mask()
             self.cuda_backend = cuda
             self.backend = cuda
@@ -3187,7 +4654,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             bm.set_clip(x, y, w, h)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             cuda.set_clip(x, y, w, h)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -3206,7 +4673,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             bm.clear_clip()
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             cuda.clear_clip()
             self.cuda_backend = cuda
             self.backend = cuda
@@ -3225,7 +4692,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             bm.present()
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             cuda.present()
             self.cuda_backend = cuda
             self.backend = cuda
@@ -3250,6 +4717,11 @@ class Engine2D with DrawIrRenderTarget:
             return dropped
         false
 
+    fn window_present_enabled() -> bool:
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            return vulkan.window_present_enabled()
+        false
+
     me submit_batch() -> bool:
         """Flush any backend-buffered draw calls for this frame into one
         fenced submission. No-op (returns true) on backends that dispatch
@@ -3259,7 +4731,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             return bm.submit_batch()
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             val ok = cuda.submit_batch()
             self.cuda_backend = cuda
             self.backend = cuda
@@ -3272,15 +4744,6 @@ class Engine2D with DrawIrRenderTarget:
         else:
             return self.backend.submit_batch()
 
-    me submit_batch_for_present() -> bool:
-        """Flush Vulkan with an exclusive one-shot presenter-read receipt."""
-        if val Some(vulkan) = self._vulkan_primitive_target():
-            val ok = vulkan.submit_batch_for_present()
-            self.vulkan_backend = Some(vulkan)
-            self.backend = vulkan
-            return ok
-        false
-
     me read_pixels() -> [u32]:
         # Checksum-free readback: delegate straight to the backend's read_pixels
         # (which, for the Metal GPU-only/native path, is a single-FFI download
@@ -3292,7 +4755,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             return bm.read_pixels()
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             val pixels = cuda.read_pixels()
             self.cuda_backend = cuda
             self.backend = cuda
@@ -3324,7 +4787,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             bm.read_pixels_with_source()
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             val readback = cuda.read_pixels_with_source()
             self.cuda_backend = cuda
             self.backend = cuda
@@ -3344,6 +4807,18 @@ class Engine2D with DrawIrRenderTarget:
             if vulkan.pending_compute_command != 0 or vulkan.pending_compute_count != 0:
                 vulkan.mark_cpu_fallback("pending-compute-state-contradicts-flush")
             val readback = vulkan.read_pixels_with_source()
+            # The batched font path saved `queued-packed-font-batch` evidence
+            # before any submit; the flush above is the one that executed it.
+            # Fold its real fence/wait and this device readback into the saved
+            # result (promotion still requires oracle parity).
+            if val Some(queued) = self.last_vulkan_font_evidence:
+                if vulkan.pending_font_descriptors.len() == 0:
+                    self.last_vulkan_font_evidence = Some(vulkan_font_promote_flushed_batch(queued,
+                        vulkan.last_font_flush_rc, vulkan.last_font_flush_glyphs,
+                        vulkan.last_font_flush_fence, vulkan.last_font_flush_waited,
+                        vulkan.last_font_flush_fence_destroyed, vulkan.last_font_flush_queue_ns,
+                        vulkan.last_font_flush_sync_ns, readback.source, readback.backend_handle,
+                        readback.pixels))
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
             readback
@@ -3367,7 +4842,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             bm.read_pixels_region(x, y, width, height)
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             val readback = cuda.read_pixels_region(x, y, width, height)
             self.cuda_backend = cuda
             self.backend = cuda
@@ -3396,7 +4871,7 @@ class Engine2D with DrawIrRenderTarget:
         elif val Some(bm) = self.baremetal_backend:
             return bm.read_pixels()
         elif self.selected_backend_name == "cuda":
-            val cuda = self.cuda_backend.?
+            val cuda = self.cuda_backend.unwrap()
             val pixels = cuda.read_pixels()
             self.cuda_backend = cuda
             self.backend = cuda
@@ -3414,7 +4889,7 @@ class Engine2D with DrawIrRenderTarget:
 
         Forwards to the active backend (trait default is a no-op for backends
         without a retained mirror). virtio-gpu/baremetal owners have no mirror."""
-        if self.virtio_gpu_backend != nil or self.baremetal_backend != nil:
+        if self.virtio_gpu_backend.is_some() or self.baremetal_backend.is_some():
             return
         if val Some(vulkan) = self._vulkan_primitive_target():
             vulkan.invalidate_damage_mirror()
@@ -3448,7 +4923,7 @@ class Engine2D with DrawIrRenderTarget:
         """Most recent Vulkan frame receipt, or nil without a Vulkan owner."""
         if val Some(vulkan) = self.vulkan_backend:
             return Some(vulkan.latest_frame_receipt())
-        nil
+        None
 
     me finalize_compute_frame_no_readback() -> bool:
         """Finalize a Vulkan compute frame device-resident (no readback).
@@ -3486,7 +4961,7 @@ class Engine2D with DrawIrRenderTarget:
                 if vulkan.completion_unknown:
                     self.vulkan_backend = Some(vulkan)
                 else:
-                    self.vulkan_backend = nil
+                    self.vulkan_backend = None
             if val Some(software) = self.software_backend:
                 software.shutdown()
             return
@@ -3496,7 +4971,7 @@ class Engine2D with DrawIrRenderTarget:
                 if vulkan.completion_unknown:
                     self.vulkan_backend = Some(vulkan)
                 else:
-                    self.vulkan_backend = nil
+                    self.vulkan_backend = None
                 return
         if self.selected_backend_name == "cuda":
             if val Some(cuda) = self.cuda_backend:
@@ -3548,3 +5023,21 @@ class Engine2D with DrawIrRenderTarget:
     fn get_frame_pacing() -> FramePacingCounters:
         """Return the current accumulated frame-pacing counters."""
         self.pacing
+
+    me draw_text_sfnt_baseline_aa(x: i32, baseline_y: i32, text_val: text, color: u32, font_size: f64, font_path: text):
+        """Draw TrueType SFNT text at exact baseline_y with 4x4 subpixel winding AA."""
+        val rb = engine2d_sfnt_rasterize_run(
+            x as f64, baseline_y as f64, text_val, color, font_size, font_path,
+            false, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0
+        )
+        if rb.width > 0 and rb.height > 0:
+            val img_key = engine2d_sfnt_last_run_image_key()
+            if img_key != 0:
+                self.hint_image_key(img_key)
+            self.draw_image_blend(rb.x, rb.y, rb.width, rb.height, rb.pixels)
+
+    me draw_text_sfnt_aa(x: i32, y: i32, text_val: text, color: u32, font_size: f64, font_path: text):
+        """Draw TrueType SFNT text top-aligned at y with 4x4 subpixel winding AA."""
+        val asc_px = engine2d_sfnt_ascender_px(font_size, font_path)
+        val base_y = y + ((asc_px + 0.5) as i32)
+        self.draw_text_sfnt_baseline_aa(x, base_y, text_val, color, font_size, font_path)

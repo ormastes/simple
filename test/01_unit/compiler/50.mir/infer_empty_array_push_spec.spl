@@ -1,0 +1,118 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# inferarm-mir-20261031: un-annotated empty array filled by push
+
+Bug: doc/08_tracking/bug/inferarm_mir_2026-10-31.md. The original shape
+(`var x = []` then `.push(...)`, no element annotation) lowers through
+pure-Simple HIR+MIR in-process (seed-hosted) without an `[infer-arm]`
+diagnostic. The failure only reproduced in the full stage3 closure.
+"""
+
+# @tag: unit, compiler, mir, stage2
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.common.diagnostics.span.Span
+use std.io_runtime.{env_get, env_set}
+
+fn lines(xs: [text]) -> text:
+    xs.join("\n") + "\n"
+
+fn lower_closure(names: [text], srcs: [text]) -> text:
+    """Lower every module through HIR, prescan all, then MIR-lower the last one.
+    Returns the concatenated HIR/MIR diagnostics ("" when clean)."""
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var asts: [Module] = []
+    var i = 0
+    while i < names.len():
+        val path = names[i].replace(".", "/") + ".spl"
+        val ast = parse_full_frontend(srcs[i], path, names[i], log)
+        modules[names[i]] = ast
+        sources.push(SourceFile(path: path, content: srcs[i], module_name: names[i]))
+        asts.push(ast)
+        i = i + 1
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hirs: [HirModule] = []
+    var out = ""
+    i = 0
+    while i < names.len():
+        var hl = hirlowering_for_module(names[i], surfaces)
+        hirs.push(hl.lower_module(asts[i]))
+        for e in hl.errors:
+            out = out + "hir: " + e.message + "\n"
+        i = i + 1
+    val last = hirs.len() - 1
+    var ml = MirLowering.new(hirs[last].symbols)
+    var pre: Dict<text, HirModule> = {}
+    i = 0
+    while i < names.len():
+        pre["m" + i.to_text()] = hirs[i]
+        i = i + 1
+    i = 0
+    while i < names.len():
+        ml.prescan_module_struct_names(pre, "m" + i.to_text())
+        i = i + 1
+    val mir = ml.lower_module(hirs[last], hirs)
+    for e in ml.errors:
+        # Exhaustiveness notes are advisory and unrelated to these bugs.
+        if not e.message.contains("non-exhaustive enum match"):
+            out = out + "mir: " + e.message + "\n"
+    print "diagnostics: [" + out + "]"
+    out
+
+fn lower_one(src: text) -> text:
+    lower_closure(["app.main"], [src])
+
+describe "inferarm-mir-20261031 empty array local":
+    it "var parts = [] then push in a while loop":
+        val d = lower_one(lines(["fn collect(n: i64) -> i64:", "    var parts = []", "    var i = 0", "    while i < n:", "        parts.push(\"p\")", "        i = i + 1", "    parts.len()"]))
+        expect(d.contains("infer-arm")).to_equal(false)
+        expect(d).to_equal("")
+
+    it "var out = [] then push in a for loop and join":
+        val d = lower_one(lines(["fn collect_join(xs: [text]) -> text:", "    var out = []", "    for x in xs:", "        out.push(x)", "    out.join(\",\")"]))
+        expect(d.contains("infer-arm")).to_equal(false)
+        expect(d).to_equal("")
+
+fn infer_ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn mir_diag(l: MirLowering) -> text:
+    var out = ""
+    for e in l.errors:
+        out = out + e.message + "\n"
+    out
+
+describe "inferarm-mir-20261031 unresolved empty-array element type":
+    it "Array(Infer) resolves to the erased element T (MIR unknown-element stand-in) by default":
+        val old = env_get("SIMPLE_SAFETY_PROFILE")
+        env_set("SIMPLE_SAFETY_PROFILE", "")
+        var l = MirLowering.new(SymbolTable.new())
+        val r = l.lower_type(infer_ty(HirTypeKind.Array(infer_ty(HirTypeKind.Infer(0, 0)), nil)))
+        env_set("SIMPLE_SAFETY_PROFILE", old)
+        expect(mir_diag(l)).to_equal("")
+        match r.kind:
+            case MirTypeKind.Array(elem, _):
+                expect(elem.kind == MirTypeKind.I64).to_equal(true)
+            case _:
+                expect("not-array").to_equal("array")
+
+    it "Array(Infer) is a compile error in robust mode":
+        val old = env_get("SIMPLE_SAFETY_PROFILE")
+        env_set("SIMPLE_SAFETY_PROFILE", "robust")
+        var l = MirLowering.new(SymbolTable.new())
+        l.lower_type(infer_ty(HirTypeKind.Array(infer_ty(HirTypeKind.Infer(0, 0)), nil)))
+        env_set("SIMPLE_SAFETY_PROFILE", old)
+        expect(mir_diag(l)).to_contain("E-MIR-EMPTY-ARRAY-ELEM")

@@ -1,0 +1,108 @@
+# @req HOST-WINDOWS-DEPLOYMENT-01 HOST-WINDOWS-DEPLOYMENT-02
+# NOT_RUN: real Windows native private ACL roots and actual Docker observation
+# are required. No POSIX permission fallback, fake provider or skip PASS.
+use std.spec
+use std.nogc_sync_mut.orchestration.host_windows_deployment_v2.*
+use std.nogc_sync_mut.io.windows_private_file_v1.*
+use test.fixtures.orchestration.host_windows_deployment_v2.*
+
+fn deployment_ready_fixture_v2(turn: HostWindowsDeploymentOpenV2) -> Result<HostWindowsDeploymentOwnerV2, text>:
+    match turn:
+        case HostWindowsDeploymentOpenV2.Ready(owner): return Ok(owner)
+        case HostWindowsDeploymentOpenV2.Rejected(error): return Err(error)
+        case HostWindowsDeploymentOpenV2.RecoveryRequired(residue, error): return Err(error)
+        case HostWindowsDeploymentOpenV2.CleanupRequired(cleanup, error):
+            val closed = host_windows_deployment_cleanup_v2(cleanup)
+            assert(closed.closed)
+            assert(closed.cleanup.is_none())
+            return Err(error)
+    Err("unexpected deployment fixture turn")
+
+struct DeploymentRecoveryFixtureV2:
+    residue: HostWindowsDeploymentResidueV2
+    error: text
+
+fn deployment_recovery_fixture_v2(turn: HostWindowsDeploymentOpenV2) -> Result<DeploymentRecoveryFixtureV2, text>:
+    match turn:
+        case HostWindowsDeploymentOpenV2.Ready(owner):
+            assert(host_windows_deployment_close_v2(owner).closed)
+            return Err("unexpected deployment role")
+        case HostWindowsDeploymentOpenV2.Rejected(error): return Err(error)
+        case HostWindowsDeploymentOpenV2.RecoveryRequired(residue, error):
+            assert(error != "")
+            return Ok(DeploymentRecoveryFixtureV2(residue, error))
+        case HostWindowsDeploymentOpenV2.CleanupRequired(cleanup, error):
+            val closed = host_windows_deployment_cleanup_v2(cleanup)
+            assert(closed.closed)
+            assert(closed.residue.is_some())
+            return Ok(DeploymentRecoveryFixtureV2(closed.residue.unwrap(), error))
+    Err("unexpected deployment fixture turn")
+
+describe "Retained Windows deployment provenance from one installed parent":
+    it "performs actual signed enrollment then reopens only its fixed claim and direct child":
+        val fixture = windows_deployment_fixture_v2()
+        val owner = deployment_ready_fixture_v2(host_windows_deployment_enroll_v2(fixture.anchor, fixture.binding,
+            fixture.credential, fixture.configuration, fixture.engine, fixture.broker)).unwrap()
+        expect(owner.binding_v2().machine_parent).to_equal(fixture.anchor.machine_parent)
+        # These remain physical intent; this test never claims broker enforcement.
+        expect(owner.metadata_v2().configuration.memory_ceiling_bytes).to_equal(fixture.binding.physical_memory_bytes)
+        val closed = host_windows_deployment_close_v2(owner)
+        assert(closed.closed)
+        assert(closed.cleanup.is_none())
+        expect(closed.residue.unwrap().phase).to_equal(HostWindowsDeploymentPhaseV2.Enrolled)
+        val reopened = deployment_ready_fixture_v2(host_windows_deployment_reopen_v2(fixture.anchor, fixture.binding)).unwrap()
+        assert(host_windows_deployment_close_v2(reopened).closed)
+
+    it "rejects a corrupt SDK signature before even parsing the poisoned observer policy":
+        var fixture = windows_deployment_fixture_v2(true)
+        fixture.credential.approval.signature[0] = ((fixture.credential.approval.signature[0] as i64 + 1) % 256) as u8
+        val denied = host_windows_deployment_enroll_v2(fixture.anchor, fixture.binding,
+            fixture.credential, fixture.configuration, fixture.engine, fixture.broker)
+        match denied:
+            case HostWindowsDeploymentOpenV2.Rejected(error): expect(error).to_equal("APPROVAL_SIGNATURE_INVALID")
+            case _: fail("invalid signature reached observation, publication or role admission")
+        # Exclusive creation is positive absence evidence for this fixed name;
+        # do not infer absence from an ambiguous file-open/existence predicate.
+        var parent = windows_private_root_open_v1(fixture.anchor.machine_parent).unwrap()
+        var absence_probe = parent.create_private_stage(host_windows_deployment_claim_name_v2(fixture.binding).unwrap(), 1u64).unwrap()
+        assert(absence_probe.close())
+        assert(parent.close())
+
+    it "keeps the original exclusive claim when enrollment is requested again":
+        val fixture = windows_deployment_fixture_v2()
+        val original = deployment_ready_fixture_v2(host_windows_deployment_enroll_v2(fixture.anchor, fixture.binding,
+            fixture.credential, fixture.configuration, fixture.engine, fixture.broker)).unwrap()
+        val closed = host_windows_deployment_close_v2(original)
+        assert(closed.closed)
+        val original_residue = closed.residue.unwrap()
+        val duplicate = deployment_recovery_fixture_v2(host_windows_deployment_enroll_v2(fixture.anchor, fixture.binding,
+            fixture.credential, fixture.configuration, fixture.engine, fixture.broker)).unwrap()
+        expect(duplicate.residue.phase).to_equal(HostWindowsDeploymentPhaseV2.ClaimAttemptedUnknown)
+        val retained = deployment_ready_fixture_v2(host_windows_deployment_reopen_v2(fixture.anchor, fixture.binding)).unwrap()
+        val retained_closed = host_windows_deployment_close_v2(retained)
+        assert(retained_closed.closed)
+        expect(retained_closed.residue.unwrap().claim_digest).to_equal(original_residue.claim_digest)
+        expect(retained_closed.residue.unwrap().root_child).to_equal(original_residue.root_child)
+
+    it "refuses a seeded partial claim without allocating or adopting a replacement root":
+        val fixture = windows_deployment_fixture_v2()
+        windows_deployment_seed_v2(fixture, fixture.credential, false)
+        val residue = deployment_recovery_fixture_v2(host_windows_deployment_reopen_v2(fixture.anchor, fixture.binding)).unwrap()
+        expect(residue.residue.phase).to_equal(HostWindowsDeploymentPhaseV2.Claimed)
+        assert(residue.residue.root_child.starts_with("host-root-"))
+        expect(residue.error).to_equal("WINDOWS_PRIVATE_ROOT_OPEN")
+        # Positive exclusive directory creation proves reopen did not allocate it.
+        var parent = windows_private_root_open_v1(fixture.anchor.machine_parent).unwrap()
+        var untouched = parent.child_directory(residue.residue.root_child, true).unwrap()
+        assert(untouched.close())
+        assert(parent.close())
+
+    it "refuses private copied metadata rebound to another parent without a new signed payload":
+        val original = windows_deployment_fixture_v2()
+        val copied = windows_deployment_fixture_v2()
+        # All native-private files/record paths match the new parent, but the
+        # retained real signature still authorizes the original binding only.
+        windows_deployment_seed_v2(copied, original.credential, true)
+        val denied = deployment_recovery_fixture_v2(host_windows_deployment_reopen_v2(copied.anchor, copied.binding)).unwrap()
+        expect(denied.residue.phase).to_equal(HostWindowsDeploymentPhaseV2.ChildCreated)
+        expect(denied.error).to_equal("host-service-enrollment-signed-binding-mismatch")

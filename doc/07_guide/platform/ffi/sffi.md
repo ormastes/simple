@@ -32,7 +32,7 @@ The standard pattern for wrapping runtime C functions:
 # In the canonical no-GC sync runtime owner.
 # Actual declarations must state their exact ABI and error contract.
 @unsafe(reason: "raw runtime ABI", capabilities: [ffi])
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 @unsafe(reason: "raw runtime ABI", capabilities: [ffi])
 extern fn rt_file_write_text(path: text, content: text) -> bool
 @unsafe(reason: "raw runtime ABI", capabilities: [ffi])
@@ -47,7 +47,7 @@ Naming convention: `rt_` prefix maps to C functions in `src/runtime/runtime.c`.
 # In src/lib/fs/mod.spl
 use std.ffi.{rt_file_read_text, rt_file_write_text, rt_file_exists}
 
-fn file_read(path: text) -> text:
+fn file_read(path: text) -> text?:
     unsafe(capabilities: [ffi]):
         rt_file_read_text(path)
 
@@ -126,6 +126,19 @@ behavior that changes the raw contract or its cost. `rt_file_read_text`,
 their nullable/sentinel contracts need human review. These mappings are source
 policy only and do not assert ABI compatibility, null safety, ownership,
 provider verification, artifact identity, or signature admission.
+
+### `char*` returns are borrowed (owner decision 2026-11-18)
+
+A C `char*` returned across SFFI is **borrowed by default**: the C side keeps
+ownership, the caller frees nothing, and Simple copies the bytes into `text`
+immediately on return. `sffi_gen` (`ffi-gen --gen-units`) turns
+`extern fn rt_version(major: i32) -> CStr` into a private
+`__raw_rt_version(...) -> i64` plus a facade `pub fn rt_version(...) ->
+Option<text>` that calls `rt_cstring_to_text(ptr)` at once; a null pointer is
+`None`. No pointer ever escapes the facade, and no `free` is emitted. A
+provider that transfers ownership (malloc'd result) needs an explicit,
+separately reviewed adapter; it is not the default. Pinned by
+`test/01_unit/compiler/sffi_gen/sffi_borrowed_cstr_spec.spl`.
 
 ### Return representation is part of the ABI
 
@@ -440,7 +453,7 @@ SFFI-gen produces:
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `rt_file_read_text` | `(path: text) -> text` | Read entire file as text |
+| `rt_file_read_text` | `(path: text) -> text?` | Read entire file as text; `nil` indicates failure |
 | `rt_file_write_text` | `(path: text, content: text) -> bool` | Write text to file |
 | `rt_file_exists` | `(path: text) -> bool` | Check if file exists |
 | `rt_file_delete` | `(path: text) -> bool` | Delete a file |
@@ -797,3 +810,36 @@ When adding a binding: put the raw call in the smallest function carrying an
 explicit `@unsafe(reason: "...", capabilities: [ffi])`, and confirm it is backed
 with `sh scripts/check/extern-backing-census.shs` — the single source of truth,
 which reads `nm` off real link artifacts rather than grepping text.
+
+---
+
+<!-- antigravity-early-defect-detection-2026-11-18 -->
+
+## Early SFFI Preflight Facts and ABI/Resource Lints (`WP-07`, 2026-11-18)
+
+Reconciled with [early_defect_detection_2026-11-18.md](../../../03_plan/compiler/early_defect_detection_2026-11-18.md) (`ED-01`, `ED-04`, `ED-T21..ED-T23`, `ED-T34`):
+
+### SFFI Preflight Fact Contracts (`sffi_preflight_facts_v1.spl`)
+
+Foreign provider verification reuses the canonical diagnostic and cache pipeline rather than a separate FFI error engine (`src/compiler/35.semantics/lint/sffi_preflight_facts_v1.spl`, `src/lib/nogc_sync_mut/sffi/sffi_signature.spl`):
+
+- Each `extern fn` / `@c_abi` boundary emits an immutable target-explicit preflight fact binding declaration identity and span, target triple, pointer width, endianness, C ABI/calling convention, admitted header/library artifact digest (when available), required export symbol/ordinal/weak policy, and explicit verification state (`validated`, `incompatible`, `pending`, or `unavailable`).
+- **Normal build vs. full lint (`ED-02`, `ED-T23`, `ED-T34`):** Normal compilation enforces mandatory call typing, local representation/ABI compatibility, and already-admitted `Low`-cost export metadata without cold-scanning archives or hashing external SDK trees on cache miss; when optional preflight bytes are absent, it records `unavailable` and leaves final link authoritative rather than claiming exports were verified. Full lint performs `Medium`/`High` header/archive/signature audits and caches reusable target-bound indexes.
+
+### Target-Explicit `@c_abi` Obligations (`SPL-SFFI-ABI-001`)
+
+`src/compiler/35.semantics/lint/sffi_abi_mismatch.spl` and `src/compiler/90.tools/lint/rules/sffi_abi_mismatch_rule.spl` enforce `SPL-SFFI-ABI-001` (`ED-04`, `ED-T21`):
+
+- Every `@c_abi` / foreign signature is checked against the explicit target data layout for integer/float width, signedness, register-class family, platform-dependent C widths (`c_long`, `size_t`, pointer width), and imported custom-primitive or unit backing types.
+- Bare Simple `text` or non-transparent aggregates without an explicit C ABI representation/wrapper are rejected, and a matching exported symbol name in a link artifact never overrides an ABI width/signedness/unit mismatch.
+
+### Constrained-Unit Return Validation (`SPL-SFFI-RANGE-001`)
+
+When an SFFI wrapper lifts a raw foreign scalar or pointer return into a constrained unit, bounded custom primitive, non-null handle, or sentinel-checked status type, `SPL-SFFI-RANGE-001` requires explicit range/sentinel validation inside the wrapper's minimal `unsafe(capabilities: [ffi])` scope before constructing the safe Simple return value (returning `Result<T, SffiError>` or `Option<T>` as specified by the boundary contract rather than passing unchecked raw values through).
+
+### Raw-Extern and Foreign-Resource Boundary Metadata
+
+`src/compiler/90.tools/lint/rules/raw_sffi_rule.spl` (`RAW-RT-001`) and `src/compiler/90.tools/lint/rules/unwrapped_foreign_resource_rule.spl` publish structured boundary metadata onto canonical `DiagnosticV1` findings:
+
+- **Raw-extern containment:** Flags direct `extern fn` invocations outside an explicit `@unsafe(reason: "...", capabilities: [ffi])` boundary and attaches reviewed facade metadata only where exact contract-preserving rewrites exist (never auto-inserting `unsafe` or converting sentinel failures into `nil`/`0`).
+- **Foreign-resource wrapping:** Tracks foreign handle acquisition sites so raw integer/pointer handles escaping without an owning resource/wrapper type carry explicit allocator/destructor obligation metadata under `DiagnosticRulePolicy` profile schedules.

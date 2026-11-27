@@ -38,43 +38,45 @@ fn provider_tuple_fixture() -> ProviderTupleFixture:
     var modules: Dict<text, Module> = {}
     modules["app.tuple.provider"] = provider_ast
     val files = [SourceFile(path: "app/tuple/provider.spl", content: provider_tuple_source, module_name: "app.tuple.provider")]
-    if val surfaces = module_surfaces_from_modules(modules, files):
-        var provider_hir = hirlowering_for_module("app/tuple/provider.spl", surfaces)
-        var consumer_hir = hirlowering_for_module("app/tuple/consumer.spl", surfaces)
-        val provider = provider_hir.lower_module(provider_ast)
-        val consumer = consumer_hir.lower_module(consumer_ast)
-        expect(provider_hir.errors.len()).to_equal(0)
-        expect(consumer_hir.errors.len()).to_equal(0)
-        var producer_lowering = MirLowering.new(provider.symbols)
-        val producer_mir = producer_lowering.lower_module(provider, [provider])
-        expect(producer_lowering.errors.len()).to_equal(0)
-        var lowering = MirLowering.new(consumer.symbols)
-        var prescan_mods: Dict<text, HirModule> = {}
-        prescan_mods["consumer"] = consumer
-        prescan_mods["provider"] = provider
-        lowering.prescan_module_struct_names(prescan_mods, "consumer")
-        lowering.prescan_module_struct_names(prescan_mods, "provider")
-        val mir = lowering.lower_module(consumer, [consumer, provider])
-        expect(lowering.errors.len()).to_equal(0)
-        for function in mir.functions.values():
-            if function.name.ends_with(".inspect") or function.name == "inspect":
-                for source_function in provider.functions.values():
-                    if source_function.name == "produce":
-                        val relocated = lowering.relocate_provider_type(source_function.return_type, provider.symbols)
-                        match relocated.kind:
-                            case HirTypeKind.Result(payload, _):
-                                val imported = consumer.symbols.exact_symbols["produce"]
-                                if val callable_return = lowering.resolved_call_hir_return_type(SymbolId(id: imported)):
-                                    expect(callable_return.kind).to_equal(relocated.kind)
-                                else: fail("imported callable lost its consumer-owned signature")
-                                match source_function.return_type.kind:
-                                    case HirTypeKind.Result(provider_payload, _):
-                                        for producer in producer_mir.functions.values():
-                                            if producer.name == "produce" or producer.name.ends_with(".produce"):
-                                                return ProviderTupleFixture(lowering: lowering, function: function, payload: payload, producer: producer, provider_symbols: provider.symbols, provider_payload: provider_payload)
-                                    case _: fail("producer lost its source tuple")
-                            case _: fail("producer lost its declared Result return type")
-        fail("missing lowered consumer or declared producer")
+    match module_surfaces_from_modules(modules, files):
+        case Err(reason): fail("provider surfaces could not be constructed: {reason}")
+        case Ok(surfaces):
+            var provider_hir = hirlowering_for_module("app/tuple/provider.spl", surfaces)
+            var consumer_hir = hirlowering_for_module("app/tuple/consumer.spl", surfaces)
+            val provider = provider_hir.lower_module(provider_ast)
+            val consumer = consumer_hir.lower_module(consumer_ast)
+            expect(provider_hir.errors.len()).to_equal(0)
+            expect(consumer_hir.errors.len()).to_equal(0)
+            var producer_lowering = MirLowering.new(provider.symbols)
+            val producer_mir = producer_lowering.lower_module(provider, [provider])
+            expect(producer_lowering.errors.len()).to_equal(0)
+            var lowering = MirLowering.new(consumer.symbols)
+            var prescan_mods: Dict<text, HirModule> = {}
+            prescan_mods["consumer"] = consumer
+            prescan_mods["provider"] = provider
+            lowering.prescan_module_struct_names(prescan_mods, "consumer")
+            lowering.prescan_module_struct_names(prescan_mods, "provider")
+            val mir = lowering.lower_module(consumer, [consumer, provider])
+            expect(lowering.errors.len()).to_equal(0)
+            for function in mir.functions.values():
+                if function.name.ends_with(".inspect") or function.name == "inspect":
+                    for source_function in provider.functions.values():
+                        if source_function.name == "produce":
+                            val relocated = lowering.relocate_provider_type(source_function.return_type, provider.symbols)
+                            match relocated.kind:
+                                case HirTypeKind.Result(payload, _):
+                                    val imported = consumer.symbols.exact_symbols["produce"]
+                                    if val callable_return = lowering.resolved_call_hir_return_type(SymbolId(id: imported)):
+                                        expect(callable_return.kind).to_equal(relocated.kind)
+                                    else: fail("imported callable lost its consumer-owned signature")
+                                    match source_function.return_type.kind:
+                                        case HirTypeKind.Result(provider_payload, _):
+                                            for producer in producer_mir.functions.values():
+                                                if producer.name == "produce" or producer.name.ends_with(".produce"):
+                                                    return ProviderTupleFixture(lowering: lowering, function: function, payload: payload, producer: producer, provider_symbols: provider.symbols, provider_payload: provider_payload)
+                                        case _: fail("producer lost its source tuple")
+                                case _: fail("producer lost its declared Result return type")
+            fail("missing lowered consumer or declared producer")
     fail("provider surfaces could not be constructed")
 
 fn provider_tuple_fields(type_: HirType) -> [HirType]:
@@ -234,13 +236,15 @@ describe "Result try tuples with imported provider handles":
         lowering.result_err_layout_types["app.tuple.provider::Issue"] = ""
         expect(lowering.result_try_tuple_payload_type(fixture.payload)).to_be_nil()
 
-    it "keeps direct text and Dict of value-record tuple fields unsupported":
+    it "admits direct text but keeps fixed, slice and Dict of value-record tuple fields unsupported":
         val fixture = provider_tuple_fixture()
         var lowering = fixture.lowering
         val span = Span.empty()
         val text_type = HirType(kind: HirTypeKind.Str, span: span)
         val text_tuple = HirType(kind: HirTypeKind.Tuple([text_type]), span: span)
-        expect(lowering.result_try_tuple_payload_type(text_tuple)).to_be_nil()
+        # A text slot is one native string-pointer word (Opaque("str")), the
+        # same contract unwrap and `?` use; fixed arrays and slices stay out.
+        expect(lowering.result_try_tuple_payload_type(text_tuple)).to_equal(Some(MirType(kind: MirTypeKind.Tuple([MirType(kind: MirTypeKind.Opaque("str"))]))))
         val integer = HirType(kind: HirTypeKind.Int(64, true), span: span)
         val fixed = HirType(kind: HirTypeKind.Array(integer, Some(2)), span: span)
         val slice = HirType(kind: HirTypeKind.Slice(integer), span: span)
@@ -263,7 +267,8 @@ describe "Result try tuples with imported provider handles":
         val float_type = HirType(kind: HirTypeKind.Float(64), span: span)
         val pair = HirType(kind: HirTypeKind.Tuple([integer, integer]), span: span)
         val numeric = HirType(kind: HirTypeKind.Tuple([boolean, float_type, pair]), span: span)
-        expect(lowering.result_try_tuple_payload_type(numeric)).to_equal(result_tuple_payload_type(numeric))
+        val numeric_mir = MirType(kind: MirTypeKind.Tuple([MirType.bool(), MirType.f64(), MirType(kind: MirTypeKind.Tuple([MirType.i64(), MirType.i64()]))]))
+        expect(lowering.result_try_tuple_payload_type(numeric)).to_equal(Some(numeric_mir))
         val result_type = HirType(kind: HirTypeKind.Result(fixture.payload, HirType(kind: HirTypeKind.Str, span: span)), span: span)
         val symbol = lowering.symbols.define("pending", SymbolKind.Parameter, result_type, span, Visibility.Private, false, Some("app.tuple.consumer"))
         var builder = lowering.builder

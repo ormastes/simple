@@ -1,6 +1,6 @@
 # `push-main-test-runnable` cannot pass on this host — no deployed binary both has `test` and reads the tree (2026-09-03)
 
-Status: OPEN — environmental, blocks every push from this machine
+Status: PARTIALLY FIXED 2026-11-04 — guard is now portable (macOS/BSD) and gives an honest ERROR for a binary without `test`; satisfying it still needs a deployed full-CLI self-hosted macOS binary (bootstrap lane)
 
 ## Verdict
 
@@ -94,3 +94,24 @@ After the fix, fixture F passes and C2 reduces to the real, documented cause:
 `error: unknown command 'test'` — the deployed binary is the BOOTSTRAP CLI
 (`simple-bootstrap 1.0.0-beta`), which exposes only `compile` and
 `native-build`. That is the unsatisfiability recorded above, unchanged.
+
+## Update 2026-11-04 — Linux-only assumptions removed; honest verdict on macOS/BSD
+
+Fixed in `scripts/check/check-main-test-runnable-push.shs`:
+
+- `sha256sum` was hard-required (absent on older macOS and pre-14 FreeBSD;
+  a missing tool collapsed every marker digest to the same empty key). Now
+  `sha256sum` -> `shasum -a 256` -> `sha256 -q`, reduced to the bare hex so
+  the key is identical across tools; none available is ERROR.
+- `timeout` was hard-required (stock macOS has none). A missing tool returned
+  rc=127 `command not found`, which the guard reported as a tree FAIL. Now
+  `timeout` -> `gtimeout`; none is ERROR, never an unbounded run.
+- A binary with no `test` subcommand (the BOOTSTRAP cli, `simple-bootstrap`)
+  used to surface as `SELFTEST FAIL: C2` — blaming the tree. A capability
+  probe now reports it as `ERROR — nothing was checked (... has no 'test'
+  subcommand ...)`, exit 2 (still blocking).
+
+Not weakened: C2 (unparseable source must fail with a parse diagnostic) is
+unchanged, so a binary that has `test` but serves a baked-in stdlib still
+FAILs. Remaining blocker (not fixable in this guard): no admitted full-CLI
+self-hosted macOS binary is deployed; that belongs to the bootstrap lane.

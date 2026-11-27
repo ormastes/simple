@@ -11,8 +11,9 @@ Contains: scaled image, box blur, drop shadow, affine transform, and
 blend mode rect.
 """
 
-use std.gpu.engine2d.backend.{RenderBackend}
+use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend}
 use std.gpu.engine2d.color.{color_r, color_g, color_b, color_a, rgba}
+use std.gc_async_mut.gpu.engine2d.helpers.blur_kernel.{engine2d_blur_step_profile}
 use std.gpu.engine2d.backend_emu_math.{_emu_min, _emu_max, _emu_overlay_ch, _emu_blend_over}
 
 # ============================================================================
@@ -82,7 +83,7 @@ fn emu_draw_image_blend(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32,
     var region: [u32] = []
     var fb: [u32] = []
     if core.name() == "software":
-        region = core.read_pixels_region(x, y, w, h).pixels
+        region = core.read_pixels_region_raw(x, y, w, h)
         use_region = region.len().to_i64() == w.to_i64() * h.to_i64()
     if not use_region:
         fb = core.read_pixels()
@@ -105,7 +106,7 @@ fn emu_draw_image_blend(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32,
                     if sa == 0:
                         result[py * w + px] = dst
                     else:
-                        result[py * w + px] = _emu_blend_over(color_r(src), color_g(src), color_b(src), sa, dst)
+                        result[py * w + px] = _emu_blend_over(color_r(src), color_g(src), color_b(src), sa, dst, false)
             px = px + 1
         py = py + 1
     core.draw_image(x, y, w, h, result)
@@ -126,8 +127,8 @@ fn emu_draw_image_blend(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32,
 # count and `sum/cnt` uses the identical i32 division.
 #
 # Pass 1 covers source rows ri in 0 .. h+2*radius-1 (fy = y - radius + ri), so
-# every row pass 2 needs (ri in [py, py+2*radius], py < h) always exists and no
-# clamping is required in pass 2.
+# every row band 2 needs (ri in [py, py+2*radius], py < h) always exists and no
+# clamping is required in band 2.
 #
 # Inlined color_r/g/b/a (2D-1 perf fix) is preserved: same bit math as
 # color_r/g/b/a in color.spl, output-identical, but without 4 free-fn dispatches
@@ -148,7 +149,7 @@ fn emu_draw_blur_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, r
     var ha: [i32] = [0; span]
     var hc: [i32] = [0; span]
     var ri: i32 = 0
-    # cpu-lane-loop-ok: box blur horizontal pass row walk: one iteration per source row
+    # cpu-lane-loop-ok: box blur horizontal band row walk: one iteration per source row
     while ri < rows:
         val fy = y - radius + ri
         if fy >= 0 and fy < fb_h:
@@ -200,7 +201,7 @@ fn emu_draw_blur_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, r
         ri = ri + 1
     var temp: [u32] = [0u32; w * h]
     var px2: i32 = 0
-    # cpu-lane-loop-ok: box blur vertical pass column walk: one iteration per destination column
+    # cpu-lane-loop-ok: box blur vertical band column walk: one iteration per destination column
     while px2 < w:
         var sr: i32 = 0
         var sg: i32 = 0
@@ -221,7 +222,7 @@ fn emu_draw_blur_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, r
         while py < h:
             if cnt > 0:
                 temp[py * w + px2] = rgba(sr / cnt, sg / cnt, sb / cnt, sa / cnt)
-            # Step the vertical window one row down over the pass-1 rows.
+            # Step the vertical window one row down over the band-1 rows.
             val leave = py * w + px2
             val enter = (py + 2 * radius + 1) * w + px2
             sr = sr - hr[leave]
@@ -243,47 +244,14 @@ fn emu_draw_blur_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, r
 # Drop Shadow — Offset + blur + blend compose
 # ============================================================================
 
-fn _emu_box_blur_1d(src: [i32], n: i32, r: i32) -> [i32]:
-    if r <= 0:
-        return src
-    val win = 2 * r + 1
-    var out: [i32] = [0; n]
-    var sum = 0
-    var k = 0 - r
-    while k <= r:  # cpu-lane-loop-ok: window priming, 2r+1 steps
-        if k >= 0 and k < n:
-            sum = sum + src[k]
-        k = k + 1
-    var i = 0
-    while i < n:  # cpu-lane-loop-ok: one iteration per profile sample
-        out[i] = sum / win
-        val leave = i - r
-        val enter = i + r + 1
-        if leave >= 0 and leave < n:
-            sum = sum - src[leave]
-        if enter >= 0 and enter < n:
-            sum = sum + src[enter]
-        i = i + 1
-    out
-
-# 1D coverage profile (0..255) of a blurred step of length `span` starting at
-# `offset` within a buffer of length `n`. Three box passes approximate a
-# gaussian (central limit); box radius r ~= sigma, and CSS defines a box-shadow
-# blur radius as 2*sigma, so the caller passes blur_r/2.
-#
-# A box blur of an AXIS-ALIGNED rect is exactly separable, so the 2D coverage is
+# A blur of an AXIS-ALIGNED rect is exactly separable, so the 2D coverage is
 # the outer product of the x and y profiles. That is why no 2D mask is ever
-# materialized: the cost is O(w + h) profile work plus one composite pass.
-fn _emu_shadow_profile(n: i32, offset: i32, span: i32, r: i32) -> [i32]:
-    var p: [i32] = [0; n]
-    var i = offset
-    while i < offset + span:  # cpu-lane-loop-ok: one iteration per covered sample
-        if i >= 0 and i < n:
-            p[i] = 255
-        i = i + 1
-    var out = _emu_box_blur_1d(p, n, r)
-    out = _emu_box_blur_1d(out, n, r)
-    _emu_box_blur_1d(out, n, r)
+# materialized: the cost is O(w + h) profile work plus one composite band.
+# One axis of the shadow coverage (0..255): the step [offset, offset + span) over n
+# samples, blurred with sigma = blur_r / 2 by Chrome 159's Skia kernel (the
+# raster painter shares it).
+fn _emu_shadow_profile(n: i32, offset: i32, span: i32, blur_r: i32) -> [i32]:
+    engine2d_blur_step_profile(offset, offset + span, 0, n, blur_r * 500)
 
 # Standard CSS drop shadow: rasterize the shadow rect as an ALPHA COVERAGE
 # field, blur that coverage, then composite the shadow colour through it.
@@ -295,14 +263,35 @@ fn _emu_shadow_profile(n: i32, offset: i32, span: i32, r: i32) -> [i32]:
 #
 # Coverage crosses 1/2 exactly ON the shadow rect edge, which is the CSS/Chrome
 # definition.
+# One shadow pixel: colour (sr, sg, sb) at coverage `cov` over `dst`. Over an
+# opaque destination this is the integer formula the Vulkan kernel twins;
+# over a translucent one (an opacity group or other transparent offscreen)
+# it is Chrome's src-over, so the shadow keeps its own alpha there.
+fn _emu_shadow_px(sr: i32, sg: i32, sb: i32, cov: i32, dst: u32) -> u32:
+    if ((dst >> 24) & 0xFFu32) != 0xFFu32:
+        return _emu_blend_over(sr, sg, sb, cov, dst, true)
+    val rr = (sr * cov + (((dst >> 16) & 0xFFu32) as i32) * (255 - cov)) / 255
+    val rg = (sg * cov + (((dst >> 8) & 0xFFu32) as i32) * (255 - cov)) / 255
+    val rb = (sb * cov + ((dst & 0xFFu32) as i32) * (255 - cov)) / 255
+    0xFF000000u32 | ((rr as u32) << 16) | ((rg as u32) << 8) | (rb as u32)
+
 fn emu_draw_shadow_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
+    emu_draw_shadow_rect_outside(core, x, y, w, h, offset_x, offset_y, blur_r, color, 0, 0, 0, 0)
+
+# emu_draw_shadow_rect with the pixels of the hole (hx, hy, hw, hh) left as
+# they are. The Draw IR box painter passes the part of the border box that it
+# repaints opaque or restores (an outer shadow is clipped to outside the
+# border box), so a box taller than the frame -- 852 x 16939 CSS px is the
+# whole frame at device scale 4 -- composites, reads and writes only the
+# falloff bands beside it instead of its whole in-frame interior.
+fn emu_draw_shadow_rect_outside(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32, hx: i32, hy: i32, hw: i32, hh: i32):
     if w <= 0 or h <= 0:
         return
     val sx = x + offset_x
     val sy = y + offset_y
     var shadow_a = ((color >> 24) & 0xFFu32) as i32
     if shadow_a == 0:
-        # Legacy callers pass a bare 0x00RRGGBB; keep those opaque.
+        # Legacy callers band a bare 0x00RRGGBB; keep those opaque.
         shadow_a = 255
     if blur_r <= 0:
         core.draw_rect_filled(sx, sy, w, h, color)
@@ -315,41 +304,188 @@ fn emu_draw_shadow_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32,
     val mh = h + 2 * pad
     if mw <= 0 or mh <= 0:
         return
-    val br = if blur_r / 2 < 1: 1 else: blur_r / 2
-    val prof_x = _emu_shadow_profile(mw, pad, w, br)
-    val prof_y = _emu_shadow_profile(mh, pad, h, br)
-    val fb: [u32] = core.read_pixels()
+    # Only the part of the shadow region inside the surface is ever written
+    # (draw_image clips), so only that part is read and composited.
     val fb_w = core.width()
     val fb_h = core.height()
+    val cx0 = if mx < 0: 0 else: mx
+    val cy0 = if my < 0: 0 else: my
+    val cx1 = if mx + mw > fb_w: fb_w else: mx + mw
+    val cy1 = if my + mh > fb_h: fb_h else: my + mh
+    if cx1 <= cx0 or cy1 <= cy0:
+        return
+    # Each axis is sampled over the in-frame span only: a sample depends on
+    # the step and the fixed-support kernel, not on the sampled span, so a
+    # 67908 px tall box costs its in-frame rows, not its height.
+    val prof_x = engine2d_blur_step_profile(sx, sx + w, cx0, cx1, blur_r * 500)
+    val prof_y = engine2d_blur_step_profile(sy, sy + h, cy0, cy1, blur_r * 500)
     val sr = ((color >> 16) & 0xFFu32) as i32
     val sg = ((color >> 8) & 0xFFu32) as i32
     val sb = (color & 0xFFu32) as i32
-    var outp: [u32] = [0u32; mw * mh]
-    var py = 0
-    while py < mh:  # cpu-lane-loop-ok: one iteration per shadow-region row
-        val fy = my + py
-        val cov_y = prof_y[py]
-        var px = 0
-        while px < mw:  # cpu-lane-loop-ok: one iteration per shadow-region column
-            val fx = mx + px
-            val idx = py * mw + px
-            var dst: u32 = 0u32
-            if fx >= 0 and fx < fb_w and fy >= 0 and fy < fb_h:
-                dst = fb[fy * fb_w + fx]
-            val cov = ((prof_x[px] * cov_y) / 255 * shadow_a) / 255
-            if cov <= 0:
-                outp[idx] = dst
-            else:
-                val dr = ((dst >> 16) & 0xFFu32) as i32
-                val dg = ((dst >> 8) & 0xFFu32) as i32
-                val db = (dst & 0xFFu32) as i32
-                val rr = (sr * cov + dr * (255 - cov)) / 255
-                val rg = (sg * cov + dg * (255 - cov)) / 255
-                val rb = (sb * cov + db * (255 - cov)) / 255
-                outp[idx] = ((rr as u32) << 16) | ((rg as u32) << 8) | (rb as u32)
-            px = px + 1
-        py = py + 1
-    core.draw_image(mx, my, mw, mh, outp)
+    val h0x = _emu_max(hx, cx0)
+    val h1x = _emu_min(hx + hw, cx1)
+    val h0y = _emu_max(hy, cy0)
+    val h1y = _emu_min(hy + hh, cy1)
+    if hw <= 0 or hh <= 0 or h1x <= h0x or h1y <= h0y:
+        _emu_shadow_band(core, cx0, cy0, cx1 - cx0, cy1 - cy0,
+            prof_x, cx0, prof_y, cy0, sr, sg, sb, shadow_a)
+        return
+    # Above and below the hole at full width, then left and right of it.
+    _emu_shadow_band(core, cx0, cy0, cx1 - cx0, h0y - cy0,
+        prof_x, cx0, prof_y, cy0, sr, sg, sb, shadow_a)
+    _emu_shadow_band(core, cx0, h1y, cx1 - cx0, cy1 - h1y,
+        prof_x, cx0, prof_y, cy0, sr, sg, sb, shadow_a)
+    _emu_shadow_band(core, cx0, h0y, h0x - cx0, h1y - h0y,
+        prof_x, cx0, prof_y, cy0, sr, sg, sb, shadow_a)
+    _emu_shadow_band(core, h1x, h0y, cx1 - h1x, h1y - h0y,
+        prof_x, cx0, prof_y, cy0, sr, sg, sb, shadow_a)
+
+# Composite colour (sr, sg, sb) at alpha `shadow_a` through the separable
+# coverage over the frame rect (bx, by, bw, bh): prof_x[i] is the coverage of
+# column px0 + i and prof_y[j] of row py0 + j. Only the rows and columns with
+# non-zero coverage are read and written.
+fn _emu_shadow_band(mut core: RenderBackend, bx: i32, by: i32, bw: i32, bh: i32, prof_x: [i32], px0: i32, prof_y: [i32], py0: i32, sr: i32, sg: i32, sb: i32, shadow_a: i32):
+    if bw <= 0 or bh <= 0:
+        return
+    # Columns whose coverage is non-zero (nz0..nz1) and full (i0..i1), in
+    # band columns. A blurred step rises, holds 255, then falls, so both are
+    # one run; outside nz0..nz1 the pixel stays the destination, and inside
+    # i0..i1 the coverage is one constant per row.
+    var nz0 = bw
+    var nz1 = 0
+    var i0 = bw
+    var i1 = 0
+    var c = 0
+    while c < bw:  # cpu-lane-loop-ok: one iteration per profile sample, O(w) not O(w*h)
+        val p = prof_x[bx - px0 + c]
+        if p > 0:
+            if c < nz0:
+                nz0 = c
+            nz1 = c + 1
+        if p == 255:
+            if c < i0:
+                i0 = c
+            i1 = c + 1
+        c = c + 1
+    if nz1 <= nz0:
+        return
+    if i1 <= i0:
+        i0 = nz1
+        i1 = nz1
+    var r0 = bh
+    var r1 = 0
+    var r = 0
+    while r < bh:  # cpu-lane-loop-ok: one iteration per profile sample, O(h) not O(w*h)
+        if prof_y[by - py0 + r] > 0:
+            if r < r0:
+                r0 = r
+            r1 = r + 1
+        r = r + 1
+    if r1 <= r0:
+        return
+    # Region columns: [0, cw) is band columns [nz0, nz1).
+    val cw = nz1 - nz0
+    val rh = r1 - r0
+    val e0 = i0 - nz0
+    val e1 = i1 - nz0
+    val col_off = bx + nz0 - px0
+    # `src` is only ever read and `outp` only ever written: the interpreter
+    # re-decodes an array's whole backing store when a slice/min/max read
+    # follows a write to it, so mixing both on one array costs O(region) per
+    # row. A composed row is built in the row-sized `line` for the same reason.
+    val src: [u32] = core.read_pixels_region_raw(bx + nz0, by + r0, cw, rh)
+    var outp: [u32] = src
+    var line: [u32] = []
+    var prev_cur: [u32] = []
+    var prev_cov_y = -1
+    # _emu_shadow_px memo: memo_out[cov] is the pixel for destination
+    # memo_dst[cov] (-1 = none). Exact: the colour is fixed for the call.
+    var memo_dst: [i64] = [-1; 256]
+    var memo_out: [u32] = [0u32; 256]
+    # Last composed falloff segment per band (0 left, 1 right): the same
+    # coverage row over the same destination composes the same pixels.
+    var ecov0 = -1
+    var esrc0: [u32] = []
+    var eout0: [u32] = []
+    var ecov1 = -1
+    var esrc1: [u32] = []
+    var eout1: [u32] = []
+    var row = 0
+    while row < rh:  # cpu-lane-loop-ok: one iteration per shadow-region row
+        val cov_y = prof_y[by + r0 + row - py0]
+        if cov_y > 0:
+            val row_base = row * cw
+            val cur = src.slice(row_base, row_base + cw)
+            # A row with the coverage of the last composed row over the same
+            # destination composes the same pixels: one native compare and
+            # one span instead of a per-pixel pass.
+            if not (cov_y == prev_cov_y and cur == prev_cur):
+                line = cur
+                # Interior: coverage is one constant for the whole row segment.
+                val icov = ((255 * cov_y + 127) / 255 * shadow_a + 127) / 255
+                if icov > 0 and e1 > e0:
+                    val dst = cur[e0]
+                    if cur.slice(e0, e1) == [dst; e1 - e0]:
+                        # Uniform destination: one pixel formula, one bulk span.
+                        val fill_row: [u32] = [_emu_shadow_px(sr, sg, sb, icov, dst); e1 - e0]
+                        line.write_span(fill_row, e0 as i64, 0, (e1 - e0) as i64)
+                    else:
+                        # Destination varies: 64-px chunks; a uniform chunk
+                        # (one native compare) is one span, else per pixel.
+                        var ix = e0
+                        while ix < e1:  # cpu-lane-loop-ok: one iteration per 64-px chunk
+                            val cend = if ix + 64 < e1: ix + 64 else: e1
+                            val d0 = cur[ix]
+                            if memo_dst[icov] != (d0 as i64):
+                                memo_dst[icov] = d0 as i64
+                                memo_out[icov] = _emu_shadow_px(sr, sg, sb, icov, d0)
+                            if cur[cend - 1] == d0 and cur.slice(ix, cend) == [d0; cend - ix]:
+                                line.write_span([memo_out[icov]; cend - ix], ix as i64, 0, (cend - ix) as i64)
+                                ix = cend
+                            else:
+                                while ix < cend:  # cpu-lane-loop-ok: destination varies within this chunk
+                                    val d = cur[ix]
+                                    if memo_dst[icov] != (d as i64):
+                                        memo_dst[icov] = d as i64
+                                        memo_out[icov] = _emu_shadow_px(sr, sg, sb, icov, d)
+                                    line[ix] = memo_out[icov]
+                                    ix = ix + 1
+                # Edges: the falloff bands, per pixel.
+                var band = 0
+                while band < 2:  # cpu-lane-loop-ok: two edge bands per row
+                    var px = if band == 0: 0 else: e1
+                    val pend = if band == 0: e0 else: cw
+                    if pend > px:
+                        val seg = cur.slice(px, pend)
+                        val hit = if band == 0: cov_y == ecov0 and seg == esrc0 else: cov_y == ecov1 and seg == esrc1
+                        if hit:
+                            line.write_span(if band == 0: eout0 else: eout1, px as i64, 0, (pend - px) as i64)
+                        else:
+                            val seg_start = px
+                            while px < pend:  # cpu-lane-loop-ok: falloff band only, not the whole row
+                                val cov = ((prof_x[px + col_off] * cov_y + 127) / 255 * shadow_a + 127) / 255
+                                if cov > 0:
+                                    val d = cur[px]
+                                    if memo_dst[cov] != (d as i64):
+                                        memo_dst[cov] = d as i64
+                                        memo_out[cov] = _emu_shadow_px(sr, sg, sb, cov, d)
+                                    line[px] = memo_out[cov]
+                                px = px + 1
+                            val out_seg = line.slice(seg_start, pend)
+                            if band == 0:
+                                ecov0 = cov_y
+                                esrc0 = seg
+                                eout0 = out_seg
+                            else:
+                                ecov1 = cov_y
+                                esrc1 = seg
+                                eout1 = out_seg
+                    band = band + 1
+                prev_cur = cur
+                prev_cov_y = cov_y
+            outp.write_span(line, row_base as i64, 0, cw as i64)
+        row = row + 1
+    core.draw_image(bx + nz0, by + r0, cw, rh, outp)
 
 # ============================================================================
 # Affine Transform Image — Per-pixel inverse transform sample

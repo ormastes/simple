@@ -99,3 +99,44 @@ native-build route. Items 1 and 3 are tractable; item 2 needs design.
 - `doc/08_tracking/feature/editor_markdown_editing_subsystem_2026-05-28.md`
   (editor render path — separate, native-route concern).
 - `doc/08_tracking/bug/seed_octal_string_escape_misdecode_2026-05-28.md`.
+
+---
+
+## Triage 2026-11-25 (p2w2-ab lane, Windows x86_64, pinned seed `bin/simple.exe` v1.0.0-rc.1, release/1.0.0 @ eb3c9c25f74)
+
+Re-ran the repro `SIMPLE_LIB=src bin/simple.exe run src/app/editor/main.spl -- --tui`:
+
+- The 2026-09-13 masking blocker (`ANY`-typed `window_title` field inference
+  in `gui_shell_run_sdl`) is **gone** — that HIR-lowering error no longer
+  appears.
+- A **new** earlier blocker now masks items 1 and 2: `[jit-fallback] HIR
+  lowering error: ambiguous call to 'md_dispatch_motion': 2 co-compiled
+  definitions (src/app/editor/md_dispatch.spl, src/lib/editor/view/md_editing.spl)
+  ... [compiler_cross_module_private_symbol_collision]` — the whole module is
+  dropped to the interpreter before codegen runs, so `Copy: source vreg
+  VReg(5) not found` (item 1) and `rt_compile_to_native_with_opt` (item 2)
+  still cannot be confirmed fixed or broken from this repro.
+- Item 3 remains fixed (2026-05-29 note above); items 1 and 2 live in the
+  Rust seed's Cranelift JIT (`codegen/instr/calls.rs`, vreg value-map) and an
+  interpreter-extern bridge design respectively — both are Rust-seed-only /
+  architectural and out of scope for a pure-Simple bounded fix.
+
+**Classification: SKIP (still OPEN).** Actionable next step is now: resolve
+the `md_dispatch_motion` duplicate-definition collision between
+`src/app/editor/md_dispatch.spl` and `src/lib/editor/view/md_editing.spl`
+(selective import or rename), then re-measure items 1 and 2.
+
+
+---
+
+## 2026-11-27 W4-9 Fix & Verification Update (Windows Seed Host)
+
+- **Code changes (strict `src/app/editor/**` + `test/01_unit/app/editor/**` scope):**
+  - Replaced `use app.editor.md_dispatch.*` wildcards and ambiguous calls in `src/app/editor/editor_ctrl_core.spl`, `editor_controller.spl`, `editor_ctrl_core2.spl`, `commands.spl`, `editor_ctrl_diagnostics.spl`, `editor_ctrl_lsp.spl`, `editor_ctrl_lsp2.spl`, `editor_ctrl_wiki.spl`, and `gui_shell_core.spl` with selective imports of `std.editor.view.md_editing.{md_dispatch_motion, md_apply_result}`, `std.editor.services.md_diagnostics.{md_diagnose}`, `std.editor.extensions.builtin.md_commands.{md_buffer_content}`, `std.editor.services.md_doc_stats.{md_compute_stats}`, and `app.editor.md_dispatch.{md_buffer_content, md_update_preview, md_update_preview_with_wiki}` (preserving `src/app/editor/md_dispatch.spl`'s public API).
+  - Added `src/app/editor/editor_jit_helpers.spl` (`app_editor_layout_with_group`, `app_md_lsp_change_active`, `app_palette_show`, `app_palette_selected`, `app_palette_select_next`, `app_palette_select_prev`) and direct field reads on `ExtensionCommandEntry` / `ExtensionCommandInvocation` to eliminate all 10 semantic private-fn visibility errors when loading `src/app/editor/main.spl` under strict JIT.
+  - Added `test/01_unit/app/editor/editor_jit_import_resolution_spec.spl` (with `@engine-reach: interpreter-only`).
+- **Verbatim Windows verification:**
+  - `SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1 simple.exe run src/app/editor/main.spl --version` -> ZERO ambiguous-call or semantic visibility errors; executed entrypoint printing `Simple Editor v0.1.0` (`STRICT_JIT_RC=0`), while still logging `[engine-demotion] reason=hybrid-interp-splice detail=<95 GPU/SDL/OpenGL/WebGPU/OneAPI/Font/DAP/OwnedProcess rt_* externs>`.
+  - `test/01_unit/app/editor/editor_jit_import_resolution_spec.spl`: `outcome=OK declared>=4 executed=4 passed=4 failed=0` (`RC=0`).
+  - `tui_split_owner_imports_spec.spl`: `6 passed, 0 failed`; `phase2_editor_type_imports_spec.spl`: `3 passed, 0 failed`; `keybinding_dispatch_spec.spl`: `3 passed, 0 failed`; `md_toggle_bold_spec.spl`: `13 passed, 0 failed`; `editor_hardening_spec.spl`: `56 passed, 3 failed` (pre-existing Windows `is_err` on `bool` for `write_frame`/`start_simple_adapter`).
+- **Status:** `fix-implemented-verification-pending` (`waiting-for:` `src/compiler_rust` items 1/2 native Cranelift `VReg(5)` / ABI extern support and eliminating `hybrid-interp-splice` extern fallback outside this slim sparse worktree).

@@ -15,25 +15,19 @@ use os.kernel.log.klog_api.{log_info}
 use std.common.string_core.{text_to_bytes}
 
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
-extern fn rt_thread_sleep(ms: i64) -> i64
+extern fn rt_thread_sleep(ms: i64)
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
-extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
 extern fn rt_bytes_concat(a: [u8], b: [u8]) -> [u8]
 extern fn serial_println(msg: text)
 
 fn _build_channel_data_stable(recipient: u32, data: [u8]) -> [u8]:
     var payload: [u8] = []
-    payload = rt_push_byte(payload, 94)
+    payload.push(94u8)
     payload = _push_u32_be_stable(payload, recipient)
     payload = _push_u32_be_stable(payload, data.len().to_u32())
-    # Copy the DATA via the `.push` intrinsic, NOT the `payload =
-    # rt_push_byte(payload, ..)` reassignment form: on x86_64 freestanding
-    # native-build the reassignment form drops the BYTE_PACKED representation
-    # once the array grows large and corrupts the copy — this was the Inc-3
-    # getfile 0x53-garbage bug (712-byte /hello.o delivered as garbage while
-    # small handshake/exit packets, which stay inline-packed, delivered fine).
-    # See _copy_bytes_stable's note. The 9-byte header above stays small enough
-    # for the reassignment helpers.
+    # Copy header and payload bytes directly via the `.push` intrinsic instead
+    # of `rt_push_byte` reassignment so BYTE_PACKED storage is preserved across
+    # all sizes without freestanding extern symbol collisions.
     var i: u64 = 0
     while i < data.len():
         payload.push(ssh_session_u8_at(data, i))
@@ -153,7 +147,7 @@ fn _scp_ctrl_line(size: i64, name_bytes: [u8]) -> [u8]:
     else:
         while v > 0:
             var db: [u8] = []
-            db = rt_push_byte(db, (v % 10) + 0x30)
+            db.push(((v % 10) + 0x30) as u8)
             digits = rt_bytes_concat(db, digits)
             v = v / 10
     var out = _copy_bytes_stable([0x43, 0x30, 0x36, 0x34, 0x34, 0x20])
@@ -184,7 +178,7 @@ fn _scp_read_file_bytes(path: text) -> ([u8], i64):
     var i: u64 = 0
     while i < fsize.to_u64():
         val b = mmio_read8(buf + i)
-        out = rt_push_byte(out, b.to_i64())
+        out.push(b)
         i = i + 1
     (out, fsize)
 
@@ -231,7 +225,7 @@ fn _scp_last_token_bytes(command: text) -> [u8]:
                 last = cur
                 cur = []
         else:
-            cur = rt_push_byte(cur, code)
+            cur.push((code & 0xFF) as u8)
         i = i + 1
     if cur.len() > 0:
         last = cur
@@ -250,7 +244,7 @@ fn _scp_basename_bytes(path_bytes: [u8]) -> [u8]:
     var out: [u8] = []
     var j = last_slash + 1
     while j < n:
-        out = rt_push_byte(out, rt_bytes_u8_at(path_bytes, j))
+        out.push((rt_bytes_u8_at(path_bytes, j) & 0xFF) as u8)
         j = j + 1
     out
 
@@ -307,8 +301,11 @@ impl SshSession:
                 continue
             elif msg_type == 96:
                 # Peer EOF is half-close notification; retain the channel
-                # until an explicit SSH_MSG_CHANNEL_CLOSE arrives.
-                if payload.len() < 5u64 or not self.channels.mark_peer_eof(_read_u32_stable(payload, 1u64)):
+                # until an explicit SSH_MSG_CHANNEL_CLOSE arrives.  The RFC
+                # payload is exactly the message byte plus one uint32 channel;
+                # rejecting trailing bytes keeps malformed connection-layer
+                # frames from being accepted as a valid state transition.
+                if payload.len() != 5u64 or not self.channels.mark_peer_eof(_read_u32_stable(payload, 1u64)):
                     self.transition_closed()
                     return
                 continue
@@ -694,7 +691,7 @@ impl SshSession:
             i = i + 1
 
     me _ensure_shell_started(show_prompt: bool):
-        if self.shell != nil:
+        if self.shell.is_some():
             return
         var shell = SshRemoteShell.new()
         if show_prompt:
@@ -748,7 +745,7 @@ impl SshSession:
             self.channels.remove_closed()
 
     me _forward_shell_output():
-        if self.shell == nil:
+        if self.shell.is_none():
             return
         if val shell = self.shell:
             val output = shell.take_remote_output()

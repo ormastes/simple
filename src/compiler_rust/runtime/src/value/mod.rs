@@ -35,6 +35,7 @@ mod core;
 pub mod diagram_sffi;
 pub mod profiler_sffi;
 mod dict;
+mod dict_scope_read;
 pub mod db_accel_bitmap_ops;
 // SFFI object-based system
 pub mod sffi_example;
@@ -57,6 +58,8 @@ pub mod monoio_future;
 pub mod net;
 mod numeric_kernels;
 mod objects;
+mod rc_graph;
+pub use rc_graph::{rt_heap_graph_bytes, rt_rc_count, rt_rc_release, rt_rc_retain, rt_rc_share};
 mod ownership;
 pub mod pbkdf2_native;
 mod process;
@@ -134,16 +137,18 @@ pub use collections::{
     rt_array_clear, rt_array_data_ptr, rt_array_data_ptr_text, rt_array_extend_i64, rt_array_free, rt_array_free_deep,
     rt_array_first, rt_array_get, rt_array_get_i64_raw, rt_array_get_text, rt_array_header_ptr, rt_array_len,
     rt_array_len_safe, rt_arm_array_get_byte_u32, rt_arm_array_len_u32, rt_array_new, rt_array_new_with_cap_u64, rt_array_pop, rt_array_push, rt_array_push_i64_raw,
-    rt_array_set, rt_array_set_len_known, rt_array_set_len_known_text, rt_array_set_text,
+    rt_array_reserve, rt_array_set, rt_array_set_len_known, rt_array_set_len_known_text, rt_array_set_text,
     rt_transient_array_scope_begin, rt_transient_array_scope_end, rt_transient_array_scope_pause,
-    rt_transient_array_scope_state_v1,
+    rt_transient_array_scope_state_v1, rt_transient_array_scope_identity_v1, rt_allocation_owner_identity_v1,
     rt_transient_heap_promote, rt_transient_heap_promote_share_begin, rt_transient_heap_promote_share_end,
+    rt_session_alloc_begin, rt_session_alloc_end, rt_session_heap_begin, rt_session_heap_end, rt_session_heap_id,
+    rt_transient_heap_adopt, session_adopt_visits_debug, session_heap_owns,
     transient_heap_scope_paused, rt_byte_array_new, rt_byte_array_new_len, rt_bytes_u32_le_at, rt_bytes_u64_le_at,
-    rt_bytes_u8_at, rt_bytes_u8_set, rt_collection_set, rt_contains, rt_cstring_to_text, rt_hash_text, rt_for_iterable, rt_index_get,
-    rt_index_set, rt_len, rt_range, rt_range_inclusive, rt_slice, rt_string_char_at, rt_interp_cstr, rt_string_bytes,
+    rt_bytes_u8_at, rt_bytes_u8_set, rt_collection_set, rt_contains, rt_cstring_to_text, rt_hash_text, rt_for_iterable, rt_index_get, rt_get,
+    rt_index_set, rt_len, rt_range, rt_range_inclusive, rt_slice, rt_slice_text_bytes, rt_string_char_at, rt_interp_cstr, rt_string_bytes,
     rt_string_chars, rt_string_lines, rt_string_byte_at, rt_string_char_code_at, rt_string_concat, rt_string_contains,
     rt_string_data, rt_string_ends_with, rt_string_eq, rt_string_find, rt_string_free, rt_string_capitalize,
-    rt_string_char_count, rt_string_chomp, rt_string_index_of, rt_string_is_alnum, rt_string_is_alpha,
+    rt_string_char_count, rt_string_to_digit, rt_string_chomp, rt_string_index_of, rt_string_is_alnum, rt_string_is_alpha,
     rt_string_is_digit, rt_string_is_whitespace, rt_string_join, rt_string_len, rt_string_new, rt_string_new_literal,
     rt_string_remove_prefix, rt_string_remove_suffix, rt_string_repeat, rt_string_replace, rt_string_replace_first,
     rt_string_rfind, rt_string_squeeze, rt_string_swapcase, rt_string_title, rt_string_trim_end_matches,
@@ -159,7 +164,7 @@ pub use collections::{
     rt_typed_words_u64_data_at_checked, rt_typed_words_u64_push, rt_typed_words_u64_push_known_at,
     rt_typed_words_u64_push_known_data_at, rt_typed_words_u64_raw_data_at, rt_typed_words_u64_set,
     rt_typed_words_u64_store_known_data_at, rt_typed_words_u64_unchecked, rt_typed_words_i64_at,
-    rt_typed_words_i64_push, rt_typed_words_i64_set,
+    rt_typed_words_i64_push, rt_typed_words_i64_set, rt_typed_words_byte_write_trap,
 };
 pub use collections::note_user_threads_started;
 pub(crate) use collections::{byte_array_bytes, byte_array_write, word_array_le_bytes};
@@ -180,6 +185,11 @@ pub use dict::{
 };
 
 // Re-export high-performance collection SFFI functions (Rust std::collections)
+pub use dict_scope_read::{
+    rt_dict_scope_read_bound_v1, rt_dict_scope_read_owner_v1, rt_dict_scope_read_epoch_v1,
+    rt_dict_scope_read_meta_v1, rt_dict_scope_read_slot_v1,
+};
+
 pub use hpcollections::{
     // HashMap
     rt_hashmap_clear,
@@ -243,9 +253,9 @@ pub use hpcollections::{
 
 // Re-export object SFFI functions
 pub use objects::{
-    hash_variant_discriminant, rt_closure_func_ptr, rt_closure_get_capture, rt_closure_new, rt_closure_release,
+    declared_variant_discriminant, enum_display_name, hash_variant_discriminant, register_enum_display_name, register_enum_variants, rt_closure_func_ptr, rt_closure_get_capture, rt_closure_new, rt_closure_release,
     rt_closure_retain, rt_closure_set_capture, closure_pin_stats,
-    rt_enum_check_discriminant, rt_enum_check_variant, rt_enum_discriminant, rt_enum_id, rt_enum_new, rt_enum_payload,
+    rt_enum_check_discriminant, rt_enum_check_variant, rt_enum_discriminant, rt_enum_id, rt_enum_new, rt_enum_payload, rt_enum_register_name,
     rt_try_is_absent,
     rt_option_map,
     rt_object_class_id, rt_object_field_count, rt_object_field_get, rt_object_field_set, rt_object_new, rt_is_some,
@@ -357,6 +367,7 @@ pub use sffi::{
 
 // Re-export stdin mock functions (for testing)
 pub use sffi::{rt_clear_stdin, rt_has_mock_stdin, rt_read_stdin_char, rt_read_stdin_line, rt_set_stdin};
+pub use sffi::io_print::rt_stdin_read_line;
 
 // Re-export print SFFI functions
 pub use sffi::{
@@ -365,6 +376,8 @@ pub use sffi::{
     rt_println_value, rt_raw_i64_to_string, rt_raw_u64_to_string, rt_stderr_flush, rt_stderr_write, rt_stdout_flush,
     rt_stdout_write, rt_value_format_string, rt_value_to_string, rt_opt_bool_to_string, rt_opt_f64_to_string,
     rt_opt_i64_to_string,
+    rt_i64_to_hex,
+    rt_opt_value_to_string,
 };
 
 // Re-export log SFFI functions
@@ -380,10 +393,10 @@ pub use sffi::{fractional_seconds_to_millis, rt_time_now_seconds, rt_time_now_se
 
 // Re-export environment & process SFFI functions
 pub use sffi::{
-    rt_condition_probe, rt_decision_probe, rt_env_all, rt_env_cwd, rt_env_exists, rt_env_get, rt_env_get_i64,
+    rt_condition_probe, rt_decision_probe, rt_env_all, rt_env_cwd, rt_env_exists, rt_env_get, rt_env_get_i64, rt_env_get_raw,
     rt_env_home, rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_exit, rt_get_env, rt_lexer_source_set,
     rt_lexer_source_slice, rt_path_probe, rt_platform_name, rt_process_execute, rt_process_is_running, rt_process_kill,
-    rt_process_run, rt_process_run_bounded, rt_process_run_inherit, rt_process_run_timeout, rt_process_spawn,
+    rt_process_run, rt_process_run_bounded, rt_process_run_bounded_bytes, rt_process_run_inherit, rt_process_run_timeout, rt_process_spawn,
     rt_process_spawn_async, rt_process_spawn_async_value, rt_process_spawn_guarded, rt_process_spawn_inherit, rt_process_wait, rt_set_env,
     rt_term_enable_ansi, rt_term_get_size,
 };
@@ -425,11 +438,15 @@ pub use sffi::{
     rt_file_exists_probe_end,
     rt_file_is_char_device,
     rt_file_is_regular_no_follow,
+    rt_file_modified,
+    rt_file_modified_time,
     rt_file_stat,
     // File ops
     rt_file_canonicalize,
     rt_file_read_text,
     rt_file_read_regular_no_follow_bounded,
+    rt_file_read_regular_no_follow_bounded_raw,
+    rt_file_read_text_raw,
     rt_file_read_regular_no_follow_last_failure,
     rt_file_read_text_rv,
     rt_file_write_text,
@@ -438,6 +455,9 @@ pub use sffi::{
     rt_file_size,
     rt_file_hash_sha256,
     rt_file_fsync,
+    rt_dir_sync,
+    rt_file_read_under_root_bytes,
+    rt_file_write_under_root_bytes,
     rt_file_fsync_cached,
     rt_file_lock,
     rt_file_unlock,
@@ -452,6 +472,7 @@ pub use sffi::{
     rt_file_write_text_at_cached,
     rt_file_write_text_at_cached_repeat,
     rt_mmap,
+    rt_mmap_create,
     rt_munmap,
     rt_madvise,
     rt_msync,
@@ -466,9 +487,13 @@ pub use sffi::{
     rt_write_u32s_to_raw_checksum,
     rt_write_fill_u32s_to_raw_checksum,
     rt_bytes_to_text,
+    rt_tls_wire_from_bytes,
     rt_text_to_bytes,
     rt_file_write_bytes,
     rt_file_write_bytes_array,
+    rt_file_atomic_write,
+    rt_file_atomic_write_mode,
+    rt_file_atomic_write_bytes_array,
     rt_file_wrap_smf_dynlib,
     rt_file_extract_smf_dynlib,
     rt_file_move,
@@ -496,6 +521,8 @@ pub use sffi::{
     rt_path_stem,
     rt_path_relative,
     rt_path_join,
+    rt_path_normalize,
+    normalize_lexical_path,
 };
 
 // Re-export hash SFFI functions
@@ -879,6 +906,7 @@ pub use net::{
     rt_browser_http_job_take_error,
     rt_browser_http_job_take_response,
     rt_dns_lookup,
+    rt_dns_lookup_timeout_ms,
     rt_io_tcp_accept,
     rt_io_tcp_accept_timeout,
     rt_io_tcp_bind,
@@ -955,7 +983,7 @@ pub use net::{
     rt_tls_client_write, rt_tls_client_write_timeout, rt_tls_get_cipher_suite, rt_tls_get_negotiated_alpn,
     rt_tls_get_protocol_version, rt_tls_is_handshake_complete, rt_tls_server_accept, rt_tls_server_close_connection,
     rt_tls_server_create, rt_tls_server_create_from_der, rt_tls_server_create_on, rt_tls_server_read_checked,
-    rt_tls_server_shutdown, rt_tls_server_write, rt_tls_server_write_bytes,
+    rt_tls_server_shutdown, rt_tls_server_upgrade_tcp, rt_tls_server_write, rt_tls_server_write_bytes,
 };
 
 // Re-export file I/O SFFI functions - Mold-inspired optimizations
@@ -1089,8 +1117,8 @@ pub use monoio_future::{
 // Re-export BDD SFFI functions (for native/SMF test execution)
 pub use bdd_sffi::{
     rt_bdd_after_each, rt_bdd_before_each, rt_bdd_clear_state, rt_bdd_describe_end, rt_bdd_describe_start,
-    rt_bdd_expect_eq, rt_bdd_expect_fail, rt_bdd_expect_truthy, rt_bdd_format_results, rt_bdd_has_failure,
-    rt_bdd_it_end, rt_bdd_it_start, rt_bdd_snapshot_results,
+    rt_bdd_expect_eq, rt_bdd_expect_fail, rt_bdd_expect_truthy, rt_bdd_fail_rv, rt_bdd_format_results, rt_bdd_has_failure,
+    rt_bdd_executed_total, rt_bdd_failed_total, rt_bdd_it_end, rt_bdd_it_start, rt_bdd_record_result, rt_bdd_note_skip, rt_bdd_skipped_count, rt_bdd_snapshot_results,
 };
 
 // ============================================================================

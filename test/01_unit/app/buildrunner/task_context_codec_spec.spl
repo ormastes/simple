@@ -1,0 +1,155 @@
+"""
+## Purpose and audience
+
+Purpose: pin the BuildRunner task-context codec (backend, runtime, policy and
+environment digests), the wire percent-escape rules that protect every
+delimiter, and the environment digest that binds owned cache paths to their
+attempt root through role tokens.
+
+Audience: engineers changing the BuildRunner task context or the build-manager
+wire format who need the exact refusal strings the context boundary emits.
+
+## Operator workflow
+
+1. Run `SIMPLE_LIB=$PWD/src bin/simple test test/01_unit/app/buildrunner/task_context_codec_spec.spl`.
+2. Every scenario must pass. Refusal strings are part of the wire contract.
+
+## Compatibility and limitations
+
+Pure codec and digest functions. Identical on macOS, Linux, Windows, FreeBSD
+and SimpleOS; no process is spawned and no filesystem path is opened.
+"""
+
+use std.spec.{describe, it, expect, fail}
+use std.common.process.observation_v4.{ProcessObservationEnvironmentV4}
+use std.common.build_manager.codec.{builder_wire_escape_v1, builder_wire_unescape_v1}
+use app.buildrunner.task_context.{
+    BuildRunnerTaskContextV1, build_runner_context_encode_v1,
+    build_runner_context_decode_v1, build_runner_environment_digest_v1
+}
+
+fn hello_context_v1(backend: text) -> BuildRunnerTaskContextV1:
+    BuildRunnerTaskContextV1(backend: backend, runtime_digest: "a".repeat(64),
+        policy_digest: "b".repeat(64), environment_digest: "c".repeat(64))
+
+fn hello_context_payload_v1() -> text:
+    build_runner_context_encode_v1(hello_context_v1("llvm")).unwrap()
+
+fn hello_context_decode_error_v1(payload: text) -> text:
+    match build_runner_context_decode_v1(payload):
+        case Ok(_): ""
+        case Err(reason): reason
+
+fn hello_context_encode_error_v1(value: BuildRunnerTaskContextV1) -> text:
+    match build_runner_context_encode_v1(value):
+        case Ok(_): ""
+        case Err(reason): reason
+
+describe "BuildRunner task context codec":
+    it "round trips an llvm and a cranelift context":
+        # @req REQ-HBR-001
+        step("Encode and decode an llvm context and require every field back")
+        match build_runner_context_decode_v1(hello_context_payload_v1()):
+            case Ok(decoded):
+                expect(decoded.backend).to_equal("llvm")
+                expect(decoded.runtime_digest).to_equal("a".repeat(64))
+                expect(decoded.policy_digest).to_equal("b".repeat(64))
+                expect(decoded.environment_digest).to_equal("c".repeat(64))
+            case Err(reason): fail(reason)
+        step("Encode and decode a cranelift context and require the backend back")
+        val cranelift = build_runner_context_encode_v1(hello_context_v1("cranelift")).unwrap()
+        match build_runner_context_decode_v1(cranelift):
+            case Ok(decoded): expect(decoded.backend).to_equal("cranelift")
+            case Err(reason): fail(reason)
+
+    it "refuses an unsupported backend and an invalid digest with exact reasons":
+        # @req REQ-HBR-001
+        step("Positive control: the llvm context encodes")
+        expect(hello_context_encode_error_v1(hello_context_v1("llvm"))).to_equal("")
+        step("Refuse the gcc backend")
+        expect(hello_context_encode_error_v1(hello_context_v1("gcc"))).to_equal("unsupported build backend context")
+        step("Refuse an uppercase runtime digest")
+        var upper = hello_context_v1("llvm")
+        upper.runtime_digest = "A".repeat(64)
+        expect(hello_context_encode_error_v1(upper)).to_equal("invalid build context digest")
+        step("Refuse a 63-character policy digest")
+        var short = hello_context_v1("llvm")
+        short.policy_digest = "b".repeat(63)
+        expect(hello_context_encode_error_v1(short)).to_equal("invalid build context digest")
+
+    it "refuses bad framing with the exact framing reason":
+        # @req REQ-HBR-001
+        val good = hello_context_payload_v1()
+        step("Positive control: the canonical payload decodes")
+        expect(hello_context_decode_error_v1(good)).to_equal("")
+        step("Refuse a payload with no trailing newline")
+        val no_newline = "SIMPLE-BUILD-TASK-CONTEXT-1\nllvm\n" + "a".repeat(64) + "\n" + "b".repeat(64) + "\n" + "c".repeat(64)
+        expect(hello_context_decode_error_v1(no_newline)).to_equal("invalid build context framing")
+        step("Refuse a payload with a wrong header")
+        val wrong_header = "SIMPLE-BUILD-TASK-CONTEXT-2\nllvm\n" + "a".repeat(64) + "\n" + "b".repeat(64) + "\n" + "c".repeat(64) + "\n"
+        expect(hello_context_decode_error_v1(wrong_header)).to_equal("invalid build context framing")
+        step("Refuse a payload with an extra trailing line")
+        expect(hello_context_decode_error_v1(good + "extra\n")).to_equal("invalid build context framing")
+
+    it "refuses a noncanonical context whose backend is not lowercase":
+        # @req REQ-HBR-001
+        step("Decode a payload that spells the backend LLVM")
+        val noncanonical = "SIMPLE-BUILD-TASK-CONTEXT-1\nLLVM\n" + "a".repeat(64) + "\n" + "b".repeat(64) + "\n" + "c".repeat(64) + "\n"
+        expect(hello_context_decode_error_v1(noncanonical)).to_equal("unsupported build backend context")
+
+    it "percent-escapes each wire delimiter exactly once and refuses noncanonical escapes":
+        # @req REQ-HBR-005
+        step("Escape a literal %0A so the percent itself is escaped once")
+        expect(builder_wire_escape_v1("a%0Ab")).to_equal("a%250Ab")
+        step("Unescape the escaped form back to the literal text")
+        match builder_wire_unescape_v1("a%250Ab"):
+            case Ok(value): expect(value).to_equal("a%0Ab")
+            case Err(reason): fail(reason)
+        step("Refuse a lowercase escape as noncanonical")
+        match builder_wire_unescape_v1("%0a"):
+            case Ok(value): fail("lowercase escape accepted")
+            case Err(reason): expect(reason).to_equal("unknown or noncanonical escape")
+        step("Refuse a truncated escape")
+        match builder_wire_unescape_v1("%2"):
+            case Ok(value): fail("truncated escape accepted")
+            case Err(reason): expect(reason).to_equal("truncated escape")
+        step("Refuse a raw tab inside a wire scalar")
+        match builder_wire_unescape_v1("a\tb"):
+            case Ok(value): fail("raw tab accepted")
+            case Err(reason): expect(reason).to_equal("invalid wire scalar")
+
+    it "binds owned cache paths to the attempt root and rejects unsorted environments":
+        # @req REQ-HBR-005
+        val root_a = "/build/attempt-a"
+        val root_b = "/build/attempt-b"
+        val owned_a = [ProcessObservationEnvironmentV4(key: "LANG", value: "C"),
+            ProcessObservationEnvironmentV4(key: "TMPDIR", value: root_a + "/work/.builder-cache/temp")]
+        val owned_b = [ProcessObservationEnvironmentV4(key: "LANG", value: "C"),
+            ProcessObservationEnvironmentV4(key: "TMPDIR", value: root_b + "/work/.builder-cache/temp")]
+        step("Positive control: owned temp paths under two attempt roots give the same digest")
+        match build_runner_environment_digest_v1(owned_a, root_a):
+            case Ok(digest_a):
+                match build_runner_environment_digest_v1(owned_b, root_b):
+                    case Ok(digest_b): expect(digest_b).to_equal(digest_a)
+                    case Err(reason): fail(reason)
+            case Err(reason): fail(reason)
+        step("Negative control: changing an inherited value changes the digest")
+        val changed = [ProcessObservationEnvironmentV4(key: "LANG", value: "en"),
+            ProcessObservationEnvironmentV4(key: "TMPDIR", value: root_a + "/work/.builder-cache/temp")]
+        match build_runner_environment_digest_v1(changed, root_a):
+            case Ok(digest_c):
+                match build_runner_environment_digest_v1(owned_a, root_a):
+                    case Ok(digest_a): expect(digest_c == digest_a).to_equal(false)
+                    case Err(reason): fail(reason)
+            case Err(reason): fail(reason)
+        step("Refuse an environment whose keys are not sorted")
+        val unsorted = [ProcessObservationEnvironmentV4(key: "ZED", value: "x"),
+            ProcessObservationEnvironmentV4(key: "LANG", value: "C")]
+        match build_runner_environment_digest_v1(unsorted, root_a):
+            case Ok(_): fail("unsorted environment accepted")
+            case Err(reason): expect(reason).to_equal("environment is not canonical sorted unique")
+        step("Refuse an owned cache path that is not under the attempt root")
+        val foreign = [ProcessObservationEnvironmentV4(key: "TMPDIR", value: "/elsewhere/work/.builder-cache/temp")]
+        match build_runner_environment_digest_v1(foreign, root_a):
+            case Ok(_): fail("foreign owned path accepted")
+            case Err(reason): expect(reason).to_equal("owned environment path differs")

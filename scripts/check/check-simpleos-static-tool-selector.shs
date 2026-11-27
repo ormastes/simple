@@ -1,0 +1,36 @@
+#!/bin/sh
+# Check legacy static-tool selection only; no cross-build/guest execution claim.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-static-tool-selection.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+mkdir -p "$WORK/src/os/port/llvm"
+cp "$ROOT/src/os/port/llvm/clang_static.shs" "$WORK/src/os/port/llvm/clang_static.shs"
+OWNER="$WORK/src/os/port/llvm/clang_static.shs"
+passed=0
+expect_prerequisite_failure() {
+    label=$1
+    shift
+    result=0
+    "$@" sh "$OWNER" >"$WORK/output" 2>&1 || result=$?
+    [ "$result" -eq 1 ] || { cat "$WORK/output"; echo "FAIL: $label exit=$result"; exit 1; }
+    grep -F '[clang_static] ERROR: missing prerequisite:' "$WORK/output" >/dev/null || {
+        cat "$WORK/output"; echo "FAIL: $label did not reach prerequisite validation"; exit 1;
+    }
+    ! grep -F 'unsupported tool:' "$WORK/output" >/dev/null || exit 1
+    [ ! -e "$WORK/build" ] || { echo "FAIL: $label created output before admission"; exit 1; }
+    passed=$((passed + 1))
+}
+expect_prerequisite_failure unset env -u TOOL
+expect_prerequisite_failure empty env TOOL=
+expect_prerequisite_failure clang env TOOL=clang
+expect_prerequisite_failure llc env TOOL=llc
+expect_prerequisite_failure lld env TOOL=lld
+result=0
+env TOOL=unsupported sh "$OWNER" >"$WORK/output" 2>&1 || result=$?
+[ "$result" -eq 1 ] || { echo "FAIL: unsupported selector exit=$result"; exit 1; }
+grep -Fx '[clang_static] ERROR: unsupported tool: unsupported' "$WORK/output" >/dev/null
+! grep -F 'missing prerequisite:' "$WORK/output" >/dev/null || exit 1
+[ ! -e "$WORK/build" ] || { echo 'FAIL: unsupported selector created output'; exit 1; }
+passed=$((passed + 1))
+printf 'PASS: legacy static-tool selector (%s cases); cross-build and guest execution NOT_RUN\n' "$passed"

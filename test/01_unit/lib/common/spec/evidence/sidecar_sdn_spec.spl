@@ -1,0 +1,112 @@
+# @tag:in-development
+# @req REQ-TRC-018
+use std.spec.*
+use std.common.spec.evidence.model.{
+    EvidenceStatus, EvidenceAudience, ManualBlockKind, evidence_manifest, manual_block_for
+}
+use std.common.spec.evidence.format.sidecar_sdn.{
+    EvidenceSidecar, EvidenceSidecarSource, EVIDENCE_SIDECAR_V2_SCHEMA,
+    encode_evidence_sidecar_v2, decode_evidence_sidecar_v2,
+    import_legacy_evidence_sidecar_v1, validate_evidence_sidecar_append,
+    EVIDENCE_SIDECAR_MAX_BYTES, validate_evidence_sidecar_encoded_size
+}
+
+fn _sidecar_fixture(status: EvidenceStatus) -> EvidenceSidecar:
+    EvidenceSidecar(
+        source: EvidenceSidecarSource.SchemaV2,
+        manifest: evidence_manifest(
+            "evidence-1", "profile-1", "test/example_spec.spl", "",
+            "", "", "", "", "", status),
+        subject_id: "", definition_sha256: "", expectation_sha256: "",
+        blocks: [manual_block_for(
+            ManualBlockKind.paragraph, "Observed output", EvidenceAudience.qa,
+            ["line with equals = and delimiter-like --- content", "second line"])])
+
+describe "Versioned typed evidence sidecar SDN codec":
+    it "round-trips a v2 sidecar through canonical shared SDN bytes":
+        val original = _sidecar_fixture(EvidenceStatus.pending_review)
+        val encoded = match encode_evidence_sidecar_v2(original):
+            case Ok(value): value
+            case Err(reason):
+                fail("v2 sidecar encode failed: " + reason)
+                return
+        expect(encoded).to_contain(EVIDENCE_SIDECAR_V2_SCHEMA)
+        val decoded = match decode_evidence_sidecar_v2(encoded):
+            case Ok(value): value
+            case Err(reason):
+                fail("v2 sidecar decode failed: " + reason)
+                return
+        expect(decoded.source).to_equal(EvidenceSidecarSource.SchemaV2)
+        expect(decoded.manifest.spec_path).to_equal("test/example_spec.spl")
+        expect(decoded.manifest.status).to_equal(EvidenceStatus.pending_review)
+        expect(decoded.blocks.len()).to_equal(1)
+        expect(decoded.blocks[0].lines[0]).to_equal("line with equals = and delimiter-like --- content")
+
+    it "rejects unknown schemas, duplicate keys, and non-SDN legacy text in the v2 decoder":
+        val encoded = match encode_evidence_sidecar_v2(_sidecar_fixture(EvidenceStatus.pending_review)):
+            case Ok(value): value
+            case Err(reason):
+                fail("v2 sidecar encode failed: " + reason)
+                return
+        val unknown = encoded.replace("simple.sspec.evidence-sidecar/v2", "simple.sspec.evidence-sidecar/v3")
+        match decode_evidence_sidecar_v2(unknown):
+            case Ok(_): fail("unknown sidecar schema was accepted")
+            case Err(reason): expect(reason).to_contain("schema")
+        val duplicate = "{schema: simple.sspec.evidence-sidecar/v2, schema: simple.sspec.evidence-sidecar/v2}"
+        match decode_evidence_sidecar_v2(duplicate):
+            case Ok(_): fail("duplicate sidecar schema key was accepted")
+            case Err(reason): expect(reason).to_contain("duplicate")
+        match decode_evidence_sidecar_v2("schema=simple.sspec.evidence.v1"):
+            case Ok(_): fail("legacy key/value content was accepted by the v2 decoder")
+            case Err(reason): expect(reason.len()).to_be_greater_than(0)
+
+    it "imports explicitly versioned v1 history only as unverified pending review":
+        val legacy = "schema=simple.sspec.evidence.v1\nevidence_id=old\nprofile_id=old-profile\nspec_path=test/old_spec.spl\nstatus=passed\n---\nkind=paragraph\ntitle=Old output\naudience=qa\nline=observed=old\n"
+        val imported = match import_legacy_evidence_sidecar_v1(legacy):
+            case Ok(value): value
+            case Err(reason):
+                fail("explicit legacy import failed: " + reason)
+                return
+        expect(imported.source).to_equal(EvidenceSidecarSource.HistoricalV1)
+        expect(imported.manifest.status).to_equal(EvidenceStatus.pending_review)
+        expect(imported.manifest.provider_id).to_equal("")
+        expect(imported.blocks[0].lines[0]).to_equal("observed=old")
+        match validate_evidence_sidecar_append(imported, "test/old_spec.spl"):
+            case Ok(()): fail("writer append guard accepted an imported historical record")
+            case Err(reason): expect(reason).to_contain("requires a v2")
+
+    it "rejects non-pending v2 claims without required provenance bindings":
+        val claimed_pass = _sidecar_fixture(EvidenceStatus.passed)
+        match encode_evidence_sidecar_v2(claimed_pass):
+            case Ok(_): fail("unbound passed evidence claim was encoded")
+            case Err(reason): expect(reason).to_contain("required provenance")
+
+    it "allows appending only to a pending sidecar bound to the requested spec path":
+        val pending = _sidecar_fixture(EvidenceStatus.pending_review)
+        match validate_evidence_sidecar_append(pending, "test/example_spec.spl"):
+            case Ok(()): expect(pending.manifest.spec_path).to_equal("test/example_spec.spl")
+            case Err(reason): fail("matching pending sidecar was rejected: " + reason)
+        match validate_evidence_sidecar_append(pending, "test/other_spec.spl"):
+            case Ok(()): fail("sidecar was appended under a different spec path")
+            case Err(reason): expect(reason).to_contain("does not match")
+
+    it "rejects appending to a final status so its artifact digest cannot become stale":
+        val final_claim = _sidecar_fixture(EvidenceStatus.passed)
+        match validate_evidence_sidecar_append(final_claim, "test/example_spec.spl"):
+            case Ok(()): fail("append mutated a final evidence claim")
+            case Err(reason): expect(reason).to_contain("is final")
+
+    it "reserves the final line ending at the exact encoded size boundary":
+        match validate_evidence_sidecar_encoded_size(EVIDENCE_SIDECAR_MAX_BYTES - 1):
+            case Ok(()): expect(EVIDENCE_SIDECAR_MAX_BYTES - 1).to_be_less_than(EVIDENCE_SIDECAR_MAX_BYTES)
+            case Err(reason): fail("maximum body with one newline did not fit: " + reason)
+        match validate_evidence_sidecar_encoded_size(EVIDENCE_SIDECAR_MAX_BYTES):
+            case Ok(()): fail("encoder admitted output that cannot include its final newline")
+            case Err(reason): expect(reason).to_contain("line ending")
+
+    it "bounds oversized escaped text before SDN block construction":
+        var oversized = _sidecar_fixture(EvidenceStatus.pending_review)
+        oversized.blocks[0].lines = ["\"".repeat(EVIDENCE_SIDECAR_MAX_BYTES / 2)]
+        match encode_evidence_sidecar_v2(oversized):
+            case Ok(_): fail("oversized escaped text was encoded")
+            case Err(reason): expect(reason).to_contain("size budget")

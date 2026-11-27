@@ -68,7 +68,10 @@ fn stage4_canonical_host_symbol(name: text, macho_prefixes: bool) -> text:
             return unprefixed
     name
 
-fn stage4_provider_symbol(name: text, object_format: text) -> text:
+fn stage4_is_known_stdcall_import(symbol: text) -> bool:
+    symbol == "LoadLibraryA@4" or symbol == "GetProcAddress@8" or symbol == "FreeLibrary@4" or symbol == "GetModuleHandleA@4"
+
+pub fn stage4_provider_symbol(name: text, object_format: text) -> text:
     var symbol = name
     if object_format == "macho" and symbol.starts_with("_"):
         symbol = symbol.substring(1)
@@ -77,10 +80,18 @@ fn stage4_provider_symbol(name: text, object_format: text) -> text:
         if symbol.starts_with("__imp_"):
             imported = true
             symbol = symbol.substring(6)
-        if symbol.starts_with("_"):
+        # x64/ARM64 COFF symbols have no C leading underscore, so `__simple_*`
+        # and single-underscore CRT names like `_strdup` / `_open` must keep
+        # their leading underscores. Strip one leading `_` only for 32-bit x86
+        # COFF triple-underscore (`___simple_*`) or runtime/stdcall prefixes.
+        if symbol.starts_with("___"):
             symbol = symbol.substring(1)
+        elif symbol.starts_with("_") and not symbol.starts_with("__") and symbol.byte_len() > 1:
+            val unprefixed = symbol.substring(1)
+            if stage4_is_runtime_abi_symbol(unprefixed) or stage4_is_known_stdcall_import(unprefixed):
+                symbol = unprefixed
         val decoration = symbol.last_index_of("@")
-        val known_stdcall_import = symbol == "LoadLibraryA@4" or symbol == "GetProcAddress@8" or symbol == "FreeLibrary@4"
+        val known_stdcall_import = stage4_is_known_stdcall_import(symbol)
         if imported and known_stdcall_import:
             symbol = symbol.substring(0, decoration)
     symbol
@@ -239,8 +250,11 @@ pub fn stage4_windows_c_object_uses_msvc_abi(target_os_name: text, target: text,
     val normalized = cc.lower().replace("\\", "/")
     val parts = normalized.split("/")
     val driver = parts[parts.len() - 1]
+    val normalized_target = target.lower()
+    val explicit_mingw_target = normalized_target.ends_with("-pc-windows-gnu") or normalized_target.ends_with("-pc-windows-gnullvm") or normalized_target.ends_with("-w64-mingw32") or normalized_target.ends_with("-w64-windows-gnu")
     val msvc_driver = driver == "cl" or driver == "cl.exe" or driver == "clang-cl" or driver == "clang-cl.exe"
-    val mingw_driver = driver == "gcc" or driver == "gcc.exe" or driver == "cc" or driver == "cc.exe" or driver.ends_with("-gcc") or driver.ends_with("-gcc.exe")
+    val mingw_clang_driver = driver.ends_with("-mingw32-clang") or driver.ends_with("-mingw32-clang.exe") or driver.ends_with("-windows-gnu-clang") or driver.ends_with("-windows-gnu-clang.exe") or ((driver == "clang" or driver == "clang.exe") and explicit_mingw_target)
+    val mingw_driver = driver == "gcc" or driver == "gcc.exe" or driver == "cc" or driver == "cc.exe" or driver.ends_with("-gcc") or driver.ends_with("-gcc.exe") or mingw_clang_driver
 
     if not msvc_driver and not mingw_driver:
         return Err("Stage4 cannot determine Windows object ABI from C compiler '" + cc + "'")
@@ -248,7 +262,7 @@ pub fn stage4_windows_c_object_uses_msvc_abi(target_os_name: text, target: text,
         return Err("Stage4 MSVC C compiler is incompatible with the MinGW linker policy")
     if mingw_driver and msvc_linker:
         return Err("Stage4 MinGW C compiler is incompatible with the MSVC linker policy")
-    if target.contains("-") and target.ends_with("-pc-windows-msvc") and not msvc_driver:
+    if target.contains("-") and normalized_target.ends_with("-pc-windows-msvc") and not msvc_driver:
         return Err("Stage4 MinGW C compiler is incompatible with explicit MSVC target '" + target + "'")
     Ok(msvc_driver)
 
@@ -469,7 +483,7 @@ pub fn stage4_validate_contracts_provider_symbol_contract(nm_output: text, objec
     """Require the two contract entry points exactly once from runtime_contracts."""
     if object_format != "elf" and object_format != "macho" and object_format != "coff-msvc" and object_format != "coff-mingw":
         return Err("Unsupported Stage4 contract provider object format '" + object_format + "'")
-    val expected = ["simple_contract_check", "simple_contract_check_msg"]
+    val expected: [text] = ["simple_contract_check", "simple_contract_check_msg"]
     var expected_set: Dict<text, bool> = {}
     for symbol in expected:
         expected_set[symbol] = true
@@ -490,8 +504,8 @@ pub fn stage4_runtime_native_localization_symbols(nm_output: text, object_format
     """Return the raw legacy dynload definitions to localize in runtime_native."""
     if object_format != "elf" and object_format != "macho" and object_format != "coff-msvc" and object_format != "coff-mingw":
         return Err("Unsupported Stage4 runtime-native object format '" + object_format + "'")
-    val legacy = ["spl_dlclose", "spl_dlopen", "spl_dlopen_checked", "spl_dlsym", "spl_dlsym_checked", "spl_dlsym_process_checked", "spl_dynlib_snapshot_linux"]
-    val required = [
+    val legacy: [text] = ["spl_dlclose", "spl_dlopen", "spl_dlopen_checked", "spl_dlsym", "spl_dlsym_checked", "spl_dlsym_process_checked", "spl_dynlib_snapshot_linux"]
+    val required: [text] = [
         "rt_http_download", "rt_http_get", "rt_http_request", "rt_interp_cstr",
         "rt_string_data", "rt_string_new", "rt_string_new_literal",
         "rt_time_now_nanos", "rt_time_now_unix_micros"
@@ -526,8 +540,8 @@ pub fn stage4_validate_runtime_native_core_symbol_contract(nm_output: text, obje
     """Require the core dependencies and forbid exported legacy dynload owners."""
     if object_format != "elf" and object_format != "macho" and object_format != "coff-msvc" and object_format != "coff-mingw":
         return Err("Unsupported Stage4 runtime-native object format '" + object_format + "'")
-    val legacy = ["spl_dlclose", "spl_dlopen", "spl_dlopen_checked", "spl_dlsym", "spl_dlsym_checked", "spl_dlsym_process_checked", "spl_dynlib_snapshot_linux"]
-    val required = [
+    val legacy: [text] = ["spl_dlclose", "spl_dlopen", "spl_dlopen_checked", "spl_dlsym", "spl_dlsym_checked", "spl_dlsym_process_checked", "spl_dynlib_snapshot_linux"]
+    val required: [text] = [
         "rt_http_download", "rt_http_get", "rt_http_request", "rt_interp_cstr",
         "rt_string_data", "rt_string_new", "rt_string_new_literal",
         "rt_time_now_nanos", "rt_time_now_unix_micros"
@@ -595,8 +609,8 @@ pub fn stage4_validate_dynload_provider_symbol_contract(nm_output: text, object_
         if undefined.keys().len() != 5 or not undefined.has("FreeLibrary") or not undefined.has("GetModuleHandleA") or not undefined.has("GetProcAddress") or not undefined.has("LoadLibraryA") or not undefined.has("rt_interp_cstr"):
             return Err("Stage4 dynamic-loader provider undefined symbols differ from the Windows contract: " + undefined.keys().join(", "))
     elif object_format == "elf":
-        val required = ["dlclose", "dlopen", "dlsym", "rt_interp_cstr"]
-        val linux_snapshot = ["__errno_location", "close", "fcntl", "fstat", "lseek", "open", "read", "syscall", "write"]
+        val required: [text] = ["dlclose", "dlopen", "dlsym", "rt_interp_cstr"]
+        val linux_snapshot: [text] = ["__errno_location", "close", "fcntl", "fstat", "lseek", "open", "read", "syscall", "write"]
         for symbol in required:
             if not undefined.has(symbol):
                 return Err("Stage4 dynamic-loader provider is missing Unix dependency '" + symbol + "'")
@@ -683,7 +697,7 @@ pub fn stage4_validate_process_provider_symbol_contract(nm_output: text, object_
     """Validate the exact process ABI; transitive resolution owns its runtime dependencies."""
     if object_format != "elf" and object_format != "macho" and object_format != "coff-msvc" and object_format != "coff-mingw":
         return Err("Unsupported Stage4 process object format '" + object_format + "'")
-    var expected = [
+    var expected: [text] = [
         "rt_browser_renderer_read_stdin_some", "rt_browser_renderer_sandbox_enter",
         "rt_browser_renderer_spawn_sandboxed", "rt_browser_renderer_write_protocol_some",
         "rt_browser_renderer_write_stdout_some",
@@ -739,7 +753,7 @@ pub fn stage4_validate_fork_provider_symbol_contract(nm_output: text, object_for
     stage4_validate_runtime_provider_symbol_contract(nm_output, object_format, "fork", [
         "rt_fork_child_setup", "rt_fork_parent_wait", "rt_fork_parent_wait_bounded", "rt_fork_parent_timed_out",
         "rt_fork_parent_signaled", "rt_fork_parent_stdout", "rt_fork_parent_stderr",
-        "rt_fork_child_exit"
+        "rt_fork_child_exit", "rt_fork_shared_heap_v1", "rt_fork_shared_heap_wait_v1"
     ], memtrack_dependencies)
 
 fn stage4_nm_has_address(parts: [text], type_index: i64) -> bool:

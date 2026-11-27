@@ -1,0 +1,375 @@
+# Actual parser -> declaration metadata -> HIR type owner regressions.
+# Authored only: execution needs an admitted, source-matched self-hosted runner.
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.type_aliases.*
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+fn nominal_arguments(kind: HirTypeKind) -> [HirType]:
+    match kind:
+        case HirTypeKind.Named(_, arguments): arguments
+        case _: []
+
+fn nominal_symbol(kind: HirTypeKind) -> i64:
+    match kind:
+        case HirTypeKind.Named(symbol, _): symbol.id
+        case _: -1
+
+fn nominal_is_i64(kind: HirTypeKind) -> bool:
+    match kind:
+        case HirTypeKind.Int(bits, signed): bits == 64 and signed
+        case _: false
+
+fn nominal_is_bool(kind: HirTypeKind) -> bool:
+    match kind:
+        case HirTypeKind.Bool: true
+        case _: false
+
+fn nominal_is_text(kind: HirTypeKind) -> bool:
+    match kind:
+        case HirTypeKind.Str: true
+        case _: false
+
+fn nominal_is_error(kind: HirTypeKind) -> bool:
+    match kind:
+        case HirTypeKind.Error: true
+        case _: false
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn nominal_lowered_module(source: text, filename: text) -> HirLowering:
+    val module = parse_and_build_module(source, filename)
+    val lowering = HirLowering.with_filename(filename)
+    lowering.use_explicit_semantic_policy()
+    lowering.lower_module(module)
+    lowering
+
+fn nominal_arity_messages(lowering: HirLowering) -> [text]:
+    var found: [text] = []
+    for message in lowering.diagnostic_messages:
+        if message.contains("type arguments, got"):
+            found = found.push(message)
+    found
+
+fn nominal_local(module: ParserModule) -> HirLowering:
+    val lowering = HirLowering.with_filename("nominal_owner.spl")
+    lowering.use_explicit_semantic_policy()
+    lowering.declare_module_symbols(module)
+    lowering
+
+fn nominal_i64() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+
+fn nominal_bool() -> HirType:
+    HirType(kind: HirTypeKind.Bool, span: Span.empty())
+
+fn nominal_text() -> HirType:
+    HirType(kind: HirTypeKind.Str, span: Span.empty())
+
+describe("nominal generic argument normalization", fn():
+    it("normalizes real parsed struct and class defaults to explicit arguments", fn():
+        val module = parse_and_build_module("struct Box<T = i64>:\n    value: T\nclass Pack<T = text>:\n    value: T\n", "nominal_owner.spl")
+        expect(module.structs["Box"].type_params[0].has_default).to_equal(true)
+        expect(module.classes["Pack"].type_params[0].has_default).to_equal(true)
+        val lowering = nominal_local(module)
+        val default_box = lowering.lower_named_kind("Box", [], Span.empty())
+        val explicit_box = lowering.lower_named_kind("Box", [nominal_i64()], Span.empty())
+        expect(nominal_symbol(default_box)).to_equal(nominal_symbol(explicit_box))
+        expect(nominal_symbol(default_box) >= 0).to_equal(true)
+        expect(nominal_arguments(default_box).len()).to_equal(1)
+        expect(nominal_arguments(explicit_box).len()).to_equal(1)
+        expect(nominal_is_i64(nominal_arguments(default_box)[0].kind)).to_equal(true)
+        expect(nominal_is_i64(nominal_arguments(explicit_box)[0].kind)).to_equal(true)
+        val pack = lowering.lower_named_kind("Pack", [], Span.empty())
+        expect(nominal_arguments(pack).len()).to_equal(1)
+        expect(nominal_is_text(nominal_arguments(pack)[0].kind)).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+    )
+
+    it("substitutes an earlier actual into a parsed dependent default", fn():
+        val module = parse_and_build_module("struct Pair<First, Second = First>:\n    first: First\n    second: Second\n", "nominal_owner.spl")
+        expect(module.structs["Pair"].type_params[1].has_default).to_equal(true)
+        val lowering = nominal_local(module)
+        val defaulted = lowering.lower_named_kind("Pair", [nominal_bool()], Span.empty())
+        val explicit = lowering.lower_named_kind("Pair", [nominal_bool(), nominal_text()], Span.empty())
+        expect(nominal_arguments(defaulted).len()).to_equal(2)
+        expect(nominal_is_bool(nominal_arguments(defaulted)[0].kind)).to_equal(true)
+        expect(nominal_is_bool(nominal_arguments(defaulted)[1].kind)).to_equal(true)
+        expect(nominal_is_text(nominal_arguments(explicit)[1].kind)).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.type_alias_argument_names.len()).to_equal(0)
+        expect(lowering.type_alias_argument_types.len()).to_equal(0)
+    )
+
+    it("rejects missing, short, excess and non-generic type arguments", fn():
+        val module = parse_and_build_module("struct Box<T>:\n    value: T\nclass Pair<T, U>:\n    first: T\n    second: U\nstruct Plain:\n    value: i64\n", "nominal_owner.spl")
+        val lowering = nominal_local(module)
+        expect(nominal_is_error(lowering.lower_named_kind("Box", [], Span.empty()))).to_equal(true)
+        expect(nominal_is_error(lowering.lower_named_kind("Pair", [nominal_bool()], Span.empty()))).to_equal(true)
+        expect(nominal_is_error(lowering.lower_named_kind("Box", [nominal_bool(), nominal_i64()], Span.empty()))).to_equal(true)
+        expect(nominal_is_error(lowering.lower_named_kind("Plain", [nominal_i64()], Span.empty()))).to_equal(true)
+        expect(lowering.errors.len()).to_equal(4)
+        expect(lowering.diagnostic_messages[0]).to_contain("expects 1 type arguments, got 0")
+        expect(lowering.diagnostic_messages[1]).to_contain("expects 2 type arguments, got 1")
+        expect(lowering.diagnostic_messages[2]).to_contain("expects 1 type arguments, got 2")
+        expect(lowering.diagnostic_messages[3]).to_contain("expects 0 type arguments, got 1")
+    )
+
+    it("publishes defaults before a forward field reference lowers", fn():
+        val module = parse_and_build_module("struct AHolder:\n    item: ZBox\nstruct ZBox<T = i64>:\n    value: T\n", "nominal_owner.spl")
+        val lowering = HirLowering.with_filename("nominal_owner.spl")
+        lowering.use_explicit_semantic_policy()
+        val hir = lowering.lower_module(module)
+        val fields = lowering.struct_field_types_by_name["AHolder"]
+        val item: HirType = fields["item"]
+        expect(nominal_symbol(item.kind)).to_equal(hir.symbols.lookup_or_invalid("ZBox").id)
+        expect(nominal_arguments(item.kind).len()).to_equal(1)
+        expect(nominal_is_i64(nominal_arguments(item.kind)[0].kind)).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+    )
+
+    it("preserves explicit self arguments and declaration binder scope", fn():
+        val module = parse_and_build_module("struct Link<Element>:\n    next: Link<Element>?\n", "nominal_owner.spl")
+        val lowering = HirLowering.with_filename("nominal_owner.spl")
+        lowering.use_explicit_semantic_policy()
+        val hir = lowering.lower_module(module)
+        val fields = lowering.struct_field_types_by_name["Link"]
+        val next: HirType = fields["next"]
+        var correct = false
+        match next.kind:
+            case HirTypeKind.Optional(inner):
+                val arguments = nominal_arguments(inner.kind)
+                if nominal_symbol(inner.kind) == hir.symbols.lookup_or_invalid("Link").id and arguments.len() == 1:
+                    match arguments[0].kind:
+                        case HirTypeKind.TypeParam(name, _): correct = name == "Element"
+                        case _: ()
+            case _: ()
+        expect(correct).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup_or_invalid("Element").is_valid()).to_equal(false)
+    )
+
+    it("preserves generic constructor inference without explicit type arguments", fn():
+        val module = parse_and_build_module("struct Cell<Element>:\n    value: Element\nfn main() -> i64:\n    val cell = Cell(value: 7)\n    0\n", "nominal_owner.spl")
+        val lowering = HirLowering.with_filename("nominal_owner.spl")
+        lowering.use_explicit_semantic_policy()
+        val hir = lowering.lower_module(module)
+        expect(hir.structs.len()).to_equal(1)
+        expect(hir.functions.len()).to_equal(1)
+        expect(lowering.errors.len()).to_equal(0)
+    )
+
+    it("resolves local defaults in declaration scope and restores caller bindings", fn():
+        val module = parse_and_build_module("struct Target:\n    value: i64\nclass Box<T = Target>:\n    value: T\n", "nominal_owner.spl")
+        val lowering = nominal_local(module)
+        val target = lowering.symbols.lookup_or_invalid("Target")
+        lowering.symbols.push_scope(ScopeKind.Function)
+        val shadow = lowering.symbols.define("Target", SymbolKind.Class, nil, Span.empty(), Visibility.Private, false, Some("consumer"))
+        val saved_scope = lowering.symbols.current_scope.id
+        val box = lowering.lower_named_kind("Box", [], Span.empty())
+        expect(nominal_arguments(box).len()).to_equal(1)
+        expect(nominal_symbol(nominal_arguments(box)[0].kind)).to_equal(target.id)
+        expect(target.id == shadow.id).to_equal(false)
+        expect(lowering.symbols.current_scope.id).to_equal(saved_scope)
+        expect(lowering.symbols.lookup_or_invalid("Target").id).to_equal(shadow.id)
+        expect(lowering.type_alias_current_owner).to_equal("")
+        expect(lowering.errors.len()).to_equal(0)
+        lowering.symbols.pop_scope()
+    )
+
+    it("normalizes imported parsed defaults using the defining owner", fn():
+        val owner_source = "pub struct Cell:\n    value: i64\npub class Box<T = Cell>:\n    value: T\n"
+        val owner_module = parse_and_build_module(owner_source, "pkg/owner.spl")
+        expect(owner_module.classes["Box"].type_params[0].has_default).to_equal(true)
+        var modules: {text: ParserModule} = {}
+        modules["pkg.owner"] = owner_module
+        val registry = module_surfaces_from_modules(modules, [SourceFile(path: "pkg/owner.spl", content: owner_source, module_name: "pkg.owner")]).unwrap()
+        for padding in [0, 4]:
+            val lowering = hirlowering_for_module("consumer.spl", registry)
+            lowering.use_explicit_semantic_policy()
+            for index in 0..padding:
+                lowering.symbols.define("Padding{index}", SymbolKind.Class, nil, Span.empty(), Visibility.Public, false, Some("consumer"))
+            val shadow = lowering.symbols.define("Cell", SymbolKind.Class, nil, Span.empty(), Visibility.Public, false, Some("consumer"))
+            lowering.register_imported_symbol(0, "pkg.owner", "Box", "ImportedBox", Span.empty(), false)
+            val saved_scope = lowering.symbols.current_scope.id
+            val defaulted = lowering.lower_named_kind("ImportedBox", [], Span.empty())
+            val explicit = lowering.lower_named_kind("ImportedBox", [nominal_bool()], Span.empty())
+            val owner_box = lowering.symbols.lookup_qualified_type_raw("pkg.owner", "Box")
+            val owner_cell = lowering.symbols.lookup_qualified_type_raw("pkg.owner", "Cell")
+            expect(nominal_symbol(defaulted)).to_equal(owner_box)
+            expect(nominal_arguments(defaulted).len()).to_equal(1)
+            expect(owner_cell >= 0).to_equal(true)
+            expect(owner_cell == shadow.id).to_equal(false)
+            expect(nominal_symbol(nominal_arguments(defaulted)[0].kind)).to_equal(owner_cell)
+            expect(nominal_is_bool(nominal_arguments(explicit)[0].kind)).to_equal(true)
+            expect(lowering.errors.len()).to_equal(0)
+            expect(lowering.symbols.current_scope.id).to_equal(saved_scope)
+            expect(lowering.type_alias_current_owner).to_equal("")
+            expect(lowering.type_alias_argument_names.len()).to_equal(0)
+            expect(lowering.type_alias_argument_types.len()).to_equal(0)
+            expect(lowering.type_alias_active_ids.len()).to_equal(0)
+    )
+
+    it("shares normalization with a parsed alias and nested nominal defaults", fn():
+        val module = parse_and_build_module("struct Inner<T>:\n    value: T\nclass Outer<T = Inner<text>>:\n    value: T\ntype Selected = Outer\n", "nominal_owner.spl")
+        val lowering = nominal_local(module)
+        val selected = lowering.lower_named_kind("Selected", [], Span.empty())
+        expect(nominal_symbol(selected)).to_equal(lowering.symbols.lookup_or_invalid("Outer").id)
+        expect(nominal_arguments(selected).len()).to_equal(1)
+        val inner = nominal_arguments(selected)[0]
+        expect(nominal_symbol(inner.kind)).to_equal(lowering.symbols.lookup_or_invalid("Inner").id)
+        expect(nominal_arguments(inner.kind).len()).to_equal(1)
+        expect(nominal_is_text(nominal_arguments(inner.kind)[0].kind)).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.type_alias_active_ids.len()).to_equal(0)
+        expect(lowering.type_alias_argument_names.len()).to_equal(0)
+    )
+
+    it("diagnoses recursive defaults and restores the normalization frame", fn():
+        val module = parse_and_build_module("struct Loop<T = Loop>:\n    value: T\n", "nominal_owner.spl")
+        val lowering = nominal_local(module)
+        val saved_scope = lowering.symbols.current_scope.id
+        lowering.lower_named_kind("Loop", [], Span.empty())
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.diagnostic_messages[0]).to_contain("cyclic generic defaults")
+        expect(lowering.type_alias_active_ids.len()).to_equal(0)
+        expect(lowering.type_alias_argument_names.len()).to_equal(0)
+        expect(lowering.type_alias_argument_types.len()).to_equal(0)
+        expect(lowering.type_alias_current_owner).to_equal("")
+        expect(lowering.symbols.current_scope.id).to_equal(saved_scope)
+    )
+
+    it("rejects self and forward formal defaults instead of capturing module decoys", fn():
+        val module = parse_and_build_module("struct T:\n    value: i64\nstruct Later:\n    value: i64\nstruct Box<T = T>:\n    value: T\nclass Pair<First = [Later], Later = i64>:\n    value: First\n", "nominal_owner.spl")
+        val lowering = nominal_local(module)
+        val saved_scope = lowering.symbols.current_scope.id
+        expect(nominal_is_error(lowering.lower_named_kind("Box", [], Span.empty()))).to_equal(true)
+        expect(nominal_is_error(lowering.lower_named_kind("Pair", [], Span.empty()))).to_equal(true)
+        expect(lowering.errors.len()).to_equal(2)
+        expect(lowering.diagnostic_messages[0]).to_contain("unavailable type parameter `T`")
+        expect(lowering.diagnostic_messages[1]).to_contain("unavailable type parameter `Later`")
+        expect(lowering.diagnostic_messages[1]).to_contain("only to earlier parameters")
+        val explicit_box = lowering.lower_named_kind("Box", [nominal_bool()], Span.empty())
+        val supplied_first = lowering.lower_named_kind("Pair", [nominal_bool()], Span.empty())
+        expect(nominal_is_bool(nominal_arguments(explicit_box)[0].kind)).to_equal(true)
+        expect(nominal_arguments(supplied_first).len()).to_equal(2)
+        expect(nominal_is_bool(nominal_arguments(supplied_first)[0].kind)).to_equal(true)
+        expect(nominal_is_i64(nominal_arguments(supplied_first)[1].kind)).to_equal(true)
+        expect(lowering.errors.len()).to_equal(2)
+        expect(lowering.type_alias_argument_names.len()).to_equal(0)
+        expect(lowering.type_alias_argument_types.len()).to_equal(0)
+        expect(lowering.type_alias_active_ids.len()).to_equal(0)
+        expect(lowering.symbols.current_scope.id).to_equal(saved_scope)
+    )
+
+    it("applies the same formal-default shadowing rule to parsed aliases", fn():
+        # Requires the independently landed canonical generic-alias transport.
+        val module = parse_and_build_module("struct T:\n    value: i64\ntype Alias<T = T> = [T]\n", "nominal_owner.spl")
+        expect(module.type_aliases["Alias"].type_params[0].has_default).to_equal(true)
+        val lowering = nominal_local(module)
+        expect(nominal_is_error(lowering.lower_named_kind("Alias", [], Span.empty()))).to_equal(true)
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.diagnostic_messages[0]).to_contain("unavailable type parameter `T`")
+        expect(lowering.type_alias_argument_names.len()).to_equal(0)
+        expect(lowering.type_alias_active_ids.len()).to_equal(0)
+    )
+
+    it("drops nominal facts when beginning the next module", fn():
+        val module = parse_and_build_module("class Box<T = i64>:\n    value: T\n", "nominal_owner.spl")
+        val lowering = nominal_local(module)
+        expect(lowering.nominal_type_templates.len()).to_equal(1)
+        lowering.begin_module("next.spl")
+        expect(lowering.nominal_type_templates.len()).to_equal(0)
+        val next = parse_and_build_module("class Box:\n    value: bool\n", "next.spl")
+        lowering.declare_module_symbols(next)
+        expect(nominal_is_error(lowering.lower_named_kind("Box", [nominal_i64()], Span.empty()))).to_equal(true)
+        expect(lowering.diagnostic_messages[0]).to_contain("expects 0 type arguments, got 1")
+    )
+
+    it("normalizes real parsed enum defaults and validates enum arity", fn():
+        # Requires the separately owned canonical enum parser/bridge transport
+        # repair. Do not replace these parsed declarations with injected facts.
+        val module = parse_and_build_module("enum Outcome<T = i64, U = T>:\n    Item(T)\n    Other(U)\nenum Required<T>:\n    Item(T)\n", "nominal_owner.spl")
+        expect(module.enums["Outcome"].type_params[0].has_default).to_equal(true)
+        expect(module.enums["Outcome"].type_params[1].has_default).to_equal(true)
+        val lowering = nominal_local(module)
+        val defaulted = lowering.lower_named_kind("Outcome", [], Span.empty())
+        val actual = lowering.lower_named_kind("Outcome", [nominal_bool()], Span.empty())
+        expect(nominal_arguments(defaulted).len()).to_equal(2)
+        expect(nominal_is_i64(nominal_arguments(defaulted)[0].kind)).to_equal(true)
+        expect(nominal_is_i64(nominal_arguments(defaulted)[1].kind)).to_equal(true)
+        expect(nominal_arguments(actual).len()).to_equal(2)
+        expect(nominal_is_bool(nominal_arguments(actual)[0].kind)).to_equal(true)
+        expect(nominal_is_bool(nominal_arguments(actual)[1].kind)).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(nominal_is_error(lowering.lower_named_kind("Outcome", [nominal_i64(), nominal_bool(), nominal_text()], Span.empty()))).to_equal(true)
+        expect(nominal_is_error(lowering.lower_named_kind("Required", [], Span.empty()))).to_equal(true)
+        expect(lowering.errors.len()).to_equal(2)
+    )
+
+    it("normalizes an imported parsed enum default against its owner", fn():
+        val source = "pub struct Cell:\n    value: i64\npub enum Event<T = Cell>:\n    Value(T)\n"
+        val module = parse_and_build_module(source, "pkg/events.spl")
+        expect(module.enums["Event"].type_params[0].has_default).to_equal(true)
+        var modules: {text: ParserModule} = {}
+        modules["pkg.events"] = module
+        val registry = module_surfaces_from_modules(modules, [SourceFile(path: "pkg/events.spl", content: source, module_name: "pkg.events")]).unwrap()
+        val lowering = hirlowering_for_module("consumer.spl", registry)
+        lowering.use_explicit_semantic_policy()
+        val decoy = lowering.symbols.define("Cell", SymbolKind.Class, nil, Span.empty(), Visibility.Public, false, Some("consumer"))
+        lowering.register_imported_symbol(0, "pkg.events", "Event", "ImportedEvent", Span.empty(), false)
+        val event = lowering.lower_named_kind("ImportedEvent", [], Span.empty())
+        val owner_cell = lowering.symbols.lookup_qualified_type_raw("pkg.events", "Cell")
+        expect(owner_cell >= 0).to_equal(true)
+        expect(owner_cell == decoy.id).to_equal(false)
+        expect(nominal_symbol(event)).to_equal(lowering.symbols.lookup_qualified_type_raw("pkg.events", "Event"))
+        expect(nominal_arguments(event).len()).to_equal(1)
+        expect(nominal_symbol(nominal_arguments(event)[0].kind)).to_equal(owner_cell)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.type_alias_argument_names.len()).to_equal(0)
+        expect(lowering.type_alias_active_ids.len()).to_equal(0)
+    )
+
+    it("accepts generic impl headers whose binders the parser hoists off the owner", fn():
+        # `impl Owner<A, B>:` parses as owner `Owner` with zero written
+        # arguments plus impl type_params [A, B]; the header is a declaration
+        # site, not a use-site annotation, so declared arity does not apply.
+        val enum_impl = nominal_lowered_module("enum Poll<T>:\n    Ready(T)\n    Pending\nimpl Poll<T>:\n    fn is_ready() -> bool:\n        true\n", "nominal_owner.spl")
+        expect(nominal_arity_messages(enum_impl).len()).to_equal(0)
+        val class_impl = nominal_lowered_module("class Bag<K, V>:\n    n: i64\nimpl Bag<K, V>:\n    fn len() -> i64:\n        self.n\n    me bump():\n        self.n = self.n + 1\n    static fn new() -> Bag<K, V>:\n        Bag(n: 0)\nfn main() -> i64:\n    val bag: Bag<i64, text> = Bag.new()\n    0\n", "nominal_owner.spl")
+        expect(nominal_arity_messages(class_impl).len()).to_equal(0)
+        val inline_struct = nominal_lowered_module("struct Mp<K, V>:\n    n: i64\n    fn len() -> i64:\n        self.n\n", "nominal_owner.spl")
+        expect(nominal_arity_messages(inline_struct).len()).to_equal(0)
+        val inline_class = nominal_lowered_module("class Fu<T>:\n    n: i64\n    fn len() -> i64:\n        self.n\n", "nominal_owner.spl")
+        expect(nominal_arity_messages(inline_class).len()).to_equal(0)
+        val enum_paths = nominal_lowered_module("enum Poll<T>:\n    Ready(T)\n    Pending\nfn ready<T>(p: Poll<T>) -> bool:\n    match p:\n        case Poll.Ready(_): true\n        case Poll.Pending: false\nfn main() -> i64:\n    val p: Poll<i64> = Poll.Pending\n    0\n", "nominal_owner.spl")
+        expect(nominal_arity_messages(enum_paths).len()).to_equal(0)
+    )
+
+    it("still rejects a bare generic annotation inside a generic impl", fn():
+        val lowering = nominal_lowered_module("class Bag<K, V>:\n    n: i64\nimpl Bag<K, V>:\n    fn copy_of(other: Bag) -> i64:\n        other.n\n", "nominal_owner.spl")
+        val messages = nominal_arity_messages(lowering)
+        expect(messages.len()).to_equal(1)
+        expect(messages[0]).to_contain("type `Bag` expects 2 type arguments, got 0")
+    )
+
+    it("lowers the stage3 generic-owner library sources without arity errors", fn():
+        val paths = ["src/lib/nogc_async_mut/async/poll.spl", "src/lib/nogc_async_mut/async/future.spl", "src/lib/nogc_async_mut/async_ring/simple_ring.spl", "src/lib/nogc_sync_mut/src/collections/ordered_map.spl", "src/lib/nogc_sync_mut/src/collections/adaptive_map.spl", "src/lib/nogc_sync_mut/src/collections/adaptive_set.spl", "src/lib/nogc_sync_mut/src/map.spl"]
+        var offending: [text] = []
+        for path in paths:
+            val source = rt_file_read_text(path) ?? ""
+            expect(source.len() > 0).to_equal(true)
+            for message in nominal_arity_messages(nominal_lowered_module(source, path)):
+                offending = offending.push(message)
+        expect(offending).to_equal([])
+    )
+)

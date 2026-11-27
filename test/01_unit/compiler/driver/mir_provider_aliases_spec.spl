@@ -1,0 +1,101 @@
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, SymbolId, Effect, EffectKind}
+use compiler.driver.driver_mir_provider_aliases.{driver_mir_checked_provider_alias_indices_v1}
+
+val PROVIDER_DIGEST = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val OTHER_PROVIDER_DIGEST = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+fn alias_provider(source: text, owner: text, path: text) -> HirModule:
+    val parsed = parse_full_frontend(source, path, owner, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    var module = lowering.lower_module(parsed)
+    module.name = owner
+    module.path = path
+    module
+
+fn simple_provider(owner: text, path: text) -> HirModule:
+    alias_provider("extern fn rt_alias_probe(value: i64) -> i64\n", owner, path)
+
+fn pair_selection(first: HirModule, second: HirModule) -> Result<[i64], text>:
+    driver_mir_checked_provider_alias_indices_v1([first, second], [first.path, second.path],
+        ["provider.spl"], [PROVIDER_DIGEST])
+
+describe "physical provider aliases keep declaration authority":
+    it "coalesces lib and std aliases of one admitted extern surface":
+        val first = simple_provider("lib.common.provider", "provider.spl")
+        val second = simple_provider("std.common.provider", "provider.spl")
+        val selected = pair_selection(first, second)
+        expect(selected.is_ok()).to_equal(true)
+        expect(selected.unwrap().len()).to_equal(1)
+        expect(selected.unwrap()[0]).to_equal(0)
+
+    it "ignores provider-local declaration and parameter symbol IDs only":
+        val first = simple_provider("lib.common.provider", "provider.spl")
+        var second = simple_provider("std.common.provider", "provider.spl")
+        val ids = second.functions.keys()
+        var declaration = second.functions[ids[0]]
+        declaration.symbol = SymbolId(id: 9876)
+        var parameter = declaration.params[0]
+        parameter.symbol = SymbolId(id: 6543)
+        declaration.params[0] = parameter
+        second.functions[ids[0]] = declaration
+        expect(pair_selection(first, second).is_ok()).to_equal(true)
+
+    it "refuses a genuinely different physical provider with the same owner":
+        val first = simple_provider("lib.common.provider", "provider.spl")
+        val second = simple_provider("std.common.provider", "other/provider.spl")
+        expect(pair_selection(first, second).is_err()).to_equal(true)
+
+    it "refuses same-path providers with incompatible parameter types":
+        val first = simple_provider("lib.common.provider", "provider.spl")
+        val second = alias_provider("extern fn rt_alias_probe(value: i32) -> i64\n",
+            "std.common.provider", "provider.spl")
+        val selected = pair_selection(first, second)
+        expect(selected.is_err()).to_equal(true)
+        expect(selected.unwrap_err()).to_contain("extern contract conflict")
+
+    it "refuses changed parameter mutability":
+        val first = simple_provider("lib.common.provider", "provider.spl")
+        var second = simple_provider("std.common.provider", "provider.spl")
+        val ids = second.functions.keys()
+        var declaration = second.functions[ids[0]]
+        var parameter = declaration.params[0]
+        parameter.is_mutable = true
+        declaration.params[0] = parameter
+        second.functions[ids[0]] = declaration
+        expect(pair_selection(first, second).is_err()).to_equal(true)
+
+    it "refuses changed effects and function ABI attributes":
+        val first = simple_provider("lib.common.provider", "provider.spl")
+        var second = simple_provider("std.common.provider", "provider.spl")
+        val ids = second.functions.keys()
+        var declaration = second.functions[ids[0]]
+        declaration.effects = [Effect(kind: EffectKind.Custom("alias-conflict"), span: declaration.span)]
+        second.functions[ids[0]] = declaration
+        expect(pair_selection(first, second).is_err()).to_equal(true)
+        var third = simple_provider("std.common.provider", "provider.spl")
+        val third_ids = third.functions.keys()
+        var third_decl = third.functions[third_ids[0]]
+        var attrs = third_decl.func_attr
+        attrs.is_global = not attrs.is_global
+        third_decl.func_attr = attrs
+        third.functions[third_ids[0]] = third_decl
+        expect(pair_selection(first, third).is_err()).to_equal(true)
+
+    it "refuses missing or contradictory admitted content":
+        val first = simple_provider("lib.common.provider", "provider.spl")
+        val second = simple_provider("std.common.provider", "provider.spl")
+        expect(driver_mir_checked_provider_alias_indices_v1([first, second],
+            ["provider.spl", "provider.spl"], [], []).is_err()).to_equal(true)
+        expect(driver_mir_checked_provider_alias_indices_v1([first, second],
+            ["provider.spl", "provider.spl"], ["provider.spl", "provider.spl"],
+            [PROVIDER_DIGEST, OTHER_PROVIDER_DIGEST]).is_err()).to_equal(true)
+
+    it "never merges two unknown-path providers by a logical spelling":
+        val first = simple_provider("lib.common.provider", "")
+        val second = simple_provider("std.common.provider", "")
+        expect(pair_selection(first, second).is_err()).to_equal(true)

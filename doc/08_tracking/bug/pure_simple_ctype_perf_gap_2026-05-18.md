@@ -1,3 +1,19 @@
+## 2026-11-09 enforced comparison failure handling
+
+The benchmark harness previously returned success after failed native
+compilation even with `SIMPLE_CTYPE_BENCH_ENFORCE=1`: the interpreter-only branch
+skipped all native/C floor checks. Both canonical and legacy entrypoints now
+reject native compilation failure in enforcing mode and retain the original
+warn-only behavior in non-enforcing mode.
+
+The regression executes the actual harness with controlled fixture commands:
+enforced native-build failure, optional native-build failure, successful native
+comparison, enforced low-ratio rejection, and optional low-ratio warning. The
+unmodified owner returned exit 0 for the first case, so the regression rejected
+it. Fixture command output is orchestration evidence only; no native compiler
+or throughput qualification is claimed. The broader performance and static-data
+correctness bug remains open.
+
 ## Triaged 2026-09-13 — LEFT OPEN, not measurable on this host
 
 Reviewed in the 2026-05-and-earlier tracking sweep. Kept open deliberately: the
@@ -526,3 +542,28 @@ Conclusion: the static-data route is blocked by native correctness for
 cross-module module-level array lookup before it can be considered as a ctype
 performance fix. Do not apply the LUT to `src/lib/common/ctype.spl`; the next
 action belongs in backend/global-array correctness and branch/loop codegen.
+
+## 2026-11-10 static-data checksum re-verification attempt (work/p2fix-librt-20261110, BLOCKED-environment)
+
+Attempted to re-verify the native static-data LUT checksum defect on the
+Windows x86_64 host with the Rust seed (worktree bin/simple.exe,
+v1.0.0-rc.1):
+
+- Interpreter control: a minimal two-module probe (module-level `val T: [i64]`,
+  `val U: [i64]` in one module, indexed reads from another) prints correct
+  values (T[2]=30, T[0]=10, U[7]=800, U[3]=400) under `--mode=interpreter`.
+- Native reproduction did not complete: `native-build` of the full-closure
+  bench_ctype_static_lut was killed at the 900s budget; a minimal 2-module
+  probe native-build stalled >15 minutes at the same pre-compile
+  db-workarounds scan point and was also killed. No native binary was
+  produced by either attempt.
+- Consequence: the 2026-05-30 wrong-checksum observation remains the latest
+  direct evidence (pattern: lut_flag returning a uniform value per character
+  with bits 1-2-3 set and bit 4 clear for every index, consistent with the
+  array handle/tag being observed instead of elements). A Rust-codegen repair
+  could not be authored-to-verified: it would additionally require a cold
+  cargo rebuild of the seed compiler (no cached compiler_rust/target exists in
+  either tree), which exceeds the session budget.
+- No source change made: applying a LUT to src/lib/common/ctype.spl remains
+  explicitly forbidden by this tracker; the throughput comparison stays open
+  (out of scope for the attempting lane).

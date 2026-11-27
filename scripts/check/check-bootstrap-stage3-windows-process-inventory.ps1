@@ -170,13 +170,13 @@ done
 [ "$(bootstrap_stage3_manifest_value concurrent_bootstrap_count "$out")" -ge 2 ]
 [ "$(bootstrap_stage3_manifest_value concurrent_qemu_count "$out")" -ge 1 ]
 set +e
-bootstrap_stage3_memory_require_exclusive_heavy "$out"
+bootstrap_stage3_memory_require_exclusive_heavy "$out" 16777216
 status=$?
 set -e
 [ "$status" -eq 75 ]
 printf 'process_scan_status=unavailable\n' >"$TMPDIR/unavailable.env"
 set +e
-bootstrap_stage3_memory_require_exclusive_heavy "$TMPDIR/unavailable.env"
+bootstrap_stage3_memory_require_exclusive_heavy "$TMPDIR/unavailable.env" 16777216
 status=$?
 set -e
 [ "$status" -eq 75 ]

@@ -223,3 +223,63 @@ due 2026-11-24, signed step scripts SCV-IMPL-{D-08,B-06}, WOTS leaves 69..70).
 - Measuring rule: a stage-2 binary runs stdlib text methods through the
   compiled `string_core` only when `SIMPLE_LIB` does not name a checkout, so
   time cold init both with and without it before concluding anything.
+
+### Frozen producer exported-static boundary (2026-10-29)
+
+Existing exported scalar APIs need public declarations for recovered P2 native
+imports; an export list alone hits unsupported private-static accessor emission.
+Preserve values and internal visibility. Native paired fixtures verify the
+boundary, but real SCV allocation behavior remains a separate runtime gate.
+Evidence: `doc/08_tracking/bug/scv_exported_static_native_visibility_2026_10_29.md`.
+
+## Lockless compile refresh (2026-11-04)
+
+The compile-event refresh, inventory publication, snapshot retention and the
+workaround index are LOCKLESS: readers never lock, writers stage privately
+(pid + clock) and publish by `file_publish_noreplace_raw` / one atomic
+rename, mutable pointers (`source-inventory/CURRENT`) are compared against the
+observed base right before the swap (`publish-cursor-superseded` -> re-observe
+warm, bounded 4 attempts), the workaround index is per-writer fragments under
+`.simple/workarounds.d/` folded at read, and GC is age-based and tolerant of
+concurrent deletes (24 h generations/membership, 600 s snapshots/fragments).
+`inventory_refresh_lease.spl`, `refresh.lock`, `publication.lock`,
+`workarounds.sdn.lock` and `SIMPLE_SCV_REFRESH_LOCK_WAIT_S` no longer exist.
+Design: `doc/05_design/compiler/scv/lockless_refresh.md`. Ratchet:
+`scripts/check/check-no-refresh-file-lock.shs`. Stress:
+`test/01_unit/app/compiler_entrypoint/lockless_refresh_stress_test.shs`.
+
+## Snapshot reader leases vs named pins (REV-01, 2026-11-15)
+
+`src/lib/scv/compile_snapshot_retention_v1.spl`. Builds use ONE moving lease
+per process (`scv_compile_snapshot_lease_acquire_v1`, file
+`receipts/<rev>.lease.<pid>`); acquiring moves it. A process holding several
+revisions (LSP) uses named pins (`scv_compile_snapshot_lease_pin_v1` /
+`..._unpin_v1`, file `receipts/<rev>.pin.<pid>`), which never move and are
+reaped when the owner pid is gone. Cap `SIMPLE_SCV_PIN_MAX` (default 16):
+beyond it pin returns `Err`, never evicts a pin. One stderr warning when pins
+reach the cap or exceed `SIMPLE_SCV_SNAPSHOT_MAX`
+(`scv_compile_snapshot_pin_warning_v1`). Spec:
+`test/01_unit/lib/scv/rev01_pinned_revision_lease_spec.spl`.
+
+## Admitted-digest memo needs a seed at scope state 0 (2026-11-24)
+`compile_source_inventory_read_admitted_digest_v1` stores its per-process memo
+only when no transient scope is active, and every native-build caller reads
+under one, so the memo never populated: a warm hello-world build fully re-read
+one 18.6 MB generation 33 times across its processes (8 of the coordinator's 16
+through the admitted reader, scope state 1 at 7 of them). A scope owner must
+call `compile_source_inventory_seed_admitted_digest_v1` BEFORE
+`transient_scope_begin()`; `compiler_source_authority_validate_v1` does. The
+seed is the same full verification, never a skipped one, and is a no-op inside
+a scope. Direct `read_at_pointer` re-reads stay deliberate. Spec:
+`test/01_unit/lib/scv/compile_source_inventory_admitted_digest_memo_spec.spl`
+(REQ-SCV-ADMITTED-MEMO-006). Neither the seed nor the reader memoizes while a
+build session heap is live: promotion there is session adoption, reclaimed at
+`rt_session_heap_end`, so a stored graph would dangle (REQ-SCV-ADMITTED-MEMO-007).
+
+## Shared immutable store adapter (opt-in)
+`std.nogc_sync_mut.storage.scv_adapter_v1` imports legacy `sha256_<hex>` chunks
+into `<repo>/.scv/store` (store key == legacy id). `scv gc` pins reachable
+chunks as `scv-gc-<g>-<n>` only when `.scv/store` exists; without it gc is
+unchanged. Enable explicitly with `scv store-init` (never on by default).
+Spec: `test/01_unit/lib/nogc_sync_mut/storage/scv_gc_store_e2e_spec.spl`.
+Details: `doc/00_llm_process/feature_expert/simple_container_store/skill.md`.

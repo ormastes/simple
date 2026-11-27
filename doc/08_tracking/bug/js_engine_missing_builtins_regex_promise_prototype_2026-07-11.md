@@ -1,6 +1,6 @@
 ---
 id: js_engine_missing_builtins_regex_promise_prototype_2026-07-11
-Status: OPEN (P2)
+Status: FIXED (all three items; verified 2026-11-06, re-verified 2026-11-25)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 severity: medium
 discovered: 2026-07-11
@@ -101,3 +101,177 @@ filed; no root-cause fix applied in this session.
 
 `String.replace(regex, repl)` performs regex substitution; `Promise` is defined;
 `typeof obj.method === "function"` for present prototype methods.
+
+## Note 2026-11-04 — item 1 (regex replace) implemented; store-backed verification blocked on Windows seed
+
+Implemented on `work/feat-js-regex-replace-20261104` (PR against `release/1.0.0`):
+
+- `engine/parser.spl`: `_js_parser_regex_literal_end` applies the standard
+  JS rule (a `/` starts a regex literal when the previous significant token
+  cannot end an expression, via the existing `_js_regex_context`) and every
+  quote-aware scanner (`find_top_level*`, ternary, assignment, split,
+  matching paren/bracket/brace, `primary_end`) skips the literal. A literal
+  `/src/flags` desugars to `new RegExp("src", "flags")` — no AST change.
+- `RegExp` is a lazily registered native constructor
+  (`NATIVE_REGEXP_CONSTRUCTOR`, same pattern as `String`/`Number`); a RegExp
+  value is a plain object tagged `__simple_regexp` with `source`, `flags`,
+  `global`, `ignoreCase`, `multiline`, `lastIndex` and native `test`/`exec`.
+- `String.prototype.replace` routes a tagged search value through
+  `src/lib/common/js/builtins/regexp.spl` (`g` honoured, function replacers
+  called with `(match, offset, string)`, `$&`/`$$` expanded — also for plain
+  string searches); `String.prototype.match` added (`null` on no match).
+- Residual: `$1`/capture groups are not available (the regexp engine records
+  no groups); `/` after `)` is still read as division; regex literals
+  containing `;` or `{` still confuse the statement splitter.
+
+Spec: `test/01_unit/lib/nogc_sync_mut/js/engine/regex_literal_replace_spec.spl`
+— 13/13 on the Windows Rust seed once the object-store defect below was fixed.
+
+Root cause of the initial 3/13: every `JsInterpreter.set_object_property` ->
+`get_object_property` round-trip returned `undefined` on this host because the
+seed *interpreter* drops a nested `self.object_store.<array>.push(x)` /
+`[i] = x` made from another class's `me` method (the array is read as a
+copy; the JIT keeps it, but the engine runs interpreted since
+`JsInterpreter._run_promise_task` fails HIR lowering). Fixed in the same
+branch by routing those writes through `ObjectStore` `me` methods
+(`alloc_object`, new `update_slot` / `append_slot`) in the nogc_sync_mut,
+nogc_async_mut and gc_async_mut `interpreter_object.spl`; `EnvironmentStack.new`
+added to nogc_sync_mut. That took the pre-existing JS-engine specs from
+1/6 green to 4/6 (remaining: nogc_sync_mut `js_vm_reclamation` is an
+intentional RED placeholder; common `js_vm_reclamation` 2/4 reads the common
+family's `env_parent_ids` field against the nogc_sync_mut engine).
+
+## Note 2026-11-05 — capture groups, `new Promise(executor)`, `new C(args).m()` parsing
+
+On `work/feat-js-builtins-promise-proto-20261105` (PR against `release/1.0.0`):
+
+- **Item 1 residual (`$1` / capture groups) — DONE.** The 2026-11-04 note's
+  "the regexp engine records no groups" understated it: `_match_atom` treated
+  `(` as a literal character, so `(…)` never matched, and `_try_match` on
+  reaching a top-level `|` after a successful left branch re-ran the right
+  branch instead of succeeding, so plain alternation was a no-op too
+  (`'xay'.replace(/a|b/, 'Z')` returned `xay`). `src/lib/common/js/builtins/regexp.spl`
+  is now a compiled backtracking matcher (node arena + explicit continuation
+  stack): groups, `(?:…)`, nested/quantified groups, `|`, `{n}`/`{n,}`/`{n,m}`,
+  lazy quantifiers, `\b`/`\B`, class escapes inside `[...]`, `m` flag. `MatchResult`
+  carries `groups: [text]` + `group_set: [bool]` (unmatched group = JS `undefined`).
+  Engine side: `$1`..`$99` in string replacers, `(match, p1..pn, offset, string)` for
+  function replacers, groups at `[1..n]` on non-global `match` and `exec`.
+- **Item 2 (`new Promise`) — was NOT fixed by the 2026-08-10 change** despite the
+  "FIXED" line above: `Promise` is a plain host object, so `new Promise(fn)` fell
+  through `eval_new` to `undefined`. Now `eval_new` routes the host Promise object
+  to `_construct_promise` (`interpreter_async.spl`): executor runs synchronously
+  with native resolve/reject functions (ids `NATIVE_PROMISE_EXECUTOR_*`, target
+  promise id carried in the native's name), settle-once, thenable adoption, and
+  `then`/`catch` reactions stay microtask-deferred. A separate parser defect hid
+  this: the subset parser read `new C(args).then(...)` as `new (C(args).then(...))`
+  (`_js_parser_expression`, `new ` branch) — fixed by re-parsing as
+  `(new C(args)).then(...)`.
+- **Still open from this record's own list:** `async/await` — `AsyncFnDecl` /
+  `Await` are not handled anywhere in `src/lib/nogc_sync_mut/js/engine/` (the
+  subset parser emits neither), and the tree-walking interpreter has no
+  suspension point to resume after an `await`; this is a feature, not a patch.
+  Also not covered: `Promise.all`/`race` (not in this record), `throw`/`try` are
+  not parsed by the subset parser, so a `throw` inside an executor or a `.then`
+  handler cannot reject a promise (the full parser's `ThrowStmt` is a different
+  `ast_types` enum from the one this engine matches, so it is no route either),
+  `RegExp.prototype.exec` ignores `lastIndex` on `g` regexes, `C.prototype.m = fn`
+  methods are not found on `new C()` instances, and a *quantified group* (`(ab)+`)
+  recurses once per repetition, so several hundred repetitions hit the seed
+  interpreter's 1000-frame limit (single-character quantifiers such as `\s+` /
+  `\w+` are iterative and verified on 800-char inputs). `_run_promise_task` HIR-lowering
+  claim from the 2026-11-04 note was not re-verified here (no diagnostic surfaced
+  under `SIMPLE_JIT_TRACE=1`).
+
+Specs (Windows Rust seed `D:/dev/wt/seed/simple.exe`):
+`test/01_unit/lib/nogc_sync_mut/js/engine/regex_literal_replace_spec.spl`
+13/17 -> 17/17 (4 new cases RED on the unpatched lib);
+`test/01_unit/lib/nogc_sync_mut/js/engine/promise_constructor_spec.spl`
+1/6 -> 6/6.
+
+## Note 2026-11-05 (worktree w6) — Promise.all / Promise.race implemented
+
+On `work/libbug-w6-jspromise-20261105` (branch from `origin/release/1.0.0`, aarch64
+Linux seed binary `build/phase_snapshots/phase1_1793422538/simple`):
+
+- The 2026-11-05 note above lists `Promise.all`/`Promise.race` as not covered;
+  re-verification showed the rest of the promise side (constructor, resolve,
+  reject, then/catch/finally chains, rejection propagation, prototype
+  introspection) already green on release/1.0.0, so `all`/`race` were the
+  remaining patchable promise gap. `typeof Promise.all` was "undefined".
+- Fix (nogc_sync_mut engine only): new natives `NATIVE_PROMISE_ALL` (-75) and
+  `NATIVE_PROMISE_RACE` (-76) registered as statics in
+  `interpreter_native.spl::_promise_global_object`. Each element is adopted
+  through `_native_promise_resolve` (host promises by identity, plain values
+  wrapped), then a pair of aggregation step natives (`NATIVE_PROMISE_AGG_FULFILL`
+  -77 / `NATIVE_PROMISE_AGG_REJECT` -78) is registered as its then-handlers;
+  the aggregate promise id and element index ride in the step native's name
+  (`__simple_promise_{all|race}_{fulfill|reject}:<agg>:<idx>`), the same
+  name-rides-context idiom as `__simple_promise_settle:<id>`. `Promise.all`
+  settles fulfilled with an index-ordered results array once all elements are
+  in, rejects on the first rejection, and resolves `[]` immediately;
+  `Promise.race` settles with the first element to settle (settle-once in
+  `_settle_promise` drops the losers) and stays pending on `[]`, per JS.
+  Already-settled elements are enqueued via `_enqueue_promise_task`, matching
+  the existing `.then` microtask-deferral idiom.
+- New spec: `test/01_unit/lib/nogc_sync_mut/js/engine/promise_all_race_spec.spl`
+  0/10 -> 10/10; chaining/regression spec
+  `test/01_unit/lib/nogc_sync_mut/js/engine/promise_chaining_spec.spl` 9/9
+  (documents the already-green then/catch/finally/prototype behavior).
+  Full engine unit dir: 53 examples, 49 passed; the 4 failures are the
+  pre-existing `js_vm_reclamation_spec.spl` intentional-RED placeholder (fails
+  0/4 identically on the unpatched base — verified via stash).
+- Residual: `Promise.all` does not adopt non-host thenables (plain objects
+  with a `then` method are wrapped as values, not unwrapped); `async/await`
+  remains a feature-sized gap as noted above.
+## Note 2026-11-05 — item 1 verified closed on release/1.0.0 (worktree re-verification)
+
+Worktree branch `work/libbug-std-jsregex-20261105` (off `origin/release/1.0.0`,
+which already contains merges #6712 regex-literals and #6733 capture-groups).
+No source change was needed: the regex `String.replace` fix is already merged.
+
+TDD evidence (seed binary `build/phase_snapshots/phase1_1793422538/simple`,
+`--mode=interpreter`):
+
+- New repro spec
+  `test/01_unit/lib/nogc_sync_mut/js/engine/regex_replace_noop_repro_spec.spl`
+  (5 cases: `'aaa'.replace(/a/,'b')`, global-flag replace, result-differs
+  cases, `String.match` with regex literal, plain-string replace).
+- RED at pre-fix commit `59488dc3590` (parent of merge #6712): 1/5 passed,
+  4/5 failed with the exact no-op symptom
+  (`expected abc to equal aXc`, `expected a-b-a to equal Z-b-Z`,
+  `expected hello world to equal hell0 w0rld`, `expected undefined to equal b`).
+- GREEN at branch HEAD: 5/5 passed.
+- Regression sweep of `test/01_unit/lib/nogc_sync_mut/js/engine/*.spl`:
+  interpreter_object_single_owner 1/1, object_store_slot_index 6/6,
+  promise_constructor 6/6, regex_literal_replace 17/17, repro 5/5 OK;
+  `js_vm_reclamation_spec.spl` 0/4 remains RED but is a pre-existing
+  intentional placeholder noted in the 2026-11-04 note above, untouched by
+  this verification.
+
+## Update 2026-11-06 — verified GREEN on release/1.0.0 (all three items)
+
+`regex_literal_replace_spec.spl` 17/17 and `regex_replace_noop_repro_spec.spl`
+5/5 on the Rust seed (`String.replace` with a RegExp works, see
+`interpreter_string_methods.spl` `_regexp_replace`). No code change needed;
+status: FIXED.
+
+## Re-verification 2026-11-25 (fleet agent, worktree wt-p2w3-aj, release/1.0.0)
+
+The 2026-11-06 "verified GREEN" update above stands; the frontmatter
+`Status: OPEN (P2)` was stale relative to it and is corrected to FIXED.
+Content check on current release/1.0.0 source confirms all three items:
+`interpreter_string_methods.spl:282,452` routes a tagged RegExp search value
+through `_regexp_replace`; `NATIVE_REGEXP_CONSTRUCTOR` /
+`NATIVE_REGEXP_TEST` / `NATIVE_REGEXP_EXEC` and the full Promise native
+family (`NATIVE_PROMISE_ALL`/`RACE`/resolve/reject/then/catch/finally) are
+registered in `interpreter_native.spl`; the named specs
+(`regex_literal_replace_spec.spl`, `regex_replace_noop_repro_spec.spl`,
+`promise_constructor_spec.spl`, `promise_all_race_spec.spl`) all exist in
+`test/01_unit/lib/nogc_sync_mut/js/engine/`.
+
+Spec re-run is environment-blocked on this Windows host: the pinned Rust
+seed rejects `@representation_boundary` (added tree-wide by cfd89933699),
+so `bin/simple.exe test` aborts before any scenario repo-wide. Verified by
+code inspection; no residual gap from this record remains open except the
+feature-sized `async/await` note already recorded above.

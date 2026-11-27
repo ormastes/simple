@@ -1,0 +1,304 @@
+use std.spec.{step}
+use app.io.env_ops.{env_get, env_set, env_unset}
+use app.io.file_ops.{path_absolute}
+use app.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+use std.io_runtime.{dir_create_all, dir_exists, dir_remove_all, file_exists, file_write}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.core.ast.{ast_reset, decl_count, module_decl_count_get}
+use compiler.core.ast_expr.{expr_count}
+use compiler.core.ast_stmt.{stmt_count}
+use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module, parse_and_build_module_checked_reference_v1}
+use std.io_runtime.{file_read}
+use compiler.driver.driver.{CompilerDriver}
+use compiler.frontend.cache_dir_evict.{CacheTreeEvictRequestV1, cache_dir_evict_tree_to_cap_v1}
+use compiler.frontend.frontend_spab_cache_v1.{frontend_spab_path_v1}
+use compiler.frontend.core.flat_pool_packed_v1.{SpabDigestV1, module_artifact_path_v1}
+use compiler.driver.driver_source_loading.{driver_entry_sync_resolver_cwd_v1, _driver_physical_source_key}
+use compiler.driver.driver_build.native_staged_codegen.{native_staged_codegen_batch_size_v1}
+use compiler.backend.llvm_backend_tools.{LlvmTempCleanupFlagsV1, llvm_temp_cleanup_plan_v1}
+use compiler.common.driver_core_types.{SourceFile, CompileOptions}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_build.smf_object_spool_v1.{smf_object_spool_begin_v1,
+    smf_object_spool_put_v1, smf_object_spool_assemble_v1, smf_object_spool_release_v1,
+    smf_object_spool_file_name_v1}
+use compiler.driver.driver_build.native_staged_codegen.{NativeStagedCodegenStateV1}
+use compiler.driver.driver_build.native_file_worker_incremental_v1.{FileWorkerIncRowV1,
+    file_worker_inc_manifest_encode_v2, file_worker_inc_manifest_parse_v1}
+use compiler.driver.driver_build.native_file_worker_reuse_v1.{FileWorkerReuseRowV1,
+    file_worker_reuse_encode_v1}
+use compiler.driver.driver_build.go_to_end.{GoToEndLedgerV1, go_to_end_manifest_text_v1}
+use compiler.driver.cache.macro_forward_candidate_contract_v1.{macro_forward_candidate_unknown_v1}
+use compiler.driver.cache.module_tldr_sections_v1.{module_tldr_sections_render_v1,
+    module_tldr_sections_parse_v1}
+
+fn _make_inc_rows(count: i64) -> [FileWorkerIncRowV1]:
+    val d1 = sha256_text("src-digest")
+    val d2 = sha256_text("iface-digest")
+    val d3 = sha256_text("obj-digest")
+    val mc = macro_forward_candidate_unknown_v1()
+    var rows: [FileWorkerIncRowV1] = []
+    var i = 0
+    while i < count:
+        rows.push(FileWorkerIncRowV1(
+            path: "src/pkg/mod_{i}.spl",
+            source_digest: d1,
+            iface_digest: d2,
+            imports_known: true,
+            imports: ["src/lib/a.spl", "src/lib/b.spl"],
+            object_digest: d3,
+            cached_object: "build/cache/obj/mod_{i}.o",
+            functions: 4,
+            statics: 1,
+            capsule: "cap-{i}",
+            macro_candidate: mc
+        ))
+        i = i + 1
+    rows
+
+describe "Storage, spool, and intermediate cleanup hygiene":
+    it "cleans temporary .ll/.bc/.o artifacts on success and failure when keep_intermediates is false and preserves them when true":
+        val ir = "/tmp/simple_llvm_test.ll"
+        val bc = "/tmp/simple_llvm_test.bc"
+        val obj = "/tmp/simple_llvm_test.o"
+        val ok_default = llvm_temp_cleanup_plan_v1(ir, bc, obj, LlvmTempCleanupFlagsV1(
+            keep_intermediates: false, keep_ir: false, bootstrap_io: false,
+            bitcode_debug: false, succeeded: true))
+        expect(ok_default.paths).to_equal([obj, ir, bc])
+
+        val fail_default = llvm_temp_cleanup_plan_v1(ir, bc, obj, LlvmTempCleanupFlagsV1(
+            keep_intermediates: false, keep_ir: false, bootstrap_io: false,
+            bitcode_debug: false, succeeded: false))
+        expect(fail_default.paths).to_equal([obj, ir, bc])
+
+        val keep_ir_only = llvm_temp_cleanup_plan_v1(ir, bc, obj, LlvmTempCleanupFlagsV1(
+            keep_intermediates: false, keep_ir: true, bootstrap_io: false,
+            bitcode_debug: false, succeeded: true))
+        expect(keep_ir_only.paths).to_equal([obj])
+
+        val keep_all = llvm_temp_cleanup_plan_v1(ir, bc, obj, LlvmTempCleanupFlagsV1(
+            keep_intermediates: true, keep_ir: false, bootstrap_io: false,
+            bitcode_debug: false, succeeded: true))
+        expect(keep_all.paths).to_equal([])
+
+    it "releases spooled .o files and removes empty per-process spool directories while preserving non-empty shared directories":
+        val base = path_absolute("build/tests/spool-hygiene-{time_now_unix_micros()}")
+        val private_dir = base + "/p_private"
+        val shared_dir = base + "/p_shared"
+        expect(dir_create_all(shared_dir)).to_equal(true)
+        expect(file_write(shared_dir + "/sibling.o", "keep")).to_equal(true)
+
+        var spool = smf_object_spool_begin_v1(private_dir)
+        spool = smf_object_spool_put_v1(spool, "pkg.alpha", [1u8, 2u8, 3u8])
+        spool = smf_object_spool_put_v1(spool, "pkg.beta", [4u8, 5u8])
+        expect(spool.live_bytes).to_equal(0)
+        expect(spool.spooled_bytes).to_equal(5)
+        expect(dir_exists(private_dir)).to_equal(true)
+        val assembled = smf_object_spool_assemble_v1(spool)
+        expect(assembled.is_ok()).to_equal(true)
+        expect(assembled.unwrap()).to_equal([1u8, 2u8, 3u8, 4u8, 5u8])
+        spool = smf_object_spool_release_v1(spool)
+        expect(spool.spooled_bytes).to_equal(0)
+        expect(dir_exists(private_dir)).to_equal(false)
+
+        var shared_spool = smf_object_spool_begin_v1(shared_dir)
+        shared_spool = smf_object_spool_put_v1(shared_spool, "pkg.gamma", [9u8])
+        shared_spool = smf_object_spool_release_v1(shared_spool)
+        expect(dir_exists(shared_dir)).to_equal(true)
+        expect(file_exists(shared_dir + "/sibling.o")).to_equal(true)
+        expect(smf_object_spool_file_name_v1("a.b/c_d")).to_equal("a_db_sc__d")
+        val _clean = dir_remove_all(base)
+
+    it "evicts aged nested artifacts/v1/<algo>/<2hex>/*.spab entries and .spab.seal sidecars while sparing fresh and .tmp files":
+        val dir = path_absolute("build/tests/spab-evict-{time_now_unix_micros()}")
+        val saved_fe_dir = env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
+        val _set_fe = env_set("SIMPLE_FRONTEND_CACHE_DIR", dir)
+        val k1 = "ab0123456789abcdef0123456789abcd"
+        val k2 = "cd0123456789abcdef0123456789abcd"
+        val k3 = "ef0123456789abcdef0123456789abcd"
+        val compiler_d = SpabDigestV1(subject: 2, algo: 1, hex: sha256_text("spec-scope"))
+        val p1_live = frontend_spab_path_v1(k1)
+        val old1 = if p1_live != "": p1_live else: module_artifact_path_v1(dir, SpabDigestV1(subject: 1, algo: 16, hex: k1), compiler_d)
+        val p2_live = frontend_spab_path_v1(k2)
+        val old2 = if p2_live != "": p2_live else: module_artifact_path_v1(dir, SpabDigestV1(subject: 1, algo: 16, hex: k2), compiler_d)
+        val p3_live = frontend_spab_path_v1(k3)
+        val fresh = if p3_live != "": p3_live else: module_artifact_path_v1(dir, SpabDigestV1(subject: 1, algo: 16, hex: k3), compiler_d)
+        expect(old1).to_contain("/artifacts/v1/")
+        expect(old1).to_contain("/ab/")
+        expect(old2).to_contain("/cd/")
+        expect(fresh).to_contain("/ef/")
+        expect(dir_create_all(old1.substring(0, old1.rfind("/")))).to_equal(true)
+        expect(dir_create_all(old2.substring(0, old2.rfind("/")))).to_equal(true)
+        expect(dir_create_all(fresh.substring(0, fresh.rfind("/")))).to_equal(true)
+        val inflight_tmp = old1 + ".4242.tmp"
+        expect(file_write(old1, "0123456789abcdef0123456789abcdef")).to_equal(true)
+        expect(file_write(old1 + ".seal", "seal-1")).to_equal(true)
+        expect(file_write(inflight_tmp, "0123456789abcdef0123456789abcdef")).to_equal(true)
+        expect(file_write(old2, "0123456789abcdef0123456789abcdef")).to_equal(true)
+        expect(file_write(old2 + ".seal", "seal-2")).to_equal(true)
+        expect(file_write(fresh, "0123456789abcdef")).to_equal(true)
+        expect(file_write(fresh + ".seal", "seal-fresh")).to_equal(true)
+        val (_o1, _e1, c1) = process_run_timeout("touch", ["-t", "202001010000", old1, old1 + ".seal", inflight_tmp], 2000)
+        val (_o2, _e2, c2) = process_run_timeout("touch", ["-t", "202001010001", old2, old2 + ".seal"], 2000)
+        expect(c1).to_equal(0)
+        expect(c2).to_equal(0)
+        val summary = cache_dir_evict_tree_to_cap_v1(CacheTreeEvictRequestV1(
+            root_dir: dir + "/artifacts/v1", suffix: ".spab", max_bytes: 20))
+        expect(summary.removed).to_equal(2)
+        expect(summary.remaining_bytes).to_equal(16)
+        expect(file_exists(old1)).to_equal(false)
+        expect(file_exists(old1 + ".seal")).to_equal(false)
+        expect(file_exists(old2)).to_equal(false)
+        expect(file_exists(old2 + ".seal")).to_equal(false)
+        expect(file_exists(fresh)).to_equal(true)
+        expect(file_exists(fresh + ".seal")).to_equal(true)
+        expect(file_exists(inflight_tmp)).to_equal(true)
+        if saved_fe_dir == "":
+            val _u = env_unset("SIMPLE_FRONTEND_CACHE_DIR")
+        else:
+            val _u = env_set("SIMPLE_FRONTEND_CACHE_DIR", saved_fe_dir)
+        val _clean = dir_remove_all(dir)
+        driver_entry_sync_resolver_cwd_v1()
+        expect(_driver_physical_source_key("src/app/cli/main.spl")).to_end_with("/src/app/cli/main.spl")
+        val saved_batch = env_get("SIMPLE_NATIVE_STAGED_CODEGEN_BATCH") ?? ""
+        val _sb_neg = env_set("SIMPLE_NATIVE_STAGED_CODEGEN_BATCH", "-3")
+        expect(native_staged_codegen_batch_size_v1() < 0).to_equal(true)
+        if saved_batch == "":
+            val _rb_neg = env_unset("SIMPLE_NATIVE_STAGED_CODEGEN_BATCH")
+        else:
+            val _rb_neg = env_set("SIMPLE_NATIVE_STAGED_CODEGEN_BATCH", saved_batch)
+
+describe "Per-unit AST, env-mirror, source-string, and staged-MIR memory reset across 32 units":
+    it "resets flat AST pools and bootstrap env mirrors to 0 across 32 sequential unit iterations":
+        val old_boot = env_get("SIMPLE_BOOTSTRAP") ?? ""
+        val old_closure = env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? ""
+        val _sb = env_set("SIMPLE_BOOTSTRAP", "1")
+        val _sc = env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+        var unit = 0
+        while unit < 32:
+            val src = "pub fn compute_{unit}(x: i64, y: i64) -> i64:\n    val sum = x + y + {unit}\n    if sum > 10:\n        return sum * 2\n    sum\n"
+            val parsed = parse_and_build_module(src, "src/unit/mod_{unit}.spl")
+            expect(parsed.functions.keys()).to_contain("compute_{unit}")
+            expect(expr_count()).to_be_greater_than(0)
+            expect(stmt_count()).to_be_greater_than(0)
+            expect(decl_count()).to_be_greater_than(0)
+            ast_reset()
+            lexer_release_parse_source_globals()
+            expect(expr_count()).to_equal(0)
+            expect(stmt_count()).to_equal(0)
+            expect(decl_count()).to_equal(0)
+            expect(module_decl_count_get()).to_equal(0)
+            expect(env_get("SIMPLE_BOOTSTRAP_EXPR_0_TAG") ?? "").to_equal("")
+            expect(env_get("SIMPLE_BOOTSTRAP_STMT_0_TAG") ?? "").to_equal("")
+            unit = unit + 1
+        if old_closure == "":
+            val _rc = env_unset("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        else:
+            val _rc = env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_closure)
+        if old_boot == "":
+            val _rb = env_unset("SIMPLE_BOOTSTRAP")
+        else:
+            val _rb = env_set("SIMPLE_BOOTSTRAP", old_boot)
+
+    it "reclaims unloaded streaming source buffers while preserving physical-alias twins of kept modules":
+        var ctx = CompileContext.create(CompileOptions.default())
+        val shared_body = "pub fn shared_fn() -> i64: 7\n" + ""
+        val drop_body_a = "pub fn unused_a() -> i64: 1\n" + ""
+        val drop_body_b = "pub fn unused_b() -> i64: 2\n" + ""
+        ctx.sources = [
+            SourceFile(path: "src/lib/shared.spl", authored_path: "src/lib/shared.spl", content: shared_body, module_name: "lib.shared"),
+            SourceFile(path: "src/std/shared.spl", authored_path: "src/std/shared.spl", content: shared_body, module_name: "std.shared"),
+            SourceFile(path: "src/app/unused_a.spl", authored_path: "src/app/unused_a.spl", content: drop_body_a, module_name: "app.unused_a"),
+            SourceFile(path: "src/app/unused_b.spl", authored_path: "src/app/unused_b.spl", content: drop_body_b, module_name: "app.unused_b")
+        ]
+        ctx.source_contents_owner = [shared_body, shared_body, drop_body_a, drop_body_b]
+        val canonical = [
+            "/repo/src/lib/shared.spl",
+            "/repo/src/lib/shared.spl",
+            "/repo/src/app/unused_a.spl",
+            "/repo/src/app/unused_b.spl"
+        ]
+        var kept: Dict<text, bool> = {}
+        kept["/repo/src/lib/shared.spl"] = true
+        val _freed = ctx.reclaim_unloaded_streaming_sources_v1(kept, canonical)
+        expect(ctx.sources[0].content).to_equal("pub fn shared_fn() -> i64: 7\n")
+        expect(ctx.sources[1].content).to_equal("pub fn shared_fn() -> i64: 7\n")
+        expect(ctx.sources[2].content).to_equal("")
+        expect(ctx.sources[3].content).to_equal("")
+        expect(ctx.source_contents_owner[2]).to_equal("")
+        expect(ctx.source_contents_owner[3]).to_equal("")
+        var state = NativeStagedCodegenStateV1.begin(8)
+        expect(state.active).to_equal(true)
+        expect(state.batch_size).to_equal(8)
+        state.module_functions["app.mod1"] = 5
+        state.module_statics["app.mod1"] = 2
+        expect(state.module_functions["app.mod1"]).to_equal(5)
+        expect(state.module_statics["app.mod1"]).to_equal(2)
+        state.smf_part_objects = smf_object_spool_release_v1(state.smf_part_objects)
+
+describe "Linear O(N) scaling and round-trip parity on manifest, reuse, go-to-end, and TLDR serializers":
+    it "encodes and round-trips large incremental manifests, reuse tables, go-to-end SDN, and TLDR sections linearly":
+        val scope_d = sha256_text("scope")
+        val inv_d = sha256_text("inv")
+        val out_d = sha256_text("out")
+        val rows_small = _make_inc_rows(150)
+        val rows_large = _make_inc_rows(600)
+
+        val t0 = time_now_unix_micros()
+        val enc_small = file_worker_inc_manifest_encode_v2(rows_small, out_d, "prod-1", scope_d, inv_d)
+        val t1 = time_now_unix_micros()
+        val enc_large = file_worker_inc_manifest_encode_v2(rows_large, out_d, "prod-1", scope_d, inv_d)
+        val t2 = time_now_unix_micros()
+
+        val (parsed_large, parsed_out) = file_worker_inc_manifest_parse_v1(enc_large, "prod-1")
+        expect(parsed_out).to_equal(out_d)
+        expect(parsed_large.len()).to_equal(600)
+        expect(enc_large.byte_len() > enc_small.byte_len() * 3).to_equal(true)
+        expect(enc_large.byte_len() < enc_small.byte_len() * 5).to_equal(true)
+        val dt_small = if t1 - t0 > 1000: t1 - t0 else: 1000
+        val dt_large = t2 - t1
+        step("4x row increase stays linear instead of 16x quadratic blowup")
+        expect(dt_large <= dt_small * 12 + 50000).to_equal(true)
+
+        var reuse_rows: [FileWorkerReuseRowV1] = []
+        var ledger = GoToEndLedgerV1.empty()
+        var sections: [text] = []
+        var i = 0
+        while i < 300:
+            reuse_rows.push(FileWorkerReuseRowV1(
+                path: "src/m_{i}.spl", cached_object: "obj/m_{i}.o",
+                functions: 3, statics: 0, capsule: "c_{i}"))
+            ledger.record("mir", "mod_{i}", "err\t\"quote\"\nline {i}")
+            sections.push("summary|fn f_{i}() -> i64")
+            i = i + 1
+        val reuse_wire = file_worker_reuse_encode_v1(reuse_rows)
+        expect(reuse_wire.split("\n").len()).to_equal(301)
+        val gte_sdn = go_to_end_manifest_text_v1("bin/out", ledger, 10, ["ok_a", "ok_b"])
+        expect(gte_sdn.contains("failed_count: 300")).to_equal(true)
+        expect(gte_sdn.contains("\\t\\\"quote\\\"\\n")).to_equal(true)
+        val rendered_tldr = module_tldr_sections_render_v1(sections)
+        val (parsed_tldr, consumed) = module_tldr_sections_parse_v1(rendered_tldr)
+        expect(consumed).to_equal(rendered_tldr.byte_len())
+        expect(parsed_tldr.len()).to_equal(300)
+
+    it "parses all v3 driver and frontend modules cleanly with zero syntax or bridge errors":
+        val checked_files = [
+            "src/compiler/80.driver/driver_source_parse_streaming.spl",
+            "src/compiler/10.frontend/cache_dir_evict.spl",
+            "src/compiler/10.frontend/frontend_spab_cache_v1.spl",
+            "src/compiler/80.driver/driver_aot_pipeline.spl",
+            "src/compiler/80.driver/driver_entry_closure_core.spl",
+            "src/compiler/80.driver/driver_source_loading.spl",
+            "src/compiler/80.driver/driver_preclosed_source_aliases.spl",
+            "src/compiler/80.driver/driver_source_pipeline_loading.spl"
+        ]
+        for path in checked_files:
+            val src = file_read(path)
+            expect(src.byte_len()).to_be_greater_than(0)
+            val parsed = parse_and_build_module_checked_reference_v1(src, path)
+            expect(parsed.is_ok()).to_equal(true)
+        ast_reset()
+        lexer_release_parse_source_globals()
+        val drv = CompilerDriver.create(CompileOptions.default())
+        expect(drv.ctx.error_count_value).to_equal(0)

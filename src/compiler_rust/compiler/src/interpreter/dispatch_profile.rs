@@ -138,6 +138,7 @@ fn expr_kind(expr: &Expr) -> &'static str {
         Expr::FieldAccess { .. } => "FieldAccess",
         Expr::Array(_) | Expr::VecLiteral(_) => "Array",
         Expr::ArrayRepeat { .. } => "ArrayRepeat",
+        Expr::GenericInst { .. } => "GenericInst",
         Expr::Tuple(_) | Expr::LabeledTuple(_) => "Tuple",
         Expr::Dict(_) => "Dict",
         Expr::Range { .. } => "Range",

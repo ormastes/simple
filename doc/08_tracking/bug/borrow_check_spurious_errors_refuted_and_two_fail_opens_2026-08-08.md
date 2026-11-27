@@ -227,3 +227,75 @@ Results: 13 total, 13 passed, 0 failed
 GREEN. The primary spurious-error claim remains refuted, consistent with the doc.
 The two secondary driver fail-opens are **not** covered by this spec (it exercises
 `nll.spl` directly, not the driver seam), so they stay OPEN and UNPROVEN here.
+
+## Driver source repair candidate (2026-11-03; runtime qualification pending)
+
+Latest release source at `cd78d5963a7` confirms the primary NLL-spurious-error
+claim remains refuted. The two secondary boundaries remain in
+`src/compiler/80.driver/driver_aot_pipeline.spl::stage_emit_object`; no NLL
+checker implementation change is indicated. Since the original report,
+PR #4525 narrowed the implicit bootstrap skip to the explicit combination
+`SIMPLE_BOOTSTRAP=1`, `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1`, `STAGE4!=1`, but
+that combination still skipped the safety gate.
+
+The scoped candidate moves the existing borrow check before the optional
+bootstrap post-MIR-transform branch. Actual borrow violations therefore stop
+AOT emission in ordinary, per-module bootstrap, whole-program bootstrap and
+Stage 4 modes. The explicit `--no-borrow-check` option remains owned by the
+existing borrow_check method. Async/optimization/AOP scheduling is unchanged.
+
+Before invoking the checker, the candidate refuses accumulated context errors
+as CodegenError, retaining all messages. These earlier failures are no longer
+logged as borrow violations or returned as BorrowError. Go-to-end keeps its
+existing failure finalization, attributing these post-lowering boundary errors
+to the MIR stage; newly detected borrow failures retain the borrow stage.
+
+Faithful driver-seam regression:
+`test/01_unit/compiler/driver/aot_borrow_gate_fail_closed_spec.spl` builds real
+MIR containing Const -> Move -> Copy of the moved source, puts it in a real
+CompilerDriver context, and invokes `stage_emit_object` under the environment
+combinations above. It requires BorrowError and nonempty real diagnostics.
+Adjacent controls cover clean-copy MIR, prior-phase messages without NLL
+violations, and explicit no-borrow-check without bypassing prior failures.
+Environment values are restored before assertions. No simulated checker or
+placeholder passing assertion is used. The zero-source observation remains a
+separate, unisolated issue outside this narrow driver repair.
+
+Actual verification: scoped whitespace check and working direct-env-runtime
+guard passed; tracked executable `_spec.spl` paths under doc/06_spec count is 0.
+All authored behavioral cases, compiler/core/lib/MCP checks and native runtime
+smokes are TEST_BLOCKED because no admitted self-hosted CLI is available.
+No Rust seed, parser-only result or source inspection is represented as a
+behavioral PASS. Candidate remains draft pending execution and root review.
+
+## Closed 2026-11-25 (p2w1-ah lane) — driver repair landed; stale "draft pending execution" note
+
+The 2026-11-03 "driver source repair candidate" has landed on release/1.0.0
+(commit `946e4aacc6d` "fix(driver): require AOT borrow checks across
+bootstrap modes"). Source inspection of
+`src/compiler/80.driver/driver_aot_pipeline.spl` @ 602063b765f confirms both
+filed fail-opens are closed in current source:
+
+- **Fail-open #1 (misattribution):** `stage_emit_object` now refuses
+  accumulated context errors as `CodegenError` ("Pre-borrow pipeline error",
+  lines 203-212) BEFORE invoking the checker, so prior-phase errors are no
+  longer logged as `Borrow error:` or returned as
+  `CompileResult.BorrowError`.
+- **Fail-open #2 (bootstrap skip):** `borrow_check()` now runs at lines
+  217-232, before the `bootstrap_flat_aot` branch (line 234). Under
+  `SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 STAGE4!=1` only the
+  optional post-MIR transforms (process_async / optimize_mir / AOP) are
+  skipped; the borrow gate is no longer bypassed in Stages 2 and 3.
+
+The faithful driver-seam regression spec
+`test/01_unit/compiler/driver/aot_borrow_gate_fail_closed_spec.spl` exists in
+the tree. Its execution on this Windows host is environment-blocked: the
+pinned `bin/simple.exe` seed rejects the 940 `@representation_boundary`
+annotations at HEAD (cfd89933699) and every spec run fails at the test-runner
+harness itself (`src/app/test_runner_new/test_runner_client.spl:9`), so this
+closure rests on source inspection; the spec's behavioral run remains owed to
+a lane with an admitted self-hosted CLI. The primary spurious-error claim was
+already refuted (2026-08-08). Fail-open #3 (zero-source
+`load_sources_impl()` returning true) remains a separately-scoped,
+unisolated issue as recorded above. Status: CLOSED for the two filed driver
+fail-opens.

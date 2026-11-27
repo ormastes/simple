@@ -1,0 +1,60 @@
+# @req REQ-MC-012
+# @cover src/lib/nogc_sync_mut/test_runner/test_runner_config.spl
+"""
+# The single lane resolves the same MC/DC mode as the full runner
+
+Both `simple test` lanes call `apply_mcdc_mode_env` (the full runner through
+`propagate_env_vars`, the `--no-session-daemon` lane directly). For the same
+environment and profile it must give the same answer as
+`resolve_mcdc_mode_for_profile`, publish it, and name invalid modes so the
+caller refuses to run.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
+use std.test_runner.test_runner_config.{apply_mcdc_mode_env, mcdc_mode_error_message, resolve_mcdc_mode_for_profile}
+
+fn set_waiver(on: bool):
+    val v = if on: "x" else: ""
+    env_set("SIMPLE_MCDC_OFF_WAIVER_REASON", v)
+    env_set("SIMPLE_MCDC_OFF_WAIVER_REVIEWER", v)
+    env_set("SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID", v)
+    env_set("SIMPLE_MCDC_OFF_WAIVER_VERSION", v)
+
+fn lane_mode(requested: text, profile: text, waiver: bool) -> text:
+    env_set("SIMPLE_MCDC_MODE", requested)
+    set_waiver(waiver)
+    apply_mcdc_mode_env(profile)
+
+fn reference_mode(requested: text, profile: text, waiver: bool) -> text:
+    val v = if waiver: "x" else: ""
+    resolve_mcdc_mode_for_profile(requested, profile, v, v, v, v)
+
+describe "single-lane MC/DC mode resolution":
+    it "matches the full runner's resolver for every mode, profile and waiver":
+        for requested in ["", "on", "dynamic", "off", "static-off", "bogus"]:
+            for profile in ["", "moderate", "dev"]:
+                for waiver in [false, true]:
+                    step("Resolve {requested}/{profile}/{waiver}")
+                    expect(lane_mode(requested, profile, waiver)).to_equal(reference_mode(requested, profile, waiver))
+        set_waiver(false)
+
+    it "defaults to on for the normal profile and publishes it":
+        expect(lane_mode("", "", false)).to_equal("on")
+        expect(env_get("SIMPLE_MCDC_MODE") ?? "").to_equal("on")
+        expect(env_get("SIMPLE_MCDC_MODE_ERROR") ?? "").to_equal("")
+
+    it "refuses off without a waiver and an unknown mode":
+        expect(lane_mode("off", "", false)).to_equal("invalid-off")
+        expect(env_get("SIMPLE_MCDC_MODE_ERROR") ?? "").to_equal("invalid-off")
+        expect(mcdc_mode_error_message("invalid-off")).to_contain("refused")
+        expect(lane_mode("bogus", "", false)).to_equal("invalid-mode")
+        expect(mcdc_mode_error_message("invalid-mode")).to_contain("unrecognised")
+        expect(mcdc_mode_error_message("on")).to_equal("")
+
+    it "honours off with all four waiver variables":
+        expect(lane_mode("off", "", true)).to_equal("off")
+        expect(env_get("SIMPLE_MCDC_MODE") ?? "").to_equal("off")
+        set_waiver(false)
+        env_set("SIMPLE_MCDC_MODE", "")

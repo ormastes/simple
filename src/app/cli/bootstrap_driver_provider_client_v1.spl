@@ -1,0 +1,145 @@
+# Bootstrap-safe client for a dynamically loaded CompilerDriverV1 provider.
+#
+# Opt-in only. The default bootstrap route stays the statically linked driver;
+# this client is selected when SIMPLE_BOOTSTRAP_DRIVER_PROVIDER names a provider
+# artifact and SIMPLE_BOOTSTRAP_DRIVER_PROVIDER_DIGEST pins its SHA-256. It
+# never imports `compiler.driver.driver`, and it never falls back to the static
+# driver: every loader refusal is a diagnostic plus a dedicated exit code.
+# Bug: compiler_driver_v1_bootstrap_activation_blocked_on_callable_loader_2026-08-14.
+
+use os.smf.provider_loader.{
+    ProviderAdmissionRequestV1, ProviderAdmissionResultV1, ProviderLoaderSessionV1,
+    PROVIDER_ADMISSION_OK, PROVIDER_SESSION_OK,
+    provider_admit_dynamic_v1, provider_session_query_owned_v1,
+    provider_session_release_owned_v1, provider_session_close_v1
+}
+use os.posix.dynlib.{dynlib_symbol, dynlib_symbol_is_process_callable}
+use os.posix.dynlib_sffi.{BytesCallV1, call_bytes_fn_v1}
+use std.nogc_sync_mut.composition.provider_contract.{SimpleProviderQueryV1, SIMPLE_PROVIDER_QUERY_V1_SIZE}
+use compiler.driver.driver_provider_contract_v1.{
+    SIMPLE_COMPILER_DRIVER_V1_INTERFACE, SIMPLE_COMPILER_DRIVER_V1_MAJOR,
+    SIMPLE_COMPILER_DRIVER_V1_MINOR, SIMPLE_COMPILER_DRIVER_V1_ABI_DIGEST
+}
+use compiler.driver.driver_provider_compile_wire_v1.{
+    DRIVER_COMPILE_SYMBOL_V1, DRIVER_COMPILE_STATUS_OK_V1,
+    encode_driver_compile_request_v1, decode_driver_compile_result_v1,
+    driver_compile_request_from_options_v1
+}
+use compiler.common.driver_compile_options.{CompileOptions}
+use app.io.env_ops.{env_get}
+
+val BOOTSTRAP_DRIVER_PROVIDER_ENV_V1: text = "SIMPLE_BOOTSTRAP_DRIVER_PROVIDER"
+val BOOTSTRAP_DRIVER_PROVIDER_DIGEST_ENV_V1: text = "SIMPLE_BOOTSTRAP_DRIVER_PROVIDER_DIGEST"
+# Distinct from 1 (compile failed) so a loader refusal is never mistaken for
+# a source error, and from 0 so it can never look like success.
+val BOOTSTRAP_DRIVER_PROVIDER_EXIT_CODE_V1: i64 = 3
+val BOOTSTRAP_DRIVER_PROVIDER_HOST_ABI_V1: u64 = 1
+val BOOTSTRAP_DRIVER_PROVIDER_RESULT_CAPACITY_V1: i64 = 65536
+
+class BootstrapDriverProviderRouteV1:
+    requested: bool
+    artifact_path: text
+    expected_digest: text
+
+class BootstrapDriverProviderOutcomeV1:
+    # loader_refused: the provider could not be admitted/called; exit_code is
+    # BOOTSTRAP_DRIVER_PROVIDER_EXIT_CODE_V1 and diagnostics name the stage.
+    # Otherwise exit_code is 0 (compiled) or 1 (driver reported errors).
+    loader_refused: bool
+    compiled: bool
+    exit_code: i64
+    diagnostics: [text]
+
+fn bootstrap_driver_provider_route_v1() -> BootstrapDriverProviderRouteV1:
+    val path = env_get(BOOTSTRAP_DRIVER_PROVIDER_ENV_V1) ?? ""
+    val digest = env_get(BOOTSTRAP_DRIVER_PROVIDER_DIGEST_ENV_V1) ?? ""
+    BootstrapDriverProviderRouteV1(requested: path != "", artifact_path: path, expected_digest: digest)
+
+fn bootstrap_driver_provider_admission_request_v1(route: BootstrapDriverProviderRouteV1) -> ProviderAdmissionRequestV1:
+    ProviderAdmissionRequestV1(
+        artifact_path: route.artifact_path,
+        artifact_kind: "native",
+        expected_artifact_digest: route.expected_digest,
+        granted_capability_bits: 0,
+        required_capability_bits: 0,
+        host_abi: BOOTSTRAP_DRIVER_PROVIDER_HOST_ABI_V1,
+        minimum_host_abi: BOOTSTRAP_DRIVER_PROVIDER_HOST_ABI_V1,
+        maximum_host_abi: BOOTSTRAP_DRIVER_PROVIDER_HOST_ABI_V1,
+        requested_interface_major: SIMPLE_COMPILER_DRIVER_V1_MAJOR,
+        requested_interface_minor: SIMPLE_COMPILER_DRIVER_V1_MINOR,
+        provided_interface_major: SIMPLE_COMPILER_DRIVER_V1_MAJOR,
+        provided_interface_minor: SIMPLE_COMPILER_DRIVER_V1_MINOR)
+
+fn bootstrap_driver_provider_query_v1() -> SimpleProviderQueryV1:
+    SimpleProviderQueryV1(
+        descriptor_size: SIMPLE_PROVIDER_QUERY_V1_SIZE,
+        interface_id: SIMPLE_COMPILER_DRIVER_V1_INTERFACE,
+        minimum_major: SIMPLE_COMPILER_DRIVER_V1_MAJOR,
+        minimum_minor: SIMPLE_COMPILER_DRIVER_V1_MINOR,
+        host_abi: BOOTSTRAP_DRIVER_PROVIDER_HOST_ABI_V1,
+        target_offset: 0, target_length: 0, requested_capability_bits: 0)
+
+fn bootstrap_driver_provider_refusal_v1(stage: text, status: i32, reason: text) -> BootstrapDriverProviderOutcomeV1:
+    BootstrapDriverProviderOutcomeV1(
+        loader_refused: true, compiled: false,
+        exit_code: BOOTSTRAP_DRIVER_PROVIDER_EXIT_CODE_V1,
+        diagnostics: ["compiler provider {stage} refused (status {status}): {reason}"])
+
+# Admission refusal -> outcome; admitted -> None. Pure over the loader's
+# evidence so every refusal class is testable without a built artifact.
+fn bootstrap_driver_provider_admission_outcome_v1(admission: ProviderAdmissionResultV1) -> BootstrapDriverProviderOutcomeV1?:
+    if admission.is_admitted():
+        return None
+    Some(bootstrap_driver_provider_refusal_v1("admission", admission.status, admission.reason))
+
+# The compile call's bytes -> outcome. A transport failure or a result the
+# wire decoder rejects is a loader refusal (exit 3); a decoded driver verdict
+# maps to exit 0/1 exactly like the static route.
+fn bootstrap_driver_provider_call_outcome_v1(call: BytesCallV1) -> BootstrapDriverProviderOutcomeV1:
+    if not call.ok:
+        return bootstrap_driver_provider_refusal_v1("compile call", call.status as i32, call.diagnostic)
+    val decoded = decode_driver_compile_result_v1(call.bytes)
+    if not decoded.ok:
+        return bootstrap_driver_provider_refusal_v1("compile result", 0, decoded.diagnostic)
+    if decoded.value.compile_status == DRIVER_COMPILE_STATUS_OK_V1:
+        return BootstrapDriverProviderOutcomeV1(loader_refused: false, compiled: true, exit_code: 0, diagnostics: [])
+    BootstrapDriverProviderOutcomeV1(loader_refused: false, compiled: false, exit_code: 1,
+        diagnostics: decoded.value.diagnostics)
+
+fn bootstrap_driver_provider_compile_v1(route: BootstrapDriverProviderRouteV1,
+        options: CompileOptions) -> BootstrapDriverProviderOutcomeV1:
+    if not route.requested:
+        return bootstrap_driver_provider_refusal_v1("route", 0, "no provider requested")
+    val dynamic = provider_admit_dynamic_v1(bootstrap_driver_provider_admission_request_v1(route))
+    val refused = bootstrap_driver_provider_admission_outcome_v1(dynamic.admission)
+    if refused.is_some():
+        return refused ?? bootstrap_driver_provider_refusal_v1("admission", dynamic.admission.status, dynamic.admission.reason)
+    var session: ProviderLoaderSessionV1 = dynamic.session
+    val queried = provider_session_query_owned_v1(session, bootstrap_driver_provider_query_v1(),
+        SIMPLE_COMPILER_DRIVER_V1_ABI_DIGEST)
+    session = queried.session
+    if queried.query.status != PROVIDER_SESSION_OK:
+        provider_session_close_v1(session)
+        return bootstrap_driver_provider_refusal_v1("interface query", queried.query.status, queried.query.reason)
+    val compile_address = dynlib_symbol(session.library, DRIVER_COMPILE_SYMBOL_V1)
+    val compile_callable = compile_address > 0 and
+        dynlib_symbol_is_process_callable(session.library, DRIVER_COMPILE_SYMBOL_V1)
+    var outcome = bootstrap_driver_provider_refusal_v1("compile entry", 0,
+        if compile_address <= 0: "{DRIVER_COMPILE_SYMBOL_V1} missing" else: "{DRIVER_COMPILE_SYMBOL_V1} not process-callable")
+    if compile_callable:
+        val call = unsafe(capabilities: [ffi, raw_ptr]):
+            call_bytes_fn_v1(compile_address,
+                encode_driver_compile_request_v1(driver_compile_request_from_options_v1(options)),
+                BOOTSTRAP_DRIVER_PROVIDER_RESULT_CAPACITY_V1)
+        outcome = bootstrap_driver_provider_call_outcome_v1(call)
+    session = provider_session_release_owned_v1(session, queried.query.pin_id).session
+    provider_session_close_v1(session)
+    outcome
+
+export BOOTSTRAP_DRIVER_PROVIDER_ENV_V1, BOOTSTRAP_DRIVER_PROVIDER_DIGEST_ENV_V1
+export BOOTSTRAP_DRIVER_PROVIDER_EXIT_CODE_V1, BOOTSTRAP_DRIVER_PROVIDER_HOST_ABI_V1
+export BootstrapDriverProviderRouteV1, BootstrapDriverProviderOutcomeV1
+export bootstrap_driver_provider_route_v1, bootstrap_driver_provider_admission_request_v1
+export bootstrap_driver_provider_query_v1, bootstrap_driver_provider_refusal_v1
+export bootstrap_driver_provider_admission_outcome_v1, bootstrap_driver_provider_call_outcome_v1
+export bootstrap_driver_provider_compile_v1

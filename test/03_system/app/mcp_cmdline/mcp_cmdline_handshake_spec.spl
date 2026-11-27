@@ -1,5 +1,11 @@
 # Purpose and audience: executable specification evidence for the owning engineering team.
 # @req REQ-SSPEC-SYSTEM
+# @tag:in-development
+# Gate: every scenario strictly native-builds src/app/mcp/main.spl with the
+# admitted pure-Simple Stage 2 compiler (REQ-MCP-CMD-001). Until the bootstrap
+# lane admits Stage 2 (no build/bootstrap/stage2 or bin/release runtime), the
+# build helper fail-closes and these examples cannot pass. Remove this tag when
+# an admitted Stage 2 compiler is part of the standard test environment.
 # research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
 # codex-system-test
@@ -16,6 +22,7 @@ use std.nogc_sync_mut.io.env_ops.{cwd}
 use std.nogc_sync_mut.io.file_ops.{file_delete, file_write}
 use std.nogc_sync_mut.io.process_ops.{shell}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.nogc_sync_mut.io_runtime.{dir_list_optional, env_get_opt, file_exists}
 
 struct McpCmdlineProbe:
     label: text
@@ -100,6 +107,62 @@ fn mcp_cmdline_probe(label: text, command: text, timeout_seconds: i64, max_elaps
         reason = "native_missing"
 
     McpCmdlineProbe(label: label, command: command, timeout_seconds: timeout_seconds, max_elapsed_ms: max_elapsed_ms, exit_code: result.exit_code, elapsed_ms: elapsed, stdout: stdout, stderr: stderr, ready_json: ready_out, ok: ok, reason: reason)
+
+fn pure_simple_mcp_binary() -> text:
+    # Canonical pure-Stage-2 MCP artifact path asserted by REQ-MCP-CMD-001.
+    "build/bootstrap/mcp-package/pure-stage2/simple_mcp_server.exe"
+
+fn pure_stage2_compiler() -> text:
+    # Admitted pure-Simple Stage 2 compiler. Fail-closed (empty) when the
+    # bootstrap lane has not admitted one yet: explicit env wins, then any
+    # frozen stage2 platform dir, then a deployed release runtime.
+    val env_override = env_get_opt("PURE_STAGE2_SIMPLE")
+    if env_override != nil and env_override != "":
+        if file_exists(env_override):
+            return env_override
+    match dir_list_optional("build/bootstrap/stage2"):
+        case Some(names):
+            for name in names:
+                val cand = "build/bootstrap/stage2/" + name + "/simple"
+                if file_exists(cand):
+                    return cand
+                if file_exists(cand + ".exe"):
+                    return cand + ".exe"
+        case nil:
+            pass
+    match dir_list_optional("bin/release"):
+        case Some(names):
+            for name in names:
+                val cand = "bin/release/" + name + "/simple"
+                if file_exists(cand):
+                    return cand
+                if file_exists(cand + ".exe"):
+                    return cand + ".exe"
+        case nil:
+            pass
+    ""
+
+fn build_pure_simple_mcp() -> (text, text, i64):
+    # Strictly native-build src/app/mcp/main.spl with the admitted pure-Simple
+    # Stage 2 compiler (no stub/hosted fallback, per the scenario contract).
+    val compiler = pure_stage2_compiler()
+    if compiler == "":
+        return ("", "pure Stage 2 compiler not admitted (no frozen build/bootstrap/stage2 or deployed bin/release runtime; admit Stage 2 via the bootstrap lane first)", 1)
+    val out_path = pure_simple_mcp_binary()
+    shell("mkdir -p " + shell_escape_text(parent_dir_of(out_path)))
+    val cmd = "cd " + shell_escape_text(cwd()) + " && SIMPLE_NO_STUB_FALLBACK=1 timeout 1800s " + shell_escape_text(compiler) + " native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/mcp/main.spl --output " + shell_escape_text(out_path)
+    val result = shell(cmd)
+    (result.stdout ?? "", result.stderr ?? "", result.exit_code)
+
+fn parent_dir_of(path: text) -> text:
+    var cut = -1
+    var i = 0
+    while i < path.len():
+        val ch = path[i:i + 1]
+        if ch == "/" or ch == "\\":
+            cut = i
+        i = i + 1
+    if cut <= 0: "." else: path[0:cut]
 
 describe "Pure-Simple MCP Launch and Handshake":
     # @manual scenario evidence

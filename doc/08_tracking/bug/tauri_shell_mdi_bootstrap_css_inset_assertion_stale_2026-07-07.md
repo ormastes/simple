@@ -6,8 +6,11 @@ evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
-Open (pre-existing, unrelated to P1.2 invoke-roundtrip work; discovered incidentally
-while verifying `cargo test --lib` in `tools/tauri-shell/src-tauri`).
+Resolved (2026-11-25, verified by code inspection — see final section). The
+emitted CSS no longer contains the dock reservation this assertion conflicted
+with, so the assertion string matches again. Previously: Open (pre-existing,
+unrelated to P1.2 invoke-roundtrip work; discovered incidentally while
+verifying `cargo test --lib` in `tools/tauri-shell/src-tauri`).
 
 ## Context
 
@@ -50,3 +53,22 @@ assert on a more change-resistant substring (e.g. just
 value). Not fixed here — out of scope for the P1.2 invoke() round-trip item;
 flagged per repo convention rather than silently left red.
 
+
+## Verification 2026-11-25 (p2w6-ak lane, release/1.0.0 tip f3fb8f24dc9) — RESOLVED by inspection
+
+The staleness no longer exists. The CSS emitted by `tauri_mdi_init_script()`
+(`tools/tauri-shell/src-tauri/src/lib.rs:292`) is now:
+
+```
+#wm-desktop{position:fixed;inset:0;overflow:hidden;z-index:10000;pointer-events:none}...
+```
+
+i.e. back to `inset:0` — the `inset:0 0 58px 0` dock reservation this doc
+reported is gone from the emitted style. The test assertion
+(`tools/tauri-shell/src-tauri/src/lib.rs:2086`) checks
+`js.contains("#wm-desktop{position:fixed;inset:0;overflow:hidden;z-index:10000")`,
+which is an exact prefix of the emitted `textContent`, so the assertion
+matches the current output. Verified by direct code inspection of both the
+emitter and the assertion on release/1.0.0 tip; `cargo test --lib` was NOT
+run (Rust builds are out of scope on this verification host), so this closure
+rests on the string-level match, which is the entirety of the assertion.

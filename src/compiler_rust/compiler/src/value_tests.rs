@@ -14,5 +14,6 @@ mod tests {
     include!("value_tests_pointers.rs");
     include!("value_tests_strict_mem.rs");
     include!("value_tests_nonlocal_overlay.rs");
+    include!("value_tests_foreign_thread_bindings.rs");
     include!("value_tests_packed_words.rs");
 }

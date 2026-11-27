@@ -1,0 +1,98 @@
+# Typed UI target references + ActionPlan types (phase 3, library-only).
+#
+# Frozen contract: doc/04_architecture/ui/testing/typed_ui_interface_arch.md
+# §SSpec targets / §ActionPlan. This module carries only the fields the
+# resolver actually uses today. NOTE: `preconditions`, capability checks,
+# settle policies richer than a millisecond budget, and manifest hash
+# verification are deliberately omitted from v1 — they belong to the driver
+# lane (Agents F/G/N) and are added when a driver consumes them.
+
+# UiTargetRef variant kinds (struct-with-kind, not an enum with payloads, so
+# the type stays safe under both interpreter and native codegen).
+pub val UI_TARGET_SYMBOL: text = "symbol"        # bare id = compiled symbol
+pub val UI_TARGET_QUALIFIED: text = "qualified"  # dotted scope path
+pub val UI_TARGET_PATTERN: text = "pattern"      # typed pattern, e.g. cell_{CellRef}
+pub val UI_TARGET_FOCUSED: text = "focused"      # omitted target = focused widget
+pub val UI_TARGET_RUNTIME: text = "runtime"      # id(expr) explicit runtime escape
+pub val UI_TARGET_NAME: text = "name"            # quoted accessible-name fallback
+
+pub struct UiTargetRef:
+    kind: text
+    value: text
+
+pub fn ui_target_symbol(id: text) -> UiTargetRef:
+    UiTargetRef(kind: UI_TARGET_SYMBOL, value: id)
+
+pub fn ui_target_qualified(qualified_id: text) -> UiTargetRef:
+    UiTargetRef(kind: UI_TARGET_QUALIFIED, value: qualified_id)
+
+pub fn ui_target_pattern(pattern: text) -> UiTargetRef:
+    UiTargetRef(kind: UI_TARGET_PATTERN, value: pattern)
+
+pub fn ui_target_focused() -> UiTargetRef:
+    UiTargetRef(kind: UI_TARGET_FOCUSED, value: "")
+
+pub fn ui_target_runtime(expr: text) -> UiTargetRef:
+    UiTargetRef(kind: UI_TARGET_RUNTIME, value: expr)
+
+pub fn ui_target_name(name: text) -> UiTargetRef:
+    UiTargetRef(kind: UI_TARGET_NAME, value: name)
+
+# Parse a raw SSpec target token into a UiTargetRef, following the arch-doc
+# precedence: quoted → name fallback; id(expr) → runtime; braces → pattern;
+# dotted → qualified; empty → focused; else bare symbol.
+pub fn parse_ui_target(raw: text) -> UiTargetRef:
+    val t = raw.trim()
+    if t == "":
+        return ui_target_focused()
+    if t.starts_with("\"") and t.ends_with("\"") and t.len() >= 2:
+        return ui_target_name(t[1:t.len() - 1])
+    if t.starts_with("id(") and t.ends_with(")"):
+        return ui_target_runtime(t[3:t.len() - 1].trim())
+    if t.contains("{"):
+        return ui_target_pattern(t)
+    if t.contains("."):
+        return ui_target_qualified(t)
+    ui_target_symbol(t)
+
+# One compiled action step. `value` is the payload for type/fill-style
+# actions ("" when the action takes none). `settle_ms` is the settle budget.
+pub struct UiActionStep:
+    kind: text
+    target: UiTargetRef
+    value: text
+    settle_ms: i64
+    source_file: text
+    source_line: i64
+
+# A compiled plan for one scenario against one app interface.
+pub struct UiActionPlan:
+    app_id: text
+    target_surface: text     # tui | gui | web | both
+    manifest_hash: text
+    steps: [UiActionStep]
+
+# --- Spec-source metadata extraction ------------------------------------
+# `# @ui: <app-id>` and `# @ui-target: tui|gui|web|both` comment headers.
+
+fn extract_marker(source: text, marker: text) -> text:
+    val lines = source.split("\n")
+    for line in lines:
+        val t = line.trim()
+        if t.starts_with(marker):
+            return t[marker.len():t.len()].trim()
+    ""
+
+# App id declared by `# @ui:`; "" when absent.
+pub fn extract_ui_app(source: text) -> text:
+    extract_marker(source, "# @ui:")
+
+# Surface declared by `# @ui-target:`; defaults to "both" when absent.
+pub fn extract_ui_target_surface(source: text) -> text:
+    val v = extract_marker(source, "# @ui-target:")
+    if v == "":
+        return "both"
+    v
+
+pub fn is_valid_ui_surface(surface: text) -> bool:
+    surface == "tui" or surface == "gui" or surface == "web" or surface == "both"

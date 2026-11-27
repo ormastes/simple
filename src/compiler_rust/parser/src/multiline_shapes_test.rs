@@ -81,6 +81,23 @@ mod multiline_shapes {
         );
     }
 
+    /// Inline `if cond: <call>` followed by `else: <assignment>`. An
+    /// expression then-body sent the `else` body through the expression parser,
+    /// which rejected the `=` ("expected expression, found Assign") although
+    /// the same `else` after an assignment then-body parsed.
+    /// (src/os/apps/smux/runtime_primary_control_service_v4.spl:131.)
+    #[test]
+    fn inline_else_assignment_after_call_then_body_parses() {
+        let src = "fn f(xs: [i64], i: i64, v: i64):\n    if i < 0: xs.push(v)\n    else: xs[i] = v\n";
+        let module = crate::Parser::new(src).parse().expect("call then-body with assignment else-body must parse");
+        let dump = format!("{module:?}");
+        assert!(dump.contains("Assignment"), "else body must be kept as an assignment: {dump}");
+        assert!(
+            parses("fn f(c: C, v: i64):\n    if v < 0: c.reset()\n    else: c.total += v\n"),
+            "compound assignment in the else body must parse"
+        );
+    }
+
     /// The inline `if` must still work as a ternary-style EXPRESSION, and as a
     /// plain call statement — the two shapes the assignment path branches away
     /// from.

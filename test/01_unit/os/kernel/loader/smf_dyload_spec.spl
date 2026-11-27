@@ -227,6 +227,34 @@ fn make_writer_layout_envelope() -> [u8]:
     b = pad_to(b, trailer + 128)
     b
 
+fn make_v13_lib_envelope(flags: i64, arch_enum_code: i64, platform_code: i64) -> [u8]:
+    """Build a canonical v1.3 96-byte #[repr(C)] trailer around the ELF library stub."""
+    var b = make_elf64_lib_with_two_exports()
+    val stub_size = b.len()
+    val trailer = b.len()
+    # [0..4] magic "SMF\0"
+    b.push(83.to_u8())
+    b.push(77.to_u8())
+    b.push(70.to_u8())
+    b.push(0.to_u8())
+    # [4..8] version 1.3, platform, smf_enums.Arch
+    b.push(1.to_u8())
+    b.push(3.to_u8())
+    b.push(platform_code.to_u8())
+    b.push(arch_enum_code.to_u8())
+    # [8..12] flags LE (e.g. SMF_FLAG_RELOADABLE = 0x0002)
+    b = push_u32_le(b, flags)
+    # [12..48] compression, section/symbol table metadata (zero)
+    b = pad_to(b, trailer + 48)
+    # [48..56] entry_point u64 LE
+    b = push_u64_le(b, 0x400000)
+    # [56..60] stub_size u32 LE, [60..64] smf_data_offset u32 LE
+    b = push_u32_le(b, stub_size)
+    b = push_u32_le(b, stub_size)
+    # [64..96] module_hash, source_hash, hints, tail pad
+    b = pad_to(b, trailer + 96)
+    b
+
 # ============================================================================
 # Gate
 # ============================================================================
@@ -319,3 +347,26 @@ describe "smf_dyload gate (H8)":
         expect(loader_dynsym(handle, "smf_hello")).to_equal(0xBEEF)
         # strict role-2 library gate fails closed on writer-default metadata
         expect(loader_dynopen_smf_library_bytes_for_arch("/lib/h8_writer2.smf", writer_env, Architecture.X86_64)).to_equal(-8)
+
+    it "dynloads canonical v1.3 96-byte role-2 library trailers across architectures":
+        """Canonical v1.3 96-byte trailers carry SMF_FLAG_RELOADABLE (0x02) in
+        flags@8, smf_enums.Arch at @7, and smf_data_offset@60 without skewing
+        into role/arch/ABI."""
+        dylib_registry_reset_for_test()
+        # flags=0x0002 (SMF_FLAG_RELOADABLE), arch=0 (smf_enums.Arch.X86_64), platform=5 (None_/SimpleOS)
+        val v13_x64 = make_v13_lib_envelope(0x0002, 0, 5)
+        val x64_handle = loader_dynopen_smf_library_bytes_for_arch("/lib/h8_v13_x64.smf", v13_x64, Architecture.X86_64)
+        expect(x64_handle).to_be_greater_than(0)
+        expect(loader_dynsym(x64_handle, "smf_hello")).to_equal(0xBEEF)
+        expect(loader_dynsym(x64_handle, "smf_add")).to_equal(0xF00D)
+        expect(loader_dynclose(x64_handle)).to_equal(0)
+
+        # flags=0x0002, arch=1 (smf_enums.Arch.Aarch64), platform=0 (Any)
+        val v13_arm64 = make_v13_lib_envelope(0x0002, 1, 0)
+        val arm_handle = loader_dynopen_smf_library_bytes_for_arch("/lib/h8_v13_arm64.smf", v13_arm64, Architecture.Arm64)
+        expect(arm_handle).to_be_greater_than(0)
+        expect(loader_dynsym(arm_handle, "smf_hello")).to_equal(0xBEEF)
+        expect(loader_dynclose(arm_handle)).to_equal(0)
+
+        # wrong arch on v1.3 96-byte envelope still fails closed (-8)
+        expect(loader_dynopen_smf_library_bytes_for_arch("/lib/h8_v13_bad.smf", v13_arm64, Architecture.X86_64)).to_equal(-8)

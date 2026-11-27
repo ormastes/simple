@@ -1,0 +1,139 @@
+"""
+# Context Capture Redaction Specification
+
+**Requirements:** CTX-009 (secrets redacted before durable capture, ordinary text and digests untouched) — plan §3.4 / §3.6 / §9
+
+## Purpose
+
+Audience: maintainers of `app.mcp.ctx_redaction` and anyone indexing command
+output through `simple_ctx_*`.
+
+Captured command output and fetched pages are stored in `.simple/ctx/chunks.sdn`
+and returned by later searches, so secret-looking values must be masked
+BEFORE they reach the store. The masking is explicit-rule based (credential
+headers, key=value pairs naming a secret, known token shapes, URL
+credentials, PEM private keys) so ordinary prose and hex digests such as
+SHA-256 are never altered.
+
+## Behavior
+
+- Each rule family masks the value and keeps the surrounding structure.
+- Ordinary text, identifiers like `max_tokens`, prefix lookalikes such as
+  `risk-assessment`, and 64-hex digests pass through byte-identical.
+- `ctx_index_text` stores only the masked text; the raw secret is not
+  findable by search afterwards.
+"""
+
+# @feature mcp_ctx_redaction
+# tag: unit
+
+use std.spec
+use std.io_runtime.{env_set, env_get, dir_create, dir_remove_all, time_now_unix_micros}
+use app.mcp.ctx_redaction.{CtxRawContent, ctx_redact}
+use app.mcp.main_lazy_ctx_tools.{ctx_index_text, handle_simple_ctx_search}
+
+fn _r(s: text) -> text:
+    ctx_redact(CtxRawContent(body: s)).body
+
+fn _n(s: text) -> i64:
+    ctx_redact(CtxRawContent(body: s)).masked.count
+
+describe "ctx redaction masks secret-looking values":
+    it "masks credential headers but keeps the scheme":
+        # @req CTX-009
+        step("Authorization bearer")
+        assert_equal(_r("Authorization: Bearer abc123.def456.ghi789"), "Authorization: Bearer [REDACTED]")
+        step("Authorization basic, any case")
+        assert_equal(_r("authorization: Basic dXNlcjpwYXNzd29yZA=="), "authorization: Basic [REDACTED]")
+        step("api key header and cookies")
+        assert_equal(_r("X-Api-Key: 9f8e7d6c5b4a"), "X-Api-Key: [REDACTED]")
+        assert_equal(_r("Set-Cookie: sid=abc123; Path=/; HttpOnly"), "Set-Cookie: [REDACTED]")
+        assert_equal(_n("Authorization: Bearer abc123.def456.ghi789"), 1)
+
+    it "masks key=value, key: value and JSON pairs naming a secret":
+        # @req CTX-009
+        step("env style")
+        assert_equal(_r("DB_PASSWORD=hunter2 host=db1"), "DB_PASSWORD=[REDACTED] host=db1")
+        step("colon style, short password still masked")
+        assert_equal(_r("password: x"), "password: [REDACTED]")
+        step("JSON")
+        assert_equal(_r("{\"api_key\": \"abcd1234efgh5678\", \"user\": \"bob\"}"), "{\"api_key\": \"[REDACTED]\", \"user\": \"bob\"}")
+        step("access token over eight chars")
+        assert_equal(_r("access_token=abcdefghijkl"), "access_token=[REDACTED]")
+        step("query string stops at the ampersand")
+        assert_equal(_r("GET /x?token=abcdefgh1234&page=2"), "GET /x?token=[REDACTED]&page=2")
+
+    it "masks well-known token shapes, URL credentials and private keys":
+        # @req CTX-009
+        step("GitHub personal access token")
+        assert_equal(_r("pushed with ghp_abcdefghijklmnopqrstuvwxyz0123456789 ok"), "pushed with [REDACTED] ok")
+        step("sk- API key")
+        assert_equal(_r("key sk-ant-abcdefghijklmnopqrstuv end"), "key [REDACTED] end")
+        step("AWS access key id")
+        assert_equal(_r("id AKIAIOSFODNN7EXAMPLE here"), "id [REDACTED] here")
+        step("Slack token")
+        assert_equal(_r("xoxb-123456789012-abcdefghij"), "[REDACTED]")
+        step("JWT")
+        assert_equal(_r("jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.SflKxwRJSMeKKF2QT4fw ok"), "jwt [REDACTED] ok")
+        step("URL password only")
+        assert_equal(_r("git clone https://bob:s3cretpw@example.com/repo.git"), "git clone https://bob:[REDACTED]@example.com/repo.git")
+        step("PEM block collapses to one marker line")
+        assert_equal(_r("before\n-----BEGIN RSA PRIVATE KEY-----\nMIIEabc\nMIIEdef\n-----END RSA PRIVATE KEY-----\nafter"), "before\n[REDACTED PRIVATE KEY]\nafter")
+
+describe "ctx redaction leaves ordinary content alone":
+    it "adverse: prose, identifiers, lookalikes and hex digests are byte-identical":
+        # @req CTX-009
+        val sha = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        val cases = [
+            "The tokenizer splits text; max_tokens: 2048 and token count is high.",
+            "sha256 " + sha + " build ok",
+            "commit 3b18e512dba79e4c8300dd08aeb37f8e728b8dad",
+            "risk-assessment and task-list sk-learn are fine",
+            "password reset instructions are in the docs",
+            "AKIA short",
+            "https://example.com/path@x no credentials here",
+            "see eyJ not a jwt",
+            "Authorization is required for this endpoint",
+        ]
+        for c in cases:
+            step("unchanged: " + c)
+            assert_equal(_r(c), c)
+            assert_equal(_n(c), 0)
+
+    it "adverse: an already masked value is not counted twice and weak keys need a real value":
+        # @req CTX-009
+        step("idempotent")
+        val once = _r("password=hunter2")
+        assert_equal(_r(once), once)
+        assert_equal(_n(once), 0)
+        step("short token value under eight chars is not a secret")
+        assert_equal(_r("token=abc"), "token=abc")
+
+describe "ctx redaction wired into indexing":
+    it "stores the masked text so the raw secret is not searchable":
+        # @req CTX-009
+        var base = env_get("SIMPLE_TEST_TMP") ?? ""
+        if base == "":
+            base = "build/tmp"
+        val dir = base + "/simple_ctx_redaction_spec_" + str(time_now_unix_micros())
+        dir_remove_all(dir)
+        dir_create(dir, true)
+        env_set("SIMPLE_CTX_DIR", dir)
+        step("index output carrying a password and a normal line")
+        assert_equal(ctx_index_text("deploy started\nDB_PASSWORD=hunter2zzqq host=db1", "cmd:deploy").count, 1)
+        step("the normal text is searchable")
+        assert_contains(handle_simple_ctx_search("1", "{\"query\":\"deploy\"}"), "source=cmd:deploy")
+        step("searching for the raw secret finds no chunk (the query is echoed, the source is not)")
+        assert_false(handle_simple_ctx_search("2", "{\"query\":\"hunter2zzqq\"}").contains("source=cmd:deploy"))
+        assert_contains(handle_simple_ctx_search("3", "{\"query\":\"DB_PASSWORD\"}"), "[REDACTED]")
+
+describe "ctx redaction with non-ASCII surroundings":
+    it "masks on the right bytes and keeps multibyte text intact":
+        # @req CTX-009
+        step("Korean text before and after a GitHub token")
+        assert_equal(_r("배포 완료 ghp_abcdefghijklmnopqrstuvwxyz0123456789 이후 계속"), "배포 완료 [REDACTED] 이후 계속")
+        step("Korean text before a password pair and a header")
+        assert_equal(_r("설정 PASSWORD=hunter2 끝"), "설정 PASSWORD=[REDACTED] 끝")
+        assert_equal(_r("헤더 Authorization: Bearer abcdef123456"), "헤더 Authorization: Bearer [REDACTED]")
+        step("multibyte-only line is untouched")
+        assert_equal(_r("토큰은 비밀이 아닙니다"), "토큰은 비밀이 아닙니다")

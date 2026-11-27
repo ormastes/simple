@@ -160,3 +160,18 @@ indivisible future lane.
 (`bootstrap_planner_v2_verify_structure`) and never executes the planner, so authorization
 remains unbound to argv/env/exit status. These two rows collapse into one missing artefact:
 a non-circular planner-execution producer. Fixing either requires building it.
+
+## Verification 2026-11-25 (release/1.0.0, Windows x86_64)
+
+CLOSED status re-verified by source inspection on `origin/release/1.0.0`
+(`0819b116ecb`). The canonical v2 producer
+(`scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs`) and its
+regression gate (`scripts/check/check-bootstrap-planner-admission-producer.shs`)
+are present, and the public verifier in
+`scripts/check/lib/bootstrap-planner-admission-bound.shs` delegates to the
+bound verifier instead of the historical unconditional refusal — matching the
+2026-09-22 source-inspected status above. The Windows verification limits
+recorded 2026-09-22 still apply (producer gate not re-run here; no native
+planner build or full-bootstrap evidence). Closure of the original v1 defect
+rests on the v2 producer's existence and binding checks, not on fresh Windows
+execution.

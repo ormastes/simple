@@ -1,0 +1,28 @@
+use std.spec.*
+use std.io_runtime.{cwd}
+use app.compiler_schema.codec_gen.{CodecUniverse, emit_codec_file}
+
+fn count_of(haystack: text, needle: text) -> i64:
+    haystack.split(needle).len() - 1
+
+use std.io_runtime.{file_read}
+
+# Prevention: the generator must never fabricate enum ids or payload words,
+# and every restore call must be preceded by a typed wire_prototype.
+describe "HIR codec enum wire boundary prevention":
+    it "generated codec never touches raw runtime enum ABI":
+        val g = emit_codec_file(CodecUniverse.load(cwd()))
+        expect(g.contains("rt_enum_new")).to_be(false)
+        expect(g.contains("rt_enum_payload")).to_be(false)
+        expect(g.contains("rt_value_nil")).to_be(false)
+
+    it "every hc_restore_enum_nil call is paired with a wire_prototype and a slot list":
+        val g = emit_codec_file(CodecUniverse.load(cwd()))
+        val restores = count_of(g, "hc_restore_enum_nil(r, wire_prototype, ")
+        expect(restores > 0).to_be(true)
+        expect(count_of(g, "var wire_nil_slots: [i64] = []\n")).to_equal(restores)
+
+    it "committed generated codec equals generator output for the wire boundary":
+        val g = emit_codec_file(CodecUniverse.load(cwd()))
+        val committed = file_read("src/compiler/20.hir/generated/hir_codec.spl")
+        expect(count_of(committed, "hc_restore_enum_nil(r, wire_prototype, ")).to_equal(count_of(g, "hc_restore_enum_nil(r, wire_prototype, "))

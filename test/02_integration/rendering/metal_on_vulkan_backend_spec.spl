@@ -1,0 +1,69 @@
+# @tag: rendering, backend, metal, vulkan, emulation
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 5%
+# @cover src/lib/gc_async_mut/gpu/engine2d/helpers_availability.spl 10%
+
+# Metal-on-Vulkan lane: a disclosed Linux GPU-execution lane that serves the
+# Metal backend surface through the real Vulkan backend (mirrors
+# directx-on-vulkan). Strict "metal" is never substituted.
+# Bug: doc/08_tracking/bug/metal_backend_no_linux_emulation_lane_2026-08-19.md
+
+use std.spec.step
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.helpers_availability.{backend_canonical_name, backend_display_name}
+
+describe "Metal-on-Vulkan lane":
+    context "name normalization":
+        it "accepts hyphen and underscore spellings":
+            step("normalize metal-on-vulkan spellings")
+            expect(backend_canonical_name("metal-on-vulkan")).to_equal("metal-on-vulkan")
+            expect(backend_canonical_name("metal_on_vulkan")).to_equal("metal-on-vulkan")
+            expect(backend_canonical_name(" Metal-On-Vulkan ")).to_equal("metal-on-vulkan")
+        it "keeps strict metal distinct":
+            step("metal stays metal")
+            expect(backend_canonical_name("metal")).to_equal("metal")
+        it "has an honest display name":
+            step("display name discloses Vulkan")
+            val shown = backend_display_name("metal-on-vulkan")
+            expect(shown.contains("Vulkan")).to_equal(true)
+            expect(shown.contains("Unknown")).to_equal(false)
+
+    context "probe disclosure":
+        it "discloses Vulkan execution or reports a clear unavailable reason":
+            step("probe metal_on_vulkan")
+            val probe = Engine2D.probe_backend(8, 8, "metal_on_vulkan")
+            expect(probe.backend_name).to_equal("metal-on-vulkan")
+            if probe.is_ok():
+                expect(probe.reason.contains("Vulkan")).to_equal(true)
+                expect(probe.reason.contains("not Apple Metal")).to_equal(true)
+            else:
+                expect(probe.reason.len()).to_be_greater_than(0)
+
+    context "selection and rendering":
+        it "selects metal-on-vulkan and renders a rect via Vulkan":
+            step("create and draw")
+            match Engine2D.create_requested_backend(8, 4, "metal_on_vulkan"):
+                Err(reason): expect(Engine2D.probe_backend(8, 4, "metal_on_vulkan").is_ok()).to_equal(false)
+                Ok(metal):
+                    expect(metal.backend_name()).to_equal("metal-on-vulkan")
+                    metal.clear(0xff102030u32)
+                    metal.draw_rect_filled(2, 1, 4, 2, 0xffa0b0c0u32)
+                    # Read before present(): readback self-flushes and must come from the device.
+                    val rb = metal.read_pixels_with_source()
+                    expect(rb.source).to_equal("device_readback")
+                    expect(rb.backend_handle).to_be_greater_than(0)
+                    expect(rb.pixel_count).to_equal(32)
+                    expect(rb.pixels[1 * 8 + 2]).to_equal(0xffa0b0c0u32)
+                    expect(rb.pixels[0]).to_equal(0xff102030u32)
+                    expect(rb.pixels[3 * 8 + 7]).to_equal(0xff102030u32)
+                    metal.shutdown()
+
+    context "strict metal is not substituted":
+        it "still reports Metal requires macOS off macOS":
+            step("probe metal")
+            val probe = Engine2D.probe_backend(1, 1, "metal")
+            if probe.is_ok():
+                expect(probe.backend_name).to_equal("metal")
+            else:
+                expect(probe.reason.contains("Metal requires macOS")).to_equal(true)
+                expect(probe.backend_name).to_equal("metal")

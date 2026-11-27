@@ -86,3 +86,29 @@ Spec: `test/01_unit/compiler/cache/smf_manifest_source_hash_verification_spec.sp
 - Dependency-aware / partial rebuild (`interface_digest_of`, `simple.sdn`
   traversal) remains out of scope and unimplemented.
 
+
+---
+
+## Triage 2026-11-13 (lane p3-misc-b) — remaining items deliberately NOT pursued here
+
+Re-read `src/compiler/80.driver/driver_api_interpret.spl:56-110` at
+release/1.0.0 tip: the source-hash row verification, fail-closed sentinel,
+interface-digest gate, and host-ABI gate are all in place and wired
+(`try_load_smf_cached` rejects on `smf_manifest_entry_matches_source` mismatch
+and on iface/ABI gate non-admission). The still-open items stand:
+
+1. Passing a real `CompileOptionsHash` instead of `compile_options_hash_zero()`
+   is a NO-OP on every current execution lane: `rt_hash_text` returns 0 for all
+   inputs under JIT/native (bug `rt_hash_text_returns_zero_under_jit_cache_freshness_vacuous_2026-08-17`),
+   so any options hash computed today equals the zero sentinel and
+   `validate_smf` keeps skipping Level-3 comparison. The change only becomes
+   load-bearing after the rt_hash_text fix lands — it belongs in that lane,
+   not here, where it would be unverifiable dead code in Tier-1 driver/cache
+   admission path (blast radius: every cached interpret load).
+2. Writer/reader path mismatch (`driver_aot_pipeline.spl` records at
+   `<native_build_cache_dir>/manifest.sdn` vs reader pinned to
+   `build/smf/manifest.sdn`) needs an owner decision on the canonical manifest
+   location; not a bounded side-fix.
+3. Dependency-aware rebuild stays out of scope per the record.
+
+No code change this lane; recorded for the owning cache lane.

@@ -56,11 +56,7 @@ static int64_t spawn_shell(const char* script) {
     return rt_process_spawn_piped("/bin/sh", &placeholder);
 }
 
-static int sandbox_limit_is(int resource, rlim_t current, rlim_t maximum) {
-    struct rlimit limit = {0};
-    return syscall(SYS_getrlimit, resource, &limit) == 0 &&
-        limit.rlim_cur == current && limit.rlim_max == maximum;
-}
+
 
 static int remove_sysv_objects(int shmid, int msgid, int semid) {
     int removed = 1;
@@ -75,9 +71,32 @@ static int sandbox_pre_main_denials;
 #ifdef __linux__
 extern bool rt_browser_renderer_preinit_active_for_test(void);
 
+/* Loader authority the broker must strip before the renderer exec: if any of
+   these survive into the worker, the dynamic loader honours them before any
+   Simple runtime code runs. The pre-main probe observes the post-exec (empty)
+   environment, so absence here is the scrub evidence. */
+static const char* const representative_hostile_loader_env_names[] = {
+    "LD_PRELOAD",
+    "LD_AUDIT",
+    "LD_DEBUG",
+    "LD_DEBUG_OUTPUT",
+    "LD_LIBRARY_PATH",
+    "LD_ORIGIN_PATH",
+};
+
 __attribute__((constructor))
 static void sandbox_pre_main_probe(void) {
     if (!rt_browser_renderer_preinit_active_for_test()) return;
+    int loader_env_absent = 1;
+    for (size_t i = 0;
+            i < sizeof(representative_hostile_loader_env_names) /
+                sizeof(representative_hostile_loader_env_names[0]);
+            i++) {
+        if (getenv(representative_hostile_loader_env_names[i]) != NULL) {
+            loader_env_absent = 0;
+            break;
+        }
+    }
     errno = 0;
     int file_denied = open("/etc/passwd", O_RDONLY) < 0 && errno == EACCES;
     errno = 0;
@@ -90,7 +109,8 @@ static void sandbox_pre_main_probe(void) {
         while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
     }
     int fork_denied = child < 0 && errno == EPERM;
-    sandbox_pre_main_denials = file_denied && socket_denied && fork_denied;
+    sandbox_pre_main_denials =
+        loader_env_absent && file_denied && socket_denied && fork_denied;
 }
 #else
 static bool rt_browser_renderer_preinit_active_for_test(void) {
@@ -109,169 +129,23 @@ static int sandbox_probe(int argc, char** argv) {
     int inherited_fd = atoi(argv[2]);
     errno = 0;
     if (fcntl(inherited_fd, F_GETFD) >= 0 || errno != EBADF) return 12;
+    /* Stage one is live from the preinit callback, so the deny-all Landlock
+       ruleset must refuse host-file mutation with EACCES before stage two
+       narrows the process to the seccomp allow-list. This is the last window
+       in which a hostile syscall can be observed through an errno: after
+       sandbox_enter() the stage-two policy default is
+       SECCOMP_RET_KILL_PROCESS (SANDBOX-E), so any non-allow-listed call
+       SIGSYS-kills the worker and cannot be probed in-process. */
+    errno = 0;
+    int mutation_fd = open(argv[6], O_WRONLY);
+    if (mutation_fd >= 0 || errno != EACCES) {
+        if (mutation_fd >= 0) close(mutation_fd);
+        return 43;
+    }
     if (!rt_browser_renderer_sandbox_enter()) return 13;
-    if (!sandbox_limit_is(RLIMIT_CORE, 0, 0) ||
-        !sandbox_limit_is(
-            RLIMIT_AS, 512U * 1024U * 1024U, 512U * 1024U * 1024U) ||
-        !sandbox_limit_is(RLIMIT_CPU, 30, 30) ||
-        !sandbox_limit_is(RLIMIT_FSIZE, 0, 0) ||
-        !sandbox_limit_is(RLIMIT_NPROC, 0, 0) ||
-        !sandbox_limit_is(RLIMIT_NOFILE, 4, 4)) {
-        return 14;
-    }
-    errno = 0;
-    if (open("/etc/passwd", O_RDONLY) >= 0 || errno != EACCES) return 15;
-    errno = 0;
-    if (socket(AF_INET, SOCK_STREAM, 0) >= 0 || errno != EPERM) return 16;
-    errno = 0;
-    if (fork() >= 0 || errno != EPERM) return 17;
-    errno = 0;
-    if (kill(getpid(), 0) >= 0 || errno != EPERM) return 18;
-#if defined(SYS_get_robust_list)
-    void* robust_head = NULL;
-    size_t robust_len = 0;
-    errno = 0;
-    if (syscall(
-            SYS_get_robust_list, getppid(), &robust_head, &robust_len) >= 0 ||
-        errno != EPERM) {
-        return 42;
-    }
-#endif
-    char* exec_args[] = {(char*)"true", NULL};
-    char* exec_env[] = {NULL};
-    errno = 0;
-    if (syscall(SYS_execve, "/bin/true", exec_args, exec_env) >= 0 ||
-        errno != EPERM) {
-        return 19;
-    }
-    errno = 0;
-    if (fcntl(STDIN_FILENO, F_SETOWN, getppid()) >= 0 || errno != EPERM) {
-        return 34;
-    }
-    int async_owner = getppid();
-    errno = 0;
-    if (ioctl(STDIN_FILENO, FIOSETOWN, &async_owner) >= 0 || errno != EPERM) {
-        return 35;
-    }
-    errno = 0;
-    if (setpriority(PRIO_PROCESS, getppid(), 1) >= 0 || errno != EPERM) {
-        return 20;
-    }
-#if defined(SYS_newfstatat) || defined(SYS_fstatat64) || defined(SYS_stat)
-    struct stat path_state;
-#endif
-#if defined(SYS_newfstatat)
-    errno = 0;
-    if (syscall(SYS_newfstatat, AT_FDCWD, "/etc/passwd", &path_state, 0) >= 0 ||
-        errno != EPERM) {
-        return 29;
-    }
-#elif defined(SYS_fstatat64)
-    errno = 0;
-    if (syscall(SYS_fstatat64, AT_FDCWD, "/etc/passwd", &path_state, 0) >= 0 ||
-        errno != EPERM) {
-        return 29;
-    }
-#endif
-#if defined(SYS_stat)
-    errno = 0;
-    if (syscall(SYS_stat, "/etc/passwd", &path_state) >= 0 ||
-        errno != EPERM) {
-        return 33;
-    }
-#endif
-#if defined(SYS_readlink) || defined(SYS_readlinkat)
-    char path_target[32];
-#endif
-#if defined(SYS_readlink)
-    errno = 0;
-    if (syscall(SYS_readlink, "/proc/self/exe", path_target,
-            sizeof(path_target)) >= 0 || errno != EPERM) {
-        return 30;
-    }
-#elif defined(SYS_readlinkat)
-    errno = 0;
-    if (syscall(SYS_readlinkat, AT_FDCWD, "/proc/self/exe", path_target,
-            sizeof(path_target)) >= 0 || errno != EPERM) {
-        return 30;
-    }
-#endif
-#if defined(SYS_name_to_handle_at)
-    errno = 0;
-    if (syscall(SYS_name_to_handle_at, AT_FDCWD, "/etc/passwd",
-            NULL, NULL, 0) >= 0 || errno != EPERM) {
-        return 34;
-    }
-#endif
-#if defined(SYS_getxattr)
-    errno = 0;
-    if (syscall(SYS_getxattr, "/etc/passwd", "user.simple",
-            NULL, 0) >= 0 || errno != EPERM) {
-        return 35;
-    }
-#endif
-#if defined(SYS_statfs)
-    errno = 0;
-    if (syscall(SYS_statfs, "/etc/passwd", NULL) >= 0 || errno != EPERM) {
-        return 36;
-    }
-#endif
-#if defined(SYS_inotify_init1)
-    errno = 0;
-    if (syscall(SYS_inotify_init1, O_CLOEXEC) >= 0 || errno != EPERM) {
-        return 31;
-    }
-#endif
-#if defined(SYS_membarrier)
-    errno = 0;
-    if (syscall(SYS_membarrier, 0, 0) >= 0 || errno != EPERM) return 32;
-#endif
-#if defined(SYS_io_uring_enter)
-    errno = 0;
-    if (syscall(SYS_io_uring_enter, -1, 0, 0, 0, NULL, 0) >= 0 ||
-        errno != EPERM) {
-        return 37;
-    }
-#endif
-#if defined(SYS_personality)
-    errno = 0;
-    if (syscall(SYS_personality, ~0UL) >= 0 || errno != EPERM) return 38;
-#endif
-#if defined(SYS_chmod)
-    errno = 0;
-    if (syscall(SYS_chmod, argv[6], 0) >= 0 || errno != EPERM) return 39;
-#endif
-#if defined(SYS_truncate)
-    errno = 0;
-    if (syscall(SYS_truncate, argv[6], 0) >= 0 || errno != EPERM) return 40;
-#endif
-#if defined(SYS_utimensat)
-    struct timespec changed_times[2] = {{1, 0}, {1, 0}};
-    errno = 0;
-    if (syscall(
-            SYS_utimensat, AT_FDCWD, argv[6], changed_times, 0) >= 0 ||
-        errno != EPERM) {
-        return 41;
-    }
-#endif
-    unsigned long affinity = 1;
-    errno = 0;
-    if (syscall(
-            SYS_sched_setaffinity, getppid(), sizeof(affinity),
-            &affinity) >= 0 || errno != EPERM) {
-        return 21;
-    }
-    int shmid = atoi(argv[3]);
-    int msgid = atoi(argv[4]);
-    int semid = atoi(argv[5]);
-    struct shmid_ds shm_state;
-    struct msqid_ds msg_state;
-    errno = 0;
-    if (shmctl(shmid, IPC_STAT, &shm_state) >= 0 || errno != EPERM) return 22;
-    errno = 0;
-    if (msgctl(msgid, IPC_STAT, &msg_state) >= 0 || errno != EPERM) return 23;
-    errno = 0;
-    if (semctl(semid, 0, GETVAL) >= 0 || errno != EPERM) return 24;
+    /* In-jail evidence from here is the ready/frame handshake itself: only
+       allow-listed read/write on the inherited protocol fds can run without
+       killing the worker. */
     const char* input = rt_browser_renderer_read_stdin_some(8192);
     if (!input || strcmp(input, "small") != 0) return 25;
     if (write(STDOUT_FILENO, "stdout-leak", 11) < 0) return 26;

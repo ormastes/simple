@@ -143,3 +143,10 @@ real dict key. Both fixed in `src/lib/common/sdn/parser.spl`, pinned by
   `rt_vulkan_readback_u32_checksum` (C, unavailable-fallback arm). This is
   lane parity for symbols that already exist, not license to add C — pure
   Simple first still applies (`../../layer_expert/runtime/skill.md`).
+
+- Windows descriptor snapshots require the existing Windows 8 declarations
+  before the first runtime translation-unit include. Preserve the early
+  `_WIN32_WINNT` floor in `runtime_native.c` and newer caller selections;
+  defining it only in a late header leaves `FILE_ID_INFO` unavailable under
+  MinGW header guards. Verify both production include order and the standalone
+  fd-stat selfcheck, without treating either as full runner qualification.

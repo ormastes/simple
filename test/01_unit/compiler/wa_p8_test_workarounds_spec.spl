@@ -1,0 +1,138 @@
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use app.bug.workaround_index.{parse_workaround_source}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_verify.{mir_verify_module}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use std.common.encoding.unicode_scalar.{unicode_scalar_to_char}
+
+var flags: [i64] = [10, 20, 30]
+
+fn touch_flags_collision(tag: text) -> i64:
+    flags.len()
+
+struct LoweringProbeResult:
+    summary: text
+    ir: text
+
+fn lower_pair_checked(label: text, p1: text, m1: text, s1: text, p2: text, m2: text, s2: text) -> LoweringProbeResult:
+    val log = Logger(level: 0)
+    val a1 = parse_full_frontend(s1, p1, m1, log)
+    val a2 = parse_full_frontend(s2, p2, m2, log)
+    var modules: Dict<text, Module> = {}
+    modules[m1] = a1
+    modules[m2] = a2
+    val sources = [
+        SourceFile(path: p1, content: s1, module_name: m1),
+        SourceFile(path: p2, content: s2, module_name: m2)
+    ]
+    val surfaces = match module_surfaces_from_modules(modules, sources):
+        case Ok(v): v
+        case Err(err): return LoweringProbeResult(summary: "SURFACE_ERR={err}", ir: "")
+    var hl1 = hirlowering_for_module(m1, surfaces)
+    var hl2 = hirlowering_for_module(m2, surfaces)
+    val h1 = hl1.lower_module(a1)
+    val h2 = hl2.lower_module(a2)
+    var mods: Dict<text, HirModule> = {}
+    mods[m1] = h1
+    mods[m2] = h2
+    var ml = MirLowering.new_for_target(h2.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    ml.prescan_module_struct_names(mods, m1)
+    ml.prescan_module_struct_names(mods, m2)
+    val mir = ml.lower_module(h2, [h1, h2])
+    val verify_report = mir_verify_module(mir)
+    val mirv_fatal = verify_report.fatal_count()
+    var tr = MirToLlvm.create("p8." + label, CodegenTarget.X86_64, None)
+    val ir = tr.translate_module(mir)
+    val void_flag = if ir.contains("(void ") or ir.contains(", void "): 1 else: 0
+    var detail = ""
+    for e in hl1.errors: detail = detail + " | H1: " + e.message
+    for e in hl2.errors: detail = detail + " | H2: " + e.message
+    for e in ml.errors: detail = detail + " | MIR: " + e.message
+    for f in verify_report.findings:
+        if f.is_fatal(): detail = detail + " | MIRV: " + f.format()
+    for e in tr.codegen_errors: detail = detail + " | LLVM: " + e
+    val summary = "hir={hl1.errors.len() + hl2.errors.len()} mir={ml.errors.len()} mirv={mirv_fatal} llvm={tr.codegen_errors.len()} void={void_flag}{detail}"
+    LoweringProbeResult(summary: summary, ir: ir)
+
+describe "WA-P8 test workaround audit and retirement regressions":
+    it "keeps `for flags in 0..16` shadowed against same-named module global `var flags: [i64]` and verifies native_build_phase_split_spec retirement":
+        var mask_hits = 0
+        for flags in 0..16:
+            val global_len = touch_flags_collision("iter")
+            expect(global_len).to_equal(3)
+            if (flags & 1) != 0: mask_hits = mask_hits + 1
+            if (flags & 2) != 0: mask_hits = mask_hits + 1
+            if (flags & 4) != 0: mask_hits = mask_hits + 1
+            if (flags & 8) != 0: mask_hits = mask_hits + 1
+        expect(mask_hits).to_equal(32)
+        expect(flags.len()).to_equal(3)
+
+        val p1_lib = "pub var flags: [i64] = []\npub fn touch(s: text) -> i64:\n    1\nexport flags, touch\n"
+        val p1_main = "use lib.p1.{{touch}}\nfn check() -> i64:\n    var sum = 0\n    for flags in 0..16:\n        val x = touch(\"a\")\n        val b = (flags & 1) != 0\n        if b: sum = sum + x\n    sum\n"
+        val res = lower_pair_checked("loop_flags", "lib/p1.spl", "lib.p1", p1_lib, "app/m1.spl", "app.m1", p1_main)
+        expect(res.summary).to_equal("hir=0 mir=0 mirv=0 llvm=0 void=0")
+
+        val spec_src = file_read("test/01_unit/app/native_build_phase_split_spec.spl")
+        expect(spec_src).to_contain("for flags in 0..16:")
+        expect(spec_src).to_contain("expect(parsed.release).to_be(true)")
+        val links = parse_workaround_source("test/01_unit/app/native_build_phase_split_spec.spl", spec_src).unwrap()
+        expect(links.len()).to_equal(0)
+
+    it "verifies Result<char, text>.unwrap() runtime & compiler lowering and unicode_scalar_char_fixture retirement":
+        for cp in [65, 233, 128512, 0, 1114111]:
+            val converted = unicode_scalar_to_char(cp)
+            expect(converted.is_err()).to_equal(false)
+            val ch: char = converted.unwrap()
+            val code: i64 = ch as i64
+            expect(code).to_equal(cp)
+
+        val us_src = file_read("src/lib/common/encoding/unicode_scalar.spl")
+        val fx_shape = "use std.common.encoding.unicode_scalar.{{unicode_scalar_to_char}}\nenum FakeHirExprKind:\n    CharLit(char)\nfn unicode_scalar_char_case_v1(codepoint: i64) -> text:\n    val converted = unicode_scalar_to_char(codepoint)\n    if converted.is_err():\n        val reason = converted.unwrap_err()\n        return \"err {{codepoint}}: {{reason}}\"\n    val character: char = converted.unwrap()\n    val kind: FakeHirExprKind = FakeHirExprKind.CharLit(character)\n    match kind:\n        case FakeHirExprKind.CharLit(raw_payload):\n            val payload: char = raw_payload\n            return \"{{payload}}\"\n        case _: return \"lost\"\n"
+        val res = lower_pair_checked("unicode_unwrap", "lib/common/encoding/unicode_scalar.spl", "std.common.encoding.unicode_scalar", us_src, "test/fx.spl", "test.fx", fx_shape)
+        expect(res.summary).to_equal("hir=0 mir=0 mirv=0 llvm=0 void=0")
+        expect(res.ir).to_contain("rt_strcat_tagged")
+
+        val fixture_src = file_read("test/01_unit/compiler/frontend/unicode_scalar_char_fixture.spl")
+        expect(fixture_src).to_contain("val character: char = converted.unwrap()")
+        val links = parse_workaround_source("test/01_unit/compiler/frontend/unicode_scalar_char_fixture.spl", fixture_src).unwrap()
+        expect(links.len()).to_equal(0)
+
+    it "lowers WireCase.TupleOnly((7, 9)) inline tuple constructor and verifies enum_wire_boundary_native retirement":
+        val ew_src = file_read("src/lib/nogc_sync_mut/sffi/enum_wire.spl")
+        val sm_shape = "use std.nogc_sync_mut.sffi.enum_wire.{{enum_wire_nil_slot, enum_wire_restore_nil}}\nenum WireCase:\n    Empty\n    Flag(value: bool)\n    Row(label: text, enabled: bool, count: i64)\n    TupleOnly(value: (i64, i64))\nfn require_slot(value: WireCase, arity: i64, index: i64, expected: bool) -> bool:\n    match enum_wire_nil_slot(value, arity, index):\n        case Ok(actual): actual == expected\n        case Err(_): false\nfn check() -> i64:\n    if not require_slot(WireCase.TupleOnly((7, 9)), 1, 0, false): return 1\n    match enum_wire_restore_nil(WireCase.TupleOnly((7, 9)), 1, []):\n        case Ok(restored):\n            match restored:\n                case WireCase.TupleOnly(pair):\n                    if pair.0 == 7 and pair.1 == 9: return 0\n                    return 2\n                case _: return 3\n        case Err(_): return 4\n"
+        val res = lower_pair_checked("enum_wire_tuple_lit", "lib/nogc_sync_mut/sffi/enum_wire.spl", "std.nogc_sync_mut.sffi.enum_wire", ew_src, "test/sm.spl", "test.sm", sm_shape)
+        expect(res.summary).to_equal("hir=0 mir=0 mirv=0 llvm=0 void=0")
+
+        val smoke_src = file_read("test/04_smoke/enum_wire_boundary_native.spl")
+        expect(smoke_src).to_contain("require_slot(WireCase.TupleOnly((7, 9)), 1, 0, false)")
+        expect(smoke_src).to_contain("match enum_wire_restore_nil(WireCase.TupleOnly((7, 9)), 1, []):")
+        val links = parse_workaround_source("test/04_smoke/enum_wire_boundary_native.spl", smoke_src).unwrap()
+        expect(links.len()).to_equal(0)
+
+    it "verifies json_comprehension_join semantic lowering and retains explicit Stage2 seed fixture":
+        val w_src = file_read("test/fixtures/native/json_comprehension_join/original/worker.spl")
+        val o_src = file_read("test/fixtures/native/json_comprehension_join/original/main.spl")
+        val res = lower_pair_checked("json_comp_join", "worker.spl", "worker", w_src, "main.spl", "main", o_src)
+        expect(res.summary).to_equal("hir=0 mir=0 mirv=0 llvm=0 void=0")
+        expect(res.ir).to_contain("rt_array_push")
+        expect(res.ir).to_contain("rt_array_join_any")
+
+        val exp_path = "test/fixtures/native/json_comprehension_join/explicit/main.spl"
+        val exp_src = file_read(exp_path)
+        val links = parse_workaround_source(exp_path, exp_src).unwrap()
+        expect(links.len()).to_equal(1)
+        expect(links[0].bug_id).to_equal("seed_list_comprehension_join_and_empty_native_2026_10_21")
+        expect(links[0].recover).to_equal("400bd5d1983")

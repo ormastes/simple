@@ -1,0 +1,79 @@
+"""
+# Stage-2 Phase 3 / Phase 4 Unblock Regression Spec
+
+Verifies all four source-level blockers discovered during the Stage-2
+Phase 3 (`stage3_from_s2`) and Phase 4 (`phase4_from_s2`) builds:
+1. Class/impl method `primitive_api` suppressions in the 8 affected compiler
+   and stdlib modules use comment-form `# @allow(primitive_api)` rather than
+   bare indented `@allow(...)` annotations rejected by the frozen Stage-2 parser.
+2. `gpu_ctx_info()` in `src/lib/nogc_sync_mut/gpu_runtime/mod.spl` uses an
+   early `return` instead of a void `if`/`else` tail and executes cleanly.
+3. `src/lib/nogc_sync_mut/simd/scalable.spl` uses `math_sqrt` instead of
+   unresolved `rt_sqrt`, `rt_ptr_load`, or `rt_ptr_store`, and computes
+   square roots accurately.
+4. `driver_aot_native_output.spl` (`if emit_shared_requested:`) propagates
+   `target_triple`, `runtime_path`, and `runtime_bundle` into `shared_config`.
+"""
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io_runtime.{file_read}
+use std.nogc_sync_mut.gpu_runtime.mod.{gpu_ctx_info}
+use std.common.math.math.{math_sqrt}
+use std.simd.scalable.{scalablevec_splat_n}
+
+describe "Stage-2 Phase 3 and Phase 4 unblock invariants":
+    it "avoids indented @allow(primitive_api) in class and impl bodies":
+        val paths = [
+            "src/compiler/00.common/diagnostics/diagnostic_rule_policy.spl",
+            "src/compiler/35.semantics/perf/perf_cache_key_v1.spl",
+            "src/compiler/70.backend/linker/elf/elf_operation_bindings.spl",
+            "src/compiler/70.backend/backend/jit_interpreter.spl",
+            "src/compiler/90.tools/lint/_LintMain/config_and_model.spl",
+            "src/compiler/95.interp/execution/mod.spl",
+            "src/lib/nogc_sync_mut/sffi/dynlib_generation_v1.spl",
+            "src/lib/nogc_sync_mut/trace/xray_spy_v1.spl"
+        ]
+        var idx = 0
+        while idx < paths.len():
+            val src = file_read(paths[idx])
+            expect(src.contains("\n    @allow(primitive_api)")).to_equal(false)
+            expect(src.contains("\n        @allow(primitive_api)")).to_equal(false)
+            expect(src.contains("# @allow(primitive_api)")).to_equal(true)
+            idx = idx + 1
+
+    it "uses early return in gpu_ctx_info and executes without error":
+        val src = file_read("src/lib/nogc_sync_mut/gpu_runtime/mod.spl")
+        val start = src.index_of("fn gpu_ctx_info():") ?? -1
+        expect(start).to_be_greater_than(-1)
+        val tail = src.substring(start, start + 350)
+        expect(tail).to_contain("return")
+        expect(tail.contains("    else:")).to_equal(false)
+        gpu_ctx_info()
+        expect(tail).to_contain("Status: CPU fallback")
+
+    it "uses math_sqrt without unresolved rt_ptr_load, rt_ptr_store, or rt_sqrt in scalable SIMD":
+        val simd_paths = [
+            "src/lib/nogc_sync_mut/simd/scalable.spl",
+            "src/lib/nogc_async_mut/simd/scalable.spl",
+            "src/lib/gc_async_mut/simd/scalable.spl"
+        ]
+        var s_idx = 0
+        while s_idx < simd_paths.len():
+            val src = file_read(simd_paths[s_idx])
+            expect(src.contains("rt_ptr_load(")).to_equal(false)
+            expect(src.contains("rt_ptr_store(")).to_equal(false)
+            expect(src.contains("rt_sqrt(")).to_equal(false)
+            expect(src).to_contain('use std.common.math.math.{math_sqrt}')
+            expect(src).to_contain("math_sqrt(self.elements[i] as f64) as T")
+            s_idx = s_idx + 1
+        expect(math_sqrt(4.0)).to_equal(2.0)
+        expect(scalablevec_splat_n(-4.0, 4).abs().to_array()[0]).to_equal(4.0)
+
+    it "propagates target_triple, runtime_path, and runtime_bundle on shared library links":
+        val src = file_read("src/compiler/80.driver/driver_aot_native_output.spl")
+        val marker = src.index_of("if emit_shared_requested:") ?? -1
+        expect(marker).to_be_greater_than(-1)
+        val block = src.substring(marker, marker + 1200)
+        expect(block).to_contain("shared_config.target_triple")
+        expect(block).to_contain("shared_config.runtime_path")
+        expect(block).to_contain("shared_config.runtime_bundle")

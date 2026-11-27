@@ -16,9 +16,17 @@
 # Err, never a laundered Ok(<nil>).
 
 use std.spec
+use std.spec.{skip}
 use std.io_runtime.{process_run, env_get, dir_create_all}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
 use app.io.sysinfo_ops.{getpid}
 use app.io.file_ops.{path_absolute}
+
+# The runtime does not translate a POSIX "/tmp" prefix on Windows; anchor the
+# fixture root under the host temp dir instead.
+fn _fixture_base() -> text:
+    val raw = get_temp_dir().replace("\\", "/")
+    if raw.ends_with("/"): raw.substring(0, raw.len() - 1) else: raw
 
 val PROBE = "test/02_integration/bootstrap/probe_stage2_object_path_diagnostic_read.spl"
 val DIAGNOSTIC_TEXT = "AOT object destination already exists"
@@ -26,6 +34,24 @@ val DIAGNOSTIC_TEXT = "AOT object destination already exists"
 fn simple_bin() -> text:
     val b = env_get("SIMPLE_BIN")
     if b == "": "bin/simple" else: b
+
+# The native lane is the point of this regression (the header above): the
+# probe is built with the selected tool's native-build. The Rust bootstrap
+# seed's native-build cannot produce that lane (no LLVM native backend on the
+# seed), so the example skips (never fails) when the selected tool is the
+# seed. The `--version` identity check mirrors the test runner's MC/DC
+# degrade decision and the compiler-dir native skip-gate convention.
+fn rust_seed_toolchain(binary: text) -> bool:
+    val (out, err, code) = process_run(binary, ["--version"])
+    if code != 0:
+        return false
+    val identity = out + "\n" + err
+    identity.contains("bootstrap seed only") or identity.contains("Simple Language v")
+
+fn native_lane_unsupported_reason() -> text:
+    if rust_seed_toolchain(simple_bin()):
+        return "the selected tool (SIMPLE_BIN or bin/simple) is the Rust bootstrap seed, whose native-build cannot produce the stage2 AOT lane; requires the self-hosted producer"
+    ""
 
 fn scv_bypass_env() -> text:
     # jj workspaces carry no git event source for the inner native-build's SCV
@@ -40,7 +66,11 @@ fn scv_bypass_env() -> text:
 
 describe "stage2 backend object-path diagnostic read (bounded no-follow read)":
     slow_it "interpret lane and native lane both recover the written diagnostic text":
-        val root = "/tmp/bootstrap_stage2_object_path_spec_{getpid()}"
+        val unsupported = native_lane_unsupported_reason()
+        if unsupported != "":
+            skip("interpret lane and native lane both recover the written diagnostic text", unsupported)
+            return
+        val root = "{_fixture_base()}/bootstrap_stage2_object_path_spec_{getpid()}"
         expect(dir_create_all(root)).to_equal(true)
         val fixture = root + "/diagnostic.txt"
         val missing = root + "/no-such-file.txt"

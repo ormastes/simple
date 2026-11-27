@@ -192,3 +192,49 @@ so no false green is possible.
 4. Then wire the clang driver to syscall 120 and run the plan's stated B3
    acceptance (`clang hello.c -o hello` in driver mode). That needs C1
    (`build/os/clang_static` is absent today), so it is a separate lane.
+
+---
+
+## Triage note 2026-11-25 (release/1.0.0 ledger pass)
+
+Update to "Next steps" item 1: **D6 is FIXED.** The dedicated ledger entry
+`simpleos_vmm_kernel_pml4_phys_reads_zero_after_init_2026-08-06.md` records the
+fix verified by a positive in-guest marker and re-confirmed 2026-08-08 from
+four independent post-fix serial logs (`[VMM] portable VMM published kernel
+PML4 ...` followed by `[spawn] user AS ready ...`). However, that same entry
+records that the narrower Lane-B3 `SpawnWait` harness remains blocked for a
+different reason: its entry `.spl` was never committed to HEAD (a build-system
+gap, not a VMM recurrence).
+
+Classification for this pass: SKIP. The remaining proof (in-guest SpawnWait
+round trip under OVMF/QEMU, then wiring the clang driver to syscall 120) is
+QEMU/baremetal-lane work not verifiable on this Windows host, and full fork
+remains the scheduler-integration program described in §2. The OPEN (P2)
+status stays accurate: the SpawnWait primitive is landed but still unproven
+in-guest, and this file must not be claimed green.
+
+## BF-9 Update (2026-11-26) — host contract verified; bug remains `open`
+
+- **Verified host contracts**: Verified fail-closed unauthenticated path spawn (`x86_64_fs_exec_spawn` returns `-13` `EACCES`), `spl_handle_spawn_binary` task threading, and `_handle_fork_state` + `_handle_waitpid_state(WNOHANG)` child parent tracking on `Scheduler`.
+- **Remaining open scope**: `src/os/kernel/loader/x86_64_fs_exec_ring3.spl:474-619` still builds an isolated `AddressSpace` and calls `x86_64_enter_user_task(ctx, space.phys_root)` without registering a scheduler `Task` (and `baremetal_stubs.c` `_bare_exec_handle` remains outside BF-9 host verification), so this bug remains `open` pending QEMU ring-3 Task/bare-exec work.
+- **Host specs**:
+  - `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel_bf9/bf9_fork_exec_spawn_contract_spec.spl --mode=interpreter` -> `2 examples, 0 failures`.
+  - `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel/abi/syscall_shim_process_state_spec.spl --mode=interpreter` -> `2 examples, 0 failures`.
+- **QEMU/baremetal verification pending**:
+  ```sh
+  sh scripts/os/build_spawn_wait_ring3.shs && sh scripts/os/ssh_ring3_uefi_boot.shs
+  ```
+
+## Wave 5 Update (2026-11-27) — `fix-implemented-verification-pending`
+
+- **Implemented scheduler Task registration & teardown (`w5-2-simpleos-kernel-boot`)**:
+  - `src/os/kernel/scheduler/scheduler_exec.spl`: added `sched_adopt_mapped_user_task_and_run_impl` (rejects `space.phys_root == 0`, fails closed when all 256 `MAX_TASKS` slots are full even when `current.id == 0` without overwriting `tasks[0]`, constructs a `TaskState.Running` user `TaskControlBlock`, calls `register_task_vmspace(...)` and `cap_init_task_record(id, true)`), `sched_prepare_reap_adopted_user_task_v1`, and `sched_reap_adopted_task_slot_v1`.
+  - `src/os/kernel/scheduler/scheduler_task_mgmt.spl`: guarded `sched_release_task_address_space` against `address_space == 0u64` / `1u64`.
+  - `src/os/kernel/scheduler/_Scheduler/scheduler_lifecycle.spl`: added `Scheduler.ensure_bootstrap_v1`, `Scheduler.adopt_mapped_user_task_and_run_v1` (returns `TaskId`, sets `self.current`, `self.current_slot`, `self.current_by_cpu[0]`, populates `self.tasks`), and `Scheduler.finish_adopted_user_task_v1` (restores `prev_current`, exits `id`, clears caller-owned `address_space`/`vmspace` before reaping the TCB slot via `wait_for_collect` / fallback reclamation so `space.phys_root` is never double-freed and 256-slot tables do not leak).
+  - `src/os/kernel/loader/x86_64_fs_exec_ring3.spl`: calls `Scheduler.ensure_bootstrap_v1(g_shim_scheduler)`, adopts the pre-mapped ring-3 process into `g_shim_scheduler` before `x86_64_enter_user_task(ctx, space.phys_root)` (failing closed with `destroy_user_address_space(space)` + `return -1` on `id == 0`), and calls `finish_adopted_user_task_v1` after `rt_x86_ring3_exit_rc()` before single-owner `destroy_user_address_space(space)`. Preserves exact SFFI authority counts (`8 extern fn`, `18 @unsafe`, `1 unsafe`, `0 @always_inline`, `39` extern calls).
+- **Host specs run post-edit (interpreter, 3-slot semaphore)**:
+  - `test/01_unit/os/kernel/loader/x86_64_fs_exec_ring3_task_registration_spec.spl` -> `5 examples, 0 failures` (`adopt_mapped_user_task_and_run_v1` + `spl_handle_getpid` + `spl_handle_fork` + `spl_handle_waitpid(..., WNOHANG)==0` + synchronous reap/no double-free across 260 cycles + full 256-slot no-overwrite refusal + zero-`phys_root` refusal + source wiring).
+  - `test/01_unit/os/kernel_bf9/bf9_fork_exec_spawn_contract_spec.spl` -> `2 examples, 0 failures`.
+  - `test/01_unit/os/kernel/abi/syscall_shim_process_state_spec.spl` -> `2 examples, 0 failures`.
+- **Verification pending**: `waiting-for: QEMU x86_64 SimpleOS boot verification` (`sh scripts/os/build_spawn_wait_ring3.shs && sh scripts/os/ssh_ring3_uefi_boot.shs`).
+

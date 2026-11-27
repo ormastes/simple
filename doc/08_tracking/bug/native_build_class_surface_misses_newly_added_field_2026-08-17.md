@@ -4,8 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN (P1 — aborts the native-build worker). Re-triaged 2026-08-17;
-not reproduced in isolation, see "Re-triage" below.
+**Status:** FIXED (triage 2026-11-11, lane boot21; first triaged 2026-11-10 lane boot5) — module-qualified type-registry fixes re-verified at HEAD `d552f63f67f8` and BOTH modqual pins green on the tracked seed 46fe8f6b6def (8/8 and 12/12); the 2026-11-10 LIVE residual reading is itself stale (see 2026-11-11 addendum below).
 
 ## Re-triage 2026-08-17 (seed `bin/release/x86_64-unknown-linux-gnu/simple`, 59537240 bytes, mtime 2026-08-17 12:58:51)
 
@@ -121,3 +120,82 @@ beside the class.
 Found while working the compiler `.spl` slice; the accessor workaround is in the
 same change that filed this row.
 
+
+## 2026-11-10 P3-boot5 triage (row 37) — LIVE (residual, fix owned by seed-fix lane)
+
+The bare-name class-registry mechanism this record indicts was substantially
+fixed: `6ae0170f5e49` (PR #6981, per-owning-module same-name enum/class
+resolution) and `4a5740091035` (PR #7498, module-qualified type registry,
+657-line `module_cache.rs` change adding `resolve_class_in_scope`) are both
+ancestors of HEAD `4343ce254922`. The accessor workaround for
+`imported_type_methods_in_progress` still exists
+(`context_helpers.spl:28-34`, used from `module_reexport_materialization.spl:1524-1526`)
+but the field is now a normally declared class field
+(`types.spl:182`, constructor `:772`).
+
+However the fix's own regression pins FAIL on the current Windows seed
+(worktree bin/simple.exe built 2026-11-10 15:00, after all three merges):
+
+- `test/01_unit/compiler/95.interp/interpreter/module_qualified_type_registry_spec.spl`
+  --mode=interpret -> FAIL (3 passed, 5 failed). The failures are exactly this
+  record's symptom strings: "unknown static method zero on class Vec3"
+  (`a_vec_zero_sum`), "class `Config` has no field named `backend`"
+  (`a_config_backend`), "unknown variant or method 'Fast' on enum Mode"
+  (`a_mode`) — i.e. module `use_a`'s explicit named imports
+  (`use test.helpers.modqual.geo_a.{Vec3, Config, Mode, ...}`) resolve to
+  `geo_b`'s same-named definitions (registered last win), while all `use_b`
+  calls pass. Not baselined in
+  `scripts/check/use_target_resolves_baseline.txt`.
+- `.../module_qualified_type_registry_prevention_spec.spl` -> FAIL (1 passed,
+  11 failed), same shape.
+
+Control: `test/03_system/gpu_lane/cuda_jit_hello_spec.spl` (same collision
+family, cited by `916af0e33400` interp-lane triage today) passes 14/14 on the
+same seed, so the seed carries the fix and the residual is shape-specific:
+the named-use-import path (`use m.{A, B}` importing same-named types) is not
+covered by `resolve_class_in_scope`, or the Windows path-separator form of
+those import keys is not normalized (`cc397582f447` fixed separator bugs in
+this area once already).
+
+Fix sketch for the seed-fix lane (src/compiler_rust — outside this lane's
+scope): (1) rerun the failing spec with
+`SIMPLE_DBG_COLLISION=1 ./bin/simple.exe test
+test/01_unit/compiler/95.interp/interpreter/module_qualified_type_registry_spec.spl
+--mode=interpret` and trace which registry tier serves `use_a`'s `Vec3`;
+(2) extend `resolve_class_in_scope` (src/compiler_rust/compiler/src/module_cache.rs)
+so named-import-list entries for same-named types bind to the imported module's
+definition before any global/last-registered tier, on Windows path spellings
+too; (3) green both modqual specs as the acceptance gate. The
+`imported_type_methods_in_progress` accessor workaround can be inlined back
+only after (3).
+
+
+## 2026-11-11 P3-boot21 triage — FIXED at tip (header flip)
+
+Fresh re-verification on the tracked seed (build 46fe8f6b6def,
+`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe`, `--mode=interpreter
+--no-cache`):
+
+- `test/01_unit/compiler/95.interp/interpreter/module_qualified_type_registry_spec.spl`
+  → SPEC FILE VERDICT outcome=OK, executed=8 passed=8 failed=0.
+- `test/01_unit/compiler/95.interp/interpreter/module_qualified_type_registry_prevention_spec.spl`
+  → SPEC FILE VERDICT outcome=OK, executed=12 passed=12 failed=0.
+
+Both pins are GREEN on the current tracked seed. The 2026-11-10 boot5 addendum
+recorded these same two specs FAILing (3/8 and 1/12) on the then-current seed
+and classified the row LIVE-residual for the seed-fix lane; that residual
+reading is itself stale as of tracked seed 46fe8f6b6def — the named-use-import
+(`use m.{A, B}` same-named types) path now resolves correctly.
+
+Source state at HEAD `d552f63f67f8`: the registry fixes `6ae0170f5e49` (PR
+#6981) and `4a5740091035` (PR #7498, `resolve_class_in_scope`) are ancestors;
+`imported_type_methods_in_progress` is a normally declared class field
+(`types.spl:182`, constructor `:772`). The accessor workaround
+(`context_helpers.spl`, used from `module_reexport_materialization.spl:1524-1526`)
+still stands and can now be inlined back as optional cleanup — its acceptance
+gate (both modqual specs green) is satisfied. No code change this lane; header
+flipped from the stale LIVE reading to FIXED-at-tip.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — boot21: both modqual pins green on the tracked seed (8/8 + 12/12); the 2026-11-10 LIVE-residual reading is itself stale at seed 46fe8f6b6def; registry fixes ancestors.

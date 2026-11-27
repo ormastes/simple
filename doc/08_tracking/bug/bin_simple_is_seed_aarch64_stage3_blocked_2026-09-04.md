@@ -1,10 +1,10 @@
 # `bin/simple` on this aarch64 host is the Rust seed, deliberately
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-11 (lane boot9) — STALE: aarch64-host stopgap ledger; not actionable from a Windows x86_64 lane
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN — stopgap in place, removal blocked on Stage 3
+**Status:** STALE (triage 2026-11-11, lane boot9) — host-state record; exit condition unchanged: aarch64 Stage 3 green, then remove stopgap and re-deploy
 **Filed:** 2026-09-04
 **Host:** aarch64-unknown-linux-gnu (Ubuntu 24.04, 20 cores, 121 GB)
 
@@ -50,9 +50,77 @@ and `--version` reports `Simple Language v1.0.0-rc.1` behind that banner.
   lane's provenance check believe a real deploy happened.
 - Do not commit it. `bin/release/**` binaries are not added here.
 
+## Triage 2026-11-10 (p3-boot lane)
+
+STALE (host-state record, not actionable in this lane). This row documents the
+resting state of ONE aarch64 host's `bin/release/aarch64-unknown-linux-gnu/simple`
+and its removal precondition (aarch64 Stage 3 self-host green). The p3-boot
+lane works on Windows x86_64 in worktree simple-p3-boot-20261110; there is no
+aarch64 stopgap artifact here, and neither deleting nor re-bootstrapping an
+aarch64 deployment is possible from this host. The stopgap's own guardrails
+("do not commit it", "do not refresh it", seed banner) are behavioral and
+remain correct. No code change; re-file against the aarch64 host when its
+Stage 3 lane is ready to re-run `--full-bootstrap --deploy`.
+
 ## Removal
 
 Delete the seed copy and re-run
 `scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy` once
 Stage 3 self-host is green on aarch64. That is the only exit condition.
 
+
+## Triage 2026-11-10 (P3 compiler-seed lane, work/p3-seed-20261110)
+
+Verdict: **STALE-BLOCKED (host/infra bookkeeping, not a seed code defect)**. This
+record is an aarch64-host stopgap ledger entry; its only exit condition is
+"delete the seed copy and re-run
+`scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy` once
+Stage 3 self-host is green on aarch64". The blocker it cites,
+`zerokind_is_a_corrupt_aggregate_2026-09-03.md`, is itself
+FIX-IMPLEMENTED-VERIFICATION-PENDING (seed fix 2c89727c11c in release/1.0.0,
+awaiting an aarch64 Stage-3 run). Nothing here is fixable from
+`src/compiler_rust` on a Windows lane, and the stopgap rules it records (never
+commit/launder the seed copy) are behavioural, not code. No change made; the
+entry remains accurate as written.
+
+## Triage 2026-11-11 (lane boot9, work/p3-boot9-20261111)
+
+STALE — third consecutive triage (2026-11-03 seed lane, 2026-11-10 p3-boot
+lane, this lane) with the same verdict: this is a host-state ledger entry
+for ONE aarch64 host's `bin/release/aarch64-unknown-linux-gnu/simple` seed
+stopgap. This lane runs on Windows x86_64; `bin/release/` does not exist in
+this worktree, and neither deleting an aarch64 deployment nor re-running
+its Stage 3 self-host is possible from here. Exit condition unchanged:
+aarch64 Stage 3 green, then remove the seed copy and re-run
+`scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy`.
+No code change.
+
+## Re-check 2026-11-26 (aarch64 Linux host, lane work/bug-arm64-tooling-20261126)
+
+Premise changed: the stopgap seed copy described above is gone. The main clone
+`/home/yoon/dev/simple` has **no `bin/simple` and no `bin/release/` at all**
+(`ls bin/simple bin/release/` -> No such file or directory), and no worktree
+under `/home/yoon/dev/*/bin/release/aarch64-unknown-linux-gnu/simple` exists.
+So there is neither a seed stopgap nor an admitted pure-Simple full-CLI binary
+deployed on this host.
+
+A self-hosted aarch64 full CLI can NOT yet be produced. The sanctioned
+`scripts/bootstrap/bootstrap-from-scratch.sh` was NOT run from this lane; the
+blocker below is inferred from the bootstrap lane drivers' own runs. Latest
+evidence on this host (dated):
+
+- Stage 2 is reachable: `.../bootstrap-s2probe-integ25/stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`
+  (2026-11-22 07:13, `--version` = `simple-bootstrap 1.0.0-rc.1`) is the
+  BOOTSTRAP cli (compile / native-build only), in active use by other lanes.
+- The last full-CLI attempt, `boot-fable-lane-scripts/p4/cli-f28`
+  (source `263f49ab6c5`, 2026-11-22 13:07), ended `rc=137` (SIGKILL / OOM) in
+  `phase=hir done=3667 total=4139` — HIR, 472 modules short. A follow-up
+  `f28-manual/fix.patch` (test_runner_new probe imports) was staged but no
+  newer rc/receipt exists (nothing newer than 2026-11-22 14:00 found). Filed
+  as `full_cli_phase3_root_process_exceeds_50g_during_hir_readoption_2026-11-22`
+  (P1, open; that record calls this build "Phase 3", the lane dir is `p4/`).
+
+Precise current blocker: the full-CLI build does not complete on this
+host (HIR-phase memory kill at ~3667/4139 modules under the lane's cap), so no
+`--full-bootstrap --deploy` receipt exists. No bootstrap was launched from
+this lane (another session's Stage 2/3 jobs share the host).

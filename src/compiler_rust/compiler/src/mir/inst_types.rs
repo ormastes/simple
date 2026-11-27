@@ -133,6 +133,8 @@ pub enum MirPattern {
     Variant {
         enum_name: String,
         variant_name: String,
+        /// Variant index in its OWNING enum's declaration (#6953).
+        discriminant: u32,
         payload: Option<Box<MirPattern>>,
     },
     /// Tuple pattern

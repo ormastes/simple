@@ -1,0 +1,38 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Statement-level `name = expr` and `name := expr` keep their source line
+
+The ident-led statement fast paths in core/parser_stmts.spl build STMT_ASSIGN
+and the walrus STMT_VAL_DECL directly. Both must carry the identifier's span:
+an unlocated statement makes every diagnostic on it report line 0 (the
+captured-write check fell back to the parser's EOF position before #8603).
+"""
+use std.spec
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.core.ast.{stmt_count, stmt_get, expr_get, STMT_VAL_DECL, STMT_ASSIGN}
+use compiler.core.types.{span_line}
+
+val SPAN_SRC = "fn main() -> i64:\n    walrus_probe := 1\n    var plain_probe = 0\n    plain_probe = 2\n    walrus_probe + plain_probe\n"
+
+fn stmt_line_of(tag: i64, name: text) -> i64:
+    var i = 0
+    while i < stmt_count():
+        val s = stmt_get(i)
+        if s.tag == tag:
+            if tag == STMT_VAL_DECL and s.name == name:
+                return if s.span_id > 0: span_line(s.span_id) else: 0
+            if tag == STMT_ASSIGN and s.expr_idx >= 0:
+                val target = expr_get(s.expr_idx)
+                if target.s_val == name:
+                    return if target.span_id > 0: span_line(target.span_id) else: 0
+        i = i + 1
+    -1
+
+describe "ident-led statement fast paths keep the identifier span":
+    it "a walrus declaration carries its line":
+        val _m = parse_and_build_module(SPAN_SRC, "assign_walrus_span_probe.spl")
+        expect(stmt_line_of(STMT_VAL_DECL, "walrus_probe")).to_equal(2)
+
+    it "a plain assignment target carries its line":
+        val _m = parse_and_build_module(SPAN_SRC, "assign_walrus_span_probe.spl")
+        expect(stmt_line_of(STMT_ASSIGN, "plain_probe")).to_equal(4)

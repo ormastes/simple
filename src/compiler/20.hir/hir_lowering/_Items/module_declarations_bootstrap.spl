@@ -7,6 +7,7 @@ use compiler.hir.hir_lowering._Items.lowering_helpers.{bootstrap_hir_symbol_for_
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
 
 use compiler.hir.hir_types.*
+use compiler.hir.primitive_method_identity.{hir_primitive_owner_name, hir_primitive_impl_method_name}
 use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
@@ -28,7 +29,7 @@ use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_
 use compiler.core.ast_stmt.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, STMT_IF, stmt_count, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type, stmt_get_body, stmt_get_if_single_else}
 
 extern fn rt_enum_discriminant<T>(value: T) -> i64
-extern fn rt_enum_payload(value: StmtKind) -> Expr
+extern fn rt_enum_payload(value: StmtKind) -> Expr?
 use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_UNIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_INDEX, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_IF, EXPR_BLOCK, EXPR_RETURN}
 use compiler.frontend.core._AstExpr.accessors.{expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_extra, expr_get_args, expr_get_arg_names, expr_get_stmts}
 use compiler.frontend.core._AstExpr.nodes.{expr_count}
@@ -49,7 +50,7 @@ fn unannotated_dict_global_type(value: Expr, span: Span) -> HirType?:
     match value.kind:
         case ExprKind.DictLit(_):
             Some(HirType(kind: HirTypeKind.Dict(HirType(kind: HirTypeKind.Any, span: span), HirType(kind: HirTypeKind.Any, span: span)), span: span))
-        case _: nil
+        case _: None
 
 impl HirLowering:
     me bootstrap_flat_error_expr(kind_label: text, index: i64, span: Span) -> HirExpr:
@@ -147,6 +148,9 @@ impl HirLowering:
         self.symbols.bind_qualified_type(self.module_filename, name, declaration)
 
     me declare_module_symbols(module: ParserModule):
+        self.declare_module_symbols_with_source_intents_v1(module, {})
+
+    me declare_module_symbols_with_source_intents_v1(module: ParserModule, source_intents: Dict<text, text>):
         # Closure builds need this pass even under SIMPLE_BOOTSTRAP=1 (see the
         # call site in lower_module) so a module's own struct/enum/class/
         # trait names resolve inside its own function bodies.
@@ -154,7 +158,11 @@ impl HirLowering:
         if self.ambient_bootstrap_enabled() and not declare_bootstrap_closure:
             return
         # Pass module filename for visibility tracking
-        val mod_name = if self.module_filename != "": Some(self.module_filename) else: nil
+        # Typed `text?` + `None`: an UNTYPED Some/nil join was typed as the
+        # first arm's raw word by native producers predating the MIR optional
+        # join fix, emptying defining_module for every local declaration
+        # (doc/08_tracking/bug/native_hir_defining_module_empty_local_decls_2026-11-17.md).
+        val mod_name: text? = if self.module_filename != "": Some(self.module_filename) else: None
         val decl_span = Span.empty()
         val decl_visibility = Visibility.Public
 
@@ -177,12 +185,14 @@ impl HirLowering:
         while idx < cls_keys.len():
             val name = cls_keys[idx]
             val class_symbol = self.define_own_module_type(name, SymbolKind.Class, decl_span, decl_visibility, mod_name)
+            self.bind_source_declaration_origin_v1(source_intents, class_symbol, "class", name)
             # Cycle-153: guard-first double access (the 10/10 extraction form);
             # the bare annotated dict-value bind drew the corrupting copy.
             if not module_classes.has(name):
                 idx = idx + 1
                 continue
             val class_decl: ParserClass = module_classes[name]
+            self.register_nominal_type_template(class_symbol, class_decl.type_params, self.module_filename)
             if class_decl.type_params.len() == 0:
                 self.nongeneric_record_owners[class_symbol.id] = true
             idx = idx + 1
@@ -194,12 +204,14 @@ impl HirLowering:
         while idx < str_keys.len():
             val name = str_keys[idx]
             val struct_symbol = self.define_own_module_type(name, SymbolKind.Struct, decl_span, decl_visibility, mod_name)
+            self.bind_source_declaration_origin_v1(source_intents, struct_symbol, "struct", name)
             self.publish_own_struct_identity(name, struct_symbol, decl_span)
             # Cycle-153: guard-first double access.
             if not module_structs.has(name):
                 idx = idx + 1
                 continue
             val struct_decl: ParserStruct = module_structs[name]
+            self.register_nominal_type_template(struct_symbol, struct_decl.type_params, self.module_filename)
             if struct_decl.type_params.len() == 0:
                 self.nongeneric_record_owners[struct_symbol.id] = true
             idx = idx + 1
@@ -211,6 +223,10 @@ impl HirLowering:
         while idx < enum_keys.len():
             val name = enum_keys[idx]
             val enum_symbol = self.define_own_module_type(name, SymbolKind.Enum, decl_span, decl_visibility, mod_name)
+            self.bind_source_declaration_origin_v1(source_intents, enum_symbol, "enum", name)
+            if module_enums.has(name):
+                val enum_decl: ParserEnum = module_enums[name]
+                self.register_nominal_type_template(enum_symbol, enum_decl.type_params, self.module_filename)
             # Local enum fields restore HIR identity through the same qualified
             # index as imported fields. Publish only this exact declaration:
             # define retains an existing lexical binding on a name collision.
@@ -231,6 +247,7 @@ impl HirLowering:
             self.publish_own_struct_identity(name, bitfield_symbol, decl_span)
             # A bitfield declaration has no type parameters.
             self.nongeneric_record_owners[bitfield_symbol.id] = true
+            self.register_nominal_type_template(bitfield_symbol, [], self.module_filename)
             idx = idx + 1
 
         val module_traits = module.traits
@@ -239,7 +256,11 @@ impl HirLowering:
         idx = 0
         while idx < trait_keys.len():
             val name = trait_keys[idx]
-            self.define_own_module_type(name, SymbolKind.Trait, decl_span, decl_visibility, mod_name)
+            val trait_symbol = self.define_own_module_type(name, SymbolKind.Trait, decl_span, decl_visibility, mod_name)
+            self.bind_source_declaration_origin_v1(source_intents, trait_symbol, "trait", name)
+            if module_traits.has(name):
+                val trait_decl: ParserTrait = module_traits[name]
+                self.register_nominal_type_template(trait_symbol, trait_decl.type_params, self.module_filename)
             idx = idx + 1
 
         # TAL2 (2026-08-01): a module's OWN `type X = Y` aliases were never entered
@@ -264,11 +285,17 @@ impl HirLowering:
             val name = alias_keys[idx]
             val alias_decl: ParserTypeAlias = module_type_aliases[name]
             val alias_id = self.symbols.define(name, SymbolKind.TypeAlias, nil, decl_span, decl_visibility, false, mod_name)
+            self.bind_source_declaration_origin_v1(source_intents, alias_id, "type_alias", name)
             self.register_type_alias_template(alias_id, alias_decl.type_, alias_decl.type_params, self.module_filename)
             idx = idx + 1
 
-        # ParserFunction signatures are lowered after type symbols so named returns
-        # and recursive calls are typed before any function body is lowered.
+        # ParserFunction, module-constant, and impl signatures are pre-declared
+        # here so named returns, globals, and recursive calls are typed before
+        # bodies lower. Defer written-`Any` diagnostics to each item's real
+        # declaration lowerer (`lower_function`, `lower_hir_const_decl`, `lower_impl`)
+        # so annotations are diagnosed once instead of twice.
+        val saved_written_any_depth = self.written_any_unsafe_depth
+        self.written_any_unsafe_depth = saved_written_any_depth + 1
         val module_functions = module.functions
         var fn_keys = module_functions.keys()
         fn_keys.sort()
@@ -301,7 +328,14 @@ impl HirLowering:
                     for parser_tuple_elem in parser_tuple_elems:
                         fn_ret_tuple_elems.push(self.lower_type(parser_tuple_elem))
                     self.fn_tuple_returns[name] = fn_ret_tuple_elems
-            self.symbols.define(name, SymbolKind.Function, fn_type, decl_span, decl_visibility, false, mod_name)
+                elif parser_type_kind_named_name(fn_return_type.kind) == "tuple":
+                    val bare_elems = self.bare_tuple_return_elements_v1(fn_decl)
+                    if bare_elems.len() > 0:
+                        self.fn_tuple_returns[name] = bare_elems
+            val declared_function = self.symbols.define(name, SymbolKind.Function, fn_type, decl_span, decl_visibility, false, mod_name)
+            self.symbols.mark_generic_callable(declared_function, fn_decl.type_params.len())
+            self.prescan_generic_function_return(declared_function, fn_decl)
+            self.bind_source_declaration_origin_v1(source_intents, declared_function, "function", name)
             idx = idx + 1
 
         val module_constants = module.constants
@@ -313,12 +347,19 @@ impl HirLowering:
             # Publish the declared semantic type before lowering function bodies.
             # MIR global storage can be an i64 handle; it cannot recover Dict
             # key/value owners from that physical storage type.
-            var constant_type: HirType? = nil
+            var constant_type: HirType? = None
             if constant.has_type_:
                 constant_type = Some(self.lower_type(constant.type_))
             else:
                 constant_type = unannotated_dict_global_type(constant.value, decl_span)
-            self.symbols.define(name, SymbolKind.Const, constant_type, decl_span, decl_visibility, false, mod_name)
+            val declared_constant = self.symbols.define(name, SymbolKind.Const, constant_type, decl_span, decl_visibility, false, mod_name)
+            self.bind_source_declaration_origin_v1(source_intents, declared_constant, "constant", name)
+            if not constant.is_mutable:
+                match constant.value.kind:
+                    case ExprKind.IntLit(constant_value):
+                        self.scalar_const_pattern_symbols = self.scalar_const_pattern_symbols.push(declared_constant.id)
+                        self.scalar_const_pattern_values = self.scalar_const_pattern_values.push(constant_value)
+                    case _: ()
             idx = idx + 1
 
         # Declare impl methods
@@ -357,27 +398,50 @@ impl HirLowering:
                 self.symbols.lookup_or_invalid(owner_name)
             val previous_impl_self_type = self.current_method_self_type
             val previous_impl_self_symbol_id = self.current_method_self_symbol_id
+            var primitive_impl_type = HirType(kind: HirTypeKind.Error, span: decl_span)
+            var primitive_impl_trait = HirType(kind: HirTypeKind.Error, span: decl_span)
+            # Settle nongeneric aliases through the same type owner as
+            # lower_impl. A primitive alias must not use its alias SymbolId as
+            # Self while the implementation later uses its expanded scalar.
+            var needs_primitive_owner = not impl_owner_symbol.is_valid()
+            if impl_owner_symbol.is_valid():
+                if val owner_declaration = self.symbols.get_symbol_raw(impl_owner_symbol.id):
+                    needs_primitive_owner = owner_declaration.kind == SymbolKind.TypeAlias
+            if needs_primitive_owner and impl_.type_params.len() == 0:
+                val actual_impl_type = self.lower_type(impl_.type_)
+                if hir_primitive_owner_name(actual_impl_type.kind) != "":
+                    primitive_impl_type = actual_impl_type
+                    if impl_.has_trait_:
+                        primitive_impl_trait = self.lower_type(impl_.trait_)
             if impl_owner_symbol.is_valid():
                 self.current_method_self_type = Some(HirType(kind: HirTypeKind.Named(impl_owner_symbol, []), span: decl_span))
                 self.current_method_self_symbol_id = impl_owner_symbol.id
+            if hir_primitive_owner_name(primitive_impl_type.kind) != "":
+                self.current_method_self_type = Some(primitive_impl_type)
+                self.current_method_self_symbol_id = -1
             var mi = 0
             while mi < meth_keys.len():
                 val name = meth_keys[mi]
                 val method: ParserFunction = impl_.methods[name]
                 val owner_symbol = impl_owner_symbol
-                val symbol_name = if owner_symbol.is_valid(): self.symbols.method_symbol_name(owner_symbol, name) else: name
+                var symbol_name = if owner_symbol.is_valid(): self.symbols.method_symbol_name(owner_symbol, name) else: name
+                val primitive_symbol_name = hir_primitive_impl_method_name(
+                    self.symbols, primitive_impl_type, primitive_impl_trait, impl_.has_trait_, self.module_filename, name)
+                if primitive_symbol_name != "":
+                    symbol_name = primitive_symbol_name
                 val symbol_kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
-                val owner_context: SymbolId? = if owner_symbol.is_valid(): Some(owner_symbol) else: nil
+                val owner_context: SymbolId? = if owner_symbol.is_valid() and primitive_symbol_name == "": Some(owner_symbol) else: None
                 # This pass runs at module scope, before lower_impl binds the
                 # enclosing type parameters. An impl-generic method is a
                 # template even when the method declares no parameters of its
                 # own. Match generic free-function preregistration: publish its
                 # symbol now, and let lower_impl validate the signature in its
-                # actual generic scope before monomorphization specializes it.
-                var method_type: HirType? = nil
+                # actual generic scope.
+                var method_type: HirType? = None
                 if impl_.type_params.len() == 0:
                     method_type = self.declared_callable_type(method, owner_context)
-                self.symbols.define(symbol_name, symbol_kind, method_type, decl_span, decl_visibility, false, mod_name)
+                val declared_method = self.symbols.define(symbol_name, symbol_kind, method_type, decl_span, decl_visibility, false, mod_name)
+                self.record_call_arity_row(declared_method.id, method, not method.is_static)
                 mi = mi + 1
             if impl_.has_trait_:
                 val trait_name = parser_type_kind_named_name(impl_.trait_.kind)
@@ -394,19 +458,25 @@ impl HirLowering:
                         if impl_.methods.contains_key(name):
                             continue
                         val owner_symbol = impl_owner_symbol
-                        val method_symbol = if owner_symbol.is_valid(): self.symbols.method_symbol_name(owner_symbol, name) else: name
+                        var method_symbol = if owner_symbol.is_valid(): self.symbols.method_symbol_name(owner_symbol, name) else: name
+                        val primitive_default_symbol = hir_primitive_impl_method_name(
+                            self.symbols, primitive_impl_type, primitive_impl_trait, impl_.has_trait_, self.module_filename, name)
+                        if primitive_default_symbol != "":
+                            method_symbol = primitive_default_symbol
                         if not self.symbols.lookup_or_invalid(method_symbol).is_valid():
                             val symbol_kind = if trait_method.is_static: SymbolKind.Function else: SymbolKind.Method
-                            val owner_context: SymbolId? = if owner_symbol.is_valid(): Some(owner_symbol) else: nil
-                            var method_type: HirType? = nil
+                            val owner_context: SymbolId? = if owner_symbol.is_valid() and primitive_default_symbol == "": Some(owner_symbol) else: None
+                            var method_type: HirType? = None
                             if impl_.type_params.len() == 0:
                                 method_type = self.declared_callable_type(trait_method, owner_context)
-                            self.symbols.define(method_symbol, symbol_kind, method_type, decl_span, decl_visibility, false, mod_name)
+                            val declared_default = self.symbols.define(method_symbol, symbol_kind, method_type, decl_span, decl_visibility, false, mod_name)
+                            self.record_call_arity_row(declared_default.id, trait_method, not trait_method.is_static)
                 else:
                     pass
             self.current_method_self_type = previous_impl_self_type
             self.current_method_self_symbol_id = previous_impl_self_symbol_id
             impl_idx = impl_idx + 1
+        self.written_any_unsafe_depth = saved_written_any_depth
 
     me lower_import(imp: ParserImport) -> HirImport:
         var items: [HirImportItem] = []
@@ -416,13 +486,13 @@ impl HirLowering:
                     items = items.push(HirImportItem(
                         name: name,
                         alias: Some(alias),
-                        resolved: nil
+                        resolved: None
                     ))
                 case ImportItem(name, false, _):
                     items = items.push(HirImportItem(
                         name: name,
-                        alias: nil,
-                        resolved: nil
+                        alias: None,
+                        resolved: None
                     ))
 
         HirImport(
@@ -513,7 +583,7 @@ impl HirLowering:
             # the downstream lower_string_interpolation + rt_interp_cstr chain
             # can evaluate and splice each part.
             val interp_parts = self.build_bootstrap_interpolations(raw_str_value, span)
-            val str_interps: [HirInterpolation]? = if interp_parts.len() > 0: Some(interp_parts) else: nil
+            val str_interps: [HirInterpolation]? = if interp_parts.len() > 0: Some(interp_parts) else: None
             return HirExpr(kind: HirExprKind.StringLit(raw_str_value, str_interps), has_type_: true, type_: HirType(kind: HirTypeKind.Str, span: span), span: span)
         if tag == EXPR_INTERPOLATED_STRING:
             var interp_parts: [HirInterpolation] = []
@@ -606,7 +676,7 @@ impl HirLowering:
             return HirExpr(kind: HirExprKind.IfChain(arms, None), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
         if tag == EXPR_RETURN:
             # Bare-lift — see bug doc 2026-07-23 (Some-box vs flat optional).
-            var flat_ret_val: HirExpr? = nil
+            var flat_ret_val: HirExpr? = None
             flat_ret_val = self.lower_bootstrap_flat_expr(expr_get_left(expr_idx))
             return HirExpr(kind: HirExprKind.Return(flat_ret_val), has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
         if tag == EXPR_BLOCK:
@@ -719,7 +789,7 @@ impl HirLowering:
             # Bare-lift: explicit Some(...) builds a heap Option box on the
             # stage4 native lane; MIR lower_expr then sees the box header
             # (<value:0x100000004>) — bug doc 2026-07-23.
-            var value: HirExpr? = nil
+            var value: HirExpr? = None
             if expr_idx >= 0:
                 value = self.lower_bootstrap_flat_expr(expr_idx)
             return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Return(value), has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)), span: span)
@@ -742,7 +812,8 @@ impl HirLowering:
             val stmt = self.lower_bootstrap_flat_stmt(stmt_ids[i])
             eprint("[hir-lower] flat_block:stmt:done {i}")
             if i == stmt_ids.len() - 1:
-                if rt_enum_discriminant(stmt.kind) == expr_stmt_disc:
+                val statement_kind: HirStmtKind = stmt.kind
+                if rt_enum_discriminant(statement_kind) == expr_stmt_disc:
                     match stmt.kind:
                         case HirStmtKind.Expr(expr):
                             if rt_enum_discriminant(expr.kind) == return_expr_disc:

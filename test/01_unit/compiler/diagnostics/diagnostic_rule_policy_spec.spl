@@ -1,0 +1,344 @@
+"""
+## Purpose and audience
+
+Executable contract for `compiler.common.diagnostics.diagnostic_rule_policy`
+(plan §4, P0): the scheduled per-rule severity policy that sits beside
+DiagnosticV1. Covers loading the shipped SDN policy, the resolution order
+(fatal/security > edition mandatory > profile baseline > schedule > scoped
+exception > warning phase), clock independence + digest reproducibility, and
+the warning-phase rule that a security rule is never silently downgraded.
+Audience: driver/lint/LSP adapters that resolve a diagnostic's severity.
+"""
+# @cover src/compiler/00.common/diagnostics/diagnostic_rule_policy.spl
+# @cover src/compiler/00.common/assurance/warning_phase.spl
+
+use std.spec
+use std.nogc_sync_mut.fs.text_io.{file_read_text}
+use compiler.common.diagnostics.diagnostic_rule_policy.{
+    DiagnosticPolicyInputV1, DiagnosticRuleLevel, DiagnosticPolicySnapshot, PolicyResolveContext,
+    load_diagnostic_policy_text, diagnostic_policy_default_path, project_policy_parity_v1, resolve_policy_with_input
+}
+use compiler.common.assurance.warning_phase.{
+    phased_rule_severity_rank, severity_rank_deny, severity_rank_advisory
+}
+
+fn shipped() -> DiagnosticPolicySnapshot:
+    match load_diagnostic_policy_text(file_read_text(diagnostic_policy_default_path())):
+        Ok(s): s
+        Err(e):
+            panic("shipped policy failed to load: " + e)
+
+fn ctx_at(profile: text, edition: text, release_date: text) -> PolicyResolveContext:
+    PolicyResolveContext.new(profile, edition, release_date)
+
+# @manual_section: diagnostic_rule_policy
+describe "DiagnosticRulePolicy load (plan §4)":
+    it "loads the twenty-three seeded rules with their schedule fields and a sha256 digest":
+        """Verifies all 23 seeded rules (14 SPL-* plus 9 PERF-*) load with deterministic sha256 digest."""
+        # @req REQ-DIAG-POLICY-001
+        # @capture(value): rule count, SPL-TYPE-001 schedule, digest prefix
+        step("Load config/policy/diagnostic_policy.sdn")
+        val s = shipped()
+        step("Inspect the dense table and one rule's lifecycle fields")
+        expect(s.rule_count()).to_equal(29)
+        expect(s.has_rule("SPL-PAT-001")).to_equal(true)
+        expect(s.has_rule("SPL-UNIT-001")).to_equal(true)
+        expect(s.has_rule("SPL-UNIT-002")).to_equal(true)
+        expect(s.has_rule("PERF-STYLE-001")).to_equal(true)
+        expect(s.has_rule("PERF-COST-001")).to_equal(true)
+        expect(s.has_rule("PERF-CONTRACT-001")).to_equal(true)
+        expect(s.has_rule("PERF-FIX-001")).to_equal(true)
+        val r = s.rule("SPL-TYPE-001")
+        expect(r.error_not_before_date).to_equal("")
+        expect(r.error_since_lang_version).to_equal("2027.2")
+        expect(r.exception_policy).to_equal("reason_required")
+        expect(s.digest.starts_with("sha256:")).to_equal(true)
+        expect(s.digest.len()).to_equal(71)
+
+    it "denies SPL-PAT-001 (Some/None over a non-Option subject) by default":
+        # @req REQ-DIAG-POLICY-001
+        # @capture(value): resolved level and stage for SPL-PAT-001
+        val s = shipped()
+        step("Resolve the option-pattern-shape rule from a warn request on the default profile")
+        val r = s.resolve("SPL-PAT-001", ctx_at("default", "2026.11", "2026-11-13"), DiagnosticRuleLevel.Warn)
+        expect(r.level.name()).to_equal("deny")
+        expect(r.stage).to_equal("profile")
+        expect(s.rule("SPL-PAT-001").exception_policy).to_equal("forbidden")
+
+    it "rejects an unknown severity spelling instead of defaulting":
+        # @req REQ-DIAG-POLICY-001
+        step("Load a policy whose mode level is a typo")
+        val src = "diagnostic_policy:\n    version: 1\n    rules:\n        X-1:\n            modes:\n                default: denny\n"
+        match load_diagnostic_policy_text(src):
+            Ok(_): expect("loaded").to_equal("rejected")
+            Err(e): expect(e.contains("denny")).to_equal(true)
+
+describe "DiagnosticRulePolicy resolution order (plan §4)":
+    it "uses the profile baseline: SPL-TYPE-001 warns in moderate and denies in robust":
+        # @req REQ-DIAG-POLICY-002
+        val s = shipped()
+        step("Resolve on the current edition in two profiles")
+        val m = s.resolve("SPL-TYPE-001", ctx_at("moderate", "2026.11", "2026-11-12"), DiagnosticRuleLevel.Warn)
+        val r = s.resolve("SPL-TYPE-001", ctx_at("robust", "2026.11", "2026-11-12"), DiagnosticRuleLevel.Warn)
+        expect(m.level.name()).to_equal("warn")
+        expect(m.stage).to_equal("profile")
+        expect(r.level.name()).to_equal("deny")
+
+    it "makes an edition-mandatory rule deny only when edition AND release date are both reached":
+        # @req REQ-DIAG-POLICY-002
+        val src = "diagnostic_policy:\n    version: 1\n    rules:\n        X-1:\n            warn_since_lang_version: \"2026.11\"\n            error_not_before_date: \"2027-05-01\"\n            error_since_lang_version: \"2027.2\"\n            modes:\n                default: warn\n"
+        match load_diagnostic_policy_text(src):
+            Ok(s):
+                step("Edition 2027.2 but released before error_not_before")
+                val early = s.resolve("X-1", ctx_at("moderate", "2027.2", "2027-04-30"), DiagnosticRuleLevel.Warn)
+                step("Edition 2027.2 released on error_not_before")
+                val due = s.resolve("X-1", ctx_at("moderate", "2027.2", "2027-05-01"), DiagnosticRuleLevel.Warn)
+                expect(early.level.name()).to_equal("warn")
+                expect(due.level.name()).to_equal("deny")
+                expect(due.stage).to_equal("edition")
+            Err(e): expect(e).to_equal("loaded")
+
+    it "promotes SPL-UNIT-001 and SPL-TYPE-001 by edition 2027.2 alone (owner decision 2026-11-17, no date)":
+        # @req REQ-DIAG-POLICY-002
+        val s = shipped()
+        for code in ["SPL-UNIT-001", "SPL-TYPE-001"]:
+            step("Resolve " + code + " on 2026.11 vs 2027.2 with an early release date")
+            expect(s.rule(code).error_not_before_date).to_equal("")
+            expect(s.rule(code).error_since_lang_version).to_equal("2027.2")
+            expect(s.resolve(code, ctx_at("moderate", "2026.11", "2026-11-17"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")
+            val next = s.resolve(code, ctx_at("moderate", "2027.2", "2026-11-17"), DiagnosticRuleLevel.Warn)
+            expect(next.level.name()).to_equal("deny")
+            expect(next.stage).to_equal("edition")
+        step("SPL-TYPE-001 keeps its robust profile deny")
+        expect(s.resolve("SPL-TYPE-001", ctx_at("robust", "2026.11", "2026-11-17"), DiagnosticRuleLevel.Warn).level.name()).to_equal("deny")
+
+    it "keeps a rule silent before its warn schedule starts":
+        # @req REQ-DIAG-POLICY-002
+        val s = shipped()
+        val before = s.resolve("SPL-UNIT-001", ctx_at("moderate", "2026.8", "2026-09-01"), DiagnosticRuleLevel.Warn)
+        expect(before.level.name()).to_equal("allow")
+        expect(before.stage).to_equal("schedule")
+
+    it "fails closed on a date-only schedule when no release date is supplied (CLI lint path)":
+        # @req REQ-DIAG-POLICY-002
+        # Regression: the CLI lint engine supplies no release date, so a row with only
+        # warn_since_date used to resolve to allow ("schedule") forever.
+        val s = shipped()
+        val input = DiagnosticPolicyInputV1.for_mode("default", "", false, "", "")
+        for code in ["SPL-GC-001", "SPL-RET-001", "SPL-IMPORT-001", "SPL-MATCH-002", "SPL-MATCH-003"]:
+            val r = resolve_policy_with_input(s, code, input, DiagnosticRuleLevel.Warn)
+            expect(r.level.name()).to_equal("warn")
+            expect(r.stage).to_equal("profile")
+        step("An explicit date before the start still keeps the rule silent")
+        val early = s.resolve("SPL-MATCH-003", ctx_at("moderate", "2026.11", "2026-11-01"), DiagnosticRuleLevel.Warn)
+        expect(early.level.name()).to_equal("allow")
+        expect(early.stage).to_equal("schedule")
+
+    it "honours a scoped exception only when the rule's exception policy allows it":
+        # @req REQ-DIAG-POLICY-002
+        val s = shipped()
+        step("Exception on a deprecation rule vs on the security rule")
+        val c = ctx_at("moderate", "2026.11", "2026-11-12").with_scoped_exception()
+        val dep = s.resolve("SPL-UNIT-001", c, DiagnosticRuleLevel.Warn)
+        val sec = s.resolve("SPL-UNIT-002", c, DiagnosticRuleLevel.Warn)
+        # owner decision 2026-11-17 (Q1=b): SPL-UNIT-002 stays a security rule
+        expect(s.rule("SPL-UNIT-002").category).to_equal("security")
+        expect(dep.level.name()).to_equal("allow")
+        expect(dep.stage).to_equal("exception")
+        expect(sec.level.name()).to_equal("deny")
+        expect(sec.stage).to_equal("security")
+
+    it "lets fatal corruption outrank every other stage":
+        # @req REQ-DIAG-POLICY-002
+        val s = shipped()
+        val c = ctx_at("moderate", "2026.8", "2026-09-01").with_fatal()
+        val r = s.resolve("SPL-UNIT-001", c, DiagnosticRuleLevel.Warn)
+        expect(r.level.name()).to_equal("deny")
+        expect(r.stage).to_equal("fatal")
+
+    it "passes an unregistered code through at its emitted level":
+        # @req REQ-DIAG-POLICY-002
+        val s = shipped()
+        val r = s.resolve("E9999", ctx_at("robust", "2026.11", "2026-11-12"), DiagnosticRuleLevel.Advisory)
+        expect(r.level.name()).to_equal("advisory")
+        expect(r.stage).to_equal("unregistered")
+
+describe "DiagnosticRulePolicy reproducibility (plan §4)":
+    it "gives the same severity and digest for the same edition and snapshot on any day":
+        # @req REQ-DIAG-POLICY-003
+        # @capture(value): two independent loads + resolves compare equal
+        step("Load twice and resolve with identical inputs")
+        val a = shipped()
+        val b = shipped()
+        val ra = a.resolve("SPL-TYPE-001", ctx_at("strict", "2026.11", "2026-11-12"), DiagnosticRuleLevel.Warn)
+        val rb = b.resolve("SPL-TYPE-001", ctx_at("strict", "2026.11", "2026-11-12"), DiagnosticRuleLevel.Warn)
+        expect(a.digest).to_equal(b.digest)
+        expect(ra.level.name()).to_equal(rb.level.name())
+        expect(ra.policy_digest).to_equal(a.digest)
+
+    it "uses policy_as_of for rehearsal instead of the release date":
+        # @req REQ-DIAG-POLICY-003
+        val s = shipped()
+        step("Release dated before error_not_before, rehearsal as of after it")
+        val src = "diagnostic_policy:\n    version: 1\n    rules:\n        X-1:\n            warn_since_lang_version: \"2026.11\"\n            error_not_before_date: \"2027-05-01\"\n            error_since_lang_version: \"2027.2\"\n            modes:\n                default: warn\n"
+        val c = ctx_at("moderate", "2027.2", "2027-01-01").with_policy_as_of("2027-06-01")
+        match load_diagnostic_policy_text(src):
+            Ok(d):
+                val r = d.resolve("X-1", c, DiagnosticRuleLevel.Warn)
+                expect(r.level.name()).to_equal("deny")
+                expect(r.effective_date).to_equal("2027-06-01")
+            Err(e): expect(e).to_equal("loaded")
+        expect(s.digest.starts_with("sha256:")).to_equal(true)
+
+    it "changes the digest when a rule's schedule changes":
+        # @req REQ-DIAG-POLICY-003
+        val base = "diagnostic_policy:\n    version: 1\n    rules:\n        X-1:\n            error_not_before_date: \"2027-05-01\"\n            modes:\n                default: warn\n"
+        val moved = "diagnostic_policy:\n    version: 1\n    rules:\n        X-1:\n            error_not_before_date: \"2027-06-01\"\n            modes:\n                default: warn\n"
+        var da = ""
+        var db = ""
+        match load_diagnostic_policy_text(base):
+            Ok(s): da = s.digest
+            Err(e): da = e
+        match load_diagnostic_policy_text(moved):
+            Ok(s): db = s.digest
+            Err(e): db = e
+        expect(da.starts_with("sha256:")).to_equal(true)
+        expect(da == db).to_equal(false)
+
+describe "Warning phase per-rule scheduling (plan §4)":
+    it "downgrades a non-security deny one rung under the blanket phase":
+        # @req REQ-DIAG-POLICY-004
+        expect(phased_rule_severity_rank(severity_rank_deny(), severity_rank_advisory(), true, false, false))
+            .to_equal(severity_rank_deny() - 1)
+
+    it "downgrades only the selected rule when the phase is selective":
+        # @req REQ-DIAG-POLICY-004
+        val s = shipped()
+        val c = ctx_at("robust", "2026.11", "2026-11-12").with_phased_rule("SPL-TYPE-001")
+        val r = s.resolve("SPL-TYPE-001", c, DiagnosticRuleLevel.Warn)
+        expect(r.level.name()).to_equal("warn")
+        expect(r.rehearsal).to_equal(true)
+        val plain = s.resolve("SPL-TYPE-001", ctx_at("robust", "2026.11", "2026-11-12"), DiagnosticRuleLevel.Warn)
+        expect(plain.rehearsal).to_equal(false)
+
+    it "never downgrades a security rule, blanket or selective":
+        # @req REQ-DIAG-POLICY-004
+        step("Pure rank transform with the security flag set")
+        expect(phased_rule_severity_rank(severity_rank_deny(), severity_rank_advisory(), true, true, true))
+            .to_equal(severity_rank_deny())
+        step("Policy resolve with blanket phase and the rule selected")
+        val s = shipped()
+        val c = ctx_at("robust", "2026.11", "2026-11-12").with_warning_phase().with_phased_rule("SPL-UNIT-002")
+        val r = s.resolve("SPL-UNIT-002", c, DiagnosticRuleLevel.Warn)
+        expect(r.level.name()).to_equal("deny")
+        expect(r.rehearsal).to_equal(false)
+
+describe "Robust-boundary rules (robust_boundaries plan section 7)":
+    it "ratifies the edition+profile schedule (owner decision 5C): warn now, robust denies, next edition denies":
+        # @req REQ-DIAG-POLICY-001
+        # @capture(value): (edition, profile) -> severity for each ratified rule
+        val s = shipped()
+        val rules = ["SPL-BOUND-001", "SPL-BOUND-002", "SPL-BOUND-003", "SPL-UNIT-003", "SPL-UNIT-004"]
+        for code in rules:
+            step("Resolve " + code + " across (edition, profile)")
+            val cur_default = s.resolve(code, ctx_at("default", "2026.11", "2026-11-16"), DiagnosticRuleLevel.Warn)
+            val cur_robust = s.resolve(code, ctx_at("robust", "2026.11", "2026-11-16"), DiagnosticRuleLevel.Warn)
+            val cur_critical = s.resolve(code, ctx_at("critical", "2026.11", "2026-11-16"), DiagnosticRuleLevel.Warn)
+            val next_default = s.resolve(code, ctx_at("default", "2027.2", "2026-11-16"), DiagnosticRuleLevel.Warn)
+            val next_robust = s.resolve(code, ctx_at("robust", "2027.2", "2026-11-16"), DiagnosticRuleLevel.Warn)
+            expect(cur_default.level.name()).to_equal("warn")
+            expect(cur_default.stage).to_equal("profile")
+            expect(cur_robust.level.name()).to_equal("deny")
+            expect(cur_critical.level.name()).to_equal("deny")
+            expect(next_default.level.name()).to_equal("deny")
+            expect(next_default.stage).to_equal("edition")
+            expect(next_robust.level.name()).to_equal("deny")
+            step("No wall-clock date gates the promotion")
+            expect(s.rule(code).error_not_before_date).to_equal("")
+            expect(s.rule(code).error_since_lang_version).to_equal("2027.2")
+            val far_past = s.resolve(code, ctx_at("default", "2027.2", ""), DiagnosticRuleLevel.Warn)
+            expect(far_past.level.name()).to_equal("deny")
+
+    it "keeps an undated rule's edition promotion independent of the release date":
+        # @req REQ-DIAG-POLICY-002
+        step("A rule with error_since_lang_version and no error_not_before_date")
+        val src = "diagnostic_policy:\n    version: 1\n    rules:\n        X-1:\n            warn_since_lang_version: \"2026.11\"\n            error_since_lang_version: \"2027.2\"\n            modes:\n                default: warn\n"
+        match load_diagnostic_policy_text(src):
+            Ok(s):
+                expect(s.resolve("X-1", ctx_at("default", "2026.11", "2030-01-01"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")
+                expect(s.resolve("X-1", ctx_at("default", "2027.2", "2020-01-01"), DiagnosticRuleLevel.Warn).level.name()).to_equal("deny")
+            Err(e): expect(e).to_equal("loaded")
+
+    it "denies an SFFI ABI mismatch or unvalidated constrained return from day one":
+        # @req REQ-DIAG-POLICY-001
+        # @capture(value): resolved level and exception policy for the SFFI rules
+        val s = shipped()
+        step("Resolve both SFFI rules from a warn request on the default profile")
+        val abi = s.resolve("SPL-SFFI-ABI-001", ctx_at("default", "2026.11", "2026-11-15"), DiagnosticRuleLevel.Warn)
+        val rng = s.resolve("SPL-SFFI-RANGE-001", ctx_at("default", "2026.11", "2026-11-15"), DiagnosticRuleLevel.Warn)
+        expect(abi.level.name()).to_equal("deny")
+        expect(rng.level.name()).to_equal("deny")
+        expect(abi.stage).to_equal("security")
+        expect(rng.stage).to_equal("security")
+        expect(s.rule("SPL-SFFI-ABI-001").exception_policy).to_equal("forbidden")
+        expect(s.rule("SPL-SFFI-RANGE-001").exception_policy).to_equal("forbidden")
+
+    it "resolves unscheduled rules directly to their profile baseline and projects parity":
+        """Verifies rules with empty warn_since fields use their mode baseline and project deterministically."""
+        val src = "diagnostic_policy:\n    version: 1\n    rules:\n        X-UNSCHED:\n            modes:\n                moderate: warn\n                robust: deny\n"
+        match load_diagnostic_policy_text(src):
+            Ok(s):
+                val mod_proj = project_policy_parity_v1(
+                    s, "X-UNSCHED",
+                    DiagnosticPolicyInputV1.for_mode("moderate", "2026.11", false, "", ""),
+                    DiagnosticRuleLevel.Warn)
+                val rob_proj = project_policy_parity_v1(
+                    s, "X-UNSCHED",
+                    DiagnosticPolicyInputV1.for_mode("robust", "2026.11", false, "", ""),
+                    DiagnosticRuleLevel.Warn)
+                expect(mod_proj.stage).to_equal("profile")
+                expect(mod_proj.lint_level_name).to_equal("warn")
+                expect(mod_proj.driver_severity_name).to_equal("warn")
+                expect(rob_proj.stage).to_equal("profile")
+                expect(rob_proj.lint_level_name).to_equal("deny")
+                expect(rob_proj.driver_severity_name).to_equal("deny")
+            Err(e): expect(e).to_equal("loaded")
+
+describe "Performance analysis diagnostic policy rules (PERF-*, section 9.2)":
+    """Verifies the 9 PERF-* rule rows, profile severity baselines, and exception policies."""
+
+    it "keeps PERF-STYLE-001 and PERF-ALG-001 advisory and PERF-FIX-001 silent across all profiles":
+        """Checks style/redesign rules stay advisory and blocked-fix carrier never warns."""
+        val s = shipped()
+        for mode in ["default", "moderate", "strict", "robust", "critical", "verified"]:
+            expect(s.resolve("PERF-STYLE-001", ctx_at(mode, "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("advisory")
+            expect(s.resolve("PERF-ALG-001", ctx_at(mode, "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("advisory")
+            expect(s.resolve("PERF-FIX-001", ctx_at(mode, "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("allow")
+        expect(s.rule("PERF-STYLE-001").exception_policy).to_equal("allowed")
+        expect(s.rule("PERF-FIX-001").exception_policy).to_equal("allowed")
+
+    it "warns on PERF-COST-001/002 with reason_required and downgrades PERF-ALLOC-001 in moderate":
+        """Checks cost warnings require suppression rationale and materialization is advisory in moderate."""
+        val s = shipped()
+        for code in ["PERF-COST-001", "PERF-COST-002"]:
+            expect(s.rule(code).exception_policy).to_equal("reason_required")
+            expect(s.resolve(code, ctx_at("default", "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")
+            expect(s.resolve(code, ctx_at("robust", "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")
+        expect(s.resolve("PERF-ALLOC-001", ctx_at("moderate", "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("advisory")
+        expect(s.resolve("PERF-ALLOC-001", ctx_at("default", "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")
+        expect(s.resolve("PERF-ALLOC-001", ctx_at("strict", "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")
+
+    it "enforces refuted vs unproved resource contracts and coverage notes selectively by profile":
+        """Checks PERF-CONTRACT-001 denies in strict..verified, PERF-CONTRACT-002 denies only in verified, and PERF-ANALYSIS-001 warns in verified."""
+        val s = shipped()
+        expect(s.rule("PERF-CONTRACT-001").exception_policy).to_equal("reason_required")
+        expect(s.rule("PERF-CONTRACT-002").exception_policy).to_equal("reason_required")
+        expect(s.resolve("PERF-CONTRACT-001", ctx_at("default", "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")
+        expect(s.resolve("PERF-CONTRACT-001", ctx_at("moderate", "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")
+        for mode in ["strict", "robust", "critical", "verified"]:
+            expect(s.resolve("PERF-CONTRACT-001", ctx_at(mode, "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("deny")
+        for mode in ["default", "moderate", "strict", "robust", "critical"]:
+            expect(s.resolve("PERF-CONTRACT-002", ctx_at(mode, "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")
+        expect(s.resolve("PERF-CONTRACT-002", ctx_at("verified", "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("deny")
+        expect(s.resolve("PERF-ANALYSIS-001", ctx_at("default", "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("advisory")
+        expect(s.resolve("PERF-ANALYSIS-001", ctx_at("verified", "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")

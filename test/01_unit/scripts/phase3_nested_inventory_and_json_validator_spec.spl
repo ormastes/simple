@@ -1,0 +1,210 @@
+# @cover scripts/bootstrap/phase3-nested-test-inventory.shs 80%
+# @cover scripts/bootstrap/validate-test-runner-json.pl 80%
+# @cover scripts/bootstrap/validate-jest-json.pl 80%
+# @req REQ-P3-NESTED-JSON-001
+"""
+## Purpose and audience
+Exercises `scripts/bootstrap/phase3-nested-test-inventory.shs`,
+`scripts/bootstrap/validate-test-runner-json.pl`, and
+`scripts/bootstrap/validate-jest-json.pl` against real throwaway Git submodule
+fixtures and JSON payloads:
+- nested submodule discovery, receipt emission, pin-mismatch / dirty-worktree /
+  empty-without-policy / stale-policy / invalid-category rejections
+- `validate-test-runner-json.pl` canonical key/counter admission (`0`),
+  zero-executed rejection (`92`), failure/pending rejection (`93`), and
+  malformed or duplicate-key JSON rejection (`91`)
+- `validate-jest-json.pl` canonical counter extraction (`0`, `91`, `92`, `93`)
+
+Audience: Phase-3 test inventory and runner integrity maintainers.
+
+## Compatibility and limitations
+Constructs real Git index `160000` gitlink entries and checked-out child Git
+repositories in OS-portable temp dirs without external submodules or network.
+
+## Examples
+```sh
+bin/simple test test/01_unit/scripts/phase3_nested_inventory_and_json_validator_spec.spl
+```
+"""
+
+# @tag: unit, scripts, bootstrap, phase3, nested-inventory, json
+
+use std.spec.*
+use std.spec.{step}
+use app.io.mod.{dir_create_all, dir_remove_all, file_atomic_write, file_read, getpid, time_now_unix_micros}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io.process_ops.{process_run, resolve_shell_argv}
+
+val NESTED_SCRIPT = "scripts/bootstrap/phase3-nested-test-inventory.shs"
+val RUNNER_PL = "scripts/bootstrap/validate-test-runner-json.pl"
+val JEST_PL = "scripts/bootstrap/validate-jest-json.pl"
+
+fn _nj_make_root(tag: text) -> text:
+    val base = get_temp_dir().replace("\\", "/")
+    val root = base + "/p3-nj-" + tag + "-" +
+        getpid().to_text() + "-" + time_now_unix_micros().to_text()
+    expect(dir_create_all(root)).to_be(true)
+    root
+
+fn _nj_sh(cmd: text) -> (text, text, i64):
+    val prefix = "case \"$(uname -s 2>/dev/null)\" in MINGW*|MSYS*|CYGWIN*) PATH=\"/usr/bin:/bin:$PATH\"; export PATH ;; esac; "
+    val (sh_bin, sh_args) = resolve_shell_argv(prefix + cmd)
+    process_run(sh_bin, sh_args)
+
+fn _nj_init_parent_with_submodule(parent: text, sub_rel: text, with_test: bool) -> text:
+    val sub_dir = parent + "/" + sub_rel
+    expect(dir_create_all(sub_dir)).to_be(true)
+    if with_test:
+        expect(dir_create_all(sub_dir + "/test/01_unit")).to_be(true)
+        expect(file_atomic_write(sub_dir + "/test/01_unit/sub_spec.spl", "describe \"sub\":\n    it \"ok\":\n        expect(1).to_equal(1)\n")).to_be(true)
+    else:
+        expect(file_atomic_write(sub_dir + "/README.txt", "empty\n")).to_be(true)
+    val cmd =
+        "set -eu; " +
+        "git -C '" + sub_dir + "' init -q && " +
+        "git -C '" + sub_dir + "' config user.name t && " +
+        "git -C '" + sub_dir + "' config user.email t@example.invalid && " +
+        "git -C '" + sub_dir + "' add . && " +
+        "git -C '" + sub_dir + "' commit -qm subbase && " +
+        "sub_sha=$(git -C '" + sub_dir + "' rev-parse HEAD) && " +
+        "git -C '" + parent + "' init -q && " +
+        "git -C '" + parent + "' config user.name t && " +
+        "git -C '" + parent + "' config user.email t@example.invalid && " +
+        "printf 'keep\\n' > '" + parent + "/README.md' && " +
+        "git -C '" + parent + "' add README.md && " +
+        "git -C '" + parent + "' update-index --add --cacheinfo 160000,\"$sub_sha\",'" + sub_rel + "' && " +
+        "git -C '" + parent + "' commit -qm parentbase && " +
+        "printf '%s' \"$sub_sha\""
+    val (out, _err, rc) = _nj_sh(cmd)
+    expect(rc).to_equal(0)
+    out.trim()
+
+describe "phase3-nested-test-inventory.shs contract":
+    it "fails closed on invalid args and discovers clean nested gitlinks + receipt":
+        val (_o0, e0, rc0) = _nj_sh("sh " + NESTED_SCRIPT)
+        expect(rc0).to_equal(64)
+        expect(e0).to_contain("usage:")
+
+        val root = _nj_make_root("disc")
+        val parent = root + "/parent"
+        val sub_sha = _nj_init_parent_with_submodule(parent, "vendor/mod_a", true)
+        val policy = root + "/policy.tsv"
+        expect(file_atomic_write(policy, "category\tpath\treason\n")).to_be(true)
+        val receipt = root + "/receipt.tsv"
+
+        val (out, err, rc) = _nj_sh("sh " + NESTED_SCRIPT + " discover '" + parent + "' '" + policy + "' '" + receipt + "'")
+        expect(rc).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_contain("surface\tcategory\trunner\tdisposition\tpath\treason")
+        expect(out).to_contain("nested\tsimple-spec\tnested\texecute\tvendor/mod_a/test/01_unit/sub_spec.spl\t-")
+        val rec_text = file_read(receipt)
+        expect(rec_text).to_contain("path\tpinned_sha\tactual_sha\tpolicy_category\tpolicy_reason")
+        expect(rec_text).to_contain("vendor/mod_a\t" + sub_sha + "\t" + sub_sha + "\t-\t-")
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "rejects pin mismatch, dirty submodule, empty module without policy, and stale policy":
+        val root = _nj_make_root("errs")
+        val parent_dirty = root + "/p_dirty"
+        val _s1 = _nj_init_parent_with_submodule(parent_dirty, "vendor/mod_d", true)
+        val empty_policy = root + "/empty_policy.tsv"
+        expect(file_atomic_write(empty_policy, "category\tpath\treason\n")).to_be(true)
+
+        expect(file_atomic_write(parent_dirty + "/vendor/mod_d/untracked.txt", "dirty\n")).to_be(true)
+        val (_od, ed, rcd) = _nj_sh("sh " + NESTED_SCRIPT + " discover '" + parent_dirty + "' '" + empty_policy + "'")
+        expect(rcd).to_equal(1)
+        expect(ed).to_contain("nested-module-dirty: vendor/mod_d")
+
+        val (_o_pin, e_pin, rc_pin) = _nj_sh(
+            "git -C '" + parent_dirty + "/vendor/mod_d' clean -fdq && " +
+            "printf 'v2\\n' > '" + parent_dirty + "/vendor/mod_d/README2.txt' && " +
+            "git -C '" + parent_dirty + "/vendor/mod_d' add README2.txt && " +
+            "git -C '" + parent_dirty + "/vendor/mod_d' commit -qm advance && " +
+            "sh " + NESTED_SCRIPT + " discover '" + parent_dirty + "' '" + empty_policy + "'"
+        )
+        expect(rc_pin).to_equal(1)
+        expect(e_pin).to_contain("nested-module-pin-mismatch: vendor/mod_d")
+
+        val parent_empty = root + "/p_empty"
+        val _s2 = _nj_init_parent_with_submodule(parent_empty, "vendor/mod_e", false)
+        val (_oe, ee, rce) = _nj_sh("sh " + NESTED_SCRIPT + " discover '" + parent_empty + "' '" + empty_policy + "'")
+        expect(rce).to_equal(1)
+        expect(ee).to_contain("nested-module-empty-without-policy: vendor/mod_e")
+
+        val skip_policy = root + "/skip_policy.tsv"
+        expect(file_atomic_write(skip_policy, "category\tpath\treason\noptional-no-tests\tvendor/mod_e\tupstream-assets\n")).to_be(true)
+        val (o_ok, _e_ok, rc_ok) = _nj_sh("sh " + NESTED_SCRIPT + " discover '" + parent_empty + "' '" + skip_policy + "'")
+        expect(rc_ok).to_equal(0)
+        expect(o_ok).to_contain("nested\toptional-no-tests\tnested\tskip\tvendor/mod_e\tupstream-assets")
+
+        val stale_policy = root + "/stale_policy.tsv"
+        expect(file_atomic_write(stale_policy, "category\tpath\treason\noptional-no-tests\tvendor/missing_mod\tgone\n")).to_be(true)
+        val (_os, es, rcs) = _nj_sh("sh " + NESTED_SCRIPT + " discover '" + root + "/no_subs' '" + stale_policy + "'")
+        expect(rcs).to_equal(1)
+
+        val (_oclean_init, _e_ci, rc_ci) = _nj_sh(
+            "mkdir -p '" + root + "/no_subs' && git -C '" + root + "/no_subs' init -q && " +
+            "sh " + NESTED_SCRIPT + " discover '" + root + "/no_subs' '" + stale_policy + "'"
+        )
+        expect(rc_ci).to_equal(1)
+        expect(dir_remove_all(root)).to_be(true)
+
+describe "validate-test-runner-json.pl and validate-jest-json.pl":
+    it "enforces canonical test-runner JSON shape and exit codes 0, 91, 92, 93":
+        val root = _nj_make_root("trjson")
+        val ok_json = root + "/ok.json"
+        expect(file_atomic_write(ok_json,
+            "banner line\n{\"success\":true,\"spec\":{\"success\":true,\"total_passed\":5,\"total_failed\":0,\"total_skipped\":1,\"total_pending\":0,\"total_duration_ms\":12,\"groups\":[],\"files\":[]},\"spl_doctest\":null,\"sdoctest\":null}\n"
+        )).to_be(true)
+        val (o_ok, _e_ok, rc_ok) = _nj_sh("perl " + RUNNER_PL + " '" + ok_json + "'")
+        expect(rc_ok).to_equal(0)
+        expect(o_ok.trim()).to_equal("5\t0\t1")
+
+        val zero_json = root + "/zero.json"
+        expect(file_atomic_write(zero_json,
+            "{\"success\":true,\"spec\":{\"success\":true,\"total_passed\":0,\"total_failed\":0,\"total_skipped\":2,\"total_pending\":0,\"total_duration_ms\":1,\"groups\":[],\"files\":[]},\"spl_doctest\":null,\"sdoctest\":null}\n"
+        )).to_be(true)
+        val (o_z, _ez, rc_z) = _nj_sh("perl " + RUNNER_PL + " '" + zero_json + "'")
+        expect(rc_z).to_equal(92)
+        expect(o_z.trim()).to_equal("0\t0\t2")
+
+        val fail_json = root + "/fail.json"
+        expect(file_atomic_write(fail_json,
+            "{\"success\":false,\"spec\":{\"success\":false,\"total_passed\":3,\"total_failed\":1,\"total_skipped\":0,\"total_pending\":0,\"total_duration_ms\":9,\"groups\":[],\"files\":[]},\"spl_doctest\":null,\"sdoctest\":null}\n"
+        )).to_be(true)
+        val (o_f, _ef, rc_f) = _nj_sh("perl " + RUNNER_PL + " '" + fail_json + "'")
+        expect(rc_f).to_equal(93)
+        expect(o_f.trim()).to_equal("3\t1\t0")
+
+        val dup_json = root + "/dup.json"
+        expect(file_atomic_write(dup_json,
+            "{\"success\":true,\"spec\":{\"success\":true,\"total_passed\":1,\"total_passed\":2,\"total_failed\":0,\"total_skipped\":0,\"total_pending\":0,\"total_duration_ms\":1,\"groups\":[],\"files\":[]},\"spl_doctest\":null,\"sdoctest\":null}\n"
+        )).to_be(true)
+        val (_o_dup, e_dup, rc_dup) = _nj_sh("perl " + RUNNER_PL + " '" + dup_json + "'")
+        expect(rc_dup).to_equal(91)
+        expect(e_dup).to_contain("ambiguous total_passed field")
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "enforces canonical Jest JSON shape and exit codes 0, 91, 92, 93":
+        val root = _nj_make_root("jestjson")
+        val ok_j = root + "/ok.json"
+        expect(file_atomic_write(ok_j, "{\"success\":true,\"numPassedTests\":4,\"numFailedTests\":0,\"numPendingTests\":0}\n")).to_be(true)
+        val (o_ok, _eo, rc_ok) = _nj_sh("perl " + JEST_PL + " '" + ok_j + "'")
+        expect(rc_ok).to_equal(0)
+        expect(o_ok.trim()).to_equal("4\t0\t0")
+
+        val zero_j = root + "/zero.json"
+        expect(file_atomic_write(zero_j, "{\"success\":true,\"numPassedTests\":0,\"numFailedTests\":0,\"numPendingTests\":1}\n")).to_be(true)
+        val (_oz, _ez, rc_z) = _nj_sh("perl " + JEST_PL + " '" + zero_j + "'")
+        expect(rc_z).to_equal(92)
+
+        val fail_j = root + "/fail.json"
+        expect(file_atomic_write(fail_j, "{\"success\":false,\"numPassedTests\":1,\"numFailedTests\":1,\"numPendingTests\":0}\n")).to_be(true)
+        val (_of, _ef, rc_f) = _nj_sh("perl " + JEST_PL + " '" + fail_j + "'")
+        expect(rc_f).to_equal(93)
+
+        val bad_j = root + "/bad.json"
+        expect(file_atomic_write(bad_j, "{\"success\":true,\"success\":true,\"numPassedTests\":1,\"numFailedTests\":0,\"numPendingTests\":0}\n")).to_be(true)
+        val (_ob, eb, rc_b) = _nj_sh("perl " + JEST_PL + " '" + bad_j + "'")
+        expect(rc_b).to_equal(91)
+        expect(eb).to_contain("ambiguous success field")
+        expect(dir_remove_all(root)).to_be(true)

@@ -1,0 +1,124 @@
+"""
+Text `<input>` width at any author font size and device scale, against Chrome
+159 (headless shell 1255, Linux arm64, `--window-size=400,300`, Liberation
+Sans as `Arial`). Every number is a Chrome `getBoundingClientRect().width`
+minus the UA's 8 px of padding and border, at `--force-device-scale-factor`
+1 and 4, for `<input size=N style="font-size:F">`:
+
+| F        | k | N = 1  | 2      | 3      | 5      | 20     | 21     |
+|----------|---|--------|--------|--------|--------|--------|--------|
+| 12       | 1 | 22     | 29     | 36     | 50     | 155    | 162    |
+| 13.3333  | 1 | 25     | 33     | 41     | 57     | 177    | 185    |
+| 16       | 1 | 30     | 40     | 49     | 68     | 207    | 216    |
+| 20       | 1 | 37     | 49     | 61     | 85     | 265    | 277    |
+| 13.3333  | 4 | 24.5   | 32.25  | 40     | 55.5   | 171.75 | 179.5  |
+| 16       | 4 | 29.5   | 39     | 48.25  | 66.75  | 205.75 | 215    |
+| 20       | 4 | 37     | 48.75  | 60.25  | 83.5   | 257.25 | 269    |
+
+All of it is one rule in DEVICE px, with `a` the face's OS/2 xAvgCharWidth
+and `m` its rounded bounding-box width at the device font size:
+
+    content = ceil((N - 1) * max(round(a), a) + m)
+
+When `a` rounds UP (13.3333 px: a = 7.728 -> 8) the columns are whole
+`round(a)`; when it rounds DOWN (16 px: a = 9.273) Chrome keeps the
+fractional `a` and ceils the sum, so 16 px is 19 x 9.273 + 30 = 206.2 ->
+207 (box 215), where the rounded-only rule gave 201 (box 209).
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-FORMS-003 — text controls size from the control face's average/maximum character width at the control's own font size and device scale.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_text.spl 1%
+use std.spec.*
+use std.nogc_sync_mut.sffi.io.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{
+    form_control_content_w_for_face
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val LIB_SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val LIB_SANS_ID: text = "unmanaged=/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf#0;bytes=410820;axes=default"
+val DJV_MONO: text = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+val DJV_MONO_ID: text = "unmanaged=/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf#0;bytes=343140;axes=default"
+val UA: text ="<html><head><style>body{margin:0;font:16px/1.5 sans-serif}</style></head><body><form>"
+
+fn w(n: i32, font_milli: i32, k: i32) -> i32:
+    form_control_content_w_for_face("input", LIB_SANS_ID, n, 1, font_milli, k)
+
+fn ta(n: i32, font_milli: i32, k: i32) -> i32:
+    form_control_content_w_for_face("textarea", DJV_MONO_ID, n, 1, font_milli, k)
+
+fn ua(inner: text) -> text:
+    simple_web_layout_debug_layout_by_id(UA + inner + "</form></body></html>", 900, 760, "x", "w")
+
+describe "text input content width at author font sizes":
+    it "AC-1: keeps whole columns when the average width rounds up (1x)":
+        step("13.3333 px: a = 7.728 -> 8, m = 25; 20 px: a = 11.59 -> 12, m = 37")
+        expect(w(1, 13333, 1)).to_equal(25)
+        expect(w(20, 13333, 1)).to_equal(177)
+        expect(w(21, 13333, 1)).to_equal(185)
+        expect(w(1, 20000, 1)).to_equal(37)
+        expect(w(20, 20000, 1)).to_equal(265)
+        expect(w(21, 20000, 1)).to_equal(277)
+        expect(w(20, 12000, 1)).to_equal(155)
+        expect(w(21, 12000, 1)).to_equal(162)
+
+    it "AC-2: keeps the fractional average when it rounds down (1x)":
+        step("16 px: a = 9.273, m = 30; Chrome 30 40 49 68 207 216")
+        expect(w(1, 16000, 1)).to_equal(30)
+        expect(w(2, 16000, 1)).to_equal(40)
+        expect(w(3, 16000, 1)).to_equal(49)
+        expect(w(5, 16000, 1)).to_equal(68)
+        expect(w(20, 16000, 1)).to_equal(207)
+        expect(w(21, 16000, 1)).to_equal(216)
+
+    it "AC-3: runs the rule in device px at device scale 4":
+        step("16 px at k = 4: a = 37.09, m = 118 -> 118 / 156 / 193 / 823 / 860 device px")
+        expect(w(1, 16000, 4)).to_equal(118)
+        expect(w(2, 16000, 4)).to_equal(156)
+        expect(w(3, 16000, 4)).to_equal(193)
+        expect(w(20, 16000, 4)).to_equal(823)
+        expect(w(21, 16000, 4)).to_equal(860)
+        step("13.3333 px at k = 4: a = 30.91 -> 31, m = 98 (Chrome 24.5 / 32.25 / 171.75 CSS px)")
+        expect(w(1, 13333, 4)).to_equal(98)
+        expect(w(2, 13333, 4)).to_equal(129)
+        expect(w(20, 13333, 4)).to_equal(687)
+        step("20 px at k = 4: a = 46.37, m = 148 (Chrome 37 / 48.75 / 257.25 CSS px)")
+        expect(w(1, 20000, 4)).to_equal(148)
+        expect(w(2, 20000, 4)).to_equal(195)
+        expect(w(20, 20000, 4)).to_equal(1029)
+
+    it "AC-4: lays a 16 px UA <input> and <textarea> out at Chrome's 215 and 221":
+        if not file_exists(LIB_SANS) or not file_exists(DJV_MONO):
+            pending("BLOCKED: Liberation Sans / DejaVu Sans Mono not installed; 215 / 221 are the Linux faces'")
+            return
+        expect(ua("<input id=\"x\" style=\"font-size:16px\">")).to_equal("215")
+        expect(ua("<input id=\"x\" size=\"5\" style=\"font-size:16px\">")).to_equal("76")
+        expect(ua("<input id=\"x\">")).to_equal("185")
+        step("textarea border box = content + 2 x 2 padding + 2 x 1 border")
+        expect(ua("<textarea id=\"x\" style=\"font-size:16px\"></textarea>")).to_equal("221")
+        expect(ua("<textarea id=\"x\"></textarea>")).to_equal("182")
+
+describe "textarea content width at author font sizes":
+    it "AC-5: columns are max(round(a), a) wide, plus the 15 px scrollbar":
+        step("Chrome 159 content, cols = 1 / 2 / 20 / 40: 12 px 23 30 160 304, 16 px 25 35 215 415, 20 px 28 40 256 497")
+        expect(ta(1, 12000, 1)).to_equal(23)
+        expect(ta(2, 12000, 1)).to_equal(30)
+        expect(ta(20, 12000, 1)).to_equal(160)
+        expect(ta(40, 12000, 1)).to_equal(304)
+        expect(ta(1, 16000, 1)).to_equal(25)
+        expect(ta(2, 16000, 1)).to_equal(35)
+        expect(ta(20, 16000, 1)).to_equal(215)
+        expect(ta(40, 16000, 1)).to_equal(415)
+        expect(ta(1, 20000, 1)).to_equal(28)
+        expect(ta(40, 20000, 1)).to_equal(497)
+        expect(ta(20, 13333, 1)).to_equal(176)
+        step("k = 4, device px (Chrome CSS x 4): 16 px 24.75 / 210, 20 px 27.25 / 496.75, 13.3333 px 175.75")
+        expect(ta(1, 16000, 4)).to_equal(99)
+        expect(ta(20, 16000, 4)).to_equal(840)
+        expect(ta(1, 20000, 4)).to_equal(109)
+        expect(ta(40, 20000, 4)).to_equal(1987)
+        expect(ta(20, 13333, 4)).to_equal(703)

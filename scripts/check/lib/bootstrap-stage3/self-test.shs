@@ -134,6 +134,44 @@ bootstrap_stage3_provenance_self_test() {
         >"$bootstrap_stage3_test_root/repo/src/runtime/hosted/lib.rs"
     printf 'void runtime_fixture(void) {}\n' \
         >"$bootstrap_stage3_test_root/repo/src/runtime/runtime.c"
+    # Tool-authority spelling: non-Windows passes through untouched, and a
+    # distinct extensionless sibling of foo.exe keeps its own identity.
+    bootstrap_stage3_test_ident_dir="$bootstrap_stage3_test_root/ident/bin"
+    mkdir -p "$bootstrap_stage3_test_ident_dir" || return 1
+    printf 'a\n' >"$bootstrap_stage3_test_ident_dir/lld-link.exe" || return 1
+    bootstrap_stage3_tool_identity_path x86_64-unknown-linux-gnu \
+        "$bootstrap_stage3_test_ident_dir/lld-link" || return 1
+    [ "$bootstrap_stage3_tool_identity" = \
+        "$bootstrap_stage3_test_ident_dir/lld-link" ] || return 1
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*)
+            # Observed MSVC-lane drift: /c/.../lld-link vs C:/.../lld-link.exe
+            # (same sha256) must record one spelling. The POSIX side is the
+            # cygpath -u form of the drive path, as MSYS mounts may re-root it.
+            bootstrap_stage3_test_ident_m=$(cygpath -m \
+                "$bootstrap_stage3_test_ident_dir") || return 1
+            bootstrap_stage3_test_ident_u=$(cygpath -u \
+                "$bootstrap_stage3_test_ident_m") || return 1
+            bootstrap_stage3_tool_identity_path x86_64-pc-windows-msvc \
+                "$bootstrap_stage3_test_ident_u/lld-link" || return 1
+            bootstrap_stage3_test_ident_a=$bootstrap_stage3_tool_identity
+            bootstrap_stage3_tool_identity_path x86_64-pc-windows-msvc \
+                "$bootstrap_stage3_test_ident_m/lld-link.exe" || return 1
+            [ "$bootstrap_stage3_tool_identity" = "$bootstrap_stage3_test_ident_a" ] ||
+                return 1
+            [ "$bootstrap_stage3_test_ident_a" = \
+                "$bootstrap_stage3_test_ident_u/lld-link.exe" ] || return 1 ;;
+    esac
+    # Create the extensionless file FIRST: on MSYS, writing "foo" while only
+    # foo.exe exists writes foo.exe.
+    bootstrap_stage3_test_ident_dir="$bootstrap_stage3_test_root/ident/sibling"
+    mkdir -p "$bootstrap_stage3_test_ident_dir" || return 1
+    printf 'b\n' >"$bootstrap_stage3_test_ident_dir/lld-link" || return 1
+    printf 'a\n' >"$bootstrap_stage3_test_ident_dir/lld-link.exe" || return 1
+    bootstrap_stage3_tool_identity_path x86_64-pc-windows-msvc \
+        "$bootstrap_stage3_test_ident_dir/lld-link" || return 1
+    [ "$bootstrap_stage3_tool_identity" = \
+        "$bootstrap_stage3_test_ident_dir/lld-link" ] || return 1
     bootstrap_stage3_test_tool_path=
     for bootstrap_stage3_test_tool_name in \
         cargo rustc cc clang ld ar ranlib sh env perl sed file \

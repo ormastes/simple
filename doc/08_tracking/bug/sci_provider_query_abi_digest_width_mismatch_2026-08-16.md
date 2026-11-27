@@ -81,3 +81,22 @@ claimed by this ABI identity result.
 - `check-cli-provider-v1-host.shs` passed with the owned 84-byte C producer and
   84-byte host buffer. Its only compiler warning is the pre-existing ignored
   `write` return in unrelated `rt_net_http_plain_local_probe`.
+
+## Verification 2026-11-25 (p2w5-ad lane, release/1.0.0)
+
+Confirmed the resolution is real in the current tree:
+`simple_core_provider_abi_digest_verdict_v1` is implemented and exported at
+`src/app/simple_core/provider_dispatch.spl:113-141` with exactly the contract
+this record describes (exact 256-bit match -> `""`, all-zero -> 
+`provider-abi-digest-not-declared`, mismatch -> `provider-abi-digest-mismatch`,
+malformed locked hex -> `provider-abi-digest-locked-invalid:...`).
+Spec execution could not be re-run on this Windows host: release/1.0.0 HEAD is
+source/binary inconsistent (pinned seed `bin/simple.exe` v1.0.0-rc.1 rejects the
+940 `@representation_boundary` annotations added by cfd89933699, failing every
+`test` invocation in `test_runner_client.spl`). Verified by code inspection
+instead. The remaining V2 wire-codec work stays open in the sibling record
+`provider_query_result_v2_wire_codec_missing_2026-09-13.md` (re-confirmed
+absent from `src/os/smf/provider_query_wire.spl`).
+
+Status: RESOLVED (this record's digest-width slice; sibling V2 codec record
+remains open and is unaffected by this closure).

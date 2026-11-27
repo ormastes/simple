@@ -1,0 +1,43 @@
+# Resolved single-container launch identity. Controller admission binds this
+# canonical child plan; it is not an AgentSession/ResourceSet schema substitute.
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+
+pub struct HostLinuxLaunchPlanV1:
+    workload_uid: text
+    attempt: i64
+    runtime_class: text
+    service_scope_id: text
+    request_digest: text
+    # Empty scope preserves canonical V1 bytes. Complete scope encodes V2.
+    physical_host_id: text = ""
+    boot_id: text = ""
+    provider_generation: i64 = 0
+
+pub fn host_linux_launch_plan_bytes_v1(plan: HostLinuxLaunchPlanV1) -> Result<text, text>:
+    if not builder_identifier_valid_v1(plan.workload_uid) or
+            not builder_identifier_valid_v1(plan.service_scope_id) or plan.attempt <= 0:
+        return Err("launch-plan-identity-invalid")
+    if plan.runtime_class != "podman-rootless": return Err("launch-runtime-class-unsupported")
+    if not builder_digest_valid_v1(plan.request_digest): return Err("launch-request-digest-invalid")
+    val scoped = plan.physical_host_id != "" or plan.boot_id != "" or plan.provider_generation != 0
+    if scoped and (not builder_identifier_valid_v1(plan.physical_host_id) or
+            not builder_identifier_valid_v1(plan.boot_id) or plan.provider_generation <= 0):
+        return Err("launch-plan-host-scope-invalid")
+    val legacy = "version: 1\nkind: host-linux-launch\nworkloadUid: \"{plan.workload_uid}\"\nattempt: {plan.attempt}\nruntimeClass: \"{plan.runtime_class}\"\nserviceScopeId: \"{plan.service_scope_id}\"\nrequestDigest: \"{plan.request_digest}\"\n"
+    if not scoped: return Ok(legacy)
+    Ok(legacy.replace("version: 1\n", "version: 2\n") +
+        "physicalHostId: \"{plan.physical_host_id}\"\nbootId: \"{plan.boot_id}\"\nproviderGeneration: {plan.provider_generation}\n")
+
+pub fn host_linux_launch_plan_digest_v1(plan: HostLinuxLaunchPlanV1) -> Result<text, text>:
+    val bytes = host_linux_launch_plan_bytes_v1(plan)?
+    Ok(sha256_text(bytes))
+
+pub fn host_linux_launch_scope_match_v1(plan: HostLinuxLaunchPlanV1,
+        physical_host_id: text, boot_id: text, provider_generation: i64) -> Result<bool, text>:
+    val canonical = host_linux_launch_plan_bytes_v1(plan)?
+    if plan.physical_host_id == "": return Ok(true)
+    if plan.physical_host_id != physical_host_id or plan.boot_id != boot_id or
+            plan.provider_generation != provider_generation:
+        return Err("launch-plan-host-scope-mismatch")
+    Ok(true)

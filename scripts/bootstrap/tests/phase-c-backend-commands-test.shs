@@ -3,19 +3,95 @@
 set -eu
 script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$script_root/phase-c-backend-commands.shs"
+. "$script_root/lib/tree-rss-policy.shs"
 . "$script_root/bootstrap-verification-resource-policy.shs"
-unset native_internal_timeout
+unset native_internal_timeout SIMPLE_MIR_SHARD_COUNT SIMPLE_MIR_SHARDING SIMPLE_MIR_RETRACT_PROVIDER_TYPES
 actual=""
-run_matrix_task() { actual="$*"; }
-bootstrap_phase_c_run_tool_build cranelift cli producer entry.spl output 8
-[ "$actual" = 'cli --verification-expect-executable=output producer native-build entry.spl --backend=cranelift --low-memory --threads 8 -o output' ]
-bootstrap_phase_c_run_tool_build llvm cli producer entry.spl output 8
-[ "$actual" = 'cli --verification-expect-executable=output producer native-build entry.spl --backend=llvm --low-memory --threads 8 -o output' ]
+run_matrix_task() {
+  actual="fw=${SIMPLE_FILE_WORKERS:-unset} $*"
+  mir_count="${SIMPLE_MIR_SHARD_COUNT:-unset}"
+  mir_sharding="${SIMPLE_MIR_SHARDING:-unset}"
+  retract_provider_types="${SIMPLE_MIR_RETRACT_PROVIDER_TYPES:-unset}"
+}
+bootstrap_phase_c_run_tool_build cranelift cli producer entry.spl output cache 8
+[ "$mir_sharding" = 1 ] || { echo "FAIL tool build MIR sharding is '$mir_sharding'"; exit 1; }
+[ "$retract_provider_types" = 1 ] || { echo "FAIL provider-type retraction is '$retract_provider_types'"; exit 1; }
+[ -z "${SIMPLE_MIR_SHARDING+x}" ] || { echo 'FAIL SIMPLE_MIR_SHARDING leaked past the tool build'; exit 1; }
+[ -z "${SIMPLE_MIR_RETRACT_PROVIDER_TYPES+x}" ] || { echo 'FAIL SIMPLE_MIR_RETRACT_PROVIDER_TYPES leaked past the tool build'; exit 1; }
+SIMPLE_MIR_SHARDING=0
+SIMPLE_MIR_RETRACT_PROVIDER_TYPES=0
+bootstrap_phase_c_run_tool_build cranelift cli producer entry.spl output cache 8
+[ "$mir_sharding" = 0 ] && [ "$SIMPLE_MIR_SHARDING" = 0 ] || { echo 'FAIL explicit SIMPLE_MIR_SHARDING not honoured/restored'; exit 1; }
+[ "$retract_provider_types" = 0 ] && [ "$SIMPLE_MIR_RETRACT_PROVIDER_TYPES" = 0 ] || { echo 'FAIL explicit SIMPLE_MIR_RETRACT_PROVIDER_TYPES not honoured/restored'; exit 1; }
+unset SIMPLE_MIR_SHARDING SIMPLE_MIR_RETRACT_PROVIDER_TYPES
+bootstrap_phase_c_run_tool_build cranelift cli producer entry.spl output cache 8
+# Full-tool closures (~3031 MIR modules) split into enough MIR shards that one
+# worker's retained MIR fits beside its own HIR under the 60 GiB compiler_cli_build
+# row cap (run 13: 8 shards, peak ~57 GiB in the app.* codegen shards; the
+# compiler.* shards never reached codegen, so that headroom is unmeasured), and few enough that the repeated
+# ~19 min frontend per shard stays inside the 14400 s row timeout (run 13: 8
+# shards took 10156 s; 12 project to 12400-15200 s). The pin is scoped to the call.
+[ "$mir_count" = "$BOOTSTRAP_PHASE_C_TOOL_MIR_SHARD_COUNT" ] || { echo "FAIL tool build MIR shard count is '$mir_count'"; exit 1; }
+[ "$BOOTSTRAP_PHASE_C_TOOL_MIR_SHARD_COUNT" -ge 8 ] || { echo 'FAIL tool MIR shard count below the run-10 memory bound'; exit 1; }
+[ "$BOOTSTRAP_PHASE_C_TOOL_MIR_SHARD_COUNT" -le 8 ] || { echo 'FAIL tool MIR shard count above the run-13 wall bound (each shard repeats the frontend; 12 exceeds the 14400 s row timeout)'; exit 1; }
+[ -z "${SIMPLE_MIR_SHARD_COUNT+x}" ] || { echo 'FAIL SIMPLE_MIR_SHARD_COUNT leaked past the tool build'; exit 1; }
+SIMPLE_MIR_SHARD_COUNT=3
+bootstrap_phase_c_run_tool_build cranelift cli producer entry.spl output cache 8
+[ "$mir_count" = 3 ] && [ "$SIMPLE_MIR_SHARD_COUNT" = 3 ] || { echo 'FAIL explicit SIMPLE_MIR_SHARD_COUNT not honoured/restored'; exit 1; }
+unset SIMPLE_MIR_SHARD_COUNT
+bootstrap_phase_c_run_tool_build cranelift cli producer entry.spl output cache 8
+[ "$actual" = 'fw=1 cli --verification-expect-executable=output producer native-build --entry entry.spl --backend=cranelift --low-memory --mode dynload --entry-closure --cache-dir cache --threads 8 -o output' ]
+bootstrap_phase_c_run_tool_build llvm cli producer entry.spl output cache 8
+[ "$actual" = 'fw=1 cli --verification-expect-executable=output producer native-build --entry entry.spl --backend=llvm --low-memory --mode dynload --entry-closure --cache-dir cache --threads 8 -o output' ]
+# Default to the per-file pool when it supports the requested thread count;
+# otherwise use two-pass shards. Both defaults are scoped, and explicit
+# SIMPLE_FILE_WORKERS=0 remains honoured and restored.
+[ -z "${SIMPLE_FILE_WORKERS+x}" ] || { echo 'FAIL SIMPLE_FILE_WORKERS leaked past the tool build'; exit 1; }
+bootstrap_phase_c_run_tool_build cranelift cli producer entry.spl output cache 1
+[ "${actual%% *}" = fw=0 ] && [ -z "${SIMPLE_FILE_WORKERS+x}" ] || { echo 'FAIL one-thread tool build did not select the two-pass shard route'; exit 1; }
+SIMPLE_FILE_WORKERS=0
+bootstrap_phase_c_run_tool_build llvm cli producer entry.spl output cache 8
+[ "${actual%% *}" = fw=0 ] && [ "$SIMPLE_FILE_WORKERS" = 0 ] || { echo 'FAIL explicit SIMPLE_FILE_WORKERS=0 not honoured/restored'; exit 1; }
+# Also prove restoration of a distinct caller value after an empty-default fallback:
+SIMPLE_FILE_WORKERS=""
+bootstrap_phase_c_run_tool_build llvm cli producer entry.spl output cache 8
+[ "${actual%% *}" = fw=1 ] && [ "${SIMPLE_FILE_WORKERS+x}" = x ] && [ -z "$SIMPLE_FILE_WORKERS" ] || { echo 'FAIL empty SIMPLE_FILE_WORKERS did not default to 1 and restore empty'; exit 1; }
+unset SIMPLE_FILE_WORKERS
+# Row RSS cap (run 11, 2026-11-06): a published compiler_cli_build row cap is
+# seen by that row only, inside run_matrix_task, and the phase pair comes
+# back afterwards; other tasks never see it; a malformed one runs nothing.
+run_matrix_task() { actual="cap=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-unset}:${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-unset}:${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND:-unset}"; }
+export BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1 SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=54525952 \
+    SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=54525952 SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=worker-floor-elevated \
+    SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=62914560 SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB=62914560 \
+    SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND=cli-row-mir-shards
+bootstrap_phase_c_run_tool_build llvm compiler_cli_build producer entry.spl output cache 2
+[ "$actual" = 'cap=62914560:62914560:cli-row-mir-shards' ] || { echo "FAIL cli row did not see its row cap: $actual"; exit 1; }
+[ "$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:$SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND" = \
+    54525952:54525952:worker-floor-elevated ] || { echo 'FAIL cli row cap leaked past the row'; exit 1; }
+bootstrap_phase_c_run_tool_build llvm test_runner_build producer entry.spl output cache 2
+[ "$actual" = 'cap=54525952:54525952:worker-floor-elevated' ] || { echo "FAIL test_runner_build saw a row cap: $actual"; exit 1; }
+actual=not-run
+row_status=0
+SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=60g bootstrap_phase_c_run_tool_build llvm compiler_cli_build producer entry.spl output cache 2 2>/dev/null || row_status=$?
+[ "$actual" = not-run ] && [ "$row_status" = 125 ] && [ "$bootstrap_phase_c_policy_refused" = 1 ] ||
+    { echo "FAIL malformed cli row cap was not refused (status $row_status, $actual)"; exit 1; }
+unset BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB \
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB \
+    SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND
+run_matrix_task() { actual="fw=${SIMPLE_FILE_WORKERS:-unset} $*"; mir_count="${SIMPLE_MIR_SHARD_COUNT:-unset}"; }
+bootstrap_phase_c_run_tool_build llvm cli producer entry.spl output cache 8
+# argv[0] must be the compiler and argv[1] native-build once run_task strips
+# its --verification-* flags: an `env VAR=...` prefix bypassed the verifier's
+# Stage 2 block, the toolchain pin and the tree-RSS owner (run 6, 2026-11-06).
+set -- $actual
+shift 3
+[ "$1" = producer ] && [ "$2" = native-build ] || { echo "FAIL tool build argv[0..1] is '$1 $2', want 'producer native-build'"; exit 1; }
 for backend in llvm cranelift; do
     native_internal_timeout=600
     bootstrap_verification_resource_policy stage2 0 1800 120 "$native_internal_timeout" 20 1 1
-    bootstrap_phase_c_run_tool_build "$backend" cli producer entry.spl output 20
-    [ "$actual" = "cli --verification-expect-executable=output producer native-build entry.spl --backend=$backend --low-memory --timeout 600 --threads 20 -o output" ]
+    bootstrap_phase_c_run_tool_build "$backend" cli producer entry.spl output cache 20
+    [ "$actual" = "fw=1 cli --verification-expect-executable=output producer native-build --entry entry.spl --backend=$backend --low-memory --mode dynload --entry-closure --cache-dir cache --timeout 600 --threads 20 -o output" ]
     native_internal_timeout=0
     if bootstrap_verification_resource_policy stage2 0 1800 120 "$native_internal_timeout" 20 1 1; then
         echo 'FAIL canonical verification accepted zero native timeout'
@@ -23,10 +99,10 @@ for backend in llvm cranelift; do
     fi
     bootstrap_verification_resource_policy stage2 1 1800 120 "$native_internal_timeout" 20 1 1
     [ "$verification_success_result" = DIAGNOSTIC_PASS ]
-    bootstrap_phase_c_run_tool_build "$backend" cli producer entry.spl output 20
-    [ "$actual" = "cli --verification-expect-executable=output producer native-build entry.spl --backend=$backend --low-memory --timeout 0 --threads 20 -o output" ]
+    bootstrap_phase_c_run_tool_build "$backend" cli producer entry.spl output cache 20
+    [ "$actual" = "fw=1 cli --verification-expect-executable=output producer native-build --entry entry.spl --backend=$backend --low-memory --mode dynload --entry-closure --cache-dir cache --timeout 0 --threads 20 -o output" ]
 done
-if bootstrap_phase_c_run_tool_build invalid cli producer entry.spl output 8; then
+if bootstrap_phase_c_run_tool_build invalid cli producer entry.spl output cache 8; then
     echo 'FAIL invalid backend unexpectedly accepted'
     exit 1
 fi
@@ -34,6 +110,6 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/phase-c-module-target.XXXXXX")
 run_task() { actual="$*"; }
 for target_c_platform in aarch64-unknown-linux-gnu riscv64-unknown-linux-gnu; do
     bootstrap_phase_c_run_module_build llvm producer entry.spl output "$work" 1
-    [ "$actual" = "module_compile_object producer native-build entry.spl --emit-object --backend=llvm --target $target_c_platform --threads 1 -o output" ]
+    [ "$actual" = "module_compile_object producer native-build entry.spl --emit-object --backend=llvm --threads 1 -o output" ]
 done
-printf '%s\n' 'PASS explicit ARM64/RISC-V object argv; 7 Phase C backend argv contracts; canonical zero rejected, diagnostic zero forwarded'
+printf '%s\n' 'PASS ARM64/RISC-V object argv (target via SIMPLE_NATIVE_BUILD_TARGET); argv[0..1] + scoped file-worker, MIR-sharding, provider-retraction and shard-count pins; 7 Phase C backend argv contracts; canonical zero rejected, diagnostic zero forwarded'

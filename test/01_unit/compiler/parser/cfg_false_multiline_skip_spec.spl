@@ -1,0 +1,34 @@
+use std.spec.{describe, it, expect}
+use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals}
+
+# Regression: false-@cfg skips must end correctly around multi-line
+# declarations (bugs p4p2_cfg_skip_swallows_next_multiline_decl_2026-10-20,
+# p4p2_cfg_false_multiline_use_closing_brace_leaks_2026-10-20).
+# arm64/riscv32 is false on the x86_64 host, @cfg(x86_64) is true.
+
+describe "false @cfg skip with multi-line declarations":
+    it "does not swallow the next multi-line fn header":
+        val src = "@cfg(riscv32)\nfn a() -> i64:\n    1\n\nfn b(\n    x: i64\n) -> i64:\n    x\n"
+        val out = _pp_preprocess_conditionals(src)
+        expect(out.contains("fn b(")).to_equal(true)
+        expect(out.contains("    x: i64")).to_equal(true)
+        expect(out.contains("fn a()")).to_equal(false)
+
+    it "keeps next multi-line fn when no blank line separates declarations":
+        val src = "@cfg(riscv32)\nfn a() -> i64:\n    1\nfn b(\n    x: i64\n) -> i64:\n    x\n"
+        val out = _pp_preprocess_conditionals(src)
+        expect(out.contains("fn b(")).to_equal(true)
+        expect(out.contains("fn a()")).to_equal(false)
+
+    it "consumes the column-0 closing brace of a false multi-line use":
+        val src = "@cfg(riscv32)\nuse m.{\n    one,\n    two\n}\n\nfn keep() -> i64:\n    1\n"
+        val out = _pp_preprocess_conditionals(src)
+        expect(out.contains("one")).to_equal(false)
+        expect(out.contains("}")).to_equal(false)
+        expect(out.contains("fn keep()")).to_equal(true)
+
+    it "keeps a following multi-line use after a false multi-line use":
+        val src = "@cfg(riscv32)\nuse m.{\n    one\n}\n@cfg(x86_64)\nuse n.{\n    two\n}\n"
+        val out = _pp_preprocess_conditionals(src)
+        expect(out.contains("one")).to_equal(false)
+        expect(out.contains("two")).to_equal(true)

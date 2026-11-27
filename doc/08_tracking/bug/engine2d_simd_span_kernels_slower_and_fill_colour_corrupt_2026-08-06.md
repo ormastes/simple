@@ -1,6 +1,6 @@
 # engine2d SIMD row/span kernels are slower than scalar, and `fill_span` corrupts the fill colour
 
-Status: PARTIALLY RESOLVED / OPEN (P3, downgraded from P2)
+Status: RESOLVED (2026-09-16: §1 fixed+measured, §2 retracted false positive, §3 closed as not-a-live-cost; status header updated 2026-11-25)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## 2026-08-20 — §1 RESOLVED (measured), §2 retraction confirmed a third time, §3 partly done
@@ -232,3 +232,15 @@ runtime work, not this bug. The Windows span-kernel harness
 (`run_span_bench.shs`) returned NO DATA under the Windows seed on this date
 (output format not parseable); the authoritative measurements remain the
 2026-08 Linux ones above.
+
+## 2026-11-25 — status header corrected, source re-verified on release/1.0.0 (0819b116ecb)
+
+The header still read "PARTIALLY RESOLVED / OPEN" although every section was
+closed in the entries above; updated to RESOLVED. Re-verified by code
+inspection: `simd_fill_row` (`src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl:459`)
+has no native branch (deliberate, per its inline comment citing this doc);
+`simd_blend_row` (`:485`) calls the in-place `rt_engine2d_simd_blend_span_u32`
+(`:504`), which exists in `src/runtime/runtime_simd_dispatch.c:1968`. The
+span-bench harness was not re-run (Linux-x86_64 perf measurement, and the
+pinned Windows seed cannot execute repo specs at this HEAD due to the
+`@representation_boundary` mismatch); verification is by source inspection.

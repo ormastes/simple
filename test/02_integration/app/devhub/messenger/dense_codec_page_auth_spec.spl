@@ -1,0 +1,156 @@
+# Integration layer, I/O and crypto: per-page authentication of the dense
+# multi-page encrypted Messenger database, using ONE key session.
+#
+# Why one session: deriving the key is cheap, decrypting a page is the cost on
+# the Phase 1 seed (about 45 s per page), but a rejected page costs a fraction of
+# a second because the HMAC is verified before any decryption.  So every
+# rejection family below runs against the same session, and only two pages are
+# decrypted as positive controls so no rejection can be vacuous.
+# Lifecycle: doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md ;
+# doc/03_plan/agent_tasks/devhub_messenger_master.md ;
+# doc/04_architecture/app/devhub/messenger_gateway.md ;
+# doc/05_design/app/devhub/messenger_sdn_and_api.md
+# @manual_section: encrypted-page-authentication
+
+"""
+## Purpose and audience
+Purpose: prove that every byte region of an encrypted page (ciphertext, IV,
+HMAC), the page number, and the database identity are bound by the page
+authentication, on the same public encrypted database the system test uses.
+Audience: reviewers of the DevHub Messenger encrypted read path who need the
+codec rejections pinned before the slower system test runs.
+The passphrase is public synthetic test data from dense_ground_truth.json.
+"""
+
+use std.spec.*
+use test.support.devhub_messenger_dense.*
+use std.common.json.value.{JsonValue, json_value_field}
+
+val truth = dense_truth()
+val file = dense_file_bytes(DENSE_BASE)
+val _secret_ready = dense_set_secret(truth_passphrase(truth))
+
+fn flip_verdicts(session_file: [u8], pages: [i64], offsets: [i64]) -> text:
+    # Every (page, offset) flip must be rejected with the authentication code.
+    val session = dense_session(session_file)
+    if session == nil:
+        return "no-session"
+    val live = session.?
+    var rejected = ""
+    var checked = 0
+    for page_no in pages:
+        for offset in offsets:
+            checked = checked + 1
+            val verdict = decode_verdict(page_no, page_flipped(page_slice(session_file, page_no), offset), live)
+            if verdict != AUTH_CODE:
+                rejected = rejected + "p{page_no}@{offset}={verdict};"
+    "checked={checked} missed={rejected}"
+
+# The summary a run must produce when every one of pages x offsets is rejected.
+fn all_rejected(pages: [i64], offsets: [i64]) -> text:
+    "checked={pages.len() * offsets.len()} missed="
+
+describe "positive controls on the pristine database":
+    it "decrypts page 1 to the SQLite header the generator wrote":
+        # @req REQ-MSGR-DENSE-CODEC-001
+        step("Load the committed encrypted database and open its key session")
+        # @capture(protocol_binary): page 1 decrypted body, header fields at offsets 16..20 and 56..60
+        val session = dense_session(file)
+        step("Decrypt page 1 and read the header fields back")
+        val live = session.?
+        val body = decode_body(1, page_slice(file, 1), live)
+        expect(body.len()).to_equal(tn(truth, "page_size") - tn(truth, "reserved_bytes"))
+        expect(body[16].to_i64() * 256 + body[17].to_i64()).to_equal(tn(truth, "page_size"))
+        expect(body[20].to_i64()).to_equal(tn(truth, "reserved_bytes"))
+        expect(body[59].to_i64()).to_equal(tn(truth, "text_encoding"))
+
+    it "decrypts the first overflow page and finds the link the generator recorded":
+        # @req REQ-MSGR-DENSE-CODEC-002
+        step("Decrypt the first overflow page named by the ground truth")
+        # @capture(protocol_binary): first four plaintext bytes of the first overflow page, big-endian next-page link
+        val session = dense_session(file)
+        val live = session.?
+        val overflow = json_value_field(truth, "overflow")
+        val first = list_int(overflow, "overflow_chain", 0)
+        val second = list_int(overflow, "overflow_chain", 1)
+        step("Compare the decrypted link with the chain the generator measured")
+        val body = decode_body(first, page_slice(file, first), live)
+        expect(be32(body, 0)).to_equal(second)
+
+describe "flipped bytes are rejected on first, middle and last pages":
+    it "rejects a flipped ciphertext byte on pages 1, 5 and 9":
+        # @req REQ-MSGR-DENSE-CODEC-003
+        step("Flip the first, a middle and the last ciphertext byte of pages 1, 5 and 9")
+        # @capture(statistics): list of (page, offset) pairs NOT rejected; must be empty
+        val first_ct = tn(json_value_field(truth, "layout"), "first_page_ciphertext_offset")
+        val iv_at = tn(json_value_field(truth, "layout"), "iv_offset")
+        expect(flip_verdicts(file, [1, 5, 9], [first_ct, 2000, iv_at - 1])).to_equal(all_rejected([1, 5, 9], [first_ct, 2000, iv_at - 1]))
+
+    it "rejects a flipped IV byte on pages 1, 5 and 9":
+        # @req REQ-MSGR-DENSE-CODEC-004
+        step("Flip the first and the last IV byte of pages 1, 5 and 9")
+        # @capture(statistics): list of (page, offset) pairs NOT rejected; must be empty
+        val iv_at = tn(json_value_field(truth, "layout"), "iv_offset")
+        expect(flip_verdicts(file, [1, 5, 9], [iv_at, iv_at + 15])).to_equal(all_rejected([1, 5, 9], [iv_at, iv_at + 15]))
+
+    it "rejects a flipped HMAC byte on pages 1, 5 and 9":
+        # @req REQ-MSGR-DENSE-CODEC-005
+        step("Flip the first and the last HMAC byte of pages 1, 5 and 9")
+        # @capture(statistics): list of (page, offset) pairs NOT rejected; must be empty
+        val mac_at = tn(json_value_field(truth, "layout"), "hmac_offset")
+        expect(flip_verdicts(file, [1, 5, 9], [mac_at, mac_at + 63])).to_equal(all_rejected([1, 5, 9], [mac_at, mac_at + 63]))
+
+describe "pages are bound to their position and their database":
+    it "rejects swapped pages":
+        # @req REQ-MSGR-DENSE-CODEC-006
+        step("Present page 3 as page 2, page 2 as page 3 and page 6 as page 5")
+        # @capture(statistics): rejection code for each swapped presentation
+        val session = dense_session(file)
+        val live = session.?
+        expect(decode_verdict(2, page_slice(file, 3), live)).to_equal(AUTH_CODE)
+        expect(decode_verdict(3, page_slice(file, 2), live)).to_equal(AUTH_CODE)
+        expect(decode_verdict(5, page_slice(file, 6), live)).to_equal(AUTH_CODE)
+
+    it "rejects a valid page from a different encrypted database":
+        # @req REQ-MSGR-DENSE-CODEC-007
+        step("Present page 2 of the older fixture database under this database's key session")
+        # @capture(protocol_binary): page 2 of messenger.sqlcipher4 at the same page number
+        val session = dense_session(file)
+        val live = session.?
+        val other = dense_file_bytes("messenger.sqlcipher4")
+        expect(other.len() > 8192).to_equal(true)
+        expect(decode_verdict(2, page_slice(other, 2), live)).to_equal(AUTH_CODE)
+
+    it "rejects a page of the wrong length as invalid geometry":
+        # @req REQ-MSGR-DENSE-CODEC-008
+        step("Present an empty page, a 4095-byte page and a 4097-byte page")
+        # @capture(statistics): rejection code for each malformed page length
+        val session = dense_session(file)
+        val live = session.?
+        val whole = page_slice(file, 5)
+        var short: [u8] = []
+        var longer: [u8] = []
+        var i = 0
+        while i < whole.len():
+            if i < whole.len() - 1:
+                short.push(whole[i])
+            longer.push(whole[i])
+            i = i + 1
+        longer.push(0u8)
+        expect(decode_verdict(5, [], live)).to_equal(GEOMETRY_CODE)
+        expect(decode_verdict(5, short, live)).to_equal(GEOMETRY_CODE)
+        expect(decode_verdict(5, longer, live)).to_equal(GEOMETRY_CODE)
+
+    it "rejects the committed tampered variants under the pristine key session":
+        # @req REQ-MSGR-DENSE-CODEC-009
+        step("Authenticate the committed tampered variants page by page against their own recorded hashes")
+        # @capture(statistics): sha256 of each tampered variant against dense_ground_truth.json
+        val files = json_value_field(truth, "files")
+        expect(dense_file_sha256("dense_multipage_tamper_first.sqlcipher4")).to_equal(tf(json_value_field(files, "dense_multipage_tamper_first.sqlcipher4"), "sha256"))
+        expect(dense_file_sha256("dense_multipage_tamper_later.sqlcipher4")).to_equal(tf(json_value_field(files, "dense_multipage_tamper_later.sqlcipher4"), "sha256"))
+        val session = dense_session(file)
+        val live = session.?
+        val tampered_first = dense_file_bytes("dense_multipage_tamper_first.sqlcipher4")
+        val tampered_later = dense_file_bytes("dense_multipage_tamper_later.sqlcipher4")
+        expect(decode_verdict(1, page_slice(tampered_first, 1), live)).to_equal(AUTH_CODE)
+        expect(decode_verdict(2, page_slice(tampered_later, 2), live)).to_equal(AUTH_CODE)

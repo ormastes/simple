@@ -4,8 +4,20 @@
 - **Severity:** high — silent wrong answer. `.len()`/`.is_empty()` on an untyped/ANY-erased
   closure returns a plausible non-negative integer instead of the `rt_len` contract's `-1`.
   No diagnostic, no crash.
-- **Status:** OPEN — **REAL** (source-confirmed defect; runtime hit not executed, see
-  "What was NOT established")
+- **Status:** SUPERSEDED 2026-11-11 (lane p3fix-comp6-20261111) — fix 0ee4e247c0dd merged at tip; source re-verified 2026-11-11 (Rust fam_abi execution stays seed-lane scope, see addenda)
+
+Resolution: the C and hosted Rust heap tags now agree (`dict = 0x03`,
+`closure = 0x06`), with compile-time tag and `RtCoreDict` offset assertions.
+`RtCoreDict` uses `len@8`/`cap@16`, matching hosted `RuntimeDict`; Cranelift's
+special tag-6/offset-16 branch is removed, so closures return `-1` and both
+runtime dict shapes read length from offset 8. Added hosted and RtCore-shaped
+closure/dict regressions in `fam_abi_tests.rs`.
+
+Verification: `cc -std=gnu11 -I. -fsyntax-only runtime_native.c`, the existing
+core-C `rt_dict_scope_read_selfcheck`, an ASan RtCore closure/dict/array/string
+selfcheck, and `cargo check -p simple-compiler --lib` all pass. The focused
+Rust test target remains blocked by unrelated existing test-code errors, so
+the new Rust regressions are not claimed as executed.
 - **Component:** Rust seed, Cranelift backend —
   `src/compiler_rust/compiler/src/codegen/instr/helpers.rs`
 - **Verified against:** `origin/main` @ `4699194f81e` (2026-09-06), read-only worktree.
@@ -255,3 +267,58 @@ in scope.
   target plumbing is the natural carrier for the fix above.
 - `28ff5e05494` (2026-07-14) — "fix(seed/cranelift): handle simple-core SplDict (tag 6,
   len@16) in `inline_runtime_len_value`" — the commit that introduced the ungated arm.
+
+
+---
+
+## 2026-11-10 (p3-compiler lane, rows 1-8, Windows worktree, seed-smoke) — SUPERSEDED ON release/1.0.0
+
+Lane: `work/p3-compiler-20261110` on `origin/release/1.0.0` (base `dfc7da8523f4`).
+Runtime: worktree Rust seed `bin/simple.exe` (built 2026-11-10). Seed-smoke only.
+
+**Disposition: SUPERSEDED.** The 2026-11-08 fix (`0ee4e247c0dd fix(runtime): align heap
+ABIs and mirror facades`) is merged on base:
+
+- `inline_runtime_len_value` no longer carries the ungated tag-6 `is_spldict` arm; it now
+  takes `baremetal`/`fam_arrays` target context (`codegen/instr/helpers.rs:53-60`), dict
+  is tag 3 with `len@8` for BOTH hosted `RuntimeDict` and `RtCoreDict`, closure (0x06 in
+  both runtimes) falls through to the `-1` sentinel, and the riscv64/SimpleOS tag-11 dict
+  arm is properly `Target::is_baremetal()`-gated.
+- `src/runtime/runtime_native.c:294-299` — `RT_VALUE_HEAP_DICT 0x03U` /
+  `RT_VALUE_HEAP_CLOSURE 0x06U` now agree with hosted `HeapObjectType`, with
+  `_Static_assert` guards.
+- Regression `generic_rt_len_hosted_and_core_closures_return_invalid` exists
+  (`codegen/instr/fam_abi_tests.rs:249`), exercising hosted and RtCore-shaped closures on
+  both lanes.
+
+Additional closure observed while verifying: the user-source path now fails CLOSED before
+codegen — `.len()` on a value whose static type is `function` is a semantic hard error
+(`method 'len' not found on type 'function'`), so the silent capture-count answer is
+unreachable from ordinary source; the fam_abi test exercises the raw codegen path
+directly. The fam_abi Rust regression itself was not executed here (building/testing
+`src/compiler_rust` is the seed lane's scope; this doc already records it blocked by
+unrelated test-code errors).
+
+
+---
+
+## 2026-11-11 (lane p3fix-comp6-20261111) — Status flipped SUPERSEDED
+
+Independent source re-verification on this lane's fresh worktree (base
+`bf946163122f`):
+
+- `src/compiler_rust/compiler/src/codegen/instr/helpers.rs` —
+  `inline_runtime_len_value` now takes `baremetal`/`fam_arrays` target
+  context; the ungated tag-6 `is_spldict` arm is gone; hosted
+  `RuntimeDict` and `RtCoreDict` share tag 3 with `len@8`; closure
+  (0x06 in both runtimes) falls through to the `-1` sentinel; the
+  riscv64/SimpleOS tag-11 dict arm is `Target::is_baremetal()`-gated.
+- `src/runtime/runtime_native.c:294-301` — `RT_VALUE_HEAP_DICT 0x03U` /
+  `RT_VALUE_HEAP_CLOSURE 0x06U` with `_Static_assert` guards matching
+  hosted `HeapObjectType`.
+
+Absorber: `0ee4e247c0dd fix(runtime): align heap ABIs and mirror
+facades` (per the 2026-11-10 addendum above). Executing the Rust
+`fam_abi_tests.rs` regressions remains the seed lane's scope (blocked by
+unrelated test-code errors per this doc). Status line flipped from
+FIX-IMPLEMENTED-VERIFICATION-PENDING to SUPERSEDED (fix merged at tip).

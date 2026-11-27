@@ -42,6 +42,7 @@ use std.spec.{describe, context, it, expect}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.color.{rgb}
 use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
+use std.io_runtime.{env_get}
 
 # ============================================================================
 # Helpers
@@ -166,6 +167,19 @@ fn _frame_assertions_skipped(label: text, source: text):
     """Disclose that no frame existed to assert rendering correctness against."""
     print "[probe-gpu] {label}: FRAME ASSERTIONS SKIPPED — no frame was produced (source={source}); this example proves NOTHING about rendering correctness"
 
+# A host that declares Vulkan mandatory (SIMPLE_2D_REQUIRE_VULKAN=1, set by the
+# strict lane on a Vulkan-capable runner) must not turn a failed strict create
+# into a disclosed skip: a driver that rejects SPIR-V or an init regression is
+# then a FAILURE, not a host condition.
+fn _vulkan_required() -> bool:
+    env_get("SIMPLE_2D_REQUIRE_VULKAN") == "1"
+
+fn _fail_if_vulkan_required(label: text):
+    """On a host that declares Vulkan mandatory, a failed strict create fails the example."""
+    if _vulkan_required():
+        print "[probe-gpu] {label}: SIMPLE_2D_REQUIRE_VULKAN=1 — the strict vulkan create failed on a host that declares Vulkan mandatory; failing instead of skipping"
+        expect(_vulkan_required()).to_equal(false)
+
 fn _disclose_toctou(label: text, probe_ready: bool, created: bool):
     """Disclose a probe/create divergence — a host condition, never asserted."""
     if probe_ready != created:
@@ -270,38 +284,46 @@ describe "Vulkan strict smoke tests":
             # probe answer is DISCLOSED, never asserted. A successful create
             # implies every spirv_* blob was accepted by the driver.
             val probe = probe_vulkan()
-            if probe.is_ok():
-                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
-                expect(result.is_ok()).to_equal(true)
+            val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+            _disclose_toctou("vulkan-strict-dimensions", probe.is_ok(), result.is_ok())
+            if result.is_ok():
                 var engine = result.unwrap()
                 expect(engine.width()).to_equal(16)  # oracle: authoritative Vulkan strict-path value for this fixture
                 expect(engine.height()).to_equal(16)  # oracle: authoritative Vulkan strict-path value for this fixture
                 engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("vulkan-strict-dimensions", result.unwrap_err())
+                _fail_if_vulkan_required("vulkan-strict-dimensions")
 
         it "backend_name is vulkan when hardware available":
             # @req REQ-VKSTRICT-010
             # @capture(statistics): created backend name retained
-            step("Create the strict vulkan engine when hardware is available")
+            step("Create the strict vulkan engine and check the name the create reports")
             val probe = probe_vulkan()
-            if probe.is_ok():
-                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
-                if result.is_ok():
-                    var engine = result.unwrap()
-                    expect(engine.backend_name()).to_equal("vulkan")
-                    engine.shutdown()
+            val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+            _disclose_toctou("vulkan-strict-name", probe.is_ok(), result.is_ok())
+            if result.is_ok():
+                var engine = result.unwrap()
+                expect(engine.backend_name()).to_equal("vulkan")
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("vulkan-strict-name", result.unwrap_err())
+                _fail_if_vulkan_required("vulkan-strict-name")
 
         it "SPIR-V shader modules load without error when hardware available":
             # @req REQ-VKSTRICT-011
             # @capture(bit_table): spirv blob acceptance flags retained
             step("Create the strict vulkan engine so every spirv blob reaches the driver")
             val probe = probe_vulkan()
-            if probe.is_ok():
-                # A successful init() implies all spirv_* blobs were accepted by the driver
-                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
-                expect(result.is_ok()).to_equal(true)
-                if result.is_ok():
-                    var engine = result.unwrap()
-                    engine.shutdown()
+            # A successful init() implies all spirv_* blobs were accepted by the driver
+            val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+            _disclose_toctou("vulkan-strict-spirv", probe.is_ok(), result.is_ok())
+            if result.is_ok():
+                var engine = result.unwrap()
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("vulkan-strict-spirv", result.unwrap_err())
+                _fail_if_vulkan_required("vulkan-strict-spirv")
 
     context "clear pixel parity with CPU reference":
 

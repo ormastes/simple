@@ -1,0 +1,13 @@
+# Signed enrollment under one installed machine parent
+
+The enrollment codec reuses V2 operation, grant, approval and snapshot verification. Its canonical payload binds exact configuration and public policy bytes to native machine/boot/provider facts and the installed shared machine parent. A signed alias may identify the host in control-plane policy, but the filesystem claim key derives from the observed native machine identity so another alias cannot create another slot in the same parent.
+
+The claim owner validates HostConfig, installed public policy and fresh signed authorization, then serializes publication under one bounded native file lock. An exclusive creating record precedes private child-root creation. The owner writes and reads back configuration, policy, credential, binding and manifest, checks that it still owns the exact pending record, then publishes the enrolled record. Lock release occurs exactly once on every acquired-lock path. Post-claim failure retains ownership evidence rather than inferring absence or deleting unknown state.
+
+No second operation state machine, scheduler, signature verifier, provider executor or terminal reader is introduced. There is no operational capacity admission in this slice. A successful claim is an authorized registration fact under the independently trusted parent, not proof that a provider ran or a host service is listening.
+
+The actual caller must establish the installed machine-parent authority and supply current native observations from the provider/host owners. Path checks and private modes are defensive checks, not UID proof or race-free descriptor-relative IO. The claim cannot prevent separate administratively chosen parents from representing the same physical machine; installation/enrollment policy must select one canonical parent. Unknown partial publication retains its claim, including the possibility of an orphan private child if the process dies before recording its path. No broad cleanup or automatic adoption is authorized.
+
+Production grants, approvals and key expirations use Unix milliseconds from the native clock. Preparation deadlines remain boot-bound monotonic milliseconds. The test clock is a local mechanism boundary, never a serialized caller field.
+
+Verification uses real Ed25519 fixtures and real temporary filesystem operations for the scoped guarantees. These are not native provider/system acceptance. All new build/test processes require root allocation and inherit the shared CPU set `taskset -c 0-4`, limiting concurrent campaign work to five CPU cores total. No build allocation is assigned to this lane.

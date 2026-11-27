@@ -1,0 +1,184 @@
+# DBC-005/006/019/020: private authority publication and exact indexed lookup.
+use std.spec.{describe, it, expect, fail}
+use std.common.contracts.distributed_authority_v2.*
+use std.common.contracts.distributed_authority_codec_v2.*
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.*
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.*
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.*
+
+fn authority_creation_error(keys: [DistributedAuthorityKeyV2]) -> text:
+    match distributed_authority_snapshot_create_v2(keys, 9, 4, 2):
+        case Ok(snapshot): ""
+        case Err(reason): reason
+
+fn authority_query_error(fixture: VerificationFixtureV2, generation: i64) -> text:
+    match distributed_authority_snapshot_create_v2([fixture.issuer, fixture.approver], 9, 4, 2):
+        case Err(reason): reason
+        case Ok(snapshot):
+            match distributed_verify_grant_approval_from_snapshot_v2(snapshot, fixture.signed,
+                    fixture.approval, fixture.request, 100, generation, 4, 2, 3):
+                case Ok(grant): ""
+                case Err(reason): reason
+
+fn authority_wire_fixture(fixture: VerificationFixtureV2) -> Result<VerificationFixtureV2, text>:
+    val grant_wire = distributed_encode_signed_grant_v2(fixture.signed)?
+    val approval_wire = distributed_encode_signed_approval_v2(fixture.approval)?
+    val signed = distributed_decode_signed_grant_v2(grant_wire)?
+    val approval = distributed_decode_signed_approval_v2(approval_wire)?
+    Ok(VerificationFixtureV2(signed: signed, approval: approval, issuer: fixture.issuer,
+        approver: fixture.approver, request: fixture.request))
+
+describe "protected authority snapshot publication and query":
+    it "verifies decoded signed frames using the private snapshot keys":
+        match authority_wire_fixture(verification_fixture()):
+            case Err(reason): fail("expected valid signed fixture/snapshot: {reason}")
+            case Ok(decoded): expect(authority_query_error(decoded, 9)).to_equal("")
+
+    it "rejects a wire-valid forged signature at the authority boundary":
+        var fixture = verification_fixture()
+        var approval = fixture.approval
+        var forged: [u8] = []
+        for i in 0..64: forged.push(0u8)
+        approval.signature = forged
+        fixture.approval = approval
+        match authority_wire_fixture(fixture):
+            case Err(reason): fail("expected valid signed fixture/snapshot: {reason}")
+            case Ok(decoded): expect(authority_query_error(decoded, 9)).to_equal("APPROVAL_SIGNATURE_INVALID")
+
+    it "indexes distinct trusted roles and verifies the golden signed operation":
+        val fixture = verification_fixture()
+        match distributed_authority_snapshot_create_v2([fixture.issuer, fixture.approver], 9, 4, 2):
+            case Err(reason): fail("expected valid signed fixture/snapshot: {reason}")
+            case Ok(snapshot):
+                expect(snapshot.keys.len()).to_equal(2)
+                expect(snapshot.generation).to_equal(9)
+                match distributed_verify_grant_approval_from_snapshot_v2(snapshot, fixture.signed,
+                        fixture.approval, fixture.request, 100, 9, 4, 2, 3):
+                    case Err(reason): fail("expected valid signed fixture/snapshot: {reason}")
+                    case Ok(grant): expect(grant.id).to_equal("grant_1")
+
+    it "rejects competing key revisions instead of selecting by row order":
+        val fixture = verification_fixture()
+        var newer = fixture.issuer
+        newer.revision = 2
+        expect(authority_creation_error([fixture.issuer, newer, fixture.approver])).to_equal("AUTHORITY_KEY_DUPLICATE")
+
+    it "rejects stale service generation before selecting authority":
+        expect(authority_query_error(verification_fixture(), 10)).to_equal("AUTHORITY_SNAPSHOT_STALE")
+
+    it "rejects an unknown issuer without using the first registered key":
+        var fixture = verification_fixture()
+        var signed = fixture.signed
+        signed.issuer_id = "unknown"
+        fixture.signed = signed
+        expect(authority_query_error(fixture, 9)).to_equal("AUTHORITY_KEY_UNAVAILABLE")
+
+    it "rejects foreign signing roles and inconsistent publication policy":
+        val fixture = verification_fixture()
+        var issuer = fixture.issuer
+        issuer.role = "receipt-signer"
+        expect(authority_creation_error([issuer, fixture.approver])).to_equal("AUTHORITY_KEY_ROLE_INVALID")
+        issuer = fixture.issuer
+        issuer.policy_revision = 3
+        expect(authority_creation_error([issuer, fixture.approver])).to_equal("AUTHORITY_KEY_POLICY_MISMATCH")
+
+    it "retains revocation in the snapshot and rejects subsequent key use":
+        var fixture = verification_fixture()
+        var issuer = fixture.issuer
+        issuer.revoked = true
+        fixture.issuer = issuer
+        expect(authority_query_error(fixture, 9)).to_equal("AUTHORITY_KEY_REVOKED")
+
+    it "rejects active-owner policy or revocation mismatch without trusting frame fields":
+        val fixture = verification_fixture()
+        match distributed_authority_snapshot_create_v2([fixture.issuer, fixture.approver], 9, 4, 2):
+            case Err(reason): fail("expected valid protected snapshot: {reason}")
+            case Ok(snapshot):
+                match distributed_verify_grant_approval_from_snapshot_v2(snapshot, fixture.signed,
+                        fixture.approval, fixture.request, 100, 9, 5, 2, 3):
+                    case Ok(grant): fail("stale policy snapshot was accepted")
+                    case Err(reason): expect(reason).to_equal("AUTHORITY_SNAPSHOT_STALE")
+                match distributed_verify_grant_approval_from_snapshot_v2(snapshot, fixture.signed,
+                        fixture.approval, fixture.request, 100, 9, 4, 3, 3):
+                    case Ok(grant): fail("stale revocation snapshot was accepted")
+                    case Err(reason): expect(reason).to_equal("AUTHORITY_SNAPSHOT_STALE")
+
+    it "rejects stale active sessions and expired signed approval at the snapshot boundary":
+        val fixture = verification_fixture()
+        match distributed_authority_snapshot_create_v2([fixture.issuer, fixture.approver], 9, 4, 2):
+            case Err(reason): fail("expected valid protected snapshot: {reason}")
+            case Ok(snapshot):
+                match distributed_verify_grant_approval_from_snapshot_v2(snapshot, fixture.signed,
+                        fixture.approval, fixture.request, 100, 9, 4, 2, 4):
+                    case Ok(grant): fail("stale signed session was accepted")
+                    case Err(reason): expect(reason).to_equal("SESSION_STALE")
+                match distributed_verify_grant_approval_from_snapshot_v2(snapshot, fixture.signed,
+                        fixture.approval, fixture.request, 190, 9, 4, 2, 3):
+                    case Ok(grant): fail("expired signed approval was accepted")
+                    case Err(reason): expect(reason).to_equal("APPROVAL_EXPIRED")
+
+describe "role-scoped snapshot key lookup (milestone_0030)":
+    it "returns a key only under the role it was published with":
+        val fixture = verification_fixture()
+        match distributed_authority_snapshot_create_v2([fixture.issuer, fixture.approver], 9, 4, 2):
+            case Err(reason): fail("expected valid protected snapshot: {reason}")
+            case Ok(snapshot):
+                expect(distributed_authority_snapshot_key_v2(snapshot, "grant-issuer", "issuer_1")).to_equal(Ok(fixture.issuer))
+                expect(distributed_authority_snapshot_key_v2(snapshot, "human-approver", "approver_1")).to_equal(
+                    Ok(fixture.approver))
+                expect(distributed_authority_snapshot_key_v2(snapshot, "human-approver", "issuer_1")).to_equal(
+                    Err("AUTHORITY_KEY_UNAVAILABLE"))
+                expect(distributed_authority_snapshot_key_v2(snapshot, "grant-issuer", "unknown")).to_equal(
+                    Err("AUTHORITY_KEY_UNAVAILABLE"))
+# milestone_0030 N2-a: the admin-installed snapshot also carries the execution-host signing key, looked up only
+# by its own role; it can never stand in for an issuer or approver, and never shares a key with either.
+fn authority_host_key_v2(fixture: VerificationFixtureV2) -> DistributedAuthorityKeyV2:
+    var host = fixture.issuer
+    host.role = "execution-host"
+    host.identity = "execution_host_1"
+    var public_key = host.public_key
+    public_key[0] = public_key[0] ^ 1u8
+    host.public_key = public_key
+    host
+
+describe "execution-host key in the protected snapshot (milestone_0030 N2-a)":
+    it "admits an execution-host key beside issuer and approver and returns it by role":
+        val fixture = verification_fixture()
+        val host = authority_host_key_v2(fixture)
+        match distributed_authority_snapshot_create_v2([fixture.issuer, fixture.approver, host], 9, 4, 2):
+            case Err(reason): fail("expected snapshot with execution-host key: {reason}")
+            case Ok(snapshot):
+                expect(snapshot.keys.len()).to_equal(3)
+                expect(distributed_authority_snapshot_key_v2(snapshot, "execution-host", "execution_host_1")).to_equal(Ok(host))
+                expect(distributed_authority_snapshot_key_v2(snapshot, "grant-issuer", "execution_host_1")).to_equal(
+                    Err("AUTHORITY_KEY_UNAVAILABLE"))
+                expect(distributed_authority_snapshot_key_v2(snapshot, "receipt-signer", host.identity)).to_equal(
+                    Err("AUTHORITY_KEY_UNAVAILABLE"))
+                expect(distributed_verify_grant_approval_from_snapshot_v2(snapshot, fixture.signed,
+                    fixture.approval, fixture.request, 100, 9, 4, 2, 3).is_ok()).to_equal(true)
+
+    it "never resolves an execution-host key as the grant issuer":
+        var fixture = verification_fixture()
+        val host = authority_host_key_v2(fixture)
+        var signed = fixture.signed
+        signed.issuer_id = host.identity
+        match distributed_authority_snapshot_create_v2([fixture.issuer, fixture.approver, host], 9, 4, 2):
+            case Err(reason): fail("expected snapshot with execution-host key: {reason}")
+            case Ok(snapshot):
+                expect(distributed_verify_grant_approval_from_snapshot_v2(snapshot, signed,
+                    fixture.approval, fixture.request, 100, 9, 4, 2, 3)).to_equal(Err("AUTHORITY_KEY_UNAVAILABLE"))
+
+    it "refuses an execution-host key that reuses the issuer or approver public key":
+        val fixture = verification_fixture()
+        var host = authority_host_key_v2(fixture)
+        host.public_key = fixture.issuer.public_key
+        expect(authority_creation_error([fixture.issuer, fixture.approver, host])).to_equal("AUTHORITY_ROLES_NOT_SEPARATE")
+        host.public_key = fixture.approver.public_key
+        expect(authority_creation_error([host, fixture.issuer, fixture.approver])).to_equal("AUTHORITY_ROLES_NOT_SEPARATE")
+
+    it "refuses two execution-host identities sharing one public key":
+        val fixture = verification_fixture()
+        val host = authority_host_key_v2(fixture)
+        var twin = host
+        twin.identity = "execution_host_2"
+        expect(authority_creation_error([fixture.issuer, fixture.approver, host, twin])).to_equal("AUTHORITY_ROLES_NOT_SEPARATE")

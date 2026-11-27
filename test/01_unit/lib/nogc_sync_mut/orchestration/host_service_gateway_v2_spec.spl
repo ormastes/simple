@@ -1,0 +1,481 @@
+# @req HOST-02 ORCH-02
+# NOT_RUN. Pure codec + actual private file/owned journal fixtures; scripted
+# Container/root facts do not qualify native bootstrap, socket peer or send.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.nogc_sync_mut.orchestration.host_service_peer_policy_v2.*
+use std.nogc_sync_mut.orchestration.host_service_gateway_v2.*
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.*
+use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
+use std.nogc_sync_mut.orchestration.host_local_root_v1.host_local_context_v1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.host_capacity_owner_expire_prepared_v1
+use std.common.contracts.orchestration.host_reservation_codec_v1.host_reservation_bind_intent_v1
+use std.common.contracts.orchestration.host_capacity_v1.HostReservationStateV1
+use std.common.contracts.orchestration.controller_parent_budget_v1.controller_parent_budget_proof_encode_v1
+use std.common.contracts.container.execution_v2.{container_execution_plan_digest_v2, container_execution_request_encode_v2}
+use std.nogc_sync_mut.daemon_sdk.local_gateway_v1.LocalGatewayRequestV1
+use std.nogc_sync_mut.orchestration.host_parent_budget_v1.host_parent_budget_record_encode_v1
+use std.common.contracts.orchestration.host_prepare_request_v1.{HostPrepareRequestV1, host_prepare_request_encode_v1}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_grant_digest_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_exists}
+use std.nogc_sync_mut.io.retained_file.retained_directory_open_trusted_v1
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_sync_mut.io_runtime.{dir_remove, read_file_text_result}
+use test.fixtures.orchestration.host_parent_budget_fixture_v1.*
+use test.fixtures.orchestration.host_local_resolver_fixture_v2.host_local_resolver_consumed_fixture_v2
+use test.fixtures.orchestration.host_exec_control_installation_fixture_v3.{host_installation_fixture_v3, host_installation_dispose_v3}
+
+struct PeerPolicyFixtureV2:
+    root: text
+    source: text
+    pin: text
+    service_uid: i64
+    client_uid: i64
+    snapshot: HostServicePeerPolicySnapshotV2
+    owns_root: bool
+
+fn peer_signing_seed_v2(offset: i64) -> [u8]:
+    var bytes: [u8] = []
+    for index in 0..32: bytes.push((offset + index) as u8)
+    bytes
+
+fn peer_fields_v2(source: text) -> Dict<text, SdnValue>:
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 65536, max_depth: 5,
+        max_nodes: 2048, max_rows: 0, max_cells: 0, max_columns: 16)).unwrap()
+    match parsed.value:
+        case SdnValue.Dict(fields): fields
+        case _: fail("actual SDN object required")
+
+fn peer_policy_v2(uid: i64 = 1001, scope: text = "user_1", actions: [text] = ["host-status"]) -> HostServicePeerPolicyV2:
+    HostServicePeerPolicyV2(rules: [HostServicePeerRuleV2(peer_uid: uid, principal: "user_1", project: "project_1",
+        service_scope_id: scope, actions: actions)])
+
+fn peer_policy_fixture_v2(scope: text = "user_1", actions: [text] = ["host-status"], existing_root: text = "") -> PeerPolicyFixtureV2:
+    val root = if existing_root == "": secure_temp_dir("/tmp", "host-service-peers").unwrap() else: existing_root
+    val initial = host_service_peer_policy_encode_v2(peer_policy_v2()).unwrap()
+    assert(file_atomic_write_mode(root + "/" + HOST_SERVICE_PEER_POLICY_FILE_V2, initial, 0o600))
+    var parent = retained_directory_open_trusted_v1(root).unwrap()
+    var file = parent.open_file(HOST_SERVICE_PEER_POLICY_FILE_V2, 65536u64).unwrap()
+    val service_uid = file.security_metadata_v1().unwrap().effective_uid as i64
+    assert(file.close())
+    assert(parent.close())
+    val client_uid = if service_uid == 1001: 1002 else: 1001
+    val source = host_service_peer_policy_encode_v2(peer_policy_v2(client_uid, scope, actions)).unwrap()
+    assert(file_atomic_write_mode(root + "/" + HOST_SERVICE_PEER_POLICY_FILE_V2, source, 0o600))
+    val pin = sha256_text(source)
+    val snapshot = host_service_peer_policy_load_v2(root, pin).unwrap()
+    PeerPolicyFixtureV2(root, source, pin, service_uid, client_uid, snapshot, existing_root == "")
+
+fn peer_policy_fixture_close_v2(fixture: PeerPolicyFixtureV2):
+    if fixture.owns_root: assert(dir_remove(fixture.root, true))
+
+fn peer_gateway_fixture_v2(local: HostLocalRootV1, peers: PeerPolicyFixtureV2) -> HostServiceGatewayV2:
+    # Actual private loader output + actual existing journal. Synthetic local
+    # root metadata is not a successful native gateway bootstrap fixture.
+    HostServiceGatewayV2(domain: HostServiceDomainV2(local: local), peers: peers.snapshot)
+
+fn peer_request_v2(uid: i64, action: text, operation: text = "", payload: text = "") -> LocalGatewayRequestV1:
+    # Explicit SDK request FRAME fixture; no native kernel-peer claim.
+    LocalGatewayRequestV1(action: action, operation_id: operation, payload: payload, peer_uid: uid, request_id: "request-1")
+
+describe "Pinned private Host service peer policy and owned callback":
+    it "round trips exact canonical mappings with explicit UID subject scope and actions":
+        step("Parse real SDN and compare independent identity and action literals")
+        val source = host_service_peer_policy_encode_v2(peer_policy_v2()).unwrap()
+        val policy = host_service_peer_policy_decode_v2(source).unwrap()
+        expect(policy.rules.len()).to_equal(1)
+        expect(policy.rules[0].peer_uid).to_equal(1001)
+        expect(policy.rules[0].principal).to_equal("user_1")
+        expect(policy.rules[0].project).to_equal("project_1")
+        expect(policy.rules[0].service_scope_id).to_equal("user_1")
+        expect(policy.rules[0].actions).to_equal(["host-status"])
+        expect(host_service_peer_policy_encode_v2(policy).unwrap()).to_equal(source)
+
+    it "bounds exact UID rules and rejects wildcard defaults and duplicate permissions":
+        step("Exercise numeric boundaries and explicit finite allowlist rather than truth-only shape tests")
+        for uid in [-1, 4294967295]: expect(host_service_peer_policy_encode_v2(peer_policy_v2(uid)).is_err()).to_equal(true)
+        for uid in [0, 4294967294]: expect(host_service_peer_policy_encode_v2(peer_policy_v2(uid)).is_ok()).to_equal(true)
+        var duplicate = peer_policy_v2()
+        duplicate.rules.push(duplicate.rules[0])
+        expect(host_service_peer_policy_encode_v2(duplicate).unwrap_err()).to_equal("host-peer-policy-uid-duplicate")
+        val invalid_actions: [[text]] = [[], ["*"], ["host-shell"], ["host-status", "host-status"]]
+        for actions in invalid_actions:
+            expect(host_service_peer_policy_encode_v2(peer_policy_v2(1001, "user_1", actions)).is_err()).to_equal(true)
+        for field in ["principal", "project", "scope"]:
+            var wildcard = peer_policy_v2()
+            if field == "principal": wildcard.rules[0].principal = "*"
+            if field == "project": wildcard.rules[0].project = "*"
+            if field == "scope": wildcard.rules[0].service_scope_id = "*"
+            expect(host_service_peer_policy_encode_v2(wildcard).is_err()).to_equal(true)
+
+    it "accepts sixty-four unique UID entries and rejects a sixty-fifth":
+        step("Use distinct literal UID entries at the actual bounded array boundary")
+        var rules: [HostServicePeerRuleV2] = []
+        for index in 0..64: rules.push(peer_policy_v2(10000 + index).rules[0])
+        var policy = HostServicePeerPolicyV2(rules: rules)
+        val source = host_service_peer_policy_encode_v2(policy).unwrap()
+        expect(host_service_peer_policy_decode_v2(source).unwrap().rules.len()).to_equal(64)
+        policy.rules.push(peer_policy_v2(20000).rules[0])
+        expect(host_service_peer_policy_encode_v2(policy).unwrap_err()).to_equal("host-peer-policy-rules-bound")
+
+    it "rejects unknown default duplicate noncanonical and wrong-typed wire fields":
+        step("Change canonical object data and syntax without relying solely on the encoder")
+        val source = host_service_peer_policy_encode_v2(peer_policy_v2()).unwrap()
+        var fields = peer_fields_v2(source)
+        fields["default"] = SdnValue.String("allow")
+        expect(host_service_peer_policy_decode_v2(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n").unwrap_err()).to_equal("host-peer-policy-unknown-field:default")
+        expect(host_service_peer_policy_decode_v2(source + "\n").unwrap_err()).to_equal("host-peer-policy-noncanonical")
+        expect(host_service_peer_policy_decode_v2("{version: 2, version: 2}\n").is_err()).to_equal(true)
+        fields = peer_fields_v2(source)
+        fields["rules"] = SdnValue.String("1001")
+        expect(host_service_peer_policy_decode_v2(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n").unwrap_err()).to_equal("host-peer-policy-rules-array")
+        expect(host_service_peer_policy_decode_v2("é".repeat(32769)).unwrap_err()).to_equal("host-peer-policy-source-size")
+
+    it "loads the pinned private file and samples the actual service EUID":
+        step("Compare native metadata observations from exact retained descriptors")
+        val fixture = peer_policy_fixture_v2()
+        expect(fixture.snapshot.source_digest).to_equal(fixture.pin)
+        expect(fixture.snapshot.protected_root).to_equal(fixture.root)
+        expect(fixture.snapshot.service_uid).to_equal(fixture.service_uid)
+        expect(fixture.snapshot.policy.rules[0].peer_uid).to_equal(fixture.client_uid)
+        expect(fixture.snapshot.policy.rules[0].peer_uid != fixture.snapshot.service_uid).to_equal(true)
+        expect(host_service_peer_policy_load_v2(fixture.root, "f".repeat(64)).unwrap_err()).to_equal("host-peer-policy-pin-mismatch")
+        assert(dir_remove(fixture.root, true))
+
+    it "rejects a nonprivate policy and service UID even with the correct hash":
+        step("Keep canonical bytes and exact digest while changing native mode or the UID map")
+        val fixture = peer_policy_fixture_v2()
+        assert(file_atomic_write_mode(fixture.root + "/" + HOST_SERVICE_PEER_POLICY_FILE_V2, fixture.source, 0o644))
+        expect(host_service_peer_policy_load_v2(fixture.root, fixture.pin).unwrap_err()).to_equal("host-peer-policy-file-not-private")
+        val same_uid = host_service_peer_policy_encode_v2(peer_policy_v2(fixture.service_uid)).unwrap()
+        assert(file_atomic_write_mode(fixture.root + "/" + HOST_SERVICE_PEER_POLICY_FILE_V2, same_uid, 0o600))
+        expect(host_service_peer_policy_load_v2(fixture.root, sha256_text(same_uid)).unwrap_err()).to_equal("host-peer-policy-service-client-uid-equal")
+        assert(dir_remove(fixture.root, true))
+
+    it "rejects an invalid bootstrap pin before opening any Host journal":
+        step("Use a private policy root without any Host configuration or provider")
+        val fixture = peer_policy_fixture_v2()
+        match host_service_gateway_open_v2(fixture.root, "not-a-digest"):
+            case HostServiceGatewayOpenV2.Rejected(reason): expect(reason).to_equal("host-peer-policy-pin-invalid")
+            case _: fail("invalid pin must reject before root factory/owner acquisition")
+        expect(file_exists(fixture.root + "/journal")).to_equal(false)
+        assert(dir_remove(fixture.root, true))
+
+    it "maps the SDK UID and exposes only explicitly allowed status reads":
+        step("Serve actual retained status through the callback with a private loaded policy")
+        val fixture = host_parent_budget_fixture_v1()
+        val peers = peer_policy_fixture_v2(fixture.local.scope.service_scope_id, ["host-status"], fixture.local.root)
+        val owner = peer_gateway_fixture_v2(fixture.local, peers)
+        val result = host_service_gateway_callback_v2(owner, peer_request_v2(peers.client_uid, "host-status"))
+        expect(result.response.request_id).to_equal("request-1")
+        expect(result.response.exit_code).to_equal(0)
+        expect(peer_fields_v2(result.response.payload)["availableCpuMillis"]).to_equal(SdnValue.Int(3000))
+        expect(result.owner.domain.local.capacity.journal.sequence).to_equal(owner.domain.local.capacity.journal.sequence)
+        expect(host_local_resolver_consumed_fixture_v2(result.owner.domain.local.container)).to_equal(0)
+        host_parent_budget_fixture_close_v1(fixture)
+        peer_policy_fixture_close_v2(peers)
+
+    it "rejects unmapped service and unauthorized-action UIDs before the domain":
+        step("Use correct signed planning bytes that cannot override kernel UID or the pinned action list")
+        val fixture = host_parent_budget_fixture_v1()
+        val peers = peer_policy_fixture_v2(fixture.local.scope.service_scope_id, ["host-status"], fixture.local.root)
+        val owner = peer_gateway_fixture_v2(fixture.local, peers)
+        val unknown_uid = if peers.client_uid == 2000 or peers.service_uid == 2000: 2001 else: 2000
+        val unknown = host_service_gateway_callback_v2(owner, peer_request_v2(unknown_uid, "host-status"))
+        expect(peer_fields_v2(unknown.response.payload)["error"]).to_equal(SdnValue.String("host-service-peer-uid-unmapped"))
+        val service = host_service_gateway_callback_v2(owner, peer_request_v2(peers.service_uid, "host-status"))
+        expect(peer_fields_v2(service.response.payload)["error"]).to_equal(SdnValue.String("host-service-peer-service-uid-forbidden"))
+        val action = host_service_gateway_callback_v2(owner, peer_request_v2(peers.client_uid, "host-parent-budget",
+            fixture.record.proof.budget.parent_operation_id, host_parent_budget_record_encode_v1(fixture.record).unwrap()))
+        expect(peer_fields_v2(action.response.payload)["error"]).to_equal(SdnValue.String("host-service-peer-action-forbidden"))
+        expect(action.owner.domain.local.capacity.journal.sequence).to_equal(owner.domain.local.capacity.journal.sequence)
+        host_parent_budget_fixture_close_v1(fixture)
+        peer_policy_fixture_close_v2(peers)
+
+    it "allows validation only as the explicitly configured read action":
+        step("Project the actual common request without SDK execution authority or provider progress")
+        val fixture = host_installation_fixture_v3()
+        val peers = peer_policy_fixture_v2(fixture.local.scope.service_scope_id, ["host-validate"], fixture.local.root)
+        val owner = peer_gateway_fixture_v2(fixture.local, peers)
+        val request = fixture.parent.execution
+        val result = host_service_gateway_callback_v2(owner, peer_request_v2(peers.client_uid, "host-validate",
+            request.plan.operation_id, container_execution_request_encode_v2(request).unwrap()))
+        expect(result.response.exit_code).to_equal(0)
+        expect(peer_fields_v2(result.response.payload)["executionAuthorized"]).to_equal(SdnValue.Bool(false))
+        expect(peer_fields_v2(result.response.payload)["cpuMillis"]).to_equal(SdnValue.Int(1000))
+        expect(peer_fields_v2(result.response.payload)["memoryBytes"]).to_equal(SdnValue.Int(512))
+        expect(host_local_resolver_consumed_fixture_v2(result.owner.domain.local.container)).to_equal(0)
+        val status = host_service_gateway_callback_v2(result.owner, peer_request_v2(peers.client_uid, "host-status"))
+        expect(peer_fields_v2(status.response.payload)["error"]).to_equal(SdnValue.String("host-service-peer-action-forbidden"))
+        host_installation_dispose_v3(status.owner.domain.local, fixture.auxiliary_root)
+
+    it "rejects a real private policy snapshot loaded from another protected root":
+        step("Pair an actual domain with a genuinely loaded foreign-root policy and require no progress")
+        val fixture = host_parent_budget_fixture_v1()
+        val peers = peer_policy_fixture_v2(fixture.local.scope.service_scope_id)
+        val owner = peer_gateway_fixture_v2(fixture.local, peers)
+        val result = host_service_gateway_callback_v2(owner, peer_request_v2(peers.client_uid, "host-status"))
+        expect(peer_fields_v2(result.response.payload)["error"]).to_equal(SdnValue.String("host-service-peer-root-mismatch"))
+        expect(result.owner.domain.local.capacity.journal.sequence).to_equal(fixture.local.capacity.journal.sequence)
+        expect(host_local_resolver_consumed_fixture_v2(result.owner.domain.local.container)).to_equal(0)
+        host_parent_budget_fixture_close_v1(fixture)
+        peer_policy_fixture_close_v2(peers)
+
+    it "retains actual signed prepare admission in the returned callback owner":
+        step("Use current authority policy, release the old preparation through its real timer owner, then admit a new signed row")
+        val micros = time_sample_unix_micros_or_failure()
+        assert(micros > 0)
+        val fixture = host_installation_fixture_v3("success", ["host_reservation_v1"], micros / 1000, 600000)
+        var local = fixture.local
+        val context = host_local_context_v1(local.policy)
+        local.capacity = host_capacity_owner_expire_prepared_v1(local.capacity, fixture.parent.operation.id, context.monotonic_ms).unwrap()
+        expect(local.capacity.ledger.reservations[0].state).to_equal(HostReservationStateV1.Released)
+        var intent = fixture.parent.intent
+        intent.fence.revision = local.capacity.ledger.revision
+        intent.reservation.id = "gateway-reservation"
+        intent.reservation.operation_id = "gateway-prepare"
+        intent.reservation.nonce = "gateway-nonce"
+        intent.reservation.prepare_deadline_ms = context.monotonic_ms + 600000
+        var plan = fixture.parent.execution.plan
+        plan.operation_id = "gateway-prepare"
+        intent.plan_digest = container_execution_plan_digest_v2(plan).unwrap()
+        intent = host_reservation_bind_intent_v1(intent).unwrap()
+        var operation = fixture.parent.operation
+        operation.id = "gateway-prepare"
+        operation.payload_digest = intent.reservation.payload_digest
+        var signed = fixture.parent.signed
+        signed.grant.operations = ["host_reservation_v1"]
+        signed.signature = pure_ed25519_sign_from_seed_v1(peer_signing_seed_v2(1), distributed_grant_signature_message_v2(signed).unwrap()).signature
+        var approval = fixture.parent.approval
+        approval.grant_digest = distributed_grant_digest_v2(signed.grant).unwrap()
+        approval.request_digest = sha256_text(distributed_encode_operation_v2(operation).unwrap())
+        approval.signature = pure_ed25519_sign_from_seed_v1(peer_signing_seed_v2(65), distributed_approval_signature_message_v2(approval).unwrap()).signature
+        val fresh = host_local_context_v1(local.policy)
+        assert(distributed_verify_grant_approval_from_snapshot_v2(local.policy.snapshot, signed, approval, operation,
+            fresh.grant_clock, local.policy.snapshot.generation, fresh.policy_revision, fresh.revocation_epoch, fresh.session_generation).is_ok())
+        val peers = peer_policy_fixture_v2(local.scope.service_scope_id, ["host-prepare", "host-status"], local.root)
+        val owner = peer_gateway_fixture_v2(local, peers)
+        val sequence = owner.domain.local.capacity.journal.sequence
+        val payload = host_prepare_request_encode_v1(HostPrepareRequestV1(intent, operation, signed, approval)).unwrap()
+        val admitted = host_service_gateway_callback_v2(owner, peer_request_v2(peers.client_uid, "host-prepare", "gateway-prepare", payload))
+        # Retain the new owner independently of whether a transport publishes its
+        # response. This does not simulate/qualify a native socket send failure.
+        val retained = admitted.owner
+        expect(admitted.response.exit_code).to_equal(0)
+        expect(peer_fields_v2(admitted.response.payload)["kind"]).to_equal(SdnValue.String("host-prepare-response"))
+        expect(peer_fields_v2(admitted.response.payload)["operationId"]).to_equal(SdnValue.String("gateway-prepare"))
+        expect(retained.domain.local.capacity.journal.sequence).to_equal(sequence + 1)
+        expect(retained.domain.local.capacity.ledger.reservations.len()).to_equal(2)
+        expect(retained.domain.local.capacity.journal.operations["gateway-prepare"].state).to_equal("admitted")
+        expect(owner.domain.local.capacity.journal.sequence).to_equal(sequence)
+        val status = host_service_gateway_callback_v2(retained, peer_request_v2(peers.client_uid, "host-status"))
+        expect(status.response.exit_code).to_equal(0)
+        expect(peer_fields_v2(status.response.payload)["availableCpuMillis"]).to_equal(SdnValue.Int(0))
+        expect(peer_fields_v2(status.response.payload)["availableMemoryBytes"]).to_equal(SdnValue.Int(0))
+        expect(host_local_resolver_consumed_fixture_v2(status.owner.domain.local.container)).to_equal(0)
+        host_installation_dispose_v3(status.owner.domain.local, fixture.auxiliary_root)
+
+    it "checks signed budget original subjects before SDK or planning publication":
+        step("Change only the trusted mapped principal or project against a canonical signed record")
+        val fixture = host_parent_budget_fixture_v1()
+        val request = HostServiceRequestV2("host-parent-budget", fixture.record.proof.budget.parent_operation_id,
+            host_parent_budget_record_encode_v1(fixture.record).unwrap())
+        for identity in ["principal", "project"]:
+            var peer = HostServiceMappedPeerV2(fixture.record.proof.operation.principal, fixture.record.proof.operation.project,
+                fixture.local.scope.service_scope_id)
+            if identity == "principal": peer.principal = "other-user"
+            if identity == "project": peer.project = "other-project"
+            val result = host_service_domain_mapped_turn_v2(HostServiceDomainV2(fixture.local), request, peer)
+            expect(peer_fields_v2(result.response)["error"]).to_equal(SdnValue.String("host-service-peer-subject-mismatch"))
+            expect(result.owner.local.capacity.journal.sequence).to_equal(fixture.local.capacity.journal.sequence)
+        expect(file_exists(fixture.local.capacity.journal.root + "/host-parent-budget-records")).to_equal(false)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "checks prepare subject and exact service scope using its existing decoded packet":
+        step("Use valid canonical prepare bytes and deny mapped substitution before expired fixture SDK proof")
+        val fixture = host_parent_budget_fixture_v1()
+        val binding = fixture.record.parent_binding
+        val prepare = HostPrepareRequestV1(intent: binding.host_intent, operation: binding.host_operation,
+            signed: fixture.record.proof.signed, approval: fixture.record.proof.approval)
+        val request = HostServiceRequestV2("host-prepare", binding.host_operation.id, host_prepare_request_encode_v1(prepare).unwrap())
+        val wrong = HostServiceMappedPeerV2("other-user", binding.host_operation.project, fixture.local.scope.service_scope_id)
+        val result = host_service_domain_mapped_turn_v2(HostServiceDomainV2(fixture.local), request, wrong)
+        expect(peer_fields_v2(result.response)["error"]).to_equal(SdnValue.String("host-service-peer-subject-mismatch"))
+        val scoped = HostServiceMappedPeerV2(binding.host_operation.principal, binding.host_operation.project, "other-service")
+        val scope_result = host_service_domain_mapped_turn_v2(HostServiceDomainV2(fixture.local), request, scoped)
+        expect(peer_fields_v2(scope_result.response)["error"]).to_equal(SdnValue.String("host-service-peer-scope-mismatch"))
+        expect(result.owner.local.capacity.journal.sequence).to_equal(fixture.local.capacity.journal.sequence)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "rejects proof parent and controller operation subject mismatches independently":
+        step("Tamper each canonical nested operation separately and require shared chain rejection before SDK")
+        val fixture = host_parent_budget_fixture_v1()
+        val original = host_parent_budget_record_encode_v1(fixture.record).unwrap()
+        val peer = HostServiceMappedPeerV2(fixture.record.proof.operation.principal, fixture.record.proof.operation.project,
+            fixture.local.scope.service_scope_id)
+        for part in ["proof", "parent", "controller"]:
+            var fields = peer_fields_v2(original)
+            if part == "proof":
+                var proof = fixture.record.proof
+                proof.operation.principal = "other-user"
+                fields["proof"] = SdnValue.String(controller_parent_budget_proof_encode_v1(proof).unwrap())
+            elif part == "parent":
+                var operation = fixture.record.parent_binding.host_operation
+                operation.principal = "other-user"
+                fields["parentHostOperation"] = SdnValue.String(distributed_encode_operation_v2(operation).unwrap())
+            else:
+                var operation = fixture.record.parent_controller_operation
+                operation.principal = "other-user"
+                fields["parentControllerOperation"] = SdnValue.String(distributed_encode_operation_v2(operation).unwrap())
+            val expected = if part == "proof": "parent-budget-controller-envelope-mismatch"
+                elif part == "parent": "assignment-object-digest-mismatch"
+                else: "controller-assignment-envelope-mismatch"
+            val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+            val result = host_service_domain_mapped_turn_v2(HostServiceDomainV2(fixture.local),
+                HostServiceRequestV2("host-parent-budget", fixture.record.proof.budget.parent_operation_id, bytes), peer)
+            expect(result.exit_code).to_equal(1)
+            expect(peer_fields_v2(result.response)["error"]).to_equal(SdnValue.String(expected))
+            expect(result.owner.local.capacity.journal.sequence).to_equal(fixture.local.capacity.journal.sequence)
+            expect(host_local_resolver_consumed_fixture_v2(result.owner.local.container)).to_equal(0)
+        expect(file_exists(fixture.local.capacity.journal.root + "/host-parent-budget-records")).to_equal(false)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "retains the pinned snapshot without silently hot reloading changed policy bytes":
+        step("Change the owned file and require explicit new bootstrap pin instead of request-driven reload")
+        val fixture = host_parent_budget_fixture_v1()
+        val peers = peer_policy_fixture_v2(fixture.local.scope.service_scope_id, ["host-status"], fixture.local.root)
+        val owner = peer_gateway_fixture_v2(fixture.local, peers)
+        val changed = host_service_peer_policy_encode_v2(peer_policy_v2(peers.client_uid, fixture.local.scope.service_scope_id, ["host-validate"])).unwrap()
+        assert(file_atomic_write_mode(peers.root + "/" + HOST_SERVICE_PEER_POLICY_FILE_V2, changed, 0o600))
+        val result = host_service_gateway_callback_v2(owner, peer_request_v2(peers.client_uid, "host-status"))
+        expect(result.response.exit_code).to_equal(0)
+        expect(result.owner.peers.source_digest).to_equal(peers.pin)
+        expect(host_service_peer_policy_load_v2(peers.root, peers.pin).unwrap_err()).to_equal("host-peer-policy-pin-mismatch")
+        host_parent_budget_fixture_close_v1(fixture)
+        peer_policy_fixture_close_v2(peers)
+
+    it "keeps effect actions nonaccepted and uses the actual owner-threaded SDK port":
+        step("Check incomplete effect routes and guard against alternate listener or raw identity paths")
+        val fixture = host_parent_budget_fixture_v1()
+        val peers = peer_policy_fixture_v2(fixture.local.scope.service_scope_id, ["host-execute", "host-inspect", "host-wait", "host-cleanup"], fixture.local.root)
+        val owner = peer_gateway_fixture_v2(fixture.local, peers)
+        for action in ["host-execute", "host-inspect", "host-wait", "host-cleanup"]:
+            val payload = if action == "host-inspect" or action == "host-wait": "" else: "not-authority"
+            val result = host_service_gateway_callback_v2(owner, peer_request_v2(peers.client_uid, action, "operation_1", payload))
+            expect(result.response.exit_code).to_equal(1)
+            expect(peer_fields_v2(result.response.payload)["error"]).to_equal(SdnValue.String("host-service-effect-dispatch-required"))
+            expect(result.owner.domain.local.capacity.journal.sequence).to_equal(fixture.local.capacity.journal.sequence)
+        val source = read_file_text_result("src/lib/nogc_sync_mut/orchestration/host_service_gateway_v2.spl").unwrap()
+        expect(source.contains("local_gateway_turn_owned_v1<HostServiceGatewayV2>")).to_equal(true)
+        expect(source.contains("domain: turn.owner")).to_equal(true)
+        for forbidden in ["local_unix_listen", "process_run", "geteuid", "host_prepare_request_decode", "host_parent_budget_record_decode"]:
+            expect(source.contains(forbidden)).to_equal(false)
+        expect(source.contains("CloseCleanupRequired(closed,")).to_equal(true)
+        host_parent_budget_fixture_close_v1(fixture)
+        peer_policy_fixture_close_v2(peers)
+
+    it "classifies only an authenticated allowed status read as control":
+        step("Use actual loaded same-root mapping before selecting the control-read class")
+        val fixture = host_parent_budget_fixture_v1()
+        val peers = peer_policy_fixture_v2(fixture.local.scope.service_scope_id, ["host-status"], fixture.local.root)
+        val owner = peer_gateway_fixture_v2(fixture.local, peers)
+        val request = peer_request_v2(peers.client_uid, "host-status")
+        expect(host_service_gateway_classify_v2(owner, request).unwrap()).to_equal(HostServiceDispatchClassV2.ControlRead)
+        expect(owner.domain.local.capacity.journal.sequence).to_equal(fixture.local.capacity.journal.sequence)
+        expect(host_local_resolver_consumed_fixture_v2(owner.domain.local.container)).to_equal(0)
+        expect(host_service_gateway_callback_v2(owner, request).response.exit_code).to_equal(0)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "never gives unauthorized status root service UID or scope a priority class":
+        step("Reject policy and provenance failures before interpreting the raw status action as priority")
+        val fixture = host_parent_budget_fixture_v1()
+        val peers = peer_policy_fixture_v2(fixture.local.scope.service_scope_id, ["host-validate"], fixture.local.root)
+        val owner = peer_gateway_fixture_v2(fixture.local, peers)
+        expect(host_service_gateway_classify_v2(owner, peer_request_v2(peers.client_uid, "host-status")).unwrap_err()).to_equal("host-service-peer-action-forbidden")
+        expect(host_service_gateway_classify_v2(owner, peer_request_v2(peers.service_uid, "host-status")).unwrap_err()).to_equal("host-service-peer-service-uid-forbidden")
+        val unknown_uid = if peers.service_uid == 2000: 2001 else: 2000
+        expect(host_service_gateway_classify_v2(owner, peer_request_v2(unknown_uid, "host-status")).unwrap_err()).to_equal("host-service-peer-uid-unmapped")
+        val foreign = peer_policy_fixture_v2(fixture.local.scope.service_scope_id)
+        val foreign_owner = peer_gateway_fixture_v2(fixture.local, foreign)
+        expect(host_service_gateway_classify_v2(foreign_owner, peer_request_v2(foreign.client_uid, "host-status")).unwrap_err()).to_equal("host-service-peer-root-mismatch")
+        val scoped = peer_policy_fixture_v2("other-service", ["host-status"], fixture.local.root)
+        val scope_owner = peer_gateway_fixture_v2(fixture.local, scoped)
+        expect(host_service_gateway_classify_v2(scope_owner, peer_request_v2(scoped.client_uid, "host-status")).unwrap_err()).to_equal("host-service-peer-scope-mismatch")
+        expect(fixture.local.capacity.journal.sequence).to_equal(owner.domain.local.capacity.journal.sequence)
+        expect(host_local_resolver_consumed_fixture_v2(owner.domain.local.container)).to_equal(0)
+        host_parent_budget_fixture_close_v1(fixture)
+        peer_policy_fixture_close_v2(foreign)
+
+    it "classifies each allowed work action without decoding or authorizing signed packets":
+        step("Keep opaque invalid packet bytes as Work metadata and require callback rejection separately")
+        val fixture = host_parent_budget_fixture_v1()
+        val peers = peer_policy_fixture_v2(fixture.local.scope.service_scope_id,
+            ["host-validate", "host-prepare", "host-parent-budget"], fixture.local.root)
+        val owner = peer_gateway_fixture_v2(fixture.local, peers)
+        for action in ["host-validate", "host-prepare", "host-parent-budget"]:
+            val request = peer_request_v2(peers.client_uid, action, "operation_1", "invalid-signed-packet")
+            expect(host_service_gateway_classify_v2(owner, request).unwrap()).to_equal(HostServiceDispatchClassV2.Work)
+            val rejected = host_service_gateway_callback_v2(owner, request)
+            expect(rejected.response.exit_code).to_equal(1)
+            expect(rejected.owner.domain.local.capacity.journal.sequence).to_equal(fixture.local.capacity.journal.sequence)
+            expect(host_local_resolver_consumed_fixture_v2(rejected.owner.domain.local.container)).to_equal(0)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "preserves scope and request shape error ordering before scheduling":
+        step("Require exact status shape after mapped identity and scope validation")
+        val fixture = host_parent_budget_fixture_v1()
+        val peers = peer_policy_fixture_v2(fixture.local.scope.service_scope_id, ["host-status"], fixture.local.root)
+        val owner = peer_gateway_fixture_v2(fixture.local, peers)
+        val request = peer_request_v2(peers.client_uid, "host-status", "operation_1", "unexpected")
+        expect(host_service_gateway_classify_v2(owner, request).unwrap_err()).to_equal("host-service-status-fields")
+        val callback = host_service_gateway_callback_v2(owner, request)
+        expect(peer_fields_v2(callback.response.payload)["error"]).to_equal(SdnValue.String("host-service-status-fields"))
+        val scoped = peer_policy_fixture_v2("other-service", ["host-status"], fixture.local.root)
+        val scope_owner = peer_gateway_fixture_v2(fixture.local, scoped)
+        expect(host_service_gateway_classify_v2(scope_owner, request).unwrap_err()).to_equal("host-service-peer-scope-mismatch")
+        expect(fixture.local.capacity.journal.sequence).to_equal(owner.domain.local.capacity.journal.sequence)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "refuses scheduling effects even when the installed policy allows their action":
+        step("Return dispatch-required rather than a work class or an accepted queue receipt")
+        val fixture = host_parent_budget_fixture_v1()
+        val peers = peer_policy_fixture_v2(fixture.local.scope.service_scope_id,
+            ["host-execute", "host-inspect", "host-wait", "host-cleanup"], fixture.local.root)
+        val owner = peer_gateway_fixture_v2(fixture.local, peers)
+        for action in ["host-execute", "host-inspect", "host-wait", "host-cleanup"]:
+            val payload = if action == "host-inspect" or action == "host-wait": "" else: "not-authority"
+            expect(host_service_gateway_classify_v2(owner, peer_request_v2(peers.client_uid, action, "operation_1", payload)).unwrap_err()).to_equal("host-service-effect-dispatch-required")
+        expect(fixture.local.capacity.journal.sequence).to_equal(owner.domain.local.capacity.journal.sequence)
+        expect(host_local_resolver_consumed_fixture_v2(owner.domain.local.container)).to_equal(0)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "revalidates at callback and keeps classification free of journal and response effects":
+        step("A prior control class cannot authorize changed peer metadata at dispatch")
+        val fixture = host_parent_budget_fixture_v1()
+        val peers = peer_policy_fixture_v2(fixture.local.scope.service_scope_id, ["host-status"], fixture.local.root)
+        val owner = peer_gateway_fixture_v2(fixture.local, peers)
+        var request = peer_request_v2(peers.client_uid, "host-status")
+        expect(host_service_gateway_classify_v2(owner, request).unwrap()).to_equal(HostServiceDispatchClassV2.ControlRead)
+        request.peer_uid = peers.service_uid
+        val rejected = host_service_gateway_callback_v2(owner, request)
+        expect(peer_fields_v2(rejected.response.payload)["error"]).to_equal(SdnValue.String("host-service-peer-service-uid-forbidden"))
+        expect(rejected.owner.domain.local.capacity.journal.sequence).to_equal(fixture.local.capacity.journal.sequence)
+        val source = read_file_text_result("src/lib/nogc_sync_mut/orchestration/host_service_gateway_v2.spl").unwrap()
+        val classifier = source.split("pub fn host_service_gateway_classify_v2")[1].split("pub fn host_service_gateway_callback_v2")[0]
+        expect(classifier.contains("host_gateway_mapped_request_v2(owner, incoming)?")).to_equal(true)
+        for forbidden in ["host_service_domain_mapped_turn_v2", "distributed_operation_journal", "simple_container_",
+                "host_prepare_request_decode", "host_parent_budget_record_decode", "LocalGatewayResponseV1", "local_gateway_publish"]:
+            expect(classifier.contains(forbidden)).to_equal(false)
+        val callback = source.split("pub fn host_service_gateway_callback_v2")[1].split("pub fn host_service_gateway_turn_v2")[0]
+        expect(callback.contains("host_gateway_mapped_request_v2(owner, incoming)")).to_equal(true)
+        expect(callback.contains("domain: turn.owner")).to_equal(true)
+        host_parent_budget_fixture_close_v1(fixture)

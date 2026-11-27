@@ -1,0 +1,143 @@
+"""
+Hosted local WM lane (Engine2dWmFrameExecutor.render) on a clock tick in
+the production caller shape: a focused window with real content, the tray
+clock item, and taskbar_revision from simpleos_runtime_taskbar_revision.
+The tick must take the retained damage path, and a forced full device
+readback of the replayed frame must equal a fresh Vulkan executor's frame
+of the new tick everywhere, and the previous device frame outside the
+clock boxes (NVIDIA GB10 and llvmpipe).
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{env_get}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gpu.engine2d.color.{rgb}
+use common.ui.taskbar_model.{TaskbarModel, AppRef, WindowRef, TrayItem}
+use common.ui.window_scene.{SharedWmScene, WM_CONTENT_ORIGIN_PIXEL_SURFACE, WmContentFrame, simple_gui_internal_window, shared_wm_background_color, wm_content_frame_checksum}
+use common.ui.generated.fluid_light_theme_snapshot.{fluid_light_theme_render_snapshot}
+use common.ui.generated.aetheric_dark_theme_snapshot.{aetheric_dark_theme_render_snapshot}
+use common.ui.wm_chrome_theme.{apply_theme_render_snapshot_to_wm_chrome, reset_wm_chrome_theme}
+use os.compositor.engine2d_wm_frame_executor.{Engine2dWmFrameExecutor}
+use os.desktop.shell.{simpleos_runtime_taskbar_revision}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+
+val REV: i64 = 7
+
+fn _scene() -> SharedWmScene:
+    # The window spans the taskbar row, so the clock boxes sit over real
+    # window pixels as well as the translucent taskbar.
+    val window = simple_gui_internal_window("surf", "win", 1u64, "app", "One", 10, 36, 140, 84, "", false, true, 1)
+    SharedWmScene(width: 160, height: 120, backend: "cpu", windows: [window], background: shared_wm_background_color(0xff101010u32))
+
+fn _taskbar(clock: text) -> TaskbarModel:
+    TaskbarModel(
+        pinned: [AppRef(app_id: "terminal", display_name: "Terminal", icon: "term")],
+        running: [WindowRef(window_id: "win", app_id: "app", title: "One", minimized: false)],
+        tray: [TrayItem(item_id: "clock", label: clock, icon: "clock")])
+
+fn _frames() -> [WmContentFrame]:
+    val pixels: [u32] = [rgb(0, 160, 0); 132 * 48]
+    [WmContentFrame(window_id: "win", scene_revision: REV, content_revision: 1,
+        origin_kind: WM_CONTENT_ORIGIN_PIXEL_SURFACE, width: 132, height: 48,
+        pixels: pixels, checksum: wm_content_frame_checksum(pixels),
+        parent_window_id: "", offset_x: 0, offset_y: 0)]
+
+fn _render(executor: Engine2dWmFrameExecutor, clock: text) -> i64:
+    var e = executor
+    val taskbar = _taskbar(clock)
+    e.render(_scene(), taskbar, _frames(), REV, simpleos_runtime_taskbar_revision(taskbar, clock), clock)
+
+fn _full_device_pixels(engine: Engine2D) -> [u32]:
+    # A damaged replay refreshes the host mirror only inside the damage, so
+    # drop the mirror and download the whole device framebuffer. The
+    # poisoned canary pixel proves the read did not come from the mirror.
+    if val Some(vk) = engine.vulkan_backend:
+        # Canary: poison one mirror pixel; a real full download overwrites it.
+        if vk.host_buf.len() > 0: vk.host_buf[0] = 0x01020304u32
+        vk.host_mirror_valid = false
+        vk.dirty = true
+    # Prove the poison is visible through `engine` itself (the binding above
+    # must alias the engine's backend, not copy it), then read through it.
+    var poisoned = false
+    if val Some(seen) = engine.vulkan_backend:
+        poisoned = seen.host_buf.len() > 0 and seen.host_buf[0] == 0x01020304u32 and not seen.host_mirror_valid
+    expect(poisoned).to_be(true)
+    if poisoned:
+        val rb = engine.read_pixels_with_source()
+        expect(rb.source).to_equal("device_readback")
+        expect(rb.pixels[0] != 0x01020304u32).to_be(true)
+        return rb.pixels
+    expect("no-vulkan-backend").to_equal("vulkan-backend")
+    []
+
+fn _vulkan_unavailable(reason: text):
+    # A host that declares Vulkan mandatory must not pass on zero pixel checks.
+    expect(env_get("SIMPLE_2D_REQUIRE_VULKAN")).to_equal("")
+    expect(reason.len()).to_be_greater_than(0)
+
+fn _in_any(i: i32, rects: [i64]) -> bool:
+    val x = (i % 160).to_i64()
+    val y = (i / 160).to_i64()
+    var r: i64 = 0
+    while r + 3 < rects.len():
+        if x >= rects[r] and x < rects[r] + rects[r + 2] and y >= rects[r + 1] and y < rects[r + 1] + rects[r + 3]:
+            return true
+        r = r + 4
+    false
+
+fn local_lane_clock_tick(theme: text, expected_path: text):
+    reset_wm_chrome_theme()
+    if theme == "fluid_light": apply_theme_render_snapshot_to_wm_chrome(fluid_light_theme_render_snapshot())
+    if theme == "aetheric_dark": apply_theme_render_snapshot_to_wm_chrome(aetheric_dark_theme_render_snapshot())
+    match Engine2D.create_requested_backend(160, 120, "vulkan"):
+        Err(reason):
+            _vulkan_unavailable(reason)
+        Ok(reference_engine):
+            var reference = Engine2dWmFrameExecutor.create(reference_engine, FramebufferDriver.empty(), 160, 120)
+            expect(_render(reference, "09:42")).to_equal(REV)
+            val fresh_b = _full_device_pixels(reference.engine)
+            reference.engine.shutdown()
+            match Engine2D.create_requested_backend(160, 120, "vulkan"):
+                Err(reason):
+                    _vulkan_unavailable(reason)
+                Ok(engine):
+                    var executor = Engine2dWmFrameExecutor.create(engine, FramebufferDriver.empty(), 160, 120)
+                    expect(_render(executor, "09:41")).to_equal(REV)
+                    expect(executor.last_present_path).to_equal("software")
+                    val first = _full_device_pixels(executor.engine)
+                    val boxes = executor.last_successful_clock_rect
+                    expect(boxes.len()).to_equal(8)  # oracle: taskbar clock + tray clock label
+                    step("The tick takes the retained damage path")
+                    expect(_render(executor, "09:42")).to_equal(REV)
+                    expect(executor.last_present_path).to_equal(expected_path)
+                    val second = _full_device_pixels(executor.engine)
+                    expect(second).to_equal(fresh_b)
+                    val all_boxes = boxes + executor.last_successful_clock_rect
+                    var changed = 0
+                    var window_px = 0
+                    var i = 0
+                    while i < 160 * 120:
+                        if not _in_any(i, all_boxes):
+                            expect(second[i]).to_equal(first[i])
+                        if second[i] != first[i]:
+                            changed = changed + 1
+                        if first[i] == rgb(0, 160, 0):
+                            window_px = window_px + 1
+                        i = i + 1
+                    expect(changed).to_be_greater_than(0)  # oracle: the clock glyphs really changed on the device
+                    expect(window_px).to_be_greater_than(1000)  # oracle: the window content is really on screen
+                    executor.engine.shutdown()
+    reset_wm_chrome_theme()
+
+describe "hosted local WM lane clock tick":
+    it "replays only the clock boxes on the device with the default WM chrome":
+        step("default chrome: 09:41 -> 09:42 through Engine2dWmFrameExecutor.render takes the retained damage path")
+        local_lane_clock_tick("default", "software-retained-damage")
+
+    it "replays only the clock boxes on the device when the fluid_light window samples its backdrop":
+        step("fluid_light window chrome samples the parent backdrop, so the tick replays the padded backdrop + intersecting glass batches and equals a fresh frame")
+        local_lane_clock_tick("fluid_light", "software-retained-damage")
+
+    it "replays only the clock boxes on the device when the aetheric_dark window samples its backdrop":
+        step("aetheric_dark glass chrome samples the parent backdrop: clipped retained replay, equal to a fresh frame")
+        local_lane_clock_tick("aetheric_dark", "software-retained-damage")

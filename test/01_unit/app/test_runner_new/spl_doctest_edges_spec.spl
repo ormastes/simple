@@ -1,0 +1,68 @@
+"""Comment doctest extraction: awkward but realistic inputs.
+
+# @req REQ-TESTRUNNER-COMMENT-KIND
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.test_runner.test_executor_parsing.{_tp_get_temp_dir}
+use std.test_runner.doctest_runner.{extract_doctests, Doctest}
+
+fn extract(source: text) -> [Doctest]:
+    val dir = secure_temp_dir(_tp_get_temp_dir(), "spl-doctest-edge-").unwrap().replace("\\", "/")
+    val path = dir + "/sample.spl"
+    file_write(path, source)
+    extract_doctests(path)
+
+describe "line endings and whitespace":
+    it "extracts an example from a file with CRLF line endings":
+        val found = extract("## ```simple\r\n## val a = 1\r\n## ```\r\nfn f():\r\n    1\r\n")
+        expect(found.len()).to_equal(1)
+        expect(found[0].code).to_equal("val a = 1")
+    it "extracts an example whose fence has trailing spaces":
+        val found = extract("## ```simple   \n## val a = 1\n## ```   \n")
+        expect(found.len()).to_equal(1)
+    it "extracts an example from a comment indented with tabs":
+        val found = extract("\t## ```simple\n\t## val a = 1\n\t## ```\n")
+        expect(found.len()).to_equal(1)
+
+describe "comment text inside an example":
+    it "keeps a hash comment line inside the example":
+        val found = extract("## ```simple\n## # a note\n## val a = 1\n## ```\n")
+        expect(found[0].code).to_equal("# a note\nval a = 1")
+    it "keeps a trailing hash comment on an example line":
+        val found = extract("## ```simple\n## val a = 1  # one\n## ```\n")
+        expect(found[0].code).to_equal("val a = 1  # one")
+    it "keeps a use statement as the first example line":
+        val found = extract("# ```simple\n# use std.text\n# val a = 1\n# ```\n")
+        expect(found[0].code).to_equal("use std.text\nval a = 1")
+
+describe "fence adjacency":
+    it "starts a new example when a second fence opens before the first closes":
+        val found = extract("## ```simple\n## val a = 1\n## ```simple\n## val b = 2\n## ```\n")
+        expect(found.len()).to_equal(1)
+        expect(found[0].code).to_equal("val b = 2")
+    it "extracts back-to-back examples with no line between them":
+        val found = extract("## ```simple\n## val a = 1\n## ```\n## ```simple\n## val b = 2\n## ```\n")
+        expect(found.len()).to_equal(2)
+    it "extracts examples separated by a blank code line":
+        val found = extract("## ```simple\n## val a = 1\n## ```\n\n## ```simple\n## val b = 2\n## ```\n")
+        expect(found.len()).to_equal(2)
+    it "drops an open example when a blank line interrupts the comment":
+        val found = extract("## ```simple\n## val a = 1\n\n## ```\n")
+        expect(found.len()).to_equal(0)
+    it "ignores prose between two examples":
+        val found = extract("## ```simple\n## val a = 1\n## ```\n## Some text.\n## ```simple\n## val b = 2\n## ```\n")
+        expect(found.len()).to_equal(2)
+        expect(found[1].line_number).to_equal(5)
+
+describe "mixed marker styles":
+    it "extracts examples from every marker style in one file":
+        val found = extract("/// ```simple\n/// val a = 1\n/// ```\nfn f():\n    1\n## ```simple\n## val b = 2\n## ```\nfn g():\n    1\n# ```simple\n# val c = 3\n# ```\n")
+        expect(found.len()).to_equal(3)
+        expect(found[0].code).to_equal("val a = 1")
+        expect(found[1].code).to_equal("val b = 2")
+        expect(found[2].code).to_equal("val c = 3")
+    it "does not close a triple-slash example with a double-hash fence":
+        val found = extract("/// ```simple\n/// val a = 1\n## ```\n")
+        expect(found.len()).to_equal(1)

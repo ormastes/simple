@@ -1398,6 +1398,11 @@ fn real_main() {
     // census explicitly here; report() is idempotent enough to double-print
     // only on paths that also unwind, and is a no-op unless SIMPLE_MEM_TRACE=1.
     simple_compiler::mem_trace::report("process exit");
+    // Same reason for the two profilers: their `atexit` dump never fires on
+    // Windows (`process::exit` is `ExitProcess` there). Both are once-guarded
+    // and no-ops unless SIMPLE_PERF_COUNTERS=1 / SIMPLE_INTERP_SAMPLE=1.
+    simple_compiler::perf_counters::flush_at_process_exit();
+    simple_compiler::interpreter::sampler::flush_at_process_exit();
 
     if metrics_enabled {
         exit_with_metrics(exit_code, &metrics);
@@ -1526,6 +1531,10 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
     }
 
     let path = resolve_app_path(app_relative_path)?;
+
+    // `lint`/`fix`/`fmt`: the loader's advisory diagnostics about the LINTER'S OWN
+    // import closure are not about the linted file; keep them off stderr.
+    simple_common::tool_closure_quiet::quiet_tool_closure_for_app(app_relative_path);
 
     if app_relative_path == "src/compiler/90.tools/sffi_gen/main.spl" {
         let previous_force_args = std::env::var("SIMPLE_FORCE_ARGS").ok();

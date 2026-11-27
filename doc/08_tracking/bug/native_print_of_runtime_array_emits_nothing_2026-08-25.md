@@ -1,7 +1,7 @@
 # `print(<array>)` emits NOTHING on the native lane
 
 - **Filed:** 2026-08-25
-- **Status:** OPEN
+- **Status:** FIXED (verified 2026-11-11, lane work/p3-rt3-20261111 — aggregate print routing incl. runtime arrays landed via PR #7463; committed regression fixture passes native==interpret; see addendum below)
 - **Lane:** native (`native-build`) only. Both seed lanes (`interpret`, `jit`) are correct.
 - **Found by:** `scripts/check/check-engine-differential.shs`, fixture
   `test/fixtures/engine_differential/closure_runtime_facing.spl`, while clearing
@@ -116,3 +116,38 @@ separate regression, filed as
 native lane last worked at `5f2ad54578f`, so all native measurements in this
 record were taken there. `origin/main` has since moved on to `73d6deb5f66`,
 which has not been probed.
+
+---
+
+## 2026-11-11 triage — lane rt3 (worktree simple-p3-rt3-20261111, base 7f0fa174083, seed 46fe8f6b6def)
+
+**Verdict: FIXED (root fix at tip; re-verified fresh on both lanes).**
+
+- Root-cause fix is IN the tree at this base: `lower_bootstrap_print_call`
+  (`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:2398-2450`)
+  now routes aggregate arguments — explicitly including runtime-array locals via
+  `arg_is_aggregate = self.runtime_array_locals.contains(arg_local.id)` (:2416),
+  selected BEFORE any cstr/empty path — through `rt_to_string`, which renders the
+  value by its own tag exactly like the interpreter oracle. Landed via merge
+  4eb1de2ecbd (PR #7463, 2026-11-07, "mir-diverging-if-merges-batch2");
+  confirmed ancestor of this base. This is precisely the missing runtime-array
+  arm this doc's "Suspected area" predicted.
+- Committed regression coverage exists and is gate-live:
+  `test/fixtures/engine_differential/native_print_runtime_array.spl` (added by
+  merge 9e7e7a526ed, PR #7597) is labeled "Regression for
+  native_print_of_runtime_array_emits_nothing_2026-08-25" and is enumerated by
+  `check_engine_differential.spl:list_fixtures()` (every `.spl` under
+  `test/fixtures/engine_differential/` runs on interpret/JIT/native with
+  byte-compared stdout).
+- Fresh behavioral verification (this lane, tracked seed, Windows,
+  `SIMPLE_NATIVE_BUILD_RUST=1`):
+  - Doc minimal repro `p1.spl` (map/filter/lambda print): native
+    `build/review/rt3/p1.exe` prints `[3, 6, 9, 12] / [3, 4] / 40`;
+    interpret oracle prints byte-identical. rc=0 both lanes.
+  - Committed regression fixture: native `npa.exe` prints
+    `[2, 4, 6] / [2, 3] / [] / 17 / tail`; interpret byte-identical.
+    Empty-filter array (`[]`) also renders — both outcomes of the
+    runtime-array condition covered.
+- Historical note: the 2026-08-25 "native-build broken at tip" blocker cited in
+  this doc is long cleared; the native lane built both probes in ~7s each at
+  this base.

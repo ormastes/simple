@@ -1,0 +1,94 @@
+"""
+Regression guard for bug `method_chain_poisons_receiver_type_2026-09-16`.
+
+The filed symptom (a method call nested in `expect(...)` "poisoning" its `var`
+receiver) was really the seed BDD `expect` handler evaluating an ORDERED
+comparison subject twice: `expect(a() > b)` evaluated `a()` and `b` once for
+the failure message, then re-evaluated the whole comparison for its value. Any
+operand with a side effect (`replies.allocate_id()`, a counter bump) therefore
+ran twice and the asserted value came from the second run. Each operand must
+be evaluated exactly once, for every comparison operator, while ordering
+semantics (unsigned, float, text) and chained-matcher authority stay unchanged.
+For interpreter / spec-harness engineers.
+"""
+use std.spipe.*
+
+var g_bumps: i64 = 0
+
+fn bump() -> i64:
+    g_bumps = g_bumps + 1
+    g_bumps
+
+struct ReplyStore:
+    next_id: i64
+    cap: i64
+    live: [i64]
+
+impl ReplyStore:
+    static fn with_capacity(capacity: i64) -> ReplyStore:
+        ReplyStore(next_id: 0, cap: capacity, live: [])
+    me allocate_id() -> i64:
+        if self.live.len() >= self.cap: return -1
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        self.live.push(id)
+        id
+    me remove(id: i64):
+        var out: [i64] = []
+        for x in self.live:
+            if x != id: out.push(x)
+        self.live = out
+
+describe "expect evaluates an ordered comparison subject once":
+    it "greater-than operand runs once":
+        g_bumps = 0
+        expect(bump() > 0).to_equal(true)
+        expect(g_bumps).to_equal(1)
+
+    it "greater-or-equal operand runs once":
+        g_bumps = 0
+        expect(bump() >= 1).to_equal(true)
+        expect(g_bumps).to_equal(1)
+
+    it "less-than operand runs once":
+        g_bumps = 0
+        expect(0 < bump()).to_equal(true)
+        expect(g_bumps).to_equal(1)
+
+    it "less-or-equal operand runs once":
+        g_bumps = 0
+        expect(bump() <= 1).to_equal(true)
+        expect(g_bumps).to_equal(1)
+
+    it "chained method call on a var receiver keeps its state":
+        var replies = ReplyStore.with_capacity(1)
+        val reply_id = replies.allocate_id()
+        expect(replies.allocate_id()).to_equal(-1)
+        replies.remove(reply_id)
+        expect(replies.allocate_id() > reply_id).to_equal(true)
+        expect(replies.next_id).to_equal(2)
+
+describe "expect comparison semantics are unchanged":
+    it "equality operands run once":
+        g_bumps = 0
+        expect(bump() == 1).to_equal(true)
+        expect(bump() != 1).to_equal(true)
+        expect(g_bumps).to_equal(2)
+
+    it "a false ordered comparison is still false under a chained matcher":
+        expect(5 < 3).to_equal(false)
+        expect(3 >= 5).to_equal(false)
+
+    it "u64 high-bit operands order unsigned":
+        val big: u64 = 18446744073709551615
+        val one: u64 = 1
+        expect(big > one).to_equal(true)
+        expect(one < big).to_equal(true)
+
+    it "int and float operands order numerically":
+        expect(2 > 1.5).to_equal(true)
+        expect(1.5 <= 1.5).to_equal(true)
+
+    it "text operands order lexically":
+        expect("abc" < "abd").to_equal(true)
+        expect("b" > "a").to_equal(true)

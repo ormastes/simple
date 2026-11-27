@@ -1,0 +1,80 @@
+# Regression: bug native_dict_get_text_if_val_double_decode_2026-11-06.
+# Native `if val sn = d.get(k)` on a text-valued Dict decoded the hit TWICE:
+# lower_dict_runtime_read already ran rt_interp_cstr (as_option lane), then
+# decode_present_collection's Str arm ran rt_unwrap_or_self + rt_interp_cstr
+# again on the char*, yielding a wild pointer (AV in note_container_elem_type,
+# worked around by #7168). The root fix marks the decoded local and the
+# present edge reuses it. The interpreter cannot reproduce the native AV, so
+# the source shape is pinned here plus behavioural coverage of every arm.
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn _read(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn _body(src: text, header: text, stop: text) -> text:
+    val start = src.index_of(header) ?? -1
+    if start < 0:
+        return ""
+    val rest = src.substring(start, src.len())
+    val end = rest.index_of(stop) ?? rest.len()
+    rest.substring(0, end)
+
+class TextNotes:
+    syms: Dict<i64, text>
+
+    fn via_if_val(id: i64) -> text:
+        val found = self.syms.get(id)
+        if val sn = found:
+            return "hit:" + sn
+        "miss"
+
+    fn via_direct_if_val(id: i64) -> text:
+        if val sn = self.syms.get(id):
+            return sn
+        ""
+
+    fn via_reassigned(id: i64) -> text:
+        var found = self.syms.get(-1)
+        found = self.syms.get(id)
+        if val sn = found:
+            return sn
+        "none"
+
+describe "Dict.get text result: single decode on the if-val present edge":
+    it "marks the decoded text option in lower_dict_runtime_read":
+        val body = _body(_read("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl"), "me lower_dict_runtime_read(", "\n    me ")
+        expect(body.len() > 0).to_equal(true)
+        expect(body).to_contain("self.mark_decoded_text_option_local(decoded.id)")
+
+    it "skips the second decode in decode_present_collection":
+        val body = _body(_read("src/compiler/50.mir/mir_lowering_stmts.spl"), "me decode_present_collection(", "\n    me ")
+        expect(body).to_contain("if self.is_decoded_text_option_local(raw.id):")
+
+    it "propagates the marker through val/var bindings and assignment":
+        val src = _read("src/compiler/50.mir/mir_lowering_stmts.spl")
+        expect(src).to_contain("self.decoded_text_option_locals = marker_map_without(self.decoded_text_option_locals, local.id)")
+        expect(src).to_contain("if has_init and self.is_decoded_text_option_local(init_local.id):")
+
+    it "resets the marker per function":
+        val src = _read("src/compiler/50.mir/_MirLowering/function_lowering.spl")
+        expect(src).to_contain("self.decoded_text_option_locals = {}")
+
+    it "if-val on a bound get result: hit and miss":
+        val n = TextNotes(syms: {})
+        n.syms[7] = "Point"
+        expect(n.via_if_val(7) == "hit:Point").to_equal(true)
+        expect(n.via_if_val(8) == "miss").to_equal(true)
+
+    it "if-val directly on the get call":
+        val n = TextNotes(syms: {})
+        n.syms[1] = "A"
+        expect(n.via_direct_if_val(1) == "A").to_equal(true)
+        expect(n.via_direct_if_val(2) == "").to_equal(true)
+
+    it "if-val after reassignment of the option local":
+        val n = TextNotes(syms: {})
+        n.syms[3] = "C"
+        expect(n.via_reassigned(3) == "C").to_equal(true)
+        expect(n.via_reassigned(4) == "none").to_equal(true)

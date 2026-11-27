@@ -1,6 +1,6 @@
 # MCP stdio interpreter gate exceeds the CPU guard
 
-Status: OPEN (P2)
+Status: FIXED (2026-11-26, BF-5 lane — verified on Windows Rust seed interpreter; Linux `kill_simple_monitor` re-check not run on this Windows host)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Exact failure
@@ -177,3 +177,29 @@ Note also `src/compiler/50.mir/**` is claimed by another lane this session; the
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Out of lane: needs measuring CPU-guard behavior under the MCP stdio interpreter gate in a live server session, not reproducible via a unit spec in this lane's budget. No change made.
+
+## Triage 2026-11-25 (fleet agent, worktree wt-p2w3-aj, release/1.0.0)
+
+The pure-Simple source fix named above is present in current source:
+`driver_source_pipeline_loading.spl:1440` excludes `CompileMode.Interpret`
+from `needs_bulk_project_sources`, and the contract spec
+`test/01_unit/compiler/driver/interpret_lazy_project_sources_spec.spl`
+exists. The CPU-guard gate itself could not be re-measured on this Windows
+host: `SIMPLE_LIB=src bin/simple.exe test
+test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter`
+aborts before any scenario with `unknown decorator
+'@representation_boundary'` (known release/1.0.0 source/binary
+inconsistency — the pinned Rust seed predates the decorator added tree-wide
+by cfd89933699). The row stays OPEN for the gate measurement; the note
+above records that the source-side fix is landed, verified by inspection.
+
+## Fix & Verification 2026-11-26 (BF-5 lane, `origin/release/1.0.0`)
+
+1. Verified the compiler bulk-loader exclusion via `test/01_unit/compiler/driver/interpret_lazy_project_sources_spec.spl --mode=interpreter` (`2/2` passed).
+2. Running `test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter` with `SIMPLE_BINARY=C:\Users\user\AppData\Local\Temp\wa3_shared_bin\simple.exe` (`89b32c2e80d`) no longer hit a startup timeout/CPU-guard hang, but failed `12/16` (`4 passed, 12 failed`) because commit `a986745de78` replaced `stdin_read_char()` in `src/app/mcp/main.spl` with C-runtime-only `rt_stdin_read_line_text()` / `rt_stdin_read_chars_text(n)`, which the Rust seed interpreter (`bin/simple_mcp_server.cmd` fallback) does not register (`error: semantic: unknown extern function: rt_stdin_read_line_text`).
+3. Added `src/app/mcp/main_stdio_fallback.spl` and wired `mcp_needs_stdin_fallback()` (`rt_is_interpreter_runtime() or rt_is_jit_runtime()`) into `src/app/mcp/main.spl`: native binaries continue to use linear `rt_stdin_read_line_text()` / `rt_stdin_read_chars_text(count)`, while interpreter/JIT fallback execution reads via `rt_stdin_read_byte()` + `bytes_to_text_checked`.
+4. Post-edit verification (`SIMPLE_LIB=C:\dev\wt\bf-5-app-mcp-cli\src`, `wa3_shared_bin\simple.exe --mode=interpreter`):
+   - `test/01_unit/app/mcp/mcp_stdio_fallback_spec.spl`: `3/3` passed (`outcome=OK`)
+   - `test/01_unit/app/mcp/mcp_stdio_linear_framing_spec.spl`: `5/5` passed (`outcome=OK`)
+   - `test/02_integration/app/mcp/mcp_stdio_integration_spec.spl`: `16/16` passed, `0` failed (`outcome=OK`)
+   - Note: Linux `kill_simple_monitor` CPU-guard re-check was not executed on this Windows host.

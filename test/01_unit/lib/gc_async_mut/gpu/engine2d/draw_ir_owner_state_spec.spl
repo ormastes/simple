@@ -1,0 +1,93 @@
+# @tag: unit, engine2d, draw_ir, regression
+# Bug: engine2d_draw_ir_free_function_state_visibility_2026-06-05
+use std.spec
+use std.common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU, DrawIrBatch, DrawIrCommand,
+    draw_ir_batch, draw_ir_composition, draw_ir_embedding_config, draw_ir_rect
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    Engine2dResolvedDrawIrImage,
+    engine2d_draw_ir_adv_batch_with_images,
+    engine2d_draw_ir_adv_batch_owner_with_images,
+    engine2d_draw_ir_adv_composition_owner_with_images,
+    engine2d_draw_ir_render_damaged
+}
+
+val OWNER_BG: u32 = 0xff000000u32
+val OWNER_RED: u32 = 0xffff0000u32
+val OWNER_GREEN: u32 = 0xff00ff00u32
+
+fn owner_state_batch(id: text, commands: [DrawIrCommand]) -> DrawIrBatch:
+    draw_ir_batch(id, DRAW_IR_BACKEND_CPU,
+        draw_ir_embedding_config("", "root", 0, 0, 4, 1, 0, 1000, false),
+        commands)
+
+describe "p2_p3_bug_reproduction":
+    it "returns the rendered batch owner and continues from its state":
+        step("Reproduce the exact failure")
+        var engine = Engine2D.create_with_backend(4, 1, "cpu")
+        engine.clear(OWNER_BG)
+        var images: [Engine2dResolvedDrawIrImage] = []
+        val first = engine2d_draw_ir_adv_batch_owner_with_images(
+            engine, owner_state_batch("first", [draw_ir_rect("left", 0, 0, 1, 1, OWNER_RED)]),
+            false, images)
+        engine = first.engine
+        expect(first.result.pixels).to_equal([OWNER_RED, OWNER_BG, OWNER_BG, OWNER_BG])
+        expect(engine.read_pixels()).to_equal(first.result.pixels)
+        expect(first.result.rendered_command_count).to_equal(1)
+        expect(first.result.skipped_command_count).to_equal(0)
+
+        step("Exercise the repaired owner")
+        val second = engine2d_draw_ir_adv_batch_owner_with_images(
+            engine, owner_state_batch("second", [draw_ir_rect("right", 3, 0, 1, 1, OWNER_GREEN)]),
+            false, images)
+        engine = second.engine
+        expect(second.result.pixels).to_equal([OWNER_RED, OWNER_BG, OWNER_BG, OWNER_GREEN])
+        expect(engine.read_pixels()).to_equal(second.result.pixels)
+        expect(first.result.pixels).to_equal([OWNER_RED, OWNER_BG, OWNER_BG, OWNER_BG])
+        engine.shutdown()
+
+describe "p2_p3_adjacent_regression":
+    it "seeds retained damage from the actual composition owner":
+        step("Exercise the repaired owner")
+        var engine = Engine2D.create_with_backend(4, 1, "cpu")
+        engine.clear(OWNER_BG)
+        var images: [Engine2dResolvedDrawIrImage] = []
+        val composition = draw_ir_composition("owner", "owner", DRAW_IR_BACKEND_CPU, [
+            owner_state_batch("left", [draw_ir_rect("red", 0, 0, 1, 1, OWNER_RED)]),
+            owner_state_batch("right", [draw_ir_rect("green", 3, 0, 1, 1, OWNER_GREEN)])])
+        val rendered = engine2d_draw_ir_adv_composition_owner_with_images(engine, composition, false, images)
+        engine = rendered.engine
+        expect(rendered.result.rendered_command_count).to_equal(2)
+        expect(rendered.result.skipped_command_count).to_equal(0)
+        expect(rendered.result.pixels).to_equal([OWNER_RED, OWNER_BG, OWNER_BG, OWNER_GREEN])
+        expect(engine.read_pixels()).to_equal(rendered.result.pixels)
+
+        step("Reject the adjacent regression")
+        val damaged = engine2d_draw_ir_render_damaged(
+            engine, [draw_ir_rect("patch", 0, 0, 4, 1, OWNER_GREEN)], [1, 0, 1, 1], true)
+        engine = damaged.engine
+        expect(damaged.readback.pixels).to_equal([OWNER_RED, OWNER_GREEN, OWNER_BG, OWNER_GREEN])
+        expect(engine.read_pixels()).to_equal(damaged.readback.pixels)
+        engine.shutdown()
+
+    it "preserves legacy receipt readback and empty composition state":
+        step("Reject the adjacent regression")
+        var engine = Engine2D.create_with_backend(4, 1, "cpu")
+        engine.clear(OWNER_BG)
+        var images: [Engine2dResolvedDrawIrImage] = []
+        val receipt = engine2d_draw_ir_adv_batch_with_images(
+            engine, owner_state_batch("legacy", [draw_ir_rect("red", 0, 0, 4, 1, OWNER_RED)]),
+            false, images)
+        expect(receipt.pixels).to_equal([OWNER_RED, OWNER_RED, OWNER_RED, OWNER_RED])
+        var batches: [DrawIrBatch] = []
+        val empty = draw_ir_composition("empty", "empty", DRAW_IR_BACKEND_CPU, batches)
+        engine.clear(OWNER_GREEN)
+        val owned = engine2d_draw_ir_adv_composition_owner_with_images(engine, empty, false, images)
+        engine = owned.engine
+        expect(owned.result.rendered_command_count).to_equal(0)
+        expect(owned.result.skipped_command_count).to_equal(0)
+        expect(owned.result.pixels).to_equal([OWNER_GREEN, OWNER_GREEN, OWNER_GREEN, OWNER_GREEN])
+        expect(engine.read_pixels()).to_equal(owned.result.pixels)
+        engine.shutdown()

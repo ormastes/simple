@@ -1,0 +1,36 @@
+#!/bin/sh
+# Execute a prebuilt test/fixtures/test_runner_source_routes/main.spl.
+# Keep this gate outside the test runner whose startup depends on process capture.
+set -eu
+if [ "$#" -ne 2 ] || [ "$1" != --binary ] || [ ! -x "$2" ]; then
+    echo "usage: $0 --binary <native-source-routes-regression>" >&2
+    exit 2
+fi
+binary=$2
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-source-routes.XXXXXX")
+trap '[ "${SIMPLE_NATIVE_ROUTES_KEEP_WORK:-0}" = 1 ] || rm -rf "$work"' EXIT HUP INT TERM
+export TMPDIR=$work
+export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=1048576
+export SIMPLE_PROCESS_TREE_RSS_RECEIPT=$work/process.rss.env
+set +e
+sh "$repo/scripts/bootstrap/run-process-group-timeout.shs" 30 2 "$binary" > "$work/stdout" 2> "$work/stderr"
+status=$?
+set -e
+cat "$work/stdout"
+if [ "$status" -ne 0 ]; then
+    cat "$work/stderr" >&2
+    echo "FAIL native source routes: executable exit=$status; evidence=$work" >&2
+    exit 1
+fi
+for case_name in plain-real-example-body empty-comment-no-example declarations-not-snippets pass-only-no-example spec-file-contract-preserved bdd-source-not-rewrapped mixed-bdd-doc-keeps-spec all-bdd-root-forms-not-rewrapped comment-string-not-bdd comment-prefix-variants-not-bdd docstring-not-bdd bdd-keyword-prefix-identifiers-not-bdd bdd-keyword-prefix-body-routed-as-snippet bdd-keyword-prefix-body-preserved; do
+    if ! grep -Fx "PASS $case_name" "$work/stdout" >/dev/null; then
+        echo "FAIL native source routes: missing case $case_name; evidence=$work" >&2
+        exit 1
+    fi
+done
+if grep '^FAIL ' "$work/stdout" >/dev/null || ! grep -Fx 'SOURCE_ROUTE_REGRESSION failures=0' "$work/stdout" >/dev/null; then
+    echo "FAIL native source routes: invalid regression summary; evidence=$work" >&2
+    exit 1
+fi
+echo "PASS native source routes: 14 cases; binary=$binary; evidence=$work"

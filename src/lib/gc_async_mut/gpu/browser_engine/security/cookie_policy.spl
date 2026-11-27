@@ -48,7 +48,7 @@ pub fn canonical_domain(raw: text) -> text:
     """Lowercase a cookie Domain attribute and drop the RFC 6265 leading dot."""
     var domain = raw.trim().to_lower()
     while domain.starts_with("."):
-        domain = domain.slice(1, domain.len())
+        domain = domain.slice(1, domain.byte_len())
     if domain.ends_with("."):
         return ""
     return domain
@@ -83,7 +83,7 @@ pub fn path_matches(cookie_path: text, request_path: text) -> bool:
         return false
     if cookie_path.ends_with("/"):
         return true
-    return path.slice(cookie_path.len(), cookie_path.len() + 1) == "/"
+    return path.slice(cookie_path.byte_len(), cookie_path.byte_len() + 1) == "/"
 
 pub fn is_expired(cookie: Cookie, now: i64) -> bool:
     """`expires_at == 0` is a session cookie and never expires on the clock."""
@@ -106,7 +106,8 @@ fn _cookie_name_is_ascii_token(name: text) -> bool:
     if name.len() == 0:
         return false
     for ch in name.chars():
-        val code = ch.code_point()
+        val ch_text: text = ch
+        val code = ch_text.ord()
         val alpha = (code >= 65 and code <= 90) or (
             code >= 97 and code <= 122
         )
@@ -257,7 +258,7 @@ fn _digits_to_i64(raw: text) -> i64?:
     """Parse an optionally-signed decimal, rejecting malformed input."""
     val body = raw.trim()
     if body.len() == 0:
-        return nil
+        return None
     var negative = false
     var start = 0
     if body.starts_with("-"):
@@ -265,14 +266,15 @@ fn _digits_to_i64(raw: text) -> i64?:
         start = 1
     elif body.starts_with("+"):
         start = 1
-    if start >= body.len() or body.len() - start > 18:
-        return nil
+    if start >= body.byte_len() or body.byte_len() - start > 18:
+        return None
     var acc = 0
     var i = start
-    while i < body.len():
-        val code = body.char_code_at(i)
+    val body_blen = body.byte_len()
+    while i < body_blen:
+        val code = body.byte_at(i)
         if code < 48 or code > 57:
-            return nil
+            return None
         acc = acc * 10 + (code - 48)
         i = i + 1
     if negative:
@@ -286,7 +288,7 @@ pub fn apply_max_age(cookie: Cookie, header: text, now: i64) -> Cookie:
     so `is_expired` and `validate_set_cookie` both see it. Malformed attributes
     are ignored.
     """
-    var max_age: i64? = nil
+    var max_age: i64? = None
     var expires_at = cookie.expires_at
     val parts = header.split(";")
     var i = 0
@@ -295,10 +297,10 @@ pub fn apply_max_age(cookie: Cookie, header: text, now: i64) -> Cookie:
         i = i + 1
         val lowered = part.to_lower()
         if lowered.starts_with("max-age="):
-            if val Some(seconds) = _digits_to_i64(part.slice(8, part.len())):
+            if val Some(seconds) = _digits_to_i64(part.slice(8, part.byte_len())):
                 max_age = Some(seconds)
         elif lowered.starts_with("expires="):
-            if val Some(expiry) = _parse_rfc1123(part.slice(8, part.len())):
+            if val Some(expiry) = _parse_rfc1123(part.slice(8, part.byte_len())):
                 # Zero is reserved for session cookies; epoch-or-earlier dates
                 # must remain an explicit expired value.
                 expires_at = if expiry <= 0: -1 else: expiry
@@ -351,22 +353,22 @@ fn _valid_weekday(raw: text) -> bool:
 fn _parse_rfc1123(raw: text) -> i64?:
     val fields = raw.trim().split(" ")
     if fields.len() != 6 or not _valid_weekday(fields[0]) or fields[5].to_lower() != "gmt":
-        return nil
+        return None
     val month = _month_number(fields[2])
     val clock = fields[4].split(":")
     if month == 0 or clock.len() != 3:
-        return nil
+        return None
     val day = _digits_to_i64(fields[1])
     val year = _digits_to_i64(fields[3])
     val hour = _digits_to_i64(clock[0])
     val minute = _digits_to_i64(clock[1])
     val second = _digits_to_i64(clock[2])
     if not day.? or not year.? or not hour.? or not minute.? or not second.?:
-        return nil
+        return None
     if (year! < 1601 or year! > 9999 or day! < 1 or
         day! > days_in_month(year!, month) or hour! < 0 or hour! > 23 or
         minute! < 0 or minute! > 59 or second! < 0 or second! > 59):
-        return nil
+        return None
     return Some(timestamp_from_components(
         year!, month, day!, hour!, minute!, second!, 0
     ) / 1000000)

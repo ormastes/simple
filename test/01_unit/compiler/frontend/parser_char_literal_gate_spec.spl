@@ -1,0 +1,60 @@
+"""
+## Purpose and audience
+Purpose: Pin activation step 1 of the ADR-005 char-literal switch: the
+pure-Simple parser accepts CharLit (token kind 9) as a char literal.
+Audience: compiler engineers staging the `'x'` char-literal switch.
+## Operator workflow
+Run with the test runner. Gate ON (`SIMPLE_CHAR_LITERAL_LEXER=1`) lexes `'x'`
+as CharLit; the parser must build the same no-interpolation string-literal node
+the legacy single-quoted form builds (a char is a one-scalar text today), so
+typing and evaluation are unchanged. Seed twin:
+src/compiler_rust/parser/src/char_literal_parse_test.rs.
+## Compatibility and limitations
+Gate OFF stays the default; see
+doc/08_tracking/bug/char_literal_lexer_switch_staged_2026-11-03.md.
+"""
+# @req: REQ-COMPILER-FRONTEND-001
+
+use std.spec
+use std.nogc_sync_mut.io.env_ops.{env_set}
+use compiler.core.parser.{parser_init, parser_get_errors, parse_module_silent}
+use compiler.core.parser_expr.{parse_expr}
+use compiler.core.ast.{expr_get_tag, expr_get_str, EXPR_STRING_LIT}
+
+fn char_expr(source: text, on: bool) -> [text]:
+    env_set("SIMPLE_CHAR_LITERAL_LEXER", if on: "1" else: "0")
+    parser_init(source)
+    val idx = parse_expr()
+    val errs = parser_get_errors().len()
+    env_set("SIMPLE_CHAR_LITERAL_LEXER", "0")
+    ["{expr_get_tag(idx) == EXPR_STRING_LIT}", expr_get_str(idx), "{errs}"]
+
+fn module_errors(source: text, on: bool) -> i64:
+    env_set("SIMPLE_CHAR_LITERAL_LEXER", if on: "1" else: "0")
+    parse_module_silent(source, "char_gate_probe.spl")
+    val n = parser_get_errors().len()
+    env_set("SIMPLE_CHAR_LITERAL_LEXER", "0")
+    n
+
+describe "pure-Simple parser accepts CharLit (gate ON)":
+    it "parses a char literal as a raw string-literal node":
+        step("'x' -> STRING_LIT, value x, no errors")
+        expect(char_expr("'x'", true)).to_equal(["true", "x", "0"])
+
+    it "parses escapes to the decoded scalar":
+        expect(char_expr("'\\n'", true)).to_equal(["true", "\n", "0"])
+        expect(char_expr("'\\''", true)).to_equal(["true", "'", "0"])
+        step("a brace char stays literal text, never an interpolation")
+        expect(char_expr("'{'", true)).to_equal(["true", "{", "0"])
+
+    it "builds the same node as the legacy gate-OFF form":
+        expect(char_expr("'q'", true)).to_equal(char_expr("'q'", false))
+
+    it "accepts char literals in match patterns and comparisons":
+        val src = "fn f(c: char) -> i64:\n    match c:\n        case 'a': 1\n        case '\\t': 2\n        case _: 0\n\nfn g(s: text) -> bool:\n    s[0] == 'q'\n"
+        expect(module_errors(src, true)).to_equal(0)
+
+    it "really runs with the gate on (non-vacuity control)":
+        step("a multi-scalar 'ab' is a lex error only when the gate is ON")
+        expect(module_errors("val s = 'ab'\n", true) > 0).to_equal(true)
+        expect(module_errors("val s = 'ab'\n", false)).to_equal(0)

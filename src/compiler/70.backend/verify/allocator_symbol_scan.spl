@@ -74,8 +74,16 @@ fn _forbidden_set() -> {text: bool}:
         set[name] = true
     set
 
+fn _strip_coff_imp_prefix(name: text) -> text:
+    """Windows COFF DLL imports (`nm -u`) carry an `__imp_` prefix
+    (e.g. `__imp_malloc` on x64/ARM64 or `__imp__malloc` on 32-bit x86).
+    Strip optional `__imp_` before stripping leading `_` and `@` suffix."""
+    if name.starts_with("__imp_"):
+        return name[6:name.len()]
+    name
+
 fn _strip_prefix_underscore(name: text) -> text:
-    """Mach-O `nm` prefixes every C symbol with a leading `_`
+    """Mach-O and 32-bit x86 COFF `nm` prefix C symbols with a leading `_`
     (`_malloc` for `malloc`). Strip exactly one, if present, before matching
     -- this is a decoration of the object format, not part of the symbol's
     logical name."""
@@ -86,7 +94,8 @@ fn _strip_prefix_underscore(name: text) -> text:
 fn _strip_version_suffix(name: text) -> text:
     """A dynamic symbol table (`nm -D` on a linked binary, as opposed to `-u`
     on a relocatable `.o`) can carry a glibc version suffix, e.g.
-    `malloc@GLIBC_2.2.5`. Strip everything from the first `@` on, if present."""
+    `malloc@GLIBC_2.2.5`, or a Win32 stdcall `@N` suffix. Strip everything
+    from the first `@` on, if present."""
     var idx = -1
     var i = 0
     while i < name.len():
@@ -100,13 +109,14 @@ fn _strip_version_suffix(name: text) -> text:
 
 pub fn normalize_object_symbol_name(raw_name: text) -> text:
     """Canonical form of a raw `nm`-emitted symbol name for exact-match
-    classification: strip a Mach-O leading `_` and any `@GLIBC_...` version
-    suffix. On the Linux ELF `.o` objects this repo actually links (verified
-    against `src/runtime/runtime.o`'s `nm -u` output: plain `malloc`, `free`,
-    `mmap`, no decoration at all), this is a no-op; the stripping exists so
-    the same classifier is correct if fed a decorated name from a different
-    platform or a dynamic symbol table."""
-    _strip_version_suffix(_strip_prefix_underscore(raw_name))
+    classification: strip an optional COFF `__imp_` import prefix, a Mach-O or
+    32-bit x86 COFF leading `_`, and any `@GLIBC_...` / `@N` suffix. On the
+    Linux ELF `.o` objects this repo actually links (verified against
+    `src/runtime/runtime.o`'s `nm -u` output: plain `malloc`, `free`, `mmap`,
+    no decoration at all), this is a no-op; the stripping exists so the same
+    classifier is correct if fed a decorated name from a different platform or
+    a dynamic symbol table."""
+    _strip_version_suffix(_strip_prefix_underscore(_strip_coff_imp_prefix(raw_name)))
 
 pub fn classify_forbidden_allocator_symbols(symbol_names: [text]) -> [text]:
     """Exact-match classifier: given a flat list of external symbol names (as

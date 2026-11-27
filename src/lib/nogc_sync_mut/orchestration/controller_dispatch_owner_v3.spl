@@ -1,0 +1,1021 @@
+# Local Controller client (Windows or Linux native origin): one actual Controller root, protected reader
+# and current one-use exchange. No Host writer, second journal or retry permit.
+use std.nogc_sync_mut.orchestration.controller_local_root_v3.*
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v3.*
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.{ControllerDispatchContextV1, controller_dispatch_grant_clock_v1}
+use std.nogc_sync_mut.orchestration.controller_dispatch_authority_v3.controller_dispatch_authorize_v3
+use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v2.{controller_dispatch_validation_match_v2, controller_dispatch_response_v2}
+use std.nogc_sync_mut.orchestration.controller_dispatch_objects_v2.*
+use std.nogc_sync_mut.orchestration.workload_store_v1.*
+use std.nogc_sync_mut.orchestration.assignment_commit_v1.ControllerAssignmentContextV1
+use std.nogc_sync_mut.orchestration.desired_input_objects_v1.controller_desired_operation_id_v1
+use std.nogc_sync_mut.orchestration.agent_preflight_objects_v1.agent_preflight_for_workload_v1
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.nogc_sync_mut.io.host_service_ready_reader_v1.*
+use std.nogc_sync_mut.io.host_service_auth_exchange_v6.*
+use std.common.task_runner.distributed_operation_journal_v2.*
+use std.common.contracts.orchestration.controller_dispatch_request_v2.*
+use std.common.contracts.orchestration.host_controller_status_v3.*
+use std.common.contracts.orchestration.host_service_operation_v6.*
+use std.common.contracts.orchestration.host_service_operation_reply_v6.*
+use std.common.contracts.orchestration.host_control_operation_v6.{HOST_AGENT_PANE_SUBS_V6, HOST_AGENT_PANE_TARGET_SUB_V6,
+    host_control_sub_decode_v6}
+use std.common.contracts.orchestration.host_prepare_request_v1.*
+use std.common.contracts.orchestration.host_prepare_response_v1.host_prepare_response_decode_v1
+use std.common.contracts.orchestration.host_execute_request_v2.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.host_reservation_encode_intent_v1
+use std.common.contracts.orchestration.assignment_v1.controller_assignment_bytes_v1
+use std.common.contracts.orchestration.workload_fence_v1.controller_workload_create_v1
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.crypto.sha256.sha256_text
+
+# Registered handles contain no root, reader or socket. An unregistered refusal
+# arm is cleanup-only and must dedupe against canonical roots before any close.
+pub class ControllerDispatchOwnerV3:
+    identity: i64 = 0
+    revision: i64 = 0
+    unregistered: Option<ControllerDispatchUnregisteredV3> = None
+
+# Refusal custody only. It can NEVER register, launch, read setup or exchange.
+class ControllerDispatchUnregisteredV3:
+    root: ControllerLocalRootV3
+    error: text
+
+impl ControllerDispatchOwnerV3:
+    # Guarded DATA equality only, not proof of current revision or admission.
+    pub fn same_handle_v3(other: ControllerDispatchOwnerV3) -> Result<bool, text>:
+        val admitted = dispatch_origin_v3()?
+        Ok(self.unregistered.is_none() and other.unregistered.is_none() and self.identity > 0 and
+            self.revision > 0 and self.identity == other.identity and self.revision == other.revision)
+
+pub struct ControllerDispatchOwnedTurnV3:
+    owner: Option<ControllerDispatchOwnerV3>
+    completed: bool
+    cleanup_pending: bool
+    outcome: text
+    response: text
+    error: text
+    root_cleanup: Option<ControllerLocalRootV3> = None
+    phase: text = ""
+
+class ControllerDispatchStateV3:
+    var root: Option<ControllerLocalRootV3>
+    var reader: Option<HostServiceReadyReaderV1> = None
+    var exchange: Option<HostServiceAuthExchangeV6> = None
+    var packet: Option<ControllerDispatchRequestV2> = None
+    uid: text
+    var mode: text
+    var request: Option<HostServiceOperationRequestV6> = None
+    var scope_digest: text = ""
+    var execute_source: text = ""
+    var execute_digest: text = ""
+    var phase: text = "initial"
+    var response: text = ""
+    var outcome: text = "not-sent"
+    var error: text = ""
+    var remote_started: bool = false
+    # The live pane carrier retains only its in-memory request and reply.
+    var live_pane_exchange: bool = false
+    var pane_target_exchange: bool = false
+    # milestone_0030 C3: the Host operation id of a REMOTE-mode run (no packet is bound in that mode).
+    var remote_op: text = ""
+
+struct ControllerDispatchStateTurnV3:
+    owner: Option<ControllerDispatchStateV3>
+    completed: bool
+    cleanup_pending: bool
+    outcome: text
+    response: text
+    error: text
+
+# Pure cleanup DATA projection, never an exchange proof or dispatch permit.
+pub struct ControllerDispatchCloseDispositionV3:
+    outcome: text
+    error: text
+
+pub fn controller_dispatch_close_disposition_v3(prior_outcome: text, exchange_outcome: text, exchange_error: text,
+        exchange_completed: bool, exchange_pending: bool) -> ControllerDispatchCloseDispositionV3:
+    var outcome = prior_outcome
+    if not exchange_completed and not exchange_pending:
+        if exchange_outcome == "unknown": outcome = "unknown"
+        return ControllerDispatchCloseDispositionV3(outcome, "dispatch-exchange-close-unconfirmed")
+    if exchange_outcome == "unknown": outcome = "unknown"
+    if exchange_error != "": return ControllerDispatchCloseDispositionV3(outcome, exchange_error)
+    if exchange_outcome == "unknown": return ControllerDispatchCloseDispositionV3(outcome, "dispatch-exchange-outcome-unknown")
+    ControllerDispatchCloseDispositionV3(outcome, "")
+
+fn dispatch_turn_v3(owner: ControllerDispatchStateV3) -> ControllerDispatchStateTurnV3:
+    val done = owner.root.is_none() and owner.reader.is_none() and owner.exchange.is_none()
+    ControllerDispatchStateTurnV3(if done: nil else: Some(owner), done, owner.phase == "cleanup" and not done,
+        owner.outcome, owner.response, owner.error)
+
+fn dispatch_fail_v3(original: ControllerDispatchStateV3, reason: text) -> ControllerDispatchStateV3:
+    var owner = original
+    if owner.error == "": owner.error = reason
+    if owner.remote_started: owner.outcome = "unknown"
+    owner.phase = "cleanup"
+    owner
+
+# Pure association, not native authority. V3 status cannot use the V2 wire parser.
+pub fn controller_dispatch_host_status_match_v3(context: ControllerDispatchContextV1,
+        packet: ControllerDispatchRequestV2, status: HostControllerStatusV3) -> Result<bool, text>:
+    val canonical = host_controller_status_encode_v3(status)?
+    val plan = packet.execution.plan
+    val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, native_machine_id: plan.native_machine_id,
+        service_scope_id: plan.service_scope_id, boot_id: plan.boot_id, provider_generation: plan.provider_generation,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+    if (plan.backend != "windows-docker-process" or status.backend != "windows-docker-process" or
+            not status.ready or status.scope != scope or status.authority_id != context.config.host_authority_id or
+            status.authority_id != packet.binding.host_intent.fence.authority_id or
+            status.provider_identity_digest != context.config.provider_identity_digest or
+            container_scope_fence_id_v2(status.scope)? != packet.binding.host_intent.fence.boot_id):
+        return Err("dispatch-host-continuity-mismatch")
+    Ok(true)
+
+# milestone_0046: `require_ready` is false ONLY for host-action mode: the controller-signed Host actions (the abandons and
+# the retention release) exist for a Host whose startup quarantine left continuity unproven (status.ready false). Every
+# installed-identity comparison still applies.
+fn dispatch_service_status_v3(config: ControllerDispatchConfigV3, status: HostControllerStatusV3, require_ready: bool) -> Result<bool, text>:
+    val canonical = host_controller_status_encode_v3(status)?
+    val binding = config.host_binding
+    val digest = controller_dispatch_host_enrollment_digest_v3(config)?
+    if ((require_ready and not status.ready) or status.backend != binding.backend or
+            status.enrollment_digest != digest or status.authority_id != "host-" + digest or
+            status.provider_identity_digest != binding.provider_identity_digest or
+            status.scope.physical_host_id != binding.physical_host_id or
+            status.scope.native_machine_id != binding.native_machine_id or
+            status.scope.service_scope_id != binding.service_scope_id):
+        return Err("dispatch-installed-host-status-mismatch")
+    Ok(true)
+
+pub fn controller_dispatch_execute_archive_key_v3(packet: ControllerDispatchRequestV2) -> Result<text, text>:
+    Ok("controller-dispatch-execute-v3/" + sha256_text(controller_assignment_bytes_v1(packet.binding)?) + ".sdn")
+
+# Original signed execute bytes remain immutable even when later packet proofs
+# are refreshed. These comparisons reuse canonical existing inner codecs.
+pub fn controller_dispatch_original_execute_match_v3(packet: ControllerDispatchRequestV2, source: text) -> Result<text, text>:
+    val execute = host_execute_request_decode_v2(source)?
+    if (host_reservation_encode_intent_v1(execute.intent)? != host_reservation_encode_intent_v1(packet.binding.host_intent)? or
+            distributed_encode_operation_v2(execute.operation)? != distributed_encode_operation_v2(packet.binding.host_operation)? or
+            container_execution_request_encode_v2(execute.execution)? != container_execution_request_encode_v2(packet.execution)?):
+        return Err("dispatch-original-execute-binding")
+    host_service_operation_request_digest_v6(execute.operation.id, source)
+
+fn dispatch_guard_v3(store: ControllerWorkloadStoreV1, packet: ControllerDispatchRequestV2) -> Result<bool, text>:
+    val desired = distributed_operation_journal_lookup_v2(store.journal,
+        controller_desired_operation_id_v1(store.controller_id, packet.binding.workload_uid)?)
+    if desired.is_ok(): return Err("agent-assignment-retained-request-required")
+    if desired.unwrap_err() != "OPERATION_NOT_FOUND": return Err(desired.unwrap_err())
+    val allowed = controller_workload_store_preflight_guard_v1(store, packet.execution.plan)?
+    if (agent_preflight_for_workload_v1(store.journal, store.controller_id, packet.binding.workload_uid)?).is_some():
+        return Err("agent-preflight-authorized-route-required")
+    Ok(true)
+
+fn dispatch_assignment_context_v3(store: ControllerWorkloadStoreV1,
+        context: ControllerDispatchContextV1, uid: text, now: i64) -> Result<ControllerAssignmentContextV1, text>:
+    Ok(ControllerAssignmentContextV1(controller_workload_store_lookup_v1(store, uid)?, context.config.controller_epoch,
+        now, context.policy.snapshot.policy_revision, context.policy.snapshot.revocation_epoch, context.policy.session_generation))
+
+fn dispatch_retain_v3(original: ControllerDispatchStateV3,
+        next: Result<ControllerWorkloadStoreV1, text>) -> ControllerDispatchStateV3:
+    var owner = original
+    if next.is_err(): return dispatch_fail_v3(owner, next.unwrap_err())
+    var root = owner.root.unwrap()
+    val accepted = root.retain_v3(next.unwrap())
+    owner.root = Some(root)
+    if accepted.is_err(): return dispatch_fail_v3(owner, accepted.unwrap_err())
+    owner
+
+fn dispatch_archive_v3(owner: ControllerDispatchStateV3, source: text) -> Result<text, text>:
+    controller_dispatch_message_retain_owned_v3((owner.root.unwrap().workload_v3()?).journal, source)
+
+fn dispatch_request_v3(owner: ControllerDispatchStateV3, action: text, payload: text) -> Result<HostServiceOperationRequestV6, text>:
+    val incarnation = host_service_ready_reader_incarnation_v1(owner.reader.unwrap())?
+    if action == "status": return Ok(HostServiceOperationRequestV6(action, incarnation, "", "", "", ""))
+    if action == "service-stop": return Ok(HostServiceOperationRequestV6(action, incarnation, "", owner.scope_digest, "", ""))
+    val op = if owner.packet.is_some(): owner.packet.unwrap().binding.host_operation.id else: owner.remote_op
+    val digest = if ["inspect", "progress", "cancel"].contains(action): owner.execute_digest
+        else: host_service_operation_request_digest_v6(op, payload)?
+    Ok(HostServiceOperationRequestV6(action, incarnation, op, owner.scope_digest, digest, payload))
+
+fn dispatch_send_v3(original: ControllerDispatchStateV3, action: text, payload: text) -> ControllerDispatchStateV3:
+    var owner = original
+    val request = dispatch_request_v3(owner, action, payload)
+    if request.is_err(): return dispatch_fail_v3(owner, request.unwrap_err())
+    val source = host_service_operation_encode_v6(request.unwrap())
+    if source.is_err(): return dispatch_fail_v3(owner, source.unwrap_err())
+    if not owner.live_pane_exchange:
+        val archived = dispatch_archive_v3(owner, source.unwrap())
+        if archived.is_err(): return dispatch_fail_v3(owner, archived.unwrap_err())
+    val turn = host_service_auth_exchange_begin_v6(owner.reader.unwrap(), request.unwrap())
+    owner.exchange = turn.owner
+    owner.request = Some(request.unwrap())
+    owner.phase = action
+    if turn.error != "" or turn.owner.is_none():
+        return dispatch_fail_v3(owner, if turn.error != "": turn.error else: "dispatch-exchange-owner-required")
+    owner
+
+fn dispatch_reader_v3(original: ControllerDispatchStateV3) -> ControllerDispatchStateV3:
+    var owner = original
+    val config = owner.root.unwrap().config_v3()
+    if config.is_err(): return dispatch_fail_v3(owner, config.unwrap_err())
+    val installed = config.unwrap()
+    val authority = controller_dispatch_host_ready_authority_v3(installed)
+    if authority.is_err(): return dispatch_fail_v3(owner, authority.unwrap_err())
+    val opened = host_service_ready_reader_open_v1(installed.setup_credential_path, installed.setup_credential_digest,
+        installed.host_deployment_root, authority.unwrap())
+    owner.reader = opened.owner
+    if opened.error != "" or not opened.ready or opened.owner.is_none():
+        return dispatch_fail_v3(owner, if opened.error != "": opened.error else: "dispatch-reader-not-ready")
+    dispatch_send_v3(owner, "status", "")
+
+fn dispatch_load_execute_v3(original: ControllerDispatchStateV3) -> ControllerDispatchStateV3:
+    var owner = original
+    val packet = owner.packet.unwrap()
+    val store = owner.root.unwrap().workload_v3()
+    if store.is_err(): return dispatch_fail_v3(owner, store.unwrap_err())
+    val key = controller_dispatch_execute_archive_key_v3(packet)
+    if key.is_err(): return dispatch_fail_v3(owner, key.unwrap_err())
+    val source = distributed_operation_journal_read_required_v3(store.unwrap().journal, key.unwrap(), 2097152)
+    if source.is_err():
+        owner.remote_started = true
+        return dispatch_fail_v3(owner, "dispatch-original-execute-archive-required:" + source.unwrap_err())
+    val digest = controller_dispatch_original_execute_match_v3(packet, source.unwrap())
+    if digest.is_err(): return dispatch_fail_v3(owner, digest.unwrap_err())
+    owner.execute_source = source.unwrap()
+    owner.execute_digest = digest.unwrap()
+    owner.remote_started = true
+    owner.outcome = "unknown"
+    owner
+
+fn dispatch_state_begin_v3(root: ControllerLocalRootV3, uid: text,
+        packet: ControllerDispatchRequestV2, resume: bool = false) -> ControllerDispatchStateTurnV3:
+    var owner = ControllerDispatchStateV3(root: Some(root), uid: uid, mode: "dispatch", packet: Some(packet))
+    if not builder_identifier_valid_v1(uid) or packet.binding.workload_uid != uid:
+        return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-request-uid-mismatch"))
+    val context = root.current_v3()
+    if context.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, context.unwrap_err()))
+    val now = controller_dispatch_grant_clock_v1()
+    if now.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, now.unwrap_err()))
+    val proofs = controller_dispatch_authorize_v3(context.unwrap(), packet, now.unwrap())
+    if proofs.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, proofs.unwrap_err()))
+    val store = root.workload_v3()
+    if store.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, store.unwrap_err()))
+    val guard = dispatch_guard_v3(store.unwrap(), packet)
+    if guard.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, guard.unwrap_err()))
+    val existing = daemon_operation_exact_v2(store.unwrap().journal, packet.operation)
+    if existing.is_err() and existing.unwrap_err() != "OPERATION_NOT_FOUND":
+        return dispatch_turn_v3(dispatch_fail_v3(owner, existing.unwrap_err()))
+    val key = controller_dispatch_execute_archive_key_v3(packet)
+    if key.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, key.unwrap_err()))
+    val archive = distributed_operation_journal_read_v3(store.unwrap().journal, key.unwrap(), 2097152)
+    if archive.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, archive.unwrap_err()))
+    if resume or archive.unwrap().is_some() or (existing.is_ok() and existing.unwrap().state == "completed"):
+        owner.mode = "inspect"
+        owner = dispatch_load_execute_v3(owner)
+        if owner.error != "": return dispatch_turn_v3(owner)
+    dispatch_turn_v3(dispatch_reader_v3(owner))
+
+fn dispatch_state_control_begin_v3(root: ControllerLocalRootV3, uid: text, action: text) -> ControllerDispatchStateTurnV3:
+    var owner = ControllerDispatchStateV3(root: Some(root), uid: uid, mode: action)
+    if not ["inspect", "progress", "cancel"].contains(action) or not builder_identifier_valid_v1(uid):
+        return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-control-action"))
+    val store = root.workload_v3()
+    if store.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, store.unwrap_err()))
+    val binding = controller_workload_store_assignment_v1(store.unwrap(), uid)
+    if binding.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, binding.unwrap_err()))
+    val bytes = controller_assignment_bytes_v1(binding.unwrap())
+    if bytes.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, bytes.unwrap_err()))
+    val packet = controller_dispatch_packet_load_owned_v3(store.unwrap().journal, sha256_text(bytes.unwrap()))
+    if packet.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, packet.unwrap_err()))
+    if packet.unwrap().binding.controller_id != store.unwrap().controller_id or packet.unwrap().binding.workload_uid != uid:
+        return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-retained-controller-mismatch"))
+    owner.packet = Some(packet.unwrap())
+    val guard = dispatch_guard_v3(store.unwrap(), packet.unwrap())
+    if guard.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, guard.unwrap_err()))
+    val original = daemon_operation_exact_v2(store.unwrap().journal, packet.unwrap().operation)
+    if original.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, original.unwrap_err()))
+    owner = dispatch_load_execute_v3(owner)
+    if owner.error != "": return dispatch_turn_v3(owner)
+    dispatch_turn_v3(dispatch_reader_v3(owner))
+
+fn dispatch_state_inspect_begin_v3(root: ControllerLocalRootV3, uid: text) -> ControllerDispatchStateTurnV3:
+    dispatch_state_control_begin_v3(root, uid, "inspect")
+
+fn dispatch_state_service_begin_v3(root: ControllerLocalRootV3, action: text) -> ControllerDispatchStateTurnV3:
+    val owner = ControllerDispatchStateV3(root: Some(root), uid: "", mode: action)
+    if not ["status", "service-stop"].contains(action): return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-service-action"))
+    dispatch_turn_v3(dispatch_reader_v3(owner))
+
+# milestone_0030 C3: REMOTE mode. One retained reader carries many frames: begin ends in phase "ready" after the
+# installed-binding status check; each send/step cycle ends in "ready" with the reply payload in `response`. No packet is
+# bound and no Windows scope match runs. Cancel/close never resend (dispatch_state_close_v3 is unchanged).
+fn dispatch_state_remote_begin_v3(root: ControllerLocalRootV3, operation_id: text) -> ControllerDispatchStateTurnV3:
+    var owner = ControllerDispatchStateV3(root: Some(root), uid: operation_id, mode: "remote")
+    if not builder_identifier_valid_v1(operation_id): return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-remote-operation-id"))
+    owner.remote_op = operation_id
+    dispatch_turn_v3(dispatch_reader_v3(owner))
+
+# The create-only archive of a remote run's signed execute (published BEFORE the execute is sent, never replaced). Its
+# absence in the root journal is the controller's own proof that no run of this operation id ever sent an execute.
+pub fn controller_dispatch_remote_execute_key_v3(operation_id: text) -> text:
+    "controller-remote-execute-v3/" + sha256_text(operation_id) + ".sdn"
+
+fn dispatch_remote_ready_v3(owner: ControllerDispatchStateV3) -> bool:
+    owner.mode == "remote" and owner.phase == "ready" and owner.exchange.is_none() and owner.root.is_some()
+
+fn dispatch_state_remote_send_v3(original: ControllerDispatchStateV3, action: text,
+        payload: text) -> ControllerDispatchStateTurnV3:
+    var owner = original
+    if owner.mode != "remote" or owner.phase != "ready" or owner.exchange.is_some():
+        return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-remote-not-ready"))
+    if not ["prepare", "execute", "remote-build"].contains(action) or payload == "":
+        return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-remote-action"))
+    owner.response = ""
+    if action == "execute":
+        val store = owner.root.unwrap().workload_v3()
+        if store.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, store.unwrap_err()))
+        val digest = host_service_operation_request_digest_v6(owner.remote_op, payload)
+        if digest.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, digest.unwrap_err()))
+        val key = controller_dispatch_remote_execute_key_v3(owner.remote_op)
+        # Atomic create-only return is the gate. Existing bytes NEVER grant resend, identical or not.
+        val published = distributed_operation_journal_publish_v3(store.unwrap().journal, key, payload)
+        if published.is_err():
+            owner.remote_started = true
+            return dispatch_turn_v3(dispatch_fail_v3(owner, published.unwrap_err()))
+        val readback = distributed_operation_journal_read_required_v3(store.unwrap().journal, key, 2097152)
+        if readback.is_err() or readback.unwrap() != payload:
+            owner.remote_started = true
+            return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-execute-archive-conflict-or-readback"))
+        if not published.unwrap():
+            owner.remote_started = true
+            return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-execute-already-recorded-inspect-required"))
+        owner.execute_source = payload
+        owner.execute_digest = digest.unwrap()
+        owner.remote_started = true
+        owner.outcome = "unknown"
+    dispatch_turn_v3(dispatch_send_v3(owner, action, payload))
+
+# milestone_0046: HOST-ACTION mode, the controller half of the shared control exchange (V6 `host-control`) for
+# controller-signed Host service actions (helper abandon, OPS-01 handoff abandon, retention release) and their read-only
+# inspects. One reader, one run operation id (the signed action's envelope id, the operator's `--abandon-id` for every action)
+# for every frame; its create-only archive makes a re-signed action need a fresh id. Begin ends in phase "ready" after the
+# installed-binding status check WITHOUT the ready requirement (dispatch_service_status_v3). No packet, no workload row.
+fn dispatch_state_host_action_begin_v3(root: ControllerLocalRootV3, operation_id: text) -> ControllerDispatchStateTurnV3:
+    var owner = ControllerDispatchStateV3(root: Some(root), uid: operation_id, mode: "host-action")
+    if not builder_identifier_valid_v1(operation_id): return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-host-action-operation-id"))
+    owner.remote_op = operation_id
+    dispatch_turn_v3(dispatch_reader_v3(owner))
+
+# The create-only archive of a run's signed effect frame (an abandon or a retention release: every sub but the read-only
+# inspects), published BEFORE it is sent. Identical bytes may be resent (the Host accepts the same proof idempotently);
+# different bytes under the same run id are refused.
+pub fn controller_dispatch_host_action_key_v3(operation_id: text) -> text:
+    "controller-host-action-v1/" + sha256_text(operation_id) + ".sdn"
+
+pub fn controller_dispatch_host_effect_key_v3(operation_id: text, sub: text) -> text:
+    if ["agent-attach", "agent-detach"].contains(sub):
+        return "controller-agent-attachment-v1/" + sha256_text(sub + "\n" + operation_id) + ".sdn"
+    if sub == "agent-invoke":
+        return "controller-agent-invoke-v1/" + sha256_text(operation_id) + ".sdn"
+    if sub == HOST_AGENT_PANE_TARGET_SUB_V6:
+        return "controller-agent-pane-target-v1/" + sha256_text(operation_id) + ".sdn"
+    controller_dispatch_host_action_key_v3(operation_id)
+
+fn dispatch_state_host_action_send_v3(original: ControllerDispatchStateV3, payload: text) -> ControllerDispatchStateTurnV3:
+    var owner = original
+    if owner.mode != "host-action" or owner.phase != "ready" or owner.exchange.is_some() or owner.root.is_none():
+        return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-host-action-not-ready"))
+    val sub = host_control_sub_decode_v6(payload)
+    if sub.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, sub.unwrap_err()))
+    owner.response = ""
+    owner.live_pane_exchange = HOST_AGENT_PANE_SUBS_V6.contains(sub.unwrap().sub)
+    owner.pane_target_exchange = sub.unwrap().sub == HOST_AGENT_PANE_TARGET_SUB_V6
+    if owner.live_pane_exchange:
+        # A claim can be consumed, and a read can drain bytes before its reply.
+        # Keep this exchange transient and send it once.
+        owner.remote_started = true
+        owner.outcome = "unknown"
+    elif not sub.unwrap().sub.ends_with("-inspect"):
+        val store = owner.root.unwrap().workload_v3()
+        if store.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, store.unwrap_err()))
+        val key = controller_dispatch_host_effect_key_v3(owner.remote_op, sub.unwrap().sub)
+        val published = distributed_operation_journal_publish_v3(store.unwrap().journal, key, payload)
+        if published.is_err():
+            owner.remote_started = true
+            owner.outcome = "unknown"
+            return dispatch_turn_v3(dispatch_fail_v3(owner, published.unwrap_err()))
+        val readback = distributed_operation_journal_read_required_v3(store.unwrap().journal, key, 2097152)
+        if readback.is_err() or readback.unwrap() != payload:
+            # A re-signed effect is new bytes (fresh expiry): a retry after an unknown outcome needs a new run id.
+            owner.remote_started = true
+            owner.outcome = "unknown"
+            return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-host-action-archive-conflict:action-id-used-retry-with-a-new-id"))
+        owner.remote_started = true
+        owner.outcome = "unknown"
+    dispatch_turn_v3(dispatch_send_v3(owner, "host-control", payload))
+
+# The admit-build-row step (C5) through the root's single journal writer, authority re-verified at the grant clock.
+fn dispatch_state_remote_admit_v3(original: ControllerDispatchStateV3, signed: DistributedSignedGrantV2,
+        approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2, open_record: text) -> ControllerDispatchStateTurnV3:
+    var owner = original
+    if not dispatch_remote_ready_v3(owner): return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-remote-not-ready"))
+    if request.id != owner.remote_op: return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-remote-admit-operation"))
+    val context = owner.root.unwrap().current_v3()
+    if context.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, context.unwrap_err()))
+    val now = controller_dispatch_grant_clock_v1()
+    if now.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, now.unwrap_err()))
+    val store = owner.root.unwrap().workload_v3()
+    if store.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, store.unwrap_err()))
+    owner.response = ""
+    # The returned store is adopted even on an error: a failed second commit leaves the first one published.
+    val admitted = controller_workload_store_admit_remote_build_v1(store.unwrap(),
+        context.unwrap().policy.snapshot, context.unwrap().policy.session_generation, signed, approval, request, open_record,
+        now.unwrap())
+    owner = dispatch_retain_v3(owner, Ok(admitted.store))
+    if owner.error == "" and admitted.error != "": owner = dispatch_fail_v3(owner, admitted.error)
+    dispatch_turn_v3(owner)
+
+# The session accept (and the remote-run settle) runs on THE root journal. The journal the closure ended with is ALWAYS
+# adopted (retain_v3), even when the closure refused after advancing it, so the root never keeps a stale writer. A closure
+# refusal does not kill the link: it is handed to the caller in the response (`edit-refused:<code>`, success is
+# `edit-ok:<result>`), which is what lets the settle run after a refused accept. Only a journal the root cannot retain
+# (wrong writer or lease) fails the run, quarantines the root and leaves cleanup.
+val CONTROLLER_DISPATCH_EDIT_OK_V3 = "edit-ok:"
+val CONTROLLER_DISPATCH_EDIT_REFUSED_V3 = "edit-refused:"
+
+fn dispatch_state_remote_edit_v3(original: ControllerDispatchStateV3,
+        edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> ControllerDispatchStateTurnV3:
+    var owner = original
+    if not dispatch_remote_ready_v3(owner): return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-remote-not-ready"))
+    val store = owner.root.unwrap().workload_v3()
+    if store.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, store.unwrap_err()))
+    val edited = controller_workload_store_edit_journal_v1(store.unwrap(), edit)
+    owner = dispatch_retain_v3(owner, Ok(edited.store))
+    if owner.error == "":
+        owner.response = if edited.error == "": CONTROLLER_DISPATCH_EDIT_OK_V3 + edited.result else: CONTROLLER_DISPATCH_EDIT_REFUSED_V3 + edited.error
+    dispatch_turn_v3(owner)
+
+# milestone_0043 (opus re-review P1-1): the SETTLE of an admitted remote-run row after ANY failure. A failed send (Host
+# refusal of prepare/execute, transport error, a refused archive) leaves the owner in `cleanup`, where the ready-only edit
+# above is refused, so the row would stay `executing` forever. The settle gate is phase-independent; it needs only the
+# remote owner's root. Root health stays the root's own gate: workload_v3() refuses a closing or quarantined root and
+# changed installed bytes (a policy change mid-run), so those refuse the settle honestly, never bypassed.
+fn dispatch_remote_settle_gate_v3(owner: ControllerDispatchStateV3) -> text:
+    if owner.mode != "remote": return "dispatch-remote-settle-mode"
+    if owner.root.is_none(): return "dispatch-remote-settle-root"
+    if owner.remote_op == "": return "dispatch-remote-settle-operation"
+    ""
+
+# A still-pending exchange (an exchange that outlived the command's per-wait bound) is ABANDONED first: closed, never
+# resent, its outcome folded into the owner exactly as the local close does; an unconfirmed abandon refuses the settle.
+# Then the edit runs through the root's single writer and the journal it ended with is always retained, like the ready
+# edit. A completed edit never changes the phase (a ready owner stays ready, a failed one stays in cleanup); a refused
+# root read or retain fails a ready owner like any other root failure, and a failed owner keeps its first error. The
+# settle verdict is the response (`edit-ok:` / `edit-refused:`, "" when no edit ran).
+fn dispatch_state_remote_settle_v3(original: ControllerDispatchStateV3,
+        edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> ControllerDispatchStateTurnV3:
+    var owner = original
+    owner.response = ""
+    val gate = dispatch_remote_settle_gate_v3(owner)
+    if gate != "": return dispatch_turn_v3(dispatch_fail_v3(owner, gate))
+    if val exchange = owner.exchange:
+        val closed = host_service_auth_exchange_close_v6(exchange)
+        owner.exchange = closed.owner
+        val disposition = controller_dispatch_close_disposition_v3(owner.outcome,
+            closed.outcome, closed.error, closed.completed, closed.owner.is_some())
+        owner.outcome = disposition.outcome
+        if disposition.error != "": owner = dispatch_fail_v3(owner, disposition.error)
+        if owner.exchange.is_some(): return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-remote-settle-exchange-open"))
+    val store = owner.root.unwrap().workload_v3()
+    if store.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, store.unwrap_err()))
+    val edited = controller_workload_store_edit_journal_v1(store.unwrap(), edit)
+    var root = owner.root.unwrap()
+    val retained = root.retain_v3(edited.store)
+    owner.root = Some(root)
+    if retained.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, retained.unwrap_err()))
+    owner.response = if edited.error == "": CONTROLLER_DISPATCH_EDIT_OK_V3 + edited.result else: CONTROLLER_DISPATCH_EDIT_REFUSED_V3 + edited.error
+    dispatch_turn_v3(owner)
+
+fn dispatch_prepare_v3(original: ControllerDispatchStateV3) -> ControllerDispatchStateV3:
+    var owner = original
+    val packet = owner.packet.unwrap()
+    val context = owner.root.unwrap().current_v3()
+    if context.is_err(): return dispatch_fail_v3(owner, context.unwrap_err())
+    val now = controller_dispatch_grant_clock_v1()
+    if now.is_err(): return dispatch_fail_v3(owner, now.unwrap_err())
+    val proofs = controller_dispatch_authorize_v3(context.unwrap(), packet, now.unwrap())
+    if proofs.is_err(): return dispatch_fail_v3(owner, proofs.unwrap_err())
+    val loaded = owner.root.unwrap().workload_v3()
+    if loaded.is_err(): return dispatch_fail_v3(owner, loaded.unwrap_err())
+    val guard = dispatch_guard_v3(loaded.unwrap(), packet)
+    if guard.is_err(): return dispatch_fail_v3(owner, guard.unwrap_err())
+    val saved = controller_dispatch_packet_retain_owned_v3(loaded.unwrap().journal, packet)
+    if saved.is_err(): return dispatch_fail_v3(owner, saved.unwrap_err())
+    var store = loaded.unwrap()
+    val prior = controller_workload_store_lookup_v1(store, owner.uid)
+    if prior.is_err():
+        if prior.unwrap_err() != "workload-not-found": return dispatch_fail_v3(owner, prior.unwrap_err())
+        val initial = controller_workload_create_v1(store.controller_id, context.unwrap().config.controller_epoch,
+            owner.uid, packet.binding.desired_revision, packet.binding.host_intent.plan_digest)
+        if initial.is_err(): return dispatch_fail_v3(owner, initial.unwrap_err())
+        owner = dispatch_retain_v3(owner, controller_workload_store_create_v1(store, initial.unwrap()))
+        if owner.error != "": return owner
+        val created_store = owner.root.unwrap().workload_v3()
+        if created_store.is_err(): return dispatch_fail_v3(owner, created_store.unwrap_err())
+        store = created_store.unwrap()
+    val before = controller_workload_store_lookup_v1(store, owner.uid)
+    if before.is_err(): return dispatch_fail_v3(owner, before.unwrap_err())
+    owner = dispatch_retain_v3(owner, controller_workload_store_bind_v1(store, owner.uid, before.unwrap().revision, packet.binding))
+    if owner.error != "": return owner
+    val bound_store = owner.root.unwrap().workload_v3()
+    if bound_store.is_err(): return dispatch_fail_v3(owner, bound_store.unwrap_err())
+    store = bound_store.unwrap()
+    val assignment = dispatch_assignment_context_v3(store, context.unwrap(), owner.uid, now.unwrap())
+    if assignment.is_err(): return dispatch_fail_v3(owner, assignment.unwrap_err())
+    val existing = daemon_operation_exact_v2(store.journal, packet.operation)
+    if existing.is_err():
+        if existing.unwrap_err() != "OPERATION_NOT_FOUND": return dispatch_fail_v3(owner, existing.unwrap_err())
+        owner = dispatch_retain_v3(owner, controller_workload_store_admit_assignment_v1(store, packet.binding,
+            packet.operation, proofs.unwrap().assignment, assignment.unwrap()))
+        if owner.error != "": return owner
+        val admitted_store = owner.root.unwrap().workload_v3()
+        if admitted_store.is_err(): return dispatch_fail_v3(owner, admitted_store.unwrap_err())
+        store = admitted_store.unwrap()
+    val admitted = daemon_operation_exact_v2(store.journal, packet.operation)
+    if admitted.is_err(): return dispatch_fail_v3(owner, admitted.unwrap_err())
+    if admitted.unwrap().state == "admitted":
+        owner = dispatch_retain_v3(owner, controller_workload_store_begin_prepare_v1(store, packet.binding,
+            packet.operation, proofs.unwrap().assignment, assignment.unwrap()))
+        if owner.error != "": return owner
+    elif not ["executing", "outcome-unknown"].contains(admitted.unwrap().state):
+        return dispatch_fail_v3(owner, "dispatch-assignment-state-invalid")
+    val prepare = host_prepare_request_encode_v1(HostPrepareRequestV1(packet.binding.host_intent,
+        packet.binding.host_operation, packet.prepare_signed, packet.prepare_approval))
+    if prepare.is_err(): return dispatch_fail_v3(owner, prepare.unwrap_err())
+    dispatch_send_v3(owner, "prepare", prepare.unwrap())
+
+fn dispatch_execute_v3(original: ControllerDispatchStateV3, payload: text) -> ControllerDispatchStateV3:
+    var owner = original
+    val packet = owner.packet.unwrap()
+    val receipt = host_prepare_response_decode_v1(payload, packet.binding.host_intent, packet.binding.host_operation)
+    if receipt.is_err(): return dispatch_fail_v3(owner, receipt.unwrap_err())
+    val context = owner.root.unwrap().current_v3()
+    if context.is_err(): return dispatch_fail_v3(owner, context.unwrap_err())
+    val now = controller_dispatch_grant_clock_v1()
+    if now.is_err(): return dispatch_fail_v3(owner, now.unwrap_err())
+    val proofs = controller_dispatch_authorize_v3(context.unwrap(), packet, now.unwrap())
+    if proofs.is_err(): return dispatch_fail_v3(owner, proofs.unwrap_err())
+    val loaded = owner.root.unwrap().workload_v3()
+    if loaded.is_err(): return dispatch_fail_v3(owner, loaded.unwrap_err())
+    var store = loaded.unwrap()
+    val guard = dispatch_guard_v3(store, packet)
+    if guard.is_err(): return dispatch_fail_v3(owner, guard.unwrap_err())
+    val assignment = dispatch_assignment_context_v3(store, context.unwrap(), owner.uid, now.unwrap())
+    if assignment.is_err(): return dispatch_fail_v3(owner, assignment.unwrap_err())
+    owner = dispatch_retain_v3(owner, controller_workload_store_commit_assignment_v1(store, owner.uid,
+        packet.operation, receipt.unwrap(), proofs.unwrap().assignment, assignment.unwrap()))
+    if owner.error != "": return owner
+    val committed_store = owner.root.unwrap().workload_v3()
+    if committed_store.is_err(): return dispatch_fail_v3(owner, committed_store.unwrap_err())
+    store = committed_store.unwrap()
+    # Actual clock and installed policy are observed AGAIN after receipt commit.
+    val fresh = owner.root.unwrap().current_v3()
+    if fresh.is_err(): return dispatch_fail_v3(owner, fresh.unwrap_err())
+    val clock = controller_dispatch_grant_clock_v1()
+    if clock.is_err(): return dispatch_fail_v3(owner, clock.unwrap_err())
+    val authorized = controller_dispatch_authorize_v3(fresh.unwrap(), packet, clock.unwrap())
+    if authorized.is_err(): return dispatch_fail_v3(owner, authorized.unwrap_err())
+    val allowed = dispatch_guard_v3(store, packet)
+    if allowed.is_err(): return dispatch_fail_v3(owner, allowed.unwrap_err())
+    val ctx = dispatch_assignment_context_v3(store, fresh.unwrap(), owner.uid, clock.unwrap())
+    if ctx.is_err(): return dispatch_fail_v3(owner, ctx.unwrap_err())
+    val ready = controller_workload_store_execution_ready_v1(store, owner.uid, packet.operation, authorized.unwrap().execution, ctx.unwrap())
+    if ready.is_err(): return dispatch_fail_v3(owner, ready.unwrap_err())
+    val source = host_execute_request_encode_v2(HostExecuteRequestV2(packet.binding.host_intent, packet.binding.host_operation,
+        ready.unwrap().host_receipt, packet.execution, packet.host_execution_signed, packet.host_execution_approval))
+    if source.is_err(): return dispatch_fail_v3(owner, source.unwrap_err())
+    val digest = controller_dispatch_original_execute_match_v3(packet, source.unwrap())
+    if digest.is_err(): return dispatch_fail_v3(owner, digest.unwrap_err())
+    val key = controller_dispatch_execute_archive_key_v3(packet)
+    if key.is_err(): return dispatch_fail_v3(owner, key.unwrap_err())
+    # Atomic create-only return is the gate, not a yielded boolean. Existing
+    # bytes NEVER grant resend, including identical bytes after interrupted send.
+    val published = distributed_operation_journal_publish_v3(store.journal, key.unwrap(), source.unwrap())
+    if published.is_err():
+        owner.remote_started = true
+        return dispatch_fail_v3(owner, published.unwrap_err())
+    val readback = distributed_operation_journal_read_required_v3(store.journal, key.unwrap(), 2097152)
+    if readback.is_err() or readback.unwrap() != source.unwrap():
+        owner.remote_started = true
+        return dispatch_fail_v3(owner, "dispatch-execute-archive-conflict-or-readback")
+    if not published.unwrap():
+        owner.remote_started = true
+        return dispatch_fail_v3(owner, "dispatch-execute-already-recorded-inspect-required")
+    owner.execute_source = source.unwrap()
+    owner.execute_digest = digest.unwrap()
+    owner.remote_started = true
+    owner.outcome = "unknown"
+    # Still in the SAME call which consumed the authenticated prepare proof.
+    dispatch_send_v3(owner, "execute", source.unwrap())
+
+fn dispatch_accept_v3(original: ControllerDispatchStateV3, reply: HostServiceOperationReplyV6) -> ControllerDispatchStateV3:
+    var owner = original
+    if owner.pane_target_exchange and reply.pending:
+        return dispatch_fail_v3(owner, "dispatch-pane-target-reply-pending")
+    val encoded = host_service_operation_reply_encode_v6(reply)
+    if encoded.is_err(): return dispatch_fail_v3(owner, encoded.unwrap_err())
+    if owner.live_pane_exchange:
+        # The pane operation is one bounded turn. No progress polling or
+        # implicit resubmission can recover bytes consumed by a lost read.
+        if reply.pending: return dispatch_fail_v3(owner, "dispatch-pane-reply-pending")
+    else:
+        val saved = dispatch_archive_v3(owner, encoded.unwrap())
+        if saved.is_err(): return dispatch_fail_v3(owner, saved.unwrap_err())
+        if reply.payload != "":
+            val inner = dispatch_archive_v3(owner, reply.payload)
+            if inner.is_err(): return dispatch_fail_v3(owner, inner.unwrap_err())
+    # Preserve exact authenticated pending DATA independently of local cleanup.
+    if reply.pending:
+        owner.response = encoded.unwrap()
+        owner.outcome = "remote-pending"
+        if reply.error != "" or reply.exit_code != 0:
+            return dispatch_fail_v3(owner, if reply.error != "": reply.error else: "dispatch-host-nonzero")
+        return dispatch_send_v3(owner, "progress", "")
+    if owner.mode == "remote" and owner.phase == "remote-build" and (reply.error != "" or reply.exit_code != 0):
+        # An authenticated Host refusal of a route frame (e.g. a reaped run answering collect) is DATA for the driver,
+        # which decodes the encoded reply: the owner stays ready so the recovery edit can still run. Prepare/execute
+        # refusals, and every transport error, keep failing the owner.
+        owner.response = encoded.unwrap()
+        owner.outcome = "host-refused"
+        owner.phase = "ready"
+        return owner
+    if owner.mode == "host-action" and owner.phase == "host-control" and (reply.error != "" or reply.exit_code != 0):
+        # milestone_0046: an authenticated Host refusal of a control frame (e.g. the expected-vs-given echo of a stale
+        # abandon) is DATA for the operator: the owner stays ready. No controller row changes state on it.
+        owner.response = encoded.unwrap()
+        owner.outcome = "host-refused"
+        owner.phase = "ready"
+        return owner
+    if reply.error != "" or reply.exit_code != 0:
+        owner.response = encoded.unwrap()
+        return dispatch_fail_v3(owner, if reply.error != "": reply.error else: "dispatch-host-nonzero")
+    if owner.phase == "status":
+        val status = host_controller_status_decode_v3(reply.payload)
+        if status.is_err(): return dispatch_fail_v3(owner, status.unwrap_err())
+        val config = owner.root.unwrap().config_v3()
+        if config.is_err(): return dispatch_fail_v3(owner, config.unwrap_err())
+        val installed = dispatch_service_status_v3(config.unwrap(), status.unwrap(), owner.mode != "host-action")
+        if installed.is_err(): return dispatch_fail_v3(owner, installed.unwrap_err())
+        val scope = container_scope_fence_id_v2(status.unwrap().scope)
+        if scope.is_err(): return dispatch_fail_v3(owner, scope.unwrap_err())
+        owner.scope_digest = scope.unwrap()
+        if owner.mode == "remote" or owner.mode == "host-action":
+            # C3: the installed-binding status check above is the whole gate; the Windows packet match never runs here.
+            owner.response = reply.payload
+            owner.outcome = "authenticated-reply"
+            owner.phase = "ready"
+            return owner
+        if owner.mode == "status":
+            owner.response = reply.payload
+            owner.outcome = "authenticated-reply"
+            owner.phase = "cleanup"
+            return owner
+        if owner.mode == "service-stop":
+            owner.remote_started = true
+            owner.outcome = "unknown"
+            return dispatch_send_v3(owner, "service-stop", "")
+        val context = owner.root.unwrap().current_v3()
+        if context.is_err(): return dispatch_fail_v3(owner, context.unwrap_err())
+        val matched = controller_dispatch_host_status_match_v3(context.unwrap(), owner.packet.unwrap(), status.unwrap())
+        if matched.is_err(): return dispatch_fail_v3(owner, matched.unwrap_err())
+        if owner.mode != "dispatch": return dispatch_send_v3(owner, owner.mode, "")
+        val source = container_execution_request_encode_v2(owner.packet.unwrap().execution)
+        if source.is_err(): return dispatch_fail_v3(owner, source.unwrap_err())
+        return dispatch_send_v3(owner, "validate", source.unwrap())
+    if owner.mode == "remote" or owner.mode == "host-action":
+        # Every later remote reply (prepare, execute after its progress polls, remote-build) is handed to the caller.
+        owner.response = reply.payload
+        owner.outcome = "authenticated-reply"
+        owner.phase = "ready"
+        return owner
+    if owner.phase == "validate":
+        val validated = controller_dispatch_validation_match_v2(owner.packet.unwrap(), reply.payload)
+        if validated.is_err(): return dispatch_fail_v3(owner, validated.unwrap_err())
+        return dispatch_prepare_v3(owner)
+    if owner.phase == "prepare": return dispatch_execute_v3(owner, reply.payload)
+    if owner.phase == "service-stop":
+        owner.response = encoded.unwrap()
+    else:
+        val context = owner.root.unwrap().current_v3()
+        if context.is_err(): return dispatch_fail_v3(owner, context.unwrap_err())
+        val response = controller_dispatch_response_v2(context.unwrap(), owner.packet.unwrap(), reply.payload, owner.phase == "execute")
+        if response.is_err(): return dispatch_fail_v3(owner, response.unwrap_err())
+        owner.response = response.unwrap()
+    owner.outcome = "authenticated-reply"
+    owner.phase = "cleanup"
+    owner
+
+fn dispatch_state_close_v3(original: ControllerDispatchStateV3) -> ControllerDispatchStateTurnV3:
+    var owner = original
+    owner.phase = "cleanup"
+    if val exchange = owner.exchange:
+        val closed = host_service_auth_exchange_close_v6(exchange)
+        owner.exchange = closed.owner
+        # Never suppress cancellation: the lower first-error API cannot prove
+        # that a later socket close did not fail. Cached pending DATA survives,
+        # while actual lower Unknown/completion/error facts remain authoritative.
+        val disposition = controller_dispatch_close_disposition_v3(owner.outcome,
+            closed.outcome, closed.error, closed.completed, closed.owner.is_some())
+        owner.outcome = disposition.outcome
+        if disposition.error != "": owner = dispatch_fail_v3(owner, disposition.error)
+        if owner.exchange.is_some(): return dispatch_turn_v3(owner)
+    if val reader = owner.reader:
+        val closed = host_service_ready_reader_close_v1(reader)
+        owner.reader = closed.owner
+        if closed.error != "": owner = dispatch_fail_v3(owner, closed.error)
+        if owner.reader.is_some(): return dispatch_turn_v3(owner)
+        if not closed.completed: owner = dispatch_fail_v3(owner, "dispatch-reader-close-unconfirmed")
+    if val root = owner.root:
+        val closed = controller_local_root_close_v3(root)
+        owner.root = closed.owner
+        if closed.error != "": owner = dispatch_fail_v3(owner, closed.error)
+        if owner.root.is_none() and not closed.closed: owner = dispatch_fail_v3(owner, "dispatch-root-close-unconfirmed")
+    dispatch_turn_v3(owner)
+
+fn dispatch_state_step_v3(original: ControllerDispatchStateV3, cancel: bool = false) -> ControllerDispatchStateTurnV3:
+    var owner = original
+    # Local cancellation/close never issues remote Host cancel or execute retry.
+    if cancel or owner.phase == "cleanup": return dispatch_state_close_v3(owner)
+    if owner.exchange.is_none(): return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-exchange-required"))
+    val exchange = owner.exchange.unwrap()
+    val next = host_service_auth_exchange_step_v6(exchange)
+    owner.exchange = next.owner
+    if next.error != "":
+        if next.outcome == "unknown": owner.outcome = "unknown"
+        return dispatch_turn_v3(dispatch_fail_v3(owner, next.error))
+    if not next.completed: return dispatch_turn_v3(owner)
+    if next.reply.is_none(): return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-verified-reply-required"))
+    # Consume registry proof BEFORE every fallible phase effect. A copied prior
+    # phase cannot take this again. There is no yield between take and next begin.
+    val reply = host_service_auth_exchange_take_v6(exchange, next.reply.unwrap())
+    if reply.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, reply.unwrap_err()))
+    val closed = host_service_auth_exchange_close_v6(exchange)
+    owner.exchange = closed.owner
+    if closed.error != "" or closed.owner.is_some() or not closed.completed:
+        return dispatch_turn_v3(dispatch_fail_v3(owner, if closed.error != "": closed.error else: "dispatch-exchange-close-unconfirmed"))
+    val matched = host_service_operation_reply_match_v6(reply.unwrap(), owner.request.unwrap())
+    if matched.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, matched.unwrap_err()))
+    dispatch_turn_v3(dispatch_accept_v3(owner, reply.unwrap()))
+
+# Canonical custody for this leaf only. Closed slots may be reused, identities
+# NEVER are. Busy state remains registered solely for native-origin comparison.
+struct ControllerDispatchSlotV3:
+    identity: i64
+    revision: i64
+    busy: bool
+    state: Option<ControllerDispatchStateV3>
+    outcome: text = "not-sent"
+    response: text = ""
+    error: text = ""
+    phase: text = "initial"
+
+struct ControllerDispatchClaimV3:
+    index: int
+    identity: i64
+    revision: i64
+    state: ControllerDispatchStateV3
+
+var _controller_dispatch_slots_v3: [ControllerDispatchSlotV3] = []
+var _controller_dispatch_identity_v3: i64 = 1
+
+fn dispatch_origin_v3() -> Result<bool, text>:
+    # One canonical-origin guard for both controller platforms (controller_local_root_v3.spl).
+    controller_origin_check_v3()
+
+# All following registry helpers are private and called ONLY after a successful
+# native origin guard in the same synchronous public invocation.
+fn dispatch_slot_v3(identity: i64) -> Result<int, text>:
+    for index in 0.._controller_dispatch_slots_v3.len():
+        if _controller_dispatch_slots_v3[index].identity == identity: return Ok(index)
+    Err("controller-dispatch-owner-retired")
+
+fn dispatch_origin_failure_v3(handle: Option<ControllerDispatchOwnerV3>, reason: text,
+        root: Option<ControllerLocalRootV3> = None) -> ControllerDispatchOwnedTurnV3:
+    # NO registry access here; never emit an independently closable bare root.
+    val retained = if root.is_some(): Some(ControllerDispatchOwnerV3(unregistered:
+        Some(ControllerDispatchUnregisteredV3(root.unwrap(), reason)))) else: handle
+    ControllerDispatchOwnedTurnV3(retained, false, true, "unknown", "", reason, nil, "refused")
+
+fn dispatch_duplicate_v3(root: ControllerLocalRootV3) -> Result<Option<ControllerDispatchOwnerV3>, text>:
+    for slot in _controller_dispatch_slots_v3:
+        if slot.state.is_some() and slot.state.unwrap().root.is_some():
+            val same = slot.state.unwrap().root.unwrap().same_journal_owner_v3(root)?
+            if same: return Ok(Some(ControllerDispatchOwnerV3(slot.identity, slot.revision)))
+    Ok(nil)
+
+fn dispatch_unregistered_close_v3(handle: ControllerDispatchOwnerV3) -> ControllerDispatchOwnedTurnV3:
+    val retained = handle.unregistered.unwrap()
+    val duplicate = dispatch_duplicate_v3(retained.root)
+    if duplicate.is_err(): return dispatch_origin_failure_v3(Some(handle), retained.error)
+    if duplicate.unwrap().is_some():
+        return dispatch_handle_failure_v3(duplicate.unwrap().unwrap(), "controller-dispatch-root-already-retained")
+    # Only a definite native no-match permits cleanup. No exchange can ever
+    # depend on an unregistered arm; later calls repeat this comparison first.
+    val closed = controller_local_root_close_v3(retained.root)
+    var error = retained.error
+    if closed.error != "" and not error.contains("unregistered-close:" + closed.error):
+        error = error + ";unregistered-close:" + closed.error
+    if not closed.closed and not error.contains("unregistered-close-unconfirmed"):
+        error = error + ";unregistered-close-unconfirmed"
+    if closed.owner.is_some(): return dispatch_origin_failure_v3(nil, error, closed.owner)
+    # nil is consumed, not evidence of confirmed close. Never retry a missing
+    # carrier; preserve actual closed/error and the primary registration refusal.
+    ControllerDispatchOwnedTurnV3(nil, closed.closed, false, "unknown", "", error, nil,
+        if closed.closed: "closed" else: "consumed-unconfirmed")
+
+fn dispatch_handle_failure_v3(handle: ControllerDispatchOwnerV3, reason: text) -> ControllerDispatchOwnedTurnV3:
+    val found = dispatch_slot_v3(handle.identity)
+    if found.is_err(): return ControllerDispatchOwnedTurnV3(nil, true, false, "unknown", "", reason, nil, "retired")
+    val slot = _controller_dispatch_slots_v3[found.unwrap()]
+    val live = slot.busy or slot.state.is_some()
+    # Stale refusal does not poison/change canonical outcome or phase. Returning
+    # the current handle permits DELIBERATE later adoption for step or cleanup.
+    ControllerDispatchOwnedTurnV3(if live: Some(ControllerDispatchOwnerV3(slot.identity, slot.revision)) else: nil,
+        not live, live, slot.outcome, slot.response, reason, nil, slot.phase)
+
+fn dispatch_register_v3(root: ControllerLocalRootV3) -> Result<ControllerDispatchOwnerV3, text>:
+    if _controller_dispatch_identity_v3 >= 9223372036854775807: return Err("controller-dispatch-owner-identity-exhausted")
+    var index = -1
+    for candidate in 0.._controller_dispatch_slots_v3.len():
+        val prior = _controller_dispatch_slots_v3[candidate]
+        if not prior.busy and prior.state.is_none() and index < 0: index = candidate
+    if index < 0 and _controller_dispatch_slots_v3.len() >= 16: return Err("controller-dispatch-owner-capacity")
+    val identity = _controller_dispatch_identity_v3
+    _controller_dispatch_identity_v3 = identity + 1
+    val state = ControllerDispatchStateV3(root: Some(root), uid: "", mode: "registered")
+    val slot = ControllerDispatchSlotV3(identity, 1, false, Some(state))
+    if index < 0: _controller_dispatch_slots_v3.push(slot)
+    else: _controller_dispatch_slots_v3[index] = slot
+    Ok(ControllerDispatchOwnerV3(identity, 1))
+
+# Checked DATA decision only: actual origin, slot ownership and busy checks
+# precede its use. It cannot create a handle, advance a phase or confer custody.
+pub fn controller_dispatch_revision_advance_v3(current: i64, provided: i64, closing: bool) -> Result<i64, text>:
+    if current <= 0 or provided <= 0 or current != provided: return Err("controller-dispatch-owner-stale")
+    if current >= 9223372036854775807:
+        if closing: return Ok(current)
+        return Err("controller-dispatch-owner-revision-exhausted")
+    Ok(current + 1)
+
+fn dispatch_claim_v3(handle: ControllerDispatchOwnerV3, closing: bool) -> Result<ControllerDispatchClaimV3, text>:
+    val index = dispatch_slot_v3(handle.identity)?
+    var slot = _controller_dispatch_slots_v3[index]
+    if slot.busy: return Err("controller-dispatch-owner-busy")
+    if slot.state.is_none(): return Err("controller-dispatch-owner-retired")
+    val revision = controller_dispatch_revision_advance_v3(slot.revision, handle.revision, closing)
+    if revision.is_err() and revision.unwrap_err() != "controller-dispatch-owner-revision-exhausted": return Err(revision.unwrap_err())
+    var state = slot.state.unwrap()
+    if slot.revision >= 9223372036854775807:
+        state = dispatch_fail_v3(state, "controller-dispatch-owner-revision-exhausted")
+        slot.state = Some(state)
+        slot.phase = state.phase
+        slot.outcome = state.outcome
+        slot.error = state.error
+        _controller_dispatch_slots_v3[index] = slot
+        if not closing: return Err("controller-dispatch-owner-revision-exhausted")
+        # Retirement cleanup uses the CURRENT ceiling revision without increment.
+        # All later claims remain cleanup-only; no phase effects can re-enter.
+    else: slot.revision = revision.unwrap()
+    slot.busy = true
+    # Keep the canonical state registered while busy for native identity-only
+    # duplicate comparison. Busy forbids phase/cleanup access to that snapshot.
+    _controller_dispatch_slots_v3[index] = slot
+    Ok(ControllerDispatchClaimV3(index, slot.identity, slot.revision, state))
+
+fn dispatch_publish_v3(claim: ControllerDispatchClaimV3, turn: ControllerDispatchStateTurnV3) -> ControllerDispatchOwnedTurnV3:
+    var slot = _controller_dispatch_slots_v3[claim.index]
+    slot.state = turn.owner
+    slot.busy = false
+    slot.outcome = turn.outcome
+    slot.response = turn.response
+    slot.error = turn.error
+    slot.phase = if turn.owner.is_some(): turn.owner.unwrap().phase else: "closed"
+    # Publish the complete latest custody BEFORE exposing any error/result.
+    _controller_dispatch_slots_v3[claim.index] = slot
+    ControllerDispatchOwnedTurnV3(if turn.owner.is_some(): Some(ControllerDispatchOwnerV3(claim.identity, claim.revision)) else: nil,
+        turn.completed, turn.cleanup_pending, turn.outcome, turn.response, turn.error, nil, slot.phase)
+
+fn dispatch_start_v3(root: ControllerLocalRootV3, uid: text, packet: Option<ControllerDispatchRequestV2>,
+        mode: text, resume: bool = false) -> ControllerDispatchOwnedTurnV3:
+    val admitted = dispatch_origin_v3()
+    if admitted.is_err(): return dispatch_origin_failure_v3(nil, admitted.unwrap_err(), Some(root))
+    val duplicate = dispatch_duplicate_v3(root)
+    if duplicate.is_err(): return dispatch_origin_failure_v3(nil, duplicate.unwrap_err(), Some(root))
+    if duplicate.unwrap().is_some():
+        return dispatch_handle_failure_v3(duplicate.unwrap().unwrap(), "controller-dispatch-root-already-retained")
+    val handle = dispatch_register_v3(root)
+    if handle.is_err(): return dispatch_origin_failure_v3(nil, handle.unwrap_err(), Some(root))
+    val claimed = dispatch_claim_v3(handle.unwrap(), false)
+    if claimed.is_err(): return dispatch_handle_failure_v3(handle.unwrap(), claimed.unwrap_err())
+    val claim = claimed.unwrap()
+    val actual = claim.state.root.unwrap()
+    val turn = if mode == "dispatch": dispatch_state_begin_v3(actual, uid, packet.unwrap(), resume)
+        elif mode == "remote": dispatch_state_remote_begin_v3(actual, uid)
+        elif mode == "host-action": dispatch_state_host_action_begin_v3(actual, uid)
+        elif mode.starts_with("service:"): dispatch_state_service_begin_v3(actual, mode[8:])
+        else: dispatch_state_control_begin_v3(actual, uid, mode[8:])
+    dispatch_publish_v3(claim, turn)
+
+pub fn controller_dispatch_begin_v3(root: ControllerLocalRootV3, uid: text,
+        packet: ControllerDispatchRequestV2, resume: bool = false) -> ControllerDispatchOwnedTurnV3:
+    dispatch_start_v3(root, uid, Some(packet), "dispatch", resume)
+
+pub fn controller_dispatch_control_begin_v3(root: ControllerLocalRootV3, uid: text, action: text) -> ControllerDispatchOwnedTurnV3:
+    # Invalid action remains a registered cleanup-only refusal, never a launch.
+    dispatch_start_v3(root, uid, nil, "control:" + action)
+
+pub fn controller_dispatch_inspect_begin_v3(root: ControllerLocalRootV3, uid: text) -> ControllerDispatchOwnedTurnV3:
+    dispatch_start_v3(root, uid, nil, "control:inspect")
+
+pub fn controller_dispatch_service_begin_v3(root: ControllerLocalRootV3, action: text) -> ControllerDispatchOwnedTurnV3:
+    dispatch_start_v3(root, "", nil, "service:" + action)
+
+# milestone_0030 C3 entry points. begin ends in phase "ready" (turn.response = the V3 status payload); after each send
+# the caller steps controller_dispatch_step_v3 until turn.phase == "ready" (response = the reply payload) or an error.
+pub fn controller_dispatch_remote_begin_v3(root: ControllerLocalRootV3, operation_id: text) -> ControllerDispatchOwnedTurnV3:
+    dispatch_start_v3(root, operation_id, None, "remote")
+
+fn dispatch_remote_turn_v3(handle: ControllerDispatchOwnerV3,
+        run: fn(ControllerDispatchStateV3) -> ControllerDispatchStateTurnV3) -> ControllerDispatchOwnedTurnV3:
+    val admitted = dispatch_origin_v3()
+    if admitted.is_err(): return dispatch_origin_failure_v3(Some(handle), admitted.unwrap_err())
+    if handle.unregistered.is_some(): return dispatch_unregistered_close_v3(handle)
+    val claimed = dispatch_claim_v3(handle, false)
+    if claimed.is_err(): return dispatch_handle_failure_v3(handle, claimed.unwrap_err())
+    val claim = claimed.unwrap()
+    dispatch_publish_v3(claim, run(claim.state))
+
+pub fn controller_dispatch_remote_send_v3(handle: ControllerDispatchOwnerV3, action: text, payload: text) -> ControllerDispatchOwnedTurnV3:
+    dispatch_remote_turn_v3(handle, fn(state: ControllerDispatchStateV3) -> ControllerDispatchStateTurnV3:
+        dispatch_state_remote_send_v3(state, action, payload))
+
+pub fn controller_dispatch_remote_admit_v3(handle: ControllerDispatchOwnerV3, signed: DistributedSignedGrantV2,
+        approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2, open_record: text) -> ControllerDispatchOwnedTurnV3:
+    dispatch_remote_turn_v3(handle, fn(state: ControllerDispatchStateV3) -> ControllerDispatchStateTurnV3:
+        dispatch_state_remote_admit_v3(state, signed, approval, request, open_record))
+
+pub fn controller_dispatch_remote_edit_v3(handle: ControllerDispatchOwnerV3,
+        edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> ControllerDispatchOwnedTurnV3:
+    dispatch_remote_turn_v3(handle, fn(state: ControllerDispatchStateV3) -> ControllerDispatchStateTurnV3:
+        dispatch_state_remote_edit_v3(state, edit))
+
+# milestone_0043 P1-1: the settle edit, reachable on a ready, failed or timed-out remote owner (one turn, no exchange).
+pub fn controller_dispatch_remote_settle_v3(handle: ControllerDispatchOwnerV3,
+        edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> ControllerDispatchOwnedTurnV3:
+    dispatch_remote_turn_v3(handle, fn(state: ControllerDispatchStateV3) -> ControllerDispatchStateTurnV3:
+        dispatch_state_remote_settle_v3(state, edit))
+
+# milestone_0046 entry points: begin ends in phase "ready" (response = the V3 status payload); after each send the caller
+# steps controller_dispatch_step_v3 until phase "ready" (response = the reply payload, or the encoded refusal with outcome
+# `host-refused`) or an error.
+pub fn controller_dispatch_host_action_begin_v3(root: ControllerLocalRootV3, operation_id: text) -> ControllerDispatchOwnedTurnV3:
+    dispatch_start_v3(root, operation_id, None, "host-action")
+
+pub fn controller_dispatch_host_action_send_v3(handle: ControllerDispatchOwnerV3, payload: text) -> ControllerDispatchOwnedTurnV3:
+    dispatch_remote_turn_v3(handle, fn(state: ControllerDispatchStateV3) -> ControllerDispatchStateTurnV3:
+        dispatch_state_host_action_send_v3(state, payload))
+
+pub fn controller_dispatch_step_v3(handle: ControllerDispatchOwnerV3, cancel: bool = false) -> ControllerDispatchOwnedTurnV3:
+    val admitted = dispatch_origin_v3()
+    if admitted.is_err(): return dispatch_origin_failure_v3(Some(handle), admitted.unwrap_err())
+    if handle.unregistered.is_some(): return dispatch_unregistered_close_v3(handle)
+    val claimed = dispatch_claim_v3(handle, cancel)
+    if claimed.is_err(): return dispatch_handle_failure_v3(handle, claimed.unwrap_err())
+    val claim = claimed.unwrap()
+    dispatch_publish_v3(claim, dispatch_state_step_v3(claim.state, cancel))
+
+pub fn controller_dispatch_close_v3(handle: ControllerDispatchOwnerV3) -> ControllerDispatchOwnedTurnV3:
+    val admitted = dispatch_origin_v3()
+    if admitted.is_err(): return dispatch_origin_failure_v3(Some(handle), admitted.unwrap_err())
+    if handle.unregistered.is_some(): return dispatch_unregistered_close_v3(handle)
+    val claimed = dispatch_claim_v3(handle, true)
+    if claimed.is_err(): return dispatch_handle_failure_v3(handle, claimed.unwrap_err())
+    val claim = claimed.unwrap()
+    dispatch_publish_v3(claim, dispatch_state_close_v3(claim.state))
+
+export ControllerDispatchOwnerV3, ControllerDispatchOwnedTurnV3
+export controller_dispatch_revision_advance_v3
+export ControllerDispatchCloseDispositionV3, controller_dispatch_close_disposition_v3
+export controller_dispatch_begin_v3, controller_dispatch_control_begin_v3, controller_dispatch_inspect_begin_v3
+export CONTROLLER_DISPATCH_EDIT_OK_V3, CONTROLLER_DISPATCH_EDIT_REFUSED_V3
+export controller_dispatch_remote_begin_v3, controller_dispatch_remote_send_v3, controller_dispatch_remote_admit_v3, controller_dispatch_remote_edit_v3
+export controller_dispatch_remote_settle_v3, controller_dispatch_remote_execute_key_v3
+export controller_dispatch_host_action_begin_v3, controller_dispatch_host_action_send_v3, controller_dispatch_host_action_key_v3
+export controller_dispatch_host_effect_key_v3
+export controller_dispatch_service_begin_v3, controller_dispatch_step_v3, controller_dispatch_close_v3
+export controller_dispatch_host_status_match_v3, controller_dispatch_execute_archive_key_v3, controller_dispatch_original_execute_match_v3

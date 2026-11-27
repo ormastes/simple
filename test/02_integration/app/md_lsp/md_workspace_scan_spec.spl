@@ -1,0 +1,72 @@
+# @cover src/app/md_lsp/md_lsp_workspace.spl 70%
+"""
+## Purpose and audience
+The stdio Markdown LSP indexes the workspace root's `.md` files so the link
+graph covers unopened documents; only then is `graph_complete` set and
+MD1102 (orphan) / MD1003 reported. Audience: the md_lsp maintainer.
+## Operator workflow
+bin/simple test test/02_integration/app/md_lsp/md_workspace_scan_spec.spl
+## Compatibility and limitations
+Uses a real temp tree under `build/md_scan_spec_ws`; files are written and
+removed by the spec.
+## Verification guidance and troubleshooting
+`partial_recovery` after a successful scan means completeness never flipped;
+an MD1102 on `a.md` means indexed (unopened) inbound edges are ignored.
+"""
+# Lifecycle: doc/03_plan/release/1.0.0/inputs_2026-11-12/unified_diagnostics_parser_recovery_fix_suggestions_plan_2026-11-12.md (REQ-DIAG-009)
+
+use std.spec
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use app.md_lsp.md_lsp_workspace.{MdWorkspace}
+use app.md_lsp.md_lsp_handler.{md_lsp_publish_json}
+
+val ROOT = "build/md_scan_spec_ws"
+
+fn make_tree():
+    dir_remove_all(ROOT)
+    dir_create_all(ROOT + "/notes")
+    file_write(ROOT + "/a.md", "# A\n")
+    file_write(ROOT + "/notes/b.md", "# B\n\nsee [a](../a.md)\n")
+    file_write(ROOT + "/c.md", "# C\n")
+    file_write(ROOT + "/skip.txt", "[x](c.md)\n")
+
+fn scanned() -> MdWorkspace:
+    make_tree()
+    var ws = MdWorkspace.new()
+    ws.set_root(ROOT)
+    ws.index_root()
+    ws
+
+describe "Markdown LSP — workspace scan":
+
+    # @req REQ-DIAG-009
+    it "indexes every markdown file under the root and flips completeness":
+        val ws = scanned()
+        step("scan")
+        expect(ws.graph_complete).to_equal(true)
+        expect(ws.indexed_count()).to_equal(3)
+
+    # @req REQ-DIAG-009
+    it "counts an unopened indexed document as an inbound edge":
+        var ws = scanned()
+        ws.open_document("file://" + ROOT + "/a.md", "# A\n", 1)
+        step("publish a.md")
+        val json = md_lsp_publish_json("file://" + ROOT + "/a.md", ws)
+        expect(json).to_contain("\"status\":\"complete\"")
+        expect(json.contains("MD1102")).to_equal(false)
+
+    # @req REQ-DIAG-009
+    it "reports a genuine orphan once the graph is complete":
+        var ws = scanned()
+        ws.open_document("file://" + ROOT + "/c.md", "# C\n", 1)
+        val json = md_lsp_publish_json("file://" + ROOT + "/c.md", ws)
+        expect(json).to_contain("MD1102")
+
+    # @req REQ-DIAG-009
+    it "stays incomplete when the root cannot be scanned":
+        var ws = MdWorkspace.new()
+        ws.set_root("build/md_scan_spec_missing_root")
+        expect(ws.index_root()).to_equal(false)
+        expect(ws.graph_complete).to_equal(false)
+        dir_remove_all(ROOT)

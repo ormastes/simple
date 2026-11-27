@@ -72,3 +72,50 @@ rewriting them to dodge this runner quirk (e.g. padding with a dummy always-run
 example) would obscure their actual purpose. The file-level FAIL is a known,
 accepted cosmetic issue until the runner is fixed.
 
+
+## Resolution 2026-11-25 (work/p2w5-ai-20261125)
+
+**Status: FIXED (single-file lane) — pending executable qualification.**
+
+`src/app/test_runner_new/test_runner_single.spl` now has a dedicated
+all-examples-skipped verdict branch, placed after the BLOCKED branch and
+ahead of the structured-evidence / `--assert-ran` / zero-executed branches.
+When every declared example was deliberately skipped (`skip_if` / `skip` /
+`return "skip: ..."` — the `... skipped (reason)` / `○ ... (skipped)`
+markers `count_real_skips()` already recognises), nothing executed, nothing
+failed, the child exited 0, output was not truncated, and any child verdict
+line is clean (executed=0, failed=0, dropped=0), the file now gets:
+
+- exit code 0 (non-failing, per the unblock condition above),
+- `SPEC FILE VERDICT: <path> outcome=NOT_RUN ... skipped=N
+  reason=all-examples-skipped` (same outcome token as the
+  platform-os-mismatch skip precedent), and
+- a `SKIPPED <path> (all examples skipped)` tail instead of `PASS`.
+
+Deliberately unchanged:
+
+- A `pending()`-only file still fails closed — `... pending` markers are not
+  skip markers; an unimplemented example is an authoring gap, not deferral.
+- A file that ran nothing WITHOUT skip markers still fails
+  `reason=zero-examples`, including under `--assert-ran`.
+- Any run carrying real failure evidence (nonzero exit, truncation, failed
+  summary/verdict, dropped examples) never reaches the new branch.
+- The directory/daemon lane (`test_runner_main` / `test_daemon`) is out of
+  scope for this fix; the reported repro is the single-file lane.
+
+Contract coverage: new fixture
+`test/fixtures/test_runner_single/all_skipped_spec.spl` (single always-skipped
+example, the board-Vulkan shape) and a new case in
+`test/01_unit/app/test_runner_new/single_structured_evidence_precedence_spec.spl`
+asserting exit 0, `reason=all-examples-skipped`, and no `no examples
+executed` line. The pre-existing `zero_examples_spec.spl` fail-closed case is
+untouched (it prints no skip markers).
+
+Verification limit: executable runs are environment-blocked on this host —
+release/1.0.0 HEAD is source/binary inconsistent (cfd89933699's
+`@representation_boundary` annotations are rejected by the pinned Rust seed
+v1.0.0-rc.1), so `bin/simple.exe test` and even `bin/simple.exe lint` fail
+before reaching any runner code. Verified by code inspection: branch order,
+guard conjuncts, verdict-line field compatibility, summary/exit-code flow,
+and the untouched fail-closed paths. Run the new contract case on a Stage 4
+self-hosted CLI to close qualification.

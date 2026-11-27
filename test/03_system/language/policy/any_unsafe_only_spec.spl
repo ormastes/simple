@@ -1,0 +1,84 @@
+# Requirement: language policy "Any only in unsafe" (W/E-ANY-COMPILE-001, type_erasure capability)
+"""
+# `Any` / erased escapes are accepted only inside `unsafe`
+
+Source-written `Any` outside `unsafe(capabilities: [type_erasure])` is diagnosed:
+a warning ([W-ANY-COMPILE-001]) by default, an error ([E-ANY-COMPILE-001]) when
+HIR lowering forbids written Any (robust/critical). Inside an unsafe block that
+carries `type_erasure` it is accepted. Reuses the harness of
+test/01_unit/compiler/30.types/written_any_compile_mode_spec.spl.
+
+| Scenario | Status |
+|----------|--------|
+| Any param outside unsafe -> warning | passing |
+| Any param outside unsafe, forbid mode -> error | passing |
+| erased [u8] via Any local outside unsafe -> error | passing |
+| Any inside unsafe(type_erasure) -> accepted | passing |
+| concrete / generic types -> no diagnostic | passing |
+| Any inside plain `unsafe:` (no type_erasure) diagnosed | passing |
+"""
+# @tag: system, language, policy, diag
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
+struct AnyDiag:
+    errors: text
+    warnings: text
+
+fn lower_diags(source: text, deny_any: bool) -> AnyDiag:
+    val ast = parse_full_frontend(source, "any_policy.spl", "any_policy.spl", Logger(level: 0))
+    var lowering = HirLowering.with_filename("any_policy.spl")
+    lowering.forbid_written_any = deny_any
+    val _hir = lowering.lower_module(ast)
+    var errors = ""
+    var warnings = ""
+    var idx = 0
+    while idx < lowering.lowering_error_count():
+        val message = lowering.lowering_error_message_at(idx, "any_policy.spl")
+        if lowering.lowering_error_is_recovered_at(idx):
+            warnings = warnings + message + "\n"
+        else:
+            errors = errors + message + "\n"
+        idx = idx + 1
+    AnyDiag(errors: errors, warnings: warnings)
+
+val any_param = "fn f(x: Any) -> i64:\n    1\n"
+val any_in_erasure = "fn f() -> i64:\n    unsafe(capabilities: [type_erasure]):\n        val x: Any = 1\n    1\n"
+val any_in_plain_unsafe = "fn f() -> i64:\n    unsafe:\n        val x: Any = 1\n    1\n"
+val any_byte_escape = "fn f(p: [u8]) -> i64:\n    val x: Any = p\n    1\n"
+
+describe "Any outside unsafe":
+    it "warns with W-ANY-COMPILE-001 by default":
+        val d = lower_diags(any_param, false)
+        expect(d.warnings).to_contain("W-ANY-COMPILE-001")
+        expect(d.errors).to_equal("")
+
+    it "errors with E-ANY-COMPILE-001 when written Any is forbidden":
+        val d = lower_diags(any_param, true)
+        expect(d.errors).to_contain("E-ANY-COMPILE-001")
+
+    it "flags an erased [u8] escape through an Any local":
+        val d = lower_diags(any_byte_escape, true)
+        expect(d.errors).to_contain("E-ANY-COMPILE-001")
+
+describe "Any inside unsafe":
+    it "accepts Any inside unsafe(capabilities: [type_erasure]) in both modes":
+        for deny in [false, true]:
+            val d = lower_diags(any_in_erasure, deny)
+            expect(d.errors).to_equal("")
+            expect(d.warnings).to_equal("")
+
+describe "typed code":
+    it "reports nothing for concrete or generic types":
+        val d = lower_diags("fn id<T>(x: T) -> T:\n    x\n\nfn g(n: i64, b: [u8]) -> i64:\n    n\n", true)
+        expect(d.errors).to_equal("")
+        expect(d.warnings).to_equal("")
+
+describe "Any inside plain unsafe without type_erasure":
+    it "is still diagnosed":
+        val d = lower_diags(any_in_plain_unsafe, true)
+        expect(d.errors).to_contain("E-ANY-COMPILE-001")

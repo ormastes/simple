@@ -34,15 +34,20 @@ model (`os.apps.smux.vt_screen`) missed an erase sequence.
 use std.spec
 use std.spec.{pending}
 use std.nogc_sync_mut.io.{thread_sleep_ms}
+use std.nogc_sync_mut.test_runner.test_runner_files.{strip_ansi}
 use app.llm_caret.cs_dashboard.{CsDashboard, cs_dashboard_new, cs_refresh,
     cs_render, cs_handle_command, cs_apply_action, cs_resolve_exe}
 
 val QUESTION = "What is 4711 times 3? Reply with only the number."
 val ANSWER = "14133"
+# Short distinctive slice of QUESTION: a wrapped echo still contains it.
+val QUESTION_ECHO = "4711 times 3"
+val ECHO_BUDGET_S = 30
 
 struct LiveRun:
     launched: text
     answered: bool
+    delivered: bool
     screen: text
     frame: text
     killed: text
@@ -54,12 +59,42 @@ fn _cmd(d: CsDashboard, line: text) -> (CsDashboard, text):
     (cs_refresh(applied), outcome)
 
 # Agents open with first-run dialogs; answer them the way an operator would.
+# Returns a /key name (enter|esc|tab|space|up|down|left|right|ctrl-c), or ""
+# when no known dialog is on screen. NOTE (2026-10-22, Windows ConPTY): the
+# smux ConPTY input path delivers printable bytes, CR and Tab, but a bare ESC
+# is swallowed by ConPTY's input parser and CSI sequences (arrows) degrade —
+# so dialogs that need Esc/arrows cannot be driven on Windows smux panes;
+# see doc/08_tracking/bug/seed_jit_demotion_textspan_native_build_stall_2026-10-22.md.
 fn _dialog_key(screen: text) -> text:
     if screen.contains("MCP servers found"):
         return "esc"
     if screen.contains("trust") and (screen.contains("folder") or screen.contains("directory")):
         return "enter"
     ""
+
+# Harness-specific "input loop is live" marker, latched on top of the quiet
+# screen. Kimi draws its welcome box and `│ >` input box before its input loop
+# runs: on a cold start it then freezes for 10-40 s, buffering (or, past the
+# echo budget, apparently dropping) anything typed. Its status bar row
+# ("<model> thinking: <level>  <cwd>") only gains a right-hand segment - a key
+# tip such as "shift+enter: newline" / "@: mention files", or the git branch -
+# once the loop redraws it, so that segment is the ready signal. Captured
+# 2026-11-15: cold run welcome t=42 s with a bare status bar for 30+ s after the
+# question was typed (never echoed); warm run tip at t=10 s, echo at t=18 s.
+fn _input_ready(harness: text, screen: text) -> bool:
+    if harness != "kimi":
+        return true
+    if screen.contains("Preparing Kimi Code") or not screen.contains("Welcome to Kimi Code"):
+        return false
+    for row in screen.split("\n"):
+        val plain = strip_ansi(row).trim()
+        if plain.contains(" thinking: "):
+            var segments = 0
+            for part in plain.split("  "):
+                if part.trim() != "":
+                    segments = segments + 1
+            return segments >= 3
+    false
 
 # Launches `harness` from the dashboard, asks QUESTION through the input line
 # and waits up to `budget_s` seconds for ANSWER on the agent screen.
@@ -72,34 +107,60 @@ fn drive_agent(session: text, harness: text, budget_s: i64) -> LiveRun:
     var quiet = 0
     var last = ""
     var waited = 0
-    while waited < budget_s and not answered:
+    # A quiet screen is not proof the agent's input line is live (see
+    # _input_ready); as a backstop, require the question to echo in the pane
+    # within ECHO_BUDGET_S of sending; otherwise stop and report it undelivered
+    # rather than waiting the whole budget for an answer to a question never asked.
+    var delivered = false
+    var sent_at = 0
+    var undelivered = false
+    var live = false
+    while waited < budget_s and not answered and not undelivered:
         thread_sleep_ms(1000)
         waited = waited + 1
         d = cs_refresh(d)
         val shown = d.screen.join("\n")
-        if not sent:
-            val key = _dialog_key(shown)
-            if key != "":
-                val (after_key, _k) = _cmd(d, "/key " + key)
-                d = after_key
-                quiet = 0
+        val key = _dialog_key(shown)
+        if key != "":
+            # A first-run dialog is up — before OR after the question went in.
+            # Answer it and re-arm the question: whatever was typed while the
+            # dialog had focus was consumed by the dialog, not the agent.
+            val (after_key, _k) = _cmd(d, "/key " + key)
+            d = after_key
+            quiet = 0
+            sent = false
+        elif not sent:
+            # Ready once the agent has drawn something and stopped changing.
+            if shown != "" and shown == last:
+                quiet = quiet + 1
             else:
-                # Ready once the agent has drawn something and stopped changing.
-                if shown != "" and shown == last:
-                    quiet = quiet + 1
-                else:
-                    quiet = 0
-                if quiet >= 3:
-                    val (after_send, _s) = _cmd(d, QUESTION)
-                    d = after_send
-                    sent = true
-            last = shown
+                quiet = 0
+            # Latched: Kimi's key tip is transient, so seeing it once counts.
+            if _input_ready(harness, shown):
+                live = true
+            if quiet >= 3 and live:
+                val (after_send, _s) = _cmd(d, QUESTION)
+                d = after_send
+                sent = true
+                sent_at = waited
+        elif shown.contains("Continue anyway?"):
+            # Codex asks before falling back when it dislikes TERM; "y" is a
+            # text line, not a named key. (pane_backend now sets TERM for
+            # smux panes, so this is a belt-and-braces path.)
+            val (after_y, _y) = _cmd(d, "y")
+            d = after_y
         elif shown.contains(ANSWER):
+            delivered = true
             answered = true
+        elif shown.contains(QUESTION_ECHO):
+            delivered = true
+        elif not delivered and waited - sent_at >= ECHO_BUDGET_S:
+            undelivered = true
+        last = shown
     val screen = d.screen.join("\n")
     val frame = cs_render(d, 140, 34)
     val (_gone, killed) = _cmd(d, "/kill a1")
-    LiveRun(launched: launched, answered: answered, screen: screen,
+    LiveRun(launched: launched, answered: answered, delivered: delivered, screen: screen,
         frame: frame, killed: killed)
 
 # An agent CLI absent from this host is a visible BLOCKED row, not a pass and
@@ -110,15 +171,55 @@ fn _blocked(harness: text) -> bool:
     pending("BLOCKED: " + harness + " is not on PATH on this host")
     true
 
+# An agent that launched, received the question, and answered with a
+# provider-side usage/rate limit is a visible BLOCKED row: the
+# dashboard-to-pane pipeline worked end to end; the host account is exhausted.
+fn _provider_limited(run: LiveRun, harness: text) -> bool:
+    if run.screen.contains("usage limit") or run.screen.contains("rate limit") or run.screen.lower().contains("quota exceeded"):
+        pending("BLOCKED: " + harness +
+            " account is provider-rate-limited on this host; the pane pipeline itself delivered the question and received a reply")
+        return true
+    false
+
+# Claude Code's one-time workspace-trust dialog cannot be confirmed through a
+# Windows smux pane: it needs Esc/arrow input, and the ConPTY input path
+# swallows ESC and degrades CSI sequences (see _dialog_key note). On a host
+# where the folder is already trusted the example passes; here it is a
+# visible BLOCKED row, not a product failure.
+fn _trust_dialog_stuck(run: LiveRun) -> bool:
+    if not run.answered and run.screen.contains("trust this folder"):
+        pending("BLOCKED: claude shows its one-time workspace-trust dialog, which needs Esc/arrow keys that the Windows ConPTY input path cannot deliver (see bug doc); trust the folder once on this host to enable this example")
+        return true
+    # Same ConPTY Esc limitation: the "new MCP servers found" dialog is
+    # dismissed with Esc, which never reaches the pane on Windows smux.
+    if not run.answered and (run.screen + run.frame).contains("MCP servers found"):
+        pending("BLOCKED: claude shows its one-time 'new MCP servers found' dialog, which is dismissed with Esc that the Windows ConPTY input path cannot deliver; approve the project MCP servers once on this host to enable this example")
+        return true
+    false
+
+# Codex self-updates over the network on launch on some hosts; while the
+# installer owns the pane the agent never reads the question.
+fn _self_updating(run: LiveRun, harness: text) -> bool:
+    if not run.answered and (run.screen + run.frame).contains("Updating Codex via"):
+        pending("BLOCKED: " + harness + " is running its own network self-update in the pane and never reached its prompt; update it once on this host to enable this example")
+        return true
+    false
+
 # The text right of the dashboard/screen divider on every frame row.
+# The divider is CS_DIVIDER (U+2502 BOX DRAWINGS LIGHT VERTICAL) in
+# src/app/llm_caret/cs_dashboard.spl — not an ASCII pipe.
+# Extraction goes through split("│"), not index_of/substring: the seed's
+# index_of/substring mix byte and char offsets around multibyte characters
+# (2026-10-22, phase-1 seed), leaving corrupted line starts that make
+# to_contain fail on otherwise-matching text.
 fn right_half(frame: text) -> text:
     var out: [text] = []
-    # Row 0 is the full-width status header; its own "  |  " is not the divider.
+    # Row 0 is the full-width status header; it has no divider.
     val rows = frame.split("\n")
     for line in rows[1:]:
-        val bar = line.index_of("|")
-        if bar > 0:
-            out.push(line.substring(bar + 1, line.len()))
+        val parts = line.split("│")
+        if parts.len() > 1:
+            out.push(parts[1..].join("│"))
     out.join("\n")
 
 describe "cs dashboard drives live agents in panes":
@@ -129,6 +230,10 @@ describe "cs dashboard drives live agents in panes":
             return
         step("Launch claude from the dashboard and type the question")
         val run = drive_agent("cs-live-claude", "claude", 180)
+        if _provider_limited(run, "claude"):
+            return
+        if _trust_dialog_stuck(run):
+            return
         # @capture(tui): split frame with Claude's answer on the right
         step("The pane was created for the agent")
         expect(run.launched).to_contain("launched a1 in pane")
@@ -144,6 +249,10 @@ describe "cs dashboard drives live agents in panes":
             return
         step("Launch codex from the dashboard and type the question")
         val run = drive_agent("cs-live-codex", "codex", 180)
+        if _provider_limited(run, "codex"):
+            return
+        if _self_updating(run, "codex"):
+            return
         # @capture(tui): split frame with Codex's answer on the right
         step("The pane was created for the agent")
         expect(run.launched).to_contain("launched a1 in pane")
@@ -159,9 +268,13 @@ describe "cs dashboard drives live agents in panes":
             return
         step("Launch kimi from the dashboard and type the question")
         val run = drive_agent("cs-live-kimi", "kimi", 180)
+        if _provider_limited(run, "kimi"):
+            return
         # @capture(tui): split frame with Kimi's answer on the right
         step("The pane was created for the agent")
         expect(run.launched).to_contain("launched a1 in pane")
+        step("The question reached Kimi's input line")
+        expect(if run.delivered: "delivered" else: "question not delivered").to_equal("delivered")
         step("Kimi computed the answer, and it shows in the agent half of the frame")
         expect(run.answered).to_equal(true)
         expect(right_half(run.frame)).to_contain(ANSWER)

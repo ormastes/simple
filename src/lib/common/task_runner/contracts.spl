@@ -35,8 +35,55 @@ struct TaskRunnerAttemptV1:
     result_digest: text
     transport_execution_digest: text
 
+struct AnalysisKeyV1:
+    snapshot_id: text
+    scope_id: text
+    target_id: text
+    policy_digest: text
+    analyzer_profile: text
+
+struct AnalysisJobLeaseV1:
+    key: AnalysisKeyV1
+    lease_generation: i64
+    owner_id: text
+
+fn analysis_key_error_v1(value: AnalysisKeyV1) -> text:
+    for field in [value.snapshot_id, value.scope_id, value.target_id, value.analyzer_profile]:
+        if field == "" or field.len() > 4096 or field.contains("\n") or field.contains("\r"):
+            return "invalid analysis key field"
+    if not builder_digest_valid_v1(value.policy_digest):
+        return "invalid analysis policy digest"
+    ""
+
+fn analysis_key_v1(value: AnalysisKeyV1) -> Result<text, text>:
+    val invalid = analysis_key_error_v1(value)
+    if invalid != "": return Err(invalid)
+    var payload = "SIMPLE-ANALYSIS-KEY-1\n"
+    for field in [value.snapshot_id, value.scope_id, value.target_id,
+            value.policy_digest, value.analyzer_profile]:
+        payload = payload + str(field.len()) + ":" + field
+    Ok(sha256_text(payload))
+
+fn analysis_key_digest_v1(value: AnalysisKeyV1) -> Result<text, text>:
+    analysis_key_v1(value)
+
+fn analysis_job_lease_error_v1(value: AnalysisJobLeaseV1) -> text:
+    val invalid_key = analysis_key_error_v1(value.key)
+    if invalid_key != "": return invalid_key
+    if value.lease_generation < 1: return "invalid analysis lease generation"
+    if value.owner_id == "" or value.owner_id.len() > 4096 or
+            value.owner_id.contains("\n") or value.owner_id.contains("\r"):
+        return "invalid analysis lease owner"
+    ""
+
+fn analysis_job_lease_v1(value: AnalysisJobLeaseV1) -> Result<text, text>:
+    val invalid = analysis_job_lease_error_v1(value)
+    if invalid != "": return Err(invalid)
+    analysis_key_v1(value.key)
+
 fn task_runner_identity_v1(value: TaskRunnerIdentityV1) -> Result<text, text>:
-    if value.kind != "build" and value.kind != "test": return Err("invalid task kind")
+    if value.kind != "build" and value.kind != "test" and value.kind != "analysis":
+        return Err("invalid task kind")
     for field in [value.task_id, value.backend, value.phase]:
         if field == "" or field.len() > 4096: return Err("invalid task identity field")
     if value.case_id.len() > 4096: return Err("task case identity exceeds bound")
@@ -65,7 +112,7 @@ fn task_runner_attempt_error_v1(value: TaskRunnerAttemptV1) -> text:
         # A later sibling crash must not erase validated completed task evidence.
         if value.status == "passed" and value.task_exit_code != 0:
             return "passing task has failed task result"
-        if value.status == "failed" and value.reason != "compile" and value.reason != "assertion":
+        if value.status == "failed" and value.reason != "compile" and value.reason != "assertion" and value.reason != "analysis":
             return "ordinary failure lacks attributable reason"
     elif value.status == "skipped" or value.status == "pending":
         if not value.result_validated or not builder_digest_valid_v1(value.result_digest):
@@ -91,6 +138,9 @@ fn task_runner_attempt_error_v1(value: TaskRunnerAttemptV1) -> text:
     ""
 
 export TaskRunnerIdentityV1, TaskRunnerAttemptV1
+export AnalysisKeyV1, AnalysisJobLeaseV1
+export analysis_key_error_v1, analysis_key_v1, analysis_key_digest_v1
+export analysis_job_lease_error_v1, analysis_job_lease_v1
 export task_runner_identity_v1, task_runner_attempt_error_v1
 
 fn task_runner_native_exception_v1(exit_code: i64) -> bool:

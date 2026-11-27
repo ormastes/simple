@@ -11,7 +11,7 @@
     .globl rt_arm32_enter_user_first
     .type rt_arm32_enter_user_first, %function
 rt_arm32_enter_user_first:
-    push {r4-r11, lr}
+    push {r4-r11, r12, lr}
     ldr r2, =rt_arm32_user_entry_pc
     str r0, [r2]
     ldr r2, =rt_arm32_saved_kernel_sp
@@ -61,7 +61,7 @@ rt_arm32_svc_resume_kernel:
     ldr sp, [r1]
     ldr r1, =rt_arm32_completed_exit_status
     ldr r0, [r1]
-    pop {r4-r11, pc}
+    pop {r4-r11, r12, pc}
 
     /* Restore a complete ARM32 user context. The C owner validates USR mode,
      * alignment, and nonzero PC/SP before reaching this noreturn capsule. */
@@ -98,7 +98,7 @@ rt_arm32_context_restore_asm:
     .globl rt_arm32_context_roundtrip_enter
     .type rt_arm32_context_roundtrip_enter, %function
 rt_arm32_context_roundtrip_enter:
-    push {r4-r11, lr}
+    push {r4-r11, r12, lr}
     ldr r1, =rt_arm32_saved_kernel_sp
     str sp, [r1]
     b rt_arm32_context_restore_asm

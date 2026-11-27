@@ -1,0 +1,142 @@
+# Actual snapshot metadata exercises validation and compact-authority lifetime.
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1,
+    scv_compile_snapshot_revision_id_v1, scv_compile_snapshot_provenance_v1,
+    scv_compile_snapshot_receipt_v1, scv_compile_snapshot_open_v1}
+use std.nogc_sync_mut.io_runtime.{cwd, dir_create_all, file_write_exact,
+    getpid, time_now_unix_micros}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
+    transient_scope_pause, transient_scope_end}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host, host_path_native,
+    host_path_release_cached_platform_v1}
+
+val SNAPSHOT_OPEN_ROOT: text = cwd() + "/build/test/snapshot-open-" +
+    getpid().to_text() + "-" + time_now_unix_micros().to_text()
+
+fn snapshot_open_fixture(name: text, unsafe_row: bool = false) -> (text, ScvCompileSnapshotV1):
+    val root = (SNAPSHOT_OPEN_ROOT + "/" + name).replace("\\", "/")
+    val source = "fn main() -> i64: 42\n"
+    val source_digest = sha256_text(source)
+    val identity = if unsafe_row: "../escape.spl" else: "src/main.spl"
+    val manifest = "{identity}|sha256_{source_digest}|{source.len()}"
+    val digest = sha256_text(manifest)
+    val tree = "scv-tree-v1-" + digest
+    val revision = scv_compile_snapshot_revision_id_v1(tree, digest)
+    val commit = "scv-compile-v1-" + sha256_text("simple/scv-compile-commit/v1|{tree}|1")
+    val snapshot_root = root + "/build/scv/snapshots/" + revision
+    val provenance_path = snapshot_root + "/SCV_COMPILE_SNAPSHOT"
+    val receipt_path = root + "/build/scv/receipts/" + revision + ".receipt"
+    assert_true(dir_create_all(snapshot_root), "create snapshot metadata directory")
+    assert_true(dir_create_all(root + "/build/scv/receipts"), "create receipt directory")
+    val provenance = scv_compile_snapshot_provenance_v1(revision, commit, tree, digest, 1)
+    assert_true(file_write_exact(snapshot_root + "/SCV_COMPILE_INVENTORY", manifest),
+        "publish actual manifest bytes")
+    assert_true(file_write_exact(provenance_path, provenance), "publish provenance bytes")
+    assert_true(file_write_exact(receipt_path,
+        scv_compile_snapshot_receipt_v1(provenance, revision)), "publish receipt bytes")
+    (root, ScvCompileSnapshotV1(valid: true, reason: "ok", revision_id: revision,
+        commit_id: commit, tree_id: tree, inventory_digest: digest, inventory_count: 1,
+        snapshot_root: snapshot_root, provenance_path: provenance_path,
+        receipt_path: receipt_path, source_drifted: false))
+
+fn open_fixture(root: text, expected: ScvCompileSnapshotV1) -> ScvCompileSnapshotV1:
+    scv_compile_snapshot_open_v1(root, expected.snapshot_root, expected.revision_id,
+        expected.commit_id, expected.tree_id, expected.inventory_digest)
+
+describe("snapshot open scratch owner", fn():
+    it("retains compact authority across retirement and later allocations", fn():
+        val (root, expected) = snapshot_open_fixture("valid")
+        val opened = open_fixture(root, expected)
+        assert_equal(transient_array_scope_state_v1(), 0, "owned scratch retired")
+        var later: [text] = []
+        var index = 0
+        while index < 512:
+            later.push("later-snapshot-allocation-{index}-" + sha256_text(index.to_text()))
+            index = index + 1
+        assert_equal(later.len(), 512, "keep later allocations live")
+        assert_true(opened.valid, "actual manifest and receipt admitted")
+        assert_equal(opened.reason, "ok", "retained reason")
+        assert_equal(opened.revision_id, expected.revision_id, "retained revision")
+        assert_equal(opened.commit_id, expected.commit_id, "retained commit")
+        assert_equal(opened.tree_id, expected.tree_id, "retained tree")
+        assert_equal(opened.inventory_digest, expected.inventory_digest, "retained digest")
+        assert_equal(opened.inventory_count, 1, "retained inventory count")
+        assert_equal(opened.snapshot_root, expected.snapshot_root, "retained canonical root")
+        assert_equal(opened.provenance_path, expected.provenance_path, "retained provenance path")
+        assert_equal(opened.receipt_path, expected.receipt_path, "retained receipt path")
+        assert_equal(opened.source_drifted, false, "retained drift state")
+    )
+
+    it("still rejects tampered manifest bytes", fn():
+        val (root, expected) = snapshot_open_fixture("tampered-manifest")
+        assert_true(file_write_exact(expected.snapshot_root + "/SCV_COMPILE_INVENTORY", "changed"),
+            "alter manifest while retaining old authority")
+        val opened = open_fixture(root, expected)
+        assert_equal(transient_array_scope_state_v1(), 0, "rejection scratch retired")
+        assert_equal(opened.valid, false, "tampered manifest refused")
+        assert_equal(opened.reason, "snapshot-open-inventory-mismatch", "hash check preserved")
+    )
+
+    it("keeps a cold platform cache valid after owned scratch ends", fn():
+        val (root, expected) = snapshot_open_fixture("cold-platform-cache")
+        val expected_platform = host_is_windows_host()
+        # Fixture writes normally prime the platform adapter. Reset directly
+        # before open to exercise initialization at the actual read boundary.
+        host_path_release_cached_platform_v1()
+        val opened = open_fixture(root, expected)
+        assert_equal(transient_array_scope_state_v1(), 0, "open scratch retired")
+        var later: [text] = []
+        var index = 0
+        while index < 512:
+            later.push("reuse-retired-platform-cache-storage-{index}")
+            index = index + 1
+        assert_equal(later.len(), 512, "keep churn live before reading cached platform")
+        assert_true(opened.valid, "cold platform still authenticates snapshot")
+        assert_equal(host_is_windows_host(), expected_platform,
+            "cached platform array survives scratch retirement")
+        assert_equal(host_path_native("src/main.spl").replace("\\", "/"), "src/main.spl",
+            "later file adapter reads valid platform cache")
+    )
+
+    it("still rejects a hash-valid unsafe row", fn():
+        val (root, expected) = snapshot_open_fixture("unsafe-row", true)
+        val opened = open_fixture(root, expected)
+        assert_equal(opened.valid, false, "unsafe identity refused")
+        assert_equal(opened.reason, "snapshot-open-inventory-row-invalid", "row validation preserved")
+    )
+
+    it("still rejects a changed receipt", fn():
+        val (root, expected) = snapshot_open_fixture("tampered-receipt")
+        assert_true(file_write_exact(expected.receipt_path, "changed"), "alter receipt bytes")
+        val opened = open_fixture(root, expected)
+        assert_equal(opened.valid, false, "receipt mismatch refused")
+        assert_equal(opened.reason, "snapshot-open-receipt-mismatch", "receipt check preserved")
+    )
+
+    it("does not retire an active caller scope", fn():
+        val (root, expected) = snapshot_open_fixture("active")
+        assert_true(transient_scope_begin(), "caller acquires scratch")
+        val opened = open_fixture(root, expected)
+        val accepted = opened.valid
+        val state = transient_array_scope_state_v1()
+        val ended = transient_scope_end()
+        assert_true(ended, "caller retains retirement")
+        assert_true(accepted, "active borrowed scope still authenticates")
+        assert_equal(state, 1, "callee leaves active caller state")
+    )
+
+    it("does not retire a paused caller scope", fn():
+        val (root, expected) = snapshot_open_fixture("paused")
+        assert_true(transient_scope_begin(), "caller acquires scratch")
+        assert_true(transient_scope_pause(), "caller pauses scratch")
+        val opened = open_fixture(root, expected)
+        val accepted = opened.valid
+        val state = transient_array_scope_state_v1()
+        val ended = transient_scope_end()
+        assert_true(ended, "caller retains retirement")
+        assert_true(accepted, "paused borrowed scope still authenticates")
+        assert_equal(state, 2, "callee leaves paused caller state")
+    )
+)

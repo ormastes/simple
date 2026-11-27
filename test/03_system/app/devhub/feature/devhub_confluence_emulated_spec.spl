@@ -1,0 +1,211 @@
+"""
+## Purpose and audience
+Near-system scenarios for DevHub maintainers: the production Confluence adapter and the
+`devhub wiki` CLI reach a scripted emulator over a real loopback socket through curl, so
+URL building, `-G` query encoding, Basic auth and body shape are all exercised.
+## Operator workflow
+From the repo root:
+`SIMPLE_BINARY=<simple> SIMPLE_EXECUTION_MODE=interpret <simple> run test/03_system/app/devhub/feature/devhub_confluence_emulated_spec.spl`
+then read the `SPEC FILE VERDICT:` line.
+## Compatibility and limitations
+Responses are synthetic and labelled in `test/fixtures/devhub/emulated/index.sdn`. The
+adapter deliberately never retries, because writes must not replay.
+Unsupported behavior: history, move, attachment and label verbs are listed in the survey.
+## Verification guidance and troubleshooting
+A client defect appears as `MISMATCH` text in the assertion message; the raw log is the
+`EMU_LOG` file.
+"""
+# Lifecycle: doc/01_research/app/devhub/service_interface_survey_2026-10-31.md ;
+# doc/03_plan/app/tools/devhub_multi_target_gateway_plan.md ;
+# doc/04_architecture/app/tools/devhub_multi_target_gateway.md ;
+# doc/05_design/app/devhub/devhub_overview.md
+# @manual_section: wiki-confluence
+
+use std.spec.*
+use std.spec.step
+use app.devhub.config.{load_config}
+use app.devhub.adapter_confluence.{confluence_list_pages, confluence_get_page, confluence_create_page, confluence_update_page, confluence_delete_page, confluence_search_pages}
+use test.fixtures.devhub.emulated.emu_harness.{emu_start, emu_base, emu_row, emu_load, emu_problems, emu_stop, emu_refused_after_stop, emu_home, emu_devhub}
+
+# base64("syn@example.test:syn-conf-token"), computed outside the product.
+val AUTH = "Authorization=Basic c3luQGV4YW1wbGUudGVzdDpzeW4tY29uZi10b2tlbg=="
+val JSON_CT = "Content-Type: application/json"
+val ROOT = "/wiki/rest/api/content"
+val PAGE_QUERY = "?expand=body.storage%2Cversion%2Cspace"
+val LIST_QUERY = "?type=page&limit=25&expand=version%2Cspace&spaceKey=DOCS"
+
+fn setup_confluence() -> text:
+    val addr = emu_start("confluence")
+    val _h = emu_home("confluence:\n    url: {emu_base()}/wiki\n    user: syn@example.test\n", "confluence:\n    token: syn-conf-token\n")
+    addr
+
+fn assert_get_failure(status: i64, fixture: text, wanted: text, mode: text = "-"):
+    val gen_id = emu_load([emu_row("GET", ROOT + "/1001" + PAGE_QUERY, AUTH, "none", status, JSON_CT, fixture, mode)])
+    val (ok, _page, message) = confluence_get_page(load_config(), "1001")
+    expect(emu_problems(gen_id, 1)).to_equal("")
+    expect(ok).to_equal(false)
+    expect(message).to_contain(wanted)
+
+describe "devhub wiki over an emulated Confluence":
+    it "lists a space's pages with an encoded query":
+        # @req REQ-DEVHUB-EMU-WIKI-001
+        step("Configure synthetic Basic auth and list DOCS")
+        expect(setup_confluence()).to_contain("127.0.0.1:")
+        val gen_id = emu_load([emu_row("GET", ROOT + LIST_QUERY, AUTH + " ;; Accept=application/json", "none", 200, JSON_CT, "@confluence/content_list.json")])
+        # @capture(protocol): the GET content request
+        val (ok, items, _raw) = confluence_list_pages(load_config(), "DOCS", 25)
+        step("Check titles and versions parsed in order")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(true)
+        expect(items.len()).to_equal(2)  # oracle: fixture has two pages
+        expect(items[0].title).to_equal("Widget runbook")
+        expect(items[1].space_id).to_equal("DOCS")
+
+    it "follows _links.next to reach every page":
+        # @req REQ-DEVHUB-EMU-WIKI-002
+        step("Ask for five, serve one with _links.next as a capped server would")
+        val gen_id = emu_load([
+            emu_row("GET", ROOT + "?type=page&limit=5&expand=version%2Cspace&spaceKey=DOCS", AUTH, "none", 200, JSON_CT, "@confluence/content_page1.json"),
+            emu_row("GET", "/wiki/rest/api/content?type=page&limit=1&expand=version,space&start=1", AUTH, "none", 200, JSON_CT, "@confluence/content_empty.json")
+        ])
+        # @capture(protocol): both GET requests
+        val (ok, _items, _raw) = confluence_list_pages(load_config(), "DOCS", 5)
+        expect(ok).to_equal(true)
+        expect(emu_problems(gen_id, 2)).to_equal("")
+
+    it "rejects a next link that would send credentials to another host":
+        # @req REQ-DEVHUB-EMU-WIKI-002
+        step("Serve an absolute next link on a foreign host")
+        val gen_id = emu_load([emu_row("GET", ROOT + "?type=page&limit=5&expand=version%2Cspace&spaceKey=DOCS", AUTH, "none", 200, JSON_CT, "@confluence/content_hostile_next.json")])
+        # @capture(protocol): one request only, then the refusal
+        val (ok, _items, message) = confluence_list_pages(load_config(), "DOCS", 5)
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(false)
+        expect(message).to_contain("outside the configured endpoint")
+
+    it "returns an empty list without error":
+        # @req REQ-DEVHUB-EMU-WIKI-003
+        step("Answer no results")
+        val gen_id = emu_load([emu_row("GET", ROOT + LIST_QUERY, AUTH, "none", 200, JSON_CT, "@confluence/content_empty.json")])
+        # @capture(protocol): the GET content request
+        val (ok, items, _raw) = confluence_list_pages(load_config(), "DOCS", 25)
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(true)
+        expect(items.len()).to_equal(0)
+
+    it "views a page with its storage body and absolute URL":
+        # @req REQ-DEVHUB-EMU-WIKI-004
+        step("Fetch page 1001")
+        val gen_id = emu_load([emu_row("GET", ROOT + "/1001" + PAGE_QUERY, AUTH, "none", 200, JSON_CT, "@confluence/page.json")])
+        # @capture(protocol): the GET page request
+        val (ok, page, _raw) = confluence_get_page(load_config(), "1001")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(true)
+        expect(page.body_storage).to_equal("<p>Restart the widget daemon.</p>")
+        expect(page.ref.version).to_equal(3)  # oracle: fixture version.number
+        expect(page.ref.url).to_equal(emu_base() + "/wiki/spaces/DOCS/pages/1001")
+
+    it "encodes the CQL of a title search":
+        # @req REQ-DEVHUB-EMU-WIKI-005
+        step("Search a title holding a quote and a space")
+        val target = ROOT + "/search?cql=type%3Dpage%20and%20title~%22a%20%5C%22b%22%20and%20space%3D%22DOCS%22&limit=5&expand=version%2Cspace"
+        val gen_id = emu_load([emu_row("GET", target, AUTH, "none", 200, JSON_CT, "@confluence/content_list.json")])
+        # @capture(protocol): the encoded search target
+        val (ok, _items, _raw) = confluence_search_pages(load_config(), "a \"b", "DOCS", 5)
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(true)
+
+    it "creates a page under a parent with a storage body":
+        # @req REQ-DEVHUB-EMU-WIKI-006
+        step("Create a child page and check the v1 body")
+        val want = "has:\"title\": \"New page\" ;; \"key\": \"DOCS\" ;; \"value\": \"<p>x</p>\" ;; \"representation\": \"storage\" ;; \"ancestors\": [\{\"id\": \"1001\"\}]"
+        val gen_id = emu_load([emu_row("POST", ROOT, AUTH + " ;; Content-Type=application/json", want, 200, JSON_CT, "@confluence/created.json")])
+        # @capture(protocol): POST content body
+        val (ok, ref, _raw) = confluence_create_page(load_config(), "DOCS", "New page", "<p>x</p>", "1001")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(true)
+        expect(ref.id).to_equal("1009")
+
+    it "updates a page by sending the next version number":
+        # @req REQ-DEVHUB-EMU-WIKI-007
+        step("Update from version 3")
+        val want = "has:\"version\": \{\"number\": 4 ;; \"message\": \"edit\""
+        val gen_id = emu_load([emu_row("PUT", ROOT + "/1001", AUTH, want, 200, JSON_CT, "@confluence/updated.json")])
+        # @capture(protocol): PUT content body
+        val (ok, ref, _raw) = confluence_update_page(load_config(), "1001", "Widget runbook", "<p>y</p>", 3, "edit")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(true)
+        expect(ref.version).to_equal(4)  # oracle: fixture version.number
+
+    it "deletes a page and accepts an empty 204":
+        # @req REQ-DEVHUB-EMU-WIKI-008
+        step("Delete page 1001")
+        val gen_id = emu_load([emu_row("DELETE", ROOT + "/1001", AUTH, "none", 204, "", "")])
+        # @capture(protocol): the DELETE request
+        val (ok, _message) = confluence_delete_page(load_config(), "1001")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(true)
+
+    it "reports 401 with the server's message":
+        # @req REQ-DEVHUB-EMU-WIKI-009
+        step("Answer 401")
+        # @capture(protocol): the refused request
+        assert_get_failure(401, "@confluence/error_401.json", "deprecated")
+
+    it "reports 403 with the server's message":
+        # @req REQ-DEVHUB-EMU-WIKI-009
+        step("Answer 403")
+        # @capture(protocol): the refused request
+        assert_get_failure(403, "@confluence/error_403.json", "Not permitted")
+
+    it "reports 404 with the server's message":
+        # @req REQ-DEVHUB-EMU-WIKI-009
+        step("Answer 404")
+        # @capture(protocol): the refused request
+        assert_get_failure(404, "@confluence/error_404.json", "No content found")
+
+    it "reports 429 once because the adapter never replays":
+        # @req REQ-DEVHUB-EMU-WIKI-009
+        step("Answer 429 with Retry-After and count one request")
+        val gen_id = emu_load([emu_row("GET", ROOT + "/1001" + PAGE_QUERY, AUTH, "none", 429, JSON_CT + " ;; Retry-After: 1", "@confluence/error_429.json")])
+        # @capture(protocol): the single request
+        val (ok, _page, message) = confluence_get_page(load_config(), "1001")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(false)
+        expect(message).to_contain("Rate limit")
+
+    it "reports a 500 as a failure":
+        # @req REQ-DEVHUB-EMU-WIKI-009
+        step("Answer 500")
+        # @capture(protocol): the failed request
+        assert_get_failure(500, "server exploded", "server exploded")
+
+    it "rejects malformed JSON":
+        # @req REQ-DEVHUB-EMU-WIKI-010
+        step("Answer 200 with a broken document")
+        # @capture(protocol): the malformed response
+        assert_get_failure(200, "\{\"id\":", "invalid JSON response")
+
+    it "rejects a truncated body as a transport error":
+        # @req REQ-DEVHUB-EMU-WIKI-010
+        step("Close the socket before Content-Length bytes arrive")
+        # @capture(protocol): the truncated response
+        assert_get_failure(200, "@confluence/page.json", "transport error", "truncate")
+
+    it "lists through the wiki CLI as a user would":
+        # @req REQ-DEVHUB-EMU-WIKI-011
+        step("Run wiki list against the Confluence backend")
+        val gen_id = emu_load([emu_row("GET", ROOT + "?type=page&limit=25&expand=version%2Cspace&spaceKey=DOCS", AUTH, "none", 200, JSON_CT, "@confluence/content_list.json")])
+        # @capture(terminal): the rendered page table
+        val result = emu_devhub(["wiki", "list", "--backend", "confluence", "--space", "DOCS", "--no-pager"])
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(result.rc).to_equal(0)
+        expect(result.combined()).to_contain("Widget runbook")
+
+    it "stops the emulator and leaves no process listening":
+        # @req REQ-DEVHUB-EMU-WIKI-012
+        step("Shut the emulator down and prove nothing accepts")
+        val addr = emu_base()[7:]
+        # @capture(protocol): the final SHUTDOWN log line
+        expect(emu_stop()).to_equal(true)
+        expect(emu_refused_after_stop(addr)).to_equal(true)

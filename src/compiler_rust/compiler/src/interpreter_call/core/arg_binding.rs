@@ -7,13 +7,177 @@ use crate::interpreter::evaluate_expr;
 use crate::interpreter::await_value;
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
-use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef, Parameter, SelfMode, Type};
+use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef, Parameter, SelfMode, Type, UnaryOp};
 use std::collections::HashMap;
 
 type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 const METHOD_SELF: &str = "self";
+
+/// Interpreter twin of the HIR `reject_callable_for_enum_slot` check: a
+/// function or type (constructor) value bound to a parameter declared as a
+/// user enum (`Kind` or `Kind?`) can never be an enum value. Without this the
+/// interpreter (and every non-strict JIT run that falls back to it) bound
+/// `kind_name(Vec4f)` and a later `case Some(I8):` matched it silently.
+/// Bug: doc/08_tracking/bug/match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14.md
+///
+/// `EnumVariantConstructor` (an unapplied payload variant such as `Kind.Pay`)
+/// is not refused here. `mod X:` dicts used to store unit variants in that
+/// encoding; they now store `Value::Enum` (fixed 2026-11-14), so refusing it
+/// is a possible later tightening, not done in that fix.
+pub(crate) fn reject_callable_for_enum_param(value: &Value, ty: Option<&Type>, enums: &Enums) -> Option<String> {
+    // Value shape first: it is a plain discriminant test, so the hot binding
+    // path never pays the enum-table lookup for ordinary data arguments.
+    let callable = matches!(
+        value,
+        Value::Constructor { .. }
+            | Value::Function { .. }
+            | Value::Lambda { .. }
+            | Value::BlockClosure { .. }
+            | Value::NativeFunction(_)
+            | Value::EnumType { .. }
+            | Value::TraitType { .. }
+    );
+    if !callable {
+        return None;
+    }
+    let enum_name = match ty? {
+        Type::Simple(name) => name,
+        Type::Optional(inner) => match inner.as_ref() {
+            Type::Simple(name) => name,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if matches!(enum_name.as_str(), "Option" | "Result") || !enums.contains_key(enum_name) {
+        return None;
+    }
+    Some(format!(
+        "is declared as enum `{enum_name}` but receives a {} value {}",
+        value.type_name(),
+        value.to_display_string()
+    ))
+}
+
+/// BUG-ADMISSION (doc/08_tracking/bug/bool_typed_parameter_accepts_non_bool_and_jit_corrupts_it_2026-08-04):
+/// does this argument expression statically prove a non-`bool` value at a
+/// `bool`-typed parameter? Only literal shapes qualify: an integer/float/text
+/// literal or a bare `nil`. Existence probes (`x.?`), Option payloads,
+/// coalesces, and every non-literal expression stay on the deliberate runtime
+/// PRESENCE contract (`present_value_as_bool_arg`): the runtime cannot tell
+/// `f(5)` from `f(x.?)`, but a literal is unambiguous. This is intentionally
+/// NOT a general argument-type check — typed non-bool identifiers need the
+/// HM-parity checker and are tracked as remaining scope in the bug doc.
+pub(crate) fn non_bool_literal_arg_kind(expr: &Expr) -> Option<&'static str> {
+    match expr {
+        Expr::Integer(_) | Expr::TypedInteger(..) => Some("integer"),
+        Expr::Float(_) | Expr::TypedFloat(..) => Some("float"),
+        Expr::String(_) | Expr::TypedString(..) | Expr::FString { .. } => Some("text"),
+        Expr::Array(_) | Expr::ArrayRepeat { .. } => Some("array"),
+        Expr::Tuple(_) => Some("tuple"),
+        Expr::Dict(_) => Some("dict"),
+        Expr::Nil => Some("nil"),
+        // `~0`, `-1`: a sign or bit-not over a numeric literal is still a literal.
+        Expr::Unary {
+            op: UnaryOp::Neg | UnaryOp::BitNot,
+            operand,
+        } => match non_bool_literal_arg_kind(operand)? {
+            kind @ ("integer" | "float") => Some(kind),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Reject a literal non-`bool` argument bound to a `bool`-typed parameter
+/// before any argument is evaluated: a rejected call must not run argument
+/// side effects. Returns `None` when the admission rule does not apply.
+fn reject_bool_literal_arg(expr: &Expr, param: &Parameter) -> Option<CompileError> {
+    if !matches!(param.ty.as_ref(), Some(Type::Simple(n)) if n == "bool") {
+        return None;
+    }
+    let kind = non_bool_literal_arg_kind(expr)?;
+    let ctx = ErrorContext::new()
+        .with_code(codes::TYPE_MISMATCH)
+        .with_help(format!(
+            "pass a `bool` value or an existence probe (`x.?`); a {kind} literal is not a bool"
+        ));
+    Some(CompileError::semantic_with_context(
+        format!(
+            "type mismatch: parameter '{}' is declared 'bool' but the argument is a {kind} literal",
+            param.name
+        ),
+        ctx,
+    ))
+}
+
+/// Static bool admission pre-scan (same bug doc as `reject_bool_literal_arg`):
+/// mirror the binding cursor so a literal non-bool argument at a `bool`
+/// parameter is rejected BEFORE any argument is evaluated. Spreads fan out per
+/// element with a statically unknown count, so a call containing one keeps the
+/// pure runtime contract; variadic callees are excluded by the caller.
+pub(crate) fn reject_bool_literal_args(
+    args: &[Argument],
+    params_to_bind: &[&Parameter],
+    named_params: &std::collections::HashSet<&str>,
+) -> Result<(), CompileError> {
+    if args.iter().any(|a| matches!(a.value, Expr::Spread(_))) {
+        return Ok(());
+    }
+    let mut admission_idx = 0usize;
+    for arg in args {
+        if let Some(name) = &arg.name {
+            if let Some(param) = params_to_bind.iter().find(|p| &p.name == name) {
+                if let Some(err) = reject_bool_literal_arg(&arg.value, param) {
+                    return Err(err);
+                }
+            }
+            continue;
+        }
+        while admission_idx < params_to_bind.len() && named_params.contains(params_to_bind[admission_idx].name.as_str())
+        {
+            admission_idx += 1;
+        }
+        let Some(param) = params_to_bind.get(admission_idx) else {
+            break;
+        };
+        if let Some(err) = reject_bool_literal_arg(&arg.value, param) {
+            return Err(err);
+        }
+        admission_idx += 1;
+    }
+    Ok(())
+}
+
+/// Convenience wrapper for pre-evaluated / static / UFCS / method call sites
+/// that have a raw `Parameter` slice and AST `Argument` slice without prebuilt
+/// lookup sets. When `skip_self` is `true` (mirroring `SelfMode::SkipSelf`),
+/// any parameter named `self` is excluded from positional/named admission.
+pub(crate) fn reject_bool_literal_args_with_self(
+    params: &[Parameter],
+    args: &[Argument],
+    skip_self: bool,
+) -> Result<(), CompileError> {
+    if args.is_empty() || args.iter().any(|a| matches!(a.value, Expr::Spread(_))) {
+        return Ok(());
+    }
+    let params_to_bind: Vec<&Parameter> = params
+        .iter()
+        .filter(|p| !(skip_self && p.name == METHOD_SELF))
+        .collect();
+    if params_to_bind.iter().any(|p| p.variadic) {
+        return Ok(());
+    }
+    let named_params: std::collections::HashSet<&str> = args.iter().filter_map(|a| a.name.as_deref()).collect();
+    reject_bool_literal_args(args, &params_to_bind, &named_params)
+}
+
+/// Convenience wrapper for pre-evaluated / static / UFCS call sites that have
+/// a raw `Parameter` slice and AST `Argument` slice without prebuilt lookup sets.
+pub(crate) fn reject_bool_literal_args_for_slice(params: &[Parameter], args: &[Argument]) -> Result<(), CompileError> {
+    reject_bool_literal_args_with_self(params, args, false)
+}
 
 // Value-type (struct) arguments are passed by copy. Until 2026-08-21 every
 // bind built a `HashSet` of ALL value-type class names by iterating and
@@ -152,7 +316,7 @@ static EMPTY_INJECTED: std::sync::LazyLock<HashMap<String, Value>> = std::sync::
 /// call sites into hard errors at once; that belongs in its own change.
 ///
 /// Returns `None` when the rule does not apply, so callers fall through.
-fn present_value_as_bool_arg(value: &Value, ty: Option<&Type>) -> Option<Value> {
+pub(crate) fn present_value_as_bool_arg(value: &Value, ty: Option<&Type>) -> Option<Value> {
     if !matches!(ty, Some(Type::Simple(n)) if n == "bool") {
         return None;
     }
@@ -247,6 +411,10 @@ pub(crate) fn bind_args_with_injected(
     let mut positional_idx = 0usize;
     let mut variadic_values = Vec::new();
 
+    if variadic_param_idx.is_none() {
+        reject_bool_literal_args(args, &params_to_bind, &named_params)?;
+    }
+
     let coerce_param = |value: Value, ty: Option<&Type>| -> Value {
         // Unsigned-int coercion for u8..u64 parameter types.
         let value = match ty {
@@ -273,7 +441,8 @@ pub(crate) fn bind_args_with_injected(
                     other => other,
                 }
             }
-            _ => value,
+            // A bare literal bound to `[u8]` packs like every other typed binding.
+            _ => crate::interpreter::coerce_to_declared_type(value, ty),
         };
         // A non-bool landing on a `bool` parameter is a PRESENCE test, not an
         // unwrap. Must run BEFORE the generic Some(x) -> x below, which would
@@ -335,7 +504,7 @@ pub(crate) fn bind_args_with_injected(
                         // Regular parameter before variadic
                         let param = params_to_bind[positional_idx];
                         let val = coerce_param(wrap_trait_object!(spread_item, param.ty.as_ref()), param.ty.as_ref());
-                        validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
+                        validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name), enums);
                         bound.insert(param.name.clone(), val);
                     } else {
                         let ctx = ErrorContext::new()
@@ -370,7 +539,7 @@ pub(crate) fn bind_args_with_injected(
                     }
                     let param = params_to_bind[positional_idx];
                     let val = coerce_param(wrap_trait_object!(spread_item, param.ty.as_ref()), param.ty.as_ref());
-                    validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
+                    validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name), enums);
                     bound.insert(param.name.clone(), val);
                 }
                 positional_idx += 1;
@@ -422,7 +591,7 @@ pub(crate) fn bind_args_with_injected(
                     wrap_trait_object!(val, param.and_then(|p| p.ty.as_ref())),
                     param.and_then(|p| p.ty.as_ref()),
                 );
-                validate_unit!(&val, param.and_then(|p| p.ty.as_ref()), format!("parameter '{}'", name));
+                validate_unit!(&val, param.and_then(|p| p.ty.as_ref()), format!("parameter '{}'", name), enums);
                 bound.insert(name.clone(), val);
             } else {
                 // Positional argument
@@ -434,7 +603,7 @@ pub(crate) fn bind_args_with_injected(
                         // Regular positional parameter before variadic
                         let param = params_to_bind[positional_idx];
                         let val = coerce_param(wrap_trait_object!(val, param.ty.as_ref()), param.ty.as_ref());
-                        validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
+                        validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name), enums);
                         bound.insert(param.name.clone(), val);
                     }
                 } else {
@@ -448,10 +617,19 @@ pub(crate) fn bind_args_with_injected(
                         let ctx = ErrorContext::new()
                             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                             .with_help("check the function signature and provide the correct number of arguments");
+                        // Report the exact count when every argument is a plain
+                        // expression (no spread), matching the pre-evaluated
+                        // `bind_args_with_values` wording the diagnostics pin.
+                        let provided = if args.iter().any(|a| matches!(a.value, Expr::Spread(_))) {
+                            "more".to_string()
+                        } else {
+                            args.len().to_string()
+                        };
                         return Err(CompileError::semantic_with_context(
                             format!(
-                                "function expects {} argument(s), but more were provided",
-                                params_to_bind.len()
+                                "function expects {} argument(s), but {} were provided",
+                                params_to_bind.len(),
+                                provided
                             ),
                             ctx,
                         ));
@@ -484,7 +662,7 @@ pub(crate) fn bind_args_with_injected(
                         }
                     }
                     let val = coerce_param(wrap_trait_object!(val, param.ty.as_ref()), param.ty.as_ref());
-                    validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
+                    validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name), enums);
                     bound.insert(param.name.clone(), val);
                 }
                 positional_idx += 1;
@@ -641,7 +819,8 @@ pub(crate) fn bind_args_with_values_named(
                     other => other,
                 }
             }
-            _ => value,
+            // A bare literal bound to `[u8]` packs like every other typed binding.
+            _ => crate::interpreter::coerce_to_declared_type(value, ty),
         };
         // A non-bool landing on a `bool` parameter is a PRESENCE test, not an
         // unwrap. Must run BEFORE the generic Some(x) -> x below, which would
@@ -696,10 +875,20 @@ pub(crate) fn bind_args_with_values_named(
     // the one value sitting at its index, so the identity this fast path rests
     // on does not hold for it (`c.addall(7)` must bind `(7,)`, not `7`).
     if variadic_idx.is_none() && args.len() == bindable_len && arg_exprs.iter().all(|arg| arg.name.is_none()) {
+        if !arg_exprs.is_empty()
+            && arg_exprs.len() == args.len()
+            && !arg_exprs.iter().any(|a| matches!(a.value, Expr::Spread(_)))
+        {
+            for (param, arg) in params.iter().filter(is_bindable).zip(arg_exprs.iter()) {
+                if let Some(err) = reject_bool_literal_arg(&arg.value, param) {
+                    return Err(err);
+                }
+            }
+        }
         for (param, value) in params.iter().filter(is_bindable).zip(args.iter()) {
             let value = await_value(value.clone())?;
             let value = coerce_param(wrap_trait_object!(value, param.ty.as_ref()), param.ty.as_ref());
-            validate_unit!(&value, param.ty.as_ref(), format!("parameter '{}'", param.name));
+            validate_unit!(&value, param.ty.as_ref(), format!("parameter '{}'", param.name), enums);
             crate::perf_counters::bump(&crate::perf_counters::MECALL_STRING_ALLOCS, 1);
             bound.insert(param.name.clone(), value);
         }
@@ -722,6 +911,9 @@ pub(crate) fn bind_args_with_values_named(
     {
         let named_params: std::collections::HashSet<&str> =
             arg_exprs.iter().filter_map(|a| a.name.as_deref()).collect();
+        if variadic_idx.is_none() && !arg_exprs.is_empty() && arg_exprs.len() == args.len() {
+            reject_bool_literal_args(arg_exprs, &params_to_bind, &named_params)?;
+        }
         let mut positional_idx = 0usize;
         for (idx, value) in args.iter().enumerate() {
             let slot = match arg_exprs.get(idx).and_then(|a| a.name.as_deref()) {
@@ -805,7 +997,7 @@ pub(crate) fn bind_args_with_values_named(
         };
 
         let value = coerce_param(wrap_trait_object!(value, param.ty.as_ref()), param.ty.as_ref());
-        validate_unit!(&value, param.ty.as_ref(), format!("parameter '{}'", param.name));
+        validate_unit!(&value, param.ty.as_ref(), format!("parameter '{}'", param.name), enums);
         crate::perf_counters::bump(&crate::perf_counters::MECALL_STRING_ALLOCS, 1);
         bound.insert(param.name.clone(), value);
     }

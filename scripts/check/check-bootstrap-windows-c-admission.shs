@@ -31,4 +31,51 @@ fi
 selected=$(SIMPLE_PROJECT_ROOT="$root" SIMPLE_WORKTREE_STORAGE_ROOT="$capture" \
     bootstrap_stage3_windows_runnable_compiler "$compiler" --version)
 [ "$selected" = "$(cygpath -u "$compiler")" ] || { echo 'FAIL: wrong compiler admitted' >&2; exit 1; }
-printf 'PASS: real native compile, spaced paths, malformed source with stale object, missing tool, production admission\n'
+
+# Exercise the real C lock providers on Windows, not a compile-only twin.
+lock_capture="$capture/file-lock"
+mkdir -p "$lock_capture"
+trap 'status=$?; if [ "$status" -ne 0 ]; then for log in "$lock_capture"/*.log; do [ -f "$log" ] || continue; printf "FAIL LOG: %s\n" "$log" >&2; cat "$log" >&2; done; fi' EXIT
+winroot=$(cygpath -m "$root")
+win_capture=$(cygpath -m "$lock_capture")
+sources=$(awk '/^pub fn runtime_core_c_sources_v1/ {f=1} f && /^    \["/ {print; exit}' \
+    "$root/src/compiler/70.backend/backend/runtime_compiler.spl" |
+    sed 's/^    \[\(.*\)\]$/\1/' | tr -d '" ' | tr ',' ' ')
+[ -n "$sources" ] || { echo 'FAIL: no core-C source list for file-lock probe' >&2; exit 1; }
+compile_lock_object() {
+    name=$1
+    source=$2
+    MSYS2_ARG_CONV_EXCL='*' "$compiler" /nologo /c /O2 /Gy /MD /std:c11 \
+        /I "$winroot/src/runtime" /I "$winroot/src/runtime/platform" \
+        /DSIMPLE_ABI_VERSION=1 /DSIMPLE_ABI_VERSION_DEFERRED=0 \
+        /DSIMPLE_RUNTIME_MEMORY_OWNER=1 \
+        /DSIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING=1 /DSIMPLE_CORE_C_STANDALONE=1 \
+        "/Fo$win_capture/$name.obj" "$source" > "$lock_capture/$name.log" 2>&1
+}
+native_objs=
+for name in $sources; do
+    # runtime_native.c owns the weak fallback clock on MSVC; linking the
+    # strong runtime_timestamp.c twin as well produces duplicate symbols.
+    [ "$name" != runtime_timestamp ] || continue
+    compile_lock_object "$name" "$winroot/src/runtime/$name.c"
+    native_objs="$native_objs $win_capture/$name.obj"
+done
+compile_lock_object windows_file_lock_selfcheck "$winroot/src/runtime/test/rt_file_lock_windows_selfcheck.c"
+native_objs="$native_objs $win_capture/windows_file_lock_selfcheck.obj"
+# shellcheck disable=SC2086
+MSYS2_ARG_CONV_EXCL='*' "$compiler" /nologo $native_objs "/Fe$win_capture/native-file-lock.exe" \
+    kernel32.lib user32.lib ws2_32.lib winhttp.lib mswsock.lib bcrypt.lib advapi32.lib userenv.lib ntdll.lib \
+    d3d11.lib dxgi.lib pdh.lib netapi32.lib psapi.lib powrprof.lib dbghelp.lib \
+    ole32.lib oleaut32.lib shell32.lib crypt32.lib secur32.lib ncrypt.lib iphlpapi.lib \
+    gdi32.lib synchronization.lib > "$lock_capture/native-link.log" 2>&1
+"$lock_capture/native-file-lock.exe"
+
+compile_lock_object host_file_exports "$winroot/src/runtime/runtime_host_file_exports.c"
+compile_lock_object host_file_test_stubs "$winroot/src/runtime/test/runtime_host_file_exports_test_stubs.c"
+compile_lock_object host_file_lock_selfcheck "$winroot/src/runtime/test/rt_file_lock_windows_selfcheck.c"
+MSYS2_ARG_CONV_EXCL='*' "$compiler" /nologo \
+    "$win_capture/host_file_exports.obj" "$win_capture/host_file_test_stubs.obj" \
+    "$win_capture/host_file_lock_selfcheck.obj" "/Fe$win_capture/host-file-lock.exe" \
+    kernel32.lib > "$lock_capture/host-link.log" 2>&1
+"$lock_capture/host-file-lock.exe"
+printf 'PASS: real native compile, spaced paths, malformed source with stale object, missing tool, production admission, two C file-lock providers\n'

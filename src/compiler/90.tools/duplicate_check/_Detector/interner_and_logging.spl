@@ -1,8 +1,7 @@
 # Duplicate-check — token interner + progress/verbose logging
 
 use compiler.tools.duplicate_check.config.{DuplicationConfig}
-use compiler.tools.duplicate_check.tokenizer.{SimpleToken, SimpleTokenKind, tokenize, token_to_string}
-use compiler.tools.duplicate_check.features.{FeatureVec, extract_token_frequencies, build_feature_vector, cosine_similarity}
+use compiler.tools.duplicate_check.tokenizer.{SimpleToken, SimpleTokenKind, tokenize, tokenize_for_path, token_to_string, source_slicer_new, source_slice}
 use compiler.tools.duplicate_check.debug.{debug_log, debug_log_progress}
 use compiler.tools.duplicate_check.cache.{TokenCacheManager, get_cached_tokens, set_cached_tokens, set_cached_tokens_with_content, get_cached_content}
 use compiler.tools.duplicate_check.detector_files.{collect_detector_files}
@@ -15,7 +14,7 @@ struct TokenInterner:
     reverse: {i64: text}
     next_id: i64
 
-fn new_token_interner() -> TokenInterner:
+pub fn new_token_interner() -> TokenInterner:
     TokenInterner(strings: {}, reverse: {}, next_id: 0)
 
 fn intern_token(interner: TokenInterner, token_str: text) -> i64:
@@ -33,7 +32,7 @@ fn log_progress(config: DuplicationConfig, message: text):
     if not config.quiet and config.output_format != "json":
         print message
 
-fn log_verbose(config: DuplicationConfig, message: text):
+fn dup_log_verbose(config: DuplicationConfig, message: text):
     """Print verbose message if verbose mode enabled."""
     if config.verbose and not config.quiet and config.output_format != "json":
         print message
@@ -118,7 +117,10 @@ struct TokenWindowCandidate:
 
 struct SimilarityPrep:
     blocks: [DuplicateBlock]
-    features: [FeatureVec]
+    # Per block: interned token ids of its feature window ([] when low-signal
+    # or unlocated), indexing `vocab`.
+    block_token_ids: [[i64]]
+    vocab: [text]
     low_signal_flags: [bool]
     file_count: i64
 
@@ -135,7 +137,9 @@ fn line_window_key(lines: [text], start: i64, window: i64) -> text:
         i = i + 1
     fragments.join("")
 
-fn line_window_prefixes(source: text, config: DuplicationConfig) -> ([i64], [i64]):
+# reason: internal duplicate_check line-window prefix tuple
+@allow(primitive_api)
+pub fn line_window_prefixes_for_path(file_path: text, source: text, config: DuplicationConfig) -> ([i64], [i64]):
     val lines = source.lines()
     var signal_lines: [bool] = []
     var token_counts: [i64] = []
@@ -143,11 +147,11 @@ fn line_window_prefixes(source: text, config: DuplicationConfig) -> ([i64], [i64
         signal_lines.push(false)
         token_counts.push(0)
 
-    for token in tokenize(source, config):
+    for token in tokenize_for_path(file_path, source, config):
         if token.line > 0 and token.line <= signal_lines.len():
             val line_index = token.line - 1
             token_counts[line_index] = token_counts[line_index] + 1
-            val is_signal = token.kind == SimpleTokenKind.Keyword and (token.value == "fn" or token.value == "if" or token.value == "while" or token.value == "for" or token.value == "match" or token.value == "return" or token.value == "val" or token.value == "var")
+            val is_signal = token.kind == SimpleTokenKind.Keyword and (token.value == "fn" or token.value == "if" or token.value == "else" or token.value == "while" or token.value == "for" or token.value == "match" or token.value == "case" or token.value == "return" or token.value == "val" or token.value == "var" or token.value == "break" or token.value == "continue")
             if is_signal:
                 signal_lines[line_index] = true
 
@@ -166,6 +170,9 @@ fn line_window_prefixes(source: text, config: DuplicationConfig) -> ([i64], [i64
         i = i + 1
     (signal_prefix, token_prefix)
 
+fn line_window_prefixes(source: text, config: DuplicationConfig) -> ([i64], [i64]):
+    line_window_prefixes_for_path("", source, config)
+
 fn window_has_signal(prefix: [i64], start: i64, window: i64) -> bool:
     if start < 0 or window <= 0 or start + window >= prefix.len():
         return false
@@ -176,9 +183,9 @@ fn fast_line_window_blocks_in_file(file: text, config: DuplicationConfig) -> [Du
     val window = if config.min_lines > 0: config.min_lines else: 5
     val source = read_detector_source(file)
     val lines = source.lines()
-    val (signal_prefix, token_prefix) = line_window_prefixes(source, config)
     if lines.len() < window:
         return blocks
+    val (signal_prefix, token_prefix) = line_window_prefixes_for_path(file, source, config)
 
     var start = 0
     while start + window <= lines.len():
@@ -463,11 +470,11 @@ fn read_detector_source(file_path: text) -> text:
 
 fn load_tokens_for_file(file_path: text, config: DuplicationConfig, cache_manager: TokenCacheManager) -> [SimpleToken]:
     val cached = get_cached_tokens(cache_manager, file_path)
-    if cached != nil:
+    if cached.is_some():
         return cached
 
     val content = read_detector_source(file_path)
-    val tokens = tokenize(content, config)
+    val tokens = tokenize_for_path(file_path, content, config)
     set_cached_tokens_with_content(cache_manager, file_path, tokens, content)
     tokens
 
@@ -600,7 +607,7 @@ fn collect_hash_counts_in_file_materialized(file_path: text, config: Duplication
 
 fn collect_repeated_hashes(files: [text], config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner) -> HashScanSummary:
     var hash_counts = {}
-    var file_hashes = {}
+    var file_hashes: {text: {text: bool}} = {}
     val start_ms = current_time_ms()
     var last_ms = start_ms
     var done = 0
@@ -626,7 +633,7 @@ fn collect_repeated_hashes(files: [text], config: DuplicationConfig, cache_manag
 
     HashScanSummary(repeated_hashes: repeated_hashes, candidate_files: candidate_files)
 
-fn find_duplicates_in_file(file_path: text, config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner) -> [DuplicateBlock]:
+pub fn find_duplicates_in_file(file_path: text, config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner) -> [DuplicateBlock]:
     find_duplicates_in_file_with_hash_filter(file_path, config, cache_manager, interner, {})
 
 fn find_duplicates_in_file_with_hash_filter(file_path: text, config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner, repeated_hashes: {text: bool}) -> [DuplicateBlock]:
@@ -636,16 +643,25 @@ fn find_duplicates_in_file_with_hash_filter(file_path: text, config: Duplication
     if source.len() == 0:
         source = read_detector_source(file_path)
 
+    val slicer = source_slicer_new(source)
     var blocks = []
     val candidates = collect_token_window_candidates(tokens, config, interner)
+    var last_start_line = -1
     for candidate in candidates:
         val hash_key = "{candidate.hash_value}"
         if filter_enabled and not repeated_hashes.has(hash_key):
             continue
+        # Unfiltered (cosine) extraction: one window per start line. Emitting a
+        # block (with its own snippet copy) for every token offset made memory
+        # O(tokens * window) -- 6.2 GB peak on src/compiler/90.tools.
+        if not filter_enabled:
+            if candidate.line_start == last_start_line:
+                continue
+            last_start_line = candidate.line_start
         val snippet_start = tokens[candidate.index].start_offset
         val snippet_end = tokens[candidate.end_index - 1].end_offset
-        val snippet = if snippet_start >= 0 and snippet_end >= snippet_start and snippet_end <= source.len():
-            source[snippet_start:snippet_end]
+        val snippet = if snippet_start >= 0 and snippet_end >= snippet_start and snippet_end <= slicer.char_len:
+            source_slice(slicer, snippet_start, snippet_end)
         else:
             ""
         blocks.push(DuplicateBlock(

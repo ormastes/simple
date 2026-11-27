@@ -1,0 +1,85 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR: desugared `self.f = self.f + y` stores back into the field
+
+`collection_desugar` Pattern B rewrites `x.f = x.f + y` (identifier addend)
+into `x.f.merge(y)`. The scalar/text `merge` arms compute a NEW value, but
+`merge` was missing from `is_mutating_method`, so no field write-back was
+emitted and the update was lost natively (`WRITEBACK_0_1` instead of
+`WRITEBACK_5_1` on stage2_new4, n88b fixture).
+Bug: native_method_result_overwrites_receiver_slot_2026_10_21.
+"""
+# @tag: unit, compiler, mir
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn src_of(lines: [text]) -> text:
+    var out = ""
+    for line in lines:
+        out = out + line + "\n"
+    out
+
+fn lower_insts(src: text, fn_suffix: text) -> [text]:
+    """MIR instruction kinds (as text) of every function whose name ends with fn_suffix."""
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: src, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var hir_modules: Dict<text, HirModule> = {}
+    hir_modules["app.main"] = hir
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.prescan_module_struct_names(hir_modules, "app.main")
+    val mir = mir_lowering.lower_module(hir)
+    var out: [text] = []
+    for e in mir_lowering.errors:
+        out.push("ERROR " + e.message)
+    for function in mir.functions.values():
+        if function.name.ends_with(fn_suffix):
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    out.push("{instruction.kind}")
+    out
+
+fn count_containing(lines: [text], needle: text) -> i64:
+    var n = 0
+    for line in lines:
+        if line.contains(needle):
+            n = n + 1
+    n
+
+val SRC = src_of([
+    "class Counter:",
+    "    total: i64",
+    "    me bump(n: i64) -> bool:",
+    "        self.total = self.total + n",
+    "        true",
+    "    me bump_unit(n: i64):",
+    "        self.total = self.total + n",
+    "fn main() -> i64:",
+    "    var c = Counter(total: 0)",
+    "    val ok = c.bump(5)",
+    "    c.total"
+])
+
+describe "MIR: merge-desugared field update writes back":
+    it "bool-returning me method stores the sum into self.total":
+        val insts = lower_insts(SRC, "Counter.bump")
+        expect(count_containing(insts, "ERROR")).to_equal(0)
+        expect(count_containing(insts, "SetField")).to_equal(1)
+    it "unit me method stores the sum into self.total":
+        val insts = lower_insts(SRC, "Counter.bump_unit")
+        expect(count_containing(insts, "SetField")).to_equal(1)

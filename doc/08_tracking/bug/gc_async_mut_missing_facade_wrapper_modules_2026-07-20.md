@@ -1,5 +1,18 @@
 # `gc_async_mut` tier missing facade wrapper modules for several subsystems (`compression`, `database.sql`, ...)
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-03 (verified fixed; behaviorally re-verified 2026-11-05) — see closing sections at end
+
+Verified 2026-11-25 (work/p2w2-aa-20261125) at release/1.0.0 HEAD
+(`8aa26f51e72`): the facade modules exist —
+`src/lib/gc_async_mut/compression/` (lz4/zlib/gzip/snappy/brotli/types/utilities)
+and `src/lib/gc_async_mut/database/sql/` (escape, codec, connection, pool,
+`__init__.spl`, ...) are both present, matching the 2026-11-03 repair
+(`e72ff56c06e`) and the 2026-11-05 behavioral re-verification recorded below.
+Behavioral re-run on this host is environment-blocked (pinned tracked Rust
+seed rejects `@representation_boundary` in test-runner infrastructure at HEAD);
+this pass confirms the facade files exist and the earlier green evidence
+stands. The "Open" header below was stale bookkeeping; the closing sections
+("Closed 2026-11-03", "Behavioral re-verification 2026-11-05") are the
+authoritative record.
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -113,3 +126,58 @@ about — GENUINE-BUG, needs its own investigation of the dbfs_engine
 checkpoint/pager call chain, not filed as a separate doc here since it was
 only spot-checked, not root-caused.
 
+
+## Repair candidate 2026-11-03 — behavioral verification pending
+
+The current release still lacked the reported GC compression and SQL module
+paths. Added 39 forwarding modules matching the complete existing
+`nogc_async_mut/compression` and `nogc_async_mut/database/sql` inventories.
+Each leaf explicitly delegates to its existing pure-Simple implementation;
+no resolver priority or global configured-family selection changed. Brotli's
+package facade delegates to its real `brotli.mod` export owner rather than
+the compatibility placeholder `brotli.spl`. The family root stays unchanged:
+it does not enumerate the existing package paths either.
+
+Both SQL facade specifications had bypassed the defect by importing the no-GC
+owner directly. Restored their GC imports. Existing exact regression scenarios
+cover RLE, LZ77, gzip, Brotli, SQL leaf helpers and the SQL package. Adjacent
+scenarios assert empty and binary RLE values, malformed Brotli rejection,
+SQL parameter values, empty placeholders and identifier quote escaping.
+
+Static owner-target validation found 39 wrappers and zero missing targets;
+`git diff --check` passed and the tracked `doc/06_spec` tree contains zero
+executable `_spec.spl` files. These are source checks, not execution evidence.
+Behavioral verification is **TEST_BLOCKED**: no admitted self-hosted full CLI
+is available; the tracked Rust seed is bootstrap-only. No behavioral tests
+were executed and this report does not mark the bug fixed.
+
+## Closed 2026-11-03 (verified fixed)
+Already fixed on release/1.0.0: facade restored by e72ff56c06e / core64_step defined in core.spl (88aac2ffe28). Specs pass: gc_async_mut compression_facade_spec 6/6, sql_facade_spec 4/4, core64_integration_spec 35/35.
+
+## Behavioral re-verification 2026-11-05 (worktree work/libbug-std-gcfacade-20261105)
+
+Independent TDD re-verification from a clean worktree of `origin/release/1.0.0`
+(HEAD adfeae3765c), using the phase1 self-hosted CLI
+(`build/phase_snapshots/phase1_1793422538/simple`; `bin/simple` not present
+in this snapshot — substituted per task note).
+
+- RED: temporarily removed `src/lib/gc_async_mut/compression/lz4.spl` →
+  `compression_facade_spec.spl` failed with the original
+  `error: semantic: Cannot resolve module: std.gc_async_mut.compression.lz4`.
+  Temporarily removed `src/lib/gc_async_mut/database/sql/escape.spl` →
+  `sql_facade_spec.spl` failed with
+  `error: runtime: Module "std.gc_async_mut.database.sql" does not export 'escape'`.
+  Both failure signatures match the reported defect class.
+- GREEN (facades restored, working tree identical to origin/release/1.0.0):
+  - `test/01_unit/lib/gc_async_mut/compression/compression_facade_spec.spl` — 6/6 PASS
+  - `test/01_unit/lib/gc_async_mut/database/sql/sql_facade_spec.spl` — 4/4 PASS
+  - `test/01_unit/lib/gc_async_mut/database/sql/sql_init_facade_spec.spl` — 1/1 PASS
+  - `test/01_unit/lib/gc_async_mut/database/test_extended/test_extended_facade_spec.spl` — 1/1 PASS
+  - `test/01_unit/lib/gc_async_mut/database/vector/database_vector_facade_spec.spl` — 2/2 PASS
+  - nogc_async_mut counterparts (compression, sql, sql_init facade specs) — all PASS
+
+Conclusion: the 2026-11-03 repair (e72ff56c06e) is behaviorally confirmed on
+release/1.0.0. No source changes were required; this pass adds only executable
+verification evidence. Remaining "likely-same-class" specs listed above were
+not all re-run; database/test_extended and database/vector facades verified
+green this pass.

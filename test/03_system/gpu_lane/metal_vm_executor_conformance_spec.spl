@@ -69,24 +69,6 @@ val _KERNEL_MSL_PATH: text = "src/lib/gc_async_mut/gpu_lane/svmg_metal_kernel.me
 # is reported verbatim rather than being silently accepted as equivalent.
 val _EXPECTED_HOST_SKIP: text = "skip:metal-unavailable-not-macos"
 
-# "mem_store_load_byte" is EXCLUDED from the bulk tally -- not a kernel defect,
-# a real host/device semantic divergence already filed as
-# doc/08_tracking/bug/svmg_device_arena_code_coresidency_diverges_from_ref_vm_2026-08-07.md
-# and reproduced identically on CUDA and Vulkan. ref_vm.spl keeps `code` and
-# `arena` as two SEPARATE host arrays, so a STORE8 into DATA can never perturb
-# instruction fetch. Every real device has ONE buffer (Metal's arena MTLBuffer
-# no less than CUDA's arena_ptr or Vulkan's SSBO), matching the SGP wire
-# format's literal meaning that code_off/code_len locate code WITHIN the single
-# arena. That vector stores 200 to absolute arena offset 50, which lands inside
-# its own code footprint (code_off=36, code_len=25 -> [36,61)) -- byte 2 of the
-# immediate of the very next `PUSHI 1` -- so the pushed value becomes
-# 1 | (200<<16) = 13107201. This is predicted, not observed, for Metal: it is
-# the arithmetic consequence of single-buffer co-residency, which the MSL
-# kernel shares by construction. If a real Mac ever shows a DIFFERENT value
-# here, that is a genuine Metal finding and must be filed, not assimilated.
-val _SELF_MODIFYING_CODE_DIVERGENCE_VECTOR: text = "mem_store_load_byte"
-val _SELF_MODIFYING_CODE_DIVERGENT_PASS: i64 = 13107201
-
 # Launch-count floor for the device branch. The D3 vector table is far larger
 # than this; a skip path dispatches ZERO. Any number at or below this means
 # the "device run" did not actually drive the device.
@@ -137,8 +119,6 @@ describe "MetalVmExecutor -- SVM-G D3 conformance vectors on a live Metal device
             var failed = 0
             var failed_names = ""
             for v in vectors:
-                if v.name == _SELF_MODIFYING_CODE_DIVERGENCE_VECTOR:
-                    continue
                 val outcome = executor.run_source(v.source, v.step_budget, v.entry_pc)
                 launches = launches + 1
                 val ok = (outcome.ok and outcome.trapped == v.expected_trapped and
@@ -154,8 +134,8 @@ describe "MetalVmExecutor -- SVM-G D3 conformance vectors on a live Metal device
 
             print("[metal_vm_executor_conformance] DEVICE-RAN: {launches} launches, " +
                 "{passed} vectors passed")
-            step("DEVICE-RAN: {launches} real device launches, {passed}/{vectors.len() - 1} " +
-                "vectors passed (1 excluded: {_SELF_MODIFYING_CODE_DIVERGENCE_VECTOR})" +
+            step("DEVICE-RAN: {launches} real device launches, {passed}/{vectors.len()} " +
+                "vectors passed" +
                 (if failed > 0: " (failed: " + failed_names + ")" else: ""))
 
             # POSITIVE PROOF the device branch really drove the device: a skip
@@ -163,20 +143,7 @@ describe "MetalVmExecutor -- SVM-G D3 conformance vectors on a live Metal device
             # reaches this floor.
             expect(launches).to_be_greater_than(_MIN_DEVICE_LAUNCHES)
             assert_equal(failed, 0)
-            assert_equal(passed, vectors.len() - 1)
-
-            step("Separately verify the excluded vector produces the DEVICE-correct " +
-                "self-modified result (not ref_vm's host-side expectation)")
-            var divergent_vector = vectors[0]
-            for v in vectors:
-                if v.name == _SELF_MODIFYING_CODE_DIVERGENCE_VECTOR:
-                    divergent_vector = v
-            val divergent_outcome = executor.run_source(
-                divergent_vector.source, divergent_vector.step_budget, divergent_vector.entry_pc)
-            assert_true(divergent_outcome.ok)
-            assert_equal(divergent_outcome.records.len(), 1)
-            assert_equal(divergent_outcome.records[0].passed, _SELF_MODIFYING_CODE_DIVERGENT_PASS)
-            assert_equal(divergent_outcome.records[0].value, 200)
+            assert_equal(passed, vectors.len())
 
             step("Shut the executor down cleanly")
             expect(executor.shutdown()).to_equal("")

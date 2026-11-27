@@ -1,5 +1,20 @@
 # cranelift `__simple_ssa_phi` N-ary-join guard now fires in a real spec
 
+**Status:** CLOSED 2026-11-25 — fixed 2026-11-10 via PR #8143; see "Status 2026-11-10 — FIXED" below
+**Reconciled:** 2026-11-09
+
+## Corrective review of PR #8095
+
+The old sugar-plugin headline was disproven, and the November 5 `mirp2-E3`
+update records the unset-destination guard concern as fixed. That same update
+explicitly leaves the latent N-ary fallback unimplemented and open. PR #8095
+closed the whole record from the older headline without resolving this
+residual; the shard is therefore reopened. This status-only correction keeps
+the existing database severity P2 and other bug-row fields; the November 5
+document's P3 assessment is preserved for a separate severity/title review.
+No new compiler/runtime execution or recurrence of the fixed guard concern is
+claimed.
+
 - **Filed:** 2026-08-17
 - Status: STILL-OPEN (P3, downgraded) — the **headline claim is disproven by
   execution**: the guard does NOT fire, `sugar_plugin_spec.spl` is 13/13 green.
@@ -253,3 +268,67 @@ misdiagnosis). Per this repo's TDD rule (failing spec first), a mechanical
 observe it fail first, then pass, is not landed here. Left OPEN as scoped by
 the prior triage: "N-ary fallback unimplemented; guard path leaks an unset
 value_map entry" is the accurate remaining description.
+
+## 2026-11-05 mirp2-E3
+
+Not a Rust-seed row: the guard is pure Simple
+(`src/compiler/70.backend/backend/cranelift_codegen_adapter.spl`). Secondary
+concern FIXED: the guard no longer does a bare `return` leaving
+`value_map[dest]` unset; it now emits `cranelift_trap`, switches to a fresh
+continuation block and binds the dest to `iconst 0` (fail closed, same shape
+as the unsupported-intrinsic arm). N-ary fallback remains unimplemented and
+latent (headline already disproven 2026-08-17). Status: open P3, latent.
+
+## Status 2026-11-10 — FIXED (source + regression, seed-smoke only)
+
+Resolved on branch work/p2fix-compiler-batch-20261110 (commits e93e4798e6dd
+fix, follow-up test commit). Route (1) from the record's own "Fix
+direction": compile_function now guarantees every __simple_ssa_phi
+destination a stack slot via the new owner helper
+`cranelift_ssa_phi_dest_ids` (Unit-typed phi dests previously got size 0),
+making the arity-agnostic edge-store/reload lowering
+(`store_phi_incomings_for_edge`) unconditionally reachable. The no-slot
+elif fallbacks and the args.len()>4 trap remain as fail-closed backstops;
+the stale "latent" comment is rewritten. The earlier secondary concern
+(bare return leaving value_map unset) was already repaired at base (trap +
+continuation + defined value_map entry).
+
+Regression: test/01_unit/compiler/backend/cranelift_ssa_phi_nary_join_spec.spl
+— six 3-predecessor probes (i64 + Unit dests, entry via each predecessor)
+executed through the real Cranelift provider JIT. Seed-smoke: 2/2 green
+post-fix; pre-fix stash check 0/2 (owner helper absent -> Unit-dest shape
+would trap). Guard specs cranelift_shift_width (9/9) and
+cranelift_gemm_fusion (3/3) unchanged green. Seed limitation hit and
+worked around: rt_cranelift_call_function_ptr accepts NO arguments
+(seed runtime, cranelift_sffi.rs), so probes route entry through one
+predecessor instead of a selector arg. Remaining: llvm-lib twin
+(llvm_lib_translate_expr.spl:714) keeps its own N-ary restriction —
+separate lane. Native/self-hosted qualification not claimed.
+
+## Closed 2026-11-25 (p2w1-ah lane) — stale header; fix merged via PR #8143
+
+The "Status: OPEN / Reconciled 2026-11-09" header above was superseded by the
+"Status 2026-11-10 — FIXED" section; the fix branch
+work/p2fix-compiler-batch-20261110 merged as PR #8143 (e4018dd6699) and is on
+release/1.0.0. Source inspection @ 602063b765f confirms the route-(1) fix is
+present: `cranelift_ssa_phi_dest_ids` is defined at
+`src/compiler/70.backend/backend/cranelift_codegen_adapter.spl:557` and wired
+into `compile_function` at :597, guaranteeing every `__simple_ssa_phi`
+destination a stack slot so the arity-agnostic
+`store_phi_incomings_for_edge` (:1156) is unconditionally reachable; the
+regression spec
+`test/01_unit/compiler/backend/cranelift_ssa_phi_nary_join_spec.spl` exists
+in the tree. Execution re-verification on this host is environment-blocked
+(the pinned `bin/simple.exe` seed rejects the `@representation_boundary`
+annotations at HEAD repo-wide); closure rests on the recorded 2026-11-10
+seed-smoke evidence (2/2 green post-fix, 0/2 pre-fix) plus current source
+inspection. The llvm-lib twin restriction
+(`llvm_lib_translate_expr.spl:714`) remains a separately-scoped lane, as
+recorded above. Status: CLOSED.
+
+## Verification 2026-11-26 (bf-2 lane, Windows host)
+
+- Executed `test/01_unit/compiler/backend/cranelift_ssa_phi_nary_join_spec.spl --mode=interpreter`
+  with `wa3_shared_bin/simple.exe` (`SIMPLE_LIB=C:\dev\wt\bf-2-compiler-mir-backend\src`):
+  4/4 passed (including 3-predecessor `i64`, `Unit`, and orphan-local phi joins
+  through the real Cranelift provider JIT).

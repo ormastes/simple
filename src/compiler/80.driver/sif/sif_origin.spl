@@ -1,0 +1,114 @@
+# SIF origin-summary section (v1).
+#
+# Per-function ORIGIN SUMMARY of a module's exported functions, carried across
+# files next to the module's SIF (sif.spl). One record per function:
+#   return_origin   — where the returned value comes from:
+#                     "extern_return" | "param:<i>" | "" (unknown / local)
+#   boundary_params — parameter indices that flow into a raw boundary
+#                     (an extern call, directly or through another summary)
+#
+# Layout (exact line order; ofn lines sorted; no trailing content):
+#   sif-origin-version: 1
+#   module: <module_id>
+#   ofn: <fn_name>|<return_origin>|<i,j,...>   (0+, sorted)
+#   origin-digest: <sha256 over all preceding lines>
+#
+# Reading FAILS CLOSED: an unknown version, a malformed line, unsorted
+# records or a digest mismatch make the section a cache MISS — the parser
+# returns [] and sif_origin_status names the reason. It never crashes.
+#
+# Names agreed with lane 1 (HIR origin table, 35.semantics): the
+# return_origin values are the textual form of ValueSemanticOrigin
+# (extern_return, param); lane 1's producer replaces the textual one in
+# compiler.tools.lint.rules.origin_import_graph.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.action_key.{action_key_sort_texts, action_key_text_le}
+
+val SIF_ORIGIN_VERSION_LINE: text = "sif-origin-version: 1"
+
+pub class FnOriginSummary:
+    fn_name: text
+    return_origin: text
+    boundary_params: [i64]
+
+fn _so_record(e: FnOriginSummary) -> text:
+    var ps = ""
+    for p in e.boundary_params:
+        ps = if ps == "": "{p}" else: ps + ",{p}"
+    "ofn: " + e.fn_name + "|" + e.return_origin + "|" + ps
+
+fn _so_digest(lines: [text]) -> text:
+    var acc = "simple/sif-origin/v1"
+    for line in lines:
+        acc = acc + "\n{line.byte_len()}:" + line
+    sha256_text(acc)
+
+pub fn sif_origin_serialize(module_id: text, entries: [FnOriginSummary]) -> text:
+    var recs: [text] = []
+    for e in entries:
+        recs.push(_so_record(e))
+    var lines: [text] = [SIF_ORIGIN_VERSION_LINE, "module: " + module_id]
+    for r in action_key_sort_texts(recs):
+        lines.push(r)
+    lines.push("origin-digest: " + _so_digest(lines))
+    var out = ""
+    for line in lines:
+        out = out + line + "\n"
+    out
+
+fn _so_lines(t: text) -> [text]:
+    val raw = t.split("\n")
+    var lines: [text] = []
+    var i = 0
+    while i < raw.len() - 1:
+        lines.push(raw[i])
+        i = i + 1
+    lines
+
+# "" when the section is valid, else the reason it is a cache miss.
+pub fn sif_origin_status(t: text) -> text:
+    if t == "" or not t.ends_with("\n"):
+        return "sif-origin: empty or truncated"
+    val lines = _so_lines(t)
+    if lines.len() < 3:
+        return "sif-origin: too few lines"
+    if lines[0] != SIF_ORIGIN_VERSION_LINE:
+        return "sif-origin: unknown version"
+    if not lines[1].starts_with("module: "):
+        return "sif-origin: missing module line"
+    val last = lines[lines.len() - 1]
+    if not last.starts_with("origin-digest: "):
+        return "sif-origin: missing digest line"
+    var i = 2
+    while i < lines.len() - 1:
+        val l = lines[i]
+        if not l.starts_with("ofn: ") or l.split("|").len() != 3:
+            return "sif-origin: malformed record"
+        if i > 2 and not action_key_text_le(lines[i - 1], l):
+            return "sif-origin: records not in canonical order"
+        i = i + 1
+    var payload: [text] = []
+    var k = 0
+    while k < lines.len() - 1:
+        payload.push(lines[k])
+        k = k + 1
+    if last.substring(15, last.byte_len()) != _so_digest(payload):
+        return "sif-origin: digest mismatch"
+    ""
+
+pub fn sif_origin_parse(t: text) -> [FnOriginSummary]:
+    var out: [FnOriginSummary] = []
+    if sif_origin_status(t) != "":
+        return out
+    val lines = _so_lines(t)
+    var i = 2
+    while i < lines.len() - 1:
+        val f = lines[i].substring(5, lines[i].byte_len()).split("|")
+        var ps: [i64] = []
+        if f[2] != "":
+            for s in f[2].split(","):
+                ps.push(s.to_int())
+        out.push(FnOriginSummary(fn_name: f[0], return_origin: f[1], boundary_params: ps))
+        i = i + 1
+    out

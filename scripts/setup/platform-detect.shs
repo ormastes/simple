@@ -53,9 +53,11 @@ case "${PLATFORM_OS}" in
 esac
 
 # Cargo uses riscv64gc for Linux and FreeBSD; Simple artifact paths use riscv64.
+# Windows GNU builds Rust as LLVM-native gnullvm (compiler-rt + libunwind, no libgcc).
 case "${PLATFORM_TRIPLE}" in
   riscv64-unknown-linux-gnu) PLATFORM_RUST_TRIPLE="riscv64gc-unknown-linux-gnu" ;;
   riscv64-unknown-freebsd) PLATFORM_RUST_TRIPLE="riscv64gc-unknown-freebsd" ;;
+  x86_64-pc-windows-gnu) PLATFORM_RUST_TRIPLE="x86_64-pc-windows-gnullvm" ;;
   *) PLATFORM_RUST_TRIPLE="${PLATFORM_TRIPLE}" ;;
 esac
 
@@ -84,12 +86,13 @@ LLVM_PREFIX=""
 LLVM_LIBDIR=""
 LLVM_LIB=""
 LLVM_PROVIDER_KIND=""
+_llvm_gnu_missing_import=""
 
 # Shared-library basenames to look for, by OS, for major version $1.
 _llvm_lib_names() {
   case "${PLATFORM_OS}" in
     macos)   echo "libLLVM.dylib libLLVM-$1.dylib" ;;
-    windows) echo "LLVM-C.dll libLLVM.dll" ;;
+    windows) if [ "${PLATFORM_ABI}" = gnu ]; then echo "libLLVM-$1.dll"; else echo "LLVM-C.dll libLLVM.dll"; fi ;;
     *)       echo "libLLVM-$1.so libLLVM.so.$1 libLLVM.so.1 libLLVM.so" ;;  # linux/freebsd/simpleos
   esac
 }
@@ -125,6 +128,8 @@ _llvm_prefixes() {
     freebsd)
       printf '%s\n' "/usr/local/llvm$1" "/usr/local" ;;
     windows)
+      # gnu lane: MSYS2 CLANG64 LLVM (MinGW ABI, all targets) before LLVM_HOME.
+      if [ "${PLATFORM_ABI}" = gnu ]; then printf '%s\n' "${MSYS2_ROOT:-/c/msys64}/clang64"; fi
       printf '%s\n' "${LLVM_HOME:-}"
       _simple_toolchain_prefixes "llvm-msvc-$1.*" "clang+llvm-$1.*-x86_64-pc-windows-msvc"
       printf '%s\n' "${ProgramFiles:-}/LLVM" "${ProgramW6432:-}/LLVM" "/c/Program Files/LLVM" ;;
@@ -159,7 +164,7 @@ _llvm_try_static_cli_prefix() {
     _tool_version=$("$1/bin/${_tool}" --version 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\.[0-9]+\.[0-9]+$/){print $i; exit}}')
     [ "${_tool_version}" = "${_static_version}" ] || return 1
   done
-  for _archive in ${_static_libnames} libPolly.a libPollyISL.a; do
+  for _archive in ${_static_libnames}; do
     case "${_archive}" in */*|*[!A-Za-z0-9_.+-]*) return 1 ;; lib*.a) ;; *) return 1 ;; esac
     [ -s "${_static_libdir}/${_archive}" ] || return 1
     _archive_members=$("$1/bin/llvm-ar" t "${_static_libdir}/${_archive}" 2>/dev/null) || return 1
@@ -187,6 +192,14 @@ _llvm_try_prefix() {
       $2.*) ;;
       *) return 1 ;;
     esac
+  fi
+  # gnu lane links the MinGW import lib; llvm-mingw ships only the DLL (and
+  # lacks BPF/RISCV/WebAssembly), MSVC prefixes have neither.
+  if [ "${PLATFORM_OS}:${PLATFORM_ABI}" = windows:gnu ]; then
+    if [ ! -f "$1/lib/libLLVM-$2.dll.a" ]; then
+      _llvm_gnu_missing_import="$1/lib/libLLVM-$2.dll.a"
+      return 1
+    fi
   fi
   for _ld in $(_llvm_libdirs); do
     for _name in $(_llvm_lib_names "$2"); do
@@ -244,6 +257,11 @@ for _v in ${LLVM_VERSIONS}; do
   if [ "${LLVM_FOUND}" = "1" ]; then break; fi
 done
 
+if [ "${LLVM_FOUND}" != 1 ] && [ -n "${_llvm_gnu_missing_import}" ]; then
+  printf 'warning: Windows GNU LLVM version matched, but required MinGW import library is missing: %s\n' "${_llvm_gnu_missing_import}" >&2
+  printf '%s\n' 'The Windows GNU LLVM backend lane needs a MinGW LLVM prefix with a shared libLLVM DLL and its .dll.a import library (e.g. MSYS2 CLANG64); a static-only prefix is valid clang for C but not for this lane. Use --backend=cranelift otherwise.' >&2
+fi
+
 if [ "${LLVM_FOUND}" = "1" ]; then
   # Export the version-named prefix the Rust build expects, plus the resolved
   # library for the Simple runtime loader (honors a pre-set SIMPLE_LLVM_PATH).
@@ -256,13 +274,26 @@ fi
 export LLVM_FOUND LLVM_VERSION LLVM_PREFIX LLVM_LIBDIR LLVM_LIB LLVM_PROVIDER_KIND
 
 # Windows gnu lane (the default): locate the repo-managed llvm-mingw UCRT
-# toolchain ($SIMPLE_TOOLCHAINS_ROOT/llvm-mingw-*-ucrt-x86_64, newest first) and
-# put its bin/ first on PATH so clang/llvm-ar resolve there rather than to MSYS2.
-# Honors a pre-set SIMPLE_MINGW_ROOT. Sets: SIMPLE_MINGW_ROOT ("" if not found).
+# toolchain ($SIMPLE_TOOLCHAINS_ROOT/llvm-mingw-*-ucrt-x86_64, falling back to
+# /c/dev/tool/llvm-mingw-*-ucrt-x86_64, newest first) and put its bin/ first on
+# PATH so clang/llvm-ar resolve there rather than to MSYS2.
+# Honors a pre-set SIMPLE_MINGW_ROOT or SIMPLE_LLVM_MINGW_ROOT. Sets:
+# SIMPLE_MINGW_ROOT, SIMPLE_LLVM_MINGW_ROOT ("" if not found),
+# SIMPLE_LINKER_FLAVOR (default gnu), and CC when clang.exe is present.
 if [ "${PLATFORM_OS}" = windows ] && [ "${PLATFORM_ABI}" = gnu ]; then
+  if [ -z "${SIMPLE_MINGW_ROOT:-}" ] && [ -n "${SIMPLE_LLVM_MINGW_ROOT:-}" ]; then
+    SIMPLE_MINGW_ROOT="${SIMPLE_LLVM_MINGW_ROOT}"
+  fi
   if [ -z "${SIMPLE_MINGW_ROOT:-}" ]; then
     for _mw in $(_simple_toolchain_prefixes "llvm-mingw-*-ucrt-x86_64" ""); do
-      if [ -x "${_mw}/bin/x86_64-w64-mingw32-gcc.exe" ] && [ -x "${_mw}/bin/clang.exe" ]; then
+      if [ -x "${_mw}/bin/clang.exe" ] && [ -x "${_mw}/bin/ld.lld.exe" ] && [ -x "${_mw}/bin/llvm-ar.exe" ]; then
+        SIMPLE_MINGW_ROOT="${_mw}"; break
+      fi
+    done
+  fi
+  if [ -z "${SIMPLE_MINGW_ROOT:-}" ]; then
+    for _mw in $(for _d in /c/dev/tool/llvm-mingw-*-ucrt-x86_64; do [ -d "${_d}" ] && printf '%s\n' "${_d}"; done | sort -r); do
+      if [ -x "${_mw}/bin/clang.exe" ] && [ -x "${_mw}/bin/ld.lld.exe" ] && [ -x "${_mw}/bin/llvm-ar.exe" ]; then
         SIMPLE_MINGW_ROOT="${_mw}"; break
       fi
     done
@@ -273,6 +304,23 @@ if [ "${PLATFORM_OS}" = windows ] && [ "${PLATFORM_ABI}" = gnu ]; then
       *) PATH="${SIMPLE_MINGW_ROOT}/bin:${PATH}" ;;
     esac
     export PATH
+    if [ -x "${SIMPLE_MINGW_ROOT}/bin/clang.exe" ]; then
+      export CC="${CC:-${SIMPLE_MINGW_ROOT}/bin/clang.exe}"
+    fi
   fi
   export SIMPLE_MINGW_ROOT="${SIMPLE_MINGW_ROOT:-}"
+  export SIMPLE_LLVM_MINGW_ROOT="${SIMPLE_LLVM_MINGW_ROOT:-${SIMPLE_MINGW_ROOT}}"
+  export SIMPLE_LINKER_FLAVOR="${SIMPLE_LINKER_FLAVOR:-gnu}"
+  # llvm-mingw's bin also ships a partial libLLVM-23.dll (no BPF/RISCV/Wasm);
+  # put the selected CLANG64 LLVM bin ahead of it so the full DLL wins.
+  if [ "${LLVM_FOUND}" = 1 ] && [ -f "${LLVM_PREFIX}/lib/libLLVM-${LLVM_VERSION}.dll.a" ]; then
+    export PATH="${LLVM_PREFIX}/bin:${PATH}"
+    # CLANG64 also ships clang.exe (same w64-windows-gnu default target), so a
+    # bare `clang` would now resolve there. Pin the C driver to llvm-mingw UCRT
+    # clang (the admitted GNU-lane compiler, #4682) unless the caller chose one.
+    if [ -n "${SIMPLE_MINGW_ROOT:-}" ] && [ -x "${SIMPLE_MINGW_ROOT}/bin/clang.exe" ]; then
+      export CC_x86_64_pc_windows_gnullvm="${CC_x86_64_pc_windows_gnullvm:-${SIMPLE_MINGW_ROOT}/bin/clang.exe}"
+      export CC="${CC:-${SIMPLE_MINGW_ROOT}/bin/clang.exe}"
+    fi
+  fi
 fi

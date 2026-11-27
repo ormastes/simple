@@ -17,7 +17,7 @@ Two defects, one spec.
 
 Contract:
 - a scope published AFTER a first (empty) read is still observed — no latch;
-- `cache_dir_max_bytes()` defaults to 4 GiB and honours `SIMPLE_CACHE_MAX_BYTES`;
+- `cache_dir_max_bytes()` defaults to 512 MiB and honours `SIMPLE_CACHE_MAX_BYTES`;
 - eviction under the cap is a no-op;
 - eviction over the cap removes least-recently-modified entries until under it;
 - `*.tmp` in-flight stores and entries inside the grace window are NEVER
@@ -29,6 +29,7 @@ and the memo latch keeps the scope empty after a late publish.
 
 use std.spec.{describe, it, assert_equal, assert_true, assert_false}
 use std.io.{file_exists}
+use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io_runtime.{
     dir_create_all,
     env_set,
@@ -38,14 +39,20 @@ use std.nogc_sync_mut.io_runtime.{
 }
 use compiler.frontend.cache_dir_evict.{
     CACHE_DEFAULT_MAX_BYTES, CACHE_EVICT_SWEEP_INTERVAL,
+    CacheTreeEvictRequestV1,
     _CacheDirEvictPlan,
-    cache_dir_max_bytes, cache_dir_evict_due, cache_dir_evict_to_cap
+    cache_dir_max_bytes, cache_dir_evict_due, cache_dir_evict_to_cap,
+    cache_dir_evict_tree_to_cap_v1, cache_dir_reap_stale_tmp_v1,
+    cache_dir_evict_frontend_to_cap_v1, cache_dir_evict_frontend_tick_v1,
+    _cache_dir_evict_to_cap_at, _cache_dir_evict_frontend_to_cap_at
 }
 use compiler.frontend.frontend_parse_cache.{
     frontend_parse_cache_enabled,
     frontend_parse_cache_load,
     frontend_parse_cache_scope,
-    frontend_parse_cache_store
+    frontend_parse_cache_store,
+    frontend_parse_cache_store_unit_conflicts,
+    frontend_parse_cache_load_unit_conflicts
 }
 
 val SCRATCH: text = "/tmp/simple-cache-evict-spec-{getpid()}"
@@ -74,14 +81,15 @@ describe("cache dir default + eviction", fn():
         val _root = env_set("SIMPLE_FRONTEND_CACHE_DIR", SCRATCH)
         val _made = dir_create_all(SCRATCH)
         val key = "owner-roundtrip"
-        assert_true(frontend_parse_cache_store(key, "payload"), "cache store succeeds")
-        assert_equal(frontend_parse_cache_load(key), "payload", "cache payload round-trips")
+        assert_true(frontend_parse_cache_store(key, "payload", sha256_text("owner-roundtrip source")), "cache store succeeds")
+        assert_equal(frontend_parse_cache_load(key, sha256_text("owner-roundtrip source")), "payload", "cache payload round-trips")
         val _clean = file_delete(SCRATCH + "/" + key + ".fpc")
     )
 
-    it("defaults the cap to 4 GiB and honours SIMPLE_CACHE_MAX_BYTES", fn():
+    it("defaults the cap to 512 MiB and honours SIMPLE_CACHE_MAX_BYTES", fn():
         val _c = env_set("SIMPLE_CACHE_MAX_BYTES", "")
-        assert_equal(cache_dir_max_bytes(), CACHE_DEFAULT_MAX_BYTES, "default cap is 4 GiB")
+        assert_equal(CACHE_DEFAULT_MAX_BYTES, 536870912, "default constant is 512 MiB")
+        assert_equal(cache_dir_max_bytes(), CACHE_DEFAULT_MAX_BYTES, "default cap is 512 MiB")
         val _s = env_set("SIMPLE_CACHE_MAX_BYTES", "12345")
         assert_equal(cache_dir_max_bytes(), 12345, "env override wins")
         val _r = env_set("SIMPLE_CACHE_MAX_BYTES", "")
@@ -173,5 +181,105 @@ describe("cache dir default + eviction", fn():
         assert_equal(plan.total_bytes(), 20, "a confirmed unlink subtracts its exact size")
         assert_equal(plan.removed_count(), 1, "only confirmed unlinks are counted")
         assert_false(plan.over_cap(20), "equality with the cap terminates eviction")
+    )
+
+    it("unlinks .spab.seal sidecar with evicted .spab and reaps aged orphan .seal in flat cache", fn():
+        val flat_dir = SCRATCH + "/flat-spab"
+        val _d = dir_create_all(flat_dir)
+        val _w1 = file_write_exact(flat_dir + "/victim.spab", "012345678901234567890123456789")
+        val _w2 = file_write_exact(flat_dir + "/victim.spab.seal", "0123456789")
+        val _w3 = file_write_exact(flat_dir + "/orphan.spab.seal", "0123456789")
+        # Future clock past grace window (now + 1 hour ~ year 2100 epoch bound safe)
+        val removed = _cache_dir_evict_to_cap_at(flat_dir, ".spab", 10, 4102444800)
+        assert_equal(removed, 1, "evicts primary .spab entry")
+        assert_false(file_exists(flat_dir + "/victim.spab"), "evicted .spab removed")
+        assert_false(file_exists(flat_dir + "/victim.spab.seal"), "evicted .spab.seal sidecar removed")
+        assert_false(file_exists(flat_dir + "/orphan.spab.seal"), "aged orphan .spab.seal reaped")
+    )
+
+    it("evicts .spab + .seal sidecar and reaps aged orphan .seal across sharded subdirectories", fn():
+        val tree_dir = SCRATCH + "/tree-spab/artifacts/v1/sha256"
+        val _da = dir_create_all(tree_dir + "/aa")
+        val _db = dir_create_all(tree_dir + "/bb")
+        val _w1 = file_write_exact(tree_dir + "/aa/first.spab", "012345678901234567890123456789")
+        val _w2 = file_write_exact(tree_dir + "/aa/first.spab.seal", "0123456789")
+        val _w3 = file_write_exact(tree_dir + "/bb/orphan.spab.seal", "0123456789")
+        val _w4 = file_write_exact(tree_dir + "/bb/inflight.spab.tmp", "0123456789")
+        val summary = cache_dir_evict_tree_to_cap_v1(CacheTreeEvictRequestV1(
+            root_dir: SCRATCH + "/tree-spab",
+            suffix: ".spab",
+            max_bytes: 5,
+            now_override_secs: 4102444800))
+        assert_equal(summary.removed, 1, "evicts sharded .spab entry")
+        assert_equal(summary.remaining_bytes, 0, "accounts both .spab and .seal bytes")
+        assert_false(file_exists(tree_dir + "/aa/first.spab"), "sharded .spab removed")
+        assert_false(file_exists(tree_dir + "/aa/first.spab.seal"), "sharded .spab.seal sidecar removed")
+        assert_false(file_exists(tree_dir + "/bb/orphan.spab.seal"), "sharded orphan .spab.seal reaped")
+        assert_true(file_exists(tree_dir + "/bb/inflight.spab.tmp"), "in-flight .tmp never touched")
+    )
+
+    it("enforces a combined byte cap across flat .fpc and sharded .spab entries", fn():
+        val fe_dir = SCRATCH + "/combined-fe"
+        val spab_dir = fe_dir + "/artifacts/v1/xxh3/aa"
+        val _d = dir_create_all(spab_dir)
+        val _w1 = file_write_exact(fe_dir + "/old1.fpc", "01234567890123456789")
+        val _w2 = file_write_exact(spab_dir + "/keep2-sha256-cdigest.spab", "01234567890123456789")
+        val _w3 = file_write_exact(spab_dir + "/keep2-sha256-cdigest.spab.seal", "0123456789")
+        val _w4 = file_write_exact(fe_dir + "/old1.u006", "conflict-evicted")
+        val _w5 = file_write_exact(fe_dir + "/keep2.u006", "conflict-live-spab")
+        val _w6 = file_write_exact(fe_dir + "/orphan.u006", "conflict-orphan")
+        val removed = _cache_dir_evict_frontend_to_cap_at(fe_dir, 35, 4102444800)
+        assert_equal(removed, 1, "combined sweep evicts oldest across .fpc and .spab")
+        val rem = (if file_exists(fe_dir + "/old1.fpc"): 20 else: 0) + (if file_exists(spab_dir + "/keep2-sha256-cdigest.spab"): 30 else: 0)
+        assert_true(rem <= 35, "remaining frontend bytes fit within shared cap")
+        assert_false(file_exists(fe_dir + "/old1.u006"), "evicted .fpc removes orphan .u006")
+        assert_true(file_exists(fe_dir + "/keep2.u006"), "u006 preserved when matching .spab survives")
+        assert_false(file_exists(fe_dir + "/orphan.u006"), "orphan .u006 reaped even when artifacts/v1 exists")
+    )
+
+    it("cleans .u006 sidecars on pure .fpc eviction and deletes cleared .u006 files", fn():
+        val fpc_only = SCRATCH + "/pure-fpc-u006"
+        val _d = dir_create_all(fpc_only)
+        val _w1 = file_write_exact(fpc_only + "/k1.fpc", "01234567890123456789")
+        val _w2 = file_write_exact(fpc_only + "/k1.u006", "conflict")
+        val _w3 = file_write_exact(fpc_only + "/orphan.u006", "stale")
+        assert_equal(_cache_dir_evict_to_cap_at(fpc_only, ".fpc", 5, 4102444800), 1, "evicts k1.fpc")
+        assert_false(file_exists(fpc_only + "/k1.u006"), "evicted .fpc removes .u006 sidecar")
+        assert_false(file_exists(fpc_only + "/orphan.u006"), "aged orphan .u006 reaped")
+
+        val _scope = env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "u006-delete-scope")
+        val _root = env_set("SIMPLE_FRONTEND_CACHE_DIR", fpc_only)
+        assert_true(frontend_parse_cache_store_unit_conflicts("k2", ["SPL-UNIT-006 test"]), "writes non-empty .u006")
+        assert_true(file_exists(fpc_only + "/k2.u006"), "k2.u006 created")
+        assert_true(frontend_parse_cache_store_unit_conflicts("k2", []), "clears .u006 on clean parse")
+        assert_false(file_exists(fpc_only + "/k2.u006"), "empty .u006 file removed instead of zero-byte residue")
+        assert_equal(frontend_parse_cache_load_unit_conflicts("k2").len(), 0, "cleared .u006 loads empty")
+    )
+
+    it("reaps aged .tmp files in sharded tree and skips coordination subtrees", fn():
+        val tree_dir = SCRATCH + "/reap-tree/artifacts/v1/xxh3/cc"
+        val coord_dir = SCRATCH + "/reap-tree/queue-123-0"
+        val _d = dir_create_all(tree_dir)
+        val _dc = dir_create_all(coord_dir)
+        val _w1 = file_write_exact(tree_dir + "/crashed.spab.tmp", "partial")
+        val _w2 = file_write_exact(coord_dir + "/inflight.claim.tmp", "keep-in-queue")
+        assert_equal(cache_dir_reap_stale_tmp_v1(SCRATCH + "/reap-tree"), 0, "fresh .tmp preserved on wall clock")
+        assert_true(file_exists(tree_dir + "/crashed.spab.tmp"), "fresh .tmp survives")
+        assert_equal(cache_dir_reap_stale_tmp_v1(SCRATCH + "/reap-tree", 4102444800), 1, "aged .tmp reaped")
+        assert_false(file_exists(tree_dir + "/crashed.spab.tmp"), "aged .tmp deleted")
+        assert_true(file_exists(coord_dir + "/inflight.claim.tmp"), "coordination subtree skipped by .tmp reaper")
+    )
+
+    it("handles long (> 260 char) paths cleanly via host_path_native", fn():
+        val seg = "long_cache_segment_0123456789abcdef0123456789abcdef"
+        val deep_dir = SCRATCH + "/" + seg + "/" + seg + "/" + seg + "/" + seg + "/" + seg
+        val spab_dir = deep_dir + "/artifacts/v1/xxh3/dd"
+        val _d = dir_create_all(spab_dir)
+        val _w1 = file_write_exact(spab_dir + "/entry-sha256-long.spab", "01234567890123456789")
+        val _w2 = file_write_exact(spab_dir + "/entry-sha256-long.spab.seal", "0123456789")
+        val removed = _cache_dir_evict_frontend_to_cap_at(deep_dir, 5, 4102444800)
+        assert_equal(removed, 1, "long-path .spab entry evicted")
+        assert_false(file_exists(spab_dir + "/entry-sha256-long.spab"), "long-path .spab deleted")
+        assert_false(file_exists(spab_dir + "/entry-sha256-long.spab.seal"), "long-path .seal deleted")
     )
 )

@@ -1,0 +1,102 @@
+#!/bin/sh
+# build-riscv64-baremetal-compiler-rt.shs — fetch + build a SOFT-FLOAT (lp64)
+# baremetal LLVM compiler-rt builtins archive for the riscv64 SimpleOS kernel.
+#
+# Why: the kernel's objects are rv64 soft-float (ELF flags 0x1). The Linux
+# cross archive from build-linux-cross-compiler-rt.shs is lp64d (flags 0x5,
+# double-float ABI); ld.lld refuses to mix the two ("cannot link object files
+# with different floating-point ABI"). Never libgcc (CLAUDE.md).
+#
+# Nothing is committed: compiler-rt-<ver>.src.tar.xz is downloaded from the
+# LLVM GitHub release (sha256 pinned for 18.1.3) and the archive is installed at
+#   $prefix/baremetal/riscv64-unknown-elf/lib/libclang_rt.builtins-riscv64.a
+# (prefix default ~/.simple/toolchains/llvm-cross-rt-18). Consumed by
+# scripts/check/check-simpleos-riscv64-user-elf-opensbi.shs.
+#
+# Env: LLVM_RT_VERSION (18.1.3), SIMPLE_CROSS_RT_PREFIX, JOBS (4),
+#      SIMPLE_CROSS_CLANG (clang), LLVM_AR (llvm-ar), LLVM_RANLIB (llvm-ranlib), LLVM_READELF (llvm-readelf),
+#      LLVM_NM (llvm-nm).
+# Needs: clang with the RISCV target, llvm-ar, cmake, ninja.
+#
+# usage: sh scripts/setup/build-riscv64-baremetal-compiler-rt.shs [--selftest]
+#   --selftest  verify an installed archive only (no build): RISC-V, soft-float,
+#               defines __udivdi3 / __muldi3 / __adddf3.
+# Verdict (last stdout line): PASS - ... (0) / FAIL - ... (1) / ERROR - nothing was checked (...) (2)
+set -eu
+
+ver=${LLVM_RT_VERSION:-18.1.3}
+major=${ver%%.*}
+prefix=${SIMPLE_CROSS_RT_PREFIX:-$HOME/.simple/toolchains/llvm-cross-rt-$major}
+jobs=${JOBS:-4}
+cc=${SIMPLE_CROSS_CLANG:-clang}
+ar=${LLVM_AR:-llvm-ar}
+ranlib=${LLVM_RANLIB:-llvm-ranlib}
+readelf=${LLVM_READELF:-llvm-readelf}
+nm=${LLVM_NM:-llvm-nm}
+src=$prefix/src/$ver
+bld=$prefix/build/compiler-rt-riscv64-baremetal-lp64
+dest=$prefix/baremetal/riscv64-unknown-elf/lib
+archive=$dest/libclang_rt.builtins-riscv64.a
+
+verify_archive() { # verify_archive <a> -> PASS/FAIL line, rc
+    [ -s "$1" ] || { echo "FAIL - $1 is missing or empty"; return 1; }
+    _flags=$("$readelf" -h "$1" 2>/dev/null | grep -E 'Machine|Flags' | sort -u || true)
+    printf '%s\n' "$_flags" | grep -q 'RISC-V' || { echo "FAIL - $1 holds no RISC-V objects"; return 1; }
+    if printf '%s\n' "$_flags" | grep -q 'float ABI'; then
+        echo "FAIL - $1 is not soft-float (lp64): $(printf '%s' "$_flags" | grep Flags | head -1)"; return 1
+    fi
+    _syms=$("$nm" -g --defined-only "$1" 2>/dev/null || true)
+    for s in __udivdi3 __muldi3 __adddf3; do
+        printf '%s\n' "$_syms" | grep -q " T $s\$" || { echo "FAIL - $1 does not define $s"; return 1; }
+    done
+    echo "PASS - 3 symbol(s) + soft-float RISC-V ABI checked in $1"
+}
+
+if [ "${1:-}" = --selftest ]; then
+    for t in "$readelf" "$nm"; do
+        command -v "$t" >/dev/null 2>&1 || { echo "ERROR - nothing was checked ($t not found)"; exit 2; }
+    done
+    [ -e "$archive" ] || { echo "ERROR - nothing was checked (no archive at $archive; run without --selftest to build)"; exit 2; }
+    verify_archive "$archive"; exit $?
+fi
+
+for t in "$cc" "$ar" "$ranlib" "$readelf" "$nm" cmake ninja curl tar sha256sum; do
+    command -v "$t" >/dev/null 2>&1 || { echo "ERROR - nothing was checked (missing tool $t)"; exit 2; }
+done
+
+pinned_sha() { [ "$ver" = 18.1.3 ] && echo 9a7df9300413696b0c4f7ff1e2729cb82aca375f35c05d698c44f26a4edf1c27; return 0; }
+
+mkdir -p "$src" "$dest"
+if [ ! -d "$src/compiler-rt" ]; then
+    _f=compiler-rt-$ver.src.tar.xz
+    _u=https://github.com/llvm/llvm-project/releases/download/llvmorg-$ver/$_f
+    [ -f "$src/$_f" ] || { curl -fsSL -o "$src/$_f.part" "$_u" && mv "$src/$_f.part" "$src/$_f"; }
+    _got=$(sha256sum "$src/$_f" | cut -d' ' -f1)
+    _want=$(pinned_sha)
+    if [ -n "$_want" ] && [ "$_got" != "$_want" ]; then
+        rm -f "$src/$_f"; echo "FAIL - sha256 mismatch for $_f: got $_got want $_want"; exit 1
+    fi
+    tar -C "$src" -xf "$src/$_f"
+    mv "$src/compiler-rt-$ver.src" "$src/compiler-rt"
+fi
+
+flags="--target=riscv64-unknown-elf -march=rv64imac -mabi=lp64 -mcmodel=medany -ffreestanding -nostdlib"
+rm -rf "$bld" && mkdir -p "$bld"
+cmake -S "$src/compiler-rt" -B "$bld" -G Ninja \
+    -DCMAKE_C_COMPILER="$cc" -DCMAKE_ASM_COMPILER="$cc" \
+    -DCMAKE_AR="$(command -v "$ar")" -DCMAKE_RANLIB="$(command -v "$ranlib")" \
+    -DCMAKE_C_COMPILER_TARGET=riscv64-unknown-elf -DCMAKE_ASM_COMPILER_TARGET=riscv64-unknown-elf \
+    -DCMAKE_C_FLAGS="$flags" -DCMAKE_ASM_FLAGS="$flags" \
+    -DCMAKE_SYSTEM_NAME=Generic -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+    -DCOMPILER_RT_BAREMETAL_BUILD=ON -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
+    -DCOMPILER_RT_BUILD_BUILTINS=ON -DCOMPILER_RT_BUILD_CRT=OFF \
+    -DCOMPILER_RT_BUILD_SANITIZERS=OFF -DCOMPILER_RT_BUILD_XRAY=OFF \
+    -DCOMPILER_RT_BUILD_LIBFUZZER=OFF -DCOMPILER_RT_BUILD_PROFILE=OFF \
+    -DCOMPILER_RT_BUILD_MEMPROF=OFF -DCOMPILER_RT_BUILD_ORC=OFF \
+    >"$bld/configure.log" 2>&1 || { tail -20 "$bld/configure.log" >&2; echo "FAIL - cmake configure failed ($bld/configure.log)"; exit 1; }
+ninja -C "$bld" -j "$jobs" builtins >"$bld/build.log" 2>&1 \
+    || { tail -20 "$bld/build.log" >&2; echo "FAIL - ninja builtins failed ($bld/build.log)"; exit 1; }
+built=$(find "$bld" -name 'libclang_rt.builtins*.a' | head -1)
+[ -n "$built" ] || { echo "FAIL - build produced no builtins archive"; exit 1; }
+cp "$built" "$archive.new" && mv -f "$archive.new" "$archive"
+verify_archive "$archive"

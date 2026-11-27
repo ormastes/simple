@@ -1,0 +1,135 @@
+# @req HOST-EXECUTION-COMMON-01 HOST-EXECUTION-COMMON-02
+# NOT_RUN. Real envelope signatures/FS codecs; no opaque container owner surrogate.
+use test.fixtures.orchestration.host_execution_envelope_fixture_v2.*
+use std.nogc_sync_mut.orchestration.host_execution_envelope_v2.*
+use std.nogc_sync_mut.orchestration.host_execution_intent_v1.*
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.*
+use std.common.contracts.orchestration.host_execute_request_v1.host_execute_request_encode_v1
+use std.common.contracts.orchestration.host_execute_request_v2.host_execute_request_encode_v2
+use std.common.contracts.container.execution_v2.{container_execution_plan_digest_v2, container_scope_fence_id_v2}
+use std.common.contracts.container.runtime_v1.{RuntimeIntentV1, RuntimeIdentityV1}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.file_system.metadata.file_mode_bits
+use std.nogc_sync_mut.io_runtime.dir_remove
+
+fn host_common_creation_intent_v1(engine: text) -> RuntimeIntentV1:
+    RuntimeIntentV1(pod_uid: "workload", attempt: 1, provider_generation: 7, operation_id: "operation_1",
+        engine: engine, native_id: "1".repeat(64), node_boot_id: "boot-1", phase: "created")
+
+describe "Common host execution compatibility and native identity persistence":
+    it "preserves original V1 signed plan/operation while adapting only runtime request routing":
+        val fixture = host_execution_envelope_fixture_v2()
+        val original_packet = host_execute_request_encode_v1(fixture.original).unwrap()
+        val normalized = host_execution_decode_v2(original_packet, fixture.scope).unwrap()
+        expect(normalized.intent.plan_digest).to_equal(fixture.original.intent.plan_digest)
+        expect(normalized.operation.payload_digest).to_equal(fixture.original.operation.payload_digest)
+        assert(normalized.legacy_v1)
+        expect(normalized.execution.plan.native_machine_id).to_equal(fixture.scope.native_machine_id)
+        expect(normalized.execution.plan.backend).to_equal("linux-podman")
+        assert(container_execution_plan_digest_v2(normalized.execution.plan).unwrap() != normalized.intent.plan_digest)
+        var execution = normalized.operation
+        execution.operation = "host_execute_v1"
+        expect(distributed_verify_grant_approval_from_snapshot_v2(fixture.policy.snapshot, normalized.signed, normalized.approval,
+            execution, 100, 7, 4, 2, 3).unwrap().id).to_equal("grant_1")
+        expect(host_execute_request_encode_v1(fixture.original).unwrap()).to_equal(original_packet)
+        val service = host_execution_envelope_fixture_v2("windows-docker-process", "service-incarnation-v1")
+        assert(host_execution_decode_v2(original_packet, service.scope).is_err())
+
+    it "normalizes real signed V2 envelopes for both exact supported backends":
+        for backend in ["linux-podman", "windows-docker-process"]:
+            val fixture = host_execution_envelope_fixture_v2(backend, if backend == "windows-docker-process": "service-incarnation-v1" else: "native-boot-incarnation-v1")
+            val packet = host_execute_request_encode_v2(fixture.common).unwrap()
+            val normalized = host_execution_decode_v2(packet, fixture.scope).unwrap()
+            assert(not normalized.legacy_v1)
+            expect(normalized.execution.plan.backend).to_equal(backend)
+            expect(normalized.intent.fence.boot_id).to_equal(container_scope_fence_id_v2(fixture.scope).unwrap())
+            expect(container_execution_plan_digest_v2(normalized.execution.plan).unwrap()).to_equal(normalized.intent.plan_digest)
+            var execution = normalized.operation
+            execution.operation = "host_execute_v1"
+            expect(distributed_verify_grant_approval_from_snapshot_v2(fixture.policy.snapshot, normalized.signed, normalized.approval,
+                execution, 100, 7, 4, 2, 3).unwrap().id).to_equal("grant_1")
+            assert(host_execution_decode_v2(packet + "\n", fixture.scope).is_err())
+            var alias = fixture.scope
+            alias.native_machine_id = "another-native-machine"
+            expect(host_execution_decode_v2(packet, alias).unwrap_err()).to_equal("host-execution-trusted-scope-mismatch")
+
+    it "retains exact original creation identity privately for Podman and Docker without mutable phase adoption":
+        for engine in ["podman", "docker"]:
+            val root = secure_temp_dir("/tmp", "host-common-intent").unwrap()
+            val intent = host_common_creation_intent_v1(engine)
+            val path = host_execution_intent_store_v1(root, intent).unwrap()
+            val bytes = host_execution_intent_encode_v1(intent).unwrap()
+            expect(file_mode_bits(path)).to_equal(0o600)
+            expect(file_read_regular_no_follow_bounded(path, 16384).unwrap()).to_equal(bytes)
+            expect(host_execution_intent_encode_v1(host_execution_intent_load_v1(root, "operation_1").unwrap()).unwrap()).to_equal(bytes)
+            var changed = intent
+            changed.native_id = "2".repeat(64)
+            expect(host_execution_intent_store_v1(root, changed).unwrap_err()).to_equal("host-execution-intent-retained-mismatch")
+            changed = intent
+            changed.phase = "running"
+            expect(host_execution_intent_store_v1(root, changed).unwrap_err()).to_equal("host-execution-intent-creation-required")
+            expect(file_read_regular_no_follow_bounded(path, 16384).unwrap()).to_equal(bytes)
+            dir_remove(root, true)
+
+    it "rejects noncanonical unknown oversized and incomplete native intent bytes":
+        val intent = host_common_creation_intent_v1("podman")
+        val bytes = host_execution_intent_encode_v1(intent).unwrap()
+        expect(host_execution_intent_decode_v1(bytes + "\n").unwrap_err()).to_equal("host-execution-intent-noncanonical")
+        expect(host_execution_intent_decode_v1("😀".repeat(5000)).unwrap_err()).to_equal("host-execution-intent-size")
+        assert(host_execution_intent_decode_v1("unknown: true\n").is_err())
+        var short = intent
+        short.native_id = "short"
+        expect(host_execution_intent_encode_v1(short).unwrap_err()).to_equal("host-execution-intent-native-identity-invalid")
+        short = intent
+        short.engine = "arbitrary"
+        expect(host_execution_intent_encode_v1(short).unwrap_err()).to_equal("host-execution-intent-native-identity-invalid")
+
+    it "encodes only the supported Podman or Docker observation engine union":
+        for engine in ["podman", "docker"]:
+            val fixture = host_execution_envelope_fixture_v2(if engine == "podman": "linux-podman" else: "windows-docker-process",
+                if engine == "podman": "native-boot-incarnation-v1" else: "service-incarnation-v1")
+            val identity = RuntimeIdentityV1(pod_uid: "workload", attempt: 1, provider_generation: 7,
+                operation_id: "operation_1", engine: engine, native_id: "1".repeat(64), node_boot_id: container_scope_fence_id_v2(fixture.scope).unwrap())
+            val observation = HostExecutionObservationV2(scope: fixture.scope, operation_id: "operation_1", operation_digest: "a".repeat(64),
+                plan_digest: "b".repeat(64), request_digest: "c".repeat(64), grant_id: "grant_1", principal: "user_1",
+                issuer_id: "issuer_1", approver_id: "approver_1", provider_identity_digest: "d".repeat(64),
+                observed_unix_ms: 100, observed_monotonic_ms: 10, runtime: identity, phase: "running",
+                create_status: "ok", start_status: "ok", inspect_status: "ok", reason: "codec data only")
+            var missing_native = observation
+            missing_native.runtime.native_id = ""
+            for phase in ["created", "running", "exited", "stopped", "destroyed"]:
+                missing_native.phase = phase
+                expect(host_execution_observation_encode_v2(missing_native).unwrap_err()).to_equal("host-observation-invalid")
+            missing_native.phase = "unknown"
+            expect(host_execution_observation_decode_v2(host_execution_observation_encode_v2(missing_native).unwrap()).unwrap().runtime.native_id).to_equal("")
+            val bytes = host_execution_observation_encode_v2(observation).unwrap()
+            val decoded = host_execution_observation_decode_v2(bytes).unwrap()
+            expect(decoded.runtime.engine).to_equal(engine)
+            expect(decoded.scope.continuity_mode).to_equal(fixture.scope.continuity_mode)
+            expect(decoded.scope.boot_id).to_equal(if engine == "docker": "" else: "boot-1")
+            expect(decoded.runtime.node_boot_id).to_equal(container_scope_fence_id_v2(fixture.scope).unwrap())
+            assert(decoded.runtime.node_boot_id != decoded.scope.boot_id)
+            var fake_native = observation
+            fake_native.runtime.node_boot_id = "boot-1"
+            expect(host_execution_observation_encode_v2(fake_native).unwrap_err()).to_equal("host-observation-invalid")
+            val root = secure_temp_dir("/tmp", "host-observation-v2").unwrap()
+            val path = host_execution_observation_store_v2(root, observation).unwrap()
+            expect(file_mode_bits(path)).to_equal(0o600)
+            expect(host_execution_observation_encode_v2(host_execution_observation_load_v2(root, "operation_1").unwrap()).unwrap()).to_equal(bytes)
+            var inspected = observation
+            inspected.phase = "exited"
+            inspected.reason = "codec inspection update; not waited"
+            inspected.observed_unix_ms = 110
+            inspected.observed_monotonic_ms = 20
+            val inspection_path = host_execution_inspection_store_v2(root, inspected).unwrap()
+            expect(file_read_regular_no_follow_bounded(inspection_path, 65536).unwrap()).to_equal(host_execution_observation_encode_v2(inspected).unwrap())
+            var replaced_scope = inspected
+            replaced_scope.scope.native_machine_id = "another-native-machine"
+            replaced_scope.runtime.node_boot_id = container_scope_fence_id_v2(replaced_scope.scope).unwrap()
+            expect(host_execution_inspection_store_v2(root, replaced_scope).unwrap_err()).to_equal("host-inspection-correlation-mismatch")
+            expect(file_read_regular_no_follow_bounded(path, 65536).unwrap()).to_equal(bytes)
+            dir_remove(root, true)
+            var unsupported = observation
+            unsupported.runtime.engine = "arbitrary"
+            expect(host_execution_observation_encode_v2(unsupported).unwrap_err()).to_equal("host-observation-invalid")

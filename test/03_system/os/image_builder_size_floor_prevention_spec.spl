@@ -1,0 +1,46 @@
+# @cover src/os/installer/image_builder.spl 15%
+# @tag:system
+# @req REQ-OS-INSTALLER-001
+"""
+## Purpose and audience
+Purpose: Prevent regressions where MIN_IMAGE_SIZE_MB_V1 drops below the capacity required for the bundled SimpleOS fonts plus rootfs metadata reserve.
+Audience: OS installer and release engineering maintainers.
+## Operator workflow
+Run with `bin/simple test test/03_system/os/image_builder_size_floor_prevention_spec.spl --mode=interpreter`.
+## Compatibility and limitations
+Tests USB installer image staging through `build_usb_installer_image` without requiring external FAT32 shell tools.
+"""
+
+use std.spec.*
+use std.io_runtime.{dir_create_all, file_exists}
+use os.installer.image_builder.{build_usb_installer_image, MIN_IMAGE_SIZE_MB_V1}
+use os.port.font_bundle.{simpleos_font_bundle_entries, load_simpleos_font_bundle_entry}
+use os.tools.pkg.pkg_format.{PkgArch}
+
+describe "SimpleOS image builder size floor prevention":
+    it "derives MIN_IMAGE_SIZE_MB_V1 large enough for EFI + 2MB alignment + font bundle + 10% metadata reserve":
+        var total_font_bytes: u64 = 0u64
+        for entry in simpleos_font_bundle_entries():
+            val loaded = load_simpleos_font_bundle_entry(entry)
+            expect(loaded.valid).to_equal(true)
+            total_font_bytes = total_font_bytes + loaded.data.len().to_u64()
+        # EFI(64 MB) + reserve(2 MB) = 66 MB overhead before root partition;
+        # ~50.9 MiB fonts with 10% metadata reserve requires root >= 57 MB -> >= 124 MB total.
+        expect(total_font_bytes).to_be_greater_than(50000000u64)
+        expect(MIN_IMAGE_SIZE_MB_V1 >= 128u64).to_equal(true)
+
+    it "builds a full-rootfs USB installer image at MIN_IMAGE_SIZE_MB_V1 and rejects sizes below the floor":
+        val root = "build/test-artifacts/image-builder-size-floor"
+        dir_create_all(root)
+
+        val too_small = "{root}/too-small.iso"
+        val rejected = build_usb_installer_image(PkgArch.Arm64, "", "", too_small, MIN_IMAGE_SIZE_MB_V1 - 1u64)
+        expect(rejected.is_err()).to_equal(true)
+        if val Err(msg) = rejected:
+            expect(msg).to_contain("must be at least")
+
+        val exact_min = "{root}/exact-min-arm64.iso"
+        val built = build_usb_installer_image(PkgArch.Arm64, "", "", exact_min, MIN_IMAGE_SIZE_MB_V1)
+        expect(built.is_ok()).to_equal(true)
+        expect(file_exists(exact_min)).to_equal(true)
+        expect(file_exists("{exact_min}.manifest.sdn")).to_equal(true)

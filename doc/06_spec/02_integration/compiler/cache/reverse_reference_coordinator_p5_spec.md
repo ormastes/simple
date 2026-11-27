@@ -33,3 +33,15 @@ until an admitted self-hosted full CLI and the frozen common-contract closure
 are available.
 
 This is an incomplete hand-authored draft, not generated-manual qualification.
+
+## Exact declared-set inverse source scenarios
+
+The executable now includes `rebuild_reverse_shards_from_forward_v1` source
+scenarios for 3000 distinct logical consumers, byte-identical consumer replay,
+conflicting duplicate consumers, duplicate read-edge collapse versus
+fingerprint conflict, removal to an explicit empty consumer manifest, incomplete
+coverage rejection, and uneven partition-name ordering. The 3000-row case is a
+serialized logical cohort; it is not a concurrency or throughput result.
+
+These cases are authored but UNRUN. No runtime, generated-manual, concurrency,
+or performance qualification is claimed by this source update.

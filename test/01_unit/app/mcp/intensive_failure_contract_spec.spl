@@ -1,0 +1,95 @@
+# @tag: unit, mcp, regression
+# Bug: app_mcp_intensive_spec_is_84s_not_a_hang_eight_real_failures_2026-08-10
+# `.?` returns the present value or nil. Compare with nil when asserting
+# presence; do not change the language operator into a boolean-only operation.
+use std.spec
+use app.mcp.main_dispatch.{dispatch_tool}
+use app.mcp.main_lazy_json.{make_error_response, make_tool_result_status}
+
+describe "p2_p3_bug_reproduction":
+    it "checks server configuration dictionary presence without losing payloads":
+        step("Reproduce the exact failure")
+        val config = {"name": "simple-mcp-server", "version": "0.5.0", "protocol_version": "2024-11-05"}
+        expect(config["version"].? != nil).to_equal(true)
+        expect(config["protocol_version"].? != nil).to_equal(true)
+        val payload = config["protocol_version"].?
+        expect(payload).to_equal("2024-11-05")
+
+    it "checks request dictionary presence and retains the method":
+        step("Reproduce the exact failure")
+        val request = {"id": "request-1", "method": "tools/call"}
+        expect(request["id"].? != nil).to_equal(true)
+        expect(request["method"].? != nil).to_equal(true)
+        val payload = request["method"].?
+        expect(payload).to_equal("tools/call")
+
+    it "checks error dictionary presence and retains the message":
+        step("Reproduce the exact failure")
+        val error = {"code": -32601, "message": "Method not found"}
+        expect(error["code"].? != nil).to_equal(true)
+        expect(error["message"].? != nil).to_equal(true)
+        val payload = error["message"].?
+        expect(payload).to_equal("Method not found")
+
+    it "checks build parameter presence and retains the target":
+        step("Reproduce the exact failure")
+        val parameters = {"target": "examples/hello.spl", "release": false}
+        expect(parameters["target"].? != nil).to_equal(true)
+        expect(parameters["release"].? != nil).to_equal(true)
+        val payload = parameters["target"].?
+        expect(payload).to_equal("examples/hello.spl")
+
+    it "checks nested format arguments and retains the actual options":
+        step("Reproduce the exact failure")
+        val request = {"tool": "simple/format", "args": {"dry_run": true}}
+        expect(request["args"].? != nil).to_equal(true)
+        val payload = request["args"].?
+        expect(payload).to_equal({"dry_run": true})
+
+    it "checks diff revision presence and retains the revision":
+        step("Reproduce the exact failure")
+        val request = {"revision": "ghi789"}
+        expect(request["revision"].? != nil).to_equal(true)
+        val payload = request["revision"].?
+        expect(payload).to_equal("ghi789")
+
+    it "returns unknown-tool errors through the real dispatch owner":
+        step("Exercise the repaired owner")
+        val response = dispatch_tool("812", "no_such_tool", "{}")
+        expect(response.contains("\"jsonrpc\":\"2.0\"")).to_equal(true)
+        expect(response.contains("\"id\":812")).to_equal(true)
+        expect(response.contains("\"result\":{")).to_equal(true)
+        expect(response.contains("\"isError\":true")).to_equal(true)
+        expect(response.contains("Unknown tool: no_such_tool")).to_equal(true)
+        expect(response.contains("\"code\":-32601")).to_equal(true)
+        expect(response.contains("\"error\":")).to_equal(false)
+
+describe "p2_p3_adjacent_regression":
+    it "distinguishes empty values from present zero and false dictionary values":
+        step("Reject the adjacent regression")
+        val values = {"empty": "", "zero": 0, "flag": false}
+        expect(values["empty"].? != nil).to_equal(false)
+        expect(values["zero"].? != nil).to_equal(true)
+        expect(values["flag"].? != nil).to_equal(true)
+        val zero_payload = values["zero"].?
+        val false_payload = values["flag"].?
+        expect(zero_payload).to_equal(0)
+        expect(false_payload).to_equal(false)
+
+    it "keeps tool failure, protocol failure and tool success envelopes distinct":
+        step("Reject the adjacent regression")
+        val missing = dispatch_tool("813", "", "{}")
+        expect(missing.contains("\"result\":{")).to_equal(true)
+        expect(missing.contains("\"isError\":true")).to_equal(true)
+        expect(missing.contains("\"code\":-32602")).to_equal(true)
+        expect(missing.contains("Missing tool name")).to_equal(true)
+        expect(missing.contains("\"error\":")).to_equal(false)
+        val protocol = make_error_response("814", -32600, "Invalid Request")
+        expect(protocol.contains("\"error\":{")).to_equal(true)
+        expect(protocol.contains("\"code\":-32600")).to_equal(true)
+        expect(protocol.contains("\"result\":")).to_equal(false)
+        expect(protocol.contains("\"isError\":")).to_equal(false)
+        val success = make_tool_result_status("815", "ok", false)
+        expect(success.contains("\"result\":{")).to_equal(true)
+        expect(success.contains("\"isError\":false")).to_equal(true)
+        expect(success.contains("\"error\":")).to_equal(false)

@@ -1,0 +1,125 @@
+# ARM32 (ARMv7-A) kernel hardware runtime shims (pure Simple, inline asm).
+#
+# Codegen/kernel-called runtime entry points the arm32 kernel closure
+# references but the arm32 boot C runtime does not define:
+#   - rt_arm32_cpsid_if / rt_arm32_wfi  (externs in arch/arm32/cpu.spl)
+#   - rt_volatile_{read,write}_u{8,16,32,64}  (externs in kernel/boot/mmio_hardware.spl
+#     and other MMIO callers)
+#
+# ABI: signatures match the live arm32 caller kernel/boot/mmio_hardware.spl
+# exactly (addr: u64; value/return u8|u16|u32|u64) so the export and the
+# extern declaration agree in one LLVM module. Values are masked/narrowed
+# to their access width; ldrb/ldrh zero-extend the full register.
+#
+# Addresses are physical/identity-mapped 32-bit on ARMv7-A: the low 32 bits
+# of addr are used. 64-bit accesses are two 32-bit accesses, low word first
+# (ARMv7 has no single-copy-atomic 64-bit MMIO access outside LDRD/STRD on
+# LPAE, and device registers wider than 32 bits are split on these SoCs).
+# All operands are 32-bit so LLVM never needs an ARM register pair.
+
+@export("C")
+fn rt_arm32_cpsid_if():
+    unsafe(capabilities: [inline_asm]):
+        asm volatile(
+            "cpsid if",
+            clobber("memory")
+        )
+
+@export("C")
+fn rt_arm32_wfi():
+    unsafe(capabilities: [inline_asm]):
+        asm volatile(
+            "wfi",
+            clobber("memory")
+        )
+
+fn _a32_ldr(addr: u32) -> u32:
+    var value: u32 = 0
+    unsafe(capabilities: [inline_asm]):
+        asm volatile(
+            "ldr {value}, [{addr}]",
+            value = out(reg) value,
+            addr = in(reg) addr,
+            clobber("memory")
+        )
+    value
+
+fn _a32_str(addr: u32, value: u32):
+    unsafe(capabilities: [inline_asm]):
+        asm volatile(
+            "str {value}, [{addr}]",
+            value = in(reg) value,
+            addr = in(reg) addr,
+            clobber("memory")
+        )
+
+@export("C")
+fn rt_volatile_read_u8(addr: u64) -> u8:
+    var value: u32 = 0
+    val a = addr as u32
+    unsafe(capabilities: [inline_asm]):
+        asm volatile(
+            "ldrb {value}, [{a}]",
+            value = out(reg) value,
+            a = in(reg) a,
+            clobber("memory")
+        )
+    (value & 0xFF) as u8
+
+@export("C")
+fn rt_volatile_read_u16(addr: u64) -> u16:
+    var value: u32 = 0
+    val a = addr as u32
+    unsafe(capabilities: [inline_asm]):
+        asm volatile(
+            "ldrh {value}, [{a}]",
+            value = out(reg) value,
+            a = in(reg) a,
+            clobber("memory")
+        )
+    (value & 0xFFFF) as u16
+
+@export("C")
+fn rt_volatile_read_u32(addr: u64) -> u32:
+    _a32_ldr(addr as u32)
+
+@export("C")
+fn rt_volatile_read_u64(addr: u64) -> u64:
+    val a = addr as u32
+    val lo = _a32_ldr(a) as u64
+    val hi = _a32_ldr(a + 4) as u64
+    (hi << 32) | lo
+
+@export("C")
+fn rt_volatile_write_u8(addr: u64, value: u8):
+    val a = addr as u32
+    val v = value as u32
+    unsafe(capabilities: [inline_asm]):
+        asm volatile(
+            "strb {v}, [{a}]",
+            v = in(reg) v,
+            a = in(reg) a,
+            clobber("memory")
+        )
+
+@export("C")
+fn rt_volatile_write_u16(addr: u64, value: u16):
+    val a = addr as u32
+    val v = value as u32
+    unsafe(capabilities: [inline_asm]):
+        asm volatile(
+            "strh {v}, [{a}]",
+            v = in(reg) v,
+            a = in(reg) a,
+            clobber("memory")
+        )
+
+@export("C")
+fn rt_volatile_write_u32(addr: u64, value: u32):
+    _a32_str(addr as u32, value)
+
+@export("C")
+fn rt_volatile_write_u64(addr: u64, value: u64):
+    val a = addr as u32
+    _a32_str(a, (value & 0xFFFFFFFF) as u32)
+    _a32_str(a + 4, (value >> 32) as u32)

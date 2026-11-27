@@ -1,6 +1,7 @@
 # DrawIR tiled 8K software evidence exceeds watchdog — 2026-08-11
 
-Status: OPEN
+Status: fix-implemented-verification-pending
+Updated: 2026-11-27
 
 The production tiled DrawIR opaque-barrier benchmark cannot complete an 8K
 optimized-plus-unculled oracle comparison inside the 180-second watchdog.
@@ -30,3 +31,54 @@ Acceptance:
 - optimized row reports 510 rendered and 510 occluded operations;
 - row includes p50/p95, RSS, fallback, readback mode, and revision;
 - any 8K/80 pass requires p95 <= 12.5ms without cached-frame substitution.
+
+## Triage addendum (2026-11-11, lane ne7)
+
+**Status: LIVE — remains OPEN; out of scope for a P3 traverse lane.**
+
+Re-checked on the release/1.0.0 tip (branch work/p3-ne7-20261111):
+
+- `test/05_perf/graphics_2d/bench_draw_ir_tiled_occlusion_8k.spl` is
+  unchanged in shape since the report: still 7680x4320, 510 tiles, both
+  `engine2d_draw_ir_render_tiled` and `engine2d_draw_ir_render_tiled_unculled`
+  in one process with full readback + checksum (`git log --follow` shows only
+  merge/lineage commits touching the file; last content-bearing change
+  predates this bug).
+- No split-process optimized/oracle evidence harness and no separately
+  bounded per-lane rows exist anywhere in `test/05_perf/graphics_2d/`,
+  `var/lib/`, or `build/` (grep for the acceptance row markers finds nothing).
+- The 2026-10-27 v3 triage freeze
+  (`doc/08_tracking/bug/triage_20261027/evidence_v3/lane01_accepted.md`)
+  classifies this `valid / untested / keep_open` with the same remaining work
+  (collect separately bounded optimized/oracle rows on identical
+  scene/revision with matching checksums).
+
+Not re-run here: an 8K software raster bench cannot produce honest evidence
+in interpreter mode on the Windows lane, and the acceptance criteria
+(split-process harness, native runner profile, p95 <= 12.5ms at 8K/80) are a
+perf-infrastructure build, not a P3 fix. No green rerun attempted per
+runaway-guard rules.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the 2026-11-11 (lane ne7) addendum stands — the
+acceptance criteria (split-process harness, native runner profile, p95 <=
+12.5ms at 8K/80) are a perf-infrastructure build, and honest evidence cannot be
+produced in interpreter mode on the Windows lane. Not re-run.
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+Blocked on this host for closure: acceptance is p95 <= 12.5 ms at 8K, which needs a native self-hosted binary; only the Rust seed is available. The bench still runs both lanes in one process.
+
+## 2026-11-27 implementation — Wave 5 Lane W5-1 (`fix-implemented-verification-pending`)
+
+- Eliminated per-tile command-array allocation (`var tile_commands`) and per-tile `engine2d_draw_ir_coalesce_plain_fills` / env-var re-reads in `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl`:
+  - Added `ops_occluded: i32 = 0` to `Engine2dDrawIrTileOutcome` (`draw_ir_adv.spl`) and `TileLaneRender` (`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_tiles_gpu.spl`).
+  - Added `_engine2d_draw_ir_tile_plan_valid` (`invalid-tile-plan` fail-closed validation), `_engine2d_draw_ir_find_full_tile_barrier` (O(k) reverse full-tile opaque-barrier fast-path), `_engine2d_draw_ir_render_commands_indexed` with shared `_Engine2dDrawIrLoopState`, hoisted `engine2d_draw_ir_lcd_text_enabled()` once per frame, unified `_engine2d_draw_ir_prove_rect_covered_slice`, and exported `engine2d_draw_ir_render_tiled_unculled`.
+  - Added scaling/parity unit contract `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_tiled_scaling_contract_spec.spl`.
+- Verified with `simple.exe test --mode=interpreter`:
+  - `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_tiled_occlusion_spec.spl`: `6 total, 6 passed, 0 failed` (`EXIT=0`).
+  - `test/01_unit/lib/gc_async_mut/gpu/browser_engine/tile_gpu_lane_occlusion_spec.spl`: `1 total, 1 passed, 0 failed` (`EXIT=0`).
+  - `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_tiled_scaling_contract_spec.spl`: `4 total, 4 passed, 0 failed` (`EXIT=0`).
+  - `test/01_unit/lib/gc_async_mut/gpu/browser_engine/tile_gpu_lane_spec.spl`: `10 total, 10 passed, 0 failed` (`EXIT=0`).
+- `waiting-for:` Deployed self-hosted native `bin/release/<triple>/simple` binary to execute `test/05_perf/graphics_2d/bench_draw_ir_tiled_occlusion_8k.spl` and verify `p95 <= 12.5 ms` at 8K.
+

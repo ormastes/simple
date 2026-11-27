@@ -49,6 +49,7 @@ impl LlvmBackend {
     pub(in crate::codegen::llvm) fn compile_inline_asm(
         &self,
         instructions: &[String],
+        dialect: crate::hir::AsmDialect,
         volatile: bool,
         constraints: &str,
         inputs: &[VReg],
@@ -79,7 +80,10 @@ impl LlvmBackend {
             constraints.to_string(),
             volatile,
             false,
-            Some(InlineAsmDialect::ATT),
+            Some(match dialect {
+                crate::hir::AsmDialect::Default | crate::hir::AsmDialect::Att => InlineAsmDialect::ATT,
+                crate::hir::AsmDialect::Intel => InlineAsmDialect::Intel,
+            }),
             false,
         );
         let call = builder

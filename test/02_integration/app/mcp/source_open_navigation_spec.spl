@@ -1,0 +1,74 @@
+# @req REQ-MCP-7-3 REQ-MCP-7-5
+# Navigation to a method over the registered MCP `source_open` tool: the target
+# body opens with its parent structure, sibling bodies stay folded, the import
+# the body actually names is shown as real source while the rest stay grouped.
+use std.spec.step
+use app.mcp.main_dispatch.{dispatch_tool}
+use std.common.string_core.{str_len}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_text_or, json_value_items}
+
+val FIXTURE = "test/fixture/source_view/navigate.spl"
+
+fn view_payload(response: text) -> JsonValue:
+    expect(str_len(response)).to_be_less_than(16385)
+    val wire = json_parse_value_strict(response).unwrap()
+    val result = json_value_field(wire, "result")
+    expect(json_value_field(result, "isError")).to_equal(JsonValue.Bool(false))
+    val content = json_value_items(json_value_field(result, "content"))
+    json_parse_value_strict(json_value_text_or(json_value_field(content[0], "text"), "")).unwrap()
+
+fn segment_named(payload: JsonValue, name: text) -> JsonValue:
+    for segment in json_value_items(json_value_field(payload, "segments")):
+        if json_value_text_or(json_value_field(segment, "name"), "") == name: return segment
+    JsonValue.Null
+
+fn fold_labelled(payload: JsonValue, label: text) -> JsonValue:
+    for fold in json_value_items(json_value_field(payload, "folds")):
+        if json_value_text_or(json_value_field(fold, "label"), "") == label: return fold
+    JsonValue.Null
+
+describe "source_open navigation to a method by symbol":
+    it "opens the target body under its class header and keeps sibling bodies folded":
+        # @capture(protocol_json): focused view segments for a qualified method target
+        step("navigate with target=Controller.process and no line number")
+        val payload = view_payload(dispatch_tool("10", "source_open", "{\"path\":\"" + FIXTURE + "\",\"mode\":\"focused\",\"target\":\"Controller.process\"}"))
+        expect(json_value_text_or(json_value_field(payload, "mode"), "")).to_equal("focused")
+        val process = segment_named(payload, "Controller.process")
+        expect(json_value_field(process, "expanded")).to_equal(JsonValue.Bool(true))
+        expect(json_value_text_or(json_value_field(process, "source_text"), "")).to_contain("val state = retry(cmd)")
+        expect(json_value_field(process, "first_line")).to_equal(JsonValue.Int(7))
+        step("parent structure is open only far enough to expose the target")
+        val controller = segment_named(payload, "Controller")
+        expect(json_value_text_or(json_value_field(controller, "source_text"), "")).to_equal("class Controller:\n")
+        expect(json_value_field(segment_named(payload, "Controller.submit"), "expanded")).to_equal(JsonValue.Bool(false))
+        expect(json_value_field(segment_named(payload, "Controller.reset"), "expanded")).to_equal(JsonValue.Bool(false))
+        val rendered = json_value_text_or(json_value_field(payload, "rendered"), "")
+        expect(rendered).to_contain("    fn submit(cmd: i64):  | + body")
+        expect(rendered.contains("7 | ")).to_equal(false)
+
+    it "shows the import the target names as source and groups the unrelated ones":
+        # @capture(protocol_json): relevant import expanded individually; range set for the rest
+        step("navigate to Controller.process, whose body calls retry")
+        val payload = view_payload(dispatch_tool("11", "source_open", "{\"path\":\"" + FIXTURE + "\",\"mode\":\"focused\",\"target\":\"Controller.process\"}"))
+        val retry = segment_named(payload, "util.retry")
+        expect(json_value_text_or(json_value_field(retry, "kind"), "")).to_equal("import")
+        expect(json_value_text_or(json_value_field(retry, "source_text"), "")).to_equal("use util.retry\n")
+        expect(json_value_field(retry, "first_line")).to_equal(JsonValue.Int(2))
+        step("the unrelated imports remain one synthetic group with per-item ranges")
+        val imports = fold_labelled(payload, "imports")
+        val ranges = json_value_items(json_value_field(imports, "ranges"))
+        expect(ranges.len()).to_equal(2)
+        expect(json_value_field(ranges[0], "start_byte")).to_equal(JsonValue.Int(0))
+        expect(json_value_field(ranges[1], "start_byte")).to_equal(JsonValue.Int(30))
+        val rendered = json_value_text_or(json_value_field(payload, "rendered"), "")
+        expect(rendered).to_contain("| + imports (2)")
+        expect(rendered).to_contain("use util.retry")
+        expect(rendered.contains("use net.socket")).to_equal(false)
+        expect(segment_named(payload, "net.socket")).to_equal(JsonValue.Null)
+
+    it "keeps every import grouped in the plain outline":
+        step("open the same file without a target")
+        val payload = view_payload(dispatch_tool("12", "source_open", "{\"path\":\"" + FIXTURE + "\"}"))
+        val imports = fold_labelled(payload, "imports")
+        expect(json_value_items(json_value_field(imports, "ranges")).len()).to_equal(3)
+        expect(segment_named(payload, "util.retry")).to_equal(JsonValue.Null)

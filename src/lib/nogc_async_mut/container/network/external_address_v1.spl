@@ -1,0 +1,162 @@
+# External-destination address policy for broker egress (design 11.8).
+# Every candidate address produced by the trusted resolver is validated here
+# BEFORE the broker connects, and the broker connects to the validated value
+# without a second uncontrolled resolution. Pure parsing/classification only.
+# Rejected: unspecified, loopback, link-local, cloud metadata, multicast,
+# broadcast/reserved, documentation ranges, IPv4-mapped/compatible/translated
+# and 6to4 IPv6 (embedded IPv4 must not bypass IPv4 rules), zone indexes, and
+# non-canonical numeric encodings (octal/hex/integer/leading-zero forms).
+# Private ranges (RFC 1918, CGNAT, ULA, benchmark) need explicit policy.
+use std.nogc_async_mut.container.network.endpoint_identity_v1.{
+    endpoint_logical_address_parse_v1, endpoint_logical_address_text_v1}
+
+pub const ENDPOINT_EXTERNAL_PUBLIC_V1 = "public"
+pub const ENDPOINT_EXTERNAL_PRIVATE_V1 = "private"
+pub const ENDPOINT_EXTERNAL_MAX_CANDIDATES_V1: i64 = 32
+
+pub struct EndpointExternalAddressV1:
+    family: i64
+    canonical: text
+    category: text
+
+fn _endpoint_v4_in(address: i64, base: i64, prefix: i64) -> bool:
+    val mask = ((1 << prefix) - 1) << (32 - prefix)
+    (address & mask) == (base & mask)
+
+fn _endpoint_v4(a: i64, b: i64, c: i64, d: i64) -> i64:
+    (a << 24) | (b << 16) | (c << 8) | d
+
+fn _endpoint_classify_v4(address: i64) -> Result<text, text>:
+    if _endpoint_v4_in(address, 0, 8): return Err("endpoint-external-unspecified")
+    if _endpoint_v4_in(address, _endpoint_v4(127, 0, 0, 0), 8): return Err("endpoint-external-loopback")
+    if address == _endpoint_v4(169, 254, 169, 254) or address == _endpoint_v4(100, 100, 100, 200):
+        return Err("endpoint-external-metadata")
+    if _endpoint_v4_in(address, _endpoint_v4(169, 254, 0, 0), 16): return Err("endpoint-external-link-local")
+    if _endpoint_v4_in(address, _endpoint_v4(224, 0, 0, 0), 4): return Err("endpoint-external-multicast")
+    if _endpoint_v4_in(address, _endpoint_v4(240, 0, 0, 0), 4): return Err("endpoint-external-reserved")
+    if _endpoint_v4_in(address, _endpoint_v4(192, 0, 0, 0), 24) or
+            _endpoint_v4_in(address, _endpoint_v4(192, 0, 2, 0), 24) or
+            _endpoint_v4_in(address, _endpoint_v4(198, 51, 100, 0), 24) or
+            _endpoint_v4_in(address, _endpoint_v4(203, 0, 113, 0), 24):
+        return Err("endpoint-external-reserved")
+    if _endpoint_v4_in(address, _endpoint_v4(10, 0, 0, 0), 8) or
+            _endpoint_v4_in(address, _endpoint_v4(172, 16, 0, 0), 12) or
+            _endpoint_v4_in(address, _endpoint_v4(192, 168, 0, 0), 16) or
+            _endpoint_v4_in(address, _endpoint_v4(100, 64, 0, 0), 10) or
+            _endpoint_v4_in(address, _endpoint_v4(198, 18, 0, 0), 15):
+        return Ok(ENDPOINT_EXTERNAL_PRIVATE_V1)
+    Ok(ENDPOINT_EXTERNAL_PUBLIC_V1)
+
+fn _endpoint_hex_group(part: text) -> Result<i64, text>:
+    if part == "" or part.len() > 4: return Err("endpoint-external-address-noncanonical")
+    var value: i64 = 0
+    for ch in part.chars():
+        val code = ch.char_code_at(0)
+        var digit: i64 = -1
+        if code >= 48 and code <= 57: digit = code - 48
+        if code >= 97 and code <= 102: digit = code - 87
+        if code >= 65 and code <= 70: digit = code - 55
+        if digit < 0: return Err("endpoint-external-address-noncanonical")
+        value = value * 16 + digit
+    Ok(value)
+
+fn _endpoint_v6_groups(parts: [text], allow_v4_tail: bool) -> Result<[i64], text>:
+    var groups: [i64] = []
+    var index: i64 = 0
+    for part in parts:
+        if allow_v4_tail and index == parts.len() - 1 and part.contains("."):
+            val v4 = endpoint_logical_address_parse_v1(part)?
+            groups.push((v4 >> 16) & 65535)
+            groups.push(v4 & 65535)
+        else:
+            groups.push(_endpoint_hex_group(part)?)
+        index = index + 1
+    Ok(groups)
+
+fn _endpoint_parse_v6(value: text) -> Result<[i64], text>:
+    if value.contains("%"): return Err("endpoint-external-zone-index-rejected")
+    val halves = value.split("::")
+    if halves.len() > 2: return Err("endpoint-external-address-noncanonical")
+    if halves.len() == 1:
+        val groups = _endpoint_v6_groups(value.split(":"), true)?
+        if groups.len() != 8: return Err("endpoint-external-address-noncanonical")
+        return Ok(groups)
+    var head: [i64] = []
+    var tail: [i64] = []
+    if halves[0] != "": head = _endpoint_v6_groups(halves[0].split(":"), false)?
+    if halves[1] != "": tail = _endpoint_v6_groups(halves[1].split(":"), true)?
+    if head.len() + tail.len() > 7: return Err("endpoint-external-address-noncanonical")
+    var groups: [i64] = []
+    for group in head:
+        groups.push(group)
+    for _fill in 0..(8 - head.len() - tail.len()):
+        groups.push(0)
+    for group in tail:
+        groups.push(group)
+    Ok(groups)
+
+fn _endpoint_hex_text(value: i64) -> text:
+    val digits = "0123456789abcdef"
+    if value == 0: return "0"
+    var out = ""
+    var rest = value
+    while rest > 0:
+        out = digits.substring(rest & 15, (rest & 15) + 1) + out
+        rest = rest >> 4
+    out
+
+fn _endpoint_classify_v6(g: [i64]) -> Result<text, text>:
+    var zero_prefix: i64 = 0
+    while zero_prefix < 8 and g[zero_prefix] == 0:
+        zero_prefix = zero_prefix + 1
+    if zero_prefix == 8: return Err("endpoint-external-unspecified")
+    if zero_prefix == 7 and g[7] == 1: return Err("endpoint-external-loopback")
+    if zero_prefix == 5 and g[5] == 65535: return Err("endpoint-external-ipv4-mapped-ipv6")
+    if zero_prefix >= 6: return Err("endpoint-external-ipv4-compatible-ipv6")
+    if g[0] == 100 and g[1] == 65435: return Err("endpoint-external-ipv4-translated-ipv6")
+    if g[0] == 8194: return Err("endpoint-external-ipv4-6to4-ipv6")
+    if g[0] == 64768 and g[1] == 3778 and g[2] == 0 and g[3] == 0 and g[4] == 0 and
+            g[5] == 0 and g[6] == 0 and g[7] == 596:
+        return Err("endpoint-external-metadata")
+    if (g[0] & 65472) == 65152: return Err("endpoint-external-link-local")
+    if (g[0] & 65472) == 65216: return Err("endpoint-external-reserved")
+    if (g[0] & 65280) == 65280: return Err("endpoint-external-multicast")
+    if g[0] == 8193 and g[1] == 3512: return Err("endpoint-external-reserved")
+    if (g[0] & 65024) == 64512: return Ok(ENDPOINT_EXTERNAL_PRIVATE_V1)
+    Ok(ENDPOINT_EXTERNAL_PUBLIC_V1)
+
+# Validate one literal resolved address. `allow_private` must come from
+# explicit trusted policy, never from the workload request.
+pub fn endpoint_external_address_admit_v1(literal: text,
+        allow_private: bool) -> Result<EndpointExternalAddressV1, text>:
+    if literal == "" or literal.len() > 64: return Err("endpoint-external-address-invalid")
+    var result = EndpointExternalAddressV1(family: 0, canonical: "", category: "")
+    if literal.contains(":"):
+        val groups = _endpoint_parse_v6(literal)?
+        val category = _endpoint_classify_v6(groups)?
+        var parts: [text] = []
+        for group in groups:
+            parts.push(_endpoint_hex_text(group))
+        result = EndpointExternalAddressV1(family: 6, canonical: parts.join(":"), category: category)
+    else:
+        val address = endpoint_logical_address_parse_v1(literal)?
+        val category = _endpoint_classify_v4(address)?
+        result = EndpointExternalAddressV1(family: 4,
+            canonical: endpoint_logical_address_text_v1(address), category: category)
+    if result.category == ENDPOINT_EXTERNAL_PRIVATE_V1 and not allow_private:
+        return Err("endpoint-external-private-not-allowed")
+    Ok(result)
+
+# All-or-nothing over a resolver answer: one forbidden candidate rejects the
+# whole set, so a mixed answer cannot be used for DNS rebinding.
+pub fn endpoint_external_candidates_admit_v1(candidates: [text],
+        allow_private: bool) -> Result<[EndpointExternalAddressV1], text>:
+    if candidates.len() == 0: return Err("endpoint-external-no-candidates")
+    if candidates.len() > ENDPOINT_EXTERNAL_MAX_CANDIDATES_V1: return Err("endpoint-external-too-many-candidates")
+    var admitted: [EndpointExternalAddressV1] = []
+    for candidate in candidates:
+        admitted.push(endpoint_external_address_admit_v1(candidate, allow_private)?)
+    Ok(admitted)
+
+export EndpointExternalAddressV1, endpoint_external_address_admit_v1, endpoint_external_candidates_admit_v1
+export ENDPOINT_EXTERNAL_PUBLIC_V1, ENDPOINT_EXTERNAL_PRIVATE_V1, ENDPOINT_EXTERNAL_MAX_CANDIDATES_V1

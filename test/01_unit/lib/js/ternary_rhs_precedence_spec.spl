@@ -1,0 +1,65 @@
+"""
+# JS Ternary RHS Precedence & Operator/Template Scanner Spec
+
+Covers OtherFix-11 (#76) part 2:
+- Ternary consequence and alternate must accept assignment and arrow expressions
+  (`cond ? a = 1 : b = 2`, `cond ? x => x + 1 : y => y + 2`) without top-level
+  assignment or arrow scanning stealing operators inside ternary branches.
+- Top-level `=`, `=>`, and `?:` dispatch in JS leftmost-first precedence order
+  (`x = cond ? a = 1 : b = 2`, `f = x => x ? 1 : 2`).
+- Unary `-` and `!` have higher precedence than binary operators
+  (`true ? -1 + 2 : 0`, `false ? 0 : !false && false`, `5 - -2`).
+- Template literals containing `?` and `:` do not disrupt ternary splitting.
+"""
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.js.engine.runtime.{js_runtime_with_default_logger}
+use std.js.types.js_types.{JsValue}
+
+fn _js_num_text(n: f64) -> text:
+    val s = n.to_text()
+    if s.ends_with(".0"):
+        return s.slice(0, s.len() - 2)
+    s
+
+fn _eval_text(src: text) -> text:
+    var rt = js_runtime_with_default_logger("ternary-rhs-spec")
+    match rt.eval(src):
+        Ok(v):
+            match v:
+                JsValue.String(v: s): s
+                JsValue.Number(v: n): _js_num_text(n)
+                JsValue.Boolean(v: b): if b: "true" else: "false"
+                JsValue.Undefined: "<undefined>"
+                _: "<other>"
+        Err(e):
+            "<err:" + e.message + ">"
+
+describe "JS ternary RHS assignment and arrow precedence":
+    it "parses assignment in ternary alternate branch without evaluating both sides":
+        step("Verify true/false branches execute only the chosen RHS assignment")
+        expect(_eval_text("var a = 0; var b = 0; true ? a = 1 : b = 2; a + ',' + b")).to_equal("1,0")
+        expect(_eval_text("var a = 0; var b = 0; false ? a = 1 : b = 2; a + ',' + b")).to_equal("0,2")
+
+    it "parses outer assignment whose RHS is a ternary with branch assignments":
+        step("Verify x = cond ? a = 1 : b = 2 keeps outer assignment at top level")
+        expect(_eval_text("var a = 0; var b = 0; var x = true ? a = 1 : b = 2; x + ',' + a + ',' + b")).to_equal("1,1,0")
+        expect(_eval_text("var a = 0; var b = 0; var x = false ? a = 1 : b = 2; x + ',' + a + ',' + b")).to_equal("2,0,2")
+
+    it "parses arrow functions inside ternary branches and ternary inside arrow body":
+        step("Verify cond ? x => x + 1 : y => y + 10 and f = x => x ? 1 : 2")
+        expect(_eval_text("var f = true ? x => x + 1 : y => y + 10; f(5)")).to_equal("6")
+        expect(_eval_text("var g = false ? x => x + 1 : y => y + 10; g(5)")).to_equal("15")
+        expect(_eval_text("var h = x => x > 0 ? 10 : 20; h(1) + ',' + h(0)")).to_equal("10,20")
+
+describe "JS unary precedence and template ternary scanning":
+    it "binds unary minus and logical not tighter than binary operators in ternary branches":
+        step("Verify -1 + 2, !false && false, and 5 - -2 obey JS operator precedence")
+        expect(_eval_text("true ? -1 + 2 : 0")).to_equal("1")
+        expect(_eval_text("false ? 0 : !false && false")).to_equal("false")
+        expect(_eval_text("5 - -2")).to_equal("7")
+
+    it "ignores question mark and colon inside template literals during ternary parsing":
+        step("Verify template literal containing ? and : inside ternary branches")
+        expect(_eval_text("true ? `a?b:c` : `x?y:z`")).to_equal("a?b:c")
+        expect(_eval_text("false ? `a?b:c` : `x?y:z`")).to_equal("x?y:z")

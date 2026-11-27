@@ -1,0 +1,86 @@
+"""
+## Purpose and audience
+Pins the fix for doc/08_tracking/bug/agent_v4_self_exit_always_failed_2026-11-18.md
+(milestone_0034, owner decision N7). Before the fix, the V4 agent classified a
+self-exited agent with `operation.state.exit_code == 0`. On V3 that value is always
+-1, so every self-exit was recorded as failed. Now V3 reads the engine-native
+`.State.ExitCode` once, before Stop, and carries it as a typed
+`RuntimeExitStatusV1`. The agent settles a self-exit cause from the Destroy reply,
+and only `Exited(0)` counts as success. Written for owners of the Linux Host
+service agent.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-18).
+## Compatibility and limitations
+Every case is DATA: the agent value and the runtime replies are built directly.
+The real Inspect, Stop and Destroy over an admitted epoch belong to the env-gated
+chain test/03_system/lib/container/linux_service_agent_chain_v4_spec.spl.
+## Verification guidance and troubleshooting
+A `succeeded` outcome for any reply except `Exited(0)` is the regression this
+spec fences. It means unknown has been widened to success.
+"""
+# @req N7-EXIT-STATUS
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.container.runtime_v1.{RuntimeExitStatusV1, RuntimeOperationV1, RuntimeStateV1,
+    RuntimeIdentityV1, RuntimeCommandV1, RUNTIME_STATUS_OK, RUNTIME_PHASE_STOPPED, RUNTIME_PHASE_DESTROYED}
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServiceAgentV4,
+    host_linux_service_agent_request_cancel_v4, host_agent_exit_outcome_v4, host_agent_workload_exit_cause_v4,
+    host_agent_destroy_exit_v4}
+
+fn x_identity() -> RuntimeIdentityV1:
+    RuntimeIdentityV1(pod_uid: "job_1", attempt: 1, provider_generation: 7, operation_id: "operation_1", engine: "podman",
+        native_id: "3".repeat(64), node_boot_id: "boot_1")
+
+# A V3 reply exactly as the workflow builds it: the untyped exit_code stays -1.
+fn x_reply(action: text, phase: text, exit: RuntimeExitStatusV1) -> RuntimeOperationV1:
+    RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: action, command: RuntimeCommandV1(action, "", []),
+        state: RuntimeStateV1(phase, x_identity(), -1, "actual-fresh-workspace", exit),
+        exit_code: 0, stdout: "", stderr: "", reason: "actual-fresh-workspace")
+
+fn x_agent() -> HostLinuxServiceAgentV4:
+    HostLinuxServiceAgentV4(operation_id: "op_1", association_digest: "a".repeat(64), payload_digest: "b".repeat(64),
+        stage: "running", pending: false, reserved: true, observed: true)
+
+fn x_settled(exit: RuntimeExitStatusV1) -> HostLinuxServiceAgentV4:
+    val exited = host_agent_workload_exit_cause_v4(x_agent(), x_reply("inspect", RUNTIME_PHASE_STOPPED, RuntimeExitStatusV1.Unobserved))
+    host_agent_destroy_exit_v4(exited, x_reply("destroy", RUNTIME_PHASE_DESTROYED, exit))
+
+describe "V4 agent self-exit outcome from the typed V3 exit status (N7)":
+    it "succeeds only on an engine-native Exited(0) and fails closed on everything else":
+        step("The pure classifier: unknown is never success")
+        expect(host_agent_exit_outcome_v4(RuntimeExitStatusV1.Exited(0))).to_equal("succeeded")
+        expect(host_agent_exit_outcome_v4(RuntimeExitStatusV1.Exited(1))).to_equal("failed")
+        expect(host_agent_exit_outcome_v4(RuntimeExitStatusV1.Exited(137))).to_equal("failed")
+        expect(host_agent_exit_outcome_v4(RuntimeExitStatusV1.Unobserved)).to_equal("failed")
+        expect(host_agent_exit_outcome_v4(RuntimeExitStatusV1.NotExited("running"))).to_equal("failed")
+        expect(host_agent_exit_outcome_v4(RuntimeExitStatusV1.Unknown("fresh-workspace-exit-inspect-engine-failed"))).to_equal("failed")
+
+    it "records a self-exit as succeeded when the Destroy reply carries Exited(0) (the side bug)":
+        step("Inspect saw the workload leave running: a self-exit cause, failed until the exit read settles it")
+        val exited = host_agent_workload_exit_cause_v4(x_agent(), x_reply("inspect", RUNTIME_PHASE_STOPPED, RuntimeExitStatusV1.Unobserved))
+        expect(exited.stop_requested).to_equal(true)
+        expect(exited.exit_by_workload).to_equal(true)
+        expect(exited.outcome).to_equal("failed")
+        step("The Destroy reply carries the engine-native read taken before Stop")
+        val ok = x_settled(RuntimeExitStatusV1.Exited(0))
+        expect(ok.outcome).to_equal("succeeded")
+        expect(ok.exit_digest.byte_len()).to_equal(64)
+        expect(ok.exit_digest != exited.exit_digest).to_equal(true)
+        step("A non-zero, not-exited, unknown or missing read is failed")
+        expect(x_settled(RuntimeExitStatusV1.Exited(2)).outcome).to_equal("failed")
+        expect(x_settled(RuntimeExitStatusV1.NotExited("running")).outcome).to_equal("failed")
+        expect(x_settled(RuntimeExitStatusV1.Unknown("fresh-workspace-exit-inspect-json")).outcome).to_equal("failed")
+        expect(x_settled(RuntimeExitStatusV1.Unobserved).outcome).to_equal("failed")
+        step("The exit evidence digest binds the observed status, so 0 and 2 cannot share evidence")
+        expect(x_settled(RuntimeExitStatusV1.Exited(2)).exit_digest != ok.exit_digest).to_equal(true)
+
+    it "keeps the first cause: a cancel before the self-exit is never rewritten to succeeded":
+        val cancelled = host_linux_service_agent_request_cancel_v4(x_agent(), sha256_text("signed-cancel-packet")).agent
+        expect(cancelled.outcome).to_equal("failed")
+        val later = host_agent_workload_exit_cause_v4(cancelled, x_reply("inspect", RUNTIME_PHASE_STOPPED, RuntimeExitStatusV1.Unobserved))
+        expect(later.exit_by_workload).to_equal(false)
+        expect(later.exit_digest).to_equal(cancelled.exit_digest)
+        val settled = host_agent_destroy_exit_v4(later, x_reply("destroy", RUNTIME_PHASE_DESTROYED, RuntimeExitStatusV1.Exited(0)))
+        expect(settled.outcome).to_equal("failed")
+        expect(settled.exit_digest).to_equal(cancelled.exit_digest)

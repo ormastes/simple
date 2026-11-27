@@ -1,0 +1,55 @@
+# NOT_RUN. Invalid/stopped owners only; no fabricated native success.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.local_ipc_v1.LocalUnixConnectionV1
+use std.nogc_sync_mut.daemon_sdk.local_gateway_v1.*
+
+fn dispatch_forbidden_v2(owner: i64, request: LocalGatewayRequestV1) -> LocalGatewayOwnedResponseV1<i64>:
+    assert(false) # No test below owns an accepted native connection.
+    LocalGatewayOwnedResponseV1(owner, LocalGatewayResponseV1(request.request_id, 1, ""))
+
+fn dispatch_invalid_connection_v2(phase: i64) -> LocalGatewayConnectionV1:
+    LocalGatewayConnectionV1(native: LocalUnixConnectionV1(token: 0), expected_peer_uid: 1,
+        deadline_monotonic_ms: 9223372036854775807, reader: nil, phase: phase,
+        response: nil, reply_prefix: [], reply_header: [], reply_payload: [],
+        reply_part: 0, reply_offset: 0, error: "")
+
+describe "Separated gateway scheduling and one-use dispatch":
+    it "does not expose cached ready metadata from a blocked connection":
+        var connection = dispatch_invalid_connection_v2(4)
+        connection.error = "retained-failure"
+        connection.ready_request = Some(LocalGatewayRequestV1("host-status", "", "", 1, "a".repeat(64)))
+        val turn = local_gateway_receive_v2(connection)
+        assert(turn.request == nil)
+        expect(turn.connection.native.token).to_equal(0)
+        expect(turn.error).to_equal("retained-failure")
+
+    it "refuses dispatch before real EOF without calling a handler":
+        val turn = local_gateway_dispatch_owned_v2(17, dispatch_invalid_connection_v2(0), dispatch_forbidden_v2)
+        expect(turn.owner).to_equal(17)
+        assert(not turn.handled)
+        expect(turn.connection.phase).to_equal(0)
+        expect(turn.error).to_equal("gateway-request-not-ready")
+
+    it "refuses publication before dispatch without consuming the connection":
+        val turn = local_gateway_publish_v2(dispatch_invalid_connection_v2(5))
+        expect(turn.connection.phase).to_equal(5)
+        expect(turn.connection.native.token).to_equal(0)
+        expect(turn.error).to_equal("gateway-response-not-ready")
+
+    it "retains the domain and prepared response when a ready request expires":
+        var connection = dispatch_invalid_connection_v2(5)
+        connection.deadline_monotonic_ms = 0
+        connection.response = Some(LocalGatewayResponseV1("b".repeat(64), 9, "retained"))
+        val turn = local_gateway_dispatch_owned_v2(23, connection, dispatch_forbidden_v2)
+        expect(turn.owner).to_equal(23)
+        assert(not turn.handled)
+        expect(turn.connection.phase).to_equal(4)
+        expect(turn.connection.response.unwrap().payload).to_equal("retained")
+        assert(turn.error != "")
+
+    it "keeps the legacy turn stopped without invoking or publishing again":
+        val turn = local_gateway_turn_owned_v1(31, dispatch_invalid_connection_v2(3), dispatch_forbidden_v2)
+        expect(turn.owner).to_equal(31)
+        expect(turn.connection.phase).to_equal(3)
+        assert(not turn.handled)
+        expect(turn.error).to_equal("")

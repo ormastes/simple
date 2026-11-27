@@ -5,7 +5,7 @@
  * targeting x86_32 bare-metal (QEMU isa-debug-exit, COM1 serial).
  *
  * Differences from x86_64:
- *   - RuntimeValue is int32_t (32-bit pointers)
+ *   - RuntimeValue is uint64_t (64-bit on every arch; 32-bit pointers)
  *   - Heap is 4MB (not 64MB)
  *   - No 64-bit register instructions
  *
@@ -30,7 +30,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-typedef int32_t RuntimeValue;
+typedef uint64_t RuntimeValue;
 
 /* ===================================================================
  * 2. Serial I/O — COM1 at 0x3F8 via x86 outb / inb
@@ -168,29 +168,35 @@ static void x86_32_harden_print_canary(void)
 }
 
 /* ===================================================================
- * 3. RuntimeValue tagging (32-bit)
+ * 3. RuntimeValue tagging (64-bit word, 8-byte strides)
  * =================================================================== */
 
-#define TAG_MASK    0x7U
-#define TAG_INT     0x0U
-#define TAG_HEAP    0x1U
-#define TAG_FLOAT   0x2U
-#define TAG_SPECIAL 0x3U
+#define TAG_MASK    0x7ULL
+#define TAG_INT     0x0ULL
+#define TAG_HEAP    0x1ULL
+#define TAG_FLOAT   0x2ULL
+#define TAG_SPECIAL 0x3ULL
 
-#define ENCODE_INT(v)  ((RuntimeValue)(((uint32_t)(int32_t)(v) << 3) | TAG_INT))
-#define DECODE_INT(v)  ((int32_t)((uint32_t)(v) >> 3))
+#define ENCODE_INT(v)  ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3) | TAG_INT))
+#define DECODE_INT(v)  ((int64_t)(v) >> 3) /* arithmetic shift: full 61-bit payload, sign preserved */
 
-#define ENCODE_PTR(p)  ((RuntimeValue)((uint32_t)(uintptr_t)(p) | TAG_HEAP))
-#define DECODE_PTR(v)  ((void*)((uint32_t)(v) & ~TAG_MASK))
+#define ENCODE_PTR(p)  ((RuntimeValue)((uint64_t)(uintptr_t)(p) | TAG_HEAP))
+#define DECODE_PTR(v)  ((void*)(uintptr_t)((uint64_t)(v) & ~(uint64_t)TAG_MASK))
 
-#define IS_INT(v)      (((uint32_t)(v) & TAG_MASK) == TAG_INT)
-#define IS_HEAP(v)     (((uint32_t)(v) & TAG_MASK) == TAG_HEAP)
-#define IS_FLOAT(v)    (((uint32_t)(v) & TAG_MASK) == TAG_FLOAT)
+#define IS_INT(v)      (((uint64_t)(v) & TAG_MASK) == TAG_INT)
+#define IS_HEAP(v)     (((uint64_t)(v) & TAG_MASK) == TAG_HEAP)
+#define IS_FLOAT(v)    (((uint64_t)(v) & TAG_MASK) == TAG_FLOAT)
 #define IS_NIL(v)      ((v) == (RuntimeValue)TAG_SPECIAL)
 
 #define NIL_VALUE      ((RuntimeValue)TAG_SPECIAL)
-#define TRUE_VALUE     ENCODE_INT(1)
-#define FALSE_VALUE    ENCODE_INT(0)
+/* Codegen tags (src/compiler_rust/compiler/src/codegen/llvm/instructions.rs
+ * `tagged_bool_const`): true = 11, false = 19. Spelled out because this TU
+ * does not include arch/common/baremetal_runtime.h. */
+#define TRUE_VALUE     ((RuntimeValue)11)
+#define FALSE_VALUE    ((RuntimeValue)19)
+_Static_assert(TRUE_VALUE == 11, "TRUE_VALUE must match codegen tagged true (11)");
+_Static_assert(FALSE_VALUE == 19, "FALSE_VALUE must match codegen tagged false (19)");
+_Static_assert(sizeof(RuntimeValue) == 8, "RuntimeValue is 64-bit on every arch (PR #10816)");
 
 typedef struct {
     uint32_t type;
@@ -281,6 +287,29 @@ RuntimeValue rt_alloc_zeroed(RuntimeValue sz)
     if (!p) return NIL_VALUE;
     __builtin_memset(p, 0, bytes);
     return ENCODE_PTR(p);
+}
+
+/* Raw (untagged) memory probes for the pure-Simple core runtime
+ * (src/os/kernel/arch/x86_32/core_runtime.spl). rt_mmio_* carry tagged
+ * 29-bit ints and cannot address or move full 32-bit words. Same contract
+ * as the riscv32 rt_rv32_probe_load8/store32. */
+RuntimeValue rt_x86_32_probe_load8(RuntimeValue addr)
+{
+    return (RuntimeValue)(uint32_t)(*(volatile uint8_t *)(uintptr_t)(uint32_t)addr);
+}
+
+RuntimeValue rt_x86_32_probe_store32(RuntimeValue addr, RuntimeValue value)
+{
+    *(volatile uint32_t *)(uintptr_t)(uint32_t)addr = (uint32_t)value;
+    return NIL_VALUE;
+}
+
+/* Raw pointer (0 on failure) from the same bump heap as rt_alloc. */
+RuntimeValue rt_x86_32_probe_alloc(RuntimeValue size)
+{
+    size_t bytes = (size_t)(uint32_t)size;
+    if (bytes == 0 || bytes > 0x1000000) return 0;
+    return (RuntimeValue)(uintptr_t)malloc(bytes);
 }
 
 RuntimeValue rt_dealloc(RuntimeValue ptr)
@@ -394,6 +423,16 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
     if (src) __builtin_memcpy(s->data, src, (size_t)len);
     s->data[len] = '\0';
     return ENCODE_PTR(s);
+}
+
+/* Interned string-literal ctor: codegen emits rt_string_new_literal for every
+ * multi-byte literal (hosted interns by data ptr). The freestanding kernel has
+ * no intern table, so forward to rt_string_new with the same raw (untagged)
+ * i32 args. Matches riscv64/x86_64; pure-Simple twin:
+ * src/runtime/simple_core/core_string.spl rt_string_new_literal. */
+RuntimeValue rt_string_new_literal(RuntimeValue data, RuntimeValue len_val)
+{
+    return rt_string_new(data, len_val);
 }
 
 RuntimeValue rt_string_from_cstr(const char *cstr)
@@ -688,6 +727,14 @@ void rt_println_value(RuntimeValue val)
     rt_print_value(val);
     serial_putchar('\r');
     serial_putchar('\n');
+}
+
+/* i686 twin of the x86_64 serial_println (arch/x86_64/boot/baremetal_stubs.c):
+ * print any value then CRLF; the codegen extern is `serial_println(msg: text)`. */
+RuntimeValue serial_println(RuntimeValue val)
+{
+    rt_println_value(val);
+    return NIL_VALUE;
 }
 
 void rt_print_int(RuntimeValue val)

@@ -1,0 +1,138 @@
+# Pure control metadata and bounded consistency checks, never authority or IO.
+# The native owner must validate live issuance under its revision barrier.
+use std.common.build_manager.contracts.builder_digest_valid_v1
+
+pub struct WindowsEnginePipeControlBindingV2:
+    # Stable adopted runtime/pane identity, independent of client attachment.
+    target_digest: text
+    kind: text
+    payload_digest: text
+
+pub struct WindowsEnginePipeControlV2:
+    target_digest: text
+    binding_digest: text
+    kind: text
+    nonce_digest: text
+    revision: i64
+    expires_monotonic_ns: i64
+
+pub struct WindowsEnginePipeAttemptV2:
+    control: WindowsEnginePipeControlV2
+    sequence: i64
+    frame_sequence: i64
+    payload_digest: text
+    payload_bytes: i64
+    offset: i64
+    requested_bytes: i64
+
+pub enum WindowsEnginePipeWriteStatusV2:
+    Queued
+    Completed
+    Unknown
+
+pub struct WindowsEnginePipeWriteReceiptV2:
+    attempt: WindowsEnginePipeAttemptV2
+    status: WindowsEnginePipeWriteStatusV2
+    accepted_bytes: i64
+
+pub struct WindowsEnginePipeControlStateV2:
+    binding: WindowsEnginePipeControlBindingV2?
+    current: WindowsEnginePipeControlV2?
+    active: bool
+    last: WindowsEnginePipeWriteReceiptV2?
+    pending: bool
+
+pub fn windows_engine_control_binding_reason_v2(binding: WindowsEnginePipeControlBindingV2) -> text:
+    if not builder_digest_valid_v1(binding.target_digest): return "engine-control-binding-target"
+    if binding.kind == "input":
+        if binding.payload_digest != "": return "engine-control-input-binding-payload"
+    elif binding.kind == "geometry":
+        if not builder_digest_valid_v1(binding.payload_digest): return "engine-control-geometry-binding-payload"
+    else: return "engine-control-binding-kind"
+    ""
+
+pub fn windows_engine_control_reason_v2(control: WindowsEnginePipeControlV2) -> text:
+    if not builder_digest_valid_v1(control.target_digest): return "engine-control-target"
+    if not builder_digest_valid_v1(control.binding_digest): return "engine-control-binding-digest"
+    if not builder_digest_valid_v1(control.nonce_digest): return "engine-control-nonce"
+    if control.kind != "input" and control.kind != "geometry": return "engine-control-kind"
+    if control.revision <= 0: return "engine-control-revision"
+    if control.expires_monotonic_ns <= 0: return "engine-control-expiry"
+    ""
+
+pub fn windows_engine_control_equal_v2(left: WindowsEnginePipeControlV2,
+        right: WindowsEnginePipeControlV2) -> bool:
+    (left.target_digest == right.target_digest and left.binding_digest == right.binding_digest and left.kind == right.kind and
+        left.nonce_digest == right.nonce_digest and left.revision == right.revision and
+        left.expires_monotonic_ns == right.expires_monotonic_ns)
+
+fn attempt_shape_reason(attempt: WindowsEnginePipeAttemptV2) -> text:
+    val control_reason = windows_engine_control_reason_v2(attempt.control)
+    if control_reason != "": return control_reason
+    if attempt.sequence <= 0 or attempt.frame_sequence <= 0: return "engine-control-attempt-sequence"
+    if not builder_digest_valid_v1(attempt.payload_digest): return "engine-control-attempt-digest"
+    if attempt.payload_bytes < 1 or attempt.payload_bytes > 131072: return "engine-control-payload-bound"
+    if attempt.requested_bytes < 1 or attempt.requested_bytes > 65536: return "engine-control-request-bound"
+    if attempt.offset < 0 or attempt.offset >= attempt.payload_bytes: return "engine-control-offset-bound"
+    # Subtraction after bounded positive payload validation avoids signed wrap.
+    if attempt.requested_bytes > attempt.payload_bytes - attempt.offset: return "engine-control-range-bound"
+    ""
+
+pub fn windows_engine_control_attempt_reason_v2(state: WindowsEnginePipeControlStateV2,
+        attempt: WindowsEnginePipeAttemptV2, now_monotonic_ns: i64) -> text:
+    if not state.binding.? or not state.current.? or not state.active:
+        return "engine-control-inactive-or-unbound"
+    val binding = state.binding.unwrap()
+    val binding_reason = windows_engine_control_binding_reason_v2(binding)
+    if binding_reason != "": return binding_reason
+    val current = state.current.unwrap()
+    val current_reason = windows_engine_control_reason_v2(current)
+    if current_reason != "": return current_reason
+    val shape_reason = attempt_shape_reason(attempt)
+    if shape_reason != "": return shape_reason
+    if not windows_engine_control_equal_v2(current, attempt.control): return "engine-control-not-current"
+    if attempt.control.binding_digest != binding.target_digest or attempt.control.kind != binding.kind:
+        return "engine-control-binding-mismatch"
+    if now_monotonic_ns <= 0 or now_monotonic_ns >= current.expires_monotonic_ns:
+        return "engine-control-expired-or-clock-invalid"
+    if binding.kind == "geometry":
+        if attempt.payload_digest != binding.payload_digest: return "engine-control-geometry-payload-mismatch"
+        if attempt.frame_sequence != 1: return "engine-control-geometry-one-frame"
+    if state.pending: return "engine-control-pending"
+    if not state.last.?:
+        if attempt.sequence != 1 or attempt.frame_sequence != 1 or attempt.offset != 0:
+            return "engine-control-first-attempt"
+        return ""
+    val last = state.last.unwrap()
+    match last.status:
+        case WindowsEnginePipeWriteStatusV2.Queued: return "engine-control-pending"
+        case WindowsEnginePipeWriteStatusV2.Unknown: return "engine-control-unknown"
+        case WindowsEnginePipeWriteStatusV2.Completed: ()
+    val last_shape_reason = attempt_shape_reason(last.attempt)
+    if last_shape_reason != "": return "engine-control-last-invalid:" + last_shape_reason
+    if last.attempt.control.binding_digest != binding.target_digest or last.attempt.control.kind != binding.kind:
+        return "engine-control-last-binding-mismatch"
+    if last.accepted_bytes < 0 or last.accepted_bytes > last.attempt.requested_bytes:
+        return "engine-control-last-accepted-bound"
+    if last.attempt.sequence == 9223372036854775807: return "engine-control-sequence-exhausted"
+    if attempt.sequence != last.attempt.sequence + 1: return "engine-control-next-attempt-sequence"
+    # The shape and accepted-byte checks bound this sum to payload_bytes.
+    val next_offset = last.attempt.offset + last.accepted_bytes
+    if attempt.frame_sequence == last.attempt.frame_sequence:
+        if not windows_engine_control_equal_v2(last.attempt.control, attempt.control):
+            # A fresh current lease can authorize only the exact known suffix.
+            # The retained receipt remains the prior native attempt's tuple.
+            if (attempt.control.revision <= last.attempt.control.revision or
+                    attempt.control.binding_digest != last.attempt.control.binding_digest or
+                    attempt.control.kind != last.attempt.control.kind):
+                return "engine-control-frame-control-changed"
+        if attempt.payload_digest != last.attempt.payload_digest or attempt.payload_bytes != last.attempt.payload_bytes:
+            return "engine-control-frame-payload-changed"
+        if next_offset == last.attempt.payload_bytes: return "engine-control-frame-already-complete"
+        if attempt.offset != next_offset: return "engine-control-frame-offset"
+        return ""
+    if last.attempt.frame_sequence == 9223372036854775807: return "engine-control-frame-sequence-exhausted"
+    if attempt.frame_sequence != last.attempt.frame_sequence + 1 or attempt.offset != 0:
+        return "engine-control-next-frame-sequence-or-offset"
+    if next_offset != last.attempt.payload_bytes: return "engine-control-previous-frame-incomplete"
+    ""

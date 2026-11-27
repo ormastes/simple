@@ -327,3 +327,43 @@ row-by-row here:
 4. Update `doc/07_guide/language/dict_native_pitfalls.md` to add `.set()`
    silent-insert-failure as a third documented defect alongside `.get()`/`.len()`.
 
+
+## Triage 2026-11-04 (c28-w3)
+
+- The "src/app/interpreter/* no longer exists" path-drift note is wrong: the dir
+  exists (23 files); `helpers/imports.spl` still has a `.set(` site.
+- Since this audit: `244170a1819` ("dispatch erased Dict set dynamically", native
+  codegen + runtime) landed, and `kms_vendor_adapters.spl` (the HIGH finding) now
+  uses bracket assignment with a comment about `.set()` on builtin Dict.
+- Not verified natively (needs a native build); so not closed. Proposed next step:
+  one native-codegen repro spec for `val d: Dict<text,text> = {}; d.set("k","v")`
+  then `d.contains_key("k")`; if green, close and re-point the 69 AFFECTED sites
+  list as verified. `doc/07_guide/language/dict_native_pitfalls.md` is absent on
+  this branch, so the "update the pitfalls doc" action item is blocked on that too.
+
+## mirp2-G 2026-11-05: left open
+
+`244170a1819` ("dispatch erased Dict set dynamically") is on release/1.0.0. The
+native repro from the 2026-11-04 triage (`val d: Dict<text,text> = {}`;
+`d.set("k","v")`; `d.contains_key("k")`) was not run: native probing blocked by
+disk (C: 6.3 GB free, s3sanity harness needs 12 GB). Next step: run that probe
+with s3_fable44; if green, close and mark the AFFECTED list verified.
+
+## Triage 2026-11-25 (fleet lane p2w1-ai, worktree wt-p2w1-ai, release/1.0.0 HEAD 50adb6f42ce)
+
+SKIP — left open; closure step is environment-blocked at HEAD.
+
+- The candidate fix `244170a1819` ("dispatch erased Dict set dynamically",
+  native codegen + runtime) is present on release/1.0.0 (confirmed via
+  `git log`), matching the 2026-11-04/2026-11-05 triage notes above.
+- The prescribed closing probe (native-build of
+  `val d: Dict<text,text> = {}; d.set("k","v"); d.contains_key("k")`) could
+  not be run: `bin/simple.exe native-build` aborts at compile time with
+  `unknown decorator '@representation_boundary'` in
+  `src/app/cli/native_build_main.spl:239` — the pinned seed v1.0.0-rc.1
+  predates that decorator (known release/1.0.0 source/binary inconsistency).
+  The defect is native-codegen-only, so an interpreter-mode probe would prove
+  nothing.
+- Next step is unchanged from 2026-11-05: run the native repro once a
+  current self-hosted binary is available; if green, close and mark the
+  AFFECTED list verified.

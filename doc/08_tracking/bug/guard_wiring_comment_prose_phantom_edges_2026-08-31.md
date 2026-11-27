@@ -1,6 +1,6 @@
 # check-guard-wiring counts `#`-comment mentions as wiring edges
 
-Status: OPEN (finding recorded, fix deliberately NOT applied — see blast radius)
+Status: FIXED (narrow whole-line shell-comment phantom edges) — the scanner excludes shell comment prose and its focused selftest passed 43/43. The historical 15 wiring debts and full repository census remain outside this closure and unverified.
 Filed: 2026-08-31
 
 ## Defect
@@ -82,3 +82,27 @@ again — which is the correct behaviour, not a regression.
 Whoever takes the 15-guard set above: apply the comment filter, then for each
 guard decide wired-vs-opt-out on evidence. Verify the pre-push chain names its
 mandatory guards executably rather than only in prose.
+
+## Narrow fix verified (2026-11-03)
+
+The scanner now removes whole-line shell comment text before deriving wiring
+edges. Its selftest includes a comment-only guard mention that must remain an
+orphan, plus positive controls for direct calls, string assignments, heredocs,
+multiline quotes, and continued quotes. The focused run completed with
+`check-guard-wiring: selftest 43/43 fixtures correct` (exit 0). The retained
+output is `C:/dev/p3new/p2_parallel_20261103/lane03/guard-selftest-only.txt`,
+SHA-256 `83F8C692F010FBCBA50C3469073D0BE1EFC63F7A4A2C9402260180562899719A`.
+
+The tested script SHA-256 is
+`E8162E5B79D7941DC65AC4E16597736C0F06A16ADC2305FECCCF4F41E19142DD`; it
+matches the current `release/1.0.0` script blob. The source fixes are present
+in commits `e45f75da819` (shell comment filtering and comment-prose regression)
+and `5b60282d540` (continued-quote handling).
+
+This closes only the false edge caused by whole-line shell comment prose. No
+full repository guard-wiring census was run. In particular, this does not
+establish that the two historical comment examples are currently classified
+correctly, does not resolve the 15 historical comment-only wiring debts listed
+above, and does not prove the pre-push hook's complete executable guard set.
+Those broader wiring obligations remain unresolved and require their own
+source and verification work.

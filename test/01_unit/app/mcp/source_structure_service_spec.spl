@@ -1,0 +1,64 @@
+# @req VIEW-01 VIEW-08 VIEW-09 VIEW-10 PROTO-03
+# Unbound shared-service integration. No authentication/session claims.
+use std.spec.step
+use app.source_view.service.{source_open_result_v1,
+    source_outline_result_identity_v1, source_structure_cursor_v1}
+use std.common.source.contracts.{SourceOutlineV1, SourceOutlineNodeV1, SourceRangeV1}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field,
+    json_value_items, json_value_text_or, json_value_object_from, json_value_serialize}
+
+fn source_service_fixture_request_v1(mode: text, target: text) -> text:
+    json_value_serialize(json_value_object_from([
+        ("path", JsonValue.Str("test/fixture/source_view/outline.spl")),
+        ("mode", JsonValue.Str(mode)), ("target", JsonValue.Str(target))]))
+
+describe "shared source-view application service":
+    it "returns native folded default outline without raw body dumping":
+        step("open the actual Simple fixture through the composed source service")
+        val result = source_open_result_v1("{\"path\":\"test/fixture/source_view/outline.spl\"}")
+        expect(result.is_error).to_equal(false)
+        val payload = json_parse_value_strict(result.payload).unwrap()
+        expect(json_value_text_or(json_value_field(payload, "mode"), "")).to_equal("outline")
+        expect(json_value_text_or(json_value_field(payload, "provider_level"), "")).to_equal("L1")
+        val segments = json_value_items(json_value_field(payload, "segments"))
+        expect(segments.len()).to_equal(2)
+        val first = json_value_text_or(json_value_field(segments[0], "source_text"), "")
+        expect(first).to_contain("class Counter:")
+        expect(first.contains("fn first")).to_equal(false)
+        val folds = json_value_items(json_value_field(payload, "folds"))
+        expect(json_value_text_or(json_value_field(folds[0], "label"), "")).to_equal("imports")
+        expect(json_value_items(json_value_field(folds[0], "ranges")).len()).to_equal(2)
+
+    it "binds structural continuation to source and query":
+        step("continue one-node outline pages without mixing queries")
+        val first = source_open_result_v1("{\"path\":\"test/fixture/source_view/outline.spl\",\"max_nodes\":1}")
+        expect(first.is_error).to_equal(false)
+        val payload = json_parse_value_strict(first.payload).unwrap()
+        val cursor = json_value_text_or(json_value_field(payload, "next_cursor"), "")
+        val snapshot = json_value_text_or(json_value_field(payload, "snapshot_id"), "")
+        expect(cursor == "").to_equal(false)
+        val next_request = json_value_serialize(json_value_object_from([
+            ("path", JsonValue.Str("test/fixture/source_view/outline.spl")),
+            ("max_nodes", JsonValue.Int(1)), ("cursor", JsonValue.Str(cursor)),
+            ("snapshot_id", JsonValue.Str(snapshot))]))
+        val next = source_open_result_v1(next_request)
+        expect(next.is_error).to_equal(false)
+        expect(next.payload).to_contain("fn outside():")
+        val changed_request = next_request.replace("\"max_nodes\":1", "\"max_nodes\":2")
+        val changed = source_open_result_v1(changed_request)
+        expect(changed.is_error).to_equal(true)
+        expect(changed.payload).to_contain("source_cursor_query_changed")
+
+    it "invalidates a cursor when produced provider facts change":
+        step("bind cursor admission to actual outline result identity")
+        val span = SourceRangeV1(0, 10)
+        val first_node = SourceOutlineNodeV1("first", "first", "function", -1, span, span, SourceRangeV1(10, 10))
+        val changed_node = SourceOutlineNodeV1("changed", "changed", "function", -1, span, span, SourceRangeV1(10, 10))
+        val first = SourceOutlineV1("same-source", "provider-v1", "L1", "parsed", [first_node], [], 0, [])
+        val changed = SourceOutlineV1("same-source", "provider-v1", "L1", "parsed", [changed_node], [], 0, [])
+        val original_identity = source_outline_result_identity_v1(first)
+        val changed_identity = source_outline_result_identity_v1(changed)
+        expect(original_identity == changed_identity).to_equal(false)
+        match source_structure_cursor_v1(original_identity + ":1", changed_identity, "same-source"):
+            Ok(_): fail("changed provider result accepted old cursor")
+            Err(reason): expect(reason).to_equal("source_cursor_query_changed")

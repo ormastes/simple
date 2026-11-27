@@ -1,0 +1,61 @@
+# Integration layer, I/O and crypto: failures that are only found AFTER earlier
+# pages were already authenticated and decrypted.
+#
+# A tampered later page is detected when the open reaches it, and a file cut at a
+# page boundary is a whole number of pages that all authenticate but are fewer
+# than the header promises.  Both cost real page decryptions on the Phase 1 seed
+# (about 45 s each), which is why they live apart from the quick negatives:
+# one decrypted page for the tampered file, four for the truncated file.
+# Lifecycle: doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md ;
+# doc/03_plan/agent_tasks/devhub_messenger_master.md ;
+# doc/04_architecture/app/devhub/messenger_gateway.md ;
+# doc/05_design/app/devhub/messenger_sdn_and_api.md
+# @manual_section: storage-port-late-failures
+
+"""
+## Purpose and audience
+Purpose: a tampered second page and a file dn_truncated to four whole pages must
+both be rejected by the storage port, without releasing rows, without echoing
+secrets or plaintext, and without modifying the source.
+Audience: reviewers of the encrypted read path who need mid-file failures pinned.
+The passphrase is public synthetic test data from dense_ground_truth.json.
+"""
+
+use std.spec.*
+use test.support.devhub_messenger_dense.*
+use std.common.json.value.{JsonValue, json_value_field}
+
+val truth = dense_truth()
+val good = truth_passphrase(truth)
+val _secret_ready = dense_set_secret(good)
+val LEAKS: [text] = [good, "SQLite format", "tie-first", "fresh general"]
+val dn_tamper_later = port_verdict(dense_path("dense_multipage_tamper_later.sqlcipher4"), "sqlcipher4", DENSE_REF)
+val dn_truncated = port_verdict(dense_path("dense_multipage_truncated_4_pages.sqlcipher4"), "sqlcipher4", DENSE_REF)
+
+fn recorded(name: text) -> JsonValue:
+    json_value_field(json_value_field(truth, "files"), name)
+
+describe "failures found after earlier pages were decrypted":
+    it "rejects a tampered second page as an authentication failure naming no secret":
+        # @req REQ-MSGR-DENSE-LATE-001
+        step("Open the variant whose page 2 has one flipped ciphertext byte")
+        # @capture(protocol_json): storage-port error code and message for the tampered second page
+        expect(verdict_code(dn_tamper_later)).to_equal("STORAGE_PORT_AUTHENTICATION_FAILED")
+        expect(verdict_message(dn_tamper_later).contains("page 2")).to_equal(true)
+        expect(leaks_none(dn_tamper_later, LEAKS)).to_equal(true)
+
+    it "rejects a file cut after four whole pages":
+        # @req REQ-MSGR-DENSE-LATE-002
+        step("Open the 16384-byte prefix of the database, which authenticates page by page")
+        # @capture(protocol_json): storage-port error code and message for the four-page truncation
+        expect(dense_file_bytes("dense_multipage_truncated_4_pages.sqlcipher4").len()).to_equal(tn(recorded("dense_multipage_truncated_4_pages.sqlcipher4"), "bytes"))
+        expect(verdict_code(dn_truncated).starts_with("STORAGE_PORT_")).to_equal(true)
+        expect(verdict_code(dn_truncated)).to_equal("STORAGE_PORT_CORRUPT_SOURCE")
+        expect(leaks_none(dn_truncated, LEAKS)).to_equal(true)
+
+    it "leaves both variants byte-identical to the generator's hashlib digests":
+        # @req REQ-MSGR-DENSE-LATE-003
+        step("Hash both variants after the rejected opens and compare with the recorded digests")
+        # @capture(statistics): sha256 of both variants against dense_ground_truth.json
+        expect(dense_file_sha256("dense_multipage_tamper_later.sqlcipher4")).to_equal(tf(recorded("dense_multipage_tamper_later.sqlcipher4"), "sha256"))
+        expect(dense_file_sha256("dense_multipage_truncated_4_pages.sqlcipher4")).to_equal(tf(recorded("dense_multipage_truncated_4_pages.sqlcipher4"), "sha256"))

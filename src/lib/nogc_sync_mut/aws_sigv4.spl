@@ -12,6 +12,7 @@
 
 use std.common.crypto.sha256.{sha256_bytes}
 use std.common.crypto.hmac.{hmac_sha256_bytes}
+use std.common.crypto.types.{crypto_text_to_bytes}
 
 
 val SIGV4_ALGORITHM = "AWS4-HMAC-SHA256"
@@ -23,10 +24,10 @@ val SIGV4_EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca49599
 
 # --- Byte / hex helpers (self-contained; do not couple to AES utilities) ---
 
-fn _aws_sigv4_text_to_bytes(s: text) -> list:
+fn _aws_sigv4_text_to_bytes(s: text) -> [u8]:
     """UTF-8 bytes of `s`.
 
-    Must iterate `s.bytes()`. The previous version pushed
+    Must hash the UTF-8 octets (`crypto_text_to_bytes`). The previous version pushed
     `s.char_code_at(i)` -- a CODE POINT -- while bounding `i` by `s.len()`,
     which is a BYTE count. For non-ASCII text that is wrong twice over: each
     multi-byte character contributed one code point instead of its 2-4 UTF-8
@@ -36,27 +37,21 @@ fn _aws_sigv4_text_to_bytes(s: text) -> list:
     sequence, so the signature was simply wrong. ASCII was unaffected, which
     is why this survived.
     """
-    var out = []
-    val bs = s.bytes()
-    var i = 0
-    while i < bs.len():
-        out.push(bs[i] as i64)
-        i = i + 1
-    out
+    crypto_text_to_bytes(s)
 
-fn _bytes_to_hex(bytes: list) -> text:
+fn _bytes_to_hex(bytes: [u8]) -> text:
     val digits = "0123456789abcdef"
     var out = ""
     var i = 0
     while i < bytes.len():
-        val b = bytes.get(i)
+        val b: i64 = bytes[i] as i64
         val hi = (b / 16) % 16
         val lo = b % 16
         out = out + digits[hi:hi + 1] + digits[lo:lo + 1]
         i = i + 1
     out
 
-fn _sha256_hex_bytes(bytes: list) -> text:
+fn _sha256_hex_bytes(bytes: [u8]) -> text:
     _bytes_to_hex(sha256_bytes(bytes))
 
 fn sigv4_sha256_hex(s: text) -> text:
@@ -72,7 +67,7 @@ fn _hex_byte(b: i64) -> text:
     val lo = b % 16
     "%" + digits[hi:hi + 1] + digits[lo:lo + 1]
 
-fn sigv4_uri_encode(s: text, encode_slash: bool) -> text:
+pub fn sigv4_uri_encode(s: text, encode_slash: bool) -> text:
     """Percent-encode per RFC 3986; uppercase hex; `/` only encoded when requested."""
     # Percent-encoding is defined per BYTE, so this loop reads bytes only.
     # It previously mixed units in a single body: `ch = s[i:i+1]` is a BYTE
@@ -110,7 +105,7 @@ fn sigv4_canonical_uri(path: text) -> text:
 
 # --- Signing key derivation ---
 
-fn sigv4_derive_signing_key(secret_key: text, date: text, region: text, service: text) -> list:
+fn sigv4_derive_signing_key(secret_key: text, date: text, region: text, service: text) -> [u8]:
     """Compute the SigV4 signing key bytes.
 
     signing_key = HMAC(HMAC(HMAC(HMAC("AWS4"+secret, date), region), service), "aws4_request")
@@ -244,7 +239,7 @@ fn sigv4_presign_url(
     "{endpoint}{canonical_uri}?{canonical_query}&X-Amz-Signature={signature}"
 
 
-fn sigv4_presign_get_url(
+pub fn sigv4_presign_get_url(
     endpoint: text,
     host: text,
     bucket: text,
@@ -341,6 +336,6 @@ fn _xml_inner(body: text, tag: text) -> text:
         return ""
     body[a + open.len():b]
 
-fn parse_s3_error(body: text) -> S3ErrorInfo:
+pub fn parse_s3_error(body: text) -> S3ErrorInfo:
     """Extract <Code> and <Message> from an S3 error XML body. Empty fields if absent."""
     S3ErrorInfo(code: _xml_inner(body, "Code"), message: _xml_inner(body, "Message"))

@@ -1,9 +1,16 @@
 # Web layout/paint engine has no device-pixel-ratio / DPI scaling hook
-## Closed 2026-09-16 — ... purposes while (b) multiplying resolved px lengths by the DPR when computing box geometry
+## Open (feature gap) — triage corrected 2026-11-25; the "Closed 2026-09-16" header was wrong
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
-bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
-fresh dated repro if the symptom returns.
+Triage 2026-11-25: the 2026-09-16 normalization pass stamped this entry
+"Closed", but the body below documents a genuinely open engine feature gap
+(no DPR parameter anywhere in the parse → style → layout → paint pipeline),
+and its own "Suggested follow-up" scopes a real engine change across a
+~9,500-line shared file. There is no resolution evidence in the body and no
+DPR hook in the current source
+(`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
+still takes a single width/height pair serving both raster size and CSS
+viewport). Reclassified: OPEN — feature gap, deferred; needs its own scoped
+engine change per the follow-up below, not a P3 ledger fix.
 
 ## Status
 

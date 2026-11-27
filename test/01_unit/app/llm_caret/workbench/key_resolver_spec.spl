@@ -1,0 +1,98 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+
+"""
+Caret TUI key resolver (REQ-CARET-UI-004, CU-005; plan 6.3/6.4): terminal focus
+forwards every non-leader key byte-for-byte; bound chords never reach the pane.
+"""
+
+use std.spec.*
+use app.llm_caret.workbench.leader_keys.{LeaderState, LeaderAction, new_leader_state}
+use app.llm_caret.workbench.key_resolver.{KeyEvent, KeyFocus, KeyRouteKind, KeyResolution, key_event, resolve_key, resolve_leader_name, leader_bytes}
+
+val LEAD = "ctrl+g"
+
+# Runs keys through the resolver, returning all forwarded bytes and the last resolution.
+fn _forward(leader: text, keys: [KeyEvent], focus: KeyFocus) -> [u8]:
+    var st = new_leader_state()
+    var sent: [u8] = []
+    for k in keys:
+        val r = resolve_key(leader, st, k, focus)
+        st = r.state
+        if r.route.kind == KeyRouteKind.Forward:
+            for b in r.route.bytes:
+                sent.push(b)
+    sent
+
+fn _last(leader: text, keys: [KeyEvent], focus: KeyFocus) -> KeyResolution:
+    var st = new_leader_state()
+    var r = resolve_key(leader, st, keys[0], focus)
+    var i = 1
+    while i < keys.len():
+        r = resolve_key(leader, r.state, keys[i], focus)
+        i = i + 1
+    r
+
+fn _ctrl_g() -> KeyEvent:
+    key_event("ctrl+g", [7])
+
+describe "Caret TUI key resolver (CU-005)":
+    it "forwards a recorded key sequence to the terminal byte-for-byte":
+        # @req REQ-CARET-UI-004
+        step("Type ctrl+b, ESC [ A, a Hangul syllable and an emoji into the terminal surface")
+        val keys = [
+            key_event("ctrl+b", [2]),
+            key_event("up", [27, 91, 65]),
+            key_event("han", [234, 176, 128]),
+            key_event("emoji", [240, 159, 152, 128])
+        ]
+        val sent = _forward(LEAD, keys, KeyFocus.TerminalSurface)
+        val expected: [u8] = [2, 27, 91, 65, 234, 176, 128, 240, 159, 152, 128]
+        expect(sent).to_equal(expected)
+
+    it "consumes a bound chord so it never reaches the pane":
+        # @req REQ-CARET-UI-004
+        val keys = [_ctrl_g(), key_event("n", [110])]
+        val r = _last(LEAD, keys, KeyFocus.TerminalSurface)
+        expect(r.route.kind).to_equal(KeyRouteKind.Action)
+        expect(r.route.action).to_equal(LeaderAction.NextAgent)
+        expect(_forward(LEAD, keys, KeyFocus.TerminalSurface).len()).to_equal(0)
+
+    it "forwards leader then key, in order, for an unknown chord":
+        # @req REQ-CARET-UI-004
+        val sent = _forward(LEAD, [_ctrl_g(), key_event("z", [122])], KeyFocus.TerminalSurface)
+        val expected: [u8] = [7, 122]
+        expect(sent).to_equal(expected)
+
+    it "forwards one literal leader when the leader is pressed twice":
+        # @req REQ-CARET-UI-004
+        val sent = _forward(LEAD, [_ctrl_g(), _ctrl_g()], KeyFocus.TerminalSurface)
+        val expected: [u8] = [7]
+        expect(sent).to_equal(expected)
+
+    it "supports a remapped f10 leader and lets ctrl+g pass through":
+        # @req REQ-CARET-UI-004
+        expect(resolve_leader_name("F10")).to_equal("f10")
+        expect(resolve_leader_name("bogus")).to_equal("ctrl+g")
+        val f10 = key_event("f10", [27, 91, 50, 49, 126])
+        val r = _last("f10", [f10, key_event("a", [97])], KeyFocus.TerminalSurface)
+        expect(r.route.action).to_equal(LeaderAction.AgentNavigator)
+        val through = _forward("f10", [_ctrl_g()], KeyFocus.TerminalSurface)
+        val expected: [u8] = [7]
+        expect(through).to_equal(expected)
+        val lit = _forward("f10", [f10, f10], KeyFocus.TerminalSurface)
+        expect(lit).to_equal(leader_bytes("f10"))
+
+    it "treats Tab and arrows as widget keys in native views but raw in the terminal":
+        # @req REQ-CARET-UI-004
+        val tab = key_event("tab", [9])
+        val native = resolve_key(LEAD, new_leader_state(), tab, KeyFocus.NativeView)
+        expect(native.route.kind).to_equal(KeyRouteKind.Widget)
+        val overlay = resolve_key(LEAD, new_leader_state(), tab, KeyFocus.Overlay)
+        expect(overlay.route.kind).to_equal(KeyRouteKind.Widget)
+        val term = resolve_key(LEAD, new_leader_state(), tab, KeyFocus.TerminalSurface)
+        expect(term.route.kind).to_equal(KeyRouteKind.Forward)
+
+    it "keeps the leader active outside the terminal without forwarding anything":
+        # @req REQ-CARET-UI-004
+        val r = _last(LEAD, [_ctrl_g(), key_event("z", [122])], KeyFocus.NativeView)
+        expect(r.route.kind).to_equal(KeyRouteKind.Consume)

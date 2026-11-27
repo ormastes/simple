@@ -1,0 +1,34 @@
+# Register TLDR-summary-built surfaces into a driver context (PR2d), behind
+# SIMPLE_TLDR_IMPORTS=1. The surfaces come from module_surface_from_tldr_v1;
+# the context's existing surfaces are re-registered beside them and the
+# registry is frozen again so the importers' import targets resolve against
+# the summary-built surfaces; both the context and the driver's streaming
+# owner (what HIR lowering reads) are updated. Returns "" on success, else the error text.
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_tldr_import_route_v1.{tldr_guards_active_v1}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_surface_registry.{ModuleSurfaceBuilder}
+
+pub fn driver_register_tldr_surfaces_v1(driver: CompilerDriver, extras: [ModuleSurface]) -> text:
+    if not tldr_guards_active_v1():
+        return "TLDR-IMPORTS-E-FLAG-OFF: summary surfaces are only registered with SIMPLE_TLDR_IMPORTS=1 or an active unit-lane TLDR switch"
+    val current = if driver.streaming_surface_owner_ready: driver.streaming_module_surfaces_owner else: (driver.ctx.module_surfaces ?? ModuleSurfacesByName.empty())
+    var builder = ModuleSurfaceBuilder.new(current.library_mode)
+    for existing in current.surfaces:
+        val added = builder.add_surface_canonical_identity(existing, existing.module_name, existing.canonical_path)
+        if added.is_err():
+            return added.unwrap_err()
+    for extra in extras:
+        val added = builder.add_surface_canonical_identity(extra, extra.module_name, extra.canonical_path)
+        if added.is_err():
+            return added.unwrap_err()
+    val registry = ModuleSurfacesByName.empty()
+    val frozen_error = builder.finish_into(registry)
+    if frozen_error != "":
+        return frozen_error
+    driver.streaming_module_surfaces_owner = registry
+    driver.streaming_surface_owner_ready = true
+    driver.ctx.module_surfaces = Some(registry)
+    ""
+
+export driver_register_tldr_surfaces_v1

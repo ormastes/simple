@@ -1,0 +1,77 @@
+"""
+## Purpose and audience
+Purpose: the 4x (384 dpi) twin of table_cell_pen_origin_chrome159_spec. Chrome
+159 sizes auto table columns in LayoutUnits (1/64 CSS px) and paints each
+cell's text from that fractional column edge at every device scale. The 1x
+lane now carries the edge as the cell's pen error; the device-scale lane
+(`simple_web_layout_render_html_pixels_engine2d_at_device_scale`, k=4) still
+starts every cell on a whole CSS px, so the `l` cells sit 1.6..2.1 device px
+off Chrome. Same page, same font (Liberation Sans 16 px) on both sides.
+Audience: web renderer table layout / device-scale paint maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--hide-scrollbars --force-device-scale-factor=4 --window-size=400,300
+--screenshot`). Ink centroid x (device px, green channel ink weight over rows
+0..63) of each cell's glyphs, minus the first cell's centroid:
+
+| W  | cells    | band (device x) | Chrome 159 | k=4 lane (base and head 2026-11-23) |
+|----|----------|-----------------|------------|-------------------------------------|
+| 50 | ll, l    | 120..240        | 126.111    | 124.000                             |
+| 61 | ll, l, l | 110..175        | 114.854    | 116.000                             |
+| 61 | ll, l, l | 175..240        | 175.854    | 176.000                             |
+
+First-cell centroids: Chrome 17.758, k=4 lane 18.271 (0..120 / 0..110).
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-LCD-001 — a table cell's text run keeps Chrome's fractional column edge at device scale 4.
+"""
+# @tag: unit, browser_engine, text, table, engine2d, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d_at_device_scale}
+
+val K: i32 = 4
+val CW: i32 = 96
+val CH: i32 = 32
+# A quarter device px.
+val TOL_MILLI: i64 = 250
+
+fn _page(width: i32, cells: text) -> text:
+    "<!doctype html><html><body style=\"margin:0;background:#fff;font-family:sans-serif\"><table style=\"margin:0 0 0 1px;font-size:16px;line-height:1;color:#000;border-collapse:collapse;border-spacing:0;width:" + width.to_string() + "px\"><tr>" + cells + "</tr></table></body></html>"
+
+val CELL_LL: text = "<td style=\"padding:0\">ll</td>"
+val CELL_L: text = "<td style=\"padding:0\">l</td>"
+
+# Ink centroid x (milli device px) over x0..x1-1, rows 0..63.
+fn _centroid_milli(px: [u32], x0: i32, x1: i32) -> i64:
+    val w = CW * K
+    var ink: i64 = 0
+    var mx: i64 = 0
+    var y = 0
+    while y < 64:
+        var x = x0
+        while x < x1:
+            val g = 255 - (((px[y * w + x] >> 8) & 255u32) as i64)
+            ink = ink + g
+            mx = mx + g * (x as i64)
+            x = x + 1
+        y = y + 1
+    if ink > 0: mx * 1000 / ink else: 0
+
+fn _abs(v: i64) -> i64:
+    if v < 0: 0 - v else: v
+
+describe "auto table cell pen origin at device scale 4 (Chrome 159)":
+    it "AC-1: the l cells keep Chrome's fractional column edge at k=4":
+        step("W=50: second cell 126.111 device px right of the first; W=61: 114.854 and 175.854")
+        val p50 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_page(50, CELL_LL + CELL_L), CW, CH, K, "cpu_simd")
+        val p61 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_page(61, CELL_LL + CELL_L + CELL_L), CW, CH, K, "cpu_simd")
+        expect(p50.len()).to_equal(CW * K * CH * K)
+        expect(p61.len()).to_equal(CW * K * CH * K)
+        val d50 = _centroid_milli(p50, 120, 240) - _centroid_milli(p50, 0, 120)
+        val d61a = _centroid_milli(p61, 110, 175) - _centroid_milli(p61, 0, 110)
+        val d61b = _centroid_milli(p61, 175, 240) - _centroid_milli(p61, 0, 110)
+        expect(_abs(d50 - 126111) <= TOL_MILLI).to_equal(true)
+        expect(_abs(d61a - 114854) <= TOL_MILLI).to_equal(true)
+        expect(_abs(d61b - 175854) <= TOL_MILLI).to_equal(true)

@@ -1,0 +1,105 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Presence predicates on a generic method's optional result lower without E-RTI-003
+
+Self-build of release head 2026-11-24: `inner.remove(key).is_some()` in
+`AdaptiveSet<K>` (`inner: AdaptiveMap<K, bool>`, `remove(key: K) -> V?`)
+failed MIR lowering with
+
+    E-RTI-003: unsubstituted generic parameter in 'opt(p1)' reached a concrete consumer
+
+while `inner.remove(key) != nil` lowered. The fatal consumer was not the
+predicate lowering (it emits rt_is_some/rt_is_none on the erased word and
+needs no payload type) but RTI owner discovery for the OUTER call:
+`receiver_owner_with_args` required the receiver's whole return term to be
+concrete before reading its head. A concrete `opt(b:bool)` head answers
+E-RTI-001 ("not a struct/class", non-fatal fallback); the erased `opt(p1)`
+answered E-RTI-003 from inside `callee_return`, which
+`rti_enum_match_subject_type` treats as fatal. Generics are erased, so the
+head decides: a builtin head owns no row either way.
+"""
+
+# @tag: unit, compiler, mir, generics, rti
+# @cover src/compiler/20.hir/return_type_interface_v1.spl
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{env_set, env_get_nullable}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.return_type_interface_v1.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val generic_prelude = "struct Slot<K, V>:\n    key: K\n    value: V?\n\n    fn take(key: K) -> V?:\n        self.value\n\n    fn field_some() -> bool:\n        self.value.is_some()\n\n    fn field_none() -> bool:\n        self.value.is_none()\n\nstruct Plain:\n    value: bool?\n\n    fn take(key: text) -> bool?:\n        self.value\n\nstruct Bag<K>:\n    inner: Slot<K, bool>\n    plain: Plain\n\n"
+
+fn lower_errors(body: text) -> text:
+    val path = "src/rti_generic_optional/bag.spl"
+    val ast = parse_full_frontend(generic_prelude + body, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(ast)
+    var lowering = MirLowering.new(hir.symbols)
+    val _ = lowering.lower_module(hir)
+    var out = ""
+    for e in hir_lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    out
+
+fn bag_method(expr: text) -> text:
+    "    fn probe(key: K) -> bool:\n        val inner = self.inner\n        val plain = self.plain\n        val found = " + expr + "\n        found\n"
+
+fn err_code<T>(r: Result<T, RtiError>) -> text:
+    match r:
+        case Ok(_): "ok"
+        case Err(e): e.code
+
+describe "presence predicate on a generic method's optional result (adaptive_set.spl:102 repro)":
+    it "REPRO: inner.take(key).is_some() lowers without E-RTI-003":
+        val out = lower_errors(bag_method("inner.take(key).is_some()"))
+        expect(out.contains("E-RTI-003")).to_equal(false)
+        expect(out.contains("unsubstituted generic parameter")).to_equal(false)
+
+    it "inner.take(key).is_none() lowers without E-RTI-003":
+        val out = lower_errors(bag_method("inner.take(key).is_none()"))
+        expect(out.contains("E-RTI-003")).to_equal(false)
+
+    it "the nil comparison it replaced keeps lowering":
+        val out = lower_errors(bag_method("inner.take(key) != nil"))
+        expect(out.contains("E-RTI")).to_equal(false)
+
+    it "a T? field answers is_some / is_none inside its generic owner":
+        val out = lower_errors(bag_method("inner.field_some()"))
+        expect(out.contains("E-RTI-003")).to_equal(false)
+
+    it "the non-generic twin keeps lowering with no RTI diagnostics":
+        val out = lower_errors(bag_method("plain.take(\"x\").is_some()"))
+        expect(out.contains("E-RTI")).to_equal(false)
+
+describe "SIMPLE_RTI_STRICT proves the head branch is the one taken":
+    it "the erased optional receiver reports the concrete twin's E-RTI-001, not E-RTI-003":
+        val previous = env_get_nullable("SIMPLE_RTI_STRICT") ?? ""
+        env_set("SIMPLE_RTI_STRICT", "1")
+        val out = lower_errors(bag_method("inner.take(key).is_some()"))
+        env_set("SIMPLE_RTI_STRICT", previous)
+        expect(out.contains("is not a struct/class")).to_equal(true)
+        expect(out.contains("'opt(p1)' reached a concrete consumer")).to_equal(false)
+
+describe "owner discovery reads the head only for builtin-headed terms":
+    it "a builtin head owns no methods with or without parameters":
+        expect(rti_term_head_may_own_methods_v1(RtType.OptionalT(RtType.Param(1)))).to_equal(false)
+        expect(rti_term_head_may_own_methods_v1(RtType.OptionalT(RtType.Builtin("bool")))).to_equal(false)
+        expect(rti_term_head_may_own_methods_v1(RtType.ResultT(RtType.Param(0), RtType.Builtin("text")))).to_equal(false)
+
+    it "a bare parameter and a nominal owner stay under the concrete-consumer check":
+        expect(rti_term_head_may_own_methods_v1(RtType.Param(0))).to_equal(true)
+        expect(rti_term_head_may_own_methods_v1(RtType.Nominal(rti_type_ref("m", "struct", "Slot"), [RtType.Param(0)]))).to_equal(true)
+
+    it "NEGATIVE: require_concrete still refuses opt(p1) for a genuinely concrete consumer":
+        val table = ReturnTypeInterfaceTable.new()
+        expect(err_code(table.require_concrete(ReturnTypeEntry.Decided(RtType.OptionalT(RtType.Param(1)))))).to_equal("E-RTI-003")
+        expect(err_code(table.bind(RtType.OptionalT(RtType.Param(1)), SymbolTable.new()))).to_equal("E-RTI-003")

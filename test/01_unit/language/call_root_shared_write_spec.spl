@@ -1,0 +1,112 @@
+# @cover src/compiler_rust/compiler/src/interpreter/place.rs
+"""
+## Purpose and audience
+An assignment through a call-result root that returns storage something else
+still holds (`get_arr()[0] = v`, where `get_arr()` returns a class field's
+array) never loses the write silently. Readers are seed interpreter and JIT
+authors.
+Bug: doc/08_tracking/bug/seed_interp_call_root_shared_write_dropped_2026-11-07.md
+## Operator workflow
+bin/simple test test/01_unit/language/call_root_shared_write_spec.spl
+## Compatibility and limitations
+pure-Simple (core interpreter, checked in-process here) and the seed JIT write
+through to the shared array; those cases are a characterization. The seed
+interpreter's arrays are copy-on-write values, so it cannot write through. It
+rejects the assignment with a clear error. That is a filed engine deviation,
+not parity. A fresh struct wrapping the shared array is refused too, because
+the two pure-Simple engines disagree on it. A root that returns a fresh array writes into a temporary on
+every engine and is accepted.
+## Verification guidance and troubleshooting
+`shared_plain=1` from the seed interpreter means the write was dropped
+silently, which is the defect.
+"""
+# @manual_section: Call-result place roots that alias storage
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+use std.env.variables.{env_set}
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.value.{val_get_int}
+
+val PROBE_PATH: text = "test/01_unit/language/probe_call_root_shared_write.spl"
+
+val PURE_SRC = "class Holder:\n    arr: [i64]\nstruct Wrap:\n    items: [i64]\n" +
+    "val h = Holder(arr: [1, 2, 3])\n" +
+    "fn get_arr() -> [i64]:\n    h.arr\n" +
+    "fn view() -> Wrap:\n    Wrap(items: h.arr)\n" +
+    "get_arr()[0] = 9\nget_arr()[1] += 5\n" +
+    "h.arr[0] * 10000 + h.arr[1] * 100 + h.arr[2]\n"
+
+# Write-through cases: pure-Simple writes through on both of its engines.
+val SHARED_CASES: [text] = ["plain", "compound"]
+# The seed interpreter also refuses a fresh struct whose field is the shared
+# array (`view().items[i] = v`): the pure-Simple engines disagree on that
+# shape (the core interpreter copies, MIR writes through), so a loud refusal
+# is the only answer that drops nothing.
+val REFUSED_CASES: [text] = ["plain", "compound", "nested"]
+
+# SIMPLE_BIN must name the Rust seed: this spec checks the seed engines.
+fn run_probe(case_name: text, mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_CR_CASE=" + case_name + " SIMPLE_RUST_SEED_WARNING=0 SIMPLE_JIT_STRICT=1 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>&1"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+fn mismatched_cases(raw: text) -> [text]:
+    var bad: [text] = []
+    for line in raw.split("\n"):
+        val t = line.trim()
+        if t.starts_with("CASE "):
+            val halves = t.split(" want=")
+            if halves.len() != 2:
+                bad.push(t)
+            else:
+                val lhs = halves[0].split("=")
+                if lhs.len() != 2 or lhs[1] != halves[1]:
+                    bad.push(t)
+    bad
+
+describe "Call-result place root over shared storage":
+    it "writes through on the pure-Simple interpreter":
+        # @req REQ-ATTR-16
+        step("Run the shared-root writes (index and compound) on the pure-Simple core interpreter")
+        env_set("SIMPLE_NO_JIT", "1")
+        val result = core_interpret(PURE_SRC, "call_root_shared_write.spl")
+        env_set("SIMPLE_NO_JIT", "")
+        step("Verify every write reached the field's array")
+        expect(val_get_int(result)).to_equal(90703)
+
+    it "accepts a fresh root on both seed engines":
+        # @req REQ-ATTR-16
+        step("Write through a call that returns a fresh array")
+        val interp = run_probe("fresh", "interpreter")
+        val jit = run_probe("fresh", "jit")
+        expect(interp).to_contain("CASE fresh_root=ok want=ok")
+        expect(jit).to_contain("CASE fresh_root=ok want=ok")
+
+    it "writes through on the seed jit":
+        # @req REQ-ATTR-16
+        step("Run each shared-root case on the seed JIT with strict fallback")
+        var bad: [text] = []
+        for c in SHARED_CASES:
+            val out = run_probe(c, "jit")
+            if not out.contains("PROBE_DONE"):
+                bad.push(c + ": no PROBE_DONE")
+            for m in mismatched_cases(out):
+                bad.push(m)
+        expect(bad.join("|")).to_equal("")
+
+    it "refuses every shared root loudly on the seed interpreter instead of dropping the write":
+        # @req REQ-ATTR-16
+        step("Run each shared-root case on the seed interpreter")
+        var bad: [text] = []
+        for c in REFUSED_CASES:
+            val out = run_probe(c, "interpreter")
+            if not out.contains("call-result place root"):
+                bad.push(c + ": not refused")
+            if out.contains("CASE "):
+                bad.push(c + ": ran past the write")
+        expect(bad.join("|")).to_equal("")

@@ -1,0 +1,475 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+"""
+# HIR imports: registration fails closed on a registry it cannot trust
+
+Import registration works from retained physical surface indexes, a
+per-surface name index and a memo of re-export answers. Each of those can be
+stale or wrong, and none of them may silently bind the wrong owner. These
+examples pin what happens then:
+
+- an index outside the registry, or one retained across a re-freeze, is an
+  error and binds nothing;
+- an export origin that names no loaded module is an error, never a
+  facade-owned symbol;
+- a name index that reports "built" but lacks the name is re-derived from the
+  surface's own name arrays, so the declaration is still registered;
+- a re-export root query rejects a surface whose physical index or generation
+  does not match the registry; a memoized miss is re-walked before it is
+  believed, and a memoized owner outside the registry is rejected;
+- a name no module can own (a primitive spelling, an undeclared builtin
+  container) is skipped quietly, while any other undeclared import is
+  reported -- as a warning, or as an error under strict imports.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module, ParserImport}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering._Items.module_lowering.{HirReexportSource}
+use compiler.hir.hir_lowering.module_surface.{
+    module_surfaces_from_modules,
+    ModuleSurface,
+    ModuleSurfacesByName,
+    module_surface_export_origin_index_empty,
+    module_surface_export_origin_index_put
+}
+use std.nogc_sync_mut.io.env_ops.{env_set, env_unset}
+
+val guard_a_src = "pub struct Point:\n    x: i64\n\npub fn real() -> i64:\n    1\n"
+val guard_f_src = "export use lib.a.*\n"
+
+fn guard_registry() -> ModuleSurfacesByName:
+    val names = ["lib.a", "lib.f"]
+    val srcs = [guard_a_src, guard_f_src]
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var i = 0
+    while i < names.len():
+        val path = names[i].replace(".", "/") + ".spl"
+        modules[names[i]] = parse_full_frontend(srcs[i], path, names[i], log)
+        sources.push(SourceFile(path: path, content: srcs[i], module_name: names[i]))
+        i = i + 1
+    module_surfaces_from_modules(modules, sources).unwrap()
+
+fn bad_origin_registry() -> ModuleSurfacesByName:
+    """A surface whose export origin points at a module that is not loaded."""
+    var leaf = ModuleSurface.empty("pkg.leaf")
+    val origins = module_surface_export_origin_index_empty()
+    module_surface_export_origin_index_put(origins, "Bad", "missing.surface", "Bad", "explicit")
+    leaf.export_origin_index = origins
+    ModuleSurfacesByName.from_parts([leaf], {"pkg.leaf": 0}, ["pkg.leaf"], [0]).unwrap()
+
+fn facade_chain_registry(length: i64) -> ModuleSurfacesByName:
+    """`chain.0` globs `chain.1`, which globs `chain.2`, ... : `length` empty
+    facades in a row, none of which declares anything."""
+    var surfaces: [ModuleSurface] = []
+    var index_by_name: Dict<text, i64> = {}
+    var ordered_names: [text] = []
+    var ordered_indices: [i64] = []
+    var index = 0
+    while index < length:
+        val name = "chain.{index}"
+        var surface = ModuleSurface.empty(name)
+        surface.content_hash = index + 1
+        if index + 1 < length:
+            surface.imports = [ParserImport(module: "chain.{index + 1}", items: [], is_lazy: false, span: Span.empty())]
+            surface.import_item_offsets = [0, 0]
+        surfaces = surfaces.push(surface)
+        index_by_name[name] = index
+        ordered_names = ordered_names.push(name)
+        ordered_indices = ordered_indices.push(index)
+        index = index + 1
+    ModuleSurfacesByName.from_parts(surfaces, index_by_name, ordered_names, ordered_indices).unwrap()
+
+fn importer(registry: ModuleSurfacesByName) -> HirLowering:
+    var lowering = hirlowering_for_module("app/main.spl", registry)
+    lowering.begin_module("app/main.spl")
+    lowering
+
+fn index_of(lowering: HirLowering, owner: text) -> i64:
+    lowering.module_surfaces.index_by_name[owner]
+
+fn bound(lowering: HirLowering, local_name: text) -> bool:
+    lowering.symbols.lookup_or_invalid(local_name).is_valid()
+
+fn errors_mentioning(lowering: HirLowering, needle: text) -> i64:
+    var n = 0
+    for e in lowering.errors:
+        if e.message.contains(needle):
+            n = n + 1
+    n
+
+fn refrozen(lowering: HirLowering) -> HirLowering:
+    """The registry moved to a new generation while indexes were retained."""
+    var target = lowering
+    target.module_surfaces.generation = target.module_surfaces.generation + 1
+    target
+
+describe "retained surface index validation":
+    it "rejects an index outside the registry":
+        var lowering = importer(guard_registry())
+        lowering.register_imported_symbol(99, "lib.a", "Point", "Point", Span.empty(), true)
+        expect(errors_mentioning(lowering, "invalid imported module surface index 99 for `Point`")).to_equal(1)
+        expect(bound(lowering, "Point")).to_equal(false)
+
+    it "rejects a negative index":
+        var lowering = importer(guard_registry())
+        lowering.register_imported_symbol(-1, "lib.a", "Point", "Point", Span.empty(), true)
+        expect(errors_mentioning(lowering, "invalid imported module surface index -1 for `Point`")).to_equal(1)
+
+    it "rejects an index retained across a registry re-freeze":
+        var lowering = refrozen(importer(guard_registry()))
+        val owner_index = index_of(lowering, "lib.a")
+        lowering.register_imported_symbol(owner_index, "lib.a", "Point", "Point", Span.empty(), true)
+        expect(errors_mentioning(lowering, "stale imported module surface index {owner_index} for `Point`")).to_equal(1)
+        expect(bound(lowering, "Point")).to_equal(false)
+
+    it "rejects a field dependency on an index outside the registry":
+        var lowering = importer(guard_registry())
+        lowering.materialize_imported_field_dependency(99, "lib.a", "Point", Span.empty(), true)
+        expect(errors_mentioning(lowering, "invalid imported module surface index 99 for field dependency `Point`")).to_equal(1)
+        expect(bound(lowering, "Point")).to_equal(false)
+
+    it "rejects a field dependency on a stale index":
+        var lowering = refrozen(importer(guard_registry()))
+        val owner_index = index_of(lowering, "lib.a")
+        lowering.materialize_imported_field_dependency(owner_index, "lib.a", "Point", Span.empty(), true)
+        expect(errors_mentioning(lowering, "stale imported module surface index {owner_index} for field dependency `Point`")).to_equal(1)
+        expect(bound(lowering, "Point")).to_equal(false)
+
+    it "accepts the same requests against a current registry":
+        var lowering = importer(guard_registry())
+        val owner_index = index_of(lowering, "lib.a")
+        lowering.materialize_imported_field_dependency(owner_index, "lib.a", "Point", Span.empty(), true)
+        expect(bound(lowering, "Point")).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+
+describe "export origin validation":
+    it "reports an origin whose owner module is not loaded and binds nothing":
+        var lowering = importer(bad_origin_registry())
+        lowering.register_imported_symbol(0, "pkg.leaf", "Bad", "Bad", Span.empty(), true)
+        expect(errors_mentioning(lowering, "invalid export origin `missing.surface::Bad` for `pkg.leaf::Bad`")).to_equal(1)
+        expect(bound(lowering, "Bad")).to_equal(false)
+
+describe "name index false negatives":
+    it "still registers a declaration the index does not know":
+        var lowering = importer(guard_registry())
+        val owner_index = index_of(lowering, "lib.a")
+        # The index claims to be built for this surface but holds no names.
+        lowering.name_index_built_record("{lowering.module_surfaces.generation} {owner_index}")
+        lowering.register_imported_symbol(owner_index, "lib.a", "Point", "Point", Span.empty(), true)
+        lowering.register_imported_symbol(owner_index, "lib.a", "real", "real", Span.empty(), true)
+        expect(lowering.name_index_build_count).to_equal(0)
+        expect(bound(lowering, "Point")).to_equal(true)
+        expect(bound(lowering, "real")).to_equal(true)
+        expect(lowering.symbols.lookup_qualified_type_raw("lib.a", "Point") >= 0).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "still reports a name the surface really does not declare":
+        var lowering = importer(guard_registry())
+        val owner_index = index_of(lowering, "lib.a")
+        lowering.name_index_built_record("{lowering.module_surfaces.generation} {owner_index}")
+        lowering.register_imported_symbol(owner_index, "lib.a", "Nowhere", "Nowhere", Span.empty(), true)
+        expect(bound(lowering, "Nowhere")).to_equal(false)
+        expect(errors_mentioning(lowering, "[W-HIR-UNDECL-IMPORT-001]")).to_equal(1)
+
+describe "undeclared import reporting":
+    it "skips a primitive spelling without a chase or a diagnostic":
+        var lowering = importer(guard_registry())
+        lowering.register_imported_symbol(index_of(lowering, "lib.a"), "lib.a", "i64", "i64", Span.empty(), true)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.reexport_root_memo_keys.len()).to_equal(0)
+        expect(bound(lowering, "i64")).to_equal(false)
+
+    it "skips a builtin container no module declares":
+        var lowering = importer(guard_registry())
+        lowering.register_imported_symbol(index_of(lowering, "lib.a"), "lib.a", "Option", "Option", Span.empty(), true)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(bound(lowering, "Option")).to_equal(false)
+
+    it "warns about a name the module neither declares nor re-exports":
+        var lowering = importer(guard_registry())
+        lowering.register_imported_symbol(index_of(lowering, "lib.a"), "lib.a", "Nowhere", "Nowhere", Span.empty(), true)
+        expect(errors_mentioning(lowering, "[W-HIR-UNDECL-IMPORT-001] `Nowhere` is named in `use lib.a.")).to_equal(1)
+        expect(errors_mentioning(lowering, "[E-HIR-UNDECL-IMPORT-001]")).to_equal(0)
+        expect(bound(lowering, "Nowhere")).to_equal(false)
+
+    it "makes the same report an error under strict imports":
+        var lowering = importer(guard_registry())
+        env_set("SIMPLE_STRICT_IMPORTS", "1")
+        lowering.register_imported_symbol(index_of(lowering, "lib.a"), "lib.a", "Nowhere", "Nowhere", Span.empty(), true)
+        env_unset("SIMPLE_STRICT_IMPORTS")
+        expect(errors_mentioning(lowering, "[E-HIR-UNDECL-IMPORT-001] `Nowhere` is named in `use lib.a.")).to_equal(1)
+        expect(errors_mentioning(lowering, "[W-HIR-UNDECL-IMPORT-001]")).to_equal(0)
+
+describe "re-export root query validation":
+    it "finds the declaring module behind a re-exporting facade":
+        var lowering = importer(guard_registry())
+        val hop: HirReexportSource = lowering.find_reexport_source(index_of(lowering, "lib.f"), "real")
+        expect(hop.found).to_equal(true)
+        expect(hop.module_index).to_equal(index_of(lowering, "lib.a"))
+        expect(hop.item_name).to_equal("real")
+        expect(lowering.reexport_walk_valid).to_equal(true)
+
+    it "rejects a facade index outside the registry":
+        var lowering = importer(guard_registry())
+        val hop: HirReexportSource = lowering.find_reexport_source(99, "real")
+        expect(hop.found).to_equal(false)
+        expect(lowering.reexport_walk_valid).to_equal(false)
+
+    it "rejects every query against a registry whose surfaces are out of position":
+        var lowering = importer(guard_registry())
+        val facade_index = index_of(lowering, "lib.f")
+        var displaced = lowering.module_surfaces.surfaces[facade_index]
+        displaced.physical_index = facade_index + 7
+        lowering.module_surfaces.surfaces[facade_index] = displaced
+        val hop: HirReexportSource = lowering.find_reexport_source(facade_index, "real")
+        expect(hop.found).to_equal(false)
+        expect(lowering.reexport_walk_valid).to_equal(false)
+        expect(lowering.reexport_registry_valid).to_equal(false)
+
+    it "rejects every query against a registry holding a surface of another generation":
+        var lowering = importer(guard_registry())
+        val facade_index = index_of(lowering, "lib.f")
+        var outdated = lowering.module_surfaces.surfaces[facade_index]
+        outdated.generation = lowering.module_surfaces.generation + 5
+        lowering.module_surfaces.surfaces[facade_index] = outdated
+        val hop: HirReexportSource = lowering.find_reexport_source(facade_index, "real")
+        expect(hop.found).to_equal(false)
+        expect(lowering.reexport_walk_valid).to_equal(false)
+        expect(lowering.reexport_registry_valid).to_equal(false)
+
+    it "rejects a surface displaced after the registry alignment was checked":
+        var lowering = importer(guard_registry())
+        val facade_index = index_of(lowering, "lib.f")
+        # The first query checks and caches the registry alignment.
+        val before: HirReexportSource = lowering.find_reexport_source(facade_index, "real")
+        expect(before.found).to_equal(true)
+        var displaced = lowering.module_surfaces.surfaces[facade_index]
+        displaced.physical_index = facade_index + 7
+        lowering.module_surfaces.surfaces[facade_index] = displaced
+        # `Point` is re-exported too, so only the guard can answer "not found".
+        val hop: HirReexportSource = lowering.find_reexport_source(facade_index, "Point")
+        expect(hop.found).to_equal(false)
+        expect(lowering.reexport_walk_valid).to_equal(false)
+        expect(lowering.reexport_registry_valid).to_equal(true)
+
+    it "rejects a surface whose generation changed after the registry alignment was checked":
+        var lowering = importer(guard_registry())
+        val facade_index = index_of(lowering, "lib.f")
+        val before: HirReexportSource = lowering.find_reexport_source(facade_index, "real")
+        expect(before.found).to_equal(true)
+        var outdated = lowering.module_surfaces.surfaces[facade_index]
+        outdated.generation = lowering.module_surfaces.generation + 5
+        lowering.module_surfaces.surfaces[facade_index] = outdated
+        val hop: HirReexportSource = lowering.find_reexport_source(facade_index, "Point")
+        expect(hop.found).to_equal(false)
+        expect(lowering.reexport_walk_valid).to_equal(false)
+        expect(lowering.reexport_registry_valid).to_equal(true)
+
+describe "re-export root memo":
+    it "answers a repeated query from the memo":
+        var lowering = importer(guard_registry())
+        val facade_index = index_of(lowering, "lib.f")
+        lowering.find_reexport_source(facade_index, "real")
+        val again: HirReexportSource = lowering.find_reexport_source(facade_index, "real")
+        expect(again.found).to_equal(true)
+        expect(again.item_name).to_equal("real")
+        expect(lowering.reexport_chase_memo_hits).to_equal(1)
+
+    it "gives the same answer when memo verification is switched on":
+        var lowering = importer(guard_registry())
+        val facade_index = index_of(lowering, "lib.f")
+        lowering.find_reexport_source(facade_index, "real")
+        env_set("SIMPLE_REXMEMO_VERIFY", "1")
+        val again: HirReexportSource = lowering.find_reexport_source(facade_index, "real")
+        env_unset("SIMPLE_REXMEMO_VERIFY")
+        expect(again.found).to_equal(true)
+        expect(again.module_index).to_equal(index_of(lowering, "lib.a"))
+        expect(lowering.reexport_chase_memo_hits).to_equal(1)
+
+    it "re-walks a memoized miss and replaces it when the walk finds the owner":
+        var lowering = importer(guard_registry())
+        val facade_index = index_of(lowering, "lib.f")
+        # Synchronize the memo with this registry generation, then plant a
+        # false negative for a name the facade really re-exports.
+        lowering.find_reexport_source(facade_index, "Nowhere")
+        lowering.reexport_root_memo_record("{facade_index} real", -1, "")
+        val rechecked: HirReexportSource = lowering.find_reexport_source(facade_index, "real")
+        # The planted entry was found (a memo hit) and then not believed.
+        expect(lowering.reexport_chase_memo_hits).to_equal(1)
+        expect(rechecked.found).to_equal(true)
+        expect(rechecked.module_index).to_equal(index_of(lowering, "lib.a"))
+        expect(rechecked.item_name).to_equal("real")
+        val settled: HirReexportSource = lowering.find_reexport_source(facade_index, "real")
+        expect(settled.found).to_equal(true)
+        expect(settled.item_name).to_equal("real")
+
+    it "keeps a memoized miss that a fresh walk confirms":
+        var lowering = importer(guard_registry())
+        val facade_index = index_of(lowering, "lib.f")
+        lowering.find_reexport_source(facade_index, "Nowhere")
+        val again: HirReexportSource = lowering.find_reexport_source(facade_index, "Nowhere")
+        expect(again.found).to_equal(false)
+        expect(lowering.reexport_chase_memo_hits).to_equal(1)
+        expect(lowering.reexport_walk_valid).to_equal(true)
+
+    it "rejects a memoized owner index outside the registry":
+        var lowering = importer(guard_registry())
+        val facade_index = index_of(lowering, "lib.f")
+        lowering.find_reexport_source(facade_index, "Nowhere")
+        lowering.reexport_root_memo_record("{facade_index} Ghost", 99, "Ghost")
+        val hop: HirReexportSource = lowering.find_reexport_source(facade_index, "Ghost")
+        expect(hop.found).to_equal(false)
+        expect(lowering.reexport_walk_valid).to_equal(false)
+
+describe "re-export chase statistics readout":
+    it "stays silent off a reporting boundary and leaves the counters alone":
+        var lowering = importer(guard_registry())
+        lowering.reexport_chase_calls = 7
+        lowering.report_reexport_chase_stats()
+        expect(lowering.reexport_chase_calls).to_equal(7)
+        expect(lowering.reexport_chase_memo_hits).to_equal(0)
+
+    it "leaves the counters alone on a reporting boundary with the readout off":
+        var lowering = importer(guard_registry())
+        lowering.reexport_chase_calls = 20000
+        lowering.report_reexport_chase_stats()
+        expect(lowering.reexport_chase_calls).to_equal(20000)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "prints the readout on a reporting boundary without touching the counters":
+        var lowering = importer(guard_registry())
+        lowering.reexport_chase_calls = 20000
+        env_set("SIMPLE_HIR_REEXPORT_STATS", "1")
+        lowering.report_reexport_chase_stats()
+        env_unset("SIMPLE_HIR_REEXPORT_STATS")
+        expect(lowering.reexport_chase_calls).to_equal(20000)
+        expect(lowering.reexport_chase_memo_hits).to_equal(0)
+
+describe "re-exported names through a facade":
+    it "binds a re-exported type and publishes it under the facade's name":
+        var lowering = importer(guard_registry())
+        lowering.register_imported_symbol(index_of(lowering, "lib.f"), "lib.f", "Point", "Point", Span.empty(), true)
+        expect(bound(lowering, "Point")).to_equal(true)
+        val declared = lowering.symbols.lookup_qualified_type_raw("lib.a", "Point")
+        expect(declared >= 0).to_equal(true)
+        expect(lowering.symbols.lookup_qualified_type_raw("lib.f", "Point")).to_equal(declared)
+
+    it "binds a re-exported callable without publishing a type under the facade":
+        var lowering = importer(guard_registry())
+        lowering.register_imported_symbol(index_of(lowering, "lib.f"), "lib.f", "real", "real", Span.empty(), true)
+        expect(bound(lowering, "real")).to_equal(true)
+        val symbol: HirSymbol = lowering.symbols.symbols[lowering.symbols.lookup_or_invalid("real").id]
+        expect(symbol.kind == SymbolKind.Function).to_equal(true)
+        expect(symbol.defining_module ?? "").to_equal("lib.a")
+        expect(lowering.symbols.lookup_qualified_type_raw("lib.f", "real")).to_equal(-1)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "binds the same owner with bootstrap diagnostics on":
+        var lowering = importer(guard_registry())
+        env_set("SIMPLE_BOOTSTRAP_DIAG", "1")
+        lowering.register_imported_symbol(index_of(lowering, "lib.f"), "lib.f", "real", "real", Span.empty(), true)
+        env_unset("SIMPLE_BOOTSTRAP_DIAG")
+        expect(bound(lowering, "real")).to_equal(true)
+        val symbol: HirSymbol = lowering.symbols.symbols[lowering.symbols.lookup_or_invalid("real").id]
+        expect(symbol.defining_module ?? "").to_equal("lib.a")
+        expect(lowering.errors.len()).to_equal(0)
+
+describe "re-export root query rejects with bootstrap diagnostics on":
+    it "rejects an out-of-range facade index the same way":
+        var lowering = importer(guard_registry())
+        env_set("SIMPLE_BOOTSTRAP_DIAG", "1")
+        val hop: HirReexportSource = lowering.find_reexport_source(99, "real")
+        env_unset("SIMPLE_BOOTSTRAP_DIAG")
+        expect(hop.found).to_equal(false)
+        expect(lowering.reexport_walk_valid).to_equal(false)
+
+    it "rejects a misaligned registry the same way":
+        var lowering = importer(guard_registry())
+        val facade_index = index_of(lowering, "lib.f")
+        var displaced = lowering.module_surfaces.surfaces[facade_index]
+        displaced.physical_index = facade_index + 7
+        lowering.module_surfaces.surfaces[facade_index] = displaced
+        env_set("SIMPLE_BOOTSTRAP_DIAG", "1")
+        val hop: HirReexportSource = lowering.find_reexport_source(facade_index, "real")
+        env_unset("SIMPLE_BOOTSTRAP_DIAG")
+        expect(hop.found).to_equal(false)
+        expect(lowering.reexport_registry_valid).to_equal(false)
+
+    it "rejects a surface displaced after the alignment check the same way":
+        var lowering = importer(guard_registry())
+        val facade_index = index_of(lowering, "lib.f")
+        lowering.find_reexport_source(facade_index, "real")
+        var displaced = lowering.module_surfaces.surfaces[facade_index]
+        displaced.physical_index = facade_index + 7
+        lowering.module_surfaces.surfaces[facade_index] = displaced
+        env_set("SIMPLE_BOOTSTRAP_DIAG", "1")
+        val hop: HirReexportSource = lowering.find_reexport_source(facade_index, "Point")
+        env_unset("SIMPLE_BOOTSTRAP_DIAG")
+        expect(hop.found).to_equal(false)
+        expect(lowering.reexport_walk_valid).to_equal(false)
+        expect(lowering.reexport_registry_valid).to_equal(true)
+
+    it "rejects a surface of another generation after the alignment check the same way":
+        var lowering = importer(guard_registry())
+        val facade_index = index_of(lowering, "lib.f")
+        lowering.find_reexport_source(facade_index, "real")
+        var outdated = lowering.module_surfaces.surfaces[facade_index]
+        outdated.generation = lowering.module_surfaces.generation + 5
+        lowering.module_surfaces.surfaces[facade_index] = outdated
+        env_set("SIMPLE_BOOTSTRAP_DIAG", "1")
+        val hop: HirReexportSource = lowering.find_reexport_source(facade_index, "Point")
+        env_unset("SIMPLE_BOOTSTRAP_DIAG")
+        expect(hop.found).to_equal(false)
+        expect(lowering.reexport_walk_valid).to_equal(false)
+        expect(lowering.reexport_registry_valid).to_equal(true)
+
+describe "re-export root memo under verification":
+    it "confirms a memoized miss":
+        var lowering = importer(guard_registry())
+        val facade_index = index_of(lowering, "lib.f")
+        lowering.find_reexport_source(facade_index, "Nowhere")
+        env_set("SIMPLE_REXMEMO_VERIFY", "1")
+        val again: HirReexportSource = lowering.find_reexport_source(facade_index, "Nowhere")
+        env_unset("SIMPLE_REXMEMO_VERIFY")
+        expect(again.found).to_equal(false)
+        expect(lowering.reexport_chase_memo_hits).to_equal(1)
+
+    it "still corrects a planted false miss":
+        var lowering = importer(guard_registry())
+        val facade_index = index_of(lowering, "lib.f")
+        lowering.find_reexport_source(facade_index, "Nowhere")
+        lowering.reexport_root_memo_record("{facade_index} real", -1, "")
+        env_set("SIMPLE_REXMEMO_VERIFY", "1")
+        val rechecked: HirReexportSource = lowering.find_reexport_source(facade_index, "real")
+        env_unset("SIMPLE_REXMEMO_VERIFY")
+        expect(lowering.reexport_chase_memo_hits).to_equal(1)
+        expect(rechecked.found).to_equal(true)
+        expect(rechecked.module_index).to_equal(index_of(lowering, "lib.a"))
+
+describe "depth-truncated re-export walks":
+    it "does not memoize a miss the walk could not complete":
+        var lowering = hirlowering_for_module("app/main.spl", facade_chain_registry(11))
+        val first: HirReexportSource = lowering.find_reexport_source(0, "Nowhere")
+        expect(first.found).to_equal(false)
+        expect(lowering.reexport_walk_complete).to_equal(false)
+        expect(lowering.reexport_root_memo_keys.len()).to_equal(0)
+        lowering.find_reexport_source(0, "Nowhere")
+        expect(lowering.reexport_chase_memo_hits).to_equal(0)
+
+    it "memoizes a miss from a walk that reached every facade":
+        var lowering = hirlowering_for_module("app/main.spl", facade_chain_registry(3))
+        val first: HirReexportSource = lowering.find_reexport_source(0, "Nowhere")
+        expect(first.found).to_equal(false)
+        expect(lowering.reexport_walk_complete).to_equal(true)
+        expect(lowering.reexport_root_memo_keys.len()).to_equal(1)
+        lowering.find_reexport_source(0, "Nowhere")
+        expect(lowering.reexport_chase_memo_hits).to_equal(1)

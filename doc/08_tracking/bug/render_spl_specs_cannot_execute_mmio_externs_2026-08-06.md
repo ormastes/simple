@@ -1,7 +1,7 @@
 # `src/os/gui/render.spl` is unexecutable in-tree — its only spec has never run an assertion
 
 - **Filed:** 2026-08-06
-- **Status:** Open
+- **Status:** Closed 2026-09-13 (host stubs landed); re-verified 2026-11-25 on Windows self-hosted binary
 - **Severity:** Medium — a vacuous coverage claim, not a wrong answer
 - **Component:** os/gui/render + test harness
 - **Found by:** WS-F4 presentation-path audit
@@ -94,3 +94,18 @@ bin/simple test test/01_unit/os/render_blit_from_addr_spec.spl --no-session-daem
 ```
 
 - Status: CLOSED (2026-09-13) — not reproducible on `bin/release/aarch64-unknown-linux-gnu/simple` (hand-linked from `/home/yoon/dev/simple`, 2026-09-13); the suggested host-stub fix has already landed
+
+## Re-verification 2026-11-25 (Windows, worktree wt-p3-baa)
+
+The 2026-09-13 closure was confirmed on the tracked self-hosted Windows binary
+(`bin/simple.exe`, 38,403,072 bytes), not the Rust seed:
+
+```
+SIMPLE_LIB=src bin/simple.exe test test/01_unit/os/render_pixel_bridge_spec.spl --mode=interpreter
+  -> SPEC FILE VERDICT: outcome=OK executed=2 passed=2 failed=0
+SIMPLE_LIB=src bin/simple.exe test test/01_unit/os/render_blit_from_addr_spec.spl --mode=interpreter
+  -> SPEC FILE VERDICT: outcome=OK executed=5 passed=5 failed=0
+```
+
+Both specs execute real assertions against the host mmio extern definitions.
+The header status (previously still "Open") is corrected to Closed.

@@ -1,0 +1,77 @@
+# Recursive `dependencies:` traversal over simple.sdn manifests, with cycle detection.
+# @cover src/compiler/80.driver/driver_build/library_unit_manifest_v1.spl
+use std.spec
+use compiler.driver.driver_build.library_unit_manifest_v1.{library_unit_manifest_closure_v1}
+use compiler.driver.driver_build.library_unit_drift_v1.{
+    library_unit_drift_v1, library_unit_drift_closure_exit_code_v1,
+    library_unit_drift_closure_verdict_v1}
+
+fn man(name: text, deps: [text]) -> text:
+    var out = "project:\n  name: {name}\n  version: 1.0.0\n  type: library\n"
+    if deps.len() > 0:
+        out = out + "  dependencies:\n"
+        for d in deps:
+            out = out + "    - project: {d}\n"
+    out
+
+fn closure_names(root: text, table: {text: text}) -> text:
+    val loader = \dir: table.get(dir) ?? ""
+    match library_unit_manifest_closure_v1(root, loader):
+        case Ok(units):
+            var ns: [text] = []
+            for u in units:
+                ns.push(u.name)
+            ns.join(",")
+        case Err(e): "ERR:" + e
+
+describe "library_unit_manifest_closure_v1":
+    it "returns the root alone when it has no dependencies":
+        expect(closure_names("a", {"a": man("A", [])})).to_equal("A")
+
+    it "orders dependencies before dependents, transitively":
+        val t = {"a": man("A", ["../b"]), "b": man("B", ["../c"]), "c": man("C", [])}
+        expect(closure_names("a", t)).to_equal("C,B,A")
+
+    it "visits a diamond dependency once":
+        val t = {"a": man("A", ["../b", "../c"]), "b": man("B", ["../d"]), "c": man("C", ["../d"]), "d": man("D", [])}
+        expect(closure_names("a", t)).to_equal("D,B,C,A")
+
+    it "fails closed on a dependency cycle and names the path":
+        val t = {"a": man("A", ["../b"]), "b": man("B", ["../a"])}
+        val r = closure_names("a", t)
+        expect(r).to_contain("ERR:")
+        expect(r).to_contain("dependency cycle")
+        expect(r).to_contain("a -> b -> a")
+
+    it "fails closed on a self dependency":
+        expect(closure_names("a", {"a": man("A", ["."])})).to_contain("dependency cycle")
+
+    it "fails closed when a dependency has no manifest":
+        val r = closure_names("a", {"a": man("A", ["../gone"])})
+        expect(r).to_contain("missing manifest")
+        expect(r).to_contain("gone")
+
+    it "fails closed when the root has no manifest":
+        expect(closure_names("a", {})).to_contain("missing manifest")
+
+    it "propagates a malformed dependency manifest":
+        val t = {"a": man("A", ["../b"]), "b": "project:\n  name: B\n"}
+        expect(closure_names("a", t)).to_contain("ERR:")
+
+describe "library_unit_drift_closure verdict":
+    it "passes when every unit in the closure is clean":
+        val clean = library_unit_drift_v1(["x.spl"], ["x.spl"])
+        expect(library_unit_drift_closure_exit_code_v1([clean, clean])).to_equal(0)
+        expect(library_unit_drift_closure_verdict_v1(["B", "A"], [clean, clean])).to_start_with("PASS")
+
+    it "fails and names the drifting dependency unit":
+        val clean = library_unit_drift_v1(["x.spl"], ["x.spl"])
+        val dirty = library_unit_drift_v1(["x.spl"], ["x.spl", "y.spl"])
+        expect(library_unit_drift_closure_exit_code_v1([dirty, clean])).to_equal(1)
+        val v = library_unit_drift_closure_verdict_v1(["B", "A"], [dirty, clean])
+        expect(v).to_start_with("FAIL")
+        expect(v).to_contain("B")
+        expect(v).to_contain("added: y.spl")
+
+    it "is ERROR when nothing was checked":
+        expect(library_unit_drift_closure_exit_code_v1([])).to_equal(2)

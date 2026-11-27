@@ -1,0 +1,130 @@
+# Real parser/hash owner boundary specifications; no native execution claimed.
+use std.spec.*
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_checked_reference_v1}
+use compiler.frontend.parser_types_expr.{Type, TypeKind}
+use compiler.frontend.generated.ast_semantic_value.{ast_semantic_hash_seed, ast_semantic_hash_seed_bounded_v2, ast_semantic_hash_finish, ast_semantic_encode_type, AST_SEMANTIC_MAX_NODES_V2, AST_SEMANTIC_MAX_DEPTH_V2, AST_SEMANTIC_MAX_BYTES_V2}
+use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_struct_draft_root_v2, module_surface_trait_root_v2, module_surface_extension_root_v2}
+
+fn budget_type_v2() -> Type:
+    val parsed = parse_and_build_module_checked_reference_v1("struct Box:\n    value: i64\n", "pkg/budget.spl").unwrap()
+    parsed.structs["Box"].fields[0].type_
+
+describe "Bounded AST semantic projection v2":
+    it "preserves actual legacy hash bytes when the budget suffices":
+        val value = budget_type_v2()
+        val legacy = ast_semantic_encode_type(value, ast_semantic_hash_seed())
+        val bounded = ast_semantic_encode_type(value, ast_semantic_hash_seed_bounded_v2(4096, 32, 1048576))
+        expect(ast_semantic_hash_finish(legacy)).to_equal(ast_semantic_hash_finish(bounded))
+        expect(bounded.depth_v2).to_equal(0)
+
+    it "admits the exact encoded byte boundary and refuses one byte less":
+        val value = budget_type_v2()
+        val measured = ast_semantic_encode_type(value, ast_semantic_hash_seed())
+        val bytes = measured.units * 8
+        val exact = ast_semantic_encode_type(value, ast_semantic_hash_seed_bounded_v2(4096, 32, bytes))
+        val short = ast_semantic_encode_type(value, ast_semantic_hash_seed_bounded_v2(4096, 32, bytes - 1))
+        expect(ast_semantic_hash_finish(exact).len()).to_equal(64)
+        expect(exact.remaining_bytes_v2).to_equal(0)
+        expect(ast_semantic_hash_finish(short)).to_equal("")
+        expect(short.depth_v2).to_equal(0)
+
+    it "admits the exact node boundary and refuses one node less":
+        val value = budget_type_v2()
+        val measured = ast_semantic_encode_type(value, ast_semantic_hash_seed_bounded_v2(4096, 32, 1048576))
+        val nodes = 4096 - measured.remaining_nodes_v2
+        val exact = ast_semantic_encode_type(value, ast_semantic_hash_seed_bounded_v2(nodes, 32, 1048576))
+        val short = ast_semantic_encode_type(value, ast_semantic_hash_seed_bounded_v2(nodes - 1, 32, 1048576))
+        expect(ast_semantic_hash_finish(exact).len()).to_equal(64)
+        expect(exact.remaining_nodes_v2).to_equal(0)
+        expect(ast_semantic_hash_finish(short)).to_equal("")
+        expect(short.depth_v2).to_equal(0)
+
+    it "refuses deep ASTs before dispatch beyond the depth cap":
+        var value = budget_type_v2()
+        for i in 0..32:
+            value = Type(kind: TypeKind.Optional(value), span: value.span)
+        val result = ast_semantic_encode_type(value, ast_semantic_hash_seed_bounded_v2(4096, 32, 1048576))
+        expect(ast_semantic_hash_finish(result)).to_equal("")
+        expect(result.depth_v2).to_equal(0)
+
+    it "never converts an invalid bounded seed to unbounded mode":
+        for nodes in [-1, AST_SEMANTIC_MAX_NODES_V2 + 1]:
+            expect(ast_semantic_hash_finish(ast_semantic_hash_seed_bounded_v2(nodes, 32, 1048576))).to_equal("")
+        for depth in [0, AST_SEMANTIC_MAX_DEPTH_V2 + 1]:
+            expect(ast_semantic_hash_finish(ast_semantic_hash_seed_bounded_v2(4096, depth, 1048576))).to_equal("")
+        for bytes in [-1, AST_SEMANTIC_MAX_BYTES_V2 + 1]:
+            expect(ast_semantic_hash_finish(ast_semantic_hash_seed_bounded_v2(4096, 32, bytes))).to_equal("")
+
+    it "charges sibling hashes cumulatively rather than resetting the budget":
+        val value = budget_type_v2()
+        val measured = ast_semantic_encode_type(value, ast_semantic_hash_seed())
+        var state = ast_semantic_hash_seed_bounded_v2(4096, 32, measured.units * 8)
+        state = ast_semantic_encode_type(value, state)
+        expect(state.cacheable).to_equal(true)
+        state = ast_semantic_encode_type(value, state)
+        expect(ast_semantic_hash_finish(state)).to_equal("")
+        expect(state.depth_v2).to_equal(0)
+
+    it "shares one declaration budget across actual parser field subtrees":
+        val parsed = parse_and_build_module_checked_reference_v1("struct Box:\n    value: i64\n", "pkg/budget.spl").unwrap()
+        var value = parsed.structs["Box"]
+        expect(module_surface_struct_draft_root_v2(value).len()).to_equal(64)
+        val field = value.fields[0]
+        var fields = value.fields
+        for i in 0..3999:
+            fields.push(field)
+        value.fields = fields
+        expect(module_surface_struct_draft_root_v2(value)).to_equal("")
+
+    it "keeps legacy whole-module surfaces outside the draft budget":
+        val source = "struct Box:\n    value: i64\n"
+        var parsed = parse_and_build_module_checked_reference_v1(source, "pkg/budget.spl").unwrap()
+        var value = parsed.structs["Box"]
+        val original = value.fields[0]
+        var fields = value.fields
+        for i in 0..3999:
+            var field = original
+            field.name = "extra_{i}"
+            fields.push(field)
+        value.fields = fields
+        parsed.structs["Box"] = value
+        expect(module_surface_struct_draft_root_v2(value)).to_equal("")
+        # Structural unit fixture: real parser objects, deliberately enlarged
+        # before the actual frozen surface constructor; no freshness claim.
+        val surfaces = module_surfaces_from_modules(
+            {"pkg.budget": parsed},
+            [SourceFile(path: "pkg/budget.spl", content: source, module_name: "pkg.budget")]).unwrap()
+        expect(surfaces.surfaces[0].semantic_cacheable).to_equal(true)
+
+    it "bounds the actual trait category default-body traversal":
+        val parsed = parse_and_build_module_checked_reference_v1("trait Value:\n    fn get(self) -> i64:\n        1\n", "pkg/trait_budget.spl").unwrap()
+        var traits = parsed.traits
+        val original = traits["Value"]
+        expect(module_surface_trait_root_v2(traits).len()).to_equal(64)
+        for i in 0..3999:
+            var value = original
+            value.name = "Value_{i}"
+            traits[value.name] = value
+        expect(module_surface_trait_root_v2(traits)).to_equal("")
+
+    it "bounds the actual extension category across sibling impls":
+        val parsed = parse_and_build_module_checked_reference_v1("struct Value:\n    count: i64\nimpl Value:\n    fn get(self) -> i64:\n        1\n", "pkg/impl_budget.spl").unwrap()
+        var impls = parsed.impls
+        expect(module_surface_extension_root_v2(impls, []).len()).to_equal(64)
+        val original = impls[0]
+        for i in 0..3999:
+            impls.push(original)
+        expect(module_surface_extension_root_v2(impls, [])).to_equal("")
+
+    it "rejects long common-prefix dictionary keys before sorting":
+        val parsed = parse_and_build_module_checked_reference_v1("trait Value:\n    fn get(self) -> i64\n", "pkg/key_budget.spl").unwrap()
+        var prefix = "x"
+        for i in 0..20:
+            prefix = prefix + prefix
+        var first = parsed.traits["Value"]
+        first.name = prefix + "a"
+        var second = parsed.traits["Value"]
+        second.name = prefix + "b"
+        expect(module_surface_trait_root_v2({first.name: first, second.name: second})).to_equal("")

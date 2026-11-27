@@ -59,3 +59,17 @@ The current lane used read-only sidecars for bootstrap behavior, dynload/loader
 surfaces, and dependency tracing/AOP risk. Integration owner is the main Codex
 thread; future implementation of resolver-backed incremental rebuilds needs a
 normal/high-capability review before claiming production precision.
+
+## Orthogonal Axes: Phase, Profile, Composition, Host ABI, and Target (2026-11-18)
+
+Artifact packaging mode (`dynload` SMF+native vs `one-binary` monolithic native) is independent of bootstrap stage, target profile, backend composition/linkage, and target architecture. Implementations and receipts must keep all five axes distinct:
+
+| Axis | Values | Authority / Selector | Boundary Contract |
+|------|--------|----------------------|-------------------|
+| Bootstrap phase | `phase3`, `phase4` | `--managed-build-phase=phase3\|phase4` (`bootstrap_focused_native_build_args.spl`) | `phase3` builds the self-hosted `bootstrap_main.spl` recovery compiler (`--stop-after-stage3` stops here without implying Phase-4 completion or deployment); `phase4` builds the full CLI / product surface (`main.spl`). |
+| Target profile | `dev`, `prod` | `--profile=dev\|prod`, `TargetBuildProfileV1` (`driver_compile_options.spl`) | `phase3` is strictly `dev`-only (`phase3` + `prod`/`--release` fails closed). `phase4` accepts both `dev` (unstripped Diagnosis variant) and `prod` (Release variant, default when `--profile` is omitted) with isolated cache, variant-key, and receipt namespaces (`focused_native_build_profile_cache_dir_v1`, `focused_native_build_profile_receipt_namespace_v1`, `ConfigVariantKeyV1`). |
+| Backend composition & linkage | `host-only` (static K1), `full` (static 12-port), `dynlib` (`simple_backend_plugin_v1`) | `SIMPLE_BACKEND_COMPOSITION=host-only\|full`, `src/compositions/backends_host_only`, `src/compositions/kernel_llvm{,_cranelift}`, `--backend-plugin=PATH` | `host-only` (default under `SIMPLE_BOOTSTRAP_STAGE3=1` and K1/`backends_host_only` source overlays) excludes optional GPU/VHDL/Wasm static backend closures at the import boundary while routing host codegen through `BackendSession`. `--backend-plugin` loads an explicit `simple_backend_plugin_v1` shared library without silent static fallback. Passing `--mode=dynload` alone does **not** prove dynamic backend plugin execution. |
+| Compiler host ABI | Resolved host triple + runtime/CRT ABI | Host build/runtime capsule (`dynamic_loader.spl`, provider manifest) | Determines the executable/shared-library ABI loaded into the compiler process (for example Linux ELF `.so`, macOS `.dylib`, Windows GNU/llvm-mingw UCRT vs MSVC `.dll`). |
+| Emitted target | Target triple, CPU model, feature set | `--target`, `--cpu`, `MirTargetContext` (`target_context_v2.spl`) | Determines the object/code ABI emitted by the selected session. Cross-compilation loads a **host-ABI** provider library that emits **target-ABI** artifacts. |
+
+See `doc/03_plan/compiler/phase3_first_dynlib_architecture_bootstrap_2026-11-18.md` (`C1`, `C7`; unit-verified slices in progress, native `G-P3-HOST`, `G-P4-DEBUG`, and `G-P4-RELEASE` gates pending execution).

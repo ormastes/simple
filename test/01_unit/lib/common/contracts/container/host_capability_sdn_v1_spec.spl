@@ -67,6 +67,26 @@ describe "container capability SDN receipt":
                 expect(parse_reason(receipt.replace("\"native-container\"", "\"unknown-isolation\""))).to_equal("host-isolation-unsupported")
                 expect(parse_reason(receipt.replace("\"client_privilege\", \"user\"", "\"client_privilege\", \"root\""))).to_equal("host-client-privilege-invalid")
 
+    it "refuses control bytes in identity fields on format and parse while keeping them in reason":
+        # milestone_0059 item 4: provider_id is the only free-form identity field; \n \t \r must not reach it.
+        for bad in ["rootless\npodman", "rootless\tpodman", "rootless\rpodman"]:
+            var capability = sample()
+            capability.provider_id = bad
+            match format_container_host_capability_sdn_v1(capability):
+                case Err(reason): expect(reason).to_equal("host-capability-identity-control")
+                case Ok(_): expect(false).to_equal(true)
+        match format_container_host_capability_sdn_v1(sample()):
+            case Err(_): expect(false).to_equal(true)
+            case Ok(receipt):
+                for code in ["\\n", "\\t", "\\r"]:
+                    val forged = receipt.replace("\"provider_id\", \"rootless-podman\"", "\"provider_id\", \"rootless" + code + "podman\"")
+                    expect(parse_reason(forged)).to_equal("host-capability-identity-control")
+        var multiline = sample()
+        multiline.reason = "line one\nline\ttwo\r"
+        match format_container_host_capability_sdn_v1(multiline):
+            case Err(_): expect(false).to_equal(true)
+            case Ok(receipt): expect(parse_reason(receipt)).to_equal("accepted")
+
     it "retains a blocked capability receipt":
         var capability = sample()
         capability.launch_capable = false

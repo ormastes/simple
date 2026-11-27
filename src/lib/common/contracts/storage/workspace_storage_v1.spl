@@ -1,0 +1,61 @@
+# Native workspace storage facts; no filesystem effects or reservation writer.
+use std.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+
+pub struct WorkspaceStorageRequestV1:
+    kind: text
+    protected_parent: text
+    leaf_name: text
+    expected_pool_id: text
+    expected_workspace_id: text
+    quota_id: i64
+    hard_bytes: i64
+    policy_digest: text
+
+pub struct WorkspaceStorageReceiptV1:
+    kind: text
+    pool_id: text
+    workspace_id: text
+    quota_id: i64
+    hard_bytes: i64
+    used_bytes: i64
+    used_inodes: i64  # -1 means unavailable on the dedicated Windows volume capability
+    policy_digest: text
+    binding_digest: text
+    state: text
+
+fn workspace_storage_scalar_v1(value: text, maximum: i64) -> bool:
+    str_len(value) > 0 and str_len(value) <= maximum and not value.contains("\u{0}") and
+        not value.contains("\n") and not value.contains("\r") and not value.contains("\t")
+
+pub fn workspace_storage_request_valid_v1(request: WorkspaceStorageRequestV1) -> bool:
+    if not workspace_storage_scalar_v1(request.protected_parent, 4095) or
+            not workspace_storage_scalar_v1(request.leaf_name, 127) or
+            not workspace_storage_scalar_v1(request.expected_pool_id, 255) or
+            not workspace_storage_scalar_v1(request.expected_workspace_id, 255) or
+            str_len(request.policy_digest) != 64 or request.hard_bytes <= 0 or
+            request.hard_bytes > 1125899906842624:
+        return false
+    if request.leaf_name == "." or request.leaf_name == "..": return false
+    for i in 0..str_len(request.leaf_name):
+        val c = request.leaf_name.byte_at(i) as i64
+        if not ((c >= 65 and c <= 90) or (c >= 97 and c <= 122) or
+                (c >= 48 and c <= 57) or c == 45 or c == 46 or c == 95): return false
+    for i in 0..64:
+        val c = request.policy_digest.byte_at(i) as i64
+        if not ((c >= 48 and c <= 57) or (c >= 97 and c <= 102)): return false
+    if request.kind == "linux-xfs-project-v1":
+        return request.protected_parent.starts_with("/") and request.quota_id > 0 and
+            request.quota_id <= 4294967295 and request.hard_bytes % 512 == 0
+    if request.kind == "windows-dedicated-volume-v1":
+        return request.protected_parent.starts_with("\\\\?\\Volume{") and request.quota_id == 0
+    false
+
+# Excludes mutable usage and state; binds every immutable request field. This
+# digest establishes correlation only, not authority or native enforcement.
+pub fn workspace_storage_binding_v1(request: WorkspaceStorageRequestV1) -> Result<text, text>:
+    if not workspace_storage_request_valid_v1(request): return Err("invalid-workspace-storage-request")
+    Ok(sha256_text("WORKSPACE-STORAGE-BINDING-V1\n" + request.kind + "\n" +
+        request.protected_parent + "\n" + request.leaf_name + "\n" + request.expected_pool_id + "\n" +
+        request.expected_workspace_id + "\n" + request.quota_id.to_text() + "\n" +
+        request.hard_bytes.to_text() + "\n" + request.policy_digest + "\n"))

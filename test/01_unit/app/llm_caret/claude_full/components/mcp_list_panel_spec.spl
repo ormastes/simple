@@ -1,0 +1,211 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+As a user running /mcp, I want the server list grouped by scope with a status
+icon per server, a selection that wraps and maps to an action, and a footer that
+points me at the debug logs when something failed, so that I can manage servers.
+"""
+use std.spec.step
+
+use std.spec.*
+use app.llm_caret.claude_full.components.mcp.MCPListPanel.*
+
+fn servers() -> [MCPListPanelServerInfo]:
+    [
+        MCPListPanelServerInfo.new("beta", "connected", "stdio", "project", "stdio", true),
+        MCPListPanelServerInfo.new("alpha", "failed", "stdio", "project", "stdio", false),
+        MCPListPanelServerInfo.new("loc", "needs-auth", "http", "local", "http", false),
+        MCPListPanelServerInfo.new("usr", "disabled", "sse", "user", "sse", false),
+        MCPListPanelServerInfo.new("cai", "connected", "claudeai-proxy", "user", "http", true),
+        MCPListPanelServerInfo.new("dyn", "connected", "stdio", "dynamic", "stdio", true),
+        MCPListPanelServerInfo.reconnecting("rec", "user", 2, 5)
+    ]
+
+fn agents() -> [MCPListPanelAgentServerInfo]:
+    [MCPListPanelAgentServerInfo.new("agentsrv", ["reviewer", "coder"], false), MCPListPanelAgentServerInfo.new("authsrv", ["coder"], true)]
+
+fn names(list: [MCPListPanelServerInfo]) -> [text]:
+    var out: [text] = []
+    for s in list:
+        out.push(s.name)
+    out
+
+fn main() -> ():
+    describe("MCPListPanel scope grouping", fn() -> ():
+        it("maps scopes to headings and config paths", fn() -> ():
+            step("maps scopes to headings and config paths")
+            expect(mcpListPanelScopeOrder()).to_equal(["project", "local", "user", "enterprise"])
+            expect(mcpListPanelHeadingLine("project")).to_equal("Project MCPs (.mcp.json)")
+            expect(mcpListPanelHeadingLine("local")).to_equal("Local MCPs (.claude/settings.local.json)")
+            expect(mcpListPanelHeadingLine("user")).to_equal("User MCPs (~/.claude.json)")
+            expect(mcpListPanelHeadingLine("enterprise")).to_equal("Enterprise MCPs")
+            expect(mcpListPanelHeadingLine("dynamic")).to_equal("Built-in MCPs (always available)")
+            expect(mcpListPanelHeadingLine("custom")).to_equal("custom")
+            expect(mcpListPanelConfigPath("enterprise")).to_equal("")
+        )
+
+        it("sorts servers by name within a scope and keeps claude.ai out of it", fn() -> ():
+            step("sorts servers by name within a scope and keeps claude.ai out of it")
+            expect(names(mcpListPanelFilterScope(servers(), "project"))).to_equal(["alpha", "beta"])
+            expect(names(mcpListPanelFilterScope(servers(), "user"))).to_equal(["rec", "usr"])
+            expect(names(mcpListPanelClaudeAiServers(servers()))).to_equal(["cai"])
+            expect(names(mcpListPanelDynamicServers(servers()))).to_equal(["dyn"])
+            expect(names(mcpListPanelSortServers(servers()))).to_equal(["alpha", "beta", "cai", "dyn", "loc", "rec", "usr"])
+        )
+
+        it("builds selectable items in display order including agent servers", fn() -> ():
+            step("builds selectable items in display order including agent servers")
+            val items = mcpListPanelBuildSelectableItems(servers(), agents())
+            expect(items.len()).to_equal(9)
+            expect(items[0].serverName).to_equal("alpha")
+            expect(items[5].serverName).to_equal("cai")
+            expect(items[6].typeName).to_equal("agent-server")
+            expect(items[7].agentIndex).to_equal(1)
+            expect(items[8].serverName).to_equal("dyn")
+            expect(mcpListPanelServerIndex(items, "loc")).to_equal(2)
+            expect(mcpListPanelServerIndex(items, "ghost")).to_equal(-1)
+            expect(mcpListPanelServerIndex(items, "agentsrv")).to_equal(-1)
+            expect(mcpListPanelAgentServerIndex(items, "authsrv", 1)).to_equal(7)
+            expect(mcpListPanelAgentServerIndex(items, "authsrv", 0)).to_equal(-1)
+        )
+    )
+
+    describe("MCPListPanel status and lines", fn() -> ():
+        it("picks an icon and text for each client state", fn() -> ():
+            step("picks an icon and text for each client state")
+            expect(mcpListPanelStatusIcon("connected")).to_equal("✓")
+            expect(mcpListPanelStatusIcon("needs-auth")).to_equal("△")
+            expect(mcpListPanelStatusIcon("pending")).to_equal("○")
+            expect(mcpListPanelStatusIcon("disabled")).to_equal("○")
+            expect(mcpListPanelStatusIcon("failed")).to_equal("✗")
+            val conn = MCPListPanelServerInfo.new("c", "connected", "stdio", "user", "stdio", true)
+            expect(mcpListPanelStatusText(conn)).to_equal("connected")
+            expect(mcpListPanelStatusText(MCPListPanelServerInfo.new("c", "pending", "stdio", "user", "stdio", true))).to_equal("connecting...")
+            expect(mcpListPanelStatusText(MCPListPanelServerInfo.reconnecting("c", "user", 2, 5))).to_equal("reconnecting (2/5)...")
+            expect(mcpListPanelStatusText(MCPListPanelServerInfo.new("c", "needs-auth", "stdio", "user", "stdio", false))).to_equal("needs authentication")
+            expect(mcpListPanelStatusText(MCPListPanelServerInfo.new("c", "weird", "stdio", "user", "stdio", false))).to_equal("failed")
+        )
+
+        it("marks the selected server and agent lines", fn() -> ():
+            step("marks the selected server and agent lines")
+            val s = MCPListPanelServerInfo.new("srv", "connected", "stdio", "user", "stdio", true)
+            expect(mcpListPanelServerLine(s, 3, 3)).to_equal("> srv · ✓ connected")
+            expect(mcpListPanelServerLine(s, 3, 2)).to_equal("  srv · ✓ connected")
+            val a = MCPListPanelAgentServerInfo.new("ag", ["x"], true)
+            expect(mcpListPanelAgentLine(a, 1, 1)).to_equal("> ag · △ may need auth")
+            expect(mcpListPanelAgentLine(MCPListPanelAgentServerInfo.new("ag", ["x"], false), 1, 0)).to_equal("  ag · ○ agent-only")
+        )
+
+        it("lists distinct source agent names in first-seen order", fn() -> ():
+            step("lists distinct source agent names in first-seen order")
+            expect(mcpListPanelAgentNames(agents())).to_equal(["reviewer", "coder"])
+            expect(mcpListPanelAgentHasSource(agents()[1], "coder")).to_equal(true)
+            expect(mcpListPanelAgentHasSource(agents()[1], "reviewer")).to_equal(false)
+            expect(mcpListPanelPlural(1, "server")).to_equal("server")
+            expect(mcpListPanelPlural(0, "server")).to_equal("servers")
+        )
+    )
+
+    describe("MCPListPanel selection", fn() -> ():
+        it("clamps and wraps the selected index", fn() -> ():
+            step("clamps and wraps the selected index")
+            expect(mcpListPanelNormalizeSelectedIndex(-2, 5)).to_equal(0)
+            expect(mcpListPanelNormalizeSelectedIndex(9, 5)).to_equal(4)
+            expect(mcpListPanelNormalizeSelectedIndex(1, 0)).to_equal(0)
+            expect(mcpListPanelMoveSelection(0, 5, "previous")).to_equal(4)
+            expect(mcpListPanelMoveSelection(4, 5, "next")).to_equal(0)
+            expect(mcpListPanelMoveSelection(2, 5, "next")).to_equal(3)
+            expect(mcpListPanelMoveSelection(2, 5, "sideways")).to_equal(2)
+            expect(mcpListPanelMoveSelection(2, 0, "next")).to_equal(0)
+        )
+
+        it("turns keybinding actions into a new index", fn() -> ():
+            step("turns keybinding actions into a new index")
+            expect(mcpListPanelKeybindingAction("confirm:next", 8, 9)).to_equal(0)
+            expect(mcpListPanelKeybindingAction("confirm:previous", 0, 9)).to_equal(8)
+            expect(mcpListPanelKeybindingAction("other", 3, 9)).to_equal(3)
+        )
+
+        it("reports the action and name for the selected item", fn() -> ():
+            step("reports the action and name for the selected item")
+            val items = mcpListPanelBuildSelectableItems(servers(), agents())
+            expect(mcpListPanelSelectAction(items, 1)).to_equal("server:beta")
+            expect(mcpListPanelSelectAction(items, 6)).to_equal("agent-server:agentsrv")
+            expect(mcpListPanelSelectAction(items, 99)).to_equal("server:dyn")
+            expect(mcpListPanelSelectAction([], 0)).to_equal("")
+            expect(mcpListPanelSelectedName(items, 7)).to_equal("authsrv")
+            expect(mcpListPanelSelectedName([], 3)).to_equal("")
+            expect(mcpListPanelCancelResult()).to_equal("MCP dialog dismissed")
+        )
+
+        it("renders only when there is something to show", fn() -> ():
+            step("renders only when there is something to show")
+            expect(mcpListPanelShouldRender([], [])).to_equal(false)
+            expect(mcpListPanelShouldRender(servers(), [])).to_equal(true)
+            expect(mcpListPanelShouldRender([], agents())).to_equal(true)
+        )
+    )
+
+    describe("MCPListPanel rendering", fn() -> ():
+        it("renders every section with a marker on the selected server", fn() -> ():
+            step("renders every section with a marker on the selected server")
+            val model = mcpListPanelRender(servers(), agents(), 1, false)
+            expect(model.title).to_equal("Manage MCP servers")
+            expect(model.subtitle).to_equal("9 servers")
+            expect(model.selectedName).to_equal("beta")
+            expect(model.rows).to_equal([
+                "Project MCPs (.mcp.json)",
+                "  alpha · ✗ failed",
+                "> beta · ✓ connected",
+                "Local MCPs (.claude/settings.local.json)",
+                "  loc · △ needs authentication",
+                "User MCPs (~/.claude.json)",
+                "  rec · ○ reconnecting (2/5)...",
+                "  usr · ○ disabled",
+                "claude.ai",
+                "  cai · ✓ connected",
+                "Agent MCPs",
+                "@reviewer",
+                "  agentsrv · ○ agent-only",
+                "@coder",
+                "  agentsrv · ○ agent-only",
+                "  authsrv · △ may need auth",
+                "Built-in MCPs (always available)",
+                "  dyn · ✓ connected"
+            ])
+        )
+
+        it("marks a server shared by two agents as selected only once", fn() -> ():
+            step("marks a server shared by two agents as selected only once")
+            val rows = mcpListPanelRender(servers(), agents(), 6, false).rows
+            var marked = 0
+            for r in rows:
+                if r.starts_with("> "):
+                    marked = marked + 1
+            expect(marked).to_equal(1)
+            expect(rows[12]).to_equal("> agentsrv · ○ agent-only")
+            expect(rows[14]).to_equal("  agentsrv · ○ agent-only")
+        )
+
+        it("points at the debug logs only when a server failed", fn() -> ():
+            step("points at the debug logs only when a server failed")
+            val help = "https://code.claude.com/docs/en/mcp for help"
+            expect(mcpListPanelHasFailedClients(servers())).to_equal(true)
+            expect(mcpListPanelFooter(servers(), false)).to_equal("※ Run claude --debug to see error logs\n" + help)
+            expect(mcpListPanelFooter(servers(), true)).to_equal("※ Error logs shown inline with --debug\n" + help)
+            val healthy = [MCPListPanelServerInfo.new("ok", "connected", "stdio", "user", "stdio", true)]
+            expect(mcpListPanelFooter(healthy, false)).to_equal(help)
+        )
+
+        it("renders a singular subtitle and clamps an out-of-range selection", fn() -> ():
+            step("renders a singular subtitle and clamps an out-of-range selection")
+            val one = [MCPListPanelServerInfo.new("only", "connected", "stdio", "user", "stdio", true)]
+            val model = mcpListPanelRender(one, [], 50, false)
+            expect(model.subtitle).to_equal("1 server")
+            expect(model.rows).to_equal(["User MCPs (~/.claude.json)", "> only · ✓ connected"])
+            expect(model.selectedName).to_equal("only")
+        )
+    )
+    return ()

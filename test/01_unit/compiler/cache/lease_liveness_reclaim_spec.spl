@@ -1,0 +1,35 @@
+# Cache lease reclaim is liveness-only: no timeout fallback (cache_v2 gap 5)
+#
+# """As a compiler engineer, I need a lease to be reclaimed only when its owner
+# process is provably dead, never because it is merely old."""
+#
+# **Category:** Infrastructure
+
+use std.spec.*
+use compiler.driver.cache.lease.lease.{CacheLease, lease_is_reclaimable, lease_acquire, lease_list_active, lease_reclaim_stale, lease_dir, lease_serialize, lease_release}
+use std.io_runtime.{getpid, dir_create_all}
+use std.nogc_sync_mut.io_runtime.{file_write_exact}
+
+val DEAD_PID: i64 = 2147483000
+
+fn _lease(pid: i64, created: i64) -> CacheLease:
+    CacheLease(lease_id: "l-{pid}-{created}", process_id: pid, created_at: created, heartbeat_generation: 0, referenced_manifests: [], referenced_artifacts: [])
+
+describe "cache lease reclaim":
+    it "keeps an ancient lease owned by the live current process":
+        val lease = _lease(getpid(), 0)
+        expect(lease_is_reclaimable(lease, 99999999999999)).to_equal(false)
+
+    it "reclaims a fresh lease whose owner process is dead":
+        val lease = _lease(DEAD_PID, 99999999999999)
+        expect(lease_is_reclaimable(lease, 99999999999999)).to_equal(true)
+
+    it "sweeps only dead-owner lease files from disk":
+        val root = "build/test_tmp/lease_liveness_reclaim"
+        dir_create_all(lease_dir(root))
+        val live = lease_acquire(root, ["m"], ["a"]).unwrap()
+        val dead = _lease(DEAD_PID, 1)
+        file_write_exact("{lease_dir(root)}/{dead.lease_id}", lease_serialize(dead))
+        expect(lease_reclaim_stale(root)).to_equal(1)
+        expect(lease_list_active(root).len()).to_equal(1)
+        lease_release(root, live.lease_id)

@@ -50,6 +50,44 @@ fn string_ord_and_hash_lower_to_shared_runtime_calls() {
 }
 
 #[test]
+fn text_hash_with_declared_trait_impl_lowers_to_method_call_not_rt_hash_text() {
+    let mir = compile_to_mir(
+        "trait CustomHash:\n    fn hash() -> i64\n\nimpl CustomHash for text:\n    fn hash() -> i64:\n        return 98765\n\nfn probe(value: text) -> i64:\n    return value.hash()\n",
+    )
+    .unwrap();
+
+    let probe = mir.functions.iter().find(|f| f.name == "probe").expect("probe function");
+    assert!(probe.blocks.iter().any(|b| b.instructions.iter().any(|i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, args, .. }
+            if func_name == "text.hash" && args.is_empty()
+    ))));
+    assert!(!probe.blocks.iter().any(|b| b.instructions.iter().any(|i| matches!(
+        i,
+        MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_hash_text")
+    ))));
+}
+
+#[test]
+fn text_hash_with_wrong_arity_impl_still_lowers_zero_arg_hash_to_rt_hash_text() {
+    let mir = compile_to_mir(
+        "trait SeededHash:\n    fn hash(seed: i64) -> i64\n\nimpl SeededHash for text:\n    fn hash(seed: i64) -> i64:\n        return seed + 1\n\nfn probe(value: text) -> i64:\n    return value.hash()\n",
+    )
+    .unwrap();
+
+    let probe = mir.functions.iter().find(|f| f.name == "probe").expect("probe function");
+    assert!(probe.blocks.iter().any(|b| b.instructions.iter().any(|i| matches!(
+        i,
+        MirInst::Call { target, args, .. }
+            if target == &CallTarget::from_name("rt_hash_text") && args.len() == 1
+    ))));
+    assert!(!probe.blocks.iter().any(|b| b.instructions.iter().any(|i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "str.hash" || func_name == "text.hash"
+    ))));
+}
+
+#[test]
 fn string_literal_hash_uses_tagged_runtime_but_user_hash_keeps_static_dispatch() {
     let mir = compile_to_mir(
         "struct HashBox:\n    value: i64\n\nimpl HashBox:\n    fn hash(self) -> i64:\n        return self.value\n\nfn literal_probe() -> i64:\n    return \"hello\".hash()\n\nfn user_probe(value: HashBox) -> i64:\n    return value.hash()\n",
@@ -316,6 +354,225 @@ fn sanitized_enum_constructor_call_lowers_to_enum_with() {
 }
 
 #[test]
+fn sanitized_multifield_enum_constructor_boxes_bool_payload_as_bool() {
+    let source = "enum Probe:\n    BoolFields(value: bool, marker: i64)\n\nfn test_false() -> Probe:\n    return Probe.BoolFields(value: false, marker: 73)\n\nfn test_true() -> Probe:\n    return Probe.BoolFields(value: true, marker: 91)\n";
+    let ast = Parser::new(source).parse().expect("parse failed");
+    let mut hir_module = hir::lower(&ast).expect("hir lower failed");
+
+    for function_name in ["test_false", "test_true"] {
+        let function = hir_module
+            .functions
+            .iter_mut()
+            .find(|function| function.name == function_name)
+            .expect("constructor fixture function exists");
+        let hir::HirStmt::Return(Some(expr)) = &mut function.body[0] else {
+            panic!("expected enum constructor return");
+        };
+        let hir::HirExprKind::Call { func, .. } = &mut expr.kind else {
+            panic!("expected enum constructor call");
+        };
+        func.kind = hir::HirExprKind::Global("Probe_dot_BoolFields".to_string());
+    }
+
+    let mir = lower_to_mir(&hir_module).expect("mir lower failed");
+    for (function_name, bool_value, marker_value) in
+        [("test_false", false, 73), ("test_true", true, 91)]
+    {
+        let function = mir
+            .functions
+            .iter()
+            .find(|function| function.name == function_name)
+            .expect("MIR fixture function exists");
+        let instructions: Vec<_> = function
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions.iter())
+            .collect();
+
+        let bool_input = instructions
+            .iter()
+            .find_map(|inst| match inst {
+                MirInst::ConstBool { dest, value } if *value == bool_value => Some(*dest),
+                _ => None,
+            })
+            .expect("bool constructor input exists");
+        let bool_box = instructions
+            .iter()
+            .find_map(|inst| match inst {
+                MirInst::Call {
+                    dest: Some(dest),
+                    target,
+                    args,
+                } if target == &CallTarget::from_name("rt_value_bool")
+                    && args.len() == 1
+                    && args[0] == bool_input => Some(*dest),
+                _ => None,
+            })
+            .expect("bool payload must use the runtime bool tag");
+        let marker_input = instructions
+            .iter()
+            .find_map(|inst| match inst {
+                MirInst::ConstInt { dest, value } if *value == marker_value => Some(*dest),
+                _ => None,
+            })
+            .expect("numeric marker input exists");
+        let marker_box = instructions
+            .iter()
+            .find_map(|inst| match inst {
+                MirInst::BoxInt { dest, value } if *value == marker_input => Some(*dest),
+                _ => None,
+            })
+            .expect("numeric marker must retain integer boxing");
+        let payload_array = instructions
+            .iter()
+            .find_map(|inst| match inst {
+                MirInst::Call {
+                    dest: Some(dest),
+                    target,
+                    args,
+                } if target == &CallTarget::from_name("rt_array_new")
+                    && args.len() == 1
+                    && instructions.iter().any(|candidate| {
+                        matches!(candidate, MirInst::ConstInt { dest, value }
+                            if *dest == args[0] && *value == 2)
+                    }) => Some(*dest),
+                _ => None,
+            })
+            .expect("two-field payload array exists");
+
+        let pushed_payloads: Vec<_> = instructions
+            .iter()
+            .filter_map(|inst| match inst {
+                MirInst::Call { target, args, .. }
+                    if target == &CallTarget::from_name("rt_array_push")
+                        && args.len() == 2
+                        && args[0] == payload_array => Some(args[1]),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            pushed_payloads,
+            vec![bool_box, marker_box],
+            "bool must use rt_value_bool before the BoxInt-tagged numeric marker"
+        );
+        assert!(instructions.iter().any(|inst| matches!(
+            inst,
+            MirInst::EnumWith { enum_name, variant_name, payload, .. }
+                if enum_name == "Probe"
+                    && variant_name == "BoolFields"
+                    && *payload == payload_array
+        )), "enum consumes the ordered payload array");
+        assert!(!instructions.iter().any(|inst| matches!(
+            inst,
+            MirInst::BoxInt { value, .. } if *value == bool_input
+        )), "bool constructor input is not integer-boxed");
+    }
+}
+
+#[test]
+fn sanitized_singlefield_enum_constructor_boxes_bool_and_preserves_integer() {
+    let source = "enum ProbeSingle:\n    Flag(value: bool)\n    Count(value: i64)\n\nfn test_false() -> ProbeSingle:\n    return ProbeSingle.Flag(value: false)\n\nfn test_true() -> ProbeSingle:\n    return ProbeSingle.Flag(value: true)\n\nfn test_count() -> ProbeSingle:\n    return ProbeSingle.Count(value: 37)\n";
+    let ast = Parser::new(source).parse().expect("parse failed");
+    let mut hir_module = hir::lower(&ast).expect("hir lower failed");
+
+    for (function_name, variant_name) in [
+        ("test_false", "Flag"),
+        ("test_true", "Flag"),
+        ("test_count", "Count"),
+    ] {
+        let function = hir_module
+            .functions
+            .iter_mut()
+            .find(|function| function.name == function_name)
+            .expect("constructor fixture function exists");
+        let hir::HirStmt::Return(Some(expr)) = &mut function.body[0] else {
+            panic!("expected enum constructor return");
+        };
+        let hir::HirExprKind::Call { func, .. } = &mut expr.kind else {
+            panic!("expected enum constructor call");
+        };
+        func.kind = hir::HirExprKind::Global(format!("ProbeSingle_dot_{variant_name}"));
+    }
+
+    let mir = lower_to_mir(&hir_module).expect("mir lower failed");
+    for (function_name, bool_value) in [("test_false", false), ("test_true", true)] {
+        let function = mir
+            .functions
+            .iter()
+            .find(|function| function.name == function_name)
+            .expect("MIR bool fixture function exists");
+        let instructions: Vec<_> = function
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions.iter())
+            .collect();
+        let bool_input = instructions
+            .iter()
+            .find_map(|inst| match inst {
+                MirInst::ConstBool { dest, value } if *value == bool_value => Some(*dest),
+                _ => None,
+            })
+            .expect("bool constructor input exists");
+        let bool_box = instructions
+            .iter()
+            .find_map(|inst| match inst {
+                MirInst::Call {
+                    dest: Some(dest),
+                    target,
+                    args,
+                } if target == &CallTarget::from_name("rt_value_bool")
+                    && args.len() == 1
+                    && args[0] == bool_input => Some(*dest),
+                _ => None,
+            })
+            .expect("single bool payload must use the runtime bool tag");
+        assert!(instructions.iter().any(|inst| matches!(
+            inst,
+            MirInst::EnumWith { enum_name, variant_name, payload, .. }
+                if enum_name == "ProbeSingle"
+                    && variant_name == "Flag"
+                    && *payload == bool_box
+        )), "single-field enum stores the tagged bool directly");
+        assert!(!instructions.iter().any(|inst| matches!(
+            inst,
+            MirInst::BoxInt { value, .. } if *value == bool_input
+        )), "bool constructor input is not integer-boxed");
+    }
+
+    let count_fn = mir
+        .functions
+        .iter()
+        .find(|function| function.name == "test_count")
+        .expect("MIR integer control function exists");
+    let count_instructions: Vec<_> = count_fn
+        .blocks
+        .iter()
+        .flat_map(|block| block.instructions.iter())
+        .collect();
+    let int_input = count_instructions
+        .iter()
+        .find_map(|inst| match inst {
+            MirInst::ConstInt { dest, value: 37 } => Some(*dest),
+            _ => None,
+        })
+        .expect("integer control input exists");
+    let int_box = count_instructions
+        .iter()
+        .find_map(|inst| match inst {
+            MirInst::BoxInt { dest, value } if *value == int_input => Some(*dest),
+            _ => None,
+        })
+        .expect("integer control keeps BoxInt");
+    assert!(count_instructions.iter().any(|inst| matches!(
+        inst,
+        MirInst::EnumWith { enum_name, variant_name, payload, .. }
+            if enum_name == "ProbeSingle"
+                && variant_name == "Count"
+                && *payload == int_box
+    )), "single-field integer enum still stores the BoxInt payload");
+}
+
+#[test]
 fn sanitized_enum_unit_global_lowers_to_enum_unit() {
     let mut parser = Parser::new("enum Tag:\n    Ready\n\nfn test() -> Tag:\n    return Tag.Ready\n");
     let ast = parser.parse().expect("parse failed");
@@ -429,9 +686,15 @@ fn primitive_field_method_call_is_builtin_qualified() {
     )
     .unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
+    // Contract commit b137e4a602b: scalar text conversions never enter nominal
+    // suffix-based dispatch; narrow ints use BoxInt + rt_value_to_string.
     assert!(has_inst(&mir, |i| matches!(
         i,
-        MirInst::MethodCallStatic { func_name, .. } if func_name == "i32.to_string"
+        MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_to_string")
+    )));
+    assert!(!has_inst(&mir, |i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. } if func_name.ends_with(".to_string")
     )));
 }
 
@@ -455,6 +718,117 @@ fn primitive_to_text_method_call_is_builtin_qualified() {
         !has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })),
         "an i64 receiver must NOT be BoxInt-tagged before rendering -- that is the lossy path 610ce80229e removed"
     );
+}
+
+#[test]
+fn integer_text_methods_bypass_nominal_dispatch_but_enum_methods_remain_nominal() {
+    let mir = compile_to_mir(
+        r#"type I32Alias = i32
+type I32Alias2 = I32Alias
+
+enum SdnValue:
+    Int(i64)
+    fn to_text() -> text:
+        match self:
+            case Int(_): "sdn"
+
+fn i8_text(value: i8) -> text: value.to_text()
+fn i16_text(value: i16) -> text: value.to_text()
+fn i32_text(value: i32) -> text: value.to_text()
+fn i64_text(value: i64) -> text: value.to_text()
+fn u8_text(value: u8) -> text: value.to_text()
+fn u16_text(value: u16) -> text: value.to_text()
+fn u32_text(value: u32) -> text: value.to_text()
+fn u64_text(value: u64) -> text: value.to_text()
+fn alias_text(value: I32Alias2) -> text: value.to_text()
+fn i32_string(value: i32) -> text: value.to_string()
+fn i32_str(value: i32) -> text: value.str()
+fn bool_text(value: bool) -> text: value.to_text()
+fn f32_text(value: f32) -> text: value.to_text()
+fn f64_text(value: f64) -> text: value.to_text()
+fn char_text(value: char) -> text: value.to_text()
+fn make_i32() -> i32: 7
+fn receiver_once() -> text: make_i32().to_text()
+fn enum_text(value: SdnValue) -> text: value.to_text()
+"#,
+    )
+    .unwrap();
+
+    for name in [
+        "i8_text", "i16_text", "i32_text", "u8_text", "u16_text", "u32_text",
+        "alias_text", "i32_string", "i32_str",
+    ] {
+        let function = mir.functions.iter().find(|function| function.name == name).unwrap();
+        let instructions: Vec<_> = function.blocks.iter().flat_map(|block| &block.instructions).collect();
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_to_string")
+        )), "{name} must use the boxed primitive text conversion");
+        assert!(!instructions.iter().any(|instruction| matches!(
+            instruction,
+            MirInst::MethodCallStatic { func_name, .. } if func_name.ends_with(".to_text") || func_name.ends_with(".to_string") || func_name.ends_with(".str")
+        )), "{name} must not enter nominal suffix-based method dispatch");
+    }
+
+    for name in ["bool_text", "f32_text", "f64_text"] {
+        let function = mir.functions.iter().find(|function| function.name == name).unwrap();
+        let instructions: Vec<_> = function.blocks.iter().flat_map(|block| &block.instructions).collect();
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_to_string")
+        )), "{name} must use the shared boxed scalar text conversion");
+        if name == "bool_text" {
+            assert!(instructions.iter().any(|instruction| matches!(
+                instruction,
+                MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_bool")
+            )), "bool must be boxed with the bool runtime constructor");
+        } else {
+            assert!(instructions.iter().any(|instruction| matches!(instruction, MirInst::BoxFloat { .. })),
+                "{name} must retain Float boxing");
+        }
+        assert!(!instructions.iter().any(|instruction| matches!(
+            instruction,
+            MirInst::MethodCallStatic { func_name, .. } if func_name.ends_with(".to_text")
+        )), "{name} must not enter nominal suffix-based method dispatch");
+    }
+    let char_function = mir.functions.iter().find(|function| function.name == "char_text").unwrap();
+    assert!(char_function.blocks.iter().flat_map(|block| &block.instructions).any(|instruction| matches!(
+        instruction,
+        MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_char_from_code")
+    )), "char must retain its Unicode-scalar bridge");
+    assert!(!char_function.blocks.iter().flat_map(|block| &block.instructions).any(|instruction| matches!(
+        instruction,
+        MirInst::MethodCallStatic { func_name, .. } if func_name.ends_with(".to_text")
+    )), "char must not enter nominal suffix-based method dispatch");
+
+    for (name, target) in [("i64_text", "rt_raw_i64_to_string"), ("u64_text", "rt_raw_u64_to_string")] {
+        let function = mir.functions.iter().find(|function| function.name == name).unwrap();
+        let instructions: Vec<_> = function.blocks.iter().flat_map(|block| &block.instructions).collect();
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            MirInst::Call { target: actual, .. } if actual == &CallTarget::from_name(target)
+        )), "{name} must retain the lossless raw integer bridge");
+        assert!(!instructions.iter().any(|instruction| matches!(
+            instruction,
+            MirInst::MethodCallStatic { func_name, .. } if func_name.ends_with(".to_text")
+        )), "{name} must not enter nominal suffix-based method dispatch");
+    }
+
+    let receiver_once = mir.functions.iter().find(|function| function.name == "receiver_once").unwrap();
+    assert_eq!(
+        receiver_once.blocks.iter().flat_map(|block| &block.instructions).filter(|instruction| matches!(
+            instruction,
+            MirInst::Call { target, .. } if target == &CallTarget::from_name("make_i32")
+        )).count(),
+        1,
+        "the integer receiver expression must be evaluated once"
+    );
+
+    let enum_function = mir.functions.iter().find(|function| function.name == "enum_text").unwrap();
+    assert!(enum_function.blocks.iter().flat_map(|block| &block.instructions).any(|instruction| matches!(
+        instruction,
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "SdnValue.to_text"
+    )), "the enum-owned to_text method must remain nominal");
 }
 
 #[test]
@@ -526,7 +900,7 @@ fn code_and_split(value: text) -> i64:
         ("rt_string_trim", 1),
         ("rt_string_to_lower", 1),
         ("rt_string_to_upper", 1),
-        ("rt_slice", 4),
+        ("rt_slice_text_bytes", 4),
         ("rt_string_char_code_at", 2),
     ] {
         assert!(
@@ -737,6 +1111,51 @@ fn read_then_write(mut owner: OwnedFields) -> i64:
     assert!(
         owners.iter().all(|owner| *owner == (Some("OwnedFields"), None)),
         "field owner identity was lost: {owners:?}"
+    );
+}
+
+#[test]
+fn field_access_on_static_ctor_inferred_local_keeps_owner_identity() {
+    // doc/08_tracking/bug/stage3_selfhost_vtable_field_offset_relro_segv_2026-08-06.md
+    // `var t = Cls.create(..)` (no annotation) must still name its owner, so
+    // the native layout pass can resolve the vtable header; an unnamed
+    // owner is guessed header-less and shifts every field by one slot.
+    let mir = compile_to_mir(
+        r#"trait Shape:
+    fn area() -> i64
+
+class Sq with Shape:
+    side: i64
+    static fn create(side: i64) -> Sq:
+        Sq(side: side)
+    fn area() -> i64:
+        self.side
+
+fn use_inferred() -> i64:
+    var t = Sq.create(3)
+    t.side = 4
+    t.side
+"#,
+    )
+    .unwrap();
+    let f = mir
+        .functions
+        .iter()
+        .find(|f| f.name.ends_with("use_inferred"))
+        .expect("use_inferred");
+    let owners: Vec<Option<&str>> = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.instructions.iter())
+        .filter_map(|i| match i {
+            MirInst::FieldGet { owner_name, .. } | MirInst::FieldSet { owner_name, .. } => Some(owner_name.as_deref()),
+            _ => None,
+        })
+        .collect();
+    assert!(!owners.is_empty(), "expected field get/set in use_inferred");
+    assert!(
+        owners.iter().all(|o| *o == Some("Sq")),
+        "inferred static-ctor local lost its owner identity: {owners:?}"
     );
 }
 
@@ -1187,4 +1606,101 @@ fn di_builtin_type_name() {
     assert_eq!(builtin_type_name(hir::TypeId::U64), Some("u64"));
     assert_eq!(builtin_type_name(hir::TypeId::F32), Some("f32"));
     assert_eq!(builtin_type_name(hir::TypeId(999)), None);
+}
+
+/// Bug stage3_selfhost_vtable_field_offset_relro_segv_2026-08-06: every
+/// field get/set on a vtable-bearing class must carry the class as owner,
+/// whatever shape produced the receiver (call result with an enum/nil arg,
+/// a field-held instance, a call-result receiver). A `None` owner makes
+/// native layout skip the vtable slot and write field N over slot N-1.
+#[test]
+fn field_access_owner_identity_survives_driver_receiver_shapes() {
+    let mir = compile_to_mir(
+        r#"trait Gen:
+    fn run_it() -> i64
+
+enum Tgt:
+    Host
+    Other
+
+class Tr with Gen:
+    name: text
+    tgt: Tgt
+    hook: i64?
+    count: i64
+    static fn create(name: text, tgt: Tgt, hook: i64?) -> Tr:
+        Tr(name: name, tgt: tgt, hook: hook, count: 0)
+    fn run_it() -> i64:
+        self.count
+
+class Drv:
+    tr: Tr
+
+fn make() -> Tr:
+    Tr.create("m", Tgt.Host, nil)
+
+fn shape_nil_arg() -> i64:
+    var t = Tr.create("x", Tgt.Host, nil)
+    t.count = 1
+    t.count
+
+fn shape_field_held(mut d: Drv) -> i64:
+    d.tr.count = 2
+    d.tr.count
+
+fn shape_call_receiver() -> i64:
+    make().count
+
+fn shape_var_reassigned() -> i64:
+    var t = make()
+    t = Tr.create("y", Tgt.Other, nil)
+    t.count = 3
+    t.count
+
+fn idg<T>(x: T) -> T:
+    x
+
+fn shape_generic_id() -> i64:
+    var t = idg(make())
+    t.count = 5
+    t.count
+
+fn shape_if_expr(c: bool) -> i64:
+    var t = if c: make() else: Tr.create("z", Tgt.Host, nil)
+    t.count = 6
+    t.count
+
+fn shape_for_elem(xs: [Tr]) -> i64:
+    var s = 0
+    for t in xs:
+        s = s + t.count
+    s
+"#,
+    )
+    .unwrap();
+    let mut bad = Vec::new();
+    for shape in ["shape_nil_arg", "shape_field_held", "shape_call_receiver", "shape_var_reassigned", "shape_generic_id", "shape_if_expr", "shape_for_elem"] {
+        let f = mir
+            .functions
+            .iter()
+            .find(|f| f.name.ends_with(shape))
+            .unwrap_or_else(|| panic!("{shape}"));
+        let owners: Vec<Option<String>> = f
+            .blocks
+            .iter()
+            .flat_map(|b| b.instructions.iter())
+            .filter_map(|i| match i {
+                MirInst::FieldGet { owner_name, byte_offset, .. } | MirInst::FieldSet { owner_name, byte_offset, .. }
+                    if *byte_offset == 24 =>
+                {
+                    Some(owner_name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        if owners.is_empty() || !owners.iter().all(|o| o.as_deref() == Some("Tr")) {
+            bad.push(format!("{shape}: {owners:?}"));
+        }
+    }
+    assert!(bad.is_empty(), "field owner identity lost: {bad:?}");
 }

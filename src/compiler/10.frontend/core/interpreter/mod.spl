@@ -129,18 +129,21 @@ use compiler.core.lexer.{lex_init}
 use compiler.core.parser.{parser_has_errors, parser_init}
 use compiler.core.parser_expr.{parse_expr}
 use compiler.core.frontend.{core_frontend_parse_reset}
+use compiler.frontend.core.string_interpolation_expand.{expand_string_interpolations}
+use compiler.frontend.desugar.placeholder_lambda.{transform_interpolated_placeholder_args}
 use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals}
 use compiler.core.interpreter.env.*
 use compiler.core.interpreter.value.*
 use compiler.core.interpreter.ops.*
 use compiler.core.interpreter.resolve.*
-use compiler.core.capture_write_check.{capture_write_check_module}
+use compiler.core.capture_write_check.{capture_write_check_module, capture_write_warnings}
+use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.core.interpreter.jit.*
 use compiler.core.interpreter.cli_eval.*
 use compiler.core.interpreter.eval_access.*
 use compiler.core.interpreter.module_loader_core.*
 
-extern fn rt_env_get(key: text) -> text
+extern fn rt_env_get(key: text) -> text?
 
 # ===== Shared Pipeline =====
 
@@ -186,6 +189,8 @@ fn _core_run_pipeline(source: text, path: text) -> i64:
     # A nested fn / lambda writing an enclosing local is a compile error
     # (closures are read-only; core/capture_write_check.spl).
     val capture_error = capture_write_check_module()
+    for capture_warning in capture_write_warnings():
+        eprint(capture_warning)
     if capture_error != "":
         eval_set_error(capture_error)
         return -1
@@ -219,10 +224,10 @@ fn _core_run_pipeline(source: text, path: text) -> i64:
 # - Otherwise → Adaptive JIT (compile hot functions after threshold calls)
 fn core_interpret(source: text, path: text) -> i64:
     # Read JIT configuration from environment variables
-    val env_no_jit = rt_env_get("SIMPLE_NO_JIT")
+    val env_no_jit = rt_env_get("SIMPLE_NO_JIT") ?? ""
     val env_threshold = rt_env_get("SIMPLE_JIT_THRESHOLD")
     val env_backend = rt_env_get("SIMPLE_JIT_BACKEND")
-    val env_verbose = rt_env_get("SIMPLE_JIT_VERBOSE")
+    val env_verbose = rt_env_get("SIMPLE_JIT_VERBOSE") ?? ""
 
     # Determine threshold (default: 10 calls, or 999999 if JIT disabled)
     var threshold = 10
@@ -230,11 +235,11 @@ fn core_interpret(source: text, path: text) -> i64:
     if has_no_jit:
         threshold = 999999
 
-    val has_threshold = env_threshold != ""
+    val has_threshold = (env_threshold ?? "") != ""
     val threshold_not_nil = env_threshold != nil
     val use_threshold = has_threshold and threshold_not_nil
     if use_threshold:
-        threshold = int(env_threshold)
+        threshold = int(env_threshold ?? "")
 
     # Determine verbose mode (0 = silent, 1 = debug output)
     var verbose = 0
@@ -244,11 +249,11 @@ fn core_interpret(source: text, path: text) -> i64:
 
     # Determine backend ("auto" = runtime detection, "cranelift", "llvm")
     var backend = "auto"
-    val has_backend = env_backend != ""
+    val has_backend = (env_backend ?? "") != ""
     val backend_not_nil = env_backend != nil
     val use_backend = has_backend and backend_not_nil
     if use_backend:
-        backend = env_backend
+        backend = env_backend ?? ""
 
     # Initialize JIT with resolved configuration
     jit_init_with_backend(threshold, verbose, backend)
@@ -274,7 +279,7 @@ fn core_interpret(source: text, path: text) -> i64:
 # - -1 (VAL_NONE) if parse error or runtime error
 #
 # **Example:** `core_jit_interpret(code, "test.spl", 5)` compiles after 5 calls
-fn core_jit_interpret(source: text, path: text, threshold: i64) -> i64:
+pub fn core_jit_interpret(source: text, path: text, threshold: i64) -> i64:
     jit_init(threshold, 0)  # verbose = 0 (silent)
     _core_run_pipeline(source, path)
 
@@ -333,5 +338,12 @@ fn core_interpret_expr(source: text) -> i64:
     if parser_has_errors():
         eval_set_error("parse error")
         return -1
+
+    # Match the module frontend's post-parse promotion. The lexer keeps
+    # interpolation regions in ordinary string nodes; evaluating those nodes
+    # directly would return their literal braces. Parsing is complete here,
+    # so fragment expressions can append safely to the same AST arena.
+    expand_string_interpolations(0)
+    transform_interpolated_placeholder_args(0)
 
     eval_expr(eid)

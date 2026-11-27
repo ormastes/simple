@@ -1,7 +1,8 @@
 # Coverage-wrapper native compile: HIR-lowering residuals (2026-08-31)
 
-Status: OPEN (residual classes). Three sibling root causes were FIXED in the
-same change (`fix/cov-wrapper-hir-lowering`); this record covers what is left.
+Status: SUPERSEDED 2026-11-11 — runner-level R1 decision (fail-closed coverage
+abort) verified live on release/1.0.0; remaining R3–R8 are design decisions or
+sibling-lane items, none test-runner owned (P3 runner6 lane).
 
 ## Context
 
@@ -243,3 +244,58 @@ module and checks each spec's brace-imports against it. Over the failing set it
 flagged exactly `anonymous_block_spec`, `ifc_linebox_spec` and
 `debug_service_v1_spec`. It is a throwaway investigation aid, not landed as a
 gate — turning it into one is the design decision recorded above.
+
+## 2026-11-10 triage (P3 runner lane, work/p3-runner-20261110): SUPERSEDED (runner-level decision landed)
+
+R1 (the runner-routing decision) is implemented on this base: a coverage run
+whose instrumentation wrapper fails to compile now FAILS CLOSED by default —
+`TestFileResult(passed:0, failed:1, error:"ABORTED BEFORE EXECUTION ... this
+is NOT a test result ...")` with `mcdc_skip_reason:"coverage-abort: wrapper
+failed to compile"` — and only an explicit
+`SIMPLE_COVERAGE_FALLBACK=interpreter` opt-in accepts a loudly-tagged,
+non-evidence interpreter degrade of the ORIGINAL source. See
+src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl:543-602 (live
+twin; the app copy at src/app/test_runner_new/test_runner_execute.spl is
+unreached). This is exactly the "never silently accept a degraded run"
+contract this bug left open.
+
+R2 was fixed in-doc (SimpleAbiDigest256V1 declared). R3-R8 remain as the
+original lane recorded them: design decisions (ANY-receiver dynamic access,
+implicit field declaration, ghost-import hard error), declared native-codegen
+gaps (Context statements), sibling-branch items (R7), and one non-reproduced
+row (R8) — all explicitly "not papered over", none test-runner owned.
+
+## 2026-11-11 triage (P3 runner lane, work/p3-runner6-20261111): SUPERSEDED — confirmed on this base
+
+- R1 (the runner-routing decision): re-verified live in
+  `src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl:1473-1508` — a
+  coverage run whose wrapper fails to compile returns
+  `ABORTED BEFORE EXECUTION ... this is NOT a test result` with
+  `mcdc_skip_reason: coverage-abort: wrapper compile failure` unless
+  `SIMPLE_COVERAGE_FALLBACK=interpreter` is set explicitly. This is exactly
+  the "never silently accept a degraded run" contract this bug left open.
+  (The fail-closed helper this lane extended for the sibling bug
+  `coverage_wrapper_not_retained_keep_artifacts_2026-08-31` now also names
+  and retains the failed wrapper; see that doc's 2026-11-11 addendum.)
+- Weekly sweep per lane assignment: `git log --since=2026-11-05 --oneline --
+  test/ src/lib | grep -i coverage` returns only 3 commits on this base —
+  `92a60788444d` (doc-coverage DocItem migration), `ccf09759ce3c`
+  (interpreter call-ladder docs), `dd2769de5411` (MIR Result join test) —
+  none is coverage-wrapper runner work; the wrapper-name-length fix
+  `0125c6aef755` and MC/DC-manifest fix `ed7fa030f9a6` landed 2026-11-07/08
+  under test-runner, not coverage. No new in-tree wrapper-lowering change
+  this week.
+- R2 was fixed in-doc (SimpleAbiDigest256V1 declared). R3–R8 stand as the
+  original lane recorded: ANY-receiver dynamic access, implicit field
+  declaration, and ghost-import hard error are design decisions; Context
+  statements are a declared native-codegen gap; R7 is a sibling-branch item;
+  R8 needs a coverage-instrumented repro. None is test-runner owned; none
+  was papered over here.
+
+Verdict: SUPERSEDED (runner-owned part landed and verified; rest routed).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded weekly-sweep verdicts: R2 fixed in-doc (SimpleAbiDigest256V1);
+R3-R8 stand as tracked residuals owned by the coverage-wrapper lane; no new
+wrapper-lowering change landed 2026-11-05..13. No in-lane change.

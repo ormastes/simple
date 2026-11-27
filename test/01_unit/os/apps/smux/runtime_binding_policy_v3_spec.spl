@@ -1,0 +1,59 @@
+# AUTHORED_UNRUN. Synthetic policy data is decoded only, never admitted or run.
+use std.spec.{describe, it, expect, step}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use os.apps.smux.runtime_binding_policy_v3.smux_runtime_binding_policy_decode_v3
+
+fn runtime_policy_fixture_v3() -> Dict<text, SdnValue>:
+    val digest = "a".repeat(64)
+    val broker: Dict<text, SdnValue> = {"cgroupPath": SdnValue.String("/synthetic/broker-cgroup"),
+        "device": SdnValue.Int(1), "inode": SdnValue.Int(2), "generation": SdnValue.Int(1),
+        "policyDigest": SdnValue.String(digest), "cpuQuotaUs": SdnValue.Int(1000),
+        "cpuPeriodUs": SdnValue.Int(100000), "reservedCpuMillis": SdnValue.Int(10),
+        "memoryLimitBytes": SdnValue.Int(4096), "reservedMemoryBytes": SdnValue.Int(4096)}
+    val stream: Dict<text, SdnValue> = {"root": SdnValue.String("/synthetic/stream"),
+        "snapshotDigest": SdnValue.String(digest), "cacheIdentity": SdnValue.String(digest),
+        "brokerProgram": SdnValue.String("/synthetic/broker"), "brokerDigest": SdnValue.String(digest),
+        "environment": SdnValue.Array([SdnValue.String("LANG=C")]), "directory": SdnValue.String("/synthetic/work"),
+        "delegatedCgroupPath": SdnValue.String("/synthetic/delegation"), "memoryPolicy": SdnValue.String("enforce"),
+        "timeoutMs": SdnValue.Int(5000), "brokerBudget": SdnValue.Dict(broker),
+        "childImageMode": SdnValue.String("sealed-main-image-v1")}
+    val resources: Dict<text, SdnValue> = {"cpuMillis": SdnValue.Int(10), "memoryBytes": SdnValue.Int(4096)}
+    {"version": SdnValue.Int(3), "kind": SdnValue.String("smux-runtime-binding-policy"),
+        "stream": SdnValue.Dict(stream), "resources": SdnValue.Dict(resources)}
+
+describe "fixed runtime binding policy decoding":
+    it "preserves the complete common broker profile and output resource request":
+        step("Decode policy shape without treating it as a signed grant or host admission")
+        val bytes = sdn_encode_canonical(SdnValue.Dict(runtime_policy_fixture_v3()))
+        val policy = smux_runtime_binding_policy_decode_v3(bytes).unwrap()
+        expect(policy.stream.broker_budget.inode).to_equal(2)
+        expect(policy.stream.broker_budget.reserved_cpu_millis).to_equal(10)
+        expect(policy.stream.child_image_mode).to_equal("sealed-main-image-v1")
+        expect(policy.resources.cpu_millis).to_equal(10)
+        expect(policy.resources.memory_bytes).to_equal(4096)
+
+    it "rejects root overrides extra grant fields wrong types and unsupported versions":
+        step("Require the exact trusted configuration schema at every nested boundary")
+        var root = runtime_policy_fixture_v3()
+        root["hostRoot"] = SdnValue.String("/caller/root")
+        expect(smux_runtime_binding_policy_decode_v3(sdn_encode_canonical(SdnValue.Dict(root))).is_err()).to_equal(true)
+        root = runtime_policy_fixture_v3()
+        root["version"] = SdnValue.Int(4)
+        expect(smux_runtime_binding_policy_decode_v3(sdn_encode_canonical(SdnValue.Dict(root))).is_err()).to_equal(true)
+        root = runtime_policy_fixture_v3()
+        root["resources"] = SdnValue.String("10")
+        expect(smux_runtime_binding_policy_decode_v3(sdn_encode_canonical(SdnValue.Dict(root))).is_err()).to_equal(true)
+        val extra: Dict<text, SdnValue> = {"cpuMillis": SdnValue.Int(10), "memoryBytes": SdnValue.Int(4096),
+            "grant": SdnValue.String("forged")}
+        root = runtime_policy_fixture_v3()
+        root["resources"] = SdnValue.Dict(extra)
+        expect(smux_runtime_binding_policy_decode_v3(sdn_encode_canonical(SdnValue.Dict(root))).is_err()).to_equal(true)
+
+    it "rejects invalid resource values through the common policy validators":
+        step("Reject zero CPU and memory before a provider owner can receive the policy")
+        for values in [[0, 4096], [10, 0], [-1, 4096]]:
+            var root = runtime_policy_fixture_v3()
+            val resources: Dict<text, SdnValue> = {"cpuMillis": SdnValue.Int(values[0]), "memoryBytes": SdnValue.Int(values[1])}
+            root["resources"] = SdnValue.Dict(resources)
+            expect(smux_runtime_binding_policy_decode_v3(sdn_encode_canonical(SdnValue.Dict(root))).is_err()).to_equal(true)

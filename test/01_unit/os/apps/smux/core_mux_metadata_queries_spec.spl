@@ -1,0 +1,299 @@
+# REQ-CMUX-002/004/005/007: pure production metadata helpers, NOT_RUN.
+# Child variants below are DTO inputs, never evidence of a native process.
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.execution_v1.*
+use std.common.contracts.mux.observation_v1.*
+use os.apps.smux.core_mux_metadata_queries.{core_mux_metadata_snapshot_v1, core_mux_current_context_v1}
+
+fn metadata_ref(kind: MuxObjectKindV1, id: text) -> MuxObjectRefV1:
+    MuxObjectRefV1(owner_id: "owner-one", owner_generation: 7u64, kind: kind, object_id: id)
+
+fn metadata_rect() -> MuxRectV1:
+    MuxRectV1(x_cells: 3, y_cells: 2, width_cells: 20, height_cells: 10)
+
+fn metadata_layout(ids: [text]) -> MuxLayoutStateV1:
+    var rectangles: [MuxPaneRectV1] = []
+    for id in ids:
+        rectangles.push(MuxPaneRectV1(pane: metadata_ref(MuxObjectKindV1.Pane, id), rectangle: metadata_rect()))
+    MuxLayoutStateV1(kind: MuxLayoutKindV1.Manual, canvas: MuxCellSizeV1(columns: 80, rows: 24), rectangles: rectangles)
+
+fn metadata_pane(id: text, session: text, window: text) -> MuxPaneStateV1:
+    MuxPaneStateV1(identity: metadata_ref(MuxObjectKindV1.Pane, id), session: metadata_ref(MuxObjectKindV1.Session, session),
+        window: metadata_ref(MuxObjectKindV1.Window, window), legacy_id: "%" + id, index: 0,
+        child: MuxChildStateV1.Unknown(nil, "not polled"), title: "literal title", current_command: "",
+        rectangle: metadata_rect(), focused: false, hidden: false, border: MuxBorderV1.Single,
+        border_status: MuxBorderStatusV1.Bottom, content_revision: 19u64)
+
+fn metadata_client(id: text, session: text, window: text, pane: text) -> MuxClientStateV1:
+    val identity = metadata_ref(MuxObjectKindV1.Client, id)
+    MuxClientStateV1(identity: identity, context: MuxContextV1(client: Some(identity),
+        session: Some(metadata_ref(MuxObjectKindV1.Session, session)), window: Some(metadata_ref(MuxObjectKindV1.Window, window)),
+        pane: Some(metadata_ref(MuxObjectKindV1.Pane, pane))), viewport: MuxCellSizeV1(columns: 80, rows: 24), attached: true)
+
+fn metadata_setup() -> MuxSnapshotV1:
+    step("metadata_setup")
+    val s1 = metadata_ref(MuxObjectKindV1.Session, "s1")
+    val s2 = metadata_ref(MuxObjectKindV1.Session, "s2")
+    val w1 = metadata_ref(MuxObjectKindV1.Window, "w1")
+    val w2 = metadata_ref(MuxObjectKindV1.Window, "w2")
+    val w3 = metadata_ref(MuxObjectKindV1.Window, "w3")
+    val p2 = metadata_ref(MuxObjectKindV1.Pane, "p2")
+    val p3 = metadata_ref(MuxObjectKindV1.Pane, "p3")
+    val p4 = metadata_ref(MuxObjectKindV1.Pane, "p4")
+    var hidden = metadata_pane("p2", "s1", "w1")
+    hidden.hidden = true
+    hidden.focused = true
+    var exited = metadata_pane("p3", "s1", "w2")
+    exited.child = MuxChildStateV1.Exited(123, Some(4), nil)
+    var running = metadata_pane("p4", "s2", "w3")
+    running.child = MuxChildStateV1.Running(456)
+    val limits = MuxCoreLimitsV1(discovery: MuxLimitsV1(max_sessions: 8, max_reply_bytes: 65536),
+        max_windows: 8, max_panes: 8, max_clients: 8, max_input_bytes: 4096, max_capture_bytes: 4096,
+        max_events: 32, max_request_timeout_ms: 5000)
+    return MuxSnapshotV1(backend: MuxBackendV1.Smux, namespace: "metadata-test",
+        handle: MuxHandleV1(owner_id: "owner-one", owner_generation: 7u64, lease_id: "lease-one"), revision: 41u64,
+        sessions: [MuxSessionStateV1(identity: s1, name: "one", current_window: Some(w2), background: false),
+            MuxSessionStateV1(identity: s2, name: "two", current_window: Some(w3), background: true)],
+        windows: [MuxWindowStateV1(identity: w1, session: s1, name: "first", index: 0, active_pane: Some(p2),
+                layout: metadata_layout(["p2"]), zoomed_pane: Some(p2), restore_layout: Some(metadata_layout(["p1", "p2"]))),
+            MuxWindowStateV1(identity: w2, session: s1, name: "second", index: 1, active_pane: Some(p3),
+                layout: metadata_layout(["p3"]), zoomed_pane: nil, restore_layout: nil),
+            MuxWindowStateV1(identity: w3, session: s2, name: "third", index: 0, active_pane: Some(p4),
+                layout: metadata_layout(["p4"]), zoomed_pane: nil, restore_layout: nil)],
+        panes: [metadata_pane("p1", "s1", "w1"), hidden, exited, running],
+        clients: [metadata_client("c1", "s1", "w1", "p2"), metadata_client("c2", "s1", "w2", "p3"),
+            metadata_client("c3", "s2", "w3", "p4"),
+            MuxClientStateV1(identity: metadata_ref(MuxObjectKindV1.Client, "c4"),
+                context: MuxContextV1(client: nil, session: nil, window: nil, pane: nil),
+                viewport: MuxCellSizeV1(columns: 40, rows: 12), attached: false)],
+        limits: limits, capabilities: [])
+
+fn metadata_check_snapshot(actual: MuxSnapshotV1, sessions: int, windows: int, panes: int, clients: int):
+    step("metadata_check_snapshot")
+    expect(actual.namespace).to_equal("metadata-test")
+    expect(actual.handle.lease_id).to_equal("lease-one")
+    expect(actual.revision).to_equal(41u64)
+    expect(actual.sessions.len()).to_equal(sessions)
+    expect(actual.windows.len()).to_equal(windows)
+    expect(actual.panes.len()).to_equal(panes)
+    expect(actual.clients.len()).to_equal(clients)
+    expect(actual.capabilities.len()).to_equal(0)
+
+fn metadata_all() -> MuxVisibilityV1: MuxVisibilityV1(include_hidden: true, include_exited: true)
+
+describe "pure bound metadata query composition":
+    it "preserves namespace ordering values and supplied child observations":
+        val st = metadata_setup()
+        val result = core_mux_metadata_snapshot_v1(st, st.namespace, st.handle, MuxScopeV1.Namespace, metadata_all()).unwrap()
+        metadata_check_snapshot(result, 2, 3, 4, 4)
+        expect(result.panes[0]).to_equal(st.panes[0])
+        expect(result.panes[2].child).to_equal(MuxChildStateV1.Exited(123, Some(4), nil))
+        expect(result.panes[3].child).to_equal(MuxChildStateV1.Running(456))
+        expect(result.limits).to_equal(st.limits)
+
+    it "filters independent hidden state without dropping zoom occluded visible panes":
+        val st = metadata_setup()
+        val result = core_mux_metadata_snapshot_v1(st, st.namespace, st.handle, MuxScopeV1.Namespace,
+            MuxVisibilityV1(include_hidden: false, include_exited: true)).unwrap()
+        metadata_check_snapshot(result, 2, 3, 3, 4)
+        expect(result.panes[0].identity.object_id).to_equal("p1")
+        expect(result.panes[0].focused).to_equal(false)
+        expect(result.windows[0].active_pane).to_be_nil()
+        expect(result.windows[0].zoomed_pane).to_be_nil()
+        expect(result.windows[0].restore_layout).to_be_nil()
+        expect(result.windows[0].layout.rectangles.len()).to_equal(0)
+        expect(result.clients[0].context.pane).to_be_nil()
+        expect(st.windows[0].zoomed_pane).to_equal(Some(metadata_ref(MuxObjectKindV1.Pane, "p2")))
+
+    it "filters Exited while preserving Unknown and Running verbatim":
+        val st = metadata_setup()
+        val result = core_mux_metadata_snapshot_v1(st, st.namespace, st.handle, MuxScopeV1.Namespace,
+            MuxVisibilityV1(include_hidden: true, include_exited: false)).unwrap()
+        metadata_check_snapshot(result, 2, 3, 3, 4)
+        expect(result.panes[0].child).to_equal(MuxChildStateV1.Unknown(nil, "not polled"))
+        expect(result.panes[2].identity.object_id).to_equal("p4")
+        expect(result.windows[1].layout.rectangles.len()).to_equal(0)
+        expect(result.windows[1].active_pane).to_be_nil()
+        expect(result.clients[1].context.pane).to_be_nil()
+
+    it "retains a requested empty window and its required session ancestor":
+        val st = metadata_setup()
+        val result = core_mux_metadata_snapshot_v1(st, st.namespace, st.handle,
+            MuxScopeV1.Window(metadata_ref(MuxObjectKindV1.Window, "w2")), MuxVisibilityV1(include_hidden: false, include_exited: false)).unwrap()
+        metadata_check_snapshot(result, 1, 1, 0, 1)
+        expect(result.windows[0].identity.object_id).to_equal("w2")
+        expect(result.sessions[0].identity.object_id).to_equal("s1")
+        expect(result.clients[0].identity.object_id).to_equal("c2")
+        expect(result.clients[0].context.pane).to_be_nil()
+
+    it "scopes a session without unrelated sibling sessions or unbound clients":
+        val st = metadata_setup()
+        val result = core_mux_metadata_snapshot_v1(st, st.namespace, st.handle,
+            MuxScopeV1.Session(metadata_ref(MuxObjectKindV1.Session, "s1")), metadata_all()).unwrap()
+        metadata_check_snapshot(result, 1, 2, 3, 2)
+        expect(result.clients[0].identity.object_id).to_equal("c1")
+        expect(result.clients[1].identity.object_id).to_equal("c2")
+
+    it "scopes a window and clears its ancestor's out of scope current window":
+        val st = metadata_setup()
+        val result = core_mux_metadata_snapshot_v1(st, st.namespace, st.handle,
+            MuxScopeV1.Window(metadata_ref(MuxObjectKindV1.Window, "w1")), metadata_all()).unwrap()
+        metadata_check_snapshot(result, 1, 1, 2, 1)
+        expect(result.sessions[0].current_window).to_be_nil()
+        expect(result.windows[0].zoomed_pane).to_equal(Some(metadata_ref(MuxObjectKindV1.Pane, "p2")))
+        expect(result.windows[0].restore_layout.unwrap().rectangles.len()).to_equal(2)
+        expect(result.windows[0].layout.canvas).to_equal(st.windows[0].layout.canvas)
+        expect(result.windows[0].layout.rectangles[0].rectangle).to_equal(metadata_rect())
+
+    it "refuses wrong namespace owner generation and lease bindings":
+        val st = metadata_setup()
+        expect(core_mux_metadata_snapshot_v1(st, "foreign", st.handle, MuxScopeV1.Namespace, metadata_all()).is_err()).to_equal(true)
+        for bad in [MuxHandleV1(owner_id: "other", owner_generation: 7u64, lease_id: "lease-one"),
+            MuxHandleV1(owner_id: "owner-one", owner_generation: 8u64, lease_id: "lease-one"),
+            MuxHandleV1(owner_id: "owner-one", owner_generation: 7u64, lease_id: "other-lease")]:
+            val result = core_mux_metadata_snapshot_v1(st, st.namespace, bad, MuxScopeV1.Namespace, metadata_all())
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err().commit_state).to_equal(MuxCommitStateV1.NotApplied)
+
+    it "retains an exact-window client whose optional session context is nil":
+        var st = metadata_setup()
+        var client = st.clients[0]
+        client.context.session = nil
+        st.clients = [client, st.clients[1], st.clients[2], st.clients[3]]
+        val result = core_mux_metadata_snapshot_v1(st, st.namespace, st.handle,
+            MuxScopeV1.Window(metadata_ref(MuxObjectKindV1.Window, "w1")), metadata_all()).unwrap()
+        metadata_check_snapshot(result, 1, 1, 2, 1)
+        expect(result.clients[0].identity).to_equal(client.identity)
+        expect(result.clients[0].context.session).to_be_nil()
+        expect(result.clients[0].context.window).to_equal(Some(metadata_ref(MuxObjectKindV1.Window, "w1")))
+
+    it "refuses foreign stale and wrong-kind scope references":
+        val st = metadata_setup()
+        var foreign = metadata_ref(MuxObjectKindV1.Window, "w1")
+        foreign.owner_id = "foreign"
+        var stale = metadata_ref(MuxObjectKindV1.Window, "w1")
+        stale.owner_generation = 6u64
+        for target in [foreign, stale, metadata_ref(MuxObjectKindV1.Session, "w1")]:
+            expect(core_mux_metadata_snapshot_v1(st, st.namespace, st.handle, MuxScopeV1.Window(target), metadata_all()).is_err()).to_equal(true)
+
+    it "refuses absent scope rather than returning a successful empty namespace":
+        val st = metadata_setup()
+        val result = core_mux_metadata_snapshot_v1(st, st.namespace, st.handle,
+            MuxScopeV1.Session(metadata_ref(MuxObjectKindV1.Session, "missing")), metadata_all())
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().kind).to_equal(MuxErrorKindV1.InvalidTarget)
+
+    it "rejects malformed input ancestry even when scope would hide that object":
+        var st = metadata_setup()
+        var pane = st.panes[3]
+        pane.session = metadata_ref(MuxObjectKindV1.Session, "s1")
+        st.panes = [st.panes[0], st.panes[1], st.panes[2], pane]
+        val result = core_mux_metadata_snapshot_v1(st, st.namespace, st.handle,
+            MuxScopeV1.Session(metadata_ref(MuxObjectKindV1.Session, "s1")), metadata_all())
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().kind).to_equal(MuxErrorKindV1.InvalidRequest)
+
+    it "checks input bounds before filtering to a smaller result":
+        var st = metadata_setup()
+        st.limits.max_panes = 1
+        expect(core_mux_metadata_snapshot_v1(st, st.namespace, st.handle,
+            MuxScopeV1.Window(metadata_ref(MuxObjectKindV1.Window, "w2")), metadata_all()).is_err()).to_equal(true)
+
+    it "returns the exact existing client's context without selecting global focus":
+        val st = metadata_setup()
+        val result = core_mux_current_context_v1(st, st.namespace, st.handle, metadata_ref(MuxObjectKindV1.Client, "c1")).unwrap()
+        expect(result).to_equal(st.clients[0].context)
+        expect(result.window).to_equal(Some(metadata_ref(MuxObjectKindV1.Window, "w1")))
+        expect(st.sessions[0].current_window).to_equal(Some(metadata_ref(MuxObjectKindV1.Window, "w2")))
+
+    it "binds a nil self reference without inventing a detached client's focus":
+        val st = metadata_setup()
+        val result = core_mux_current_context_v1(st, st.namespace, st.handle, metadata_ref(MuxObjectKindV1.Client, "c4")).unwrap()
+        expect(result.client).to_equal(Some(metadata_ref(MuxObjectKindV1.Client, "c4")))
+        expect(result.session).to_be_nil()
+        expect(result.window).to_be_nil()
+        expect(result.pane).to_be_nil()
+
+    it "refuses absent foreign or wrong-kind clients and mismatched lease binding":
+        val st = metadata_setup()
+        var foreign = metadata_ref(MuxObjectKindV1.Client, "c1")
+        foreign.owner_generation = 8u64
+        for target in [foreign, metadata_ref(MuxObjectKindV1.Client, "missing"), metadata_ref(MuxObjectKindV1.Pane, "c1")]:
+            expect(core_mux_current_context_v1(st, st.namespace, st.handle, target).is_err()).to_equal(true)
+        var wrong = st.handle
+        wrong.lease_id = "old-lease"
+        expect(core_mux_current_context_v1(st, st.namespace, wrong, st.clients[0].identity).is_err()).to_equal(true)
+
+    it "refuses dangling and incoherent context references before returning metadata":
+        var st = metadata_setup()
+        var client = st.clients[0]
+        client.context.pane = Some(metadata_ref(MuxObjectKindV1.Pane, "missing"))
+        st.clients = [client]
+        expect(core_mux_current_context_v1(st, st.namespace, st.handle, client.identity).is_err()).to_equal(true)
+        client.context.pane = Some(metadata_ref(MuxObjectKindV1.Pane, "p4"))
+        st.clients = [client]
+        expect(core_mux_current_context_v1(st, st.namespace, st.handle, client.identity).is_err()).to_equal(true)
+
+    it "retains every namespace record across ordinary collection growth":
+        var st = metadata_setup()
+        st.sessions = []
+        st.windows = []
+        st.panes = []
+        st.clients = []
+        st.limits.discovery.max_sessions = 16
+        st.limits.max_windows = 16
+        st.limits.max_panes = 16
+        st.limits.max_clients = 16
+        for index in 0..12:
+            val sid = "growth-s{index}"
+            val wid = "growth-w{index}"
+            val pid = "growth-p{index}"
+            val cid = "growth-c{index}"
+            st.sessions.push(MuxSessionStateV1(identity: metadata_ref(MuxObjectKindV1.Session, sid), name: sid,
+                current_window: Some(metadata_ref(MuxObjectKindV1.Window, wid)), background: false))
+            st.windows.push(MuxWindowStateV1(identity: metadata_ref(MuxObjectKindV1.Window, wid), session: metadata_ref(MuxObjectKindV1.Session, sid),
+                name: wid, index: 0, active_pane: Some(metadata_ref(MuxObjectKindV1.Pane, pid)),
+                layout: metadata_layout([pid]), zoomed_pane: nil, restore_layout: nil))
+            st.panes.push(metadata_pane(pid, sid, wid))
+            st.clients.push(metadata_client(cid, sid, wid, pid))
+        # Reject incomplete fixture construction; this is not fault injection.
+        metadata_check_snapshot(st, 12, 12, 12, 12)
+        val result = core_mux_metadata_snapshot_v1(st, st.namespace, st.handle, MuxScopeV1.Namespace, metadata_all()).unwrap()
+        metadata_check_snapshot(result, 12, 12, 12, 12)
+        for index in 0..12:
+            expect(result.sessions[index].identity.object_id).to_equal("growth-s{index}")
+            expect(result.windows[index].identity.object_id).to_equal("growth-w{index}")
+            expect(result.panes[index].identity.object_id).to_equal("growth-p{index}")
+            expect(result.clients[index].identity.object_id).to_equal("growth-c{index}")
+
+    it "retains every selected rectangle without reflow across ordinary array growth":
+        var st = metadata_setup()
+        var session = st.sessions[0]
+        session.current_window = Some(metadata_ref(MuxObjectKindV1.Window, "w1"))
+        st.sessions = [session]
+        var window = st.windows[0]
+        window.active_pane = nil
+        window.zoomed_pane = nil
+        window.restore_layout = nil
+        window.layout = metadata_layout([])
+        st.panes = []
+        st.clients = []
+        st.limits.max_panes = 16
+        for index in 0..12:
+            val pid = "rect-p{index}"
+            val rect = MuxRectV1(x_cells: index * 3, y_cells: 2, width_cells: 2, height_cells: 10)
+            var pane = metadata_pane(pid, "s1", "w1")
+            pane.rectangle = rect
+            pane.index = index
+            st.panes.push(pane)
+            window.layout.rectangles.push(MuxPaneRectV1(pane: pane.identity, rectangle: rect))
+        st.windows = [window]
+        expect(st.panes.len()).to_equal(12)
+        expect(st.windows[0].layout.rectangles.len()).to_equal(12)
+        val result = core_mux_metadata_snapshot_v1(st, st.namespace, st.handle, MuxScopeV1.Namespace, metadata_all()).unwrap()
+        metadata_check_snapshot(result, 1, 1, 12, 0)
+        expect(result.windows[0].layout.rectangles.len()).to_equal(12)
+        for index in 0..12:
+            expect(result.windows[0].layout.rectangles[index].pane.object_id).to_equal("rect-p{index}")
+            expect(result.windows[0].layout.rectangles[index].rectangle.x_cells).to_equal(index * 3)

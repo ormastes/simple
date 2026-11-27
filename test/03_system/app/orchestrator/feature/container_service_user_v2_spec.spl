@@ -1,0 +1,174 @@
+# @req ORCH-02 HOST-02
+# Pure constructed inventory/user integrity fixtures, NOT native or UID proof.
+# Execution NOT_RUN. No provider or SimpleContainerOwner is fabricated.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.service_v2.*
+use std.common.contracts.container.execution_evidence_v2.*
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeCommandV1}
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+
+fn service_user_scope_v2() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "authorized-alias", service_scope_id: "service", boot_id: "",
+        provider_generation: 3, native_machine_id: "windows-machine-guid-v1:abcd",
+        continuity_mode: "service-incarnation-v1", continuity_id: "windows-service-incarnation-v1:old")
+
+fn service_user_entry_v2(scope: ContainerHostScopeV2) -> ContainerServiceInventoryEntryV2:
+    ContainerServiceInventoryEntryV2(scope: scope,
+        runtime: RuntimeIdentityV1(pod_uid: "workload", attempt: 1, provider_generation: scope.provider_generation,
+            operation_id: "operation", engine: "docker", native_id: "c".repeat(64),
+            node_boot_id: container_scope_fence_id_v2(scope).unwrap()),
+        request_digest: "a".repeat(64), cpu_millis: 1000, memory_bytes: 4096)
+
+fn service_user_receipt_v2(backend: text) -> ContainerExecutionUserReceiptV2:
+    var scope = service_user_scope_v2()
+    if backend == "linux-podman":
+        scope.boot_id = "native-boot"
+        scope.continuity_mode = "native-boot-incarnation-v1"
+        scope.continuity_id = "native-boot"
+    var identity = service_user_entry_v2(scope).runtime
+    identity.engine = if backend == "linux-podman": "podman" else: "docker"
+    val query = RuntimeCommandV1(operation: "inspect", program: if backend == "linux-podman": "/usr/bin/podman" else: "C:/Docker/docker.exe",
+        args: ["container", "inspect", "--format", "{" + "{" + ".Config.User" + "}" + "}", identity.native_id])
+    ContainerExecutionUserReceiptV2(backend: backend, scope: scope, identity: identity,
+        request_digest: "a".repeat(64), provider_identity_digest: "b".repeat(64), selected_user: "1000:1000",
+        observed_unix_ms: 1000, query_digest: container_runtime_query_digest_v2(query).unwrap(),
+        evidence_digest: sha256_text("constructed selected-user output"), proof_kind: "exact-native-execution-user-v1")
+
+fn service_user_wire_v2(source: text, key: text, value: SdnValue) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    var fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+describe "service quarantine and selected engine user pure integrity":
+    it "accepts old same machine inventory and binds the new owner epoch":
+        step("accepts old same machine inventory and binds the new owner epoch")
+        val old = service_user_scope_v2()
+        val row = service_user_entry_v2(old)
+        var current = old
+        current.continuity_id = "windows-service-incarnation-v1:new"
+        current.provider_generation = 4
+        val before = container_service_inventory_digest_v2("windows-docker-process", old, [row]).unwrap()
+        val after = container_service_inventory_digest_v2("windows-docker-process", current, [row]).unwrap()
+        expect(before == after).to_equal(false)
+        expect(container_scope_fence_id_v2(old).unwrap() == container_scope_fence_id_v2(current).unwrap()).to_equal(false)
+        expect(container_service_inventory_digest_v2("windows-docker-process", current, []).is_ok()).to_equal(true)
+        # Empty inventory is only meaningful after an actual complete native query.
+
+    it "rejects duplicate native identities and duplicate operations independently":
+        step("rejects duplicate native identities and duplicate operations independently")
+        val scope = service_user_scope_v2()
+        val row = service_user_entry_v2(scope)
+        var other = row
+        other.runtime.operation_id = "other-operation"
+        expect(container_service_inventory_digest_v2("windows-docker-process", scope, [row, other]).is_err()).to_equal(true)
+        other = row
+        other.runtime.native_id = "d".repeat(64)
+        expect(container_service_inventory_digest_v2("windows-docker-process", scope, [row, other]).is_err()).to_equal(true)
+        other.runtime.operation_id = "other-operation"
+        expect(container_service_inventory_digest_v2("windows-docker-process", scope, [row, other]).is_ok()).to_equal(true)
+
+    it "refuses alias machine scope charge and unsupported mode collisions":
+        step("refuses alias machine scope charge and unsupported mode collisions")
+        val scope = service_user_scope_v2()
+        val row = service_user_entry_v2(scope)
+        var other = row
+        other.scope.native_machine_id = "other-machine"
+        expect(container_service_inventory_digest_v2("windows-docker-process", scope, [other]).is_err()).to_equal(true)
+        other = row
+        other.scope.physical_host_id = scope.native_machine_id
+        expect(container_service_inventory_digest_v2("windows-docker-process", scope, [other]).is_err()).to_equal(true)
+        other = row
+        other.scope.service_scope_id = "other-service"
+        expect(container_service_inventory_digest_v2("windows-docker-process", scope, [other]).is_err()).to_equal(true)
+        other = row
+        other.cpu_millis = 0
+        expect(container_service_inventory_digest_v2("windows-docker-process", scope, [other]).is_err()).to_equal(true)
+        other = row
+        other.memory_bytes = -1
+        expect(container_service_inventory_digest_v2("windows-docker-process", scope, [other]).is_err()).to_equal(true)
+        expect(container_service_inventory_digest_v2("linux-podman", scope, [row]).is_err()).to_equal(true)
+        var native = scope
+        native.continuity_mode = "native-boot-incarnation-v1"
+        native.boot_id = "native-boot"
+        native.continuity_id = "native-boot"
+        expect(container_service_inventory_digest_v2("windows-docker-process", native, []).is_err()).to_equal(true)
+
+    it "requires exact journal acknowledgment shape and process crash durability":
+        step("requires exact journal acknowledgment shape and process crash durability")
+        var ack = ContainerServiceAdmissionV2(scope_fence_id: container_scope_fence_id_v2(service_user_scope_v2()).unwrap(),
+            inventory_digest: "a".repeat(64), host_journal_commit_digest: "", host_journal_revision: 0, durability_profile: "process-crash-v1")
+        expect(container_service_admission_valid_v2(ack).unwrap()).to_equal(true)
+        ack.host_journal_commit_digest = "b".repeat(64)
+        expect(container_service_admission_valid_v2(ack).is_err()).to_equal(true)
+        ack.host_journal_revision = 1
+        expect(container_service_admission_valid_v2(ack).unwrap()).to_equal(true)
+        ack.host_journal_commit_digest = ""
+        expect(container_service_admission_valid_v2(ack).is_err()).to_equal(true)
+        ack.host_journal_commit_digest = "b".repeat(64)
+        ack.durability_profile = "power-loss-v1"
+        expect(container_service_admission_valid_v2(ack).is_err()).to_equal(true)
+        # Valid digest syntax does not prove any journal commit occurred.
+
+    it "round trips both selected user receipts and binds exact query argv boundaries":
+        step("round trips both selected user receipts and binds exact query argv boundaries")
+        for backend in ["linux-podman", "windows-docker-process"]:
+            val receipt = service_user_receipt_v2(backend)
+            val source = container_execution_user_receipt_encode_v2(receipt).unwrap()
+            expect(container_execution_user_receipt_decode_v2(source).unwrap().selected_user).to_equal("1000:1000")
+            var changed = receipt
+            changed.selected_user = "1001:1001"
+            expect(container_execution_user_receipt_digest_v2(receipt).unwrap() == container_execution_user_receipt_digest_v2(changed).unwrap()).to_equal(false)
+        val first = RuntimeCommandV1(operation: "inspect", program: "/usr/bin/podman", args: ["a b", "c"])
+        val second = RuntimeCommandV1(operation: "inspect", program: "/usr/bin/podman", args: ["a", "b c"])
+        expect(container_runtime_query_digest_v2(first).unwrap() == container_runtime_query_digest_v2(second).unwrap()).to_equal(false)
+
+    it "refuses selected user identity scope provider pin and proof shape tampering":
+        step("refuses selected user identity scope provider pin and proof shape tampering")
+        val receipt = service_user_receipt_v2("windows-docker-process")
+        var changed = receipt
+        changed.identity.native_id = "c".repeat(63)
+        expect(container_execution_user_receipt_encode_v2(changed).is_err()).to_equal(true)
+        changed = receipt
+        changed.scope.continuity_id = "windows-service-incarnation-v1:new"
+        expect(container_execution_user_receipt_encode_v2(changed).is_err()).to_equal(true)
+        changed = receipt
+        changed.identity.operation_id = ""
+        expect(container_execution_user_receipt_encode_v2(changed).is_err()).to_equal(true)
+        changed = receipt
+        changed.provider_identity_digest = "not-a-pin"
+        expect(container_execution_user_receipt_encode_v2(changed).is_err()).to_equal(true)
+        changed = receipt
+        changed.query_digest = ""
+        expect(container_execution_user_receipt_encode_v2(changed).is_err()).to_equal(true)
+        changed = receipt
+        changed.proof_kind = "effective-uid-authority"
+        expect(container_execution_user_receipt_encode_v2(changed).is_err()).to_equal(true)
+
+    it "enforces selected user byte bounds and rejects control characters":
+        step("enforces selected user byte bounds and rejects control characters")
+        var receipt = service_user_receipt_v2("linux-podman")
+        receipt.selected_user = "é".repeat(128)
+        expect(str_len(receipt.selected_user)).to_equal(256)
+        expect(container_execution_user_receipt_encode_v2(receipt).is_ok()).to_equal(true)
+        receipt.selected_user = "é".repeat(129)
+        expect(container_execution_user_receipt_encode_v2(receipt).is_err()).to_equal(true)
+        for invalid in ["", "user\nroot", "user\rroot", "user\troot", "user\0root"]:
+            receipt.selected_user = invalid
+            expect(container_execution_user_receipt_encode_v2(receipt).is_err()).to_equal(true)
+
+    it "rejects unknown duplicate typed noncanonical and oversized receipt wire":
+        step("rejects unknown duplicate typed noncanonical and oversized receipt wire")
+        val source = container_execution_user_receipt_encode_v2(service_user_receipt_v2("linux-podman")).unwrap()
+        expect(container_execution_user_receipt_decode_v2(service_user_wire_v2(source, "effectiveUidVerified", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(container_execution_user_receipt_decode_v2(service_user_wire_v2(source, "observedUnixMs", SdnValue.String("1000"))).is_err()).to_equal(true)
+        expect(container_execution_user_receipt_decode_v2(source + "\n").is_err()).to_equal(true)
+        val head = source.slice(0, source.len() - 2)
+        expect(container_execution_user_receipt_decode_v2(head + ", version: 2" + "}\n").is_err()).to_equal(true)
+        val oversized = "é".repeat(32769)
+        expect(str_len(oversized)).to_equal(65538)
+        expect(container_execution_user_receipt_decode_v2(oversized).is_err()).to_equal(true)

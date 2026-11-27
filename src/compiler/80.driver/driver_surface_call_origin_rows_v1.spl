@@ -1,0 +1,129 @@
+# Call-origin rows for imported providers held only as module SURFACES.
+#
+# The PM3 per-file unit lane resolves imports through TLDR summary surfaces
+# and loads HIR only for its targets, so MIR's HIR prescan never registers a
+# provider row and every cross-module call answered MirCallOrigin.Unknown
+# (bug stage2_slim_driver_app_native_build_unproven_call_origin_2026-11-19).
+# The surfaces themselves are released at the end of HIR lowering
+# (lower_and_check_retained_owner_impl), BEFORE MIR setup, so the rows are
+# captured here as flat scalars while the surfaces are alive and consumed by
+# MIR setup afterwards. Parallel arrays: no surface aggregate crosses the
+# native lifetime boundary.
+
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceImpl, ModuleSurfaceCallable}
+use compiler.frontend.parser_types_expr.{parser_type_kind_named_name}
+
+struct SurfaceCallOriginRowsV1:
+    owners: [text]
+    names: [text]
+    externs: [bool]
+    methods: [bool]
+    statics: [bool]
+    unmangled_abis: [bool] = []
+
+fn surface_call_origin_rows_empty_v1() -> SurfaceCallOriginRowsV1:
+    SurfaceCallOriginRowsV1(owners: [], names: [], externs: [], methods: [], statics: [], unmangled_abis: [])
+
+fn surface_call_origin_rows_capture_v1(surfaces: ModuleSurfacesByName) -> SurfaceCallOriginRowsV1:
+    var owners: [text] = []
+    var names: [text] = []
+    var externs: [bool] = []
+    var methods: [bool] = []
+    var statics: [bool] = []
+    var unmangled_abis: [bool] = []
+    var si = 0
+    while si < surfaces.surfaces.len():
+        val owner: text = surfaces.surfaces[si].module_name
+        if owner != "":
+            val callables = surfaces.surfaces[si].callable_values
+            var ci = 0
+            while ci < callables.len():
+                owners.push(owner)
+                names.push(callables[ci].name)
+                externs.push(callables[ci].is_extern)
+                methods.push(callables[ci].is_method)
+                statics.push(callables[ci].is_static)
+                unmangled_abis.push(callables[ci].has_unmangled_abi)
+                ci = ci + 1
+            val impls = surfaces.surfaces[si].impls
+            var ii = 0
+            while ii < impls.len():
+                val impl_row: ModuleSurfaceImpl = impls[ii]
+                val impl_owner = parser_type_kind_named_name(impl_row.type_.kind)
+                if impl_owner != "":
+                    val method_names = impl_row.methods.keys()
+                    var mi = 0
+                    while mi < method_names.len():
+                        val mname: text = method_names[mi]
+                        if mname != "" and impl_row.methods.contains_key(mname):
+                            val method_val: ModuleSurfaceCallable = impl_row.methods[mname]
+                            owners.push(owner)
+                            names.push(impl_owner + "." + mname)
+                            externs.push(method_val.is_extern)
+                            methods.push(method_val.is_method)
+                            statics.push(method_val.is_static)
+                            unmangled_abis.push(method_val.has_unmangled_abi)
+                        mi = mi + 1
+                ii = ii + 1
+        si = si + 1
+    SurfaceCallOriginRowsV1(owners: owners, names: names, externs: externs, methods: methods, statics: statics, unmangled_abis: unmangled_abis)
+
+export SurfaceCallOriginRowsV1, surface_call_origin_rows_empty_v1, surface_call_origin_rows_capture_v1
+
+# Named-call parameter rows for the same surface-only providers.
+#
+# The PM3 unit lane's MIR bootstrap branch binds named-call arguments from
+# bootstrap_fn_param_defaults_lookup (named_call_arguments_v1.spl), which the
+# HIR prescan populates only for HIR-resident modules. A callee held only as
+# a surface therefore failed with "named call lacks bootstrap parameter
+# metadata" even though the surface already carries every parameter name and
+# default flag (stage2 test_runner_build, 2026-11-25:
+# extract_blocks_from_content in lib/nogc_sync_mut/test_runner/
+# test_manifest_scanner.spl; minimal repro: a 41-module chain of cross-module
+# named calls under SIMPLE_BOOTSTRAP_STAGE3=1 --mode dynload).
+#
+# Default EXPRESSIONS are not transported: a surface-bound call must supply
+# every parameter by name, and an unsupplied defaulted parameter stays the
+# fail-closed "named default requires admitted declaration scope" refusal.
+# Module-level callables only; surface impl methods keep the existing
+# behaviour (their call-site key spelling is receiver-derived, not a bare
+# import name). Parallel scalar arrays, same native-transport rule as above.
+struct SurfaceParamRowsV1:
+    owners: [text]
+    names: [text]
+    param_counts: [i64]
+    param_names_flat: [text]
+    param_defaults_flat: [bool]
+
+fn surface_param_rows_empty_v1() -> SurfaceParamRowsV1:
+    SurfaceParamRowsV1(owners: [], names: [], param_counts: [], param_names_flat: [], param_defaults_flat: [])
+
+fn surface_param_rows_capture_v1(surfaces: ModuleSurfacesByName) -> SurfaceParamRowsV1:
+    var owners: [text] = []
+    var names: [text] = []
+    var param_counts: [i64] = []
+    var param_names_flat: [text] = []
+    var param_defaults_flat: [bool] = []
+    var si = 0
+    while si < surfaces.surfaces.len():
+        val owner: text = surfaces.surfaces[si].module_name
+        if owner != "":
+            val callables = surfaces.surfaces[si].callable_values
+            var ci = 0
+            while ci < callables.len():
+                owners.push(owner)
+                names.push(callables[ci].name)
+                val params = callables[ci].params
+                param_counts.push(params.len())
+                var pi = 0
+                while pi < params.len():
+                    param_names_flat.push(params[pi].name)
+                    param_defaults_flat.push(params[pi].has_default)
+                    pi = pi + 1
+                ci = ci + 1
+        si = si + 1
+    SurfaceParamRowsV1(owners: owners, names: names, param_counts: param_counts,
+        param_names_flat: param_names_flat, param_defaults_flat: param_defaults_flat)
+
+export SurfaceParamRowsV1, surface_param_rows_empty_v1, surface_param_rows_capture_v1

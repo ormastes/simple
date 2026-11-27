@@ -1,0 +1,853 @@
+# Generic template TLDR section + concrete-view contract (plan P1/P3).
+#
+# One generic declaration has ONE symbolic template entry in an indexed
+# section; a reference `Pair<i64, f64>` is served by an immutable
+# `ConcreteTldrAstViewV1` (generation-pinned, set-once, no lease) keyed by the canonical `ConcreteTldrKey`.
+#
+# Identity: TemplateId / ArgsId / ConcreteTldrKey are domain-separated,
+# algorithm-tagged (DigestV1 text, hash_algorithm_registry_v1),
+# length-framed SHA-256 digests (the persistent canonical hash). XXH3 is used
+# only as an in-memory bucket index by the acquisition table, and every
+# bucket hit is verified against the full canonical key.
+#
+# Type terms are stored as structural key text, so this layer has
+# no substitution dependency.
+# Generic parameters are binder-indexed (`<symbol>#<index>`), so renaming a
+# binder does not change the template identity (alpha-invariance, T4).
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.string_core.{text_to_bytes}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use compiler.common.cache_contract.physical_tld_v1.{three_payload_contract_digest_valid_v1}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_v1_new, digest_v1_text,
+    HASH_ALGO_SHA256_V1, digest_v1_parse}
+
+pub val GENERIC_TLDR_VIEW_SCHEMA_V2 = "generic-tldr-view/v2"
+pub val GENERIC_TEMPLATE_SECTION_MAGIC_V2 = "generic-template-section/v2"
+
+pub val GENERIC_TLDR_VIEW_SCHEMA_V1 = "generic-tldr-view/v1"
+pub val GENERIC_TEMPLATE_SECTION_MAGIC_V1 = "generic-template-section/v1"
+
+pub val GENERIC_PARAM_KIND_TYPE = "type"
+pub val GENERIC_PARAM_KIND_CONST = "const"
+
+# A Concrete view has no free generic variable in any reachable field.
+# Partial: some argument is open (IDE/hover only; never codegen input).
+# Unresolved: missing evidence, arity/kind mismatch, unknown symbol, or a
+# guard (depth) failure; `error` names the reason.
+pub val GENERIC_CLOSURE_CONCRETE = "Concrete"
+pub val GENERIC_CLOSURE_PARTIAL = "Partial"
+pub val GENERIC_CLOSURE_UNRESOLVED = "Unresolved"
+
+pub val GENERIC_INSTANTIATION_DEPTH_LIMIT = 32
+
+# Generic dependency facets (plan section 8.3; design
+# doc/05_design/generic_rr_hir_variant_obj.md). Under the erased model a
+# type-arg-bearing caller consumes signature + bound only; the single erased
+# body is consumed by the template's own object action.
+pub val GENERIC_FACET_DIMENSION_V1 = "generic"
+pub val GENERIC_FACET_SIGNATURE_V1 = "generic.signature"
+pub val GENERIC_FACET_BOUND_V1 = "generic.bound"
+pub val GENERIC_FACET_BODY_V1 = "generic.body"
+
+pub struct GenericBoundV1:
+    param_index: i64
+    bound_key: text   # structural key of the bound (trait/type); never display text
+
+pub struct GenericTemplateFacetsV1:
+    template_id: text
+    signature_fingerprint: text   # 64-hex sha256
+    bound_fingerprint: text
+    body_fingerprint: text
+
+pub struct GenericFacetChangeV1:
+    facet: text
+    old_fingerprint: text?   # nil at genesis
+    new_fingerprint: text?   # nil when the template is removed
+
+pub struct GenericParamV1:
+    index: i64
+    kind: text
+    binder_id: text   # "<symbol_id>#<index>" — identity
+    display_name: text   # source spelling — presentation only, not identity
+
+pub struct GenericTemplateFieldV1:
+    name: text
+    type_key: text   # structural key (generic_subst_model.mt_key_type)
+    generic: bool    # true iff the type mentions a template binder
+
+pub struct GenericTemplateEntryV1:
+    symbol_id: text   # module-qualified nominal identity, e.g. "pkg_a.Pair"
+    source_digest: text
+    visibility_root: text
+    active_guard_root: text   # ActiveGuardRootV1.root_digest (guard_id_v1); part of TemplateId
+    language_schema: text
+    params: [GenericParamV1]
+    fields: [GenericTemplateFieldV1]
+    # Trailing defaulted fields (the seed fills partial named constructions
+    # positionally, so only a trailing addition is slot-safe).
+    bounds: [GenericBoundV1] = []
+    body_digest: text = ""   # sha256 hex of the single erased body; "" = no body
+    # Explicit V2 identity metadata. Absent on V1; never inferred as empty
+    # semantics. These roots do not provide source-free instantiation payload.
+    declaration_kind: text = ""
+    signature_digest: text = ""
+    instantiation_digest: text = ""
+
+pub struct GenericTemplateSectionV1:
+    entries: [GenericTemplateEntryV1]   # sorted by symbol_id, unique (indexed)
+    digest: text
+
+pub struct GenericTemplateSectionDecodeV1:
+    ok: bool
+    section: GenericTemplateSectionV1
+    error: text
+
+pub struct ConcreteTldrOverrideV1:
+    field_index: i64
+    type_key: text
+
+pub struct ConcreteTldrAstViewV1:
+    """Immutable view. Fields not listed in `overrides` are the shared
+    template field nodes (sparse overlay); overrides are written once at
+    admission and never mutated."""
+    view_id: text   # process-local short id (id_scope_v1); never persisted
+    semantic_key: text
+    template_id: text
+    args_id: text
+    arg_keys: [text]   # positional structural argument keys (mt_key_type)
+    snapshot_pin: text
+    template: GenericTemplateEntryV1
+    overrides: [ConcreteTldrOverrideV1]
+    closure_status: text
+    error: text
+
+# Ordinary typed-AST accessors: consumers read fields the same way for a
+# generic and a non-generic declaration (no `is_generic` branch).
+pub fn concrete_tldr_field_count(view: ConcreteTldrAstViewV1) -> i64:
+    view.template.fields.len()
+
+pub fn concrete_tldr_field_name(view: ConcreteTldrAstViewV1, index: i64) -> text:
+    view.template.fields[index].name
+
+pub fn concrete_tldr_field_type_key(view: ConcreteTldrAstViewV1, index: i64) -> text:
+    for o in view.overrides:
+        val oo: ConcreteTldrOverrideV1 = o
+        if oo.field_index == index:
+            return oo.type_key
+    view.template.fields[index].type_key
+
+# ----------------------------------------------------------------------------
+# Canonical keys
+# ----------------------------------------------------------------------------
+
+# TemplateId / ArgsId / ConcreteTldrKey are algorithm-tagged DigestV1 text
+# (`sha256:<hex>`, hash_algorithm_registry_v1). sha256 always yields a
+# well-formed digest, so "" never escapes as an identity.
+fn _tagged_sha256_v1(data: text) -> text:
+    match digest_v1_new(HASH_ALGO_SHA256_V1, sha256_text(data)):
+        case Some(d): digest_v1_text(d)
+        case None: ""
+
+fn _frame_v1(value: text) -> text:
+    "{value.len()}:" + value
+
+pub fn generic_template_summary_digest_v1(entry: GenericTemplateEntryV1) -> text:
+    """Digest of the semantic template content. Display names are excluded."""
+    if entry.language_schema != GENERIC_TLDR_VIEW_SCHEMA_V1: return ""
+    var acc = _frame_v1("tldr-template-summary/v1") + _frame_v1(entry.symbol_id)
+    acc = acc + _frame_v1("{entry.params.len()}")
+    for p in entry.params:
+        val pp: GenericParamV1 = p
+        acc = acc + _frame_v1("{pp.index}") + _frame_v1(pp.kind) + _frame_v1(pp.binder_id)
+    acc = acc + _frame_v1("{entry.fields.len()}")
+    for f in entry.fields:
+        val ff: GenericTemplateFieldV1 = f
+        acc = acc + _frame_v1(ff.name) + _frame_v1(ff.type_key)
+    sha256_text(acc)
+
+pub fn generic_template_id_v1(entry: GenericTemplateEntryV1) -> text:
+    if entry.language_schema != GENERIC_TLDR_VIEW_SCHEMA_V1: return ""
+    _tagged_sha256_v1(_frame_v1("tldr-template/v1") + _frame_v1(entry.symbol_id) +
+        _frame_v1(generic_template_summary_digest_v1(entry)) +
+        _frame_v1(entry.visibility_root) + _frame_v1(entry.active_guard_root) +
+        _frame_v1(entry.language_schema))
+
+pub fn generic_args_id_v1(kinds: [text], value_keys: [text]) -> text:
+    """Ordered positional arguments: reversing them changes the id (T5).
+
+    Fail-closed: a kind/value length mismatch has no identity ("").
+    """
+    if kinds.len() != value_keys.len():
+        return ""
+    var acc = _frame_v1("generic-args/v1") + _frame_v1("{value_keys.len()}")
+    var i = 0
+    while i < value_keys.len():
+        acc = acc + _frame_v1(kinds[i]) + _frame_v1(value_keys[i])
+        i = i + 1
+    _tagged_sha256_v1(acc)
+
+# The semantic-profile part folds the ActiveGuardRoot digest
+# (compiler.common.cache_contract.guard_id_v1); callers must only pass an
+# admissible (complete) root - an inadmissible one is a miss, not a key.
+pub fn concrete_tldr_key_v1(template_id: text, args_id: text, constraint_root: text,
+                            profile_digest: text, active_guard_root: text) -> text:
+    _tagged_sha256_v1(_frame_v1("tldr-concrete/v1") + _frame_v1(template_id) +
+        _frame_v1(args_id) + _frame_v1(constraint_root) + _frame_v1(profile_digest) +
+        _frame_v1(active_guard_root))
+
+# ----------------------------------------------------------------------------
+# Generic facets and fingerprints
+# ----------------------------------------------------------------------------
+
+pub fn generic_bounds_valid_v1(entry: GenericTemplateEntryV1) -> bool:
+    """Every bound names an existing binder index and a non-empty key."""
+    for b in entry.bounds:
+        val bb: GenericBoundV1 = b
+        if bb.param_index < 0 or bb.param_index >= entry.params.len() or bb.bound_key == "":
+            return false
+    true
+
+fn _bound_rank_v1(b: GenericBoundV1) -> text:
+    # Fixed-width index so text order equals numeric order (indices < 10^9).
+    var digits = "{b.param_index}"
+    while digits.len() < 9:
+        digits = "0" + digits
+    digits + ":" + b.bound_key
+
+fn _sorted_unique_bounds_v1(bounds: [GenericBoundV1]) -> [GenericBoundV1]:
+    """Insertion sort by (param_index, bound_key); duplicates dropped."""
+    var out: [GenericBoundV1] = []
+    for b in bounds:
+        val bb: GenericBoundV1 = b
+        val rank = _bound_rank_v1(bb)
+        var placed: [GenericBoundV1] = []
+        var inserted = false
+        var duplicate = false
+        for o in out:
+            val oo: GenericBoundV1 = o
+            val orank = _bound_rank_v1(oo)
+            if orank == rank:
+                duplicate = true
+            if not inserted and not duplicate and rank < orank:
+                placed = placed.push(bb)
+                inserted = true
+            placed = placed.push(oo)
+        if duplicate:
+            continue
+        if not inserted:
+            placed = placed.push(bb)
+        out = placed
+    out
+
+pub fn generic_template_signature_fingerprint_v1(entry: GenericTemplateEntryV1) -> text:
+    """Signature facet: symbol, binder-indexed params and fields (alpha-invariant)."""
+    if entry.language_schema != GENERIC_TLDR_VIEW_SCHEMA_V1:
+        val projected = generic_template_facets_v2(entry)
+        if projected.is_err(): panic("invalid generic facet schema: " + projected.unwrap_err())
+        return projected.unwrap().signature_fingerprint
+    sha256_text(_frame_v1("generic-facet-signature/v1") +
+        _frame_v1(generic_template_summary_digest_v1(entry)))
+
+pub fn generic_template_bound_fingerprint_v1(entry: GenericTemplateEntryV1) -> text:
+    """Bound facet: canonical (index, key) set; "no bounds" is a distinct value."""
+    if entry.language_schema != GENERIC_TLDR_VIEW_SCHEMA_V1:
+        val projected = generic_template_facets_v2(entry)
+        if projected.is_err(): panic("invalid generic facet schema: " + projected.unwrap_err())
+        return projected.unwrap().bound_fingerprint
+    val sorted = _sorted_unique_bounds_v1(entry.bounds)
+    var acc = _frame_v1("generic-facet-bound/v1") + _frame_v1("{sorted.len()}")
+    for b in sorted:
+        val bb: GenericBoundV1 = b
+        acc = acc + _frame_v1("{bb.param_index}") + _frame_v1(bb.bound_key)
+    sha256_text(acc)
+
+pub fn generic_template_body_fingerprint_v1(entry: GenericTemplateEntryV1) -> text:
+    """Body facet: the single erased body digest ("" = no body, still a value)."""
+    if entry.language_schema != GENERIC_TLDR_VIEW_SCHEMA_V1:
+        val projected = generic_template_facets_v2(entry)
+        if projected.is_err(): panic("invalid generic facet schema: " + projected.unwrap_err())
+        return projected.unwrap().body_fingerprint
+    sha256_text(_frame_v1("generic-facet-body/v1") + _frame_v1(entry.body_digest))
+
+pub fn generic_template_facets_v1(entry: GenericTemplateEntryV1) -> GenericTemplateFacetsV1:
+    if entry.language_schema != GENERIC_TLDR_VIEW_SCHEMA_V1:
+        val projected = generic_template_facets_v2(entry)
+        if projected.is_err(): panic("invalid generic facet schema: " + projected.unwrap_err())
+        return projected.unwrap()
+    GenericTemplateFacetsV1(template_id: generic_template_id_v1(entry),
+        signature_fingerprint: generic_template_signature_fingerprint_v1(entry),
+        bound_fingerprint: generic_template_bound_fingerprint_v1(entry),
+        body_fingerprint: generic_template_body_fingerprint_v1(entry))
+
+pub fn generic_caller_consumed_facets_v1() -> [text]:
+    """Facets a type-arg-bearing caller reads (sorted). Never the body."""
+    [GENERIC_FACET_BOUND_V1, GENERIC_FACET_SIGNATURE_V1]
+
+pub fn generic_template_consumed_facets_v1() -> [text]:
+    """Facets the template's own object action reads (sorted)."""
+    [GENERIC_FACET_BODY_V1, GENERIC_FACET_BOUND_V1, GENERIC_FACET_SIGNATURE_V1]
+
+fn _facet_fingerprint_v1(facets: GenericTemplateFacetsV1, facet: text) -> text:
+    if facet == GENERIC_FACET_BODY_V1: return facets.body_fingerprint
+    if facet == GENERIC_FACET_BOUND_V1: return facets.bound_fingerprint
+    facets.signature_fingerprint
+
+fn _facet_change_v1(facet: text, old_facets: GenericTemplateFacetsV1?,
+                    new_facets: GenericTemplateFacetsV1?) -> [GenericFacetChangeV1]:
+    """Zero or one change row for `facet`: emitted only when the texts differ."""
+    var old_text = ""
+    var has_old = false
+    match old_facets:
+        case Some(f):
+            old_text = _facet_fingerprint_v1(f, facet)
+            has_old = true
+        case None: pass
+    var new_text = ""
+    var has_new = false
+    match new_facets:
+        case Some(f):
+            new_text = _facet_fingerprint_v1(f, facet)
+            has_new = true
+        case None: pass
+    if has_old == has_new and old_text == new_text:
+        return []
+    var old_value: text? = None
+    if has_old:
+        old_value = Some(old_text)
+    var new_value: text? = None
+    if has_new:
+        new_value = Some(new_text)
+    [GenericFacetChangeV1(facet: facet, old_fingerprint: old_value, new_fingerprint: new_value)]
+
+pub fn generic_template_changed_facets_v1(old_entry: GenericTemplateEntryV1?,
+        new_entry: GenericTemplateEntryV1?) -> [GenericFacetChangeV1]:
+    """Exactly the facets whose fingerprint differs, in sorted facet order.
+    (nil, nil) -> []; (nil, e) -> genesis rows with old nil; (e, nil) -> removal rows."""
+    val old_facets: GenericTemplateFacetsV1? = match old_entry:
+        case Some(e): Some(generic_template_facets_v1(e))
+        case None: nil
+    val new_facets: GenericTemplateFacetsV1? = match new_entry:
+        case Some(e): Some(generic_template_facets_v1(e))
+        case None: nil
+    var out: [GenericFacetChangeV1] = []
+    for facet in generic_template_consumed_facets_v1():
+        for c in _facet_change_v1(facet, old_facets, new_facets):
+            out = out.push(c)
+    out
+
+# ----------------------------------------------------------------------------
+# Indexed section
+# ----------------------------------------------------------------------------
+
+fn _entry_body_v1(e: GenericTemplateEntryV1) -> text:
+    var acc = _frame_v1(e.symbol_id) + _frame_v1(e.source_digest) +
+        _frame_v1(e.visibility_root) + _frame_v1(e.active_guard_root) +
+        _frame_v1(e.language_schema) + _frame_v1("{e.params.len()}")
+    for p in e.params:
+        val pp: GenericParamV1 = p
+        acc = acc + _frame_v1(pp.kind) + _frame_v1(pp.binder_id) + _frame_v1(pp.display_name)
+    acc = acc + _frame_v1("{e.fields.len()}")
+    for f in e.fields:
+        val ff: GenericTemplateFieldV1 = f
+        val g = if ff.generic: "1" else: "0"
+        acc = acc + _frame_v1(ff.name) + _frame_v1(ff.type_key) + _frame_v1(g)
+    # Facet payload (design generic_rr_hir_variant_obj.md section 1): bounds
+    # as written (the fingerprint canonicalizes), then the erased-body digest.
+    acc = acc + _frame_v1("{e.bounds.len()}")
+    for b in e.bounds:
+        val bb: GenericBoundV1 = b
+        acc = acc + _frame_v1("{bb.param_index}") + _frame_v1(bb.bound_key)
+    acc + _frame_v1(e.body_digest)
+
+fn _section_body_v1(entries: [GenericTemplateEntryV1]) -> text:
+    var acc = _frame_v1(GENERIC_TEMPLATE_SECTION_MAGIC_V1) + _frame_v1("{entries.len()}")
+    for e in entries:
+        val ee: GenericTemplateEntryV1 = e
+        acc = acc + _entry_body_v1(ee)
+    acc
+
+pub fn build_generic_template_section_v1(entries: [GenericTemplateEntryV1]) -> GenericTemplateSectionV1:
+    """Sort by symbol_id (insertion sort; sections are small) and seal."""
+    var out: [GenericTemplateEntryV1] = []
+    for e in entries:
+        val ee: GenericTemplateEntryV1 = e
+        var placed: [GenericTemplateEntryV1] = []
+        var inserted = false
+        for o in out:
+            val oo: GenericTemplateEntryV1 = o
+            if not inserted and ee.symbol_id < oo.symbol_id:
+                placed = placed.push(ee)
+                inserted = true
+            placed = placed.push(oo)
+        if not inserted:
+            placed = placed.push(ee)
+        out = placed
+    GenericTemplateSectionV1(entries: out, digest: sha256_text(_section_body_v1(out)))
+
+pub fn generic_template_section_lookup_v1(section: GenericTemplateSectionV1, symbol_id: text) -> i64:
+    """Binary search over the sorted symbol index; -1 when absent."""
+    var lo = 0
+    var hi = section.entries.len() - 1
+    while lo <= hi:
+        val mid = (lo + hi) / 2
+        val s = section.entries[mid].symbol_id
+        if s == symbol_id:
+            return mid
+        if s < symbol_id:
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    -1
+
+pub fn generic_template_section_encode_v1(section: GenericTemplateSectionV1) -> text:
+    for entry in section.entries:
+        if entry.language_schema != GENERIC_TLDR_VIEW_SCHEMA_V1: return ""
+    _frame_v1(section.digest) + _section_body_v1(section.entries)
+
+fn _read_frame_v1(data: text, pos: i64) -> [text]:
+    """Returns [value, next_pos] or [] on malformed input."""
+    var i = pos
+    var n = 0
+    var digits = 0
+    while i < data.byte_len() and digits < 12:
+        val code = data.char_code_at(i)
+        if code == 58:   # ':'
+            break
+        if code < 48 or code > 57:
+            return []
+        n = n * 10 + (code - 48)
+        digits = digits + 1
+        i = i + 1
+    if digits == 0 or i >= data.byte_len() or data.char_code_at(i) != 58 or i + 1 + n > data.byte_len():
+        return []
+    [data.substring(i + 1, i + 1 + n), "{i + 1 + n}"]
+
+fn _empty_section_v1() -> GenericTemplateSectionV1:
+    GenericTemplateSectionV1(entries: [], digest: "")
+
+fn _decode_fail_v1(error: text) -> GenericTemplateSectionDecodeV1:
+    GenericTemplateSectionDecodeV1(ok: false, section: _empty_section_v1(), error: error)
+
+fn _take_v1(data: text, pos: i64) -> [text]:
+    _read_frame_v1(data, pos)
+
+fn _count_v1(value: text) -> i64:
+    if value.len() == 0 or value.len() > 12:
+        return -1
+    var n = 0
+    var i = 0
+    while i < value.byte_len():
+        val code = value.char_code_at(i)
+        if code < 48 or code > 57:
+            return -1
+        n = n * 10 + (code - 48)
+        i = i + 1
+    n
+
+pub fn generic_template_section_decode_v1(data: text) -> GenericTemplateSectionDecodeV1:
+    """Strict decode: framing, magic, counts and the sealed digest must all
+    verify; anything else fails closed (never an empty section)."""
+    var toks: [text] = []
+    var pos = 0
+    while pos < data.byte_len():
+        val t = _take_v1(data, pos)
+        if t.len() != 2:
+            return _decode_fail_v1("malformed frame")
+        toks = toks.push(t[0])
+        pos = _count_v1(t[1])
+    if toks.len() < 3 or toks[1] != GENERIC_TEMPLATE_SECTION_MAGIC_V1:
+        return _decode_fail_v1("bad magic")
+    val n = _count_v1(toks[2])
+    if n < 0:
+        return _decode_fail_v1("bad entry count")
+    var k = 3
+    var entries: [GenericTemplateEntryV1] = []
+    var e = 0
+    while e < n:
+        if k + 6 > toks.len():
+            return _decode_fail_v1("truncated entry")
+        if toks[k + 4] != GENERIC_TLDR_VIEW_SCHEMA_V1:
+            return _decode_fail_v1("unsupported entry schema")
+        val np = _count_v1(toks[k + 5])
+        if np < 0 or k + 6 + np * 3 + 1 > toks.len():
+            return _decode_fail_v1("bad param count")
+        var params: [GenericParamV1] = []
+        var j = 0
+        while j < np:
+            val b = k + 6 + j * 3
+            params = params.push(GenericParamV1(index: j, kind: toks[b], binder_id: toks[b + 1], display_name: toks[b + 2]))
+            j = j + 1
+        val fc_at = k + 6 + np * 3
+        val nf = _count_v1(toks[fc_at])
+        if nf < 0 or fc_at + 1 + nf * 3 > toks.len():
+            return _decode_fail_v1("bad field count")
+        var fields: [GenericTemplateFieldV1] = []
+        j = 0
+        while j < nf:
+            val b = fc_at + 1 + j * 3
+            fields = fields.push(GenericTemplateFieldV1(name: toks[b], type_key: toks[b + 1], generic: toks[b + 2] == "1"))
+            j = j + 1
+        val bc_at = fc_at + 1 + nf * 3
+        if bc_at >= toks.len():
+            return _decode_fail_v1("truncated entry")
+        val nb = _count_v1(toks[bc_at])
+        if nb < 0 or bc_at + 1 + nb * 2 + 1 > toks.len():
+            return _decode_fail_v1("bad bound count")
+        var bounds: [GenericBoundV1] = []
+        j = 0
+        while j < nb:
+            val b = bc_at + 1 + j * 2
+            val index = _count_v1(toks[b])
+            if index < 0 or index >= np or toks[b + 1] == "":
+                return _decode_fail_v1("bad bound")
+            bounds = bounds.push(GenericBoundV1(param_index: index, bound_key: toks[b + 1]))
+            j = j + 1
+        val body_at = bc_at + 1 + nb * 2
+        entries = entries.push(GenericTemplateEntryV1(symbol_id: toks[k], source_digest: toks[k + 1],
+            visibility_root: toks[k + 2], active_guard_root: toks[k + 3], language_schema: toks[k + 4],
+            params: params, fields: fields, bounds: bounds, body_digest: toks[body_at]))
+        k = body_at + 1
+        e = e + 1
+    if k != toks.len():
+        return _decode_fail_v1("trailing data")
+    val digest = sha256_text(_section_body_v1(entries))
+    if digest != toks[0]:
+        return _decode_fail_v1("section digest mismatch")
+    var i = 1
+    while i < entries.len():
+        if not (entries[i - 1].symbol_id < entries[i].symbol_id):
+            return _decode_fail_v1("section index not sorted/unique")
+        i = i + 1
+    GenericTemplateSectionDecodeV1(ok: true, section: GenericTemplateSectionV1(entries: entries, digest: digest), error: "")
+
+# V2 extends this owner, not the V1 wire interpretation. The three new fields
+# describe identity/invalidation only. Instantiation still needs its semantic
+# owner/source; a digest is not a callable/default AST payload.
+val GENERIC_V2_MAX_BYTES: i64 = 16777216
+val GENERIC_V2_MAX_ITEMS: i64 = 65536
+val GENERIC_V2_MAX_FRAMES: i64 = 262144
+
+fn _frame_v2(value: text) -> text:
+    "{value.byte_len()}:" + value
+
+fn _frames_v2(values: [text]) -> text:
+    var parts: [text] = []
+    for value in values: parts = parts.push(_frame_v2(value))
+    parts.join("")
+
+fn _generic_text_valid_v2(value: text) -> bool:
+    if value == "" or value.byte_len() > 1048576: return false
+    validated_utf8_bytes_to_text_linear(text_to_bytes(value)).is_ok()
+
+# @allow(primitive_api) cache-contract predicate/scalar: bool validity verdicts and i64 epochs/limits/pids match the sibling v1 cache API surface
+pub fn generic_template_entry_valid_v2(entry: GenericTemplateEntryV1) -> bool:
+    if entry.language_schema != GENERIC_TLDR_VIEW_SCHEMA_V2: return false
+    if not ["struct", "class", "function"].contains(entry.declaration_kind): return false
+    if not _generic_text_valid_v2(entry.symbol_id) or not _generic_text_valid_v2(entry.visibility_root): return false
+    for digest in [entry.source_digest, entry.signature_digest, entry.instantiation_digest]:
+        if not three_payload_contract_digest_valid_v1(digest): return false
+    if entry.body_digest != "" and not three_payload_contract_digest_valid_v1(entry.body_digest): return false
+    match digest_v1_parse(entry.active_guard_root):
+        case Some(digest):
+            if digest.algo_id != HASH_ALGO_SHA256_V1: return false
+        case None: return false
+    if entry.params.len() > GENERIC_V2_MAX_ITEMS or entry.fields.len() > GENERIC_V2_MAX_ITEMS or entry.bounds.len() > GENERIC_V2_MAX_ITEMS: return false
+    if entry.declaration_kind == "function" and entry.fields.len() != 0: return false
+    if 12 + entry.params.len() * 3 + entry.fields.len() * 3 + entry.bounds.len() * 2 > GENERIC_V2_MAX_FRAMES - 3: return false
+    var bytes: i64 = 1024 + entry.symbol_id.byte_len() + entry.visibility_root.byte_len()
+    var seen: Dict<text, bool> = {}
+    var i = 0
+    for param in entry.params:
+        if param.index != i or not [GENERIC_PARAM_KIND_TYPE, GENERIC_PARAM_KIND_CONST].contains(param.kind): return false
+        if param.binder_id != entry.symbol_id + "#{i}" or not _generic_text_valid_v2(param.display_name) or seen.contains_key(param.display_name): return false
+        bytes = bytes + param.binder_id.byte_len() + param.display_name.byte_len() + 64
+        if bytes > GENERIC_V2_MAX_BYTES: return false
+        seen[param.display_name] = true
+        i = i + 1
+    seen = {}
+    for field in entry.fields:
+        if not _generic_text_valid_v2(field.name) or not _generic_text_valid_v2(field.type_key) or seen.contains_key(field.name): return false
+        bytes = bytes + field.name.byte_len() + field.type_key.byte_len() + 64
+        if bytes > GENERIC_V2_MAX_BYTES: return false
+        seen[field.name] = true
+    for bound in entry.bounds:
+        if not _generic_text_valid_v2(bound.bound_key): return false
+        bytes = bytes + bound.bound_key.byte_len() + 64
+        if bytes > GENERIC_V2_MAX_BYTES: return false
+    generic_bounds_valid_v1(entry)
+
+fn _summary_values_v2(entry: GenericTemplateEntryV1) -> [text]:
+    var values = ["tldr-template-summary/v2", entry.symbol_id, "{entry.params.len()}"]
+    for param in entry.params:
+        values = values.push("{param.index}")
+        values = values.push(param.kind)
+        values = values.push(param.binder_id)
+    values = values.push("{entry.fields.len()}")
+    for field in entry.fields:
+        values = values.push(field.name)
+        values = values.push(field.type_key)
+    values + [entry.declaration_kind, entry.signature_digest, entry.instantiation_digest]
+
+pub fn generic_template_summary_digest_v2(entry: GenericTemplateEntryV1) -> text:
+    if not generic_template_entry_valid_v2(entry): return ""
+    sha256_text(_frames_v2(_summary_values_v2(entry)))
+
+pub fn generic_template_id_v2(entry: GenericTemplateEntryV1) -> text:
+    val summary = generic_template_summary_digest_v2(entry)
+    if summary == "": return ""
+    _tagged_sha256_v1(_frames_v2(["tldr-template/v2", entry.symbol_id, summary,
+        entry.visibility_root, entry.active_guard_root, entry.language_schema]))
+
+fn _sorted_unique_bounds_v2(bounds: [GenericBoundV1]) -> [GenericBoundV1]:
+    var ranks: [text] = []
+    var order: [i64] = []
+    var i = 0
+    for bound in bounds:
+        ranks = ranks.push(_bound_rank_v1(bound))
+        order = order.push(i)
+        i = i + 1
+    var start = order.len() / 2 - 1
+    var end = order.len() - 1
+    while end > 0:
+        var root = 0
+        if start >= 0:
+            root = start
+            start = start - 1
+        else:
+            val saved = order[end]
+            order[end] = order[0]
+            order[0] = saved
+            end = end - 1
+        var child = root * 2 + 1
+        while child <= end:
+            if child + 1 <= end and ranks[order[child]] < ranks[order[child + 1]]: child = child + 1
+            if not (ranks[order[root]] < ranks[order[child]]): break
+            val saved = order[root]
+            order[root] = order[child]
+            order[child] = saved
+            root = child
+            child = root * 2 + 1
+    var result: [GenericBoundV1] = []
+    var previous = ""
+    for index in order:
+        if ranks[index] != previous:
+            result = result.push(bounds[index])
+            previous = ranks[index]
+    result
+
+pub fn generic_template_facets_v2(entry: GenericTemplateEntryV1) -> Result<GenericTemplateFacetsV1, text>:
+    if not generic_template_entry_valid_v2(entry): return Err("invalid v2 template")
+    val bounds = _sorted_unique_bounds_v2(entry.bounds)
+    var bound_values = ["generic-facet-bound/v2", "{bounds.len()}"]
+    for bound in bounds:
+        bound_values = bound_values.push("{bound.param_index}")
+        bound_values = bound_values.push(bound.bound_key)
+    Ok(GenericTemplateFacetsV1(template_id: generic_template_id_v2(entry),
+        signature_fingerprint: sha256_text(_frames_v2(["generic-facet-signature/v2", generic_template_summary_digest_v2(entry)])),
+        bound_fingerprint: sha256_text(_frames_v2(bound_values)),
+        body_fingerprint: sha256_text(_frames_v2(["generic-facet-body/v2", entry.body_digest]))))
+
+pub fn generic_template_changed_facets_v2(old_entry: GenericTemplateEntryV1?, new_entry: GenericTemplateEntryV1?) -> Result<[GenericFacetChangeV1], text>:
+    var old_facets: GenericTemplateFacetsV1? = None
+    var new_facets: GenericTemplateFacetsV1? = None
+    if val entry = old_entry:
+        val facets = generic_template_facets_v2(entry)
+        if facets.is_err(): return Err(facets.unwrap_err())
+        old_facets = Some(facets.unwrap())
+    if val entry = new_entry:
+        val facets = generic_template_facets_v2(entry)
+        if facets.is_err(): return Err(facets.unwrap_err())
+        new_facets = Some(facets.unwrap())
+    var changes: [GenericFacetChangeV1] = []
+    for facet in generic_template_consumed_facets_v1():
+        changes = changes + _facet_change_v1(facet, old_facets, new_facets)
+    Ok(changes)
+
+fn _entry_values_v2(entry: GenericTemplateEntryV1) -> [text]:
+    var values = [entry.symbol_id, entry.source_digest, entry.visibility_root,
+        entry.active_guard_root, entry.language_schema, "{entry.params.len()}"]
+    for param in entry.params:
+        values = values.push(param.kind)
+        values = values.push(param.binder_id)
+        values = values.push(param.display_name)
+    values = values.push("{entry.fields.len()}")
+    for field in entry.fields:
+        values = values.push(field.name)
+        values = values.push(field.type_key)
+        values = values.push(if field.generic: "1" else: "0")
+    values = values.push("{entry.bounds.len()}")
+    for bound in entry.bounds:
+        values = values.push("{bound.param_index}")
+        values = values.push(bound.bound_key)
+    values + [entry.body_digest, entry.declaration_kind, entry.signature_digest, entry.instantiation_digest]
+
+fn _section_body_v2(entries: [GenericTemplateEntryV1]) -> text:
+    if entries.len() > GENERIC_V2_MAX_ITEMS: return ""
+    var values = [GENERIC_TEMPLATE_SECTION_MAGIC_V2, "{entries.len()}"]
+    var budget: i64 = 128
+    var previous = ""
+    for entry in entries:
+        if not generic_template_entry_valid_v2(entry): return ""
+        if previous != "" and not (previous < entry.symbol_id): return ""
+        previous = entry.symbol_id
+        # Bound before allocating a collection of frames for this entry.
+        val frames = 12 + entry.params.len() * 3 + entry.fields.len() * 3 + entry.bounds.len() * 2
+        if values.len() + frames + 1 > GENERIC_V2_MAX_FRAMES: return ""
+        val entry_values = _entry_values_v2(entry)
+        for value in entry_values:
+            budget = budget + value.byte_len() + 16
+            if budget > GENERIC_V2_MAX_BYTES: return ""
+        for value in entry_values: values = values.push(value)
+    _frames_v2(values)
+
+# Heap-sort indices: bounded O(n log n), no legacy V1 body allocation.
+fn _sort_entries_v2(entries: [GenericTemplateEntryV1]) -> [GenericTemplateEntryV1]:
+    var order: [i64] = []
+    var i = 0
+    while i < entries.len():
+        order = order.push(i)
+        i = i + 1
+    var start = order.len() / 2 - 1
+    var end = order.len() - 1
+    while end > 0:
+        var root = 0
+        if start >= 0:
+            root = start
+            start = start - 1
+        else:
+            val saved = order[end]
+            order[end] = order[0]
+            order[0] = saved
+            end = end - 1
+        var child = root * 2 + 1
+        while child <= end:
+            if child + 1 <= end and entries[order[child]].symbol_id < entries[order[child + 1]].symbol_id:
+                child = child + 1
+            if not (entries[order[root]].symbol_id < entries[order[child]].symbol_id): break
+            val saved = order[root]
+            order[root] = order[child]
+            order[child] = saved
+            root = child
+            child = root * 2 + 1
+    var result: [GenericTemplateEntryV1] = []
+    for index in order: result = result.push(entries[index])
+    result
+
+pub fn build_generic_template_section_v2(entries: [GenericTemplateEntryV1]) -> Result<GenericTemplateSectionV1, text>:
+    if entries.len() > GENERIC_V2_MAX_ITEMS: return Err("entry bound exceeded")
+    for entry in entries:
+        if not generic_template_entry_valid_v2(entry): return Err("invalid v2 template")
+    val sorted = _sort_entries_v2(entries)
+    val body = _section_body_v2(sorted)
+    if body == "": return Err("invalid or oversized v2 section")
+    Ok(GenericTemplateSectionV1(entries: sorted, digest: sha256_text(body)))
+
+pub fn generic_template_section_encode_v2(section: GenericTemplateSectionV1) -> Result<text, text>:
+    val body = _section_body_v2(section.entries)
+    if body == "" or sha256_text(body) != section.digest: return Err("invalid v2 section seal")
+    Ok(_frame_v2(section.digest) + body)
+
+# Byte cursor: never apply character-index substring to a byte offset.
+class GenericFrameReaderV2:
+    data: [u8]
+    offset: i64
+    ok: bool
+
+    me next() -> text:
+        var length: i64 = 0
+        var digits = 0
+        var leading_zero = false
+        while self.offset < self.data.len() and self.data[self.offset] != 58u8:
+            val byte = self.data[self.offset]
+            if byte < 48u8 or byte > 57u8 or digits >= 8:
+                self.ok = false
+                return ""
+            if digits == 0: leading_zero = byte == 48u8
+            elif leading_zero:
+                self.ok = false
+                return ""
+            length = length * 10 + (byte - 48u8) as i64
+            digits = digits + 1
+            self.offset = self.offset + 1
+        if digits == 0 or self.offset >= self.data.len() or length > self.data.len() - self.offset - 1:
+            self.ok = false
+            return ""
+        self.offset = self.offset + 1
+        var raw: [u8] = []
+        var i = 0
+        while i < length:
+            raw = raw.push(self.data[self.offset + i])
+            i = i + 1
+        self.offset = self.offset + length
+        match validated_utf8_bytes_to_text_linear(raw):
+            case Ok(value): value
+            case Err(_):
+                self.ok = false
+                ""
+
+fn _count_v2(value: text) -> i64:
+    if value == "" or value.byte_len() > 5: return -1
+    if value.byte_len() > 1 and value.byte_at(0) == 48u8: return -1
+    val count = _count_v1(value)
+    if count > GENERIC_V2_MAX_ITEMS: return -1
+    count
+
+pub fn generic_template_section_decode_v2(data: text) -> GenericTemplateSectionDecodeV1:
+    if data.byte_len() > GENERIC_V2_MAX_BYTES: return _decode_fail_v1("v2 byte bound exceeded")
+    var reader = GenericFrameReaderV2(data: text_to_bytes(data), offset: 0, ok: true)
+    var toks: [text] = []
+    while reader.offset < reader.data.len():
+        if toks.len() >= GENERIC_V2_MAX_FRAMES: return _decode_fail_v1("v2 frame bound exceeded")
+        val value = reader.next()
+        if not reader.ok: return _decode_fail_v1("invalid v2 UTF8 frame")
+        toks = toks.push(value)
+    if toks.len() < 3 or toks[1] != GENERIC_TEMPLATE_SECTION_MAGIC_V2: return _decode_fail_v1("v2 magic required")
+    val count = _count_v2(toks[2])
+    if count < 0: return _decode_fail_v1("invalid v2 entry count")
+    var entries: [GenericTemplateEntryV1] = []
+    var k = 3
+    var e = 0
+    while e < count:
+        if k + 6 > toks.len(): return _decode_fail_v1("truncated v2 entry")
+        val np = _count_v2(toks[k + 5])
+        if np < 0 or k + 6 + np * 3 + 1 > toks.len(): return _decode_fail_v1("invalid v2 binder count")
+        var params: [GenericParamV1] = []
+        var j = 0
+        while j < np:
+            val b = k + 6 + j * 3
+            params = params.push(GenericParamV1(index: j, kind: toks[b], binder_id: toks[b + 1], display_name: toks[b + 2]))
+            j = j + 1
+        val fc = k + 6 + np * 3
+        val nf = _count_v2(toks[fc])
+        if nf < 0 or fc + 1 + nf * 3 + 1 > toks.len(): return _decode_fail_v1("invalid v2 field count")
+        var fields: [GenericTemplateFieldV1] = []
+        j = 0
+        while j < nf:
+            val b = fc + 1 + j * 3
+            if toks[b + 2] != "0" and toks[b + 2] != "1": return _decode_fail_v1("invalid v2 generic flag")
+            fields = fields.push(GenericTemplateFieldV1(name: toks[b], type_key: toks[b + 1], generic: toks[b + 2] == "1"))
+            j = j + 1
+        val bc = fc + 1 + nf * 3
+        val nb = _count_v2(toks[bc])
+        if nb < 0 or bc + 1 + nb * 2 + 4 > toks.len(): return _decode_fail_v1("invalid v2 bound count")
+        var bounds: [GenericBoundV1] = []
+        j = 0
+        while j < nb:
+            val b = bc + 1 + j * 2
+            val index = _count_v2(toks[b])
+            if index < 0 or index >= np: return _decode_fail_v1("invalid v2 bound index")
+            bounds = bounds.push(GenericBoundV1(param_index: index, bound_key: toks[b + 1]))
+            j = j + 1
+        val tail = bc + 1 + nb * 2
+        entries = entries.push(GenericTemplateEntryV1(symbol_id: toks[k], source_digest: toks[k + 1],
+            visibility_root: toks[k + 2], active_guard_root: toks[k + 3], language_schema: toks[k + 4],
+            params: params, fields: fields, bounds: bounds, body_digest: toks[tail],
+            declaration_kind: toks[tail + 1], signature_digest: toks[tail + 2], instantiation_digest: toks[tail + 3]))
+        k = tail + 4
+        e = e + 1
+    if k != toks.len(): return _decode_fail_v1("trailing v2 frames")
+    val body = _section_body_v2(entries)
+    if body == "" or sha256_text(body) != toks[0] or _frame_v2(toks[0]) + body != data:
+        return _decode_fail_v1("invalid v2 section seal or canonical form")
+    GenericTemplateSectionDecodeV1(ok: true, section: GenericTemplateSectionV1(entries: entries, digest: toks[0]), error: "")

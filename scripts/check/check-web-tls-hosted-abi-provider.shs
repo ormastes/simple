@@ -7,42 +7,44 @@ TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/simple-web-tls-abi.XXXXXX")
 trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM
 
 PROVIDER="$ROOT_DIR/src/runtime/runtime_tls_hosted.c"
-TOOLS="$ROOT_DIR/src/compiler_rust/compiler/src/pipeline/native_project/tools.rs"
-LINKER="$ROOT_DIR/src/compiler_rust/compiler/src/pipeline/native_project/linker.rs"
-
-cc -std=gnu11 -O2 -ffunction-sections -fdata-sections \
-    -I"$ROOT_DIR/src/runtime" -c "$PROVIDER" -o "$TMP_DIR/provider.o"
-
-nm -g --defined-only "$TMP_DIR/provider.o" | awk '{print $NF}' | sort -u >"$TMP_DIR/symbols"
-for symbol in rt_byte_char rt_rsa_decrypt rt_wire_to_hex rt_hex_to_wire rt_random_i64; do
-    grep -Fxq "$symbol" "$TMP_DIR/symbols" || {
-        echo "FAIL: hosted TLS provider is missing $symbol" >&2
-        exit 1
-    }
-done
-
-grep -Fq '"runtime_tls_hosted.c"' "$TOOLS" || {
-    echo "FAIL: core-C/host-gpu supplement does not compile hosted TLS provider" >&2
-    exit 1
+# The hosted capsule supplies this object explicitly. It is not an implicit
+# Rust compiler runtime provider; require the actual shared host contract.
+. "$ROOT_DIR/scripts/check/lib/host-gpu-provider.shs"
+host_gpu_host_init || exit 1
+HOST_CC=${CC:-cc}
+HOST_NM=${NM:-nm}
+host_gpu_resolve_crypto || exit 1
+set -- -std=gnu11 -O2 -ffunction-sections -fdata-sections -I"$ROOT_DIR/src/runtime"
+[ -z "$CRYPTO_INCLUDE_DIR" ] || set -- "$@" -I"$CRYPTO_INCLUDE_DIR"
+"$HOST_CC" "$@" -c "$PROVIDER" -o "$TMP_DIR/provider.o"
+host_gpu_require_symbols "$TMP_DIR/provider.o" \
+    rt_byte_char rt_rsa_decrypt rt_rsa_decrypt_with_len rt_wire_to_hex rt_hex_to_wire rt_random_i64 || {
+    echo "FAIL: hosted TLS provider lacks a required defined ABI symbol" >&2; exit 1;
 }
-grep -Fq '"rt_net_https_openssl_local_probe" | "rt_rsa_decrypt"' "$LINKER" || {
-    echo "FAIL: RSA caller does not request the OpenSSL link authority" >&2
-    exit 1
-}
-
-cc -std=gnu11 -O2 -ffunction-sections -fdata-sections \
-    -I"$ROOT_DIR/src/runtime" \
+# Link the inspected object and exact resolved crypto provider, not an
+# unrelated -lcrypto search result. No ELF-only linker flags are needed.
+"$HOST_CC" "$@" \
     "$ROOT_DIR/test/01_unit/runtime/runtime_tls_hosted_selfcheck.c" \
-    "$PROVIDER" -Wl,--gc-sections -lcrypto -o "$TMP_DIR/selfcheck"
+    "$TMP_DIR/provider.o" "$CRYPTO_PROVIDER" \
+    -Wl,-rpath,"$(dirname -- "$CRYPTO_PROVIDER")" -o "$TMP_DIR/selfcheck"
 "$TMP_DIR/selfcheck"
+[ "$(host_gpu_hash_file "$CRYPTO_PROVIDER")" = "$CRYPTO_PROVIDER_SHA256" ] || {
+    echo "FAIL: selected crypto provider changed during ABI check" >&2; exit 1;
+}
 
 # runtime.c remains the legacy lane owner. No third provider may silently
 # create first-definition-wins behavior in the hosted supplement.
 for symbol in rt_byte_char rt_rsa_decrypt rt_wire_to_hex rt_hex_to_wire rt_random_i64; do
     owners=$(rg -l "^[A-Za-z_][A-Za-z0-9_ *]*${symbol}\\(" "$ROOT_DIR/src/runtime"/*.c | sort)
-    count=$(printf '%s\n' "$owners" | awk 'NF { count++ } END { print count + 0 }')
-    [ "$count" -eq 2 ] || {
-        echo "FAIL: $symbol must have exactly legacy+hosted owners, found $count" >&2
+    expected=$(printf '%s\n' "$ROOT_DIR/src/runtime/runtime.c" "$PROVIDER" | sort)
+    if [ "$symbol" = rt_random_i64 ]; then
+        # This third implementation is the separate standalone core-C lane;
+        # it is not linked into the hosted TLS supplement.
+        expected=$(printf '%s\n' "$ROOT_DIR/src/runtime/runtime.c" "$PROVIDER" \
+            "$ROOT_DIR/src/runtime/runtime_core_exports.c" | sort)
+    fi
+    [ "$owners" = "$expected" ] || {
+        echo "FAIL: $symbol has an unexpected runtime source owner" >&2
         printf '%s\n' "$owners" >&2
         exit 1
     }

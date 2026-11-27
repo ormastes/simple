@@ -1,0 +1,92 @@
+# Pure codec and installed-policy checks for the finite detached TTY exec
+# admission. No Engine, socket or native transport is simulated.
+use std.spec.*
+use std.common.contracts.container.exec_v3.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.nogc_async_mut.container.providers.linux.engine_exec_codec_v3.*
+use std.nogc_async_mut.container.providers.linux.installed_policy_v3.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+
+fn _exec_tty_request_fixture_v3(terminal: text) -> ContainerExecRequestV3:
+    val parent = linux_container_request_fixture_v2(linux_container_leaf_fixture_v2()).plan
+    val runtime = RuntimeIdentityV1(pod_uid: parent.workload_uid, attempt: parent.attempt,
+        provider_generation: parent.provider_generation, operation_id: parent.operation_id,
+        engine: "podman", native_id: "b".repeat(64), node_boot_id: container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap())
+    ContainerExecRequestV3(parent: parent, parent_runtime: runtime, operation_id: "exec-api", nonce: "d".repeat(64),
+        argv: ["/bin/sh", "-c", "test -t 1"], environment: [],
+        working_directory: "/work", selected_user: "1000:1001", terminal_mode: terminal, stdin_requested: false, timeout_ms: 5000)
+
+fn _exec_tty_inspect_fixture_v3(tty: text) -> text:
+    "{\"CanRemove\":false,\"ContainerID\":\"" + "b".repeat(64) + "\",\"DetachKeys\":\"\",\"ExitCode\":0,\"ID\":\"" + "c".repeat(64) +
+        "\",\"OpenStderr\":false,\"OpenStdin\":false,\"OpenStdout\":false,\"Running\":false,\"Pid\":0,\"ProcessConfig\":{\"arguments\":[\"-c\",\"test -t 1\"],\"entrypoint\":\"/bin/sh\",\"privileged\":false,\"tty\":" +
+        tty + ",\"user\":\"1000:1001\"}" + "}"
+
+fn _exec_tty_policy_fixture_v3(terminal: text) -> LinuxOciInstalledPolicyV3:
+    LinuxOciInstalledPolicyV3(cli_policy: linux_container_policy_fixture_v2(),
+        socket_path: "/run/user/1000/podman/podman.sock", expected_service_uid: 1000, api_version: "5.2.5",
+        exec_terminal_mode: terminal)
+
+describe "finite detached TTY exec admission":
+    it "refuses a tty exec by default with the historical reason at every codec entry":
+        val request = _exec_tty_request_fixture_v3("tty")
+        expect(linux_engine_exec_create_request_v3(request).unwrap_err()).to_equal("engine-exec-finite-noninteractive-required")
+        expect(linux_engine_exec_create_request_v3(request, "none").unwrap_err()).to_equal("engine-exec-finite-noninteractive-required")
+        expect(linux_engine_exec_inspect_request_v3(request, "c".repeat(64)).unwrap_err()).to_equal("engine-exec-finite-noninteractive-required")
+        expect(linux_engine_exec_start_request_v3(request, "c".repeat(64)).unwrap_err()).to_equal("engine-exec-finite-noninteractive-required")
+        expect(linux_engine_exec_inspect_decode_v3(_exec_tty_inspect_fixture_v3("true"), request, "c".repeat(64)).unwrap_err()).to_equal("engine-exec-finite-noninteractive-required")
+
+    it "encodes Tty true in create and start only under the installed tty admission":
+        val request = _exec_tty_request_fixture_v3("tty")
+        val create = linux_engine_exec_create_request_v3(request, "tty").unwrap()
+        expect(create.body.contains("\"Tty\":true")).to_equal(true)
+        expect(create.body.contains("\"AttachStdin\":false")).to_equal(true)
+        expect(create.body.contains("\"Privileged\":false")).to_equal(true)
+        val start = linux_engine_exec_start_request_v3(request, "c".repeat(64), "tty").unwrap()
+        expect(start.body).to_equal("{\"Detach\":true,\"Tty\":true}")
+        step("A plain request stays byte-identical under either admission")
+        val plain = _exec_tty_request_fixture_v3("none")
+        expect(linux_engine_exec_create_request_v3(plain, "tty").unwrap().body).to_equal(linux_engine_exec_create_request_v3(plain).unwrap().body)
+        expect(linux_engine_exec_create_request_v3(plain).unwrap().body.contains("\"Tty\":false")).to_equal(true)
+        expect(linux_engine_exec_start_request_v3(plain, "c".repeat(64), "tty").unwrap().body).to_equal("{\"Detach\":true,\"Tty\":false}")
+
+    it "keeps stdin refused and rejects an unknown admission value even when tty is admitted":
+        var request = _exec_tty_request_fixture_v3("tty")
+        request.stdin_requested = true
+        expect(linux_engine_exec_create_request_v3(request, "tty").unwrap_err()).to_equal("engine-exec-finite-noninteractive-required")
+        request = _exec_tty_request_fixture_v3("none")
+        request.stdin_requested = true
+        expect(linux_engine_exec_create_request_v3(request, "tty").unwrap_err()).to_equal("engine-exec-finite-noninteractive-required")
+        expect(linux_engine_exec_create_request_v3(_exec_tty_request_fixture_v3("tty"), "stdin").unwrap_err()).to_equal("engine-exec-terminal-admission-invalid")
+
+    it "requires the inspected process tty flag to equal the requested mode":
+        val tty = _exec_tty_request_fixture_v3("tty")
+        val plain = _exec_tty_request_fixture_v3("none")
+        expect(linux_engine_exec_inspect_decode_v3(_exec_tty_inspect_fixture_v3("true"), tty, "c".repeat(64), "tty").is_ok()).to_equal(true)
+        expect(linux_engine_exec_inspect_decode_v3(_exec_tty_inspect_fixture_v3("false"), tty, "c".repeat(64), "tty").unwrap_err()).to_equal("engine-exec-process-config-mismatch")
+        expect(linux_engine_exec_inspect_decode_v3(_exec_tty_inspect_fixture_v3("true"), plain, "c".repeat(64), "tty").unwrap_err()).to_equal("engine-exec-process-config-mismatch")
+        expect(linux_engine_exec_inspect_decode_v3(_exec_tty_inspect_fixture_v3("false"), plain, "c".repeat(64), "tty").is_ok()).to_equal(true)
+        expect(linux_engine_exec_inspect_decode_v3(_exec_tty_inspect_fixture_v3("false"), plain, "c".repeat(64)).is_ok()).to_equal(true)
+
+    it "carries the exec terminal admission in the installed policy and its digest":
+        val closed = _exec_tty_policy_fixture_v3("none")
+        val historical = LinuxOciInstalledPolicyV3(cli_policy: linux_container_policy_fixture_v2(),
+            socket_path: "/run/user/1000/podman/podman.sock", expected_service_uid: 1000, api_version: "5.2.5")
+        expect(historical.exec_terminal_mode).to_equal("none")
+        step("The default mode keeps the historical policy bytes and digest")
+        val closed_source = linux_oci_installed_policy_encode_v3(closed).unwrap()
+        expect(closed_source).to_equal(linux_oci_installed_policy_encode_v3(historical).unwrap())
+        expect(closed_source.contains("execTerminalMode")).to_equal(false)
+        expect(linux_oci_installed_policy_decode_v3(closed_source).unwrap().exec_terminal_mode).to_equal("none")
+        step("An admitting policy roundtrips with a different digest")
+        val open = _exec_tty_policy_fixture_v3("tty")
+        val open_source = linux_oci_installed_policy_encode_v3(open).unwrap()
+        expect(open_source.contains("execTerminalMode")).to_equal(true)
+        expect(linux_oci_installed_policy_decode_v3(open_source).unwrap().exec_terminal_mode).to_equal("tty")
+        expect(linux_oci_installed_policy_digest_v3(open).unwrap() == linux_oci_installed_policy_digest_v3(closed).unwrap()).to_equal(false)
+        step("Any other mode, or a spelled-out none, is not an installed policy")
+        expect(linux_oci_installed_policy_encode_v3(_exec_tty_policy_fixture_v3("stdin")).is_err()).to_equal(true)
+        for mode in ["none", "stdin"]:
+            val changed = open_source.replace("execTerminalMode: tty", "execTerminalMode: " + mode)
+            expect(changed == open_source).to_equal(false)
+            expect(linux_oci_installed_policy_decode_v3(changed).is_err()).to_equal(true)

@@ -1,0 +1,423 @@
+# MIR shard worker HIR residency: hold bodies only for the modules this worker
+# lowers (design: doc/05_design/compiler/perf/mir_shard_hir_residency_v1.md).
+#
+# A spawned MIR shard worker (driver_build/native_mir_shard.spl) re-runs the
+# front half, so the HIR stage loads every module from the cache and
+# hir_cache_load promotes each decoded module to the persistent heap, bodies
+# included. There is no collector: a promoted module is never freed, so the
+# only residency lever is to promote less. Ownership is decided later, inside
+# lower_to_mir's claim loop, so at load time every module is a candidate.
+#
+# Mechanism (opt-in, SIMPLE_MIR_SHARD_INTERFACE_HIR=1, default off):
+#   1. arm once per process when the predicate below admits this worker;
+#   2. the HIR stage asks hir_cache_load_parsed_v1 for an interface-only
+#      projection (hir_module_interface_only_v1, applied INSIDE the decode
+#      scope, before promotion) of every non-entry module and records the
+#      cache key it would need to get the body back;
+#   3. the claim loop reloads a claimed module in full from the cache with the
+#      recorded key and replaces the ctx.hir_modules entry; a refused reload
+#      fails that one module closed (the ICE boundary records it).
+#
+# The feed (ctx.mir_feed_modules) keeps the interface copies: MIR lowering
+# reads only declarations from `providers` (symbols, signatures and parameter
+# defaults, constants, structs/classes/enums, traits incl. default bodies,
+# impls, extern declarations). Bodies kept whole regardless (fail closed: a
+# body is dropped only when the function is provably ordinary): extern
+# functions (no body), generic templates (fn-level type params,
+# is_generic_template, a type parameter anywhere in the signature, every
+# method of a generic class or generic impl -- including trait defaults
+# concretized into a generic impl, which HIR does not flag), `const fn`
+# (compile-time evaluated) and @inline/@always_inline. Trait default bodies
+# live in HirTrait.defaults, which the projection never touches.
+
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolKind}
+use compiler.hir.hir_definitions.{HirFunction, HirBlock, HirExpr, HirExprKind, HirClass, HirImpl}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
+
+pub const MIR_SHARD_INTERFACE_HIR_ENV_V1: text = "SIMPLE_MIR_SHARD_INTERFACE_HIR"
+
+# ===== arming predicate (pure) ==============================================
+
+# "" when this process may hold interface-only HIR for unclaimed modules;
+# otherwise the named refusal. Inputs are the raw env values so the rule is
+# testable without a process: `flag` SIMPLE_MIR_SHARD_INTERFACE_HIR,
+# `shard_spec` SIMPLE_MIR_SHARD ("<i>/<n>"), `link_ledger` SIMPLE_MIR_SHARD_LINK,
+# `export_dir` SIMPLE_MIR_SHARD_EXPORT_WRITE, `fork_workers`
+# SIMPLE_MIR_FORK_WORKERS, `file_worker_queue` SIMPLE_FILE_WORKER_HIR_QUEUE,
+# `loads_restricted` worker_hir_loads_restricted_v1(), `aot_mode` the compile
+# mode is AOT (check / interpret never shard MIR), `any_nogc_strict` some
+# module surface is @no_gc(strict).
+pub fn mir_shard_hir_residency_refusal_v1(flag: text, shard_spec: text, link_ledger: text,
+        export_dir: text, fork_workers: text, file_worker_queue: text,
+        loads_restricted: bool, bootstrap_flat_rows: bool, entry_closure_flat: bool,
+        aot_mode: bool, any_nogc_strict: bool) -> text:
+    if flag != "1": return "flag-off"
+    if shard_spec == "": return "not-mir-shard-worker"
+    if not aot_mode: return "not-aot-compile"
+    # NoGC admission (driver_admit_nogc_param_effects_v1) runs over ctx.hir_modules
+    # after the HIR cache was written, so a claimed @no_gc(strict) module reloaded
+    # from the cache would lose its effect rows (NOGC-POLICY-002). Refuse until
+    # the reload carries them.
+    if any_nogc_strict: return "nogc-strict-module"
+    if link_ledger != "": return "link-worker"
+    if export_dir != "": return "export-writer"
+    if fork_workers == "auto" or (fork_workers.to_i64() ?? 0) > 1: return "fork-workers"
+    if file_worker_queue != "": return "file-worker-unit"
+    if loads_restricted: return "module-scoped-unit"
+    # The bootstrap flat-row store (_bootstrap_hir_store, adopted when
+    # SIMPLE_BOOTSTRAP=1 and not STAGE4) copies rows from the HIR module at load
+    # time; a body reload at claim does not refresh them. Its rows' bodies are only
+    # read by the flat lowering path (bootstrap_globals.spl) behind
+    # SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1, so refuse exactly that combination.
+    if bootstrap_flat_rows and entry_closure_flat: return "bootstrap-flat-rows"
+    ""
+
+# True when any module surface of the build is @no_gc(strict).
+pub fn hir_residency_any_nogc_strict_v1(surfaces: [ModuleSurface]) -> bool:
+    for surface in surfaces:
+        if surface.nogc_strict: return true
+    false
+
+# ===== per-file unit residency (pure) =======================================
+#
+# A module-scoped per-file unit child (closure-walk route,
+# SIMPLE_UNIT_TLDR_IMPORTS=0) knows its MIR targets and advice modules BEFORE
+# the HIR stage, and lowers only its targets: every other held row is a MIR
+# placeholder that only provides declarations (driver_mir_owner_disposition_v1,
+# driver_mir_unit_provider_keys_v1) -- the same contract under which the PM3
+# route already holds its imports interface-only (hir_unit_import_interface_load_v1).
+# So its non-target, non-advice closure rows load interface-only from the HIR
+# cache with no claim race and no reload. This is separate from the MIR shard
+# arm above, which keeps refusing `file-worker-unit` (its claim-time reload is
+# the shard route's own mechanism). Opt-in like the shard arm: only "1" arms it
+# (unmeasured and its spec unrun, so it is not a default).
+pub const FILE_WORKER_INTERFACE_HIR_ENV_V1: text = "SIMPLE_FILE_WORKER_INTERFACE_HIR"
+
+# Resolve per-file unit interface-HIR opt-in flag: explicit
+# SIMPLE_FILE_WORKER_INTERFACE_HIR always wins (so "0" disables even when
+# SIMPLE_MIR_SHARD_INTERFACE_HIR is set); otherwise fall back to
+# SIMPLE_MIR_SHARD_INTERFACE_HIR so shared interface-HIR flags arm on
+# closure-walk units too.
+pub fn file_worker_unit_interface_hir_flag_v1(unit_flag: text, shard_flag: text) -> text:
+    if unit_flag != "": return unit_flag
+    shard_flag
+
+# "" when this per-file unit may hold interface-only HIR for its non-target
+# rows; otherwise the named refusal. `unit_scoped` is
+# driver_mir_unit_scoped_v1(...) (the ONLY_PATHS skip that keeps non-targets
+# placeholders is active), `keep_full_count` the recorded target + advice rows.
+# Per-file unit children never enter the whole-program flat lowering path
+# (SIMPLE_BOOTSTRAP_WHOLE_PROGRAM != "1") and hold target/advice rows full from
+# initial load, so `bootstrap_flat_rows` is true only when whole-program flat
+# rows are actually requested.
+# reason: driver-internal arm/selection state over raw env values, process flags and source-path text
+@allow(primitive_api)
+pub fn file_worker_unit_interface_hir_refusal_v1(flag: text, unit_scoped: bool,
+        keep_full_count: i64, bootstrap_flat_rows: bool, entry_closure_flat: bool,
+        aot_mode: bool, any_nogc_strict: bool) -> text:
+    if flag != "1": return "flag-off"
+    if not unit_scoped: return "not-scoped-unit"
+    if keep_full_count == 0: return "no-targets"
+    if not aot_mode: return "not-aot-compile"
+    if any_nogc_strict: return "nogc-strict-module"
+    if bootstrap_flat_rows and entry_closure_flat: return "bootstrap-flat-rows"
+    ""
+
+# Selection rule: one HIR cache load is interface-only when the unit arm is
+# set, the row is not the requested entry, and neither its source path nor its
+# surface canonical path names a target or advice module (an alias row of a
+# target shares its HirModule through the canonical reuse, so it stays full).
+# reason: driver-internal arm/selection state over raw env values, process flags and source-path text
+@allow(primitive_api)
+pub fn file_worker_unit_row_interface_only_v1(armed: bool, is_entry: bool,
+        source_path: text, canonical_path: text, keep_full: Dict<text, bool>) -> bool:
+    if not armed or is_entry: return false
+    if keep_full.contains_key(source_path): return false
+    if canonical_path != "" and keep_full.contains_key(canonical_path): return false
+    true
+
+# The retained-owner HIR route (SIMPLE_STAGE3_STREAMING_SURFACES unset/0) has
+# no interface-only load: "" when the flag is unset, else the one refusal line
+# that route prints so the flag is never silently ignored.
+pub fn mir_shard_hir_residency_retained_route_line_v1(flag: text) -> text:
+    if flag == "": return ""
+    "[mir-shard] hir-residency refused reason=retained-route: only the streaming-surfaces HIR route (SIMPLE_STAGE3_STREAMING_SURFACES=1) loads interface-only HIR"
+
+# ===== interface-only projection (pure) =====================================
+
+# Functions whose body stays resident in an interface-only module, judged on
+# the function alone. Generic class/impl methods carry no fn-level type_params;
+# they are flagged is_generic_template instead (class_declaration_lowering.spl,
+# trait_impl_lowering.spl).
+pub fn hir_function_keeps_body_v1(function: HirFunction) -> bool:
+    function.is_extern or function.type_params.len() > 0 or function.is_const or
+        function.is_generic_template or function.func_attr.is_inline
+
+# True when a type parameter occurs anywhere in `ty`, spelled either as
+# TypeParam or as Named of a symbol the module declares as a type parameter.
+# Kinds not walked here (Projection, Tensor, Layer) report true: fail closed.
+pub fn hir_type_mentions_type_param_v1(ty: HirType, module: HirModule) -> bool:
+    match ty.kind:
+        case HirTypeKind.TypeParam(_, _): true
+        case HirTypeKind.Named(symbol, args):
+            if val info = module.symbols.get_symbol_raw(symbol.id):
+                if info.kind == SymbolKind.TypeParam: return true
+            hir_types_mention_type_param_v1(args, module)
+        case HirTypeKind.Int(_, _): false
+        case HirTypeKind.Float(_): false
+        case HirTypeKind.Bool: false
+        case HirTypeKind.Char: false
+        case HirTypeKind.Str: false
+        case HirTypeKind.Unit: false
+        case HirTypeKind.Never: false
+        case HirTypeKind.Error: false
+        case HirTypeKind.DynTrait(_): false
+        # The erased top type is not a type parameter. An unresolved inference
+        # variable may still stand for one: fail closed and keep the body.
+        case HirTypeKind.Infer(_, _): true
+        case HirTypeKind.Any: false
+        case HirTypeKind.Tuple(elements): hir_types_mention_type_param_v1(elements, module)
+        case HirTypeKind.Array(element, _): hir_type_mentions_type_param_v1(element, module)
+        case HirTypeKind.Slice(element): hir_type_mentions_type_param_v1(element, module)
+        case HirTypeKind.Dict(key, value):
+            hir_type_mentions_type_param_v1(key, module) or hir_type_mentions_type_param_v1(value, module)
+        case HirTypeKind.Ref(inner, _): hir_type_mentions_type_param_v1(inner, module)
+        case HirTypeKind.Ptr(inner, _): hir_type_mentions_type_param_v1(inner, module)
+        case HirTypeKind.Optional(inner): hir_type_mentions_type_param_v1(inner, module)
+        case HirTypeKind.Result(ok, err):
+            hir_type_mentions_type_param_v1(ok, module) or hir_type_mentions_type_param_v1(err, module)
+        case HirTypeKind.Union(members): hir_types_mention_type_param_v1(members, module)
+        case HirTypeKind.Function(params, ret, _):
+            hir_types_mention_type_param_v1(params, module) or hir_type_mentions_type_param_v1(ret, module)
+        case HirTypeKind.Isolated(inner): hir_type_mentions_type_param_v1(inner, module)
+        case HirTypeKind.Unique(inner): hir_type_mentions_type_param_v1(inner, module)
+        case HirTypeKind.Shared(inner): hir_type_mentions_type_param_v1(inner, module)
+        case HirTypeKind.Weak(inner): hir_type_mentions_type_param_v1(inner, module)
+        case _: true
+
+fn hir_types_mention_type_param_v1(types: [HirType], module: HirModule) -> bool:
+    for ty in types:
+        if hir_type_mentions_type_param_v1(ty, module): return true
+    false
+
+fn hir_signature_mentions_type_param_v1(function: HirFunction, module: HirModule) -> bool:
+    for param in function.params:
+        if hir_type_mentions_type_param_v1(param.type_, module): return true
+    hir_type_mentions_type_param_v1(function.return_type, module)
+
+# Symbol ids of every method of a generic class or a generic impl (impl<T>, or
+# an impl whose self type mentions a type parameter). HIR flags the written
+# methods of these but not the trait defaults concretized into a generic impl
+# (trait_impl_lowering.spl default loop), so membership is the rule here.
+pub fn hir_module_generic_owner_methods_v1(module: HirModule) -> Dict<i64, bool>:
+    var owned: Dict<i64, bool> = {}
+    for class_key in module.classes.keys():
+        val class_: HirClass = module.classes[class_key]
+        if class_.type_params.len() > 0 or class_.is_generic_template:
+            for method_name in class_.methods.keys():
+                owned[class_.methods[method_name].id] = true
+    for impl_ in module.impls:
+        if impl_.type_params.len() > 0 or hir_type_mentions_type_param_v1(impl_.type_, module):
+            for method_name in impl_.methods.keys():
+                owned[impl_.methods[method_name].id] = true
+    owned
+
+# Module-aware keep rule: the function-local rule, a type parameter anywhere
+# in the signature, or membership in a generic owner.
+pub fn hir_function_keeps_body_in_module_v1(function: HirFunction, module: HirModule,
+        generic_owner_methods: Dict<i64, bool>) -> bool:
+    module.nogc_strict or
+        hir_function_keeps_body_v1(function) or
+        generic_owner_methods.contains_key(function.symbol.id) or
+        hir_signature_mentions_type_param_v1(function, module)
+
+fn hir_interface_placeholder_block_v1() -> HirBlock:
+    val span = Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0)
+    HirBlock(stmts: [], has: false,
+        value: HirExpr(kind: HirExprKind.UnitLit, has_type_: false,
+            type_: HirType(kind: HirTypeKind.Error, span: span), span: span,
+            is_uninit_marker: false),
+        span: span, unsafe_caps: [])
+
+fn hir_function_body_present_v1(function: HirFunction) -> bool:
+    function.body.stmts.len() > 0 or function.body.has
+
+# The module with every ordinary function body replaced by the placeholder
+# block; returns the projection and the number of bodies it dropped. Every
+# other field is carried by value, so declarations, parameter defaults,
+# constants, trait default bodies and AOP advices are untouched. Idempotent.
+pub fn hir_module_interface_only_v1(module: HirModule) -> (HirModule, i64):
+    var functions: Dict<SymbolId, HirFunction> = {}
+    var stripped = 0
+    val generic_owner_methods = hir_module_generic_owner_methods_v1(module)
+    for key in module.functions.keys():
+        val function: HirFunction = module.functions[key]
+        if hir_function_keeps_body_in_module_v1(function, module, generic_owner_methods) or
+                not hir_function_body_present_v1(function):
+            functions[key] = function
+        else:
+            var projected = function
+            projected.body = hir_interface_placeholder_block_v1()
+            functions[key] = projected
+            stripped = stripped + 1
+    var out = module
+    out.functions = functions
+    (out, stripped)
+
+# ===== residency plan (pure) ================================================
+
+# Partition of the schedule into (full, interface-only) for a worker that
+# claimed `owned`: the entry module and every claimed module hold bodies.
+pub fn mir_shard_hir_residency_plan_v1(all_modules: [text], owned: [text], entry: text) -> ([text], [text]):
+    var full: [text] = []
+    var iface_only: [text] = []
+    for name in all_modules:
+        if name == entry or owned.contains(name):
+            full.push(name)
+        else:
+            iface_only.push(name)
+    (full, iface_only)
+
+# ===== per-process registry =================================================
+
+var _res_armed: bool = false
+var _res_decided: bool = false
+var _res_kind: Dict<text, text> = {}          # source path -> "interface" | "full"
+var _res_module: Dict<text, text> = {}        # source path -> module name
+var _res_key: Dict<text, text> = {}           # source path -> HIR cache key
+var _res_binding: Dict<text, text> = {}       # source path -> parser binding
+var _res_library_mode: Dict<text, text> = {}  # source path -> library mode
+var _res_reloaded: i64 = 0
+
+# Set-once: the first decision wins so a later refusal cannot disarm a worker
+# whose modules are already interface-only. Returns the armed state.
+pub fn mir_shard_hir_residency_arm_v1(refusal: text) -> bool:
+    if not _res_decided:
+        _res_decided = true
+        _res_armed = refusal == ""
+    _res_armed
+
+pub fn mir_shard_hir_residency_armed_v1() -> bool:
+    _res_armed
+
+# Per-file unit arm and its keep-full rows (target + advice source and
+# canonical paths), both set once per process.
+var _unit_armed: bool = false
+var _unit_decided: bool = false
+var _unit_keep_full_recorded: bool = false
+var _unit_keep_full: Dict<text, bool> = {}
+
+# reason: driver-internal arm/selection state over raw env values, process flags and source-path text
+@allow(primitive_api)
+pub fn file_worker_unit_keep_full_record_v1(paths: [text]):
+    if _unit_keep_full_recorded:
+        return
+    _unit_keep_full_recorded = true
+    for p in paths:
+        if p != "": _unit_keep_full[p] = true
+
+# reason: driver-internal arm/selection state over raw env values, process flags and source-path text
+@allow(primitive_api)
+pub fn file_worker_unit_keep_full_v1() -> Dict<text, bool>:
+    _unit_keep_full
+
+# reason: driver-internal arm/selection state over raw env values, process flags and source-path text
+@allow(primitive_api)
+pub fn file_worker_unit_keep_full_count_v1() -> i64:
+    _unit_keep_full.keys().len()
+
+# reason: driver-internal arm/selection state over raw env values, process flags and source-path text
+@allow(primitive_api)
+pub fn file_worker_unit_interface_hir_arm_v1(refusal: text) -> bool:
+    if not _unit_decided:
+        _unit_decided = true
+        _unit_armed = refusal == ""
+    _unit_armed
+
+# reason: driver-internal arm/selection state over raw env values, process flags and source-path text
+@allow(primitive_api)
+pub fn file_worker_unit_interface_hir_armed_v1() -> bool:
+    _unit_armed
+
+# Either arm: the HIR stage notes loads in the registry below and the claim
+# loop reloads any claimed module that is still interface-only.
+# reason: driver-internal arm/selection state over raw env values, process flags and source-path text
+@allow(primitive_api)
+pub fn hir_residency_any_armed_v1() -> bool:
+    _res_armed or _unit_armed
+
+# Tests only: a fresh process state.
+pub fn mir_shard_hir_residency_reset_v1():
+    _res_armed = false
+    _res_decided = false
+    _unit_armed = false
+    _unit_decided = false
+    _unit_keep_full_recorded = false
+    _unit_keep_full = {}
+    _res_kind = {}
+    _res_module = {}
+    _res_key = {}
+    _res_binding = {}
+    _res_library_mode = {}
+    _res_reloaded = 0
+
+# Record how one module was loaded and what a body reload needs.
+pub fn mir_shard_hir_residency_note_v1(path: text, module_name: text, key: text,
+        binding: text, library_mode: text, kind: text):
+    _res_kind[path] = kind
+    _res_module[path] = module_name
+    _res_key[path] = key
+    _res_binding[path] = binding
+    _res_library_mode[path] = library_mode
+
+# "interface", "full", or "" for a path this process never loaded.
+pub fn mir_shard_hir_residency_kind_v1(path: text) -> text:
+    if _res_kind.contains_key(path): _res_kind[path] else: ""
+
+# [key, parser binding, library mode] for a recorded path; [] otherwise.
+pub fn mir_shard_hir_residency_reload_key_v1(path: text) -> [text]:
+    if not _res_key.contains_key(path): return []
+    [_res_key[path], _res_binding[path], _res_library_mode[path]]
+
+# The claimed module's body is resident again.
+pub fn mir_shard_hir_residency_mark_full_v1(path: text):
+    if _res_kind.contains_key(path) and _res_kind[path] != "full":
+        _res_reloaded = _res_reloaded + 1
+    _res_kind[path] = "full"
+
+fn _res_modules_of_kind(kind: text) -> [text]:
+    var names: [text] = []
+    for path in _res_kind.keys():
+        if _res_kind[path] == kind and _res_module.contains_key(path):
+            names.push(_res_module[path])
+    names.sort()
+    names
+
+# Module names whose bodies this worker holds (sorted).
+pub fn mir_shard_hir_residency_held_v1() -> [text]:
+    _res_modules_of_kind("full")
+
+# Module names held interface-only (sorted).
+pub fn mir_shard_hir_residency_interface_v1() -> [text]:
+    _res_modules_of_kind("interface")
+
+pub fn mir_shard_hir_residency_counters_v1() -> text:
+    val iface_count = _res_modules_of_kind("interface").len()
+    val full_count = _res_modules_of_kind("full").len()
+    "hir_interface_only={iface_count} hir_full={full_count} hir_reloaded={_res_reloaded}"
+
+# Compact residency attribution summary emitted when a MIR shard worker aborts.
+pub fn mir_shard_hir_residency_abort_context_v1() -> text:
+    val held = mir_shard_hir_residency_held_v1()
+    val counters = mir_shard_hir_residency_counters_v1()
+    if held.len() == 0:
+        return counters
+    var preview: [text] = []
+    var i: i64 = 0
+    while i < held.len() and i < 8:
+        preview.push(held[i])
+        i = i + 1
+    val suffix = if held.len() > 8: " (+{held.len() - 8} more)" else: ""
+    val held_joined = preview.join(", ")
+    "{counters} held_full=[{held_joined}{suffix}]"

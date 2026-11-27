@@ -1,0 +1,211 @@
+"""SCVN-C01/C02/C03 component contracts; execution evidence remains separate."""
+use std.spec.{describe, it, expect}
+use std.scv.scv_config_v1.*
+use std.scv.scv_config_routes_v1.*
+use std.scv.scv_config_effective_v1.{scv_config_effective_v1}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1, sdn_strict_limits_v1}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use test.fixtures.scv.scv_config_fixture_v1.*
+
+fn check_config_rejection(source: text, diagnostic: text):
+    var rejected = false
+    match scv_config_parse_v1(source.bytes(), sdn_strict_limits_v1()):
+        case Ok(_): ()
+        case Err(issue):
+            rejected = true
+            expect(issue).to_contain(diagnostic)
+    expect(rejected).to_equal(true)
+
+fn check_routes_rejection(source: text, diagnostic: text):
+    var rejected = false
+    match scv_config_routes_parse_v1(source.bytes(), sdn_strict_limits_v1()):
+        case Ok(_): ()
+        case Err(issue):
+            rejected = true
+            expect(issue).to_contain(diagnostic)
+    expect(rejected).to_equal(true)
+
+fn check_config_limit_rejection(limits: SdnStrictLimitsV1, diagnostic: text):
+    var rejected = false
+    match scv_config_parse_v1(scv_config_fixture_source_v1().bytes(), limits):
+        case Ok(_): ()
+        case Err(issue):
+            rejected = true
+            expect(issue).to_contain(diagnostic)
+    expect(rejected).to_equal(true)
+
+describe "SCVN-C01 full native configuration schema":
+    it "decodes exact nested master sample with native inline arrays":
+        val config = setup_scv_fixture()
+        expect(config.schema_version).to_equal(1)
+        expect(config.profile).to_equal("native_v1")
+        expect(config.validated).to_equal(true)
+        expect(config.settings.keys().len()).to_equal(8)
+        expect(config.routes.len()).to_equal(9)
+        expect(config.source_sha256).to_equal(sha256_u8_hex(scv_config_fixture_source_v1().bytes()))
+        expect(config.routes_sha256).to_equal(sha256_u8_hex(scv_config_fixture_routes_v1().bytes()))
+
+    it "rejects duplicate top-level and nested fields":
+        val source = scv_config_fixture_source_v1()
+        check_config_rejection("schema_version: 1\n" + source, "duplicate")
+        check_config_rejection(source.replace("        client_mode:", "        client_mode: hybrid\n        client_mode:"), "duplicate")
+
+    it "rejects unknown mandatory fields and nested typos":
+        val source = scv_config_fixture_source_v1()
+        check_config_rejection(source + "future_required: true\n", "unknown_field")
+        check_config_rejection(source.replace("edit_debounce_ms", "edit_debouce_ms"), "unknown_field")
+        check_config_rejection(source.replace("topology:", "topolgy:"), "unknown_field")
+
+    it "rejects unsupported version missing sections and incorrect scalar types":
+        val source = scv_config_fixture_source_v1()
+        check_config_rejection(source.replace("schema_version: 1", "schema_version: 2"), "schema_version")
+        check_config_rejection(source.replace("schema_version: 1", "schema_version: true"), "wrong_type")
+        check_config_rejection("schema_version: 1\nscv:\n    topology: hybrid\n", "missing_field")
+        check_config_rejection(source.replace("edit_debounce_ms: 150", "edit_debounce_ms: 150ms"), "wrong_type")
+        check_config_rejection(source.replace("edit_debounce_ms: 150", "edit_debounce_ms: -1"), "range")
+
+    it "rejects malformed input rather than recovering partial config":
+        val source = scv_config_fixture_source_v1()
+        check_config_rejection(source + "dangling input\n", "line")
+        check_config_rejection(source.replace("client_mode: \"hybrid\"", "client_mode: \"hybrid"), "line")
+        check_config_rejection(source.replace("target_record_bytes: 16384", "target_record_bytes: 9223372036854775808"), "line")
+
+    it "preserves caller byte depth and node bounds":
+        var limits = sdn_strict_limits_v1()
+        limits.max_source_bytes = 128
+        check_config_limit_rejection(limits, "source_limit")
+        limits = sdn_strict_limits_v1()
+        limits.max_depth = 1
+        check_config_limit_rejection(limits, "depth_limit")
+        limits = sdn_strict_limits_v1()
+        limits.max_nodes = 2
+        check_config_limit_rejection(limits, "node_limit")
+        limits = sdn_strict_limits_v1()
+        limits.max_depth = 0
+        check_config_limit_rejection(limits, "invalid_limits")
+
+    it "rejects invalid UTF-8 before schema parsing":
+        val malformed: [u8] = [255u8]
+        var rejected = false
+        match scv_config_parse_v1(malformed, sdn_strict_limits_v1()):
+            case Ok(_): ()
+            case Err(issue):
+                rejected = true
+                expect(issue).to_contain("utf8")
+        expect(rejected).to_equal(true)
+
+    it "refuses unsafe values unsupported execution requests and inconsistent units":
+        val source = scv_config_fixture_source_v1()
+        for name in ["allow_secure_downgrade", "llm_proposals", "record_private_transcripts", "scalar_timestamp_winner", "nested_thread_pools", "mandatory_grammar_download"]:
+            check_config_rejection(source.replace(name + ": false", name + ": true"), name)
+        check_config_rejection(source.replace("retain_raw_copy: true", "retain_raw_copy: false"), "retain_raw_copy")
+        check_config_rejection(source.replace("maximum_batch_delay_ms: 1000", "maximum_batch_delay_ms: 1"), "range")
+        check_config_rejection(source.replace("soft_max_record_bytes: 65536", "soft_max_record_bytes: 1"), "range")
+        check_config_rejection(source.replace("structural_delta_depth: 0", "structural_delta_depth: 1"), "range")
+        check_config_rejection(source.replace("config/scv-routes.sdn", "config/../escape.sdn"), "unsafe_path")
+        check_config_rejection(source.replace("durable_default: \"blake3_256\"", "durable_default: \"xxh3_128\""), "default_not_allowed")
+
+    it "never describes an explicitly selected legacy profile as validated":
+        val legacy = scv_config_legacy_v1()
+        expect(legacy.validated).to_equal(false)
+        expect(legacy.schema_version).to_equal(0)
+        expect(legacy.profile).to_equal("legacy_default")
+        expect(scv_config_routes_path_v1(legacy)).to_equal(Err("unvalidated_config: no routes path"))
+
+describe "SCVN-C02 typed route semantics":
+    it "rejects table shape changes duplicate names IDs and routes":
+        val source = scv_config_fixture_routes_v1()
+        check_routes_rejection(source.replace("id, domain, path, profile", "id, domain, path"), "width")
+        check_routes_rejection(source.replace("id, domain, path, profile", "id, domain, path, id"), "duplicate")
+        check_routes_rejection(source.replace("\"documentation\"", "\"simple_source\""), "duplicate_route_id")
+        check_routes_rejection(source.replace("doc/**/*.md", "src/**/*.spl"), "ambiguous_route")
+        check_routes_rejection(source.replace("\"document\"", "\"documnt\""), "unsupported_value")
+
+    it "routes the same syntax according to accepted semantic role":
+        val config = setup_scv_fixture()
+        expect(scv_config_route_v1(config, "config/scv.sdn").unwrap().domain).to_equal("configuration")
+        expect(scv_config_route_v1(config, "config/scv-db/issues.schema.sdn").unwrap().domain).to_equal("database_schema")
+        expect(scv_config_route_v1(config, "data/rows.sdn").unwrap().domain).to_equal("database_data")
+        expect(scv_config_route_v1(config, "data/nested/rows.sdn").unwrap().domain).to_equal("database_data")
+
+    it "matches glob component boundaries including zero recursive directories":
+        expect(scv_config_glob_matches_v1("src/**/*.spl", "src/main.spl")).to_equal(true)
+        expect(scv_config_glob_matches_v1("src/**/*.spl", "src/deep/main.spl")).to_equal(true)
+        expect(scv_config_glob_matches_v1("src/*.spl", "src/deep/main.spl")).to_equal(false)
+        expect(scv_config_glob_matches_v1("assets/**", "assets/deep/a.bin")).to_equal(true)
+        expect(scv_config_glob_matches_v1("data/**/*.sdn", "data/x.sdn.extra")).to_equal(false)
+        expect(scv_config_glob_matches_v1("assets/**", "assets/../config/scv-policy.sdn")).to_equal(false)
+
+    it "rejects overlapping declarations independently of order":
+        val header = "schema_version: 1\nroutes |id, domain, path, profile|\n"
+        val one = "    source, source, src/**/*.spl, simple_source\n"
+        val two = "    all, opaque, src/**, opaque_conflict\n"
+        check_routes_rejection(header + one + two, "ambiguous_route")
+        check_routes_rejection(header + two + one, "ambiguous_route")
+        expect(scv_config_route_v1(setup_scv_fixture(), "unclassified.sdn")).to_equal(Err("unknown_domain: unclassified.sdn; opaque_conflict required"))
+        expect(scv_config_routes_may_overlap_v1("src/**/*.spl", "src/**/*.rs")).to_equal(false)
+
+    it "blocks protected-file rename and profile weakening under old routes":
+        val accepted = setup_scv_fixture()
+        var rejected = false
+        match scv_config_route_transition_v1(accepted, "config/scv-policy.sdn", "assets/policy.sdn", "configuration_policy"):
+            case Ok(_): ()
+            case Err(issue):
+                rejected = true
+                expect(issue).to_contain("role_transition_requires_old_policy")
+        expect(rejected).to_equal(true)
+        expect(scv_config_route_transition_v1(accepted, "config/scv-policy.sdn", "config/scv-policy.sdn", "source")).to_equal(Err("old_role_mismatch: accepted metadata disagrees with accepted route"))
+        expect(scv_config_route_transition_v1(accepted, "src/old.spl", "src/new.spl", "source").unwrap().domain).to_equal("source")
+
+describe "SCVN-C03 explicit authority intersection":
+    it "prevents local and CLI grants and enforces the smallest memory ceiling":
+        val config = setup_scv_fixture()
+        val host = scv_config_fixture_constraints_v1("host-1")
+        var old_policy = scv_config_fixture_constraints_v1("accepted-1")
+        old_policy.max_worker_memory_bytes = 4096
+        var local = scv_config_fixture_constraints_v1("local-1")
+        local.network = true
+        local.executable_providers = true
+        local.provider_ids = ["builtin_simple", "unapproved"]
+        var cli = local
+        cli.generation = "cli-1"
+        val effective = scv_config_effective_v1(config, host, old_policy, local, cli).unwrap()
+        expect(effective.network).to_equal(false)
+        expect(effective.executable_providers).to_equal(false)
+        expect(effective.llm_proposals).to_equal(false)
+        expect(effective.provider_ids).to_equal(["builtin_simple"])
+        expect(effective.max_worker_memory_bytes).to_equal(4096)
+        expect(effective.policy_generation).to_equal("accepted-1")
+
+    it "refuses a candidate secure default denied by old accepted policy":
+        var old_policy = scv_config_fixture_constraints_v1("accepted-1")
+        old_policy.secure_algorithms = ["sha256"]
+        val other = scv_config_fixture_constraints_v1("request")
+        expect(scv_config_effective_v1(setup_scv_fixture(), other, old_policy, other, other)).to_equal(Err("denied_durable_algorithm: blake3_256"))
+
+    it "distinguishes raw bytes from canonical effective identity":
+        val first = setup_scv_fixture()
+        val source = "# equivalent authored formatting\n" + scv_config_fixture_source_v1()
+        val second = scv_config_attach_routes_v1(scv_config_parse_v1(source.bytes(), sdn_strict_limits_v1()).unwrap(), scv_config_fixture_routes_v1().bytes(), sdn_strict_limits_v1()).unwrap()
+        val policy = scv_config_fixture_constraints_v1("accepted-1")
+        val one = scv_config_effective_v1(first, policy, policy, policy, policy).unwrap()
+        val two = scv_config_effective_v1(second, policy, policy, policy, policy).unwrap()
+        expect(first.source_sha256 == second.source_sha256).to_equal(false)
+        expect(one.canonical_sha256).to_equal(two.canonical_sha256)
+        var changed = policy
+        changed.generation = "accepted-2"
+        val different = scv_config_effective_v1(first, policy, changed, policy, policy).unwrap()
+        expect(one.canonical_sha256 == different.canonical_sha256).to_equal(false)
+
+    it "binds route profiles and lower limits into the effective digest":
+        val config = setup_scv_fixture()
+        val policy = scv_config_fixture_constraints_v1("accepted-1")
+        val one = scv_config_effective_v1(config, policy, policy, policy, policy).unwrap()
+        val routes = scv_config_fixture_routes_v1().replace("\"markdown_document\"", "\"reviewed_document\"")
+        val changed = scv_config_attach_routes_v1(config, routes.bytes(), sdn_strict_limits_v1()).unwrap()
+        val two = scv_config_effective_v1(changed, policy, policy, policy, policy).unwrap()
+        expect(one.canonical_sha256 == two.canonical_sha256).to_equal(false)
+        var local = policy
+        local.max_worker_memory_bytes = 1024
+        val three = scv_config_effective_v1(config, policy, policy, local, policy).unwrap()
+        expect(one.canonical_sha256 == three.canonical_sha256).to_equal(false)

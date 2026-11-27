@@ -1,7 +1,7 @@
 # WM lane rung (d): the guest renders the theme sheet with `var()` UNRESOLVED — two admission terms fail, not one
 
 - **ID:** wm_guest_css_var_unresolved_blocks_material_admission_2026-08-09
-- **Status:** OPEN
+- **Status:** fix-implemented-verification-pending (was: OPEN)
 - **Severity:** high (true blocker for SimpleOS x86_64 WM lane rung (d))
 - **Found by:** host-side reproduction of the 2026-08-08 lane serial log, 2026-08-09
 - **Lane:** `scripts/check/check-simpleos-wm-fullscreen-evidence.shs`
@@ -394,3 +394,47 @@ Retained evidence: `build/wm_lane_evidence/run_2026-08-09_0324_cssvar_receipt/`
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Out of lane: needs a live SimpleOS x86_64 WM guest render + QEMU evidence to verify CSS var() resolution. No change made.
+
+**Revalidated 2026-11-02: still plausible because the report title (Guest renders theme sheet with var() UNRESOLVED) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 — host pin on the full current sheet; still guest-only
+
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/css_var_aetheric_theme_sheet_host_spec.spl`
+feeds the full current `aetheric_dark_theme_render_snapshot().composed_css` (the
+sheet the guest window renderer uses) to the pure-Simple resolver on the host,
+on a `.wm-window` node. It passes 2/2: `background_color` = `0xCC1F1F21`
+(`--app-surface`, not the guest's `0x14FFFFFF`), and the backdrop has
+`blur(30px)` with no `var(` left. So the sheet and the resolver logic are
+correct on identical input. The defect is still the guest-only `props=0`
+divergence inside `_css_collect_custom_props`
+(`simple_web_html_layout_renderer_core_css_rules.spl:32`). Next step is still a
+guest lane re-run with the receipts. Stays OPEN until the guest admits the
+window material.
+
+## Premise re-check 2026-11-05
+
+- The `props=0` cause was measured on 2026-08-09 (guest-side
+  `_css_collect_custom_props` harvesting zero custom properties).
+- The substitution fix is landed, but the guest lane is still not green.
+- `_css_collect_custom_props` has since been rewritten. It now lives in
+  `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core_css_rules.spl`
+  (`fn _css_collect_custom_props(css: text, root_attrs: text) -> text`, line 32)
+  and takes `root_attrs`, so the 2026-08-09 measurement describes older code.
+- Current behaviour is unverified, and the bug is guest-only (the host pin spec
+  from 2026-11-03 passes on the same sheet).
+- Next step: re-run `scripts/check/check-simpleos-wm-fullscreen-evidence.shs`
+  with `SIMPLEOS_WM_READINESS_TIMEOUT_MS=420000` on a Linux host against current
+  release, and read the `css-var-unresolved` / `css-var-pass-bailed` serial
+  lines. If `props=0` persists, bisect `find_from` / `substring` in the guest.
+
+## BF-10 Fix & Verification Status (2026-11-26)
+
+- **Disposition:** `fix-implemented-verification-pending` (verify waiting — host unit specs pass; live diskless SimpleOS QEMU desktop boot verification pending).
+- **Root Fix (`src/os/compositor/simple_web_window_renderer.spl`):**
+  - Added `_canonical_theme_id`, `_embedded_theme_snapshot`, `_resolved_snapshot_from_package` (detecting missing `--app-surface` / `--ui-fg` tokens and empty `family_id` so icon-only CSS / empty SHA-256 digests / dark defaults never short-circuit embedded fallback), `_resolved_theme_package_css`, `_resolved_theme_source_fingerprint`, `_theme_solid_fallback_rgba`, `_theme_text_rgba`, and `_simple_web_theme_cache_fingerprint`.
+  - Updated `_wm_root_data_attrs`, `simple_web_external_content_frame`, and `_simple_web_content_frame_cached_impl` (canonicalizing `""`, `"light"`, and `"dark"` while falling back to the embedded `ThemeRenderSnapshot` CSS/material/SHA-256 package on diskless SimpleOS guests).
+- **Host Verification:**
+  - `SIMPLE_LIB=.../src simple.exe test test/01_unit/os/compositor/simple_web_window_renderer_spec.spl --mode=interpreter` (`28 passed, 0 failed`)
+  - `SIMPLE_LIB=.../src simple.exe test test/01_unit/os/wm_bf10/bf10_theme_css_provenance_spec.spl --mode=interpreter` (`5 passed, 0 failed`)
+- **QEMU Verification Needed:**
+  - Boot the built SimpleOS WM diskless desktop image under QEMU and verify window material admission and rendered DOM CSS variables resolve with zero missing-theme rejections.

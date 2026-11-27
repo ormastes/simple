@@ -29,13 +29,12 @@ use os.userlib.window.*
 
 use os.userlib.syscall_raw.{syscall}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE, COMP_INPUT_EVENT, COMP_CLOSE_REQUEST, COMP_FOCUS_CHANGED}
-use common.window_protocol.window_protocol.{WmCreateRequest, WmCreateResponse, WmInputEvent, WmCloseRequest, WmResizeRequest, WmMoveRequest, WmFocusEvent, WM_STATUS_OK, WM_STATUS_ERROR, WM_EVENT_CLOSE, WM_EVENT_FOCUS, WM_EVENT_RESIZE, wm_input_event}
+use common.window_protocol.window_protocol.{WmCreateRequest, WmCreateResponse, WmInputEvent, WmCloseRequest, WmResizeRequest, WmMoveRequest, WmFocusEvent, WmStatus, WM_STATUS_OK, WM_STATUS_ERROR, WM_EVENT_CLOSE, WM_EVENT_FOCUS, WM_EVENT_RESIZE, wm_input_event}
 use common.window_protocol.geometry.{WindowId, Point, Px, KeyCode, Modifiers, WmEventType}
-use std.common.base_encoding.utilities.{bytes_to_text}
 use os.userlib.process.{getpid}
 
 use os.kernel.log.klog_api.{log_raw_println}
-extern fn rt_get_args() -> [text]
+extern fn rt_get_args() -> [text]?
 extern fn rt_host_wm_client_connect(app_id: text, process_id: i64) -> i64
 extern fn rt_host_wm_client_request(client_id: i64, method: i64, window_id: i64, title: text, x: i64, y: i64, w: i64, h: i64, content: text, process_id: i64, app_id: text, timeout_ms: i64) -> (i64, i64)
 extern fn rt_host_wm_client_poll_event(client_id: i64, blocking: bool) -> (i64, i64, i64, i64, i64, i64)
@@ -166,21 +165,24 @@ impl WindowClient:
         # title_len(u32) | title(bytes) | x(i32) | y(i32) | w(i32) | h(i32)
         # | process_id(u64) | app_id_len(u32) | app_id(bytes)
         var payload: [u8] = []
-        val title_len = title.len().to_u32()
+        # Length prefixes and payload are UTF-8 bytes, not code points.
+        val title_bytes = title.bytes()
+        val title_len = title_bytes.len().to_u32()
         if self.app_id == "":
             self.app_id = _runtime_window_app_identity()
-        val app_id_len = self.app_id.len().to_u32()
+        val app_id_bytes = self.app_id.bytes()
+        val app_id_len = app_id_bytes.len().to_u32()
         _push_u32(payload, title_len)
-        for ch in title:
-            payload.push(ch.to_u8())
+        for b in title_bytes:
+            payload.push(b)
         _push_i32(payload, x)
         _push_i32(payload, y)
         _push_i32(payload, width)
         _push_i32(payload, height)
         _push_u64(payload, process_id)
         _push_u32(payload, app_id_len)
-        for ch in self.app_id:
-            payload.push(ch.to_u8())
+        for b in app_id_bytes:
+            payload.push(b)
 
         # Send request
         self._send_request(COMP_CREATE_WINDOW, payload)
@@ -269,10 +271,10 @@ impl WindowClient:
 
         var payload: [u8] = []
         _push_u64(payload, window_id)
-        val title_len = title.len().to_u32()
-        _push_u32(payload, title_len)
-        for ch in title:
-            payload.push(ch.to_u8())
+        val title_bytes = title.bytes()
+        _push_u32(payload, title_bytes.len().to_u32())
+        for b in title_bytes:
+            payload.push(b)
         self._send_request(COMP_SET_TITLE, payload)
 
         # Wait for acknowledgment
@@ -508,10 +510,10 @@ impl WindowClient:
 
         var payload: [u8] = []
         _push_u64(payload, window_id)
-        val content_len = content.len().to_u32()
-        _push_u32(payload, content_len)
-        for ch in content:
-            payload.push(ch.to_u8())
+        val content_bytes = content.bytes()
+        _push_u32(payload, content_bytes.len().to_u32())
+        for b in content_bytes:
+            payload.push(b)
         self._send_request(COMP_UPDATE_TREE, payload)
 
         val reply = self._recv_reply()
@@ -547,11 +549,14 @@ impl WindowClient:
             if event_type == 0:
                 return nil
             return WmInputEvent(
+                event_type: WmEventType.from_u32(event_type.to_u32()),
                 window_id: WindowId(value: wid.to_u64()),
-                event_type: WmEventType(value: event_type.to_u32()),
-                key_code: KeyCode(value: key.to_u32()),
-                mouse_pos: Point.xy(x.to_i32(), y.to_i32()),
-                modifiers: Modifiers(value: mods.to_u32())
+                point: Point.xy(x.to_i32(), y.to_i32()),
+                key_code: KeyCode(code: key.to_u32(), name: ""),
+                modifiers: Modifiers.from_bits(mods.to_u32()),
+                scroll_dx: 0.0,
+                scroll_dy: 0.0,
+                committed_text: ""
             )
 
         val msg_raw = syscall(SYS_IPC_RECV, self.app_port, 0, 1, 0, 0)
@@ -583,16 +588,19 @@ impl WindowClient:
             val (wid, event_type, key, x, y, mods) = rt_host_wm_client_poll_event(self.host_client_id, true)
             if event_type > 0:
                 return WmInputEvent(
+                    event_type: WmEventType.from_u32(event_type.to_u32()),
                     window_id: WindowId(value: wid.to_u64()),
-                    event_type: WmEventType(value: event_type.to_u32()),
-                    key_code: KeyCode(value: key.to_u32()),
-                    mouse_pos: Point.xy(x.to_i32(), y.to_i32()),
-                    modifiers: Modifiers(value: mods.to_u32())
+                    point: Point.xy(x.to_i32(), y.to_i32()),
+                    key_code: KeyCode(code: key.to_u32(), name: ""),
+                    modifiers: Modifiers.from_bits(mods.to_u32()),
+                    scroll_dx: 0.0,
+                    scroll_dy: 0.0,
+                    committed_text: ""
                 )
             return wm_input_event(
                 WindowId(value: self.window_id),
                 WM_EVENT_CLOSE,
-                KeyCode(value: 0),
+                KeyCode(code: 0u32, name: ""),
                 Point.xy(0, 0)
             )
 
@@ -603,7 +611,7 @@ impl WindowClient:
             return wm_input_event(
                 WindowId(value: self.window_id),
                 WM_EVENT_CLOSE,
-                KeyCode(value: 0),
+                KeyCode(code: 0u32, name: ""),
                 Point.xy(0, 0)
             )
 
@@ -706,12 +714,25 @@ impl WindowClient:
                 var modifiers: u32 = 0
                 if payload_len >= 32:
                     modifiers = _read_u32_at(payload_addr + 28)
+                var committed_text = ""
+                if payload_len >= 36:
+                    val text_len = _read_u32_at(payload_addr + 32)
+                    if text_len > 0u32 and payload_len >= 36u64 + text_len.to_u64():
+                        var raw_bytes: [u8] = []
+                        var ti: u64 = 0u64
+                        while ti < text_len.to_u64():
+                            raw_bytes = raw_bytes.push(_read_u8_at(payload_addr + 36u64 + ti))
+                            ti = ti + 1u64
+                        committed_text = bytes_to_text(raw_bytes)
                 return WmInputEvent(
+                    event_type: WmEventType.from_u32(event_type),
                     window_id: WindowId(value: wid),
-                    event_type: WmEventType(value: event_type),
-                    key_code: KeyCode(value: key_code),
-                    mouse_pos: Point.xy(mouse_x, mouse_y),
-                    modifiers: Modifiers(value: modifiers)
+                    point: Point.xy(mouse_x, mouse_y),
+                    key_code: KeyCode(code: key_code, name: ""),
+                    modifiers: Modifiers.from_bits(modifiers),
+                    scroll_dx: 0.0,
+                    scroll_dy: 0.0,
+                    committed_text: committed_text
                 )
             COMP_CLOSE_REQUEST:
                 if payload_len < 12:
@@ -720,7 +741,7 @@ impl WindowClient:
                 return wm_input_event(
                     WindowId(value: wid),
                     WM_EVENT_CLOSE,
-                    KeyCode(value: 0),
+                    KeyCode(code: 0u32, name: ""),
                     Point.xy(0, 0)
                 )
             COMP_FOCUS_CHANGED:
@@ -731,7 +752,7 @@ impl WindowClient:
                 return wm_input_event(
                     WindowId(value: wid),
                     WM_EVENT_FOCUS,
-                    KeyCode(value: focused_byte.to_u32()),
+                    KeyCode(code: focused_byte.to_u32(), name: ""),
                     Point.xy(0, 0)
                 )
             _:

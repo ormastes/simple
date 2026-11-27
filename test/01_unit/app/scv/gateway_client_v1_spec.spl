@@ -1,0 +1,66 @@
+# Client subject/integrity and credential-acquisition scenarios. No live network
+# or execution evidence is claimed by these authored specifications.
+use std.spec
+use app.scv.gateway_client_v1.{ScvGatewayClientConfigV1, scv_gateway_client_target_v1,
+    scv_gateway_client_decode_v1, scv_gateway_client_call_v1}
+use std.scv.gateway_protocol_v1.{ScvGatewayRequestV1, scv_gateway_response_ok_v1,
+    scv_gateway_response_encode_v1}
+
+var gateway_credential_calls_v1: i64 = 0
+
+fn invalid_gateway_credential_v1() -> Result<text, text>:
+    gateway_credential_calls_v1 = gateway_credential_calls_v1 + 1
+    Ok("never-send\r\nX: injected")
+
+fn unavailable_gateway_credential_v1() -> Result<text, text>:
+    gateway_credential_calls_v1 = gateway_credential_calls_v1 + 1
+    Err("secret-sentinel-must-not-escape")
+
+fn gateway_fixture_config_v1() -> ScvGatewayClientConfigV1:
+    ScvGatewayClientConfigV1(endpoint: "https://gateway.example/scv/v1", repository: "repo1",
+        allow_loopback_http: false, timeout_ms: 5000, tls_address: "192.0.2.7")
+
+fn gateway_fixture_request_v1() -> ScvGatewayRequestV1:
+    ScvGatewayRequestV1(version: 1, id: "request1", repository: "repo1",
+        method: "read_blob", ref_or_oid: "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391")
+
+describe "gateway client preflight and secrets":
+    it "rejects wrong repository and paths before acquiring any credential":
+        gateway_credential_calls_v1 = 0
+        var config = gateway_fixture_config_v1()
+        var request = gateway_fixture_request_v1()
+        request.repository = "other"
+        expect(scv_gateway_client_call_v1(config, request, invalid_gateway_credential_v1).unwrap_err()).to_equal("gateway_request_invalid")
+        config.endpoint = "https://gateway.example/other"
+        expect(scv_gateway_client_target_v1(config).unwrap_err()).to_equal("gateway_path_invalid")
+        expect(gateway_credential_calls_v1).to_equal(0)
+
+    it "acquires once and refuses header-injection tokens before transport":
+        gateway_credential_calls_v1 = 0
+        expect(scv_gateway_client_call_v1(gateway_fixture_config_v1(), gateway_fixture_request_v1(),
+            invalid_gateway_credential_v1).unwrap_err()).to_equal("gateway_credentials_invalid")
+        expect(gateway_credential_calls_v1).to_equal(1)
+
+    it "redacts credential-provider failures":
+        gateway_credential_calls_v1 = 0
+        val error = scv_gateway_client_call_v1(gateway_fixture_config_v1(), gateway_fixture_request_v1(),
+            unavailable_gateway_credential_v1).unwrap_err()
+        expect(error).to_equal("gateway_credentials_unavailable")
+        expect(error.contains("secret-sentinel")).to_equal(false)
+        expect(gateway_credential_calls_v1).to_equal(1)
+
+describe "gateway client exact-subject blob verification":
+    it "verifies the independently known Git empty-blob SHA1":
+        val request = gateway_fixture_request_v1()
+        val response = scv_gateway_response_ok_v1(request, "repo1", request.ref_or_oid, "blob", []).unwrap()
+        val wire = scv_gateway_response_encode_v1(response, request, "repo1").unwrap()
+        expect(scv_gateway_client_decode_v1(wire, request, "repo1").unwrap().oid).to_equal(request.ref_or_oid)
+        var other = request
+        other.id = "different"
+        expect(scv_gateway_client_decode_v1(wire, other, "repo1").unwrap_err()).to_equal("gateway_response_invalid")
+
+    it "rejects a sender-chosen valid payload SHA whose bytes do not hash to the requested Git OID":
+        val request = gateway_fixture_request_v1()
+        val response = scv_gateway_response_ok_v1(request, "repo1", request.ref_or_oid, "blob", [0u8, 255u8, 10u8]).unwrap()
+        val wire = scv_gateway_response_encode_v1(response, request, "repo1").unwrap()
+        expect(scv_gateway_client_decode_v1(wire, request, "repo1").unwrap_err()).to_equal("gateway_blob_oid_mismatch")

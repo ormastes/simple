@@ -1,0 +1,109 @@
+# @req REQ-SSPEC-UNIT
+"""
+# Claude full companion roll
+
+As a caret user, my buddy companion must be derived deterministically from my
+account id, with rarity and stats following the documented thresholds.
+"""
+
+use std.spec.step
+use std.spec.*
+use app.llm_caret.claude_full.buddy.companion.*
+
+describe "Claude full companion roll":
+    it "maps rarity thresholds across the 0-999 range":
+        step("rarity")
+        expect(rollRarity(0)).to_equal("common")
+        expect(rollRarity(599)).to_equal("common")
+        expect(rollRarity(600)).to_equal("uncommon")
+        expect(rollRarity(850)).to_equal("rare")
+        expect(rollRarity(960)).to_equal("epic")
+        expect(rollRarity(995)).to_equal("legendary")
+        expect(rollRarity(-1)).to_equal("legendary")
+
+    it "rolls a shiny common fox from seed zero":
+        step("seed 0")
+        val r = rollFrom(0)
+        expect(r.bones.rarity).to_equal("common")
+        expect(r.bones.species).to_equal("fox")
+        expect(r.bones.eye).to_equal("wide")
+        expect(r.bones.hat).to_equal("none")
+        expect(r.bones.shiny).to_equal(true)
+        expect(r.bones.stats.helpfulness).to_equal(37)
+        expect(r.bones.stats.mischief).to_equal(1)
+        expect(r.bones.stats.focus).to_equal(39)
+        expect(r.bones.stats.luck).to_equal(60)
+        expect(r.bones.stats.min()).to_equal(1)
+        expect(r.bones.stats.max()).to_equal(60)
+        expect(r.inspirationSeed).to_equal(0)
+
+    it "rolls a legendary with a hat and capped peak stat from seed 995":
+        step("seed 995")
+        val r = rollFrom(995)
+        expect(r.bones.rarity).to_equal("legendary")
+        expect(r.bones.species).to_equal("frog")
+        expect(r.bones.eye).to_equal("dot")
+        expect(r.bones.hat).to_equal("crown")
+        expect(r.bones.shiny).to_equal(false)
+        expect(r.bones.stats.helpfulness).to_equal(77)
+        expect(r.bones.stats.mischief).to_equal(48)
+        expect(r.bones.stats.focus).to_equal(100)
+        expect(r.bones.stats.luck).to_equal(80)
+
+    it "hashes text by weighted alphabet position":
+        step("hash")
+        expect(hashString("a")).to_equal(1)
+        expect(hashString("ab")).to_equal(5)
+        expect(hashString("A")).to_equal(27)
+        expect(hashString("!")).to_equal(37)
+        expect(hashString("")).to_equal(0)
+        expect(charScore("_")).to_equal(63)
+
+    it "derives the same companion for the same user and a salted seed":
+        step("roll determinism")
+        val a = roll("user-1")
+        val b = roll("user-1")
+        expect(rollSignature("user-1")).to_equal(rollSignature("user-1"))
+        expect(a.inspirationSeed).to_equal(hashString("user-1" + salt()))
+        expect(a.bones.species).to_equal(b.bones.species)
+        expect(rollWithSeed("user-1" + salt()).inspirationSeed).to_equal(a.inspirationSeed)
+
+    it "caches the roll for the same key and recomputes for a new key":
+        step("cache")
+        var cache = RollCache.empty()
+        val first = cache.roll("u1")
+        expect(cache.key).to_equal("u1" + salt())
+        expect(first.inspirationSeed).to_equal(hashString("u1" + salt()))
+        val second = cache.roll("u2")
+        expect(cache.key).to_equal("u2" + salt())
+        expect(second.inspirationSeed).to_equal(hashString("u2" + salt()))
+
+    it "picks the user id from oauth, then user id, then anon":
+        step("user id")
+        expect(companionUserId(CompanionConfig.new("oauth", "uid"))).to_equal("oauth")
+        expect(companionUserId(CompanionConfig.new("", "uid"))).to_equal("uid")
+        expect(companionUserId(CompanionConfig.new("", ""))).to_equal("anon")
+
+    it "returns no companion until one is stored, then merges soul with bones":
+        step("getCompanion")
+        val empty = CompanionConfig.new("", "uid")
+        expect(getCompanion(empty).?).to_equal(false)
+        val stored = empty.withStored("Pip", "happy")
+        val c = getCompanion(stored) ?? Companion.new("", "", roll("x").bones)
+        expect(c.name).to_equal("Pip")
+        expect(c.mood).to_equal("happy")
+        expect(c.bones.species).to_equal(roll("uid").bones.species)
+
+    it "exposes the static tables and numeric helpers":
+        step("tables")
+        expect(speciesList().len()).to_equal(4)
+        expect(eyesList()[1]).to_equal("wide")
+        expect(hatsList()[2]).to_equal("crown")
+        expect(rarityList()[4]).to_equal("legendary")
+        expect(statNames()[3]).to_equal("luck")
+        expect(rarityFloor("rare")).to_equal(25)
+        expect(rarityFloor("bogus")).to_equal(5)
+        expect(positiveMod(-7, 5)).to_equal(3)
+        expect(min4(4, 2, 9, 3)).to_equal(2)
+        expect(max4(4, 2, 9, 3)).to_equal(9)
+        expect(pick(["a", "b", "c"], 4)).to_equal("b")

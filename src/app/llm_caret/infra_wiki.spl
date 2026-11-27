@@ -60,7 +60,7 @@ fn _schema(name: text, desc: text, props: [text], required: [text]) -> text:
         _LB() + "\"type\": \"object\", \"properties\": " + _LB() + props.join(", ") + _RB() +
         ", \"required\": [" + req.join(", ") + "]" + _RB() + _RB()
 
-fn wiki_tool_schemas() -> [text]:
+pub fn wiki_tool_schemas() -> [text]:
     [
         _schema("wiki_search", "Search the configured wiki (read-only). One line per hit: page id, title, url (tab-separated).",
             [_prop("query", "string", "Search text (Confluence: title match; local: case-insensitive substring over *.md)")],
@@ -87,7 +87,7 @@ fn _is_env_name(s: text) -> bool:
     if s == "":
         return false
     var i = 0
-    while i < s.len():
+    while i < s.byte_len():
         val ch = s.substring(i, i + 1)
         i = i + 1
         val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
@@ -96,7 +96,7 @@ fn _is_env_name(s: text) -> bool:
     true
 
 # "" when usable, else an honest error. Never echoes a token value.
-fn wiki_config_error() -> text:
+pub fn wiki_config_error() -> text:
     if not wiki_configured():
         return WIKI_NOT_CONFIGURED
     val backend = config_wiki_backend()
@@ -141,7 +141,7 @@ fn _confluence_cfg() -> ItfConfig:
 fn _confluence_page_url(page_id: text) -> text:
     var base = config_wiki_base_url()
     while base.ends_with("/"):
-        base = base.substring(0, base.len() - 1)
+        base = base.substring(0, base.byte_len() - 1)
     base + "/pages/" + page_id
 
 # ============================================================================
@@ -151,14 +151,21 @@ fn _confluence_page_url(page_id: text) -> text:
 fn _norm_dir(p: text) -> text:
     var r = p
     while r.len() > 1 and r.ends_with("/"):
-        r = r.substring(0, r.len() - 1)
+        r = r.substring(0, r.byte_len() - 1)
     r
 
+# True for a POSIX absolute path or a Windows drive path (`C:/x`; backslashes
+# are folded to `/` by the callers before this is asked).
+fn _is_abs_path(p: text) -> bool:
+    if p.starts_with("/"):
+        return true
+    p.byte_len() >= 3 and p.substring(1, 2) == ":" and p.substring(2, 3) == "/"
+
 fn _local_root(ws_root: text) -> text:
-    val root = config_wiki_root()
-    if root.starts_with("/"):
+    val root = config_wiki_root().replace("\\", "/")
+    if _is_abs_path(root):
         return _norm_dir(root)
-    _norm_dir(_norm_dir(ws_root) + "/" + root)
+    _norm_dir(_norm_dir(ws_root.replace("\\", "/")) + "/" + root)
 
 fn _has_dotdot(path: text) -> bool:
     for part in path.split("/"):
@@ -173,7 +180,7 @@ fn _local_guard(root: text, rel: text) -> (text, text):
     if _has_dotdot(rel):
         return ("", "path traversal ('..') is not allowed: " + rel)
     var full = rel
-    if not rel.starts_with("/"):
+    if not _is_abs_path(rel):
         full = root + "/" + rel
     if full == root or full.starts_with(root + "/"):
         return (full, "")
@@ -187,7 +194,7 @@ fn _local_title(rel: text, body: text) -> text:
     val parts = rel.split("/")
     var name = parts[parts.len() - 1]
     if name.ends_with(".md"):
-        name = name.substring(0, name.len() - 3)
+        name = name.substring(0, name.byte_len() - 3)
     name
 
 fn _slug(title: text) -> text:
@@ -203,8 +210,16 @@ fn _slug(title: text) -> text:
         elif out != "" and not out.ends_with("_"):
             out = out + "_"
     while out.ends_with("_"):
-        out = out.substring(0, out.len() - 1)
+        out = out.substring(0, out.byte_len() - 1)
     out
+
+# A `file:` URL always has an empty host: `file:///D:/x`, never `file://D:/x`,
+# which names a host called `D:`.
+fn _file_url(path: text) -> text:
+    val normalized = path.replace("\\", "/")
+    if normalized.starts_with("/"):
+        return "file://" + normalized
+    "file:///" + normalized
 
 fn _local_search(ws_root: text, query: text) -> (bool, text):
     val root = _local_root(ws_root)
@@ -214,16 +229,20 @@ fn _local_search(ws_root: text, query: text) -> (bool, text):
     var rows: [text] = []
     var hits = 0
     for path in dir_walk(root):
-        if not path.ends_with(".md"):
+        # dir_walk returns OS-native separators; every consumer here (rel ids,
+        # title fallback, slash-splitting) speaks forward slashes. Windows
+        # returned `notes\page.md` ids that wiki_read could not look up.
+        val norm = path.replace("\\", "/")
+        if not norm.ends_with(".md"):
             continue
-        val rel = path.substring(root.len() + 1)
+        val rel = norm.substring(root.byte_len() + 1)
         val body = read_file_text(path)
         if rel.lower().contains(needle) or body.lower().contains(needle):
             hits = hits + 1
             if hits > WIKI_SEARCH_MAX:
                 rows.push("... [more hits omitted]")
                 break
-            rows.push(rel + "\t" + _local_title(rel, body) + "\tfile://" + path)
+            rows.push(rel + "\t" + _local_title(rel, body) + "\t" + _file_url(path))
     if rows.len() == 0:
         return (true, "(no pages under " + root + " match '" + query + "')")
     (true, rows.join("\n"))

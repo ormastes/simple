@@ -1,3 +1,4 @@
+#![allow(REQC004)]
 # HirModule codec generator — src/app/compiler_schema/codec_gen.spl
 #
 # Generates src/compiler/20.hir/generated/hir_codec.spl: a line-oriented
@@ -44,13 +45,12 @@ fn codec_decl_sources() -> [text]:
         "src/compiler/20.hir/hir_types.spl",
         "src/compiler/20.hir/hir_definitions.spl",
         "src/compiler/20.hir/hir_operators.spl",
-        "src/compiler/00.common/diagnostics/span.spl",
+        "src/lib/common/diagnostics/span.spl",
         "src/compiler/00.common/dependency/visibility.spl",
         "src/compiler/00.common/dynamic_identity/closure.spl",
         "src/compiler/00.common/_Attributes/decl_attrs.spl",
         "src/compiler/30.types/_TypeLayout/layout_core.spl",
-        "src/compiler/10.frontend/parser_types_expr.spl",
-        "src/lib/common/facet_abi.spl"
+        "src/compiler/10.frontend/parser_types_expr.spl"
     ]
 
 fn codec_opaque_types() -> [text]:
@@ -85,7 +85,6 @@ fn codec_use_lines() -> text:
     out = out + "use compiler.types.type_layout.{{LayoutAttr, TypeLayoutKind}}\n"
     out = out + "use compiler.common.attributes.{{FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata, VhdlClockedMetadata, VhdlGenericMetadata, VhdlReturnFieldMetadata, VhdlResetPolarity, VhdlResetSynchrony, OptimizationReq, OptimizationReqLevel, OptimizationBackend}}\n"
     out = out + "use compiler.frontend.parser_types_expr.{{AsmTargetSpec, AsmConstraintKind, AsmLocation, Type, TypeKind, Expr}}\n"
-    out = out + "use common.facet_abi.*\n"
     out = out + "use compiler.frontend.core.flat_pool_codec.{{FlatPoolReader, flat_pool_parse_i64, flat_pool_unescape}}\n"
     out = out + "use compiler.hir.hir_codec_support.{{HirCodecWriter, hc_enc_opaque_expr, hc_dec_opaque_expr, hc_enc_opaque_block_value, hc_dec_opaque_block_value, hc_bad_tag, hc_read_f64, hc_enc_enum_bool, hc_enc_enum_text, hc_enc_enum_char, hc_put_char, hc_read_char, hc_restore_enum_nil}}\n"
     out = out + "use compiler.hir.hir_codec_key_order.{{hc_order_i64_keys_v1, hc_order_text_keys_v1, hc_order_symbol_id_keys_v1}}\n"
@@ -135,7 +134,7 @@ fn _split_top_colon(s: text) -> [text]:
         elif ch == ")" or ch == "]" or ch == "}" or ch == ">":
             depth = depth - 1
         elif ch == ":" and depth == 0:
-            return [s.substring(0, i).trim(), s.substring(i + 1, s.len()).trim()]
+            return [s.substring(0, i).trim(), s.substring(i + 1, s.byte_len()).trim()]
         i = i + 1
     [s.trim()]
 
@@ -182,19 +181,19 @@ class CodecUniverse:
                 val t = _codec_no_comment(line).trim()
                 if (t.starts_with("struct ") or t.starts_with("class ")) and t.ends_with(":"):
                     val start = if t.starts_with("struct "): 7 else: 6
-                    val nm = t.substring(start, t.len() - 1).trim()
+                    val nm = t.substring(start, t.byte_len() - 1).trim()
                     if nm.find("<") < 0:
                         snames.push(nm)
                         owners.push(rel)
                 if t.starts_with("enum ") and t.ends_with(":"):
-                    val nm = t.substring(5, t.len() - 1).trim()
+                    val nm = t.substring(5, t.byte_len() - 1).trim()
                     if nm.find("<") < 0:
                         enames.push(nm)
                         owners.push(rel)
                 if t.starts_with("type ") and t.find("=") > 0:
                     val eq = t.find("=")
                     anames.push(t.substring(5, eq).trim())
-                    atargets.push(t.substring(eq + 1, t.len()).trim())
+                    atargets.push(t.substring(eq + 1, t.byte_len()).trim())
         CodecUniverse(sources: texts, source_names: names, struct_names: snames,
             enum_names: enames, alias_names: anames, alias_targets: atargets,
             decl_owner: owners, opaques: codec_opaque_types())
@@ -247,7 +246,7 @@ class CodecUniverse:
         if t == "":
             _codec_fail("hir codec generator: empty type text")
         if t.ends_with("?"):
-            return TypeShape(cat: "opt", a: t.substring(0, t.len() - 1).trim(), b: "", name: "")
+            return TypeShape(cat: "opt", a: t.substring(0, t.byte_len() - 1).trim(), b: "", name: "")
         val alias = self.alias_of(t)
         if alias != "":
             return self.classify(alias)
@@ -262,20 +261,20 @@ class CodecUniverse:
         if t == "f64":
             return TypeShape(cat: "prim_f64", a: "", b: "", name: "")
         if t.starts_with("[") and t.ends_with("]"):
-            val inner = t.substring(1, t.len() - 1).trim()
+            val inner = t.substring(1, t.byte_len() - 1).trim()
             if inner.starts_with("(") and inner.ends_with(")"):
-                val sides = _split_top(inner.substring(1, inner.len() - 1))
+                val sides = _split_top(inner.substring(1, inner.byte_len() - 1))
                 if sides.len() != 2:
                     _codec_fail("hir codec generator: unsupported tuple element `{t}`")
                 return TypeShape(cat: "pair", a: sides[0].trim(), b: sides[1].trim(), name: "")
             return TypeShape(cat: "list", a: inner, b: "", name: "")
         if t.starts_with("{") and t.ends_with("}"):
-            val kv = _split_top_colon(t.substring(1, t.len() - 1).trim())
+            val kv = _split_top_colon(t.substring(1, t.byte_len() - 1).trim())
             if kv.len() != 2:
                 _codec_fail("hir codec generator: unsupported dict type `{t}`")
             return TypeShape(cat: "dict", a: kv[0], b: kv[1], name: "")
         if t.starts_with("Dict<") and t.ends_with(">"):
-            val kv = _split_top(t.substring(5, t.len() - 1))
+            val kv = _split_top(t.substring(5, t.byte_len() - 1))
             if kv.len() != 2:
                 _codec_fail("hir codec generator: unsupported dict type `{t}`")
             return TypeShape(cat: "dict", a: kv[0].trim(), b: kv[1].trim(), name: "")
@@ -319,9 +318,9 @@ fn extract_codec_struct_fields(source: text, name: text) -> [FieldDecl]:
         if trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static ") or trimmed.starts_with("@") or trimmed.starts_with("pub "):
             continue
         if trimmed.starts_with("var "):
-            trimmed = trimmed.substring(4, trimmed.len()).trim()
+            trimmed = trimmed.substring(4, trimmed.byte_len()).trim()
         elif trimmed.starts_with("val "):
-            trimmed = trimmed.substring(4, trimmed.len()).trim()
+            trimmed = trimmed.substring(4, trimmed.byte_len()).trim()
         val kv = _split_top_colon(trimmed)
         if kv.len() != 2:
             continue
@@ -433,24 +432,35 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
     # state instead of crashing on `.kind` of nil.
     if s.cat == "node" or s.cat == "opaque":
         val callee = if s.cat == "node": enc_fn_name(s.name) else: "hc_enc_opaque_" + _codec_snake(s.name)
-        # @workaround bug=a174_struct_nil_comparison_dispatch_2026_10_16 recover=e458621e87670403385147dd4380acb0b925153d reason=old-producer-record-presence-dispatch
-        val record_presence = s.cat == "opaque" or u.is_struct(s.name)
         # v21 (2026-10-18): bind the node ONCE and use that word for both the
         # presence check and the encode call. The guard-first double read
         # (check, then argument) drew non-nil then ERASED-NIL on
         # module.functions, so the required-entry gate refused EVERY module
         # (p2_add: stores=0 refused=everything) even though every entry was
         # present. The single annotated bind is the codec-pool proven class.
+        #
+        # 2026-10-23: bind into an OPTIONAL local. A DECLARED-TYPED bind
+        # materialises a typed value, and a nil payload faulted inside that
+        # copy-in BEFORE the guard below could run -- SIGSEGV dereferencing
+        # nil's immediate 0x3 at hc_enc_hir_expr_kind+42634
+        # (doc/08_tracking/bug/stage2_sanity_module_path_naming_probe_segv_2026_10_22.md).
+        # An optional local accepts nil legitimately, so there is no copy-in to
+        # fault. It also lets `.?` cover ENUMS as well as structs: the arm this
+        # replaces used `== nil` for enums, which compares against nil's
+        # immediate and is unreliable under staged-native codegen (see
+        # HirCodecWriter.put_i64's note on integer 3). Still exactly ONE read of
+        # the payload, so the v21 failure above does not return; the `!` unwrap
+        # happens only on the branch where presence is already proven.
         val bind_k = c.next()
-        var out = indent + "val enc_node_v" + "{bind_k}" + ": " + _strip_default(s.name).trim() + " = " + v + "\n"
-        out = out + (if record_presence: indent + "if not enc_node_v{bind_k}.?:\n" else: indent + "if enc_node_v{bind_k} == nil:\n")
+        var out = indent + "val enc_node_v" + "{bind_k}" + ": " + _strip_default(s.name).trim() + "? = " + v + "\n"
+        out = out + indent + "if not enc_node_v{bind_k}.?:\n"
         if required_node:
             out = out + indent + "    w.reject(\"missing_required_hir_module_function_entry\")\n"
         else:
             out = out + indent + "    w.put_i64(0)\n"
         out = out + indent + "else:\n"
         out = out + indent + "    w.put_i64(1)\n"
-        out = out + indent + "    " + callee + "(w, enc_node_v{bind_k})\n"
+        out = out + indent + "    " + callee + "(w, enc_node_v{bind_k}!)\n"
         return out
     val k = c.next()
     if s.cat == "opt":
@@ -461,12 +471,12 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
         out = out + indent + "    w.put_i64(0)\n"
         return out
     if s.cat == "list":
-        var out = indent + "w.put_i64(if " + v + " == nil: 0 else: " + v + ".len())\n"
+        var out = indent + "w.put_i64(if not " + v + ".?: 0 else: " + v + ".len())\n"
         out = out + indent + "for e{k} in (" + v + " ?? []):\n"
         out = out + _emit_enc(u, s.a, "e{k}", indent + "    ", c)
         return out
     if s.cat == "pair":
-        var out = indent + "w.put_i64(if " + v + " == nil: 0 else: " + v + ".len())\n"
+        var out = indent + "w.put_i64(if not " + v + ".?: 0 else: " + v + ".len())\n"
         out = out + indent + "for (pa{k}, pb{k}) in (" + v + " ?? []):\n"
         out = out + _emit_enc(u, s.a, "pa{k}", indent + "    ", c)
         out = out + _emit_enc(u, s.b, "pb{k}", indent + "    ", c)
@@ -477,6 +487,7 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
         # and truncates their tagged pointers before a by-value codec call.
         var out = indent + "var ks{k}: [" + s.a + "] = []\n"
         out = out + indent + "if " + v + " != nil:\n"
+        out = out + indent + "    if not w.account_key_snapshot(" + v + ".len()): return\n"
         out = out + indent + "    ks{k} = " + v + ".keys()\n"
         val order_fn = if s.a == "i64": "hc_order_i64_keys_v1"
             elif s.a == "text": "hc_order_text_keys_v1"
@@ -484,17 +495,315 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
             else: ""
         if order_fn == "":
             _codec_fail("hir codec generator: unsupported dictionary key order " + s.a)
+        val admission = if s.a == "text": "account_text_key_order(ks{k})" else: "account_scalar_key_order(ks{k}.len())"
+        out = out + indent + "if not w." + admission + ": return\n"
         out = out + indent + "ks{k} = " + order_fn + "(ks{k})\n"
         out = out + indent + "w.put_i64(ks{k}.len())\n"
         out = out + indent + "for dk{k} in ks{k}:\n"
         out = out + _emit_enc(u, s.a, "dk{k}", indent + "    ", c, required_node)
+        # A Dict<_, bool> value is read through a typed LOCAL, never straight
+        # off the field projection: staged-native types that projection temp
+        # as i64, so `d[k]` decoded the bool word with the integer `>>3` arm
+        # (11 -> 1, 0 -> 0), put_bool rendered "1"/"0" rather than
+        # "true"/"false" and wrote the nil token N, and the decoder refused
+        # every module carrying an impl (HirImpl.method_return_is_array /
+        # method_return_is_optional). A typed local resolves Dict(_, bool).
+        # doc/08_tracking/bug/hir_cache_selfcheck_nil_in_non_optional_scalar_2026-10-25.md
+        if u.classify(s.b).cat == "prim_bool":
+            out = out + indent + "    val dm{k}: Dict<" + s.a + ", bool> = " + v + "\n"
+            # Branch on the value instead of rendering it: the typed local alone
+            # did NOT fix staged-native (stage2 d72188e68ec still logged 313
+            # SELFCHECK FAILED token=N) -- put_bool still saw the int-decoded
+            # word 1/0 and rendered it as neither true nor false. Truthiness of
+            # that word is correct, and put_bool on a literal renders exactly.
+            out = out + indent + "    if dm{k}[dk{k}]:\n" + indent + "        w.put_bool(true)\n"
+            out = out + indent + "    else:\n" + indent + "        w.put_bool(false)\n"
+            return out
         out = out + _emit_enc(u, s.b, v + "[dk{k}]", indent + "    ", c, required_node)
         return out
     _codec_fail("hir codec generator: unhandled shape {s.cat}")
 
+fn _emit_nil_scalar_reject(u: CodecUniverse, type_text: text, target: text, indent: text, raw_name: text,
+        owner_field: text) -> text:
+    """A non-optional scalar slot must never hold the wire nil sentinel: refuse the blob.
+
+    The guard reads the RAW wire token, never `target == nil`: staged-native
+    codegen compares a raw i64 against nil's immediate (so every integer 3
+    reads as nil) and a raw bool against true (so every true reads as nil) --
+    the exact hazards HirCodecWriter.put_i64/put_bool document. The value
+    comparison therefore refused nearly every module under the self-hosted
+    compiler (mass `[hir-cache] SELFCHECK FAILED reason=decode` in the phase-3
+    build). Wire nil for i64/bool is exactly the bare N token; text gets no
+    guard at all: nil text is a legitimate in-memory state that put_text and
+    put_nil_text_wire round-trip as the escaped-N wire token, and rejecting it
+    refused every module carrying, e.g., an AsmTargetSpec with os/abi/backend
+    unset. `raw_name` is the `rawK` binder _emit_dec emitted immediately
+    before (one counter step back).
+    """
+    val cat = u.classify(type_text).cat
+    if cat == "prim_i64" or cat == "prim_bool":
+        return indent + "if " + raw_name + " == \"N\":\n" + indent + "    r.reject_malformed(\"nil_in_non_optional_scalar:{owner_field}\")\n"
+    ""
+
+pub fn bare_node_placeholder_v1(decl_type: text) -> text:
+    """A bare (never Option-boxed) placeholder literal for a NON-optional
+    node/opaque field of `decl_type`, or "" when the type has none.
+
+    Stage3 incident 2026-11-04 (s3_fable39 hello, representation_observe_function_v1+0x31d,
+    addr 0): the generated decoder read every node field into a
+    `var f_x: T? = nil` local and stored that local into the NON-optional
+    struct field (`return_type: f_return_type`, `type_: f_type_`, 9 sites).
+    The stage2-built compiler keeps the Option transport word on that store,
+    so the by-value copy-in prologue of the next callee reads
+    `return_type.span` as the word 1, passes the tag guard and faults on
+    NULL -- the same class as the tuple `.N` producer (PR #6625). Only
+    DECODED HIR carries it, which is why the file-worker route (unit children
+    decode the HIR blob) faulted while the in-process route did not.
+
+    The placeholder is a literal struct construction: no `Span.empty()` call
+    (a struct-returning static fn is itself a known stage2 miscompile shape,
+    fable_milestones P4) and no `nil` in a non-optional slot. Types without
+    a cheap literal keep the optional local; a wrong placeholder here would
+    be worse than the box it replaces.
+    """
+    if decl_type == "HirType":
+        return "HirType(kind: HirTypeKind.Error, span: Span(start: 0, end: 0, line: 0, col: 0, file: \"\", length: 0))"
+    if decl_type == "SymbolId":
+        return "SymbolId(id: -1)"
+    if decl_type == "Span":
+        return "Span(start: 0, end: 0, line: 0, col: 0, file: \"\", length: 0)"
+    ""
+
+fn bare_placeholder_literal_v1(u: CodecUniverse, type_text: text, depth: i64) -> text:
+    """A literal that builds a bare (never Option-boxed) placeholder of
+    `type_text`, or "" when no safe placeholder exists.
+
+    Generalises bare_node_placeholder_v1 (2026-11-05, stage3 s3_fable41 hello,
+    representation_observe_function_v1+0xa26, fault address -1): after the
+    HirType/SymbolId/Span fix the by-value copy-in of a decoded HirFunction
+    faulted one nested struct later, in func_attr.optimization_req, because the
+    decoder still read every other non-optional struct/enum field through a
+    `var f_x: T? = nil` local. Recursive over the declaration universe:
+    primitives get their zero, an optional gets nil, list/pair/dict get an empty
+    container, a struct is built over ALL its fields, an enum uses its first
+    payload-less variant. Any component without a placeholder (an opaque
+    declaration, an enum with no unit variant, depth beyond 6) makes the whole
+    literal "" so the caller keeps today's `T?` local -- a wrong placeholder is
+    worse than the box it replaces.
+    """
+    if depth > 6:
+        return ""
+    val t = _strip_default(type_text).trim()
+    if t == "":
+        return ""
+    val legacy = bare_node_placeholder_v1(t)
+    if legacy != "":
+        return legacy
+    val s = u.classify(t)
+    if s.cat == "prim_i64":
+        return "0"
+    if s.cat == "prim_bool":
+        return "false"
+    if s.cat == "prim_text":
+        return "\"\""
+    if s.cat == "prim_f64":
+        return "0.0"
+    if s.cat == "prim_char":
+        return "0 as char"
+    if s.cat == "opt":
+        return "None"
+    if s.cat == "list" or s.cat == "pair":
+        return "[]"
+    if s.cat == "dict":
+        return "{}"
+    if s.cat != "node":
+        return ""
+    val decl = u.decl_of(s.name)
+    if decl.is_enum:
+        for row in decl.variants:
+            if parse_payload_fields(row.payload_schema).len() == 0:
+                return s.name + "." + row.variant
+        for row in decl.variants:
+            val pfields = parse_payload_fields(row.payload_schema)
+            var pparts: [text] = []
+            var all_ok = true
+            for pf in pfields:
+                val plit = bare_placeholder_literal_v1(u, pf.type_text, depth + 1)
+                if plit == "":
+                    all_ok = false
+                else:
+                    pparts.push(plit)
+            if all_ok and pparts.len() > 0:
+                return s.name + "." + row.variant + "(" + _join(pparts, ", ") + ")"
+        return ""
+    var parts: [text] = []
+    for f in decl.fields:
+        val lit = bare_placeholder_literal_v1(u, f.type_text, depth + 1)
+        if lit == "":
+            return ""
+        parts.push(f.binder + ": " + lit)
+    s.name + "(" + _join(parts, ", ") + ")"
+
+fn _presence_flag_of(u: CodecUniverse, decl: CodecDecl, f: FieldDecl) -> text:
+    """The `has_<field>` bool flag binder that is the presence authority for a
+    non-legacy field, or "". HirFunction export_attr / driver_manifest_attr /
+    vhdl_metadata (and HirClass export_attr, ...) are absent under their flag.
+    The encoder writes the presence word from the FLAG, so the decoder can
+    store a bare placeholder for an absent value (no Option transport word in
+    the non-optional slot, bug hir_codec_present_flagged_attr_option_word_
+    2026-11-05) and the placeholder still re-encodes as absent. The legacy
+    HirType / SymbolId / Span literals keep their payload-word encoding
+    (HirExpr.type_ under has_type_)."""
+    if u.classify(f.type_text).cat != "node":
+        return ""
+    if bare_node_placeholder_v1(_strip_default(f.type_text).trim()) != "":
+        return ""
+    for g in decl.fields:
+        if g.binder == "has_" + f.binder and _strip_default(g.type_text).trim() == "bool":
+            return g.binder
+    ""
+
+fn _text_presence_flag_of(u: CodecUniverse, decl: CodecDecl, f: FieldDecl) -> text:
+    """The `has_<field>` bool flag binder for a non-optional `text` field, or "".
+
+    An absent `has_*`-flagged text field can hold `nil` in lowered HIR
+    (e.g. `specialization_of: nil` when `has_specialization_of: false`), so the
+    encoder normalizes `!node.<flag>` and `nil` to `""` (`\n` on wire), while
+    `_field_is_bare` keeps the decoder on `""` so `"\\N"` never widens the
+    local to `Option<text>` (which staged-native boxes via `rt_enum_new`).
+    """
+    if u.classify(f.type_text).cat != "prim_text":
+        return ""
+    for g in decl.fields:
+        if g.binder == "has_" + f.binder and _strip_default(g.type_text).trim() == "bool":
+            return g.binder
+    ""
+
+fn _field_is_bare(u: CodecUniverse, decl: CodecDecl, f: FieldDecl) -> bool:
+    """False only for a has_*-flagged non-legacy, non-text field whose encoder
+    still writes the payload: flag-gated node and text fields keep a bare
+    (never Option-boxed) local slot."""
+    if _presence_flag_of(u, decl, f) != "":
+        return true
+    if _text_presence_flag_of(u, decl, f) != "":
+        return true
+    if bare_node_placeholder_v1(_strip_default(f.type_text).trim()) != "":
+        return true
+    for g in decl.fields:
+        if g.binder == "has_" + f.binder:
+            return false
+    true
+
+fn _placeholder_helper_name(type_name: text) -> text:
+    "hc_placeholder_" + _codec_snake(type_name)
+
+fn _dec_or_placeholder_helper_name(type_name: text) -> text:
+    "hc_dec_or_placeholder_" + _codec_snake(type_name)
+
+fn _bare_field_placeholder_expr(u: CodecUniverse, decl_type: text) -> text:
+    """The expression that initialises a bare field local: a once-emitted helper
+    call for structs and payload-only enums, the literal for unit enums, or ""."""
+    val lit = bare_placeholder_literal_v1(u, decl_type, 0)
+    if lit == "":
+        return ""
+    if u.is_struct(decl_type) or (u.is_enum(decl_type) and lit.contains("(")):
+        return _placeholder_helper_name(decl_type) + "()"
+    lit
+
+fn _bare_field_helper_types(u: CodecUniverse, order: [text]) -> [text]:
+    """Struct/payload-enum types that some declaration reads into a bare field
+    local (in first-use order), i.e. those _bare_field_placeholder_expr names."""
+    var out: [text] = []
+    for name in order:
+        val decl = u.decl_of(name)
+        var field_types: [text] = []
+        if decl.is_enum:
+            for row in decl.variants:
+                for f in parse_payload_fields(row.payload_schema):
+                    field_types.push(f.type_text)
+        else:
+            for f in decl.fields:
+                if _field_is_bare(u, decl, f):
+                    field_types.push(f.type_text)
+        for ft in field_types:
+            val shape = u.classify(ft)
+            val dt = shape.name
+            if shape.cat == "node" and (u.is_struct(dt) or u.is_enum(dt)) and not _contains(out, dt):
+                if _bare_field_placeholder_expr(u, dt) == _placeholder_helper_name(dt) + "()":
+                    out.push(dt)
+    out
+
+fn _emit_default_file_helpers() -> text:
+    var out = "var _hc_enc_default_file: text = \"\"\n"
+    out = out + "var _hc_dec_default_file: text = \"\"\n\n"
+    out = out + "fn _hc_module_default_file(node: HirModule) -> text:\n"
+    out = out + "    val p: text? = node.path\n"
+    out = out + "    if not p.?:\n"
+    out = out + "        return \"\"\n"
+    out = out + "    p!\n\n"
+    out = out + "fn _hc_enc_span_file(w: HirCodecWriter, v: text):\n"
+    out = out + "    val opt_v: text? = v\n"
+    # `.?` is false for an empty text, so test emptiness first: an empty file
+    # must encode as an empty line, not as the nil wire.
+    out = out + "    if v != \"\" and not opt_v.?:\n"
+    out = out + "        w.put_nil_text_wire()\n"
+    out = out + "        return\n"
+    out = out + "    val s = opt_v ?? \"\"\n"
+    out = out + "    if _hc_enc_default_file != \"\":\n"
+    out = out + "        if s == _hc_enc_default_file:\n"
+    out = out + "            w.put_text(\"@\")\n"
+    out = out + "            return\n"
+    out = out + "        if s.starts_with(\"@\"):\n"
+    out = out + "            w.put_text(\"@\" + s)\n"
+    out = out + "            return\n"
+    out = out + "    w.put_text(s)\n\n"
+    out = out + "fn _hc_dec_span_file(raw: text) -> text:\n"
+    out = out + "    if raw == \"\\\\N\":\n"
+    out = out + "        return \"\"\n"
+    out = out + "    val unescaped = flat_pool_unescape(raw)\n"
+    out = out + "    if _hc_dec_default_file != \"\":\n"
+    out = out + "        if unescaped == \"@\":\n"
+    out = out + "            return _hc_dec_default_file\n"
+    out = out + "        if unescaped.starts_with(\"@@\"):\n"
+    out = out + "            return unescaped.substring(1, unescaped.byte_len())\n"
+    out = out + "    unescaped\n\n"
+    out = out + "fn _hc_enc_flagged_text(w: HirCodecWriter, present: bool, v: text):\n"
+    out = out + "    if not present:\n"
+    out = out + "        w.put_text(\"\")\n"
+    out = out + "        return\n"
+    out = out + "    if v == nil:\n"
+    out = out + "        w.put_text(\"\")\n"
+    out = out + "        return\n"
+    out = out + "    w.put_text(v)\n\n"
+    out
+
+fn _emit_placeholder_helpers(u: CodecUniverse, order: [text]) -> text:
+    val helper_types = _bare_field_helper_types(u, order)
+    var out = ""
+    for dt in helper_types:
+        if bare_node_placeholder_v1(dt) == "":
+            out = out + "fn " + _placeholder_helper_name(dt) + "() -> " + dt + ":\n"
+            out = out + "    " + bare_placeholder_literal_v1(u, dt, 0) + "\n\n"
+    for dt in helper_types:
+        if bare_node_placeholder_v1(dt) != "":
+            out = out + "fn " + _placeholder_helper_name(dt) + "() -> " + dt + ":\n"
+            out = out + "    " + bare_placeholder_literal_v1(u, dt, 0) + "\n\n"
+    for dt in helper_types:
+        if u.is_struct(dt):
+            out = out + "fn " + _dec_or_placeholder_helper_name(dt) + "(r: FlatPoolReader) -> " + dt + ":\n"
+            out = out + "    if r.next_i64() == 1:\n"
+            out = out + "        return " + dec_fn_name(dt) + "(r)\n"
+            out = out + "    " + _placeholder_helper_name(dt) + "()\n\n"
+    out + _emit_default_file_helpers()
+
 fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: EmitCounter,
-        required_node: bool = false) -> text:
-    """Statements that read one value of `type_text` into a new local `target`."""
+        required_node: bool = false, bare_field: bool = false) -> text:
+    """Statements that read one value of `type_text` into a new local `target`.
+
+    `bare_field` marks a declaration FIELD target (the local is stored straight
+    into a non-optional struct/payload field); opt-inner, list, pair and dict
+    targets pass false and keep their `T?` local.
+    """
     val s = u.classify(type_text)
     val decl_type = _strip_default(type_text).trim()
     if s.cat == "prim_char":
@@ -508,13 +817,22 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         if s.cat == "prim_i64":
             out = out + indent + "val " + target + " = if raw{k0} == \"N\": nil else: flat_pool_parse_i64(raw{k0})\n"
         elif s.cat == "prim_bool":
-            out = out + indent + "val " + target + " = if raw{k0} == \"N\": nil else: raw{k0} == \"1\"\n"
+            # A NON-optional bool needs no nil: the caller rejects "N" below.
+            if bare_field:
+                out = out + indent + "val " + target + " = raw{k0} == \"1\"\n"
+            else:
+                out = out + indent + "val " + target + " = if raw{k0} == \"N\": nil else: raw{k0} == \"1\"\n"
         else:
-            out = out + indent + "val " + target + " = if raw{k0} == \"\\\\N\": nil else: flat_pool_unescape(raw{k0})\n"
+            # A NON-optional text field decodes an absent value to the empty
+            # string, never nil; opt-inner, list and dict targets keep nil.
+            val absent_text = if bare_field: "\"\"" else: "nil"
+            out = out + indent + "val " + target + " = if raw{k0} == \"\\\\N\": " + absent_text + " else: flat_pool_unescape(raw{k0})\n"
         return out
     if s.cat == "prim_f64":
         return indent + "val " + target + " = hc_read_f64(r)\n"
     if s.cat == "node" or s.cat == "opaque":
+        if bare_field and not required_node and s.cat == "node" and u.is_struct(s.name) and bare_placeholder_literal_v1(u, s.name, 0) != "":
+            return indent + "val " + target + ": " + decl_type + " = " + _dec_or_placeholder_helper_name(s.name) + "(r)\n"
         val callee = if s.cat == "node": dec_fn_name(s.name) else: "hc_dec_opaque_" + _codec_snake(s.name)
         # Bug (selfhost_hir_cache_encode_hir_type_segv_2026-08-22): the
         # if-EXPRESSION form unifies both arms at `T?`, so the taken arm is
@@ -528,7 +846,23 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         # unmitigated. The statement form assigns the bare value without
         # boxing; the `opt` branch below keeps that bare value for node/opaque
         # inners (see its note). Wire format is unchanged.
-        var out = indent + "var " + target + ": " + decl_type + "? = nil\n"
+        #
+        # 2026-11-04: a FIELD target with a known bare placeholder is declared
+        # as the bare type (see bare_node_placeholder_v1), so the store into
+        # the non-optional field never carries an Option transport word. The
+        # presence flag is still read; an absent node leaves the placeholder.
+        #
+        # 2026-11-13: the opaque payload field HirExprKind.CustomBlock.value is
+        # a non-optional `BlockValue`; a `BlockValue? = nil` local stored into
+        # it is rejected by the pure-Simple MIR enum payload check ("payload
+        # type mismatch at 1"). Struct components keep the "" fallback.
+        var placeholder = if bare_field: _bare_field_placeholder_expr(u, decl_type) else: ""
+        if placeholder == "" and bare_field and s.cat == "opaque" and decl_type == "BlockValue":
+            placeholder = "BlockValue.Raw(\"\")"
+        var out = if placeholder != "":
+            indent + "var " + target + ": " + decl_type + " = " + placeholder + "\n"
+        else:
+            indent + "var " + target + ": " + decl_type + "? = None\n"
         out = out + indent + "if r.next_i64() == 1:\n"
         out = out + indent + "    " + target + " = " + callee + "(r)\n"
         if required_node:
@@ -537,7 +871,8 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         return out
     val k = c.next()
     if s.cat == "opt":
-        var out = indent + "var " + target + ": " + decl_type + " = nil\n"
+        val opt_decl_type = if decl_type.ends_with("?"): decl_type else: s.a + "?"
+        var out = indent + "var " + target + ": " + opt_decl_type + " = None\n"
         out = out + indent + "if r.next_i64() == 1:\n"
         out = out + _emit_dec(u, s.a, "ov{k}", indent + "    ", c)
         # A node/opaque inner value is already decoded into a `T?` local
@@ -552,6 +887,9 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         val inner = u.classify(s.a)
         if inner.cat == "node" or inner.cat == "opaque":
             out = out + indent + "    " + target + " = ov{k}\n"
+        elif inner.cat == "prim_text":
+            out = out + indent + "    if val present_ov{k} = ov{k}:\n"
+            out = out + indent + "        " + target + " = Some(present_ov{k})\n"
         else:
             out = out + indent + "    " + target + " = Some(ov{k})\n"
         return out
@@ -560,8 +898,15 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         out = out + indent + "val n{k} = r.next_len()\n"
         out = out + indent + "var i{k} = 0\n"
         out = out + indent + "while i{k} < n{k}:\n"
-        out = out + _emit_dec(u, s.a, "ev{k}", indent + "    ", c)
-        out = out + indent + "    " + target + ".push(ev{k})\n"
+        val elem_shape = u.classify(s.a)
+        out = out + _emit_dec(u, s.a, "ev{k}", indent + "    ", c, false, elem_shape.cat == "prim_text")
+        if elem_shape.cat == "node" or elem_shape.cat == "opaque":
+            out = out + indent + "    if val present_ev{k} = ev{k}:\n"
+            out = out + indent + "        " + target + ".push(present_ev{k})\n"
+            out = out + indent + "    else:\n"
+            out = out + indent + "        r.reject_malformed(\"nil_in_non_optional_list_element\")\n"
+        else:
+            out = out + indent + "    " + target + ".push(ev{k})\n"
         out = out + indent + "    i{k} = i{k} + 1\n"
         return out
     if s.cat == "pair":
@@ -569,9 +914,32 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         out = out + indent + "val n{k} = r.next_len()\n"
         out = out + indent + "var i{k} = 0\n"
         out = out + indent + "while i{k} < n{k}:\n"
-        out = out + _emit_dec(u, s.a, "pa{k}", indent + "    ", c)
-        out = out + _emit_dec(u, s.b, "pb{k}", indent + "    ", c)
-        out = out + indent + "    " + target + ".push((pa{k}, pb{k}))\n"
+        val shape_a = u.classify(s.a)
+        val shape_b = u.classify(s.b)
+        out = out + _emit_dec(u, s.a, "pa{k}", indent + "    ", c, false, shape_a.cat == "prim_text")
+        out = out + _emit_dec(u, s.b, "pb{k}", indent + "    ", c, false, shape_b.cat == "prim_text")
+        val a_opt_local = shape_a.cat == "node" or shape_a.cat == "opaque"
+        val b_opt_local = shape_b.cat == "node" or shape_b.cat == "opaque"
+        if a_opt_local and b_opt_local:
+            out = out + indent + "    if val present_pa{k} = pa{k}:\n"
+            out = out + indent + "        if val present_pb{k} = pb{k}:\n"
+            out = out + indent + "            " + target + ".push((present_pa{k}, present_pb{k}))\n"
+            out = out + indent + "        else:\n"
+            out = out + indent + "            r.reject_malformed(\"nil_in_non_optional_pair_element\")\n"
+            out = out + indent + "    else:\n"
+            out = out + indent + "        r.reject_malformed(\"nil_in_non_optional_pair_element\")\n"
+        elif a_opt_local:
+            out = out + indent + "    if val present_pa{k} = pa{k}:\n"
+            out = out + indent + "        " + target + ".push((present_pa{k}, pb{k}))\n"
+            out = out + indent + "    else:\n"
+            out = out + indent + "        r.reject_malformed(\"nil_in_non_optional_pair_element\")\n"
+        elif b_opt_local:
+            out = out + indent + "    if val present_pb{k} = pb{k}:\n"
+            out = out + indent + "        " + target + ".push((pa{k}, present_pb{k}))\n"
+            out = out + indent + "    else:\n"
+            out = out + indent + "        r.reject_malformed(\"nil_in_non_optional_pair_element\")\n"
+        else:
+            out = out + indent + "    " + target + ".push((pa{k}, pb{k}))\n"
         out = out + indent + "    i{k} = i{k} + 1\n"
         return out
     if s.cat == "dict":
@@ -579,30 +947,46 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         out = out + indent + "val n{k} = r.next_len()\n"
         out = out + indent + "var i{k} = 0\n"
         out = out + indent + "while i{k} < n{k}:\n"
-        out = out + _emit_dec(u, s.a, "dk{k}", indent + "    ", c, required_node)
+        val key_shape = u.classify(s.a)
+        val key_is_opt_node = key_shape.cat == "node" or key_shape.cat == "opaque"
+        if key_shape.cat == "prim_i64":
+            val _key_wire_slot = c.next()
+            out = out + indent + "    val raw_dk{k} = r.next()\n"
+            out = out + indent + "    var key_i64_{k}: i64 = 0\n"
+            out = out + indent + "    if raw_dk{k} == \"N\":\n"
+            out = out + indent + "        r.reject_malformed(\"nil_in_non_optional_dict_key\")\n"
+            out = out + indent + "    else:\n"
+            out = out + indent + "        key_i64_{k} = flat_pool_parse_i64(raw_dk{k})\n"
+            out = out + indent + "    val dk{k}: i64 = key_i64_{k}\n"
+        else:
+            out = out + _emit_dec(u, s.a, "dk{k}", indent + "    ", c, required_node, key_shape.cat == "prim_text")
         val value_shape = u.classify(s.b)
         if value_shape.cat == "prim_i64":
             # Keep later emitted local names aligned with scalar _emit_dec.
             val _wire_slot = c.next()
             out = out + indent + "    val value_pos{k} = r.pos\n"
             out = out + indent + "    val dv{k}: i64 = r.next_i64()\n"
+        elif value_shape.cat == "prim_bool":
+            # Stage-2 native codegen mis-types `if raw == "N": nil else: raw == "1"`
+            # as i64 and stores rt_value_int_wide(1) = 0x9 instead of bool 0xb, which
+            # the encoder then compares against 0xb and re-encodes as false (0).
+            val _bool_wire_slot = c.next()
+            out = out + indent + "    val raw_dv{k} = r.next()\n"
+            out = out + indent + "    val dv{k}: bool = raw_dv{k} == \"1\"\n"
         else:
             out = out + _emit_dec(u, s.b, "dv{k}", indent + "    ", c, required_node)
-        # Store through a presence bind of the decoded optional value, never
-        # the optional itself: dict[key] = T? stores land erased (nil) on
-        # the stage2 LLVM draw -- the decoded module.functions dict holds
-        # nil HirFunction values while the cache blob is complete, and the
-        # first values()/for-in consumer passes a nil declaration into
-        # record_exact_extern_declaration_v1 (SIGSEGV, EXC_BAD_ACCESS at
-        # 0x70, stage2 p2_add sanity smoke). The presence-guarded concrete
-        # bind is the proven-clean shape; absent values are skipped rather
-        # than stored as nil (the cache re-encode selfcheck already rejects
-        # lossy entries). Kept inside the tip's required_node/r.ok rejection
-        # guard so a rejected decode never reaches the dictionary either.
+        # Store through presence binds of optional node keys/values, never the
+        # optionals themselves: `dk{k}`/`dv{k}` for node shapes hold canonical
+        # Option handles on the self-hosted native lane.
         if required_node:
             out = out + indent + "    if r.ok:\n"
-            out = out + indent + "        if val present_v{k} = dv{k}:\n"
-            out = out + indent + "            " + target + "[dk{k}] = present_v{k}\n"
+            if key_is_opt_node:
+                out = out + indent + "        if val present_k{k} = dk{k}:\n"
+                out = out + indent + "            if val present_v{k} = dv{k}:\n"
+                out = out + indent + "                " + target + "[present_k{k}] = present_v{k}\n"
+            else:
+                out = out + indent + "        if val present_v{k} = dv{k}:\n"
+                out = out + indent + "            " + target + "[dk{k}] = present_v{k}\n"
         elif value_shape.cat == "prim_i64":
             # Raw integers are not optional node handles. Preserve 3 and reject
             # nil/malformed tokens even under the legacy unbounded reader.
@@ -610,7 +994,39 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
             out = out + indent + "        if r.lines[value_pos{k}] != \"{{dv{k}}}\":\n"
             out = out + indent + "            r.reject_malformed(\"integer_dictionary_value\")\n"
             out = out + indent + "        else:\n"
-            out = out + indent + "            " + target + "[dk{k}] = dv{k}\n"
+            if key_is_opt_node:
+                out = out + indent + "            if val present_k{k} = dk{k}:\n"
+                out = out + indent + "                " + target + "[present_k{k}] = dv{k}\n"
+                out = out + indent + "            else:\n"
+                out = out + indent + "                r.reject_malformed(\"nil_in_non_optional_dict_key\")\n"
+            else:
+                out = out + indent + "            " + target + "[dk{k}] = dv{k}\n"
+        elif value_shape.cat == "prim_bool":
+            out = out + indent + "    if r.ok:\n"
+            out = out + indent + "        if raw_dv{k} == \"N\":\n"
+            out = out + indent + "            r.reject_malformed(\"nil_in_non_optional_scalar\")\n"
+            out = out + indent + "        elif raw_dv{k} != \"1\" and raw_dv{k} != \"0\":\n"
+            out = out + indent + "            r.reject_malformed(\"bool_dictionary_value\")\n"
+            out = out + indent + "        else:\n"
+            if key_is_opt_node:
+                out = out + indent + "            if val present_k{k} = dk{k}:\n"
+                out = out + indent + "                if dv{k}:\n"
+                out = out + indent + "                    " + target + "[present_k{k}] = true\n"
+                out = out + indent + "                else:\n"
+                out = out + indent + "                    " + target + "[present_k{k}] = false\n"
+                out = out + indent + "            else:\n"
+                out = out + indent + "                r.reject_malformed(\"nil_in_non_optional_dict_key\")\n"
+            else:
+                out = out + indent + "            if dv{k}:\n"
+                out = out + indent + "                " + target + "[dk{k}] = true\n"
+                out = out + indent + "            else:\n"
+                out = out + indent + "                " + target + "[dk{k}] = false\n"
+        elif key_is_opt_node:
+            out = out + indent + "    if val present_k{k} = dk{k}:\n"
+            out = out + indent + "        if val present_v{k} = dv{k}:\n"
+            out = out + indent + "            " + target + "[present_k{k}] = present_v{k}\n"
+            out = out + indent + "    elif r.ok:\n"
+            out = out + indent + "        r.reject_malformed(\"nil_in_non_optional_dict_key\")\n"
         else:
             out = out + indent + "    if val present_v{k} = dv{k}:\n"
             out = out + indent + "        " + target + "[dk{k}] = present_v{k}\n"
@@ -670,19 +1086,41 @@ fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
                     parts.push(_emit_enc(u, f.type_text, "b_" + f.binder, "            ", c))
                 field_index = field_index + 1
             idx = idx + 1
-        parts.push("        case _: hc_bad_tag(\"" + decl.name + "\", -1)\n")
+        parts.push("        case _: w.reject(\"unencodable " + decl.name + " enum\")\n")
         return parts.join("")
     var body: [text] = []
     for f in decl.fields:
         # A function dictionary entry cannot represent an absent declaration.
         # Enforce in the actual presence branch, not a separate live-state read.
         val required_function_entry = decl.name == "HirModule" and f.binder == "functions"
-        body.push(_emit_enc(u, f.type_text, "node." + f.binder, "    ", c, required_function_entry))
+        val flag = _presence_flag_of(u, decl, f)
+        val text_flag = _text_presence_flag_of(u, decl, f)
+        if flag != "":
+            body.push("    if not node." + flag + ":\n")
+            body.push("        w.put_i64(0)\n")
+            body.push("    else:\n")
+            body.push(_emit_enc(u, f.type_text, "node." + f.binder, "        ", c, required_function_entry))
+        elif text_flag != "":
+            body.push("    _hc_enc_flagged_text(w, node." + text_flag + ", node." + f.binder + ")\n")
+        elif decl.name == "Span" and f.binder == "file":
+            body.push("    _hc_enc_span_file(w, node.file)\n")
+        else:
+            # A non-optional i64/bool field refuses nil at ENCODE time, matching
+            # the decoder's nil_in_non_optional_scalar guard (bug
+            # hir_codec_encodes_nil_non_optional_scalar_that_decode_refuses_2026-10-24).
+            val cat = u.classify(f.type_text).cat
+            if cat == "prim_i64":
+                body.push("    w.put_i64_field(node." + f.binder + ", \"" + decl.name + "." + f.binder + "\")\n")
+            elif cat == "prim_bool":
+                body.push("    w.put_bool_field(node." + f.binder + ", \"" + decl.name + "." + f.binder + "\")\n")
+            else:
+                body.push(_emit_enc(u, f.type_text, "node." + f.binder, "    ", c, required_function_entry))
+                if decl.name == "HirModule" and f.binder == "path":
+                    body.push("    _hc_enc_default_file = _hc_module_default_file(node)\n")
     if body.len() == 0:
         body.push("    val _leaf = 0\n")
     parts.join("") + body.join("")
 
-# @workaround bug=a174_enum_scalar_codec_wire_boundary_2026_10_16 recover=5c3e501759ae833a828b14b4e23c9238c73b76a6 reason=generate-typed-enum-prototypes-and-schema-owned-wire-nil-slots
 fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
     var parts: [text] = ["fn " + dec_fn_name(decl.name) + "(r: FlatPoolReader) -> " + decl.name + ":\n"]
     var c = EmitCounter(n: 0)
@@ -716,7 +1154,9 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
                     nil_flags.push(flag)
                     nil_indices.push(field_index)
                 else:
-                    parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "        ", c))
+                    parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "        ", c, false, true))
+                    parts.push(_emit_nil_scalar_reject(u, f.type_text, "f_" + f.binder, "        ", "raw{c.n - 1}",
+                        decl.name + "." + row.variant + "." + f.binder))
                 names.push("f_" + f.binder)
                 field_index = field_index + 1
             if fields.len() == 0:
@@ -730,7 +1170,7 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
                 while ni < nil_flags.len():
                     parts.push("            if " + nil_flags[ni] + ": wire_nil_slots.push(" + "{nil_indices[ni]}" + ")\n")
                     ni = ni + 1
-                parts.push("            return hc_restore_enum_nil(r, wire_prototype, " + "{fields.len()}" + ", wire_nil_slots)\n")
+                parts.push("            return hc_restore_enum_nil(r, wire_prototype, " + "{fields.len()}" + ", wire_nil_slots, \"" + decl.name + "." + row.variant + "\")\n")
                 parts.push("        return wire_prototype\n")
             else:
                 parts.push("        return " + decl.name + "." + row.variant + "(" + _join(names, ", ") + ")\n")
@@ -739,27 +1179,121 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
         # Unreachable: hc_bad_tag exits. A typed tail keeps the checker happy
         # on every lane without inventing a sentinel variant.
         parts.push("    " + dec_fn_name(decl.name) + "(r)\n")
+        # NIL-RET-001: a decoder with a reject path returns nil there (the
+        # reader carries the failure), so its signature must say `T?`.
+        val decoded = parts.join("")
+        if decoded.contains("return nil") or decoded.contains("hc_restore_enum_nil("):
+            parts[0] = "fn " + dec_fn_name(decl.name) + "(r: FlatPoolReader) -> " + decl.name + "?:\n"
         return parts.join("")
+    if decl.name == "HirModule":
+        parts.push("    val prev_default_file = _hc_dec_default_file\n")
+        parts.push("    _hc_dec_default_file = \"\"\n")
     var names: [text] = []
     for f in decl.fields:
         val required_function_entry = decl.name == "HirModule" and f.binder == "functions"
-        parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "    ", c, required_function_entry))
+        if decl.name == "Span" and f.binder == "file":
+            val k0 = c.next()
+            parts.push("    val raw{k0} = r.next()\n")
+            parts.push("    val f_file = _hc_dec_span_file(raw{k0})\n")
+        else:
+            parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "    ", c, required_function_entry, _field_is_bare(u, decl, f)))
+            parts.push(_emit_nil_scalar_reject(u, f.type_text, "f_" + f.binder, "    ", "raw{c.n - 1}",
+                decl.name + "." + f.binder))
+            if decl.name == "HirModule" and f.binder == "path":
+                parts.push("    _hc_dec_default_file = f_path\n")
         names.push(f.binder + ": f_" + f.binder)
+    if decl.name == "HirModule":
+        parts.push("    _hc_dec_default_file = prev_default_file\n")
     parts.push("    " + decl.name + "(" + _join(names, ", ") + ")\n")
     parts.join("")
+
+# A `T?` decoder's result is an Option at run time, and storing it straight
+# into a slot keeps the Some wrapper (only `if val` unwraps it). Rewrite each
+# `x = <optional decoder>(r)` into an explicit unwrap; a nil result leaves the
+# slot nil and the reader already carries the failure.
+fn _unwrap_optional_decoder_calls(body: text, optional_decoders: [text]) -> text:
+    var out: [text] = []
+    for line in body.split("\n"):
+        var rewritten = false
+        for callee in optional_decoders:
+            val call = " = " + callee + "(r)"
+            if not rewritten and line.ends_with(call):
+                val lhs = line.substring(0, line.len() - call.len())
+                val target = lhs.trim()
+                if target != "" and not target.contains(" "):
+                    val indent = lhs.substring(0, lhs.len() - target.len())
+                    out.push(indent + "if val decoded_v1 = " + callee + "(r):")
+                    out.push(indent + "    " + target + " = decoded_v1")
+                    rewritten = true
+        if not rewritten:
+            out.push(line)
+    out.join("\n")
+
+# A wrapper owns balanced depth even when a generated body refuses early.
+# Apply this one source transformation to every declaration, rather than
+# relying on each shape/enum arm to remember its unwind and poison guards.
+pub fn guard_codec_encoder_v1(body: text) -> text:
+    val lines = body.split("\n")
+    if lines.len() == 0: _codec_fail("empty encoder body")
+    val signature = lines[0]
+    val marker = "(w: HirCodecWriter, node: "
+    val split = signature.find(marker)
+    if not signature.starts_with("fn hc_enc_") or split < 0:
+        _codec_fail("unexpected encoder signature: " + signature)
+    val name = signature.substring(3, split)
+    val private_name = "_" + name + "_body"
+    var out: [text] = [signature,
+        "    if not w.enter_node(): return"]
+    if name == "hc_enc_hir_module":
+        out.push("    val prev_default_file = _hc_enc_default_file")
+        out.push("    _hc_enc_default_file = \"\"")
+    out.push("    " + private_name + "(w, node)")
+    if name == "hc_enc_hir_module":
+        out.push("    _hc_enc_default_file = prev_default_file")
+    out.push("    w.leave_node()")
+    out.push("")
+    out.push("fn " + private_name + signature.substring(split))
+    var i = 1
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+        val indent = line.substring(0, _indent_of(line))
+        # Guard variable traversal and composite argument evaluation. Scalar
+        # writer calls already refuse poison; their fixed tails may unwind.
+        val boundary = (trimmed.starts_with("for ") or trimmed.starts_with("var ks") or
+            trimmed.starts_with("val enc_node_") or
+            (trimmed.starts_with("hc_enc_") and not trimmed.starts_with("hc_enc_enum_")))
+        if boundary: out.push(indent + "if not w.ok: return")
+        out.push(line)
+        if trimmed.starts_with("for "):
+            out.push(indent + "    if not w.charge_work(1): return")
+        i = i + 1
+    out.join("\n")
 
 fn emit_codec_file(u: CodecUniverse) -> text:
     var parts: [text] = [CODEC_GEN_HEADER]
     parts.push("#\n# HirModule <-> line blob codec. One encoder and one decoder per\n")
     parts.push("# declaration reachable from HirModule (see codec_gen.spl for the format).\n")
     parts.push("# Enum arms are exhaustive by construction; the trailing `_` arm only\n")
-    parts.push("# satisfies the seed's match checker and routes to hc_bad_tag, which exits.\n\n")
+    parts.push("# satisfies the seed's match checker. Encoders reject the cache entry;\n")
+    parts.push("# decoders route an unknown stored tag to hc_bad_tag, which exits.\n\n")
     parts.push(codec_use_lines() + "\n")
     val order = codec_emit_order(u)
+    parts.push(_emit_placeholder_helpers(u, order))
+    var bodies: [text] = []
+    # Optional decoders (NIL-RET-001): every opaque decoder, plus each
+    # generated one whose signature came out `T?`.
+    var optional_decoders: [text] = []
+    for opaque in codec_opaque_types():
+        optional_decoders.push("hc_dec_opaque_" + _codec_snake(opaque))
     for name in order:
         val decl = u.decl_of(name)
-        parts.push(_emit_enc_decl(u, decl) + "\n")
-        parts.push(_emit_dec_decl(u, decl) + "\n")
+        bodies.push(guard_codec_encoder_v1(_emit_enc_decl(u, decl)) + "\n")
+        val dec = _emit_dec_decl(u, decl)
+        if dec.starts_with("fn " + dec_fn_name(name) + "(r: FlatPoolReader) -> " + name + "?:"):
+            optional_decoders.push(dec_fn_name(name))
+        bodies.push(dec + "\n")
+    parts.push(_unwrap_optional_decoder_calls(bodies.join(""), optional_decoders))
     var names: [text] = []
     for name in order:
         names.push(enc_fn_name(name))
@@ -780,5 +1314,5 @@ fn codec_decl_count(repo_root: text) -> i64:
 
 export codec_decl_sources, codec_opaque_types, CodecUniverse, CodecDecl, TypeShape
 export extract_codec_struct_fields, codec_closure, codec_emit_order
-export emit_codec_file, generate_codec_into, codec_decl_count
-export enc_fn_name, dec_fn_name, CODEC_GEN_HEADER
+export emit_codec_file, generate_codec_into, codec_decl_count, bare_placeholder_literal_v1
+export enc_fn_name, dec_fn_name, CODEC_GEN_HEADER, guard_codec_encoder_v1

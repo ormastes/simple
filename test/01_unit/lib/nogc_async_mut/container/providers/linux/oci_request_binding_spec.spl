@@ -1,0 +1,191 @@
+# Authored, UNEXECUTED provider contract tests; no native runtime qualification.
+use std.spec.*
+use test.fixtures.orchestration.oci_binding_admission_fixture.*
+use std.common.contracts.container.runtime_v1.*
+use std.common.contracts.container.bound_intent_v2.*
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use std.nogc_async_mut.container.providers.linux.request_v1.*
+use std.nogc_sync_mut.io.file_ops.file_is_regular_no_follow
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.io_runtime.dir_remove_all
+
+# Existing filesystem fixture ABI; no shell or fake link creation.
+extern fn rt_package_create_symlink(target: text, link_path: text) -> i32
+
+describe "OCI request payload binding before execution":
+    it "persists a fresh request before create and reopens the same bound identity":
+        val directory = oci_binding_dir_v1()
+        val provider = LinuxOciRuntimeProviderV1.new("linux", OCI_ENGINE_PODMAN,
+            directory, "boot-1", 7, false)
+        expect(provider.persist_intent(oci_binding_request_v1(), "create-bound")).to_equal(true)
+        expect(provider.retained_intent_count()).to_equal(1)
+        val reopened = LinuxOciRuntimeProviderV1.new("linux", OCI_ENGINE_PODMAN,
+            directory, "boot-1", 7, false)
+        expect(reopened.intent_for(oci_binding_request_v1()).operation_id).to_equal("create-bound")
+        expect(reopened.create(oci_binding_request_v1()).status).to_equal(RUNTIME_STATUS_BLOCKED)
+        expect(dir_remove_all(directory)).to_equal(true)
+
+    it "does not let an accessor replace cached immutable operation authority":
+        val directory = oci_binding_dir_v1()
+        val path = directory + "/runtime-intent-bound-1-1-7"
+        val provider = LinuxOciRuntimeProviderV1.new("linux", OCI_ENGINE_PODMAN,
+            directory, "boot-1", 7, false)
+        expect(provider.prepare_pod(oci_binding_request_v1()).status).to_equal(RUNTIME_STATUS_OK)
+        var foreign = oci_binding_intent_v1()
+        foreign.operation_id = "foreign-operation"
+        expect(file_atomic_write_mode(path, oci_binding_bytes_v1(foreign), 0o600)).to_equal(true)
+        var unspecified = oci_binding_request_v1()
+        unspecified.operation_id = ""
+        provider.intent_for(unspecified)
+        expect(provider.request_bindings["bound-1-1"].identity.operation_id).to_equal("create-bound")
+        expect(provider.create(unspecified).reason).to_equal("intent-operation-id-mismatch")
+        expect(dir_remove_all(directory)).to_equal(true)
+
+    it "never resurrects a scripted bound tombstone by persisting prepared intent":
+        val tombstone = oci_binding_bound_v1(oci_binding_intent_v1("b".repeat(64), "destroyed"))
+        val provider = LinuxOciRuntimeProviderV1.scripted_with_bound_intents("linux", OCI_ENGINE_PODMAN,
+            "/unused/binding", "boot-1", 7, [tombstone], [])
+        expect(provider.persist_intent(oci_binding_request_v1(), "create-bound")).to_equal(false)
+        expect(provider.intent_for(oci_binding_request_v1()).phase).to_equal("destroyed")
+        expect(provider.create(oci_binding_request_v1()).reason).to_equal("attempt-already-destroyed")
+        expect(provider.scripted_cursor).to_equal(0)
+        expect(provider.executor_call_count()).to_equal(0)
+
+    it "allows identical prepare and create replay with one exact native create":
+        val request = oci_binding_request_v1()
+        val command = build_create_command(OCI_ENGINE_PODMAN, "/unused/binding",
+            request, request.operation_id, 7, "boot-1").1
+        val provider = LinuxOciRuntimeProviderV1.scripted("linux", OCI_ENGINE_PODMAN,
+            "/unused/binding", "boot-1", 7, [oci_binding_result_v1(command, "native-bound")])
+        expect(provider.prepare_pod(request).status).to_equal(RUNTIME_STATUS_OK)
+        expect(provider.prepare_pod(request).status).to_equal(RUNTIME_STATUS_OK)
+        expect(provider.create(request).status).to_equal(RUNTIME_STATUS_OK)
+        expect(provider.create(request).status).to_equal(RUNTIME_STATUS_OK)
+        expect(provider.scripted_cursor).to_equal(1)
+        expect(provider.executor_call_count()).to_equal(1)
+
+    it "publishes V2 for exact scripted create and retains its native identity on disk":
+        val directory = oci_binding_dir_v1()
+        val path = directory + "/runtime-intent-bound-1-1-7"
+        val request = oci_binding_request_v1()
+        val command = build_create_command(OCI_ENGINE_PODMAN, directory,
+            request, request.operation_id, 7, "boot-1").1
+        val provider = LinuxOciRuntimeProviderV1.scripted("linux", OCI_ENGINE_PODMAN,
+            directory, "boot-1", 7, [oci_binding_result_v1(command, "native-bound")],
+            persist_scripted_journal: true)
+        expect(provider.create(request).status).to_equal(RUNTIME_STATUS_OK)
+        val saved = match runtime_bound_intent_decode_v2(oci_binding_read_v1(path)):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        expect(saved.identity.native_id).to_equal("native-bound")
+        expect(saved.identity.phase).to_equal("created")
+        expect(saved.request_digest).to_equal(oci_binding_bound_v1(oci_binding_intent_v1()).request_digest)
+        expect(provider.create(request).status).to_equal(RUNTIME_STATUS_OK)
+        expect(provider.scripted_cursor).to_equal(1)
+        expect(provider.executor_call_count()).to_equal(1)
+        expect(dir_remove_all(directory)).to_equal(true)
+
+    it "rejects changed command args image resources and operation before cached success":
+        expect(oci_binding_check_changed_payload_v1()).to_equal(1)
+
+    it "rejects NUL before logical state reservation or executor use":
+        var request = oci_binding_request_v1()
+        request.args = ["a\0b"]
+        val provider = LinuxOciRuntimeProviderV1.scripted("linux", OCI_ENGINE_PODMAN,
+            "/unused/binding", "boot-1", 7, [])
+        expect(provider.prepare_pod(request).reason).to_equal("request-field-contains-nul")
+        expect(provider.create(request).reason).to_equal("request-field-contains-nul")
+        expect(provider.retained_state_count()).to_equal(0)
+        expect(provider.scripted_cursor).to_equal(0)
+        expect(provider.executor_call_count()).to_equal(0)
+
+    it "recovers matching durable V2 while refusing changed payload after restart":
+        val directory = oci_binding_dir_v1()
+        val path = directory + "/runtime-intent-bound-1-1-7"
+        val native = "b".repeat(64)
+        expect(file_atomic_write_mode(path, oci_binding_bytes_v1(oci_binding_intent_v1(native, "running")), 0o600)).to_equal(true)
+        val inspect = build_inspect_command(OCI_ENGINE_PODMAN, directory, native).1
+        val provider = LinuxOciRuntimeProviderV1.scripted("linux", OCI_ENGINE_PODMAN,
+            directory, "boot-1", 7, [oci_binding_result_v1(inspect,
+                "bound-1|1|boot-1|7|create-bound|" + native + "|running")])
+        var changed = oci_binding_request_v1()
+        changed.args = ["different"]
+        expect(provider.recover(changed).reason).to_equal("intent-request-mismatch")
+        expect(provider.scripted_cursor).to_equal(0)
+        expect(provider.executor_call_count()).to_equal(0)
+        expect(provider.recover(oci_binding_request_v1()).status).to_equal(RUNTIME_STATUS_OK)
+        expect(provider.scripted_cursor).to_equal(1)
+        expect(provider.executor_call_count()).to_equal(1)
+        expect(dir_remove_all(directory)).to_equal(true)
+
+    it "does not overwrite corrupt noncanonical or foreign records":
+        val directory = oci_binding_dir_v1()
+        val path = directory + "/runtime-intent-bound-1-1-7"
+        var foreign = oci_binding_intent_v1()
+        foreign.node_boot_id = "other-boot"
+        for bytes in ["corrupt", oci_binding_bytes_v1(oci_binding_intent_v1()) + "\n", oci_binding_bytes_v1(foreign)]:
+            expect(file_atomic_write_mode(path, bytes, 0o600)).to_equal(true)
+            val provider = LinuxOciRuntimeProviderV1.new("linux", OCI_ENGINE_PODMAN,
+                directory, "boot-1", 7, false)
+            expect(provider.create(oci_binding_request_v1()).status).to_equal(RUNTIME_STATUS_REJECTED)
+            expect(provider.persist_intent(oci_binding_request_v1(), "create-bound")).to_equal(false)
+            expect(oci_binding_read_v1(path)).to_equal(bytes)
+        expect(dir_remove_all(directory)).to_equal(true)
+
+    it "refuses a dangling journal link before exact scripted create can execute":
+        val directory = oci_binding_dir_v1()
+        val path = directory + "/runtime-intent-bound-1-1-7"
+        expect(rt_package_create_symlink(directory + "/absent-target", path)).to_equal(0)
+        val request = oci_binding_request_v1()
+        val command = build_create_command(OCI_ENGINE_PODMAN, directory,
+            request, request.operation_id, 7, "boot-1").1
+        val provider = LinuxOciRuntimeProviderV1.scripted("linux", OCI_ENGINE_PODMAN,
+            directory, "boot-1", 7, [oci_binding_result_v1(command, "unexpected-native")],
+            persist_scripted_journal: true)
+        expect(provider.create(request).reason).to_equal("intent-journal-write-failed")
+        expect(provider.scripted_cursor).to_equal(0)
+        expect(provider.executor_call_count()).to_equal(0)
+        expect(file_is_regular_no_follow(path)).to_equal(false)
+        expect(rt_package_create_symlink(directory + "/another-target", path) == 0).to_equal(false)
+        expect(dir_remove_all(directory)).to_equal(true)
+
+    it "checks disk against stale prepared memory and keeps destroyed tombstones":
+        val directory = oci_binding_dir_v1()
+        val path = directory + "/runtime-intent-bound-1-1-7"
+        val provider = LinuxOciRuntimeProviderV1.new("linux", OCI_ENGINE_PODMAN,
+            directory, "boot-1", 7, false)
+        expect(provider.prepare_pod(oci_binding_request_v1()).status).to_equal(RUNTIME_STATUS_OK)
+        var other = oci_binding_intent_v1()
+        other.operation_id = "other-operation"
+        val bytes = oci_binding_bytes_v1(other)
+        expect(file_atomic_write_mode(path, bytes, 0o600)).to_equal(true)
+        expect(provider.create(oci_binding_request_v1()).reason).to_equal("intent-operation-id-mismatch")
+        expect(provider.persist_intent(oci_binding_request_v1(), "create-bound")).to_equal(false)
+        expect(oci_binding_read_v1(path)).to_equal(bytes)
+        expect(file_atomic_write_mode(path, oci_binding_bytes_v1(oci_binding_intent_v1("b".repeat(64), "destroyed")), 0o600)).to_equal(true)
+        expect(provider.create(oci_binding_request_v1()).reason).to_equal("attempt-already-destroyed")
+        expect(provider.start(oci_binding_request_v1()).status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(dir_remove_all(directory)).to_equal(true)
+
+    it "refuses legacy create and start but reconciles exact identity without V2 promotion":
+        expect(oci_binding_check_legacy_cleanup_v1()).to_equal(4)
+
+    it "rejects unqualified legacy operands before every reconciliation executor":
+        for native in ["--all", "arbitrary-name", "abc123", ""]:
+            val row = oci_binding_intent_v1(native, "running")
+            val provider = LinuxOciRuntimeProviderV1.scripted_with_intents("linux", OCI_ENGINE_PODMAN,
+                "/unused/binding", "boot-1", 7, [row], [])
+            expect(provider.recover(oci_binding_request_v1()).reason).to_equal("legacy-native-id-unqualified")
+            expect(provider.inspect(oci_binding_request_v1()).reason).to_equal("legacy-native-id-unqualified")
+            expect(provider.stop(oci_binding_request_v1()).reason).to_equal("legacy-native-id-unqualified")
+            expect(provider.destroy(oci_binding_request_v1(), true).reason).to_equal("legacy-native-id-unqualified")
+            expect(provider.scripted_cursor).to_equal(0)
+            expect(provider.executor_call_count()).to_equal(0)
+
+    it "rejects option-like operands at every native-id command builder":
+        expect(build_start_command(OCI_ENGINE_PODMAN, "/unused", "--all").0).to_equal("native-id-invalid")
+        expect(build_wait_command(OCI_ENGINE_PODMAN, "/unused", "--all").0).to_equal("native-id-invalid")
+        expect(build_logs_command(OCI_ENGINE_PODMAN, "/unused", "--all").0).to_equal("native-id-invalid")
+        expect(build_stop_command(OCI_ENGINE_PODMAN, "/unused", "--all", 10).0).to_equal("native-id-invalid")
+        expect(build_destroy_command(OCI_ENGINE_PODMAN, "/unused", "--all", true).0).to_equal("native-id-invalid")
+        expect(build_inspect_command(OCI_ENGINE_PODMAN, "/unused", "--all").0).to_equal("native-id-invalid")

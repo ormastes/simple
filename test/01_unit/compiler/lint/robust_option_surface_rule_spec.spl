@@ -1,0 +1,109 @@
+# Purpose and audience: reproducing evidence for the ROB-OPT public-surface lint, for lint maintainers.
+# @req REQ-SSPEC-COMPILER
+# bug: doc/08_tracking/bug/robust_option_public_surface_walker_missing_2026-11-12.md
+"""
+# `robust_option_surface`: a public input or field must not expose a raw optional
+
+ROB-OPT-001 flags a `pub fn` / `pub me` parameter whose type is `Option<T>`
+or `T?`; ROB-OPT-002 flags a field of a `pub struct` / `pub class` (the field
+is both a constructor input and a generated accessor). Findings are warnings,
+never deny, and the rule is registered in the static lint table with an
+`allow` default that the Robust and Critical profiles raise to `warn`.
+"""
+
+# @tag: unit, compiler, lint, robust
+
+use std.spec.*
+use compiler.tools.lint.static_rules.{LintParamsV1, LintUnit, StaticLintFinding, StaticLintLevel, static_lint_rule_table, run_static_lint_rule_table}
+use compiler.tools.lint.rules.robust_option_surface_rule.{robust_option_surface_lint_rule}
+use compiler.tools.lint._LintMain.config_and_model.{build_default_levels, canonical_lint_rule_profile_descriptors}
+
+fn findings(src: text) -> [StaticLintFinding]:
+    val run = run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("src/lib/example.spl", src), [robust_option_surface_lint_rule()])
+    run.findings
+
+describe "robust_option_surface lint":
+    it "flags Option<T> and T? on a pub fn parameter with ROB-OPT-001":
+        val found = findings("pub fn connect(host: Host, timeout: Option<Duration>, retries: i64?) -> Result<Session, Error>:\n    pass\n")
+        expect([f.code for f in found]).to_equal(["ROB-OPT-001", "ROB-OPT-001"])
+        expect(found[0].line_num).to_equal(1)
+        expect(found[0].column).to_equal(28)
+        expect(found[0].message.contains("`timeout`")).to_equal(true)
+        expect(found[1].message.contains("`retries`")).to_equal(true)
+
+    it "flags a pub me parameter and skips the receiver":
+        val found = findings("pub class Pool:\n    pub me take(self, slot: Slot?) -> Slot:\n        slot\n")
+        expect([f.code for f in found]).to_equal(["ROB-OPT-001"])
+        expect(found[0].line_num).to_equal(2)
+
+    it "flags a pub struct field with ROB-OPT-002 naming the accessor":
+        val found = findings("pub struct Connection:\n    socket: Option<Socket>\n    retries: i64\n")
+        expect(found.len()).to_equal(1)
+        expect(found[0].code).to_equal("ROB-OPT-002")
+        expect(found[0].line_num).to_equal(2)
+        expect(found[0].message.contains("accessor")).to_equal(true)
+
+    it "reports warnings only":
+        for f in findings("pub fn f(a: Option<A>):\n    pass\npub struct S:\n    b: B?\n"):
+            expect(f.level == StaticLintLevel.Warn).to_equal(true)
+
+    it "is registered with an allow default raised to warn in Robust and Critical":
+        expect([r.id() for r in static_lint_rule_table()]).to_contain("robust_option_surface")
+        expect(build_default_levels()["robust_option_surface"]).to_equal("allow")
+        for rule in canonical_lint_rule_profile_descriptors():
+            if rule.name == "robust_option_surface":
+                expect(rule.strict_level).to_equal("allow")
+                expect(rule.robust_level).to_equal("warn")
+                expect(rule.critical_level).to_equal("warn")
+
+fn codes3(src: text) -> [text]:
+    [f.code for f in findings(src)]
+
+describe "robust_option_surface ROB-OPT-003 public returns":
+    it "flags a pub fn returning Option<T> or T? at the exact span of the type":
+        val found = findings("pub fn find(id: Id) -> Option<User>:\n    None\npub fn peek() -> i64?:\n    None\n")
+        expect([f.code for f in found]).to_equal(["ROB-OPT-003", "ROB-OPT-003"])
+        expect(found[0].line_num).to_equal(1)
+        expect(found[0].column).to_equal(24)
+        expect(found[0].message.contains("`Option<User>`")).to_equal(true)
+        expect(found[1].line_num).to_equal(3)
+        expect(found[1].column).to_equal(18)
+
+    it "flags nested generics and pub methods, once per function":
+        expect(codes3("pub fn a() -> Result<Option<A>, E>:\n    pass\n")).to_equal(["ROB-OPT-003"])
+        expect(codes3("pub fn b() -> [A?]:\n    pass\n")).to_equal(["ROB-OPT-003"])
+        expect(codes3("pub class P:\n    pub me take(self) -> Slot?:\n        None\n")).to_equal(["ROB-OPT-003"])
+        expect(codes3("pub fn c(x: Option<A>) -> Option<B>:\n    None\n")).to_equal(["ROB-OPT-001", "ROB-OPT-003"])
+
+    it "reports the line of a multi-line signature's return type":
+        val found = findings("pub fn f(\n    a: A\n) -> Option<B>:\n    None\n")
+        expect([f.code for f in found]).to_equal(["ROB-OPT-003"])
+        expect(found[0].line_num).to_equal(3)
+        expect(found[0].column).to_equal(6)
+
+    it "follows an in-file alias in the return type":
+        expect(codes3("type Maybe = Option<A>\npub fn f() -> Maybe:\n    None\n")).to_equal(["ROB-OPT-003"])
+
+    it "flags a pub alias to a raw optional":
+        val found = findings("pub type Maybe = Option<A>\n")
+        expect([f.code for f in found]).to_equal(["ROB-OPT-003"])
+        expect(found[0].line_num).to_equal(1)
+        expect(found[0].message.contains("alias")).to_equal(true)
+        expect(codes3("type Hidden = Option<A>\n")).to_equal([])
+        expect(codes3("pub type Plain = [A]\n")).to_equal([])
+
+    it "stays quiet for private fns, non-optional and Result returns, externs, private owners":
+        expect(codes3("fn find() -> Option<User>:\n    None\n")).to_equal([])
+        expect(codes3("pub fn f() -> i64:\n    0\n")).to_equal([])
+        expect(codes3("pub fn f() -> Result<A, E>:\n    pass\n")).to_equal([])
+        expect(codes3("pub fn f() -> OptionSet:\n    pass\n")).to_equal([])
+        expect(codes3("pub extern fn rt_peek() -> i64?\n")).to_equal([])
+        expect(codes3("class Hidden:\n    pub fn f() -> A?:\n        None\n")).to_equal([])
+        expect(codes3("pub fn f(cb: fn(A) -> Option<B>) -> i64:\n    0\n")).to_equal(["ROB-OPT-001"])
+        expect(codes3("pub fn f() -> i64:  # was Option<A>\n    0\n")).to_equal([])
+        expect(codes3("pub fn f() -> i64:\n    val x: Option<A> = None\n    0\n")).to_equal([])
+
+    it "honours in-file export and warns only":
+        expect(codes3("fn f() -> A?:\n    None\nexport f\n")).to_equal(["ROB-OPT-003"])
+        for f in findings("pub fn f() -> A?:\n    None\n"):
+            expect(f.level == StaticLintLevel.Warn).to_equal(true)

@@ -1,6 +1,10 @@
 # `.unwrap()` on an optional scalar returns the box ADDRESS under baremetal Cranelift (2026-08-31)
 
 STATUS: OPEN (compiler bug). Routed around at one call site; NOT fixed.
+Addendum 2026-11-11 (lane ne18): confirmed STILL OPEN — workaround intact at
+`src/os/services/pcimgr/pcimgr.spl:98-133`, no fixing commit on
+release/1.0.0 tip; baremetal build+run lane required to fix/verify (grant
+below).
 
 ## Symptom
 
@@ -116,3 +120,38 @@ page; PCI memory-space decoding not actually enabled before the reads
 (`pcimgr_enable_mmio_bus_master`); or `mmio_read64`/`mmio_read32` miscompiled on
 this backend the way the optional unwrap above was. This is a SEPARATE defect
 from the optional-unwrap bug and is where the round-trip lane now stands.
+
+## Addendum 2026-11-11 (lane ne18) — still LIVE, BLOCKED for this lane
+
+Triage verdict: **LIVE (unfixed)** / **BLOCKED** for the P3 traverse lane.
+
+Evidence it is unfixed on release/1.0.0 tip:
+
+- The sentinel workaround is still in place and still names this bug as its
+  reason: `pcimgr_nth_target_raw(dev_idx) -> u64` with
+  `PCIMGR_NO_TARGET = 0xFFFFFFFFFFFFFFFF` at
+  `src/os/services/pcimgr/pcimgr.spl:33,98-133`, all 14 call sites on the raw
+  form. The docstring still reads "under the baremetal Cranelift backend
+  `.unwrap()` on an optional scalar yields the box ADDRESS instead of the
+  value".
+- No fixing commit: `git log --grep` over `src/compiler`/`src/compiler_rust`
+  since 2026-08-31 for unwrap/optional/baremetal surfaces only unrelated
+  fixes (e.g. `a2948b13382c` Option-None discrimination, `8bb33e7d0827` and
+  `752d38cd9875` seed-JIT lane unwrap fixes — none baremetal Cranelift).
+- No regression spec references this bug id; the fix wanted ("correct the
+  optional-scalar unwrap lowering in the Cranelift baremetal path, then revert
+  the sentinel workaround") cannot be paired with a runtime test here.
+
+Why BLOCKED rather than fixed in this lane: the defect only manifests on
+`x86_64-unknown-none` Cranelift output running under OVMF. This lane may run
+only small hosted native fixtures (entry-closure builds forbidden, 120 s cap);
+the reproduce path needs the full SimpleOS kernel build plus a QEMU/OVMF boot
+(`sh scripts/check/check-simpleos-vfs-server-roundtrip-ovmf.shs`, which passes
+`--timeout 1200` to native-build and requires OVMF pflash + GRUB-EFI + a
+per-run nonce-verified NVMe image).
+
+Exact grant that would unblock: permission to run
+`sh scripts/check/check-simpleos-vfs-server-roundtrip-ovmf.shs` (or an
+equivalent baremetal build+boot lane with the kernel-closure native-build
+budget) so an unwrap-lowering fix can be verified by the instrumented
+bus/dev/fn decode log this doc specifies.

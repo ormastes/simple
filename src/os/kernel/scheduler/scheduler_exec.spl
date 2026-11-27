@@ -1,3 +1,4 @@
+#![allow(REQC004)]
 # Scheduler Exec / User-Task Creation helpers.
 #
 # Contains:
@@ -23,7 +24,7 @@ use os.kernel.types.task_types.{
 }
 use os.kernel.types.vmspace_types.{ProcessVmSpace}
 use os.kernel.types.capability_types.{CapabilitySet}
-use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.hal.arch_context.{Architecture}
 use os.kernel.memory.user_address_space.{create_user_address_space, destroy_user_address_space}
 use os.kernel.memory.vmm_address_space.{stage_user_address_space_scalars, staged_user_address_space_root, staged_user_address_space_id}
 use os.kernel.memory.vmm.{vmm_cow_clone_pages}
@@ -248,11 +249,6 @@ pub fn sched_create_user_task_pid_impl(
         return (0, tasks, -1)
     val identity = maybe_identity.unwrap()
     val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
-    val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
-    if maybe_identity == nil:
-        destroy_user_address_space(user_as)
-        return (0u64, tasks, -1)
-    val identity = maybe_identity.unwrap()
     val user_next_id = identity.task_id
     val id = TaskId(id: user_next_id)
     val tcb = TaskControlBlock(
@@ -442,6 +438,92 @@ pub fn sched_create_bootstrap_user_task_pid_impl(
     _record_exec_user_handoff(mapped_entry, user_sp, user_as.phys_root)
     cap_init_task_record(id, true)
     (user_next_id, new_tasks)
+
+@allow(primitive_api) # adopts mapped ring-3 user AS/context into TCB table for FS-exec handoff; returns (pid, updated_tasks, slot)
+pub fn sched_adopt_mapped_user_task_and_run_impl(
+    tasks: [TaskControlBlock?],
+    current: TaskId,
+    name: text,
+    entry: u64,
+    user_stack_top: u64,
+    space: AddressSpace,
+    user_ctx: TaskContext,
+    caps: CapabilitySet
+) -> (u64, [TaskControlBlock?], i32):
+    """Adopt an already-mapped user address space and context into the scheduler."""
+    var tasks_nil = false
+    unsafe:
+        tasks_nil = (tasks == nil)
+    if space.phys_root == 0 or tasks_nil or tasks.len() < MAX_TASKS:
+        return (0u64, tasks, -1)
+    val slot = _find_empty_slot_in(tasks)
+    if slot < 0:
+        return (0u64, tasks, -1)
+    val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
+    if maybe_identity.is_none():
+        return (0u64, tasks, -1)
+    val identity = maybe_identity.unwrap()
+    val pid = identity.task_id
+    val id = TaskId(id: pid)
+    val parent_ref: TaskId? = if current.id != 0: Some(current) else: None
+    val tcb = TaskControlBlock(
+        id: id, lifecycle_generation: identity.lifecycle_generation, name: name,
+        state: TaskState.Running, priority: TaskPriority.Normal, is_user: true,
+        entry_point: entry, context: user_ctx, user_context: Some(user_ctx),
+        address_space: space.phys_root, kernel_stack: 0, user_stack: user_stack_top,
+        capabilities: caps, parent: parent_ref,
+        security: default_task_security(id),
+        schedule: default_task_schedule(TaskPriority.Normal),
+        isolation: default_task_isolation(space.id),
+        assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS,
+        arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1(),
+        riscv32_mapping_handle: scheduler_riscv32_mapping_handle_absent_v1(),
+        x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1(),
+        exec_generation: 1u64
+    )
+    var new_tasks = tasks
+    new_tasks[slot] = tcb
+    register_task_vmspace(
+        pid.to_u32(),
+        ProcessVmSpace(pml4: space.phys_root, id: space.id, vma_count: 0, areas: []))
+    cap_init_task_record(id, true)
+    (pid, new_tasks, slot)
+
+pub fn sched_prepare_reap_adopted_user_task_v1(
+    tasks: [TaskControlBlock?],
+    id: TaskId
+) -> [TaskControlBlock?]:
+    """Detach caller-owned user address_space before reaping an adopted ring-3 TCB."""
+    val slot = _find_slot_in(tasks, id)
+    if slot < 0:
+        return tasks
+    val tcb = tasks[slot]
+    if tcb.is_none():
+        return tasks
+    var task = tcb.unwrap()
+    task.address_space = 0u64
+    var iso = task.isolation
+    iso.address_space_id = 0u64
+    task.isolation = iso
+    var new_tasks = tasks
+    new_tasks[slot] = task
+    register_task_vmspace(
+        id.id.to_u32(),
+        ProcessVmSpace(pml4: 0u64, id: 0u64, vma_count: 0, areas: []))
+    new_tasks
+
+pub fn sched_reap_adopted_task_slot_v1(
+    tasks: [TaskControlBlock?],
+    id: TaskId
+) -> [TaskControlBlock?]:
+    """Fallback slot reclamation when an adopted synchronous task's parent cannot collect it."""
+    val slot = _find_slot_in(tasks, id)
+    if slot < 0:
+        return tasks
+    var new_tasks = tasks
+    unsafe:
+        new_tasks[slot] = nil
+    new_tasks
 
 # ============================================================================
 # Clone task (fork)

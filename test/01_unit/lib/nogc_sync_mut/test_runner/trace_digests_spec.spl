@@ -1,0 +1,85 @@
+# Purpose and audience: plan 3.5 test-definition and binary digests for reviewers of TestDB evidence.
+# @req TESTDB-003
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_write, file_delete, file_hash_sha256_or_empty}
+use std.nogc_sync_mut.spec.engine_probe.{self_exe_path}
+use std.common.traceability.case_events.{TraceCaseEvent, TraceCaseFacts, TestEventAtMicros, TestDefinitionDigest, TestBinaryDigest}
+use std.nogc_sync_mut.test_runner.trace_digests.{trace_definition_digest, trace_binary_digest, trace_events_with_digests, trace_digest_attempts, trace_digests_reset}
+
+fn _has_definition(d: TestDefinitionDigest?) -> bool:
+    match d:
+        case Some(_): true
+        case None: false
+
+fn _has_binary(d: TestBinaryDigest?) -> bool:
+    match d:
+        case Some(_): true
+        case None: false
+
+val SPEC_FILE = "target/trace-digests-spec-fixture.spl"
+
+fn _events() -> [TraceCaseEvent]:
+    [TraceCaseEvent(case_name: "a", phase: "started", outcome: "not_finished", facts: Some(TraceCaseFacts(at: Some(TestEventAtMicros(value: 5))))),
+     TraceCaseEvent(case_name: "a", phase: "finished", outcome: "passed"),
+     TraceCaseEvent(case_name: "b", phase: "started", outcome: "not_finished"),
+     TraceCaseEvent(case_name: "b", phase: "finished", outcome: "passed")]
+
+describe "trace digests":
+    it "hashes the spec file once however many events and lookups use it":
+        trace_digests_reset()
+        val _ = file_write(SPEC_FILE, "describe \"x\":\n    it \"y\":\n        pass\n")
+        step("Stamp four events, then look the digest up twice more")
+        val stamped = trace_events_with_digests(_events(), SPEC_FILE)
+        val again = trace_definition_digest(SPEC_FILE)
+        val third = trace_definition_digest(SPEC_FILE)
+        expect(trace_digest_attempts().definition.value).to_equal(1)
+        step("Every event carries the same digest, equal to a direct sha256 of the bytes")
+        val direct = file_hash_sha256_or_empty(SPEC_FILE)
+        expect(direct.len()).to_equal(64)
+        for event in stamped:
+            match event.facts:
+                case Some(facts):
+                    match facts.definition_digest:
+                        case Some(found): expect(found.value).to_equal(direct)
+                        case None: fail("definition digest missing")
+                case None: fail("facts missing")
+        expect(_has_definition(again)).to_equal(true)
+        expect(_has_definition(third)).to_equal(true)
+        val _ = file_delete(SPEC_FILE)
+
+    it "keeps facts already on the event and leaves digests absent for a missing spec file":
+        trace_digests_reset()
+        val stamped = trace_events_with_digests(_events(), "target/does-not-exist-spec.spl")
+        match stamped[0].facts:
+            case Some(facts):
+                expect(_has_definition(facts.definition_digest)).to_equal(false)
+                match facts.at:
+                    case Some(at): expect(at.value).to_equal(5)
+                    case None: fail("existing at_micros lost")
+            case None: fail("facts missing")
+        step("A missing file is not re-probed as a hash attempt")
+        expect(trace_digest_attempts().definition.value).to_equal(0)
+
+    it "hashes the executable at most once per process":
+        trace_digests_reset()
+        val first = trace_binary_digest()
+        val second = trace_binary_digest()
+        val _ = trace_events_with_digests(_events(), "")
+        expect(trace_digest_attempts().binary.value < 2).to_equal(true)
+        expect(_has_binary(first)).to_equal(_has_binary(second))
+        step("A digest is present exactly when a real executable path resolves")
+        match self_exe_path():
+            case Some(_): expect(_has_binary(first)).to_equal(true)
+            case None: expect(_has_binary(first)).to_equal(false)
+
+    it "never presents the sha256 of a .spl script as the binary digest":
+        trace_digests_reset()
+        match self_exe_path():
+            case Some(exe): expect(exe.ends_with(".spl")).to_equal(false)
+            case None: pass
+        val lane_script = "src/app/test_runner_new/test_db_lane_main.spl"
+        val script_hash = file_hash_sha256_or_empty(lane_script)
+        expect(script_hash.len()).to_equal(64)
+        match trace_binary_digest():
+            case Some(found): expect(found.value == script_hash).to_equal(false)
+            case None: pass

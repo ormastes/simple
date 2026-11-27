@@ -1,0 +1,97 @@
+# COFF COMDAT leaders with static storage class.
+#
+# clang -ffunction-sections puts each `static` C function in its own
+# IMAGE_COMDAT_SELECT_NODUPLICATES section whose COMDAT (leader) symbol has
+# IMAGE_SYM_CLASS_STATIC. Such a COMDAT is local to its object: two objects
+# that each carry one must both be kept, never reported as duplicates.
+# Before the fix the parser only recorded EXTERNAL leaders, the key fell back
+# to the section name ".text", and the hosted runtime objects failed with
+# "duplicate NODUPLICATES COFF COMDAT '.text'".
+
+use std.spec.*
+use compiler.backend.linker.coff.coff_link.{
+    CoffLinkRequest, coff_link_amd64_retained_image_policy_opt}
+use compiler.backend.linker.coff.pe_image_writer.{PeImagePolicy}
+
+fn _cl_u16(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push((value & 0xff) as u8)
+    result.push(((value >> 8) & 0xff) as u8)
+
+fn _cl_u32(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push((value & 0xff) as u8)
+    result = result.push(((value >> 8) & 0xff) as u8)
+    result = result.push(((value >> 16) & 0xff) as u8)
+    result.push(((value >> 24) & 0xff) as u8)
+
+fn _cl_name(bytes: [u8], value: text) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < 8:
+        result = result.push((if i < value.len(): value.byte_at(i) else: 0) as u8)
+        i = i + 1
+    result
+
+fn _cl_comdat_object(symbol_name: text, opcode: i64, selection: i64, storage_class: i64) -> [u8]:
+    # One COMDAT section plus its leader symbol of the given storage class.
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0x8664)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 61)
+    bytes = _cl_u32(bytes, 3)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u32(bytes, 60)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x60001020)
+    bytes = bytes.push(opcode as u8)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = bytes.push(3)
+    bytes = bytes.push(1)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x1234)
+    bytes = _cl_u16(bytes, 0)
+    bytes = bytes.push(selection as u8)
+    bytes = bytes.push(0)
+    bytes = bytes.push(0)
+    bytes = bytes.push(0)
+    bytes = _cl_name(bytes, symbol_name)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(storage_class as u8)
+    bytes = bytes.push(0)
+    _cl_u32(bytes, 4)
+
+describe "COFF static COMDAT leaders":
+    it "keeps a NODUPLICATES COMDAT with a static leader in each of two objects":
+        val request = CoffLinkRequest(objects: [
+            _cl_comdat_object("_start", 0xc3, 1, 2),
+            _cl_comdat_object("local_helper", 0xc3, 1, 3),
+            _cl_comdat_object("local_helper", 0xcc, 1, 3)], archives: [], entry: "_start")
+        val linked = coff_link_amd64_retained_image_policy_opt(
+            request, [], PeImagePolicy.default(), 0x140000000, false, false)
+        if linked.is_err(): print("link error: {linked.unwrap_err()}")
+        expect(linked.is_ok()).to_equal(true)
+
+    it "still rejects a NODUPLICATES COMDAT with an external leader defined twice":
+        val request = CoffLinkRequest(objects: [
+            _cl_comdat_object("_start", 0xc3, 2, 2),
+            _cl_comdat_object("dup", 0xc3, 1, 2),
+            _cl_comdat_object("dup", 0xc3, 1, 2)], archives: [], entry: "_start")
+        val linked = coff_link_amd64_retained_image_policy_opt(
+            request, [], PeImagePolicy.default(), 0x140000000, false, false)
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("duplicate NODUPLICATES COFF COMDAT 'dup'")

@@ -1,0 +1,153 @@
+# Read-only TestDB -> BugTestRunV1 loader for the bug closure gate (plan 4.2/4.3).
+#
+# Translates persisted TestDB runs (their verified source_head plus recorded
+# trace case events) into BugTestRunV1 rows without mutating or saving the DB.
+# Runs whose source_head is absent (dirty working tree, git unavailable, or
+# pre-source_revision runs) emit zero BugTestRunV1 rows so a verified fix can
+# never claim evidence from an untrusted source state.
+
+use app.bug.closure_gate.{TestCaseIdV1, BackendIdV1, SnapshotDigestV1, BugRunPhaseV1, BugRunOutcomeV1, BugTestRunV1}
+use std.common.traceability.model.{trace_sorted_ids}
+use std.common.traceability.test_query.{TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestQueryRow, TestQueryStatus, TestQueryError, TestQueryErrorKind, project_run_case_rows}
+use std.database.test_extended.source_revision.{TestSourceRevision}
+use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
+use app.test_runner_new.test_query_cli.{TestDbFilePath, open_test_db_read_only}
+
+pub struct BugTestDbRunLoadV1:
+    runs: [BugTestRunV1]
+    notes: [text]
+
+struct _FileBackendGroup:
+    path: text
+    backend: text
+    outcome: BugRunOutcomeV1
+
+fn _outcome_priority(outcome: BugRunOutcomeV1) -> i64:
+    # Monotonic severity order for file-level aggregation:
+    # Failed > Cached > Skipped > NotRun > Passed (Passed only when every case passed).
+    match outcome:
+        case BugRunOutcomeV1.Failed: 5
+        case BugRunOutcomeV1.Cached: 4
+        case BugRunOutcomeV1.Skipped: 3
+        case BugRunOutcomeV1.NotRun: 2
+        case BugRunOutcomeV1.Passed: 1
+
+fn _combine_group_outcome(current: BugRunOutcomeV1, next: BugRunOutcomeV1) -> BugRunOutcomeV1:
+    if _outcome_priority(next) > _outcome_priority(current):
+        return next
+    current
+
+pub fn bug_run_outcome_from_query_status_v1(status: TestQueryStatus) -> BugRunOutcomeV1:
+    """Fail-closed status translation: only Passed passes; only Failed fails."""
+    match status:
+        case TestQueryStatus.Passed: BugRunOutcomeV1.Passed
+        case TestQueryStatus.Failed: BugRunOutcomeV1.Failed
+        case TestQueryStatus.Cached: BugRunOutcomeV1.Cached
+        case TestQueryStatus.Skipped: BugRunOutcomeV1.Skipped
+        case TestQueryStatus.Ignored: BugRunOutcomeV1.Skipped
+        case TestQueryStatus.QualifiedIgnore: BugRunOutcomeV1.Skipped
+        case TestQueryStatus.Pending: BugRunOutcomeV1.Skipped
+        case TestQueryStatus.InDevelopment: BugRunOutcomeV1.Skipped
+        case TestQueryStatus.FeatureGated: BugRunOutcomeV1.Skipped
+        case TestQueryStatus.Blocked: BugRunOutcomeV1.Skipped
+        case TestQueryStatus.NotFinished: BugRunOutcomeV1.NotRun
+        case TestQueryStatus.Expired: BugRunOutcomeV1.NotRun
+        case TestQueryStatus.Unknown(_): BugRunOutcomeV1.NotRun
+
+pub fn bug_test_runs_from_query_rows_v1(rows: [TestQueryRow], phase: BugRunPhaseV1, source: TestSourceRevision?) -> [BugTestRunV1]:
+    """Convert projected TestQueryRow items into exact-case and file-aggregate BugTestRunV1 rows."""
+    val rev = match source:
+        case Some(found): found
+        case None: return []
+    val digest = SnapshotDigestV1(value: rev.value)
+    var out: [BugTestRunV1] = []
+    var group_idx: Dict<text, i64> = {}
+    var groups: [_FileBackendGroup] = []
+    for row in rows:
+        val backend_text = match row.backend:
+            case Some(found): found.value
+            case None: ""
+        val outcome = bug_run_outcome_from_query_status_v1(row.status)
+        out.push(BugTestRunV1(
+            case_id: TestCaseIdV1(value: "{row.case_key.path.value}::{row.case_key.name.value}"),
+            backend: BackendIdV1(value: backend_text),
+            phase: phase,
+            outcome: outcome,
+            source: digest
+        ))
+        val gkey = "{row.case_key.path.value}\n{backend_text}"
+        if group_idx.contains_key(gkey):
+            val idx = group_idx[gkey]
+            val prev = groups[idx]
+            groups[idx] = _FileBackendGroup(
+                path: prev.path,
+                backend: prev.backend,
+                outcome: _combine_group_outcome(prev.outcome, outcome)
+            )
+        else:
+            group_idx[gkey] = groups.len()
+            groups.push(_FileBackendGroup(
+                path: row.case_key.path.value,
+                backend: backend_text,
+                outcome: outcome
+            ))
+    for group in groups:
+        out.push(BugTestRunV1(
+            case_id: TestCaseIdV1(value: group.path),
+            backend: BackendIdV1(value: group.backend),
+            phase: phase,
+            outcome: group.outcome,
+            source: digest
+        ))
+    out
+
+fn _load_one_run(owner: RunnerTestDb, run_id: TestRunId, phase: BugRunPhaseV1, phase_label: text) -> Result<BugTestDbRunLoadV1, TestQueryError>:
+    val _known = owner.select_query_run_ids(Some(run_id))?
+    val source = owner.run_source_revision(run_id.value)
+    if not source.?:
+        return Ok(BugTestDbRunLoadV1(runs: [], notes: ["{phase_label} run {run_id.value} has no trustworthy source_head"]))
+    val plan = owner.run_plan_for_query(run_id.value)?
+    val by_path = match owner.db.get_trace_case_events_by_path(run_id.value):
+        case Ok(grouped): grouped
+        case Err(reason): return Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: reason))
+    var rows: [TestQueryRow] = []
+    for path_str in trace_sorted_ids(by_path.keys()):
+        val path = TestCasePath(value: path_str)
+        val events = by_path.get(path_str) ?? []
+        var seen_names: Dict<text, bool> = {}
+        var names: [text] = []
+        for event in events:
+            if not seen_names.contains_key(event.case_name):
+                seen_names[event.case_name] = true
+                names.push(event.case_name)
+        for name in names:
+            val key = TestCaseKey(path: path, name: TestCaseName(value: name))
+            for row in project_run_case_rows(key, run_id, owner.planned_identity_for(plan, key), events):
+                rows.push(row)
+    var notes: [text] = []
+    if rows.len() == 0:
+        notes.push("{phase_label} run {run_id.value} has no trace case events")
+    Ok(BugTestDbRunLoadV1(runs: bug_test_runs_from_query_rows_v1(rows, phase, source), notes: notes))
+
+pub fn bug_closure_load_testdb_runs_v1(owner: RunnerTestDb, pre_fix_run: TestRunId?, post_fix_run: TestRunId?) -> Result<BugTestDbRunLoadV1, TestQueryError>:
+    """Read-only extraction of pre-fix and post-fix BugTestRunV1 rows from an open RunnerTestDb."""
+    var runs: [BugTestRunV1] = []
+    var notes: [text] = []
+    match pre_fix_run:
+        case Some(run_id):
+            val loaded = _load_one_run(owner, run_id, BugRunPhaseV1.PreFix, "pre_fix")?
+            for r in loaded.runs: runs.push(r)
+            for n in loaded.notes: notes.push(n)
+        case None: pass
+    match post_fix_run:
+        case Some(run_id):
+            val loaded = _load_one_run(owner, run_id, BugRunPhaseV1.PostFix, "post_fix")?
+            for r in loaded.runs: runs.push(r)
+            for n in loaded.notes: notes.push(n)
+        case None: pass
+    Ok(BugTestDbRunLoadV1(runs: runs, notes: notes))
+
+pub fn bug_closure_load_testdb_runs_from_path_v1(path: TestDbFilePath, pre_fix_run: TestRunId?, post_fix_run: TestRunId?) -> Result<BugTestDbRunLoadV1, TestQueryError>:
+    """Open the TestDB read-only and map the named pre-fix / post-fix runs into BugTestRunV1."""
+    val owner = open_test_db_read_only(path)?
+    bug_closure_load_testdb_runs_v1(owner, pre_fix_run, post_fix_run)

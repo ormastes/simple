@@ -277,6 +277,7 @@ impl<'a> Parser<'a> {
                     ),
                     path,
                     target,
+                    attributes: vec![],
                 }))
             }
             TokenKind::Import => {
@@ -303,6 +304,7 @@ impl<'a> Parser<'a> {
                     ),
                     path,
                     target,
+                    attributes: vec![],
                 }))
             }
             TokenKind::Val => {
@@ -497,6 +499,8 @@ impl<'a> Parser<'a> {
                     Visibility::Private
                 };
 
+                let is_resource_decl = matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "resource")
+                    && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
                 // After decorators, could be fn, class, struct, extern, etc.
                 match &self.current.kind {
                     TokenKind::Class => {
@@ -539,6 +543,18 @@ impl<'a> Parser<'a> {
                         return Ok(node);
                     }
                     TokenKind::Mixin => return self.parse_mixin_with_attrs(attributes),
+                    TokenKind::Unit => {
+                        // `@c_abi("int32_t") unit Fd: i32 as fd` (owner decision
+                        // 3B, 2026-11-16): the C ABI type is source metadata read
+                        // by the SPL-SFFI-ABI-001 lint; the unit node itself
+                        // carries no attributes, so they are dropped here.
+                        let _ = attributes;
+                        let mut node = self.parse_unit()?;
+                        if let Node::Unit(ref mut u) = node {
+                            u.visibility = visibility;
+                        }
+                        return Ok(node);
+                    }
                     TokenKind::Trait => {
                         // Without this arm a decorator-shaped attribute
                         // (`@doc("...")`) before a trait fell through to the
@@ -546,6 +562,9 @@ impl<'a> Parser<'a> {
                         // found Trait" — same root cause as the Union arm
                         // above.
                         return self.parse_trait_with_attrs(attributes);
+                    }
+                    TokenKind::Identifier { .. } if is_resource_decl => {
+                        return self.parse_resource_decl(decorators, visibility);
                     }
                     _ => {}
                 }
@@ -605,7 +624,7 @@ impl<'a> Parser<'a> {
             TokenKind::Var | TokenKind::Val => {
                 let algorithm = self.collection_algorithm_attribute(&attributes)?;
                 let mut node = self.parse_item()?;
-                if let Some(algorithm) = algorithm {
+                if let Some((algorithm, label)) = algorithm {
                     let Node::Let(ref mut binding) = node else {
                         return Err(ParseError::contextual_error(
                             "collection algorithm",
@@ -636,18 +655,27 @@ impl<'a> Parser<'a> {
                             binding.span,
                         )),
                     };
-                    let site_id = self.collection_site_id(name, binding.span, false);
+                    let site_id = match &label {
+                        Some(label) => self.collection_label_site_id(label, binding.span)?,
+                        None => self.collection_site_id(name, binding.span, false),
+                    };
                     binding.value = Some(self.collection_attributed_value(
                         value, &algorithm, &site_id, binding.span, declared_type.as_ref()
                     )?);
                 }
                 Ok(node)
             }
-            TokenKind::Use
-            | TokenKind::Export
-            | TokenKind::Trait
-            | TokenKind::From
-            | TokenKind::Import => self.parse_item(),
+            TokenKind::Use | TokenKind::Export | TokenKind::From | TokenKind::Import => {
+                let mut node = self.parse_item()?;
+                match &mut node {
+                    Node::UseStmt(u) => u.attributes = attributes,
+                    Node::MultiUse(m) => m.attributes = attributes,
+                    Node::ExportUseStmt(e) => e.attributes = attributes,
+                    _ => {}
+                }
+                Ok(node)
+            }
+            TokenKind::Trait => self.parse_item(),
             // Design A.5 data items: `@section/@align/@global const|static`
             // keep their attributes so the backend can place the bytes.
             TokenKind::Const | TokenKind::Static => {
@@ -748,8 +776,18 @@ impl<'a> Parser<'a> {
                 Ok(node)
             }
             // Everything else (val/var/const/static/trait/type/actor/use/...) shares the
-            // attribute-less `pub` item table rather than being rejected outright.
-            _ => self.parse_pub_item_with_visibility(visibility),
+            // attribute-less `pub` item table rather than being rejected outright, while
+            // preserving attributes on `pub use` / `pub const` / `pub static`.
+            _ => {
+                let mut node = self.parse_pub_item_with_visibility(visibility)?;
+                match &mut node {
+                    Node::ExportUseStmt(e) => e.attributes = attributes,
+                    Node::Const(c) => c.attributes = attributes,
+                    Node::Static(s) => s.attributes = attributes,
+                    _ => {}
+                }
+                Ok(node)
+            }
         }
     }
 }

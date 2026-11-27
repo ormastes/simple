@@ -1,0 +1,73 @@
+# @cover src/lib/common/trace/xray_native_selection_v1.spl
+# @req REQ-XRAY-PR5B-ASPECT-SELECTION
+"""
+# XRay PR5b — aspect-param pointcuts select native sleds at runtime
+
+Design A.4: aspect params never decide whether sleds exist; at runtime the
+`simple.trace/observer-v1` pointcuts choose which existing sleds are patched.
+A pointcut names a canonical function; it expands to every sled (entry and
+exits) of that function in the admitted `.simple_xray_map`. An unknown or
+duplicate pointcut fails closed instead of tracing less than was asked.
+"""
+use std.spec.*
+use std.common.plugin.aspect_params.{AspectParamsV1}
+use std.common.plugin.iface_id.{ParamExt}
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.xray_native_map_format_v1.*
+use std.common.trace.xray_native_selection_v1.*
+
+fn map_fixture() -> XrayMapV1:
+    var build_id: [u8] = []
+    for index in 0..16: build_id.push(index as u8)
+    XrayMapV1(isa: XRAY_MAP_ISA_AARCH64_V1, abi_profile: XRAY_MAP_ABI_AARCH64_SIMPLE_V1,
+        sled_abi_version: XRAY_MAP_SLED_ABI_V1, build_id: build_id, text_base: 0,
+        functions: [
+            XrayMapFunctionV1(local_fn_id: 1, first_site: 1, site_count: 2, name: "m.add1"),
+            XrayMapFunctionV1(local_fn_id: 2, first_site: 3, site_count: 3, name: "m.traced")
+        ],
+        sites: [
+            xray_map_aarch64_site_v1(0, 1, XRAY_MAP_KIND_ENTRY_V1),
+            xray_map_aarch64_site_v1(40, 1, XRAY_MAP_KIND_EXIT_V1),
+            xray_map_aarch64_site_v1(80, 2, XRAY_MAP_KIND_ENTRY_V1),
+            xray_map_aarch64_site_v1(120, 2, XRAY_MAP_KIND_EXIT_V1),
+            xray_map_aarch64_site_v1(160, 2, XRAY_MAP_KIND_EXIT_V1)
+        ])
+
+fn params_with(payload: text) -> AspectParamsV1:
+    var params = AspectParamsV1.defaults()
+    params.ext.push(ParamExt(ASPECT_TRACE_POINTCUTS_EXT_V1, 1, payload.bytes(), TRACE_POINTCUTS_SCHEMA_V1))
+    params
+
+fn site_ids(selection: TraceSelectionV1) -> [i64]:
+    var ids: [i64] = []
+    for site in selection.sites: ids.push(site.site_id as i64)
+    ids
+
+describe "XRay native aspect-param selection":
+    it "reads pointcuts from aspect params; absent means none":
+        expect(trace_aspect_pointcuts_v1(AspectParamsV1.defaults())).to_equal(Ok([]))
+        expect(trace_aspect_pointcuts_v1(params_with("m.traced"))).to_equal(Ok(["m.traced"]))
+        expect(trace_aspect_pointcuts_v1(params_with(" m.add1 ,\nm.traced\n"))).to_equal(Ok(["m.add1", "m.traced"]))
+
+    it "rejects malformed pointcut extensions (never silently ignored)":
+        expect(trace_aspect_pointcuts_v1(params_with("")).is_err()).to_equal(true)
+        expect(trace_aspect_pointcuts_v1(params_with("m.add1,m.add1")).is_err()).to_equal(true)
+        var twice = params_with("m.add1")
+        twice.ext.push(ParamExt(ASPECT_TRACE_POINTCUTS_EXT_V1, 1, "m.traced".bytes(), TRACE_POINTCUTS_SCHEMA_V1))
+        expect(trace_aspect_pointcuts_v1(twice).is_err()).to_equal(true)
+        var major = AspectParamsV1.defaults()
+        major.ext.push(ParamExt(ASPECT_TRACE_POINTCUTS_EXT_V1, 2, "m.add1".bytes(), TRACE_POINTCUTS_SCHEMA_V1))
+        expect(trace_aspect_pointcuts_v1(major).is_err()).to_equal(true)
+
+    it "expands a function pointcut to all of its sleds":
+        val one = xray_native_selection_v1(map_fixture(), ["m.traced"], 7, 1).unwrap()
+        expect(site_ids(one)).to_equal([3, 4, 5])
+        expect(one.manifest_incarnation).to_equal(1)
+        expect(one.sites[0].module_instance).to_equal(7)
+        val both = xray_native_selection_v1(map_fixture(), ["m.add1", "m.traced"], 7, 1).unwrap()
+        expect(site_ids(both)).to_equal([1, 2, 3, 4, 5])
+
+    it "fails closed on an unknown pointcut or an empty selection":
+        expect(xray_native_selection_v1(map_fixture(), ["m.nope"], 7, 1)).to_equal(Err(TraceFailureV1.InvalidArgument))
+        expect(xray_native_selection_v1(map_fixture(), [], 7, 1)).to_equal(Err(TraceFailureV1.InvalidArgument))
+        expect(xray_native_selection_v1(map_fixture(), ["m.add1"], 0, 1)).to_equal(Err(TraceFailureV1.InvalidArgument))

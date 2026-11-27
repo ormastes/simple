@@ -11,11 +11,7 @@ use super::{InstrContext, InstrResult};
 
 /// Calculate discriminant for enum variant using DefaultHasher (matches pattern.rs).
 fn variant_disc(name: &str) -> i64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    name.hash(&mut h);
-    (h.finish() & 0xFFFFFFFF) as i64
+    simple_runtime::value::hash_variant_discriminant(name) as i64
 }
 
 /// Create a Result/Option enum using rt_enum_new for consistent representation.

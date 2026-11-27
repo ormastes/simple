@@ -1,0 +1,64 @@
+use std.spec.{describe, it, expect, after_each}
+use app.bootstrap_builder.transport.{BuilderAttemptV1, builder_transport_collect_v1}
+use app.bootstrap_builder.process_port.{builder_process_portable_v1}
+use app.bootstrap_builder.codec.{builder_write_result_v1}
+use std.common.build_manager.contracts.{BuildHostV1, BuildResultV1, BuildInputV1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write}
+use std.nogc_sync_mut.io_runtime.{dir_create_all, dir_remove_all}
+
+var transport_identity_root = ""
+
+fn transport_identity_fixture(stale: bool, missing_output: bool) -> BuilderAttemptV1:
+    transport_identity_root = secure_temp_dir("/tmp", "builder-identity-").unwrap()
+    expect(dir_create_all(transport_identity_root + "/work")).to_equal(true)
+    if not missing_output:
+        expect(file_write(transport_identity_root + "/work/result.o", "output")).to_equal(true)
+    val expected = sha256_text("current immutable task")
+    val observed = if stale: sha256_text("different immutable task") else: expected
+    val receipt = BuildResultV1(task_id: "compile", attempt: 1,
+        identity_digest: observed, host_id: "local", status: "OK", exit_code: 0,
+        outputs: [BuildInputV1(path: "result.o", digest: sha256_text("output"))],
+        cache_hits: 0, cache_misses: 0, cache_stores: 0)
+    expect(builder_write_result_v1(transport_identity_root + "/result.sdn", receipt)).to_equal(true)
+    val host = BuildHostV1(id: "local", transport: "local", endpoint: "",
+        workspace: transport_identity_root, worker_program: "/unused-worker",
+        worker_digest: sha256_text("worker"), slots: 1)
+    BuilderAttemptV1(task_id: "compile", attempt: 1, host: host, pid: 0,
+        local_root: transport_identity_root, remote_root: "", error: "",
+        identity_digest: expected, process: builder_process_portable_v1())
+
+describe "BuildRunner collection binds the immutable task":
+    """Collect only receipts for the exact admitted task, even when task name,
+    attempt number, host and output bytes are reused by a different manifest.
+    These filesystem fixtures exercise collection, not live process finality.
+    """
+    after_each():
+        if transport_identity_root != "":
+            expect(dir_remove_all(transport_identity_root)).to_equal(true)
+            transport_identity_root = ""
+
+    it "rejects a stale task digest even when every output hashes correctly":
+        val attempt = transport_identity_fixture(true, false)
+        expect(builder_transport_collect_v1(attempt).is_err()).to_equal(true)
+
+    it "rejects a stale task digest before inspecting missing output files":
+        val attempt = transport_identity_fixture(true, true)
+        match builder_transport_collect_v1(attempt):
+            case Err(reason): expect(reason).to_equal("worker result identity does not match transport")
+            case Ok(_): expect(false).to_equal(true)
+
+    it "rejects a stale failure receipt with no outputs to inspect":
+        val attempt = transport_identity_fixture(true, true)
+        val receipt = BuildResultV1(task_id: "compile", attempt: 1,
+            identity_digest: sha256_text("different immutable task"), host_id: "local",
+            status: "ERROR", exit_code: 1, outputs: [],
+            cache_hits: 0, cache_misses: 0, cache_stores: 0)
+        expect(builder_write_result_v1(transport_identity_root + "/result.sdn", receipt)).to_equal(true)
+        expect(builder_transport_collect_v1(attempt).is_err()).to_equal(true)
+
+    it "collects matching task identity and verified output bytes":
+        val attempt = transport_identity_fixture(false, false)
+        val receipt = builder_transport_collect_v1(attempt).unwrap()
+        expect(receipt.identity_digest).to_equal(attempt.identity_digest)
+        expect(receipt.outputs[0].digest).to_equal(sha256_text("output"))

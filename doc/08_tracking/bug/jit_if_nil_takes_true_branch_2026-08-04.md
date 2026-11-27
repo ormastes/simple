@@ -379,3 +379,31 @@ rather than worked around by reshuffling the spec's text.
 `test/unit/` mirror, so `scripts/check/check-test-tree-divergence.shs` may want
 a baseline row when this lands.
 
+## Triage 2026-11-25 (release/1.0.0 pinned seed) — 6 of 7 forms fixed on the JIT; `not nil` still inverted; Rust-seed-only residual
+
+Re-probed the defect class on `bin/simple.exe` (38,403,072 bytes, Rust seed
+v1.0.0-rc.1, Windows) at release/1.0.0 HEAD, both engines:
+
+| form | JIT (default) | interpreter | verdict |
+|---|---|---|---|
+| bare `if nil:` | FALSY | FALSY | fixed (was TRUTHY on JIT) |
+| `if n.?:` (nil `i64?` local) | falsy | falsy | correct |
+| call returning nil `text?` in condition | falsy | falsy | fixed (was TRUTHY on both) |
+| `while nil:` | 0 iterations | 0 iterations | fixed (was spin-until-break) |
+| `not nil` | **FALSE — still INVERTED** | TRUE | **still divergent on the JIT** |
+| `takes_bool(nil)` (nil literal to `bool` param) | loud HIR type-mismatch error (both engines; JIT demotes, interpreter errors) | same | no longer a silent wrong answer |
+
+So the seed half this entry left open is now mostly fixed in the shipped
+binary: only the `not <nil>` operand form still negates the raw non-zero
+`RT_NIL` word and takes the wrong branch under the JIT — the exact third blind
+spot the 2026-09-06 pure-Simple hunk fixed in `src/compiler/50.mir`, whose
+seed-side analog (`src/compiler_rust/**` unary-`Not` condition lowering) was
+never touched. That residual is Rust-seed-only: out of bounds for this lane
+(no cargo builds; seed is bootstrap-only; fix needs a seed rebuild +
+redeploy). Note the remaining `takes_bool(nil)` behavior is now a LOUD
+compile-time rejection on both engines rather than the silent TRUE/FALSE split
+filed here — a semantics change, but not the silent-divergence defect class.
+
+**Disposition: SKIP (Rust-seed-only residual), stays OPEN** for the
+`not nil` JIT inversion only; the other six forms are verified fixed on the
+release/1.0.0 seed.

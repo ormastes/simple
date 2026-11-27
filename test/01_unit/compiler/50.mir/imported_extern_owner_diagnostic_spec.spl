@@ -1,0 +1,90 @@
+# @req REQ-SSPEC-UNIT
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.exact_extern_provenance.*
+
+# Actual parsed declarations and imported function symbols exercise the guard.
+# This diagnostic preserves its existing treatment of all imported functions,
+# including pure functions; it does not change extern admission or deduplicate.
+fn check_imported_owner_diagnostic(mode: i64):
+    val logger = Logger(level: 0)
+    val provider_source = "pub fn ping() -> i64:\n    3\n"
+    val consumer_source = "use lib.provider.\{ping\}\nfn invoke() -> i64:\n    ping()\n"
+    val first_path = "first/src/lib/provider.spl"
+    val second_path = "second/src/lib/provider.spl"
+    val consumer_path = "app/consumer.spl"
+    val provider_ast = parse_full_frontend(provider_source, first_path, "lib.provider", logger)
+    val second_ast = parse_full_frontend(provider_source, second_path, "lib.provider", logger)
+    val consumer_ast = parse_full_frontend(consumer_source, consumer_path, "app.consumer", logger)
+    var modules: Dict<text, Module> = {}
+    modules["lib.provider"] = provider_ast
+    val surfaces = module_surfaces_from_modules(modules, [
+        SourceFile(path: first_path, content: provider_source, module_name: "lib.provider")
+    ]).unwrap()
+    var first_lowering = hirlowering_for_module("lib.provider", surfaces)
+    first_lowering.use_explicit_semantic_policy()
+    first_lowering.begin_module(first_path)
+    val first = first_lowering.lower_module(provider_ast)
+    var second_lowering = hirlowering_for_module("lib.provider", surfaces)
+    second_lowering.use_explicit_semantic_policy()
+    second_lowering.begin_module(second_path)
+    val second = second_lowering.lower_module(second_ast)
+    var consumer_lowering = hirlowering_for_module("app.consumer", surfaces)
+    consumer_lowering.use_explicit_semantic_policy()
+    consumer_lowering.begin_module(consumer_path)
+    val consumer = consumer_lowering.lower_module(consumer_ast)
+    expect(first_lowering.errors.len()).to_equal(0)
+    expect(second_lowering.errors.len()).to_equal(0)
+    expect(consumer_lowering.errors.len()).to_equal(0)
+    expect(first.name).to_equal(first_path)
+    expect(first.path).to_equal(first_path)
+    expect(second.path).to_equal(second_path)
+    expect(consumer.path).to_equal(consumer_path)
+    val imported = mir_imported_extern_consumers_v1(consumer.symbols, consumer.name)
+    expect(imported.len()).to_be_greater_than(0)
+    var lowering = MirLowering.new(consumer.symbols)
+    if mode == 0:
+        lowering.record_imported_exact_extern_modules_with_context_v1(
+            consumer.name, consumer.path, [first, consumer])
+        expect(lowering.errors.len()).to_equal(0)
+        return
+    if mode == 1:
+        lowering.record_imported_exact_extern_modules_with_context_v1(
+            consumer.name, consumer.path, [first, consumer, second])
+    else:
+        # Existing two-argument ABI remains callable and reports missing path
+        # honestly rather than reconstructing one from a module spelling.
+        lowering.record_imported_exact_extern_modules_v1(
+            consumer.name, [first, consumer, second])
+    expect(lowering.errors.len()).to_equal(1)
+    expect(lowering.errors[0].fatal).to_equal(true)
+    val message = lowering.errors[0].message
+    expect(message).to_start_with("ambiguous imported extern provider owner")
+    expect(message).to_contain("consumer_module=\"{consumer_path}\"")
+    expect(message).to_contain("canonical_owner=\"lib.provider#\"")
+    expect(message).to_contain("first_provider_index=0")
+    expect(message).to_contain("second_provider_index=2")
+    expect(message).to_contain("first_provider_name=\"{first_path}\"")
+    expect(message).to_contain("second_provider_name=\"{second_path}\"")
+    expect(message).to_contain("first_provider_path=\"{first_path}\"")
+    expect(message).to_contain("second_provider_path=\"{second_path}\"")
+    if mode == 1:
+        expect(message).to_contain("consumer_path=\"{consumer_path}\"")
+        expect(message).to_contain("consumer_path_available=true")
+    else:
+        expect(message).to_contain("consumer_path=\"\"")
+        expect(message).to_contain("consumer_path_available=false")
+
+describe "imported extern provider owner diagnostics":
+    it "attributes an actual duplicate owner to importer and both provider rows":
+        check_imported_owner_diagnostic(1)
+    it "keeps the existing two-argument entrypoint and fatal guard":
+        check_imported_owner_diagnostic(2)
+    it "accepts a unique imported provider without a new error":
+        check_imported_owner_diagnostic(0)

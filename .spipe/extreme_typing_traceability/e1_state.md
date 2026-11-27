@@ -1,0 +1,70 @@
+# E1 owned signature projection candidate
+
+2026-11-02, base 401883ab000, work/release-1.0.0-fix-primary.
+
+Bounded acceptance (source candidate; execution pending):
+1. The retained production typecheck pass requests signature projection inside
+   the actual inference consumer after infer_module, before context disposal.
+2. Returned facts contain owned scalar/enum/text/array data only, never HIR,
+   SymbolTable, Substitution, parser or module-surface objects.
+3. Structural type nodes use compiler kind tags and module-local symbol identity;
+   bounded substitution traversal detects unresolved/cyclic variables. Explicit
+   unknown reasons cover nominal member expansion, generic guarantees, omitted
+   declaration kinds, effective export closure and generated stages.
+4. Facts reach bounded per-module CompileContext storage. Optional collection
+   defaults off for existing archive body leases, whose diagnostic digest and
+   lifetime contracts are unchanged. No serialized/cache/admission consumer
+   may claim these facts as complete or authoritative publication permission.
+5. Real unit/negative specs cover type tags, substitution, symbol ownership,
+   budgets, and production consumer/storage plumbing. No string-source tests
+   substitute execution. All tests unrun until an admitted runtime exists.
+
+Owned files: new 00.common/api_signature_facts_v1.spl;
+new 30.types/type_infer/api_signature_projection_v1.spl;
+80.driver/hir_typecheck_consumer_v1.spl;
+80.driver/driver_hir_pipeline_passes.spl; 80.driver/driver_types.spl;
+80.driver/driver_orchestration.spl (retained product ownership only);
+new test/01_unit/compiler/type_infer/api_signature_projection_v1_spec.spl;
+doc/05_design/extreme_typing_traceability.md (append candidate status).
+
+Reviewer: /root/design_review. Maximum three source review/fix cycles.
+No commits/merges, Rust changes, fatal enforcement or runtime claims.
+
+Source checkpoint: production collector, bounded projector, retained store and
+seven execution specs authored. Cycle 1 review found no P0/P1; corrected early
+budget error counts, added nonempty production-pass coverage, and moved all
+lifetime-spec assertions outside scratch with mutable record promotion.
+Sibling substitution paths copy their bounded active-ID list independently.
+Cycle 2 final source review requested. Tests remain unrun. Added concise status
+to the traceability guide and feature expert route; no operational skills changed.
+
+Final checkpoint: cycle 2 independent source review completed with zero
+unresolved reported P0/P1/P2 findings. Owned tracked diff whitespace check passed.
+Source frozen for parent review/commit. No runtime, merge or release qualification.
+
+2026-11-06 (work/r10-xtype-20261106): structural exposure walker slice added
+(`api_exposure_walker_v1`, `api_exposure_result_v1`, spec). Projection
+and walker specs executed GREEN on the Windows seed runner; the route spec was
+3/6 there until the same-day route fix (authority index never frozen; facts
+keyed by filename-derived module name) took it to 7/7; design/feature
+expert updated. Next: retain walker results per module in CompileContext
+(observation only), then E2 named rule.
+Follow-up same day: walker results retained per module in
+`CompileContext.api_exposure` (observation only, cleared with the facts).
+
+2026-11-06 (work/r11-xtype-closure-design-20261106): effective export closure
+DESIGNED (docs-only PR first, per owner directive for structural changes).
+Definition, records, module-verdict conjunction, Unknown-denial consequence
+and spec obligations are in the design doc section "E1 effective export
+closure (design, 2026-11-06)". Code slice: `api_export_closure_facts_v1`,
+`api_export_closure_projection_v1`, `api_exposure_closure_v1`,
+`CompileContext.api_export_closure_facts`, stacked PR after this one.
+
+2026-11-06 (work/r11-xtype-closure-20261106, stacked on the design PR):
+closure IMPLEMENTED. Closure spec RED -> GREEN 5/5; guard 8/8 (unknown-root
+case flipped to deny on purpose); walker/route/signature collateral unchanged.
+Seed facts recorded: no origin row for an unresolved `export use` directory
+alias (closure reads raw exports -> Unknown); transitive re-export via the
+facade name joins to the terminal. Still open: nominal members (every
+Nominal export is an Unknown root, hence denied under the flag at robust),
+non-callable/generated surfaces, Phase 3 full compile() verification.

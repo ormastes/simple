@@ -1,0 +1,79 @@
+# Failed attach attempts settle only their helper reservation. A live opaque
+# terminal capability is mandatory; decoded evidence never proves absence.
+use std.nogc_sync_mut.orchestration.host_windows_local_root_v3.HostWindowsLocalRootV3
+use std.common.contracts.container.primary_connection_consumption_v2.{ContainerPrimaryConnectionConsumptionV2,
+    container_primary_connection_consumption_bytes_v2}
+use std.nogc_async_mut.container.primary_connection_attempt_v3.{ContainerPrimaryConnectionAttemptTerminalV3,
+    container_primary_connection_attempt_bytes_v3}
+use std.nogc_sync_mut.orchestration.host_primary_connection_receipt_v2.{host_primary_connection_basis_v3,
+    host_primary_connection_attempt_settlement_bytes_v3, host_primary_connection_completion_evidence_v2}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{host_capacity_owner_settle_v1,
+    host_capacity_completion_evidence_owned_v2}
+use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_read_v3,
+    distributed_operation_journal_read_required_v3, distributed_operation_journal_publish_v3}
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.common.crypto.sha256.sha256_text
+
+pub struct HostPrimaryConnectionAttemptSettlementV3:
+    local: HostWindowsLocalRootV3
+    terminal: ContainerPrimaryConnectionAttemptTerminalV3
+    settled: bool
+    error: text
+
+fn publish_v3(local: HostWindowsLocalRootV3, record: ContainerPrimaryConnectionConsumptionV2,
+        terminal: ContainerPrimaryConnectionAttemptTerminalV3) -> Result<text, text>:
+    val metadata = local.current_v3()?
+    val journal = local.capacity_v3().journal
+    val operation = record.admission.operation
+    if record.plan.journal_lease_digest != journal.lease_digest:
+        return Err("connection-attempt-settlement-writer-mismatch")
+    val state = daemon_operation_exact_v2(journal, operation)?
+    if state.state != "executing" and state.state != "completed": return Err("connection-attempt-settlement-state")
+    val key = sha256_text(operation.id) + ".sdn"
+    if distributed_operation_journal_read_v3(journal, "primary-connection-settlement/" + key, 4096)? != nil:
+        return Err("connection-settlement-conflicting-domains")
+    val consumed = container_primary_connection_consumption_bytes_v2(record)?
+    if distributed_operation_journal_read_required_v3(journal, "primary-connection-consumed/" + key, 8388608)? != consumed:
+        return Err("connection-attempt-settlement-consumption-mismatch")
+    # This rechecks exact native closure, or the private positive-claim proof.
+    val bytes = container_primary_connection_attempt_bytes_v3(terminal, record)?
+    val stored = distributed_operation_journal_publish_v3(journal, "primary-connection-attempt-terminal/" + key, bytes)?
+    if distributed_operation_journal_read_required_v3(journal, "primary-connection-attempt-terminal/" + key, 4096)? != bytes:
+        return Err("connection-attempt-terminal-retained-mismatch")
+    val basis = host_primary_connection_basis_v3(journal, operation)?
+    val outcome = host_primary_connection_attempt_settlement_bytes_v3(basis, bytes)?
+    val published = distributed_operation_journal_publish_v3(journal, "primary-connection-attempt-settlement/" + key, outcome)?
+    val checked = host_primary_connection_completion_evidence_v2(journal, operation)?
+    if checked != outcome: return Err("connection-attempt-settlement-retained-mismatch")
+    Ok(outcome)
+
+pub fn host_primary_connection_attempt_settle_v3(local: HostWindowsLocalRootV3,
+        record: ContainerPrimaryConnectionConsumptionV2,
+        terminal: ContainerPrimaryConnectionAttemptTerminalV3) -> HostPrimaryConnectionAttemptSettlementV3:
+    var turn = HostPrimaryConnectionAttemptSettlementV3(local, terminal, false, "")
+    val published = publish_v3(local, record, terminal)
+    if published.is_err():
+        turn.error = published.unwrap_err()
+        return turn
+    val checked = host_capacity_completion_evidence_owned_v2(local.capacity_v3().journal,
+        local.capacity_v3().ledger.capacity, record.admission.operation)
+    if checked.is_err() or checked.unwrap() != published.unwrap():
+        turn.error = if checked.is_err(): checked.unwrap_err() else: "connection-attempt-independent-evidence-mismatch"
+        return turn
+    val committed = host_capacity_owner_settle_v1(local.capacity_v3(), record.admission.operation)
+    val retained = turn.local.retain_v3(committed.owner, local.container_v3())
+    if retained.is_err():
+        turn.error = retained.unwrap_err()
+        return turn
+    if not committed.settled:
+        turn.error = committed.error
+        return turn
+    val state = daemon_operation_exact_v2(committed.owner.journal, record.admission.operation)
+    if state.is_err():
+        turn.error = state.unwrap_err()
+        return turn
+    if state.unwrap().state != "completed" or state.unwrap().outcome_digest != sha256_text(published.unwrap()):
+        turn.error = "connection-attempt-settlement-ack-mismatch"
+        return turn
+    turn.settled = true
+    turn

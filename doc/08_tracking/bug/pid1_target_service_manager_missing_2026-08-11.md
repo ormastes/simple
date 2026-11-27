@@ -1,10 +1,38 @@
 # Missing target-native PID1 service manager
 ## Open 2026-09-16 — needs owner triage
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
-
 **Status:** Partially resolved — blocks `simple_os_enhance` AC-4 QEMU acceptance
+
+## Addendum 2026-11-11 (lane ne19) — LIVE, partially progressed; no Status change
+
+Re-checked the release/1.0.0 tree against this doc's "Required resolution"
+list. Since 2026-08-11 several prerequisites have landed, but the acceptance
+blockers remain open:
+
+- **Landed:** catalog payload entry sources now exist —
+  `src/os/services/vfs/vfs_service_main.spl`,
+  `src/os/services/netstack/net_service_main.spl`,
+  `src/os/services/web/http_service_main.spl`, plus a fault-injection payload
+  `net_service_main`-sibling `net_service_fault_after_ready_main.spl`; staging
+  scripts `scripts/os/build_root_service_catalog.shs` (stages
+  `$ROOTFS/system/services/{vfs,http}.smf`),
+  `build_pid1_catalog_media.shs`, `build_pid1_kernel_riscv64.shs`; contract
+  specs `pid1_boot_contract_spec.spl`, `root_service_catalog_spec.spl`,
+  `pid1_catalog_qemu_harness_contract_spec.spl`,
+  `pid1_lifecycle_serial_markers_contract_spec.spl`,
+  `service_manager_main_contract_spec.spl`. `root_service_catalog.spl` owns
+  per-service grants/limits/filters for vfs+http.
+- **Still open:** target-native static payload builds + exact catalog-path
+  staging provenance, signed `WorkloadManifest` records replacing the trusted
+  catalog, the QEMU lifecycle scenario capture (readiness order, crash ->
+  grant revocation -> fresh-grant restart -> quarantine), readiness/watchdog
+  signals (service_manager_main.spl notes endpoint reservation is "the first
+  live readiness signal" and supervision "is added once ..."), authenticated
+  exit notifications replacing WNOHANG polling, the named-capability mismatch
+  (`catalog_service_named_capability_syscall_mismatch_2026-08-11.md`), and
+  the provenance-valid self-hosted rebuild.
+
+This is a multi-lane feature campaign, not a P3 fix; left OPEN.
 
 ## Evidence
 
@@ -82,3 +110,13 @@ SIMPLEOS_REQUIRE_PID1=1 sh scripts/os/make_os_disk.shs
 Then run the repository's RV64/QEMU service lifecycle system scenario once it
 has been added.
 
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne19: prerequisites landed (catalog payload entry sources exist) but all six acceptance blockers remain open (target-native static builds + provenance-valid compiler, signed VFS-loaded WorkloadManifest, SIMPLEOS_PID1_BINARY wiring, QEMU lifecycle capture, authenticated exit notifications, catalog capability resolution). Owner: SimpleOS PID1/service-manager lane.
+
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Re-read the record against the release/1.0.0 tip: unchanged from the 2026-11-11 ne19 addendum — catalog payload entry sources, staging scripts, and contract specs exist; all six acceptance blockers remain open (target-native static payload builds + provenance-valid rebuild, signed WorkloadManifest, SIMPLEOS_PID1_BINARY wiring, QEMU lifecycle capture, authenticated exit notifications, named-capability resolution). The record itself classifies this as "a multi-lane feature campaign, not a P3 fix"; nothing in a 25-minute bug box changes that. No in-lane change. Owner: SimpleOS PID1/service-manager lane (grant: RV64 QEMU on Linux + provenance-valid self-hosted compiler).

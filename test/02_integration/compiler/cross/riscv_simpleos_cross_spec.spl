@@ -1,0 +1,107 @@
+"""
+## Purpose and audience
+For SimpleOS application developers. I want `native-build --target
+riscv64-unknown-simpleos` (and `riscv32-unknown-simpleos`) to give me a
+SimpleOS ELF executable, an object, a static archive and a shared object
+that the kernel's DlOpen/DlSym syscalls (src/os/kernel/ipc/syscall_process.spl)
+can load, using clang + ld.lld only.
+## Operator workflow
+From the repository root: `SIMPLE_XC_BIN=<compiler> bin/simple test
+test/02_integration/compiler/cross/riscv_simpleos_cross_spec.spl`.
+## Compatibility and limitations
+The run path boots SimpleOS on `qemu-system-riscv64 -M virt` through OpenSBI
+(real firmware; never `-kernel` pass-through or isa-debug-exit) using
+scripts/qemu/simple-qemu-settings.shs and simple-qemu-host-admission.shs,
+then runs the exe from the guest filesystem. The board path is recorded in
+doc/03_plan/compiler/cross_compile_matrix_plan.md. Without QEMU the run
+rows report BLOCKED and fail.
+## Verification guidance and troubleshooting
+A failing row names the native-build error or the readobj mismatch.
+"""
+# @manual_section: cross-compile-riscv-simpleos
+# @req: REQ-XC-005
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use .cross_matrix_helpers.{xc_fixture, xc_out, xc_build, xc_check_format, xc_check_symbol, xc_check_entry, xc_check_export, xc_runner}
+
+const RV64: text = "riscv64-unknown-simpleos"
+const RV32: text = "riscv32-unknown-simpleos"
+
+describe "riscv64 SimpleOS cross-compile":
+    it "links an RV64 SimpleOS executable with an entry point":
+        # NOTE: RED — BUG-XC-CROSS-EXE-LINK.
+        step("build fixture")
+        val out = xc_out(RV64, "elf")
+        expect(xc_build(RV64, "exe", xc_fixture("hello"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "elf64-littleriscv", "EM_RISCV")).to_equal("")
+        expect(xc_check_entry(out)).to_equal("")
+
+    it "runs the RV64 executable inside SimpleOS booted through OpenSBI":
+        step("find runner")
+        expect(xc_runner("qemu-system-riscv64")).to_equal("")
+
+    it "emits an RV64 ELF object that defines xc_add":
+        step("build fixture")
+        val out = xc_out(RV64, "o")
+        expect(xc_build(RV64, "obj", xc_fixture("lib"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "elf64-littleriscv", "EM_RISCV")).to_equal("")
+        expect(xc_check_symbol(out, "xc_add")).to_equal("")
+
+    it "emits an RV64 static archive that defines xc_add":
+        step("build fixture")
+        val out = xc_out(RV64, "a")
+        expect(xc_build(RV64, "ar", xc_fixture("lib"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "elf64-littleriscv", "EM_RISCV")).to_equal("")
+        expect(xc_check_symbol(out, "xc_add")).to_equal("")
+
+    it "links an RV64 shared object that exports xc_add for DlOpen":
+        # NOTE: RED — BUG-XC-SHARED-LINK-DFLAG.
+        step("build fixture")
+        val out = xc_out(RV64, "so")
+        expect(xc_build(RV64, "so", xc_fixture("lib"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "elf64-littleriscv", "EM_RISCV")).to_equal("")
+        expect(xc_check_export(out, "xc_add")).to_equal("")
+
+describe "riscv32 SimpleOS cross-compile":
+    it "links an RV32 SimpleOS executable with an entry point":
+        # NOTE: RED — BUG-XC-RV32-GCC.
+        step("build fixture")
+        val out = xc_out(RV32, "elf")
+        expect(xc_build(RV32, "exe", xc_fixture("hello"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "elf32-littleriscv", "EM_RISCV")).to_equal("")
+        expect(xc_check_entry(out)).to_equal("")
+
+    it "runs the RV32 executable inside SimpleOS booted through OpenSBI":
+        step("find runner")
+        expect(xc_runner("qemu-system-riscv32")).to_equal("")
+
+    it "emits an RV32 ELF object that defines xc_add":
+        step("build fixture")
+        val out = xc_out(RV32, "o")
+        expect(xc_build(RV32, "obj", xc_fixture("lib"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "elf32-littleriscv", "EM_RISCV")).to_equal("")
+        expect(xc_check_symbol(out, "xc_add")).to_equal("")
+
+    it "emits an RV32 static archive that defines xc_add":
+        step("build fixture")
+        val out = xc_out(RV32, "a")
+        expect(xc_build(RV32, "ar", xc_fixture("lib"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "elf32-littleriscv", "EM_RISCV")).to_equal("")
+        expect(xc_check_symbol(out, "xc_add")).to_equal("")
+
+    it "links an RV32 shared object that exports xc_add for DlOpen":
+        # NOTE: RED — BUG-XC-SHARED-LINK-DFLAG.
+        step("build fixture")
+        val out = xc_out(RV32, "so")
+        expect(xc_build(RV32, "so", xc_fixture("lib"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "elf32-littleriscv", "EM_RISCV")).to_equal("")
+        expect(xc_check_export(out, "xc_add")).to_equal("")

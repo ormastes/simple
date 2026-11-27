@@ -1,0 +1,50 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Enum discriminants: positional convention shared by pure-Simple and the seed
+
+Bug enum_discriminant_convention_split_hashed_seed_vs_positional_pure_simple_2026-08-08:
+the Rust seed tagged variants with a `DefaultHasher` hash of the name while
+pure-Simple MIR (and the C runtime) use the declared position. The seed now
+uses the positional values for the builtin Result/Option variants. This spec
+pins the pure-Simple side and cross-checks the seed's single definition.
+"""
+
+# @tag: unit, compiler, mir, enum
+
+use std.spec
+use std.io_runtime.{file_read}
+use compiler.driver.driver_pipeline_lowering.*
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{SymbolTable}
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn enumdisc_lowering(src: text) -> MirLowering:
+    val parsed = parse_full_frontend(src, "testdata/fixture_enum_disc.spl", "fixture_enum_disc", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("testdata/fixture_enum_disc.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(SymbolTable.new(), driver_mir_target_context(driver_core_compile_options_default()))
+    lowering.register_module_enum_bootstrap_inventory_v1([hir])
+    lowering
+
+describe "enum discriminant positional convention":
+    it "builtin Result and Option use declared positions":
+        val lw = enumdisc_lowering("enum Shape:\n    Circle\n    Square\n    Triangle\n")
+        expect(lw.enum_variant_discriminant("Result", "Ok")).to_equal(0)
+        expect(lw.enum_variant_discriminant("Result", "Err")).to_equal(1)
+        expect(lw.enum_variant_discriminant("Option", "Some")).to_equal(0)
+        expect(lw.enum_variant_discriminant("Option", "None")).to_equal(1)
+
+    it "user enums use declared positions":
+        val lw = enumdisc_lowering("enum Shape:\n    Circle\n    Square\n    Triangle\n")
+        expect(lw.enum_variant_discriminant("Shape", "Circle")).to_equal(0)
+        expect(lw.enum_variant_discriminant("Shape", "Triangle")).to_equal(2)
+
+    it "the Rust seed's single definition maps builtins to the same positions":
+        val src = file_read("src/compiler_rust/runtime/src/value/objects.rs")
+        expect(src.contains("\"Ok\" | \"Some\" => return 0")).to_equal(true)
+        expect(src.contains("\"Err\" | \"None\" => return 1")).to_equal(true)

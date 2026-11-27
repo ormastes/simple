@@ -1,0 +1,139 @@
+# Source-only profile installation and truthful post-publication path receipts.
+# Native protected-store/setup execution: NOT_RUN.
+use app.orchestrator.host_identity_profile_v1.*
+use app.orchestrator.host_identity_command_v1.host_identity_projection_receipt_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+val PROFILE_ROOT = "/home/owner/.simple/identity"
+
+fn profile_candidate_fields_v1() -> Dict<text, SdnValue>:
+    {"version": SdnValue.Int(1), "kind": SdnValue.String("server-ssh-profile"),
+        "authRef": SdnValue.String("secret://shared-host"), "trustRef": SdnValue.String("trust://build"),
+        "user": SdnValue.String("builder"), "sshExecutable": SdnValue.String("/usr/bin/ssh"),
+        "identityPath": SdnValue.String(PROFILE_ROOT + "/journal/" + "a".repeat(64) + ".key"),
+        "knownHostsPath": SdnValue.String(PROFILE_ROOT + "/journal/" + "b".repeat(64) + ".hosts"),
+        "hostKeyAlias": SdnValue.String("build"), "storeRoot": SdnValue.String(PROFILE_ROOT),
+        "sshDigest": SdnValue.String("c".repeat(64))}
+
+fn profile_source_v1(fields: Dict<text, SdnValue>) -> text:
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+fn profile_receipt_bool_v1(fields: Dict<text, SdnValue>, key: text) -> Result<bool, text>:
+    match fields[key]:
+        case SdnValue.Bool(value): Ok(value)
+        case _: Err("not-bool")
+
+fn profile_receipt_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("not-text")
+
+describe "Canonical protected profile installation input":
+    it "derives a distinct immutable profile role from strict canonical configuration":
+        val source = profile_source_v1(profile_candidate_fields_v1())
+        val prepared = host_identity_profile_prepare_v1(source, PROFILE_ROOT)
+        expect(prepared.is_ok()).to_equal(true)
+        expect(prepared.unwrap().leaf.len()).to_equal(72)
+        expect(prepared.unwrap().leaf).to_end_with(".profile")
+        expect(prepared.unwrap().profile_ref).to_start_with("profile://")
+        expect(prepared.unwrap().profile.auth_ref).to_equal("secret://shared-host")
+
+    it "preserves the exact reference when preparing an already canonical profile":
+        val first = host_identity_profile_prepare_v1(profile_source_v1(profile_candidate_fields_v1()), PROFILE_ROOT).unwrap()
+        val second = host_identity_profile_prepare_v1(first.canonical, PROFILE_ROOT).unwrap()
+        expect(second.canonical).to_equal(first.canonical)
+        expect(second.leaf).to_equal(first.leaf)
+        expect(second.profile_ref).to_equal(first.profile_ref)
+
+    it "gives changed profile content a different immutable reference":
+        val first = host_identity_profile_prepare_v1(profile_source_v1(profile_candidate_fields_v1()), PROFILE_ROOT).unwrap()
+        var changed = profile_candidate_fields_v1()
+        changed["user"] = SdnValue.String("other-builder")
+        val second = host_identity_profile_prepare_v1(profile_source_v1(changed), PROFILE_ROOT).unwrap()
+        expect(second.leaf == first.leaf).to_equal(false)
+
+    it "rejects secret fields invalid references and a different retained root":
+        var fields = profile_candidate_fields_v1()
+        fields["privateKey"] = SdnValue.String("must-not-be-copied")
+        expect(host_identity_profile_prepare_v1(profile_source_v1(fields), PROFILE_ROOT).is_err()).to_equal(true)
+        var raw_auth = profile_candidate_fields_v1()
+        raw_auth["authRef"] = SdnValue.String("plaintext-password")
+        expect(host_identity_profile_prepare_v1(profile_source_v1(raw_auth), PROFILE_ROOT).is_err()).to_equal(true)
+        expect(host_identity_profile_prepare_v1(profile_source_v1(profile_candidate_fields_v1()), "/different/root").is_err()).to_equal(true)
+
+    it "rejects missing options duplicate flags and relative input paths before IO":
+        expect(host_identity_profile_command_v1(["key-profile-install"]).exit_code).to_equal(2)
+        expect(host_identity_profile_command_v1(["key-profile-install", "--store-root", PROFILE_ROOT,
+            "--store-root", PROFILE_ROOT]).exit_code).to_equal(2)
+        expect(host_identity_profile_command_v1(["key-profile-install", "--store-root", PROFILE_ROOT,
+            "--profile-file", "relative.sdn"]).exit_code).to_equal(2)
+
+describe "Published identity facts survive unavailable external path projection":
+    it "returns logical success only for the dedicated validated projection refusal":
+        val fields: Dict<text, SdnValue> = {"status": SdnValue.String("identity-created"),
+            "identityRef": SdnValue.String("secret://shared-host"), "publicationObserved": SdnValue.Bool(true),
+            "fingerprint": SdnValue.String("public-fingerprint")}
+        val receipt = host_identity_projection_receipt_v1(fields,
+            Err("identity-store-transport-projection-unavailable"), "identityPath")
+        expect(receipt.exit_code).to_equal(0)
+        expect(receipt.available).to_equal(false)
+        expect(profile_receipt_bool_v1(receipt.fields, "publicationObserved").unwrap()).to_equal(true)
+        expect(profile_receipt_bool_v1(receipt.fields, "transportProjectionUnavailable").unwrap()).to_equal(true)
+        expect(profile_receipt_text_v1(receipt.fields, "status").unwrap()).to_equal("identity-created")
+        expect(receipt.fields.contains_key("identityPath")).to_equal(false)
+
+    it "preserves observed publication but fails an unrelated path-integrity error":
+        val fields: Dict<text, SdnValue> = {"status": SdnValue.String("server-key-pinned"),
+            "publicationObserved": SdnValue.Bool(true), "pinned": SdnValue.Bool(true)}
+        val receipt = host_identity_projection_receipt_v1(fields, Err("identity-store-stale"), "knownHostsPath")
+        expect(receipt.exit_code).to_equal(1)
+        expect(profile_receipt_bool_v1(receipt.fields, "publicationObserved").unwrap()).to_equal(true)
+        expect(profile_receipt_bool_v1(receipt.fields, "pinned").unwrap()).to_equal(true)
+        expect(profile_receipt_bool_v1(receipt.fields, "projectionValidationUnconfirmed").unwrap()).to_equal(true)
+
+    it "never strips a native global namespace prefix to manufacture a drive path":
+        val receipt = host_identity_projection_receipt_v1({"publicationObserved": SdnValue.Bool(true)},
+            Ok("\\GLOBAL??\\C:\\Users\\owner\\identity\\journal\\key.key"), "identityPath")
+        expect(receipt.exit_code).to_equal(1)
+        expect(receipt.available).to_equal(false)
+        expect(receipt.fields.contains_key("identityPath")).to_equal(false)
+        expect(profile_receipt_bool_v1(receipt.fields, "publicationObserved").unwrap()).to_equal(true)
+
+    it "returns an already supported path unchanged":
+        val path = PROFILE_ROOT + "/journal/" + "a".repeat(64) + ".key"
+        val receipt = host_identity_projection_receipt_v1({}, Ok(path), "identityPath")
+        expect(receipt.exit_code).to_equal(0)
+        expect(receipt.available).to_equal(true)
+        expect(profile_receipt_text_v1(receipt.fields, "identityPath").unwrap()).to_equal(path)
+
+
+describe "Paired installer bounded phases and publication receipts":
+    it "advances acquisition only for a retained pending pair without failure":
+        expect(host_identity_profile_pair_can_advance_v2(true, false, false, "")).to_equal(true)
+        expect(host_identity_profile_pair_can_advance_v2(false, false, false, "")).to_equal(false)
+        expect(host_identity_profile_pair_can_advance_v2(true, true, false, "")).to_equal(false)
+        expect(host_identity_profile_pair_can_advance_v2(true, false, true, "")).to_equal(false)
+        expect(host_identity_profile_pair_can_advance_v2(true, false, false, "identity-store-stale")).to_equal(false)
+
+    it "does not retry retained native failures or consumed close slots":
+        expect(host_identity_profile_close_can_advance_v2(true, false, "identity-ssh-projection-cleanup-pending")).to_equal(true)
+        expect(host_identity_profile_close_can_advance_v2(true, false, "identity-ssh-projection-file-close-retained")).to_equal(false)
+        expect(host_identity_profile_close_can_advance_v2(true, false, "identity-ssh-projection-root-close-retained")).to_equal(false)
+        expect(host_identity_profile_close_can_advance_v2(false, false, "identity-ssh-projection-cleanup-pending")).to_equal(false)
+        expect(host_identity_profile_close_can_advance_v2(true, true, "identity-ssh-projection-cleanup-pending")).to_equal(false)
+
+    it "preserves successful publication and the original operation failure during cleanup":
+        val fields: Dict<text, SdnValue> = {"status": SdnValue.String("profile-installed"),
+            "profileRef": SdnValue.String("profile://published"), "publicationObserved": SdnValue.Bool(true),
+            "profileInstalled": SdnValue.Bool(true), "fileSynced": SdnValue.Bool(true),
+            "namespaceSynced": SdnValue.Bool(false), "code": SdnValue.String("host-identity-profile-locator-unavailable")}
+        val receipt = host_identity_profile_cleanup_receipt_v2(fields, "identity-ssh-projection-file-close-retained")
+        expect(profile_receipt_bool_v1(receipt, "publicationObserved").unwrap()).to_equal(true)
+        expect(profile_receipt_bool_v1(receipt, "profileInstalled").unwrap()).to_equal(true)
+        expect(profile_receipt_bool_v1(receipt, "fileSynced").unwrap()).to_equal(true)
+        expect(profile_receipt_bool_v1(receipt, "cleanupPending").unwrap()).to_equal(true)
+        expect(profile_receipt_text_v1(receipt, "profileRef").unwrap()).to_equal("profile://published")
+        expect(profile_receipt_text_v1(receipt, "operationCode").unwrap()).to_equal("host-identity-profile-locator-unavailable")
+        expect(profile_receipt_text_v1(receipt, "code").unwrap()).to_equal("host-identity-profile-locator-unavailable")
+        expect(profile_receipt_text_v1(receipt, "operationStatus").unwrap()).to_equal("profile-installed")

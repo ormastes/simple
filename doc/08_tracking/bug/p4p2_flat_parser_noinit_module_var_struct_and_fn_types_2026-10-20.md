@@ -1,7 +1,7 @@
 # Self-hosted flat parser rejects initializer-less struct/fn-typed module vars (seed accepts)
 
 - **Date:** 2026-10-20
-- **Status:** open — tagged source workaround active; no root fix yet
+- **Status:** fix-implemented-verification-pending (owner decision 2026-11-06 item 8: robust = error; other modes zero/nil default; fn-typed = error)
 - **Found by:** p4-phase2 lane (producer7 `87b9c74ff39`, source origin/release_phase3 `97aa8eb9e1f`)
 
 ## Failure

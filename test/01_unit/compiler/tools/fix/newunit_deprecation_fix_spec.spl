@@ -1,0 +1,110 @@
+# SPL-UNIT-001 / SPL-UNIT-003 auto-fix rule proofs.
+#
+# `newunit Name: T as suffix` is the deprecated spelling of
+# `unit Name: T as suffix` (parser warns SPL-UNIT-001,
+# 10.frontend/core/_ParserDecls/enum_module_body.spl). The fix replaces only
+# the keyword token. A numeric `newtype Name = T` (SPL-UNIT-003) is rewritten
+# to the suffix-less `unit Name: T` form, but only as an Uncertain proposal:
+# its auto-derived arithmetic does not carry over, so it is never auto-applied.
+# Lines that only mention the words (comments, strings, prose, docstrings) and
+# non-numeric newtypes are never touched.
+use std.spec.*
+use std.tooling.easy_fix.*
+use std.common.string_core.{char_from_code}
+use compiler.tools.fix.rules.impl_.deprecation.{check_newunit_deprecation, check_numeric_newtype_deprecation}
+
+val CASE_FILE = "/tmp/newunit_case.spl"
+val QUO = char_from_code(34)   # "
+
+fn apply_all(source: text, fixes: [EasyFix]) -> text:
+    var reps: [Replacement] = []
+    for fix in fixes:
+        for rep in easyfix_replacements(fix):
+            reps.push(rep)
+    var out = source
+    for rep in easyfix_sort_replacements_descending(reps):
+        out = out.slice(0, rep.start) + rep.new_text + out.slice(rep.end, out.len())
+    out
+
+fn fix_newunit(source: text) -> text:
+    apply_all(source, check_newunit_deprecation(source, CASE_FILE))
+
+fn fix_newtype(source: text) -> text:
+    apply_all(source, check_numeric_newtype_deprecation(source, CASE_FILE))
+
+describe "SPL-UNIT-001 newunit auto-fix":
+    it "rewrites a top-level newunit declaration to unit":
+        step("Scan a newunit declaration")
+        step("Expect only the keyword token replaced by `unit`")
+        val src = "newunit Foo: u64 as Fo\n"
+        val fixes = check_newunit_deprecation(src, CASE_FILE)
+        assert_equal(fixes.len(), 1)
+        val reps = easyfix_replacements(fixes[0])
+        assert_equal(reps.len(), 1)
+        assert_equal(reps[0].start, 0)
+        assert_equal(reps[0].end, 7)
+        assert_equal(reps[0].new_text, "unit")
+        assert_equal(fix_newunit(src), "unit Foo: u64 as Fo\n")
+
+    it "rewrites a pub newunit declaration":
+        step("Scan a pub-prefixed newunit declaration")
+        step("Expect `pub unit` with the rest unchanged")
+        assert_equal(fix_newunit("pub newunit Foo: u64 as Fo\n"), "pub unit Foo: u64 as Fo\n")
+
+    it "rewrites an indented declaration on a later line":
+        step("Scan an indented newunit declaration on line 2")
+        step("Expect the replacement offset to land on the keyword")
+        val src = "val a = 1\n    newunit Foo:  i64 as fo\n"
+        assert_equal(fix_newunit(src), "val a = 1\n    unit Foo:  i64 as fo\n")
+
+    it "produces only effective fixes":
+        step("Scan a newunit declaration")
+        step("Expect every proposal to change the source")
+        val src = "newunit Foo: u64 as Fo\n"
+        val sources: Dict<String, String> = {"/tmp/newunit_case.spl": src}
+        for fix in check_newunit_deprecation(src, CASE_FILE):
+            assert_equal(easyfix_is_effective(fix, sources), true)
+
+    it "does not touch comments, strings, or prose":
+        step("Scan lines that only mention the keyword")
+        step("Expect no proposals")
+        val src = "# newunit Foo: u64 as Fo\n" +
+            "val s = " + QUO + "newunit Foo: u64 as Fo" + QUO + "\n" +
+            "newunit declarations must land in the registry\n" +
+            "val newunit_count = 3\n"
+        assert_equal(check_newunit_deprecation(src, CASE_FILE).len(), 0)
+
+    it "does not touch declaration-shaped lines inside a triple-quoted block":
+        step("Scan a docstring holding a newunit declaration")
+        step("Expect no proposals")
+        val tq = QUO + QUO + QUO
+        val src = tq + "\nnewunit Foo: u64 as Fo\n" + tq + "\n"
+        assert_equal(check_newunit_deprecation(src, CASE_FILE).len(), 0)
+
+describe "SPL-UNIT-003 numeric newtype auto-fix":
+    it "rewrites a numeric newtype to the unit form as an uncertain proposal":
+        step("Scan a numeric newtype with irregular spacing and a trailing comment")
+        step("Expect `unit Name: T`, the comment kept, confidence uncertain")
+        val src = "newtype Lba   = i64   # logical block address\n"
+        val fixes = check_numeric_newtype_deprecation(src, CASE_FILE)
+        assert_equal(fixes.len(), 1)
+        assert_equal(fixes[0].confidence_str(), "uncertain")
+        assert_equal(fix_newtype(src), "unit Lba: i64   # logical block address\n")
+
+    it "rewrites every numeric inner type the parser flags":
+        step("Scan float and narrow integer newtypes")
+        step("Expect each rewritten")
+        assert_equal(fix_newtype("newtype Meters = f64\n"), "unit Meters: f64\n")
+        assert_equal(fix_newtype("    newtype Port = u16\n"), "    unit Port: u16\n")
+
+    it "does not touch non-numeric newtypes":
+        step("Scan newtypes over text and an array")
+        step("Expect no proposals (the parser does not raise SPL-UNIT-003)")
+        val src = "newtype CStr = [i64]\nnewtype Name = text\nnewtype Big = i64x\n"
+        assert_equal(check_numeric_newtype_deprecation(src, CASE_FILE).len(), 0)
+
+    it "does not touch comments or prose mentioning newtype":
+        step("Scan lines that only mention the keyword")
+        step("Expect no proposals")
+        val src = "# newtype Lba = i64\nnewtype arithmetic is kept\n"
+        assert_equal(check_numeric_newtype_deprecation(src, CASE_FILE).len(), 0)

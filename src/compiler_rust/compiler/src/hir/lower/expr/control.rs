@@ -40,6 +40,204 @@ fn hir_arm_is_bottom(expr: &HirExpr) -> bool {
     expr.ty == TypeId::NIL || hir_expr_definitely_returns(expr)
 }
 
+/// An arm whose value is only an EMPTY `[]` / `{}` literal (possibly through
+/// blocks, a nested match/if chain whose every value arm is such a literal).
+/// Its default element/key type is not evidence about the join type, so a
+/// concrete sibling must win (same rule `lower_if` applies to `[]`).
+/// Bottom arms (`return`, NIL) are ignored; at least one arm must be weak.
+fn hir_value_is_weak_empty(expr: &HirExpr) -> bool {
+    weak_expr(expr) == Some(true)
+}
+
+// Some(true) = weak literal, Some(false) = concrete value, None = bottom.
+fn weak_expr(expr: &HirExpr) -> Option<bool> {
+    if hir_arm_is_bottom(expr) {
+        return None;
+    }
+    match &expr.kind {
+        HirExprKind::Array(items) => Some(items.is_empty()),
+        HirExprKind::Dict(pairs) => Some(pairs.is_empty()),
+        HirExprKind::Block(stmts) => weak_stmts(stmts),
+        HirExprKind::LetIn { body, .. } => weak_expr(body),
+        HirExprKind::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => join_weak(weak_expr(then_branch), weak_expr(else_branch)),
+        _ => Some(false),
+    }
+}
+
+fn weak_stmts(stmts: &[HirStmt]) -> Option<bool> {
+    match stmts.last() {
+        Some(HirStmt::Expr(expr)) => weak_expr(expr),
+        Some(HirStmt::If {
+            then_block,
+            else_block: Some(else_block),
+            ..
+        }) => join_weak(weak_stmts(then_block), weak_stmts(else_block)),
+        Some(HirStmt::Return(_)) => None,
+        _ => Some(false),
+    }
+}
+
+fn join_weak(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (None, other) | (other, None) => other,
+        (Some(x), Some(y)) => Some(x && y),
+    }
+}
+
+/// True when the arm value is concrete (not bottom, not a weak empty literal).
+fn hir_value_is_concrete(expr: &HirExpr) -> bool {
+    weak_expr(expr) == Some(false)
+}
+
+/// Value type of a lowered tail `if`/`else` statement: the first arm whose
+/// tail value is neither bottom (NIL) nor an empty `[]` literal (its default
+/// element type is not evidence, see `lower_if`); an empty literal is used
+/// only when no other arm yields a value. `None` when the statement list does
+/// not end in an `if` with an `else`, or no arm yields a value.
+fn hir_tail_if_value_type(stmts: &[HirStmt]) -> Option<TypeId> {
+    // (type, is_empty_array_literal)
+    fn arm_type(stmts: &[HirStmt]) -> Option<(TypeId, bool)> {
+        match stmts.last() {
+            Some(HirStmt::Expr(expr)) if !hir_arm_is_bottom(expr) => {
+                let empty = matches!(&expr.kind, HirExprKind::Array(items) if items.is_empty())
+                    || matches!(&expr.kind, HirExprKind::Dict(pairs) if pairs.is_empty());
+                Some((expr.ty, empty))
+            }
+            Some(HirStmt::If { .. }) => tail_if_type(stmts),
+            _ => None,
+        }
+    }
+    fn tail_if_type(stmts: &[HirStmt]) -> Option<(TypeId, bool)> {
+        match stmts.last() {
+            Some(HirStmt::If {
+                then_block,
+                else_block: Some(else_block),
+                ..
+            }) => {
+                let then_ty = arm_type(then_block);
+                let else_ty = arm_type(else_block);
+                match (then_ty, else_ty) {
+                    (Some((_, true)), Some(other @ (_, false))) => Some(other),
+                    (Some(t), _) => Some(t),
+                    (None, e) => e,
+                }
+            }
+            _ => None,
+        }
+    }
+    tail_if_type(stmts).map(|(ty, _)| ty)
+}
+
+/// True when the tail value of `expr` (through do-blocks, nested if/match) is
+/// an explicit `[x; n]` repeat. That form carries real element evidence even
+/// when `n` is 0 (it lowers to an empty HIR array), so it is never "weak".
+fn ast_expr_tail_is_array_repeat(expr: &Expr) -> bool {
+    match expr {
+        Expr::ArrayRepeat { .. } => true,
+        Expr::DoBlock(stmts) => ast_stmts_tail_is_array_repeat(stmts),
+        Expr::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            ast_expr_tail_is_array_repeat(then_branch)
+                || else_branch.as_deref().is_some_and(ast_expr_tail_is_array_repeat)
+        }
+        Expr::Match { arms, .. } => arms.iter().any(|a| ast_stmts_tail_is_array_repeat(&a.body.statements)),
+        _ => false,
+    }
+}
+
+fn ast_stmts_tail_is_array_repeat(stmts: &[ast::Node]) -> bool {
+    match stmts.last() {
+        Some(ast::Node::Expression(e)) => ast_expr_tail_is_array_repeat(e),
+        Some(ast::Node::Match(m)) => m.arms.iter().any(|a| ast_stmts_tail_is_array_repeat(&a.body.statements)),
+        Some(ast::Node::If(i)) => {
+            ast_stmts_tail_is_array_repeat(&i.then_block.statements)
+                || i.elif_branches.iter().any(|(_, _, b)| ast_stmts_tail_is_array_repeat(&b.statements))
+                || i.else_block.as_ref().is_some_and(|b| ast_stmts_tail_is_array_repeat(&b.statements))
+        }
+        _ => false,
+    }
+}
+
+fn expr_is_empty_array_literal(expr: &Expr) -> bool {
+    match expr {
+        Expr::Array(items) => items.is_empty(),
+        Expr::DoBlock(stmts) => match stmts.last() {
+            Some(ast::Node::Expression(tail)) => expr_is_empty_array_literal(tail),
+            _ => false,
+        },
+        Expr::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => expr_is_empty_array_literal(then_branch) && expr_is_empty_array_literal(else_branch),
+        _ => false,
+    }
+}
+
+fn retype_empty_array_branch(branch: &mut HirExpr, empty_ty: TypeId, slice_ty: TypeId) {
+    match &mut branch.kind {
+        HirExprKind::Array(items) if items.is_empty() => {
+            branch.ty = empty_ty;
+        }
+        HirExprKind::Block(stmts) => {
+            if let Some(HirStmt::Expr(tail)) = stmts.last_mut() {
+                retype_empty_array_branch(tail, empty_ty, slice_ty);
+                branch.ty = tail.ty;
+            }
+        }
+        HirExprKind::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => {
+            retype_empty_array_branch(then_branch, empty_ty, slice_ty);
+            retype_empty_array_branch(else_branch, empty_ty, slice_ty);
+            branch.ty = slice_ty;
+        }
+        _ => {
+            branch.ty = empty_ty;
+        }
+    }
+}
+
+/// Text of the runtime "no arm matched" panic. JIT/native code carries no
+/// source path at this point, so the location is the
+/// line of the match (statement) or of its first arm (expression).
+/// Always starts with [`crate::hir::MATCH_EXHAUSTED_PANIC_PREFIX`], which is
+/// what `HirExpr::is_match_exhausted_panic` recognises.
+pub(in crate::hir::lower) fn match_exhausted_message(form: &str, site: Option<(&str, usize)>) -> String {
+    let mut msg = format!(
+        "{}{form} exhausted without matching any pattern (no arm matched)",
+        crate::hir::MATCH_EXHAUSTED_PANIC_PREFIX
+    );
+    if let Some((what, line)) = site {
+        msg.push_str(&format!("; {what} at line {line}"));
+    }
+    msg
+}
+
+/// `rt_panic(msg)` typed NIL (bottom): the fail-closed tail of a match chain
+/// whose subject hit no arm.
+pub(in crate::hir::lower) fn match_exhausted_panic(msg: &str) -> HirExpr {
+    HirExpr {
+        kind: HirExprKind::BuiltinCall {
+            name: "rt_panic".to_string(),
+            args: vec![HirExpr {
+                kind: HirExprKind::String(msg.to_string()),
+                ty: TypeId::STRING,
+            }],
+        },
+        ty: TypeId::NIL,
+    }
+}
+
 /// Placeholder-lambda parameter names generated by
 /// `parser/expressions/placeholder.rs` (`_` / `_1`/`_2`/... -> `__p0`,
 /// `__p1`, ...). Used to scope the ANY-default fix (class 3) to exactly the
@@ -53,15 +251,30 @@ fn is_placeholder_lambda_param_name(name: &str) -> bool {
 }
 
 impl Lowerer {
-    /// The struct/class payload type of a `T?` (represented in HIR as a shared
-    /// pointer to `T`), or None for every other type.
+    /// The struct/class or tuple payload type of a `T?` (represented in HIR
+    /// as a shared pointer to `T`), or None for every other type.
+    ///
+    /// Tuples are admitted alongside structs because `.0`/`.1` on a
+    /// `(A, B)?` local read after a nil check hits the same boxed-`Some`
+    /// receiver: without the payload projection the positional Index ran
+    /// over the Option enum object's own slots, so
+    /// `sqlite_format.schema._read_ident(...).0` yielded "" and `.1` nil in
+    /// the native lane (every CREATE TABLE column name came back empty and
+    /// devhub reported `schema column missing in table 'room'`), while the
+    /// interpreter auto-unwrapped.
     pub(super) fn optional_struct_inner_type(&self, ty: TypeId) -> Option<TypeId> {
         match self.module.types.get(ty) {
             Some(HirType::Pointer {
                 kind: PointerKind::Shared,
                 inner,
                 ..
-            }) if matches!(self.module.types.get(*inner), Some(HirType::Struct { .. })) => Some(*inner),
+            }) if matches!(
+                self.module.types.get(*inner),
+                Some(HirType::Struct { .. }) | Some(HirType::Tuple(_))
+            ) =>
+            {
+                Some(*inner)
+            }
             _ => None,
         }
     }
@@ -89,6 +302,16 @@ impl Lowerer {
             Some(HirType::Pointer { inner, .. }) => self.result_like_payload_type(*inner),
             _ => None,
         }
+    }
+
+    /// Both types are arrays, or both are dicts: only then may a weak empty
+    /// literal defer to its sibling (an unrelated aggregate keeps the default).
+    fn same_collection_kind(&self, a: TypeId, b: TypeId) -> bool {
+        matches!(
+            (self.module.types.get(a), self.module.types.get(b)),
+            (Some(HirType::Array { .. } | HirType::Any), Some(HirType::Array { .. }))
+                | (Some(HirType::Dict { .. } | HirType::Any), Some(HirType::Dict { .. }))
+        )
     }
 
     /// Lower an if expression to HIR
@@ -138,26 +361,45 @@ impl Lowerer {
             if hir_arm_is_bottom(&then_hir) && !hir_arm_is_bottom(other) {
                 ty = other.ty;
             }
+            // A then-arm that is only an empty `[]`/`{}` (directly or through a
+            // nested match/if chain, see `hir_value_is_weak_empty`) is not
+            // evidence about the join type: a concrete else-arm wins.
+            if hir_value_is_weak_empty(&then_hir)
+                && hir_value_is_concrete(other)
+                && other.ty != TypeId::ANY
+                && self.same_collection_kind(then_hir.ty, other.ty)
+                && !ast_expr_tail_is_array_repeat(then_branch)
+            {
+                ty = other.ty;
+            }
         }
         if let Some(other) = else_hir.as_mut() {
             // An empty literal's configured default (normally i32) is not
             // evidence about the sibling's elements. Keeping it here narrows
-            // struct keys to i32 when a conditional array is later iterated.
+            // struct elements to i32 when a conditional array (inline or
+            // multiline DoBlock, including `if ...: [] elif ...` chains where
+            // the sibling may be typed Array or dynamic ANY) is later iterated.
             // Restrict contextualization to actual empty literals: a populated
             // or explicitly typed array must never be silently reinterpreted.
-            let then_empty = matches!(then_branch, Expr::Array(items) if items.is_empty());
-            let else_empty = matches!(else_branch, Some(Expr::Array(items)) if items.is_empty());
+            let then_empty = expr_is_empty_array_literal(then_branch);
+            let else_empty = else_branch.is_some_and(expr_is_empty_array_literal);
             if then_empty != else_empty {
                 let sibling_ty = if then_empty { other.ty } else { then_hir.ty };
-                if let Some(HirType::Array { element, .. }) = self.module.types.get(sibling_ty) {
-                    let element = *element;
+                let inferred_elem = match self.module.types.get(sibling_ty) {
+                    Some(HirType::Array { element, .. }) => Some(*element),
+                    Some(HirType::Any) => Some(TypeId::ANY),
+                    _ if sibling_ty == TypeId::ANY => Some(TypeId::ANY),
+                    _ => None,
+                };
+                if let Some(element) = inferred_elem {
                     let empty_ty = self.module.types.register(HirType::Array { element, size: Some(0) });
+                    let slice_ty = self.module.types.register(HirType::Array { element, size: None });
                     if then_empty {
-                        then_hir.ty = empty_ty;
+                        retype_empty_array_branch(&mut then_hir, empty_ty, slice_ty);
                     } else {
-                        other.ty = empty_ty;
+                        retype_empty_array_branch(other, empty_ty, slice_ty);
                     }
-                    ty = self.module.types.register(HirType::Array { element, size: None });
+                    ty = slice_ty;
                 }
             }
         }
@@ -195,8 +437,9 @@ impl Lowerer {
             Expr::ExistsCheck(inner) => inner.as_ref(),
             other => other,
         };
-        let subject_hir = self.lower_expr(condition_expr, ctx)?;
+        let subject_hir = self.lower_subject_for_patterns(condition_expr, [pattern], true, ctx)?;
         let subject_ty = subject_hir.ty;
+        self.validate_result_presence_binding(subject_ty, pattern, condition)?;
 
         // Temp local holding the subject value, so the pattern condition and the
         // payload extraction both read it without re-evaluating the expression.
@@ -327,11 +570,17 @@ impl Lowerer {
                     // field-access path instead of the dynamic one, and a
                     // non-numeric receiver (e.g. a struct's `.flag` field)
                     // silently mis-executed instead of routing dynamically.
-                    // No behavior change for a NAMED unannotated lambda param
-                    // (e.g. `\x: x.flag`), which is intentionally excluded.
                     TypeId::ANY
                 } else {
-                    TypeId::I64
+                    // A NAMED unannotated param with no expected type is an
+                    // erased `ANY` too. It used to default to I64, which made
+                    // the lambda decode every argument as an integer: a
+                    // `val u = \x: x` handed text, a float or a struct (e.g.
+                    // `["a", "b"].map(u)`, or any call through a declared
+                    // `fn(T) -> T` / `fn(any) -> any` boundary) returned a
+                    // garbage integer with no fallback. `ANY` is a tagged
+                    // word; the body's operators dispatch on it at run time.
+                    TypeId::ANY
                 };
                 (p.name.clone(), ty)
             })
@@ -346,8 +595,13 @@ impl Lowerer {
             param_local_indices.push(local_index);
         }
 
-        // Lower the lambda body with access to parameters
-        let body_hir = Box::new(self.lower_expr(body, ctx)?);
+        // Lower the lambda body with access to parameters. Typed params carry
+        // their unit identity into the body (SPL-UNIT-002); untyped ones
+        // shadow any outer local of the same name.
+        let unit_scope = self.enter_lambda_unit_scope(params, ctx);
+        let body_result = self.lower_expr(body, ctx);
+        Self::leave_lambda_unit_scope(unit_scope, ctx);
+        let body_hir = Box::new(body_result?);
         let body_ty = body_hir.ty;
 
         // Restore context; lambda-local variables must not leak to the outer function.
@@ -477,8 +731,23 @@ impl Lowerer {
         arms: &[MatchArm],
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        self.lower_match_with(subject, arms, "expression", ctx)
+    }
+
+    /// `form` is `"expression"` or `"statement"` and only names the match form
+    /// in the no-arm-matched panic: a match used as a statement (value
+    /// discarded) fails closed exactly like a value-position one (owner
+    /// decision 2026-11-14,
+    /// doc/08_tracking/bug/match_statement_no_arm_silent_noop_2026-11-14.md).
+    pub(in crate::hir::lower) fn lower_match_with(
+        &mut self,
+        subject: &Expr,
+        arms: &[MatchArm],
+        form: &str,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
         // Lower the subject once and store in a local variable to avoid re-evaluation
-        let subject_hir = self.lower_expr(subject, ctx)?;
+        let subject_hir = self.lower_subject_for_patterns(subject, arms.iter().map(|a| &a.pattern), false, ctx)?;
         let subject_ty = subject_hir.ty;
 
         // Create a temporary local to hold the subject value
@@ -487,7 +756,8 @@ impl Lowerer {
         self.carry_optional_trait_subject(subject, subject_idx, ctx);
 
         // Build the chain of If-Else expressions from the arms
-        let if_chain = self.lower_match_arms(subject_idx, subject_ty, arms, ctx)?;
+        let exhaust_msg = match_exhausted_message(form, arms.first().map(|a| ("first arm", a.span.line)));
+        let if_chain = self.lower_match_arms(subject_idx, subject_ty, arms, &exhaust_msg, ctx)?;
         let result_ty = if_chain.ty;
 
         // Wrap in LetIn to store the subject before evaluating the if-else chain
@@ -507,21 +777,25 @@ impl Lowerer {
         subject_idx: usize,
         subject_ty: TypeId,
         arms: &[MatchArm],
+        exhaust_msg: &str,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
         if arms.is_empty() {
-            // No more arms - return Nil
-            return Ok(HirExpr {
-                kind: HirExprKind::Nil,
-                ty: TypeId::NIL,
-            });
+            // No arm matched and no wildcard: fail closed at runtime, like the
+            // interpreter ("match expression exhausted"). Yielding Nil here let
+            // JIT/native code produce garbage for a value-position match whose
+            // subject hit no arm. Type stays NIL (bottom), so the join type
+            // still comes from the real arms.
+            return Ok(match_exhausted_panic(exhaust_msg));
         }
 
         let arm = &arms[0];
         let remaining_arms = &arms[1..];
 
-        // Check if this is a wildcard pattern (always matches)
-        if matches!(&arm.pattern, Pattern::Wildcard) {
+        // Only an UNGUARDED wildcard always matches (later arms are dead).
+        // `case _ if c:` must fall through to the remaining arms when `c` is
+        // false. doc/08_tracking/bug/seed_run_wildcard_arm_guard_ignored_2026-10-10.md
+        if matches!(&arm.pattern, Pattern::Wildcard) && arm.guard.is_none() {
             return self.lower_match_arm_body(&arm.body, ctx);
         }
 
@@ -563,7 +837,7 @@ impl Lowerer {
         self.restore_match_bindings(previous_bindings, ctx);
 
         // Recursively build the else branch from remaining arms
-        let else_branch = self.lower_match_arms(subject_idx, subject_ty, remaining_arms, ctx)?;
+        let else_branch = self.lower_match_arms(subject_idx, subject_ty, remaining_arms, exhaust_msg, ctx)?;
         // Class 5: a BOTTOM arm — a return-only arm, a bare `nil`, or
         // `panic(...)` (which lowers to `rt_panic` typed `TypeId::NIL`) —
         // does not contribute a value to the match join. Using its type as
@@ -573,7 +847,15 @@ impl Lowerer {
         // `case Err(e): panic(e); case Ok(v): v` report `Nil` instead of
         // `v`'s real type.
         let then_is_bottom = hir_arm_is_bottom(&then_branch);
-        let result_ty = if then_is_bottom { else_branch.ty } else { then_ty };
+        // A weak empty `[]`/`{}` arm must not win the join over a concrete
+        // sibling (its default element type is not evidence).
+        let then_is_weak_vs_concrete = !then_is_bottom
+            && hir_value_is_weak_empty(&then_branch)
+            && hir_value_is_concrete(&else_branch)
+            && else_branch.ty != TypeId::ANY
+            && self.same_collection_kind(then_ty, else_branch.ty)
+            && !ast_stmts_tail_is_array_repeat(&arm.body.statements);
+        let result_ty = if then_is_bottom || then_is_weak_vs_concrete { else_branch.ty } else { then_ty };
 
         Ok(HirExpr {
             kind: HirExprKind::If {
@@ -610,6 +892,20 @@ impl Lowerer {
             Pattern::Literal(lit_expr) => {
                 // Compare subject == literal
                 let lit_hir = self.lower_expr(lit_expr, ctx)?;
+
+                // `case nil:` tests absence, exactly like `case None:`. As an
+                // equality it lowered to text/scalar `==` against nil, which is
+                // never true for an absent `text?` (rt_string_eq(nil, nil) == 0),
+                // so the arm silently never matched.
+                if matches!(lit_hir.kind, HirExprKind::Nil) {
+                    return Ok(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_is_none".to_string(),
+                            args: vec![subject_ref],
+                        },
+                        ty: TypeId::BOOL,
+                    });
+                }
 
                 // Check if subject or literal is a string type - use rt_string_eq for string comparison
                 // Also check CHAR and ANY since string indexing returns single-char strings
@@ -698,7 +994,7 @@ impl Lowerer {
                     ty: TypeId::BOOL,
                 })
             }
-            Pattern::Enum { name: _, variant, .. } => {
+            Pattern::Enum { name: pattern_enum, variant, .. } => {
                 // Warn-only, DEFAULT OFF. Expression-form twin of the statement
                 // check in hir/lower/stmt_lowering.rs; reached for
                 // `val x = match subj: case Some(v)`. See
@@ -713,7 +1009,7 @@ impl Lowerer {
                         line: self.current_pattern_span.map(|(line, _)| line),
                         column: self.current_pattern_span.map(|(_, column)| column),
                     },
-                );
+                )?;
                 // Does the subject's own enum type declare this variant name?
                 // This must be decided BEFORE the `Some`/`None` fast paths below:
                 // a user-defined enum is free to name its variants `Some`/`None`
@@ -770,15 +1066,10 @@ impl Lowerer {
                         ty: TypeId::BOOL,
                     });
                 }
-                // Special handling for Some - check not-none
+                // Special handling for Some - presence AND payload sub-patterns
+                // (see `optional_some_condition`).
                 if variant == "Some" && !subject_enum_owns_variant {
-                    return Ok(HirExpr {
-                        kind: HirExprKind::BuiltinCall {
-                            name: "rt_is_some".to_string(),
-                            args: vec![subject_ref],
-                        },
-                        ty: TypeId::BOOL,
-                    });
+                    return Ok(self.optional_some_condition(pattern, subject_ty, subject_ref, ctx));
                 }
 
                 // Positional class/struct pattern: `case ClassName(a, b, c)` where the
@@ -804,14 +1095,10 @@ impl Lowerer {
                     return Ok(self.class_pattern_condition(&subject_ref, &variant, payload, ctx));
                 }
 
-                // Validate the stable enum identity and hashed variant tag.
-                let expected_disc: i64 = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    variant.hash(&mut hasher);
-                    (hasher.finish() & 0xFFFFFFFF) as i64
-                };
+                // Validate the stable enum identity and the OWNING enum's
+                // declared variant index (#6953).
+                let expected_disc: i64 =
+                    self.owner_variant_discriminant(subject_ty, Some(pattern_enum.as_str()), variant, "hir match arm");
 
                 let expected_val = HirExpr {
                     kind: HirExprKind::Integer(expected_disc),
@@ -839,8 +1126,16 @@ impl Lowerer {
                 let nested = match pattern {
                     Pattern::Enum {
                         payload: Some(payload_patterns),
+                        name: outer_enum,
                         ..
-                    } => self.nested_payload_condition(variant, &subject_ref, payload_patterns, ctx),
+                    } => self.nested_payload_condition(
+                        outer_enum,
+                        variant,
+                        subject_ty,
+                        &subject_ref,
+                        payload_patterns,
+                        ctx,
+                    ),
                     _ => None,
                 };
 
@@ -911,6 +1206,361 @@ impl Lowerer {
         })
     }
 
+    /// Is `variant` the BUILTIN optional's `Some`/`None` (nil-boxing `T?`
+    /// representation), rather than a variant of a user-declared enum?
+    /// A user enum may name its variants `Some`/`None`; only the generic
+    /// builtin `Option<T>` registration is excluded from that check (same
+    /// genericity rule as `lower_pattern_condition`).
+    pub(crate) fn is_builtin_optional_variant_name(&self, variant: &str) -> bool {
+        if variant != "Some" && variant != "None" {
+            return false;
+        }
+        !self.module.types.iter().any(|(_, ty)| {
+            matches!(ty, HirType::Enum { name, variants, generic_params, .. }
+                if variants.iter().any(|(v, _)| v == variant)
+                    && !(name == "Option" && !generic_params.is_empty()))
+        })
+    }
+
+    /// Bare-name runtime id of each user enum declaring a `Some` or `None`
+    /// variant, with its `Some` discriminant when it has one. Such values are
+    /// not the raw form of an optional, so a bare `Some` arm over an untyped
+    /// subject only matches them through their own `Some` variant. Cached per
+    /// type-registry size: it is consulted for every erased `Some` arm.
+    pub(crate) fn user_option_shaped_enums(&mut self) -> std::sync::Arc<Vec<(i64, Option<i64>)>> {
+        let count = self.module.types.type_count();
+        if let Some((at, cached)) = &self.user_option_shaped_cache {
+            if *at == count {
+                return std::sync::Arc::clone(cached);
+            }
+        }
+        let builtin_global_option = self.global_option_is_builtin();
+        let mut out: Vec<(i64, Option<i64>)> = Vec::new();
+        for (tid, ty) in self.module.types.iter() {
+            let HirType::Enum {
+                name,
+                variants,
+                generic_params,
+                ..
+            } = ty
+            else {
+                continue;
+            };
+            // Only the builtin is exempt; a user `enum Option` is an ordinary
+            // enum (sharing runtime id 1 with the builtin on the JIT lane).
+            if (name == "Option" && (!generic_params.is_empty() || builtin_global_option))
+                || !variants.iter().any(|(v, _)| v == "Some" || v == "None")
+            {
+                continue;
+            }
+            let id = i64::from(crate::codegen::shared::enum_runtime_type_id(name));
+            if out.iter().any(|(seen, _)| *seen == id) {
+                continue;
+            }
+            let some_disc = variants
+                .iter()
+                .any(|(v, _)| v == "Some")
+                .then(|| self.owner_variant_discriminant(tid, Some(name.as_str()), "Some", "hir user Some arm"));
+            out.push((id, some_disc));
+        }
+        // Enums seen only through the project-wide table count too.
+        if let Some(defs) = self.global_enum_defs.as_ref() {
+            for (name, variants) in defs.iter() {
+                if super::super::lowerer::global_def_is_builtin_option(name, variants)
+                    || !variants.iter().any(|(v, _)| v == "Some" || v == "None")
+                {
+                    continue;
+                }
+                let id = i64::from(crate::codegen::shared::enum_runtime_type_id(name));
+                if out.iter().any(|(seen, _)| *seen == id) {
+                    continue;
+                }
+                let owner = self.module.types.lookup(name).unwrap_or(TypeId::ANY);
+                let some_disc = variants
+                    .iter()
+                    .any(|(v, _)| v == "Some")
+                    .then(|| self.owner_variant_discriminant(owner, Some(name.as_str()), "Some", "hir user Some arm"));
+                out.push((id, some_disc));
+            }
+        }
+        let out = std::sync::Arc::new(out);
+        self.user_option_shaped_cache = Some((count, std::sync::Arc::clone(&out)));
+        out
+    }
+
+    /// `rt_enum_check_variant(subject, enum_id, disc)`: the one enum-identity
+    /// test the native-project lane re-points at the qualified runtime name
+    /// (`requalify_enum_check_variant_ids`); a bare `rt_enum_id` compare is not.
+    fn erased_check_variant(subject: &HirExpr, enum_id: i64, disc: HirExpr) -> HirExpr {
+        HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_enum_check_variant".to_string(),
+                args: vec![
+                    subject.clone(),
+                    HirExpr {
+                        kind: HirExprKind::Integer(enum_id),
+                        ty: TypeId::I64,
+                    },
+                    disc,
+                ],
+            },
+            ty: TypeId::BOOL,
+        }
+    }
+
+    /// `LetIn(id = rt_enum_id(subject), id < 2 ? fast : slow(..))`: raw words
+    /// (-1), Result (0) and Option (1) skip the per-enum tests; user enum ids
+    /// are always >= 2.
+    fn erased_enum_id_split(
+        subject: &HirExpr,
+        ctx: &mut FunctionContext,
+        ty: TypeId,
+        fast: HirExpr,
+        slow: HirExpr,
+    ) -> HirExpr {
+        let id_idx = ctx.locals.len();
+        ctx.add_local("$some_arm_enum_id".to_string(), TypeId::I64, Mutability::Immutable);
+        HirExpr {
+            kind: HirExprKind::LetIn {
+                local_idx: id_idx,
+                value: Box::new(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_enum_id".to_string(),
+                        args: vec![subject.clone()],
+                    },
+                    ty: TypeId::I64,
+                }),
+                body: Box::new(HirExpr {
+                    kind: HirExprKind::If {
+                        condition: Box::new(HirExpr {
+                            kind: HirExprKind::Binary {
+                                op: BinOp::Lt,
+                                left: Box::new(HirExpr {
+                                    kind: HirExprKind::Local(id_idx),
+                                    ty: TypeId::I64,
+                                }),
+                                right: Box::new(HirExpr {
+                                    kind: HirExprKind::Integer(2),
+                                    ty: TypeId::I64,
+                                }),
+                            },
+                            ty: TypeId::BOOL,
+                        }),
+                        then_branch: Box::new(fast),
+                        else_branch: Some(Box::new(slow)),
+                    },
+                    ty,
+                }),
+            },
+            ty,
+        }
+    }
+
+    /// Arm-test guard for a bare `Some` over an untyped subject: a value of a
+    /// user enum declaring `Some`/`None` passes only through its own `Some`
+    /// variant. `None` when no such enum is in scope.
+    /// seed_jit_any_match_bare_some_arm_takes_user_enum_unit_variant_2026-11-27
+    pub(crate) fn erased_some_arm_guard(&mut self, subject: &HirExpr, ctx: &mut FunctionContext) -> Option<HirExpr> {
+        let shaped = self.user_option_shaped_enums();
+        if shaped.is_empty() {
+            return None;
+        }
+        let disc_idx = ctx.locals.len();
+        ctx.add_local("$some_arm_enum_disc".to_string(), TypeId::I64, Mutability::Immutable);
+        let disc = || HirExpr {
+            kind: HirExprKind::Local(disc_idx),
+            ty: TypeId::I64,
+        };
+        let bin = |op: BinOp, left: HirExpr, right: HirExpr| HirExpr {
+            kind: HirExprKind::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+            ty: TypeId::BOOL,
+        };
+        let mut all_ok: Option<HirExpr> = None;
+        for &(enum_id, some_disc) in shaped.iter() {
+            // Not this enum (the value's own discriminant under E's identity
+            // fails), or it is E's `Some` variant.
+            let not_e = HirExpr {
+                kind: HirExprKind::Unary {
+                    op: UnaryOp::Not,
+                    operand: Box::new(Self::erased_check_variant(subject, enum_id, disc())),
+                },
+                ty: TypeId::BOOL,
+            };
+            let ok = match some_disc {
+                None => not_e,
+                Some(d) => bin(
+                    BinOp::Or,
+                    bin(
+                        BinOp::Eq,
+                        disc(),
+                        HirExpr {
+                            kind: HirExprKind::Integer(d),
+                            ty: TypeId::I64,
+                        },
+                    ),
+                    not_e,
+                ),
+            };
+            all_ok = Some(match all_ok {
+                None => ok,
+                Some(prev) => bin(BinOp::And, prev, ok),
+            });
+        }
+        let slow = HirExpr {
+            kind: HirExprKind::LetIn {
+                local_idx: disc_idx,
+                value: Box::new(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_enum_discriminant".to_string(),
+                        args: vec![subject.clone()],
+                    },
+                    ty: TypeId::I64,
+                }),
+                body: Box::new(all_ok?),
+            },
+            ty: TypeId::BOOL,
+        };
+        let fast = HirExpr {
+            kind: HirExprKind::Bool(true),
+            ty: TypeId::BOOL,
+        };
+        Some(Self::erased_enum_id_split(subject, ctx, TypeId::BOOL, fast, slow))
+    }
+
+    /// Binding for a bare `Some(v)` over an untyped subject: the payload of a
+    /// user enum's own `Some`, else `rt_unwrap_or_self` (Option payload, or the
+    /// raw `T?` word itself).
+    pub(crate) fn erased_some_arm_binding(
+        &mut self,
+        subject: &HirExpr,
+        payload_ty: TypeId,
+        ctx: &mut FunctionContext,
+    ) -> HirExpr {
+        let unwrap = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_unwrap_or_self".to_string(),
+                args: vec![subject.clone()],
+            },
+            ty: payload_ty,
+        };
+        let shaped = self.user_option_shaped_enums();
+        let mut chain = unwrap.clone();
+        let mut any_some_owner = false;
+        for &(enum_id, some_disc) in shaped.iter() {
+            let Some(d) = some_disc else {
+                continue;
+            };
+            any_some_owner = true;
+            chain = HirExpr {
+                kind: HirExprKind::If {
+                    condition: Box::new(Self::erased_check_variant(
+                        subject,
+                        enum_id,
+                        HirExpr {
+                            kind: HirExprKind::Integer(d),
+                            ty: TypeId::I64,
+                        },
+                    )),
+                    then_branch: Box::new(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_enum_payload".to_string(),
+                            args: vec![subject.clone()],
+                        },
+                        ty: payload_ty,
+                    }),
+                    else_branch: Some(Box::new(chain)),
+                },
+                ty: payload_ty,
+            };
+        }
+        if !any_some_owner {
+            return unwrap;
+        }
+        // A user `enum Option` shares id 1 with the builtin on the JIT lane,
+        // so the id split cannot skip its payload read.
+        if shaped.iter().any(|&(enum_id, _)| enum_id < 2) {
+            return chain;
+        }
+        Self::erased_enum_id_split(subject, ctx, payload_ty, unwrap, chain)
+    }
+
+    /// Arm test for a top-level builtin-optional `case Some(p):`: presence
+    /// (`rt_is_some`) AND the refutable payload sub-patterns, read through the
+    /// same dual-representation slot as the nested `Ok(Some(..))` path in
+    /// `subpattern_condition_typed`. Presence alone made the first
+    /// `Some(I8)` arm match `Kind.F32` / `Kind.Wrap(7)` in a `Kind?` slot.
+    /// Shared by the statement and expression forms.
+    ///
+    /// The payload test is emitted only when the subject is statically a
+    /// `T?` / `Option<T>` whose payload type is not itself an enum declaring
+    /// `Some`/`None`. For an untyped (ANY) subject, or an `Opt?` where `Opt`
+    /// owns `Some`, the raw slot would be the user enum itself (e.g.
+    /// `Opt.Some(5)`, not `5`) while the binder reads its payload, so those
+    /// keep the presence-only test they had before.
+    /// optional_enum_some_variant_match_engine_divergence_2026-11-14
+    pub(crate) fn optional_some_condition(
+        &mut self,
+        pattern: &Pattern,
+        subject_ty: TypeId,
+        subject_ref: HirExpr,
+        ctx: &mut FunctionContext,
+    ) -> HirExpr {
+        let inner_ty = self
+            .optional_enum_payload_inner(subject_ty)
+            .or_else(|| self.module.types.optional_inner(subject_ty));
+        let inner_owns_option_variant = inner_ty.is_some_and(|t| {
+            matches!(self.module.types.get(t), Some(HirType::Enum { variants, .. })
+                if variants.iter().any(|(n, _)| n == "Some" || n == "None"))
+        });
+        let deeper = match pattern {
+            Pattern::Enum {
+                name,
+                payload: Some(inner),
+                ..
+            } if inner_ty.is_some() && !inner_owns_option_variant => {
+                self.nested_payload_condition(name, "Some", subject_ty, &subject_ref, inner, ctx)
+            }
+            _ => None,
+        };
+        let mut presence = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_is_some".to_string(),
+                args: vec![subject_ref.clone()],
+            },
+            ty: TypeId::BOOL,
+        };
+        // An untyped subject can hold a user enum that declares `Some`/`None`
+        // itself; the interpreter matches such a value only through its own
+        // `Some` variant, so `Opt.Nope` must not take the arm.
+        if subject_ty == TypeId::ANY {
+            if let Some(guard) = self.erased_some_arm_guard(&subject_ref, ctx) {
+                presence = HirExpr {
+                    kind: HirExprKind::Binary {
+                        op: BinOp::And,
+                        left: Box::new(presence),
+                        right: Box::new(guard),
+                    },
+                    ty: TypeId::BOOL,
+                };
+            }
+        }
+        match deeper {
+            None => presence,
+            Some(inner_test) => HirExpr {
+                kind: HirExprKind::Binary {
+                    op: BinOp::And,
+                    left: Box::new(presence),
+                    right: Box::new(inner_test),
+                },
+                ty: TypeId::BOOL,
+            },
+        }
+    }
+
     /// Build the refutability test for an enum variant pattern's payload
     /// sub-patterns, or `None` when every sub-pattern is irrefutable.
     ///
@@ -924,19 +1574,34 @@ impl Lowerer {
     /// Scope: fully recursive over variant and literal sub-patterns, at any
     /// nesting depth. Tuple/array/struct sub-patterns in payload position are
     /// still treated as irrefutable and are tracked separately in the bug doc.
+    ///
+    /// `outer_enum` / `subject_ty` name the enum the variant belongs to (the
+    /// pattern's qualifier, `_` when bare, and the subject's static type), so
+    /// each payload slot is tested against its DECLARED type — a bare unit
+    /// variant in a slot (`case Box(Red):`) is then a variant test. The field
+    /// types come from the same `get_enum_variant_field_types_with_hint` call
+    /// `collect_pattern_bindings` makes, so the condition and the binder agree
+    /// on which bare names are variants rather than bindings.
     pub(crate) fn nested_payload_condition(
         &mut self,
+        outer_enum: &str,
         outer_variant: &str,
+        subject_ty: TypeId,
         subject_ref: &HirExpr,
         payload_patterns: &[Pattern],
         ctx: &mut FunctionContext,
     ) -> Option<HirExpr> {
         let arity = payload_patterns.len();
         let mut combined: Option<HirExpr> = None;
+        let field_types = self.get_enum_variant_field_types_with_hint(outer_enum, outer_variant, subject_ty);
 
         for (i, p) in payload_patterns.iter().enumerate() {
             let slot_expr = Self::payload_slot_expr(outer_variant, subject_ref, i, arity);
-            let Some(test) = self.subpattern_condition(&slot_expr, p, ctx) else {
+            let slot_ty = field_types
+                .as_ref()
+                .and_then(|types| types.get(i).copied())
+                .unwrap_or(TypeId::ANY);
+            let Some(test) = self.subpattern_condition_typed(&slot_expr, slot_ty, p, ctx) else {
                 continue;
             };
             combined = Some(match combined {
@@ -972,7 +1637,11 @@ impl Lowerer {
     /// path in `build_pattern_binding_stmts` already carried this guard; this
     /// is the same runtime branch, hoisted into the slot owner so the
     /// CONDITION side and every sub-pattern binder get it too:
-    ///     if rt_enum_id(subj) >= 0: rt_enum_payload(subj) else: subj
+    ///     if rt_enum_id(subj) == OPTION_ENUM_ID: rt_enum_payload(subj) else: subj
+    /// `== OPTION_ENUM_ID`, not `>= 0`: the raw form of an `Evt?` IS a user
+    /// enum, so `>= 0` unwrapped `Evt.Click(8)` one level too far and the
+    /// nested `Some(Evt.Click(x))` binder read nil (same rule as the
+    /// identifier binder and `rt_unwrap_or_self`).
     /// See §22 of
     /// doc/08_tracking/bug/option_pattern_accepted_on_non_option_scrutinee_2026-07-27.md.
     pub(crate) fn payload_slot_expr(outer_variant: &str, subject_ref: &HirExpr, i: usize, arity: usize) -> HirExpr {
@@ -988,7 +1657,7 @@ impl Lowerer {
                 kind: HirExprKind::If {
                     condition: Box::new(HirExpr {
                         kind: HirExprKind::Binary {
-                            op: BinOp::GtEq,
+                            op: BinOp::Eq,
                             left: Box::new(HirExpr {
                                 kind: HirExprKind::BuiltinCall {
                                     name: "rt_enum_id".to_string(),
@@ -997,7 +1666,8 @@ impl Lowerer {
                                 ty: TypeId::I64,
                             }),
                             right: Box::new(HirExpr {
-                                kind: HirExprKind::Integer(0),
+                                // OPTION_ENUM_ID (runtime value/objects.rs).
+                                kind: HirExprKind::Integer(1),
                                 ty: TypeId::I64,
                             }),
                         },
@@ -1038,9 +1708,30 @@ impl Lowerer {
     /// level down. Descending only one level made
     /// `case C(L2.S(L3.X(n)), tag)` select on `L2.S` alone, so an `L3.Y`
     /// subject took the `L3.X` arm.
-    pub(crate) fn subpattern_condition(
+    ///
+    /// `slot_ty` is the slot's DECLARED static type (`TypeId::ANY` when
+    /// unknown). The slot expression itself stays ANY-typed; `slot_ty`
+    /// decides whether a bare identifier is a variant test and which enum
+    /// owns a variant's discriminant (#6953).
+    ///
+    /// A bare `Red` in a tuple element / array element / enum payload slot
+    /// whose declared type is an enum owning a variant `Red` is a VARIANT
+    /// TEST, exactly as a top-level `case Red:` is in
+    /// `lower_pattern_condition_stmt`, and as the tree-walk interpreter and the
+    /// pure-Simple frontend (`lower_match_pattern_with_union_v1`) decide it.
+    /// Treating it as an irrefutable binder made `case (Red, Red):` match every
+    /// pair, which made the seed-compiled `hir_types_equal`
+    /// (`case (Bool, Bool): true`) answer true for unrelated types.
+    /// `collect_pattern_bindings` already excluded such names from the arm's
+    /// bindings using the same element/field types, so the two halves agree.
+    /// A name that is NOT a variant of the slot's enum (including a variant of
+    /// some OTHER enum) stays a binding; pattern names never consult outer
+    /// locals, so a same-named local does not turn a variant back into a binder.
+    /// Bug: doc/08_tracking/bug/seed_tuple_pattern_bare_fieldless_variant_binds_hir_types_equal_true_2026-11-12.md
+    pub(crate) fn subpattern_condition_typed(
         &mut self,
         slot: &HirExpr,
+        slot_ty: TypeId,
         pattern: &Pattern,
         ctx: &mut FunctionContext,
     ) -> Option<HirExpr> {
@@ -1058,17 +1749,50 @@ impl Lowerer {
             );
         }
         match pattern {
+            // A bare unit variant of the slot's declared enum: variant test.
+            Pattern::Identifier(name) if self.subject_enum_has_unit_variant(slot_ty, name) => Some(HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_enum_check_variant".to_string(),
+                    args: vec![
+                        slot.clone(),
+                        HirExpr {
+                            kind: HirExprKind::Integer(self.enum_runtime_id_for_type(slot_ty)),
+                            ty: TypeId::I64,
+                        },
+                        HirExpr {
+                            kind: HirExprKind::Integer(self.owner_variant_discriminant(
+                                slot_ty,
+                                None,
+                                name,
+                                "hir nested bare variant",
+                            )),
+                            ty: TypeId::I64,
+                        },
+                    ],
+                },
+                ty: TypeId::BOOL,
+            }),
             // Irrefutable: binds or ignores, never rejects.
             Pattern::Wildcard
             | Pattern::Identifier(_)
             | Pattern::MutIdentifier(_)
             | Pattern::MoveIdentifier(_)
             | Pattern::Rest => None,
-            Pattern::Typed { pattern, .. } => self.subpattern_condition(slot, pattern, ctx),
+            Pattern::Typed { pattern, .. } => self.subpattern_condition_typed(slot, slot_ty, pattern, ctx),
             Pattern::Literal(lit_expr) => {
                 // `case A(0, y)` must reject `A(9, 7)`. Without this the arm was
                 // irrefutable and the first literal arm swallowed every value.
                 let lit_hir = self.lower_expr(lit_expr, ctx).ok()?;
+                // Nested `nil` literal: absence test, same as the top-level arm.
+                if matches!(lit_hir.kind, HirExprKind::Nil) {
+                    return Some(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_is_none".to_string(),
+                            args: vec![slot.clone()],
+                        },
+                        ty: TypeId::BOOL,
+                    });
+                }
                 // The slot is ANY-typed (it came out of rt_enum_payload), so the
                 // literal's own type is the only usable signal for picking the
                 // text comparison over the scalar one.
@@ -1128,7 +1852,7 @@ impl Lowerer {
                 // the pattern does accept.
                 let mut acc: Option<HirExpr> = None;
                 for alt in alternatives {
-                    let test = self.subpattern_condition(slot, alt, ctx)?;
+                    let test = self.subpattern_condition_typed(slot, slot_ty, alt, ctx)?;
                     acc = Some(match acc {
                         None => test,
                         Some(prev) => HirExpr {
@@ -1153,18 +1877,45 @@ impl Lowerer {
                 // irrefutable, but a refutable sub-pattern inside it
                 // (`P(Point(0, b))`) still has to be tested, by positional
                 // field access rather than payload extraction.
+                // Nested builtin optional (`Ok(Some(c))`, `Ok(None)`): the slot
+                // holds a `T?` in either runtime form (boxed Some or raw
+                // payload, nil for absence), so the test is presence/absence,
+                // never a discriminant. Without this `Some` fell to the struct
+                // path below, became irrefutable, and `Ok(nil)` took the
+                // `Ok(Some(c))` arm with `c` unbound.
+                // Bug: doc/08_tracking/bug/native_enum_nil_payload_pattern_2026_10_11.md
+                if self.is_builtin_optional_variant_name(variant) {
+                    let probe = if variant == "None" { "rt_is_none" } else { "rt_is_some" };
+                    let presence = HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: probe.to_string(),
+                            args: vec![slot.clone()],
+                        },
+                        ty: TypeId::BOOL,
+                    };
+                    let deeper = payload
+                        .as_ref()
+                        .filter(|_| variant == "Some")
+                        .and_then(|inner| self.nested_payload_condition(name, variant, slot_ty, slot, inner, ctx));
+                    return Some(match deeper {
+                        None => presence,
+                        Some(inner_test) => HirExpr {
+                            kind: HirExprKind::Binary {
+                                op: BinOp::And,
+                                left: Box::new(presence),
+                                right: Box::new(inner_test),
+                            },
+                            ty: TypeId::BOOL,
+                        },
+                    });
+                }
                 if !self.is_real_enum_variant_name(variant) {
                     let fields = payload.as_ref()?;
                     let positional: Vec<(usize, &Pattern)> = fields.iter().enumerate().collect();
                     return self.struct_fields_condition(slot, variant, &positional, ctx);
                 }
-                let expected_disc: i64 = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    variant.hash(&mut hasher);
-                    (hasher.finish() & 0xFFFFFFFF) as i64
-                };
+                let expected_disc: i64 =
+                    self.owner_variant_discriminant(slot_ty, Some(name.as_str()), variant, "hir nested variant");
                 let tag_test = HirExpr {
                     kind: HirExprKind::BuiltinCall {
                         name: "rt_enum_check_variant".to_string(),
@@ -1184,7 +1935,7 @@ impl Lowerer {
                 };
                 let deeper = payload
                     .as_ref()
-                    .and_then(|inner| self.nested_payload_condition(variant, slot, inner, ctx));
+                    .and_then(|inner| self.nested_payload_condition(name, variant, slot_ty, slot, inner, ctx));
                 Some(match deeper {
                     None => tag_test,
                     Some(inner_test) => HirExpr {
@@ -1208,8 +1959,8 @@ impl Lowerer {
                 }
                 self.struct_fields_condition(slot, name, &positional, ctx)
             }
-            Pattern::Tuple(elements) => self.sequence_condition(slot, elements, false, ctx),
-            Pattern::Array(elements) => self.sequence_condition(slot, elements, true, ctx),
+            Pattern::Tuple(elements) => self.sequence_condition_typed(slot, slot_ty, elements, false, ctx),
+            Pattern::Array(elements) => self.sequence_condition_typed(slot, slot_ty, elements, true, ctx),
         }
     }
 
@@ -1318,7 +2069,33 @@ impl Lowerer {
         is_array: bool,
         ctx: &mut FunctionContext,
     ) -> Option<HirExpr> {
+        self.sequence_condition_typed(slot, slot.ty, patterns, is_array, ctx)
+    }
+
+    /// [`Self::sequence_condition`] with the sequence's declared type, so each
+    /// element is tested against ITS type (`HirType::Tuple` element `i`, or
+    /// the `HirType::Array` element type) — the same resolution
+    /// `collect_pattern_bindings` uses for the binders.
+    pub(crate) fn sequence_condition_typed(
+        &mut self,
+        slot: &HirExpr,
+        seq_ty: TypeId,
+        patterns: &[Pattern],
+        is_array: bool,
+        ctx: &mut FunctionContext,
+    ) -> Option<HirExpr> {
         let slots = Self::sequence_element_slots(slot, patterns, is_array)?;
+        // Tuple slots are only ever leading positions (a tuple rest with
+        // trailing elements has no addressable form, see
+        // `sequence_element_slots`), so slot `i` is tuple element `i`.
+        let element_ty = |i: usize| -> TypeId {
+            match self.module.types.get(seq_ty) {
+                Some(HirType::Tuple(types)) if !is_array => types.get(i).copied().unwrap_or(TypeId::ANY),
+                Some(HirType::Array { element, .. }) if is_array => *element,
+                _ => TypeId::ANY,
+            }
+        };
+        let slot_types: Vec<TypeId> = (0..slots.len()).map(element_ty).collect();
 
         let mut combined: Option<HirExpr> = None;
         if is_array {
@@ -1338,8 +2115,8 @@ impl Lowerer {
             });
         }
 
-        for (elem_expr, sub) in &slots {
-            let Some(test) = self.subpattern_condition(elem_expr, sub, ctx) else {
+        for ((elem_expr, sub), elem_ty) in slots.iter().zip(slot_types) {
+            let Some(test) = self.subpattern_condition_typed(elem_expr, elem_ty, sub, ctx) else {
                 continue;
             };
             combined = Some(match combined {
@@ -1371,6 +2148,12 @@ impl Lowerer {
     ///
     /// A struct pattern is itself irrefutable — the type system already fixed
     /// the class — so this returns `None` unless some FIELD is refutable.
+    ///
+    /// Each field is tested against its DECLARED type, the one
+    /// `collect_pattern_bindings` binds with, so a bare unit variant in a field
+    /// (`case Holder { c: Red, .. }`, `case Holder(Red, n)`) is a variant test
+    /// under the same unit-only slot rule as tuple/array/payload slots.
+    /// Bug: doc/08_tracking/bug/seed_struct_field_slot_bare_unit_variant_neither_tested_nor_bound_2026-11-12.md
     pub(crate) fn struct_fields_condition(
         &mut self,
         slot: &HirExpr,
@@ -1398,7 +2181,7 @@ impl Lowerer {
                 },
                 ty: field_ty,
             };
-            let Some(test) = self.subpattern_condition(&field_expr, field_pattern, ctx) else {
+            let Some(test) = self.subpattern_condition_typed(&field_expr, field_ty, field_pattern, ctx) else {
                 continue;
             };
             combined = Some(match combined {
@@ -1436,7 +2219,7 @@ impl Lowerer {
     ///
     /// Only the TOP-LEVEL position was wrong. A struct pattern nested in an enum
     /// payload, an array element or a tuple element routes through
-    /// [`Self::subpattern_condition`], which has tested struct fields since
+    /// [`Self::subpattern_condition_typed`], which has tested struct fields since
     /// `5ce2f653a49`. Recursion (depth 3+, literal fields, array/tuple field
     /// sub-patterns) is likewise [`Self::struct_fields_condition`]'s; this is
     /// only the entry point.
@@ -1466,7 +2249,7 @@ impl Lowerer {
     ///
     /// A field name that does not resolve leaves the pattern irrefutable rather
     /// than inventing an index — the same under-report rule
-    /// [`Self::subpattern_condition`] already applies to this spelling.
+    /// [`Self::subpattern_condition_typed`] already applies to this spelling.
     pub(crate) fn named_struct_pattern_condition(
         &mut self,
         subject_ref: &HirExpr,
@@ -1617,7 +2400,7 @@ impl Lowerer {
     /// Returns a list of (name, type) pairs for variables that should be bound.
     pub fn extract_pattern_bindings(&self, pattern: &Pattern, subject_ty: TypeId) -> Vec<(String, TypeId)> {
         let mut bindings = Vec::new();
-        self.collect_pattern_bindings(pattern, subject_ty, &mut bindings);
+        self.collect_pattern_bindings(pattern, subject_ty, false, &mut bindings);
         bindings
     }
 
@@ -1641,6 +2424,29 @@ impl Lowerer {
                     .iter()
                     .any(|(variant, payload)| variant == name && payload.is_none())
             })
+    }
+
+    /// [`Self::subject_enum_has_variant`] restricted to UNIT (payload-less)
+    /// variants — the rule for a bare name in a SUB-pattern slot
+    /// (`case (Red, _)`, `case Box(Red)`). A bare name that spells a payload
+    /// variant there (`case (Int, _)` with `Int(bits)`) is a BINDER, as in the
+    /// pure-Simple frontend, whose HIR gate is `enum_unit_pattern_names`
+    /// (`expression_components.spl`, `lower_match_pattern_with_union_v1`).
+    /// A TOP-LEVEL bare payload-variant arm (`case Clocked:` over
+    /// `VhdlProcessKind`) stays a payload-ignoring variant test on both
+    /// lanes: pure-Simple re-reads that top-level binder as the variant in
+    /// MIR (`expr_dispatch.spl`, bug
+    /// match_unqualified_imported_enum_variant_default_arms_2026-10-24), so
+    /// the top-level caller keeps the any-variant predicate.
+    /// Bug: doc/08_tracking/bug/seed_tuple_pattern_bare_fieldless_variant_binds_hir_types_equal_true_2026-11-12.md
+    pub(crate) fn subject_enum_has_unit_variant(&self, subject_ty: TypeId, name: &str) -> bool {
+        match self.module.types.get(subject_ty) {
+            Some(HirType::Enum { variants, .. }) if !variants.is_empty() => variants
+                .iter()
+                .any(|(variant, fields)| variant == name && fields.as_ref().is_none_or(|f| f.is_empty())),
+            // Empty local list: the global-summary fallback is already unit-only.
+            _ => self.subject_enum_has_variant(subject_ty, name),
+        }
     }
 
     /// Stable runtime identity for a statically known enum. Zero keeps the
@@ -1759,10 +2565,24 @@ impl Lowerer {
     }
 
     /// Recursively collect bindings from a pattern
-    fn collect_pattern_bindings(&self, pattern: &Pattern, expected_ty: TypeId, bindings: &mut Vec<(String, TypeId)>) {
+    fn collect_pattern_bindings(
+        &self,
+        pattern: &Pattern,
+        expected_ty: TypeId,
+        in_slot: bool,
+        bindings: &mut Vec<(String, TypeId)>,
+    ) {
         match pattern {
             Pattern::Identifier(name) => {
-                if !self.subject_enum_has_variant(expected_ty, name) {
+                // Same predicate as the condition walk: top level any variant
+                // (`lower_pattern_condition_stmt`), a sub-pattern slot unit
+                // variants only (`subpattern_condition_typed`).
+                let is_variant = if in_slot {
+                    self.subject_enum_has_unit_variant(expected_ty, name)
+                } else {
+                    self.subject_enum_has_variant(expected_ty, name)
+                };
+                if !is_variant {
                     bindings.push((name.clone(), expected_ty));
                 }
             }
@@ -1783,7 +2603,7 @@ impl Lowerer {
                         .as_ref()
                         .and_then(|types| types.get(i).copied())
                         .unwrap_or(TypeId::ANY);
-                    self.collect_pattern_bindings(p, elem_ty, bindings);
+                    self.collect_pattern_bindings(p, elem_ty, true, bindings);
                 }
             }
             Pattern::Enum {
@@ -1832,7 +2652,7 @@ impl Lowerer {
                                 .unwrap_or("unknown");
                             eprintln!("[PB] {enum_name}.{variant_name} slot{i} expected_ty={:?} field_ty={:?} ({:?}) in {fpath}", expected_ty, field_ty, self.module.types.get(field_ty), );
                         }
-                        self.collect_pattern_bindings(p, field_ty, bindings);
+                        self.collect_pattern_bindings(p, field_ty, true, bindings);
                     }
                 }
             }
@@ -1849,7 +2669,7 @@ impl Lowerer {
                         .and_then(|f| f.iter().find(|(n, _)| n == field_name))
                         .map(|(_, ty)| *ty)
                         .unwrap_or(TypeId::ANY);
-                    self.collect_pattern_bindings(field_pattern, field_ty, bindings);
+                    self.collect_pattern_bindings(field_pattern, field_ty, true, bindings);
                 }
             }
             Pattern::Array(patterns) => {
@@ -1863,18 +2683,18 @@ impl Lowerer {
                     _ => TypeId::ANY,
                 };
                 for p in patterns {
-                    self.collect_pattern_bindings(p, element_ty, bindings);
+                    self.collect_pattern_bindings(p, element_ty, true, bindings);
                 }
             }
             Pattern::Or(patterns) => {
                 // Or patterns should bind the same variables - just use first pattern
                 if let Some(first) = patterns.first() {
-                    self.collect_pattern_bindings(first, expected_ty, bindings);
+                    self.collect_pattern_bindings(first, expected_ty, in_slot, bindings);
                 }
             }
             Pattern::Typed { pattern, ty: _ } => {
                 // Type annotation on pattern - recurse into inner pattern
-                self.collect_pattern_bindings(pattern, expected_ty, bindings);
+                self.collect_pattern_bindings(pattern, expected_ty, in_slot, bindings);
             }
             // Patterns that don't introduce bindings
             Pattern::Wildcard
@@ -1972,9 +2792,29 @@ impl Lowerer {
 
         let mut block_stmts = Vec::new();
         let mut result_ty = TypeId::NIL;
+        let last_index = statements.len() - 1;
 
-        for stmt in statements {
+        for (index, stmt) in statements.iter().enumerate() {
             match stmt {
+                // A tail `if`/`else` STATEMENT is the block's value (MIR
+                // `lower_block_expr` yields it), so the block takes its arms'
+                // value type. Leaving it NIL made an `if` arm like
+                // `if c:\n    if b: f() else: g()\nelse:\n    []` bottom, the
+                // join took `[]`'s default `[i32]`, and every element read was
+                // narrowed to i32 under the JIT (italic font face lost).
+                // doc/08_tracking/bug/jit_if_arm_tail_if_stmt_typed_nil_italic_lost_2026-11-23.md
+                // A tail `match` STATEMENT is the block's value exactly like a tail
+                // `if`: a nested `match` as the only body of an outer match arm
+                // otherwise typed the whole block NIL/ANY, so `files[k].as_str()`
+                // on the bound payload reached codegen with an erased receiver
+                // (CODEGEN-AMBIGUOUS-METHOD).
+                simple_parser::ast::Node::If(_) | simple_parser::ast::Node::Match(_) if index == last_index => {
+                    let lowered = self.lower_node(stmt, ctx)?;
+                    if let Some(ty) = hir_tail_if_value_type(&lowered) {
+                        result_ty = ty;
+                    }
+                    block_stmts.extend(lowered);
+                }
                 simple_parser::ast::Node::Expression(expr) => {
                     let expr = self.lower_expr(expr, ctx)?;
                     result_ty = expr.ty;
@@ -2010,6 +2850,89 @@ impl Lowerer {
         })
     }
 
+    /// Desugar a list comprehension `[expr for pat in iterable if cond]` into a
+    /// do-block that builds the array and yields it:
+    ///
+    /// ```text
+    /// do:
+    ///     var __comp_N = []
+    ///     for pat in iterable:
+    ///         if cond:            # only when a filter is present
+    ///             __comp_N.push(expr)
+    ///     __comp_N
+    /// ```
+    ///
+    /// The loop variable lives in the `for` scope so it does not leak; nested
+    /// comprehensions get distinct temporaries from a global counter.
+    pub(super) fn lower_list_comprehension(
+        &mut self,
+        expr: &Expr,
+        pattern: &Pattern,
+        iterable: &Expr,
+        condition: Option<&Expr>,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let name = format!("__comp_{}", COMP_COUNTER.fetch_add(1, Ordering::Relaxed));
+        let span = ast::Span::new(0, 0, 0, 0);
+
+        let push = Expr::MethodCall {
+            receiver: Box::new(Expr::Identifier(name.clone())),
+            method: "push".to_string(),
+            args: vec![ast::Argument {
+                name: None,
+                value: expr.clone(),
+                span,
+                label: None,
+            }],
+            generic_args: vec![],
+        };
+        let push_stmt = ast::Node::Expression(push);
+        let body_stmts = match condition {
+            Some(cond) => vec![ast::Node::If(ast::IfStmt {
+                span,
+                let_pattern: None,
+                condition: cond.clone(),
+                then_block: ast::Block {
+                    span,
+                    statements: vec![push_stmt],
+                },
+                elif_branches: vec![],
+                else_block: None,
+                is_suspend: false,
+            })],
+            None => vec![push_stmt],
+        };
+        let stmts = vec![
+            ast::Node::Let(ast::LetStmt {
+                span,
+                pattern: Pattern::Identifier(name.clone()),
+                ty: None,
+                value: Some(Expr::Array(vec![])),
+                mutability: Mutability::Mutable,
+                storage_class: ast::StorageClass::Auto,
+                is_ghost: false,
+                is_suspend: false,
+            }),
+            ast::Node::For(ast::ForStmt {
+                span,
+                pattern: pattern.clone(),
+                iterable: iterable.clone(),
+                body: ast::Block {
+                    span,
+                    statements: body_stmts,
+                },
+                simd_requested: false,
+                is_suspend: false,
+                invariants: vec![],
+                label: None,
+            }),
+            ast::Node::Expression(Expr::Identifier(name)),
+        ];
+        self.lower_do_block(&stmts, ctx)
+    }
+
     /// Lower a lexical unsafe block without turning `return` or loop control
     /// into a tail value. The marker remains visible to HIR safety passes.
     pub(super) fn lower_unsafe_block(
@@ -2022,7 +2945,14 @@ impl Lowerer {
             statements: statements.to_vec(),
             ..Default::default()
         };
-        let block_stmts = self.lower_block(&block, ctx)?;
+        // Track nesting so `lower_cast` can admit `T? as <numeric>` only here
+        // (bug optional_as_cast_yields_zero_2026_11_09). Decrement on BOTH
+        // exits so an error inside one unsafe block does not leave the rest
+        // of the function treated as unsafe.
+        ctx.unsafe_depth += 1;
+        let lowered = self.lower_block(&block, ctx);
+        ctx.unsafe_depth -= 1;
+        let block_stmts = lowered?;
         let result_ty = match block_stmts.last() {
             Some(crate::hir::HirStmt::Expr(expr)) => expr.ty,
             _ => TypeId::NIL,
@@ -2047,7 +2977,7 @@ impl Lowerer {
         default: &Expr,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
-        let expr_hir = self.lower_expr(expr, ctx)?;
+        let expr_hir = self.lower_optional_subject(expr, ctx)?;
         let default_hir = self.lower_expr(default, ctx)?;
 
         // Statically non-nullable scalars can NEVER legitimately be nil, and the
@@ -2132,18 +3062,92 @@ impl Lowerer {
             ty: subject_ty,
         };
 
-        // Create a nil check: expr != nil
-        let nil_expr = HirExpr {
-            kind: HirExprKind::Nil,
-            ty: TypeId::NIL,
+        // Presence check: neither the nil sentinel nor a canonical
+        // `Option::None`. A bare `expr != nil` compared the word against the
+        // sentinel only, so a canonical None (e.g. `Dict.get` on a miss, which
+        // returns a real Option) took the present branch and unwrapped to nil
+        // (jit_dict_get_option_presence_in_string_interp_2026-11-03).
+        // Only tagged `T?` slots take `rt_is_some` (`!rt_is_none`, i.e.
+        // `is_nil()` for every non-enum word); raw scalar / raw-pointer
+        // operands keep the sentinel compare, as in `lower_condition`.
+        // Explicit `Option<scalar>` enum subject: presence is `rt_is_some`
+        // (a real `None` is not the nil sentinel) and the coalesced value is the
+        // raw payload scalar (decoded in MIR by name + type).
+        let option_scalar_payload = match self.module.types.get(subject_ty) {
+            Some(HirType::Enum { name, .. }) if name == "Option" => self
+                .result_like_payload_type(subject_ty)
+                .filter(|p| {
+                    matches!(
+                        *p,
+                        TypeId::BOOL
+                            | TypeId::I8
+                            | TypeId::I16
+                            | TypeId::I32
+                            | TypeId::I64
+                            | TypeId::U8
+                            | TypeId::U16
+                            | TypeId::U32
+                            | TypeId::U64
+                            | TypeId::F32
+                            | TypeId::F64
+                    )
+                }),
+            _ => None,
         };
-        let condition = HirExpr {
-            kind: HirExprKind::Binary {
-                op: BinOp::NotEq,
-                left: Box::new(expr_hir.clone()),
-                right: Box::new(nil_expr),
-            },
-            ty: TypeId::BOOL,
+        let is_tagged_slot = option_scalar_payload.is_some()
+            || matches!(
+                self.module.types.get(subject_ty),
+                Some(HirType::Pointer {
+                    kind: PointerKind::Shared | PointerKind::Unique | PointerKind::Weak | PointerKind::Handle,
+                    ..
+                })
+            );
+        let condition = if is_tagged_slot {
+            // `Some(nil) ?? d` / `Ok(nil) ?? d` take the default, exactly as the
+            // interpreter's `Expr::Coalesce` does: `rt_is_some` alone unwrapped
+            // to the raw nil sentinel and printed `3`
+            // (seed_jit_dotq_coalesce_parity_2026-11-06). The unwrap here stays
+            // typed as the tagged subject so it is compared as a tagged word.
+            let is_some = HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_is_some".to_string(),
+                    args: vec![expr_hir.clone()],
+                },
+                ty: TypeId::BOOL,
+            };
+            let payload_not_nil = HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_is_some".to_string(),
+                    args: vec![HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_unwrap_or_self".to_string(),
+                            args: vec![expr_hir.clone()],
+                        },
+                        ty: subject_ty,
+                    }],
+                },
+                ty: TypeId::BOOL,
+            };
+            HirExpr {
+                kind: HirExprKind::Binary {
+                    op: BinOp::And,
+                    left: Box::new(is_some),
+                    right: Box::new(payload_not_nil),
+                },
+                ty: TypeId::BOOL,
+            }
+        } else {
+            HirExpr {
+                kind: HirExprKind::Binary {
+                    op: BinOp::NotEq,
+                    left: Box::new(expr_hir.clone()),
+                    right: Box::new(HirExpr {
+                        kind: HirExprKind::Nil,
+                        ty: TypeId::NIL,
+                    }),
+                },
+                ty: TypeId::BOOL,
+            }
         };
 
         // The result type is the type of the expression (or default if expr could be nil)
@@ -2165,6 +3169,7 @@ impl Lowerer {
         // boxing, so both edges are raw and agree with the static type.
         // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
         let result_ty = self.optional_boxint_scalar_inner(result_ty).unwrap_or(result_ty);
+        let result_ty = option_scalar_payload.unwrap_or(result_ty);
         // Same for the non-BoxInt scalars (`bool?`, `f32?`, `f64?`): the
         // coalesced value is the raw inner scalar. Typed as the tagged `T?`,
         // `val b = maybe_bool() ?? false` kept a tagged word and
@@ -2176,7 +3181,7 @@ impl Lowerer {
                 kind: PointerKind::Shared,
                 inner,
                 ..
-            }) if matches!(*inner, TypeId::BOOL | TypeId::F32 | TypeId::F64) => *inner,
+            }) if matches!(*inner, TypeId::BOOL | TypeId::F32 | TypeId::F64 | TypeId::U64) => *inner,
             // `text?` coalesces to plain text. Left as the `text?` pointer the
             // receiver was neither `is_string` nor `is_any` in the method
             // result-type tables (hir/lower/expr/mod.rs), so `(o ?? d)
@@ -2190,6 +3195,18 @@ impl Lowerer {
                 inner,
                 ..
             }) if *inner == TypeId::STRING && default_hir.ty == TypeId::STRING => TypeId::STRING,
+            // `any?` coalesces to plain `any`: the payload word of an erased
+            // optional IS the tagged RuntimeValue an `any` slot holds, and MIR
+            // (lowering_expr_builtin.rs, `rt_unwrap_or_self`) only unboxes a
+            // scalar-typed result, so no representation changes. Left as the
+            // `any?` pointer, `(json_to_number(v) ?? 0) as i64` was still an
+            // optional source for `lower_cast` and the recommended narrowing
+            // itself was rejected (optional_as_cast_yields_zero_2026_11_09).
+            Some(HirType::Pointer {
+                kind: PointerKind::Shared,
+                inner,
+                ..
+            }) if *inner == TypeId::ANY => TypeId::ANY,
             _ => result_ty,
         };
 
@@ -2234,6 +3251,187 @@ impl Lowerer {
                 else_branch: Some(Box::new(default_hir)),
             },
             ty: result_ty,
+        };
+        Ok(HirExpr {
+            kind: HirExprKind::Block(vec![store_subject, HirStmt::Expr(selected)]),
+            ty: result_ty,
+        })
+    }
+
+    /// Optional chaining `recv?.member` / `recv?.member(args)`.
+    ///
+    /// Contract (syntax_quick_reference.md § Safe Navigation; self-hosted
+    /// `optional_chain_desugar` in
+    /// src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl):
+    /// evaluate `recv` once; when present (non-nil, not `None`, not `Err`)
+    /// yield the member read on its payload (`Some`/`Ok` unwrapped, any other
+    /// value is itself) AS-IS, otherwise nil. Never re-wrapped in `Some`.
+    /// Before this arm existed the lenient catch-all lowered every `?.` to a
+    /// bare nil under the JIT.
+    pub(super) fn lower_optional_chain(
+        &mut self,
+        receiver: &Expr,
+        member: &str,
+        call_args: Option<&[ast::Argument]>,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        let subject_hir = self.lower_optional_subject(receiver, ctx)?;
+        let subject_ty = subject_hir.ty;
+        let subject_idx = ctx.locals.len();
+        ctx.add_local(format!("$optchain_subject_{}", subject_idx), subject_ty, Mutability::Immutable);
+        let subject_ref = HirExpr {
+            kind: HirExprKind::Local(subject_idx),
+            ty: subject_ty,
+        };
+
+        let is_raw_scalar = matches!(
+            subject_ty,
+            TypeId::BOOL
+                | TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+                | TypeId::F32
+                | TypeId::F64
+                | TypeId::CHAR
+        );
+        let result_like = matches!(
+            self.module.types.get(subject_ty),
+            Some(HirType::Enum { name, .. }) if name == "Result" || name == "Option"
+        );
+
+        // Presence: never the nil sentinel / canonical None (`rt_is_some`),
+        // and for a static Result never `Err` -- `Err(e)?.f` is nil, matching
+        // the interpreter's `try_unwrap_option_or_result`.
+        let not_none = if is_raw_scalar {
+            HirExpr {
+                kind: HirExprKind::Binary {
+                    op: BinOp::NotEq,
+                    left: Box::new(subject_ref.clone()),
+                    right: Box::new(HirExpr {
+                        kind: HirExprKind::Nil,
+                        ty: TypeId::NIL,
+                    }),
+                },
+                ty: TypeId::BOOL,
+            }
+        } else {
+            HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_is_some".to_string(),
+                    args: vec![subject_ref.clone()],
+                },
+                ty: TypeId::BOOL,
+            }
+        };
+        let condition = if result_like {
+            let err_disc: i64 = self.owner_variant_discriminant(subject_ty, None, "Err", "hir result-like presence");
+            let is_err = HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_enum_check_variant".to_string(),
+                    args: vec![
+                        subject_ref.clone(),
+                        HirExpr {
+                            kind: HirExprKind::Integer(self.enum_runtime_id_for_type(subject_ty)),
+                            ty: TypeId::I64,
+                        },
+                        HirExpr {
+                            kind: HirExprKind::Integer(err_disc),
+                            ty: TypeId::I64,
+                        },
+                    ],
+                },
+                ty: TypeId::BOOL,
+            };
+            HirExpr {
+                kind: HirExprKind::Binary {
+                    op: BinOp::And,
+                    left: Box::new(not_none),
+                    right: Box::new(HirExpr {
+                        kind: HirExprKind::Unary {
+                            op: UnaryOp::Not,
+                            operand: Box::new(is_err),
+                        },
+                        ty: TypeId::BOOL,
+                    }),
+                },
+                ty: TypeId::BOOL,
+            }
+        } else {
+            not_none
+        };
+
+        // Payload the member is read on.
+        let (payload_ty, unwrap_fn) = if result_like {
+            (
+                self.result_like_payload_type(subject_ty).unwrap_or(TypeId::ANY),
+                "rt_enum_payload",
+            )
+        } else {
+            match self.module.types.get(subject_ty) {
+                Some(HirType::Pointer { inner, .. }) => (*inner, "rt_unwrap_or_self"),
+                _ => (subject_ty, "rt_unwrap_or_self"),
+            }
+        };
+        let payload_name = format!("$optchain_payload_{}", ctx.locals.len());
+        let payload_idx = ctx.add_local(payload_name.clone(), payload_ty, Mutability::Immutable);
+        let bind_payload = HirStmt::Let {
+            local_index: payload_idx,
+            ty: payload_ty,
+            value: Some(HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: unwrap_fn.to_string(),
+                    args: vec![subject_ref],
+                },
+                ty: payload_ty,
+            }),
+        };
+        let payload_expr = Expr::Identifier(payload_name);
+        let access = match call_args {
+            Some(args) => self.lower_method_call(&payload_expr, member, args, ctx)?,
+            None => self.lower_field_access(&payload_expr, member, ctx)?,
+        };
+
+        // Raw scalars must leave through a tagged slot so the nil edge and the
+        // value edge agree (same hazard as `lower_coalesce`'s default).
+        let access_ty = access.ty;
+        let result_ty = if self.box_scalar_into_tagged_result(TypeId::ANY, access.clone()).ty != access_ty
+            || access_ty == TypeId::NIL
+        {
+            TypeId::ANY
+        } else {
+            access_ty
+        };
+        let access = self.box_scalar_into_tagged_result(TypeId::ANY, access);
+        let access = if result_ty == TypeId::ANY && access.ty != TypeId::ANY {
+            HirExpr { ty: TypeId::ANY, ..access }
+        } else {
+            access
+        };
+
+        let present = HirExpr {
+            kind: HirExprKind::Block(vec![bind_payload, HirStmt::Expr(access)]),
+            ty: result_ty,
+        };
+        let selected = HirExpr {
+            kind: HirExprKind::If {
+                condition: Box::new(condition),
+                then_branch: Box::new(present),
+                else_branch: Some(Box::new(HirExpr {
+                    kind: HirExprKind::Nil,
+                    ty: TypeId::NIL,
+                })),
+            },
+            ty: result_ty,
+        };
+        let store_subject = HirStmt::Let {
+            local_index: subject_idx,
+            ty: subject_ty,
+            value: Some(subject_hir),
         };
         Ok(HirExpr {
             kind: HirExprKind::Block(vec![store_subject, HirStmt::Expr(selected)]),
@@ -2729,13 +3927,7 @@ impl Lowerer {
             ty: TypeId::BOOL,
         };
         let is_err = || {
-            let err_disc: i64 = {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut hasher = DefaultHasher::new();
-                "Err".hash(&mut hasher);
-                (hasher.finish() & 0xFFFF_FFFF) as i64
-            };
+            let err_disc: i64 = simple_runtime::value::hash_variant_discriminant("Err") as i64;
             builtin_check(
                 "rt_enum_check_variant",
                 vec![
@@ -2874,6 +4066,30 @@ impl Lowerer {
         // Lower the inner expression once and bind it to a temp.
         let inner_hir = self.lower_expr(inner, ctx)?;
         let subject_ty = inner_hir.ty;
+
+        // A NON-nullable raw scalar subject (`"20672".to_i64()` is typed bare
+        // `I64`: `to_i64` is total) holds an UNTAGGED word, and cannot be
+        // absent. Routing it through `rt_unwrap_or_self` below re-typed that raw
+        // word `ANY`, so the next consumer decoded it as tagged and shifted it
+        // by the tag width: `val d = "20672".to_i64(); d!` gave 2584 (>>3).
+        // Unwrapping a value that cannot be absent is the identity, type kept.
+        // Bug: seed_interp_local_to_i64_unwrap_shifts_by_tag_2026_11_09
+        if matches!(
+            subject_ty,
+            TypeId::BOOL
+                | TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+                | TypeId::F32
+                | TypeId::F64
+        ) {
+            return Ok(inner_hir);
+        }
 
         // A nullable SCALAR (`i64?`, `f64?`, `bool?`, `text?`) is not a
         // Result/Option enum: it lowers to `HirType::Pointer { inner }` and its
@@ -3077,14 +4293,9 @@ impl Lowerer {
             });
         }
 
-        // Hashed "Err" discriminant — same convention as match lowering.
-        let err_disc: i64 = {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut hasher = DefaultHasher::new();
-            "Err".hash(&mut hasher);
-            (hasher.finish() & 0xFFFFFFFF) as i64
-        };
+        // The subject's own `Err` index (#6953): a typed user enum may declare
+        // `Err` anywhere; an unresolved subject is the builtin Result (1).
+        let err_disc: i64 = self.owner_variant_discriminant(subject_ty, None, "Err", "hir ? operator");
 
         let is_err = HirExpr {
             kind: HirExprKind::BuiltinCall {
@@ -3612,6 +4823,9 @@ fn collect_identifiers_recursive(expr: &Expr, bound: &mut Vec<String>, identifie
         Expr::ArrayRepeat { value, count } => {
             collect_identifiers_recursive(value, bound, identifiers);
             collect_identifiers_recursive(count, bound, identifiers);
+        }
+        Expr::GenericInst { expr, .. } => {
+            collect_identifiers_recursive(expr, bound, identifiers);
         }
         Expr::Dict(entries) => {
             for (k, v) in entries {

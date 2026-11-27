@@ -63,12 +63,12 @@ fn parse_regex(payload: &str) -> Result<Value, CompileError> {
     let capture_groups = extract_capture_groups(&pattern);
 
     // Build result structure
-    let mut result = HashMap::new();
+    let mut result = crate::value::DictMap::new();
     result.insert("pattern".to_string(), Value::text(pattern.clone()));
     result.insert(
         "flags".to_string(),
         Value::dict({
-            let mut flags_map = HashMap::new();
+            let mut flags_map = crate::value::DictMap::new();
             flags_map.insert("case_insensitive".to_string(), Value::Bool(flags.case_insensitive));
             flags_map.insert("multiline".to_string(), Value::Bool(flags.multiline));
             flags_map.insert("dotall".to_string(), Value::Bool(flags.dotall));

@@ -1,5 +1,14 @@
 # Async/Await, Generators, and Actors
 
+> **2026-10-27 status:** this guide mixes language examples and runtime-family
+> APIs. Check the selected compiler/provider capability before using an example
+> as an availability claim. The [async infrastructure architecture](../../04_architecture/language/async_infrastructure.md)
+> records existing hosted futures/promises, scheduler contexts and native
+> I/O/fiber paths, plus their pending-chain/join and cross-thread gaps.
+> `std.async` is the intended shared interface; `async_host` supplies hosted
+> execution. Existing `async_host`, `async_embedded` and `async_unified`
+> imports remain compatible during the proposed facade migration.
+
 Covers asynchronous programming in Simple: lambdas, futures, async/await, generators, and the actor model.
 
 ---
@@ -46,7 +55,10 @@ val sum = items.reduce(\acc, x: acc + x, 0)
 
 ## Futures and Await
 
-Futures represent values that will be available later. `await` blocks until the future completes.
+Futures represent values that may become available later. Under the target
+managed-task contract, `await` suspends the task until completion; it must not
+block the carrier thread. A synchronous root may explicitly drive an executor.
+Actual language lowering and provider support require separate qualification.
 
 ```text
 # Create deferred computations
@@ -189,6 +201,12 @@ print "IDs: {id1}, {id2}"
 
 ### Waker System
 
+The following is the legacy `async_sffi` compatibility surface. Its task-ID
+table is not the canonical generation-qualified cross-thread wake contract.
+New shared-resource integrations use the existing task/ring contracts and a
+qualified executor ingress; a manually set flag does not wake a sleeping OS
+carrier by itself.
+
 ```simple
 use std.nogc_async_mut.async_sffi.{waker_signal, waker_check, waker_clear}
 
@@ -208,6 +226,10 @@ enum Poll<T>:
 
 ### Runtime Selection
 
+These are runtime-family descriptions, not portable capacity/performance
+guarantees. Inspect the selected provider and compile-time exports. The current
+`async_unified` module documents host default and incomplete runtime selection.
+
 | Runtime | Capacity | Scheduling | Use Case |
 |---------|----------|------------|----------|
 | Embedded | 16 tasks, 32 futures | Cooperative | Microcontrollers, bare-metal |
@@ -215,15 +237,13 @@ enum Poll<T>:
 
 ---
 
-## Performance
+## Performance evidence
 
-| Operation | Time |
-|-----------|------|
-| Lambda call | <1ns (inlined by compiler) |
-| Future creation | ~10ns |
-| Await (context switch) | ~50ns |
-| Generator next() | ~20ns |
-| Actor message | ~100ns |
+No reproducible source/provider/workload receipt accompanies the previous
+nanosecond estimates, so they are not performance guarantees. Measure handle
+latency, first usable result, wake tail latency, throughput and retained memory
+on the actual selected backend. See the
+[async TDD and measurement plan](../../03_plan/sys_test/async_infrastructure.md).
 
 ---
 
@@ -242,10 +262,16 @@ enum Poll<T>:
 
 ## Limitations
 
-- `async`, `await`, `yield`, `spawn`, `generator` keywords work in the compiler but are not yet in the runtime parser
+- Syntax and lowering support differ by compiler/interpreter profile; require
+  actual compile/run evidence for `async`, `await`, `yield`, `spawn` and
+  `generator` rather than inferring support from a library type.
 - Lambda capture is read-only
 - Generators are single-use (exhausted after one iteration)
-- No structured concurrency yet (no automatic cancellation of child tasks)
+- Hosted task contexts already carry lifetime/cancellation and cleanup
+  machinery. Complete parent/child cancellation, result publication and native
+  cleanup across every provider remain separate qualification gates.
+- Pending HostFuture map/then and HostTaskHandle join need live subscription
+  hardening at the audited source pin; ready-only examples do not verify it.
 
 ---
 

@@ -13,8 +13,9 @@ decodes a `Bitmap` and checks the resulting bytes or decoded fields against
 the documented wire layout.
 ## Compatibility and limitations
 Interpreter-mode only; no GPU backend is exercised. The codec is
-intentionally not validated against any external image tooling — its only
-contract is round-tripping a `Bitmap` produced by this same library.
+intentionally not validated against any external image tooling. New encodings
+use the documented `RBPA` tag; the decoder also accepts the earlier `RAQA` tag
+so stored blobs made by prior releases remain readable.
 ## Verification guidance and troubleshooting
 A failing header-byte or magic-constant scenario means the wire layout
 changed; a failing decode-rejection scenario means malformed input is no
@@ -44,10 +45,6 @@ describe "raw_rgba codec":
         val bmp = Bitmap.zeros(2, 3)
         val blob = encode_raw_rgba(bmp)
         step("Read the four magic bytes and compare with the ASCII 'RBPA' tag")
-        # NOTE: legitimate RED, verified 2026-09-06 -- b2 fails ("expected 81 to equal 80").
-        # RAW_RGBA_MAGIC (src/lib/skia/feature/codec/raw_rgba.spl:16) is 1380012353, whose
-        # byte-3 is 0x51 ('Q'), not the documented 0x50 ('P') for 0x52425041 ('RBPA'). See
-        # doc/08_tracking/bug/skia_raw_rgba_magic_constant_wrong_value_2026-09-06.md.
         val b0 = blob[0] as i64
         val b1 = blob[1] as i64
         val b2 = blob[2] as i64
@@ -72,7 +69,30 @@ describe "raw_rgba codec":
         val h3 = blob[15] as i64
         expect(h3).to_equal(3)  # oracle: the bitmap was constructed with height 3
         step("Compare the shipped RAW_RGBA_MAGIC constant with the packed 'RBPA' tag as a u32")
-        expect(RAW_RGBA_MAGIC).to_equal(1380012353)  # oracle: 0x52425041 packed big-endian equals 1380012353
+        expect(RAW_RGBA_MAGIC).to_equal(1380077633)  # oracle: 0x52425041 packed big-endian equals 1380077633
+
+    it "decode_raw_rgba: accepts the previous RAQA magic for stored blobs":
+        # @req REQ-SKIA-RAWRGBA-001
+        # @capture(bit_table): legacy RAQA header and decoded one-pixel payload
+        step("Build a version 1 1x1 blob with the previously emitted RAQA tag")
+        val legacy = [
+            0x52 as u8, 0x41 as u8, 0x51 as u8, 0x41 as u8,
+            0 as u8, 0 as u8, 0 as u8, 1 as u8,
+            0 as u8, 0 as u8, 0 as u8, 1 as u8,
+            0 as u8, 0 as u8, 0 as u8, 1 as u8,
+            10 as u8, 20 as u8, 30 as u8, 40 as u8
+        ]
+        step("Decode the legacy blob and confirm its dimensions and pixel bytes")
+        val result = decode_raw_rgba(legacy)
+        if val decoded = result:
+            expect(decoded.width).to_equal(1)
+            expect(decoded.height).to_equal(1)
+            expect(decoded.pixels[0] as i64).to_equal(10)
+            expect(decoded.pixels[1] as i64).to_equal(20)
+            expect(decoded.pixels[2] as i64).to_equal(30)
+            expect(decoded.pixels[3] as i64).to_equal(40)
+        else:
+            expect(false).to_equal(true)
 
     it "decode_raw_rgba: empty blob returns None":
         # @req REQ-SKIA-RAWRGBA-002

@@ -1,0 +1,299 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, mir, semantics
+"""
+MIR StructLit `expr_dispatch` and Semantics `narrowing` payload element-type preservation.
+
+Verifies two P3 Stage3 type-preservation paths plus direct MIR StructLit field lowering:
+1. `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` (`case StructLit(struct_type, fields):`)
+   binds `val struct_fields: [(text, HirExpr)] = fields` before calling
+   `struct_literal_order_problem` and iterating `for field in struct_fields:`.
+2. `src/compiler/35.semantics/narrowing.spl` (`_enum_some_has_irrefutable_payload`)
+   binds `val payload_patterns: [HirPattern] = patterns` under
+   `Some(HirPatternPayload.Tuple(patterns))` and
+   `val payload_fields: [(text, HirPattern)] = fields` under
+   `Some(HirPatternPayload.Struct(fields))`.
+"""
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+
+fn make_facts_lowering() -> (MirLowering, SymbolId):
+    var symbols = SymbolTable.new()
+    val owner = symbols.define("Facts", SymbolKind.Struct, None, Span.empty(), Visibility.Public, false, Some("provider.facts"))
+    var lowering = MirLowering.new(symbols)
+    lowering.struct_field_order["src/provider/facts.spl::Facts"] = ["admitted", "count"]
+    lowering.struct_identity_layout_key["provider.facts::Facts"] = "src/provider/facts.spl::Facts"
+    lowering.struct_field_hir_type["src/provider/facts.spl::Facts"] = [
+        HirType(kind: HirTypeKind.Bool, span: Span.empty()),
+        HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+    ]
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 900), "probe", MirSignature(params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+    lowering.builder = builder
+    (lowering, owner)
+
+fn find_aggregate_operands(lowering: MirLowering, dest_id: i64) -> [MirOperand]:
+    for inst in lowering.builder.instructions:
+        match inst.kind:
+            case MirInstKind.Aggregate(dest, _, operands):
+                if dest.id == dest_id:
+                    return operands
+            case _: ()
+    for blk in lowering.builder.blocks:
+        for inst in blk.instructions:
+            match inst.kind:
+                case MirInstKind.Aggregate(dest, _, operands):
+                    if dest.id == dest_id:
+                        return operands
+                case _: ()
+    []
+
+fn operand_mir_type_tag(lowering: MirLowering, op: MirOperand) -> text:
+    val local_opt: LocalId? = match op.kind:
+        case MirOperandKind.Copy(loc): Some(loc)
+        case MirOperandKind.Move(loc): Some(loc)
+        case _: None
+    if val loc = local_opt:
+        if val mir_ty = lowering.local_mir_type_of(loc):
+            return match mir_ty.kind:
+                case MirTypeKind.Bool: "bool"
+                case MirTypeKind.I64: "i64"
+                case _: "other"
+    "unknown"
+
+fn lower_module_pair(def_path: text, def_mod: text, def_src: text, main_path: text, main_mod: text, main_src: text) -> (MirModule, [text]):
+    val log = Logger(level: 0)
+    val def_ast = parse_full_frontend(def_src, def_path, def_mod, log)
+    val main_ast = parse_full_frontend(main_src, main_path, main_mod, log)
+    var modules: Dict<text, Module> = {}
+    modules[def_mod] = def_ast
+    modules[main_mod] = main_ast
+    val sources = [
+        SourceFile(path: def_path, content: def_src, module_name: def_mod),
+        SourceFile(path: main_path, content: main_src, module_name: main_mod)
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var def_hl = hirlowering_for_module(def_mod, surfaces)
+    var main_hl = hirlowering_for_module(main_mod, surfaces)
+    val def_hir = def_hl.lower_module(def_ast)
+    val main_hir = main_hl.lower_module(main_ast)
+    var errs: [text] = []
+    for e in def_hl.errors:
+        errs.push("hir-def: " + e.message)
+    for e in main_hl.errors:
+        errs.push("hir-main: " + e.message)
+    var ml = MirLowering.new_for_target(main_hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    var prescan: Dict<text, HirModule> = {}
+    prescan[def_mod] = def_hir
+    prescan[main_mod] = main_hir
+    ml.prescan_module_struct_names(prescan, def_mod)
+    ml.prescan_module_struct_names(prescan, main_mod)
+    val mir = ml.lower_module(main_hir, [def_hir, main_hir])
+    for e in ml.errors:
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        errs.push(e.message)
+    (mir, errs)
+
+fn mir_fn_has_array_local(mir: MirModule, fn_name: text) -> bool:
+    for fn_val in mir.functions.values():
+        if fn_val.name == fn_name or fn_val.name.ends_with("." + fn_name):
+            for loc in fn_val.locals:
+                var is_arg = false
+                match loc.kind:
+                    case LocalKind.Arg(_): is_arg = true
+                    case _: ()
+                if not is_arg:
+                    match loc.type_.kind:
+                        case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_):
+                            return true
+                        case _: ()
+    false
+
+fn mir_panic_is_non_array(msg: text) -> bool:
+    msg.contains("for-in over non-array")
+
+fn mir_fn_has_non_array_panic(mir: MirModule, fn_name: text) -> bool:
+    for fn_val in mir.functions.values():
+        if fn_val.name == fn_name or fn_val.name.ends_with("." + fn_name):
+            for blk in fn_val.blocks:
+                for inst in blk.instructions:
+                    match inst.kind:
+                        case MirInstKind.Call(_, func, args):
+                            match func.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(cname), _):
+                                    if cname == "rt_panic" and args.len() > 0:
+                                        match args[0].kind:
+                                            case MirOperandKind.Const(MirConstValue.Str(msg), _):
+                                                if mir_panic_is_non_array(msg):
+                                                    return true
+                                            case _: ()
+                                case _: ()
+                        case _: ()
+    false
+
+fn mir_fn_calls_rt_helper(mir: MirModule, fn_name: text, target: text) -> bool:
+    for fn_val in mir.functions.values():
+        if fn_val.name == fn_name or fn_val.name.ends_with("." + fn_name):
+            for blk in fn_val.blocks:
+                for inst in blk.instructions:
+                    match inst.kind:
+                        case MirInstKind.Call(_, func, _):
+                            match func.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(cname), _):
+                                    if cname == target:
+                                        return true
+                                case _: ()
+                        case _: ()
+    false
+
+val payload_defs_src =
+    "pub enum HirExprKind:\n" +
+    "    UnitLit\n" +
+    "    StructLit(i64, [(text, HirExpr)])\n\n" +
+    "pub struct HirExpr:\n" +
+    "    id: i64\n" +
+    "    kind: HirExprKind\n\n" +
+    "pub struct HirPattern:\n" +
+    "    irref: bool\n\n" +
+    "pub enum HirPatternPayload:\n" +
+    "    Tuple(patterns: [HirPattern])\n" +
+    "    Struct(fields: [(text, HirPattern)])\n"
+
+val payload_main_src =
+    "use lib.payload_defs.*\n\n" +
+    "fn helper_field_count(fields: [(text, HirExpr)]) -> i64:\n" +
+    "    fields.len()\n\n" +
+    "fn lower_struct_fields_sample(expr: HirExpr) -> i64:\n" +
+    "    match expr.kind:\n" +
+    "        case HirExprKind.StructLit(_, fields):\n" +
+    "            val struct_fields: [(text, HirExpr)] = fields\n" +
+    "            val n = helper_field_count(struct_fields)\n" +
+    "            var total = n\n" +
+    "            for field in struct_fields:\n" +
+    "                total = total + field.1.id\n" +
+    "            total\n" +
+    "        case _: 0\n\n" +
+    "fn narrowing_payload_sample(payload: HirPatternPayload?) -> bool:\n" +
+    "    match payload:\n" +
+    "        case None: false\n" +
+    "        case Some(HirPatternPayload.Tuple(patterns)):\n" +
+    "            val payload_patterns: [HirPattern] = patterns\n" +
+    "            if payload_patterns.len() == 0:\n" +
+    "                return false\n" +
+    "            for pat in payload_patterns:\n" +
+    "                if not pat.irref:\n" +
+    "                    return false\n" +
+    "            true\n" +
+    "        case Some(HirPatternPayload.Struct(fields)):\n" +
+    "            val payload_fields: [(text, HirPattern)] = fields\n" +
+    "            for field_entry in payload_fields:\n" +
+    "                if not field_entry.1.irref:\n" +
+    "                    return false\n" +
+    "            true\n"
+
+describe "MIR StructLit field lowering and order preservation":
+    it "lowers in-order and reordered order-insensitive StructLit fields into declaration-ordered Aggregate":
+        step("Lower in-order and reordered StructLit expressions and inspect Aggregate operands")
+        var (lowering, owner) = make_facts_lowering()
+        val sp = Span.empty()
+        val admitted = HirExpr(kind: HirExprKind.BoolLit(true), has_type_: true,
+            type_: HirType(kind: HirTypeKind.Bool, span: sp), span: sp)
+        val count = HirExpr(kind: HirExprKind.IntLit(73, None), has_type_: true,
+            type_: HirType(kind: HirTypeKind.Int(64, true), span: sp), span: sp)
+        val type_ = HirType(kind: HirTypeKind.Named(owner, []), span: sp)
+
+        val in_order = HirExpr(kind: HirExprKind.StructLit(type_, [("admitted", admitted), ("count", count)]),
+            has_type_: true, type_: type_, span: sp)
+        val res1 = lowering.lower_expr(in_order)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.struct_value_syms[res1.id]).to_equal("src/provider/facts.spl::Facts")
+        val ops1 = find_aggregate_operands(lowering, res1.id)
+        expect(ops1.len()).to_equal(2)
+        expect(operand_mir_type_tag(lowering, ops1[0])).to_equal("bool")
+        expect(operand_mir_type_tag(lowering, ops1[1])).to_equal("i64")
+
+        val reordered = HirExpr(kind: HirExprKind.StructLit(type_, [("count", count), ("admitted", admitted)]),
+            has_type_: true, type_: type_, span: sp)
+        val res2 = lowering.lower_expr(reordered)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.struct_value_syms[res2.id]).to_equal("src/provider/facts.spl::Facts")
+        val ops2 = find_aggregate_operands(lowering, res2.id)
+        expect(ops2.len()).to_equal(2)
+        expect(operand_mir_type_tag(lowering, ops2[0])).to_equal("bool")
+        expect(operand_mir_type_tag(lowering, ops2[1])).to_equal("i64")
+
+    it "rejects duplicate, unknown, and reordered side-effecting StructLit fields":
+        step("Verify StructLit rejects duplicate, unknown, and effectful out-of-order fields")
+        val sp = Span.empty()
+        val admitted = HirExpr(kind: HirExprKind.BoolLit(true), has_type_: true,
+            type_: HirType(kind: HirTypeKind.Bool, span: sp), span: sp)
+        val count = HirExpr(kind: HirExprKind.IntLit(73, None), has_type_: true,
+            type_: HirType(kind: HirTypeKind.Int(64, true), span: sp), span: sp)
+
+        var (dup_lowering, dup_owner) = make_facts_lowering()
+        val dup_ty = HirType(kind: HirTypeKind.Named(dup_owner, []), span: sp)
+        val dup_lit = HirExpr(kind: HirExprKind.StructLit(dup_ty, [("admitted", admitted), ("admitted", admitted)]),
+            has_type_: true, type_: dup_ty, span: sp)
+        dup_lowering.lower_expr(dup_lit)
+        expect(dup_lowering.errors.len()).to_equal(1)
+        expect(dup_lowering.errors[0].message).to_contain("duplicate field")
+
+        var (unk_lowering, unk_owner) = make_facts_lowering()
+        val unk_ty = HirType(kind: HirTypeKind.Named(unk_owner, []), span: sp)
+        val unk_lit = HirExpr(kind: HirExprKind.StructLit(unk_ty, [("admitted", admitted), ("missing", count)]),
+            has_type_: true, type_: unk_ty, span: sp)
+        unk_lowering.lower_expr(unk_lit)
+        expect(unk_lowering.errors.len()).to_equal(1)
+        expect(unk_lowering.errors[0].message).to_contain("unknown field")
+
+        var (eff_lowering, eff_owner) = make_facts_lowering()
+        val eff_ty = HirType(kind: HirTypeKind.Named(eff_owner, []), span: sp)
+        val eff_callee = HirExpr(kind: HirExprKind.Var(SymbolId(id: 901)), has_type_: false,
+            type_: HirType(kind: HirTypeKind.Error, span: sp), span: sp)
+        val eff_call = HirExpr(kind: HirExprKind.Call(eff_callee, [], []),
+            has_type_: true, type_: HirType(kind: HirTypeKind.Int(64, true), span: sp), span: sp)
+        val eff_lit = HirExpr(kind: HirExprKind.StructLit(eff_ty, [("count", eff_call), ("admitted", admitted)]),
+            has_type_: true, type_: eff_ty, span: sp)
+        eff_lowering.lower_expr(eff_lit)
+        expect(eff_lowering.errors.len()).to_equal(1)
+        expect(eff_lowering.errors[0].message).to_contain("out of declaration order")
+
+describe "StructLit and narrowing payload for-in element-type preservation":
+    it "preserves array locals and indexed loops across StructLit and nested Tuple/Struct pattern payloads":
+        step("Compile and MIR-lower StructLit and Some(HirPatternPayload.Tuple/Struct) loops")
+        val (mir, errs) = lower_module_pair("lib/payload_defs.spl", "lib.payload_defs", payload_defs_src, "app/payload_main.spl", "app.payload_main", payload_main_src)
+        expect(errs.len()).to_equal(0)
+        val sl_has_arr = mir_fn_has_array_local(mir, "lower_struct_fields_sample")
+        val sl_has_len = mir_fn_calls_rt_helper(mir, "lower_struct_fields_sample", "rt_array_len")
+        val sl_has_get = mir_fn_calls_rt_helper(mir, "lower_struct_fields_sample", "rt_array_get")
+        val sl_has_panic = mir_fn_has_non_array_panic(mir, "lower_struct_fields_sample")
+        expect(sl_has_arr).to_equal(true)
+        expect(sl_has_len).to_equal(true)
+        expect(sl_has_get).to_equal(true)
+        expect(sl_has_panic).to_equal(false)
+
+        val np_has_arr = mir_fn_has_array_local(mir, "narrowing_payload_sample")
+        val np_has_len = mir_fn_calls_rt_helper(mir, "narrowing_payload_sample", "rt_array_len")
+        val np_has_get = mir_fn_calls_rt_helper(mir, "narrowing_payload_sample", "rt_array_get")
+        val np_has_panic = mir_fn_has_non_array_panic(mir, "narrowing_payload_sample")
+        expect(np_has_arr).to_equal(true)
+        expect(np_has_len).to_equal(true)
+        expect(np_has_get).to_equal(true)
+        expect(np_has_panic).to_equal(false)

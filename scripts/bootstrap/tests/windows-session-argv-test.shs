@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Exercise literal argv through the real Windows Job guard and the MSYS shell.
+# The guard (process-tree-rss-watchdog.pl -> bootstrap-session-exec.c) must
+# deliver every value byte-identical to an MSYS consumer: backslash pairs,
+# UNC / extended-path prefixes, quotes, globs and `$(...)` stay literal.
+# Usage: bash windows-session-argv-test.shs [--cc <clang>] [--output-root <dir>]
+# Exit: 0 PASS, 1 FAIL, 2 ERROR/UNSUPPORTED (nothing was checked).
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"  # invoked as `sh` by the push gate
+set -u
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+root=$(CDPATH= cd -- "$here/../../.." && pwd)
+cc=${CC:-clang}
+output=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --cc) cc=$2; shift 2 ;;
+        --output-root) output=$2; shift 2 ;;
+        *) echo "ERROR — unknown argument $1"; exit 2 ;;
+    esac
+done
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) echo "ERROR — nothing was checked (UNSUPPORTED: actual Windows Job execution required)"; exit 2 ;;
+esac
+if [ -z "$output" ]; then
+    output=$(mktemp -d "${TMPDIR:-/tmp}/win-session-argv.XXXXXX") || exit 2
+else
+    [ -e "$output" ] && { echo "ERROR — output root already exists: $output"; exit 2; }
+    mkdir -p "$output" || exit 2
+fi
+output=$(CDPATH= cd -- "$output" && pwd)
+
+values=(
+    ''
+    'C:\one\two'
+    '\\?\D:\long\path'
+    '\\server\share\file'
+    'one\\two'
+    'C:\space path\trailing\'
+    'two trailing\\'
+    'quote"and\slash'
+    'slashes\\"quote'
+    "single'quote"
+    '*?[abc]'
+    '$(printf not-expanded)'
+    '%PATH%'
+    $'Unicode \xed\x95\x9c\xea\xb8\x80'
+)
+printf '%s\0' "${values[@]}" > "$output/expected.bin"
+
+cd "$root" || exit 2
+SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE=$(cygpath -u "$output/helper-cache") \
+CC=$cc \
+    timeout 90 perl scripts/resource/process-tree-rss-watchdog.pl \
+    --budget-scope=aggregate-tests --aggregate-workers=1 \
+    --max-rss-kib=1048576 --interval-ms=100 --timeout-seconds=30 \
+    "--receipt=$output/owner.env" -- \
+    bash -c 'printf "%s\0" "$@" > "$0"' "$output/captured.bin" "${values[@]}" \
+    > "$output/stdout.log" 2> "$output/stderr.log"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    echo "FAIL — guard exit $rc; inspect $output"; exit 1
+fi
+set -- "$output"/simple-rss-session-*/workload.spec
+if [ $# -ne 1 ] || [ ! -f "$1" ]; then
+    echo "FAIL — missing unique guard input spec; inspect $output"; exit 1
+fi
+# The spec ends with the values then a final NUL; compare its trailing items.
+expected_size=$(wc -c < "$output/expected.bin")
+tail -c "$expected_size" "$1" > "$output/incoming.bin"
+if ! cmp -s "$output/incoming.bin" "$output/expected.bin"; then
+    echo "FAIL — launcher changed argv before the native helper; inspect $output"; exit 1
+fi
+if ! cmp -s "$output/captured.bin" "$output/expected.bin"; then
+    echo "FAIL — native helper changed argv; inspect $output"; exit 1
+fi
+receipt=$(cat "$output/owner.env")
+case "$receipt" in *"status=complete"*) ;; *) echo "FAIL — missing terminal Job receipt"; exit 1 ;; esac
+case "$receipt" in *"exit_status=0"*) ;; *) echo "FAIL — Job receipt exit_status not 0"; exit 1 ;; esac
+echo "PASS — ${#values[@]} literal argv cases through Windows Job guard to msys"

@@ -29,11 +29,167 @@ thread_local! {
     /// Kept outside `TRANSIENT_HEAP_SCOPE` so a heap free can erase from it
     /// without re-borrowing the scope.
     static TRANSIENT_PROMOTE_SHARE: RefCell<Option<TransientPromoteShare>> = const { RefCell::new(None) };
+    /// Build session heap (BSM T1): one live session per thread, twin of the
+    /// C runtime's `rt_core_session_heap_*` state (runtime_native.c).
+    static SESSION_HEAP: RefCell<Option<SessionHeap>> = const { RefCell::new(None) };
+    /// Nodes the last `rt_transient_heap_adopt` visited (I2 pruning evidence).
+    static SESSION_ADOPT_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+static SESSION_HEAP_NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+static TRANSIENT_HEAP_NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+/// Objects owned by a build session (doc/05_design/compiler/memory/
+/// build_session_memory_model_v1.md §2-§4). Rust objects carry no scope tag,
+/// so ownership is membership: `owned` holds header addresses for O(1) checks.
+struct SessionHeap {
+    id: u32,
+    alloc_depth: i32,
+    objects: Vec<RuntimeValue>,
+    owned: super::heap::HeapPtrSet<usize>,
+}
+
+impl SessionHeap {
+    fn adopt(&mut self, value: RuntimeValue) {
+        if value.is_heap() && self.owned.insert(value.as_heap_ptr() as usize) {
+            self.objects.push(value);
+        }
+    }
+
+    /// Drop every session-owned object whose exact value bits are in
+    /// `reachable` (it became an rc root's graph). Entries are tombstoned to
+    /// NIL, as the module scope does, so `free_transient_objects` skips them.
+    /// O(objects) per call; shares are rare (dataset puts), adopts are not.
+    fn release_reachable(&mut self, reachable: &super::heap::HeapPtrSet<u64>) {
+        let mut removed = false;
+        for bits in reachable.iter() {
+            let value = RuntimeValue(*bits);
+            if value.is_heap() && self.owned.remove(&(value.as_heap_ptr() as usize)) {
+                removed = true;
+            }
+        }
+        if !removed {
+            return;
+        }
+        for object in self.objects.iter_mut() {
+            if object.is_heap() && reachable.contains(&object.0) {
+                *object = RuntimeValue::NIL;
+            }
+        }
+    }
+}
+
+/// Nodes visited by this thread's last `rt_transient_heap_adopt`.
+pub fn session_adopt_visits_debug() -> u64 {
+    SESSION_ADOPT_VISITS.with(|visits| visits.get())
+}
+
+/// True when the session (if any) owns header address `ptr`.
+pub fn session_heap_owns(value: RuntimeValue) -> bool {
+    value.is_heap()
+        && SESSION_HEAP.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .is_some_and(|session| session.owned.contains(&(value.as_heap_ptr() as usize)))
+        })
 }
 
 struct TransientHeapScope {
+    id: u32,
     paused: bool,
     objects: Vec<RuntimeValue>,
+    /// Lazily built header-address -> `objects` position index, so promotion
+    /// answers ownership and removal in O(reachable) instead of rescanning
+    /// every object the scope ever tracked. Tracking only appends while the
+    /// scope is running and promotion only runs while it is paused, so the
+    /// index is synced (extended over `objects[indexed..]`) at promote time.
+    /// Profiled 2026-10-24 (Windows stage2 parse of the parser closure): the
+    /// two full rescans were ~50% of parse-phase samples.
+    by_ptr: std::collections::HashMap<usize, usize, std::hash::BuildHasherDefault<ahash::AHasher>>,
+    indexed: usize,
+    /// Two tracked objects share a header address. Ownership remains indexed;
+    /// removal defers duplicate compaction using the exact-bit promoted set.
+    index_ambiguous: bool,
+    /// Exact value bits promoted while the index is ambiguous. Compaction of
+    /// `objects` is deferred to ONE filter at scope end instead of a
+    /// per-promote `retain` (O(objects) per call -> O(N^2) for N promotes;
+    /// doc/05_design/compiler/memory/build_session_memory_model_v1.md §6, BSM P0).
+    promoted: super::heap::HeapPtrSet<u64>,
+}
+
+impl TransientHeapScope {
+    fn sync_index(&mut self) {
+        while self.indexed < self.objects.len() {
+            let object = self.objects[self.indexed];
+            if object.is_heap() {
+                let ptr = object.as_heap_ptr() as usize;
+                if self.by_ptr.insert(ptr, self.indexed).is_some() {
+                    self.index_ambiguous = true;
+                }
+            }
+            self.indexed += 1;
+        }
+    }
+
+    fn owns_heap_ptr(&mut self, root_ptr: *mut super::heap::HeapHeader) -> bool {
+        self.sync_index();
+        // A heap address has one canonical RuntimeValue representation (the
+        // address plus TAG_HEAP). Duplicate tracking therefore does not make
+        // ownership ambiguous: every entry for this address has the same
+        // promoted status. Keep the index even when removal must defer duplicate
+        // compaction. Scanning `objects` here makes adopt quadratic in the graph.
+        let Some(&position) = self.by_ptr.get(&(root_ptr as usize)) else {
+            return false;
+        };
+        let object = self.objects[position];
+        object.is_heap() && object.as_heap_ptr() == root_ptr && !self.promoted.contains(&object.0)
+    }
+
+    /// Drop every tracked object whose exact value bits are in `reachable`.
+    /// With `released`, also report each object that left the scope (BSM:
+    /// it moves to the live session instead of becoming permanent).
+    fn release_reachable(
+        &mut self,
+        reachable: &super::heap::HeapPtrSet<u64>,
+        mut released: Option<&mut Vec<RuntimeValue>>,
+    ) {
+        self.sync_index();
+        if self.index_ambiguous {
+            // Deferred: rt_transient_array_scope_end filters once.
+            // Only tracked addresses are recorded, so the set stays bounded
+            // by `objects` however much persistent graph a promote walks.
+            for bits in reachable.iter().copied() {
+                let value = RuntimeValue(bits);
+                if value.is_heap()
+                    && self.by_ptr.contains_key(&(value.as_heap_ptr() as usize))
+                    && self.promoted.insert(bits)
+                {
+                    if let Some(out) = released.as_deref_mut() {
+                        out.push(value);
+                    }
+                }
+            }
+            return;
+        }
+        for bits in reachable.iter() {
+            let value = RuntimeValue(*bits);
+            if !value.is_heap() {
+                continue;
+            }
+            let ptr = value.as_heap_ptr() as usize;
+            if let Some(&position) = self.by_ptr.get(&ptr) {
+                if self.objects[position].0 == *bits {
+                    // Tombstone: NIL is not heap, so scope end skips it and
+                    // the free order of the survivors is unchanged.
+                    self.objects[position] = RuntimeValue::NIL;
+                    self.by_ptr.remove(&ptr);
+                    if let Some(out) = released.as_deref_mut() {
+                        out.push(value);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Nodes whose promotion fully committed earlier in the open share window:
@@ -47,7 +203,10 @@ struct TransientPromoteShare {
 /// Erase a freed heap object from the open share window so a recycled address
 /// is never mistaken for a committed node. Called by `unregister_heap_ptr`.
 pub(crate) fn transient_promote_share_forget(addr: usize) {
-    TRANSIENT_PROMOTE_SHARE.with(|slot| {
+    // A runtime-owned TLS destructor can free a string after this optional
+    // per-thread cache has been destroyed. The cache is already gone then;
+    // registry removal, accounting and the real deallocation still proceed.
+    let _ = TRANSIENT_PROMOTE_SHARE.try_with(|slot| {
         if let Ok(mut slot) = slot.try_borrow_mut() {
             if let Some(share) = slot.as_mut() {
                 share.heap.remove(&addr);
@@ -56,13 +215,118 @@ pub(crate) fn transient_promote_share_forget(addr: usize) {
     });
 }
 
+/// How far back `transient_untrack_freed` scans before using the index. A
+/// block-local array is freed a few allocations after it was tracked.
+const TRANSIENT_UNTRACK_WINDOW: usize = 64;
+
+/// Erase a heap object that is being freed from this thread's open transient
+/// scope and session. Without this the stale entry survives the free; if the
+/// allocator then hands the same address to an object the scope/session does
+/// NOT own (allocated while paused, or adopted elsewhere), scope/session end
+/// would free that live object, because it frees by registry membership of
+/// the address
+/// (doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md, Option A
+/// risk table). Entries are tombstoned to NIL, as promotion does.
+///
+/// Called from the single-object registry erase (`unregister_heap_ptr*`), so
+/// every free path is covered, not only `rt_array_free`. Bug:
+/// native_build_hir_sigsegv_under_20g_cgroup_cuda_port_closure_2026-11-22
+/// (an object freed mid-scope; its address went to the paused-born
+/// `join_point_attr_dirty_fn_names` header, which scope end then freed).
+#[inline]
+pub(crate) fn transient_untrack_freed_addr(addr: usize) {
+    transient_untrack_freed(RuntimeValue(addr as u64 | super::tags::TAG_HEAP));
+}
+
+/// Hot free path: one thread-local access per slot, inlined; the scope work
+/// runs out of line only when this thread has an open scope.
+#[inline]
+fn transient_untrack_freed(value: RuntimeValue) {
+    let addr = value.as_heap_ptr() as usize;
+    let _ = SESSION_HEAP.try_with(|slot| {
+        if let Ok(mut slot) = slot.try_borrow_mut() {
+            if let Some(session) = slot.as_mut() {
+                // `owned` is the membership truth; `rt_session_heap_end`
+                // frees only entries still in it.
+                session.owned.remove(&addr);
+            }
+        }
+    });
+    let _ = TRANSIENT_HEAP_SCOPE.try_with(|slot| {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            return;
+        };
+        if let Some(scope) = slot.as_mut() {
+            transient_untrack_in_scope(scope, value);
+        }
+    });
+}
+
+#[inline(never)]
+fn transient_untrack_in_scope(scope: &mut TransientHeapScope, value: RuntimeValue) {
+    let addr = value.as_heap_ptr() as usize;
+    let len = scope.objects.len();
+    let window_start = len.saturating_sub(TRANSIENT_UNTRACK_WINDOW);
+    let same = |object: &RuntimeValue| object.is_heap() && object.as_heap_ptr() as usize == addr;
+    for pos in (window_start..len).rev() {
+        if same(&scope.objects[pos]) {
+            scope.objects[pos] = RuntimeValue::NIL;
+        }
+    }
+    // Every entry for this address must go, not just the newest: an
+    // older duplicate left behind would be freed at scope end once
+    // `promoted` no longer filters it.
+    if window_start > 0 {
+        scope.sync_index();
+        if scope.index_ambiguous {
+            for object in scope.objects[..window_start].iter_mut() {
+                if same(object) {
+                    *object = RuntimeValue::NIL;
+                }
+            }
+            scope.by_ptr.remove(&addr);
+        } else if let Some(pos) = scope.by_ptr.remove(&addr) {
+            if same(&scope.objects[pos]) {
+                scope.objects[pos] = RuntimeValue::NIL;
+            }
+        }
+    } else if !scope.by_ptr.is_empty() {
+        scope.by_ptr.remove(&addr);
+    }
+    if !scope.promoted.is_empty() {
+        scope.promoted.remove(&value.0);
+    }
+}
+
 /// True when the calling thread holds a transient heap scope that is paused,
 /// the only state in which `rt_transient_heap_promote` may succeed.
 pub fn transient_heap_scope_paused() -> bool {
     TRANSIENT_HEAP_SCOPE.with(|slot| slot.borrow().as_ref().is_some_and(|scope| scope.paused))
 }
 
+fn allocation_uses_session_v1(alloc_depth: i32, module_running: bool) -> bool {
+    alloc_depth > 0 || !module_running
+}
+
 pub(crate) fn track_transient_heap(value: RuntimeValue) -> RuntimeValue {
+    // A live session owns what a paused/absent module scope would have left
+    // permanent, and everything inside rt_session_alloc_begin/end (I3).
+    let to_session = SESSION_HEAP.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(session) = slot.as_mut() else {
+            return false;
+        };
+        let module_running =
+            TRANSIENT_HEAP_SCOPE.with(|scope| scope.borrow().as_ref().is_some_and(|scope| !scope.paused));
+        if allocation_uses_session_v1(session.alloc_depth, module_running) {
+            session.adopt(value);
+            return true;
+        }
+        false
+    });
+    if to_session {
+        return value;
+    }
     TRANSIENT_HEAP_SCOPE.with(|slot| {
         if let Some(scope) = slot.borrow_mut().as_mut() {
             if !scope.paused {
@@ -1586,14 +1850,28 @@ pub extern "C" fn rt_bytes_u8_at(array: RuntimeValue, index: i64) -> i64 {
 /// Read a u32 element from a `[u32]`-style runtime array without generic index dispatch.
 #[no_mangle]
 pub extern "C" fn rt_typed_words_u32_at(array: RuntimeValue, index: i64) -> i64 {
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, 0);
     unsafe {
         let len = (*arr).len as i64;
         let idx = normalize_index(index, len);
         if idx < 0 || idx >= len {
             return 0;
         }
+        // A byte-packed `[u8]` reached through an untyped caller holds bytes,
+        // not word slots (seed_jit_u8_array_into_i64_array_param_reads_zero).
+        if (*arr).is_byte_packed() {
+            return *((*arr).data as *const u8).add(idx as usize) as i64;
+        }
+        if (*arr).is_u64_packed() {
+            return (*((*arr).data as *const u64).add(idx as usize) & 0xFFFF_FFFF) as i64;
+        }
         let raw = (*arr).as_slice()[idx as usize];
+        if let Some(value) = raw.as_heap_u64() {
+            return (value & 0xFFFF_FFFF) as i64;
+        }
+        if let Some(value) = raw.as_heap_i64() {
+            return value & 0xFFFF_FFFF;
+        }
         if raw.is_int() {
             return raw.as_int() & 0xFFFF_FFFF;
         }
@@ -1606,6 +1884,9 @@ pub extern "C" fn rt_typed_words_u32_at(array: RuntimeValue, index: i64) -> i64 
 pub extern "C" fn rt_typed_words_u32_unchecked(array: RuntimeValue, index: i64) -> i64 {
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
     unsafe {
+        if (*arr).is_byte_packed() {
+            return *((*arr).data as *const u8).add(index as usize) as i64;
+        }
         let raw = (*arr).as_slice()[index as usize];
         if raw.is_int() {
             return raw.as_int() & 0xFFFF_FFFF;
@@ -1678,6 +1959,11 @@ pub extern "C" fn rt_typed_bytes_u8_data_at(data_ptr: i64, index: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_typed_words_u32_data_at(data_ptr: i64, index: i64) -> i64 {
+    // Bit 0 set: the hoisted loop pointer of a byte-packed `[u8]` (MIR
+    // lowering tags it; seed_jit_u8_array_into_i64_array_param_reads_zero).
+    if data_ptr & 1 != 0 {
+        return unsafe { *(((data_ptr & !1) as *const u8).add(index as usize)) as i64 };
+    }
     unsafe {
         let raw = *((data_ptr as *const RuntimeValue).add(index as usize));
         if raw.is_int() {
@@ -1697,10 +1983,21 @@ pub extern "C" fn rt_typed_words_u64_at(array: RuntimeValue, index: i64) -> i64 
         if idx < 0 || idx >= len {
             return 0;
         }
+        // A byte-packed `[u8]` reached through an untyped caller holds bytes,
+        // not word slots (seed_jit_u8_array_into_i64_array_param_reads_zero).
+        if (*arr).is_byte_packed() {
+            return *((*arr).data as *const u8).add(idx as usize) as i64;
+        }
         if (*arr).is_u64_packed() {
             return *((*arr).data as *const u64).add(idx as usize) as i64;
         }
         let raw = (*arr).as_slice()[idx as usize];
+        if let Some(value) = raw.as_heap_u64() {
+            return value as i64;
+        }
+        if let Some(value) = raw.as_heap_i64() {
+            return value;
+        }
         if raw.is_int() {
             return raw.as_int();
         }
@@ -1713,6 +2010,9 @@ pub extern "C" fn rt_typed_words_u64_at(array: RuntimeValue, index: i64) -> i64 
 pub extern "C" fn rt_typed_words_u64_unchecked(array: RuntimeValue, index: i64) -> i64 {
     let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, 0);
     unsafe {
+        if (*arr).is_byte_packed() {
+            return *((*arr).data as *const u8).add(index as usize) as i64;
+        }
         if (*arr).is_u64_packed() {
             return *((*arr).data as *const u64).add(index as usize) as i64;
         }
@@ -1726,6 +2026,11 @@ pub extern "C" fn rt_typed_words_u64_unchecked(array: RuntimeValue, index: i64) 
 
 #[no_mangle]
 pub extern "C" fn rt_typed_words_u64_data_at(data_ptr: i64, index: i64) -> i64 {
+    // Bit 0 set: the hoisted loop pointer of a byte-packed `[u8]` (MIR
+    // lowering tags it; seed_jit_u8_array_into_i64_array_param_reads_zero).
+    if data_ptr & 1 != 0 {
+        return unsafe { *(((data_ptr & !1) as *const u8).add(index as usize)) as i64 };
+    }
     unsafe {
         let raw = *((data_ptr as *const RuntimeValue).add(index as usize));
         if raw.is_int() {
@@ -1742,6 +2047,9 @@ pub extern "C" fn rt_typed_words_u64_data_at_checked(header_ptr: i64, data_ptr: 
     }
     unsafe {
         let arr = (header_ptr & !7) as *const RuntimeArray;
+        if (*arr).is_byte_packed() {
+            return *(((data_ptr & !1) as *const u8).add(index as usize)) as i64;
+        }
         if (*arr).is_u64_packed() {
             return *((data_ptr as *const u64).add(index as usize)) as i64;
         }
@@ -1753,6 +2061,11 @@ pub extern "C" fn rt_typed_words_u64_data_at_checked(header_ptr: i64, data_ptr: 
 pub extern "C" fn rt_typed_words_u64_raw_data_at(data_ptr: i64, index: i64) -> i64 {
     if data_ptr == 0 || index < 0 {
         return 0;
+    }
+    // Bit 0 set: the hoisted loop pointer of a byte-packed `[u8]` (MIR
+    // lowering tags it; seed_jit_u8_array_into_i64_array_param_reads_zero).
+    if data_ptr & 1 != 0 {
+        return unsafe { *(((data_ptr & !1) as *const u8).add(index as usize)) as i64 };
     }
     unsafe { *((data_ptr as *const u64).add(index as usize)) as i64 }
 }
@@ -1839,11 +2152,34 @@ pub extern "C" fn rt_bytes_u8_set(array: RuntimeValue, index: i64, value: i64) -
     }
 }
 
+/// A typed word write (`[i64]` / `[u64]` / `[u32]` parameter) that receives a
+/// byte-packed `[u8]` has no 8-byte slot to store into. Writing one would
+/// overrun the byte buffer and refusing it silently drops the value, so it is a
+/// runtime error (owner decision). Reads decode the byte instead. The report
+/// and exit status match the C lane, whose `rt_typed_words_byte_write_trap`
+/// (runtime_native.c) calls `spl_panic` (runtime.c: `PANIC: <msg>`, exit 1).
+/// Bug: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27
+fn typed_words_byte_write_trap() -> ! {
+    eprintln!(
+        "PANIC: typed word write: a [u8] array cannot be written through a word-typed array parameter ([i64]/[u64]/[u32])"
+    );
+    std::process::exit(1);
+}
+
+/// Cold-branch entry for the JIT's inlined typed word writers.
+#[no_mangle]
+pub extern "C" fn rt_typed_words_byte_write_trap() {
+    typed_words_byte_write_trap();
+}
+
 /// Write a u32 element into a `[u32]`-style runtime array without generic index dispatch.
 #[no_mangle]
 pub extern "C" fn rt_typed_words_u32_set(array: RuntimeValue, index: i64, value: i64) -> bool {
     let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
+        if (*arr).is_byte_packed() {
+            typed_words_byte_write_trap();
+        }
         let len = (*arr).len as i64;
         let idx = normalize_index(index, len);
         if idx < 0 || idx >= len {
@@ -1859,6 +2195,9 @@ pub extern "C" fn rt_typed_words_u32_set(array: RuntimeValue, index: i64, value:
 pub extern "C" fn rt_typed_words_u64_set(array: RuntimeValue, index: i64, value: i64) -> bool {
     let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
+        if (*arr).is_byte_packed() {
+            typed_words_byte_write_trap();
+        }
         let len = (*arr).len as i64;
         let idx = normalize_index(index, len);
         if idx < 0 || idx >= len {
@@ -1886,6 +2225,11 @@ pub extern "C" fn rt_typed_words_i64_at(array: RuntimeValue, index: i64) -> i64 
         if idx < 0 || idx >= len {
             return 0;
         }
+        // A byte-packed `[u8]` reached through an untyped caller holds bytes,
+        // not word slots (seed_jit_u8_array_into_i64_array_param_reads_zero).
+        if (*arr).is_byte_packed() {
+            return *((*arr).data as *const u8).add(idx as usize) as i64;
+        }
         if (*arr).is_u64_packed() {
             return *((*arr).data as *const i64).add(idx as usize);
         }
@@ -1910,7 +2254,7 @@ pub extern "C" fn rt_typed_words_i64_set(array: RuntimeValue, index: i64, value:
             return false;
         }
         if (*arr).is_byte_packed() {
-            return false;
+            typed_words_byte_write_trap();
         }
         if !(*arr).is_u64_packed() && RuntimeValue::fits_inline_int(value) {
             *(*arr).data.add(idx as usize) = RuntimeValue::from_int(value);
@@ -1933,7 +2277,7 @@ pub extern "C" fn rt_typed_words_i64_push(array: RuntimeValue, value: i64) -> bo
     let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         if (*arr).is_byte_packed() {
-            return false;
+            typed_words_byte_write_trap();
         }
         if !(*arr).is_u64_packed() && !RuntimeValue::fits_inline_int(value) {
             pack_tagged_words_in_place(arr);
@@ -2009,7 +2353,7 @@ pub extern "C" fn rt_typed_words_u32_push(array: RuntimeValue, value: i64) -> bo
     let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         if (*arr).is_byte_packed() {
-            return false;
+            typed_words_byte_write_trap();
         }
         if (*arr).len >= (*arr).capacity {
             let old_cap = (*arr).capacity;
@@ -2045,7 +2389,7 @@ pub extern "C" fn rt_typed_words_u64_push(array: RuntimeValue, value: i64) -> bo
     let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         if (*arr).is_byte_packed() {
-            return false;
+            typed_words_byte_write_trap();
         }
         if (*arr).len >= (*arr).capacity {
             let old_cap = (*arr).capacity;
@@ -2084,7 +2428,10 @@ pub extern "C" fn rt_typed_words_u64_push(array: RuntimeValue, value: i64) -> bo
 pub extern "C" fn rt_typed_words_u32_push_known_at(array: RuntimeValue, index: i64, value: i64) -> bool {
     let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
-        if (*arr).is_byte_packed() || index < 0 || index as u64 >= (*arr).capacity {
+        if (*arr).is_byte_packed() {
+            typed_words_byte_write_trap();
+        }
+        if index < 0 || index as u64 >= (*arr).capacity {
             return false;
         }
         *(*arr).data.add(index as usize) = RuntimeValue::from_int(value & 0xFFFF_FFFF);
@@ -2098,7 +2445,10 @@ pub extern "C" fn rt_typed_words_u32_push_known_at(array: RuntimeValue, index: i
 pub extern "C" fn rt_typed_words_u64_push_known_at(array: RuntimeValue, index: i64, value: i64) -> bool {
     let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
-        if (*arr).is_byte_packed() || index < 0 || index as u64 >= (*arr).capacity {
+        if (*arr).is_byte_packed() {
+            typed_words_byte_write_trap();
+        }
+        if index < 0 || index as u64 >= (*arr).capacity {
             return false;
         }
         if (*arr).is_u64_packed() {
@@ -2124,6 +2474,9 @@ pub extern "C" fn rt_typed_words_u32_push_known_data_at(
     }
     unsafe {
         let arr = header_ptr as *mut RuntimeArray;
+        if (*arr).is_byte_packed() {
+            typed_words_byte_write_trap();
+        }
         if index as u64 >= (*arr).capacity {
             return false;
         }
@@ -2146,6 +2499,9 @@ pub extern "C" fn rt_typed_words_u64_push_known_data_at(
     }
     unsafe {
         let arr = header_ptr as *mut RuntimeArray;
+        if (*arr).is_byte_packed() {
+            typed_words_byte_write_trap();
+        }
         if index as u64 >= (*arr).capacity {
             return false;
         }
@@ -2522,6 +2878,46 @@ pub extern "C" fn rt_array_remove(array: RuntimeValue, index: i64) -> RuntimeVal
     }
 }
 
+/// Insert `value` BEFORE `index` IN PLACE (`index == len` appends). Returns
+/// true when inserted. A non-array receiver, a negative index or
+/// `index > len` is a NO-OP returning false — matching the interpreter's
+/// `insert` arm (interpreter_method/collections.rs), which leaves the array
+/// unchanged for `idx > len`. Never panics (extern "C").
+///
+/// Built on `rt_array_push` + `rt_array_get`/`rt_array_set` so growth and all
+/// three storage layouts (tagged, byte-packed, u64-packed) are handled by the
+/// existing primitives. The C lane twin in runtime_native.c is identical.
+#[no_mangle]
+pub extern "C" fn rt_array_insert(array: RuntimeValue, index: i64, value: RuntimeValue) -> bool {
+    let len = rt_array_len(array);
+    if len < 0 || index < 0 || index > len {
+        return false;
+    }
+    if !rt_array_push(array, value) {
+        return false;
+    }
+    if index == len {
+        return true;
+    }
+    // One overlapping copy shifts the tail (inherent O(n), no per-element
+    // calls); the new slot is then written through rt_array_set so packed
+    // layouts store the value exactly as push did.
+    let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    unsafe {
+        let elem = if (*arr).is_byte_packed() {
+            1usize
+        } else if (*arr).is_u64_packed() {
+            std::mem::size_of::<u64>()
+        } else {
+            std::mem::size_of::<RuntimeValue>()
+        };
+        let base = (*arr).data as *mut u8;
+        let idx = index as usize;
+        std::ptr::copy(base.add(idx * elem), base.add((idx + 1) * elem), (len as usize - idx) * elem);
+    }
+    rt_array_set(array, index, value)
+}
+
 /// `remove`: receiver-dispatched, so a bare `.remove(k)` is safe on an untyped
 /// receiver.
 ///
@@ -2564,16 +2960,33 @@ pub extern "C" fn rt_collection_remove(receiver: RuntimeValue, key: RuntimeValue
 
 /// `set`: receiver-dispatched for erased collection receivers.
 ///
-/// Only Dict owns this method in the language. An erased Dict retains the
-/// fluent result of `Dict.set`, while Array and Tuple take the same loud
-/// method-not-found path as statically typed receivers. Do not route this
-/// through `rt_index_set` or `rt_tuple_set`: those implement index assignment
-/// and tuple construction, not the `.set()` method.
+/// The interpreter has implemented `[T].set(i, v)` since 2026-11-03 — bool
+/// result, negative index counts from the end, out-of-range returns false with
+/// no mutation, exactly `rt_array_set` (see
+/// doc/08_tracking/bug/array_set_missing_on_interpreter_2026-08-18.md). The
+/// erased compiled-lane dispatch lands here for ANY receiver, so an Array must
+/// take those same semantics rather than fail closed: before this arm,
+/// `a.set(0, 9)` on the JIT/native lanes aborted with "Method 'set' not found
+/// on type 'Array'" while the interpreter accepted it.
+///
+/// Dict keeps its fluent receiver result; Tuple and every other receiver keep
+/// the loud method-not-found path (the interpreter has no `tuple.set` either).
 #[no_mangle]
 pub extern "C" fn rt_collection_set(receiver: RuntimeValue, key: RuntimeValue, value: RuntimeValue) -> RuntimeValue {
     if get_typed_ptr::<crate::value::dict::RuntimeDict>(receiver, HeapObjectType::Dict).is_some() {
         let _ = crate::value::dict::rt_dict_set(receiver, key, value);
         return receiver;
+    }
+    if get_typed_ptr_packed::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+        // Array indices arrive TAGGED; `as_index_i64` decodes every integer
+        // representation the tag uses — the same decode `rt_index_set` applies.
+        // A non-integer key is out of range by definition and must return FALSE
+        // with NO mutation: substituting -1 here would normalize to `len-1` and
+        // silently overwrite the last element.
+        let Some(index) = key.as_index_i64() else {
+            return RuntimeValue::FALSE;
+        };
+        return RuntimeValue::from_bool(rt_array_set(receiver, index, value));
     }
 
     let type_name = collection_set_missing_type(receiver);
@@ -2590,7 +3003,10 @@ fn collection_set_missing_type(receiver: RuntimeValue) -> &'static [u8] {
 
 #[cfg(test)]
 mod collection_set_tests {
-    use super::{collection_set_missing_type, rt_array_new, rt_collection_set, rt_tuple_new};
+    use super::{
+        collection_set_missing_type, rt_array_len, rt_array_new, rt_array_push, rt_collection_set, rt_index_get,
+        rt_string_new, rt_tuple_new,
+    };
     use crate::value::dict::{rt_dict_get, rt_dict_new};
     use crate::value::RuntimeValue;
 
@@ -2604,9 +3020,82 @@ mod collection_set_tests {
     }
 
     #[test]
-    fn array_and_tuple_set_keep_their_method_not_found_identity() {
-        assert_eq!(collection_set_missing_type(rt_array_new(3)), b"Array");
+    fn tuple_keeps_its_method_not_found_identity() {
+        // Arrays no longer reach `collection_set_missing_type` (`.set` is a real
+        // array method since 2026-11-05); Tuple and unknown receivers still fail
+        // closed through it.
         assert_eq!(collection_set_missing_type(rt_tuple_new(3)), b"Tuple");
+    }
+
+    // doc/08_tracking/bug/array_set_missing_on_interpreter_2026-08-18.md: the
+    // interpreter gained `[T].set(i, v)` (bool result, `rt_array_set`
+    // semantics) but the erased compiled-lane dispatch still funneled
+    // `a.set(i, v)` into `rt_collection_set`, which aborted with
+    // "Method 'set' not found on type 'Array'". This child-process test is the
+    // JIT/native-lane regression: pre-fix the child aborts (exit 70), post-fix
+    // it exits 0 having asserted the full `rt_array_set` contract.
+    #[test]
+    fn erased_array_set_mutates_in_place_and_returns_bool() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("value::collections::collection_set_tests::erased_array_set_accepts_child")
+            .arg("--nocapture")
+            .env("SIMPLE_COLLECTION_SET_ACCEPT_CHILD", "1")
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "array.set through rt_collection_set must succeed (pre-fix it loudly \
+             rejected arrays): stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn erased_array_set_accepts_child() {
+        if std::env::var_os("SIMPLE_COLLECTION_SET_ACCEPT_CHILD").is_none() {
+            return;
+        }
+        let arr = rt_array_new(0);
+        rt_array_push(arr, RuntimeValue::from_int(5));
+        rt_array_push(arr, RuntimeValue::from_int(3));
+        rt_array_push(arr, RuntimeValue::from_int(1));
+
+        // In range: returns TRUE and mutates in place.
+        let ok = rt_collection_set(arr, RuntimeValue::from_int(0), RuntimeValue::from_int(99));
+        assert!(ok.as_bool(), "in-range array set must return true");
+        assert_eq!(rt_index_get(arr, RuntimeValue::from_int(0)).as_int(), 99);
+
+        // Negative index counts from the end (`rt_array_set` contract).
+        let ok_neg = rt_collection_set(arr, RuntimeValue::from_int(-1), RuntimeValue::from_int(7));
+        assert!(ok_neg.as_bool(), "negative-index array set must return true");
+        assert_eq!(rt_index_get(arr, RuntimeValue::from_int(2)).as_int(), 7);
+
+        // Out of range on either side: returns FALSE, no mutation.
+        let oob = rt_collection_set(arr, RuntimeValue::from_int(10), RuntimeValue::from_int(1));
+        assert!(!oob.as_bool());
+        let oob_neg = rt_collection_set(arr, RuntimeValue::from_int(-10), RuntimeValue::from_int(1));
+        assert!(!oob_neg.as_bool());
+        assert_eq!(rt_array_len(arr), 3);
+        assert_eq!(rt_index_get(arr, RuntimeValue::from_int(1)).as_int(), 3);
+
+        // Non-integer keys (text, float) must be rejected with NO mutation:
+        // `rt_index_set`'s Array contract is `as_index_i64() == None => false`.
+        // An earlier version of this arm substituted -1 for a non-int key,
+        // which `normalize_index` turned into len-1 and silently overwrote
+        // the LAST element (parallel-review P1, 2026-11-05).
+        let text_key = rt_string_new(b"k".as_ptr(), 1);
+        let text_res = rt_collection_set(arr, text_key, RuntimeValue::from_int(42));
+        assert!(!text_res.as_bool(), "text key must return false, not overwrite the last element");
+        let float_res = rt_collection_set(arr, RuntimeValue::from_float(1.5), RuntimeValue::from_int(42));
+        assert!(!float_res.as_bool(), "float key must return false, not overwrite the last element");
+        assert_eq!(rt_array_len(arr), 3);
+        assert_eq!(
+            rt_index_get(arr, RuntimeValue::from_int(2)).as_int(),
+            7,
+            "last element must be intact after non-integer-key rejections"
+        );
     }
 
     fn assert_rejected_child(kind: &str) {
@@ -2627,18 +3116,6 @@ mod collection_set_tests {
             "missing receiver type in diagnostic: {stderr}"
         );
         assert!(stderr.contains("set"), "missing method in diagnostic: {stderr}");
-    }
-
-    #[test]
-    fn array_set_rejection_is_loud() {
-        assert_rejected_child("array");
-    }
-
-    #[test]
-    fn array_set_rejection_child() {
-        if std::env::var_os("SIMPLE_COLLECTION_SET_REJECTION_CHILD").is_some() {
-            rt_collection_set(rt_array_new(0), RuntimeValue::from_int(1), RuntimeValue::from_int(2));
-        }
     }
 
     #[test]
@@ -2664,6 +3141,73 @@ pub extern "C" fn rt_array_clear(array: RuntimeValue) -> bool {
     }
 }
 
+/// Ensure the array can hold `len + additional` elements without regrowing.
+///
+/// `[T].reserve(additional)` is a capacity hint, exactly like the pure-Simple
+/// core's `array_reserve` (src/runtime/simple_core/core_array.spl): it never
+/// changes `len` or any element; it only reallocates the backing buffer when
+/// the current capacity is insufficient. The `RuntimeArray` header stays at a
+/// stable address across the grow (only `data` may move), so callers holding
+/// the array handle need no rebind. Returns false only when the grow
+/// allocation fails.
+#[no_mangle]
+pub extern "C" fn rt_array_reserve(array: RuntimeValue, additional: i64) -> bool {
+    let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    unsafe {
+        if additional <= 0 {
+            return true;
+        }
+        let len = (*arr).len;
+        let needed = len.saturating_add(additional as u64);
+        if needed <= (*arr).capacity {
+            return true;
+        }
+        let old_cap = (*arr).capacity;
+        let new_cap = needed.max((old_cap.saturating_mul(2)).max(4));
+        if (*arr).is_byte_packed() {
+            let old_layout = byte_array_data_layout(old_cap);
+            let new_size = byte_array_data_layout(new_cap).size();
+            let new_data = if (*arr).data.is_null() {
+                std::alloc::alloc_zeroed(byte_array_data_layout(new_cap)) as *mut RuntimeValue
+            } else {
+                std::alloc::realloc((*arr).data as *mut u8, old_layout, new_size) as *mut RuntimeValue
+            };
+            if new_data.is_null() {
+                return false;
+            }
+            let new_tail_bytes = new_size - old_cap as usize;
+            if new_tail_bytes > 0 {
+                std::ptr::write_bytes((new_data as *mut u8).add(old_cap as usize), 0, new_tail_bytes);
+            }
+            note_array_data_swap((*arr).data, old_layout.size(), new_size);
+            (*arr).data = new_data;
+            (*arr).capacity = new_cap;
+            return true;
+        }
+        let old_layout = array_data_layout(old_cap);
+        let new_size = array_data_layout(new_cap).size();
+        let new_data = if (*arr).data.is_null() {
+            std::alloc::alloc_zeroed(array_data_layout(new_cap)) as *mut RuntimeValue
+        } else {
+            std::alloc::realloc((*arr).data as *mut u8, old_layout, new_size) as *mut RuntimeValue
+        };
+        if new_data.is_null() {
+            return false;
+        }
+        // Zero-init the newly grown tail so later reads of unwritten slots
+        // return NIL instead of leaked memory.
+        let old_len_bytes = old_cap as usize * std::mem::size_of::<RuntimeValue>();
+        let new_tail_bytes = new_size - old_len_bytes;
+        if new_tail_bytes > 0 {
+            std::ptr::write_bytes((new_data as *mut u8).add(old_len_bytes), 0, new_tail_bytes);
+        }
+        note_array_data_swap((*arr).data, old_layout.size(), new_size);
+        (*arr).data = new_data;
+        (*arr).capacity = new_cap;
+        true
+    }
+}
+
 /// Reclaim flat-parser scratch heap objects after conversion creates owned
 /// frontend values. Each parser thread owns at most one scope.
 extern "C" {
@@ -2681,15 +3225,34 @@ pub extern "C" fn rt_transient_array_scope_begin() -> bool {
         if slot.is_some() {
             return false;
         }
+        let Some(id) = next_transient_scope_identity(&TRANSIENT_HEAP_NEXT_ID) else {
+            return false;
+        };
         if unsafe { rt_transient_raw_scope_begin() } == 0 {
             return false;
         }
         *slot = Some(TransientHeapScope {
+            id,
             paused: false,
             objects: Vec::new(),
+            by_ptr: Default::default(),
+            indexed: 0,
+            index_ambiguous: false,
+            promoted: Default::default(),
         });
         true
     })
+}
+
+/// Test hook: force the ambiguous-index fallback on this thread's scope.
+#[cfg(test)]
+pub(crate) fn transient_scope_force_index_ambiguous() {
+    TRANSIENT_HEAP_SCOPE.with(|slot| {
+        if let Some(scope) = slot.borrow_mut().as_mut() {
+            scope.sync_index();
+            scope.index_ambiguous = true;
+        }
+    });
 }
 
 /// Read this thread's actual scope; no mutation, allocation or lease grant.
@@ -2699,6 +3262,41 @@ pub extern "C" fn rt_transient_array_scope_state_v1() -> i64 {
         None => 0,
         Some(scope) if scope.paused => 2,
         Some(_) => 1,
+    })
+}
+
+fn next_transient_scope_identity(counter: &std::sync::atomic::AtomicU32) -> Option<u32> {
+    use std::sync::atomic::Ordering as AtomicOrdering;
+    simple_common::atomic_update::update_u32(counter, AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |next| {
+        if next == 0 {
+            None
+        } else {
+            Some(next.checked_add(1).unwrap_or(0))
+        }
+    })
+    .ok()
+}
+
+/// Current-thread allocator identity; observing it never opens or claims a scope.
+#[no_mangle]
+pub extern "C" fn rt_transient_array_scope_identity_v1() -> i64 {
+    TRANSIENT_HEAP_SCOPE.with(|slot| slot.borrow().as_ref().map_or(0, |scope| i64::from(scope.id)))
+}
+
+/// Actual new-object owner, with disjoint signed domains; observation only.
+#[no_mangle]
+pub extern "C" fn rt_allocation_owner_identity_v1() -> i64 {
+    TRANSIENT_HEAP_SCOPE.with(|scope| {
+        let scope = scope.borrow();
+        let running = scope.as_ref().is_some_and(|scope| !scope.paused);
+        SESSION_HEAP.with(|session| {
+            if let Some(session) = session.borrow().as_ref() {
+                if allocation_uses_session_v1(session.alloc_depth, running) {
+                    return -i64::from(session.id);
+                }
+            }
+            if running { i64::from(scope.as_ref().unwrap().id) } else { 0 }
+        })
     })
 }
 
@@ -2856,34 +3454,37 @@ fn free_transient_heap(value: RuntimeValue) {
 /// Keep transient heap objects reachable from a retained graph when the scope ends.
 #[no_mangle]
 pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
-    // Rust twin of the C fix 3d407765f1e (runtime_native.c
-    // rt_transient_heap_promote): a registered heap object that is NOT owned
-    // by the current transient scope is already persistent, so promotion is
-    // a no-op success, not a failure. Without this, the stage-2 candidate's
-    // retained parse promotes the process-immortal parse-metadata arrays
-    // (UNSAFE_ANNOTATIONS / ENUM_ATTRIBUTES / ENUM_OPEN_REGIONS) and aborts
-    // the whole parse with "transient retained parser ownership failed"
-    // (0xC0000409 fail-fast). Implemented against the Rust heap registry:
-    // the C immortal registry is not linkable from this crate
-    // (runtime_native.c is not compiled into the Rust runtime).
-    // Only a root the current scope does NOT own may take this exit (the C
-    // twin gates it on rt_core_transient_classify == 0). Every heap object is
-    // registered, scope-owned ones included, so without the ownership check
-    // a scope-owned root (the retained parse Result<ParserModule>) skipped
-    // promotion, was freed at scope end with its raw payload, and stage 2
-    // crashed reading the dangling module in surface_build.
-    if value.is_heap() {
+    // Only persistent leaves can skip traversal. Persistent containers may
+    // acquire current-scope children without a write barrier. In particular,
+    // MIR builds its temporary owner-root arrays AFTER pausing the scope;
+    // skipping those roots frees their transient MirError records and turns a
+    // nonfatal warning into a corrupted fatal diagnostic (f07 Result/?).
+    // Keep the no-op contract for already-persistent immutable leaves, but
+    // always walk registered arrays/dicts/objects/enums/closures below.
+    if matches!(
+        value.heap_type(),
+        Some(HeapObjectType::String | HeapObjectType::Float | HeapObjectType::Int | HeapObjectType::UInt)
+    ) {
         let root_ptr = value.as_heap_ptr();
+        // Scope-owned registered roots are walked, never treated as persistent:
+        // doc/08_tracking/bug/stage2_hir_worker_layer_eq_registry_segv_2026-10-23.md
         let scope_owned = TRANSIENT_HEAP_SCOPE.with(|slot| {
-            slot.borrow().as_ref().is_some_and(|scope| {
-                scope
-                    .objects
-                    .iter()
-                    .any(|object| object.is_heap() && object.as_heap_ptr() == root_ptr)
-            })
+            slot.borrow_mut()
+                .as_mut()
+                .is_some_and(|scope| scope.owns_heap_ptr(root_ptr))
         });
         if !scope_owned && super::heap::is_registered_heap_ptr(root_ptr) {
-            return true;
+            // An unowned root can still hold scope-owned children: allocations
+            // made while the scope is paused are never tracked, so e.g. a
+            // fresh `Some(batch)` built in reverse_reference_module_seal_v1
+            // wraps a batch whose arrays the scope owns. Walk it whenever a
+            // paused scope exists and the root has walkable children;
+            // otherwise it is persistent and opaque, a valid no-op.
+            let paused_scope = TRANSIENT_HEAP_SCOPE
+                .with(|slot| slot.borrow().as_ref().is_some_and(|scope| scope.paused));
+            if !paused_scope || value.heap_type().is_none() {
+                return true;
+            }
         }
     }
     let mut root_words = std::ptr::null();
@@ -2903,15 +3504,29 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
         // below: they may own state this walk cannot understand.
         return true;
     }
+    // Cached once: an env lookup takes a lock and allocates, too costly per call.
+    static RAW_PROMOTE_DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let raw_debug = *RAW_PROMOTE_DEBUG.get_or_init(|| {
+        std::env::var_os("SIMPLE_TRANSIENT_RAW_PROMOTE_DEBUG").is_some_and(|v| v != "0")
+    });
     if !root_raw && value.heap_type().is_none() {
+        if raw_debug {
+            eprintln!("[raw-promote] false exit=unknown-heap-kind word={:#x} is_heap={} heap_type={:?}", value.0, value.is_heap(), value.heap_type());
+        }
         return false;
     }
     TRANSIENT_HEAP_SCOPE.with(|slot| {
         let mut slot = slot.borrow_mut();
         let Some(scope) = slot.as_mut() else {
+            if raw_debug {
+                eprintln!("[raw-promote] false exit=no-scope word={:#x}", value.0);
+            }
             return false;
         };
         if !scope.paused {
+            if raw_debug {
+                eprintln!("[raw-promote] false exit=not-paused word={:#x}", value.0);
+            }
             return false;
         }
 
@@ -2935,6 +3550,9 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
                 }
                 if word_count > 0 {
                     if words.is_null() {
+                        if raw_debug {
+                            eprintln!("[raw-promote] false exit=words-null current={:#x} canonical={:#x} count={}", current.0, canonical_ptr, word_count);
+                        }
                         return false;
                     }
                     let raw_words = unsafe { std::slice::from_raw_parts(words, word_count as usize) };
@@ -2954,10 +3572,30 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
         }
         for ptr in reachable_raw.iter() {
             if unsafe { rt_transient_raw_promote(*ptr) } == 0 {
+                if raw_debug {
+                    eprintln!("[raw-promote] false exit=promote-refused ptr={:#x} root_word={:#x} raw_len={}", ptr, value.0, reachable_raw.len());
+                }
                 return false;
             }
         }
-        scope.objects.retain(|object| !reachable_heap.contains(&object.0));
+        // BSM compatibility alias (design §4): with a live session, the
+        // module-owned nodes move to the SESSION instead of becoming
+        // permanent. The walk above stays FULL (no I2 pruning): legacy
+        // callers may still violate I1 (e8152c252ad unowned roots holding
+        // module-owned children). With no session this is unchanged.
+        if SESSION_HEAP.with(|slot| slot.borrow().is_some()) {
+            let mut released = Vec::new();
+            scope.release_reachable(&reachable_heap, Some(&mut released));
+            SESSION_HEAP.with(|slot| {
+                if let Some(session) = slot.borrow_mut().as_mut() {
+                    for value in released {
+                        session.adopt(value);
+                    }
+                }
+            });
+        } else {
+            scope.release_reachable(&reachable_heap, None);
+        }
         // Fully committed: record it for later calls in an open share window.
         TRANSIENT_PROMOTE_SHARE.with(|share| {
             if let Some(share) = share.borrow_mut().as_mut() {
@@ -3014,13 +3652,310 @@ pub extern "C" fn rt_transient_array_scope_end() -> bool {
     // A promotion share window never outlives its scope.
     TRANSIENT_PROMOTE_SHARE.with(|share| share.borrow_mut().take());
     let scope = TRANSIENT_HEAP_SCOPE.with(|slot| slot.borrow_mut().take());
-    let Some(scope) = scope else {
+    let Some(mut scope) = scope else {
         return false;
     };
-    for object in scope.objects {
-        free_transient_heap(object);
+    // The ONE deferred compaction (BSM P0): drop objects promoted while the
+    // index was ambiguous. The common path already tombstoned them to NIL.
+    if !scope.promoted.is_empty() {
+        let promoted = std::mem::take(&mut scope.promoted);
+        scope.objects.retain(|object| !promoted.contains(&object.0));
     }
-    unsafe { rt_transient_raw_scope_end() != 0 }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    let live_before = super::heap::rt_heap_live_bytes()
+        .saturating_add(super::heap::rt_heap_aux_live_bytes());
+    free_transient_objects(&scope.objects);
+    // Retire the scope's Vec/HashSets and the C raw scratch owner before
+    // returning unused allocator pages. Promoted/session roots remain live.
+    drop(scope);
+    let ended = unsafe { rt_transient_raw_scope_end() != 0 };
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if ended {
+        let live_after = super::heap::rt_heap_live_bytes()
+            .saturating_add(super::heap::rt_heap_aux_live_bytes());
+        // A coarse reclamation threshold avoids a process-wide libc sweep
+        // for tiny scratch scopes. These approximate process counters affect
+        // only this advisory optimization, never ownership or admission.
+        if live_before.saturating_sub(live_after) >= 16 * 1024 * 1024 {
+            unsafe { libc::malloc_trim(0); }
+        }
+    }
+    ended
+}
+
+/// Free every still-registered object in `objects` (module-scope end and
+/// `rt_session_heap_end`, BSM I4 — one sweep).
+fn free_transient_objects(objects: &[RuntimeValue]) {
+    // One shard lock per 64K of that shard's objects (see `unregister_heap_ptrs_batch`):
+    // the old per-object `free_transient_heap` took the registry mutex twice
+    // per object, and each erase bumped the free epoch, so the next object's
+    // validation always missed its cache and probed the process-wide set cold.
+    // Exactly the objects `free_transient_heap` would free are erased here;
+    // shared strings stay registered, as `rt_string_free` leaves them, and
+    // closures take the per-object path below so a pinned one is orphaned
+    // (`closure_pin_defer_free`) rather than freed.
+    let mut erased = Vec::with_capacity(objects.len());
+    let mut closures = Vec::new();
+    super::heap::unregister_heap_ptrs_batch(
+        objects,
+        |value, ptr| unsafe {
+            match (*ptr).object_type {
+                HeapObjectType::String => (*ptr).reserved & RT_STRING_FLAG_SHARED == 0,
+                HeapObjectType::Array | HeapObjectType::Tuple | HeapObjectType::Dict => true,
+                HeapObjectType::Object
+                | HeapObjectType::Enum
+                | HeapObjectType::Float
+                | HeapObjectType::UInt
+                | HeapObjectType::Int => std::alloc::Layout::from_size_align((*ptr).size as usize, 8).is_ok(),
+                HeapObjectType::Closure => {
+                    closures.push(value);
+                    false
+                }
+                _ => false,
+            }
+        },
+        &mut erased,
+    );
+    // Every erase is complete (all chunks) before the first free below.
+    for (ptr, kind) in erased {
+        unsafe { dealloc_erased_transient(ptr, kind) };
+    }
+    for closure in closures {
+        free_transient_heap(closure);
+    }
+}
+
+// ============================================================================
+// Build session heap (BSM T1) — design §3 I2-I4, §4. Twin of runtime_native.c.
+// ============================================================================
+
+fn module_scope_state() -> Option<bool> {
+    TRANSIENT_HEAP_SCOPE.with(|slot| slot.borrow().as_ref().map(|scope| scope.paused))
+}
+
+/// 0 on failure: a session is already live on this thread, a module scope is
+/// active on this thread, or the id space is exhausted.
+#[no_mangle]
+pub extern "C" fn rt_session_heap_begin() -> u32 {
+    if module_scope_state().is_some() {
+        return 0;
+    }
+    SESSION_HEAP.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_some() {
+            return 0;
+        }
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut id = SESSION_HEAP_NEXT_ID.load(Relaxed);
+        while id != 0 {
+            match SESSION_HEAP_NEXT_ID.compare_exchange_weak(id, id.wrapping_add(1), Relaxed, Relaxed) {
+                Ok(_) => break,
+                Err(current) => id = current,
+            }
+        }
+        if id == 0 {
+            return 0;
+        }
+        *slot = Some(SessionHeap { id, alloc_depth: 0, objects: Vec::new(), owned: Default::default() });
+        id
+    })
+}
+
+/// Frees every object the session still owns in ONE sweep (I4). Refused
+/// while a module scope is active on this thread or for a non-live id.
+#[no_mangle]
+pub extern "C" fn rt_session_heap_end(session: u32) -> bool {
+    if session == 0 || module_scope_state().is_some() {
+        return false;
+    }
+    let taken = SESSION_HEAP.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_some_and(|live| live.id == session) {
+            slot.take()
+        } else {
+            None
+        }
+    });
+    let Some(heap) = taken else {
+        return false;
+    };
+    // An entry `rt_array_free` already freed was erased from `owned`
+    // (`transient_untrack_freed`); its address may now belong to an object
+    // this session does not own.
+    let mut heap = heap;
+    let owned = std::mem::take(&mut heap.owned);
+    heap.objects
+        .retain(|object| object.is_heap() && owned.contains(&(object.as_heap_ptr() as usize)));
+    drop(owned);
+    free_transient_objects(&heap.objects);
+    // Release the session's own Vec/HashSet allocations before asking libc to
+    // return unused arena pages. The TLS borrow and object registry locks are
+    // already released; no live object ownership changes at this boundary.
+    drop(heap);
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        // The native-all runtime uses Rust's system allocator. Other global
+        // allocators may not use glibc; trimming then remains harmless/advisory.
+        libc::malloc_trim(0);
+    }
+    true
+}
+
+/// Depth-counted: while > 0, new objects belong to the session even inside a
+/// running module scope (I3: session containers grow under the session).
+#[no_mangle]
+pub extern "C" fn rt_session_alloc_begin() -> bool {
+    SESSION_HEAP.with(|slot| match slot.borrow_mut().as_mut() {
+        Some(session) if session.alloc_depth < i32::MAX => {
+            session.alloc_depth += 1;
+            true
+        }
+        _ => false,
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_session_alloc_end() -> bool {
+    SESSION_HEAP.with(|slot| match slot.borrow_mut().as_mut() {
+        Some(session) if session.alloc_depth > 0 => {
+            session.alloc_depth -= 1;
+            true
+        }
+        _ => false,
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_session_heap_id() -> u32 {
+    SESSION_HEAP.with(|slot| slot.borrow().as_ref().map_or(0, |session| session.id))
+}
+
+/// Move the module-owned part of `value`'s graph to the live session: nodes
+/// the ACTIVE paused module scope owns leave its list and join the session;
+/// the walk stops at any node the module scope does not own (I2), so the cost
+/// is O(nodes the module allocated), never O(session). Root rules as in
+/// `rt_transient_heap_promote`: scalars and registered non-module roots are a
+/// no-op success. Raw struct blocks are always walked (their ownership is not
+/// visible here) and promoted to permanent, as promote does — v1 sessions do
+/// not own raw blocks. False without a live session or a paused module scope.
+#[no_mangle]
+pub extern "C" fn rt_transient_heap_adopt(value: RuntimeValue) -> bool {
+    SESSION_ADOPT_VISITS.with(|visits| visits.set(0));
+    if rt_session_heap_id() == 0 || module_scope_state() != Some(true) {
+        return false;
+    }
+    let mut root_words = std::ptr::null();
+    let mut root_ptr = 0usize;
+    let root_raw = unsafe { rt_transient_raw_words(value.0 as i64, &mut root_words, &mut root_ptr) >= 0 };
+    if !root_raw && !value.is_heap() {
+        return true;
+    }
+    if !root_raw && value.heap_type().is_none() {
+        return false;
+    }
+    let mut visits = 0u64;
+    let mut moved = super::heap::HeapPtrSet::<u64>::default();
+    let mut reachable_raw = super::heap::HeapPtrSet::<usize>::default();
+    let ok = TRANSIENT_HEAP_SCOPE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(scope) = slot.as_mut() else {
+            return false;
+        };
+        let mut pending = vec![value];
+        while let Some(current) = pending.pop() {
+            let mut words = std::ptr::null();
+            let mut canonical_ptr = 0usize;
+            let word_count = unsafe { rt_transient_raw_words(current.0 as i64, &mut words, &mut canonical_ptr) };
+            if word_count >= 0 {
+                visits += 1;
+                if !reachable_raw.insert(canonical_ptr) {
+                    continue;
+                }
+                if word_count > 0 {
+                    if words.is_null() {
+                        return false;
+                    }
+                    let raw_words = unsafe { std::slice::from_raw_parts(words, word_count as usize) };
+                    pending.extend(raw_words.iter().map(|word| RuntimeValue(*word as u64)));
+                }
+                continue;
+            }
+            if !current.is_heap() || current.heap_type().is_none() {
+                continue;
+            }
+            visits += 1;
+            if !scope.owns_heap_ptr(current.as_heap_ptr()) {
+                continue; // I2 prune: session-owned, permanent or foreign
+            }
+            if !moved.insert(current.0) {
+                continue;
+            }
+            if let Some(children) = transient_heap_children(current) {
+                pending.extend(children);
+            }
+        }
+        for ptr in reachable_raw.iter() {
+            if unsafe { rt_transient_raw_promote(*ptr) } == 0 {
+                return false;
+            }
+        }
+        let mut released = Vec::with_capacity(moved.len());
+        scope.release_reachable(&moved, Some(&mut released));
+        SESSION_HEAP.with(|slot| {
+            if let Some(session) = slot.borrow_mut().as_mut() {
+                for value in released {
+                    session.adopt(value);
+                }
+            }
+        });
+        true
+    });
+    SESSION_ADOPT_VISITS.with(|cell| cell.set(visits));
+    ok
+}
+
+/// Release the memory of a heap object this thread just erased from the
+/// registry. Mirrors the deallocation half of `rt_string_free`,
+/// `rt_array_free`, `rt_tuple_free`, `rt_dict_free` and the generic arm of
+/// `free_transient_heap`; keep them in step.
+unsafe fn dealloc_erased_transient(ptr: *mut HeapHeader, kind: HeapObjectType) {
+    match kind {
+        HeapObjectType::String => {
+            let len = (*(ptr as *mut RuntimeString)).len;
+            let size = std::mem::size_of::<RuntimeString>() + len as usize;
+            std::alloc::dealloc(ptr as *mut u8, std::alloc::Layout::from_size_align(size, 8).unwrap());
+        }
+        HeapObjectType::Array => {
+            let array = ptr as *mut RuntimeArray;
+            if !(*array).data.is_null() {
+                let data_layout = if (*array).is_byte_packed() {
+                    byte_array_data_layout((*array).capacity)
+                } else {
+                    array_data_layout((*array).capacity)
+                };
+                note_aux_free(HeapObjectType::Array as u8, data_layout.size() as u64);
+                std::alloc::dealloc((*array).data as *mut u8, data_layout);
+            }
+            let layout = std::alloc::Layout::from_size_align(std::mem::size_of::<RuntimeArray>(), 8).unwrap();
+            std::alloc::dealloc(ptr as *mut u8, layout);
+        }
+        HeapObjectType::Tuple => {
+            let len = (*(ptr as *mut RuntimeTuple)).len;
+            let size = std::mem::size_of::<RuntimeTuple>() + len as usize * std::mem::size_of::<RuntimeValue>();
+            std::alloc::dealloc(ptr as *mut u8, std::alloc::Layout::from_size_align(size, 8).unwrap());
+        }
+        HeapObjectType::Dict => {
+            let dict = ptr as *mut RuntimeDict;
+            super::dict::dict_free_slots((*dict).data, (*dict).capacity);
+            let layout = std::alloc::Layout::from_size_align(std::mem::size_of::<RuntimeDict>(), 8).unwrap();
+            std::alloc::dealloc(ptr as *mut u8, layout);
+        }
+        _ => {
+            // Object/Enum/Float/UInt/Int: layout validity was checked before erasing.
+            let layout = std::alloc::Layout::from_size_align((*ptr).size as usize, 8).unwrap();
+            std::alloc::dealloc(ptr as *mut u8, layout);
+        }
+    }
 }
 
 /// Create an array from a slice of RuntimeValues
@@ -3050,6 +3985,31 @@ pub fn rt_array_create_from_slice(values: &[RuntimeValue]) -> RuntimeValue {
 #[allow(clippy::unused_unit)]
 pub extern "C" fn rt_array_free(array: RuntimeValue) {
     let ptr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, ());
+    if super::heap::array_free_quarantine_enabled() {
+        // Diagnostic mode: unregister and poison, never return the memory, so
+        // the address cannot be reused and every later use is a registry miss
+        // that aborts (`array_free_quarantine_check`).
+        unsafe {
+            if !(*ptr).data.is_null() {
+                let data_layout = if (*ptr).is_byte_packed() {
+                    byte_array_data_layout((*ptr).capacity)
+                } else {
+                    array_data_layout((*ptr).capacity)
+                };
+                note_aux_free(HeapObjectType::Array as u8, data_layout.size() as u64);
+            }
+            super::heap::array_free_quarantine_add(ptr as usize);
+            unregister_heap_ptr(ptr as *mut HeapHeader);
+            // Inlined JIT accessors skip the registry: give them a length
+            // every index passes and a null buffer, so a stale element read
+            // or write faults (SIGSEGV) instead of yielding a default. A
+            // stale `len()` reads i64::MAX.
+            (*ptr).len = i64::MAX as u64;
+            (*ptr).capacity = 0;
+            (*ptr).data = std::ptr::null_mut();
+        }
+        return;
+    }
     unsafe {
         if !(*ptr).data.is_null() {
             let data_layout = if (*ptr).is_byte_packed() {
@@ -3466,7 +4426,9 @@ pub extern "C" fn rt_string_len(string: RuntimeValue) -> i64 {
 pub extern "C" fn rt_len(value: RuntimeValue) -> i64 {
     match value.heap_type() {
         Some(HeapObjectType::Array) => rt_array_len(value),
-        Some(HeapObjectType::String) => rt_string_len(value),
+        // User-facing `.len()` on text counts code points (ADR-005 item 5);
+        // the byte length is `rt_string_len` / `byte_len()`.
+        Some(HeapObjectType::String) => rt_string_char_count(value),
         Some(HeapObjectType::Tuple) => rt_tuple_len(value),
         Some(HeapObjectType::Dict) => super::dict::rt_dict_len(value),
         _ => -1,
@@ -3554,6 +4516,11 @@ pub extern "C" fn rt_any_add(left: RuntimeValue, right: RuntimeValue) -> Runtime
         || matches!(right.heap_type(), Some(HeapObjectType::String))
     {
         return rt_string_concat(rt_to_string(left), rt_to_string(right));
+    }
+    // Float lane, as in rt_any_sub/mul/div: without it two tagged floats
+    // were added as integers (their shifted heap pointers).
+    if any_binop_is_float(left, right) {
+        return RuntimeValue::from_float(any_as_f64(left) + any_as_f64(right));
     }
 
     RuntimeValue::from_int(left.as_int() + right.as_int())
@@ -3807,14 +4774,119 @@ fn new_string(s: &str) -> RuntimeValue {
     rt_string_new(s.as_ptr(), s.len() as u64)
 }
 
-/// `char_count`: number of Unicode scalar values, as opposed to `len`, which is
-/// the BYTE count. Returns -1 for a non-text receiver, matching `rt_string_len`
-/// and `rt_len`.
+/// Code-point count of UTF-8 `bytes` (ADR-005 item 5). ASCII fast path:
+/// `is_ascii` is a word-at-a-time scan, so ASCII text costs one pass and no
+/// decode; non-ASCII text counts the non-continuation bytes.
+#[inline]
+pub(crate) fn text_cp_len_bytes(bytes: &[u8]) -> usize {
+    if bytes.is_ascii() {
+        return bytes.len();
+    }
+    bytes.iter().filter(|b| (**b & 0xC0) != 0x80).count()
+}
+
+/// Byte offset of code-point index `cp` in `bytes`; `bytes.len()` past the end.
+#[inline]
+pub(crate) fn text_cp_to_byte(bytes: &[u8], cp: usize) -> usize {
+    if bytes.is_ascii() {
+        return cp.min(bytes.len());
+    }
+    let mut seen = 0usize;
+    for (i, b) in bytes.iter().enumerate() {
+        if (*b & 0xC0) != 0x80 {
+            if seen == cp {
+                return i;
+            }
+            seen += 1;
+        }
+    }
+    bytes.len()
+}
+
+/// Memoized ASCII test for a heap text value: `RT_STRING_FLAG_ASCII` is set the
+/// first time a scan proves the bytes are ASCII (heap text is immutable, so it
+/// never goes stale), making every later `len()` / slice / find on ASCII text
+/// O(1) again instead of a rescan. Shared with `rt_string_char_code_at`.
+///
+/// The header `reserved` flag word is shared by every thread holding the
+/// string, so the memo bit is read and set with atomics (lockless; a plain
+/// `|=` is a read-modify-write that can drop a bit set concurrently).
+#[inline]
+pub(crate) unsafe fn header_flag_is_set(hdr: *mut HeapHeader, flag: u16) -> bool {
+    let cell = &*(std::ptr::addr_of!((*hdr).reserved) as *const std::sync::atomic::AtomicU16);
+    cell.load(std::sync::atomic::Ordering::Relaxed) & flag != 0
+}
+
+#[inline]
+pub(crate) unsafe fn header_flag_set(hdr: *mut HeapHeader, flag: u16) {
+    let cell = &*(std::ptr::addr_of!((*hdr).reserved) as *const std::sync::atomic::AtomicU16);
+    cell.fetch_or(flag, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[inline]
+pub(crate) fn text_is_ascii_memo(string: RuntimeValue, bytes: &[u8]) -> bool {
+    let hdr = string.as_heap_ptr();
+    unsafe {
+        if !hdr.is_null() && header_flag_is_set(hdr, RT_STRING_FLAG_ASCII) {
+            return true;
+        }
+        if bytes.is_ascii() {
+            if !hdr.is_null() {
+                header_flag_set(hdr, RT_STRING_FLAG_ASCII);
+            }
+            return true;
+        }
+    }
+    false
+}
+
+#[inline]
+pub(crate) fn text_cp_len_memo(string: RuntimeValue, bytes: &[u8]) -> usize {
+    if text_is_ascii_memo(string, bytes) {
+        return bytes.len();
+    }
+    bytes.iter().filter(|b| (**b & 0xC0) != 0x80).count()
+}
+
+/// User-facing text length (ADR-005 item 5): number of Unicode scalar values.
+/// `len()`, `char_count()`, the `s[i]` bound and `rt_len`'s text arm all route
+/// here; `rt_string_len` stays the BYTE primitive (`byte_len()`, the
+/// `(data, len)` text extern ABI, every internal caller). Returns -1 for a
+/// non-text receiver, matching `rt_string_len` and `rt_len`.
 #[no_mangle]
 pub extern "C" fn rt_string_char_count(string: RuntimeValue) -> i64 {
-    match string_as_str(string) {
-        Some(s) => s.chars().count() as i64,
-        None => -1,
+    let len = rt_string_len(string);
+    if len < 0 {
+        return -1;
+    }
+    let data = rt_string_data(string);
+    if len == 0 || data.is_null() {
+        return 0;
+    }
+    // Count lead bytes on the RAW bytes, like the C runtime's
+    // `spl_core_string_cp_len`: a byte-offset `substring`/`slice` that cuts
+    // inside a code point yields text that is not valid UTF-8, and its
+    // `len()` must not be the -1 "not text" answer.
+    let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
+    text_cp_len_memo(string, bytes) as i64
+}
+
+/// `to_digit` on a one-character text (ADR-005): `Some(0..=9)` for an ASCII
+/// decimal digit, `None` for anything else (non-digit, empty, multi-character,
+/// non-text). Twin of the interpreter arm in interpreter_method/string.rs; it is
+/// never a silent 0.
+#[no_mangle]
+pub extern "C" fn rt_string_to_digit(string: RuntimeValue) -> RuntimeValue {
+    let Some(s) = string_as_str(string) else {
+        return rt_option_none();
+    };
+    let mut chars = s.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => match c.to_digit(10) {
+            Some(d) => rt_option_some(RuntimeValue::from_int(d as i64)),
+            None => rt_option_none(),
+        },
+        _ => rt_option_none(),
     }
 }
 
@@ -4692,6 +5764,61 @@ pub extern "C" fn rt_text_cmp_any(string1: RuntimeValue, string2: RuntimeValue) 
     }
 }
 
+/// JIT-resolvable backing for `rt_text_eq_any` (bug
+/// jit_silent_interpreter_fallback_on_unresolved_extern_2026_11_03).
+/// MIR lowering emits this for text `==`/`!=`; before this existed the JIT
+/// had no symbol for it and dropped the whole module to the interpreter.
+/// Rust twin of runtime_native.c `rt_text_eq_any`: nil sentinel aware, tagged
+/// strings compared by content, a raw aligned C-string pointer is accepted
+/// (`rt_interp_cstr` semantics). Any other word (int/float/special) is never
+/// equal to text. Returns 1 if equal, else 0.
+#[no_mangle]
+pub extern "C" fn rt_text_eq_any(left: RuntimeValue, right: RuntimeValue) -> i64 {
+    if left.is_nil() || right.is_nil() {
+        return i64::from(left.to_raw() == right.to_raw());
+    }
+    unsafe fn bytes_of<'a>(v: RuntimeValue) -> Option<&'a [u8]> {
+        let len = rt_string_len(v);
+        if len >= 0 {
+            let data = rt_string_data(v);
+            if data.is_null() {
+                return None;
+            }
+            return Some(std::slice::from_raw_parts(data, len as usize));
+        }
+        let raw = v.to_raw();
+        if raw & 0x7 != 0 || raw < 0x10000 {
+            return None;
+        }
+        Some(std::ffi::CStr::from_ptr(raw as usize as *const std::ffi::c_char).to_bytes())
+    }
+    unsafe {
+        match (bytes_of(left), bytes_of(right)) {
+            (Some(a), Some(b)) => i64::from(a == b),
+            _ => 0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod text_eq_any_tests {
+    use super::*;
+
+    fn s(t: &str) -> RuntimeValue {
+        rt_string_new(t.as_ptr(), t.len() as u64)
+    }
+
+    #[test]
+    fn compares_content_nil_and_non_text() {
+        assert_eq!(rt_text_eq_any(s("abc"), s("abc")), 1);
+        assert_eq!(rt_text_eq_any(s("abc"), s("abd")), 0);
+        assert_eq!(rt_text_eq_any(s(""), s("")), 1);
+        assert_eq!(rt_text_eq_any(RuntimeValue::NIL, RuntimeValue::NIL), 1);
+        assert_eq!(rt_text_eq_any(s("abc"), RuntimeValue::NIL), 0);
+        assert_eq!(rt_text_eq_any(s("abc"), RuntimeValue::from_int(5)), 0);
+    }
+}
+
 /// Get a single character from a string at the given index.
 /// Returns the character as a new single-character string (RuntimeValue).
 /// Returns nil (TAG_SPECIAL 3) if index is out of bounds.
@@ -4814,7 +5941,7 @@ pub extern "C" fn rt_string_char_code_at(string: RuntimeValue, index: i64) -> i6
         let idx = index as usize;
 
         let hdr = string.as_heap_ptr();
-        if !hdr.is_null() && (*hdr).reserved & RT_STRING_FLAG_ASCII != 0 {
+        if !hdr.is_null() && header_flag_is_set(hdr, RT_STRING_FLAG_ASCII) {
             return bytes[idx] as i64;
         }
 
@@ -4822,7 +5949,7 @@ pub extern "C" fn rt_string_char_code_at(string: RuntimeValue, index: i64) -> i6
         if first_hi == bytes.len() {
             // Whole string is ASCII: character index == byte index, permanently.
             if !hdr.is_null() {
-                (*hdr).reserved |= RT_STRING_FLAG_ASCII;
+                header_flag_set(hdr, RT_STRING_FLAG_ASCII);
             }
             return bytes[idx] as i64;
         }
@@ -4907,12 +6034,6 @@ pub extern "C" fn rt_text_find(haystack: RuntimeValue, needle: RuntimeValue, sta
     if needle_len < 0 || hay_len < 0 {
         return -1;
     }
-    if needle_len == 0 {
-        return start.min(hay_len);
-    }
-    if start >= hay_len || needle_len > hay_len {
-        return -1;
-    }
     let hay_ptr = rt_string_data(haystack);
     let needle_ptr = rt_string_data(needle);
     if hay_ptr.is_null() || needle_ptr.is_null() {
@@ -4922,6 +6043,15 @@ pub extern "C" fn rt_text_find(haystack: RuntimeValue, needle: RuntimeValue, sta
     unsafe {
         let hay = std::slice::from_raw_parts(hay_ptr, hay_len as usize);
         let needle_bytes = std::slice::from_raw_parts(needle_ptr, needle_len as usize);
+        // `start` and the answer are BYTE offsets (owner decision 2026-11-07,
+        // ADR-005 "Staging"): `index_of` is in the named byte family with
+        // `byte_at`/`substring`, bounded by `byte_len()`.
+        if needle_len == 0 {
+            return start.min(hay_len);
+        }
+        if start >= hay_len || needle_len > hay_len {
+            return -1;
+        }
         (collection_providers().byte_find)(hay, needle_bytes, start as usize)
             .map(|idx| idx as i64)
             .unwrap_or(-1)
@@ -5007,10 +6137,18 @@ pub extern "C" fn rt_string_split_limit(string: RuntimeValue, delimiter: Runtime
             return result;
         }
         if d.is_empty() {
+            // Codepoint units, matching the interpreter's bounded arm
+            // (interpreter_method/string.rs "split"): the first `limit - 1`
+            // characters, then the remainder. Slicing single bytes here
+            // panicked on multibyte text inside this `extern "C"` fn and
+            // aborted the process.
             let mut start = 0usize;
-            while start < s.len() && (start as i64) < limit - 1 {
-                let end = start + 1;
-                rt_array_push(result, rt_string_new(s[start..end].as_ptr(), 1));
+            for (taken, ch) in s.chars().enumerate() {
+                if taken as i64 >= limit - 1 {
+                    break;
+                }
+                let end = start + ch.len_utf8();
+                rt_array_push(result, rt_string_new(s[start..end].as_ptr(), (end - start) as u64));
                 start = end;
             }
             rt_array_push(result, rt_string_new(s[start..].as_ptr(), (s.len() - start) as u64));
@@ -5342,6 +6480,18 @@ pub extern "C" fn rt_string_to_lower(string: RuntimeValue) -> RuntimeValue {
 }
 
 /// Convert a string to an integer, returns 0 on failure
+///
+/// Single-character fallback: `for ch in text` yields one-character strings,
+/// and the interpreter arm (`interpreter_method/string.rs`,
+/// `"to_int" | "to_i64" | "to_i32" | "to_i16" | "to_i8"`, fixed 2026-08-26 in
+/// 8d100a8aa81) returns that character's CODEPOINT when the parse fails. This
+/// runtime entry is what the JIT/native lanes dispatch for the same methods,
+/// so it must answer identically — before this fallback every
+/// `ch.to_i32()`-per-character checksum folded 0 for every non-digit character
+/// under the default (JIT) execution mode while the interpreter folded the
+/// codepoint. Multi-character non-numeric text still yields 0, exactly as the
+/// interpreter. Bug row:
+/// jit_to_i32_returns_zero_and_leaks_mistagged_value_2026-08-26.md
 #[no_mangle]
 pub extern "C" fn rt_string_to_int(string: RuntimeValue) -> i64 {
     let len = rt_string_len(string);
@@ -5351,7 +6501,16 @@ pub extern "C" fn rt_string_to_int(string: RuntimeValue) -> i64 {
     let data = rt_string_data(string);
     unsafe {
         let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize));
-        s.trim().parse::<i64>().unwrap_or(0)
+        match s.trim().parse::<i64>() {
+            Ok(n) => n,
+            Err(_) => {
+                let mut chars = s.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(only), None) => only as i64,
+                    _ => 0,
+                }
+            }
+        }
     }
 }
 
@@ -5399,6 +6558,22 @@ pub extern "C" fn rt_any_to_int(value: RuntimeValue) -> i64 {
         return value.as_float() as i64;
     }
     crate::value::sffi::value_ops::rt_value_unbox_int(value)
+}
+
+/// `v as <int>` with `v: any` (MIR `lower_cast_expr`). Same as
+/// `rt_any_to_int` except TEXT, which takes the CAST contract of
+/// `rt_value_as_int` (one code point -> that code point, longer text ->
+/// lenient parse) instead of the `.to_i64()` parse: `s.char_at(i) as i64`
+/// lands here because `char_at` has no static return type, and the parse
+/// turned every ASCII digit into its numeric value under the JIT.
+/// doc/08_tracking/bug/char_at_as_i64_parses_digit_jit_ppm_header_2026-11-23.md
+/// Twin: `src/runtime/runtime_native.c`.
+#[no_mangle]
+pub extern "C" fn rt_any_cast_int(value: RuntimeValue) -> i64 {
+    if value.heap_type() == Some(HeapObjectType::String) {
+        return crate::value::sffi::value_ops::rt_value_as_int(value);
+    }
+    rt_any_to_int(value)
 }
 
 /// Task #118 canonical `int(text)` semantics: a TOTAL, non-erroring,
@@ -5539,16 +6714,14 @@ pub extern "C" fn rt_string_find(string: RuntimeValue, needle: RuntimeValue) -> 
     unsafe {
         let haystack = std::slice::from_raw_parts(str_data, str_len as usize);
         let needle_bytes = std::slice::from_raw_parts(needle_data, needle_len as usize);
-        if needle_bytes.len() == 1 {
-            return haystack
-                .iter()
-                .position(|byte| *byte == needle_bytes[0])
-                .map(|idx| idx as i64)
-                .unwrap_or(-1);
-        }
-        (collection_providers().byte_find)(haystack, needle_bytes, 0)
-            .map(|idx| idx as i64)
-            .unwrap_or(-1)
+        // The answer is a BYTE offset (owner decision 2026-11-07), so it
+        // composes with `byte_len()` / `byte_at` / `substring`.
+        let found = if needle_bytes.len() == 1 {
+            haystack.iter().position(|byte| *byte == needle_bytes[0])
+        } else {
+            (collection_providers().byte_find)(haystack, needle_bytes, 0)
+        };
+        found.map(|idx| idx as i64).unwrap_or(-1)
     }
 }
 
@@ -5586,16 +6759,13 @@ pub extern "C" fn rt_string_rfind(string: RuntimeValue, needle: RuntimeValue) ->
     unsafe {
         let haystack = std::slice::from_raw_parts(str_data, str_len as usize);
         let needle_bytes = std::slice::from_raw_parts(needle_data, needle_len as usize);
-        if needle_bytes.len() == 1 {
-            return haystack
-                .iter()
-                .rposition(|byte| *byte == needle_bytes[0])
-                .map(|idx| idx as i64)
-                .unwrap_or(-1);
-        }
-        (collection_providers().byte_rfind)(haystack, needle_bytes)
-            .map(|idx| idx as i64)
-            .unwrap_or(-1)
+        // BYTE offset, like `index_of`/`find`.
+        let found = if needle_bytes.len() == 1 {
+            haystack.iter().rposition(|byte| *byte == needle_bytes[0])
+        } else {
+            (collection_providers().byte_rfind)(haystack, needle_bytes)
+        };
+        found.map(|idx| idx as i64).unwrap_or(-1)
     }
 }
 
@@ -5785,14 +6955,63 @@ pub extern "C" fn rt_index_get(collection: RuntimeValue, index: RuntimeValue) ->
             _ => RuntimeValue::NIL,
         },
         Some(HeapObjectType::String) => {
-            // String indexing returns a single-char string (consistent with char_at)
+            // `s[i]` (ADR-005): per code point, negative from the end, and an
+            // out-of-range index is a runtime error, matching the interpreter
+            // (`indexed_string_char`). It used to return "" / nil through
+            // rt_string_char_at, so the JIT ran on where the interpreter stopped.
+            // `char_at` keeps its own "" over-run policy.
             match index.as_index_i64() {
-                Some(idx) => rt_string_char_at(collection, idx),
+                Some(idx) => match string_index_checked(collection, idx) {
+                    Some(v) => v,
+                    None => {
+                        let msg = format!("error: string index {idx} out of bounds");
+                        unsafe { super::sffi::contracts::rt_panic(msg.as_ptr(), msg.len() as u64) };
+                        std::process::abort();
+                    }
+                },
                 None => RuntimeValue::NIL,
             }
         }
         Some(HeapObjectType::Dict) => super::dict::rt_dict_get(collection, index),
         _ => RuntimeValue::NIL,
+    }
+}
+
+/// `.get(i)` method entry: receiver-dispatched like `rt_at`. An ARRAY
+/// receiver answers a real `Option` (`Some(elem)` in range, `None` for a
+/// negative or past-the-end index), per the owner decision that `a.get(i)`
+/// returns `T?` on every lane while `a[i]` stays the direct form
+/// (doc/08_tracking/bug/array_get_contract_drift_crypto_2026-10-18.md).
+/// Every other receiver keeps `rt_index_get`'s answer, so dict/tuple/text
+/// `.get` is unchanged. The index arrives as a tagged RuntimeValue, exactly
+/// as for `rt_index_get`, so the codegen boxing rules are shared.
+#[no_mangle]
+pub extern "C" fn rt_get(collection: RuntimeValue, index: RuntimeValue) -> RuntimeValue {
+    if collection.heap_type() == Some(HeapObjectType::Array) {
+        return match index.as_index_i64() {
+            Some(idx) => rt_array_at(collection, idx),
+            None => rt_option_none(),
+        };
+    }
+    rt_index_get(collection, index)
+}
+
+#[cfg(test)]
+mod rt_get_optional_tests {
+    use super::*;
+    use crate::value::objects::{rt_enum_payload, rt_is_none};
+
+    #[test]
+    fn array_get_is_optional() {
+        let arr = rt_array_new(4);
+        rt_array_push(arr, RuntimeValue::from_int(10));
+        rt_array_push(arr, RuntimeValue::from_int(20));
+        let hit = rt_get(arr, RuntimeValue::from_int(1));
+        assert!(!rt_is_none(hit));
+        assert_eq!(rt_enum_payload(hit), RuntimeValue::from_int(20));
+        assert!(rt_is_none(rt_get(arr, RuntimeValue::from_int(2))));
+        assert!(rt_is_none(rt_get(arr, RuntimeValue::from_int(-1))));
+        assert!(rt_is_none(rt_get(arr, RuntimeValue::NIL)));
     }
 }
 
@@ -5921,7 +7140,14 @@ pub extern "C" fn rt_slice(collection: RuntimeValue, start: i64, end: i64, step:
                 return RuntimeValue::NIL;
             };
             unsafe {
-                let len = (*str_ptr).len as i64;
+                let byte_len = (*str_ptr).len as i64;
+                let data = str_ptr.add(1) as *const u8;
+                let src = std::slice::from_raw_parts(data, byte_len as usize);
+                // Indices are CODE POINTS (ADR-005 item 5), the unit `len()`,
+                // `s[i]` and `index_of` use. ASCII text (one word-wise scan)
+                // keeps byte == code point, so the copy below is unchanged.
+                let ascii = text_is_ascii_memo(collection, src);
+                let len = if ascii { byte_len } else { text_cp_len_bytes(src) as i64 };
                 let start = normalize_index(start, len).max(0).min(len);
                 let end = normalize_index(end, len).max(0).min(len);
 
@@ -5935,7 +7161,15 @@ pub extern "C" fn rt_slice(collection: RuntimeValue, start: i64, end: i64, step:
                     return collection;
                 }
 
-                let data = str_ptr.add(1) as *const u8;
+                let (start, end, len) = if ascii {
+                    (start, end, byte_len)
+                } else {
+                    (
+                        text_cp_to_byte(src, start as usize) as i64,
+                        text_cp_to_byte(src, end as usize) as i64,
+                        byte_len,
+                    )
+                };
 
                 // UTF-8 slice audit, stage 1 (COUNTING ONLY, default off).
                 // This range is copied RAW, so a boundary that falls inside a
@@ -5957,6 +7191,50 @@ pub extern "C" fn rt_slice(collection: RuntimeValue, start: i64, end: i64, step:
             }
         }
         _ => RuntimeValue::NIL,
+    }
+}
+
+/// `.slice(a, b)` / `.substring(a, b)` METHOD entry: same ABI as `rt_slice`,
+/// but a text receiver is cut at BYTE offsets clamped to `0..=byte_len()`
+/// (owner decision 2026-11-07; ADR-005 "Staging";
+/// doc/05_design/language/text/text_len_counts_characters_2026-11-07.md).
+/// `rt_slice` itself serves the `s[a:b]` operator and stays code-point indexed.
+/// A range that splits a multi-byte code point is copied RAW, like
+/// `spl_str_slice` in the C runtime: no snapping and no U+FFFD. Every other
+/// receiver (array, tuple) is `rt_slice`.
+#[no_mangle]
+pub extern "C" fn rt_slice_text_bytes(collection: RuntimeValue, start: i64, end: i64, step: i64) -> RuntimeValue {
+    let Some(str_ptr) = get_typed_ptr::<RuntimeString>(collection, HeapObjectType::String) else {
+        return rt_slice(collection, start, end, step);
+    };
+    if step < 1 {
+        // Zero / negative step keep `rt_slice`'s own nil / hard-error policy.
+        return rt_slice(collection, start, end, step);
+    }
+    unsafe {
+        let len = (*str_ptr).len as i64;
+        let end = end.max(0).min(len);
+        let start = start.max(0).min(end);
+        if step != 1 || start >= end {
+            return rt_string_new(std::ptr::null(), 0);
+        }
+        // Identity fast path, as in `rt_slice`.
+        if start == 0 && end == len {
+            return collection;
+        }
+        let data = str_ptr.add(1) as *const u8;
+        // UTF-8 slice audit, stage 1 (COUNTING ONLY, default off).
+        if crate::text_slice_audit::enabled() {
+            let src = std::slice::from_raw_parts(data, len as usize);
+            crate::text_slice_audit::note(
+                crate::text_slice_audit::site::RT_SLICE_RUST,
+                start,
+                end,
+                src,
+                &src[start as usize..end as usize],
+            );
+        }
+        rt_string_new(data.add(start as usize), (end - start) as u64)
     }
 }
 
@@ -6324,9 +7602,8 @@ pub extern "C" fn rt_array_map(array: RuntimeValue, closure: RuntimeValue) -> Ru
 /// already routed `("Array", "map")` to `rt_array_map` and is left untouched.
 ///
 /// Option behaviour is intentionally unchanged: a non-array receiver still goes
-/// to `rt_option_map` and keeps its exact previous result, including the `Some`
-/// wrap and the None/nil pass-through. Only the array receiver — which had no
-/// correct implementation on these two lanes — changes.
+/// to `rt_option_map`, including its `Some` wrap and None/nil pass-through.
+/// Result receivers preserve `Err` and wrap mapped payloads in `Ok`.
 #[no_mangle]
 pub extern "C" fn rt_map(receiver: RuntimeValue, closure: RuntimeValue) -> RuntimeValue {
     if get_typed_ptr_packed::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
@@ -7309,6 +8586,60 @@ fn write_span_fail(message: &str) -> ! {
     std::process::exit(1);
 }
 
+/// Bulk in-place VOLATILE fill: dst[dst_off..dst_off+count] = value.
+///
+/// JIT/native counterpart of the interpreter's `arr.fill_span(dst_off, count,
+/// value)` mutating method (interpreter_method/collections.rs
+/// `byte_array_fill_span` / `array_fill_span`), the compiler-owned byte
+/// write the secure-memory owner uses instead of handing raw data pointers
+/// to Simple code (doc/08_tracking/bug/secure_memory_interpreter_raw_pointer_aliasing_2026-08-24.md).
+/// Every store is `write_volatile` and the fill ends with a SeqCst fence, so a
+/// secret wipe through it is never elided or reordered past the call.
+///
+/// Contract shape is `rt_array_write_span`'s: count <= 0 is a no-op returning
+/// 0; an out-of-range span NEVER writes and fails with the interpreter's exact
+/// diagnostic (`fill_span out of range: ...`, exit 1); an invalid destination
+/// handle answers -1 (ABI misuse, the compiler only emits this for an array
+/// receiver). Returns the RAW `i64` count written. A packed `[u8]` receives the
+/// low byte; a boxed slot array receives `value` as an ordinary int word.
+#[no_mangle]
+pub extern "C" fn rt_array_fill_span(dst: RuntimeValue, dst_off: i64, count: i64, value: i64) -> i64 {
+    if count <= 0 {
+        return 0;
+    }
+    let err = -1;
+    let dst_arr = as_typed_ptr_packed!(mut dst, HeapObjectType::Array, RuntimeArray, err);
+    unsafe {
+        let dst_len = (*dst_arr).len as i64;
+        let dst_end = dst_off.checked_add(count);
+        if dst_off < 0 || !dst_end.is_some_and(|end| end <= dst_len) {
+            write_span_fail(&format!(
+                "fill_span out of range: dst_off={dst_off} count={count} dst_len={dst_len}"
+            ));
+        }
+        let (off, n) = (dst_off as usize, count as usize);
+        if (*dst_arr).is_byte_packed() {
+            let base = (*dst_arr).data.cast::<u8>().add(off);
+            for i in 0..n {
+                base.add(i).write_volatile(value as u8);
+            }
+        } else if (*dst_arr).is_u64_packed() {
+            let base = (*dst_arr).data.cast::<u64>().add(off);
+            for i in 0..n {
+                base.add(i).write_volatile(value as u64);
+            }
+        } else {
+            let word = RuntimeValue::from_int(value);
+            let base = (*dst_arr).data.add(off);
+            for i in 0..n {
+                base.add(i).write_volatile(word);
+            }
+        }
+    }
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    count
+}
+
 #[cfg(test)]
 mod write_span_range_tests {
     use super::write_span_range_check;
@@ -8149,6 +9480,213 @@ mod string_free_contract_tests {
     }
 
     #[test]
+    fn persistent_container_root_rewalks_new_transient_children() {
+        let _g = GUARD.lock().unwrap();
+        let owner = rt_array_new(2);
+        for round in 0..2 {
+            assert!(rt_transient_array_scope_begin());
+            let bytes = format!("new child appended to persistent owner, round {round}");
+            let child = mkstr(&bytes);
+            assert!(rt_array_push(owner, child));
+            assert!(rt_transient_array_scope_pause());
+            assert!(rt_transient_heap_promote(owner));
+            assert!(rt_transient_array_scope_end());
+            assert_eq!(rt_string_len(child), bytes.len() as i64);
+        }
+        for index in 0..2 {
+            assert_eq!(rt_string_free(super::rt_array_get(owner, index)), 1);
+        }
+        rt_array_free(owner);
+    }
+
+    #[test]
+    fn persistent_dict_cycle_retains_new_children_across_scopes() {
+        let _g = GUARD.lock().unwrap();
+        let owner = rt_array_new(1);
+        let dict = rt_dict_new(8);
+        let back_key = mkstr("persistent cycle back edge");
+        assert!(rt_array_push(owner, dict));
+        assert!(rt_dict_set(dict, back_key, owner));
+        let mut retained = Vec::new();
+        for round in 0..2 {
+            assert!(rt_transient_array_scope_begin());
+            let key = mkstr(&format!("persistent cycle key {round}"));
+            let value_bytes = format!("persistent cycle value {round}");
+            let value = mkstr(&value_bytes);
+            let discarded = mkstr("unreachable scope sibling");
+            assert!(rt_dict_set(dict, key, value));
+            assert!(rt_transient_array_scope_pause());
+            assert!(rt_transient_heap_promote(owner));
+            assert!(rt_transient_array_scope_end());
+            assert_eq!(rt_string_len(value), value_bytes.len() as i64);
+            assert_eq!(rt_dict_get(dict, key), value);
+            assert_eq!(rt_dict_get(dict, back_key), owner);
+            assert_eq!(rt_dict_len(dict), round + 2);
+            assert_eq!(rt_string_len(discarded), -1);
+            retained.push((key, value));
+        }
+        for (key, value) in retained {
+            assert_eq!(rt_dict_get(dict, key), value);
+            assert_eq!(rt_string_free(key), 1);
+            assert_eq!(rt_string_free(value), 1);
+        }
+        rt_array_free(owner);
+        crate::value::dict::rt_dict_free(dict);
+        assert_eq!(rt_string_free(back_key), 1);
+    }
+
+    #[test]
+    fn persistent_root_does_not_retain_children_when_scope_aborts_without_promotion() {
+        let _g = GUARD.lock().unwrap();
+        let owner = rt_array_new(1);
+        assert!(rt_transient_array_scope_begin());
+        let child = mkstr("unpromoted child of a persistent root");
+        assert!(rt_array_push(owner, child));
+        assert!(!rt_transient_heap_promote(owner), "promotion requires a paused scope");
+        assert!(rt_transient_array_scope_end());
+        assert_eq!(rt_string_len(child), -1, "abort reclaims the unpromoted child");
+        assert_eq!(rt_array_len(owner), 1, "the pre-scope owner itself remains live");
+        // Do not dereference the stale element. Array free is shallow.
+        rt_array_free(owner);
+        assert!(!rt_transient_array_scope_end(), "the aborted scope is closed");
+    }
+
+    #[test]
+    fn persistent_root_growth_reports_bounded_promotion_work() {
+        let _g = GUARD.lock().unwrap();
+        // A measurement, not a timing threshold or a linear-growth claim.
+        // With no write barrier, the retained graph must be rewalked each round.
+        for rounds in [8usize, 16, 32] {
+            let owner = rt_array_new(32);
+            let mut children = Vec::new();
+            let mut promotion_time = std::time::Duration::ZERO;
+            for round in 0..rounds {
+                assert!(rt_transient_array_scope_begin());
+                for item in 0..32 {
+                    let bytes = format!("growth rounds={rounds} round={round} item={item}");
+                    let child = mkstr(&bytes);
+                    assert!(rt_array_push(owner, child));
+                    children.push((child, bytes.len() as i64));
+                }
+                assert!(rt_transient_array_scope_pause());
+                let started = std::time::Instant::now();
+                assert!(rt_transient_heap_promote(owner));
+                promotion_time += started.elapsed();
+                assert!(rt_transient_array_scope_end());
+                assert_eq!(rt_array_len(owner), ((round + 1) * 32) as i64);
+            }
+            for (child, expected_len) in children {
+                assert_eq!(rt_string_len(child), expected_len);
+                assert_eq!(rt_string_free(child), 1);
+            }
+            rt_array_free(owner);
+            eprintln!(
+                "persistent_root_growth rounds={rounds} batch=32 final_children={} expected_rewalk_slots={} promotion_ns={}",
+                rounds * 32, 32 * rounds * (rounds + 1) / 2, promotion_time.as_nanos()
+            );
+        }
+    }
+
+    #[test]
+    fn paused_container_root_retains_mir_error_message_span_and_severity() {
+        unsafe extern "C" {
+            fn rt_alloc(size: i64) -> *mut u8;
+            fn rt_free(ptr: *mut u8);
+        }
+
+        let _g = GUARD.lock().unwrap();
+        // Reproduce MirLowering.errors: persistent array, transient raw
+        // MirError(message, optional span, fatal), post-pause wrapper array.
+        for fatal in [0u64, 1] {
+            let errors = rt_array_new(1);
+            assert!(rt_transient_array_scope_begin());
+            let message_bytes = if fatal == 0 {
+                "non-exhaustive enum match on 'Result': Arms cover: Ok, Err."
+            } else {
+                "enum match: missing declaration owner"
+            };
+            let message = mkstr(message_bytes);
+            let file_bytes = "src/app/_cg/f07/main.spl";
+            let file = mkstr(file_bytes);
+            let span = unsafe { rt_alloc(24) } as *mut u64;
+            let error = unsafe { rt_alloc(24) } as *mut u64;
+            assert!(!span.is_null() && !error.is_null());
+            let span_value = crate::value::RuntimeValue((span as u64) | crate::value::tags::TAG_HEAP);
+            let error_value = crate::value::RuntimeValue((error as u64) | crate::value::tags::TAG_HEAP);
+            unsafe {
+                span.write(file.0);
+                span.add(1).write(8);
+                span.add(2).write(5);
+                error.write(message.0);
+                error.add(1).write(span_value.0);
+                error.add(2).write(fatal);
+            }
+            assert!(rt_array_push(errors, error_value));
+            assert!(rt_transient_array_scope_pause());
+            let roots = rt_array_new(1);
+            assert!(rt_array_push(roots, errors));
+            assert!(super::rt_transient_heap_promote_share_begin());
+            assert!(rt_transient_heap_promote(roots));
+            rt_array_free(roots);
+            assert!(super::rt_transient_heap_promote_share_end());
+            assert!(rt_transient_array_scope_end());
+            // Check managed children before dereferencing raw records: the
+            // pre-fix failure is a safe assertion, never a use-after-free.
+            assert_eq!(rt_string_len(message), message_bytes.len() as i64);
+            assert_eq!(rt_string_len(file), file_bytes.len() as i64);
+            assert_eq!(super::rt_array_get(errors, 0), error_value);
+            unsafe {
+                assert_eq!(error.read(), message.0);
+                assert_eq!(error.add(1).read(), span_value.0);
+                assert_eq!(error.add(2).read(), fatal);
+                assert_eq!(span.read(), file.0);
+                assert_eq!(span.add(1).read(), 8);
+                assert_eq!(span.add(2).read(), 5);
+                rt_free(error as *mut u8);
+                rt_free(span as *mut u8);
+            }
+            assert_eq!(rt_string_free(message), 1);
+            assert_eq!(rt_string_free(file), 1);
+            rt_array_free(errors);
+        }
+    }
+
+    #[test]
+    #[ignore = "bounded accumulated-graph time/RSS measurement; run explicitly"]
+    fn persistent_root_accumulated_graph_benchmark() {
+        let _g = GUARD.lock().unwrap();
+        for rounds in [64usize, 128, 256] {
+            let owner = rt_array_new(64);
+            let mut children = Vec::new();
+            let mut promotion_time = std::time::Duration::ZERO;
+            for round in 0..rounds {
+                assert!(rt_transient_array_scope_begin());
+                for item in 0..64 {
+                    let bytes = format!("accumulated rounds={rounds} round={round} item={item}");
+                    let child = mkstr(&bytes);
+                    assert!(rt_array_push(owner, child));
+                    children.push((child, bytes.len() as i64));
+                }
+                assert!(rt_transient_array_scope_pause());
+                let started = std::time::Instant::now();
+                assert!(rt_transient_heap_promote(owner));
+                promotion_time += started.elapsed();
+                assert!(rt_transient_array_scope_end());
+            }
+            assert_eq!(rt_array_len(owner), (rounds * 64) as i64);
+            for (child, expected_len) in children {
+                assert_eq!(rt_string_len(child), expected_len);
+                assert_eq!(rt_string_free(child), 1);
+            }
+            rt_array_free(owner);
+            eprintln!(
+                "persistent_root_accumulated rounds={rounds} batch=64 final_children={} expected_rewalk_slots={} promotion_ns={}",
+                rounds * 64, 64 * rounds * (rounds + 1) / 2, promotion_time.as_nanos()
+            );
+        }
+    }
+
+    #[test]
     fn persistent_native_struct_root_promotes_transient_children() {
         unsafe extern "C" {
             fn rt_struct_alloc(size: i64) -> *mut u8;
@@ -8489,5 +10027,335 @@ mod lazy_string_hash_tests {
         let before = FNV1A_HASH_CALLS.load(Ordering::Relaxed);
         assert_eq!(hash_of(e), 0);
         assert_eq!(FNV1A_HASH_CALLS.load(Ordering::Relaxed) - before, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Object-graph refcount hooks (BSM P4, see rc_graph.rs). New entry points
+// over the private transient-scope machinery above; they change none of it.
+// ---------------------------------------------------------------------------
+
+/// Children of one heap node, exactly as transient promotion walks them.
+pub(crate) fn rc_graph_children(value: RuntimeValue) -> Option<Vec<RuntimeValue>> {
+    transient_heap_children(value)
+}
+
+/// Free one heap node through the same per-kind path as scope end.
+pub(crate) fn rc_graph_free(value: RuntimeValue) {
+    free_transient_heap(value)
+}
+
+/// True when this thread's live transient scope still owns `value`.
+pub(crate) fn rc_graph_scope_owns(value: RuntimeValue) -> bool {
+    if !value.is_heap() {
+        return false;
+    }
+    TRANSIENT_HEAP_SCOPE.with(|slot| {
+        slot.try_borrow_mut()
+            .ok()
+            .is_some_and(|mut slot| slot.as_mut().is_some_and(|scope| scope.owns_heap_ptr(value.as_heap_ptr())))
+    })
+}
+
+/// Move `reachable` out of this thread's transient scope AND out of the live
+/// build session (no-op without either). An rc root is owned by its count, not
+/// by a scope: `None` here because the nodes must not be adopted into the
+/// session, and the session eviction is what keeps `rt_session_heap_end` from
+/// freeing a graph that `rt_rc_share` took over (BSM P1 x P4; the C twin is
+/// safe by construction because its reclaim keys on the tag share zeroes).
+pub(crate) fn rc_graph_scope_release(reachable: &super::heap::HeapPtrSet<u64>) {
+    TRANSIENT_HEAP_SCOPE.with(|slot| {
+        if let Some(scope) = slot.borrow_mut().as_mut() {
+            scope.release_reachable(reachable, None);
+        }
+    });
+    SESSION_HEAP.with(|slot| {
+        if let Some(session) = slot.borrow_mut().as_mut() {
+            session.release_reachable(reachable);
+        }
+    });
+}
+
+/// `s[i]` element lookup with the interpreter's index policy (ADR-005):
+/// per code point, negative indices count from the end, and anything outside
+/// `-len..len` is `None` (the caller raises). Positive indices never count the
+/// whole text: `chars().nth` stops at `i`.
+pub(crate) fn string_index_checked(string: RuntimeValue, index: i64) -> Option<RuntimeValue> {
+    let len = rt_string_len(string);
+    if len <= 0 {
+        return None;
+    }
+    let data = rt_string_data(string);
+    if data.is_null() {
+        return None;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
+    // ASCII fast path (memoized per string): byte == code point, so `s[i]`
+    // is one byte copy instead of a chars() walk (and two for a negative i).
+    if text_is_ascii_memo(string, bytes) {
+        let want = if index < 0 { len + index } else { index };
+        if want < 0 || want >= len {
+            return None;
+        }
+        return Some(rt_string_new(unsafe { data.add(want as usize) }, 1));
+    }
+    let s = unsafe { std::str::from_utf8_unchecked(bytes) };
+    let c = if index >= 0 {
+        s.chars().nth(index as usize)?
+    } else {
+        let adjusted = s.chars().count() as i64 + index;
+        if adjusted < 0 {
+            return None;
+        }
+        s.chars().nth(adjusted as usize)?
+    };
+    let mut buf = [0u8; 4];
+    let cs = c.encode_utf8(&mut buf);
+    Some(rt_string_new(cs.as_ptr(), cs.len() as u64))
+}
+
+/// ADR-005 item 5 on the native/JIT lane: user-facing text length, slicing and
+/// `index_of`/`rfind` count CODE POINTS; `rt_string_len` stays the BYTE primitive
+/// (`byte_len()`, the `(data, len)` text extern ABI, every internal caller).
+/// Twin: `src/runtime/test/rt_text_len_slice_codepoint_selfcheck.c`.
+/// Bug: text_len_bytes_vs_codepoint_index_bound_disagree_2026_11_03.
+#[cfg(test)]
+mod text_len_slice_codepoint_tests {
+    use super::*;
+
+    fn t(s: &str) -> RuntimeValue {
+        rt_string_new(s.as_ptr(), s.len() as u64)
+    }
+
+    fn text_of(v: RuntimeValue) -> String {
+        string_as_str(v).expect("text").to_string()
+    }
+
+    fn some_int(v: RuntimeValue) -> Option<i64> {
+        use super::super::objects::{hash_variant_discriminant, rt_enum_discriminant, rt_enum_payload};
+        if rt_enum_discriminant(v) == hash_variant_discriminant("Some") as i64 {
+            Some(rt_enum_payload(v).as_int())
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn len_counts_code_points_and_byte_len_stays_bytes() {
+        let s = t("h\u{e9}llo"); // 5 code points, 6 bytes
+        assert_eq!(rt_string_char_count(s), 5);
+        assert_eq!(rt_len(s), 5);
+        assert_eq!(rt_string_len(s), 6);
+        let e = t("a\u{1F600}b"); // 3 code points, 6 bytes
+        assert_eq!(rt_string_char_count(e), 3);
+        assert_eq!(rt_len(e), 3);
+        assert_eq!(rt_string_len(e), 6);
+        assert_eq!(rt_string_char_count(t("")), 0);
+        assert_eq!(rt_string_char_count(RuntimeValue::NIL), -1);
+    }
+
+    #[test]
+    fn ascii_len_fast_path_is_unchanged() {
+        let s = t("hello world");
+        assert_eq!(rt_string_char_count(s), 11);
+        assert_eq!(rt_len(s), 11);
+        assert_eq!(rt_string_len(s), 11);
+        // 8-byte-word scan boundary: 7, 8, 9, 16 and 17 bytes.
+        for n in [7usize, 8, 9, 16, 17, 31, 32, 33] {
+            let a = "x".repeat(n);
+            assert_eq!(rt_string_char_count(t(&a)), n as i64, "ascii len {n}");
+            let m = format!("{}\u{e9}", "x".repeat(n - 1));
+            assert_eq!(rt_string_char_count(t(&m)), n as i64, "trailing multibyte at {n}");
+        }
+    }
+
+    #[test]
+    fn slice_is_code_point_indexed() {
+        let s = t("h\u{e9}llo");
+        assert_eq!(text_of(rt_slice(s, 1, 3, 1)), "\u{e9}l");
+        assert_eq!(text_of(rt_slice(s, 2, 5, 1)), "llo");
+        assert_eq!(text_of(rt_slice(s, 0, 2, 1)), "h\u{e9}");
+        assert_eq!(text_of(rt_slice(s, -2, 5, 1)), "lo");
+        assert_eq!(text_of(rt_slice(s, 3, 99, 1)), "lo");
+        assert_eq!(text_of(rt_slice(s, 9, 12, 1)), "");
+        assert_eq!(text_of(rt_slice(t("a\u{1F600}bc"), 1, 3, 1)), "\u{1F600}b");
+        // ASCII unchanged.
+        assert_eq!(text_of(rt_slice(t("hello"), 1, 3, 1)), "el");
+        assert_eq!(text_of(rt_slice(t("hello"), 3, 5, 1)), "lo");
+    }
+
+    #[test]
+    fn index_of_and_rfind_return_byte_offsets() {
+        // Owner decision 2026-11-07 (ADR-005 "Staging"): the find family is
+        // byte-offset, like `byte_at` / `substring`, bounded by `byte_len()`.
+        let s = t("h\u{e9}llo"); // h | C3 A9 | l l o : 6 bytes, 5 code points
+        assert_eq!(some_int(rt_string_index_of(s, t("l"))), Some(3));
+        assert_eq!(some_int(rt_string_index_of(s, t("o"))), Some(5));
+        assert_eq!(some_int(rt_string_index_of(s, t("\u{e9}"))), Some(1));
+        assert_eq!(some_int(rt_string_index_of(s, t("z"))), None);
+        assert_eq!(some_int(rt_string_index_of(s, t(""))), Some(0));
+        assert_eq!(rt_string_find(s, t("l")), 3);
+        assert_eq!(rt_text_find(s, t("l"), 4), 4);
+        assert_eq!(rt_text_find(s, t(""), 99), 6);
+        assert_eq!(rt_string_rfind(s, t("l")), 4);
+        assert_eq!(rt_string_rfind(s, t("")), 6);
+        assert_eq!(rt_string_rfind(s, t("z")), -1);
+        // index_of result composes with the byte slice entry.
+        let i = some_int(rt_string_index_of(s, t("l"))).unwrap();
+        assert_eq!(text_of(rt_slice_text_bytes(s, i, i64::MAX, 1)), "llo");
+        // ASCII unchanged.
+        assert_eq!(some_int(rt_string_index_of(t("hello"), t("lo"))), Some(3));
+        assert_eq!(rt_string_rfind(t("hello"), t("l")), 3);
+    }
+
+    #[test]
+    fn slice_text_bytes_is_byte_indexed_and_keeps_raw_bytes() {
+        let s = t("\u{65e5}\u{672c}ab"); // 3 + 3 + 1 + 1 bytes
+        assert_eq!(text_of(rt_slice_text_bytes(s, 0, 3, 1)), "\u{65e5}");
+        assert_eq!(text_of(rt_slice_text_bytes(s, 3, 6, 1)), "\u{672c}");
+        assert_eq!(text_of(rt_slice_text_bytes(s, 6, 8, 1)), "ab");
+        assert_eq!(text_of(rt_slice_text_bytes(s, 6, i64::MAX, 1)), "ab");
+        // Clamped to 0..=byte_len(); negative offsets clamp to 0.
+        assert_eq!(text_of(rt_slice_text_bytes(s, -5, 3, 1)), "\u{65e5}");
+        assert_eq!(rt_string_len(rt_slice_text_bytes(s, 7, 99, 1)), 1);
+        assert_eq!(rt_string_len(rt_slice_text_bytes(s, 5, 2, 1)), 0);
+        // A cut inside a code point is copied RAW: the byte length is the
+        // requested width and adjacent cuts reassemble the original bytes.
+        let head = rt_slice_text_bytes(s, 0, 2, 1);
+        let tail = rt_slice_text_bytes(s, 2, 8, 1);
+        assert_eq!(rt_string_len(head), 2);
+        assert_eq!(rt_string_len(tail), 6);
+        assert_eq!(string_as_str(head), None);
+        // `len()` of such a fragment counts lead bytes, like the C runtime's
+        // `rt_string_char_count`; it is never the -1 "not text" answer.
+        assert_eq!(rt_string_char_count(head), 1);
+        // The bracket operator entry is untouched: code points.
+        assert_eq!(text_of(rt_slice(s, 0, 2, 1)), "\u{65e5}\u{672c}");
+        // A non-text receiver is `rt_slice`.
+        let arr = rt_array_new(3);
+        for v in [10, 20, 30] {
+            rt_array_push(arr, RuntimeValue::from_int(v));
+        }
+        assert_eq!(rt_array_len(rt_slice_text_bytes(arr, 1, i64::MAX, 1)), 2);
+    }
+}
+
+/// Two threads hammering `len()` / slice / find on ONE shared ASCII and ONE
+/// shared non-ASCII string: the memoized ASCII flag is set with an atomic RMW,
+/// so no thread ever observes a wrong length or a lost bit. (Concurrency is P0
+/// — Opus review of PR #7892.)
+#[cfg(test)]
+mod text_len_memo_concurrency_tests {
+    use super::*;
+
+    #[test]
+    fn two_threads_share_ascii_and_utf8_strings_without_losing_the_memo_bit() {
+        let ascii_src = "x".repeat(257);
+        let utf_src = "h\u{e9}llo w\u{f6}rld ".repeat(40); // 12 cps x 40 = 480 cps, 560 bytes
+        let ascii = rt_string_new(ascii_src.as_ptr(), ascii_src.len() as u64).to_raw();
+        let utf = rt_string_new(utf_src.as_ptr(), utf_src.len() as u64).to_raw();
+        let needle_src = "w\u{f6}";
+        let needle = rt_string_new(needle_src.as_ptr(), needle_src.len() as u64).to_raw();
+
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    let a = RuntimeValue::from_raw(ascii);
+                    let u = RuntimeValue::from_raw(utf);
+                    let n = RuntimeValue::from_raw(needle);
+                    for i in 0..20_000i64 {
+                        assert_eq!(rt_string_char_count(a), 257);
+                        assert_eq!(rt_len(a), 257);
+                        assert_eq!(rt_string_char_count(u), 480);
+                        assert_eq!(rt_len(u), 480);
+                        assert_eq!(rt_string_len(u), 560);
+                        let k = i % 400;
+                        let expect_len = (k + 3).min(257) - k.min(257);
+                        assert_eq!(rt_string_len(rt_slice(a, k, k + 3, 1)), expect_len);
+                        assert_eq!(string_as_str(rt_slice(u, 12 * (i % 40), 12 * (i % 40) + 2, 1)), Some("h\u{e9}"));
+                        assert_eq!(rt_string_find(u, n), 7);
+                    }
+                })
+            })
+            .collect();
+        for w in workers {
+            w.join().expect("worker panicked: concurrent len/slice/find disagreed");
+        }
+        // The memo bit is set exactly on the ASCII string and never on the UTF-8 one.
+        unsafe {
+            assert!(header_flag_is_set(RuntimeValue::from_raw(ascii).as_heap_ptr(), RT_STRING_FLAG_ASCII));
+            assert!(!header_flag_is_set(RuntimeValue::from_raw(utf).as_heap_ptr(), RT_STRING_FLAG_ASCII));
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod string_to_int_single_char_fallback_tests {
+    use super::*;
+
+    fn s(src: &str) -> RuntimeValue {
+        rt_string_new(src.as_ptr(), src.len() as u64)
+    }
+
+    // Bug row: jit_to_i32_returns_zero_and_leaks_mistagged_value_2026-08-26.
+    // The interpreter arm (interpreter_method/string.rs, fixed 2026-08-26 in
+    // 8d100a8aa81) returns the character CODEPOINT for a single non-numeric
+    // character; `rt_string_to_int` is the JIT/native dispatch target for the
+    // same `to_int`/`to_i64`/`to_i32`/`to_i16`/`to_i8` family and must
+    // answer identically or per-character checksum loops degenerate under the
+    // default JIT execution mode.
+    #[test]
+    fn single_non_numeric_char_yields_codepoint_not_zero() {
+        assert_eq!(rt_string_to_int(s("h")), 104);
+        assert_eq!(rt_string_to_int(s("e")), 101);
+        assert_eq!(rt_string_to_int(s("z")), 122);
+        assert_eq!(rt_string_to_int(s("한")), '한' as i64);
+    }
+
+    #[test]
+    fn numeric_strings_still_parse_and_multi_char_non_numeric_is_zero() {
+        assert_eq!(rt_string_to_int(s("42")), 42);
+        assert_eq!(rt_string_to_int(s("  -7  ")), -7);
+        assert_eq!(rt_string_to_int(s("ab")), 0);
+        assert_eq!(rt_string_to_int(s("")), 0);
+        assert_eq!(rt_string_to_int(s("5a")), 0);
+    }
+}
+
+// Bug: native_build_hir_sigsegv_under_20g_cgroup_cuda_port_closure_2026-11-22.
+// An object freed mid-scope through a path other than `rt_array_free` left a
+// stale entry in the scope's object list. When the allocator handed that
+// address to an object born while the scope was PAUSED (untracked, meant to be
+// persistent), scope end freed the live object by registry membership.
+#[cfg(test)]
+mod transient_scope_stale_entry_tests {
+    use super::*;
+
+    /// Allocate with `alloc` while paused until an object lands on `addr`.
+    /// Fails rather than skips when the allocator never reuses the address.
+    fn alloc_at(addr: usize, alloc: impl Fn() -> RuntimeValue) -> RuntimeValue {
+        let mut keep = Vec::new();
+        for _ in 0..64 {
+            let value = alloc();
+            if value.as_heap_ptr() as usize == addr {
+                return value;
+            }
+            keep.push(value);
+        }
+        panic!("allocator never reused the freed address {addr:#x}; test cannot observe the stale entry");
+    }
+
+    #[test]
+    fn freed_string_address_reused_while_paused_survives_scope_end() {
+        let text = "stale-entry-probe";
+        assert!(rt_transient_array_scope_begin());
+        let doomed = rt_string_new(text.as_ptr(), text.len() as u64);
+        let addr = doomed.as_heap_ptr() as usize;
+        assert_eq!(rt_string_free(doomed), 1);
+        assert!(rt_transient_array_scope_pause());
+        let survivor = alloc_at(addr, || rt_string_new(text.as_ptr(), text.len() as u64));
+        assert!(rt_transient_array_scope_end());
+        assert_eq!(survivor.heap_type(), Some(HeapObjectType::String), "persistent string freed by scope end");
     }
 }

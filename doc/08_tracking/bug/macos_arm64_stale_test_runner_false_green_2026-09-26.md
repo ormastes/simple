@@ -67,3 +67,37 @@ bounded interpreter-mode negative control at
 `expect(1).to_equal(2)`. It selected one file, then exited `-11` during setup
 after `cover-check: 0ms`, before reporting a case result. It is not a trusted
 replacement runner. No rendering spec was retried with it.
+
+## 2026-11-05 Worker-selection source fix (work/rel100-macos-fixes-20261105)
+
+The durable source fix from "Isolated bootstrap worker selection" is landed on
+this branch. `src/app/cli/native_build_main.spl` now:
+
+- exposes `native_build_worker_binary_host_runnable(path)`: Windows hosts
+  keep the prior accept behavior; other hosts refuse a confirmed Windows PE
+  image (DOS `MZ` magic plus `PE\0\0` at e_lfanew, any subtype) and accept
+  everything else, including files too short or unreadable to classify;
+- makes `native_build_worker_binary_valid` consult it, so the coordinator
+  refuses a PE worker binary with
+  `error: native-build worker binary is unavailable: <path>` (exit 1) before
+  SCV admission or the timeout runner, instead of spawning it;
+- makes the `bin/simple.exe` fallback in `resolve_simple_binary()` skip a PE
+  image on non-Windows hosts so a runnable `bin/simple` is preferred.
+
+RED→GREEN evidence (Rust seed `/private/tmp/rel100-cargo-f/release/simple`,
+interpreter mode, macOS aarch64):
+- RED: new `test/01_unit/app/cli/native_build_worker_host_runnable_spec.spl`
+  failed 3/3 (helper missing; `native_build_worker_binary_valid("bin/simple.exe",
+  true)` returned `true` for the tracked PE32+), and the updated
+  `native_build_worker_launch_guard_spec.spl` failed 1/3 on the same admission.
+- GREEN: those two specs pass 3/3 and 3/3; sibling
+  `native_build_worker_failure_lines_spec.spl` passes 28/28.
+- End-to-end negative control: `SIMPLE_BINARY=<repo>/bin/simple.exe simple run
+  src/app/cli/native_build_main.spl native-build ...` now exits 1 with the
+  refusal above; with `SIMPLE_BINARY=<Mach-O seed>` the guard passes.
+
+The runner-qualification half of this bug is unchanged and still open: no
+current self-hosted macOS runner has executed a failing negative control, and
+the GPU-symbol lane/linker admission blocker from 2026-09-26 still stands. Do
+not treat rendering results from any listed binary as admissible until that
+passes.

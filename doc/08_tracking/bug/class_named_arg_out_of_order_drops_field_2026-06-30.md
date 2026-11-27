@@ -104,3 +104,18 @@ Every field lands on its declared name. No field is dropped.
 Scope: the **Rust seed's** interpreter lane. The pure-Simple interpreter
 (`test_interp.spl`, the file the work package attributed this row to) was not
 separately measured.
+
+## Verification 2026-11-25 (work/p2w1-ak-20261125)
+
+Reproduced the entry's own fence live on this host (Windows, pinned seed
+`bin/simple.exe` v1.0.0-rc.1, 38,403,072 bytes) against release/1.0.0 @
+1ef7c198073 with the three-field fixture:
+
+```
+val p = Point(z: 3, x: 1, y: 2)
+print("out-of-order named args -> x={p.x} y={p.y} z={p.z} (expected 1 2 3)")
+```
+
+via `SIMPLE_LIB=src bin/simple.exe run` →
+`out-of-order named args -> x=1 y=2 z=3 (expected 1 2 3)`.
+Every field lands on its declared name; the Closed status stands.

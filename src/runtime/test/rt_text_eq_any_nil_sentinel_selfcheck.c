@@ -19,6 +19,10 @@
  * P2 THE RED: nil sentinel vs nil sentinel must be EQUAL (x == nil on a miss).
  * P3 nil sentinel vs a real string must be UNEQUAL (x == nil on a hit).
  * P4 real string vs nil sentinel (operand order flipped) must be UNEQUAL.
+ * P5/P6 ensure tagged strings compare by stored byte length across embedded
+ * NUL bytes, rather than by strcmp's visible prefix.
+ * P7/P8 cover raw-literal/tagged-string equality in both operand orders.
+ * P9 covers equal raw C strings at distinct addresses.
  *
  * Build + run (same line the sibling selfchecks document; the runtime dir holds
  * mutually-exclusive alternative TUs, hence the filter and -z muldefs):
@@ -51,15 +55,31 @@ int main(void) {
     int64_t hello_a = rt_string_new((const uint8_t*)"hello", 5);
     int64_t hello_b = rt_string_new((const uint8_t*)"hello", 5);
     int64_t world = rt_string_new((const uint8_t*)"world", 5);
+    const uint8_t embedded_a_bytes[] = { 'a', 0, 'x' };
+    const uint8_t embedded_b_bytes[] = { 'a', 0, 'y' };
+    int64_t embedded_a = rt_string_new(embedded_a_bytes, sizeof(embedded_a_bytes));
+    int64_t embedded_a_copy = rt_string_new(embedded_a_bytes, sizeof(embedded_a_bytes));
+    int64_t embedded_b = rt_string_new(embedded_b_bytes, sizeof(embedded_b_bytes));
+    int64_t raw_hello = (int64_t)(uintptr_t)"hello";
+    char raw_hello_a[] = "hello";
+    char raw_hello_b[] = "hello";
 
     check("P0 equal-content strings", rt_text_eq_any(hello_a, hello_b), 1);
     check("P1 unequal-content strings", rt_text_eq_any(hello_a, world), 0);
     check("P2 nil == nil (dict-miss text vs NilLit)", rt_text_eq_any(RT_NIL_SENTINEL, RT_NIL_SENTINEL), 1);
     check("P3 nil vs real string", rt_text_eq_any(RT_NIL_SENTINEL, hello_a), 0);
     check("P4 real string vs nil", rt_text_eq_any(hello_a, RT_NIL_SENTINEL), 0);
+    check("P5 embedded-NUL tagged strings with equal visible prefix differ",
+          rt_text_eq_any(embedded_a, embedded_b), 0);
+    check("P6 identical embedded-NUL tagged strings compare equal",
+          rt_text_eq_any(embedded_a, embedded_a_copy), 1);
+    check("P7 raw literal equals tagged string", rt_text_eq_any(raw_hello, hello_a), 1);
+    check("P8 tagged string equals raw literal", rt_text_eq_any(hello_a, raw_hello), 1);
+    check("P9 equal raw C strings at distinct addresses",
+          rt_text_eq_any((int64_t)(uintptr_t)raw_hello_a, (int64_t)(uintptr_t)raw_hello_b), 1);
 
     if (fails == 0) {
-        printf("VERDICT: ALL %d PROBES PASS\n", 5);
+        printf("VERDICT: ALL %d PROBES PASS\n", 10);
         return 0;
     }
     printf("VERDICT: %d PROBE(S) FAIL\n", fails);

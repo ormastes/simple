@@ -12,3 +12,10 @@ pub const SPECIAL_TRUE: u64 = 1;
 pub const SPECIAL_FALSE: u64 = 2;
 pub const SPECIAL_ERROR: u64 = 3;
 // Symbol IDs start at 4
+
+// Char values (ADR-005): a TAG_SPECIAL sub-kind disjoint from symbol IDs.
+// payload = SPECIAL_CHAR_BASE | code_point. Symbol IDs are small counters and
+// never reach bit 40, so the ranges cannot collide. Never TAG_INT: a char must
+// not compare equal to its code point or print as a number.
+pub const SPECIAL_CHAR_BASE: u64 = 1 << 40;
+pub const SPECIAL_CHAR_MASK: u64 = 0x1F_FFFF;

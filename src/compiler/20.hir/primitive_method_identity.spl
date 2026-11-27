@@ -1,0 +1,42 @@
+# Primitive impl methods have no nominal owner SymbolId. Preserve their
+# concrete Self and trait identities before bodies enter symbol-keyed maps.
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolTable, SymbolKind}
+use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
+use compiler.hir.hir_symbol_table_methods.*
+
+pub fn hir_primitive_owner_name(kind: HirTypeKind) -> text:
+    """Name a settled primitive Self; return empty for nonprimitive owners."""
+    match kind:
+        case HirTypeKind.Int(bits, signed):
+            if signed: "i{bits}" else: "u{bits}"
+        case HirTypeKind.Float(bits): "f{bits}"
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Char: "char"
+        case HirTypeKind.Str: "text"
+        case HirTypeKind.Unit: "unit"
+        case _: ""
+
+pub fn hir_primitive_impl_method_name(symbols: SymbolTable, self_type: HirType,
+        trait_type: HirType, has_trait: bool, module_name: text, method: text) -> text:
+    """Keep supported nongeneric primitive impl bodies in distinct symbol slots.
+
+    Scalar dispatch rejects trait arguments and generic impls in its existing
+    provider admission gate; this name does not grant generic dispatch support.
+    """
+    val primitive = hir_primitive_owner_name(self_type.kind)
+    if primitive == "": return ""
+    var method_identity = method
+    if has_trait:
+        match trait_type.kind:
+            case HirTypeKind.Named(trait_symbol, _):
+                # The symbol table supplies canonical module/declaration names,
+                # including through import aliases; numeric IDs are not linkage.
+                if val declaration = symbols.get_symbol_raw(trait_symbol.id):
+                    if declaration.kind != SymbolKind.Trait: return ""
+                    method_identity = symbols.method_symbol_name(trait_symbol, method)
+                else:
+                    return ""
+            case _: return ""
+    val module_owner = hir_symbol_owner_module(module_name)
+    val owner = if module_owner == "": primitive else: "{module_owner}.{primitive}"
+    "{owner}::{method_identity}"

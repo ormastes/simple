@@ -138,3 +138,15 @@ concat corrupts, with a minimal non-huffman repro; fix in the interpreter (seed)
 or rework the huffman loops to avoid the offending array pattern (e.g. index
 assignment into a pre-sized array instead of push/concat). Multi-hour; same
 class as the other interpreter array bugs.
+
+## Verification 2026-11-25 (p2w2-ab lane) — closure re-confirmed
+
+Re-ran both entry repros plus the localization case on the pinned Windows seed
+(`bin/simple.exe` v1.0.0-rc.1, release/1.0.0 @ ead200cb544, `SIMPLE_LIB=src`):
+
+- `hpack_huffman_decode(hpack_huffman_encode([97]), 0, enc.len()).unwrap().len()`
+  → `1` (was `0`)
+- `var p: [u8] = []; p = p + [97]; p[0]` → `97` (was `8`)
+- `var c:[u8]=[10]; var e:[u8]=[97]; c+e` → `10,97` (was `10,0`)
+
+All green; the 2026-09-13 closure stands. No code change.

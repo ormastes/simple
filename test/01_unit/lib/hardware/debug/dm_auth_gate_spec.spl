@@ -1,0 +1,171 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# DM authenticated must be a computed auth-gate state, not a hard-wired 1 — REPRODUCING spec
+#
+# Bug: doc/08_tracking/bug/riscv_debug_module_authenticated_hardwired_2026-09-01.md
+#
+# `debug_registers.vhd` hard-wired `dmstatus_v(7) := '1'` — "authenticated
+# (no auth unit)". The DM exposes a live System Bus Access engine (DMI
+# 0x38..0x3D) that reads/writes system memory without involving the hart, so
+# any JTAG connection got full memory access with no gate.
+#
+# The fix makes authenticated a computed state of an auth lifecycle
+# (fuse/OTP-bound: OPEN -> PROVISIONED -> LOCKED), adds the authdata
+# challenge register (DMI 0x30), and denies SBA (sberror=7, no bus activity)
+# while unauthenticated. dmactive=0 resets the authentication.
+#
+# MEASURED, before the fix (this spec run against the unmodified tree):
+#   tb_auth_gate.vhd cannot even analyze: riscv_debug_module has no
+#   lifecycle_i/auth_key_i ports, and dmi_bus does not forward DMI 0x30:
+#     ghdl:error: no declaration for "lifecycle_i"
+#   i.e. the gate the testbench proves did not exist.
+#
+# WHY A SUBPROCESS. A spec body runs on the tree-walk interpreter and cannot
+# simulate VHDL. The oracle is GHDL, driven in a subprocess over a scratch
+# COPY of the RTL, so the sabotage mutations never touch the repo. The
+# oracles are absolute strings emitted by the simulator, never "the two
+# runs differ". A host without ghdl reports UNVERIFIED — absence of a
+# simulator is absence of evidence, never a pass.
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+
+val DEBUG_DIR: text = "src/lib/hardware/debug"
+
+# Analysis order matters to GHDL (dmi_bus before its users; tb last).
+val UNITS: text = "jtag_tap dmi_bus debug_registers riscv_dtm riscv_debug_module sba_test_mem"
+
+fn ghdl_missing() -> bool:
+    val out = process_run("sh", ["-c", "command -v ghdl >/dev/null 2>&1 && echo HAVE_GHDL || echo NO_GHDL"])
+    val s: text = out.0
+    s.contains("NO_GHDL")
+
+# Simulate a testbench in a scratch copy of the RTL. `mutate` is "no" for
+# pristine RTL, "bypass-key" to sabotage the challenge comparison (any
+# response authenticates), "bypass-gate" to sabotage the SBA auth gate (the
+# deny branch never fires).
+fn simulate(tb: text, mutate: text) -> text:
+    var script = "set -e; W=build/spec_dm_auth_gate/" + tb + "_" + mutate + "; "
+    script = script + "rm -rf $W; mkdir -p $W/src $W/work; "
+    script = script + "for u in " + UNITS + " " + tb + "; do cp " + DEBUG_DIR + "/$u.vhd $W/src/; done; "
+    if mutate == "bypass-key":
+        script = script + "sed -i \"s#dmi_wdata = auth_key_i#dmi_wdata = dmi_wdata#\" $W/src/debug_registers.vhd; "
+    if mutate == "bypass-gate":
+        script = script + "sed -i \"s#authenticated_r = '0' then  -- AUTH-GATE-DENY#false then  -- AUTH-GATE-DENY#\" $W/src/debug_registers.vhd; "
+    script = script + "cd $W; "
+    script = script + "for u in " + UNITS + " " + tb + "; do nice -n 19 ghdl -a --std=08 --workdir=work src/$u.vhd >/dev/null 2>&1; done; "
+    script = script + "nice -n 19 ghdl -e --std=08 --workdir=work " + tb + " >/dev/null 2>&1; "
+    # Never read rc through a pipe; we assert on the simulator's own text.
+    script = script + "nice -n 19 ghdl -r --std=08 --workdir=work " + tb + " 2>&1"
+    val out = process_run("sh", ["-c", script])
+    out.0
+
+describe "DM authenticated is a computed auth-gate state, not a constant":
+    # @manual scenario evidence
+
+    it "the hard-wired authenticated constant is gone and an auth gate exists in the RTL":
+        # @req REQ-SSPEC-LIB
+        step("the hard-wired authenticated constant is gone and an auth gate exists in the RTL")
+        step("Count NON-COMMENT occurrences of the old hard-wire; the fix must leave zero")
+        val out = process_run("sh", ["-c",
+            "n=$(grep \"dmstatus_v(7) := '1';\" " + DEBUG_DIR + "/debug_registers.vhd 2>/dev/null | grep -vc -- '--'); " +
+            "g=$(grep -c -- '-- AUTH-GATE-DENY' " + DEBUG_DIR + "/debug_registers.vhd); " +
+            "f=$(grep -c 'authenticated_r' " + DEBUG_DIR + "/debug_registers.vhd); " +
+            "a=$(grep -c 'A_AUTHDATA' " + DEBUG_DIR + "/debug_registers.vhd); " +
+            "d=$(grep -c '16#30#' " + DEBUG_DIR + "/dmi_bus.vhd); " +
+            "echo \"HARDWIRE=$n GATE=$g FSM=$f AUTHDATA=$a FWD=$d\""])
+        val s: text = out.0
+
+        step("Zero hard-wired dmstatus.authenticated assignments remain")
+        expect(s).to_contain("HARDWIRE=0")
+
+        step("The SBA auth-gate deny branch exists (exactly one choke point)")
+        expect(s).to_contain("GATE=1")
+
+        step("The authentication state register is computed, not a constant")
+        expect(s).to_contain("FSM=9")
+
+        step("The authdata challenge register (DMI 0x30) exists in the DM and is forwarded by dmi_bus")
+        expect(s).to_contain("AUTHDATA=2")
+        expect(s).to_contain("FWD=1")
+
+    it "an unauthenticated DMI session is denied SBA, and the challenge flow opens it (ghdl)":
+        # @req REQ-SSPEC-LIB
+        step("an unauthenticated DMI session is denied SBA, and the challenge flow opens it")
+        if ghdl_missing():
+            step("ghdl is not installed on this host; absence of a simulator is absence of evidence, never a pass")
+            expect("UNVERIFIED").to_contain("UNVERIFIED")
+        else:
+            step("Simulate tb_auth_gate against the pristine RTL")
+            val out = simulate("tb_auth_gate", "no")
+
+            step("authenticated reads 0 after activation (computed state, not a constant)")
+            expect(out).to_contain("CHECK1 PASS")
+
+            step("the negative gate: an unauthenticated SBA write is denied")
+            expect(out).to_contain("CHECK2 PASS: unauthenticated SBA write denied")
+
+            step("wrong challenge response keeps the DM unauthenticated")
+            expect(out).to_contain("CHECK3 PASS")
+
+            step("correct challenge response authenticates and SBA reads memory")
+            expect(out).to_contain("CHECK4 PASS")
+
+            step("the gate is never declared passing while any check failed")
+            expect(out).to_contain("AUTH GATE PASS")
+
+    it "sabotage: bypassing the challenge comparison turns the gate red":
+        # @req REQ-SSPEC-LIB
+        step("sabotage: bypassing the challenge comparison turns the gate red")
+        if ghdl_missing():
+            step("ghdl is not installed on this host")
+            expect("UNVERIFIED").to_contain("UNVERIFIED")
+        else:
+            step("Simulate with the key comparison sabotaged (any response authenticates)")
+            val out = simulate("tb_auth_gate", "bypass-key")
+
+            step("the wrong-key rejection check must now FAIL — a positive-path-only gate would pass this mutant")
+            expect(out).to_contain("CHECK3 FAIL")
+
+            step("the mutant must not reach the pass marker")
+            expect(out).to_contain("assertion failed")
+
+    it "sabotage: bypassing the SBA deny branch turns the gate red":
+        # @req REQ-SSPEC-LIB
+        step("sabotage: bypassing the SBA deny branch turns the gate red")
+        if ghdl_missing():
+            step("ghdl is not installed on this host")
+            expect("UNVERIFIED").to_contain("UNVERIFIED")
+        else:
+            step("Simulate with the auth-gate deny branch disabled (SBA always allowed)")
+            val out = simulate("tb_auth_gate", "bypass-gate")
+
+            step("unauthenticated SBA must now start a bus access — the non-vacuous assert fires")
+            expect(out).to_contain("SBA bus access started while unauthenticated")
+
+            step("the mutant must not reach the pass marker")
+            expect(out).to_contain("assertion failed")
+
+    it "neighboring JTAG debug testbenches still pass with the auth gate in place (regression)":
+        # @req REQ-SSPEC-LIB
+        step("neighboring JTAG debug testbenches still pass with the auth gate in place")
+        if ghdl_missing():
+            step("ghdl is not installed on this host")
+            expect("UNVERIFIED").to_contain("UNVERIFIED")
+        else:
+            step("tb_debug_module (STAGE2)")
+            expect(simulate("tb_debug_module", "no")).to_contain("JTAG STAGE2 PASS")
+
+            step("tb_abstract_cmds (STAGE3)")
+            expect(simulate("tb_abstract_cmds", "no")).to_contain("JTAG STAGE3 PASS")
+
+            step("tb_debug_csrs (STAGE4)")
+            expect(simulate("tb_debug_csrs", "no")).to_contain("JTAG STAGE4 PASS")
+
+            step("tb_sba (STAGE5, now authenticates before touching the bus)")
+            expect(simulate("tb_sba", "no")).to_contain("JTAG STAGE5 PASS")

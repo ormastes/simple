@@ -1,0 +1,56 @@
+# @cover scripts/check/check-llm-caret-native-closure.shs
+# @req REQ-LLM-CARET-FULL-003
+"""
+# LLM Caret Native Closure: Phase-3 Gate
+
+A missing simple-core archive or self-hosted runtime is an environment gap
+(BLOCKED, exit 6) only while phase 3 is not declared complete. With
+`SIMPLE_PHASE3_COMPLETE=1` the same absence is a release failure (FAIL, exit 1).
+Each scenario executes the real checker with a private artifact root.
+"""
+
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{process_run_timeout}
+
+struct ClosureGateRun:
+    stdout: text
+    exit_code: i32
+
+fn run_closure_gate(case_name: text, phase3: bool, core_present: bool) -> ClosureGateRun:
+    val root = "build/test-artifacts/01_unit/llm_caret_closure_phase3_gate/" + case_name
+    var script = "set -u; rm -rf '" + root + "'; mkdir -p '" + root + "'; unset SIMPLE_SIMPLE_CORE_PATH SIMPLE_CORE_RUNTIME_PATH SIMPLE_PHASE3_COMPLETE; "
+    if core_present:
+        script = script + ": > '" + root + "/libsimple_core.a'; export SIMPLE_SIMPLE_CORE_PATH='" + root + "/libsimple_core.a'; export SIMPLE_CARET_RUNTIME_PATH='" + root + "/no-such-runtime'; "
+    if phase3:
+        script = script + "export SIMPLE_PHASE3_COMPLETE=1; "
+    script = script + "SIMPLE_CARET_ARTIFACT_ROOT='" + root + "/out' sh scripts/check/check-llm-caret-native-closure.shs --check"
+    val (stdout, _stderr, exit_code) = process_run_timeout("sh", ["-c", script], 120000)
+    ClosureGateRun(stdout: stdout, exit_code: exit_code)
+
+describe "LLM Caret native closure phase-3 gate":
+    it "reports a missing core archive as BLOCKED before phase 3 is complete":
+        step("Run the checker with no core archive and no phase-3 declaration")
+        val run = run_closure_gate("core-pre", false, false)
+        expect(run.exit_code).to_equal(6)
+        expect(run.stdout.contains("closure_status=BLOCKED")).to_equal(true)
+        expect(run.stdout.contains("simple_core_archive_not_supplied")).to_equal(true)
+
+    it "fails a missing core archive once phase 3 is declared complete":
+        step("Run the checker with no core archive and SIMPLE_PHASE3_COMPLETE=1")
+        val run = run_closure_gate("core-post", true, false)
+        expect(run.exit_code).to_equal(1)
+        expect(run.stdout.contains("closure_status=FAIL")).to_equal(true)
+        expect(run.stdout.contains("simple_core_archive_not_supplied")).to_equal(true)
+
+    it "reports a missing self-hosted runtime as BLOCKED before phase 3 is complete":
+        step("Supply a core archive but point the runtime at a missing path")
+        val run = run_closure_gate("runtime-pre", false, true)
+        expect(run.exit_code).to_equal(6)
+        expect(run.stdout.contains("self_hosted_runtime_missing_or_not_executable")).to_equal(true)
+
+    it "fails a missing self-hosted runtime once phase 3 is declared complete":
+        step("Same missing runtime with SIMPLE_PHASE3_COMPLETE=1")
+        val run = run_closure_gate("runtime-post", true, true)
+        expect(run.exit_code).to_equal(1)
+        expect(run.stdout.contains("closure_status=FAIL")).to_equal(true)
+        expect(run.stdout.contains("self_hosted_runtime_missing_or_not_executable")).to_equal(true)

@@ -1,6 +1,16 @@
 # A naked `case StructName(field):` pattern matched against an `Option<StructName>` value always falls to the wildcard arm
 ## Closed 2026-09-16 — ...y this naked-pattern shape and was fixed in lane SYM0 (see `hir_get_symbol_id_zero_returns
 
+**Re-verified 2026-11-25** (release/1.0.0 @ a19165ae174, Windows, pinned
+`bin/simple.exe` Rust seed v1.0.0-rc.1, `--mode=interpreter`): the general
+defect class is fixed, not just the confirmed site — an isolated probe of
+the exact doc shape (`fn find_it() -> PId?:` returning `PId(id: 1)`, then
+`match id: case PId(raw): ... case _: ...`) now takes the naked-pattern arm
+and prints `naked-matched 1` instead of falling to the wildcard. The
+originally confirmed site (`SymbolTable.get_symbol(id: SymbolId?)`) no
+longer exists in that form in `src/compiler/20.hir/hir_types.spl` (file
+restructured since).
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
 fresh dated repro if the symptom returns.

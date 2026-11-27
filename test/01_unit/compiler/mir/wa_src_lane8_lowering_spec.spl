@@ -1,0 +1,121 @@
+use std.spec
+use std.nogc_sync_mut.io_runtime.{file_read}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirConst}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_lowering.*
+use compiler.mir.mir_instructions.{
+    BlockId,
+    LocalId,
+    MirBlock,
+    MirConstValue,
+    MirInst,
+    MirInstKind,
+    MirModule,
+    MirTerminator,
+    MirType,
+    MirTypeKind,
+    mir_operand_const_int
+}
+use compiler.mir_opt.var_reassign_ssa.{ssa_reassigned_locals_for_blocks}
+
+fn _has_array_static(mir_mod: MirModule, fragment: text) -> bool:
+    for sym_id in mir_mod.statics.keys():
+        val st = mir_mod.statics[sym_id]
+        if st.name.contains(fragment):
+            match st.type_.kind:
+                case MirTypeKind.Array(_, _):
+                    return true
+                case MirTypeKind.Slice(_):
+                    return true
+                case _:
+                    ()
+    false
+
+describe "WA-S8 compiler lowering verification":
+
+    it "Bug #1: lowers module-static [text] array concatenation without HIR or MIR errors":
+        val src = "val _COMMON_KNOWN: [text] = [\"--json\", \"--repo\"]\npub val PR_CREATE_KNOWN: [text] = _COMMON_KNOWN + [\"--title\", \"--head\"]\nfn flag_count() -> i64:\n    PR_CREATE_KNOWN.len()\n"
+        val parsed = parse_full_frontend(src, "provider.spl", "provider", Logger.from_env())
+        var hir = HirLowering.with_filename("provider.spl")
+        val hir_mod: HirModule = hir.lower_module(parsed)
+        expect(hir.errors.len()).to_equal(0)
+
+        var mir = MirLowering.new(hir_mod.symbols)
+        val mir_mod: MirModule = mir.lower_module(hir_mod)
+        expect(mir.errors.len()).to_equal(0)
+        expect(_has_array_static(mir_mod, "PR_CREATE_KNOWN")).to_equal(true)
+
+        # Also verify cross-module provider binding resolves PR_CREATE_KNOWN as Array storage
+        var demanded: Dict<text, [i64]> = {}
+        demanded["provider::PR_CREATE_KNOWN"] = [9001]
+        var consumer_mir = MirLowering.new(hir_mod.symbols)
+        var prov_consts: [HirConst] = []
+        for c_id in hir_mod.constants.keys():
+            prov_consts.push(hir_mod.constants[c_id])
+        val found = consumer_mir.register_provider_global_bindings(
+            "provider",
+            hir_mod.symbols,
+            prov_consts,
+            demanded,
+            {}
+        )
+        expect(consumer_mir.errors.len()).to_equal(0)
+        expect(found.contains_key("provider::PR_CREATE_KNOWN")).to_equal(true)
+
+    it "Bug #2: lowers direct [u8] carrier call without [i64] widening errors":
+        val src = "extern fn rt_tls13_sha256(data: [u8]) -> [u8]\nfn hash_len(body: [u8]) -> i64:\n    val digest = rt_tls13_sha256(body)\n    digest.len()\n"
+        val parsed = parse_full_frontend(src, "minio_probe.spl", "minio_probe", Logger.from_env())
+        var hir = HirLowering.with_filename("minio_probe.spl")
+        val hir_mod: HirModule = hir.lower_module(parsed)
+        expect(hir.errors.len()).to_equal(0)
+
+        var mir = MirLowering.new(hir_mod.symbols)
+        val mir_mod: MirModule = mir.lower_module(hir_mod)
+        expect(mir.errors.len()).to_equal(0)
+        expect(mir_mod.functions.len()).to_be_greater_than(0)
+
+    it "Bug #3: ssa_reassigned_locals_for_blocks tracks multi-write sparse locals accurately":
+        val ty = MirType.i64()
+        val inst_zero_once = MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(0), ty), span: None)
+        val inst_sparse_a = MirInst(kind: MirInstKind.Const(LocalId(id: 500), MirConstValue.Int(1), ty), span: None)
+        val inst_sparse_b = MirInst(kind: MirInstKind.Copy(LocalId(id: 500), LocalId(id: 0)), span: None)
+        val inst_once_12 = MirInst(kind: MirInstKind.Const(LocalId(id: 12), MirConstValue.Int(2), ty), span: None)
+        val inst_cross_a = MirInst(kind: MirInstKind.Const(LocalId(id: 7), MirConstValue.Int(3), ty), span: None)
+        val inst_cross_b = MirInst(kind: MirInstKind.Copy(LocalId(id: 7), LocalId(id: 0)), span: None)
+
+        val b0 = MirBlock(
+            id: BlockId.new(0),
+            label: None,
+            instructions: [inst_zero_once, inst_sparse_a, inst_sparse_b, inst_once_12],
+            terminator: MirTerminator.Goto(BlockId.new(1))
+        )
+        val b1 = MirBlock(
+            id: BlockId.new(1),
+            label: None,
+            instructions: [inst_cross_a],
+            terminator: MirTerminator.Goto(BlockId.new(2))
+        )
+        val b2 = MirBlock(
+            id: BlockId.new(2),
+            label: None,
+            instructions: [inst_cross_b],
+            terminator: MirTerminator.Ret(Some(mir_operand_const_int(0)))
+        )
+
+        val reassigned = ssa_reassigned_locals_for_blocks([b0, b1, b2])
+        expect(reassigned.len()).to_equal(2)
+        expect(reassigned).to_contain(7)
+        expect(reassigned).to_contain(500)
+        expect(reassigned.contains(0)).to_equal(false)
+        expect(reassigned.contains(12)).to_equal(false)
+
+    it "Bug #4 and #5 guard: MirToLlvm array aggregate lowering still emits rt_array_push per element":
+        val agg_src = file_read("src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl")
+        expect(agg_src).to_contain("case Array(_):")
+        expect(agg_src).to_contain("rt_array_new")
+        expect(agg_src).to_contain("rt_array_push")

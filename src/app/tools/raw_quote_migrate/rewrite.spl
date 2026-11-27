@@ -1,0 +1,265 @@
+# raw_quote_migrate rewrite core (pure text transformation, no file I/O).
+#
+# Single quotes are becoming `char` only ('x'). Every single-quoted RAW STRING
+# literal is rewritten to r"..." (or r"""...""" when the content holds a `"`).
+#
+# Token discovery uses the real core lexer (compiler.frontend.core.lexer): a
+# single-quoted string is a StringLit token (kind 3) whose source slice starts
+# with `'`. Spans are CODEPOINT offsets (cur_start/pos), read through
+# lex_token_start_get / lex_token_end_get. No regex over source.
+#
+# Classification of 'x' (decided here, documented for the lane):
+#   The current lexer lexes 'x' exactly like 'xyz' (kind 3, no char token), so
+#   there is no lexer signal. A literal is CHAR-LIKE, and left untouched, iff
+#   its decoded content is exactly ONE Unicode scalar. Scalars are counted
+#   after escape decoding, never by bytes: 'e-acute' '한' emoji '\n' '\u{1F600}'
+#   '\'' '\\' are one scalar (kept); decomposed e+U+0301 and ZWJ emoji sequences
+#   are several scalars (converted). Unknown escapes ('\d') count as backslash
+#   plus the next char = 2 scalars, so they are converted (a regex fragment, not
+#   a char). '' (empty) is not a char and is converted to r"".
+#
+# Never rewritten, reported as skips: '''...''' (triple; counted), contents
+# holding \' (raw vs escaped meaning of the quote is ambiguous), contents holding
+# a triple double-quote or ending in a double quote (cannot be spelled as
+# r"""...""").
+#
+# NOTE: the core lexer DECODES escapes inside '...' (e.g. '\n' -> newline), while
+# the language guide says single quotes are raw. Converting keeps the bytes and
+# makes backslashes literal (guide semantics). Sites whose content contains a
+# backslash are counted as `escapes` so a reviewer can look at them; the
+# --skip-escapes flag leaves them unconverted.
+
+use compiler.frontend.core.lexer.{lexer_new, lex_next, lex_token_start_get, lex_token_end_get, lex_token_text}
+
+val TOK_STRING: i64 = 3
+val TOK_EOF_CODE: i64 = 190
+
+struct MigrateResult:
+    output: text
+    converted: i64
+    kept_char: i64
+    triple_kept: i64
+    escapes: i64
+    skipped: [text]
+    changed: bool
+
+struct TokenDump:
+    kinds: [i64]
+    texts: [text]
+    starts: [i64]
+    ends: [i64]
+
+fn _is_hex(ch: text) -> bool:
+    ch != "" and "0123456789abcdefABCDEF".contains(ch)
+
+fn _is_octal(ch: text) -> bool:
+    ch != "" and "01234567".contains(ch)
+
+fn _slice(cs: [text], a: i64, b: i64) -> text:
+    var out: [text] = []
+    var i = a
+    while i < b and i < cs.len():
+        out.push(cs[i])
+        i = i + 1
+    out.join("")
+
+# Number of Unicode scalars the content decodes to, saturating at 2.
+fn count_scalars(content: text) -> i64:
+    val cs: [text] = content.chars()
+    val n = cs.len()
+    var i = 0
+    var count = 0
+    while i < n:
+        if count >= 2:
+            return 2
+        val c = cs[i]
+        if c != "\\" or i + 1 >= n:
+            count = count + 1
+            i = i + 1
+            continue
+        val e = cs[i + 1]
+        if e == "n" or e == "t" or e == "r" or e == "\\" or e == "\"" or e == "'":
+            count = count + 1
+            i = i + 2
+        elif _is_octal(e):
+            var j = i + 2
+            var digits = 1
+            while j < n and digits < 3 and _is_octal(cs[j]):
+                j = j + 1
+                digits = digits + 1
+            count = count + 1
+            i = j
+        elif e == "x" and i + 2 < n and _is_hex(cs[i + 2]):
+            var j = i + 3
+            if j < n and _is_hex(cs[j]):
+                j = j + 1
+            count = count + 1
+            i = j
+        elif e == "u" and i + 2 < n and cs[i + 2] == "{":
+            var j = i + 3
+            while j < n and _is_hex(cs[j]):
+                j = j + 1
+            if j < n and cs[j] == "}" and j > i + 3:
+                count = count + 1
+                i = j + 1
+            else:
+                count = count + 2
+                i = i + 2
+        else:
+            count = count + 2
+            i = i + 2
+    count
+
+fn dump_tokens(src: text) -> TokenDump:
+    lexer_new(src)
+    var kinds: [i64] = []
+    var texts: [text] = []
+    var starts: [i64] = []
+    var ends: [i64] = []
+    var guard = 0
+    while guard < 50000000:
+        val k = lex_next()
+        kinds.push(k)
+        texts.push(lex_token_text())
+        starts.push(lex_token_start_get())
+        ends.push(lex_token_end_get())
+        if k == TOK_EOF_CODE:
+            break
+        guard = guard + 1
+    TokenDump(kinds: kinds, texts: texts, starts: starts, ends: ends)
+
+# Split a single-quoted token slice `'body'suffix` into [body, suffix];
+# returns [] when the slice is not a well-formed single-quoted literal.
+fn _split_quoted(tok: text) -> [text]:
+    val cs: [text] = tok.chars()
+    val n = cs.len()
+    if n < 2 or cs[0] != "'":
+        return []
+    var i = 1
+    var body: [text] = []
+    while i < n:
+        val c = cs[i]
+        if c == "'":
+            return [body.join(""), _slice(cs, i + 1, n)]
+        if c == "\\" and i + 1 < n:
+            body.push(c)
+            body.push(cs[i + 1])
+            i = i + 2
+        else:
+            body.push(c)
+            i = i + 1
+    []
+
+# Build the r"..." spelling for body, or "" when it cannot be spelled.
+fn raw_spelling(body: text, suffix: text) -> text:
+    if body.contains("\""):
+        if body.contains("\"\"\"") or body.ends_with("\""):
+            return ""
+        return "r\"\"\"" + body + "\"\"\"" + suffix
+    "r\"" + body + "\"" + suffix
+
+fn migrate_source(src: text, skip_escapes: bool) -> MigrateResult:
+    val d = dump_tokens(src)
+    val sc: [text] = src.chars()
+    var pieces: [text] = []
+    var cursor = 0
+    var converted = 0
+    var kept_char = 0
+    var triple_kept = 0
+    var escapes = 0
+    var skipped: [text] = []
+    var idx = 0
+    while idx < d.kinds.len():
+        if d.kinds[idx] != TOK_STRING:
+            idx = idx + 1
+            continue
+        val s = d.starts[idx]
+        val e = d.ends[idx]
+        val tok = _slice(sc, s, e)
+        if not tok.starts_with("'"):
+            idx = idx + 1
+            continue
+        val site = "char-offset " + s.to_text()
+        if tok.starts_with("'''"):
+            triple_kept = triple_kept + 1
+            idx = idx + 1
+            continue
+        val parts = _split_quoted(tok)
+        if parts.len() != 2:
+            skipped.push(site + " reason=malformed")
+            idx = idx + 1
+            continue
+        val body = parts[0]
+        val suffix = parts[1]
+        if count_scalars(body) == 1:
+            kept_char = kept_char + 1
+            idx = idx + 1
+            continue
+        if body.contains("\\'"):
+            skipped.push(site + " reason=escaped-quote")
+            idx = idx + 1
+            continue
+        val spelled = raw_spelling(body, suffix)
+        if spelled == "":
+            skipped.push(site + " reason=double-quote-unspellable")
+            idx = idx + 1
+            continue
+        if body.contains("\\"):
+            escapes = escapes + 1
+            if skip_escapes:
+                skipped.push(site + " reason=backslash")
+                idx = idx + 1
+                continue
+        pieces.push(_slice(sc, cursor, s))
+        pieces.push(spelled)
+        cursor = e
+        converted = converted + 1
+        idx = idx + 1
+    if converted == 0:
+        return MigrateResult(output: src, converted: 0, kept_char: kept_char, triple_kept: triple_kept, escapes: escapes, skipped: skipped, changed: false)
+    pieces.push(_slice(sc, cursor, sc.len()))
+    MigrateResult(output: pieces.join(""), converted: converted, kept_char: kept_char, triple_kept: triple_kept, escapes: escapes, skipped: skipped, changed: true)
+
+fn _string_slices(d: TokenDump, sc: [text]) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < d.kinds.len():
+        if d.kinds[i] == TOK_STRING:
+            out.push(_slice(sc, d.starts[i], d.ends[i]))
+        else:
+            out.push("")
+        i = i + 1
+    out
+
+# Re-lex both sources. Returns "" when equivalent, else the first mismatch.
+# Token kind sequences must match; a converted token must carry exactly the
+# raw content between the quotes; every other token must keep its text.
+fn verify_rewrite(before: text, after: text) -> text:
+    val b = dump_tokens(before)
+    val b_toks = _string_slices(b, before.chars())
+    val a = dump_tokens(after)
+    val a_toks = _string_slices(a, after.chars())
+    if b.kinds.len() != a.kinds.len():
+        return "token count differs: " + b.kinds.len().to_text() + " vs " + a.kinds.len().to_text()
+    var i = 0
+    while i < b.kinds.len():
+        if b.kinds[i] != a.kinds[i]:
+            return "token kind differs at #" + i.to_text() + ": " + b.kinds[i].to_text() + " vs " + a.kinds[i].to_text()
+        val bt = b_toks[i]
+        if b.kinds[i] == TOK_STRING and bt.starts_with("'") and not bt.starts_with("'''"):
+            val aft = a_toks[i]
+            if aft == bt:
+                i = i + 1
+                continue
+            val parts = _split_quoted(bt)
+            if parts.len() != 2:
+                return "unparseable original at #" + i.to_text()
+            if not aft.starts_with("r\""):
+                return "converted token is not a raw string at #" + i.to_text() + ": " + aft
+            if a.texts[i] != parts[0]:
+                return "raw value differs at #" + i.to_text() + ": <" + a.texts[i] + "> vs <" + parts[0] + ">"
+        else:
+            if b.texts[i] != a.texts[i]:
+                return "token text differs at #" + i.to_text() + ": <" + b.texts[i] + "> vs <" + a.texts[i] + ">"
+        i = i + 1
+    ""

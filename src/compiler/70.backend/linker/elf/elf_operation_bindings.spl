@@ -9,8 +9,8 @@ use std.mdsocpp.model.{CapsuleDescriptorV1, MdsocppFacetOfferV1, MdsocppFacetReq
     MdsocppClosure, MdsocppSealPolicyV1, MdsocppGenerationReceiptV1, MdsocppProfile}
 use std.mdsocpp.seal.{mdsocpp_seal_v1}
 use std.io_runtime.{file_read_bytes_result}
-use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes}
-use compiler.backend.linker.elf.elf_exec_writer.{ElfOutSec, ElfExecPlan, elf_exec_plan,
+use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes, reloc_patch_value}
+use compiler.backend.linker.elf.elf_exec_writer.{ElfOutSec, ElfExecPlan, elf_exec_plan, elf_exec_plan_class_x,
     elf_write_image_bytes, SHT_NOBITS_E, PT_LOAD}
 
 pub const ELF_OPERATION_RELOCATE: u32 = 1
@@ -20,10 +20,13 @@ pub const ELF_OPERATION_READ_BYTES: u32 = 4
 
 pub struct ElfOperationProviderV1:
     descriptor: CapsuleDescriptorV1
-    relocate: Option<fn(RelocArch, [i64], i64, i64, i64, i64, i64) -> Result<[i64], text>> = nil
-    layout: Option<fn([ElfOutSec], i64, i64) -> Result<ElfExecPlan, text>> = nil
-    write_image: Option<fn(i64, i64, i64, ElfExecPlan, [[u8]]) -> Result<[u8], text>> = nil
-    read_bytes: Option<fn(text) -> Result<[u8], text>> = nil
+    relocate: Option<fn(RelocArch, [i64], i64, i64, i64, i64, i64) -> Result<[i64], text>> = None
+    layout: Option<fn([ElfOutSec], i64, i64) -> Result<ElfExecPlan, text>> = None
+    # Optional companion of `layout` (same provider, same LAYOUT facet): the
+    # same plan plus n reserved trailing PT_RISCV_ATTRIBUTES slots, as ld.lld.
+    layout_reserving: Option<fn([ElfOutSec], i64, i64, i64) -> Result<ElfExecPlan, text>> = None
+    write_image: Option<fn(i64, i64, i64, ElfExecPlan, [[u8]]) -> Result<[u8], text>> = None
+    read_bytes: Option<fn(text) -> Result<[u8], text>> = None
 
 pub struct ElfComposedImageV1:
     image: [u8]
@@ -61,6 +64,20 @@ fn _elf_builtin_relocate(arch: RelocArch, bytes: [i64], offset: i64,
     if not checked.success: return Err(checked.error)
     Ok(reloc_patch_bytes(arch, bytes, offset, kind, symbol, addend, place))
 
+# workaround: doc/08_tracking/bug/native_result_call_cost_2026-11-16.md
+# _elf_builtin_relocate without Result: one reloc_apply, patched window or []
+# on reject.
+fn _elf_builtin_relocate_fast(arch: RelocArch, bytes: [i64], offset: i64,
+        kind: i64, symbol: i64, addend: i64, place: i64) -> [i64]:
+    val checked = reloc_apply(arch, bytes, offset, kind, symbol, addend, place)
+    if not checked.success: return []
+    reloc_patch_value(arch, bytes, offset, kind, symbol, addend, place, checked.value)
+
+@allow(primitive_api)  # provider callback shape mirrors elf_exec_plan
+fn _elf_builtin_layout_reserving(secs: [ElfOutSec], base: i64, page: i64,
+        attr_phdrs: i64) -> Result<ElfExecPlan, text>:
+    elf_exec_plan_class_x(secs, base, page, false, attr_phdrs)
+
 fn _elf_builtin_write(kind: i64, machine: i64, entry: i64,
         plan: ElfExecPlan, contents: [[u8]]) -> Result<[u8], text>:
     Ok(elf_write_image_bytes(kind, machine, entry, plan, contents))
@@ -71,7 +88,7 @@ pub fn elf_builtin_operation_providers_v1() -> [ElfOperationProviderV1]:
         relocate: Some(_elf_builtin_relocate)),
      ElfOperationProviderV1(descriptor: elf_operation_descriptor_v1(elf_operation_capsule_id_v1(3),
         [MdsocppFacetOfferV1(facet_id: elf_operation_facet_id_v1(ELF_OPERATION_LAYOUT))]),
-        layout: Some(elf_exec_plan)),
+        layout: Some(elf_exec_plan), layout_reserving: Some(_elf_builtin_layout_reserving)),
      ElfOperationProviderV1(descriptor: elf_operation_descriptor_v1(elf_operation_capsule_id_v1(4),
         [MdsocppFacetOfferV1(facet_id: elf_operation_facet_id_v1(ELF_OPERATION_WRITE_IMAGE))]),
         write_image: Some(_elf_builtin_write))]
@@ -190,14 +207,26 @@ fn _elf_writer_shape(image: [u8], kind: i64, machine: i64, entry: i64,
 pub class ElfSealedOperationsV1:
     relocate_operation: fn(RelocArch, [i64], i64, i64, i64, i64, i64) -> Result<[i64], text>
     layout_operation: fn([ElfOutSec], i64, i64) -> Result<ElfExecPlan, text>
+    layout_reserving_operation: Option<fn([ElfOutSec], i64, i64, i64) -> Result<ElfExecPlan, text>> = None
     writer_operation: fn(i64, i64, i64, ElfExecPlan, [[u8]]) -> Result<[u8], text>
     receipt: MdsocppGenerationReceiptV1
-    read_operation: Option<fn(text) -> Result<[u8], text>> = nil
+    read_operation: Option<fn(text) -> Result<[u8], text>> = None
+    # Set only by elf_builtin_*operations_v1 after sealing the unmodified
+    # builtin providers, so relocate_fast never bypasses a caller's callback.
+    builtin_relocate: bool = false
 
-    pub fn has_byte_source() -> bool: self.read_operation != nil
+    pub fn has_byte_source() -> bool: self.read_operation.is_some()
+
+    # workaround: doc/08_tracking/bug/native_result_call_cost_2026-11-16.md
+    pub fn relocate_fast(arch: RelocArch, bytes: [i64], offset: i64, kind: i64,
+            symbol: i64, addend: i64, place: i64) -> [i64]:
+        """Patched window like relocate(), or [] when the caller must use
+        relocate() (non-builtin relocation operation, or a reject)."""
+        if not self.builtin_relocate or bytes.len() == 0: return []
+        _elf_builtin_relocate_fast(arch, bytes, offset, kind, symbol, addend, place)
 
     pub fn read_bytes(path: text) -> Result<[u8], text>:
-        if self.read_operation == nil: return Err("ELF byte-source operation is not bound")
+        if self.read_operation.is_none(): return Err("ELF byte-source operation is not bound")
         if path == "" or path.contains("\0"): return Err("ELF byte-source path is empty or contains NUL")
         val read = self.read_operation.unwrap()
         val bytes = read(path)?
@@ -213,6 +242,28 @@ pub class ElfSealedOperationsV1:
     pub fn layout(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan, text>:
         val plan = self.layout_operation(secs, base, page)?
         _elf_plan_shape(secs, plan)?
+        Ok(plan)
+
+    # reason: boolean predicate over the sealed optional layout companion
+    # @allow(primitive_api)
+    pub fn has_reserving_layout() -> bool: self.layout_reserving_operation.is_some()
+
+    # @allow(primitive_api)  # same raw ELF base/page/count words as layout()
+    pub fn layout_reserving(secs: [ElfOutSec], base: i64, page: i64, attr_phdrs: i64) -> Result<ElfExecPlan, text>:
+        """layout() plus attr_phdrs zero-extent trailing PT_RISCV_ATTRIBUTES slots.
+        A provider without the reserving companion gets plain layout() (no slot)."""
+        if attr_phdrs == 0 or self.layout_reserving_operation.is_none(): return self.layout(secs, base, page)
+        if attr_phdrs < 0 or attr_phdrs > 1: return Err("ELF reserving layout slot count is invalid")
+        val reserve = self.layout_reserving_operation.unwrap()
+        val plan = reserve(secs, base, page, attr_phdrs)?
+        _elf_plan_shape(secs, plan)?
+        val n = plan.segments.len()
+        if n < attr_phdrs: return Err("ELF reserving layout dropped its slots")
+        for index in (n - attr_phdrs)..n:
+            val s = plan.segments[index]
+            if s.p_type != 0x70000003 or s.p_flags != 4 or s.p_align != 1 or s.p_offset != 0 or
+                    s.p_vaddr != 0 or s.p_paddr != 0 or s.p_filesz != 0 or s.p_memsz != 0:
+                return Err("ELF reserving layout slot is not an empty PT_RISCV_ATTRIBUTES")
         Ok(plan)
 
     pub fn write_image(kind: i64, machine: i64, entry: i64, plan: ElfExecPlan,
@@ -251,9 +302,11 @@ fn _elf_seal_operations_v1(providers: [ElfOperationProviderV1],
                     seen[index] = true
                     found = true
             if not found: return Err("ELF unknown operation offer")
-        if seen[0] != (provider.relocate != nil) or seen[1] != (provider.layout != nil) or
-                seen[2] != (provider.write_image != nil) or seen[3] != (provider.read_bytes != nil):
+        if seen[0] != (provider.relocate.is_some()) or seen[1] != (provider.layout.is_some()) or
+                seen[2] != (provider.write_image.is_some()) or seen[3] != (provider.read_bytes.is_some()):
             return Err("ELF operation offer and typed callback disagree")
+        if provider.layout_reserving.is_some() and provider.layout.is_none():
+            return Err("ELF reserving layout requires the layout operation")
         if not seen[0] and not seen[1] and not seen[2] and not seen[3]: return Err("ELF operation provider has no operation")
         descriptors.push(provider.descriptor)
     var engine = elf_operation_descriptor_v1(elf_operation_capsule_id_v1(1), [])
@@ -282,14 +335,21 @@ fn _elf_seal_operations_v1(providers: [ElfOperationProviderV1],
             if kpf_id128_equal(binding.facet_id, elf_operation_facet_id_v1(ELF_OPERATION_READ_BYTES)): source_slot = binding.provider_slot as i64
     if relocation_slot < 0 or layout_slot < 0 or writer_slot < 0: return Err("ELF operation binding is missing")
     if requires_source and source_slot < 0: return Err("ELF byte-source binding is missing")
-    val read_operation = if source_slot >= 0: providers[source_slot].read_bytes else: nil
+    val read_operation = if source_slot >= 0: providers[source_slot].read_bytes else: None
     Ok(ElfSealedOperationsV1(relocate_operation: providers[relocation_slot].relocate.unwrap(),
         layout_operation: providers[layout_slot].layout.unwrap(),
+        layout_reserving_operation: providers[layout_slot].layout_reserving,
         writer_operation: providers[writer_slot].write_image.unwrap(), receipt: sealed.receipt,
         read_operation: read_operation))
 
+fn _elf_with_builtin_relocate(sealed: ElfSealedOperationsV1) -> ElfSealedOperationsV1:
+    var ops = sealed
+    ops.builtin_relocate = true
+    ops
+
 pub fn elf_builtin_operations_v1() -> Result<ElfSealedOperationsV1, text>:
-    elf_seal_operations_v1(elf_builtin_operation_providers_v1(), elf_operation_policy_v1())
+    val sealed = elf_seal_operations_v1(elf_builtin_operation_providers_v1(), elf_operation_policy_v1())?
+    Ok(_elf_with_builtin_relocate(sealed))
 
 pub fn elf_builtin_file_operation_providers_v1() -> [ElfOperationProviderV1]:
     var providers = elf_builtin_operation_providers_v1()
@@ -300,7 +360,8 @@ pub fn elf_builtin_file_operation_providers_v1() -> [ElfOperationProviderV1]:
     providers
 
 pub fn elf_builtin_file_operations_v1() -> Result<ElfSealedOperationsV1, text>:
-    elf_seal_file_operations_v1(elf_builtin_file_operation_providers_v1(), elf_operation_policy_v1())
+    val sealed = elf_seal_file_operations_v1(elf_builtin_file_operation_providers_v1(), elf_operation_policy_v1())?
+    Ok(_elf_with_builtin_relocate(sealed))
 
 export ElfOperationProviderV1, ElfSealedOperationsV1, ElfComposedImageV1
 export elf_operation_facet_id_v1, elf_operation_capsule_id_v1, elf_operation_descriptor_v1, elf_operation_policy_v1

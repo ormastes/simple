@@ -42,7 +42,7 @@ use os.compositor.host_wm_theme_bootstrap.{
     install_default_host_wm_theme, apply_host_wm_css_theme_override,
     active_host_wm_theme_snapshot
 }
-use std.io_runtime.{file_read}
+use std.io_runtime.{file_read, thread_sleep}
 use common.ui.theme_package_wire.{
     theme_package_install_wire_v1_encode
 }
@@ -60,6 +60,7 @@ use os.compositor.shared_mdi_setup.{
 }
 use common.ui.window_scene.{shared_wm_motion_background_next_due_micros, shared_wm_motion_dirty_due, shared_wm_motion_background_consume_due}
 use common.ui.window_scene_draw_ir.{WM_BROWSER_TOOLBAR_HEIGHT}
+use os.hosted.hosted_remote_app_pump.{hosted_remote_app_pump_open, hosted_remote_app_pump_step, hosted_remote_app_pump_close, hosted_remote_app_pump_pointer_move, hosted_remote_app_pump_pointer_button, hosted_remote_app_pump_key}
 use std.nogc_sync_mut.io.window_winit.{
     winit_event_text,
     rt_winit_event_loop_new, rt_winit_window_new,
@@ -757,12 +758,21 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     # back to a full render_frame() rather than risking an incorrect partial
     # paint.
     var last_motion_fired_due: i64 = -1
+    # Remote application presentation: off unless SIMPLE_HOSTED_WM_REMOTE_APPS=1.
+    var remote_pump = hosted_remote_app_pump_open()
+    val has_deadline = live_proof or evidence.enabled
     val end_at = rt_time_now_micros() + 300000000
-    while running and rt_time_now_micros() < end_at:
+    while running and (not has_deadline or rt_time_now_micros() < end_at):
+        var had_winit_event = false
         var other_dirty = false
         var motion_dirty = false
         var evidence_capture_requested = false
         val now_micros = rt_time_now_micros()
+        val remote_step = hosted_remote_app_pump_step(comp, remote_pump, now_micros)
+        comp = remote_step.comp
+        remote_pump = remote_step.pump
+        if remote_step.handled > 0:
+            other_dirty = true
         val wall_clock_ms = rt_time_now_unix_micros() / 1000
         if (browser_renderer_close_pending and
             now_micros >= browser_renderer_close_retry_at_micros):
@@ -1024,6 +1034,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
             shared_wm_motion_background_consume_due(motion_due)
         var ev = rt_winit_event_loop_poll_events(el, 1)
         while ev != 0:
+            had_winit_event = true
             val input_received_us = rt_time_now_micros()
             val kind = rt_winit_event_get_type(ev)
             if kind == EVT_CLOSE:
@@ -1074,11 +1085,15 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 val mx = (rt_winit_event_mouse_x_milli(ev) / 1000).to_i32()
                 val my = (rt_winit_event_mouse_y_milli(ev) / 1000).to_i32()
                 comp.pointer_move(mx, my)
+                remote_pump = hosted_remote_app_pump_pointer_move(comp, remote_pump, mx, my).pump
                 # GUI-session content lane: mirror the baremetal
                 # dispatch_gui_pointer_event move semantics (captured target
                 # wins; otherwise the client-area hit under the pointer).
-                if (comp.gui_pointer_capture_window_id > 0 or
-                    comp.gui_content_window_ids.len() > 0):
+                # Skip client hover forwarding while actively dragging or resizing
+                # a WM window so window moves do not leak hover into client views.
+                if (not comp.dragging and not comp.resizing and
+                    (comp.gui_pointer_capture_window_id > 0 or
+                     comp.gui_content_window_ids.len() > 0)):
                     var gui_move_window_id = comp.gui_pointer_capture_window_id
                     if gui_move_window_id == 0:
                         val gui_move_target = comp.content_target(mx, my)
@@ -1099,6 +1114,10 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
             elif kind == EVT_MOUSE_BUTTON:
                 val button = rt_winit_event_mouse_button(ev)
                 val pressed = rt_winit_event_mouse_pressed(ev) != 0
+                val was_wm_interaction = (
+                    comp.dragging or comp.resizing or
+                    comp.armed_chrome_target != ""
+                )
                 val wm_close_window_id = (
                     host_compositor_close_release_target(
                         comp, button, pressed
@@ -1138,6 +1157,11 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 # the event is observable even though no chrome action consumes
                 # them yet (parity with ui.browser/app.spl's unconditional forward).
                 comp.handle_mouse_button(button, pressed)
+                remote_pump = hosted_remote_app_pump_pointer_button(comp, remote_pump, button, pressed, comp.pointer_x, comp.pointer_y).pump
+                val is_wm_interaction = (
+                    was_wm_interaction or comp.dragging or comp.resizing or
+                    comp.armed_chrome_target != ""
+                )
                 if (allow_wm_close and wm_close_window_id > 0 and
                     host_compositor_find_window_index(
                         comp, wm_close_window_id
@@ -1162,7 +1186,23 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         )
                         browser_profile_window_id = 0
                 input_receipt = host_wm_input_record_pointer_button(input_receipt, button, pressed)
-                if button == 0 and chrome_target != nil:
+                if button == 0 and not pressed and comp.gui_pointer_capture_window_id > 0:
+                    val capture_wid = comp.gui_pointer_capture_window_id
+                    semantic_event_id = semantic_event_id + 1
+                    val gui_handled = comp.dispatch_gui_pointer_event(
+                        capture_wid, comp.pointer_x, comp.pointer_y, "left", "up"
+                    )
+                    input_receipt = host_wm_input_record_semantic(
+                        input_receipt, semantic_event_id, capture_wid,
+                        "gui:session", if gui_handled: 1 else: 0,
+                        comp.render_revision,
+                        if gui_handled: "" else: "gui-dispatch-rejected",
+                        input_received_us
+                    )
+                elif button == 0 and is_wm_interaction:
+                    web_sessions.cancel_pointer_state()
+                    browser_pressed_control = ""
+                elif button == 0 and chrome_target != nil:
                     val target = chrome_target.unwrap()
                     semantic_event_id = semantic_event_id + 1
                     var action_reason = ""
@@ -1502,6 +1542,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 key_events = key_events + 1
                 val key_state = if pressed_key: "down" else: "up"
                 print "[hosted-wm] event key count={key_events} state={key_state} scancode={scan_code} keycode={keycode}"
+                remote_pump = hosted_remote_app_pump_key(comp, remote_pump, keycode, pressed_key).pump
                 var semantic_consumed = false
                 val focused = host_compositor_focused_window_id(comp)
                 if focused == browser_profile_window_id:
@@ -2083,6 +2124,9 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 running = false
                 continue
 
+        if (not had_winit_event and not other_dirty and not motion_dirty and
+            not browser_renderer_ready and warmup_frames >= 12):
+            thread_sleep(4)
         if evidence.enabled and evidence_nonce > 0 and (other_dirty or evidence_capture_requested):
             val evidence_pixels = comp.pure_simple_pixel_buffer()
             val evidence_backend = HostedWinitBufferBackend.implementation_name()
@@ -2104,6 +2148,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 running = false
             else:
                 print "[hosted-wm] evidence-ack nonce={evidence_nonce} phase={evidence_phase} surface_phase={surface.phase} revision={comp.render_revision} semantic_event_id={presented_event_id} mutation_revision={presented_mutation_revision} {raster.frame_provenance()} {raster.font_provenance()}"
+    val _ = hosted_remote_app_pump_close(remote_pump)
     var shared_hsts_closed = true
     if browser_renderers.hsts_dirty():
         if browser_profile == nil:

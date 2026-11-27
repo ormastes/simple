@@ -1,0 +1,40 @@
+# Caller-created manifests here are intentionally untrusted negative controls.
+# Complete coverage labels NEVER stand in for actual owner/issuer evidence.
+use std.scv.snapshot_v2.{scv_snapshot_freeze_v2, scv_snapshot_file_v2}
+use std.scv.source_witness_v1.{scv_snapshot_lookup_v2, scv_verify_source_witnesses_v1}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.*
+use compiler.common.cache_contract.scv_semantic_validation_v1.*
+use compiler.driver.cache.gateway.semantic_scope_live_owner_v2.{SemanticScopeLiveOwnerV2}
+use compiler.driver.cache.gateway.scv_semantic_validation_adapter_v1.{ScvSemanticValidationAdapterV1}
+
+pub fn setup_scv_semantic_bridge_request_v1() -> ScvSemanticValidationRequestV1:
+    val bytes = [102u8, 110u8, 32u8, 97u8, 10u8]
+    val snapshot = scv_snapshot_freeze_v2("declared-source-files-v2",
+        [scv_snapshot_file_v2("src/a.spl", bytes)], ["src"], 1, 1, "complete", []).unwrap()
+    val witnesses = [scv_snapshot_lookup_v2(snapshot, "src/a.spl").unwrap()]
+    val action = sha256_text("semantic-bridge-negative-control-action")
+    val profile = sha256_text("semantic-bridge-negative-control-profile")
+    val consumer = SemanticQueryKeyV1(kind: "obj.emit", stable_entity_id: "src/a.spl",
+        semantic_profile_digest: profile, parameter_digest: sha256_text("object-arguments"))
+    val producer = SemanticQueryKeyV1(kind: "tldr.symbolic", stable_entity_id: "src/a.spl",
+        semantic_profile_digest: profile, parameter_digest: sha256_text("symbolic-arguments"))
+    val read = SemanticQueryReadV1(producer: producer, consumer: consumer, facet: "template-summary",
+        ordinal: 0, consumed_fingerprint: sha256_text("untrusted-fingerprint"),
+        witness_digest: sha256_text("untrusted-witness"), partition_id: "src/a.spl",
+        completeness: SemanticCoverageV1.Complete)
+    val manifest = SemanticQueryReadManifestV1(schema: 1, consumer: consumer, ordered_reads: [read])
+    ScvSemanticValidationRequestV1(requested_snapshot: snapshot, source_witnesses: witnesses,
+        source_receipt: scv_verify_source_witnesses_v1(snapshot, action, witnesses).unwrap(),
+        source_path: "src/a.spl", source_content_digest: sha256_u8_hex(bytes), action_digest: action,
+        recorded_manifest: manifest, recorded_manifest_digest: sha256_u8_hex(semantic_query_read_manifest_encode_v1(manifest)),
+        semantic_generation_digest: sha256_text("untrusted-semantic-generation"),
+        semantic_profile_digest: profile, max_reads: 16, max_bytes: 1000000)
+
+pub fn setup_scv_semantic_bridge_adapter_v1() -> ScvSemanticValidationAdapterV1:
+    ScvSemanticValidationAdapterV1(owner: SemanticScopeLiveOwnerV2.create(), gateway: nil, context: nil)
+
+pub fn refresh_scv_semantic_manifest_digest_v1(request: ScvSemanticValidationRequestV1) -> ScvSemanticValidationRequestV1:
+    var next = request
+    next.recorded_manifest_digest = sha256_u8_hex(semantic_query_read_manifest_encode_v1(next.recorded_manifest))
+    next

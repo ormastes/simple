@@ -1,0 +1,91 @@
+# AUTHORED_UNRUN. Actual in-process dispatch, not socket/process acceptance.
+# Configured capability data below is codec input only, never an owner grant.
+use std.spec.{describe, it, expect, step}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use os.apps.smux.server.smux_server_dispatch
+use os.apps.smux.api.smux_configuration_revision
+use os.apps.smux.runtime_binding_protocol_v1.smux_runtime_binding_capabilities_decode_v1
+use os.apps.smux.smux_remote.smux_remote_dispatch
+use app.hosted_apps.smux_client.smux_client_request_reply_ok
+use os.apps.smux.runtime_binding_request_v3.{SmuxRuntimeBindRequestV3,
+    smux_runtime_bind_request_token_v3, smux_runtime_bind_request_digest_v3}
+use os.apps.smux.runtime_binding_reply_v3.{SmuxRuntimeBindingReplyV3, smux_runtime_binding_reply_encode_v3}
+
+fn configured_capability_shape_v3() -> Dict<text, SdnValue>:
+    {"version": SdnValue.Int(2), "kind": SdnValue.String("smux-runtime-binding-capabilities"),
+        "authenticationScope": SdnValue.String("trusted-local-owner"), "transport": SdnValue.String("smux-text-v1"),
+        "bindExistingRuntime": SdnValue.Bool(false), "framedCoreMux": SdnValue.Bool(false),
+        "reason": SdnValue.String("container-output-plan-required"), "serviceIncarnation": SdnValue.String("a".repeat(32)),
+        "inputSupported": SdnValue.Bool(false), "geometrySupported": SdnValue.Bool(false),
+        "interactive": SdnValue.Bool(false), "outputMode": SdnValue.String("output-follow"),
+        "planningSupported": SdnValue.Bool(true)}
+
+describe "authenticated runtime binding text adapter":
+    it "authenticates every operation before codec or owner lookup":
+        step("Reject unauthenticated planning binding inspection target and capability queries")
+        val before = smux_configuration_revision()
+        for command in ["runtime-binding-capabilities-v1", "plan-existing-runtime-v3 invalid",
+                "bind-existing-runtime-v3 invalid", "inspect-runtime-binding-v3 bind-a", "prepare-runtime-helper-v3 bind-a",
+                "create-runtime-target-v3 target", "runtime-binding-target-v3 s w p"]:
+            expect(smux_server_dispatch("wrong " + command, "secret")).to_equal("smux: unauthorized")
+        val after = smux_configuration_revision()
+        expect(after.epoch).to_equal(before.epoch)
+        expect(after.value).to_equal(before.value)
+
+    it "preserves unconfigured discovery and refuses binding through the consumed classifier":
+        step("Classify the real authenticated absence reply without claiming a configured owner")
+        val cap = smux_server_dispatch("secret runtime-binding-capabilities-v1", "secret")
+        expect(smux_client_request_reply_ok("runtime-binding-capabilities-v1", cap)).to_equal(true)
+        expect(smux_runtime_binding_capabilities_decode_v1(cap).unwrap().planning_supported).to_equal(false)
+        for command in ["plan-existing-runtime-v3 invalid", "bind-existing-runtime-v3 invalid",
+                "inspect-runtime-binding-v3 bind-a", "prepare-runtime-helper-v3 bind-a",
+                "create-runtime-target-v3 target", "runtime-binding-target-v3 s w p"]:
+            val reply = smux_server_dispatch("secret " + command, "secret")
+            expect(smux_client_request_reply_ok(command, reply)).to_equal(false)
+            expect(smux_client_request_reply_ok(command, "smux: ok")).to_equal(false)
+        expect(smux_client_request_reply_ok("runtime-binding-capabilities-v1",
+            smux_remote_dispatch("runtime-binding-capabilities-v1"))).to_equal(false)
+
+    it "decodes planning-only facts and rejects fabricated startup capability claims":
+        step("Require exact configured capability shape without inferring runtime support")
+        val bytes = sdn_encode_canonical(SdnValue.Dict(configured_capability_shape_v3()))
+        val facts = smux_runtime_binding_capabilities_decode_v1(bytes).unwrap()
+        expect(facts.planning_supported).to_equal(true)
+        expect(facts.bind_existing_runtime).to_equal(false)
+        for key in ["bindExistingRuntime", "framedCoreMux", "inputSupported", "geometrySupported", "interactive"]:
+            var fields = configured_capability_shape_v3()
+            fields[key] = SdnValue.Bool(true)
+            expect(smux_runtime_binding_capabilities_decode_v1(sdn_encode_canonical(SdnValue.Dict(fields))).is_err()).to_equal(true)
+        var fields = configured_capability_shape_v3()
+        fields["version"] = SdnValue.Int(3)
+        expect(smux_runtime_binding_capabilities_decode_v1(sdn_encode_canonical(SdnValue.Dict(fields))).is_err()).to_equal(true)
+        fields = configured_capability_shape_v3()
+        fields["readiness"] = SdnValue.Bool(true)
+        expect(smux_runtime_binding_capabilities_decode_v1(sdn_encode_canonical(SdnValue.Dict(fields))).is_err()).to_equal(true)
+        fields = configured_capability_shape_v3()
+        fields["planningSupported"] = SdnValue.Bool(false)
+        expect(smux_runtime_binding_capabilities_decode_v1(sdn_encode_canonical(SdnValue.Dict(fields))).is_err()).to_equal(true)
+
+    it "rejects syntactically valid but uncorrelated planned reply bytes":
+        step("Refuse replayed or substituted binding identities before reporting planning success")
+        val request = SmuxRuntimeBindRequestV3(binding_uid: "bind-a", workload_operation_id: "workload-a",
+            helper_operation_id: "helper-a", parent_budget_digest: "a".repeat(64), service_incarnation: "b".repeat(32),
+            session_id: "s", window_id: "w", pane_id: "p", expected_epoch: 1u64,
+            expected_revision: 1u64, expected_child_incarnation: 0u64)
+        val command = "plan-existing-runtime-v3 " + smux_runtime_bind_request_token_v3(request).unwrap()
+        # These intentionally substituted metadata replies never enter an owner
+        # and are never asserted as successful planning or binding evidence.
+        for field in ["uid", "incarnation", "digest", "workload", "helper"]:
+            var reply = SmuxRuntimeBindingReplyV3(binding_uid: request.binding_uid,
+                service_incarnation: request.service_incarnation,
+                binding_digest: smux_runtime_bind_request_digest_v3(request).unwrap(),
+                workload_operation_id: request.workload_operation_id, helper_operation_id: request.helper_operation_id,
+                request_digest: "c".repeat(64), status: "planned", code: "planned", committed: false,
+                stream_owned: false, cleanup_retained: false, host_release_pending: false)
+            if field == "uid": reply.binding_uid = "bind-other"
+            if field == "incarnation": reply.service_incarnation = "d".repeat(32)
+            if field == "digest": reply.binding_digest = "d".repeat(64)
+            if field == "workload": reply.workload_operation_id = "workload-other"
+            if field == "helper": reply.helper_operation_id = "helper-other"
+            expect(smux_client_request_reply_ok(command, smux_runtime_binding_reply_encode_v3(reply).unwrap())).to_equal(false)

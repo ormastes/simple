@@ -1,3 +1,7 @@
+use compiler.core.ast.{decl_set_manifest_role_v1}
+use compiler.frontend.core._ParserDecls.named_aspect_decls.{parse_named_aspect_decl}
+use compiler.frontend.core.parser_identifiers.{declaration_identifier_text}
+use compiler.core.ast.{decl_set_param_defaults}
 # Declaration parsing: enum, top-level visibility, module body.
 use compiler.frontend.core.parser_decls.*
 # Parser — Declaration Module
@@ -16,28 +20,35 @@ use compiler.core.ast.{DECL_CE, decl_ce_block}
 use compiler.core.ast.{decl_fn, decl_extern_fn, decl_struct_def}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding, decl_type_alias}
 use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_enum_payload_unnamed_marker, decl_set_lazy}
-use compiler.core.ast.{decl_set_type_params}
+use compiler.core.ast.{decl_set_type_params, decl_set_type_param_constraints}
 use compiler.core.ast.{decl_set_hardware, decl_set_clocked_args, decl_set_vhdl_generic_args, decl_set_flatten_struct_output}
 use compiler.core.ast.{decl_impl_block}
+use compiler.frontend.core._Ast.decl_nodes.{decl_impl_block_typed}
 use compiler.core.ast.{decl_set_comptime}
 use compiler.core.ast.{decl_set_visibility_text}
 use compiler.core.ast.{decl_set_gpu_target_text, decl_set_gpu_target_arg_name_text, decl_set_gpu_backends_text, decl_set_rt_hal_flags, decl_set_asm_placement}
 use compiler.core.ast.{decl_set_unroll_factor, decl_set_pipeline_ii, decl_set_memory_banks}
-use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd, decl_is_packed, decl_derives}
+use compiler.core.ast.{decl_is_gpu_kernel_set_at, decl_is_simd_set_at, decl_is_packed_set_at, decl_derives_set_at}
 use compiler.core.ast.{decl_get_name, decl_get_fields, decl_get_field_bits, decl_get_derives, decl_set_derives}
 use compiler.core.ast.{module_set_path}
-use compiler.frontend.core._Ast.module_state.{module_add_decl}
+use compiler.frontend.core._Ast.module_state.{module_add_decl, module_decl_at, module_decl_count_get}
+use compiler.frontend.core._Ast.decl_nodes.{decl_count}
+use std.common.crypto.sha256.{sha256_text}
 use compiler.frontend.core.lexer.{lex_token_start_get, lex_token_end_get}
+use compiler.frontend.core.lexer.{lex_source_byte_offset, lex_current_token_decl_end_byte}
 use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice}
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
 use compiler.core.types.{TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
 use compiler.core.types.{TYPE_RESULT, TYPE_NAMED_BASE, TYPE_DICT, TYPE_FN, TYPE_ANY}
 use compiler.core.types.{int_to_str, type_tag_name, flat_span_new}
-use compiler.core.types.{named_type_register, named_type_update, named_type_find, custom_primitive_register}
-use compiler.core.types.{newunit_register}
+use compiler.core.types.{named_type_register, named_type_update, named_type_find, custom_primitive_register, named_generic_instance_register}
+use compiler.core.types.{newunit_register, unit_decl_register_origin, unit_decl_find, unit_decl_find_in_module, unit_decl_get_current_module, unit_decl_underlying_tag_at, unit_decl_short_symbol_at, unit_decl_last_conflict_error}
+use compiler.core.types.{refinement_type_register}
+use compiler.core.unit_constraint.{unit_constraint_register, unit_constraint_eval, unit_range_predicate, unit_where_bounds, unit_where_bounds_empty, unit_bound_texts_empty}
+use compiler.core.tokens.{TOK_KW_WHERE, TOK_KW_IN, TOK_DOTDOT, TOK_DOTDOT_EQ, TOK_NEWLINE, TOK_EOF, TOK_DEDENT, TOK_INT_LIT, TOK_FLOAT_LIT}
 use compiler.core.types.{primitive_integer_bit_width_from_name, primitive_backing_bits_from_name}
 use compiler.core.types.{custom_primitive_integer_bit_width_by_name, custom_primitive_backing_bits_by_name}
-use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors, par_struct_names}
+use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, parser_has_errors}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_warn_print_if_needed}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
@@ -45,8 +56,10 @@ use compiler.core.parser.{parser_legacy_let_decl_ahead}
 use compiler.core.tokens.{TOK_KW_AS, TOK_KW_CE, TOK_PIPE, TOK_ASSIGN, tok_kind_name}
 use compiler.core.tokens.{TOK_KW_DYN, TOK_KW_EXTEND}
 use compiler.frontend.core._ParserDecls.extend_decls.{parse_extend_enum_decl, parser_reset_extend_enums}
-use compiler.core.tokens.{TOK_IDENT, TOK_COMMA, TOK_MINUS}
+use compiler.core.tokens.{TOK_IDENT, TOK_COMMA, TOK_MINUS, TOK_DOT, TOK_STAR, TOK_SLASH}
 use compiler.frontend.core.flat_pool_codec.*
+use compiler.frontend.core.lock_level_parser.{lock_level_parse_attribute, lock_level_is_exception_attribute, lock_level_reject_non_function}
+use compiler.frontend.core.static_lock_level_metadata.{lock_level_metadata_promote}
 
 # Import from sibling split modules
 use compiler.frontend.core.parser_expr.{parse_expr, parse_int_text}
@@ -54,10 +67,12 @@ use compiler.frontend.core.parser_stmts.{parse_block, parse_if_expr, parse_for_e
 use compiler.frontend.core.parser_stmts.{parse_trailing_colon_block_arg, try_parse_bare_ident_string_call}
 use compiler.core.ast.{EXPR_CALL, EXPR_METHOD_CALL, expr_get_tag}
 use compiler.core.tokens.{TOK_COLON}
+use compiler.core.ast.{macro_fact_def_push}
 
 # Re-export use/export/binding/impl declarations (extracted to parser_decls_use.spl)
 use compiler.frontend.core.parser_decls_use.*
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.frontend.core.decorator_check.{parser_check_decorator_name, parser_peek_decorated_item}
 
 # Import CLI parser
 use compiler.core.parser_cli.{parse_cli_decl}
@@ -69,7 +84,7 @@ use compiler.frontend.aspect_registry.{aspect_pending_set_noalloc, aspect_pendin
 use compiler.frontend.aspect_registry.{aspect_pending_kind_get, aspect_pending_selector_get}
 use compiler.frontend.aspect_registry.{aspect_pending_mode_get, aspect_pending_readonly_get}
 use compiler.frontend.aspect_registry.{aspect_pending_noalloc_get, aspect_pending_bounded_time_get}
-use compiler.frontend.aspect_registry.{aspect_pending_saw_advice_get, aspect_pending_reset}
+use compiler.frontend.aspect_registry.{aspect_pending_saw_advice_get, aspect_pending_reset, aspect_registry_record_parser_declaration_v2}
 use compiler.common.rt_profile_policy.{rt_implicit_profile_is_error}
 # ===== Helper Functions =====
 
@@ -93,6 +108,17 @@ fn current_ident_is_layer_decl() -> bool:
         return false
     is_ident_start_char(lex_source_char_at(pos))
 
+# Recognize only `aspect NAME:`; preserve ordinary calls/variables named aspect.
+fn current_ident_is_named_aspect_decl() -> bool:
+    var pos = lex_skip_inline_ws_after_token()
+    if pos < 0: return false
+    if not is_ident_start_char(lex_source_char_at(pos)): return false
+    while pos < lex_source_len() and is_ident_char(lex_source_char_at(pos)):
+        pos = pos + 1
+    while pos < lex_source_len() and (lex_source_char_at(pos) == " " or lex_source_char_at(pos) == "\t"):
+        pos = pos + 1
+    pos < lex_source_len() and lex_source_char_at(pos) == ":"
+
 # Soft-keyword lookahead for the `on pc{...} use handler form [priority N]`
 # AOP advice decl. "on" is NOT a reserved word at the lexer level -- it is an
 # extremely common parameter/variable name (boolean toggle) and reserving it
@@ -115,7 +141,7 @@ fn current_ident_is_on_advice_decl() -> bool:
         return false
     if lex_source_char_at(pos + 1) != "c":
         return false
-    lex_source_char_at(pos + 2) == "{"
+    lex_source_char_at(pos + 2) == "{{"
 
 # Parses `layer NAME` and `layer NAME uses A, B, ...` (M0: no body, no
 # fields, no methods -- zero runtime effect). The declared facts are lowered
@@ -156,6 +182,153 @@ fn parse_layer_decl(loop_index: i64) -> i64:
     val marker = expr_call(helper, args, 0)
     decl_val_binding("_expr_layer_" + int_to_str(loop_index), -1, marker, -1)
 
+# ===== `friend PKG` / `internal_export NAME` module access directives =====
+# Soft keywords (same lookahead as `layer`). Lowered to inert marker decls
+# (`__module_friend` / `__module_internal_export`, comma-joined names) that
+# module_assembly folds into ParserModule.friends / .internal_exports and
+# drops -- no flat-pool shape change. Consumed by HIR member visibility.
+fn parse_module_access_decl(loop_index: i64, helper_name: text) -> i64:
+    val keyword = par_text_get()
+    parser_advance()  # consume the directive keyword
+    var names: [text] = []
+    while true:
+        if par_kind_get() != TOK_IDENT:
+            parser_error("expected name after '" + keyword + "'")
+            break
+        var name = par_text_get()
+        parser_advance()
+        while par_kind_get() == TOK_DOT:
+            parser_advance()
+            if par_kind_get() != TOK_IDENT:
+                parser_error("expected name segment after '.' in '" + keyword + "'")
+                break
+            name = name + "." + par_text_get()
+            parser_advance()
+        names.push(name)
+        if par_kind_get() == TOK_COMMA:
+            parser_advance()
+            continue
+        break
+    var args: [i64] = []
+    args.push(expr_string_lit(names.join(","), 0))
+    val marker = expr_call(expr_ident(helper_name, 0), args, 0)
+    decl_val_binding("_expr_module_access_" + int_to_str(loop_index), -1, marker, -1)
+
+# ===== `macro NAME(params) -> (contract): body` declarations =====
+# "macro" is a soft keyword (an identifier elsewhere). The declaration emits no
+# decl: its facts (name, params, raw contract/body source, nested `n!(` names)
+# go to the macro fact pools in _Ast/decl_nodes.spl, which feed the macro
+# reference cache (plan 2026-10-24 §6). Expansion itself is not done here.
+fn current_ident_is_macro_decl() -> bool:
+    val pos = lex_skip_inline_ws_after_token()
+    if pos < 0:
+        return false
+    is_ident_start_char(lex_source_char_at(pos))
+
+# True when the current identifier token is immediately followed by `!(`.
+fn current_ident_is_macro_invocation() -> bool:
+    val end = lex_token_end_get()
+    if end + 1 >= lex_source_len():
+        return false
+    lex_source_char_at(end) == "!" and lex_source_char_at(end + 1) == "("
+
+fn _macro_join_unique(values: [text]) -> text:
+    var out: [text] = []
+    for v in values:
+        if not out.contains(v):
+            out.push(v)
+    out.join(",")
+
+fn parse_macro_decl(visibility: text):
+    val decl_line = par_line_get()
+    parser_advance()  # consume 'macro'
+    if par_kind_get() != TOK_IDENT:
+        parser_error("expected macro name after 'macro'")
+        return
+    val name = par_text_get()
+    parser_advance()
+    var params: [text] = []
+    if par_kind_get() == 140:
+        var depth = 0
+        var expect_name = true
+        while par_kind_get() != 190:
+            val k = par_kind_get()
+            if k == 140 or k == 144 or k == 142:
+                depth = depth + 1
+                if depth == 1:
+                    expect_name = true
+                    parser_advance()
+                    continue
+            elif k == 141 or k == 145 or k == 143:
+                depth = depth - 1
+                if depth == 0:
+                    parser_advance()
+                    break
+            elif k == TOK_COMMA and depth == 1:
+                expect_name = true
+                parser_advance()
+                continue
+            elif k == TOK_IDENT and depth == 1 and expect_name:
+                params.push(par_text_get())
+            elif depth == 1 and par_text_get() == "const" and params.len() > 0:
+                # `n: Int const` -- a compile-time (CTFE) parameter; recorded as
+                # `n=const` so the macro facts carry the declared CTFE effect.
+                params[params.len() - 1] = params[params.len() - 1] + "=const"
+            expect_name = false
+            parser_advance()
+    var contract = ""
+    if par_kind_get() == 167:
+        parser_advance()
+        if par_kind_get() == 140:
+            val start = lex_token_start_get()
+            var depth = 0
+            var end = start
+            while par_kind_get() != 190:
+                val k = par_kind_get()
+                if k == 140: depth = depth + 1
+                if k == 141:
+                    depth = depth - 1
+                    if depth == 0:
+                        end = lex_token_end_get()
+                        parser_advance()
+                        break
+                parser_advance()
+            contract = lex_source_slice(start, end)
+    if par_kind_get() != TOK_COLON:
+        parser_error("expected ':' after macro '{name}' header")
+        return
+    parser_advance()
+    # Body: the indented block (or the rest of the line). Raw source is kept;
+    # nested invocations are the identifiers directly followed by `!(`.
+    var nested: [text] = []
+    val body_start = lex_token_start_get()
+    var body_end = body_start
+    var depth = 0
+    var seen_indent = false
+    while par_kind_get() != 190:
+        val k = par_kind_get()
+        if k == 180 and not seen_indent and depth == 0:
+            parser_advance()
+            if par_kind_get() != 181:
+                break
+            continue
+        if k == 181:
+            depth = depth + 1
+            seen_indent = true
+        elif k == 182:
+            depth = depth - 1
+            if depth <= 0:
+                parser_advance()
+                break
+        elif k == TOK_IDENT and current_ident_is_macro_invocation():
+            nested.push(par_text_get())
+        if k != 180 and k != 181 and k != 182:
+            body_end = lex_token_end_get()
+        parser_advance()
+    val body = if body_end > body_start: lex_source_slice(body_start, body_end) else: ""
+    macro_fact_def_push(name, params.join(","), contract, body, _macro_join_unique(nested),
+        decl_line, visibility)
+
 # ===== WP-A: `resource` declarations + `@sffi(...)` attribute =====
 # doc/05_design/language/resource/resource_sffi_binding_design_2026-08-06.md §1
 # doc/04_architecture/language/resource/resource_declaration_architecture_2026-08-06.md
@@ -166,6 +339,87 @@ fn parse_layer_decl(loop_index: i64) -> i64:
 # `resource: text` fields in 85.mdsoc/weaving/join_point_kind.spl, ...),
 # including inside the compiler's own source -- a hard keyword would break the
 # compiler's own rebuild. Recognition is declaration-start position only.
+# `unit Name: T [as suffix]` is recognised contextually: the identifier `unit`
+# followed (after inline whitespace) by an identifier start. `unit` stays a
+# plain identifier everywhere else, including `-> unit` return types, so no
+# keyword is added and the lookahead is one character scan.
+fn current_ident_is_unit_decl() -> bool:
+    val pos = lex_skip_inline_ws_after_token()
+    if pos < 0:
+        return false
+    is_ident_start_char(lex_source_char_at(pos))
+
+fn unit_decl_inner_is_numeric(inner_type: i64) -> bool:
+    val n = type_tag_name(inner_type)
+    if n == "i64" or n == "i32" or n == "i16" or n == "i8":
+        return true
+    if n == "u64" or n == "u32" or n == "u16" or n == "u8":
+        return true
+    if n == "f64" or n == "f32" or n == "Int" or n == "Float":
+        return true
+    false
+
+# Struct decl id produced by the most recent parser_lower_unit_decl call.
+var PARSER_LAST_UNIT_DECL_ID_V1: i64 = -1
+
+# Set by the `pub unit` arm of parse_module_decl_with_visibility so the module
+# dispatcher can bind the visibility observation row (the arm itself returns -1
+# because the unit lowering already added the decl to the module).
+var PARSER_VISIBLE_UNIT_DECL_ID_V1: i64 = -1
+
+# One lowering for `unit`, `newunit`, and numeric `newtype`: a single-field
+# struct (`value`) plus a canonical UnitDecl row. `legacy_origin` is "" for the
+# canonical spelling, else the deprecated keyword that produced the row.
+fn _parser_lower_unit_decl_checked(name: text, inner_type: i64, suffix: text, legacy_origin: text) -> bool:
+    val active_module = unit_decl_get_current_module()
+    val prev_idx = unit_decl_find_in_module(active_module, name)
+    if prev_idx >= 0:
+        if unit_decl_underlying_tag_at(prev_idx) != inner_type or unit_decl_short_symbol_at(prev_idx) != suffix:
+            parser_error("conflicting unit declaration `" + name + "` in module `" + active_module + "`")
+            return false
+    named_type_register(name, ["value"], [inner_type])
+    custom_primitive_register(name, inner_type)
+    # Bind discarded i64 return values and terminate with `()` so MIR/LLVM void
+    # tail lowering does not emit `i64 0` into a void dest (E-BACKEND-LLVM-CONST-TYPE).
+    if legacy_origin == "newunit":
+        val _reg = newunit_register(name, suffix, inner_type)
+    else:
+        val _reg = unit_decl_register_origin(name, "nominal", suffix, inner_type, "", legacy_origin)
+    val unit_conflict = unit_decl_last_conflict_error()
+    if unit_conflict != "":
+        parser_error(unit_conflict)
+        return false
+    val field_names: [text] = ["value"]
+    val field_types: [i64] = [inner_type]
+    val field_defaults: [i64] = [-1]
+    val field_bits: [i64] = [-1]
+    val d = decl_struct_def(name, field_names, field_types, field_defaults, field_bits, 0)
+    module_add_decl(d)
+    PARSER_LAST_UNIT_DECL_ID_V1 = d
+    parser_reset_pending_vhdl_decorators()
+    true
+
+fn parser_lower_unit_decl(name: text, inner_type: i64, suffix: text, legacy_origin: text):
+    val _ok = _parser_lower_unit_decl_checked(name, inner_type, suffix, legacy_origin)
+    ()
+
+# `unit Speed = Meter / Second`: same struct lowering as a nominal unit, payload
+# type taken from the left operand unit, UnitDecl row role "derived" with the
+# formula ("Meter/Second") in alias_of for the operator matrix.
+fn parser_lower_derived_unit_decl(name: text, lhs: text, formula: text):
+    val lhs_idx = unit_decl_find(lhs)
+    if lhs_idx < 0:
+        parser_error("derived unit `" + name + "` references undeclared unit `" + lhs + "`")
+        return
+    val inner_type = unit_decl_underlying_tag_at(lhs_idx)
+    if not _parser_lower_unit_decl_checked(name, inner_type, "", ""):
+        return
+    unit_decl_register_origin(name, "derived", "", inner_type, formula, "")
+    val derived_conflict = unit_decl_last_conflict_error()
+    if derived_conflict != "":
+        parser_error(derived_conflict)
+    ()
+
 fn current_ident_is_resource_decl() -> bool:
     val pos = lex_skip_inline_ws_after_token()
     if pos < 0:
@@ -270,8 +524,10 @@ fn parse_enum_decl() -> i64:
     val enum_name = par_text_get()
     parser_expect(6)
 
-    # Parse optional type parameters: enum Result<T, E>:
-    val type_params = parse_type_params()
+    # Preserve the canonical generic declaration's names and bound/default rows.
+    val parsed_type_params = parse_type_params_with_trait_bounds()
+    val type_params = parsed_type_params.0
+    val type_param_constraints = parsed_type_params.1
 
     # Pre-register enum name so type references resolve during parsing (same
     # reason struct decls do this -- see parse_struct_decl). Without this,
@@ -306,6 +562,7 @@ fn parse_enum_decl() -> i64:
     # S1 (hardening plan 15 Phase 4): parallel element-for-element to
     # variant_payload_types_flat -- see decl_enum_def's docstring.
     var variant_payload_field_names_flat: [text] = []
+    var variant_payload_defaults_flat: [i64] = []
     var parse_enum_method_ids: [i64] = []
     # §2 of doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md:
     # trailing `complete:` / `dyn:` sections declare the OPEN regions of the
@@ -391,6 +648,7 @@ fn parse_enum_decl() -> i64:
         # one entry per payload field -- the declared identifier for a NAMED
         # field, decl_enum_payload_unnamed_marker() for a positional one.
         var variant_field_names: [text] = []
+        var variant_field_defaults: [i64] = []
         if par_kind_get() == 140:
             parser_advance()
             while true:
@@ -423,12 +681,22 @@ fn parse_enum_decl() -> i64:
                     # Handle optional ? after type
                     if par_kind_get() == 130:
                         parser_advance()
-                elif par_kind_get() == 144:
-                    val bracket_type = parser_parse_type()
-                    variant_field_types.push(bracket_type)
+                elif par_kind_get() == 142 or par_kind_get() == 144 or par_kind_get() == 140:
+                    # A positional dict, array, or tuple is one complete payload type.
+                    # Let the type parser consume its own nested delimiters.
+                    val positional_type = parser_parse_type()
+                    variant_field_types.push(positional_type)
                     variant_field_names.push(decl_enum_payload_unnamed_marker())
                 else:
                     parser_advance()
+                if variant_field_types.len() > variant_field_defaults.len():
+                    var field_default: i64 = -1
+                    if par_kind_get() == TOK_ASSIGN:
+                        if variant_field_names[variant_field_names.len() - 1] == decl_enum_payload_unnamed_marker():
+                            parser_error("enum payload defaults require a named field")
+                        parser_advance()
+                        field_default = parse_expr()
+                    variant_field_defaults.push(field_default)
                 if par_kind_get() == 160:
                     parser_advance()
             parser_expect(141)
@@ -443,6 +711,7 @@ fn parse_enum_decl() -> i64:
         while vft_i < variant_field_types.len():
             variant_payload_types_flat.push(variant_field_types[vft_i])
             variant_payload_field_names_flat.push(variant_field_names[vft_i])
+            variant_payload_defaults_flat.push(variant_field_defaults[vft_i])
             vft_i = vft_i + 1
         # G42: pipe-separated variants on the same line (e.g. `Escape | F1 | F2`).
         # Pure separator, no semantic change -- loop back to the top and parse
@@ -461,6 +730,7 @@ fn parse_enum_decl() -> i64:
     if saw_complete_section or saw_dyn_section:
         parser_record_enum_open_regions(enum_name, saw_complete_section, saw_dyn_section)
     val enum_d = decl_enum_def(enum_name, variant_names, variant_discriminants, variant_payload_types_flat, variant_payload_counts, variant_payload_field_names_flat, 0)
+    decl_set_param_defaults(enum_d, variant_payload_defaults_flat)
     representation_declaration_end_v1(representation_owner, enum_d, enum_name)
     # `enum Opt<T>:` -- thread the `<T, ...>` names parsed above onto the flat
     # decl's shared TYPE_PARAMS slot, exactly as parse_struct_decl does for
@@ -469,16 +739,150 @@ fn parse_enum_decl() -> i64:
     # registered `T` as a SymbolKind.TypeParam, and every payload `T` fell
     # through lower_type's seed-parity "bare single uppercase letter -> Any"
     # rule -- erasing the payload type AND making a generic enum partition as
-    # non-generic, so it could never be monomorphized.
+    # non-generic, so it could never be specialized.
     # doc/08_tracking/bug/enum_payload_type_param_erased_to_any_in_flat_ast_2026-08-21.md
     if type_params.len() > 0:
         decl_set_type_params(enum_d, type_params)
+        decl_set_type_param_constraints(enum_d, type_param_constraints)
     if parse_enum_method_ids.len() > 0:
-        val enum_impl = decl_impl_block(enum_name, parse_enum_method_ids, 0)
+        # This construction site proves the impl is synthetic. Preserve the
+        # enum's ordered binders and applied receiver here; a missing target
+        # tag elsewhere also denotes explicit bare impls and is not evidence
+        # that type arguments may be inferred.
+        var enum_impl_target = -1
+        if type_params.len() > 0:
+            var enum_impl_args: [i64] = []
+            for parameter_name in type_params:
+                val parameter_id = named_type_register(parameter_name, [], [])
+                enum_impl_args.push(TYPE_NAMED_BASE + parameter_id)
+            enum_impl_target = named_generic_instance_register(enum_name, enum_impl_args)
+        val enum_impl = decl_impl_block_typed(enum_name, parse_enum_method_ids, 0, enum_impl_target)
+        if type_params.len() > 0:
+            decl_set_type_params(enum_impl, type_params)
         module_add_decl(enum_impl)
     enum_d
 
 # ===== Top-Level Module Parsing =====
+
+# Source observations only. Byte offsets identify the modifier's first byte,
+# or the unmarked declaration-start token. A consumer must bind a row to
+# an actual top-level declaration before assigning scope or access authority.
+# Keeping this separate preserves legacy visibility and member/default APIs.
+var TOP_LEVEL_VISIBILITY_OFFSETS_V1: [i64] = []
+var TOP_LEVEL_VISIBILITY_MODIFIERS_V1: [text] = []
+var TOP_LEVEL_VISIBILITY_DECL_IDS_V1: [i64] = []
+var TOP_LEVEL_VISIBILITY_SOURCE_DIGEST_V1: text = ""
+var TOP_LEVEL_VISIBILITY_SOURCE_PATH_V1: text = ""
+# Admission is transient, never trusted from a serialized payload.
+var TOP_LEVEL_VISIBILITY_BINDINGS_ADMITTED_V1: bool = false
+
+# @allow(primitive_api) core-parser raw i64 arena index/offset or bool validity flag; core frontend has no domain wrappers
+pub fn parser_top_level_visibility_intent_decl_id_v1(index: i64) -> i64:
+    if parser_has_errors() or not TOP_LEVEL_VISIBILITY_BINDINGS_ADMITTED_V1: return -1
+    if index < 0 or index >= TOP_LEVEL_VISIBILITY_DECL_IDS_V1.len(): return -1
+    TOP_LEVEL_VISIBILITY_DECL_IDS_V1[index]
+
+pub fn parser_top_level_visibility_source_digest_v1() -> text:
+    if parser_has_errors(): return ""
+    TOP_LEVEL_VISIBILITY_SOURCE_DIGEST_V1
+
+# @allow(primitive_api) core-parser raw i64 arena index/offset or bool validity flag; core frontend has no domain wrappers
+pub fn parser_top_level_visibility_source_matches_digest_v1(digest: text, path: text) -> bool:
+    TOP_LEVEL_VISIBILITY_SOURCE_PATH_V1 == path and
+        TOP_LEVEL_VISIBILITY_SOURCE_DIGEST_V1 == digest
+
+pub fn parser_top_level_visibility_begin_source_v1(selected_source: text, path: text):
+    parser_top_level_visibility_intent_clear_v1()
+    TOP_LEVEL_VISIBILITY_SOURCE_DIGEST_V1 = sha256_text(selected_source)
+    TOP_LEVEL_VISIBILITY_SOURCE_PATH_V1 = path
+
+pub fn parser_top_level_visibility_intent_clear_v1():
+    TOP_LEVEL_VISIBILITY_OFFSETS_V1 = []
+    TOP_LEVEL_VISIBILITY_MODIFIERS_V1 = []
+    TOP_LEVEL_VISIBILITY_DECL_IDS_V1 = []
+    TOP_LEVEL_VISIBILITY_SOURCE_DIGEST_V1 = ""
+    TOP_LEVEL_VISIBILITY_SOURCE_PATH_V1 = ""
+    TOP_LEVEL_VISIBILITY_BINDINGS_ADMITTED_V1 = false
+
+# @allow(primitive_api) core-parser raw i64 arena index/offset or bool validity flag; core frontend has no domain wrappers
+pub fn parser_top_level_visibility_intent_count_v1() -> i64:
+    if parser_has_errors(): return 0
+    TOP_LEVEL_VISIBILITY_OFFSETS_V1.len()
+
+# @allow(primitive_api) core-parser raw i64 arena index/offset or bool validity flag; core frontend has no domain wrappers
+pub fn parser_top_level_visibility_intent_offset_v1(index: i64) -> i64:
+    if parser_has_errors(): return -1
+    if index < 0 or index >= TOP_LEVEL_VISIBILITY_OFFSETS_V1.len(): return -1
+    TOP_LEVEL_VISIBILITY_OFFSETS_V1[index]
+
+# @allow(primitive_api) core-parser raw i64 arena index; core frontend has no domain wrappers
+pub fn parser_top_level_visibility_intent_modifier_v1(index: i64) -> text:
+    if parser_has_errors(): return "unknown"
+    if index < 0 or index >= TOP_LEVEL_VISIBILITY_MODIFIERS_V1.len(): return "unknown"
+    TOP_LEVEL_VISIBILITY_MODIFIERS_V1[index]
+
+fn top_level_visibility_intent_rows_valid_v1() -> bool:
+    if TOP_LEVEL_VISIBILITY_OFFSETS_V1.len() != TOP_LEVEL_VISIBILITY_MODIFIERS_V1.len(): return false
+    if TOP_LEVEL_VISIBILITY_OFFSETS_V1.len() != TOP_LEVEL_VISIBILITY_DECL_IDS_V1.len(): return false
+    var previous = -1
+    for offset in TOP_LEVEL_VISIBILITY_OFFSETS_V1:
+        if offset <= previous: return false
+        previous = offset
+    for modifier in TOP_LEVEL_VISIBILITY_MODIFIERS_V1:
+        if not ["omitted", "pri", "public", "peer", "up", "internal", "package"].contains(modifier): return false
+    var seen: Dict<i64, bool> = {}
+    var module_ids: Dict<i64, bool> = {}
+    var module_index = 0
+    while module_index < module_decl_count_get():
+        module_ids[module_decl_at(module_index)] = true
+        module_index = module_index + 1
+    for source_id in TOP_LEVEL_VISIBILITY_DECL_IDS_V1:
+        if source_id < -1 or source_id >= decl_count(): return false
+        if source_id >= 0:
+            if seen.contains_key(source_id) or not module_ids.contains_key(source_id): return false
+            seen[source_id] = true
+    true
+
+# @allow(primitive_api) core-parser raw i64 arena index/offset or bool validity flag; core frontend has no domain wrappers
+pub fn parser_top_level_visibility_intent_bindings_valid_v1() -> bool:
+    TOP_LEVEL_VISIBILITY_BINDINGS_ADMITTED_V1 and
+        not parser_has_errors() and top_level_visibility_intent_rows_valid_v1()
+
+# @allow(primitive_api) core-parser raw i64 arena index/offset or bool validity flag; core frontend has no domain wrappers
+pub fn parser_top_level_visibility_admit_restored_bindings_v1() -> bool:
+    TOP_LEVEL_VISIBILITY_BINDINGS_ADMITTED_V1 = not parser_has_errors() and top_level_visibility_intent_rows_valid_v1()
+    TOP_LEVEL_VISIBILITY_BINDINGS_ADMITTED_V1
+
+fn record_top_level_visibility_intent_v1(source_start: i64, explicit_pri: bool, explicit_pub: bool, parsed: text) -> i64:
+    val token = par_text_get()
+    if not explicit_pri and not explicit_pub and not ["fn", "me", "struct", "class", "enum", "trait", "actor", "extern", "async", "static", "const", "val", "var", "let", "cli", "lazy", "type", "newtype", "newunit", "unit", "resource", "layer", "mod", "macro", "bitfield"].contains(token):
+        return -1
+    val modifier = if explicit_pri: "pri" else: if explicit_pub: parsed else: "omitted"
+    val row = TOP_LEVEL_VISIBILITY_OFFSETS_V1.len()
+    TOP_LEVEL_VISIBILITY_OFFSETS_V1.push(source_start)
+    TOP_LEVEL_VISIBILITY_MODIFIERS_V1.push(modifier)
+    TOP_LEVEL_VISIBILITY_DECL_IDS_V1.push(-1)
+    row
+
+# Called only by the module dispatcher with its explicitly captured row.
+# Nested parsers may register synthetic impls before returning the source node;
+# the generic module_add_decl must never infer which declaration owns a row.
+fn module_add_source_decl_v1(source_id: i64, observation_row: i64):
+    module_add_decl(source_id)
+    module_bind_source_decl_row_v1(source_id, observation_row)
+
+# Binds an observation row to a decl that is ALREADY in the module (the unit
+# lowering adds its own struct decl, so adding it again would duplicate it).
+fn module_bind_source_decl_row_v1(source_id: i64, observation_row: i64):
+    if observation_row < 0: return
+    if observation_row >= TOP_LEVEL_VISIBILITY_DECL_IDS_V1.len() or
+            source_id < 0 or source_id >= decl_count():
+        parser_error("invalid source declaration visibility binding")
+        return
+    if TOP_LEVEL_VISIBILITY_DECL_IDS_V1[observation_row] != -1:
+        parser_error("duplicate source declaration visibility binding")
+        return
+    TOP_LEVEL_VISIBILITY_DECL_IDS_V1[observation_row] = source_id
 
 fn parse_top_level_visibility() -> text:
     if par_kind_get() == 29:
@@ -514,6 +918,7 @@ fn finalize_decl_visibility(decl_id: i64, visibility: text) -> i64:
 fn parse_mod_decl_with_visibility(visibility: text) -> i64:
     parser_advance()
     var mod_last_seg = ""
+    var mod_segment_count = 0
     while true:
         var segment = ""
         if par_kind_get() == 6:
@@ -524,11 +929,44 @@ fn parse_mod_decl_with_visibility(visibility: text) -> i64:
             parser_error("expected module name after 'mod'")
             return -1
         mod_last_seg = segment
+        mod_segment_count = mod_segment_count + 1
         parser_advance()
         if par_kind_get() != 164:
             break
         parser_advance()
-    finalize_decl_visibility(decl_use_import("." + mod_last_seg, [], 0), visibility)
+    val child = decl_use_import("." + mod_last_seg, [], 0)
+    # Legacy import lowering uses the last segment. It is not an immediate
+    # child authorization for a dotted declaration. Refuse that policy shape.
+    decl_set_manifest_role_v1(child, if mod_segment_count == 1: "child" else: "child-invalid")
+    finalize_decl_visibility(child, visibility)
+
+fn parse_type_alias_decl() -> i64:
+    parser_advance()
+    var ta_name: text = ""
+    if par_kind_get() == 6:
+        ta_name = par_text_get()
+        parser_advance()
+    val ta_parameters = parse_type_params_with_trait_bounds()
+    var ta_type_tag: i64 = 0
+    if parser_expect(TOK_ASSIGN):
+        ta_type_tag = parser_parse_type()
+    var ta_d: i64 = -1
+    if ta_name != "":
+        ta_d = decl_type_alias(ta_name, ta_type_tag, 0)
+        decl_set_type_params(ta_d, ta_parameters.0)
+        decl_set_type_param_constraints(ta_d, ta_parameters.1)
+    # Preserve the existing recovery boundary for unsupported trailing
+    # syntax; generic parameters and the RHS have been consumed.
+    while true:
+        val type_is_nl: bool = par_kind_get() == 180
+        val type_is_ded: bool = par_kind_get() == 182
+        val type_is_eof: bool = par_kind_get() == 190
+        val type_done: bool = type_is_nl or type_is_ded
+        val type_done2: bool = type_done or type_is_eof
+        if type_done2:
+            break
+        parser_advance()
+    ta_d
 
 fn parse_module_decl_with_visibility(loop_index: i64, visibility: text) -> i64:
     if par_kind_get() == 53:
@@ -589,13 +1027,150 @@ fn parse_module_decl_with_visibility(loop_index: i64, visibility: text) -> i64:
     if par_kind_get() == 6 and par_text_get() == "resource" and current_ident_is_resource_decl():
         # WP-A: `pub resource File` -- soft keyword, see current_ident_is_resource_decl().
         return finalize_decl_visibility(parse_resource_decl(loop_index), visibility)
+    if par_kind_get() == 6 and par_text_get() == "unit" and current_ident_is_unit_decl():
+        # `pub unit FreeBytes: i64 as fbytes` -- the seed accepts a visibility
+        # modifier on a unit declaration. The lowering adds its own struct decl
+        # to the module, so return -1 (no second module_add) after stamping the
+        # visibility on that decl.
+        val unit_decl_id = parse_unit_decl_after_keyword_v1()
+        if unit_decl_id >= 0:
+            decl_set_visibility_text(unit_decl_id, visibility)
+            PARSER_VISIBLE_UNIT_DECL_ID_V1 = unit_decl_id
+        return -1
+    if par_kind_get() == 35:
+        val ta_d = parse_type_alias_decl()
+        if ta_d >= 0:
+            return finalize_decl_visibility(ta_d, visibility)
+        return -1
     parser_error("expected declaration after visibility modifier")
     -1
+
+# unit ByteCount: u64 as Bc -- canonical nominal unit declaration. Called at the
+# `unit` soft keyword. `as suffix` is optional; a suffix-less unit is
+# full-name-only in the registry. Returns the lowered struct decl id (also
+# for a derived unit), or -1 when lowering failed.
+fn parse_unit_decl_after_keyword_v1() -> i64:
+    PARSER_LAST_UNIT_DECL_ID_V1 = -1
+    parser_advance()
+    val u_name = par_text_get()
+    parser_expect(6)
+    if par_kind_get() == TOK_ASSIGN:
+        # unit Speed = Meter / Second -- declared derived unit
+        # (owner decision 4A, 2026-11-16). The formula is recorded as
+        # "A/B" or "A*B" in alias_of with role "derived".
+        parser_advance()
+        val d_lhs = par_text_get()
+        parser_expect(6)
+        var d_op = ""
+        if par_kind_get() == TOK_STAR:
+            d_op = "*"
+        elif par_kind_get() == TOK_SLASH:
+            d_op = "/"
+        else:
+            parser_error("expected `*` or `/` in derived unit declaration `unit " + u_name + " = A / B`")
+        parser_advance()
+        val d_rhs = par_text_get()
+        parser_expect(6)
+        parser_lower_derived_unit_decl(u_name, d_lhs, d_lhs + d_op + d_rhs)
+        return PARSER_LAST_UNIT_DECL_ID_V1
+    parser_expect(161)
+    val u_inner = parser_parse_type()
+    var u_suffix = ""
+    if par_kind_get() == TOK_KW_AS:
+        parser_advance()
+        u_suffix = par_text_get()
+        parser_expect(6)
+    # Constrained unit (owner decision 2026-11-17, keyword `unit` only):
+    #   unit Port: u16 where 1 <= self <= 65535   -- any predicate on `self`
+    #   unit Port: u16 in 1..=65535               -- sugar for the same `where`
+    # Both register ONE predicate (unit_constraint.spl) through the refinement
+    # registry, so there is a single constraint system.
+    var u_pred = ""
+    var u_min = ""
+    var u_max = ""
+    if par_kind_get() == TOK_KW_WHERE:
+        u_pred = parse_unit_where_predicate_text()
+        val u_bounds = unit_where_bounds(u_pred)
+        u_min = u_bounds[0]
+        u_max = u_bounds[1]
+        if unit_where_bounds_empty():
+            parser_error("`unit " + u_name + "` where-predicate is empty: no value satisfies its bounds")
+    elif par_kind_get() == TOK_KW_IN:
+        parser_advance()
+        u_min = parse_unit_range_bound_text()
+        var inclusive = false
+        if par_kind_get() == TOK_DOTDOT_EQ:
+            inclusive = true
+            parser_advance()
+        elif par_kind_get() == TOK_DOTDOT:
+            parser_advance()
+        else:
+            parser_error("expected `..` or `..=` in `unit " + u_name + ": T in lo..hi`")
+        val u_hi = parse_unit_range_bound_text()
+        u_pred = unit_range_predicate(u_min, u_hi, inclusive)
+        # ConstraintError bounds are inclusive texts: `lo..hi` on an integer
+        # bound reports hi-1 as max_text; the predicate itself keeps `<`.
+        u_max = if inclusive or u_hi == "": u_hi else: unit_exclusive_max_text(u_hi)
+        if unit_bound_texts_empty(u_min, u_max):
+            parser_error("`unit " + u_name + "` range is empty: lower bound exceeds upper bound")
+        if u_min == "" and u_hi == "":
+            parser_error("`unit " + u_name + "` range needs at least one bound")
+    parser_lower_unit_decl(u_name, u_inner, u_suffix, "")
+    if u_pred != "":
+        if unit_constraint_eval(u_pred, 0.0) < 0:
+            parser_error("unsupported constraint predicate for unit `" + u_name + "`: `" + u_pred + "` (numbers, self, + - * / %, comparisons, and/or/not)")
+        else:
+            val u_ref = refinement_type_register(u_inner, u_pred)
+            unit_constraint_register(u_name, u_pred, u_ref, u_min, u_max)
+    PARSER_LAST_UNIT_DECL_ID_V1
+
+# `where <predicate>` on a unit declaration: the predicate is the raw source
+# text from after `where` to the end of the line (comment stripped), so any
+# expression shape reaches the evaluator verbatim. Tokens are then skipped to
+# the line end.
+fn parse_unit_where_predicate_text() -> text:
+    val start = lex_token_end_get()
+    var end = start
+    val n = lex_source_len()
+    while end < n:
+        val ch = lex_source_char_at(end)
+        if ch == "\n" or ch == "\r" or ch == "#":
+            break
+        end = end + 1
+    val pred = lex_source_slice(start, end).trim()
+    parser_advance()
+    while par_kind_get() != TOK_NEWLINE and par_kind_get() != TOK_EOF and par_kind_get() != TOK_DEDENT:
+        parser_advance()
+    pred
+
+# One bound of `in lo..hi`: optional `-`, then an int/float literal; "" when
+# the side is open (`..=hi`, `lo..`).
+fn parse_unit_range_bound_text() -> text:
+    var sign = ""
+    if par_kind_get() == TOK_MINUS:
+        sign = "-"
+        parser_advance()
+    if par_kind_get() == TOK_INT_LIT or par_kind_get() == TOK_FLOAT_LIT:
+        val t = par_text_get()
+        parser_advance()
+        return sign + t
+    if sign != "":
+        parser_error("expected a numeric bound after `-` in unit range")
+    ""
+
+fn unit_exclusive_max_text(hi: text) -> text:
+    var i = 0
+    while i < hi.len():
+        val c = hi[i:i+1]
+        if c < "0" or c > "9":
+            return hi + " - 1"
+        i = i + 1
+    int_to_str(int(hi) - 1)
 
 fn parser_decorator_arg_text(raw: text) -> text:
     if raw.len() >= 2:
         val first = raw.substring(0, 1)
-        val last = raw.substring(raw.len() - 1, raw.len())
+        val last = raw.substring(raw.byte_len() - 1, raw.byte_len())
         if (first == "\"" and last == "\"") or (first == "'" and last == "'"):
             return raw.substring(1, raw.len() - 1)
     raw
@@ -618,15 +1193,53 @@ use compiler.frontend.core.representation_declarations_v1.{representation_parse_
 var PENDING_UNSAFE: i64 = 0
 var PENDING_UNSAFE_REASON: text = ""
 var PENDING_UNSAFE_CAPS: [text] = []
-# One entry per annotated decl: "decl_name|reason|cap1,cap2". Reset per module.
+# One entry per annotated decl: "decl_idx|cap1,cap2|reason". Keyed by the
+# flat decl index, not the name, so two classes' same-named `@unsafe` methods
+# cannot collide. The reason is last because it is free text and may itself
+# contain `|`. Reset per module; carried through the parse cache with the
+# other declaration metadata.
 var UNSAFE_ANNOTATIONS: [text] = []
 
 fn parser_unsafe_annotations_get() -> [text]:
     UNSAFE_ANNOTATIONS
 
-fn parser_record_unsafe_annotation(decl_name: text):
-    if PENDING_UNSAFE == 1:
-        UNSAFE_ANNOTATIONS.push(decl_name + "|" + PENDING_UNSAFE_REASON + "|" + PENDING_UNSAFE_CAPS.join(","))
+fn parser_record_unsafe_annotation(decl_idx: i64):
+    if PENDING_UNSAFE == 1 and decl_idx >= 0:
+        UNSAFE_ANNOTATIONS.push("{decl_idx}|" + PENDING_UNSAFE_CAPS.join(",") + "|" + PENDING_UNSAFE_REASON)
+
+fn _unsafe_annotation_entry_for(decl_idx: i64) -> text:
+    val prefix = "{decl_idx}|"
+    for entry in UNSAFE_ANNOTATIONS:
+        if entry.starts_with(prefix):
+            return entry.substring(prefix.len(), entry.byte_len())
+    ""
+
+pub fn parser_unsafe_annotation_present(decl_idx: i64) -> bool:
+    """True when the decl at `decl_idx` carried a declaration-level `@unsafe`."""
+    val prefix = "{decl_idx}|"
+    for entry in UNSAFE_ANNOTATIONS:
+        if entry.starts_with(prefix):
+            return true
+    false
+
+pub fn parser_unsafe_annotation_caps(decl_idx: i64) -> [text]:
+    """Capability names from `@unsafe(capabilities: [...])` on that decl."""
+    val rest = _unsafe_annotation_entry_for(decl_idx)
+    val bar = rest.find("|")
+    val caps_text = if bar >= 0: rest.substring(0, bar) else: rest
+    var caps: [text] = []
+    for cap in caps_text.split(","):
+        if cap != "":
+            caps.push(cap)
+    caps
+
+pub fn parser_unsafe_annotation_reason(decl_idx: i64) -> text:
+    """The `reason:` text from `@unsafe(...)` on that decl ("" when absent)."""
+    val rest = _unsafe_annotation_entry_for(decl_idx)
+    val bar = rest.find("|")
+    if bar < 0:
+        return ""
+    rest.substring(bar + 1, rest.byte_len())
 
 fn parser_reset_pending_unsafe():
     """Clear the pending `@unsafe` slots after they have been attached.
@@ -640,7 +1253,7 @@ fn parser_reset_pending_unsafe():
     PENDING_UNSAFE_REASON = ""
     PENDING_UNSAFE_CAPS = []
 
-fn parser_parse_member_attribute() -> bool:
+pub fn parser_parse_member_attribute() -> bool:
     """Parse ONE member-position `@name` / `@name(...)` attribute inside a
     class, struct or trait body. Returns true when one was consumed.
 
@@ -660,15 +1273,24 @@ fn parser_parse_member_attribute() -> bool:
     Refs: doc/08_tracking/bug/caret_suite_native_build_blocked_stage2_windows_2026-09-03.md (B1)"""
     if par_kind_get() != 171:
         return false
-    val representation_start = lex_token_start_get()
+    val representation_start = lex_source_byte_offset(lex_token_start_get())
     val representation_line = par_line_get()
     val representation_col = par_col_get()
     parser_advance()
-    if par_kind_get() != 6:
+    val attr_name = declaration_identifier_text(par_kind_get(), par_text_get())
+    if attr_name == "":
         parser_error("expected attribute name after `@` in class body")
         return true
-    val attr_name = par_text_get()
     parser_advance()
+    # Member-position attributes deliberately do NOT run the unknown-decorator
+    # check (core/decorator_check.spl): the warning is scoped to module-level
+    # function decorators (seed parity), and member vocabularies (unsafe/
+    # danger, lock_level, layer_field, AOP attr markers, ...) are owned by
+    # other lanes -- unknown spellings here stay silent preserved metadata.
+    if attr_name == "lock_level" or lock_level_is_exception_attribute(attr_name):
+        lock_level_parse_attribute(attr_name)
+        parser_skip_newlines_and_semicolons()
+        return true
     if attr_name == "representation_boundary":
         representation_parse_attribute_v1(representation_start, representation_line, representation_col)
         parser_skip_newlines_and_semicolons()
@@ -737,6 +1359,8 @@ fn parser_attr_token_text() -> text:
         return ":"
     if k == 162:
         return "::"
+    if k == 100:
+        return "="
     val t = par_text_get()
     if t == "":
         return ""
@@ -757,7 +1381,7 @@ fn parser_pending_asm_placement() -> text:
     """Asm-embedding contract (design A.2): the subset of the pending
     decorator spellings that place or shape a function symbol
     (`naked`, `section(...)`, `align(n)`, `global`, `noreturn`, `entry`,
-    `interrupt`, `export(C[,name:sym])`), "|"-joined for
+    `interrupt`, `export(C[,name:sym])`, `inline`), "|"-joined for
     decl_set_asm_placement. Everything else in PENDING_DECL_ATTRS keeps its
     existing rt/gpu/vhdl routing. `export` is here because it fixes the
     symbol's linkage name: dropped from the flat pool, HirFunction lost
@@ -770,7 +1394,13 @@ fn parser_pending_asm_placement() -> text:
     for spelling in PENDING_DECL_ATTRS:
         val paren = spelling.index_of("(")
         val attr_name = if paren >= 0: spelling[0:paren] else: spelling
-        if attr_name == "naked" or attr_name == "section" or attr_name == "align" or attr_name == "global" or attr_name == "noreturn" or attr_name == "entry" or attr_name == "interrupt" or attr_name == "export":
+        if attr_name == "naked" or attr_name == "section" or attr_name == "align" or attr_name == "global" or attr_name == "noreturn" or attr_name == "entry" or attr_name == "interrupt" or attr_name == "export" or attr_name == "inline":
+            out.push(spelling)
+        elif paren < 0:
+            # Bare marker decorators (`@logged`) reach ParserFunction.attributes
+            # as name-only Attributes so AOP `attr(...)` selectors can see them
+            # (frontend/join_point_attr_registry). Name-only: no argument is
+            # reinterpreted, and every existing consumer matches by name.
             out.push(spelling)
     out.join("|")
 
@@ -816,13 +1446,50 @@ fn parser_record_enum_attributes(enum_name: text):
     if PENDING_DECL_ATTRS.len() > 0:
         ENUM_ATTRIBUTES.push(enum_name + "|" + PENDING_DECL_ATTRS.join("|"))
 
-fn parser_enum_attributes_for(enum_name: text) -> [text]:
+# Class decorators share the ENUM_ATTRIBUTES pool (so the flat parse-cache
+# blob format is unchanged), keyed "class:<name>|...". "class:" cannot begin
+# an enum name, so the two key spaces never collide.
+fn parser_record_class_attributes(class_name: text):
+    # "classdecl:<name>|" marks every class (decorated or not) so a no-init
+    # module var of class type can be rejected (owner decision item 14).
+    ENUM_ATTRIBUTES.push("classdecl:" + class_name + "|")
+    if PENDING_DECL_ATTRS.len() > 0:
+        ENUM_ATTRIBUTES.push("class:" + class_name + "|" + PENDING_DECL_ATTRS.join("|"))
+
+pub fn parser_is_class_decl_v1(name: text) -> bool:
+    """True when `name` was declared with `class` earlier in this module."""
+    val key = "classdecl:" + name + "|"
+    for entry in ENUM_ATTRIBUTES:
+        if entry == key:
+            return true
+    false
+
+pub fn parser_class_attributes_for(class_name: text) -> [text]:
+    """Raw decorator spellings recorded for class `class_name` in this module."""
+    parser_enum_attributes_for("class:" + class_name)
+
+fn parser_record_struct_attributes(struct_name: text):
+    if PENDING_DECL_ATTRS.len() > 0:
+        ENUM_ATTRIBUTES.push("struct:" + struct_name + "|" + PENDING_DECL_ATTRS.join("|"))
+
+pub fn parser_struct_attributes_for(struct_name: text) -> [text]:
+    """Raw decorator spellings recorded for struct `struct_name` in this module."""
+    var has_struct_attr = false
+    for entry in ENUM_ATTRIBUTES:
+        if entry.starts_with("struct:"):
+            has_struct_attr = true
+            break
+    if not has_struct_attr:
+        return []
+    parser_enum_attributes_for("struct:" + struct_name)
+
+pub fn parser_enum_attributes_for(enum_name: text) -> [text]:
     """Raw decorator spellings recorded for `enum_name` in this module."""
     var out: [text] = []
     val prefix = enum_name + "|"
     for entry in ENUM_ATTRIBUTES:
         if entry.starts_with(prefix):
-            val rest = entry.substring(prefix.len(), entry.len())
+            val rest = entry.substring(prefix.len(), entry.byte_len())
             for part in rest.split("|"):
                 if part != "":
                     out = out.push(part)
@@ -838,17 +1505,49 @@ extern fn rt_transient_heap_promote<T>(value: T) -> bool
 # The bridge copies these into rich declarations, but the public last-parse
 # accessors must also remain valid until the next parser reset.
 pub fn parser_declaration_metadata_promote_transient_owner() -> bool:
-    rt_transient_heap_promote(UNSAFE_ANNOTATIONS) and
+    rt_transient_heap_promote(TOP_LEVEL_VISIBILITY_OFFSETS_V1) and
+        rt_transient_heap_promote(TOP_LEVEL_VISIBILITY_MODIFIERS_V1) and
+        rt_transient_heap_promote(TOP_LEVEL_VISIBILITY_DECL_IDS_V1) and
+        rt_transient_heap_promote(TOP_LEVEL_VISIBILITY_SOURCE_DIGEST_V1) and
+        rt_transient_heap_promote(TOP_LEVEL_VISIBILITY_SOURCE_PATH_V1) and
+        rt_transient_heap_promote(UNSAFE_ANNOTATIONS) and
         rt_transient_heap_promote(ENUM_ATTRIBUTES) and
         rt_transient_heap_promote(ENUM_OPEN_REGIONS) and
-        representation_parser_promote_transient_owner_v1()
+        representation_parser_promote_transient_owner_v1() and
+        lock_level_metadata_promote()
+
+# Transient-scope owner promotion (peer of type_pools_promote_hir_owners and
+# parser_declaration_metadata_promote_transient_owner): the PENDING_* pools
+# are module-private here and read after the per-file transient parse scope
+# ends, so promote their backing allocations before scope teardown.
+extern fn rt_array_free<T>(array: [T])
+
+fn _pending_pool_promote_i64(root: [[i64]]) -> bool:
+    val promoted = rt_transient_heap_promote(root)
+    rt_array_free(root)
+    promoted
+
+fn _pending_pool_promote_text(root: [[text]]) -> bool:
+    val promoted = rt_transient_heap_promote(root)
+    rt_array_free(root)
+    promoted
+
+pub fn parser_pending_pools_promote_transient_owners() -> bool:
+    var promoted = true
+    promoted = _pending_pool_promote_text([PENDING_SFFI_KEYS]) and promoted
+    promoted = _pending_pool_promote_text([PENDING_SFFI_VALUES]) and promoted
+    promoted = _pending_pool_promote_text([PENDING_CLOCKED_ARGS]) and promoted
+    promoted = _pending_pool_promote_i64([PENDING_VHDL_GENERIC_ARGS]) and promoted
+    promoted = _pending_pool_promote_text([PENDING_UNSAFE_CAPS]) and promoted
+    promoted = _pending_pool_promote_text([PENDING_DECL_ATTRS]) and promoted
+    promoted
 
 fn parser_record_enum_open_regions(enum_name: text, complete_open: bool, dyn_open: bool):
     val c = if complete_open: "1" else: "0"
     val d = if dyn_open: "1" else: "0"
     ENUM_OPEN_REGIONS.push(enum_name + "|" + c + "|" + d)
 
-fn parser_enum_open_regions_for(enum_name: text) -> (bool, bool):
+pub fn parser_enum_open_regions_for(enum_name: text) -> (bool, bool):
     """(complete_open, dyn_open) recorded for `enum_name` in this module."""
     var complete_open = false
     var dyn_open = false
@@ -917,9 +1616,14 @@ fn parser_reset_pending_vhdl_decorators():
     # per-declaration, matching the other PENDING_* slots.
     parser_reset_pending_sffi()
 
-fn parse_module_body():
+pub fn parse_module_body():
     parser_reset_pending_vhdl_decorators()
+    TOP_LEVEL_VISIBILITY_OFFSETS_V1 = []
+    TOP_LEVEL_VISIBILITY_MODIFIERS_V1 = []
+    TOP_LEVEL_VISIBILITY_DECL_IDS_V1 = []
+    TOP_LEVEL_VISIBILITY_BINDINGS_ADMITTED_V1 = false
     UNSAFE_ANNOTATIONS = []
+    var named_aspects: [text] = []
     ENUM_ATTRIBUTES = []
     ENUM_OPEN_REGIONS = []
     parser_reset_extend_enums()
@@ -955,6 +1659,7 @@ fn parse_module_body():
             parser_advance()
             parser_skip_newlines_and_semicolons()
         if par_kind_get() == 190:
+            lock_level_reject_non_function(190)
             representation_reject_pending_v1()
             break
         val pm_kind = par_kind_get()
@@ -968,13 +1673,26 @@ fn parse_module_body():
         pm_prev_col = pm_col
         if parser_module_trace_enabled():
             eprint("[parser-module] decl:start i={i} kind={par_kind_get()} text={par_text_get()} line={par_line_get()} col={par_col_get()}")
+        val visibility_source_start = lex_source_byte_offset(lex_token_start_get())
+        val explicit_pri = par_kind_get() == 6 and par_text_get() == "pri"
+        val explicit_pub = par_kind_get() == 29
         val parsed_visibility = parse_top_level_visibility()
+        val visibility_observation_row = record_top_level_visibility_intent_v1(visibility_source_start, explicit_pri, explicit_pub, parsed_visibility)
         val representation_target = par_kind_get()
         if not [20, 34, 23, 24, 25, 31, 53, 30, 171].contains(representation_target):
             representation_reject_pending_v1()
+        if parsed_visibility != "private" and par_kind_get() == 6 and par_text_get() == "macro" and current_ident_is_macro_decl():
+            parse_macro_decl(parsed_visibility)
+            parser_reset_pending_vhdl_decorators()
+            continue
         if parsed_visibility != "private":
             parser_skip_newlines_and_semicolons()
+            lock_level_reject_non_function(par_kind_get())
+            PARSER_VISIBLE_UNIT_DECL_ID_V1 = -1
             val visible_decl = parse_module_decl_with_visibility(i, parsed_visibility)
+            if visible_decl < 0 and PARSER_VISIBLE_UNIT_DECL_ID_V1 >= 0:
+                module_bind_source_decl_row_v1(PARSER_VISIBLE_UNIT_DECL_ID_V1, visibility_observation_row)
+                PARSER_VISIBLE_UNIT_DECL_ID_V1 = -1
             if visible_decl >= 0:
                 decl_set_asm_placement(visible_decl, parser_pending_asm_placement())
                 parser_apply_pending_kernel_attrs(visible_decl)
@@ -983,10 +1701,11 @@ fn parse_module_body():
                     decl_set_clocked_args(visible_decl, PENDING_CLOCKED_ARGS)
                     decl_set_vhdl_generic_args(visible_decl, PENDING_VHDL_GENERIC_ARGS)
                     decl_set_flatten_struct_output(visible_decl, PENDING_FLATTEN_STRUCT_OUTPUT)
-                parser_record_unsafe_annotation(decl_get_name(visible_decl))
-                module_add_decl(visible_decl)
+                parser_record_unsafe_annotation(visible_decl)
+                module_add_source_decl_v1(visible_decl, visibility_observation_row)
                 parser_reset_pending_vhdl_decorators()
             continue
+        lock_level_reject_non_function(par_kind_get())
         if par_kind_get() == 182:
             # Stray dedent at module level -- skip it
             parser_advance()
@@ -1003,7 +1722,7 @@ fn parse_module_body():
                 val d = parse_fn_decl(1)  # 1 = is_async
                 decl_set_asm_placement(d, parser_pending_asm_placement())
                 parser_apply_pending_kernel_attrs(d)
-                module_add_decl(d)
+                module_add_source_decl_v1(d, visibility_observation_row)
                 parser_reset_pending_vhdl_decorators()
             else:
                 representation_reject_pending_v1()
@@ -1017,15 +1736,15 @@ fn parse_module_body():
                 decl_set_clocked_args(d, PENDING_CLOCKED_ARGS)
                 decl_set_vhdl_generic_args(d, PENDING_VHDL_GENERIC_ARGS)
                 decl_set_flatten_struct_output(d, PENDING_FLATTEN_STRUCT_OUTPUT)
-            parser_record_unsafe_annotation(decl_get_name(d))
-            module_add_decl(d)
+            parser_record_unsafe_annotation(d)
+            module_add_source_decl_v1(d, visibility_observation_row)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 34:
             # Module-level `me name(self: T, ...)` — parsed as a plain fn with
             # an explicit self param (parity with the Rust parser, which routes
             # top-level Me to parse_function).
             val me_d = parse_fn_decl(0)
-            module_add_decl(me_d)
+            module_add_source_decl_v1(me_d, visibility_observation_row)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 30:
             # Module-level static (canonical parse_static): `static fn` /
@@ -1040,11 +1759,12 @@ fn parse_module_body():
             parser_advance()
             if par_kind_get() == 20 or par_kind_get() == 34:
                 val static_fn_d = parse_fn_decl(0)
-                module_add_decl(static_fn_d)
+                module_add_source_decl_v1(static_fn_d, visibility_observation_row)
                 parser_reset_pending_vhdl_decorators()
             else:
                 representation_reject_pending_v1()
                 val static_is_mut = par_kind_get() == 6 and par_text_get() == "mut"
+                lock_level_reject_non_function(-1)
                 if static_is_mut:
                     parser_advance()
                 val static_name = par_text_get()
@@ -1060,58 +1780,58 @@ fn parse_module_body():
                     decl_var_binding(static_name, static_type, static_init, static_span)
                 else:
                     decl_val_binding(static_name, static_type, static_init, static_span)
-                module_add_decl(static_d)
+                module_add_source_decl_v1(static_d, visibility_observation_row)
                 parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 25:
             parser_advance()
             val d = parse_extern_fn_decl()
-            module_add_decl(d)
+            module_add_source_decl_v1(d, visibility_observation_row)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 23:
             val d = parse_struct_decl(false)
-            module_add_decl(d)
+            module_add_source_decl_v1(d, visibility_observation_row)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 24:
             val d = parse_enum_decl()
             parser_record_enum_attributes(decl_get_name(d))
-            module_add_decl(d)
+            module_add_source_decl_v1(d, visibility_observation_row)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 31:
             # class is treated like struct (fields + methods) but keeps
             # reference semantics — see decl_set_is_value_type in parse_struct_decl.
             val d = parse_struct_decl(true)
-            module_add_decl(d)
+            module_add_source_decl_v1(d, visibility_observation_row)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 32:
             val d = parse_impl_decl()
-            module_add_decl(d)
+            module_add_source_decl_v1(d, visibility_observation_row)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 27:
             val d = parse_use_decl()
-            module_add_decl(d)
+            module_add_source_decl_v1(d, visibility_observation_row)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 26:
             val d = parse_export_decl()
-            module_add_decl(d)
+            module_add_source_decl_v1(d, visibility_observation_row)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 21:
             val d = parse_val_decl()
-            module_add_decl(d)
+            module_add_source_decl_v1(d, visibility_observation_row)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 194:
             parser_advance()
             val d = parse_lazy_val_decl()
-            module_add_decl(d)
+            module_add_source_decl_v1(d, visibility_observation_row)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 22:
             val d = parse_var_decl()
-            module_add_decl(d)
+            module_add_source_decl_v1(d, visibility_observation_row)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == TOK_IDENT and par_text_get() == "let" and parser_legacy_let_decl_ahead():
             # Legacy `let [mut]` module-level binding (seed parity: parse_let
             # lowers to the same mutable global as `var`).
             val d = parse_var_decl()
-            module_add_decl(d)
+            module_add_source_decl_v1(d, visibility_observation_row)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 188:
             # const fn name(): or const binding: same as val/fn at module level
@@ -1123,7 +1843,7 @@ fn parse_module_body():
                 # const fn -- parse as normal function with comptime flag
                 val cfd = parse_fn_decl(0)
                 decl_set_comptime(cfd)
-                module_add_decl(cfd)
+                module_add_source_decl_v1(cfd, visibility_observation_row)
                 parser_reset_pending_vhdl_decorators()
             else:
                 val const_name = par_text_get()
@@ -1136,7 +1856,7 @@ fn parse_module_body():
                 val const_init = parse_expr()
                 val decl_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
                 val cd = decl_val_binding(const_name, const_type, const_init, decl_span)
-                module_add_decl(cd)
+                module_add_source_decl_v1(cd, visibility_observation_row)
                 parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 40:
             val source_start = lex_token_start_get()
@@ -1144,7 +1864,9 @@ fn parse_module_body():
             val source_col = par_col_get()
             val if_expr = parse_if_expr()
             val source_span = flat_span_new(source_start, lex_token_start_get(), source_line, source_col)
-            val d = decl_val_binding("_if_" + int_to_str(i), -1, if_expr, source_span)
+            # The bridge recognizes parser-owned _expr_ declarations as script
+            # statements when synthesizing main; authored bindings stay values.
+            val d = decl_val_binding("_expr_if_" + int_to_str(i), -1, if_expr, source_span)
             module_add_decl(d)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 45:
@@ -1153,7 +1875,7 @@ fn parse_module_body():
             val source_col = par_col_get()
             val for_expr = parse_for_expr()
             val source_span = flat_span_new(source_start, lex_token_start_get(), source_line, source_col)
-            val d = decl_val_binding("_for_" + int_to_str(i), -1, for_expr, source_span)
+            val d = decl_val_binding("_expr_for_" + int_to_str(i), -1, for_expr, source_span)
             module_add_decl(d)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 46:
@@ -1162,13 +1884,13 @@ fn parse_module_body():
             val source_col = par_col_get()
             val while_expr = parse_while_expr()
             val source_span = flat_span_new(source_start, lex_token_start_get(), source_line, source_col)
-            val d = decl_val_binding("_while_" + int_to_str(i), -1, while_expr, source_span)
+            val d = decl_val_binding("_expr_while_" + int_to_str(i), -1, while_expr, source_span)
             module_add_decl(d)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 28:
             # import X.{Y, Z} -- treat like use
             val d = parse_use_decl()
-            module_add_decl(d)
+            module_add_source_decl_v1(d, visibility_observation_row)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 6 and par_text_get() == "mod":
             # `mod pkg.member` package-member declaration (260+ uses across
@@ -1180,12 +1902,12 @@ fn parse_module_body():
             # sibling file; the relative-import machinery resolves the rest.
             val mod_d = parse_mod_decl_with_visibility("private")
             if mod_d >= 0:
-                module_add_decl(mod_d)
+                module_add_source_decl_v1(mod_d, visibility_observation_row)
                 parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 6 and is_domain_block_kind(par_text_get()) and current_ident_followed_by_lbrace():
             val block_kind = par_text_get()
             val d = parse_module_domain_block_decl(i, block_kind)
-            module_add_decl(d)
+            module_add_source_decl_v1(d, visibility_observation_row)
             parser_reset_pending_vhdl_decorators()
             parser_skip_newlines_and_semicolons()
         elif par_kind_get() == 33:
@@ -1194,16 +1916,25 @@ fn parse_module_body():
             # parse_struct_or_trait_decl's is_trait doc comment) -- doing
             # so collides with real `impl Trait for Struct` dispatch.
             val d = parse_struct_or_trait_decl(false, true)
-            module_add_decl(d)
+            module_add_source_decl_v1(d, visibility_observation_row)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 196:
             # extend TypeName: adds methods to an existing type
             val d = parse_impl_decl()
-            module_add_decl(d)
+            module_add_source_decl_v1(d, visibility_observation_row)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 209:
             val d = parse_bitfield_decl()
-            module_add_decl(d)
+            module_add_source_decl_v1(d, visibility_observation_row)
+            parser_reset_pending_vhdl_decorators()
+        elif par_kind_get() == 6 and par_text_get() == "macro" and current_ident_is_macro_decl():
+            parse_macro_decl("private")
+            parser_reset_pending_vhdl_decorators()
+        elif par_kind_get() == 6 and (par_text_get() == "friend" or par_text_get() == "internal_export") and current_ident_is_layer_decl():
+            val access_helper = if par_text_get() == "friend": "__module_friend" else: "__module_internal_export"
+            val access_d = parse_module_access_decl(i, access_helper)
+            if access_d >= 0:
+                module_add_source_decl_v1(access_d, visibility_observation_row)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 6 and par_text_get() == "layer" and current_ident_is_layer_decl():
             # layer NAME / layer NAME uses A, B ("layer" is a soft keyword,
@@ -1211,7 +1942,7 @@ fn parse_module_body():
             # `layer: i64` fields/params; see current_ident_is_layer_decl()).
             val layer_d = parse_layer_decl(i)
             if layer_d >= 0:
-                module_add_decl(layer_d)
+                module_add_source_decl_v1(layer_d, visibility_observation_row)
                 parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 6 and par_text_get() == "resource" and current_ident_is_resource_decl():
             # WP-A: `@sffi(...) resource Name` ("resource" is a soft keyword,
@@ -1220,25 +1951,25 @@ fn parse_module_body():
             # current_ident_is_resource_decl()).
             val res_d = parse_resource_decl(i)
             if res_d >= 0:
-                module_add_decl(res_d)
+                module_add_source_decl_v1(res_d, visibility_observation_row)
                 parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 6 and par_text_get() == "cli" and current_ident_is_cli_decl():
             # cli Name: declarative arg parsing block ("cli" is a soft
             # keyword, not reserved, so it never shadows identifiers like
             # `fn cli(): ...`; see current_ident_is_cli_decl()).
             val cli_d = parse_cli_decl()
-            module_add_decl(cli_d)
+            module_add_source_decl_v1(cli_d, visibility_observation_row)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 205:
             # ce NAME: computation expression block at module level
             parser_advance()
             val ce_d = parse_ce_decl()
-            module_add_decl(ce_d)
+            module_add_source_decl_v1(ce_d, visibility_observation_row)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 171:
             # Decorator: @gpu, @gpu_kernel, @simd, @bounds(...), @derive(Eq, Hash, Debug), etc.
             # Also: @allow(...), @inline, @no_gc, @tag:... and other file-level annotations
-            val representation_start = lex_token_start_get()
+            val representation_start = lex_source_byte_offset(lex_token_start_get())
             val representation_line = par_line_get()
             val representation_col = par_col_get()
             parser_advance()
@@ -1251,6 +1982,16 @@ fn parse_module_body():
                 # Capture its text and consume it so we don't mis-dispatch to AOP parser
                 decorator_name = par_text_get()
                 parser_advance()
+            # Warn (or error under SIMPLE_STRICT_DECORATORS=1) on a spelling no
+            # pass consumes; known names are a no-op. The check gates itself to
+            # stacks whose decorated item is a module-level FUNCTION (seed
+            # parity); enum/struct/val stacks stay silent. See
+            # core/decorator_check.spl.
+            parser_check_decorator_name(decorator_name, parser_peek_decorated_item())
+            if decorator_name == "lock_level" or lock_level_is_exception_attribute(decorator_name):
+                lock_level_parse_attribute(decorator_name)
+                parser_skip_newlines_and_semicolons()
+                continue
             if decorator_name == "representation_boundary":
                 representation_parse_attribute_v1(representation_start, representation_line, representation_col)
                 parser_skip_newlines_and_semicolons()
@@ -1437,6 +2178,15 @@ fn parse_module_body():
                 var nogc_marker_args: [i64] = []
                 val nogc_marker = expr_call(expr_ident("__module_nogc_strict", 0), nogc_marker_args, 0)
                 module_add_decl(decl_val_binding("_expr_nogc_strict_" + int_to_str(i), -1, nogc_marker, -1))
+                parser_reset_pending_vhdl_decorators()
+            elif decorator_name == "required_init" and (attr_raw_args == "error" or attr_raw_args == "warning"):
+                # `@required_init(error|warning)`: per-module opt-in to the
+                # required-field verifier. Same inert-marker trick as
+                # `@no_gc(strict)` above; module_assembly records the mode and
+                # drops the marker.
+                var required_init_marker_args: [i64] = []
+                val required_init_marker = expr_call(expr_ident("__module_required_init_" + attr_raw_args, 0), required_init_marker_args, 0)
+                module_add_decl(decl_val_binding("_expr_required_init_" + int_to_str(i), -1, required_init_marker, -1))
                 parser_reset_pending_vhdl_decorators()
             elif decorator_name == "layer":
                 # `@layer(NAME)` module tag (M1). Unlike @gpu/@derive/etc,
@@ -1637,6 +2387,9 @@ fn parse_module_body():
                     # pointcut the author never wrote, and the validator would
                     # then reject a perfectly ordinary function.
                     if aspect_pending_saw_advice_get():
+                        aspect_registry_record_parser_declaration_v2(decl_get_name(adv_d),
+                            aspect_pending_kind_get(), aspect_pending_selector_get(), aspect_pending_mode_get(),
+                            aspect_pending_readonly_get(), aspect_pending_noalloc_get(), aspect_pending_bounded_time_get())
                         val adv_helper = expr_ident("__advice_decl", 0)
                         var adv_args: [i64] = []
                         adv_args.push(expr_string_lit(decl_get_name(adv_d), 0))
@@ -1684,7 +2437,7 @@ fn parse_module_body():
             elif decorator_name == "gpu_kernel" or decorator_name == "gpu":
                 if par_kind_get() == 20 or par_kind_get() == 34:
                     val d = parse_fn_decl(0)
-                    decl_is_gpu_kernel[d] = 1
+                    decl_is_gpu_kernel_set_at(d, 1)
                     if gpu_target_arg.len() > 0:
                         decl_set_gpu_target_text(d, gpu_target_arg)
                         if gpu_target_arg_name.len() > 0:
@@ -1696,7 +2449,7 @@ fn parse_module_body():
             elif decorator_name == "simd":
                 if par_kind_get() == 20 or par_kind_get() == 34:
                     val d = parse_fn_decl(0)
-                    decl_is_simd[d] = 1
+                    decl_is_simd_set_at(d, 1)
                     module_add_decl(d)
                     parser_reset_pending_vhdl_decorators()
             elif decorator_name == "packed":
@@ -1708,7 +2461,7 @@ fn parse_module_body():
                         if packed_field_bits[pfi] <= 0:
                             parser_error("@packed struct fields must use explicit bit widths; use an explicit nested struct instead")
                         pfi = pfi + 1
-                    decl_is_packed[d] = 1
+                    decl_is_packed_set_at(d, 1)
                     module_add_decl(d)
                     parser_reset_pending_vhdl_decorators()
             elif decorator_name == "derive":
@@ -1716,22 +2469,30 @@ fn parse_module_body():
                 val is_struct: bool = par_kind_get() == 23
                 if is_class or is_struct:
                     val d = parse_struct_decl(is_class)
-                    decl_derives[d] = derive_traits
+                    decl_derives_set_at(d, derive_traits)
                     module_add_decl(d)
                     # Generate derived trait method implementations
                     generate_derive_impls(d, derive_traits)
                     parser_reset_pending_vhdl_decorators()
             else:
-                # Unknown annotation (e.g. @allow(...), @inline, @no_gc, @bounds(...), etc.)
-                # The annotation tokens have already been consumed above (@ + name + args).
-                # The following declaration is handled by the next outer loop iteration,
-                # which dispatches via the full elif chain (fn, use, struct, val, etc.).
-                # Multiple stacked annotations also work: each loop iteration consumes one @.
+                # Fall-through annotation (e.g. @allow(...), @inline, @no_gc,
+                # @bounds(...), or a genuinely unknown tag). The annotation
+                # tokens have already been consumed above (@ + name + args).
+                # The following declaration is handled by the next outer loop
+                # iteration, which dispatches via the full elif chain (fn, use,
+                # struct, val, etc.). Multiple stacked annotations also work:
+                # each loop iteration consumes one @. Unknown names were
+                # already warned about (or hard-errored under
+                # SIMPLE_STRICT_DECORATORS=1) at the top of this arm; the
+                # spelling still rides PENDING_DECL_ATTRS as inert metadata.
                 pass_dn
+        elif par_kind_get() == 6 and par_text_get() == "unit" and current_ident_is_unit_decl():
+            parse_unit_decl_after_keyword_v1()
         elif par_kind_get() == 219:
-            # newunit UserId: i64 as uid -- nominal ABI-transparent wrapper.
-            # The suffix is accepted by this frontend for syntax parity; runtime
-            # suffix literal registration is handled by the Rust unit parser path.
+            # newunit UserId: i64 as uid -- deprecated spelling of `unit`.
+            # Lowers into the same canonical record (legacy_origin "newunit")
+            # and raises SPL-UNIT-001 as a WARNING; it is never rejected.
+            parser_warn("SPL-UNIT-001: `newunit` is deprecated; declare `unit Name: T as suffix` instead")
             parser_advance()
             val nt_name = par_text_get()
             parser_expect(6)
@@ -1743,17 +2504,11 @@ fn parse_module_body():
                 parser_error("expected 'as' in newunit declaration")
             val suffix_name = par_text_get()
             parser_expect(6)
-            pass_dn
-            named_type_register(nt_name, ["value"], [inner_type])
-            custom_primitive_register(nt_name, inner_type)
-            newunit_register(nt_name, suffix_name, inner_type)
-            val nt_field_names: [text] = ["value"]
-            val nt_field_types: [i64] = [inner_type]
-            val nt_field_defaults: [i64] = [-1]
-            val nt_field_bits: [i64] = [-1]
-            val nt_d = decl_struct_def(nt_name, nt_field_names, nt_field_types, nt_field_defaults, nt_field_bits, 0)
-            module_add_decl(nt_d)
-            parser_reset_pending_vhdl_decorators()
+            parser_lower_unit_decl(nt_name, inner_type, suffix_name, "newunit")
+            # The constraint syntax belongs to `unit` only (owner decision
+            # 2026-11-17): the deprecated spelling never grows new syntax.
+            if par_kind_get() == TOK_KW_WHERE or par_kind_get() == TOK_KW_IN:
+                parser_error("`newunit` does not accept a constraint; declare `unit " + nt_name + ": " + type_tag_name(inner_type) + " as " + suffix_name + " " + par_text_get() + " ...` instead")
         elif par_kind_get() == 198:
             # newtype Meters = i64 -- wrapper struct with single 'value' field
             # For numeric inner types, auto-derives __add__, __sub__, __mul__, __div__, __eq__, __lt__, __gt__
@@ -1763,42 +2518,23 @@ fn parse_module_body():
             parser_expect(100)
             val inner_type = parser_parse_type()
             # Pre-register newtype so type references resolve (same as parse_struct_decl)
-            pass_dn
-            named_type_register(nt_name, ["value"], [inner_type])
-            custom_primitive_register(nt_name, inner_type)
-            val nt_field_names: [text] = ["value"]
-            val nt_field_types: [i64] = [inner_type]
-            val nt_field_defaults: [i64] = [-1]
-            val nt_field_bits: [i64] = [-1]
-            val nt_d = decl_struct_def(nt_name, nt_field_names, nt_field_types, nt_field_defaults, nt_field_bits, 0)
-            module_add_decl(nt_d)
-            parser_reset_pending_vhdl_decorators()
-
-            # Check if inner type is numeric — auto-derive operator methods
-            val inner_name = type_tag_name(inner_type)
-            val is_i64: bool = inner_name == "i64"
-            val is_i32: bool = inner_name == "i32"
-            val is_i16: bool = inner_name == "i16"
-            val is_i8: bool = inner_name == "i8"
-            val is_u64: bool = inner_name == "u64"
-            val is_u32: bool = inner_name == "u32"
-            val is_u16: bool = inner_name == "u16"
-            val is_u8: bool = inner_name == "u8"
-            val is_f64: bool = inner_name == "f64"
-            val is_f32: bool = inner_name == "f32"
-            val is_int: bool = inner_name == "Int"
-            val is_float: bool = inner_name == "Float"
-            val is_numeric_a: bool = is_i64 or is_i32
-            val is_numeric_b: bool = is_i16 or is_i8
-            val is_numeric_c: bool = is_u64 or is_u32
-            val is_numeric_d: bool = is_u16 or is_u8
-            val is_numeric_e: bool = is_f64 or is_f32
-            val is_numeric_f: bool = is_int or is_float
-            val is_numeric_ab: bool = is_numeric_a or is_numeric_b
-            val is_numeric_cd: bool = is_numeric_c or is_numeric_d
-            val is_numeric_ef: bool = is_numeric_e or is_numeric_f
-            val is_numeric_abcd: bool = is_numeric_ab or is_numeric_cd
-            val is_numeric: bool = is_numeric_abcd or is_numeric_ef
+            val is_numeric: bool = unit_decl_inner_is_numeric(inner_type)
+            if is_numeric:
+                # A numeric newtype is a unit in compat mode: same canonical
+                # record (legacy_origin "newtype"), own warning code, and its
+                # auto-derived operators are kept (never silently dropped).
+                parser_warn("SPL-UNIT-003: numeric `newtype` auto-derives arithmetic; migrate to `unit " + nt_name + ": " + type_tag_name(inner_type) + " as <suffix>` and declare approved operators")
+                parser_lower_unit_decl(nt_name, inner_type, "", "newtype")
+            else:
+                named_type_register(nt_name, ["value"], [inner_type])
+                custom_primitive_register(nt_name, inner_type)
+                val nt_field_names: [text] = ["value"]
+                val nt_field_types: [i64] = [inner_type]
+                val nt_field_defaults: [i64] = [-1]
+                val nt_field_bits: [i64] = [-1]
+                val nt_d = decl_struct_def(nt_name, nt_field_names, nt_field_types, nt_field_defaults, nt_field_bits, 0)
+                module_add_source_decl_v1(nt_d, visibility_observation_row)
+                parser_reset_pending_vhdl_decorators()
 
             if is_numeric:
                 # Resolve the newtype's type tag for return types
@@ -1869,35 +2605,11 @@ fn parse_module_body():
             parser_advance()
             parser_skip_newlines_and_semicolons()
         elif par_kind_get() == 35:
-            # Type alias: type X = Y -- capture name + aliased type into the
-            # arena (bug type_alias_declarations_discarded_at_parse_2026-07-29,
-            # lane TAL1). Pure plumbing: no semantic alias registry yet -- a
-            # later lane consumes module.type_aliases.
-            parser_advance()
-            var ta_name: text = ""
-            if par_kind_get() == 6:
-                ta_name = par_text_get()
-                parser_advance()
-            var ta_type_tag: i64 = 0
-            if par_kind_get() == TOK_ASSIGN:
-                parser_advance()
-                ta_type_tag = parser_parse_type()
-            if ta_name != "":
-                val ta_d = decl_type_alias(ta_name, ta_type_tag, 0)
-                module_add_decl(ta_d)
-            # Defensive skip-to-newline: this minimal capture does not parse
-            # generic type-alias params (`type X<T> = ...`) or where-clauses,
-            # so consume any leftover tokens the same way the old skip loop
-            # did rather than risking a parse desync.
-            while true:
-                val type_is_nl: bool = par_kind_get() == 180
-                val type_is_ded: bool = par_kind_get() == 182
-                val type_is_eof: bool = par_kind_get() == 190
-                val type_done: bool = type_is_nl or type_is_ded
-                val type_done2: bool = type_done or type_is_eof
-                if type_done2:
-                    break
-                parser_advance()
+            # Type aliases share declaration generic syntax, bounds/default
+            # transport, and the existing semantic alias owner.
+            val ta_d = parse_type_alias_decl()
+            if ta_d >= 0:
+                module_add_source_decl_v1(ta_d, visibility_observation_row)
             parser_skip_newlines_and_semicolons()
         elif par_kind_get() == 36:
             val asm_expr = parse_expr()
@@ -1908,11 +2620,20 @@ fn parse_module_body():
         elif par_kind_get() == 181:
             # Stray indent at module level -- skip it
             parser_advance()
+        elif par_kind_get() == 6 and par_text_get() == "aspect" and current_ident_is_named_aspect_decl():
+            val aspect_name = parse_named_aspect_decl()
+            if named_aspects.contains(aspect_name):
+                parser_error("duplicate named aspect: " + aspect_name)
+            else:
+                named_aspects.push(aspect_name)
+            parser_reset_pending_vhdl_decorators()
+            parser_skip_newlines_and_semicolons()
         elif par_kind_get() == 6 and par_text_get() == "on" and current_ident_is_on_advice_decl():
             # on pc{...} use handler form [priority N] ("on" is a soft
             # keyword, not reserved, so it never shadows identifiers/params
             # like `fn showcase_trace(on: bool, ...)`; see
             # current_ident_is_on_advice_decl()).
+            parser_warn("W-AOP-LEGACY-OWNER: wrap top-level on pc advice in a named aspect")
             val d = parse_aop_advice_decl()
             module_add_decl(d)
             parser_reset_pending_vhdl_decorators()
@@ -2055,8 +2776,10 @@ fn parse_module_body():
                         module_add_decl(ctd)
                         parser_reset_pending_vhdl_decorators()
                     parser_skip_newlines_and_semicolons()
-                elif par_text_get() == "print":
-                    parser_warn_print_if_needed()
+                elif par_text_get() == "print" or par_text_get() == "eprint":
+                    val print_ident_name = par_text_get()
+                    if print_ident_name == "print":
+                        parser_warn_print_if_needed()
                     parser_advance()
                     val is_nl = par_kind_get() == 180
                     val is_ded = par_kind_get() == 182
@@ -2065,16 +2788,18 @@ fn parse_module_body():
                     val no_arg2 = no_arg or is_eof
                     var print_call: i64 = 0
                     if no_arg2:
-                        val callee0 = expr_ident("print", 0)
+                        val callee0 = expr_ident(print_ident_name, 0)
                         var args0: [i64] = []
                         print_call = expr_call(callee0, args0, 0)
                     else:
                         val print_arg = parse_expr()
-                        val callee1 = expr_ident("print", 0)
+                        val callee1 = expr_ident(print_ident_name, 0)
                         var args1: [i64] = []
                         args1.push(print_arg)
                         print_call = expr_call(callee1, args1, 0)
-                    val top_expr_span = flat_span_new(top_expr_start, lex_token_start_get(), top_expr_line, top_expr_col)
+                    # Byte offsets: LexSpan and source slicing are byte-based; the
+                    # raw lexer positions are char-based and broke UTF-8 spans.
+                    val top_expr_span = flat_span_new(lex_source_byte_offset(top_expr_start), lex_current_token_decl_end_byte(), top_expr_line, top_expr_col)
                     val d = decl_val_binding("_expr_" + int_to_str(i), -1, print_call, top_expr_span)
                     module_add_decl(d)
                     parser_reset_pending_vhdl_decorators()
@@ -2092,7 +2817,9 @@ fn parse_module_body():
                     val expression0 = if bc0_matched: bc0_call else: parse_expr()
                     val is_call0 = bc0_matched or expr_get_tag(expression0) == EXPR_CALL or expr_get_tag(expression0) == EXPR_METHOD_CALL
                     val expression = if par_kind_get() == TOK_COLON and is_call0: parse_trailing_colon_block_arg(expression0) else: expression0
-                    val top_expr_span = flat_span_new(top_expr_start, lex_token_start_get(), top_expr_line, top_expr_col)
+                    # Byte offsets: LexSpan and source slicing are byte-based; the
+                    # raw lexer positions are char-based and broke UTF-8 spans.
+                    val top_expr_span = flat_span_new(lex_source_byte_offset(top_expr_start), lex_current_token_decl_end_byte(), top_expr_line, top_expr_col)
                     val d = decl_val_binding("_expr_" + int_to_str(i), -1, expression, top_expr_span)
                     module_add_decl(d)
                     parser_reset_pending_vhdl_decorators()
@@ -2105,16 +2832,23 @@ fn parse_module_body():
                 val expression1 = parse_expr()
                 val is_call1 = expr_get_tag(expression1) == EXPR_CALL or expr_get_tag(expression1) == EXPR_METHOD_CALL
                 val expression = if par_kind_get() == TOK_COLON and is_call1: parse_trailing_colon_block_arg(expression1) else: expression1
-                val top_expr_span = flat_span_new(top_expr_start, lex_token_start_get(), top_expr_line, top_expr_col)
+                # Byte offsets: LexSpan and source slicing are byte-based; the
+                # raw lexer positions are char-based and broke UTF-8 spans.
+                val top_expr_span = flat_span_new(lex_source_byte_offset(top_expr_start), lex_current_token_decl_end_byte(), top_expr_line, top_expr_col)
                 val d = decl_val_binding("_expr_" + int_to_str(i), -1, expression, top_expr_span)
                 module_add_decl(d)
                 parser_reset_pending_vhdl_decorators()
                 parser_skip_newlines_and_semicolons()
 
+    if not parser_has_errors():
+        if not parser_top_level_visibility_admit_restored_bindings_v1():
+            parser_error("invalid top-level source declaration binding table")
+
 # ===== Exports =====
 
-export parse_enum_decl, parse_module_body, parser_enum_attributes_for
+export parse_enum_decl, parse_module_body, parser_enum_attributes_for, parser_class_attributes_for, parser_record_class_attributes, parser_struct_attributes_for, parser_record_struct_attributes, parser_is_class_decl_v1
 export parser_enum_open_regions_for
+export parser_pending_pools_promote_transient_owners
 
 # ===== Bitfield Declaration =====
 
@@ -2150,12 +2884,19 @@ pub fn flat_pending_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_text(PENDING_UNSAFE_CAPS))
     parts = parts.push(flat_pool_enc_scalar_text(PENDING_UNSAFE_REASON))
     parts = parts.push(flat_pool_enc_i64(PENDING_VHDL_GENERIC_ARGS))
+    parts = parts.push(flat_pool_enc_i64(TOP_LEVEL_VISIBILITY_DECL_IDS_V1))
+    parts = parts.push(flat_pool_enc_text(TOP_LEVEL_VISIBILITY_MODIFIERS_V1))
+    parts = parts.push(flat_pool_enc_i64(TOP_LEVEL_VISIBILITY_OFFSETS_V1))
+    parts = parts.push(flat_pool_enc_scalar_text(TOP_LEVEL_VISIBILITY_SOURCE_DIGEST_V1))
+    parts = parts.push(flat_pool_enc_scalar_text(TOP_LEVEL_VISIBILITY_SOURCE_PATH_V1))
     parts = parts.push(flat_pool_enc_text(UNSAFE_ANNOTATIONS))
     parts.join("")
 
 # Returns false when the blob ran short or was malformed; the caller must
 # treat that as a cache MISS and reparse, never as an empty parse.
 pub fn flat_pending_pools_restore(r: FlatPoolReader) -> bool:
+    # Pending data alone cannot authorize IDs in another live AST snapshot.
+    TOP_LEVEL_VISIBILITY_BINDINGS_ADMITTED_V1 = false
     ENUM_ATTRIBUTES = flat_pool_dec_text(r)
     ENUM_OPEN_REGIONS = flat_pool_dec_text(r)
     PENDING_CLOCKED_ARGS = flat_pool_dec_text(r)
@@ -2169,7 +2910,111 @@ pub fn flat_pending_pools_restore(r: FlatPoolReader) -> bool:
     PENDING_UNSAFE_CAPS = flat_pool_dec_text(r)
     PENDING_UNSAFE_REASON = flat_pool_dec_scalar_text(r)
     PENDING_VHDL_GENERIC_ARGS = flat_pool_dec_i64(r)
+    TOP_LEVEL_VISIBILITY_DECL_IDS_V1 = flat_pool_dec_i64(r)
+    TOP_LEVEL_VISIBILITY_MODIFIERS_V1 = flat_pool_dec_text(r)
+    TOP_LEVEL_VISIBILITY_OFFSETS_V1 = flat_pool_dec_i64(r)
+    TOP_LEVEL_VISIBILITY_SOURCE_DIGEST_V1 = flat_pool_dec_scalar_text(r)
+    TOP_LEVEL_VISIBILITY_SOURCE_PATH_V1 = flat_pool_dec_scalar_text(r)
     UNSAFE_ANNOTATIONS = flat_pool_dec_text(r)
-    r.ok
+    if not r.ok or not top_level_visibility_intent_rows_valid_v1():
+        parser_top_level_visibility_intent_clear_v1()
+        return false
+    true
 
 export flat_pending_pools_dump, flat_pending_pools_restore
+
+# ===== PendingDeclAttrState snapshot (ParseContext stage 1) =====
+# See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
+# take moves this file's parse state out and installs fresh initial
+# owners; install makes a taken snapshot active again.
+pub struct PendingDeclAttrState:
+    PENDING_SFFI: i64
+    PENDING_SFFI_KEYS: [text]
+    PENDING_SFFI_VALUES: [text]
+    PENDING_HARDWARE: i64
+    PENDING_CLOCKED_ARGS: [text]
+    PENDING_VHDL_GENERIC_ARGS: [i64]
+    PENDING_FLATTEN_STRUCT_OUTPUT: i64
+    PENDING_UNSAFE: i64
+    PENDING_UNSAFE_REASON: text
+    PENDING_UNSAFE_CAPS: [text]
+    UNSAFE_ANNOTATIONS: [text]
+    PENDING_DECL_ATTRS: [text]
+    ENUM_ATTRIBUTES: [text]
+    ENUM_OPEN_REGIONS: [text]
+    TOP_LEVEL_VISIBILITY_OFFSETS_V1: [i64]
+    TOP_LEVEL_VISIBILITY_MODIFIERS_V1: [text]
+    TOP_LEVEL_VISIBILITY_DECL_IDS_V1: [i64]
+    TOP_LEVEL_VISIBILITY_SOURCE_DIGEST_V1: text
+    TOP_LEVEL_VISIBILITY_SOURCE_PATH_V1: text
+    TOP_LEVEL_VISIBILITY_BINDINGS_ADMITTED_V1: bool
+
+pub fn pending_decl_attr_state_take() -> PendingDeclAttrState:
+    val s = PendingDeclAttrState(
+        PENDING_SFFI: PENDING_SFFI,
+        PENDING_SFFI_KEYS: PENDING_SFFI_KEYS,
+        PENDING_SFFI_VALUES: PENDING_SFFI_VALUES,
+        PENDING_HARDWARE: PENDING_HARDWARE,
+        PENDING_CLOCKED_ARGS: PENDING_CLOCKED_ARGS,
+        PENDING_VHDL_GENERIC_ARGS: PENDING_VHDL_GENERIC_ARGS,
+        PENDING_FLATTEN_STRUCT_OUTPUT: PENDING_FLATTEN_STRUCT_OUTPUT,
+        PENDING_UNSAFE: PENDING_UNSAFE,
+        PENDING_UNSAFE_REASON: PENDING_UNSAFE_REASON,
+        PENDING_UNSAFE_CAPS: PENDING_UNSAFE_CAPS,
+        UNSAFE_ANNOTATIONS: UNSAFE_ANNOTATIONS,
+        PENDING_DECL_ATTRS: PENDING_DECL_ATTRS,
+        ENUM_ATTRIBUTES: ENUM_ATTRIBUTES,
+        ENUM_OPEN_REGIONS: ENUM_OPEN_REGIONS,
+        TOP_LEVEL_VISIBILITY_OFFSETS_V1: TOP_LEVEL_VISIBILITY_OFFSETS_V1,
+        TOP_LEVEL_VISIBILITY_MODIFIERS_V1: TOP_LEVEL_VISIBILITY_MODIFIERS_V1,
+        TOP_LEVEL_VISIBILITY_DECL_IDS_V1: TOP_LEVEL_VISIBILITY_DECL_IDS_V1,
+        TOP_LEVEL_VISIBILITY_SOURCE_DIGEST_V1: TOP_LEVEL_VISIBILITY_SOURCE_DIGEST_V1,
+        TOP_LEVEL_VISIBILITY_SOURCE_PATH_V1: TOP_LEVEL_VISIBILITY_SOURCE_PATH_V1,
+        TOP_LEVEL_VISIBILITY_BINDINGS_ADMITTED_V1: TOP_LEVEL_VISIBILITY_BINDINGS_ADMITTED_V1
+    )
+    PENDING_SFFI = 0
+    PENDING_SFFI_KEYS = []
+    PENDING_SFFI_VALUES = []
+    PENDING_HARDWARE = 0
+    PENDING_CLOCKED_ARGS = []
+    PENDING_VHDL_GENERIC_ARGS = []
+    PENDING_FLATTEN_STRUCT_OUTPUT = 0
+    PENDING_UNSAFE = 0
+    PENDING_UNSAFE_REASON = ""
+    PENDING_UNSAFE_CAPS = []
+    UNSAFE_ANNOTATIONS = []
+    PENDING_DECL_ATTRS = []
+    ENUM_ATTRIBUTES = []
+    ENUM_OPEN_REGIONS = []
+    TOP_LEVEL_VISIBILITY_OFFSETS_V1 = []
+    TOP_LEVEL_VISIBILITY_MODIFIERS_V1 = []
+    TOP_LEVEL_VISIBILITY_DECL_IDS_V1 = []
+    TOP_LEVEL_VISIBILITY_SOURCE_DIGEST_V1 = ""
+    TOP_LEVEL_VISIBILITY_SOURCE_PATH_V1 = ""
+    TOP_LEVEL_VISIBILITY_BINDINGS_ADMITTED_V1 = false
+    s
+
+pub fn pending_decl_attr_state_install(s: PendingDeclAttrState):
+    PENDING_SFFI = s.PENDING_SFFI
+    PENDING_SFFI_KEYS = s.PENDING_SFFI_KEYS
+    PENDING_SFFI_VALUES = s.PENDING_SFFI_VALUES
+    PENDING_HARDWARE = s.PENDING_HARDWARE
+    PENDING_CLOCKED_ARGS = s.PENDING_CLOCKED_ARGS
+    PENDING_VHDL_GENERIC_ARGS = s.PENDING_VHDL_GENERIC_ARGS
+    PENDING_FLATTEN_STRUCT_OUTPUT = s.PENDING_FLATTEN_STRUCT_OUTPUT
+    PENDING_UNSAFE = s.PENDING_UNSAFE
+    PENDING_UNSAFE_REASON = s.PENDING_UNSAFE_REASON
+    PENDING_UNSAFE_CAPS = s.PENDING_UNSAFE_CAPS
+    UNSAFE_ANNOTATIONS = s.UNSAFE_ANNOTATIONS
+    PENDING_DECL_ATTRS = s.PENDING_DECL_ATTRS
+    ENUM_ATTRIBUTES = s.ENUM_ATTRIBUTES
+    ENUM_OPEN_REGIONS = s.ENUM_OPEN_REGIONS
+    TOP_LEVEL_VISIBILITY_OFFSETS_V1 = s.TOP_LEVEL_VISIBILITY_OFFSETS_V1
+    TOP_LEVEL_VISIBILITY_MODIFIERS_V1 = s.TOP_LEVEL_VISIBILITY_MODIFIERS_V1
+    TOP_LEVEL_VISIBILITY_DECL_IDS_V1 = s.TOP_LEVEL_VISIBILITY_DECL_IDS_V1
+    TOP_LEVEL_VISIBILITY_SOURCE_DIGEST_V1 = s.TOP_LEVEL_VISIBILITY_SOURCE_DIGEST_V1
+    TOP_LEVEL_VISIBILITY_SOURCE_PATH_V1 = s.TOP_LEVEL_VISIBILITY_SOURCE_PATH_V1
+    # Only the whole ParseContext owner can admit IDs after installing the AST.
+    TOP_LEVEL_VISIBILITY_BINDINGS_ADMITTED_V1 = false
+
+export PendingDeclAttrState, pending_decl_attr_state_take, pending_decl_attr_state_install

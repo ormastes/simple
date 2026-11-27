@@ -1,0 +1,426 @@
+# Per-module interface summary (PR2b of
+# doc/03_plan/compiler/build_system/true_per_file_src_to_obj_plan.md).
+#
+# Produced on demand from ONE module's own source; never opens an import.
+# Entries are the existing companion section records
+# (module_tldr_sections_v1: layout/trait/type/const/impl/generic) plus:
+#   export|<name>                       exported-name list (glob / bare `use`)
+#   use|<stmts>                         source-ordered use/import/export statements (one row)
+#   decl|<kind> <name> id=<stable> cfg=<attrs> sig=<header line>
+#   fallback|<reason>                   counted, logged unsupported construct
+# Every @when/cfg variant is kept (target-neutral; MIR lowering selects).
+# Decl identity = (module_id, stable_symbol_id).
+#
+# Wire form:
+#   tldr-summary-v1.1\nmodule: <id>\nsource: sha256:<hex>\ndigest: sha256:<hex>\n
+#   <section records, sorted>
+# `digest` is sha256 over the full rendered section body (struct fields,
+# signatures, variants), NOT interface_digest_of_source (under-captures fields).
+#
+# Concurrency: none needed. Content is a pure function of (module_id, source)
+# and readers check the source digest, so racing writers are harmless: the
+# rename is atomic and a stale winner reads as not fresh (closure route).
+use std.io_runtime.{file_exists, file_read}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{HASH_ALGO_SHA256_V1,
+    digest_v1_text, digest_v1_parse, digest_admits_identity_v1}
+use compiler.driver.cache.hash_digest_v1.{digest_v1_of_text}
+use compiler.driver.cache.module_tldr_sections_v1.{module_tldr_sections_of_source_v1,
+    module_tldr_sections_render_v1, module_tldr_sections_parse_v1}
+use compiler.driver.cache.tldr_layout_v1.{tldr_publish_v1}
+use compiler.semantics.symbol_id.stable_id.{SymbolComponents, stable_symbol_id}
+
+
+val TLDR_SUMMARY_MAGIC_V1: text = "tldr-summary-v1.1"
+
+var _TLDR_FALLBACKS_V1: i64 = 0
+
+pub fn tldr_summary_fallback_count_v1() -> i64:
+    _TLDR_FALLBACKS_V1
+
+pub fn tldr_summary_path_v1(root: text, module_id: text) -> text:
+    root + "/" + module_id.replace(".", "/") + ".tldrs"
+
+fn _tldr_sha256_v1(data: text) -> text:
+    match digest_v1_of_text(HASH_ALGO_SHA256_V1, data):
+        case Some(d): digest_v1_text(d)
+        case None: ""
+
+fn _tldr_ident_end_v1(s: text) -> i64:
+    var i = 0
+    while i < s.len():
+        val c = s.substring(i, i + 1)
+        if c == " " or c == "(" or c == "<" or c == ":" or c == "=" or c == "[" or c == ",":
+            return i
+        i = i + 1
+    i
+
+fn _tldr_note_fallback_v1(module_id: text, reason: text, out: [text]) -> [text]:
+    _TLDR_FALLBACKS_V1 = _TLDR_FALLBACKS_V1 + 1
+    print("[tldr-fallback] module={module_id} reason={reason}")
+    var next = out
+    next.push("fallback|" + reason)
+    next
+
+fn _tldr_count_v1(s: text, ch: text) -> i64:
+    if ch.byte_len() != 1:
+        return 0
+    val target = ch.byte_at(0)
+    var n = 0
+    var in_dq = false
+    var in_sq = false
+    var in_comment = false
+    var escaped = false
+    var i = 0
+    val len = s.byte_len()
+    while i < len:
+        val b = s.byte_at(i)
+        if in_comment:
+            if b == 10:
+                in_comment = false
+                escaped = false
+            i = i + 1
+            continue
+        if in_dq:
+            if b == 10:
+                escaped = false
+            elif escaped:
+                escaped = false
+            elif b == 92:
+                escaped = true
+            elif b == 34:
+                in_dq = false
+            i = i + 1
+            continue
+        if in_sq:
+            if b == 10:
+                escaped = false
+            elif escaped:
+                escaped = false
+            elif b == 92:
+                escaped = true
+            elif b == 39:
+                in_sq = false
+            i = i + 1
+            continue
+        if b == 35:
+            in_comment = true
+            i = i + 1
+            continue
+        if b == 34:
+            in_dq = true
+            i = i + 1
+            continue
+        if b == 39:
+            in_sq = true
+            i = i + 1
+            continue
+        if b == target:
+            n = n + 1
+        i = i + 1
+    n
+
+# Names re-exported by `pub use a.b.{x, y as z}` / `export use a.b.{x}`;
+# nil when the form is not an explicit brace list (glob, bare module).
+fn _tldr_strip_line_comment_v1(raw_line: text) -> text:
+    var in_str = false
+    var escaped = false
+    var i = 0
+    val n = raw_line.byte_len()
+    while i < n:
+        val b = raw_line.byte_at(i)
+        if in_str:
+            if escaped:
+                escaped = false
+            elif b == 92:
+                escaped = true
+            elif b == 34:
+                in_str = false
+        else:
+            if b == 34:
+                in_str = true
+            elif b == 35:
+                return raw_line.substring(0, i)
+        i = i + 1
+    raw_line
+
+fn _tldr_strip_stmt_comments_v1(stmt: text) -> text:
+    var cleaned_lines: [text] = []
+    for raw_line in stmt.split("\n"):
+        val trimmed = _tldr_strip_line_comment_v1(raw_line).trim()
+        if trimmed != "":
+            cleaned_lines.push(trimmed)
+    cleaned_lines.join(" ").trim()
+
+fn _tldr_reexport_names_v1(spec: text) -> [text]?:
+    val cleaned = _tldr_strip_stmt_comments_v1(spec)
+    val lb = cleaned.index_of(".{")
+    if lb < 0 or not cleaned.ends_with("}"): return None
+    var names: [text] = []
+    for part in cleaned.substring(lb + 2, cleaned.byte_len() - 1).split(","):
+        val item = part.trim()
+        if item == "": continue
+        if item == "*": return None
+        val as_at = item.index_of(" as ")
+        names.push(if as_at > 0: item.substring(as_at + 4).trim() else: item)
+    if names.len() == 0: return None
+    Some(names)
+
+# Advance `"""` block state across one line; outside `"""` blocks, respect
+# `#` comments and single/double-quoted literals so embedded quotes do not desync.
+fn _tldr_scan_triple_state_v1(line: text, start_in_block: bool) -> bool:
+    var in_block = start_in_block
+    var in_dq = false
+    var in_sq = false
+    var escaped = false
+    var i = 0
+    val n = line.byte_len()
+    while i < n:
+        val b = line.byte_at(i)
+        if in_block:
+            if b == 34 and i + 2 < n and line.byte_at(i + 1) == 34 and line.byte_at(i + 2) == 34:
+                in_block = false
+                i = i + 3
+                continue
+            i = i + 1
+            continue
+        if in_dq:
+            if escaped:
+                escaped = false
+            elif b == 92:
+                escaped = true
+            elif b == 34:
+                in_dq = false
+            i = i + 1
+            continue
+        if in_sq:
+            if escaped:
+                escaped = false
+            elif b == 92:
+                escaped = true
+            elif b == 39:
+                in_sq = false
+            i = i + 1
+            continue
+        if b == 35:
+            break
+        if b == 39:
+            in_sq = true
+            i = i + 1
+            continue
+        if b == 34:
+            if i + 2 < n and line.byte_at(i + 1) == 34 and line.byte_at(i + 2) == 34:
+                in_block = true
+                i = i + 3
+                continue
+            in_dq = true
+            i = i + 1
+            continue
+        i = i + 1
+    in_block
+
+# Summary entries ("<kind>|<body>") of one module's own source, sorted.
+pub fn tldr_summary_entries_v1(module_id: text, source: text) -> [text]:
+    var out = module_tldr_sections_of_source_v1(source)
+    val lines = source.replace("\r\n", "\n").split("\n")
+    var exported: [text] = []
+    var use_stmts: [text] = []
+    var impl_stmts: [text] = []
+    var attrs: [text] = []
+    var in_docstring = false
+    var in_triple_str = false
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        li = li + 1
+        if in_docstring:
+            in_docstring = _tldr_scan_triple_state_v1(line, true)
+            continue
+        if in_triple_str:
+            in_triple_str = _tldr_scan_triple_state_v1(line, true)
+            continue
+        if line == "" or line.starts_with("#"):
+            continue
+        if line.starts_with("\"\"\""):
+            in_docstring = _tldr_scan_triple_state_v1(line, false)
+            continue
+        if line.starts_with(" ") or line.starts_with("\t"):
+            in_triple_str = _tldr_scan_triple_state_v1(line, false)
+            if in_triple_str:
+                out = _tldr_note_fallback_v1(module_id, "multiline-string", out)
+            continue
+        in_triple_str = _tldr_scan_triple_state_v1(line, false)
+        if in_triple_str:
+            out = _tldr_note_fallback_v1(module_id, "multiline-string", out)
+        if line.starts_with("@"):
+            val attr_trimmed = line.trim()
+            if attr_trimmed == "@end" or attr_trimmed == "@else" or attr_trimmed == "@else:" or
+                    (attr_trimmed.starts_with("@when(") and attr_trimmed.ends_with(":")) or
+                    (attr_trimmed.starts_with("@elif(") and attr_trimmed.ends_with(":")):
+                out = _tldr_note_fallback_v1(module_id, "conditional:" + attr_trimmed, out)
+                attrs = []
+                continue
+            attrs.push(attr_trimmed)
+            continue
+        val is_pub = line.starts_with("pub ")
+        var decl = if is_pub: line.substring(4) else: line
+        if decl.starts_with("extern "):
+            decl = decl.substring(7)
+        if decl.starts_with("static "):
+            decl = decl.substring(7)
+        val sp = decl.index_of(" ")
+        val word = if sp > 0: decl.substring(0, sp) else: decl
+        val rest = if sp > 0: decl.substring(sp + 1).trim() else: ""
+        if word == "import" or word == "use" or word == "export":
+            # Source-ordered statement text: strip `#` comments outside string
+            # literals on each line BEFORE counting `{` / `}` so comment braces
+            # never corrupt multiline statement accumulation.
+            var stmt = _tldr_strip_line_comment_v1(line).trim()
+            while li < lines.len() and not in_triple_str and _tldr_count_v1(stmt, "{") > _tldr_count_v1(stmt, "}"):
+                val cont_raw = lines[li]
+                in_triple_str = _tldr_scan_triple_state_v1(cont_raw, in_triple_str)
+                if in_triple_str:
+                    out = _tldr_note_fallback_v1(module_id, "multiline-string", out)
+                val next_line = _tldr_strip_line_comment_v1(cont_raw)
+                stmt = stmt + "\n" + next_line
+                li = li + 1
+            use_stmts.push(stmt)
+        if word == "impl" or word == "extend":
+            # Source-ordered impl block header.
+            var impl_header = line.trim()
+            impl_stmts.push(impl_header)
+            attrs = []
+            continue
+        if word == "import" or (word == "use" and not is_pub):
+            attrs = []
+            continue
+        if word == "use" or (word == "export" and rest.starts_with("use ")):
+            var full_stmt = use_stmts[use_stmts.len() - 1]
+            if full_stmt.starts_with("pub "):
+                full_stmt = full_stmt.substring(4).trim()
+            if full_stmt.starts_with("export "):
+                full_stmt = full_stmt.substring(7).trim()
+            val spec = if full_stmt.starts_with("use "): full_stmt.substring(4).trim() else: rest
+            match _tldr_reexport_names_v1(spec):
+                case Some(names):
+                    for name in names:
+                        if not exported.contains(name):
+                            exported.push(name)
+                case None:
+                    out = _tldr_note_fallback_v1(module_id, "reexport:" + spec, out)
+            attrs = []
+            continue
+        if word == "export":
+            if rest.ends_with("*") or rest.contains(" from "):
+                out = _tldr_note_fallback_v1(module_id, "reexport:" + rest, out)
+            else:
+                for part in rest.split(","):
+                    val name = part.trim()
+                    if name != "" and not exported.contains(name):
+                        exported.push(name)
+            attrs = []
+            continue
+        var kind = ""
+        if word == "fn" or word == "me":
+            kind = "fn"
+        if word == "struct" or word == "class" or word == "enum" or word == "bitfield" or word == "type":
+            kind = "type"
+        if word == "trait":
+            kind = "trait"
+        if word == "val" or word == "const" or word == "var":
+            kind = "const"
+        if kind == "":
+            out = _tldr_note_fallback_v1(module_id, "unsupported:" + word, out)
+            attrs = []
+            continue
+        # A header spans continuation lines until its parentheses balance.
+        var header = line.trim()
+        var header_scan = line.trim()
+        while li < lines.len() and not in_triple_str and _tldr_count_v1(header_scan, "(") > _tldr_count_v1(header_scan, ")"):
+            val cont_line = lines[li]
+            in_triple_str = _tldr_scan_triple_state_v1(cont_line, in_triple_str)
+            if in_triple_str:
+                out = _tldr_note_fallback_v1(module_id, "multiline-string", out)
+            header = header + " " + cont_line.trim()
+            header_scan = header_scan + "\n" + cont_line.trim()
+            li = li + 1
+        val name = rest.substring(0, _tldr_ident_end_v1(rest))
+        val id = stable_symbol_id(SymbolComponents(package: "simple", module_path: module_id,
+            item_kind: kind, owner_id: "", name: name, signature: header))
+        out.push("decl|{kind} {name} id={id} cfg={attrs.join(";")} sig={header}")
+        if is_pub and not exported.contains(name):
+            exported.push(name)
+        attrs = []
+    if in_docstring:
+        out = _tldr_note_fallback_v1(module_id, "unclosed-docstring", out)
+    for name in exported:
+        out.push("export|" + name)
+    if use_stmts.len() > 0:
+        out.push("use|" + use_stmts.join("\n"))
+    if impl_stmts.len() > 0:
+        out.push("impls|" + impl_stmts.join("\n"))
+    out.sorted()
+
+pub fn tldr_summary_produce_v1(module_id: text, source: text) -> text:
+    val body = module_tldr_sections_render_v1(tldr_summary_entries_v1(module_id, source))
+    TLDR_SUMMARY_MAGIC_V1 + "\nmodule: " + module_id + "\nsource: " + _tldr_sha256_v1(source) +
+        "\ndigest: " + _tldr_sha256_v1(body) + "\n" + body
+
+fn _tldr_header_v1(content: text, key: text) -> text:
+    val tag = "\n" + key + ": "
+    val at = content.index_of(tag)
+    if at < 0: return ""
+    val rest = content.substring(at + tag.len())
+    val nl = rest.index_of("\n")
+    if nl < 0: "" else: rest.substring(0, nl)
+
+# The summary digest ("sha256:<hex>") recorded in `content`; "" when absent.
+pub fn tldr_summary_digest_v1(content: text) -> text:
+    _tldr_header_v1(content, "digest")
+
+# Parsed entries of a summary, or nil when the header, the digest algorithm or
+# the sha256 value over the body does not verify (stale/torn/spliced).
+pub fn tldr_summary_parse_v1(content: text) -> [text]?:
+    if not content.starts_with(TLDR_SUMMARY_MAGIC_V1 + "\n"): return None
+    val recorded = tldr_summary_digest_v1(content)
+    val parsed = digest_v1_parse(recorded)
+    if parsed.is_none() or not digest_admits_identity_v1(parsed.unwrap().algo_id): return None
+    val at = content.index_of("\ndigest: ")
+    val body_at = at + 1 + content.substring(at + 1).index_of("\n") + 1
+    val body = content.substring(body_at)
+    if _tldr_sha256_v1(body) != recorded: return None
+    val (entries, consumed) = module_tldr_sections_parse_v1(body)
+    if consumed != body.len(): return None
+    Some(entries)
+
+# readTldr: the verified section set of `module_id`'s published summary.
+pub fn read_tldr(root: text, module_id: text) -> [text]?:
+    val path = tldr_summary_path_v1(root, module_id)
+    if not file_exists(path): return None
+    val content = file_read(path)
+    if _tldr_header_v1(content, "module") != module_id: return None
+    tldr_summary_parse_v1(content)
+
+fn _tldr_read_fresh_v1(root: text, module_id: text, source_digest: text) -> [text]?:
+    val path = tldr_summary_path_v1(root, module_id)
+    if not file_exists(path): return None
+    val content = file_read(path)
+    if _tldr_header_v1(content, "source") != source_digest: return None
+    if _tldr_header_v1(content, "module") != module_id: return None
+    tldr_summary_parse_v1(content)
+
+pub fn tldr_summary_publish_v1(path: text, content: text) -> bool:
+    tldr_publish_v1(path, content)
+
+# Produce-or-read. nil = no verified summary (caller keeps the closure route).
+pub fn tldr_summary_ensure_v1(root: text, module_id: text, source: text) -> [text]?:
+    val source_digest = _tldr_sha256_v1(source)
+    val fresh = _tldr_read_fresh_v1(root, module_id, source_digest)
+    if fresh.is_some(): return fresh
+    if not tldr_summary_publish_v1(tldr_summary_path_v1(root, module_id),
+            tldr_summary_produce_v1(module_id, source)):
+        return None
+    _tldr_read_fresh_v1(root, module_id, source_digest)
+
+export tldr_summary_fallback_count_v1, tldr_summary_path_v1, tldr_summary_entries_v1
+export tldr_summary_produce_v1, tldr_summary_digest_v1, tldr_summary_parse_v1, read_tldr
+export tldr_summary_publish_v1, tldr_summary_ensure_v1

@@ -2,8 +2,8 @@
 # Binary contract: PE/COFF Import Library Format, Import Header.
 
 use compiler.backend.linker.coff.coff_object.{
-    COFF_MACHINE_AMD64, COFF_MACHINE_ARM64, coff_is_bigobj}
-use std.common.text_bytes.{bytes_to_text}
+    COFF_MACHINE_AMD64, COFF_MACHINE_ARM64, COFF_MACHINE_I386, coff_is_bigobj}
+use compiler.backend.linker.name_text.{linker_name_text}
 
 val COFF_IMPORT_CODE: i64 = 0
 val COFF_IMPORT_DATA: i64 = 1
@@ -43,7 +43,11 @@ fn _ci_string(bytes: [u8], offset: i64, end: i64) -> Result<(text, i64), text>:
     var cursor = offset
     while cursor < end:
         if bytes[cursor] == 0 and cursor == offset: return Ok(("", cursor + 1))
-        if bytes[cursor] == 0: return Ok((bytes_to_text(bytes[offset:cursor]), cursor + 1))
+        if bytes[cursor] == 0:
+            val name: text = match linker_name_text(bytes[offset:cursor], "short-import string at offset {offset}"):
+                case Ok(v): v
+                case Err(e): return Err(e)
+            return Ok((name, cursor + 1))
         cursor = cursor + 1
     Err("short-import string is not NUL terminated")
 
@@ -71,7 +75,8 @@ fn coff_parse_short_import(bytes: [u8]) -> Result<CoffImportObject, text>:
     """Decode one canonical short-import member from an MSVC .lib archive."""
     if not coff_is_short_import(bytes): return Err("not a COFF short-import object")
     val machine = _ci_u16(bytes, 6)
-    if machine != COFF_MACHINE_AMD64 and machine != COFF_MACHINE_ARM64:
+    if machine != COFF_MACHINE_AMD64 and machine != COFF_MACHINE_ARM64 and
+            machine != COFF_MACHINE_I386:
         return Err("unsupported short-import machine {machine}")
     val string_size = _ci_u32(bytes, 12)
     val hint_or_ordinal = _ci_u16(bytes, 16)

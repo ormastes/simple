@@ -41,3 +41,20 @@ source-implemented, but executable evidence remains pending. No
 Simple, C, Rust, Cargo, compiler, or native execution is claimed in this
 static-only session.
 
+
+## Triage 2026-11-25 (P2 ledger pass, release/1.0.0)
+
+Classification: SKIP — Stage4/bootstrap-lane item; the remaining gap is
+executable evidence, which needs a Rust-seed/native build that this host may
+not run (no cargo/rust builds permitted; pinned `bin/simple.exe` additionally
+fails repo-wide at this HEAD on `@representation_boundary`).
+
+Source-level inspection finds the fix described above IS present in the tree:
+`runtime_process.c` (plus `runtime_process_tree.c`, `runtime_process_owned.c`)
+is staged in the deterministic object list at
+`src/compiler_rust/compiler/src/pipeline/native_project/tools.rs:566-606`, and
+`runtime_process_tree.h` is fingerprinted at `:711`. The 2026-09-16 note's "no
+resolution evidence found in the body" therefore understates the tree state:
+the source half of the fix exists; what is still missing is a built-candidate
+link/run proving strict owner resolution end-to-end. Leaving OPEN for the
+bootstrap lane to produce that evidence; no code change in this pass.

@@ -31,3 +31,9 @@ the valid tiny fixture, expose frontend phase counters, and complete the
 optimizer command without Rust-seed fallback.
 
 
+
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with the record's own required resolution: this needs a producer-authenticated self-hosted runtime (admitted pure-Simple binary with frontend phase counters, optimizer command completing without Rust-seed fallback). That is the self-host deployment program, not a P3 bug fix; the deployed seed on this host explicitly warns it is bootstrap-only. No in-lane change. Owner: self-host/deploy lane.

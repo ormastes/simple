@@ -1,5 +1,5 @@
 # Stage4 entry closure parses duplicate sources and exceeds bounded runtime
-## Open 2026-09-16 — needs owner triage
+## Triaged 2026-11-25 — dedup fix verified in source; remaining acceptance needs Stage4 rebuild capacity (out of scope for source-only lanes)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -208,3 +208,21 @@ time. Native execution is separately blocked by the missing canonical macOS
 while the removed legacy hosted lane is no longer selectable. This runtime
 packaging issue does not justify another monolithic Stage4 attempt.
 
+
+## 2026-11-25 triage (release/1.0.0, worktree p2w6-ab) — SKIP, stays open
+
+The duplicate-parse/dedup fix is intact at release/1.0.0 HEAD (`64dfa6d980f`):
+`src/compiler/80.driver/driver_entry_closure_core.spl:543`
+(`_driver_unique_physical_sources`) implements the one-parse-per-physical-path
+plan with logical aliases retained for module registration, and the
+`collected`/`unique` count split is still reported. No regression found by
+inspection.
+
+The only remaining acceptance criterion is executable: running the exact
+full-CLI Stage4 closure to completion, which needs multi-hundred-second,
+multi-GiB stage4 rebuild cycles. This lane runs on a Windows host with the
+pinned Rust seed only (no self-hosted Stage3, no bootstrap permitted), so the
+acceptance run cannot be attempted here — same constraint the doc itself
+recorded on 2026-08-10. Classification: SKIP (needs full-bootstrap capacity),
+not a source defect. Left open for a lane with Stage4 rebuild capacity; the
+status header now says so instead of "needs owner triage".

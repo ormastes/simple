@@ -29,6 +29,7 @@ setlocal
 > "%DEVHUB_TEST_MARKER%" echo script=%~1
 >>"%DEVHUB_TEST_MARKER%" echo arg1=%~2
 >>"%DEVHUB_TEST_MARKER%" echo arg2=%~3
+if defined DEVHUB_TEST_EXIT exit /b %DEVHUB_TEST_EXIT%
 exit /b 0
 '@
 
@@ -54,6 +55,7 @@ exit /b 0
     # Explicit DEVHUB_SH override and argument forwarding, including spaces.
     $env:DEVHUB_SH = $FakeSh
     $env:DEVHUB_TEST_MARKER = $Marker
+    $env:DEVHUB_TEST_EXIT = '0'
     & $FakeSh 'fixture-script' '--name' 'value with spaces'
     if (-not (Test-Path -LiteralPath $Marker)) { throw 'fake shell fixture did not execute directly' }
     Remove-Item -LiteralPath $Marker -Force
@@ -63,6 +65,12 @@ exit /b 0
     if ($lines[1] -ne 'arg1=--name' -or $lines[2] -ne 'arg2=value with spaces') {
         throw "argument forwarding failed: $($lines -join '; ')"
     }
+    $env:DEVHUB_TEST_EXIT = '38'
+    $r = Invoke-DevHub @('--help')
+    if ($r.ExitCode -ne 38) {
+        throw "shell override lost the child exit code: exit=$($r.ExitCode)"
+    }
+    $env:DEVHUB_TEST_EXIT = '0'
     Remove-Item -LiteralPath $Marker -Force
     $r = Invoke-DevHub @('--mode', 'loading')
     if ($r.ExitCode -ne 78 -or (Test-Path -LiteralPath $Marker)) {
@@ -193,7 +201,12 @@ case "${1:-}" in
   *) exit 2 ;;
 esac
 '@
-        & bash.exe -lc ('chmod +x "' + ($Runtime -replace '\\','/') + '"') 2>$null
+        $bash = Join-Path (Split-Path -Parent $sh) 'bash.exe'
+        if (Test-Path -LiteralPath $bash -PathType Leaf) {
+            & $bash -lc ('chmod +x "' + ($Runtime -replace '\\','/') + '"') 2>$null
+        } else {
+            & $sh -c ('chmod +x "' + ($Runtime -replace '\\','/') + '"') 2>$null
+        }
         $hash = (Get-FileHash -LiteralPath $Runtime -Algorithm SHA256).Hash.ToLowerInvariant()
         Write-LfFile ($Runtime + '.provenance.env') @"
 schema=simple-runtime-provenance-v1

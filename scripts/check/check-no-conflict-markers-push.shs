@@ -215,11 +215,74 @@ y
         st_fail=1
     fi
 
+    # Fixture 4: a deletion-only range PASSes and counts the deleted paths.
+    st_repo4="$st_tmp/delete-repo"
+    mkdir -p "$st_repo4/scripts/check"
+    cp "$st_self" "$st_repo4/scripts/check/check-no-conflict-markers-push.shs"
+    (
+        cd "$st_repo4" || exit 2
+        git init -q
+        git config user.email test@example.com
+        git config user.name test
+        printf 'a\n' > a.txt
+        printf 'b\n' > b.txt
+        git add a.txt b.txt
+        git commit -q -m "initial"
+        st_base=$(git rev-parse HEAD)
+        git rm -q a.txt b.txt
+        git commit -q -m "delete both"
+        st_tip=$(git rev-parse HEAD)
+        sh scripts/check/check-no-conflict-markers-push.shs "$st_base..$st_tip" > out.txt 2>&1
+        echo $? > rc.txt
+    )
+    st_rc4=$(cat "$st_repo4/rc.txt" 2>/dev/null)
+    st_out4=$(cat "$st_repo4/out.txt" 2>/dev/null)
+    if [ "$st_rc4" = "0" ] && printf '%s' "$st_out4" | "$GREP" -q "PASS — 2 path(s) checked.*all deletions"; then
+        echo "$SELF: selftest fixture 4 (deletion-only range counts deleted paths) -> PASS: ok"
+    else
+        echo "$SELF: selftest FIXTURE 4 FAILED (deletion-only range should PASS): rc=$st_rc4 out=$st_out4" >&2
+        st_fail=1
+    fi
+
+    # Fixture 5: core.worktree in the shared .git/config must fail closed with
+    # a NAMED cause — the 2026-08-08 incident had all three pre-push guards
+    # answering the generic repository-mismatch error, which reads like a
+    # tooling hiccup and invites being pushed past.
+    # doc/08_tracking/bug/core_worktree_config_disables_all_pre_push_guards_2026-08-08.md
+    st_repo5="$st_tmp/core-worktree-repo"
+    mkdir -p "$st_repo5/scripts/check"
+    cp "$st_self" "$st_repo5/scripts/check/check-no-conflict-markers-push.shs"
+    (
+        cd "$st_repo5" || exit 2
+        git init -q
+        git config user.email test@example.com
+        git config user.name test
+        printf 'hello\n' > f.txt
+        git add f.txt
+        git commit -q -m "initial"
+        st_base=$(git rev-parse HEAD)
+        printf 'hello\nworld\n' > f.txt
+        git add f.txt
+        git commit -q -m "second"
+        st_tip=$(git rev-parse HEAD)
+        git config core.worktree "$st_tmp/not-this-tree"
+        sh scripts/check/check-no-conflict-markers-push.shs "$st_base..$st_tip" > out.txt 2>&1
+        echo $? > rc.txt
+    )
+    st_rc5=$(cat "$st_repo5/rc.txt" 2>/dev/null)
+    st_out5=$(cat "$st_repo5/out.txt" 2>/dev/null)
+    if [ "$st_rc5" = "2" ] && printf '%s' "$st_out5" | "$GREP" -q "core.worktree"; then
+        echo "$SELF: selftest fixture 5 (core.worktree poison named, fail closed) -> PASS: ok"
+    else
+        echo "$SELF: selftest FIXTURE 5 FAILED (core.worktree must fail closed naming core.worktree): rc=$st_rc5 out=$st_out5" >&2
+        st_fail=1
+    fi
+
     if [ "$st_fail" -ne 0 ]; then
         echo "$SELF: ERROR — nothing was checked (selftest failed)"
         exit 2
     fi
-    echo "$SELF: selftest: 3 fixture(s) passed"
+    echo "$SELF: selftest: 5 fixture(s) passed"
     exit 0
 fi
 
@@ -256,6 +319,27 @@ done
 range="${1:-}"
 explicit=0
 [ -n "$range" ] && explicit=1
+
+# --- 0. core.worktree poison: name it, don't fail generically later ---------
+# core.worktree in the shared .git/config redirects EVERY git command in this
+# repo — including this guard's own toplevel resolution below — to a different
+# working tree. The guards then die with the generic 'repository mismatch'
+# error, which reads like a tooling hiccup, so the only protection against a
+# main tree wipe looks broken and invites being pushed past. Name the cause
+# and the repair instead.
+# doc/08_tracking/bug/core_worktree_config_disables_all_pre_push_guards_2026-08-08.md
+_cw_git_common=$(git rev-parse --git-common-dir 2>/dev/null) || _cw_git_common=""
+if [ -n "$_cw_git_common" ] && [ -f "$_cw_git_common/config" ]; then
+    _cw_value=$(git config --file "$_cw_git_common/config" --get core.worktree 2>/dev/null) || _cw_value=""
+    if [ -n "$_cw_value" ]; then
+        die 2 "core.worktree = '$_cw_value' is set in $_cw_git_common/config.
+  That key redirects every git command in this repository — this guard
+  included — to a DIFFERENT working tree, so the pre-push guards cannot
+  check the tree about to be pushed and fail closed here.
+  Repair:  git config --file \"$_cw_git_common/config\" --unset core.worktree
+  One-run workaround: export GIT_DIR=<repo>/.git GIT_WORK_TREE=<repo>"
+    fi
+fi
 
 # --- 1. cwd must be inside a git repository ---------------------------------
 toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || toplevel=""
@@ -496,7 +580,12 @@ if [ "$scanned" -gt 0 ]; then
     # positional arguments. CHUNK bounds the argv size instead of letting a
     # huge range risk the OS command-line limit; at or under CHUNK files this
     # is exactly ONE git process per marker kind, matching WP1's target.
+    # CHUNK_BYTES additionally bounds the summed path length: Windows caps a
+    # whole command line at 32,767 chars, and 500 long paths exceeded it
+    # ("Argument list too long", verdict ERROR) — see
+    # doc/08_tracking/bug/prepush_conflict_markers_arglist_too_long_windows_2026-10-27.md.
     CHUNK=500
+    CHUNK_BYTES=20000
 
     run_grep_chunked() { # <pattern> <outfile> -> sets G_RC (0 ok/no-match, >0 real error)
         pat=$1
@@ -505,17 +594,20 @@ if [ "$scanned" -gt 0 ]; then
         : > "$TMPD/greperr"
         G_RC=0
         n=0
+        bytes=0
         set --
         while IFS= read -r p; do
             set -- "$@" "$p"
             n=$((n + 1))
-            if [ "$n" -ge "$CHUNK" ]; then
+            bytes=$((bytes + ${#p} + 1))
+            if [ "$n" -ge "$CHUNK" ] || [ "$bytes" -ge "$CHUNK_BYTES" ]; then
                 git -c core.quotePath=false --literal-pathspecs grep -anzE "$pat" "$tip" -- "$@" \
                     >> "$outfile" 2>>"$TMPD/greperr"
                 rc=$?
                 [ "$rc" -gt 1 ] && G_RC=$rc
                 set --
                 n=0
+                bytes=0
             fi
         done < "$TMPD/remaining"
         if [ "$n" -gt 0 ]; then
@@ -600,10 +692,11 @@ if [ "$scanned" -eq 0 ]; then
     # here, but the OLD script's separate `git ls-tree --format` gitlink
     # probe used to fail on 2.34 and misclassify the path as unreadable
     # content, ERRORing on every push that touched .spipe/spipe). An
-    # all-DELETION range is deliberately NOT given the same pass: a commit
-    # that only deletes previously-scanned content and adds nothing new to
-    # scan is exactly the shape a bad rebase can produce, so that case still
-    # requires an explicit --allow below, unchanged from before this rewrite.
+    # all-DELETION range gets the same pass (2026-11-07): a deleted path has
+    # no blob at the tip, so it categorically cannot carry marker text. The
+    # "a bad rebase can delete content" risk is real but is not a marker
+    # risk; mass deletion is the job of check-tree-size-push.shs, which still
+    # runs on every push. Every deleted path is counted as checked.
     # `exempted` must be exactly 0 here too: if some OTHER path was skipped by
     # the (implicit or --allow) allowlist, the "entirely explained by
     # uncontroversial gitlinks" story no longer covers the whole range, and
@@ -612,6 +705,11 @@ if [ "$scanned" -eq 0 ]; then
     if [ "$skipped_gitlink" -gt 0 ] && [ "$skipped_deleted" -eq 0 ] && [ "$exempted" -eq 0 ] \
        && [ "$nlines" -eq "$skipped_gitlink" ]; then
         echo "$SELF: PASS — 0 file(s) scanned at $tip across $ncommits commit(s) in $range$allow_note ($skipped_gitlink submodule gitlink(s) skipped: no blob content in this repo) (repo $toplevel)"
+        exit 0
+    fi
+    if [ "$skipped_deleted" -gt 0 ] && [ "$skipped_gitlink" -eq 0 ] && [ "$exempted" -eq 0 ] \
+       && [ "$nlines" -eq "$skipped_deleted" ]; then
+        echo "$SELF: PASS — $skipped_deleted path(s) checked at $tip across $ncommits commit(s) in $range$allow_note (all deletions: no content to scan) (repo $toplevel)"
         exit 0
     fi
     # Still fail closed when the zero came from anything OTHER than paths the

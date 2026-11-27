@@ -1,10 +1,10 @@
 # Bug: `to_be_true()` / `to_be_false()` matchers error inside interpreter `it` blocks
 
-Status: Open (worked around)
+Status: Resolved (seed intrinsic fix landed; verified 2026-11-25)
 
 **Date:** 2026-06-04
 **Area:** SPipe runtime, built-in matchers (`std.spec`)
-**Status:** Open (worked around)
+**Status:** Resolved (seed intrinsic fix landed; verified 2026-11-25)
 **Severity:** Medium
 
 ## Summary
@@ -59,3 +59,22 @@ Locate the `to_be_true`/`to_be_false` matcher handler in the interpreter's
 the matcher result is mis-reported, mirroring the related (fixed) tuple-map
 matcher regression in
 `spipe_interpreter_tuple_map_result_matcher_binding_2026-05-27.md`.
+
+## Verification 2026-11-25 (p2w5-ad lane, release/1.0.0)
+
+This record's "Next step" was completed by the sibling record
+`spec_to_be_true_to_be_false_seed_intrinsic_gap_2026-07-02.md`: the interpreter
+mis-dispatch was the Rust seed's BDD-matcher intrinsic list missing
+`to_be_true`/`to_be_false`. Both are now present in
+`src/compiler_rust/compiler/src/interpreter_method/mod.rs` (guard list line
+316, match arms at 693 and 804) with the strict `Value::Bool` equality this
+record's semantics require, and the sibling record's 2026-11-11 addendum
+verified the tracked seed binary green on the 4-case repro plus the committed
+regression specs `test/01_unit/std/spec_to_be_true_matcher_spec.spl` and
+`spec_to_be_true_in_it_block_spec.spl` (both still in tree).
+
+Re-running the spec here is environment-blocked (pinned seed rejects
+`@representation_boundary` at HEAD); verified by code inspection against the
+already-landed seed fix.
+
+Status: RESOLVED (seed intrinsic gap fixed; regression specs in tree).

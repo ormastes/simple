@@ -1,0 +1,171 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Stage2 MIR lowering: a struct leaf declared by two modules
+
+The Phase 4 full-CLI native-build (source 8d850c2, Stage 2 compiler built from
+the same pin) failed ~15 modules with
+
+```
+MIR lowering error: field 'is_dir' on ambiguous struct/class owner 'DirEntry': no exact layout
+```
+
+(also `FileStat.size`, `FileHandle.id`, `TaskContext.rip/rsp/rax/rflags`,
+`Fat32Bpb.bytes_per_sector`). Each leaf is declared by several modules in the
+entry closure, so its bare `struct_field_order` row is conflicted and
+`resolve_field_index` correctly refuses it. The defect is upstream: four value
+provenance writers stamped the BARE leaf on the value instead of the defining
+declaration's layout key, and the base expression carries no HIR type, so the
+exact tier never ran:
+
+1. `case Ok(h)` over a Call/MethodCall scrutinee: the
+   `bootstrap_fn_ret_ok_shape_*` registry stored `symbol.name` for structs
+   (`match table.open(..)`, managed_image_authority_v1).
+2. `match rc: Ok(v)` over a local: the declared-payload arm in
+   switch_operators_calls.spl stored `rpt_symbol.name` (fat32_dir_ops, ramfs).
+3. `opt_field.unwrap()`: the receiver's bare field owner was copied before the
+   Option's declared type argument was consulted (TaskContext, user_entry*,
+   scheduler).
+4. `self.local_method()` returning a struct of the same module:
+   `HirImpl.method_return_struct_names` holds only the leaf (fat32_core).
+
+Reproduced in 15 s with the 8d850c2 Stage 2 binary on a five-module fixture of
+exactly these shapes. Every example below asserts the field INDEX read, and
+`lib.decoy` declares each leaf with a different field order, so neither a
+silent index 0 nor the decoy's layout can satisfy an example.
+
+Tag used in the compiler comments: mir_result_ok_payload_bare_owner_2026-11-22.
+Evidence: /home/yoon/dev/boot-fable-lane-scripts/p4/cli-f23/build.log
+(`grep '^\[go-to-end\] failed stage=mir'`).
+"""
+
+# @tag: unit, compiler, mir, stage2
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+# DirEntry: id=0 name=1 is_dir=2. TaskContext: rip=0 rsp=1 rax=2.
+# Task.user_context=2.
+val entries_source = "pub struct DirEntry:\n    id: i64\n    name: text\n    is_dir: bool\n\npub struct TaskContext:\n    rip: i64\n    rsp: i64\n    rax: i64\n\npub struct Task:\n    id: i64\n    label: text\n    user_context: TaskContext?\n\nimpl DirEntry:\n    fn kind() -> i64:\n        self.id\n\npub struct Table:\n    n: i64\n\nimpl Table:\n    fn open(flag: bool) -> Result<DirEntry, text>:\n        if flag:\n            return Ok(DirEntry(id: 1, name: \"t\", is_dir: true))\n        Err(\"no\")\n\npub fn find_entry(flag: bool) -> Result<DirEntry, text>:\n    if flag:\n        return Ok(DirEntry(id: 2, name: \"x\", is_dir: true))\n    Err(\"none\")\n\npub fn make_task() -> Task:\n    Task(id: 1, label: \"t\", user_context: Some(TaskContext(rip: 1, rsp: 2, rax: 3)))\n"
+
+# Same leaves, different orders: DirEntry is_dir=0 name=3, TaskContext rsp=3
+# rax=0, Bpb fat_size=1. Each DirEntry has its own `kind` method.
+val decoy_source = "pub struct DirEntry:\n    is_dir: bool\n    extra: i64\n    size: i64\n    name: text\n\npub struct TaskContext:\n    rax: i64\n    rbx: i64\n    rip: i64\n    rsp: i64\n\npub struct Bpb:\n    total: i64\n    fat_size: i64\n\nimpl DirEntry:\n    fn kind() -> i64:\n        self.size\n\npub fn decoy_entry() -> DirEntry:\n    DirEntry(is_dir: false, extra: 1, size: 2, name: \"d\")\n\npub fn decoy_ctx() -> TaskContext:\n    TaskContext(rax: 1, rbx: 2, rip: 3, rsp: 4)\n\npub fn decoy_bpb() -> Bpb:\n    Bpb(total: 2, fat_size: 1)\n"
+
+# Local Bpb: bytes_per_sector=0 reserved=1 fat_size=2.
+val consumer_source = "use lib.entries.\{DirEntry, TaskContext, Task, Table, find_entry, make_task\}\nuse lib.decoy.\{decoy_entry, decoy_ctx, decoy_bpb\}\n\nstruct Bpb:\n    bytes_per_sector: i64\n    reserved: i64\n    fat_size: i64\n\nstruct Core:\n    n: i64\n\nimpl Core:\n    fn _parse() -> Bpb:\n        Bpb(bytes_per_sector: 512, reserved: 1, fat_size: 3)\n\n    fn mount() -> i64:\n        val bpb = self._parse()\n        bpb.fat_size\n\nfn f_match_local() -> i64:\n    val rc = find_entry(true)\n    val e = match rc:\n        Ok(value): value\n        Err(_): return 0\n    if e.is_dir:\n        return 1\n    2\n\nfn f_case_call() -> text:\n    match find_entry(true):\n        case Err(_): return \"\"\n        case Ok(handle):\n            return handle.name\n\nfn f_case_method() -> bool:\n    val table = Table(n: 0)\n    match table.open(true):\n        case Err(_): return false\n        case Ok(h):\n            return h.is_dir\n\nfn f_field_unwrap() -> i64:\n    val task = make_task()\n    val context: TaskContext = task.user_context.unwrap()\n    context.rsp\n\nfn f_field_unwrap_var() -> i64:\n    val task = make_task()\n    var ctx_opt = task.user_context\n    var user_ctx = ctx_opt.unwrap()\n    user_ctx.rax\n\nfn f_case_dispatch() -> i64:\n    match find_entry(true):\n        case Err(_): return 0\n        case Ok(found):\n            return found.kind()\n\nfn f_decoy() -> i64:\n    val d = decoy_entry()\n    val c = decoy_ctx()\n    val b = decoy_bpb()\n    d.name.len() + c.rsp + b.fat_size\n"
+
+class Lowered:
+    errors: text
+    mir: MirModule
+
+var _lowered: Lowered? = nil
+
+fn lower_consumer() -> Lowered:
+    if val cached = _lowered:
+        return cached
+    val log = Logger(level: 0)
+    val entries_ast = parse_full_frontend(entries_source, "lib/entries.spl", "lib.entries", log)
+    val decoy_ast = parse_full_frontend(decoy_source, "lib/decoy.spl", "lib.decoy", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, ParserModule> = {}
+    modules["lib.entries"] = entries_ast
+    modules["lib.decoy"] = decoy_ast
+    val sources = [SourceFile(path: "lib/entries.spl", content: entries_source, module_name: "lib.entries"), SourceFile(path: "lib/decoy.spl", content: decoy_source, module_name: "lib.decoy")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    # Source paths as the driver passes them (declaration `defining_module`
+    # is a path, an import's is dotted), see the foreign-struct-return spec.
+    var entries_lowering = hirlowering_for_module("lib/entries.spl", surfaces)
+    var decoy_lowering = hirlowering_for_module("lib/decoy.spl", surfaces)
+    var consumer_lowering = hirlowering_for_module("app/main.spl", surfaces)
+    val entries_hir = entries_lowering.lower_module(entries_ast)
+    val decoy_hir = decoy_lowering.lower_module(decoy_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    # The decoy is prescanned first so it owns every bare leaf row; the
+    # later declarations then mark those rows conflicted.
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["decoy_hir"] = decoy_hir
+    prescan_mods["consumer_hir"] = consumer_hir
+    prescan_mods["entries_hir"] = entries_hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "decoy_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "entries_hir")
+    val mir = mir_lowering.lower_module(consumer_hir, [decoy_hir, consumer_hir, entries_hir])
+    var errors = ""
+    for e in mir_lowering.errors:
+        errors = errors + e.message + "\n"
+    print "ambiguous-leaf mir errors: [{errors}]"
+    val lowered = Lowered(errors: errors, mir: mir)
+    _lowered = Some(lowered)
+    lowered
+
+fn field_reads(function_name: text) -> text:
+    """Field indices read by `function_name`, in emission order ("1,3,")."""
+    var out = ""
+    for function in lower_consumer().mir.functions.values():
+        if function.name.ends_with(".{function_name}"):
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.GetField(_, _, field):
+                            out = out + "{field},"
+                        case _: ()
+    print "{function_name} field reads: {out}"
+    out
+
+fn direct_callees(function_name: text) -> text:
+    var out = ""
+    for function in lower_consumer().mir.functions.values():
+        if function.name.ends_with(".{function_name}"):
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(_, operand, _):
+                            match operand.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                    out = out + name + ","
+                                case _: ()
+                        case _: ()
+    print "{function_name} callees: {out}"
+    out
+
+describe "a struct leaf declared by two modules in one closure":
+    it "lowers every field access without an ambiguous-owner error":
+        val errors = lower_consumer().errors
+        expect(errors.contains("ambiguous struct/class owner")).to_equal(false)
+        expect(errors.contains("ambiguous struct/class field owner")).to_equal(false)
+        expect(errors).to_equal("")
+
+    it "binds `match rc: Ok(v)` over a local to the declaring module's layout":
+        expect(field_reads("f_match_local")).to_equal("2,")
+
+    it "binds `case Ok(h)` over a free call to the declaring module's layout":
+        expect(field_reads("f_case_call")).to_equal("1,")
+
+    it "binds `case Ok(h)` over a method call to the declaring module's layout":
+        expect(field_reads("f_case_method")).to_equal("2,")
+
+    it "unwraps an Optional struct field to its declared payload layout":
+        expect(field_reads("f_field_unwrap")).to_equal("2,1,")
+        expect(field_reads("f_field_unwrap_var")).to_equal("2,2,")
+
+    it "keeps a local impl method's struct return on the local declaration":
+        expect(field_reads("mount")).to_equal("2,")
+
+    it "keeps the decoy's own values on the decoy layouts":
+        expect(field_reads("f_decoy")).to_equal("3,3,1,")
+
+    it "dispatches a method on a qualified Ok payload to the declaring module":
+        val callees = direct_callees("f_case_dispatch")
+        expect(callees.contains("lib.entries.DirEntry.kind")).to_equal(true)
+        expect(callees.contains("decoy")).to_equal(false)

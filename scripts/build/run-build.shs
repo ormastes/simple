@@ -1,0 +1,45 @@
+#!/bin/sh
+# Select an existing build owner. No scheduler, admission or retry lives here.
+set -eu
+die() { printf 'run-build: %s\n' "$1" >&2; exit 2; }
+usage() {
+  cat <<'EOF'
+Usage: sh scripts/build/run-build.shs [--executor=direct|buildrunner]
+       --program=/absolute/path/to/owner -- OWNER_ARGUMENTS...
+
+direct      Execute the selected compiler's native-build command (default).
+buildrunner Execute the selected BuildRunner's run command with its manifest.
+
+SIMPLE_BUILD_EXECUTOR supplies the build-script default; --executor overrides it.
+Arguments after -- pass unchanged. The working directory and child exit status
+are preserved. This selector execs the owner; the caller retains supervision.
+
+TestRunner is a test execution owner, not a compiler backend. Build its entry
+with direct or a BuildRunner manifest, then run/validate tests separately.
+This command emits no bootstrap admission, test PASS or release qualification.
+EOF
+}
+executor=${SIMPLE_BUILD_EXECUTOR-direct}
+program= executor_seen=0 program_seen=0 separator=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --help|-h) usage; exit 0 ;;
+    --program=*)
+      [ "$program_seen" -eq 0 ] || die 'duplicate --program'
+      program=${1#*=} program_seen=1 ;;
+    --executor=*)
+      [ "$executor_seen" -eq 0 ] || die 'duplicate --executor'
+      executor=${1#*=} executor_seen=1 ;;
+    --) separator=1; shift; break ;;
+    *) die "unknown option before --: $1" ;;
+  esac
+  shift
+done
+case "$executor" in direct|buildrunner) ;; *) die "unsupported executor: $executor" ;; esac
+[ "$separator" -eq 1 ] && [ "$#" -gt 0 ] || die 'nonempty owner arguments after -- required'
+case "$program" in /*) ;; *) die '--program must be an absolute executable path' ;; esac
+[ -f "$program" ] && [ -x "$program" ] || die 'selected owner is not an executable file'
+case "$executor" in
+  direct) exec "$program" native-build "$@" ;;
+  buildrunner) exec "$program" run "$@" ;;
+esac

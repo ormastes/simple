@@ -1,0 +1,309 @@
+# General OpenType `dev2` (Devanagari) substitution, following HarfBuzz's Indic
+# shaper (what Chrome runs). indic_syllable.spl segments the codepoints into
+# syllables and gives them in initial-reordered order with their feature bits;
+# this file probes the face for what that needs (which consonants `blwf` /
+# `pstf` ligate with the halant, whether `rphf` ligates Ra + halant), runs the
+# GSUB features one stage at a time per syllable (so no lookup matches across a
+# syllable boundary), applies the final reordering, then the presentation
+# features.
+#
+# Fail closed: a broken cluster (a mark with no base; Chrome inserts a dotted
+# circle there), an unmapped codepoint, a face with `pref`/`init` lookups or a
+# GSUB stage the validator rejects returns None and the caller falls back.
+# While GSUB runs, a record's `cluster` is its item index in IndicClusters; the
+# returned records carry HarfBuzz level-0 clusters (grapheme starts, merged
+# across whatever the reordering moved).
+#
+# Known difference from HarfBuzz: locl/ccmp run after the initial reordering
+# (HarfBuzz runs them before it, on logical order).
+
+use std.skia.feature.glyph.ot_parser.OtFont
+use std.skia.feature.glyph.ot_parser_cmap.cmap_glyph_id
+use std.skia.feature.glyph.ot_parser_layout.{GsubLookup, LayoutLookupPlan, LayoutLookupActivation}
+use std.skia.feature.shaper.ot_layout_context.{LayoutGlyphRecord}
+use std.skia.feature.shaper.ot_layout_apply.{layout_apply_gsub_activations}
+use std.skia.feature.shaper.indic_syllable.{IndicClusters, indic_category, indic_clusters_with_forms, indic_final_order}
+use std.common.unicode.codepoint.{is_combining_mark}
+
+class _Dev2Shaper:
+    font: OtFont
+    plan: LayoutLookupPlan
+    catalog: [GsubLookup]
+    rphf_mask: u64
+    half_mask: u64
+    blwf_mask: u64
+    post_mask: u64
+    global_mask: u64
+    halant_glyph: u32
+
+fn _dev2_tag(value: text) -> u32:
+    (value.byte_at(0) as u32 * 16777216u32 + value.byte_at(1) as u32 * 65536u32 +
+        value.byte_at(2) as u32 * 256u32 + value.byte_at(3) as u32)
+
+fn _dev2_feature_mask(plan: LayoutLookupPlan, tag: text) -> u64:
+    val wanted = _dev2_tag(tag)
+    for feature in plan.features:
+        if feature.feature_tag == wanted: return feature.feature_mask
+    0u64
+
+# --- GSUB stages --------------------------------------------------------------
+
+fn _dev2_stage(plan: LayoutLookupPlan, mask: u64) -> [LayoutLookupActivation]:
+    var result: [LayoutLookupActivation] = []
+    if mask == 0u64: return result
+    for activation in plan.activations:
+        if (activation.feature_mask & mask) != 0u64:
+            result.push(LayoutLookupActivation(lookup_index: activation.lookup_index,
+                feature_mask: activation.feature_mask & mask))
+    result
+
+fn _dev2_apply(shaper: _Dev2Shaper, mask: u64, records: [LayoutGlyphRecord]) -> Option<[LayoutGlyphRecord]>:
+    val active = _dev2_stage(shaper.plan, mask)
+    if active.len() == 0 or records.len() == 0: return Some(records)
+    val applied = layout_apply_gsub_activations(shaper.font, active, shaper.catalog, records)
+    if not applied.complete: return None
+    Some(applied.glyphs)
+
+fn _dev2_record(glyph: u32, source: i64, id: i64, mask: u64) -> LayoutGlyphRecord:
+    LayoutGlyphRecord(glyph_id: glyph, source_index: source, cluster: id,
+        component_clusters: [id], feature_mask: mask,
+        x_advance_units: 0, y_advance_units: 0, x_offset_units: 0, y_offset_units: 0)
+
+# HarfBuzz would_substitute for a glyph pair: the feature ligates the two.
+fn _dev2_would_ligate(shaper: _Dev2Shaper, mask: u64, first: u32, second: u32) -> Option<bool>:
+    if mask == 0u64: return Some(false)
+    val applied = match _dev2_apply(shaper, mask, [_dev2_record(first, 0, 0, mask), _dev2_record(second, 1, 1, mask)]):
+        Some(value): value
+        None: return None
+    Some(applied.len() == 1)
+
+# Position of a consonant from the face: below-base (8) when `blwf` ligates it
+# with the halant in either order, post-base (11) for `pstf`, else base (4).
+fn _dev2_consonant_position(shaper: _Dev2Shaper, glyph: u32) -> Option<i64>:
+    if shaper.halant_glyph == 0u32: return Some(4)
+    val pstf = _dev2_feature_mask(shaper.plan, "pstf")
+    val masks = [shaper.blwf_mask, shaper.blwf_mask, pstf, pstf]
+    var probe: i64 = 0
+    while probe < 4:
+        val first = if probe % 2 == 0: shaper.halant_glyph else: glyph
+        val second = if probe % 2 == 0: glyph else: shaper.halant_glyph
+        val ligates = match _dev2_would_ligate(shaper, masks[probe], first, second):
+            Some(value): value
+            None: return None
+        if ligates: return Some(if probe < 2: 8 else: 11)
+        probe = probe + 1
+    Some(4)
+
+fn _dev2_restore_masks(masks: [u64], records: [LayoutGlyphRecord]) -> [LayoutGlyphRecord]:
+    var index: i64 = 0
+    while index < records.len():
+        records[index].feature_mask = masks[records[index].cluster]
+        index = index + 1
+    records
+
+# HarfBuzz cluster level 0 (monotone graphemes, Chrome's level): a mark or ZWJ
+# continues the cluster of the character before it. One entry per source
+# index of codepoints[start..end_idx), holding that grapheme's start.
+fn _dev2_graphemes(codepoints: [u32], start: i64, end_idx: i64) -> [i64]:
+    var result: [i64] = []
+    var source = start
+    while source < end_idx:
+        val cp = codepoints[source]
+        val category = indic_category(cp)
+        val devanagari = cp >= 2304u32 and cp <= 2431u32
+        val continues = (category == 4 or category == 5 or category == 7 or category == 8 or
+            category == 9 or category == 10 or (not devanagari and is_combining_mark(cp as i64)))
+        result.push(if continues and source > start: result[source - start - 1] else: source)
+        source = source + 1
+    result
+
+# HarfBuzz merge_clusters over records[low..high] (inclusive, either order).
+fn _dev2_merge(records: [LayoutGlyphRecord], first: i64, second: i64) -> [LayoutGlyphRecord]:
+    if first < 0 or second < 0: return records
+    val low = if first < second: first else: second
+    val high = if first < second: second else: first
+    var smallest = records[low].cluster
+    var index = low
+    while index <= high:
+        if records[index].cluster < smallest: smallest = records[index].cluster
+        index = index + 1
+    index = low
+    while index <= high:
+        records[index].cluster = smallest
+        index = index + 1
+    records
+
+# HarfBuzz's final reordering merges a pre-base matra's cluster through the
+# base and the reph's from the syllable start to where it lands; anything
+# left out of order is merged so clusters stay monotone (in LTR visual order
+# a glyph takes the smallest cluster at or after it).
+fn _dev2_monotone(records: [LayoutGlyphRecord]) -> [LayoutGlyphRecord]:
+    var index = records.len() - 1
+    while index > 0:
+        if records[index].cluster < records[index - 1].cluster:
+            records[index - 1].cluster = records[index].cluster
+        index = index - 1
+    records
+
+fn _dev2_contains(values: [u32], wanted: u32) -> bool:
+    for value in values:
+        if value == wanted: return true
+    false
+
+# --- entry --------------------------------------------------------------------
+
+# Canonical decomposition of the precomposed nukta consonants U+0958..U+095F
+# (composition exclusions: HarfBuzz never recomposes them).
+fn _dev2_nukta_base(cp: u32) -> u32:
+    if cp == 2392u32: return 2325u32
+    if cp == 2393u32: return 2326u32
+    if cp == 2394u32: return 2327u32
+    if cp == 2395u32: return 2332u32
+    if cp == 2396u32: return 2337u32
+    if cp == 2397u32: return 2338u32
+    if cp == 2398u32: return 2347u32
+    if cp == 2399u32: return 2351u32
+    0u32
+
+# GSUB-shaped, visually ordered records for codepoints[start..end_idx), with
+# zero advances (the caller reads hmtx) or None when the run is not admitted.
+fn indic_dev2_substitute(font: OtFont, plan: LayoutLookupPlan, catalog: [GsubLookup],
+                         codepoints: [u32], start: i64, end_idx: i64) -> Option<[LayoutGlyphRecord]>:
+    if not plan.valid or start < 0 or end_idx > codepoints.len() or start >= end_idx: return None
+    if _dev2_feature_mask(plan, "pref") != 0u64 or _dev2_feature_mask(plan, "init") != 0u64: return None
+    val rphf = _dev2_feature_mask(plan, "rphf")
+    val half = _dev2_feature_mask(plan, "half")
+    val blwf = _dev2_feature_mask(plan, "blwf")
+    val post = blwf | _dev2_feature_mask(plan, "abvf") | _dev2_feature_mask(plan, "pstf")
+    var every: u64 = 0u64
+    for feature in plan.features: every = every | feature.feature_mask
+    val global = every & ~(rphf | half | post)
+    val shaper = _Dev2Shaper(font: font, plan: plan, catalog: catalog, rphf_mask: rphf, half_mask: half,
+        blwf_mask: blwf, post_mask: post, global_mask: global, halant_glyph: cmap_glyph_id(font, 2381u32))
+    # HarfBuzz's normalization: precomposed nukta consonants split; NNNA, RRA,
+    # LLLA composed when the face has them.
+    var cps: [u32] = []
+    var sources: [i64] = []
+    var source = start
+    while source < end_idx:
+        val cp = codepoints[source]
+        val split = _dev2_nukta_base(cp)
+        if split != 0u32:
+            cps.push(split)
+            sources.push(source)
+            cps.push(2364u32)
+            sources.push(source)
+            source = source + 1
+        else if ((cp == 2344u32 or cp == 2352u32 or cp == 2355u32) and source + 1 < end_idx and
+                 codepoints[source + 1] == 2364u32 and cmap_glyph_id(font, cp + 1u32) != 0u32):
+            cps.push(cp + 1u32)
+            sources.push(source)
+            source = source + 2
+        else:
+            cps.push(cp)
+            sources.push(source)
+            source = source + 1
+    # What the syllable machine needs from the face.
+    var below: [u32] = []
+    var after: [u32] = []
+    var probed: [u32] = []
+    var has_reph = false
+    for cp in cps:
+        val category = indic_category(cp)
+        if (category == 1 or category == 2) and not _dev2_contains(probed, cp):
+            probed.push(cp)
+            val position = match _dev2_consonant_position(shaper, cmap_glyph_id(font, cp)):
+                Some(value): value
+                None: return None
+            if position == 8: below.push(cp)
+            if position == 11: after.push(cp)
+            if category == 2 and rphf != 0u64 and shaper.halant_glyph != 0u32:
+                has_reph = match _dev2_would_ligate(shaper, rphf, cmap_glyph_id(font, cp), shaper.halant_glyph):
+                    Some(value): value
+                    None: return None
+    val clusters = indic_clusters_with_forms(cps, below, after, has_reph)
+    var masks: [u64] = []
+    for bits in clusters.feature_bits:
+        var mask = global
+        if (bits & 1) != 0: mask = mask | rphf
+        if (bits & 2) != 0: mask = mask | half
+        if (bits & 4) != 0: mask = mask | blwf
+        if (bits & 8) != 0: mask = mask | _dev2_feature_mask(plan, "pstf")
+        if (bits & 16) != 0: mask = mask | _dev2_feature_mask(plan, "abvf")
+        masks.push(mask)
+    val basic = [_dev2_feature_mask(plan, "locl") | _dev2_feature_mask(plan, "ccmp"),
+        _dev2_feature_mask(plan, "nukt"), _dev2_feature_mask(plan, "akhn"), rphf,
+        _dev2_feature_mask(plan, "rkrf"), blwf, _dev2_feature_mask(plan, "abvf"), half,
+        _dev2_feature_mask(plan, "pstf"), _dev2_feature_mask(plan, "vatu"), _dev2_feature_mask(plan, "cjct")]
+    val presentation = (_dev2_feature_mask(plan, "pres") | _dev2_feature_mask(plan, "abvs") |
+        _dev2_feature_mask(plan, "blws") | _dev2_feature_mask(plan, "psts") |
+        _dev2_feature_mask(plan, "haln") | _dev2_feature_mask(plan, "rlig") |
+        _dev2_feature_mask(plan, "calt") | _dev2_feature_mask(plan, "clig") |
+        _dev2_feature_mask(plan, "liga") | _dev2_feature_mask(plan, "rclt"))
+    var result: [LayoutGlyphRecord] = []
+    val graphemes = _dev2_graphemes(codepoints, start, end_idx)
+    var syllable: i64 = 0
+    while syllable < clusters.syllable_start.len():
+        val kind = clusters.syllable_kind[syllable]
+        if kind == 4: return None
+        val first = clusters.syllable_start[syllable]
+        var records: [LayoutGlyphRecord] = []
+        var item = first
+        while item < clusters.syllable_end[syllable]:
+            val glyph = cmap_glyph_id(font, clusters.codepoints[item])
+            if glyph == 0u32 and clusters.category[item] != 6 and clusters.category[item] != 7: return None
+            records.push(_dev2_record(glyph, sources[clusters.source_index[item]], item, masks[item]))
+            item = item + 1
+        # Text outside the Devanagari block (space, Latin, a stray joiner) has
+        # no lookups in these features.
+        val reordered = kind <= 2
+        val shaped = reordered or (clusters.codepoints[first] >= 2304u32 and clusters.codepoints[first] <= 2431u32)
+        if shaped:
+            for mask in basic:
+                records = match _dev2_apply(shaper, mask, records):
+                    Some(value): _dev2_restore_masks(masks, value)
+                    None: return None
+        # Final reordering. A ligature is no longer a halant, matra or joiner.
+        var order: [i64] = []
+        if reordered and records.len() > 1:
+            var cat: [i64] = []
+            var pos: [i64] = []
+            for record in records:
+                val category = clusters.category[record.cluster]
+                val ligated = record.component_clusters.len() > 1
+                cat.push(if ligated and category >= 4 and category <= 8: 0 else: category)
+                pos.push(clusters.position[record.cluster])
+            order = indic_final_order(cat, pos, clusters.syllable_reph[syllable] and
+                records[0].component_clusters.len() > 1)
+        var final_records: [LayoutGlyphRecord] = []
+        var base_slot: i64 = -1
+        var matra_slots: [i64] = []
+        var reph_slot: i64 = -1
+        var slot: i64 = 0
+        while slot < records.len():
+            val record = if order.len() == records.len(): records[order[slot]] else: records[slot]
+            var components: [i64] = []
+            var cluster = end_idx
+            for component in record.component_clusters:
+                val component_source = sources[clusters.source_index[component]]
+                components.push(component_source)
+                if graphemes[component_source - start] < cluster: cluster = graphemes[component_source - start]
+                if component == clusters.syllable_base[syllable]: base_slot = slot
+            if reordered and clusters.position[record.cluster] == 2: matra_slots.push(slot)
+            if reordered and clusters.position[record.cluster] == 1 and record.component_clusters.len() > 1: reph_slot = slot
+            final_records.push(LayoutGlyphRecord(glyph_id: record.glyph_id, source_index: record.source_index,
+                cluster: cluster, component_clusters: components, feature_mask: 18446744073709551615u64,
+                x_advance_units: 0, y_advance_units: 0, x_offset_units: 0, y_offset_units: 0))
+            slot = slot + 1
+        if base_slot >= 0:
+            for matra_slot in matra_slots: final_records = _dev2_merge(final_records, matra_slot, base_slot)
+        if reph_slot >= 0: final_records = _dev2_merge(final_records, 0, reph_slot)
+        if shaped:
+            final_records = match _dev2_apply(shaper, presentation, final_records):
+                Some(value): value
+                None: return None
+        for record in _dev2_monotone(final_records): result.push(record)
+        syllable = syllable + 1
+    Some(result)
+
+export indic_dev2_substitute

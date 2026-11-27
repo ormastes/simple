@@ -72,3 +72,10 @@ The symbol-level evidence is reproducible in minutes:
 SIMPLE_BIN=<real binary> sh scripts/audit/sffi-contract-inventory.shs out.tsv out.symbols.tsv
 awk -F'\t' 'NR>1 && $10=="source_signature_variants"{print $1}' out.symbols.tsv | sort -u
 ```
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+pre-existing debt, measured; owner: SFFI authority lane.

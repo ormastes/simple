@@ -1,0 +1,117 @@
+"""
+## Purpose and audience
+Purpose: Pin where a mid-line text run STARTS at device scale 4 against
+Chrome 159. On Linux Chrome turns on subpixel glyph positioning when the
+device scale factor is above 1. A run that opens mid-line (the text after a
+`<code>`/`<kbd>` element, or a `<span>` after a plain run) starts on the
+quarter device px of its exact pen. Simple folded `round(k x pen origin)`
+into the command x and dropped the rest, so every such run started on a whole
+device px. Glyphs INSIDE a run already took Chrome's quarter phases, so only
+the run starts were off, by 1-2 quarter device px. That is the outline-pair
+signature on the catalog's inventory rows (`<code>align-content</code> —
+partial; values=...`) and on html's `Keyboard samples: <kbd>Tab</kbd>, ...`.
+Audience: web renderer device-scale text placement.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--hide-scrollbars --force-device-scale-factor=4 --window-size=500,520
+--screenshot`, 2026-11-26), body `margin:0;font:16px/24px sans-serif`,
+Liberation Sans 16 px, monospace = DejaVu Sans Mono 16 px. Every 24 px line
+ends in a red `<span style="color:#f00">l</span>`; the probe is the red-ink
+centroid x of that `l` (weight = red - green), CSS milli-px. Inside one run
+Simple matched Chrome to 5 milli-px already, so the centroid moves only with
+the run start.
+
+| line (RUNS page)                  | Chrome k=4 | base Simple |
+|-----------------------------------|------------|-------------|
+| `x` + n x `a` then `l`, n = 1..19 | see RUN_CHROME | whole-device-px starts (e.g. n=1 18.777 vs 18.658) |
+| `x<code>W</code>l` / `x<kbd>W</kbd>l`, W = a, ab, abcd, abcdefgh, align-content, abcdefghijklmnop, Tab, ArrowRight | see CODE_CHROME | e.g. W=a 19.527 vs 19.408 |
+| `x — partial; values=keyword-number;l` | 266.341 | 266.277 |
+
+Known limit: two lines are exact device quarter TIES: RUN n=4 (174.375
+device px) and RUN n=12 (459.125). Chrome rounds the exact float pen up there,
+but Simple's pen origin is a sum of milli-rounded advances, which can land
+just below the tie. Those lines are left out of the ACs. Exact (font-unit) pen
+origins would fix them; that is a layout-wide change, filed as a follow-up and
+not made here.
+Tolerance: 20 milli-px, under a third of one quarter device px (62.5).
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-RUN-START-QUARTER-PHASE-K4-001 - a mid-line text run at k > 1 starts on the quarter device px of its exact pen.
+"""
+# @tag: unit, browser_engine, text, device_scale, chrome159
+# @cover src/lib/common/ui/draw_ir_device_scale.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val W: i32 = 500
+val H: i32 = 520
+val K: i32 = 4
+val HEAD: text = "<!doctype html><html><body style=\"margin:0;background:#fff;color:#000;font:16px/24px sans-serif\">"
+val MARK: text = "<span style=\"color:#f00\">l</span>"
+
+fn _runs_page() -> text:
+    var body = HEAD
+    var a = ""
+    var n = 0
+    while n < 20:
+        body = body + "<div>x" + a + MARK + "</div>"
+        a = a + "a"
+        n = n + 1
+    body + "</body></html>"
+
+fn _code_page() -> text:
+    val words = ["a", "ab", "abcd", "abcdefgh", "align-content", "abcdefghijklmnop", "Tab", "ArrowRight"]
+    var body = HEAD
+    for w in words:
+        body = body + "<div>x<code>" + w + "</code>" + MARK + "</div>"
+    for w in words:
+        body = body + "<div>x<kbd>" + w + "</kbd>" + MARK + "</div>"
+    body = body + "<div>x — partial; values=keyword-number;" + MARK + "</div>"
+    body + "</body></html>"
+
+# Chrome k=4 red centroid x per line, CSS milli-px (-1: tie line, not checked).
+val RUN_CHROME: [i64] = [9777, 18658, 27591, 36472, -1, 54277, 63158, 72091, 80972, 89841,
+    98777, 107658, -1, 125472, 134341, 143277, 152158, 161027, 169972, 178841]
+val CODE_CHROME: [i64] = [19408, 29027, 48341, 86841, 135027, 163908, 38658, 106091,
+    19408, 29027, 48341, 86841, 135027, 163908, 38658, 106091, 266341]
+
+fn _red_x(px: [u32], line: i32) -> i64:
+    val fw = W * K
+    var s: i64 = 0
+    var sx: i64 = 0
+    var y = line * 24 * K
+    while y < (line + 1) * 24 * K:
+        var x = 0
+        while x < fw:
+            val p = px[y * fw + x]
+            val wgt = ((p >> 16u32) & 0xFFu32) as i64 - ((p >> 8u32) & 0xFFu32) as i64
+            if wgt > 40:
+                s = s + wgt
+                sx = sx + wgt * (x as i64)
+            x = x + 1
+        y = y + 1
+    if s == 0: -1000000 else: (sx * 1000 / s + 500) / (K as i64)
+
+# Lines whose marker centroid is not within 20 milli-px of Chrome, "line:got/want".
+fn _misses(px: [u32], want: [i64]) -> text:
+    var out = ""
+    var i = 0
+    while i < want.len():
+        if want[i] >= 0:
+            val got = _red_x(px, i)
+            if got < want[i] - 20 or got > want[i] + 20:
+                out = out + "{i}:{got}/{want[i]} "
+        i = i + 1
+    out
+
+describe "mid-line text run start at k=4 (Chrome 159 quarter phase)":
+    it "AC-1: a span after a plain run starts on the quarter device px of its pen":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_runs_page(), W, H, K, "cpu_simd")
+        expect(_misses(px, RUN_CHROME)).to_equal("")
+
+    it "AC-2: text after a <code>/<kbd> element starts on the quarter device px of its pen":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_code_page(), W, H, K, "cpu_simd")
+        expect(_misses(px, CODE_CHROME)).to_equal("")

@@ -1,0 +1,70 @@
+# The opt-in vector HTTP parser must reject a request line or header that is
+# not valid UTF-8 with a 400 failure, instead of lossily decoding it (#11334).
+# No provider is admitted here, so the parser runs its scalar fallback.
+use std.spec
+use std.nogc_sync_mut.http_server.vector_parser.{
+    HttpVectorRequestParserV1, http_vector_parser_session_open_owned_v1
+}
+use std.nogc_sync_mut.http_server.request_parser.{HttpRequestParserV1}
+use os.smf.provider_loader.{ProviderAdmissionRequestV1}
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+
+fn _closed_parser() -> HttpVectorRequestParserV1:
+    val opened = http_vector_parser_session_open_owned_v1(ProviderAdmissionRequestV1(
+        artifact_path: "missing-http-vector-provider.so", artifact_kind: "native",
+        expected_artifact_digest: "",
+        granted_capability_bits: 0, required_capability_bits: 0,
+        host_abi: 1, minimum_host_abi: 1, maximum_host_abi: 1,
+        requested_interface_major: 1, requested_interface_minor: 0,
+        provided_interface_major: 1, provided_interface_minor: 0))
+    HttpVectorRequestParserV1(session: opened.session)
+
+# Sends `wire` over loopback and returns the parser error ("" when parsed).
+fn _parse_error(wire: [u8]) -> text:
+    match TcpListener.bind("127.0.0.1:0"):
+        Err(_): return "listener-bind-failed"
+        Ok(listener):
+            match listener.local_addr():
+                Err(_):
+                    val _ = listener.close()
+                    return "listener-address-failed"
+                Ok(address):
+                    match TcpStream.connect(address):
+                        Err(_):
+                            val _ = listener.close()
+                            return "client-connect-failed"
+                        Ok(client):
+                            var error = "accept-failed"
+                            match client.write_all(wire):
+                                Err(_): error = "client-write-failed"
+                                Ok(_):
+                                    match listener.accept():
+                                        Err(_): pass
+                                        Ok(connection):
+                                            val parsed = _closed_parser().parse_request_owned_v1(
+                                                connection, 8192, 64, 8192, 65536, 64)
+                                            error = parsed.error
+                                            val _ = connection.close()
+                            val _ = client.close()
+                            val _ = listener.close()
+                            error
+
+describe "HTTP vector parser UTF-8 validation":
+    it "accepts a valid UTF-8 request":
+        # GET / HTTP/1.1, Host: a, X: é
+        val wire: [u8] = [71u8, 69u8, 84u8, 32u8, 47u8, 32u8, 72u8, 84u8, 84u8, 80u8, 47u8, 49u8, 46u8, 49u8, 13u8, 10u8,
+            72u8, 111u8, 115u8, 116u8, 58u8, 32u8, 97u8, 13u8, 10u8,
+            88u8, 58u8, 32u8, 195u8, 169u8, 13u8, 10u8, 13u8, 10u8]
+        expect(_parse_error(wire)).to_equal("")
+
+    it "rejects an invalid UTF-8 request line with 400":
+        # GET /<0xFF> HTTP/1.1
+        val wire: [u8] = [71u8, 69u8, 84u8, 32u8, 47u8, 255u8, 32u8, 72u8, 84u8, 84u8, 80u8, 47u8, 49u8, 46u8, 49u8, 13u8, 10u8,
+            72u8, 111u8, 115u8, 116u8, 58u8, 32u8, 97u8, 13u8, 10u8, 13u8, 10u8]
+        expect(_parse_error(wire)).to_equal("400 Invalid request line encoding")
+
+    it "rejects an invalid UTF-8 header with 400":
+        # GET / HTTP/1.1, X: <0xC3 0x28> (truncated sequence)
+        val wire: [u8] = [71u8, 69u8, 84u8, 32u8, 47u8, 32u8, 72u8, 84u8, 84u8, 80u8, 47u8, 49u8, 46u8, 49u8, 13u8, 10u8,
+            88u8, 58u8, 32u8, 195u8, 40u8, 13u8, 10u8, 13u8, 10u8]
+        expect(_parse_error(wire)).to_equal("400 Invalid request header encoding")

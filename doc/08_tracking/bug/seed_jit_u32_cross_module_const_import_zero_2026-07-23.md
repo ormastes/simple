@@ -3,7 +3,7 @@
 - **Filed:** 2026-07-23
 - **Component:** `src/compiler_rust/` bootstrap seed — JIT (Cranelift) backend, constant evaluation
 - **Severity:** Medium (Rust-seed-only; interpreter and real hardware unaffected)
-- **Status:** Open
+- **Status:** fixed (re-verified 2026-11-06, see "Re-verification 2026-11-06")
 
 ## Summary
 
@@ -58,3 +58,26 @@ than truncated. `i64` globals take a different, correct path. Not reproducible i
 the interpreter, so the defect is isolated to the Cranelift const-eval path in
 `src/compiler_rust/`. This is seed-only and off the FPGA critical path (the
 hardware model is synthesized from interpreter-verified `.spl`, never the JIT).
+
+## Re-verification 2026-11-06
+
+No longer reproduces on a seed built from `origin/release/1.0.0` @ ecb705896a4 (Windows x86_64 host). The record's two-module repro (`a.spl` exporting
+`SHARED_U32`/`SHARED_I64`; `main.spl` with `FROM_U32_IMPORT`, `FROM_I64_IMPORT`,
+`LOCAL_CAST`, `I64_TO_U32_CAST`) prints
+`268435456 268435456 268435456 268435456` under both `SIMPLE_EXECUTION_MODE=jit`
+and `interpret`. Before, the three `u32` forms were 0 under the JIT.
+
+## Verification 2026-11-25 (p2w5-ad lane, release/1.0.0)
+
+Re-ran the record's exact two-module repro on this worktree's tracked seed
+(`bin/simple.exe`, Rust seed v1.0.0-rc.1, Windows x86_64, default JIT mode):
+
+```
+FROM_U32_IMPORT / FROM_I64_IMPORT / LOCAL_CAST / I64_TO_U32_CAST
+-> 268435456 268435456 268435456 268435456
+```
+
+All four values are correct (0x10000000); the JIT zero-miscompile does not
+reproduce on the tracked binary. Confirms the 2026-11-06 re-verification.
+
+Status: RESOLVED.

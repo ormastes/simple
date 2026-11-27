@@ -8,7 +8,7 @@ Base revision: `eb98be6f2b1`
 
 ## Capsule scan errors admitted a frozen capsule
 
-Status: FIXED; focused macOS contract suite PASS.
+Status: FIXED; focused macOS contract suite PASS. (stdbuf part verified present 2026-11-02: `process_ops.spl:1915` tests `command -v stdbuf` and execs with or without it; row closed.)
 
 Priority: P0, admission fails open.
 

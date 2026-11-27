@@ -190,21 +190,21 @@ fn keccak_f1600(state_in: [i64]) -> [i64]:
 
 # Read 8 little-endian bytes starting at offset `off` from `bytes` into a u64
 # lane. Caller guarantees the slice is in range.
-fn _bytes_to_lane_le(bytes: [i64], off: i64) -> i64:
+fn _bytes_to_lane_le(bytes: [u8], off: i64) -> i64:
     var lane = 0
     var i = 0
     while i < 8:
-        val b = bytes[off + i] & 0xFF
+        val b = bytes[off + i] as i64
         # b << (8*i): for i=7 the shift is 56; b max 0xFF so no sign-bit hit.
         lane = lane | (b << (8 * i))
         i = i + 1
     lane
 
 # Append the low 8 bytes of `lane` (little-endian) onto `dest`.
-fn _lane_to_bytes_le(dest: [i64], lane: i64):
+fn _lane_to_bytes_le(dest: [u8], lane: i64):
     var i = 0
     while i < 8:
-        dest.push((lane >> (8 * i)) & 0xFF)
+        dest.push(((lane >> (8 * i)) & 0xFF).to_u8())
         i = i + 1
 
 # =============================================================================
@@ -212,10 +212,10 @@ fn _lane_to_bytes_le(dest: [i64], lane: i64):
 # =============================================================================
 #
 # Streaming context shape: (state, buffer, buffer_len, rate_bytes)
-#   state       — 25 i64 lanes (flat list)
+#   state       — 25 i64 lanes (flat word array)
 #   buffer      — pending input bytes (< rate_bytes when not full)
 #   buffer_len  — current size of buffer (kept for clarity even though
-#                 list.len() == buffer_len always)
+#                 buffer.len() == buffer_len always)
 #   rate_bytes  — sponge rate r/8 (136 / 104 / 72 for SHA3-256/384/512)
 #
 # Domain separator for SHA-3 hash mode is the 4-bit suffix `01` followed by
@@ -232,7 +232,7 @@ fn _empty_state() -> [i64]:
     s
 
 # Absorb one full rate-byte block into state and run Keccak-f.
-fn _absorb_block(state: [i64], block: [i64], rate_bytes: i64) -> [i64]:
+fn _absorb_block(state: [i64], block: [u8], rate_bytes: i64) -> [i64]:
     # Lane count = rate_bytes / 8 (always integral: 136/8=17, 104/8=13, 72/8=9).
     val lane_count = rate_bytes / 8
     var s: [i64] = []
@@ -250,28 +250,30 @@ fn _absorb_block(state: [i64], block: [i64], rate_bytes: i64) -> [i64]:
     keccak_f1600(s)
 
 # Create a SHA-3 streaming context for the given rate (in bytes).
-fn create_sha3_context(rate_bytes: i64) -> ([i64], [i64], i64, i64):
-    (_empty_state(), [], 0, rate_bytes)
+fn create_sha3_context(rate_bytes: i64) -> ([i64], [u8], i64, i64):
+    val buffer: [u8] = []
+    (_empty_state(), buffer, 0, rate_bytes)
 
-fn create_sha3_256_context() -> ([i64], [i64], i64, i64):
+fn create_sha3_256_context() -> ([i64], [u8], i64, i64):
     create_sha3_context(136)
 
-fn create_sha3_384_context() -> ([i64], [i64], i64, i64):
+fn create_sha3_384_context() -> ([i64], [u8], i64, i64):
     create_sha3_context(104)
 
-fn create_sha3_512_context() -> ([i64], [i64], i64, i64):
+fn create_sha3_512_context() -> ([i64], [u8], i64, i64):
     create_sha3_context(72)
 
 # Append data to the context; absorbs full blocks as they fill up. Returns
 # updated context tuple.
-fn sha3_update(ctx: ([i64], [i64], i64, i64), data: [i64]) -> ([i64], [i64], i64, i64):
+fn sha3_update(ctx: ([i64], [u8], i64, i64), data: [u8]) -> ([i64], [u8], i64, i64):
     var state: [i64] = ctx[0]
-    var buffer: [i64] = ctx[1]
+    var buffer: [u8] = ctx[1]
     var buffer_len = ctx[2]
     val rate_bytes = ctx[3]
 
     var i = 0
-    while i < data.len():
+    val n = data.len() as i64
+    while i < n:
         buffer.push(data[i])
         buffer_len = buffer_len + 1
         if buffer_len == rate_bytes:
@@ -285,9 +287,9 @@ fn sha3_update(ctx: ([i64], [i64], i64, i64), data: [i64]) -> ([i64], [i64], i64
 # requested `output_bytes`. For fixed-length SHA3-256/384/512, output_bytes
 # never exceeds rate_bytes, so a single squeeze suffices — we still loop in
 # case future SHAKE-style callers pass a longer length.
-fn sha3_finalize(ctx: ([i64], [i64], i64, i64), output_bytes: i64) -> [i64]:
+fn sha3_finalize(ctx: ([i64], [u8], i64, i64), output_bytes: i64) -> [u8]:
     var state: [i64] = ctx[0]
-    var buffer: [i64] = ctx[1]
+    var buffer: [u8] = ctx[1]
     var buffer_len = ctx[2]
     val rate_bytes = ctx[3]
 
@@ -295,25 +297,25 @@ fn sha3_finalize(ctx: ([i64], [i64], i64, i64), output_bytes: i64) -> [i64]:
     # has 0x80 OR'd into its MSB. When buffer_len == rate_bytes - 1, the same
     # byte carries both → 0x86 (handled by OR'ing 0x80 onto whichever byte
     # ends up at index rate_bytes - 1).
-    buffer.push(0x06)
+    buffer.push(0x06u8)
     buffer_len = buffer_len + 1
     while buffer_len < rate_bytes:
-        buffer.push(0)
+        buffer.push(0u8)
         buffer_len = buffer_len + 1
     # OR 0x80 into the last byte.
-    val last = buffer[rate_bytes - 1]
-    buffer[rate_bytes - 1] = last | 0x80
+    val last = buffer[rate_bytes - 1] as i64
+    buffer[rate_bytes - 1] = (last | 0x80).to_u8()
     state = _absorb_block(state, buffer, rate_bytes)
 
     # Squeeze.
-    var out: [i64] = []
+    var out: [u8] = []
     var produced = 0
     while produced < output_bytes:
         # Emit lanes from state up to rate_bytes or until output_bytes is met.
         val lane_count = rate_bytes / 8
         var lane_i = 0
         while lane_i < lane_count and produced < output_bytes:
-            var tmp: [i64] = []
+            var tmp: [u8] = []
             _lane_to_bytes_le(tmp, state[lane_i])
             var k = 0
             while k < 8 and produced < output_bytes:
@@ -327,36 +329,36 @@ fn sha3_finalize(ctx: ([i64], [i64], i64, i64), output_bytes: i64) -> [i64]:
     out
 
 # Aliases matching FIPS 202 wording.
-fn sha3_init(rate_bytes: i64) -> ([i64], [i64], i64, i64):
+fn sha3_init(rate_bytes: i64) -> ([i64], [u8], i64, i64):
     create_sha3_context(rate_bytes)
 
-fn sha3_final(ctx: ([i64], [i64], i64, i64), output_bytes: i64) -> [i64]:
+fn sha3_final(ctx: ([i64], [u8], i64, i64), output_bytes: i64) -> [u8]:
     sha3_finalize(ctx, output_bytes)
 
 # =============================================================================
 # Public one-shot API — SHA3-256 / SHA3-384 / SHA3-512
 # =============================================================================
 
-# SHA3-256 of byte list (returns 32-byte list).
-fn sha3_256_bytes(data: [i64]) -> [i64]:
+# SHA3-256 of a byte array (returns 32 bytes).
+pub fn sha3_256_bytes(data: [u8]) -> [u8]:
     val ctx = create_sha3_256_context()
     val updated = sha3_update(ctx, data)
     sha3_finalize(updated, 32)
 
-# SHA3-384 of byte list (returns 48-byte list).
-fn sha3_384_bytes(data: [i64]) -> [i64]:
+# SHA3-384 of a byte array (returns 48 bytes).
+fn sha3_384_bytes(data: [u8]) -> [u8]:
     val ctx = create_sha3_384_context()
     val updated = sha3_update(ctx, data)
     sha3_finalize(updated, 48)
 
-# SHA3-512 of byte list (returns 64-byte list).
-fn sha3_512_bytes(data: [i64]) -> [i64]:
+# SHA3-512 of a byte array (returns 64 bytes).
+fn sha3_512_bytes(data: [u8]) -> [u8]:
     val ctx = create_sha3_512_context()
     val updated = sha3_update(ctx, data)
     sha3_finalize(updated, 64)
 
-# Streaming convenience: feed `chunks` (list of lists of bytes) and finalize.
-fn sha3_256_stream(chunks: [[i64]]) -> [i64]:
+# Streaming convenience: feed `chunks` (list of byte arrays) and finalize.
+fn sha3_256_stream(chunks: [[u8]]) -> [u8]:
     var ctx = create_sha3_256_context()
     var i = 0
     while i < chunks.len():
@@ -364,7 +366,7 @@ fn sha3_256_stream(chunks: [[i64]]) -> [i64]:
         i = i + 1
     sha3_finalize(ctx, 32)
 
-fn sha3_384_stream(chunks: [[i64]]) -> [i64]:
+fn sha3_384_stream(chunks: [[u8]]) -> [u8]:
     var ctx = create_sha3_384_context()
     var i = 0
     while i < chunks.len():
@@ -372,7 +374,7 @@ fn sha3_384_stream(chunks: [[i64]]) -> [i64]:
         i = i + 1
     sha3_finalize(ctx, 48)
 
-fn sha3_512_stream(chunks: [[i64]]) -> [i64]:
+fn sha3_512_stream(chunks: [[u8]]) -> [u8]:
     var ctx = create_sha3_512_context()
     var i = 0
     while i < chunks.len():

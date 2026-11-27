@@ -1,0 +1,52 @@
+# `trace report`: one-screen summary over the other query results. Pure.
+# Counts are by overall requirement status; Linked and Verified stay separate.
+# @req REQ-TRC-021
+use std.common.traceability.model.*
+use std.common.traceability.sidecar_v1.{TraceSidecarReferenceV1}
+use std.common.traceability.profile_v1.{TraceProfile}
+use std.common.traceability.trace_ids_v1.{TraceSnapshotIdV1}
+use std.common.traceability.query_missing_v1.{TraceLinkStatus, TraceRequirementIdV1,
+    TraceRequirementCountV1, TraceGraphCompletenessV1}
+use std.common.traceability.query_status_v1.{TracePassingEvidenceV1, TraceCommandVerdictV1,
+    trace_requirement_statuses_v1, trace_requirement_overall_v1, trace_graph_completeness_v1, trace_command_verdict_v1}
+use std.common.traceability.query_links_v1.{trace_links_check_v1}
+
+pub struct TraceReportResultV1:
+    snapshot_id: TraceSnapshotIdV1
+    profile: TraceProfile
+    total: TraceRequirementCountV1
+    linked: TraceRequirementCountV1
+    verified: TraceRequirementCountV1
+    missing: TraceRequirementCountV1
+    unknown: TraceRequirementCountV1
+    link_issues: TraceRequirementCountV1
+    top_missing: [TraceRequirementIdV1]    # first ids (sorted) whose overall status is Missing, bounded by the caller
+    completeness: TraceGraphCompletenessV1
+    verdict: TraceCommandVerdictV1
+
+pub fn trace_report_v1(graph: TraceGraph, sidecar: [TraceSidecarReferenceV1], evidence: [TracePassingEvidenceV1],
+    profile: TraceProfile, top_limit: TraceRequirementCountV1) -> TraceReportResultV1:
+    var linked = 0
+    var verified = 0
+    var missing = 0
+    var unknown = 0
+    var total = 0
+    var top: [TraceRequirementIdV1] = []
+    for status in trace_requirement_statuses_v1(graph, sidecar, evidence):
+        total = total + 1
+        val overall = trace_requirement_overall_v1(status)
+        if overall == TraceLinkStatus.Verified: verified = verified + 1
+        elif overall == TraceLinkStatus.Linked: linked = linked + 1
+        elif overall == TraceLinkStatus.Unknown: unknown = unknown + 1
+        else:
+            missing = missing + 1
+            if top.len() < top_limit.value: top.push(status.requirement_id)
+    val links = trace_links_check_v1(graph, sidecar, evidence, profile)
+    val completeness = trace_graph_completeness_v1(graph)
+    TraceReportResultV1(snapshot_id: TraceSnapshotIdV1(value: graph.subject.snapshot_id), profile: profile,
+        total: TraceRequirementCountV1(value: total), linked: TraceRequirementCountV1(value: linked),
+        verified: TraceRequirementCountV1(value: verified), missing: TraceRequirementCountV1(value: missing),
+        unknown: TraceRequirementCountV1(value: unknown),
+        link_issues: TraceRequirementCountV1(value: links.issues.len()), top_missing: top,
+        completeness: completeness, verdict: trace_command_verdict_v1(completeness, profile))
+

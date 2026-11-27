@@ -1,0 +1,138 @@
+use std.spec.{describe, it, expect}
+use compiler.driver.cache.aop_match_cache_driver_v1.{
+    AopMatchDriverStateV1, aop_selector_plan_acquire_v1,
+    aop_match_shard_acquire_v1
+}
+use compiler.common.cache_contract.aspect_match_shard_v1.{
+    JoinPointFactV1, DirectoryJoinPointFactsV1,
+    pointcut_selector_parse_v1, pointcut_match_shard_compute_v1,
+    directory_join_point_facts_v1, directory_join_point_facts_guarded_v1
+}
+use compiler.common.cache_contract.guard_id_v1.{GuardEvalV1, guard_id_v1, active_guard_root_v1}
+
+fn aop_selector_facts(points: [JoinPointFactV1]) -> DirectoryJoinPointFactsV1:
+    directory_join_point_facts_v1("src", ["src/module.spl"], points, [], true)
+
+fn aop_selector_fact(id: text, symbol: text, attrs: [text]) -> JoinPointFactV1:
+    JoinPointFactV1(id: id, kind: "forward", symbol: symbol, attrs: attrs,
+        owner_file: "src/module.spl", base_body_digest: "")
+
+describe "bounded AOP selector plan cache":
+    it "parses once for an exact source hit and returns the same plan":
+        val state = AopMatchDriverStateV1.create()
+        val first = aop_selector_plan_acquire_v1(state, "attr(logged)")
+        val second = aop_selector_plan_acquire_v1(state, "attr(logged)")
+        expect(first.source).to_equal("attr(logged)")
+        expect(second.source).to_equal(first.source)
+        expect(second.selector_digest).to_equal(first.selector_digest)
+        expect(state.selector_parse_count).to_equal(1)
+        expect(state.selector_plan_hits).to_equal(1)
+        expect(state.selector_plan_evictions).to_equal(0)
+
+    it "canonicalizes equivalent spellings to one retained semantic plan":
+        val state = AopMatchDriverStateV1.create()
+        val first = aop_selector_plan_acquire_v1(state, "attr(logged)")
+        val equivalent = aop_selector_plan_acquire_v1(state, "  attr ( logged )  ")
+        expect(first.selector_digest).to_equal(equivalent.selector_digest)
+        expect(first.form).to_equal(equivalent.form)
+        expect(first.operand).to_equal(equivalent.operand)
+        expect(first.supported).to_equal(equivalent.supported)
+        expect(first.needs_universe).to_equal(equivalent.needs_universe)
+        expect(equivalent.source).to_equal(first.source)
+        expect(state.selector_parse_count).to_equal(2)
+        expect(state.selector_plan_hits).to_equal(0)
+        expect(state.selector_plan_keys.len()).to_equal(2)
+
+    it "keeps different semantic selectors under distinct digests":
+        val state = AopMatchDriverStateV1.create()
+        val logged = aop_selector_plan_acquire_v1(state, "attr(logged)")
+        val execution = aop_selector_plan_acquire_v1(state, "execution(run*)")
+        expect(logged.selector_digest == execution.selector_digest).to_equal(false)
+        expect(state.selector_parse_count).to_equal(2)
+        expect(state.selector_plan_keys.len()).to_equal(2)
+
+    it "bounds FIFO entries while retained evicted plans keep their old meaning":
+        val state = AopMatchDriverStateV1.create_with_selector_capacity(1).unwrap()
+        val old_plan = aop_selector_plan_acquire_v1(state, "attr(logged)")
+        val old_digest = old_plan.selector_digest
+        val facts = aop_selector_facts([
+            aop_selector_fact("module::logged", "logged", ["logged"]),
+            aop_selector_fact("module::plain", "plain", [])])
+        val before = pointcut_match_shard_compute_v1(old_plan, facts)
+
+        val replacement = aop_selector_plan_acquire_v1(state, "within(src.*)")
+        expect(replacement.selector_digest == old_digest).to_equal(false)
+        expect(state.selector_plan_keys.len()).to_equal(1)
+        expect(state.selector_plans.keys().len()).to_equal(1)
+        expect(state.selector_plan_evictions).to_equal(1)
+
+        val after = pointcut_match_shard_compute_v1(old_plan, facts)
+        val independent = pointcut_match_shard_compute_v1(pointcut_selector_parse_v1("attr(logged)"), facts)
+        expect(old_plan.source).to_equal("attr(logged)")
+        expect(old_plan.selector_digest).to_equal(old_digest)
+        expect(after.sorted_matching_ids).to_equal(["module::logged"])
+        expect(after.sorted_matching_ids).to_equal(before.sorted_matching_ids)
+        expect(after.sorted_matching_ids).to_equal(independent.sorted_matching_ids)
+
+    it "reuses selector plans while member and active-guard changes miss result shards":
+        val state = AopMatchDriverStateV1.create()
+        val first_facts = aop_selector_facts([
+            aop_selector_fact("module::first", "first", ["logged"])])
+        val first = aop_match_shard_acquire_v1(state, "attr(logged)", first_facts, "request-1")
+        val exact_hit = aop_match_shard_acquire_v1(state, "attr(logged)", first_facts, "request-2")
+        expect(first.sorted_matching_ids).to_equal(["module::first"])
+        expect(exact_hit.sorted_matching_ids).to_equal(first.sorted_matching_ids)
+        expect(state.selector_parse_count).to_equal(1)
+        expect(state.selector_plan_hits).to_equal(1)
+        expect(state.shard_misses).to_equal(1)
+        expect(state.shard_hits).to_equal(1)
+
+        val expanded_facts = aop_selector_facts([
+            aop_selector_fact("module::first", "first", ["logged"]),
+            aop_selector_fact("module::second", "second", ["logged"])])
+        val expanded = aop_match_shard_acquire_v1(state, "attr(logged)", expanded_facts, "request-3")
+        expect(expanded.sorted_matching_ids).to_equal(["module::first", "module::second"])
+        expect(state.selector_parse_count).to_equal(1)
+        expect(state.shard_misses).to_equal(2)
+
+        val guard = guard_id_v1("when", "feature_enabled")
+        val active_guards = active_guard_root_v1("profile-a", [
+            GuardEvalV1(guard: guard, evaluable: true, active: true)])
+        val guarded_facts = directory_join_point_facts_guarded_v1(
+            "src", ["src/module.spl"], expanded_facts.sorted_join_points, [], true, active_guards)
+        val guarded = aop_match_shard_acquire_v1(state, "attr(logged)", guarded_facts, "request-4")
+        expect(guarded.sorted_matching_ids).to_equal(expanded.sorted_matching_ids)
+        expect(state.selector_parse_count).to_equal(1)
+        expect(state.shard_misses).to_equal(3)
+
+    it "recomputes a prior negative result when new facts add a matching join point":
+        val state = AopMatchDriverStateV1.create()
+        val absent_facts = aop_selector_facts([
+            aop_selector_fact("module::plain", "plain", [])])
+        val absent = aop_match_shard_acquire_v1(state, "attr(logged)", absent_facts, "negative-1")
+        expect(absent.sorted_matching_ids).to_equal([])
+        expect(state.shard_misses).to_equal(1)
+
+        val added_facts = aop_selector_facts([
+            aop_selector_fact("module::plain", "plain", []),
+            aop_selector_fact("module::logged", "logged", ["logged"])])
+        val added = aop_match_shard_acquire_v1(state, "attr(logged)", added_facts, "negative-2")
+        expect(added.sorted_matching_ids).to_equal(["module::logged"])
+        expect(state.shard_misses).to_equal(2)
+        expect(state.selector_parse_count).to_equal(1)
+
+    it "retains unsupported selectors while preserving the incomplete fallback result":
+        val state = AopMatchDriverStateV1.create()
+        val unsupported = aop_selector_plan_acquire_v1(state, "unknown(selector)")
+        expect(unsupported.supported).to_equal(false)
+        expect(unsupported.form).to_equal("unsupported")
+        val facts = aop_selector_facts([])
+        val shard = aop_match_shard_acquire_v1(state, "unknown(selector)", facts, "unsupported-1")
+        expect(shard.complete).to_equal(false)
+        expect(state.selector_parse_count).to_equal(1)
+        expect(state.selector_plan_hits).to_equal(1)
+
+    it "rejects an invalid selector plan capacity":
+        match AopMatchDriverStateV1.create_with_selector_capacity(0):
+            case Err(error): expect(error).to_equal("selector-plan-capacity-invalid")
+            case Ok(_): fail("zero selector-plan capacity was accepted")

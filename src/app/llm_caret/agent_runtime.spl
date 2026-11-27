@@ -2,7 +2,7 @@
 
 use app.io.mod.{process_spawn_async, process_spawn_async_env, process_is_running, process_kill}
 use std.nogc_async_mut.sosix.{sosix_platform}
-use app.llm_caret.agent_plan.{AgentLaunchPlan, AgentLaunchRequest, build_agent_launch_plan}
+use app.llm_caret.agent_plan.{AgentLaunchPlan, AgentLaunchRequest, build_agent_launch_plan, agent_plan_launch_error_v1}
 
 struct AgentProcess:
     agent_id: text
@@ -38,7 +38,8 @@ pub fn is_known_agent_provider(provider: text) -> bool:
     provider == "" or provider == "claude" or provider == "claude_cli" or
         provider == "codex" or provider == "opencode_cli" or
         provider == "gemini" or provider == "gemini_cli" or
-        provider == "kimi" or provider == "kimi_cli" or provider == "team"
+        provider == "kimi" or provider == "kimi_cli" or
+        provider == "agy" or provider == "agy_cli" or provider == "team"
 
 pub fn agent_command_for_provider(provider: text, claude_path: text, codex_path: text, opencode_path: text) -> text:
     agent_command_for_provider_with_gemini(provider, claude_path, codex_path, "", opencode_path)
@@ -63,6 +64,7 @@ pub fn windows_script_interpreter(cmd: text) -> text:
 # One spawn vocabulary for agent commands: identity on POSIX, interpreter
 # routed on Windows. `.sh`/`.shs` stubs need `sh` on PATH where they are
 # used; production agent CLIs are real executables either way.
+@allow(primitive_api)  # OS process id from process_spawn_async (<= 0 on spawn failure)
 pub fn agent_command_spawn(cmd: text, args: [text]) -> i64:
     if sosix_platform() == "windows":
         val interpreter = windows_script_interpreter(cmd)
@@ -73,7 +75,7 @@ pub fn agent_command_spawn(cmd: text, args: [text]) -> i64:
     process_spawn_async(cmd, args)
 
 # Environment-carrying sibling of agent_command_spawn for messaging agents.
-pub fn agent_command_spawn_env(cmd: text, args: [text], env: {text: text}) -> i64:
+fn agent_command_spawn_env(cmd: text, args: [text], env: {text: text}) -> i64:
     if sosix_platform() == "windows":
         val interpreter = windows_script_interpreter(cmd)
         if interpreter != "":
@@ -102,6 +104,8 @@ pub fn agent_command_for_provider_with_all(provider: text, claude_path: text,
         if kimi_path != "":
             return kimi_path
         return "kimi"
+    if provider == "agy" or provider == "agy_cli":
+        return "agy"
     if claude_path != "":
         return claude_path
     "claude"
@@ -123,6 +127,9 @@ pub fn launch_agent_plan_with_all(agent_id: text, plan: AgentLaunchPlan,
     if not is_known_agent_provider(plan.provider):
         return AgentProcess(agent_id: agent_id, status: "error",
             reason: "unknown_provider:" + plan.provider, pid: -1)
+    val plan_error = agent_plan_launch_error_v1(plan)
+    if plan_error != "":
+        return AgentProcess(agent_id: agent_id, status: "not_started", reason: plan_error, pid: -1)
     val cmd = agent_command_for_provider_with_all(plan.provider, claude_path,
         codex_path, gemini_path, kimi_path, opencode_path)
     val pid = agent_command_spawn(cmd, plan.argv)
@@ -148,6 +155,9 @@ pub fn launch_messaging_agent_plan_with_all(agent_id: text, plan: AgentLaunchPla
     if not is_known_agent_provider(plan.provider):
         return AgentProcess(agent_id: agent_id, status: "error",
             reason: "unknown_provider:" + plan.provider, pid: -1)
+    val plan_error = agent_plan_launch_error_v1(plan)
+    if plan_error != "":
+        return AgentProcess(agent_id: agent_id, status: "not_started", reason: plan_error, pid: -1)
     val cmd = agent_command_for_provider_with_all(plan.provider, claude_path,
         codex_path, gemini_path, kimi_path, opencode_path)
     val pid = agent_command_spawn_env(cmd, plan.argv, messaging_agent_environment(context))

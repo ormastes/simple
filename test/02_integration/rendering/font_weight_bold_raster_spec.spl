@@ -1,0 +1,67 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# Follow-up from doc/08_tracking/bug/browser_engine_missing_ua_defaults_2026-07-11.md:
+# bold is computed in style but never rasterized — inline `font-weight:bold`
+# (and the <b> UA default) are pixel-identical to normal weight in the
+# software framebuffer lane. Chrome: `<b>abcdefg</b>` measures ~64px vs ~60px
+# for the regular run; Simple measured both at 56.
+#
+# LIMITATION (recorded, not silent): the font stack on this host has no bold
+# face for the bundled/generic families (browser_platform_sans_bold_faces is
+# macOS-only), so weight cannot come from a real face here. The rasterizer
+# applies deterministic fake-bold instead: every inked glyph pixel block is
+# extended by one extra column on the right edge (the same synthesis idiom
+# as the existing per-row italic shift). Where a real bold face exists the
+# layout metrics already widen via browser_font_family_for_weight; the
+# fake-bold stroke is additive on top of the same 5x7 bitmap cell.
+# @req REQ-SSPEC-INTEGRATION
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_raster.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_declarations.spl
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_software_pixels}
+
+val W = 200
+val H = 120
+
+fn is_ink(p: u32) -> bool:
+    (p & 0x00FFFFFFu32) != 0x00FFFFFFu32
+
+fn ink_count(px: [u32], w: i32, h: i32) -> i32:
+    var count = 0
+    var y = 0
+    while y < h:
+        var x = 0
+        while x < w:
+            if is_ink(px[y * w + x]):
+                count = count + 1
+            x = x + 1
+        y = y + 1
+    count
+
+fn render(body_html: text) -> [u32]:
+    simple_web_layout_render_html_software_pixels(
+        "<html><body style=\"margin:0\">" + body_html + "</body></html>",
+        W, H, 600000)
+
+describe "computed font-weight bold reaches the software raster":
+    it "inline font-weight:bold paints measurably more ink than normal":
+        step("span with font-weight:bold must raster wider than the identical normal span")
+        val normal_px = render("<span>x</span>")
+        val bold_px = render("<span style=\"font-weight:bold\">x</span>")
+        expect(normal_px.len()).to_equal(W * H)
+        expect(bold_px.len()).to_equal(W * H)
+        val normal_ink = ink_count(normal_px, W, H)
+        val bold_ink = ink_count(bold_px, W, H)
+        print "[bold-raster] normal_ink=" + normal_ink.to_string() + " bold_ink=" + bold_ink.to_string()
+        expect(bold_ink > normal_ink).to_equal(true)
+
+    it "<b> paints measurably more ink than normal":
+        step("<b> carries the UA bold default and must raster wider than plain text")
+        val normal_px = render("<span>x</span>")
+        val bold_px = render("<b>x</b>")
+        val normal_ink = ink_count(normal_px, W, H)
+        val bold_ink = ink_count(bold_px, W, H)
+        print "[bold-raster] b normal_ink=" + normal_ink.to_string() + " bold_ink=" + bold_ink.to_string()
+        expect(bold_ink > normal_ink).to_equal(true)

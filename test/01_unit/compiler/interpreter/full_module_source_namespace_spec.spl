@@ -1,0 +1,55 @@
+"""Full imports retain the resolved source owner and its re-export routes."""
+use std.spec.{describe, it, expect, step}
+use compiler.core.ast.{ast_reset, decl_fn}
+use compiler.core.interpreter.eval_tables.{func_table_reset, func_table_register_owned, func_import_binding_reset, func_import_binding_register, func_module_namespace_lookup, func_resolve_module_member_for_caller, func_resolve_for_caller}
+use compiler.core.interpreter.module_loader_core.{module_loader_init, module_mark_loaded, module_bind_exports_for_caller}
+use compiler.core.interpreter.module_loader_resolve.{module_resolve_cache_reset, resolve_module_path}
+
+fn p2_p3_bug_reproduction():
+    ast_reset()
+    func_table_reset()
+    func_import_binding_reset()
+    module_loader_init()
+
+describe "full module source namespaces":
+    it "resolves the exact legacy string spelling to its source facade":
+        step("Reproduce the exact failure")
+        module_resolve_cache_reset()
+        expect(resolve_module_path("string", "test/01_unit/compiler/interpreter/full_module_source_namespace_spec.spl")).to_equal("src/lib/string.spl")
+
+    it "binds char_at to the selected string owner and preserves bare exports":
+        step("Exercise the repaired owner")
+        p2_p3_bug_reproduction()
+        val owner = "src/lib/string.spl"
+        val caller = "spec/string_caller.spl"
+        val char_decl = decl_fn("char_at", [], [], 0, [], 0, [], 0)
+        func_table_register_owned(owner, "char_at", char_decl)
+        module_mark_loaded("string", owner, ["char_at"])
+        module_bind_exports_for_caller("string", caller)
+        expect(func_module_namespace_lookup(caller, "string")).to_equal(owner)
+        expect(func_resolve_module_member_for_caller(caller, "string", "char_at")).to_equal(char_decl)
+        expect(func_resolve_for_caller(caller, "char_at")).to_equal(char_decl)
+
+    it "follows arbitrary facade re-export aliases without borrowing a sibling":
+        step("Reject the adjacent regression")
+        p2_p3_bug_reproduction()
+        val caller = "spec/facade_caller.spl"
+        val facade = "src/fixture/facade.spl"
+        val provider = "src/fixture/provider.spl"
+        val sibling = "src/fixture/sibling.spl"
+        val original = decl_fn("transform", [], [], 0, [], 0, [], 0)
+        val unrelated = decl_fn("public_transform", [], [], 0, [], 0, [], 0)
+        func_table_register_owned(provider, "transform", original)
+        func_table_register_owned(sibling, "public_transform", unrelated)
+        func_import_binding_register(facade, "transform:public_transform", provider)
+        module_mark_loaded("fixture.facade", facade, ["public_transform"])
+        module_bind_exports_for_caller("fixture.facade", caller)
+        expect(func_module_namespace_lookup(caller, "facade")).to_equal(facade)
+        expect(func_resolve_module_member_for_caller(caller, "facade", "public_transform")).to_equal(original)
+        expect(func_resolve_module_member_for_caller(caller, "facade", "absent")).to_equal(-1)
+        expect(func_module_namespace_lookup("other_caller.spl", "facade")).to_equal("")
+
+    it "keeps a caller-local source ahead of the root compatibility facade":
+        step("Reject the adjacent regression")
+        module_resolve_cache_reset()
+        expect(resolve_module_path("string", "test/02_integration/compiler/interpreter/fixtures/namespace_local/caller.spl")).to_equal("test/02_integration/compiler/interpreter/fixtures/namespace_local/string.spl")

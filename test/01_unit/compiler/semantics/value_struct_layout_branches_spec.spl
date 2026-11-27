@@ -1,0 +1,185 @@
+# @req REQ-SEM-VSL-001
+"""
+# value_struct_layout residual branch pins
+
+Complements value_struct_layout_spec.spl (the main cycle/provenance spec) with
+the branches it leaves unexercised in
+`src/compiler/35.semantics/value_struct_layout.spl`: the `is_generic_template`
+skip without type parameters, generic-argument field edges, the
+`<unknown file>` / line-0 diagnostic location fallbacks, non-struct symbol
+filtering in the declaration view, and the cycle-diagnostic predicate.
+Hand-built HIR, same technique and reason as the main spec.
+"""
+
+# @tag: unit, compiler, semantics, value_struct_layout
+
+use std.spec
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirField, HirStruct, HirTypeParam}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable, SymbolKind}
+use compiler.semantics.value_struct_layout.{
+    validate_value_struct_layouts, value_struct_layout_declarations_v1,
+    value_struct_layout_report, value_struct_layout_is_cycle_diagnostic,
+    value_struct_layout_cycle_is_fatal_for
+}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
+
+fn mk_span() -> Span:
+    Span(start: 0, end: 0, line: 1, col: 1, file: "synthetic", length: 0)
+
+fn i64_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: mk_span())
+
+fn named_type(sym: SymbolId) -> HirType:
+    HirType(kind: HirTypeKind.Named(sym, []), span: mk_span())
+
+fn named_type_args(sym: SymbolId, args: [HirType]) -> HirType:
+    HirType(kind: HirTypeKind.Named(sym, args), span: mk_span())
+
+fn nil_expr() -> HirExpr:
+    HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: i64_type(), span: mk_span())
+
+fn mk_field(name: text, type_: HirType) -> HirField:
+    HirField(
+        symbol: SymbolId(id: 0),
+        name: name,
+        type_: type_,
+        has_default: false,
+        default: nil_expr(),
+        visibility: Visibility.Public,
+        is_public: true,
+        is_volatile: false,
+        has_bits_attr: false,
+        bits_width: 0,
+        has_fixed_address: false,
+        fixed_address: 0,
+        span: mk_span()
+    )
+
+fn mk_struct(sym: SymbolId, name: text, fields: [HirField], type_params: [HirTypeParam]) -> HirStruct:
+    HirStruct(
+        symbol: sym,
+        name: name,
+        type_params: type_params,
+        fields: fields,
+        visibility: Visibility.Public,
+        is_public: true,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: mk_span(),
+        has_layout_attr: false,
+        layout_attr: LayoutAttr(layout_kind: TypeLayoutKind.Simple, is_packed: false),
+        has_platform_attr: false,
+        platform_has_error: false,
+        platform_has_warning: false,
+        platform_diagnostic_message: "",
+        platform_diagnostic_line: 0,
+        is_generic_template: false,
+        has_specialization_of: false,
+        specialization_of: "",
+        type_bindings: {}
+    )
+
+fn mk_type_param(sym: SymbolId, name: text) -> HirTypeParam:
+    HirTypeParam(symbol: sym, name: name, bounds: [], has_default: false, default: i64_type(), span: mk_span())
+
+fn mk_module(name: text, table: SymbolTable, structs: [HirStruct]) -> HirModule:
+    var structs_dict: Dict<SymbolId, HirStruct> = {}
+    for s in structs:
+        structs_dict[s.symbol] = s
+    HirModule(
+        name: name,
+        path: "synthetic/" + name + ".spl",
+        imports: [],
+        exports: [],
+        domain_blocks: [],
+        symbols: table,
+        functions: {},
+        classes: {},
+        structs: structs_dict,
+        enums: {},
+        bitfields: {},
+        traits: {},
+        impls: [],
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: [],
+        types: []
+    )
+
+describe "is_generic_template skip":
+    it "skips a template-marked struct that has no type parameters":
+        var table = SymbolTable.new()
+        val sym = table.define("TplSelf", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val base = mk_struct(sym, "TplSelf", [mk_field("next", named_type(sym))], [])
+        val template = HirStruct(..base, is_generic_template: true)
+        val hir = mk_module("tpl_skip", table, [template])
+        val declarations = value_struct_layout_declarations_v1(hir.name, hir.path, hir.structs, hir.symbols)
+        expect(declarations.structs[0].skip_template).to_equal(true)
+        expect(validate_value_struct_layouts(["tpl_skip"], [hir]).len()).to_equal(0)
+
+    it "marks a struct with type parameters as skipped and ignores generic-argument edges":
+        var table = SymbolTable.new()
+        val box_sym = table.define("GBox", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val param_sym = table.define("T", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val inner = mk_struct(box_sym, "GBox", [mk_field("value", named_type(param_sym))], [mk_type_param(param_sym, "T")])
+        val holder_sym = table.define("GHolder", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val holder = mk_struct(holder_sym, "GHolder", [mk_field("box", named_type_args(box_sym, [i64_type()]))], [])
+        val hir = mk_module("generic_args", table, [inner, holder])
+        val declarations = value_struct_layout_declarations_v1(hir.name, hir.path, hir.structs, hir.symbols)
+        expect(declarations.structs[0].skip_template).to_equal(true)
+        expect(declarations.structs[1].skip_template).to_equal(false)
+        expect(declarations.structs[1].fields[0].named_symbol_id).to_equal(-1)
+        val report = value_struct_layout_report(["generic_args"], [hir])
+        expect(report.errors.len()).to_equal(0)
+        expect(report.skipped_struct_edges).to_equal(0)
+
+describe "declaration view symbol filtering":
+    it "keeps only struct-kind symbols in struct_symbols":
+        var table = SymbolTable.new()
+        val struct_sym = table.define("OnlyStruct", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val fn_sym = table.define("some_fn", SymbolKind.Function, nil, mk_span(), Visibility.Public, false, nil)
+        val s = mk_struct(struct_sym, "OnlyStruct", [mk_field("v", i64_type())], [])
+        val hir = mk_module("sym_filter", table, [s])
+        val declarations = value_struct_layout_declarations_v1(hir.name, hir.path, hir.structs, hir.symbols)
+        expect(declarations.struct_symbols.contains(struct_sym.id)).to_equal(true)
+        expect(declarations.struct_symbols.contains(fn_sym.id)).to_equal(false)
+
+describe "diagnostic location fallbacks":
+    it "uses <unknown file> and no line suffix when the module path and span carry nothing":
+        var table = SymbolTable.new()
+        val sym = table.define("NoLoc", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val empty_span = Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0)
+        val field = HirField(..mk_field("next", named_type(sym)), span: empty_span)
+        val s = HirStruct(..mk_struct(sym, "NoLoc", [field], []), span: empty_span)
+        val hir = HirModule(..mk_module("no_loc", table, [s]), path: "")
+        val errors = validate_value_struct_layouts(["no_loc"], [hir])
+        expect(errors.len()).to_equal(1)
+        expect(errors[0]).to_equal(
+            "recursive by-value struct layout: NoLoc.next -> NoLoc [struct NoLoc in module no_loc at <unknown file>, field next at <unknown file>]")
+
+    it "prefers a non-empty span file and omits the line when it is zero":
+        var table = SymbolTable.new()
+        val sym = table.define("FileOnly", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val file_span = Span(start: 0, end: 0, line: 0, col: 0, file: "src/file_only.spl", length: 0)
+        val field = HirField(..mk_field("next", named_type(sym)), span: file_span)
+        val s = HirStruct(..mk_struct(sym, "FileOnly", [field], []), span: file_span)
+        val hir = mk_module("file_only", table, [s])
+        val errors = validate_value_struct_layouts(["file_only"], [hir])
+        expect(errors.len()).to_equal(1)
+        expect(errors[0]).to_contain("struct FileOnly in module file_only at src/file_only.spl, field next at src/file_only.spl]")
+
+describe "cycle predicate and severity":
+    it "recognizes only the cycle diagnostic prefix":
+        expect(value_struct_layout_is_cycle_diagnostic("recursive by-value struct layout: A.f -> A")).to_equal(true)
+        expect(value_struct_layout_is_cycle_diagnostic("internal error: x")).to_equal(false)
+        expect(value_struct_layout_is_cycle_diagnostic("")).to_equal(false)
+
+    it "downgrades only the exact value warning":
+        expect(value_struct_layout_cycle_is_fatal_for("warning")).to_equal(false)
+        expect(value_struct_layout_cycle_is_fatal_for("Warning")).to_equal(true)
+        expect(value_struct_layout_cycle_is_fatal_for("")).to_equal(true)

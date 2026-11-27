@@ -74,6 +74,8 @@ architecture rtl of rv32_exec_core_axi is
   signal csr_mtvec : unsigned(31 downto 0) := x"00000000";
   signal csr_mie : unsigned(31 downto 0) := x"00000000";
   signal csr_mip : unsigned(31 downto 0) := x"00000000";
+  signal csr_mcause : unsigned(31 downto 0) := x"00000000";
+  signal csr_mepc : unsigned(31 downto 0) := x"00000000";
   -- Divider FSM state (multi-cycle for div/divu/rem/remu)
   signal div_running_q : std_logic := '0';
   signal div_rem_q : std_logic := '0';
@@ -236,6 +238,7 @@ begin
     variable rs1 : natural range 0 to 31;
     variable rs2 : natural range 0 to 31;
     variable eff : unsigned(31 downto 0);
+    variable trap_taken : boolean;
     variable lane : natural range 0 to 3;
     variable hlane : natural range 0 to 1;
     variable load_addr : unsigned(31 downto 0);
@@ -293,6 +296,8 @@ begin
         csr_mtvec <= (others => '0');
         csr_mie <= (others => '0');
         csr_mip <= (others => '0');
+        csr_mcause <= (others => '0');
+        csr_mepc <= (others => '0');
         div_running_q <= '0';
         div_rem_q <= '0';
         div_neg_result_q <= '0';
@@ -430,6 +435,7 @@ begin
         do_store := false;
         div_started := false;
         uart_started := false;
+        trap_taken := false;
         pc_next := pc_q + 4;
         if pc_q(1) = '0' then
           h := w(15 downto 0);
@@ -497,7 +503,14 @@ begin
           end if;
 
           if h(1 downto 0) = "00" then
-            if h(15 downto 13) = "000" then
+            if h = "0000000000000000" then
+              -- All-zero compressed halfword: permanently illegal encoding
+              -- (C extension reserved). Trap so it is observable.
+              trap_taken := true;
+              csr_mcause <= x"00000002";
+              csr_mepc <= pc_q;
+              pc_q <= csr_mtvec;
+            elsif h(15 downto 13) = "000" then
               rd := 8 + to_integer(unsigned(h(4 downto 2)));
               r(rd) := r(2) + c_addi4spn_imm(h);
             elsif h(15 downto 13) = "010" then
@@ -546,8 +559,14 @@ begin
                   r(rd) := r(rs2);
                 end if;
               else
+                -- c.ebreak (rs2=0, rd=0): breakpoint trap
                 if rs2 = 0 then
-                  if rd /= 0 then
+                  if rd = 0 then
+                    trap_taken := true;
+                    csr_mcause <= x"00000003";
+                    csr_mepc <= pc_q;
+                    pc_q <= csr_mtvec;
+                  elsif rd /= 0 then
                     pc_next := r(rd);
                     r(1) := pc_q + 2;
                   end if;
@@ -781,9 +800,19 @@ begin
             when "1110011" => -- system / csr
               case ins(14 downto 12) is
                 when "000" =>
-                  -- ecall / ebreak: halt cleanly (hold pc)
-                  if ins(31 downto 20) = "000000000000" or ins(31 downto 20) = "000000000001" then
-                    pc_next := pc_q;
+                  -- ecall / ebreak: enter the M-mode trap vector
+                  if ins(31 downto 20) = "000000000000" then
+                    -- ecall from M-mode
+                    trap_taken := true;
+                    csr_mcause <= x"0000000B";
+                    csr_mepc <= pc_q;
+                    pc_q <= csr_mtvec;
+                  elsif ins(31 downto 20) = "000000000001" then
+                    -- ebreak: breakpoint trap
+                    trap_taken := true;
+                    csr_mcause <= x"00000003";
+                    csr_mepc <= pc_q;
+                    pc_q <= csr_mtvec;
                   end if;
                 when "001" | "010" | "011" | "101" | "110" | "111" =>
                   if rd /= 0 then
@@ -798,7 +827,13 @@ begin
                   end if;
                 when others => null;
               end case;
-            when others => null;
+            when others =>
+              -- Unknown opcode (incl. unimplemented AMOs): trap (illegal
+              -- instruction) so a runaway pc is observable.
+              trap_taken := true;
+              csr_mcause <= x"00000002";
+              csr_mepc <= pc_q;
+              pc_q <= csr_mtvec;
           end case;
         end if;
 
@@ -830,6 +865,9 @@ begin
           mem_we_q <= '1';
           mem_req_q <= '1';
           state_q <= S_STORE_W;
+        elsif trap_taken then
+          -- Decode arm already redirected pc_q to csr_mtvec; just refetch.
+          state_q <= S_FETCH;
         else
           pc_q <= pc_next;
           state_q <= S_FETCH;

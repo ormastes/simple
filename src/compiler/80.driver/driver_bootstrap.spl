@@ -15,7 +15,8 @@ use compiler.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path, compile_ir_to_object}
 use compiler.backend._MirToLlvm.asm_constraints_helpers.{llvm_bootstrap_string_globals_reset, llvm_bootstrap_string_globals_text}
 use compiler.backend.llvm_ir_builder.{llvm_ir_builder_handle}
-use compiler.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
+use compiler.backend.llvm_native_link.{NativeLinkOptions}
+use compiler.driver.driver_build.native_link_receipt_v1.{native_link_with_receipt_v1}
 use compiler.backend.backend_helpers.{compile_bootstrap_module_with_backend}
 use compiler.hir.hir_types.{SymbolTable, SymbolId}
 use compiler.core.interpreter.hashmap.{hm_hash_text}
@@ -23,7 +24,7 @@ use compiler.hir.hir_lowering.items.{bootstrap_hir_function_count, bootstrap_hir
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_lower_hir_globals_to_mir_module_for_target, bootstrap_lower_flat_hir_modules_to_mir_for_target, bootstrap_set_entry_hir_module, bootstrap_clear_entry_hir_module, bootstrap_lower_extra_hir_module_to_mir_for_target, bootstrap_function_value_names_reset, bootstrap_register_function_value_module, bootstrap_register_fn_ret_types_module}
 use compiler.mir_opt.{ssa_alloca_transform_blocks}
 use compiler.common.driver_core_types.{CompileResult}
-use driver_types.{CompileContext, CompileOptions}
+use compiler.driver.driver_types.{CompileContext, CompileOptions}
 use compiler.driver.driver_log_helpers.{log_phase, log_error}
 use compiler.driver.driver_source_loading.{_driver_module_name_from_path, _driver_physical_source_key}
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
@@ -39,7 +40,7 @@ pub fn bootstrap_native_opt_level(ctx: CompileContext, is_release: bool) -> i64:
     # optimizing a build the user asked to leave unoptimized.
     match ctx.options.opt_level:
         case Some(level): return level
-        case nil: pass_do_nothing
+        case None: pass_do_nothing
     if is_release:
         return 3
     0
@@ -56,7 +57,7 @@ pub fn bootstrap_llvm_opt_level(opt_level_i64: i64) -> OptimizationLevel:
 
 pub fn bootstrap_llvm_ir_path_from_object_path(obj_path: text) -> text:
     if obj_path.ends_with(".o"):
-        obj_path.slice(0, obj_path.len() - 1) + "ll"
+        obj_path.slice(0, obj_path.byte_len() - 1) + "ll"
     else:
         obj_path + ".ll"
 
@@ -269,9 +270,9 @@ pub fn bootstrap_driver_stub_mir_function(symbol: SymbolId, name: text) -> MirFu
         span: nil,
         generic_params: [],
         is_generic_template: false,
-        specialization_of: nil,
+        specialization_of: None,
         type_bindings: {},
-        layout_phase: nil,
+        layout_phase: None,
         is_kernel: false,
         gpu_target: "",
         gpu_backend_order: "",
@@ -359,10 +360,11 @@ fn bootstrap_emit_llvm_trailer(translator: MirToLlvm):
         translator.builder.emit("")
         translator.builder.emit("; String constants")
         translator.builder.emit(string_globals)
+    llvm_bootstrap_string_globals_reset()
 
 pub fn bootstrap_real_llvm_translator() -> MirToLlvm:
     """Create an armed translator for the direct-emit bootstrap LLVM paths."""
-    var translator = MirToLlvm.create("app.cli.bootstrap_main", CodegenTarget.Host, nil)
+    var translator = MirToLlvm.create("app.cli.bootstrap_main", CodegenTarget.Host, None)
     # Direct emit bypasses translate_module_with_entry_policy, which normally
     # arms and clears the accumulator read by bootstrap_emit_llvm_trailer.
     translator.bootstrap_string_globals_active = true
@@ -372,7 +374,7 @@ pub fn bootstrap_real_llvm_translator() -> MirToLlvm:
 pub fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> CompileResult:
     """Emit LLVM for bootstrap MIR functions from the local driver module instance."""
     log_phase("aot:bootstrap_real_llvm:start")
-    val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.Host, nil)
+    val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.Host, None)
     val temp_obj = llvm_bootstrap_last_object_path()
     val temp_ir = bootstrap_llvm_ir_path_from_object_path(temp_obj)
     var translator: MirToLlvm = bootstrap_real_llvm_translator()
@@ -419,7 +421,7 @@ pub fn bootstrap_emit_real_llvm_module_object(module: MirModule, output: text, o
     log_phase("aot:bootstrap_real_llvm_module:start")
     if module.functions.keys().len() == 0:
         return CompileResult.CodegenError("Bootstrap module LLVM has no MIR functions")
-    val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.Host, nil)
+    val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.Host, None)
     val temp_obj = llvm_bootstrap_last_object_path()
     val temp_ir = bootstrap_llvm_ir_path_from_object_path(temp_obj)
     var translator: MirToLlvm = bootstrap_real_llvm_translator()
@@ -542,7 +544,7 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
         stage4_compiler_hash: native_build_compiler_identity(),
         target_triple: ctx.native_target
     )
-    match link_llvm_native([obj_path], output, llvm_opts):
+    match native_link_with_receipt_v1([obj_path], output, llvm_opts):
         case Ok(_):
             CompileResult.Success(output)
         case Err(e):
@@ -609,7 +611,7 @@ pub fn bootstrap_compile_context_to_native_local(ctx: CompileContext, backend_na
         stage4_compiler_hash: native_build_compiler_identity(),
         target_triple: ctx.native_target
     )
-    match link_llvm_native([obj_path], output, llvm_opts):
+    match native_link_with_receipt_v1([obj_path], output, llvm_opts):
         case Ok(_):
             CompileResult.Success(output)
         case Err(e):

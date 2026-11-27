@@ -1,0 +1,65 @@
+# Deterministic value fixtures, never observations of a launched process.
+use std.common.task_runner.contracts.TaskRunnerAttemptV1
+use std.common.task_runner.execution_identity_v2.{TaskRunnerContainerAttemptV2}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerExecutionPlanV2,
+    container_scope_fence_id_v2}
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeCommandV1,
+    RuntimeStateV1, RuntimeOperationV1}
+use std.common.contracts.container.execution_evidence_v2.{ContainerExecutionEvidenceV2,
+    ContainerAbsenceReceiptV2, container_execution_evidence_v2,
+    container_runtime_query_digest_v2, container_runtime_observation_digest_v2}
+
+# These are synthetic provider command observations. Their canonical digests
+# are computed by the common owner; they establish codec fixtures, not that
+# a container, wait query or absence query actually ran.
+fn container_execution_fixture_v2(exit_code: i64 = 0, attempt: i64 = 1,
+        request_digest: text = "") -> ContainerExecutionEvidenceV2:
+    val scope = ContainerHostScopeV2(physical_host_id: "host_a", service_scope_id: "service_a",
+        boot_id: "boot_a", provider_generation: 3, native_machine_id: "machine_a",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot_a")
+    val request_binding = if request_digest == "": "a".repeat(64) else: request_digest
+    val plan = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: "task_a",
+        attempt: attempt, operation_id: "operation_a", request_digest: request_binding,
+        physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id,
+        boot_id: scope.boot_id, provider_generation: scope.provider_generation,
+        native_machine_id: scope.native_machine_id, continuity_mode: scope.continuity_mode,
+        continuity_id: scope.continuity_id)
+    val runtime = RuntimeIdentityV1(pod_uid: "task_a", attempt: attempt, provider_generation: 3,
+        operation_id: "operation_a", engine: "podman", native_id: "b".repeat(64),
+        node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    val wait = RuntimeOperationV1(status: "ok", operation: "wait",
+        command: RuntimeCommandV1(operation: "wait", program: "podman", args: ["wait", runtime.native_id]),
+        state: RuntimeStateV1(phase: "exited", identity: runtime, exit_code: exit_code, reason: "exited"),
+        exit_code: 0, stdout: str(exit_code) + "\n", stderr: "", reason: "exited")
+    val query = RuntimeCommandV1(operation: "absence", program: "podman",
+        args: ["inspect", "--type", "container", runtime.native_id])
+    val observation = RuntimeOperationV1(status: "ok", operation: "absence", command: query,
+        state: RuntimeStateV1(phase: "destroyed", identity: runtime, exit_code: exit_code, reason: "absent"),
+        exit_code: 1, stdout: "", stderr: "no such container", reason: "exact-native-object-absent")
+    val absence = ContainerAbsenceReceiptV2(backend: plan.backend, scope: scope, identity: runtime,
+        request_digest: plan.request_digest, provider_identity_digest: "c".repeat(64),
+        observed_unix_ms: 1000, query_digest: container_runtime_query_digest_v2(query).unwrap(),
+        evidence_digest: container_runtime_observation_digest_v2(observation).unwrap(),
+        proof_kind: "exact-native-object-absence-v1")
+    container_execution_evidence_v2(plan, wait, absence).unwrap()
+
+fn native_attempt_fixture_v2(group: text = "group_a", attempt: i64 = 1,
+        status: text = "passed") -> TaskRunnerAttemptV1:
+    TaskRunnerAttemptV1(identity_digest: "1".repeat(64), group_id: group, attempt: attempt,
+        mode: "isolated", pid: 41, process_generation: 99, status: status,
+        reason: if status == "crashed": "process-signal" else: "",
+        exit_code: if status == "crashed": 139 else: 0, task_exit_code: 0,
+        signal_number: if status == "crashed": 11 else: 0, tree_reaped: true,
+        result_validated: status == "passed", stdout_digest: "2".repeat(64),
+        stderr_digest: "3".repeat(64), result_digest: if status == "passed": "4".repeat(64) else: "",
+        transport_execution_digest: "5".repeat(64))
+
+fn container_attempt_fixture_v2(execution: ContainerExecutionEvidenceV2,
+        group: text = "group_a") -> TaskRunnerContainerAttemptV2:
+    TaskRunnerContainerAttemptV2(identity_digest: "1".repeat(64), group_id: group,
+        attempt: execution.execution.attempt, mode: "isolated", status: "passed",
+        reason: "", task_exit_code: 0, result_validated: true,
+        stdout_digest: "2".repeat(64), stderr_digest: "3".repeat(64),
+        result_digest: "4".repeat(64), execution: execution)
+
+export native_attempt_fixture_v2, container_attempt_fixture_v2, container_execution_fixture_v2

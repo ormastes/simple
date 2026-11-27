@@ -1,0 +1,80 @@
+#!/bin/sh
+# Selftest: the aarch64 Limine kernel build and the arm64 EFI real-firmware
+# boot check must exit NON-ZERO whenever nothing was produced or checked.
+#
+# Bug: simpleos_aarch64_lane_rc0_report_2026-11-15. Both scripts were reported
+# as exiting 0 with no artifact. Measured: run directly they exit 1 and 2; the
+# 0 came from the caller recipe `wsl ... bash -lc '...; echo rc=$?'`, where the
+# outer shell expands `$?` (to 0) before the inner command runs. This test pins
+# the scripts' own exit status so a real fail-open regression is caught.
+# Every exit status is read directly on the line after the command, never
+# through a pipe.
+set -u
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT INT TERM
+fails=0
+checked=0
+
+expect_nonzero() {
+    label=$1; rc=$2
+    checked=$((checked + 1))
+    if [ "$rc" -eq 0 ]; then
+        printf 'FAIL %s: exited 0 with nothing produced/checked\n' "$label" >&2
+        fails=$((fails + 1))
+    else
+        printf 'ok   %s: rc=%s\n' "$label" "$rc"
+    fi
+}
+
+# 1. Compiler that claims success but writes no ELF.
+cat >"$WORK/fake-ok" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+# 2. Compiler that fails (the cranelift AOT-module refusal shape).
+cat >"$WORK/fake-fail" <<'EOF'
+#!/bin/sh
+echo "Failed to create Cranelift AOT module" >&2
+exit 1
+EOF
+# 3. Compiler that writes an empty ELF and exits 0.
+cat >"$WORK/fake-empty" <<'EOF'
+#!/bin/sh
+while [ $# -gt 0 ]; do [ "$1" = "-o" ] && { : >"$2"; exit 0; }; shift; done
+exit 0
+EOF
+chmod +x "$WORK/fake-ok" "$WORK/fake-fail" "$WORK/fake-empty"
+
+for fake in fake-ok fake-fail fake-empty; do
+    SIMPLE_BIN="$WORK/$fake" OUT_DIR="$WORK/out-$fake" \
+        sh "$REPO_ROOT/scripts/os/build-simpleos-aarch64-limine-kernel.shs" \
+        >"$WORK/$fake.log" 2>&1
+    rc=$?
+    expect_nonzero "kernel build with $fake" "$rc"
+    if [ -e "$WORK/out-$fake/kernel.elf" ] && [ -s "$WORK/out-$fake/kernel.elf" ]; then
+        printf 'FAIL kernel build with %s: left a non-empty kernel.elf\n' "$fake" >&2
+        fails=$((fails + 1))
+    fi
+done
+
+# 4. Boot check with no kernel ELF: must report ERROR and exit non-zero.
+KERNEL_ELF="$WORK/missing/kernel.elf" \
+    sh "$REPO_ROOT/scripts/check/check-simpleos-arm64-efi-real-firmware-boot.shs" \
+    >"$WORK/boot.log" 2>&1
+rc=$?
+expect_nonzero "efi real-firmware boot check without kernel" "$rc"
+if [ "$rc" -eq 2 ] && ! grep -q 'ERROR — nothing was checked' "$WORK/boot.log"; then
+    printf 'FAIL boot check: rc=2 without the ERROR verdict line\n' >&2
+    fails=$((fails + 1))
+fi
+
+if [ "$checked" -eq 0 ]; then
+    printf 'ERROR — nothing was checked\n' >&2
+    exit 2
+fi
+if [ "$fails" -ne 0 ]; then
+    printf 'FAIL — %s of %s case(s) fail open\n' "$fails" "$checked" >&2
+    exit 1
+fi
+printf 'PASS — %s case(s) checked, all exit non-zero\n' "$checked"

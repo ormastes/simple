@@ -1,0 +1,52 @@
+# @req ORCH-02 HOST-02
+# Pure installed-carrier integrity, not a signed Host installation or live owner.
+# NOT_RUN: no native handle, journal completion or Engine success is fabricated.
+use std.common.contracts.container.exec_installed_v3.*
+use std.common.contracts.orchestration.host_exec_control_installation_v3.host_exec_control_installation_intent_digest_v3
+use test.fixtures.container.linux_engine_exec_fixture_v3.*
+
+describe "completed installation carrier preserves signed identity domains":
+    it "matches the original installation artifact scope and parent baseline":
+        step("matches the original installation artifact scope and parent baseline")
+        val installed = linux_engine_exec_installation_fixture_v3()
+        val admission = linux_engine_exec_admission_fixture_v3()
+        expect(container_exec_installed_match_v3(installed, admission).unwrap()).to_equal(true)
+        expect(installed.intent.provider_identity_digest == admission.provider_identity_digest).to_equal(false)
+
+    it "rejects changed artifact and policy bytes even when the original scope remains":
+        step("rejects changed artifact and policy bytes even when the original scope remains")
+        val original = linux_engine_exec_installation_fixture_v3()
+        val admission = linux_engine_exec_admission_fixture_v3()
+        var changed = original
+        changed.artifact_digest = "0".repeat(64)
+        expect(container_exec_installed_match_v3(changed, admission).is_err()).to_equal(true)
+        changed = original
+        changed.intent.control_policy_bytes = changed.intent.control_policy_bytes + " "
+        expect(container_exec_installed_match_v3(changed, admission).is_err()).to_equal(true)
+        changed = original
+        changed.intent.control_policy_digest = "0".repeat(64)
+        expect(container_exec_installed_match_v3(changed, admission).is_err()).to_equal(true)
+
+    it "rejects a self-consistent artifact for another service generation or parent provider":
+        step("rejects a self-consistent artifact for another service generation or parent provider")
+        val original = linux_engine_exec_installation_fixture_v3()
+        val admission = linux_engine_exec_admission_fixture_v3()
+        var changed = original
+        changed.intent.scope.service_scope_id = "other-service"
+        changed.artifact_digest = host_exec_control_installation_intent_digest_v3(changed.intent).unwrap()
+        expect(container_exec_installed_match_v3(changed, admission).is_err()).to_equal(true)
+        changed = original
+        changed.intent.scope.provider_generation = changed.intent.scope.provider_generation + 1
+        changed.artifact_digest = host_exec_control_installation_intent_digest_v3(changed.intent).unwrap()
+        expect(container_exec_installed_match_v3(changed, admission).is_err()).to_equal(true)
+        changed = original
+        changed.intent.provider_identity_digest = admission.provider_identity_digest
+        changed.artifact_digest = host_exec_control_installation_intent_digest_v3(changed.intent).unwrap()
+        expect(container_exec_installed_match_v3(changed, admission).is_err()).to_equal(true)
+
+    it "does not equate an observed control pin with the original parent CLI baseline":
+        step("does not equate an observed control pin with the original parent CLI baseline")
+        val installed = linux_engine_exec_installation_fixture_v3()
+        var admission = linux_engine_exec_admission_fixture_v3()
+        admission.intent.parent_provider_identity_digest = admission.provider_identity_digest
+        expect(container_exec_installed_match_v3(installed, admission).is_err()).to_equal(true)

@@ -51,6 +51,8 @@ pub(super) fn eval_builtin(
                 host_gpu_lane::rt_host_gpu_queue_emit(lane_code, 1, 0, 0);
             }
 
+            let _fn_return_guard = crate::interpreter::push_current_fn_return_type(None);
+            let _expected_target_guard = crate::interpreter::push_expected_target_type(None);
             let body_result: Result<Value, CompileError> = match &args[args.len() - 1].value {
                 Expr::Lambda { body, .. } => match body.as_ref() {
                     Expr::DoBlock(statements) => {
@@ -176,6 +178,42 @@ pub(super) fn eval_builtin(
             let value = std::env::var(key.as_str()).unwrap_or_default().to_ascii_lowercase();
             Ok(Some(Value::Bool(matches!(value.as_str(), "1" | "true" | "yes" | "on"))))
         }
+        // Callable spelling of the assertion statement: `assert(COND[, MSG])`.
+        //
+        // The lexer keeps `assert(` an ordinary identifier call (so a user
+        // `fn assert` stays callable; see test/fixtures/compiler/
+        // native_callable_assert_shadow.spl), and `evaluate_call`'s Priority-2
+        // gate only reaches this arm when no user `fn assert` exists. A local
+        // *value* named `assert` (a lambda in scope) is left to the ordinary
+        // callable-value path below, mirroring the HIR gate in
+        // hir/lower/stmt_lowering.rs (`ctx.lookup("assert")`). The pure-Simple
+        // front end desugars both `assert COND[, MSG]` and `assert(COND[, MSG])`
+        // to the single `__assert` builtin (parser_stmts.spl), where MSG is any
+        // expression evaluated only on failure; this arm is the interpreter
+        // half of that parity (the keyword form is `Node::Assert`).
+        "assert" => {
+            if env.get("assert").is_some() {
+                return Ok(None);
+            }
+            let Some(condition) = args.first() else {
+                return Err(assert_call_shape_error());
+            };
+            if args.len() > 2 || args.iter().any(|arg| arg.name.is_some()) {
+                return Err(assert_call_shape_error());
+            }
+            let value = evaluate_expr(&condition.value, env, functions, classes, enums, impl_methods)?;
+            if super::super::interpreter_control::is_condition_present(&condition.value, &value) {
+                return Ok(Some(Value::Nil));
+            }
+            // Evaluate the message only on failure, as `__assert` does.
+            let message = match args.get(1) {
+                Some(msg) => {
+                    Some(evaluate_expr(&msg.value, env, functions, classes, enums, impl_methods)?.to_display_string())
+                }
+                None => None,
+            };
+            Err(super::super::interpreter_control::assert_failure(message.as_deref(), &value))
+        }
         "len" => {
             let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             match val {
@@ -183,7 +221,7 @@ pub(super) fn eval_builtin(
                 Value::ByteArray(a) | Value::FrozenByteArray(a) => Ok(Some(Value::Int(a.len() as i64))),
                 Value::Tuple(t) => Ok(Some(Value::Int(t.len() as i64))),
                 Value::Dict(d) => Ok(Some(Value::Int(crate::interpreter::module_dict_len(&d) as i64))),
-                Value::Str(s) => Ok(Some(Value::Int(s.len() as i64))),
+                Value::Str(s) => Ok(Some(Value::Int(crate::interpreter::text_cp_len(&s) as i64))),
                 _ => {
                     let ctx = ErrorContext::new()
                         .with_code(codes::INVALID_OPERATION)
@@ -562,6 +600,7 @@ pub(super) fn eval_builtin(
                 body, env: captured, ..
             } = val
             {
+                let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                 let mut captured_clone = Env::clone(&captured);
                 GENERATOR_YIELDS.with(|cell| *cell.borrow_mut() = Some(Vec::new()));
                 let _ = evaluate_expr(&body, &mut captured_clone, functions, classes, enums, impl_methods);
@@ -668,12 +707,11 @@ pub(super) fn eval_builtin(
             match val {
                 Value::Float(f) => Ok(Some(Value::Float(f))),
                 Value::Int(n) => Ok(Some(Value::Float(n as f64))),
-                Value::Str(s) => s.parse::<f64>().map(Value::Float).map(Some).map_err(|_| {
-                    let ctx = ErrorContext::new()
-                        .with_code(codes::TYPE_MISMATCH)
-                        .with_help("string must contain a valid float");
-                    CompileError::semantic_with_context(format!("cannot parse '{}' as f64", s), ctx)
-                }),
+                // Total, like native `T(text)` (`rt_string_to_float` +
+                // `rt_value_as_float`) and `text.to_float()`: an unparsable
+                // text is 0.0, not an error
+                // (float_parse_call_failure_value_differs_from_seed_2026-10-10).
+                Value::Str(s) => Ok(Some(Value::Float(s.trim().parse::<f64>().unwrap_or(0.0)))),
                 _ => {
                     let ctx = ErrorContext::new()
                         .with_code(codes::TYPE_MISMATCH)
@@ -684,6 +722,33 @@ pub(super) fn eval_builtin(
                     ))
                 }
             }
+        }
+        // Narrow-width conversion calls `i32(x)`, `u8(text)`, ...: native lowers
+        // `T(x)` (HirExprKind.ConvertCall) to an `as T` cast, parsing text
+        // first with the same total integer parse as `i64(text)`. They were
+        // `function not found` here
+        // (float_parse_call_failure_value_differs_from_seed_2026-10-10).
+        "i8" | "i16" | "i32" | "u8" | "u16" | "u32" | "u64" if args.len() == 1 && args[0].name.is_none() => {
+            let val = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
+            let raw = match val {
+                Value::Int(n) => n,
+                Value::UInt { value, .. } => value as i64,
+                Value::Float(f) => f as i64,
+                Value::Float32(f) => f as i64,
+                Value::Str(s) => parse_int_lenient(&s),
+                Value::Bool(b) => i64::from(b),
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::TYPE_MISMATCH)
+                        .with_help(format!("{name}() requires an int, float, string, or bool"));
+                    return Err(CompileError::semantic_with_context(
+                        format!("cannot convert value to {name}"),
+                        ctx,
+                    ));
+                }
+            };
+            let ty = simple_parser::ast::Type::Simple(name.to_string());
+            Ok(Some(crate::interpreter::coerce_to_declared_type(Value::Int(raw), Some(&ty))))
         }
         "str" | "string" => {
             let val = eval_arg(
@@ -725,6 +790,18 @@ pub(super) fn eval_builtin(
 /// used by both compiled backends, so this seed interpreter agrees with
 /// compiled mode and with the pure-Simple flat-AST interpreter
 /// (eval_builtins.spl's `eval_int_parse_lenient`).
+/// Arity/shape error for the callable `assert(...)` spelling. Same wording as
+/// the pure-Simple parser's rejection (parser_stmts.spl, `assert` desugar).
+fn assert_call_shape_error() -> CompileError {
+    let ctx = ErrorContext::new()
+        .with_code(codes::INVALID_OPERATION)
+        .with_help("use `assert(condition)` or `assert(condition, message)`");
+    CompileError::semantic_with_context(
+        "assert requires a condition and at most one message".to_string(),
+        ctx,
+    )
+}
+
 fn parse_int_lenient(s: &str) -> i64 {
     let t = s.trim();
     let mut chars = t.chars().peekable();
@@ -753,5 +830,28 @@ fn parse_int_lenient(s: &str) -> i64 {
         -result
     } else {
         result
+    }
+}
+
+#[cfg(test)]
+mod conversion_call_tests {
+    //! float_parse_call_failure_value_differs_from_seed_2026-10-10: `f64(text)`
+    //! is total (unparsable -> 0.0) and `i8/i16/i32/u8/...(x)` are callable.
+    use crate::interpreter::evaluate_module;
+    use simple_parser::Parser;
+
+    fn run(src: &str) -> i32 {
+        evaluate_module(&Parser::new(src).parse().expect("parse").items).expect("evaluate")
+    }
+
+    #[test]
+    fn f64_of_unparsable_text_is_zero() {
+        assert_eq!(run("fn probe() -> i64:\n    if f64(\"x\") == 0.0:\n        return 1\n    0\nmain = probe()\n"), 1);
+    }
+
+    #[test]
+    fn narrow_int_conversion_calls_parse_and_wrap() {
+        assert_eq!(run("main = i32(\"5\") + i8(\"7\") + i16(\"9\") + u8(\"200\")\n"), 221);
+        assert_eq!(run("main = i8(300)\n"), 44);
     }
 }

@@ -1,0 +1,539 @@
+# Node-tree storage for AST / HIR / MIR: measure, then choose per attribute
+
+Status: design (phase B of the node-storage lane, 2026-11-13); phase C library landed
+(§7.1), driver adoption C.2 open (§7.2). Plan:
+`doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md`
+(§3, §5, §6, §8.4, §12.3). Phase A landed the selection surface: the storage
+mechanism of every `@node_tree` attribute is chosen by a source tag or an SDN
+rule through the one W1 resolver (`direct | column | sparse_hash`), and the
+generated view carries `schema_digest` (logical) and `physical_plan_digest`
+(mechanism per attribute). This note decides WHAT the mechanisms should be for
+the production trees and HOW a frozen tree is shared, from measurement, and
+fixes the write-once / async contract the later phases implement.
+
+Default rule for every phase that follows: the CURRENT layout stays the default
+per node family until before/after evidence (bytes per node, phase RSS, wall
+time within ~2% or a win, value-identical HIR/MIR dumps on a fixture set) says
+otherwise. A switch is an SDN rule row, not a code edit.
+
+## 1. Measurements (interpreter lane, Rust seed)
+
+Executing binary (the `simple test` wrapper execs a generation binary):
+`src/compiler_rust/target/bootstrap.generations/8ea37491fb8e95ca0467aefd707ed0189260b724f6d9dc8dcee4b9092875b511-d59cc6238831a991b5a02de7640089dede84ccdb40166c1e3f65667640e467bc/simple`
+(119,570,696 bytes, 2026-11-05 18:12:30), worktree at `f78d0d7bc9b`, box
+shared with a 20-40 GiB census. Probe (committed, perf lane):
+
+```
+SIMPLE_PERF_PROBES=1 systemd-run --user --scope -q -p MemoryMax=8G \
+  src/compiler_rust/target/bootstrap/simple test \
+  test/05_perf/compiler/data/node_storage_footprint_probe_spec.spl      # ~8 min
+```
+
+Per module it parses into the flat pools, boxes a `ParserModule` with
+`flat_ast_to_module`, lowers with `HirLowering.lower_module`, encodes the HIR
+with `hir_module_encode` (one scalar per line, position-independent) and lowers
+to MIR. RSS is `memory_usage()` (`/proc` RSS, OS truth) — `rt_heap_live_bytes`
+reads a constant here because seed interpreter values live outside the hosted
+heap registry. AST nodes = `expr_count() + stmt_count()`; MIR size =
+instructions + terminators.
+
+### 1.1 Results
+
+Output of the committed probe (one process, rows in run order; RSS deltas in
+bytes between the phase boundaries; `(reuse)` = negative delta, the allocator
+recycled memory freed by `reset_all_pools()`):
+
+| module | src lines | AST nodes | HIR fns | HIR blob bytes | MIR insts | Δ pools | Δ bridge | Δ HIR | Δ MIR | bridge B/node | HIR B/node | blob B/node | MIR B/inst |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `00.common/data/data_schema_resolver.spl` | 514 | 1,973 | 27 | 349,431 | 3,223 | (reuse) | 466,944 | 3,575,808 | 18,112,512 | 236 | 1,812 | 177 | 5,619 |
+| `20.hir/hir_lowering/attr_access_sites.spl` | 188 | 638 | 12 | 117,314 | 934 | (reuse) | 12,288 | (reuse) | (reuse) | 19 | — | 183 | — |
+| `50.mir/mir_lowering_stmts.spl` (cold) | 5,513 | 15,235 | 99 | 2,391,922 | 21,077 | 52,772,864 | 20,008,960 | 23,564,288 | 113,127,424 | 1,313 | 1,546 | 157 | 5,367 |
+| `50.mir/mir_lowering_stmts.spl` (repeat) | 5,513 | 15,235 | 99 | 2,391,922 | 21,077 | (reuse) | 1,060,864 | 40,259,584 | 64,720,896 | 69 | 2,642 | 157 | 3,070 |
+
+Supplementary: a scratch split probe (same binary, `reset_all_pools -> parse ->
+bridge -> HIR` only, no MIR; three runs of the large module) read bridge
+20.5 / 22.7 / 23.2 MB (1,346 / 1,487 / 1,526 B per node) against HIR
+28.8 / 44.5 / 46.4 MB, i.e. a bridge share of 42 / 34 / 33 % of bridge+HIR; an
+earlier scratch run of the same pipeline read MIR at 2.0-2.2 KB per
+instruction, so the MIR figure is allocator-state dependent (2.0-5.6 KB).
+
+Per AST node on the large module: **bridge 1.3-1.5 KB on a cold heap**
+(hidden by reuse on repeats: 69 B), **HIR 1.5-2.6 KB of RSS**, **HIR blob
+157 B (~33 scalars)**. Cold-row bridge share of the bridge+HIR peak: 46 %
+(split probe: 33-42 %).
+
+### 1.2 Reading the numbers
+
+- **RSS on a non-shrinking interpreter heap is an upper bound**; "(reuse)"
+  marks rows where the allocator recycled memory freed by `reset_all_pools()`
+  (negative deltas). Repeated rows are the per-phase estimate; the cold `pools`
+  row (~4.1 KB/node) includes one-time module loading.
+- **The allocator-independent metric is the HIR blob: 150-183 B per AST node.**
+  A u32 column arena with a span table is a small multiple of 4 B per scalar,
+  i.e. under half the text blob and an order of magnitude under the boxed tree
+  (~2-3 KB/node). HIR is what a MIR worker must hold per module — the hirres
+  lane's 20-25 GiB of promoted HIR across workers is this number times fan-out.
+- **The bridge is a peak cost, not a resident one** (cold heap: 20 MB, 1.3 KB per AST node on the 5.5k-line module; invisible on a warm heap). The streaming driver calls
+  `ast_reset()` and `self.ctx.modules = {}` right after HIR lowering
+  (`src/compiler/80.driver/driver_hir_pipeline_lowering.spl:1641-1643`); the
+  non-streaming path keeps `ctx.modules: Dict<text, ParserModule>`
+  (`driver_types.spl:436`). So "every node is paid twice" holds for peak RSS
+  during lowering (pools + boxed tree + HIR live together) and for the
+  non-streaming path only.
+- **MIR counts include runtime-fallback placeholders** (modules are lowered
+  without import surfaces; 24 `[mir-lower] WARNING` on the first module);
+  ratios hold, absolute MIR sizes are not production figures.
+- **Phase C conclusion:** do not rewrite the ~10k lines of HIR lowering that
+  consume `Expr`/`Stmt`. Shrink the bridge: box one function's tree at a time
+  (`flat_bootstrap_function_at` already converts on demand via
+  `convert_decl_fn(decl_idx)`; `flat_bootstrap_body_at` is still a stub
+  returning an empty Block), lower it, release it. Expected peak saving ≈ the
+  cold-row bridge delta minus one function (~20 MB on a 5.5k-line module, 1.3-1.5 KB
+  per AST node), behind a resolver rule with the whole-module bridge as the
+  default until the native lane measures it.
+
+### 1.3 What the native lane must measure (quiet box, owner-scheduled)
+
+Interpreter RSS is dominated by boxed `Value`s; the native number decides the
+layout. Record both binaries (`readlink -f` + `stat -c '%s %y'`):
+
+```
+# per-phase RSS of a real build, before/after a layout switch (same sha, own cache scope)
+SIMPLE_CACHE_SCOPE=nodestore-a /usr/bin/time -f 'wall=%e rss_max_kb=%M' \
+  bin/simple build native src/app/cli/main.spl 2>&1 | tail -3
+# MIR shard workers: total RSS = sum of /proc/<pid>/status VmRSS over the process tree,
+# sampled by a PROPOSED gate scripts/check/check-process-tree-rss.shs (NOT present yet) while
+# SIMPLE_MIR_SHARDING=1 SIMPLE_MIR_SHARD_INTERFACE_HIR=1 bin/simple build native ...
+# value identity: HIR codec blobs and MIR dumps of the fixture set must be byte-identical
+bin/simple test test/02_integration/compiler/data/ast_node_pool_pilot_spec.spl
+```
+
+## 2. How other compilers store trees (survey)
+
+| Compiler | Node identity | Layout | Payload encoding | Interning | Rare attributes | Lifetime |
+|---|---|---|---|---|---|---|
+| rustc | `newtype_index!` u32 ids (`HirId`, `DefId`, `Local`, `BasicBlock`); `IndexVec<I, T>` | HIR in a `TypedArena` per crate; MIR `Body` = `IndexVec` of blocks (AoS per block, SoA across locals/decls) | enums with boxed children; `Span` is 8 bytes, large spans interned | `Symbol` (u32), `Ty<'tcx>` interned by pointer identity | side tables keyed by `HirId`/`DefId` (`TypeckResults`, spans, attrs) | query system (memoized, Salsa-like); `Steal<T>` moves MIR between passes; AST dropped after lowering |
+| Clang | pointers into `ASTContext` | `BumpPtrAllocator` arena, nodes `new (Context)`; variable-length payload via `TrailingObjects` | `SourceLocation` u32; `QualType` = pointer + qualifier bits; bit-packed `Stmt`/`Decl` headers | `IdentifierTable`; types uniqued in `FoldingSet`s | side maps on `ASTContext` (comments, attrs) | whole-TU arena, freed at TU end |
+| LLVM IR | pointers; intrusive `ilist` | `BumpPtrAllocator`, `SmallVector` inline storage | `Use` list, `Value` subclass data bits | `Type`/`Constant`/`MDNode` uniqued in `LLVMContext`, `StringMap` | metadata attachments as side tables | module freed after codegen |
+| Swift | pointers into `ASTContext` | permanent + solver arenas; SIL has its own module allocator | `SourceLoc` from a buffer pointer; `TypeBase` bits | `Identifier`; canonical types uniqued | request evaluator caches | request evaluator (Salsa-like) with cycle diagnostics; solver arena freed per expression |
+| Zig | `Node.Index`/`Inst.Index` u32 | `MultiArrayList` SoA (tags, main_token, data), `extra_data: []u32` for variable payloads | ZIR/AIR `Inst` = 1-byte tag + 8-byte data, overflow in `extra` | `string_bytes`, `InternPool` for types/values | per-decl side tables | ZIR per declaration, freed after Sema; incremental dependency graph |
+
+What is common: 32-bit indices instead of pointers (position independent,
+half the size, trivially serialisable); contiguous arenas per phase, freed as
+a unit; tag + small fixed payload with an `extra` array for the long tail;
+interned strings/types compared by id; rare facts in side tables keyed by node
+id; later-phase results computed by memoised queries that never mutate the
+frozen tree. What differs is AoS vs SoA, and every one of them chose it per
+hot/cold access pattern, not globally.
+
+## 3. Target shape for Simple's trees
+
+Starting point: the production AST is already flat SoA pools indexed by `i64`
+node id (`_AstExpr/nodes.spl`, `FlatPoolState`), bridged into a boxed
+`ParserModule` for HIR lowering (§1.2); HIR and MIR are boxed enum trees with a
+position-independent line-blob codec decoded per module (`hir_cache_load`), so
+every MIR worker holds its own copy; the `@node_tree` view already selects
+`direct | column | sparse_hash` per attribute (Phase A).
+
+Target, per phase, each step behind the resolver with the current layout as the
+default until measured:
+
+1. Node ids are `i64` today and stay the public type; the arena may store them
+   as u32 slots (plan §5: identity is separate from physical ordinal). Spans
+   become one u32 index into a span table (the AST already has
+   `span_pool_*`), not four i64 fields per node.
+2. Hot attributes (tag, span, left/right, type id) are `column`s of the family
+   arena; cold/rare attributes (doc comment, attributes, inferred type,
+   diagnostics, generic instantiation lists) are `sparse_hash` side tables.
+   Which is which is decided by the access census the attr-access side table
+   already records (`attr_access_sites.spl`, W2b), not by taste.
+3. Variable-length payloads (args, stmts, type args) live in one `extra: [i64]`
+   array per family with (offset, len) in the node, Zig-style, instead of
+   `[[i64]]` arrays of arrays.
+4. Strings are interned once per build session (`sym_names`, literals) and
+   nodes carry the id.
+5. A module's frozen tree is one contiguous, position-independent blob
+   (columns + extra + string table + header with `schema_digest` and
+   `physical_plan_digest`), so sharing it is mapping it (§5).
+6. Per-phase lifetime: the AST arena of a module is released when its HIR cell
+   is published; HIR bodies when the owning MIR module's cell is published
+   (the hirres lane's interface-only projection is the first instance of this
+   rule).
+
+## 4. Write-once (pseudo-immutable) contract
+
+- Construction is an internal, single-owner obligation (`NotInit`,
+  `node_construction_*_v1` in `node_lifecycle_contracts.spl`): a node and each
+  attribute are initialised exactly once inside the producer, with zero
+  synchronisation, and the builder never escapes to readers.
+- After `finish` the tree is frozen: the generated view has getters only; the
+  generated stores' `set` exists on the builder side of the phase and a
+  post-freeze write is a compile-time error in generated code (no setter is
+  emitted on the frozen view) and fails closed at runtime for the stores (the
+  phase cell refuses a second publish).
+- Later-phase results (inferred types, resolved symbols, layouts, diagnostics)
+  go into separate write-once side tables keyed by node id (plan §4.4), each
+  its own cell, never by mutating the frozen node.
+
+## 5. Async surface: one write-once cell per (phase, module)
+
+Landed as the deterministic model in `node_lifecycle_contracts.spl`
+(`PhaseCellTableV1`, `phase_cell_{declare,publish,fail,await}_v1`, spec
+`test/01_unit/compiler/data/node_lifecycle_contracts_spec.spl`):
+
+- `publish` succeeds once and releases waiters in registration order; a second
+  publish or a late `fail` is refused and the first value stays.
+- `await` never answers "not initialised": `Pending -> Waiting`,
+  `Published -> Ready(value)`, `Failed -> ProducerFailed(reason)`; a reader that
+  arrives after publication reads the same frozen value as one that waited.
+- A wait that would close a cycle is refused BEFORE registration with
+  `await cycle: hir:c -> hir:a -> hir:b -> hir:c`; a self-await is the shortest
+  cycle. The runtime binding must keep this order (check, then CAS-register).
+- A failed producer releases its waiters with the failure: dependents are
+  excluded (go-to-end), never blocked.
+- Granularity is the module per phase (`await hir(module)`); inside a frozen
+  module every read is a plain indexed load. Per-attribute cells only for rare
+  lazily computed attributes stored in sparse side tables; never a future per
+  hot node attribute.
+- Determinism: outcomes depend only on cell state, so output cannot depend on
+  completion order; the cell value is the blob digest, which makes "same input,
+  same tree" checkable across workers.
+
+Runtime binding (phase D): one word per cell (`AtomicI64` state, CAS
+`Pending -> Published|Failed`, `std.nogc_async_immut.atom.cas`), a parked
+waiter list appended by CAS, the blob published to the session heap
+(`build_session_memory_model_v1.md` tier T1/RC) before the state flips
+(promote-then-publish, invariant I1).
+
+## 6. Sharing a frozen module across workers (integration point)
+
+Today each MIR shard worker (`driver_build/native_mir_shard.spl`) re-runs the
+front half, decodes every HIR module from the cache and promotes it; the
+hirres lane (landed in #8808,
+`driver_mir_shard_hir_residency_v1.spl`) cuts that to an interface-only
+projection per non-owned module at `hir_cache_load_in_owned_scope(key, ...,
+interface_only)` and reloads a claimed module's body after the claim. The
+frozen-blob design plugs into exactly that seam and composes with it:
+
+- `hir_cache_load_in_owned_scope` gains a third answer besides "decode full"
+  and "decode interface": "map the frozen blob read-only" (mmap of the
+  per-module blob file under `native_cache/<scope>/hir/`, or the parent's
+  session-heap page range inherited copy-on-write by forked workers). N
+  workers then read ONE physical copy instead of N promoted trees.
+- The post-claim body reload becomes "take the body columns from the same
+  mapping"; nothing is decoded twice.
+- Completion is published through the module's phase cell with the blob digest
+  as value, so a worker that needs module B's HIR awaits `hir:B` instead of
+  polling the ledger; cycles across modules surface as the diagnostic in §5.
+- The hirres lane owns residency policy (which modules a worker holds); this
+  lane owns the storage/arena layer (what a held module costs and how it is
+  mapped). Neither touches the other's files; the shared surface is the
+  loader signature above and the cell key `hir:<module>`.
+
+## 7. Phase plan and acceptance
+
+| Phase | Change | Evidence before the default flips |
+|---|---|---|
+| C (AST) | per-module compact pool snapshot (packed `.spab` bytes in memory) behind a write-once `ast:<module>` cell; `ParserModule` materialised from it right before lowering; selected by the `compiler.ast` rule (§7.1); driver adoption is C.2 (§7.2) | bytes/node and parse+HIR RSS on the §1 module set; HIR codec blobs identical to the cache-hit restore (not the fresh parse, see §7.1); wall time within 2% |
+| D (HIR) | module blob arena + phase cells + mapped read-only sharing at the hirres seam | per-worker and total RSS with K shard workers; identical MIR dumps |
+| E (MIR) | `MirInst` columns + `extra` array; same cells | object-file identity on a fixture set; lowering wall time |
+
+Each phase lands behind a resolver rule with the current layout as default,
+runs the compiler unit specs of the touched layer, and never requires a
+native build on the census box; native measurements are scheduled by the
+coordinator with the commands in §1.3.
+
+### 7.1 Phase C as landed (2026-11-13): AST pool snapshot
+
+Relation to §1.2: §1.2 proposed a per-function bridge. Phase C instead keeps the
+whole module's AST in its compact column form between parse and lowering and
+materialises the boxed tree once, at the lowering seam; the per-function bridge
+remains a later refinement inside materialisation and is not contradicted.
+
+Code: `src/compiler/10.frontend/snapshot/ast_pool_snapshot_v1.spl`. Spec:
+`test/02_integration/compiler/data/ast_pool_snapshot_spec.spl` (5/5).
+
+- **Snapshot** = the packed position-independent `.spab` blob
+  (`flat_pool_packed_v1.spl`) of the module's flat pools, captured right after
+  the parse (`flat_pool_capture_*`), held in memory (`AstPoolSnapshotV1.bytes`),
+  plus the exact parse source and its xxh3-128 key. No new encoding.
+- **Materialise** = validate the view, check the published body digest and the
+  source key, restore the pools from the typed tokens and run the bridge
+  (`build_module_from_packed_view_v1`). Every doubt is an `Err`, never an empty
+  module. A materialised module stays valid after another module is
+  materialised (spec: self-contained example).
+- **Write-once** = `ast_snapshot_store_publish_v1` declares/publishes the cell
+  `ast:<module>` (`phase_cell_*_v1`) with the sha256 body digest as value; a
+  second publish is refused and the first snapshot stays; a consumer
+  (`hir:<module>`) awaits the cell and reads `Ready(digest)`.
+- **Selection** = `data_attr_storage_resolve_v1("compiler.ast",
+  "compiler.ast.Module", "nodes", rules, "direct")`: `direct` (the versioned
+  default) = boxed tree, `column` = pool snapshot, any other token is an error
+  naming it. Recommended key: `site: "compiler.ast.Module.nodes"` (a
+  `module: "compiler.ast"` row would also drive every per-attribute choice of
+  the generated AST views). **Default stays `direct`; no flip is proposed.**
+- **Equality oracle**: the materialised module lowers to a HIR codec blob
+  byte-identical to the fresh in-process parse and to the production cache-hit
+  restore of the same parse (`build_module_from_flat_pool_blob`; the packed hit
+  is identical to that). Until the interpolation sub-parse gave the module
+  lexer back, the fresh parse differed in 2,706 of 25,718 codec lines on
+  `attr_access_sites.spl` (span byte offsets clamped to the last fragment;
+  `doc/08_tracking/bug/fresh_parse_vs_cache_hit_span_divergence_2026-11-13.md`,
+  fixed).
+
+Measurements (same seed binary as §1:
+`.../bootstrap.generations/8ea37491...e467bc/simple`, 119,570,696 bytes,
+2026-11-05 18:12:30; `simple test` lane under `MemoryMax=8G`, shared box,
+load ~8; one run of the spec, `SNAPSHOT` lines):
+
+| module | AST nodes | snapshot bytes | B/node | parse+bridge µs | encode µs | materialise µs |
+|---|---|---|---|---|---|---|
+| `20.hir/hir_lowering/attr_access_sites.spl` | 638 | 125,200 | 196 | 2,345,106 | 5,521,531 | 3,726,909 |
+| `lib/common/text_bytes.spl` | 198 | 51,664 | 260 | 3,631,250 | 2,213,935 | 3,833,567 |
+| `00.common/data/data_schema_resolver.spl` | 1,973 | 342,736 | 173 | 10,594,790 | 15,187,931 | 103,769,537 |
+
+After the lexer fix (same binary, one run): `data_schema_resolver.spl` parse
+7,524,121 µs, materialise 10,626,035 µs; `text_bytes.spl` 960,966 / 1,446,842;
+`attr_access_sites.spl` unchanged (ASCII).
+
+B/node counts `AstPoolSnapshotV1.bytes` only. The retained parse source
+(`AstPoolSnapshotV1.source`) is on top of it: 13.3 / 26.4 / 13.3 B per AST node
+on these three modules (8,517 / 5,235 / 26,285 bytes), unless it is the same
+text the driver already holds in its `SourceFile`.
+
+Before/after, like for like on `data_schema_resolver.spl`: boxed bridge 236 B
+per node (§1.1 first row, 466,944 B / 1,973 nodes) and 1.3-1.5 KB per node on a cold heap
+(§1.1 large-module row) versus 173 B per node packed — about 27 % smaller warm,
+7-8x smaller cold. The brief's "about 76 B per node" figure does not appear in
+this note's measurements; the measured packed snapshot is 173-260 B per node
+(small modules pay the fixed header and string table).
+
+Time: as first measured, materialising cost ~10x the parse it replaces on the
+514-line module (104 s vs 10.6 s). The cause was not the restore but the
+char->byte span cursor rewinding on every backward query of a non-ASCII source
+(`doc/08_tracking/bug/flat_pool_restore_10x_slower_than_parse_interpreter_2026-11-13.md`,
+fixed with a per-source prefix table): materialise is now 10.6 s against a
+7.5 s parse (~1.4x). **Still a time cost on the interpreter lane, not a win**;
+the native lane (where `.spab` is the default hit format) must be measured
+before any default changes.
+
+### 7.2 Phase C.2 (open): driver adoption
+
+Blocked on a native-lane RSS and time measurement (the restore-cost bug is fixed)
+(§1.3). The exact seam, so the change is mechanical once unblocked:
+
+- **Producer**: `parse_full_frontend_preprocessed_with_scope`
+  (`src/compiler/10.frontend/frontend.spl`) miss path, where the pool capture
+  already happens for the cache store: encode once, share the bytes between the
+  `.spab` store and `ast_snapshot_store_publish_v1`; on a `.spab` hit the bytes
+  are the file already mapped. A `.fpc` line hit carries no trace and keeps the
+  boxed tree (counted, logged).
+- **Retention**: under `column`, `ctx.modules[name]` keeps a body-less module
+  (headers/surfaces only) and the snapshot holds the bodies.
+- **Consumer**: a branch ahead of `unstub_cached` in
+  `driver_hir_pipeline_lowering.spl` materialises from the snapshot, lowers and
+  drops the boxed tree. It must sit BEFORE the `ctx.modules[name] != nil`
+  check, or a missing module silently falls through to `unstub_reparse` (a
+  green build that reparses everything).
+- **Reader audit** (must work on a body-less module or route through one
+  materialising accessor, with the materialisation count asserted):
+  `module_surfaces_from_modules` (`20.hir/hir_lowering/module_surface_registry.spl`),
+  `driver_orchestration.spl:110`, the export-facade check in
+  `driver_aot_native_output.spl`, and the three `Dict` copies in
+  `driver_source_parse_retained.spl`.
+
+### 7.3 Phase D (HIR) plan — not implemented
+
+Goal: one frozen, position-independent HIR blob per module, published once and
+shared read-only by every MIR shard worker, instead of N decoded copies.
+
+1. **Spec first (RED)** — `test/02_integration/compiler/data/hir_module_arena_spec.spl`:
+   (a) for the §7.1 module set, `hir_arena_encode(hir)` -> `hir_arena_view(bytes)`
+   -> `hir_arena_materialise` lowers to a MIR dump byte-identical to lowering the
+   original `HirModule`; (b) the arena is <= the current codec blob in bytes
+   (150-183 B per AST node today); (c) a second publish of `hir:<module>` is
+   refused; (d) a `compiler.hir` rule `site: "compiler.hir.Module.nodes"`,
+   `column` selects the arena, default `direct` keeps the decoded tree.
+2. **Arena layout** (§3): u32 node slots per family (items, stmts, exprs,
+   types), one `extra: [i64]` per family for variable payloads, span table index
+   instead of four i64 fields, interned strings by id, header with
+   `schema_digest` / `physical_plan_digest` and a sha256 body digest (the cell
+   value). Start by re-encoding the existing `hir_codec` scalar stream into typed
+   sections (the `.spab` pattern), so value identity is checkable before any
+   reader reads columns in place.
+3. **Cells** — the producer publishes `hir:<module>` after lowering (driver
+   streaming path, `driver_hir_pipeline_lowering.spl`), then releases the AST
+   (`ast_reset`, and under C.2 the `ast:<module>` snapshot). MIR consumers await
+   `hir:<module>`; cycles surface as the §5 diagnostic.
+4. **Sharing** — a third answer at `hir_cache_load_in_owned_scope` (§6):
+   map the per-module arena file under `native_cache/<scope>/hir/` read-only;
+   the hirres lane keeps residency policy, this lane only the arena.
+5. **Evidence before any default flip** — per-worker and total RSS with K shard
+   workers (native lane, §1.3), identical MIR dumps on the fixture set, MIR
+   lowering wall time within 2 %. Expect the interpreter lane to repeat the
+   §7.1 lesson (decode/restore cost dominates); measure it, do not assume.
+
+## 8. Non-goals and risks
+
+- No per-node futures, no locks (repo rule: immutable values, CAS, messages).
+- No `nil`/`any` widening in safe code; absent attribute = `Err`, never zero.
+- The seed `run` lane cannot parse the pilot SDN
+  (`doc/08_tracking/bug/seed_run_lane_sdn_quoted_scalar_parse_2026-11-13.md`);
+  regeneration goes through `simple test` until fixed.
+- Interpreter-lane numbers over-state bytes per node; they rank the phases and
+  attributes, the native lane confirms the absolute savings.
+
+### 7.4 AST placement census (measured 2026-11-14, node-attribute step 3)
+
+Probe: `test/05_perf/compiler/data/ast_placement_census_probe_spec.spl` (perf lane,
+`SIMPLE_PERF_PROBES=1`), seed-tip interpreter, Windows. Inputs: 6 real modules
+(`mir_lowering_stmts`, `data_schema_resolver`, `attr_access_sites`, `_AstExpr/nodes`,
+`driver_types`, `test_runner_single`) = **24,936 expr nodes, 6,137 stmt nodes**, parsed
+with `parse_module_body` after `reset_all_pools()`. A slot counts as populated when it
+differs from `expr_alloc`'s default. **Access frequency is NOT measured** (no dynamic
+read counters exist; the static fan-in scan timed out) — class "hot" below is by role,
+not by count, and must be confirmed by the native lane before any default flip.
+
+| column | populated | density | class (proposed) | reason |
+|---|---|---|---|---|
+| expr `tag` | 24,936 | 100% | main node | every node, 8 B, read on every dispatch |
+| expr `span` | 24,936 | 100% | main node | every node, diagnostics + HIR |
+| expr `i_val` | 17,046 | 68% | main node | dense small scalar (op / int value / ident id by tag) |
+| expr `s_val` | 17,188 | 69% | array (column) | dense but a wide text ref; read per tag family |
+| expr `left` | 9,096 | 36% | array (column) | mid density; node-id scalar |
+| expr `right` | 3,056 | 12% | array (column) / hash | binary/index/range only |
+| expr `extra` | 101 | 0.4% | sparse hash | almost always -1 |
+| expr `args` | 3,179 | 13% | sparse hash | list ref; 87% share one empty list |
+| expr `arg_names` | 2,926 | 12% | sparse hash | call-site named args only |
+| expr `stmts` | 188 | 0.8% | sparse hash | block-like exprs only |
+| expr `call_type_args` | 3 | 0.01% | sparse hash | turbofish only |
+| expr `f_val` | 0 | 0% | sparse hash (unconfirmed) | none in this sample; needs a float-bearing input |
+| stmt `expr` | 5,942 | 97% | main node | dense node-id scalar |
+| stmt `name` | 1,586 | 26% | array (column) | let/var names |
+| stmt `type_tag` | 1,275 | 21% | array (column) | annotated bindings |
+| stmt `if_single_else` | 157 | 2.6% | sparse hash | if-statements only |
+| stmt `body` | 0 | 0% | n/a | bodies live in `stmt_body_flat` + offsets, not `stmt_body` |
+
+Per-tag shape (tag ids from `_AstExpr/nodes.spl`): IDENT (6) = 11,960 nodes (48%)
+uses only `i_val`+`s_val`; BINARY (7) = 1,974 (7.9%) uses `i_val` (op), `left`,
+`right` on 100% of its own nodes; CALL (9) 1,571 uses `left`+`args`, 87% with named
+args absent; FIELD_ACCESS (11) 1,988 uses `i_val`,`s_val`,`left`.
+
+Findings that change the plan:
+- **`op` is family-sparse.** The pilot gives `op` a column indexed by global node id;
+  that column is 7.9% dense for Binary alone (92% of slots empty). A column wins only
+  when indexed per tag family (a view-local index); over the global id space the sparse
+  hash is the smaller choice for any attribute whose owning tag is under ~25% of nodes.
+- `left`/`right`/`extra` are tag-conditional: dense within their tags, sparse overall.
+- `args`/`arg_names`/`stmts`/`extra`/`call_type_args` are each < 15% populated and
+  hold list/text refs: first hash candidates after the two pilot attributes.
+- Not yet censused: decl columns, `asm_*` expr columns, HIR/MIR nodes.
+
+### 7.5 Node attributes applied to the real AST pool (2026-11-14, step 4)
+
+Switch: env `SIMPLE_NODE_ATTR=extra=<token>,s_val=<token>` (tokens `direct`,
+`column`, `sparse_hash`), read ONCE per `expr_reset` by `expr_attr_apply_config` in
+`10.frontend/core/_AstExpr/nodes.spl`; per access only an `[i64]` mode slot is read, no
+string compare. Unset/`direct` = today's owner arrays, no store constructed. An unknown
+token returns Err and leaves everything off.
+
+SDN rule (2026-11-15, lane nodeattr2): placement is also selectable by the existing
+`data_policy.rules` layout rows (no new format) addressed `compiler.ast.Expr.extra` /
+`compiler.ast.Expr.s_val` (site), `compiler.ast.Expr` (type), `compiler.ast` (module) or
+project, resolved by `data_attr_storage_resolve_v1` with default `direct`
+(`expr_attr_apply_sdn(source, path, override_spec)`). The rule file path comes from env
+`SIMPLE_NODE_ATTR_SDN`, read at `expr_reset`; `SIMPLE_NODE_ATTR` is applied AFTER the
+rules and overrides them. Neither set, or empty rules plus empty override, is the off
+identity (no store). A bad layout token or a bad/unreadable rule file returns Err and
+leaves the switch off. Default stays OFF.
+
+Applied (real `ExprStore` owner arrays `expr_extra`, `expr_s_val`; `inferred_type` has no
+owner in the real AST pool, so the 0.4%-dense `extra` is the sparse-hash candidate and
+69%-dense `s_val` the dense-column candidate). `op` was NOT applied in that step
+(7.9% dense); it is applied below (2026-11-15, lane nodeattr-op).
+Writes go through `expr_*_put`, reads through `expr_*_get`; the flat snapshot codec
+uses `*_dense()` / `*_load()`.
+
+Evidence (seed-tip interpreter, Windows, `ast_attr_apply_spec` 11/11 (7 env + 4 SDN-rule: site rules for both attrs with identical parse, no-rules/override precedence, bogus layout rejected, rule file via env at reset)): off-identity
+(parse fingerprint equals the pre-change constant), value+presence parity for extra on
+hash and column, s_val (text) on column and hash, array<->hash<->column switching by
+config alone with parity both ways, combined extra+s_val identical fingerprint.
+Regressions: `ast_pool_snapshot_spec` 5/5, `ast_node_pool_pilot_spec` 6/6,
+`attribute_schema_v1_spec` 9/9.
+
+Perf (parse-only of `mir_lowering_stmts.spl`, 12,266 exprs; same seed binary and tree,
+only the switch toggled; 3 alternating rounds, one process per run; wall = in-process
+parse_ms, peak RSS = PowerShell `Process.PeakWorkingSet64` polled externally every
+100 ms; host loaded, so rounds drift 84 s -> 118 s):
+
+| run | off parse_ms / peak MB | extra=sparse_hash | s_val=column |
+|---|---|---|---|
+| round 1 | 83910 / 231.3 | 79336 / 231.0 | 84647 / 231.7 |
+| round 2 | 92077 / 230.8 | 91034 / 230.8 | 91149 / 230.9 |
+| round 3 | 118385 / 231.0 | 96244 / 231.2 | 92294 / 230.8 |
+| mean | 98124 | 88871 | 89363 |
+
+Round-to-round drift (load) dwarfs any switch effect; within each round the on-runs are
+not slower than off. Peak working set is identical to 0.5 MB (about 231 MB for every
+config). `memory_usage()` in-process: 6455 off, 6496 extra=sparse_hash, 6491
+s_val=column (+36..41, units unrecorded). Conclusion: no measurable time or peak-RSS
+cost; no win either on the interpreter lane.
+Caveats: static fan-in of `expr_get_extra(` is 23 sites/10 files; dynamic read counters
+need a product hook (no cheap existing one) and were not added. Default stays off.
+(Superseded by 7.6: counters now exist behind `SIMPLE_NODE_ATTR_COUNT`.)
+
+### 7.6 `op` applied, access counters, driver latch (2026-11-15, lane nodeattr-op)
+
+Decision for `op`: **sparse_hash** (column accepted for parity only). `op` is the
+`i_val` slot of BINARY (7), UNARY (8) and COMPOUND_ASSIGN (24) nodes — 7.9% of the
+global id space (7.4), so a column over global ids is 92% empty; it would win only with
+a per-tag-family index, which the store does not have. Other tags keep `i_val` in the
+owner array (it is 68% dense and main-node). Mechanism: `op=<token>` in the same switch;
+op-family writes go through `expr_op_put`, reads through `expr_owner_int` (off path: one
+`[i64]` route-slot read, then the array); `expr_owner_tag_set` moves the value between
+store and array when a tag change alters op-ness; the snapshot codec uses
+`expr_i_val_dense()` / `expr_i_val_load()` (load runs after `expr_tag` is restored).
+Moving `op` out saves no bytes while `i_val` stays a dense array for the other tags; the
+switch exists so the choice can be measured, not as a memory win.
+
+Access counters: `SIMPLE_NODE_ATTR_COUNT=1` (resolved at `expr_reset`, default off)
+counts reads/writes of `extra`, `s_val`, `op` (process-cumulative, zeroed when switched
+on); `expr_attr_access_counts(attr)` -> `[reads, writes]` (`[-1,-1]` off),
+`expr_attr_access_summary()`. Parse-only of `mir_lowering_stmts.spl` (12,266 exprs):
+`extra reads=3 writes=56; s_val reads=3926 writes=9377; op reads=6 writes=844` — during
+parsing all three are write-dominated; read frequency must be taken from later phases
+(HIR lowering), which the probe does not run. The driver does not print the summary (no
+end-of-compile hook); the perf probe does.
+
+Driver adoption (C.2): `CompilerDriver.create` calls `expr_attr_driver_latch()`, which
+captures `SIMPLE_NODE_ATTR`, `SIMPLE_NODE_ATTR_SDN`, `SIMPLE_NODE_ATTR_COUNT` once (first
+call wins) and applies them; later `expr_reset` calls use the latched values instead of
+re-reading env. A rejected config is reported once on stderr and stays off. Without a
+driver (specs, tools) `expr_reset` still reads env. `expr_attr_latch_clear()` drops it.
+
+Evidence (seed `/c/dev/wt/seed-attr2/simple.exe`, interpreter, Windows):
+`ast_attr_op_counters_spec` 6/6 (RED first: 1/6 before the change), `ast_attr_apply_spec`
+11/11, `ast_pool_snapshot_spec` 5/5 off and 5/5 with `op=sparse_hash,extra=sparse_hash`,
+`ast_node_pool_pilot_spec` 6/6, `attribute_schema_v1_spec` 9/9,
+`node_lifecycle_contracts_spec` 14/14, `compiler_driver_identity_id_spec` 2/2.
+
+Perf (parse-only of `mir_lowering_stmts.spl`, 12,266 exprs, 844 op nodes; same seed and
+tree, only `op` toggled; 3 alternating rounds, one process each; wall = external
+stopwatch, peak = PowerShell `PeakWorkingSet64` polled every 500 ms; host loaded):
+
+| round | off wall / parse ms / peak MB | op=sparse_hash (hash) | op=column (array) |
+|---|---|---|---|
+| 1 | 174685 / 156807 / 230 | 192958 / 170309 / 231 | 201543 / 178441 / 230 |
+| 2 | 206258 / 180602 / 231 | 202693 / 182122 / 233 | 197432 / 175719 / 231 |
+| 3 | 195636 / 178274 / 231 | 199686 / 179876 / 230 | 192841 / 170422 / 233 |
+| mean | 192193 / 171894 / 231 | 198446 / 177436 / 231 | 197272 / 174861 / 231 |
+
+Pre-change tree (same seed, measured earlier that day, not interleaved): wall
+172939 / 177430 / 169297 / 163911 ms, parse mean 159798 ms, peak 232 MB. On-vs-off
+spread (+2-3% parse) is inside the round-to-round drift (off alone ranged 157-181 s);
+peak working set is identical (230-233 MB). The ~+7% pre-vs-post gap in those
+non-interleaved numbers is load drift: an interleaved off-path check (base files swapped
+in and out of the same worktree, pre/post/pre/post) gave pre parse 179852 / 174356 ms
+(peak 232 MB) vs post 181995 / 177672 ms (peak 231 MB), +1.5%, inside noise.
+Conclusion: no measurable off-path or peak-RSS cost; no time win for `op` on the
+interpreter lane.

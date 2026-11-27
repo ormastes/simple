@@ -4,14 +4,18 @@ use std.sffi.cli_args.{cli_get_args}
 use app.io.cli_ops.{cli_current_exe_path}
 use app.io.process_ops.{process_run_bounded}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
-use app.test_daemon.light_protocol.{LIGHT_REQUEST_ENVIRONMENT_REROUTE_CODE, LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER, light_request_deadline, light_request_parse_v2, light_request_matches_daemon_v2, timeout_verdict_line, has_verdict_line, exit_code_reason, light_request_inflight_path, light_request_is_pollable}
+use app.test_daemon.light_protocol.{light_lock_claim, light_lock_release, light_atomic_publish, LIGHT_REQUEST_ENVIRONMENT_REROUTE_CODE, LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER, light_request_deadline, light_request_parse_v2, light_request_matches_daemon_v2, timeout_verdict_line, has_verdict_line, exit_code_reason, light_request_inflight_path, light_request_is_pollable}
 use app.test_daemon.environment_identity.{test_daemon_environment_identity_v1}
+use app.test_daemon.worker_cache.{
+    WORKER_CACHE_DIR, WORKER_SOURCE_PATH, WorkerExitClass, WorkerLaunchKind,
+    WorkerSmfProbeStatus, worker_cache_build_args, worker_cache_classify_failure,
+    worker_cache_default_deps, worker_cache_poison, worker_cache_resolve_or_compile
+}
 
 use std.io_runtime.{dir_create_all}
-use std.io_runtime.{dir_list}
+use std.io_runtime.{dir_list_or_empty}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{read_file_text}
-use std.io_runtime.{file_write}
 use std.io_runtime.{file_delete}
 use std.io_runtime.{file_rename}
 use std.io_runtime.{getpid}
@@ -19,24 +23,31 @@ use std.io_runtime.{thread_sleep}
 use std.io_runtime.{time_now_unix_micros}
 use std.nogc_sync_mut.sffi.io.{path_absolute}
 use std.io_runtime.{env_get}
+use std.io_runtime.{env_set}
+use std.io_runtime.{env_remove_process}
 
 # Atomic write: tmp + rename (see test_runner_client.spl for the race this
 # closes — #98: a plain rt_file_write_text response could be observed
 # 0-byte/partial by the polling client between this daemon's open(truncate)
 # and its write()).
 fn atomic_write_text(path: text, content: text) -> bool:
-    val tmp_path = "{path}.tmp"
-    if file_write(tmp_path, content):
-        if file_rename(tmp_path, path):
-            return true
-        file_delete(tmp_path)
-    file_write(path, content)
+    if light_atomic_publish(path, content):
+        return true
+    print "light_daemon: atomic publish of {path} failed"
+    false
 
 val LIGHT_DAEMON_DIR: text = ".build/test_daemon_light"
 val LIGHT_REQ_DIR: text = ".build/test_daemon_light/requests"
 val LIGHT_RESP_DIR: text = ".build/test_daemon_light/responses"
 val LIGHT_LOCK: text = ".build/test_daemon_light/daemon.lock"
 val LIGHT_STOP: text = ".build/test_daemon_light/stop"
+# Wakeup sequence for the idle poll loop. A client bumps this file (atomic
+# tmp+rename, content = its request id) AFTER publishing its request; the
+# daemon's idle loop stat()s this one file in-process every LIGHT_POLL_MS
+# instead of paying dir_list_or_empty()'s `/bin/sh -c "ls -1 ..."` shell-out every
+# poll. Any content change triggers one drain of the request directory.
+# See doc/08_tracking/bug/light_test_daemon_lane_slower_than_direct_after_shell_spawn_fix_2026-09-13.md.
+val LIGHT_WAKE: text = ".build/test_daemon_light/wakeup.seq"
 # Published so a client can see WHICH compiler this daemon will run every served
 # spec with. Without it the daemon lane is unobservable: the caller cannot tell
 # that its freshly built binary was replaced by whatever started the daemon.
@@ -68,6 +79,33 @@ fn invoking_binary() -> text:
             return current_path
     ""
 
+fn argv_binary_candidate(raw: [text]) -> text:
+    """argv[0] when it names an existing compiler binary, else "".
+
+    A `.spl` argv[0] is this daemon's own source path (source-mode launch); it
+    exists but is not executable, so it must never be chosen as the binary."""
+    if raw.len() > 0 and not raw[0].ends_with(".spl") and (raw[0].ends_with("/simple") or raw[0].ends_with("simple.exe")) and file_exists(raw[0]):
+        return raw[0]
+    ""
+
+fn enter_daemon_child_env() -> text:
+    """Mark the environment the served worker inherits as daemon-owned.
+
+    Returns the previous marker value so the caller can restore it. A spec the
+    daemon is serving that itself runs `simple test <spec>` reaches
+    test_runner_client with SIMPLE_TEST_DAEMON_CHILD=1 and runs directly
+    instead of queueing behind the single worker that is busy serving it."""
+    val previous_child_marker = env_get("SIMPLE_TEST_DAEMON_CHILD") ?? ""
+    env_set("SIMPLE_TEST_DAEMON_CHILD", "1")
+    previous_child_marker
+
+fn restore_daemon_child_env(previous_child_marker: text):
+    """Undo enter_daemon_child_env() so the daemon's own environment is unchanged."""
+    if previous_child_marker == "":
+        env_remove_process("SIMPLE_TEST_DAEMON_CHILD")
+    else:
+        env_set("SIMPLE_TEST_DAEMON_CHILD", previous_child_marker)
+
 fn simple_binary() -> text:
     val configured = (env_get("SIMPLE_BINARY") ?? "")
     if configured != "" and file_exists(configured):
@@ -85,8 +123,9 @@ fn simple_binary() -> text:
     # exists, but it is not executable; passing it to process_run_timeout
     # produces a misleading permission-denied failure instead of running the
     # test. Same fix as test_runner_single.spl's simple_binary().
-    if raw.len() > 0 and (raw[0].ends_with("/simple") or raw[0].ends_with("simple.exe")) and file_exists(raw[0]):
-        return raw[0]
+    val argv_binary = argv_binary_candidate(raw)
+    if argv_binary != "":
+        return argv_binary
     # bin/simple (the deployed pure-Simple self-hosted binary — see
     # .claude/rules/bootstrap.md "Default tooling runs on pure-Simple") MUST be
     # tried before any Rust-seed candidate. This daemon is long-lived (it
@@ -181,12 +220,52 @@ fn handle_request(binary: text, name: text, environment_digest: text,
             "{LIGHT_REQUEST_ENVIRONMENT_REROUTE_CODE}\n{LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER}")
         file_delete(inflight_path)
         return
-    val (stdout, stderr, code) = process_run_bounded(
+    val simple_lib = env_get("SIMPLE_LIB") ?? ""
+    val worker_target = worker_cache_resolve_or_compile(
         binary,
-        ["run", "src/app/test_runner_new/test_runner_single.spl", test_path, "--no-session-daemon", "--sequential", "--timeout", timeout_secs.to_string()],
+        WORKER_CACHE_DIR,
+        WORKER_SOURCE_PATH,
+        environment_digest,
+        simple_lib,
+        worker_cache_default_deps()
+    )
+    val launch_args = worker_cache_build_args(worker_target, test_path, timeout_secs.to_string())
+    val previous_child_marker = enter_daemon_child_env()
+    var run_res = process_run_bounded(
+        binary,
+        launch_args,
         timeout_ms,
         TEST_OUTPUT_CAPTURE_BYTES
     )
+    val exit_class = if run_res.2 == 0: WorkerExitClass.ZeroExit else: WorkerExitClass.NonZeroExit
+    match worker_target.kind:
+        case WorkerLaunchKind.CachedSmf:
+            match worker_cache_classify_failure(run_res.0, run_res.1, exit_class):
+                case WorkerSmfProbeStatus.LoadOrRelocationFailed:
+                    worker_cache_poison(worker_target, "smf-load-or-relocation-failed:{run_res.2}")
+                    val fallback_args = [
+                        "run",
+                        WORKER_SOURCE_PATH,
+                        test_path,
+                        "--no-session-daemon",
+                        "--sequential",
+                        "--timeout",
+                        timeout_secs.to_string()
+                    ]
+                    run_res = process_run_bounded(
+                        binary,
+                        fallback_args,
+                        timeout_ms,
+                        TEST_OUTPUT_CAPTURE_BYTES
+                    )
+                case WorkerSmfProbeStatus.Usable:
+                    pass
+        case WorkerLaunchKind.SourceFallback:
+            pass
+    restore_daemon_child_env(previous_child_marker)
+    val stdout = run_res.0
+    val stderr = run_res.1
+    val code = run_res.2
     var body = stdout
     if stderr != "":
         body = body + stderr
@@ -219,31 +298,12 @@ fn pid_is_live(pid: text) -> bool:
     file_exists("/proc/{pid}")
 
 fn claim_lane(environment_digest: text) -> bool:
-    """Take exclusive ownership of the lane, or report that someone else has it.
+    """Take exclusive ownership of the lane (O_EXCL, pid + digest in one record).
 
-    `ensure_daemon()` in test_runner_client.spl is check-then-spawn with NO
-    mutual exclusion, so N clients that all find the lock absent all spawn a
-    daemon. Measured 2026-08-21: a 6-client burst left 4+ light daemons alive,
-    every one of them polling the SAME request directory, racing to serve and
-    to answer the same `.req` files. That is the concurrency defect behind
-    doc/08_tracking/bug/test_runner_concurrent_runs_lose_output_2026-08-21.md.
-
-    Fixing the client alone cannot close it (the check and the spawn can never
-    be one atomic step from out there), so the exclusion is enforced HERE, by
-    the only processes that can see each other: a daemon that does not own the
-    lock exits instead of serving. Claim = atomic tmp+rename, then verify. Two
-    racing renames are serialised by the kernel, so after the settle both
-    losers read the same winner pid and stand down."""
-    val my_pid = "{getpid()}"
-    val incumbent = lock_owner_pid()
-    if incumbent != "" and incumbent != my_pid and pid_is_live(incumbent):
-        return false
-    # PID and environment identity are one atomic generation record. A client
-    # can never pair a new PID with an old digest from a sibling side file.
-    if not atomic_write_text(LIGHT_LOCK, my_pid + "\n" + environment_digest):
-        return false
-    thread_sleep(200)
-    lock_owner_pid() == my_pid
+    The client serialises spawns with a kernel lock, but a daemon must still
+    never trust that: exactly one O_EXCL creator wins, a stale lock is broken
+    only for a provably dead pid. No tmp+rename, no sleep arbitration."""
+    light_lock_claim(LIGHT_LOCK, environment_digest, "{getpid()}", \p: pid_is_live(p), LIGHT_BINARY)
 
 fn main() -> i64:
     ensure_dirs()
@@ -255,22 +315,55 @@ fn main() -> i64:
     val binary = simple_binary()
     # Publish the served binary BEFORE accepting any request, so a client that
     # observes the lock also observes an accurate binary record.
-    atomic_write_text(LIGHT_BINARY, binary)
+    if not atomic_write_text(LIGHT_BINARY, binary):
+        light_lock_release(LIGHT_LOCK, LIGHT_BINARY, "{getpid()}")
+        return 1
     var idle = 0
-    while idle < 240:
+    var last_wake = ""
+    # True once any wakeup-protocol client has been seen. Pre-contact the
+    # fallback sweep runs at 500 ms so clients of EITHER generation (old
+    # clients never write LIGHT_WAKE) are discovered well inside their 2000 ms
+    # claim-wait window; post-contact it relaxes to 5 s — a wakeup-protocol
+    # client is provably out there, and an old client discovering a 5 s sweep
+    # merely withdraws and runs direct, which is correct, just not served.
+    var wake_seen = false
+    # Idle lifetime is ~60 s, matching the old 240 x 250 ms loop, but the
+    # poll interval is 25x finer because the hot-path wakeup check is an
+    # in-process file stat, not the dir_list_or_empty() shell-out the old loop paid
+    # on every iteration (~2 execves per 250 ms of idle lifetime).
+    while idle < 6000:
         if file_exists(LIGHT_STOP):
             file_delete(LIGHT_STOP)
-            file_delete(LIGHT_LOCK)
-            file_delete(LIGHT_BINARY)
+            light_lock_release(LIGHT_LOCK, LIGHT_BINARY, "{getpid()}")
             return 0
         # Stand down the moment another daemon owns the lane, so a duplicate
         # spawned by a racing client cannot double-serve requests.
         if lock_owner_pid() != "{getpid()}":
             return 0
-        val entries = dir_list(LIGHT_REQ_DIR)
+        # Fast path: a client bumped the wakeup sequence after publishing its
+        # request. The request rename lands BEFORE the wakeup write, so a
+        # visible sequence value implies the request is already listable.
+        var woke = false
+        if file_exists(LIGHT_WAKE):
+            val current_wake = (read_file_text(LIGHT_WAKE)).trim()
+            if current_wake != "" and current_wake != last_wake:
+                last_wake = current_wake
+                wake_seen = true
+                woke = true
+        # Fallback sweep: clients predating the wakeup protocol never write
+        # LIGHT_WAKE, and a lost wakeup write (a client dying between its
+        # request rename and the bump) would otherwise strand the request
+        # for the whole idle lifetime. Between sweeps the loop is pure
+        # in-process file stats.
+        val sweep_mod = if wake_seen: 500 else: 50
+        if not woke and idle % sweep_mod != 0:
+            idle = idle + 1
+            thread_sleep(10)
+            continue
+        val entries = dir_list_or_empty(LIGHT_REQ_DIR)
         if entries.len() == 0:
             idle = idle + 1
-            thread_sleep(250)
+            thread_sleep(10)
             continue
         idle = 0
         # Serve ONE request per poll iteration, then re-list.
@@ -295,6 +388,5 @@ fn main() -> i64:
                 i = entries.len()
             else:
                 i = i + 1
-    file_delete(LIGHT_LOCK)
-    file_delete(LIGHT_BINARY)
+    light_lock_release(LIGHT_LOCK, LIGHT_BINARY, "{getpid()}")
     0

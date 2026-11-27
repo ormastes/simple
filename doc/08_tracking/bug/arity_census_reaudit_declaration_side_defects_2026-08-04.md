@@ -262,3 +262,18 @@ the first place. Filed rather than guessed.
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Already has 1 fix landed; remainder is a large repo-wide arity census (237,215 call sites checked) with filed residuals, beyond a single-bug budget. No change made.
+
+## Triage 2026-11-11 (lane p3-ne20) — verdict: LIVE (left open)
+
+Re-checked on origin/release/1.0.0 (worktree @9202f187777): this row's
+remaining items are all deliberately-filed judgment decisions, not fixable
+defects — (1) the 6 torch ABI mismatches (`rt_torch_tensor_{zeros,ones,rand,
+randn,empty,full}`) need the array-marshalling contract design, not an arity
+edit; (2) the 8 unpadded call-site defects were left unpadded *on principle*
+(guessing `timeout_ms`/`since`/GUI-mode values repeats the census's own
+error); (3) the 533-symbol wipe-casualty sweep needs per-symbol lineage
+authority decisions (95 files, divergent-rewrite pairs like text_painter.spl).
+All three are owner/design-lane work this P3 lane must not guess at. Status
+left as-is (the header records the landed fix `3c45274ba4b` and "remainder
+filed below", which remains accurate). Lane evidence:
+`build/review/p3fix-ne20-20261111.sdn`.

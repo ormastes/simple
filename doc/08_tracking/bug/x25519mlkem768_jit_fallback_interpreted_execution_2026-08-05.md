@@ -1,6 +1,27 @@
 # X25519MLKEM768: all hot-path operations run interpreted, not JIT-compiled
 ## Open 2026-09-16 — needs owner triage
 
+## Triage 2026-11-25
+
+Still open as a perf-attribution record; the header is accurate. Movement on
+the two named blockers since filing:
+
+1. The cross-module imported-struct `bool`-field HIR lowering gap
+   (`hir_lowering_bool_field_infer_imported_struct_2026-07-03.md`) is CLOSED
+   — fixed and re-verified 2026-09-13 with a running minimal repro on a
+   rebuilt seed. Blocker (1) as filed should therefore no longer fire, but
+   the AC-9 benchmark numbers have NOT been re-measured, so the
+   interpreted-execution attribution in the 2026-08-05 report still stands
+   until someone re-runs the harness.
+2. The `cuda_module_load_binary` unresolved-symbol registration gap is
+   untouched and remains a separate compiler/runtime fix.
+
+Re-measurement requires a Linux host with an admitted (pure-Simple
+self-hosted) binary — not possible from this Windows worktree, where the
+tracked seed's lanes are additionally constrained at release/1.0.0 HEAD by
+the known `@representation_boundary` source/binary inconsistency. Left open
+pending re-measurement and the CUDA symbol fix.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 

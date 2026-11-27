@@ -1,0 +1,79 @@
+# Archiver (llvm-ar / ar / lib.exe) command construction with response files.
+#
+# A full collection archive can carry well over a thousand object paths.
+# Passing them on argv overflows the Windows CreateProcess limit (32767
+# chars, os error 206). Object paths always go through an `@file` response
+# file instead, so the archiver argv stays O(1) in the object count.
+#
+# Quoting: lib.exe and llvm-ar on a Windows host tokenize response files with
+# the Windows CRT rules; GNU ar and llvm-ar on POSIX hosts use GNU rules
+# (backslash escapes, double quotes group). BSD system ar (macOS, *BSD) may lack
+# @file and keeps argv (ARG_MAX is large there); response_path is empty in that case.
+
+use compiler.backend.linker.msvc_response_file.{msvc_response_quote}
+
+pub struct ArchiveCommand:
+    argv: [text]
+    response_path: text
+    response_body: text
+
+pub fn archive_is_msvc_lib(archiver: text) -> bool:
+    val lower = archiver.lower()
+    lower == "lib" or lower.ends_with("lib.exe")
+
+pub fn archive_is_system_ar(archiver: text) -> bool:
+    archiver == "ar" or archiver.ends_with("/ar")
+
+pub fn archive_gnu_response_quote(arg: text) -> text:
+    var encoded = "\""
+    for ch in arg:
+        if ch == "\\" or ch == "\"":
+            encoded = encoded + "\\" + ch
+        else:
+            encoded = encoded + ch
+    encoded + "\""
+
+# lib.exe: CRT rules. Other archivers on Windows may be llvm-ar (Windows
+# tokenizer) or GNU ar (GNU tokenizer); forward-slash paths in double quotes
+# tokenize identically under both, since Windows paths cannot contain quotes.
+pub fn archive_response_quote(host_os: text, msvc_lib: bool, arg: text) -> text:
+    if msvc_lib:
+        return msvc_response_quote(arg)
+    if host_os == "windows":
+        return archive_gnu_response_quote(arg.replace("\\", "/"))
+    archive_gnu_response_quote(arg)
+
+pub fn archive_response_path(output: text) -> text:
+    output + ".ar.rsp"
+
+# Build the archiver argv. Flags and output stay on argv; every object path
+# goes into the response body, one quoted path per line.
+pub fn archive_command_build(archiver: text, host_os: text, output: text, objects: [text]) -> ArchiveCommand:
+    val msvc_lib = archive_is_msvc_lib(archiver)
+    val response_path = archive_response_path(output)
+    var lines: [text] = []
+    for obj in objects:
+        lines = lines.push(archive_response_quote(host_os, msvc_lib, obj))
+    val body = lines.join("\n") + "\n"
+    var argv: [text] = []
+    if msvc_lib:
+        argv = ["/NOLOGO", "/OUT:{output}", "@{response_path}"]
+    else:
+        val system_ar = archive_is_system_ar(archiver)
+        if system_ar and host_os != "linux" and host_os != "windows":
+            # BSD ar (macOS, *BSD) may lack @file; ARG_MAX there fits argv.
+            var flags = "rcsD"
+            if host_os == "macos":
+                flags = "rcs"
+            argv = [flags, output]
+            for obj in objects:
+                argv = argv.push(obj)
+            return ArchiveCommand(argv: argv, response_path: "", response_body: "")
+        argv = ["rcsD", output, "@{response_path}"]
+    ArchiveCommand(argv: argv, response_path: response_path, response_body: body)
+
+pub fn archive_argv_bytes(argv: [text]) -> i64:
+    var total: i64 = 0
+    for arg in argv:
+        total = total + arg.len() + 3
+    total

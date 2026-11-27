@@ -12,7 +12,7 @@
 #   base64_decode_bytes(encoded: text) -> [u8]                  (binary-safe)
 #   base64url_encode(data: text) -> text
 #   base64url_encode_bytes(data: [u8]) -> text                    (binary-safe)
-#   base64url_encode_i64_bytes(data: [i64]) -> text               (std.crypto bytes)
+#   base64url_encode_i64_bytes(data: [i64]) -> text               ([i64] byte arrays)
 #   base64url_decode(encoded: text) -> text                       (lenient)
 #   base64url_decode_strict(encoded: text) -> Result<text, Base64UrlError>
 
@@ -29,7 +29,7 @@ val ENCODE_TABLE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234567
 use std.common.encoding.utf8.{char_from_codepoint}
 use std.common.base_encoding.utilities.{base_encoding_bytes_to_text}
 
-fn _decode_char(c: i64) -> i64:
+fn _decode_char(c: i64, url_safe: bool) -> i64:
     """Return the 6-bit value for an ASCII base64 character, or 255 if invalid."""
     if c >= 65 and c <= 90:
         c - 65
@@ -37,9 +37,9 @@ fn _decode_char(c: i64) -> i64:
         c - 97 + 26
     else if c >= 48 and c <= 57:
         c - 48 + 52
-    else if c == 43:   # '+'
+    else if c == 43 or (url_safe and c == 45):   # '+' or '-'
         62
-    else if c == 47:   # '/'
+    else if c == 47 or (url_safe and c == 95):   # '/' or '_'
         63
     else:
         255
@@ -134,7 +134,12 @@ pub fn base64_decode_bytes(encoded: text) -> [u8]:
     Same lenient contract as `base64_decode`; this is the decoder core, and
     `base64_decode` is the text projection of it.
     """
-    val n = encoded.length()
+    _base64_decode_bytes_impl(encoded, false)
+
+fn _base64_decode_bytes_impl(encoded: text, url_safe: bool) -> [u8]:
+    """Shared single-pass RFC 4648 base64 / base64url byte decoder."""
+    val enc_bytes = encoded.bytes()
+    val n = enc_bytes.len()
     var out_bytes: [u8] = []
     var c0 = 0
     var c1 = 0
@@ -143,26 +148,18 @@ pub fn base64_decode_bytes(encoded: text) -> [u8]:
     var chunk_len = 0
     var pad_count = 0
     var i = 0
-    val enc_bytes = encoded.bytes()
     while i < n:
-        # Iterate BYTES, not codepoints. `n` is encoded.length(), which is a
-        # BYTE count, while char_at(i) is CODEPOINT indexed -- so on any
-        # non-ASCII input the loop over-ran the string. Worse, on the default
-        # (JIT) engine `char_at(i) as i64` does not yield the code point at
-        # all: it returns a raw pointer value (e.g. "e" -> 394395739456
-        # instead of 233), so _decode_char rejected EVERY character and
-        # base64_decode returned an empty string for all input, ASCII
-        # included. The base64 alphabet is ASCII, so reading raw bytes is both
-        # correct and what the RFC 4648 lenient-skip contract expects: any
-        # byte outside the alphabet is simply skipped.
+        # Iterate BYTES, not codepoints. `n` is byte count, while char_at(i) is
+        # CODEPOINT indexed -- so on non-ASCII input it over-ran the string.
+        # Reading raw bytes is both correct and matches the RFC 4648 lenient-skip
+        # contract: any byte outside the alphabet is skipped.
         val raw = enc_bytes[i] as i64
         i = i + 1
 
         # Skip whitespace (space, tab, LF, CR)
         if raw == 32 or raw == 9 or raw == 10 or raw == 13:
             pass_dn
-
-        if raw == 61:  # '=' padding
+        else if raw == 61:  # '=' padding
             if chunk_len < 2:
                 chunk_len = 0
                 c0 = 0
@@ -184,7 +181,7 @@ pub fn base64_decode_bytes(encoded: text) -> [u8]:
                     c3 = 0
                     pad_count = 0
         else:
-            val v = _decode_char(raw)
+            val v = _decode_char(raw, url_safe)
             if v != 255:
                 if pad_count > 0:
                     chunk_len = 0
@@ -243,9 +240,9 @@ pub fn base64url_encode_bytes(data: [u8]) -> text:
 pub fn base64url_encode_i64_bytes(data: [i64]) -> text:
     """`base64url_encode_bytes` for callers whose byte arrays are `[i64]`.
 
-    `std.crypto` (`hmac_sha256_bytes`, `text_to_bytes`) represents bytes as
-    `[i64]`, while this module represents them as `[u8]`. This adapter exists
-    once here rather than being copy-pasted into every crypto caller. Each
+    Some callers still hold bytes as `[i64]`, while this module represents them
+    as `[u8]` (as does `std.crypto` since 2026-11-27). This adapter exists once
+    here rather than being copy-pasted into every such caller. Each
     element is masked to its low 8 bits, so an out-of-range `[i64]` element
     cannot silently corrupt neighbouring output sextets.
     """
@@ -298,35 +295,13 @@ fn _base64url_encode_raw(bytes: [u8]) -> [u8]:
     out_bytes
 
 pub fn base64url_decode(encoded: text) -> text:
-    """Decode URL-safe base64 text (RFC 4648 §5).
+    """Decode URL-safe base64 text (RFC 4648 §5) in a single pass.
 
-    Replaces '-'→'+', '_'→'/', re-pads to 4-char boundary, then
-    delegates to standard base64_decode. This is the pure-Simple
+    Accepts both URL-safe ('-', '_') and standard ('+', '/') alphabet characters
+    leniently and handles unpadded final groups directly. This is the pure-Simple
     replacement for the C extern rt_base64url_decode used in id_token.spl.
     """
-    val enc_bytes = encoded.bytes()
-    val n = enc_bytes.len()
-    var out_bytes: [u8] = []
-    var i = 0
-    while i < n:
-        val b = enc_bytes[i]
-        if b == 45u8:      # '-'
-            out_bytes = out_bytes.push(43u8)   # '+'
-        else if b == 95u8: # '_'
-            out_bytes = out_bytes.push(47u8)   # '/'
-        else:
-            out_bytes = out_bytes.push(b)
-        i = i + 1
-
-    # Re-add '=' padding to reach 4-char boundary
-    val rem = out_bytes.len() % 4
-    if rem == 2:
-        out_bytes = out_bytes.push(61u8)
-        out_bytes = out_bytes.push(61u8)
-    else if rem == 3:
-        out_bytes = out_bytes.push(61u8)
-
-    base64_decode(_bytes_to_text(out_bytes))
+    _bytes_to_text(_base64_decode_bytes_impl(encoded, true))
 
 # ============================================================================
 # Strict base64url decode (RFC 4648 §3.3 — reject, do not repair)

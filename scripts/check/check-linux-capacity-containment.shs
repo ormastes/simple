@@ -1,0 +1,51 @@
+#!/bin/sh
+# Live kernel component evidence; caller supplies delegated cgroup-v2 memory.
+# Never modifies the host/root controller configuration to make a test pass.
+set -eu
+if [ "$(uname -s)" != Linux ]; then
+    echo 'linux-capacity-containment: requires Linux (not a PASS)' >&2
+    exit 77
+fi
+if ! test -w /sys/fs/cgroup ||
+   ! grep -qw memory /sys/fs/cgroup/cgroup.subtree_control; then
+    echo 'linux-capacity-containment: delegated memory controller required (not a PASS)' >&2
+    exit 78
+fi
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/linux-capacity-containment.XXXXXX")
+cleanup() {
+    status=$?
+    trap - EXIT HUP INT TERM
+    # A failed assertion or timeout must not leave a live workload behind.
+    # These names bind only this invocation's fresh private scratch paths.
+    for scenario in orphan memory; do
+        identity=$(printf '%s' "$scratch/$scenario" | sha256sum | cut -d ' ' -f 1)
+        parent=/sys/fs/cgroup/simple-parent-$identity
+        child=$parent/simple-native-$identity
+        if [ -d "$child" ]; then
+            printf '1\n' > "$child/cgroup.kill" || status=1
+            attempts=0
+            while grep -qx 'populated 1' "$child/cgroup.events" && [ "$attempts" -lt 200 ]; do
+                sleep 0.01
+                attempts=$((attempts + 1))
+            done
+            rmdir "$child" || status=1
+        fi
+        if [ -d "$parent" ]; then rmdir "$parent" || status=1; fi
+    done
+    rm -rf "$scratch"
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
+"${CC:-cc}" -D_GNU_SOURCE -std=c11 -O1 -Wall -Wextra \
+    -I "$root/src/runtime" \
+    "$root/test/fixtures/bootstrap_builder/linux_capacity_containment.c" \
+    -lcrypto -o "$scratch/owner"
+"${CC:-cc}" -std=c11 -O1 -Wall -Wextra -Werror \
+    "$root/test/fixtures/bootstrap_builder/linux_capacity_hostile_child.c" \
+    -o "$scratch/child"
+mkdir "$scratch/orphan" "$scratch/memory"
+timeout 25 "$scratch/owner" "$scratch/orphan" "$scratch/child" orphan
+timeout 25 "$scratch/owner" "$scratch/memory" "$scratch/child" memory
+echo 'STATUS: PASS (2 live cgroup scenarios; no Simple ABI or BuildRunner admission)'

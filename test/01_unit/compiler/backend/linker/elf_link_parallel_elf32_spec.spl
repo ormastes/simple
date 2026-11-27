@@ -1,0 +1,163 @@
+# Internal ELF linker: lockless parallel scan/apply, ELF32 .symtab, ARM float ABI
+#
+# - A link with jobs = 4 (per-object-range workers) must be byte-identical to
+#   jobs = 1 (the serial path) for every ELF target the hello set covers.
+# - ELFCLASS32 output carries .symtab (Elf32_Sym, 16-byte entries) and .strtab
+#   unless stripped, like ld.lld.
+# - armv7 e_flags: EF_ARM_ABI_FLOAT_HARD (0x400) when the inputs' .ARM.attributes
+#   say Tag_ABI_VFP_args = 1, else EF_ARM_ABI_FLOAT_SOFT (0x200), as ld.lld does.
+#
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+# @cover src/compiler/70.backend/linker/elf/elf_par.spl
+
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.elf.elf_static_link.{
+    ElfLinkRequest, elf_link, elf_link_stripped, elf_arm_float_flags, ELF_LINK_STATIC_EXEC}
+use compiler.backend.linker.elf_parser.{elf_parse_object}
+use compiler.backend.linker.elf.elf_par.{elf_par_completed}
+use std.io_runtime.{file_read_bytes}
+use std.common.text_bytes.{bytes_to_text}
+
+val FIX: text = "test/fixtures/linker/elf"
+
+fn load(name: text) -> [i64]:
+    val raw = file_read_bytes("{FIX}/{name}")
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn u_le(b: [i64], at: i64, n: i64) -> i64:
+    var v: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        v = v | ((b[at + i] & 0xff) << (i * 8))
+        i = i + 1
+    v
+
+fn link_jobs(hello: text, helper: text, target: RelocArch, jobs: i64) -> Result<[i64], text>:
+    elf_link(ElfLinkRequest(objects: [load(hello), load(helper)], archives: [], shared: [],
+        entry: "_start", target: target, mode: ELF_LINK_STATIC_EXEC, interp: "", jobs: jobs))
+
+fn same_bytes(a: [i64], b: [i64]) -> bool:
+    if a.len() != b.len(): return false
+    var i: i64 = 0
+    while i < a.len():
+        if a[i] != b[i]: return false
+        i = i + 1
+    true
+
+fn cstr(b: [i64], at: i64) -> text:
+    var s: [u8] = []
+    var i = at
+    while i < b.len() and b[i] != 0:
+        s.push(b[i] as u8)
+        i = i + 1
+    bytes_to_text(s)
+
+# ELF32 section header lookup: returns [offset, size, entsize, link, info] of
+# the first section of sh_type, or [] when absent.
+fn shdr32(img: [i64], sh_type: i64) -> [i64]:
+    val shoff = u_le(img, 0x20, 4)
+    val shnum = u_le(img, 0x30, 2)
+    var i: i64 = 0
+    while i < shnum:
+        val h = shoff + i * 40
+        if u_le(img, h + 4, 4) == sh_type:
+            return [u_le(img, h + 16, 4), u_le(img, h + 20, 4), u_le(img, h + 36, 4),
+                u_le(img, h + 24, 4), u_le(img, h + 28, 4)]
+        i = i + 1
+    []
+
+fn sym32_names(img: [i64]) -> [text]:
+    val st = shdr32(img, 2)
+    val shoff = u_le(img, 0x20, 4)
+    val strh = shoff + st[3] * 40
+    val stroff = u_le(img, strh + 16, 4)
+    var names: [text] = []
+    var e: i64 = 0
+    while e < st[1] / 16:
+        names = names.push(cstr(img, stroff + u_le(img, st[0] + e * 16, 4)))
+        e = e + 1
+    names
+
+describe "parallel relocation scan + prep + apply":
+    it "is byte-identical to the serial path on i386":
+        val a = link_jobs("elf32_hello_i386.o", "elf32_helper_i386.o", RelocArch.I386, 1)
+        val before = elf_par_completed()
+        val b = link_jobs("elf32_hello_i386.o", "elf32_helper_i386.o", RelocArch.I386, 4)
+        # scan, prep and apply each fanned out (not the serial fallback)
+        expect(elf_par_completed() - before).to_equal(3)
+        expect(a.is_ok()).to_equal(true)
+        expect(b.is_ok()).to_equal(true)
+        expect(same_bytes(a.unwrap(), b.unwrap())).to_equal(true)
+
+    it "is byte-identical to the serial path on i386 PIC (GOTPC/GOTOFF/GOT32X)":
+        val a = link_jobs("elf32_hello_i386_pic.o", "elf32_helper_i386_pic.o", RelocArch.I386, 1)
+        val before = elf_par_completed()
+        val b = link_jobs("elf32_hello_i386_pic.o", "elf32_helper_i386_pic.o", RelocArch.I386, 3)
+        expect(elf_par_completed() - before).to_equal(3)
+        expect(a.is_ok()).to_equal(true)
+        expect(same_bytes(a.unwrap(), b.unwrap())).to_equal(true)
+
+    it "is byte-identical to the serial path on armv7":
+        val a = link_jobs("elf32_hello_arm.o", "elf32_helper_arm.o", RelocArch.Arm32, 1)
+        val before = elf_par_completed()
+        val b = link_jobs("elf32_hello_arm.o", "elf32_helper_arm.o", RelocArch.Arm32, 4)
+        expect(elf_par_completed() - before).to_equal(3)
+        expect(a.is_ok()).to_equal(true)
+        expect(same_bytes(a.unwrap(), b.unwrap())).to_equal(true)
+
+describe "ELF32 .symtab / .strtab":
+    it "emits Elf32_Sym entries naming the linked symbols":
+        val img = link_jobs("elf32_hello_i386.o", "elf32_helper_i386.o", RelocArch.I386, 1).unwrap()
+        val st = shdr32(img, 2)
+        expect(st.len()).to_equal(5)
+        expect(st[2]).to_equal(16)
+        expect(st[1] % 16).to_equal(0)
+        val names = sym32_names(img)
+        expect(names.contains("_start")).to_equal(true)
+        expect(names.contains("helper")).to_equal(true)
+        expect(names.contains("bias")).to_equal(true)
+
+    it "places globals after locals (sh_info = first global)":
+        val img = link_jobs("elf32_hello_i386.o", "elf32_helper_i386.o", RelocArch.I386, 1).unwrap()
+        val st = shdr32(img, 2)
+        val names = sym32_names(img)
+        expect(names[st[4]]).to_equal("_start")
+
+    it "gives _start its entry address":
+        val img = link_jobs("elf32_hello_arm.o", "elf32_helper_arm.o", RelocArch.Arm32, 1).unwrap()
+        val st = shdr32(img, 2)
+        val names = sym32_names(img)
+        var found = false
+        var e: i64 = 0
+        while e < names.len():
+            if names[e] == "_start":
+                expect(u_le(img, st[0] + e * 16 + 4, 4)).to_equal(u_le(img, 0x18, 4))
+                found = true
+            e = e + 1
+        expect(found).to_equal(true)
+
+    it "is omitted when stripped":
+        val r = elf_link_stripped(ElfLinkRequest(objects: [load("elf32_hello_i386.o"), load("elf32_helper_i386.o")],
+            archives: [], shared: [], entry: "_start", target: RelocArch.I386, mode: ELF_LINK_STATIC_EXEC, interp: ""))
+        expect(shdr32(r.unwrap(), 2).len()).to_equal(0)
+
+describe "armv7 float-ABI e_flags":
+    it "sets EF_ARM_ABI_FLOAT_HARD for hard-float inputs (as ld.lld: 0x5000400)":
+        val img = link_jobs("elf32_hello_arm.o", "elf32_helper_arm.o", RelocArch.Arm32, 1).unwrap()
+        expect(u_le(img, 0x24, 4)).to_equal(0x5000400)
+
+    it "sets EF_ARM_ABI_FLOAT_SOFT for soft-float inputs (as ld.lld: 0x5000200)":
+        val img = link_jobs("elf32_hello_arm_soft.o", "elf32_helper_arm_soft.o", RelocArch.Arm32, 1).unwrap()
+        expect(u_le(img, 0x24, 4)).to_equal(0x5000200)
+
+    it "reads Tag_ABI_VFP_args from .ARM.attributes":
+        val raw = file_read_bytes("{FIX}/elf32_hello_arm.o")
+        val obj = elf_parse_object(raw).unwrap()
+        expect(elf_arm_float_flags([obj])).to_equal(0x400)
+        val soft = elf_parse_object(file_read_bytes("{FIX}/elf32_hello_arm_soft.o")).unwrap()
+        expect(elf_arm_float_flags([soft])).to_equal(0x200)

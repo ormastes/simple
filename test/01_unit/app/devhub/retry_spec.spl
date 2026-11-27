@@ -1,0 +1,66 @@
+"""
+## Purpose and audience
+Unit coverage of DevHub's shared retry/backoff policy (`src/app/devhub/retry.spl`)
+used by the MinIO and Jira curl adapters: which responses are retried, and how
+long the backoff is. Network-free and sleep-free — `itf_retry_wait` is not run.
+## Operator workflow
+`bin/simple test test/01_unit/app/devhub/retry_spec.spl`
+## Compatibility and limitations
+Jitter is 0 or 1 second, so backoff assertions accept the closed range
+[base, base + 1]. The HTTP-date form of Retry-After is not parsed and falls back
+to exponential backoff — pinned here as a stated limitation.
+## Verification guidance and troubleshooting
+A failure means the retry classification or backoff schedule drifted; adapters
+only call these helpers.
+"""
+
+use app.devhub.retry.{ITF_RETRY_MAX_ATTEMPTS, itf_should_retry, itf_retry_backoff_secs}
+use std.spec.step
+
+fn in_jitter_range(v: i64, base: i64) -> bool:
+    v >= base and v <= base + 1
+
+describe "DevHub retry policy":
+    it "retries transport failures, 429 and every 5xx":
+        # @req REQ-DEVHUB-RETRY-001
+        step("Classify a transport error, a rate limit, and the 5xx edges")
+        expect(itf_should_retry(0, "connection reset")).to_equal(true)
+        expect(itf_should_retry(429, "")).to_equal(true)
+        expect(itf_should_retry(500, "")).to_equal(true)
+        expect(itf_should_retry(503, "")).to_equal(true)
+        expect(itf_should_retry(599, "")).to_equal(true)
+
+    it "never retries success, other 4xx, or out-of-range statuses":
+        # @req REQ-DEVHUB-RETRY-001
+        step("Classify 2xx, 400/401/404 and 600 with no transport error")
+        expect(itf_should_retry(200, "")).to_equal(false)
+        expect(itf_should_retry(400, "")).to_equal(false)
+        expect(itf_should_retry(401, "")).to_equal(false)
+        expect(itf_should_retry(404, "")).to_equal(false)
+        expect(itf_should_retry(600, "")).to_equal(false)
+
+    it "backs off exponentially 2/4/8 seconds plus at most 1s jitter":
+        # @req REQ-DEVHUB-RETRY-002
+        step("Compute backoff for attempts 0..2 without a Retry-After header")
+        val b0 = itf_retry_backoff_secs(0, "")
+        val b1 = itf_retry_backoff_secs(1, "")
+        val b2 = itf_retry_backoff_secs(2, "")
+        expect(in_jitter_range(b0, 2)).to_equal(true)
+        expect(in_jitter_range(b1, 4)).to_equal(true)
+        expect(in_jitter_range(b2, 8)).to_equal(true)
+
+    it "honours a numeric Retry-After header over the exponential schedule":
+        # @req REQ-DEVHUB-RETRY-002
+        step("Pass Retry-After: 30 on attempt 2")
+        expect(in_jitter_range(itf_retry_backoff_secs(2, "30"), 30)).to_equal(true)
+
+    it "falls back to exponential backoff for a non-numeric Retry-After":
+        # @req REQ-DEVHUB-RETRY-002
+        step("Pass an HTTP-date Retry-After on attempt 1")
+        val b = itf_retry_backoff_secs(1, "Wed, 21 Oct 2015 07:28:00 GMT")
+        expect(in_jitter_range(b, 4)).to_equal(true)
+
+    it "bounds the attempt budget at three":
+        # @req REQ-DEVHUB-RETRY-003
+        step("Read the shared attempt budget")
+        expect(ITF_RETRY_MAX_ATTEMPTS).to_equal(3)

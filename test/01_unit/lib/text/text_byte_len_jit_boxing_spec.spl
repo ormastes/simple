@@ -1,0 +1,59 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# bug: jit_text_byte_len_untagged_int_boxing_2026-11-06 (doc/08_tracking/bug/bug_db.sdn)
+
+# Regression: under the Cranelift JIT, byte_len() lowered to rt_string_len
+# (raw i64) but HIR declared no result type for it, so the print / call-arg
+# boxing step was skipped and the raw word was read back as a tagged value
+# ("<value:0x5>", a float, `== 10` false). The spec interpreter never hit it,
+# so this spec drives the JIT through a `simple run` subprocess on a fixture
+# and also checks the in-process (interpreter) answers agree.
+# ADR-005: byte_len() = UTF-8 bytes, char_count() = code points.
+# "héllo→l": h é(2) l l o →(3) l = 7 code points, 10 bytes.
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.nogc_sync_mut.io_runtime.{env_get}
+
+val FIXTURE = "test/01_unit/lib/text/fixtures/byte_len_jit_main.spl"
+
+fn simple_bin() -> text:
+    val from_env = env_get("SIMPLE_BIN")
+    if from_env != "":
+        return from_env
+    "bin/simple"
+
+fn jit_output() -> text:
+    val (out, _err, _code) = process_run(simple_bin(), ["run", FIXTURE])
+    out
+
+describe "text byte_len JIT boxing":
+    it "JIT byte_len results are boxed ints in print, arithmetic and comparison":
+        # @req REQ-SSPEC-UNIT
+        step("Run the fixture through the JIT")
+        val out = jit_output()
+        expect(out.contains("bl_ascii=5\n")).to_equal(true)
+        expect(out.contains("bl_utf8=10\n")).to_equal(true)
+        expect(out.contains("bl_sum=15\n")).to_equal(true)
+        expect(out.contains("bl_eq=true\n")).to_equal(true)
+        expect(out.contains("bl_gt=true\n")).to_equal(true)
+        expect(out.contains("bl_fn=10\n")).to_equal(true)
+
+    it "JIT sibling int-returning text methods stay boxed (prevention)":
+        # @req REQ-SSPEC-UNIT
+        step("char_count / len / find / index_of / rfind / count")
+        val out = jit_output()
+        expect(out.contains("cc=7 len=10 find=3 idx=3 rfind=9 count=3")).to_equal(true)
+
+    it "interpreter answers match the JIT fixture":
+        # @req REQ-SSPEC-UNIT
+        step("Same receiver in-process, results used directly")
+        val b = "héllo→l"
+        val y = b.byte_len()
+        expect(y).to_equal(10)
+        expect(y == 10).to_equal(true)
+        expect("{y}").to_equal("10")
+        expect("hello".byte_len()).to_equal(5)
+        expect(b.char_count()).to_equal(7)
+        expect(b.count("l")).to_equal(3)

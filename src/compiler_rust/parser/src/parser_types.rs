@@ -458,9 +458,21 @@ impl<'a> Parser<'a> {
                     break; // Will be handled below
                 }
 
-                // Check for associated type binding: Name=Type (e.g., Iterator<Item=T>)
-                // An identifier followed by = is an associated type binding
-                if let TokenKind::Identifier { name: assoc_name, .. } = &self.current.kind {
+                // Const generic parameters inside `impl Type<T, const N: usize>:`
+                if self.check(&TokenKind::Const) {
+                    self.advance(); // consume 'const'
+                    let const_name = self.expect_identifier()?;
+                    self.expect(&TokenKind::Colon)?;
+                    let _const_ty = self.parse_type()?;
+                    args.push(Type::Simple(const_name));
+                } else if let TokenKind::Integer(n) | TokenKind::TypedInteger(n, _) = &self.current.kind {
+                    // Integer literal const generic argument, e.g. FixedVec<i64, 4>
+                    let n_str = n.to_string();
+                    self.advance();
+                    args.push(Type::Simple(n_str));
+                } else if let TokenKind::Identifier { name: assoc_name, .. } = &self.current.kind {
+                    // Check for associated type binding: Name=Type (e.g., Iterator<Item=T>)
+                    // An identifier followed by = is an associated type binding
                     let assoc_name = assoc_name.clone();
                     // Peek ahead to check if next token is '='
                     if self.peek_is(&TokenKind::Assign) {

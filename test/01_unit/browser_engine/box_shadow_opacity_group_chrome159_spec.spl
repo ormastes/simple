@@ -1,0 +1,51 @@
+"""
+## Purpose and audience
+Purpose: Pin a box-shadow painted inside an `opacity` group against Chrome
+159 on cpu_simd and Vulkan. The group paints into a transparent offscreen,
+and the shadow painter blended its colour against that transparent
+destination while keeping its alpha 0, so the whole shadow vanished.
+Audience: Engine2D maintainers of the shadow painter and its Vulkan twin.
+"""
+
+"""
+Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(shadow inside an opacity group).
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+# A 60x30 #2050c0 box at (20,20) with `box-shadow: 0 10px 8px
+# rgba(0,0,0,0.8)` inside an `opacity:0.5` group, on white.
+val OG_PAGE = "<!DOCTYPE html><html><body style='margin:0;background:#ffffff'><div style='opacity:0.5;padding:20px'><div style='width:60px;height:30px;background:#2050c0;box-shadow:0 10px 8px rgba(0,0,0,0.8)'></div></div></body></html>"
+
+fn og_near(a: u32, b: u32) -> bool:
+    var sh = 0u32
+    while sh <= 16u32:
+        val d = ((a >> sh) & 0xFFu32) as i32 - ((b >> sh) & 0xFFu32) as i32
+        if d > 2 or d < -2:
+            return false
+        sh = sh + 8u32
+    true
+
+# Chrome 159 (k=4 capture, pixel centres): the box (50,35), the shadow
+# below it (50,60) and beside it (85,40).
+fn og_failures(lane: text) -> i32:
+    val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(OG_PAGE, 120, 90, 1, lane)
+    if px.len() != 120 * 90:
+        return -1
+    var bad = 0
+    if not og_near(px[35 * 120 + 50], 0x8EA6DFu32):
+        bad = bad + 1
+    if not og_near(px[60 * 120 + 50], 0xD2D2D2u32):
+        bad = bad + 1
+    if not og_near(px[40 * 120 + 85], 0xF6F6F6u32):
+        bad = bad + 1
+    bad
+
+describe "box-shadow inside an opacity group (Chrome 159)":
+    it "cpu_simd keeps the shadow":
+        expect(og_failures("cpu_simd")).to_equal(0)
+    it "vulkan keeps the shadow":
+        expect(og_failures("vulkan")).to_equal(0)

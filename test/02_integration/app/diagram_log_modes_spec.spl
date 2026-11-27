@@ -1,13 +1,18 @@
 use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
+use test.helpers.simple_cli_spawn_fixture.{simple_cli_run}
 
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+val DIAGRAM_TMP = get_temp_dir().replace("\\", "/") + "/simple-diagram-log-modes"
 
 fn _run_diagram(args: [text]) -> (text, text, i64):
-    val joined = args.join(" ")
-    rt_process_run("/bin/sh", [
-        "-c",
-        "REPO=$(pwd); TMP=/tmp/simple-diagram-log-modes; mkdir -p \"$TMP\"; printf '1|call|Main|Worker|x|ok|5\\n' > \"$TMP/profile.log\"; SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/diagram/main.spl\" " + joined
-    ])
+    val _removed = dir_remove_all(DIAGRAM_TMP)
+    if not dir_create_all(DIAGRAM_TMP):
+        fail("could not create diagram fixture dir " + DIAGRAM_TMP)
+    if not file_create_exclusive(DIAGRAM_TMP + "/profile.log", "1|call|Main|Worker|x|ok|5\n"):
+        fail("could not write diagram fixture profile.log")
+    simple_cli_run(["src/app/diagram/main.spl"] + args, 120000)
 
 describe "diagram log mode CLI options":
     # @manual scenario evidence
@@ -37,9 +42,9 @@ describe "diagram log mode CLI options":
         val (out, err, code) = _run_diagram([
             "--log-mode=json",
             "--from-file",
-            "/tmp/simple-diagram-log-modes/profile.log",
+            DIAGRAM_TMP + "/profile.log",
             "--output",
-            "/tmp/simple-diagram-log-modes",
+            DIAGRAM_TMP,
             "--name",
             "sample"
         ])

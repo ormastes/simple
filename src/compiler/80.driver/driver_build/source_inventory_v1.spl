@@ -1,0 +1,115 @@
+# Source inventory receipt (slice A, plan section 4.2 of
+# doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md).
+#
+# Pure functions only. The caller has already resolved a build unit's globs
+# into (path, content digest) pairs; nothing here walks the filesystem.
+# The receipt is a sorted, digested `source_inventory` SDN block, and the
+# ownership checker reports duplicate owners and orphans as SPL-BUILD-SRC-001.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.driver.driver_build.incremental.{cache_key_frame}
+
+val SOURCE_INVENTORY_DOMAIN_V1 = "simple/source-inventory/v1"
+val SOURCE_INVENTORY_CODE_V1 = "SPL-BUILD-SRC-001"
+
+# One resolved file: repo-relative path plus its content digest.
+struct SourceInventoryFileV1:
+    path: text
+    digest: text
+
+# One unit's resolved file list, for the ownership check.
+struct SourceInventoryUnitV1:
+    name: text
+    files: [SourceInventoryFileV1]
+
+struct SourceInventoryFindingV1:
+    code: text
+    path: text
+    message: text
+
+# Order by path, then digest, dropping exact duplicates. Keys are length-framed
+# so characters cannot be moved between path and digest to forge an order.
+fn _source_inventory_ordered_v1(files: [SourceInventoryFileV1]) -> [SourceInventoryFileV1]:
+    var paths: [text] = []
+    var digests_by_path: {text: [text]} = {}
+    for file in files:
+        if not digests_by_path.contains_key(file.path):
+            digests_by_path[file.path] = []
+            paths.push(file.path)
+        var ds = digests_by_path[file.path]
+        var dup = false
+        for d in ds:
+            if d == file.digest:
+                dup = true
+        if not dup:
+            ds.push(file.digest)
+            digests_by_path[file.path] = ds
+    var out: [SourceInventoryFileV1] = []
+    for path in canonical_identity_sort_texts(paths):
+        for digest in canonical_identity_sort_texts(digests_by_path[path]):
+            out.push(SourceInventoryFileV1(path: path, digest: digest))
+    out
+
+pub fn source_inventory_snapshot_digest_v1(name: text, kind: text, target: text,
+        policy_digest: text, files: [SourceInventoryFileV1]) -> text:
+    var serial = "{SOURCE_INVENTORY_DOMAIN_V1};unit={cache_key_frame(name)};kind={cache_key_frame(kind)};target={cache_key_frame(target)};policy={cache_key_frame(policy_digest)};files="
+    for file in _source_inventory_ordered_v1(files):
+        serial = serial + cache_key_frame(file.path) + cache_key_frame(file.digest)
+    sha256_text(serial)
+
+pub fn source_inventory_receipt_v1(name: text, kind: text, target: text,
+        policy_digest: text, files: [SourceInventoryFileV1]) -> text:
+    val ordered = _source_inventory_ordered_v1(files)
+    val digest = source_inventory_snapshot_digest_v1(name, kind, target, policy_digest, files)
+    var lines: [text] = []
+    lines.push("source_inventory:")
+    lines.push("  unit: {name}")
+    lines.push("  kind: {kind}")
+    lines.push("  target: {target}")
+    lines.push("  policy_digest: {policy_digest}")
+    lines.push("  completeness: complete")
+    lines.push("  file_count: {ordered.len()}")
+    lines.push("  snapshot_digest: {digest}")
+    lines.push("  files:")
+    for file in ordered:
+        lines.push("    - path: {file.path}")
+        lines.push("      digest: {file.digest}")
+    lines.join("\n") + "\n"
+
+# Duplicate owners first (path order), then orphans (path order). A unit
+# listing a path more than once still counts as one owner.
+pub fn source_inventory_ownership_check_v1(units: [SourceInventoryUnitV1],
+        scanned: [text]) -> [SourceInventoryFindingV1]:
+    var owners: {text: [text]} = {}
+    var owned_paths: [text] = []
+    for unit in units:
+        for file in unit.files:
+            if not owners.contains_key(file.path):
+                owners[file.path] = []
+                owned_paths.push(file.path)
+            var names = owners[file.path]
+            var seen = false
+            for n in names:
+                if n == unit.name:
+                    seen = true
+            if not seen:
+                names.push(unit.name)
+                owners[file.path] = names
+    var out: [SourceInventoryFindingV1] = []
+    for path in canonical_identity_sort_texts(owned_paths):
+        val names = canonical_identity_sort_texts(owners[path])
+        if names.len() > 1:
+            out.push(SourceInventoryFindingV1(code: SOURCE_INVENTORY_CODE_V1, path: path,
+                message: "source file has duplicate owners: " + names.join(", ")))
+    var seen_scan: {text: bool} = {}
+    var scan_paths: [text] = []
+    for path in scanned:
+        if not seen_scan.contains_key(path):
+            seen_scan[path] = true
+            scan_paths.push(path)
+    for path in canonical_identity_sort_texts(scan_paths):
+        if not owners.contains_key(path):
+            out.push(SourceInventoryFindingV1(code: SOURCE_INVENTORY_CODE_V1, path: path,
+                message: "source file is under a scanned root but owned by no unit"))
+    out

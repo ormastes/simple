@@ -1,0 +1,946 @@
+# Worker surface closure (true_per_file_pipeline_v1.md P5).
+#
+# A HIR shard worker (--hir-shard, and the HIR children a --file-worker
+# drives) used to build a ModuleSurface for EVERY module of the closure in
+# phase 2: ~1453 parses per worker. It only lowers the modules it claims, and
+# lowering reads only the surfaces of the claimed module's transitive import
+# closure. Here a worker:
+#   1. seeds its static hash slice of the inventory (the same split
+#      driver_parse_shard_hash gives every shard kind),
+#   2. follows `use` / `export use` targets from those seeds (facades are
+#      followed through their own imports) -- worker_surface_closure_v1,
+#   3. builds real surfaces only for that closure, from the module SKELETON
+#      text: the fresh `.tldr` v6 `surface` section, else a fresh `.surface`
+#      sidecar, else module_surface_skeleton_v1 (published by temp file +
+#      atomic rename); one set-once TldrTableV1 entry per content key makes
+#      the work single-flight inside the process,
+#   4. gives every other module an empty-text PLACEHOLDER surface. Identity
+#      fields (path, content hash/length, names) still come from the source,
+#      so hir_cache_closure_digest -- the HIR cache key -- is unchanged
+#      under its default CONTENT rows (a placeholder's semantic digest is an
+#      empty module's, which is why interface rows are opt-in only),
+#   5. after freeze, claims only modules whose whole resolved import/export
+#      route closure (the real resolver's import_target_indices) is built
+#      (worker_surface_ready_v1). A module that is not ready is left
+#      unclaimed; another worker or the parent lowers it. The text closure
+#      in (2) is a heuristic; (5) is what makes it safe.
+#
+# Default ON for HIR shard children; SIMPLE_HIR_WORKER_SKELETON=0 opts out.
+# MIR children under module-scoped instantiation (per-file lane, not whole-program, +
+# SIMPLE_MIR_SHARD_ONLY_PATHS, the file-worker P4 lane, which a file worker's
+# MIR child always is) seed the closure from their admitted target paths and
+# additionally load HIR only for the targets plus their FROZEN import closure
+# (worker_hir_*_v1 below). A target whose closure is not fully built fails
+# closed (OBJECT-PENDING). MIR shards that run whole-program HIR are unchanged: they
+# still build every surface and load every HIR module.
+use compiler.driver.cache.tldr_layout_v1.{tldr_publish_v1}
+use compiler.driver.driver_advice_scan_v1.{advice_source_may_declare_v1}
+use compiler.frontend.core.parser_preprocessor.{pp_scan_diagnostic_state_v1}
+use compiler.driver.driver_worker_surface_graph_v1.{worker_surface_import_ids_v1, worker_surface_ready_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_exists, file_read, file_write, file_delete, dir_exists, dir_list_optional, getpid}
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_atomic_write, file_publish_noreplace}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
+use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
+use compiler.driver.driver_worker_surface_path_v1.{worker_surface_path_suffix_v1}
+use compiler.driver.driver_log_helpers.{driver_phase_trace_enabled, log_phase}
+use compiler.driver.cache.module_surface_skeleton_v1.{module_surface_skeleton_v1}
+use compiler.driver.cache.worker_surface_table_owner_v1.{worker_surface_table_lookup_v1, worker_surface_table_publish_v1}
+use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_path_v1,
+    module_tldr_companion_sections_v1}
+use compiler.frontend.core.interpreter.module_loader_resolve.{resolve_module_path}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_only_paths_parse_v1, file_worker_module_scoped_selected_v1}
+use compiler.driver.driver_tldr_import_route_v1.{tldr_imports_enabled_v1, tldr_guards_active_v1, tldr_closure_walk_check_v1}
+use compiler.common.source_root_resolution.{SourceRootResolutionV1}
+use compiler.driver.driver_library_mode_resolution_v1.{driver_library_mode_resolve_v1, driver_library_mode_native_owner_v1}
+use compiler.driver.driver_source_loading.{_driver_entry_import_dirname, _driver_physical_source_key, driver_closure_import_specs_from_source_v1, driver_owner_scope_counters_v1}
+extern fn rt_process_start_identity(pid: i64) -> i64
+extern fn rt_heap_live_bytes() -> i64
+extern fn rt_heap_aux_live_bytes() -> i64
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
+val WORKER_SURFACE_SIDECAR_HEADER_V1: text = "simple-worker-surface v2"
+
+var _ws_surfaces_built: i64 = 0
+var _ws_surfaces_loaded: i64 = 0
+var _ws_skeleton_parses: i64 = 0
+var _ws_restricted: bool = false
+var _ws_allowed: Dict<text, bool> = {}
+var _ws_hir_restricted: bool = false
+var _ws_hir_allowed: Dict<text, bool> = {}
+var _ws_hir_loaded: i64 = 0
+var _ws_hir_skipped: i64 = 0
+var _ws_lookup_exact: i64 = 0
+var _ws_lookup_fallback: i64 = 0
+var _ws_lookup_rows: i64 = 0
+var _ws_lookup_misses: i64 = 0
+
+pub fn worker_surface_closure_selected_v1(hir_shard_spec: text, flag: text) -> bool:
+    hir_shard_spec != "" and flag != "0"
+
+# Static slice of a `i/n` spec. A malformed spec seeds everything (fail closed
+# to the old whole-closure behaviour, never to an empty worker).
+pub fn worker_surface_seed_v1(spec: text, path: text) -> bool:
+    val slash = spec.index_of("/")
+    if slash <= 0:
+        return true
+    val index = spec.substring(0, slash).to_i64() ?? -1
+    val count = spec.substring(slash + 1, spec.byte_len()).to_i64() ?? 0
+    if count <= 0 or index < 0 or index >= count:
+        return true
+    (driver_parse_shard_hash(path) % count) == index
+
+# SIMPLE_TLDR_IMPORTS=1 forbids a closure walk (PR2c): hard error, never a
+# silent whole-closure load.
+fn _ws_closure_walk_guard_v1(site: text):
+    match tldr_closure_walk_check_v1(tldr_guards_active_v1(), site):
+        case Err(msg): panic(msg)
+        case Ok(_): pass
+
+# Closure over the inventory: seeds plus every module reachable through import
+# ids that resolve (resolve_module_path) to an inventory canonical path.
+# Unresolved ids are dropped; the post-freeze readiness check covers them.
+pub fn worker_surface_closure_v1(paths: [text], canonical_paths: [text], contents: [text],
+        seeds: [bool]) -> [bool]:
+    _ws_closure_walk_guard_v1("worker_surface_closure_v1")
+    _ws_lookup_exact = 0
+    _ws_lookup_fallback = 0
+    _ws_lookup_rows = 0
+    _ws_lookup_misses = 0
+    val trace_lookup = driver_phase_trace_enabled()
+    var by_canonical: Dict<text, i64> = {}
+    var i = 0
+    while i < canonical_paths.len():
+        if not by_canonical.contains_key(canonical_paths[i]):
+            by_canonical[canonical_paths[i]] = i
+        i = i + 1
+    var needed: [bool] = []
+    var queue: [i64] = []
+    i = 0
+    while i < paths.len():
+        val seeded = i < seeds.len() and seeds[i]
+        needed.push(seeded)
+        if seeded: queue.push(i)
+        i = i + 1
+    var head = 0
+    while head < queue.len():
+        val at = queue[head]
+        head = head + 1
+        for id in worker_surface_import_ids_v1(contents[at]):
+            val resolved = resolve_module_path(id, paths[at])
+            if resolved == "":
+                continue
+            val key = _ws_canonical_key_v1(resolved, canonical_paths, by_canonical)
+            if key >= 0 and not needed[key]:
+                needed[key] = true
+                queue.push(key)
+        if trace_lookup and head % 128 == 0:
+            log_phase("phase2:surface:closure:progress sources={head} queued={queue.len()} exact={_ws_lookup_exact} fallback={_ws_lookup_fallback} rows={_ws_lookup_rows} misses={_ws_lookup_misses}")
+    if trace_lookup:
+        log_phase("phase2:surface:closure:done sources={head} exact={_ws_lookup_exact} fallback={_ws_lookup_fallback} rows={_ws_lookup_rows} misses={_ws_lookup_misses}")
+    needed
+
+# The resolver may answer with a differently-rooted spelling of an inventory
+# path; match exactly first, then by unique path suffix.
+fn _ws_canonical_key_v1(resolved: text, canonical_paths: [text], by_canonical: Dict<text, i64>) -> i64:
+    val norm = resolved.replace("\\", "/")
+    if by_canonical.contains_key(norm):
+        _ws_lookup_exact = _ws_lookup_exact + 1
+        return by_canonical[norm]
+    _ws_lookup_fallback = _ws_lookup_fallback + 1
+    var j = 0
+    while j < canonical_paths.len():
+        _ws_lookup_rows = _ws_lookup_rows + 1
+        val c = canonical_paths[j]
+        if worker_surface_path_suffix_v1(c, norm) or worker_surface_path_suffix_v1(norm, c):
+            return j
+        j = j + 1
+    _ws_lookup_misses = _ws_lookup_misses + 1
+    -1
+
+# Resolve the same admitted owner as phase 1. Phase-1 scans are required;
+# extra scanner candidates include speculative grouped members and qualified
+# export providers, so a missing candidate is not an import failure.
+# Sources whose imports the admitted-graph walk resolved (per-unit cost probe).
+var _wa_sources_scanned: i64 = 0
+
+pub fn worker_admitted_sources_scanned_v1() -> i64:
+    _wa_sources_scanned
+
+# Import resolutions (resolve + native-owner check) the walk actually ran.
+# Bug unit_child_first_walk_resolves_every_edge_2026-11-16: every edge paid a
+# resolve + owner rescan, so one unit child's walk over a 3747-module
+# inventory outlived a 31-minute phase-3 run before its first ledger write.
+# SIMPLE_WORKER_ADMITTED_MEMO (default on; 0/false/off rolls back) memoizes the
+# outcome per (candidate, importer dir[, logical owner]) within one walk.
+var _wa_resolutions: i64 = 0
+pub const WORKER_ADMITTED_MEMO_ENV_V1: text = "SIMPLE_WORKER_ADMITTED_MEMO"
+const WORKER_ADMITTED_MEMO_MISSING_V1: i64 = -2
+
+pub struct WorkerAdmittedResolutionsV1:
+    count: i64
+
+pub fn worker_admitted_resolutions_v1() -> WorkerAdmittedResolutionsV1:
+    WorkerAdmittedResolutionsV1(count: _wa_resolutions)
+
+fn worker_admitted_memo_enabled_v1(raw: text) -> bool:
+    val trimmed = raw.trim()
+    trimmed != "0" and trimmed != "false" and trimmed != "off"
+
+# The resolver reads (candidate, roots, importer dir, library_mode, owner);
+# roots and mode are fixed for one walk, the owner matters only in a
+# library mode.
+fn worker_admitted_memo_key_v1(candidate: text, dir: text, library_mode: text, owner: text) -> text:
+    if library_mode == "": "{candidate}\t{dir}" else: "{candidate}\t{dir}\t{owner}"
+
+pub struct WorkerAdmittedGraphV1:
+    edges: [[i64]]
+    errors: [text]
+
+pub fn worker_admitted_edges_v1(paths: [text], contents: [text], names: [text],
+        roots: [text], library_mode: text) -> Result<WorkerAdmittedGraphV1, text>:
+    var seeds: [bool] = []
+    for _path in paths: seeds.push(true)
+    worker_admitted_edges_selected_v1(paths, contents, names, roots, library_mode, seeds)
+
+# Build only nodes reachable from worker seeds; unit ordering deliberately
+# calls the all-seeds wrapper because it orders the complete inventory.
+pub fn worker_admitted_edges_selected_v1(paths: [text], contents: [text], names: [text],
+        roots: [text], library_mode: text, seeds: [bool]) -> Result<WorkerAdmittedGraphV1, text>:
+    if paths.len() != contents.len() or paths.len() != names.len() or paths.len() != seeds.len():
+        return Err("worker surface inventory length mismatch")
+    var by_physical: Dict<text, i64> = {}
+    var i = 0
+    while i < paths.len():
+        val physical = _driver_physical_source_key(paths[i])
+        if not by_physical.contains_key(physical): by_physical[physical] = i
+        i = i + 1
+    val (epoch_base, scopes_base, nested_base, legacy_base) = driver_owner_scope_counters_v1()
+    if driver_phase_trace_enabled():
+        val (pp_target, pp_cfg, pp_log_size, pp_count_size) = pp_scan_diagnostic_state_v1()
+        log_phase("phase2:surface:admitted-graph:preprocess-start pp_target={pp_target} pp_cfg={pp_cfg} pp_memo_log={pp_log_size} pp_memo_count={pp_count_size}")
+    var graph: [[i64]] = []
+    var errors: [text] = []
+    var queued: [bool] = []
+    var queue: [i64] = []
+    i = 0
+    while i < paths.len():
+        graph.push([])
+        errors.push("")
+        queued.push(seeds[i])
+        if seeds[i]: queue.push(i)
+        i = i + 1
+    val memo_on = worker_admitted_memo_enabled_v1(sosix_env_get_nullable(WORKER_ADMITTED_MEMO_ENV_V1) ?? "")
+    var memo: Dict<text, i64> = {}
+    var head = 0
+    while head < queue.len():
+        i = queue[head]
+        head = head + 1
+        _wa_sources_scanned = _wa_sources_scanned + 1
+        # Preprocessing, import-ID extraction and candidate resolution allocate
+        # per-source scratch in the no-GC runtime. Reclaim it at this boundary;
+        # only the dependency row and diagnostic escape into the frozen graph.
+        val scope_owned = rt_transient_array_scope_begin()
+        val required = driver_closure_import_specs_from_source_v1(paths[i], contents[i])
+        var candidates: [text] = []
+        for candidate in required:
+            candidates.push(candidate)
+        for candidate in worker_surface_import_ids_v1(contents[i]):
+            if not candidates.contains(candidate): candidates.push(candidate)
+        val dir = _driver_entry_import_dirname(paths[i])
+        var deps: [i64] = []
+        var error = ""
+        var memo_keys: [text] = []
+        var memo_vals: [i64] = []
+        for candidate in candidates:
+            val is_required = required.contains(candidate)
+            # Memo hit: same (candidate, importer dir[, owner]) resolved earlier
+            # in this walk. Only Found+admitted (dep index) and Missing are
+            # memoized; every error-text outcome is recomputed below.
+            val memo_key = worker_admitted_memo_key_v1(candidate, dir, library_mode, names[i])
+            if memo_on and memo.contains_key(memo_key):
+                val hit = memo[memo_key]
+                if hit >= 0:
+                    if hit != i and not deps.contains(hit): deps.push(hit)
+                    if not queued[hit]:
+                        queued[hit] = true
+                        queue.push(hit)
+                elif is_required and candidate.contains(".") and error == "":
+                    error = "WORKER_IMPORT_MISSING: " + paths[i] + "|" + candidate
+                continue
+            _wa_resolutions = _wa_resolutions + 1
+            val result = driver_library_mode_resolve_v1(candidate, roots, dir, library_mode, names[i])
+            if result.is_err():
+                if is_required and error == "": error = result.unwrap_err()
+                continue
+            val selected = result.unwrap()
+            var target = ""
+            match selected:
+                case SourceRootResolutionV1.Found(path): target = path
+                case SourceRootResolutionV1.Ambiguous(directory):
+                    if is_required and error == "": error = "SOURCE_ROOT_AMBIGUOUS: " + paths[i] + "|" + candidate + "|" + directory
+                case SourceRootResolutionV1.Missing:
+                    if memo_on:
+                        memo_keys.push(memo_key)
+                        memo_vals.push(WORKER_ADMITTED_MEMO_MISSING_V1)
+                    if is_required and candidate.contains(".") and error == "":
+                        error = "WORKER_IMPORT_MISSING: " + paths[i] + "|" + candidate
+            if target == "": continue
+            val owner = driver_library_mode_native_owner_v1(target, candidate, dir, library_mode, names[i])
+            val physical = _driver_physical_source_key(owner)
+            if not by_physical.contains_key(physical):
+                if is_required and error == "": error = "WORKER_PROVIDER_NOT_ADMITTED: " + paths[i] + "|" + candidate + "|" + owner
+                continue
+            val dep = by_physical[physical]
+            if memo_on:
+                memo_keys.push(memo_key)
+                memo_vals.push(dep)
+            if dep != i and not deps.contains(dep): deps.push(dep)
+            if not queued[dep]:
+                queued[dep] = true
+                queue.push(dep)
+        if scope_owned:
+            if not rt_transient_array_scope_pause():
+                val _scope_abandoned = rt_transient_array_scope_end()
+                return Err("worker admitted graph scope pause failed for {paths[i]}")
+            val deps_retained = rt_transient_heap_promote(deps)
+            val error_retained = rt_transient_heap_promote(error)
+            val keys_retained = rt_transient_heap_promote(memo_keys)
+            val vals_retained = rt_transient_heap_promote(memo_vals)
+            val scope_ended = rt_transient_array_scope_end()
+            if not (deps_retained and error_retained and keys_retained and vals_retained and scope_ended):
+                return Err("worker admitted graph retention failed for {paths[i]}")
+        # Memo rows enter the walk-owned Dict only after the scope ended, so
+        # the Dict never grows inside reclaimed scratch.
+        var mi = 0
+        while mi < memo_keys.len():
+            memo[memo_keys[mi]] = memo_vals[mi]
+            mi = mi + 1
+        graph[i] = deps
+        errors[i] = error
+        if driver_phase_trace_enabled() and head % 128 == 0:
+            val (epoch_checks, scopes, nested, legacy) = driver_owner_scope_counters_v1()
+            val live = rt_heap_live_bytes()
+            val aux = rt_heap_aux_live_bytes()
+            val epoch_delta = epoch_checks - epoch_base
+            val scopes_delta = scopes - scopes_base
+            val nested_delta = nested - nested_base
+            val legacy_delta = legacy - legacy_base
+            val (pp_target, pp_cfg, pp_log_size, pp_count_size) = pp_scan_diagnostic_state_v1()
+            log_phase("phase2:surface:admitted-graph:progress scanned={head} queued={queue.len()} inventory={paths.len()} owner_epoch={epoch_delta} owner_scopes={scopes_delta} owner_nested={nested_delta} owner_legacy={legacy_delta} heap_live={live} heap_aux={aux} pp_target={pp_target} pp_cfg={pp_cfg} pp_memo_log={pp_log_size} pp_memo_count={pp_count_size}")
+    if driver_phase_trace_enabled():
+        log_phase("phase2:surface:admitted-graph:done scanned={head} inventory={paths.len()}")
+    Ok(WorkerAdmittedGraphV1(edges: graph, errors: errors))
+
+pub fn worker_admitted_error_v1(graph: WorkerAdmittedGraphV1, selected: [bool]) -> text:
+    var i = 0
+    while i < graph.errors.len():
+        if i < selected.len() and selected[i] and graph.errors[i] != "": return graph.errors[i]
+        i = i + 1
+    ""
+
+pub fn worker_admitted_closure_v1(edges: [[i64]], seeds: [bool]) -> [bool]:
+    var needed: [bool] = []
+    var queue: [i64] = []
+    var i = 0
+    while i < edges.len():
+        val selected = i < seeds.len() and seeds[i]
+        needed.push(selected)
+        if selected: queue.push(i)
+        i = i + 1
+    var head = 0
+    while head < queue.len():
+        val at = queue[head]
+        head = head + 1
+        for dep in edges[at]:
+            if dep >= 0 and dep < needed.len() and not needed[dep]:
+                needed[dep] = true
+                queue.push(dep)
+    needed
+
+# Restrict this worker's claims to `paths` (the ready modules' sources).
+pub fn worker_surface_restrict_claims_v1(paths: [text]):
+    _ws_restricted = true
+    _ws_allowed = {}
+    for p in paths:
+        _ws_allowed[p] = true
+
+pub fn worker_surface_claim_allowed_v1(path: text) -> bool:
+    not _ws_restricted or _ws_allowed.contains_key(path)
+
+# ===== MIR-child scoping (P-A) =====
+
+# Admitted targets of a module-scoped MIR child, or [] when this child must
+# keep the whole-closure behaviour (whole-program lane, skeleton opt-out, or no
+# targets). Scoping is decided by the ONE predicate
+# file_worker_module_scoped_selected_v1 (also used by the HIR deps record) so
+# the two cannot drift. `whole_program` is
+# SIMPLE_BOOTSTRAP_WHOLE_PROGRAM, `flag` is SIMPLE_HIR_WORKER_SKELETON.
+pub fn worker_mir_scoped_targets_v1(whole_program: text, only_paths: text, flag: text) -> [text]:
+    val targets = native_file_worker_only_paths_parse_v1(only_paths)
+    if flag == "0" or not file_worker_module_scoped_selected_v1(whole_program, targets.len() > 0):
+        return []
+    targets
+
+# AOP advice is collected from EVERY loaded HIR module at weave time, and an
+# aspect module is normally not imported by its join points, so it is not in
+# the import closure. A module that may declare `on pc{...}` advice is loaded
+# too. The parser's lexer excludes comments and literals before applying the
+# same inline-whitespace lookahead as current_ident_is_on_advice_decl.
+pub fn worker_source_may_declare_advice_v1(source: text) -> bool:
+    advice_source_may_declare_v1(source)
+
+# Source path for each canonical path (first wins), built once.
+pub fn source_path_by_canonical_map_v1(canonical_paths: [text], source_paths: [text]) -> Dict<text, text>:
+    var out: Dict<text, text> = {}
+    var i = 0
+    while i < canonical_paths.len() and i < source_paths.len():
+        if not out.contains_key(canonical_paths[i]):
+            out[canonical_paths[i]] = source_paths[i]
+        i = i + 1
+    out
+
+# Transitive closure (targets included) over frozen surface edges.
+pub fn worker_surface_import_closure_v1(targets: [i64], edges: [[i64]]) -> [bool]:
+    var needed: [bool] = []
+    for _e in edges:
+        needed.push(false)
+    var queue: [i64] = []
+    for t in targets:
+        if t >= 0 and t < needed.len() and not needed[t]:
+            needed[t] = true
+            queue.push(t)
+    var head = 0
+    while head < queue.len():
+        val at = queue[head]
+        head = head + 1
+        for t in edges[at]:
+            if t >= 0 and t < needed.len() and not needed[t]:
+                needed[t] = true
+                queue.push(t)
+    needed
+
+# Restrict this MIR child's HIR loads (cache hit or local lowering) to `paths`.
+# Set once per process: the first restriction wins (lazy set-once ref).
+pub fn worker_hir_restrict_loads_v1(paths: [text]):
+    if _ws_hir_restricted:
+        return
+    _ws_hir_restricted = true
+    for p in paths:
+        _ws_hir_allowed[p] = true
+
+# True once this process restricted its HIR loads (a module-scoped MIR /
+# per-file unit child). The MIR ownership gate then accepts unheld non-target
+# rows (driver_mir_owner_disposition_v1).
+pub fn worker_hir_loads_restricted_v1() -> bool:
+    _ws_hir_restricted
+
+# Counted gate the HIR stage asks before loading a module.
+pub fn worker_hir_load_allowed_v1(path: text) -> bool:
+    if not _ws_hir_restricted or _ws_hir_allowed.contains_key(path):
+        _ws_hir_loaded = _ws_hir_loaded + 1
+        return true
+    _ws_hir_skipped = _ws_hir_skipped + 1
+    false
+
+pub fn worker_hir_counters_v1() -> text:
+    "hir_loaded={_ws_hir_loaded} hir_skipped={_ws_hir_skipped}"
+
+fn _ws_sidecar_path_v1(root: text, source_path: text) -> text:
+    val tldr = module_tldr_companion_path_v1(root, source_path)
+    tldr.substring(0, tldr.byte_len() - 5) + ".surface"
+
+fn _ws_tldr_surface_v1(root: text, source_path: text, source: text) -> text:
+    val path = module_tldr_companion_path_v1(root, source_path)
+    if not file_exists(path):
+        return ""
+    for entry in module_tldr_companion_sections_v1(file_read(path), source):
+        if entry.starts_with("surface|"):
+            return entry.substring(8)
+    ""
+
+fn _ws_sidecar_surface_v1(path: text, digest: text) -> text:
+    if not file_exists(path):
+        return ""
+    val prefix = WORKER_SURFACE_SIDECAR_HEADER_V1 + "\nsource-sha256: " + digest + "\n"
+    val content = file_read(path)
+    if content.starts_with(prefix): content.substring(prefix.len()) else: ""
+
+fn _ws_publish_sidecar_v1(path: text, digest: text, skeleton: text) -> bool:
+    tldr_publish_v1(path, WORKER_SURFACE_SIDECAR_HEADER_V1 + "\nsource-sha256: " + digest + "\n" + skeleton)
+
+# Surface text for one closure module: table hit, fresh .tldr `surface`
+# section, fresh sidecar, else a new skeleton published for the next process.
+# `tldr_root` "" disables the on-disk layers.
+pub fn worker_surface_text_v1(source_path: text, source: text, tldr_root: text) -> text:
+    _ws_skeleton_parses = _ws_skeleton_parses + 1
+    val digest = sha256_text(source)
+    if val retained = worker_surface_table_lookup_v1(digest):
+        _ws_surfaces_loaded = _ws_surfaces_loaded + 1
+        return retained
+    var text = ""
+    if tldr_root != "":
+        text = _ws_tldr_surface_v1(tldr_root, source_path, source)
+        if text == "":
+            text = _ws_sidecar_surface_v1(_ws_sidecar_path_v1(tldr_root, source_path), digest)
+    if text != "":
+        _ws_surfaces_loaded = _ws_surfaces_loaded + 1
+    else:
+        text = module_surface_skeleton_v1(source)
+        _ws_surfaces_built = _ws_surfaces_built + 1
+        if tldr_root != "":
+            val _published = _ws_publish_sidecar_v1(_ws_sidecar_path_v1(tldr_root, source_path), digest, text)
+    if text != "":
+        val _stored = worker_surface_table_publish_v1(digest, text)
+    text
+
+# Per-file unit child (SIMPLE_FILE_WORKER_UNIT=1, native_file_worker_v1.spl):
+# deps-first order over the frozen sources (iterative DFS post-order on the
+# same import resolution as worker_surface_closure_v1). Every unit child of
+# one invocation computes the same order from the same frozen inventory, so a
+# module is picked only after the modules it imports were picked (an import
+# cycle has no such order: one member of the cycle is picked first).
+pub fn worker_unit_pick_order_v1(paths: [text], canonical_paths: [text], contents: [text]) -> [i64]:
+    # Pick order is a text-only ordering scan (no parse, no load); only the
+    # SIMPLE_TLDR_IMPORTS route forbids it, not the PM3 unit switch.
+    match tldr_closure_walk_check_v1(tldr_imports_enabled_v1(), "worker_unit_pick_order_v1"):
+        case Err(msg): panic(msg)
+        case Ok(_): pass
+    var by_canonical: Dict<text, i64> = {}
+    var i = 0
+    while i < canonical_paths.len():
+        if not by_canonical.contains_key(canonical_paths[i]):
+            by_canonical[canonical_paths[i]] = i
+        i = i + 1
+    var edges: [[i64]] = []
+    i = 0
+    while i < paths.len():
+        var deps: [i64] = []
+        for id in worker_surface_import_ids_v1(contents[i]):
+            val resolved = resolve_module_path(id, paths[i])
+            if resolved != "":
+                val key = _ws_canonical_key_v1(resolved, canonical_paths, by_canonical)
+                if key >= 0 and key != i and not deps.contains(key): deps.push(key)
+        edges.push(deps)
+        i = i + 1
+    worker_admitted_order_v1(edges)
+
+pub fn worker_admitted_order_v1(edges: [[i64]]) -> [i64]:
+    var state: [i64] = []
+    for _p in edges:
+        state.push(0)
+    var order: [i64] = []
+    var stack: [i64] = []
+    var next: [i64] = []
+    var root = 0
+    while root < edges.len():
+        if state[root] == 0:
+            if stack.len() == 0:
+                stack.push(root)
+                next.push(0)
+            else:
+                stack[0] = root
+                next[0] = 0
+            var sp: i64 = 1
+            state[root] = 1
+            while sp > 0:
+                val top = sp - 1
+                val at = stack[top]
+                if next[top] < edges[at].len():
+                    val dep = edges[at][next[top]]
+                    next[top] = next[top] + 1
+                    if dep >= 0 and dep < state.len() and state[dep] == 0:
+                        state[dep] = 1
+                        if sp == stack.len():
+                            stack.push(dep)
+                            next.push(0)
+                        else:
+                            stack[sp] = dep
+                            next[sp] = 0
+                        sp = sp + 1
+                else:
+                    state[at] = 2
+                    order.push(at)
+                    sp = sp - 1
+        root = root + 1
+    order
+
+# Takes up to `batch` sources in `order` that no unit child picked or claimed
+# yet, under the HIR ledger lock. The pick record "<sha256(path)>.pick" holds
+# the owner; the ledger's own readers only read .claim/.terminal. Err when the
+# lock or a pick record cannot be taken -- never confused with a drained
+# ledger. An empty Ok publishes the owner's drained proof: the whole order was
+# scanned under the lock and every source was already picked or claimed.
+# Advisory `{queue}/.pick_cursor` avoids O(n) already-taken prefix rescans by
+# scanning `[cursor .. order.len())` first and wrapping to `[0 .. cursor)` only
+# when `picked.len() < batch` (preserving dead-owner reclamation and full-scan
+# drained proofs).
+# Lease: the record is "owner\npid\nstart" (start = OS process start identity
+# of the picking process). A pick whose pid is gone, or whose pid now names a
+# process with another start identity, is dead and reclaimable by the next
+# picker. A record without a readable lease is treated as live (never stolen).
+pub fn worker_unit_pick_lease_v1(owner: text) -> text:
+    val pid = getpid()
+    "{owner}\n{pid}\n{rt_process_start_identity(pid)}"
+
+pub fn worker_unit_pick_owner_dead_v1(record: text) -> bool:
+    val parts = record.split("\n")
+    if parts.len() < 3:
+        return false
+    val pid = parts[1].to_i64() ?? 0
+    val start = parts[2].to_i64() ?? 0
+    if pid <= 0 or start <= 0:
+        return false
+    rt_process_start_identity(pid) != start
+
+var _worker_unit_pick_seq: i64 = 0
+var _worker_unit_pick_probe_count: i64 = 0
+
+fn _worker_unit_next_pick_seq() -> i64:
+    _worker_unit_pick_seq = _worker_unit_pick_seq + 1
+    _worker_unit_pick_seq
+
+# reason: scalar diagnostic probe counter for O(N) lock-free unit-pick verification
+@allow(primitive_api)
+pub fn worker_unit_pick_probes_v1() -> i64:
+    _worker_unit_pick_probe_count
+
+pub fn worker_unit_pick_probes_reset_v1():
+    _worker_unit_pick_probe_count = 0
+
+fn _worker_unit_pick_cursor_path_for_slot_v1(queue: text, slot: i64, workers: i64) -> text:
+    if workers > 1 and slot >= 0 and slot < workers:
+        return "{queue}/.pick_cursor.{slot}-{workers}"
+    "{queue}/.pick_cursor"
+
+fn _worker_unit_owner_picks_root_v1(queue: text) -> text:
+    "{queue}/owner_picks"
+
+fn _worker_unit_owner_picks_dir_v1(queue: text, owner: text) -> text:
+    "{queue}/owner_picks/{sha256_text(owner)}"
+
+fn _worker_unit_pick_cursor_read_slot_v1(queue: text, slot: i64, workers: i64, limit: i64) -> i64:
+    if limit <= 0:
+        return 0
+    val default_start = if workers > 1 and slot > 0 and slot < workers: (slot * limit) / workers else: 0
+    val path = _worker_unit_pick_cursor_path_for_slot_v1(queue, slot, workers)
+    if not file_exists(path):
+        return default_start
+    val parsed = file_read(path).trim().to_i64() ?? default_start
+    if parsed < 0 or parsed >= limit: default_start else: parsed
+
+fn _worker_unit_owner_stride_slot_v1(owner: text) -> (i64, i64):
+    var base_owner = owner.split("~")[0].split("@")[0]
+    if base_owner.starts_with("file-"):
+        base_owner = base_owner.substring(5, base_owner.byte_len())
+    val parts = base_owner.split("/")
+    if parts.len() != 2:
+        return (0, 1)
+    val slot = parts[0].to_i64() ?? -1
+    val workers = parts[1].to_i64() ?? 0
+    if workers <= 1 or slot < 0 or slot >= workers:
+        return (0, 1)
+    (slot, workers)
+
+fn _worker_unit_publish_pick_noreplace_v1(pick_path: text, lease: text) -> i64:
+    val seq = _worker_unit_next_pick_seq()
+    val tmp = "{pick_path}.{getpid()}.{seq}.tmp"
+    if not file_write(tmp, lease):
+        val _cleanup_err = file_delete(tmp)
+        return -1
+    val published = file_publish_noreplace(tmp, pick_path)
+    val _cleanup = file_delete(tmp)
+    match published:
+        case Ok(created): if created: 1 else: 0
+        case Err(_): -1
+
+fn _worker_unit_stage_owner_pick_marker_v1(queue: text, owner: text, digest: text, path: text) -> text:
+    val dir = _worker_unit_owner_picks_dir_v1(queue, owner)
+    if not dir_create_all(dir):
+        return ""
+    val marker = "{dir}/{digest}.pick"
+    if _worker_unit_publish_pick_noreplace_v1(marker, path) < 0:
+        return ""
+    marker
+
+# Lock-free atomic pick via file_publish_noreplace (link/O_EXCL).
+# 1 = picked (lease published), 0 = already claimed, -2 = already live-picked by peer, -1 = I/O error.
+fn _worker_unit_try_pick_path_v1(queue: text, owner: text, path: text, already_in_batch: bool) -> i64:
+    if already_in_batch:
+        return 0
+    _worker_unit_pick_probe_count = _worker_unit_pick_probe_count + 1
+    val digest = sha256_text(path)
+    val base = "{queue}/{digest}"
+    if file_exists("{base}.claim"):
+        return 0
+    val pick_path = "{base}.pick"
+    val lease = worker_unit_pick_lease_v1(owner)
+    if file_exists(pick_path):
+        if not worker_unit_pick_owner_dead_v1(file_read(pick_path)):
+            return -2
+        val reclaim_marker = _worker_unit_stage_owner_pick_marker_v1(queue, owner, digest, path)
+        if reclaim_marker == "":
+            return -1
+        # Dead-lease recovery: synchronize only on this single key so two
+        # reclaimers cannot unlink a newly published live pick (no global lock).
+        # Never unlink `{base}.reclaim.lock` after unlock (flock+unlink split-brain).
+        val rfd = file_lock("{base}.reclaim.lock", 5)
+        if rfd < 0:
+            val _rm_m = file_delete(reclaim_marker)
+            return -2
+        var reclaimed: i64 = -2
+        if not file_exists("{base}.claim"):
+            if not file_exists(pick_path):
+                reclaimed = _worker_unit_publish_pick_noreplace_v1(pick_path, lease)
+            elif worker_unit_pick_owner_dead_v1(file_read(pick_path)):
+                if file_delete(pick_path):
+                    reclaimed = _worker_unit_publish_pick_noreplace_v1(pick_path, lease)
+        val _runlocked = file_unlock(rfd)
+        if reclaimed == 1:
+            return 1
+        val _rm_reclaim = file_delete(reclaim_marker)
+        if reclaimed < 0 and reclaimed != -2:
+            return -1
+        return -2
+    val marker = _worker_unit_stage_owner_pick_marker_v1(queue, owner, digest, path)
+    if marker == "":
+        return -1
+    val created = _worker_unit_publish_pick_noreplace_v1(pick_path, lease)
+    if created == 1:
+        return 1
+    val _rm_loser = file_delete(marker)
+    if created == 0:
+        return -2
+    -1
+
+# Largest import cycle one unit takes whole; a bigger one keeps the batch pick.
+pub const WORKER_UNIT_CYCLE_PEER_MAX_V1: i64 = 16
+
+# Rows on an import cycle with `seed` (reachable from it and reaching it),
+# without `seed`. edges[i] = the rows row i imports.
+# reason: schedule row indices, as worker_admitted_order_v1
+@allow(primitive_api)
+pub fn worker_unit_cycle_peers_v1(edges: [[i64]], seed: i64) -> [i64]:
+    var peers: [i64] = []
+    if seed < 0 or seed >= edges.len():
+        return peers
+    var forward: [bool] = []
+    var back: [bool] = []
+    for _row in edges:
+        forward.push(false)
+        back.push(false)
+    forward[seed] = true
+    back[seed] = true
+    var reached: [i64] = [seed]
+    var at = 0
+    while at < reached.len():
+        for dep in edges[reached[at]]:
+            if dep >= 0 and dep < edges.len() and not forward[dep]:
+                forward[dep] = true
+                reached.push(dep)
+        at = at + 1
+    var changed = true
+    while changed:
+        changed = false
+        for node in reached:
+            if not back[node]:
+                for dep in edges[node]:
+                    if dep >= 0 and dep < edges.len() and back[dep] and not back[node]:
+                        back[node] = true
+                        changed = true
+    for node in reached:
+        if node != seed and back[node]:
+            peers.push(node)
+    peers
+
+pub fn worker_unit_pick_v1(queue: text, owner: text, paths: [text], order: [i64], batch: i64) -> Result<[text], text>:
+    var picked: [text] = []
+    if queue == "" or owner == "" or owner.contains("\n") or batch <= 0:
+        return Err("unit pick needs a HIR ledger, an owner and a batch")
+    if not dir_exists(queue):
+        return Err("HIR ledger directory unavailable for unit pick")
+    var picked_set: Dict<text, bool> = {}
+    val total = order.len()
+    if total == 0:
+        if not file_atomic_write(worker_unit_drained_path_v1(queue, owner), owner):
+            return Err("unit pick record publication failed")
+        return Ok(picked)
+    val (slot, workers) = _worker_unit_owner_stride_slot_v1(owner)
+    val cursor_path = _worker_unit_pick_cursor_path_for_slot_v1(queue, slot, workers)
+    val start_cursor = _worker_unit_pick_cursor_read_slot_v1(queue, slot, workers, total)
+    var visited: [bool] = []
+    var vi = 0
+    while vi < total:
+        visited.push(false)
+        vi = vi + 1
+    var next_cursor = start_cursor
+    var cursor_published = false
+    var step = 0
+    # Pass 1: lockless per-slot disjoint cursor + contention-leapfrog scan with wraparound stealing.
+    while step < total and picked.len() < batch:
+        val idx = (start_cursor + step) % total
+        visited[idx] = true
+        val path = paths[order[idx]]
+        val status = _worker_unit_try_pick_path_v1(queue, owner, path, picked_set.contains_key(path))
+        if status == -1:
+            return Err("unit pick record publication failed")
+        if status == 1:
+            picked.push(path)
+            picked_set[path] = true
+            next_cursor = (idx + 1) % total
+            if not cursor_published and workers <= 1 and total >= batch * 2:
+                cursor_published = true
+                val _early_cursor = file_atomic_write(cursor_path, "{(idx + batch) % total}")
+            step = step + 1
+        elif status == -2 and picked.len() == 0 and total >= batch * 2 and batch > 1:
+            # Peer is actively claiming this batch window; leapfrog to the next batch boundary.
+            step = step + batch
+        else:
+            step = step + 1
+            if picked.len() == 0:
+                next_cursor = (idx + 1) % total
+    # Pass 2: exact completeness sweep over any indices skipped during contention leapfrogs.
+    if picked.len() < batch:
+        var sweep = 0
+        while sweep < total and picked.len() < batch:
+            val idx = (start_cursor + sweep) % total
+            sweep = sweep + 1
+            if visited[idx]:
+                continue
+            visited[idx] = true
+            val path = paths[order[idx]]
+            val status = _worker_unit_try_pick_path_v1(queue, owner, path, picked_set.contains_key(path))
+            if status == -1:
+                return Err("unit pick record publication failed")
+            if status == 1:
+                picked.push(path)
+                picked_set[path] = true
+                next_cursor = (idx + 1) % total
+    if picked.len() == 0:
+        next_cursor = 0
+    val _cursor_saved = file_atomic_write(cursor_path, "{next_cursor}")
+    if picked.len() == 0:
+        if not file_atomic_write(worker_unit_drained_path_v1(queue, owner), owner):
+            return Err("unit pick record publication failed")
+    Ok(picked)
+
+# worker_unit_pick_v1, then each picked row on an import cycle also takes its
+# free cycle peers past `batch` (edges row-aligned with paths), so the cycle is
+# lowered in one unit. A unit that held a peer only as a summary surface had no
+# class metadata or method call origin for it (bug
+# per_file_unit_class_import_cycle_2026-11-21). A peer another worker already
+# claimed or leased is skipped: the pick stays valid, that peer is an import.
+# reason: raw ledger path, owner and row-index arguments, as worker_unit_pick_v1
+@allow(primitive_api)
+pub fn worker_unit_pick_with_cycle_peers_v1(queue: text, owner: text, paths: [text], order: [i64], batch: i64,
+        edges: [[i64]]) -> Result<[text], text>:
+    val base = worker_unit_pick_v1(queue, owner, paths, order, batch)
+    if base.is_err() or edges.len() != paths.len():
+        return base
+    var picked: [text] = base.unwrap()
+    if picked.len() == 0:
+        return Ok(picked)
+    var picked_set: Dict<text, bool> = {}
+    for p in picked:
+        picked_set[p] = true
+    var order_set: Dict<i64, bool> = {}
+    var seeds: [i64] = []
+    for row in order:
+        order_set[row] = true
+        if picked_set.contains_key(paths[row]):
+            seeds.push(row)
+    for seed in seeds:
+        val peers = worker_unit_cycle_peers_v1(edges, seed)
+        if peers.len() <= WORKER_UNIT_CYCLE_PEER_MAX_V1:
+            for peer in peers:
+                if order_set.contains_key(peer):
+                    val peer_path = paths[peer]
+                    val status = _worker_unit_try_pick_path_v1(queue, owner, peer_path, picked_set.contains_key(peer_path))
+                    if status == -1:
+                        return Err("unit pick record publication failed")
+                    if status == 1:
+                        picked.push(peer_path)
+                        picked_set[peer_path] = true
+    Ok(picked)
+
+pub fn worker_unit_drained_path_v1(queue: text, owner: text) -> text:
+    "{queue}/{sha256_text(owner)}.drained"
+
+# After `owner`'s unit exited: delete its picks that never became a claim so
+# a later unit can pick them again. Returns how many, or -1 when the ledger
+# is unavailable or a record cannot be removed. Lockless via per-owner index.
+fn _worker_unit_drop_orphan_pick_v1(queue: text, digest: text, owner: text) -> i64:
+    val base = "{queue}/{digest}"
+    val pick_path = "{base}.pick"
+    val claim_path = "{base}.claim"
+    if file_exists(claim_path) or not file_exists(pick_path):
+        return 0
+    if file_read(pick_path).split("\n")[0] != owner:
+        return 0
+    # Rare unclaimed-orphan path: coordinate on `{base}.reclaim.lock` (matching
+    # dead-lease reclamation in `_worker_unit_try_pick_path_v1`) so a peer that
+    # reclaimed this dead unit PID's lease cannot have its new `.pick` unlinked.
+    val rfd = file_lock("{base}.reclaim.lock", 5)
+    if rfd < 0:
+        return -1
+    var outcome: i64 = 0
+    if not file_exists(claim_path) and file_exists(pick_path) and file_read(pick_path).split("\n")[0] == owner:
+        if not file_delete(pick_path) and file_exists(pick_path):
+            outcome = -1
+        else:
+            outcome = 1
+    val _runlocked = file_unlock(rfd)
+    outcome
+
+pub fn worker_unit_pick_seal_v1(queue: text, owner: text) -> i64:
+    if queue == "" or not dir_exists(queue):
+        return -1
+    if dir_exists(_worker_unit_owner_picks_root_v1(queue)):
+        val owner_dir = _worker_unit_owner_picks_dir_v1(queue, owner)
+        if not dir_exists(owner_dir):
+            return 0
+        val idx_listing = dir_list_optional(owner_dir)
+        if idx_listing.is_none():
+            return -1
+        var dropped_idx: i64 = 0
+        for name in idx_listing.unwrap():
+            if not name.ends_with(".pick"):
+                continue
+            val digest = name.substring(0, name.byte_len() - 5)
+            val drop_rc = _worker_unit_drop_orphan_pick_v1(queue, digest, owner)
+            if drop_rc < 0:
+                return -1
+            dropped_idx = dropped_idx + drop_rc
+            val _rm_marker = file_delete("{owner_dir}/{name}")
+        return dropped_idx
+    val listing = dir_list_optional(queue)
+    if listing.is_none():
+        return -1
+    var dropped: i64 = 0
+    for name in listing.unwrap():
+        if name.ends_with(".pick"):
+            val digest = name.substring(0, name.byte_len() - 5)
+            val drop_rc = _worker_unit_drop_orphan_pick_v1(queue, digest, owner)
+            if drop_rc < 0:
+                return -1
+            dropped = dropped + drop_rc
+    dropped
+
+pub fn worker_surface_counters_v1() -> text:
+    "surfaces_built={_ws_surfaces_built} surfaces_loaded={_ws_surfaces_loaded} skeleton_parses={_ws_skeleton_parses}"
+
+export worker_surface_closure_selected_v1, worker_surface_seed_v1, worker_surface_import_ids_v1
+export worker_surface_closure_v1, worker_surface_ready_v1
+export worker_surface_restrict_claims_v1, worker_surface_claim_allowed_v1
+export worker_surface_text_v1, worker_surface_counters_v1
+export worker_mir_scoped_targets_v1, worker_surface_import_closure_v1
+export worker_source_may_declare_advice_v1, source_path_by_canonical_map_v1
+export worker_hir_restrict_loads_v1, worker_hir_load_allowed_v1, worker_hir_counters_v1
+export worker_unit_pick_lease_v1, worker_unit_pick_owner_dead_v1
+export WorkerAdmittedResolutionsV1, worker_admitted_resolutions_v1, WORKER_ADMITTED_MEMO_ENV_V1
+export worker_unit_pick_order_v1, worker_unit_pick_v1, worker_unit_drained_path_v1, worker_unit_pick_seal_v1
+export worker_unit_cycle_peers_v1, WORKER_UNIT_CYCLE_PEER_MAX_V1, worker_unit_pick_with_cycle_peers_v1

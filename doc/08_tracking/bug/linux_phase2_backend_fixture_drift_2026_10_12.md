@@ -5,3 +5,24 @@ Status: FIXED by focused fixture correction; full native bootstrap remains unqua
 Fix only the test fixture: exercise all14 existing scenarios on both LLVM and Cranelift, enforce backend forwarding, emit backend-bound receipts, and reject missing/invalid backends before verifier work. Production runner unchanged.
 
 Qualification: corrected32 runner scenarios PASS once; shell syntax PASS. No compiler or full bootstrap executed.
+
+## Evidence: re-verification 2026-11-05 (work/libbug-linux-phase2fix-20261105)
+
+Re-checked on `origin/release/1.0.0` @ adfeae3765c. The correction is already
+present via commits 114ff44787b (runner-side backend/receipt enforcement) and
+d80aaaa574f (fixture binding, "test(bootstrap): bind Linux Phase2 fixtures to
+explicit backend"); both are ancestors of release/1.0.0. No fixture or test
+change was required.
+
+- RED (pre-fix reproduction, d80aaaa574f^): `16 runner scenarios; 4 failures` —
+  `good`/`binding` rejected by `--backend=llvm|cranelift is required` and both
+  memory-cap guards unreachable, matching the CI38162989607 signature.
+- GREEN (current test): `32 runner scenarios; 0 failures`, exit 0 (14 scenarios
+  x llvm/cranelift + malformed/zero memory-cap guards + missing/invalid backend
+  rejection before verifier work). `sh -n` syntax PASS.
+- Non-vacuity: three deliberate fixture corruptions are each caught —
+  (a) summary omits `verification_backend`: 4 failures (runner rejects, status 2);
+  (b) command-owner receipt omits `verification_backend`: 4 failures;
+  (c) fake verifier stops forwarding `--backend` (accepts only cranelift):
+  2 failures (llvm good/binding only). Corruptions were applied to throwaway
+  copies under /tmp, never committed.

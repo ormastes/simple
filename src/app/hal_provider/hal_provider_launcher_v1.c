@@ -45,17 +45,6 @@ static int64_t monotonic_ms(void) {
     return (int64_t)value.tv_sec * 1000 + value.tv_nsec / 1000000;
 }
 
-static int parse_positive(const char *text, int64_t upper, int64_t *out) {
-    char *end = NULL;
-    long long value;
-    if (!text || !*text) return 0;
-    errno = 0;
-    value = strtoll(text, &end, 10);
-    if (errno || !end || *end || value <= 0 || value > upper) return 0;
-    *out = (int64_t)value;
-    return 1;
-}
-
 static int write_all(int fd, const char *data, size_t size) {
     size_t offset = 0;
     while (offset < size) {
@@ -126,6 +115,15 @@ static int parse_u64_text(const char *text, uint64_t *out) {
     value = strtoull(text, &end, 10);
     if (errno || !end || *end) return 0;
     *out = (uint64_t)value;
+    return 1;
+}
+
+static int parse_positive(const char *text, int64_t upper, int64_t *out) {
+    uint64_t value;
+    /* A '-' anywhere is invalid; strtoull would otherwise wrap it. */
+    if (!text || strchr(text, '-') || !parse_u64_text(text, &value) ||
+        value == 0 || value > (uint64_t)upper) return 0;
+    *out = (int64_t)value;
     return 1;
 }
 

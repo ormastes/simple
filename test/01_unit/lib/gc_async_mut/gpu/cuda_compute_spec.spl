@@ -1,0 +1,171 @@
+"""
+## Purpose
+Pure (hardware-free) parts of the CUDA compute backend: library-name resolution
+per OS, kernel argument packing, launch-config layout, f32 word/bytes helpers,
+and the kernel sources shared with the ROCm provider. Runs on any host.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.cuda.cuda_compute.{cuda_driver_lib_names, cuda_nvrtc_lib_names, cuda_libc_name, cuda_pack_args, cuda_launch_config_bytes, cuda_f32_word, cuda_f32_bytes, cuda_driver_available, cuda_open, cuda_launch, cuda_close, cuda_libc_name, cuda_buffer_upload_bytes, cuda_buffer_download_bytes, CudaDevice}
+use std.nogc_sync_mut.sffi.dynamic.{spl_dlopen}
+use std.gc_async_mut.slang.host.slang_host.{host_os_name}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops_cuda.{CudaOps, CudaTensor, cuda_tensor_matvec, cuda_tensor_rmsnorm, cuda_tensor_add, cuda_tensor_mul, cuda_tensor_attention, cuda_tensor_rope, cuda_tensor_kv_write, cuda_tensor_row}
+use std.gc_async_mut.slang.model_executor.pure.gpu_kernel_sources.{SLANG_SRC_MATVEC, SLANG_SRC_ATTENTION}
+
+describe "cuda library name resolution":
+    it "uses nvcuda.dll on Windows and libcuda.so.1 on Linux":
+        expect(cuda_driver_lib_names("windows")).to_equal(["nvcuda.dll"])
+        expect(cuda_driver_lib_names("linux")[0]).to_equal("libcuda.so.1")
+
+    it "picks the C runtime per OS":
+        expect(cuda_libc_name("windows")).to_equal("ucrtbase.dll")
+        expect(cuda_libc_name("linux")).to_equal("libc.so.6")
+
+    it "lists the explicit NVRTC override first, then bin dir, then bare names":
+        val names = cuda_nvrtc_lib_names("windows", "D:\\x\\nvrtc.dll", "C:\\CUDA\\bin", 0)
+        expect(names[0]).to_equal("D:\\x\\nvrtc.dll")
+        expect(names[1]).to_equal("C:\\CUDA\\bin\\nvrtc64_130_0.dll")
+        expect(names[2]).to_equal("C:\\CUDA\\bin\\x64\\nvrtc64_130_0.dll")
+        expect(names[names.len() - 1]).to_equal("nvrtc64_112_0.dll")
+
+    it "uses versioned libnvrtc sonames on Linux and no x64 subdirectory":
+        val names = cuda_nvrtc_lib_names("linux", "", "/usr/local/cuda/lib64", 0)
+        expect(names[0]).to_equal("/usr/local/cuda/lib64/libnvrtc.so.13")
+        expect(names[names.len() - 1]).to_equal("libnvrtc.so")
+        var has_x64 = false
+        for n in names:
+            if n.contains("x64"):
+                has_x64 = true
+        expect(has_x64).to_equal(false)
+
+    it "falls back to bare loader names when no directory is given":
+        expect(cuda_nvrtc_lib_names("windows", "", "", 0)[0]).to_equal("nvrtc64_130_0.dll")
+
+    it "drops NVRTC majors newer than the driver but keeps the override and unversioned names":
+        val win = cuda_nvrtc_lib_names("windows", "D:\\nvrtc64_130_0.dll", "", 12)
+        expect(win).to_equal(["D:\\nvrtc64_130_0.dll", "nvrtc64_120_0.dll", "nvrtc64_112_0.dll"])
+        val lin = cuda_nvrtc_lib_names("linux", "", "", 11)
+        expect(lin).to_equal(["libnvrtc.so.11.2", "libnvrtc.so"])
+        expect(cuda_nvrtc_lib_names("windows", "", "", 13).len()).to_equal(3)
+
+describe "cuda kernel argument packing":
+    it "packs pointers as 8 bytes then words as 4 bytes, params point at each value":
+        val pack = cuda_pack_args(1000, [4096, 8192], [7, 300]).unwrap()
+        expect(pack.argv.len()).to_equal(24)
+        expect(pack.params.len()).to_equal(32)
+        # first pointer value 4096 = 0x1000
+        expect(pack.argv[0]).to_equal(0)
+        expect(pack.argv[1]).to_equal(16)
+        # word 300 = 0x012C at argv offset 20
+        expect(pack.argv[20]).to_equal(44)
+        expect(pack.argv[21]).to_equal(1)
+        # params[0] = base + 0 = 1000 = 0x03E8; params[2] = base + 16 + 0 = 1016 = 0x03F8; params[3] = 1020
+        expect(pack.params[0]).to_equal(232)
+        expect(pack.params[1]).to_equal(3)
+        expect(pack.params[16]).to_equal(248)
+        expect(pack.params[24]).to_equal(252)
+
+    it "rejects an argument list that does not fit the scratch layout":
+        var many: [i64] = []
+        var i: i64 = 0
+        while i < 200:
+            many.push(i)
+            i = i + 1
+        expect(cuda_pack_args(0, many, []).is_err()).to_equal(true)
+
+describe "cuda launch config and f32 helpers":
+    it "lays out CUlaunchConfig as 56 bytes with grid, block, zero stream and attrs":
+        val cfg = cuda_launch_config_bytes(12, 256)
+        expect(cfg.len()).to_equal(56)
+        expect(cfg[0]).to_equal(12)
+        expect(cfg[4]).to_equal(1)
+        expect(cfg[12]).to_equal(0)
+        expect(cfg[13]).to_equal(1)
+        expect(cfg[28]).to_equal(0)
+        expect(cfg[32]).to_equal(0)
+
+    it "encodes f32 words and bytes little-endian":
+        expect(cuda_f32_word(1.0)).to_equal(1065353216)
+        expect(cuda_f32_word(-2.0)).to_equal(3221225472)
+        val b = cuda_f32_bytes([1.0])
+        expect(b).to_equal([0, 0, 128, 63])
+
+describe "kernel sources shared by ROCm and CUDA":
+    it "use 64-bit offsets (long long) rather than platform-dependent long":
+        expect(SLANG_SRC_MATVEC.contains("(long long)row")).to_equal(true)
+        expect(SLANG_SRC_ATTENTION.contains("(long)")).to_equal(false)
+
+describe "cuda open failure":
+    it "returns Err with a reason and releases handles when no NVIDIA driver exists":
+        if cuda_driver_available():
+            print "NOTE: NVIDIA driver present; failure path covered by the hardware-free cases only"
+        else:
+            val r = cuda_open()
+            expect(r.is_err()).to_equal(true)
+            expect(r.unwrap_err()).to_contain("driver library not found")
+
+# A CudaDevice whose every handle is 0. Any driver call through it would crash,
+# so a case that returns Err/Ok through it proves the argument checks run
+# before the first device access.
+fn zero_device() -> CudaDevice:
+    CudaDevice(name: "", ctx: 0, f_malloc: 0, f_free: 0, f_htod: 0, f_dtoh: 0, f_sync: 0, f_modload: 0, f_getfn: 0, f_launch: 0, f_modunload: 0, f_rtc_create: 0, f_rtc_compile: 0, f_rtc_log_size: 0, f_rtc_log: 0, f_rtc_code_size: 0, f_rtc_code: 0, f_rtc_cubin_size: 0, f_rtc_cubin: 0, f_rtc_destroy: 0, cc: 0, c_malloc: 0, c_free: 0, c_memcpy: 0, scratch: 0, launch_scratch: 0, kernels: {}, modules: [], cu_dev: 0, f_release: 0, lib_c: 0, lib_drv: 0, lib_rtc: 0)
+
+fn zero_ops() -> CudaOps:
+    CudaOps(dev: zero_device())
+
+fn tensor_of(shape: [i64]) -> CudaTensor:
+    var n: i64 = 1
+    for d in shape:
+        n = n * d
+    CudaTensor(ptr: 0, n: n, shape: shape)
+
+describe "cuda launch edge cases (no device)":
+    it "treats an empty grid as a no-op instead of calling cuLaunchKernelEx":
+        expect(cuda_launch(zero_device(), 0, 0, 256, [], [0]).is_ok()).to_equal(true)
+
+    it "rejects a block size below 1":
+        expect(cuda_launch(zero_device(), 0, 4, 0, [], []).is_err()).to_equal(true)
+
+    it "cuda_close releases each library once and a second close does nothing":
+        val d = zero_device()
+        d.lib_c = spl_dlopen(cuda_libc_name(host_os_name()))
+        expect(d.lib_c != 0).to_equal(true)
+        cuda_close(d)
+        expect(d.lib_c).to_equal(0)
+        cuda_close(d)
+        expect(d.lib_c).to_equal(0)
+
+describe "cuda zero-length transfers (no device)":
+    it "never reach the driver":
+        expect(cuda_buffer_upload_bytes(zero_device(), 0, [1, 2], 2, 0).unwrap()).to_equal(0)
+        expect(cuda_buffer_download_bytes(zero_device(), 0, 0).unwrap().len()).to_equal(0)
+
+describe "cuda op argument validation (fails before any device access)":
+    it "matvec rejects a non-matrix weight and a mismatched input":
+        val ops = zero_ops()
+        expect(cuda_tensor_matvec(ops, tensor_of([6]), tensor_of([6])).unwrap_err()).to_contain("rank 2")
+        expect(cuda_tensor_matvec(ops, tensor_of([4, 6]), tensor_of([5])).unwrap_err()).to_contain("does not match")
+
+    it "rmsnorm, add and mul reject mismatched operand sizes":
+        val ops = zero_ops()
+        expect(cuda_tensor_rmsnorm(ops, tensor_of([8]), tensor_of([7]), 0.00001).is_err()).to_equal(true)
+        expect(cuda_tensor_add(ops, tensor_of([8]), tensor_of([7])).unwrap_err()).to_contain("add_f32")
+        expect(cuda_tensor_mul(ops, tensor_of([8]), tensor_of([9])).unwrap_err()).to_contain("mul_f32")
+
+    it "attention rejects short q/K/V buffers and out-of-range positions":
+        val ops = zero_ops()
+        expect(cuda_tensor_attention(ops, tensor_of([12]), tensor_of([2, 12]), tensor_of([2, 12]), 3, 3, 4).unwrap_err()).to_contain("cover")
+        expect(cuda_tensor_attention(ops, tensor_of([11]), tensor_of([3, 12]), tensor_of([3, 12]), 3, 3, 4).unwrap_err()).to_contain("cover")
+        expect(cuda_tensor_attention(ops, tensor_of([12]), tensor_of([3, 12]), tensor_of([3, 12]), 2000, 3, 4).unwrap_err()).to_contain("outside 1..1024")
+
+    it "rope rejects an odd head_dim and a size mismatch":
+        val ops = zero_ops()
+        expect(cuda_tensor_rope(ops, tensor_of([9]), 1, 3, 3, 10000.0).is_err()).to_equal(true)
+        expect(cuda_tensor_rope(ops, tensor_of([10]), 1, 3, 4, 10000.0).is_err()).to_equal(true)
+
+    it "kv_write and row reject non-matrix buffers and out-of-range indices":
+        val ops = zero_ops()
+        expect(cuda_tensor_kv_write(ops, tensor_of([8]), 0, tensor_of([8])).unwrap_err()).to_contain("rank 2")
+        expect(cuda_tensor_kv_write(ops, tensor_of([4, 6]), 4, tensor_of([6])).is_err()).to_equal(true)
+        expect(cuda_tensor_row(ops, tensor_of([8]), 0).unwrap_err()).to_contain("rank 2")
+        expect(cuda_tensor_row(ops, tensor_of([5, 6]), 5).is_err()).to_equal(true)

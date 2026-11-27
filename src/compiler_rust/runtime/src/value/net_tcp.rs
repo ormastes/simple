@@ -466,6 +466,15 @@ pub extern "C" fn rt_io_tcp_connect_timeout(addr: crate::value::RuntimeValue, ms
 
 #[no_mangle]
 pub extern "C" fn rt_dns_lookup(hostname: crate::value::RuntimeValue) -> crate::value::RuntimeValue {
+    rt_dns_lookup_timeout_ms(hostname, NET_DNS_LOOKUP_TIMEOUT.as_millis() as i64)
+}
+
+/// Resolve with an explicit budget in ms; a budget <= 0 answers empty without resolving.
+#[no_mangle]
+pub extern "C" fn rt_dns_lookup_timeout_ms(hostname: crate::value::RuntimeValue, timeout_ms: i64) -> crate::value::RuntimeValue {
+    if timeout_ms <= 0 {
+        return crate::value::collections::rt_string_new(std::ptr::null(), 0);
+    }
     let Some((ptr, len)) = runtime_text_ptr_len(hostname) else {
         return crate::value::collections::rt_string_new(std::ptr::null(), 0);
     };
@@ -473,7 +482,7 @@ pub extern "C" fn rt_dns_lookup(hostname: crate::value::RuntimeValue) -> crate::
     let Ok(host) = std::str::from_utf8(bytes) else {
         return crate::value::collections::rt_string_new(std::ptr::null(), 0);
     };
-    let Ok(iter) = resolve_socket_addrs_with_timeout(format!("{host}:0"), NET_DNS_LOOKUP_TIMEOUT) else {
+    let Ok(iter) = resolve_socket_addrs_with_timeout(format!("{host}:0"), std::time::Duration::from_millis(timeout_ms as u64)) else {
         return crate::value::collections::rt_string_new(std::ptr::null(), 0);
     };
 

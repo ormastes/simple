@@ -1,0 +1,76 @@
+"""
+## Purpose and audience
+Purpose: pin the pair kerning between a run's glyph and its collapsible edge
+space against Chrome 159. Chrome shapes a text run together with its edge
+space, so `A ` (Liberation Sans 16px) is 14.234 px, not the 10.672 px glyph
+plus a 4.453 px space (15.125): the kern pair (A,space) is -0.883 px. Charging
+a flat space advance per run made a line of one-letter runs
+(`A <b>B</b> A <b>D</b> ...`) drift ~1 px late per run.
+Audience: browser-engine inline layout maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless, `--hide-scrollbars
+--force-device-scale-factor=1 --window-size=400,300`, host default sans-serif
+16px). Kern of `<letter> ` minus glyph minus space, measured with
+`getBoundingClientRect` on `white-space:pre` text: A -0.883, L -0.602,
+T/Y -0.289 px. Two 300 px blocks, line-height 20 px, one line each.
+`SK_CHROME` holds, per band, the ink-run start columns (a column that is ink
+after a non-ink column; ink = every channel < 160) from the Chrome screenshot.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-INLINE-SPACE-KERN-001 -- a run's edge space is measured with the run so the letter/space kern pair applies; later runs on the line land where Chrome 159 puts them.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_text.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_resolved_engine2d_backend}
+
+val SK_W: i32 = 400
+val SK_H: i32 = 300
+val SK_PAGE: text = "<!DOCTYPE html><html><body style=\"margin:0;background:#fff;color:#000;font:16px sans-serif\"><div style=\"width:300px;line-height:20px\">A <b>B</b> A <b>D</b> A <b>F</b> A</div><div style=\"width:300px;line-height:20px\">A <b>B</b> L <b>D</b> T <b>F</b> Y</div></body></html>"
+# Ink-run start columns per band, 7 per band. Bands stop at 7 runs: the pen
+# origin of a text run inside an inline element is not yet carried (a separate
+# paint-origin gap), so longer lines drift by that, not by the kern pair.
+val SK_CHROME: [i32] = [
+    0, 16, 30, 45, 59, 74, 87,
+    0, 16, 32, 44, 59, 74, 87
+]
+
+fn sk_dark_col(px: [u32], x: i32, y0: i32) -> bool:
+    var y = y0
+    while y < y0 + 20:
+        val p = px[y * SK_W + x]
+        if ((p >> 16) & 255u32) < 160u32 and ((p >> 8) & 255u32) < 160u32 and (p & 255u32) < 160u32:
+            return true
+        y = y + 1
+    false
+
+fn sk_mismatches(px: [u32]) -> i32:
+    if px.len() != SK_W * SK_H:
+        return 99
+    var bad = 0
+    var band = 0
+    while band < 2:
+        var starts: [i32] = []
+        var x = 0
+        while x < SK_W:
+            if sk_dark_col(px, x, band * 20) and (x == 0 or not sk_dark_col(px, x - 1, band * 20)):
+                starts.push(x)
+            x = x + 1
+        if starts.len() != 7:
+            print "band {band}: {starts.len()} ink runs, Chrome 7"
+            bad = bad + 1
+        else:
+            var k = 0
+            while k < 7:
+                val d = starts[k] - SK_CHROME[band * 7 + k]
+                if d > 1 or d < -1:
+                    print "band {band} run {k}: {starts[k]}, Chrome {SK_CHROME[band * 7 + k]}"
+                    bad = bad + 1
+                k = k + 1
+        band = band + 1
+    bad
+
+describe "a run's edge space is kerned with the run like Chrome 159":
+    it "AC-1: A/L/T/Y before a collapsible space move later runs once (cpu_simd)":
+        step("one-letter runs separated by inline elements, kern pairs with the space")
+        expect(sk_mismatches(simple_web_render_html_to_pixels_with_resolved_engine2d_backend(SK_PAGE, SK_W, SK_H, "cpu_simd"))).to_equal(0)

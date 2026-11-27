@@ -1,4 +1,22 @@
 # AES utilities: `generate_aes_key` / `generate_iv` / `generate_nonce` are constant-seeded LCGs
+## RESOLVED (verified 2026-11-25) — the 2026-09-16 "Open" banner below is stale bookkeeping
+
+**Verification 2026-11-25 (work/p2w1-af-20261125, release/1.0.0, Windows,
+Rust seed v1.0.0-rc.1):** fix re-verified by source inspection and execution.
+`src/lib/common/aes/utilities.spl` — `generate_aes_key` (:284) =
+`csprng_bytes(size)`, `generate_iv` (:300) = `csprng_bytes(16)`,
+`generate_nonce` (:304) = `csprng_bytes(16)`; `csprng_bytes` (:19) draws one
+byte per `rt_random_i64()` extern call, no seed/state/LCG. The LCG survives
+only in the DEPRECATED `generate_iv_from_seed` (:324). Ran
+`SIMPLE_LIB=src bin/simple.exe test test/07_security/csprng_salt_iv_spec.spl
+--mode=interpreter` -> **6 total, 6 passed, 0 failed**. (Run required a local,
+reverted strip of `@representation_boundary` decorator lines: release/1.0.0
+HEAD is source/binary inconsistent — commit cfd89933699's annotations are
+rejected by the pinned seed. No source was changed by this verification.)
+The residual C-lane silent-degrade is tracked in
+`crypto_sffi_random_hex_degrades_to_empty_string_on_entropy_failure_2026-08-08.md`,
+also RESOLVED. Status: **STALE / CLOSED**.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

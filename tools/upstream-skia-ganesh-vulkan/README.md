@@ -183,3 +183,11 @@ device preflight receipt
 ICD — or with the digests drifted — is rejected by
 `scripts/check/check-macos-gpu-2d-live-evidence.shs`, which applies the same
 canonical-ICD pin to the full live harness.
+
+Status (2026-11-18): the Linux provider builds on a physical aarch64 NVIDIA
+GB10 host (see `build-status.md`). `build-linux.shs` needs `CC`/`CXX`/`AR`
+naming clang (default `clang`/`clang++`/`llvm-ar`) and accepts
+`SIMPLE_UPSTREAM_SKIA_NINJA_JOBS`. The receipt's `gn_args` remains the
+runner-pinned feature set; host toolchain and font switches are recorded in
+`gn_host_args`, which the runner does not validate. No GB10 worker readback
+exists yet.

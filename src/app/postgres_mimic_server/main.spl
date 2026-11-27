@@ -1,12 +1,16 @@
 """Compiled PostgreSQL-mimic database command entrypoint.
 
 The cached SMF/native artifact owns the database hot path. A network transport
-can supervise this process or compose the same server capsule.
+can supervise this process or compose the same server capsule. `--listen`
+serves a loopback line protocol (see serve.spl); `--vector-provider` opts the
+query path into an admitted RowBitmap AND reducer (see vector.spl).
 """
 
-use std.database.postgres_mimic.{PgResponseKind, postgres_mimic_open,
-    postgres_mimic_startup, postgres_mimic_simple_query, postgres_mimic_close,
-    postgres_mimic_join_text, postgres_mimic_row_tsv}
+use std.database.postgres_mimic.{PgResponseKind, PostgresMimicServer, postgres_mimic_open,
+    postgres_mimic_open_memory, postgres_mimic_startup, postgres_mimic_simple_query,
+    postgres_mimic_close, postgres_mimic_join_text, postgres_mimic_row_tsv}
+use app.postgres_mimic_server.serve.{PgServeConfig, pg_seed_bench_rows, pg_line_serve}
+use app.postgres_mimic_server.vector.{pg_vector_admit, pg_vector_level_name}
 
 extern fn sys_get_args() -> [text]
 
@@ -26,6 +30,8 @@ fn pg_flag_value(args: [text], flag: text, fallback: text) -> text:
 
 fn print_help():
     print "Usage: postgres-mimic-server --db <path> --query <sql>"
+    print "       postgres-mimic-server --listen <host:port> [--db <path>|:memory:] [--seed-rows N]"
+    print "           [--max-requests N] [--vector-provider build/providers/X --vector-provider-sha256 HEX]"
     print "Run this entrypoint from its cached SMF or native artifact."
 
 fn main() -> i64:
@@ -34,11 +40,13 @@ fn main() -> i64:
         print_help()
         return 0
     val path = pg_flag_value(args, "--db", "build/database/default.pdb")
+    val listen = pg_flag_value(args, "--listen", "")
     val sql = pg_flag_value(args, "--query", "")
-    if sql == "":
-        print "error: --query is required"
+    if sql == "" and listen == "":
+        print "error: --query or --listen is required"
         return 2
-    var server = match postgres_mimic_open(path):
+    val opened = if path == ":memory:": postgres_mimic_open_memory() else: postgres_mimic_open(path)
+    var server = match opened:
         Ok(value): value
         Err(reason):
             print "error: database open failed"
@@ -48,6 +56,8 @@ fn main() -> i64:
         Err(reason):
             print "error: session startup failed: {reason}"
             return 1
+    if listen != "":
+        return pg_serve_main(server, session, args, listen)
     val response = postgres_mimic_simple_query(server, session, sql)
     if response.kind == PgResponseKind.ErrorResponse:
         print "ERROR {response.sqlstate} {response.message}"
@@ -60,3 +70,36 @@ fn main() -> i64:
         print response.tag
     postgres_mimic_close(server)
     0
+
+fn pg_serve_main(server: PostgresMimicServer, session: i64, args: [text], listen: text) -> i64:
+    val seed_rows = pg_flag_value(args, "--seed-rows", "0").to_int() ?? -1
+    val max_requests = pg_flag_value(args, "--max-requests", "0").to_int() ?? -1
+    if seed_rows < 0 or max_requests < 0:
+        print "error: --seed-rows and --max-requests must be non-negative integers"
+        return 2
+    val provider = pg_flag_value(args, "--vector-provider", "")
+    val provider_sha = pg_flag_value(args, "--vector-provider-sha256", "")
+    if (provider == "") != (provider_sha == ""):
+        print "error: --vector-provider and --vector-provider-sha256 must be supplied together"
+        return 2
+    if seed_rows > 0:
+        val seeded = pg_seed_bench_rows(server, session, seed_rows)
+        if seeded != "":
+            print "error: seeding bench rows: {seeded}"
+            return 1
+        print "postgres-mimic-server: seeded bench rows={seed_rows}"
+    var parser_name = "scalar"
+    var level: i64 = -1
+    if provider != "":
+        val admission = pg_vector_admit(server, provider, provider_sha)
+        if admission.admitted:
+            parser_name = "vector"
+            level = admission.level
+            print "postgres-mimic-server: vector provider admitted path={provider} level={level} ({pg_vector_level_name(level)})"
+        else:
+            print "postgres-mimic-server: vector provider refused ({admission.reason}); using the scalar query path"
+    val code = pg_line_serve(server, session,
+        PgServeConfig(listen_addr: listen, max_requests: max_requests,
+            provider_level: level, parser_name: parser_name))
+    postgres_mimic_close(server)
+    code

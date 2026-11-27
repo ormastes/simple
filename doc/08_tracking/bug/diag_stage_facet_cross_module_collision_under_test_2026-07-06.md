@@ -445,3 +445,34 @@ widened detector is signal, not a flood.
   and should wait until item 2 lands.
 
 
+
+---
+
+# Verification note 2026-11-25 (release/1.0.0 ledger pass)
+
+**Status clarification:** the 2026-09-16 header ("Open — needs owner triage")
+is stale. Triage was completed 2026-08-01 (see above): the original repro no
+longer reproduces on the Rust seed, the facet-forced-on `it` is restored in
+`test/01_unit/app/ui/browser_shared_wm_and_stage_log_spec.spl`, and the
+collision-detector widening landed on both engines. Verified by code
+inspection at release/1.0.0 HEAD:
+
+- The widened pure-Simple detector is present:
+  `src/compiler/10.frontend/core/interpreter/eval_tables.spl:309`
+  (`_ftr_warn_collision` covers private helpers, public free functions and
+  methods; same-signature arm gated by `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION`).
+- The facet-on oracle `it` is present at
+  `test/01_unit/app/ui/browser_shared_wm_and_stage_log_spec.spl:100`.
+
+Runtime re-verification is environment-blocked on this host: the pinned seed
+binary (v1.0.0-rc.1) rejects `@representation_boundary` (introduced by
+cfd89933699), so `bin/simple.exe test` fails repo-wide at HEAD with
+`unknown decorator '@representation_boundary'`. The limit is the seed, not
+this bug.
+
+**Remaining work (the actual product defect):** the bare-name function
+registry is still not module-qualified — item 2 of "Change I would make"
+(key the interpreter registry on (module path, bare name), mirrored in both
+engines). That is a compiler resolver rework affecting the whole repo, out of
+scope for a bounded P2 fix. This file stays OPEN for that rework only; the
+2026-07-06 symptom itself is not currently reproducible.

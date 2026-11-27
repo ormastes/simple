@@ -70,3 +70,14 @@ same-module access does; no interpreter fallback.
 
 ## Triage 2026-09-12
 Re-verification attempted 2026-09-12 via the record's own repro (`bin/simple examples/12_business/simple_erp/src/business_suite.spl`); it crashed for an unrelated reason (`JIT panicked, falling back to interpreter: can't resolve symbol simple_contract_check`) rather than confirming or refuting the original bool-field HIR-lowering claim. Older than 45 days; closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Verification note (2026-11-25, release/1.0.0)
+
+Re-ran the 2026-09-13 minimal two-module repro verbatim on release/1.0.0
+HEAD (dfbd7c9d765) with the pinned binary (`SIMPLE_LIB=src
+bin/simple.exe run main.spl`, Windows 11 / Git Bash): output `true`,
+exit 0, and no `HIR lowering error ... cannot infer field type ...
+field 'active'` line and no interpreter-fallback message. The
+CLOSED-STALE / CLOSED status stands.
+
+**Status:** resolved (re-verified at tip with the pinned seed).

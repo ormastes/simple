@@ -48,6 +48,17 @@ and scoped workaround without presenting skipped or failed tests as passes.
 - Identify testable behaviors per requirement
 - Map edge cases and error paths
 
+For PDF/standard-derived tests, use the canonical
+[specification sources to executed evidence workflow](../../../doc/07_guide/infra/sspec_typed_evidence.md#specification-sources-to-executed-evidence).
+It covers pinned primary sources, clause-to-requirement mapping, independent
+oracles, real production calls and manual receipts. Keep standard obligations
+distinct from repository policy. Writing a failing-looking test is not an
+observed TDD RED: retain actual before/after results or label AUTHORED_UNRUN.
+An authored manual is not generated evidence. Report branch counts for the
+actual owner/backend/target, including zero-hit branches; label injected failure
+paths separately from real provider failures. Missing runtime evidence remains
+pending rather than a pass. Keep detailed procedures in that guide.
+
 ## Phase 2: Step-Based SSpec Test Generation
 
 Generate executable SSpec `.spl` scenarios using the canonical matcher set.
@@ -74,6 +85,25 @@ generated/manual scenario documentation derived from those specs.
 - `to_raise()` — not available; test error returns via `Result<T, E>`
 - Feature-specific matcher replacements — use helper functions inside SSpec
   scenarios instead
+
+### Control flow in effectful fixtures
+
+Inside a running example, `std.spec.fail(...)` and failed `expect(...)` matchers
+record failures; they are not an early-return mechanism. Before opening another
+resource, sending a request, or closing a parent, propagate failed prerequisites
+through `Result` and explicitly return from the calling scenario/helper. A
+return from `before_each` alone does not establish that the example or
+`after_each` will stop: retain a readiness/error state that those paths check.
+
+For owner-bearing operation/cleanup turns, retain the actual returned owner
+before inspecting success or error flags, following that API's contract. Never
+replace a returned updated owner with a stale original handle. If child cleanup
+is unresolved, preserve its carrier and stop parent close, sweeping, and the
+next setup attempt. Do not retry a consumed raw descriptor to make cleanup pass.
+
+Exercise the failure path with the real fixture when available. A textual
+source-order check is not a native cleanup-fault test; label missing dynamic
+coverage and unexecuted cases explicitly.
 
 ### SSpec Template
 
@@ -134,10 +164,9 @@ describe "<Feature Name>":
 
 ### SimpleOS toolchain and desktop evidence profiles
 
-- Keep one canonical executable spec under `test/03_system/os/`; remove
-  byte-identical compatibility copies under `test/system/` when modernizing
-  that surface. The generated/manual mirror belongs only under
-  `doc/06_spec/03_system/os/`.
+- Keep one canonical executable spec under `test/03_system/os/`; the legacy
+  `test/system/` tree was retired on 2026-11-27, so never add a copy there.
+  The generated/manual mirror belongs only under `doc/06_spec/03_system/os/`.
 - Label each scenario as `source-contract`, `host-fixture`, `image-admission`,
   or `live-guest`. A source/file inventory never satisfies image or live-guest
   behavior. A host fixture may exercise the production wrapper but proves only

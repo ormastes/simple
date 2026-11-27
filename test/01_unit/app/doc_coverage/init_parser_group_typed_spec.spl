@@ -1,0 +1,55 @@
+# Purpose and audience: regression evidence for the doc-coverage command owners.
+# @req REQ-SSPEC-UNIT
+# Bug: `doc-coverage` always ran on the interpreter. parse_init_file kept the
+# open group in `var current_group = nil`, so HIR typed it as struct 'Nil' and
+# `current_group.items` failed with "Cannot infer field type: struct 'Nil'
+# field 'items'", dropping the whole doc_coverage_command module off the JIT.
+# See doc/08_tracking/bug/doc_coverage_root_arg_swallowed_full_repo_scan_2026-11-13.md
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use app.io.mod.{file_exists, process_run, dir_remove_all}
+use app.doc_coverage.analysis.init_parser.{parse_init_file, PublicApiGroup, PublicApiItem}
+
+fn parse_fixture(body: text) -> ([PublicApiGroup], [PublicApiItem]):
+    val root = secure_temp_dir(".", "init-parser-spec-").unwrap()
+    val path = root + "/__init__.spl"
+    file_write(path, body)
+    val result = parse_init_file(path)
+    dir_remove_all(root)
+    result
+
+fn simple_binary() -> text:
+    if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+
+describe "parse_init_file group tracking":
+    it "collects items under their group header and keeps ungrouped items apart":
+        step("an ungrouped item precedes two groups, one of them empty")
+        val result = parse_fixture("# - loose_fn\n# File operations\n# - read_all\n# - write_all\n# Empty Group\n# Network\nuse std.net.{connect, listen}\n")
+        val groups = result.0
+        val loose = result.1
+        step("empty group is dropped; the use-list feeds the open group")
+        expect(groups.len()).to_equal(2)
+        expect(groups[0].group_name).to_equal("File operations")
+        expect(groups[0].items).to_equal(["read_all", "write_all"])
+        expect(groups[1].group_name).to_equal("Network")
+        expect(groups[1].items).to_equal(["connect", "listen"])
+        expect(loose.len()).to_equal(1)
+        expect(loose[0].name).to_equal("loose_fn")
+
+    it "returns no groups when no header was ever opened":
+        step("items only, no header")
+        val result = parse_fixture("# - a\n# - b\n")
+        expect(result.0.len()).to_equal(0)
+        expect(result.1.len()).to_equal(2)
+
+describe "doc-coverage JIT lowering":
+    it "lowers the doc-coverage module without the Nil-receiver field error":
+        step("run doc-coverage over a small directory and capture diagnostics")
+        val (out, err, code) = process_run(simple_binary(), ["doc-coverage", "src/app/doc_coverage/types"])
+        val all = out + err
+        expect(code).to_equal(0)
+        expect(all.contains("Total Items:")).to_equal(true)
+        expect(all.contains("field 'items'")).to_equal(false)
+        expect(all.contains("[jit-fallback]")).to_equal(false)

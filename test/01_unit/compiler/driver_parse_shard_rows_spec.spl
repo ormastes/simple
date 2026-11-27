@@ -1,0 +1,27 @@
+# @cover src/compiler/80.driver/driver_parse_shard_rows_v1.spl
+use compiler.driver.driver_parse_shard_rows_v1.{driver_parse_shard_row_plan_v1}
+
+describe "parse shard canonical source-row plan":
+    it "does not admit a compatibility alias when rotation starts on its row":
+        # Rows 0/1/2 are canonical compiler.frontend.core.parser_identifiers,
+        # numbered spelling and compiler.core compatibility spelling of one
+        # physical file. A shard starting at row 2 must still parse row 0.
+        val paths = ["/snapshot/src/compiler/10.frontend/core/parser_identifiers.spl",
+            "/snapshot/src/compiler/10.frontend/core/parser_identifiers.spl",
+            "/snapshot/src/compiler/10.frontend/core/parser_identifiers.spl",
+            "/snapshot/src/compiler/00.common/module_path_naming.spl"]
+        expect(driver_parse_shard_row_plan_v1(paths, 2)).to_equal([3, 0])
+
+    it "retains every distinct physical source exactly once across interleaved aliases":
+        val paths = ["a.spl", "b.spl", "a.spl", "c.spl", "b.spl", "c.spl"]
+        expect(driver_parse_shard_row_plan_v1(paths, 4)).to_equal([0, 1, 3])
+        expect(driver_parse_shard_row_plan_v1(paths, 1)).to_equal([1, 3, 0])
+
+    it "retains original source indices and ordering when all paths are distinct":
+        expect(driver_parse_shard_row_plan_v1(["a.spl", "b.spl", "c.spl"], 1)).to_equal([1, 2, 0])
+
+    it "handles empty, single-source and whole-ring start boundaries":
+        expect(driver_parse_shard_row_plan_v1([], 0)).to_equal([])
+        expect(driver_parse_shard_row_plan_v1(["a.spl"], 0)).to_equal([0])
+        expect(driver_parse_shard_row_plan_v1(["a.spl", "a.spl"], 1)).to_equal([0])
+        expect(driver_parse_shard_row_plan_v1(["a.spl", "b.spl", "a.spl"], 3)).to_equal([0, 1])

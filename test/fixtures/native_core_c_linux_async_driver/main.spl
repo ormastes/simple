@@ -1,0 +1,36 @@
+# Native fixture: a core-c-bootstrap Linux link must resolve the rt_driver_*
+# family that lib.nogc_async_mut.io.platform_event declares.
+#
+# Before 2026-11-15 runtime_core_c_platform_sources_v1 returned [] for every
+# non-Windows target, so the core-C runtime had no rt_driver_* owner on Linux
+# and the link failed (aarch64 Stage 3: 10 undefined rt_driver_* symbols,
+# all referenced by lib.nogc_async_mut.io.platform_event). The owners are
+# platform/async_driver.c + async_linux_epoll.c + async_linux_uring.c.
+#
+# Copy this directory outside test/ (closure builds exclude fixture trees),
+# e.g. to build/fx/, and build FROM THE REPO ROOT (std.* resolves relative to
+# the working directory) on a Linux host with the C runtime profile:
+#   . scripts/setup/llvm-toolchain-env.shs
+#   SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_GO_TO_END=1 SIMPLE_FILE_WORKERS=0 \
+#   SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap \
+#   <stage2>/simple native-build build/fx/main.spl --backend=cranelift \
+#     --entry-closure --runtime-bundle core-c-bootstrap \
+#     --cache-dir <dir>/cache -o <dir>/out
+#   <dir>/out
+# Before the fix: link fails with ld.lld "undefined symbol" for
+# rt_driver_create, rt_driver_destroy and rt_driver_poll.
+# Expected: the link succeeds and stdout is exactly
+#   driver=ok poll=0 destroyed
+# (a fresh driver has no submitted operation, so a zero-timeout poll returns
+# 0 completions on either backend; io_uring vs epoll is not printed because
+# it depends on host kernel policy).
+use std.nogc_async_mut.io.platform_event.{platform_driver_create, platform_driver_poll, platform_driver_destroy}
+
+fn main():
+    val handle = platform_driver_create(8)
+    if handle < 0:
+        print "driver=failed({handle})"
+        return
+    val ready = platform_driver_poll(handle, 0)
+    platform_driver_destroy(handle)
+    print "driver=ok poll={ready} destroyed"

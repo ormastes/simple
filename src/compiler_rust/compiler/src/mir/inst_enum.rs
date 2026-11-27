@@ -126,6 +126,7 @@ pub enum MirInst {
     /// declared type of the bound place); `inputs` are the vregs it reads.
     /// A raw block has empty operands and an empty constraint string.
     InlineAsm {
+        dialect: crate::hir::AsmDialect,
         instructions: Vec<String>,
         volatile: bool,
         constraints: String,
@@ -493,6 +494,14 @@ pub enum MirInst {
         args: Vec<VReg>,
         /// Effect annotation for the call
         effect: Effect,
+        /// `param_types`/`return_type` are the callee's DECLARED function
+        /// type and the arguments were coerced to those slots
+        /// (`coerce_args_for_param_slots`). Then an `ANY` slot is, by the
+        /// declared-slot convention, a tagged `RuntimeValue` word (an erased
+        /// generic `T`, or `any`) rather than a value of unknown encoding,
+        /// and the JIT closure ABI may carry it. `false` when the signature
+        /// is only a guess from the argument types.
+        signature_declared: bool,
     },
 
     // =========================================================================
@@ -646,6 +655,9 @@ pub enum MirInst {
         enum_name: String,
         /// Variant name
         variant_name: String,
+        /// Variant index in its OWNING enum's declaration, fixed at MIR
+        /// lowering (#6953); codegen must not re-derive it from the name.
+        discriminant: u32,
     },
 
     /// Create an enum variant with payload
@@ -655,6 +667,8 @@ pub enum MirInst {
         enum_name: String,
         /// Variant name
         variant_name: String,
+        /// Variant index in its OWNING enum's declaration (#6953).
+        discriminant: u32,
         /// Payload value
         payload: VReg,
     },

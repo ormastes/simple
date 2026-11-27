@@ -1,0 +1,39 @@
+# The snapshot materializer must resolve a tracked symlink to its real target
+# on every engine. The native runtime's rt_path_absolute is a lexical
+# `_fullpath` on Windows (no symlink resolution), so the owner/fallback check
+# has to use the realpath-semantics canonicalizer instead.
+use std.spec.*
+use std.scv.compile_snapshot.{scv_compile_snapshot_real_path_v1}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use app.io.mod.{dir_create, process_run}
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.io_runtime.{env_set}
+
+extern fn rt_getpid() -> i64
+
+fn real_path_root(label: text) -> text:
+    path_absolute("build/test-artifacts/snapshot-realpath-{rt_getpid()}-{label}").replace("\\", "/")
+
+describe "SCV snapshot real path":
+    it "resolves a symlinked source to the file it points at":
+        val root = real_path_root("link")
+        expect(dir_create(root + "/src/positive", true)).to_equal(true)
+        expect(dir_create(root + "/src/meta", true)).to_equal(true)
+        expect(file_write_bytes(root + "/src/positive/a.spl", text_to_utf8_bytes("fn main():\n    print 1\n"))).to_equal(true)
+        # MSYS ln copies instead of linking unless native symlinks are requested.
+        env_set("MSYS", "winsymlinks:nativestrict")
+        val (_o, _e, code) = process_run("ln", ["-s", "../positive/a.spl", root + "/src/meta/a.spl"])
+        expect(code).to_equal(0)
+        val real = scv_compile_snapshot_real_path_v1(root + "/src/meta/a.spl")
+        expect(real).to_equal(root + "/src/positive/a.spl")
+
+    it "keeps a plain file path unchanged":
+        val root = real_path_root("plain")
+        expect(dir_create(root + "/src", true)).to_equal(true)
+        expect(file_write_bytes(root + "/src/p.spl", text_to_utf8_bytes("x\n"))).to_equal(true)
+        expect(scv_compile_snapshot_real_path_v1(root + "/src/p.spl")).to_equal(root + "/src/p.spl")
+
+    it "falls back to the absolute spelling for a path that does not exist":
+        val root = real_path_root("missing")
+        expect(scv_compile_snapshot_real_path_v1(root + "/src/none.spl")).to_equal(root + "/src/none.spl")

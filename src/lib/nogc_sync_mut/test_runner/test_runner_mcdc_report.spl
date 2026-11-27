@@ -40,7 +40,7 @@ struct McdcRuntimeObligation:
     policy_reason: text
 
 fn parse_mcdc_obligations_v1(manifest: text) -> [McdcRuntimeObligation]?:
-    if manifest.len() > 67108864: return nil
+    if manifest.len() > 67108864: return None
     var obligations: [McdcRuntimeObligation] = []
     var saw_schema = false
     for raw_line in manifest.split("\n"):
@@ -49,14 +49,14 @@ fn parse_mcdc_obligations_v1(manifest: text) -> [McdcRuntimeObligation]?:
             saw_schema = true
         elif line.starts_with("condition|"):
             val fields = line.split("|")
-            if fields.len() != 11: return nil
+            if fields.len() != 11: return None
             val runtime_id = try_parse_int(fields[1])
             val ordinal = try_parse_int(fields[4])
-            if runtime_id == nil or ordinal == nil: return nil
+            if runtime_id == nil or ordinal == nil: return None
             val projection0 = try_parse_int(fields[5]); val projection1 = try_parse_int(fields[6])
             val projection2 = try_parse_int(fields[7]); val projection3 = try_parse_int(fields[8])
-            if projection0 == nil or projection1 == nil or projection2 == nil or projection3 == nil: return nil
-            if fields[9] != "true" and fields[9] != "false": return nil
+            if projection0 == nil or projection1 == nil or projection2 == nil or projection3 == nil: return None
+            if fields[9] != "true" and fields[9] != "false": return None
             if (fields[2].trim() == "" or fields[3].trim() == "" or
                     fields[10].trim() == "" or fields[10].contains("\n") or
                     fields[10].contains("\r") or fields[10].len() > 2048 or
@@ -68,7 +68,7 @@ fn parse_mcdc_obligations_v1(manifest: text) -> [McdcRuntimeObligation]?:
                 projection2: projection2.unwrap(), projection3: projection3.unwrap(),
                 strong_coupling: fields[9] == "true", policy_reason: fields[10]
             ))
-    if not saw_schema or obligations.len() == 0: return nil
+    if not saw_schema or obligations.len() == 0: return None
     Some(obligations)
 
 pub fn test_runner_build_mcdc_evidence(
@@ -130,6 +130,11 @@ pub fn test_runner_build_mcdc_evidence(
                 val analyzed = analysis.conditions[obligation.condition_ordinal]
                 covered = analyzed.covered
                 classification = mcdc_classification_name(analyzed.classification)
+            # Label an uncovered reviewed strong-coupling obligation as such;
+            # the context analysis receives no policy table. (Relabel only:
+            # coverage itself is unchanged.)
+            if not covered and obligation.strong_coupling:
+                classification = "strong-coupling"
             results.push(McdcConditionResult(
                 semantic_id: obligation.semantic_id,
                 identity_version: obligation.identity_version,
@@ -244,7 +249,7 @@ pub fn test_runner_result_with_mcdc_evidence(
     TestFileResult(
         path: result.path, passed: result.passed, failed: result.failed,
         skipped: result.skipped, pending: result.pending,
-        duration_ms: result.duration_ms, setup_ms: result.setup_ms,
+        duration_ms: result.duration_ms, peak_rss_kib: result.peak_rss_kib, setup_ms: result.setup_ms,
         error: result.error, timed_out: result.timed_out, cached: result.cached,
         in_development: result.in_development, mcdc_evidence_v1: evidence,
         blocked: result.blocked, unsupported: result.unsupported,
@@ -266,7 +271,7 @@ fn mcdc_exclusion_value(row: McdcExclusion) -> text:
     "{row.reason}|{row.reviewer}|{row.review_id}|{row.expires_or_version}"
 
 fn mcdc_parse_evaluation(fields: [text]) -> McdcEvaluation?:
-    if fields.len() != 17: return nil
+    if fields.len() != 17: return None
     var values: [i64] = []
     var index = 1
     while index < fields.len():
@@ -274,10 +279,10 @@ fn mcdc_parse_evaluation(fields: [text]) -> McdcEvaluation?:
             index = index + 1
             continue
         val parsed = try_parse_int(fields[index])
-        if parsed == nil: return nil
+        if parsed == nil: return None
         values.push(parsed.unwrap())
         index = index + 1
-    if fields[4] != "true" and fields[4] != "false": return nil
+    if fields[4] != "true" and fields[4] != "false": return None
     Some(McdcEvaluation(
         decision_id: values[0], owner_id: values[1], sequence: values[2],
         outcome: fields[4] == "true",
@@ -290,15 +295,15 @@ fn mcdc_parse_evaluation(fields: [text]) -> McdcEvaluation?:
     ))
 
 fn mcdc_parse_formal_context(fields: [text]) -> McdcMaskingContext?:
-    if fields.len() != 7: return nil
+    if fields.len() != 7: return None
     var values: [i64] = []
     var index = 1
     while index < 6:
         val parsed = try_parse_int(fields[index])
-        if parsed == nil: return nil
+        if parsed == nil: return None
         values.push(parsed.unwrap())
         index = index + 1
-    if fields[6] != "true" and fields[6] != "false": return nil
+    if fields[6] != "true" and fields[6] != "false": return None
     if (values[0] <= 0 or values[1] < 0 or values[1] > 255 or
         values[2] <= 0 or values[3] <= 0 or
         values[4] < 0 or values[4] > 64): return nil
@@ -308,12 +313,12 @@ fn mcdc_parse_formal_context(fields: [text]) -> McdcMaskingContext?:
         requirement_count: values[4], strong_coupling: fields[6] == "true"))
 
 fn mcdc_parse_context_evidence(fields: [text]) -> McdcMaskingContextEvidence?:
-    if fields.len() != 15: return nil
+    if fields.len() != 15: return None
     var values: [i64] = []
     var index = 1
     while index < fields.len():
         val parsed = try_parse_int(fields[index])
-        if parsed == nil: return nil
+        if parsed == nil: return None
         values.push(parsed.unwrap())
         index = index + 1
     if (values[0] <= 0 or values[1] <= 0 or values[2] < 0 or
@@ -359,26 +364,26 @@ pub fn test_runner_aggregate_mcdc_evidence(
         if owner_namespace_paths.contains_key(owner_namespace):
             if owner_namespace_paths[owner_namespace] != result.path:
                 return TestRunnerMcdcAggregate(valid: false,
-                    error: "MCDC-E-OWNER-NAMESPACE-COLLISION", evidence: nil)
+                    error: "MCDC-E-OWNER-NAMESPACE-COLLISION", evidence: None)
         else:
             owner_namespace_paths[owner_namespace] = result.path
         var child_policy_keys: {text: bool} = {}
         if result.cached:
             return TestRunnerMcdcAggregate(valid: false,
-                error: "MCDC-E-CACHED|path={result.path}", evidence: nil)
+                error: "MCDC-E-CACHED|path={result.path}", evidence: None)
         if result.mcdc_evidence_v1 == "" or result.mcdc_evidence_v1 == MCDC_EVIDENCE_INVALID:
             val reason = if result.mcdc_evidence_v1 == "": "missing" else: "invalid"
             return TestRunnerMcdcAggregate(valid: false,
-                error: "MCDC-E-EVIDENCE-{reason.upper()}|path={result.path}", evidence: nil)
+                error: "MCDC-E-EVIDENCE-{reason.upper()}|path={result.path}", evidence: None)
         total_bytes = total_bytes + result.mcdc_evidence_v1.len()
         if total_bytes > MCDC_EVIDENCE_BYTE_CAP:
             return TestRunnerMcdcAggregate(valid: false,
-                error: "MCDC-E-REPORT-CAP|bytes={total_bytes}", evidence: nil)
+                error: "MCDC-E-REPORT-CAP|bytes={total_bytes}", evidence: None)
         val validated_source = test_runner_extract_mcdc_evidence_v1(
             result.mcdc_evidence_v1)
         if validated_source == MCDC_EVIDENCE_INVALID or validated_source == "":
             return TestRunnerMcdcAggregate(valid: false,
-                error: "MCDC-E-EVIDENCE-INVALID|path={result.path}", evidence: nil)
+                error: "MCDC-E-EVIDENCE-INVALID|path={result.path}", evidence: None)
         for line in result.mcdc_evidence_v1.split("\n"):
             val fields = line.trim().split("|")
             if fields.len() == 3 and fields[0] == "counters":
@@ -389,7 +394,7 @@ pub fn test_runner_aggregate_mcdc_evidence(
                         dropped_count > 0x7fffffffffffffff - child_dropped.unwrap() or
                         overwritten_count > 0x7fffffffffffffff - child_overwritten.unwrap()):
                     return TestRunnerMcdcAggregate(valid: false,
-                        error: "MCDC-E-EVIDENCE-INVALID|path={result.path}", evidence: nil)
+                        error: "MCDC-E-EVIDENCE-INVALID|path={result.path}", evidence: None)
                 dropped_count = dropped_count + child_dropped.unwrap()
                 overwritten_count = overwritten_count + child_overwritten.unwrap()
             elif fields.len() == 11 and fields[0] == "obligation":
@@ -399,7 +404,7 @@ pub fn test_runner_aggregate_mcdc_evidence(
                 val p2 = try_parse_int(fields[7]); val p3 = try_parse_int(fields[8])
                 if runtime_id == nil or ordinal == nil or p0 == nil or p1 == nil or p2 == nil or p3 == nil or (fields[9] != "true" and fields[9] != "false") or fields[2].trim() == "" or fields[3].trim() == "" or fields[10].trim() == "" or fields[10].len() > 2048 or ordinal.unwrap() < 0 or ordinal.unwrap() > 255:
                     return TestRunnerMcdcAggregate(valid: false,
-                        error: "MCDC-E-EVIDENCE-INVALID|path={result.path}", evidence: nil)
+                        error: "MCDC-E-EVIDENCE-INVALID|path={result.path}", evidence: None)
                 val row = McdcRuntimeObligation(
                     runtime_id: runtime_id.unwrap(), semantic_id: fields[2],
                     identity_version: fields[3], condition_ordinal: ordinal.unwrap(),
@@ -408,19 +413,19 @@ pub fn test_runner_aggregate_mcdc_evidence(
                 if runtime_semantic_ids.contains_key(row.runtime_id):
                     if runtime_semantic_ids[row.runtime_id] != row.semantic_id:
                         return TestRunnerMcdcAggregate(valid: false,
-                            error: "MCDC-E-RUNTIME-ID-COLLISION|{row.runtime_id}", evidence: nil)
+                            error: "MCDC-E-RUNTIME-ID-COLLISION|{row.runtime_id}", evidence: None)
                 else:
                     runtime_semantic_ids[row.runtime_id] = row.semantic_id
                 val key = "{row.runtime_id}|{mcdc_condition_key(McdcConditionResult(semantic_id: row.semantic_id, identity_version: row.identity_version, condition_ordinal: row.condition_ordinal, covered: false))}"
                 if child_policy_keys.contains_key(key):
                     return TestRunnerMcdcAggregate(valid: false,
-                        error: "MCDC-E-POLICY-DUPLICATE|{key}|path={result.path}", evidence: nil)
+                        error: "MCDC-E-POLICY-DUPLICATE|{key}|path={result.path}", evidence: None)
                 child_policy_keys[key] = true
                 val policy_value = "{row.identity_version}|{row.projection0}|{row.projection1}|{row.projection2}|{row.projection3}|{row.strong_coupling}|{row.policy_reason}"
                 if obligation_keys.contains_key(key):
                     if obligation_keys[key] != policy_value:
                         return TestRunnerMcdcAggregate(valid: false,
-                            error: "MCDC-E-POLICY-CONFLICT|{key}", evidence: nil)
+                            error: "MCDC-E-POLICY-CONFLICT|{key}", evidence: None)
                 else:
                     obligation_keys[key] = policy_value
                     var grouped: [McdcRuntimeObligation] = []
@@ -434,7 +439,7 @@ pub fn test_runner_aggregate_mcdc_evidence(
                 val evaluation = mcdc_parse_evaluation(fields)
                 if evaluation == nil:
                     return TestRunnerMcdcAggregate(valid: false,
-                        error: "MCDC-E-EVIDENCE-INVALID|path={result.path}", evidence: nil)
+                        error: "MCDC-E-EVIDENCE-INVALID|path={result.path}", evidence: None)
                 val parsed_row = evaluation.unwrap()
                 val combined_owner = mcdc_child_owner_id(
                     result.path, parsed_row.owner_id)
@@ -442,7 +447,7 @@ pub fn test_runner_aggregate_mcdc_evidence(
                 if owner_identity_values.contains_key(combined_owner):
                     if owner_identity_values[combined_owner] != owner_identity:
                         return TestRunnerMcdcAggregate(valid: false,
-                            error: "MCDC-E-OWNER-ID-COLLISION", evidence: nil)
+                            error: "MCDC-E-OWNER-ID-COLLISION", evidence: None)
                 else:
                     owner_identity_values[combined_owner] = owner_identity
                 val row = McdcEvaluation(
@@ -470,14 +475,14 @@ pub fn test_runner_aggregate_mcdc_evidence(
                 val parsed_context = mcdc_parse_formal_context(fields)
                 if parsed_context == nil:
                     return TestRunnerMcdcAggregate(valid: false,
-                        error: "MCDC-E-EVIDENCE-INVALID|path={result.path}", evidence: nil)
+                        error: "MCDC-E-EVIDENCE-INVALID|path={result.path}", evidence: None)
                 val row: McdcMaskingContext = parsed_context.unwrap()
                 val key = "{row.decision_id}|{row.target_ordinal}"
                 val value = "{row.proof_id}|{row.context_id}|{row.requirement_count}|{row.strong_coupling}"
                 if context_values.contains_key(key):
                     if context_values[key] != value:
                         return TestRunnerMcdcAggregate(valid: false,
-                            error: "MCDC-E-CONTEXT-CONFLICT|{key}", evidence: nil)
+                            error: "MCDC-E-CONTEXT-CONFLICT|{key}", evidence: None)
                 else:
                     context_values[key] = value
                     var grouped: [McdcMaskingContext] = []
@@ -489,7 +494,7 @@ pub fn test_runner_aggregate_mcdc_evidence(
                 val parsed_context_evidence = mcdc_parse_context_evidence(fields)
                 if parsed_context_evidence == nil:
                     return TestRunnerMcdcAggregate(valid: false,
-                        error: "MCDC-E-EVIDENCE-INVALID|path={result.path}", evidence: nil)
+                        error: "MCDC-E-EVIDENCE-INVALID|path={result.path}", evidence: None)
                 val parsed_row = parsed_context_evidence.unwrap()
                 val combined_owner = mcdc_child_owner_id(
                     result.path, parsed_row.owner_id)
@@ -497,7 +502,7 @@ pub fn test_runner_aggregate_mcdc_evidence(
                 if owner_identity_values.contains_key(combined_owner):
                     if owner_identity_values[combined_owner] != owner_identity:
                         return TestRunnerMcdcAggregate(valid: false,
-                            error: "MCDC-E-OWNER-ID-COLLISION", evidence: nil)
+                            error: "MCDC-E-OWNER-ID-COLLISION", evidence: None)
                 else:
                     owner_identity_values[combined_owner] = owner_identity
                 val row = McdcMaskingContextEvidence(
@@ -519,7 +524,7 @@ pub fn test_runner_aggregate_mcdc_evidence(
                 val ordinal = try_parse_int(fields[2])
                 if ordinal == nil:
                     return TestRunnerMcdcAggregate(valid: false,
-                        error: "MCDC-E-EVIDENCE-INVALID|path={result.path}", evidence: nil)
+                        error: "MCDC-E-EVIDENCE-INVALID|path={result.path}", evidence: None)
                 val row = McdcExclusion(
                     semantic_id: fields[1], condition_ordinal: ordinal.unwrap(),
                     whole_decision: false, reason: fields[3], reviewer: fields[4],
@@ -529,22 +534,22 @@ pub fn test_runner_aggregate_mcdc_evidence(
                 if exclusion_indexes.contains_key(key):
                     if exclusion_values[key] != value:
                         return TestRunnerMcdcAggregate(valid: false,
-                            error: "MCDC-E-EXCLUSION-CONFLICT|{key}", evidence: nil)
+                            error: "MCDC-E-EXCLUSION-CONFLICT|{key}", evidence: None)
                 else:
                     exclusion_indexes[key] = exclusions.len()
                     exclusion_values[key] = value
                     exclusions.push(row)
             elif line.trim() != MCDC_EVIDENCE_HEADER:
                 return TestRunnerMcdcAggregate(valid: false,
-                    error: "MCDC-E-EVIDENCE-INVALID|path={result.path}", evidence: nil)
+                    error: "MCDC-E-EVIDENCE-INVALID|path={result.path}", evidence: None)
             total_rows = total_rows + 1
             if total_rows > MCDC_EVIDENCE_ROW_CAP:
                 return TestRunnerMcdcAggregate(valid: false,
-                    error: "MCDC-E-REPORT-CAP|rows={total_rows}", evidence: nil)
+                    error: "MCDC-E-REPORT-CAP|rows={total_rows}", evidence: None)
     for runtime_id in evaluation_runtime_ids:
         if not obligations_by_runtime.contains_key(runtime_id):
             return TestRunnerMcdcAggregate(valid: false,
-                error: "MCDC-E-EVALUATION-UNKNOWN|{runtime_id}", evidence: nil)
+                error: "MCDC-E-EVALUATION-UNKNOWN|{runtime_id}", evidence: None)
     runtime_ids.sort()
     for runtime_id in runtime_ids:
         val obligations = obligations_by_runtime[runtime_id]
@@ -568,12 +573,22 @@ pub fn test_runner_aggregate_mcdc_evidence(
             contexts, context_evidence, dropped_count, overwritten_count)
         for obligation in obligations:
             var covered = false
-            var classification = "insufficient-evidence"
+            # Same evidence-loss precedence as analyze_mcdc_one_decision: a
+            # decision with no surviving evaluation row under a lossy
+            # recorder is classified by the loss, not as plain insufficiency.
+            var classification = if dropped_count > 0: "evidence-dropped"
+                else if overwritten_count > 0: "evidence-overwritten"
+                else: "insufficient-evidence"
             if (obligation.condition_ordinal >= 0 and
                     obligation.condition_ordinal < analysis.conditions.len()):
                 val analyzed = analysis.conditions[obligation.condition_ordinal]
                 covered = analyzed.covered
                 classification = mcdc_classification_name(analyzed.classification)
+            # Label an uncovered reviewed strong-coupling obligation as such;
+            # the context analysis receives no policy table. (Relabel only:
+            # coverage itself is unchanged.)
+            if not covered and obligation.strong_coupling:
+                classification = "strong-coupling"
             conditions.push(McdcConditionResult(
                 semantic_id: obligation.semantic_id,
                 identity_version: obligation.identity_version,
@@ -603,7 +618,7 @@ pub fn test_runner_aggregate_mcdc_evidence(
     val canonical = driver_parse_mcdc_runtime_evidence_v1(canonical_source)
     if canonical == nil:
         return TestRunnerMcdcAggregate(valid: false,
-            error: "MCDC-E-EVIDENCE-INVALID|canonical", evidence: nil)
+            error: "MCDC-E-EVIDENCE-INVALID|canonical", evidence: None)
     TestRunnerMcdcAggregate(valid: true, error: "", evidence: canonical)
 
 pub fn test_runner_finalize_mcdc_results(
@@ -629,3 +644,74 @@ pub fn test_runner_finalize_mcdc_report(
     evidence: McdcRuntimeCoverageEvidence?
 ) -> McdcReportCompletion:
     driver_complete_mcdc_report(mode_text, profile, evidence)
+
+# End-of-run MC/DC gate shared by the full runner and the single-file lane.
+# `required` mirrors resolve_mcdc_mode_for_profile: MC/DC is mandatory when the
+# mode is on/dynamic and the profile is not one of the two explicit
+# below-normal development spellings.
+#
+# Degrade policy (user ruling 2026-10-30): the Rust seed cannot emit MC/DC
+# probes, so a degraded file (or one with no evidence) is reported, counted
+# and never called MC/DC-compliant, but it does not change the test verdict.
+# Coverage gating applies only to real evidence: when any executed file
+# carried evidence, an under-covered or invalid report fails a required run.
+pub struct TestRunnerMcdcRunGate:
+    required: bool
+    failed: bool
+    lines: [text]
+
+pub fn test_runner_mcdc_run_gate(
+    mode_text: text,
+    profile_text: text,
+    results: [TestFileResult]
+) -> TestRunnerMcdcRunGate:
+    if mode_text != "on" and mode_text != "dynamic":
+        return TestRunnerMcdcRunGate(required: false, failed: false, lines: [])
+    val below_normal = profile_text == "dev" or profile_text == "advisory"
+    val required = not below_normal
+    var lines: [text] = []
+    var degraded_count = 0
+    var missing_count = 0
+    # Only files that executed this run owe evidence. Skip-marker, mode- and
+    # feature-gated files never ran (0 passed, 0 failed, no error, no
+    # evidence, not degraded).
+    var with_evidence: [TestFileResult] = []
+    for result in results:
+        val never_ran = result.passed == 0 and result.failed == 0 and
+            result.error == "" and result.mcdc_evidence_v1 == "" and
+            result.mcdc_skip_reason == "" and not result.timed_out
+        if never_ran:
+            continue
+        if result.mcdc_skip_reason != "":
+            degraded_count = degraded_count + 1
+            lines.push("MC/DC: DEGRADED {result.path}: {result.mcdc_skip_reason}")
+        elif result.mcdc_evidence_v1 == "":
+            missing_count = missing_count + 1
+            lines.push("MC/DC: NO EVIDENCE {result.path}")
+        else:
+            with_evidence.push(result)
+    lines.push("=== MC/DC decision report (mode={mode_text}) ===")
+    val not_instrumented = degraded_count + missing_count
+    if not_instrumented > 0:
+        lines.push("MC/DC: NOT COMPLIANT: {degraded_count} degraded, " +
+            "{missing_count} without evidence; test verdict unaffected")
+    if with_evidence.len() == 0:
+        lines.push("MC/DC: no runtime evidence collected; no decision report")
+        return TestRunnerMcdcRunGate(required: required, failed: false, lines: lines)
+    val completion = test_runner_finalize_mcdc_results(
+        mode_text, AssuranceStrictness.from_name(profile_text), with_evidence)
+    if completion.human_diagnostic != "":
+        for line in completion.human_diagnostic.split("\n"):
+            lines.push(line)
+    val failed = required and not completion.accepted
+    if failed:
+        lines.push("error: MC/DC required (mode={mode_text}) and not satisfied: " +
+            completion.machine_diagnostic.split("\n")[0])
+    elif not completion.accepted:
+        lines.push("MC/DC: advisory only (profile={profile_text}); not satisfied: " +
+            completion.machine_diagnostic.split("\n")[0])
+    elif not_instrumented == 0:
+        lines.push("MC/DC: PASS")
+    else:
+        lines.push("MC/DC: instrumented files covered; run not compliant")
+    TestRunnerMcdcRunGate(required: required, failed: failed, lines: lines)

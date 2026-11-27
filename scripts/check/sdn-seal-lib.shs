@@ -1,0 +1,377 @@
+#!/bin/sh
+# sdn-seal-lib.shs — shell twin of src/lib/nogc_sync_mut/database/csm_seal.spl.
+# SOURCE it (`. "$HERE/sdn-seal-lib.shs"`); it defines functions only.
+#
+# A sealed data file `dir/X.sdn` is accompanied by an EMPTY sibling file
+# `dir/X.<algo>_<lowercase hex>.csm`; the hash is over the LF-normalized file
+# (every CR dropped). ONE hashing function: csm_hash_hex <algo> <file>.
+#
+# States (csm_judge / csm_state): OK | CORRUPT | MERGED_UNSEALED | MISSING | LEGACY
+# Policy (config/check/sdn_seal_policy.sdn) maps path globs -> algorithm; a .csm
+# whose algorithm differs from the policy is RESEAL_NEEDED (reported by gates).
+
+CSM_DEFAULT_ALGO=xxh3
+
+csm_hex_len() { # algo -> width; returns 1 for an unknown tag (fail closed)
+    case "$1" in crc32) echo 8 ;; xxh3) echo 16 ;; blake3) echo 64 ;; *) return 1 ;; esac
+}
+
+# xxh3/blake3 are computed by the pure-Simple CLI (src/app/hash/main.spl), which
+# costs ~5 s of startup per process: callers with many files use csm_hash_batch.
+_cs_libdir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+# native spelling: under MSYS_NO_PATHCONV=1 git.exe cannot read /c/... paths
+if command -v cygpath >/dev/null 2>&1; then _cs_libdir=$(cygpath -m "$_cs_libdir"); fi
+CSM_TOOL_ROOT=$(git -C "$_cs_libdir" rev-parse --show-toplevel 2>/dev/null)
+csm_tool_root() { echo "$CSM_TOOL_ROOT"; }
+
+# Pure-Simple hasher lookup (after xxhsum on PATH, which callers try first): $SIMPLE_BIN,
+# the worktree's bin/simple(.exe), then the common-dir checkout's (worktrees
+# under C:/dev/wt have no binary of their own). Never Python.
+csm_simple_bin() {
+    _r=$(csm_tool_root)
+    _common=$(git -C "$_r" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+    for _b in "${SIMPLE_BIN:-}" "$_r/bin/simple.exe" "$_r/bin/simple" "${_common%/.git}/bin/simple.exe" "${_common%/.git}/bin/simple"; do
+        [ -n "$_b" ] && [ -x "$_b" ] && { echo "$_b"; return 0; }
+    done
+    return 1
+}
+
+# The hash app and std are read as SOURCE relative to cwd. Run from the chosen
+# binary's own checkout (<root>/bin/simple) when it carries them, so a sparse
+# worktree without src/lib still works; else from this tool root.
+csm_hasher_root() { # bin -> root dir
+    _hr=$(dirname -- "$(dirname -- "$1")")
+    if [ -f "$_hr/src/app/hash/main.spl" ] && [ -d "$_hr/src/lib" ]; then echo "$_hr"; else csm_tool_root; fi
+}
+
+csm_native_path() { # absolute, native spelling (the hasher runs from the tool root)
+    case "$1" in
+        [A-Za-z]:/*)
+            case "$1" in *\\*) ;; *) printf '%s\n' "$1"; return 0 ;; esac ;;
+    esac
+    case "$1" in /*|[A-Za-z]:*) _np=$1 ;; *) _np="$PWD/$1" ;; esac
+    case "$_np" in
+        [A-Za-z]:/*)
+            case "$_np" in *\\*) ;; *) printf '%s\n' "$_np"; return 0 ;; esac ;;
+    esac
+    if command -v cygpath >/dev/null 2>&1; then cygpath -m "$_np"; else printf '%s\n' "$_np"; fi
+}
+
+csm_native_hasher() { # algo -> 0 when a native digest tool exists
+    case "$1" in
+        xxh3) command -v xxhsum >/dev/null 2>&1 ;;
+        blake3) command -v b3sum >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
+}
+
+# LF-normalized digest of <file> from the native tool; prints lowercase hex only.
+csm_native_hash() { # algo file
+    case "$1" in
+        xxh3) _nh=$(tr -d '\r' < "$2" | xxhsum -H3 2>/dev/null | head -1) || return 1 ;;
+        blake3) _nh=$(tr -d '\r' < "$2" | b3sum --no-names 2>/dev/null | head -1) || return 1 ;;
+        *) return 1 ;;
+    esac
+    # GNU style `XXH3_<hex>  stdin` (0.8.3+) / bare `<hex>  stdin`, or BSD style
+    # `XXH3 (stdin) = <hex>` (0.8.2, Ubuntu 24.04's package).
+    case "$_nh" in *' = '*) _nh=${_nh##* = } ;; esac
+    _nh=${_nh%% *}; _nh=${_nh#XXH3_}
+    _w=$(csm_hex_len "$1")
+    case "$_nh" in ''|*[!0-9a-f]*) return 1 ;; esac
+    [ "${#_nh}" -eq "$_w" ] || return 1
+    printf '%s\n' "$_nh"
+}
+
+# Known answers over EMPTY input (published constants): a hasher that does not
+# reproduce them is the wrong algorithm/variant and must not seal or verify.
+CSM_KAT_XXH3_EMPTY=2d06800538d394c2
+CSM_KAT_BLAKE3_EMPTY=af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
+
+csm_hasher_kat() { # algo -> 0 when the active hasher reproduces the empty-input KAT
+    _ke=$(mktemp) || return 1
+    : > "$_ke"
+    _ko=$(csm_hash_hex "$1" "$_ke" 2>/dev/null); _krc=$?
+    rm -f "$_ke"
+    [ "$_krc" -eq 0 ] || return 1
+    case "$1" in
+        crc32) [ "$_ko" = 00000000 ] ;;
+        xxh3) [ "$_ko" = "$CSM_KAT_XXH3_EMPTY" ] ;;
+        blake3) [ "$_ko" = "$CSM_KAT_BLAKE3_EMPTY" ] ;;
+        *) return 1 ;;
+    esac
+}
+
+# _csm_native_chunk <algo> <outfile> <file>... -> fast batch for <= 80 files.
+_csm_native_chunk() {
+    _ca=$1; _co=$2; shift 2
+    [ $# -gt 0 ] || return 0
+    _need_cyg=0
+    if command -v cygpath >/dev/null 2>&1; then
+        for _bf in "$@"; do
+            case "$_bf" in
+                [A-Za-z]:/*) case "$_bf" in *\\*) _need_cyg=1; break ;; esac ;;
+                *) _need_cyg=1; break ;;
+            esac
+        done
+    fi
+    if [ "$_need_cyg" -eq 0 ]; then
+        for _bf in "$@"; do
+            [ -f "$_bf" ] && [ -r "$_bf" ] || { echo "csm: native $_ca hasher cannot read $_bf" >&2; return 1; }
+        done
+        _cr_hit=$(awk 'BEGIN{BINMODE=3} /\r/{print FILENAME; exit 0}' "$@" 2>/dev/null)
+        if [ -z "$_cr_hit" ]; then
+            case "$_ca" in
+                xxh3)
+                    rm -f "$_co.part"
+                    _raw=$(xxhsum -H3 "$@" 2>/dev/null) || { echo "csm: native xxh3 batch failed" >&2; return 1; }
+                    if printf '%s\n' "$_raw" | awk -v n="$#" '
+                        {
+                            line = $0
+                            if (line ~ / = [0-9a-f]+$/) {
+                                sub(/^.* = /, "", line); h = line
+                            } else {
+                                sub(/[ \t].*$/, "", line); sub(/^XXH3_/, "", line); h = line
+                            }
+                            if (length(h) != 16 || h !~ /^[0-9a-f]+$/) exit 1
+                            print h; c++
+                        }
+                        END { if (c != n) exit 1 }
+                    ' > "$_co.part"; then
+                        cat "$_co.part" >> "$_co" && rm -f "$_co.part" && return 0
+                    fi
+                    rm -f "$_co.part" ;;
+                blake3)
+                    rm -f "$_co.part"
+                    _raw=$(b3sum --no-names "$@" 2>/dev/null) || { echo "csm: native blake3 batch failed" >&2; return 1; }
+                    if printf '%s\n' "$_raw" | awk -v n="$#" '
+                        {
+                            h = $1
+                            if (length(h) != 64 || h !~ /^[0-9a-f]+$/) exit 1
+                            print h; c++
+                        }
+                        END { if (c != n) exit 1 }
+                    ' > "$_co.part"; then
+                        cat "$_co.part" >> "$_co" && rm -f "$_co.part" && return 0
+                    fi
+                    rm -f "$_co.part" ;;
+            esac
+        fi
+    fi
+    for _bf in "$@"; do
+        _bn=$(csm_native_hash "$_ca" "$_bf") || { echo "csm: native $_ca hasher failed on $_bf" >&2; return 1; }
+        printf '%s\n' "$_bn" >> "$_co"
+    done
+}
+
+# csm_hash_batch <algo> <outfile> <file>... -> one lowercase hex per input, in
+# input order, one per line. Vectorized for xxh3/blake3, chunked to stay well
+# below Windows argv limits. Fail closed (rc 1) on unreadable files or wrong count.
+csm_hash_batch() {
+    _ba=$1; _bo=$2; shift 2
+    : > "$_bo"
+    [ $# -gt 0 ] || return 0
+    case "$_ba" in
+        crc32)
+            for _bf in "$@"; do
+                _bn=$(tr -d '\r' < "$_bf" | gzip -c -n | tail -c 8 | head -c 4 | od -An -tu4 | tr -d ' \n') || return 1
+                [ -n "$_bn" ] || return 1
+                printf '%08x\n' "$_bn" >> "$_bo"
+            done ;;
+        xxh3|blake3)
+            # Prefer a native tool (xxhsum -H3 / b3sum: milliseconds, and what a CI
+            # runner has); otherwise ONE pure-Simple CLI process per bounded chunk
+            # (src/app/hash/main.spl, ~5 s of startup). Both are KAT-checked by the
+            # gate selftest (empty-input digests below) so they cannot disagree
+            # silently. SDN_SEAL_HASHER=simple forces the CLI.
+            if [ "${SDN_SEAL_HASHER:-}" != simple ] && csm_native_hasher "$_ba"; then
+                while [ $# -gt 80 ]; do
+                    _csm_native_chunk "$_ba" "$_bo" \
+                        "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" \
+                        "${11}" "${12}" "${13}" "${14}" "${15}" "${16}" "${17}" "${18}" "${19}" "${20}" \
+                        "${21}" "${22}" "${23}" "${24}" "${25}" "${26}" "${27}" "${28}" "${29}" "${30}" \
+                        "${31}" "${32}" "${33}" "${34}" "${35}" "${36}" "${37}" "${38}" "${39}" "${40}" \
+                        "${41}" "${42}" "${43}" "${44}" "${45}" "${46}" "${47}" "${48}" "${49}" "${50}" \
+                        "${51}" "${52}" "${53}" "${54}" "${55}" "${56}" "${57}" "${58}" "${59}" "${60}" \
+                        "${61}" "${62}" "${63}" "${64}" "${65}" "${66}" "${67}" "${68}" "${69}" "${70}" \
+                        "${71}" "${72}" "${73}" "${74}" "${75}" "${76}" "${77}" "${78}" "${79}" "${80}" || return 1
+                    shift 80
+                done
+                if [ $# -gt 0 ]; then
+                    _csm_native_chunk "$_ba" "$_bo" "$@" || return 1
+                fi
+                return 0
+            fi
+            _bin=$(csm_simple_bin) || { echo "csm: no $_ba hasher found: need xxhsum/b3sum on PATH, bin/simple(.exe) in this worktree or its git common-dir checkout, or SIMPLE_BIN (no Python fallback)" >&2; return 1; }
+            _cs_root=$(csm_hasher_root "$_bin")
+            _w=$(csm_hex_len "$_ba")
+            _raw="$_bo.raw"
+            _chunk_simple() {
+                _csa=$1; _cso=$2; shift 2
+                set -- $(for _bf in "$@"; do csm_native_path "$_bf"; done)
+                (cd "$_cs_root" && "$_bin" run src/app/hash/main.spl "--$_csa" --lf "$@") > "$_raw" 2>/dev/null
+                _brc=$?
+                [ "$_brc" -eq 0 ] || { echo "csm: $_csa hasher exited $_brc (unreadable file?)" >&2; rm -f "$_raw"; return 1; }
+                _part="$_cso.part"
+                grep -E "^[0-9a-f]{$_w}  " "$_raw" | cut -d' ' -f1 > "$_part"
+                rm -f "$_raw"
+                [ "$(wc -l < "$_part" | tr -d ' ')" -eq $# ] || { rm -f "$_part"; echo "csm: $_csa hasher returned a wrong digest count" >&2; return 1; }
+                cat "$_part" >> "$_cso"
+                rm -f "$_part"
+            }
+            while [ $# -gt 150 ]; do
+                _chunk_simple "$_ba" "$_bo" \
+                    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" \
+                    "${11}" "${12}" "${13}" "${14}" "${15}" "${16}" "${17}" "${18}" "${19}" "${20}" \
+                    "${21}" "${22}" "${23}" "${24}" "${25}" "${26}" "${27}" "${28}" "${29}" "${30}" \
+                    "${31}" "${32}" "${33}" "${34}" "${35}" "${36}" "${37}" "${38}" "${39}" "${40}" \
+                    "${41}" "${42}" "${43}" "${44}" "${45}" "${46}" "${47}" "${48}" "${49}" "${50}" \
+                    "${51}" "${52}" "${53}" "${54}" "${55}" "${56}" "${57}" "${58}" "${59}" "${60}" \
+                    "${61}" "${62}" "${63}" "${64}" "${65}" "${66}" "${67}" "${68}" "${69}" "${70}" \
+                    "${71}" "${72}" "${73}" "${74}" "${75}" "${76}" "${77}" "${78}" "${79}" "${80}" \
+                    "${81}" "${82}" "${83}" "${84}" "${85}" "${86}" "${87}" "${88}" "${89}" "${90}" \
+                    "${91}" "${92}" "${93}" "${94}" "${95}" "${96}" "${97}" "${98}" "${99}" "${100}" \
+                    "${101}" "${102}" "${103}" "${104}" "${105}" "${106}" "${107}" "${108}" "${109}" "${110}" \
+                    "${111}" "${112}" "${113}" "${114}" "${115}" "${116}" "${117}" "${118}" "${119}" "${120}" \
+                    "${121}" "${122}" "${123}" "${124}" "${125}" "${126}" "${127}" "${128}" "${129}" "${130}" \
+                    "${131}" "${132}" "${133}" "${134}" "${135}" "${136}" "${137}" "${138}" "${139}" "${140}" \
+                    "${141}" "${142}" "${143}" "${144}" "${145}" "${146}" "${147}" "${148}" "${149}" "${150}" || return 1
+                shift 150
+            done
+            if [ $# -gt 0 ]; then
+                _chunk_simple "$_ba" "$_bo" "$@" || return 1
+            fi ;;
+        *) echo "csm: unknown hash algorithm '$_ba'" >&2; return 1 ;;
+    esac
+}
+
+# The ONE hash function: LF-normalized content of <file>, lowercase hex.
+csm_hash_hex() { # algo file
+    _ho=$(mktemp) || return 1
+    csm_hash_batch "$1" "$_ho" "$2" || { rm -f "$_ho"; return 1; }
+    head -1 "$_ho"; rm -f "$_ho"
+}
+
+csm_stem() { case "$1" in *.sdn) echo "${1%.sdn}" ;; *) echo "$1" ;; esac; }
+
+# Tags (`<algo>_<hex>`) of every sidecar beside <file> on the FILESYSTEM.
+csm_fs_tags() {
+    _stem=$(csm_stem "$1")
+    for _c in "$_stem".*.csm; do
+        [ -e "$_c" ] || continue
+        _tag=${_c#"$_stem".}; _tag=${_tag%.csm}
+        case "$_tag" in *.*|'') continue ;; *_*) echo "$_tag" ;; esac
+    done
+}
+
+# legacy `#sdn-crc32:` header check over the exact body
+csm_legacy_state() { # file -> LEGACY | CORRUPT
+    _want=$(head -1 "$1" | tr -d '\r' | cut -c12-)
+    case "$_want" in ''|*[!0-9]*) echo CORRUPT; return ;; esac
+    _got=$(tail -n +2 "$1" | gzip -c -n | tail -c 8 | head -c 4 | od -An -tu4 | tr -d ' \n')
+    if [ "$_want" = "$_got" ]; then echo LEGACY; else echo CORRUPT; fi
+}
+
+# csm_judge <datafile> <got-hex|-> [<tag>...] -> "STATE" or "STATE detail" (one
+# line). <got-hex> is the datafile's digest for the single tag's algorithm,
+# precomputed by csm_hash_batch ("-" when not needed / not available).
+# Tags come from the filesystem or from `git ls-tree` — the caller decides.
+csm_judge() {
+    _df=$1; _got=$2; shift 2
+    if [ $# -eq 0 ]; then
+        case "$(head -1 "$_df")" in
+            '#sdn-crc32:'*) csm_legacy_state "$_df" ;;
+            *) echo MISSING ;;
+        esac
+        return 0
+    fi
+    if [ $# -gt 1 ]; then echo "MERGED_UNSEALED $# seals"; return 0; fi
+    _algo=${1%%_*}; _hex=${1#*_}
+    _w=$(csm_hex_len "$_algo") || { echo "CORRUPT unknown algorithm '$_algo'"; return 0; }
+    case "$_hex" in ''|*[!0-9a-f]*) echo "CORRUPT non-hex digest in $1"; return 0 ;; esac
+    [ "${#_hex}" -eq "$_w" ] || { echo "CORRUPT wrong digest width for $_algo (want $_w)"; return 0; }
+    [ "$_got" != "-" ] || { echo "CORRUPT cannot hash with $_algo"; return 0; }
+    if [ "$_got" = "$_hex" ]; then echo "OK $_algo"; else echo "CORRUPT $_algo mismatch (want $_hex got $_got)"; fi
+}
+
+# csm_state <datafile> [<tag>...]: hashes the file itself (one process per call).
+csm_state() {
+    _sf=$1; shift
+    _sg="-"
+    if [ $# -eq 1 ]; then
+        _sa=${1%%_*}
+        if csm_hex_len "$_sa" >/dev/null; then _sg=$(csm_hash_hex "$_sa" "$_sf") || _sg="-"; fi
+    fi
+    csm_judge "$_sf" "$_sg" "$@"
+}
+
+# csm_policy_algo <policy-file> <path> -> algorithm of the first matching glob,
+# else the default. Rows are `    <glob>, <algo>` under a `seal_policy |...|` table.
+csm_policy_algo_strict() {
+    _pf=$1; _path=$(printf '%s' "$2" | tr '\\' '/')
+    if [ -f "$_pf" ]; then
+        while IFS= read -r _line; do
+            case "$_line" in "    "*) ;; *) continue ;; esac
+            _row=${_line#"    "}
+            case "$_row" in '#'*|'') continue ;; esac
+            _pat=${_row%%,*}; _alg=${_row#*,}
+            _alg=$(printf '%s' "$_alg" | tr -d ' \r\t')
+            _p=$_path
+            while :; do
+                case "$_p" in $_pat) echo "$_alg"; return 0 ;; esac
+                case "$_p" in */*) _p=${_p#*/} ;; *) break ;; esac
+            done
+        done < "$_pf"
+    fi
+    echo "$CSM_DEFAULT_ALGO"
+}
+
+# Remove every legacy header line at the top of <file> (also merge leftovers).
+csm_strip_legacy() { # file
+    case "$(head -1 "$1")" in '#sdn-crc32:'*) ;; *) return 0 ;; esac
+    _cs_tmp="$1.strip.$$"
+    awk 'f || !/^#sdn-crc32:/ {f=1; print}' "$1" > "$_cs_tmp" && mv "$_cs_tmp" "$1"
+}
+
+# Seal <file>: strip legacy header, add the new sidecar, delete every other.
+# Prints "resealed <algo>_<hex>" or "already <algo>_<hex>".
+csm_seal_file() { # file algo
+    csm_strip_legacy "$1" || return 1
+    _hex=$(csm_hash_hex "$2" "$1") || return 1
+    _stem=$(csm_stem "$1"); _target="$_stem.$2_$_hex.csm"
+    _had=0; [ -e "$_target" ] && _had=1
+    : > "$_target" || return 1
+    _others=0
+    for _c in "$_stem".*.csm; do
+        [ -e "$_c" ] || continue
+        [ "$_c" = "$_target" ] && continue
+        _tag=${_c#"$_stem".}; _tag=${_tag%.csm}
+        case "$_tag" in *.*|'') continue ;; *_*) rm -f "$_c"; _others=1 ;; esac
+    done
+    if [ "$_had" -eq 1 ] && [ "$_others" -eq 0 ]; then echo "already $2_$_hex"; else echo "resealed $2_$_hex"; fi
+}
+
+# Delete every sidecar beside <file> except <keep> (a full path).
+csm_prune_other_seals() { # file keep
+    _stem=$(csm_stem "$1")
+    for _c in "$_stem".*.csm; do
+        [ -e "$_c" ] || continue
+        [ "$_c" = "$2" ] && continue
+        _tag=${_c#"$_stem".}; _tag=${_tag%.csm}
+        case "$_tag" in *.*|'') continue ;; *_*) rm -f "$_c" ;; esac
+    done
+}
+
+# Writers: SDN_SEAL_ALGO forces one algorithm (selftests use crc32 so they need no
+# external hasher); otherwise the policy row, else the default.
+csm_policy_algo() { # policy-file path
+    if [ -n "${SDN_SEAL_ALGO:-}" ]; then echo "$SDN_SEAL_ALGO"; return 0; fi
+    csm_policy_algo_strict "$1" "$2"
+}
+
+# mktemp -d, in a spelling native Windows tools (git, the hasher) also resolve.
+# Under MSYS_NO_PATHCONV=1 nothing converts `/tmp/...` for them, so hand out the
+# mixed form (C:/...) up front; elsewhere cygpath is absent and this is mktemp -d.
+csm_mktemp_dir() {
+    _md=$(mktemp -d) || return 1
+    if command -v cygpath >/dev/null 2>&1; then cygpath -m "$_md"; else echo "$_md"; fi
+}

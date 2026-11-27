@@ -1,0 +1,214 @@
+"""
+## Purpose and audience
+Pins milestone_0021 PR3 for the V4-native installed agent owner
+(`.spipe/simple_orchestrator/continuation_20261116/milestone_0021_agent_owner_v4/DESIGN.md`
+sections 2, 3.6 and 5). It covers three things. First, the released machine-charge
+rows replace the self-attested settle digests (D19, P2R1-F7). Second, the
+re-pointed V7 cancel handler `host_agent_cancel_v4` (D21: the cancel route PR2
+deferred to PR3). Third, the exact-envelope agent slot (P2R2-F1; its DATA case is
+in host_linux_service_agent_v4_pr3_slot_spec.spl, isolated because it imports a
+private function). Written for
+owners of the Linux Host service and the fresh-epoch machine authority.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+Every case is DATA. The released-charge digest is the pure function the lent
+transfer calls after a store replay. The cancel cases build the agent value
+directly; cancel touches no container, journal or clock. A real
+settle, a real Destroy after cancel and a same-id conflicting re-prepare over a
+live journal need an admitted epoch: they belong to the env-gated chain
+test/03_system/lib/container/linux_service_agent_chain_v4_spec.spl, and are NOT
+authored there yet. The structural pins at the end fence those paths until then.
+## Verification guidance and troubleshooting
+Each refusal names its exact error. If a cancel case reports a container or
+journal error, the cancel transition gained an effect: that is a regression,
+not a flake.
+"""
+use std.spec.step
+use std.io.file_read_text
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.nogc_sync_mut.database.wal.{WalEntry, WalEntryType}
+use std.nogc_sync_mut.database.wal_segmented.DatabaseWalRevisionV1
+use std.nogc_sync_mut.container.machine_fresh_workload_history_v2.{MachineFreshWorkloadSegmentV2,
+    machine_fresh_workload_released_charge_digest_v3}
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.{HostServiceDomainV3, host_service_domain_turn_v3}
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.{HostServiceRequestV2, host_service_request_error_v2}
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.HostLinuxServiceCurrentV4
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServiceAgentV4, HostAgentInvokeRequestV4,
+    host_agent_invoke_request_encode_v4, host_linux_service_agent_request_cancel_v4}
+
+# ---- released charge rows (D19) ----
+
+fn p3_charge(kind: text, state: text) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String(kind), "version": SdnValue.Int(2),
+        "workloadDigest": SdnValue.String("9".repeat(64)), "state": SdnValue.String(state),
+        "cpuMillis": SdnValue.Int(0), "memoryBytes": SdnValue.Int(0), "exclusiveDevices": SdnValue.Array([])}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+fn p3_revision(digest: text, first: i64, last: i64) -> DatabaseWalRevisionV1:
+    DatabaseWalRevisionV1(digest: digest, parent: "0".repeat(64), database_identity: "machine-store",
+        first_sequence: first, last_sequence: last, segment_digest: "5".repeat(64))
+
+fn p3_row(key: text, data: text) -> WalEntry:
+    WalEntry(0, WalEntryType.Update, "machine-container-reservations-v1", key, data, 7)
+
+# Reserve segment (charge `reserved`), then the settle segment: action row, released charge, partition remainder.
+fn p3_segments(prefix: text, kind: text) -> [MachineFreshWorkloadSegmentV2]:
+    val reserve = MachineFreshWorkloadSegmentV2(revision: p3_revision("1".repeat(64), 5, 6),
+        entries: [WalEntry(0, WalEntryType.Insert, "machine-fresh-workloads-v2", "w1", "record", 7),
+            p3_row(prefix + "w1", p3_charge(kind, "reserved"))])
+    val settle = MachineFreshWorkloadSegmentV2(revision: p3_revision("2".repeat(64), 7, 9),
+        entries: [WalEntry(0, WalEntryType.Update, "machine-fresh-workload-actions-v2", "op_1", "action", 7),
+            p3_row(prefix + "w1", p3_charge(kind, "released")),
+            p3_row("partition-" + "3".repeat(64), p3_charge("machine-fresh-partition-remainder", "uncertain"))])
+    [reserve, settle]
+
+describe "V4 agent owner PR3: released machine-charge rows (D19)":
+    it "digests the released charge row of the settle segment, bound to its committed revision":
+        # @req S40-AGENT-12 (D19 / P2R1-F7: real settle rows, not self-attested constants)
+        step("a probe (CPU) lifecycle: the workload charge row of the latest segment")
+        val released = p3_charge("machine-fresh-workload-charge", "released")
+        val expected = sha256_text("machine-fresh-released-charge-v3\n" + "2".repeat(64) + "\nworkload-w1\n" + released)
+        expect(machine_fresh_workload_released_charge_digest_v3(p3_segments("workload-", "machine-fresh-workload-charge")).unwrap()).to_equal(expected)
+        step("the agent (workspace) lifecycle: the workspace charge row")
+        val workspace = p3_charge("machine-fresh-workspace-charge", "released")
+        val expected_workspace = sha256_text("machine-fresh-released-charge-v3\n" + "2".repeat(64) + "\nworkspace-w1\n" + workspace)
+        expect(machine_fresh_workload_released_charge_digest_v3(p3_segments("workspace-", "machine-fresh-workspace-charge")).unwrap()).to_equal(expected_workspace)
+
+    it "refuses a history whose latest charge row is not released, or that has none":
+        # @req S40-AGENT-12 (fail closed: an unsettled or foreign row never yields evidence)
+        val reserve_only = [p3_segments("workload-", "machine-fresh-workload-charge")[0]]
+        expect(machine_fresh_workload_released_charge_digest_v3(reserve_only).unwrap_err()).to_equal("machine-fresh-workload-charge-not-released")
+        expect(machine_fresh_workload_released_charge_digest_v3([]).unwrap_err()).to_equal("machine-fresh-workload-charge-row-missing")
+        step("a released row of an unknown charge kind is refused")
+        val foreign = [MachineFreshWorkloadSegmentV2(revision: p3_revision("2".repeat(64), 7, 7),
+            entries: [p3_row("workload-w1", p3_charge("machine-fresh-partition-remainder", "released"))])]
+        expect(machine_fresh_workload_released_charge_digest_v3(foreign).unwrap_err()).to_equal("machine-fresh-workload-charge-not-released")
+
+# ---- cancel (D21: the re-pointed V7 cancel handler) ----
+
+fn p3_agent(stage: text, pending: bool) -> HostLinuxServiceAgentV4:
+    HostLinuxServiceAgentV4(operation_id: "op_1", association_digest: "a".repeat(64), payload_digest: "b".repeat(64),
+        stage: stage, pending: pending, reserved: true, observed: true)
+
+# P3R1-F5: the exit marker is bound to the digest of the controller-signed cancel packet.
+fn p3_cancel_digest() -> text:
+    sha256_text("signed-cancel-packet")
+
+describe "V4 agent owner PR3: cancel a running agent (host_agent_cancel_v4)":
+    it "moves a running, idle agent to stopping with a failed outcome and a cancel exit digest":
+        # @req S40-AGENT-13 (D21: the cancel route drives the 3.6 settle through the step driver)
+        val turn = host_linux_service_agent_request_cancel_v4(p3_agent("running", false), p3_cancel_digest())
+        expect(turn.error).to_equal("")
+        expect(turn.agent.stage).to_equal("stopping")
+        expect(turn.agent.outcome).to_equal("failed")
+        expect(turn.agent.exit_digest.byte_len()).to_equal(64)
+        expect(turn.response.contains("stopping")).to_equal(true)
+        step("the cancel transition itself performs no effect")
+        expect(turn.effect_attempted).to_equal(false)
+        step("the exit digest names the signed cancel it came from (P3R1-F5), and an invalid digest is refused")
+        val other = host_linux_service_agent_request_cancel_v4(p3_agent("running", false), sha256_text("another-packet"))
+        expect(other.agent.exit_digest != turn.agent.exit_digest).to_equal(true)
+        val bad = host_linux_service_agent_request_cancel_v4(p3_agent("running", false), "not-a-digest")
+        expect(bad.error).to_equal("linux-host-agent-cancel-digest")
+        expect(bad.agent.stage).to_equal("running")
+
+    it "is a no-op once the agent is stopping or later":
+        # @req S40-AGENT-13 (idempotent: the step driver owns the rest)
+        for stage in ["stopping", "settle", "source-return", "host-settle", "settled"]:
+            val turn = host_linux_service_agent_request_cancel_v4(p3_agent(stage, false), p3_cancel_digest())
+            expect(turn.error).to_equal("")
+            expect(turn.agent.stage).to_equal(stage)
+            expect(turn.agent.outcome).to_equal("")
+
+    it "refuses a pending running step and every earlier stage, leaving the agent unchanged":
+        # @req S40-AGENT-13 (no mid-step or pre-running cancel: those records settle through their own stages)
+        val pending = host_linux_service_agent_request_cancel_v4(p3_agent("running", true), p3_cancel_digest())
+        expect(pending.error).to_equal("linux-host-agent-cancel-pending")
+        expect(pending.agent.stage).to_equal("running")
+        expect(pending.effect_attempted).to_equal(false)
+        for stage in ["transfer", "probe-reserve", "probe-collect", "advance", "selection", "source", "stage", "enable",
+                "prepare", "create", "configuration", "start", "inspect"]:
+            val early = host_linux_service_agent_request_cancel_v4(p3_agent(stage, false), p3_cancel_digest())
+            expect(early.error).to_equal("linux-host-agent-cancel-stage:" + stage)
+            expect(early.agent.stage).to_equal(stage)
+            expect(early.effect_attempted).to_equal(false)
+
+    it "reports a wedged or failed agent's own error as needing recovery":
+        # @req S40-AGENT-13 (U-02: a wedged run is terminal; cancel never resumes it)
+        var wedged = p3_agent("wedged", false)
+        wedged.error = "linux-host-agent-destroy:busy"
+        val turn = host_linux_service_agent_request_cancel_v4(wedged, p3_cancel_digest())
+        expect(turn.error).to_equal("linux-host-agent-destroy:busy")
+        expect(turn.agent.stage).to_equal("wedged")
+        expect(turn.effect_attempted).to_equal(true)
+
+fn p3_unpublished_domain() -> HostServiceDomainV3:
+    HostServiceDomainV3(HostLocalRootV3.LinuxService(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service")))
+
+fn p3_invoke(operation_id: text) -> text:
+    host_agent_invoke_request_encode_v4(HostAgentInvokeRequestV4(operation_id: operation_id, manifest: "manifest: 1\n")).unwrap()
+
+describe "V4 agent owner PR3: the host-agent-cancel route":
+    it "routes host-agent-cancel on the LinuxService arm only; invoke bytes are not a cancel packet":
+        # @req S40-AGENT-13 (route, N-07: the V2 lists stay untouched; P3R1-F1: no unsigned cancel)
+        expect(host_service_request_error_v2(HostServiceRequestV2("host-agent-cancel", "op_1", p3_invoke("op_1")))).to_equal("host-service-action-unsupported")
+        val unsigned = host_service_domain_turn_v3(p3_unpublished_domain(), HostServiceRequestV2("host-agent-cancel", "op_1", p3_invoke("op_1")))
+        expect(unsigned.exit_code).to_equal(1)
+        expect(unsigned.response.contains("linux-host-agent-cancel-")).to_equal(true)
+        step("the signed-packet route cases (operation mismatch, unpublished owner) live in the cancel spec")
+
+# ---- structural pins for the paths a DATA case cannot reach ----
+
+fn p3_count(source: text, token: text) -> i64:
+    source.split(token).len() - 1
+
+describe "V4 agent owner PR3: structural pins":
+    it "records the slot only when empty and clears it only for the exact envelope":
+        # @req S40-AGENT-02 (P2R2-F1)
+        val cv4 = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl")
+        val empty = cv4.index_of("        if owner.agent_operation_id == \"\":\n            owner.agent_operation_id = operation.id\n            owner.agent_operation = Some(operation)")
+        val clear = cv4.index_of("if agent_draft and linux_service_agent_slot_exact_v4(owner.agent_operation, operation):")
+        expect(empty >= 0 and clear > empty).to_equal(true)
+        step("P3R1-F2: after a successful admission the slot names exactly the admitted envelope")
+        val admitted = cv4.index_of("    if agent_draft: owner.agent_operation = Some(operation)")
+        val receipt = cv4.index_of("val receipt = host_capacity_owner_prepared_receipt_v1(owner.capacity.unwrap(), intent, operation, grant.unwrap(),")
+        expect(admitted > empty and receipt > admitted).to_equal(true)
+        expect(p3_count(cv4, "owner.agent_operation = Some(")).to_equal(2)
+
+    it "binds both settle digests to the released rows through the lent transfer":
+        # @req S40-AGENT-12 (D19)
+        val agent = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_agent_v4.spl")
+        expect(p3_count(agent, "SdnValue.String(\"released\")")).to_equal(0)
+        expect(p3_count(agent, "simple_container_released_charge_digest_v3(")).to_equal(2)
+        val ma = file_read_text("src/lib/nogc_sync_mut/container/machine_authority_v1.spl")
+        val accessor = ma.index_of("pub fn released_charge_digest_v3()")
+        expect(accessor >= 0).to_equal(true)
+        val body = ma.substring(accessor, ma.byte_len())
+        val replay = body.index_of("machine_fresh_workload_history_verify_v2(self.admission.authority.unwrap().storage, history)?")
+        val digest = body.index_of("machine_fresh_workload_released_charge_digest_v3(history.segments)")
+        expect(replay > 0 and digest > replay).to_equal(true)
+
+    it "routes host-agent-cancel after host-agent-invoke and before the V2 validator":
+        # @req S40-AGENT-13 (route placement)
+        val v3 = file_read_text("src/lib/nogc_sync_mut/orchestration/host_service_domain_v3.spl")
+        val invoke = v3.index_of("if request.action == \"host-agent-invoke\":")
+        val cancel = v3.index_of("if request.action == \"host-agent-cancel\":")
+        val validator = v3.index_of("val invalid = host_service_request_error_v2(request)\n            if invalid != \"\": return HostServiceTurnV3(owner, 1, host_service_error_payload_v2(request, invalid, false))\n            if request.action != \"host-status\"")
+        expect(invoke >= 0 and cancel > invoke and validator > cancel).to_equal(true)
+        expect(p3_count(v3, "\"host_agent_cancel_v4\"")).to_equal(1)
+        val cv4 = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl")
+        expect(cv4).to_contain("if action == \"host_agent_cancel_v4\": return host_linux_service_agent_cancel_v4(owner, source)")
+        expect(v3).to_contain("host_service_agent_cancel_request_error_v3(request)")
+
+    it "makes the probe-settle charge read resumable and never repeats a committed Settle":
+        # @req S40-AGENT-12 (P3R1-F4)
+        val agent = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_agent_v4.spl")
+        val gate = agent.index_of("        if not state.probe_settle_read:")
+        val read = agent.index_of("        val digest = simple_container_released_charge_digest_v3(state.container.unwrap())\n        if digest.is_err(): return host_agent_turn_v4(state, capacity, \"\", digest.unwrap_err(), true)")
+        val cleared = agent.index_of("        state.probe_settle_read = false\n        state.probe_settles.push(digest.unwrap())")
+        expect(gate > 0 and read > gate and cleared > read).to_equal(true)

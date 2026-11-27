@@ -1,0 +1,99 @@
+#![allow(REQC004)]
+# Canonical authenticated-server envelope metadata only. Authentication,
+# retained issuance, native ownership and effects belong to the consumer.
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.base_encoding.base64.{base64url_encode, base64url_decode_strict}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.{sdn_encode_canonical, sdn_encoded_text_size_v1}
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.crypto.sha256.sha256_text
+
+pub struct SmuxRuntimeConnectionRequestV5:
+    action: text
+    binding_uid: text
+    payload: text
+
+fn connection_fields_v5(request: SmuxRuntimeConnectionRequestV5, payload: text) -> Dict<text, SdnValue>:
+    {"version": SdnValue.Int(5), "kind": SdnValue.String("smux-runtime-connection-request"),
+        "action": SdnValue.String(request.action), "bindingUid": SdnValue.String(request.binding_uid),
+        "payload": SdnValue.String(payload)}
+
+pub fn smux_runtime_connection_request_validate_v5(request: SmuxRuntimeConnectionRequestV5) -> Result<(), text>:
+    if request.action.byte_len() > 2097152 or request.binding_uid.byte_len() > 2097152 or request.payload.byte_len() > 2097152:
+        return Err("runtime-connection-request-bound")
+    if request.action.contains("\0") or request.binding_uid.contains("\0") or request.payload.contains("\0"):
+        return Err("runtime-connection-request-nul")
+    if not ["host", "host-progress", "host-cancel", "plan", "prepare", "bind", "progress", "cancel", "release", "input-issue",
+            "input-write", "input-observe", "input-revoke", "input-resolve", "capabilities",
+            "geometry-resolve", "geometry-issue", "geometry-resize", "geometry-observe",
+            "geometry-revoke", "geometry-cancel"].contains(request.action):
+        return Err("runtime-connection-request-action")
+    if request.action == "host" or request.action == "host-progress" or request.action == "host-cancel" or request.action == "capabilities":
+        if request.binding_uid != "": return Err("runtime-connection-request-binding")
+    elif not builder_identifier_valid_v1(request.binding_uid): return Err("runtime-connection-request-binding")
+    val needs_payload = ["host", "plan", "prepare", "bind", "input-issue", "input-write",
+        "input-revoke", "input-resolve", "geometry-resolve", "geometry-issue", "geometry-resize",
+        "geometry-revoke"].contains(request.action)
+    if needs_payload and request.payload == "": return Err("runtime-connection-request-payload-required")
+    if not needs_payload and request.payload != "": return Err("runtime-connection-request-payload-unexpected")
+    # Count the full canonical envelope before allocating a large escaped
+    # payload. The empty payload representation contributes two quote bytes.
+    val base = sdn_encode_canonical(SdnValue.Dict(connection_fields_v5(request, "")))
+    val overhead = base.byte_len() - sdn_encoded_text_size_v1("")
+    if overhead > 2097152 or sdn_encoded_text_size_v1(request.payload) > 2097152 - overhead:
+        return Err("runtime-connection-request-bound")
+    Ok(())
+
+pub fn smux_runtime_connection_request_encode_v5(request: SmuxRuntimeConnectionRequestV5) -> Result<text, text>:
+    smux_runtime_connection_request_validate_v5(request)?
+    val source = sdn_encode_canonical(SdnValue.Dict(connection_fields_v5(request, request.payload)))
+    if source.byte_len() > 2097152: return Err("runtime-connection-request-bound")
+    Ok(source)
+
+fn connection_text_v5(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("runtime-connection-request-type:" + key)
+
+pub fn smux_runtime_connection_request_decode_v5(source: text) -> Result<SmuxRuntimeConnectionRequestV5, text>:
+    if source.byte_len() == 0 or source.byte_len() > 2097152: return Err("runtime-connection-request-bound")
+    if source.contains("\0"): return Err("runtime-connection-request-nul")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 2097152,
+            max_depth: 2, max_nodes: 32, max_rows: 0, max_cells: 0, max_columns: 8)):
+        case Ok(value): value
+        case Err(_): return Err("runtime-connection-request-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("runtime-connection-request-object")
+    val keys = ["version", "kind", "action", "bindingUid", "payload"]
+    for key in fields.keys():
+        if not keys.contains(key): return Err("runtime-connection-request-unknown-field:" + key)
+    for key in keys:
+        if not fields.contains_key(key): return Err("runtime-connection-request-missing-field:" + key)
+    val version = match fields["version"]:
+        case SdnValue.Int(value): value
+        case _: return Err("runtime-connection-request-type:version")
+    if version != 5: return Err("runtime-connection-request-version")
+    if connection_text_v5(fields, "kind")? != "smux-runtime-connection-request":
+        return Err("runtime-connection-request-kind")
+    val request = SmuxRuntimeConnectionRequestV5(action: connection_text_v5(fields, "action")?,
+        binding_uid: connection_text_v5(fields, "bindingUid")?, payload: connection_text_v5(fields, "payload")?)
+    if smux_runtime_connection_request_encode_v5(request)? != source:
+        return Err("runtime-connection-request-noncanonical")
+    Ok(request)
+
+pub fn smux_runtime_connection_request_token_v5(request: SmuxRuntimeConnectionRequestV5) -> Result<text, text>:
+    Ok(base64url_encode(smux_runtime_connection_request_encode_v5(request)?))
+
+pub fn smux_runtime_connection_request_from_token_v5(token: text) -> Result<SmuxRuntimeConnectionRequestV5, text>:
+    if token.byte_len() == 0 or token.byte_len() > 2796203: return Err("runtime-connection-request-token-bound")
+    val source = match base64url_decode_strict(token):
+        case Ok(value): value
+        case Err(_): return Err("runtime-connection-request-token-base64")
+    if source.byte_len() > 2097152: return Err("runtime-connection-request-bound")
+    if base64url_encode(source) != token: return Err("runtime-connection-request-token-noncanonical")
+    smux_runtime_connection_request_decode_v5(source)
+
+pub fn smux_runtime_connection_request_digest_v5(request: SmuxRuntimeConnectionRequestV5) -> Result<text, text>:
+    Ok(sha256_text(smux_runtime_connection_request_encode_v5(request)?))

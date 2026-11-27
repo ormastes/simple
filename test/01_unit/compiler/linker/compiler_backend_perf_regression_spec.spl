@@ -1,0 +1,185 @@
+# @req REQ-PERF-REGRESSION
+"""Focused regression tests for backend, linker, MIR, and HIR performance fixes."""
+
+use std.spec.*
+use compiler.backend.native.mach_inst.{EncodedFunction, EncodedReloc, MachModule, new_mach_module, new_mach_function, new_mach_block, mach_block_add_inst, mach_func_add_block, mach_module_add_func, new_mach_inst, X86_OP_RET, X86_OP_NOP}
+use compiler.backend.native.layout_solver.{LayoutPlan, LayoutGroup, LayoutFunctionInfo, LayoutPhase}
+use compiler.backend.native.native_layout.{reorder_by_layout}
+use compiler.backend.native.xray_sled_emit.{xray_insert_sleds_x86_64, xray_locate_sleds_x86_64}
+use compiler.backend.native.encode_x86_64.{encode_module}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.hir.demand.deferred_body.{DeferredHirBodyV1, HirDemandDependencyV1, HirDemandDependencyKindV1}
+use compiler.hir.demand.hir_demand_set.{HirDemandRequestV1, hir_demand_close_v1}
+use compiler.mir.mir_data.{MirModule, MirFunction, MirSignature, MirType}
+use compiler.mir.mir_instructions.{MirBlock, MirTerminator, MirInst, MirInstKind, MirOperand, MirOperandKind, MirConstValue, BlockId}
+use compiler.mir.verification_effects.{VerificationEffectV1}
+use compiler.mir.verification_ir.{VerificationEffectNodeV1, resolve_verification_effect_closure, verification_mir_functions_by_symbol_v1, verification_effect_nodes_from_mir_module_v1}
+use compiler.common.diagnostics.span.{Span}
+use std.common.crypto.sha256.{sha256_text}
+
+fn _perf_span() -> Span:
+    Span(start: 0, end: 0, line: 1, col: 1, file: "", length: 0)
+
+fn _perf_mir_fn(id: i64, name: text, calls: [text]) -> MirFunction:
+    var insts: [MirInst] = []
+    for cname in calls:
+        val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(cname), MirType.unit()))
+        insts.push(MirInst(kind: MirInstKind.Call(nil, callee, []), span: _perf_span()))
+    MirFunction(
+        symbol: SymbolId(id: id),
+        name: name,
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [],
+        blocks: [
+            MirBlock(
+                id: BlockId.entry(),
+                label: Some("entry"),
+                instructions: insts,
+                terminator: MirTerminator.Ret(nil)
+            )
+        ],
+        entry_block: BlockId.entry(),
+        span: _perf_span(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        is_export_c: false,
+        export_name: "",
+        driver_manifest_attr: nil
+    )
+
+fn _perf_demand_body(rev: text, id: text, deps: [text]) -> DeferredHirBodyV1:
+    var dep_list: [HirDemandDependencyV1] = []
+    for d in deps:
+        dep_list.push(HirDemandDependencyV1(d, HirDemandDependencyKindV1.body, ""))
+    DeferredHirBodyV1(
+        id, "owner." + id, rev, sha256_text("ast:" + id), true, ["lower"], dep_list, []
+    )
+
+describe "Compiler backend/linker/MIR/HIR performance regressions":
+    it "reorders encoded functions by layout plan in O(N) preserving fallback and duplicates":
+        var encoded: [EncodedFunction] = []
+        var layout_fns: [LayoutFunctionInfo] = []
+        var i = 0
+        while i < 120:
+            val name = "fn_{i}"
+            encoded.push(EncodedFunction(name: name, code: [i], relocations: []))
+            i = i + 1
+        # Add a duplicate name to verify first-match + placed-name dedup semantics.
+        encoded.push(EncodedFunction(name: "fn_5", code: [999], relocations: []))
+        # Add an unscheduled function to verify fallback append.
+        encoded.push(EncodedFunction(name: "unplanned_fn", code: [777], relocations: []))
+
+        var rev = 119
+        while rev >= 0:
+            layout_fns.push(LayoutFunctionInfo(
+                name: "fn_{rev}",
+                symbol_id: rev,
+                estimated_size: 1,
+                hotness_score: 1,
+                phase: LayoutPhase.Steady
+            ))
+            rev = rev - 1
+
+        val plan = LayoutPlan(
+            groups: [LayoutGroup(phase: LayoutPhase.Steady, functions: layout_fns, start_offset: 0, total_size: 120, page_aligned: true)],
+            total_size: 120,
+            page_count: 1
+        )
+        val ordered = reorder_by_layout(encoded, plan)
+        expect(ordered.len()).to_equal(121)
+        expect(ordered[0].name).to_equal("fn_119")
+        expect(ordered[114].name).to_equal("fn_5")
+        expect(ordered[114].code[0]).to_equal(5)
+        expect(ordered[119].name).to_equal("fn_0")
+        expect(ordered[120].name).to_equal("unplanned_fn")
+
+    it "inserts and locates XRay sleds across many functions via indexed lookup":
+        var mod_ = new_mach_module("xray_perf")
+        var instrumented: [text] = []
+        var i = 0
+        while i < 30:
+            val fname = "f_{i}"
+            var blk = new_mach_block("entry", 0)
+            blk = mach_block_add_inst(blk, new_mach_inst(X86_OP_NOP, []))
+            blk = mach_block_add_inst(blk, new_mach_inst(X86_OP_RET, []))
+            var fn_ = new_mach_function(fname)
+            fn_ = mach_func_add_block(fn_, blk)
+            mod_ = mach_module_add_func(mod_, fn_)
+            if i % 3 == 0:
+                instrumented.push(fname)
+            i = i + 1
+
+        val plan = xray_insert_sleds_x86_64(mod_, instrumented)
+        expect(plan.sites.len()).to_equal(20)
+        val encoded = encode_module(plan.module)
+        val located = xray_locate_sleds_x86_64(encoded, plan.sites)
+        expect(located.is_ok()).to_equal(true)
+        expect(located.unwrap().len()).to_equal(20)
+
+    it "sorts MIR functions by SymbolId and resolves effect closure across chains and cycles":
+        var fn_map: Dict<SymbolId, MirFunction> = {}
+        var i = 40
+        while i >= 1:
+            val calls = if i > 1: ["fn_{i - 1}"] else: []
+            val f = _perf_mir_fn(i, "fn_{i}", calls)
+            fn_map[f.symbol] = f
+            i = i - 1
+        val module = MirModule(
+            name: "vir_perf",
+            functions: fn_map,
+            statics: {},
+            constants: {},
+            types: {}
+        )
+        val sorted = verification_mir_functions_by_symbol_v1(module)
+        expect(sorted.len()).to_equal(40)
+        expect(sorted[0].symbol.id).to_equal(1)
+        expect(sorted[39].symbol.id).to_equal(40)
+
+        val extracted = verification_effect_nodes_from_mir_module_v1(module)
+        expect(extracted.diagnostic).to_equal("")
+        expect(extracted.nodes.len()).to_equal(40)
+
+        # Two-node cycle + linear chain of length 25
+        var nodes: [VerificationEffectNodeV1] = [
+            VerificationEffectNodeV1("n0", [VerificationEffectV1.Read("mem")], ["n1"], []),
+            VerificationEffectNodeV1("n1", [VerificationEffectV1.Pure], ["n0"], [])
+        ]
+        var k = 2
+        while k < 25:
+            nodes.push(VerificationEffectNodeV1("n{k}", [VerificationEffectV1.Pure], ["n{k - 1}"], []))
+            k = k + 1
+        val closure = resolve_verification_effect_closure(nodes)
+        expect(closure.diagnostic).to_equal("")
+        val top_effects = closure.effects_for("n24").unwrap()
+        expect(top_effects.len()).to_equal(1)
+        expect(top_effects[0].canonical_text()).to_equal("read:mem")
+
+    it "computes HIR demand closure and Tarjan SCCs deterministically over cyclic DAGs":
+        val rev = "rev1"
+        # Cycle: a <-> b, c -> a, d -> c, e <-> f, d -> e
+        val bodies = [
+            _perf_demand_body(rev, "a", ["b"]),
+            _perf_demand_body(rev, "b", ["a"]),
+            _perf_demand_body(rev, "c", ["a"]),
+            _perf_demand_body(rev, "d", ["c", "e"]),
+            _perf_demand_body(rev, "e", ["f"]),
+            _perf_demand_body(rev, "f", ["e"])
+        ]
+        val res = hir_demand_close_v1(rev, bodies, [HirDemandRequestV1("d", "lower")])
+        expect(res.is_ok()).to_equal(true)
+        val demand = res.unwrap()
+        expect(demand.body_identities).to_equal(["a", "b", "c", "d", "e", "f"])
+        expect(demand.sccs.len()).to_equal(4)
+        expect(demand.sccs[0].members).to_equal(["a", "b"])
+        expect(demand.sccs[0].dependencies.len()).to_equal(0)
+        expect(demand.sccs[1].members).to_equal(["c"])
+        expect(demand.sccs[1].dependencies).to_equal([demand.sccs[0].identity])
+        expect(demand.sccs[2].members).to_equal(["d"])
+        expect(demand.sccs[2].dependencies.len()).to_equal(2)
+        expect(demand.sccs[3].members).to_equal(["e", "f"])
+        expect(demand.sccs[3].dependencies.len()).to_equal(0)

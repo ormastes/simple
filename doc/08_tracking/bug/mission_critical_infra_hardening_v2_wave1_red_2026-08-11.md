@@ -234,3 +234,58 @@ ones, so this doc should be split into three rows before any of them is
 actioned.
 
 **Not reproduced from this lane** — see the parent reports Unproven list.
+
+## Revalidation 2026-11-05 (release/1.0.0, seed `bin/simple.exe run`)
+
+Premise mostly outdated. GREEN now: `compiler_admission_spec` 10/10,
+`draw_ir_generation_arena_v3_spec` 8/8, `draw_ir_packed_generation_store_v3_spec` 7/7,
+`certified_manifest_spec` 16/16, `bounded_process_policy_spec` 12/12,
+`mci_evidence_manifest_v1_spec` 7/7. Required fix 3 (SHA-256 profile hash) is in
+`domain_arena_v1.spl` (`relaxed_allocation_profile_hash_v1`); no `receipts[-1]` remains (fix 6).
+
+Fixed this pass: `test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl`
+had 2 stale fixtures (`try_allocate` without `checkpoint()`; the arena correctly answers
+UNSEALED when no generation is open). Added `checkpoint()` and a pin scenario
+asserting UNSEALED before checkpoint: 19/19.
+
+Remaining (why this stays OPEN): `domain_arena_v1_spec` 3 failures —
+`DomainArenaV1.write_byte`/byte banks and `DOMAIN_ARENA_V1_MAX_QUOTA_BYTES` are specified
+but not implemented in `src/lib/nogc_sync_mut/mission_critical/domain_arena_v1.spl`
+(a feature slice, not a fixture bug); fix 4/5 full designed-storage scope also open.
+
+## Verification 2026-11-25 (p2w3-ae lane, release/1.0.0 worktree) — filed RED specs all addressed; residual is feature scope, not a bug
+
+The "Remaining (why this stays OPEN)" items from the 2026-11-05 revalidation
+are now addressed in source:
+
+- `DomainArenaV1.write_byte` / byte banks / `DOMAIN_ARENA_V1_MAX_QUOTA_BYTES`
+  are implemented in `src/lib/nogc_sync_mut/mission_critical/domain_arena_v1.spl`
+  (const at :31, `write_byte` at :457-469 with staging/committed byte banks and
+  span validation, `read_byte` at :471-477) — landed by commit `b4762cf1a45`
+  ("feat(mission-critical): domain_arena_v1 byte banks, exact spans, max
+  quota", 2026-11-08), an ancestor of the release/1.0.0 tip. This was the
+  feature slice behind the 3 remaining `domain_arena_v1_spec` failures.
+- Required fix 3 (canonical SHA-256 profile hash) is present:
+  `relaxed_allocation_profile_hash_v1` at domain_arena_v1.spl:493-494 wraps
+  `sha256_text` over the canonical serialization.
+
+Per the 2026-11-05 revalidation, every spec this umbrella was filed RED on is
+green: `compiler_admission_spec` 10/10, `draw_ir_generation_arena_v3_spec` 8/8,
+`draw_ir_packed_generation_store_v3_spec` 7/7, `certified_manifest_spec` 16/16,
+`bounded_process_policy_spec` 12/12, `mci_evidence_manifest_v1_spec` 7/7, and
+the 03_system wrapper 19/19 after its fixture repair.
+
+Not closed by this note: required fixes 4/5 (artifact-level payload hashes,
+full DrawIR-v3 designed packed storage / Engine2D handoff for REQ-MCI-005) are
+feature-scope expansion, not defects filed here; they belong to the
+mission-critical feature lane, not this bug row.
+
+Runtime re-verification in this lane was not possible: the pinned seed binary
+at `bin/simple.exe` rejects the `@representation_boundary` decorator added
+tree-wide by cfd89933699, so every `bin/simple.exe test` at release/1.0.0 HEAD
+fails before reaching any spec. Verification is by code inspection + commit
+ancestry, as stated above.
+
+**Verdict: STALE-CLOSED as a bug-ledger row.** All filed RED specs have their
+fixes in tree; what remains is planned feature work tracked by the
+mission-critical lane.

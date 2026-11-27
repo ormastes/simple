@@ -1,0 +1,580 @@
+# NOT_RUN: policy regressions; these do not qualify a native launch provider.
+use std.spec.{describe, it, expect}
+use app.cli.worker_hir_profile_v1.{worker_hir_argument_error_v1, worker_hir_stage3_capsule_environment_keys_v1,
+    worker_hir_tool_build_environment_keys_v1, worker_hir_base_environment_keys_v1, worker_hir_environment_value_error_v1,
+    worker_hir_unsupported_environment_keys_v1,
+    worker_hir_environment_key_admitted_v1, worker_hir_child_validate_v1,
+    worker_hir_pool_skip_without_closure_v1, worker_hir_environment_admit_v1, worker_hir_profile_admit_v1,
+    worker_hir_configuration_digest_v1}
+use app.cli.worker_hir_owner_v1.{worker_hir_cleanup_deadline_v1,
+    worker_hir_remaining_budget_v1, worker_hir_environment_sort_v1}
+use app.cli.native_build_output_plan.{native_build_entry_and_sources_v1}
+use compiler.driver.driver_build.native_mir_shard.{NATIVE_CACHE_SCOPE_RETENTION_DONE_ENV_V1}
+use app.cli.environment_variant_policy_handoff_owner_v1.{
+    ENVIRONMENT_VARIANT_POLICY_HANDOFF_ARG_PREFIX_V1}
+use app.cli.environment_variant_policy_handoff_owner_v1.{
+    environment_variant_policy_handoff_prepare_from_snapshot_v1, environment_variant_policy_handoff_attach_v1}
+use app.cli.environment_variant_policy_sources_v1.{EnvironmentVariantConfigSourceV1}
+use std.common.process.observation_v4.{ProcessObservationEnvironmentV4,
+    PROCESS_OBSERVATION_V4_MAX_WALL_BUDGET_NS}
+
+# Exact Stage 3 launch environment as the HIR pool coordinator captures it:
+# the transcribed runner's env -i base, the RSS watchdog's exports, the
+# coordinator's own pool markers, and the lane values that reach the HIR pool
+# (two-pass route: SIMPLE_FILE_WORKERS=0).
+fn stage3_common_launch_env() -> [(text, text)]:
+    [("HOME", "/w/home"), ("PATH", "/usr/bin:/bin"), ("TMPDIR", "/w/tmp"), ("TMP", "/w/tmp"),
+        ("TEMP", "/w/tmp"), ("LC_ALL", "C"), ("LANG", "C"),
+        ("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", "8388608"), ("SIMPLE_BOOTSTRAP_RSS_CAP_MODE", "enforce"),
+        ("SIMPLE_BOOTSTRAP_SESSION_ID", "4242"), ("SIMPLE_BOOTSTRAP_SESSION_EXEC", "/w/tmp/session"),
+        ("SIMPLE_BOOTSTRAP_PROCESS_OBSERVER", "/w/tmp/observer"),
+        ("SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256", "ab"),
+        ("RUST_LOG", "error"), ("LIBRARY_PATH", ""), ("SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256", "absent"),
+        ("SIMPLE_BOOTSTRAP", "1"), ("SIMPLE_FILE_WORKERS", "0"), ("SIMPLE_NATIVE_GO_TO_END", "1"),
+        ("SIMPLE_ABI_POLICY", "v1"), ("SIMPLE_ABI_ADMISSION_RECEIPT", "/w/admission.sdn"),
+        ("SIMPLE_NO_DEPRECATED_WARNINGS", "1"), ("SIMPLE_STAGE3_STREAMING_SURFACES", "0"),
+        ("SIMPLE_FRONTEND_CACHE", "1"), ("SIMPLE_FRONTEND_CACHE_DIR", "/w/c/frontend"),
+        ("SIMPLE_HIR_CACHE", "1"), ("SIMPLE_HIR_CACHE_DIR", "/w/c/hir"),
+        ("MALLOC_ARENA_MAX", "2"), ("MALLOC_TRIM_THRESHOLD_", "0"),
+        ("SIMPLE_NATIVE_ARENA_DECLS", "1"), ("SIMPLE_NO_STUB_FALLBACK", "1"),
+        ("SIMPLE_PACKAGE_INDEX_COLD_INIT", "1"), ("SIMPLE_SAFETY_PROFILE", "critical"),
+        ("SIMPLE_ASSURANCE_WARNING_PHASE", "1"), ("SIMPLE_BUILD_PROGRESS_EVENTS", "1"),
+        ("SIMPLE_COMPILER_PHASE_PROFILE", "1"), ("SIMPLE_COMPILER_PHASE_PROFILE_FILE", "/w/phase.sdn"),
+        ("SIMPLE_MEM_SNAPSHOT_FILE", "/w/mem.sdn"), ("SIMPLE_EVIDENCE_RUN_ID", "run-28"),
+        ("LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING", "1"),
+        ("SIMPLE_NATIVE_BUILD_TARGET", "x86_64-unknown-linux-gnu"), ("SIMPLE_NATIVE_BUILD_THREADS", "8"),
+        ("SIMPLE_NATIVE_BUILD_CACHE_DIR", "/w/c"), ("SIMPLE_RUNTIME_PATH", "/w/rt"),
+        ("SIMPLE_NATIVE_RUNTIME_BUNDLE", "core-c-bootstrap"), ("SIMPLE_BINARY", "/w/stage2/simple"),
+        ("SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB", "16777216"),
+        ("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING", "1"), ("SIMPLE_HIR_SHARD_QUEUE", "/w/c/q")]
+
+# resume-stage3-from-admitted.sh -> lib/stage3-native-build-worker.sh:205-235.
+fn stage3_resume_launch_env(route: text, fallback: text) -> [(text, text)]:
+    var env = stage3_common_launch_env()
+    env.push(("SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB", "16777216"))
+    env.push(("SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE", route))
+    env.push(("SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE", fallback))
+    env
+
+# bootstrap-from-scratch.sh --full-bootstrap Stage 3 block (no route keys).
+fn stage3_full_launch_env() -> [(text, text)]:
+    var env = stage3_common_launch_env()
+    for pair in [("SIMPLE_BOOTSTRAP_STAGE3", "1"), ("SIMPLE_PLUGIN_MANIFEST_POLICY", "v1"),
+            ("SIMPLE_KERNEL_K1_POLICY", "v1"), ("SIMPLE_COVERAGE_CUTOVER_STATE", "off"),
+            ("SIMPLE_K1_COMPOSITION_SHA256_BEFORE", "ab"), ("SIMPLE_NATIVE_STAGED_CODEGEN_BATCH", "64"),
+            ("SIMPLE_CACHE_SCOPE", "stage3"), ("SIMPLE_KEEP_SOURCE_CONTENTS", ""),
+            ("SIMPLE_MIR_TAG_PROBE", ""), ("SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ", "/w/p2.sdn"),
+            ("SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT", "/w/c")]:
+        env.push(pair)
+    env
+
+fn admitted_env_size(env: [(text, text)]) -> text:
+    match worker_hir_environment_admit_v1(env):
+        case Ok(environment): "{environment.len()}"
+        case Err(reason): reason
+
+fn admit_error(env: [(text, text)]) -> text:
+    match worker_hir_environment_admit_v1(env):
+        case Ok(_): ""
+        case Err(reason): reason
+
+fn handed_args(user_args: [text]) -> [text]:
+    val absent = EnvironmentVariantConfigSourceV1(present: false, source_identity: "", content: "")
+    val prepared = environment_variant_policy_handoff_prepare_from_snapshot_v1(user_args, [], absent, absent).unwrap()
+    environment_variant_policy_handoff_attach_v1(user_args, prepared.encoded_payload).unwrap()
+
+fn profile_error(args: [text], deadline_ms: i64) -> text:
+    match worker_hir_profile_admit_v1(args, "src/app/cli/bootstrap_main.spl", [], deadline_ms):
+        case Ok(_): ""
+        case Err(reason): reason
+
+fn launch_env_value_errors(env: [(text, text)]) -> [text]:
+    var out: [text] = []
+    for pair in env:
+        val reason = worker_hir_environment_value_error_v1(pair.0, pair.1)
+        if reason != "": out.push(pair.0 + ": " + reason)
+    out
+
+describe "worker HIR profile admission":
+    it "admits explicit HIR consumer arguments":
+        expect(worker_hir_argument_error_v1(["--entry-closure", "--entry", "src/main.spl",
+            "--source", "src", "--output", "build/result", "--backend=llvm",
+            "--no-borrow-check", "--emit-object", "--emit-entry-object",
+            "--emit-archive", "--emit-shared", "--emit-smf"])).to_equal("")
+
+    it "admits the canonical positional entry form used by phase C tool builds":
+        # bootstrap-fable-10 (2026-11-12): `native-build <entry>.spl --backend=cranelift
+        # --low-memory --cache-dir D --timeout 7200 --threads 2 -o OUT` was refused as
+        # `unsupported HIR worker option: <entry>` and every matrix tool build failed.
+        expect(worker_hir_argument_error_v1(["src/app/cli/_CliMain/main_and_help.spl",
+            "--backend=cranelift", "--low-memory", "--cache-dir", "/tmp/c", "--timeout", "7200",
+            "--threads", "2", "-o", "/tmp/out"])).to_equal("")
+        expect(worker_hir_argument_error_v1(["a.spl", "b.spl"])).to_contain("unsupported")
+
+    it "admits the native-build output modes Stage 4 direct builds pass":
+        # build-phase4-direct-product.shs passes `--mode dynload` with
+        # `--threads N`; once shard threads >= 2 the profile refused it as
+        # `unsupported HIR worker option: --mode` (early Phase 3 lane, 2026-11-12).
+        for mode in ["dynload", "one-binary"]:
+            expect(worker_hir_argument_error_v1(["--entry-closure", "--entry", "src/main.spl",
+                "--mode", mode, "--threads", "2"])).to_equal("")
+            expect(worker_hir_argument_error_v1(["--entry-closure", "--mode=" + mode])).to_equal("")
+
+    it "rejects every other native-build mode spelling":
+        for args in [["--entry-closure", "--mode", "jit"], ["--entry-closure", "--mode=jit"],
+                ["--entry-closure", "--mode"], ["--entry-closure", "--mode="],
+                ["--entry-closure", "--mode", "--threads"], ["--entry-closure", "--build-mode", "dynload"]]:
+            expect(worker_hir_argument_error_v1(args) == "").to_equal(false)
+
+    it "rejects directory fallback without a frozen closure":
+        expect(worker_hir_argument_error_v1(["--entry", "src/main.spl"])).to_contain("frozen")
+
+    it "skips an ordinary HIR pool over a bulk build with no frozen closure":
+        val bulk = ["--source", "src/lib", "--entry", "src/app/simple_lsp_mcp/main.spl", "-o", "out.exe"]
+        expect(worker_hir_pool_skip_without_closure_v1(bulk, "")).to_equal(true)
+        expect(worker_hir_pool_skip_without_closure_v1(bulk, "auto")).to_equal(true)
+
+    it "keeps an explicit SIMPLE_HIR_SHARDING=1 request fail-closed":
+        expect(worker_hir_pool_skip_without_closure_v1(["--entry", "src/main.spl"], "1")).to_equal(false)
+
+    it "never skips a frozen-closure build or another argument refusal":
+        expect(worker_hir_pool_skip_without_closure_v1(["--entry-closure", "--entry", "src/main.spl"], "")).to_equal(false)
+        expect(worker_hir_pool_skip_without_closure_v1(["src/main.spl", "--backend=llvm"], "")).to_equal(false)
+        expect(worker_hir_pool_skip_without_closure_v1(["--entry", "src/main.spl", "--plugin", "x"], "")).to_equal(false)
+
+    it "rejects mixed MIR parse and file-unit routes":
+        for mode in ["--mir-shard=0/1", "--parse-shard=0/1", "--file-worker-unit", "--mode=jit"]:
+            expect(worker_hir_argument_error_v1(["--entry-closure", mode]) == "").to_equal(false)
+
+    it "rejects plugin and unrecognized future options":
+        for mode in ["--plugin=anything", "--frontend-offload=worker", "--future-route"]:
+            expect(worker_hir_argument_error_v1(["--entry-closure", mode]) == "").to_equal(false)
+
+    it "does not admit incomplete value options":
+        expect(worker_hir_argument_error_v1(["--entry-closure", "--source"])).to_contain("missing")
+        expect(worker_hir_argument_error_v1(["--entry-closure", "--source="])).to_contain("empty")
+
+    it "admits supported runtime owners exactly and binds their captured bytes":
+        var digests: [text] = []
+        for owner in ["", "c", "rust", "C", "RuSt"]:
+            val environment = worker_hir_environment_admit_v1([("SIMPLE_RUNTIME_OWNER", owner)]).unwrap()
+            expect(environment.len()).to_equal(1)
+            expect(environment[0].key).to_equal("SIMPLE_RUNTIME_OWNER")
+            expect(environment[0].value).to_equal(owner)
+            val digest = worker_hir_configuration_digest_v1("receipt", "policy", "producer", 123,
+                environment, ["--entry-closure"])
+            expect(digest.len()).to_equal(64)
+            expect(digests.contains(digest)).to_equal(false)
+            digests.push(digest)
+
+    it "refuses unsupported runtime owners and keeps unknown keys fail closed":
+        for owner in ["simple", "other", " c", "c ", "rust\n", "rust;evil"]:
+            expect(admit_error([("SIMPLE_RUNTIME_OWNER", owner)])).to_contain("SIMPLE_RUNTIME_OWNER")
+        expect(admit_error([("SIMPLE_RUNTIME_OWNER_FUTURE", "c")])).to_contain("unsupported")
+
+    it "admits canonical source authority and rejects loader injection":
+        expect(worker_hir_environment_key_admitted_v1("SIMPLE_SCV_INVENTORY_DIGEST")).to_equal(true)
+        for name in ["DYLD_INSERT_LIBRARIES", "LD_PRELOAD", "LD_LIBRARY_PATH",
+                "SIMPLE_NATIVE_GROUP_MANIFEST", "SIMPLE_FILE_WORKER_UNIT", "SIMPLE_PLUGIN", "FUTURE_ROUTE"]:
+            expect(worker_hir_environment_key_admitted_v1(name)).to_equal(false)
+
+    it "admits the exact Stage 3 capsule launch environment":
+        # Pinned from bootstrap-from-scratch.sh's Stage 3 block, the
+        # transcribed runner and process-tree-rss-watchdog.pl (2026-11-12).
+        val stage3 = ["RUST_LOG", "LIBRARY_PATH", "LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING",
+            "MALLOC_ARENA_MAX", "MALLOC_TRIM_THRESHOLD_", "MSYS2_ENV_CONV_EXCL",
+            "SIMPLE_BOOTSTRAP", "SIMPLE_BOOTSTRAP_STAGE3", "SIMPLE_BOOTSTRAP_WHOLE_PROGRAM",
+            "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256", "SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB",
+            "SIMPLE_BOOTSTRAP_RSS_CAP_MODE", "SIMPLE_BOOTSTRAP_SESSION_ID", "SIMPLE_BOOTSTRAP_SESSION_EXEC",
+            "SIMPLE_BOOTSTRAP_PROCESS_OBSERVER", "SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256",
+            "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", "SIMPLE_FILE_WORKERS",
+            "SIMPLE_ABI_POLICY", "SIMPLE_ABI_ADMISSION_RECEIPT", "SIMPLE_PLUGIN_MANIFEST_POLICY",
+            "SIMPLE_KERNEL_K1_POLICY", "SIMPLE_COVERAGE_CUTOVER_STATE", "SIMPLE_K1_COMPOSITION_SHA256_BEFORE",
+            "SIMPLE_NO_DEPRECATED_WARNINGS", "SIMPLE_STAGE3_STREAMING_SURFACES",
+            "SIMPLE_NATIVE_STAGED_CODEGEN_BATCH", "SIMPLE_NATIVE_GO_TO_END", "SIMPLE_KEEP_SOURCE_CONTENTS",
+            "SIMPLE_MIR_SHARDING", "SIMPLE_MIR_RETRACT_PROVIDER_TYPES",
+            "SIMPLE_MIR_TAG_PROBE", "SIMPLE_FRONTEND_CACHE", "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ",
+            "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT", "SIMPLE_PACKAGE_INDEX_COLD_INIT",
+            "SIMPLE_SAFETY_PROFILE", "SIMPLE_ASSURANCE_WARNING_PHASE", "SIMPLE_COMPILER_PHASE_PROFILE",
+            "SIMPLE_EVIDENCE_RUN_ID", "SIMPLE_NATIVE_BUILD_TARGET", "SIMPLE_NATIVE_BUILD_THREADS",
+            "SIMPLE_RUNTIME_PATH", "SIMPLE_NATIVE_RUNTIME_BUNDLE",
+            "SIMPLE_MIR_SHARD_INTERFACE_HIR", "SIMPLE_MIR_FORK_WORKERS", "SIMPLE_MIR_FORK_BATCH",
+            "SIMPLE_MIR_FORK_CHILD_KB", "SIMPLE_WORKER_MEMORY_RESERVE_KB", "SIMPLE_MIR_FORK_SOLO_ROWS",
+            "SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE", "SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE",
+            "SIMPLE_STAGE3_LIB_DYNLIB", "SIMPLE_NATIVE_LIBRARY_UNITS",
+            "SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", "SIMPLE_DYNLIB_EMBED_CACHE_RPATH",
+            "SIMPLE_NATIVE_BUILD_MODE",
+            "SIMPLE_STAGE3_HOST_TAG", "SIMPLE_STAGE3_NATIVE_HOST_MATCH",
+            "SIMPLE_STAGE3_STATIC_PRIMITIVE_ARCHIVE", "SIMPLE_STAGE3_MINIMAL_STATIC_PRIMITIVES",
+            "SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS", "SIMPLE_STAGE3_ALLOW_EXISTING_DYNLIBS",
+            "STAGE3_RESOLVED_TARGET", "STAGE3_RESOLVED_COMPILE_MODE", "STAGE3_POLICY_SOURCE_ARGS",
+            "STAGE3_POLICY_SDN",
+            "SIMPLE_BACKEND_COMPOSITION", "SIMPLE_NATIVE_CODEGEN_WORKER_KIB", "SIMPLE_NATIVE_FILE_WORKERS",
+            "SIMPLE_LINKER", "SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256",
+            "SIMPLE_HOST_MEM_RESERVE_FREE_MIB", "SIMPLE_HOST_WORKER_MEM_MIB",
+            "SIMPLE_HOST_MAX_THREADS", "SIMPLE_BOOTSTRAP_WORKER_MEM_MIB",
+            "SIMPLE_STAGE3_DIRECT_THREADS",
+            "SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "SIMPLE_BUILD_MEMORY_ALLOW_COMMIT_WITNESS",
+            "SIMPLE_PROCESS_TREE_RSS_CAP_KIB", "SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS",
+            "LLVM_PREFIX", "LLVM_SYS_231_PREFIX", "SIMPLE_LLVM_PATH",
+            "HOMEBREW_PREFIX", "CPATH", "CFLAGS",
+            "SIMPLE_WINDOWS_ABI", "SIMPLE_LINKER_FLAVOR", "CC", "CL", "INCLUDE", "LIB", "LIBPATH", "OS"]
+        expect(worker_hir_stage3_capsule_environment_keys_v1()).to_equal(stage3)
+        for name in stage3:
+            expect(worker_hir_environment_key_admitted_v1(name)).to_equal(true)
+
+    it "admits the resume Stage 3 launch environment so the HIR pool is not refused":
+        # Run 28 debug log: "[hir-shard] profile admission rejected: unsupported
+        # HIR worker environment key: SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE,
+        # SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE" -> HIR ran in one process.
+        for routes in [("coordinator", "direct"), ("direct", "none")]:
+            val env = stage3_resume_launch_env(routes.0, routes.1)
+            expect(worker_hir_unsupported_environment_keys_v1(env).join(", ")).to_equal("")
+            expect(launch_env_value_errors(env).join("; ")).to_equal("")
+            expect(admitted_env_size(env)).to_equal("{env.len()}")
+
+    it "admits the full-bootstrap Stage 3 launch environment":
+        val env = stage3_full_launch_env()
+        expect(worker_hir_unsupported_environment_keys_v1(env).join(", ")).to_equal("")
+        expect(launch_env_value_errors(env).join("; ")).to_equal("")
+        expect(admitted_env_size(env)).to_equal("{env.len()}")
+
+    it "refuses an inadmissible captured environment at the admission step":
+        expect(admit_error(stage3_resume_launch_env("coordinator", "direct"))).to_equal("")
+        var unknown = stage3_full_launch_env()
+        unknown.push(("SIMPLE_SCV_INVENTORY_COLD_INIT", "1"))
+        unknown.push(("LD_PRELOAD", "x.so"))
+        expect(admit_error(unknown)).to_equal(
+            "unsupported HIR worker environment key: SIMPLE_SCV_INVENTORY_COLD_INIT, LD_PRELOAD")
+        var duplicate = stage3_full_launch_env()
+        duplicate.push(("HOME", "/other"))
+        expect(admit_error(duplicate)).to_equal("duplicate HIR worker environment key")
+        expect(admit_error(stage3_resume_launch_env("process", "none"))).to_equal(
+            "HIR profile requires a Stage 3 requested route of direct or coordinator")
+        expect(admit_error([("PATH", "/bin".repeat(17000))])).to_equal("HIR worker environment exceeds byte bound")
+        var many: [(text, text)] = []
+        for _ in 0..257: many.push(("HOME", "/h"))
+        expect(admit_error(many)).to_equal("HIR worker environment exceeds profile bound")
+
+    it "checks profile arguments and deadline before the frozen closure":
+        expect(profile_error(handed_args(["--plugin", "x"]), 1)).to_equal("unsupported HIR worker option: --plugin")
+        var wide = ["--entry-closure"]
+        for _ in 0..256: wide.push("--strip")
+        expect(profile_error(handed_args(wide), 1)).to_equal("HIR worker argv exceeds profile bound")
+        expect(profile_error(handed_args(["--entry-closure", "--log", "x".repeat(262145)]), 1)).to_equal(
+            "HIR worker argv exceeds byte bound")
+        expect(profile_error(handed_args(["--entry-closure"]), 0)).to_equal("HIR worker requires a parent absolute deadline")
+        expect(profile_error(handed_args(["--entry-closure"]), 1)).to_equal("no closure request published")
+
+    it "gates the Stage 3 route keys to the bootstrap route policy values":
+        # lib/stage3-direct-parallel.shs: route direct|coordinator, fallback none|direct.
+        for good in ["direct", "coordinator"]:
+            expect(worker_hir_environment_value_error_v1("SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE", good)).to_equal("")
+        for good in ["none", "direct"]:
+            expect(worker_hir_environment_value_error_v1("SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE", good)).to_equal("")
+        for bad in ["", "process", "Direct", "coordinator "]:
+            expect(worker_hir_environment_value_error_v1("SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE", bad) == "").to_equal(false)
+        for bad in ["", "coordinator", "NONE"]:
+            expect(worker_hir_environment_value_error_v1("SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE", bad) == "").to_equal(false)
+        expect(launch_env_value_errors(stage3_resume_launch_env("process", "none")).len()).to_equal(1)
+
+    it "still refuses opt-in Stage 3 keys that change worker behaviour":
+        # Operator opt-ins outside the reviewed profile stay refused, by name.
+        for name in ["SIMPLE_SCV_INVENTORY_COLD_INIT", "SIMPLE_BOOTSTRAP_DIAG", "SIMPLE_COMPILER_TRACE",
+                "SIMPLE_BOOTSTRAP_STAGE3_ROUTE", "SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE_X"]:
+            expect(worker_hir_environment_key_admitted_v1(name)).to_equal(false)
+
+    it "admits the MIR shard HIR residency opt-in on the Stage 3 lane":
+        # Stage 3 forwards SIMPLE_MIR_SHARD_INTERFACE_HIR to every pool child; a
+        # HIR worker inherits it and ignores it (refusal not-mir-shard-worker),
+        # so admitting it must not open any other key.
+        expect(worker_hir_environment_key_admitted_v1("SIMPLE_MIR_SHARD_INTERFACE_HIR")).to_equal(true)
+        expect(worker_hir_environment_value_error_v1("SIMPLE_MIR_SHARD_INTERFACE_HIR", "1")).to_equal("")
+        expect(worker_hir_unsupported_environment_keys_v1([("SIMPLE_MIR_SHARD_INTERFACE_HIR", "1")]).len()).to_equal(0)
+
+    it "admits the MIR fork-workers opt-in so the HIR pool is not refused":
+        # SIMPLE_MIR_FORK_WORKERS is read only by the MIR shard coordinator and an
+        # armed MIR fork root (native_mir_fork_v1.spl); a HIR worker inherits and
+        # ignores it. Refusing it forced HIR in-process and made fork mode unusable.
+        expect(worker_hir_environment_key_admitted_v1("SIMPLE_MIR_FORK_WORKERS")).to_equal(true)
+        expect(worker_hir_environment_value_error_v1("SIMPLE_MIR_FORK_WORKERS", "4")).to_equal("")
+        expect(worker_hir_unsupported_environment_keys_v1([("SIMPLE_MIR_FORK_WORKERS", "4")]).len()).to_equal(0)
+        expect(worker_hir_environment_key_admitted_v1("SIMPLE_MIR_FORK_WORKERS_X")).to_equal(false)
+        expect(worker_hir_environment_key_admitted_v1("SIMPLE_MIR_FORK_BATCH")).to_equal(true)
+        expect(worker_hir_environment_key_admitted_v1("SIMPLE_MIR_FORK_CHILD_KB")).to_equal(true)
+        expect(worker_hir_environment_key_admitted_v1("SIMPLE_WORKER_MEMORY_RESERVE_KB")).to_equal(true)
+
+    it "admits the host memory reserve the pool-refusal text tells the operator to set":
+        # shard_mem_clamp.spl names SIMPLE_BUILD_MEMORY_RESERVE_BYTES as the way
+        # past a reserve refusal; setting it must not refuse the HIR pool itself.
+        expect(worker_hir_environment_key_admitted_v1("SIMPLE_BUILD_MEMORY_RESERVE_BYTES")).to_equal(true)
+
+    it "admits the exact Phase 4 direct and phase C tool-build environment":
+        val tools = ["SIMPLE_FILE_WORKERS", "SIMPLE_MIR_SHARDING", "SIMPLE_MIR_SHARD_COUNT", "SIMPLE_MIR_RETRACT_PROVIDER_TYPES", "SIMPLE_MIR_SHARD_WORKER_KB", "SIMPLE_PARSE_SHARD_WORKER_KB",
+            "SIMPLE_PARSE_SHARD_MAX", "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB",
+            "SIMPLE_NATIVE_BUILD_RUST", "SIMPLE_BOOTSTRAP_STAGE3", "SIMPLE_BOOTSTRAP_STAGE4",
+            "SIMPLE_NATIVE_BUILD_TARGET", "SIMPLE_NATIVE_BUILD_THREADS", "SIMPLE_NATIVE_RUNTIME_BUNDLE",
+            "SIMPLE_RUNTIME_PATH", "SIMPLE_RUNTIME_OWNER", "SIMPLE_PROJECT_ROOT", "SIMPLE_CACHE_PROJECT", "SIMPLE_CACHE",
+            "XDG_CACHE_HOME", "SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP", "SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS",
+            "SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB", "SIMPLE_BOOTSTRAP_RSS_CAP_MODE",
+            "SIMPLE_PROCESS_TREE_RSS_RECEIPT", "SIMPLE_TOOLCHAINS_ROOT", "SIMPLE_HOST_CONFIG",
+            "SIMPLE_BOOTSTRAP_SESSION_ID", "SIMPLE_BOOTSTRAP_SESSION_EXEC",
+            "SIMPLE_BOOTSTRAP_PROCESS_OBSERVER", "SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256",
+            "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT",
+            "CXX", "SIMPLE_CC", "SIMPLE_NO_BOOTSTRAP_DELEGATE", "SIMPLE_RUNTIME_RISCV64_VECTOR",
+            "SIMPLE_LINKER_FLAVOR",
+            "SIMPLE_SHARD_MEM_CLAMP", "SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS",
+            "SIMPLE_BUILD_MEMORY_RESERVE_BYTES",
+            "SIMPLE_HOST_MEM_RESERVE_FREE_MIB", "SIMPLE_HOST_WORKER_MEM_MIB",
+            "SIMPLE_HOST_MAX_THREADS", "SIMPLE_BOOTSTRAP_WORKER_MEM_MIB",
+            "SIMPLE_BUILD_MEMORY_ALLOW_COMMIT_WITNESS",
+            "SIMPLE_PROCESS_TREE_RSS_CAP_KIB", "SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS",
+            "MACOSX_DEPLOYMENT_TARGET", "SDKROOT", "DEVELOPER_DIR",
+            "SIMPLE_STAGE4_STREAMING_SURFACES", "SIMPLE_XRAY", "LDFLAGS",
+            "SIMPLE_LINKER", "SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256", "CL"]
+        expect(worker_hir_tool_build_environment_keys_v1()).to_equal(tools)
+        for name in tools:
+            expect(worker_hir_environment_key_admitted_v1(name)).to_equal(true)
+
+    it "admits the bootstrap internal routing marker, live only while set":
+        # Set to "1" by run_bootstrap_stage3_process_route for every threads>1
+        # bootstrap native-build; restored exactly (absent) afterwards.
+        expect(worker_hir_environment_key_admitted_v1("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING")).to_equal(true)
+
+    it "admits the cache retention latch so the HIR pool is not refused":
+        # Exported by every top-level coordinator before its HIR pool is
+        # admitted (native_build_cache_scope_retention_at_start_v1).
+        expect(worker_hir_environment_key_admitted_v1(NATIVE_CACHE_SCOPE_RETENTION_DONE_ENV_V1)).to_equal(true)
+        expect(worker_hir_environment_value_error_v1(NATIVE_CACHE_SCOPE_RETENTION_DONE_ENV_V1, "1")).to_equal("")
+        expect(worker_hir_unsupported_environment_keys_v1([(NATIVE_CACHE_SCOPE_RETENTION_DONE_ENV_V1, "1")]).len()).to_equal(0)
+
+    it "admits the phase C tool-row pins the exact launcher forwards":
+        # bootstrap-fable-17 (2026-11-12): the row inherited the caller shell
+        # and the profile refused 111 keys. The launcher now constructs the row
+        # environment (phase-c-tool-row-exec.shs); these are the keys the
+        # verification chain itself pins for the row and the compiler or the
+        # tree-RSS owner reads, so the launcher must forward them.
+        val pins = ["CXX", "SIMPLE_CC", "SIMPLE_NO_BOOTSTRAP_DELEGATE",
+            "SIMPLE_RUNTIME_RISCV64_VECTOR", "SIMPLE_SHARD_MEM_CLAMP",
+            "SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS"]
+        for name in pins:
+            expect(worker_hir_environment_key_admitted_v1(name)).to_equal(true)
+
+    it "admits safe host headroom, diagnostic RSS, and ICE retry keys":
+        val safe_keys = [
+            ("SIMPLE_HIR_SHARDING", "1"),
+            ("SIMPLE_PHASE_RSS", "1"),
+            ("SIMPLE_ICE_CRASH_RETRIES", "2"),
+            ("SIMPLE_HOST_MEM_RESERVE_FREE_MIB", "8192"),
+            ("SIMPLE_HOST_WORKER_MEM_MIB", "1200"),
+            ("SIMPLE_HOST_MAX_THREADS", "8"),
+            ("SIMPLE_BOOTSTRAP_WORKER_MEM_MIB", "1200"),
+            ("SIMPLE_STAGE3_DIRECT_THREADS", "4"),
+            ("SIMPLE_BUILD_MEMORY_ALLOW_COMMIT_WITNESS", "1"),
+            ("SIMPLE_PROCESS_TREE_RSS_CAP_KIB", "16777216"),
+            ("SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS", "100")
+        ]
+        for pair in safe_keys:
+            expect(worker_hir_environment_key_admitted_v1(pair.0)).to_equal(true)
+        expect(worker_hir_unsupported_environment_keys_v1(safe_keys).join(", ")).to_equal("")
+
+    it "never admits caller-session secrets or harness keys":
+        val ambient = ["GITHUB_TOKEN", "GH_TOKEN", "TMUX", "CLAUDE_CODE_ENTRYPOINT", "SSH_CLIENT",
+            "LD_LIBRARY_PATH", "BOOTSTRAP_VERIFY_TIMEOUT_SECONDS", "SIMPLE_BOOTSTRAP_HOME_ROOT",
+            "CARGO_TARGET_DIR", "SIMPLE_WORKTREE_STORAGE_ROOT"]
+        for name in ambient:
+            expect(worker_hir_environment_key_admitted_v1(name)).to_equal(false)
+
+    it "pins the exact base environment allowlist":
+        # Membership alone let a widened list pass review (#8610 post-merge review).
+        val pinned = [
+            "HOME", "USER", "LOGNAME", "SHELL", "PATH", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL",
+            "LC_CTYPE", "TZ", "TERM", "CI", "PWD", "OLDPWD", "SHLVL", "_",
+            "__CF_USER_TEXT_ENCODING", "SIMPLE_BIN",
+            "SIMPLE_BINARY", "SIMPLE_LIB", "SIMPLE_EXECUTION_MODE",
+            "SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING",
+            "SIMPLE_NATIVE_CACHE_SCOPE_RETENTION_DONE", "SIMPLE_NATIVE_BUILD_WORKER",
+            "SIMPLE_HIR_WORKER_PROFILE_V1", "SIMPLE_BUILD_PROGRESS_EVENTS",
+            "SIMPLE_COMPILE_FAIL_FAST", "SIMPLE_FRONTEND_CACHE_DIR", "SIMPLE_FRONTEND_CACHE_SCOPE",
+            "SIMPLE_HIR_CACHE", "SIMPLE_HIR_CACHE_DIR", "SIMPLE_CACHE_SCOPE",
+            "SIMPLE_USER_STORAGE_ROOT", "SIMPLE_GLOBAL_DATASET_MAX_BYTES", "SIMPLE_HIR_SHARD_QUEUE",
+            "SIMPLE_HIR_SHARD_OWNER", "SIMPLE_HIR_SHARD_CLAIM_LIMIT", "SIMPLE_PARSE_CLOSURE_REQUEST",
+            "SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "SIMPLE_PARSE_CLOSURE_CONSUMER",
+            "SIMPLE_PARSE_CLOSURE_SELECTED_COUNT", "SIMPLE_SCV_COMMIT_ID",
+            "SIMPLE_SCV_INVENTORY_DIGEST", "SIMPLE_SCV_INVENTORY_GENERATION",
+            "SIMPLE_SCV_REVISION_ID", "SIMPLE_SCV_SNAPSHOT_ROOT", "SIMPLE_SCV_SOURCE_DRIFTED",
+            "SIMPLE_SCV_SOURCE_INVENTORY_DIGEST", "SIMPLE_SCV_TREE_ID",
+            "SIMPLE_COMPILER_PHASE_PROFILE_FILE", "SIMPLE_MEM_SNAPSHOT_FILE",
+            "SIMPLE_PHASE_RSS", "SIMPLE_ICE_CRASH_RETRIES",
+            "SIMPLE_NATIVE_BUILD_CACHE_DIR", "SIMPLE_RT_OBJ_CACHE_DIR", "SIMPLE_NO_STUB_FALLBACK",
+            "SIMPLE_NATIVE_ARENA_DECLS", "SIMPLE_HIR_SHARDING", "SIMPLE_PARSE_SHARDING",
+            "SIMPLE_SHARD_SMALL_CLOSURE_MAX", "SIMPLE_HIR_SHARD_WORKER_KB",
+            "SIMPLE_MANAGED_NATIVE_TOOLS", "SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_PATH",
+            "SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_SHA256",
+            "SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_PATH",
+            "SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_SHA256", "SIMPLE_MANAGED_PHASE4_SOURCE_ROOT",
+            "SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH", "SIMPLE_MANAGED_RUNTIME_SNAPSHOT_PATH",
+            "SIMPLE_MANAGED_RUNTIME_SNAPSHOT_SHA256"
+        ]
+        expect(worker_hir_base_environment_keys_v1()).to_equal(pinned)
+
+    it "refuses route-selecting keys with any other value":
+        expect(worker_hir_environment_value_error_v1("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING", "1")).to_equal("")
+        for bad in ["", "0", "true", "2"]:
+            expect(worker_hir_environment_value_error_v1("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING", bad) == "").to_equal(false)
+        expect(worker_hir_environment_value_error_v1("SIMPLE_FILE_WORKERS", "0")).to_equal("")
+        for bad in ["", "1", "auto"]:
+            expect(worker_hir_environment_value_error_v1("SIMPLE_FILE_WORKERS", bad) == "").to_equal(false)
+        expect(worker_hir_environment_value_error_v1("SIMPLE_EXECUTION_MODE", "")).to_equal("")
+        expect(worker_hir_environment_value_error_v1("SIMPLE_EXECUTION_MODE", "native")).to_equal("")
+        expect(worker_hir_environment_value_error_v1("SIMPLE_EXECUTION_MODE", "interpret") == "").to_equal(false)
+        expect(worker_hir_environment_value_error_v1("HOME", "")).to_equal("")
+        expect(worker_hir_environment_key_admitted_v1("__CF_USER_TEXT_ENCODING")).to_equal(true)
+        expect(worker_hir_environment_value_error_v1("__CF_USER_TEXT_ENCODING", "0x1F5:0x0:0x0")).to_equal("")
+        for good in ["", "0", "1"]:
+            expect(worker_hir_environment_value_error_v1("SIMPLE_STAGE4_STREAMING_SURFACES", good)).to_equal("")
+            expect(worker_hir_environment_value_error_v1("SIMPLE_XRAY", good)).to_equal("")
+        expect(worker_hir_environment_value_error_v1("SIMPLE_STAGE4_STREAMING_SURFACES", "2") == "").to_equal(false)
+        expect(worker_hir_environment_value_error_v1("SIMPLE_XRAY", "yes") == "").to_equal(false)
+        for good_cm in ["", "shard", "phase", "file"]:
+            expect(worker_hir_environment_value_error_v1("STAGE3_RESOLVED_COMPILE_MODE", good_cm)).to_equal("")
+        expect(worker_hir_environment_value_error_v1("STAGE3_RESOLVED_COMPILE_MODE", "bogus") == "").to_equal(false)
+        for good_lnk in ["", "internal", "mold", "lld", "ld.lld", "lld-link", "ld", "gnu", "bfd"]:
+            expect(worker_hir_environment_value_error_v1("SIMPLE_LINKER", good_lnk)).to_equal("")
+        expect(worker_hir_environment_value_error_v1("SIMPLE_LINKER", "custom-ld") == "").to_equal(false)
+        expect(worker_hir_environment_value_error_v1("SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256", "")).to_equal("")
+        expect(worker_hir_environment_value_error_v1("SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256", "0123456789abcdef".repeat(4))).to_equal("")
+        for bad_vec in ["none", "ABCDEF".repeat(10) + "abcd", "short", "0123456789abcdef".repeat(3) + "0123456789abcdeg"]:
+            expect(worker_hir_environment_value_error_v1("SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256", bad_vec) == "").to_equal(false)
+        expect(worker_hir_environment_value_error_v1("CL", "")).to_equal("")
+        expect(worker_hir_environment_value_error_v1("CL", "/TC")).to_equal("")
+        expect(worker_hir_environment_value_error_v1("CL", "@evil.rsp") == "").to_equal(false)
+        expect(worker_hir_environment_value_error_v1("LDFLAGS", "-Wl,-s\nBAD") == "").to_equal(false)
+
+    it "names every unsupported key in one refusal":
+        val captured = [("HOME", "/h"), ("SIMPLE_NATIVE_BUILD_ENTRY", "x.spl"), ("PATH", "/bin"),
+            ("LS_COLORS", ""), ("SIMPLE_NATIVE_BUILD_ENTRY", "y.spl")]
+        val keys = worker_hir_unsupported_environment_keys_v1(captured)
+        expect(keys.len()).to_equal(2)
+        expect(keys[0]).to_equal("SIMPLE_NATIVE_BUILD_ENTRY")
+        expect(keys[1]).to_equal("LS_COLORS")
+        expect(worker_hir_unsupported_environment_keys_v1([("HOME", "/h")]).len()).to_equal(0)
+
+    it "still rejects ambient and loader-injection keys":
+        for name in ["SSH_CLIENT", "LS_COLORS", "GH_TOKEN", "CLAUDECODE", "LD_PRELOAD",
+                "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "SIMPLE_FILE_WORKER_UNIT", "SIMPLE_PLUGIN"]:
+            expect(worker_hir_environment_key_admitted_v1(name)).to_equal(false)
+
+    it "rejects invalid shard ordinals before source admission":
+        for shard in ["--hir-shard=-1/1", "--hir-shard=1/1", "--hir-shard=0/129", "--hir-shard=bad"]:
+            expect(worker_hir_child_validate_v1(["--entry", "src/main.spl", shard]).is_err()).to_equal(true)
+
+    it "rejects duplicate shard selectors before source admission":
+        expect(worker_hir_child_validate_v1(["--entry", "src/main.spl",
+            "--hir-shard=0/1", "--hir-shard=0/1"]).is_err()).to_equal(true)
+
+    # bootstrap-fable-21 (2026-11-13): the coordinator admitted the positional
+    # phase C matrix argv (`native-build <entry>.spl --backend=cranelift
+    # --low-memory --entry-closure ... -o OUT`, entry resolved through
+    # native_build_entry_and_sources_v1) and spawned its HIR pool; every worker
+    # then refused itself with `HIR profile requires one shard and entry`
+    # because the child pre-check derived the entry from `--entry` only.
+    # The child must derive the entry exactly as the coordinator did: the
+    # pre-check passes and the unit fixture is refused one step later, at the
+    # missing policy handoff -- the same verdict the `--entry` spelling gets.
+    it "derives the positional phase C entry in the child pre-check":
+        val positional = ["src/app/cli/_CliMain/main_and_help.spl", "--backend=cranelift",
+            "--low-memory", "--entry-closure", "--cache-dir", "/tmp/c", "--timeout", "7200",
+            "--threads", "2", "-o", "/tmp/out", "--hir-shard=0/2"]
+        val explicit = ["--entry", "src/app/cli/_CliMain/main_and_help.spl", "--backend=cranelift",
+            "--low-memory", "--entry-closure", "--cache-dir", "/tmp/c", "--timeout", "7200",
+            "--threads", "2", "-o", "/tmp/out", "--hir-shard=0/2"]
+        val expected = match worker_hir_child_validate_v1(explicit):
+            case Err(reason): reason
+            case Ok(_): "admitted"
+        expect(expected).to_equal("missing-internal-argument")
+        val verdict = match worker_hir_child_validate_v1(positional):
+            case Err(reason): reason
+            case Ok(_): "admitted"
+        expect(verdict).to_equal(expected)
+
+    # One derivation for both halves of the profile contract: what the
+    # coordinator resolves the frozen closure from is what the child checks.
+    it "derives the entry and sources the coordinator admitted the profile from":
+        val positional = native_build_entry_and_sources_v1(["src/app/cli/_CliMain/main_and_help.spl",
+            "--backend=cranelift", "--low-memory", "--entry-closure", "--cache-dir", "/tmp/c",
+            "--timeout", "7200", "--threads", "2", "-o", "/tmp/out", "--source", "src/lib"])
+        expect(positional.len()).to_equal(2)
+        expect(positional[0]).to_equal("src/app/cli/_CliMain/main_and_help.spl")
+        expect(positional[1]).to_equal("src/lib")
+        val explicit = native_build_entry_and_sources_v1(["--entry=src/main.spl", "--source=src"])
+        expect(explicit.len()).to_equal(2)
+        expect(explicit[0]).to_equal("src/main.spl")
+        expect(explicit[1]).to_equal("src")
+        # A value a flag consumes is never the entry; the coordinator's own
+        # policy handoff token (a `--` switch) is skipped, not taken as the entry.
+        expect(native_build_entry_and_sources_v1(["-o", "out.spl", "--backend", "cranelift"]).len()).to_equal(0)
+        val handed = native_build_entry_and_sources_v1([ENVIRONMENT_VARIANT_POLICY_HANDOFF_ARG_PREFIX_V1 + "x",
+            "src/main.spl"])
+        expect(handed.len()).to_equal(1)
+        expect(handed[0]).to_equal("src/main.spl")
+        expect(native_build_entry_and_sources_v1(["--entry"]).len()).to_equal(0)
+
+    it "still refuses a worker argv that names no entry at all":
+        val verdict = match worker_hir_child_validate_v1(["--backend=cranelift", "-o", "out.spl",
+                "--entry-closure", "--hir-shard=0/2"]):
+            case Err(reason): reason
+            case Ok(_): "admitted"
+        expect(verdict).to_equal("HIR profile requires one shard and entry")
+
+    it "does not renew retirement budget after refused acknowledgements":
+        val first = worker_hir_cleanup_deadline_v1(0, 100)
+        expect(first).to_equal(5100)
+        expect(worker_hir_cleanup_deadline_v1(first, 4000)).to_equal(first)
+        expect(worker_hir_cleanup_deadline_v1(first, 6000)).to_equal(first)
+
+    it "rejects unavailable or overflowing clock observations":
+        expect(worker_hir_cleanup_deadline_v1(0, 0)).to_equal(-1)
+        expect(worker_hir_cleanup_deadline_v1(0, -1)).to_equal(-1)
+        expect(worker_hir_cleanup_deadline_v1(0, 9223372036854775807)).to_equal(-1)
+        expect(worker_hir_remaining_budget_v1(100, 0)).to_equal(-1)
+        expect(worker_hir_remaining_budget_v1(100, 100)).to_equal(-1)
+        expect(worker_hir_remaining_budget_v1(200, 100)).to_equal(100)
+        expect(worker_hir_remaining_budget_v1(3600100, 100)).to_equal(3600000)
+        expect(worker_hir_remaining_budget_v1(7200000, 0)).to_equal(-1)
+
+    # Matrix rows run native-internal timeouts of 7200 s (bootstrap-fable-19):
+    # the launch budget is clamped to the V4 wall ceiling, never refused.
+    it "clamps a deadline beyond the V4 wall ceiling to that ceiling":
+        val max_ms = PROCESS_OBSERVATION_V4_MAX_WALL_BUDGET_NS / 1000000
+        val now: i64 = 1000
+        expect(worker_hir_remaining_budget_v1(now + 7200000, now)).to_equal(max_ms)
+        expect(worker_hir_remaining_budget_v1(now + max_ms + 1, now)).to_equal(max_ms)
+        expect(worker_hir_remaining_budget_v1(now + max_ms, now)).to_equal(max_ms)
+
+    it "still refuses an expired deadline":
+        expect(worker_hir_remaining_budget_v1(100, 200)).to_equal(-1)
+        expect(worker_hir_remaining_budget_v1(200, 200)).to_equal(-1)
+
+    it "keeps a deadline within the V4 wall ceiling unchanged":
+        val now: i64 = 1000
+        expect(worker_hir_remaining_budget_v1(now + 1800000, now)).to_equal(1800000)
+        expect(worker_hir_remaining_budget_v1(now + 1, now)).to_equal(1)
+
+    it "canonicalizes the exact copied environment before V4 encoding":
+        val captured = [ProcessObservationEnvironmentV4(key: "SIMPLE_HIR_SHARD_OWNER", value: "0/1@0"),
+            ProcessObservationEnvironmentV4(key: "HOME", value: "/fixture"),
+            ProcessObservationEnvironmentV4(key: "PATH", value: "/bin")]
+        val ordered = worker_hir_environment_sort_v1(captured)
+        expect(ordered[0].key).to_equal("HOME")
+        expect(ordered[1].key).to_equal("PATH")
+        expect(ordered[2].key).to_equal("SIMPLE_HIR_SHARD_OWNER")
+        expect(ordered[2].value).to_equal("0/1@0")
+        expect(captured[0].key).to_equal("SIMPLE_HIR_SHARD_OWNER")
+
+    it "admits --debug, -g, --no-strip, --xray, and --xray-startup-consumer on HIR worker argv":
+        expect(worker_hir_argument_error_v1([
+            "--entry", "src/main.spl", "--entry-closure", "--profile=dev", "--debug", "-g",
+            "--no-strip", "--xray", "--xray-startup-consumer", "--mode=one-binary",
+            "-o", "/tmp/out"
+        ])).to_equal("")

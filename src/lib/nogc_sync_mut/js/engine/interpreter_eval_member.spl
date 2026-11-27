@@ -64,7 +64,7 @@ fn _js_location_host(url: text) -> text:
     val host_start = scheme_pos + 3
     val path_start = _js_location_find_text(url, "/", host_start)
     if path_start < 0:
-        return url.slice(host_start, url.len())
+        return url.slice(host_start, url.byte_len())
     url.slice(host_start, path_start)
 
 fn _js_location_origin(url: text) -> text:
@@ -79,7 +79,7 @@ fn _js_location_origin(url: text) -> text:
 
 fn _js_location_pathname(url: text) -> text:
     if url.starts_with("file://"):
-        return _js_location_without_query(url.slice(7, url.len()))
+        return _js_location_without_query(url.slice(7, url.byte_len()))
     if url.starts_with("about:"):
         return url
     val scheme_pos = _js_location_find_text(url, "://", 0)
@@ -88,20 +88,20 @@ fn _js_location_pathname(url: text) -> text:
     val path_start = _js_location_find_text(url, "/", scheme_pos + 3)
     if path_start < 0:
         return "/"
-    _js_location_without_query(url.slice(path_start, url.len()))
+    _js_location_without_query(url.slice(path_start, url.byte_len()))
 
 fn _js_location_search(url: text) -> text:
     val clean = _js_location_without_fragment(url)
     val idx = _js_location_find_text(clean, "?", 0)
     if idx < 0:
         return ""
-    clean.slice(idx, clean.len())
+    clean.slice(idx, clean.byte_len())
 
 fn _js_location_hash(url: text) -> text:
     val idx = _js_location_find_text(url, "#", 0)
     if idx < 0:
         return ""
-    url.slice(idx, url.len())
+    url.slice(idx, url.byte_len())
 
 impl JsInterpreter:
     # Member access: obj.prop
@@ -134,7 +134,7 @@ impl JsInterpreter:
                 val env_id = self.create_object()
                 var env_i = 0
                 while env_i < self.node_credential_grant_names.len():
-                    self.set_object_property(env_id, self.node_credential_grant_names.get(env_i), JsValue.String(v: self.node_credential_grant_values.get(env_i)))
+                    self.set_object_property(env_id, self.node_credential_grant_names[env_i], JsValue.String(v: self.node_credential_grant_values[env_i]))
                     env_i = env_i + 1
                 return Ok(JsValue.Object(id: env_id))
             if property == "argv":
@@ -629,7 +629,7 @@ impl JsInterpreter:
         var i = 0
         val len = elements.len()
         while i < len:
-            val elem_expr = elements.get(i)
+            val elem_expr = elements[i]
             match elem_expr:
                 JsExpression.SpreadElement(arg):
                     val spread_val = self.eval_expression(arg, env)?
@@ -659,7 +659,7 @@ impl JsInterpreter:
         var i = 0
         val len = properties.len()
         while i < len:
-            val prop = properties.get(i)
+            val prop = properties[i]
             val pv = self.eval_expression(prop.value, env)?
             self.set_object_property(obj_id, prop.key, pv)
             i = i + 1
@@ -671,9 +671,9 @@ impl JsInterpreter:
         var i = 0
         val qlen = quasis.len()
         while i < qlen:
-            result = result + quasis.get(i)
+            result = result + quasis[i]
             if i < expressions.len():
-                val expr_val = self.eval_expression(expressions.get(i), env)?
+                val expr_val = self.eval_expression(expressions[i], env)?
                 result = result + js_to_string(expr_val)
             i = i + 1
         Ok(JsValue.String(v: result))
@@ -688,6 +688,16 @@ impl JsInterpreter:
                         val observed = self._host_dom_observes_property(
                             id, property
                         )
+                        if observed and self._host_dom_style_object(id):
+                            # Style declarations are modeled as ordered writes
+                            # over the cssText base; erasing the property
+                            # would let the cssText base resurrect the
+                            # declaration, so record the removal as an
+                            # empty write instead (matching removeProperty).
+                            self._assign_object_property(
+                                id, property, JsValue.String(v: "")
+                            )
+                            return Ok(JsValue.Boolean(v: true))
                         val before = self.get_object_property(id, property)
                         self.object_store.remove_property(id, property)
                         if observed and not strict_equals(

@@ -1,0 +1,58 @@
+#!/bin/sh
+# W11 regression: the tool-authority version probe must not bind a transient
+# env(1) exec failure (125/126/127), must never retry a stable status (BSD
+# tools exit 1 on --version), and must record a persistent failure as-is.
+# doc/08_tracking/bug/windows_msvc_release_bootstrap_lane_gaps_2026-11-22.md
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+. "$repo/scripts/check/lib/bootstrap-stage3/authority.shs"
+
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-stage3-version-probe.XXXXXX")
+scratch=$(CDPATH= cd -- "$scratch" && pwd -P)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+checked=0
+
+# stub NAME FAIL_STATUS FAILURES FINAL_STATUS: fails FAILURES times with
+# FAIL_STATUS, then prints a version and exits FINAL_STATUS. The counter path
+# is baked in because the probe runs under env -i.
+stub() {
+    printf '#!/bin/sh\nn=$(cat "%s/%s.count" 2>/dev/null || echo 0)\nn=$((n + 1))\necho "$n" >"%s/%s.count"\nif [ "$n" -le %s ]; then echo "env: cannot run" >&2; exit %s; fi\necho "%s version 23.1.1"\nexit %s\n' \
+        "$scratch" "$1" "$scratch" "$1" "$3" "$2" "$1" "$4" >"$scratch/$1"
+    chmod +x "$scratch/$1"
+}
+
+expect() {
+    # NAME ATTEMPTS WANT_STATUS WANT_CALLS WANT_FIRST_LINE
+    bootstrap_stage3_tool_version_probe "$scratch/$1" "$scratch/$1.out" "$2" 2>/dev/null
+    got_status=$bootstrap_stage3_tool_version_status
+    got_calls=$(cat "$scratch/$1.count")
+    got_line=
+    { IFS= read -r got_line || :; } <"$scratch/$1.out"
+    if [ "$got_status" != "$3" ] || [ "$got_calls" != "$4" ] || [ "$got_line" != "$5" ]; then
+        printf 'FAIL — %s: status=%s calls=%s line=%s (want %s/%s/%s)\n' \
+            "$1" "$got_status" "$got_calls" "$got_line" "$3" "$4" "$5"
+        exit 1
+    fi
+    checked=$((checked + 1))
+}
+
+# Reproduction: the W11 shape, 125 then success on the same bytes.
+stub transient125 125 2 0
+expect transient125 5 0 3 'transient125 version 23.1.1'
+# 126/127 are the same exec-failure class.
+stub transient126 126 1 0
+expect transient126 5 0 2 'transient126 version 23.1.1'
+stub transient127 127 4 0
+expect transient127 5 0 5 'transient127 version 23.1.1'
+# Fail-closed: a persistent exec failure is recorded, bounded.
+stub always125 125 99 0
+expect always125 3 125 3 'env: cannot run'
+# Stable non-zero (BSD --version) is a binding, never retried.
+stub bsd1 1 99 0
+expect bsd1 5 1 1 'env: cannot run'
+# Non-Windows hosts pass ATTEMPTS=1: identical single-probe behavior.
+stub single125 125 1 0
+expect single125 1 125 1 'env: cannot run'
+
+printf 'PASS — %s version-probe case(s) checked\n' "$checked"

@@ -1,0 +1,242 @@
+"""
+## Purpose and audience
+Purpose: Prove SFFI preflight fact contracts (`WP-07`: `SPL-SFFI-ABI-001`,
+`SPL-SFFI-RANGE-001`, raw `extern fn` capability boundaries, foreign-resource
+handle acquire/release pairing, and `sffi_signature.spl` manifest validation)
+operate fail-closed across explicit target data models.
+Audience: Compiler, lint, and runtime SFFI engineers maintaining boundary safety.
+## Operator workflow
+Run with `simple test test/01_unit/compiler/lint/sffi_preflight_fact_contracts_spec.spl --mode=interpreter`
+and confirm every scenario passes with zero skipped or placeholder checks.
+## Compatibility and limitations
+Exercises pure preflight fact extraction, imported `@c_abi` unit obligations,
+range-constrained unit return checks, static lint rule wrappers, and `FfiManifest`
+preflight validation without executing foreign libraries.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use compiler.semantics.lint.sffi_preflight_facts_v1.{
+    resolve_sffi_target_data_model_v1,
+    extract_sffi_preflight_report_v1,
+    extract_sffi_preflight_report_with_imports_v1,
+    sffi_preflight_to_manifest_facts_v1,
+    validate_sffi_preflight_report_manifest_v1
+}
+use compiler.semantics.lint.sffi_abi_mismatch.{
+    check_sffi_abi_mismatch,
+    check_sffi_abi_mismatch_with_imports
+}
+use compiler.tools.lint.lint_rule_api.{LintParamsV1, LintUnit, StaticLintLevel}
+use compiler.tools.lint.rules.sffi_abi_mismatch_rule.{
+    sffi_abi_check_with_triple,
+    sffi_abi_mismatch_lint_rule,
+    sffi_preflight_facts_for_unit_v1
+}
+use compiler.tools.lint.rules.raw_sffi_rule.{
+    raw_sffi_lint_rule,
+    raw_sffi_preflight_extern_facts_v1
+}
+use compiler.tools.lint.rules.unwrapped_foreign_resource_rule.{
+    unwrapped_foreign_resource_lint_rule,
+    unwrapped_foreign_resource_ownership_facts_v1
+}
+use std.nogc_sync_mut.sffi.sffi_signature.{
+    FfiManifest,
+    EvidenceBoundI64ManifestV1,
+    extract_sffi_extern_signature_facts_v1,
+    validate_sffi_preflight_manifest_facts_v1,
+    validate_evidence_bound_preflight_facts_v1
+}
+
+describe "WP-07: SFFI preflight fact contracts":
+    """Verifies target data model resolution, imported @c_abi unit checking,
+    SPL-SFFI-RANGE-001 constrained return emission, capability/resource provenance,
+    and manifest vs extern signature preflight validation."""
+
+    context "explicit target data model facts":
+        """Resolves pointer width, c_long width, char signedness, endianness, and
+        calling convention per triple, refusing to default unknown targets."""
+
+        it "populates LP64, LLP64, and ILP32 data model facts and rejects unknown triples":
+            """Linux x86_64 uses LP64/sysv64, Windows x86_64 uses LLP64/win64,
+            aarch64 Linux marks plain char unsigned, and unknown triples return 0 bits."""
+            step("Resolve SffiTargetDataModelV1 across four representative triples")
+            val linux64 = resolve_sffi_target_data_model_v1("x86_64-unknown-linux-gnu")
+            expect(linux64.data_model).to_equal("lp64")
+            expect(linux64.pointer_bits).to_equal(64)
+            expect(linux64.c_long_bits).to_equal(64)
+            expect(linux64.char_signedness).to_equal("signed")
+            expect(linux64.endianness).to_equal("little")
+            expect(linux64.calling_convention).to_equal("sysv64")
+
+            val win64 = resolve_sffi_target_data_model_v1("x86_64-pc-windows-msvc")
+            expect(win64.data_model).to_equal("llp64")
+            expect(win64.pointer_bits).to_equal(64)
+            expect(win64.c_long_bits).to_equal(32)
+            expect(win64.calling_convention).to_equal("win64")
+
+            val arm64 = resolve_sffi_target_data_model_v1("aarch64-unknown-linux-gnu")
+            expect(arm64.char_signedness).to_equal("unsigned")
+            expect(arm64.calling_convention).to_equal("aapcs64")
+
+            val unknown = resolve_sffi_target_data_model_v1("mystery-unknown-os")
+            expect(unknown.data_model).to_equal("")
+            expect(unknown.pointer_bits).to_equal(0)
+
+    context "imported @c_abi unit declarations and obligations (SPL-SFFI-ABI-001)":
+        """Checks imported units resolved from module sources and flags unresolved
+        imported unit ABI obligations when strict preflight checking is active."""
+
+        it "detects width and signedness mismatches on imported @c_abi units":
+            """An imported unit declared as `@c_abi(\"long\") unit Offset: i64`
+            passes on LP64 Linux x86_64 but fails with SPL-SFFI-ABI-001 on LLP64 Windows."""
+            step("Check imported @c_abi unit across LP64 and LLP64 targets")
+            val imported_mod = "@c_abi(\"long\")\npub unit Offset: i64 as off\n"
+            val caller = "use pkg.abi.{{Offset}}\n@unsafe(reason: \"ffi\", capabilities: [ffi])\nextern fn c_seek(pos: Offset) -> Offset\n"
+            var imports: {text: text} = {}
+            imports["pkg.abi"] = imported_mod
+
+            val ok_linux = check_sffi_abi_mismatch_with_imports(
+                caller, "src/io/seek.spl", "x86_64-unknown-linux-gnu", imports, true
+            )
+            expect(ok_linux.len()).to_equal(0)
+
+            val bad_win = check_sffi_abi_mismatch_with_imports(
+                caller, "src/io/seek.spl", "x86_64-pc-windows-msvc", imports, true
+            )
+            expect(bad_win.len()).to_equal(1)
+            expect(bad_win[0].code).to_equal("SPL-SFFI-ABI-001")
+            expect(bad_win[0].message).to_contain("width mismatch")
+
+        it "reports unresolved imported unit ABI obligations under strict preflight":
+            """When an imported unit named in @c_abi or unit.* import cannot be
+            resolved to a concrete underlying primitive, strict preflight emits SPL-SFFI-ABI-001."""
+            step("Extract preflight report with unresolved imported unit obligation")
+            val caller = "use unit.net.{{SockFd}}\n@unsafe(reason: \"ffi\", capabilities: [ffi])\nextern fn c_socket() -> SockFd\n"
+            val empty_imports: {text: text} = {}
+            val report = extract_sffi_preflight_report_with_imports_v1(
+                caller, "src/net/raw.spl", "x86_64-unknown-linux-gnu", empty_imports, true
+            )
+            expect(report.unresolved_imported_units.len()).to_equal(1)
+            expect(report.unresolved_imported_units[0]).to_equal("SockFd")
+            expect(report.findings.len()).to_be_greater_than(0)
+            expect(report.findings[0].code).to_equal("SPL-SFFI-ABI-001")
+            expect(report.findings[0].message).to_contain("SockFd")
+
+    context "SPL-SFFI-RANGE-001 constrained unit returns across SFFI":
+        """Emits SPL-SFFI-RANGE-001 at deny severity when an extern fn returns a
+        where/range-constrained or NonZero* unit without a validating boundary wrapper."""
+
+        it "emits SPL-SFFI-RANGE-001 when extern fn returns a where-constrained unit or NonZeroU16 unvalidated":
+            """Foreign C code can return arbitrary bit patterns such as 0, so a
+            direct constrained unit return without boundary validation is denied."""
+            step("Lint unvalidated constrained unit and NonZeroU16 extern returns")
+            val src = "@c_abi(\"uint16_t\")\nunit Port: u16 as port where port > 0\n\n@unsafe(reason: \"ffi\", capabilities: [ffi])\npub extern fn c_listen_port() -> Port\n"
+            val findings = sffi_abi_check_with_triple(LintUnit("src/net/port.spl", src), "x86_64-unknown-linux-gnu")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].code).to_equal("SPL-SFFI-RANGE-001")
+            expect(findings[0].level).to_equal(StaticLintLevel.Deny)
+            expect(findings[0].message).to_contain("Port")
+
+            val nz_src = "@unsafe(reason: \"ffi\", capabilities: [ffi])\nextern fn c_handle_id() -> NonZeroU32\n"
+            val nz_findings = check_sffi_abi_mismatch(nz_src, "src/net/id.spl", "x86_64-unknown-linux-gnu")
+            expect(nz_findings.len()).to_equal(1)
+            expect(nz_findings[0].code).to_equal("SPL-SFFI-RANGE-001")
+
+        it "accepts a private extern fn wrapped by an explicit range-validating helper":
+            """When the private extern fn is called inside an @unsafe([ffi]) boundary
+            helper that validates the invariant before returning Result/Option, SPL-SFFI-RANGE-001 is satisfied."""
+            step("Lint private constrained extern paired with a boundary validation wrapper")
+            val wrapped_src = "@c_abi(\"uint16_t\")\nunit Port: u16 as port where port > 0\n\n@unsafe(reason: \"raw port ABI\", capabilities: [ffi])\nextern fn _c_listen_port_raw() -> Port\n\n@unsafe(reason: \"validate foreign port range\", capabilities: [ffi])\npub fn listen_port_checked() -> Result<Port, text>:\n    val candidate = _c_listen_port_raw()\n    if candidate == 0:\n        return Err(\"invalid zero port\")\n    Ok(candidate)\n"
+            val findings = sffi_abi_check_with_triple(LintUnit("src/net/port_ok.spl", wrapped_src), "x86_64-unknown-linux-gnu")
+            expect(findings.len()).to_equal(0)
+
+    context "raw capability boundaries, resource pairing provenance, and rule wiring":
+        """Verifies raw_sffi_rule, unwrapped_foreign_resource_rule, and sffi_abi_mismatch_rule
+        preserve static_rules signatures while exposing preflight facts."""
+
+        it "extracts @unsafe([ffi]) declaration facts and pairs acquire/release resource families":
+            """Preflight fact extraction records per-extern ffi capability status
+            and pairs `rt_db_open` with `rt_db_close` while flagging unwrapped escapes."""
+            step("Inspect preflight facts through all three lint rule providers")
+            val abi_rule = sffi_abi_mismatch_lint_rule()
+            val raw_rule = raw_sffi_lint_rule()
+            val res_rule = unwrapped_foreign_resource_lint_rule()
+            expect(abi_rule.id()).to_equal("sffi_abi_mismatch")
+            expect(raw_rule.id()).to_equal("raw_sffi")
+            expect(res_rule.id()).to_equal("unwrapped_foreign_resource")
+
+            val src = "@unsafe(reason: \"db open\", capabilities: [ffi])\nextern fn rt_db_open(path: text) -> i64\nextern fn rt_db_close(handle: i64) -> bool\n\nfn leak_db(path: text) -> i64:\n    return rt_db_open(path)\n"
+            val unit = LintUnit("src/db/raw.spl", src)
+            val extern_facts = raw_sffi_preflight_extern_facts_v1(unit)
+            expect(extern_facts.len()).to_equal(2)
+            expect(extern_facts[0].name).to_equal("rt_db_open")
+            expect(extern_facts[0].has_ffi_unsafe_decl).to_equal(true)
+            expect(extern_facts[0].paired_release_symbol).to_equal("rt_db_close")
+            expect(extern_facts[1].name).to_equal("rt_db_close")
+            expect(extern_facts[1].has_ffi_unsafe_decl).to_equal(false)
+
+            val ownership = unwrapped_foreign_resource_ownership_facts_v1(unit)
+            expect(ownership.len()).to_equal(1)
+            expect(ownership[0].family_prefix).to_equal("rt_db")
+            expect(ownership[0].paired).to_equal(true)
+            expect(ownership[0].unwrapped_escape_lines.len()).to_equal(1)
+
+            val res_findings = res_rule.check(LintParamsV1.defaults(), unit)
+            expect(res_findings.len()).to_equal(1)
+            expect(res_findings[0].code).to_equal("W-MC-RES-001")
+            expect(res_findings[0].hint).to_contain("rt_db_close")
+
+            val unit_report = sffi_preflight_facts_for_unit_v1(unit, "x86_64-unknown-linux-gnu")
+            expect(unit_report.extern_facts.len()).to_equal(2)
+
+    context "sffi_signature.spl preflight manifest fact validation":
+        """Verifies FfiManifest and EvidenceBoundI64ManifestV1 validate arity,
+        return type, target triple, and ABI/range obligations against extracted extern facts."""
+
+        it "accepts matching manifest facts and rejects arity, target, ABI, or range mismatches":
+            """Manifest preflight validation fails closed before dynamic symbol
+            resolution whenever arity, target, ABI, or constrained return checks fail."""
+            step("Validate FfiManifest and EvidenceBoundI64ManifestV1 against extracted source facts")
+            val valid_src = "@c_abi(\"int64_t\")\nunit Ticks: i64 as tk\n\n@unsafe(reason: \"clock\", capabilities: [ffi])\nextern fn rt_clock_now(clock_id: i64) -> i64\n"
+            val report = extract_sffi_preflight_report_v1(valid_src, "src/sys/clock.spl", "x86_64-unknown-linux-gnu")
+            val manifest_facts = sffi_preflight_to_manifest_facts_v1(report)
+            var manifest = FfiManifest.create()
+            manifest.add("rt_clock_now", 1, "i64")
+
+            val ok_res = validate_sffi_preflight_report_manifest_v1(report, manifest)
+            match ok_res:
+                case Ok(summary):
+                    expect(summary.checked_symbols).to_equal(1)
+                    expect(summary.data_model).to_equal("lp64")
+                case Err(err):
+                    expect(err).to_equal("")
+
+            var wrong_arity = FfiManifest.create()
+            wrong_arity.add("rt_clock_now", 2, "i64")
+            val bad_arity = validate_sffi_preflight_manifest_facts_v1(wrong_arity, "x86_64-unknown-linux-gnu", manifest_facts)
+            match bad_arity:
+                case Err(err):
+                    expect(err).to_contain("E-SFFI-003")
+                case Ok(_):
+                    expect("arity mismatch accepted").to_equal("")
+
+            var ev_manifest = EvidenceBoundI64ManifestV1.create(
+                "clock.provider",
+                "x86_64-pc-windows-msvc",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            )
+            ev_manifest.add("rt_clock_now", 1, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            val bad_target = validate_evidence_bound_preflight_facts_v1(ev_manifest, manifest_facts)
+            match bad_target:
+                case Err(err):
+                    expect(err).to_contain("E-SFFI-005")
+                case Ok(_):
+                    expect("target mismatch accepted").to_equal("")
+
+            val direct_facts = extract_sffi_extern_signature_facts_v1(valid_src, "x86_64-unknown-linux-gnu")
+            expect(direct_facts.len()).to_equal(1)
+            expect(direct_facts[0].arg_count).to_equal(1)

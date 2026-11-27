@@ -298,7 +298,12 @@ mod cuda_dlopen {
     type CuMemcpyHtoDAsync = unsafe extern "C" fn(u64, *const c_void, usize, *mut c_void) -> i32;
     type CuMemcpyDtoHAsync = unsafe extern "C" fn(*mut c_void, u64, usize, *mut c_void) -> i32;
     type CuDeviceGetCount = unsafe extern "C" fn(*mut i32) -> i32;
+    // CUdevice_attribute values: 75 = COMPUTE_CAPABILITY_MAJOR, 76 = MINOR.
+    type CuDeviceGetAttribute = unsafe extern "C" fn(*mut i32, i32, i32) -> i32;
     type CuModuleLoadData = unsafe extern "C" fn(*mut *mut c_void, *const c_void) -> i32;
+    type CuModuleLoad = unsafe extern "C" fn(*mut *mut c_void, *const std::os::raw::c_char) -> i32;
+    type CuMemcpyDtoD = unsafe extern "C" fn(u64, u64, usize) -> i32;
+    type CuGetErrorName = unsafe extern "C" fn(i32, *mut *const std::os::raw::c_char) -> i32;
     type CuModuleUnload = unsafe extern "C" fn(*mut c_void) -> i32;
     type CuModuleGetFunction = unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *const std::os::raw::c_char) -> i32;
     type CuLaunchKernel = unsafe extern "C" fn(
@@ -321,6 +326,9 @@ mod cuda_dlopen {
         pub device_get_uuid: CuDeviceGetUuid,
         pub device_get_name: CuDeviceGetName,
         pub device_get_count: CuDeviceGetCount,
+        // Optional: a driver without cuDeviceGetAttribute must not invalidate
+        // the whole table (capability callers surface a negative rc instead).
+        pub device_get_attribute: Option<CuDeviceGetAttribute>,
         pub ctx_create: CuCtxCreate,
         pub ctx_set_current: CuCtxSetCurrent,
         pub ctx_destroy: CuCtxDestroy,
@@ -346,6 +354,9 @@ mod cuda_dlopen {
         pub memcpy_htod: CuMemcpyHtoD,
         pub memcpy_dtoh: CuMemcpyDtoH,
         pub module_load_data: CuModuleLoadData,
+        pub module_load: Option<CuModuleLoad>,
+        pub memcpy_dtod: Option<CuMemcpyDtoD>,
+        pub get_error_name: Option<CuGetErrorName>,
         pub module_unload: CuModuleUnload,
         pub module_get_function: CuModuleGetFunction,
         pub launch_kernel: CuLaunchKernel,
@@ -480,6 +491,7 @@ mod cuda_dlopen {
             device_get_uuid: sym_alt!("cuDeviceGetUuid_v2", "cuDeviceGetUuid"),
             device_get_name: sym!("cuDeviceGetName"),
             device_get_count: sym!("cuDeviceGetCount"),
+            device_get_attribute: sym_opt!("cuDeviceGetAttribute"),
             ctx_create: sym!("cuCtxCreate_v2"),
             ctx_set_current: sym!("cuCtxSetCurrent"),
             ctx_destroy: sym!("cuCtxDestroy_v2"),
@@ -491,6 +503,9 @@ mod cuda_dlopen {
             memcpy_htod: sym!("cuMemcpyHtoD_v2"),
             memcpy_dtoh: sym!("cuMemcpyDtoH_v2"),
             module_load_data: sym!("cuModuleLoadData"),
+            module_load: sym_opt!("cuModuleLoad"),
+            memcpy_dtod: sym_opt!("cuMemcpyDtoD_v2"),
+            get_error_name: sym_opt!("cuGetErrorName"),
             module_unload: sym!("cuModuleUnload"),
             module_get_function: sym!("cuModuleGetFunction"),
             launch_kernel: sym!("cuLaunchKernel"),
@@ -637,9 +652,11 @@ fn strict_owned_bytes(args: &[Value], index: usize, name: &str, expected: usize)
     if let Some(bytes) = value.byte_array_view() {
         return Ok(bytes.to_vec().into_boxed_slice());
     }
-    let items = match value {
-        Value::Array(items) | Value::FrozenArray(items) => items.as_slice(),
-        Value::FixedSizeArray { data, .. } => data.as_slice(),
+    // Element by element, so a packed array keeps no boxed view (see
+    // `strict_i64_values`).
+    let (count, items): (usize, Box<dyn Iterator<Item = Value> + '_>) = match value {
+        Value::Array(items) | Value::FrozenArray(items) => (items.len(), Box::new(items.values_iter())),
+        Value::FixedSizeArray { data, .. } => (data.len(), Box::new(data.iter().cloned())),
         other => {
             return Err(CompileError::semantic(format!(
                 "{name} argument {index} must be [u8], got {}",
@@ -647,7 +664,7 @@ fn strict_owned_bytes(args: &[Value], index: usize, name: &str, expected: usize)
             )))
         }
     };
-    let mut bytes = Vec::with_capacity(items.len());
+    let mut bytes = Vec::with_capacity(count);
     for item in items {
         let raw = item.as_int()?;
         bytes.push(
@@ -681,7 +698,11 @@ fn strict_i64_values(args: &[Value], index: usize, name: &str, expected: usize) 
         .get(index)
         .ok_or_else(|| CompileError::semantic(format!("{name} expects {expected} arguments")))?;
     let items = match value {
-        Value::Array(items) | Value::FrozenArray(items) => items.as_slice(),
+        // Element by element: `as_slice()` would build (and keep) the boxed
+        // view of a packed array -- ~80 MB for a 1M-word font atlas.
+        Value::Array(items) | Value::FrozenArray(items) => {
+            return items.values_iter().map(|v| v.as_int()).collect();
+        }
         Value::FixedSizeArray { data, .. } => data.as_slice(),
         other => {
             return Err(CompileError::semantic(format!(
@@ -707,20 +728,54 @@ fn runtime_i64_owner(values: &[i64]) -> simple_runtime::value::RuntimeValue {
 
 pub fn rt_cuda_module_load_data_array_fn(args: &[Value]) -> Result<Value, CompileError> {
     let bytes = strict_owned_bytes(args, 0, "rt_cuda_module_load_data_array", 1)?;
-    let owner = runtime_byte_owner(&bytes);
-    let result = simple_runtime::cuda_runtime::rt_cuda_module_load_data_array(owner);
-    release_runtime_owner(owner);
-    Ok(Value::Int(result))
+    #[cfg(not(feature = "cuda"))]
+    {
+        // Same gap as rt_cuda_memcpy_htod_array: the runtime array helper is
+        // the -3 stub without the `cuda` feature; load through the dlopen
+        // driver via the pointer-based sibling.
+        return rt_cuda_module_load_data_bytes_fn(&[
+            Value::Int(bytes.as_ptr() as i64),
+            Value::Int(bytes.len() as i64),
+        ]);
+    }
+    #[cfg(feature = "cuda")]
+    {
+        let owner = runtime_byte_owner(&bytes);
+        let result = simple_runtime::cuda_runtime::rt_cuda_module_load_data_array(owner);
+        release_runtime_owner(owner);
+        Ok(Value::Int(result))
+    }
 }
 
 pub fn rt_cuda_memcpy_htod_array_fn(args: &[Value]) -> Result<Value, CompileError> {
     let dst = arg_i64(args, 0, "rt_cuda_memcpy_htod_array", 3)?;
     let bytes = strict_owned_bytes(args, 1, "rt_cuda_memcpy_htod_array", 3)?;
     let count = arg_i64(args, 2, "rt_cuda_memcpy_htod_array", 3)?;
-    let owner = runtime_byte_owner(&bytes);
-    let result = simple_runtime::cuda_runtime::rt_cuda_memcpy_htod_array(dst, owner, count);
-    release_runtime_owner(owner);
-    Ok(Value::Int(result))
+    #[cfg(not(feature = "cuda"))]
+    {
+        // Without the `cuda` feature the runtime's array helper is the -3
+        // stub, so a working driver was never reached (CUDA lane arena guard
+        // upload failed on every host). Copy through the dlopen driver like
+        // the pointer-based sibling `rt_cuda_memcpy_htod_fn`.
+        let Ok(byte_count) = usize::try_from(count) else {
+            return Ok(Value::Int(-1));
+        };
+        if byte_count > bytes.len() {
+            return Ok(Value::Int(-1));
+        }
+        return rt_cuda_memcpy_htod_fn(&[
+            Value::Int(dst),
+            Value::Int(bytes.as_ptr() as i64),
+            Value::Int(count),
+        ]);
+    }
+    #[cfg(feature = "cuda")]
+    {
+        let owner = runtime_byte_owner(&bytes);
+        let result = simple_runtime::cuda_runtime::rt_cuda_memcpy_htod_array(dst, owner, count);
+        release_runtime_owner(owner);
+        Ok(Value::Int(result))
+    }
 }
 
 pub fn rt_cuda_launch_kernel_name_array_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -1387,7 +1442,27 @@ pub fn rt_cuda_device_compute_capability_fn(args: &[Value]) -> Result<Value, Com
     }
     #[cfg(not(feature = "cuda"))]
     {
-        Ok(Value::Int(-3))
+        // Reach the real driver through dlopen like the sibling device
+        // externs; the -3 build sentinel must survive only where no driver
+        // path exists, and a host with a working driver must report its
+        // packed capability (major*10+minor, e.g. 86 for sm_86).
+        if let Some(fns) = get_cuda_dl() {
+            if let Some(get_attr) = fns.device_get_attribute {
+                let mut major = 0i32;
+                let mut minor = 0i32;
+                let r_major = unsafe { get_attr(&mut major, 75, device as i32) };
+                let r_minor = unsafe { get_attr(&mut minor, 76, device as i32) };
+                if r_major == 0 && r_minor == 0 {
+                    return Ok(Value::Int((major * 10 + minor) as i64));
+                }
+                // CUresult codes are POSITIVE (3 = NOT_INITIALIZED, 101 =
+                // INVALID_DEVICE); returned raw they read as a plausible
+                // capability. Negate so every failure is <= 0.
+                let rc = if r_major != 0 { r_major } else { r_minor };
+                return Ok(Value::Int(-(rc as i64)));
+            }
+        }
+        Ok(Value::Int(-1))
     }
 }
 
@@ -1456,6 +1531,17 @@ pub fn rt_cuda_ctx_destroy_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
+        // Without this every interpreter-created context leaked until
+        // cuCtxCreate failed with OUT_OF_MEMORY (cuda_gpu_gated_spec_defects item 3).
+        if let Some(fns) = get_cuda_dl() {
+            // 0 is no context and a negative value is a CUresult from a failed
+            // create; neither is a handle the driver may be given.
+            if ctx <= 0 {
+                return Ok(Value::Int(-1));
+            }
+            let r = unsafe { (fns.ctx_destroy)(ctx as *mut std::os::raw::c_void) };
+            return Ok(Value::Int(cuda_driver_status(r)));
+        }
         Ok(Value::Int(-3))
     }
 }
@@ -1858,11 +1944,10 @@ pub fn rt_cuda_launch_kernel_ex_fn(args: &[Value]) -> Result<Value, CompileError
     let args_ptr = arg_i64(args, 10, "rt_cuda_launch_kernel_ex", N)?;
     #[cfg(feature = "cuda")]
     {
-        let name = func_name.as_bytes();
+        let c_name = c_string_or_error(func_name, "rt_cuda_launch_kernel_ex")?;
         return Ok(Value::Int(rt_cuda_launch_kernel_ex(
             module,
-            name.as_ptr(),
-            name.len() as u64,
+            c_name.as_ptr(),
             grid_x,
             grid_y,
             grid_z,
@@ -2035,6 +2120,15 @@ pub fn rt_cuda_memcpy_dtod_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            if let Some(memcpy_dtod) = fns.memcpy_dtod {
+                if size < 0 {
+                    return Ok(Value::Int(-1));
+                }
+                let r = unsafe { memcpy_dtod(dst as u64, src as u64, size as usize) };
+                return Ok(Value::Int(cuda_driver_status(r)));
+            }
+        }
         Ok(Value::Int(-3))
     }
 }
@@ -2215,6 +2309,17 @@ pub fn rt_cuda_module_load_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            if let Some(module_load) = fns.module_load {
+                let c_path = c_string_or_error(path, "rt_cuda_module_load")?;
+                let mut module: *mut std::os::raw::c_void = std::ptr::null_mut();
+                let r = unsafe { module_load(&mut module, c_path.as_ptr()) };
+                if r == 0 {
+                    return Ok(Value::Int(module as i64));
+                }
+                return Ok(Value::Int(-(r as i64)));
+            }
+        }
         Ok(Value::Int(-3))
     }
 }
@@ -2268,11 +2373,18 @@ pub fn rt_cuda_module_load_data_bytes_fn(args: &[Value]) -> Result<Value, Compil
                 return Ok(Value::Int(-1));
             }
             let bytes = unsafe { std::slice::from_raw_parts(ptx_ptr as *const u8, ptx_len as usize) };
-            let c_ptx = CString::new(bytes).map_err(|_| {
-                CompileError::semantic("rt_cuda_module_load_data_bytes does not accept embedded NUL bytes".to_string())
-            })?;
+            // cuModuleLoadData accepts either NUL-terminated PTX text or a binary cubin/
+            // fatbin image (self-describing via its header). CString::new() rejects any
+            // buffer containing an interior NUL, which every cubin has. Mirror the native
+            // cuda_runtime.rs fix: copy the buffer and append a terminator only if one is
+            // not already present; the extra byte is ignored by the cubin/fatbin parsers
+            // and is required by the PTX parser.
+            let mut image: Vec<u8> = bytes.to_vec();
+            if image.last() != Some(&0) {
+                image.push(0);
+            }
             let mut module: *mut std::os::raw::c_void = std::ptr::null_mut();
-            let r = unsafe { (fns.module_load_data)(&mut module, c_ptx.as_ptr() as *const std::os::raw::c_void) };
+            let r = unsafe { (fns.module_load_data)(&mut module, image.as_ptr() as *const std::os::raw::c_void) };
             if r == 0 {
                 return Ok(Value::Int(module as i64));
             }
@@ -2406,6 +2518,20 @@ pub fn rt_cuda_get_error_string_fn(args: &[Value]) -> Result<Value, CompileError
     }
     #[cfg(not(feature = "cuda"))]
     {
+        // Same contract as the runtime table: negative codes are CUresult
+        // values, and the reply is the driver's CUDA_ERROR_* name.
+        if let Some(fns) = get_cuda_dl() {
+            if let Some(get_error_name) = fns.get_error_name {
+                let code = error_code.checked_abs().and_then(|c| i32::try_from(c).ok()).unwrap_or(-1);
+                let mut name: *const std::os::raw::c_char = std::ptr::null();
+                let r = unsafe { get_error_name(code, &mut name) };
+                if r == 0 && !name.is_null() {
+                    let text = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned();
+                    return Ok(Value::text(text));
+                }
+                return Ok(Value::text(format!("CUDA_ERROR_UNKNOWN({})", error_code)));
+            }
+        }
         Ok(Value::text(String::from("CUDA support disabled")))
     }
 }
@@ -2936,8 +3062,12 @@ pub fn rt_opencl_release_context_fn(args: &[Value]) -> Result<Value, CompileErro
 }
 
 /// WebGPU surface stubs — no surface is available in interpreter mode.
+///
+/// `create_surface` must return the documented invalid handle (`-1`, see
+/// `WEBGPU_INVALID_HANDLE` in `src/runtime/hosted/webgpu.rs`), never `0`: `0`
+/// is indistinguishable from a live handle at the Simple call site.
 pub fn rt_webgpu_create_surface_fn(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(0))
+    Ok(Value::Int(-1))
 }
 
 pub fn rt_webgpu_destroy_surface_fn(_args: &[Value]) -> Result<Value, CompileError> {
@@ -3448,6 +3578,20 @@ mod vulkan_dlopen {
         unsafe extern "C" fn(VkDevice, *const VkFenceCreateInfo, *const c_void, *mut u64) -> VkResult;
     type FnVkDestroyFence = unsafe extern "C" fn(VkDevice, u64, *const c_void);
     type FnVkWaitForFences = unsafe extern "C" fn(VkDevice, u32, *const u64, u32, u64) -> VkResult;
+    type FnVkGetFenceStatus = unsafe extern "C" fn(VkDevice, u64) -> VkResult;
+    type FnVkEnumerateDeviceExtensionProperties = unsafe extern "C" fn(
+        VkPhysicalDevice,
+        *const c_char,
+        *mut u32,
+        *mut VkExtensionProperties,
+    ) -> VkResult;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub(super) struct VkExtensionProperties {
+        pub extension_name: [u8; 256],
+        pub spec_version: u32,
+    }
 
     #[repr(C)]
     pub(super) struct VkFenceCreateInfo {
@@ -3526,6 +3670,8 @@ mod vulkan_dlopen {
         pub create_fence: FnVkCreateFence,
         pub destroy_fence: FnVkDestroyFence,
         pub wait_for_fences: FnVkWaitForFences,
+        pub get_fence_status: FnVkGetFenceStatus,
+        pub enumerate_device_extension_properties: Option<FnVkEnumerateDeviceExtensionProperties>,
     }
     unsafe impl Send for VkFns {}
     unsafe impl Sync for VkFns {}
@@ -3586,6 +3732,8 @@ mod vulkan_dlopen {
     }
 
     pub fn load_vulkan() -> Option<VkFns> {
+        simple_runtime::vulkan_graphics_runtime::ensure_macos_moltenvk_icd_env();
+
         unsafe {
             #[cfg(unix)]
             {
@@ -3687,10 +3835,29 @@ mod vulkan_dlopen {
             create_fence: sym!("vkCreateFence"),
             destroy_fence: sym!("vkDestroyFence"),
             wait_for_fences: sym!("vkWaitForFences"),
+            get_fence_status: sym!("vkGetFenceStatus"),
             queue_wait_idle: sym!("vkQueueWaitIdle"),
             device_wait_idle: sym!("vkDeviceWaitIdle"),
             reset_command_buffer: sym!("vkResetCommandBuffer"),
             get_physical_device_properties: sym!("vkGetPhysicalDeviceProperties"),
+            enumerate_device_extension_properties: {
+                let n = CString::new("vkEnumerateDeviceExtensionProperties").ok()?;
+                #[cfg(unix)]
+                let p = libc::dlsym(handle, n.as_ptr());
+                #[cfg(windows)]
+                let p = {
+                    use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
+                    match GetProcAddress(handle as _, n.as_ptr() as *const u8) {
+                        Some(f) => f as *mut c_void,
+                        None => std::ptr::null_mut(),
+                    }
+                };
+                if p.is_null() {
+                    None
+                } else {
+                    Some(std::mem::transmute(p))
+                }
+            },
         })
     }
 
@@ -3764,11 +3931,16 @@ mod vulkan_dlopen {
     pub struct DescriptorSetEntry {
         pub set: VkDescriptorSet,
         pub pool: VkDescriptorPool,
+        /// `(binding, buffer handle)` currently written into this set, so an
+        /// async ring submission can retain the buffers it may still read.
+        pub buffers: Vec<(u32, i64)>,
     }
 
     pub struct CommandBufferEntry {
         pub cmd: VkCommandBuffer,
         pub pipeline_handle: i64,
+        /// Descriptor set handles bound while recording this command.
+        pub descriptor_sets: Vec<i64>,
     }
 
     pub struct VulkanState {
@@ -3794,6 +3966,9 @@ mod vulkan_dlopen {
         /// it is genuinely gone — or the caller is stranded in a permanent
         /// "release pending" state. Observed on a real RTX A6000.
         pub retired_fences: Vec<u64>,
+        /// Bounded async submission ring, when a session is open. It is the
+        /// sole owner of its submitted command buffers and fences.
+        pub async_ring: Option<super::vulkan_async_ring::AsyncRing>,
         pub last_error: String,
         pub selected_device_index: usize,
         pub fns: VkFns,
@@ -3803,7 +3978,29 @@ mod vulkan_dlopen {
     unsafe impl Sync for VulkanState {}
 
     pub static VK_STATE: Mutex<Option<VulkanState>> = Mutex::new(None);
+
+    /// Why the last `rt_vulkan_init` failed (step + VkResult). `VK_STATE` is
+    /// `None` after a failed init, so its `last_error` cannot carry this;
+    /// `rt_vulkan_get_last_error` falls back to it. Empty after a success.
+    pub static VK_INIT_ERROR: Mutex<String> = Mutex::new(String::new());
+
+    // Shared with the compiled runtime's ash lane (one retry + text helper).
+    pub use simple_runtime::vulkan_create_device_retry::{
+        vk_create_device_error, vk_create_device_with_retry, vk_result_name, vk_retry_sleep_ms,
+    };
 }
+
+#[path = "gpu_vulkan_async_ring.rs"]
+mod vulkan_async_ring;
+use vulkan_async_ring::RingResource;
+pub use vulkan_async_ring::{
+    rt_vulkan_async_session_acquire_fn, rt_vulkan_async_session_cancel_fn, rt_vulkan_async_session_capacity_fn,
+    rt_vulkan_async_session_close_fn, rt_vulkan_async_session_command_fn, rt_vulkan_async_session_create_fn,
+    rt_vulkan_async_session_create_with_wait_fn, rt_vulkan_async_session_in_flight_fn, rt_vulkan_async_session_poll_fn,
+    rt_vulkan_async_session_published_sequence_fn, rt_vulkan_async_session_receipt_fn,
+    rt_vulkan_async_session_recover_fn, rt_vulkan_async_session_retire_fn, rt_vulkan_async_session_submit_fn,
+    rt_vulkan_async_session_supported_fn,
+};
 
 static VULKAN_DL_AVAILABLE: OnceLock<bool> = OnceLock::new();
 static SHADERC_DL: OnceLock<Option<vulkan_dlopen::ShadercFns>> = OnceLock::new();
@@ -3915,9 +4112,21 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             return Ok(Value::Bool(true));
         }
     }
+    let fail = |step: &str, r: Option<VkResult>| -> Result<Value, CompileError> {
+        let msg = match r {
+            Some(r) => format!("{step}: {} ({r})", vk_result_name(r)),
+            None => step.to_string(),
+        };
+        eprintln!("[vulkan] rt_vulkan_init failed at {msg}");
+        *VK_INIT_ERROR.lock().unwrap() = msg;
+        Ok(Value::Bool(false))
+    };
     let fns = match vulkan_dlopen::load_vulkan() {
         Some(f) => f,
-        None => return Ok(Value::Bool(false)),
+        None => {
+            *VK_INIT_ERROR.lock().unwrap() = "load_vulkan: loader library or symbols unavailable".to_string();
+            return Ok(Value::Bool(false));
+        }
     };
     unsafe {
         let app_name = std::ffi::CString::new("simple").unwrap();
@@ -3948,19 +4157,25 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             pp_enabled_extension_names: instance_extension_ptr,
         };
         let mut instance: VkInstance = ptr::null_mut();
-        if (fns.create_instance)(&create_info, ptr::null(), &mut instance) != VK_SUCCESS {
-            return Ok(Value::Bool(false));
+        let r = (fns.create_instance)(&create_info, ptr::null(), &mut instance);
+        if r != VK_SUCCESS {
+            return fail("vkCreateInstance", Some(r));
         }
 
         // Enumerate physical devices
         let mut count: u32 = 0;
-        (fns.enumerate_physical_devices)(instance, &mut count, ptr::null_mut());
+        let r = (fns.enumerate_physical_devices)(instance, &mut count, ptr::null_mut());
         if count == 0 {
             (fns.destroy_instance)(instance, ptr::null());
-            return Ok(Value::Bool(false));
+            return fail("vkEnumeratePhysicalDevices(count=0)", Some(r));
         }
         let mut phys_devs: Vec<VkPhysicalDevice> = vec![ptr::null_mut(); count as usize];
-        (fns.enumerate_physical_devices)(instance, &mut count, phys_devs.as_mut_ptr());
+        let r = (fns.enumerate_physical_devices)(instance, &mut count, phys_devs.as_mut_ptr());
+        if r < 0 {
+            (fns.destroy_instance)(instance, ptr::null());
+            return fail("vkEnumeratePhysicalDevices", Some(r));
+        }
+        phys_devs.truncate(count as usize);
 
         // Pick first device with a compute queue
         let mut chosen_phys: VkPhysicalDevice = ptr::null_mut();
@@ -3981,7 +4196,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
         }
         if chosen_phys.is_null() {
             (fns.destroy_instance)(instance, ptr::null());
-            return Ok(Value::Bool(false));
+            return fail(&format!("no compute queue family on any of {count} device(s)"), None);
         }
 
         let priority: f32 = 1.0;
@@ -3994,6 +4209,31 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             p_queue_priorities: &priority,
         };
         let features = VkPhysicalDeviceFeatures { _data: [0u32; 55] };
+        let portability_subset_cstr = CString::new("VK_KHR_portability_subset").unwrap();
+        let mut dev_ext_ptrs: Vec<*const std::os::raw::c_char> = Vec::new();
+        if let Some(enum_dev_exts) = fns.enumerate_device_extension_properties {
+            let mut ext_count: u32 = 0;
+            if enum_dev_exts(chosen_phys, ptr::null(), &mut ext_count, ptr::null_mut()) == VK_SUCCESS && ext_count > 0 {
+                let mut exts = vec![
+                    VkExtensionProperties {
+                        extension_name: [0u8; 256],
+                        spec_version: 0,
+                    };
+                    ext_count as usize
+                ];
+                if enum_dev_exts(chosen_phys, ptr::null(), &mut ext_count, exts.as_mut_ptr()) == VK_SUCCESS {
+                    exts.truncate(ext_count as usize);
+                    let has_portability_subset = exts.iter().any(|e| {
+                        std::ffi::CStr::from_bytes_until_nul(&e.extension_name)
+                            .map(|n| n == portability_subset_cstr.as_c_str())
+                            .unwrap_or(false)
+                    });
+                    if has_portability_subset {
+                        dev_ext_ptrs.push(portability_subset_cstr.as_ptr());
+                    }
+                }
+            }
+        }
         let dev_ci = VkDeviceCreateInfo {
             s_type: 3,
             p_next: ptr::null(),
@@ -4002,14 +4242,29 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             p_queue_create_infos: &queue_ci,
             enabled_layer_count: 0,
             pp_enabled_layer_names: ptr::null(),
-            enabled_extension_count: 0,
-            pp_enabled_extension_names: ptr::null(),
+            enabled_extension_count: dev_ext_ptrs.len() as u32,
+            pp_enabled_extension_names: if dev_ext_ptrs.is_empty() {
+                ptr::null()
+            } else {
+                dev_ext_ptrs.as_ptr()
+            },
             p_enabled_features: &features,
         };
         let mut device: VkDevice = ptr::null_mut();
-        if (fns.create_device)(chosen_phys, &dev_ci, ptr::null(), &mut device) != VK_SUCCESS {
+        let (created, attempts) = vk_create_device_with_retry(
+            || match (fns.create_device)(chosen_phys, &dev_ci, ptr::null(), &mut device) {
+                VK_SUCCESS => Ok(()),
+                r => Err(r),
+            },
+            vk_retry_sleep_ms,
+        );
+        if let Err(r) = created {
             (fns.destroy_instance)(instance, ptr::null());
-            return Ok(Value::Bool(false));
+            let idx = phys_devs.iter().position(|pd| *pd == chosen_phys).unwrap_or(0);
+            return fail(
+                &vk_create_device_error(idx, count as usize, chosen_qf, attempts, r),
+                None,
+            );
         }
 
         let mut queue: VkQueue = ptr::null_mut();
@@ -4035,10 +4290,11 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             queue_family_index: chosen_qf,
         };
         let mut cmd_pool: VkCommandPool = 0;
-        if (fns.create_command_pool)(device, &pool_ci, ptr::null(), &mut cmd_pool) != VK_SUCCESS {
+        let r = (fns.create_command_pool)(device, &pool_ci, ptr::null(), &mut cmd_pool);
+        if r != VK_SUCCESS {
             (fns.destroy_device)(device, ptr::null());
             (fns.destroy_instance)(instance, ptr::null());
-            return Ok(Value::Bool(false));
+            return fail("vkCreateCommandPool", Some(r));
         }
 
         let state = VulkanState {
@@ -4057,6 +4313,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             descriptor_sets: Vec::new(),
             command_buffers: Vec::new(),
             quarantined_commands: Vec::new(),
+            async_ring: None,
             accepted_compute_submit_count: 0,
             live_fences: Vec::new(),
             retired_fences: Vec::new(),
@@ -4066,6 +4323,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
         };
         *VK_STATE.lock().unwrap() = Some(state);
     }
+    VK_INIT_ERROR.lock().unwrap().clear();
     Ok(Value::Bool(true))
 }
 
@@ -4098,6 +4356,13 @@ pub fn rt_vulkan_shutdown_fn(_args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::{VK_STATE, VK_SUCCESS};
     use std::ptr;
     let mut guard = VK_STATE.lock().unwrap();
+    // An open async ring still owns command buffers and fences on this device.
+    if guard
+        .as_mut()
+        .is_some_and(|s| vulkan_async_ring::ring_refuses(s, "shutdown"))
+    {
+        return Ok(Value::Bool(false));
+    }
     if let Some(st) = guard.take() {
         unsafe {
             let f = &st.fns;
@@ -4160,6 +4425,9 @@ pub fn rt_vulkan_select_device_fn(args: &[Value]) -> Result<Value, CompileError>
     use vulkan_dlopen::VK_STATE;
     let mut guard = VK_STATE.lock().unwrap();
     if let Some(s) = guard.as_mut() {
+        if vulkan_async_ring::ring_refuses(s, "select_device") {
+            return Ok(Value::Bool(false));
+        }
         if idx < s.physical_devices.len() {
             s.selected_device_index = idx;
             s.physical_device = s.physical_devices[idx];
@@ -4460,6 +4728,9 @@ pub fn rt_vulkan_free_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
     let h = arg_i64(args, 0, "rt_vulkan_free_buffer", 1)? as usize;
     let mut guard = VK_STATE.lock().unwrap();
     if let Some(s) = guard.as_mut() {
+        if vulkan_async_ring::ring_retains(s, RingResource::Buffer, h as i64, "free_buffer") {
+            return Ok(Value::Bool(false));
+        }
         if h > 0 && h <= s.buffers.len() {
             if let Some(e) = s.buffers[h - 1].take() {
                 unsafe {
@@ -5048,6 +5319,9 @@ pub fn rt_vulkan_destroy_pipeline_fn(args: &[Value]) -> Result<Value, CompileErr
     let h = arg_i64(args, 0, "rt_vulkan_destroy_pipeline", 1)? as usize;
     let mut guard = VK_STATE.lock().unwrap();
     if let Some(s) = guard.as_mut() {
+        if vulkan_async_ring::ring_retains(s, RingResource::Pipeline, h as i64, "destroy_pipeline") {
+            return Ok(Value::Bool(false));
+        }
         if h > 0 && h <= s.pipelines.len() {
             if let Some(e) = s.pipelines[h - 1].take() {
                 unsafe {
@@ -5114,7 +5388,11 @@ pub fn rt_vulkan_create_descriptor_set_fn(args: &[Value]) -> Result<Value, Compi
             (s.fns.destroy_descriptor_pool)(s.device, pool, ptr::null());
             return Ok(Value::Int(0));
         }
-        s.descriptor_sets.push(Some(DescriptorSetEntry { set, pool }));
+        s.descriptor_sets.push(Some(DescriptorSetEntry {
+            set,
+            pool,
+            buffers: Vec::new(),
+        }));
         Ok(Value::Int(s.descriptor_sets.len() as i64))
     }
 }
@@ -5135,12 +5413,21 @@ pub fn rt_vulkan_bind_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
     if dsh == 0 || dsh > s.descriptor_sets.len() || bh == 0 || bh > s.buffers.len() {
         return Ok(Value::Bool(false));
     }
-    let set = match s.descriptor_sets[dsh - 1].as_ref() {
-        Some(e) => e.set,
-        None => return Ok(Value::Bool(false)),
-    };
+    // A descriptor set an in-flight async submission may still read must not
+    // be rewritten until that submission is retired.
+    if vulkan_async_ring::ring_retains(s, RingResource::DescriptorSet, dsh as i64, "bind_buffer") {
+        return Ok(Value::Bool(false));
+    }
     let (buf, buf_size) = match s.buffers[bh - 1].as_ref() {
         Some(b) => (b.buffer, b.size),
+        None => return Ok(Value::Bool(false)),
+    };
+    let set = match s.descriptor_sets[dsh - 1].as_mut() {
+        Some(e) => {
+            e.buffers.retain(|&(bound, _)| bound != binding);
+            e.buffers.push((binding, bh as i64));
+            e.set
+        }
         None => return Ok(Value::Bool(false)),
     };
     unsafe {
@@ -5173,6 +5460,9 @@ pub fn rt_vulkan_destroy_descriptor_set_fn(args: &[Value]) -> Result<Value, Comp
     let h = arg_i64(args, 0, "rt_vulkan_destroy_descriptor_set", 1)? as usize;
     let mut guard = VK_STATE.lock().unwrap();
     if let Some(s) = guard.as_mut() {
+        if vulkan_async_ring::ring_retains(s, RingResource::DescriptorSet, h as i64, "destroy_descriptor_set") {
+            return Ok(Value::Bool(false));
+        }
         if h > 0 && h <= s.descriptor_sets.len() {
             if let Some(e) = s.descriptor_sets[h - 1].take() {
                 unsafe {
@@ -5188,12 +5478,23 @@ pub fn rt_vulkan_destroy_descriptor_set_fn(args: &[Value]) -> Result<Value, Comp
 /// `rt_vulkan_begin_compute() -> i64` — allocates and begins a command buffer; returns handle
 pub fn rt_vulkan_begin_compute_fn(_args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::*;
-    use std::ptr;
     let mut guard = VK_STATE.lock().unwrap();
     let s = match guard.as_mut() {
         Some(s) => s,
         None => return Ok(Value::Int(0)),
     };
+    // An open async ring is the sole compute admission owner; its commands
+    // come from `rt_vulkan_async_session_acquire`.
+    if vulkan_async_ring::ring_refuses(s, "begin_compute") {
+        return Ok(Value::Int(0));
+    }
+    Ok(Value::Int(begin_compute_command(s)))
+}
+
+/// Allocate and begin one compute command buffer; returns its handle or 0.
+fn begin_compute_command(s: &mut vulkan_dlopen::VulkanState) -> i64 {
+    use vulkan_dlopen::*;
+    use std::ptr;
     unsafe {
         let alloc_info = VkCommandBufferAllocateInfo {
             s_type: 40,
@@ -5204,7 +5505,7 @@ pub fn rt_vulkan_begin_compute_fn(_args: &[Value]) -> Result<Value, CompileError
         };
         let mut cmd: VkCommandBuffer = ptr::null_mut();
         if (s.fns.allocate_command_buffers)(s.device, &alloc_info, &mut cmd) != VK_SUCCESS {
-            return Ok(Value::Int(0));
+            return 0;
         }
         let begin_info = VkCommandBufferBeginInfo {
             s_type: 42,
@@ -5214,13 +5515,42 @@ pub fn rt_vulkan_begin_compute_fn(_args: &[Value]) -> Result<Value, CompileError
         };
         if (s.fns.begin_command_buffer)(cmd, &begin_info) != VK_SUCCESS {
             (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &cmd);
-            return Ok(Value::Int(0));
+            return 0;
         }
         s.command_buffers.push(Some(CommandBufferEntry {
             cmd,
             pipeline_handle: 0,
+            descriptor_sets: Vec::new(),
         }));
-        Ok(Value::Int(s.command_buffers.len() as i64))
+        s.command_buffers.len() as i64
+    }
+}
+
+/// `rt_vulkan_discard_command(cmd: i64) -> bool` — free a recorded, never
+/// submitted command buffer. Refused while an async ring owns the commands.
+pub fn rt_vulkan_discard_command_fn(args: &[Value]) -> Result<Value, CompileError> {
+    use vulkan_dlopen::VK_STATE;
+    let ch = arg_i64(args, 0, "rt_vulkan_discard_command", 1)? as usize;
+    let mut guard = VK_STATE.lock().unwrap();
+    let s = match guard.as_mut() {
+        Some(s) => s,
+        None => return Ok(Value::Bool(false)),
+    };
+    if vulkan_async_ring::ring_refuses(s, "discard_command") {
+        return Ok(Value::Bool(false));
+    }
+    if ch == 0 || ch > s.command_buffers.len() {
+        return Ok(Value::Bool(false));
+    }
+    match s.command_buffers[ch - 1].take() {
+        Some(e) => {
+            unsafe { (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &e.cmd) };
+            Ok(Value::Bool(true))
+        }
+        None => {
+            s.last_error = "discard_command: unknown command handle".to_string();
+            Ok(Value::Bool(false))
+        }
     }
 }
 
@@ -5292,6 +5622,11 @@ pub fn rt_vulkan_bind_descriptors_fn(args: &[Value]) -> Result<Value, CompileErr
     };
     unsafe {
         (s.fns.cmd_bind_descriptor_sets)(cmd, 1, layout, 0, 1, &set, 0, ptr::null());
+    }
+    if let Some(e) = s.command_buffers[ch - 1].as_mut() {
+        if !e.descriptor_sets.contains(&(dsh as i64)) {
+            e.descriptor_sets.push(dsh as i64);
+        }
     }
     Ok(Value::Bool(true))
 }
@@ -5409,6 +5744,9 @@ pub fn rt_vulkan_submit_and_wait_fn(args: &[Value]) -> Result<Value, CompileErro
         Some(s) => s,
         None => return Ok(Value::Bool(false)),
     };
+    if vulkan_async_ring::ring_refuses(s, "submit_and_wait") {
+        return Ok(Value::Bool(false));
+    }
     if ch == 0 || ch > s.command_buffers.len() {
         return Ok(Value::Bool(false));
     }
@@ -5456,6 +5794,9 @@ pub fn rt_vulkan_submit_and_wait_fence_fn(args: &[Value]) -> Result<Value, Compi
         Some(s) => s,
         None => return Ok(Value::Int(0)),
     };
+    if vulkan_async_ring::ring_refuses(s, "submit_and_wait_fence") {
+        return Ok(Value::Int(0));
+    }
     if ch == 0 || ch > s.command_buffers.len() {
         return Ok(Value::Int(0));
     }
@@ -5526,6 +5867,9 @@ pub fn rt_vulkan_submit_no_wait_fn(args: &[Value]) -> Result<Value, CompileError
         Some(s) => s,
         None => return Ok(Value::Int(0)),
     };
+    if vulkan_async_ring::ring_refuses(s, "submit_no_wait") {
+        return Ok(Value::Int(0));
+    }
     if ch == 0 || ch > s.command_buffers.len() {
         return Ok(Value::Int(0));
     }
@@ -5632,6 +5976,11 @@ pub fn rt_vulkan_wait_idle_fn(_args: &[Value]) -> Result<Value, CompileError> {
     use std::ptr;
     let mut guard = VK_STATE.lock().unwrap();
     if let Some(s) = guard.as_mut() {
+        // Ring submissions are released by exact-fence retirement or explicit
+        // session recovery, never by a device-wide idle reap.
+        if vulkan_async_ring::ring_refuses(s, "wait_idle") {
+            return Ok(Value::Bool(false));
+        }
         let ok = unsafe { (s.fns.device_wait_idle)(s.device) };
         if ok == vulkan_dlopen::VK_SUCCESS {
             for (fence, cmd) in s.quarantined_commands.drain(..) {
@@ -5657,7 +6006,10 @@ pub fn rt_vulkan_wait_idle_fn(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_vulkan_get_last_error_fn(_args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::VK_STATE;
     let guard = VK_STATE.lock().unwrap();
-    let err = guard.as_ref().map(|s| s.last_error.clone()).unwrap_or_default();
+    let err = match guard.as_ref() {
+        Some(s) => s.last_error.clone(),
+        None => vulkan_dlopen::VK_INIT_ERROR.lock().unwrap().clone(),
+    };
     Ok(Value::text(err))
 }
 
@@ -6049,11 +6401,18 @@ mod cuda_status_tests {
 
 #[cfg(test)]
 mod foreign_text_tests {
-    use super::c_ptr_to_string;
+    use super::{c_ptr_to_string, rt_webgpu_create_surface_fn};
+    use crate::value::Value;
 
     #[test]
     fn null_foreign_text_is_a_contract_error() {
         let error = c_ptr_to_string(std::ptr::null(), "rt_metal_device_name").unwrap_err();
         assert!(format!("{error:?}").contains("foreign text contract returned null"));
+    }
+
+    #[test]
+    fn webgpu_create_surface_returns_invalid_handle_not_zero() {
+        let handle = rt_webgpu_create_surface_fn(&[]).expect("surface stub must not raise");
+        assert!(matches!(handle, Value::Int(-1)), "got {handle:?}");
     }
 }

@@ -17,15 +17,20 @@
 // Built-in methods for String
 if let Value::Str(ref s) = recv_val {
     match method {
-        "to_string" | "to_text" => return Ok(Value::shared_text(s.clone())),
-        "len" | "length" => return Ok(Value::Int(s.len() as i64)),
+        // `clone` on a StrBytes receiver arrives here already converted to a
+        // lossy Str, the same display-boundary rule as to_string.
+        "to_string" | "to_text" | "clone" => return Ok(Value::shared_text(s.clone())),
+        "len" | "length" => return Ok(Value::Int(crate::interpreter::text_cp_len(s) as i64)),
+        "byte_len" => return Ok(Value::Int(s.len() as i64)),
         "char_count" => return Ok(Value::Int(s.chars().count() as i64)),
         "is_empty" => return Ok(Value::Bool(s.is_empty())),
         "chars" => {
             let chars: Vec<Value> = s.chars().map(|c| Value::text(c.to_string())).collect();
             return Ok(Value::array(chars));
         }
-        "bytes" => {
+        // `to_bytes` is the same operation: the compiled lanes lower both
+        // names to `rt_string_bytes` (one tagged int per UTF-8 byte).
+        "bytes" | "to_bytes" => {
             let bytes: Vec<Value> = s.bytes().map(|b| Value::Int(b as i64)).collect();
             return Ok(Value::array(bytes));
         }
@@ -57,6 +62,9 @@ if let Value::Str(ref s) = recv_val {
             // keeps the interpreter and the compiled lane in agreement.
             if args.len() >= 2 {
                 let start_raw = eval_arg_int(args, 1, 0, env, functions, classes, enums, impl_methods)?;
+                // BYTE offsets in and out (owner decision 2026-11-07, ADR-005
+                // "Staging"): `index_of` belongs to the named byte family with
+                // `byte_at`/`substring`, bounded by `byte_len()`.
                 let start = start_raw.max(0) as usize;
                 let bytes = s.as_bytes();
                 let nb = needle.as_bytes();
@@ -118,8 +126,20 @@ if let Value::Str(ref s) = recv_val {
             return Ok(Value::text(result));
         }
         "trim" | "trimmed" | "strip" => return Ok(Value::text(s.trim().to_string())),
-        "trim_start" | "trim_left" => return Ok(Value::text(s.trim_start().to_string())),
-        "trim_end" | "trim_right" => return Ok(Value::text(s.trim_end().to_string())),
+        "trim_start" | "trim_left" => {
+            if args.is_empty() {
+                return Ok(Value::text(s.trim_start().to_string()));
+            }
+            let prefix = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            return Ok(Value::text(s.trim_start_matches(&*prefix).to_string()));
+        }
+        "trim_end" | "trim_right" => {
+            if args.is_empty() {
+                return Ok(Value::text(s.trim_end().to_string()));
+            }
+            let suffix = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            return Ok(Value::text(s.trim_end_matches(&*suffix).to_string()));
+        }
         "trim_start_matches" => {
             // Repeatedly remove prefix until it no longer matches
             let prefix = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
@@ -334,41 +354,35 @@ if let Value::Str(ref s) = recv_val {
             return Ok(Value::text(s.replacen(&old, &new, 1)));
         }
         "slice" | "substring" => {
+            // BYTE offsets, clamped to `0..=byte_len()` (owner decision
+            // 2026-11-07; ADR-005 "Staging";
+            // doc/05_design/language/text/text_len_counts_characters_2026-11-07.md).
+            // Only `len()`, `s[i]` and `s[a:b]` are code points. 04969955c75
+            // made these two methods code-point indexed as well, which broke
+            // every byte scanner that bounds with `byte_len()`, reads with
+            // `byte_at`/`index_of` and cuts with `substring` on non-ASCII text.
+            let byte_len = s.len() as i64;
             let start_raw = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
             let end_raw = args.get(1)
                 .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                 .transpose()?
-                .map(|v| v.as_int().unwrap_or(s.len() as i64))
-                .unwrap_or(s.len() as i64);
+                .map(|v| v.as_int().unwrap_or(byte_len))
+                .unwrap_or(byte_len);
             let start = start_raw.max(0) as usize;
             let end = end_raw.max(0) as usize;
-            // Identity fast path: full-string slice avoids the chars() walk + Vec<char>.
-            // Byte-len upper-bounds char count, so end >= s.len() guarantees end >= chars().count().
+            // Identity fast path: full-string slice.
             if start == 0 && end >= s.len() {
                 return Ok(Value::shared_text(s.clone()));
             }
-            // BYTE-indexed, matching the JIT/native lane (`rt_slice`, which
-            // slices `s->data + begin` raw) and this interpreter's own
-            // byte-valued `len` / `index_of`. Indexing by character here made
-            // an index produced by `len`/`index_of` invalid input to `slice`:
-            // for "caféZdef" (9 bytes / 8 chars) `index_of("Z")` is 5, and a
-            // char-indexed `slice(0, 5)` wrongly yielded "caféZ".
             let bytes = s.as_bytes();
             let end = end.min(bytes.len());
             let start = start.min(end);
-            // A range that splits a multi-byte codepoint cannot be held in
-            // Rust's UTF-8 `String`; preserve the RAW bytes (`Value::StrBytes`)
-            // exactly like the bracket-slice path in
-            // `interpreter/expr/collections.rs` and like the JIT/native lane's
-            // `rt_slice`, which slices `s->data + begin` raw. The previous
-            // `String::from_utf8_lossy` here substituted U+FFFD, which is
-            // valid-but-wrong: it CHANGES the byte length of the result
-            // (`"aé€𝄞z".slice(0, 2).len()` was 4, not 2) and makes the original
-            // byte unrecoverable at concat time. That was the sole remaining
-            // interpret-vs-jit divergence in
-            // `test/fixtures/engine_differential/utf8_slice_boundary.spl`.
-            // UTF-8 slice audit, stage 1 (COUNTING ONLY, default off). Measured
-            // on the RAW range, which is now also what is returned.
+            // A range that splits a multi-byte code point keeps the RAW bytes
+            // (`Value::StrBytes`), like `spl_str_slice` in the C runtime and
+            // the nested-receiver arm in interpreter_helpers/method_dispatch.rs:
+            // no snapping and no U+FFFD, so the result's byte length is the
+            // requested width and adjacent cuts reassemble the original.
+            // UTF-8 slice audit, stage 1 (COUNTING ONLY, default off).
             if simple_runtime::text_slice_audit::enabled() {
                 simple_runtime::text_slice_audit::note(
                     simple_runtime::text_slice_audit::site::INTERP_METHOD,
@@ -400,6 +414,7 @@ if let Value::Str(ref s) = recv_val {
         "last_index_of" | "rfind" => {
             let needle = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             return Ok(match s.rfind(&needle) {
+                // BYTE offset, like `index_of`.
                 Some(idx) => Value::Int(idx as i64),
                 None => Value::Int(-1),
             });
@@ -470,6 +485,18 @@ if let Value::Str(ref s) = recv_val {
                 Some(c) => return Ok(Value::text(c.to_string())),
                 None => return Ok(Value::text(String::new())),
             }
+        }
+        "to_digit" => {
+            // ADR-005: explicit digit conversion of a single character.
+            // Some(0..=9) for an ASCII decimal digit, None otherwise.
+            let mut chars = s.chars();
+            return Ok(match (chars.next(), chars.next()) {
+                (Some(c), None) => match c.to_digit(10) {
+                    Some(d) => Value::some(Value::Int(d as i64)),
+                    None => Value::none(),
+                },
+                _ => Value::none(),
+            });
         }
         "ord" | "codepoint" | "code_point" => {
             // Return the Unicode code point of the first character
@@ -674,7 +701,7 @@ if let Value::Str(ref s) = recv_val {
             let dict_val = eval_arg(
                 args,
                 0,
-                Value::Dict(std::sync::Arc::new(std::collections::HashMap::new())),
+                Value::Dict(std::sync::Arc::new(crate::value::DictMap::new())),
                 env,
                 functions,
                 classes,
@@ -686,7 +713,7 @@ if let Value::Str(ref s) = recv_val {
                 let mut result = s.as_ref().clone();
                 for (key, value) in data.iter() {
                     let placeholder = format!("{{{}}}", key);
-                    let replacement = value.to_display_string();
+                    let replacement = Value::dict_entry_value_ref(value).to_display_string();
                     result = result.replace(&placeholder, &replacement);
                 }
                 return Ok(Value::text(result));

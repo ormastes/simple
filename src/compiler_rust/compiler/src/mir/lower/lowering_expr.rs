@@ -20,6 +20,23 @@ use crate::hir::{HirExpr, HirExprKind, HirType, PointerKind, TypeId};
 use crate::mir::instructions::VReg;
 
 impl<'a> MirLowerer<'a> {
+    /// Class identity for a struct `FieldGet`/`FieldSet`: the first NAMED
+    /// type among `primary` (usually the recovered local/param type), the
+    /// expression's own `receiver.ty`, and a structural recovery. A local
+    /// slot typed ANY/unnamed must not mask a named `receiver.ty`: a `None`
+    /// owner makes native layout skip the vtable header word and write field
+    /// N over slot N-1 (stage3_selfhost_vtable_field_offset_relro_segv).
+    pub(super) fn field_owner_name(&mut self, receiver: &HirExpr, primary: TypeId) -> Option<String> {
+        let registry = self.type_registry?;
+        for ty in [primary, receiver.ty] {
+            if let Some(name) = registry.get_type_name(ty) {
+                return Some(name.to_owned());
+            }
+        }
+        let recovered = self.recover_receiver_type(receiver)?;
+        registry.get_type_name(recovered).map(str::to_owned)
+    }
+
     /// Recover a named type for a method-call receiver whose own
     /// `receiver.ty` does not resolve to a named class via
     /// `TypeRegistry::get_type_name`.
@@ -49,6 +66,9 @@ impl<'a> MirLowerer<'a> {
         match &expr.kind {
             HirExprKind::Local(idx) => {
                 let lookup_idx = *idx;
+                if let Some((_, ty)) = self.lambda_param_types.iter().rev().find(|(index, _)| *index == lookup_idx) {
+                    return Some(*ty);
+                }
                 self.with_func(|func, _| {
                     let nparams = func.params.len();
                     // Local indices include params first, then locals.
@@ -185,14 +205,27 @@ impl<'a> MirLowerer<'a> {
             HirExprKind::Unary { op, operand } => self.lower_unary_expr(*op, operand),
             HirExprKind::Cast { expr: inner, target } => self.lower_cast_expr(inner, *target),
 
-            HirExprKind::Call { func: callee, args } => self.lower_call_expr(callee, args),
+            HirExprKind::Call { func: callee, args } => self.lower_call_expr(callee, args, expr_ty),
             HirExprKind::BuiltinCall { name, args } => self.lower_builtin_call_expr(name, args, expr_ty),
             HirExprKind::MethodCall {
                 receiver,
                 method,
                 args,
                 dispatch,
-            } => self.lower_method_call_expr(receiver, method, args, dispatch),
+                generic_args,
+            } => {
+                if let Some(reg) = self.try_lower_dict_stored_fn_call(receiver, method, args, expr_ty)? {
+                    return Ok(reg);
+                }
+                self.lower_method_call_expr_with_generics(receiver, method, args, dispatch, generic_args)
+            }
+            HirExprKind::TypeParamStaticCall {
+                type_param,
+                method,
+                args,
+                ..
+            } => self.lower_type_param_static_call_expr(type_param, method, args),
+            HirExprKind::ConstGeneric(name) => self.lower_const_generic_expr(name),
 
             HirExprKind::Lambda {
                 params,

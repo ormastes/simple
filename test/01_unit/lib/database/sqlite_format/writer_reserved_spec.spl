@@ -1,0 +1,120 @@
+# Writer gate: images laid out for a non-zero per-page reserved region.
+#
+# SQLCipher 4 keeps an 80-byte IV+HMAC trailer per page, so a plaintext image
+# that the sqlcipher4_4k_sha512 profile decrypts to has header byte 20 == 80
+# and every b-tree page uses only the first 4016 bytes. This spec pins that
+# the writer honours the reserved count end to end: header field, cell
+# content never entering the reserved tail, overflow chains sized to the
+# usable width, and the repo reader recovering the exact rows.
+
+"""
+## Purpose and audience
+Purpose: sqlite_format_create_image_reserved lays out pages for a reserved
+per-page tail and the reader round-trips the rows.
+Audience: sqlite_format writer owners; devhub secured-storage provisioners.
+"""
+
+use std.spec
+use std.nogc_sync_mut.database.sqlite_format.wimage.{
+    sqlite_format_create_image, sqlite_format_create_image_reserved, SqliteTableData
+}
+use std.nogc_sync_mut.database.sqlite_format.{sqlite_format_read_table_bytes}
+use std.nogc_sync_mut.database.sqlite_format.types.{SqliteError}
+use std.nogc_sync_mut.database.sql.types.{DbValue, DbRow}
+
+val PAGE: i64 = 4096
+val RESERVE: i64 = 80
+
+fn schema() -> text:
+    "CREATE TABLE ledger (id INTEGER PRIMARY KEY, note TEXT NOT NULL, amount REAL NOT NULL, flag INTEGER NOT NULL, payload BLOB NOT NULL);"
+
+fn cols() -> [text]:
+    ["id", "note", "amount", "flag", "payload"]
+
+# Rows sized so the leaf fills past 4016 bytes: a 4096-usable layout would
+# keep them on one page, the 4016-usable layout must spill or overflow.
+fn rows() -> [DbRow]:
+    var out: [DbRow] = []
+    var i: i64 = 1
+    while i <= 40:
+        var blob: [u8] = []
+        var k: i64 = 0
+        while k < 90:
+            blob.push((((i * 31 + k) % 256) as u8))
+            k = k + 1
+        out.push(DbRow(columns: cols(), values: [
+            DbValue.Integer(value: i), DbValue.Text(value: "row-{i}-marker"),
+            DbValue.Real(value: i.to_f64() * 0.5), DbValue.Integer(value: i % 2),
+            DbValue.Blob(value: blob)]))
+        i = i + 1
+    out
+
+fn tables() -> [SqliteTableData]:
+    [SqliteTableData(name: "ledger", columns: cols(), rows: rows())]
+
+fn build(reserved: i64) -> [u8]:
+    match sqlite_format_create_image_reserved(schema(), tables(), reserved):
+        case Ok(img): img
+        case Err(e):
+            fail("create_image_reserved({reserved}) failed: {e}")
+            []
+
+# True when every byte in [page*PAGE + PAGE - RESERVE, (page+1)*PAGE) is zero.
+fn tail_is_zero(img: [u8], page: i64) -> bool:
+    var off = page * PAGE + PAGE - RESERVE
+    val end = (page + 1) * PAGE
+    while off < end:
+        if (img[off] as i64) != 0:
+            return false
+        off = off + 1
+    true
+
+describe "REQ-SQLITE-WRITER-RESERVED-001: reserved per-page tail is honoured":
+    # @req REQ-SQLITE-WRITER-RESERVED-001
+    it "sets header byte 20 and leaves every page's reserved tail untouched":
+        val img = build(RESERVE)
+        step "whole pages, more than one b-tree page"
+        expect(img.len() % PAGE).to_equal(0)
+        expect(img.len() / PAGE > 1).to_be_true()
+        expect(img[20] as i64).to_equal(RESERVE)
+        step "no cell bytes inside any reserved tail"
+        var page: i64 = 0
+        var clean = true
+        while page < img.len() / PAGE:
+            if not tail_is_zero(img, page):
+                clean = false
+            page = page + 1
+        expect(clean).to_be_true()
+
+    it "the reader recovers every row and cell from the reserved layout":
+        val img = build(RESERVE)
+        match sqlite_format_read_table_bytes(img, "ledger"):
+            case Ok(got):
+                expect(got.len()).to_equal(40)
+                expect(got[0].values.len()).to_equal(5)
+                expect(got[39].values[1].as_text() ?? "").to_equal("row-40-marker")
+            case Err(e):
+                fail("reader on reserved layout: {e}")
+
+    it "reserved 0 is byte-identical to the plain create_image path":
+        val plain = match sqlite_format_create_image(schema(), tables()):
+            case Ok(img): img
+            case Err(e):
+                fail("create_image: {e}")
+                []
+        val zero = build(0)
+        expect(zero.len()).to_equal(plain.len())
+        var same = true
+        var i: i64 = 0
+        while i < plain.len():
+            if plain[i] != zero[i]:
+                same = false
+            i = i + 1
+        expect(same).to_be_true()
+
+    it "rejects a reserved count that leaves no usable page":
+        match sqlite_format_create_image_reserved(schema(), tables(), 4000):
+            case Ok(_):
+                fail("reserved 4000 must be rejected")
+            case Err(e):
+                expect("{e}".len() > 0).to_be_true()

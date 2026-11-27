@@ -1,0 +1,165 @@
+# @req: REQ-COMP-HIR-CFG-DECL-003 - decl-level @cfg overlap / exhaustiveness / signature / coherence checks.
+"""
+## Purpose and audience
+Purpose: Prove cfg_decl_check_module over hand-built HIR (parse + cfg field edits):
+exclusive guards are accepted; overlapping guards, non-exhaustive groups, divergent
+signatures and overlapping trait impls produce E-CFG-* strings; unguarded modules and
+two unguarded same-named items are not reported; the real typecheck consumer surfaces the error.
+Audience: COMP maintainers.
+"""
+# @tag: unit, compiler, types, hir
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.*
+use compiler.types.cfg_decl_check.{cfg_decl_check_module}
+use compiler.driver.hir_typecheck_consumer_v1.{collect_module_typecheck_receipt_v1}
+use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity}
+
+val SRC_PLAIN = "fn f_a() -> i64:\n    1\n\nfn f_b() -> i64:\n    2\n"
+val SRC_CALL = "fn f_a() -> i64:\n    1\n\nfn f_b() -> i64:\n    2\n\nfn g() -> i64:\n    f_a()\n"
+val IMPL_SRC = "struct P:\n    x: i64\n\nimpl P:\n    fn m(self) -> i64:\n        7\n"
+
+fn parse_hir(src: text, name: text) -> HirModule:
+    val parsed = parse_full_frontend(src, "testdata/{name}.spl", name, Logger(level: 0))
+    var hl = HirLowering.with_filename("testdata/{name}.spl")
+    hl.lower_module(parsed)
+
+# Rename f_a / f_b to "f" and set their guards. ret_b_bool makes f_b return bool.
+fn two_variants(src: text, a_cfg: [text], a_group: i64, a_arm: i64, b_cfg: [text], b_group: i64, b_arm: i64, ret_b_bool: bool) -> HirModule:
+    val hir = parse_hir(src, "cfg_check")
+    for key in hir.functions.keys():
+        var fn_ = hir.functions[key]
+        if fn_.name == "f_a" or fn_.name.ends_with(".f_a"):
+            fn_.name = "f"
+            fn_.cfg = a_cfg
+            fn_.cfg_group = a_group
+            fn_.cfg_arm = a_arm
+            hir.functions[key] = fn_
+        elif fn_.name == "f_b" or fn_.name.ends_with(".f_b"):
+            fn_.name = "f"
+            fn_.cfg = b_cfg
+            fn_.cfg_group = b_group
+            fn_.cfg_arm = b_arm
+            if ret_b_bool:
+                fn_.return_type = HirType(kind: HirTypeKind.Bool, span: fn_.return_type.span)
+            hir.functions[key] = fn_
+    hir
+
+fn has_code(errs: [text], code: text) -> bool:
+    for e in errs:
+        if e.starts_with(code): return true
+    false
+
+fn impl_pair(a_cfg: [text], a_group: i64, a_arm: i64, b_cfg: [text], b_group: i64, b_arm: i64) -> HirModule:
+    val hir = parse_hir(IMPL_SRC, "impl_check")
+    var impls: [HirImpl] = []
+    for im in hir.impls:
+        var first = im
+        first.has_trait_ = true
+        first.trait_ = im.type_
+        first.cfg = a_cfg
+        first.cfg_group = a_group
+        first.cfg_arm = a_arm
+        var second = first
+        second.cfg = b_cfg
+        second.cfg_group = b_group
+        second.cfg_arm = b_arm
+        impls.push(first)
+        impls.push(second)
+    hir.impls = impls
+    hir
+
+describe "cfg_decl_check_module":
+    it "accepts exclusive arms of one group":
+        val hir = two_variants(SRC_PLAIN, ["os=linux"], 1, 0, ["os=windows"], 1, 1, false)
+        expect(cfg_decl_check_module(hir).len()).to_equal(0)
+
+    it "accepts standalone os=linux vs os=windows":
+        val hir = two_variants(SRC_PLAIN, ["os=linux"], 1, 0, ["os=windows"], 2, 0, false)
+        expect(cfg_decl_check_module(hir).len()).to_equal(0)
+
+    it "reports E-CFG-OVERLAP for os=linux vs arch=x86_64":
+        val hir = two_variants(SRC_PLAIN, ["os=linux"], 1, 0, ["arch=x86_64"], 2, 0, false)
+        expect(has_code(cfg_decl_check_module(hir), "E-CFG-OVERLAP")).to_equal(true)
+
+    it "reports nothing for two unguarded same-named items":
+        val hir = two_variants(SRC_PLAIN, [], 0, -1, [], 0, -1, false)
+        expect(cfg_decl_check_module(hir).len()).to_equal(0)
+
+    it "reports E-CFG-NONEXHAUSTIVE for linux+windows without else and an unguarded caller":
+        val hir = two_variants(SRC_CALL, ["os=linux"], 1, 0, ["os=windows"], 1, 1, false)
+        expect(has_code(cfg_decl_check_module(hir), "E-CFG-NONEXHAUSTIVE")).to_equal(true)
+
+    it "accepts the same group when the second arm is else":
+        val hir = two_variants(SRC_CALL, ["os=linux"], 1, 0, [], 1, -1, false)
+        expect(cfg_decl_check_module(hir).len()).to_equal(0)
+
+    it "reports E-CFG-SIG-DIVERGE for divergent return types and an unguarded caller":
+        val hir = two_variants(SRC_CALL, ["os=linux"], 1, 0, [], 1, -1, true)
+        expect(has_code(cfg_decl_check_module(hir), "E-CFG-SIG-DIVERGE")).to_equal(true)
+
+    it "does not report divergent signatures without an unguarded caller":
+        val hir = two_variants(SRC_PLAIN, ["os=linux"], 1, 0, [], 1, -1, true)
+        expect(cfg_decl_check_module(hir).len()).to_equal(0)
+
+    it "evaluates feature atoms as free booleans":
+        val hir = two_variants(SRC_PLAIN, ["feature=\"a\""], 1, 0, ["feature=\"b\""], 2, 0, false)
+        expect(has_code(cfg_decl_check_module(hir), "E-CFG-OVERLAP")).to_equal(true)
+
+    it "accepts exclusive trait impls of one type":
+        val hir = impl_pair(["os=linux"], 1, 0, ["os=windows"], 1, 1)
+        expect(cfg_decl_check_module(hir).len()).to_equal(0)
+
+    it "reports E-CFG-IMPL-OVERLAP for overlapping trait impls":
+        val hir = impl_pair(["os=linux"], 1, 0, ["arch=x86_64"], 2, 0)
+        expect(has_code(cfg_decl_check_module(hir), "E-CFG-IMPL-OVERLAP")).to_equal(true)
+
+    it "returns [] for an unguarded module":
+        val hir = parse_hir(SRC_CALL, "plain")
+        expect(cfg_decl_check_module(hir).len()).to_equal(0)
+
+
+    it "reports E-CFG-OVERLAP for two plain (group 0) @cfg items that overlap":
+        val hir = two_variants(SRC_PLAIN, ["os=linux"], 0, -1, ["arch=x86_64"], 0, -1, false)
+        expect(has_code(cfg_decl_check_module(hir), "E-CFG-OVERLAP")).to_equal(true)
+
+    it "reports E-CFG-OVERLAP for an unguarded f next to a @cfg(os=linux) f":
+        val hir = two_variants(SRC_PLAIN, [], 0, -1, ["os=linux"], 1, 0, false)
+        expect(has_code(cfg_decl_check_module(hir), "E-CFG-OVERLAP")).to_equal(true)
+
+    it "reports E-CFG-MALFORMED and does not let it hide an overlap":
+        val hir = two_variants(SRC_PLAIN, [], 0, -1, ["bogus_atom"], 1, 0, false)
+        val errs = cfg_decl_check_module(hir)
+        expect(has_code(errs, "E-CFG-MALFORMED")).to_equal(true)
+        expect(has_code(errs, "E-CFG-OVERLAP")).to_equal(true)
+
+    it "fails closed with more than 6 feature atoms":
+        val many = ["feature=\"a\" and feature=\"b\" and feature=\"c\" and feature=\"d\" and feature=\"e\" and feature=\"f\" and feature=\"g\""]
+        val hir = two_variants(SRC_PLAIN, many, 1, 0, ["feature=\"h\""], 2, 0, false)
+        var closed = false
+        for e in cfg_decl_check_module(hir):
+            if e.starts_with("E-CFG-OVERLAP") and e.contains("too many feature atoms"): closed = true
+        expect(closed).to_equal(true)
+
+    it "matches a qualified variant name and a bare one to the same callee":
+        val hir = two_variants(SRC_CALL, ["os=linux"], 1, 0, [], 1, -1, false)
+        for key in hir.functions.keys():
+            var fn_ = hir.functions[key]
+            if fn_.name == "f" and fn_.cfg_arm == 0:
+                fn_.name = "m.f"
+                hir.functions[key] = fn_
+        expect(cfg_decl_check_module(hir).len()).to_equal(0)
+
+describe "cfg_decl_check wiring":
+    it "surfaces E-CFG-OVERLAP as an error through the typecheck consumer":
+        val hir = two_variants(SRC_PLAIN, ["os=linux"], 1, 0, ["arch=x86_64"], 2, 0, false)
+        val receipt = collect_module_typecheck_receipt_v1("cfg_wiring", hir, TypecheckPassSeverity.Advisory)
+        var found = false
+        for e in receipt.errors:
+            if e.contains("E-CFG-OVERLAP"): found = true
+        expect(found).to_equal(true)

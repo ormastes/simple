@@ -3,6 +3,7 @@ use app.build.scheduler.parallel_flat_result_inventory_v1.{
     check_parallel_flat_result_inventory_v1}
 use app.io.mod.{cwd, getpid, time_now_unix_micros, dir_create_all,
     dir_remove_all, file_atomic_write, process_run_bounded}
+use std.io_runtime.{platform_name}
 
 fn _flat_fixture_root_v1() -> text:
     cwd() + "/build/test/flat-result-inventory-" + getpid().to_text() +
@@ -42,18 +43,22 @@ describe "parallel flat result inventory V1":
         expect(dir_remove_all(root)).to_be(true)
 
     it "rejects an expected name that is a symlink":
-        val root = _flat_fixture_root_v1() + "-symlink"
-        expect(dir_create_all(root)).to_be(true)
-        val (out, err, code) = process_run_bounded("/bin/ln",
-            ["-s", "absent-target", root + "/result.wire"], 5000, 1024)
-        expect(code).to_equal(0)
-        expect(out).to_equal("")
-        expect(err).to_equal("")
-        val checked = check_parallel_flat_result_inventory_v1(root,
-            ["result.wire"])
-        expect(checked.valid).to_be(false)
-        expect(checked.reason).to_equal("inventory-file-invalid")
-        expect(dir_remove_all(root)).to_be(true)
+        if not ["linux", "macos", "freebsd"].contains(platform_name()):
+            skip("rejects an expected name that is a symlink",
+                "POSIX symlink fixture requires Linux or macOS")
+        else:
+            val root = _flat_fixture_root_v1() + "-symlink"
+            expect(dir_create_all(root)).to_be(true)
+            val (out, err, code) = process_run_bounded("/bin/ln",
+                ["-s", "absent-target", root + "/result.wire"], 5000, 1024)
+            expect(code).to_equal(0)
+            expect(out).to_equal("")
+            expect(err).to_equal("")
+            val checked = check_parallel_flat_result_inventory_v1(root,
+                ["result.wire"])
+            expect(checked.valid).to_be(false)
+            expect(checked.reason).to_equal("inventory-file-invalid")
+            expect(dir_remove_all(root)).to_be(true)
 
     it "rejects traversal, duplicate, and nested expected names":
         val root = _flat_fixture_root_v1() + "-invalid"

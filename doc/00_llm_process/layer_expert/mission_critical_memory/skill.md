@@ -24,3 +24,9 @@ Rules:
   contexts always reject.
 - New runtime imports are prohibited unless a recorded owner-boundary decision
   proves no existing facade can supply the capability.
+
+The arena context constants already exported for SCV must also have public
+native declarations under recovered P2. This changes linkage visibility only;
+quota and forbidden-context behavior still require runtime evidence. Keep
+`DOMAIN_ARENA_U64_MAX` private. The 2026-10-29 SCV exported-static bug record
+distinguishes native compilation success from unresolved behavior checks.

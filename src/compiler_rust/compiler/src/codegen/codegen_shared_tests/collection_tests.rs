@@ -199,6 +199,7 @@ shared_test!(shared_enum_unit, |f: &mut MirFunction| {
         dest,
         enum_name: "Color".to_string(),
         variant_name: "Red".to_string(),
+        discriminant: simple_runtime::value::hash_variant_discriminant("Red"),
     });
     dest
 });
@@ -215,6 +216,7 @@ shared_test!(shared_enum_with, |f: &mut MirFunction| {
         dest,
         enum_name: "Option".to_string(),
         variant_name: "Some".to_string(),
+        discriminant: simple_runtime::value::hash_variant_discriminant("Some"),
         payload,
     });
     dest
@@ -228,6 +230,7 @@ shared_test!(shared_enum_discriminant, |f: &mut MirFunction| {
         dest: val,
         enum_name: "Color".to_string(),
         variant_name: "Red".to_string(),
+        discriminant: simple_runtime::value::hash_variant_discriminant("Red"),
     });
     block.instructions.push(MirInst::EnumDiscriminant { dest, value: val });
     dest

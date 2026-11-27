@@ -1,0 +1,261 @@
+# SOSIX containment contract (architecture pure_simple_container 4.1).
+# Pure value types plus the fail-closed request check. A host variant reports
+# what it enforces through SosixContainSupportV1; a request that asks for an
+# axis the variant does not enforce is refused before any child exists, never
+# weakened. Bool-backed units are always truthy: every condition reads .value.
+
+pub unit SosixContainBytesV1: i64      # 0 = no limit
+pub unit SosixContainCountV1: i64      # 0 = no limit
+pub unit SosixContainCpuRateV1: i64    # hard cap, 1/100 percent of the machine, 1..10000; 0 = no limit
+pub unit SosixContainMillisV1: i64     # 0 = no deadline
+pub unit SosixContainExitCodeV1: i64
+pub unit SosixContainSlotV1: i64
+pub unit SosixContainFlagV1: bool
+
+pub const SOSIX_CONTAIN_IDENTITY_INHERIT_V1 = "inherit"
+pub const SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1 = "restricted"
+pub const SOSIX_CONTAIN_NETWORK_HOST_V1 = "host"
+pub const SOSIX_CONTAIN_NETWORK_NONE_V1 = "none"
+
+const _SOSIX_CONTAIN_CPU_RATE_MAX_V1 = 10000
+
+pub struct SosixContainLimitsV1:
+    memory: SosixContainBytesV1
+    processes: SosixContainCountV1
+    cpu_rate: SosixContainCpuRateV1
+    wall: SosixContainMillisV1
+
+pub struct SosixContainRequestV1:
+    program: text
+    program_digest: text               # sha256 hex; pinned by the host owner before launch
+    args: [text]
+    environment: [text]                # complete "K=V" block; nothing is inherited
+    directory: text
+    stdout_path: text
+    stderr_path: text
+    limits: SosixContainLimitsV1
+    identity: text
+    scope: text                        # container identity; names the per-container write principal / cgroup / jail
+    network: text
+    readonly_dirs: [text]
+    writable_dirs: [text]
+    private_pids: SosixContainFlagV1
+    root_dir: text                     # "" = no root remap requested
+
+pub struct SosixContainSupportV1:
+    mechanism: text
+    memory_accounting: text
+    memory_hard_limit: SosixContainFlagV1
+    process_limit: SosixContainFlagV1
+    cpu_rate_limit: SosixContainFlagV1
+    kill_all_descendants: SosixContainFlagV1
+    write_confinement: SosixContainFlagV1   # mechanism implemented; static, not a measured result
+    read_confinement: SosixContainFlagV1
+    network_isolation: SosixContainFlagV1
+    pid_isolation: SosixContainFlagV1
+    root_remap: SosixContainFlagV1
+    unprivileged: SosixContainFlagV1
+
+pub struct SosixContainPollV1:
+    terminal: SosixContainFlagV1
+    tree_empty: SosixContainFlagV1
+    timed_out: SosixContainFlagV1
+    cancelled: SosixContainFlagV1
+    exit_code: SosixContainExitCodeV1
+    active_processes: SosixContainCountV1
+    peak_memory: SosixContainBytesV1
+
+pub struct SosixContainLeaseV1:
+    slot: SosixContainSlotV1
+
+pub struct SosixContainCanaryV1:
+    id: text
+    expected: text                     # "allow" | "deny"
+    observed: text                     # "allow" | "deny" | "not-run"
+    control: text                      # same op on the allowed target, same run: "allow" | "deny" | "not-run" | "none"
+
+pub struct SosixContainQualifyRequestV1:
+    probe_program: text                # canary executable (performs one attempt, prints the outcome)
+    probe_digest: text
+    probe_script: text                 # the repo canary probe; its sha256 is checked against a pinned constant
+    work_dir: text                     # empty scratch directory the op owns for the run
+    scope: text
+    wall: SosixContainMillisV1
+
+pub struct SosixContainQualifyResultV1:
+    canaries: [SosixContainCanaryV1]   # every planned canary, in plan order
+    evidence_digest: text              # "" when nothing ran
+    reason: text                       # "" = ran to completion
+
+pub const SOSIX_CONTAIN_CANARY_LAUNCH_EXIT_V1 = "launch-exit-code"        # allow
+pub const SOSIX_CONTAIN_CANARY_OWN_WRITE_V1 = "own-dir-write"            # allow
+pub const SOSIX_CONTAIN_CANARY_TREE_EMPTY_V1 = "tree-empty-after-cancel" # allow
+pub const SOSIX_CONTAIN_CANARY_PROCESS_LIMIT_V1 = "process-limit-spawn"  # deny
+pub const SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1 = "lower-read-exec"    # allow
+pub const SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1 = "lower-overwrite"        # deny
+pub const SOSIX_CONTAIN_CANARY_USER_PRIVATE_WRITE_V1 = "user-private-write"   # deny
+pub const SOSIX_CONTAIN_CANARY_OTHER_SCOPE_WRITE_V1 = "other-scope-write"     # deny
+pub const SOSIX_CONTAIN_CANARY_OTHER_SCOPE_PROCESS_V1 = "other-scope-process-open"   # deny
+
+pub enum SosixContainAdmissionV1:
+    Started(lease: SosixContainLeaseV1)
+    RejectedBeforeStart(reason: text)   # no child exists
+    FailedAfterCleanup(reason: text)    # a child existed and is proven gone
+    Unknown(reason: text)               # cleanup unproven; caller keeps the journal
+
+# Support with every axis false: the typed-refusal body of an unimplemented host.
+pub fn sosix_contain_support_none_v1(mechanism: text) -> SosixContainSupportV1:
+    val no = SosixContainFlagV1(false)
+    SosixContainSupportV1(mechanism: mechanism, memory_accounting: "",
+        memory_hard_limit: no, process_limit: no, cpu_rate_limit: no,
+        kill_all_descendants: no, write_confinement: no, read_confinement: no,
+        network_isolation: no, pid_isolation: no, root_remap: no, unprivileged: no)
+
+fn _contain_digest_ok_v1(digest: text) -> bool:
+    if digest.byte_len() != 64: return false
+    for byte in digest.bytes():
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)): return false
+    true
+
+fn _contain_texts_nonempty_v1(values: [text]) -> bool:
+    for value in values:
+        if value == "": return false
+    true
+
+fn _contain_env_entry_ok_v1(entry: text) -> bool:
+    var index = 0
+    for byte in entry.bytes():
+        if byte == 61: return index > 0
+        index = index + 1
+    false
+
+fn _contain_env_ok_v1(entries: [text]) -> bool:
+    for entry in entries:
+        if not _contain_env_entry_ok_v1(entry): return false
+    true
+
+fn _contain_dirs_overlap_v1(left: [text], right: [text]) -> bool:
+    for a in left:
+        for b in right:
+            if a == b: return true
+    false
+
+fn _contain_scope_ok_v1(scope: text) -> bool:
+    if scope.byte_len() < 1 or scope.byte_len() > 64: return false
+    for byte in scope.bytes():
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 122) or byte == 45): return false
+    true
+
+fn _contain_request_invalid_v1(request: SosixContainRequestV1) -> bool:
+    val limits = request.limits
+    if request.program == "": return true
+    if not _contain_digest_ok_v1(request.program_digest): return true
+    if request.identity != SOSIX_CONTAIN_IDENTITY_INHERIT_V1 and
+            request.identity != SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1: return true
+    if request.network != SOSIX_CONTAIN_NETWORK_HOST_V1 and
+            request.network != SOSIX_CONTAIN_NETWORK_NONE_V1: return true
+    if limits.memory.value < 0 or limits.processes.value < 0 or limits.wall.value < 0: return true
+    if limits.cpu_rate.value < 0 or limits.cpu_rate.value > _SOSIX_CONTAIN_CPU_RATE_MAX_V1: return true
+    if not _contain_texts_nonempty_v1(request.readonly_dirs): return true
+    if not _contain_texts_nonempty_v1(request.writable_dirs): return true
+    if request.identity == SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1 and not _contain_scope_ok_v1(request.scope): return true
+    if not _contain_env_ok_v1(request.environment): return true
+    if _contain_dirs_overlap_v1(request.readonly_dirs, request.writable_dirs): return true
+    false
+
+# "" = admissible. Refuses every requested axis the variant does not enforce,
+# in a fixed order so the reason is deterministic.
+pub fn sosix_contain_request_reason_v1(request: SosixContainRequestV1,
+        support: SosixContainSupportV1) -> text:
+    if _contain_request_invalid_v1(request):
+        return "containment-request-invalid"
+    if request.readonly_dirs.len() > 0 and request.identity != SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1:
+        return "containment-readonly-requires-restricted"
+    val limits = request.limits
+    if limits.memory.value > 0 and not support.memory_hard_limit.value:
+        return "containment-memory-limit-unsupported"
+    if limits.processes.value > 0 and not support.process_limit.value:
+        return "containment-process-limit-unsupported"
+    if limits.cpu_rate.value > 0 and not support.cpu_rate_limit.value:
+        return "containment-cpu-rate-unsupported"
+    val wants_write_confinement = request.identity == SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1 or
+        request.readonly_dirs.len() > 0
+    if wants_write_confinement and not support.write_confinement.value:
+        return "containment-write-confinement-unsupported"
+    if request.network == SOSIX_CONTAIN_NETWORK_NONE_V1 and not support.network_isolation.value:
+        return "containment-network-isolation-unsupported"
+    if request.private_pids.value and not support.pid_isolation.value:
+        return "containment-pid-isolation-unsupported"
+    if request.root_dir != "" and not support.root_remap.value:
+        return "containment-root-remap-unsupported"
+    if limits.wall.value > 0 and not support.kill_all_descendants.value:
+        return "containment-deadline-unsupported"
+    ""
+
+# The planned canaries and their fixed expectations (architecture 4.3).
+fn _contain_canary_expected_v1(id: text) -> text:
+    if id == SOSIX_CONTAIN_CANARY_LAUNCH_EXIT_V1 or id == SOSIX_CONTAIN_CANARY_OWN_WRITE_V1 or
+            id == SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1 or id == SOSIX_CONTAIN_CANARY_TREE_EMPTY_V1:
+        return "allow"
+    if id == SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1 or id == SOSIX_CONTAIN_CANARY_USER_PRIVATE_WRITE_V1 or
+            id == SOSIX_CONTAIN_CANARY_OTHER_SCOPE_WRITE_V1 or
+            id == SOSIX_CONTAIN_CANARY_OTHER_SCOPE_PROCESS_V1 or
+            id == SOSIX_CONTAIN_CANARY_PROCESS_LIMIT_V1:
+        return "deny"
+    ""
+
+fn _contain_canary_count_v1(canaries: [SosixContainCanaryV1], id: text) -> i64:
+    var count = 0
+    for canary in canaries:
+        if canary.id == id: count = count + 1
+    count
+
+# "" = admissible qualify request; same digest and scope rules as a launch
+# request. A qualify run always uses a scope, so an empty scope is invalid.
+pub fn sosix_contain_qualify_request_reason_v1(request: SosixContainQualifyRequestV1) -> text:
+    if request.probe_program == "" or request.probe_script == "" or request.work_dir == "":
+        return "containment-request-invalid"
+    if not _contain_digest_ok_v1(request.probe_digest): return "containment-request-invalid"
+    if not _contain_scope_ok_v1(request.scope): return "containment-request-invalid"
+    if request.wall.value < 0: return "containment-request-invalid"
+    ""
+
+# One canary passes when the run completed (empty reason), the id is planned
+# and present exactly once, observed == expected == the fixed expectation, and
+# (for a deny canary) control == "allow": a deny without a successful positive
+# control is a failure, so a broken probe cannot read as "denied".
+pub fn sosix_contain_canary_pass_v1(result: SosixContainQualifyResultV1, id: text) -> SosixContainFlagV1:
+    val expected = _contain_canary_expected_v1(id)
+    if expected == "" or result.reason != "" or _contain_canary_count_v1(result.canaries, id) != 1:
+        return SosixContainFlagV1(false)
+    for canary in result.canaries:
+        if canary.id != id: continue
+        if canary.expected != expected or canary.observed != expected: return SosixContainFlagV1(false)
+        if expected == "deny" and canary.control != "allow": return SosixContainFlagV1(false)
+        return SosixContainFlagV1(true)
+    SosixContainFlagV1(false)
+
+# True only if all nine pass and the list holds nothing else.
+pub fn sosix_contain_canaries_pass_v1(result: SosixContainQualifyResultV1) -> SosixContainFlagV1:
+    if result.canaries.len() != 9: return SosixContainFlagV1(false)
+    for id in [SOSIX_CONTAIN_CANARY_LAUNCH_EXIT_V1, SOSIX_CONTAIN_CANARY_OWN_WRITE_V1,
+            SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1, SOSIX_CONTAIN_CANARY_TREE_EMPTY_V1,
+            SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1, SOSIX_CONTAIN_CANARY_USER_PRIVATE_WRITE_V1,
+            SOSIX_CONTAIN_CANARY_OTHER_SCOPE_WRITE_V1, SOSIX_CONTAIN_CANARY_OTHER_SCOPE_PROCESS_V1,
+            SOSIX_CONTAIN_CANARY_PROCESS_LIMIT_V1]:
+        if not sosix_contain_canary_pass_v1(result, id).value: return SosixContainFlagV1(false)
+    SosixContainFlagV1(true)
+
+export SosixContainBytesV1, SosixContainCountV1, SosixContainCpuRateV1
+export SosixContainMillisV1, SosixContainExitCodeV1, SosixContainSlotV1, SosixContainFlagV1
+export SosixContainLimitsV1, SosixContainRequestV1, SosixContainSupportV1
+export SosixContainPollV1, SosixContainLeaseV1, SosixContainAdmissionV1
+export sosix_contain_request_reason_v1, sosix_contain_support_none_v1
+export SOSIX_CONTAIN_IDENTITY_INHERIT_V1, SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1
+export SOSIX_CONTAIN_NETWORK_HOST_V1, SOSIX_CONTAIN_NETWORK_NONE_V1
+export SosixContainCanaryV1, SosixContainQualifyRequestV1, SosixContainQualifyResultV1
+export sosix_contain_canaries_pass_v1, sosix_contain_canary_pass_v1, sosix_contain_qualify_request_reason_v1
+export SOSIX_CONTAIN_CANARY_LAUNCH_EXIT_V1, SOSIX_CONTAIN_CANARY_TREE_EMPTY_V1, SOSIX_CONTAIN_CANARY_PROCESS_LIMIT_V1
+export SOSIX_CONTAIN_CANARY_OWN_WRITE_V1, SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1
+export SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1, SOSIX_CONTAIN_CANARY_USER_PRIVATE_WRITE_V1
+export SOSIX_CONTAIN_CANARY_OTHER_SCOPE_WRITE_V1, SOSIX_CONTAIN_CANARY_OTHER_SCOPE_PROCESS_V1

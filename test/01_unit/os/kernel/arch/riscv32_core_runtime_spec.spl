@@ -1,0 +1,109 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-OS
+# Repro (riscv32 kernel link, scripts/check/check-simpleos-riscv32-kernel-link.shs
+# --link-only): rt_alloc, rt_pool_safepoint, rt_string_new_literal,
+# rt_string_concat, rt_value_to_string, rt_raw_i64_to_string, rt_array_get,
+# rt_array_set_text, rt_index_set, rt_value_u64 and rt_typed_words_{u32,u64}_{at,set}
+# were undefined: riscv32 had no freestanding core runtime.
+# The exported bodies need rv32 memory, so they are proven by the link gate;
+# the integer policy they are built on is tested directly here.
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read_text}
+use os.kernel.arch.riscv32.core_runtime_layout.{
+    rv32_rt_tag_int, rv32_rt_untag_int, rv32_rt_align8, rv32_rt_normalize_index,
+    rv32_rt_heap_fits, rv32_rt_byte_merge, rv32_rt_decimal_len, rv32_rt_decimal_digit,
+    rv32_rt_ram_ref, RV32_RT_NIL, RV32_RT_TRUE, RV32_RT_FALSE
+}
+
+val RT = "src/os/kernel/arch/riscv32/core_runtime.spl"
+val ENTRY = "examples/09_embedded/simple_os/arch/riscv32/os_entry.spl"
+
+describe "riscv32 core runtime layout policy":
+    it "tags ints and specials like the rv32 boot C (TAG_HEAP 1, NIL 3)":
+        expect(rv32_rt_tag_int(5)).to_equal(40)
+        expect(rv32_rt_untag_int(40)).to_equal(5)
+        expect(rv32_rt_untag_int(-40)).to_equal(-5)
+        expect(RV32_RT_NIL).to_equal(3)
+        expect(RV32_RT_TRUE).to_equal(11)
+        expect(RV32_RT_FALSE).to_equal(19)
+
+    it "aligns allocations to 8 bytes":
+        expect(rv32_rt_align8(1)).to_equal(8)
+        expect(rv32_rt_align8(8)).to_equal(8)
+        expect(rv32_rt_align8(13)).to_equal(16)
+
+    it "normalizes negative indexes and rejects out-of-bounds":
+        expect(rv32_rt_normalize_index(0, 3)).to_equal(0)
+        expect(rv32_rt_normalize_index(-1, 3)).to_equal(2)
+        expect(rv32_rt_normalize_index(3, 3)).to_equal(-1)
+        expect(rv32_rt_normalize_index(-4, 3)).to_equal(-1)
+
+    it "bounds the bump heap by offset, never by signed address compare":
+        step("0x8xxxxxxx addresses are negative as i32, so compare offsets")
+        expect(rv32_rt_heap_fits(0, 16, 32)).to_equal(1)
+        expect(rv32_rt_heap_fits(24, 16, 32)).to_equal(0)
+        expect(rv32_rt_heap_fits(0, 0, 32)).to_equal(0)
+        expect(rv32_rt_heap_fits(0x00FFFFF8, 8, 0x01000000)).to_equal(1)
+        expect(rv32_rt_heap_fits(0x00FFFFF8, 16, 0x01000000)).to_equal(0)
+
+    it "merges a byte into an aligned little-endian word":
+        expect(rv32_rt_byte_merge(0x11223344, 0, 0xAA)).to_equal(0x112233AA)
+        expect(rv32_rt_byte_merge(0x11223344, 2, 0xAA)).to_equal(0x11AA3344)
+        expect(rv32_rt_byte_merge(0x11223344, 3, 0xAA)).to_equal(0xAA223344)
+
+    it "formats decimals including negatives and zero":
+        expect(rv32_rt_decimal_len(0)).to_equal(1)
+        expect(rv32_rt_decimal_len(1234)).to_equal(4)
+        expect(rv32_rt_decimal_len(-56)).to_equal(3)
+        expect(rv32_rt_decimal_digit(1234, 0)).to_equal(4)
+        expect(rv32_rt_decimal_digit(1234, 3)).to_equal(1)
+        expect(rv32_rt_decimal_digit(-56, 0)).to_equal(6)
+        expect(rv32_rt_decimal_digit(-56, 1)).to_equal(5)
+        step("i32 min never needs negation")
+        expect(rv32_rt_decimal_len(-2147483648)).to_equal(11)
+        expect(rv32_rt_decimal_digit(-2147483648, 0)).to_equal(8)
+        expect(rv32_rt_decimal_digit(-2147483648, 9)).to_equal(2)
+
+    it "only dereferences refs inside rv32 RAM":
+        expect(rv32_rt_ram_ref(0x80001000)).to_equal(1)
+        expect(rv32_rt_ram_ref(0x87FFFFFF)).to_equal(1)
+        expect(rv32_rt_ram_ref(0x10000000)).to_equal(0)
+        expect(rv32_rt_ram_ref(0x7FFFFFFF)).to_equal(0)
+        expect(rv32_rt_ram_ref(0x88000000)).to_equal(0)
+
+describe "riscv32 core runtime exports":
+    it "exports every missing core symbol for riscv32 only":
+        val src = file_read_text(RT)
+        for name in ["rt_alloc(size: i64) -> i64", "rt_pool_safepoint() -> i64",
+                     "rt_string_new_literal(bytes: i64, len: i64) -> i64",
+                     "rt_string_concat(left: i64, right: i64) -> i64",
+                     "rt_value_to_string(value: i64) -> i64",
+                     "rt_raw_i64_to_string(raw: i64) -> i64",
+                     "rt_array_get(array: i64, index: i64) -> i64",
+                     "rt_array_set_text(array: i64, index: i64, value: i64) -> bool",
+                     "rt_index_set(collection: i64, index: i64, value: i64) -> bool",
+                     "rt_value_u64(bits: i64) -> i64",
+                     "rt_typed_words_u32_at(array: i64, index: i64) -> i64",
+                     "rt_typed_words_u64_at(array: i64, index: i64) -> i64",
+                     "rt_typed_words_u32_set(array: i64, index: i64, value: i64) -> bool",
+                     "rt_typed_words_u64_set(array: i64, index: i64, value: i64) -> bool"]:
+            expect(src.contains("@cfg(riscv32)\n@no_mangle\nfn " + name + ":")).to_equal(true)
+
+    it "never calls one rt_* export from another (ANY result -> rt_value_truthy)":
+        val src = file_read_text(RT)
+        expect(src.contains("    rt_array_set_text(")).to_equal(false)
+        expect(src.contains("rt_value_to_string(left)")).to_equal(false)
+        expect(src.contains("    rt_typed_words_u32_at(")).to_equal(false)
+        expect(src.contains("= rt_alloc(")).to_equal(false)
+
+    it "uses no inline asm (memory goes through the linked rv32 boot probes)":
+        val src = file_read_text(RT)
+        expect(src.contains("asm volatile")).to_equal(false)
+        expect(src.contains("extern fn rt_rv32_probe_load8(addr: i64) -> i64")).to_equal(true)
+        expect(src.contains("extern fn rt_rv32_probe_store32(addr: i64, value: i64) -> i64")).to_equal(true)
+
+    it "keeps the runtime in the riscv32 kernel entry closure":
+        val src = file_read_text(ENTRY)
+        expect(src.contains("use os.kernel.arch.riscv32.core_runtime.{}")).to_equal(true)

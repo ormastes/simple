@@ -5,6 +5,30 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
+
+## Addendum 2026-11-11 (lane ne19) — LIVE, still real (minor); no Status change
+
+Re-checked the named specs on the release/1.0.0 tree. This record's guidance
+still holds and its recommended migration is only partially adopted:
+
+- `test/05_perf/interp/interpreter_component_scaling_spec.spl` still pins
+  within-process wall-clock ratios (`report_ratio`, `ratio_x10`, ratio < 7
+  bound at n vs 4n). Its header now explicitly documents the noisy-host
+  caveat ("READ THE RATIO, NOT THE SECONDS ... absolute times drift 2x"),
+  i.e. the spec knows about this record's finding but has not moved to
+  counts/CPU time.
+- `while_loop_shape_parity_spec.spl` has moved toward this doc's endorsed
+  style: iteration-count non-vacuity pins plus an absolute us/iteration
+  ceiling derived from the fast shape, rather than a bare ratio.
+- `block_scope_shadow_parity_spec.spl` already pins deterministic counts
+  (`BLOCK_SHADOW_*`), as this doc recommends.
+
+The underlying condition (wall-clock ratios on a loaded shared host are
+unreliable; only counts, loose ceilings, or child CPU time are trustworthy) is
+environmental and unchanged. Remaining action — migrate
+`interpreter_component_scaling_spec.spl` off tight ratio pins — is spec
+authoring, not a code fix; left OPEN.
+
 - Found by: PERF-6, host load 27-40, 90 users, 20 cores
 
 ## Evidence
@@ -90,3 +114,29 @@ and resolves no binary, so no fallback can explain it. Every failing example in 
 is a ratio pin (`stays within 3x`, `linear pin`); **no semantics example failed on either
 seed in any run.**
 
+
+
+## 2026-11-13 triage (lane p3-io, work/p3-io-20261113)
+
+Still OPEN, confirmed minor; no status change. `interpreter_component_scaling_spec.spl`
+still pins within-process wall-clock ratios (`report_ratio`, `ratio_x10`, < 7 bound).
+Migrating it to counts / loose ceilings / child-CPU-time is spec authoring, not a
+code fix, and — because the underlying condition (flaky ratios on a loaded host) is
+the very thing being measured — a rewritten pin cannot be reliably re-verified on
+this host. Left for the owning perf lane with its own before/after evidence rather
+than migrated blind here. No change in this closure.
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113)
+
+Remaining action LANDED: \`test/05_perf/interp/interpreter_component_scaling_spec.spl\`'s
+nine "linear pin" rows no longer pin a single-sample wall-clock ratio. Each now
+runs the shape 3x at each n and pins the ratio of the two MINIMA (\`best_of_3\`),
+the noise-robust estimator this record's own interleaved-rep evidence endorses
+(minima and medians agreed where single samples spread 2.2x). The eight
+KNOWN-RED quadratic rows keep a single run (ratio ~15 cannot be flipped by load
+noise; tripling them would multiply the spec's wall time by ~3). Verified run on
+the fresh seed: 19/23 with the 4 reds being one remaining quadratic row
+(self_index_push scaling) plus three "value semantics preserved" alias rows — a
+live interpreter-semantics divergence documented in the spec header, NOT ratio
+flake. This record's other named specs were already migrated per the
+2026-11-11 addendum; no further ratio pins remain known to this lane.

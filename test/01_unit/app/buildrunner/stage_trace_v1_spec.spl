@@ -1,0 +1,40 @@
+use std.spec.{describe, it, expect}
+use app.bootstrap_builder.contracts.{BuildTaskV1}
+use app.buildrunner.stage_trace_v1.{build_runner_stage_trace_encode_v1}
+
+fn trace_fixture_task(args: [text]) -> BuildTaskV1:
+    val digest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    BuildTaskV1(id: "trace-fixture", attempt: 1, phase: "module",
+        producer_digest: digest, source_digest: digest, toolchain_digest: digest,
+        dependencies: [], program: "PRIVATE_PROGRAM", args: args, inputs: [],
+        outputs: ["out.obj"], cache_key: digest, timeout_ms: 1000,
+        memory_limit_bytes: 1073741824, links: [])
+
+describe "BuildRunner opt-in stage trace":
+    it "is silent by default and never copies arbitrary command arguments":
+        val task = trace_fixture_task(["native-build", "PRIVATE_PATH", "--backend", "llvm", "--token", "PRIVATE_TOKEN"])
+        expect(build_runner_stage_trace_encode_v1(false, "worker", "v4-start", "begin", task)).to_equal("")
+        val trace = build_runner_stage_trace_encode_v1(true, "worker", "v4-start", "begin", task)
+        expect(trace).to_contain("build-stage-v1")
+        expect(trace).to_contain("producer_sha256:")
+        expect(trace).to_contain("backend: \"llvm\"")
+        expect(trace).to_contain("compile_route: \"positional\"")
+        expect(trace.contains("PRIVATE_")).to_equal(false)
+
+    it "distinguishes coordinator and managed wrapper routes":
+        val coordinator = trace_fixture_task(["native-build", "--entry", "src/main.spl", "--backend", "cranelift"])
+        expect(build_runner_stage_trace_encode_v1(true, "manager", "dispatch", "begin", coordinator)).to_contain("compile_route: \"coordinator\"")
+        val managed = trace_fixture_task(["worker.py", "--compile-route", "positional", "--backend", "llvm"])
+        expect(build_runner_stage_trace_encode_v1(true, "manager", "dispatch", "begin", managed)).to_contain("compile_route: \"positional\"")
+        val unknown = trace_fixture_task(["native-build", "--backend", "SECRET_BACKEND"])
+        val trace = build_runner_stage_trace_encode_v1(true, "worker", "result", "end", unknown, 2)
+        expect(trace).to_contain("compile_route: \"unspecified\"")
+        expect(trace).to_contain("exit_code: 2")
+        expect(trace.contains("SECRET_BACKEND")).to_equal(false)
+
+    it "recognizes native CLI equals spelling without copying its values":
+        val task = trace_fixture_task(["native-build", "--entry=PRIVATE_PATH", "--backend=llvm"])
+        val trace = build_runner_stage_trace_encode_v1(true, "manager", "dispatch", "begin", task)
+        expect(trace).to_contain("backend: \"llvm\"")
+        expect(trace).to_contain("compile_route: \"coordinator\"")
+        expect(trace.contains("PRIVATE_PATH")).to_equal(false)

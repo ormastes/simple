@@ -1,7 +1,6 @@
 # Reading an element off an `any` receiver: three forms, three different results
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Status: CLOSED (2026-09-13, verified fixed on `a6450c9d6f5`; re-verified 2026-11-25 — see bottom). The "OPEN (P1)" line that stood here until 2026-11-25 was stale: the closure section at the bottom of this file already recorded the 2026-09-13 fix verification.
 
 **Filed:** 2026-08-06 · **Severity:** high (silent wrong data, no diagnostic)
 **Found by:** WS-D 2D perf work (`src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl`)
@@ -145,3 +144,18 @@ own caution that interpret mode can hide a JIT-only defect — identical
 correct output. Both engines confirmed fixed.
 
 Status: CLOSED (2026-09-13) — verified fixed on `a6450c9d6f5`.
+
+## Re-verification 2026-11-25 (release/1.0.0 @ 0819b116ecb, worktree wt-p1w1-aa)
+
+Ran this record's own 5-form probe verbatim (from `build/`, no stdlib imports)
+on the pinned `bin/simple.exe` (Rust seed v1.0.0-rc.1):
+
+- default (JIT) lane:
+  `raw=289427552 u32=289427552 i64=289427552 cast=289427552 via_arr=289427552`
+  / `shift_raw=17 shift_u32=17 shift_arr=17`
+- `SIMPLE_EXECUTION_MODE=interpret` (with `println`→`print`, which the
+  interpreter now requires): identical correct output.
+
+All five read forms yield `289427552` (`0x11405060`) and every shift yields
+`17` on both engines — no tag leakage, no float-shift artifact. The generic
+defect stays fixed; header status corrected to CLOSED. No code change.

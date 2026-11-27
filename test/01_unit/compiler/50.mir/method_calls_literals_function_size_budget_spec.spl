@@ -1,0 +1,92 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+# method_calls_literals.spl: per-method size budget (native compile-time guard)
+
+## Overview
+
+Bug `stage2_method_calls_literals_300s_timeout_2026-11-08`: the stage2
+native-build timed out on
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` at the
+fixed 300 s per-file budget (`DEFAULT_NATIVE_FILE_TIMEOUT_SECS`). Measured
+2026-11-09 with the stage2 seed (`native-build --backend llvm`, warm cache,
+8 threads): wall 317.8 s / cpu 316.5 s for this one file; the next slowest
+compiler file took 101 s.
+
+The cost is not the file's line count (7,507 lines) but one method:
+`MirLowering.lower_method_call` was a single 3,396-line body. Per-function
+compile cost in the native pipeline is superlinear in function size (the
+same class `.claude/rules/commands.md` records for lint), so one giant
+method dominates the whole file.
+
+The fix split that method into read-only `try_lower_*_v1` helpers plus
+`lower_method_call_by_resolution_v1`. This spec is the time-budget
+prevention test expressed structurally, because a wall-clock assertion on a
+multi-minute seed compile is not runnable as a unit test: it pins the
+largest method body in the file to a budget well under the size that blew
+the 300 s timeout, so re-growing the dispatcher fails here first.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_read}
+
+val TARGET = "src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl"
+# 3,396 lines measured at 317.8 s (over the 300 s native per-file budget).
+# Budget leaves headroom for the ~1,250-line resolution dispatcher while
+# refusing anything approaching the size that timed out.
+val MAX_METHOD_LINES = 1500
+
+struct MethodSpan:
+    name: text
+    lines: i64
+
+fn method_header_name(line: text) -> text?:
+    # Methods inside `impl MirLowering:` are declared at 4-space indent.
+    if line.starts_with("    me ") or line.starts_with("    fn "):
+        # Both `me ` and `fn ` prefixes are 3 characters.
+        val rest = line.trim().substring(3, line.trim().len())
+        val open = rest.find("(")
+        if open > 0:
+            return rest.substring(0, open)
+    nil
+
+fn method_spans(source: text) -> [MethodSpan]:
+    var spans: [MethodSpan] = []
+    var current_name = ""
+    var current_start = 0
+    var line_no = 0
+    for line in source.lines():
+        line_no = line_no + 1
+        if val name = method_header_name(line):
+            if current_name != "":
+                spans.push(MethodSpan(name: current_name, lines: line_no - current_start))
+            current_name = name
+            current_start = line_no
+    if current_name != "":
+        spans.push(MethodSpan(name: current_name, lines: line_no + 1 - current_start))
+    spans
+
+fn largest_span(spans: [MethodSpan]) -> MethodSpan:
+    var best = MethodSpan(name: "", lines: 0)
+    for span in spans:
+        if span.lines > best.lines:
+            best = span
+    best
+
+describe "method_calls_literals.spl per-method size budget":
+    val source = file_read(TARGET)
+    val spans = method_spans(source)
+
+    it "parses the file into method spans":
+        expect(spans.len() > 50).to_equal(true)
+
+    it "keeps every method body under the native compile-time budget":
+        val worst = largest_span(spans)
+        # Name the offender so a failure says what to split.
+        val verdict = if worst.lines <= MAX_METHOD_LINES: "within budget" else: "{worst.name} is {worst.lines} lines (budget {MAX_METHOD_LINES})"
+        expect(verdict).to_equal("within budget")
+
+    it "lower_method_call stays split into its v1 helpers":
+        expect(source.contains("me try_lower_dict_builtin_method_v1(")).to_equal(true)
+        expect(source.contains("me try_lower_text_search_and_transform_v1(")).to_equal(true)
+        expect(source.contains("me lower_method_call_by_resolution_v1(")).to_equal(true)

@@ -7,6 +7,18 @@ fresh dated repro if the symptom returns.
 
 **Status:** SOURCE FIXED / ARCHIVE QUALIFICATION PENDING
 
+## Verification note — 2026-11-25 (release/1.0.0 P2 batch)
+
+SOURCE FIXED re-confirmed by code inspection on release/1.0.0 HEAD
+(4bc2c986375): `resolve_runtime_func` in
+`src/compiler_rust/compiler/src/codegen/instr/helpers.rs:477-483` prefers the
+local `func_ids` declaration and only falls back to the `runtime_funcs`
+import, and every `call_runtime_*` helper routes through it. The focused Rust
+regression (`cargo test`) cannot be re-run on this Windows host (no cargo
+builds permitted; the pinned bin/simple.exe also rejects
+`@representation_boundary` at HEAD), so verification is by code inspection
+only. ARCHIVE QUALIFICATION remains PENDING as tracked.
+
 ## Reproduction
 
 ```sh

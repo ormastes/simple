@@ -1,0 +1,73 @@
+# SOURCE_AUTHORED_NOT_RUN (lane A review P2-2). Op (ii) mechanism `linux_remote_build_read_v1` over a real retained
+# directory. The fixture is the independently provisioned empty private directory of the staging specs
+# (owner decision 2026-11-16, OPEN_ISSUE B-10): unset -> BLOCKED (counted, never a pass), nothing touched.
+# Artifacts intentionally remain retained for operator inspection; use a fresh fixture per run.
+use std.spec.{describe, it, expect, pending}
+use std.nogc_sync_mut.io.env_ops.{env_get, host_os}
+use std.nogc_sync_mut.io.retained_file.retained_directory_open_trusted_v1
+use std.nogc_sync_mut.io.snapshot_links.snapshot_symlink_create_nofollow_v1
+use std.nogc_async_mut.container.providers.linux.remote_build_workspace_stage_v1.{LinuxRemoteBuildStageFileV3,
+    linux_remote_build_stage_bytes_v1, linux_remote_build_read_v1}
+use std.common.contracts.container.build_workspace_profile_v1.LinuxBuildWorkspaceProfileV1
+use std.common.contracts.container.settled_workspace_read_v3.ContainerSettledWorkspaceBoundsV3
+use std.common.crypto.sha256.sha256_u8_hex
+use std.common.text_bytes.text_to_utf8_bytes
+
+fn rr_profile_v1() -> LinuxBuildWorkspaceProfileV1:
+    LinuxBuildWorkspaceProfileV1(machine_policy_digest: "a".repeat(64), workspace_profile_digest: "b".repeat(64),
+        image: "registry.example/build@sha256:" + "d".repeat(64), image_config_id: "e".repeat(64),
+        launcher_program: "/opt/simple/build-launcher", producer_path: "inputs/producer", stdout_leaf: "stdout.log",
+        stderr_leaf: "stderr.log", output_root: "outputs", max_input_bytes: 4096, max_output_bytes: 2048,
+        memory_minimum_bytes: 268435456, preparation_budget_ms: 60000)
+
+fn rr_file_v1(path: text, content: text) -> LinuxRemoteBuildStageFileV3:
+    val bytes = text_to_utf8_bytes(content)
+    LinuxRemoteBuildStageFileV3(path: path, digest: sha256_u8_hex(bytes), bytes: bytes)
+
+fn rr_fixture_v1() -> text:
+    env_get("SIMPLE_AGENT_STAGE_PRIVATE_FIXTURE") ?? ""
+
+describe "Settled remote-build read over a real retained root (lane A review P2-2)":
+    it "refuses a symlinked output and reads the regular one":
+        # @req M0030-LANEA-READ-01
+        if rr_fixture_v1() == "":
+            pending("BLOCKED: retained-directory staging fixture env unset: SIMPLE_AGENT_STAGE_PRIVATE_FIXTURE")
+            return
+        expect(host_os()).to_equal("linux")
+        var root = retained_directory_open_trusted_v1(rr_fixture_v1()).unwrap()
+        var attempt = root.stage_directory_v1("remote-build-read-symlink", true).unwrap()
+        val staged = linux_remote_build_stage_bytes_v1(attempt, [rr_file_v1("stdout.log", "out\n"),
+            rr_file_v1("stderr.log", "err\n"), rr_file_v1("outputs/real.txt", "artifact\n")])
+        expect(staged.error).to_equal("")
+        expect(snapshot_symlink_create_nofollow_v1(rr_fixture_v1() + "/remote-build-read-symlink", "outputs/link",
+            "real.txt", 1)).to_equal(true)
+        val linked = linux_remote_build_read_v1(attempt, rr_profile_v1(),
+            ContainerSettledWorkspaceBoundsV3(maximum_bytes: 1024, output_paths: ["link"]), "f".repeat(64))
+        val regular = linux_remote_build_read_v1(attempt, rr_profile_v1(),
+            ContainerSettledWorkspaceBoundsV3(maximum_bytes: 1024, output_paths: ["real.txt"]), "f".repeat(64))
+        val attempt_closed = attempt.close()
+        val root_closed = root.close()
+        expect(linked.is_err()).to_equal(true)
+        expect(regular.unwrap().outputs[0].bytes).to_equal(text_to_utf8_bytes("artifact\n"))
+        expect(attempt_closed and root_closed).to_equal(true)
+
+    it "refuses the file that crosses the byte budget and admits the same tree at the exact budget":
+        # @req M0030-LANEA-READ-02: stdout 4 + stderr 4 + output 9 = 17 bytes
+        if rr_fixture_v1() == "":
+            pending("BLOCKED: retained-directory staging fixture env unset: SIMPLE_AGENT_STAGE_PRIVATE_FIXTURE")
+            return
+        expect(host_os()).to_equal("linux")
+        var root = retained_directory_open_trusted_v1(rr_fixture_v1()).unwrap()
+        var attempt = root.stage_directory_v1("remote-build-read-budget", true).unwrap()
+        val staged = linux_remote_build_stage_bytes_v1(attempt, [rr_file_v1("stdout.log", "out\n"),
+            rr_file_v1("stderr.log", "err\n"), rr_file_v1("outputs/a.txt", "artifact\n")])
+        expect(staged.error).to_equal("")
+        val crossing = linux_remote_build_read_v1(attempt, rr_profile_v1(),
+            ContainerSettledWorkspaceBoundsV3(maximum_bytes: 16, output_paths: ["a.txt"]), "f".repeat(64))
+        val exact = linux_remote_build_read_v1(attempt, rr_profile_v1(),
+            ContainerSettledWorkspaceBoundsV3(maximum_bytes: 17, output_paths: ["a.txt"]), "f".repeat(64))
+        val attempt_closed = attempt.close()
+        val root_closed = root.close()
+        expect(crossing.is_err()).to_equal(true)
+        expect(exact.unwrap().outputs.len()).to_equal(1)
+        expect(attempt_closed and root_closed).to_equal(true)

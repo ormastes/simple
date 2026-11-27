@@ -23,6 +23,11 @@ fn divide(a: i64, b: i64) -> Result<i64, text>:
 
 ### Option
 
+Compatibility-only example: `return nil` in a safe return is `NIL-UNSAFE-001`,
+and a public `Option<T>` input/field is `ROB-OPT-001`/`-002`. Robust APIs use
+`Result` or a domain enum — see
+[robust_semantic_absence.md](robust_semantic_absence.md).
+
 ```simple:skip
 enum Option<T>:
     Some(T)
@@ -34,6 +39,29 @@ fn find_user(id: i64) -> Option<User>:
 ```
 
 ---
+
+### `Some`/`None` patterns need an Option subject (`SPL-PAT-001`)
+
+A `Some(..)` or `None` pattern is only valid when the subject's static type is
+`T?` / `Option<T>`. Matching it against a plain `i64`, `text`, `bool`, `f64` or
+`char` is a compile error (as Rust `E0308` and Swift reject it); it is never a
+silent bind. `text.index_of` returns a plain `i64` (`-1` on a miss), not an
+Option:
+
+```text
+val idx = s.index_of(":")
+match idx:
+    Some(i): use(i)       # error[SPL-PAT-001]: pattern `Some(_)` expects Option<T>, found i64
+    nil: miss()
+
+val idx = s.index_of(":")  # fix: test the value itself
+if idx >= 0:
+    use(idx)
+```
+
+If absence is genuinely possible, make the subject optional (`i64?`) and use
+`if val i = x:`. The rule is `deny` in every profile
+(`config/policy/diagnostic_policy.sdn`) and takes no exception.
 
 ## The ? Operator
 
@@ -66,7 +94,7 @@ match divide(10, 0):
 
 match find_user(42):
     Some(user): process(user)
-    nil: print "User not found"
+    None: print "User not found"
 ```
 
 ---
@@ -185,6 +213,35 @@ Use 'fn' to define functions in Simple, not 'def'.
 Python:  def add(a, b):
 Simple:  fn add(a, b):
 ```
+
+---
+
+<!-- antigravity-early-defect-detection-2026-11-18 -->
+
+## Deterministic Diagnostic Policy and Batch Completeness
+
+See [early_defect_detection_2026-11-18.md](../../03_plan/compiler/early_defect_detection_2026-11-18.md) (`WP-02`, `WP-04`, `ED-07`, `ED-09`).
+
+### `DiagnosticRulePolicy` and Drift-Free `policy_digest`
+
+Compiler diagnostics, lint rules, LSP, and MCP share one deterministic policy resolver in `src/compiler/00.common/diagnostics/diagnostic_rule_policy.spl` backed by `config/policy/diagnostic_policy.sdn` (`ED-T26`, `ED-T27`):
+
+- **Pinned inputs only:** Severity schedules (warn-first rollout, edition/release promotion, profile escalation across `moderate` / `strict` / `robust` / `critical`, replacement guidance, and scoped exception rules) are resolved strictly from the pinned language edition, toolchain release date (or explicit `policy_as_of`), and active profile.
+- **No wall-clock drift:** `DiagnosticRulePolicy` never reads the host wall clock during compilation or lint evaluation. Identical source, target, edition, and policy configuration produce an identical `policy_digest` today and in future builds.
+- **Policy binding vs. lease fencing:** In `src/lib/common/task_runner/contracts.spl:38-73`, `AnalysisKeyV1` binds `(snapshot_id, scope_id, target_id, policy_digest, analyzer_profile)` so single-flight analysis jobs and admitted `DiagnosticBatchV1` caches never serve stale severities across policy edits, while keeping `lease_generation` and owner/attempt nonces (`AnalysisJobLeaseV1.lease_generation`, `owner_id`, `TaskRunnerAttemptV1.attempt`) strictly outside `analysis_key` (`ED-02`, `ED-09`). Underlying syntax/HIR/type facts remain reusable across policy changes without recomputing deep compiler passes.
+
+### `DiagnosticBatchV1` Completeness vs. Clean Verdicts
+
+Structured diagnostic consumers consume `DiagnosticBatchV1` (`src/lib/common/diagnostics/diagnostic_batch.spl`, `src/lib/common/diagnostics/diagnostic_v1.spl`, `src/lib/common/diagnostics/diagnostic_batch_v1_schema.sdn`), which separates **findings** from **execution completeness**:
+
+| Batch Status / Coverage | Findings | Verdict Meaning |
+|-------------------------|----------|-----------------|
+| `Complete` (all requested rules/units finished) | `0` errors | Clean for the declared snapshot, target, `policy_digest`, and profile scope |
+| `Complete` | `> 0` warnings/errors | Analysis succeeded; policy gate decides pass/fail from findings |
+| `Partial` (e.g., parser error recovery, `ED-T06`) | Syntax/recovery hints | Useful local diagnostics, **not** a full semantic certificate |
+| `Incomplete` / `TimedOut` / `Failed` / `Unavailable` | `0` (or partial) | **Never clean** (`ED-07`, `ED-T05`); missing or truncated analysis fails full-lint/assurance gates |
+
+Empty diagnostic arrays (`diagnostics: []`) without a `Complete` terminal receipt, matching `snapshot`, and full requested scope coverage never certify error-free code.
 
 ---
 

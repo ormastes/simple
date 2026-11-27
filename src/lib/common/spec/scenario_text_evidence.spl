@@ -1,0 +1,334 @@
+# Pure transcript normalization and ordered evidence matching.
+
+use std.string_core.{char_code}
+
+pub enum ScenarioTextMask:
+    date
+    version
+    address
+    duration
+    build_id
+
+pub struct ScenarioTextEvidencePolicy:
+    trim_lines: bool
+    collapse_horizontal_whitespace: bool
+    masks: [ScenarioTextMask]
+    max_gap: i64
+
+pub struct ScenarioTextMatchResult:
+    passed: bool
+    first_expected_index: i64
+    first_actual_index: i64
+    diagnostic: text
+    raw_transcript: text
+    normalized_transcript: text
+
+pub fn scenario_text_evidence_policy(
+    trim_lines: bool,
+    collapse_horizontal_whitespace: bool,
+    masks: [ScenarioTextMask],
+    max_gap: i64
+) -> ScenarioTextEvidencePolicy:
+    ScenarioTextEvidencePolicy(
+        trim_lines: trim_lines,
+        collapse_horizontal_whitespace: collapse_horizontal_whitespace,
+        masks: masks,
+        max_gap: max_gap
+    )
+
+pub fn scenario_text_mask_name(mask: ScenarioTextMask) -> text:
+    match mask:
+        case ScenarioTextMask.date: "date"
+        case ScenarioTextMask.version: "version"
+        case ScenarioTextMask.address: "address"
+        case ScenarioTextMask.duration: "duration"
+        case ScenarioTextMask.build_id: "build-id"
+
+fn _strip_ansi(value: text) -> text:
+    var out: [text] = []
+    var i = 0
+    while i < value.len():
+        if (
+            i + 1 < value.len() and
+            value[i:i + 1] == "\x1b" and
+            value[i + 1:i + 2] == "["
+        ):
+            var j = i + 2
+            var valid = false
+            while j < value.len():
+                val ch = value[j:j + 1]
+                if (ch >= "0" and ch <= "9") or ch == ";" or ch == "?":
+                    j = j + 1
+                elif (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z"):
+                    valid = true
+                    j = j + 1
+                    break
+                else:
+                    break
+            if valid:
+                i = j
+                continue
+        out.push(value[i:i + 1])
+        i = i + 1
+    out.join("")
+
+fn _collapse_horizontal_whitespace(value: text) -> text:
+    var out: [text] = []
+    var pending_space = false
+    for ch in value:
+        if ch == " " or ch == "\t":
+            pending_space = out.len() > 0
+        else:
+            if pending_space:
+                out.push(" ")
+            out.push(ch)
+            pending_space = false
+    out.join("")
+
+fn _is_digit(ch: text) -> bool:
+    val code = char_code(ch)
+    code >= 48 and code <= 57
+
+fn _is_hex(ch: text) -> bool:
+    val code = char_code(ch)
+    _is_digit(ch) or (code >= 97 and code <= 102) or (code >= 65 and code <= 70)
+
+fn _all_digits(value: text) -> bool:
+    if value == "":
+        return false
+    for ch in value:
+        if not _is_digit(ch):
+            return false
+    true
+
+fn _is_date(value: text) -> bool:
+    (
+        value.len() == 10 and
+        value[4:5] == "-" and
+        value[7:8] == "-" and
+        _all_digits(value[0:4]) and
+        _all_digits(value[5:7]) and
+        _all_digits(value[8:10])
+    )
+
+fn _is_version(value: text) -> bool:
+    var start = 0
+    if value.starts_with("v") or value.starts_with("V"):
+        start = 1
+    if start >= value.len() or not _is_digit(value[start:start + 1]):
+        return false
+    var has_dot = false
+    var segment_has_value = false
+    var i = start
+    while i < value.len():
+        val ch = value[i:i + 1]
+        if ch == ".":
+            if not segment_has_value:
+                return false
+            has_dot = true
+            segment_has_value = false
+        elif not (
+            _is_digit(ch) or
+            (char_code(ch) >= 97 and char_code(ch) <= 122) or
+            (char_code(ch) >= 65 and char_code(ch) <= 90) or
+            ch == "-" or ch == "_" or ch == "+"
+        ):
+            return false
+        else:
+            segment_has_value = true
+        i = i + 1
+    has_dot and segment_has_value
+
+fn _is_address(value: text) -> bool:
+    if value.len() <= 2 or not (value.starts_with("0x") or value.starts_with("0X")):
+        return false
+    var i = 2
+    while i < value.len():
+        if not _is_hex(value[i:i + 1]):
+            return false
+        i = i + 1
+    true
+
+fn _is_duration(value: text) -> bool:
+    var unit_len = 0
+    if value.ends_with("ns") or value.ends_with("us") or value.ends_with("ms"):
+        unit_len = 2
+    elif value.ends_with("s"):
+        unit_len = 1
+    else:
+        return false
+    val number = value[0:value.len() - unit_len]
+    if number == "":
+        return false
+    var dots = 0
+    for ch in number:
+        if ch == ".":
+            dots = dots + 1
+        elif not _is_digit(ch):
+            return false
+    dots <= 1
+
+fn _is_build_id(value: text) -> bool:
+    (
+        (value.starts_with("build-id=") and value.len() > 9) or
+        (value.starts_with("build_id=") and value.len() > 9)
+    )
+
+fn _mask_enabled(masks: [ScenarioTextMask], wanted: ScenarioTextMask) -> bool:
+    for mask in masks:
+        if mask == wanted:
+            return true
+    false
+
+fn _mask_token(token: text, masks: [ScenarioTextMask]) -> text:
+    if _mask_enabled(masks, ScenarioTextMask.date) and _is_date(token):
+        return "<date>"
+    if _mask_enabled(masks, ScenarioTextMask.version) and _is_version(token):
+        return "<version>"
+    if _mask_enabled(masks, ScenarioTextMask.address) and _is_address(token):
+        return "<address>"
+    if _mask_enabled(masks, ScenarioTextMask.duration) and _is_duration(token):
+        return "<duration>"
+    if _mask_enabled(masks, ScenarioTextMask.build_id) and _is_build_id(token):
+        return "<build-id>"
+    token
+
+fn _apply_masks(line: text, masks: [ScenarioTextMask]) -> text:
+    val tokens = line.split(" ")
+    var out: [text] = []
+    for token in tokens:
+        out.push(_mask_token(token, masks))
+    out.join(" ")
+
+fn _normalize_line(line: text, policy: ScenarioTextEvidencePolicy) -> text:
+    var normalized = line
+    if policy.trim_lines:
+        normalized = normalized.trim()
+    if policy.collapse_horizontal_whitespace:
+        normalized = _collapse_horizontal_whitespace(normalized)
+    _apply_masks(normalized, policy.masks)
+
+pub fn scenario_text_normalize(
+    transcript: text,
+    policy: ScenarioTextEvidencePolicy
+) -> text:
+    var canonical = _strip_ansi(transcript)
+    canonical = canonical.replace("\r\n", "\n")
+    canonical = canonical.replace("\r", "\n")
+    val lines = canonical.split("\n")
+    var normalized: [text] = []
+    for line in lines:
+        normalized.push(_normalize_line(line, policy))
+    normalized.join("\n")
+
+fn _nearby_lines(lines: [text], start: i64) -> text:
+    if lines.len() == 0:
+        return "<none>"
+    var first = start
+    if first < 0:
+        first = 0
+    if first >= lines.len():
+        first = lines.len() - 1
+    var last = first + 2
+    if last >= lines.len():
+        last = lines.len() - 1
+    var out: [text] = []
+    var i = first
+    while i <= last:
+        out.push("{i}: " + lines[i])
+        i = i + 1
+    out.join(" | ")
+
+fn _mask_summary(masks: [ScenarioTextMask]) -> text:
+    if masks.len() == 0:
+        return "none"
+    var names: [text] = []
+    for mask in masks:
+        names.push(scenario_text_mask_name(mask))
+    names.join(",")
+
+fn _failure(
+    expected_index: i64,
+    actual_index: i64,
+    reason: text,
+    expected: text,
+    actual_lines: [text],
+    policy: ScenarioTextEvidencePolicy,
+    raw: text,
+    normalized: text
+) -> ScenarioTextMatchResult:
+    val diagnostic = (
+        "{reason} expected[{expected_index}] `{expected}`; " +
+        "actual_index={actual_index}; trim={policy.trim_lines}; " +
+        "collapse_horizontal_whitespace={policy.collapse_horizontal_whitespace}; " +
+        "masks={_mask_summary(policy.masks)}; nearby=" +
+        _nearby_lines(actual_lines, actual_index)
+    )
+    ScenarioTextMatchResult(
+        passed: false,
+        first_expected_index: expected_index,
+        first_actual_index: actual_index,
+        diagnostic: diagnostic,
+        raw_transcript: raw,
+        normalized_transcript: normalized
+    )
+
+pub fn scenario_text_match(
+    transcript: text,
+    required_lines: [text],
+    policy: ScenarioTextEvidencePolicy
+) -> ScenarioTextMatchResult:
+    val normalized = scenario_text_normalize(transcript, policy)
+    val actual_lines = normalized.split("\n")
+    var cursor = 0
+    var expected_index = 0
+    while expected_index < required_lines.len():
+        val expected = _normalize_line(required_lines[expected_index], policy)
+        var limit = actual_lines.len() - 1
+        if policy.max_gap >= 0 and cursor + policy.max_gap < limit:
+            limit = cursor + policy.max_gap
+        var found = -1
+        var actual_index = cursor
+        while actual_index < actual_lines.len() and actual_index <= limit:
+            if actual_lines[actual_index] == expected:
+                found = actual_index
+                break
+            actual_index = actual_index + 1
+        if found < 0:
+            var prior = 0
+            while prior < cursor:
+                if actual_lines[prior] == expected:
+                    return _failure(
+                        expected_index, prior, "out-of-order", expected,
+                        actual_lines, policy, transcript, normalized
+                    )
+                prior = prior + 1
+            var later = limit + 1
+            while later < actual_lines.len():
+                if actual_lines[later] == expected:
+                    return _failure(
+                        expected_index, later, "bounded-gap-exceeded", expected,
+                        actual_lines, policy, transcript, normalized
+                    )
+                later = later + 1
+            return _failure(
+                expected_index, cursor, "missing", expected,
+                actual_lines, policy, transcript, normalized
+            )
+        cursor = found + 1
+        expected_index = expected_index + 1
+    ScenarioTextMatchResult(
+        passed: true,
+        first_expected_index: -1,
+        first_actual_index: -1,
+        diagnostic: "ok",
+        raw_transcript: transcript,
+        normalized_transcript: normalized
+    )
+
+pub fn check_text_evidence(
+    actual: text,
+    expected_lines: [text],
+    policy: ScenarioTextEvidencePolicy
+) -> ScenarioTextMatchResult:
+    scenario_text_match(actual, expected_lines, policy)

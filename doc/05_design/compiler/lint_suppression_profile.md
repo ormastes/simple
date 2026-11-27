@@ -29,3 +29,21 @@ The scoped pre-edit census found no actual `@allow` production directive in the 
 Ten authored SSpec scenarios invoke real `Linter.lint_source` and `LintConfig` APIs with deterministic warning-phase settings. They cover ordinary and robust profiles/aliases, exact location and absent EasyFix, described positive suppression, whitespace and blanket negatives, self-suppression, migration downgrade, attribute order, retained underlying warning and lexical lookalikes. The seven existing contract fixtures keep their actual API assertions.
 
 The change adds a constant-time profile match for each already-collected suppression issue. It adds no source scan, cache, file access or dependency. Runtime, latency/RSS, full CLI/core/MCP checks and broader warning inventory remain UNRUN. Independent source review is required; it cannot substitute for execution.
+
+<!-- antigravity-early-defect-detection-2026-11-18 -->
+
+## Cost-admission ceiling (`tier_profile`) vs suppression hierarchy and `DiagnosticRulePolicy` parity
+
+Reconciled with [early_defect_detection_2026-11-18.md](../../03_plan/compiler/early_defect_detection_2026-11-18.md) (`WP-01`, `WP-04`, `ED-02`, `ED-05`, `ED-09`, `ED-T01..ED-T03`, `ED-T26`, `ED-T27`):
+
+1. **Orthogonal cost ceiling (`tier_profile`) vs severity/suppression hierarchy:**
+   - `tier_profile` (`NormalBuild`, `FastLint`, `DefaultLint` in `src/compiler/90.tools/lint/_LintMain/rule_cost_tier.spl` and `src/compiler/90.tools/lint/_LintMain/config_and_model.spl`) is a **pre-execution producer admission ceiling** over `Low` / `Medium` / `High` cost tiers.
+   - Project config (`simple.sdn`), deterministic edition/profile schedules (`DiagnosticRulePolicy` in `src/compiler/00.common/diagnostics/diagnostic_rule_policy.spl`), CLI `--warn-all` / `--deny-all`, and file/item `@allow` / `@warn` / `@deny` attributes form the **severity and suppression hierarchy** applied to admitted rules.
+2. **Hard ceiling invariant (no upward cost escalation via severity):**
+   - Raising severity via `--warn-all`, `--deny-all`, Robust/Critical profile schedules, or file-level `@warn` / `@deny` never elevates `tier_profile` or admits a `Medium` or `High` producer in `NormalBuild` or `FastLint` (`ED-T01`, `ED-T02`).
+   - Shared fix/lint producers (`src/compiler/90.tools/fix/rules/registry.spl`, `src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl`, `src/compiler/90.tools/lint/_LintMain/lint_checks.spl`) receive the precomputed admission mask before executing any traversal.
+3. **Suppression accounting and `LINTALLOW001` placement:**
+   - Valid described `@allow(rule, reason: "...")` directives suppress or downgrade finding enforcement where policy permits and record `exempted` coverage provenance rather than counting unrun rules as analyzed passes.
+   - `LINTALLOW001` remains an unmapped `Low`-cost lexical header check: it runs within `Low` admission, cannot silence itself via `@allow(LINTALLOW001)`, and resolves to `Deny` in explicit Robust/Critical profiles (subject to `warning_phase` migration downgrade).
+4. **Cross-consumer `DiagnosticRulePolicy` parity (`WP-04`):**
+   - `src/compiler/00.common/diagnostics/diagnostic_rule_policy.spl` and `src/compiler/80.driver/driver_safety_severity.spl` provide downward-shared canonical rule ID resolution and deterministic `policy_digest` stamping across compiler, lint CLI, LSP, and MCP (`ED-T26`, `ED-T27`) while preserving MDSOC layering (`80.driver` never imports `90.tools/lint`).

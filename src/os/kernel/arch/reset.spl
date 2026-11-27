@@ -4,12 +4,16 @@
 # arch_adapt.hal_current. Syscall dispatchers for non-x86_64 targets can import
 # it without pulling foreign-arch inline assembly into their entry-closure build.
 
+@cfg(x86_64)
+use os.kernel.arch_adapt.x86_port_io.{x86_port_outb}
+@cfg(x86)
 use os.kernel.arch_adapt.x86_port_io.{x86_port_outb}
 
 var _hal_reset_test_mode: u64 = 0
 var _hal_reset_requested_for_test: u64 = 0
 
-fn hal_reset_set_test_mode(enabled: bool):
+@allow(primitive_api)  # reason: existing HAL test-mode boolean latch exposed for hal.reset facade
+pub fn hal_reset_set_test_mode(enabled: bool):
     """Enable a test-only reset latch so syscall tests cannot reset QEMU."""
     if enabled:
         _hal_reset_test_mode = 1
@@ -18,11 +22,13 @@ fn hal_reset_set_test_mode(enabled: bool):
         _hal_reset_test_mode = 0
         _hal_reset_requested_for_test = 0
 
-fn hal_reset_requested_for_test() -> bool:
+@allow(primitive_api)  # reason: existing HAL test-mode boolean predicate exposed for hal.reset facade
+pub fn hal_reset_requested_for_test() -> bool:
     """Return whether hal_system_reset() was requested while test mode was active."""
     _hal_reset_requested_for_test != 0
 
-fn hal_system_reset() -> i64:
+@allow(primitive_api)  # reason: existing HAL reset syscall-style errno status exposed for hal.reset facade
+pub fn hal_system_reset() -> i64:
     """Request a machine reset through the x86 reset-control register.
 
     Returns 0 only in test mode. On real QEMU/hardware the backend should not
@@ -32,6 +38,32 @@ fn hal_system_reset() -> i64:
     if _hal_reset_test_mode != 0:
         _hal_reset_requested_for_test = 1
         return 0
+    _hal_reset_backend()
+    -38
+
+@cfg(x86_64)
+fn _hal_reset_backend():
     x86_port_outb(0xCF9 as u16, 0x02 as u8)
     x86_port_outb(0xCF9 as u16, 0x06 as u8)
-    -38
+
+@cfg(x86)
+fn _hal_reset_backend():
+    x86_port_outb(0xCF9 as u16, 0x02 as u8)
+    x86_port_outb(0xCF9 as u16, 0x06 as u8)
+
+# No reset-control register on non-x86 targets yet; hal_system_reset reports -38.
+@cfg(riscv64)
+fn _hal_reset_backend():
+    pass_do_nothing("no x86 reset-control register on this target")
+
+@cfg(riscv32)
+fn _hal_reset_backend():
+    pass_do_nothing("no x86 reset-control register on this target")
+
+@cfg(arm64)
+fn _hal_reset_backend():
+    pass_do_nothing("no x86 reset-control register on this target")
+
+@cfg(arm32)
+fn _hal_reset_backend():
+    pass_do_nothing("no x86 reset-control register on this target")

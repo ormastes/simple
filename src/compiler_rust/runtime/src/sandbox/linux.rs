@@ -151,7 +151,13 @@ pub fn install_seccomp_profile(profile: LinuxSeccompProfile) -> SandboxResult<()
                 libc::SYS_connect,
                 libc::SYS_bind,
                 libc::SYS_listen,
+                // i386 has no direct accept(2); glibc routes it (and other socket calls) via
+                // socketcall(2). Denying socketcall blocks every multiplexed socket op on
+                // i386 (socket, socketpair, getsockname, ...) -- intended for deny_network.
+                #[cfg(not(target_arch = "x86"))]
                 libc::SYS_accept,
+                #[cfg(target_arch = "x86")]
+                libc::SYS_socketcall,
                 libc::SYS_accept4,
                 libc::SYS_sendto,
                 libc::SYS_recvfrom,

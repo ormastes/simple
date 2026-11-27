@@ -25,11 +25,16 @@
 extern int64_t rt_array_join_any(int64_t array, int64_t separator);
 extern int64_t rt_array_max(int64_t receiver);
 
-/* runtime.c owns spl_panic; this selfcheck links runtime_native.c alone. */
+/* runtime.c owns spl_panic; this selfcheck links runtime_native.c alone.
+ * Under the c-runtime test kind (SIMPLE_TEST_CORE_RUNTIME) the core-C owner
+ * runtime_legacy_core.c defines it instead. */
+#ifndef SIMPLE_TEST_CORE_RUNTIME
+/* Same report and status as runtime.c's spl_panic. */
 void spl_panic(const char* msg) {
-    fprintf(stderr, "panic: %s\n", msg);
-    abort();
+    fprintf(stderr, "PANIC: %s\n", msg ? msg : "unknown error");
+    exit(1);
 }
+#endif
 
 static unsigned checks;
 #define CHECK(x) do { ++checks; if (!(x)) { fprintf(stderr, "FAIL line=%d check=%u\n", __LINE__, checks); return 1; } } while (0)
@@ -40,6 +45,46 @@ static int text_is(int64_t s, const char* want) {
 }
 
 static int64_t rv(SplArray* a) { return (int64_t)(uintptr_t)a; }
+
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+/* Run one typed word write on a BYTES array in a child; it must exit 1 with
+ * the spl_panic report. runtime.c prints "PANIC: ", runtime_legacy_core.c
+ * "panic: "; the message after the prefix is the cross-lane contract (the
+ * Rust runtime prints the runtime.c line). */
+static int word_write_traps(SplArray* bytes, int op) {
+    int fds[2];
+    if (pipe(fds) != 0) return 0;
+    pid_t pid = fork();
+    if (pid < 0) return 0;
+    if (pid == 0) {
+        close(fds[0]);
+        dup2(fds[1], 2);
+        switch (op) {
+        case 0: rt_typed_words_i64_set(bytes, 0, 1); break;
+        case 1: rt_typed_words_u64_set(bytes, 0, 1); break;
+        case 2: rt_typed_words_u32_set(bytes, 0, 1); break;
+        case 3: rt_typed_words_i64_push(bytes, 1); break;
+        case 4: rt_typed_words_u64_push(bytes, 1); break;
+        default: rt_typed_words_u32_push(bytes, 1); break;
+        }
+        _exit(0);
+    }
+    close(fds[1]);
+    char err[512];
+    size_t got = 0;
+    ssize_t n;
+    while (got < sizeof err - 1 && (n = read(fds[0], err + got, sizeof err - 1 - got)) > 0) got += (size_t)n;
+    err[got] = 0;
+    close(fds[0]);
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid) return 0;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 1 &&
+           strstr(err, ": typed word write: a [u8] array cannot be written through a "
+                       "word-typed array parameter ([i64]/[u64]/[u32])\n") != NULL;
+}
+#endif
 
 int main(void) {
     const int64_t big = (int64_t)((1ULL << 60) + 5);
@@ -86,6 +131,26 @@ int main(void) {
     CHECK(rt_array_len(bytes) == 4);
     const uint8_t want_bytes[] = {56, 66, 67, 200};
     for (int i = 0; i < 4; i++) CHECK(rt_bytes_u8_at(bytes, i) == want_bytes[i]);
+
+    /* ---- 3. typed word readers on a BYTES array read the byte ------------
+     * A [u8] reaching a [i64]/[u64]/[u32] parameter through an untyped caller
+     * was read as 8-byte slots of the byte buffer. Readers (including the
+     * hoisted raw_data_at, whose pointer has bit 0 set for BYTES) decode the
+     * byte; a typed word write into a BYTES array is a runtime error.
+     * Bug: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27 */
+    for (int i = 0; i < 4; i++) {
+        CHECK(rt_typed_words_i64_at(bytes, i) == want_bytes[i]);
+        CHECK(rt_typed_words_u64_at(bytes, i) == want_bytes[i]);
+        CHECK(rt_typed_words_u32_at(bytes, i) == want_bytes[i]);
+    }
+    CHECK(rt_typed_words_i64_at(bytes, -1) == 200);
+    CHECK(rt_typed_words_i64_at(bytes, 4) == 0);
+    int64_t tagged = rt_array_data_ptr(bytes) | 1;
+    for (int i = 0; i < 4; i++) CHECK(rt_typed_words_u64_raw_data_at(tagged, i) == want_bytes[i]);
+#ifndef _WIN32
+    for (int op = 0; op < 6; op++) CHECK(word_write_traps(bytes, op));
+    CHECK(rt_array_len(bytes) == 4 && rt_bytes_u8_at(bytes, 0) == 56 && rt_bytes_u8_at(bytes, 1) == 66);
+#endif
 
     /* ---- 4. wide integers compare, hash and order by value --------------- */
     int64_t a = rt_value_int(big), b = rt_value_int(big);

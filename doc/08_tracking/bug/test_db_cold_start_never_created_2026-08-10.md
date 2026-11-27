@@ -1,6 +1,7 @@
 # Test database never created: every run silently recorded nothing
 
 - **Status:** FIXED (cold-start hole) + one residual open (see § Residual)
+- **Verification 2026-11-25 (lane p3-baw, release/1.0.0 @ 1301149fa3f):** cold-start fix confirmed present in source — `load_with_migration` branch 3 returns `Some(create_test_database_extended(unified_path))` at `src/lib/nogc_sync_mut/database/test_extended/factory.spl:190` with the explanatory comment intact. Executable re-verification is environment-blocked on this host: `bin/simple.exe test` (seed v1.0.0-rc.1) cannot load `src/app/test_runner_new/test_runner_client.spl` (`unknown decorator '@representation_boundary'`, known seed limitation), so `test/01_unit/lib/test_runner/test_db_cold_start_spec.spl` could not be run; verification is by code inspection. The § Residual directory-run abort remains tracked under `interp_class_name_collision_breaks_test_db_persistence_2026-08-10.md` (OPEN, worked-around); no change to that verdict here.
 - **Verification 2026-08-21 (bug-status-consistency audit): PARTIAL, not fully fixed.** the cold-start hole is closed (`factory.spl:185`), but the § Residual directory-run abort ("cannot convert string to int" before persistence) is still open — this is a DATA-PERSISTENCE residual, not cosmetic. `bug_db.sdn` row is `fix-implemented-verification-pending`.
 - **Date:** 2026-08-10
 - **Files:** `src/lib/nogc_sync_mut/database/test_extended/factory.spl`,

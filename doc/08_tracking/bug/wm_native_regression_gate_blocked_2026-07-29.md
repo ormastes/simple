@@ -1,8 +1,18 @@
 # WM Native Regression Gate Blockers — 2026-07-29
-## Open 2026-09-16 — needs owner triage
+## OPEN — triaged 2026-11-25: blocked on a source-current pure-Simple compiler artifact + Linux/X11 native lanes
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+
+**Triage 2026-11-25:** the remaining blocker per the last checkpoint is the
+runtime-provider/link contract for a source-current pure-Simple compiler
+(the stage2 `core-c-bootstrap` lane omits hosted/compiler primitives), plus
+the cross-block scalar-reload layout defect the WM oracle keeps tripping on.
+Every evidence lane in this record is Linux-only (Xvfb/GLFW/X11 captures,
+Phase-3 native builds measured in hours) and none of it is reproducible on
+this Windows host; the pre-object runaway signature also makes the unchanged
+compiler rebuild command explicitly non-repeatable. Left OPEN, no code
+change.
 
 ## Self-hosted source closure
 

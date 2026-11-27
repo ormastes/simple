@@ -1,0 +1,50 @@
+# Native executable controls call the production admission owner unchanged.
+use std.test_runner.native_compile_contract.{native_test_request_error}
+use std.test_runner.runner_self_coverage.{runner_self_coverage_start, runner_self_coverage_sdn}
+use std.test_runner.test_runner_coverage.{parse_coverage_state_sdn, parse_i64_safe, render_coverage_state_sdn}
+use std.sffi.host.{raw_i64_to_string}
+use std.io_runtime.{get_args}
+
+fn main() -> i64:
+    val args = get_args()
+    runner_self_coverage_start()
+    if args.contains("--empty"):
+        val empty = runner_self_coverage_sdn()
+        val parsed = parse_coverage_state_sdn(empty)
+        print empty
+        if parsed.total_decisions != 6 or parsed.total_decisions_covered != 0:
+            return 2
+        return 0
+    var failures = 0
+    if native_test_request_error("llvm", false) != "": failures = failures + 1
+    if not native_test_request_error("llvm", false, false, [], "bad").starts_with("LIBRARY_MODE_INVALID"):
+        failures = failures + 1
+    if not native_test_request_error("llvm", false, false, [""]).starts_with("invalid value for --native-source"):
+        failures = failures + 1
+    if native_test_request_error("", false, false, ["."]) != "Native source roots require an explicit native backend":
+        failures = failures + 1
+    if native_test_request_error("llvm", false, true) != "Explicit native backend and --safe cannot be combined":
+        failures = failures + 1
+    if native_test_request_error("bad", false) != "Unsupported native backend: bad":
+        failures = failures + 1
+    if native_test_request_error("cranelift", true) != "Native Cranelift coverage is not qualified; refusing LLVM fallback":
+        failures = failures + 1
+    if args.contains("--negative"):
+        # Deliberately incorrect expected behavior must stay red with coverage.
+        if native_test_request_error("bad", false) != "": failures = failures + 1
+    val report = runner_self_coverage_sdn()
+    val parsed = parse_coverage_state_sdn(report)
+    if args.contains("--diagnostic"):
+        print "parsed_total=" + raw_i64_to_string(parsed.total_decisions)
+        print "parsed_covered=" + raw_i64_to_string(parsed.total_decisions_covered)
+        print "parsed_conditions=" + raw_i64_to_string(parsed.total_conditions)
+        print "parsed_number=" + raw_i64_to_string(parse_i64_safe(" 6"))
+        print "standard_render_begin"
+        print render_coverage_state_sdn()
+        print "standard_render_end"
+    if parsed.total_decisions != 6 or parsed.total_decisions_covered != 6 or parsed.total_conditions != 0:
+        failures = failures + 1
+    print report
+    print "assertion_failures={failures}"
+    if failures > 0: return 1
+    0

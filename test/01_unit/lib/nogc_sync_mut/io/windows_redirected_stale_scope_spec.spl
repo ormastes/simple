@@ -1,0 +1,41 @@
+# A private capture scope left by a dead earlier owner must not make the next
+# redirected spawn on the same capture path fail with -1, while a scope held by
+# a live admission of this process must still be rejected.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.process_ops.{process_spawn_redirected, process_wait}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all, is_dir}
+use std.nogc_sync_mut.io.file_ops.{file_delete}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+
+val OUT = "build/probe/stale_scope_spec.out"
+val ERR = "build/probe/stale_scope_spec.err"
+val OUT_LIVE = "build/probe/live_scope_spec.out"
+val ERR_LIVE = "build/probe/live_scope_spec.err"
+
+describe "windows redirected spawn private capture scope":
+    it "reclaims an orphaned stale scope and starts the child":
+        if host_is_windows_host():
+            file_delete(OUT)
+            file_delete(ERR)
+            dir_remove_all(OUT + ".scope")
+            expect(dir_create_all(OUT + ".scope/home")).to_equal(true)
+            val token = process_spawn_redirected("C:/Windows/System32/hostname.exe", [], OUT, ERR, 0, 1048576)
+            expect(token >= 0).to_equal(true)
+            expect(process_wait(token, 60000)).to_equal(0)
+            expect(is_dir(OUT + ".scope")).to_equal(false)
+            file_delete(OUT)
+            file_delete(ERR)
+
+    it "rejects a second spawn while a live admission still holds the scope":
+        if host_is_windows_host():
+            file_delete(OUT_LIVE)
+            file_delete(ERR_LIVE)
+            dir_remove_all(OUT_LIVE + ".scope")
+            val first = process_spawn_redirected("C:/Windows/System32/hostname.exe", [], OUT_LIVE, ERR_LIVE, 0, 1048576)
+            expect(first >= 0).to_equal(true)
+            val second = process_spawn_redirected("C:/Windows/System32/hostname.exe", [], OUT_LIVE, ERR_LIVE, 0, 1048576)
+            expect(second).to_equal(-1)
+            expect(process_wait(first, 60000)).to_equal(0)
+            expect(is_dir(OUT_LIVE + ".scope")).to_equal(false)
+            file_delete(OUT_LIVE)
+            file_delete(ERR_LIVE)

@@ -1,0 +1,138 @@
+# Authored UNRUN. Contract records exercise registry retention/invalidation;
+# these unit maps do not claim source-inventory authentication.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.driver_source_file.{SourceFile, source_file_with_manifest_evidence_v1}
+use compiler.common.cache.visibility_manifest_read_v1.{VisibilityManifestEvidenceV1, visibility_manifest_reads_v1}
+use compiler.common.cache.visibility_manifest_policy_v1.{VisibilityManifestPolicyV1}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
+use compiler.hir.hir_lowering.module_surface_manifest_evidence_v1.{module_surface_manifest_ready_reason_v1, module_surface_manifest_digest_v1}
+
+val SURFACE_MANIFEST_SOURCE = "/snapshot/src/pkg/body.spl"
+val SURFACE_MANIFEST_PATH = "/snapshot/src/pkg/__init__.spl"
+val SURFACE_MANIFEST_BODY = "pub fn exposed() -> i64:\n    1\n"
+
+fn surface_manifest_input_v1(present: bool) -> VisibilityManifestEvidenceV1:
+    var inventory = {SURFACE_MANIFEST_SOURCE: sha256_text(SURFACE_MANIFEST_BODY)}
+    if present: inventory[SURFACE_MANIFEST_PATH] = sha256_text("# closed\n")
+    val evidence = visibility_manifest_reads_v1(SURFACE_MANIFEST_SOURCE,
+        "/snapshot", ["/snapshot/src"], "test-snapshot", inventory, inventory).unwrap()
+    if present:
+        evidence.policies.push(VisibilityManifestPolicyV1(source_path: SURFACE_MANIFEST_PATH,
+            directory_path: "/snapshot/src/pkg", coverage_root: "/snapshot/src",
+            content_sha256: inventory[SURFACE_MANIFEST_PATH], snapshot_id: "test-snapshot",
+            valid: true, frontend_identity: "test-frontend", parser_provider_id: "parser.simple.legacy-reference",
+            frontend_route: "advisory-selected", advisory_policy: "reference",
+            preprocessed_source_sha256: sha256_text("# closed\n")))
+    evidence
+
+fn surface_with_manifest_v1(evidence: VisibilityManifestEvidenceV1) -> ModuleSurface:
+    val parsed = parse_and_build_module(SURFACE_MANIFEST_BODY, SURFACE_MANIFEST_SOURCE)
+    val source = source_file_with_manifest_evidence_v1(SourceFile(path: SURFACE_MANIFEST_SOURCE,
+        content: SURFACE_MANIFEST_BODY, module_name: "pkg.body"), evidence)
+    val surfaces = module_surfaces_from_modules({"pkg.body": parsed}, [source])
+    expect(surfaces.is_ok()).to_equal(true)
+    surfaces.unwrap().surfaces[0]
+
+fn surface_manifest_hash_equal_v1(a: ModuleSurface, b: ModuleSurface) -> bool:
+    a.semantic_hash0 == b.semantic_hash0 and a.semantic_hash1 == b.semantic_hash1 and
+        a.semantic_hash2 == b.semantic_hash2 and a.semantic_hash3 == b.semantic_hash3
+
+describe "frozen manifest permission inputs":
+    it "distinguishes authenticated absence from missing authority and a closed initializer":
+        val absent = surface_with_manifest_v1(surface_manifest_input_v1(false))
+        val closed = surface_with_manifest_v1(surface_manifest_input_v1(true))
+        val unknown = surface_with_manifest_v1(VisibilityManifestEvidenceV1())
+        expect(absent.semantic_cacheable).to_equal(true)
+        expect(closed.semantic_cacheable).to_equal(true)
+        expect(surface_manifest_hash_equal_v1(absent, closed)).to_equal(false)
+        expect(surface_manifest_hash_equal_v1(absent, unknown)).to_equal(false)
+        expect(module_surface_manifest_ready_reason_v1(SURFACE_MANIFEST_SOURCE,
+            absent.visibility_manifest_evidence_v1)).to_equal("")
+        expect(module_surface_manifest_ready_reason_v1(SURFACE_MANIFEST_SOURCE,
+            unknown.visibility_manifest_evidence_v1)).to_contain("incomplete")
+
+    it "owns policy arrays independently after the source producer mutates":
+        val original = surface_manifest_input_v1(true)
+        original.policies[0].friend_modules = ["pkg.friend"]
+        original.policies[0].internal_exports = ["child"]
+        val surface = surface_with_manifest_v1(original)
+        val before = module_surface_manifest_digest_v1(SURFACE_MANIFEST_SOURCE, surface.visibility_manifest_evidence_v1)
+        original.policies[0].friend_modules[0] = "other.friend"
+        original.policies[0].internal_exports[0] = "other_child"
+        original.policies[0].source_path = "/different/__init__.spl"
+        original.reads[0] = original.reads[1]
+        expect(surface.visibility_manifest_evidence_v1.reads.len()).to_equal(2)
+        expect(surface.visibility_manifest_evidence_v1.reads[0].directory_path).to_equal("/snapshot/src/pkg")
+        expect(surface.visibility_manifest_evidence_v1.policies[0].friend_modules).to_equal(["pkg.friend"])
+        expect(surface.visibility_manifest_evidence_v1.policies[0].internal_exports).to_equal(["child"])
+        expect(module_surface_manifest_digest_v1(SURFACE_MANIFEST_SOURCE,
+            surface.visibility_manifest_evidence_v1)).to_equal(before)
+
+    it "refuses missing, duplicate and cross-snapshot positive policies":
+        val missing = surface_manifest_input_v1(true)
+        missing.policies = []
+        expect(module_surface_manifest_ready_reason_v1(SURFACE_MANIFEST_SOURCE, missing)).to_contain("missing")
+        val duplicate = surface_manifest_input_v1(true)
+        duplicate.policies.push(duplicate.policies[0])
+        expect(module_surface_manifest_ready_reason_v1(SURFACE_MANIFEST_SOURCE, duplicate)).to_contain("duplicate")
+        val other_snapshot = surface_manifest_input_v1(true)
+        other_snapshot.policies[0].snapshot_id = "another-snapshot"
+        expect(module_surface_manifest_digest_v1(SURFACE_MANIFEST_SOURCE, other_snapshot)).to_equal("")
+
+    it "hashes scoped inputs and parser policy changes without requiring arch metadata":
+        val baseline = surface_manifest_input_v1(true)
+        val first = module_surface_manifest_digest_v1(SURFACE_MANIFEST_SOURCE, baseline)
+        expect(first.byte_len()).to_equal(64)
+        baseline.policies[0].friend_modules = ["friend"]
+        val friend = module_surface_manifest_digest_v1(SURFACE_MANIFEST_SOURCE, baseline)
+        expect(friend == first).to_equal(false)
+        baseline.policies[0].internal_exports = ["child"]
+        val internal_digest = module_surface_manifest_digest_v1(SURFACE_MANIFEST_SOURCE, baseline)
+        expect(internal_digest == friend).to_equal(false)
+        baseline.policies[0].frontend_identity = "different-frontend"
+        expect(module_surface_manifest_digest_v1(SURFACE_MANIFEST_SOURCE, baseline) == internal_digest).to_equal(false)
+
+    it "requires the target-cfg receipt to describe the same selected parser input":
+        val evidence = surface_manifest_input_v1(true)
+        val policy = evidence.policies[0]
+        policy.frontend_route = "target-cfg-reference"
+        expect(module_surface_manifest_ready_reason_v1(SURFACE_MANIFEST_SOURCE, evidence)).to_contain("receipt-missing")
+        policy.cfg_receipt_present = true
+        policy.cfg_source_identity = "selected-source"
+        policy.cfg_preprocessed_sha256 = sha256_text("different parser input")
+        policy.cfg_decision_digest = sha256_text("cfg-decisions")
+        expect(module_surface_manifest_ready_reason_v1(SURFACE_MANIFEST_SOURCE, evidence)).to_contain("provenance-invalid")
+        policy.cfg_preprocessed_sha256 = policy.preprocessed_source_sha256
+        expect(module_surface_manifest_ready_reason_v1(SURFACE_MANIFEST_SOURCE, evidence)).to_equal("")
+        policy.frontend_route = "unrecognized-route"
+        expect(module_surface_manifest_ready_reason_v1(SURFACE_MANIFEST_SOURCE, evidence)).to_contain("provenance-missing")
+
+    it "rejects shortened ancestor chains and mismatched source owners":
+        val evidence = surface_manifest_input_v1(false)
+        evidence.reads = [evidence.reads[0]]
+        expect(module_surface_manifest_ready_reason_v1(SURFACE_MANIFEST_SOURCE, evidence)).to_contain("root-not-reached")
+        expect(module_surface_manifest_ready_reason_v1("/snapshot/src/other.spl",
+            surface_manifest_input_v1(false))).to_contain("owner-mismatch")
+
+    it "invalidates cached policy when an actual child modifier or selected target changes":
+        val evidence = surface_manifest_input_v1(true)
+        val policy = evidence.policies[0]
+        policy.child_names = ["child"]
+        policy.child_visibilities = ["public"]
+        policy.child_modifiers = ["pub"]
+        policy.child_target_paths = ["/snapshot/src/pkg/child.spl"]
+        policy.child_target_sha256 = [sha256_text("pub fn child():\n    1\n")]
+        policy.child_target_kinds = ["source-file"]
+        policy.child_resolution_outcomes = ["snapshot-selected"]
+        val first = module_surface_manifest_digest_v1(SURFACE_MANIFEST_SOURCE, evidence)
+        expect(first.byte_len()).to_equal(64)
+        policy.child_modifiers[0] = "pri"
+        val private_digest = module_surface_manifest_digest_v1(SURFACE_MANIFEST_SOURCE, evidence)
+        expect(private_digest == first).to_equal(false)
+        policy.child_target_paths[0] = "/snapshot/src/pkg/other.spl"
+        expect(module_surface_manifest_digest_v1(SURFACE_MANIFEST_SOURCE, evidence) == private_digest).to_equal(false)
+        policy.child_target_kinds = []
+        expect(module_surface_manifest_digest_v1(SURFACE_MANIFEST_SOURCE, evidence)).to_equal("")

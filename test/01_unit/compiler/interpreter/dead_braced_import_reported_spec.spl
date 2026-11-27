@@ -1,0 +1,89 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/compiler/mdsoc_architecture_tobe.md
+
+"""
+# A braced `use` name the module does not provide is REPORTED, never silent
+
+Bug: doc/08_tracking/bug/spec_imports_declared_nowhere_2026-08-04.md — its
+sharpest case is `use std.crypto.chacha20.{..., chacha20_keystream}` where
+`chacha20_keystream` is declared nowhere under src/ and the importing spec
+stayed green and silent. Premise re-checked 2026-11-10 through the deployed
+binary: the loader now emits `[use-warning] '<name>' is named in `use m.{...}`
+but module '<path>' does not provide it (imported from <file>)` on fd 2 at load
+time (seed oracle `warn_unprovided_use_names`, pure-Simple parity in
+src/compiler/10.frontend/core/interpreter/module_loader_core.spl, unit-pinned
+by use_warning_unprovided_names_spec.spl).
+
+This spec pins the END-TO-END contract that the unit spec cannot reach (it
+cannot drive a real `load_module` parse): a real file with a dead braced
+import, interpreted through the compiler binary. Reporting only, by recorded
+design — the module still loads and the program runs (the record and the seed
+both reject a fatal oracle: it would mass-break ~294 spec files with no
+migration path, and `simple test` itself trips it today on two names resolved
+into stale sibling family copies). The control example proves the oracle
+discriminates: a provided name produces no warning.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+val DEAD_IMPORT_FIXTURE = """use std.crypto.chacha20.{chacha20_block, chacha20_keystream}
+fn main():
+    print("loaded")
+"""
+
+val PROVIDED_IMPORT_FIXTURE = """use std.crypto.chacha20.{chacha20_block}
+fn main():
+    print("loaded")
+"""
+
+fn work_dir() -> text:
+    val base = env_get("TMPDIR")
+    val root = if base == "": "/tmp" else: base
+    val dir = root + "/simple-spec-dead-braced-import-reported"
+    dir_create_all(dir)
+    dir
+
+# The compiler under test: `SIMPLE_SPEC_COMPILER` (a rebuilt seed or a stage
+# candidate), else `SIMPLE_BINARY`, else the deployed `bin/simple`.
+fn compiler_binary() -> text:
+    val spec_compiler = env_get("SIMPLE_SPEC_COMPILER")
+    if spec_compiler != "":
+        return spec_compiler
+    val configured = env_get("SIMPLE_BINARY")
+    if configured == "": "bin/simple" else: configured
+
+fn run_fixture(name: text, source: text) -> [text]:
+    val src = work_dir() + "/" + name
+    assert_true(file_write(src, source))
+    env_set("SIMPLE_EXECUTION_MODE", "interpreter")
+    env_set("SIMPLE_BOOTSTRAP", "1")
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    process_run(compiler_binary(), ["run", src])
+
+describe "a braced `use` name the module does not provide is reported at load time":
+
+    it "names the dead import in a [use-warning] and still runs the program":
+        step("interpret a file whose braced import names a symbol declared nowhere")
+        val ran = run_fixture("dead_import.spl", DEAD_IMPORT_FIXTURE)
+
+        step("the module loads and the program runs (reporting only, by design)")
+        assert_equal(ran[2], 0)
+        assert_true(ran[0].contains("loaded"))
+
+        step("the warning names the dead symbol, the use path, and the resolved module")
+        val err = ran[1]
+        assert_true(err.contains("[use-warning] 'chacha20_keystream' is named in `use std.crypto.chacha20.{{...}}`"))
+        assert_true(err.contains("chacha20.spl' does not provide it"))
+
+    it "stays silent for a name the module does provide":
+        step("interpret a file whose braced import names only a real symbol")
+        val ran = run_fixture("provided_import.spl", PROVIDED_IMPORT_FIXTURE)
+
+        step("no [use-warning] fires")
+        assert_equal(ran[2], 0)
+        assert_true(ran[0].contains("loaded"))
+        assert_false(ran[1].contains("[use-warning]"))

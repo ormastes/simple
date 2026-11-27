@@ -49,8 +49,10 @@
 # spec-proven; this module therefore adds zero direct runtime call sites.
 
 use std.common.aspect_pack.{apk_loader_new, apk_loader_register_pack,
-    apk_loader_unregister_pack, apk_loader_last_error, apk_open_pack_v1}
-use compiler.loader.aspect_pack_io.{pack_read_range, pack_file_size}
+    apk_loader_unregister_pack, apk_loader_last_error, apk_open_pack_v1,
+    apk_validate_pack_directory_v1, APK_FLAG_ASPECT_PACK}
+use compiler.loader.aspect_pack_io.{pack_read_range, pack_file_size,
+    APKIO_MAX_RANGE_BYTES}
 use app.io.env_ops.{env_get}
 use std.io_runtime.{platform_name}
 
@@ -99,6 +101,8 @@ fn startup_register_aspect_pack(ld: i64, path: text) -> text:
     val size = pack_file_size(path)
     if size <= 0:
         return "aspect pack not found or empty: {path}"
+    if size > APKIO_MAX_RANGE_BYTES:
+        return "aspect pack exceeds startup read limit ({APKIO_MAX_RANGE_BYTES} bytes): {path}"
     val bytes = pack_read_range(path, 0, size)
     if bytes.len() != size:
         return "aspect pack {path}: short read ({bytes.len()} of {size} bytes)"
@@ -108,6 +112,11 @@ fn startup_register_aspect_pack(ld: i64, path: text) -> text:
     val handle = apk_open_pack_v1(bytes)
     if not handle.ok:
         return "aspect pack {path} is not a valid SMFAPK1 container: {handle.error_code} {handle.error_message}"
+    if handle.flags != APK_FLAG_ASPECT_PACK:
+        return "aspect pack {path} has unsupported flags: {handle.flags}"
+    val directory_error = apk_validate_pack_directory_v1(bytes, handle)
+    if directory_error != "":
+        return "aspect pack {path} has an invalid directory: {directory_error}"
     if not apk_loader_register_pack(ld, path, bytes):
         return "aspect pack {path} rejected: {apk_loader_last_error(ld)}"
     ""

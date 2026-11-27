@@ -1,0 +1,115 @@
+# @cover src/lib/nogc_sync_mut/trace/xray_data_profiling_v1.spl
+# @cover src/lib/nogc_sync_mut/src/collections/adaptive_map.spl
+"""
+## Purpose and audience
+The in-process XRay host owns ONE data-profiling policy per aspect config: the
+initial value a container is built with, and the value it flips containers to
+right after `start` and right after `request_stop`. Readers: trace host and
+collection authors.
+## Operator workflow
+bin/simple test test/01_unit/lib/nogc_sync_mut/trace/xray_data_profiling_v1_spec.spl
+## Compatibility and limitations
+Interpreter lane; the adapter state is driven through its state codes here.
+The full start/stop flow over real adapters is the backend-parameterized IN
+suite (test/01_unit/lib/xray/xray_backend_differential_in_spec.spl); the
+in-process host lane is scripts/check/check-xray-native-inprocess-e2e.shs.
+## Verification guidance and troubleshooting
+A RED on "no observer extension" means legacy containers silently stopped
+profiling; a RED on "malformed" means a bad config turned profiling on.
+"""
+# @manual_section: XRay data-profiling policy
+
+use std.spec.*
+use std.common.plugin.aspect_params.{AspectParamsV1, ASPECT_TRACE_OBSERVER_EXT_V1}
+use std.common.plugin.iface_id.{ParamExt}
+use std.common.trace.observer_config_v1.{TRACE_CONFIG_SCHEMA_HASH_V1}
+use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.{XRAY_LLVM_STATE_IDLE_V1, XRAY_LLVM_STATE_PREPARED_V1, XRAY_LLVM_STATE_ACTIVE_V1, XRAY_LLVM_STATE_FAULTED_V1}
+use std.nogc_sync_mut.trace.xray_data_profiling_v1.*
+use std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap
+use std.nogc_sync_mut.src.collections.adaptive_set.AdaptiveSet
+use std.nogc_sync_mut.src.collections.ordered_map.OrderedMapEntry
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveSetProfile}
+
+fn payload(instrumentation: text) -> text:
+    "trace:\n    schema: 1\n    instrumentation: {instrumentation}\n    backend: simple\n    consistency: raw_edges\n    patch_mode: quiescent\n    abi_profile: x86_64-sysv\n    events: [entry, exit, tail_exit]\n"
+
+fn params_with(instrumentation: text, schema_hash: text) -> AspectParamsV1:
+    var params = AspectParamsV1.defaults()
+    params.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1, payload(instrumentation).bytes(), schema_hash))
+    params
+
+fn policy(instrumentation: text) -> XrayDataProfilingV1:
+    XrayDataProfilingV1.from_aspect(params_with(instrumentation, TRACE_CONFIG_SCHEMA_HASH_V1))
+
+fn states() -> [i64]:
+    [XRAY_LLVM_STATE_IDLE_V1, XRAY_LLVM_STATE_PREPARED_V1, XRAY_LLVM_STATE_ACTIVE_V1, XRAY_LLVM_STATE_FAULTED_V1]
+
+fn profile() -> AdaptiveSetProfile:
+    AdaptiveSetProfile(linear_size_limit: 2, lookup_promotion_count: 4, allow_hash: true)
+
+fn seeded(map_in: AdaptiveMap<i64, i64>) -> AdaptiveMap<i64, i64>:
+    var map = map_in
+    map.linear_entries = [OrderedMapEntry(key: 0, value: 10), OrderedMapEntry(key: 1, value: 11)]
+    map.size = 2
+    map.observed_peak_size = 2
+    map
+
+describe "XRay data-profiling policy from the aspect config":
+    it "keeps legacy containers profiling when there is no observer extension":
+        val legacy = XrayDataProfilingV1.from_aspect(AspectParamsV1.defaults())
+        expect(legacy.initial()).to_equal(true)
+        for state in states():
+            expect(legacy.after(state)).to_equal(true)
+
+    it "fails closed to off on a malformed observer extension":
+        val bad = XrayDataProfilingV1.from_aspect(params_with("dynamic", "not-the-schema-hash"))
+        expect(bad.initial()).to_equal(false)
+        for state in states():
+            expect(bad.after(state)).to_equal(false)
+
+    it "never profiles under instrumentation off, always under always_on":
+        val off = policy("off")
+        val always = policy("always_on")
+        expect(off.initial()).to_equal(false)
+        expect(always.initial()).to_equal(true)
+        for state in states():
+            expect(off.after(state)).to_equal(false)
+            expect(always.after(state)).to_equal(true)
+
+    it "follows the session under dynamic: off until start, on only while Active":
+        val dynamic = policy("dynamic")
+        expect(dynamic.initial()).to_equal(false)
+        expect(dynamic.after(XRAY_LLVM_STATE_IDLE_V1)).to_equal(false)
+        expect(dynamic.after(XRAY_LLVM_STATE_PREPARED_V1)).to_equal(false)
+        expect(dynamic.after(XRAY_LLVM_STATE_ACTIVE_V1)).to_equal(true)
+        expect(dynamic.after(XRAY_LLVM_STATE_FAULTED_V1)).to_equal(false)
+
+describe "Containers built with the policy's initial value":
+    it "builds a map and a set that start off and count nothing until flipped":
+        val dynamic = policy("dynamic")
+        var map = seeded(AdaptiveMap.with_profiling(profile(), dynamic.initial()))
+        expect(map.profiling_enabled()).to_equal(false)
+        expect(map.get(0) == Some(10)).to_equal(true)
+        expect(map.observed_lookups).to_equal(0)
+        map.set_profiling(dynamic.after(XRAY_LLVM_STATE_ACTIVE_V1))
+        expect(map.get(0) == Some(10)).to_equal(true)
+        expect(map.get(5).is_none()).to_equal(true)
+        expect(map.observed_lookups).to_equal(2)
+        expect(map.observed_misses).to_equal(1)
+        map.set_profiling(dynamic.after(XRAY_LLVM_STATE_IDLE_V1))
+        expect(map.get(1) == Some(11)).to_equal(true)
+        expect(map.observed_lookups).to_equal(2)
+        var set: AdaptiveSet<i64> = AdaptiveSet.with_profiling(profile(), dynamic.initial())
+        expect(set.profiling_enabled()).to_equal(false)
+        for i in 0..3:
+            expect(set.contains(i)).to_equal(false)
+        expect(set.observation().lookups).to_equal(0)
+
+    it "builds legacy containers profiling exactly like with_profile":
+        val legacy = XrayDataProfilingV1.from_aspect(AspectParamsV1.defaults())
+        var map = seeded(AdaptiveMap.with_profiling(profile(), legacy.initial()))
+        var plain = seeded(AdaptiveMap.with_profile(profile()))
+        expect(map.profiling_enabled()).to_equal(plain.profiling_enabled())
+        expect(map.get(0) == plain.get(0)).to_equal(true)
+        expect(map.observed_lookups).to_equal(plain.observed_lookups)
+        expect(map.observed_lookups).to_equal(1)

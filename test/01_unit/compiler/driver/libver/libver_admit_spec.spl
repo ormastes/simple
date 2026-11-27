@@ -1,0 +1,165 @@
+"""
+## Purpose and audience
+
+As a loader or link step, I hand libver the sidecar of a library I am about
+to use and I expect a clear yes, or a named refusal, before I touch a symbol.
+This spec is the manual for that contract (AC-4..AC-8).
+
+## Operator workflow
+
+Run: bin/simple test test/unit/compiler/driver/libver/libver_admit_spec.spl
+
+## Verification guidance
+
+Each refusal scenario changes exactly ONE field away from an admitted
+baseline, so a failure names the single rule that drifted.
+"""
+
+# @manual_section: library version admission
+
+use compiler.driver.libver.identity.{LibIdentity}
+use compiler.driver.libver.sidecar.{libver_emit_sidecar}
+use compiler.driver.libver.admit.{LibHostReq, LibAdmit, LibRefusal, libver_admit, libver_admit_identity}
+use std.spec.step
+
+fn base_id() -> LibIdentity:
+    LibIdentity(name: "simple_std", semver: "1.0.0", abi_major: 2, abi_minor: 1, iface_digest: "d1", iface_parts: ["fn a()", "fn b()"], producer: "p1", triple: "x86_64-unknown-linux-gnu", cpu_tier: "x86-64-v2", sha256: "h1")
+
+fn base_host() -> LibHostReq:
+    LibHostReq(name_required: "simple_std", host_triple: "x86_64-unknown-linux-gnu", host_tier_base: "x86-64-v3", host_tier_features: ["avx2"], abi_major_supported: 2, abi_minor_supported: 1, abi_window: 1, deprecated_abi: [1], iface_parts_required: [], iface_digest_required: "d1", artifact_sha256: "h1", producer_required: None)
+
+fn with_id(id: LibIdentity) -> LibAdmit:
+    libver_admit_identity(id, base_host())
+
+fn refusal_name(r: LibAdmit) -> text:
+    match r.refusal:
+        case Some(x): x.name()
+        case None: "admitted"
+
+describe "Admitting a matching library":
+    # @req AC-4
+    it "a library built for this host and ABI is admitted":
+        step("Admit the baseline identity against the baseline host")
+        expect(refusal_name(with_id(base_id()))).to_equal("admitted")
+
+    # @req AC-2
+    it "the same verdict comes back when starting from sidecar text":
+        step("Emit the sidecar and admit from its text")
+        val r = libver_admit(libver_emit_sidecar(base_id()), base_host())
+        expect(r.ok).to_equal(true)
+
+describe "Refusing a library that does not fit":
+    # @req AC-7
+    it "a different library name is refused as NameMismatch":
+        var id = base_id()
+        id.name = "other"
+        expect(refusal_name(with_id(id))).to_equal("NameMismatch")
+
+    # @req AC-7
+    it "a different target triple is refused as TripleMismatch":
+        var id = base_id()
+        id.triple = "aarch64-unknown-linux-gnu"
+        expect(refusal_name(with_id(id))).to_equal("TripleMismatch")
+
+    # @req AC-4
+    it "a newer ABI major is refused as AbiMajorMismatch":
+        var id = base_id()
+        id.abi_major = 3
+        expect(refusal_name(with_id(id))).to_equal("AbiMajorMismatch")
+
+    # @req AC-4
+    it "a deprecated N-1 ABI major inside the window is admitted":
+        var id = base_id()
+        id.abi_major = 1
+        expect(refusal_name(with_id(id))).to_equal("admitted")
+
+    # @req AC-4
+    it "an N-2 ABI major is refused as AbiOutOfWindow":
+        var id = base_id()
+        id.abi_major = 0
+        expect(refusal_name(with_id(id))).to_equal("AbiOutOfWindow")
+
+    # @req AC-4
+    it "an ABI minor newer than the consumer is refused as AbiMinorTooNew":
+        var id = base_id()
+        id.abi_minor = 2
+        expect(refusal_name(with_id(id))).to_equal("AbiMinorTooNew")
+
+    # @req AC-5
+    it "a tier above the host CPU is refused as TierTooHigh":
+        var id = base_id()
+        id.cpu_tier = "x86-64-v4"
+        expect(refusal_name(with_id(id))).to_equal("TierTooHigh")
+
+    # @req AC-5
+    it "a feature tier needing a feature the host lacks is refused as TierTooHigh":
+        var id = base_id()
+        id.cpu_tier = "x86-64-v2+avx512vnni"
+        expect(refusal_name(with_id(id))).to_equal("TierTooHigh")
+
+    # @req AC-5
+    it "a feature tier whose feature the host has is admitted":
+        var id = base_id()
+        id.cpu_tier = "x86-64-v2+avx2"
+        expect(refusal_name(with_id(id))).to_equal("admitted")
+
+    # @req AC-5
+    it "the x86-64-v1 alias is admitted as the baseline level":
+        var id = base_id()
+        id.cpu_tier = "x86-64-v1"
+        expect(refusal_name(with_id(id))).to_equal("admitted")
+
+    # @req AC-5
+    it "a tier from another arch is refused as TierTooHigh":
+        var id = base_id()
+        id.cpu_tier = "armv8-a"
+        expect(refusal_name(with_id(id))).to_equal("TierTooHigh")
+
+    # @req AC-5
+    it "an unknown tier is refused as TierUnknown":
+        var id = base_id()
+        id.cpu_tier = "pentium-pro"
+        expect(refusal_name(with_id(id))).to_equal("TierUnknown")
+
+    # @req AC-6
+    it "a different interface digest is refused as DigestMismatch":
+        var id = base_id()
+        id.iface_digest = "d2"
+        expect(refusal_name(with_id(id))).to_equal("DigestMismatch")
+
+    # @req AC-6
+    it "a different digest whose parts cover what the consumer needs is admitted":
+        var id = base_id()
+        id.iface_digest = "d2"
+        var host = base_host()
+        host.iface_parts_required = ["fn a()"]
+        expect(refusal_name(libver_admit_identity(id, host))).to_equal("admitted")
+
+    # @req AC-7
+    it "artifact bytes that do not match the sidecar hash are refused as HashMismatch":
+        var id = base_id()
+        id.sha256 = "h2"
+        expect(refusal_name(with_id(id))).to_equal("HashMismatch")
+
+    # @req AC-7
+    it "a pinned producer that differs is refused as ProducerMismatch":
+        var host = base_host()
+        host.producer_required = Some("p9")
+        expect(refusal_name(libver_admit_identity(base_id(), host))).to_equal("ProducerMismatch")
+
+describe "Sidecar problems fail closed":
+    # @req AC-2
+    it "an empty sidecar is refused as SidecarMissing":
+        expect(refusal_name(libver_admit("", base_host()))).to_equal("SidecarMissing")
+
+    # @req AC-2
+    it "a sidecar missing required fields is refused as SidecarMalformed":
+        expect(refusal_name(libver_admit("name: \"x\"\n", base_host()))).to_equal("SidecarMalformed")
+
+describe "Refusal reasons are named enum values":
+    # @req AC-8
+    it "every refusal reports its own name":
+        step("Spot-check names across the enum")
+        expect(LibRefusal.TierUnknown.name()).to_equal("TierUnknown")
+        expect(LibRefusal.SidecarMalformed.name()).to_equal("SidecarMalformed")
+        expect(LibRefusal.AbiOutOfWindow.name()).to_equal("AbiOutOfWindow")

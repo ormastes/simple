@@ -12,6 +12,116 @@ usage() {
     exit 2
 }
 
+# A qualification run is green only when the process succeeds AND its output
+# reports every counted test as passed. In particular, zero tests or a partial
+# pass count is not sufficient qualification evidence.
+case_is_nonvacuous_green() {
+    _case_rc=$1
+    _case_log=$2
+    [ "$_case_rc" -eq 0 ] || return 1
+    [ -f "$_case_log" ] || return 1
+    awk '
+        function canonical_count(value) {
+            return value == "0" || value ~ /^[1-9][0-9]*$/
+        }
+        function results_green(line, fields, count) {
+            if (line !~ /^Results:[[:space:]]*(0|[1-9][0-9]*) total,[[:space:]]*(0|[1-9][0-9]*) passed,[[:space:]]*(0|[1-9][0-9]*) failed$/) return 0
+            count = split(line, fields, /[[:space:],]+/)
+            if (count != 7 || fields[1] != "Results:" || fields[3] != "total" || fields[5] != "passed" || fields[7] != "failed") return 0
+            return canonical_count(fields[2]) && canonical_count(fields[4]) && canonical_count(fields[6]) && fields[2] != "0" && fields[4] == fields[2] && fields[6] == "0"
+        }
+        function fallback_status(line, fields, count) {
+            if (line ~ /^[[:space:]]*(0|[1-9][0-9]*) examples?, (0|[1-9][0-9]*) failures[[:space:]]*$/) {
+                count = split(line, fields, /[[:space:],]+/)
+                if (count == 4 && canonical_count(fields[1]) && fields[1] != "0" && canonical_count(fields[3])) return fields[3] == "0" ? 1 : -1
+            }
+            if (line ~ /^[[:space:]]*(0|[1-9][0-9]*) passed, (0|[1-9][0-9]*) failed[[:space:]]*$/) {
+                count = split(line, fields, /[[:space:],]+/)
+                if (count == 4 && canonical_count(fields[1]) && canonical_count(fields[3])) return fields[1] != "0" && fields[3] == "0" ? 1 : -1
+            }
+            return 0
+        }
+        {
+            esc = sprintf("%c", 27)
+            gsub(esc "\\[[0-9;]*m", "", $0)
+            if ($0 ~ /^Results:/) {
+                saw_results = 1
+                final_results = $0
+            } else if (!saw_results) {
+                status = fallback_status($0)
+                if (status != 0) {
+                    saw_fallback = 1
+                    final_fallback = status
+                }
+            }
+        }
+        END {
+            if (saw_results) exit results_green(final_results) ? 0 : 1
+            if (saw_fallback) exit final_fallback == 1 ? 0 : 1
+            exit 1
+        }
+    ' "$_case_log"
+}
+
+selftest_summary_contract() {
+    _selftest_dir=$(mktemp -d 2>/dev/null) || {
+        echo "FAIL: cannot create summary self-test directory" >&2
+        return 1
+    }
+    trap 'rm -rf "$_selftest_dir"' EXIT INT TERM
+
+    _expect_case() {
+        _name=$1
+        _rc=$2
+        _want=$3
+        _summary=$4
+        _file="$_selftest_dir/$_name.log"
+        printf '%b\n' "$_summary" >"$_file"
+        if case_is_nonvacuous_green "$_rc" "$_file"; then
+            _got=pass
+        else
+            _got=reject
+        fi
+        [ "$_got" = "$_want" ] || {
+            echo "FAIL: summary self-test $_name expected $_want, got $_got" >&2
+            return 1
+        }
+    }
+
+    _expect_case real-green 0 pass 'Results: 2 total, 2 passed, 0 failed' || return 1
+    _expect_case zero-results 0 reject 'Results: 0 total, 0 passed, 0 failed' || return 1
+    _expect_case all-skipped 0 reject 'Results: 3 total, 0 passed, 0 failed, 3 skipped' || return 1
+    _expect_case malformed 0 reject 'all tests passed without a result summary' || return 1
+    _expect_case failed-summary 0 reject 'Results: 1 total, 0 passed, 1 failed' || return 1
+    _expect_case earlier-green-final-red 0 reject 'Results: 1 total, 1 passed, 0 failed\nResults: 1 total, 0 passed, 1 failed' || return 1
+    _expect_case earlier-green-final-zero 0 reject 'Results: 1 total, 1 passed, 0 failed\nResults: 0 total, 0 passed, 0 failed' || return 1
+    _expect_case earlier-green-final-leading-zero 0 reject 'Results: 1 total, 1 passed, 0 failed\nResults: 1 total, 1 passed, 01 failed' || return 1
+    _expect_case earlier-red-final-green 0 pass 'Results: 1 total, 0 passed, 1 failed\nResults: 1 total, 1 passed, 0 failed' || return 1
+    _expect_case earlier-green-final-malformed 0 reject '2 examples, 0 failures\nResults: malformed' || return 1
+    _expect_case canonical-over-fallback 0 pass 'Results: 1 total, 1 passed, 0 failed\n0 examples, 1 failures' || return 1
+    _expect_case leading-zero-total 0 reject 'Results: 01 total, 1 passed, 0 failed' || return 1
+    _expect_case leading-zero-passed 0 reject 'Results: 1 total, 01 passed, 0 failed' || return 1
+    _expect_case leading-zero-failed 0 reject 'Results: 1 total, 1 passed, 01 failed' || return 1
+    _expect_case inconsistent-counts 0 reject 'Results: 1 total, 2 passed, 0 failed' || return 1
+    _expect_case incomplete-pass-count 0 reject 'Results: 9 total, 2 passed, 0 failed' || return 1
+    _expect_case explicit-skips 0 reject 'Results: 3 total, 2 passed, 0 failed, 1 skipped' || return 1
+    _expect_case trailing-data 0 reject 'Results: 1 total, 1 passed, 0 failed extra' || return 1
+    _expect_case fallback-green 0 pass '2 examples, 0 failures' || return 1
+    _expect_case fallback-passed 0 pass '2 passed, 0 failed' || return 1
+    _expect_case fallback-ansi-green 0 pass '\033[32m2 examples, 0 failures\033[0m' || return 1
+    _expect_case fallback-earlier-green-final-red 0 reject '2 examples, 0 failures\n1 examples, 1 failures' || return 1
+    _expect_case nonzero-with-green-summary 1 reject 'Results: 1 total, 1 passed, 0 failed' || return 1
+    _expect_case nonzero-with-failed-summary 1 reject 'Results: 1 total, 0 passed, 1 failed' || return 1
+    trap - EXIT INT TERM
+    rm -rf "$_selftest_dir"
+    echo "PASS: macOS test-runner summary rejects vacuous, skipped, malformed, and failed results"
+}
+
+if [ "${1:-}" = "--selftest-summary" ]; then
+    selftest_summary_contract
+    exit $?
+fi
+
 [ "$(uname -s)" = Darwin ] || { echo "BLOCKED: macOS host required" >&2; exit 2; }
 [ -n "$BINARY" ] && [ -x "$BINARY" ] && [ -n "$EXPECTED_SHA256" ] || usage
 
@@ -62,7 +172,7 @@ run_case() {
     rc=$?
     set -e
     [ "$rc" -eq 0 ] || { echo "FAIL: $name exited $rc (see $log_file)" >&2; exit 1; }
-    grep -Eq '([1-9][0-9]* examples?, 0 failures|passed[^0-9]*[1-9][0-9]*.*failed[^0-9]*0|Results:.*0 failed)' "$log_file" || {
+    case_is_nonvacuous_green "$rc" "$log_file" || {
         echo "FAIL: $name lacks non-vacuous green summary" >&2
         exit 1
     }

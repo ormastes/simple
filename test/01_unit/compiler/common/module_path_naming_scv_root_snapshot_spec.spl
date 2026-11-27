@@ -1,0 +1,56 @@
+# @req REQ-SSPEC-UNIT
+# Bug: phase2_candidate_native_smokes_access_violation_2026_11_02 (driver rc=1 half)
+#
+# s3_fable43 `native-build --entry-closure --entry test/s3sanity/hello.spl` ends
+# with `ld.lld: error: undefined symbol: __simple_main` (referenced by the
+# driver's own simple_entry.o). The AOT object instead exports
+# `__simple_main_C__dev_p3new_s3sanity_root_build_scv_snapshots_scv_revision_v1_<hash>_test_s3sanity_hello`
+# because the frozen SCV snapshot path (`<root>/build/scv/snapshots/scv-revision-v1-<hash>/test/...`)
+# was never anchored repo-relative, so `llvm_module_is_native_entry` compared
+# the absolute module name against the relative --entry name and got false.
+# 3ee90e34dc5 anchors `/test/` entries; this spec pins the exact 43 shape and
+# the predicate at the bug site.
+use std.spec.{describe, it, expect}
+use std.io_runtime.{env_get, env_set}
+use compiler.common.module_path_naming.{module_logical_name_from_path, module_source_relative_path}
+use compiler.backend.mir_to_llvm.{llvm_module_is_native_entry}
+
+val SCV43 = "C:/dev/p3new/s3sanity/root/build/scv/snapshots/scv-revision-v1-4ea8c4eea1abe81674df86942511f8def3b71b9504f7d1a577bda47e2dde2c1e/test/s3sanity/hello.spl"
+
+describe "SCV root snapshot entry (stage3 43 shape)":
+    it "anchors the frozen snapshot test/ path repo-relative":
+        expect(module_source_relative_path(SCV43)).to_equal("test/s3sanity/hello.spl")
+        expect(module_logical_name_from_path(SCV43)).to_equal("test.s3sanity.hello")
+
+    it "gives the snapshot path and the relative --entry the same logical name":
+        expect(module_logical_name_from_path(SCV43)).to_equal(module_logical_name_from_path("test/s3sanity/hello.spl"))
+
+    it "accepts a backslash-spelled snapshot path (Windows driver)":
+        val win = "C:\\dev\\p3new\\s3sanity\\root\\build\\scv\\snapshots\\scv-revision-v1-4ea8\\test\\s3sanity\\variable.spl"
+        expect(module_logical_name_from_path(win)).to_equal("test.s3sanity.variable")
+
+    it "accepts a ./-prefixed --entry spelling":
+        expect(module_logical_name_from_path("./test/s3sanity/hello.spl")).to_equal("test.s3sanity.hello")
+
+    it "anchors sibling snapshot shapes under src/ and examples/ the same way":
+        val snap_src = "C:/dev/p3new/s3sanity/root/build/scv/snapshots/scv-revision-v1-4ea8/src/app/cli/bootstrap_main.spl"
+        expect(module_logical_name_from_path(snap_src)).to_equal(module_logical_name_from_path("src/app/cli/bootstrap_main.spl"))
+        val snap_ex = "C:/dev/p3new/s3sanity/root/build/scv/snapshots/scv-revision-v1-4ea8/examples/hello.spl"
+        expect(module_logical_name_from_path(snap_ex)).to_equal(module_logical_name_from_path("examples/hello.spl"))
+
+describe "llvm_module_is_native_entry (bug site)":
+    it "flags the snapshot-named entry module when --entry is the relative test/ path":
+        val saved = env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY", "test/s3sanity/hello.spl")
+        val verdict = llvm_module_is_native_entry(module_logical_name_from_path(SCV43))
+        val other = llvm_module_is_native_entry(module_logical_name_from_path("test/s3sanity/variable.spl"))
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY", saved)
+        expect(verdict).to_equal(true)
+        expect(other).to_equal(false)
+
+    it "treats every module as entry when no --entry is set":
+        val saved = env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY", "")
+        val verdict = llvm_module_is_native_entry("anything.at.all")
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY", saved)
+        expect(verdict).to_equal(true)

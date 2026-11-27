@@ -1,0 +1,64 @@
+"""Exact SCV schema primitives; unknown fields never disappear on decode."""
+use std.common.sdn.value.{SdnValue}
+
+pub fn scv_config_dict_v1(value: SdnValue, path: text, names: [text]) -> Result<Dict<text, SdnValue>, text>:
+    match value:
+        case Dict(fields):
+            for name in fields.keys():
+                if not names.contains(name): return Err("unknown_field: " + path + "." + name)
+            for name in names:
+                if not fields.contains_key(name): return Err("missing_field: " + path + "." + name)
+            Ok(fields)
+        case _: Err("wrong_type: " + path + " requires mapping")
+
+pub fn scv_config_text_v1(value: SdnValue, path: text) -> Result<text, text>:
+    match value:
+        case String(item):
+            if item.len() == 0: return Err("empty_text: " + path)
+            Ok(item)
+        case _: Err("wrong_type: " + path + " requires text")
+
+pub fn scv_config_bool_v1(value: SdnValue, path: text) -> Result<bool, text>:
+    match value:
+        case Bool(item): Ok(item)
+        case _: Err("wrong_type: " + path + " requires bool")
+
+pub fn scv_config_int_v1(value: SdnValue, path: text, low: i64, high: i64) -> Result<i64, text>:
+    match value:
+        case Int(item):
+            if item < low or item > high: return Err("range: " + path)
+            Ok(item)
+        case _: Err("wrong_type: " + path + " requires integer")
+
+pub fn scv_config_enum_v1(value: SdnValue, path: text, allowed: [text]) -> Result<text, text>:
+    val item = scv_config_text_v1(value, path)?
+    if not allowed.contains(item): return Err("unsupported_value: " + path + "=" + item)
+    Ok(item)
+
+pub fn scv_config_texts_v1(value: SdnValue, path: text, allowed: [text]) -> Result<[text], text>:
+    match value:
+        case Array(items):
+            if items.len() == 0 or items.len() > 256: return Err("array_limit: " + path)
+            var result: [text] = []
+            for item in items:
+                val name = scv_config_text_v1(item, path)?
+                if allowed.len() > 0 and not allowed.contains(name): return Err("unsupported_value: " + path + "=" + name)
+                if result.contains(name): return Err("duplicate_value: " + path + "=" + name)
+                result.push(name)
+            Ok(result)
+        case _: Err("wrong_type: " + path + " requires array")
+
+pub fn scv_config_relative_path_v1(path: text, pattern: bool) -> bool:
+    if path.len() == 0 or path.len() > 256 or path.starts_with("/") or path.ends_with("/"): return false
+    if path.contains("\\") or path.contains(":") or path.contains("\n") or path.contains("\r"): return false
+    for code in path.bytes():
+        if code < 32 or code == 127: return false
+    if path.contains("?") or path.contains("[") or path.contains("]") or path.contains("***"): return false
+    if not pattern and path.contains("*"): return false
+    for part in path.split("/"):
+        if part == "" or part == "." or part == "..": return false
+        # Recursive wildcards are complete directory components or the tail.
+        if part.contains("**") and part != "**": return false
+    true
+
+export scv_config_dict_v1, scv_config_text_v1, scv_config_bool_v1, scv_config_int_v1, scv_config_enum_v1, scv_config_texts_v1, scv_config_relative_path_v1

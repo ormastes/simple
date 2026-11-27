@@ -35,28 +35,25 @@ fn _pixel_count(style: text, body: text, color: u32) -> i32:
     val pixels = result.pixel_data
     _count_color(pixels, color)
 
-fn _has_color_at_row(style: text, body: text, color: u32, row: i32) -> bool:
+# Bare 8 px text is drawn with LCD coverage, as in Chrome 159: no pixel carries
+# the exact text colour, so placement is read from the non-white ink.
+fn _render(style: text, body: text) -> [u32]:
     val css = "body { margin: 0; background-color: #ffffff; } " + browser_renderer_normalize_style_rules(style)
     val html = "<html><head><style>" + css + "</style></head><body>" + body + "</body></html>"
-    val result = render_html_to_pixels_with_viewport(html, WIDTH, HEIGHT)
-    val pixels = result.pixel_data
-    var x: i32 = 0
-    while x < WIDTH:
-        val idx = row * WIDTH + x
-        if idx < pixels.len():
-            if pixels[idx] == color:
-                return true
-        x = x + 1
-    false
+    render_html_to_pixels_with_viewport(html, WIDTH, HEIGHT).pixel_data
 
-fn _has_color_at(style: text, body: text, color: u32, x: i32, y: i32) -> bool:
-    val css = "body { margin: 0; background-color: #ffffff; } " + browser_renderer_normalize_style_rules(style)
-    val html = "<html><head><style>" + css + "</style></head><body>" + body + "</body></html>"
-    val result = render_html_to_pixels_with_viewport(html, WIDTH, HEIGHT)
-    val idx = y * WIDTH + x
-    if idx < 0 or idx >= result.pixel_data.len():
-        return false
-    result.pixel_data[idx] == color
+# Non-white pixels in the w x h window at (x, y).
+fn _ink(pixels: [u32], x: i32, y: i32, w: i32, h: i32) -> i32:
+    var count: i32 = 0
+    var row: i32 = y
+    while row < y + h:
+        var col: i32 = x
+        while col < x + w:
+            if pixels[row * WIDTH + col] != 0xFFFFFFFFu32:
+                count = count + 1
+            col = col + 1
+        row = row + 1
+    count
 
 describe "WPT-derived pseudo-element and text shaping":
     # @manual scenario evidence
@@ -121,8 +118,10 @@ describe "WPT-derived pseudo-element and text shaping":
             val trunc_style = "div { width: 40px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #0f766e; font-size: 8px; }"
             val no_trunc_style = "div { width: 40px; color: #0f766e; font-size: 8px; }"
             val body = "<div>ThisIsAVeryLongWordThatOverflows</div>"
-            val trunc_px = _pixel_count(trunc_style, body, 0xFF0F766Eu32)
-            val no_trunc_px = _pixel_count(no_trunc_style, body, 0xFF0F766Eu32)
+            # Chrome 159 non-white pixels: 165 truncated, 411 not (raster lane 58 / 200).
+            val trunc_px = _ink(_render(trunc_style, body), 0, 0, WIDTH, HEIGHT)
+            val no_trunc_px = _ink(_render(no_trunc_style, body), 0, 0, WIDTH, HEIGHT)
+            expect(trunc_px).to_be_greater_than(60)
             expect(trunc_px).to_be_less_than(no_trunc_px)
 
     context "word-break and overflow-wrap":
@@ -131,24 +130,30 @@ describe "WPT-derived pseudo-element and text shaping":
             val style = "div { width: 40px; word-break: break-all; color: #4338ca; font-size: 8px; }"
             val body = "<div>ABCDEFGHIJKLMNOPQRST</div>"
             val second_row = 8 + 4 + 2
-            expect(_has_color_at_row(style, body, 0xFF4338CAu32, second_row)).to_equal(true)
+            # Chrome 159: the second line inks rows 10..15, 35 non-white pixels on row 14.
+            expect(_ink(_render(style, body), 0, second_row, WIDTH, 1)).to_be_greater_than(25)
 
         it "overflow-wrap break-word wraps long word onto second line":
             val style = "div { width: 40px; overflow-wrap: break-word; color: #9333ea; font-size: 8px; }"
             val body = "<div>ABCDEFGHIJKLMNOPQRST</div>"
             val second_row = 8 + 4 + 2
-            expect(_has_color_at_row(style, body, 0xFF9333EAu32, second_row)).to_equal(true)
+            # Chrome 159: the second line inks rows 10..15, 35 non-white pixels on row 14.
+            expect(_ink(_render(style, body), 0, second_row, WIDTH, 1)).to_be_greater_than(25)
 
     context "text-align fallback rendering":
 
         it "centers short text within the fallback block width":
             val style = "div { width: 40px; text-align: center; color: #ea580c; font-size: 8px; }"
             val body = "<div>AB</div>"
-            expect(_has_color_at(style, body, 0xFFEA580Cu32, 15, 2)).to_equal(true)
-            expect(_has_color_at(style, body, 0xFFEA580Cu32, 0, 2)).to_equal(false)
+            # Chrome 159: ink starts at x 14; column 15 has 5 non-white pixels, column 0 none.
+            val px = _render(style, body)
+            expect(_ink(px, 15, 0, 1, 10)).to_be_greater_than(3)
+            expect(_ink(px, 0, 0, 14, 10)).to_equal(0)
 
         it "right aligns short text within the fallback block width":
             val style = "div { width: 40px; text-align: right; color: #0d9488; font-size: 8px; }"
             val body = "<div>AB</div>"
-            expect(_has_color_at(style, body, 0xFF0D9488u32, 30, 2)).to_equal(true)
-            expect(_has_color_at(style, body, 0xFF0D9488u32, 0, 2)).to_equal(false)
+            # Chrome 159: ink starts at x 29; column 30 has 6 non-white pixels, columns 0..28 none.
+            val px = _render(style, body)
+            expect(_ink(px, 30, 0, 1, 10)).to_be_greater_than(3)
+            expect(_ink(px, 0, 0, 29, 10)).to_equal(0)

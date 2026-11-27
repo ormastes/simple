@@ -1,0 +1,96 @@
+"""
+# RV64 Translation Lookaside Buffer (TLB)
+
+64-entry direct-mapped TLB for Sv39 virtual memory.
+"""
+
+class TlbEntry:
+    valid: bool
+    vpn: i64         # Virtual page number (bits [38:12])
+    ppn: i64         # Physical page number
+    asid: i64        # Address Space ID
+    perm_r: bool
+    perm_w: bool
+    perm_x: bool
+    perm_u: bool
+    is_global: bool
+    level: i64       # 0=4KiB, 1=megapage, 2=gigapage
+
+    static fn empty() -> TlbEntry:
+        TlbEntry(
+            valid: false, vpn: 0, ppn: 0, asid: 0,
+            perm_r: false, perm_w: false, perm_x: false,
+            perm_u: false, is_global: false, level: 0
+        )
+
+val TLB_SIZE: i64 = 64
+val TLB_INDEX_MASK: i64 = 63  # TLB_SIZE - 1
+
+class Rv64Tlb:
+    entries: [TlbEntry]
+
+    static fn create() -> Rv64Tlb:
+        var ents: [TlbEntry] = []
+        var i = 0
+        while i < TLB_SIZE:
+            ents = ents + [TlbEntry.empty()]
+            i = i + 1
+        Rv64Tlb(entries: ents)
+
+    fn _index(vpn: i64) -> i64:
+        """Compute TLB index from VPN (direct-mapped)."""
+        vpn and TLB_INDEX_MASK
+
+    fn lookup(vaddr: i64, asid: i64) -> TlbEntry:
+        """Look up a virtual address in the TLB.
+        Returns entry (check .valid to see if it hit)."""
+        val page_vpn = (vaddr >> 12) and 0x7FFFFFF  # 27-bit VPN for Sv39
+        val idx = self._index(page_vpn)
+        val entry = self.entries[idx]
+
+        if entry.valid and (entry.is_global or entry.asid == asid):
+            # Check VPN match based on page level
+            val match_mask = if entry.level == 2: 0x7FC0000  # Gigapage: match VPN[2]
+                elif entry.level == 1: 0x7FFFE00             # Megapage: match VPN[2:1]
+                else: 0x7FFFFFF                               # 4KiB: match all
+            if (page_vpn and match_mask) == (entry.vpn and match_mask):
+                entry
+            else:
+                TlbEntry.empty()
+        else:
+            TlbEntry.empty()
+
+    me insert(vaddr: i64, ppn: i64, asid: i64, perm_r: bool, perm_w: bool,
+              perm_x: bool, perm_u: bool, is_global: bool, level: i64):
+        """Insert a new TLB entry."""
+        val page_vpn = (vaddr >> 12) and 0x7FFFFFF
+        val idx = self._index(page_vpn)
+        self.entries[idx] = TlbEntry(
+            valid: true, vpn: page_vpn, ppn: ppn, asid: asid,
+            perm_r: perm_r, perm_w: perm_w, perm_x: perm_x,
+            perm_u: perm_u, is_global: is_global, level: level
+        )
+
+    me flush_all():
+        """Flush all TLB entries (SFENCE.VMA with rs1=x0, rs2=x0)."""
+        var i = 0
+        while i < TLB_SIZE:
+            self.entries[i] = TlbEntry.empty()
+            i = i + 1
+
+    me flush_addr(vaddr: i64):
+        """Flush TLB entry for a specific virtual address."""
+        val page_vpn = (vaddr >> 12) and 0x7FFFFFF
+        val idx = self._index(page_vpn)
+        val entry = self.entries[idx]
+        if entry.valid and entry.vpn == page_vpn:
+            self.entries[idx] = TlbEntry.empty()
+
+    me flush_asid(asid: i64):
+        """Flush all TLB entries for a specific ASID."""
+        var i = 0
+        while i < TLB_SIZE:
+            val entry = self.entries[i]
+            if entry.valid and entry.asid == asid and (entry.is_global == false):
+                self.entries[i] = TlbEntry.empty()
+            i = i + 1

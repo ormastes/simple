@@ -62,7 +62,7 @@ fn desugar_async_function_with_body_name(func: ParserFunction, body_name: text) 
                 case State2(...): ...
     """
     if not func.is_async:
-        return [func, [], []]
+        return (func, [], [])
 
     # Wrap return type in Future<T>
     val source_return = if func.has_return_type:
@@ -104,7 +104,7 @@ fn desugar_async_function_with_body_name(func: ParserFunction, body_name: text) 
         span: func.span
     )
 
-    [transformed_func, generated_enums, generated_functions]
+    (transformed_func, generated_enums, generated_functions)
 
 fn desugar_async_body(body: Block, func: ParserFunction) -> (Block, [ParserEnum], [ParserFunction]):
     desugar_async_body_with_name(body, func, "__async_ready_body_{func.name}")
@@ -136,10 +136,10 @@ fn desugar_async_body_with_name(body: Block, func: ParserFunction, body_name: te
         # implemented; explicit returns in this legacy path remain unsupported.
         if func.type_params.len() > 0:
             val body_value = Expr(kind: ExprKind.Block(body), span: body.span)
-            return [make_async_ready_value_body(body, body_value), [], []]
+            return (make_async_ready_value_body(body, body_value), [], [])
         val helper = make_async_ready_body_function(func, body_name)
         val simple_body = desugar_async_body_simple(body, func.params, body_name)
-        return [simple_body, [], [helper]]
+        return (simple_body, [], [helper])
 
     # Generate state machine components
     val state_enum = generate_state_enum(func.name, analysis)
@@ -152,7 +152,7 @@ fn desugar_async_body_with_name(body: Block, func: ParserFunction, body_name: te
     # Create body that calls Future.from_generator with poll function
     val generator_body = make_generator_call(func.name, func.span)
 
-    [generator_body, [enum_ast], [poll_fn_ast]]
+    (generator_body, [enum_ast], [poll_fn_ast])
 
 fn make_async_ready_body_function(func: ParserFunction, body_name: text) -> ParserFunction:
     # A real function gives both HIR inference and MIR explicit returns their
@@ -196,12 +196,14 @@ fn desugar_async_body_simple(body: Block, params: [Param], body_name: text) -> B
     make_async_ready_value_body(body, body_value)
 
 fn make_async_ready_value_body(body: Block, body_value: Expr) -> Block:
+    # Emit the parser's own `Future.from_value(v)` shape (MethodCall). HIR
+    # resolves a static call on a type owner only through MethodCall; a
+    # Call(Field(Ident("Future"))) lowered `Future` as a plain variable and
+    # native MIR rejected it as `undefined variable Future`.
     val wrapper_call = Expr(
-        kind: ExprKind.Call(
-            Expr(kind: ExprKind.Field(
-                Expr(kind: ExprKind.Ident("Future"), span: body.span),
-                "from_value"
-            ), span: body.span),
+        kind: ExprKind.MethodCall(
+            Expr(kind: ExprKind.Ident("Future"), span: body.span),
+            "from_value",
             [CallArg(has_name: false, name: "", value: body_value, span: body.span)]
         ),
         span: body.span
@@ -488,7 +490,12 @@ fn desugar_module(module: ParserModule) -> ParserModule:
         # extension axis parse fine and then vanish before HIR.
         # Strict no-GC mode is a module fact; a rebuild must keep it.
         nogc_strict: module.nogc_strict,
-        extend_enums: module.extend_enums
+        extend_enums: module.extend_enums,
+        # The module's required-init opt-in is a module fact too.
+        required_init_mode: module.required_init_mode,
+        source_declaration_intents_v1: module.source_declaration_intents_v1,
+        source_declaration_digest_v1: module.source_declaration_digest_v1,
+        manifest_visibility_v1: module.manifest_visibility_v1
     )
 
 fn desugar_function_body(func: ParserFunction) -> ParserFunction:

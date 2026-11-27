@@ -1,0 +1,40 @@
+"""Behavioral spec for 3-predecessor and N-ary __simple_ssa_phi pair collection in LLVM lib backend (#4681)."""
+
+use std.spec.*
+use compiler.mir.mir_data.*
+use plugins.backend_llvm_lib.llvm_lib_translate_expr.{llvm_lib_collect_ssa_phi_incomings_v1}
+
+fn phi_const(v: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(v), MirType.i64()))
+
+describe "LLVM lib backend N-ary __simple_ssa_phi lowering":
+    it "collects 3-predecessor and 4-predecessor phi pairs including predecessor block 0":
+        val block_map: {i64: i64} = {0: 1000, 1: 1001, 2: 1002, 3: 1003}
+        val three_args = [
+            phi_const(0), phi_const(10),
+            phi_const(1), phi_const(20),
+            phi_const(2), phi_const(30)
+        ]
+        val res3 = llvm_lib_collect_ssa_phi_incomings_v1(three_args, block_map)
+        expect(res3.is_ok()).to_equal(true)
+        val pairs3 = res3.unwrap()
+        expect(pairs3.len()).to_equal(3)
+        expect(pairs3[0].0).to_equal(1000)
+        expect(pairs3[1].0).to_equal(1001)
+        expect(pairs3[2].0).to_equal(1002)
+
+        val four_args = three_args + [phi_const(3), phi_const(40)]
+        val res4 = llvm_lib_collect_ssa_phi_incomings_v1(four_args, block_map)
+        expect(res4.is_ok()).to_equal(true)
+        expect(res4.unwrap().len()).to_equal(4)
+        expect(res4.unwrap()[3].0).to_equal(1003)
+
+    it "rejects odd arity and unknown predecessor blocks":
+        val block_map: {i64: i64} = {1: 1001, 2: 1002}
+        val odd_res = llvm_lib_collect_ssa_phi_incomings_v1(
+            [phi_const(1), phi_const(10), phi_const(2)], block_map)
+        expect(odd_res.is_err()).to_equal(true)
+
+        val unknown_res = llvm_lib_collect_ssa_phi_incomings_v1(
+            [phi_const(1), phi_const(10), phi_const(99), phi_const(20)], block_map)
+        expect(unknown_res.is_err()).to_equal(true)

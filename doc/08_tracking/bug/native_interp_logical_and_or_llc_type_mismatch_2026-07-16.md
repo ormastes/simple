@@ -1,10 +1,10 @@
 # Native: `"{a() and b()}"` interpolation fails llc (ptr vs i64 type mismatch)
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-25 — source fix verified present; native execution environment-blocked
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+(Supersedes the 2026-09-16 normalization-pass "needs owner triage" note.)
 
-**Status:** Source fixed; execution pending  **Found:** 2026-07-16 (p_shortcircuit lane)  **Path:** native-build --entry (strict-llvm)
+**Status:** RESOLVED 2026-11-25 (fix verified in source; native-build execution
+not runnable on the verifying host — see note below)  **Found:** 2026-07-16 (p_shortcircuit lane)  **Path:** native-build --entry (strict-llvm)
 ```simple
 fn t() -> bool:
     return true
@@ -43,3 +43,35 @@ lane was limited to static/source verification.
 
 `env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 bin/simple native-build --entry <case>.spl -o <bin> --clean`
 
+
+## Verification 2026-11-25 (p2w4-al lane, Windows host)
+
+Code inspection at release/1.0.0 HEAD: the fix described under "Root cause and
+fix" is present in `src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl`
+(`translate_const`, ~line 2615): fresh SSA-renamed constant locals with no
+`MirLocal` entry now take their LLVM type from the Const instruction itself
+(`local_types.has(dest_id)` branch at lines 2620-2628), with the comment
+explicitly citing the poisoned-pointer-constant mechanism this bug records.
+Execution evidence is NOT claimed: `native-build --entry` with llc-18 is not
+available on this Windows host, and the pinned seed binary cannot load the
+current tree (`unknown decorator '@representation_boundary'` in
+`src/app/test_runner_new/test_runner_client.spl`), so no spec run was possible.
+Closure rests on source inspection only, as stated.
+
+## Verification 2026-11-26 (bf-2 lane, Windows host)
+
+- `test/01_unit/compiler/backend/llvm_copy_move_alloc_spec.spl --mode=interpreter`
+  (via `wa3_shared_bin/simple.exe`, `SIMPLE_LIB=C:\dev\wt\bf-2-compiler-mir-backend\src`):
+  7/7 passed.
+- Added `test/01_unit/compiler/backend/llvm_interp_logical_and_or_spec.spl` (4/4
+  passed, 0 lint warnings): examples 1, 2, and 4 lower `print("v={t() and t()}")`,
+  `print("w={t() or f()}")`, `SdnValue.Dict(...)`, and `code.to_string(16).upper()`
+  end-to-end through `parse_full_frontend -> HirLowering -> MirLowering -> MirToLlvm`;
+  example 3 builds a synthetic `MirModule` directly (`Alloc` + orphan
+  `Const(Str, Opaque("str"))` + `Store`) and lowers it through
+  `MirToLlvm.translate_module`.
+- Compiled the emitted LLVM IR for `print("v={t() and t()}")` and
+  `print("w={t() or f()}")` with host `clang version 23.1.2` (`clang.exe -x ir -c`):
+  both exited 0 with no `ptr` vs `i64` or invalid `inttoptr` errors.
+- Full native-build executable linking/execution remains pending a Linux/llc-18
+  lane (disallowed in this BF-2 interpreter lane).

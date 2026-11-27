@@ -121,18 +121,16 @@ fn main():
     arr_mut_middle(y, y, y)
     fails = check("aliased_array_mut_middle", y.len().to_string(), "2", fails)
 
-    # ---- every alias mutates: KNOWN-OPEN RESIDUAL, deliberately not counted --
+    # ---- every alias mutates: FIXED 2026-11-05 (was the known-open residual) --
     #
-    # When BOTH aliases are `mut` the interpreter still loses one push (2, not
-    # 3). This is NOT the same defect and is NOT fixed by the mut/immut rule:
-    # both parameters legitimately mutate, each forks its own Arc, and the last
-    # write-back still wins. A correct answer needs the callee's two parameter
-    # bindings to SHARE one handle, which is a deeper change to how the
-    # interpreter binds container arguments. The JIT gets 3.
-    #
-    # It is recorded rather than asserted so the aggregate verdict stays a
-    # truthful signal for the class that IS fixed — but it is PINNED by the
-    # sibling spec, so if this number moves in either direction someone is told.
+    # When BOTH aliases are `mut` each parameter legitimately COW-forks its own
+    # Arc from the shared pre-call handle during the body, so the old last-wins
+    # write-back dropped every fork but the last (2, not 3). The write-back now
+    # merges each all-`mut` aliased group's forks back against the shared,
+    # never-parked caller handle (append-only forks contribute their suffix in
+    # argument order; same-length forks carry slot edits; anything else is a
+    # last-wins replace) and writes ONE reconciled value. The JIT gets 3.
+    # doc/08_tracking/bug/aliased_array_mut_param_mutation_lost_interpreter_2026-08-06.md
     var z: [i64] = [1]
     arr_both_mut(z, z)
     print("OBSERVE aliased_array_both_mut=" + z.len().to_string())

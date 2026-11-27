@@ -8,3 +8,9 @@ The catalog schema records quantity kinds, unit classes, aliases, provenance, pr
 Exact conversions use `ExactRatio` in `world_units.spl`; for example `km/h` has exact factor `5/18` relative to `m/s`. Prefix generation consults `is_prefix_blocked` so accepted non-SI time/calendar units such as `h`, `d`, and year variants are not auto-prefixed.
 
 Migration of public primitives should use `newunit` for nominal values and measurement `unit` only for real quantities. Any remaining raw public primitive must have a local `@allow(primitive_api)` reason.
+
+2026-11-01 clarification: that historical allowlist does not apply to the
+selected robust/critical/verified
+[extreme public API rule](../../../extreme_typing_traceability.md). Easy nominal
+creation and typed literals must be validated end to end; generated public raw
+constructors/getters cannot defeat the boundary. Private storage is permitted.

@@ -1,0 +1,177 @@
+"""
+## Purpose and audience
+Purpose: Pin that an atomic inline (inline-block, `<img>`, form control) with
+`vertical-align: middle` is placed by its MARGIN box: the margin box's midpoint
+sits half the parent's x-height above the baseline (CSS 2.2 10.8), and the line
+grows to hold that margin box. Before, a `middle` box stayed at the line top
+(y=0) for every margin and never grew the line. Also pins that `<img>` and
+`<input>` take the same margin-box path for `top | bottom | text-top |
+text-bottom`, which only `display:inline-block` boxes took before.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159 headless, `--dump-dom` + getBoundingClientRect(),
+`body{margin:0}`, `<div id=c style="width:300px;font:F">x ITEM</div>`,
+2026-11-18). ITEM is a 20x10 inline-block (`ib`), a 20x40 one (`ib40`), a
+20x10 `<img>` or a default `<input>` (21 px tall). y is the item's top relative
+to the div, h the div's height. Chrome's values are fractional (trailing
+comment on each row); the engine lays boxes out in whole CSS px, so each pin is
+Chrome's value rounded half up -- the row Chrome paints the box on (checked by
+screenshot at 1x: rows 5..14, 8..17, 5..14, 11..20 on both sides).
+
+Model (Blink `vertical-align: middle`): with X = round64(x-height / 2) and M the
+margin-box height, the margin box spans [baseline - X - M/2, baseline - X + M/2].
+x-height is the face's OS/2 sxHeight: Liberation Sans 1082/2048, Liberation
+Serif 940/2048.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-INLINE-VALIGN-MARGIN-002 — middle-aligned atomic inlines, and replaced/form-control atomics under top/bottom/text-top/text-bottom, place and size the line by their margin box.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val SERIF16 = "font:16px serif"
+val SANS16 = "font:16px 'Liberation Sans'"
+val SANS24 = "font:24px 'Liberation Sans'"
+val IMG_SRC = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+
+fn _item(kind: text, va: text, margin: text) -> text:
+    if kind == "ib":
+        return "<span class=b id=s style=\"vertical-align:" + va + ";" + margin + "\"></span>"
+    if kind == "ib40":
+        return "<span class=b id=s style=\"height:40px;vertical-align:" + va + ";" + margin + "\"></span>"
+    if kind == "img":
+        return "<img id=s src=\"" + IMG_SRC + "\" style=\"width:20px;height:10px;vertical-align:" + va + ";" + margin + "\">"
+    "<input id=s style=\"vertical-align:" + va + ";" + margin + "\">"
+
+fn _page(va: text, font: text, kind: text, margin: text) -> text:
+    "<html><head><style>body{{margin:0}} .c{{width:300px}} .b{{display:inline-block;width:20px;height:10px}}</style></head><body><div class=c id=c style=\"" + font + "\">x" + _item(kind, va, margin) + "</div></body></html>"
+
+fn _pin(va: text, font: text, kind: text, margin: text, y: i32, h: i32):
+    val page = _page(va, font, kind, margin)
+    val rel_y = simple_web_layout_debug_layout_by_id(page, 900, 2000, "s", "y").to_i32() - simple_web_layout_debug_layout_by_id(page, 900, 2000, "c", "y").to_i32()
+    expect(rel_y).to_equal(y)
+    expect(simple_web_layout_debug_layout_by_id(page, 900, 2000, "c", "h").to_i32()).to_equal(h)
+
+describe "vertical-align middle margin box":
+    it "inline-block, 16px Liberation Serif":
+        step("Chrome 159 y, h in the trailing comments; pins are those rounded half up")
+        _pin("middle", SERIF16, "ib", "margin:5px 0", 5, 20)  # Chrome 5.328125, 20.328125
+        _pin("middle", SERIF16, "ib", "margin:10px 0", 10, 30)  # Chrome 10, 30
+        _pin("middle", SERIF16, "ib", "margin-top:6px", 8, 18)  # Chrome 8.328125, 18.328125
+        _pin("middle", SERIF16, "ib", "margin-bottom:6px", 2, 18)  # Chrome 2.328125, 18.328125
+        _pin("middle", SERIF16, "ib", "margin:3px 0 9px", 3, 22)  # Chrome 3, 22
+        _pin("middle", SERIF16, "ib", "margin-top:30px", 30, 40)  # Chrome 30, 40
+        _pin("middle", SERIF16, "ib", "margin-bottom:30px", 0, 40)  # Chrome 0, 40
+        _pin("middle", SERIF16, "ib", "", 5, 18)  # Chrome 5.328125, 18
+
+    it "inline-block, 16px Liberation Sans":
+        step("Chrome 159 y, h in the trailing comments")
+        _pin("middle", SANS16, "ib", "", 5, 18)  # Chrome 4.765625, 18
+        _pin("middle", SANS16, "ib", "margin:5px 0", 5, 20)  # Chrome 5, 20
+        _pin("middle", SANS16, "ib", "margin:10px 0", 10, 30)  # Chrome 10, 30
+        _pin("middle", SANS16, "ib", "margin-top:6px", 8, 18)  # Chrome 7.765625, 18
+        _pin("middle", SANS16, "ib", "margin-bottom:6px", 2, 18)  # Chrome 1.765625, 18
+        _pin("middle", SANS16, "ib", "margin:3px 0 9px", 3, 22)  # Chrome 3, 22
+        _pin("middle", SANS16, "ib", "margin-top:30px", 30, 40)  # Chrome 30, 40
+        _pin("middle", SANS16, "ib", "margin-bottom:30px", 0, 40)  # Chrome 0, 40
+
+    it "inline-block, 24px Liberation Sans":
+        step("Chrome 159 y, h in the trailing comments")
+        _pin("middle", SANS24, "ib", "", 11, 28)  # Chrome 10.65625, 28
+        _pin("middle", SANS24, "ib", "margin:5px 0", 11, 28)  # Chrome 10.65625, 28
+        _pin("middle", SANS24, "ib", "margin:10px 0", 11, 31)  # Chrome 10.65625, 30.65625
+        _pin("middle", SANS24, "ib", "margin-top:6px", 14, 28)  # Chrome 13.65625, 28
+        _pin("middle", SANS24, "ib", "margin-bottom:6px", 8, 28)  # Chrome 7.65625, 28
+        _pin("middle", SANS24, "ib", "margin:3px 0 9px", 8, 28)  # Chrome 7.65625, 28
+        _pin("middle", SANS24, "ib", "margin-top:30px", 30, 40)  # Chrome 30, 40
+        _pin("middle", SANS24, "ib", "margin-bottom:30px", 0, 40)  # Chrome 0, 40
+
+    it "inline-block taller than the line":
+        step("Chrome 159: the margin box sets the line; y is the top margin")
+        _pin("middle", SANS16, "ib40", "", 0, 40)  # Chrome 0, 40
+        _pin("middle", SANS16, "ib40", "margin:5px 0", 5, 50)  # Chrome 5, 50
+        _pin("middle", SANS16, "ib40", "margin:10px 0", 10, 60)  # Chrome 10, 60
+        _pin("middle", SANS16, "ib40", "margin-top:6px", 6, 46)  # Chrome 6, 46
+        _pin("middle", SANS16, "ib40", "margin-bottom:6px", 0, 46)  # Chrome 0, 46
+        _pin("middle", SANS16, "ib40", "margin:3px 0 9px", 3, 52)  # Chrome 3, 52
+        _pin("middle", SANS16, "ib40", "margin-top:30px", 30, 70)  # Chrome 30, 70
+        _pin("middle", SANS16, "ib40", "margin-bottom:30px", 0, 70)  # Chrome 0, 70
+
+    it "img":
+        step("Chrome 159: a replaced box takes the same margin-box placement")
+        _pin("middle", SANS16, "img", "", 5, 18)  # Chrome 4.765625, 18
+        _pin("middle", SANS16, "img", "margin:5px 0", 5, 20)  # Chrome 5, 20
+        _pin("middle", SANS16, "img", "margin:10px 0", 10, 30)  # Chrome 10, 30
+        _pin("middle", SANS16, "img", "margin-top:6px", 8, 18)  # Chrome 7.765625, 18
+        _pin("middle", SANS16, "img", "margin-bottom:6px", 2, 18)  # Chrome 1.765625, 18
+        _pin("middle", SANS16, "img", "margin:3px 0 9px", 3, 22)  # Chrome 3, 22
+        _pin("middle", SANS16, "img", "margin-top:30px", 30, 40)  # Chrome 30, 40
+        _pin("middle", SANS16, "img", "margin-bottom:30px", 0, 40)  # Chrome 0, 40
+        _pin("middle", SANS24, "img", "", 11, 28)  # Chrome 10.65625, 28
+        _pin("middle", SANS24, "img", "margin:5px 0", 11, 28)  # Chrome 10.65625, 28
+        _pin("middle", SANS24, "img", "margin:10px 0", 11, 31)  # Chrome 10.65625, 30.65625
+        _pin("middle", SANS24, "img", "margin-top:6px", 14, 28)  # Chrome 13.65625, 28
+        _pin("middle", SANS24, "img", "margin-bottom:6px", 8, 28)  # Chrome 7.65625, 28
+        _pin("middle", SANS24, "img", "margin:3px 0 9px", 8, 28)  # Chrome 7.65625, 28
+        _pin("middle", SANS24, "img", "margin-top:30px", 30, 40)  # Chrome 30, 40
+        _pin("middle", SANS24, "img", "margin-bottom:30px", 0, 40)  # Chrome 0, 40
+
+    it "input":
+        step("Chrome 159: a form control is centred by its margin box, not its text baseline")
+        _pin("middle", SANS24, "inp", "", 5, 28)  # Chrome 5.15625, 28
+        _pin("middle", SANS24, "inp", "margin:5px 0", 5, 31)  # Chrome 5.15625, 31.15625
+        _pin("middle", SANS24, "inp", "margin:10px 0", 10, 41)  # Chrome 10, 41
+        _pin("middle", SANS24, "inp", "margin-top:6px", 8, 29)  # Chrome 8.15625, 29.15625
+        _pin("middle", SANS24, "inp", "margin-bottom:6px", 2, 29)  # Chrome 2.15625, 29.15625
+        _pin("middle", SANS24, "inp", "margin:3px 0 9px", 3, 33)  # Chrome 3, 33
+        _pin("middle", SANS24, "inp", "margin-top:30px", 30, 51)  # Chrome 30, 51
+        _pin("middle", SANS24, "inp", "margin-bottom:30px", 0, 51)  # Chrome 0, 51
+
+describe "img and input margin box under top | bottom | text-top | text-bottom":
+    it "top":
+        step("Chrome 159, 16px Liberation Serif; before, only inline-block boxes took this path")
+        _pin("top", SERIF16, "img", "margin-top:6px", 6, 18)  # Chrome 6, 18
+        _pin("top", SERIF16, "img", "margin-bottom:6px", 0, 18)  # Chrome 0, 18
+        _pin("top", SERIF16, "img", "margin:3px 0 9px", 3, 22)  # Chrome 3, 22
+        _pin("top", SERIF16, "img", "margin-top:30px", 30, 40)  # Chrome 30, 40
+        _pin("top", SERIF16, "inp", "margin-top:6px", 6, 27)  # Chrome 6, 27
+        _pin("top", SERIF16, "inp", "margin-bottom:6px", 0, 27)  # Chrome 0, 27
+        _pin("top", SERIF16, "inp", "margin:3px 0 9px", 3, 33)  # Chrome 3, 33
+        _pin("top", SERIF16, "inp", "margin-top:30px", 30, 51)  # Chrome 30, 51
+
+    it "bottom":
+        step("Chrome 159, 16px Liberation Serif; before, only inline-block boxes took this path")
+        _pin("bottom", SERIF16, "img", "margin-top:6px", 8, 18)  # Chrome 8, 18
+        _pin("bottom", SERIF16, "img", "margin-bottom:6px", 2, 18)  # Chrome 2, 18
+        _pin("bottom", SERIF16, "img", "margin:3px 0 9px", 3, 22)  # Chrome 3, 22
+        _pin("bottom", SERIF16, "img", "margin-top:30px", 30, 40)  # Chrome 30, 40
+        _pin("bottom", SERIF16, "inp", "margin-top:6px", 6, 27)  # Chrome 6, 27
+        _pin("bottom", SERIF16, "inp", "margin-bottom:6px", 0, 27)  # Chrome 0, 27
+        _pin("bottom", SERIF16, "inp", "margin:3px 0 9px", 3, 33)  # Chrome 3, 33
+        _pin("bottom", SERIF16, "inp", "margin-top:30px", 30, 51)  # Chrome 30, 51
+
+    it "text-top":
+        step("Chrome 159, 16px Liberation Serif; before, only inline-block boxes took this path")
+        _pin("text-top", SERIF16, "img", "margin-top:6px", 6, 18)  # Chrome 6, 18
+        _pin("text-top", SERIF16, "img", "margin-bottom:6px", 0, 18)  # Chrome 0, 18
+        _pin("text-top", SERIF16, "img", "margin:3px 0 9px", 3, 22)  # Chrome 3, 22
+        _pin("text-top", SERIF16, "img", "margin-top:30px", 30, 40)  # Chrome 30, 40
+        _pin("text-top", SERIF16, "inp", "margin-top:6px", 6, 27)  # Chrome 6, 27
+        _pin("text-top", SERIF16, "inp", "margin-bottom:6px", 0, 27)  # Chrome 0, 27
+        _pin("text-top", SERIF16, "inp", "margin:3px 0 9px", 3, 33)  # Chrome 3, 33
+        _pin("text-top", SERIF16, "inp", "margin-top:30px", 30, 51)  # Chrome 30, 51
+
+    it "text-bottom":
+        step("Chrome 159, 16px Liberation Serif; before, only inline-block boxes took this path")
+        _pin("text-bottom", SERIF16, "img", "margin-top:6px", 7, 18)  # Chrome 7, 18
+        _pin("text-bottom", SERIF16, "img", "margin-bottom:6px", 1, 18)  # Chrome 1, 18
+        _pin("text-bottom", SERIF16, "img", "margin:3px 0 9px", 3, 23)  # Chrome 3, 23
+        _pin("text-bottom", SERIF16, "img", "margin-top:30px", 30, 41)  # Chrome 30, 41
+        _pin("text-bottom", SERIF16, "inp", "margin-top:6px", 6, 28)  # Chrome 6, 28
+        _pin("text-bottom", SERIF16, "inp", "margin-bottom:6px", 0, 28)  # Chrome 0, 28
+        _pin("text-bottom", SERIF16, "inp", "margin:3px 0 9px", 3, 34)  # Chrome 3, 34
+        _pin("text-bottom", SERIF16, "inp", "margin-top:30px", 30, 52)  # Chrome 30, 52

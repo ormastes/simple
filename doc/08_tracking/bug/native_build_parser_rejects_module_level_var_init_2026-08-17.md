@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN (P1 — blocks every push)
+**Status:** CLOSED (outdated, 2026-11-05) — see addendum.
 **Filed:** 2026-08-17
 **Component:** pure-Simple parser (native-build lane) vs Rust seed parser
 **Class:** engine divergence — the same source parses in one engine and not the other
@@ -79,3 +79,53 @@ accept — but the divergence itself is the defect and will recur elsewhere.
   would fail the same way (only the first was bisected).
 - Whether the seed's acceptance is deliberate or itself a laxity bug.
 
+
+## Addendum 2026-11-05 — closed as outdated (W3b)
+
+Stage3 `s3_fable44` builds, links and runs a fixture with module-level
+`var x: i64 = -1` and `var s: text = ""`: rc=0, stdout `PASS modvar`.
+
+## 2026-11-10 status — SUPERSEDED (P3 bootstrap lane row 45, work/p3-boot6-20261110)
+
+Corroborates the W3b addendum. Source-verified on this lane's base
+(`4343ce254922`): the pure-Simple parser now accepts the module-level
+`var x: T = <expr>` form the record says it rejected —
+`src/compiler/10.frontend/core/parser_decls_use.spl:454-486` parses the
+annotized declaration, requires `=` for types with no safe zero (fn type,
+text, Option, dynamic array) with an explicit diagnostic, synthesizes zero
+defaults for scalars/fixed arrays/named types, and falls through to
+`parse_expr` for the initializer. Divergence itself is closed: the seed's
+lax acceptance and the native-build parser's rejection were reconciled in
+the parser, which is the fix direction this record prescribes. Pins in tree:
+`test/01_unit/compiler/parser/module_noinit_zero_default_spec.spl`,
+`test/01_unit/compiler/parser/module_noinit_enum_class_zero_spec.spl`
+(queued under seed-smoke this pass; results in
+build/review/p3fix-boot6-20261110.sdn).
+The two `expr_dispatch.spl` declarations named in this record still exist
+and are accepted forms today. Not re-verified end-to-end by this lane: a full
+native-build of a modvar fixture is a ~2-3 GB interpreted-worker run
+(heavy-forbidden); W3b (2026-11-05) already holds the end-to-end rc=0.
+
+## 2026-11-11 — SUPERSEDED confirmed (lane p3-comp12, row 1)
+
+Fresh re-verification at this lane's base (6233df4b9f9ea, tracked seed
+46fe8f6b6def):
+
+- Source: the annotated module-level `var` declaration path in
+  `src/compiler/10.frontend/core/parser_decls_use.spl` handles the no-init
+  forms and then falls through to `parser_expect(100)` + `parse_expr()`
+  (:486-491), i.e. the `var x: T = <expr>` initializer form the record says
+  the native-build parser rejected is parsed today. The two declarations the
+  guard bisected to still exist and are the accepted form:
+  `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:144-145`
+  (`var mir_lower_parent_expr_file: text = ""`,
+  `var mir_lower_parent_expr_line: i64 = -1`).
+- Seed-smoke (tracked seed 46fe8f6b6def, interpreter, --no-cache):
+  `test/01_unit/compiler/parser/module_noinit_zero_default_spec.spl`
+  outcome=OK executed=15 passed=15 failed=0;
+  `test/01_unit/compiler/parser/module_noinit_enum_class_zero_spec.spl`
+  outcome=OK executed=7 passed=7 failed=0. The boot6 addendum above queued
+  these pins but left no in-tree evidence file at this base, so they were
+  re-run here on this lane's sanctioned binary.
+- End-to-end native-build rc=0 for a modvar fixture remains as recorded by
+  W3b (2026-11-05); not re-run in-lane (heavy-forbidden interpreted worker).

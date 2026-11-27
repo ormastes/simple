@@ -1,0 +1,57 @@
+"""Coordinator seal covers the dead owner's fork tree.
+
+native_mir_fork_v1.spl children claim under "<root>+fork<k>/<n>" and the
+per-file unit loop's MIR child under "<worker>+fork-m<round>"
+(HIR_SHARD_FORK_OWNER_MARK_V1). When the coordinator kills a timed-out or
+crashed owner, PR_SET_PDEATHSIG (runtime_fork.c) takes every fork child with
+it, so no child seals its own claims. The coordinator counted progress over the
+tree (hir_shard_recovery_owner_tree_progress_v1) but sealed the ROOT owner only,
+leaving claims nobody terminalizes: close_inventory read -1 (fail closed, but
+the crash attribution under go-to-end was lost and `sealed=0` under-reported).
+"""
+# @cover src/compiler/80.driver/driver_hir_recovery.spl
+use std.spec.*
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_inventory,
+    hir_shard_recovery_seal, hir_shard_recovery_owner_tree_progress_v1, hir_shard_recovery_terminal,
+    hir_shard_recovery_close_inventory, hir_shard_recovery_failed_rows_v1, HIR_SHARD_FORK_OWNER_MARK_V1}
+use std.io_runtime.{dir_create_all, dir_exists, getpid}
+
+fn fork_seal_fixture(label: text) -> text:
+    val queue = "build/test_output/fork_rows_seal/{getpid()}-{label}"
+    expect(dir_exists(queue)).to_equal(false)
+    expect(dir_create_all(queue)).to_equal(true)
+    queue
+
+describe "fork-child rows after the root owner is reaped":
+    it "are sealed by the coordinator's seal of the root, under each row's own claim owner":
+        val queue = fork_seal_fixture("tree")
+        val root = "0/2@0"
+        val child = root + HIR_SHARD_FORK_OWNER_MARK_V1 + "0/2"
+        expect(hir_shard_recovery_inventory(queue, "id-x", ["m.a", "m.b"])).to_equal(true)
+        expect(hir_shard_recovery_claim(queue, child, "m.a", "id-x")).to_equal(1)
+        expect(hir_shard_recovery_owner_tree_progress_v1(queue, root)).to_equal(1)
+        expect(hir_shard_recovery_seal(queue, root, "CRASH")).to_equal(1)
+        expect(hir_shard_recovery_close_inventory(queue, false)).to_equal(1)
+        expect(hir_shard_recovery_failed_rows_v1(queue)).to_equal(["BLOCKED m.b", "CRASH m.a"])
+
+    it "covers the per-file unit loop's +fork-m child and a re-forked ~r child, and skips sealed rows":
+        val queue = fork_seal_fixture("units")
+        val worker = "1/2@0"
+        val unit = worker + HIR_SHARD_FORK_OWNER_MARK_V1 + "-m3"
+        val refork = worker + HIR_SHARD_FORK_OWNER_MARK_V1 + "1/2~r1"
+        expect(hir_shard_recovery_inventory(queue, "id-y", ["u.a", "u.b", "u.c"])).to_equal(true)
+        expect(hir_shard_recovery_claim(queue, unit, "u.a", "id-y")).to_equal(1)
+        expect(hir_shard_recovery_claim(queue, refork, "u.b", "id-y")).to_equal(1)
+        # The unit loop sealed its own round before the worker died.
+        expect(hir_shard_recovery_terminal(queue, unit, "u.a", "PASS", true)).to_equal(true)
+        expect(hir_shard_recovery_seal(queue, worker, "TIMEOUT")).to_equal(1)
+        expect(hir_shard_recovery_failed_rows_v1(queue)).to_equal(["TIMEOUT u.b"])
+
+    it "never seals a sibling root's tree":
+        val queue = fork_seal_fixture("sibling")
+        val mine = "0/2@0"
+        val sibling_child = "1/2@0" + HIR_SHARD_FORK_OWNER_MARK_V1 + "0/2"
+        expect(hir_shard_recovery_inventory(queue, "id-z", ["s.a"])).to_equal(true)
+        expect(hir_shard_recovery_claim(queue, sibling_child, "s.a", "id-z")).to_equal(1)
+        expect(hir_shard_recovery_seal(queue, mine, "CRASH")).to_equal(0)
+        expect(hir_shard_recovery_failed_rows_v1(queue).len()).to_equal(0)

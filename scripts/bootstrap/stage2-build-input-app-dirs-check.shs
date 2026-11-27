@@ -1,0 +1,124 @@
+#!/bin/sh
+# Verify scripts/bootstrap/stage2-build-input-app-dirs.txt is closed under
+# every reachability channel into src/app the Stage 2/3 build can observe:
+#   1. `use|from|import app.X` imports from the core compiler roots
+#      (src/compiler src/lib src/os src/runtime src/plugins src/compositions
+#      src/package_ownership), walked transitively through listed app dirs;
+#   2. the same import forms in TOP-LEVEL src/app files (src/app/*.spl,
+#      src/app/*.sdn) — entry points like src/app/main.spl and src/app/*.sdn
+#      manifests reach app dirs without any importing module naming them;
+#   3. PATH-SPELLED reach — scripts under scripts/bootstrap and
+#      scripts/check/lib that name src/app/<dir> directly. These are reported
+#      as NOTEs, not verdict failures: most belong to phase-4 tooling,
+#      sanity runners and fixtures that execute AFTER stage2/3 admission, and
+#      listing them would re-break the incident fix (unrelated app churn
+#      refusing admission). Owner triage owns promoting a NOTE to a listed
+#      dir; the import channels (1,2) stay fail-closed.
+# The Stage 2/3 quiescence snapshot (command-snapshot.shs) treats only the
+# listed src/app dirs as build inputs, so a missing import-reachable dir
+# would be fail-open.
+# Bug: stage2_admission_source_quiescence_unsatisfiable_in_shared_tree_2026-08-31
+#
+# Usage: stage2-build-input-app-dirs-check.shs [--root DIR] [--print] [--selftest]
+# Verdict (last stdout line): PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+set -u
+
+closure() (
+  r=$1
+  core="src/compiler src/lib src/os src/runtime src/plugins src/compositions src/package_ownership"
+  refs() { grep -rhoE '^[[:space:]]*(use|from|import)[[:space:]]+app\.[A-Za-z0-9_]+' "$@" 2>/dev/null |
+    sed -E 's/.*app\.//' | sort -u; }
+  cd "$r" || exit 2
+  # Channels 1+2: core roots AND top-level src/app files seed the walk.
+  queue="cli io compiler_entrypoint $(refs src/app/*.spl src/app/*.sdn) \
+    $(for d in $core; do [ -d "$d" ] && refs "$d"; done)"
+  seen=" "
+  while [ -n "$(echo $queue)" ]; do
+    set -- $queue; d=$1; shift; queue="$*"
+    case "$seen" in *" $d "*) continue ;; esac
+    [ -d "src/app/$d" ] || continue
+    seen="$seen$d "
+    queue="$queue $(refs "src/app/$d")"
+  done
+  echo $seen | tr ' ' '\n' | sed '/^$/d' | sort
+)
+
+# Channel 3: dirs named by the src/app/<dir> path spelling under the bootstrap
+# script roots. Excludes this script (its selftest text spells fixture paths)
+# and nonexistent dirs. Report-only.
+pathrefs() {
+  r=$1
+  list="$r/scripts/bootstrap/stage2-build-input-app-dirs.txt"
+  have=$(listed "$list" 2>/dev/null || true)
+  grep -rhoE 'src/app/[A-Za-z0-9_.-]+' "$r/scripts/bootstrap" "$r/scripts/check/lib" 2>/dev/null |
+    grep -v "scripts/bootstrap/stage2-build-input-app-dirs-check.shs" |
+    sed -E 's/.*src\/app\///' | sort -u |
+    while read -r d; do
+      [ -d "$r/src/app/$d" ] || continue
+      printf '%s\n' "$have" | grep -qxF "$d" || echo "$d"
+    done
+}
+
+listed() { sed -e 's/[[:space:]]*$//' -e '/^#/d' -e '/^$/d' "$1" | sort -u; }
+
+check() {
+  r=$1
+  list="$r/scripts/bootstrap/stage2-build-input-app-dirs.txt"
+  [ -s "$list" ] || { echo "ERROR — nothing was checked (missing $list)"; return 2; }
+  want=$(closure "$r") || { echo "ERROR — nothing was checked (closure failed)"; return 2; }
+  [ -n "$want" ] || { echo "ERROR — nothing was checked (empty closure)"; return 2; }
+  have=$(listed "$list")
+  missing=$(printf '%s\n' "$want" | while read -r d; do printf '%s\n' "$have" | grep -qxF "$d" || echo "$d"; done)
+  n=$(printf '%s\n' "$want" | wc -l | tr -d ' ')
+  # Channel 3 visibility: path-referenced but unlisted dirs are NOTEs on
+  # stderr, never verdict failures (see header).
+  p=$(pathrefs "$r")
+  [ -n "$p" ] && printf 'NOTE path-referenced but unlisted (report-only, see header): %s\n' "$(echo $p)" >&2
+  if [ -n "$missing" ]; then
+    echo "FAIL — $n build-input app dir(s) in closure, unlisted: $(echo $missing)"
+    return 1
+  fi
+  echo "PASS — $n build-input app dir(s) checked, all listed"
+}
+
+selftest() {
+  t=$(mktemp -d) || return 2
+  trap 'rm -rf "$t"' EXIT
+  mkdir -p "$t/src/compiler" "$t/src/app/cli" "$t/src/app/io" "$t/src/app/compiler_entrypoint" \
+    "$t/src/app/util" "$t/src/app/spipe" "$t/src/app/toplevel" "$t/scripts/bootstrap"
+  printf 'use app.util.x\n' >"$t/src/compiler/a.spl"
+  printf 'from app.io import y\n' >"$t/src/app/cli/m.spl"
+  printf 'use app.spipe.z\n' >"$t/src/app/spipe/m.spl"
+  # Channel 2: a top-level src/app file reaches an app dir no module names.
+  printf 'use app.toplevel.entry\n' >"$t/src/app/main.spl"
+  printf '# c\ncli\ncompiler_entrypoint\nio\ntoplevel\nutil\n' >"$t/scripts/bootstrap/stage2-build-input-app-dirs.txt"
+  out=$(check "$t"); rc=$?
+  [ $rc -eq 0 ] || { echo "selftest: closed list should PASS: $out" >&2; return 1; }
+  printf 'import app.newdep\n' >"$t/src/app/util/n.spl"; mkdir -p "$t/src/app/newdep"
+  out=$(check "$t"); rc=$?
+  [ $rc -eq 1 ] && echo "$out" | grep -q newdep || { echo "selftest: unlisted dep should FAIL: $out" >&2; return 1; }
+  # Channel 2 fail-closed: drop toplevel from the list; the top-level file's
+  # import must now FAIL the check even though no importing module names it.
+  printf '# c\ncli\ncompiler_entrypoint\nio\nutil\n' >"$t/scripts/bootstrap/stage2-build-input-app-dirs.txt"
+  out=$(check "$t"); rc=$?
+  [ $rc -eq 1 ] && echo "$out" | grep -q toplevel || { echo "selftest: unlisted top-level reach should FAIL: $out" >&2; return 1; }
+  : >"$t/scripts/bootstrap/stage2-build-input-app-dirs.txt"
+  check "$t" >/dev/null; [ $? -eq 2 ] || { echo "selftest: empty list should ERROR" >&2; return 1; }
+  return 0
+}
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+mode=check
+while [ $# -gt 0 ]; do
+  case $1 in
+    --root) root=$2; shift ;;
+    --print) mode=print ;;
+    --selftest) mode=selftest ;;
+    *) echo "ERROR — nothing was checked (unknown arg $1)"; exit 2 ;;
+  esac
+  shift
+done
+if [ "$mode" = print ]; then closure "$root"; exit $?; fi
+( selftest ) || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+[ "$mode" = selftest ] && { echo "PASS — selftest 4 fixture(s)"; exit 0; }
+check "$root"

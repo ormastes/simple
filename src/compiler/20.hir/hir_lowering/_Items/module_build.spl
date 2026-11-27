@@ -1,10 +1,18 @@
 # HIR item lowering - module, import, and bootstrap-flat lowering.
+use compiler.hir.binding_annotation_provenance.{hir_local_annotation_copy}
+use compiler.hir.hir_lowering.attr_access_sites.{hir_collect_attr_sites_v1}
+use compiler.hir.hir_lowering.required_field_init_v1.{hir_required_field_init_check_v1, required_init_effective_mode_v1,
+    hir_async_immutable_attr_v1, RequiredInitReportV1}
 use compiler.hir.hir_lowering._Items.module_lowering.*
 # HIR Lowering - Item Lowering
 #
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
 
 use compiler.hir.hir_types.*
+use compiler.hir.hir_owner_name.{hir_owner_name_is_canonical, hir_symbol_owner_module}
+use compiler.hir.hir_symbol_table_methods.{hir_symbol_declaration_category_v1, hir_declaration_origin_snapshot_skipped_v1}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path}
+use compiler.frontend.declaration_intent_v1.{parser_declaration_intent_index_v1}
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
@@ -16,6 +24,7 @@ use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
 use compiler.hir.hir_lowering.expressions.*
+use compiler.hir.hir_lowering._Expressions.call_arity.*
 use compiler.hir.hir_lowering._Items.lowering_helpers.{
     bootstrap_hir_modules_add, bootstrap_hir_functions_reset,
     bootstrap_hir_functions_add, bootstrap_hir_function_count
@@ -39,7 +48,7 @@ use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_
 use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 
 extern fn rt_enum_discriminant<T>(value: T) -> i64
-extern fn rt_enum_payload(value: StmtKind) -> Expr
+extern fn rt_enum_payload(value: StmtKind) -> Expr?
 use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
 use compiler.frontend.core._AstExpr.accessors.{expr_get_arg_names}
 use compiler.core.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
@@ -50,14 +59,154 @@ use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.hir_function_order.{hir_function_symbol_order}
 
+# A module `var` named in its owner's `export` list is public API (exported
+# symbols are Public by default). Lift only an undeclared (Private) mutable
+# static: the owner then emits the native accessor and every importer binds it,
+# instead of the importer's backend refusing an "imported non-public module
+# static". Explicit scoped visibility is kept, and immutable values keep the
+# private inline-literal import path unchanged.
+fn hir_module_exported_names(module: ParserModule) -> Dict<text, bool>:
+    var names: Dict<text, bool> = {}
+    for exp in module.exports:
+        for item in exp.items:
+            names[item] = true
+    names
+
+fn hir_const_with_export_visibility(hir_const: HirConst, exported: Dict<text, bool>) -> HirConst:
+    if not hir_const.is_mutable or hir_const.visibility != Visibility.Private or not exported.has(hir_const.name):
+        return hir_const
+    var lifted = hir_const
+    lifted.visibility = Visibility.Public
+    # Keep the ABI/interface digest (keyed on is_public) in step with the
+    # linkage change so cached importers rebuild instead of missing the accessor.
+    lifted.is_public = true
+    lifted
+
+fn hir_module_path_is_scv_snapshot_v1(path: text) -> bool:
+    # Mirrors _hir_symbol_path_is_scv_snapshot_v1 in hir_symbol_table_methods.spl
+    # (kept private to the symbol-table module); the two predicates must move together.
+    if path == "":
+        return false
+    val normalized = path.replace("\\", "/")
+    normalized.contains("/scv/") or normalized.contains("/scv_snapshots/") or normalized.contains("scv-revision-")
+
 impl HirLowering:
+    fn owner_canonical_source_path_v1() -> text:
+        if self.module_filename != "" and self.module_surfaces.index_by_name.contains_key(self.module_filename):
+            val s_idx = self.module_surfaces.index_by_name[self.module_filename]
+            if s_idx >= 0 and s_idx < self.module_surfaces.surfaces.len():
+                val surf_path = self.module_surfaces.surfaces[s_idx].canonical_path
+                if surf_path != "":
+                    return surf_path
+        module_surface_canonical_path(self.module_filename)
+
+    fn parsed_module_matches_owner_v1(parsed_name: text) -> bool:
+        if self.module_filename == "":
+            return true
+        val parsed_is_canonical = hir_owner_name_is_canonical(parsed_name)
+        if self.module_surfaces.index_by_name.contains_key(self.module_filename):
+            val s_idx = self.module_surfaces.index_by_name[self.module_filename]
+            if s_idx >= 0 and s_idx < self.module_surfaces.surfaces.len():
+                val surf = self.module_surfaces.surfaces[s_idx]
+                if parsed_is_canonical:
+                    return (surf.module_name != "" and parsed_name == surf.module_name) or parsed_name == surf.canonical_name
+                return surf.canonical_path != "" and module_surface_canonical_path(parsed_name) == surf.canonical_path
+        val owner_is_canonical = hir_owner_name_is_canonical(self.module_filename)
+        if parsed_is_canonical and owner_is_canonical:
+            return parsed_name == self.module_filename
+        if not parsed_is_canonical and not owner_is_canonical:
+            return module_surface_canonical_path(parsed_name) == module_surface_canonical_path(self.module_filename)
+        if not parsed_is_canonical and owner_is_canonical:
+            return hir_symbol_owner_module(parsed_name) == self.module_filename
+        hir_symbol_owner_module(self.module_filename) == parsed_name
+
+    me bind_source_declaration_origin_v1(intents: Dict<text, text>, id: SymbolId, category: text, source_name: text):
+        val key = category + ":" + source_name
+        if not intents.contains_key(key): return
+        # Standalone owner-less lowering has no canonical source authority.
+        # Keep it Unknown; the driver always installs an authenticated owner.
+        if self.module_filename == "": return
+        val source_path = self.owner_canonical_source_path_v1()
+        if source_path == "" and hir_module_path_is_scv_snapshot_v1(self.module_filename):
+            return
+        val owner = hir_symbol_owner_module(self.module_filename)
+        val bound = self.symbols.bind_declaration_origin_v1(id, owner, source_name,
+            intents[key], source_path, key)
+        if bound.is_err():
+            self.error(bound.unwrap_err(), Span.empty())
+        elif not bound.unwrap():
+            # Ok(false) is a by-design skip inside bind_declaration_origin_v1:
+            # the transparent-alias shared-SymbolId guard, and the SCV snapshot
+            # escapes (snapshot-identity predicate + SIMPLE_SCV_INVENTORY_COLD_INIT
+            # gate). The stage-2 sanity snapshot build takes the snapshot escape
+            # for every fixture declaration; erroring unconditionally here
+            # re-arms the origin gate one layer up (cycle 37: p2_add main,
+            # tag_bool, tag_text, tag_i64s all died with "typed declaration did
+            # not retain its source identity" AFTER the v3 gate had already
+            # skipped the bind by design). Mirror the escape predicates so the
+            # sanity snapshot can skip; real module builds keep this fail-closed
+            # error for unexpected skips.
+            if hir_module_path_is_scv_snapshot_v1(self.module_filename) or (hir_module_env_get("SIMPLE_SCV_INVENTORY_COLD_INIT") ?? "") == "1":
+                return
+            # Diagnostic for native_hir_defining_module_empty_local_decls_2026-11-17:
+            # Ok(false) has three causes (empty modifier, key/name mismatch,
+            # snapshot skip); name every input so a native boot shows which.
+            var sym_name = "<missing>"
+            var sym_category = "<missing>"
+            var sym_defining = "<missing>"
+            if self.symbols.symbols.has(id.id):
+                val sym = self.symbols.symbols[id.id]
+                # The SCV-snapshot skip (bootstrap-mode Stage 2) is not a
+                # retention failure; only a genuine Ok(false) reports.
+                if hir_declaration_origin_snapshot_skipped_v1(sym.defining_module ?? "", owner,
+                        self.owner_canonical_source_path_v1()):
+                    return
+                sym_name = sym.name
+                sym_category = hir_symbol_declaration_category_v1(sym)
+                sym_defining = sym.defining_module ?? "<none>"
+            self.error("typed declaration did not retain its source identity: " + key +
+                " [symbol.name=" + sym_name + " category=" + sym_category +
+                " defining_module=" + sym_defining + " owner=" + owner +
+                " modifier=" + intents[key] + " source_path=" +
+                self.owner_canonical_source_path_v1() + "]", Span.empty())
+
+    # Sub-plan P1 wiring (immutable_views_async_init_revisions_2026-11-13.md
+    # section 3.2). Gate SIMPLE_REQUIRED_INIT_CHECK: off (default) | warning |
+    # error, read once per process; a module raises it with
+    # `@required_init(warning|error)` (the stricter wins). The E_ASYNC_INIT_*
+    # rows are errors in every mode because the class annotation is the opt-in;
+    # in off mode the walk runs only for modules that declare an
+    # @support_async_immutable class, so an unannotated module pays nothing.
+    me hir_required_init_apply_v1(built: HirModule, parser_classes: Dict<text, ParserClass>, module_mode: text):
+        val mode = required_init_effective_mode_v1(module_mode)
+        if mode == "off":
+            var any_async = false
+            for name in parser_classes.keys():
+                if hir_async_immutable_attr_v1(parser_classes[name].attributes).0:
+                    any_async = true
+            if not any_async:
+                return
+        val report: RequiredInitReportV1 = hir_required_field_init_check_v1(built.name, built.path,
+            built.symbols, parser_classes, built.classes, built.structs, built.functions)
+        for row in report.rows:
+            val rendered = "{row.code}: {row.message}"
+            val async_code = row.code.starts_with("E_ASYNC_INIT")
+            if async_code or mode == "error":
+                self.error(rendered, row.span)
+            elif mode == "warning":
+                self.record_recovered_diagnostic(rendered, row.span, "warning")
+
     me lower_parser_module_unstub(module: ParserModule, is_entry: bool) -> HirModule:
         # Trap D (iteration 17): env-GATED eprint probes are mute in the
         # hir_lowering modules — `(hir_*_env_get("X") ?? "") == "1"` evaluates
         # false on stage4 even when X=1 — while UNGATED eprint works fine.
         # Probe builds must use ungated eprint here.
         val bootstrap_mode = self.ambient_bootstrap_enabled()
-        val bootstrap_flat_mode = bootstrap_mode and (hir_module_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"
+        val pure_hir_shard = (hir_module_env_get("SIMPLE_HIR_SHARD") ?? "") != "" and
+            (hir_module_env_get("SIMPLE_FILE_WORKER_UNIT") ?? "") != "1"
+        val bootstrap_flat_mode = bootstrap_mode and
+            (hir_module_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1" and
+            not pure_hir_shard
         val bootstrap_closure = bootstrap_mode and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         val parser_constants = module.constants.values()
         # Keep the aggregate out of the stage4 Any-erasure path. HirModule
@@ -70,18 +219,22 @@ impl HirLowering:
             eprint("[hir-finalize] returned future")
         if bootstrap_mode and parser_constants.len() > 0:
             var recovered_constants: Dict<SymbolId, HirConst> = {}
+            val recovered_exported_names = hir_module_exported_names(module)
             var const_idx = 0
             while const_idx < parser_constants.len():
-                val hir_const = self.lower_hir_const_decl(parser_constants[const_idx])
-                recovered_constants[SymbolId(id: const_idx)] = hir_const
+                val hir_const = hir_const_with_export_visibility(self.lower_hir_const_decl(parser_constants[const_idx]), recovered_exported_names)
+                val recovered_key: SymbolId = if hir_const.symbol.is_valid(): hir_const.symbol else: SymbolId(id: const_idx)
+                recovered_constants[recovered_key] = hir_const
                 const_idx = const_idx + 1
             lowered_module.constants = recovered_constants
         elif lowered_module.constants.keys().len() == 0 and parser_constants.len() > 0:
             var recovered_constants: Dict<SymbolId, HirConst> = {}
+            val recovered_exported_names = hir_module_exported_names(module)
             var const_idx = 0
             while const_idx < parser_constants.len():
-                val hir_const = self.lower_hir_const_decl(parser_constants[const_idx])
-                recovered_constants[SymbolId(id: const_idx)] = hir_const
+                val hir_const = hir_const_with_export_visibility(self.lower_hir_const_decl(parser_constants[const_idx]), recovered_exported_names)
+                val recovered_key: SymbolId = if hir_const.symbol.is_valid(): hir_const.symbol else: SymbolId(id: const_idx)
+                recovered_constants[recovered_key] = hir_const
                 const_idx = const_idx + 1
             lowered_module.constants = recovered_constants
         if focused_future_diag:
@@ -199,7 +352,7 @@ impl HirLowering:
         val existing_id = self.symbols.lookup_or_invalid(local_name)
         if not existing_id.is_valid():
             return ""
-        val raw = existing_id.id
+        val raw: i64 = existing_id.id
         val trace_owner = (hir_module_env_get("SIMPLE_HIR_ENUM_OWNER_TRACE") ?? "") == "1"
         if trace_owner:
             eprint("[enum-owner-trace] ROWS-MISS name={local_name} raw={raw} rows={self.imported_enum_owner_rows.len()}")
@@ -213,7 +366,7 @@ impl HirLowering:
             eprint("[enum-owner-trace] EMPTY-DEFINING-MODULE name={local_name} raw={raw}")
         owner
 
-    me lower_module_enum_definitions(module: ParserModule) -> Dict<SymbolId, HirEnum>:
+    me lower_module_enum_definitions(module: ParserModule, source_intents: Dict<text, text> = {}) -> Dict<SymbolId, HirEnum>:
         var lowered: Dict<SymbolId, HirEnum> = {}
         val imported_names = self.imported_enums.keys()
         var enum_idx = 0
@@ -240,13 +393,29 @@ impl HirLowering:
         while enum_idx < local_names.len():
             val local_name = local_names[enum_idx]
             val hir_enum = self.lower_enum(module.enums[local_name], hir_module_logical_name_from_path(module.name))
+            self.bind_source_declaration_origin_v1(source_intents, hir_enum.symbol, "enum", local_name)
             lowered[hir_enum.symbol] = hir_enum
             enum_idx = enum_idx + 1
         lowered
 
     me lower_module(module: ParserModule) -> HirModule:
+        self.local_annotation_provenance = {}
+        # Keyed by module-local SymbolId, which restarts at zero per module.
+        self.local_optional_call_init = {}
+        # Re-home Scope(0) into the active transient scope so promotion walks
+        # starting from table.scopes or HirModule descend into Scope(0).binding_versions_v1
+        # even when reset_module() ran before rt_transient_array_scope_begin().
+        self.symbols.rehome_root_scope_for_active_transient_v1()
         # Opt-in no-GC ownership-sigil mode, carried on the module by the flat
         # bridge from `@no_gc(strict)` (memory.md).
+        var source_intents: Dict<text, text> = {}
+        val source_intent_result = parser_declaration_intent_index_v1(module.source_declaration_intents_v1)
+        if source_intent_result.is_err():
+            self.error(source_intent_result.unwrap_err(), Span.empty())
+        elif module.source_declaration_intents_v1.len() > 0 and (module.source_declaration_digest_v1 == "" or not self.parsed_module_matches_owner_v1(module.name)):
+            self.error("source declaration facts do not belong to this HIR module owner", Span.empty())
+        else:
+            source_intents = source_intent_result.unwrap()
         self.nogc_strict = module.nogc_strict
         # Probe MUST be eprint AND ungated (Traps A/C/D, bug doc iters 13-17).
         val bootstrap_mode = self.ambient_bootstrap_enabled()
@@ -273,6 +442,7 @@ impl HirLowering:
             # SIMPLE_COMPILER_TRACE=1 ("class `ParserModule` has no field named `path`").
             eprint("[hir-lower] lower_module:start module={module.name}")
         self.lowered_impl_functions = {}
+        self.record_impl_textual_method_keys(module.impls)
         self.imported_traits = {}
         self.imported_enums = {}
         self.imported_enum_owners = {}
@@ -316,8 +486,12 @@ impl HirLowering:
                 eprint("[hir-lower] resolve_import_symbols:start module={module.name}")
             val prof_imports_started = hir_phase_profile_now()
             self.registering_import_symbols = true
+            self.registering_sibling_symbols = false
             self.resolve_import_symbols(module)
+            hir_module_phase_probe("phase3:hir:imports:siblings:start {module.name}")
+            self.registering_sibling_symbols = true
             self.resolve_package_sibling_symbols(module)
+            self.registering_sibling_symbols = false
             self.registering_import_symbols = false
             hir_phase_profile_add(HIR_PROF_IMPORTS, prof_imports_started)
             if bootstrap_diag:
@@ -339,7 +513,8 @@ impl HirLowering:
             # bootstrap_decl_idx loop below, so this only widens declaration
             # coverage to types/consts for the closure path.
             val prof_declare_started = hir_phase_profile_now()
-            self.declare_module_symbols(module)
+            self.declare_module_symbols_with_source_intents_v1(module, source_intents)
+            self.validate_public_alias_private_targets_v1(module, source_intents)
             hir_phase_profile_add(HIR_PROF_DECLARE, prof_declare_started)
             hir_module_phase_probe("phase3:hir:declare:done {module.name}")
         if bootstrap_diag:
@@ -394,6 +569,16 @@ impl HirLowering:
             val prescan_name = prescan_class_names[prescan_idx]
             val prescan_class: ParserClass = module.classes[prescan_name]
             self.prescan_composite_field_types(prescan_name, prescan_class.fields, prescan_class.type_params)
+            prescan_idx = prescan_idx + 1
+        # Class methods arrive as a synthetic impl block (the parser empties
+        # classes[..].methods), so a generic owner's method return types are
+        # read from module.impls (bug generic_method_return_subst_2026_11_09).
+        prescan_idx = 0
+        while prescan_idx < module.impls.len():
+            val prescan_impl: Impl = module.impls[prescan_idx]
+            if prescan_impl.type_params.len() > 0 and not prescan_impl.has_trait_:
+                val prescan_owner = parser_type_kind_named_name(prescan_impl.type_.kind)
+                self.prescan_generic_class_method_returns(prescan_owner, prescan_impl.methods, prescan_impl.type_params)
             prescan_idx = prescan_idx + 1
 
         # Second pass: lower definitions
@@ -473,6 +658,11 @@ impl HirLowering:
             # same-module call in bootstrap_main.spl itself.
             val bootstrap_decl_qualify = bootstrap_closure and not hir_module_is_bootstrap_entry(module.name)
             val bootstrap_decl_module_name = hir_module_logical_name_from_path(module.name)
+            # Typed `text?` + `None` (matches declare_module_symbols_with_source_intents_v1):
+            # pre-declared local bootstrap functions must retain their owning module
+            # so bind_source_declaration_origin_v1 validates origin without SCV cold-init
+            # escapes, while standalone owner-less lowering (`module_filename == ""`) keeps None.
+            val bootstrap_decl_defining_module: text? = if self.module_filename != "": Some(self.module_filename) else: None
             var bootstrap_decl_idx = 0
             while bootstrap_decl_idx < bootstrap_function_keys.len():
                 val bootstrap_decl_fn: ParserFunction = bootstrap_module_functions[bootstrap_function_keys[bootstrap_decl_idx]]
@@ -485,7 +675,10 @@ impl HirLowering:
                 # xs[0] + xs[1] -> rt_strcat_tagged). Generic templates stay
                 # untyped (declared_callable_type returns nil for them).
                 val bootstrap_decl_type = self.declared_callable_type(bootstrap_decl_fn, nil)
-                val bootstrap_decl_sym = self.symbols.define(bootstrap_decl_fn.name, SymbolKind.Function, bootstrap_decl_type, Span.empty(), Visibility.Private, false, nil)
+                val bootstrap_decl_sym = self.symbols.define(bootstrap_decl_fn.name, SymbolKind.Function, bootstrap_decl_type, Span.empty(), Visibility.Private, false, bootstrap_decl_defining_module)
+                self.symbols.mark_generic_callable(bootstrap_decl_sym, bootstrap_decl_fn.type_params.len())
+                self.prescan_generic_function_return(bootstrap_decl_sym, bootstrap_decl_fn)
+                self.record_call_arity_row(bootstrap_decl_sym.id, bootstrap_decl_fn, false)
                 # Extern fns must keep their BARE runtime symbol: qualifying
                 # them ("std.nogc_sync_mut.simd.rt_simd_has_avx2") makes every
                 # same-module call emit an undefined module-prefixed symbol at
@@ -500,6 +693,7 @@ impl HirLowering:
                 if bootstrap_diag:
                     eprint("[hir-lower] function:start module={module.name} name={bootstrap_fn.name} idx={lower_idx}")
                 val hir_fn = self.lower_function(bootstrap_fn)
+                self.bind_source_declaration_origin_v1(source_intents, hir_fn.symbol, "function", bootstrap_fn.name)
                 if hir_fn.is_gpu_kernel:
                     gpu_function_targets[hir_fn.name] = hir_fn.gpu_target
                     gpu_function_backend_orders[hir_fn.name] = hir_fn.gpu_backend_order
@@ -518,6 +712,7 @@ impl HirLowering:
                     eprint("[hir-lower] function:done module={module.name} name={bootstrap_fn.name} idx={lower_idx}")
                 lower_idx = lower_idx + 1
         else:
+            self.record_call_arity_rows(module.functions)
             val lower_module_functions = module.functions
             val lower_function_keys = lower_module_functions.keys()
             while lower_idx < lower_function_keys.len():
@@ -526,6 +721,7 @@ impl HirLowering:
                 val fn_: ParserFunction = lower_module_functions[name]
                 val prof_fn_started = hir_phase_profile_now()
                 val hir_fn = self.lower_function(fn_)
+                self.bind_source_declaration_origin_v1(source_intents, hir_fn.symbol, "function", fn_.name)
                 hir_phase_profile_add(HIR_PROF_FUNCTIONS, prof_fn_started)
                 if hir_fn.is_gpu_kernel:
                     gpu_function_targets[hir_fn.name] = hir_fn.gpu_target
@@ -556,8 +752,8 @@ impl HirLowering:
                 # loop-index synthetic key only if `lookup` can't find the name
                 # (defensive; should not happen since `declare_module_symbols`
                 # always pre-declares every function first). Every HIR-functions
-                # consumer iterates `.keys()`/`.values()` (monomorphize_integration,
-                # backend translate, interpreter main-by-name scan) and
+                # consumer iterates `.keys()`/`.values()` (backend translate,
+                # interpreter main-by-name scan) and
                 # re-indexes with the yielded key, so any distinct key preserves
                 # all entries and all consumers -- using the real symbol id is a
                 # strict improvement, not just a distinct one.
@@ -588,6 +784,7 @@ impl HirLowering:
                 while bootstrap_class_idx < bootstrap_class_keys.len():
                     val bootstrap_class_: ParserClass = bootstrap_module_classes[bootstrap_class_keys[bootstrap_class_idx]]
                     val bootstrap_hir_class = self.lower_class(bootstrap_class_)
+                    self.bind_source_declaration_origin_v1(source_intents, bootstrap_hir_class.symbol, "class", bootstrap_class_.name)
                     classes[bootstrap_hir_class.symbol] = bootstrap_hir_class
                     bootstrap_class_idx = bootstrap_class_idx + 1
 
@@ -597,12 +794,13 @@ impl HirLowering:
                 while bootstrap_struct_idx < bootstrap_struct_keys.len():
                     val bootstrap_struct_: ParserStruct = bootstrap_module_structs[bootstrap_struct_keys[bootstrap_struct_idx]]
                     val bootstrap_hir_struct = self.lower_struct(bootstrap_struct_)
+                    self.bind_source_declaration_origin_v1(source_intents, bootstrap_hir_struct.symbol, "struct", bootstrap_struct_.name)
                     structs[bootstrap_hir_struct.symbol] = bootstrap_hir_struct
                     self.register_struct_field_types(bootstrap_hir_struct)
                     bootstrap_struct_idx = bootstrap_struct_idx + 1
 
                 val prof_enums_started = hir_phase_profile_now()
-                enums = self.lower_module_enum_definitions(module)
+                enums = self.lower_module_enum_definitions(module, source_intents)
                 hir_phase_profile_add(HIR_PROF_ENUMS, prof_enums_started)
 
                 val bootstrap_module_bitfields = module.bitfields
@@ -620,6 +818,7 @@ impl HirLowering:
                 while bootstrap_trait_idx < bootstrap_trait_keys.len():
                     val bootstrap_trait_: ParserTrait = bootstrap_module_traits[bootstrap_trait_keys[bootstrap_trait_idx]]
                     val bootstrap_hir_trait = self.lower_trait(bootstrap_trait_)
+                    self.bind_source_declaration_origin_v1(source_intents, bootstrap_hir_trait.symbol, "trait", bootstrap_trait_.name)
                     traits[bootstrap_hir_trait.symbol] = bootstrap_hir_trait
                     bootstrap_trait_idx = bootstrap_trait_idx + 1
 
@@ -647,12 +846,14 @@ impl HirLowering:
             # like the non-bootstrap path below (line ~1284).
             var bootstrap_constants: Dict<SymbolId, HirConst> = {}
             val bootstrap_const_names = module.constants.keys()
+            val bootstrap_exported_names = hir_module_exported_names(module)
             if bootstrap_diag and bootstrap_const_names.len() > 0:
                 eprint("[hir-lower] bootstrap-constants:count module={module.name} count={bootstrap_const_names.len()}")
             var bootstrap_const_idx = 0
             while bootstrap_const_idx < bootstrap_const_names.len():
                 val bootstrap_const_src: ParserConst = module.constants[bootstrap_const_names[bootstrap_const_idx]]
-                val bootstrap_hir_const = self.lower_hir_const_decl(bootstrap_const_src)
+                val bootstrap_hir_const = hir_const_with_export_visibility(self.lower_hir_const_decl(bootstrap_const_src), bootstrap_exported_names)
+                self.bind_source_declaration_origin_v1(source_intents, bootstrap_hir_const.symbol, "constant", bootstrap_const_src.name)
                 bootstrap_constants[bootstrap_hir_const.symbol] = bootstrap_hir_const
                 bootstrap_const_idx = bootstrap_const_idx + 1
             if bootstrap_diag:
@@ -670,7 +871,8 @@ impl HirLowering:
             val bootstrap_arch_rules: [HirArchRule] = []
             val bootstrap_mock_decls: [HirMockDecl] = []
             val bootstrap_types: [text] = []
-            return HirModule(
+            val built_bootstrap = HirModule(
+                local_annotation_provenance: hir_local_annotation_copy(self.local_annotation_provenance),
                 name: module.name,
                 path: self.module_filename,
                 imports: bootstrap_imports,
@@ -682,6 +884,7 @@ impl HirLowering:
                 gpu_function_backend_orders: gpu_function_backend_orders,
                 classes: classes,
                 structs: structs,
+                imported_layouts: self.imported_layouts,
                 enums: enums,
                 bitfields: bitfields,
                 traits: traits,
@@ -695,8 +898,11 @@ impl HirLowering:
                 types: bootstrap_types,
                 representation_declarations: module.representation_declarations,
                 extend_enums: [],
-                nogc_strict: module.nogc_strict
+                nogc_strict: module.nogc_strict,
+                attr_sites: hir_collect_attr_sites_v1(module.name, self.symbols, module.classes, classes, functions)
             )
+            self.hir_required_init_apply_v1(built_bootstrap, module.classes, module.required_init_mode)
+            return built_bootstrap
 
         val lower_module_classes = module.classes
         val lower_class_keys = lower_module_classes.keys()
@@ -705,6 +911,7 @@ impl HirLowering:
             val name = lower_class_keys[lower_idx]
             val class_: ParserClass = lower_module_classes[name]
             val hir_class = self.lower_class(class_)
+            self.bind_source_declaration_origin_v1(source_intents, hir_class.symbol, "class", class_.name)
             classes[hir_class.symbol] = hir_class
             lower_idx = lower_idx + 1
 
@@ -715,12 +922,13 @@ impl HirLowering:
             val name = lower_struct_keys[lower_idx]
             val struct_: ParserStruct = lower_module_structs[name]
             val hir_struct = self.lower_struct(struct_)
+            self.bind_source_declaration_origin_v1(source_intents, hir_struct.symbol, "struct", struct_.name)
             structs[hir_struct.symbol] = hir_struct
             self.register_struct_field_types(hir_struct)
             lower_idx = lower_idx + 1
 
         val prof_enums_started = hir_phase_profile_now()
-        enums = self.lower_module_enum_definitions(module)
+        enums = self.lower_module_enum_definitions(module, source_intents)
         hir_phase_profile_add(HIR_PROF_ENUMS, prof_enums_started)
 
         val lower_module_bitfields = module.bitfields
@@ -740,6 +948,7 @@ impl HirLowering:
             val name = lower_trait_keys[lower_idx]
             val trait_: ParserTrait = lower_module_traits[name]
             val hir_trait = self.lower_trait(trait_)
+            self.bind_source_declaration_origin_v1(source_intents, hir_trait.symbol, "trait", trait_.name)
             traits[hir_trait.symbol] = hir_trait
             lower_idx = lower_idx + 1
 
@@ -757,10 +966,12 @@ impl HirLowering:
             lower_idx = lower_idx + 1
 
         val lower_const_names = module.constants.keys()
+        val exported_names = hir_module_exported_names(module)
         lower_idx = 0
         while lower_idx < lower_const_names.len():
             val const_: ParserConst = module.constants[lower_const_names[lower_idx]]
-            val hir_const = self.lower_hir_const_decl(const_)
+            val hir_const = hir_const_with_export_visibility(self.lower_hir_const_decl(const_), exported_names)
+            self.bind_source_declaration_origin_v1(source_intents, hir_const.symbol, "constant", const_.name)
             constants[SymbolId(id: lower_idx)] = hir_const
             lower_idx = lower_idx + 1
 
@@ -824,7 +1035,8 @@ impl HirLowering:
             for item in exp.items:
                 exports = exports.push(item)
 
-        HirModule(
+        val built = HirModule(
+            local_annotation_provenance: hir_local_annotation_copy(self.local_annotation_provenance),
             name: module.name,
             path: self.module_filename,
             imports: imports,
@@ -836,6 +1048,7 @@ impl HirLowering:
             gpu_function_backend_orders: gpu_function_backend_orders,
             classes: classes,
             structs: structs,
+            imported_layouts: self.imported_layouts,
             enums: enums,
             bitfields: bitfields,
             traits: traits,
@@ -849,5 +1062,8 @@ impl HirLowering:
             types: [],
             extend_enums: hir_extend_enums,
             representation_declarations: module.representation_declarations,
-            nogc_strict: module.nogc_strict
+            nogc_strict: module.nogc_strict,
+            attr_sites: hir_collect_attr_sites_v1(module.name, self.symbols, module.classes, classes, functions)
         )
+        self.hir_required_init_apply_v1(built, module.classes, module.required_init_mode)
+        built

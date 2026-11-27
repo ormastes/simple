@@ -1,0 +1,105 @@
+# Bug option_struct_none_box_freed_by_transient_scope_2026_11_09 (general
+# class of stage3_native_build_heap_corruption_c0000374_2026_11_08).
+#
+# In native code `nil` for an Option<struct> is a heap-boxed None enum. Before
+# the runtime fix, a None allocated INSIDE a transient scope was scope-owned
+# and freed at scope end, so every function with this (old, un-gated) shape
+# returned a dangling box: `== nil` on it read freed memory (false) and the
+# caller unwrapped garbage. The fix makes payload-less variants (None, unit
+# variants) process-lifetime singletons in rt_enum_new, so this shape is
+# correct WITHOUT a call-site workaround.
+#
+# Expected (fixed runtime): all three probes report the None as nil, the
+# promoted Some survives, exit 0. Red (old runtime): `miss-case hit=true`
+# and/or `unit-case nil=false`, exit 1.
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+struct Box:
+    v: i64
+    path: text
+
+enum Mode:
+    Idle
+    Busy(i64)
+
+fn load_in_scope(flag: bool) -> Box?:
+    val p = "probe/" + "path.spl"
+    if not flag:
+        return nil
+    Some(Box(v: 1, path: p))
+
+# Old shape: returns `decoded` straight out of the scope, no hit gate.
+fn load(flag: bool) -> Box?:
+    if not transient_scope_begin():
+        return nil
+    val decoded = load_in_scope(flag)
+    val paused = transient_scope_pause()
+    var promoted = true
+    if paused and decoded != nil:
+        promoted = transient_promote(decoded)
+    val ended = transient_scope_end()
+    if not paused or not promoted or not ended:
+        panic("scope ownership failed")
+    decoded
+
+fn load_parsed(flag: bool, source_path: text) -> Box?:
+    val loaded = load(flag)
+    if source_path == "" or loaded == nil:
+        return loaded
+    var m = loaded.unwrap()
+    m.path = source_path
+    Some(m)
+
+# A custom unit variant built inside a scope and returned past its end.
+fn mode_in_scope() -> Mode?:
+    if not transient_scope_begin():
+        return nil
+    val m = Mode.Idle
+    val paused = transient_scope_pause()
+    val ended = transient_scope_end()
+    if not paused or not ended:
+        panic("scope ownership failed")
+    Some(m)
+
+# Promoting a None must stay a no-op success (immortal root).
+fn promote_none() -> bool:
+    if not transient_scope_begin():
+        return false
+    val none: Box? = load_in_scope(false)
+    val paused = transient_scope_pause()
+    val promoted = transient_promote(none)
+    val ended = transient_scope_end()
+    paused and ended and promoted
+
+fn main() -> i64:
+    var failed = false
+    val r = load_parsed(false, "x")
+    val hit = r != nil
+    print "miss-case hit={hit}"
+    if hit:
+        failed = true
+    val r2 = load_parsed(true, "y")
+    val hit2 = r2 != nil
+    print "hit-case hit={hit2}"
+    if not hit2:
+        failed = true
+    val mode = mode_in_scope()
+    var idle = false
+    if val m = mode:
+        match m:
+            case Mode.Idle:
+                idle = true
+            case _:
+                idle = false
+    print "unit-case idle={idle}"
+    if not idle:
+        failed = true
+    val pn = promote_none()
+    print "promote-none ok={pn}"
+    if not pn:
+        failed = true
+    val k = "after"
+    print "alloc-after-ok {k}"
+    if failed:
+        return 1
+    0

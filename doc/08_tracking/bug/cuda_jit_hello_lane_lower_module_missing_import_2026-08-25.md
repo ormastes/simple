@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** partially fixed (import), remainder blocked on seed interpreter.
+**Status:** verified 2026-11-26 on a live CUDA host (aarch64 GB10, lane work/bug-cuda-segv-20261126, seed fb80903917d6d5f5, `SIMPLE_GPU_TEST=1 SIMPLE_CUDA_TEST=1`): `cuda_jit_hello_spec.spl` 14/14. The last live failure (13/14, "CUDA store value must match pointer element type") was a separate MIR defect, fixed in fb5065750ca: same-width u32 arithmetic was widened to i64 in CUDA kernels. Its red/green spec is `test/01_unit/plugins/backend_cuda/u32_binop_width_spec.spl`.
 **Spec:** `test/03_system/gpu_lane/cuda_jit_hello_spec.spl` — `Results: 14 total, 13 passed, 1 failed`
 on `bin/simple` = Rust seed, host with 2 live CUDA devices (`SIMPLE_GPU_TEST=1 SIMPLE_CUDA_TEST=1`).
 Sibling `vulkan_jit_hello_spec.spl` passes live on the same host (`2 total, 2 passed`).
@@ -34,3 +34,85 @@ Reproduce: `bin/simple test <spec with the 6 imports of cuda_jit_lane_executor +
 Unblocks when: a pure-Simple self-hosted `bin/simple` is deployed (the bootstrap redeploy is
 tracked separately), or the seed's cross-module member resolution is keyed by class identity.
 
+
+## 2026-11-07 — seed cross-module class resolution keyed by owner (round 15)
+
+The seed now resolves a bare class name through the using module's own
+definitions and imports (`resolve_class_in_scope`), and dispatches an
+instance's method against the definition whose fields match the instance
+(`resolve_class_for_instance`), instead of the flat last-registration-wins
+map; see `engine_specs_spec_runner_interpreter_divergence_2026-09-16.md`
+(2026-11-07 note) for the mechanism and the repro/prevention specs. Whether
+the `ParserModule has no field named friends` member collision in this lane
+is fully covered is reported in the PR table from a re-run of
+`test/03_system/gpu_lane/cuda_jit_hello_spec.spl` on the fixed seed.
+
+## 2026-11-10 P3 triage (work/p3-interp-20261110) — verification advanced; SUPERSEDED as far as a CUDA-less host can show
+
+Re-ran `test test/03_system/gpu_lane/cuda_jit_hello_spec.spl` on the deployed
+Windows Rust seed (worktree `bin/simple.exe`, cwd = worktree, no CUDA device,
+no SIMPLE_CUDA_TEST):
+
+- Result: 14/14 PASS, including "computes vector-add on a live CUDA host ..."
+which SKIPs cleanly per the no-device contract.
+- Symptom 2's seed-side trigger is gone: with the 2026-11-07
+  module-qualified class registry, the full
+  `cuda_jit_lane_executor` + `compiler.hir.hir_lowering.*` import closure
+  compiles with NO `semantic: class ParserModule has no field named friends`
+  (that failure mode aborts the whole spec at semantic time; the spec now runs
+  to a clean verdict).
+
+Live-device dispatch (RECORD drain + `0xCAFE0000` sentinel) still requires a
+re-run on a host with live CUDA devices (`SIMPLE_GPU_TEST=1
+SIMPLE_CUDA_TEST=1`) to close the record fully; everything a CUDA-less host
+can verify is green.
+
+## 2026-11-10 P3 triage (work/p3-interp2-20261110) — independently confirmed; verdict unchanged
+
+Second-lane re-run of `test test/03_system/gpu_lane/cuda_jit_hello_spec.spl`
+on the deployed Windows Rust seed (worktree `bin/simple.exe`, no CUDA
+device, no SIMPLE_CUDA_TEST): 14 total, 14 passed, 0 failed in ~8.7s —
+identical to the work/p3-interp-20261110 result. SUPERSEDED stands; only the
+live-device re-run on a CUDA host remains, with the owning GPU lane.
+
+
+## 2026-11-11 P3 triage (work/p3-interp7-20261111) — SUPERSEDED stands, re-verified on the fresh seed
+
+Re-ran `test test/03_system/gpu_lane/cuda_jit_hello_spec.spl
+--mode=interpreter --no-cache` on the fresh seed (worktree `bin/simple.exe`,
+build-commit `46fe8f6b6def`, cwd = worktree root, no CUDA device, no
+`SIMPLE_CUDA_TEST`): 14/14 PASS in ~30 s wall, including the live-device case
+which SKIPs cleanly per the no-device contract. Symptom 2's seed-side trigger
+(`ParserModule has no field named friends`) remains absent — the spec compiles
+and runs to a clean verdict.
+
+Verdict unchanged: SUPERSEDED as far as a CUDA-less host can show. The only
+remaining closure action is the live-device dispatch re-run
+(`SIMPLE_GPU_TEST=1 SIMPLE_CUDA_TEST=1` on a CUDA host) with the owning GPU
+lane. No code change in this lane.
+
+## 2026-11-22 live-device attempt on a CUDA host (lane work/cuda-compiler-bugs) — BLOCKED, stays verification-pending
+
+Host: Linux aarch64 with a live NVIDIA GB10, base `origin/release/1.0.0`
+`3c2e4556b6d`. Three paths were checked; none could run the live-device case.
+
+1. **Seed interpreter** (the producer the original repro used).
+   `SIMPLE_GPU_TEST=1 SIMPLE_CUDA_TEST=1 seed-tip-20261115/simple test test/03_system/gpu_lane/cuda_jit_hello_spec.spl --mode=interpreter --no-cache`
+   (seed sha256 prefix `5ef615e2b60a80fc`, 8 GiB scope) returned rc=1 before any
+   example ran. Error: `parse: src/lib/common/types.spl: expected As, found
+   Newline at line 23` (`unit ByteSize: i64`). The seed predates current syntax.
+2. **Native fixture** (prepare -> run_program -> lane_log_records -> sentinel)
+   with the integ25 Stage 2 producer (`ef46f0d2...`). This closure includes the
+   frontend, HIR/MIR lowering and CudaBackend. Two smaller compiler closures
+   (504 and 514 modules) were already OOM-killed by the lane's mandatory 8 GiB
+   cgroup cap during whole-program MIR, so this build was not attempted.
+3. **Runtime link** (observed on the sibling `processing_cuda_fill_probe`). A
+   Stage 2 binary linked against `stage2-runtime-authority` never opens
+   libcuda: `rt_cuda_init` fails with `cuda-init-failed`. This belongs to the
+   CUDA runtime/extern lane (nocuda stub), not this compiler record.
+
+No compiler-side evidence contradicts the 2026-11-10/11 SUPERSEDED verdict.
+
+Unblock: either of these.
+- A seed or full CLI new enough to parse current source.
+- Native builds above 8 GiB, plus a runtime whose `rt_cuda_init` dlopens libcuda.

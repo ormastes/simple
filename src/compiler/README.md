@@ -36,7 +36,6 @@ build/bootstrap/simple_stage2 native-build \
 | `25.traits/` | Trait definition, impl, solver, coherence |
 | `30.types/` | Type inference, type system, dimension constraints |
 | `35.semantics/` | Semantic analysis, lint, macro check, resolve |
-| `40.mono/` | Monomorphization, instantiation |
 | `50.mir/` | MIR types, data, instructions, lowering |
 | `55.borrow/` | Borrow checking, GC analysis |
 | `60.mir_opt/` | MIR optimization passes |

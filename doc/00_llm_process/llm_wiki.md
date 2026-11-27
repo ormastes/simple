@@ -1,5 +1,18 @@
 # LLM Repository Wiki
 
+## rt_ mapping and pointer contract
+
+`.spl` declarations are authoritative for `rt_` bindings. A NULL-returnable C
+function must be `T?` in Simple; without an error channel it fails closed with
+`SIMPLE_RT_NONNULL`. Verify with `check-rt-pointer-ref-map.py`,
+`check-rt-host-map.py` and the on-demand `check-rt-c-contract-compile.py` in
+`scripts/check/`. Those results are mapping evidence: UNKNOWN and UNTESTED are
+not passes, and macOS clang results do not certify other hosts. Baselines only
+shrink. When changing a width, update every provider, Rust twin, codegen spec
+and LLVM declaration. Read the
+[design](../05_design/compiler/rt_mapping_pointer_contract_design.md) and
+[plan](../03_plan/compiler/rt_mapping_pointer_contract_plan.md) first.
+
 ## Simple linker: external mold/LLD and internal Simple engine
 
 The self-hosted Simple compiler can use external mold or LLVM LLD; that does
@@ -16,7 +29,98 @@ currently requires its admitted external hosted linker. The overall
 `mold_is_pure_simple_linker_complete()` receipt gate does not automatically
 change defaults or replace real execution evidence.
 
+## Phase compiler Hello sanity
+
+Use the [Hello sanity matrix](../07_guide/app/llm/bootstrap_parallel_handoff.md#hello-sanity-16-native-execution-cases-and-phase-interpreter-checks)
+with the exact Phase 1, 2, or 3 compiler. The native target is 16 separately
+evidenced cells: four forms (source, two objects, static library, shared
+library) × LLVM/Cranelift × direct/BuildRunner. Keep each cell's status and
+receipt; `UNRUN` and `UNSUPPORTED` are not passes. Current driver coverage is
+four direct cases per selected backend invocation, plus optional one-source
+BuildRunner execution with a complete qualified provider. The remaining three
+BuildRunner forms stay `UNRUN`; pending required cells prevent overall `PASS`.
+All eight P2 direct macOS attempts on 2026-10-29 hit RSS bounds; the BuildRunner
+cells remain unrun. Adapter transport tests do not qualify the phase compiler.
+Interpreter qualification is additional and phase-specific: Phase 1 requires
+the phase 1 seed in interpreter mode; Phase 2 records the configured skip;
+Phase 3 requires a full CLI qualified to its exact phase 3 producer, source, and
+runtime. Do not promote partial diagnostics to phase completion or bootstrap
+admission.
+
+## Unified Phase 3 / Phase 4 Cross-Platform Build & Protected Bootstrap
+
+- **Shared cross-platform script:** `scripts/bootstrap/build-phase3-phase4.sh`
+  owns Phase 3 and Phase 4 builds across **Linux, macOS, FreeBSD, Windows
+  (Git-Bash/MSYS2), and SimpleOS**. Running interactively without `--phase=...`
+  (or with `--menu`) opens the **interactive Phased Build Menu**; non-interactive
+  invocations use `--phase=p3a|p3|p4|all`. Windows `scripts/bootstrap/build-phase3-phase4.bat`
+  delegates to the same `.sh` script with 2 configs: **`mingw` DEFAULT**
+  (`--win-config=mingw`, `llvm-mingw` clang + `ld.lld`) and **`msvc` optional**
+  (`--win-config=msvc`, `clang-cl`). Legacy standalone Phase 3/4 scripts
+  (`p3-selfbuild-stage3.shs`, `p3-manual-link-stage3.shs`, `p3-smoke-stage3.shs`,
+  `p3-targeted-stage2-build.shs`, `p3-entry-groups.shs`, etc.) are deprecated —
+  direct invocation pauses with migration instructions for `build-phase3-phase4.sh`
+  (including phased/shard mode) and returns without building.
+- **Default Phase 1 & Phase 2 skip:** In `scripts/bootstrap/bootstrap-from-scratch.sh`,
+  when a working native pure-Simple Phase 3+ host compiler already exists
+  (`bin/release/<triple>/simple` or `bin/simple` without the Rust-seed banner),
+  **default bootstrap skips Phase 1 (Cargo Rust seed) and Phase 2 (`seed -> stage2`)**
+  and delegates directly to `scripts/bootstrap/build-phase3-phase4.sh` (`P3 -> P4`).
+  Pass `--from-seed` / `--cold-bootstrap` (or `--full-bootstrap` in CI) ONLY when
+  intentionally rebuilding Phase 1 & Phase 2 from the Rust seed; pass `--skip-seed`
+  to require an existing Phase 3+ compiler without seed fallback.
+- **Compile mode & `(platform, cpu)` link policy:** `--compile-mode=shard` is
+  **DEFAULT** in `build-phase3-phase4.sh` (`SIMPLE_FILE_WORKERS=0`,
+  `SIMPLE_HIR_SHARDING=1`, `SIMPLE_MIR_SHARDING=1`); `--compile-mode=file`
+  (`SIMPLE_FILE_WORKERS=1`) is optional. `scripts/bootstrap/stage3-native-host-link-policy.{sdn,shs}`
+  enforces mandatory **`native_host_match`** (`target (platform, cpu) == host (os, arch)`),
+  minimizing `simple` to link **only** thin entry + `(platform, cpu)` static
+  primitive archive (`libsimple-primitive-<platform>-<cpu>.a`) + dead-stripped
+  primitive C core statically, while linking
+  `lib/libsimple-{std,compiler-common,compiler,app}.dylib` (`.so`) dynamically.
+  **Phase 3 builds ONLY native host targets** — non-native backends (other CPUs,
+  VHDL, GPU/CUDA/Vulkan, Wasm) are NOT built during Phase 3, **but if a `.dylib`
+  already exists on disk, `simple` can load and use it** (`--backend-plugin <existing.dylib>`).
+- **Phase 4 dual-mode build:** Phase 4 builds **both** the optimized production
+  binary (`simple`: `--profile=prod --release --strip`) AND the XRay-instrumented
+  debug binary (`simple-debug`: `--profile=dev --debug --no-strip --xray`), plus
+  Stage 5 essentials (`simple_test_runner`, `simple_build_runner`,
+  `simple_mcp_server`, `simple_lsp_mcp_server`).
+- **Protected script guard & zero-compile `--path-check`:** Every core bootstrap
+  script carries a top-of-file
+  `PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER`
+  banner. Run `sh scripts/check/fast-verify-bootstrap-scripts.shs` for a sub-second
+  check of sealed `.sdn` SHA-256 digests, protected banners, syntax, and
+  `check-bootstrap-path-matrix-all.shs` across Unix/Windows/SimpleOS using extensible
+  `PATH_ACTION|...|status=ALIVE` superset records without running compilation.
+- **Primary guides:** [shared Phase 3/4 build](../07_guide/tooling/phase3_phase4_shared_build.md)
+  and [bootstrap options](../07_guide/tooling/bootstrap_options.md).
+
 ## Bootstrap failure collection
+
+### Release compiler selection and platform qualification
+
+For release work, use the highest known-success actual phase binary for the
+target platform, with the newest qualifying producer as the tie-breaker within
+that phase. Bind success to the actual binary digest, source revision/digest,
+toolchain/runtime identity, and a receipt proving Hello compilation and
+execution output/exit status. A phase directory, `PHASE` marker, or banner is
+not proof. Skip already-proven lower phases; when a qualifying Phase 3 binary
+exists, use that exact P3 to build P3, then build the Phase 4 full CLI and run
+its required tests. Keep the producer immutable and use private outputs/cache
+with default cache behavior, LLVM/LLD and 24 build jobs for P3 -> P3 and Phase
+4 native builds; preserve worker limits in receipt-bound stage resumes. If a
+candidate is missing or incompatible, record the failure and make only an
+explicit, bounded fallback to a compatible known-success candidate; do not
+silently rebuild lower phases or use the Rust seed.
+
+Prerelease/beta qualification may cover a partial platform matrix only when at
+least one platform binary is genuinely qualified and missing/failed platforms
+are explicit. Zero qualified artifacts or a security/integrity failure cannot
+PASS. Stable releases keep the full required gates. See the
+[release producer-selection policy](../07_guide/infra/toolchain/phase_ladder_ci.md#release-producer-selection)
+and [qualification guide](../07_guide/infra/release_full_bootstrap.md); these
+docs do not assert current phase admission or define tag-trigger behavior.
 
 For one-thread crash diagnosis, host CUDA policy, RAM cache-parent staging and
 owned-process finality, use [native staging and terminal evidence](../07_guide/tooling/bootstrap_native_staging.md).
@@ -60,7 +164,9 @@ test PASS. Restore normal gates before promotion. Follow the
 cache preservation, and bug evidence. This is agent workflow guidance; it does
 not change runner behavior.
 
-Maintained project routes: [build collection](../07_guide/tooling/bootstrap_failure_collection.md),
+Maintained project routes: [shared Phase 3/4 build](../07_guide/tooling/phase3_phase4_shared_build.md),
+[bootstrap options](../07_guide/tooling/bootstrap_options.md),
+[build collection](../07_guide/tooling/bootstrap_failure_collection.md),
 [parallel handoff](../07_guide/app/llm/bootstrap_parallel_handoff.md), and
 [LLVM debugging](../07_guide/app/llm/llm_bootstrap_llvm_debugging.md).
 Agent entrypoints: [debug](../../.agents/skills/debug/SKILL.md),
@@ -287,6 +393,29 @@ results, deterministic parent commit, or no-resurrection cancellation, start
 with `doc/05_design/language/concurrency/parent_commit_parallel_apps.md`, then
 the two focused test plans under `doc/03_plan/sys_test/`. Preserve the explicit
 same-thread/typed-payload exclusions and the Stage-4 blocker.
+
+## Simple Orchestrator server discovery and identity
+
+Simple, Simple Orchestrator, Caret, and container agents resolve a named server
+from the same strict SDN document. Consumer overrides can select independent
+servers, and the `host` and `container` scopes select the appropriate public
+endpoint. On a shared server, use the same authentication and trust references
+through the protected store. Keep credentials out of the server document.
+[Server contexts](../07_guide/tooling/orchestration_server_contexts.md) ·
+[Host identity setup](../07_guide/tooling/orchestration_host_identity.md)
+
+For command routing and verification, start with the Orchestrator feature
+skill. Check the acceptance record for the exact platform and workflow before
+reporting a qualified deployment.
+[Orchestrator feature skill](feature_expert/simple_orchestrator/skill.md) ·
+[Release status](../03_plan/agent_tasks/simple_orchestrator_status_20261126.md)
+
+Caret Suite's `/orchestrator remote` selects its named context and explicit
+SSH server through the shared resolver. It uses the protected profile and
+typed controller gateway. The live dashboard progresses one native exchange
+per tick. Line mode can query `remote-progress`, and `remote-cancel` cancels
+the local transport. Local session commands validate the recorded loopback
+endpoint before sending their bearer. Live SSH qualification is pending.
 
 ## Modern SSpec typed evidence
 

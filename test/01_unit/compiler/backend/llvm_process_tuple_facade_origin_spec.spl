@@ -1,0 +1,188 @@
+# @req REQ-SSPEC-COMPILER
+use std.spec.*
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir.*
+use compiler.mir.mir_instruction_support.{MirCallOrigin}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.backend.mir_to_llvm.{MirToLlvm, llvm_select_runtime_tuple_facade_v1}
+
+fn lpt_fn_ptr(argc: i64) -> MirType:
+    var params: [MirType] = []
+    for _i in 0..argc:
+        params = params.push(MirType.i64())
+    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: params, return_type: MirType.i64(), is_variadic: false)))
+
+fn lpt_local_fn(symbol_id: i64, fn_name: text, argc: i64, is_export_c: bool = false, export_name: text = "") -> MirFunction:
+    var params: [MirType] = []
+    var mir_locals: [MirLocal] = []
+    for i in 0..argc:
+        params = params.push(MirType.i64())
+        mir_locals = mir_locals.push(MirLocal(id: LocalId(id: i), name: None, type_: MirType.i64(), kind: LocalKind.Arg(i), is_ghost: false))
+    MirFunction(
+        symbol: SymbolId(id: symbol_id), name: fn_name,
+        signature: MirSignature(params: params, return_type: MirType.i64(), is_variadic: false, params_known: true),
+        locals: mir_locals,
+        blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"),
+            instructions: [],
+            terminator: MirTerminator.Ret(Some(mir_operand_const_int(0))))],
+        entry_block: BlockId.entry(), span: Span.empty(), generic_params: [],
+        is_generic_template: false, specialization_of: None, type_bindings: {},
+        layout_phase: None, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: is_export_c, export_name: export_name, has_driver_manifest_attr: false,
+        driver_manifest_attr: None, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false)
+
+fn lpt_call_module(
+    module_name: text,
+    callee_name: text,
+    argc: i64,
+    origin: MirCallOrigin,
+    extra_funcs: [MirFunction] = []
+) -> MirModule:
+    var args: [MirOperand] = []
+    for i in 0..argc:
+        args = args.push(mir_operand_const_int(i + 1))
+    val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(callee_name), lpt_fn_ptr(argc)), call_origin: origin)
+    val caller = MirFunction(
+        symbol: SymbolId(id: 1), name: "lpt_caller",
+        signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+        locals: [MirLocal(id: LocalId(id: 0), name: None, type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false)],
+        blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"),
+            instructions: [MirInst(kind: MirInstKind.Call(Some(LocalId(id: 0)), callee, args), span: None)],
+            terminator: MirTerminator.Ret(Some(mir_operand_copy(LocalId(id: 0)))))],
+        entry_block: BlockId.entry(), span: Span.empty(), generic_params: [],
+        is_generic_template: false, specialization_of: None, type_bindings: {},
+        layout_phase: None, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: false, export_name: "", has_driver_manifest_attr: false,
+        driver_manifest_attr: None, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false)
+    var funcs: Dict<SymbolId, MirFunction> = {SymbolId(id: 1): caller}
+    for extra in extra_funcs:
+        funcs[extra.symbol] = extra
+    MirModule(name: module_name, functions: funcs, statics: {}, constants: {}, types: {})
+
+fn lpt_call_terminator_module(module_name: text, callee_name: text, argc: i64, origin: MirCallOrigin) -> MirModule:
+    var args: [MirOperand] = []
+    for i in 0..argc:
+        args = args.push(mir_operand_const_int(i + 1))
+    val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(callee_name), lpt_fn_ptr(argc)), call_origin: origin)
+    val entry_block = MirBlock(
+        id: BlockId(id: 0), label: Some("entry"),
+        instructions: [],
+        terminator: MirTerminator.CallTerminator(
+            Some(LocalId(id: 0)), callee, args, BlockId(id: 1), None, None, None))
+    val ret_block = MirBlock(
+        id: BlockId(id: 1), label: Some("done"),
+        instructions: [],
+        terminator: MirTerminator.Ret(Some(mir_operand_const_int(0))))
+    val caller = MirFunction(
+        symbol: SymbolId(id: 1), name: "lpt_term_caller",
+        signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+        locals: [MirLocal(id: LocalId(id: 0), name: None, type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false)],
+        blocks: [entry_block, ret_block],
+        entry_block: BlockId(id: 0), span: Span.empty(), generic_params: [],
+        is_generic_template: false, specialization_of: None, type_bindings: {},
+        layout_phase: None, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: false, export_name: "", has_driver_manifest_attr: false,
+        driver_manifest_attr: None, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false)
+    MirModule(name: module_name, functions: {SymbolId(id: 1): caller}, statics: {}, constants: {}, types: {})
+
+fn lpt_translate_ir(module: MirModule, no_mangle: bool = false) -> text:
+    var generator = MirToLlvm.create(module.name, CodegenTarget.X86_64, None)
+    generator.set_group_bootstrap_mode(true)
+    generator.no_mangle = no_mangle
+    generator.translate_module(module)
+
+fn lpt_ir_calls(ir: text, symbol: text) -> bool:
+    for line in ir.split("\n"):
+        if line.contains("call ") and line.contains("@{symbol}("):
+            return true
+    false
+
+describe "llvm_select_runtime_tuple_facade_v1":
+    it "selects tuple facades for Runtime origin":
+        expect(llvm_select_runtime_tuple_facade_v1("rt_process_run_timeout", 4, MirCallOrigin.Runtime, false)).to_equal("rt_process_run_timeout_tuple")
+        expect(llvm_select_runtime_tuple_facade_v1("rt_process_run", 3, MirCallOrigin.Runtime, false)).to_equal("rt_process_run_tuple")
+        expect(llvm_select_runtime_tuple_facade_v1("rt_process_run_bounded", 5, MirCallOrigin.Runtime, false)).to_equal("rt_process_run_bounded_tuple")
+        expect(llvm_select_runtime_tuple_facade_v1("rt_process_run_bounded_bytes", 5, MirCallOrigin.Runtime, false)).to_equal("rt_process_run_bounded_bytes_tuple")
+        expect(llvm_select_runtime_tuple_facade_v1("rt_process_run_owned_observed_bounded_value", 5, MirCallOrigin.Runtime, false)).to_equal("rt_process_run_owned_observed_bounded_text")
+        expect(llvm_select_runtime_tuple_facade_v1("rt_cpuid_tuple", 2, MirCallOrigin.Runtime, false)).to_equal("rt_cpuid_tuple_block")
+
+    it "selects tuple facades for Foreign origin without local source body":
+        expect(llvm_select_runtime_tuple_facade_v1("rt_process_run_timeout", 4, MirCallOrigin.Foreign, false)).to_equal("rt_process_run_timeout_tuple")
+        expect(llvm_select_runtime_tuple_facade_v1("rt_process_run", 3, MirCallOrigin.Foreign, false)).to_equal("rt_process_run_tuple")
+        expect(llvm_select_runtime_tuple_facade_v1("rt_process_run_bounded", 5, MirCallOrigin.Foreign, false)).to_equal("rt_process_run_bounded_tuple")
+
+    it "selects tuple facades for Source origin when no local body exists":
+        expect(llvm_select_runtime_tuple_facade_v1("rt_process_run_timeout", 4, MirCallOrigin.Source, false)).to_equal("rt_process_run_timeout_tuple")
+        expect(llvm_select_runtime_tuple_facade_v1("rt_process_run", 3, MirCallOrigin.Source, false)).to_equal("rt_process_run_tuple")
+        expect(llvm_select_runtime_tuple_facade_v1("rt_process_run_bounded", 5, MirCallOrigin.Source, false)).to_equal("rt_process_run_bounded_tuple")
+        expect(llvm_select_runtime_tuple_facade_v1("\"rt_process_run_timeout\"", 4, MirCallOrigin.Source, false)).to_equal("rt_process_run_timeout_tuple")
+
+    it "suppresses tuple facade for Source origin when a local source body exists":
+        expect(llvm_select_runtime_tuple_facade_v1("rt_process_run_timeout", 4, MirCallOrigin.Source, true)).to_equal("")
+        expect(llvm_select_runtime_tuple_facade_v1("rt_process_run", 3, MirCallOrigin.Source, true)).to_equal("")
+        expect(llvm_select_runtime_tuple_facade_v1("rt_process_run_bounded", 5, MirCallOrigin.Source, true)).to_equal("")
+
+    it "preserves non-matching arities such as 1-arg wasm rt_process_run and non-facade names":
+        expect(llvm_select_runtime_tuple_facade_v1("rt_process_run", 1, MirCallOrigin.Runtime, false)).to_equal("")
+        expect(llvm_select_runtime_tuple_facade_v1("rt_process_run", 1, MirCallOrigin.Foreign, false)).to_equal("")
+        expect(llvm_select_runtime_tuple_facade_v1("rt_process_run", 1, MirCallOrigin.Source, false)).to_equal("")
+        expect(llvm_select_runtime_tuple_facade_v1("main.process_run_timeout", 4, MirCallOrigin.Source, false)).to_equal("")
+        expect(llvm_select_runtime_tuple_facade_v1("rt_process_run_timeout", 4, MirCallOrigin.Unknown, false)).to_equal("")
+
+describe "MirToLlvm.translate_module tuple facade origin lowering":
+    it "preserves local Source-origin definitions across ordinary, @export(C), and --no-mangle modes":
+        val ordinary_ir = lpt_translate_ir(lpt_call_module(
+            "lpt.local.ordinary", "rt_process_run", 3, MirCallOrigin.Source,
+            [lpt_local_fn(2, "rt_process_run", 3)]))
+        expect(lpt_ir_calls(ordinary_ir, "__simple_local_rt_process_run")).to_equal(true)
+        expect(lpt_ir_calls(ordinary_ir, "rt_process_run_tuple")).to_equal(false)
+
+        val export_ir = lpt_translate_ir(lpt_call_module(
+            "lpt.local.export_c", "custom_local_run", 3, MirCallOrigin.Source,
+            [lpt_local_fn(2, "custom_local_run", 3, true, "rt_process_run")]))
+        expect(lpt_ir_calls(export_ir, "rt_process_run")).to_equal(true)
+        expect(lpt_ir_calls(export_ir, "rt_process_run_tuple")).to_equal(false)
+
+        val no_mangle_ir = lpt_translate_ir(lpt_call_module(
+            "lpt.local.nomangle", "rt_process_run", 3, MirCallOrigin.Source,
+            [lpt_local_fn(2, "rt_process_run", 3)]), true)
+        expect(lpt_ir_calls(no_mangle_ir, "rt_process_run")).to_equal(true)
+        expect(lpt_ir_calls(no_mangle_ir, "rt_process_run_tuple")).to_equal(false)
+
+    it "selects tuple facades for non-local Source-origin calls without emitting __simple_local_rt_*":
+        val ir = lpt_translate_ir(lpt_call_module("lpt.nonlocal.source", "rt_process_run", 3, MirCallOrigin.Source))
+        expect(lpt_ir_calls(ir, "rt_process_run_tuple")).to_equal(true)
+        expect(ir.contains("__simple_local_rt_")).to_equal(false)
+
+    it "selects tuple facades for quoted non-local Source-origin calls":
+        val quoted_ir = lpt_translate_ir(lpt_call_module("lpt.nonlocal.quoted", "\"rt_process_run_timeout\"", 4, MirCallOrigin.Source))
+        expect(lpt_ir_calls(quoted_ir, "rt_process_run_timeout_tuple")).to_equal(true)
+        expect(quoted_ir.contains("__simple_local_rt_")).to_equal(false)
+
+    it "selects tuple facades for CallTerminator non-local Source-origin calls":
+        val term_ir = lpt_translate_ir(lpt_call_terminator_module("lpt.nonlocal.term", "rt_process_run_timeout", 4, MirCallOrigin.Source))
+        expect(term_ir).to_contain("call ")
+        expect(lpt_ir_calls(term_ir, "rt_process_run_timeout_tuple")).to_equal(true)
+        expect(term_ir.contains("__simple_local_rt_")).to_equal(false)
+
+    it "fails closed on MirCallOrigin.Unknown without emitting a facade call":
+        val ir = lpt_translate_ir(lpt_call_module("lpt.unknown", "rt_process_run", 3, MirCallOrigin.Unknown))
+        expect(ir).to_contain("E-BACKEND-LLVM-CALL-ORIGIN")
+        expect(lpt_ir_calls(ir, "rt_process_run_tuple")).to_equal(false)
+
+    it "selects tuple facades for Runtime and Foreign origin even when a local body of the same name exists":
+        val local_body = lpt_local_fn(2, "rt_process_run", 3)
+        val runtime_ir = lpt_translate_ir(lpt_call_module(
+            "lpt.runtime.with_local", "rt_process_run", 3, MirCallOrigin.Runtime, [local_body]))
+        expect(lpt_ir_calls(runtime_ir, "rt_process_run_tuple")).to_equal(true)
+        expect(lpt_ir_calls(runtime_ir, "__simple_local_rt_process_run")).to_equal(false)
+
+        val foreign_ir = lpt_translate_ir(lpt_call_module(
+            "lpt.foreign.with_local", "rt_process_run", 3, MirCallOrigin.Foreign, [local_body]))
+        expect(lpt_ir_calls(foreign_ir, "rt_process_run_tuple")).to_equal(true)
+        expect(lpt_ir_calls(foreign_ir, "__simple_local_rt_process_run")).to_equal(false)

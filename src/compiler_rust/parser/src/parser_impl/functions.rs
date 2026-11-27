@@ -94,7 +94,7 @@ impl<'a> Parser<'a> {
         // Allow keywords like 'new', 'type', etc. as function names
         let name = self.expect_method_name()?;
         // Parse optional generic parameters: fn foo<T, U>(...)
-        let generic_params = self.parse_generic_params_as_strings()?;
+        let (generic_params, inline_where_bounds) = self.parse_generic_params_with_where_bounds()?;
         let params = self.parse_parameters()?;
 
         // Skip newlines/indents for multi-line function signatures:
@@ -150,7 +150,8 @@ impl<'a> Parser<'a> {
         let return_constraint = self.parse_return_constraint()?;
 
         // Parse optional where clause: where T: Clone + Default
-        let where_clause = self.parse_where_clause()?;
+        let mut where_clause = inline_where_bounds;
+        where_clause.extend(self.parse_where_clause()?);
 
         // Skip newlines before the function body colon or abstract semicolon
         self.skip_newlines();

@@ -1,0 +1,41 @@
+# Actual context and clock come from the retained command owner, never a frame.
+use std.common.contracts.orchestration.agent_task_command_v1.*
+use std.common.contracts.orchestration.agent_task_object_v1.*
+use std.common.contracts.orchestration.agent_task_use_v1.*
+use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionGrantV2}
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.crypto.sha256.sha256_text
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.nogc_sync_mut.orchestration.controller_agent_task_objects_v1.*
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.ControllerDispatchContextV1
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+
+pub fn controller_agent_task_authorization_operation_v1(context: ControllerDispatchContextV1,
+        config_digest: text, action: text, body: text) -> Result<OperationEnvelopeV2, text>:
+    if not builder_digest_valid_v1(config_digest): return Err("agent-task-config-pin")
+    if context.config.controller_epoch <= 0 or context.policy.source_digest != context.config.authority_policy_digest:
+        return Err("agent-task-installed-context-mismatch")
+    val canonical = agent_task_command_body_v1(action, body)?
+    var operation = if action == "retain":
+        controller_agent_task_retain_operation_v1(context.config.controller_id, agent_task_object_decode_v1(body)?)?
+    else:
+        controller_agent_task_use_operation_v1(agent_task_use_decode_v1(body)?)?
+    if operation.host_id != context.config.controller_id: return Err("agent-task-controller-mismatch")
+    operation.id = "authorize-" + operation.id
+    operation.operation = if action == "retain": "controller_agent_task_retain_v1" else: "controller_agent_task_access_v1"
+    operation.environment_digest = sha256_text("CONTROLLER-AGENT-TASK-CONTEXT-V1\n{operation.environment_digest}\n{config_digest}\n{context.config.authority_policy_digest}\n{context.config.controller_epoch}\n")
+    operation.policy_revision = context.policy.snapshot.policy_revision
+    operation.revocation_epoch = context.policy.snapshot.revocation_epoch
+    operation.session_generation = context.policy.session_generation
+    val checked = distributed_encode_operation_v2(operation)?
+    Ok(operation)
+
+pub fn controller_agent_task_authorize_v1(context: ControllerDispatchContextV1,
+        config_digest: text, packet: AgentTaskCommandV1, now: i64) -> Result<ExecutionGrantV2, text>:
+    if now <= 0: return Err("agent-task-wall-clock-unavailable")
+    val checked = agent_task_command_encode_v1(packet)?
+    val operation = controller_agent_task_authorization_operation_v1(context, config_digest, packet.action, packet.body)?
+    val snapshot = context.policy.snapshot
+    distributed_verify_grant_approval_from_snapshot_v2(snapshot, packet.signed, packet.approval,
+        operation, now, snapshot.generation, snapshot.policy_revision, snapshot.revocation_epoch,
+        context.policy.session_generation)

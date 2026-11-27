@@ -1,0 +1,75 @@
+# Purpose and audience: regression evidence for the browser_engine text-metrics API
+# drift fix (PR #6820): stored content geometry, 3-arg layout_node, paint_layout_box.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/layout_box.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/layout.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/paint.spl
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.css.{be_default_style}
+use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_node, layout_get_height}
+use std.gc_async_mut.gpu.browser_engine.paint.{paint_layout_box}
+
+fn _container(w: f64, h: f64) -> BeLayoutBox:
+    BeLayoutBox(x: 0.0, y: 0.0, width: w, height: h,
+        content_x: 0.0, content_y: 0.0, content_width: w, content_height: h,
+        node: BeDomNode.element("div"), children: [])
+
+describe "BeLayoutBox stored content geometry":
+    it "defaults stored content fields to zero and node to nil":
+        val b = BeLayoutBox(x: 1.0, y: 2.0, width: 10.0, height: 20.0)
+        expect(b.content_x).to_equal(0.0)
+        expect(b.content_y).to_equal(0.0)
+        expect(b.content_width).to_equal(0.0)
+        expect(b.content_height).to_equal(0.0)
+        expect(b.node == nil).to_equal(true)
+
+    it "keeps pinned stored content geometry independent of the box model":
+        val b = BeLayoutBox(x: 0.0, y: 0.0, width: 100.0, height: 50.0,
+            padding_left: 10.0, padding_right: 10.0,
+            content_x: 3.0, content_y: 4.0, content_width: 77.0, content_height: 33.0)
+        expect(b.content_x).to_equal(3.0)
+        expect(b.content_y).to_equal(4.0)
+        expect(b.content_width).to_equal(77.0)
+        expect(b.content_height).to_equal(33.0)
+        # the derived method form is still computed from the box model
+        expect(b.content_width()).to_equal(80.0)
+
+    it "text_box constructor stores content geometry equal to border box":
+        val n = BeDomNode.text("hi")
+        val b = BeLayoutBox.text_box(n, "hi", 5.0, 6.0, 30.0, 12.0)
+        expect(b.content_x).to_equal(5.0)
+        expect(b.content_y).to_equal(6.0)
+        expect(b.content_width).to_equal(30.0)
+        expect(b.content_height).to_equal(12.0)
+
+describe "layout_node 3-arg container entry":
+    it "lays out text inside the container and wraps when narrow":
+        val style = be_default_style()
+        style.font_size = 16
+        val n = BeDomNode.text("hello world")
+        val wide = layout_node(n, _container(200.0, 40.0), style)
+        val narrow = layout_node(n, _container(24.0, 40.0), style)
+        expect(layout_get_height(wide) > 0.0).to_equal(true)
+        expect(layout_get_height(narrow) > layout_get_height(wide)).to_equal(true)
+
+describe "paint_layout_box":
+    it "emits a text command carrying the text and an underline rect":
+        val n = BeDomNode.text("abcd")
+        n.set_style("font-size", "16px")
+        n.set_style("text-decoration", "underline")
+        val b = BeLayoutBox(x: 0.0, y: 0.0, width: 64.0, height: 16.0,
+            content_x: 0.0, content_y: 0.0, content_width: 64.0, content_height: 16.0,
+            node: n, children: [])
+        val cmds = paint_layout_box(b, [])
+        expect(cmds.len()).to_equal(2)
+        expect(cmds[0].text_val).to_equal("abcd")
+
+    it "emits no decoration rect without text-decoration":
+        val n = BeDomNode.text("abcd")
+        n.set_style("font-size", "16px")
+        val b = BeLayoutBox(x: 0.0, y: 0.0, width: 64.0, height: 16.0,
+            content_x: 0.0, content_y: 0.0, content_width: 64.0, content_height: 16.0,
+            node: n, children: [])
+        val cmds = paint_layout_box(b, [])
+        expect(cmds.len()).to_equal(1)

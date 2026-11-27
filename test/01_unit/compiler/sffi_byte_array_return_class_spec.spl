@@ -31,13 +31,12 @@ Positive control: `rt_bytes_alloc(24)` must return an array whose `.len()` is
 exactly 24 — a value the marshaller had to actually compute and transport, so a
 green sweep cannot come from a stubbed-out or never-loaded extern path.
 
-NOT covered here, deliberately: `rt_file_read_bytes` on a missing path is a
-sibling of this class that is currently BROKEN in a *different* way — the
-tree-walk interpreter binds `nil` (`method len not found on type nil`) rather
-than an array, and `rt_bytes_alloc(24)` disagrees across engines (24 under
-`bin/simple test`, 0 under `bin/simple run`). Both are filed in
-`doc/08_tracking/bug/sffi_u8_return_nil_and_cross_engine_len_2026-08-18.md`
-and must not be folded into this spec until they are fixed.
+Defect B of `sffi_u8_return_nil_and_cross_engine_len_2026-08-18` (JIT reporting
+`rt_bytes_alloc(n).len() == 0`) is fixed by the packed-byte bridge in
+`runtime_bridge.rs`; the cases below pin the length for several sizes so an
+interpreter and a `run` (JIT-eligible) path must agree. Defect A is closed by
+the `[u8]?` declaration of `rt_file_read_bytes`
+(`fs_extern_optional_spec.spl`).
 
 tag: unit, compiler, sffi
 """
@@ -81,3 +80,19 @@ describe "SFFI [u8] return marshalling — defect class":
         val buf = rt_bytes_from_raw(0, 0)
         expect(buf.len()).to_equal(0)
 
+
+    it "rt_bytes_alloc length is the requested size across sizes (engine parity)":
+        # @req REQ-SSPEC-COMPILER
+        step("rt_bytes_alloc length is the requested size across sizes (engine parity)")
+        step("Verify: rt_bytes_alloc length is the requested size across sizes (engine parity)")
+        expect(rt_bytes_alloc(0).len()).to_equal(0)
+        expect(rt_bytes_alloc(7).len()).to_equal(7)
+        expect(rt_bytes_alloc(4096).len()).to_equal(4096)
+
+    it "rt_bytes_alloc elements are zero-filled and readable":
+        # @req REQ-SSPEC-COMPILER
+        step("rt_bytes_alloc elements are zero-filled and readable")
+        step("Verify: rt_bytes_alloc elements are zero-filled and readable")
+        val buf = rt_bytes_alloc(4)
+        expect(buf[0]).to_equal(0)
+        expect(buf[3]).to_equal(0)

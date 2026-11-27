@@ -1,0 +1,224 @@
+# @req REQ-WIN-PRIVATE-002 REQ-WIN-PRIVATE-003 REQ-WDS-006
+# Evidence class: real native Windows host fixture. AUTHORED_NOT_RUN.
+# Requires independently installed protected ACL roots; missing/non-Windows
+# setup fails explicitly. No scripted provider, POSIX substitute or skip PASS.
+use std.spec.*
+use std.nogc_sync_mut.io.env_ops.{host_os, env_get}
+use std.nogc_sync_mut.io.windows_private_file_v1.{WindowsPrivateRootV1, windows_private_root_open_v1}
+use std.nogc_sync_mut.io.windows_journal_store_v1.*
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+
+# @inline
+fn journal_native_configured_root_v1(variable: text) -> WindowsPrivateRootV1:
+    if host_os() != "windows": fail("Windows journal native fixture requires actual Windows")
+    val path = env_get(variable)
+    if path == "": fail("Windows journal fixture variable is required: " + variable)
+    match windows_private_root_open_v1(path):
+        case Ok(root): return root
+        case Err(error):
+            if val retained = error.cleanup_root:
+                var cleanup = retained
+                expect(cleanup.close()).to_equal(true)
+            fail("Native protected Windows root rejected: " + error.message)
+
+# @inline
+fn journal_native_fresh_root_v1() -> WindowsPrivateRootV1:
+    var parent = journal_native_configured_root_v1("SIMPLE_WINDOWS_JOURNAL_PRIVATE_PARENT")
+    val name = "journal-native-" + sosix_random_hex(16).unwrap()
+    match parent.child_directory(name, true):
+        case Ok(root):
+            expect(parent.close()).to_equal(true)
+            return root
+        case Err(error):
+            if val retained = error.cleanup_root:
+                var cleanup = retained
+                expect(cleanup.close()).to_equal(true)
+            expect(parent.close()).to_equal(true)
+            fail("Native fresh private journal fixture rejected: " + error.message)
+
+# @inline
+fn journal_native_ready_v1(root: WindowsPrivateRootV1) -> WindowsJournalStoreV1:
+    match root.open_journal_store_v1():
+        case WindowsJournalStoreOpenV1.Ready(store): return store
+        case WindowsJournalStoreOpenV1.CleanupRequired(store, message):
+            var cleanup = store
+            expect(cleanup.close_state()).to_equal("released")
+            fail("Actual journal admission needs cleanup: " + message)
+        case WindowsJournalStoreOpenV1.Rejected(message):
+            fail("Actual journal admission rejected: " + message)
+
+describe "Native retained Windows journal storage":
+    it "should bind stores and consumption receipts to their actual retained origin owners":
+        step("Open two independently protected roots and their actual journal stores")
+        var first_root = journal_native_fresh_root_v1()
+        var second_root = journal_native_fresh_root_v1()
+        var first = journal_native_ready_v1(first_root)
+        var second = journal_native_ready_v1(second_root)
+        expect(first.belongs_to(first_root)).to_equal(true)
+        expect(first.belongs_to(second_root)).to_equal(false)
+        expect(second.belongs_to(first_root)).to_equal(false)
+        step("Publish identical consumption bytes under distinct actual native owners")
+        val relative = "primary-connection-consumed/" + "a".repeat(64) + ".sdn"
+        val receipt = first.publish_consumption(relative, "exact-body\n").unwrap()
+        val other = second.publish_consumption(relative, "exact-body\n").unwrap()
+        expect(receipt.belongs_to(first)).to_equal(true)
+        expect(receipt.belongs_to(second)).to_equal(false)
+        expect(other.belongs_to(first)).to_equal(false)
+        expect(receipt.claim("exact-body\n")).to_equal(Ok(true))
+        expect(other.claim("exact-body\n")).to_equal(Ok(true))
+        step("Release the exact store and refuse its stale authority correlation")
+        expect(first.close_state()).to_equal("released")
+        expect(first.belongs_to(first_root)).to_equal(false)
+        expect(receipt.belongs_to(first)).to_equal(false)
+        expect(second.close_state()).to_equal("released")
+        expect(first_root.close()).to_equal(true)
+        expect(second_root.close()).to_equal(true)
+
+    it "should exclude a second lock owner, collect its real failed acquisition, and reject stale aliases":
+        step("Admit a fresh child beneath the configured protected Windows fixture root")
+        var root = journal_native_fresh_root_v1()
+        var first = journal_native_ready_v1(root)
+        var stale = first
+        expect(first.same_owner(stale)).to_equal(true)
+        expect(first.publish("lock-proof.sdn", "phase: first\n")).to_equal(Ok(true))
+        step("Attempt a second native journal owner while the first exact parent lock is retained")
+        match root.open_journal_store_v1():
+            case WindowsJournalStoreOpenV1.CleanupRequired(store, message):
+                var refused = store
+                expect(message).to_equal("WINDOWS_JOURNAL_OPEN_CLEANUP_REQUIRED")
+                expect(refused.live()).to_equal(false)
+                expect(refused.close_state()).to_equal("released")
+            case WindowsJournalStoreOpenV1.Ready(store):
+                var unexpected = store
+                val closed = unexpected.close()
+                fail("Two actual Windows journal stores acquired the same parent lock")
+            case WindowsJournalStoreOpenV1.Rejected(message):
+                fail("Failed lock acquisition must retain its acquired native resources: " + message)
+        expect(first.live()).to_equal(true)
+        expect(first.read("lock-proof.sdn", 4096)).to_equal(Ok(Some("phase: first\n")))
+        step("Release the first owner, reacquire the actual lock, and refuse stale generation cleanup")
+        expect(first.close_state()).to_equal("released")
+        var replacement = journal_native_ready_v1(root)
+        expect(stale.close_state()).to_equal("stale")
+        expect(stale.same_owner(replacement)).to_equal(false)
+        expect(stale.live()).to_equal(false)
+        expect(stale.publish("stale-write.sdn", "forbidden").is_err()).to_equal(true)
+        expect(replacement.live()).to_equal(true)
+        expect(replacement.read("stale-write.sdn", 4096)).to_equal(Ok(None))
+        expect(replacement.close_state()).to_equal("released")
+        expect(root.close()).to_equal(true)
+
+    it "should preserve immutable collisions and exact UTF8 across journal WAL and archive namespaces":
+        step("Publish real private records through one retained Windows owner")
+        var root = journal_native_fresh_root_v1()
+        var store = journal_native_ready_v1(root)
+        val payload = "kind: archive\nvalue: café 🐈\n"
+        for name in ["entries/first.sdn", "database-wal/segments/first.sdn", "archive/execution/first.sdn"]:
+            expect(store.publish(name, payload)).to_equal(Ok(true))
+            expect(store.read(name, 4096)).to_equal(Ok(Some(payload)))
+            step("Try a conflicting immutable publication and read the original bytes")
+            expect(store.publish(name, "must not replace")).to_equal(Ok(false))
+            expect(store.read(name, 4096)).to_equal(Ok(Some(payload)))
+        expect(store.publish("empty.sdn", "")).to_equal(Ok(true))
+        expect(store.read("empty.sdn", 0)).to_equal(Ok(Some("")))
+        expect(store.read("absent.sdn", 0)).to_equal(Ok(None))
+        expect(store.replace("parent.lease", "phase: old\n")).to_equal(Ok(true))
+        expect(store.replace("parent.lease", "phase: new\n")).to_equal(Ok(true))
+        expect(store.read("parent.lease", 4096)).to_equal(Ok(Some("phase: new\n")))
+        expect(store.replace("entries/first.sdn", "forbidden").is_err()).to_equal(true)
+        expect(store.close_state()).to_equal("released")
+        expect(root.close()).to_equal(true)
+
+    it "should compare CURRENT and publish once while distinguishing exact absence from an empty value":
+        step("Close the independent root owner and keep the journal's retained ancestry live")
+        var root = journal_native_fresh_root_v1()
+        var store = journal_native_ready_v1(root)
+        expect(root.close()).to_equal(true)
+        expect(store.live()).to_equal(true)
+        val current = "database-wal/CURRENT"
+        expect(store.compare_replace(current, "generation: 1\n", None)).to_equal(Ok(true))
+        val alias = store
+        step("Reject a stale copied owner's absent expectation without overwriting CURRENT")
+        expect(alias.compare_replace(current, "generation: 2\n", None)).to_equal(Ok(false))
+        expect(store.read(current, 4096)).to_equal(Ok(Some("generation: 1\n")))
+        expect(alias.compare_replace(current, "generation: 2\n", Some("generation: 1\n"))).to_equal(Ok(true))
+        expect(store.compare_replace(current, "generation: stale\n", Some("generation: 1\n"))).to_equal(Ok(false))
+        expect(store.read(current, 4096)).to_equal(Ok(Some("generation: 2\n")))
+        step("Require Some empty bytes rather than None after publishing an actual empty CURRENT")
+        expect(store.compare_replace(current, "", Some("generation: 2\n"))).to_equal(Ok(true))
+        expect(store.compare_replace(current, "wrong", None)).to_equal(Ok(false))
+        expect(store.read(current, 0)).to_equal(Ok(Some("")))
+        expect(store.compare_replace(current, "generation: 3\n", Some(""))).to_equal(Ok(true))
+        expect(store.read(current, 4096)).to_equal(Ok(Some("generation: 3\n")))
+        expect(store.close_state()).to_equal("released")
+
+    it "should reject unsafe relative names and forbidden replacements before creating records":
+        var root = journal_native_fresh_root_v1()
+        var store = journal_native_ready_v1(root)
+        step("Submit traversal ADS internal namespace and out-of-bound path components")
+        for name in ["..", "../escape", "/absolute", "a//b", "a/../b", "a\\b", "file:ads",
+            "a/b/c/d/e", "a".repeat(129), "parent.lock", ".journal-stage-private", "trailing."]:
+            expect(store.publish(name, "forbidden").is_err()).to_equal(true)
+            expect(store.read(name, 4096).is_err()).to_equal(true)
+        expect(store.replace("database-wal/CURRENT", "forbidden").is_err()).to_equal(true)
+        expect(store.compare_replace("parent.lease", "forbidden", None).is_err()).to_equal(true)
+        expect(store.live()).to_equal(true)
+        expect(store.publish("admitted.sdn", "actual")).to_equal(Ok(true))
+        expect(store.read("admitted.sdn", 4096)).to_equal(Ok(Some("actual")))
+        expect(store.close_state()).to_equal("released")
+        expect(root.close()).to_equal(true)
+
+    it "should preserve the eight MiB boundary and refuse larger payloads without publication":
+        var root = journal_native_fresh_root_v1()
+        var store = journal_native_ready_v1(root)
+        step("Publish and read a real eight MiB record through bounded native file chunks")
+        val payload = "x".repeat(8388608)
+        expect(store.publish("archive/maximum.sdn", payload)).to_equal(Ok(true))
+        expect(store.read("archive/maximum.sdn", 8388608)).to_equal(Ok(Some(payload)))
+        expect(store.publish("archive/too-large.sdn", payload + "x").is_err()).to_equal(true)
+        expect(store.read("archive/too-large.sdn", 4096)).to_equal(Ok(None))
+        expect(store.read("archive/maximum.sdn", -1).is_err()).to_equal(true)
+        expect(store.read("archive/maximum.sdn", 8388609).is_err()).to_equal(true)
+        expect(store.live()).to_equal(true)
+        expect(store.close_state()).to_equal("released")
+        expect(root.close()).to_equal(true)
+
+    it "should return an error for an actually denied entry rather than fabricated absence":
+        step("Open the separately provisioned protected root containing journal/denied.sdn with read access denied")
+        var root = journal_native_configured_root_v1("SIMPLE_WINDOWS_JOURNAL_DENIED_ROOT")
+        var store = journal_native_ready_v1(root)
+        expect(store.read("fixture-must-be-absent.sdn", 4096)).to_equal(Ok(None))
+        expect(store.read("denied.sdn", 4096).is_err()).to_equal(true)
+        expect(store.live()).to_equal(false)
+        step("Collect the actual failed read owner and prove stale aliases no longer retain cleanup authority")
+        var stale = store
+        expect(store.close_state()).to_equal("released")
+        expect(stale.close_state()).to_equal("stale")
+        expect(root.close()).to_equal(true)
+
+    it "should mint consumption only from new publication and prevent copied receipt replay":
+        var root = journal_native_fresh_root_v1()
+        var store = journal_native_ready_v1(root)
+        val name = "primary-connection-consumed/" + "a".repeat(64) + ".sdn"
+        val payload = "operation: primary\nnonce: actual-native-fixture\n"
+        step("Publish an actual fixed consumption record and copy the opaque capability")
+        val receipt = store.publish_consumption(name, payload).unwrap()
+        val copied = receipt
+        expect(store.read(name, 4096)).to_equal(Ok(Some(payload)))
+        expect(store.publish_consumption(name, payload).is_err()).to_equal(true)
+        expect(receipt.claim(payload)).to_equal(Ok(true))
+        expect(copied.claim(payload)).to_equal(Ok(false))
+        step("Consume a wrong-payload attempt permanently rather than allowing a later correct replay")
+        val second_name = "primary-connection-consumed/" + "b".repeat(64) + ".sdn"
+        val second = store.publish_consumption(second_name, payload).unwrap()
+        expect(second.claim("wrong bytes")).to_equal(Ok(false))
+        expect(second.claim(payload)).to_equal(Ok(false))
+        step("Refuse a receipt from ordinary publication and invalidate unclaimed capabilities at close")
+        val ordinary_name = "primary-connection-consumed/" + "c".repeat(64) + ".sdn"
+        expect(store.publish(ordinary_name, payload)).to_equal(Ok(true))
+        expect(store.publish_consumption(ordinary_name, payload).is_err()).to_equal(true)
+        val last_name = "primary-connection-consumed/" + "d".repeat(64) + ".sdn"
+        val last = store.publish_consumption(last_name, payload).unwrap()
+        expect(store.close_state()).to_equal("released")
+        expect(last.claim(payload).is_err()).to_equal(true)
+        expect(root.close()).to_equal(true)

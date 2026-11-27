@@ -1,0 +1,185 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+#
+# A `match` whose scrutinee matches no arm FAILS — statement and expression
+# form alike (owner decision 2026-11-14,
+# doc/08_tracking/bug/match_statement_no_arm_silent_noop_2026-11-14.md).
+#
+# Before this rule a match STATEMENT with no matching arm was a silent no-op
+# on the seed interpreter and the seed JIT, so a mis-typed pattern (the classic
+# being `Ok`/`Err` arms over an `Option`) simply skipped its body with no
+# diagnostic. A match EXPRESSION already failed closed.
+#
+# Each no-match case is its own run-path probe under `match_no_arm_probes/`
+# because the failure terminates the program. Every probe prints `before`,
+# runs the match, then prints `after`: a failing match must show `before`,
+# must NOT show `after`, and must exit non-zero with the exhaustion message.
+# The probes run under BOTH seed engines.
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_DIR: text = "test/01_unit/compiler/control_flow/match_no_arm_probes/"
+val EXPR_PROBE_DIR: text = "test/01_unit/compiler/control_flow/match_no_arm_expr_probes/"
+val INTERP: text = "SIMPLE_EXECUTION_MODE=interpreter"
+val JIT: text = "SIMPLE_EXECUTION_MODE=jit"
+
+# Runs a probe and returns its merged stdout+stderr followed by `rc=<code>`.
+fn run_probe(name: text, env_prefix: text) -> text:
+    run_probe_in(PROBE_DIR, name, env_prefix)
+
+fn run_expr_probe(name: text, env_prefix: text) -> text:
+    run_probe_in(EXPR_PROBE_DIR, name, env_prefix)
+
+fn run_probe_in(dir: text, name: text, env_prefix: text) -> text:
+    var bin = env_get("SIMPLE_TEST_BINARY")
+    if bin == "":
+        bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 " + env_prefix + " " + bin + " run " + dir + name + ".spl 2>&1; echo rc=$?"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+fn expect_no_arm_failure(out: text, form: text):
+    expect(out).to_contain("before")
+    expect(out).to_contain("match " + form + " exhausted without matching any pattern")
+    expect(out.contains("after")).to_equal(false)
+    expect(out.contains("rc=0")).to_equal(false)
+
+# The JIT/native panic text carries a token the interpreter error never has, so
+# a silent fallback to the interpreter cannot satisfy a JIT case.
+fn expect_jit_no_arm_failure(out: text, form: text):
+    expect_no_arm_failure(out, form)
+    expect(out).to_contain("(no arm matched)")
+
+fn expect_ok_cases(out: text):
+    expect(out).to_contain("wildcard_silent=ok")
+    expect(out).to_contain("matched_arm=seven")
+    expect(out).to_contain("exhaustive_enum=blue")
+    expect(out).to_contain("binder_catch_all=7")
+    expect(out).to_contain("none_arm=ok")
+    expect(out).to_contain("float_nested_tail=2.5")
+    expect(out).to_contain("float_else=0.25")
+    expect(out).to_contain("expr_arms=one,big,other")
+    expect(out).to_contain("loop_arms=4")
+    expect(out).to_contain("done")
+    expect(out).to_contain("rc=0")
+    expect(out.contains("exhausted without matching")).to_equal(false)
+
+describe "match with no matching arm fails":
+    # @manual scenario evidence
+    context "statement form on the interpreter":
+        it "fails for an int scrutinee and names type, value and location":
+            step("Run the int probe")
+            val out = run_probe("stmt_int", INTERP)
+            expect_no_arm_failure(out, "statement")
+            step("The message names the scrutinee type and value and the source location")
+            expect(out).to_contain("for i64 value 7")
+            expect(out).to_contain("stmt_int.spl:4:5")
+
+        it "fails for a text scrutinee":
+            val out = run_probe("stmt_text", INTERP)
+            expect_no_arm_failure(out, "statement")
+            expect(out).to_contain("value pear")
+
+        it "fails for an enum scrutinee":
+            val out = run_probe("stmt_enum", INTERP)
+            expect_no_arm_failure(out, "statement")
+            expect(out).to_contain("Color::Blue")
+
+        it "fails for an Option scrutinee with only a Some arm":
+            val out = run_probe("stmt_option", INTERP)
+            expect_no_arm_failure(out, "statement")
+            expect(out).to_contain("Option::None")
+
+        it "fails for a tuple scrutinee":
+            val out = run_probe("stmt_tuple", INTERP)
+            expect_no_arm_failure(out, "statement")
+            expect(out).to_contain("(1, 9)")
+
+        it "counts arms whose guards are all false as no match":
+            val out = run_probe("stmt_guard_all_false", INTERP)
+            expect_no_arm_failure(out, "statement")
+            expect(out).to_contain("for i64 value 5")
+
+        it "fails inside a block closure and does not run the rest of the closure":
+            val out = run_probe("stmt_closure", INTERP)
+            expect_no_arm_failure(out, "statement")
+            expect(out).to_contain("for i64 value 7")
+            expect(out.contains("closure-after")).to_equal(false)
+
+        it "fails inside a loop on the first value no arm accepts":
+            val out = run_probe("stmt_in_loop", INTERP)
+            expect_no_arm_failure(out, "statement")
+            expect(out).to_contain("one")
+            expect(out).to_contain("for i64 value 9")
+
+    context "statement form on the JIT":
+        it "fails for an int scrutinee and names the match line":
+            val out = run_probe("stmt_int", JIT)
+            expect_jit_no_arm_failure(out, "statement")
+            expect(out).to_contain("match at line 4")
+
+        it "fails for text, enum, Option and tuple scrutinees":
+            expect_jit_no_arm_failure(run_probe("stmt_text", JIT), "statement")
+            expect_jit_no_arm_failure(run_probe("stmt_enum", JIT), "statement")
+            expect_jit_no_arm_failure(run_probe("stmt_option", JIT), "statement")
+            expect_jit_no_arm_failure(run_probe("stmt_tuple", JIT), "statement")
+
+        it "counts arms whose guards are all false as no match":
+            expect_jit_no_arm_failure(run_probe("stmt_guard_all_false", JIT), "statement")
+
+        it "fails inside a loop on the first value no arm accepts":
+            val out = run_probe("stmt_in_loop", JIT)
+            expect_jit_no_arm_failure(out, "statement")
+            expect(out).to_contain("one")
+
+    context "expression form":
+        it "fails for an int scrutinee on the interpreter":
+            val out = run_expr_probe("expr_int", INTERP)
+            expect_no_arm_failure(out, "expression")
+            expect(out).to_contain("for i64 value 7")
+            expect(out).to_contain("expr_int.spl:4:5")
+
+        it "fails for text, enum, Option and tuple scrutinees on the interpreter":
+            val t = run_expr_probe("expr_text", INTERP)
+            expect_no_arm_failure(t, "expression")
+            expect(t).to_contain("value pear")
+            val e = run_expr_probe("expr_enum", INTERP)
+            expect_no_arm_failure(e, "expression")
+            expect(e).to_contain("Color::Blue")
+            val o = run_expr_probe("expr_option", INTERP)
+            expect_no_arm_failure(o, "expression")
+            expect(o).to_contain("Option::None")
+            val u = run_expr_probe("expr_tuple", INTERP)
+            expect_no_arm_failure(u, "expression")
+            expect(u).to_contain("(1, 9)")
+
+        it "counts arms whose guards are all false as no match on the interpreter":
+            val out = run_expr_probe("expr_guard_all_false", INTERP)
+            expect_no_arm_failure(out, "expression")
+            expect(out).to_contain("for i64 value 5")
+
+        it "fails for an int scrutinee on the JIT and names the first arm line":
+            val out = run_expr_probe("expr_int", JIT)
+            expect_jit_no_arm_failure(out, "expression")
+            expect(out).to_contain("first arm at line 5")
+
+        it "fails for text, enum, Option and tuple scrutinees on the JIT":
+            expect_jit_no_arm_failure(run_expr_probe("expr_text", JIT), "expression")
+            expect_jit_no_arm_failure(run_expr_probe("expr_enum", JIT), "expression")
+            expect_jit_no_arm_failure(run_expr_probe("expr_option", JIT), "expression")
+            expect_jit_no_arm_failure(run_expr_probe("expr_tuple", JIT), "expression")
+
+        it "counts arms whose guards are all false as no match on the JIT":
+            expect_jit_no_arm_failure(run_expr_probe("expr_guard_all_false", JIT), "expression")
+
+    context "matches that do match are unchanged":
+        it "keeps wildcard, matched, exhaustive, binder, None, float-tail, expression and loop arms working on the interpreter":
+            expect_ok_cases(run_probe("ok_cases", INTERP))
+
+        it "keeps the same matches working on the JIT":
+            expect_ok_cases(run_probe("ok_cases", JIT))

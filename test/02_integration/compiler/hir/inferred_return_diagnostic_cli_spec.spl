@@ -1,0 +1,79 @@
+# @req REQ-SSPEC-INTEGRATION
+# NOT_RUN: requires an admitted absolute SIMPLE_BIN and outer tree watchdog.
+# This tests the external multi-module driver boundary, not simple check's
+# single-file lowering route. Positive cases qualify warning emission only.
+use std.spec.*
+use std.io_runtime.{file_write, process_run_bounded, env_get, cwd_process}
+
+fn reproduce_imported_return_diagnostic(case_name: text, facade: bool, explicit_return: bool):
+    val runtime = env_get("SIMPLE_BIN")
+    val workspace = cwd_process()
+    expect(runtime.starts_with("/")).to_equal(true)
+    expect(workspace.starts_with("/")).to_equal(true)
+    if not runtime.starts_with("/") or not workspace.starts_with("/"): return
+    val root = workspace + "/build/test-artifacts/inferred-return-cli/" + case_name
+    # Every case owns its directory. Removing it prevents stale native/entry
+    # cache or output artifacts from substituting for this source invocation.
+    val clean = process_run_bounded("/bin/rm", ["-rf", root], 5000, 65536)
+    expect(clean.2).to_equal(0)
+    if clean.2 != 0: return
+    val setup = process_run_bounded("/bin/mkdir", ["-p", root + "/src/repro", root + "/src/app"], 5000, 65536)
+    expect(setup.2).to_equal(0)
+    if setup.2 != 0: return
+    val model = "pub struct Node:\n    n: i64\n\npub fn make() -> Node:\n    Node(n: 7)\n"
+    val import_line = if facade: "export use repro.model.*\n" else: "use repro.model.\{Node, make\}\n"
+    val signature = if explicit_return: "pub fn node_get() -> Node:" else: "pub fn node_get():"
+    val provider = import_line + "\n" + signature + "\n    make()\n"
+    # No written annotation on src: this is the ordinary AST provenance path,
+    # unlike the separate unit phase-contract metadata mutation controls.
+    val consumer = "use repro.api.\{node_get\}\n\nfn main() -> i64:\n    val src = node_get()\n    src.n\n"
+    val model_written = file_write(root + "/src/repro/model.spl", model)
+    val provider_written = file_write(root + "/src/repro/api.spl", provider)
+    val consumer_written = file_write(root + "/src/app/main.spl", consumer)
+    expect(model_written and provider_written and consumer_written).to_equal(true)
+    if not model_written or not provider_written or not consumer_written: return
+    val built = process_run_bounded("/usr/bin/env", ["SIMPLE_BOOTSTRAP=1",
+        "SIMPLE_TYPECHECK_WARN=1", "SIMPLE_TYPECHECK_PROFILE=robust", "SIMPLE_FRONTEND_DIAG=1",
+        runtime, "native-build", "--source", root + "/src", "--entry", root + "/src/app/main.spl",
+        "--entry-closure", "--threads", "1", "--cache-dir", root + "/cache", "-o", root + "/program"], 120000, 4194304)
+    val stdout_saved = file_write(root + "/build.stdout.log", built.0)
+    val stderr_saved = file_write(root + "/build.stderr.log", built.1)
+    val status_saved = file_write(root + "/build.status.txt", "{built.2}\n")
+    expect(stdout_saved and stderr_saved and status_saved).to_equal(true)
+    # Only ordinary completed statuses are accepted for warning reproduction.
+    # Timeout, launch failure, signal termination and output overflow cannot pass.
+    expect(built.2 == 0 or built.2 == 1).to_equal(true)
+    if built.2 != 0 and built.2 != 1: return
+    expect(built.0.len()).to_be_less_than(4194304)
+    expect(built.1.len()).to_be_less_than(4194304)
+    val output = built.0 + "\n" + built.1
+    for failure_marker in ["native-build worker CRASHED", "native-build worker terminated with",
+        "native-build worker wrapper exited abnormally", "native-build worker timed out", "[TIMEOUT:"]:
+        expect(output.contains(failure_marker)).to_equal(false)
+    val reason = "callee `node_get` has no available imported return signature"
+    if explicit_return:
+        expect(built.2).to_equal(0)
+        expect(output.contains("W-HIR-INFER-001")).to_equal(false)
+        expect(output.contains(reason)).to_equal(false)
+    else:
+        expect(output.split(reason).len() - 1).to_equal(1)
+        expect(output).to_contain("[frontend W-HIR-INFER-001]")
+        expect(output).to_contain("type of `src` could not be determined at its declaration")
+        expect(output).to_contain("in `main`")
+        for line in output.split("\n"):
+            if line.contains(reason):
+                expect(line).to_contain(": 4:")
+                expect(line).to_contain("in `main`")
+
+describe "external imported omitted-return diagnostic reproduction":
+    it "reports an ordinary provider omitted return at the inferred declaration":
+        reproduce_imported_return_diagnostic("provider-omitted", false, false)
+
+    it "reports an ordinary re-exporting facade omitted return at the inferred declaration":
+        reproduce_imported_return_diagnostic("facade-omitted", true, false)
+
+    it "successfully compiles an explicit provider nominal return without the warning":
+        reproduce_imported_return_diagnostic("provider-explicit", false, true)
+
+    it "successfully compiles an explicit facade nominal return without the warning":
+        reproduce_imported_return_diagnostic("facade-explicit", true, true)

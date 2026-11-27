@@ -90,3 +90,15 @@ the Rust seed's `interpreter_sffi` extern dispatch table, wired to the
 existing native implementations in `runtime_process.c`. Out of scope for
 this lane (Rust seed change + rebuild; project rule is "fix .spl not Rust"
 and "no bootstrap unless essential").
+
+## Triage 2026-11-25 (fleet agent, worktree wt-p2w3-aj, release/1.0.0)
+
+Re-confirmed the gap still exists in the Rust seed source:
+`grep -rn rt_process_spawn_piped src/compiler_rust/src` returns zero matches,
+while the native implementations in `src/runtime/runtime_process.c` and the
+self-hosted backend registry entry
+(`src/compiler/70.backend/backend/stage4_symbol_closure.spl`) are present.
+Status "open" remains accurate. Classification: Rust-seed-only fix (seed
+dispatch-table registration + seed rebuild), out of scope for a pure-Simple
+fleet lane and for this Windows host (no cargo/rust builds permitted).
+No change made.

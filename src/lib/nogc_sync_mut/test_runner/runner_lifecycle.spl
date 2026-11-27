@@ -7,7 +7,8 @@
 
 use std.test_runner.process_tracker.{tracker_register_pid, tracker_get_pids, tracker_unregister_pid, tracker_register_container, tracker_unregister_container, tracker_kill_all_children, tracker_stop_all_containers, tracker_container_runtime, get_running_containers, tracker_enable_heartbeat, tracker_send_heartbeat, tracker_check_heartbeat_alive}
 use std.test_runner.checkpoint.{checkpoint_save}
-use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_spawn_redirected, process_wait, process_kill, process_is_running, process_run_bounded}
+use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_spawn_redirected, process_wait, process_kill, process_kill_tree, process_is_running, process_run_bounded}
+use std.nogc_sync_mut.sosix.test_process.{sosix_test_owned_capture, sosix_test_spawn_capture}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_try_acquire, proc_slot_release, proc_slot_reset)
 use std.io_runtime.{exit}
@@ -56,6 +57,23 @@ fn spawn_tracked_redirected_process(cmd: text, args: [text], stdout_path: text,
         proc_slot_release()
     token
 
+# Capture strategy and provider dispatch belong to SOSIX; this layer owns only
+# scheduler admission and registration. Preserve POSIX blocking admission and
+# Windows retryable denial (-3) for the existing worker scheduler.
+fn spawn_tracked_test_process(cmd: text, args: [text], stdout_path: text,
+        stderr_path: text, timeout_ms: i64) -> i64:
+    if sosix_test_owned_capture():
+        if not proc_slot_try_acquire(): return -3
+    else:
+        proc_slot_acquire()
+    val token = sosix_test_spawn_capture(cmd, args, stdout_path, stderr_path,
+        timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
+    if token > 0:
+        tracker_register_pid(token)
+    else:
+        proc_slot_release()
+    token
+
 fn untrack_process(pid: i64):
     """
     Unregister process after successful wait/cleanup.
@@ -72,7 +90,10 @@ fn untrack_process(pid: i64):
 fn wait_tracked_process(pid: i64, timeout_ms: i64) -> i64:
     val exit_code = process_wait(pid, timeout_ms)
     if exit_code == -2:
-        val killed = process_kill(pid)
+        # A timed-out test must take everything it started with it. The sosix
+        # plan spawned it as a session leader (or a Windows Job token), so this
+        # reaches the whole tree; for anything else it prints why it cannot.
+        val killed = process_kill_tree(pid)
         if killed or not process_is_running(pid):
             untrack_process(pid)
         return -1
@@ -84,7 +105,10 @@ fn poll_tracked_process(pid: i64) -> i64:
     if pid <= 0:
         return -1
     val exit_code = process_wait(pid, 1)
-    if exit_code >= 0 or (exit_code == -1 and not process_is_running(pid)):
+    # Any non-timeout result for a reaped child is terminal, including a
+    # signal death (-(128+signo)). Releasing only on >= 0 or -1 leaked one
+    # process slot per crashed spec until the parallel pool wedged.
+    if exit_code != -2 and (exit_code >= 0 or not process_is_running(pid)):
         untrack_process(pid)
     exit_code
 

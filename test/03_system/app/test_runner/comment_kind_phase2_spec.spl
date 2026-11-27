@@ -1,0 +1,150 @@
+# @req REQ-TESTRUNNER-COMMENT-KIND
+# @req REQ-TESTRUNNER-PHASE2-4KINDS
+# @cover src/lib/nogc_sync_mut/test_runner/test_runner_modes.spl 10%
+"""
+# Comment doctests run on the phase2 compiler when asked
+
+**Feature IDs:** #test-runner-comment-kind, #test-runner-phase2
+**Category:** Tooling
+
+## Overview
+
+`simple test --compiler=phase2 --spl-doctest <file.spl>` must run every
+example with the phase2-built CLI named by SIMPLE_PHASE2_FULL_CLI, report
+PASS and FAIL as the default compiler does, and refuse (exit 2, naming the
+variable) when that CLI is not configured. The CLI here is a recording
+stand-in that logs its argv and then runs the real binary.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read, file_exists, file_remove}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.io_runtime.{file_hash_sha256_or_empty}
+
+val DIR = "build/comment_kind/phase2"
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY")
+    if b != "":
+        return b
+    "bin/simple"
+
+fn mkdir(path: text):
+    process_run_bounded("mkdir", ["-p", path], 10000, 65536)
+
+fn fixture(name: text, body: text) -> text:
+    mkdir(DIR)
+    val path = DIR + "/" + name + ".spl"
+    file_write(path, body)
+    path
+
+# Recording stand-in for the phase2-built CLI: logs its argv, runs the real binary.
+# Returns the CLI path; its log is <cli>.log, reset on every call.
+fn write_phase2_cli(name: text) -> text:
+    mkdir(DIR)
+    val path = DIR + "/" + name
+    if file_exists(path + ".log"):
+        file_remove(path + ".log")
+    file_write(path, "#!/bin/sh\necho \"phase2-invoked $*\" >> \"{path}.log\"\nexec \"{real_binary()}\" \"$@\"\n")
+    process_run_bounded("chmod", ["+x", path], 10000, 65536)
+    path
+
+fn log_of(cli: text) -> text:
+    if file_exists(cli + ".log"):
+        return file_read(cli + ".log")
+    ""
+
+fn run_phase2(cli: text, spec: text) -> (text, i64):
+    val (out, err, code) = process_run_bounded("env", ["SIMPLE_PHASE2_FULL_CLI=" + cli, "SIMPLE_PHASE2_FULL_CLI_SHA256=" + file_hash_sha256_or_empty(cli), real_binary(), "test", "--compiler=phase2", "--no-session-daemon", "--spl-doctest", spec], 600000, 4194304)
+    (out + err, code)
+
+val GREEN = "## ```simple\n## assert_equal(6 * 7, 42)\n## ```\nfn f():\n    1\n"
+val RED = "## ```simple\n## assert_equal(6 * 7, 43)\n## ```\nfn f():\n    1\n"
+
+describe "simple test --compiler=phase2 --spl-doctest":
+    # @capture(exec)
+    it "reports a green file as PASS with exit 0":
+        step("Write a green fixture and a recording phase2 CLI")
+        val cli = write_phase2_cli("cli_green")
+        val path = fixture("green", GREEN)
+        step("Run the comment doctest with phase2")
+        val (report, code) = run_phase2(cli, path)
+        expect(code).to_equal(0)
+        expect(report).to_contain("PASS  " + path)
+        expect(report).to_contain("SPL Doctest: 1 passed, 0 failed")
+
+    # @capture(exec)
+    it "reports a red file as FAIL with exit 1":
+        step("Write a red fixture and a recording phase2 CLI")
+        val cli = write_phase2_cli("cli_red")
+        val path = fixture("red", RED)
+        val (report, code) = run_phase2(cli, path)
+        expect(code).to_equal(1)
+        expect(report).to_contain("FAIL  " + path)
+        expect(report).to_contain("SPL Doctest: 0 passed, 1 failed")
+
+    # @capture(exec)
+    it "runs the example with the phase2 CLI":
+        step("Run a green fixture with phase2")
+        val cli = write_phase2_cli("cli_runs")
+        run_phase2(cli, fixture("runs", GREEN))
+        step("The phase2 CLI was invoked on a composite program")
+        val log = log_of(cli)
+        expect(log).to_contain("phase2-invoked")
+        expect(log).to_contain("spl_doctest_")
+
+    # @capture(exec)
+    it "invokes the phase2 CLI once per example":
+        step("Run a fixture with three examples")
+        val cli = write_phase2_cli("cli_count")
+        val body = GREEN + GREEN + RED
+        run_phase2(cli, fixture("three", body))
+        val log = log_of(cli)
+        val invocations = log.split("phase2-invoked").len() - 1
+        expect(invocations).to_equal(3)
+
+    # @capture(exec)
+    it "counts mixed examples like the default compiler":
+        step("Run a fixture with two green and one red example")
+        val cli = write_phase2_cli("cli_mixed")
+        val (report, code) = run_phase2(cli, fixture("mixed", GREEN + RED + GREEN))
+        expect(code).to_equal(1)
+        expect(report).to_contain("SPL Doctest: 2 passed, 1 failed")
+
+    # @capture(exec)
+    it "does not run the phase2 CLI when the file has no example":
+        step("Run a code-only fixture with phase2")
+        val cli = write_phase2_cli("cli_none")
+        val (report, code) = run_phase2(cli, fixture("none", "fn f():\n    1\n"))
+        expect(code).to_equal(1)
+        expect(report).to_contain("no doctest blocks found")
+        expect(log_of(cli)).to_equal("")
+
+    # @capture(exec)
+    it "does not use the phase2 CLI without the compiler flag":
+        step("Run a green fixture on the default compiler with a phase2 CLI configured")
+        val cli = write_phase2_cli("cli_default")
+        val path = fixture("default", GREEN)
+        val (out, err, code) = process_run_bounded("env", ["SIMPLE_PHASE2_FULL_CLI=" + cli, real_binary(), "test", "--no-session-daemon", "--spl-doctest", path], 600000, 4194304)
+        expect(code).to_equal(0)
+        expect(out + err).to_contain("PASS  " + path)
+        expect(log_of(cli)).to_equal("")
+
+    # @capture(exec)
+    it "gives a clear error when SIMPLE_PHASE2_FULL_CLI is missing":
+        step("Run with SIMPLE_PHASE2_FULL_CLI unset")
+        val path = fixture("no_cli", GREEN)
+        val (out, err, code) = process_run_bounded("env", ["-u", "SIMPLE_PHASE2_FULL_CLI", real_binary(), "test", "--compiler=phase2", "--no-session-daemon", "--spl-doctest", path], 600000, 4194304)
+        expect(code).to_equal(2)
+        expect(out + err).to_contain("SIMPLE_PHASE2_FULL_CLI")
+
+    # @capture(exec)
+    it "refuses a phase2 CLI whose hash does not match":
+        step("Run with a wrong SIMPLE_PHASE2_FULL_CLI_SHA256")
+        val cli = write_phase2_cli("cli_badhash")
+        val path = fixture("badhash", GREEN)
+        val (out, err, code) = process_run_bounded("env", ["SIMPLE_PHASE2_FULL_CLI=" + cli, "SIMPLE_PHASE2_FULL_CLI_SHA256=0000000000000000000000000000000000000000000000000000000000000000", real_binary(), "test", "--compiler=phase2", "--no-session-daemon", "--spl-doctest", path], 600000, 4194304)
+        expect(code).to_equal(2)
+        expect(log_of(cli)).to_equal("")

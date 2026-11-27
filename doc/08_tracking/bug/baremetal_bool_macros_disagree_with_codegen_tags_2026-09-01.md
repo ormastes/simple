@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN
+- Status: SUPERSEDED 2026-11-11 (lane p3fix-comp6-20261111) — #7447 lineage merged at tip; check-baremetal-tagged-bool-decode.shs PASS on Windows seed (see addenda)
 - Date: 2026-09-01
 - Scope: `examples/09_embedded/simple_os/arch/common/baremetal_runtime.h`
 - Found while root-causing
@@ -60,3 +60,86 @@ runtime (both `baremetal_stubs.c`, whose definitions win the link, and
 make the header agree with codegen — with a per-DEFINITION guard, since a
 tree-wide grep cannot tell which definition the linker actually selected.
 
+
+## Resolution evidence — 2026-11-05
+
+Fixed on `work/libbug-linux-booltag-20261105` (branched from `origin/release/1.0.0`).
+
+**Canonical encoding: the codegen tags won** — `true = 11`, `false = 19`
+(`TAG_SPECIAL` payloads), per this doc's "Next step" ("make the header agree
+with codegen"). `tagged_bool_const` in
+`src/compiler_rust/compiler/src/codegen/llvm/instructions.rs:14-17` is the
+source of truth and is pinned by
+`scripts/check/check-baremetal-tagged-bool-decode.shs`.
+
+All 7 definitions of `TRUE_VALUE`/`FALSE_VALUE` were aligned:
+
+- `arch/common/baremetal_runtime.h:74-75` — now alias the existing
+  `TAGGED_BOOL_TRUE`/`TAGGED_BOOL_FALSE` macros (11/19), with file-scope
+  `_Static_assert` guards.
+- `arch/{x86_64,x86_32,arm64,arm32,riscv64}/boot/baremetal_stubs.c` and
+  `arch/riscv64/boot/baremetal_runtime_core.inc.c` — each self-contained TU
+  redefines the pair; each was changed to the literal tagged values (spelled
+  out because these TUs do not include the common header) **and** given its
+  own `_Static_assert(TRUE_VALUE == 11, ...)` /
+  `_Static_assert(FALSE_VALUE == 19, ...)` guard, per this doc's
+  per-DEFINITION-guard requirement: any future drift now fails the build at
+  the offending definition instead of silently relinking the old encoding.
+
+Verified (aarch64 Linux host, source-level + host cc only):
+
+- RED (pre-fix): extracted constants compiled to `TRUE_VALUE=8 vs 11 MISMATCH`,
+  `FALSE_VALUE=0 vs 19 MISMATCH`.
+- GREEN (post-fix): `TRUE_VALUE=11 MATCH`, `FALSE_VALUE=19 MATCH`; a
+  deliberately-diverged definition fails to compile with
+  `static assertion failed: "TRUE_VALUE must match codegen tagged true (11)"`.
+- `grep` sweep: no `ENCODE_INT(1)`/`ENCODE_INT(0)`-based bool definitions
+  remain under `examples/09_embedded/`.
+- `cc -fsyntax-only -ffreestanding` (c11/gnu11 as appropriate) passes for all
+  touched TUs and every TU that includes `baremetal_runtime.h`.
+- `sh scripts/check/check-baremetal-tagged-bool-decode.shs` →
+  `PASS — 4 definition(s) checked, all decode the tagged bool` (exit 0).
+
+Not verified here (no hardware/semihosting on this host): actual baremetal
+boot on any target; the change is ABI-visible only at runtime<->codegen bool
+boundaries, which is exactly the defect.
+
+## Scoped C consumer repair — 2026-11-07
+
+The ARM64 and x86_64 primitive logical consumers still interpreted tagged false (19) as integer2, converted tagged true (11) to false, and recognized encoded integers0/8 as booleans. The scoped repair handles11/19 first, retains prior nonboolean integer truthiness, preserves tagged booleans in conversion and keeps the predicate's raw0/1 result ABI. No compiler or runtime representation is changed.
+
+The whole-production-object reproducer landed in #7447 records the original release failing25 of190 assertions per architecture and the candidate repair passing190/190 on both. The seven producer owners and two logical owners also have a focused native regression. Both checks are now CI-wired for owner/header/test changes, including the complete-object QEMU user-mode regression. The current release integration is validated with exact input identities in the landing receipt.
+
+Astra reviewed the production C patch and confirmed that compiler/lib/MCP-specific conditional gates do not automatically apply to these embedded C files. This records completion of the primitive C consumer repair only. It does not claim a device boot, a Simple-generated caller, full owner branch coverage, or broader system qualification; those remain separate acceptance work. No broad bug closure is added here.
+
+
+---
+
+## 2026-11-10 (p3-compiler lane, rows 1-8, Windows worktree, seed-smoke) — SUPERSEDED ON release/1.0.0
+
+Lane: `work/p3-compiler-20261110` on `origin/release/1.0.0` (base `dfc7da8523f4`).
+Runtime: worktree Rust seed `bin/simple.exe` (built 2026-11-10). Seed-smoke only.
+
+**Disposition: SUPERSEDED.** The 2026-11-05/2026-11-07 resolution (#7447 lineage) is merged
+on base: `arch/common/baremetal_runtime.h:70-77` aliases `TRUE_VALUE`/`FALSE_VALUE` to
+`TAGGED_BOOL_TRUE`/`TAGGED_BOOL_FALSE` (11/19) with `_Static_assert` guards, and each
+self-contained arch TU carries the same per-definition guard (e.g.
+`arch/x86_64/boot/baremetal_stubs.c:333-336`).
+
+Verification on this host (Windows Git Bash, source-level check):
+`sh scripts/check/check-baremetal-tagged-bool-decode.shs` →
+`PASS — 4 definition(s) checked, all decode the tagged bool` (exit 0).
+
+
+---
+
+## 2026-11-11 (lane p3fix-comp6-20261111) — Status flipped SUPERSEDED
+
+Independent re-verification on this lane's fresh worktree (Windows Git
+Bash, base `bf946163122f`):
+
+`sh scripts/check/check-baremetal-tagged-bool-decode.shs` →
+**`PASS — 4 definition(s) checked, all decode the tagged bool`** (exit 0).
+
+Absorber: the 2026-11-05/2026-11-07 resolution (#7447 lineage) merged on
+release/1.0.0, per the addenda above. Status line flipped from OPEN.

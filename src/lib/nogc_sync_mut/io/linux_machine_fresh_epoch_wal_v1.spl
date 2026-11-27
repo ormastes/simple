@@ -1,0 +1,221 @@
+# Fixed-root data mechanism only. The enclosing platform storage retains and
+# checks actual ancestry, machine writer and installed binding around each call.
+# This helper is READ ONLY: no WAL publication, reset or initialization port.
+# It supplies no preparation/admission proof and acquires no writer.
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.*
+use std.nogc_sync_mut.database.wal_segmented.{DatabaseWalRevisionV1, database_wal_current_v1,
+    database_wal_revision_open_v1, database_wal_segment_read_strict_v1}
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+use std.common.string_core.char_from_code
+
+pub class LinuxMachineFreshWalV1:
+    slot: i64
+    generation: i64
+    pub fn roots_v1() -> Result<(text, text), text>: fresh_wal_roots_v1(self.slot, self.generation)
+    pub fn head_v1(record: MachineFreshEpochRecordV1, identity: text) -> Result<text, text>:
+        fresh_wal_head_v1(self.slot, self.generation, record, identity)
+    pub fn close_v1() -> (bool, text): fresh_wal_close_v1(self.slot, self.generation)
+pub enum LinuxMachineFreshWalOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: LinuxMachineFreshWalV1, reason: text)
+    Ready(owner: LinuxMachineFreshWalV1)
+
+pub fn linux_machine_fresh_wal_open_v1() -> LinuxMachineFreshWalOpenV1:
+    @when(os="linux"):
+    fresh_wal_open_v1()
+    @else:
+    LinuxMachineFreshWalOpenV1.Rejected("fresh-wal-linux-required")
+    @end
+
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_machine_policy_abi_v1.*
+use std.nogc_sync_mut.io.linux_installed_supervisor_abi_v1.{fdopendir, readdir, closedir, __errno_location}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32,
+    volatile_read_u64, volatile_write_u8, volatile_write_u32}
+struct FreshWalStateV1:
+    generation: i64
+    arena: i64
+    uid: i64
+    var root: i64 = -1
+    var objects: i64 = -1
+    var root_id: text = ""
+    var objects_id: text = ""
+    var cursor_fd: i64 = -1
+    var cursor: i64 = 0
+    var closed: bool = false
+    var error: text = ""
+var fresh_wal_slots_v1: [FreshWalStateV1] = []
+
+fn fresh_wal_state_v1(slot: i64, generation: i64) -> Result<FreshWalStateV1, text>:
+    linux_machine_process_origin_check_v1()?
+    if slot < 0 or slot >= fresh_wal_slots_v1.len() or fresh_wal_slots_v1[slot].generation != generation:
+        return Err("fresh-wal-stale")
+    Ok(fresh_wal_slots_v1[slot])
+
+fn fresh_wal_flags_v1() -> i32:
+    @when(arch="x86_64"):
+    720896
+    @elif(arch="aarch64"):
+    573440
+    @else:
+    0
+    @end
+
+@unsafe(reason: "bounded fixed-name buffer in canonical owned arena", capabilities: [raw_ptr])
+fn fresh_wal_name_v1(slot: i64, name: text) -> i64:
+    val pointer = fresh_wal_slots_v1[slot].arena + 256
+    for at in 0..name.byte_len(): volatile_write_u8(pointer + at, name.byte_at(at) as i64)
+    volatile_write_u8(pointer + name.byte_len(), 0)
+    pointer
+
+@unsafe(reason: "actual nofollow statx identity and exact private owner mode", capabilities: [ffi, raw_ptr])
+fn fresh_wal_meta_v1(slot: i64, parent: i64, name: text = "") -> Result<text, text>:
+    val state = fresh_wal_slots_v1[slot]
+    for at in 0..256: volatile_write_u8(state.arena + at, 0)
+    val pointer = fresh_wal_name_v1(slot, name)
+    if (statx(parent as i32, pointer, if name == "": 4096 else: 256, 6143u32, state.arena) != 0 or
+            (volatile_read_u32(state.arena) & 6143) != 6143 or volatile_read_u64(state.arena + 144) <= 0):
+        return Err("fresh-wal-statx-unavailable")
+    val uid = volatile_read_u32(state.arena + 20)
+    val mode = volatile_read_u16(state.arena + 28)
+    if uid != state.uid or mode != 16832: return Err("fresh-wal-private-directory-required")
+    Ok(str(volatile_read_u32(state.arena + 136)) + ":" + str(volatile_read_u32(state.arena + 140)) + ":" +
+        str(volatile_read_u64(state.arena + 32)) + ":" + str(volatile_read_u64(state.arena + 144)) + ":" + str(uid) + ":" + str(mode))
+
+fn fresh_wal_roots_v1(slot: i64, generation: i64) -> Result<(text, text), text>:
+    val state = fresh_wal_state_v1(slot, generation)?
+    if state.closed or state.root < 0 or state.objects < 0: return Err("fresh-wal-not-current")
+    if (fresh_wal_meta_v1(slot, state.root)? != state.root_id or fresh_wal_meta_v1(slot, state.objects)? != state.objects_id or
+            fresh_wal_meta_v1(slot, -100, "/var/lib/simple/container/database-wal")? != state.root_id or
+            fresh_wal_meta_v1(slot, state.root, "objects")? != state.objects_id):
+        return Err("fresh-wal-root-replaced")
+    Ok((state.root_id, state.objects_id))
+
+@unsafe(reason: "consumes canonical directory stream before one libc close", capabilities: [ffi])
+fn fresh_wal_cursor_close_v1(slot: i64) -> Result<(), text>:
+    val cursor = fresh_wal_slots_v1[slot].cursor
+    fresh_wal_slots_v1[slot].cursor = 0
+    if cursor != 0 and closedir(cursor) != 0: return Err("fresh-wal-cursor-close-consumed-error")
+    Ok(())
+
+@unsafe(reason: "bounded errno-aware enumeration of the actual retained WAL and object directories", capabilities: [ffi, raw_ptr])
+fn fresh_wal_inventory_v1(slot: i64, fd: i64, root: bool) -> Result<(), text>:
+    if fresh_wal_slots_v1[slot].cursor != 0 or fresh_wal_slots_v1[slot].cursor_fd >= 0:
+        return Err("fresh-wal-inventory-already-pending")
+    val opened = openat(fd as i32, fresh_wal_name_v1(slot, "."), fresh_wal_flags_v1(), 0u32) as i64
+    fresh_wal_slots_v1[slot].cursor_fd = opened
+    if opened < 0: return Err("fresh-wal-inventory-open")
+    val stream = fdopendir(opened as i32)
+    if stream == 0: return Err("fresh-wal-inventory-adopt")
+    fresh_wal_slots_v1[slot].cursor = stream
+    fresh_wal_slots_v1[slot].cursor_fd = -1
+    var count = 0
+    while true:
+        val error = __errno_location()
+        volatile_write_u32(error, 0)
+        val row = readdir(stream)
+        if row == 0:
+            if volatile_read_u32(error) != 0: return Err("fresh-wal-inventory-read")
+            break
+        count = count + 1
+        if count > 8: return Err("fresh-wal-unknown-or-orphan-history")
+        val length = volatile_read_u16(row + 16)
+        if length < 20 or length > 280: return Err("fresh-wal-inventory-dirent")
+        var name = ""
+        var ended = false
+        for at in 19..length:
+            val byte = volatile_read_u8(row + at)
+            if byte == 0:
+                ended = true
+                break
+            if byte < 32 or byte > 126: return Err("fresh-wal-inventory-name")
+            name = name + char_from_code(byte as u32)
+        if not ended: return Err("fresh-wal-inventory-unterminated")
+        # The initial inventory permits ONLY the installed empty objects dir.
+        # Even a leftover commit.lock requires explicit operator investigation.
+        if name != "." and name != ".." and not (root and name == "objects"):
+            return Err("fresh-wal-unknown-or-orphan-history")
+    fresh_wal_cursor_close_v1(slot)
+
+fn fresh_wal_head_v1(slot: i64, generation: i64, record: MachineFreshEpochRecordV1, identity: text) -> Result<text, text>:
+    val roots = fresh_wal_roots_v1(slot, generation)?
+    val checked = machine_fresh_epoch_record_validate_v1(record)?
+    val root = "/var/lib/simple/container/database-wal"
+    val current = database_wal_current_v1(root, identity)?
+    if current == "":
+        val state = fresh_wal_slots_v1[slot]
+        fresh_wal_inventory_v1(slot, state.root, true)?
+        fresh_wal_inventory_v1(slot, state.objects, false)?
+    else:
+        var digest = current
+        var expected_first = 0
+        var count = 0
+        while true:
+            count = count + 1
+            if count > 65536: return Err("fresh-wal-history-bound")
+            val revision = database_wal_revision_open_v1(root, digest)?
+            if revision.database_identity != identity: return Err("fresh-wal-history-identity")
+            if expected_first != 0 and revision.last_sequence != expected_first - 1: return Err("fresh-wal-history-gap")
+            val entries = database_wal_segment_read_strict_v1(root, revision)?
+            if revision.parent == "":
+                if revision.first_sequence != 1 or revision.last_sequence != 4 or entries.len() != 4:
+                    return Err("fresh-wal-genesis-layout")
+                val original = machine_fresh_epoch_record_decode_v1(entries[0].data)?
+                val replayed = machine_fresh_epoch_replay_v1(entries, original)?
+                if not replayed or machine_fresh_epoch_stable_v1(original)? != machine_fresh_epoch_stable_v1(record)?:
+                    return Err("fresh-wal-installed-epoch-binding-differs")
+                break
+            expected_first = revision.first_sequence
+            digest = revision.parent
+    val after = fresh_wal_roots_v1(slot, generation)?
+    Ok(current)
+
+@unsafe(reason: "all acquired descriptors retained before fallible inspection", capabilities: [ffi, raw_ptr])
+fn fresh_wal_open_v1() -> LinuxMachineFreshWalOpenV1:
+    val origin = linux_machine_process_origin_check_v1()
+    if origin.is_err(): return LinuxMachineFreshWalOpenV1.Rejected(origin.unwrap_err())
+    if fresh_wal_flags_v1() == 0 or fresh_wal_slots_v1.len() >= 4096: return LinuxMachineFreshWalOpenV1.Rejected("fresh-wal-owner-bound-or-platform")
+    val arena = malloc(8192u64)
+    if arena == 0: return LinuxMachineFreshWalOpenV1.Rejected("fresh-wal-allocation")
+    val slot = fresh_wal_slots_v1.len()
+    fresh_wal_slots_v1.push(FreshWalStateV1(generation: slot + 1, arena: arena, uid: geteuid() as i64))
+    val owner = LinuxMachineFreshWalV1(slot: slot, generation: slot + 1)
+    val root = openat(-100, fresh_wal_name_v1(slot, "/var/lib/simple/container/database-wal"), fresh_wal_flags_v1(), 0u32) as i64
+    fresh_wal_slots_v1[slot].root = root
+    if root < 0: return LinuxMachineFreshWalOpenV1.CleanupRequired(owner, "fresh-wal-root-open")
+    val objects = openat(root as i32, fresh_wal_name_v1(slot, "objects"), fresh_wal_flags_v1(), 0u32) as i64
+    fresh_wal_slots_v1[slot].objects = objects
+    val captured = fresh_wal_capture_v1(slot)
+    if captured.is_err(): return LinuxMachineFreshWalOpenV1.CleanupRequired(owner, captured.unwrap_err())
+    LinuxMachineFreshWalOpenV1.Ready(owner)
+
+fn fresh_wal_capture_v1(slot: i64) -> Result<(), text>:
+    val state = fresh_wal_slots_v1[slot]
+    if state.uid <= 0 or state.objects < 0: return Err("fresh-wal-private-installation-missing")
+    fresh_wal_slots_v1[slot].root_id = fresh_wal_meta_v1(slot, state.root)?
+    fresh_wal_slots_v1[slot].objects_id = fresh_wal_meta_v1(slot, state.objects)?
+    val checked = fresh_wal_roots_v1(slot, state.generation)?
+    Ok(())
+
+@unsafe(reason: "Linux close consumes once including errors, never retries recycled descriptors", capabilities: [ffi])
+fn fresh_wal_close_v1(slot: i64, generation: i64) -> (bool, text):
+    val loaded = fresh_wal_state_v1(slot, generation)
+    if loaded.is_err(): return (false, loaded.unwrap_err())
+    val state = loaded.unwrap()
+    if state.closed: return (true, state.error)
+    val cursor = fresh_wal_cursor_close_v1(slot)
+    if cursor.is_err() and state.error == "": fresh_wal_slots_v1[slot].error = cursor.unwrap_err()
+    fresh_wal_slots_v1[slot].cursor_fd = -1
+    fresh_wal_slots_v1[slot].objects = -1
+    fresh_wal_slots_v1[slot].root = -1
+    for fd in [state.cursor_fd, state.objects, state.root]:
+        if fd >= 0 and close(fd as i32) != 0 and fresh_wal_slots_v1[slot].error == "":
+            fresh_wal_slots_v1[slot].error = "fresh-wal-close-consumed-error"
+    free(state.arena)
+    fresh_wal_slots_v1[slot].closed = true
+    (true, fresh_wal_slots_v1[slot].error)
+@else:
+fn fresh_wal_roots_v1(slot: i64, generation: i64) -> Result<(text, text), text>: Err("fresh-wal-linux-required")
+fn fresh_wal_head_v1(slot: i64, generation: i64, record: MachineFreshEpochRecordV1, identity: text) -> Result<text, text>: Err("fresh-wal-linux-required")
+fn fresh_wal_close_v1(slot: i64, generation: i64) -> (bool, text): (false, "fresh-wal-linux-required")
+@end

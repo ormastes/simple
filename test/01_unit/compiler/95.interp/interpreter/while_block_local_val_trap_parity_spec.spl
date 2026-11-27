@@ -1,0 +1,44 @@
+# Follow-up to interpreter_val_decl_in_loop_body_declines_every_matcher_2026-09-13
+# (review of the block-local `val` splice): an UNUSED `val y = i % 0` must still
+# trap. Splicing drops an unread initializer, so the matcher must decline and
+# let the generic path evaluate it once per iteration. Every shape below must
+# trap identically in the interpreter and the default engine, whether or not
+# the inline-int fast path could have taken the loop.
+# Needs the fixed seed: SIMPLE_BINARY=<seed built from this tree>.
+use std.spec.{describe, it, expect}
+use std.io_runtime.{write_file, file_exists, env_get, env_set_process}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use app.io.process_ops.{process_run_timeout}
+
+fn binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "": return env_bin
+    if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+
+fn loop_program(val_line: text, body_line: text) -> text:
+    "fn run_loop(n: i64) -> i64:\n    var acc = 0\n    var i = 0\n    while i < n:\n        " + val_line + "\n        " + body_line + "\n        i = i + 1\n    acc\n\nfn main():\n    print run_loop(10)\nmain()\n"
+
+fn run_src(tag: text, src: text, mode: text) -> (text, i64):
+    val file = get_temp_dir().replace("\\", "/") + "/while_trap_" + tag + ".spl"
+    val _w = write_file(file, src)
+    val _e = env_set_process("SIMPLE_EXECUTION_MODE", mode)
+    val (out, err, rc) = process_run_timeout(binary(), [file], 300000)
+    val _r = env_set_process("SIMPLE_EXECUTION_MODE", "")
+    (out + err, rc)
+
+describe "block-local val in a while body keeps trapping semantics":
+    it "unused val y = i % 0 traps in the interpreter":
+        val (o, rc) = run_src("unused_i", loop_program("val y = i % 0", "acc = acc + i"), "interpreter")
+        expect(rc != 0).to_equal(true)
+    it "unused val y = i % 0 traps in the default engine":
+        val (o, rc) = run_src("unused_j", loop_program("val y = i % 0", "acc = acc + i"), "jit")
+        expect(rc != 0).to_equal(true)
+    it "used val y = i % 0 traps in both engines (no-fast-path baseline)":
+        val (o1, rc1) = run_src("used_i", loop_program("val y = i % 0", "acc = acc + y"), "interpreter")
+        val (o2, rc2) = run_src("used_j", loop_program("val y = i % 0", "acc = acc + y"), "jit")
+        expect(rc1 != 0).to_equal(true)
+        expect(rc2 != 0).to_equal(true)
+    it "a non-trapping unused val still runs and sums correctly":
+        val (o, rc) = run_src("ok", loop_program("val y = i % 7", "acc = acc + i"), "interpreter")
+        expect(rc).to_equal(0)
+        expect(o.contains("45")).to_equal(true)

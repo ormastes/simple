@@ -1,0 +1,83 @@
+# Purpose and audience: executable specification evidence for SDN brace escape parity and symbol-collision hygiene.
+# @req REQ-SSPEC-UNIT
+# @covers src/lib/common/sdn/encode.spl 80%
+# @covers src/lib/common/sdn/lexer.spl 80%
+# @covers src/lib/common/traceability/schema.spl 80%
+# @covers src/lib/nogc_sync_mut/env/paths.spl 80%
+"""
+# SDN Brace Escape and Symbol Collision Hygiene Specification
+
+Verifies that doubled-brace string literals (`{{` / `}}`) preserve exact
+single-brace (`0x7b` / `0x7d`) runtime semantics in `sdn_encode_canonical`,
+`Lexer`, and `trace_sdn_preflight`, and that `join_env_paths` joins PATH
+entries cleanly without colliding with 2-argument `join_path(base, child)`.
+"""
+use std.spec.step
+import std.spec
+
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.lexer.{Lexer, TokenKind}
+use std.common.traceability.schema.{trace_sdn_preflight}
+use std.nogc_sync_mut.env.paths.{join_env_paths, path_separator}
+
+describe "SDN brace escape and collision hygiene":
+    # @manual scenario evidence
+    """
+    ## Brace literal parity and renamed PATH joiner
+    """
+
+    context "encode_sdn dict brace encoding":
+        it "encodes empty and populated dicts with single literal braces":
+            # @req REQ-SSPEC-UNIT
+            step("encodes empty and populated dicts with single literal braces")
+            expect(sdn_encode_canonical(SdnValue.empty_dict())).to_equal(r"{}")
+            expect(sdn_encode_canonical(SdnValue.empty_dict())).to_equal("{{}}")
+
+            var d: Dict<text, SdnValue> = {}
+            d["v"] = SdnValue.int(2)
+            d["k"] = SdnValue.string("alpha")
+            val encoded = sdn_encode_canonical(SdnValue.Dict(d))
+            expect(encoded).to_equal(r"{k: alpha, v: 2}")
+            expect(encoded.byte_len()).to_equal(16)
+            expect(encoded.byte_at(0)).to_equal(123)
+            expect(encoded.byte_at(15)).to_equal(125)
+
+        it "tokenizes left and right braces in SDN lexer":
+            # @req REQ-SSPEC-UNIT
+            step("tokenizes left and right braces in SDN lexer")
+            val tokens = Lexer.new(r"{k: 1}").run()
+            expect(tokens.len()).to_equal(5)
+            expect(tokens[0].kind).to_equal(TokenKind.LBrace)
+            expect(tokens[4].kind).to_equal(TokenKind.RBrace)
+
+    context "trace_sdn_preflight brace delimiter matching":
+        it "accepts balanced nested braces and quoted scalars before closing brace":
+            # @req REQ-SSPEC-UNIT
+            step("accepts balanced nested braces and quoted scalars before closing brace")
+            val ok_doc = "{{outer: {{inner: [1, 2], label: \"hello\"}}}}"
+            expect(trace_sdn_preflight(ok_doc).is_ok()).to_equal(true)
+
+        it "rejects unmatched, mismatched, and unterminated braces":
+            # @req REQ-SSPEC-UNIT
+            step("rejects unmatched, mismatched, and unterminated braces")
+            match trace_sdn_preflight(r"}"):
+                case Ok(_): fail("expected unmatched closing brace error")
+                case Err(msg): expect(msg).to_contain("unmatched SDN closing delimiter")
+
+            match trace_sdn_preflight(r"{a: [1}"):
+                case Ok(_): fail("expected mismatched delimiter error")
+                case Err(msg): expect(msg).to_contain("mismatched SDN delimiter")
+
+            match trace_sdn_preflight(r"{a: 1"):
+                case Ok(_): fail("expected unterminated collection error")
+                case Err(msg): expect(msg).to_contain("unterminated SDN string or collection")
+
+    context "join_env_paths":
+        it "joins directory lists with the platform PATH separator":
+            # @req REQ-SSPEC-UNIT
+            step("joins directory lists with the platform PATH separator")
+            val sep = path_separator()
+            expect(join_env_paths([])).to_equal("")
+            expect(join_env_paths(["/usr/bin"])).to_equal("/usr/bin")
+            expect(join_env_paths(["/usr/bin", "/usr/local/bin"])).to_equal("/usr/bin" + sep + "/usr/local/bin")

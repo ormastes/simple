@@ -1,3 +1,4 @@
+#![allow(REQC004)]
 # Scheduler Task Management — free-function implementations for task lifecycle.
 #
 # These functions contain the bodies of Scheduler methods for task creation,
@@ -18,7 +19,7 @@ use os.kernel.types.task_types.{
     user_process_image_initial_stack_bytes
 }
 use os.kernel.types.capability_types.{CapabilitySet}
-use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.hal.arch_context.{Architecture}
 use os.kernel.memory.user_address_space.{create_user_address_space, destroy_user_address_space}
 use os.kernel.memory.vmm.{vmm_cow_clone_pages}
 use os.kernel.loader.segment_mapper.{verify_direct_load_entry}
@@ -504,7 +505,7 @@ pub fn sched_wait_for_collect_impl(
         if tcb != nil:
             val task = tcb
             var parent_matches = false
-            if task.parent != nil:
+            if task.parent.is_some():
                 val parent = task.parent.unwrap()
                 parent_matches = parent.id == parent_id.id
             val child_matches = any_child or task.id.id == child_id.id
@@ -512,7 +513,7 @@ pub fn sched_wait_for_collect_impl(
             # parent TCB. Treat only the exact named child as owned by the
             # synthetic PID 0; never turn parentless tasks into wildcard
             # children and never unwrap a value TaskId on this ABI path.
-            if synthetic_bootstrap_collect and task.parent == nil and task.is_user and child_matches:
+            if synthetic_bootstrap_collect and task.parent.is_none() and task.is_user and child_matches:
                 parent_matches = true
             if parent_matches and child_matches:
                 match task.state:
@@ -604,6 +605,8 @@ pub fn sched_release_task_address_space(task: TaskControlBlock):
             if not _release_riscv32_task_mapping_v1(task):
                 log_raw_println(
                     "[scheduler] RV32 mapping release quarantined pid={task.id.id}")
+            return
+        if task.address_space == 0u64 or task.address_space == 1u64:
             return
         destroy_user_address_space(AddressSpace(
             phys_root: task.address_space,

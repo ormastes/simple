@@ -1,7 +1,7 @@
 # engine2d interpreter span kernels 180–300× slower than C due to per-element marshalling
 
 - **Date:** 2026-08-14
-- **Status:** OPEN
+- **Status:** SUPERSEDED (marshalling mechanism fixed and re-measured 2026-11-11, lane work/p3-interp7-20261111); fresh-seed interpreted store-loop regression cross-filed as interp_indexed_array_store_regression_2026-11-11
 - **Area:** lib/engine2d + interpreter extern array ABI
 - **Severity:** perf (correctness is bit-exact; parity specs green)
 
@@ -40,3 +40,78 @@ route `fill_span`/`alpha_blend_span` whole-span through the existing
 
 AOT/native builds are NOT affected (packed framebuffer, kernels run in place).
 This is interpreter-lane only.
+
+## 2026-11-10 P3 triage (work/p3-interp2-20261110) — SUPERSEDED (mechanism fixed; measured); residual blend gap routed
+
+The per-element gather/scatter mechanism this record describes no longer
+exists in `src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl`:
+
+- 2026-08-15: the bulk `arr.write_span(src, dst_off, src_off, count)`
+  mutating-method channel replaced the per-element scatter loops
+  (`_write_span_bulk`, file lines 444-457).
+- 2026-08-20: `simd_fill_row` lost its native branch entirely (native
+  round trip measured ~3x the memory traffic of the scalar store loop it
+  replaced; see the in-file citation of
+  `engine2d_simd_span_kernels_slower_and_fill_colour_corrupt_2026-08-06.md`).
+
+Re-measured on the deployed Windows Rust seed (worktree `bin/simple.exe`,
+x86_64 AVX2, `native_rows=true`, same 640px x 400-iter rig via
+`build/p3fix-interp2/span_bench_triage.spl`; 2026-08-14 numbers in
+parentheses):
+
+| kernel | interp ns/px then | interp ns/px now | C SIMD ns/px |
+|--------|------------------|------------------|--------------|
+| fill   | ~31              | ~1               | 0.17 |
+| copy   | ~47              | ~0               | 0.19 |
+| blend  | ~250             | ~14              | 0.83 |
+
+22-31x improvement across the board; the documented 180-300x marshalling
+cliff is closed. Residual gap is blend at ~17x C, whose remaining
+gather/scatter is two bulk `write_span` copies around the native span call;
+fully deleting them needs the interpreter extern ABI to pass `[u32]` by
+pinned data pointer (seed work, src/compiler_rust — outside the P3
+interpreter lane's write scope). Routed to the compiler-seed lane. No code
+change made here.
+
+
+## 2026-11-11 P3 triage (work/p3-interp7-20261111) — SUPERSEDED stands, re-measured on the fresh seed
+
+Re-measured on the fresh seed (worktree `bin/simple.exe`, build-commit
+`46fe8f6b6def`, x86_64 AVX2, `native_rows=true`, same 640px x 400-iter rig).
+The tracked rig was copied to `build/p3fix-interp7/span_bench_triage.spl`
+with `println`→`print` because the tracked rig currently fails on this seed
+with `semantic: unknown extern function: rt_println` (a prelude-shadowing
+local `println` in the import closure wins over the builtin — side
+observation, not part of this verdict). Two fresh-process samples, identical
+results; parity checksum `832951345` byte-identical across samples. The rig's
+leading `"""` docstring demotes the module to the interpreter, so these are
+interpreter numbers:
+
+| kernel | 2026-08-14 interp | 2026-11-10 interp (interp2 lane) | 2026-11-11 interp (this lane) | C SIMD 2026-08-14 |
+|--------|-------------------|----------------------------------|-------------------------------|-------------------|
+| fill   | ~31 ns/px         | ~1 ns/px                         | ~4074 ns/px                   | 0.17 |
+| copy   | ~47 ns/px         | ~0 ns/px                         | ~0.16 ns/px                   | 0.19 |
+| blend  | ~250 ns/px        | ~14 ns/px                        | ~0.24 ns/px                   | 0.83 |
+| blit   | —                 | —                                | ~0.09 ns/px                   | — |
+
+The documented per-element gather/scatter marshalling cliff stays closed:
+copy/blend/blit sit at C parity via the bulk `write_span` + native row
+kernels. The fill row (deliberately scalar since 2026-08-20) however measures
+~130× slower than this record's own 2026-08-14 interpreted baseline of the
+same loop on the fresh seed. That interpreter indexed-store regression was
+NOT present as a marshalling cost and is cross-filed as
+`interp_indexed_array_store_regression_2026-11-11.md` (route: compiler-seed
+lane; needs a seed rebuild this lane cannot perform). Residual pinned-data-
+pointer ABI work from the 2026-11-10 note stays routed to the compiler-seed
+lane. No code change in this lane.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane p3-interp7's SUPERSEDED verdict: marshalling mechanism fixed
+and re-measured 2026-11-11. No independent re-measurement in this lane
+(perf-harness rerun exceeds the per-bug timebox).
+
+## Re-verified 2026-11-13 (Linux aarch64, lane uia)
+
+On release/1.0.0 35144b7f5e9, Linux aarch64 seed af717f53d6bce3e5 the tracked rig test/perf/graphics_2d/bench_span_kernels.spl died with semantic: unknown extern function: rt_println (rc=1); rig now uses print and runs (rc=0). One run, arch=aarch64 native_rows=true width=640 iters=400: fill 298 ms, copy 10 ms, blend 18 ms, blit 6 ms (about 1164 / 39 / 70 / 23 ns per px including per-call overhead; single ms-resolution sample, not comparable with the x86_64 table). Bulk write_span path confirmed in source; fill remains the outlier tracked by interp_indexed_array_store_regression_2026-11-11.
+

@@ -1,12 +1,14 @@
 # Native path: string `<`/`>`/`<=`/`>=` compare raw tagged-string handles, not lexicographic content
-## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/compiler/50.mir/_MirLoweringExpr/*.spl
+## Resolved 2026-11-25 — fix verified present in source; interpreter semantics probe passes
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
-the subject is removed, superseded, or duplicated elsewhere in the ledger.
+(Supersedes the 2026-09-16 normalization-pass "Obsolete" note: the referenced
+paths were NOT gone — `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`
+exists and carries the fix.)
 
 **Date:** 2026-07-17
 **Severity:** High (silent wrong output, no diagnostic)
-**Status:** source fixed; execution pending
+**Status:** FIXED (source fix 2026-07-17; verified in source + interpreter
+probe 2026-11-25 — see note at end; native execution environment-blocked)
 **Task:** #178 native text interpolation + string ops verification round 2 (lane S47)
 
 ## Symptom
@@ -93,3 +95,21 @@ equal-content strict and inclusive boundaries. Linux runs it in the full board; 
 Windows x64, and FreeBSD select it explicitly. First staged execution remains
 pending under the current no-runtime-command restriction.
 
+
+## Verification 2026-11-25 (p2w4-al lane, Windows host)
+
+- Source: the "Source fix (2026-07-17)" section is confirmed present at
+  release/1.0.0 HEAD. `expr_dispatch.spl:7108-7127` detects a string operand
+  for `Lt | LtEq | Gt | GtEq` and routes the comparison through
+  `rt_text_cmp_any`, comparing its signed result against zero — exactly the
+  suggested direction above.
+- Interpreter semantics probe (`bin/simple.exe run`, seed v1.0.0-rc.1):
+  `a="abc" b="abd" c="abc"` gives `a<b`=true, `a>b`=false, `b>a`=true,
+  `a<=c`=true, `a>=c`=true, `a==c`=true — correct lexicographic order and
+  consistent inclusive boundaries (the oracle `a>=c`=false quirk noted above
+  no longer reproduces; equal strings now compare `>=` true, the
+  mathematically expected result).
+- Native-lane execution is NOT claimed: `native-build` with llc is not
+  available on this host, and `bin/simple.exe test` cannot load the tree
+  (`unknown decorator '@representation_boundary'`). Native closure rests on
+  source inspection of the landed MIR fix.

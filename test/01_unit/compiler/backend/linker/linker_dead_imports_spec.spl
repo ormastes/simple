@@ -15,16 +15,55 @@
 # this worktree found real live importers for all five, so lane A1 kept them.
 # See the lane A1 report for the full importer evidence.
 
-use std.io_runtime.{shell}
+use std.spec.*
+use std.io_runtime.{file_exists, file_read, dir_walk}
 
-fn _file_exists_cmd(path: text) -> text:
-    "test -e '{path}' && echo present || echo absent"
+fn _is_ident_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
 
-fn _grep_importers_cmd(pattern: text) -> text:
-    # Qualified-path grep across product source, excluding this spec's own doc
-    # comments. `-w`-anchored on the trailing segment via \\b to avoid
-    # `compiler.loader.X` matching inside `compiler.loader.X`.
-    "grep -rn '\\<{pattern}\\>' src/ --include='*.spl' | grep -v 'linker_dead_imports_spec' || true"
+fn _contains_word(content: text, needle: text) -> bool:
+    if not content.contains(needle):
+        return false
+    var pos = 0
+    val nlen = needle.len()
+    val clen = content.len()
+    while pos + nlen <= clen:
+        val rest = content.slice(pos, clen)
+        val idx_opt = rest.index_of(needle)
+        if not idx_opt.?:
+            return false
+        val rel = idx_opt ?? 0
+        val start = pos + rel
+        val end = start + nlen
+        val left_ok = if start == 0: true else: not _is_ident_char(content.slice(start - 1, start))
+        val right_ok = if end >= clen: true else: not _is_ident_char(content.slice(end, end + 1))
+        if left_ok and right_ok:
+            return true
+        pos = start + 1
+    false
+
+struct _SrcFileEntry:
+    path: text
+    content: text
+
+var _cached_src_files: [_SrcFileEntry] = []
+
+fn _collect_src_contents() -> [_SrcFileEntry]:
+    if _cached_src_files.len() > 0:
+        return _cached_src_files
+    for root in ["src/compiler", "src/lib", "src/app", "src/plugins"]:
+        for entry in dir_walk(root):
+            val norm = entry.replace("\\", "/")
+            if norm.ends_with(".spl") and not norm.contains("linker_dead_imports_spec"):
+                _cached_src_files.push(_SrcFileEntry(path: norm, content: file_read(norm)))
+    _cached_src_files
+
+fn _grep_importers(files: [_SrcFileEntry], pattern: text) -> [text]:
+    var hits: [text] = []
+    for entry in files:
+        if _contains_word(entry.content, pattern):
+            hits.push(entry.path)
+    hits
 
 describe "lane A1 delete wave 0 — deleted paths are gone":
     it "LD top-level 0-byte modules no longer exist":
@@ -35,10 +74,10 @@ describe "lane A1 delete wave 0 — deleted paths are gone":
             "src/compiler/99.loader/resource_lifecycle.spl",
             "src/compiler/99.loader/smf_cache_manager.spl",
         ]:
-            expect(shell(_file_exists_cmd(p)).stdout.trim()).to_equal("absent")
+            expect(file_exists(p)).to_equal(false)
 
     it "LD/loader/arch_validator.spl no longer exists":
-        expect(shell(_file_exists_cmd("src/compiler/99.loader/loader/arch_validator.spl")).stdout.trim()).to_equal("absent")
+        expect(file_exists("src/compiler/99.loader/loader/arch_validator.spl")).to_equal(false)
 
     it "L/{object_provider_adapter,smf_source,mod,__init__,wasm_linker}.spl no longer exist":
         for p in [
@@ -48,46 +87,56 @@ describe "lane A1 delete wave 0 — deleted paths are gone":
             "src/compiler/70.backend/linker/__init__.spl",
             "src/compiler/70.backend/linker/wasm_linker.spl",
         ]:
-            expect(shell(_file_exists_cmd(p)).stdout.trim()).to_equal("absent")
+            expect(file_exists(p)).to_equal(false)
 
 describe "lane A1 delete wave 0 — no remaining src/ importer references a deleted module":
     it "no src/ file imports the deleted top-level LD modules by qualified path":
-        for pattern in [
-            "compiler\\.loader\\.generation_sweeper",
-            "compiler\\.loader\\.module_loader_lib_support",
-            "compiler\\.loader\\.resource_lifecycle",
-            "compiler\\.loader\\.smf_cache_manager",
+        val files = _collect_src_contents()
+        for name in [
+            "generation_sweeper",
+            "module_loader_lib_support",
+            "resource_lifecycle",
+            "smf_cache_manager",
         ]:
-            val hits = shell(_grep_importers_cmd(pattern)).stdout.trim()
-            expect(hits).to_equal("")
+            # Commit 877c1622a9f collapsed NN.name/name (compiler.loader.loader.* ->
+            # compiler.loader.*), so 99.loader/runtime/__init__.spl canonically
+            # re-exports the live 99.loader/loader/<name>.spl owner under
+            # compiler.loader.<name> while the deleted top-level file remains gone.
+            expect(file_exists("src/compiler/99.loader/loader/{name}.spl")).to_equal(true)
+            val hits = _grep_importers(files, "compiler.loader.{name}")
+            var non_facade_hits: [text] = []
+            for h in hits:
+                if h != "src/compiler/99.loader/runtime/__init__.spl":
+                    non_facade_hits.push(h)
+            expect(non_facade_hits).to_equal([])
 
     it "no src/ file imports the deleted LD/loader/arch_validator.spl":
-        val hits = shell(_grep_importers_cmd("compiler\\.loader\\.loader\\.arch_validator")).stdout.trim()
-        expect(hits).to_equal("")
+        val files = _collect_src_contents()
+        expect(_grep_importers(files, "compiler.loader.loader.arch_validator")).to_equal([])
 
     it "no src/ file imports the deleted L/{object_provider_adapter,smf_source,wasm_linker}.spl":
+        val files = _collect_src_contents()
         for pattern in [
-            "compiler\\.linker\\.object_provider_adapter",
-            "compiler\\.backend\\.linker\\.object_provider_adapter",
-            "compiler\\.backend\\.linker\\.smf_source",
-            "compiler\\.linker\\.smf_source",
-            "compiler\\.backend\\.linker\\.wasm_linker",
-            "compiler\\.linker\\.wasm_linker",
+            "compiler.linker.object_provider_adapter",
+            "compiler.backend.linker.object_provider_adapter",
+            "compiler.backend.linker.smf_source",
+            "compiler.linker.smf_source",
+            "compiler.backend.linker.wasm_linker",
+            "compiler.linker.wasm_linker",
         ]:
-            val hits = shell(_grep_importers_cmd(pattern)).stdout.trim()
-            expect(hits).to_equal("")
+            expect(_grep_importers(files, pattern)).to_equal([])
 
 describe "lane A1 delete wave 0 — mold.spl dropped its elf_inspect dependency":
     it "mold.spl no longer imports elf_inspect (mold_post_link_check, its only user, was deleted)":
-        val hits = shell("grep -n 'elf_inspect' src/compiler/70.backend/linker/mold.spl || true").stdout.trim()
-        expect(hits).to_equal("")
+        val src = file_read("src/compiler/70.backend/linker/mold.spl")
+        expect(src.contains("elf_inspect")).to_equal(false)
 
     it "mold.spl no longer defines mold_post_link_check (dead, 0 callers)":
-        val hits = shell("grep -n 'mold_post_link_check' src/compiler/70.backend/linker/mold.spl || true").stdout.trim()
-        expect(hits).to_equal("")
+        val src = file_read("src/compiler/70.backend/linker/mold.spl")
+        expect(src.contains("mold_post_link_check")).to_equal(false)
 
     it "mold.spl still defines write_elf_object, parse_linker_diagnostics, mold_find_crt_files (real callers/testers found, kept)":
-        val src = shell("cat src/compiler/70.backend/linker/mold.spl").stdout
+        val src = file_read("src/compiler/70.backend/linker/mold.spl")
         expect(src.contains("fn write_elf_object")).to_equal(true)
         expect(src.contains("fn parse_linker_diagnostics")).to_equal(true)
         expect(src.contains("fn mold_find_crt_files")).to_equal(true)

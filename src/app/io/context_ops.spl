@@ -3,8 +3,8 @@
 
 extern fn sys_get_args() -> [text]
 extern fn rt_cli_get_args() -> [text]
-use std.io_runtime.{file_exists, file_read, file_write}
-use app.io.sqlite_sffi.{SqliteConnection, sqlite_open, sqlite_open_memory, sqlite_close, sqlite_execute, sqlite_query_all, sqlite_insert, sqlite_row_get}
+use std.io_runtime.{file_exists, file_read, file_write, file_read_bytes}
+use app.io.sqlite_sffi.{SqliteConnection, sqlite_open, sqlite_open_memory, sqlite_close, sqlite_execute, sqlite_query_all, sqlite_insert, sqlite_row_get, sqlite_table_exists}
 use std.db.dbfs_engine.fts.{FtsInvertedIndex, FtsSearchResult, fts_bm25_search}
 
 fn _context_file_exists_impl(path: text) -> bool:
@@ -13,10 +13,10 @@ fn _context_file_exists_impl(path: text) -> bool:
 fn _context_file_read_impl(path: text) -> text:
     file_read(path)
 
-fn context_file_write(path: text, content: text) -> bool:
+pub fn context_file_write(path: text, content: text) -> bool:
     file_write(path, content)
 
-fn context_get_args() -> [text]:
+pub fn context_get_args() -> [text]:
     val raw_args = rt_cli_get_args()
     if raw_args != nil and raw_args.len() > 0:
         return raw_args
@@ -27,7 +27,7 @@ fn context_get_args() -> [text]:
 
     []
 
-fn context_file_exists(path: text) -> bool:
+pub fn context_file_exists(path: text) -> bool:
     _context_file_exists_impl(path)
 
 fn context_args_allow_sourceless_sql_query(args: [text]) -> bool:
@@ -62,7 +62,10 @@ fn _context_json_escape(value: text) -> text:
 fn _context_sql_literal(value: text) -> text:
     "'" + value.split("'").join("''") + "'"
 
-fn _context_sql_like_literal(value: text) -> text:
+fn _context_sql_like_candidate(value: text) -> text:
+    # LIKE's percent/underscore wildcards are a coarse candidate selector.
+    # Exact literal substring semantics are enforced after rows are fetched;
+    # the bundled pure-SQL backend does not implement LIKE ... ESCAPE.
     _context_sql_literal("%" + value + "%")
 
 fn _context_token_estimate(content: text) -> i64:
@@ -278,21 +281,26 @@ fn _context_sql_schema() -> text:
 
 fn _context_sql_render_rows_filtered(rows, query: text, source_filter: text, format: text) -> text:
     val trimmed_filter = source_filter.trim()
+    val trimmed_query = query.trim()
     var match_count: i64 = 0
     var status = "ready"
     var body_parts: [text] = []
 
     for row in rows:
         val source = sqlite_row_get(row, "source")
-        if trimmed_filter == "" or source == trimmed_filter or source.ends_with("/" + trimmed_filter):
+        val target = sqlite_row_get(row, "target")
+        val content = sqlite_row_get(row, "content")
+        val query_matches = trimmed_query == "" or source.contains(trimmed_query) or
+            target.contains(trimmed_query) or content.contains(trimmed_query)
+        if query_matches and (trimmed_filter == "" or source == trimmed_filter or source.ends_with("/" + trimmed_filter)):
             match_count = match_count + 1
             body_parts.push("source: " + source)
-            body_parts.push("target: " + sqlite_row_get(row, "target"))
+            body_parts.push("target: " + target)
             body_parts.push("status: " + sqlite_row_get(row, "status"))
             body_parts.push("lines: " + sqlite_row_get(row, "lines"))
             body_parts.push("token_estimate: " + sqlite_row_get(row, "token_estimate"))
             body_parts.push("content:")
-            body_parts.push(sqlite_row_get(row, "content"))
+            body_parts.push(content)
             body_parts.push("---")
 
     if match_count == 0:
@@ -314,6 +322,25 @@ fn _context_sql_render_rows_filtered(rows, query: text, source_filter: text, for
 
 fn _context_sql_render_rows(rows, query: text, format: text) -> text:
     _context_sql_render_rows_filtered(rows, query, "", format)
+
+fn context_sql_db_format(path: text) -> text:
+    """Detect the on-disk context database format.
+
+    A context SQL database is defined by the facade schema, not by the bytes
+    that back it: the same facade runs over real SQLite pages and over the
+    pure-database codec, so probe by opening through the facade and checking
+    for the context_packs table rather than by file magic.
+    """
+    if not file_exists(path):
+        return "missing"
+    val db = _context_sql_open(path)
+    if not db.is_valid:
+        return "unknown"
+    val has_table = sqlite_table_exists(db, "context_packs")
+    val closed = sqlite_close(db)
+    if has_table and closed:
+        return "sqlite-facade"
+    "unknown"
 
 fn context_sql_index_packs(paths: [text], target: text, db_path: text, format: text) -> text:
     val db = _context_sql_open(db_path)
@@ -438,7 +465,7 @@ fn context_sql_query_packs_by_source(paths: [text], target: text, query: text, s
                     [path, normalized_target, "ready", str(_context_line_count(content)), str(_context_token_estimate(content)), content],
                 )
 
-    val pattern = _context_sql_like_literal(trimmed_query)
+    val pattern = _context_sql_like_candidate(trimmed_query)
     val sql = "SELECT source, target, status, lines, token_estimate, content FROM context_packs WHERE source LIKE " + pattern + " OR target LIKE " + pattern + " OR content LIKE " + pattern + " ORDER BY id"
     val rows = sqlite_query_all(db, sql)
     val rendered = _context_sql_render_rows_filtered(rows, trimmed_query, source_filter, format)
@@ -533,7 +560,7 @@ fn context_log_summary(content: text, source_path: text, purpose: text,
             round = round + 1
     body + tail
 
-fn context_log_summary_file(path: text, purpose: text, query: text, top_n: i64) -> text:
+pub fn context_log_summary_file(path: text, purpose: text, query: text, top_n: i64) -> text:
     if not file_exists(path):
         return ""
     context_log_summary(_context_file_read_impl(path), path, purpose, query, top_n)

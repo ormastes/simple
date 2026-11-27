@@ -1,0 +1,43 @@
+# Exact pure DATA validation extracted from accepted Native owner. These
+# values/UID arguments never provide native authority; parent passes actual
+# canonical profile/metadata/proc bytes and retains all syscall custody.
+# allow(primitive_api): reviewed /proc numeric DATA (uid/start/count/bounds) parser and predicate (milestone_0012 groupE)
+pub fn linux_fresh_probe_native_number_v3(value: text, maximum: i64 = 1125899906842624) -> Result<i64, text>:
+    val source = value.trim()
+    if source.byte_len() == 0 or source.byte_len() > 19: return Err("fresh-epoch-native-integer")
+    val parsed = source.to_int() ?? -1
+    if parsed < 0 or parsed > maximum or str(parsed) != source: return Err("fresh-epoch-native-integer")
+    Ok(parsed)
+
+# allow(primitive_api): reviewed /proc numeric DATA (uid/start/count/bounds) parser and predicate (milestone_0012 groupE)
+pub fn linux_fresh_probe_status_related_v3(source: text, uid: i64, start: i64, count: i64) -> Result<bool, text>:
+    for line in source.split("\n"):
+        if not line.starts_with("Uid:"): continue
+        var cells: [text] = []
+        for cell in line.substring(4, line.byte_len()).replace("\t", " ").split(" "):
+            if cell != "": cells.push(cell)
+        if cells.len() != 4: return Err("fresh-epoch-native-uid-status-shape")
+        var related = false
+        for cell in cells:
+            val value = linux_fresh_probe_native_number_v3(cell, 4294967295)?
+            if value == uid or (value >= start and value - start < count): related = true
+        return Ok(related)
+    Err("fresh-epoch-native-uid-status-missing")
+
+# allow(primitive_api): reviewed /proc numeric DATA (uid/start/count/bounds) parser and predicate (milestone_0012 groupE)
+pub fn linux_fresh_probe_native_security_v3(meta: (text, i64, i64, i64), rule: text, uid: i64) -> Result<(), text>:
+    if rule == "root-dir" and (meta.1 != 0 or (meta.2 & 61440) != 16384 or (meta.2 & 18) != 0):
+        return Err("fresh-epoch-native-root-ancestry-writable")
+    if rule == "private-dir" and (meta.1 != uid or meta.2 != 16832):
+        return Err("fresh-epoch-native-private-store-owner-mode")
+    if rule == "root-file" or rule == "executable" or rule == "ceiling-file":
+        if meta.1 != 0 or (meta.2 & 61440) != 32768 or (meta.2 & 18) != 0 or (meta.2 & 3072) != 0:
+            return Err("fresh-epoch-native-root-control-writable")
+    if rule == "executable" and (meta.2 & 73) == 0: return Err("fresh-epoch-native-executable-mode")
+    if rule == "cgroup-dir" and ((meta.2 & 61440) != 16384 or meta.1 != 0 or (meta.2 & 18) != 0):
+        return Err("fresh-epoch-native-parent-ownership")
+    if rule == "delegated-dir" and ((meta.2 & 61440) != 16384 or (meta.1 != 0 and meta.1 != uid) or (meta.2 & 18) != 0):
+        return Err("fresh-epoch-native-delegated-ownership")
+    if rule == "root-mask" and (meta.1 != 0 or (meta.2 & 61440) != 40960):
+        return Err("fresh-epoch-native-activation-mask-ownership")
+    Ok(())

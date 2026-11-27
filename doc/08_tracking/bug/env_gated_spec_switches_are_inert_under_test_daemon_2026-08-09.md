@@ -1,7 +1,9 @@
 # Env-gated spec switches are silently INERT under `bin/simple test` (fail-open)
 
 **Filed:** 2026-08-09 (stream P13, while adding `SIMPLE_REQUIRE_GPU` to the GPU lane specs)
-Status: OPEN (P2)
+Status: RESOLVED 2026-11-25 — the general defect (any non-allowlisted variable
+silently frozen) is closed by the v2 daemon request carrying the caller's
+environment identity; see the 2026-11-25 verification section at the end.
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Severity:** high — it makes every env-gated strictness switch in a spec fail OPEN
 
@@ -216,3 +218,33 @@ an audit stream should land blind.
 Reconfirmed: env-gated spec switches remain inert under the test daemon per
 this record's own analysis (fail-open). Fix needs test-daemon environment
 propagation work. Left OPEN (P2), no code change attempted.
+
+## Verification 2026-11-25 — general defect closed
+
+The preferred fix (#1, carry the caller's environment in the daemon request)
+has landed on release/1.0.0 (dfbd7c9d765), making the per-variable allowlist
+obsolete as the safety mechanism:
+
+- `src/app/test_daemon/environment_identity.spl` computes a sha256 identity
+  digest over the caller's FULL environment snapshot
+  (`test_daemon_environment_identity_v1`, normalizing only shell bookkeeping
+  fields `_`/`SHLVL`/`OLDPWD` and `SIMPLE_EXECUTION_MODE`).
+- The v2 request wire carries it:
+  `src/app/test_daemon/light_protocol.spl:51-52`
+  (`LIGHT_REQUEST_V2_HEADER` frame = expiry + environment_digest +
+  daemon_generation + path).
+- `test_runner_client.spl` compares the caller digest against the daemon's
+  published digest (`test_daemon_environment_can_reuse_v1`) and diverts to the
+  direct lane on ANY mismatch via `environment_bypass` (folded into
+  `daemon_ok` at line 962). A variable outside the old allowlist therefore no
+  longer reads the daemon's frozen value — any env difference fails CLOSED to
+  the direct lane, where the child really inherits the caller's environment.
+- This also closes the P14 residual "Scenario B" (daemon started WITH a var
+  serving later runs without it): the digests differ, so the run diverts.
+
+Covering evidence on disk: `test/01_unit/app/test_daemon/environment_identity_spec.spl`
+and `test/01_unit/scripts/test_daemon_environment_identity_wiring_test.shs`.
+
+Verification limit: spec execution at this HEAD is blocked by the pinned seed
+rejecting `@representation_boundary` (cfd89933699), which fails the test
+runner's own load; verified by code inspection of the modules cited above.

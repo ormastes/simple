@@ -66,96 +66,55 @@ int cosmos_storage_bridge_ftl_init(void) {
 #endif
 }
 
-int cosmos_storage_bridge_backend_mount(void) {
+/* Each bridge is "unavailable under QEMU, otherwise forward one call". */
 #if COSMOS_IS_QEMU
-    return COSMOS_UNAVAILABLE;
+#define COSMOS_STORAGE_BRIDGE_CALL(name, call) \
+    int name(void) { return COSMOS_UNAVAILABLE; }
 #else
-    return cosmos_ftl_nfc_backend_mount(&storage_backend);
+#define COSMOS_STORAGE_BRIDGE_CALL(name, call) \
+    int name(void) { return (call); }
 #endif
-}
 
-int cosmos_storage_bridge_ftl_recover(void) {
-#if COSMOS_IS_QEMU
-    return COSMOS_UNAVAILABLE;
-#else
-    return cosmos_ftl_recover(&storage_ftl);
-#endif
-}
+COSMOS_STORAGE_BRIDGE_CALL(cosmos_storage_bridge_backend_mount,
+    cosmos_ftl_nfc_backend_mount(&storage_backend))
 
-int cosmos_storage_bridge_media_init(void) {
-#if COSMOS_IS_QEMU
-    return COSMOS_UNAVAILABLE;
-#else
-    return cosmos_nvme_ftl_media_init(
+COSMOS_STORAGE_BRIDGE_CALL(cosmos_storage_bridge_ftl_recover,
+    cosmos_ftl_recover(&storage_ftl))
+
+COSMOS_STORAGE_BRIDGE_CALL(cosmos_storage_bridge_media_init,
+    cosmos_nvme_ftl_media_init(
         &storage_media, &storage_ftl,
         COSMOS_NFC_DATA_POOL_BASE, COSMOS_NFC_SPARE_POOL_BASE,
         COSMOS_NFC_COMPLETION_POOL_BASE, COSMOS_NFC_STATUS_POOL_BASE,
-        COSMOS_NFC_ERROR_POOL_BASE);
-#endif
-}
+        COSMOS_NFC_ERROR_POOL_BASE))
 
-int cosmos_storage_bridge_io_init(void) {
-#if COSMOS_IS_QEMU
-    return COSMOS_UNAVAILABLE;
-#else
-    return cosmos_nvme_pcie_service_init(
+COSMOS_STORAGE_BRIDGE_CALL(cosmos_storage_bridge_io_init,
+    cosmos_nvme_pcie_service_init(
         &storage_io, &storage_bridge, &storage_media,
         storage_media.media_read, storage_media.media_program,
         storage_media.media_flush, storage_media.media_write_zeroes,
         storage_media.media_deallocate,
         COSMOS_FTL_NAMESPACE_BLOCK_COUNT, 0U,
-        COSMOS_FTL_NVME_BLOCK_BYTES);
-#endif
-}
+        COSMOS_FTL_NVME_BLOCK_BYTES))
 
-int cosmos_storage_bridge_admin_init(void) {
-#if COSMOS_IS_QEMU
-    return COSMOS_UNAVAILABLE;
-#else
-    return cosmos_nvme_pcie_admin_service_init(
+COSMOS_STORAGE_BRIDGE_CALL(cosmos_storage_bridge_admin_init,
+    cosmos_nvme_pcie_admin_service_init(
         &storage_admin, &storage_bridge,
         COSMOS_FTL_NAMESPACE_BLOCK_COUNT, 0U,
-        COSMOS_FTL_NVME_BLOCK_BYTES);
-#endif
-}
+        COSMOS_FTL_NVME_BLOCK_BYTES))
 
-int cosmos_storage_bridge_dispatch_init(void) {
-#if COSMOS_IS_QEMU
-    return COSMOS_UNAVAILABLE;
-#else
-    return cosmos_nvme_dispatch_init(
-        &storage_dispatch, &storage_bridge, &storage_io, &storage_admin);
-#endif
-}
+COSMOS_STORAGE_BRIDGE_CALL(cosmos_storage_bridge_dispatch_init,
+    cosmos_nvme_dispatch_init(
+        &storage_dispatch, &storage_bridge, &storage_io, &storage_admin))
 
-int cosmos_storage_bridge_backend_format(void) {
-#if COSMOS_IS_QEMU
-    return COSMOS_UNAVAILABLE;
-#else
-    return cosmos_ftl_nfc_backend_format(&storage_backend);
-#endif
-}
+COSMOS_STORAGE_BRIDGE_CALL(cosmos_storage_bridge_backend_format,
+    cosmos_ftl_nfc_backend_format(&storage_backend))
 
-int cosmos_storage_bridge_factory_initialize_erased(void) {
-#if COSMOS_IS_QEMU
-    return COSMOS_UNAVAILABLE;
-#else
-    return cosmos_ftl_factory_initialize_erased(&storage_ftl);
-#endif
-}
+COSMOS_STORAGE_BRIDGE_CALL(cosmos_storage_bridge_factory_initialize_erased,
+    cosmos_ftl_factory_initialize_erased(&storage_ftl))
 
-int cosmos_storage_bridge_dispatch_poll(void) {
-#if COSMOS_IS_QEMU
-    return COSMOS_UNAVAILABLE;
-#else
-    return cosmos_nvme_dispatch_poll(&storage_dispatch);
-#endif
-}
+COSMOS_STORAGE_BRIDGE_CALL(cosmos_storage_bridge_dispatch_poll,
+    cosmos_nvme_dispatch_poll(&storage_dispatch))
 
-int cosmos_storage_bridge_gc_step(void) {
-#if COSMOS_IS_QEMU
-    return COSMOS_UNAVAILABLE;
-#else
-    return cosmos_ftl_gc_step(&storage_ftl, 1U);
-#endif
-}
+COSMOS_STORAGE_BRIDGE_CALL(cosmos_storage_bridge_gc_step,
+    cosmos_ftl_gc_step(&storage_ftl, 1U))

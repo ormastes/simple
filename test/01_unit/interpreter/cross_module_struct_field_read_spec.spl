@@ -1,0 +1,34 @@
+# Regression: container mutations through an enum payload nested in an array
+# element must write back to the caller's storage (the "two-hop place chain").
+# On the seed interpreter before the fix, the mutation was silently dropped,
+# which downstream surfaced as cross-module struct-field reads returning 0
+# (see doc/08_tracking/bug/seed_interpreter_cross_module_struct_field_read_zero_2026-11-05.md).
+
+use std.spec
+
+use .fixtures.cross_module_struct_return_fixture.{ProbeDriver, ProbeDriverKind,
+    ProbeEntry, ProbeTable, driver_open}
+
+describe "two-hop place chain (enum payload in array element)":
+    it "fd recorded via a dispatch fn through table.mounts[0].driver persists":
+        var table = ProbeTable(mounts: [ProbeEntry(
+            driver: ProbeDriverKind.Ram(ProbeDriver(fd_table: [])))])
+        expect(driver_open(table.mounts[0].driver, 0x100000001u64)).to_equal(true)
+        match table.mounts[0].driver:
+            case ProbeDriverKind.Ram(d):
+                expect(d.has_fd(0x100000001u64)).to_equal(true)
+            case _:
+                expect(1).to_equal(2)
+
+    it "fd recorded through a match payload binding on a local enum persists":
+        var kind = ProbeDriverKind.Ram(ProbeDriver(fd_table: []))
+        match kind:
+            case ProbeDriverKind.Ram(d):
+                d.record_fd(7)
+            case _:
+                pass_dn
+        match kind:
+            case ProbeDriverKind.Ram(d):
+                expect(d.has_fd(7)).to_equal(true)
+            case _:
+                expect(1).to_equal(2)

@@ -77,3 +77,16 @@ Before implementing the game2d adapter, introduce one of:
 
 Do not wire this by direct cross-family imports; that would make verify fail
 the capsule boundary.
+
+## Verification note 2026-11-25 (p3-bar lane, worktree wt-p3-bar)
+
+Re-verified the 2026-09-13 closure against the release/1.0.0 tip
+(`fcd95d41d60`), static inspection only (this entry has no runnable repro):
+
+- `grep -rn "fn create_auto" src/lib` -> no hits; `create_auto` is gone.
+- The surviving call site is qualified: `Engine2D.detect_best_backend()` at
+  `src/lib/gc_async_mut/gpu/engine2d/engine.spl:1537`, against the static
+  declared at `engine.spl:2134` (line numbers drifted from the closure note's
+  490/1019; substance unchanged).
+
+Closure stands. No code change; doc-only confirmation.

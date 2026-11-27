@@ -1,0 +1,76 @@
+# A match arm that stores a grown copy of its payload back into the matched
+# global keeps that store; the post-arm payload merge must not rewind it.
+# Bug: doc/08_tracking/bug/executable_authority_registry_slots_lost_on_store_2026-11-15.md
+use std.spec.*
+
+struct RegState:
+    counter: i64
+    items: [i64]
+
+var g_reg: RegState? = nil
+var g_list: [RegState] = []
+
+fn reg_reset():
+    g_reg = Some(RegState(counter: 0, items: []))
+
+fn reg_add_by_store(x: i64):
+    match g_reg:
+        case Some(cur):
+            var s = cur
+            s.items.push(x)
+            s.counter = s.counter + 1
+            g_reg = Some(s)
+        case None:
+            pass
+
+fn reg_add_through_binding(x: i64):
+    match g_reg:
+        case Some(cur):
+            cur.items.push(x)
+        case None:
+            pass
+
+fn reg_replace_in_arm():
+    match g_reg:
+        case Some(cur):
+            var s = cur
+            s.items.push(2)
+            g_reg = Some(RegState(counter: 9, items: []))
+        case None:
+            pass
+
+fn reg_items_len() -> i64:
+    match g_reg:
+        case Some(c): c.items.len()
+        case None: -1
+
+fn reg_counter() -> i64:
+    match g_reg:
+        case Some(c): c.counter
+        case None: -1
+
+describe "match arm stores into the matched global":
+    it "keeps a pushed element after storing the grown copy":
+        """Repro: the store kept the counter but dropped the pushed element."""
+        step("Issue two entries through copy-push-store")
+        reg_reset()
+        reg_add_by_store(5)
+        reg_add_by_store(6)
+        expect(reg_items_len()).to_equal(2)
+        expect(reg_counter()).to_equal(2)
+
+    it "still carries a push made through the payload binding itself":
+        """Generalization: the payload merge that the fix guards still works."""
+        step("Push through the bound payload without storing")
+        reg_reset()
+        reg_add_through_binding(7)
+        expect(reg_items_len()).to_equal(1)
+
+    it "keeps a store that replaces the subject with a fresh value":
+        """Generalization: an arm that resets the subject wins over the binding."""
+        step("Replace the global from inside its own arm")
+        reg_reset()
+        reg_add_by_store(1)
+        reg_replace_in_arm()
+        expect(reg_items_len()).to_equal(0)
+        expect(reg_counter()).to_equal(9)

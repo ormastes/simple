@@ -1,0 +1,75 @@
+# Preserve legacy formats. This adapter opens the actual V1 receipt and inventory,
+# then reads ONLY the frozen root. It never refreshes an inventory or reopens sources.
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1, scv_compile_snapshot_open_v1,
+    scv_compile_snapshot_read_source_v1, scv_compile_snapshot_read_text_v1,
+    scv_compile_snapshot_plain_path_v1}
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.fs.host_path.{host_path_native}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryV1,
+    compile_source_inventory_encode_v1, compile_source_inventory_sort_v1,
+    compile_source_inventory_path_valid_v1}
+use std.scv.snapshot_v2.{ScvSnapshotV2, ScvFrozenFileV2, scv_snapshot_freeze_v2,
+    scv_snapshot_path_valid_v2, scv_snapshot_in_scope_v2, scv_snapshot_file_v2}
+
+pub struct CompileSnapshotV1Adapter:
+    legacy: ScvCompileSnapshotV1
+    snapshot: ScvSnapshotV2
+    source_inventory_digest: text
+    source_inventory_generation: i64
+
+pub fn scv_snapshot_from_compile_v1(checkout_root: text, legacy: ScvCompileSnapshotV1,
+        complete_inventory: CompileSourceInventoryV1, declared_scopes: [text],
+        acknowledged_generation: i64) -> Result<CompileSnapshotV1Adapter, text>:
+    if not legacy.valid: return Err("adapter-legacy-invalid:" + legacy.reason)
+    if legacy.source_drifted: return Err("adapter-source-drifted")
+    # Inventory generations are not filesystem/editor acknowledgement barriers.
+    if acknowledged_generation != 0: return Err("adapter-event-acknowledgement-unsupported")
+    val inventory_text = compile_source_inventory_encode_v1(complete_inventory)
+    if inventory_text == "": return Err("adapter-source-inventory-invalid")
+    if declared_scopes.len() == 0: return Err("adapter-complete-scope-missing")
+    for scope in declared_scopes:
+        if not scv_snapshot_path_valid_v2(scope): return Err("adapter-scope-invalid")
+    val reopened = scv_compile_snapshot_open_v1(checkout_root, legacy.snapshot_root,
+        legacy.revision_id, legacy.commit_id, legacy.tree_id, legacy.inventory_digest)
+    if not reopened.valid: return Err("adapter-legacy-open:" + reopened.reason)
+    if reopened.inventory_count != legacy.inventory_count:
+        return Err("adapter-legacy-count-mismatch")
+    val frozen_inventory = scv_compile_snapshot_read_text_v1(
+        reopened.snapshot_root + "/SCV_COMPILE_INVENTORY")
+    # This second read must still match the exact subject reopened above.
+    if sha256_text(frozen_inventory) != reopened.inventory_digest:
+        return Err("adapter-frozen-inventory-changed")
+    var expected_rows: [text] = []
+    var files: [ScvFrozenFileV2] = []
+    for entry in compile_source_inventory_sort_v1(complete_inventory.entries):
+        var selected = false
+        for scope in declared_scopes:
+            if scv_snapshot_in_scope_v2(entry.source_identity, scope): selected = true
+        if not selected: continue
+        if not compile_source_inventory_path_valid_v1(entry.source_identity):
+            return Err("adapter-source-path-invalid")
+        expected_rows = expected_rows.push(
+            "{entry.source_identity}|sha256_{entry.content_digest}|{entry.byte_count}")
+        val frozen_path = scv_compile_snapshot_plain_path_v1(path_absolute(host_path_native(
+            reopened.snapshot_root + "/" + entry.source_identity)))
+        if not frozen_path.starts_with(reopened.snapshot_root + "/"):
+            return Err("adapter-frozen-object-outside-root:" + entry.source_identity)
+        val bytes = scv_compile_snapshot_read_source_v1(frozen_path)
+        if bytes == nil: return Err("adapter-frozen-object-missing:" + entry.source_identity)
+        val file = scv_snapshot_file_v2(entry.source_identity, bytes!)
+        if file.content_id != "sha256_" + entry.content_digest or file.bytes.len() != entry.byte_count:
+            return Err("adapter-frozen-object-mismatch:" + entry.source_identity)
+        files = files.push(file)
+    if expected_rows.join("\n") != frozen_inventory or expected_rows.len() != reopened.inventory_count:
+        return Err("adapter-declared-scope-inventory-mismatch")
+    # Complete means complete relative to the immutable compile inventory ONLY.
+    # V1 has no evidence about watcher holes, overlays or arbitrary FS absence.
+    val frozen = scv_snapshot_freeze_v2("compile-inventory-v1", files, declared_scopes,
+        complete_inventory.generation, acknowledged_generation, "complete",
+        ["editor-overlays", "generated-inputs", "external-inputs", "configuration",
+            "filesystem-event-coverage", "physical-file-modes", "physical-path-aliases"])
+    if val Err(reason) = frozen: return Err(reason)
+    Ok(CompileSnapshotV1Adapter(legacy: legacy, snapshot: frozen.unwrap(),
+        source_inventory_digest: "sha256_" + sha256_text(inventory_text),
+        source_inventory_generation: complete_inventory.generation))

@@ -10,8 +10,13 @@ use std.common.encoding.external_text.{utf8_format}
 # Extern fn declarations (runtime resolves at file level)
 
 use std.io_runtime.{read_file_text, read_file_text_result, file_delete, file_copy}
-use std.nogc_sync_mut.fs.host_path.{host_path_native}
-use std.nogc_sync_mut.sffi.file_bytes.{file_write_bytes_tagged_native}
+# Canonical text read: one blessed `pub fn file_read(path) -> text` owner in
+# std.io_runtime (absent/unreadable -> ""). No local redefinition — the flat
+# name-keyed registry silently misdispatches duplicate bodies across a closure
+# (doc/08_tracking/bug/file_read_has_23_definitions_with_two_return_types_2026-08-16.md).
+use std.io_runtime.{file_read}
+use std.nogc_sync_mut.fs.host_path.{host_path_native, host_path_canonical}
+use std.nogc_sync_mut.sffi.file_bytes.{file_write_bytes_tagged_native, file_atomic_write_bytes_tagged_native, file_write_under_root_bytes_tagged_native}
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 # Cycle-170 split crossing (parent slot, prefix slot, make) is a SOSIX
 # operation; see std.nogc_sync_mut.sosix.secure_temp_dir.
@@ -23,7 +28,7 @@ extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
 @unsafe(reason: "raw nullable mmap byte-array ABI; nil means mapping or read failure", capabilities: [ffi])
 extern fn rt_file_mmap_read_bytes(path: text) -> [i64]?
 @unsafe(reason: "raw SHA-256 text ABI; provider may use nil for unreadable input and is not admitted", capabilities: [ffi])
-extern fn rt_file_hash_sha256(path: text) -> text
+extern fn rt_file_hash_sha256(path: text) -> text?
 @unsafe(reason: "acquires an OS-owned file descriptor that must be released exactly once", capabilities: [ffi])
 extern fn rt_file_lock(path: text, timeout_secs: i64) -> i64
 @unsafe(reason: "consumes a raw OS file-lock descriptor", capabilities: [ffi])
@@ -36,7 +41,6 @@ extern fn rt_munmap(addr: i64, size: i64) -> bool
 extern fn rt_madvise(addr: i64, size: i64, advice: i64) -> bool
 @unsafe(reason: "raw memory-sync ABI; address and extent must describe a live mapping", capabilities: [ffi, raw_ptr])
 extern fn rt_msync(addr: i64, size: i64) -> bool
-use std.io_runtime.{process_run}
 @unsafe(reason: "raw file-existence predicate; false conflates missing, inaccessible, and provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
 @unsafe(reason: "raw no-follow regular-file predicate; false conflates path kind, access, and provider failure", capabilities: [ffi])
@@ -53,49 +57,27 @@ extern fn rt_file_fsync(path: text) -> bool
 extern fn rt_secure_temp_dir(parent: text, prefix: text) -> text
 @unsafe(reason: "atomically transfers ownership of a staged file path", capabilities: [ffi])
 extern fn rt_file_publish_noreplace(staged_path: text, destination: text) -> i64
+@unsafe(reason: "creates a second name for a regular file; no follow, no replace", capabilities: [ffi])
+extern fn rt_file_link_create_excl_no_follow(source: text, destination: text) -> bool
+@unsafe(reason: "raw chmod ABI; 0 is success, the Windows runtime stub also answers 0", capabilities: [ffi])
+extern fn rt_package_chmod(path: text, mode: i32) -> i32
+@unsafe(reason: "raw runtime ABI for rt_file_mode; negative is the failure sentinel", capabilities: [ffi])
+extern fn rt_file_mode(path: text) -> i64
 @unsafe(reason: "raw file-size ABI; negative status is the provider failure sentinel", capabilities: [ffi])
 extern fn rt_file_size(path: text) -> i64
 @unsafe(reason: "raw file-stat ABI; zero and negative values are provider-defined failure states", capabilities: [ffi])
 extern fn rt_file_stat(path: text) -> i64
 
-# --- Shell helpers (local copies to avoid circular imports) ---
-# These are minimal copies needed for file operations.
-# The canonical versions live in process_ops.spl.
-
-fn _file_shell(command: text) -> (text, text, i64):
-    process_run("/bin/sh", ["-c", command])
-
-fn _file_shell_bool(command: text) -> bool:
-    val (out, err, code) = _file_shell(command)
-    code == 0
-
-# reason positional io file_ops API
-fn _file_shell_output(command: text, default: text) -> text:
-    val (out, err, code) = _file_shell(command)
-    if code == 0:
-        out
-    else:
-        default
-
-fn _file_shell_int(command: text, default: i64) -> i64:
-    val (out, err, code) = _file_shell(command)
-    if code == 0:
-        val trimmed = out.trim()
-        if trimmed.len() > 0:
-            int(trimmed)
-        else:
-            default
-    else:
-        default
-
 # ============================================================================
 # Core File Operations
 # ============================================================================
 
-fn file_exists(path: text) -> bool:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_exists", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn file_exists(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_file_exists(host_path_native(path))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_is_regular_no_follow", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn file_is_regular_no_follow(path: text) -> bool:
     # ponytail: predicate + later hash is sufficient for local retained-test
     # artifacts; replace with no-follow open/fstat/hash-on-fd for hostile races.
@@ -108,10 +90,11 @@ fn file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> Result<tex
     val bytes = file_read_regular_no_follow_bounded_bytes(path, max_bytes)?
     io_legacy_utf8(bytes)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_read_regular_no_follow_bounded_bytes", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn file_read_regular_no_follow_bounded_bytes(path: text, max_bytes: i64) -> Result<[u8], text>:
     if max_bytes < 0:
         return Err("bounded file read requires a non-negative limit")
-    var content: [u8]? = nil
+    var content: [u8]? = None
     unsafe(capabilities: [ffi]):
         content = rt_file_read_regular_no_follow_bounded_bytes(host_path_native(path), max_bytes)
     if content.?:
@@ -128,12 +111,14 @@ fn file_read_regular_no_follow_bounded_bytes(path: text, max_bytes: i64) -> Resu
             return Ok([])
         Err("regular no-follow bounded file read failed ({_read_no_follow_failure_name()}): {path}")
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _read_no_follow_failure_code", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn _read_no_follow_failure_code() -> i64:
     var code: i64 = -1
     unsafe(capabilities: [ffi]):
         code = rt_file_read_regular_no_follow_last_failure()
     code
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _read_no_follow_failure_name", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn _read_no_follow_failure_name() -> text:
     """Name the admission arm that rejected the most recent bounded read.
 
@@ -161,15 +146,13 @@ fn _read_no_follow_failure_name() -> text:
     elif code == 10: "content is not valid utf-8"
     else: "arm {code}"
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_size_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn file_size_raw(path: text) -> i64:
     unsafe(capabilities: [ffi]):
         rt_file_size(host_path_native(path))
 
-fn file_read(path: text) -> text:
-    # rt_file_read_text returns Option in bootstrap runtime — unwrap with ??
-    read_file_text(path)
-
 # reason positional io file_ops API
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_write", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn file_write(path: text, content: text) -> bool:
     # Preserve unlink/create, 0644-with-umask, partial-count, and empty-write
     # semantics of this legacy UTF-8 provider. Admission precedes unlink.
@@ -187,12 +170,56 @@ fn file_write_bytes(path: text, data: [u8]) -> bool:
     file_write_bytes_tagged_native(host_path_native(path), data)
 
 
+fn file_atomic_write_bytes(path: text, data: [u8]) -> bool:
+    file_atomic_write_bytes_tagged_native(host_path_native(path), data)
+
+# Open-time confinement (todo 479): the runtime walks `rel` below the trusted
+# `root`, refusing a reparse point/symlink at EVERY component at open time and
+# holding each directory open until the final read, so a junction swapped in
+# after a path-policy walk cannot redirect it.
+@unsafe(reason: "walks a root-relative path with a no-follow open per component and returns at most the caller-owned bound as raw bytes", capabilities: [ffi])
+extern fn rt_file_read_under_root_bytes(root: text, rel: text, max_bytes: i64) -> [u8]?
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_read_under_root_bytes", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+# @allow(primitive_api) reason: byte bound and failure text of a raw runtime ABI call, consumed by the storage view through sosix fs_v1
+pub fn file_read_under_root_bytes(root: text, rel: text, max_bytes: i64) -> Result<[u8], text>:
+    if max_bytes < 0:
+        return Err("bounded file read requires a non-negative limit")
+    var content: [u8]? = None
+    unsafe(capabilities: [ffi]):
+        content = rt_file_read_under_root_bytes(host_path_native(root), rel, max_bytes)
+    # Stable prefixes, never user text: callers classify by `under-root-link` (arm 8).
+    if content.?:
+        val value = content.unwrap()
+        if value.len() < 0:
+            val code = _read_no_follow_failure_code()
+            if code == 100:
+                return Ok([])
+            if code == 8:
+                return Err("under-root-link")
+            return Err("under-root-failed: {_read_no_follow_failure_name()}")
+        Ok(value)
+    else:
+        val code = _read_no_follow_failure_code()
+        if code == 100:
+            return Ok([])
+        if code == 8:
+            return Err("under-root-link")
+        Err("under-root-failed: {_read_no_follow_failure_name()}")
+
+# Write counterpart: directory chain verified and held open, temp file created
+# in the held parent and renamed into place.
+# @allow(primitive_api) reason: bool success result of a raw runtime ABI call, consumed by the storage view through sosix fs_v1
+pub fn file_write_bytes_under_root(root: text, rel: text, data: [u8]) -> bool:
+    file_write_under_root_bytes_tagged_native(host_path_native(root), rel, data)
+
 # reason positional io file_ops API
-fn file_atomic_write(path: text, content: text) -> bool:
+pub fn file_atomic_write(path: text, content: text) -> bool:
     match file_atomic_write_encoded_text(path, content, utf8_format()):
         case Ok(_): true
         case Err(_): false
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in secure_temp_dir_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn secure_temp_dir_raw(parent: text, prefix: text) -> text:
     # Cycle-170 (candidate-seednew 2026-10-19): the two-argument
     # rt_secure_temp_dir text-ABI crossing reached the C admission with a
@@ -219,11 +246,59 @@ fn secure_temp_dir_raw(parent: text, prefix: text) -> text:
         val prefix_set: i64 = sosix_secure_temp_dir_set_prefix(host_path_native(prefix + ""))
         if prefix_set != 1:
             return ""
-        sosix_secure_temp_dir_make()
+        val made = sosix_secure_temp_dir_make()
+        # Canonical forward-slash spelling on Windows, matching
+        # path_final_existing/dir_walk output, so callers that textually
+        # compare against canonical paths (scv scope validators, fixture
+        # oracles) see one spelling. host_path_native re-adds native
+        # separators at every extern boundary. Identity off Windows.
+        # The nil/empty failure signal is preserved untouched: len() on the
+        # returned value is what callers gate on (nil measures -1).
+        if made.len() <= 0:
+            return made
+        host_path_canonical(made)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_publish_noreplace_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn file_publish_noreplace_raw(staged_path: text, destination: text) -> i64:
     unsafe(capabilities: [ffi]):
         rt_file_publish_noreplace(host_path_native(staged_path), host_path_native(destination))
+
+# Hard link `source` (a regular file, never followed) to the not-yet-existing
+# `destination`. The runtime verifies the new name resolves to the same inode
+# and removes it otherwise, so true means both names are one file. False for
+# a missing or non-regular source, an existing destination, a cross-device
+# pair, or a host without hard links -- callers fall back to a copy.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_hardlink", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn file_hardlink(source: text, destination: text) -> bool:
+    if source == "" or destination == "" or source == destination:
+        return false
+    unsafe(capabilities: [ffi]):
+        rt_file_link_create_excl_no_follow(host_path_native(source), host_path_native(destination))
+
+# Seal a regular file read-only (0444) so that an in-place write through ANY of
+# its names (fopen "wb" truncates the shared inode) fails instead of rewriting
+# bytes every hard link shares. True only when the mode read back is exactly
+# r--r--r--: the Windows runtime chmod stub reports success without changing
+# anything and its mode word is attribute bits, so a host that cannot seal
+# answers false and callers keep copying instead of linking.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_seal_readonly", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn file_seal_readonly(path: text) -> bool:
+    if path == "":
+        return false
+    var status: i32 = -1
+    var mode: i64 = -1
+    unsafe(capabilities: [ffi]):
+        status = rt_package_chmod(host_path_native(path), 292)
+        mode = rt_file_mode(host_path_native(path))
+    status == 0 and mode > 0 and (mode & 511) == 292
+
+# chmod(2) without the `sffi.host` hub: importing that hub links all of its
+# ~150 externs (rt_db_*, rt_browser_http_job_*, ...) into every binary that
+# only wanted chmod.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in package_chmod", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn package_chmod(path: text, mode: i32) -> i32:
+    unsafe(capabilities: [ffi]):
+        rt_package_chmod(host_path_native(path), mode)
 
 fn secure_temp_dir(parent: text, prefix: text) -> Result<text, text>:
     if parent == "" or prefix == "" or prefix.contains("/") or prefix.contains("\\"):
@@ -261,6 +336,7 @@ fn _timestamp_str() -> text:
     "{micros}"
 
 # reason positional io file_ops API
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_append", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn file_append(path: text, content: text) -> bool:
     # Preserve the legacy size+positioned-write contract, including empty
     # content succeeding without creating a file or requiring a parent.
@@ -270,13 +346,15 @@ fn file_append(path: text, content: text) -> bool:
     val offset = if current_size > 0: current_size else: 0
     file_write_text_at(path, offset, content) >= 0
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_stat", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn file_stat(path: text) -> i64:
     # Get file modification time in seconds since epoch (direct SFFI).
     # Returns 0 if file doesn't exist or on error.
     unsafe(capabilities: [ffi]):
         rt_file_stat(host_path_native(path))
 
-fn file_modified_time(path: text) -> i64:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_modified_time", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn file_modified_time(path: text) -> i64:
     # Get file modification time in seconds since epoch.
     # A zero result fails closed: cache users must treat it as unavailable.
     # rt_file_stat is the same measurement in one call; the handle-based
@@ -289,7 +367,9 @@ fn file_modified_time(path: text) -> i64:
 fn file_remove(path: text) -> bool:
     file_delete(path)
 
-fn file_hash_sha256(path: text) -> text:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_hash_sha256", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn file_hash_sha256(path: text) -> text?:
+    """SHA-256 hex digest of the file, or nil when it is missing or unreadable."""
     unsafe(capabilities: [ffi]):
         rt_file_hash_sha256(host_path_native(path))
 
@@ -302,13 +382,15 @@ fn file_read_lines(path: text) -> Result<[text], text>:
                 Ok(content.split("\n"))
         Err(error): Err(error)
 
-fn file_lock(path: text, timeout_secs: i64) -> i64:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_lock", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn file_lock(path: text, timeout_secs: i64) -> i64:
     var handle: i64 = -1
     unsafe(capabilities: [ffi]):
         handle = rt_file_lock(host_path_native(path), timeout_secs)
     handle
 
-fn file_unlock(handle: i64) -> bool:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_unlock", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn file_unlock(handle: i64) -> bool:
     var released = false
     unsafe(capabilities: [ffi]):
         released = rt_file_unlock(handle)
@@ -319,7 +401,7 @@ fn file_size(path: text) -> i64:
 
 # --- Memory-Mapped File I/O (SFFI wrappers) ---
 
-fn file_read_text(path: text) -> text:
+pub fn file_read_text(path: text) -> text:
     read_file_text(path)
 
 # file_read_bytes is defined once in std.io_runtime; re-exported here.
@@ -331,27 +413,23 @@ fn file_mmap_read_text(path: text) -> text:
     # byte provider is read-backed too; no raw text mmap bypass remains here.
     read_file_text(path)
 
-# `rt_file_mmap_read_bytes` delegates to rt_file_read_bytes, which yields nil
-# on any fs::read error (missing/unreadable path). TOTAL with the documented
-# Preserve the provider's nullable failure state as Result.Err. A valid empty
-# mapping remains Ok([]).
-#
-# The provider is NOT total in every execution lane: the interpreter lane
-# raises `rt_file_mmap_read_bytes failed: <errno>` and aborts instead of
-# yielding nil, so a caller could never observe the documented Err. Reject an
-# empty or non-existent path here — through the typed `file_exists` alias, not
-# a fresh raw `rt_*` call site — so the typed Err contract holds in every lane
-# without fabricating bytes. A path that exists still goes to the provider, so
-# genuine provider failures are still reported as the provider sees them.
+# `rt_file_mmap_read_bytes` is declared `[i64]?`: nil means mapping or read
+# failure (missing/unreadable path). The seed interpreter returns nil too (it
+# no longer raises), so the provider's nullable failure state is preserved as
+# Result.Err in every lane. A valid empty mapping remains Ok([]). The empty-path
+# and file_exists checks below are an early fail-closed rejection through the
+# typed `file_exists` alias (not a fresh raw `rt_*` call site); they do not
+# fabricate bytes, and a path that exists still goes to the provider.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_mmap_read_bytes", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn file_mmap_read_bytes(path: text) -> Result<[i64], text>:
     if path == "":
         return Err("file mmap read requires a non-empty path")
     if not file_exists(path):
         return Err("file mmap read failed: {path}")
-    var bytes: [i64]? = nil
+    var bytes: [i64]? = None
     unsafe(capabilities: [ffi]):
         bytes = rt_file_mmap_read_bytes(host_path_native(path))
-    if bytes == nil:
+    if bytes.is_none():
         Err("file mmap read failed: {path}")
     else:
         Ok(bytes ?? [])
@@ -372,6 +450,7 @@ fn file_read_text_at(path: text, offset: i64, size: i64) -> Result<text, text>:
         case Ok(item): Ok(item)
         case Err(error): Err(io_text_error_message(error))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_write_text_at", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn file_write_text_at(path: text, offset: i64, data: text) -> i64:
     # The old provider opens O_WRONLY|O_CREAT with mode 0644 (subject to
     # umask), preserves existing contents outside the write, and returns 0
@@ -386,12 +465,14 @@ fn file_write_text_at(path: text, offset: i64, data: text) -> i64:
     unsafe(capabilities: [ffi]):
         rt_file_write_text_at(host_path_native(path), offset, data)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_fsync", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn file_fsync(path: text) -> bool:
     var synced = false
     unsafe(capabilities: [ffi]):
         synced = rt_file_fsync(host_path_native(path))
     synced
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in directory_fsync", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn directory_fsync(path: text) -> bool:
     # A successful regular-file flush is not a directory-entry barrier. Reject
     # static symlinks/junctions too. This predicate plus open still requires a
@@ -411,6 +492,7 @@ fn file_fsync_cached(path: text) -> bool:
 # --- Memory-Mapped File I/O ---
 
 # reason positional io file_ops API
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_mmap", reviewers: ["ormastes", "opus-review"], capabilities: ["raw_ptr", "ffi"])
 fn file_mmap(path: text, size: i64, offset: i64, readonly: bool) -> i64:
     # Memory-map a file into process address space.
     #
@@ -428,18 +510,21 @@ fn file_mmap(path: text, size: i64, offset: i64, readonly: bool) -> i64:
         rt_mmap(path, size, offset, if readonly: 1 else: 0)
 
 # reason positional io file_ops API
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_munmap", reviewers: ["ormastes", "opus-review"], capabilities: ["raw_ptr", "ffi"])
 fn file_munmap(addr: i64, size: i64) -> bool:
     # Unmap a memory-mapped file region.
     unsafe(capabilities: [ffi, raw_ptr]):
         rt_munmap(addr, size)
 
 # reason positional io file_ops API
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_madvise", reviewers: ["ormastes", "opus-review"], capabilities: ["raw_ptr", "ffi"])
 fn file_madvise(addr: i64, size: i64, advice: i64) -> bool:
     # Give advice about memory access patterns.
     unsafe(capabilities: [ffi, raw_ptr]):
         rt_madvise(addr, size, advice)
 
 # reason positional io file_ops API
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_msync", reviewers: ["ormastes", "opus-review"], capabilities: ["raw_ptr", "ffi"])
 fn file_msync(addr: i64, size: i64) -> bool:
     # Synchronize mapped memory with file on disk.
     unsafe(capabilities: [ffi, raw_ptr]):

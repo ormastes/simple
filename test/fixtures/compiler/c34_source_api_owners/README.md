@@ -16,7 +16,7 @@ No additional composition overlay should replace the explicitly named module.
 An unsuccessful setup exits 10/11; incorrect admission results exit 12/13;
 policy mutation exits 14. Inspect the output path in addition to the exit code.
 
-The mono SSpec at `test/01_unit/compiler/mono/source_api_owner_spec.spl` checks
+The regressions check
 cross-module error-state updates, a genuine truncated read, clearing the error,
 and the initialized tracker metadata. Both regressions are authored but not
 executed; no build or runtime result is claimed.

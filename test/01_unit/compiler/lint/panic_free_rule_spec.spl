@@ -1,0 +1,98 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Panic-free safe code: warning phase (ADR-006)
+
+The `panic_free` lint warns on a potential panic site in safe code that it
+cannot prove safe: an unguarded index, `unwrap`/`expect`, or integer `/`/`%`
+by a divisor not proven non-zero. A dominating guard silences it. Each finding
+carries a stable code and a fix-it.
+"""
+
+# @tag: unit, compiler, lint
+
+use std.spec.*
+use compiler.tools.lint.static_rules.{LintParamsV1, LintUnit, StaticLintFinding, static_lint_rule_table, run_static_lint_rule_table}
+use compiler.tools.lint.rules.panic_free_rule.{panic_free_lint_rule}
+
+fn pf(src: text) -> [StaticLintFinding]:
+    run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("fixture.spl", src), [panic_free_lint_rule()]).findings
+
+describe "panic_free lint: true positives":
+    it "warns on an unguarded index with a get fix-it":
+        val found = pf("fn f(xs: [i64], i: i64) -> i64:\n    xs[i]\n")
+        expect(found.len()).to_equal(1)
+        expect(found[0].code).to_equal("PANIC-W-INDEX")
+        expect(found[0].line_num).to_equal(2)
+        expect(found[0].hint).to_equal("fix-it: `xs.get(i) ?? <default>`, or guard with `if i < xs.len():`")
+
+    it "warns on an indexed write with a set fix-it":
+        val found = pf("fn f(xs: [i64], i: i64):\n    xs[i] = 1\n")
+        expect(found.len()).to_equal(1)
+        expect(found[0].hint.contains("xs.set(i, <value>)")).to_equal(true)
+
+    it "warns on unwrap and expect":
+        val found = pf("fn f(x: i64?) -> i64:\n    val a = x.unwrap()\n    x.expect(\"m\")\n")
+        expect(found.len()).to_equal(2)
+        expect(found[0].code).to_equal("PANIC-W-UNWRAP")
+        expect(found[0].hint).to_equal("fix-it: `x ?? <default>`, or bind it with `if val v = x:`")
+
+    it "warns on division and modulo by a non-literal":
+        val found = pf("fn f(a: i64, b: i64) -> i64:\n    a / b + a % b\n")
+        expect(found.len()).to_equal(2)
+        expect(found[0].code).to_equal("PANIC-W-DIV")
+        expect(found[0].hint).to_equal("fix-it: `checked_div(<lhs>, b) ?? <default>`, or guard with `if b != 0:`")
+
+    it "warns on a literal zero divisor":
+        expect(pf("fn f(a: i64) -> i64:\n    a / 0\n").len()).to_equal(1)
+
+    it "still reports inside unsafe: unsafe does not erase a panic effect":
+        expect(pf("fn f(xs: [i64], i: i64) -> i64:\n    unsafe:\n        xs[i]\n").len()).to_equal(1)
+
+    it "warns again once the guarding block ends":
+        val found = pf("fn f(xs: [i64], i: i64) -> i64:\n    if i < xs.len():\n        val a = xs[i]\n    xs[i]\n")
+        expect(found.len()).to_equal(1)
+        expect(found[0].line_num).to_equal(4)
+
+describe "panic_free lint: guarded negatives":
+    it "accepts an index under a dominating length guard":
+        expect(pf("fn f(xs: [i64], i: i64) -> i64:\n    if i >= 0 and i < xs.len():\n        return xs[i]\n    0\n").len()).to_equal(0)
+
+    it "accepts an index in a for loop over 0..xs.len()":
+        expect(pf("fn f(xs: [i64]):\n    for i in 0..xs.len():\n        print xs[i]\n").len()).to_equal(0)
+
+    it "accepts an index after an early-exit guard":
+        expect(pf("fn f(xs: [i64], i: i64) -> i64:\n    if i >= xs.len(): return 0\n    xs[i]\n").len()).to_equal(0)
+        expect(pf("fn f(xs: [i64], i: i64) -> i64:\n    if i < 0 or i >= xs.len():\n        return 0\n    xs[i]\n").len()).to_equal(0)
+
+    it "accepts first and last element under an is_empty check":
+        expect(pf("fn f(xs: [i64]) -> i64:\n    if not xs.is_empty():\n        return xs[0] + xs[xs.len() - 1]\n    0\n").len()).to_equal(0)
+
+    it "accepts unwrap under a presence check":
+        expect(pf("fn f(x: i64?) -> i64:\n    if x.is_some():\n        return x.unwrap()\n    0\n").len()).to_equal(0)
+        expect(pf("fn f(x: i64?) -> i64:\n    if x == nil: return 0\n    x.unwrap()\n").len()).to_equal(0)
+
+    it "accepts non-zero literal and guarded divisors":
+        expect(pf("fn f(a: i64) -> i64:\n    a / 2 + a % 10\n").len()).to_equal(0)
+        expect(pf("fn f(a: i64, b: i64) -> i64:\n    if b != 0:\n        return a / b\n    0\n").len()).to_equal(0)
+        expect(pf("fn f(a: i64, b: i64) -> i64:\n    if b == 0: return 0\n    a % b\n").len()).to_equal(0)
+
+    it "ignores slices, list literals, types, strings, comments and docstrings":
+        expect(pf("fn f(xs: [i64]) -> [i64]:\n    val ys = [1, 2]\n    xs[1:3]\n").len()).to_equal(0)
+        expect(pf("fn f():\n    # xs[i] and a / b\n    print \"xs[i] / x.unwrap()\"\n").len()).to_equal(0)
+        expect(pf("fn f():\n    \"\"\"xs[i] / b\n    x.unwrap()\"\"\"\n    0\n").len()).to_equal(0)
+
+    it "skips float division and declared Dict indexing (cheap type hints)":
+        expect(pf("fn f(a: f64, b: f64) -> f64:\n    a / b\n").len()).to_equal(0)
+        expect(pf("fn f(a: i64) -> f64:\n    val x = 1.5\n    x / a\n").len()).to_equal(0)
+        expect(pf("fn f(m: Dict<text, i64>, k: text) -> i64?:\n    m[k]\n").len()).to_equal(0)
+        expect(pf("fn f(k: text):\n    val m = Dict.new()\n    print m[k]\n").len()).to_equal(0)
+
+    it "forgets a param type hint outside its function":
+        expect(pf("fn f(b: f64):\n    pass\nfn g(a: i64, b: i64) -> i64:\n    a / b\n").len()).to_equal(1)
+
+    it "warns when a float hint is shadowed by an int redeclaration (SAF-05)":
+        expect(pf("fn f(a: i64, b: f64) -> i64:\n    if a > 1:\n        val b: i64 = a\n        return a / b\n    0\n").len()).to_equal(1)
+        expect(pf("fn f(a: i64) -> i64:\n    val x = 1.5\n    if a > 1:\n        val x = a\n        return a / x\n    0\n").len()).to_equal(1)
+
+    it "is registered in the static lint table":
+        expect([r.id() for r in static_lint_rule_table()]).to_contain("panic_free")

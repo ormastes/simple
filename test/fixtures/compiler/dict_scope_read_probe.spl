@@ -1,0 +1,78 @@
+# Direct native fixture: link the selected dictionary provider's five new ABI
+# exports. This intentionally fails instead of treating missing ABI as a skip.
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1, MirLoopResourceLimitsV1}
+use compiler.common.dict_scope_read_v1.{DictScopeReadV1, dict_scope_read_fuel_v1}
+
+fn main() -> i64:
+    val account = match MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1()):
+        case Ok(value): value
+        case Err(_): return 1
+    var symbols: Dict<text, i64> = {"driver": 7, "café": 11}
+    val before = account.snapshot().work_used
+    var view = match DictScopeReadV1.create(symbols, account):
+        case Ok(value): value
+        case Err(_): return 2
+    if account.snapshot().work_used <= before: return 3
+    var second = match DictScopeReadV1.create(symbols, account):
+        case Ok(value): value
+        case Err(_): return 4
+    val after_create = account.snapshot().work_used
+    match view.meta(1):
+        case Ok(length):
+            if length != 2: return 5
+        case Err(_): return 6
+    if account.snapshot().work_used <= after_create: return 7
+    # The pure owner's allocator, descriptor and retained-byte accounting share
+    # this exact header size, including the generation/epoch/backing words.
+    val kind = match view.meta(0):
+        case Ok(value): value
+        case Err(_): return 20
+    if kind == 2:
+        match view.meta(5):
+            case Ok(bytes):
+                if bytes != 64: return 21
+            case Err(_): return 22
+    var copied = view
+    val before_copy = account.snapshot().work_used
+    match copied.meta(1):
+        case Ok(_): ()
+        case Err(_): return 8
+    if account.snapshot().work_used <= before_copy: return 9
+
+    # A successful local permit reveals its charged probe budget without an
+    # uncharged runtime observation or an assumed provider constant.
+    val before_permit = account.snapshot().work_used
+    match dict_scope_read_fuel_v1(account):
+        case Ok(_): ()
+        case Err(_): return 10
+    val cost = account.snapshot().work_used - before_permit
+    if cost < 2 or cost > 1048556: return 11
+    val exact = match MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1(max_work: 20 + cost)):
+        case Ok(value): value
+        case Err(_): return 12
+    match dict_scope_read_fuel_v1(exact):
+        case Ok(_): ()
+        case Err(_): return 13
+    match dict_scope_read_fuel_v1(exact):
+        case Ok(_): return 14
+        case Err(_): ()
+    val under = match MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1(max_work: 19 + cost)):
+        case Ok(value): value
+        case Err(_): return 15
+    match dict_scope_read_fuel_v1(under):
+        case Ok(_): return 16
+        case Err(_): ()
+
+    symbols["driver"] = 13
+    match view.meta(1):
+        case Ok(_): return 17
+        case Err(_): ()
+    account.close()
+    match second.meta(1):
+        case Ok(_): return 18
+        case Err(_): ()
+    match copied.meta(1):
+        case Ok(_): return 19
+        case Err(_): ()
+    print "PASS dict-scope-facade shared-account copy close stale exact under"
+    0

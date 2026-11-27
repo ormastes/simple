@@ -153,6 +153,8 @@ mod tests {
             is_ghost: false,
             is_sync: true,
             has_suspension: false,
+            generic_params: vec![],
+            generic_bounds: vec![],
         };
         assert!(!checker.needs_promise_wrapping(&sync_func, &types));
 
@@ -177,6 +179,8 @@ mod tests {
             is_ghost: false,
             is_sync: false,
             has_suspension: true,
+            generic_params: vec![],
+            generic_bounds: vec![],
         };
         assert!(checker.needs_promise_wrapping(&async_func, &types));
 
@@ -202,6 +206,8 @@ mod tests {
             is_ghost: false,
             is_sync: false,
             has_suspension: true,
+            generic_params: vec![],
+            generic_bounds: vec![],
         };
         assert!(!checker.needs_promise_wrapping(&already_wrapped, &types));
     }

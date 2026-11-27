@@ -1,10 +1,14 @@
 # RTL MDSOC reorg Phase 5 modules were never created — 68 system examples red
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-05 (PR #6979) — verified 2026-11-25; 9 debug_sidecar tripwires remain red by design
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+The 2026-09-16 normalization banner ("no resolution evidence found") is
+superseded: the Resolution section below (2026-11-05) landed the SA-3/SA-4
+modules, capsule markers, and spec repairs, and was re-verified by source
+inspection on 2026-11-25 (see the dated note at the end of this file).
 
-**Status:** OPEN
+**Status:** RESOLVED 2026-11-05 (PR #6979); residual: 9
+`debug_sidecar_json_order_spec.spl` fail-closed tripwires stay red until a
+real LLVM-capable generation run (`scripts/rtl/rtl_riscv{32,64}_linux_generated.shs`)
 **Found:** 2026-08-04
 
 ## Symptom
@@ -124,3 +128,77 @@ Still genuine unbuilt design-owned feature work (Phase 5 RTL MDSOC reorg), not
 a defect — a whole reorg phase, not a shard-scale fix. No change made.
 Leaving OPEN.
 
+
+## Resolution 2026-11-05 (RTL lane, PR #6979 — wait verification)
+
+State at the release/1.0.0 tip was better than this record: the SA-3 split
+modules already exist under `src/lib/hardware/fpga_linux/` (orchestrator,
+data, manifest + the 13-line re-export facade). What was still missing, and
+what this lane landed per `doc/05_design/app/riscv/rtl_riscv_mdsoc_capsules.md`:
+
+- **SA-4 plug-in stubs created** (fail-closed, honest, no fabricated
+  behavior): `src/plugins/backend_vhdl/vhdl/vhdl_emit_{fp,simd,cache,hart}_stub.spl`,
+  each a one-function module whose body returns a VHDL comment line
+  (`-- VHDL-EMIT-…-STUB-NOT-IMPLEMENTED`) with a TODO(Feature A/B) link, plus
+  the `# capsule:` markers. `vhdl/__init__.spl` and `vhdl/mod.spl` re-export
+  all four.
+- **SA-2 capsule markers** added to the 9 existing emitter files, with the
+  marker values from the design's capsule table.
+- **AC-4 plan annotations**: `<!-- capsule: … -->` comments added to each of
+  the 8 agent sections of `doc/03_plan/hardware/pure_simple_vhdl_riscv_gap_spawn_plan.md`
+  plus a preamble mapping block (per-agent mapping taken from the design doc's
+  8-agent table).
+- **Spec repairs to the landed SA-3 reality** (same class as bug 2's
+  resolution): `fpga_linux_split_spec.spl` imported
+  `hardware.fpga_linux.riscv_fpga_linux`, which still resolves to the old
+  6990-line monolith at `src/hardware/fpga_linux/` — switched to the
+  `std.hardware.fpga_linux.riscv_fpga_linux` facade (the import path the
+  production driver `riscv_fpga_bundle.spl` already uses). Its AC-7 script
+  paths were also stale (`scripts/rtl_riscv*.shs` → `scripts/rtl/…`, the path
+  every other consumer uses).
+- **debug_sidecar_json_order_spec.spl** was not executable at all (cover
+  admission failure — no `# @req`/`# @cover` header). Added the standard
+  header; the 7 source-contract checks now execute and PASS.
+
+**Verification (seed interpreter):** rtl_mdsoc_capsule_boundary 22/22,
+rtl_mdsoc_plugin_stubs 20/20, fpga_linux_split 19/19 (all were red before),
+debug_sidecar_json_order 7 passed / 9 failed-of-16.
+
+**Left red, by design of the specs themselves:** the 9 debug_sidecar
+failures are fail-closed tripwires over `build/rtl_linux/generated_{rv32,rv64}`
+that turn green only after a real generation run
+(`scripts/rtl/rtl_riscv{32,64}_linux_generated.shs`). That lane requires an
+LLVM-capable Simple binary; none exists in the RTL worktree, so host-side
+generation verification is pending — this is the "wait verification" state.
+The old monolith at `src/hardware/fpga_linux/riscv_fpga_linux.spl` is retained
+(verified consumers: test/03_system/app/hardware/feature/riscv_fpga_linux_spec.spl,
+test/01_unit/compiler/backend/vhdl_backend_spec.spl, both green).
+
+## Verification 2026-11-25 (work/p2w4-ak-20261125, release/1.0.0)
+
+The 2026-11-05 resolution is confirmed present at release/1.0.0 HEAD by
+source inspection:
+
+- SA-3 modules exist under `src/lib/hardware/fpga_linux/`
+  (`fpga_linux_orchestrator.spl`, `fpga_linux_data.spl`,
+  `fpga_linux_manifest.spl`, `riscv_fpga_linux.spl` facade), each carrying a
+  `# capsule:` marker.
+- SA-4 stubs exist: `src/plugins/backend_vhdl/vhdl/vhdl_emit_{fp,simd,cache,hart}_stub.spl`,
+  all with `# capsule:` markers; the emitter files
+  (`vhdl_backend.spl`, `vhdl_builder.spl`, `vhdl_helpers.spl`,
+  `vhdl_memory_templates.spl`, `vhdl_testbench.spl`, `vhdl_type_mapper.spl`,
+  `mod.spl`, `__init__.spl`) also carry markers (16 marker-bearing files
+  total under `src/plugins/backend_vhdl/` + the 4 fpga_linux modules).
+- The specs live at `test/03_system/compiler/rtl_mdsoc_capsule_boundary_spec.spl`,
+  `rtl_mdsoc_plugin_stubs_spec.spl`, `fpga_linux_split_spec.spl`, and
+  `test/system/compiler/debug_sidecar_json_order_spec.spl` (paths moved since
+  filing; `test/system/compiler/` no longer holds the first three).
+- Execution limit: spec re-run blocked on this Windows host — the pinned
+  seed rejects the tree-wide `@representation_boundary` decorator, failing
+  `bin/simple.exe test` repo-wide at this HEAD. Verification is by source
+  inspection; the 2026-11-05 seed-interpreter results (22/22, 20/20, 19/19)
+  stand as the execution evidence. The 9 remaining debug_sidecar failures
+  are the specs' own fail-closed tripwires over
+  `build/rtl_linux/generated_{rv32,rv64}` and stay red by design until a
+  real LLVM-capable generation run — tracked as the resolution section's
+  "wait verification" state, not as this bug.

@@ -1,0 +1,163 @@
+# Scoped service registry for the emulated `endpoint-v1` network (design
+# 11.7, 11.8). Names live under a broker-reserved suffix and are resolved only
+# inside the caller's exact network scope and generation. A name outside the
+# reserved suffix is rejected as not-private; an unknown private name is
+# not-found. Neither falls back to public DNS or external routing; external
+# destinations take the separate external-address policy path.
+# Registration is attempt-bound: the address must be owned by the registering
+# principal in the network IPAM, a stale incarnation cannot replace a newer
+# one, and a different workload cannot take over a live endpoint.
+use std.nogc_async_mut.container.network.endpoint_identity_v1.{
+    EndpointNetworkIdV1, EndpointPrincipalV1, RouteLeaseV1, VirtualEndpointV1,
+    endpoint_network_scope_v1, endpoint_network_key_v1, endpoint_principal_validate_v1,
+    endpoint_principal_key_v1, endpoint_principal_newer_v1, virtual_endpoint_v1,
+    virtual_endpoint_key_v1}
+use std.nogc_async_mut.container.network.ipam_v1.{EndpointIpamV1}
+
+pub const ENDPOINT_NAME_MAX_V1: i64 = 253
+pub const ENDPOINT_LEASE_ACTIVE_V1 = "active"
+pub const ENDPOINT_LEASE_DRAINING_V1 = "draining"
+pub const ENDPOINT_LEASE_RETIRED_V1 = "retired"
+
+pub struct EndpointServiceEntryV1:
+    lease: RouteLeaseV1
+    state: text
+
+fn _endpoint_label_valid(label: text) -> bool:
+    if label == "" or label.len() > 63: return false
+    if label.starts_with("-") or label.ends_with("-"): return false
+    for ch in label.chars():
+        if not ((ch >= "a" and ch <= "z") or (ch >= "0" and ch <= "9") or ch == "-"):
+            return false
+    true
+
+# Lowercase DNS-shaped name: labels [a-z0-9-], 1..63 each, 253 total.
+pub fn endpoint_dns_name_valid_v1(name: text) -> bool:
+    if name == "" or name.len() > ENDPOINT_NAME_MAX_V1: return false
+    for label in name.split("."):
+        if not _endpoint_label_valid(label): return false
+    true
+
+pub class EndpointServiceRegistryV1:
+    suffix: text
+    current_generation: Dict<text, i64>
+    entries: [EndpointServiceEntryV1]
+    index_by_lease: Dict<text, i64>
+    active_by_endpoint: Dict<text, i64>
+    next_lease_generation: i64
+
+    pub static fn create(reserved_suffix: text) -> Result<EndpointServiceRegistryV1, text>:
+        if not endpoint_dns_name_valid_v1(reserved_suffix): return Err("endpoint-registry-suffix-invalid")
+        Ok(EndpointServiceRegistryV1(suffix: reserved_suffix, current_generation: {},
+            entries: [], index_by_lease: {}, active_by_endpoint: {}, next_lease_generation: 1))
+
+    # Admits one network generation. Generations only move forward; leases of
+    # an older generation can no longer resolve or authorize.
+    pub me admit_network(network: EndpointNetworkIdV1) -> Result<bool, text>:
+        val scope = endpoint_network_scope_v1(network)
+        if network.generation < 1: return Err("endpoint-network-generation-invalid")
+        if self.current_generation.contains_key(scope):
+            val current = self.current_generation[scope]
+            if network.generation < current: return Err("endpoint-registry-stale-network-generation")
+        self.current_generation[scope] = network.generation
+        Ok(true)
+
+    pub fn network_generation(network: EndpointNetworkIdV1) -> Option<i64>:
+        val scope = endpoint_network_scope_v1(network)
+        if self.current_generation.contains_key(scope): return Some(self.current_generation[scope])
+        None
+
+    pub fn private_name(name: text) -> bool:
+        if not endpoint_dns_name_valid_v1(name): return false
+        name.len() > self.suffix.len() + 1 and name.ends_with("." + self.suffix)
+
+    fn _current(network: EndpointNetworkIdV1) -> bool:
+        val scope = endpoint_network_scope_v1(network)
+        if not self.current_generation.contains_key(scope): return false
+        self.current_generation[scope] == network.generation
+
+    pub me register(ipam: EndpointIpamV1, principal: EndpointPrincipalV1, name: text,
+            address: i64, port: i64, protocol: text, policy_revision: i64) -> Result<RouteLeaseV1, text>:
+        val _principal = endpoint_principal_validate_v1(principal)?
+        if not self.private_name(name): return Err("endpoint-registry-name-not-private")
+        if policy_revision < 1: return Err("endpoint-registry-policy-revision-invalid")
+        if not self._current(principal.network): return Err("endpoint-registry-stale-network-generation")
+        if endpoint_network_key_v1(ipam.network) != endpoint_network_key_v1(principal.network):
+            return Err("endpoint-registry-ipam-network-mismatch")
+        val owner = endpoint_principal_key_v1(principal)
+        match ipam.owner_of(address):
+            case Some(holder):
+                if holder != owner: return Err("endpoint-registry-address-not-owned")
+            case None:
+                return Err("endpoint-registry-address-not-owned")
+        val endpoint = virtual_endpoint_v1(principal.network, address, port, protocol)?
+        val endpoint_key = virtual_endpoint_key_v1(endpoint)
+        if self.active_by_endpoint.contains_key(endpoint_key):
+            val existing_index = self.active_by_endpoint[endpoint_key]
+            val existing = self.entries[existing_index].lease
+            if endpoint_principal_key_v1(existing.owner) == owner:
+                if existing.service_name != name: return Err("endpoint-registry-endpoint-in-use")
+                return Ok(existing)
+            if existing.owner.pod_uid != principal.pod_uid: return Err("endpoint-registry-endpoint-in-use")
+            if not endpoint_principal_newer_v1(principal, existing.owner):
+                return Err("endpoint-registry-stale-registration")
+            # A newer incarnation of the same workload supersedes the old lease.
+            self.entries[existing_index] = EndpointServiceEntryV1(lease: existing,
+                state: ENDPOINT_LEASE_RETIRED_V1)
+        val generation = self.next_lease_generation
+        self.next_lease_generation = generation + 1
+        val lease = RouteLeaseV1(lease_id: "lease-" + generation.to_text(), service_name: name,
+            endpoint: endpoint, owner: principal, lease_generation: generation,
+            policy_revision: policy_revision)
+        self.entries.push(EndpointServiceEntryV1(lease: lease, state: ENDPOINT_LEASE_ACTIVE_V1))
+        self.index_by_lease[lease.lease_id] = self.entries.len() - 1
+        self.active_by_endpoint[endpoint_key] = self.entries.len() - 1
+        Ok(lease)
+
+    # Removal first stops new opens (draining); routes retire separately.
+    pub me unregister(principal: EndpointPrincipalV1, lease_id: text) -> Result<bool, text>:
+        if not self.index_by_lease.contains_key(lease_id): return Err("endpoint-registry-lease-unknown")
+        val index = self.index_by_lease[lease_id]
+        val entry = self.entries[index]
+        if endpoint_principal_key_v1(entry.lease.owner) != endpoint_principal_key_v1(principal):
+            return Err("endpoint-registry-unregister-not-owner")
+        if entry.state != ENDPOINT_LEASE_ACTIVE_V1: return Ok(true)
+        self.entries[index] = EndpointServiceEntryV1(lease: entry.lease, state: ENDPOINT_LEASE_DRAINING_V1)
+        self.active_by_endpoint = self.active_by_endpoint.remove(virtual_endpoint_key_v1(entry.lease.endpoint))
+        Ok(true)
+
+    pub me retire(lease_id: text) -> Result<bool, text>:
+        if not self.index_by_lease.contains_key(lease_id): return Err("endpoint-registry-lease-unknown")
+        val index = self.index_by_lease[lease_id]
+        val entry = self.entries[index]
+        if entry.state == ENDPOINT_LEASE_ACTIVE_V1: return Err("endpoint-registry-retire-requires-drain")
+        self.entries[index] = EndpointServiceEntryV1(lease: entry.lease, state: ENDPOINT_LEASE_RETIRED_V1)
+        Ok(true)
+
+    pub fn lease_state(lease_id: text) -> Option<text>:
+        if not self.index_by_lease.contains_key(lease_id): return None
+        Some(self.entries[self.index_by_lease[lease_id]].state)
+
+    # True only for the exact live lease (id and generation) of a current network.
+    pub fn lease_active(lease: RouteLeaseV1) -> bool:
+        if not self.index_by_lease.contains_key(lease.lease_id): return false
+        val entry = self.entries[self.index_by_lease[lease.lease_id]]
+        entry.state == ENDPOINT_LEASE_ACTIVE_V1 and
+            entry.lease.lease_generation == lease.lease_generation and
+            self._current(entry.lease.endpoint.network)
+
+    # Network-scoped resolution of active leases. No public-DNS fallback.
+    pub fn resolve(network: EndpointNetworkIdV1, name: text) -> Result<[RouteLeaseV1], text>:
+        if not self.private_name(name): return Err("endpoint-resolve-not-private-name")
+        if not self._current(network): return Err("endpoint-resolve-stale-network-generation")
+        val key = endpoint_network_key_v1(network)
+        var found: [RouteLeaseV1] = []
+        for entry in self.entries:
+            if entry.state == ENDPOINT_LEASE_ACTIVE_V1 and entry.lease.service_name == name and
+                    endpoint_network_key_v1(entry.lease.endpoint.network) == key:
+                found.push(entry.lease)
+        if found.len() == 0: return Err("endpoint-resolve-not-found")
+        Ok(found)
+
+export EndpointServiceRegistryV1, EndpointServiceEntryV1, endpoint_dns_name_valid_v1
+export ENDPOINT_NAME_MAX_V1, ENDPOINT_LEASE_ACTIVE_V1, ENDPOINT_LEASE_DRAINING_V1, ENDPOINT_LEASE_RETIRED_V1

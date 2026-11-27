@@ -15,6 +15,23 @@
 #define SIMPLE_VECTOR_MAX_ADDRESS UINT64_C(9223372036854775807)
 enum simple_vector_opcode_v1 { SIMPLE_VECTOR_BITMAP_AND_U32=1, SIMPLE_VECTOR_BITMAP_OR_U32=2,
     SIMPLE_VECTOR_HTTP_FIND_BYTE=3, SIMPLE_VECTOR_HTTP_FIND_CRLF=4 };
+/* Additive text extension. The v1 description/digest above are unchanged; a
+ * host discovers text support by requesting SIMPLE_VECTOR_TEXT_CAPS at query
+ * (a provider without it answers status 5) and keeps its scalar path then.
+ * Request: input u64@8 + len u64@16; FIND/FIND_LAST needle @24/@32 (else 0);
+ * UPPER/LOWER out @40, cap @48 == len, out == input or disjoint (else 0);
+ * argument @56 == 0. Response i64@16 = result: VALIDATE/ASCII_CHECK 1|0,
+ * FIND_INVALID/FIND/FIND_LAST byte offset|-1 (empty needle: 0 / len),
+ * COUNT = non-continuation bytes; u64@8 = len for UPPER/LOWER. Empty spans
+ * use address 0 like every v1 span. Opcode n is capability bit n-1. */
+enum simple_vector_text_opcode_v1 { SIMPLE_VECTOR_TEXT_UTF8_VALIDATE=5,
+    SIMPLE_VECTOR_TEXT_UTF8_FIND_INVALID=6, SIMPLE_VECTOR_TEXT_UTF8_COUNT=7,
+    SIMPLE_VECTOR_TEXT_ASCII_CHECK=8, SIMPLE_VECTOR_TEXT_ASCII_UPPER=9,
+    SIMPLE_VECTOR_TEXT_ASCII_LOWER=10, SIMPLE_VECTOR_TEXT_FIND=11,
+    SIMPLE_VECTOR_TEXT_FIND_LAST=12 };
+#define SIMPLE_VECTOR_TEXT_FIRST_OPCODE 5u
+#define SIMPLE_VECTOR_TEXT_LAST_OPCODE 12u
+#define SIMPLE_VECTOR_TEXT_CAPS UINT64_C(0xFF0)
 enum simple_vector_status_v1 { SIMPLE_VECTOR_OK=0, SIMPLE_VECTOR_INVALID_REQUEST=1,
     SIMPLE_VECTOR_UNSUPPORTED_OPERATION=2, SIMPLE_VECTOR_CAPABILITY_DENIED=3,
     SIMPLE_VECTOR_RANGE_INVALID=4, SIMPLE_VECTOR_FEATURE_UNAVAILABLE=5,

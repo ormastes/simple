@@ -1,0 +1,51 @@
+use std.spec.{describe, it, expect}
+use std.common.text_bytes.{text_bytes_concat_checked}
+use std.io_runtime.{file_write, file_read, file_delete}
+
+# Bug smux_owner_jit_file_read_empty_2026-11-04: under the default JIT lane
+# `file_read` returned "" because text_bytes_concat_checked() reported
+# AllocationFailed. rt_array_concat itself returned the right array; the
+# `if val joined = rt_array_concat(..)` binding of a `[u8]?` extern result was
+# left untyped, so `joined.len()` came back as an untagged word and the exact
+# length check rejected a correct result. Fixed by the HIR if-val payload
+# narrowing (89ffd34d223); this spec pins the observable behaviour in the
+# default (JIT) lane.
+
+extern fn rt_array_concat(head: [u8], tail: [u8]) -> [u8]?
+
+describe "text_bytes_concat_checked under the default lane":
+    it "joins two packed byte arrays":
+        val head: [u8] = [1u8, 2u8, 3u8]
+        val tail: [u8] = [4u8, 5u8]
+        match text_bytes_concat_checked(head, tail):
+            case Ok(joined):
+                expect(joined.len()).to_equal(5)
+                expect(joined[0]).to_equal(1u8)
+                expect(joined[4]).to_equal(5u8)
+            case Err(_): expect(false).to_equal(true)
+
+    it "returns the head unchanged for an empty tail":
+        val head: [u8] = [9u8, 8u8]
+        val tail: [u8] = []
+        match text_bytes_concat_checked(head, tail):
+            case Ok(joined): expect(joined.len()).to_equal(2)
+            case Err(_): expect(false).to_equal(true)
+
+describe "if-val binding of an optional array extern result":
+    it "keeps the array length usable in comparisons":
+        val head: [u8] = [1u8, 2u8, 3u8]
+        val tail: [u8] = [4u8, 5u8]
+        val want = head.len() + tail.len()
+        if val joined = rt_array_concat(head, tail):
+            val n = joined.len()
+            expect(n).to_equal(want)
+            expect(joined.len() != want).to_equal(false)
+        else:
+            expect(false).to_equal(true)
+
+describe "file_read under the default lane":
+    it "reads back what file_write stored":
+        val path = "build/text_bytes_jit_concat_spec.tmp"
+        file_write(path, "hello smux owner")
+        expect(file_read(path)).to_equal("hello smux owner")
+        file_delete(path)

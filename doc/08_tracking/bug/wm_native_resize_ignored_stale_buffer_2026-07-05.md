@@ -25,3 +25,27 @@ Drag-resize the SimpleOS Shared Hosted WM window at OS level → compositor keep
 ## Next Step
 Handle EVENT_WINDOW_RESIZED; allocate new buffer and notify compositor of size change.
 
+
+## Verification 2026-11-25 (P2 sweep lane) — FIXED (header corrected)
+
+The 2026-09-16 "Obsolete — referenced path(s) gone" banner is inaccurate:
+`src/os/hosted/hosted_entry.spl` still exists (now 2144 lines) — but the
+defect itself is genuinely gone in the evolved code:
+
+- The event loop now handles both event types this doc names:
+  `EVT_RESIZE: i64 = 1` and `EVT_SCALE_FACTOR: i64 = 7`
+  (`hosted_entry.spl:162-164`), dispatched at `hosted_entry.spl:1035`
+  (`elif kind == EVT_RESIZE or kind == EVT_SCALE_FACTOR:`).
+- The compositor is no longer fixed-size-for-lifetime: the resize branch
+  calls `comp.resize(physical.width, physical.height)`
+  (`hosted_entry.spl:1056`), and `os.compositor.host_compositor_core`
+  imports and uses `shared_wm_pixel_buffer_resize` (line 22) — the buffer
+  recreate path this doc said was missing.
+- A full `HostDisplayTransitionPhase` state machine
+  (Requested/AwaitingResize, resize/scale acknowledgment nonces, rollback
+  geometry) now governs resize transitions, far beyond the "handle
+  EVENT_WINDOW_RESIZED" next step filed here.
+
+Verified by code inspection at release/1.0.0 HEAD; a behavioral run needs a
+hosted WM GUI session (OS window drag-resize), which this lane cannot drive.
+Status: **RESOLVED** (fixed in the evolved hosted-WM code).

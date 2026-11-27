@@ -5,14 +5,16 @@
 @unsafe(reason: "raw environment text lookup ABI; nil means absent", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text?
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in env_get_nilable", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
-fn env_get(key: text) -> text?:
+fn env_get_nilable(key: text) -> text?:
     unsafe(capabilities: [ffi]):
         rt_env_get(key)
 
 @unsafe(reason: "raw environment integer lookup uses the caller default as its failure sentinel", capabilities: [ffi])
 extern fn rt_env_get_i64(key: text, default: i64) -> i64
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in env_get_i64", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn env_get_i64(key: text, default: i64) -> i64:
     unsafe(capabilities: [ffi]):
@@ -21,6 +23,7 @@ fn env_get_i64(key: text, default: i64) -> i64:
 @unsafe(reason: "raw environment key removal-status ABI", capabilities: [ffi])
 extern fn rt_env_remove(key: text) -> bool
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in env_remove", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn env_remove(key: text) -> bool:
     unsafe(capabilities: [ffi]):
@@ -29,9 +32,43 @@ fn env_remove(key: text) -> bool:
 @unsafe(reason: "raw nullable environment snapshot and owned tuple-array ABI", capabilities: [ffi])
 extern fn rt_env_vars() -> [(text, text)]?
 
-@always_inline
-fn env_vars_nilable() -> [(text, text)]?:
-    unsafe(capabilities: [ffi]):
-        rt_env_vars()
+# A runtime tuple is an array-headed heap object, not the inline two-word
+# layout native code uses for a typed `(text, text)`. Two producers exist:
+#   - a compiler with e9b6b0e24d6 rebuilds the extern result into native
+#     tuples at the call, and the interpreter has real tuples: `pair` is
+#     already usable and must be kept as-is;
+#   - a compiler without it (the frozen Phase 2 pin) hands over the runtime
+#     pair, whose `.0`/`.1` read header words (every owned Windows test child
+#     then got the assignment "=" and admission was refused).
+# These getters are private to the runtime-produced snapshot.
+@unsafe(reason: "validate the runtime-owned environment pair before slot access", capabilities: [ffi])
+extern fn rt_tuple_len(pair: (text, text)) -> i64
+@unsafe(reason: "read a validated environment pair slot; runtime owns both text values", capabilities: [ffi])
+extern fn rt_tuple_get(pair: (text, text), index: i64) -> text?
 
-export env_get, env_get_i64, env_remove, env_vars_nilable
+# None means the snapshot is unavailable. A pair is never dropped: rt_tuple_len
+# is the validated discriminator (2 for a runtime pair, -1 for anything else),
+# so a runtime pair is rebuilt and any other pair is kept as the language tuple
+# it already is. Empty values stay present and unchanged.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in env_vars_nilable", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn env_vars_nilable() -> [(text, text)]?:
+    val snapshot = unsafe(capabilities: [ffi]): rt_env_vars()
+    var result: [(text, text)] = []
+    if val pairs = snapshot:
+        for pair in pairs:
+            var rebuilt = false
+            val arity = unsafe(capabilities: [ffi]): rt_tuple_len(pair)
+            if arity == 2:
+                val key = unsafe(capabilities: [ffi]): rt_tuple_get(pair, 0)
+                val value = unsafe(capabilities: [ffi]): rt_tuple_get(pair, 1)
+                if val key_text = key:
+                    if val value_text = value:
+                        # Construct a language tuple instead of exposing
+                        # the runtime header.
+                        result = result.push((key_text, value_text))
+                        rebuilt = true
+            if not rebuilt: result = result.push(pair)
+        return result
+    None
+
+export env_get_nilable, env_get_i64, env_remove, env_vars_nilable

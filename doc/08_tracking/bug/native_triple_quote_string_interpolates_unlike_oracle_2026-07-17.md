@@ -85,3 +85,20 @@ should route through the same "no interpolation" handling as single-quoted
   hosted non-Linux and FreeBSD gates; execution remains pending because this
   source-only repair session did not run compiler/native commands.
 
+## Verification 2026-11-25 (p2w4-ag lane, release/1.0.0 @ 63e791180d3)
+
+- Oracle side re-verified live on this Windows host with the pinned seed:
+  `SIMPLE_LIB=src bin/simple.exe run` on the exact Symptom probe prints
+  `MLZ:line1 {inner}` / `line2 done|END` — the `{inner}` brace text stays
+  literal, matching the recorded oracle behavior.
+- Native-side source fix confirmed by inspection:
+  `src/compiler/10.frontend/core/_ParserPrimary/primary_expr.spl:504-515`
+  sets `no_interp = true` for triple-quoted (and raw-triple) literals and
+  lowers them via `expr_raw_string_lit` (lines 552-554), so the flat/native
+  path no longer routes `"""..."""` through interpolation scanning.
+- Native dual-backend execution remains unrun on this host (native-build
+  lane unavailable under the pinned seed); the parity case
+  `raw_string_interpolation_contract` is still the required admission run
+  where a self-hosted toolchain exists. Status remains Closed on the
+  oracle/native source agreement evidence above.
+

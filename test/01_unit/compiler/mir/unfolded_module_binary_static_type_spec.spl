@@ -65,9 +65,35 @@ describe "unfolded module binary static type inference":
         expect(static_type_label("const BASE = 10\nvar IS_LARGER = BASE + 5 > 12\n", "IS_LARGER")).to_equal("bool")
         expect(static_type_label("const LEFT = true\nconst RIGHT = false\nvar BOTH = LEFT and RIGHT\n", "BOTH")).to_equal("bool")
 
+    it "types a comparison of a null-coalesced optional call as bool":
+        # Shape of src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl:80
+        # (`val X = (env_get("...") ?? "") == "1"`), which stage2 rejected.
+        val prelude = "fn lookup(name: text) -> text?:\n    nil\n"
+        val compared = prelude + "val TRACE_ON = (lookup(\"TRACE\") ?? \"\") == \"1\"\n"
+        expect(static_type_label(compared, "TRACE_ON")).to_equal("bool")
+        val differs = prelude + "val UPLOAD_U32 = (lookup(\"UPLOAD\") ?? \"\") != \"u32\"\n"
+        expect(static_type_label(differs, "UPLOAD_U32")).to_equal("bool")
+        val combined = prelude + "val BOTH_ON = (lookup(\"A\") ?? \"\") == \"1\" and (lookup(\"B\") ?? \"\") == \"1\"\n"
+        expect(static_type_label(combined, "BOTH_ON")).to_equal("bool")
+        val either = prelude + "val EITHER_ON = (lookup(\"A\") ?? \"\") == \"1\" or (lookup(\"B\") ?? \"\") == \"1\"\n"
+        expect(static_type_label(either, "EITHER_ON")).to_equal("bool")
+        val ordered = prelude + "val COUNT_BIG = (lookup(\"N\") ?? \"\") > \"5\"\n"
+        expect(static_type_label(ordered, "COUNT_BIG")).to_equal("bool")
+
     it "keeps genuinely unresolved binary initializers diagnostic":
         val errors = static_error_report("var UNKNOWN = missing_value + 5\n")
         expect(errors).to_contain("cannot derive module static type from unresolved binary initializer")
+        # A coalesce whose fallback is itself underivable proves nothing.
+        val coalesced = static_error_report("fn lookup(name: text) -> text?:\n    nil\nval UNKNOWN_EQ = (lookup(\"A\") ?? missing_value) == \"1\"\n")
+        expect(coalesced).to_contain("cannot derive module static type from unresolved binary initializer")
+
+    it "never gives a standalone coalesce a guessed static slot":
+        # Value lowering of `??` takes its type from the LEFT inner type, which
+        # this pass cannot see; the fallback's type must not become the slot.
+        val standalone = "fn lookup(name: text) -> text?:\n    nil\nval TRACE_NAME = lookup(\"TRACE\") ?? \"\"\n"
+        val report = static_error_report(standalone)
+        if not report.contains("cannot derive module static type"):
+            expect(static_type_label(standalone, "TRACE_NAME")).to_equal("missing")
 
 fn module_lowering_static_report(source: text, wanted: text) -> text:
     # Drives the production `lower_module` loop rather than the two explicit
@@ -104,3 +130,16 @@ describe "unfolded module binary static typing is order independent":
         val late_report = module_lowering_static_report(late, "aa_total")
         expect(late_report.contains("cannot derive module static type")).to_be(false)
         expect(late_report).to_contain("static:i64")
+
+describe "unfolded module binary static typing through null coalescing":
+    it "types an env-flag comparison over a text coalesce as bool":
+        # Shape of src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl:80
+        # (`val FLAG = (env_get("X") ?? "") == "1"`), rejected by stage2 MIR.
+        val source = "fn lookup_flag(name: text) -> text?:\n    nil\nval FLAG_ON = (lookup_flag(\"X\") ?? \"\") == \"1\"\n"
+        expect(static_type_label(source, "FLAG_ON")).to_equal("bool")
+
+    it "keeps a numeric coalesce default from overriding an unknown optional payload":
+        # `?? 0` must not guess i64 when the optional's payload is unproven:
+        # an f64? payload with an int-literal default would be relabeled.
+        val errors = static_error_report("var UNKNOWN = (missing_value ?? 0) + 1\n")
+        expect(errors).to_contain("cannot derive module static type from unresolved binary initializer")

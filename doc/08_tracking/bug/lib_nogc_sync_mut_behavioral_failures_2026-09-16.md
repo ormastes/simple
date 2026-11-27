@@ -1,7 +1,6 @@
 # lib nogc_sync_mut: behavioral/spec failures beyond trivial repair (22 specs RED)
 
-**Status:** OPEN (2026-09-16). All verified with `SIMPLE_TIMEOUT_SECONDS=600 bin/simple test <spec>`
-on `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed banner present).
+**Status:** LIVE (triaged 2026-11-11, lane rt3 two passes — PR #8313 + second pass work/p3-rt3-20261111; umbrella narrowed twice on fresh seed 46fe8f6b6def: 8/13 sampled items green, 5 confirmed RED remain, each needing its owning package lane; see addenda below)
 
 ## Observed (spec -> failing example -> message)
 
@@ -139,3 +138,111 @@ heading-based recovery recognition. The factual reviewed header explains the
 29/41 closure payloads, purpose and recovery; generated body is retained.
 No passing test or manual scan was replayed. Working/staged environment,
 layout-zero and staged diff checks pass for the three-file test-only scope.
+
+---
+
+## 2026-11-11 — Lane rt3 triage verdict: OPEN, substantially narrowed (partial)
+
+Status kept OPEN: a subset of the 22 RED specs is fixed on the current base,
+but confirmed remaining failures need per-owner implementation. Sampled
+re-verification on the fresh seed (build `46fe8f6b6def`,
+`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe test <spec> --mode=interpreter --no-cache`):
+
+**Now PASS (were RED on 2026-09-16):**
+- `concurrent_thread_lifecycle_spec.spl` 2/2 PASS (join-after-complete nil contract).
+- `web_framework/session_csrf_signing_spec.spl` 11/11 PASS (sha256-style digests).
+- `io/stream_reader_append_shape_spec.spl` PASS (tcp.spl quadratic accumulator gone).
+- `file_read_single_return_type_spec.spl` PASS (single-return read API restored).
+
+**Still RED (confirmed this lane):**
+- `engine/render/shader_compile_spec.spl` — 12/17, 5 failing (WgslEmitter still
+  emits `void main()` without `@vertex`/`@fragment` entry-point markers).
+- `gpu/gpu_queue_usm_spec.spl` — 30/34, 4 failing (`E_GPU_COMPILE_ONLY:
+  gpu_block_id_x is only valid after GPU compiler lowering`; spec exercises
+  GPU intrinsics off the lowering path).
+
+**Not re-run this lane (budget):** the remaining ~16 items (DbFsDriver method
+parity, `Vec3.transform_direction` receiver, `with_lock_guard` crash,
+`raw_f64_to_bits`, js engine reclaim, `domain_arena_v1`, `ui_scene_column_arena_v2`,
+lint crash regression, test_runner resolution order, durable_atomic_bytes, etc.).
+Disposition is expected to mirror the sampled split — fixed by intervening
+lanes or still red — but each needs its own owner pass.
+
+Per the testing rules (leave RED, do not weaken), no spec was edited and no
+assertion was relaxed. This umbrella needs its remaining items either fixed in
+`src/lib`/`src/app` or individually retired by their owners; it is too broad
+for a single P3 triage lane to close wholesale.
+
+---
+
+## 2026-11-11 second-pass narrowing — lane rt3 pass 2 (worktree simple-p3-rt3-20261111, base 7f0fa174083, seed 46fe8f6b6def)
+
+**Verdict: LIVE (named per-item owners) — umbrella narrowed twice, not closeable by a triage lane.**
+
+Pass 2 sampled 7 further unit-scale items never re-checked in pass 1
+(`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe test <spec> --mode=interpreter --no-cache`, per-spec 240s timeout):
+
+**Now PASS (were RED on 2026-09-16):**
+- `env_platform_process_owner_spec.spl` 1/1 PASS (ownership-contract scan; platform.spl routing restored).
+- `js/engine/interpreter_object_single_owner_spec.spl` 1/1 PASS (allocation count).
+- `tooling/easy_fix/duplicate_typed_arg_signature_nil_miss_spec.spl` 2/2 PASS (lint crash regression).
+- `test_runner/native_binary_resolution_contract_spec.spl` 2/2 PASS (SIMPLE_BINARY resolution order).
+
+**Still RED (confirmed pass 2):**
+- `concurrent_thread_pointer_spawn_spec.spl` 1/1 FAIL (closure-pointer vs Any-value forwarding) — owner: `concurrent` package (`src/lib/nogc_sync_mut/concurrent/thread.spl`).
+- `io/window_winit_compat_mapping_spec.spl` 2/2 FAIL (`winit_compat_event_get_type` / `_window_close_requested` not found) — owner: `io` package.
+- `linalg/raw_memory_owner_spec.spl` 0/4 FAIL (`raw_f64_to_bits` not found; owner-shape drift) — owner: `linalg` package.
+
+**Combined tally across both rt3 passes:** 8 of 13 sampled items green;
+5 confirmed RED (shader_compile WgslEmitter entry points, gpu_queue_usm
+lowering path, thread_pointer_spawn, winit_compat_mapping, raw_memory_owner).
+The remaining ~9 unsampled items (DbFsDriver parity, Vec3 receiver,
+with_lock_guard crash, js_vm_reclamation, domain_arena_v1,
+ui_scene_column_arena_v2, durable_atomic_bytes, gpu_mesh3d/graph_ir3d) are
+heavier render/gpu/ui specs expected to mirror the same split; each belongs
+to its owning package lane. Per testing rules no spec was edited and no
+assertion relaxed. No production change attempted in this lane — the 5
+confirmed items are real per-package implementation gaps, and this umbrella
+record stays LIVE until each owning lane fixes or individually retires its item.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — rt3 narrowed twice: 8/13 sampled items green on the fresh seed; 5 confirmed RED (shader_compile WgslEmitter entry points, gpu_queue_usm lowering, thread_pointer_spawn, winit_compat_mapping, raw_memory_owner) — each a real per-package implementation gap with a named owning lane.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: partially discharged this lane — `window_winit_compat_mapping_spec` FIXED (2/2 PASS);
+`raw_memory_owner_spec` drift measured and deferred; remaining items unchanged.**
+
+- **`io/window_winit_compat_mapping_spec.spl` — FIXED (2/2 PASS, seed-smoke
+  `--mode=interpreter --no-cache`).** Root cause: the `winit_compat_*` SDL→winit
+  event-mapping family existed in a pre-merge tree (visible at `fcbec1c3b62^`) but a
+  later merge restored `src/lib/nogc_sync_mut/io/window_sffi.spl` to a revision
+  carrying only the `rt_winit_*` twin names, so the spec's contracted exports
+  vanished. Fix (this lane, `src/lib/nogc_sync_mut/io/window_sffi.spl`): added
+  `winit_compat_event_get_type` / `winit_compat_event_window_close_requested`
+  delegating to the existing `rt_winit_event_get_type` /
+  `rt_winit_event_window_close_requested` (the mapping itself was already
+  correct and matches the spec's expectations 1→3, 2/3→10, 4→21, 5/6→20,
+  7→22, else 0), and exported both. No assertion relaxed.
+- **`linalg/raw_memory_owner_spec.spl` — drift measured, deferred to linalg
+  owner.** Spec now executes 4/4 (module resolution succeeds) but all four
+  examples fail: (1) `raw_f64_to_bits`/`raw_bits_to_f64` do not exist — the
+  owner module exports `spl_f64_to_bits`/`spl_bits_to_f64` instead;
+  (2) the spec pins an exact inline-owner source shape (`@inline` decorators,
+  `# @tag(addr=...)` comments, single-arity `raw_release(ptr)` calling
+  `rt_free(ptr)`) while the current `ptr/raw.spl` has `@inline`-free wrappers
+  and `raw_free(ptr, size)`; (3/4) both linalg leaves
+  (`nogc_async_mut/linalg/backend_ops.spl`, `nogc_sync_mut/linalg/blas_openblas.spl`)
+  currently import and call the raw `rt_*` externs directly (zero `raw_*`
+  wrapper usage) and their topology no longer matches the pinned counts
+  (backend 35/91/44/7, openblas 20/50/25/4). Reconciling means reshaping
+  production staging loops to literal text pins — owner-lane work; the
+  testing rules forbid weakening the spec.
+- **Remaining rt3-named items** (shader_compile WgslEmitter entry points,
+  gpu_queue_usm lowering path, thread_pointer_spawn, plus the unsampled
+  render/gpu/ui items) were not re-run this lane; prior-lane dispositions
+  stand.

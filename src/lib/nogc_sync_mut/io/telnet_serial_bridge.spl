@@ -28,7 +28,7 @@ extern fn native_tcp_write(handle: i64, data: [i64]) -> Result<i64, text>
 extern fn native_tcp_set_read_timeout(handle: i64, ms: i64) -> Result<i64, text>
 extern fn native_tcp_set_nodelay(handle: i64, nodelay: bool) -> Result<i64, text>
 extern fn native_tcp_close(handle: i64) -> i64
-extern fn rt_file_read_bytes(path: text) -> [i64]?
+extern fn rt_file_read_bytes(path: text) -> [u8]?
 use std.io_runtime.{file_append_text}
 extern fn rt_bytes_to_text(data: [i64]) -> text
 use std.io_runtime.{thread_sleep}
@@ -163,19 +163,13 @@ struct BridgeConfig:
 fn bridge_rx_pending(rx_path: text, rx_offset: i64) -> [i64]:
     """Return capture-file bytes past rx_offset (empty if none/missing)."""
     var fresh: [i64] = []
-    # Unwrap with `??`, not `match Some(_)/None`: the seed interpreter marshals
-    # the SFFI array return Option-wrapped, but the JIT/native engines return
-    # the bare array, so a `Some(_)` arm silently falls through and the match
-    # dies with "match expression exhausted ... for array value". `?? []` is
-    # identity on a bare array and unwraps a Some, so it is correct on every
-    # engine — same convention as shb_reader.spl:44 and sfm/container.spl.
-    # The empty-file case yields an empty array, which the loop below skips,
-    # matching the old `None: pass_do_nothing` behaviour.
-    val all: [i64] = rt_file_read_bytes(rx_path) ?? []
+    # The provider returns nullable one-byte elements. Missing input and EOF
+    # remain empty; widen each present byte only at the telnet i64 boundary.
+    val all: [u8] = rt_file_read_bytes(rx_path) ?? []
     val total = all.length()
     var i = rx_offset
     while i < total:
-        fresh.push(all[i])
+        fresh.push(all[i] as i64)
         i = i + 1
     fresh
 

@@ -5,6 +5,12 @@ use super::super::lifetime::LifetimeViolation;
 use super::super::types::TypeId;
 use super::memory_warning::{MemoryWarningCode, MemoryWarningCollector};
 
+/// Prefix on a lowering verdict that is a TYPE error (declared return type,
+/// float->int slot), not a JIT capability gap. The run driver refuses to
+/// demote such a module to the interpreter (exec_core.rs
+/// `jit_failure_must_propagate`), so `simple run` exits non-zero.
+pub const LOWERING_TYPE_ERROR_TAG: &str = "error[E1003]";
+
 /// Render the declared-field hint for `CannotInferFieldType`.
 ///
 /// Returns the empty string when nothing is known, so the field-ACCESS path
@@ -49,6 +55,16 @@ pub enum LowerError {
     #[error("Parameter '{param}' in function '{function}' requires explicit type annotation")]
     MissingParameterType { param: String, function: String },
 
+    /// `T? as <numeric>` outside `unsafe`. The `SIMPLE_JIT_STRICT:` marker
+    /// is load-bearing: the driver's JIT catch site propagates only errors
+    /// carrying it and demotes everything else to the interpreter, which
+    /// would silently run the cast that this error exists to forbid.
+    #[error(
+        "SIMPLE_JIT_STRICT: cannot cast an optional `T?` to `{target}` with `as` outside `unsafe` \
+         (nil-only-in-unsafe, ERR-01); narrow it first with `?? <default>`, `if val x = ...`, or `match`"
+    )]
+    OptionalCast { target: String },
+
     #[error("Cannot infer element type of empty array - use explicit annotation")]
     EmptyArrayNeedsType,
 
@@ -78,6 +94,13 @@ pub enum LowerError {
 
     #[error("Unsupported feature: {0}")]
     Unsupported(String),
+
+    /// A bare free-function reference that several co-compiled modules define
+    /// and that the referencing module neither defines nor imports. Owner
+    /// decision 2026-11-09 (`jit_co_compiled_definition_ambiguity_debt_2026-09-15`):
+    /// a compile error requiring qualification, never a last-definition fallback.
+    #[error("{0}")]
+    AmbiguousCallable(String),
 
     /// E1034: a `use` names a module that does not exist anywhere on the
     /// resolution path.

@@ -1,0 +1,45 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-OS
+# arm32 SimpleOS kernel link: the CPU (cpsid/wfi) and volatile MMIO runtime
+# entry points are provided in pure Simple by src/os/kernel/arch/arm32/hw_shims.spl
+# and bound into the kernel closure by the arm32 entry
+# (gate: scripts/check/check-simpleos-arm32-kernel-link.shs --link-only).
+
+use std.spec.step
+
+use std.io_runtime.{file_read}
+
+val HW_SHIMS = "src/os/kernel/arch/arm32/hw_shims.spl"
+
+fn exports(source: text, name: text) -> bool:
+    source.contains("@export(\"C\")\nfn " + name + "(")
+
+describe "SimpleOS arm32 hardware runtime shims":
+    # @manual scenario evidence
+    it "exports the arm32 CPU entry points":
+        # @req REQ-SSPEC-OS
+        step("exports the arm32 CPU entry points")
+        val src = file_read(HW_SHIMS)
+        expect(exports(src, "rt_arm32_cpsid_if")).to_equal(true)
+        expect(exports(src, "rt_arm32_wfi")).to_equal(true)
+
+    it "exports all eight volatile MMIO accessors":
+        # @req REQ-SSPEC-OS
+        step("exports all eight volatile MMIO accessors")
+        val src = file_read(HW_SHIMS)
+        for w in ["u8", "u16", "u32", "u64"]:
+            expect(exports(src, "rt_volatile_read_" + w)).to_equal(true)
+            expect(exports(src, "rt_volatile_write_" + w)).to_equal(true)
+
+    it "stays pure Simple (no C provider for these symbols)":
+        # @req REQ-SSPEC-OS
+        step("stays pure Simple (no C provider for these symbols)")
+        val stubs = file_read("examples/09_embedded/simple_os/arch/arm32/boot/baremetal_stubs.c")
+        expect(stubs.contains("rt_volatile_read_u32(")).to_equal(false)
+        expect(stubs.contains("void rt_arm32_wfi(")).to_equal(false)
+
+    it "is bound into the arm32 kernel entry closure":
+        # @req REQ-SSPEC-OS
+        step("is bound into the arm32 kernel entry closure")
+        val entry = file_read("examples/09_embedded/simple_os/arch/arm32/os_entry.spl")
+        expect(entry).to_contain("use os.kernel.arch.arm32.hw_shims")

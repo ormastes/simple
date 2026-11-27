@@ -1,6 +1,6 @@
 # `detect_tool_name` fails to extract the tool name from a `tools/call` body
 
-- **Status:** OPEN (RED, pre-existing)
+- **Status:** RESOLVED 2026-11-25 (defect site removed in Wave C3 facade migration; see verification note at end)
 - **Found:** 2026-08-09, while auditing `serial_mcp_spec.spl` for tautology shells
 - **Severity:** medium — MCP tool dispatch cannot identify which tool was invoked
 
@@ -52,3 +52,20 @@ copy at `test/unit/app/serial_mcp/serial_mcp_spec.spl`.
 
 - `doc/08_tracking/test/tautology_shell_spec_dispositions_2026-08-09.md` — why
   this file's four `BLOCKED:` hardware examples are kept as-is.
+
+## Verification 2026-11-25 (p2w5-ag lane) — RESOLVED (superseded by Wave C3 migration), closing
+
+The defective app-local `detect_tool_name` no longer exists: serial-mcp
+migrated to the McpServer facade (Wave C3), and
+`src/app/serial_mcp/tools.spl` declares no such helper. Tool-name extraction
+now lives in `src/lib/nogc_sync_mut/mcp_sdk/server/app.spl:234-252`
+(`mcp_server_handle` extracts `params.name` via `app_extract_str(params,
+"name")` and routes to the named handler) — verified by code inspection. Both
+formerly-RED examples were rewritten to exercise that real dispatch path
+(`test/01_unit/app/serial_mcp/serial_mcp_spec.spl:172-199`, with an in-file
+comment at :174-178 recording the migration), so the spec no longer calls an
+import that resolves to nothing. Runtime re-run is blocked on this host:
+release/1.0.0 HEAD's pinned seed rejects `@representation_boundary` in the
+test runner itself, so no spec executes; stated limit, inspection-only.
+The unblock condition in this doc is therefore satisfied by removal of the
+defect site plus a rewritten, non-vacuous spec.

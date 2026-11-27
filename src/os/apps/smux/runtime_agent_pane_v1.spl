@@ -1,0 +1,182 @@
+# The smux consumer of a V4 agent primary attach (milestone_0024 PR3c, DESIGN 9.1/11.1). The pane holds ONLY a
+# HostAgentPaneLeaseV4 (operation id, epoch, fingerprint), claims it once and relays Read through the agent owner;
+# it never holds the session or an fd and never cleans native state (the agent owns custody, retirement and
+# settlement). smux/pane state is never authority: every answer comes from the agent, and when the agent says the
+# lease is no longer valid the record is dropped. Pure data; the owner calls live in runtime_host_continuation_v6.
+# SOURCE_AUTHORED / NOT_RUN.
+use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneLeaseV4, HostAgentPaneIoResultV4}
+use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+
+pub struct SmuxAgentPaneTurnV1:
+    lease: Option<HostAgentPaneLeaseV4>
+    response: text
+    error: text
+    # An observed revoke is final for this attach: the agent never re-issues the lease, so claim/read stop reaching it.
+    revoked: bool = false
+
+# "" when a claim may reach the agent. The agent hands the lease out once; a held lease never asks twice.
+# allow(primitive_api): reviewed pane gate flag/word (milestone_0024 PR3c S3)
+pub fn smux_agent_pane_claim_gate_v1(held: Option<HostAgentPaneLeaseV4>, revoked: bool) -> text:
+    if revoked: return "runtime-agent-pane-revoked"
+    if held.is_some(): return "runtime-agent-pane-held"
+    ""
+
+# The agent's lease answer. The fingerprint stays inside the record; the reply names only operation and epoch.
+# allow(primitive_api): reviewed pane lease epoch DATA word (milestone_0024 PR3c)
+pub fn smux_agent_pane_claimed_v1(lease: Option<HostAgentPaneLeaseV4>, error: text) -> SmuxAgentPaneTurnV1:
+    if error != "": return SmuxAgentPaneTurnV1(lease: None, response: "", error: error)
+    if lease.is_none(): return SmuxAgentPaneTurnV1(lease: None, response: "", error: "runtime-agent-pane-no-lease")
+    val held = lease.unwrap()
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("host-agent-pane-lease"),
+        "operationId": SdnValue.String(held.operation_id), "epoch": SdnValue.Int(held.epoch)}
+    SmuxAgentPaneTurnV1(lease: lease, response: sdn_encode_canonical(SdnValue.Dict(fields)), error: "")
+
+# allow(primitive_api): reviewed pane gate flag/word (milestone_0024 PR3c S3)
+pub fn smux_agent_pane_read_gate_v1(held: Option<HostAgentPaneLeaseV4>, revoked: bool) -> text:
+    if revoked: return "runtime-agent-pane-revoked"
+    if held.is_none(): return "runtime-agent-pane-not-claimed"
+    ""
+
+# The record is kept only on success and on `attach-not-ready` (still opening). Every other refusal (revoked,
+# stopping, wedged/failed/detach -> attach-stage, an expired or revoked approval, a binding mismatch of a changed
+# service) drops it (a wrong binding uid keeps it: the agent was never reached): the owner gate masks the agent's own lease-terminal errors, so dropping is the safe default.
+# allow(primitive_api): reviewed agent refusal code word (milestone_0024 PR3c)
+pub fn smux_agent_pane_keeps_lease_v1(error: text) -> bool:
+    error == "" or error == "attach-not-ready" or error == "attach-binding-mismatch" or
+        error == "attach-binding-registry-mismatch"
+
+pub fn smux_agent_pane_read_done_v1(held: Option<HostAgentPaneLeaseV4>, result: HostAgentPaneIoResultV4) -> SmuxAgentPaneTurnV1:
+    if result.error != "":
+        val kept_lease = smux_agent_pane_keeps_lease_v1(result.error)
+        val kept = if kept_lease: held else: None
+        return SmuxAgentPaneTurnV1(lease: kept, response: "", error: result.error, revoked: not kept_lease)
+    var chunks: [SdnValue] = []
+    for chunk in result.chunks:
+        var bytes: [SdnValue] = []
+        for byte in chunk.bytes:
+            bytes.push(SdnValue.Int(byte as i64))
+        val row: Dict<text, SdnValue> = {"stream": SdnValue.String(chunk.stream), "bytes": SdnValue.Array(bytes)}
+        chunks.push(SdnValue.Dict(row))
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("host-agent-pane-read"),
+        "eof": SdnValue.Bool(result.eof), "chunks": SdnValue.Array(chunks)}
+    SmuxAgentPaneTurnV1(lease: held, response: sdn_encode_canonical(SdnValue.Dict(fields)), error: "")
+
+# Resize is the one pane action this service does not serve: it needs an installed-policy source the V4 service
+# does not have (Write is served by the owner, which alone holds the smux control lease).
+pub fn smux_agent_pane_resize_refusal_v1() -> text:
+    "runtime-agent-pane-resize-refused"
+
+# The Write request body. The caller names the controller-signed binding uid and the byte window only; the
+# principal, nonce, lease and target are never read from it (the owner mints them from signed authority).
+pub struct SmuxAgentPaneWriteRequestV1:
+    binding_uid: text
+    attempt: i64
+    # Client-supplied id: a retry after an Unknown outcome repeats it; the agent answers from its record.
+    write_id: i64
+    offset: i64
+    maximum: i64
+    data: text
+
+# allow(primitive_api): reviewed pane write window words (milestone_0025 PR4)
+pub fn smux_agent_pane_write_decode_v1(payload: text) -> Result<SmuxAgentPaneWriteRequestV1, text>:
+    if payload.byte_len() < 1 or payload.byte_len() > 16384: return Err("runtime-agent-pane-write-payload")
+    val parsed = sdn_parse_strict_v1(payload, SdnStrictLimitsV1(max_source_bytes: 16384,
+        max_depth: 2, max_nodes: 16, max_rows: 0, max_cells: 0, max_columns: 8))
+    if parsed.is_err(): return Err("runtime-agent-pane-write-payload")
+    val fields = match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: return Err("runtime-agent-pane-write-payload")
+    val keys = ["bindingUid", "attempt", "writeId", "offset", "maximum", "data"]
+    if fields.len() != keys.len(): return Err("runtime-agent-pane-write-payload")
+    for key in keys:
+        if not fields.contains_key(key): return Err("runtime-agent-pane-write-payload")
+    val uid = match fields["bindingUid"]:
+        case SdnValue.String(value): value
+        case _: return Err("runtime-agent-pane-write-payload")
+    val data = match fields["data"]:
+        case SdnValue.String(value): value
+        case _: return Err("runtime-agent-pane-write-payload")
+    val attempt = match fields["attempt"]:
+        case SdnValue.Int(value): value
+        case _: return Err("runtime-agent-pane-write-payload")
+    val write_id = match fields["writeId"]:
+        case SdnValue.Int(value): value
+        case _: return Err("runtime-agent-pane-write-payload")
+    val offset = match fields["offset"]:
+        case SdnValue.Int(value): value
+        case _: return Err("runtime-agent-pane-write-payload")
+    val maximum = match fields["maximum"]:
+        case SdnValue.Int(value): value
+        case _: return Err("runtime-agent-pane-write-payload")
+    if not builder_identifier_valid_v1(uid): return Err("runtime-agent-pane-write-payload")
+    # Each Write installs a fresh native gate (input sequence 0), so the native attempt is always 1.
+    if attempt != 1: return Err("runtime-agent-pane-write-attempt")
+    if write_id < 1: return Err("runtime-agent-pane-write-id")
+    Ok(SmuxAgentPaneWriteRequestV1(binding_uid: uid, attempt: attempt, write_id: write_id, offset: offset, maximum: maximum, data: data))
+
+# The agent's write answer: the native disposition and the accepted byte count (a partial accept is the leaf's
+# answer). The lease record is kept on success and on the Read keep set, and also on a write-shape refusal or an
+# unresolved previous input (the agent was reached only to refuse; nothing about the lease changed).
+# allow(primitive_api): reviewed pane write outcome words (milestone_0025 PR4)
+pub fn smux_agent_pane_write_done_v1(held: Option<HostAgentPaneLeaseV4>, result: HostAgentPaneIoResultV4) -> SmuxAgentPaneTurnV1:
+    if result.error != "":
+        val kept_lease = (smux_agent_pane_keeps_lease_v1(result.error) or result.error.starts_with("attach-pane-write-") or
+            result.error == "attach-pane-input-unresolved")
+        val kept = if kept_lease: held else: None
+        # A gate close failure on a failed write is appended (never dropped); the keep rule used the write error alone.
+        val named = if result.gate_error != "": result.error + ";gate:" + result.gate_error else: result.error
+        return SmuxAgentPaneTurnV1(lease: kept, response: "", error: named, revoked: not kept_lease)
+    var fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("host-agent-pane-write"),
+        "disposition": SdnValue.String(result.disposition), "acceptedBytes": SdnValue.Int(result.accepted_bytes)}
+    # The write outcome stands even when the native gate could not be closed: the failure rides in the response
+    # (`gateError`), NOT the turn error, so a client never retries (and double-writes) a completed write.
+    if result.gate_error != "": fields["gateError"] = SdnValue.String(result.gate_error)
+    # An exact retry answered from the agent's record: the recorded outcome, no second native write.
+    if result.replayed: fields["replayed"] = SdnValue.Bool(true)
+    SmuxAgentPaneTurnV1(lease: held, response: sdn_encode_canonical(SdnValue.Dict(fields)), error: "")
+
+pub struct SmuxAgentPaneWriteReportV1:
+    response: text
+    error: text
+
+# Folds a failed control-lease revoke into a Write answer. After a COMPLETED write (no error) it rides in the
+# response as `revokeError`, never the turn error, so no client retries (and double-writes) a completed write. When
+# the write itself failed the error stays the turn error and the revoke error is appended to it, not dropped.
+pub fn smux_agent_pane_write_revoke_report_v1(response: text, error: text, revoke_error: text) -> SmuxAgentPaneWriteReportV1:
+    if revoke_error == "": return SmuxAgentPaneWriteReportV1(response: response, error: error)
+    if error != "": return SmuxAgentPaneWriteReportV1(response: response, error: error + ";control-revoke:" + revoke_error)
+    val parsed = sdn_parse_strict_v1(response, SdnStrictLimitsV1(max_source_bytes: 4096,
+        max_depth: 2, max_nodes: 16, max_rows: 0, max_cells: 0, max_columns: 8))
+    if parsed.is_err(): return SmuxAgentPaneWriteReportV1(response: response, error: "runtime-agent-pane-write-revoke:" + revoke_error)
+    val fields = match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: return SmuxAgentPaneWriteReportV1(response: response, error: "runtime-agent-pane-write-revoke:" + revoke_error)
+    var merged = fields
+    merged["revokeError"] = SdnValue.String(revoke_error)
+    SmuxAgentPaneWriteReportV1(response: sdn_encode_canonical(SdnValue.Dict(merged)), error: "")
+
+# The control-lease attachment token, from signed data only (the target digest and the attachment generation, which
+# is >= 1): 32 hex of the digest, ":", the generation; the control owner requires this shape and a nonzero lead digit.
+# allow(primitive_api): reviewed lease generation DATA word (milestone_0025 PR4)
+pub fn smux_agent_pane_control_token_v1(target_digest: text, generation: i64) -> text:
+    sha256_text(target_digest)[0:32] + ":" + generation.to_text()
+
+# Consistency check only, never authority: the controller-signed binding must name this service's incarnation and a
+# pane smux's own registry lists. `pane_ids` is the registry's pane list of the binding's session/window.
+# allow(primitive_api): reviewed pane gate flag/word (milestone_0024 PR3c S3)
+pub fn smux_agent_pane_registry_match_v1(binding: HostAgentPaneBindingV4, service_incarnation: text, pane_ids: [text]) -> text:
+    if binding.service_incarnation != service_incarnation: return "attach-binding-registry-mismatch"
+    if not pane_ids.contains(binding.pane_id): return "attach-binding-registry-mismatch"
+    ""
+
+# A successful attach clears the pane record only when it names a DIFFERENT run than the one claimed: an exact
+# replay of the held run's attach changes nothing, and the agent never re-issues the lease it already handed out.
+# allow(primitive_api): reviewed run id word (milestone_0024 PR3c S3)
+pub fn smux_agent_pane_attach_supersedes_v1(held_operation_id: text, attach_operation_id: text) -> bool:
+    held_operation_id != "" and held_operation_id != attach_operation_id

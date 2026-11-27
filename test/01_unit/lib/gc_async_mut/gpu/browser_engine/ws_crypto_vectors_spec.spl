@@ -1,0 +1,95 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/net/ws_crypto.spl 98%
+# @tag: unit, browser_engine, net, websocket
+#
+# Known-answer vectors for the WebSocket handshake crypto helpers. The
+# Sec-WebSocket-Accept vector is the worked example of RFC 6455 section 1.3,
+# the SHA-1 digests are the FIPS 180 "abc" / empty-message vectors and the
+# base64 strings are the RFC 4648 section 10 vectors, so none of the expected
+# values below is derived from the implementation under test.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.net.ws_crypto.{
+    compute_accept_key, ws_base64_encode, ws_sha1, ws_text_to_bytes,
+    ws_hex_to_bytes, ws_mix_counter, ws_word_to_bytes, ws_bytes_to_word,
+    ws_rotl32, ws_u32, ws_hex_digit, generate_mask_key, generate_ws_key
+}
+
+describe "WebSocket handshake crypto helpers":
+
+    context "Sec-WebSocket-Accept":
+
+        it "matches the RFC 6455 section 1.3 worked example":
+            expect(compute_accept_key("dGhlIHNhbXBsZSBub25jZQ==")).to_equal("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+
+        it "changes when the client key changes":
+            expect(compute_accept_key("x3JJHMbDL1EzLkh9GBhXDw==")).to_equal("HSmrc0sMlYUkAGmm5OPpG2HaGWk=")
+
+    context "base64":
+
+        it "encodes the RFC 4648 vectors with correct padding":
+            expect(ws_base64_encode(ws_text_to_bytes(""))).to_equal("")
+            expect(ws_base64_encode(ws_text_to_bytes("f"))).to_equal("Zg==")
+            expect(ws_base64_encode(ws_text_to_bytes("fo"))).to_equal("Zm8=")
+            expect(ws_base64_encode(ws_text_to_bytes("foo"))).to_equal("Zm9v")
+            expect(ws_base64_encode(ws_text_to_bytes("foobar"))).to_equal("Zm9vYmFy")
+
+        it "encodes high bytes through the + and / alphabet tail":
+            expect(ws_base64_encode([251, 255, 254])).to_equal("+//+")
+
+    context "SHA-1":
+
+        it "digests abc to the FIPS 180 vector":
+            expect(ws_sha1("abc")).to_equal(ws_hex_to_bytes("a9993e364706816aba3e25717850c26c9cd0d89d"))
+
+        it "digests the empty message":
+            expect(ws_sha1("")).to_equal(ws_hex_to_bytes("da39a3ee5e6b4b0d3255bfef95601890afd80709"))
+
+        it "digests a message that needs a second padding block":
+            val msg = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+            expect(ws_sha1(msg)).to_equal(ws_hex_to_bytes("84983e441c3bd26ebaae4aa1f95129e5e54670f1"))
+
+        it "returns twenty bytes":
+            expect(ws_sha1("abc").len()).to_equal(20)
+
+    context "byte and word helpers":
+
+        it "parses hex pairs case-insensitively":
+            expect(ws_hex_to_bytes("00ffA07f")).to_equal([0, 255, 160, 127])
+
+        it "reports a non-hex digit as -1":
+            expect(ws_hex_digit("g")).to_equal(-1)
+            expect(ws_hex_digit("F")).to_equal(15)
+
+        it "splits and joins a big-endian 32-bit word":
+            expect(ws_word_to_bytes(0x01020304)).to_equal([1, 2, 3, 4])
+            expect(ws_bytes_to_word(1, 2, 3, 4)).to_equal(0x01020304)
+
+        it "rotates left within 32 bits":
+            expect(ws_rotl32(0x80000001, 1)).to_equal(3)
+            expect(ws_u32(0x1FFFFFFFF)).to_equal(0xFFFFFFFF)
+
+        it "mixes the counter into the last two bytes only":
+            expect(ws_mix_counter([1, 2, 3, 4], 0x0102)).to_equal([1, 2, 2, 6])
+
+    context "random material shape":
+
+        it "produces a four-byte frame mask of byte values":
+            val mask = generate_mask_key().unwrap()
+            expect(mask.len()).to_equal(4)
+            var in_range = 0
+            for b in mask:
+                if b >= 0 and b <= 255:
+                    in_range = in_range + 1
+            expect(in_range).to_equal(4)
+
+        it "produces a 24-character base64 key for 16 random bytes":
+            val key = generate_ws_key().unwrap()
+            expect(key.len()).to_equal(24)
+            expect(key.ends_with("==")).to_equal(true)
+
+        it "never repeats a key across consecutive calls":
+            val a = generate_ws_key().unwrap()
+            val b = generate_ws_key().unwrap()
+            expect(a == b).to_equal(false)

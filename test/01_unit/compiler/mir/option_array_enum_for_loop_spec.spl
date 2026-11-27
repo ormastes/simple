@@ -1,0 +1,79 @@
+# Regression spec for Option<[Enum]>.unwrap() / unwrap_or() iterated in for-in loops
+# (provider_gate.spl:54 and provider_receipt.spl:158 native MIR lowering).
+# @cover src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl
+
+use std.spec.*
+use compiler.backend.{MirToLlvm}
+use compiler.backend.llvm_ir_builder.{llvm_codegen_error_from_ir}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir_lowering_types.{MirLowering}
+
+fn lower_to_llvm_ir(source: text, name: text) -> text:
+    val ast = parse_full_frontend(source, name, name, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(name)
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errors = ""
+    for err in hir_lowering.errors:
+        errors = errors + err.message + "\n"
+    for err in mir_lowering.errors:
+        errors = errors + err.message + "\n"
+    if errors != "":
+        return "LOWERING_ERRORS:\n" + errors
+    MirToLlvm.create("test.llvm.option_array_enum_for_loop", CodegenTarget.X86_64, None).translate_module(mir)
+
+describe "Option<[Enum]> unwrap and unwrap_or for-in loop MIR lowering":
+    it "lowers for-in over Option<[Enum]>.unwrap() with method calls on the enum element":
+        val source = "enum NodeVal:\n" +
+            "    Text(s: text)\n" +
+            "    Array(items: [NodeVal])\n\n" +
+            "impl NodeVal:\n" +
+            "    fn as_str() -> text?:\n" +
+            "        match self:\n" +
+            "            case NodeVal.Text(s): Some(s)\n" +
+            "            case _: None\n" +
+            "    fn as_array() -> [NodeVal]?:\n" +
+            "        match self:\n" +
+            "            case NodeVal.Array(items): Some(items)\n" +
+            "            case _: None\n\n" +
+            "fn collect_caps(root: NodeVal) -> [text]?:\n" +
+            "    val arr = root.as_array()\n" +
+            "    if not arr.?: return None\n" +
+            "    var out: [text] = []\n" +
+            "    for item in arr.unwrap():\n" +
+            "        val s = item.as_str()\n" +
+            "        if not s.?: return None\n" +
+            "        out.push(s.unwrap())\n" +
+            "    Some(out)\n"
+        val ir = lower_to_llvm_ir(source, "option_array_enum_unwrap_for.spl")
+        expect(ir.starts_with("LOWERING_ERRORS:")).to_equal(false)
+        expect(llvm_codegen_error_from_ir(ir)).to_equal("")
+        expect(ir).to_contain("as_str")
+        expect(ir.contains("rt_value_as_int_wide")).to_equal(false)
+
+    it "lowers for-in over Option<[Enum]>.unwrap_or([]) with method calls on the enum element":
+        val source = "enum NodeVal:\n" +
+            "    Text(s: text)\n" +
+            "    Num(n: i64)\n\n" +
+            "impl NodeVal:\n" +
+            "    fn as_str() -> text?:\n" +
+            "        match self:\n" +
+            "            case NodeVal.Text(s): Some(s)\n" +
+            "            case _: None\n\n" +
+            "fn collect_or_empty(arr: [NodeVal]?) -> [text]:\n" +
+            "    var out: [text] = []\n" +
+            "    for item in arr.unwrap_or([]):\n" +
+            "        val s = item.as_str()\n" +
+            "        if s.?:\n" +
+            "            out.push(s.unwrap())\n" +
+            "    out\n"
+        val ir = lower_to_llvm_ir(source, "option_array_enum_unwrap_or_for.spl")
+        expect(ir.starts_with("LOWERING_ERRORS:")).to_equal(false)
+        expect(llvm_codegen_error_from_ir(ir)).to_equal("")
+        expect(ir).to_contain("as_str")
+        expect(ir.contains("rt_value_as_int_wide")).to_equal(false)

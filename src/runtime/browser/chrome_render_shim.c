@@ -205,14 +205,16 @@ int64_t simple_chrome_render_create(const uint8_t *cfg_json, uint64_t len) {
 #endif
 }
 
-int32_t simple_chrome_render_load_html(int64_t h, const uint8_t *html, uint64_t len) {
+/* Shared body of load_html / load_url: both validate the payload as a request and
+ * then apply the LOAD transition; they differ only in what the payload is named. */
+static int32_t chrome_render_load(int64_t h, const uint8_t *data, uint64_t len) {
     chrome_render_session *s = chrome_render_lookup(h);
     int32_t status;
     int32_t next;
     if (s == NULL) {
         return chrome_render_fail(NULL, CHROME_RENDER_E_INVALID_HANDLE);
     }
-    status = chrome_render_request_status(html, len);
+    status = chrome_render_request_status(data, len);
     if (status != CHROME_RENDER_OK) {
         return chrome_render_fail(s, status);
     }
@@ -224,23 +226,12 @@ int32_t simple_chrome_render_load_html(int64_t h, const uint8_t *html, uint64_t 
     return chrome_render_fail(s, CHROME_RENDER_E_BACKEND_UNAVAILABLE);
 }
 
+int32_t simple_chrome_render_load_html(int64_t h, const uint8_t *html, uint64_t len) {
+    return chrome_render_load(h, html, len);
+}
+
 int32_t simple_chrome_render_load_url(int64_t h, const uint8_t *url, uint64_t len) {
-    chrome_render_session *s = chrome_render_lookup(h);
-    int32_t status;
-    int32_t next;
-    if (s == NULL) {
-        return chrome_render_fail(NULL, CHROME_RENDER_E_INVALID_HANDLE);
-    }
-    status = chrome_render_request_status(url, len);
-    if (status != CHROME_RENDER_OK) {
-        return chrome_render_fail(s, status);
-    }
-    next = chrome_render_state_next(s->state, CHROME_RENDER_EV_LOAD);
-    if (next < 0) {
-        return chrome_render_fail(s, CHROME_RENDER_E_INVALID_REQUEST);
-    }
-    s->state = next;
-    return chrome_render_fail(s, CHROME_RENDER_E_BACKEND_UNAVAILABLE);
+    return chrome_render_load(h, url, len);
 }
 
 int32_t simple_chrome_render_resize(int64_t h, uint32_t w, uint32_t h_px, double scale) {

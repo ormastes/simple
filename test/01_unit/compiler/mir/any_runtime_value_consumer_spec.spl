@@ -8,6 +8,7 @@ row can close.
 """
 # @cover src/compiler/50.mir/_MirLowering/function_lowering.spl
 # @cover src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl
 # Regression: doc/08_tracking/bug/any_slot_holds_untagged_scalar_2026-08-05.md
 
 use std.spec.*
@@ -19,13 +20,30 @@ use compiler.mir.mir.*
 use compiler.mir.mir_serialization.{serialize_mir_module}
 use compiler.mir._MirLowering.module_lowering.*
 
-fn lower_any_mir(source: text, name: text) -> text:
+fn lower_any_mir_module(source: text, name: text) -> MirModule:
     val filename = "any_runtime_value_" + name + ".spl"
     val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
     var hir_lowering = HirLowering.with_filename(filename)
     val hir = hir_lowering.lower_module(module)
     var mir_lowering = MirLowering.new(hir.symbols)
-    serialize_mir_module(mir_lowering.lower_module(hir))
+    mir_lowering.lower_module(hir)
+
+fn lower_any_mir(source: text, name: text) -> text:
+    serialize_mir_module(lower_any_mir_module(source, name))
+
+fn has_direct_cast_of_local(module: MirModule, target_local_id: i64) -> bool:
+    for function in module.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Cast(_, operand, _):
+                        match operand.kind:
+                            case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                                if local.id == target_local_id:
+                                    return true
+                            case _: ()
+                    case _: ()
+    false
 
 fn occurrences(haystack: text, needle: text) -> i64:
     haystack.split(needle).len() - 1
@@ -100,3 +118,122 @@ describe "Any RuntimeValue consumer semantics", tag: ["only-compiled"]:
         val mir = lower_any_mir("fn probe(value: Any) -> text:\n    value.to_text()\n", "to_text")
 
         expect(mir).to_contain("rt_value_to_string")
+
+    it "keeps Any-typed vars tagged across re-assignment":
+        var local_bool: Any = true
+        local_bool = false
+        var local_int: Any = 42
+        local_int = 43
+        var local_float: Any = 1.5
+        local_float = 2.5
+
+        expect(local_bool == false).to_equal(true)
+        expect(local_bool == any_identity(false)).to_equal(true)
+        expect(local_int == 43).to_equal(true)
+        expect(local_int == any_identity(43)).to_equal(true)
+        expect(local_float == 2.5).to_equal(true)
+        expect(local_float == any_identity(2.5)).to_equal(true)
+        expect(local_bool.to_text()).to_equal("false")
+        expect(local_int.to_text()).to_equal("43")
+        expect(local_float.to_text()).to_equal("2.5")
+
+    it "re-tags scalars stored into Any-typed vars by assignment":
+        val int_mir = lower_any_mir("fn probe() -> bool:\n    var value: Any = 42\n    value = 43\n    value == 43\n", "reassign_int")
+        val bool_mir = lower_any_mir("fn probe() -> bool:\n    var value: Any = true\n    value = false\n    value == value\n", "reassign_bool")
+        val float_mir = lower_any_mir("fn probe() -> text:\n    var value: Any = 1.5\n    value = 2.5\n    value.to_text()\n", "reassign_float")
+
+        expect(occurrences(int_mir, "rt_value_int_wide")).to_equal(3)
+        expect(int_mir).to_contain("rt_native_eq")
+        expect(occurrences(bool_mir, "\"value\":-8")).to_equal(2)
+        expect(occurrences(bool_mir, "\"value\":19")).to_equal(2)
+        expect(occurrences(float_mir, "rt_value_float")).to_equal(2)
+        expect(float_mir).to_contain("rt_value_to_string")
+
+    it "decodes Any as-casts to integers through rt_any_cast_int without raw tagged Cast":
+        val i64_mod = lower_any_mir_module("fn probe(v: Any) -> i64:\n    v as i64\n", "cast_i64")
+        val i64_mir = serialize_mir_module(i64_mod)
+        val u8_mod = lower_any_mir_module("fn probe(v: Any) -> u8:\n    v as u8\n", "cast_u8")
+        val u8_mir = serialize_mir_module(u8_mod)
+
+        expect(i64_mir).to_contain("rt_any_cast_int")
+        expect(i64_mir.contains("{\"Cast\":")).to_equal(false)
+        expect(has_direct_cast_of_local(i64_mod, 0)).to_equal(false)
+        expect(u8_mir).to_contain("rt_any_cast_int")
+        expect(u8_mir).to_contain("\"U8\"")
+        expect(has_direct_cast_of_local(u8_mod, 0)).to_equal(false)
+
+    it "decodes Any as-casts to floats through tagged float helpers without raw tagged Cast":
+        val f64_mod = lower_any_mir_module("fn probe(v: Any) -> f64:\n    v as f64\n", "cast_f64")
+        val f64_mir = serialize_mir_module(f64_mod)
+        val f32_mod = lower_any_mir_module("fn probe(v: Any) -> f32:\n    v as f32\n", "cast_f32")
+        val f32_mir = serialize_mir_module(f32_mod)
+        val raw_f64_mir = lower_any_mir("fn probe(x: i64) -> f64:\n    x as f64\n", "raw_cast_f64")
+
+        expect(f64_mir).to_contain("rt_value_is_float")
+        expect(f64_mir).to_contain("rt_value_is_nil")
+        expect(f64_mir).to_contain("rt_string_eq")
+        expect(f64_mir).to_contain("rt_value_as_float")
+        expect(f64_mir).to_contain("rt_string_char_count")
+        expect(f64_mir).to_contain("type mismatch: cannot cast str to f64")
+        expect(f64_mir).to_contain("type mismatch: cannot cast nil to f64")
+        expect(f64_mir).to_contain("rt_any_cast_int")
+        expect(f64_mir.contains("rt_string_to_float")).to_equal(false)
+        expect(has_direct_cast_of_local(f64_mod, 0)).to_equal(false)
+        expect(f32_mir).to_contain("rt_value_is_float")
+        expect(f32_mir).to_contain("rt_value_is_nil")
+        expect(f32_mir).to_contain("rt_value_as_float")
+        expect(f32_mir).to_contain("rt_any_cast_int")
+        expect(f32_mir).to_contain("\"F32\"")
+        expect(f32_mir.contains("rt_string_to_float")).to_equal(false)
+        expect(has_direct_cast_of_local(f32_mod, 0)).to_equal(false)
+        expect(raw_f64_mir.contains("rt_value_is_float")).to_equal(false)
+        expect(raw_f64_mir.contains("rt_any_cast_int")).to_equal(false)
+
+    it "threads conversion_call for Any f64(v), f32(v), and i64(v) value conversions":
+        val f64_conv_mod = lower_any_mir_module("fn probe(v: Any) -> f64:\n    f64(v)\n", "conv_f64")
+        val f64_conv_mir = serialize_mir_module(f64_conv_mod)
+        val f32_conv_mod = lower_any_mir_module("fn probe(v: Any) -> f32:\n    f32(v)\n", "conv_f32")
+        val f32_conv_mir = serialize_mir_module(f32_conv_mod)
+        val i64_conv_mod = lower_any_mir_module("fn probe(v: Any) -> i64:\n    i64(v)\n", "conv_i64")
+        val i64_conv_mir = serialize_mir_module(i64_conv_mod)
+
+        expect(f64_conv_mir).to_contain("rt_value_is_float")
+        expect(f64_conv_mir).to_contain("rt_value_is_nil")
+        expect(f64_conv_mir).to_contain("cannot convert value to f64")
+        expect(f64_conv_mir).to_contain("rt_string_eq")
+        expect(f64_conv_mir).to_contain("rt_string_to_float")
+        expect(f64_conv_mir).to_contain("cannot parse text as floating-point value")
+        expect(f64_conv_mir).to_contain("rt_any_to_int")
+        expect(f64_conv_mir.contains("rt_any_cast_int")).to_equal(false)
+        expect(has_direct_cast_of_local(f64_conv_mod, 0)).to_equal(false)
+
+        expect(f32_conv_mir).to_contain("rt_string_to_float")
+        expect(f32_conv_mir).to_contain("rt_any_to_int")
+        expect(f32_conv_mir).to_contain("\"F32\"")
+        expect(has_direct_cast_of_local(f32_conv_mod, 0)).to_equal(false)
+
+        expect(i64_conv_mir).to_contain("rt_any_to_int")
+        expect(i64_conv_mir.contains("rt_any_cast_int")).to_equal(false)
+        expect(has_direct_cast_of_local(i64_conv_mod, 0)).to_equal(false)
+
+    it "evaluates Any casts and conversions in interpreter mode":
+        val int_v: Any = 42
+        val wide_v: Any = 300
+        val float_v: Any = 2.5
+        val bool_v: Any = true
+        val char_v: Any = "A"
+        val float_text_v: Any = "3.5"
+
+        expect(int_v as i64).to_equal(42)
+        expect(wide_v as u8).to_equal(44u8)
+        expect(float_v as i64).to_equal(2)
+        expect(char_v as i64).to_equal(65)
+        expect(int_v as f64).to_equal(42.0)
+        expect(float_v as f64).to_equal(2.5)
+        expect(bool_v as f64).to_equal(1.0)
+        expect(char_v as f64).to_equal(65.0)
+        expect((float_v as f32) > 2.0).to_equal(true)
+        expect(f64(int_v)).to_equal(42.0)
+        expect(f64(float_v)).to_equal(2.5)
+        expect(f64(float_text_v)).to_equal(3.5)
+        expect(i64(float_text_v)).to_equal(3)

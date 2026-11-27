@@ -1,0 +1,52 @@
+# Behavioral coverage for the seven-input fixed transport (six roots plus entry).
+use std.spec
+use compiler.common.driver_compile_options.{driver_core_compile_options_default}
+use compiler.common.driver_compile_result.{CompileResult, compile_result_errors, compile_result_is_success}
+use compiler.driver.bootstrap_api_fixed.{aot_native_project_with_backend_fixed, aot_native_project_with_backend_fixed_v2}
+use compiler.driver.driver_phase_gates.{bootstrap_last_fixed_input}
+use compiler.driver.cache.native_noop_admission.{native_noop_normalized_invocation_v1}
+
+describe "focused six-root transport":
+    it "defaults the seventh input and selects the final entry at count seven":
+        var options = driver_core_compile_options_default()
+        expect(options.bootstrap_input_6).to_equal("")
+        options.bootstrap_input_count = 7
+        options.bootstrap_input_5 = "sixth-root"
+        options.bootstrap_input_6 = "entry.spl"
+        expect(bootstrap_last_fixed_input(options)).to_equal("entry.spl")
+        val original = native_noop_normalized_invocation_v1(options, "output")
+        options.bootstrap_input_5 = "changed-sixth-root"
+        expect(original == native_noop_normalized_invocation_v1(options, "output")).to_equal(false)
+        val changed_root = native_noop_normalized_invocation_v1(options, "output")
+        options.bootstrap_input_6 = "changed-entry.spl"
+        expect(changed_root == native_noop_normalized_invocation_v1(options, "output")).to_equal(false)
+
+    it "rejects invalid v2 root counts before attempting compiler work":
+        for count in [-1, 7]:
+            val result = aot_native_project_with_backend_fixed_v2(
+                "", "", "", "", "", "", count, "", "", "llvm", false, false, 0, false)
+            match result:
+                case CompileResult.RuntimeError(message):
+                    expect(message).to_contain("zero to six source roots")
+                case _:
+                    fail("invalid count must be a RuntimeError")
+
+    it "keeps the old five-root symbol bounded":
+        for count in [-1, 6]:
+            val result = aot_native_project_with_backend_fixed(
+                "", "", "", "", "", count, "", "", "llvm", false, false, 0, false)
+            expect(compile_result_errors(result)).to_equal([
+                "fixed native project API accepts zero to five source roots"])
+
+    it "compiles the native fixture through the legacy five-root API":
+        # Requires a compatible rebuilt producer and native backend/runtime.
+        # The helper occupies the fifth root; the entry follows it in slot 5.
+        val result = aot_native_project_with_backend_fixed(
+            "test/fixtures/bootstrap_six_roots/root1",
+            "test/fixtures/bootstrap_six_roots/root2",
+            "test/fixtures/bootstrap_six_roots/root3",
+            "test/fixtures/bootstrap_six_roots/root4",
+            "test/fixtures/bootstrap_six_roots/root6", 5,
+            "test/fixtures/bootstrap_six_roots/main.spl",
+            "build/bootstrap-six-roots-legacy-proof", "llvm", false, false, 0, false)
+        expect(compile_result_is_success(result)).to_equal(true)

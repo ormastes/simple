@@ -8,14 +8,44 @@ use std.js.engine.vm_object_store.{ObjectStore}
 use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
 use common.js.engine.string_trim.{js_trim_text}
+use std.js.builtins.regexp.{RegExpObj, MatchResult, regexp_exec}
 use std.nogc_sync_mut.js.engine.interpreter_exec.{JsInterpreter}
+
+# Capture groups of a match as JS values: matched text, or `undefined` for a
+# group that did not participate.
+fn _group_values(m: MatchResult) -> [JsValue]:
+    var out: [JsValue] = []
+    var i = 0
+    while i < m.groups.len():
+        if m.group_set[i]:
+            out.push(JsValue.String(v: m.groups[i]))
+        else:
+            out.push(JsValue.Undefined)
+        i = i + 1
+    out
+
+fn _group_text(g: JsValue) -> text:
+    match g:
+        JsValue.String(v): v
+        _: ""
+
+# Value of a decimal digit character, or -1 (the family-mapped
+# `_digit_val` takes a code point, not a one-char text).
+fn _replace_digit(ch: text) -> i64:
+    val digits = "0123456789"
+    var i = 0
+    while i < 10:
+        if digits.slice(i, i + 1) == ch:
+            return i
+        i = i + 1
+    -1
 
 impl JsInterpreter:
     # String method dispatch
     me _dispatch_string_method(str_val: text, method: text, args: [JsExpression], env: i64) -> JsBrowserResult<JsValue>:
         if method == "indexOf":
             if args.len() > 0:
-                val search = self.eval_expression(args.get(0), env)?
+                val search = self.eval_expression(args[0], env)?
                 val search_str = js_to_string(search)
                 val slen = str_val.len()
                 val needle_len = search_str.len()
@@ -37,7 +67,7 @@ impl JsInterpreter:
 
         if method == "lastIndexOf":
             if args.len() > 0:
-                val search = self.eval_expression(args.get(0), env)?
+                val search = self.eval_expression(args[0], env)?
                 val search_str = js_to_string(search)
                 val slen = str_val.len()
                 val needle_len = search_str.len()
@@ -115,7 +145,7 @@ impl JsInterpreter:
         if method == "split":
             var sep = ""
             if args.len() > 0:
-                val sep_val = self.eval_expression(args.get(0), env)?
+                val sep_val = self.eval_expression(args[0], env)?
                 sep = js_to_string(sep_val)
             val result_id = self.create_object()
             if sep == "":
@@ -168,14 +198,14 @@ impl JsInterpreter:
             var start = 0
             var end = str_val.len()
             if args.len() > 0:
-                val s = self.eval_expression(args.get(0), env)?
+                val s = self.eval_expression(args[0], env)?
                 start = f64_to_i64(to_number(s))
                 if start < 0:
                     start = str_val.len() + start
                     if start < 0:
                         start = 0
             if args.len() > 1:
-                val e = self.eval_expression(args.get(1), env)?
+                val e = self.eval_expression(args[1], env)?
                 end = f64_to_i64(to_number(e))
                 if end < 0:
                     end = str_val.len() + end
@@ -190,7 +220,7 @@ impl JsInterpreter:
 
         if method == "charAt":
             if args.len() > 0:
-                val idx_val = self.eval_expression(args.get(0), env)?
+                val idx_val = self.eval_expression(args[0], env)?
                 val idx = f64_to_i64(to_number(idx_val))
                 if idx >= 0 and idx < str_val.len():
                     return Ok(JsValue.String(v: str_val[idx]))
@@ -198,7 +228,7 @@ impl JsInterpreter:
 
         if method == "charCodeAt":
             if args.len() > 0:
-                val idx_val = self.eval_expression(args.get(0), env)?
+                val idx_val = self.eval_expression(args[0], env)?
                 val idx = f64_to_i64(to_number(idx_val))
                 if idx >= 0 and idx < str_val.len():
                     val ch = str_val[idx]
@@ -207,21 +237,24 @@ impl JsInterpreter:
 
         if method == "startsWith":
             if args.len() > 0:
-                val prefix_val = self.eval_expression(args.get(0), env)?
+                val prefix_val = self.eval_expression(args[0], env)?
                 val prefix = js_to_string(prefix_val)
                 return Ok(JsValue.Boolean(v: str_val.starts_with(prefix)))
             return Ok(JsValue.Boolean(v: true))
 
         if method == "endsWith":
             if args.len() > 0:
-                val suffix_val = self.eval_expression(args.get(0), env)?
+                val suffix_val = self.eval_expression(args[0], env)?
                 val suffix = js_to_string(suffix_val)
-                return Ok(JsValue.Boolean(v: str_val.ends_with(suffix)))
+                # bug=pin_ends_with_i64_bool_arg_2026-11-21: frozen Phase 2 types ends_with as i64; branch instead of passing it as a bool.
+                if str_val.ends_with(suffix):
+                    return Ok(JsValue.Boolean(v: true))
+                return Ok(JsValue.Boolean(v: false))
             return Ok(JsValue.Boolean(v: true))
 
         if method == "includes":
             if args.len() > 0:
-                val search_val = self.eval_expression(args.get(0), env)?
+                val search_val = self.eval_expression(args[0], env)?
                 val search_s = js_to_string(search_val)
                 val slen = str_val.len()
                 val needle_len = search_s.len()
@@ -243,14 +276,17 @@ impl JsInterpreter:
 
         if method == "replace":
             if args.len() >= 2:
-                val search_val = self.eval_expression(args.get(0), env)?
-                val replace_val = self.eval_expression(args.get(1), env)?
+                val search_val = self.eval_expression(args[0], env)?
+                val replace_val = self.eval_expression(args[1], env)?
+                match self._regexp_of(_get_obj_id(search_val)):
+                    Some(re): return self._regexp_replace(str_val, re, replace_val, env)
+                    nil: pass_dn
                 val search_s = js_to_string(search_val)
-                val replace_str = js_to_string(replace_val)
                 val slen = str_val.len()
                 val needle_len = search_s.len()
                 if needle_len == 0:
-                    return Ok(JsValue.String(v: replace_str + str_val))
+                    val head = self._replace_expand(replace_val, "", 0, str_val, [], env)?
+                    return Ok(JsValue.String(v: head + str_val))
                 var i = 0
                 while i <= slen - needle_len:
                     var matched = true
@@ -266,7 +302,7 @@ impl JsInterpreter:
                         while bi < i:
                             result = result + str_val[bi]
                             bi = bi + 1
-                        result = result + replace_str
+                        result = result + self._replace_expand(replace_val, search_s, i, str_val, [], env)?
                         var ai = i + needle_len
                         while ai < slen:
                             result = result + str_val[ai]
@@ -275,10 +311,41 @@ impl JsInterpreter:
                     i = i + 1
             return Ok(JsValue.String(v: str_val))
 
+        if method == "match":
+            if args.len() >= 1:
+                val pat_val = self.eval_expression(args[0], env)?
+                var re = RegExpObj.create(js_to_string(pat_val), "")
+                match self._regexp_of(_get_obj_id(pat_val)):
+                    Some(found): re = RegExpObj.create(found.source, found.flags)
+                    nil: pass_dn
+                var values: [JsValue] = []
+                var first_index = 0
+                var pos = 0
+                while pos <= str_val.len():
+                    re.last_index = pos
+                    val m = regexp_exec(re, str_val)
+                    if not m.matched:
+                        break
+                    values.push(JsValue.String(v: m.value))
+                    first_index = m.index
+                    if not re.global:
+                        for g in _group_values(m):
+                            values.push(g)
+                        break
+                    pos = m.index + (if m.value.len() == 0: 1 else: m.value.len())
+                if values.len() == 0:
+                    return Ok(JsValue.Null)
+                val arr_id = self._js_array_from(values)
+                if not re.global:
+                    self.set_object_property(arr_id, "index", JsValue.Number(v: first_index.to_f64()))
+                    self.set_object_property(arr_id, "input", JsValue.String(v: str_val))
+                return Ok(JsValue.Array(id: arr_id))
+            return Ok(JsValue.Null)
+
         if method == "replaceAll":
             if args.len() >= 2:
-                val search_val = self.eval_expression(args.get(0), env)?
-                val replace_val = self.eval_expression(args.get(1), env)?
+                val search_val = self.eval_expression(args[0], env)?
+                val replace_val = self.eval_expression(args[1], env)?
                 val search = js_to_string(search_val)
                 val replace_str = js_to_string(replace_val)
                 val slen = str_val.len()
@@ -309,7 +376,7 @@ impl JsInterpreter:
 
         if method == "repeat":
             if args.len() > 0:
-                val count_val = self.eval_expression(args.get(0), env)?
+                val count_val = self.eval_expression(args[0], env)?
                 val count = f64_to_i64(to_number(count_val))
                 var result = ""
                 var i = 0
@@ -321,11 +388,11 @@ impl JsInterpreter:
 
         if method == "padStart":
             if args.len() > 0:
-                val target_len_val = self.eval_expression(args.get(0), env)?
+                val target_len_val = self.eval_expression(args[0], env)?
                 val target_len = f64_to_i64(to_number(target_len_val))
                 var pad_str = " "
                 if args.len() > 1:
-                    val ps = self.eval_expression(args.get(1), env)?
+                    val ps = self.eval_expression(args[1], env)?
                     pad_str = js_to_string(ps)
                 if pad_str.len() == 0:
                     return Ok(JsValue.String(v: str_val))
@@ -341,11 +408,11 @@ impl JsInterpreter:
 
         if method == "padEnd":
             if args.len() > 0:
-                val target_len_val = self.eval_expression(args.get(0), env)?
+                val target_len_val = self.eval_expression(args[0], env)?
                 val target_len = f64_to_i64(to_number(target_len_val))
                 var pad_str = " "
                 if args.len() > 1:
-                    val ps = self.eval_expression(args.get(1), env)?
+                    val ps = self.eval_expression(args[1], env)?
                     pad_str = js_to_string(ps)
                 if pad_str.len() == 0:
                     return Ok(JsValue.String(v: str_val))
@@ -362,14 +429,14 @@ impl JsInterpreter:
             var result = str_val
             var i = 0
             while i < args.len():
-                val arg_val = self.eval_expression(args.get(i), env)?
+                val arg_val = self.eval_expression(args[i], env)?
                 result = result + js_to_string(arg_val)
                 i = i + 1
             return Ok(JsValue.String(v: result))
 
         if method == "at":
             if args.len() > 0:
-                val idx_val = self.eval_expression(args.get(0), env)?
+                val idx_val = self.eval_expression(args[0], env)?
                 var idx = f64_to_i64(to_number(idx_val))
                 if idx < 0:
                     idx = str_val.len() + idx
@@ -380,6 +447,88 @@ impl JsInterpreter:
         self.logger.warn("Unknown string method: {method}")
         Ok(JsValue.Undefined)
 
+    # String.prototype.replace with a RegExp search value: every match when
+    # the `g` flag is set, otherwise only the first.
+    me _regexp_replace(input: text, re_in: RegExpObj, replace_val: JsValue, env: i64) -> JsBrowserResult<JsValue>:
+        # Own the cursor: `last_index` is advanced per match, and mutating a
+        # class argument in place is unreliable under the seed interpreter.
+        var re = RegExpObj.create(re_in.source, re_in.flags)
+        var result = ""
+        var last = 0
+        var pos = 0
+        val n = input.len()
+        while pos <= n:
+            re.last_index = pos
+            val m = regexp_exec(re, input)
+            if not m.matched:
+                break
+            result = result + input.slice(last, m.index)
+            result = result + self._replace_expand(replace_val, m.value, m.index, input, _group_values(m), env)?
+            last = m.index + m.value.len()
+            if not re.global:
+                break
+            pos = if m.value.len() == 0: last + 1 else: last
+        result = result + input.slice(last, n)
+        Ok(JsValue.String(v: result))
+
+    # Replacement text for one match: a function replacer is called with
+    # (match, p1..pn, offset, string); a string replacer expands `$&`, `$$`
+    # and `$1`..`$99` (an unmatched or out-of-range group expands to "").
+    me _replace_expand(replace_val: JsValue, matched: text, index: i64, input: text, groups: [JsValue], env: i64) -> JsBrowserResult<text>:
+        match replace_val:
+            JsValue.Function(fn_id):
+                var call_args: [JsValue] = [JsValue.String(v: matched)]
+                for g in groups:
+                    call_args.push(g)
+                call_args.push(JsValue.Number(v: index.to_f64()))
+                call_args.push(JsValue.String(v: input))
+                val r = self._invoke_function(fn_id, call_args, env)?
+                return Ok(js_to_string(r))
+            _: pass_dn
+        val tmpl = js_to_string(replace_val)
+        var out = ""
+        var i = 0
+        while i < tmpl.len():
+            val ch = tmpl.slice(i, i + 1)
+            val nx = if i + 1 < tmpl.len(): tmpl.slice(i + 1, i + 2) else: ""
+            if ch == "$" and nx == "&":
+                out = out + matched
+                i = i + 2
+            else if ch == "$" and nx == "$":
+                out = out + "$"
+                i = i + 2
+            else if ch == "$" and _replace_digit(nx) >= 0:
+                # `$nn` when both digits form a valid group number, else `$n`.
+                val nx2 = if i + 2 < tmpl.len(): tmpl.slice(i + 2, i + 3) else: ""
+                var num = _replace_digit(nx)
+                var width = 2
+                val d2 = _replace_digit(nx2)
+                if d2 >= 0:
+                    val two = num * 10 + d2
+                    if two >= 1 and two <= groups.len():
+                        num = two
+                        width = 3
+                if num >= 1 and num <= groups.len():
+                    out = out + _group_text(groups[num - 1])
+                    i = i + width
+                else:
+                    out = out + ch
+                    i = i + 1
+            else:
+                out = out + ch
+                i = i + 1
+        Ok(out)
+
+    # Allocate a JS array holding `values`; returns its object id.
+    me _js_array_from(values: [JsValue]) -> i64:
+        val arr_id = self.create_object()
+        var i = 0
+        while i < values.len():
+            self.set_object_property(arr_id, "{i}", values[i])
+            i = i + 1
+        self.set_object_property(arr_id, "length", JsValue.Number(v: values.len().to_f64()))
+        arr_id
+
     # Invoke a JS function by id with the given argument values
     me _invoke_function(fn_id: i64, arg_vals: [JsValue], env: i64) -> JsBrowserResult<JsValue>:
         self._invoke_function_with_this(fn_id, arg_vals, env, JsValue.Undefined)
@@ -387,10 +536,10 @@ impl JsInterpreter:
     me _invoke_function_with_this(fn_id: i64, arg_vals: [JsValue], env: i64, this_val: JsValue) -> JsBrowserResult<JsValue>:
         var bound_i = 0
         while bound_i < self.bound_function_ids.len():
-            if self.bound_function_ids.get(bound_i) == fn_id:
-                val target_id = self.bound_function_target_ids.get(bound_i)
-                val bound_this = self.bound_function_this_values.get(bound_i)
-                val bound_args_id = self.bound_function_arg_array_ids.get(bound_i)
+            if self.bound_function_ids[bound_i] == fn_id:
+                val target_id = self.bound_function_target_ids[bound_i]
+                val bound_this = self.bound_function_this_values[bound_i]
+                val bound_args_id = self.bound_function_arg_array_ids[bound_i]
                 var combined_args: [JsValue] = []
                 var stored_len = 0
                 match self.get_object_property(bound_args_id, "length"):
@@ -404,26 +553,26 @@ impl JsInterpreter:
                     stored_i = stored_i + 1
                 var arg_i = 0
                 while arg_i < arg_vals.len():
-                    combined_args.push(arg_vals.get(arg_i))
+                    combined_args.push(arg_vals[arg_i])
                     arg_i = arg_i + 1
                 return self._invoke_function_with_this(target_id, combined_args, env, bound_this)
             bound_i = bound_i + 1
         if fn_id < 0 or fn_id >= self.functions.len():
             return Ok(JsValue.Undefined)
-        val js_fn = self.functions.get(fn_id)
+        val js_fn = self.functions[fn_id]
         val params = js_fn.params
         val fn_env = self.env_stack.create_env(js_fn.closure_env)
         var pi = 0
         while pi < params.len():
             var pv = JsValue.Undefined
             if pi < arg_vals.len():
-                pv = arg_vals.get(pi)
-            self.env_stack.define_var(fn_env, params.get(pi), pv)
+                pv = arg_vals[pi]
+            self.env_stack.define_var(fn_env, params[pi], pv)
             pi = pi + 1
         val args_obj_id = self.create_object()
         var ai = 0
         while ai < arg_vals.len():
-            self.set_object_property(args_obj_id, ai.to_text(), arg_vals.get(ai))
+            self.set_object_property(args_obj_id, ai.to_text(), arg_vals[ai])
             ai = ai + 1
         self.set_object_property(args_obj_id, "length", JsValue.Number(v: arg_vals.len().to_f64()))
         self.env_stack.define_var(fn_env, "arguments", JsValue.Object(id: args_obj_id))
@@ -435,7 +584,7 @@ impl JsInterpreter:
         var result = JsValue.Undefined
         var bi = 0
         while bi < js_fn.body.len():
-            result = self.exec_statement(js_fn.body.get(bi), fn_env)?
+            result = self.exec_statement(js_fn.body[bi], fn_env)?
             if self.control_return:
                 result = self.return_value
                 break

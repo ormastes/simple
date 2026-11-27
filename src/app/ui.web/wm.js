@@ -464,8 +464,14 @@ class SimpleWindowManager {
   _applyAccentPreference(preference) {
     const accent = this._normalizeAccentPreference(preference || this._readAccentPreference());
     document.documentElement.dataset.wmAccent = accent.id;
-    document.documentElement.style.setProperty('--ui-accent', accent.color);
-    document.documentElement.style.setProperty('--ui-accent-rgb', accent.rgb);
+    if (accent.color) {
+      document.documentElement.style.setProperty('--ui-accent', accent.color);
+      document.documentElement.style.setProperty('--ui-accent-rgb', accent.rgb);
+    } else {
+      // The theme default keeps the resolved theme package's own accent.
+      document.documentElement.style.removeProperty('--ui-accent');
+      document.documentElement.style.removeProperty('--ui-accent-rgb');
+    }
     return accent;
   }
 
@@ -1480,6 +1486,7 @@ class SimpleWindowManager {
       { label: 'Set transparency: standard', category: 'Appearance', shortcut: 'Cmd 4', icon: 'G', action: () => this.setTransparencyPreference('standard') },
       { label: 'Set transparency: reduced', category: 'Appearance', shortcut: 'Cmd 5', icon: 'R', action: () => this.setTransparencyPreference('reduced') },
       { label: 'Set transparency: off', category: 'Appearance', shortcut: 'Cmd 6', icon: 'S', action: () => this.setTransparencyPreference('off') },
+      { label: 'Set accent: theme default', category: 'Appearance', shortcut: '', icon: 'T', action: () => this._setAccentFromControlCenter('theme') },
       { label: 'Set accent: blue', category: 'Appearance', shortcut: '', icon: 'B', action: () => this._setAccentFromControlCenter('blue') },
       { label: 'Set accent: green', category: 'Appearance', shortcut: '', icon: 'G', action: () => this._setAccentFromControlCenter('green') },
       { label: 'Set accent: rose', category: 'Appearance', shortcut: '', icon: 'R', action: () => this._setAccentFromControlCenter('rose') },
@@ -5752,6 +5759,7 @@ class SimpleWindowManager {
 
   _accentChoices() {
     return [
+      { id: 'theme', label: 'Theme', meta: 'theme default', color: '', rgb: '' },
       { id: 'blue', label: 'Blue', meta: 'clear focus', color: '#64d2ff', rgb: '100,210,255' },
       { id: 'green', label: 'Green', meta: 'steady status', color: '#30d158', rgb: '48,209,88' },
       { id: 'rose', label: 'Rose', meta: 'warm alerts', color: '#ff375f', rgb: '255,55,95' },
@@ -6837,7 +6845,7 @@ class SimpleWindowManager {
       item.setAttribute('aria-selected', selected ? 'true' : 'false');
       const swatch = document.createElement('span');
       swatch.className = 'wm-quality-accent-policy-swatch';
-      swatch.style.background = choice.color;
+      swatch.style.background = choice.color || 'var(--ui-accent)';
       const name = document.createElement('span');
       name.className = 'wm-quality-accent-policy-label';
       name.textContent = choice.label;
@@ -14158,17 +14166,31 @@ class SimpleWindowManager {
       const dir = rs.direction;
       const minW = 200, minH = 120;
       let w = rs.origW, h = rs.origH;
+      let left = rs.origLeft, top = rs.origTop;
       if (dir.includes('e')) w = Math.max(minW, rs.origW + dx);
       if (dir.includes('s')) h = Math.max(minH, rs.origH + dy);
-      if (dir.includes('w')) w = Math.max(minW, rs.origW - dx);
-      if (dir === 'n' || dir.includes('n')) h = Math.max(minH, rs.origH - dy);
+      if (dir.includes('w')) {
+        w = Math.max(minW, rs.origW - dx);
+        left = rs.origLeft + (rs.origW - w);
+      }
+      if (dir === 'n' || dir.includes('n')) {
+        h = Math.max(minH, rs.origH - dy);
+        top = rs.origTop + (rs.origH - h);
+      }
       if (rs.isElectronWindow) {
+        if (left !== rs.origLeft || top !== rs.origTop) {
+          this._electronMoveWindow(rs.surfaceId, Math.round(left), Math.round(top));
+        }
         this._electronResizeWindow(rs.surfaceId, Math.round(w), Math.round(h));
       } else if (rs.ghostEl) {
         if (rs.winEl) {
+          rs.winEl.style.left = left + 'px';
+          rs.winEl.style.top = top + 'px';
           rs.winEl.style.width = w + 'px';
           rs.winEl.style.height = h + 'px';
         }
+        rs.ghostEl.style.left   = left + 'px';
+        rs.ghostEl.style.top    = top + 'px';
         rs.ghostEl.style.width  = w + 'px';
         rs.ghostEl.style.height = h + 'px';
         rs.ghostEl.dataset.resizeDirection = dir;
@@ -14231,15 +14253,36 @@ class SimpleWindowManager {
       const dir = rs.direction;
       const minW = 200, minH = 120;
       let w = rs.origW, h = rs.origH;
+      let left = rs.origLeft, top = rs.origTop;
       if (dir.includes('e')) w = Math.max(minW, rs.origW + dx);
       if (dir.includes('s')) h = Math.max(minH, rs.origH + dy);
-      if (dir.includes('w')) w = Math.max(minW, rs.origW - dx);
-      if (dir === 'n' || dir.includes('n')) h = Math.max(minH, rs.origH - dy);
+      if (dir.includes('w')) {
+        w = Math.max(minW, rs.origW - dx);
+        left = rs.origLeft + (rs.origW - w);
+      }
+      if (dir === 'n' || dir.includes('n')) {
+        h = Math.max(minH, rs.origH - dy);
+        top = rs.origTop + (rs.origH - h);
+      }
+      const moved = left !== rs.origLeft || top !== rs.origTop;
       if (this.transport === 'electron-ipc' && this._electronWindows.has(rs.surfaceId)) {
+        if (moved) this._electronMoveWindow(rs.surfaceId, Math.round(left), Math.round(top));
         this._electronResizeWindow(rs.surfaceId, Math.round(w), Math.round(h));
       } else if (rs.winEl) {
+        if (moved) {
+          rs.winEl.style.left = Math.round(left) + 'px';
+          rs.winEl.style.top = Math.round(top) + 'px';
+        }
         rs.winEl.style.width = Math.round(w) + 'px';
         rs.winEl.style.height = Math.round(h) + 'px';
+      }
+      if (moved) {
+        this._sendWindowCmd('move', {
+          window_id_hint: rs.surfaceId,
+          ...(rs.isElectronWindow ? { source: HOST_NATIVE_EVENT_SOURCE } : {}),
+          x: Math.round(left),
+          y: Math.round(top)
+        });
       }
       this._sendWindowCmd('resize', {
         window_id_hint: rs.surfaceId,

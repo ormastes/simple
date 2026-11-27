@@ -11,6 +11,17 @@ Status: Implemented
 Tests for the functional update syntax that allows creating modified copies
 of structs and records without mutation, supporting immutable programming patterns.
 
+> Reconciled 2026-11-17: `x->m(args)` means `x = x.m(args)` — it replaces the
+> *binding*; whether old storage is mutated depends on `m`'s receiver contract.
+> The examples below exercise array/dict `var` bindings (`->map`, `->filter`,
+> `->concat`, `->set`), not immutable record copies, and assert no retained
+> original alias; the scenario titles overstate what is tested. The seed parses
+> `->` (`src/compiler_rust/parser/src/expressions/postfix.rs:577-593`); the
+> self-hosted frontend does not yet. Contract (binding replacement vs. mutable
+> storage vs. immutable copy, `?`/chain behaviour) and parity lane:
+> `doc/05_design/language/robust_types/robustness_effects_arrow_pin_design_2026-11-17.md` §2,
+> `doc/03_plan/release/1.0.0/robustness_completion_plan_2026-11-17.md` P0-4.
+
 ## Feature: Functional Update Syntax
 
 Tests for basic functional update patterns on structs and records.

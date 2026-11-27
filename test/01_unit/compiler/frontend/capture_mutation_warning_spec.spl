@@ -1,0 +1,36 @@
+# @req REQ-SSPEC-COMPILER
+# @bug capture_write_check_misses_mutating_method_calls_2026_11_10
+"""
+# W-CAPTURE-MUTATION: receiver-mutating calls on a captured local
+
+Closures capture enclosing locals by value and read-only. An assignment is a
+compile error; a `push`/`insert`/`remove`/`pop`/`clear`/`set`/`sort`/`extend`/
+`append` on a captured local used to pass silently while the mutation was
+dropped with the snapshot. Staged as a warning (census 2026-11-10: 0 src
+lambdas, 15 test-spec sites incl. a policy pin). Twin of the seed
+`find_captured_local_mutations` tests.
+"""
+use std.spec.*
+use compiler.core.parser.{parse_module_silent}
+use compiler.core.capture_write_check.{capture_write_check_module, capture_write_warnings}
+
+fn warnings_of(src: text) -> [text]:
+    parse_module_silent(src, "capture_mutation_probe.spl")
+    val err = capture_write_check_module()
+    expect(err).to_equal("")
+    capture_write_warnings()
+
+describe "W-CAPTURE-MUTATION":
+    it "warns on push to a captured local inside a closure":
+        val w = warnings_of("fn outer() -> i64:\n    var seen: [i64] = []\n    [1, 2].each(\\x:\n        seen.push(x)\n    )\n    seen.len()\n")
+        expect(w.len()).to_equal(1)
+        expect(w[0]).to_contain("`seen.push(...)` mutates captured variable `seen` inside a closure")
+
+    it "warns on each mutating call in a nested fn":
+        val w = warnings_of("fn outer():\n    var xs: [i64] = []\n    var d = {}\n    fn fill():\n        xs.insert(0, 1)\n        xs.sort()\n        d.set(\"k\", 1)\n        xs.clear()\n    fill()\n")
+        expect(w.len()).to_equal(4)
+        expect(w[0]).to_contain("inside nested fn `fill`")
+
+    it "does not warn on own locals, module globals or read-only calls":
+        val w = warnings_of("var g: [i64] = []\nfn outer():\n    var xs: [i64] = []\n    xs.push(1)\n    [1].each(\\x:\n        var mine: [i64] = []\n        mine.push(x)\n        g.push(x)\n        val n = xs.len()\n    )\n")
+        expect(w.len()).to_equal(0)

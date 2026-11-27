@@ -1,0 +1,192 @@
+# @cover scripts/bootstrap/lib/executable_batch_policy.spl 80%
+"""
+## Purpose and audience
+Purpose: pin the pure-Simple port of the former `executable_batch_policy.py`
+(admission ramp, closure/outcome verdicts, resume identity, preflight
+invocation, owned-process ancestry) and the cases of the former
+`executable-batch-test.py` and `executable-batch-owner-test.py`.
+Audience: maintainers of `scripts/bootstrap/lib/executable_batch_policy.spl`.
+The commit probe is covered by `executable_batch_probe_spec.spl`, the driver's
+decoding and state machine by `executable_batch_driver_spec.spl`, and its
+launcher/preflight by `scripts/bootstrap/tests/executable-batch-*-test.shs`.
+Identity and admission vectors below equal the former Python outputs (checked
+against `executable_batch_policy.py` on 334 admission, identity, closure and outcome
+combinations before deletion; active > 20 is pinned by the 20-ceiling case).
+"""
+
+use std.spec.*
+use scripts.bootstrap.lib.executable_batch_policy.{BatchConfig, RssReceipt, ChildResult, OptionPair, Target, SavedSuccess, EnvPair, PreflightRequest, OwnerConfig, OwnerLaunch, OwnerReservation, OwnerRequest, ProcessRow, may_start, closed_rss, outcome, identity, reusable_success, request_environment, preflight_invocation, validate_owned_ancestry}
+
+val GIB = 1073741824
+
+fn cfg() -> BatchConfig:
+    BatchConfig(max_executables: 20, headroom_bytes: 16 * GIB, minimum_estimate_bytes: GIB, rss_to_commit_safety_factor: 2)
+
+fn good() -> RssReceipt:
+    RssReceipt(quiescent: "1", observer_errors: "0", status: "complete")
+
+fn repeat(v: i64, n: i64) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < n:
+        out.push(v)
+        i = i + 1
+    out
+
+fn tgt(source: text) -> Target:
+    Target(producer_sha256: "p", source: source, backend: "cranelift", entry: "main.spl", options: [OptionPair(key: "threads", value: 1)])
+
+fn saved_for(t: Target) -> SavedSuccess:
+    SavedSuccess(identity: identity(t), binary_sha256: "b", binary_linked: true, sanity_pass: true, closure: "CLOSED")
+
+fn child(compile_exit: bool, status: text, sanity: bool) -> ChildResult:
+    ChildResult(has_result: true, has_compile_exit: compile_exit, terminal_status: status, sanity_pass: sanity)
+
+# ---- ownership fixture (mirrors OwnershipTests.setUp) ----
+val COLLECTOR = "C:/work/collector.py"
+
+fn fake_hash(path: text) -> text:
+    if path.ends_with("request.json"):
+        return "request"
+    if path.ends_with("config.json"):
+        return "config"
+    if path.ends_with("collector.py"):
+        return "helper"
+    "unknown"
+
+fn owner_config() -> OwnerConfig:
+    OwnerConfig(global_job_budget: 80, admission_root: "admission", parent_collector_receipt: "cfec.env", collector_path: COLLECTOR, collector_sha256: "helper")
+
+fn owner_launch() -> OwnerLaunch:
+    OwnerLaunch(owner_pid: 10, collector_pid: 20, threads: 20, reservation: "admission/lane.json", request: "request.json", request_sha256: "request")
+
+fn owner_reservation() -> OwnerReservation:
+    OwnerReservation(owner_pid: 10, owner_start_utc: "2026-10-05T00:00:00Z", threads: 20, schema: "diagnostic-downstream-reservation/1", total_job_budget: 80, receipt_path: "cfec.env", helper_sha256: "helper")
+
+fn owner_request(command: [text]) -> OwnerRequest:
+    OwnerRequest(threads: 20, command: command, config_json_sha256: "config")
+
+fn bound_command() -> [text]:
+    ["python", "runner.py", "--packet", "packet"]
+
+fn collector_line() -> text:
+    "python \"{COLLECTOR}\" --timeout-seconds 0 --root-exit-policy terminate-job"
+
+fn chain(owner_start: text, collector_start: text, caller_parent: i64, collector_line_text: text) -> [ProcessRow]:
+    [ProcessRow(pid: 30, parent_pid: caller_parent, start_utc: "2026-10-05T00:00:02Z", command_line: "python runner.py"), ProcessRow(pid: 20, parent_pid: 10, start_utc: collector_start, command_line: collector_line_text), ProcessRow(pid: 10, parent_pid: 1, start_utc: owner_start, command_line: "owner")]
+
+fn valid_chain() -> [ProcessRow]:
+    chain("2026-10-05T00:00:00Z", "2026-10-05T00:00:01Z", 20, collector_line())
+
+fn validate(rows: [ProcessRow], command: [text]) -> text:
+    validate_owned_ancestry(owner_config(), owner_launch(), owner_reservation(), owner_request(command), rows, 30, "runner.py", "packet", fake_hash)
+
+describe "executable_batch_policy admission":
+    it "never admits more than 20 executables":
+        var admitted = false
+        var active = 20
+        while active < 40:
+            if may_start(active, repeat(GIB, 100), 1000000000000000, cfg()):
+                admitted = true
+            active = active + 1
+        expect(admitted).to_equal(false)
+
+    it "admits one task unmeasured, then ramps by observation count":
+        expect(may_start(0, [], 100 * GIB, cfg())).to_equal(true)
+        expect(may_start(1, [], 100 * GIB, cfg())).to_equal(false)
+        expect(may_start(1, [GIB], 100 * GIB, cfg())).to_equal(true)
+        expect(may_start(2, [GIB], 100 * GIB, cfg())).to_equal(false)
+
+    it "queues under memory pressure":
+        expect(may_start(3, repeat(8 * GIB, 8), 20 * GIB, cfg())).to_equal(false)
+
+    it "refuses unmeasured start without headroom":
+        expect(may_start(0, [], 15 * GIB, cfg())).to_equal(false)
+
+describe "executable_batch_policy closure and outcome":
+    it "continues after a failure only once closure is verified":
+        expect(outcome(1, child(true, "", false), [good()])).to_equal("CONTINUE")
+        expect(outcome(139, child(true, "", false), [good()])).to_equal("CONTINUE")
+        expect(outcome(139, ChildResult(has_result: false, has_compile_exit: false, terminal_status: "", sanity_pass: false), [])).to_equal("BLOCKED_UNVERIFIED_CHILD")
+        expect(outcome(1, child(true, "", false), [RssReceipt(quiescent: "0", observer_errors: "0", status: "complete")])).to_equal("BLOCKED_UNVERIFIED_CHILD")
+
+    it "blocks when the result lacks compile_exit or receipts are missing":
+        expect(outcome(0, child(false, "", false), [good()])).to_equal("BLOCKED_UNVERIFIED_CHILD")
+        expect(outcome(0, child(true, "", false), [])).to_equal("BLOCKED_UNVERIFIED_CHILD")
+
+    it "requires quiescence and zero observer errors to count as closed":
+        expect(closed_rss(RssReceipt(quiescent: "0", observer_errors: "0", status: "complete"))).to_equal(false)
+        expect(closed_rss(RssReceipt(quiescent: "1", observer_errors: "1", status: "complete"))).to_equal(false)
+        expect(closed_rss(RssReceipt(quiescent: "1", observer_errors: "0", status: "running"))).to_equal(false)
+        expect(closed_rss(RssReceipt(quiescent: "1", observer_errors: "0", status: "interrupted"))).to_equal(true)
+
+    it "rejects a nonzero child that claims success":
+        expect(outcome(1, child(true, "LINKED_SANITY_PASS", true), [good()])).to_equal("BLOCKED_CHILD_RESULT_MISMATCH")
+
+describe "executable_batch_policy identity":
+    it "hashes the sorted-key compact JSON exactly as Python json.dumps did":
+        expect(identity(tgt("s"))).to_equal("9d3ba717952524ff4e3a4cb795dbb99c0c88588cc8add739a3feda4661a9b705")
+        val t = Target(producer_sha256: "p", source: "s", backend: "b", entry: "e", options: [OptionPair(key: "z", value: 1), OptionPair(key: "a", value: 2)])
+        expect(identity(t)).to_equal("85b951b1868ea2d2f0f95b4f9a0dafd89b61ec9689c8acecba3be3f6960c0ba4")
+
+    it "reuses a success only for the exact identity, binary and sanity":
+        val t = tgt("s")
+        val saved = saved_for(t)
+        expect(reusable_success(saved, t, "b")).to_equal(true)
+        expect(reusable_success(saved, tgt("changed"), "b")).to_equal(false)
+        expect(reusable_success(saved, t, "changed")).to_equal(false)
+        val unsane = SavedSuccess(identity: saved.identity, binary_sha256: "b", binary_linked: true, sanity_pass: false, closure: "CLOSED")
+        expect(reusable_success(unsane, t, "b")).to_equal(false)
+
+describe "executable_batch_policy preflight":
+    it "inherits the request cwd and environment, request entries winning":
+        val request = PreflightRequest(command: ["tool", "x"], has_preflight_command: false, preflight_command: [], cwd: "/work/dir", environment: [EnvPair(key: "BATCH_TEST_VALUE", value: "bound"), EnvPair(key: "SHARED", value: "request")])
+        val inv = preflight_invocation(request, [EnvPair(key: "SHARED", value: "inherited"), EnvPair(key: "KEEP", value: "1")])
+        expect(inv.command).to_equal(["tool", "x", "--preflight"])
+        expect(inv.cwd).to_equal("/work/dir")
+        expect(inv.environment).to_equal([EnvPair(key: "KEEP", value: "1"), EnvPair(key: "BATCH_TEST_VALUE", value: "bound"), EnvPair(key: "SHARED", value: "request")])
+
+    it "honours an explicit preflight_command":
+        val request = PreflightRequest(command: ["tool"], has_preflight_command: true, preflight_command: ["tool", "--check"], cwd: "/w", environment: [])
+        expect(preflight_invocation(request, []).command).to_equal(["tool", "--check"])
+        expect(request_environment(request, [EnvPair(key: "A", value: "1")])).to_equal([EnvPair(key: "A", value: "1")])
+
+describe "executable_batch_policy owned ancestry":
+    it "accepts a valid live chain":
+        expect(validate(valid_chain(), bound_command())).to_equal("")
+
+    it "rejects a stale owner":
+        val rows = [valid_chain()[0], valid_chain()[1]]
+        expect(validate(rows, bound_command())).to_contain("no longer live")
+
+    it "rejects a reused owner pid":
+        expect(validate(chain("2026-10-05T00:00:03Z", "2026-10-05T00:00:01Z", 20, collector_line()), bound_command())).to_contain("Owner PID was reused")
+
+    it "rejects a caller outside the collector":
+        expect(validate(chain("2026-10-05T00:00:00Z", "2026-10-05T00:00:01Z", 10, collector_line()), bound_command())).to_contain("not under the recorded collector")
+
+    it "rejects a reused collector pid":
+        expect(validate(chain("2026-10-05T00:00:00Z", "2026-10-05T00:00:03Z", 20, collector_line()), bound_command())).to_contain("reused")
+
+    it "rejects a wrong collector command":
+        expect(validate(chain("2026-10-05T00:00:00Z", "2026-10-05T00:00:01Z", 20, "unrelated.py"), bound_command())).to_contain("Collector command mismatch")
+
+    it "rejects a request not bound to the runner":
+        expect(validate(valid_chain(), ["python", "unrelated.py"])).to_contain("not bound to runner")
+
+    it "rejects a relative collector pin":
+        val c = OwnerConfig(global_job_budget: 80, admission_root: "admission", parent_collector_receipt: "cfec.env", collector_path: "collector.py", collector_sha256: "helper")
+        expect(validate_owned_ancestry(c, owner_launch(), owner_reservation(), owner_request(bound_command()), valid_chain(), 30, "runner.py", "packet", fake_hash)).to_contain("absolute path")
+
+describe "executable_batch_policy Python parity vectors":
+    it "hashes the reviewed driver option set like json.dumps(sort_keys)":
+        val opts = [OptionPair(key: "threads", value: 1), OptionPair(key: "hir_sharding", value: 0), OptionPair(key: "parse_sharding", value: 0), OptionPair(key: "streaming_surfaces", value: 1)]
+        val t = Target(producer_sha256: "p", source: "s", backend: "b", entry: "e", options: opts)
+        expect(identity(t)).to_equal("fc06bd12236084a45430f85d18baca5a604222f28289679abfd094eb91dfd062")
+
+    it "hashes an empty option set and the driver's cranelift target":
+        val none = Target(producer_sha256: "p", source: "s", backend: "b", entry: "e", options: [])
+        expect(identity(none)).to_equal("bc5f40b1e4daa8b7610b92aa123090a2a6d52e0c0bfb1735a502e2f8c55c4b4f")
+        val opts = [OptionPair(key: "threads", value: 1), OptionPair(key: "hir_sharding", value: 0), OptionPair(key: "parse_sharding", value: 0), OptionPair(key: "streaming_surfaces", value: 1)]
+        val e = Target(producer_sha256: "p", source: "s", backend: "cranelift", entry: "e.spl", options: opts)
+        expect(identity(e)).to_equal("6ab8f771b68a6040c039cc529fbfcd2a63c352d170ec9edd804efb2c858cd101")

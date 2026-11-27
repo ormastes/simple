@@ -1,0 +1,56 @@
+use std.spec.*
+use compiler.common.cache_contract.aspect_match_shard_v1.*
+
+fn collision_facts(symbol: text, owner: text) -> DirectoryJoinPointFactsV1:
+    directory_join_point_facts_v1("pkg", ["b|c", "c"],
+        [JoinPointFactV1(id: "mod::a", kind: "forward", symbol: symbol, attrs: [],
+            owner_file: owner, base_body_digest: "")], [], true)
+
+describe "AOP facts identity byte framing":
+    it "separates fields that previously shared a pipe-delimited spelling":
+        val a = collision_facts("a|b", "c")
+        val b = collision_facts("a", "b|c")
+        expect(a.negative_root).to_equal(b.negative_root)
+        expect(a.facts_key == b.facts_key).to_equal(false)
+        val selector = pointcut_selector_parse_v1("a")
+        val first = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(), selector, a)
+        val second = pointcut_match_cache_acquire_v1(first.cache, selector, b)
+        expect(first.shard.sorted_matching_ids.len()).to_equal(0)
+        expect(second.hit).to_equal(false)
+        expect(second.shard.sorted_matching_ids).to_equal(["mod::a"])
+
+    it "keeps body-only edits out of selection identity":
+        val a = collision_facts("a", "c")
+        var point = a.sorted_join_points[0]
+        point.base_body_digest = "changed body identity"
+        val b = directory_join_point_facts_v1("pkg", ["b|c", "c"], [point], [], true)
+        expect(a.facts_key).to_equal(b.facts_key)
+
+    it "refuses retained keys that do not describe current framed facts":
+        val current = collision_facts("a", "c")
+        val stale = DirectoryJoinPointFactsV1(..current, facts_key: "sha256:" + "a".repeat(64))
+        val selector = pointcut_selector_parse_v1("a")
+        expect(pointcut_match_key_v1(selector, stale)).to_equal("")
+        expect(pointcut_match_identity_v1(selector, stale)).to_equal("")
+        val result = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(), selector, stale)
+        expect(result.cacheable).to_equal(false)
+        expect(result.shard.complete).to_equal(false)
+        expect(pointcut_match_universe_v1(selector, [stale], true).complete).to_equal(false)
+
+    it "retains Unicode and delimiter-bearing identities without rejecting valid text":
+        val point = JoinPointFactV1(id: "模块::a", kind: "forward", symbol: "a", attrs: ["é", "a|b"],
+            owner_file: "目录/é|a.spl", base_body_digest: "")
+        val first = directory_join_point_facts_v1("目录", ["目录/é|a.spl"], [point], [], true)
+        val again = directory_join_point_facts_v1("目录", ["目录/é|a.spl"], [point], [], true)
+        expect(first.facts_key).to_equal(again.facts_key)
+        expect(pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(),
+            pointcut_selector_parse_v1("a"), first).shard.sorted_matching_ids).to_equal(["模块::a"])
+
+    it "matches an independent UTF-8 framed digest vector":
+        val point = JoinPointFactV1(id: "模块::a", kind: "forward", symbol: "a", attrs: ["é", "a|b"],
+            owner_file: "目录/é|a.spl", base_body_digest: "")
+        # Pure encoding vector, not an admitted negative/guard witness.
+        val value = DirectoryJoinPointFactsV1(scope_id: "目录", sorted_member_files: ["目录/é|a.spl"],
+            sorted_join_points: [point], sorted_child_roots: [], complete: true,
+            negative_root: "sha256:" + "1".repeat(64), active_guard_root: "sha256:" + "2".repeat(64), facts_key: "")
+        expect(directory_facts_key_v1(value)).to_equal("sha256:d606ea14d13b8949daccd477e2caa960a2d09879144afe9b586c37dfb6a8eb9e")

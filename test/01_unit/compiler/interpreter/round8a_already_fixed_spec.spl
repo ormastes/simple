@@ -1,0 +1,120 @@
+# Regression pins for round-8 part-A interpreter bugs that no longer reproduce
+# on the seed (each example is the bug record's minimal shape).
+
+class R8Task:
+    state: i64
+    n: i64
+
+class R8Mgr:
+    tasks: Dict<text, R8Task>
+    items: [R8Task]
+
+    me start(id: text):
+        if self.tasks.contains_key(id):
+            val t = self.tasks[id]
+            t.state = 2
+
+    me bump(i: i64):
+        val hf = self.items[i]
+        hf.n = hf.n + 1
+
+trait R8Prov:
+    me bump() -> i64
+
+class R8P1 with R8Prov:
+    n: i64
+    me bump() -> i64:
+        self.n = self.n + 1
+        self.n
+
+var r8_slot: R8Prov? = nil
+
+fn r8_step() -> i64:
+    var r = 0
+    match r8_slot:
+        case Some(p): r = p.bump()
+        case _: r = -1
+    r
+
+enum R8Val:
+    Arr(items: [i64])
+    Num(n: i64)
+
+impl R8Val:
+    fn as_array() -> [i64]?:
+        match self:
+            case Arr(items): Some(items)
+            case _: nil
+
+class R8Doc:
+    v: R8Val
+    fn get_path(p: text) -> R8Val?:
+        Some(self.v)
+
+struct R8Box:
+    data: Dict<text, i64>
+
+fn r8_box_set(b: R8Box, k: text, v: i64) -> R8Box:
+    var nb = b
+    nb.data[k] = v
+    nb
+
+struct R8Bf:
+    shift: i64
+    width: i64
+
+val R8_BF = R8Bf(shift: 3, width: 2)
+
+fn r8_bf_mask(f: R8Bf) -> i64:
+    ((1 << f.width) - 1) << f.shift
+
+describe "round 8 part A already-fixed pins":
+    it "class element read from a dict field is a live reference":
+        var m = R8Mgr(tasks: {}, items: [])
+        m.tasks["a"] = R8Task(state: 0, n: 0)
+        m.start("a")
+        expect(m.tasks["a"].state).to_equal(2)
+
+    it "class element read from a list field is a live reference":
+        var m = R8Mgr(tasks: {}, items: [])
+        m.items.push(R8Task(state: 0, n: 0))
+        m.bump(0)
+        m.bump(0)
+        expect(m.items[0].n).to_equal(2)
+
+    it "me method through a Trait? module slot keeps mutations":
+        r8_slot = Some(R8P1(n: 0))
+        expect(r8_step()).to_equal(1)
+        expect(r8_step()).to_equal(2)
+        expect(r8_step()).to_equal(3)
+
+    it "?. chain on a present optional method result stays present":
+        val d = R8Doc(v: R8Val.Arr(items: [1, 2]))
+        val r = d.get_path("a")?.as_array()
+        match r:
+            case Some(a): expect(a.len()).to_equal(2)
+            case _: expect(false).to_equal(true)
+
+    it "dict inside a struct survives copy-return":
+        val b = r8_box_set(R8Box(data: {}), "a", 42)
+        expect(b.data["a"]).to_equal(42)
+
+    it "i64 values from dict iteration compare equal":
+        var d: Dict<text, i64> = {}
+        d["a"] = 5
+        d["b"] = 7
+        var hits = 0
+        for (k, v) in d:
+            if v == 5 or v == 7:
+                hits = hits + 1
+        expect(hits).to_equal(2)
+
+    it "str.trim().substring(nested call).trim() dispatches":
+        val s = "  abc def  "
+        val parts = ["abc"]
+        expect(s.trim().substring(parts[0].len()).trim()).to_equal("def")
+
+    it "module-level val struct passed as call argument is intact":
+        val a = R8_BF
+        expect(r8_bf_mask(a)).to_equal(24)
+        expect(r8_bf_mask(R8_BF)).to_equal(24)

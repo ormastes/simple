@@ -39,6 +39,24 @@ rustflags = [
     "-C", "link-arg=-Wl,--export-dynamic",
 ]
 
+[target.aarch64-apple-darwin]
+# ld64's --export-dynamic equivalent (single-dash; the GNU spelling is an
+# ELF flag ld64 silently ignores). Export the runtime/contract symbols so
+# cranelift JIT code resolves them from the main binary — same contract the
+# Linux section above documents for the SMF loader. Without this, macOS
+# JIT-finalize cannot resolve e.g. simple_contract_check and every caller
+# needs a preloaded runtime dylib, which switches the JIT's whole rt-symbol
+# surface to that second (stale) runtime copy:
+# doc/08_tracking/bug/seed_scv_cold_init_second_file_event_fails_2026-11-05.md
+rustflags = [
+    "-C", "link-arg=-Wl,-export_dynamic",
+]
+
+[target.x86_64-apple-darwin]
+rustflags = [
+    "-C", "link-arg=-Wl,-export_dynamic",
+]
+
 [target.x86_64-pc-windows-msvc]
 # clang-only policy (.claude/rules/code-style.md, 2026-09-24): never `cl`,
 # never MSVC `link.exe`. `lld-link` is LLD's COFF linker driver -- it accepts
@@ -59,6 +77,12 @@ rustflags = [
     "-C", "link-arg=/OPT:REF",
     # Fold identical COMDATs (identical function folding)
     "-C", "link-arg=/OPT:ICF",
+    # Reproducible link (bug seed_rust_build_not_reproducible_2026-11-02):
+    # without /Brepro lld-link stamps the COFF TimeDateStamp from the wall
+    # clock, so identical source never hashes equal and the native object
+    # cache (keyed on the compiler binary) misses on every reseed. The PDB
+    # half is handled in driver/build.rs (/DEBUG:NONE for bootstrap bins).
+    "-C", "link-arg=/Brepro",
 ]
 
 # Cross-compilation linker configs for non-Windows targets. clang-only policy:
@@ -72,7 +96,15 @@ rustflags = [
 # before relying on this for an actual cross-build.
 [target.aarch64-unknown-linux-gnu]
 linker = "clang"
-rustflags = ["-C", "link-arg=--target=aarch64-linux-gnu"]
+# --export-dynamic: same contract as the x86_64 Linux section above. The
+# interpreter resolves the rt_vulkan_* family table (interpreter_extern/vulkan.rs)
+# and the SMF loader resolves runtime symbols with dlsym(RTLD_DEFAULT) on the
+# main binary. A seed linked without it has an empty dynamic symbol table and every
+# such call fails with "is not linked into this binary".
+rustflags = [
+    "-C", "link-arg=--target=aarch64-linux-gnu",
+    "-C", "link-arg=-Wl,--export-dynamic",
+]
 
 [target.riscv64gc-unknown-linux-gnu]
 linker = "clang"

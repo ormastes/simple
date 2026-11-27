@@ -72,3 +72,15 @@ pure-Simple test-runner) — A/B confirmed the failure is byte-identical for
 origin and swept content, i.e. pre-existing and unrelated. Remaining
 ~1,360 complex lines: run the checker for the current list.
 
+
+## 2026-11-25 triage (p3-bap lane, Windows worktree)
+
+Fresh checker run at `origin/release/1.0.0` (47d6c5eddd5):
+`sh scripts/check/check-expect-footgun.shs` → `23971 file(s) scanned, 4357
+footgun pattern(s) found (report-only)`, exit 0. The remaining sweep is a
+large program (thousands of complex-case rewrites requiring parse-aware
+transformation and per-file verification), not a bounded single-bug fix, and
+spec-run verification on this host is blocked by the seed
+`@representation_boundary` parse gap. Left open for owner triage; the
+"needs owner triage" header stands. No assertion was rewritten or weakened
+in this lane.

@@ -1,0 +1,65 @@
+# Promise.all / Promise.race in the nogc JS engine.
+# Bug: js_engine_missing_builtins_regex_promise_prototype_2026-07-11 (item 2, residual).
+# The 2026-11-05 note on this record lists Promise.all / Promise.race as not
+# covered; everyday page JS (`Promise.all([fetch(...), fetch(...)])`) needs them.
+# RED on unpatched lib: `typeof Promise.all` is "undefined".
+
+use std.spec.*
+use std.js.engine.js_error.{JsLogger, LogLevel}
+use std.js.engine.parser.{JsParser}
+use std.js.types.js_types.{JsValue}
+use std.js.engine.interpreter_types.{js_to_string}
+use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
+use std.nogc_sync_mut.js.engine.interpreter_exec.*
+
+# Run `source`, drain the microtask queue, and return global `r` as text.
+fn run_js_drained(source: text) -> text:
+    val logger = JsLogger.new("promise-all-race-spec", LogLevel.Error)
+    val parser = JsParser.new(source, logger)
+    match parser.parse_program():
+        Ok(statements):
+            val interpreter = JsInterpreter.new(logger)
+            match interpreter.execute(statements):
+                Ok(value):
+                    var rounds = 0
+                    while rounds < 16 and interpreter.drain_pending_microtasks():
+                        rounds = rounds + 1
+                    match interpreter.lookup_global_value("r"):
+                        Some(v): js_to_string(v)
+                        nil: "<no r>"
+                Err(error): "ERR: {error.message}"
+        Err(error): "PARSE-ERR: {error.message}"
+
+describe "JS engine Promise.all / Promise.race":
+    it "exposes all and race as functions on Promise":
+        expect(run_js_drained("var r = 0; r = typeof Promise.all;")).to_equal("function")
+        expect(run_js_drained("var r = 0; r = typeof Promise.race;")).to_equal("function")
+
+    it "resolves with element values in index order":
+        expect(run_js_drained("var r = 0; Promise.all([1, 2, 3]).then(v => { r = v[0] + v[1] + v[2]; });")).to_equal("6")
+        expect(run_js_drained("var r = 0; Promise.all([Promise.resolve(1), Promise.resolve(2)]).then(v => { r = v[0] + v[1]; });")).to_equal("3")
+
+    it "preserves index order when a later element settles first":
+        expect(run_js_drained("var r = 0; var late; var p1 = new Promise(res => { late = res; }); Promise.all([p1, Promise.resolve(2)]).then(v => { r = v[0] + ',' + v[1]; }); late(1);")).to_equal("1,2")
+
+    it "resolves an empty array immediately":
+        expect(run_js_drained("var r = 'no'; Promise.all([]).then(v => { r = 'empty:' + v.join(','); });")).to_equal("empty:")
+
+    it "rejects when any element rejects":
+        expect(run_js_drained("var r = 0; Promise.all([Promise.resolve(1), Promise.reject('bad')]).catch(e => { r = 'c:' + e; });")).to_equal("c:bad")
+        expect(run_js_drained("var r = 0; Promise.all([Promise.reject('a'), Promise.reject('b')]).catch(e => { r = 'c:' + e; });")).to_equal("c:a")
+
+    it "adopts pending element promises resolved after registration":
+        expect(run_js_drained("var r = 0; var ir; var inner = new Promise(res => { ir = res; }); Promise.all([inner, 10]).then(v => { r = v[0] + v[1]; }); ir(5);")).to_equal("15")
+
+    it "settles a race with the first settled element":
+        expect(run_js_drained("var r = 0; Promise.race([Promise.resolve('a'), Promise.resolve('b')]).then(v => { r = v; });")).to_equal("a")
+
+    it "settles a race from the element that settles first, even when registered second":
+        expect(run_js_drained("var r = 0; var win; var lose; var p = new Promise(res => { win = res; }); var q = new Promise(res => { lose = res; }); Promise.race([q, p]).then(v => { r = v; }); win('now');")).to_equal("now")
+
+    it "rejects a race from the first rejection":
+        expect(run_js_drained("var r = 0; Promise.race([Promise.reject('no'), Promise.resolve('yes')]).catch(e => { r = 'c:' + e; });")).to_equal("c:no")
+
+    it "chains into then and catch like any promise":
+        expect(run_js_drained("var r = 0; Promise.all([Promise.resolve(1), 2]).then(v => v[0] + v[1]).then(v => { r = v * 10; });")).to_equal("30")

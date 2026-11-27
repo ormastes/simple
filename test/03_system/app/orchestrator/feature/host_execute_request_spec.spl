@@ -1,0 +1,148 @@
+# @req HOST-02 ORCH-02
+# Envelope-only checks; admitted SSpec and provider execution NOT_RUN.
+# Envelope-only fixture. Opaque SDN below is NOT a provider launch request.
+# Zero signatures are shape-valid bytes, never valid admission evidence.
+use std.common.contracts.orchestration.host_execute_request_v1.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.orchestration.linux_launch_plan_v1.*
+use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionGrantV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+fn execute_shape_fixture() -> HostExecuteRequestV1:
+    val plan = HostLinuxLaunchPlanV1(workload_uid: "workload", attempt: 1,
+        runtime_class: "podman-rootless", service_scope_id: "user", request_digest: "d".repeat(64),
+        physical_host_id: "host", boot_id: "boot", provider_generation: 1)
+    val row = HostReservationV1(id: "reservation", operation_id: "operation",
+        payload_digest: "0".repeat(64), service_scope_id: "user", assignment_generation: 1,
+        nonce: "nonce", cpu_millis: 2000, memory_bytes: 4000, exclusive_devices: [],
+        prepare_deadline_ms: 100, state: HostReservationStateV1.Prepared)
+    val intent = host_reservation_bind_intent_v1(HostReservationIntentV1(physical_host_id: "host",
+        fence: HostLedgerFenceV1(authority_id: "authority", boot_id: "boot", provider_generation: 1, revision: 1),
+        plan_digest: host_linux_launch_plan_digest_v1(plan).unwrap(), reservation: row)).unwrap()
+    val operation = OperationEnvelopeV2(version: 2, id: "operation", payload_digest: intent.reservation.payload_digest,
+        principal: "user", project: "project", host_id: "host", operation: "host_reservation_v1",
+        environment_digest: "b".repeat(64), policy_revision: 1, revocation_epoch: 0,
+        session_generation: 1, memory_bytes: 4000, duration_ms: 100)
+    val grant = ExecutionGrantV2(id: "grant", principal: "user", project: "project", host_id: "host",
+        operations: ["host_execute_v1"], environment_digest: "b".repeat(64), policy_revision: 1,
+        revocation_epoch: 0, expires_at: 1000, maximum_memory_bytes: 8000, maximum_duration_ms: 1000)
+    var signature: [u8] = []
+    for index in 0..64: signature.push(0u8)
+    val signed = DistributedSignedGrantV2(grant: grant, issuer_id: "issuer", key_revision: 1, signature: signature)
+    val approval = DistributedSignedApprovalV2(approver_id: "approver", key_revision: 1,
+        grant_digest: "a".repeat(64), request_digest: "c".repeat(64), policy_revision: 1,
+        session_generation: 1, expires_at: 1000, signature: signature)
+    val opaque = sdn_encode_canonical(SdnValue.Dict({"opaque": SdnValue.String("envelope-only")})) + "\n"
+    HostExecuteRequestV1(intent: intent, operation: operation,
+        receipt: host_reservation_receipt_v1(intent, operation).unwrap(), plan: plan,
+        request_bytes: opaque, signed: signed, approval: approval)
+
+describe "host execute request envelope shape and integrity":
+    it "round trips exact envelope bytes without claiming signed authorization":
+        step("Round trips exact envelope bytes without claiming signed authorization")
+        val request = execute_shape_fixture()
+        val bytes = host_execute_request_encode_v1(request).unwrap()
+        val decoded = host_execute_request_decode_v1(bytes).unwrap()
+        expect(host_execute_request_encode_v1(decoded).unwrap() == bytes).to_equal(true)
+        expect(decoded.operation.operation == "host_reservation_v1").to_equal(true)
+        expect(decoded.plan.physical_host_id == "host").to_equal(true)
+        expect(decoded.request_bytes == request.request_bytes).to_equal(true)
+        expect(decoded.signed.signature.len() == 64).to_equal(true)
+
+    it "rejects intent operation and receipt tampering":
+        step("Rejects intent operation and receipt tampering")
+        var request = execute_shape_fixture()
+        request.operation.payload_digest = "f".repeat(64)
+        expect(host_execute_request_encode_v1(request).is_err()).to_equal(true)
+        request = execute_shape_fixture()
+        request.receipt.prepared_revision = 99
+        expect(host_execute_request_encode_v1(request).is_err()).to_equal(true)
+        request = execute_shape_fixture()
+        request.receipt.receipt_digest = "e".repeat(64)
+        expect(host_execute_request_encode_v1(request).is_err()).to_equal(true)
+
+    it "requires full scope and matching host boot provider and service identity":
+        step("Requires full scope and matching host boot provider and service identity")
+        var request = execute_shape_fixture()
+        request.plan.physical_host_id = ""
+        request.plan.boot_id = ""
+        request.plan.provider_generation = 0
+        expect(host_execute_request_encode_v1(request).is_err()).to_equal(true)
+        request = execute_shape_fixture()
+        request.plan.physical_host_id = "other-host"
+        expect(host_execute_request_encode_v1(request).is_err()).to_equal(true)
+        request = execute_shape_fixture()
+        request.plan.boot_id = "other-boot"
+        expect(host_execute_request_encode_v1(request).is_err()).to_equal(true)
+        request = execute_shape_fixture()
+        request.plan.provider_generation = 2
+        expect(host_execute_request_encode_v1(request).is_err()).to_equal(true)
+        request = execute_shape_fixture()
+        request.plan.service_scope_id = "other-scope"
+        expect(host_execute_request_encode_v1(request).is_err()).to_equal(true)
+
+    it "binds the canonical launch plan digest to the reservation":
+        step("Binds the canonical launch plan digest to the reservation")
+        var request = execute_shape_fixture()
+        request.plan.request_digest = "e".repeat(64)
+        expect(host_execute_request_encode_v1(request).is_err()).to_equal(true)
+        request = execute_shape_fixture()
+        request.plan.workload_uid = "other-workload"
+        expect(host_execute_request_encode_v1(request).is_err()).to_equal(true)
+        request = execute_shape_fixture()
+        request.plan.attempt = 2
+        expect(host_execute_request_encode_v1(request).is_err()).to_equal(true)
+
+    it "rejects unknown duplicate noncanonical and tampered wire fields":
+        step("Rejects unknown duplicate noncanonical and tampered wire fields")
+        val bytes = host_execute_request_encode_v1(execute_shape_fixture()).unwrap()
+        val head = bytes.slice(0, bytes.len() - 2)
+        expect(host_execute_request_decode_v1(head + ", extra: true" + "}\n").is_err()).to_equal(true)
+        expect(host_execute_request_decode_v1(head + ", version: 1" + "}\n").is_err()).to_equal(true)
+        expect(host_execute_request_decode_v1(bytes + "\n").is_err()).to_equal(true)
+        expect(host_execute_request_decode_v1(bytes.replace("host-execute-request", "host-prepare-request")).is_err()).to_equal(true)
+        expect(host_execute_request_decode_v1(bytes.replace("host_reservation_v1", "host_execute_v1")).is_err()).to_equal(true)
+
+    it "bounds opaque canonical request syntax without trusting semantic digest fields":
+        step("Bounds opaque canonical request syntax without trusting semantic digest fields")
+        var request = execute_shape_fixture()
+        request.request_bytes = ""
+        expect(host_execute_request_encode_v1(request).is_err()).to_equal(true)
+        request.request_bytes = "x".repeat(1048577)
+        expect(host_execute_request_encode_v1(request).is_err()).to_equal(true)
+        request.request_bytes = "a: 1\na: 2\n"
+        expect(host_execute_request_encode_v1(request).is_err()).to_equal(true)
+        request.request_bytes = "a: 1\n"
+        expect(host_execute_request_encode_v1(request).is_err()).to_equal(true)
+        request.request_bytes = sdn_encode_canonical(SdnValue.Dict({"requestDigest": SdnValue.String("not-verified-here")})) + "\n"
+        val wire = host_execute_request_encode_v1(request).unwrap()
+        expect(host_execute_request_decode_v1(wire).unwrap().request_bytes == request.request_bytes).to_equal(true)
+        expect(host_execute_request_decode_v1("x".repeat(2097153)).is_err()).to_equal(true)
+
+    it "rejects malformed signature shapes without treating valid lengths as authentication":
+        step("Rejects malformed signature shapes without treating valid lengths as authentication")
+        var request = execute_shape_fixture()
+        request.signed.signature = []
+        expect(host_execute_request_encode_v1(request).is_err()).to_equal(true)
+        request = execute_shape_fixture()
+        request.approval.signature = []
+        expect(host_execute_request_encode_v1(request).is_err()).to_equal(true)
+
+
+    it "enforces request and envelope limits in UTF8 bytes":
+        step("Check multibyte bodies immediately below and above the byte ceiling")
+        var request = execute_shape_fixture()
+        # UTF-8 byte ceiling, not a count of scalar characters.
+        request.request_bytes = "\"" + "é".repeat(524286) + "\"\n"
+        expect(str_len(request.request_bytes) == 1048575).to_equal(true)
+        expect(host_execute_request_encode_v1(request).is_ok()).to_equal(true)
+        request.request_bytes = "\"" + "é".repeat(524288) + "\"\n"
+        expect(str_len(request.request_bytes) == 1048579).to_equal(true)
+        expect(host_execute_request_encode_v1(request).unwrap_err() == "host-execute-request-body-size").to_equal(true)
+        val outer = "é".repeat(1048577)
+        expect(str_len(outer) == 2097154).to_equal(true)
+        expect(host_execute_request_decode_v1(outer).unwrap_err() == "host-execute-request-too-large").to_equal(true)

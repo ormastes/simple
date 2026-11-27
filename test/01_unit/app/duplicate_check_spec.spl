@@ -1,12 +1,12 @@
 use compiler.tools.duplicate_check.config.{default_config}
-use compiler.tools.duplicate_check.tokenizer.{tokenize, SimpleToken, SimpleTokenKind}
+use compiler.tools.duplicate_check.tokenizer.{tokenize, tokenize_for_path, SimpleToken, SimpleTokenKind}
 use compiler.tools.duplicate_check.detector.{collect_files}
 use compiler.tools.duplicate_check.features.{extract_token_frequencies, build_feature_vector, cosine_similarity}
 use compiler.tools.duplicate_check.doc_extractor.{DocEntry}
 use compiler.tools.duplicate_check.semantic.{run_text_fallback}
 
 fn fixture_root() -> text:
-    "$repo/test/fixtures/duplicate_check"
+    cwd() + "/test/fixtures/duplicate_check"
 
 describe "duplicate-check config":
     it "loads semantic-first defaults while keeping token mode available":
@@ -37,6 +37,16 @@ describe "duplicate-check tokenizer":
             if token.kind == SimpleTokenKind.Identifier and token.value == "IDENTIFIER":
                 has_identifier_token = true
         expect(has_identifier_token).to_equal(true)
+
+    it "skips C comments only for .c/.h paths":
+        var config = default_config()
+        config.ignore_identifiers = false
+        val source = "// license header\n/* block\ncomment */\nint add(int a) {{ return a + 1; }}\n"
+        val c_tokens = tokenize_for_path("x.c", source, config)
+        expect(c_tokens[0].value).to_equal("int")
+        expect(c_tokens[0].line).to_equal(4)
+        val spl_tokens = tokenize_for_path("x.spl", source, config)
+        expect(spl_tokens[0].value).to_equal("/")
 
 describe "duplicate-check file collection":
     it "collects fixture files from directory":
@@ -121,3 +131,12 @@ describe "duplicate-check semantic fallback":
         val report = run_text_fallback(entries, 0.90, 0.40)
         expect(report.matches.len()).to_equal(1)
         expect(report.matches[0].match_kind.contains("text-based")).to_equal(true)
+
+describe "duplicate-check C sources":
+    it "collects .c/.h files only when include_c_sources is set":
+        val root = cwd() + "/test/fixtures/duplicate_check/c_sources"
+        var config = default_config()
+        config.exclude_patterns = []
+        expect(collect_files(root, config).len()).to_equal(0)
+        config.include_c_sources = true
+        expect(collect_files(root, config).len()).to_equal(2)

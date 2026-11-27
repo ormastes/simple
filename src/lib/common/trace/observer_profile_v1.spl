@@ -1,0 +1,98 @@
+# MDSOC: feature dimension
+# Observer profile fold V1 — "profile mode" over the V1 raw-edge event stream.
+#
+# Log mode is the event stream itself (TraceEventV1 records drained from the
+# collector). Profile mode folds that SAME stream — no second instrumentation
+# path and no backend knowledge — into per-function call counts and
+# inclusive/exclusive time, using one stack per context (plan §12.4: raw edges
+# are the baseline; nesting is reconstructed by the consumer, never promised
+# by the producer). An Exit without a matching Entry, or an Entry that never
+# exits, is counted as unmatched rather than guessed.
+use std.common.trace.observer_contract_v1.{TraceEventV1, TraceEventKindV1}
+
+pub struct TraceFunctionProfileV1:
+    function_id: u32
+    calls: u64
+    inclusive_ns: u64
+    exclusive_ns: u64
+    max_depth: u64
+
+pub struct TraceProfileV1:
+    functions: [TraceFunctionProfileV1]
+    unmatched_exits: u64
+    open_entries: u64
+    events: u64
+
+struct _TraceOpenFrameV1:
+    context_id: u64
+    function_id: u32
+    entered_at: u64
+    child_ns: u64
+
+fn _trace_profile_index_v1(profile: TraceProfileV1, function_id: u32) -> i64:
+    for index in 0..profile.functions.len():
+        if profile.functions[index].function_id == function_id: return index
+    -1
+
+# Fold raw edges into a profile. Events must be in record order; contexts are
+# independent (one stack each). Entry/Exit/TailExit are consumed, every
+# other kind is counted in `events` only.
+pub fn trace_profile_fold_v1(events: [TraceEventV1]) -> TraceProfileV1:
+    var profile = TraceProfileV1(functions: [], unmatched_exits: 0, open_entries: 0, events: 0)
+    var open: [_TraceOpenFrameV1] = []
+    for event in events:
+        profile.events = profile.events + 1u64
+        if event.kind == TraceEventKindV1.Entry:
+            open.push(_TraceOpenFrameV1(context_id: event.context_id, function_id: event.function_id,
+                entered_at: event.timestamp, child_ns: 0))
+            var depth: u64 = 0
+            for frame in open:
+                if frame.context_id == event.context_id: depth = depth + 1u64
+            val index = _trace_profile_index_v1(profile, event.function_id)
+            if index < 0:
+                profile.functions.push(TraceFunctionProfileV1(function_id: event.function_id, calls: 0,
+                    inclusive_ns: 0, exclusive_ns: 0, max_depth: depth))
+            elif profile.functions[index].max_depth < depth:
+                profile.functions[index].max_depth = depth
+            continue
+        if event.kind != TraceEventKindV1.Exit and event.kind != TraceEventKindV1.TailExit:
+            continue
+        # Innermost open frame of this context and function.
+        var frame_index = open.len() - 1
+        while frame_index >= 0:
+            val frame = open[frame_index]
+            if frame.context_id == event.context_id and frame.function_id == event.function_id: break
+            frame_index = frame_index - 1
+        if frame_index < 0:
+            profile.unmatched_exits = profile.unmatched_exits + 1u64
+            continue
+        val frame = open[frame_index]
+        val inclusive: u64 = if event.timestamp >= frame.entered_at: event.timestamp - frame.entered_at else: 0
+        val exclusive: u64 = if inclusive >= frame.child_ns: inclusive - frame.child_ns else: 0
+        # Frames opened above this one in the same context never closed.
+        var kept: [_TraceOpenFrameV1] = []
+        for index in 0..open.len():
+            if index == frame_index: continue
+            if index > frame_index and open[index].context_id == event.context_id:
+                profile.open_entries = profile.open_entries + 1u64
+                continue
+            kept.push(open[index])
+        open = kept
+        # Charge inclusive time to the nearest enclosing frame of this context.
+        var parent = open.len() - 1
+        while parent >= 0:
+            if open[parent].context_id == event.context_id:
+                open[parent].child_ns = open[parent].child_ns + inclusive
+                break
+            parent = parent - 1
+        val index = _trace_profile_index_v1(profile, event.function_id)
+        profile.functions[index].calls = profile.functions[index].calls + 1u64
+        profile.functions[index].inclusive_ns = profile.functions[index].inclusive_ns + inclusive
+        profile.functions[index].exclusive_ns = profile.functions[index].exclusive_ns + exclusive
+    profile.open_entries = profile.open_entries + (open.len() as u64)
+    profile
+
+pub fn trace_profile_function_v1(profile: TraceProfileV1, function_id: u32) -> TraceFunctionProfileV1?:
+    val index = _trace_profile_index_v1(profile, function_id)
+    if index < 0: return None
+    Some(profile.functions[index])

@@ -1,0 +1,92 @@
+# Rich wrapper over the single normalized schema reducer and property checker.
+# Only the existing semantic type owner binds/types syntax; no V1 nominal field
+# carries a structural descriptor or an invented hash-based nominal identity.
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.data.data_schema_contracts.*
+use compiler.common.data.data_schema_contracts_v2.*
+use compiler.common.data.data_schema_contracts_v3.*
+use compiler.common.data.data_semantic_type_identity_v1.{DataSemanticTypeIdentityV1, data_semantic_type_identity_valid_v1}
+use compiler.common.data.data_schema_core_v1.*
+use compiler.common.data.data_schema_property_resolver_v1.*
+
+fn data_schema_lp_v3(value: text) -> text:
+    "{value.byte_len()}:{value}"
+
+pub fn data_schema_digest_v3(tree: text, attrs: [DataResolvedAttrV3], views: [DataResolvedViewV2], properties: [DataResolvedPropertyV2]) -> text:
+    var canonical = DATA_SCHEMA_DIGEST_DOMAIN_V3 + "\ntree=" + data_schema_lp_v3(tree) + "\n"
+    for view in views:
+        canonical = canonical + "view=" + data_schema_lp_v3(view.name) + "\n"
+    var index = 0
+    while index < attrs.len():
+        val attr = attrs[index]
+        canonical = canonical + "attr={attr.id.ordinal}|" + data_schema_lp_v3(attr.name) +
+            "type-version={attr.type_identity.version}|" + data_schema_lp_v3(attr.type_identity.canonical) +
+            "required={data_requiredness_code_v1(attr.requiredness)}|" + data_schema_lp_v3(attr.default_value)
+        var applicable = ""
+        for view in attr.views:
+            applicable = applicable + data_schema_lp_v3(view)
+        canonical = canonical + "views=" + data_schema_lp_v3(applicable) +
+            "property=" + data_schema_lp_v3(data_property_canonical_v2(properties[index].property)) + "\n"
+        index = index + 1
+    sha256_text(canonical)
+
+pub fn data_schema_resolve_v3(authority: DataSchemaAuthorityV1, views: [DataViewDeclV2],
+                              decls: [DataAttrDeclV3]) -> Result<DataSchemaSurfaceV3, [DataSchemaDiagnosticV1]>:
+    val nowhere = data_decl_provenance_v1(DataDeclOriginV1.Spl, "", 0, "")
+    if views.len() > DATA_SCHEMA_MAX_VIEWS_V2 or decls.len() > DATA_SCHEMA_MAX_DECLS_V2 or authority.owners.len() > DATA_SCHEMA_MAX_VIEWS_V2:
+        return Err([data_schema_invalid_v2(authority.tree, nowhere, "schema input limit exceeded")])
+    if not data_schema_name_valid_v2(authority.tree) or authority.owners.len() == 0:
+        return Err([data_schema_invalid_v2(authority.tree, nowhere, "schema needs a canonical tree and explicit owner authority")])
+    var diags: [DataSchemaDiagnosticV1] = []
+    for owner in authority.owners:
+        if not data_schema_name_valid_v2(owner):
+            diags.push(data_schema_invalid_v2(owner, nowhere, "schema authority owner must be canonical"))
+    var view_names: [text] = []
+    for view in views:
+        if val diagnostic = data_schema_view_error_v2(authority, view):
+            diags.push(diagnostic)
+        else:
+            view_names.push(view.name)
+    var normalized: [DataSchemaCoreDeclV1] = []
+    var property_decls: [DataSchemaPropertyDeclV1] = []
+    var identities: Dict<text, DataSemanticTypeIdentityV1> = {}
+    for decl in decls:
+        if decl.tree != authority.tree or not authority.owners.contains(decl.provenance.owner):
+            diags.push(data_schema_diagnostic_v1(DataSchemaErrorKindV1.UnauthorizedInjection, decl.name,
+                decl.provenance, decl.provenance, "attribute owner has no authority over tree '{decl.tree}'"))
+        if not data_schema_name_valid_v2(decl.tree) or not data_schema_name_valid_v2(decl.view) or not data_schema_name_valid_v2(decl.name):
+            diags.push(data_schema_invalid_v2(decl.name, decl.provenance, "tree, view and attribute must be canonical names"))
+        if not view_names.contains(decl.view):
+            diags.push(data_schema_invalid_v2(decl.name, decl.provenance, "attribute view was not explicitly declared"))
+        if not data_semantic_type_identity_valid_v1(decl.type_identity):
+            diags.push(data_schema_invalid_v2(decl.name, decl.provenance, "invalid or unsupported bound semantic type identity"))
+        val shape = data_property_contract_error_v2(decl.property, decl.requiredness, decl.default_value)
+        if shape != "":
+            diags.push(data_schema_invalid_v2(decl.name, decl.provenance, shape))
+        val defaulted = data_requiredness_code_v1(decl.requiredness) == 3
+        if defaulted and decl.default_value == "":
+            diags.push(data_schema_invalid_v2(decl.name, decl.provenance, "defaulted attribute has no default"))
+        if not defaulted and decl.default_value != "":
+            diags.push(data_schema_invalid_v2(decl.name, decl.provenance, "default given for a non-defaulted attribute"))
+        normalized.push(DataSchemaCoreDeclV1(view: decl.view, name: decl.name,
+            type_key: decl.type_identity.canonical, requiredness: decl.requiredness,
+            default_value: decl.default_value, provenance: decl.provenance))
+        property_decls.push(DataSchemaPropertyDeclV1(name: decl.name, property: decl.property,
+            provenance: decl.provenance))
+        if not identities.contains_key(decl.name):
+            identities[decl.name] = decl.type_identity
+    if diags.len() > 0:
+        return Err(diags)
+    # All rich keys have passed the owning semantic identity validator above.
+    # The private reducer compares their complete canonical bytes, not hashes.
+    val reduced = data_schema_reduce_v1(authority.tree, normalized)?
+    val properties = data_schema_properties_resolve_v2(reduced, property_decls)?
+    val resolved_views = data_schema_resolved_views_v2(views)
+    var attrs: [DataResolvedAttrV3] = []
+    for attr in reduced:
+        attrs.push(DataResolvedAttrV3(id: attr.id, name: attr.name, type_identity: identities[attr.name],
+            requiredness: attr.requiredness, default_value: attr.default_value,
+            views: attr.views, provenances: attr.provenances))
+    Ok(DataSchemaSurfaceV3(contract_version: DATA_SCHEMA_CONTRACT_V3, tree: authority.tree,
+        attrs: attrs, views: resolved_views, properties: properties,
+        schema_digest: data_schema_digest_v3(authority.tree, attrs, resolved_views, properties)))

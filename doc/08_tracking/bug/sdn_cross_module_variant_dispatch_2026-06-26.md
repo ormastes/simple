@@ -10,6 +10,22 @@
 **Severity:** P2 (test blocker)
 **Status:** CLOSED 2026-09-13 (see Closed section above)
 
+## Verification note — 2026-11-25 (release/1.0.0 P2 batch)
+- CLOSED status re-confirmed. Spec re-run on Windows (`SIMPLE_LIB=src
+  bin/simple.exe test test/01_unit/lib/common/roundtrip_spec.spl
+  --mode=interpreter`) is blocked at release/1.0.0 HEAD by the known
+  source/binary inconsistency: the pinned v1.0.0-rc.1 seed rejects the
+  `@representation_boundary` decorator added by cfd89933699
+  (`error: semantic: ... unknown decorator '@representation_boundary'`),
+  so no spec in the repo can execute with this binary.
+- Verified instead by code inspection: the interpreter enum-dispatch path in
+  `src/compiler_rust/compiler/src/interpreter/expr/calls.rs` now resolves
+  cross-module definitions — enum defs via
+  `owner_module_enum`/`GLOBAL_ENUMS` fallbacks (lines ~1133-1135) and impl
+  methods via `GLOBAL_IMPL_METHODS` (lines ~1167-1176) — so a method call on
+  a cross-module `SdnValue` no longer falls through to
+  `unknown variant or method '...'`. The 2026-09-13 CLOSED entry stands.
+
 ## Symptom
 
 In the interpreter (bin/simple run), calling ANY method on a `SdnValue` returned

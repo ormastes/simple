@@ -1,4 +1,5 @@
 # Interpreter: `substring` dispatch fails on chained str receiver with nested call argument
+Status: SUPERSEDED. Triage 2026-11-11 (lane interp4, PR #8185): seed-smoke verified, fixing commit cited in addendum below.
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
@@ -41,3 +42,15 @@ Reproduce in a minimal interpreter unit spec (`str.trim().substring(f())`) and
 fix method dispatch on chained receivers with nested call arguments in the
 interpreter call path.
 
+
+## 2026-11-10 triage — SUPERSEDED (seed-smoke, lane p3-interp4 row 22)
+
+Fixed by 63c35af09a41 "fix(seed): dispatch slice/substring on temporary text in
+nested calls" (2026-10-09, in branch): the interpreter's nested-call
+dispatcher gained the Value::Str slice/substring arm — the fix message quotes
+this doc's exact error ("method 'substring' not found on value of type str in
+nested call context") and repro shape. Seed-smoke repro
+`build/p3fix-interp4/row22_substring.spl` (the doc's
+`raw_directive.trim().substring(parts[0].len()).trim()` chain): default and
+SIMPLE_EXECUTION_MODE=interpreter both print `row22 result=cdef`. One
+verification cycle; no fix required from this lane.

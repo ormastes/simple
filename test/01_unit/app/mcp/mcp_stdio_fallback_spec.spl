@@ -1,0 +1,33 @@
+# @req REQ-SSPEC-UNIT
+# bug: doc/08_tracking/bug/mcp_stdio_interpreter_gate_exceeds_cpu_guard_2026-08-10.md
+"""
+# MCP Stdin Interpreter Fallback Contract
+
+Verifies that `src/app/mcp/main.spl` retains the native C-runtime linear framing
+route while routing interpreter/JIT execution through `app.mcp.main_stdio_fallback`
+so `bin/simple_mcp_server.cmd` works when no admitted native binary exists.
+"""
+
+use std.spec.{describe, it, expect, assert_true}
+use std.io_runtime.{read_file_text}
+use app.mcp.main_stdio_fallback.{mcp_needs_stdin_fallback, mcp_fallback_read_chars}
+
+describe "MCP stdin interpreter fallback":
+    """Verifies runtime fallback detection, non-positive byte guards, and main.spl dispatch wiring."""
+    it "detects interpreter/JIT fallback mode under the seed interpreter":
+        """When executed under the Rust seed interpreter, fallback mode must be enabled."""
+        assert_true(mcp_needs_stdin_fallback())
+
+    it "returns empty text for zero and negative byte counts":
+        """Zero and negative byte counts return an empty payload without reading stdin."""
+        expect(mcp_fallback_read_chars(0)).to_equal("")
+        expect(mcp_fallback_read_chars(-5)).to_equal("")
+
+    it "keeps native linear framing in main.spl while gating fallback on runtime kind":
+        """main.spl retains native linear stdin reads and gates interpreter/JIT fallback via mcp_needs_stdin_fallback()."""
+        val main_src = read_file_text("src/app/mcp/main.spl")
+        assert_true(main_src.contains("rt_stdin_read_line_text()"))
+        assert_true(main_src.contains("rt_stdin_read_chars_text(count)"))
+        assert_true(main_src.contains("mcp_needs_stdin_fallback()"))
+        assert_true(main_src.contains("mcp_fallback_read_line()"))
+        assert_true(main_src.contains("mcp_fallback_read_chars(count)"))

@@ -1,0 +1,80 @@
+# codex-system-test
+# @manual: show
+# @req: REQ-CACHE-AOP-001
+# Evidence class: source-contract. This covers package-init TLD serialization only.
+# Four authored scenarios; execution and SPipe doc generation are UNRUN.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.package_init_tld_v1.{
+    PackageInitTldV1, package_init_tld_encode_v1, package_init_tld_decode_v1,
+    package_init_tld_valid_v1}
+
+fn directory_tldr_fixture_v1(parent: text?, membership: text, aspect: text) -> PackageInitTldV1:
+    PackageInitTldV1(package_id: "demo.directory",
+        parent_scope_digest: parent,
+        membership_root_digest: membership,
+        ordered_member_ids: ["demo.directory.alpha", "demo.directory.beta"],
+        aspect_root_digest: aspect,
+        trait_root_digest: sha256_text("trait-root"),
+        macro_root_digest: sha256_text("macro-root"),
+        extension_root_digest: sha256_text("extension-root"),
+        template_root_digest: sha256_text("template-root"),
+        initializer_contract_digest: sha256_text("initializer-contract"),
+        ordered_initializer_refs: ["init.first", "init.second"])
+
+describe "Directory TLD semantic binding contract":
+    describe "REQ-CACHE-AOP-001: Directory package-init serialization binds semantic inputs":
+        it "should preserve distinct parent, membership, aspect, and ordered-member values":
+            step("Bind inherited context and directory membership")
+            val parent = sha256_text("parent-context")
+            val membership = sha256_text("directory-membership")
+            val aspect = sha256_text("directory-aspect")
+            val encoded = package_init_tld_encode_v1(
+                directory_tldr_fixture_v1(Some(parent), membership, aspect))
+            step("Decode the stored directory contract")
+            val decoded = package_init_tld_decode_v1(encoded)
+            expect(decoded.ok).to_equal(true)
+            val package = decoded.value.unwrap()
+            expect(package.parent_scope_digest).to_equal(Some(parent))
+            expect(package.membership_root_digest).to_equal(membership)
+            expect(package.aspect_root_digest).to_equal(aspect)
+            expect(package_init_tld_encode_v1(package)).to_equal(encoded)
+            expect(package.ordered_member_ids).to_equal(
+                ["demo.directory.alpha", "demo.directory.beta"])
+
+        it "should encode a changed parent context as different bytes":
+            step("Bind inherited context and directory membership")
+            val membership = sha256_text("directory-membership")
+            val aspect = sha256_text("directory-aspect")
+            val first = package_init_tld_encode_v1(directory_tldr_fixture_v1(
+                Some(sha256_text("parent-one")), membership, aspect))
+            val second = package_init_tld_encode_v1(directory_tldr_fixture_v1(
+                Some(sha256_text("parent-two")), membership, aspect))
+            expect(first.len()).to_be_greater_than(0)
+            expect(second.len()).to_be_greater_than(0)
+            expect(first == second).to_equal(false)
+
+        it "should encode membership and aspect changes independently":
+            step("Bind inherited context and directory membership")
+            val parent = Some(sha256_text("parent-context"))
+            val membership = sha256_text("directory-membership")
+            val aspect = sha256_text("directory-aspect")
+            val baseline = package_init_tld_encode_v1(
+                directory_tldr_fixture_v1(parent, membership, aspect))
+            val changed_membership = package_init_tld_encode_v1(
+                directory_tldr_fixture_v1(parent, sha256_text("membership-changed"), aspect))
+            val changed_aspect = package_init_tld_encode_v1(
+                directory_tldr_fixture_v1(parent, membership, sha256_text("aspect-changed")))
+            expect(baseline.len()).to_be_greater_than(0)
+            expect(changed_membership.len()).to_be_greater_than(0)
+            expect(changed_aspect.len()).to_be_greater_than(0)
+            expect(baseline == changed_membership).to_equal(false)
+            expect(baseline == changed_aspect).to_equal(false)
+
+        it "should reject a malformed inherited parent digest during encoding":
+            step("Reject malformed inherited context")
+            val invalid = directory_tldr_fixture_v1(
+                Some("not-a-sha256-digest"), sha256_text("directory-membership"),
+                sha256_text("directory-aspect"))
+            expect(package_init_tld_valid_v1(invalid)).to_equal(false)
+            expect(package_init_tld_encode_v1(invalid)).to_equal([])

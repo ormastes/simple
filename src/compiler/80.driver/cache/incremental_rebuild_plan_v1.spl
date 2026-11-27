@@ -1,0 +1,157 @@
+# Incremental rebuild plan v1: changed-src + TLDR interface + AOP pointcut
+# invalidation, and the object-hash-equal link skip.
+#
+# doc/05_design/compiler/incremental_build/src_based_tldr_build_v1.md §11:
+#   1. recompile only changed sources, sources whose imported TLDR interface
+#      digest changed, and the aspect-affected pointcut set;
+#   2. no relink when every object hash is unchanged: emit no object, skip the
+#      link, place the cached lib/dynlib/binary.
+#
+# Pure planning over values the driver already has (source digests, TLDR
+# interface digests, directory AOP match shards keyed by facts_key, which
+# carries the GuardIdV1 ActiveGuardRoot). Unknown coverage widens: an import
+# with no module row, an empty digest, an incomplete directory inventory or
+# shard, or a guard-root flip recompiles conservatively, never narrows.
+use compiler.common.cache_contract.aspect_match_shard_v1.{DirectoryJoinPointFactsV1,
+    PointcutMatchShardV1, aspect_weave_plan_delta_v1}
+
+pub struct IncrementalModuleV1:
+    path: text
+    old_source_digest: text     # "" = new module
+    new_source_digest: text
+    imports: [text]             # module paths this module imports
+    old_iface_digest: text      # TLDR interface digest before the edit ("" = unknown)
+    new_iface_digest: text      # after TLDR regeneration ("" = unknown)
+
+pub struct PointcutDirChangeV1:
+    old_facts: DirectoryJoinPointFactsV1
+    new_facts: DirectoryJoinPointFactsV1
+    old_shard: PointcutMatchShardV1
+    new_shard: PointcutMatchShardV1
+    old_apply: Dict<text, text>  # join point id -> advice_apply_key_v1
+    new_apply: Dict<text, text>
+
+pub struct IncrementalRebuildPlanV1:
+    recompile: [text]           # sorted module paths
+    reasons: [text]             # "<path>\u0000<changed-source|iface:<import>|pointcut|unknown-import:<import>>"
+    pointcut_affected: [text]   # sorted owner files from the AOP delta
+
+pub struct IncrementalObjectV1:
+    path: text
+    old_object_digest: text     # "" = no previous object
+    new_object_digest: text     # "" = object removed
+
+pub struct IncrementalLinkDecisionV1:
+    relink: bool
+    place_cached: bool          # reuse the cached lib/dynlib/binary as-is
+    changed_objects: [text]
+
+fn _sorted_v1(values: [text]) -> [text]:
+    var out: [text] = []
+    for v in values:
+        if out.contains(v):
+            continue
+        var j = out.len()
+        out.push(v)
+        while j > 0 and out[j - 1] > v:
+            out[j] = out[j - 1]
+            j = j - 1
+        out[j] = v
+    out
+
+fn _owner_of_v1(f: DirectoryJoinPointFactsV1, id: text) -> text:
+    for p in f.sorted_join_points:
+        if p.id == id:
+            return p.owner_file
+    ""
+
+fn _push_all_members_v1(out: [text], f: DirectoryJoinPointFactsV1) -> [text]:
+    var acc = out
+    for file in f.sorted_member_files:
+        acc.push(file)
+    acc
+
+fn _apply_equal_v1(a: Dict<text, text>, b: Dict<text, text>) -> bool:
+    if a.len() != b.len():
+        return false
+    for k in a.keys():
+        if not b.contains_key(k) or b[k] != a[k]:
+            return false
+    true
+
+# Owner files whose woven code changes. Exact (match/apply delta) when both
+# sides are complete and the guard root is unchanged; otherwise every member
+# file of both inventories.
+pub fn pointcut_affected_files_v1(changes: [PointcutDirChangeV1]) -> [text]:
+    var out: [text] = []
+    for c in changes:
+        if c.old_facts.facts_key == c.new_facts.facts_key and c.old_shard.match_digest ==
+                c.new_shard.match_digest and _apply_equal_v1(c.old_apply, c.new_apply):
+            continue
+        val exact = c.old_facts.complete and c.new_facts.complete and c.old_shard.complete and
+            c.new_shard.complete and c.old_facts.active_guard_root == c.new_facts.active_guard_root
+        if not exact:
+            out = _push_all_members_v1(out, c.old_facts)
+            out = _push_all_members_v1(out, c.new_facts)
+            continue
+        val delta = aspect_weave_plan_delta_v1(c.old_shard, c.old_apply, c.new_shard, c.new_apply)
+        for id in delta.unweave:
+            out.push(_owner_of_v1(c.old_facts, id))
+        for id in delta.weave:
+            out.push(_owner_of_v1(c.new_facts, id))
+        for id in delta.reweave:
+            out.push(_owner_of_v1(c.new_facts, id))
+    var known: [text] = []
+    for file in out:
+        if file != "":
+            known.push(file)
+    _sorted_v1(known)
+
+pub fn incremental_rebuild_plan_v1(modules: [IncrementalModuleV1],
+        pointcuts: [PointcutDirChangeV1]) -> IncrementalRebuildPlanV1:
+    var by_path: Dict<text, IncrementalModuleV1> = {}
+    for m in modules:
+        by_path[m.path] = m
+    val affected = pointcut_affected_files_v1(pointcuts)
+    var recompile: [text] = []
+    var reasons: [text] = []
+    for m in modules:
+        var reason = ""
+        if m.old_source_digest == "" or m.new_source_digest == "" or
+                m.old_source_digest != m.new_source_digest:
+            reason = "changed-source"
+        if reason == "":
+            for dep in m.imports:
+                if not by_path.contains_key(dep):
+                    reason = "unknown-import:" + dep
+                    break
+                val d = by_path[dep]
+                if d.old_iface_digest == "" or d.new_iface_digest == "" or
+                        d.old_iface_digest != d.new_iface_digest:
+                    reason = "iface:" + dep
+                    break
+        if reason == "" and affected.contains(m.path):
+            reason = "pointcut"
+        if reason != "":
+            recompile.push(m.path)
+            reasons.push(m.path + "\u0000" + reason)
+    IncrementalRebuildPlanV1(recompile: _sorted_v1(recompile), reasons: reasons,
+        pointcut_affected: affected)
+
+# Relink only when an object hash changed (or appeared/disappeared). When every
+# object is byte-identical and the cached output exists, place it: no new
+# object, no link. A missing cached output relinks.
+pub fn incremental_link_decision_v1(objects: [IncrementalObjectV1],
+        cached_output_present: bool) -> IncrementalLinkDecisionV1:
+    var changed: [text] = []
+    for o in objects:
+        if o.old_object_digest == "" or o.new_object_digest == "" or
+                o.old_object_digest != o.new_object_digest:
+            changed.push(o.path)
+    val unchanged = changed.len() == 0 and objects.len() > 0
+    IncrementalLinkDecisionV1(relink: not (unchanged and cached_output_present),
+        place_cached: unchanged and cached_output_present, changed_objects: _sorted_v1(changed))
+
+export IncrementalModuleV1, PointcutDirChangeV1, IncrementalRebuildPlanV1
+export IncrementalObjectV1, IncrementalLinkDecisionV1
+export pointcut_affected_files_v1, incremental_rebuild_plan_v1, incremental_link_decision_v1

@@ -1,0 +1,88 @@
+# Immutable per-attempt use DATA; this binds intent, never permission or execution.
+use std.common.contracts.orchestration.agent_task_object_v1.agent_task_reference_valid_v1
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict, as_int, only_known}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct AgentTaskUseBindingV1:
+    controller_id: text
+    session_uid: text
+    attempt: i64
+    ns: text
+    task_ref: text
+    task_digest: text
+    source_digest: text
+    catalog_digest: text
+    provider: text
+    adapter_id: text
+    model: text
+    host_scope_digest: text
+
+pub fn agent_task_use_encode_v1(binding: AgentTaskUseBindingV1) -> Result<text, text>:
+    if (not builder_identifier_valid_v1(binding.controller_id) or
+            not builder_identifier_valid_v1(binding.session_uid) or not builder_identifier_valid_v1(binding.ns) or
+            binding.attempt <= 0 or not agent_task_reference_valid_v1(binding.task_ref)):
+        return Err("agent-task-use-identity-invalid")
+    for digest in [binding.task_digest, binding.source_digest, binding.catalog_digest, binding.host_scope_digest]:
+        if not builder_digest_valid_v1(digest): return Err("agent-task-use-digest-invalid")
+    if binding.provider != "codex" or binding.adapter_id != "codex-root-start-0.169.0-v1":
+        return Err("agent-task-use-adapter-unsupported")
+    if binding.model != "" and not agent_task_reference_valid_v1(binding.model):
+        return Err("agent-task-use-model-invalid")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("agent-task-use"), "intent": SdnValue.String("interactive-start"),
+        "controllerId": SdnValue.String(binding.controller_id), "sessionUid": SdnValue.String(binding.session_uid),
+        "attempt": SdnValue.Int(binding.attempt), "namespace": SdnValue.String(binding.ns),
+        "taskRef": SdnValue.String(binding.task_ref), "taskDigest": SdnValue.String(binding.task_digest),
+        "sourceDigest": SdnValue.String(binding.source_digest), "catalogDigest": SdnValue.String(binding.catalog_digest),
+        "provider": SdnValue.String(binding.provider), "adapterId": SdnValue.String(binding.adapter_id),
+        "model": SdnValue.String(binding.model), "hostScopeDigest": SdnValue.String(binding.host_scope_digest)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn agent_task_use_identity_digest_v1(binding: AgentTaskUseBindingV1) -> Result<text, text>:
+    val checked = agent_task_use_encode_v1(binding)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("agent-task-use-identity"), "controllerId": SdnValue.String(binding.controller_id),
+        "sessionUid": SdnValue.String(binding.session_uid), "attempt": SdnValue.Int(binding.attempt)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"))
+
+pub fn agent_task_use_digest_v1(binding: AgentTaskUseBindingV1) -> Result<text, text>:
+    Ok(sha256_text(agent_task_use_encode_v1(binding)?))
+
+fn agent_task_use_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("agent-task-use-text-required:" + key)
+
+pub fn agent_task_use_decode_v1(source: text) -> Result<AgentTaskUseBindingV1, text>:
+    if source.byte_len() == 0 or source.byte_len() > 8192: return Err("agent-task-use-size")
+    val parsed = match parse_resource_document(source):
+        case Ok(value): value
+        case Err(_): return Err("agent-task-use-syntax")
+    val fields = match as_dict(parsed.0, "", parsed.1):
+        case Ok(value): value
+        case Err(_): return Err("agent-task-use-object-required")
+    val names = ["version", "kind", "intent", "controllerId", "sessionUid", "attempt", "namespace", "taskRef",
+        "taskDigest", "sourceDigest", "catalogDigest", "provider", "adapterId", "model", "hostScopeDigest"]
+    if only_known(fields, names, "", parsed.1).is_err(): return Err("agent-task-use-unknown-field")
+    for key in names:
+        if not fields.contains_key(key): return Err("agent-task-use-missing-field:" + key)
+    val version = match as_int(fields["version"], "version", parsed.1):
+        case Ok(value): value
+        case Err(_): return Err("agent-task-use-version")
+    if version != 1 or agent_task_use_text_v1(fields, "kind")? != "agent-task-use": return Err("agent-task-use-version")
+    if agent_task_use_text_v1(fields, "intent")? != "interactive-start": return Err("agent-task-use-intent-unsupported")
+    val attempt = match as_int(fields["attempt"], "attempt", parsed.1):
+        case Ok(value): value
+        case Err(_): return Err("agent-task-use-attempt-invalid")
+    val binding = AgentTaskUseBindingV1(controller_id: agent_task_use_text_v1(fields, "controllerId")?,
+        session_uid: agent_task_use_text_v1(fields, "sessionUid")?, attempt: attempt,
+        ns: agent_task_use_text_v1(fields, "namespace")?, task_ref: agent_task_use_text_v1(fields, "taskRef")?,
+        task_digest: agent_task_use_text_v1(fields, "taskDigest")?, source_digest: agent_task_use_text_v1(fields, "sourceDigest")?,
+        catalog_digest: agent_task_use_text_v1(fields, "catalogDigest")?, provider: agent_task_use_text_v1(fields, "provider")?,
+        adapter_id: agent_task_use_text_v1(fields, "adapterId")?, model: agent_task_use_text_v1(fields, "model")?,
+        host_scope_digest: agent_task_use_text_v1(fields, "hostScopeDigest")?)
+    if agent_task_use_encode_v1(binding)? != source: return Err("agent-task-use-noncanonical")
+    Ok(binding)

@@ -1,0 +1,42 @@
+# Exact root interactive CLI planning DATA. No process, installed capability,
+# stdin/EOF transition or terminal permission is constructed here.
+use std.common.contracts.provider_cli.adapter_types_v1.{ProviderCliProviderV1, ProviderCliVersionDataV1}
+use std.common.text_bytes.utf8_bytes_valid
+use std.common.crypto.sha256.sha256_text
+
+pub struct ProviderCliCodexInteractiveRequestDataV1:
+    prompt: text
+    model: text = ""
+
+pub struct ProviderCliCodexInteractivePlanDataV1:
+    version: ProviderCliVersionDataV1
+    argv: [text]
+    raw_prompt_digest: text
+    expected_normalized_prompt_digest: text
+
+fn interactive_model_valid_v1(value: text) -> bool:
+    if value.byte_len() > 256 or value.starts_with("-") or value.trim() != value:
+        return false
+    if not utf8_bytes_valid(value.bytes()): return false
+    for byte in value.bytes():
+        if byte < 32 or byte == 127: return false
+    true
+
+pub fn plan_provider_cli_codex_interactive_v1(version: ProviderCliVersionDataV1,
+        request: ProviderCliCodexInteractiveRequestDataV1) -> Result<ProviderCliCodexInteractivePlanDataV1, text>:
+    if version.provider != ProviderCliProviderV1.Codex or version.version != "0.169.0":
+        return Err("codex-interactive-exact-version-required")
+    if (request.prompt.byte_len() < 1 or request.prompt.byte_len() > 4096 or
+            request.prompt.contains("\0") or not utf8_bytes_valid(request.prompt.bytes())):
+        return Err("codex-interactive-prompt-utf8-byte-bound")
+    if not interactive_model_valid_v1(request.model): return Err("codex-interactive-model-invalid")
+    var argv: [text] = []
+    if request.model != "":
+        argv.push("--model")
+        argv.push(request.model)
+    argv.push("--")
+    # Root TUI consumes a plain initial prompt; '-' is not exec's stdin sentinel.
+    argv.push(request.prompt)
+    val normalized = request.prompt.replace("\r\n", "\n").replace("\r", "\n")
+    Ok(ProviderCliCodexInteractivePlanDataV1(version: version, argv: argv,
+        raw_prompt_digest: sha256_text(request.prompt), expected_normalized_prompt_digest: sha256_text(normalized)))

@@ -4,7 +4,11 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN — fail-closed gap, not a silent one
+**Status:** FIXED 2026-11-11 (p3-boot11 lane) — explicit startup entry
+`rt_browser_renderer_preinit_enter()` added and called from the generated
+native entry main; new selfcheck + runner coverage. Core-C lane can now host
+the renderer worker without a constructor. Details in the 2026-11-11
+triage section below.
 **Filed:** 2026-08-22 (seed lane)
 
 ## What changed
@@ -46,3 +50,115 @@ Until then the renderer worker must be built on a lane that keeps `.preinit_arra
 2. Allow `.preinit_array` specifically in `forbidden_archive_sections`. Weakens
    the invariant the Stage4 tests exist to prove; not recommended.
 
+
+
+## Triage 2026-11-10 (p3-boot4 lane, assignment row 26)
+
+**Verdict: LIVE — fix blocked by this lane's scope.**
+
+Re-verified at this lane's base (origin/release/1.0.0); the requested
+explicit startup entry was never added:
+
+- No `rt_browser_renderer_preinit_enter` (or any explicit preinit entry)
+  exists anywhere under `src/runtime/` (grep 2026-11-10, zero hits).
+- `src/runtime/runtime_process.c:3844-3853` still compiles the
+  `.preinit_array` registration out under `#if !defined(SIMPLE_CORE_C_STANDALONE)`
+  and keeps only an unreferenced-for-production alias in the standalone arm;
+  the source comment at `:3834-3843` still cites this bug as the recorded
+  open state.
+- Consequence unchanged: a core-C-standalone-built renderer worker still
+  fails closed (`rt_browser_renderer_sandbox_enter()` refuses without
+  `s_browser_renderer_preinit_active`; worker exits).
+
+The documented fix (doc option 1: add `rt_browser_renderer_preinit_enter(argc,
+argv, envp)` and have the core-C entry shim forward `argc/argv/envp` for the
+worker marker) requires edits to `src/runtime/runtime_process.c` **and** the
+compiler-generated core-C main shim (`src/compiler` backend). Both trees are
+outside this lane's scope (`src/runtime` runtime lane; `src/compiler`
+seed-fix lane active). No change made in this lane; fix sketch above is
+ready for whichever lane owns those trees.
+
+## Triage 2026-11-11 (P3 boot11 lane, work/p3-boot11-20261111)
+
+**Verdict: FIXED in this lane — doc option 1 implemented (explicit startup
+entry + entry-shim forwarding), paired with a selfcheck and runner coverage.**
+
+Change (option 1; option 2's invariant-weakening rejected as recommended):
+
+- `src/runtime/runtime_process.c`:
+  - New exported `rt_browser_renderer_preinit_enter(argc, argv, envp)` in the
+    Linux arm, forwarding to `browser_renderer_preinit()` — the same jail the
+    `.preinit_array` constructor entered.
+  - No-op stubs in the non-Linux POSIX arm and the Windows arm, so the
+    runtime.h symbol resolves on every lane (the jail itself is Linux-only).
+  - `browser_renderer_preinit()` made idempotent (early return once
+    `s_browser_renderer_preinit_active`): the hosted lane keeps the
+    constructor, which now runs BEFORE the entry call, so the entry call must
+    not re-enter namespaces/Landlock/seccomp (a double-enter would
+    `_exit(126)` the already-jailed worker).
+  - Standalone-arm comment updated; the "what is missing" comment now records
+    the explicit entry as the documented way out.
+- `src/runtime/runtime.h`: declaration beside the other
+  `rt_browser_renderer_*` process symbols.
+- `src/compiler/70.backend/backend/llvm_native_link_hosted_support.spl`
+  (`compile_entry_point_c`, the entry generator used by the pure-Simple
+  native link, including the core-C standalone lane): the generated
+  `main(argc, argv)` now calls `rt_browser_renderer_preinit_enter(argc, argv,
+  environ)` as its first statement under `#if !defined(_WIN32)`, before
+  `spl_init_args`/`__simple_runtime_init` — matching the constructor's
+  before-main ordering. The callee is a no-op for any argv[0] that is not
+  `simple-browser-renderer`, so ordinary binaries are unaffected. Stage4
+  capsule liveness needs no static list change: `stage4_live_runtime_requests`
+  derives requested symbols from the link closure's undefined symbols.
+  (The Rust-seed linker's own Stage4 main stub in
+  `native_project/linker.rs` was NOT touched; seed-built workers still get
+  the constructor. Symmetric coverage there is a follow-up for a lane that
+  may run cargo.)
+- Test pairing: new selfcheck
+  `src/runtime/test/rt_browser_renderer_preinit_entry_selfcheck.c`
+  (REQ-WEB-BROWSER-014) — Arm 1: the exported entry forwards the worker
+  marker into the real preinit (non-empty envp must `_exit(126)`; catches
+  the fail-open "wrapper became a stub" shape); Arm 2: ordinary argv passes
+  through untouched with `sandbox_enter()` still refusing. Wired into
+  `scripts/check/check-browser-renderer-sandbox-seccomp.shs` (+2 counted
+  assertions, no vacuity).
+
+Verification run 2026-11-11 on this Windows lane:
+
+- `cc -fsyntax-only` (llvm-mingw) of `runtime_process.c`, with and without
+  `-DSIMPLE_CORE_C_STANDALONE=1` — clean (exercises the Windows arm incl. the
+  new stub).
+- New selfcheck + sibling startup-failure selfcheck build clean under MinGW
+  and print their documented `SKIP (linux only)` / exit 77 (jail is
+  Linux-only; the Linux CI gate runs both arms for real).
+- `simple lint src/compiler/70.backend/backend/llvm_native_link_hosted_support.spl`
+  (seed-smoke, fresh seed 46fe8f6b6def) — 0 errors; none of the 5 warnings
+  touch the edited region. (Standalone `simple compile` of that module fails
+  identically at the unmodified base — pre-existing package-context
+  constraint, not a regression of this change.)
+- The exact generated-entry C snippet compiled `-Wall -Wextra` clean in both
+  the POSIX branch (`-U_WIN32`) and the `_WIN32` branch.
+
+Honest gap: the Linux arm of the C change (wrapper + idempotency) and the
+end-to-end core-C renderer-worker link could not be compiled/run on this
+Windows host; first full compile+run of those arms happens on the Linux CI
+gate (`check-browser-renderer-sandbox-seccomp.shs`).
+
+## 2026-11-13 closure (UI batch B, Linux aarch64, release/1.0.0 @ 35144b7f5e93)
+
+The 2026-11-11 section left one honest gap: the Linux arm of the C change had
+never been compiled or run. It now has, on a Linux aarch64 host with clang 23:
+`CC=clang sh scripts/check/check-browser-renderer-sandbox-seccomp.shs` exited
+0 with `PASS — 10 check(s) verified`. The four selfchecks all passed for real
+(no SKIP): seccomp allow-list, namespace posture (`namespaces=unavailable` on
+this host, partial failure closed), startup failure (non-empty envp exits 126)
+and `rt_browser_renderer_preinit_entry_selfcheck: PASS`. `bug_db.sdn` row
+moved open -> fixed to match the shard. Not covered here: an end-to-end core-C
+renderer-worker link, which needs a deployed self-hosted compiler.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**FIXED (confirmed)** — `rt_browser_renderer_preinit_entry_selfcheck.c` + `stage3_fdwalk.c` in-tree; Linux aarch64 gate `check-browser-renderer-sandbox-seccomp.shs` PASS 10/10 recorded 2026-11-13 (four selfchecks all real). Not covered here: end-to-end core-C renderer-worker link, needs a deployed self-hosted compiler.

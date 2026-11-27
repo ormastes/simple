@@ -110,3 +110,10 @@ This closes prerequisite 3's zero-handle clause only. Prerequisites 1, 2 and 4
 (a real TLS 1.3 provider, verified-state key installation, and the
 authentication/downgrade wire tests) are untouched, so the record stays
 **blocked** and `quic_provider_check()` still returns `Unavailable`.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+Not pursued in this lane: blocked on authenticated QUIC/TLS prerequisites per in-file status; runtime/TLS lane owns it.

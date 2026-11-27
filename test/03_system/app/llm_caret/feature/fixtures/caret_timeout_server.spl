@@ -1,0 +1,60 @@
+# Loopback stall/echo HTTP fixture for llm_caret_attempt_timeout_spec.spl.
+# Usage: simple run caret_timeout_server.spl <state_dir>
+# Binds 127.0.0.1:0, writes the port to <state_dir>/port, serves requests one
+# at a time (POST /slow stalls 2 s, POST /echo echoes the body), and rewrites
+# <state_dir>/ledger as "slow=<n>\necho=<m>\n" after every request. Exits after
+# 4 requests or 60 s without a connection, so a crashed spec leaves no orphan.
+use std.nogc_sync_mut.io.tcp.{TcpListener, tcp_listener_bind_fd, tcp_listener_accept_fd_timeout, tcp_fd_set_read_timeout, tcp_fd_read_line_bounded_or_empty, tcp_fd_read_bytes_or_empty, tcp_fd_write_text, tcp_fd_close}
+use app.io.mod.{file_write, get_args, sleep_ms}
+
+fn server_port(listener: i64) -> i64:
+    val view = TcpListener(fd: listener, open: true)
+    val address = match view.local_addr():
+        Ok(value): value
+        Err(_): ""
+    val parts = address.split(":")
+    parts[parts.len() - 1].to_i64() ?? 0
+
+fn serve_one(peer: i64) -> text:
+    tcp_fd_set_read_timeout(peer, 5000)
+    val request_line = tcp_fd_read_line_bounded_or_empty(peer, 4096)
+    val words = request_line.split(" ")
+    val path = if words.len() > 1: words[1] else: ""
+    var content_length = 0
+    var header = tcp_fd_read_line_bounded_or_empty(peer, 4096)
+    while header.trim().len() > 0:
+        val lower = header.lower()
+        if lower.starts_with("content-length:"):
+            content_length = header.substring(15).trim().to_i64() ?? 0
+        header = tcp_fd_read_line_bounded_or_empty(peer, 4096)
+    val body = if content_length > 0: tcp_fd_read_bytes_or_empty(peer, content_length.to_i32()) else: ""
+    if path == "/slow":
+        sleep_ms(2000)
+    tcp_fd_write_text(peer, "HTTP/1.1 200 OK\r\nContent-Length: {body.byte_len()}\r\nConnection: close\r\n\r\n" + body)
+    tcp_fd_close(peer)
+    path
+
+fn main():
+    val args = get_args()
+    val state_dir = args[args.len() - 1]
+    val listener = tcp_listener_bind_fd("127.0.0.1:0")
+    if listener < 0:
+        return
+    file_write(state_dir + "/port", "{server_port(listener)}")
+    var slow = 0
+    var echo = 0
+    var served = 0
+    while served < 4:
+        val peer = tcp_listener_accept_fd_timeout(listener, 60000)
+        if peer < 0:
+            break
+        val path = serve_one(peer)
+        if path == "/slow":
+            slow = slow + 1
+        if path == "/echo":
+            echo = echo + 1
+        served = served + 1
+        file_write(state_dir + "/ledger", "slow={slow}\necho={echo}\n")
+    tcp_fd_close(listener)
+
+main()

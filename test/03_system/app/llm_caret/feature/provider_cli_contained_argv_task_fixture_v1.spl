@@ -1,0 +1,50 @@
+# AUTHORED_NOT_RUN. Requires actual completed contained probes and a genuine
+# signed Host domain/request. No fake selection, grant or provider IO is built.
+use std.spec.{expect, step, fail}
+use app.llm_caret.provider_cli_adapter_types_v1.{ProviderCliRequestDataV1, ProviderCliActionV1}
+use app.llm_caret.provider_cli_container_probe_v1.{ProviderCliContainedSelectionV1, ProviderCliContainedProbeReceiptV1}
+use app.llm_caret.provider_cli_contained_task_v1.{provider_cli_contained_task_argv_constraint_v1,
+    provider_cli_contained_task_effect_v1}
+use app.llm_caret.provider_cli_contained_argv_task_v1.provider_cli_contained_argv_task_effect_v1
+use std.common.contracts.container.pre_start_input_constraint_v1.ContainerPreStartInputProfileV1
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.{HostServiceDomainV3, HostServiceTurnV3}
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.{HostServiceRequestV2, host_service_error_payload_v2}
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.host_execution_observation_decode_v2
+
+pub fn run_real_contained_codex_argv_fixture_v1(domain: HostServiceDomainV3,
+        selection: ProviderCliContainedSelectionV1, version_receipt: ProviderCliContainedProbeReceiptV1,
+        request: HostServiceRequestV2, action: ProviderCliRequestDataV1) -> HostServiceTurnV3:
+    step("Derive explicit argument mode from the genuine Codex selection and observed program prefix")
+    val restricted = provider_cli_contained_task_argv_constraint_v1(domain, selection, version_receipt, request, action)
+    if restricted.is_err():
+        fail("actual Codex Argv fixture restriction required: " + restricted.unwrap_err())
+        # Preserve the actual domain without attempting an effect after failure.
+        return HostServiceTurnV3(domain, 1, host_service_error_payload_v2(request, restricted.unwrap_err(), false))
+    val value = restricted.unwrap()
+    expect(value.profile).to_equal(ContainerPreStartInputProfileV1.ClosedStdinNonTty)
+    expect(value.base.primary_argv[value.base.primary_argv.len() - 2]).to_equal("--")
+    expect(value.base.primary_argv[value.base.primary_argv.len() - 1]).to_equal(action.prompt)
+    var bytes = 0
+    for argument in value.base.primary_argv: bytes = bytes + argument.byte_len()
+    expect(bytes).to_be_less_than(8193)
+    step("Invoke actual signed create/input-configuration/start through the existing Host owner")
+    val turn = provider_cli_contained_argv_task_effect_v1(domain, selection, version_receipt, request, action)
+    expect(turn.exit_code).to_equal(0)
+    val observed = host_execution_observation_decode_v2(turn.response)
+    if observed.is_err():
+        fail("actual input-constrained Host observation required")
+        return turn
+    expect(observed.unwrap().request_digest).to_equal(value.base.request_digest)
+    expect(observed.unwrap().create_status).to_equal("ok")
+    expect(observed.unwrap().start_status).to_equal("ok")
+    turn
+
+pub fn run_real_codex_legacy_stdin_refusal_fixture_v1(domain: HostServiceDomainV3,
+        selection: ProviderCliContainedSelectionV1, version_receipt: ProviderCliContainedProbeReceiptV1,
+        request: HostServiceRequestV2) -> HostServiceTurnV3:
+    step("Keep the original stdin entry unavailable rather than silently select argv mode")
+    val turn = provider_cli_contained_task_effect_v1(domain, selection, version_receipt, request,
+        ProviderCliRequestDataV1(action: ProviderCliActionV1.Start, prompt: "--flag-like fixture prompt"))
+    expect(turn.exit_code).to_equal(1)
+    expect(turn.response.contains("provider-contained-owned-stdin-continuation-required")).to_equal(true)
+    turn

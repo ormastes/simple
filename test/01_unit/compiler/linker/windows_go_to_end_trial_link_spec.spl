@@ -1,0 +1,229 @@
+"""
+# Windows go-to-end trial link, strict extra-args split validation, and rpath drive admission
+
+Unit tests for:
+1. `go_to_end_trial_adapt_extra_flags_v1`: Windows GNU vs MSVC flag mapping,
+   ELF-only `--warn-unresolved-symbols` dropping, and empty report flags under
+   `SIMPLE_NATIVE_TOOL_STRICT=1` or `SIMPLE_LINKER=internal`.
+2. `native_windows_strict_extra_args_error`: splitting `-Wl,` payloads on `,`,
+   admitting safe GNU diagnostic flags while rejecting duplicate-definition /
+   response-file tokens, and gating `/FORCE:UNRESOLVED` / `-force:unresolved` /
+   `-Wl,-Xlink=-force:unresolved` behind `allow_unresolved_trial_artifact`.
+3. `managed_native_extra_args_error_v1`: admitting `[A-Za-z]:/` Windows `-rpath`
+   directories alongside `/`.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set, env_unset}
+use compiler.driver.driver_build.go_to_end_trial_link_v1.{
+    go_to_end_trial_report_flags_v1,
+    go_to_end_trial_artifact_flags_v1,
+    go_to_end_trial_adapt_extra_flags_v1,
+    GO_TO_END_TRIAL_SUFFIX_V1
+}
+use compiler.backend.linker.linker_wrapper.{
+    NativeLinkConfig,
+    native_windows_strict_extra_args_error,
+    link_native_windows_with_engine,
+    native_windows_trial_artifact_unresolved_begin_v1,
+    native_windows_trial_artifact_unresolved_end_v1
+}
+use compiler.backend.linker.managed_native_args_v1.{managed_native_extra_args_error_v1}
+
+fn _restore_env(name: text, prior: text):
+    if prior == "":
+        env_unset(name)
+    else:
+        env_set(name, prior)
+
+describe "go-to-end trial link Windows flag adaptation":
+    it "maps report and artifact flags for Windows GNU targets and drops ELF-only warnings":
+        val saved_strict = env_get("SIMPLE_NATIVE_TOOL_STRICT") ?? ""
+        val saved_linker = env_get("SIMPLE_LINKER") ?? ""
+        env_unset("SIMPLE_NATIVE_TOOL_STRICT")
+        env_unset("SIMPLE_LINKER")
+
+        val report_flags = go_to_end_trial_report_flags_v1()
+        val artifact_flags = go_to_end_trial_artifact_flags_v1()
+        for target in ["x86_64-pc-windows-gnu", "x86_64-w64-mingw32", "windows-gnu"]:
+            expect(go_to_end_trial_adapt_extra_flags_v1(report_flags, target)).to_equal([
+                "-Wl,--error-limit=0",
+                "-Wl,--no-gc-sections"
+            ])
+            expect(go_to_end_trial_adapt_extra_flags_v1(["--error-limit=0", "--no-gc-sections"], target)).to_equal([
+                "-Wl,--error-limit=0",
+                "-Wl,--no-gc-sections"
+            ])
+            expect(go_to_end_trial_adapt_extra_flags_v1(artifact_flags, target)).to_equal([
+                "-Wl,-Xlink=-force:unresolved",
+                "-Wl,--error-limit=0",
+                "-Wl,--no-gc-sections"
+            ])
+            expect(go_to_end_trial_adapt_extra_flags_v1(["--unresolved-symbols=ignore-all", "--warn-unresolved-symbols"], target)).to_equal([
+                "-Wl,-Xlink=-force:unresolved"
+            ])
+
+        _restore_env("SIMPLE_NATIVE_TOOL_STRICT", saved_strict)
+        _restore_env("SIMPLE_LINKER", saved_linker)
+
+    it "maps report and artifact flags for Windows MSVC targets and drops warn-unresolved-symbols":
+        val saved_strict = env_get("SIMPLE_NATIVE_TOOL_STRICT") ?? ""
+        val saved_linker = env_get("SIMPLE_LINKER") ?? ""
+        env_unset("SIMPLE_NATIVE_TOOL_STRICT")
+        env_unset("SIMPLE_LINKER")
+
+        val report_flags = go_to_end_trial_report_flags_v1()
+        val artifact_flags = go_to_end_trial_artifact_flags_v1()
+        for target in ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc", "windows-msvc"]:
+            expect(go_to_end_trial_adapt_extra_flags_v1(report_flags, target)).to_equal([
+                "/ERRORLIMIT:0",
+                "/OPT:NOREF"
+            ])
+            expect(go_to_end_trial_adapt_extra_flags_v1(["--error-limit=0", "--no-gc-sections"], target)).to_equal([
+                "/ERRORLIMIT:0",
+                "/OPT:NOREF"
+            ])
+            expect(go_to_end_trial_adapt_extra_flags_v1(artifact_flags, target)).to_equal([
+                "/FORCE:UNRESOLVED",
+                "/ERRORLIMIT:0",
+                "/OPT:NOREF"
+            ])
+            expect(go_to_end_trial_adapt_extra_flags_v1(["--unresolved-symbols=ignore-all", "--warn-unresolved-symbols"], target)).to_equal([
+                "/FORCE:UNRESOLVED"
+            ])
+
+        _restore_env("SIMPLE_NATIVE_TOOL_STRICT", saved_strict)
+        _restore_env("SIMPLE_LINKER", saved_linker)
+
+    it "resolves unqualified windows flavor via SIMPLE_LINKER_FLAVOR":
+        val saved_strict = env_get("SIMPLE_NATIVE_TOOL_STRICT") ?? ""
+        val saved_linker = env_get("SIMPLE_LINKER") ?? ""
+        val saved_flavor = env_get("SIMPLE_LINKER_FLAVOR") ?? ""
+        env_unset("SIMPLE_NATIVE_TOOL_STRICT")
+        env_unset("SIMPLE_LINKER")
+
+        env_set("SIMPLE_LINKER_FLAVOR", "msvc")
+        expect(go_to_end_trial_adapt_extra_flags_v1(go_to_end_trial_report_flags_v1(), "windows")).to_equal([
+            "/ERRORLIMIT:0",
+            "/OPT:NOREF"
+        ])
+        expect(go_to_end_trial_adapt_extra_flags_v1(go_to_end_trial_artifact_flags_v1(), "windows")).to_equal([
+            "/FORCE:UNRESOLVED",
+            "/ERRORLIMIT:0",
+            "/OPT:NOREF"
+        ])
+
+        env_set("SIMPLE_LINKER_FLAVOR", "gnu")
+        expect(go_to_end_trial_adapt_extra_flags_v1(go_to_end_trial_report_flags_v1(), "windows")).to_equal([
+            "-Wl,--error-limit=0",
+            "-Wl,--no-gc-sections"
+        ])
+
+        _restore_env("SIMPLE_LINKER_FLAVOR", saved_flavor)
+        _restore_env("SIMPLE_NATIVE_TOOL_STRICT", saved_strict)
+        _restore_env("SIMPLE_LINKER", saved_linker)
+
+    it "returns empty report flags when strict native tool mode or internal linker is active":
+        val saved_strict = env_get("SIMPLE_NATIVE_TOOL_STRICT") ?? ""
+        val saved_linker = env_get("SIMPLE_LINKER") ?? ""
+        val report_flags = go_to_end_trial_report_flags_v1()
+
+        env_set("SIMPLE_NATIVE_TOOL_STRICT", "1")
+        env_unset("SIMPLE_LINKER")
+        expect(go_to_end_trial_adapt_extra_flags_v1(report_flags, "x86_64-pc-windows-gnu")).to_equal([])
+        expect(go_to_end_trial_adapt_extra_flags_v1(report_flags, "x86_64-pc-windows-msvc")).to_equal([])
+        expect(go_to_end_trial_adapt_extra_flags_v1(report_flags, "x86_64-unknown-linux-gnu")).to_equal([])
+
+        env_unset("SIMPLE_NATIVE_TOOL_STRICT")
+        env_set("SIMPLE_LINKER", "internal")
+        expect(go_to_end_trial_adapt_extra_flags_v1(report_flags, "x86_64-pc-windows-gnu")).to_equal([])
+        expect(go_to_end_trial_adapt_extra_flags_v1(report_flags, "x86_64-pc-windows-msvc")).to_equal([])
+        expect(go_to_end_trial_adapt_extra_flags_v1(report_flags, "x86_64-unknown-linux-gnu")).to_equal([])
+
+        _restore_env("SIMPLE_NATIVE_TOOL_STRICT", saved_strict)
+        _restore_env("SIMPLE_LINKER", saved_linker)
+
+describe "native_windows_strict_extra_args_error token splitting and unresolved gating":
+    it "admits safe -Wl diagnostic flags while rejecting duplicate-def and response-file tokens":
+        for safe in ["-Wl,--error-limit=0", "-Wl,--no-gc-sections", "-Wl,--gc-sections,-s", "-Wl,-u,rt_sym", "-Wl,-Xlink=-errorlimit:0"]:
+            expect(native_windows_strict_extra_args_error([safe], false)).to_equal("")
+
+        for forbidden in [
+            "-Wl,--allow-multiple-definition",
+            "-Wl,-z,muldefs",
+            "-Wl,-z,relro",
+            "-Wl,@nested.rsp",
+            "-Wl,-Xlinker",
+            "-Wl,/link",
+            "-Wl,/FORCE",
+            "-Wl,/FORCE:MULTIPLE",
+            "-Wl,-force:multiple",
+            "-Wl,-Xlink=-force:multiple",
+            "-Wl,--error-limit=0,--allow-multiple-definition",
+            "-z",
+            "muldefs",
+            "--allow-multiple-definition",
+            "/FORCE",
+            "/FORCE:MULTIPLE",
+            "-force:multiple",
+            "@nested.rsp",
+            "-Xlinker",
+            "/link"
+        ]:
+            expect(native_windows_strict_extra_args_error([forbidden], false) != "").to_equal(true)
+
+    it "gates /FORCE:UNRESOLVED and -Wl,-Xlink=-force:unresolved behind allow_unresolved_trial_artifact":
+        step("Default (false) rejects unresolved overrides")
+        for flag in ["/FORCE:UNRESOLVED", "-force:unresolved", "-Wl,-Xlink=-force:unresolved"]:
+            expect(native_windows_strict_extra_args_error([flag], false) != "").to_equal(true)
+            expect(native_windows_strict_extra_args_error([flag], false, false) != "").to_equal(true)
+
+        step("Explicit trial artifact opt-in (true) admits unresolved overrides only")
+        expect(native_windows_strict_extra_args_error(["/FORCE:UNRESOLVED", "/ERRORLIMIT:0", "/OPT:NOREF"], false, true)).to_equal("")
+        expect(native_windows_strict_extra_args_error(["-force:unresolved"], false, true)).to_equal("")
+        expect(native_windows_strict_extra_args_error(["-Wl,-Xlink=-force:unresolved", "-Wl,--error-limit=0", "-Wl,--no-gc-sections"], false, true)).to_equal("")
+
+        step("Duplicate-definition overrides stay rejected even when allow_unresolved_trial_artifact is true")
+        for dup in ["/FORCE:MULTIPLE", "/force:multiple,unresolved", "-force:multiple", "-Wl,--allow-multiple-definition", "-Wl,-z,muldefs", "@bad.rsp"]:
+            expect(native_windows_strict_extra_args_error([dup], false, true) != "").to_equal(true)
+
+    it "scopes trial-artifact unresolved permission to .go-to-end-trial outputs only":
+        var cfg = NativeLinkConfig.default()
+        cfg.allow_duplicate_definitions = false
+        cfg.extra_flags = ["/FORCE:UNRESOLVED"]
+
+        native_windows_trial_artifact_unresolved_begin_v1()
+        val normal_res = link_native_windows_with_engine([], "build/tmp/normal_output.exe", cfg)
+        expect(normal_res.is_err()).to_equal(true)
+        expect(normal_res.unwrap_err()).to_contain("strict Windows link rejects FORCE option")
+
+        var dup_cfg = NativeLinkConfig.default()
+        dup_cfg.allow_duplicate_definitions = false
+        dup_cfg.extra_flags = ["/FORCE:MULTIPLE"]
+        val dup_trial_res = link_native_windows_with_engine([], "build/tmp/app" + GO_TO_END_TRIAL_SUFFIX_V1, dup_cfg)
+        expect(dup_trial_res.is_err()).to_equal(true)
+        expect(dup_trial_res.unwrap_err()).to_contain("strict Windows link rejects FORCE option")
+
+        native_windows_trial_artifact_unresolved_end_v1()
+        val after_end_res = link_native_windows_with_engine([], "build/tmp/app" + GO_TO_END_TRIAL_SUFFIX_V1, cfg)
+        expect(after_end_res.is_err()).to_equal(true)
+        expect(after_end_res.unwrap_err()).to_contain("strict Windows link rejects FORCE option")
+
+describe "managed_native_extra_args_error_v1 Windows drive-letter rpath admission":
+    it "admits [A-Za-z]:/ Windows -rpath paths alongside POSIX / paths":
+        expect(managed_native_extra_args_error_v1(["-rpath", "C:/admitted/runtime"])).to_equal("")
+        expect(managed_native_extra_args_error_v1(["-rpath", "d:/tools/lib"])).to_equal("")
+        expect(managed_native_extra_args_error_v1(["-rpath", "/admitted/runtime"])).to_equal("")
+        expect(managed_native_extra_args_error_v1(["-rpath", "$ORIGIN"])).to_equal("")
+        expect(managed_native_extra_args_error_v1(["-rpath", "@loader_path"])).to_equal("")
+
+    it "still rejects relative, non-alpha, traversal, and hostile Windows -rpath values":
+        for bad in [
+            ["-rpath", "C:relative/path"],
+            ["-rpath", "1:/numeric/drive"],
+            ["-rpath", "C:/admitted/../escape"],
+            ["-rpath", "C:/admitted/.."],
+            ["-rpath", "//unc/share"],
+            ["-rpath", "C:/bad|pipe"]
+        ]:
+            expect(managed_native_extra_args_error_v1(bad) != "").to_equal(true)

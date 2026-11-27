@@ -1,0 +1,35 @@
+# UNEXECUTED: written against bug gpu_type_mapper_struct_symbolid_layout_2026-10-24
+use std.spec.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirTypeDef, MirTypeDefKind, MirFieldDef}
+use compiler.hir.hir_types.{SymbolId}
+use plugins.backend_vulkan.vulkan_type_mapper.{VulkanTypeMapper}
+use plugins.backend_cuda.cuda_type_mapper.{CudaTypeMapper}
+
+fn struct_defs(sym: SymbolId) -> Dict<SymbolId, MirTypeDef>:
+    val f0 = MirFieldDef(name: "a", type_: MirType(kind: MirTypeKind.I8), offset: 0, has_bits_attr: false, bits_width: 0)
+    val f1 = MirFieldDef(name: "b", type_: MirType(kind: MirTypeKind.I64), offset: 8, has_bits_attr: false, bits_width: 0)
+    val f2 = MirFieldDef(name: "c", type_: MirType(kind: MirTypeKind.I32), offset: 16, has_bits_attr: false, bits_width: 0)
+    val def = MirTypeDef(symbol: sym, name: "S", kind: MirTypeDefKind.Struct(fields: [f0, f1, f2]), is_export_c: false, export_name: "")
+    {sym: def}
+
+describe "GPU type mappers resolve Struct(SymbolId) via the module type table":
+    it "vulkan applies std430 padding and max alignment":
+        val sym = SymbolId(id: 7)
+        val m = VulkanTypeMapper.create().with_type_defs(struct_defs(sym))
+        val ty = MirType(kind: MirTypeKind.Struct(symbol: sym))
+        # i8@0 -> i64@8 -> i32@16 => 20 (old algorithm: no tail round-up)
+        expect(m.size_of(ty)).to_equal(20)
+        expect(m.align_of(ty)).to_equal(8)
+
+    it "cuda sums field sizes and uses max alignment":
+        val sym = SymbolId(id: 7)
+        val m = CudaTypeMapper.create_sm(8, 6).with_type_defs(struct_defs(sym))
+        val ty = MirType(kind: MirTypeKind.Struct(symbol: sym))
+        expect(m.size_of(ty)).to_equal(13)
+        expect(m.align_of(ty)).to_equal(8)
+
+    it "unknown symbol falls back to the 8-byte pointer slot":
+        val ty = MirType(kind: MirTypeKind.Struct(symbol: SymbolId(id: 99)))
+        expect(VulkanTypeMapper.create().size_of(ty)).to_equal(8)
+        expect(CudaTypeMapper.create().size_of(ty)).to_equal(8)

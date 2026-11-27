@@ -43,7 +43,21 @@ describe "verified immutable inventory decoding":
         val cache_root = "build/test-artifacts/scv-verified-noncanonical-{rt_getpid()}/build/scv"
         val published = compile_source_inventory_publish_v1(cache_root, CompileSourceInventoryV1(1, 1, []))
         expect(published.len()).to_equal(64)
-        val content = "simple-compile-source-inventory-v1\ngeneration=01\ncount=0"
+        # Two well-formed rows in descending identity order: every field and
+        # decimal is canonical, only the row order is not. (A leading-zero
+        # header such as generation=01 is rejected earlier, as
+        # inventory-count-invalid, by the strict decimal parser; see
+        # compile_source_inventory_decode_scratch_spec.)
+        val first = compile_source_inventory_apply_event_v1(CompileSourceInventoryV1(1, 0, []),
+            compile_source_inventory_git_event_v1("create", "src/a.spl", "fn a(): 1"))
+        val second = compile_source_inventory_apply_event_v1(first.inventory!,
+            compile_source_inventory_git_event_v1("create", "src/b.spl", "fn b(): 2"))
+        expect(second.valid).to_equal(true)
+        val canonical = compile_source_inventory_encode_v1(second.inventory!)
+        expect(compile_source_inventory_decode_v1(canonical).valid).to_equal(true)
+        val lines = canonical.split("\n")
+        expect(lines.len()).to_equal(5)
+        val content = [lines[0], lines[1], lines[2], lines[4], lines[3]].join("\n")
         val digest = sha256_text(content)
         expect(file_write("{cache_root}/source-inventory/generations/{digest}.inventory", content)).to_equal(true)
         val rejected = compile_source_inventory_read_at_pointer_v1(cache_root, digest)

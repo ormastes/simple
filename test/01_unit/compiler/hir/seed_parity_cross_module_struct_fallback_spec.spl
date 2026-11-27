@@ -1,0 +1,97 @@
+# @cover src/compiler/20.hir/hir_lowering/types.spl 2%
+# @cover src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl 2%
+# @tag: unit, compiler, hir, types, seed-parity, cross-module
+# bug: doc/08_tracking/bug/unresolved_type_declared_nowhere_family_2026-08-01.md
+
+# Pins the last open item of the `unresolved type` family: the seed's
+# cross-module struct fallback (type_resolver.rs `global_struct_defs`, keyed
+# by the BARE struct name over every loaded module). The bug doc recorded
+# that pure-Simple HIR lowering had "no global_struct_defs equivalent at
+# all"; it now has one -- `try_register_bootstrap_global_symbol`
+# (module_import_registration.spl), reached from `lower_named_kind`'s
+# default arm for every unbound name, and ungated since 2026-10-20. It
+# resolves a name declared by EXACTLY ONE loaded module surface, and gives
+# up (the strict `unresolved type: X` gate still fires) on zero or several
+# owners. These three outcomes are what this spec gates, in-process, because
+# the seed's own `run`/`compile` resolve any unknown name to ANY under
+# `lenient_types` and cannot see the gate at all.
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+
+fn fallback_spec_surfaces(modules: Dict<text, Module>, sources: [SourceFile]) -> ModuleSurfacesByName:
+    match module_surfaces_from_modules(modules, sources):
+        case Ok(value): value
+        case Err(error):
+            expect(false).to_equal(true)
+            ModuleSurfacesByName.empty()
+
+fn count_unresolved(lowering: HirLowering, name: text) -> i64:
+    var hits: i64 = 0
+    for error in lowering.errors:
+        if error.message == "unresolved type: {name}":
+            hits = hits + 1
+    hits
+
+# The consumer names `Payload` in a signature with NO `use` for it.
+#
+# The owners deliberately live in OTHER packages (`far.*`, `ambig.*`), never
+# in the consumer's `fb.*`: files of one directory-package share a namespace
+# (resolve_package_sibling_symbols, module_import_resolution.spl), so a
+# sibling owner is bound by that rule before the fallback ever runs -- and
+# with two sibling owners the first one wins silently. The first draft of the
+# ambiguity example used siblings and went green for that reason.
+val consumer_source = "fn take(p: Payload) -> i64:\n    1\n"
+
+describe "cross-module struct fallback in lower_named_kind":
+    it "resolves a struct declared by exactly one loaded module without a use":
+        val log = Logger(level: 0)
+        val owner_source = "struct Payload:\n    size: i64\n"
+        val owner = parse_full_frontend(owner_source, "far.owner", "far.owner", log)
+        val consumer = parse_full_frontend(consumer_source, "fb.consumer", "fb.consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["far.owner"] = owner
+        val sources = [SourceFile(path: "far/owner.spl", content: owner_source, module_name: "far.owner")]
+        var lowering = hirlowering_for_module("fb.consumer", fallback_spec_surfaces(modules, sources))
+        val hir = lowering.lower_module(consumer)
+        expect(count_unresolved(lowering, "Payload")).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)
+        if val fn_id = hir.symbols.lookup("take"):
+            match hir.functions[fn_id].params[0].type_.kind:
+                case Named(_, _): expect(true).to_equal(true)
+                case _: expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "still rejects a name no loaded module declares":
+        # Control: the fallback must not degrade into the seed's lenient ANY.
+        val log = Logger(level: 0)
+        val consumer = parse_full_frontend(consumer_source, "fb.consumer", "fb.consumer", log)
+        var lowering = hirlowering_for_module("fb.consumer", ModuleSurfacesByName.empty())
+        val hir = lowering.lower_module(consumer)
+        expect(count_unresolved(lowering, "Payload") > 0).to_equal(true)
+
+    it "gives up when two loaded modules both declare the name":
+        # Seed parity: an ambiguous bare name is not guessed; it needs a `use`.
+        val log = Logger(level: 0)
+        val a_source = "struct Payload:\n    size: i64\n"
+        val b_source = "struct Payload:\n    bytes: text\n"
+        val a = parse_full_frontend(a_source, "ambig.a", "ambig.a", log)
+        val b = parse_full_frontend(b_source, "ambig.b", "ambig.b", log)
+        val consumer = parse_full_frontend(consumer_source, "fb.consumer", "fb.consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["ambig.a"] = a
+        modules["ambig.b"] = b
+        val sources = [
+            SourceFile(path: "ambig/a.spl", content: a_source, module_name: "ambig.a"),
+            SourceFile(path: "ambig/b.spl", content: b_source, module_name: "ambig.b")
+        ]
+        var lowering = hirlowering_for_module("fb.consumer", fallback_spec_surfaces(modules, sources))
+        val hir = lowering.lower_module(consumer)
+        expect(count_unresolved(lowering, "Payload") > 0).to_equal(true)

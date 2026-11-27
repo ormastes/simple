@@ -1,0 +1,93 @@
+# A bare fieldless variant inside a tuple pattern is a VARIANT TEST, not a
+# binding, exactly like a top-level `case Red:` arm. The Rust seed's native
+# lowering used to treat it as an irrefutable binder, so `case (Red, Red):`
+# matched every pair and `hir_types_equal` (`case (Bool, Bool): true`) said
+# true for unrelated types in every seed-compiled Stage 2 compiler.
+# Bug: doc/08_tracking/bug/seed_tuple_pattern_bare_fieldless_variant_binds_hir_types_equal_true_2026-11-12.md
+enum Kind:
+    Int(bits: i64)
+    Str
+    Arr(n: i64)
+
+enum Color:
+    Red
+    Green
+    Blue
+
+fn eq_locals(a: Kind, b: Kind) -> bool:
+    match (a, b):
+        case (Int(x), Int(y)): x == y
+        case (Str, Str): true
+        case (Arr(x), Arr(y)): x == y
+        case _: false
+
+fn eq_fieldless(a: Color, b: Color) -> bool:
+    match (a, b):
+        case (Red, Red): true
+        case (Green, Green): true
+        case _: false
+
+fn eq_qualified(a: Kind, b: Kind) -> bool:
+    match (a, b):
+        case (Kind.Int(x), Kind.Int(y)): x == y
+        case (Kind.Str, Kind.Str): true
+        case (Kind.Arr(x), Kind.Arr(y)): x == y
+        case _: false
+
+# A lowercase name in a tuple slot is still a real binding.
+fn first_red_then(a: Color, b: Color) -> i64:
+    match (a, b):
+        case (Red, other):
+            match other:
+                case Red: 10
+                case Green: 11
+                case Blue: 12
+        case (other, Red): 20
+        case _: 30
+
+# Plain scalar binders and literals in a tuple are unaffected.
+fn scalar_pair(a: i64, b: i64) -> i64:
+    match (a, b):
+        case (0, y): y
+        case (x, y): x * 100 + y
+
+# Nested tuple: the inner tuple's elements are tested against their own types.
+fn nested(a: Color, b: Color, c: Color) -> i64:
+    match ((a, b), c):
+        case ((Red, Green), Blue): 1
+        case ((Red, _), Red): 2
+        case ((x, Blue), _): 3
+        case _: 4
+
+# Or-pattern inside a tuple slot.
+fn warm_pair(a: Color, b: Color) -> bool:
+    match (a, b):
+        case (Red | Green, Red): true
+        case _: false
+
+fn main() -> i64:
+    if eq_locals(Kind.Arr(1), Kind.Str): return 1
+    if eq_locals(Kind.Int(1), Kind.Int(2)): return 2
+    if not eq_locals(Kind.Str, Kind.Str): return 3
+    if not eq_locals(Kind.Arr(4), Kind.Arr(4)): return 4
+    if eq_locals(Kind.Str, Kind.Arr(1)): return 5
+    if eq_fieldless(Color.Red, Color.Green): return 6
+    if not eq_fieldless(Color.Red, Color.Red): return 7
+    if not eq_fieldless(Color.Green, Color.Green): return 8
+    if eq_fieldless(Color.Blue, Color.Blue): return 9
+    if eq_qualified(Kind.Arr(1), Kind.Str): return 10
+    if not eq_qualified(Kind.Str, Kind.Str): return 11
+    if first_red_then(Color.Red, Color.Blue) != 12: return 12
+    if first_red_then(Color.Green, Color.Red) != 20: return 13
+    if first_red_then(Color.Green, Color.Blue) != 30: return 14
+    if scalar_pair(0, 7) != 7: return 15
+    if scalar_pair(3, 4) != 304: return 16
+    if nested(Color.Red, Color.Green, Color.Blue) != 1: return 17
+    if nested(Color.Red, Color.Blue, Color.Red) != 2: return 18
+    if nested(Color.Green, Color.Blue, Color.Green) != 3: return 19
+    if nested(Color.Green, Color.Green, Color.Green) != 4: return 20
+    if not warm_pair(Color.Green, Color.Red): return 21
+    if warm_pair(Color.Blue, Color.Red): return 22
+    if warm_pair(Color.Red, Color.Green): return 23
+    print "tuple_pattern_bare_unit_variant: ok"
+    0

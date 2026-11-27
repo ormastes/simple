@@ -1,0 +1,55 @@
+# @req REQ-APP-LLM-CARET-WORKSPACE-001
+# @cover src/app/llm_caret/pane_backend.spl 5%
+# @timeout_secs 300
+"""
+## Purpose and audience
+
+An operator who runs `llm_caret workspace <id> attach` expects the workspace
+owner it starts to keep serving after that one command has returned. This
+specification pins that for LLM Caret maintainers: a process started through
+`start_outliving_process` is still doing its work after the launching call is
+back, both when caret is interpreted and when it is a native binary.
+
+## Operator workflow
+
+Run `bin/simple test test/01_unit/app/llm_caret/outliving_process_spec.spl`
+and read the Results line. The helper process sleeps five seconds and then
+writes a marker file under `build/test-artifacts/llm_caret`; the scenario
+removes the marker when it is done.
+
+## Compatibility and limitations
+
+Windows only (the smux backend's launcher uses PowerShell `Start-Process`);
+elsewhere the scenario records itself as pending.
+"""
+
+use std.spec.{describe, it, expect, step, pending}
+use app.io.mod.{dir_create_all, file_exists, file_read, file_delete, cwd, current_time_ms, sleep_ms}
+use std.nogc_async_mut.sosix.{sosix_platform}
+use app.llm_caret.pane_backend.{start_outliving_process}
+
+describe "a process started to outlive its launcher":
+    it "finishes its work after the launching call has returned":
+        # @req REQ-APP-LLM-CARET-WORKSPACE-001
+        if sosix_platform() != "windows":
+            pending("Windows only: the launcher is PowerShell Start-Process")
+            return
+        val dir = cwd().replace("\\", "/") + "/build/test-artifacts/llm_caret"
+        expect(dir_create_all(dir)).to_equal(true)
+        val marker = dir + "/outliving_" + current_time_ms().to_text() + ".marker"
+
+        step("Start a helper that waits five seconds and then writes a marker file")
+        val work = "Start-Sleep -Seconds 5; Set-Content -LiteralPath '" + marker + "' -Value alive"
+        val started = start_outliving_process(dir, ["powershell", "-NoProfile", "-NonInteractive", "-Command", work])
+        expect(started).to_equal(true)
+
+        step("The launching call came back while the helper was still waiting")
+        expect(file_exists(marker)).to_equal(false)
+
+        step("The helper was not taken down with the launcher: its marker appears")
+        val deadline = current_time_ms() + 120000
+        while not file_exists(marker) and current_time_ms() < deadline:
+            sleep_ms(250)
+        expect(file_exists(marker)).to_equal(true)
+        expect(file_read(marker).trim()).to_equal("alive")
+        val _removed = file_delete(marker)

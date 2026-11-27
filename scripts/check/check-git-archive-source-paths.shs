@@ -1,0 +1,114 @@
+#!/bin/sh
+# Exercise repository export attributes through actual Git archives.
+# Port of the former check-git-archive-source-paths.py, now deleted (repo rule: .spl/.shs only).
+#
+# usage: check-git-archive-source-paths.shs [--attributes FILE] [--git GIT] [--selftest]
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+attributes="$repo/.gitattributes"
+git_bin=$(command -v git || true)
+selftest=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --attributes) attributes="$2"; shift 2 ;;
+        --git) git_bin="$2"; shift 2 ;;
+        --selftest) selftest=1; shift ;;
+        -h|--help) sed -n '2,5p' "$0"; exit 0 ;;
+        *) echo "error: unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+[ -n "$git_bin" ] || { echo "error: Git is required" >&2; exit 2; }
+
+ROOTS="build tmp artifacts node-compile-cache system"
+
+# check ATTRIBUTES_FILE -> prints PASS line, exit 0; or "FAIL: ..." exit 1
+check() {
+    attr_file="$1"
+    work=$(mktemp -d "${TMPDIR:-/tmp}/simple-archive-source-XXXXXX")
+    fx="$work/repo"
+    mkdir -p "$fx" "$work/expect"
+    g() { "$git_bin" -C "$fx" "$@"; }
+    g init --quiet
+    cp "$attr_file" "$fx/.gitattributes"
+    : > "$work/kept"; : > "$work/excluded"
+    for name in $ROOTS; do
+        rel="src/app/$name/source.spl"
+        fn=$(printf '%s' "$name" | tr '-' '_')
+        mkdir -p "$fx/src/app/$name" "$work/expect/src/app/$name"
+        printf 'fn %s_source():\n    7\n' "$fn" > "$fx/$rel"
+        cp "$fx/$rel" "$work/expect/$rel"
+        echo "$rel" >> "$work/kept"
+        mkdir -p "$fx/$name"
+        printf 'local cache\n' > "$fx/$name/cache.txt"
+        echo "$name/cache.txt" >> "$work/excluded"
+    done
+    rel=src/lib/nogc_sync_mut/system/source.spl
+    mkdir -p "$fx/$(dirname "$rel")" "$work/expect/$(dirname "$rel")"
+    printf 'fn system_source():\n    9\n' > "$fx/$rel"; cp "$fx/$rel" "$work/expect/$rel"
+    echo "$rel" >> "$work/kept"
+    for pair in "src/compiler_rust/target/cache.txt:compiled cache" \
+                "src/app/vscode_extension/node_modules/cache.txt:npm cache"; do
+        rel=${pair%%:*}
+        mkdir -p "$fx/$(dirname "$rel")"
+        printf '%s\n' "${pair#*:}" > "$fx/$rel"
+        echo "$rel" >> "$work/excluded"
+    done
+    g -c core.autocrlf=false add --force --all
+    g ls-files > "$work/tracked"
+    while IFS= read -r rel; do
+        grep -qxF "$rel" "$work/tracked" || {
+            rm -rf "$work"; echo "FAIL: archive controls were not tracked in the fixture"; return 1; }
+    done < "$work/kept"
+    while IFS= read -r rel; do
+        grep -qxF "$rel" "$work/tracked" || {
+            rm -rf "$work"; echo "FAIL: archive controls were not tracked in the fixture"; return 1; }
+    done < "$work/excluded"
+    g -c user.name='Archive regression' -c user.email=archive@example.invalid \
+      -c commit.gpgsign=false commit --quiet -m 'archive fixture'
+    g archive --format=tar -o "$work/out.tar" HEAD
+    mkdir "$work/x"
+    tar -xf "$work/out.tar" -C "$work/x"
+    tar -tf "$work/out.tar" > "$work/names"
+    failures=""
+    while IFS= read -r rel; do
+        if ! grep -qxF "$rel" "$work/names"; then
+            failures="$failures; missing source: $rel"
+        elif ! cmp -s "$work/x/$rel" "$work/expect/$rel"; then
+            failures="$failures; changed source: $rel"
+        fi
+    done < "$work/kept"
+    while IFS= read -r rel; do
+        grep -qxF "$rel" "$work/names" && failures="$failures; exported cache: $rel"
+    done < "$work/excluded"
+    nk=$(wc -l < "$work/kept" | tr -d ' '); ne=$(wc -l < "$work/excluded" | tr -d ' ')
+    rm -rf "$work"
+    if [ -n "$failures" ]; then
+        echo "FAIL: ${failures#; }"
+        return 1
+    fi
+    echo "PASS: $nk nested sources retained byte-for-byte; $ne cache files excluded"
+}
+
+if [ "$selftest" = 1 ]; then
+    st=$(mktemp -d "${TMPDIR:-/tmp}/simple-archive-selftest-XXXXXX")
+    # good: excludes root caches anchored at /, plus explicit dependency caches.
+    printf '* -text
+/build export-ignore\n/tmp export-ignore\n/artifacts export-ignore\n/node-compile-cache export-ignore\n/system export-ignore\nsrc/compiler_rust/target export-ignore\nnode_modules export-ignore\n' > "$st/good"
+    # bad: unanchored patterns swallow nested src/app/build etc.
+    printf 'build export-ignore\ntmp export-ignore\nartifacts export-ignore\nnode-compile-cache export-ignore\nsystem export-ignore\nsrc/compiler_rust/target export-ignore\nnode_modules export-ignore\n' > "$st/bad"
+    : > "$st/none"
+    rc=0
+    out=$(check "$st/good") || rc=1
+    case "$out" in "PASS: 6 nested sources retained byte-for-byte; 7 cache files excluded") ;; *) echo "selftest FAIL good: $out"; rc=1 ;; esac
+    if out=$(check "$st/bad"); then echo "selftest FAIL bad accepted: $out"; rc=1; fi
+    case "$out" in *"missing source: src/app/build/source.spl"*) ;; *) echo "selftest FAIL bad reason: $out"; rc=1 ;; esac
+    if out=$(check "$st/none"); then echo "selftest FAIL empty accepted"; rc=1; fi
+    case "$out" in *"exported cache: build/cache.txt"*) ;; *) echo "selftest FAIL empty reason: $out"; rc=1 ;; esac
+    rm -rf "$st"
+    [ "$rc" = 0 ] && echo "SELFTEST PASS: 3 fixtures"
+    exit "$rc"
+fi
+
+check "$attributes"

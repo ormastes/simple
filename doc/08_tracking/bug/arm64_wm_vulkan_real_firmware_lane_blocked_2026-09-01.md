@@ -1,10 +1,39 @@
-# arm64 WM+Vulkan real-firmware smoke lane is blocked: `arm64-desktop-engine2d` scenario is unregistered (2026-09-01)
+# ARM64 WM/Vulkan real-firmware admission remains pending
 
 Status: **OPEN**. Gate landed **ADVISORY** (honestly RED).
 Gate: `scripts/check/check-simpleos-arm64-wm-vulkan-pixel-evidence.shs`
 Arch scope: aarch64/arm64 only. x86_64 and riscv64 are other lanes.
 
-## Summary
+## Current source review — 2026-11-03
+
+The original registration blocker is stale: `scenario_catalog.spl` now
+constructs `arm64-desktop-engine2d` and dispatches both lookup routes. The
+historical observations below are retained as evidence of the earlier state.
+
+The remaining gate had a separate concrete artifact defect: it supplied the
+ELF container directly to `BOOT_PROTOCOL=linux`; the ESP builder copies its
+payload verbatim. The gate now extracts a flat Image with `llvm-objcopy`,
+checks ELF64 little-endian AArch64 input and the ARM64 Linux Image magic and
+nonzero declared image size, then supplies that Image to the ESP owner.
+Conversion/validation happens before the optional daemon build. Failures keep
+the gate's ERROR/exit-2 contract; no direct-kernel fallback or admission
+relaxation was added.
+
+`python3 scripts/check/check-arm64-wm-firmware-image.py [deleted 2026-11-26]` passed with a real
+clang/LLD-produced ARM64 ELF and the production conversion/ESP-handoff shell
+fragments. It verifies the exact flat bytes reaching the builder boundary,
+quoted paths, bad magic, zero size, truncated image, wrong machine, accidental
+raw-ELF copy, missing objcopy, and builder failure. The ESP boundary is a test
+capture, not a FAT/firmware execution claim. Shell syntax, whitespace and
+scoped env guards passed.
+
+Status remains **OPEN / ADVISORY**: full gate selftests requiring an admitted
+Simple runner, current-source kernel build, real-firmware handover and paired
+hardware Vulkan receipts were not run here. The PCI/ivshmem descriptor defect
+and other live-lane dependencies remain separate open records. Source artifact
+repair must not be reported as successful WM/Vulkan firmware admission.
+
+## Historical summary (2026-09-01)
 
 Goal item 2 asks for an "x86, arm, riscv simple os wm with vulkan backed smoke
 test". The aarch64 gate is written and its `--selftest` is green (25 fixtures,
@@ -166,3 +195,28 @@ ERROR — nothing was checked: ESP build failed (rc=1, ...):
 i.e. the failure is correctly reported as ERROR (exit 2) with a verdict line,
 not as a bare non-zero exit. The only missing input to a real boot is the
 kernel, which is Blocker 1.
+
+## 2026-11-11 addendum — P3 traverse lane ne1 verdict: BLOCKED (OPEN)
+
+Current gate evidence, this host, 2026-11-11 (seed-smoke only, no
+self-hosted claims): `SIMPLE_BIN=<refreshed 2026-11-11 seed> sh
+scripts/check/check-simpleos-arm64-wm-vulkan-pixel-evidence.shs` →
+`[arm64-wm-vulkan] selftest OK (25 fixtures)` then `ERROR — nothing was
+checked: qemu-system-aarch64 not installed`, exit 2. This host has no
+qemu-system-aarch64, no mkfs.vfat, and no AAVMF pflash; the desktop kernel
+is not built in this worktree, so the real-firmware handover (Blocker 2) and
+paired hardware-Vulkan receipts cannot be produced here. The 2026-11-03
+source repairs (scenario registration present; gate now validates/extracts
+the flat ARM64 Image via llvm-objcopy before ESP handoff) are still the
+latest landed state; the dedicated user-assigned lane
+`arm64-wm-firmware-20261103` (bug_db, 2026-11-03) remains open.
+
+Exact grant command (Linux host with the firmware/QEMU toolchain):
+
+```sh
+sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs
+SIMPLE_BIN=<admitted compiler> sh scripts/check/check-simpleos-arm64-wm-vulkan-pixel-evidence.shs
+```
+
+Promotion criteria in this doc are unchanged. Status stays OPEN / ADVISORY.
+Lane evidence: `build/review/p3fix-ne1-20261111.sdn` row 6.

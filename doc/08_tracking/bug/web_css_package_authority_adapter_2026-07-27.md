@@ -51,3 +51,24 @@ run the focused specs and capture wrapper below.
   wrapper is optional backend evidence only; it is not package-authority proof.
   Do not bootstrap or substitute the Rust seed.
 
+## Triage 2026-11-25 (p3-bau fleet, worktree wt-p3-bau, release/1.0.0 @ 33280d09762)
+
+Attempted the runtime verification on this Windows host with the admitted
+self-hosted path (`SIMPLE_LIB=src bin/simple.exe test
+test/01_unit/app/ui_web/html_css_theme_authority_spec.spl --mode=interpreter`).
+BLOCKED before any spec loaded: the tracked pinned seed `bin/simple.exe`
+(built 2026-11-17, commit 41dbae93225) predates the 2026-11-25
+`@representation_boundary` mass-annotation commit (`cfd89933699`) and aborts
+with `unknown decorator '@representation_boundary'` in the test runner, so no
+spec execution is possible against current source on this host.
+
+Source-side claims re-verified by inspection instead:
+`generate_package_authoritative_css` (`src/app/ui.web/html_css.spl:1906`)
+emits rules via string literals with single `\n` newline escapes (e.g.
+lines 163-167) — real newlines at runtime, not the literal `\\n` defect from
+the original report.
+
+Status unchanged: **source fixed / runtime unverified**. The runtime leg
+needs a host whose admitted runtime can parse current source (i.e. a seed or
+self-hosted binary built after `cfd89933699`).
+

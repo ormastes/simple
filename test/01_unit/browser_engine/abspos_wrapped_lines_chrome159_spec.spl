@@ -1,0 +1,237 @@
+"""
+## Purpose and audience
+Purpose: Pin how text WRAPS inside an absolutely positioned box against
+Chrome 159: where the line breaks (the fit test), where line 2 starts (its
+pen) and how wide the box paints at device scale 4.
+Audience: web renderer layout (line fit, abspos sizing, pen origin).
+
+Three causes, measured on base:
+- **Fit:** a one-run box was kept on one line when its WHOLE-px run width
+  (`ll ll ll` = 30) was at most the box width (30), while Chrome compares
+  the exact LayoutUnit width (30.21875) and breaks. The same holds for an
+  in-flow block and a float with `width:30px`; a fractional authored width
+  is compared exactly (`30.2px` is 30.1875 and breaks, `30.25px` fits).
+- **Line 2 pen:** only the FIRST line of a run carried the box's sub-pixel
+  line start; lines 2..n started on the whole px (k=1).
+- **Device width:** at k=4 a box whose exact width has a fraction (a
+  shrink-to-fit `Hello world` is 79.140625 px, `width:30.2px`) painted k x
+  its whole-px width; Chrome paints round(k x exact right) - round(k x left).
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--hide-scrollbars --force-device-scale-factor=k --window-size=400,300
+--screenshot`, sans-serif = Liberation Sans 16 px, line-height 20 px,
+2026-11-24). Boxes are `#00f` with transparent text; heights are blue rows
+in one column, spans are blue columns on one row.
+
+| probe (box holding `ll ll ll`)          | Chrome h k=1 / k=4 | base k=1 / k=4 |
+|-----------------------------------------|--------------------|----------------|
+| abspos `width:30px`                     | 40 / 160           | 20 / 80        |
+| abspos `width:30px`, text in a `<span>` | 40 / 160           | 20 / 80        |
+| abspos `width:30px`, text in a `<p>`    | 40 / 160           | 20 / 80        |
+| abspos `left:120px;right:250px` (30)    | 40 / 160           | 20 / 80        |
+| abspos `width:30.2px` (30.1875)         | 40 / 160           | 20 / 80        |
+| abspos `width:30.25px` (guard)          | 20 / 80            | 20 / 80        |
+| abspos shrink-to-fit `Hello world`      | 20 / 80            | 20 / 80        |
+| abspos `left:370px`, 30 px available    | 40 / 160           | 20 / 80        |
+| in-flow `<div style=width:30px>`        | 40 / 160           | 20 / 80        |
+| `float:left;width:30px`                 | 40 / 160           | 20 / 80        |
+
+Device columns at k=4 (base in brackets): shrink-to-fit `Hello world` at
+`left:10px` 40..356 (40..355); at `right:10px` 1243..1559 (1243..1558);
+13 px at `left:10.5px` 42..298 (42..297); `width:30.2px` at 160 640..760
+(640..759); `width:30.25px` at 200 800..920 (800..919); `Hello world` at
+240 960..1276 (960..1275).
+
+Line 2 pen (k=1): `ll ll ll` in a `width:22px` box wraps to `ll ll` /
+`ll`; the probe is the ink centroid (255 - green) of line 2 minus the same
+centroid of the whole-px twin at `left:60px`:
+`left:10.25px` -49.739 (base -50.000), `<p>` in `left:100.5px` 40.574
+(base 41.000), `left:150.75px` 90.837 (base 91.000). Tolerance 0.08 px.
+At k=4 the box's device column already carries the fraction (Chrome =
+base); AC-4 keeps that.
+"""
+
+"""
+Traceability: REQ-WEB-LAYOUT-ABSPOS-WRAP-001 - text in a box breaks where its exact LayoutUnit width overflows, every wrapped line keeps the box's sub-pixel start, and an absolutely positioned box paints its exact width in device px.
+"""
+# @tag: unit, browser_engine, layout, text, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 400
+val H: i32 = 300
+val B: text = "background:#00f;color:transparent"
+val L: text = "ll ll ll"
+
+val PAGE: text = "<!doctype html><html><body style=\"margin:0;background:#fff;color:#000;font-family:sans-serif\"><div style=\"position:relative;width:400px;height:300px;font-size:16px;line-height:20px\">" +
+    "<div style=\"position:absolute;left:0;top:0;width:30px;" + B + "\">" + L + "</div>" +
+    "<div style=\"position:absolute;left:40px;top:0;width:30px;" + B + "\"><span>" + L + "</span></div>" +
+    "<div style=\"position:absolute;left:80px;top:0;width:30px;" + B + "\"><p style=\"margin:0\">" + L + "</p></div>" +
+    "<div style=\"position:absolute;left:120px;right:250px;top:0;" + B + "\">" + L + "</div>" +
+    "<div style=\"position:absolute;left:160px;top:0;width:30.2px;" + B + "\">" + L + "</div>" +
+    "<div style=\"position:absolute;left:200px;top:0;width:30.25px;" + B + "\">" + L + "</div>" +
+    "<div style=\"position:absolute;left:240px;top:0;" + B + "\">Hello world</div>" +
+    "<div style=\"position:absolute;left:370px;top:0;" + B + "\">" + L + "</div>" +
+    "<div style=\"position:absolute;left:0;top:50px;width:200px\"><div style=\"width:30px;" + B + "\">" + L + "</div></div>" +
+    "<div style=\"position:absolute;left:60px;top:50px;width:200px\"><div style=\"float:left;width:30px;" + B + "\">" + L + "</div></div>" +
+    "<div style=\"position:absolute;left:10px;top:100px;" + B + "\">Hello world</div>" +
+    "<div style=\"position:absolute;right:10px;top:130px;" + B + "\">Hello world</div>" +
+    "<div style=\"position:absolute;left:10.5px;top:160px;font-size:13px;line-height:16px;" + B + "\">Hello world</div>" +
+    "<div style=\"position:absolute;left:10.25px;top:200px;width:22px\">" + L + "</div>" +
+    "<div style=\"position:absolute;left:60px;top:200px;width:22px\">" + L + "</div>" +
+    "<div style=\"position:absolute;left:100.5px;top:200px;width:22px\"><p style=\"margin:0\">" + L + "</p></div>" +
+    "<div style=\"position:absolute;left:150.75px;top:200px;width:22px\">" + L + "</div>" +
+    "</div></body></html>"
+
+fn _blue(v: u32) -> bool:
+    val r = ((v >> 16u32) & 0xFFu32).to_i64()
+    val b = (v & 0xFFu32).to_i64()
+    b > 128 and r < 128
+
+# Blue device rows in device column x between CSS rows y0..y1.
+fn _blue_h(px: [u32], k: i32, x: i32, y0: i32, y1: i32) -> i32:
+    var n = 0
+    var y = y0 * k
+    while y < y1 * k:
+        if _blue(px[y * W * k + x]): n = n + 1
+        y = y + 1
+    n
+
+# Heights of the eight top-row boxes (columns 5, 45, ..., 375), the in-flow
+# twin and the float twin, in device rows.
+fn _heights(px: [u32], k: i32) -> [i32]:
+    var out: [i32] = []
+    for xc in [5, 45, 85, 125, 165, 205, 245, 375]:
+        out.push(_blue_h(px, k, xc * k, 0, 48))
+    out.push(_blue_h(px, k, 5 * k, 50, 98))
+    out.push(_blue_h(px, k, 65 * k, 50, 98))
+    out
+
+# Last blue device column of the blue span that starts at or after x0 on
+# device row y.
+fn _blue_last(px: [u32], k: i32, y: i32, x0: i32) -> i32:
+    var x = x0
+    while x < W * k and not _blue(px[y * W * k + x]):
+        x = x + 1
+    while x < W * k and _blue(px[y * W * k + x]):
+        x = x + 1
+    x - 1
+
+fn _blue_first(px: [u32], k: i32, y: i32, x0: i32) -> i32:
+    var x = x0
+    while x < W * k and not _blue(px[y * W * k + x]):
+        x = x + 1
+    x
+
+# Ink centroid (milli device px) of 255 - green over CSS rect y0..y1 x x0..x1.
+fn _cx(px: [u32], k: i32, y0: i32, y1: i32, x0: i32, x1: i32) -> i64:
+    var s: i64 = 0
+    var sp: i64 = 0
+    var y = y0 * k
+    while y < y1 * k:
+        var x = x0 * k
+        while x < x1 * k:
+            val ink = 255 - ((px[y * W * k + x] >> 8u32) & 0xFFu32).to_i64()
+            s = s + ink
+            sp = sp + ink * x.to_i64()
+            x = x + 1
+        y = y + 1
+    if s == 0: -1000000000 else: sp * 1000 / s
+
+fn _line2_delta_ok(px: [u32], k: i32, x0: i32, want: i64) -> bool:
+    val got = _cx(px, k, 220, 240, x0, x0 + 20) - _cx(px, k, 220, 240, 55, 75)
+    val tol: i64 = if k == 1: 80 else: 300
+    got >= want - tol and got <= want + tol
+
+describe "abspos wrapped lines (Chrome 159)":
+    it "AC-1: k=1 a run breaks where its exact width overflows the box":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        val h = _heights(px, 1)
+        step("width:30px bare / span / p / left+right / 30.2px: two lines (40)")
+        expect(h[0]).to_equal(40)
+        expect(h[1]).to_equal(40)
+        expect(h[2]).to_equal(40)
+        expect(h[3]).to_equal(40)
+        expect(h[4]).to_equal(40)
+        step("width:30.25px and shrink-to-fit Hello world stay on one line (20)")
+        expect(h[5]).to_equal(20)
+        expect(h[6]).to_equal(20)
+        step("shrink-to-fit with 30 px available: two lines")
+        expect(h[7]).to_equal(40)
+        step("in-flow and float width:30px twins: two lines")
+        expect(h[8]).to_equal(40)
+        expect(h[9]).to_equal(40)
+
+    it "AC-2: k=1 line 2 starts at the box's sub-pixel line start":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        step("left 10.25 / <p> in 100.5 / 150.75: -49.739 / 40.574 / 90.837")
+        expect(_line2_delta_ok(px, 1, 5, -49739)).to_equal(true)
+        expect(_line2_delta_ok(px, 1, 95, 40574)).to_equal(true)
+        expect(_line2_delta_ok(px, 1, 145, 90837)).to_equal(true)
+        step("shrink-to-fit boxes keep their whole-px columns at k=1")
+        expect(_blue_first(px, 1, 110, 0)).to_equal(10)
+        expect(_blue_last(px, 1, 110, 0)).to_equal(88)
+        expect(_blue_first(px, 1, 140, 200)).to_equal(311)
+        expect(_blue_last(px, 1, 140, 200)).to_equal(389)
+        expect(_blue_first(px, 1, 170, 0)).to_equal(11)
+        expect(_blue_last(px, 1, 170, 0)).to_equal(74)
+
+    it "AC-3: k=4 the same boxes break as at k=1":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, W, H, 4, "cpu_simd")
+        expect(px.len()).to_equal((W * H * 16).to_i64())
+        val h = _heights(px, 4)
+        step("two-line boxes 160 device rows, one-line guards 80")
+        expect(h[0]).to_equal(160)
+        expect(h[1]).to_equal(160)
+        expect(h[2]).to_equal(160)
+        expect(h[3]).to_equal(160)
+        expect(h[4]).to_equal(160)
+        expect(h[5]).to_equal(80)
+        expect(h[6]).to_equal(80)
+        expect(h[7]).to_equal(160)
+        expect(h[8]).to_equal(160)
+        expect(h[9]).to_equal(160)
+
+    it "AC-4: k=4 an absolute box paints its exact width in device px":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, W, H, 4, "cpu_simd")
+        step("shrink-to-fit Hello world: left 10 -> 40..356, right 10 -> 1243..1559")
+        expect(_blue_first(px, 4, 440, 0)).to_equal(40)
+        expect(_blue_last(px, 4, 440, 0)).to_equal(356)
+        expect(_blue_first(px, 4, 560, 800)).to_equal(1243)
+        expect(_blue_last(px, 4, 560, 800)).to_equal(1559)
+        step("13px at left 10.5 -> 42..298")
+        expect(_blue_first(px, 4, 680, 0)).to_equal(42)
+        expect(_blue_last(px, 4, 680, 0)).to_equal(298)
+        step("width 30.2 / 30.25 / Hello world on row 10: 640..760 / 800..920 / 960..1276")
+        expect(_blue_first(px, 4, 40, 620)).to_equal(640)
+        expect(_blue_last(px, 4, 40, 620)).to_equal(760)
+        expect(_blue_first(px, 4, 40, 780)).to_equal(800)
+        expect(_blue_last(px, 4, 40, 780)).to_equal(920)
+        expect(_blue_first(px, 4, 40, 940)).to_equal(960)
+        expect(_blue_last(px, 4, 40, 940)).to_equal(1276)
+        step("line 2 keeps its device pen (Chrome = base at k=4)")
+        expect(_line2_delta_ok(px, 4, 5, -199000)).to_equal(true)
+        expect(_line2_delta_ok(px, 4, 95, 162000)).to_equal(true)
+        expect(_line2_delta_ok(px, 4, 145, 363000)).to_equal(true)

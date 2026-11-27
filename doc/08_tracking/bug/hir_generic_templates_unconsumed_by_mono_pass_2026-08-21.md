@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN
+**Status:** SUPERSEDED 2026-11-11 (lane p3fix-comp7-20261111) — `40.mono` no-op subsystem replaced by `hir_function_selection_v1`; re-verified fresh-seed 4/4 + 4/4 (see addenda)
 **Filed:** 2026-08-21
 **Relates to:** #158 Phase B; plan `doc/03_plan/compiler/generics/native_monomorphization_plan_2026-07-17.md`
 
@@ -347,3 +347,77 @@ what catches it.
   SOURCE.
 - `substitute_expr` still does not recurse into sub-expressions.
 
+
+---
+
+## Addendum 2026-11-11 — lane compiler2 — verdict SUPERSEDED (40.mono replaced; templates now marked + consumed)
+
+Triage-first pass, batch 2. The literal subsystem this bug describes no longer
+exists on the refreshed seed (build-commit 0791c2b7f4a7).
+
+**The `40.mono` no-op pass is gone.** `src/compiler/40.mono/` (and its specs
+`test/01_unit/compiler/mono/*`, incl. `mono_template_pruning_spec.spl` and
+`hir_monomorphization_rewrite_spec.spl`) are absent from HEAD — `find
+src/compiler -iname '*mono*'` and a `test/` grep for `prune_consumed_templates`
+return nothing. Monomorphization was reworked: function selection /
+specialization now lives in `src/compiler/20.hir/hir_function_selection_v1.spl`
+with the `is_generic_template` group on `HirFunction` + struct/class/enum/trait
+(consumed across `hir_definitions.spl`, the `_Items/*_lowering.spl` tiers, and
+MIR — `module_lowering.spl:1228,1352` now branch on
+`type_params.len() > 0 or is_generic_template`), plus module-scoped COMDAT mono
+(`7c03cb625fa3`) and the receiver-type-arg substitution fixes (`c9294577eff5`,
+`6672f9336413`). The "rewrite_module returns the module unchanged" premise has
+no referent in the current tree.
+
+**Seed-smoke (both green, refreshed seed, `--mode=interpreter --no-cache`):**
+- `test/01_unit/compiler/hir/generic_template_marking_spec.spl` ->
+  `outcome=OK, passed=4/4` (this bug's own defect-2 pin: generic struct/class/
+  free-fn tiers are truthfully marked `is_generic_template`).
+- `test/01_unit/compiler/hir/hir_function_selection_v1_spec.spl` ->
+  `outcome=OK, passed=4/4` (the current selection/specialization mechanism that
+  consumes those templates).
+- Also green earlier this lane: `test/01_unit/compiler/20.hir/generic_enum_self_match_spec.spl`
+  5/5 (generic-enum self-match lowers). Evidence logs:
+  `build/review/p3c2-gentemplatemark-seedsmoke.log`,
+  `build/review/p3c2-hirfuncsel-seedsmoke.log`.
+
+**Caveat:** end-to-end demonstration from a full native build of a generic user
+was NOT run (heavy entry-closure native build; blocked under this lane's
+mandate). The verdict rests on the disappearance of the named no-op subsystem +
+the landed #158/#7991 selection machinery + the two green pins above.
+
+**Cycles:** 0 (no fix attempted; addressed by prior #158 rework).
+
+---
+
+## 2026-11-11 (lane p3fix-comp7-20261111) — Status re-verified SUPERSEDED, header flipped
+
+Independent re-verification of the same-day compiler2 addendum on this lane's
+fresh worktree (base `a64cda1ee32d`, tracked seed `bin/simple.exe`,
+build-commit 46fe8f6b6def):
+
+- `src/compiler/40.mono/` no longer exists (`ls` → No such file or directory);
+  neither does its spec tree `test/01_unit/compiler/mono/`. The literal
+  no-op-pass subsystem this bug describes has no referent in the current tree.
+- Selection/specialization now lives at `src/compiler/20.hir/hir_function_selection_v1.spl`
+  (present), and the `is_generic_template` group is consumed across HIR and MIR.
+- Seed-smoke, refreshed tracked seed, `--mode=interpreter --no-cache`:
+  - `test/01_unit/compiler/hir/generic_template_marking_spec.spl` →
+    `outcome=OK, executed=4 passed=4 failed=0` (this bug's own defect-2 pin).
+  - `test/01_unit/compiler/hir/hir_function_selection_v1_spec.spl` →
+    `outcome=OK, executed=4 passed=4 failed=0` (the mechanism that now consumes
+    the marked templates).
+
+Disposition: SUPERSEDED — absorbed by the #158/#7991 monomorphization rework
+(selection + module-scoped COMDAT mono + receiver-type-arg substitution).
+Header Status line normalized to the dated form.
+
+Caveat carried from the compiler2 addendum: no full end-to-end native build of
+a generic user was run in-lane (heavy entry-closure native build, out of lane
+mandate); the verdict rests on the disappeared subsystem + the landed
+machinery + the two green pins above.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane p3fix-comp7: SUPERSEDED — the 40.mono no-op subsystem was
+replaced by hir_function_selection. No in-lane change.

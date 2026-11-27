@@ -151,6 +151,8 @@ done
 [ -n "$CROSS" ] || verdict_error "no riscv64 cross-gcc (riscv64-unknown-elf-gcc / riscv64-linux-gnu-gcc)"
 OBJCOPY=${CROSS}objcopy
 command -v "$OBJCOPY" >/dev/null 2>&1 || verdict_error "missing tool $OBJCOPY"
+OBJDUMP=${CROSS}objdump
+command -v "$OBJDUMP" >/dev/null 2>&1 || verdict_error "missing tool $OBJDUMP"
 
 # --- build the probe kernel against the REAL early-boot sources -------------
 CFLAGS="-march=rv64gc -mabi=lp64d -mcmodel=medany -ffreestanding -nostdlib -O1"
@@ -198,9 +200,26 @@ check_stub_image() {
     "${CROSS}gcc" $CFLAGS $extra -c "$src" -o "$OUT/$name.o" \
         >>"$OUT/build.log" 2>&1 \
         || { tail -5 "$OUT/build.log" >&2; verdict_error "real kernel stub $src did not compile"; }
-    "${CROSS}ld" -T "$LD_SCRIPT" --unresolved-symbols=ignore-all -e _start \
-        --defsym=spl_start=0x80200000 --defsym=boot_main=0x80200000 \
-        "$OUT/$name.o" -o "$OUT/$name.elf" >>"$OUT/build.log" 2>&1 \
+    # This is a structural header link, not a runnable kernel link. Runtime
+    # call targets are supplied by the full kernel and must be kept close enough
+    # for R_RISCV_CALL/R_RISCV_CALL_PLT relocations in this isolated object.
+    # Derive only CALL targets from the relocation table. Never synthesize all
+    # undefined symbols: _kernel_end, _stack_top, and the other data boundaries
+    # are deliberately defined by the real linker script and must retain those
+    # values for the image-size and memory-layout checks.
+    relocations="$OUT/$name.relocations"
+    call_symbols="$OUT/$name.call-symbols"
+    "$OBJDUMP" -r "$OUT/$name.o" >"$relocations" \
+        || verdict_error "could not inspect relocations for real kernel stub $src"
+    awk '$2 == "R_RISCV_CALL" || $2 == "R_RISCV_CALL_PLT" { sym=$3; sub(/\+.*/, "", sym); print sym }' \
+        "$relocations" | sort -u >"$call_symbols"
+    set -- -T "$LD_SCRIPT" --unresolved-symbols=ignore-all -e _start
+    while IFS= read -r sym; do
+        [ -n "$sym" ] || continue
+        set -- "$@" "--defsym=$sym=0x80200000"
+    done <"$call_symbols"
+    set -- "$@" "$OUT/$name.o" -o "$OUT/$name.elf"
+    "${CROSS}ld" "$@" >>"$OUT/build.log" 2>&1 \
         || { tail -5 "$OUT/build.log" >&2; verdict_error "real kernel stub $src did not link"; }
     "$OBJCOPY" -O binary "$OUT/$name.elf" "$OUT/$name.Image" \
         || verdict_error "flat Image extraction failed for $name"

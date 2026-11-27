@@ -1,0 +1,115 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+"""
+Caret TUI workbench cell writer (REQ-CARET-UI-003, acceptance CU-017).
+
+`_put_str` in tui_view.spl is module-private, so these cases go through the
+smallest public renderer that uses it: `render_workbench` with a live-pane
+output line, which the active-session region writes with `_put_str` at
+`layout.active.x + 1` and width `layout.active.w - 2`. Cell positions are
+measured with the stdlib `text_cell_width` on the rendered row.
+"""
+
+use std.spec.*
+use std.common.layout.text_metrics.{text_cell_width}
+use std.common.encoding.utf8.{text_codepoints, char_from_codepoint}
+
+use app.llm_caret.workbench.session_contract.{
+    SessionId, SessionView, ProcessLifecycle, AgentTurn, Transport,
+    CapabilityEvidence, InputMode, new_session_id, new_draft}
+use app.llm_caret.workbench.tui_layout.{compute_layout, CompactView}
+use app.llm_caret.workbench.tui_view.{new_render_input_with_output, render_workbench}
+
+val GRID_W = 120
+val GRID_H = 40
+
+fn _row_for(output_line: text) -> text:
+    val base = SessionView(id: new_session_id("a1"), label: "A1", provider: "Codex",
+        lifecycle: ProcessLifecycle.Running, turn: AgentTurn.Working, transport: Transport.Ready,
+        evidence: CapabilityEvidence.Verified, needs_attention: false)
+    val sessions = [base]
+    val draft = new_draft(base.id, InputMode.Message)
+    val input = new_render_input_with_output(sessions, base.id, draft, "Composer", "p1", [output_line])
+    val layout = compute_layout(GRID_W, GRID_H, CompactView.Agents, 3)
+    val lines = render_workbench(layout, input)
+    lines[layout.active.y + 5]
+
+fn _active_x() -> i64:
+    compute_layout(GRID_W, GRID_H, CompactView.Agents, 3).active.x
+
+fn _region_w() -> i64:
+    compute_layout(GRID_W, GRID_H, CompactView.Agents, 3).active.w - 2
+
+fn _repeat(s: text, n: i64) -> text:
+    var out = ""
+    var i = 0
+    while i < n:
+        out = out + s
+        i = i + 1
+    out
+
+fn _prefix_before(row: text, marker: text) -> text:
+    row.split(marker)[0]
+
+describe "Caret TUI cell writer (CU-017)":
+
+    it "keeps an ASCII row byte-identical":
+        # @req REQ-CARET-UI-003
+        step("render an ASCII output line")
+        val row = _row_for("hello world")
+        step("the row is exactly the pane text between the region border and padding")
+        val expected_tail = "hello world" + _repeat(" ", _region_w() - 11) + "|"
+        expect(row.ends_with("hello world" + _repeat(" ", _region_w() - 11) + "|")).to_equal(true)
+        expect(row.len()).to_equal(GRID_W)
+        expect(expected_tail.len()).to_equal(_region_w() - 11 + 12)
+
+    it "places text after Hangul by cell, two cells per syllable":
+        # @req REQ-CARET-UI-003
+        step("render Hangul followed by ASCII")
+        val row = _row_for("한글XY")
+        step("the Hangul pair is 4 cells so XY starts 4 cells after the region start")
+        expect(row).to_contain("한글XY")
+        expect(text_cell_width(_prefix_before(row, "한글XY"))).to_equal(_active_x() + 1)
+        expect(text_cell_width(row)).to_equal(GRID_W)
+        expect(text_cell_width("한글")).to_equal(4)
+
+    it "replaces a wide char straddling the region edge with a space":
+        # @req REQ-CARET-UI-003
+        step("fill all but one cell of the region then add a wide char")
+        val row = _row_for(_repeat("a", _region_w() - 1) + "한")
+        step("the wide char is not written and the leftover cell is a space")
+        expect(row.contains("한")).to_equal(false)
+        expect(row.ends_with(_repeat("a", _region_w() - 1) + " |")).to_equal(true)
+        expect(text_cell_width(row)).to_equal(GRID_W)
+
+    it "gives a combining sequence one cell":
+        # @req REQ-CARET-UI-003
+        step("render e + U+0301 followed by ASCII")
+        val composed = "e" + char_from_codepoint(0x0301)
+        val row = _row_for(composed + "XY")
+        expect(row).to_contain(composed + "XY")
+        expect(text_cell_width(_prefix_before(row, composed + "XY"))).to_equal(_active_x() + 1)
+        expect(text_cell_width(row)).to_equal(GRID_W)
+
+    it "gives an emoji two cells":
+        # @req REQ-CARET-UI-003
+        step("render an emoji followed by ASCII")
+        val emoji = char_from_codepoint(0x1F600)
+        val row = _row_for(emoji + "XY")
+        expect(row).to_contain(emoji + "XY")
+        expect(text_cell_width(row)).to_equal(GRID_W)
+        expect(text_cell_width(emoji)).to_equal(2)
+
+    it "clips an over-long string at a codepoint boundary":
+        # @req REQ-CARET-UI-003
+        step("render far more wide chars than the region holds")
+        val row = _row_for(_repeat("한", 200))
+        step("the row is valid, full width, and holds exactly region/2 wide chars")
+        expect(text_cell_width(row)).to_equal(GRID_W)
+        val cps = text_codepoints(row)
+        var wide = 0
+        var i = 0
+        while i < cps.len():
+            if cps[i] == 0xD55C:
+                wide = wide + 1
+            i = i + 1
+        expect(wide).to_equal(_region_w() / 2)

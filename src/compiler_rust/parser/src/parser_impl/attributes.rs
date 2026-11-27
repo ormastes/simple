@@ -13,6 +13,7 @@ use super::core::Parser;
 /// These are non-effect, non-decorator tags used for metadata, lint control, test config, etc.
 pub const KNOWN_ATTRIBUTE_NAMES: &[&str] = &[
     // Lint control
+    "abi",
     "allow",
     "warn",
     "deny",
@@ -85,6 +86,8 @@ pub const KNOWN_ATTRIBUTE_NAMES: &[&str] = &[
     "collection_algorithm",
     "error_not",
     "warn_not",
+    // A5 representation boundary manifest (`@representation_boundary(...)`)
+    "representation_boundary",
 ];
 
 /// Check if a name is a known attribute (should produce Attribute, not Decorator)
@@ -104,19 +107,19 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn collection_site_id(&mut self, name: &str, declaration: Span, field: bool) -> String {
-        // FNV-1a is the hash_text ABI used by the self-hosted parser. Hash the
-        // declaration without its attribute so a policy switch reuses feedback.
+        // Hash the declaration without its attribute so a policy switch reuses
+        // feedback; comments and insignificant whitespace do not count.
         let text = self.source.get(declaration.start..declaration.end).unwrap_or("");
-        let hash = text.bytes().fold(0xcbf29ce484222325_u64, |value, byte| {
-            (value ^ u64::from(byte)).wrapping_mul(0x100000001b3)
-        }) as i64;
+        let hash = collection_declaration_hash(text);
         let module = if self.collection_module_path.is_empty() {
             "<unknown>".to_string()
         } else {
             self.collection_module_path.replace(';', "_").replace('\n', "_").replace('\r', "_")
         };
         let owner = &self.collection_owner;
-        let stem = if field {
+        let stem = if field && owner.is_empty() {
+            format!("ast://{module}/{name}#{hash}")
+        } else if field {
             format!("ast://{module}/{owner}/{name}#{hash}")
         } else if owner.is_empty() {
             format!("ast://{module}/local/{name}#{hash}")
@@ -132,15 +135,41 @@ impl<'a> Parser<'a> {
         site
     }
 
+    /// `@attr_storage(..)` is a node-attribute storage tag. The seed accepts it on a
+    /// field and ignores it; the pure-Simple compiler owns the storage mechanism.
+    pub(crate) fn is_at_field_annotation(&mut self) -> bool {
+        self.is_at_collection_algorithm()
+            || (self.check(&TokenKind::At)
+                && matches!(&self.peek_next().kind, TokenKind::Identifier { name, .. } if name == "attr_storage"))
+    }
+
     pub(crate) fn is_at_collection_algorithm(&mut self) -> bool {
         self.check(&TokenKind::At)
             && matches!(&self.peek_next().kind, TokenKind::Identifier { name, .. } if name == "collection_algorithm")
     }
 
+    /// Site ID for a user label. Labels share one namespace per module.
+    pub(crate) fn collection_label_site_id(&mut self, label: &str, span: Span) -> Result<String, ParseError> {
+        if !self.collection_site_labels.insert(label.to_string()) {
+            return Err(ParseError::contextual_error(
+                "collection algorithm",
+                format!("duplicate collection site label in this module: {label}"),
+                span,
+            ));
+        }
+        let module = if self.collection_module_path.is_empty() {
+            "<unknown>".to_string()
+        } else {
+            self.collection_module_path.replace(';', "_").replace('\n', "_").replace('\r', "_")
+        };
+        Ok(format!("ast://{module}/label/{label}"))
+    }
+
+    /// Returns the algorithm name and the optional site label.
     pub(crate) fn collection_algorithm_attribute(
         &self,
         attributes: &[Attribute],
-    ) -> Result<Option<String>, ParseError> {
+    ) -> Result<Option<(String, Option<String>)>, ParseError> {
         let mut algorithm = None;
         for attribute in attributes {
             if attribute.name != "collection_algorithm" {
@@ -153,8 +182,28 @@ impl<'a> Parser<'a> {
                     attribute.span,
                 ));
             }
+            let label = match (&attribute.args, &attribute.named_args) {
+                (Some(args), None) if args.len() == 2 => match collection_literal_text(&args[1]) {
+                    Some(label) if collection_label_valid(label) => Some(label.to_string()),
+                    _ => {
+                        return Err(ParseError::contextual_error(
+                            "collection algorithm",
+                            "@collection_algorithm site label must be a dotted name of letters, digits, '_', '-' or '.'",
+                            attribute.span,
+                        ));
+                    }
+                },
+                (Some(args), None) if args.len() > 2 => {
+                    return Err(ParseError::contextual_error(
+                        "collection algorithm",
+                        "@collection_algorithm takes an algorithm name and at most one site label",
+                        attribute.span,
+                    ));
+                }
+                _ => None,
+            };
             let name = match (&attribute.args, &attribute.named_args) {
-                (Some(args), None) if args.len() == 1 => match &args[0] {
+                (Some(args), None) if args.len() == 1 || args.len() == 2 => match &args[0] {
                     Expr::String(name) => name.as_str(),
                     Expr::FString { parts, .. } => match parts.as_slice() {
                         [FStringPart::Literal(name)] => name.as_str(),
@@ -189,7 +238,7 @@ impl<'a> Parser<'a> {
                     attribute.span,
                 ));
             }
-            algorithm = Some(name.to_string());
+            algorithm = Some((name.to_string(), label));
         }
         Ok(algorithm)
     }
@@ -539,6 +588,133 @@ impl<'a> Parser<'a> {
             Ok(Some(args))
         } else {
             Ok(None)
+        }
+    }
+}
+
+fn collection_literal_text(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::String(text) => Some(text.as_str()),
+        Expr::FString { parts, .. } => match parts.as_slice() {
+            [FStringPart::Literal(text)] => Some(text.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn collection_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || (c as u32) >= 128
+}
+
+/// Same rules as `collection_label_valid` in pure-Simple `collection_feedback.spl`.
+pub(crate) fn collection_label_valid(label: &str) -> bool {
+    !label.is_empty()
+        && label.chars().count() <= 128
+        && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
+}
+
+/// Drop comments and insignificant whitespace; keep string contents. One space
+/// survives only between two word characters. Twin of pure-Simple
+/// `parser_collection_normalize_declaration`.
+pub(crate) fn normalize_collection_declaration(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut quote: Option<char> = None;
+    let mut raw = false;
+    let mut escaped = false;
+    let mut prev: char = '\0';
+    let mut prev_prev_word = false;
+    let mut in_comment = false;
+    let mut pending_space = false;
+    let mut last_word = false;
+    for c in source.chars() {
+        if in_comment {
+            if c == '\n' {
+                in_comment = false;
+                pending_space = true;
+            }
+            continue;
+        }
+        if let Some(open) = quote {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' && !raw {
+                escaped = true;
+            } else if c == open {
+                quote = None;
+                prev = c;
+            }
+            continue;
+        }
+        if c == '#' {
+            in_comment = true;
+            prev = ' ';
+            continue;
+        }
+        if matches!(c, ' ' | '\t' | '\n' | '\r') {
+            pending_space = true;
+            prev = ' ';
+            continue;
+        }
+        let word = collection_word_char(c);
+        if pending_space && word && last_word {
+            out.push(' ');
+        }
+        // `r"..."` is raw only when the `r` stands alone, right before the quote.
+        let raw_prefix = !pending_space && prev == 'r' && !prev_prev_word;
+        pending_space = false;
+        out.push(c);
+        if c == '"' || c == '\'' {
+            quote = Some(c);
+            raw = c == '"' && raw_prefix;
+            last_word = false;
+        } else {
+            last_word = word;
+        }
+        prev_prev_word = prev != '\0' && collection_word_char(prev);
+        prev = c;
+    }
+    out
+}
+
+/// Versioned site hash: `n1.` plus FNV-1a (the `hash_text` ABI) of the
+/// normalized declaration.
+pub(crate) fn collection_declaration_hash(declaration: &str) -> String {
+    let hash = normalize_collection_declaration(declaration)
+        .bytes()
+        .fold(0xcbf29ce484222325_u64, |value, byte| (value ^ u64::from(byte)).wrapping_mul(0x100000001b3))
+        as i64;
+    format!("n1.{hash}")
+}
+
+#[cfg(test)]
+mod collection_site_hash_tests {
+    use super::collection_declaration_hash as hash;
+
+    #[test]
+    fn raw_string_ending_in_backslash_does_not_swallow_a_comment() {
+        assert_eq!(hash("var p = r\"a\\\"  # c"), hash("var p = r\"a\\\""));
+    }
+
+    #[test]
+    fn whitespace_and_comments_do_not_change_the_hash() {
+        assert_eq!(hash("var  hot = x  # c"), hash("var hot=x"));
+        assert_ne!(hash("var hot = ab"), hash("var hot = a b"));
+        assert!(hash("var hot = x").starts_with("n1."));
+    }
+
+    #[test]
+    fn representation_boundary_parses_as_attribute_not_decorator() {
+        let src = "@representation_boundary(kind: \"ffi\", reason: \"test\", reviewers: [\"ormastes\", \"opus-review\"], capabilities: [\"ffi\"])\npub fn f():\n    0\n";
+        let mut parser = crate::Parser::new(src);
+        let module = parser.parse().expect("parse @representation_boundary");
+        match &module.items[0] {
+            crate::ast::Node::Function(f) => {
+                assert!(f.decorators.is_empty(), "must not be parsed as runtime decorator");
+                assert!(f.attributes.iter().any(|a| a.name == "representation_boundary"));
+            }
+            other => panic!("expected Function, got {:?}", other),
         }
     }
 }

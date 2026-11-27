@@ -1,0 +1,105 @@
+# Standalone native regression for empty partition arrays populated by push.
+# Select the actual owner explicitly: the production sort recursively infers
+# less/equal/greater and insertion-sort buffers; this fixture does not clone it.
+use lib.nogc_async_mut.array.array_sort_by
+
+struct SortPairRecord:
+    identity: i64
+    key: i64
+
+struct SortTextRecord:
+    label: text
+    key: i64
+    identity: i64
+    payload: text
+
+struct SortWideRecord:
+    prefix: i64
+    label: text
+    identity: i64
+    checksum: i64
+    key: i64
+    suffix: i64
+
+fn main() -> i64:
+    # Twelve entries cross the production quicksort threshold. Duplicate keys
+    # exercise the equal partition; both smaller partitions exercise insertion.
+    # Key order deliberately differs from identity and every payload field.
+    val keys: [i64] = [3, 1, 4, 2, 1, 0, 4, 3, 2, 0, 5, 5]
+    var pairs: [SortPairRecord] = []
+    var texts: [SortTextRecord] = []
+    var wides: [SortWideRecord] = []
+    for identity in 0..12:
+        pairs.push(SortPairRecord(identity: identity, key: keys[identity]))
+        texts.push(SortTextRecord(label: "label-{identity}", key: keys[identity], identity: identity, payload: "payload-{identity}"))
+        wides.push(SortWideRecord(prefix: 1000 - identity, label: "wide-{identity}", identity: identity, checksum: identity * 17 + 9, key: keys[identity], suffix: -100 - identity))
+
+    val sorted_pairs = array_sort_by(pairs, \left, right: left.key - right.key)
+    val sorted_texts = array_sort_by(texts, \left, right: left.key - right.key)
+    val sorted_wides = array_sort_by(wides, \left, right: left.key - right.key)
+    assert(sorted_pairs.len() == 12)
+    assert(sorted_texts.len() == 12)
+    assert(sorted_wides.len() == 12)
+    for index in 1..12:
+        assert(sorted_pairs[index - 1].key <= sorted_pairs[index].key)
+        assert(sorted_texts[index - 1].key <= sorted_texts[index].key)
+        assert(sorted_wides[index - 1].key <= sorted_wides[index].key)
+    assert(sorted_pairs[0].key == 0)
+    assert(sorted_pairs[11].key == 5)
+    assert(sorted_texts[0].key == 0)
+    assert(sorted_texts[11].key == 5)
+    assert(sorted_wides[0].key == 0)
+    assert(sorted_wides[11].key == 5)
+
+    # Each original identity must occur exactly once, with every field intact.
+    # Counting identities separately catches loss/duplication among equal keys;
+    # no stability guarantee is assumed for those equal-key records.
+    for identity in 0..12:
+        var pair_count = 0
+        var text_count = 0
+        var wide_count = 0
+        for record in sorted_pairs:
+            if record.identity == identity:
+                pair_count = pair_count + 1
+                assert(record.key == keys[identity])
+        for record in sorted_texts:
+            if record.identity == identity:
+                text_count = text_count + 1
+                assert(record.key == keys[identity])
+                assert(record.label == "label-{identity}")
+                assert(record.payload == "payload-{identity}")
+        for record in sorted_wides:
+            if record.identity == identity:
+                wide_count = wide_count + 1
+                assert(record.key == keys[identity])
+                assert(record.prefix == 1000 - identity)
+                assert(record.label == "wide-{identity}")
+                assert(record.checksum == identity * 17 + 9)
+                assert(record.suffix == -100 - identity)
+        assert(pair_count == 1)
+        assert(text_count == 1)
+        assert(wide_count == 1)
+
+    # Direct entry to the production insertion branch, independent of recursion.
+    val small_keys: [i64] = [2, 0, 2, 1, 0]
+    var small: [SortTextRecord] = []
+    for identity in 0..5:
+        small.push(SortTextRecord(label: "small-{identity}", key: small_keys[identity], identity: identity, payload: "small-payload-{identity}"))
+    val sorted_small = array_sort_by(small, \left, right: left.key - right.key)
+    assert(sorted_small.len() == 5)
+    for index in 1..5:
+        assert(sorted_small[index - 1].key <= sorted_small[index].key)
+    assert(sorted_small[0].key == 0)
+    assert(sorted_small[4].key == 2)
+    for identity in 0..5:
+        var small_count = 0
+        for record in sorted_small:
+            if record.identity == identity:
+                small_count = small_count + 1
+                assert(record.key == small_keys[identity])
+                assert(record.label == "small-{identity}")
+                assert(record.payload == "small-payload-{identity}")
+        assert(small_count == 1)
+
+    print "PASS production array_sort_by three record layouts ordering and permutation"
+    0

@@ -7,7 +7,7 @@ type: reference
 ## Common Mistakes
 | From | Wrong | Correct |
 |------|-------|---------|
-| Python | `def`, `None`, `True` | `fn`, `nil`, `true` |
+| Python | `def`, `None`, `True` | `fn`, `None` (`nil` only in unsafe), `true` |
 | Rust | `let mut`, `fn(&mut self)`, `::<T>` | `var`, `me fn()`, `<T>` |
 | Java/C++ | `new Point()`, `this.x`, `public` | `Point{}`, `self.x` (implicit), `pub` |
 | TS | `function`, `const`, `interface` | `fn`, `val`, `trait` |

@@ -1,0 +1,49 @@
+"""A top-level bootstrap `native-build` that reports exit 0 without its -o
+artifact fails closed.
+
+Reproduces doc/08_tracking/bug/native_build_exit0_no_artifact_after_pool_refusal_2026-11-22.md:
+the planner admission build logged a per-file pool refusal and a MIR shard
+aggregate failure, yet exited 0 with no executable. The route-level gate in
+`src/app/cli/bootstrap_main.spl` main converts that outcome to exit 1.
+Runs only on a compiler deployed after this change.
+"""
+# @req REQ-SSPEC-UNIT
+use std.spec.{describe, it, expect, step}
+use app.cli.bootstrap_native_output_args.{bootstrap_native_build_missing_artifact_v1}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn bootstrap_main_source() -> text:
+    rt_file_read_text("src/app/cli/bootstrap_main.spl") ?? ""
+
+describe "bootstrap native-build artifact gate":
+    it "fails a top-level exit 0 whose -o artifact is absent":
+        step("Report success for an owned executable that was never written")
+        expect(bootstrap_native_build_missing_artifact_v1(0, "build/x/planner.exe", 0, 1)).to_equal(1)
+
+    it "fails the same outcome on every artifact-owning route shape":
+        step("Report success without an artifact for Stage 4 and positional outputs")
+        expect(bootstrap_native_build_missing_artifact_v1(0, "build/bootstrap/stage4/simple.exe", 0, 1)).to_equal(1)
+        expect(bootstrap_native_build_missing_artifact_v1(0, "build/native/hello", 0, 1)).to_equal(1)
+
+    it "keeps a successful build that wrote its artifact":
+        step("Report success for an owned executable that exists")
+        expect(bootstrap_native_build_missing_artifact_v1(0, "build/x/planner.exe", 1, 1)).to_equal(0)
+
+    it "leaves an already failing exit code to its route":
+        step("Return a nonzero route code with no artifact")
+        expect(bootstrap_native_build_missing_artifact_v1(1, "build/x/planner.exe", 0, 1)).to_equal(0)
+        expect(bootstrap_native_build_missing_artifact_v1(3, "build/x/planner.exe", 0, 1)).to_equal(0)
+
+    it "never gates children, help, or builds without an explicit -o":
+        step("Succeed as a non-owner or without a requested output path")
+        expect(bootstrap_native_build_missing_artifact_v1(0, "build/x/planner.exe", 0, 0)).to_equal(0)
+        expect(bootstrap_native_build_missing_artifact_v1(0, "", 0, 1)).to_equal(0)
+
+    it "wires the gate around the native-build dispatch in main":
+        step("Read the bootstrap CLI main dispatch")
+        val source = bootstrap_main_source()
+        expect(source.len() > 1000).to_equal(true)
+        expect(source).to_contain("val artifact_owner = bootstrap_native_build_artifact_owner_v1(all_args, native_worker_marker)")
+        expect(source).to_contain("if bootstrap_native_build_missing_artifact_v1(native_code, native_output, native_present, artifact_owner) == 1:")
+        expect(source).to_contain("produced no artifact at {native_output}; failing closed")

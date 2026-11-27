@@ -11,8 +11,6 @@
 # SFFI calls reuse patterns from simd_platform.spl (_read_cpuinfo_flags,
 # _flags_contain) and add new externs for cpuid/getauxval/sysctlbyname.
 
-use std.io_runtime.{file_read_result}
-use std.common.convert.{try_parse_i32}
 use std.nogc_sync_mut.sffi.cpu.{cpuid}
 
 # ============================================================================
@@ -46,6 +44,11 @@ extern fn rt_sysctlbyname_i32(name: text) -> i32
 @unsafe(reason: "raw RISC-V vector-length register ABI; zero is an unsupported sentinel", capabilities: [ffi])
 extern fn rt_riscv_read_vlenb() -> i32
 
+# AArch64: measure the running thread's SVE vector length with `rdvl` (bytes).
+# Returns 0 when AT_HWCAP lacks SVE or off aarch64 Linux (fail-closed, no SIGILL)
+@unsafe(reason: "raw SVE rdvl vector-length ABI; zero is an unsupported sentinel", capabilities: [ffi])
+extern fn rt_sve_read_vl_bytes() -> i32
+
 # Check whether the V extension misa bit is set (RISC-V only; returns 0 elsewhere)
 @unsafe(reason: "raw RISC-V vector-extension probe ABI", capabilities: [ffi])
 extern fn rt_riscv_has_v_ext() -> bool
@@ -71,56 +74,73 @@ extern fn rt_cuda_sm_version(device: i32) -> i32
 fn _sffi_cpuid(leaf: i32, subleaf: i32) -> (i32, i32, i32, i32):
     cpuid(leaf, subleaf)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_xgetbv", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_xgetbv(index: i32) -> i64:
     unsafe(capabilities: [ffi]):
         rt_xgetbv(index)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_xgetbv", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_xgetbv(index: i32) -> i64:
     unsafe(capabilities: [ffi]):
         rt_xgetbv(index)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_getauxval", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_getauxval(key: i64) -> i64:
     unsafe(capabilities: [ffi]):
         rt_getauxval(key)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_is_darwin_arm64", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_is_darwin_arm64() -> bool:
     unsafe(capabilities: [ffi]):
         rt_is_darwin_arm64()
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_sysctlbyname_i32", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_sysctlbyname_i32(name: text) -> i32:
     unsafe(capabilities: [ffi]):
         rt_sysctlbyname_i32(name)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_riscv_read_vlenb", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_riscv_read_vlenb() -> i32:
     unsafe(capabilities: [ffi]):
         rt_riscv_read_vlenb()
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_sve_read_vl_bytes", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+@always_inline
+fn _sffi_sve_read_vl_bytes() -> i32:
+    unsafe(capabilities: [ffi]):
+        rt_sve_read_vl_bytes()
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_riscv_has_v_ext", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_riscv_has_v_ext() -> bool:
     unsafe(capabilities: [ffi]):
         rt_riscv_has_v_ext()
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_cpu_is_x86_64", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_cpu_is_x86_64() -> i32:
     unsafe(capabilities: [ffi]):
         rt_cpu_is_x86_64()
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_cpu_is_aarch64", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_cpu_is_aarch64() -> i32:
     unsafe(capabilities: [ffi]):
         rt_cpu_is_aarch64()
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_cpu_is_riscv64", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_cpu_is_riscv64() -> i32:
     unsafe(capabilities: [ffi]):
         rt_cpu_is_riscv64()
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_cuda_sm_version", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_cuda_sm_version(device: i32) -> i32:
     unsafe(capabilities: [ffi]):
@@ -424,7 +444,7 @@ fn detect_aarch64_capabilities() -> SimdFeatureSet:
     explicitly sets has_sve = has_sve2 = false (§6-H).
 
     On Linux: reads AT_HWCAP / AT_HWCAP2 via rt_getauxval. SVE vector length
-    is probed via /proc/sys/abi/sve_default_vector_length if SVE is present.
+    is measured with `rdvl` (rt_sve_read_vl_bytes) if SVE is present.
 
     C3b §9.2.
     """
@@ -452,19 +472,11 @@ fn detect_aarch64_capabilities() -> SimdFeatureSet:
     f = SimdFeatureSet(..f, has_sve:  raw_sve  and not is_apple)
     f = SimdFeatureSet(..f, has_sve2: raw_sve2 and not is_apple)
 
-    # SVE vector length from /proc sysfs (bits = bytes * 8)
-    # Fallback: 0 (unknown) if unavailable
+    # SVE vector length measured on this thread with `rdvl` (bits = bytes * 8),
+    # not the kernel default. Fail-closed: 0 (unknown) when not SVE.
     var svl: i32 = 0
     if raw_sve and not is_apple:
-        # Read minimum VL; on most systems this equals the hardware VL
-        match file_read_result("/proc/sys/abi/sve_default_vector_length"):
-            case Ok(svl_str):
-                if svl_str != "":
-                    # Parse integer bytes and convert to bits
-                    val svl_bytes: i32 = (try_parse_i32(svl_str.trim()) ?? 0).to_i32()
-                    if svl_bytes > 0:
-                        svl = svl_bytes * 8
-            case Err(_): pass
+        svl = _sffi_sve_read_vl_bytes() * 8
     f = SimdFeatureSet(..f, sve_vector_length: svl)
 
     f
@@ -519,7 +531,7 @@ fn ptx_compute_capability(device: i32) -> i32:
 # detect_capabilities — top-level dispatcher
 # ============================================================================
 
-fn detect_capabilities() -> SimdFeatureSet:
+pub fn detect_capabilities() -> SimdFeatureSet:
     """
     Detect all available SIMD capabilities for the current host CPU.
 

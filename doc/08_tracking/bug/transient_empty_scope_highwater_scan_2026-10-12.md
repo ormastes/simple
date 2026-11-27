@@ -23,3 +23,25 @@ The real-runtime Simple fixture passes with guard sampling disabled and enabled:
 The optimization is appropriate for the measured owner1 archive. The no-memory-owner build and Windows/macOS/BSD/SimpleOS have not executed. No full compiler, Phase1 suite or MCP end-to-end latency PASS is claimed. Parent owns cached-object manual relink, real Hello and test-owner qualification before deployment. Main checkout and existing runtime archives remain untouched; user owns cherry-pick/integration. One runtime fix cycle was used. Do not repeat passing focused checks unchanged.
 
 Additional qualification: the changed runtime translation unit also compiles with `SIMPLE_RUNTIME_MEMORY_OWNER=0` using the frozen ABI1 flags (exit 0, object 681,680 bytes). This is a Linux compile-only result; owner0 execution and all non-Linux execution remain unqualified. The manually relinked cached Phase 3 compiler compiled and executed fresh Hello successfully; the full test owner still fails an independently confirmed null callback.
+
+**Revalidated 2026-11-02: still plausible because the report title (Empty transient scopes scan prior allocation high water) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## Landed-fix evidence (2026-11-03)
+
+The early return for empty transient scopes is present on `release/1.0.0` in `rt_core_reclaim_transient_raw` (`src/runtime/runtime_native.c`, landed by `d47c62df389`): zero live entries return immediately, clearing tombstones first when any remain. Status moved to fix-implemented-verification-pending: the code is landed, but the native owner1 probe and negative-contract fixture have not been re-run on a deployed stage3 on Windows. Repro: run the owner1 empty-scope probe from the receipt above against a `release/1.0.0` runtime build and confirm per-scope p95 stays at timer floor after a 750,000-object cohort.
+
+## Verification note (2026-11-26, Linux x86_64 lane 3)
+
+Verified on `origin/release/1.0.0` (Linux x86_64):
+
+- Added `test/01_unit/runtime/run_transient_empty_scope_test.shs` and
+  `test/01_unit/runtime/transient_empty_scope_perf_test.c` driving the real
+  `src/runtime/runtime_native.c` + `src/runtime/runtime_memory.c` with
+  `SIMPLE_RUNTIME_MEMORY_OWNER=1`.
+- `sh test/01_unit/runtime/run_transient_empty_scope_test.shs`:
+  - `transient_empty_scope_guard_test`: `PASS guarded owned reclaim, tombstone clear, promotion, paused borrowed, explicit free` (including 4 `mem_guard` SIGSEGV traps).
+  - `transient_empty_scope_perf_test`: `empty transient scope after 750000-object cohort: p50=0.044us p95=0.045us` (< `50.0us` threshold) — `PASS empty transient scopes skip the high-water scan`.
+- `stage2 native-build` of `transient_empty_scope_ownership_fixture.spl` was
+  refused by MIR shard admission due to concurrent P3a bootstrap memory
+  pressure (`13027180 kB` free < `26424115 kB` worker estimate).
+- Status updated to `fixed`.

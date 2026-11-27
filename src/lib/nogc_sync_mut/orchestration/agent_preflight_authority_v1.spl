@@ -1,0 +1,19 @@
+# Expected task/image/probe authorization is separate from execution grants and
+# from eventual observed CLI evidence. Actual private-root context and clock
+# are supplied by the controller command owner, never the request packet.
+use std.common.contracts.orchestration.agent_preflight_dispatch_v1.*
+use std.common.contracts.distributed_control_v2.ExecutionGrantV2
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.ControllerDispatchContextV1
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+
+pub fn controller_preflight_authorize_v1(context: ControllerDispatchContextV1,
+        packet: AgentPreflightDispatchV1, now_unix_ms: i64) -> Result<ExecutionGrantV2, text>:
+    val canonical = agent_preflight_dispatch_encode_v1(packet)?
+    if (now_unix_ms <= 0 or packet.binding.controller_id != context.config.controller_id or
+            packet.dispatch.binding.controller_epoch != context.config.controller_epoch):
+        return Err("agent-preflight-authority-scope-mismatch")
+    val operation = agent_preflight_authorization_operation_v1(packet)?
+    val snapshot = context.policy.snapshot
+    distributed_verify_grant_approval_from_snapshot_v2(snapshot, packet.signed, packet.approval, operation,
+        now_unix_ms, snapshot.generation, snapshot.policy_revision, snapshot.revocation_epoch,
+        context.policy.session_generation)

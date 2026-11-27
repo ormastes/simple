@@ -1,0 +1,222 @@
+# std.mcdc.module_analyzer — CD and MC/DC analysis over recorded vectors.
+#
+# Inputs: a decision (conditions + and/or/not tree) and the DISTINCT
+# evaluation vectors recorded for it: (values bits, evaluated bits, outcome).
+# A condition bit absent from `evaluated` was masked by short-circuit.
+#
+# Condition/Decision (CD) coverage: the decision took both outcomes AND every
+# condition was observed both true and false (while evaluated).
+#
+# MC/DC independence pair for condition c = two vectors (A, B) with
+#   * different outcomes,
+#   * c evaluated in both with different values, and either
+#   * UNIQUE-CAUSE: every other condition evaluated in both has the same value
+#     (conditions masked in at least one vector are don't-care), or
+#   * MASKING: for every ancestor and/or node of c, the sibling subtree has the
+#     same value in A and B whenever it is evaluated in both (a sibling that
+#     is skipped by short-circuit in one of them cannot have influenced that
+#     outcome). Unique-cause pairs are masking pairs too; the kind reported is
+#     the strongest one found.
+# A single-condition decision is MC/DC covered when it took both outcomes.
+
+use std.nogc_sync_mut.mcdc.module_decisions.{McdcDecisionInfo, McdcCondition, McdcTreeNode, MNODE_LEAF, MNODE_NOT, MNODE_AND, MNODE_OR}
+
+val MCDC_PAIR_NONE: i64 = 0
+val MCDC_PAIR_UNIQUE_CAUSE: i64 = 1
+val MCDC_PAIR_MASKING: i64 = 2
+
+# Bound on distinct vectors analyzed per decision (pair search is O(E^2 * C)).
+val MCDC_MAX_VECTORS_PER_DECISION: i64 = 4096
+
+struct McdcEvalRecord:
+    decision: i64
+    values: i64
+    evaluated: i64
+    outcome: bool
+
+struct McdcPair:
+    kind: i64
+    a: i64
+    b: i64
+
+struct McdcConditionCoverage:
+    index: i64
+    expr: text
+    line: i64
+    col: i64
+    seen_true: bool
+    seen_false: bool
+    pair: McdcPair
+
+struct McdcDecisionCoverage:
+    id: i64
+    file: text
+    line: i64
+    col: i64
+    kind: text
+    expr: text
+    eval_count: i64
+    seen_true: bool
+    seen_false: bool
+    conditions: [McdcConditionCoverage]
+    conditions_both: i64
+    conditions_mcdc: i64
+
+struct McdcFileSummary:
+    file: text
+    decisions: i64
+    conditions: i64
+    decisions_both: i64
+    conditions_both: i64
+    conditions_mcdc: i64
+    cd_percent: f64
+    mcdc_percent: f64
+
+fn _ma_bit(index: i64) -> i64:
+    var b = 1
+    var k = 0
+    while k < index:
+        b = b * 2
+        k = k + 1
+    b
+
+fn _ma_has(bits: i64, index: i64) -> bool:
+    (bits & _ma_bit(index)) != 0
+
+# Value of subtree `n` under one vector: 1 true, 0 false, -1 not evaluated.
+pub fn mcdc_node_value(nodes: [McdcTreeNode], n: i64, values: i64, evaluated: i64) -> i64:
+    val nd = nodes[n]
+    if nd.kind == MNODE_LEAF:
+        if not _ma_has(evaluated, nd.cond): return -1
+        return if _ma_has(values, nd.cond): 1 else: 0
+    if nd.kind == MNODE_NOT:
+        val c = mcdc_node_value(nodes, nd.left, values, evaluated)
+        if c < 0: return -1
+        return 1 - c
+    val l = mcdc_node_value(nodes, nd.left, values, evaluated)
+    if l < 0: return -1
+    if nd.kind == MNODE_AND and l == 0: return 0
+    if nd.kind == MNODE_OR and l == 1: return 1
+    mcdc_node_value(nodes, nd.right, values, evaluated)
+
+fn _ma_parent(nodes: [McdcTreeNode], n: i64) -> i64:
+    var i = 0
+    while i < nodes.len():
+        if nodes[i].left == n or nodes[i].right == n: return i
+        i = i + 1
+    -1
+
+fn _ma_leaf_node(nodes: [McdcTreeNode], cond: i64) -> i64:
+    var i = 0
+    while i < nodes.len():
+        if nodes[i].kind == MNODE_LEAF and nodes[i].cond == cond: return i
+        i = i + 1
+    -1
+
+# Classify (a, b) as an independence pair for condition `cond`.
+pub fn mcdc_pair_kind(info: McdcDecisionInfo, cond: i64, a: McdcEvalRecord, b: McdcEvalRecord) -> i64:
+    if a.outcome == b.outcome: return MCDC_PAIR_NONE
+    if not _ma_has(a.evaluated, cond) or not _ma_has(b.evaluated, cond): return MCDC_PAIR_NONE
+    if _ma_has(a.values, cond) == _ma_has(b.values, cond): return MCDC_PAIR_NONE
+    var unique = true
+    var k = 0
+    val count = info.conditions.len()
+    while unique and k < count:
+        if k != cond and _ma_has(a.evaluated, k) and _ma_has(b.evaluated, k):
+            if _ma_has(a.values, k) != _ma_has(b.values, k):
+                unique = false
+        k = k + 1
+    if unique: return MCDC_PAIR_UNIQUE_CAUSE
+    var child = _ma_leaf_node(info.nodes, cond)
+    if child < 0: return MCDC_PAIR_NONE
+    var p = _ma_parent(info.nodes, child)
+    while p >= 0:
+        val nd = info.nodes[p]
+        if nd.kind == MNODE_AND or nd.kind == MNODE_OR:
+            val sib = if nd.left == child: nd.right else: nd.left
+            val va = mcdc_node_value(info.nodes, sib, a.values, a.evaluated)
+            val vb = mcdc_node_value(info.nodes, sib, b.values, b.evaluated)
+            if va >= 0 and vb >= 0 and va != vb: return MCDC_PAIR_NONE
+        child = p
+        p = _ma_parent(info.nodes, p)
+    MCDC_PAIR_MASKING
+
+fn _ma_find_pair(info: McdcDecisionInfo, cond: i64, evs: [McdcEvalRecord]) -> McdcPair:
+    var best = McdcPair(kind: MCDC_PAIR_NONE, a: -1, b: -1)
+    var i = 0
+    val n = evs.len()
+    while i < n and best.kind != MCDC_PAIR_UNIQUE_CAUSE:
+        var j = i + 1
+        while j < n and best.kind != MCDC_PAIR_UNIQUE_CAUSE:
+            val kind = mcdc_pair_kind(info, cond, evs[i], evs[j])
+            if kind > best.kind:
+                best = McdcPair(kind: kind, a: i, b: j)
+            j = j + 1
+        i = i + 1
+    best
+
+pub fn mcdc_analyze_decision(info: McdcDecisionInfo, records: [McdcEvalRecord]) -> McdcDecisionCoverage:
+    var evs: [McdcEvalRecord] = []
+    var seen_true = false
+    var seen_false = false
+    for r in records:
+        if r.decision == info.id and evs.len() < MCDC_MAX_VECTORS_PER_DECISION:
+            evs.push(r)
+            if r.outcome: seen_true = true
+            else: seen_false = true
+    var conds: [McdcConditionCoverage] = []
+    var both = 0
+    var covered = 0
+    for c in info.conditions:
+        var ct = false
+        var cf = false
+        for r in evs:
+            if _ma_has(r.evaluated, c.index):
+                if _ma_has(r.values, c.index): ct = true
+                else: cf = true
+        val pair = _ma_find_pair(info, c.index, evs)
+        if ct and cf: both = both + 1
+        if pair.kind != MCDC_PAIR_NONE: covered = covered + 1
+        conds.push(McdcConditionCoverage(index: c.index, expr: c.expr, line: c.line, col: c.col, seen_true: ct, seen_false: cf, pair: pair))
+    McdcDecisionCoverage(id: info.id, file: info.file, line: info.line, col: info.col, kind: info.kind, expr: info.expr, eval_count: evs.len(), seen_true: seen_true, seen_false: seen_false, conditions: conds, conditions_both: both, conditions_mcdc: covered)
+
+pub fn mcdc_percent(part: i64, total: i64) -> f64:
+    if total == 0: return 100.0
+    (part as f64) * 100.0 / (total as f64)
+
+pub fn mcdc_summarize_file(file: text, covs: [McdcDecisionCoverage]) -> McdcFileSummary:
+    var decisions = 0
+    var conditions = 0
+    var decisions_both = 0
+    var conditions_both = 0
+    var conditions_mcdc = 0
+    for c in covs:
+        decisions = decisions + 1
+        conditions = conditions + c.conditions.len()
+        if c.seen_true and c.seen_false: decisions_both = decisions_both + 1
+        conditions_both = conditions_both + c.conditions_both
+        conditions_mcdc = conditions_mcdc + c.conditions_mcdc
+    McdcFileSummary(file: file, decisions: decisions, conditions: conditions, decisions_both: decisions_both, conditions_both: conditions_both, conditions_mcdc: conditions_mcdc, cd_percent: mcdc_percent(decisions_both + conditions_both, decisions + conditions), mcdc_percent: mcdc_percent(conditions_mcdc, conditions))
+
+pub fn mcdc_pair_kind_name(kind: i64) -> text:
+    if kind == MCDC_PAIR_UNIQUE_CAUSE: return "unique-cause"
+    if kind == MCDC_PAIR_MASKING: return "masking"
+    "none"
+
+# Human-readable reasons why a decision is not fully MC/DC covered (empty
+# when it is).
+pub fn mcdc_uncovered_reasons(cov: McdcDecisionCoverage) -> [text]:
+    var out: [text] = []
+    if cov.eval_count == 0:
+        out.push("decision never evaluated")
+        return out
+    if not cov.seen_true: out.push("decision outcome never true")
+    if not cov.seen_false: out.push("decision outcome never false")
+    for c in cov.conditions:
+        if c.pair.kind == MCDC_PAIR_NONE:
+            var why = "no independence pair"
+            if not c.seen_true and not c.seen_false: why = "never evaluated (masked)"
+            elif not c.seen_true: why = "only false; no independence pair"
+            elif not c.seen_false: why = "only true; no independence pair"
+            out.push("c" + c.index.to_text() + " `" + c.expr + "`: " + why)
+    out

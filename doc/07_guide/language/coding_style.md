@@ -231,7 +231,7 @@ trait Renderable:
     fn render() -> text
 
 trait Saveable:
-    fn save() -> Result<(), Error>
+    fn save() -> Result<Nil, Error>
 
 struct Document:
     content: text
@@ -240,7 +240,7 @@ impl Renderable for Document:
     fn render() -> text: self.content
 
 impl Saveable for Document:
-    fn save() -> Result<(), Error>:
+    fn save() -> Result<Nil, Error>:
         file_write("doc.txt", self.content)
 ```
 

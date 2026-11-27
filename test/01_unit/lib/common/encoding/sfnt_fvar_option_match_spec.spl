@@ -1,0 +1,142 @@
+# @req REQ-SSPEC-LIB
+"""
+# Optional sfnt table lookups: the None arm fires without fvar, the Some arm with it
+
+Bug sfnt_fvar_option_match_nil_baremetal_2026-08-04: `parse_fvar_axes` used
+`val table = match find_table(font, FVAR): Some(v): v / None: return []`,
+and on the freestanding native lane the Option scrutinee matched neither
+arm, so `table` became nil and `table.offset` faulted. These specs pin the
+behaviour that shape must have for fvar and for the sibling optional table
+lookups (gvar, avar, name): absent table -> the None arm (empty result /
+rejected), present table -> the Some arm with a real payload. They run the
+same `match find_table(...)` expression shape directly so a lowering that
+substitutes nil for an unmatched Option is caught as a field-access fault.
+"""
+
+# @tag: unit, lib, encoding, sfnt, option
+
+use std.spec.*
+use std.common.encoding.sfnt.{read_u32_be, parse_offset_table, find_table, parse_fvar_axes, validate_default_glyf_font}
+
+val FVAR: u32 = 1719034226
+val GVAR: u32 = 1735811442
+val AVAR: u32 = 1635148146
+val NAME: u32 = 1851878757
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var bytes: [u8] = []
+    var index: i64 = 0
+    while index < count:
+        bytes.push(0 as u8)
+        index = index + 1
+    bytes
+
+fn _set_u16_be(bytes: [u8], offset: i64, value: i64) -> [u8]:
+    var result = bytes
+    result[offset] = ((value / 256) % 256) as u8
+    result[offset + 1] = (value % 256) as u8
+    result
+
+fn _set_u32_be(bytes: [u8], offset: i64, value: i64) -> [u8]:
+    var result = bytes
+    result[offset] = ((value / 16777216) % 256) as u8
+    result[offset + 1] = ((value / 65536) % 256) as u8
+    result[offset + 2] = ((value / 256) % 256) as u8
+    result[offset + 3] = (value % 256) as u8
+    result
+
+fn _sfnt(entries: [(i64, [u8])]) -> [u8]:
+    val directory_size = 12 + entries.len() * 16
+    var total_size = directory_size
+    for entry in entries:
+        total_size = ((total_size + 3) / 4) * 4 + entry.1.len()
+    var bytes = _zero_bytes(total_size)
+    bytes = _set_u32_be(bytes, 0, 65536)
+    bytes = _set_u16_be(bytes, 4, entries.len())
+    var data_offset = directory_size
+    var index: i64 = 0
+    while index < entries.len():
+        val entry = entries[index]
+        val record = 12 + index * 16
+        data_offset = ((data_offset + 3) / 4) * 4
+        bytes = _set_u32_be(bytes, record, entry.0)
+        bytes = _set_u32_be(bytes, record + 8, data_offset)
+        bytes = _set_u32_be(bytes, record + 12, entry.1.len())
+        var byte_index: i64 = 0
+        while byte_index < entry.1.len():
+            bytes[data_offset + byte_index] = entry.1[byte_index]
+            byte_index = byte_index + 1
+        data_offset = data_offset + entry.1.len()
+        index = index + 1
+    bytes
+
+fn _valid_fvar() -> [u8]:
+    var bytes = _zero_bytes(36)
+    bytes = _set_u16_be(bytes, 0, 1)
+    bytes = _set_u16_be(bytes, 4, 16)
+    bytes = _set_u16_be(bytes, 6, 2)
+    bytes = _set_u16_be(bytes, 8, 1)
+    bytes = _set_u16_be(bytes, 10, 20)
+    bytes = _set_u16_be(bytes, 14, 8)
+    bytes = _set_u32_be(bytes, 16, 2003265652)
+    bytes = _set_u32_be(bytes, 20, 6553600)
+    bytes = _set_u32_be(bytes, 24, 26214400)
+    bytes = _set_u32_be(bytes, 28, 58982400)
+    bytes = _set_u16_be(bytes, 34, 256)
+    bytes
+
+fn _valid_font(extra: [(i64, [u8])]) -> [u8]:
+    var entries: [(i64, [u8])] = [
+        (1735162214, [1u8]), (1819239265, [1u8]),
+        (1751474532, [1u8]), (1835104368, [1u8]),
+        (1668112752, [1u8]), (1751672161, [1u8]),
+        (1752003704, [1u8])
+    ]
+    for entry in extra: entries.push(entry)
+    _sfnt(entries)
+
+# The bug's exact source shape: val-assigned payload extraction from a direct
+# `find_table(...)` call. Returns the table offset, -1 for the None arm.
+fn _table_offset(blob: [u8], tag: u32) -> i64:
+    val font = match parse_offset_table(blob):
+        Some(value): value
+        None: return -2
+    val table = match find_table(font, tag):
+        Some(value): value
+        None: return -1
+    table.offset as i64
+
+describe "sfnt optional table lookups":
+    it "fvar: None arm fires for a static font, Some arm for a variable font":
+        val static_font = _valid_font([])
+        val variable_font = _valid_font([(FVAR as i64, _valid_fvar())])
+        expect(_table_offset(static_font, FVAR)).to_equal(-1)
+        val expected = read_u32_be(variable_font, 12 + 7 * 16 + 8) as i64
+        expect(_table_offset(variable_font, FVAR)).to_equal(expected)
+
+    it "parse_fvar_axes: no fvar yields no axes, fvar yields its axis":
+        val static_font = parse_offset_table(_valid_font([])).unwrap()
+        expect(parse_fvar_axes(static_font).len()).to_equal(0)
+        val variable_font = parse_offset_table(_valid_font([(FVAR as i64, _valid_fvar())])).unwrap()
+        val axes = parse_fvar_axes(variable_font)
+        expect(axes.len()).to_equal(1)
+        expect(axes[0].tag).to_equal(2003265652 as u32)
+        expect(axes[0].default_value).to_equal(400.0)
+
+    it "validate_default_glyf_font: static accepted, fvar-present with default instance accepted":
+        expect(validate_default_glyf_font(_valid_font([])).supported).to_be_true()
+        expect(validate_default_glyf_font(_valid_font([(FVAR as i64, _valid_fvar())])).supported).to_be_true()
+
+    it "siblings gvar/avar/name: None arm when absent, Some arm with a real offset when present":
+        val bare = _valid_font([])
+        expect(_table_offset(bare, GVAR)).to_equal(-1)
+        expect(_table_offset(bare, AVAR)).to_equal(-1)
+        expect(_table_offset(bare, NAME)).to_equal(-1)
+        val with_tables = _valid_font([(GVAR as i64, [1u8, 2u8]), (AVAR as i64, [3u8]), (NAME as i64, [4u8, 5u8, 6u8])])
+        val gvar_off = _table_offset(with_tables, GVAR)
+        val avar_off = _table_offset(with_tables, AVAR)
+        val name_off = _table_offset(with_tables, NAME)
+        expect(gvar_off).to_be_greater_than(12 + 10 * 16 - 1)
+        expect(avar_off).to_be_greater_than(gvar_off)
+        expect(name_off).to_be_greater_than(avar_off)
+        expect(with_tables[name_off]).to_equal(4u8)

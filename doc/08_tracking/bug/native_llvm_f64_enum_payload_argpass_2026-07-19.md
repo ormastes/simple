@@ -103,3 +103,23 @@ The direct LLVM-IR regression constructs both runtime calls, rejects
 i64-to-f64 cast. A cache-isolated current-source mini build was
 bounded at 4 GiB and 240 seconds; it reached the time cap with no output, so a
 fresh native executable is not claimed.
+
+## Verification 2026-11-25 (p2w4-ad lane, release/1.0.0 @ ef6a94f8a03)
+
+Both source fixes are ancestors of HEAD: `fc7cdcb0b90` (MIR extract-side
+reinterpret) and `ae42d201c9e` ("fix(llvm): preserve f64 enum payload bits" —
+construct-side aggregate float-word helper for the third `rt_enum_new`
+argument, plus the LLVM-IR regression and the un-XFAILed
+`test/03_system/native/enum_f64_payload_precision.spl`).
+
+Controls re-verified on this host with the pinned seed
+(`SIMPLE_LIB=src bin/simple.exe run <probe>`): the doc's `FBox.V(0.1)`
+repro returns `r=30` in both `--mode=interpreter` and default (cranelift
+JIT) modes — the documented-correct control backends stay correct.
+
+Not verified here: the native LLVM execution itself. This Windows host has
+no admitted/stage3 compiler and the pinned seed cannot run the spec harness
+at this HEAD (`unknown decorator '@representation_boundary'`, cfd89933699),
+so `test/03_system/native/enum_f64_payload_precision.spl` was not executed.
+Status unchanged: **source fixed; native execution pending** on a host with
+an admitted compiler — no known remaining source defect.

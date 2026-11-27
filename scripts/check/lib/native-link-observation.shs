@@ -1,0 +1,40 @@
+#!/bin/sh
+# Strict post-success observation validation; this never grants cache authority.
+# Caller supplies simpleos_sdk_hash from the canonical SDK receipt helper.
+native_link_observation_arch_v3() {
+    case "$1" in
+        simpleos-x86_64) echo x86_64 ;;
+        simpleos-i686) echo i686 ;;
+        simpleos-aarch64) echo aarch64 ;;
+        simpleos-armv7) echo arm32 ;;
+        simpleos-riscv64gc) echo riscv64 ;;
+        simpleos-riscv32) echo riscv32 ;;
+        *) return 1 ;;
+    esac
+}
+
+native_link_observation_verify_v3() (
+    _obs_output=$1 _obs_target=$2 _obs_request=$3
+    _obs_arch=$(native_link_observation_arch_v3 "$_obs_target") || exit 1
+    case "$_obs_request" in
+        internal) _obs_engine=internal:simpleos ;;
+        lld) _obs_engine=ld.lld ;;
+        *) exit 1 ;;
+    esac
+    _obs_receipt=$_obs_output.link-receipt
+    [ -f "$_obs_output" ] && [ ! -L "$_obs_output" ] &&
+        [ -f "$_obs_receipt" ] && [ ! -L "$_obs_receipt" ] || exit 1
+    _obs_digest=$(simpleos_sdk_hash "$_obs_output") || exit 1
+    [ "${#_obs_digest}" -eq 64 ] || exit 1
+    _obs_expected=$(mktemp) || exit 1
+    trap 'rm -f "$_obs_expected"' EXIT HUP INT TERM
+    {
+        printf 'simple-link-receipt: 3\nobservation: completed-native-link\ncompleted: true\nfresh-only: true\ncache-authority: none\n'
+        printf 'target: simpleos-%s\narch: %s\nengine-id: %s\noutput-sha256: %s\n' "$_obs_arch" "$_obs_arch" "$_obs_engine" "$_obs_digest"
+    } > "$_obs_expected"
+    _obs_receipt_digest=$(simpleos_sdk_hash "$_obs_expected") || exit 1
+    printf 'receipt-sha256: %s\n' "$_obs_receipt_digest" >> "$_obs_expected"
+    _obs_expected_hash=$(simpleos_sdk_hash "$_obs_expected") || exit 1
+    _obs_observed_hash=$(simpleos_sdk_hash "$_obs_receipt") || exit 1
+    [ "${#_obs_observed_hash}" -eq 64 ] && [ "$_obs_expected_hash" = "$_obs_observed_hash" ]
+)

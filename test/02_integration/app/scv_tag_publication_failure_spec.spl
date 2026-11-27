@@ -1,0 +1,111 @@
+"""
+SCVN-B03 review corrections: annotated-tag object failure cannot publish either
+tag reference. Reference setters independently reject real staging failures.
+Existing reference bytes and absence of error text are independent oracles.
+"""
+# @req REQ-SCVN-B03-PUBLISH
+use std.spec.{describe, it, expect}
+use std.spec.step
+use app.io.mod (process_run, file_write, file_read, file_exists, dir_create)
+use std.scv.store.{scv_init_repo, scv_read_workspace_commit, scv_write_tag_object, scv_hash_text}
+use std.scv.working_copy.{scv_snapshot}
+use std.scv.fast_import.{scv_import_git_fast_import}
+use std.scv.refs.{scv_tag_set, scv_tag_annotated_set, scv_bookmark_set}
+
+fn setup_scv_fixture() -> (text, text, text):
+    val (out, err, code) = process_run("mktemp", ["-d", "/tmp/scv-tag-failure.XXXXXX"])
+    expect(code).to_equal(0)
+    expect(err).to_equal("")
+    val root = out.trim()
+    expect(scv_init_repo(root)).to_equal("initialized\n")
+    expect(file_write("{root}/a", "first")).to_equal(true)
+    expect(scv_snapshot(root)).to_start_with("snapshot ")
+    val first = scv_read_workspace_commit(root)
+    expect(file_write("{root}/a", "second")).to_equal(true)
+    expect(scv_snapshot(root)).to_start_with("snapshot ")
+    val second = scv_read_workspace_commit(root)
+    expect(first == second).to_equal(false)
+    (root, first, second)
+
+describe "SCVN-B03 annotated tag publication":
+    it "retains both old references when the imported tag object cannot be staged":
+        step("setup")
+        val (root, first, second) = setup_scv_fixture()
+        val old_object = scv_write_tag_object(root, "v1", first, "commit", "Old", "old")
+        expect(old_object).to_start_with("tag_")
+        expect(scv_tag_set(root, "v1", first)).to_start_with("tag ")
+        expect(scv_tag_annotated_set(root, "v1", old_object)).to_start_with("tag-annotated ")
+        step("capture")
+        val old_lightweight = file_read("{root}/.scv/meta/tags")
+        val old_annotated = file_read("{root}/.scv/meta/tag_objects/v1")
+        val tagger = "Test <test@example.com> 1 +0000"
+        val message = "candidate\n"
+        val payload = "target: {second}\ntype: commit\ntagger: {tagger}\nmessage: {message}\n"
+        val predicted = scv_hash_text("tag", payload)
+        dir_create("{root}/.scv/objects/tags/{predicted}.sdn.tmp", true)
+        expect(file_write("{root}/candidate.fi", "tag v1\nfrom {second}\ntagger {tagger}\ndata {message.len()}\n{message}")).to_equal(true)
+        step("exercise")
+        val outcome = scv_import_git_fast_import(root, "{root}/candidate.fi")
+        step("evidence")
+        val lightweight = file_read("{root}/.scv/meta/tags")
+        val annotated = file_read("{root}/.scv/meta/tag_objects/v1")
+        step("assert")
+        expect(outcome).to_equal("ERROR cannot publish tag object\n")
+        expect(lightweight).to_equal(old_lightweight)
+        expect(annotated).to_equal(old_annotated)
+        expect(lightweight.contains("ERROR")).to_equal(false)
+        expect(annotated.contains("ERROR")).to_equal(false)
+        expect(file_exists("{root}/.scv/objects/tags/{predicted}.sdn")).to_equal(false)
+
+    it "reports a lightweight reference staging failure and retains its previous bytes":
+        step("setup")
+        val (root, first, second) = setup_scv_fixture()
+        expect(scv_tag_set(root, "v1", first)).to_start_with("tag ")
+        step("capture")
+        val before = file_read("{root}/.scv/meta/tags")
+        dir_create("{root}/.scv/meta/tags.tmp", true)
+        step("exercise")
+        val outcome = scv_tag_set(root, "v1", second)
+        step("evidence")
+        val after = file_read("{root}/.scv/meta/tags")
+        step("assert")
+        expect(outcome).to_equal("ERROR cannot publish tag reference\n")
+        expect(after).to_equal(before)
+
+    it "reports an annotated reference staging failure and refuses error text as an object id":
+        step("setup")
+        val (root, first, second) = setup_scv_fixture()
+        val old_object = scv_write_tag_object(root, "v1", first, "commit", "Old", "old")
+        val next_object = scv_write_tag_object(root, "v1", second, "commit", "New", "new")
+        expect(scv_tag_annotated_set(root, "v1", old_object)).to_start_with("tag-annotated ")
+        step("capture")
+        val before = file_read("{root}/.scv/meta/tag_objects/v1")
+        dir_create("{root}/.scv/meta/tag_objects/v1.tmp", true)
+        step("exercise")
+        val outcome = scv_tag_annotated_set(root, "v1", next_object)
+        val invalid = scv_tag_annotated_set(root, "v1", "ERROR cannot publish tag object\n")
+        step("evidence")
+        val after = file_read("{root}/.scv/meta/tag_objects/v1")
+        step("assert")
+        expect(outcome).to_equal("ERROR cannot publish annotated tag reference\n")
+        expect(invalid).to_equal("ERROR invalid annotated tag object\n")
+        expect(after).to_equal(before)
+        expect(after.contains("ERROR")).to_equal(false)
+
+    it "reports a bookmark staging failure without publishing an operation":
+        step("setup")
+        val (root, first, second) = setup_scv_fixture()
+        expect(scv_bookmark_set(root, "topic", first)).to_start_with("bookmark ")
+        step("capture")
+        val before = file_read("{root}/.scv/meta/bookmarks.sdn")
+        val head_before = file_read("{root}/.scv/HEAD_OP")
+        dir_create("{root}/.scv/meta/bookmarks.sdn.tmp", true)
+        step("exercise")
+        val outcome = scv_bookmark_set(root, "topic", second)
+        step("evidence")
+        val after = file_read("{root}/.scv/meta/bookmarks.sdn")
+        val head_after = file_read("{root}/.scv/HEAD_OP")
+        step("assert")
+        expect(outcome).to_equal("ERROR cannot publish bookmark reference\n")
+        expect(after).to_equal(before)
+        expect(head_after).to_equal(head_before)

@@ -1,50 +1,64 @@
-# Feature: Tree-Sitter Parser Module
-# Category: Parser
-# Status: Active
+"""
+## Purpose and audience
+Purpose: Verify `TreeSitter` outline parsing and `LanguageDetector` language
+classification against the real `compiler.treesitter` implementation.
+Audience: compiler and IDE tooling engineers.
 
-Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
-reading this spec to confirm the behavior still holds.
-
-# Mock Parser class for testing
-fn check(condition: bool):
-    expect(condition).to_equal(true)
-fn check_msg(condition: bool, message: text):
-    if not condition:
-        expect(message).to_equal("")
-class MockParser:
-    language: text
-
+## Operator workflow
 1. Run `bin/simple test test/01_unit/compiler/parser/treesitter_parser_spec.spl`.
-2. Every scenario must pass; a failure is a regression in the
-   behavior under test.
+2. Every scenario must pass with zero parse errors on valid Simple sources.
 
 ## Compatibility and limitations
-
-Covers the interpreter and native lanes for the constructs
-asserted here; platform-specific behavior is out of scope.
+Covers outline-level declarations and language heuristics on the interpreter lane.
 """
+# @req: REQ-COMPILER-PARSER-TREESITTER-001
+# @cover src/compiler/10.frontend/treesitter/outline.spl 80%
+# @cover src/compiler/10.frontend/treesitter/language_detect.spl 80%
+
+use std.spec.*
+use std.spec.step
+use compiler.treesitter.*
+use compiler.frontend.treesitter.language_detect.{LanguageDetector}
 
 describe "TreeSitterParser":
-    # Tests for the TreeSitterParser module with mock implementations
-    it "creates parser for Simple language":
-        val parser = MockParser.new("simple")
-        check(parser.language == "simple")
+    it "detects supported and unknown languages via LanguageDetector":
+        step("Run LanguageDetector on Simple, Python, Rust, and unknown snippets")
+        val detector = LanguageDetector.new()
+        val simple_res = detector.detect("fn add(a: i64, b: i64) -> i64:\n    a + b\n")
+        expect(simple_res.language).to_equal("simple")
+        expect(simple_res.confidence).to_be_greater_than(0.5)
 
-    it "rejects unsupported languages":
-        val parser = MockParser.new("python")
-        check(parser.language == "python")
+        val py_res = detector.detect("def add(a, b):\n    return a + b\n")
+        expect(py_res.language).to_equal("python")
 
-    it "parses source code":
-        val parser = MockParser.new("simple")
-        val result = parser.parse("val x = 42")
-        check(result)
+        val rs_res = detector.detect("let count = 1;")
+        expect(rs_res.language).to_equal("rust")
 
-    it "generates syntax tree":
-        val parser = MockParser.new("simple")
-        val code = "fn add(a, b): a + b"
-        val result = parser.parse(code)
-        check(result)
+        val unk_res = detector.detect("42 + 1")
+        expect(unk_res.language).to_equal("unknown")
+        expect(unk_res.confidence).to_equal(0.0)
 
-    it "handles parse errors":
-        val parser = MockParser.new("simple")
-        check(parser.has_errors() == false)
+    it "parses functions, classes, structs, enums, and constants into OutlineModule":
+        step("Parse a multi-declaration Simple module via TreeSitter.new")
+        val code = "val LIMIT = 10\nstruct Pair:\n    left: i64\n    right: i64\nenum Color:\n    Red\n    Blue\nclass Box:\n    size: i64\nfn add(a: i64, b: i64) -> i64:\n    a + b\n"
+        var parser = TreeSitter.new(code)
+        val outline = parser.parse_outline()
+        expect(outline.errors.len()).to_equal(0)
+        expect(outline.constants.len()).to_equal(1)
+        expect(outline.constants[0].name).to_equal("LIMIT")
+        expect(outline.structs.len()).to_equal(1)
+        expect(outline.structs[0].name).to_equal("Pair")
+        expect(outline.structs[0].fields.len()).to_equal(2)
+        expect(outline.enums.len()).to_equal(1)
+        expect(outline.enums[0].name).to_equal("Color")
+        expect(outline.classes.len()).to_equal(1)
+        expect(outline.classes[0].name).to_equal("Box")
+        expect(outline.functions.len()).to_equal(1)
+        expect(outline.functions[0].name).to_equal("add")
+        expect(outline.functions[0].params.len()).to_equal(2)
+
+    it "records parse errors on malformed function headers without crashing":
+        step("Parse malformed source with treesitter_new and verify error reporting")
+        var parser = treesitter_new("fn ():\n    0\n")
+        val outline = parser.parse_outline()
+        expect(outline.errors.len()).to_be_greater_than(0)

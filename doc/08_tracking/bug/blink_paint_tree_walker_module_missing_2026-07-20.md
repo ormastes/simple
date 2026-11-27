@@ -78,3 +78,24 @@ for a test-shard fix.
 
 - `test/01_unit/lib_standalone/blink/.spipe_matchers_image_paint_spec.spl` (whole file, 0 examples executed)
 
+## Resolution 2026-11-25 (p2w1-ab lane, release/1.0.0 @ 38265c7f249) — RESOLVED
+
+The missing modules were implemented and the spec repointed:
+
+- `src/lib/blink/layout/block_flow.spl` and
+  `src/lib/blink/paint/paint_tree_walker.spl` now exist (the paint walker
+  landed in 00920d22fe9 "feat(blink): implement paint tree walker sinks")
+  and export the required API: `LayoutContext`, `BoxGeometry`,
+  `box_geometry_new`, `layout_context_new` (block_flow), and `StyledBox`,
+  `ImageEntry`, `PaintContext`, `paint_tree_new_with_images`,
+  `collect_display_list`, `finalize_paint` (paint_tree_walker).
+- The original `test/01_unit/lib_standalone/blink/.spipe_matchers_image_paint_spec.spl`
+  no longer exists; the Phase B2 image-paint coverage now lives in
+  `test/01_unit/lib/blink/image_paint_spec.spl`, which imports the landed
+  modules and still carries
+  `# @cover src/lib/blink/paint/paint_tree_walker.spl 85%`.
+
+Verification limit: spec execution is blocked in this lane because the
+pinned seed rejects the `@representation_boundary` decorator tree-wide
+(cfd89933699); closure is by source inspection. Status: RESOLVED.
+

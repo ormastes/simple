@@ -1,0 +1,62 @@
+#!/bin/sh
+# POSIX per-file verification two-worker floor with explicit host fixtures; no native PASS.
+set -eu
+source_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$source_root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+. "$source_root/scripts/bootstrap/phase-c-backend-commands.shs"
+. "$source_root/scripts/bootstrap/lib/tree-rss-policy.shs"
+. "$source_root/scripts/bootstrap/lib/product-frontend-policy.shs"
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+uname() { printf '%s\n' Linux; }
+export BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1 BOOTSTRAP_TREE_RSS_TEST_PLATFORM=Linux
+export SIMPLE_FILE_WORKERS=1 SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+# Replace only the OS memory sensor for pure scheduling tests. No watchdog or
+# compiler is launched; production still refuses enforced memory fixtures.
+bootstrap_tree_rss_probe_host() {
+  bootstrap_tree_rss_host_total_kib=$(bootstrap_tree_rss_meminfo_total "$BOOTSTRAP_TREE_RSS_MEMINFO_PATH")
+  bootstrap_tree_rss_host_available_kib=$(bootstrap_tree_rss_meminfo_available "$BOOTSTRAP_TREE_RSS_MEMINFO_PATH")
+  bootstrap_tree_rss_host_total_source=fixture
+}
+unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB \
+  SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB \
+  SIMPLE_HIR_SHARD_WORKER_KB SIMPLE_PARSE_SHARD_WORKER_KB SIMPLE_PARSE_SHARD_MAX \
+  SIMPLE_MIR_SHARD_WORKER_KB SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT SIMPLE_HOST_TREE_RSS_HOST_PCT \
+  SIMPLE_BUILD_MEMORY_RESERVE_BYTES SIMPLE_HOST_MEM_RESERVE_FREE_MIB
+export SIMPLE_HOST_CONFIG="$scratch/no-host.sdn"
+export SIMPLE_HOST_ENV_FILE="$scratch/no-host.env"
+printf 'MemTotal: 63449060 kB\nMemAvailable: 44089408 kB\n' > "$scratch/fit"
+printf 'MemTotal: 63449060 kB\nMemAvailable: 30000000 kB\n' > "$scratch/busy"
+(
+  BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$scratch/fit"
+  bootstrap_tree_rss_whole_build_export 2 "$source_root"
+  [ "$BOOTSTRAP_VERIFY_BUILD_THREADS" = 2 ]
+  [ "$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB" = 18923584 ]
+  [ "$bootstrap_tree_rss_plan_bound" = posix-file-worker-floor ]
+  pure_tool_threads=$BOOTSTRAP_VERIFY_BUILD_THREADS
+  SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+  bootstrap_phase_c_apply_frontend_policy > "$scratch/fit.policy"
+  [ "$SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB" = 18923584 ]
+)
+(
+  BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$scratch/busy"
+  bootstrap_tree_rss_whole_build_export 2 "$source_root"
+  [ "$BOOTSTRAP_VERIFY_BUILD_THREADS" = 1 ]
+  pure_tool_threads=$BOOTSTRAP_VERIFY_BUILD_THREADS
+  if bootstrap_phase_c_apply_frontend_policy > "$scratch/busy.policy" 2>"$scratch/busy.error"; then exit 1; fi
+  grep -q 'require at least 2 workers' "$scratch/busy.error"
+  [ ! -s "$scratch/busy.policy" ]
+)
+(
+  BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$scratch/fit"
+  bootstrap_tree_rss_whole_build_export 1 "$source_root"
+  [ "$BOOTSTRAP_VERIFY_BUILD_THREADS" = 1 ]
+)
+(
+  BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$scratch/fit"
+  SIMPLE_FILE_WORKERS=0
+  bootstrap_tree_rss_whole_build_export 2 "$source_root"
+  [ "$BOOTSTRAP_VERIFY_BUILD_THREADS" = 1 ]
+  [ "$bootstrap_tree_rss_plan_bound" = small-host-one-worker ]
+)
+printf '%s\n' 'PASS POSIX verification: 64 GiB small-host plan lifted to 2 unit workers under headroom, busy refusal, explicit one-worker and two-pass unchanged'

@@ -1,0 +1,359 @@
+"""
+## Purpose and audience
+
+MC/DC driver for `src/compiler/30.types/type_infer/generalization.spl`
+(levels, fresh variables, free-variable collection, generalize, instantiate).
+Each decision is driven to both outcomes and every condition of the compound
+generalize guard is shown to flip quantification independently. For compiler
+engineers changing let-polymorphism.
+
+## Operator workflow
+
+Run `bin/simple test test/01_unit/compiler/type_infer/coverage/generalization_mcdc_spec.spl`
+with the pure-Simple self-hosted binary. Execution status: UNRUN (no
+self-hosted binary existed when written, 2026-11-01).
+
+## Decision inventory
+
+| Line | Decision | Conditions | Vectors (it) |
+|---|---|---|---|
+| 65 | `match ty.kind` in collect_free_vars (10 arms) | arm selector | "65 arm <Kind>" |
+| 102 | `not bound_vars.has(id)` | c1 | T "102 c1 true", F "102 c1 false" |
+| 121 | `not env_vars.has(id) and var_level > self.level` | c1 env-free, c2 deeper level | TT "121 both true", FT "121 c1 false", TF "121 c2 false" |
+| 122 | `not seen.has(id)` (generalize) | c1 | T first, F duplicate "122 c1 false" |
+| 137 | `not env_vars.has(id)` (generalize_all) | c1 | T "137 c1 true", F "137 c1 false" |
+| 138 | `not seen.has(id)` (generalize_all) | c1 | F "138 c1 false" |
+| 146 | `scheme.vars.is_empty()` | c1 | T "146 c1 true", F "146 c1 false" |
+| 159 | `match ty.kind` in instantiate_type (19 arms) | arm selector | "159 arm <Kind>" |
+| 161 | `var_map[id].?` | c1 | T "161 c1 true", F "161 c1 false" |
+| 166 | `names.has(name)` | c1 | T "166 c1 true", F "166 c1 false" |
+| 171 | `match effect.kind` Throws vs other | arm | "171 arm Throws", "171 arm default" |
+| 214 | `args.len() == 0 and binders.has(symbol.id)` | c1 nullary, c2 bound | TT, FT, TF |
+
+Counts: 12 decisions, 15 conditions (one 2-condition `and` at 121, one at
+214). Gaps: none.
+Bug suspects: collect_free_vars (line 65) has no arm for `Union`,
+`Isolated`, `Projection`, `Tensor`, nor `Function` Throws effects, while
+`instantiate_type` maps all of them; generalize therefore under-quantifies a
+variable reachable only through those carriers. Owned by
+generic_traversal_coverage_spec.spl (sibling lane), so only the Tensor
+carrier is pinned here ("65 arm Tensor"); it passes since E2 landed (178ecc247f1).
+"""
+
+# @tag:in-development
+# Tracks: doc/03_plan/compiler/generics/generics_coverage_mcdc_plan_2026-11-01.md step 3
+# @manual_section: generics-coverage-mcdc-generalization
+
+use compiler.types.type_infer_types.*
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.types.type_infer.generalization.*
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+use compiler.common.diagnostics.span.{Span}
+use std.spec.step
+
+fn gmc_sp() -> Span:
+    lex_span_empty()
+
+fn gmc_mk(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: gmc_sp())
+
+fn gmc_i64() -> HirType:
+    gmc_mk(HirTypeKind.Int(64, true))
+
+fn gmc_str() -> HirType:
+    gmc_mk(HirTypeKind.Str)
+
+fn gmc_unit() -> HirType:
+    gmc_mk(HirTypeKind.Unit)
+
+fn gmc_id(ty: HirType) -> i64:
+    match ty.kind:
+        case Infer(id, _): id
+        case _: -1
+
+fn gmc_deep(ctx: HmInferContext) -> HirType:
+    ctx.enter_level()
+    val v = ctx.fresh_var(gmc_sp())
+    ctx.exit_level()
+    v
+
+fn gmc_all(items: [HirType]) -> text:
+    var parts: [text] = []
+    for item in items:
+        parts = parts.push(gmc_show(item))
+    parts.join(",")
+
+fn gmc_show(ty: HirType) -> text:
+    match ty.kind:
+        case Int(bits, _): "i{bits}"
+        case Str: "str"
+        case Unit: "unit"
+        case Bool: "bool"
+        case Infer(id, _): "?{id}"
+        case TypeParam(name, _): "'" + name
+        case Function(params, ret, effects): "Fn[" + gmc_all(params) + "->" + gmc_show(ret) + "!{effects.len()}]"
+        case Tuple(elements): "Tup[" + gmc_all(elements) + "]"
+        case Array(element, _): "Arr[" + gmc_show(element) + "]"
+        case Slice(element): "Slice[" + gmc_show(element) + "]"
+        case Dict(key, value): "Dict[" + gmc_show(key) + "," + gmc_show(value) + "]"
+        case Optional(inner): "Opt[" + gmc_show(inner) + "]"
+        case Result(ok, err): "Res[" + gmc_show(ok) + "," + gmc_show(err) + "]"
+        case Ref(inner, m): "Ref{m}[" + gmc_show(inner) + "]"
+        case Ptr(inner, m): "Ptr{m}[" + gmc_show(inner) + "]"
+        case Unique(inner): "Uniq[" + gmc_show(inner) + "]"
+        case Shared(inner): "Shr[" + gmc_show(inner) + "]"
+        case Weak(inner): "Weak[" + gmc_show(inner) + "]"
+        case Isolated(inner): "Iso[" + gmc_show(inner) + "]"
+        case Union(members): "Union[" + gmc_all(members) + "]"
+        case Projection(base, name): "Proj[" + gmc_show(base) + "." + name + "]"
+        case Tensor(element, _, _): "Tensor[" + gmc_show(element) + "]"
+        case Named(symbol, args): "N{symbol.id}[" + gmc_all(args) + "]"
+        case _: "leaf"
+
+fn gmc_effect_payload(ty: HirType) -> text:
+    match ty.kind:
+        case Function(_, _, effects):
+            match effects[0].kind:
+                case Throws(payload): "throws " + gmc_show(payload)
+                case _: "plain"
+        case _: "none"
+
+fn gmc_free_count(ctx: HmInferContext, ty: HirType) -> i64:
+    ctx.free_vars_with_levels(ty).len()
+
+describe "generalization.spl levels and fresh variables":
+    it "generalization.spl:23-45 fresh variables carry the current level and fresh ids":
+        # @req REQ-GEN-COV-GENERAL-001
+        var ctx = HmInferContext.new()
+        ctx.enter_level()
+        expect(ctx.current_level()).to_equal(1)
+        val v = ctx.fresh_var(gmc_sp())
+        val w = ctx.fresh_var_at_level(5, gmc_sp())
+        ctx.exit_level()
+        expect(ctx.current_level()).to_equal(0)
+        expect(gmc_id(w)).to_equal(gmc_id(v) + 1)
+        val levels = ctx.free_vars_with_levels(gmc_mk(HirTypeKind.Tuple([v, w])))
+        var seen_levels: [i64] = []
+        for (_, level) in levels:
+            seen_levels = seen_levels.push(level)
+        expect(seen_levels.len()).to_equal(2)
+        expect(seen_levels[0]).to_equal(1)
+        expect(seen_levels[1]).to_equal(5)
+
+describe "generalization.spl collect_free_vars arms":
+    it "generalization.spl:65 arm Infer and default":
+        # @req REQ-GEN-COV-GENERAL-002
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(gmc_sp())
+        expect(gmc_free_count(ctx, v)).to_equal(1)
+        expect(gmc_free_count(ctx, gmc_i64())).to_equal(0)
+
+    it "generalization.spl:65 arms Function Tuple Array Slice Dict Optional Ref Ptr Unique Shared Weak Result Named":
+        # @req REQ-GEN-COV-GENERAL-003
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(gmc_sp())
+        expect(gmc_free_count(ctx, gmc_mk(HirTypeKind.Function([v], v, [])))).to_equal(2)
+        expect(gmc_free_count(ctx, gmc_mk(HirTypeKind.Tuple([v, gmc_i64(), v])))).to_equal(2)
+        expect(gmc_free_count(ctx, gmc_mk(HirTypeKind.Array(v, nil)))).to_equal(1)
+        expect(gmc_free_count(ctx, gmc_mk(HirTypeKind.Slice(v)))).to_equal(1)
+        expect(gmc_free_count(ctx, gmc_mk(HirTypeKind.Dict(v, v)))).to_equal(2)
+        expect(gmc_free_count(ctx, gmc_mk(HirTypeKind.Optional(v)))).to_equal(1)
+        expect(gmc_free_count(ctx, gmc_mk(HirTypeKind.Ref(v, true)))).to_equal(1)
+        expect(gmc_free_count(ctx, gmc_mk(HirTypeKind.Ptr(v, false)))).to_equal(1)
+        expect(gmc_free_count(ctx, gmc_mk(HirTypeKind.Unique(v)))).to_equal(1)
+        expect(gmc_free_count(ctx, gmc_mk(HirTypeKind.Shared(v)))).to_equal(1)
+        expect(gmc_free_count(ctx, gmc_mk(HirTypeKind.Weak(v)))).to_equal(1)
+        expect(gmc_free_count(ctx, gmc_mk(HirTypeKind.Result(v, v)))).to_equal(2)
+        expect(gmc_free_count(ctx, gmc_mk(HirTypeKind.Named(SymbolId.new(3), [v])))).to_equal(1)
+
+    it "generalization.spl:65 arm Tensor should reach the element":
+        # @req REQ-GEN-COV-GENERAL-004
+        step("A Tensor element variable is free, but collect_free_vars has no Tensor arm")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(gmc_sp())
+        expect(gmc_free_count(ctx, gmc_mk(HirTypeKind.Tensor(v, [], nil)))).to_equal(1)
+
+describe "generalization.spl env_free_var_ids":
+    it "generalization.spl:102 c1 true: unbound scheme variable is env-free":
+        # @req REQ-GEN-COV-GENERAL-005
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(gmc_sp())
+        ctx.env["x"] = TypeScheme.mono(v)
+        val ids = ctx.env_free_var_ids()
+        expect(ids.has(gmc_id(v))).to_equal(true)
+
+    it "generalization.spl:102 c1 false: quantified scheme variable is not env-free":
+        # @req REQ-GEN-COV-GENERAL-006
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(gmc_sp())
+        ctx.env["x"] = TypeScheme.poly([gmc_id(v)], v)
+        val ids = ctx.env_free_var_ids()
+        expect(ids.has(gmc_id(v))).to_equal(false)
+        expect(ids.len()).to_equal(0)
+
+describe "generalization.spl generalize guard":
+    it "generalization.spl:121 both true: deeper env-free variable is quantified":
+        # @req REQ-GEN-COV-GENERAL-007
+        var ctx = HmInferContext.new()
+        val v = gmc_deep(ctx)
+        val scheme = ctx.generalize(v)
+        expect(scheme.vars.len()).to_equal(1)
+        expect(scheme.vars[0]).to_equal(gmc_id(v))
+
+    it "generalization.spl:121 c1 false: env-owned deeper variable is not quantified":
+        # @req REQ-GEN-COV-GENERAL-008
+        var ctx = HmInferContext.new()
+        val v = gmc_deep(ctx)
+        ctx.env["owner"] = TypeScheme.mono(v)
+        expect(ctx.generalize(v).vars.len()).to_equal(0)
+
+    it "generalization.spl:121 c2 false: variable at the current level is not quantified":
+        # @req REQ-GEN-COV-GENERAL-009
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(gmc_sp())
+        expect(ctx.generalize(v).vars.len()).to_equal(0)
+
+    it "generalization.spl:122 c1 false: a repeated variable is quantified once":
+        # @req REQ-GEN-COV-GENERAL-010
+        var ctx = HmInferContext.new()
+        val v = gmc_deep(ctx)
+        val scheme = ctx.generalize(gmc_mk(HirTypeKind.Function([v], v, [])))
+        expect(scheme.vars.len()).to_equal(1)
+
+describe "generalization.spl generalize_all guard":
+    it "generalization.spl:137 c1 true: current-level variable is quantified (level ignored)":
+        # @req REQ-GEN-COV-GENERAL-011
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(gmc_sp())
+        val scheme = ctx.generalize_all(v)
+        expect(scheme.vars.len()).to_equal(1)
+        expect(scheme.vars[0]).to_equal(gmc_id(v))
+
+    it "generalization.spl:137 c1 false: env-owned variable is not quantified":
+        # @req REQ-GEN-COV-GENERAL-012
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(gmc_sp())
+        ctx.env["owner"] = TypeScheme.mono(v)
+        expect(ctx.generalize_all(v).vars.len()).to_equal(0)
+
+    it "generalization.spl:138 c1 false: a repeated variable is quantified once":
+        # @req REQ-GEN-COV-GENERAL-013
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(gmc_sp())
+        val w = ctx.fresh_var(gmc_sp())
+        val scheme = ctx.generalize_all(gmc_mk(HirTypeKind.Tuple([v, w, v])))
+        expect(scheme.vars.len()).to_equal(2)
+        expect(scheme.vars[0]).to_equal(gmc_id(v))
+        expect(scheme.vars[1]).to_equal(gmc_id(w))
+
+describe "generalization.spl instantiate":
+    it "generalization.spl:146 c1 true: monomorphic scheme returns its body":
+        # @req REQ-GEN-COV-GENERAL-014
+        var ctx = HmInferContext.new()
+        val before = ctx.next_var
+        expect(gmc_show(ctx.instantiate(TypeScheme.mono(gmc_i64())))).to_equal("i64")
+        expect(ctx.next_var).to_equal(before)
+
+    it "generalization.spl:146 c1 false and 161 c1 true: bound variable is replaced with a fresh one":
+        # @req REQ-GEN-COV-GENERAL-015
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(gmc_sp())
+        val result = ctx.instantiate(TypeScheme.poly([gmc_id(v)], gmc_mk(HirTypeKind.Optional(v))))
+        expect(gmc_show(result)).to_equal("Opt[?{gmc_id(v) + 1}]")
+
+    it "generalization.spl:161 c1 false: unquantified variable is kept":
+        # @req REQ-GEN-COV-GENERAL-016
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(gmc_sp())
+        val w = ctx.fresh_var(gmc_sp())
+        val result = ctx.instantiate(TypeScheme.poly([gmc_id(v)], gmc_mk(HirTypeKind.Tuple([v, w]))))
+        expect(gmc_show(result)).to_equal("Tup[?{gmc_id(w) + 1},?{gmc_id(w)}]")
+
+describe "generalization.spl instantiate_type binders and names":
+    it "generalization.spl:166 c1 true: named type parameter is substituted":
+        # @req REQ-GEN-COV-GENERAL-017
+        var ctx = HmInferContext.new()
+        var names: Dict<text, HirType> = {}
+        names["T"] = gmc_i64()
+        val result = ctx.instantiate_type(gmc_mk(HirTypeKind.TypeParam("T", [])), {}, {}, names)
+        expect(gmc_show(result)).to_equal("i64")
+
+    it "generalization.spl:166 c1 false: unknown type parameter is kept":
+        # @req REQ-GEN-COV-GENERAL-018
+        var ctx = HmInferContext.new()
+        var names: Dict<text, HirType> = {}
+        names["T"] = gmc_i64()
+        val result = ctx.instantiate_type(gmc_mk(HirTypeKind.TypeParam("U", [])), {}, {}, names)
+        expect(gmc_show(result)).to_equal("'U")
+
+    it "generalization.spl:214 both true: nullary bound binder is replaced":
+        # @req REQ-GEN-COV-GENERAL-019
+        var ctx = HmInferContext.new()
+        var binders: Dict<i64, HirType> = {}
+        binders[77] = gmc_str()
+        val result = ctx.instantiate_type(gmc_mk(HirTypeKind.Named(SymbolId.new(77), [])), {}, binders, {})
+        expect(gmc_show(result)).to_equal("str")
+
+    it "generalization.spl:214 c1 false: applied named type is rebuilt, not replaced":
+        # @req REQ-GEN-COV-GENERAL-020
+        var ctx = HmInferContext.new()
+        var binders: Dict<i64, HirType> = {}
+        binders[77] = gmc_str()
+        val result = ctx.instantiate_type(gmc_mk(HirTypeKind.Named(SymbolId.new(77), [gmc_i64()])), {}, binders, {})
+        expect(gmc_show(result)).to_equal("N77[i64]")
+
+    it "generalization.spl:214 c2 false: nullary unbound named type is kept":
+        # @req REQ-GEN-COV-GENERAL-021
+        var ctx = HmInferContext.new()
+        var binders: Dict<i64, HirType> = {}
+        binders[77] = gmc_str()
+        val result = ctx.instantiate_type(gmc_mk(HirTypeKind.Named(SymbolId.new(78), [])), {}, binders, {})
+        expect(gmc_show(result)).to_equal("N78[]")
+
+describe "generalization.spl instantiate_type arms":
+    it "generalization.spl:171 arm Throws maps the thrown payload":
+        # @req REQ-GEN-COV-GENERAL-022
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(gmc_sp())
+        var var_map: Dict<i64, HirType> = {}
+        var_map[gmc_id(v)] = gmc_i64()
+        val throws = Effect(kind: EffectKind.Throws(v), span: gmc_sp())
+        val result = ctx.instantiate_type(gmc_mk(HirTypeKind.Function([v], v, [throws])), var_map)
+        expect(gmc_show(result)).to_equal("Fn[i64->i64!1]")
+        expect(gmc_effect_payload(result)).to_equal("throws i64")
+
+    it "generalization.spl:171 arm default keeps a non-throws effect":
+        # @req REQ-GEN-COV-GENERAL-023
+        var ctx = HmInferContext.new()
+        val io = Effect(kind: EffectKind.IO, span: gmc_sp())
+        val result = ctx.instantiate_type(gmc_mk(HirTypeKind.Function([], gmc_unit(), [io])), {})
+        expect(gmc_effect_payload(result)).to_equal("plain")
+
+    it "generalization.spl:159 arms map every structural carrier":
+        # @req REQ-GEN-COV-GENERAL-024
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(gmc_sp())
+        var m: Dict<i64, HirType> = {}
+        m[gmc_id(v)] = gmc_i64()
+        expect(gmc_show(ctx.instantiate_type(gmc_mk(HirTypeKind.Tuple([v])), m))).to_equal("Tup[i64]")
+        expect(gmc_show(ctx.instantiate_type(gmc_mk(HirTypeKind.Array(v, nil)), m))).to_equal("Arr[i64]")
+        expect(gmc_show(ctx.instantiate_type(gmc_mk(HirTypeKind.Slice(v)), m))).to_equal("Slice[i64]")
+        expect(gmc_show(ctx.instantiate_type(gmc_mk(HirTypeKind.Dict(gmc_str(), v)), m))).to_equal("Dict[str,i64]")
+        expect(gmc_show(ctx.instantiate_type(gmc_mk(HirTypeKind.Optional(v)), m))).to_equal("Opt[i64]")
+        expect(gmc_show(ctx.instantiate_type(gmc_mk(HirTypeKind.Result(v, gmc_str())), m))).to_equal("Res[i64,str]")
+        expect(gmc_show(ctx.instantiate_type(gmc_mk(HirTypeKind.Ref(v, true)), m))).to_equal("Reftrue[i64]")
+        expect(gmc_show(ctx.instantiate_type(gmc_mk(HirTypeKind.Ptr(v, false)), m))).to_equal("Ptrfalse[i64]")
+        expect(gmc_show(ctx.instantiate_type(gmc_mk(HirTypeKind.Isolated(v)), m))).to_equal("Iso[i64]")
+        expect(gmc_show(ctx.instantiate_type(gmc_mk(HirTypeKind.Unique(v)), m))).to_equal("Uniq[i64]")
+        expect(gmc_show(ctx.instantiate_type(gmc_mk(HirTypeKind.Shared(v)), m))).to_equal("Shr[i64]")
+        expect(gmc_show(ctx.instantiate_type(gmc_mk(HirTypeKind.Weak(v)), m))).to_equal("Weak[i64]")
+        expect(gmc_show(ctx.instantiate_type(gmc_mk(HirTypeKind.Union([v, gmc_str()])), m))).to_equal("Union[i64,str]")
+        expect(gmc_show(ctx.instantiate_type(gmc_mk(HirTypeKind.Projection(v, "Item")), m))).to_equal("Proj[i64.Item]")
+        expect(gmc_show(ctx.instantiate_type(gmc_mk(HirTypeKind.Tensor(v, [], nil)), m))).to_equal("Tensor[i64]")
+
+    it "generalization.spl:159 arm default returns a leaf unchanged":
+        # @req REQ-GEN-COV-GENERAL-025
+        var ctx = HmInferContext.new()
+        expect(gmc_show(ctx.instantiate_type(gmc_mk(HirTypeKind.Bool), {}))).to_equal("bool")

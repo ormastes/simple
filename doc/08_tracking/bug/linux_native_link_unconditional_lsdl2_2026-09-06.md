@@ -87,3 +87,20 @@ statically still gets it through `config.libraries`.
   runtime resolves at runtime is invisible to every existing check on a host
   that happens to have the SDK installed. The failure only appears on a clean
   host, which is where releases are built.
+
+## Verification + guard — 2026-11-05
+
+The shared support-args table (native_all_support.spl) now excludes -lSDL2
+from the linux, freebsd AND macOS arms (per-OS comments cite this bug), so
+the doc's "macOS and FreeBSD arms untouched and still suspect" status is
+outdated at source level; host link verification on those OSes remains with
+their lanes.
+
+Landed guard spec
+test/01_unit/compiler/backend/linker/no_unconditional_sdl2_link_spec.spl:
+every SDL2 mention in native_linking.spl and native_all_support.spl must be a
+comment line, and the config.libraries request path stays intact.
+Discrimination verified: an injected active args.push("-lSDL2") fails the
+scan; as landed, 3/3 under the seed interpreter on an aarch64 Linux host with
+no SDL2 dev package. Manual:
+doc/06_spec/01_unit/compiler/backend/linker/no_unconditional_sdl2_link_spec.md.

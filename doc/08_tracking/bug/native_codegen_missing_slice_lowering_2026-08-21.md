@@ -10,7 +10,7 @@ evidence found in the body. This is bookkeeping, not verification.
   suite's AC-5/AC-6 native-ACID stage 2, and it blocks the standalone-native
   path for any code reaching `src/lib/common/string_core.spl`, i.e. most string
   handling in the language.
-- Status: OPEN, feature request. Filed rather than worked around, per CLAUDE.md
+- Status: FIXED (2026-11-11 lane compiler5: slice lowering landed in both compilers — see addendum below). Filed rather than worked around, per CLAUDE.md
   ("When a short, safe grammar or compact expression form fails … fix it or
   record a concrete bug/feature request instead of silently normalizing the
   workaround").
@@ -148,3 +148,34 @@ arm, `rt_contains` ships only because it was verified against an oracle, while
 failing loudly. Slice lowering must clear the same bar rather than being wired
 up because it links.
 
+
+## Addendum 2026-11-11 — lane compiler5 (P3 batch-5 triage): FIXED
+
+Slice lowering now exists in BOTH compilers and the load-bearing refusal is
+relaxed exactly as this doc prescribed (only after runtime-oracle proof):
+
+- **Seed (Rust) side:** `a25b1f175206` (2026-10-19, "fix(seed): admit
+  natively-lowered ?/??/slice/[v; n]/int match in AotNative") — `recv[a:b]`
+  lowers to the ordinary runtime call `rt_slice`
+  (`hir/lower/expr/collections.rs::lower_slice`) with a native runtime spec in
+  both backends; `compilability.rs` (Expr::Slice arm, now ~line 582) keeps the
+  CollectionOps flag ONLY for HybridJit and no longer refuses standalone AOT.
+  The commit's recorded acceptance meets this doc's bar: fixture
+  `compile --native` output byte-identical to the interpreter oracle. The
+  sibling `ArrayRepeat` relaxation shipped in the same commit. All three commits
+  verified as ancestors of this branch.
+- **Pure-Simple MIR side:** `lower_runtime_array_slice`
+  (`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:2159`, with
+  proven-handle/bounds validation and a loud `reject_runtime_array_slice`),
+  array range slices in `3a16118c6033` (2026-10-20), and the runtime text-slice
+  arm in `db56bd08e197` (2026-11-09, ADR-005 code-point semantics). The old
+  "no lowering, emits nothing" state is gone from both sides.
+- **Verification run on the fresh seed** (build-commit 46fe8f6b6def,
+  `--mode=interpreter --no-cache`):
+  - `test/01_unit/compiler/frontend/open_range_slice_endpoint_spec.spl` — 2/2 PASS
+  - `test/01_unit/compiler/frontend/omitted_text_slice_end_spec.spl` — 11/11 PASS
+- **Out-of-scope observation (pre-existing, not blocking this verdict):**
+  `test/01_unit/bugs/text_slice_substring_spec.spl` shows 8 red UTF-8/codepoint
+  assertions on this seed — a text-semantics concern (ADR-005 interpreter
+  territory), not slice-lowering presence. Recorded here so the next reader does
+  not conflate the two; not chased in this lane.

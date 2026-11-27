@@ -1,0 +1,59 @@
+# Semantic authority adapter for the existing SPipe generator.
+use app.spipe_docgen.common.{SspecDoc, native_fs_write_string}
+use app.doc.spec_gen.types.{SpecFile}
+use app.doc.spec_gen.parser.{extract_test_cases}
+use app.doc.spec_gen.semantic_links.{semantic_doc_symbol_map_v1}
+use app.doc.spec_gen.markdown.{publish_semantic_markdown_content_v1}
+use compiler.semantics.symbol_id.semantic_link_source.{open_semantic_link_document_v1}
+
+pub struct SemanticDocgenOptionsV1:
+    package: text
+    module_path: text
+    file: text
+    revision: text
+
+    static fn empty() -> SemanticDocgenOptionsV1:
+        SemanticDocgenOptionsV1(package: "", module_path: "", file: "", revision: "")
+
+pub fn prepare_semantic_docgen_links_v1(doc: SspecDoc, options: SemanticDocgenOptionsV1) -> Result<text, text>:
+    # Legacy documents without semantic claims avoid a second extraction pass.
+    if options.file == "" and options.package == "" and options.module_path == "" and options.revision == "" and not doc.raw_content.contains("spl:"):
+        return Ok("")
+    # Consume the exact parsed spec bytes, never guesses or a second file read.
+    val spec = SpecFile(path: doc.file_path, header_docstring: "", metadata: [], test_cases: extract_test_cases(doc.raw_content, true))
+    var explicit = false
+    for scenario in spec.test_cases:
+        for symbol in scenario.symbols:
+            if symbol.starts_with("spl:"):
+                explicit = true
+    if options.file == "" and options.package == "" and options.module_path == "" and options.revision == "":
+        if explicit:
+            return Err("explicit semantic links require source authority")
+        return Ok("")
+    val document = match open_semantic_link_document_v1(options.package, options.module_path, options.file, options.revision):
+        case Ok(value): value
+        case Err(error): return Err(error.message)
+    val links = match semantic_doc_symbol_map_v1(spec, document, options.revision):
+        case Ok(value): value
+        case Err(error): return Err(error.message)
+    var rows: [text] = []
+    var seen: Dict<text, bool> = {}
+    for scenario in spec.test_cases:
+        for symbol in scenario.symbols:
+            if links.contains_key(symbol) and not seen.contains_key(symbol):
+                seen[symbol] = true
+                rows.push("- " + links[symbol] + "\n")
+    if rows.len() == 0:
+        return Ok("")
+    Ok("\n## Verified Declarations\n\n" + rows.join(""))
+
+pub fn publish_semantic_docgen_v1(content: text, output: text, options: SemanticDocgenOptionsV1) -> Result<text, text>:
+    if options.file != "" or options.package != "" or options.module_path != "" or options.revision != "":
+        val written = match publish_semantic_markdown_content_v1(content, output, options.file, options.revision):
+            case Ok(value): value
+            case Err(error): return Err(error.message)
+        if not written:
+            return Err("Failed to atomically publish {output}")
+    elif not native_fs_write_string(output, content):
+        return Err("Failed to write {output}")
+    Ok(output)

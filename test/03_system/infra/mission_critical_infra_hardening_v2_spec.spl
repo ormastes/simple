@@ -264,6 +264,7 @@ describe "mission-critical infrastructure hardening V2":
             step("should allocate exactly the sealed domain quota")
             step("Exercise strict and relaxed allocation profiles")
             var arena = DomainArenaV1.from_sealed_profile(51u64, mci_relaxed_profile())
+            arena.checkpoint()
             match arena.try_allocate(64u64, ARENA_CONTEXT_NORMAL):
                 DomainArenaAllocationV1.Allocated(reference):
                     expect(reference.size_bytes).to_equal(64u64)
@@ -291,11 +292,24 @@ describe "mission-critical infrastructure hardening V2":
             expect(arena.rollback(checkpoint)).to_be(true)
             expect(arena.cursor_bytes).to_equal(0u64)
 
+        it "should refuse allocation before a generation checkpoint opens":
+            # @req REQ-SSPEC-SYSTEM
+            step("should refuse allocation before a generation checkpoint opens")
+            step("Exercise strict and relaxed allocation profiles")
+            var arena = DomainArenaV1.from_sealed_profile(54u64, mci_relaxed_profile())
+            match arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL):
+                DomainArenaAllocationV1.Exhausted(receipt):
+                    expect(receipt.reason).to_equal(ARENA_EXHAUSTION_UNSEALED)
+                DomainArenaAllocationV1.Allocated(reference):
+                    fail("allocation without an open generation was unexpectedly admitted")
+            expect(arena.cursor_bytes).to_equal(0u64)
+
         it "should reject allocation in an ISR context":
             # @req REQ-SSPEC-SYSTEM
             step("should reject allocation in an ISR context")
             step("Exercise strict and relaxed allocation profiles")
             var arena = DomainArenaV1.from_sealed_profile(53u64, mci_relaxed_profile())
+            arena.checkpoint()
             match arena.try_allocate(8u64, ARENA_CONTEXT_ISR):
                 DomainArenaAllocationV1.Exhausted(receipt):
                     expect(receipt.reason).to_equal(ARENA_EXHAUSTION_FORBIDDEN_CONTEXT)

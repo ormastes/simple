@@ -1,8 +1,10 @@
 use compiler.driver.action_graph.build_action_v1.{BuildActionResultV1}
 use compiler.driver.action_graph.coordinator.{
     BuildActionClaimTransferV1, BuildActionClaimV1,
-    BuildActionCommitTransferV1, coordinator_cancel_v1,
-    coordinator_claim_v1, coordinator_commit_v1
+    BuildActionCommitTransferV1, coordinator_attach_waiter_v1,
+    coordinator_cancel_action_v1, coordinator_cancel_v1,
+    coordinator_claim_v1, coordinator_commit_v1,
+    coordinator_detach_waiter_v1
 }
 use compiler.driver.action_graph.demand_compile_integration.{DemandCompileExecutionV1}
 use lib.compiler_artifact_service.profile.{
@@ -14,9 +16,10 @@ use lib.compiler_artifact_service.protocol.{
 }
 use lib.compiler_artifact_service.service.{
     ArtifactLeaseV1, ArtifactQueueEntryV1, ArtifactRequestStateV1, ArtifactRequestV1,
-    ArtifactServiceV1, artifact_service_cancel_v1,
-    artifact_service_claim_v1, artifact_service_complete_v1,
-    artifact_service_enqueue_v1
+    ArtifactServiceV1, artifact_service_attach_waiter_v1,
+    artifact_service_cancel_v1, artifact_service_claim_v1,
+    artifact_service_complete_v1, artifact_service_detach_waiter_v1,
+    artifact_service_enqueue_v1, artifact_service_waiter_ids_v1
 }
 
 struct DemandArtifactRouteV1:
@@ -40,7 +43,7 @@ fn demand_artifact_route_v1(
     execution: DemandCompileExecutionV1, profile: ArtifactServiceProfileV1,
     daemon_available: bool, owner_id: text, lease_generation: i64
 ) -> DemandArtifactRouteV1:
-    if not execution.valid or execution.coordinator == nil:
+    if not execution.valid or execution.coordinator.is_none():
         return DemandArtifactRouteV1(
             false, execution.reason, execution,
             ArtifactServiceV1(profile, []), daemon_available, owner_id,
@@ -67,13 +70,13 @@ fn demand_artifact_claim_v1(
     lease_id: text, available_memory_bytes: i64
 ) -> BuildActionClaimV1:
     if not route.valid:
-        return BuildActionClaimV1(false, route.reason, nil, "")
+        return BuildActionClaimV1(false, route.reason, None, "")
     var service = artifact_service_claim_action_v1(
         route.service, action_id, route.owner_id, lease_id,
         route.lease_generation, available_memory_bytes)
     val lease = artifact_service_lease_for_action_v1(service, action_id)
-    if lease == nil:
-        return BuildActionClaimV1(false, "artifact-service-not-ready", nil, "")
+    if lease.is_none():
+        return BuildActionClaimV1(false, "artifact-service-not-ready", None, "")
     # A lookup can return an existing lease when no new claim was admitted.
     # Never borrow that lease's authority for a different caller or epoch.
     if lease!.owner_id != route.owner_id or lease!.lease_id != lease_id or
@@ -100,7 +103,7 @@ fn demand_artifact_commit_v1(
     if not route.valid or (result.success and result.output_identity == ""):
         return false
     val lease = artifact_service_lease_for_action_v1(route.service, result.action_id)
-    if lease == nil:
+    if lease.is_none():
         return false
     # After recovery, action/snapshot alone cannot distinguish a late old
     # result. Require the worker's original lease, never relabel it as current.
@@ -162,13 +165,73 @@ fn demand_artifact_commit_owned_v1(
     DemandArtifactCommitTransferV1(owned, accepted)
 
 fn demand_artifact_cancel_v1(route: &mut DemandArtifactRouteV1, action_id: text):
+    if action_id == "":
+        demand_artifact_abort_all_v1(route)
+        return
     var execution = route.execution
-    if execution.coordinator != nil:
-        var coordinator = execution.coordinator!
-        coordinator_cancel_v1(&mut coordinator)
-        execution.coordinator = Some(coordinator)
+    match execution.coordinator:
+        case Some(coord):
+            var mutable_coord = coord
+            val did_cancel = coordinator_cancel_action_v1(&mut mutable_coord, action_id)
+            execution.coordinator = Some(mutable_coord)
+            route.execution = execution
+            if did_cancel:
+                route.service = artifact_service_cancel_v1(route.service, action_id)
+        case None:
+            route.execution = execution
+            if artifact_service_waiter_ids_v1(route.service, action_id).len() == 0:
+                route.service = artifact_service_cancel_v1(route.service, action_id)
+
+fn demand_artifact_abort_all_v1(route: &mut DemandArtifactRouteV1):
+    var execution = route.execution
+    match execution.coordinator:
+        case Some(coord):
+            var mutable_coord = coord
+            coordinator_cancel_v1(&mut mutable_coord)
+            for action in mutable_coord.graph.actions:
+                route.service = artifact_service_cancel_v1(route.service, action.action_id)
+            execution.coordinator = Some(mutable_coord)
+        case None:
+            var action_ids: [text] = []
+            for entry in route.service.entries:
+                if not action_ids.contains(entry.request.action_id):
+                    action_ids.push(entry.request.action_id)
+            for aid in action_ids:
+                route.service = artifact_service_cancel_v1(route.service, aid)
     route.execution = execution
-    route.service = artifact_service_cancel_v1(route.service, action_id)
+
+fn demand_artifact_attach_waiter_v1(
+    route: &mut DemandArtifactRouteV1, action_id: text, waiter_id: text
+) -> bool:
+    if not route.valid or route.execution.coordinator.is_none():
+        return false
+    var execution = route.execution
+    var coordinator = execution.coordinator!
+    if not coordinator_attach_waiter_v1(&mut coordinator, action_id, waiter_id):
+        return false
+    val staged_service = artifact_service_attach_waiter_v1(route.service, action_id, waiter_id)
+    if not artifact_service_waiter_ids_v1(staged_service, action_id).contains(waiter_id):
+        return false
+    execution.coordinator = Some(coordinator)
+    route.execution = execution
+    route.service = staged_service
+    true
+
+fn demand_artifact_detach_waiter_v1(
+    route: &mut DemandArtifactRouteV1, action_id: text, waiter_id: text
+) -> bool:
+    if not route.valid or route.execution.coordinator.is_none():
+        return false
+    if not artifact_service_waiter_ids_v1(route.service, action_id).contains(waiter_id):
+        return false
+    var execution = route.execution
+    var coordinator = execution.coordinator!
+    val cancelled_action = coordinator_detach_waiter_v1(&mut coordinator, action_id, waiter_id)
+    val staged_service = artifact_service_detach_waiter_v1(route.service, action_id, waiter_id)
+    execution.coordinator = Some(coordinator)
+    route.execution = execution
+    route.service = staged_service
+    cancelled_action
 
 fn artifact_service_claim_action_v1(
     service: ArtifactServiceV1, action_id: text, owner_id: text,
@@ -181,7 +244,7 @@ fn artifact_service_claim_action_v1(
                 entries[index].state == ArtifactRequestStateV1.queued:
             entries[index] = ArtifactQueueEntryV1(
                 entries[index].request, ArtifactRequestStateV1.rejected,
-                nil, "", "claim-deferred")
+                None, "", "claim-deferred")
     isolated.entries = entries
     var claimed = artifact_service_claim_v1(
         isolated, owner_id, lease_id, generation,
@@ -200,7 +263,7 @@ fn artifact_service_lease_for_action_v1(
         if entry.request.action_id == action_id and
                 entry.state == ArtifactRequestStateV1.leased:
             return entry.lease
-    nil
+    None
 
 fn demand_artifact_frames_v1(result: BuildActionResultV1) -> [ArtifactResultFrameV1]:
     var frames: [ArtifactResultFrameV1] = []
@@ -231,4 +294,6 @@ export DemandArtifactRouteV1
 export DemandArtifactClaimTransferV1, DemandArtifactCommitTransferV1
 export demand_artifact_route_v1, demand_artifact_claim_v1
 export demand_artifact_commit_v1, demand_artifact_cancel_v1
+export demand_artifact_abort_all_v1
+export demand_artifact_attach_waiter_v1, demand_artifact_detach_waiter_v1
 export demand_artifact_claim_owned_v1, demand_artifact_commit_owned_v1

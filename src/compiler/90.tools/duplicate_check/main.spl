@@ -1,14 +1,14 @@
 #!/usr/bin/env simple
 # Duplication detection CLI
 
-use compiler.tools.duplicate_check.config (load_config, DuplicationConfig, analysis_mode, apply_analysis_mode, target_path_from_args, config_validation_error)
+use compiler.tools.duplicate_check.config (load_config, DuplicationConfig, analysis_mode, apply_analysis_mode, target_path_from_args, config_validation_error, vendored_exclude_patterns)
 use compiler.tools.duplicate_check.debug (init_debug)
 use compiler.tools.duplicate_check.cache.{new_token_cache_manager}
 use compiler.tools.duplicate_check.detector.{collect_files, find_duplicates_with_options}
 use compiler.tools.duplicate_check.formatter.{print_text_report, print_json_report, write_sdn_database}
 use lazy compiler.tools.duplicate_check.semantic.{run_semantic_analysis, run_semantic_analysis_local}
 use lazy compiler.tools.duplicate_check.semantic_formatter.{print_semantic_text_report, print_semantic_json_report}
-use std.sffi.cli.{cli_get_args, cli_exit}
+use std.nogc_sync_mut.sffi.cli_args.{cli_get_args, cli_exit}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.nogc_sync_mut.io.mod_stub.{is_dir}
 
@@ -43,7 +43,7 @@ fn normalize_argv(all_args: [text]) -> [text]:
         i = i + 1
     args
 
-fn collect_command_args(all_args: [text]) -> [text]:
+pub fn collect_command_args(all_args: [text]) -> [text]:
     val argv = normalize_argv(all_args)
     if argv.len() <= 1:
         return []
@@ -65,6 +65,8 @@ fn print_usage():
     print "  --exclude PATTERN   Exclude files matching pattern"
     print "  --no-default-excludes   Clear built-in default excludes (e.g. \"test/\") before applying --exclude"
     print "  --verbose, -v       Show detailed progress information"
+    print "  --include-vendored  Also scan vendored third-party code (vendor/, miniaudio.h, stb_*.h), skipped by default"
+    print "  --include-c         Also scan .c/.h files (C comment rules)"
     print "  --progress          Print periodic progress and resource usage to stderr"
     print "  --progress-interval-ms N  Progress interval in milliseconds (default: 5000)"
     print "  --quiet, -q         Suppress all output except results"
@@ -79,6 +81,8 @@ fn print_usage():
     print "  --max-allowed N     Maximum duplicate groups before non-zero exit (default: 0)"
     print "  --cache-path PATH   Reuse token/cosine blocks for unchanged files"
     print "  --no-cache          Disable incremental caching from configuration"
+    print "  --no-pass0          Disable lossy Pass 0 exact-window prefilter in cosine mode (default)"
+    print "  --pass0             Opt in to approximate Pass 0 exact-window prefilter in cosine mode"
     print "  --semantic-threshold N  Similarity threshold (default: 0.90)"
     print "  --semantic-model NAME   Ollama model (default: nomic-embed-text)"
     print "  --ollama-url URL    Ollama base URL (default: http://localhost:11434)"
@@ -103,11 +107,6 @@ fn unsupported_runtime_config(config: DuplicationConfig) -> text:
 fn duplicate_target_exists(path: text) -> bool:
     file_exists(path) or is_dir(path)
 
-fn set_mode(config: DuplicationConfig, mode: text) -> DuplicationConfig:
-    if mode == "semantic" or mode == "semantic-llm" or mode == "token" or mode == "cosine":
-        return apply_analysis_mode(config, mode)
-    config
-
 fn lexical_runtime_config(config: DuplicationConfig, mode: text) -> DuplicationConfig:
     if mode == "cosine":
         return apply_analysis_mode(config, "cosine")
@@ -123,7 +122,7 @@ fn lexical_runtime_config(config: DuplicationConfig, mode: text) -> DuplicationC
         runtime.similarity_threshold = 0.999
     runtime
 
-fn parse_args(args: [text]) -> DuplicationConfig:
+pub fn parse_args(args: [text]) -> DuplicationConfig:
     var config = load_config()
     config = apply_analysis_mode(config, analysis_mode(config))
 
@@ -132,52 +131,60 @@ fn parse_args(args: [text]) -> DuplicationConfig:
         val arg = args[i]
 
         if arg == "--mode" and i + 1 < args.len():
-            config = set_mode(config, args[i + 1])
+            config = apply_analysis_mode(config, args[i + 1])
             i = i + 2
         elif arg.starts_with("--mode="):
-            config = set_mode(config, arg.slice("--mode=".len(), arg.len()))
+            config = apply_analysis_mode(config, arg.slice("--mode=".len(), arg.byte_len()))
             i = i + 1
         elif arg == "--min-tokens" and i + 1 < args.len():
             config.min_tokens = int(args[i + 1])
             i = i + 2
         elif arg.starts_with("--min-tokens="):
-            config.min_tokens = int(arg.slice("--min-tokens=".len(), arg.len()))
+            config.min_tokens = int(arg.slice("--min-tokens=".len(), arg.byte_len()))
             i = i + 1
         elif arg == "--min-lines" and i + 1 < args.len():
             config.min_lines = int(args[i + 1])
             i = i + 2
         elif arg.starts_with("--min-lines="):
-            config.min_lines = int(arg.slice("--min-lines=".len(), arg.len()))
+            config.min_lines = int(arg.slice("--min-lines=".len(), arg.byte_len()))
             i = i + 1
         elif arg == "--min-impact" and i + 1 < args.len():
             config.min_impact = int(args[i + 1])
             i = i + 2
         elif arg.starts_with("--min-impact="):
-            config.min_impact = int(arg.slice("--min-impact=".len(), arg.len()))
+            config.min_impact = int(arg.slice("--min-impact=".len(), arg.byte_len()))
             i = i + 1
         elif arg == "--max-allowed" and i + 1 < args.len():
             config.max_allowed = int(args[i + 1])
             i = i + 2
         elif arg.starts_with("--max-allowed="):
-            config.max_allowed = int(arg.slice("--max-allowed=".len(), arg.len()))
+            config.max_allowed = int(arg.slice("--max-allowed=".len(), arg.byte_len()))
             i = i + 1
         elif arg == "--format" and i + 1 < args.len():
             config.output_format = args[i + 1]
             i = i + 2
         elif arg.starts_with("--format="):
-            config.output_format = arg.slice("--format=".len(), arg.len())
+            config.output_format = arg.slice("--format=".len(), arg.byte_len())
             i = i + 1
         elif arg == "--similarity-threshold" and i + 1 < args.len():
             config.similarity_threshold = float(args[i + 1])
             i = i + 2
         elif arg.starts_with("--similarity-threshold="):
-            config.similarity_threshold = float(arg.slice("--similarity-threshold=".len(), arg.len()))
+            config.similarity_threshold = float(arg.slice("--similarity-threshold=".len(), arg.byte_len()))
             i = i + 1
         elif arg == "--exclude" and i + 1 < args.len():
             config.exclude_patterns.push(args[i + 1])
             i = i + 2
         elif arg.starts_with("--exclude="):
-            config.exclude_patterns.push(arg.slice("--exclude=".len(), arg.len()))
+            config.exclude_patterns.push(arg.slice("--exclude=".len(), arg.byte_len()))
+            i = i + 1
+        elif arg == "--include-vendored":
+            val vendored = vendored_exclude_patterns()
+            var kept: [text] = []
+            for p in config.exclude_patterns:
+                if not vendored.contains(p):
+                    kept.push(p)
+            config.exclude_patterns = kept
             i = i + 1
         elif arg == "--no-default-excludes":
             config.exclude_patterns = []
@@ -192,7 +199,10 @@ fn parse_args(args: [text]) -> DuplicationConfig:
             config.progress_interval_ms = int(args[i + 1])
             i = i + 2
         elif arg.starts_with("--progress-interval-ms="):
-            config.progress_interval_ms = int(arg.slice("--progress-interval-ms=".len(), arg.len()))
+            config.progress_interval_ms = int(arg.slice("--progress-interval-ms=".len(), arg.byte_len()))
+            i = i + 1
+        elif arg == "--include-c":
+            config.include_c_sources = true
             i = i + 1
         elif arg == "--quiet" or arg == "-q":
             config.quiet = true
@@ -206,7 +216,7 @@ fn parse_args(args: [text]) -> DuplicationConfig:
             i = i + 2
         elif arg.starts_with("--jobs="):
             config.use_parallel = true
-            config.num_workers = int(arg.slice("--jobs=".len(), arg.len()))
+            config.num_workers = int(arg.slice("--jobs=".len(), arg.byte_len()))
             i = i + 1
         elif arg == "--cosine":
             config = apply_analysis_mode(config, "cosine")
@@ -224,19 +234,19 @@ fn parse_args(args: [text]) -> DuplicationConfig:
             config.semantic_threshold = float(args[i + 1])
             i = i + 2
         elif arg.starts_with("--semantic-threshold="):
-            config.semantic_threshold = float(arg.slice("--semantic-threshold=".len(), arg.len()))
+            config.semantic_threshold = float(arg.slice("--semantic-threshold=".len(), arg.byte_len()))
             i = i + 1
         elif arg == "--semantic-model" and i + 1 < args.len():
             config.semantic_model = args[i + 1]
             i = i + 2
         elif arg.starts_with("--semantic-model="):
-            config.semantic_model = arg.slice("--semantic-model=".len(), arg.len())
+            config.semantic_model = arg.slice("--semantic-model=".len(), arg.byte_len())
             i = i + 1
         elif arg == "--ollama-url" and i + 1 < args.len():
             config.ollama_url = args[i + 1]
             i = i + 2
         elif arg.starts_with("--ollama-url="):
-            config.ollama_url = arg.slice("--ollama-url=".len(), arg.len())
+            config.ollama_url = arg.slice("--ollama-url=".len(), arg.byte_len())
             i = i + 1
         elif arg == "--rebuild-embeddings":
             config.rebuild_embeddings = true
@@ -244,13 +254,19 @@ fn parse_args(args: [text]) -> DuplicationConfig:
         elif arg == "--no-cache":
             config.use_incremental = false
             i = i + 1
+        elif arg == "--no-pass0":
+            config.use_pass0_prefilter = false
+            i = i + 1
+        elif arg == "--pass0":
+            config.use_pass0_prefilter = true
+            i = i + 1
         elif arg == "--cache-path" and i + 1 < args.len():
             config.use_incremental = true
             config.incremental_cache_path = args[i + 1]
             i = i + 2
         elif arg.starts_with("--cache-path="):
             config.use_incremental = true
-            config.incremental_cache_path = arg.slice("--cache-path=".len(), arg.len())
+            config.incremental_cache_path = arg.slice("--cache-path=".len(), arg.byte_len())
             i = i + 1
         elif arg == "--help" or arg == "-h":
             print_usage()
@@ -262,7 +278,7 @@ fn parse_args(args: [text]) -> DuplicationConfig:
 
     config
 
-fn parse_args_checked(args: [text]) -> Result<DuplicationConfig, text>:
+pub fn parse_args_checked(args: [text]) -> Result<DuplicationConfig, text>:
     val config = parse_args(args)
     val error = config_validation_error(config)
     if error != "":

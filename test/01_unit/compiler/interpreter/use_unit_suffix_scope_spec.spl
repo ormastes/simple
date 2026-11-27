@@ -1,0 +1,48 @@
+# Pure-Simple core interpreter: a unit suffix backed by a library unit module
+# (src/unit/<org>/<family>/<sfx>.spl) is only in scope in a file that imports
+# that unit or its family, or declares the suffix itself (`unit X: T as sfx`).
+# Suffixes not backed by a library module (file-declared) stay free.
+# Runtime: src/compiler/10.frontend/core/interpreter/eval_units.spl.
+# Import lists use r"..." so `{kmph}` is not interpolated by the spec itself.
+use std.spec.{describe, it, expect}
+use compiler.frontend.core.interpreter.mod.{core_interpret}
+use compiler.frontend.core.interpreter.value.{val_get_int}
+use compiler.frontend.core.interpreter.eval.{eval_get_error}
+
+fn probe(src: text) -> text:
+    val result = core_interpret(src + "\n", "use_unit_suffix_scope_probe.spl")
+    val err = eval_get_error()
+    if err != "": return "ERR:" + err
+    "" + val_get_int(result)
+
+describe "core interpreter unit suffix scope":
+    it "accepts an imported suffix":
+        expect(probe(r"use unit.velocity.{kmph}" + "\nval s = 60_kmph\ns.value()")).to_equal("60")
+
+    it "rejects a library suffix that is not imported":
+        expect(probe("val s = 60_kmph\ns.value()")).to_start_with("ERR:unit suffix 'kmph' is not in scope")
+
+    it "names the import that brings the suffix into scope":
+        expect(probe("val s = 60_kmph\ns.value()")).to_contain(r"use unit.velocity.{kmph}")
+
+    it "does not admit a sibling suffix of a selective import":
+        expect(probe(r"use unit.velocity.{kmph}" + "\nval s = 5_mps\ns.value()")).to_start_with("ERR:unit suffix 'mps'")
+
+    it "accepts any family suffix after a glob import":
+        expect(probe("use unit.velocity.*\nval s = 5_mps\ns.value()")).to_equal("5")
+
+    it "accepts any family suffix after a family module import":
+        expect(probe("use unit.velocity\nval s = 5_mps\ns.value()")).to_equal("5")
+
+    it "accepts a suffix imported by its module path":
+        expect(probe("use unit.length.km\nval d = 2_km\nd.value()")).to_equal("2")
+
+    it "accepts a suffix declared in the same file":
+        expect(probe("unit MyKm: i64 as kmph\nval s = 7_kmph\ns.value()")).to_equal("7")
+
+    it "keeps a file-declared non-library suffix free":
+        expect(probe("unit FreeBytes: i64 as fbytes\nval b = 12_fbytes\nb.value()")).to_equal("12")
+
+    it "does not leak an import into the next file":
+        probe(r"use unit.velocity.{kmph}" + "\n1")
+        expect(probe("val s = 60_kmph\ns.value()")).to_start_with("ERR:")

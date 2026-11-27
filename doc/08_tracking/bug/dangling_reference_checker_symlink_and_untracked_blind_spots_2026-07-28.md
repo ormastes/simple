@@ -90,3 +90,55 @@ In the `src/app/{cli,dashboard}` slice they are 2 of 25 (8%); the symlink class
 is likely much larger repo-wide, since the numbered compiler tier directories
 are all reached through symlinks.
 
+
+## Resolution 2026-11-25
+
+**Status:** fixed in `scripts/check/check-dangling-references.shs` (branch
+`work/p3-dangling-20261125`, base `release/1.0.0`).
+
+### Root cause
+
+The index file set came solely from `git ls-files -- 'src/*.spl'`, which
+(a) never descends through tracked symlinks (mode `120000`) and (b) never
+lists untracked files — while file *content* was read from the working copy.
+Both false-positive classes in this document follow from that one line.
+
+### Fix
+
+Index construction now unions three sources (vendor exclusions unchanged):
+
+1. tracked `src/*.spl` (as before);
+2. `git ls-files --others --exclude-standard -- 'src/*.spl'` — untracked,
+   non-ignored providers get a vote (class 2);
+3. every tracked `120000` entry under `src/`, resolved via `git cat-file -p`
+   on its blob (a working-copy `readlink` is impossible where
+   `core.symlinks=false`, e.g. Windows) and normalized with
+   `realpath -m --relative-to=<physical root>` — `git rev-parse
+   --show-toplevel` prints a drive-letter path on Windows that `realpath`
+   cannot relate to the cwd, so the physical `pwd -P` form is used. The
+   `.spl` files under each in-repo target are indexed (class 1).
+
+Only the **index** is widened: the default scan-target set remains the
+tracked src set, so in-flight or out-of-tree files feed definitions but are
+never themselves reported on. The partial-tree refusal guard, the
+working-copy presence filter, and all fail-closed ERROR paths are unchanged.
+
+### Evidence
+
+Real-repo run (worktree root, `examples/10_tooling` materialized):
+
+- before: `FAIL -- 1326 dangling reference(s) in 19967 file(s)`
+- after:  `FAIL -- 1325 dangling reference(s) in 19967 file(s)`
+- `diff` of the two finding lists: exactly one line removed —
+  `src/app/cli/_CliMain/main_and_help.spl:62: SYMBOL: imported name
+  `t32_cli_main` is declared in no src file` — zero findings added; all
+  genuine findings remain.
+
+Selftest: extended from 4 to 6 fixtures. Fixture 5 plants a tracked
+`120000` index entry (via `git update-index --cacheinfo`, no filesystem
+symlink needed) pointing at a directory whose `mod.spl` declares the
+imported symbol — red before the fix (MODULE + SYMBOL false positives),
+green after. Fixture 6 imports a symbol from an untracked working-copy
+provider — red before, green after. `sh -n` clean;
+`--selftest` prints `selftest 6/6 fixtures correct` (exit 0), and the
+selftest also runs green as part of every normal checker invocation.

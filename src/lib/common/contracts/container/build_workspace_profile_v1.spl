@@ -1,0 +1,121 @@
+# Installed remote-build workspace policy (milestone_0030 N5, DESIGN 14.3). Decoding DATA alone
+# grants no mutation; it is not a toolchain allow-list (D1 default kept). AUTHORED_NOT_RUN.
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.contracts.container.linux_agent_workspace_profile_v1.linux_agent_workspace_absolute_v1
+use std.common.contracts.container.linux_fresh_workload_v2.linux_fresh_workload_registry_image_v2
+
+pub struct LinuxBuildWorkspaceProfileV1:
+    machine_policy_digest: text
+    workspace_profile_digest: text
+    image: text
+    image_config_id: text
+    launcher_program: text
+    producer_path: text
+    stdout_leaf: text
+    stderr_leaf: text
+    output_root: text
+    max_input_bytes: i64
+    max_output_bytes: i64
+    memory_minimum_bytes: i64
+    preparation_budget_ms: i64
+
+# One workspace-relative component: the retained-stage leaf alphabet [A-Za-z0-9._-], 1..128 bytes.
+# @allow(primitive_api) validity predicate over one text component; bool is the predicate result
+pub fn linux_build_workspace_component_v1(value: text) -> bool:
+    if value.byte_len() < 1 or value.byte_len() > 128 or value == "." or value == "..": return false
+    for byte in value.bytes():
+        if not ((byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or
+                (byte >= 97 and byte <= 122) or byte == 45 or byte == 95 or byte == 46): return false
+    true
+
+# A workspace-relative path: 1..16 components, no "", ".", "..", absolute or trailing slash.
+# @allow(primitive_api) validity predicate over a relative path; bool is the predicate result
+pub fn linux_build_workspace_relative_v1(value: text) -> bool:
+    if value.byte_len() < 1 or value.byte_len() > 1024: return false
+    val parts = value.split("/")
+    if parts.len() < 1 or parts.len() > 16: return false
+    for part in parts:
+        if not linux_build_workspace_component_v1(part): return false
+    true
+
+# True when `path` equals `root` or lies beneath it (component-wise).
+# @allow(primitive_api) containment predicate over two paths; bool is the predicate result
+pub fn linux_build_workspace_under_v1(path: text, root: text) -> bool:
+    path == root or path.starts_with(root + "/")
+
+fn build_profile_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key): return Err("build-profile-field:" + key)
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("build-profile-text:" + key)
+
+fn build_profile_int_v1(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    if not fields.contains_key(key): return Err("build-profile-field:" + key)
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("build-profile-number:" + key)
+
+pub fn linux_build_workspace_profile_validate_v1(value: LinuxBuildWorkspaceProfileV1) -> Result<(), text>:
+    if not builder_digest_valid_v1(value.machine_policy_digest) or not builder_digest_valid_v1(value.workspace_profile_digest):
+        return Err("build-profile-digest")
+    if value.image == "" or value.image.byte_len() > 512 or value.image.split("@sha256:").len() != 2:
+        return Err("build-profile-image")
+    linux_fresh_workload_registry_image_v2(value.image)?
+    if not builder_digest_valid_v1(value.image_config_id): return Err("build-profile-image-config")
+    if not linux_agent_workspace_absolute_v1(value.launcher_program): return Err("build-profile-launcher")
+    if not linux_build_workspace_relative_v1(value.producer_path) or not linux_build_workspace_relative_v1(value.output_root):
+        return Err("build-profile-path")
+    if (not linux_build_workspace_component_v1(value.stdout_leaf) or not linux_build_workspace_component_v1(value.stderr_leaf) or
+            value.stdout_leaf == value.stderr_leaf): return Err("build-profile-stream-leaf")
+    for reserved in [value.stdout_leaf, value.stderr_leaf]:
+        if linux_build_workspace_under_v1(reserved, value.output_root) or linux_build_workspace_under_v1(value.output_root, reserved) or
+                linux_build_workspace_under_v1(value.producer_path, reserved):
+            return Err("build-profile-reserved-path-overlap")
+    if linux_build_workspace_under_v1(value.producer_path, value.output_root): return Err("build-profile-producer-under-outputs")
+    if (value.max_input_bytes < 1 or value.max_input_bytes > 1099511627776 or
+            value.max_output_bytes < 1 or value.max_output_bytes > 1099511627776 or
+            value.memory_minimum_bytes < 1 or value.memory_minimum_bytes > 1125899906842624 or
+            value.preparation_budget_ms < 1 or value.preparation_budget_ms > 86400000):
+        return Err("build-profile-bounds")
+    Ok(())
+
+pub fn linux_build_workspace_profile_encode_v1(value: LinuxBuildWorkspaceProfileV1) -> Result<text, text>:
+    linux_build_workspace_profile_validate_v1(value)?
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-build-workspace-profile"), "version": SdnValue.Int(1),
+        "machinePolicyDigest": SdnValue.String(value.machine_policy_digest),
+        "workspaceProfileDigest": SdnValue.String(value.workspace_profile_digest),
+        "image": SdnValue.String(value.image), "imageConfigId": SdnValue.String(value.image_config_id),
+        "launcherProgram": SdnValue.String(value.launcher_program), "producerPath": SdnValue.String(value.producer_path),
+        "stdoutLeaf": SdnValue.String(value.stdout_leaf), "stderrLeaf": SdnValue.String(value.stderr_leaf),
+        "outputRoot": SdnValue.String(value.output_root), "maxInputBytes": SdnValue.Int(value.max_input_bytes),
+        "maxOutputBytes": SdnValue.Int(value.max_output_bytes), "memoryMinimumBytes": SdnValue.Int(value.memory_minimum_bytes),
+        "preparationBudgetMs": SdnValue.Int(value.preparation_budget_ms)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn linux_build_workspace_profile_decode_v1(source: text) -> Result<LinuxBuildWorkspaceProfileV1, text>:
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 16384,
+            max_depth: 2, max_nodes: 40, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value
+        case Err(_): return Err("build-profile-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("build-profile-object")
+    if fields.len() != 15 or not fields.contains_key("kind") or not fields.contains_key("version"): return Err("build-profile-fields")
+    if fields["kind"] != SdnValue.String("linux-build-workspace-profile") or fields["version"] != SdnValue.Int(1):
+        return Err("build-profile-kind-version")
+    val value = LinuxBuildWorkspaceProfileV1(
+        machine_policy_digest: build_profile_text_v1(fields, "machinePolicyDigest")?,
+        workspace_profile_digest: build_profile_text_v1(fields, "workspaceProfileDigest")?,
+        image: build_profile_text_v1(fields, "image")?, image_config_id: build_profile_text_v1(fields, "imageConfigId")?,
+        launcher_program: build_profile_text_v1(fields, "launcherProgram")?, producer_path: build_profile_text_v1(fields, "producerPath")?,
+        stdout_leaf: build_profile_text_v1(fields, "stdoutLeaf")?, stderr_leaf: build_profile_text_v1(fields, "stderrLeaf")?,
+        output_root: build_profile_text_v1(fields, "outputRoot")?, max_input_bytes: build_profile_int_v1(fields, "maxInputBytes")?,
+        max_output_bytes: build_profile_int_v1(fields, "maxOutputBytes")?,
+        memory_minimum_bytes: build_profile_int_v1(fields, "memoryMinimumBytes")?,
+        preparation_budget_ms: build_profile_int_v1(fields, "preparationBudgetMs")?)
+    if linux_build_workspace_profile_encode_v1(value)? != source: return Err("build-profile-noncanonical")
+    Ok(value)

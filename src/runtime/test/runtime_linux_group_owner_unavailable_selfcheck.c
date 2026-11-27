@@ -54,7 +54,51 @@ const uint8_t *rt_string_data(int64_t value) { (void)value; return NULL; }
 
 #include "../runtime_linux_group_owner_impl.h"
 
-int main(void) {
+/* A malformed observation must never become a tree-empty proof. These
+ * regular-file fixtures test decoding only, not kernel containment. */
+static void check_population_observation(void) {
+    char directory[] = "/tmp/simple-group-events-XXXXXX";
+    assert(mkdtemp(directory));
+    int group = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    assert(group >= 0);
+    const char *events[] = {
+        "populated 0\nfrozen 0\n", "frozen 0\npopulated 1\n",
+        "populated 0junk\n", "populated 00\n", "populated 0",
+        "populated 0\npopulated 1\n", "populated 1\npopulated 0\n",
+        "notpopulated 0\n", "frozen 0\n", "populated 2\n",
+        "populated 0 \n", "populated 0\t\n", "populated -1\n",
+        "populated 0\ngarbage", "populated 0\nunknown 3\n",
+        "populated 0\npopulated\r1\n", "populated 0\nfrozen 0\nfrozen 1\n"
+    };
+    for (size_t i = 0; i < sizeof(events) / sizeof(events[0]); i++) {
+        int fd = openat(group, "cgroup.events", O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        assert(fd >= 0);
+        assert(write(fd, events[i], strlen(events[i])) == (ssize_t)strlen(events[i]));
+        assert(close(fd) == 0);
+        int populated = 1;
+        errno = 0;
+        int valid = rt_lg_populated(group, &populated);
+        if (i < 2) { assert(valid); assert(populated == (int)i); }
+        else { assert(!valid); assert(populated == 1); assert(errno == EPROTO); }
+    }
+    const char hidden[] = "populated 0\n\0populated 1\n";
+    int fd = openat(group, "cgroup.events", O_WRONLY | O_TRUNC);
+    assert(fd >= 0);
+    assert(write(fd, hidden, sizeof(hidden) - 1) == (ssize_t)sizeof(hidden) - 1);
+    assert(close(fd) == 0);
+    int populated = 1;
+    errno = 0;
+    assert(!rt_lg_populated(group, &populated));
+    assert(populated == 1 && errno == EPROTO);
+    assert(unlinkat(group, "cgroup.events", 0) == 0);
+    assert(close(group) == 0);
+    assert(rmdir(directory) == 0);
+    puts("runtime_linux_group_population_observation: PASS");
+}
+
+int main(int argc, char **argv) {
+    check_population_observation();
+    if (argc == 2 && strcmp(argv[1], "--population-only") == 0) return 0;
 #ifdef RT_LINUX_GROUP_TEST_OPENSSL
     int image = open("/bin/true", O_RDONLY);
     assert(image >= 0);

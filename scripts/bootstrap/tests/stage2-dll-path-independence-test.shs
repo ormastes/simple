@@ -1,0 +1,111 @@
+#!/bin/sh
+# Reproduce the Windows stage-compiler libLLVM PATH clash, bundle the admitted
+# runtime DLL closure, and verify the candidate starts under the conflicting
+# PATH with SIMPLE_PROJECT_ROOT set.
+set -eu
+
+if [ "$#" -ne 1 ]; then
+    echo "usage: $0 <stage2-or-stage3.exe>" >&2
+    exit 2
+fi
+source_exe=$1
+[ -f "$source_exe" ] || { echo "ERROR: missing executable: $source_exe" >&2; exit 2; }
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+lm=${SIMPLE_LLVM_MINGW_ROOT:-C:/Users/user/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64}
+lm_bin=$(cygpath -u "$lm/bin" 2>/dev/null || echo "$lm/bin")
+dll_dir=${P3_RUNTIME_DLL_DIR:-C:/msys64/clang64/bin}
+dll_bin=$(cygpath -u "$dll_dir" 2>/dev/null || echo "$dll_dir")
+[ -f "$lm_bin/libLLVM-23.dll" ] || {
+    echo "ERROR: conflicting llvm-mingw libLLVM-23.dll missing: $lm_bin" >&2; exit 2;
+}
+objdump="$lm_bin/llvm-objdump.exe"
+[ -f "$objdump" ] || objdump=$(PATH="$lm_bin:$PATH" command -v llvm-objdump 2>/dev/null || true)
+[ -n "$objdump" ] || {
+    echo "ERROR: llvm-objdump is required" >&2; exit 2;
+}
+[ -f "$dll_dir/libLLVM-23.dll" ] || {
+    echo "ERROR: admitted libLLVM-23.dll missing: $dll_dir" >&2; exit 2;
+}
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/stage2-dll-path.XXXXXX") || exit 2
+case "$tmp" in /*/stage2-dll-path.*) ;; *) echo "ERROR: unsafe temp path: $tmp" >&2; exit 2 ;; esac
+cleanup() { rm -rf -- "$tmp"; }
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+exe="$tmp/stage2.exe"
+cp "$source_exe" "$exe"
+bad_path="$lm_bin:$dll_bin:$PATH"
+
+# Prove the selected llvm-mingw DLL is actually incompatible with this stage
+# executable, rather than accepting an unrelated failure as the negative case.
+"$objdump" -p "$exe" | awk '/DLL Name:/{f=($3=="libLLVM-23.dll");next} f&&$1~/^[0-9]+$/&&NF==2{print $2}' | sort -u > "$tmp/imports"
+"$objdump" -p "$lm_bin/libLLVM-23.dll" | awk '/^Export Table:/{f=1;next} f&&NF>=3&&$1~/^[0-9]+$/{print $3}' | sort -u > "$tmp/conflict-exports"
+[ -s "$tmp/imports" ] || { echo "ERROR: candidate imports no libLLVM-23.dll symbols" >&2; exit 2; }
+comm -23 "$tmp/imports" "$tmp/conflict-exports" > "$tmp/missing"
+[ -s "$tmp/missing" ] || { echo "ERROR: llvm-mingw DLL satisfies every candidate import" >&2; exit 2; }
+echo "conflicting DLL lacks $(wc -l < "$tmp/missing" | tr -d ' ') imported symbol(s)"
+
+set +e
+admitted_output=$(PATH="$dll_bin:$lm_bin:$PATH" SIMPLE_PROJECT_ROOT="$repo_root" \
+    timeout 60 "$exe" --help 2>&1)
+admitted_rc=$?
+set -e
+[ "$admitted_rc" -eq 0 ] && [ -n "$admitted_output" ] || {
+    echo "ERROR: candidate did not start with the admitted runtime DLL first (rc=$admitted_rc)" >&2
+    printf '%s\n' "$admitted_output" | head -n 5 >&2
+    exit 2
+}
+
+# Refuse to touch an existing runtime DLL with different bytes. The bundler
+# must leave every destination file unchanged when preflight detects conflict.
+conflict_dir="$tmp/conflict"
+mkdir -p "$conflict_dir"
+conflict_exe="$conflict_dir/stage2.exe"
+cp "$source_exe" "$conflict_exe"
+printf '%s\n' 'preserve-existing-runtime' > "$conflict_dir/libLLVM-23.dll"
+set +e
+PATH="$lm_bin:$PATH" sh "$repo_root/scripts/setup/bundle-llvm-runtime-dlls.shs" \
+    "$conflict_exe" "$dll_dir" > "$tmp/conflict.log" 2>&1
+conflict_rc=$?
+set -e
+[ "$conflict_rc" -ne 0 ] &&
+    grep -Fq 'refusing to overwrite different runtime DLL' "$tmp/conflict.log" &&
+    grep -Fxq 'preserve-existing-runtime' "$conflict_dir/libLLVM-23.dll" &&
+    [ ! -f "$conflict_dir/libunwind.dll" ] || {
+        echo "FAIL: conflicting DLL preflight modified the destination" >&2
+        cat "$tmp/conflict.log" >&2
+        exit 1
+    }
+
+# The unbundled copy is the negative control: the partial llvm-mingw DLL is
+# found first and the Windows loader must reject the executable before main.
+set +e
+unbundled_output=$(PATH="$bad_path" SIMPLE_PROJECT_ROOT="$repo_root" \
+    timeout 60 "$exe" --help 2>&1)
+unbundled_rc=$?
+set -e
+[ "$unbundled_rc" -ne 0 ] || {
+    echo "FAIL: unbundled candidate unexpectedly ran with llvm-mingw first" >&2
+    exit 1
+}
+[ "$unbundled_rc" -eq 127 ] && [ -z "$unbundled_output" ] || {
+    echo "FAIL: expected silent loader status 127, got rc=$unbundled_rc" >&2
+    printf '%s\n' "$unbundled_output" | head -n 5 >&2
+    exit 1
+}
+echo 'negative control: unbundled candidate failed silently with loader status 127'
+
+PATH="$lm_bin:$PATH" sh "$repo_root/scripts/setup/bundle-llvm-runtime-dlls.shs" \
+    "$exe" "$dll_dir"
+set +e
+bundled_output=$(PATH="$bad_path" SIMPLE_PROJECT_ROOT="$repo_root" \
+    timeout 60 "$exe" --help 2>&1)
+bundled_rc=$?
+set -e
+[ "$bundled_rc" -eq 0 ] && [ -n "$bundled_output" ] || {
+    echo "FAIL: bundled candidate did not start under conflicting PATH (rc=$bundled_rc)" >&2
+    printf '%s\n' "$bundled_output" | head -n 5 >&2
+    exit 1
+}
+printf '%s\n' 'PASS: stage compiler starts with llvm-mingw first and SIMPLE_PROJECT_ROOT set'

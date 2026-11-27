@@ -1,0 +1,43 @@
+use std.spec.*
+use std.nogc_sync_mut.io.windows_service_logon_namespace_contract_v1.{windows_service_namespace_root_shape_v1,
+    windows_service_namespace_fixed_target_v1, windows_service_namespace_mutation_mask_v1,
+    windows_service_namespace_service_fields_v1}
+
+describe "Windows service-only namespace production shape rules":
+    it "admits only the strict existing store native root spelling":
+        step("Use the production candidate shape helper without claiming native authority")
+        expect(windows_service_namespace_root_shape_v1("\\GLOBAL??\\c:\\ProgramData\\Simple").unwrap()).to_equal("C:\\ProgramData\\Simple")
+        for root in ["C:\\ProgramData", "\\??\\C:\\ProgramData", "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\Simple",
+                "\\GLOBAL??\\C:/ProgramData", "\\GLOBAL??\\C:\\..\\Simple", "\\GLOBAL??\\C:\\Simple:stream",
+                "\\GLOBAL??\\C:\\Simple\\", "\\GLOBAL??\\C:\\NUL", "\\GLOBAL??\\C:\\Simple\0bad"]:
+            expect(windows_service_namespace_root_shape_v1(root).is_err()).to_equal(true)
+
+    it "preserves a Unicode store suffix as data without namespace normalization":
+        step("Preserve the store suffix while canonicalizing only ASCII drive case")
+        expect(windows_service_namespace_root_shape_v1("\\GLOBAL??\\D:\\Simple\\키").unwrap()).to_equal("D:\\Simple\\키")
+
+    it "accepts direct local volume roots and rejects every suffix or alternate target":
+        step("Apply the same direct-volume target predicate as the actual link query")
+        expect(windows_service_namespace_fixed_target_v1("\\Device\\HarddiskVolume12")).to_equal(true)
+        for target in ["\\Device\\HarddiskVolume", "\\Device\\HarddiskVolume12\\", "\\Device\\HarddiskVolume12\\SUBST",
+                "\\Device\\Mup\\server", "\\??\\C:", "\\Device\\HarddiskVolume12\0"]:
+            expect(windows_service_namespace_fixed_target_v1(target)).to_equal(false)
+
+    it "recognizes only actual Service logon with all identity correlations":
+        step("Check every field correlation required by the production LSA observation")
+        expect(windows_service_namespace_service_fields_v1(5, true, true, true)).to_equal(true)
+        for kind in [0, 2, 3, 4, 7, 9, 10, 11]:
+            expect(windows_service_namespace_service_fields_v1(kind, true, true, true)).to_equal(false)
+        expect(windows_service_namespace_service_fields_v1(5, false, true, true)).to_equal(false)
+        expect(windows_service_namespace_service_fields_v1(5, true, false, true)).to_equal(false)
+        expect(windows_service_namespace_service_fields_v1(5, true, true, false)).to_equal(false)
+
+    it "permits unrelated read control but rejects unrelated mutation rights":
+        step("Exercise the exact production namespace mutation masks")
+        val directory = windows_service_namespace_mutation_mask_v1(false)
+        val link = windows_service_namespace_mutation_mask_v1(true)
+        expect((directory & 131075u32) == 0u32).to_equal(true)
+        expect((link & 131073u32) == 0u32).to_equal(true)
+        for mask in [4u32, 8u32, 65536u32, 262144u32, 524288u32, 33554432u32, 268435456u32, 1073741824u32]:
+            expect((directory & mask) != 0u32).to_equal(true)
+        expect((link & 2u32) != 0u32).to_equal(true)

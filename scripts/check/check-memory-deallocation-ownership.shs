@@ -1,8 +1,14 @@
 #!/bin/sh
-set -eu
+# Verdict convention (repo guard standard), last line of stdout:
+#   PASS — <n> ownership invariant(s) checked ...        (exit 0)
+#   FAIL — <what broke>                                  (exit 1)
+#   ERROR — nothing was checked (<reason>)               (exit 2)
+# An unreadable authority/owner file is an incomplete scan (ERROR), never a
+# pass and never a silent mute.
+set -u
 
 fail() {
-    echo "memory deallocation ownership: FAIL: $*" >&2
+    echo "FAIL — $*"
     exit 1
 }
 
@@ -123,25 +129,37 @@ selftest() {
 }
 
 if [ "${1:-}" = '--selftest' ]; then
-    selftest
-    exit $?
+    if selftest; then
+        echo 'PASS — selftest fixtures checked (clean rejected, retired spellings detected across spl/rs/c, missing authority is unreadable)'
+        exit 0
+    fi
+    echo 'FAIL — selftest failed (details above)'
+    exit 1
 fi
 
+checks=0
 for mode in gc_async_mut nogc_async_mut nogc_sync_mut; do
     allocator="$root/src/lib/$mode/allocator.spl"
     gc="$root/src/lib/$mode/gc.spl"
 
+    checks=$((checks+1))
     require_ordered_arena_release "$allocator" || \
         fail "$mode arena release must free once, then clear buffer/capacity/cursor/accounting in order"
 
+    checks=$((checks+1))
     grep -q 'if not self.objects.?:' "$gc" || fail "$mode GC does not detect an empty heap"
+    checks=$((checks+1))
     grep -q 'self.young_alloc.release()' "$gc" || fail "$mode empty-heap sweep does not release its arena"
+    checks=$((checks+1))
     grep -q 'if self.young_alloc.capacity == 0:' "$gc" || fail "$mode GC does not lazily restore a released arena"
 done
 
 # Adjacent explicit allocation families must retain their shared native owner.
+checks=$((checks+1))
 grep -q 'void rt_free(uint8_t\* ptr)' "$root/src/runtime/runtime_memory.c" || fail 'hosted runtime lacks rt_free'
+checks=$((checks+1))
 grep -q 'free(ptr);' "$root/src/runtime/runtime_memory.c" || fail 'hosted rt_free does not reach libc free'
+checks=$((checks+1))
 grep -q 'void spl_free(void\* ptr)' "$root/src/runtime/runtime.c" || fail 'runtime allocator owner is missing'
 
 # Fail closed if a declaration, wrapper, registry entry, interpreter provider,
@@ -157,11 +175,15 @@ for authority in \
     "$root/src/runtime" \
     "$root/src/compiler_rust/runtime/src"
 do
+    checks=$((checks+1))
     if scan_retired_runtime_value_api "$authority"; then
         fail "retired generic GC/value-free producer resurrected under ${authority#"$root"/}"
     else
         status=$?
-        [ "$status" -eq 1 ] || fail "could not completely read retired-API authority ${authority#"$root"/}"
+        if [ "$status" -ne 1 ]; then
+            echo "ERROR — nothing was checked (could not completely read retired-API authority ${authority#"$root"/})"
+            exit 2
+        fi
     fi
 done
 
@@ -173,16 +195,26 @@ c_owner="$root/src/runtime/runtime_native.c"
 c_tests="$root/src/runtime/test"
 rust_owner="$root/src/compiler_rust/runtime/src/value/collections.rs"
 
+checks=$((checks+1))
 grep -q 'This runtime has no refcounting and RuntimeValue is Copy' "$c_owner" || fail 'C string owner no longer states the no-refcount invariant'
+checks=$((checks+1))
 grep -q 'if (!rt_core_unregister_string(s)) return 0;' "$c_owner" || fail 'C string free no longer refuses foreign or already-freed values'
+checks=$((checks+1))
 grep -q 'RT_CORE_STRING_FLAG_SHARED) return 0;' "$c_owner" || fail 'C string free no longer refuses shared values'
+checks=$((checks+1))
 grep -q 'rt_string_free(int64_t value)' "$c_owner" || fail 'C string owner is missing'
+checks=$((checks+1))
 grep -q 'rt_array_free_deep(int64_t value)' "$c_owner" || fail 'C deep-array owner is missing'
+checks=$((checks+1))
 grep -E -q 'rt_string_free\([^)]*\)[[:space:]]*==[[:space:]]*0' "$c_tests/rt_string_free_selfcheck.c" || fail 'C string refusal assertion is missing'
 
+checks=$((checks+1))
 grep -q 'no refcounting' "$rust_owner" || fail 'Rust owner no longer states the no-refcount invariant'
+checks=$((checks+1))
 grep -q 'if !unregister_heap_ptr_checked(ptr as \*mut HeapHeader)' "$rust_owner" || fail 'Rust string free no longer refuses foreign or already-freed values'
+checks=$((checks+1))
 grep -q 'RT_STRING_FLAG_SHARED) != 0' "$rust_owner" || fail 'Rust string free no longer refuses shared values'
+checks=$((checks+1))
 grep -F -q 'assert_eq!(rt_string_free(s), 0, "double free refused")' "$rust_owner" || fail 'Rust string double-free refusal assertion is missing'
 
-echo 'memory deallocation ownership: PASS'
+echo "PASS — $checks ownership invariant(s) checked (arena release order, empty-heap GC sweep, hosted rt_free/spl_free owners, retired-API authority scans, native-provider no-refcount invariants)"

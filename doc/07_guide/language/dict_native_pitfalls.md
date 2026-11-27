@@ -19,8 +19,8 @@
 > `.len()`, `expr_dispatch.spl` for `.get()`), not the C runtime — the
 > underlying `rt_dict_len`/`rt_dict_get` runtime entry points were already
 > correct; the bug was in the MIR lowering's receiver-type routing that fed
-> them. **The `f64`-value `.get()` miss gap and the class-field `d[k]`
-> bracket-read array-value segfault (see Truth table below) remain open** —
+> them. **The class-field `d[k]`
+> bracket-read array-value segfault (see Truth table below) remains open** (the `f64` miss gap was fixed in the seed 2026-08-18) —
 > only the two headline defects named in this doc's title are resolved.
 
 Two native-codegen defects **used to** make common `Dict` operations silently
@@ -29,7 +29,7 @@ Historically they were **native-only** — the interpreter and the Rust seed
 both behaved correctly, so a seed build or an interpreter-mode test run
 **could not** catch either bug; only a native build/run exercised the broken
 paths. The truth table below still lists the OTHER, still-open native-only
-gaps (`f64`-miss, class-field array bracket-read) for which that caveat still
+gap (class-field array bracket-read) for which that caveat still
 applies — treat "seed-build verified" or "interpreter test green" as no
 signal for those remaining rows.
 
@@ -170,7 +170,7 @@ exposure — always also search for `: {`-style dict declarations.
 | `d.len()` / `d.length()` | correct count since 2026-08-01 (measured: local **and** function parameter). The old **-1** does not reproduce; struct-field receivers remain unmeasured | yes for locals/params |
 | `d.get(k)` — miss, `V` = `i64` / `bool` | correct `nil` since 2026-08-01 — `== nil` true, `?? default` fires | yes |
 | `d.get(k)` — miss, `V` = `text` | correct `nil` — re-verified 2026-08-07 on current source (see re-verification note above); the row title below was stale | yes |
-| `d.get(k)` — miss, `V` = `f64` | **REPRODUCES — measured 2026-08-17, no longer unverified.** A miss decodes to `0.0` with `== nil` false and `??` not firing; **and, in the opposite direction, a STORED `3.0` is reported as nil** (`== nil` true, `??` fires). `d[k]` returns `3.0` correctly, so the value is stored fine and only `.get()`'s nil guard is broken. Measured interpreter-vs-Cranelift-JIT on the seed with a confirmed `[jit-addr]` engine witness. This is exactly the `emit_cast(3 → f64) == 3.0` landmine predicted in the note above — so a fix needs a **bitcast**, not just adding f64 to `guardable_value_type`. Standing guard: `scripts/check/check-dict-engine-differential.shs` (case `text_f64_local`). Record: `doc/08_tracking/bug/native_dict_f64_get_nil_sentinel_collides_with_stored_3_2026-08-17.md` | **NO** |
+| `d.get(k)` — miss, `V` = `f64` | **FIXED in the seed (2026-08-18)** by the float-vs-nil arm in `src/compiler_rust/compiler/src/mir/lower/lowering_expr_ops.rs` (compares against the f64 whose BITS are the nil word, not numeric 3.0). Re-verified 2026-11-03 on the deployed seed: probe `PROBE F64MISS: true` under both `interpret` and `jit`; canary `test/01_unit/compiler/dict_get_miss_returns_nil_spec.spl` 14/14. The pure-Simple MIR path (`expr_dispatch.spl` `guardable_value_type`) still excludes F64 and is unverified until a self-hosted binary runs the probe. Record: `doc/08_tracking/bug/native_dict_f64_get_nil_sentinel_collides_with_stored_3_2026-08-17.md` | **YES** (seed JIT) |
 | `d.get(k)` — hit, `V` = `bool`, value `true` | correct since 2026-08-01 (`.get()` on a bool dict now returns the raw 3-state word) | yes |
 | `d.get(k)` — hit, `V` = `i64` / `text` | correct since `7e83e92ce314` (was `7`→`56`) | yes |
 | `d.get(k)` — hit, `V` = struct/class/enum | correct since `7e83e92ce314` (was a segfaulting corrupt `Option`) | yes |
@@ -180,6 +180,24 @@ exposure — always also search for `: {`-style dict declarations.
 | `d.keys()` | correct | yes |
 | `d[k]` indexed read — hit | correct | yes |
 | `Some(d[k])` manual wrap | correct — round-trips through `.unwrap()` and `Option`-typed params | yes |
+| `K` = tuple `(a, b)` | **silent miss** — tuples are headerless `rt_alloc` blocks, compared by address (measured `t1 -1`, `t2 false` on Rust and C runtimes; Stage 2 core-c-bootstrap: every row of `test/fixtures/native_tuple_keyed_dict/main.spl` misses) | **NO** |
+| `K` = array `[T]` | C runtime: value-keyed since `work/native-tuple-keyed-dict-20261115` (`rt_core_dict_hash` hashes registered arrays/runtime tuples structurally, matching the structural equality it already used; was a silent miss, overwrite added a second entry). `[1, 2]` and a runtime tuple `(1, 2)` are ONE key. **Mutating an array after using it as a key strands the entry** (still counted by `len()`, found by neither the mutated array nor a fresh equal one) — same as the Rust runtime's value hash | yes, never mutate a key |
+| `K` = single-field i64/u64 struct (`SymbolId`) — get / set / `.set` / literal / contains / remove / len, `keys()`, `for k in d`, `items()` | value-keyed since `work/native-struct-keyed-dict-20261115`: the key word is the boxed field; key-out paths rebuild the struct. Before: a headerless `rt_alloc` block compared by ADDRESS in both runtimes — an equal key built elsewhere, a param value-copy or a loop-var copy missed (nil → SIGSEGV, Stage 3 `forward_join_points_for_module_v1`). Oracle `test/fixtures/native_struct_keyed_dict/main.spl` | yes (after a Stage 2 built from that branch) |
+| key held in an Optional local `S?` (`S` a single-field i64/u64 struct): the generated `hir_codec.spl` does `var dk6: SymbolId? = nil` then `f_functions[dk6] = ..` | since 2026-11-16, unwrapped and keyed by the field like a plain `S`. `rt_is_some` runs first and a None key panics; `rt_unwrap_or_self` reads the payload on both Option lanes. Before: keyed by the Option word, and the `keys()` rebuild read that pointer as the id field. Measured native `a -1 -1 3 / b 588132720154563`, seed `a 70 71 3 / b 24`. Oracle rows `ab`..`af`. Limits: the unwrap is decided by the key local's type alone. On a dict DECLARED `Dict<S?, _>`, a key is field-keyed but `keys()` does not rebuild it (0 such dicts in `src/` on 2026-11-16). A non-word `Pair?` key is refused with `E-MIR-STRUCT-DICT-KEY`, like a plain `Pair`. Before that it was keyed by its pointer, silently; 0 such key sites in `src/` on 2026-11-16 | yes (after a Stage 2 built from that branch) |
+| `K` = any other struct (multi-field, nested, non-integer field) | **compile error** `struct type 'X' is not supported as a native dict key` (was a silent address-compared miss, measured `o1 -1` for a nested key) | key by a word field instead |
+| `K` = a type parameter (`Dict<K, _>` in a generic fn or class) meeting a value-keyed struct: a generic call binding `K`, a struct key on a `Dict<K, _>` field, a generic class with a `Dict<K, _>` field instantiated with that struct (parameter, return, method receiver) | **compile error** `E-MIR-STRUCT-DICT-KEY` — a generic is ONE erased body that keys by the raw word, so it would disagree with concrete code that keys by the field (a miss, or field words handed back as struct pointers). A `Dict<T, _>` that stays inside the generic body is legal and consistently address-keyed: equal structs built separately do NOT collide there | key by the word field, or keep the dict out of generic signatures |
+| `K` = tuple `(a, b)` with a struct element | **silent miss** — tuples are headerless `rt_alloc` blocks too, compared by address (measured `t1 -1`, `t2 false` on Rust and C runtimes). A struct element inside a tuple key is not refused either. Live at `TraitSolver.cache`/`active`: `doc/08_tracking/bug/native_dict_tuple_key_struct_element_address_compared_2026-11-16.md` | **NO** |
+| `K` = enum, with or without payload | correct — registered runtime enum, value-compared (measured on Rust and C runtimes) | yes |
+
+> **Struct canonicalization is KEY-site only (2026-11-16).** It lives in
+> `box_dict_key_v1` (`expr_dispatch.spl`), called by `lower_dict_key` and the
+> `rt_dict_contains` key argument. `box_runtime_dictionary_key_v1` stays
+> struct-agnostic because the `Any`/`T` call-argument boxer from
+> `work/transient-promote-dangle-20261116` reuses it. In the integ5 merge,
+> canonicalizing there refused `gen_opt<T>(v: T)` given a multi-field `F` (the
+> dict VALUE in `test/fixtures/native_option_none_equality`). It would also
+> have silently passed a `SymbolId` to a generic `T` as its field word. Spec:
+> `struct_keyed_dict_key_lowering_spec.spl` "struct values are not dict keys".
 
 > **CHANGED 2026-07-28 — the MISS row was previously WRONG.** This table used to say
 > `d.get(k)` on a miss was "correct, `nil`". It is not: a miss returns the **zero value**

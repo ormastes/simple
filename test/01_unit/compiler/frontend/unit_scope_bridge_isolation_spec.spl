@@ -1,0 +1,50 @@
+# The interpreter's `use unit` scope (set at interpret time, checked at eval
+# time) must survive an in-run call into the compiled-path bridge
+# (parse_and_build_module), which resets the shared scope for its own file.
+# Runtime: src/compiler/10.frontend/core/unit_scope.spl,
+# src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl.
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_write}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.core.unit_scope.{unit_library_set_base, unit_scope_reset, unit_scope_record_use, unit_suffix_scope_error}
+use compiler.core.types.{unit_decl_register_origin, unit_decl_count, unit_decl_name_at}
+
+val FIXTURE_ROOT: text = "build/tmp/unit_scope_bridge_isolation_spec/unit"
+
+fn setup_fixture():
+    file_write(FIXTURE_ROOT + "/simple-lang/velocity/kmph.spl", "# fixture\n")
+    file_write(FIXTURE_ROOT + "/simple-lang/velocity/__init__.spl", "# fixture\n")
+    unit_library_set_base(FIXTURE_ROOT)
+
+describe "unit scope isolation across the flat AST bridge":
+    it "keeps the interpreter's use-unit scope after parse_and_build_module":
+        setup_fixture()
+        # Interpreter run: `use unit.velocity.{kmph}` recorded at interpret time.
+        unit_scope_reset()
+        unit_scope_record_use("unit.velocity", ["kmph"])
+        expect(unit_suffix_scope_error("kmph")).to_equal("")
+        # Script calls the bridge on another source with no unit import.
+        val _m = parse_and_build_module("val x = 1\n", "unit_scope_bridge_isolation_other.spl")
+        val after = unit_suffix_scope_error("kmph")
+        unit_library_set_base("")
+        expect(after).to_equal("")
+
+    it "keeps a script-local unit declaration after parse_and_build_module":
+        setup_fixture()
+        # Interpreter run: `unit Speed: f64 as kmph` registered in the shared
+        # unit decl pool after the scope reset, with no `use unit` import.
+        unit_scope_reset()
+        val base = unit_decl_count()
+        val _idx = unit_decl_register_origin("Speed", "nominal", "kmph", 0, "", "")
+        expect(unit_decl_count()).to_equal(base + 1)
+        expect(unit_suffix_scope_error("kmph")).to_equal("")
+        # The bridge resets every flat pool (reset_all_pools) for its own file;
+        # the script's declaration must come back with the scope.
+        val _m = parse_and_build_module("val x = 1\n", "unit_scope_bridge_isolation_other2.spl")
+        val after = unit_suffix_scope_error("kmph")
+        val count_after = unit_decl_count()
+        val name_after = if count_after > base: unit_decl_name_at(base) else: ""
+        unit_library_set_base("")
+        expect(count_after).to_equal(base + 1)
+        expect(name_after).to_equal("Speed")
+        expect(after).to_equal("")

@@ -11,6 +11,7 @@
 # ============================================================================
 
 extern fn rt_text_to_bytes(s: text) -> [u8]
+use compiler.driver.smf_writer.{serialize_smf_dependencies, SmfDependencyEntry}
 
 struct MockDep:
     module_path: text
@@ -170,6 +171,25 @@ describe "SMF dependency serialization":
         val data: [u8] = [1, 0, 0]  # Less than 4 bytes
         val parsed = mock_deserialize(data)
         expect(parsed.len()).to_equal(0)
+
+    it "production serializer appends per-entry records with the reference bytes":
+        # Bug: doc/08_tracking/bug/smf_package_quadratic_assembly_oom_2026-11-18.md
+        var mock_deps: [MockDep] = []
+        var deps: [SmfDependencyEntry] = []
+        var i = 0
+        while i < 40:
+            val path = "src/pkg/module_{i}.spl"
+            mock_deps.push(MockDep(module_path: path, interface_hash: 1000003 * i + 7))
+            deps.push(SmfDependencyEntry(module_path: path, content_hash: 1000003 * i + 7))
+            i = i + 1
+        val data = serialize_smf_dependencies(deps)
+        # production = magic "DFMS" + version 1, then the count + entries the mock writes
+        var expected: [u8] = [68, 70, 77, 83, 1, 0, 0, 0]
+        for b in mock_serialize(mock_deps):
+            expected.push(b)
+        expect(data.len()).to_equal(1322)
+        expect(data).to_equal(expected)
+        expect(serialize_smf_dependencies([]).len()).to_equal(12)
 
 describe "SMF dependency validation":
     it "returns FRESH when all hashes match":

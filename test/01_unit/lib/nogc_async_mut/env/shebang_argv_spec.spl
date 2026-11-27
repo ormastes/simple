@@ -1,0 +1,31 @@
+# process_run_script must deliver every argument byte-for-byte to a shebang
+# script. On Windows the script runs under an MSYS/Cygwin sh, whose argv parser
+# does not read the MS-CRT quoting the host uses to build the command line.
+
+use std.nogc_async_mut.env.shebang.{process_run_script}
+
+val ECHO_SCRIPT = "test/fixtures/env/shebang_argv_echo.shs"
+
+fn echoed(args: [text]) -> text:
+    val result = process_run_script(ECHO_SCRIPT, args)
+    expect(result.2).to_equal(0)
+    result.0 ?? ""
+
+describe "process_run_script argument transport":
+    it "keeps a JSON argument with double quotes intact":
+        expect(echoed(["{\"type\":\"object\"}", "next"])).to_equal("<{\"type\":\"object\"}>\n<next>\n")
+
+    it "does not let an embedded double quote swallow later arguments":
+        expect(echoed(["c\"d", "a b", "z"])).to_equal("<c\"d>\n<a b>\n<z>\n")
+
+    it "keeps backslashes in an argument that also has a space":
+        expect(echoed(["C:\\Program Files\\y", "z"])).to_equal("<C:\\Program Files\\y>\n<z>\n")
+
+    it "keeps backslash runs before a double quote and at the end":
+        expect(echoed(["e\\\"f", "g\\\\h", "tail\\"])).to_equal("<e\\\"f>\n<g\\\\h>\n<tail\\>\n")
+
+    it "keeps single quotes and shell metacharacters literal":
+        expect(echoed(["it's", "$HOME `y` ;&|", "*.md"])).to_equal("<it's>\n<$HOME `y` ;&|>\n<*.md>\n")
+
+    it "keeps newlines and empty arguments":
+        expect(echoed(["l1\nl2", "", "z"])).to_equal("<l1\nl2>\n<>\n<z>\n")

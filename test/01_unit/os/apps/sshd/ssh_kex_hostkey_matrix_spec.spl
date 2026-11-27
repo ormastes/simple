@@ -47,6 +47,8 @@ use os.apps.sshd.ssh_packet.{ssh_get_string, ssh_get_text, ssh_get_u32, SshStrin
 use os.apps.sshd.ssh_transport.{ssh_parse_kexinit}
 use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_verify}
 use os.crypto.ecdsa_p256.{ssh_mpint_pair_to_fixed64}
+use os.crypto.ed25519.{ed25519_keypair_from_seed}
+use std.spec.step
 
 extern fn rt_text_to_bytes(s: text) -> [u8]
 
@@ -318,6 +320,41 @@ describe "ssh-ed25519 host key signing":
         expect(hash_1 == hash_2).to_equal(false)
         expect(ed25519_verify(pubkey, hash_1, sig)).to_equal(true)
         expect(ed25519_verify(pubkey, hash_2, sig)).to_equal(false)
+
+    it "rt_ed25519_verify rejects tampered exchange_hash":
+        # @req: REQ-TEST-SSHD_SSH_KEX_HOSTKEY_MATRIX-001
+        step("Verify: rt_ed25519_verify rejects tampered exchange_hash")
+        val seed = _ed25519_seed()
+        val pubkey = ed25519_keypair_from_seed(seed).1
+        val host_keys = HostKeySet(
+            ed25519_seed: seed,
+            rsa_pkcs8: nil,
+            rsa_public_blob: nil,
+            ecdsa_p256_pkcs8: nil
+        )
+        val hash = _test_exchange_hash()
+        val blob = ssh_sign_exchange_hash("ssh-ed25519", host_keys, hash).unwrap()
+        val raw_sig = _decode_sig_blob(blob).1
+        val tampered = _tampered_hash(hash)
+        val bad = rt_ed25519_verify(tampered, pubkey, raw_sig)
+        expect(bad).to_equal(0)  # oracle: expected value pinned by spec
+
+    it "Ed25519 signature round-trips through rt_ed25519_verify":
+        # @req: REQ-TEST-SSHD_SSH_KEX_HOSTKEY_MATRIX-001
+        step("Verify: Ed25519 signature round-trips through rt_ed25519_verify")
+        val seed = _ed25519_seed()
+        val pubkey = ed25519_keypair_from_seed(seed).1
+        val host_keys = HostKeySet(
+            ed25519_seed: seed,
+            rsa_pkcs8: nil,
+            rsa_public_blob: nil,
+            ecdsa_p256_pkcs8: nil
+        )
+        val hash = _test_exchange_hash()
+        val blob = ssh_sign_exchange_hash("ssh-ed25519", host_keys, hash).unwrap()
+        val raw_sig = _decode_sig_blob(blob).1
+        val ok = rt_ed25519_verify(hash, pubkey, raw_sig)
+        expect(ok).to_equal(1)  # oracle: expected value pinned by spec
 
 describe "host-key aware KEXINIT builder":
     it "round-trips an ed25519-only KEXINIT through the transport parser":

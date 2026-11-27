@@ -1,0 +1,60 @@
+# `--no-mangle` must emit the declared LEAF name, not `<module>.<leaf>`.
+#
+# Regression: the simple-core SimpleOS runtime archive built with
+# `native-build --no-mangle` exported every symbol module-qualified
+# (`runtime.simple_core.core_math.rt_math_sqrt`), so the roster gate in
+# scripts/check/check-simple-core-runtime-smoke.shs failed with
+# `missing_required_symbol:rt_string_replace` and no C caller could link.
+# Two layers were at fault:
+#   1. MIR (mir_provider_function_name_fields_v1) owner-qualifies every
+#      non-extern function name, for definitions AND call sites;
+#   2. MirToLlvm.llvm_function_symbol_name ran the runtime-owned
+#      `__simple_local_` rename BEFORE the no-mangle check, so even a bare
+#      `rt_*` definition would be renamed.
+# See doc/08_tracking/bug/no_mangle_emits_module_qualified_symbols_2026-11-16.md
+use std.spec
+use compiler.mir._MirLowering.provider_metadata.{mir_provider_callable_identity_for_mode,
+    mir_no_mangle_claim_leaf, mir_no_mangle_leaf_claims_reset}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+describe "no-mangle leaf symbol naming":
+    it "keeps the module-qualified identity when mangling":
+        expect(mir_provider_callable_identity_for_mode("runtime.simple_core.core_string", "rt_string_replace", false))
+            .to_equal("runtime.simple_core.core_string.rt_string_replace")
+
+    it "emits the declared leaf name under --no-mangle":
+        expect(mir_provider_callable_identity_for_mode("runtime.simple_core.core_string", "rt_string_replace", true))
+            .to_equal("rt_string_replace")
+
+    it "strips an already-present owner prefix exactly once under --no-mangle":
+        expect(mir_provider_callable_identity_for_mode("runtime.simple_core.core_math", "runtime.simple_core.core_math.rt_math_sqrt", true))
+            .to_equal("rt_math_sqrt")
+
+    it "keeps Type.method names intact under --no-mangle":
+        expect(mir_provider_callable_identity_for_mode("runtime.simple_core.core_string", "Pt::get", true))
+            .to_equal("Pt.get")
+        expect(mir_provider_callable_identity_for_mode("runtime.simple_core.core_string", "Pt::get", false))
+            .to_equal("runtime.simple_core.core_string.Pt.get")
+
+    it "fails closed when two modules export the same leaf":
+        mir_no_mangle_leaf_claims_reset()
+        expect(mir_no_mangle_claim_leaf("rt_probe_leaf", "pm.a")).to_equal("")
+        expect(mir_no_mangle_claim_leaf("rt_probe_leaf", "pm.a")).to_equal("")
+        val err = mir_no_mangle_claim_leaf("rt_probe_leaf", "pm.b")
+        expect(err.contains("rt_probe_leaf")).to_equal(true)
+        expect(err.contains("pm.a")).to_equal(true)
+        expect(err.contains("pm.b")).to_equal(true)
+        mir_no_mangle_leaf_claims_reset()
+
+    it "does not rename a runtime-owned rt_* definition under --no-mangle (LLVM)":
+        var translator = MirToLlvm.create("runtime.simple_core.core_array", CodegenTarget.X86_64, nil)
+        translator.no_mangle = true
+        expect(translator.llvm_function_symbol_name("rt_array_new")).to_equal("rt_array_new")
+        expect(translator.llvm_function_symbol_name("rt_string_replace")).to_equal("rt_string_replace")
+        expect(translator.llvm_function_symbol_name("Pt.get")).to_equal("Pt.get")
+
+    it "still privatizes a runtime-owned local definition when mangling (LLVM)":
+        var translator = MirToLlvm.create("app.demo", CodegenTarget.X86_64, nil)
+        translator.no_mangle = false
+        expect(translator.llvm_function_symbol_name("rt_array_new")).to_equal("__simple_local_rt_array_new")

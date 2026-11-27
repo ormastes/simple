@@ -1,0 +1,56 @@
+"""
+Source contract for the match-guard policy cached across HIR transient scopes.
+This checks escape ownership and cleanup ordering, not native reclamation.
+"""
+use std.spec
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+fn guard_owner_between(source: text, start: text, finish: text) -> text:
+    val start_at = source.find(start)
+    if start_at < 0: return ""
+    val tail = source[start_at:]
+    val finish_at = tail.find(finish)
+    if finish_at < 0: return ""
+    tail[:finish_at]
+
+describe "HIR match guard transient owner contract":
+    it "tracks the lazily cached level back to nonempty verifier configuration":
+        val match_source = file_read("src/compiler/20.hir/hir_lowering/_Expressions/match_desugaring.spl")
+        val build = guard_owner_between(match_source,
+            "    me build_match_expr(", "    me match_case_guard_count(")
+        expect(build).to_contain("if self.match_guard_level == \"\":")
+        expect(build).to_contain("self.match_guard_level = mir_verify_rule_level_from_spec(")
+        expect(build).to_contain("hir_type_env_get(\"SIMPLE_MIR_VERIFY_LEVELS\")")
+        val levels = file_read("src/compiler/50.mir/mir_verify_levels.spl")
+        # An explicit E-MIR-MATCH-GUARD=warning/error/off value is allocated
+        # through substring/lower and returned from the parsed level table.
+        expect(levels).to_contain("val value = entry.substring(eq + 1).trim().lower()")
+        expect(levels).to_contain("levels[named_keys[n]] = named_values[n]")
+        expect(levels).to_contain("mir_verify_levels_from_spec(spec).level_of(rule_id)")
+
+    it "promotes the cached text and propagates a failed promotion":
+        val types = file_read("src/compiler/20.hir/hir_lowering/types.spl")
+        val promote = guard_owner_between(types,
+            "    me promote_phase_memo_transient_owners()", "    me lower_type(")
+        expect(promote).to_contain("val match_guard_level_ok = self.match_guard_level == \"\" or\n            rt_transient_heap_promote(self.match_guard_level)")
+        expect(promote).to_contain("memos_ok and glob_importer_owner_ok and match_guard_level_ok")
+        # Keep the existing once-per-lowerer policy resolution on every path.
+        val context = file_read("src/compiler/20.hir/hir_lowering/context_helpers.spl")
+        expect(context.contains("self.match_guard_level =")).to_be(false)
+
+    it "requires promotion before shard reset and publication or reclamation":
+        val driver = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        val cleanup = guard_owner_between(driver,
+            "        val errors_owned = rt_transient_heap_promote(errors)",
+            "        # These context allocations happen AFTER scratch reclamation.")
+        val promote_at = cleanup.find("val memos_owned = actual_lowering.promote_phase_memo_transient_owners()")
+        val reset_at = cleanup.find("actual_lowering.begin_module(source.path)")
+        val gate_at = cleanup.find("if not (errors_owned and warnings_owned and failure_owned and abi_owned and memos_owned")
+        val reclaim_at = cleanup.find("if not driver_publish_reverse_reference_parse_scope_v1(reverse_token):")
+        expect(promote_at).to_be_greater_than(-1)
+        expect(reset_at).to_be_greater_than(promote_at)
+        expect(gate_at).to_be_greater_than(reset_at)
+        expect(reclaim_at).to_be_greater_than(gate_at)
+        val failure = cleanup[gate_at:reclaim_at]
+        expect(failure).to_contain("driver_abort_reverse_reference_parse_scope_v1(reverse_token)")
+        expect(failure).to_contain("exit(1)")

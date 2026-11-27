@@ -1,0 +1,83 @@
+# Explicit v2 command owner. Secret material is read only through the configured
+# environment reference; the request and config never accept an inline token.
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use app.scv.gateway_publish_config_v2.{scv_gateway_publish_config_load_v2}
+use app.scv.gateway_config_v1.{scv_gateway_env_name_valid_v1,
+    scv_gateway_bearer_valid_v1, scv_gateway_bearer_load_v1}
+use app.scv.gateway_publish_service_v2.{scv_gateway_publish_serve_v2}
+
+pub struct ScvGatewayPublishCommandResultV2:
+    exit_code: i64
+    output: text
+
+fn _scv_gateway_publish_command_result_v2(code: i64, status: text, detail: text) -> ScvGatewayPublishCommandResultV2:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2),
+        "command": SdnValue.String("scv.gateway.publish"),
+        "status": SdnValue.String(status), "detail": SdnValue.String(detail),
+        "publication": SdnValue.String("not_acceptance"),
+        "production_qualified": SdnValue.Bool(false)}
+    ScvGatewayPublishCommandResultV2(exit_code: code,
+        output: sdn_encode_canonical(SdnValue.Dict(fields)))
+
+pub fn scv_gateway_publish_command_help_v2() -> text:
+    "scv gateway publish-serve --config <native.sdn> --development-loopback --reason <audit reason> (host policy, loopback development only; production TLS unavailable)"
+
+pub fn scv_gateway_publish_command_v2(args: [text]) -> ScvGatewayPublishCommandResultV2:
+    if args.len() == 0 or (args.len() == 1 and args[0] == "--help"):
+        return _scv_gateway_publish_command_result_v2(0, "usage", scv_gateway_publish_command_help_v2())
+    if args[0] != "serve":
+        return _scv_gateway_publish_command_result_v2(1, "invalid_request", scv_gateway_publish_command_help_v2())
+    var config_path = ""
+    var reason = ""
+    var development = false
+    var index = 1
+    while index < args.len():
+        if args[index] == "--config" and config_path == "" and index + 1 < args.len():
+            config_path = args[index + 1]
+            index = index + 2
+        elif args[index] == "--reason" and reason == "" and index + 1 < args.len():
+            reason = args[index + 1]
+            index = index + 2
+        elif args[index] == "--development-loopback" and not development:
+            development = true
+            index = index + 1
+        else:
+            return _scv_gateway_publish_command_result_v2(1, "invalid_request",
+                "Unknown, missing or duplicate gateway publish argument")
+    if not development:
+        return _scv_gateway_publish_command_result_v2(1, "tls_unavailable",
+            "Production service refused: native TLS owner is not qualified; development requires loopback and an audit reason")
+    if config_path == "" or reason == "":
+        return _scv_gateway_publish_command_result_v2(1, "invalid_request", scv_gateway_publish_command_help_v2())
+    val loaded = match scv_gateway_publish_config_load_v2(config_path):
+        case Ok(value): value
+        case Err(_):
+            return _scv_gateway_publish_command_result_v2(1, "configuration_rejected",
+                "Publish service requires strict native SDN host policy with one exact GitHub repository and fixed local roots")
+    if not scv_gateway_env_name_valid_v1(loaded.gateway.bearer_token_env):
+        return _scv_gateway_publish_command_result_v2(1, "configuration_rejected",
+            "Credential must be an environment-variable reference")
+    val token = match scv_gateway_bearer_load_v1(loaded.gateway):
+        case Ok(value): value
+        case Err(_):
+            return _scv_gateway_publish_command_result_v2(1, "credential_unavailable",
+                "Configured gateway credential is unavailable")
+    if not scv_gateway_bearer_valid_v1(token):
+        return _scv_gateway_publish_command_result_v2(1, "credential_unavailable",
+            "Configured gateway credential is invalid")
+    match scv_gateway_publish_serve_v2(loaded.gateway, loaded.policy, token, development, reason):
+        case Err(_): _scv_gateway_publish_command_result_v2(1, "service_refused",
+            "Loopback publish service stopped with an error; inspect host logs for the operation outcome")
+        case Ok(_): _scv_gateway_publish_command_result_v2(0, "stopped",
+            "Loopback publish service stopped; no acceptance result was imported")
+
+pub fn scv_gateway_publish_root_command_v2(args: [text]) -> ScvGatewayPublishCommandResultV2:
+    if args.len() == 0 or (args.len() == 1 and args[0] == "--help"):
+        return _scv_gateway_publish_command_result_v2(0, "usage", scv_gateway_publish_command_help_v2())
+    if args[0] != "publish-serve":
+        return _scv_gateway_publish_command_result_v2(1, "invalid_request", scv_gateway_publish_command_help_v2())
+    scv_gateway_publish_command_v2(["serve"] + args[1:])
+
+export ScvGatewayPublishCommandResultV2, scv_gateway_publish_command_help_v2
+export scv_gateway_publish_command_v2, scv_gateway_publish_root_command_v2

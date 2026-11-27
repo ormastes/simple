@@ -1,0 +1,44 @@
+# Direct native diagnostic fixture: no spool hash, handler, or response path.
+use std.nogc_sync_mut.daemon_sdk.lock.{
+    try_acquire_daemon_lock_owned, release_daemon_lock_owned,
+    try_acquire_daemon_lock, release_daemon_lock
+}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_lock, file_unlock}
+use std.nogc_sync_mut.io_runtime.{dir_remove}
+use std.io_runtime.{read_file_text, file_exists}
+
+fn main() -> i64:
+    val root = secure_temp_dir("build", "native-daemon-exact-owner").unwrap()
+    val path = root + "/owner.lock"
+    val first = try_acquire_daemon_lock_owned(path)
+    if not first.acquired:
+        return 1
+    if release_daemon_lock(first.pid, path):
+        return 2
+    if not release_daemon_lock_owned(first):
+        return 3
+    val second = try_acquire_daemon_lock_owned(path)
+    if not second.acquired or first.pid != second.pid or first.record == second.record:
+        return 4
+    if release_daemon_lock_owned(first) or read_file_text(path) != second.record:
+        return 5
+    val guard = file_lock(path + ".break", 0)
+    if guard < 0:
+        return 6
+    if release_daemon_lock_owned(second) or release_daemon_lock(second.pid, path):
+        return 7
+    if try_acquire_daemon_lock_owned(path).acquired or try_acquire_daemon_lock(path) > 0:
+        return 8
+    if read_file_text(path) != second.record:
+        return 9
+    if not file_unlock(guard) or not release_daemon_lock_owned(second):
+        return 10
+    if not release_daemon_lock_owned(second) or not file_exists(path + ".break"):
+        return 11
+    val legacy = try_acquire_daemon_lock(path)
+    if legacy <= 0 or not release_daemon_lock(legacy, path):
+        return 12
+    if not dir_remove(root, true):
+        return 13
+    print "daemon exact lock owner: PASS"
+    0

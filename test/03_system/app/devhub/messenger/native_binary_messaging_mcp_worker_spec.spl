@@ -1,0 +1,50 @@
+# System test: the NATIVE llm_caret messaging MCP worker serves stdio without crashing.
+# Binary comes from env LLM_CARET_MCP_WORKER_NATIVE_BIN; build command is in the blocked message.
+# Regression: doc/08_tracking/bug/native_user_class_imported_trait_vtable_missing_2026-11-15.md
+# @manual_section: messenger-native-binary
+
+"""
+## Purpose and audience
+Purpose: the natively compiled messaging MCP worker answers a JSON-RPC ping on stdin
+and exits cleanly at end of input, instead of segfaulting on its first transport call.
+Audience: LLM Caret / DevHub release reviewers.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run_timeout, env_get_opt}
+
+val BUILD_CMD: text = "SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NATIVE_INCREMENTAL=1 bin/simple.exe native-build src/app/llm_caret/messaging/mcp_worker.spl -o build/nb/messaging_mcp_worker.exe --cache-dir build/nb/cache"
+
+fn native_bin() -> text:
+    match env_get_opt("LLM_CARET_MCP_WORKER_NATIVE_BIN"):
+        case Some(v): v
+        case None: ""
+
+fn blocked_msg() -> text:
+    "BLOCKED: LLM_CARET_MCP_WORKER_NATIVE_BIN is unset; build it with: {BUILD_CMD}"
+
+fn run_with_stdin(bin: text, input: text) -> (text, text, i32):
+    if bin == "": return ("", "", -1)
+    val script = "printf '%s' '" + input + "' | LLM_CARET_MESSAGING_DB=build/nb/home/mcp_worker_spec.db \"" + bin + "\" --help"
+    process_run_timeout("sh", ["-c", script], 30000)
+
+val mw_bin = native_bin()
+val mw_eof = run_with_stdin(mw_bin, "")
+val mw_ping = run_with_stdin(mw_bin, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}\\n")
+
+describe "native messaging MCP worker over stdio":
+    it "is available through LLM_CARET_MCP_WORKER_NATIVE_BIN":
+        step("Require the native binary path; otherwise report blocked with the build command")
+        val msg = if mw_bin == "": blocked_msg() else: "available"
+        expect(msg).to_equal("available")
+
+    it "exits 0 at end of stdin instead of crashing":
+        step("Run the worker with --help and an empty stdin; it serves until EOF")
+        expect(mw_eof.2).to_equal(0)
+
+    it "answers a JSON-RPC ping with a result for the same id":
+        step("Pipe one JSON-lines ping request into the worker")
+        expect(mw_ping.2).to_equal(0)
+        step("Assert the reply carries the request id and a result")
+        expect(mw_ping.0.contains("\"id\":7")).to_equal(true)
+        expect(mw_ping.0.contains("\"result\"")).to_equal(true)

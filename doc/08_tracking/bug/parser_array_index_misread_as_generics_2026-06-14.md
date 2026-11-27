@@ -2,6 +2,15 @@
 
 ## Closed 2026-09-13 — Fixed: `name[expr]` is no longer misread as a generic application
 
+## Re-verification 2026-11-25 (p2w4-ac lane, release/1.0.0)
+
+Confirmed still fixed on the pinned Rust seed (`bin/simple.exe` v1.0.0-rc.1,
+Windows, `SIMPLE_LIB=src`). Fresh probe: `while j >= 0 and matched[j].w > 2:`
+with `matched[j]` read inside the loop parses and runs, printing `3` then `5`
+— no `Use angle brackets` error. Load-time consequence still gone:
+`use std.common.ui.style.*` in a fresh file loads and prints `style-ok`.
+Status unchanged: CLOSED.
+
 - **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the exact shape from the report — `while j >= 0 and matched[j].w > 2:` with `matched[j]` read inside the loop — parses and runs, printing `5` then `3`. No `Use angle brackets: matched<...>` error.
 - **measured**: the load-time consequence is gone. `use std.common.ui.style.*` in a fresh file loads and runs (`style-ok`), so `common.ui.style` and its transitive dependents (`common.ui.widget`, `app.office.slides.render`) are importable again.
 - **inferred**: `src/lib/common/ui/style.spl` around the cited lines has also been rewritten to build the match list with `push` rather than indexed assignment, so the original call site no longer depends on the parser behaviour either way.

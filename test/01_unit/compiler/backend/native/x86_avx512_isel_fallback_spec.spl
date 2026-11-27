@@ -1,0 +1,209 @@
+"""
+AVX-512 instruction selection fallback paths:
+- the empty-shape guard keeps SIMD on the AVX2/SSE/portable selectors;
+- a denied capability lowers explicit 512-bit MIR with scalar code instead
+  of panicking, and none of it is an AVX-512 instruction;
+- vector arguments and results follow the frame-vector ABI (by pointer and a
+  hidden result pointer) identically with and without AVX-512;
+- shapes the ABI cannot place fail closed with a named reason.
+Lane-by-lane execution of both paths against a C reference lives in
+test/02_integration/compiler/native/x86_avx512_exec/.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.mir.mir_data.*
+use compiler.backend.native.isel_x86_64.{isel_module_with_x86_simd_capability}
+use compiler.backend.native.native_avx2_capability.{native_avx2_denied_v1}
+use compiler.backend.native.native_avx512_capability.{native_avx512_capability_v1, native_avx512_denied_v1}
+use compiler.backend.native.mach_inst.*
+use compiler.backend.native.x86_64_avx512_isel.{x86_plan_avx512_fixed}
+use compiler.backend.native.x86_64_avx512_lower.{x86_avx512_handles}
+use compiler.backend.native.x86_64_avx512_ops.*
+use compiler.backend.native.x86_64_avx512_scalar.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+
+fn c(id: i64) -> MirOperand:
+    MirOperand.copy(LocalId(id: id))
+
+fn i(kind: MirInstKind) -> MirInst:
+    MirInst(kind: kind, span: nil)
+
+fn mir_function(name: text, sym: i64, params: [MirType], ret: MirType, locals: [MirLocal], insts: [MirInst], terminator: MirTerminator) -> MirFunction:
+    val block = MirBlock(id: BlockId.new(0), label: Some("entry"), instructions: insts, terminator: terminator)
+    MirFunction(
+        symbol: SymbolId.new(sym), name: name,
+        signature: MirSignature(params: params, return_type: ret, is_variadic: false),
+        locals: locals, blocks: [block], entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {})
+
+fn module_of(functions_list: [MirFunction]) -> MirModule:
+    var functions: Dict<SymbolId, MirFunction> = {}
+    for f in functions_list:
+        functions[f.symbol] = f
+    MirModule(name: "avx512_fallback", functions: functions, statics: {}, constants: {}, types: {})
+
+fn ptr_type() -> MirType:
+    MirType(kind: MirTypeKind.Ptr(pointee: MirType(kind: MirTypeKind.F32), mutable: true))
+
+fn local(id: i64, type_: MirType, kind: LocalKind) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: Some("l{id}"), type_: type_, kind: kind)
+
+fn broad_function() -> MirFunction:
+    val ptr = ptr_type()
+    val v = MirType(kind: MirTypeKind.Vec16f)
+    val locals = [local(0, ptr, LocalKind.Arg(0)), local(1, ptr, LocalKind.Arg(1)), local(2, v, LocalKind.Temp), local(3, v, LocalKind.Temp),
+                  local(4, v, LocalKind.Temp), local(5, v, LocalKind.Temp), local(6, MirType.i64(), LocalKind.Temp)]
+    mir_function("broad_f32", 0, [ptr, ptr], MirType.unit(), locals, [
+        i(MirInstKind.MirSimdLoad(LocalId(id: 2), c(0), true, v)),
+        i(MirInstKind.MirSimdUnop(LocalId(id: 3), c(2), "Sqrt")),
+        i(MirInstKind.MirSimdCmp(LocalId(id: 4), c(2), c(3), "Lt")),
+        i(MirInstKind.MirSimdSelect(LocalId(id: 5), c(4), c(2), c(3))),
+        i(MirInstKind.MirSimdShuffle(LocalId(id: 3), c(5), c(2), "InterleaveHi")),
+        i(MirInstKind.MirSimdReduce(LocalId(id: 6), c(3), "Max")),
+        i(MirInstKind.MirSimdStore(c(5), c(1), true))], MirTerminator.Ret(nil))
+
+fn avx512_admitted():
+    native_avx512_capability_v1("x86_64-avx512-linux", "integration-injected", "fixture-avx512-v1", true, false, true)
+
+fn opcodes(module: MirModule, admitted: bool) -> [i64]:
+    val capability = if admitted: avx512_admitted() else: native_avx512_denied_v1()
+    val selected = isel_module_with_x86_simd_capability(module, native_avx2_denied_v1(), capability)
+    var out: [i64] = []
+    for function in selected.functions:
+        for block in function.blocks:
+            for inst in block.insts:
+                out.push(inst.opcode)
+    out
+
+fn is_vector_unit_op(opcode: i64) -> bool:
+    # Every opcode that encodes a ZMM, EVEX or mask-register instruction.
+    (opcode >= X86_OP_VMOVAPS_LOAD_ZMM and opcode <= X86_OP_VPXORD_ZMM) or opcode == X86_OP_AVX512_LOADU or opcode == X86_OP_AVX512_STOREU or (opcode >= X86_OP_AVX512_BINARY and opcode <= X86_OP_AVX512_SPLAT) or opcode == X86_OP_AVX512_BROADCAST_LANE or (opcode >= X86_OP_AVX512_PERMUTE and opcode <= X86_OP_AVX512_EXTRACT_I32)
+
+fn abi_module() -> MirModule:
+    # callee(v, w) -> v * w ; caller(a, b, out): out = callee(load a, load b)
+    val ptr = ptr_type()
+    val v = MirType(kind: MirTypeKind.Vec16f)
+    val callee = mir_function("callee", 1, [v, v], v,
+        [local(0, v, LocalKind.Arg(0)), local(1, v, LocalKind.Arg(1)), local(2, v, LocalKind.Temp)],
+        [i(MirInstKind.MirSimdBinop(LocalId(id: 2), c(0), c(1), "Mul"))], MirTerminator.Ret(Some(c(2))))
+    val name = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("callee"), MirType.i64()))
+    val caller = mir_function("caller", 0, [ptr, ptr, ptr], MirType.unit(),
+        [local(0, ptr, LocalKind.Arg(0)), local(1, ptr, LocalKind.Arg(1)), local(2, ptr, LocalKind.Arg(2)),
+         local(3, v, LocalKind.Temp), local(4, v, LocalKind.Temp), local(5, v, LocalKind.Temp)],
+        [i(MirInstKind.MirSimdLoad(LocalId(id: 3), c(0), true, v)),
+         i(MirInstKind.MirSimdLoad(LocalId(id: 4), c(1), true, v)),
+         i(MirInstKind.Call(Some(LocalId(id: 5)), name, [c(3), c(4)])),
+         i(MirInstKind.MirSimdStore(c(5), c(2), true))], MirTerminator.Ret(nil))
+    module_of([caller, callee])
+
+fn function_named(module: MachModule, name: text) -> MachFunction:
+    for function in module.functions:
+        if function.name == name: return function
+    panic("missing function {name}")
+
+fn physical_target(inst: MachInst) -> i64:
+    match inst.operands[0].kind:
+        case Reg(reg):
+            match reg.kind:
+                case Physical(id): id
+                case _: -1
+        case _: -1
+
+fn call_argument_registers(function: MachFunction) -> [i64]:
+    var out: [i64] = []
+    for block in function.blocks:
+        for inst in block.insts:
+            if inst.opcode == X86_OP_MOV_REG_REG:
+                val target = physical_target(inst)
+                if target == X86_RDI or target == X86_RSI or target == X86_RDX: out.push(target)
+            if inst.opcode == X86_OP_CALL: return out
+    out
+
+fn count(function: MachFunction, opcode: i64) -> i64:
+    var n = 0
+    for block in function.blocks:
+        for inst in block.insts:
+            if inst.opcode == opcode: n = n + 1
+    n
+
+describe "AVX-512 isel empty-shape guard":
+    it "does not claim SIMD instructions when no AVX-512 shape was planned":
+        val vector = MirType(kind: MirTypeKind.Vec16f)
+        val splat = i(MirInstKind.MirSimdSplat(LocalId(id: 1), MirOperand.const_int(1), vector))
+        val copy = i(MirInstKind.Copy(LocalId(id: 1), LocalId(id: 2)))
+        val empty: Dict<i64, text> = {}
+        expect(x86_avx512_handles(splat, empty)).to_equal(false)
+        expect(x86_avx512_handles(copy, empty)).to_equal(false)
+        var shapes: Dict<i64, text> = {}
+        shapes[1] = "f32x16"
+        expect(x86_avx512_handles(splat, shapes)).to_equal(true)
+
+describe "AVX-512 scalar fallback selection":
+    it "compiles explicit 512-bit MIR with no AVX-512 instruction when the capability is denied":
+        val ops = opcodes(module_of([broad_function()]), false)
+        var vector_ops = 0
+        var fallback_ops = 0
+        for opcode in ops:
+            if is_vector_unit_op(opcode): vector_ops = vector_ops + 1
+            if opcode >= X86_OP_V512S_COPY and opcode <= X86_OP_V512S_BROADCAST: fallback_ops = fallback_ops + 1
+        expect(vector_ops).to_equal(0)
+        # load, unary, compare, select, two scratch copies, store
+        expect(fallback_ops).to_equal(7)
+        # Reduction and lane moves use the shared GPR/SSE-only operations.
+        expect(ops.contains(X86_OP_AVX512_REDUCE)).to_equal(true)
+        expect(ops.contains(X86_OP_AVX512_COPY_LANE)).to_equal(true)
+
+    it "still selects ZMM operations when AVX-512 is admitted":
+        val ops = opcodes(module_of([broad_function()]), true)
+        var vector_ops = 0
+        for opcode in ops:
+            if is_vector_unit_op(opcode): vector_ops = vector_ops + 1
+            expect(opcode >= X86_OP_V512S_COPY and opcode <= X86_OP_V512S_BROADCAST).to_equal(false)
+        expect(vector_ops > 5).to_equal(true)
+
+    it "refuses FMA by name in the scalar fallback instead of rounding twice":
+        val source = file_read("src/compiler/70.backend/backend/native/x86_64_avx512_lower.spl")
+        expect(source.contains("E-BACKEND-X86-AVX512-SCALAR-FMA")).to_equal(true)
+
+describe "AVX-512 frame-vector ABI":
+    it "plans vector arguments and a vector result instead of rejecting them":
+        val module = abi_module()
+        val callee_plan = x86_plan_avx512_fixed(module.functions[SymbolId.new(1)])
+        expect(callee_plan.ok).to_equal(true)
+        expect(callee_plan.return_shape).to_equal("f32x16")
+
+    it "passes vector arguments by address after a hidden result pointer, in both modes":
+        for admitted in [true, false]:
+            val capability = if admitted: avx512_admitted() else: native_avx512_denied_v1()
+            val selected = isel_module_with_x86_simd_capability(abi_module(), native_avx2_denied_v1(), capability)
+            val caller = function_named(selected, "caller")
+            # result pointer, then the two vector argument addresses
+            expect(count(caller, X86_OP_LEA)).to_equal(3)
+            expect(call_argument_registers(caller)).to_equal([X86_RDI, X86_RSI, X86_RDX])
+            val callee = function_named(selected, "callee")
+            # the callee saves the hidden pointer and returns it in RAX
+            var saves_result_pointer = 0
+            var returns_rax = 0
+            for block in callee.blocks:
+                for inst in block.insts:
+                    if inst.opcode == X86_OP_MOV_MEM_REG and physical_target(MachInst(opcode: 0, operands: [inst.operands[1]], size: 0)) == X86_RDI: saves_result_pointer = saves_result_pointer + 1
+                    if inst.opcode == X86_OP_MOV_REG_REG and physical_target(inst) == X86_RAX: returns_rax = returns_rax + 1
+            expect(saves_result_pointer).to_equal(1)
+            expect(returns_rax).to_equal(1)
+
+    it "fails closed for vector values it cannot place":
+        val ptr = ptr_type()
+        val v = MirType(kind: MirTypeKind.Vec16f)
+        var locals: [MirLocal] = []
+        for k in 0..6:
+            locals.push(local(k, ptr, LocalKind.Arg(k)))
+        locals.push(local(6, v, LocalKind.Arg(6)))
+        val stacked = mir_function("stacked", 0, [ptr, ptr, ptr, ptr, ptr, ptr, v], MirType.unit(), locals, [], MirTerminator.Ret(nil))
+        expect(x86_plan_avx512_fixed(stacked).reason).to_equal("avx512-vector-abi-argument-beyond-register-slots")
+        val name = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("callee"), MirType.i64()))
+        val terminator = MirTerminator.CallTerminator(nil, name, [c(0)], BlockId.new(0), nil, nil, nil)
+        val via_terminator = mir_function("via_terminator", 0, [], MirType.unit(), [local(0, v, LocalKind.Temp)], [], terminator)
+        expect(x86_plan_avx512_fixed(via_terminator).reason).to_equal("avx512-vector-abi-call-terminator-unsupported")

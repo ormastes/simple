@@ -45,3 +45,46 @@ compilable; interpolation-heavy ops (http serialize) stay honestly omitted.
 - **inferred**: that COFF `.rdata$.refptr` failure is a separate Windows SMF-emission defect, not this bug. It does mean the standalone-SMF lane is entirely unavailable here.
 - **inferred**: neither of the two fix options has landed — native string-format codegen would have to remove the `FallbackReason::StringOps` route, and SMF interp-snapshot seeding would have to embed the snapshot; nothing in the entry or the tree indicates either.
 - Verdict: OPEN.
+
+## 2026-11-07 — fix implemented (round 15, work/r15-interp-design-20261107)
+
+- Re-measured on the release tip seed (Windows): an interpolated-FString
+  function now compiles natively and `compile X.spl -o X.smf && run X.smf`
+  prints the interpolation (`hello smf 7`, exit 0) — the 2026-09-13 COFF
+  `.rdata$.refptr` failure did NOT reproduce on this seed. The remaining
+  gap was the compile-time gate `standalone_smf_fallback_error`, which
+  refused any file-backed module containing an interpreter-only function.
+- Fix: new SMF section `.interp_snapshot` (`SectionType::InterpSnapshot = 17`,
+  Rust `common/src/smf/section.rs` and spl twin `70.backend/linker/smf_writer.spl`).
+  A file-backed compile with interpreter-only functions now applies the
+  hybrid transform and embeds a JSON record `{"version":1,"path","source"}`
+  pinning the entry source it was compiled from
+  (`pipeline/execution.rs::prepare_smf_interp_fallback`). The runtime loader
+  surfaces the payload as `LoadedModule::interp_snapshot`; the driver's
+  `execute_and_gc` seeds the interpreter definitions from it
+  (`seed_interpreter_from_smf_snapshot`: pinned entry on disk when its text
+  matches byte-for-byte, otherwise the embedded text materialised in a temp
+  dir, flattened through the same `load_module_with_imports` the JIT lane
+  uses) before `main` runs. In-memory and WASM modules keep the fail-closed
+  diagnostic (nothing to pin / no host interpreter).
+- Repro: `smf_with_interp_fallback_function_runs_through_embedded_snapshot`
+  (driver `exec_core.rs`) and
+  `file_backed_smf_with_interp_fallback_embeds_snapshot_section`
+  (compiler `pipeline/execution.rs`). Prevention:
+  `smf_interp_snapshot_survives_source_removal_and_is_absent_without_fallback`,
+  `interp_snapshot_requires_a_file_backed_entry_and_is_absent_without_fallback`,
+  `interp_snapshot_payload_round_trips_and_rejects_unknown_version`.
+- Two bridge defects surfaced once the snapshot made routed calls reachable
+  (both fixed here, both would have hit any `rt_interp_call` consumer):
+  (1) the seeded state never ran `initialize_extern_functions()`, so a routed
+  body could not resolve prelude externs (`function print not found`), and
+  (2) `interpreter_sffi::call_interpreted_function` executed the body with a
+  bare `exec_block` + `control_to_value`, which drops the implicit
+  last-expression value (`if c: 7 else: 3` answered NIL, decoded as 3 by the
+  native caller). It now delegates to `exec_function_with_values`.
+  (3) `codegen/instr/body.rs::build_vreg_types` had no `InterpCall` arm, so a
+  plain user function's routed-call dest carried no scalar type and
+  `compile_interp_call` left the bridge's TAGGED RuntimeValue in the vreg
+  (`-> i64` callee answering 7 reached the caller as 56). The dest is now
+  stamped from `function_return_types` exactly like a plain `Call`
+  (`boxed_result` returns stay unstamped and boxed).

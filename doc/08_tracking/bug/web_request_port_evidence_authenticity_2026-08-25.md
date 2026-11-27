@@ -32,3 +32,11 @@ preserving legacy v1 receipt parsing. It must:
 Direct handler calls, shell/`nc` fixture servers, arbitrary caller-supplied
 executables, and producer-authored PASS counters are not production evidence.
 
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the record's implementation grant stands — the next
+implementation must use a new versioned acceptance contract (declared
+committed entry, closed-environment build, retained byte evidence bound to
+PID/socket, monotonic timestamps, fresh repo-contained directory, unsigned
+bundle authenticated before load). Producer-authored PASS counters and shell
+fixtures are not production evidence, so no partial/synthetic change was made.

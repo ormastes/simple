@@ -5,6 +5,13 @@ use std.nogc_sync_mut.io.thread.thread_native_sleep_ms
 use os.smf.kernel_plugin.real_worker_process.KpfRealWorkerProcessV1
 use os.smf.kernel_plugin.real_worker_transport.KpfRealWorkerTransportV1
 use os.smf.kernel_plugin.worker_protocol.*
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.nogc_sync_mut.kernel_plugin.generation.{KpfGenerationTable}
+use std.nogc_sync_mut.kernel_plugin.recovery_transaction.{
+    KpfRecoveryTransaction, KpfRecoveryPhase, KpfRecoveryVerdict,
+}
+use std.nogc_sync_mut.crash.failure_slot_v1.{FailureSlotV1, FailureKindV1}
+use os.smf.kernel_plugin.recovery_worker.{kpf_recover_on_worker_exit}
 
 fn fake_process(mode: text) -> KpfRealWorkerProcessV1:
     KpfRealWorkerProcessV1.spawn_fixture_unisolated("/bin/sh",
@@ -68,3 +75,43 @@ describe "real KPF worker process placement":
             KpfWorkerOutcome.WorkerCrashed)
         assert_equal(crashed_process.exit_status().outcome,
             KpfWorkerOutcome.WorkerCrashed)
+
+describe "real KPF worker exit drives generation recovery":
+    it "rolls a crashed real candidate worker back to V1":
+        step("publish V1, begin V2 probation, crash the real V2 child, recover")
+        val table = KpfGenerationTable.create(4, 4)
+        table.publish(KpfId128(hi: 1, lo: 2), KpfDigest256(w0: 1, w1: 2, w2: 3, w3: 4), 1)
+        val tx = KpfRecoveryTransaction.create(table)
+        tx.begin_upgrade(KpfId128(hi: 2, lo: 3), KpfDigest256(w0: 2, w1: 3, w2: 4, w3: 5), 2, 7)
+        val process = fake_process("crash")
+        val transport = KpfRealWorkerTransportV1.create(process, 7, 2, 3, 5)
+        assert_equal(transport.handshake(5, 1000), KpfWorkerOutcome.Accepted)
+        assert_equal(poll_nonempty(transport, 1).outcome, KpfWorkerOutcome.WorkerCrashed)
+        val slot = FailureSlotV1.create()
+        val receipt = kpf_recover_on_worker_exit(tx, process.exit_status(), slot)
+        assert_equal(receipt.verdict, KpfRecoveryVerdict.Applied)
+        assert_equal(receipt.phase, KpfRecoveryPhase.Restored)
+        assert_true(table.view(tx.retained_handle()).active)
+        assert_false(table.view(tx.candidate_handle()).active)
+        assert_equal(slot.take().unwrap().kind, FailureKindV1.WorkerExit)
+
+    it "keeps V2 probation after a real clean close":
+        step("close the real V2 child through the protocol; no rollback")
+        val table = KpfGenerationTable.create(4, 4)
+        table.publish(KpfId128(hi: 1, lo: 2), KpfDigest256(w0: 1, w1: 2, w2: 3, w3: 4), 1)
+        val tx = KpfRecoveryTransaction.create(table)
+        tx.begin_upgrade(KpfId128(hi: 2, lo: 3), KpfDigest256(w0: 2, w1: 3, w2: 4, w3: 5), 2, 7)
+        val process = fake_process("normal")
+        val transport = KpfRealWorkerTransportV1.create(process, 7, 2, 3, 5)
+        assert_equal(transport.handshake(5, 1000), KpfWorkerOutcome.Accepted)
+        assert_equal(poll_nonempty(transport, 1).outcome, KpfWorkerOutcome.Accepted)
+        assert_equal(transport.quiesce(), KpfWorkerOutcome.Accepted)
+        assert_equal(poll_nonempty(transport, 2).outcome, KpfWorkerOutcome.Quiescing)
+        assert_equal(transport.close(), KpfWorkerOutcome.Accepted)
+        assert_equal(poll_nonempty(transport, 3).outcome, KpfWorkerOutcome.Closed)
+        val slot = FailureSlotV1.create()
+        val receipt = kpf_recover_on_worker_exit(tx, process.exit_status(), slot)
+        assert_equal(receipt.verdict, KpfRecoveryVerdict.Rejected)
+        assert_equal(tx.phase, KpfRecoveryPhase.Probation)
+        assert_true(table.view(tx.candidate_handle()).active)
+        assert_true(slot.take().is_none())

@@ -1,0 +1,111 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+# brotli_lz77_general_round_trip_spec.spl
+#
+# Round-trip and size evidence for the general RFC 7932 encoder path
+# (lz77_encoder.spl: hash-chain LZ77 + per-meta-block prefix codes), as
+# reached through the public `brotli_encode` / facade `brotli_compress`.
+# Bug: doc/08_tracking/bug/zstd_brotli_encoders_are_stored_only_2026-08-17.md
+#
+# Every encoded stream is decoded with the in-repo RFC 7932 decoder.  The
+# same streams were also verified byte-exact with the external `brotli -d`
+# CLI (recorded in the bug doc); that check is not part of this spec.
+
+use std.spec.step
+use std.spec.*
+use std.nogc_sync_mut.compression.brotli.decoder.{brotli_decode}
+use std.nogc_sync_mut.compression.brotli.encoder.{brotli_encode}
+use std.nogc_sync_mut.compression.brotli.lz77_encoder.{brotli_encode_lz77}
+use std.common.compress.brotli.{brotli_compress, try_brotli_decompress}
+
+fn _bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn _text_bytes(s: text) -> [u8]:
+    var out: [u8] = []
+    val b = s.bytes()
+    var i = 0
+    while i < b.len():
+        out.push(b[i])
+        i = i + 1
+    out
+
+fn _repetitive(n: i64) -> [u8]:
+    val unit = _text_bytes("The quick brown fox jumps over the lazy dog. ")
+    var out: [u8] = []
+    var i = 0
+    while out.len() < n:
+        out.push(unit[i % unit.len()])
+        i = i + 1
+    out
+
+# Deterministic LCG byte stream (incompressible).
+fn _random(n: i64) -> [u8]:
+    var out: [u8] = []
+    var x = 0x12345678
+    while out.len() < n:
+        x = (x * 1103515245 + 12345) & 0x7fffffff
+        out.push(((x >> 16) & 0xff).to_u8())
+    out
+
+fn _round_trips(payload: [u8]) -> bool:
+    val encoded = brotli_encode(payload)
+    match brotli_decode(encoded):
+        case Ok(out): _bytes_equal(out, payload)
+        case Err(_): false
+
+describe("brotli_encode (general LZ77 + prefix codes) — round-trip"):
+
+    it "round-trips the empty input as the 1-byte terminator stream":
+        step("encode [] and decode")
+        val encoded = brotli_encode([])
+        expect(encoded.len()).to_equal(1)
+        expect(_round_trips([])).to_equal(true)
+
+    it "round-trips a single byte":
+        step("encode [0x41] and decode")
+        expect(_round_trips([0x41])).to_equal(true)
+
+    it "round-trips short text through the general path directly":
+        step("encode with brotli_encode_lz77 and decode")
+        val payload = _text_bytes("hello brotli world, hello brotli world!")
+        val encoded = brotli_encode_lz77(payload)
+        match brotli_decode(encoded):
+            case Ok(out): expect(_bytes_equal(out, payload)).to_equal(true)
+            case Err(_): expect(false).to_equal(true)
+        expect(encoded.len() < payload.len()).to_equal(true)
+
+    it "round-trips 64 KiB of repetitive text and compresses it below 1 percent":
+        step("encode 65536 bytes of repeated sentence")
+        val payload = _repetitive(65536)
+        val encoded = brotli_encode(payload)
+        expect(encoded.len() < 656).to_equal(true)
+        match brotli_decode(encoded):
+            case Ok(out): expect(_bytes_equal(out, payload)).to_equal(true)
+            case Err(_): expect(false).to_equal(true)
+
+    it "round-trips 64 KiB of random bytes within 8 bytes of stored size":
+        step("encode 65536 LCG bytes; the stored fallback must win")
+        val payload = _random(65536)
+        val encoded = brotli_encode(payload)
+        expect(encoded.len() <= 65536 + 8).to_equal(true)
+        match brotli_decode(encoded):
+            case Ok(out): expect(_bytes_equal(out, payload)).to_equal(true)
+            case Err(_): expect(false).to_equal(true)
+
+    it "is reachable through the common facade":
+        step("brotli_compress -> try_brotli_decompress on repetitive text")
+        val payload = _repetitive(4096)
+        val encoded = brotli_compress(payload)
+        expect(encoded.len() < payload.len() / 10).to_equal(true)
+        match try_brotli_decompress(encoded):
+            case Ok(out): expect(_bytes_equal(out, payload)).to_equal(true)
+            case Err(_): expect(false).to_equal(true)

@@ -130,3 +130,10 @@ unrecorded step-over to be treated as a violation even when the delta is clean.
 needs an owner; regenerating it from a shared, concurrently-edited tree would
 risk baselining other sessions' in-flight changes.
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+main-gate debt ledger; bookkeeping record, not a per-lane fix.

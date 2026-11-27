@@ -1,6 +1,84 @@
 # Trait `impl` blocks on PRIMITIVE Self types are honoured only by the interpreter
 
-- **Status:** OPEN (diagnosed, root cause located, not fixed) — re-verified
+## 2026-11-26 — WA-S7 Disposition (`KEPT-WITH-REASON`)
+
+- Checked `src/lib/nogc_sync_mut/src/hash.spl` (`:325`, `hash_text_fnv1a`) and
+  Rust seed codegen (`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`).
+- The Rust seed still only exempts numeric/bool `.hash` and rewrites `text.hash()`
+  to `rt_hash_text` (while pure-Simple native verification remains pending).
+- Kept `# @workaround bug=primitive_receiver_trait_impl_dispatch_2026-08-07` in
+  `hash.spl` and added `test/01_unit/lib/wa_src_lane7_hash_workaround_spec.spl`.
+
+## 2026-11-10 — pure-Simple primitive declaration identity repair, verification pending
+
+Current-source trace found a remaining HIR owner defect independent of the
+already-present MIR scalar registry. Primitive impls have no nominal type
+SymbolId, so method preregistration and `lower_function` reused a bare method
+name. `lower_impl` then stored different primitive implementations under the
+same key in `lowered_impl_functions`, overwriting bodies before MIR received
+them. Primitive instance signatures also omitted implicit self because
+`declared_callable_type` only inserted a receiver for a nominal owner symbol.
+
+The candidate uses one module-qualified primitive/trait declaration identity
+for preregistration, body lookup and default injection. Distinct traits over
+the same primitive retain distinct bodies, so the existing MIR visibility and
+ambiguity checks can operate. Primitive signatures contain exactly one self
+parameter, including explicit untyped self, while static methods contain none.
+An explicit method in another trait no longer suppresses this trait's default.
+Named owners retain their symbol-based path. No MIR registry or HIR struct
+layout was added. Generic scalar trait arguments remain rejected by the
+existing MIR admission rule; this change does not claim to support them.
+
+Authored regression surfaces:
+
+- `test/01_unit/compiler/hir/primitive_method_identity_spec.spl`
+- `test/02_integration/compiler/primitive_trait_identity_hir_spec.spl`
+- `test/03_system/compiler/primitive_trait_identity_native_spec.spl`
+- `test/fixtures/compiler/primitive_trait_identity/` (cross-module trait alias,
+  same-name primitive bodies, primitive type alias, defaults, explicit self,
+  static and nominal controls, and generic refusal)
+
+**Not executed:** no admitted current self-hosted runner was available when
+this candidate was authored. The native spec requires an explicit
+`SIMPLE_SELFHOSTED_BIN`, a fresh `SIMPLE_PRIMITIVE_TRAIT_OUTPUT`, LLVM,
+`SIMPLE_NO_STUB_FALLBACK=1`, and `SIMPLE_NO_BOOTSTRAP_DELEGATE=1`; it checks both
+compilation and execution status. Required unit/integration/system runs,
+coverage, generated manuals and compiler/core/MCP checks remain pending.
+No bug closure or verification PASS is claimed. Historical seed-component
+results below retain only their original scope.
+
+## 2026-11-10 — nested narrow `self` interpreter component verified
+
+Nested trait calls from an i8/i16/i32 impl lost the declared width when binding
+`self`, so the inner call selected i64. Both function-entry paths now preserve
+the selected impl's width, including an explicitly spelled untyped self
+parameter. Fallback dispatch retains the actual matched impl owner: an i64
+implementation selected for a narrow receiver must still receive i64 self.
+
+The unchanged `primitive_trait_impl_self_width` Rust integration target ran
+against release base `5c089d25fa64`: baseline **2 executed, 1 passed/1 expected
+failure** (nested case returned 1 instead of 0); candidate **2 executed, 2
+passed, 0 ignored/filtered**. The second case preserves i64 fallback and direct
+narrow dispatch; the first also checks arithmetic/text conversion. These call
+the real Rust interpreter owners directly, not a normal-tool Rust-seed CLI.
+
+Both 8,000,000 KiB / 1800-second guarded runs ended quiescent. Actual baseline
+and candidate executable bytes, source/fixture snapshots, and receipts are
+retained outside the writable Cargo target. See the adjacent
+[component receipt](primitive_receiver_trait_impl_dispatch_component_2026-11-10.sdn).
+The final PR omits only a new, uncompiled `cfg(test)` mapping mirror from the
+executed source; production code and the two-test fixture are unchanged. The
+receipt distinguishes executed and final whole-file hashes.
+
+This verifies only nested narrow-self seed-interpreter dispatch. JIT/native,
+non-identifier receiver shapes, broader compiler/core/MCP qualification and
+self-hosted CLI admission remain outside this result; the family stays open.
+
+- **Status (2026-11-05):** seed INTERPRETER dispatch FIXED for cast, bare
+  `val y: i32`, `val w = x as i32`, `fn f(x: i32)` receivers, scoped to the
+  binding (see the two 2026-11-04/05 sections at the end of this file);
+  JIT Defect A and the non-identifier receiver shapes remain OPEN there.
+- **Status (historical):** OPEN (diagnosed, root cause located, not fixed) — re-verified
   2026-08-07 (same day, follow-up probe), matrix unchanged.
   2026-08-08: the `use std.hash` export half is FIXED (30697f688ed,
   b73597bfd03). Defect A (seed JIT) still unfixed. Defect B now has a
@@ -858,3 +936,239 @@ dispatch gap, Defect B had a measured fix recipe that was "lost to a"
 changes or deep interpreter/JIT dispatch work. Out of pure-Simple
 scope. Leaving OPEN.
 
+**Revalidated 2026-11-02: still plausible because OPEN (diagnosed, root cause located, not fixed) — re-verified; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 s3g4 lane: Defect A (seed JIT) fix landed; verification pending
+
+`closures_structs.rs::try_compile_builtin_method_call` now returns `Ok(None)` for
+qualified `<i8..i64|u8..u64|f32|f64|bool>.hash` calls, so they fall through to the
+user's `impl Hash for <T>` instead of the name-keyed `"hash" => "rt_hash_text"`
+builtin (raw scalar passed as text pointer -> silent 0). `text.hash` is unchanged
+(no user-impl bypass change; separate follow-up if the FNV impl must win).
+Verify after a seed rebuild: `SIMPLE_EXECUTION_MODE=jit bin/simple run
+test/fixtures/repro/compiler/primitive_trait_impl_dispatch_repro.spl` must show the
+user sentinels for i64/bool/f32/f64. Remaining open: the interpreter i32->i64-impl
+collapse row (spec 6/7, Defect B tail). Status: fix-implemented-verification-pending (Defect A).
+
+## Interpreter seed fix: i32 collapse and u64 lookup (2026-11-04)
+
+Root cause: `src/compiler_rust/compiler/src/interpreter_method/mod.rs` (trait-impl
+fallback for built-in receivers, ~line 1780). `Value::Int` carries no width and was
+mapped to `["i64","i32","int"]`, so `impl T for i32` lost to the i64 impl; and
+`Value::UInt{width,..}` had no entry at all, so `impl T for u64` was never found.
+
+Fix: `Value::UInt` maps to `u8/u16/u32/u64` by width; an `Int` receiver written as
+`(x as <int type>)` tries the cast's type name first (then the old list). A bare
+`i32` variable receiver still has no static type at runtime and resolves to i64
+(remaining limitation).
+
+Evidence (before = release/1.0.0 seed, after = fixed seed):
+- probe, interpreter: before `FAIL i32_receiver expected=1003 actual=1002`, then
+  `method marker_probe not found on type u64`; after `ALL PASS`.
+- `primitive_receiver_trait_impl_dispatch_spec.spl`: 6/7 -> 7/7 (spec already asserted 1003; unchanged).
+- `..._class_spec.spl`: interpreter example now GREEN; the two JIT examples still FAIL
+  (`Function 'str.marker_probe' not found`) - that is Defect A, not addressed here.
+
+## Seed interpreter: bare narrow-width receivers (`val y: i32`, `fn f(x: i32)`) — FIXED 2026-11-04
+
+Closes the "bare `i32` variable receiver still resolves to i64" limitation left
+by the 2026-11-04 cast-sniff fix above. Worktree branch
+`work/seed-i32-width-20261104`; before-binary = `simple-ref` (release/1.0.0 at
+17:04, predates #6642), after-binary = the rebuilt seed.
+
+### Pure-Simple semantics mirrored
+
+`src/compiler/35.semantics/resolve.spl:103` (`TypeChecker.primitive_type_key`)
+keys `impl Trait for <primitive>` on the receiver's STATIC HIR type —
+`Int(bits, signed)` gives a distinct key per (bits, signedness) — and
+`resolve_strategies.spl:194` looks the receiver up under that key. The receiver
+type is the binding's declared type (`val y: i32`), the cast target
+(`x as i32`, so `val w = x as i32` is i32), or the parameter type
+(`fn f(x: i32)`). It is never derived from a runtime value, and the runtime
+value of an i32 is still an ordinary integer for arithmetic, equality and
+printing. The seed therefore needs the DECLARED width at dispatch time, not a
+width-tagged value.
+
+### Design chosen: declared-width side table, not a width-carrying `Value::Int`
+
+Two options were weighed:
+
+1. A signed analogue of `Value::UInt { value, width }` (new width-carrying
+   variant for i8/i16/i32). Rejected: `Value::Int(_)` is matched at ~4,300
+   sites in the seed, and `src/lib` alone declares ~16,700 `i8/i16/i32`
+   bindings that the seed interprets during bootstrap, so a new variant would
+   have to be honoured at every one of those sites (indexing, externs, format,
+   equality, hashing) or silently misbehave — and it would change the
+   arithmetic/printing/equality contract the owner required to stay unchanged.
+   `UInt` gets away with it because unsigned bindings are rare and its wrap
+   semantics were the point of that variant.
+2. **A per-frame declared-type side table keyed by binding name (chosen).**
+   `CowEnv.declared_int_widths: Option<Box<FrameMap<String, u8>>>`
+   (`src/compiler_rust/compiler/src/value.rs`), `None` until the first narrow
+   binding in a frame (one pointer per frame; the unboxed inline ahash map was
+   64 B/frame and measured +1.5 MB max RSS across retained captured envs, hence
+   the box). Written by every Let executor — `exec_node`
+   (`interpreter/node_exec.rs`) AND the block-body/closure path
+   (`interpreter_call/block_execution.rs`, two sites; this is the path `it`
+   bodies take, which is why the first build was green from `main()` but red
+   inside a spec) — through one helper `record_let_declared_width`, and by
+   parameter binding in `interpreter_call/core/function_exec.rs`. A
+   re-declaration of the name without a narrow type clears the entry
+   (`val y: i32 = 1; val y = 2; y.m()` is i64 again). Read ONLY by the
+   trait-impl fallback in `interpreter_method/mod.rs` (~1810) for an
+   `Expr::Identifier` receiver holding `Value::Int`, which now tries
+   `i8`/`i16`/`i32` before the existing `["i64","i32","int"]` order. Arithmetic,
+   printing and equality never consult it, so value semantics are untouched.
+
+### RED -> GREEN (`test/01_unit/language/primitive_receiver_trait_impl_dispatch_spec.spl`)
+
+Added `impl MarkerProbe for i8/i16`, `probe_param_i32/i64`, and six `it`
+cases: bare `val y: i32`; `val w = x as i32`; bare i8 + i16; `fn f(x: i32)`
+parameter; i64-typed, untyped and `fn f(x: i64)` receivers still pick the i64
+impl; and `val y: i32` still behaves as a plain integer (`y + 100 == 105`,
+`y == 5`, `y.to_text() == "5"`).
+
+- before-binary: `13 total, 8 passed, 5 failed` (the 4 new dispatch cases plus
+  the pre-existing inline-cast case, since `simple-ref` predates #6642).
+- after-binary: `13 total, 13 passed, 0 failed`.
+- `..._class_spec.spl`: interpreter example GREEN; the JIT example still fails
+  — Defect A, see below.
+- Direct probe (`val y: i32`, `val w = x as i32`, `val a: i16`, `val b: i8`,
+  `fn f(x: i32)`, `var m: i32` after `m = m + 1`): all reach their own impl;
+  `val z: i64`, untyped `val x = 7`, `fn f(x: i64)` still reach i64.
+
+### Regression sweep (30 specs under `test/01_unit/language` + `test/01_unit/compiler/interpreter` matching i32|i64|int|numeric|cast|trait|impl|dispatch|arith, interpreter mode, one process at a time)
+
+before 26 OK / 4 ERROR -> after 29 OK / 1 ERROR. Four specs went ERROR -> OK
+(`class_option_match_binding_identity`, `class_ref/class_element_reference`,
+`class_ref/class_ref_alias_shapes_indev`, `class_ref_interp_jit_consistency` —
+other commits landed between the two binaries). One went OK -> ERROR:
+`aliased_param_writeback_spec` 4/4 -> 3/4, its JIT-mode probe now prints
+`[engine-demotion] reason=jit-compile-error ... module has 22 top-level
+statement(s)` and falls back to the interpreter, so the "JIT gets 3" pin
+fails. Attributed by `git log -S` to `75bb3e73148` (fix(seed): JIT run falls
+back to interpreter when module has top-level statements around main(),
+2026-11-04 19:27, already on origin/release/1.0.0), not to this change — this
+diff touches no JIT/codegen file.
+
+### Perf (interpreter mode, 3 runs each, `/usr/bin/time -f %e/%M`)
+
+| loop (3M iterations) | before `simple-ref` 361cda41a52e | after 3bbd34780014 |
+|---|---|---|
+| i64 arithmetic `acc = acc + i*3 - i/7` | 1.58-1.63 s, 22-33 MB | 1.58-1.59 s, 32.7-32.9 MB |
+| method call `a.bump(i)` on a struct | 5.76-5.79 s, 23-31 MB | 5.73-5.80 s, 34.3-34.6 MB |
+
+Wall: no measurable change (<1 %, under the 3 % bar). Max RSS: the before
+binary itself spans 22-33 MB run to run; the after binary sits at the top of
+that band (+1.0 MB vs the before binary's steady 31.7-31.9 MB on a quiet
+re-run). After boxing, the side table costs 8 B per `CowEnv` and allocates
+nothing in these loops (no narrow binding), so the residual is not attributable
+to it; the two binaries differ by every commit between 17:04 and HEAD.
+
+### Remaining gaps (recorded, not built)
+
+- Receiver expressions that are not a plain identifier or cast still resolve
+  as i64: `(y + 1).m()` with `y: i32` (arithmetic result typing), `h.f.m()` on
+  an `f: i32` field, `g().m()` on `fn g() -> i32`. Pure-Simple types all of
+  these statically; the seed would need a receiver-expression type sniff
+  (field decl lookup, callee return type, operand widths). Probe values
+  measured: `arith_i32 64`, `field_i32 64`, `call_i32 64`.
+- Module-scope globals and closure-captured bases are not in the frame table
+  (only frame-local lets and params are recorded).
+- Defect A (seed JIT): `SIMPLE_EXECUTION_MODE=jit bin/simple run
+  test/fixtures/repro/compiler/primitive_trait_impl_dispatch_repro.spl` ->
+  `Runtime error: Function 'str.marker_probe' not found` after the struct
+  control passes. The JIT callee name for a text receiver is built as
+  `str.<method>` while the user impl is registered under `text`; no single
+  canonicalisation site was found in `mir/lower/lowering_expr_call.rs` /
+  `codegen/instr/closures_structs.rs`, so it is not a small fix and stays open
+  here (class spec JIT example remains RED).
+
+### Review fixes 2026-11-05: the width is scoped to its binding (block exit, loop vars)
+
+Review of the first cut (6b9ee76422f) found two leaks the before-binary got
+right: (1) a block-scoped `val q: i32` kept its width on the outer `q` after
+the block (`val q = 5; if true: val q: i32 = 1; q.m()` -> i32 impl); (2) a
+`for y in ...` variable inherited the width of the outer `val y: i32` it
+shadows. Root cause of (1), found by tracing: `block_local_bindings` is ONE
+depth counter per name — the function body is itself a shadow-captured block
+(depth 1) and the `if` is depth 2 — so a restore keyed on "depth back to 0"
+ran only at function end. Root cause of (2): `for` variables on the closure
+path bind through `save_pattern_scope`/`bind_for_pattern_value`/
+`restore_pattern_scope`, not `enter_block_local`.
+
+Invariant now stated on the field and enforced: an entry belongs to exactly
+one binding of the name. `mark_local` (frame locals, fn/lambda params) clears
+it; `enter_block_local` (block `val`s, `exec_for` loop vars, `if val`, match
+arms) and `save_pattern_scope` (closure-path `for`) stash the enclosing width
+and clear; every `exit_block_local` / `restore_pattern_scope` pops the
+matching stash — one marker per enter, LIFO per name, so a nested exit never
+pops an outer block's entry. A marker is pushed only when there is a live
+width or any stash already exists, so a narrow-free block allocates nothing.
+`set_declared_int_width` refreshes an existing entry in place (no
+`to_string` per loop-body re-execution).
+
+Measured (after = `fce6486cb331`, before = `simple-ref`):
+
+| shape | before | first cut | after |
+|---|---|---|---|
+| `val q = 5; if true: val q: i32 = 1; q.m()` (fn body) | i64 | **i32 (leak)** | i64 |
+| same, inside an `it` body / closure | i64 | i64 | i64 |
+| `val y: i32 = 1; for y in [10,20]: y.m()` | i64 | **i32 (leak)** | i64 x2; `y.m()` after the loop -> i32 (outer binding back in scope) |
+| `val y: i32 = 1; if true: val y = 5` then `y.m()` | i64 | i64 | i32 (outer `y: i32` restored — pure-Simple static typing; the before-binary's i64 was the original bug) |
+| `val y: i32 = 1; val y = 2; y.m()` (same frame) | i64 | i64 | i64 |
+| `self.m()` inside `impl Trait for i32` body | i64 | i64 | i64 (gap, below) |
+
+Spec: two new `it` cases (block-scoped `val q: i32` with `if` and `while`;
+`for` var shadowing `val y: i32`) were RED on the first cut (13/15) and are
+GREEN now (15/15). Class spec: interpreter example GREEN; JIT example is
+Defect A (unchanged). Perf, 3M-iteration i64 arithmetic loop, interpreter:
+1.58-1.61 s / 22-33 MB max RSS (before 1.58-1.63 s / 22-33 MB) — unchanged.
+
+Additional gap recorded: `self` inside an `impl Trait for <narrow>` body is
+bound by `function_exec.rs` without a width, so a trait method calling
+another trait method on `self` resolves as i64 (`D self_in_i32_impl: 64`).
+Fix is one `set_declared_int_width("self", w)` at that self-insert site when
+the impl type is i8/i16/i32; left for a follow-up to keep this change scoped.
+Separate record for the interpreter-vs-JIT `i32` overflow divergence
+(`i32::MAX + 1`): `doc/08_tracking/bug/seed_i32_overflow_interp_vs_jit_divergence_2026-11-05.md`.
+
+Regression sweep on `fce6486cb331` (same 30 specs, interpreter, one process at
+a time): 29 OK / 1 ERROR — byte-identical diff to the 2026-11-04 after-sweep
+(four ERROR->OK from other landed commits; the single OK->ERROR,
+`aliased_param_writeback_spec` JIT-probe demotion, is `75bb3e73148`, not this
+change).
+
+## 2026-11-06 re-verified: interpreter half PASSES on a seed built from current source
+primitive_receiver_trait_impl_dispatch_spec: simple-ref (stale, 2026-11-04 build) 8/15; seed built from release/1.0.0 (a89f4c436db) 15/15. No source change needed; JIT Defect A and native/pure-Simple Defect B remain as recorded above.
+
+## 2026-11-06 — seed JIT `text` receiver half fixed (row stays open)
+
+Seed JIT on `impl MarkerProbe for text` failed `Function 'str.probe' not
+found`: MIR qualified a STRING receiver with the builtin name `str` while the
+impl registered `text.probe`. `mir/lower/lowering_expr_method.rs` now prefers
+`text.m`/`String.m`/`string.m` when `str.m` is not a declared function.
+Regression: `src/compiler_rust/compiler/tests/primitive_text_trait_impl_jit.rs`.
+i64 impl already dispatched under JIT. Still OPEN: native (s3) crash on the
+b0_e probe, i32-collapses-to-i64 row.
+
+## WA-P5 Update (2026-11-26)
+
+- Root fix in Rust seed Cranelift codegen (`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`):
+  - `compile_method_call_static` previously ran `prefer_builtin_first` (`try_compile_builtin_method_call`) for qualified `<text|str|String|string>.hash`, hitting `"hash" => "rt_hash_text"` before checking `ctx.func_ids`, `ctx.use_map`, or `ctx.import_map` (only numeric/bool `.hash` was exempted).
+  - Added `is_qualified_text_hash` gate on `prefer_builtin_first` and `resolve_declared_text_hash_func_id` / `resolve_declared_text_hash_import` alias resolution for `"str.hash"` -> `text`/`String`/`string`, so declared user/trait `impl ... for text { fn hash() -> i64 }` runs first, while standalone `.hash()` with no declared impl still falls back cleanly to `rt_hash_text`.
+- `src/lib/nogc_sync_mut/src/hash.spl`: its `@workaround` tag was retired upstream in PR `#11847`; left clean on `release/1.0.0`.
+- Verification: `cargo test -p simple-compiler --lib -j 4 closures_structs::tests` (12/12 passed, including `qualified_text_hash_prefers_declared_trait_impl_over_rt_hash_text` and `qualified_text_hash_falls_back_to_rt_hash_text_when_no_impl_declared`), `builtin_hash_method_does_not_replace_local_rt_hash_text_body_id` (1/1 passed), and `--test primitive_text_trait_impl_jit` (1/1 passed).
+
+## P1-1 Update (2026-11-27) — pure-Simple HIR + MIR scalar trait-impl dispatch parity
+
+- **Status:** `fix-implemented-verification-pending`
+- **waiting-for:** Linux/Stage-2 native LLVM rebuild and execution of `test/03_system/compiler/primitive_trait_identity_native_spec.spl` (Windows host ran `--mode=interpreter` only; no native-build or cargo on this lane).
+- **Fixed in `src/compiler/20.hir/` & `src/compiler/50.mir/`:**
+  1. `src/compiler/50.mir/_MirLowering/{native_trait_registration.spl, declaration_providers_v1.spl}`: replaced `val concrete_id = match ...: case _: continue` (which evaluated `nil` in interpreter rather than skipping non-nominal `impl Marker for i32`) with explicit sentinel skip `if not concrete_id.is_valid(): continue`.
+  2. `src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl`: resolved `self.<method>()` calls inside trait default bodies (`Trait.inherited()` calling `self.mark()`) to `MethodResolution.TraitMethod(trait_sym, trait_method)` so injected scalar/nominal defaults keep trait provenance even when an unrelated trait (`Other`) implements the same method for `i32`.
+  3. `src/compiler/20.hir/hir_lowering/{types.spl, context_helpers.spl, _Items/module_build.spl, _Items/module_import_registration.spl}` + `src/compiler/50.mir/_MirLowering/provider_metadata.spl`: tracked `registering_sibling_symbols` during `resolve_package_sibling_symbols`, tagged unimported directory-sibling traits with `Visibility.Package` (preserving `Visibility.Public` on explicit imports), and skipped cross-module `Visibility.Package` traits in `mir_visible_scalar_traits_v1` so unimported sibling `Other` does not leak into `main.spl` scalar dispatch.
+  4. `src/compiler/50.mir/_MirLowering/provider_metadata.spl` + `src/compiler/50.mir/_MirLoweringExpr/{switch_operators_calls.spl, method_calls_literals.spl}`: populated trait-qualified scalar keys `"{trait_key}::{scalar_owner}::{method}"` and inherent `"scalar:inherent::{scalar_owner}::{method}"` across eager, demand, and materialized paths; exported `mir_trait_dispatch_identity` / `mir_scalar_trait_owner_key_v1`; added `scalar_trait_receiver_type_v1` for untyped scalar literal/cast/unary receivers (`1`, `1i32`, `"x"`, etc.) and unified `try_lower_scalar_trait_method_v1` across `TraitMethod` and `Unresolved` calls (plus concrete target substitution on nominal `TraitMethod` calls).
+- **Verified (Windows `--mode=interpreter`):**
+  - New regression `test/01_unit/compiler/mir/primitive_trait_identity_mir_spec.spl`: `2/2` pass (`provider.spl` + `main.spl` MIR lowering clean preserving `I32`/`I64`/`I16`, and `generic_rejected.spl` rejected with `"scalar trait method"`).
+  - Re-verified after final compiler edit: `test/01_unit/compiler/hir/primitive_method_identity_spec.spl` (`3/3`), `test/02_integration/compiler/primitive_trait_identity_hir_spec.spl` (`1/1`), `test/01_unit/compiler/mir/scalar_trait_visibility_spec.spl` (`2/2`), `test/01_unit/compiler/hir/rti_primitive_trait_method_rows_spec.spl` (`3/3`), `test/01_unit/language/primitive_receiver_trait_impl_dispatch_spec.spl` (`15/15`).

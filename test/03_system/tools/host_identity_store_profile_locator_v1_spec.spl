@@ -1,0 +1,141 @@
+# AUTHORED_NOT_RUN. Mandatory real protected profile fixtures; no synthetic
+# owner, path-as-authority, inline private key, self-installation or OS skip.
+use std.spec.{describe, it, expect, step}
+use std.common.crypto.sha256.sha256_u8_hex
+use std.common.text_bytes.bytes_to_text
+use std.nogc_sync_mut.io_runtime.env_get
+use std.nogc_sync_mut.io.host_identity_store_v1.*
+use app.orchestrator.server_ssh_profile_v1.{server_ssh_profile_decode_v1, server_ssh_profile_load_v1}
+use app.orchestrator.server_ssh_types_v1.{ServerSshProfileV1, ServerSshProfileLoadTurnV1}
+
+var profile_locator_fixture_owners_v1: [HostIdentityStoreV1] = []
+
+fn profile_locator_fixture_required_v1(name: text) -> text:
+    val value = env_get(name)
+    if value == "": panic("independently provisioned protected profile fixture required")
+    value
+
+fn profile_locator_fixture_close_v1(owner: HostIdentityStoreV1) -> HostIdentityStoreCloseTurnV1:
+    var turn = host_identity_store_close_v1(owner)
+    var budget = 128
+    while turn.owner != None and budget > 0:
+        if turn.error != "" and turn.error != "identity-store-projection-cleanup-pending": return turn
+        val actual = turn.owner.unwrap()
+        turn = host_identity_store_close_v1(actual)
+        budget = budget - 1
+    turn
+
+fn profile_locator_fixture_open_v1(root: text) -> Result<HostIdentityStoreV1, text>:
+    val opened = host_identity_store_open_v1(root)
+    if val actual = opened.owner:
+        profile_locator_fixture_owners_v1.push(actual)
+        if opened.ready and not opened.cleanup_pending and opened.error == "": return Ok(actual)
+        val closed = profile_locator_fixture_close_v1(actual)
+        return Err("actual profile store refused; cleanup-completed=" + str(closed.completed))
+    Err("actual protected profile store owner required")
+
+describe "Actual exact-profile retained config locator v1":
+    it "forwards the original protected config namespace to the real profile loader":
+        step("Open an actual protected store with an independently installed canonical full profile")
+        val root = profile_locator_fixture_required_v1("SIMPLE_HOST_IDENTITY_PROFILE_LOCATOR_ROOT")
+        val leaf = profile_locator_fixture_required_v1("SIMPLE_HOST_IDENTITY_PROFILE_LOCATOR_LEAF")
+        val owner = profile_locator_fixture_open_v1(root).unwrap()
+        val copied = owner
+        val observed = host_identity_store_read_v1(owner, leaf, 65536)
+        var expected: Option<ServerSshProfileV1> = None
+        var digest_bound = false
+        if observed.error == "" and observed.bytes != None:
+            val actual_bytes = observed.bytes.unwrap()
+            digest_bound = leaf.substring(0, 64) == sha256_u8_hex(actual_bytes)
+            val decoded = server_ssh_profile_decode_v1(bytes_to_text(actual_bytes))
+            if decoded.is_ok(): expected = Some(decoded.unwrap())
+        val locator = host_identity_store_profile_locator_v1(owner, leaf)
+        val generic_path = host_identity_store_path_v1(owner, leaf)
+        val generic_preflight = host_identity_store_transport_preflight_v1(owner)
+        step("Refuse every non-profile or malformed role through the production locator")
+        var roles_refused = true
+        val stem = "a".repeat(64)
+        for wrong in [stem + ".key", stem + ".hosts", stem + ".PROFILE",
+                "A".repeat(64) + ".profile", "g".repeat(64) + ".profile",
+                "a".repeat(63) + ".profile", "a".repeat(65) + ".profile",
+                "../" + stem + ".profile", stem + ".profile/child", stem + ".profile.key",
+                stem + ".profile ", stem + ".profile\u0000"]:
+            val rejected = host_identity_store_profile_locator_v1(owner, wrong)
+            if rejected.is_ok(): roles_refused = false
+            elif rejected.unwrap_err() != "identity-store-profile-role": roles_refused = false
+        step("Release the first actual writer before the loader reacquires and validates the locator")
+        val closed = profile_locator_fixture_close_v1(owner)
+        val stale = host_identity_store_profile_locator_v1(copied, leaf)
+        var loaded: Option<ServerSshProfileLoadTurnV1> = None
+        if closed.completed and closed.owner == None and locator.is_ok():
+            val actual = server_ssh_profile_load_v1(locator.unwrap())
+            loaded = Some(actual)
+            if val cleanup = actual.cleanup:
+                profile_locator_fixture_owners_v1.push(cleanup)
+                val cleanup_turn = profile_locator_fixture_close_v1(cleanup)
+        # Every returned OS owner is retained and received its cleanup attempt
+        # before assertions. Raw profile/private file bytes are never captured.
+        expect(closed.completed).to_equal(true)
+        expect(closed.owner == None).to_equal(true)
+        expect(observed.error).to_equal("")
+        expect(expected != None).to_equal(true)
+        expect(digest_bound).to_equal(true)
+        expect(roles_refused).to_equal(true)
+        expect(locator.is_ok()).to_equal(true)
+        expect(stale.is_err()).to_equal(true)
+        val original_locator = locator.unwrap()
+        @when(os="windows"):
+        val native_root = root.replace("/", "\\")
+        expect(original_locator).to_equal(native_root + "\\journal\\" + leaf)
+        expect(original_locator.starts_with("\\GLOBAL??\\")).to_equal(true)
+        expect(generic_path.unwrap_err()).to_equal("identity-store-transport-projection-unavailable")
+        expect(generic_preflight.unwrap_err()).to_equal("identity-store-transport-projection-unavailable")
+        @else:
+        expect(original_locator).to_equal(root + "/journal/" + leaf)
+        expect(generic_path.unwrap()).to_equal(original_locator)
+        expect(generic_preflight.is_ok()).to_equal(true)
+        @end
+        expect(loaded != None).to_equal(true)
+        val actual_turn = loaded.unwrap()
+        expect(actual_turn.error).to_equal("")
+        expect(actual_turn.cleanup == None).to_equal(true)
+        expect(actual_turn.profile != None).to_equal(true)
+        val actual_profile = actual_turn.profile.unwrap()
+        val expected_profile = expected.unwrap()
+        expect(actual_profile.auth_ref).to_equal(expected_profile.auth_ref)
+        expect(actual_profile.trust_ref).to_equal(expected_profile.trust_ref)
+        expect(actual_profile.user).to_equal(expected_profile.user)
+        expect(actual_profile.ssh_executable).to_equal(expected_profile.ssh_executable)
+        expect(actual_profile.identity_path).to_equal(expected_profile.identity_path)
+        expect(actual_profile.known_hosts_path).to_equal(expected_profile.known_hosts_path)
+        expect(actual_profile.host_key_alias).to_equal(expected_profile.host_key_alias)
+        expect(actual_profile.ssh_digest).to_equal(expected_profile.ssh_digest)
+        expect(actual_profile.store_root).to_equal(expected_profile.store_root)
+        expect(actual_profile.store_root).to_equal(root)
+
+    it "returns proved absence without poisoning the existing actual profile owner":
+        val root = profile_locator_fixture_required_v1("SIMPLE_HOST_IDENTITY_PROFILE_LOCATOR_ROOT")
+        val leaf = profile_locator_fixture_required_v1("SIMPLE_HOST_IDENTITY_PROFILE_LOCATOR_LEAF")
+        val owner = profile_locator_fixture_open_v1(root).unwrap()
+        # Fixture preparation must leave this valid-role leaf genuinely absent.
+        val absent = host_identity_store_profile_locator_v1(owner, "0".repeat(64) + ".profile")
+        val present = host_identity_store_profile_locator_v1(owner, leaf)
+        val closed = profile_locator_fixture_close_v1(owner)
+        expect(closed.completed).to_equal(true)
+        expect(absent.unwrap_err()).to_equal("identity-store-profile-absent")
+        expect(present.is_ok()).to_equal(true)
+
+    it "preserves actual unsafe-target failure and retained cleanup instead of returning a locator":
+        val root = profile_locator_fixture_required_v1("SIMPLE_HOST_IDENTITY_PROFILE_UNSAFE_ROOT")
+        val leaf = "b".repeat(64) + ".profile"
+        val owner = profile_locator_fixture_open_v1(root).unwrap()
+        val refused = host_identity_store_profile_locator_v1(owner, leaf)
+        val pending = host_identity_store_read_v1(owner, "../invalid.profile", 65536)
+        val closed = profile_locator_fixture_close_v1(owner)
+        expect(refused.is_err()).to_equal(true)
+        expect(refused.unwrap_err() == "identity-store-profile-absent").to_equal(false)
+        expect(refused.unwrap_err() == "identity-store-profile-role").to_equal(false)
+        expect(pending.cleanup_pending).to_equal(true)
+        expect(pending.bytes == None).to_equal(true)
+        expect(pending.absent).to_equal(false)
+        expect(closed.completed).to_equal(true)

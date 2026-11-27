@@ -153,13 +153,16 @@ class KpfGenerationTable:
             return KpfPinResult(status: KpfSyncStatus.StaleHandle, handle: KpfPinHandle(index: 0, epoch: 0))
         if not self.generations[handle.index].active:
             return KpfPinResult(status: KpfSyncStatus.GenerationNotActive, handle: KpfPinHandle(index: 0, epoch: 0))
+        self._take_pin_slot(handle)
+
+    me _take_pin_slot(generation: KpfGenerationHandle) -> KpfPinResult:
         var scanned = 0u32
         while scanned < self.pin_capacity:
             val index = (self.pin_cursor + scanned) % self.pin_capacity
             if not self.pins[index].occupied:
-                self.pins[index].generation = handle
+                self.pins[index].generation = generation
                 self.pins[index].occupied = true
-                self.generations[handle.index].pin_count = self.generations[handle.index].pin_count + 1
+                self.generations[generation.index].pin_count = self.generations[generation.index].pin_count + 1
                 self.pin_cursor = (index + 1) % self.pin_capacity
                 return KpfPinResult(status: KpfSyncStatus.Ok, handle: KpfPinHandle(index: index, epoch: self.pins[index].epoch))
             scanned = scanned + 1
@@ -169,6 +172,21 @@ class KpfGenerationTable:
         if not self._valid_generation(self.active):
             return KpfPinResult(status: KpfSyncStatus.GenerationNotActive, handle: KpfPinHandle(index: 0, epoch: 0))
         self.pin(self.active)
+
+    me share_pin(held: KpfPinHandle) -> KpfPinResult:
+        """Take a second lease on the generation an existing pin already holds.
+
+        pin() refuses retired generations, so a continuation suspended across a
+        publication could not otherwise keep its code alive once the original
+        holder releases. A live pin proves the generation cannot be collected,
+        so sharing it is safe even after retirement (DHR GEN-02/03).
+        """
+        if held.index >= self.pin_capacity:
+            return KpfPinResult(status: KpfSyncStatus.StaleHandle, handle: KpfPinHandle(index: 0, epoch: 0))
+        val source = self.pins[held.index]
+        if not source.occupied or source.epoch != held.epoch or not self._valid_generation(source.generation):
+            return KpfPinResult(status: KpfSyncStatus.StaleHandle, handle: KpfPinHandle(index: 0, epoch: 0))
+        self._take_pin_slot(source.generation)
 
     me release_pin(handle: KpfPinHandle) -> KpfSyncStatus:
         if handle.index >= self.pin_capacity: return KpfSyncStatus.StaleHandle

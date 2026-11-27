@@ -23,7 +23,7 @@ fn extract_sdoctest_blocks(file_path: text) -> [SdoctestBlock]:
         return extract_spl_blocks_from_content(content: content, file_path: file_path)
     extract_blocks_from_content(content: content, file_path: file_path)
 
-fn extract_blocks_from_content(content: text, file_path: text) -> [SdoctestBlock]:
+pub fn extract_blocks_from_content(content: text, file_path: text) -> [SdoctestBlock]:
     val lines = content.split("\n")
     var blocks: [SdoctestBlock] = []
     var i = 0
@@ -37,10 +37,20 @@ fn extract_blocks_from_content(content: text, file_path: text) -> [SdoctestBlock
     var ignore_next = false
     var ignore_region = false
     var pending_run_config = ""
+    # A fence of any other language (python, bash, untagged, 4+ backticks) is
+    # opaque: nothing inside it is a marker or a simple block.
+    var other_fence_len = 0
+    var simple_fence_len = 3
 
     while i < lines.len():
         val line = lines[i]
         val trimmed = line.trim()
+
+        if other_fence_len > 0:
+            if fence_closes(trimmed, other_fence_len):
+                other_fence_len = 0
+            i = i + 1
+            continue
 
         # Check for HTML comment markers
         if trimmed == "<!--sdoctest:skip-next-->":
@@ -85,6 +95,7 @@ fn extract_blocks_from_content(content: text, file_path: text) -> [SdoctestBlock
                 in_code_block = true
                 code_lines = []
                 start_line = i + 1
+                simple_fence_len = fence_tick_count(trimmed)
 
                 # Parse language and modifiers from fence line
                 val fence_info = parse_fence_line(trimmed)
@@ -113,9 +124,11 @@ fn extract_blocks_from_content(content: text, file_path: text) -> [SdoctestBlock
                 # Apply ignore-region
                 if ignore_region:
                     current_modifiers.push(SdoctestModifier.Ignore)
+            elif trimmed.starts_with("```"):
+                other_fence_len = fence_tick_count(trimmed)
         else:
             # Inside a code block
-            if trimmed == "```":
+            if fence_closes(trimmed, simple_fence_len):
                 in_code_block = false
                 # For sdoctest blocks, strip >>> prompts and remove output lines
                 var final_lines = code_lines
@@ -142,6 +155,17 @@ fn extract_blocks_from_content(content: text, file_path: text) -> [SdoctestBlock
 # =========================================================================
 # Fence Line Parsing
 # =========================================================================
+
+fn fence_tick_count(trimmed: text) -> i64:
+    var n = 0
+    while n < trimmed.len() and trimmed[n:n + 1] == "`":
+        n = n + 1
+    n
+
+# A closing fence is only backticks (no info string), at least as long as the opener.
+fn fence_closes(trimmed: text, open_len: i64) -> bool:
+    val n = fence_tick_count(trimmed)
+    n >= open_len and n == trimmed.len()
 
 fn parse_fence_line(fence: text) -> (text, [SdoctestModifier]):
     # Input examples:
@@ -491,3 +515,26 @@ fn count_occurrences(s: text, needle: text) -> i64:
         else:
             i = i + 1
     count
+
+fn build_accumulated_preambles(codes: [text]) -> [text]:
+    # Block N's preamble = reusable lines of blocks 0..N-1. Top-level `use` /
+    # `import` lines are deduplicated (first-seen order kept) so a doc that
+    # repeats the same imports in every block does not grow the preamble
+    # linearly (sdoctest_use_accumulation_exceeds_5s_block_timeout_2026-08-18).
+    var preambles: [text] = []
+    var acc_lines: [text] = []
+    var seen_imports: [text] = []
+    for code in codes:
+        preambles.push(acc_lines.join("\n"))
+        val reusable = extract_reusable_lines(code)
+        if reusable == "":
+            continue
+        for line in reusable.split("\n"):
+            val trimmed = line.trim()
+            val is_import = line_indent_count(line) == 0 and (trimmed.starts_with("use ") or trimmed.starts_with("import "))
+            if is_import:
+                if seen_imports.contains(trimmed):
+                    continue
+                seen_imports.push(trimmed)
+            acc_lines.push(line)
+    preambles

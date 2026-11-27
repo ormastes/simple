@@ -1,0 +1,102 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+# JsRuntime eval (parser path) with the common/nogc JsValue co-load
+
+**Category:** Stdlib / js engine runtime
+**Bug:** doc/08_tracking/bug/seed_enum_variant_bare_name_last_registration_wins_2026_10_19.md
+        (2026-11-11 seedfix addendum — see below for the corrected root cause)
+
+## Why this spec exists
+
+Routed symptom (lane lib3, PR #8189): any compilation co-loading
+`std.js.engine.runtime` with a `JsValue` import failed with
+`method 'trim' not found on value of type enum in nested call context`
+right after the `enum-bare-name-ambiguous: JsValue` warning, and triage
+attributed the failure to the bare-name enum collision.
+
+Seedfix-lane re-diagnosis (2026-11-11): the enum warning is incidental — the
+runtime's own dependency graph always loads both JsValue variant sets, and a
+control repro with NO enum involvement (`["1+1"].get(0).trim()`, zero imports)
+failed identically. True root: the 2026-11-09 array-get contract change
+(array_get_contract_drift_crypto_2026-10-18) made the seed interpreter's
+`arr.get(i)` return a BOXED `Option::Some`, diverging from the pure-Simple
+interpreter's flat encoding (bare word = Some payload, nil = None). Every
+`arr.get(i).<method>(...)` chain in the stdlib — first hit: the js parser's
+`parts.get(i).trim()` — then blew up with the routed error.
+
+Fix (seed): array `.get`/`.at` return the flat encoding again, and the pattern
+matcher gains the flat `Some` arm (a bare non-Nil value matches `Some(x)`),
+restoring pure-Simple parity for both chains and `Some`/`None` patterns.
+JIT/native lanes are untouched. `array_get_option_spec.spl` remains the
+contract pin and must stay green.
+
+## Coverage
+
+- co-load `std.js.engine.runtime` + the common-tier `JsValue` import (the
+  routed shape) and eval NON-fast-path scripts (the parser path that was
+  broken; the existing js_runtime_node_fast_path_spec covers only the
+  fast-path strings, which return before the parser)
+- the bare control shape `["x"].get(0).trim()` with no imports at all
+- Some/None pattern matching on `.get()` results stays intact
+"""
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+use std.js.engine.runtime.{js_runtime_with_default_logger}
+use std.common.js.types.js_types.{JsValue}
+
+
+fn _eval_text(source: text) -> text:
+    val runtime = js_runtime_with_default_logger("coload_spec")
+    val result = runtime.eval(source)
+    match result:
+        Ok(value):
+            match value:
+                JsValue.String(v): v
+                JsValue.Number(v):
+                    var s = "{v}"
+                    if s.ends_with(".0"):
+                        return s.substring(0, s.len() - 2)
+                    s
+                JsValue.Boolean(v): if v: "true" else: "false"
+                JsValue.Undefined: "undefined"
+                _: "object"
+        Err(err): "error:" + err.message
+
+describe "JsRuntime eval parser path under the JsValue co-load":
+    # @manual scenario evidence
+    it "evals non-fast-path scripts through the parser path (the routed failure mode)":
+        # @req REQ-SSPEC-UNIT
+        step("evals non-fast-path scripts through the parser path (the routed failure mode)")
+        step("'1+1' exercises js_parse_program_subset whose parts.get(i).trim() was the crash site")
+        expect(_eval_text("1+1")).to_equal("2")
+        step("string-literal method call exercises the string-method dispatch chain")
+        expect(_eval_text("'  hello  '.trim()")).to_equal("hello")
+        expect(_eval_text("'x'.toUpperCase()")).to_equal("X")
+
+    it "constructs common-tier JsValue variants alongside the runtime":
+        # @req REQ-SSPEC-UNIT
+        step("constructs common-tier JsValue variants alongside the runtime")
+        val v = JsValue.String(v: "co-load")
+        var out = ""
+        match v:
+            JsValue.String(s): out = s
+            _: out = "wrong"
+        expect(out).to_equal("co-load")
+
+    it "keeps array get chains and Some/None patterns working (flat Option contract)":
+        # @req REQ-SSPEC-UNIT
+        step("keeps array get chains and Some/None patterns working (flat Option contract)")
+        val parts = ["  a  ", "b"]
+        expect(parts.get(0).trim()).to_equal("a")
+        match parts.get(1):
+            Some(v): expect(v).to_equal("b")
+            None: expect(true).to_equal(false)
+        match parts.get(99):
+            Some(v): expect(true).to_equal(false)
+            None: expect(true).to_equal(true)

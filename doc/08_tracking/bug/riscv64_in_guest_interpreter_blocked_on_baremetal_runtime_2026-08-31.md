@@ -1,7 +1,7 @@
 # riscv64 in-guest Simple interpreter blocked on 43 missing baremetal `rt_*` symbols
 
 Date: 2026-08-31
-Status: OPEN — lane landed, honestly RED (gate exits 2, `ERROR — nothing was checked`)
+Status: SUPERSEDED — lane landed, honestly RED (gate exits 2, `ERROR — nothing was checked`)
 Base: `fix/simpleos-riscv64-components` (PR #179, `ed610b469e2`)
 Lane: `scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs`
 
@@ -319,3 +319,126 @@ baseline to compare against — the image never linked before — so attribution
 to be established by inspection rather than by bisection.
 
 Neither defect is a runtime-symbol gap, and neither is fixed by this change.
+
+---
+
+## RE-VERIFIED at tip 2026-11-05 (release/1.0.0 lane `work/riscv-inguest-20261105`)
+
+Two findings: **the original 43-symbol blocker this record was opened for
+is FIXED at tip (verified by real build)**, and **the lane is RED again
+at a NEW, different blocker — 35 undefined symbols introduced by later
+compiler growth — which this lane records but does not fix (blocked,
+below).**
+
+### The 43 are fixed — measured, not just read
+
+* Every symbol in
+  `riscv64_interpreter_missing_rt_symbols_2026-08-31.txt` has a real
+  definition in `arch/riscv64/boot/baremetal_runtime_core.inc.c`
+  (definition scan), and `nm -S` over the emitted guest objects shows all
+  43 present as strong definitions larger than 8 bytes — no weak-nil
+  stubs. `spl_wffi_call_i64` is also defined (`:2662`).
+* Real kernel build of the interp row at this tip
+  (`SIMPLE_BIN=<rust-seed> sh scripts/os/build-simpleos-riscv64-interpreter-kernel.shs`):
+  the link's undefined-symbol list contains **none of the original 43**.
+
+Toolchain note for the next runner: on this host the default
+`/home/yoon/dev/llvm/install/bin/clang` has no riscv64 target
+("No available targets are compatible with triple riscv64..."). The build
+succeeds through compile and reaches the link with
+`PATH=/usr/lib/llvm-18/bin:$PATH` (llvm-18 has the riscv64 target).
+
+### The NEW blocker, measured (nonce b24836bbd2a91e8f)
+
+The same real build's link fails with **35 undefined symbols, zero
+overlap with the original 43** (authoritative replay per this record's
+own method: `ld.lld -T linker.ld --gc-sections --error-limit=0
+--allow-multiple-definition -e <mangled spl_start> *.o` over the
+preserved `.simple/native-objects-*` dir; the replay additionally reports
+`spl_start`, the known vacuous artifact of the entry object living
+outside that dir):
+
+| bucket | n | symbols |
+|---|---|---|
+| pure computation (sibling freestanding reference exists) | 8 | `rt_text_eq_any`, `rt_array_data_ptr_text`, `rt_utf8_validate`, `rt_ptr_read_i64`, `rt_atomic_int_load`, `rt_atomic_int_compare_exchange`, `rt_value_as_bool`, `rt_value_truthy` |
+| no VFS/process/threads in S-mode (honest = fail closed) | 14 | `rt_io_file_{open,open_read,open_write,open_append,read,seek,close_value}`, `rt_process_run{,_bounded,_tuple,_bounded_tuple}`, `rt_thread_sleep`, `rt_signal_check`, `rt_atexit_check` |
+| identity/capability queries | 3 | `rt_is_interpreter_runtime`, `rt_is_jit_runtime`, `spl_thread_cpu_count` |
+| adaptive-collection capture-note instrumentation | 6 | `spl_collection_capture_note_{size,lookup,materialization,hash_probe,filter,loop}` |
+| session/transient heap | 4 | `rt_session_alloc_{begin,end}`, `rt_transient_heap_adopt`, `rt_transient_array_scope_state_v1` |
+
+Referencing sources are checked-in compiler/std modules:
+`bootstrap_mir_store.spl` / `bootstrap_hir_store.spl` (session heap,
+`f1e2edad6c7` "session-owned bootstrap MIR registries"),
+`interpreter_run_abi.spl`, `text_extern_abi.spl`, parser modules
+(`rt_value_truthy`), and `src/lib/nogc_sync_mut/sffi/collection_capture.spl`
+(`c3252a358d9`, `a1230c0acf5`). The x86_64/aarch64 freestanding lanes
+define some buckets (pure-computation, io fail-closed) but NONE define
+the session-heap or capture-note sets — this is a **cross-architecture
+freestanding gap from compiler growth after this record's closure**, not
+a riscv64-specific regression.
+
+### Blocked, not fixed — and why that is the honest call
+
+This lane does not port the 35. Reasons, in the vocabulary this record
+already uses:
+
+1. **Size and design, not transcription.** The pure-computation and
+   fail-closed buckets (~25 symbols) are a #179-sized tranche with
+   sibling references. The session-heap bucket is different: the hosted
+   semantics (`runtime_native.c:3539-3606`) implement an alloc-session
+   discipline that the new bootstrap MIR/HIR stores are built around,
+   and no freestanding sibling defines it anywhere in the tree. Porting
+   it wrong — e.g. refuse-everything stubs — would not fail the link
+   honestly, it would silently change what the in-guest BUILD half
+   produces, the exact silent-lie class this lane exists to prevent.
+   It needs its own design session, not a drive-by port.
+2. **Capture notes are cross-arch absent.** All six
+   `spl_collection_capture_note_*` symbols are instrumentation with
+   caller-defined sentinel contracts; no freestanding reference exists
+   on any architecture. Same design question as the session heap.
+3. **Verification needs the guest.** A port is only proven by the real
+   OpenSBI boot reaching `phase=mir-ok` / the row markers; one boot
+   cycle is ~25 minutes and the full gate includes the OpenSBI wrap
+   build. That evidence cannot be produced within this lane's budget.
+
+**Status: the blocker this record was opened for (43 symbols) is CLOSED
+and verified fixed at tip. The lane's current RED state is a NEW defect
+(the 35-symbol set above) and needs a fresh bug record + a dedicated
+port lane.** File it against
+`build-simpleos-riscv64-interpreter-kernel.shs`; the measurement commands
+in this section reproduce the list exactly.
+
+## Follow-up 2026-11-05
+
+The NEW 35-symbol link blocker is tracked as its own record:
+`riscv64_in_guest_kernel_link_blocked_35_symbols_2026-11-05.md` (P2, open).
+
+---
+
+# P3 TRIAGE ADDENDUM (2026-11-11, lane boot8) — SUPERSEDED
+
+Verdict: **SUPERSEDED — the 43-symbol blocker this record was opened for is CLOSED and verified fixed at tip; the lane's current RED is a different, separately-tracked defect.**
+
+This doc's 2026-11-05 "RE-VERIFIED at tip" section already established: all 43
+symbols in `riscv64_interpreter_missing_rt_symbols_2026-08-31.txt` have real
+definitions in `arch/riscv64/boot/baremetal_runtime_core.inc.c` (strong, >8
+bytes, no weak-nil stubs) and a real interp-row kernel build's link contains
+none of the original 43. This lane spot-checked at `work/p3-boot8-20261111` HEAD
+(`7d4140c1a6b3`):
+
+- Source: a definition-scan over `baremetal_runtime_core.inc.c` confirms the
+  sampled set across every bucket is present — file (`rt_file_exists`),
+  diagnostics/print (`rt_print_value`, `rt_panic`, `rt_unwrap_or_trap`,
+  `rt_platform_name`, ...), dict (`rt_dict_new/keys/values/contains`),
+  transient heap, env (`rt_env_get/get_i64/set/remove`), array/collection
+  (`rt_array_copy`, `rt_push/pop/clear/sort/index_of`,
+  `rt_collection_remove`), value/convert (`rt_value_as_int/float`,
+  `rt_value_float`, `rt_string_to_float`, `rt_raw_i64_to_string`), and time
+  (`rt_time_now_unix_micros`, `rt_time_now_monotonic_ms`). No absent symbol.
+
+Host-limit note: a fresh in-guest link/boot is not possible on this Windows
+host; verification here is source definition-scan. The real-build link proof
+stands from the cited 2026-11-05 section. This record's blocker is closed; the
+NEW 35-symbol link blocker is tracked separately as
+`riscv64_in_guest_kernel_link_blocked_35_symbols_2026-11-05.md` (P2, open) and is
+out of this record's scope.

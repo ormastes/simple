@@ -1,0 +1,93 @@
+#!/bin/sh
+set -eu
+if [ "$(uname -s)" != Darwin ]; then
+    echo 'UNAVAILABLE: native Darwin snapshot runner requires macOS'
+    exit 77
+fi
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/darwin-snapshot-runner.XXXXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+"${CC:-cc}" -std=c11 -O0 -Wno-deprecated-declarations \
+    "$root/src/runtime/tools/sosix_darwin_snapshot_runner.c" -o "$scratch/runner"
+cat > "$scratch/fixture.c" <<'EOF'
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+    if (argc < 2) return 126;
+    if (!strcmp(argv[1], "capture")) {
+        char cwd[4096]; if (!getcwd(cwd, sizeof(cwd))) return 126;
+        printf("%s|%s|%s", argv[2], getenv("SNAPSHOT_ENV"), cwd);
+        fprintf(stderr, "diagnostic"); return 17;
+    }
+    if (!strcmp(argv[1], "timeout")) {
+        signal(SIGTERM, SIG_IGN); for (;;) pause();
+    }
+    if (!strcmp(argv[1], "overflow")) {
+        for (int i = 0; i < 10000; i++) putchar('x'); return 0;
+    }
+    if (!strcmp(argv[1], "marker")) {
+        FILE *f = fopen(argv[2], "w"); if (!f) return 126;
+        fclose(f); return 0;
+    }
+    return 127;
+}
+EOF
+"${CC:-cc}" -std=c11 "$scratch/fixture.c" -o "$scratch/fixture"
+"$scratch/runner" --capabilities > "$scratch/caps"
+test "$(cat "$scratch/caps")" = 'profile: "trusted-snapshot-group"
+snapshot: true
+process_group: true
+immutable_executable: false
+complete_descendant_tree: false
+sealed_v4: false'
+echo 'PASS capabilities: strict V4 unavailable'
+set +e
+"$scratch/runner" --profile sealed-v4 --cwd /private/tmp -- "$scratch/fixture" marker "$scratch/marker" > "$scratch/out" 2> "$scratch/err"
+status=$?
+set -e
+test "$status" = 64
+test ! -e "$scratch/marker"
+echo 'PASS strict profile: rejected before spawn'
+set +e
+SNAPSHOT_ENV=exact "$scratch/runner" --profile trusted-snapshot-group --cwd /private/tmp -- "$scratch/fixture" capture 'two words' > "$scratch/out" 2> "$scratch/err"
+status=$?
+set -e
+test "$status" = 17
+test "$(cat "$scratch/out")" = 'two words|exact|/private/tmp'
+test "$(cat "$scratch/err")" = diagnostic
+echo 'PASS capture: exact argv environment cwd streams exit'
+set +e
+"$scratch/runner" --profile trusted-snapshot-group --cwd /private/tmp --wall-ms 100 -- "$scratch/fixture" timeout > "$scratch/out" 2> "$scratch/err"
+status=$?
+set -e
+test "$status" = 124
+echo 'PASS timeout: TERM KILL reap group retirement'
+"$scratch/runner" --profile trusted-snapshot-group --cwd /private/tmp --output-limit 128 -- "$scratch/fixture" overflow > "$scratch/out" 2> "$scratch/err"
+test "$(wc -c < "$scratch/out" | tr -d ' ')" = 128
+test ! -s "$scratch/err"
+echo 'PASS output: retained 128 of 10000 bytes'
+set +e
+TMPDIR=. SNAPSHOT_ENV=exact "$scratch/runner" --profile trusted-snapshot-group --cwd /private/tmp -- "$scratch/fixture" capture 'two words' > "$scratch/out" 2> "$scratch/err"
+status=$?
+set -e
+test "$status" = 17
+test "$(cat "$scratch/out")" = 'two words|exact|/private/tmp'
+test "$(cat "$scratch/err")" = diagnostic
+echo 'PASS relative TMPDIR: snapshot survives child cwd change'
+mkfifo "$scratch/not-an-executable"
+set +e
+"$scratch/runner" --profile trusted-snapshot-group --cwd /private/tmp --wall-ms 50 -- "$scratch/not-an-executable" > "$scratch/out" 2> "$scratch/err" &
+runner_pid=$!
+(sleep 2; kill -KILL "$runner_pid" 2>/dev/null) &
+watchdog_pid=$!
+wait "$runner_pid"
+status=$?
+kill "$watchdog_pid" 2>/dev/null
+wait "$watchdog_pid" 2>/dev/null
+set -e
+test "$status" = 125
+echo 'PASS FIFO: rejected without blocking before spawn'
+echo 'Darwin trusted snapshot runner: PASS (strict V4 unavailable)'

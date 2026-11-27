@@ -1,0 +1,284 @@
+use std.spec
+use compiler.mir.loop_resource_account_v1.{MirLoopResourceAccountV1, MirLoopResourceLimitsV1, MirLoopResourceKindV1}
+use compiler.mir.loop_module_shape_types_v1.{MirLoopShapeTagV1, MirLoopShapeErrorV1, mir_loop_mir_binop_code_v1}
+use compiler.mir.loop_module_shape_owner_v1.{MirLoopShapeOwnerV1}
+use compiler.mir.loop_module_shape_projection_v1.{reserve_type_renderer_v1, reserve_operand_renderer_v1, reserve_instruction_renderer_v1, reserve_text_export_v1, reserve_type_plan_projection_v1}
+use compiler.mir.mir_types.{MirTypeKind, MirTypeDefKind}
+use compiler.mir.mir_instruction_support.{MirOperandKind, MirBinOp}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.hir.hir_types.{SymbolId}
+
+fn projection_owner() -> MirLoopShapeOwnerV1:
+    val owner = MirLoopShapeOwnerV1.create(MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1()).unwrap()).unwrap()
+    owner.publish_namespace(owner.reserve_text(1).unwrap().publish("N").unwrap()).unwrap()
+    owner
+
+fn projection_unit_function_owner() -> MirLoopShapeOwnerV1:
+    val owner = projection_owner()
+    val unit = owner.begin(MirLoopShapeTagV1.TypeUnit).unwrap().finish().unwrap()
+    val signature = owner.begin(MirLoopShapeTagV1.Signature).unwrap()
+    signature.scalar(0, 0).unwrap()
+    signature.scalar(1, 1).unwrap()
+    signature.scalar(2, 0).unwrap()
+    signature.scalar(3, 0).unwrap()
+    signature.child(unit).unwrap()
+    val signature_id = signature.finish().unwrap()
+    val function = owner.begin(MirLoopShapeTagV1.Function).unwrap()
+    function.scalar(0, 18).unwrap()
+    function.scalar(1, 0).unwrap()
+    function.text_id(0, owner.reserve_text(1).unwrap().publish("f").unwrap()).unwrap()
+    function.child(signature_id).unwrap()
+    owner.publish_function(function.finish().unwrap(), nil).unwrap()
+    owner
+
+describe "Reserved scalar view projections":
+    it "materializes actual pointer type and denies reuse of the permit":
+        val owner = projection_owner()
+        val byte_type = owner.begin(MirLoopShapeTagV1.TypeU8).unwrap().finish().unwrap()
+        val pointer = owner.begin(MirLoopShapeTagV1.TypePtr).unwrap()
+        pointer.scalar(0, 1).unwrap()
+        pointer.child(byte_type).unwrap()
+        val identity = pointer.finish().unwrap()
+        val view = owner.seal().unwrap()
+        val permit = reserve_type_renderer_v1(view, identity).unwrap()
+        match permit.materialize_type().unwrap().kind:
+            case MirTypeKind.Ptr(inner, mutable):
+                expect(inner.kind).to_equal(MirTypeKind.U8)
+                expect(mutable).to_equal(true)
+            case _: expect(false).to_equal(true)
+        expect(permit.materialize_type().is_err()).to_equal(true)
+
+    it "preserves a real Move operand without widening it to Copy":
+        val owner = projection_owner()
+        val move = owner.begin(MirLoopShapeTagV1.OperandMove).unwrap()
+        move.scalar(0, 17).unwrap()
+        val identity = move.finish().unwrap()
+        val view = owner.seal().unwrap()
+        match reserve_operand_renderer_v1(view, identity).unwrap().materialize_operand().unwrap().kind:
+            case MirOperandKind.Move(local): expect(local.id).to_equal(17)
+            case _: expect(false).to_equal(true)
+
+    it "exports exact internal text including NUL and refuses closed issuer access":
+        val owner = projection_owner()
+        val identity = owner.reserve_text(3).unwrap().publish("a\0b").unwrap()
+        val view = owner.seal().unwrap()
+        val text = reserve_text_export_v1(view, identity).unwrap().copy_text().unwrap()
+        expect(text.len()).to_equal(3)
+        expect(text.byte_at(0)).to_equal(97)
+        expect(text.byte_at(1)).to_equal(0)
+        expect(text.byte_at(2)).to_equal(98)
+        val permit = reserve_text_export_v1(view, identity).unwrap()
+        owner.close()
+        expect(permit.copy_text().is_err()).to_equal(true)
+
+    it "refuses a non-type cursor before any rich type projection":
+        val owner = projection_owner()
+        val operand = owner.begin(MirLoopShapeTagV1.OperandCopy).unwrap()
+        operand.scalar(0, 0).unwrap()
+        val identity = operand.finish().unwrap()
+        val view = owner.seal().unwrap()
+        expect(reserve_type_renderer_v1(view, identity).is_err()).to_equal(true)
+
+    it "projects actual declaration fields without a function body or invented layout":
+        val owner = projection_owner()
+        val nominal = owner.begin(MirLoopShapeTagV1.TypeStruct).unwrap()
+        nominal.scalar(0, 7).unwrap()
+        val unit = nominal.finish().unwrap()
+        val field = owner.begin(MirLoopShapeTagV1.Field).unwrap()
+        field.scalar(0, 16).unwrap()
+        field.scalar(1, 1).unwrap()
+        field.scalar(2, 5).unwrap()
+        field.text_id(0, owner.reserve_text(1).unwrap().publish("x").unwrap()).unwrap()
+        field.child(unit).unwrap()
+        val field_id = field.finish().unwrap()
+        val declaration = owner.begin(MirLoopShapeTagV1.DeclStruct).unwrap()
+        declaration.scalar(0, 7).unwrap()
+        declaration.scalar(1, 1).unwrap()
+        declaration.text_id(0, owner.reserve_text(3).unwrap().publish("Box").unwrap()).unwrap()
+        declaration.text_id(1, owner.reserve_text(5).unwrap().publish("C_Box").unwrap()).unwrap()
+        declaration.child(field_id).unwrap()
+        owner.publish_declaration(declaration.finish().unwrap(), nil).unwrap()
+        owner.remap_nominal(7, 77).unwrap()
+        val view = owner.seal().unwrap()
+        val permit = reserve_type_plan_projection_v1(view).unwrap()
+        val module = permit.materialize_type_plan().unwrap()
+        expect(module.types.len()).to_equal(1)
+        expect(module.functions.len()).to_equal(0)
+        expect(module.statics.len()).to_equal(0)
+        val definition = module.types[SymbolId(id: 77)]
+        expect(definition.symbol.id).to_equal(77)
+        expect(definition.name).to_equal("Box")
+        expect(definition.export_name).to_equal("C_Box")
+        expect(definition.is_export_c).to_equal(true)
+        match definition.kind:
+            case MirTypeDefKind.Struct(fields):
+                expect(fields.len()).to_equal(1)
+                expect(fields[0].name).to_equal("x")
+                expect(fields[0].offset).to_equal(16)
+                expect(fields[0].has_bits_attr).to_equal(true)
+                expect(fields[0].bits_width).to_equal(5)
+                match fields[0].type_.kind:
+                    case MirTypeKind.Struct(symbol): expect(symbol.id).to_equal(77)
+                    case _: expect(false).to_equal(true)
+            case _: expect(false).to_equal(true)
+        expect(permit.materialize_type_plan().is_err()).to_equal(true)
+
+    it "projects ordered instruction operands and every original span field":
+        val owner = projection_owner()
+        val left = owner.begin(MirLoopShapeTagV1.OperandCopy).unwrap()
+        left.scalar(0, 3).unwrap()
+        val left_id = left.finish().unwrap()
+        val right = owner.begin(MirLoopShapeTagV1.OperandMove).unwrap()
+        right.scalar(0, 9).unwrap()
+        val right_id = right.finish().unwrap()
+        val span = owner.begin(MirLoopShapeTagV1.Span).unwrap()
+        span.scalar(0, 11).unwrap()
+        span.scalar(1, 18).unwrap()
+        span.scalar(2, 2).unwrap()
+        span.scalar(3, 5).unwrap()
+        span.scalar(4, 99).unwrap()
+        span.text_id(0, owner.reserve_text(5).unwrap().publish("p.spl").unwrap()).unwrap()
+        val span_id = span.finish().unwrap()
+        val instruction = owner.begin(MirLoopShapeTagV1.InstBinOp).unwrap()
+        instruction.scalar(0, 12).unwrap()
+        instruction.scalar(1, mir_loop_mir_binop_code_v1(MirBinOp.Sub)).unwrap()
+        instruction.child(left_id).unwrap()
+        instruction.child(right_id).unwrap()
+        instruction.span(span_id).unwrap()
+        val identity = instruction.finish().unwrap()
+        val permit = reserve_instruction_renderer_v1(owner.seal().unwrap(), identity).unwrap()
+        val actual = permit.materialize_instruction().unwrap()
+        match actual.kind:
+            case MirInstKind.BinOp(destination, operation, lhs, rhs):
+                expect(destination.id).to_equal(12)
+                expect(operation).to_equal(MirBinOp.Sub)
+                match lhs.kind:
+                    case MirOperandKind.Copy(local): expect(local.id).to_equal(3)
+                    case _: expect(false).to_equal(true)
+                match rhs.kind:
+                    case MirOperandKind.Move(local): expect(local.id).to_equal(9)
+                    case _: expect(false).to_equal(true)
+            case _: expect(false).to_equal(true)
+        val original = actual.span.unwrap()
+        expect(original.file).to_equal("p.spl")
+        expect(original.start).to_equal(11)
+        expect(original.end).to_equal(18)
+        expect(original.line).to_equal(2)
+        expect(original.col).to_equal(5)
+        expect(original.length).to_equal(99)
+        expect(permit.materialize_instruction().is_err()).to_equal(true)
+
+    it "projects distinct actual and declared function signature lists and flags":
+        val owner = projection_owner()
+        val result = owner.begin(MirLoopShapeTagV1.TypeU32).unwrap().finish().unwrap()
+        val actual = owner.begin(MirLoopShapeTagV1.TypeBool).unwrap().finish().unwrap()
+        val declared_first = owner.begin(MirLoopShapeTagV1.TypeI16).unwrap().finish().unwrap()
+        val declared_second = owner.begin(MirLoopShapeTagV1.TypeU8).unwrap().finish().unwrap()
+        val signature = owner.begin(MirLoopShapeTagV1.Signature).unwrap()
+        signature.scalar(0, 1).unwrap()
+        signature.scalar(1, 0).unwrap()
+        signature.scalar(2, 1).unwrap()
+        signature.scalar(3, 1).unwrap()
+        signature.child(result).unwrap()
+        signature.child(actual).unwrap()
+        signature.child(declared_first).unwrap()
+        signature.child(declared_second).unwrap()
+        val signature_id = signature.finish().unwrap()
+        val function = owner.begin(MirLoopShapeTagV1.Function).unwrap()
+        function.scalar(0, 18).unwrap()
+        function.scalar(1, 0).unwrap()
+        function.text_id(0, owner.reserve_text(1).unwrap().publish("f").unwrap()).unwrap()
+        function.child(signature_id).unwrap()
+        owner.publish_function(function.finish().unwrap(), nil).unwrap()
+        val module = reserve_type_plan_projection_v1(owner.seal().unwrap()).unwrap().materialize_type_plan().unwrap()
+        val projected = module.functions[SymbolId(id: 18)]
+        expect(projected.name).to_equal("f")
+        expect(projected.symbol.id).to_equal(18)
+        expect(projected.blocks.len()).to_equal(0)
+        expect(projected.locals.len()).to_equal(0)
+        expect(projected.nogc_strict).to_equal(false)
+        expect(projected.short_call_contracts.len()).to_equal(0)
+        expect(projected.enum_matches.len()).to_equal(0)
+        expect(projected.signature.return_type.kind).to_equal(MirTypeKind.U32)
+        expect(projected.signature.is_variadic).to_equal(true)
+        expect(projected.signature.params_known).to_equal(false)
+        expect(projected.signature.declared_params_known).to_equal(true)
+        expect(projected.signature.params.len()).to_equal(1)
+        expect(projected.signature.params[0].kind).to_equal(MirTypeKind.Bool)
+        expect(projected.signature.declared_params.len()).to_equal(2)
+        expect(projected.signature.declared_params[0].kind).to_equal(MirTypeKind.I16)
+        expect(projected.signature.declared_params[1].kind).to_equal(MirTypeKind.U8)
+
+    it "reserves the current function skeleton at its exact boundary and refuses one under":
+        # Independent current-layout inventory: module/permit34, traversal3,
+        # signature9 fields x12 copies, child queue3, Unit4 fields x18 copies,
+        # and (MirFunction36 + Span6 + clocked8 + hardware6 + two IDs) x5.
+        # Total510 is five more slots than the historical35-field skeleton.
+        # Materializing the two text exports separately needs six permit slots.
+        val owner = projection_unit_function_owner()
+        val view = owner.seal().unwrap()
+        val account = view.account()
+        val fill = account.remaining(MirLoopResourceKindV1.StateFields) - 516
+        account.reserve(fill, state_fields: fill).unwrap()
+        val before = account.snapshot()
+        val permit = reserve_type_plan_projection_v1(view).unwrap()
+        expect(account.snapshot().state_fields - before.state_fields).to_equal(510)
+        expect(account.snapshot().output_bytes - before.output_bytes).to_equal(11)
+        val module = permit.materialize_type_plan().unwrap()
+        val projected = module.functions[SymbolId(id: 18)]
+        expect(projected.name).to_equal("f")
+        expect(projected.signature.return_type.kind).to_equal(MirTypeKind.Unit)
+        expect(projected.nogc_strict).to_equal(false)
+        expect(projected.short_call_contracts.len()).to_equal(0)
+        expect(projected.enum_matches.len()).to_equal(0)
+        expect(account.snapshot().state_fields - before.state_fields).to_equal(516)
+        expect(account.remaining(MirLoopResourceKindV1.StateFields)).to_equal(0)
+        val short_owner = projection_unit_function_owner()
+        val short_view = short_owner.seal().unwrap()
+        val short_account = short_view.account()
+        val short_fill = short_account.remaining(MirLoopResourceKindV1.StateFields) - 509
+        short_account.reserve(short_fill, state_fields: short_fill).unwrap()
+        val short_before = short_account.snapshot()
+        match reserve_type_plan_projection_v1(short_view):
+            case Err(error): expect(error).to_equal(MirLoopShapeErrorV1.Capacity)
+            case Ok(_): expect(false).to_equal(true)
+        # Earlier successful reservations stay charged; the failed290-slot
+        # function skeleton reservation adds nothing and issues no permit.
+        expect(short_account.snapshot().state_fields - short_before.state_fields).to_equal(220)
+        expect(short_account.snapshot().output_bytes - short_before.output_bytes).to_equal(6)
+        expect(short_view.function_count().unwrap()).to_equal(1)
+
+    it "admits the independently counted thirty-field Unit projection and refuses one under":
+        # Independent leaf copy inventory: four retained node/constructor slots
+        # across payload, wrapper, Ok, return, binding and argument = 24.
+        # Three scalar traversal slots + three permit slots = 30; no children,
+        # text bytes or span. This literal oracle never calls a sizing helper.
+        val owner = projection_owner()
+        val unit = owner.begin(MirLoopShapeTagV1.TypeUnit).unwrap().finish().unwrap()
+        val view = owner.seal().unwrap()
+        val account = view.account()
+        val fill = account.remaining(MirLoopResourceKindV1.StateFields) - 30
+        account.reserve(fill, state_fields: fill).unwrap()
+        val before = account.snapshot()
+        val permit = reserve_type_renderer_v1(view, unit).unwrap()
+        expect(account.snapshot().state_fields - before.state_fields).to_equal(30)
+        expect(account.snapshot().output_bytes).to_equal(before.output_bytes)
+        expect(permit.materialize_type().unwrap().kind).to_equal(MirTypeKind.Unit)
+        val short_owner = projection_owner()
+        val short_unit = short_owner.begin(MirLoopShapeTagV1.TypeUnit).unwrap().finish().unwrap()
+        val short_view = short_owner.seal().unwrap()
+        val short_account = short_view.account()
+        val short_fill = short_account.remaining(MirLoopResourceKindV1.StateFields) - 29
+        short_account.reserve(short_fill, state_fields: short_fill).unwrap()
+        val short_before = short_account.snapshot()
+        val observation = short_owner.observation()
+        match reserve_type_renderer_v1(short_view, short_unit):
+            case Err(error): expect(error).to_equal(MirLoopShapeErrorV1.Capacity)
+            case Ok(_): expect(false).to_equal(true)
+        # Failed permit allocation is atomic; prior admitted traversal/copy
+        # reservations remain charged, with no refund or new publication.
+        expect(short_account.snapshot().state_fields - short_before.state_fields).to_equal(27)
+        expect(short_account.snapshot().output_bytes).to_equal(short_before.output_bytes)
+        expect(short_owner.observation().nodes).to_equal(observation.nodes)
+        expect(short_owner.observation().texts).to_equal(observation.texts)
+        expect(short_view.tag(short_unit).unwrap()).to_equal(MirLoopShapeTagV1.TypeUnit)

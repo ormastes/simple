@@ -1,0 +1,55 @@
+# Wrap a flat bare-metal blob (Simple-linked, entry stub first) in a PE EFI
+# application with the in-house PE emitter instead of lld-link.
+# Used by check-baremetal-efi-boot.shs --linker simple.
+#
+# Usage: bin/simple run scripts/check/baremetal-efi-wrap.spl -- \
+#            <x86_64|aarch64|i686|arm> <image.bin> <out.efi>
+# Exit 0 on success, 1 on a wrap error (message on stdout), 2 on bad usage.
+
+use compiler.backend.linker.coff.pe_efi_blob.{pe_efi_wrap_blob}
+use compiler.backend.linker.coff.pe_image_writer.{
+    PE_MACHINE_AMD64, PE_MACHINE_ARM64, PE_MACHINE_I386, PE_MACHINE_ARM_THUMB}
+use std.io_runtime.{get_args, file_read_bytes_i64, file_write_bytes}
+
+fn _machine(name: text) -> (i64, i64):
+    # (machine, entry offset); ARM enters in Thumb state (bit 0 set).
+    if name == "x86_64": return (PE_MACHINE_AMD64, 0)
+    if name == "aarch64": return (PE_MACHINE_ARM64, 0)
+    if name == "i686": return (PE_MACHINE_I386, 0)
+    if name == "arm": return (PE_MACHINE_ARM_THUMB, 1)
+    (0, 0)
+
+fn _user_args() -> [text]:
+    val all = get_args()
+    var out: [text] = []
+    var seen = false
+    for a in all:
+        if seen:
+            if not (out.len() == 0 and a == "--"): out = out.push(a)
+        elif a.ends_with("baremetal-efi-wrap.spl"):
+            seen = true
+    out
+
+fn main() -> i64:
+    val args = _user_args()
+    if args.len() != 3:
+        print("usage: baremetal-efi-wrap.spl <arch> <image.bin> <out.efi>")
+        return 2
+    val m = _machine(args[0])
+    if m.0 == 0:
+        print("efi-wrap: unsupported arch {args[0]}")
+        return 2
+    val raw = file_read_bytes_i64(args[1])
+    if raw.len() == 0:
+        print("efi-wrap: cannot read {args[1]}")
+        return 1
+    var blob: [u8] = []
+    for b in raw: blob = blob.push((b & 0xff) as u8)
+    val wrapped = pe_efi_wrap_blob(blob, m.0, m.1)
+    if wrapped.is_err():
+        print("efi-wrap: {wrapped.unwrap_err()}")
+        return 1
+    if not file_write_bytes(args[2], wrapped.unwrap()):
+        print("efi-wrap: cannot write {args[2]}")
+        return 1
+    0

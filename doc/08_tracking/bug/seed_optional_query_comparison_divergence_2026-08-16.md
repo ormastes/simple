@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - **Date**: 2026-08-16
-- **Status**: PARTIAL FIX (Divergence A: 2 sites fixed in h1_client.spl, 43 total sites tree-wide remain; Divergence B: constant made pub; Divergence C: open)
+- **Status**: FIXED (2026-11-11, lane interp12) — Divergence A reclassified + census-converted (pinned, spec green); Divergence B fixed (`pub val`) with the chunked-decode root cause closed by Divergence D's ByteArray-concat fix (spec green); Divergence D FIXED at root; the 2026-11-09 Part A `bool?` JIT fix is verified on fresh seed 46fe8f6b6def (specs 7/7, 10/10, 8/8 + JIT repro matches); Divergence C split out to `seed_semantic_errors_lack_position_2026-11-09.md`. See "Addendum 2026-11-11". (Supersedes:) PARTIAL FIX (Divergence A: 2 sites fixed in h1_client.spl, 43 total sites tree-wide remain; Divergence B: constant made pub; Divergence C: open)
 - **Area**: compiler_rust (seed interpreter), lib/gc_async_mut/gpu/browser_engine
 - **Related**: `src/lib/gc_async_mut/gpu/browser_engine/net/h1_client.spl` (TLS handshake guard), `src/lib/gc_async_mut/gpu/browser_engine/net/entity/request_types.spl` (BROWSER_MAX_RESOURCE_BYTES)
 
@@ -158,7 +158,7 @@ divergence D's tests now assert the FIXED concat behavior) and
 `test/01_unit/lib/gc_async_mut/gpu/browser_engine/h1_response_parse_spec.spl`
 (6 parse cases incl. the chunked regression, compiler-agnostic).
 
-## Divergence C — Seed reports semantic errors with no position information
+## Divergence C — Seed reports semantic errors with no position information — split out to seed_semantic_errors_lack_position_2026-11-09
 
 Both divergences A and B presented as runtime mysteries (nil pointer dereference, type mismatch with no source location) because the seed's semantic error reporting omits file and line number information.
 
@@ -182,3 +182,85 @@ This lack of context makes seed-vs-self-hosted discrepancies hard to localize. A
 
 The two h1_client.spl guard fixes landed in the browser development lane. The BROWSER_MAX_RESOURCE_BYTES `pub val` change was made but downstream chunked-decode failure was not resolved as part of this investigation — that work remains open.
 
+
+## Update 2026-11-05 (F1 lane)
+
+Divergence A residual fixed in the seed BDD assertion path
+(`src/compiler_rust/compiler/src/interpreter_call/bdd.rs`, comparison-form
+`expect`): `expect(opt.? == nil)` collapsed `.?` to bool and compared
+`false == nil`, so the spec said false while `simple run` said true. A `.?`
+compared with a literal `nil` now keeps its `T?` value. Repro:
+`test/01_unit/compiler/interpreter/exists_check_presence_regression_spec.spl` case "optional .? passes the payload through". Divergence C
+(module-private `val` imports) is outside the `.?` family and stays open.
+
+## 2026-11-07 (round 15) status correction
+Verdict: fixed (already). Divergence A is a reclassified call-site idiom trap (census converted
+2026-08-16) and is pinned by `test/03_system/feature/usage/exists_check_bool_comparison_trap_spec.spl`;
+the "PARTIAL FIX / 43 sites remain" header above is stale. Prevention spec path is that same file.
+
+## 2026-11-09 — Part A (`bool?` payload comparison) fix implemented, verification pending
+Owner decision: `x.? == true/false` is nil-safe and matches self-hosted (`bool_false().? == false` true;
+`nil == false` false; `nil != true` true). Divergence C was split out to
+`seed_semantic_errors_lack_position_2026-11-09`.
+
+Root cause: the INTERPRETER was already correct (`Some(x)` vs `x` bridged in `BinOp::Eq`; forced-interpreter
+run gives true for all cases). The divergence is the JIT lane: under `run`, `main` is JIT-compiled, and
+`HIR lower_binary` compared a tagged optional slot (`Pointer<bool|int>`, also what `.?` yields in value
+position) against a RAW scalar word, so `bool_false().? == false`, `bool_false() == false` and
+`int_f() == 5` were all false. Fix: `lower_binary` (hir/lower/expr/operators.rs) boxes the raw side and compares
+both via `rt_unwrap_or_self` as ANY (tagged equality; nil never equals a boxed scalar).
+Tests: `optional_scalar_eq_raw_scalar_uses_tagged_equality` / `raw_scalar_and_nil_comparisons_keep_plain_binary`
+(control_flow_tests.rs) and the spec above (the `simple test` runner uses the interpreter lane, so the spec
+pins semantics; the JIT repro is `simple run` on a `fn main()`).
+Evidence: `simple run` on a `fn main()` repro (`e=bf().?` ...): before (bin/simple.exe) `e == false` false,
+`bt().? == true` false, `ki() == 5` false, `bf() == false` false; after (rebuilt seed) all true, while
+`bf().? == true` false, `bn().? == false` false, `bn().? != true` true, `bn().? == nil` true, `ki().? == false` false.
+HIR red->green: `optional_scalar_eq_raw_scalar_uses_tagged_equality` fails without the fix, passes with it.
+
+## 2026-11-09 (follow-up) — Part A seed fix (owner decision), Part C split
+
+Owner decision (memory owner-decisions-20261106 item 14): the seed treats
+`x.? == true` / `x.? == false` nil-safely, matching pure Simple.
+
+- **Pure-Simple reference** (native stage2 `stage2_new4.exe` probe): nil `text?`
+  -> neither literal; present `text?` -> neither; `bool?` false -> `== false`;
+  `bool?` true -> `== true`; nil `bool?` -> neither.
+- **Seed divergence found**: the interpreter already matched; the default
+  `simple run` engine (JIT lane, HIR->MIR->Cranelift) answered false for BOTH
+  literals on a `bool?` receiver (`SIMPLE_EXECUTION_MODE=interpret` true vs
+  `jit` false on the same file).
+- **Fix**: `src/compiler_rust/compiler/src/hir/lower/expr/operators.rs`
+  `lower_exists_check_bool_compare` — `x.? ==/!= <bool literal>` lowers to
+  `rt_is_present(x) and rt_unwrap_or_self(x) ==/!= literal` on tagged words.
+- **Tests**: `compiler/tests/exists_check_bool_compare_jit.rs` (JIT red 3072 vs
+  expected 6288 before the fix, green after; interpreter green both) and
+  `seed_semantic_divergences.rs::dot_query_bool_comparison_matches_pure_simple`.
+- **Part C** split to `seed_semantic_error_missing_position_2026-11-09.md`.
+- Status: fix-implemented-verification-pending.
+
+
+## Addendum 2026-11-11 (lane interp12) — verified FIXED on fresh seed 46fe8f6b6def
+
+The header's "PARTIAL FIX / 43 sites remain" predates the 2026-11-07 round-15
+correction and the 2026-11-09 Part A seed fix; this addendum closes the last
+open in-scope item (Part A verification) and re-confirms the pins.
+
+**Verification actually run** (worktree simple-p3-interp12-20261111, seed-smoke):
+
+```
+# Part A JIT repro (bool? payload compare, doc's e=bf().? shape), default run lane:
+./bin/simple.exe run build/review/p3fix-interp12-20261111/tmp/row4_jit_repro.spl --no-cache
+# e==false true | bt.?==true true | ki==5 true | bf==false true
+# bf.?==true false | bn.?==false false | bn.?!=true true | bn.?==None true | kf.?==false false
+# — exactly the documented post-fix values
+
+# interpreter specs:
+./bin/simple.exe test test/01_unit/compiler/interpreter/exists_check_presence_regression_spec.spl --mode=interpreter --no-cache   # 7/7
+./bin/simple.exe test test/01_unit/compiler/interpreter/exists_check_bool_payload_compare_spec.spl --mode=interpreter --no-cache # 10/10
+./bin/simple.exe test test/03_system/feature/usage/exists_check_bool_comparison_trap_spec.spl  --mode=interpreter --no-cache     # 8/8
+./bin/simple.exe test test/01_unit/lib/gc_async_mut/gpu/browser_engine/h1_response_parse_spec.spl --mode=interpreter --no-cache # 6/6 (chunked regression pin)
+```
+
+Divergence C (semantic error position) remains tracked in its split-out doc and
+is intentionally not covered here. Verdict: STALE (no new code change this
+lane).

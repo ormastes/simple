@@ -34,7 +34,9 @@ use std.spec.*
 use std.io_runtime.{process_run, file_write, file_exists, read_file_text, dir_create_all, cwd, time_now_unix_micros}
 
 fn _art() -> text:
-    cwd() + "/build/test-artifacts/mcp/caret_tools"
+    # POSIX-style separators: the path is spliced into a `sh -c` command line,
+    # where a Windows backslash would be consumed as an escape.
+    cwd().replace("\\", "/") + "/build/test-artifacts/mcp/caret_tools"
 
 fn _wiki_dir() -> text:
     _art() + "/wiki"
@@ -52,15 +54,21 @@ fn _prepare(nonce: text) -> text:
 fn _nonce() -> text:
     time_now_unix_micros().to_text()
 
+# Closing braces are concatenated one at a time: the lexer collapses a literal
+# `}}` inside ANY string to a single `}` (open bug, see the seed lexer's
+# string_literal_double_brace_collapse), which would corrupt the JSON-RPC lines.
+fn _rb() -> text:
+    "}"
+
 fn _init() -> text:
-    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"caret-system-spec\",\"version\":\"1.0\"}}}\n" +
-        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"caret-system-spec\",\"version\":\"1.0\"" + _rb() + _rb() + _rb() + "\n" +
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{" + _rb() + _rb() + "\n"
 
 fn _tools_list(id: text) -> text:
-    "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"method\":\"tools/list\",\"params\":{}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"method\":\"tools/list\",\"params\":{" + _rb() + _rb() + "\n"
 
 fn _call(id: text, name: text, args_json: text) -> text:
-    "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"method\":\"tools/call\",\"params\":{\"name\":\"" + name + "\",\"arguments\":" + args_json + "}}\n"
+    "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"method\":\"tools/call\",\"params\":{\"name\":\"" + name + "\",\"arguments\":" + args_json + _rb() + _rb() + "\n"
 
 # Spawn the real MCP stdio server with the caret config in its environment,
 # feed it `messages`, return stdout. Bounded by a shell-level `timeout` so a
@@ -115,7 +123,10 @@ describe "caret tools over MCP stdio: local wiki backend":
         assert_not_equal(resp, "")
         step("the hit names the seeded page id, title and file url (absolute oracle: the nonce)")
         expect(resp.contains("\"isError\":true")).to_equal(false)
-        expect(resp).to_contain("seed_" + nonce + ".md\\tSeed " + nonce + "\\tfile://" + seed)
+        # A file URL has an empty host: `file:///C:/x` on Windows, `file:///x` on POSIX.
+        val slashed = seed.replace("\\", "/")
+        val seed_url = if slashed.starts_with("/"): "file://" + slashed else: "file:///" + slashed
+        expect(resp).to_contain("seed_" + nonce + ".md\\tSeed " + nonce + "\\t" + seed_url)
 
     it "caret_wiki_write is denied without confirm and writes the page with confirm: true":
         # @req REQ-SSPEC-SYSTEM

@@ -180,25 +180,24 @@ describe "scalar local isolation metadata":
         assert_true(errors.len() == 0)
 
 describe "an EXPLICIT early `return a` inside an if-branch is a real Move too":
-    it "reports a borrow diagnostic for `fn take(a: iso i64) -> i64: if 1: return a; val c = a; 0`":
-        step("Verify: reports a borrow diagnostic for `fn take(a: iso i64) -> i64: if 1: return a; val c = a; 0`")
-        # This is the distinguishing scenario for the explicit-`return`
-        # lowering site (expr_dispatch.spl's lower_return_expr): the
-        # checker's `record_use` on a bare Copy operand already flags a
-        # USE of an already-moved place, but never itself ADDS the place
-        # to moved_now (only `record_move` does). Without a real Move
-        # instruction backing the early return, the checker's block-order
-        # forward walk never learns `a` was moved inside the if-branch, so
-        # the later `val c = a` in the fall-through block goes undetected.
+    it "reports a borrow diagnostic for `fn take(a: iso i64) -> i64: if 1: val b = a; return a; val c = a; 0`":
+        step("Verify: reports a borrow diagnostic for `fn take(a: iso i64) -> i64: if 1: val b = a; return a; val c = a; 0`")
+        # @req: REQ-COMPILER-BORROW-001
+        # The ownership flow is path-sensitive over real CFG edges: an early
+        # `return a` ends its path, so the fall-through `val c = a` is NOT a
+        # use-after-move by itself (the old expectation relied on a linear
+        # block-order walk that no longer exists). The genuine defect on this
+        # shape is inside the branch: `val b = a` moves the iso param and the
+        # explicit `return a` (lowered as a real Move by lower_return_expr)
+        # consumes it a second time on the same path.
         val cond = int_lit(1, 15)
-        val return_a = HirExpr(kind: HirExprKind.Return(Some(var_read(SymbolId(id: 1), 16))), has_type_: true, type_: i64_type(), span: mk_span(16))
-        val then_block = HirBlock(stmts: [], has: true, value: return_a, span: mk_span(16))
+        val let_b = HirStmt(kind: HirStmtKind.Let(SymbolId(id: 5), nil, var_read(SymbolId(id: 1), 16)), span: mk_span(16))
+        val return_a = HirExpr(kind: HirExprKind.Return(Some(var_read(SymbolId(id: 1), 17))), has_type_: true, type_: i64_type(), span: mk_span(17))
+        val then_block = HirBlock(stmts: [let_b], has: true, value: return_a, span: mk_span(16))
         val if_expr = HirExpr(kind: HirExprKind.If(cond, then_block, nil), has_type_: true, type_: i64_type(), span: mk_span(15))
         val if_stmt = HirStmt(kind: HirStmtKind.Expr(if_expr), span: mk_span(15))
-        # val c = a  -- reached only when the if-branch did NOT return;
-        # still a genuine use-after-move site in the checker's own
-        # (already-documented, not-in-scope-here) linear over-approximate
-        # forward walk.
+        # val c = a  -- reached only when the if-branch did NOT return, so
+        # `a` is still owned on that path.
         val let_c = HirStmt(kind: HirStmtKind.Let(SymbolId(id: 4), nil, var_read(SymbolId(id: 1), 20)), span: mk_span(20))
         val fn_ = make_fn([iso_param(SymbolId(id: 1))], [if_stmt, let_c], int_lit(0, 25))
         val errors = lower_and_check(fn_)

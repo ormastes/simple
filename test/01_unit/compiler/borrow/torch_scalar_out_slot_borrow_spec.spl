@@ -1,0 +1,211 @@
+# Torch scalar checked out-slots: `&mut local` vs caller-owned address.
+#
+# Census 2026-11-13 (p3_census_mir_classes_2026-11-13.md) recorded 8 short-borrow
+# sites in `src/lib/nogc_sync_mut/torch/sffi.spl:297-353` handing `&mut value`
+# to `rt_torch_torchtensor_*_checked(handle: i64, out: *mut f64) -> i32` after
+# an early-return handle guard. The fix declares `out: i64` and passes a
+# caller-owned 8-byte `rt_alloc(8)` cell by address, freeing before any error
+# return and decoding the loaded `i64` payload via pure `std.common.binary_io.f64_from_bits`.
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.borrow.borrow_check.mod.{check_mir_module}
+use std.io_runtime.{file_read}
+use std.nogc_sync_mut.torch.sffi.{
+    rt_ptr_write_i64, spl_f64_to_bits,
+    _torch_scalar_alloc_slot, _torch_scalar_finish_slot,
+    torch_torchtensor_sum_result, torch_torchtensor_mean_result,
+    torch_torchtensor_min_result, torch_torchtensor_max_result,
+    torch_torchtensor_norm_result, torch_torchtensor_det_result,
+    torch_torchtensor_std_result, torch_torchtensor_var_result
+}
+
+val SLOT_EXTERNS = [
+    "@unsafe(reason: \"raw alloc\", capabilities: [ffi])",
+    "extern fn rt_alloc(size: i64) -> i64",
+    "@unsafe(reason: \"raw free\", capabilities: [ffi])",
+    "extern fn rt_free(ptr: i64)",
+    "@unsafe(reason: \"raw store\", capabilities: [ffi, raw_ptr])",
+    "extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)",
+    "@unsafe(reason: \"raw load\", capabilities: [ffi, raw_ptr])",
+    "extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64",
+    "fn f64_from_bits(bits: u64) -> f64:",
+    "    0.0"
+]
+
+fn borrow_messages(lines: [text]) -> [text]:
+    val filename = "torch_scalar_out_slot.spl"
+    val parsed = parse_full_frontend(lines.join("\n") + "\n", filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    expect(lowering.errors.len()).to_equal(0)
+    var messages: [text] = []
+    for error in check_mir_module(mir):
+        messages.push(error.message)
+    messages
+
+# Straight-line `&mut value` handed to a `*mut f64` extern.
+fn scalar_borrow_shape() -> [text]:
+    [
+        "@unsafe(reason: \"status/out ABI\", capabilities: [ffi, raw_ptr])",
+        "extern fn rt_torch_torchtensor_sum_checked(handle: i64, out: *mut f64) -> i32",
+        "fn sum_checked(handle: i64) -> f64:",
+        "    var value: f64 = 0.0",
+        "    val status = unsafe(capabilities: [ffi, raw_ptr]):",
+        "        rt_torch_torchtensor_sum_checked(handle, &mut value)",
+        "    if status != 0: return 0.0",
+        "    value"
+    ]
+
+# Pre-fix `torch/sffi.spl:293-299` shape: early-return handle guard before
+# `&mut value` handed to `*mut f64` extern.
+fn scalar_join_borrow_shape() -> [text]:
+    [
+        "@unsafe(reason: \"status/out ABI\", capabilities: [ffi, raw_ptr])",
+        "extern fn rt_torch_torchtensor_sum_checked(handle: i64, out: *mut f64) -> i32",
+        "fn torch_torchtensor_sum_result(handle: i64) -> Result<f64, text>:",
+        "    if handle <= 0: return Err(\"invalid_handle\")",
+        "    var value: f64 = 0.0",
+        "    val status = unsafe(capabilities: [ffi, raw_ptr]):",
+        "        rt_torch_torchtensor_sum_checked(handle, &mut value)",
+        "    if status != 0: return Err(\"provider_error\")",
+        "    Ok(value)"
+    ]
+
+# Fixed caller-owned 8-byte slot form (`out: i64`).
+fn scalar_address_shape() -> [text]:
+    SLOT_EXTERNS + [
+        "@unsafe(reason: \"status/out ABI\", capabilities: [ffi, raw_ptr])",
+        "extern fn rt_torch_torchtensor_sum_checked(handle: i64, out: i64) -> i32",
+        "fn torch_torchtensor_sum_result(handle: i64) -> Result<f64, text>:",
+        "    if handle <= 0: return Err(\"invalid_handle\")",
+        "    val out_slot = unsafe(capabilities: [ffi, raw_ptr]):",
+        "        rt_alloc(8)",
+        "    if out_slot <= 0: return Err(\"out_slot_alloc_failed\")",
+        "    unsafe(capabilities: [ffi, raw_ptr]):",
+        "        rt_ptr_write_i64(out_slot, 0, 0)",
+        "    val status = unsafe(capabilities: [ffi, raw_ptr]):",
+        "        rt_torch_torchtensor_sum_checked(handle, out_slot)",
+        "    val raw_bits = unsafe(capabilities: [ffi, raw_ptr]):",
+        "        rt_ptr_read_i64(out_slot, 0)",
+        "    unsafe(capabilities: [ffi, raw_ptr]):",
+        "        rt_free(out_slot)",
+        "    if status != 0: return Err(\"provider_error\")",
+        "    Ok(f64_from_bits(raw_bits as u64))"
+    ]
+
+# Real scalar checked declarations and wrappers extracted from
+# `src/lib/nogc_sync_mut/torch/sffi.spl`, with a local stand-in for the
+# imported `f64_from_bits`.
+fn torch_scalar_slice_source() -> [text]:
+    val lines = file_read("src/lib/nogc_sync_mut/torch/sffi.spl").split("\n")
+    var out: [text] = [
+        "fn f64_from_bits(bits: u64) -> f64:",
+        "    0.0"
+    ]
+    var in_scalar_section = false
+    var index = 0
+    while index < lines.len():
+        val line: text = lines[index]
+        val previous: text = if index > 0: lines[index - 1] else: ""
+        if in_scalar_section:
+            if line.starts_with("# Shape Manipulation"):
+                in_scalar_section = false
+            else:
+                out.push(line)
+        else:
+            if line.starts_with("fn _torch_scalar_status("):
+                out.push(line)
+                in_scalar_section = true
+            else:
+                val is_slot_extern = line.starts_with("extern fn rt_alloc(") or
+                    line.starts_with("extern fn rt_free(") or
+                    line.starts_with("extern fn rt_ptr_write_i64(") or
+                    line.starts_with("extern fn rt_ptr_read_i64(")
+                val is_checked_extern = line.starts_with("extern fn rt_torch_torchtensor_") and
+                    line.contains("_checked(")
+                if is_slot_extern or is_checked_extern:
+                    if previous.starts_with("@unsafe"):
+                        out.push(previous)
+                    out.push(line)
+        index = index + 1
+    out
+
+fn finish_with_bits(bits: i64) -> Result<f64, text>:
+    val slot = _torch_scalar_alloc_slot()
+    expect(slot).to_be_greater_than(0)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_ptr_write_i64(slot, 0, bits)
+    _torch_scalar_finish_slot(slot, 0)
+
+describe "torch scalar checked out-slot borrow safety":
+    it "rejects a straight-line &mut local out slot passed to *_checked":
+        step("Lower straight-line &mut f64 shape and run borrow checker")
+        expect(borrow_messages(scalar_borrow_shape()).join("\n")).to_contain("call argument requires a checked non-retaining short contract")
+
+    it "rejects a &mut local out slot after an early-return handle guard (pre-fix torch/sffi.spl shape)":
+        step("Lower pre-fix early-return &mut f64 shape and run borrow checker")
+        expect(borrow_messages(scalar_join_borrow_shape()).join("\n")).to_contain("call argument requires a checked non-retaining short contract")
+
+    it "accepts the caller-owned address form for rt_torch_torchtensor_sum_checked":
+        step("Lower caller-owned address shape and verify 0 borrow errors")
+        expect(borrow_messages(scalar_address_shape()).len()).to_equal(0)
+
+    it "passes borrow checking across all eight real torch/sffi.spl scalar checked wrappers":
+        step("Extract real scalar checked declarations and wrappers from src/lib/nogc_sync_mut/torch/sffi.spl")
+        val source = torch_scalar_slice_source()
+        val joined = source.join("\n")
+        expect(joined).to_contain("fn _torch_scalar_alloc_slot(")
+        expect(joined).to_contain("fn _torch_scalar_finish_slot(")
+        expect(joined).to_contain("fn torch_torchtensor_sum_result(")
+        expect(joined).to_contain("fn torch_torchtensor_var_result(")
+        expect(borrow_messages(source).join("\n")).to_equal("")
+
+    it "allocates, zero-initializes, decodes positive/negative/signed-zero payloads, and frees before error return":
+        step("Exercise _torch_scalar_alloc_slot and _torch_scalar_finish_slot directly")
+        expect(_torch_scalar_finish_slot(0, 0)).to_equal(Err("out_slot_alloc_failed"))
+        val zero_slot = _torch_scalar_alloc_slot()
+        expect(zero_slot).to_be_greater_than(0)
+        expect(_torch_scalar_finish_slot(zero_slot, 0)).to_equal(Ok(0.0))
+
+        val pos_bits = unsafe(capabilities: [ffi]): spl_f64_to_bits(42.5)
+        expect(finish_with_bits(pos_bits)).to_equal(Ok(42.5))
+        val neg_bits = unsafe(capabilities: [ffi]): spl_f64_to_bits(-3.25)
+        expect(finish_with_bits(neg_bits)).to_equal(Ok(-3.25))
+        val neg_zero_bits = unsafe(capabilities: [ffi]): spl_f64_to_bits(-0.0)
+        val neg_zero_res = finish_with_bits(neg_zero_bits)
+        expect(neg_zero_res.is_ok()).to_equal(true)
+        if val Ok(decoded_neg_zero) = neg_zero_res:
+            val roundtrip_bits = unsafe(capabilities: [ffi]): spl_f64_to_bits(decoded_neg_zero)
+            expect(roundtrip_bits).to_equal(neg_zero_bits)
+
+        val s1 = _torch_scalar_alloc_slot()
+        expect(_torch_scalar_finish_slot(s1, -1)).to_equal(Err("invalid_output_pointer"))
+        val s2 = _torch_scalar_alloc_slot()
+        expect(_torch_scalar_finish_slot(s2, -2)).to_equal(Err("invalid_handle"))
+        val s3 = _torch_scalar_alloc_slot()
+        expect(_torch_scalar_finish_slot(s3, -4)).to_equal(Err("unresolved_provider_symbol"))
+        val s4 = _torch_scalar_alloc_slot()
+        expect(_torch_scalar_finish_slot(s4, -3)).to_equal(Err("provider_error"))
+
+    it "rejects invalid handles with Err(\"invalid_handle\") across all eight wrappers":
+        step("Invoke all eight torch_torchtensor_*_result wrappers with zero/negative handles")
+        expect(torch_torchtensor_sum_result(0)).to_equal(Err("invalid_handle"))
+        expect(torch_torchtensor_sum_result(-1)).to_equal(Err("invalid_handle"))
+        expect(torch_torchtensor_mean_result(0)).to_equal(Err("invalid_handle"))
+        expect(torch_torchtensor_min_result(0)).to_equal(Err("invalid_handle"))
+        expect(torch_torchtensor_max_result(0)).to_equal(Err("invalid_handle"))
+        expect(torch_torchtensor_norm_result(0)).to_equal(Err("invalid_handle"))
+        expect(torch_torchtensor_det_result(0)).to_equal(Err("invalid_handle"))
+        expect(torch_torchtensor_std_result(0)).to_equal(Err("invalid_handle"))
+        expect(torch_torchtensor_var_result(0)).to_equal(Err("invalid_handle"))

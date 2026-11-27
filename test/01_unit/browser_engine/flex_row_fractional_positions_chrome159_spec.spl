@@ -1,0 +1,60 @@
+"""
+## Purpose and audience
+Purpose: Pin that flex-row main-axis item widths and positions accumulate as
+fractions (Chrome's LayoutUnit, 1/64 px) and only the EDGES are snapped, so a
+row of text buttons does not drift right by one rounded-up pixel per item.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159, 900x300, catalog tab-bar CSS: `.tabs{display:flex;
+gap:8px;padding:10px 24px}` inside `main{padding:24px}`, default 13.333px
+buttons with `padding:8px;border:1px`, getBoundingClientRect, 2026-11-17):
+
+| button          | left       | width      |
+|-----------------|------------|------------|
+| tab-overview    | 48         | 73.546875  |
+| tab-html        | 129.546875 | 54.296875  |
+| tab-css-layout  | 191.84375  | 89.125     |
+| tab-css-paint   | 288.96875  | 79.5       |
+| tab-forms-media | 376.46875  | 108.359375 |
+| tab-animation   | 492.828125 | 77.28125   |
+| tab-evidence    | 578.109375 | 72.84375   |
+
+Pixel-snapped edges (round(left), round(left+width)) -> x,w:
+48,74  130,54  192,89  289,79  376,109  493,77  578,73
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-FLEX-ROW-FRACTIONAL-001 — flex-row main axis keeps fractional positions and snaps edges.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val PAGE: text = "<html><head><style>* {{ box-sizing: border-box; }} body {{ margin: 0; font: 16px/1.5 sans-serif; }} " +
+    ".tabs {{ display: flex; gap: 8px; padding: 10px 24px; background: #dbeafe; }} " +
+    "button {{ padding: 8px; border: 1px solid #94a3b8; border-radius: 5px; }} main {{ padding: 24px; }}</style></head><body><main><nav class=tabs>" +
+    "<button id=tab-overview>Overview</button><button id=tab-html>HTML</button><button id=tab-css-layout>CSS Layout</button>" +
+    "<button id=tab-css-paint>CSS Paint</button><button id=tab-forms-media>Forms &amp; Media</button>" +
+    "<button id=tab-animation>Animation</button><button id=tab-evidence>Evidence</button></nav></main></body></html>"
+
+fn _xw(id: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE, 900, 300, id, "x") + "," +
+        simple_web_layout_debug_layout_by_id(PAGE, 900, 300, id, "w")
+
+describe "flex row fractional main axis":
+    it "FR-1: first button":
+        expect(_xw("tab-overview")).to_equal("48,74")
+    it "FR-2: second button snaps its left edge, not its width":
+        expect(_xw("tab-html")).to_equal("130,54")
+    it "FR-3: third button":
+        expect(_xw("tab-css-layout")).to_equal("192,89")
+    it "FR-4: fourth button":
+        expect(_xw("tab-css-paint")).to_equal("289,79")
+    it "FR-5: fifth button":
+        expect(_xw("tab-forms-media")).to_equal("376,109")
+    it "FR-6: sixth button":
+        expect(_xw("tab-animation")).to_equal("493,77")
+    it "FR-7: seventh button does not drift":
+        expect(_xw("tab-evidence")).to_equal("578,73")

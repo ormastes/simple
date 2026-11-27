@@ -1,0 +1,52 @@
+#!/bin/sh
+# Run an already-compiled scope fixture in a private, initially empty checkout.
+# Port of the former native_parent_parse_closure_scope_test.py (repo rule: .spl/.shs only).
+#
+# This runner does not build a compiler or grant producer admission. The caller
+# must retain its build/producer/runtime receipt separately. All evidence is kept.
+#
+# usage: native_parent_parse_closure_scope_test.shs BINARY --expected-sha256 HEX --evidence-parent DIR
+set -eu
+
+binary=""; expected=""; parent=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --expected-sha256) expected="$2"; shift 2 ;;
+        --evidence-parent) parent="$2"; shift 2 ;;
+        -*) echo "error: unknown argument: $1" >&2; exit 2 ;;
+        *) binary="$1"; shift ;;
+    esac
+done
+[ -n "$binary" ] && [ -n "$expected" ] && [ -n "$parent" ] \
+    || { echo "error: BINARY, --expected-sha256 and --evidence-parent are required" >&2; exit 2; }
+[ -f "$binary" ] || { echo "error: no such file: $binary" >&2; exit 2; }
+binary="$(CDPATH= cd -- "$(dirname -- "$binary")" && pwd -P)/${binary##*/}"
+digest=$(sha256sum "$binary" | cut -d' ' -f1)
+[ "$digest" = "$expected" ] || { echo "error: compiled fixture digest mismatch" >&2; exit 2; }
+mkdir -p "$parent"
+root=$(mktemp -d "$(CDPATH= cd -- "$parent" && pwd -P)/parent-closure-native-XXXXXXXX")
+# A fixture establishes its own real source authority. Never inherit a
+# live bootstrap snapshot/epoch, child shard role, or warm candidate sink.
+for key in $(env | cut -d= -f1 | grep -E '^(SIMPLE_SCV_|SIMPLE_PARSE_CLOSURE_|SIMPLE_PARSE_SHARD$|SIMPLE_HIR_SHARD$|SIMPLE_NATIVE_BUILD_WARM_CLOSURE_CANDIDATE$)' || true); do
+    unset "$key"
+done
+SIMPLE_PARENT_CLOSURE_FIXTURE_ROOT="$root"; export SIMPLE_PARENT_CLOSURE_FIXTURE_ROOT
+set +e
+(cd "$root" && "$binary" "$binary" > "$root/stdout.log" 2> "$root/stderr.log")
+code=$?
+set -e
+# The executable's actual dynamic count is authoritative; no empty or
+# truncated output may turn a raw zero exit into a successful result.
+rows=$(tr -d '\r' < "$root/stdout.log" | grep '^parent-closure checks=' || true)
+checks=null; failures=null; passed=false
+if [ "$(printf '%s' "$rows" | grep -c .)" = 1 ] \
+    && printf '%s' "$rows" | grep -qxE 'parent-closure checks=[0-9]+ failures=[0-9]+'; then
+    checks=$(printf '%s' "$rows" | sed 's/^parent-closure checks=\([0-9]*\) .*/\1/' | sed 's/^0*\([0-9]\)/\1/')
+    failures=$(printf '%s' "$rows" | sed 's/.* failures=\([0-9]*\)$/\1/' | sed 's/^0*\([0-9]\)/\1/')
+    [ "$code" = 0 ] && [ "$checks" -gt 0 ] && [ "$failures" = 0 ] && passed=true
+fi
+report=$(printf '{"fixture_sha256": "%s", "exit_code": %s, "checks": %s, "failures": %s, "passed": %s, "formal_admission": false, "evidence_root": "%s"}' \
+    "$digest" "$code" "$checks" "$failures" "$passed" "$root")
+printf '%s\n' "$report" > "$root/result.json"
+printf '%s\n' "$report"
+[ "$passed" = true ]

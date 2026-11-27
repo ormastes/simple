@@ -1,0 +1,229 @@
+# Persistent host domain. The service owns one local journal writer for its
+# lifetime; the generic SDK retains returned owners before publishing responses.
+# Kernel peer UID -> pinned principal/project/scope/action policy is enforced by
+# host service composition before entering this trusted internal domain boundary.
+use std.nogc_sync_mut.orchestration.host_local_root_v1.{HostLocalRootV1, HostLocalRootOpenV2,
+    host_local_root_open_owned_v2, host_local_context_v1, host_local_refresh_context_v1}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{
+    HostReservationAuthorizationContextV1, host_capacity_owner_close_owned_v2}
+use std.nogc_sync_mut.orchestration.host_authorized_reservation_v1.host_authorized_prepare_reply_v1
+use std.nogc_sync_mut.orchestration.host_parent_budget_v1.{
+    host_parent_budget_record_decode_v1, host_parent_budget_store_v1}
+use std.common.contracts.orchestration.host_prepare_request_v1.host_prepare_request_decode_v1
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.nogc_sync_mut.orchestration.host_local_command_v1.{host_local_status_v1, host_local_validate_payload_v2}
+use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_lookup_v2,
+    DistributedOperationJournalOpenCleanupV2, DistributedOperationJournalCleanupTurnV2,
+    distributed_operation_journal_open_cleanup_v2}
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.io_runtime.host_os
+
+pub const HOST_SERVICE_MAX_ACTION_BYTES_V2: i64 = 64
+pub const HOST_SERVICE_MAX_OPERATION_BYTES_V2: i64 = 128
+pub const HOST_SERVICE_MAX_PAYLOAD_BYTES_V2: i64 = 2097152
+pub const HOST_SERVICE_MAX_RESPONSE_BYTES_V2: i64 = 8388608
+
+pub struct HostServiceDomainV2:
+    local: HostLocalRootV1
+
+pub enum HostServiceDomainOpenV2:
+    Ready(HostServiceDomainV2)
+    Rejected(text)
+    CleanupRequired(DistributedOperationJournalOpenCleanupV2, text)
+
+pub struct HostServiceRequestV2:
+    action: text
+    operation_id: text
+    payload: text
+
+# Trusted composition data from a loaded transport policy, never wire identity.
+pub struct HostServiceMappedPeerV2:
+    principal: text
+    project: text
+    service_scope_id: text
+
+pub struct HostServiceTurnV2:
+    owner: HostServiceDomainV2
+    exit_code: i64
+    response: text
+
+pub fn host_service_effect_action_v2(action: text) -> bool:
+    ["host-execute", "host-inspect", "host-wait", "host-cleanup"].contains(action)
+
+pub fn host_service_supported_action_v2(action: text) -> bool:
+    ["host-status", "host-validate", "host-parent-budget", "host-prepare",
+        "host-execute", "host-inspect", "host-wait", "host-cleanup"].contains(action)
+
+pub fn host_service_request_error_v2(request: HostServiceRequestV2) -> text:
+    if str_len(request.action) == 0 or str_len(request.action) > HOST_SERVICE_MAX_ACTION_BYTES_V2:
+        return "host-service-action-size"
+    if not host_service_supported_action_v2(request.action):
+        return "host-service-action-unsupported"
+    if str_len(request.operation_id) > HOST_SERVICE_MAX_OPERATION_BYTES_V2:
+        return "host-service-operation-size"
+    if str_len(request.payload) > HOST_SERVICE_MAX_PAYLOAD_BYTES_V2:
+        return "host-service-payload-size"
+    if request.payload.contains("\u{0}"): return "host-service-payload-nul"
+    if request.action == "host-status":
+        if request.operation_id != "" or request.payload != "": return "host-service-status-fields"
+    else:
+        if not builder_identifier_valid_v1(request.operation_id): return "host-service-operation-invalid"
+        if request.action == "host-inspect" or request.action == "host-wait":
+            if request.payload != "": return "host-service-read-payload-unexpected"
+        elif request.payload == "":
+            return "host-service-payload-required"
+    ""
+
+pub fn host_service_error_payload_v2(request: HostServiceRequestV2, reason: text,
+        recovery_required: bool) -> text:
+    val action = if str_len(request.action) <= HOST_SERVICE_MAX_ACTION_BYTES_V2: request.action else: ""
+    val operation = if builder_identifier_valid_v1(request.operation_id): request.operation_id else: ""
+    val omitted = str_len(reason) > 4096
+    val detail = if omitted: "host-service-error-detail-too-large" else: reason
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-service-error"),
+        "action": SdnValue.String(action), "operationId": SdnValue.String(operation),
+        "error": SdnValue.String(detail), "detailOmitted": SdnValue.Bool(omitted),
+        "recoveryRequired": SdnValue.Bool(recovery_required)}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn host_service_error_v2(owner: HostServiceDomainV2, request: HostServiceRequestV2,
+        reason: text, recovery_required: bool = false) -> HostServiceTurnV2:
+    HostServiceTurnV2(owner: owner, exit_code: if recovery_required: 2 else: 1,
+        response: host_service_error_payload_v2(request, reason, recovery_required))
+
+fn host_service_publish_v2(owner: HostServiceDomainV2, request: HostServiceRequestV2,
+        response: text) -> HostServiceTurnV2:
+    # Owner update is retained even when encoding/publication bounds refuse data.
+    if str_len(response) > HOST_SERVICE_MAX_RESPONSE_BYTES_V2:
+        return host_service_error_v2(owner, request, "host-service-response-size", true)
+    HostServiceTurnV2(owner: owner, exit_code: 0, response: response)
+
+fn host_service_live_v2(owner: HostServiceDomainV2) -> Result<bool, text>:
+    val capacity = owner.local.capacity
+    if capacity.ledger.revision != capacity.journal.sequence + 1:
+        return Err("host-service-owner-projection-stale")
+    # The journal verifies this exact writer and current revision before lookup.
+    # A closed/stale writer must not serve a stale success projection.
+    val probe = distributed_operation_journal_lookup_v2(capacity.journal, "")
+    if probe.is_err() and probe.unwrap_err() == "OPERATION_NOT_FOUND": return Ok(true)
+    if probe.is_err(): return Err(probe.unwrap_err())
+    Err("host-service-invalid-empty-operation")
+
+pub fn host_service_domain_open_v2(protected_root: text) -> HostServiceDomainOpenV2:
+    if protected_root == "" or str_len(protected_root) > 4096 or protected_root.contains("\u{0}"):
+        return HostServiceDomainOpenV2.Rejected("host-service-protected-root-invalid")
+    if host_os() != "linux": return HostServiceDomainOpenV2.Rejected("host-service-strong-linux-required")
+    # The actual root factory retains its existing native-boot validation before
+    # writer admission. Only Ready creates a live domain; cleanup is not Err text.
+    match host_local_root_open_owned_v2(protected_root, 30000):
+        case HostLocalRootOpenV2.Ready(local): HostServiceDomainOpenV2.Ready(HostServiceDomainV2(local: local))
+        case HostLocalRootOpenV2.Rejected(reason): HostServiceDomainOpenV2.Rejected(reason)
+        case HostLocalRootOpenV2.CleanupRequired(cleanup, reason): HostServiceDomainOpenV2.CleanupRequired(cleanup, reason)
+
+pub fn host_service_domain_open_cleanup_v2(cleanup: DistributedOperationJournalOpenCleanupV2) -> DistributedOperationJournalCleanupTurnV2:
+    # Caller retains the complete canonical turn, including nil-cleanup consumed
+    # errors or stale/unknown state. No automatic retry or raw-FD release exists.
+    distributed_operation_journal_open_cleanup_v2(cleanup)
+
+pub fn host_service_domain_close_v2(owner: HostServiceDomainV2) -> DistributedOperationJournalCleanupTurnV2:
+    # Releases this exact writer only. Workload/helper charges are unaffected.
+    # Do not flatten partial/unknown cleanup or consumed-error into a boolean.
+    host_capacity_owner_close_owned_v2(owner.local.capacity)
+
+pub fn host_service_domain_turn_v2(owner: HostServiceDomainV2,
+        request: HostServiceRequestV2) -> HostServiceTurnV2:
+    # Existing trusted in-process port. Transport callers use the mapped port.
+    host_service_domain_dispatch_v2(owner, request, nil)
+
+pub fn host_service_domain_mapped_turn_v2(owner: HostServiceDomainV2,
+        request: HostServiceRequestV2, peer: HostServiceMappedPeerV2) -> HostServiceTurnV2:
+    val mapped_error = host_service_mapped_peer_error_v2(owner, peer)
+    if mapped_error != "": return host_service_error_v2(owner, request, mapped_error)
+    host_service_domain_dispatch_v2(owner, request, Some(peer))
+
+pub fn host_service_mapped_peer_error_v2(owner: HostServiceDomainV2, peer: HostServiceMappedPeerV2) -> text:
+    if (not builder_identifier_valid_v1(peer.principal) or not builder_identifier_valid_v1(peer.project) or
+            not builder_identifier_valid_v1(peer.service_scope_id) or peer.service_scope_id != owner.local.config.service_scope_id or
+            peer.service_scope_id != owner.local.scope.service_scope_id):
+        return "host-service-peer-scope-mismatch"
+    ""
+
+fn host_service_peer_operation_error_v2(peer: Option<HostServiceMappedPeerV2>, operation: OperationEnvelopeV2,
+        service_scope_id: text) -> text:
+    match peer:
+        case Some(mapped):
+            if (operation.principal != mapped.principal or operation.project != mapped.project or
+                    service_scope_id != mapped.service_scope_id): return "host-service-peer-subject-mismatch"
+        case None: ()
+    ""
+
+fn host_service_domain_dispatch_v2(owner: HostServiceDomainV2,
+        request: HostServiceRequestV2, peer: Option<HostServiceMappedPeerV2>) -> HostServiceTurnV2:
+    val request_error = host_service_request_error_v2(request)
+    if request_error != "": return host_service_error_v2(owner, request, request_error)
+    val live = host_service_live_v2(owner)
+    if live.is_err(): return host_service_error_v2(owner, request, live.unwrap_err(), true)
+    if host_service_effect_action_v2(request.action):
+        # Never invoke a monolithic blocking provider/WAL routine on the control
+        # callback. No job was accepted and no queued/success receipt is invented.
+        return host_service_error_v2(owner, request, "host-service-effect-dispatch-required")
+    if request.action == "host-status":
+        val status = host_local_status_v1(owner.local)
+        if status.is_err(): return host_service_error_v2(owner, request, status.unwrap_err(), true)
+        return host_service_publish_v2(owner, request, status.unwrap())
+    if request.action == "host-validate":
+        val projected = host_local_validate_payload_v2(owner.local.container, request.payload, request.operation_id)
+        if projected.is_err(): return host_service_error_v2(owner, request, projected.unwrap_err())
+        return host_service_publish_v2(owner, request, projected.unwrap())
+    val service_root = owner.local.root
+    val binding = owner.local.binding
+    val refresh = fn() -> HostReservationAuthorizationContextV1:
+        host_local_refresh_context_v1(service_root, binding)
+    if request.action == "host-prepare":
+        val decoded = host_prepare_request_decode_v1(request.payload)
+        if decoded.is_err(): return host_service_error_v2(owner, request, decoded.unwrap_err())
+        val prepared_request = decoded.unwrap()
+        if prepared_request.operation.id != request.operation_id:
+            return host_service_error_v2(owner, request, "host-service-operation-mismatch")
+        if prepared_request.intent.reservation.service_scope_id != owner.local.config.service_scope_id:
+            return host_service_error_v2(owner, request, "host-service-scope-mismatch")
+        val mapped_error = host_service_peer_operation_error_v2(peer, prepared_request.operation,
+            prepared_request.intent.reservation.service_scope_id)
+        if mapped_error != "": return host_service_error_v2(owner, request, mapped_error)
+        val prepared = host_authorized_prepare_reply_v1(owner.local.capacity, request.payload,
+            owner.local.policy.snapshot, owner.local.policy.snapshot.generation,
+            host_local_context_v1(owner.local.policy), refresh)
+        if prepared.is_err():
+            # A post-commit core error can require reconciliation. Keep the writer
+            # claim; do not reopen or manufacture an updated journal projection.
+            return host_service_error_v2(owner, request, prepared.unwrap_err(), true)
+        val reply = prepared.unwrap()
+        var local = owner.local
+        local.capacity = reply.owner
+        val current = HostServiceDomainV2(local: local)
+        return host_service_publish_v2(current, request, reply.response)
+    # The exact whitelist and earlier branches leave only parent-budget here.
+    val record = host_parent_budget_record_decode_v1(request.payload)
+    if record.is_err(): return host_service_error_v2(owner, request, record.unwrap_err())
+    if record.unwrap().proof.budget.parent_operation_id != request.operation_id:
+        return host_service_error_v2(owner, request, "host-service-operation-mismatch")
+    # Check this SAME decoded record before its actual SDK store/verifier.
+    # No gateway predecoder or wire-supplied identity can select another subject.
+    val budget_record = record.unwrap()
+    val budget_peer = host_service_peer_operation_error_v2(peer, budget_record.proof.operation,
+        budget_record.proof.budget.scope.service_scope_id)
+    if budget_peer != "": return host_service_error_v2(owner, request, budget_peer)
+    val parent_peer = host_service_peer_operation_error_v2(peer, budget_record.parent_binding.host_operation,
+        budget_record.parent_binding.host_intent.reservation.service_scope_id)
+    if parent_peer != "": return host_service_error_v2(owner, request, parent_peer)
+    val controller_peer = host_service_peer_operation_error_v2(peer, budget_record.parent_controller_operation,
+        budget_record.proof.budget.scope.service_scope_id)
+    if controller_peer != "": return host_service_error_v2(owner, request, controller_peer)
+    val stored = host_parent_budget_store_v1(owner.local, record.unwrap(), host_local_context_v1(owner.local.policy), refresh)
+    if stored.is_err(): return host_service_error_v2(owner, request, stored.unwrap_err(), true)
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-parent-budget-reference"),
+        "parentOperationId": SdnValue.String(request.operation_id), "budgetDigest": SdnValue.String(stored.unwrap())}
+    host_service_publish_v2(owner, request, sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")

@@ -1,0 +1,63 @@
+# Ordinary executable diagnostic for the actual Pure-Simple LLVM owner.
+# @req REQ-PURE-LLVM-UNSIGNED-WRAP
+# This imports the production translator; it contains no translator substitute.
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.mir.mir_data.*
+
+fn owner_require(condition: bool, message: text):
+    if not condition:
+        panic(message)
+
+fn owner_integer_ir(kind: MirTypeKind, llvm_type: text, left_value: i64, right_value: i64) -> text:
+    val translator = MirToLlvm.create("diagnostic.llvm.integer_arithmetic_flags", CodegenTarget.X86_64, nil)
+    val type_ = MirType(kind: kind)
+    val left = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(left_value), type_))
+    val right = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(right_value), type_))
+    translator.local_types[0] = llvm_type
+    translator.local_types[1] = llvm_type
+    translator.local_types[2] = llvm_type
+    translator.translate_binop(LocalId(id: 0), MirBinOp.Add, left, right)
+    translator.translate_binop(LocalId(id: 1), MirBinOp.Sub, left, right)
+    translator.translate_binop(LocalId(id: 2), MirBinOp.Mul, left, right)
+    translator.builder.build()
+
+fn owner_require_wrapping(ir: text, llvm_type: text):
+    owner_require(ir.contains(" = add {llvm_type} "), "missing unsigned add")
+    owner_require(ir.contains(" = sub {llvm_type} "), "missing unsigned sub")
+    owner_require(ir.contains(" = mul {llvm_type} "), "missing unsigned mul")
+    owner_require(not ir.contains(" nsw "), "unsigned arithmetic acquired nsw")
+    owner_require(not ir.contains(" nuw "), "unsigned arithmetic acquired nuw")
+
+fn owner_require_signed(ir: text, llvm_type: text):
+    owner_require(ir.contains(" = add nsw {llvm_type} "), "signed add lost nsw")
+    owner_require(ir.contains(" = sub nsw {llvm_type} "), "signed sub lost nsw")
+    owner_require(ir.contains(" = mul nsw {llvm_type} "), "signed mul lost nsw")
+    owner_require(not ir.contains(" nuw "), "signed arithmetic acquired nuw")
+
+fn owner_float_ir() -> text:
+    val translator = MirToLlvm.create("diagnostic.llvm.float_arithmetic_flags", CodegenTarget.X86_64, nil)
+    val left = MirOperand(kind: MirOperandKind.Const(MirConstValue.Float(2.5), MirType.f64()))
+    val right = MirOperand(kind: MirOperandKind.Const(MirConstValue.Float(1.5), MirType.f64()))
+    translator.local_types[0] = "double"
+    translator.local_types[1] = "double"
+    translator.local_types[2] = "double"
+    translator.translate_binop(LocalId(id: 0), MirBinOp.Add, left, right)
+    translator.translate_binop(LocalId(id: 1), MirBinOp.Sub, left, right)
+    translator.translate_binop(LocalId(id: 2), MirBinOp.Mul, left, right)
+    translator.builder.build()
+
+fn main():
+    owner_require_wrapping(owner_integer_ir(MirTypeKind.U32, "i32", 2147483647, 1), "i32")
+    owner_require_wrapping(owner_integer_ir(MirTypeKind.U8, "i8", 200, 60), "i8")
+    owner_require_wrapping(owner_integer_ir(MirTypeKind.U16, "i16", 60000, 10000), "i16")
+    owner_require_wrapping(owner_integer_ir(MirTypeKind.U64, "i64", 65536, 65536), "i64")
+    owner_require_signed(owner_integer_ir(MirTypeKind.I32, "i32", 7, 3), "i32")
+    owner_require_signed(owner_integer_ir(MirTypeKind.I64, "i64", 7, 3), "i64")
+    val float_ir = owner_float_ir()
+    owner_require(float_ir.contains(" = fadd double "), "float add changed")
+    owner_require(float_ir.contains(" = fsub double "), "float sub changed")
+    owner_require(float_ir.contains(" = fmul double "), "float mul changed")
+    owner_require(not float_ir.contains(" nsw "), "float arithmetic acquired nsw")
+    owner_require(not float_ir.contains(" nuw "), "float arithmetic acquired nuw")
+    print "pure-llvm-unsigned-nsw-owner: PASS cases=7"

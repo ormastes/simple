@@ -6,7 +6,10 @@ use std.spec.step
 
 use std.spec.*
 use std.io_runtime.{read_file_text}
-use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_definitions.{HirModule}
 use compiler.frontend.frontend.{parse_full_frontend}
@@ -18,24 +21,31 @@ fn make_logger() -> Logger:
 
 fn lower_value_consumer() -> (HirLowering, HirModule):
     val log = make_logger()
+    val provider_src = "pub fn emit(value: text) -> i64:\n    print value\n    0"
     val provider = parse_full_frontend(
-        "pub fn emit(value: text) -> i64:\n    print value\n    0",
-        "provider",
+        provider_src,
+        "provider.spl",
         "provider",
         log
     )
     val open = "{"
     val close = "}"
+    val consumer_src = "use provider." + open + "emit" + close
     val consumer = parse_full_frontend(
-        "use provider." + open + "emit" + close,
-        "consumer",
+        consumer_src,
+        "consumer.spl",
         "consumer",
         log
     )
-    var modules: Dict<text, any> = {}
+    var modules: Dict<text, ParserModule> = {}
     modules["provider"] = provider
-    var lowering = HirLowering.with_filename("consumer")
-    lowering.modules_by_name = modules
+    modules["consumer"] = consumer
+    val sources = [
+        SourceFile(path: "provider.spl", content: provider_src, module_name: "provider"),
+        SourceFile(path: "consumer.spl", content: consumer_src, module_name: "consumer")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("consumer.spl", surfaces)
     val hir = lowering.lower_module(consumer)
     (lowering, hir)
 
@@ -62,10 +72,11 @@ describe "Stage4 HIR value-name dispatch":
     it "rebinds erased Param elements before reading names or types":
         # @req REQ-SSPEC-COMPILER
         step("rebinds erased Param elements before reading names or types")
-        val lowering = read_file_text("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl")
+        val lowering = read_file_text("src/compiler/20.hir/hir_lowering/_Items/module_callable_types.spl")
 
         expect(lowering).to_contain("val receiver_param: Param = raw_params[0]")
         expect(lowering).to_contain("val raw_param: Param = raw_params[first_raw_param]")
-        expect(lowering).to_contain("self.lower_type(raw_param.type_)")
+        expect(lowering).to_contain("val raw_param_type: Type = raw_param.type_")
+        expect(lowering).to_contain("param_types.push(self.lower_type(raw_param_type))")
         expect(lowering).to_contain("val param: Param = params[i]")
         expect(lowering.contains("raw_params[first_raw_param].type_")).to_equal(false)

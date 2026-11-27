@@ -135,7 +135,6 @@ test/fixtures
 test/integration
 test/perf
 test/shared
-test/system
 test/unit
 ```
 

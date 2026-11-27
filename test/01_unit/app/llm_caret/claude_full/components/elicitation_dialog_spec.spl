@@ -1,0 +1,335 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+As a user answering an MCP server's request for input, I want each field to be
+validated as I fill it, choices to expand and toggle, navigation to wrap through
+the fields and buttons, and URL requests to show the real domain, so that I
+know exactly what I am accepting before I press Accept.
+"""
+use std.spec.step
+
+use std.spec.*
+use app.llm_caret.claude_full.components.mcp.ElicitationDialog.*
+
+fn sch(kind: text, title: text, desc: text, fmt: text, vals: [text], labels: [text], required: bool, minItems: i64, maxItems: i64) -> ElicitationDialogSchema:
+    ElicitationDialogSchema.new(kind, title, desc, fmt, "", vals, labels, required, minItems, maxItems)
+
+fn text_schema(kind: text, required: bool) -> ElicitationDialogSchema:
+    sch(kind, "", "", "", [], [], required, 0, 0)
+
+fn enum_schema() -> ElicitationDialogSchema:
+    sch("string", "", "", "", ["r", "g"], ["Red", ""], false, 0, 0)
+
+fn multi_schema(required: bool, minItems: i64, maxItems: i64) -> ElicitationDialogSchema:
+    sch("array", "", "", "", ["a", "b", "c"], ["A", "B", "C"], required, minItems, maxItems)
+
+fn field(name: text, schema: ElicitationDialogSchema, value: text) -> ElicitationDialogField:
+    ElicitationDialogField.new(name, schema, value, [], "", false)
+
+fn url_state(phase: text, button: text, showCancel: bool, completed: bool) -> ElicitationDialogUrlState:
+    ElicitationDialogUrlState.new("srv", "msg", "https://example.com/p", phase, button, showCancel, "Done", completed)
+
+fn main() -> ():
+    describe("Elicitation input validation", fn() -> ():
+        it("requires a value only when the field is required", fn() -> ():
+            step("requires a value only when the field is required")
+            expect(elicitationDialogValidateInput("  ", text_schema("string", true))).to_equal("This field is required")
+            expect(elicitationDialogValidateInput("", text_schema("string", false))).to_equal("")
+            expect(elicitationDialogValidateInput(" hi ", text_schema("string", true))).to_equal("")
+        )
+
+        it("accepts only whole numbers for integer fields", fn() -> ():
+            step("accepts only whole numbers for integer fields")
+            val s = text_schema("integer", false)
+            expect(elicitationDialogValidateInput("12", s)).to_equal("")
+            expect(elicitationDialogValidateInput("-7", s)).to_equal("")
+            expect(elicitationDialogValidateInput("1.5", s)).to_equal("Enter a whole number")
+            expect(elicitationDialogValidateInput("-", s)).to_equal("Enter a whole number")
+            expect(elicitationDialogValidateInput("12a", s)).to_equal("Enter a whole number")
+            expect(elicitationDialogLooksInteger("")).to_equal(false)
+        )
+
+        it("accepts decimals for number fields but not malformed ones", fn() -> ():
+            step("accepts decimals for number fields but not malformed ones")
+            val s = text_schema("number", false)
+            expect(elicitationDialogValidateInput("1.5", s)).to_equal("")
+            expect(elicitationDialogValidateInput("-0.25", s)).to_equal("")
+            expect(elicitationDialogValidateInput("1.2.3", s)).to_equal("Enter a number")
+            expect(elicitationDialogValidateInput("abc", s)).to_equal("Enter a number")
+            expect(elicitationDialogValidateInput(".", s)).to_equal("Enter a number")
+            expect(elicitationDialogLooksNumber("")).to_equal(false)
+        )
+
+        it("checks date shape for date and date-time formats", fn() -> ():
+            step("checks date shape for date and date-time formats")
+            val d = sch("string", "", "", "date", [], [], false, 0, 0)
+            expect(elicitationDialogValidateInput("2026-01-05", d)).to_equal("")
+            expect(elicitationDialogValidateInput("20260105xx", d)).to_equal("Enter a valid date")
+            expect(elicitationDialogValidateInput("2026-1-5", d)).to_equal("Enter a valid date")
+            val dt = sch("string", "", "", "date-time", [], [], false, 0, 0)
+            expect(elicitationDialogValidateInput("2026-01-05T10:20:30Z", dt)).to_equal("")
+            expect(elicitationDialogIsDateTimeSchema(dt)).to_equal(true)
+        )
+
+        it("restricts enum fields to the listed values", fn() -> ():
+            step("restricts enum fields to the listed values")
+            expect(elicitationDialogValidateInput("r", enum_schema())).to_equal("")
+            expect(elicitationDialogValidateInput("zzz", enum_schema())).to_equal("Choose one of the listed options")
+            expect(elicitationDialogIsEnumSchema(enum_schema())).to_equal(true)
+            expect(elicitationDialogIsEnumSchema(multi_schema(false, 0, 0))).to_equal(false)
+            expect(elicitationDialogIsMultiSelectEnumSchema(multi_schema(false, 0, 0))).to_equal(true)
+            expect(elicitationDialogIsTextField(text_schema("integer", false))).to_equal(true)
+            expect(elicitationDialogIsTextField(text_schema("boolean", false))).to_equal(false)
+        )
+
+        it("validates multi-select size limits and membership", fn() -> ():
+            step("validates multi-select size limits and membership")
+            expect(elicitationDialogValidateMultiSelect([], multi_schema(true, 0, 0))).to_equal("This field is required")
+            expect(elicitationDialogValidateMultiSelect(["a"], multi_schema(false, 2, 0))).to_equal("Select at least 2 items")
+            expect(elicitationDialogValidateMultiSelect([], multi_schema(true, 1, 0))).to_equal("This field is required")
+            expect(elicitationDialogValidateMultiSelect([], multi_schema(false, 2, 0))).to_equal("")
+            expect(elicitationDialogValidateMultiSelect(["a", "b"], multi_schema(false, 0, 1))).to_equal("Select at most 1 item")
+            expect(elicitationDialogValidateMultiSelect(["a", "b", "c"], multi_schema(false, 0, 2))).to_equal("Select at most 2 items")
+            expect(elicitationDialogValidateMultiSelect(["a", "zzz"], multi_schema(false, 0, 0))).to_equal("Choose only listed options")
+            expect(elicitationDialogValidateMultiSelect(["a"], multi_schema(false, 0, 0))).to_equal("")
+            expect(elicitationDialogValidateMultiSelect(["x"], text_schema("string", true))).to_equal("")
+        )
+    )
+
+    describe("Elicitation field state", fn() -> ():
+        it("reports whether required fields are satisfied and which is first invalid", fn() -> ():
+            step("reports whether required fields are satisfied and which is first invalid")
+            val fields = [field("a", text_schema("string", true), "x"), field("b", text_schema("integer", false), "zz"), field("c", text_schema("string", true), "")]
+            expect(elicitationDialogRequiredFieldsValid(fields)).to_equal(false)
+            expect(elicitationDialogFirstInvalidField(fields)).to_equal(1)
+            val good = [field("a", text_schema("string", true), "x")]
+            expect(elicitationDialogRequiredFieldsValid(good)).to_equal(true)
+            expect(elicitationDialogFirstInvalidField(good)).to_equal(-1)
+            expect(elicitationDialogRequiredFieldsValid([])).to_equal(true)
+        )
+
+        it("prefers an explicit error over validation and counts multi-select values", fn() -> ():
+            step("prefers an explicit error over validation and counts multi-select values")
+            val forced = ElicitationDialogField.new("a", text_schema("string", false), "x", [], "server said no", false)
+            expect(elicitationDialogFieldError(forced)).to_equal("server said no")
+            val multi = ElicitationDialogField.new("m", multi_schema(true, 0, 0), "", ["a"], "", false)
+            expect(elicitationDialogFieldHasValue(multi)).to_equal(true)
+            expect(elicitationDialogFieldError(multi)).to_equal("")
+            val none = ElicitationDialogField.new("m", multi_schema(true, 0, 0), "", [], "", false)
+            expect(elicitationDialogFieldHasValue(none)).to_equal(false)
+        )
+
+        it("chooses a status glyph by priority", fn() -> ():
+            step("chooses a status glyph by priority")
+            val busy = ElicitationDialogField.new("a", text_schema("string", true), "", [], "", true)
+            expect(elicitationDialogFieldStatusGlyph(busy, false)).to_equal("spinner")
+            expect(elicitationDialogFieldStatusGlyph(field("a", text_schema("integer", false), "zz"), false)).to_equal("warning")
+            expect(elicitationDialogFieldStatusGlyph(field("a", text_schema("string", false), "v"), false)).to_equal("checked")
+            expect(elicitationDialogFieldStatusGlyph(field("a", text_schema("boolean", true), ""), false)).to_equal("warning")
+            expect(elicitationDialogFieldStatusGlyph(field("a", text_schema("string", false), ""), true)).to_equal("active")
+            expect(elicitationDialogFieldStatusGlyph(field("a", text_schema("string", false), ""), false)).to_equal("empty")
+        )
+
+        it("titles a field by schema title or its name", fn() -> ():
+            step("titles a field by schema title or its name")
+            expect(elicitationDialogFieldTitle(field("nm", sch("string", "Full name", "", "", [], [], false, 0, 0), ""))).to_equal("Full name")
+            expect(elicitationDialogFieldTitle(field("nm", text_schema("string", false), ""))).to_equal("nm")
+        )
+
+        it("toggles multi-select values without duplicates", fn() -> ():
+            step("toggles multi-select values without duplicates")
+            expect(elicitationDialogToggleMultiValue(["a"], "b")).to_equal(["a", "b"])
+            expect(elicitationDialogToggleMultiValue(["a", "b"], "a")).to_equal(["b"])
+            expect(elicitationDialogAddUniqueText(["a"], "a")).to_equal(["a"])
+            expect(elicitationDialogRemoveText(["a", "b", "a"], "a")).to_equal(["b"])
+        )
+
+        it("labels enum values, falling back to the raw value", fn() -> ():
+            step("labels enum values, falling back to the raw value")
+            expect(elicitationDialogEnumLabel(enum_schema(), "r")).to_equal("Red")
+            expect(elicitationDialogEnumLabel(enum_schema(), "g")).to_equal("g")
+            expect(elicitationDialogEnumLabel(enum_schema(), "other")).to_equal("other")
+            expect(elicitationDialogJoinedLabels(multi_schema(false, 0, 0), ["a", "c"])).to_equal("A, C")
+            expect(elicitationDialogJoinedLabels(multi_schema(false, 0, 0), [])).to_equal("not set")
+            expect(elicitationDialogCleanLabel("  ")).to_equal("not set")
+            expect(elicitationDialogCleanLabel(" v ")).to_equal("v")
+        )
+    )
+
+    describe("Elicitation navigation", fn() -> ():
+        it("moves through fields and both buttons with wraparound", fn() -> ():
+            step("moves through fields and both buttons with wraparound")
+            expect(elicitationDialogNavigateIndex(0, "", 2, "down")).to_equal(1)
+            expect(elicitationDialogNavigateIndex(3, "", 2, "down")).to_equal(0)
+            expect(elicitationDialogNavigateIndex(0, "", 2, "up")).to_equal(3)
+            expect(elicitationDialogNavigateIndex(-1, "decline", 2, "down")).to_equal(0)
+            expect(elicitationDialogNavigateIndex(-1, "accept", 2, "down")).to_equal(3)
+        )
+
+        it("maps indexes to buttons and clamps field indexes", fn() -> ():
+            step("maps indexes to buttons and clamps field indexes")
+            expect(elicitationDialogButtonForIndex(2, 2)).to_equal("accept")
+            expect(elicitationDialogButtonForIndex(3, 2)).to_equal("decline")
+            expect(elicitationDialogButtonForIndex(0, 2)).to_equal("")
+            val fields = [field("a", text_schema("string", false), ""), field("b", text_schema("string", false), "")]
+            expect(elicitationDialogClampFieldIndex(5, fields)).to_equal(1)
+            expect(elicitationDialogClampFieldIndex(-3, fields)).to_equal(0)
+            expect(elicitationDialogClampFieldIndex(0, [])).to_equal(-1)
+        )
+
+        it("finds the first label starting with the typed prefix", fn() -> ():
+            step("finds the first label starting with the typed prefix")
+            val labels = ["Apple", "Banana", "Blueberry"]
+            expect(elicitationDialogRunTypeahead("", "B", labels)).to_equal(1)
+            expect(elicitationDialogRunTypeahead("b", "l", labels)).to_equal(2)
+            expect(elicitationDialogRunTypeahead("", "z", labels)).to_equal(-1)
+        )
+
+        it("cycles the spinner frame within ten frames", fn() -> ():
+            step("cycles the spinner frame within ten frames")
+            expect(elicitationDialogAdvanceSpinnerFrame(3)).to_equal(4)
+            expect(elicitationDialogAdvanceSpinnerFrame(9)).to_equal(0)
+            expect(elicitationDialogPlural(1, "item")).to_equal("item")
+        )
+    )
+
+    describe("Elicitation form rendering", fn() -> ():
+        it("renders an invalid required field with its error and an expanded enum", fn() -> ():
+            step("renders an invalid required field with its error and an expanded enum")
+            val fields = [
+                field("name", sch("string", "Name", "Your name", "", [], [], true, 0, 0), ""),
+                field("color", enum_schema(), "g")
+            ]
+            val state = ElicitationDialogFormState.new("srv", "Please fill", fields, 1, "", "color", 1, "")
+            val m = ElicitationFormDialog(state)
+            expect(m.title).to_equal("MCP server \"srv\" requests your input")
+            expect(m.subtitle).to_equal("Please fill")
+            expect(m.action).to_equal("validation-needed")
+            expect(m.footer).to_equal("Esc cancel | Up/Down navigate | Backspace unset")
+            expect(m.rows).to_equal([
+                "  warning Name: not set",
+                "      Your name",
+                "      This field is required",
+                "> checked color: g",
+                "      ( ) Red",
+                "    > (*) g",
+                "  Accept    Decline"
+            ])
+        )
+
+        it("renders multi-select, boolean and date values and is ready when valid", fn() -> ():
+            step("renders multi-select, boolean and date values and is ready when valid")
+            val multi = ElicitationDialogField.new("tags", multi_schema(false, 0, 0), "", ["a", "c"], "", false)
+            val flag = field("ok", text_schema("boolean", false), "true")
+            val off = field("off", text_schema("boolean", false), "false")
+            val unset = field("unset", text_schema("boolean", false), "")
+            val when = field("when", sch("string", "", "", "date-time", [], [], false, 0, 0), "2026-01-05T10:20:30Z")
+            val state = ElicitationDialogFormState.new("srv", "m", [multi, flag, off, unset, when], -1, "accept", "", 0, "")
+            val m = ElicitationFormDialog(state)
+            expect(m.action).to_equal("accept-ready")
+            expect(m.rows).to_equal([
+                "  checked tags: A, C",
+                "  checked ok: [x]",
+                "  checked off: [ ]",
+                "  empty unset: not set",
+                "  checked when: 2026-01-05 10:20:30 UTC",
+                "> Accept    Decline"
+            ])
+        )
+
+        it("lists multi-select options with check marks when expanded", fn() -> ():
+            step("lists multi-select options with check marks when expanded")
+            val multi = ElicitationDialogField.new("tags", multi_schema(false, 0, 0), "", ["b"], "", false)
+            val rows = elicitationDialogRenderChoice(multi, true, true, 2)
+            expect(rows).to_equal(["> checked tags: B", "      [ ] A", "      [x] B", "    > [ ] C"])
+            val plain = elicitationDialogRenderChoice(field("n", text_schema("string", false), "v"), false, false, 0)
+            expect(plain).to_equal(["  checked n: v"])
+            val other = elicitationDialogRenderChoice(field("n", sch("object", "", "", "", [], [], false, 0, 0), " x "), false, false, 0)
+            expect(other).to_equal(["  checked n: x"])
+        )
+
+        it("formats date display only for date formats", fn() -> ():
+            step("formats date display only for date formats")
+            val dt = sch("string", "", "", "date-time", [], [], false, 0, 0)
+            expect(elicitationDialogFormatDateDisplay("2026-01-05T10:20:30Z", dt)).to_equal("2026-01-05 10:20:30 UTC")
+            expect(elicitationDialogFormatDateDisplay("2026-01-05", sch("string", "", "", "date", [], [], false, 0, 0))).to_equal("2026-01-05")
+            expect(elicitationDialogFormatDateDisplay("T", text_schema("string", false))).to_equal("T")
+            expect(elicitationDialogFormatDateDisplay("", dt)).to_equal("not set")
+        )
+
+        it("renders button focus pointers", fn() -> ():
+            step("renders button focus pointers")
+            expect(elicitationDialogRenderButtons("accept", "Yes", "No")).to_equal("> Yes    No")
+            expect(elicitationDialogRenderButtons("decline", "Yes", "No")).to_equal("  Yes  > No")
+        )
+    )
+
+    describe("Elicitation URL dialog", fn() -> ():
+        it("splits a URL around its domain", fn() -> ():
+            step("splits a URL around its domain")
+            val p = elicitationDialogParseUrl("https://example.com/path?x=1")
+            expect(p.beforeDomain).to_equal("https://")
+            expect(p.domain).to_equal("example.com")
+            expect(p.afterDomain).to_equal("/path?x=1")
+            val q = elicitationDialogParseUrl("http://h:80#frag")
+            expect(q.domain).to_equal("h:80")
+            expect(q.afterDomain).to_equal("#frag")
+            val bare = elicitationDialogParseUrl("no-scheme")
+            expect(bare.beforeDomain).to_equal("")
+            expect(bare.domain).to_equal("no-scheme")
+            expect(bare.afterDomain).to_equal("")
+        )
+
+        it("cycles the waiting-phase buttons", fn() -> ():
+            step("cycles the waiting-phase buttons")
+            expect(elicitationDialogWaitingButtons(true)).to_equal(["open", "action", "cancel"])
+            expect(elicitationDialogWaitingButtons(false)).to_equal(["open", "action"])
+            expect(elicitationDialogCycleWaitingButton("open", true, "right")).to_equal("action")
+            expect(elicitationDialogCycleWaitingButton("open", true, "left")).to_equal("cancel")
+            expect(elicitationDialogCycleWaitingButton("cancel", true, "right")).to_equal("open")
+            expect(elicitationDialogCycleWaitingButton("open", false, "left")).to_equal("action")
+        )
+
+        it("picks the action for each phase and focused button", fn() -> ():
+            step("picks the action for each phase and focused button")
+            expect(elicitationDialogUrlAction(url_state("prompt", "accept", false, false))).to_equal("open-url")
+            expect(elicitationDialogUrlAction(url_state("prompt", "decline", false, false))).to_equal("decline")
+            expect(elicitationDialogUrlAction(url_state("prompt", "", false, false))).to_equal("cancel")
+            expect(elicitationDialogUrlAction(url_state("waiting", "open", true, false))).to_equal("reopen-url")
+            expect(elicitationDialogUrlAction(url_state("waiting", "cancel", true, false))).to_equal("cancel")
+            expect(elicitationDialogUrlAction(url_state("waiting", "action", true, false))).to_equal("retry")
+            expect(elicitationDialogUrlAction(url_state("waiting", "action", false, false))).to_equal("dismiss")
+            expect(elicitationDialogUrlAction(url_state("waiting", "open", true, true))).to_equal("retry")
+            expect(elicitationDialogUrlAction(url_state("waiting", "open", false, true))).to_equal("dismiss")
+        )
+
+        it("renders the prompt phase with the domain highlighted", fn() -> ():
+            step("renders the prompt phase with the domain highlighted")
+            val m = ElicitationURLDialog(url_state("prompt", "accept", false, false))
+            expect(m.title).to_equal("MCP server \"srv\" wants to open a URL")
+            expect(m.rows).to_equal(["https://[example.com]/p", "> Accept    Decline"])
+            expect(m.action).to_equal("open-url")
+        )
+
+        it("renders the waiting phase with the optional cancel button", fn() -> ():
+            step("renders the waiting phase with the optional cancel button")
+            val m = ElicitationURLDialog(url_state("waiting", "open", true, false))
+            expect(m.title).to_equal("MCP server \"srv\" - waiting for completion")
+            expect(m.rows[1]).to_equal("Waiting for the server to confirm completion...")
+            expect(m.rows[2]).to_equal("> Reopen URL    Done    Cancel")
+            expect(m.action).to_equal("reopen-url")
+            val nocancel = ElicitationURLDialog(url_state("waiting", "action", false, false))
+            expect(nocancel.rows[2]).to_equal("  Reopen URL  > Done")
+        )
+
+        it("dispatches by mode", fn() -> ():
+            step("dispatches by mode")
+            val form = ElicitationDialogFormState.new("f", "m", [], -1, "accept", "", 0, "")
+            val url = url_state("prompt", "accept", false, false)
+            expect(ElicitationDialog("url", form, url).title).to_equal("MCP server \"srv\" wants to open a URL")
+            expect(ElicitationDialog("form", form, url).title).to_equal("MCP server \"f\" requests your input")
+        )
+    )
+    return ()

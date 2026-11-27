@@ -1,0 +1,128 @@
+"""
+## Purpose and audience
+Purpose: Prove SPL-SFFI-ABI-001 reports an SFFI C-scalar-to-unit mapping whose
+underlying primitive differs in width or signedness for the selected target,
+resolves C `int`/`long` through the target ABI table, and rejects unknown
+targets instead of defaulting.
+Audience: compiler and tooling engineers maintaining robust-boundary lints.
+## Operator workflow
+Run with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Declaration form is an `@c_abi(Unit: "ctype")` line above the extern fn. The
+lint is a pure function taking the target triple; registry wiring is later.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use compiler.semantics.lint.sffi_abi_mismatch.{check_sffi_abi_mismatch}
+
+# @manual_section: sffi_abi_mismatch
+describe "SPL-SFFI-ABI-001: SFFI unit ABI mismatch":
+    """A unit crossing SFFI must match the C scalar's width and signedness on the target."""
+
+    it "accepts a matching int64_t to i64 unit":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint int64_t mapped to an i64-backed unit")
+        val src = "unit Ticks: i64 as tk\n@c_abi(Ticks: \"int64_t\")\nextern fn c_ticks() -> Ticks\n"
+        val fs = check_sffi_abi_mismatch(src, "app/x.spl", "x86_64-unknown-linux-gnu")
+        expect(fs.len()).to_equal(0)
+
+    it "reports a width mismatch for int64_t to an i32 unit":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint int64_t mapped to an i32-backed unit")
+        val src = "unit Ticks: i32 as tk\n@c_abi(Ticks: \"int64_t\")\nextern fn c_ticks() -> Ticks\n"
+        val fs = check_sffi_abi_mismatch(src, "app/x.spl", "x86_64-unknown-linux-gnu")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].code).to_equal("SPL-SFFI-ABI-001")
+        expect(fs[0].line_num).to_equal(2)
+        expect(fs[0].message).to_contain("width mismatch")
+
+    it "reports a signedness mismatch for unsigned int to an i32 unit":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint unsigned int mapped to an i32-backed unit")
+        val src = "unit Flags: i32 as fl\n@c_abi(Flags: \"unsigned int\")\nextern fn c_flags() -> Flags\n"
+        val fs = check_sffi_abi_mismatch(src, "app/x.spl", "x86_64-unknown-linux-gnu")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].message).to_contain("signedness mismatch")
+
+    it "resolves C long through the target ABI: LP64 vs 32-bit vs LLP64":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint C long mapped to an i64-backed unit on three data models")
+        val src = "unit Off: i64 as off\n@c_abi(Off: \"long\")\nextern fn c_off() -> Off\n"
+        expect(check_sffi_abi_mismatch(src, "app/x.spl", "x86_64-unknown-linux-gnu").len()).to_equal(0)
+        expect(check_sffi_abi_mismatch(src, "app/x.spl", "riscv32-unknown-none-elf").len()).to_equal(1)
+        expect(check_sffi_abi_mismatch(src, "app/x.spl", "x86_64-pc-windows-gnu").len()).to_equal(1)
+
+    it "resolves C int as 32-bit so an i64 unit mismatches":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint C int mapped to an i64-backed unit")
+        val src = "unit Count: i64 as cnt\n@c_abi(Count: \"int\")\nextern fn c_count() -> Count\n"
+        val fs = check_sffi_abi_mismatch(src, "app/x.spl", "x86_64-unknown-linux-gnu")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].message).to_contain("width mismatch")
+
+    it "rejects an unknown target instead of defaulting":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a matching declaration against an unknown triple")
+        val src = "unit Ticks: i64 as tk\n@c_abi(Ticks: \"int64_t\")\nextern fn c_ticks() -> Ticks\n"
+        val fs = check_sffi_abi_mismatch(src, "app/x.spl", "mystery-os")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].message).to_contain("unknown target")
+
+    it "treats plain char as unsigned on aarch64 and arm linux, signed on x86_64":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint char mapped to an i8 unit on three targets")
+        val src = "unit Tag: i8 as tg\n@c_abi(Tag: \"char\")\nextern fn c_tag() -> Tag\n"
+        expect(check_sffi_abi_mismatch(src, "app/x.spl", "x86_64-unknown-linux-gnu").len()).to_equal(0)
+        val a64 = check_sffi_abi_mismatch(src, "app/x.spl", "aarch64-unknown-linux-gnu")
+        expect(a64.len()).to_equal(1)
+        expect(a64[0].message).to_contain("signedness mismatch")
+        expect(check_sffi_abi_mismatch(src, "app/x.spl", "armv7-unknown-linux-gnueabihf").len()).to_equal(1)
+        val usrc = "unit Tag: u8 as tg\n@c_abi(Tag: \"char\")\nextern fn c_tag() -> Tag\n"
+        expect(check_sffi_abi_mismatch(usrc, "app/x.spl", "aarch64-unknown-linux-gnu").len()).to_equal(0)
+
+    it "keeps char signed on aarch64 macOS and Windows":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint char mapped to an i8 unit on non-linux aarch64")
+        val src = "unit Tag: i8 as tg\n@c_abi(Tag: \"char\")\nextern fn c_tag() -> Tag\n"
+        expect(check_sffi_abi_mismatch(src, "app/x.spl", "aarch64-apple-darwin").len()).to_equal(0)
+        expect(check_sffi_abi_mismatch(src, "app/x.spl", "aarch64-pc-windows-msvc").len()).to_equal(0)
+
+    it "treats the x86_64 gnux32 ABI as ilp32":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint C long mapped to i64 and u32 units on x86_64 gnux32")
+        val big = "unit Off: i64 as off\n@c_abi(Off: \"long\")\nextern fn c_off() -> Off\n"
+        expect(check_sffi_abi_mismatch(big, "app/x.spl", "x86_64-unknown-linux-gnux32").len()).to_equal(1)
+        val sz = "unit Len: u32 as ln\n@c_abi(Len: \"size_t\")\nextern fn c_len() -> Len\n"
+        expect(check_sffi_abi_mismatch(sz, "app/x.spl", "x86_64-unknown-linux-gnux32").len()).to_equal(0)
+        expect(check_sffi_abi_mismatch(sz, "app/x.spl", "x86_64-unknown-linux-gnu").len()).to_equal(1)
+
+    it "flags an @c_abi entry that names an undeclared unit":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint an @c_abi line naming a unit with no declaration")
+        val src = "@c_abi(Ghost: \"int64_t\")\nextern fn c_ghost() -> i64\n"
+        val fs = check_sffi_abi_mismatch(src, "app/x.spl", "x86_64-unknown-linux-gnu")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].message).to_contain("undeclared unit")
+        expect(fs[0].message).to_contain("Ghost")
+
+    it "does not flag a unit imported through a braced use list":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint @c_abi naming units imported via use unit.X.{A, B as C}")
+        val src = "use unit.dist.{{Km, Hours as Hr}\n@c_abi(Km: \"int64_t\", Hr: \"int\")\nextern fn c_km() -> Km\n"
+        expect(check_sffi_abi_mismatch(src, "app/x.spl", "x86_64-unknown-linux-gnu").len()).to_equal(0)
+
+    it "does not flag a unit imported through a plain use path or alias":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint @c_abi naming a unit imported by a single-name use")
+        val src = "use std.units.Ticks\nuse std.units.Mass as Weight\n@c_abi(Ticks: \"int64_t\", Weight: \"int\")\nextern fn c_t() -> Ticks\n"
+        expect(check_sffi_abi_mismatch(src, "app/x.spl", "x86_64-unknown-linux-gnu").len()).to_equal(0)
+
+    it "still flags a name that is neither declared nor imported":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint @c_abi naming Ghost while only Km is imported")
+        val src = "use unit.dist.{{Km}\n@c_abi(Ghost: \"int64_t\")\nextern fn c_g() -> i64\n"
+        val fs = check_sffi_abi_mismatch(src, "app/x.spl", "x86_64-unknown-linux-gnu")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].message).to_contain("undeclared unit")

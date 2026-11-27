@@ -46,6 +46,87 @@ fn declared_return_type_rejects_explicit_and_implicit_mismatches() {
     }
 }
 
+/// optional_return_into_scalar_fn_accepted_2026-11-26: a declared `T?` (or
+/// `Dict.get`) returned from `-> T` is a type error.
+#[test]
+fn optional_returned_from_scalar_fn_is_rejected() {
+    for source in [
+        "fn maybe() -> i64?:\n    return Some(7)\n\nfn value() -> i64:\n    return maybe()\n",
+        "fn lookup() -> i64:\n    val map: Dict<i64, i64> = {1: 7}\n    return map.get(1)\n",
+        "fn lookup() -> i64:\n    val map: Dict<i64, i64> = {1: 7}\n    map.get(1)\n",
+    ] {
+        let error = parse_and_lower(source).expect_err("T? returned from -> T must reject");
+        assert!(format!("{error:?}").contains("error[E1003]"), "unexpected diagnostic: {error:?}");
+    }
+    parse_and_lower("fn lookup() -> i64:\n    val map: Dict<i64, i64> = {1: 7}\n    return map.get(1) ?? 0\n")
+        .expect("unwrapped Dict.get must lower");
+}
+
+/// Fable review 2026-11-26: on an untyped receiver the seed borrows a return
+/// type from any same-named user method (`A.join() -> text?`). That guess must
+/// not make `-> text` reject `xs.join(",")` or `a.concat(b).join(",")`.
+#[test]
+fn optional_rule_ignores_untyped_receiver_suffix_guess() {
+    let class = "class A:\n    n: text\n    fn join(sep: text) -> text?:\n        Some(self.n + sep)\n\n";
+    for body in [
+        "fn f<T>(xs: T) -> text:\n    xs.join(\",\")\n",
+        "fn f<T>(xs: T) -> text:\n    return xs.join(\",\")\n",
+        "fn f<T>(a: T, b: T) -> text:\n    a.concat(b).join(\",\")\n",
+        "fn f<T>(xs: T) -> text:\n    val joined = xs.join(\",\")\n    joined\n",
+    ] {
+        parse_and_lower(&format!("{class}{body}")).unwrap_or_else(|e| panic!("{body}: {e:?}"));
+    }
+}
+
+/// A guess earlier in the module must not exempt a real declared `T?`.
+#[test]
+fn optional_rule_guess_does_not_mask_declared_optional() {
+    let prefix = "class A:\n    n: text\n    fn join(sep: text) -> text?:\n        Some(self.n + sep)\n\n\
+                  fn m() -> text?:\n    Some(\"x\")\n\nfn f<T>(xs: T) -> text:\n    xs.join(\",\")\n\n";
+    for body in ["fn g(a: A) -> text:\n    a.join(\",\")\n", "fn v() -> text:\n    m()\n"] {
+        let error = parse_and_lower(&format!("{prefix}{body}")).expect_err(body);
+        assert!(format!("{error:?}").contains("error[E1003]"), "{body}: {error:?}");
+    }
+}
+
+/// Fable re-review 2026-11-26: the `Option<T>` spelling of the guess is
+/// skipped too, and a declared `Option<T>` is still rejected.
+#[test]
+fn optional_rule_handles_option_enum_spelling() {
+    let class = "class A:\n    n: text\n    fn join(sep: text) -> Option<text>:\n        Some(self.n + sep)\n\n";
+    for body in [
+        "fn f<T>(xs: T) -> text:\n    xs.join(\",\")\n",
+        "fn f(a: [text], b: [text]) -> text:\n    a.concat(b).join(\",\")\n",
+    ] {
+        parse_and_lower(&format!("{class}{body}")).unwrap_or_else(|e| panic!("{body}: {e:?}"));
+    }
+    let error = parse_and_lower(&format!("{class}fn g(a: A) -> text:\n    a.join(\",\")\n")).expect_err("declared Option<text>");
+    assert!(format!("{error:?}").contains("error[E1003]"), "{error:?}");
+}
+
+/// An Option of a different payload is still an Option word in a scalar
+/// slot: `Option<f64>` into `-> i64` and `i64?` into `-> text` must reject.
+#[test]
+fn optional_rule_rejects_mismatched_payloads() {
+    for source in [
+        "fn m() -> Option<f64>:\n    Some(1.5)\n\nfn f() -> i64:\n    return m()\n",
+        "fn m() -> i64?:\n    None\n\nfn f() -> text:\n    return m()\n",
+    ] {
+        let error = parse_and_lower(source).expect_err(source);
+        assert!(format!("{error:?}").contains("error[E1003]"), "{source}: {error:?}");
+    }
+}
+
+/// Sweep 2026-11-26 (option_fn_transport_siblings_spec): `if val f = self.cb`
+/// leaves a class-field `Option<fn>` binding typed `(fn)?`; calling it returns
+/// the function's `text`, not an Option.
+#[test]
+fn calling_unnarrowed_optional_fn_binding_returns_its_result_type() {
+    let source = "class Holder:\n    cb: Option<fn(text, text) -> text>\n\n    fn run(a: text, b: text) -> text:\n        \
+                  if val f = self.cb:\n            return f(a, b)\n        \"none\"\n";
+    parse_and_lower(source).unwrap_or_else(|e| panic!("{e:?}"));
+}
+
 #[test]
 fn declared_return_type_accepts_same_name_struct_across_registration_paths() {
     // TypeIds are module-registry-local (every HirModule owns its own
@@ -319,4 +400,21 @@ fn small_dynamic_module_init_stays_single_function() {
         assigned_globals(root),
         (0..5).map(|i| format!("g_{i}")).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn extern_abi_system_attribute_is_recorded_only_for_tagged_externs() {
+    let module = parse_and_lower(
+        "@abi(\"system\")\nextern fn Sleep(ms: u32)\n@abi(\"system\")\nextern fn GetLastError() -> u32\nextern fn plain_c(x: i32) -> i32\nfn test() -> i64:\n    0\n",
+    )
+    .unwrap();
+
+    let sleep = module.extern_system_abi.get("Sleep").expect("Sleep recorded");
+    assert_eq!(sleep.0, vec![TypeId::U32]);
+    assert_eq!(sleep.1, TypeId::VOID);
+    let last = module.extern_system_abi.get("GetLastError").expect("GetLastError recorded");
+    assert!(last.0.is_empty());
+    assert_eq!(last.1, TypeId::U32);
+    assert!(!module.extern_system_abi.contains_key("plain_c"));
+    assert!(module.extern_param_types.contains_key("plain_c"));
 }

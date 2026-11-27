@@ -1,0 +1,102 @@
+# @req REQ-SSPEC-COMPILER
+"""
+UNIT-WRAP-001 Opt-in Unsafe (suggestion-only) rule: proposes `unit Name: Prim`
+for a non-generic `class` or `struct` with exactly one bare primitive field
+(`i8..i64`, `u8..u64`, `f32`, `f64`, `bool`; `text` exempt) and no methods or
+only trivial accessors. Never emits replacements and never auto-applies under
+`--safe-only`.
+Run: bin/simple test test/01_unit/compiler/lint/unit_wrap_suggestion_spec.spl
+"""
+
+# @tag: unit, compiler, lint, unit_wrap
+
+use std.spec.*
+use std.tooling.easy_fix.types.{FixApplicator, FixConfidence, EasyFix, easyfix_code}
+use compiler.tools.fix.rules.impl_.lint_single_prim_unit.{check_single_prim_unit}
+use compiler.tools.fix.rules.registry.{registry_fix_producers}
+use compiler.tools.fix.main.{FixToolApplicator}
+use app.io.cli_fix_options.{fix_option_error}
+
+fn _suggestions(src: text) -> [EasyFix]:
+    check_single_prim_unit(src, "u.spl")
+
+describe "UNIT-WRAP-001 suggestion: positive cases":
+    it "proposes unit Name: Prim for a struct with one integer field and no methods":
+        val src = "struct Port:\n    num: u16\n"
+        val fixes = _suggestions(src)
+        expect(fixes.len()).to_equal(1)
+        expect(easyfix_code(fixes[0])).to_equal("UNIT-WRAP-001")
+        expect(fixes[0].description).to_contain("unit Port: u16")
+
+    it "preserves pub in the proposed unit declaration for a pub class":
+        val src = "pub class Millis:\n    raw: i64\n"
+        val fixes = _suggestions(src)
+        expect(fixes.len()).to_equal(1)
+        expect(fixes[0].description).to_contain("pub unit Millis: i64")
+
+    it "accepts a class with a trivial getter and trivial static constructor":
+        val src = "pub class Meter:\n    raw: f64\n\n    pub static fn new(v: f64) -> Meter:\n        Meter(raw: v)\n\n    pub fn value() -> f64:\n        return self.raw\n"
+        val fixes = _suggestions(src)
+        expect(fixes.len()).to_equal(1)
+        expect(fixes[0].description).to_contain("pub unit Meter: f64")
+
+    it "accepts a struct whose trivial getter lives in a same-file impl block":
+        val src = "struct Flag:\n    enabled: bool\n\nimpl Flag:\n    fn is_on() -> bool:\n        self.enabled\n"
+        val fixes = _suggestions(src)
+        expect(fixes.len()).to_equal(1)
+        expect(fixes[0].description).to_contain("unit Flag: bool")
+
+    it "is strictly suggestion-only: Uncertain confidence, zero replacements, filtered out by --safe-only":
+        val src = "pub struct Score:\n    points: i32\n"
+        val fixes = _suggestions(src)
+        expect(fixes.len()).to_equal(1)
+        expect(fixes[0].is_safe()).to_equal(false)
+        expect(fixes[0].replacements.len()).to_equal(0)
+        expect(FixToolApplicator.filter_by_confidence(fixes, FixConfidence.Safe).len()).to_equal(0)
+        match FixApplicator.apply(fixes, {"u.spl": src}):
+            case Ok(m): expect(m.len()).to_equal(0)
+            case Err(e): expect("ERR " + e).to_equal("")
+
+describe "UNIT-WRAP-001 suggestion: negative cases":
+    it "exempts text-wrapped classes and structs":
+        val src = "pub struct UserName:\n    raw: text\n\nclass PathText:\n    inner: String\n"
+        expect(_suggestions(src).len()).to_equal(0)
+
+    it "skips structs with zero or multiple fields":
+        val src = "struct Empty:\n    pass\n\nstruct Point:\n    x: i64\n    y: i64\n"
+        expect(_suggestions(src).len()).to_equal(0)
+
+    it "skips wrappers around non-primitive or optional types":
+        val src = "struct Outer:\n    inner: InnerType\n\nstruct MaybeCount:\n    count: i64?\n\nstruct Bytes:\n    data: [u8]\n"
+        expect(_suggestions(src).len()).to_equal(0)
+
+    it "skips generic classes and structs":
+        val src = "struct Tagged<T>:\n    id: i64\n"
+        expect(_suggestions(src).len()).to_equal(0)
+
+    it "skips classes with mutating or non-trivial methods":
+        val src = "class Counter:\n    count: i64\n\n    me inc():\n        self.count = self.count + 1\n\nclass Scaled:\n    raw: i64\n\n    fn doubled() -> i64:\n        self.raw * 2\n"
+        expect(_suggestions(src).len()).to_equal(0)
+
+    it "skips classes with validating constructors":
+        val src = "class Positive:\n    n: i64\n\n    static fn new(v: i64) -> Positive:\n        if v < 0: return Positive(n: 0)\n        Positive(n: v)\n"
+        expect(_suggestions(src).len()).to_equal(0)
+
+    it "skips types with a trait impl or non-trivial inherent impl in the same file":
+        val src = "struct WithTrait:\n    v: i64\n\nimpl Display for WithTrait:\n    fn fmt() -> text:\n        \"x\"\n\nstruct WithLogic:\n    v: i64\n\nimpl WithLogic:\n    fn next() -> i64:\n        self.v + 1\n"
+        expect(_suggestions(src).len()).to_equal(0)
+
+    it "respects @allow(primitive_api), @allow(unit_wrap), and file-scope allow":
+        val src1 = "@allow(primitive_api)\nstruct RawFd:\n    fd: i32\n\n@allow(unit_wrap)\nstruct RawHandle:\n    h: u64\n"
+        val src2 = "#![allow(unit_wrap)]\nstruct Allowed:\n    x: i64\n"
+        expect(_suggestions(src1).len()).to_equal(0)
+        expect(_suggestions(src2).len()).to_equal(0)
+
+describe "UNIT-WRAP-001 opt-in CLI wiring":
+    it "is opt-in, not in the default registry fix producers":
+        for p in registry_fix_producers():
+            expect(p.code != "UNIT-WRAP-001").to_equal(true)
+
+    it "accepts --rule UNIT-WRAP-001 and --safe-only via fix_option_error":
+        expect(fix_option_error(["fix", "--rule", "UNIT-WRAP-001", "--dry-run", "src/lib/common"])).to_equal("")
+        expect(fix_option_error(["fix", "--rule=UNIT-WRAP-001", "--safe-only", "a.spl"])).to_equal("")

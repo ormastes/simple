@@ -1,0 +1,38 @@
+"""
+Regression guard: `d.name(args)` on a local dict of functions, where `name` is
+not a dict method, calls the function stored under key "name". In compiled
+code (`simple run`) it used to lower to the static symbol `Dict.name` and abort
+with "Function 'Dict.name' not found"; the interpreter already resolved it.
+The fixture is run through the binary under test so the compiled lane is the
+one exercised (spec bodies themselves run on the interpreter). Covered: a dict
+whose values share ONE function type. A dict of several functions has an
+erased static type and is still open (see the bug doc). Set SIMPLE_BIN
+to that binary (default bin/simple).
+"""
+use std.spec.{describe, it, expect}
+use std.io.{process_run, env_get}
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn run_fixture() -> text:
+    val (stdout, stderr, _code) = process_run(simple_binary(),
+        ["run", "test/fixtures/dict_fn_dot_call/main.spl"])
+    stdout + stderr
+
+describe "dot-call of a function stored in a local dict (compiled lane)":
+    it "returns the stored function's result for bool, integer and text":
+        val out = run_fixture()
+        expect(out).to_contain("bool=true")
+        expect(out).to_contain("branch=taken")
+        expect(out).to_contain("int=42")
+        expect(out).to_contain("text=hi!")
+
+    it "leaves real dict methods alone and reports no dispatch gap":
+        val out = run_fixture()
+        expect(out).to_contain("len=1")
+        expect(out).to_contain("keys=1")
+        expect(out.contains("not found")).to_equal(false)

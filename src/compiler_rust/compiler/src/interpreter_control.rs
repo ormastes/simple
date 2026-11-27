@@ -170,6 +170,34 @@ pub(crate) fn optional_let_binding(pattern: &Pattern, value: &Value) -> LetBind 
     }
 }
 
+/// Bare identifier binding is nullable presence, not implicit Result success.
+/// An explicit presence expression may already have unwrapped Some(Result),
+/// so retain its payload and the existing structural Ok/Err pattern path.
+pub(crate) fn optional_let_binding_condition(
+    pattern: &Pattern,
+    value: &Value,
+    condition: &Expr,
+) -> Result<LetBind, CompileError> {
+    ensure_optional_binding_condition(pattern, value, condition)?;
+    Ok(optional_let_binding(pattern, value))
+}
+
+pub(crate) fn ensure_optional_binding_condition(
+    pattern: &Pattern,
+    value: &Value,
+    condition: &Expr,
+) -> Result<(), CompileError> {
+    if matches!(pattern, Pattern::Identifier(_) | Pattern::MutIdentifier(_) | Pattern::MoveIdentifier(_))
+        && !matches!(condition, Expr::ExistsCheck(_))
+        && matches!(value, Value::Enum { enum_name, .. } if enum_name == "Result")
+    {
+        return Err(CompileError::Semantic(
+            "cannot bind a Result with bare if val/while val; use match Ok/Err or Result.ok.?".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Is `val` (the already-evaluated result of a boolean-context condition
 /// expression) "true" for branch-taking purposes? For an `Expr::ExistsCheck`
 /// (`.?`) condition, presence was already fully decided inside
@@ -205,11 +233,22 @@ pub(crate) fn assert_stmt_failure(
     assert_stmt: &simple_parser::ast::AssertStmt,
     condition_value: &Value,
 ) -> CompileError {
+    assert_failure(assert_stmt.message.as_deref(), condition_value)
+}
+
+/// Build the error raised by a failing assertion, whichever spelling raised
+/// it: the `assert COND[, "msg"]` keyword statement (`Node::Assert`, above) or
+/// the callable spelling `assert(COND[, MSG])` that the lexer deliberately
+/// leaves as an identifier call (`interpreter_call/builtins.rs`, the `assert`
+/// arm). The pure-Simple front end desugars both to one `__assert` builtin
+/// (src/compiler/10.frontend/core/parser_stmts.spl), so both must fail with
+/// one identical, greppable message and the same `ASSERTION_FAILED` code.
+pub(crate) fn assert_failure(message: Option<&str>, condition_value: &Value) -> CompileError {
     let base = format!(
         "assertion failed: condition evaluated to {}",
         condition_value.to_display_string()
     );
-    let msg = match &assert_stmt.message {
+    let msg = match message {
         Some(custom) => format!("{} ({})", base, custom),
         None => base,
     };
@@ -234,6 +273,100 @@ mod optional_let_binding_tests {
             _ => panic!("if val must not bind nil payloads"),
         }
     }
+
+    fn interpret_binding(source: &str) -> Result<i32, String> {
+        crate::interpreter::clear_module_cache();
+        crate::interpreter::clear_interpreter_state();
+        let module = simple_parser::Parser::new(source).parse().map_err(|e| e.to_string())?;
+        crate::interpreter::evaluate_module(&module.items).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn rejects_bare_result_bindings_before_branch_execution() {
+        let cases = [
+            "fn make() -> Result<i64, text>: Ok(7)\nfn main() -> i64:\n    if val value = make(): return 99\n    0\n",
+            "fn make() -> Result<i64, text>: Err(\"no\")\nfn main() -> i64:\n    if val value = make(): 99\n    else: 0\n",
+            "fn make() -> Result<i64, text>: Ok(7)\nfn main() -> i64:\n    if false: return 98\n    elif val value = make(): return 99\n    0\n",
+            "fn make() -> Result<i64, text>: Ok(7)\nfn main() -> i64:\n    while val value = make(): return 99\n    0\n",
+            "fn make() -> Result<i64, text>: Ok(7)\nfn main() -> i64:\n    val selected = if val value = make(): 99 else: 0\n    selected\n",
+        ];
+        for source in cases {
+            let error = interpret_binding(source).expect_err("bare Result must not enter a presence-binding branch");
+            assert!(error.contains("cannot bind a Result"), "{error}");
+            assert!(error.contains("Result.ok.?"), "{error}");
+        }
+    }
+
+    #[test]
+    fn some_result_and_structural_result_patterns_keep_their_meaning() {
+        let result = Value::Enum {
+            enum_name: "Result".to_string(),
+            variant: "Ok".to_string(),
+            payload: Some(Box::new(Value::Int(7))),
+        };
+        let name = Pattern::Identifier("value".to_string());
+        let condition = Expr::Identifier("input".to_string());
+        let wrapped = Value::some(result.clone());
+        match optional_let_binding_condition(&name, &wrapped, &condition).unwrap() {
+            LetBind::Bind(bound, inner) => {
+                assert_eq!(bound, "value");
+                assert_eq!(inner, result);
+            }
+            _ => panic!("Some(Result) must bind its Result payload"),
+        }
+        let structural = Pattern::Enum {
+            name: "Result".to_string(),
+            variant: "Ok".to_string(),
+            payload: Some(vec![name.clone()]),
+        };
+        assert!(matches!(optional_let_binding_condition(&structural, &result, &condition), Ok(LetBind::NotApplicable)));
+        let present = Expr::ExistsCheck(Box::new(condition));
+        assert!(matches!(optional_let_binding_condition(&name, &result, &present), Ok(LetBind::NotApplicable)));
+    }
+
+    // interp_while_val_binds_option_not_payload_2026-11-13: the statement-level
+    // `while val IDENT = <T?>` must bind the payload (like `if val`), including a
+    // falsy-but-present `Some(0)`, and stop on nil.
+    #[test]
+    fn while_val_binds_optional_payload_not_wrapper() {
+        let source = "fn pk(v: i64, ok: bool) -> i64?:\n    if ok:\n        v\n    else:\n        nil\nfn main() -> i64:\n    var i = 0\n    var total = 0\n    while val m = pk(i, i < 3):\n        total = total + m * 10\n        i = i + 1\n    total\n";
+        assert_eq!(interpret_binding(source), Ok(30));
+    }
+
+    #[test]
+    fn while_val_stops_on_none_and_keeps_structural_and_loop_control() {
+        let cases = [
+            // explicit None / Some(nil) stop the loop (previously bound and looped)
+            ("fn main() -> i64:\n    var n = 0\n    while val m = None:\n        n = n + 1\n        if n > 5: return 99\n    n\n", 0),
+            ("fn main() -> i64:\n    var n = 0\n    while val m = Some(nil):\n        n = n + 1\n        if n > 5: return 99\n    n\n", 0),
+            // structural Some(x) still goes through pattern_matches
+            ("fn pk(v: i64, ok: bool) -> i64?:\n    if ok:\n        v\n    else:\n        nil\nfn main() -> i64:\n    var i = 0\n    var t = 0\n    while val Some(m) = pk(i, i < 3):\n        t = t + m + 1\n        i = i + 1\n    t\n", 6),
+            // break / continue inside a while-val body keep the unwrapped binding
+            ("fn pk(v: i64, ok: bool) -> i64?:\n    if ok:\n        v\n    else:\n        nil\nfn main() -> i64:\n    var i = 0\n    var t = 0\n    while val m = pk(i, i < 10):\n        i = i + 1\n        if m == 1: continue\n        if m == 4: break\n        t = t + m\n    t\n", 5),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(interpret_binding(source), Ok(expected), "{source}");
+        }
+    }
+
+    #[test]
+    fn result_guard_preserves_existing_optional_presence() {
+        let source = "fn make() -> Result<i64, text>: Ok(7)\nfn main() -> i64:\n    if val outer = Some(make()):\n        match outer:\n            case Ok(value): return value - 7\n            case Err(_): return 1\n    2\n";
+        assert_eq!(interpret_binding(source), Ok(0));
+        for source in [
+            "fn make() -> Result<i64, text>: Ok(7)\nfn main() -> i64:\n    if val item = make().?: return item - 7\n    1\n",
+            "fn make() -> Result<i64, text>: Ok(7)\nfn main() -> i64:\n    while val item = make().?: return item - 7\n    1\n",
+        ] {
+            assert_eq!(interpret_binding(source), Ok(0));
+        }
+        let pattern = Pattern::Identifier("value".to_string());
+        let condition = Expr::Identifier("input".to_string());
+        for value in [Value::Int(0), Value::Bool(false)] {
+            assert!(matches!(optional_let_binding_condition(&pattern, &Value::some(value), &condition), Ok(LetBind::Bind(_, _))));
+        }
+        assert!(matches!(optional_let_binding_condition(&pattern, &Value::Nil, &condition), Ok(LetBind::Skip)));
+        assert!(matches!(optional_let_binding_condition(&pattern, &Value::some(Value::Nil), &condition), Ok(LetBind::Skip)));
+    }
 }
 
 pub(super) fn exec_if(
@@ -244,10 +377,14 @@ pub(super) fn exec_if(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
+    let _clear_expected = crate::interpreter::push_expected_target_type(None);
     // Handle if-let: if let PATTERN = EXPR:
     if let Some(pattern) = &if_stmt.let_pattern {
-        let value = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
-        match optional_let_binding(pattern, &value) {
+        let value = {
+            let _clear_cond = crate::interpreter::push_expected_target_type(None);
+            evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?
+        };
+        match optional_let_binding_condition(pattern, &value, &if_stmt.condition)? {
             LetBind::Bind(name, inner) => {
                 // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
                 // so is load-bearing, not cosmetic: `Env::insert` alone leaves
@@ -256,10 +393,11 @@ pub(super) fn exec_if(
                 // NON-local binding. A bound name that also exists as a module
                 // global therefore read back as the GLOBAL — in the bootstrap
                 // closure `if val get_value = …` returned `<fn:get_value>`.
-                env.mark_local(name.clone());
-                env.insert(name, inner);
+                let saved = crate::interpreter::bind_block_scope_shadows(std::collections::HashMap::from([(name, inner)]), env);
                 record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
-                return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
+                let result = exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
+                crate::interpreter::restore_block_scope_shadows(saved, env);
+                return result;
             }
             // value absent — fall through to elif branches / else below.
             LetBind::Skip => {}
@@ -267,11 +405,11 @@ pub(super) fn exec_if(
                 let mut bindings = HashMap::new();
                 if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
                     // Pattern matched - add bindings and execute then block
-                    for (name, val) in bindings {
-                        env.insert(name, val);
-                    }
+                    let saved = crate::interpreter::bind_block_scope_shadows(bindings, env);
                     record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
-                    return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
+                    let result = exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
+                    crate::interpreter::restore_block_scope_shadows(saved, env);
+                    return result;
                 }
                 // Pattern didn't match - fall through to elif branches / else below.
                 // (Previously this returned the else block directly, silently skipping
@@ -282,17 +420,20 @@ pub(super) fn exec_if(
     } else {
         // Normal if condition
         // For if~ (is_suspend), await the condition value before checking truthiness
-        let cond_val = eval_decision_cond(
-            &if_stmt.condition,
-            if_stmt.span.line,
-            if_stmt.span.column,
-            SUB_STMT,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?;
+        let cond_val = {
+            let _clear_cond = crate::interpreter::push_expected_target_type(None);
+            eval_decision_cond(
+                &if_stmt.condition,
+                if_stmt.span.line,
+                if_stmt.span.column,
+                SUB_STMT,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+        };
         let cond_val = if if_stmt.is_suspend {
             await_value(cond_val)?
         } else {
@@ -317,7 +458,7 @@ pub(super) fn exec_if(
         if let Some(pattern) = pattern {
             // elif val PATTERN = EXPR: pattern binding
             let value = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
-            match optional_let_binding(pattern, &value) {
+            match optional_let_binding_condition(pattern, &value, cond)? {
                 LetBind::Bind(name, inner) => {
                     // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
                     // so is load-bearing, not cosmetic: `Env::insert` alone leaves
@@ -326,20 +467,21 @@ pub(super) fn exec_if(
                     // NON-local binding. A bound name that also exists as a module
                     // global therefore read back as the GLOBAL — in the bootstrap
                     // closure `if val get_value = …` returned `<fn:get_value>`.
-                    env.mark_local(name.clone());
-                    env.insert(name, inner);
+                    let saved = crate::interpreter::bind_block_scope_shadows(std::collections::HashMap::from([(name, inner)]), env);
                     record_decision_site(if_stmt.span.line, if_stmt.span.column, sub_elif(idx), true);
-                    return exec_block(block, env, functions, classes, enums, impl_methods);
+                    let result = exec_block(block, env, functions, classes, enums, impl_methods);
+                    crate::interpreter::restore_block_scope_shadows(saved, env);
+                    return result;
                 }
                 LetBind::Skip => {}
                 LetBind::NotApplicable => {
                     let mut bindings = HashMap::new();
                     if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                        for (name, val) in bindings {
-                            env.insert(name, val);
-                        }
+                        let saved = crate::interpreter::bind_block_scope_shadows(bindings, env);
                         record_decision_site(if_stmt.span.line, if_stmt.span.column, sub_elif(idx), true);
-                        return exec_block(block, env, functions, classes, enums, impl_methods);
+                        let result = exec_block(block, env, functions, classes, enums, impl_methods);
+                        crate::interpreter::restore_block_scope_shadows(saved, env);
+                        return result;
                     }
                 }
             }
@@ -450,17 +592,32 @@ pub(super) fn exec_while(
             check_execution_limit!();
             check_timeout!();
             let value = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
-            let mut bindings = HashMap::new();
-            let matched = pattern_matches(pattern, &value, &mut bindings, enums, classes)?;
-            record_decision_site(while_stmt.span.line, while_stmt.span.column, SUB_STMT, matched);
-            if !matched {
+            // `while val IDENT = <T?>` unwraps exactly like `if val` (exec_if) and
+            // the block-closure executor (`evaluate_block_while_condition`): bind
+            // the payload, stop on nil/None. Running the bare identifier through
+            // `pattern_matches` bound the whole `Option::Some(x)` wrapper
+            // (interp_while_val_binds_option_not_payload_2026-11-13).
+            let bindings = match optional_let_binding_condition(pattern, &value, &while_stmt.condition)? {
+                LetBind::Skip => None,
+                LetBind::Bind(name, inner) => Some(HashMap::from([(name, inner)])),
+                LetBind::NotApplicable => {
+                    let mut bindings = HashMap::new();
+                    if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
+                        Some(bindings)
+                    } else {
+                        None
+                    }
+                }
+            };
+            record_decision_site(while_stmt.span.line, while_stmt.span.column, SUB_STMT, bindings.is_some());
+            let Some(bindings) = bindings else {
                 break;
-            }
+            };
             // Pattern matched - add bindings and execute body
-            for (name, val) in bindings {
-                env.insert(name, val);
-            }
-            let ctrl = exec_block(&while_stmt.body, env, functions, classes, enums, impl_methods)?;
+            let saved = crate::interpreter::bind_block_scope_shadows(bindings, env);
+            let ctrl = exec_block(&while_stmt.body, env, functions, classes, enums, impl_methods);
+            crate::interpreter::restore_block_scope_shadows(saved, env);
+            let ctrl = ctrl?;
             if let Some(result) = handle_loop_control_labeled(ctrl, &while_stmt.label) {
                 return result;
             }
@@ -2538,12 +2695,58 @@ fn inline_int_steps_max_depth(steps: &[InlineIntStep]) -> Option<usize> {
     }
 }
 
+/// Name bound by a plain immutable `val name[: i64] = ...` block-local.
+fn inline_block_local_val_name(let_stmt: &simple_parser::ast::LetStmt) -> Option<String> {
+    if let_stmt.mutability.is_mutable()
+        || let_stmt.is_ghost
+        || let_stmt.is_suspend
+        || let_stmt.value.is_none()
+        || !matches!(let_stmt.storage_class, simple_parser::ast::StorageClass::Auto)
+        || !let_stmt.ty.as_ref().is_none_or(inline_int_type_is_integer)
+    {
+        return None;
+    }
+    match &let_stmt.pattern {
+        simple_parser::ast::Pattern::Identifier(name) => Some(name.clone()),
+        _ => None,
+    }
+}
+
+/// Replace every read of `name` in `expr` with `replacement`. Only integer
+/// literals, identifiers and binary operators are rewritten; any other form
+/// declines, because it could hide a read of `name` this walk cannot see.
+fn substitute_inline_int_local(expr: &Expr, name: &str, replacement: &Expr, uses: &mut usize) -> Option<Expr> {
+    match expr {
+        Expr::Integer(_) | Expr::TypedInteger(..) => Some(expr.clone()),
+        Expr::Identifier(id) if id == name => {
+            *uses += 1;
+            Some(replacement.clone())
+        }
+        Expr::Identifier(_) => Some(expr.clone()),
+        Expr::Binary { op, left, right } => Some(Expr::Binary {
+            op: op.clone(),
+            left: Box::new(substitute_inline_int_local(left, name, replacement, uses)?),
+            right: Box::new(substitute_inline_int_local(right, name, replacement, uses)?),
+        }),
+        _ => None,
+    }
+}
+
+
 fn parse_inline_int_expr_loop(
     while_stmt: &WhileStmt,
     env: &Env,
     functions: &HashMap<String, Arc<FunctionDef>>,
 ) -> Option<InlineIntExprLoop> {
-    let [value_node, increment_node] = while_stmt.body.statements.as_slice() else {
+    // Optional leading block-local integer `val t = <int expr>`: `t` is pure and
+    // read-only, so it is spliced into the target expression (the matched
+    // no-declaration shape) instead of disqualifying the whole loop.
+    // Bug: interpreter_val_decl_in_loop_body_declines_every_matcher_2026-09-13.
+    let (local_val, rest) = match while_stmt.body.statements.as_slice() {
+        [Node::Let(let_stmt), rest @ ..] => (Some(let_stmt), rest),
+        rest => (None, rest),
+    };
+    let [value_node, increment_node] = rest else {
         return None;
     };
     let Node::Assignment(value_assign) = value_node else {
@@ -2569,7 +2772,27 @@ fn parse_inline_int_expr_loop(
     }
 
     let mut steps = Vec::new();
-    emit_inline_int_expr(&value_assign.value, None, &index, env, functions, 0, &mut steps)?;
+    let substituted;
+    let target_expr = match local_val {
+        Some(let_stmt) => {
+            let name = inline_block_local_val_name(let_stmt)?;
+            if name == *target || name == index {
+                return None;
+            }
+            let mut uses = 0usize;
+            substituted =
+                substitute_inline_int_local(&value_assign.value, &name, let_stmt.value.as_ref()?, &mut uses)?;
+            // An initializer that is never read is never evaluated once spliced,
+            // so a trapping one (`val y = i % 0`) would silently stop trapping.
+            // Decline: the generic path evaluates it exactly once per iteration.
+            if uses == 0 {
+                return None;
+            }
+            &substituted
+        }
+        None => &value_assign.value,
+    };
+    emit_inline_int_expr(target_expr, None, &index, env, functions, 0, &mut steps)?;
     Some(InlineIntExprLoop {
         target: target.clone(),
         index,
@@ -3470,6 +3693,7 @@ fn expr_may_mutate_var(e: &Expr, var: &str) -> bool {
             items.iter().any(|x| expr_may_mutate_var(x, var))
         }
         Expr::ArrayRepeat { value, count } => expr_may_mutate_var(value, var) || expr_may_mutate_var(count, var),
+        Expr::GenericInst { expr, .. } => expr_may_mutate_var(expr, var),
         Expr::Dict(pairs) => pairs
             .iter()
             .any(|(k, v)| expr_may_mutate_var(k, var) || expr_may_mutate_var(v, var)),
@@ -3787,6 +4011,36 @@ pub(crate) fn call_method_if_exists(
                     impl_methods,
                 )?));
             }
+        }
+    }
+    // Reference-semantics `class` receiver: look the method up the same way
+    // and bind `self` to the instance itself (single-key `{"self": value}`
+    // convention honoured by `exec_function_with_values_and_self`).
+    if let Value::ClassInstance(instance) = receiver {
+        let class = instance.class();
+        let method = classes
+            .get(class)
+            .and_then(|class_def| class_def.methods.iter().find(|m| m.name == method_name).cloned())
+            .map(Arc::new)
+            .or_else(|| {
+                impl_methods
+                    .get(class)
+                    .and_then(|ms| ms.iter().find(|m| m.name == method_name).cloned())
+            });
+        if let Some(method) = method {
+            let mut self_fields = HashMap::new();
+            self_fields.insert("self".to_string(), receiver.clone());
+            let self_fields = Arc::new(self_fields);
+            return Ok(Some(crate::interpreter::interpreter_call::exec_function_with_values_and_self(
+                method.as_ref(),
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+                Some((class, &self_fields)),
+            )?));
         }
     }
     Ok(None)
@@ -5400,7 +5654,19 @@ pub(crate) fn exec_match_core(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Control, Option<Value>), CompileError> {
-    let subject = evaluate_expr(&match_stmt.subject, env, functions, classes, enums, impl_methods)?;
+    // Read the subject through its place (index expressions evaluate exactly
+    // once) so the post-arm payload-binding merge can write back through it.
+    let (subject, subject_place) = {
+        let _clear_subj_target = crate::interpreter::push_expected_target_type(None);
+        crate::interpreter::interpreter_patterns::evaluate_match_subject(
+            &match_stmt.subject,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?
+    };
 
     // Check for strong enum - disallow wildcard/catch-all patterns
     if let Value::Enum { enum_name, .. } = &subject {
@@ -5418,23 +5684,27 @@ pub(crate) fn exec_match_core(
 
     for arm in match_stmt.arms.iter() {
         let mut bindings = HashMap::new();
-        if pattern_matches(&arm.pattern, &subject, &mut bindings, enums, classes)? {
+        if crate::interpreter::interpreter_patterns::match_arm_matches(&arm.pattern, &subject, &mut bindings, enums, classes)? {
             if let Some(guard) = &arm.guard {
                 let mut guard_env = env.clone();
                 for (name, value) in &bindings {
+                    guard_env.enter_block_local(name.clone());
                     guard_env.insert(name.clone(), value.clone());
                 }
-                let guard_val = eval_decision_cond(
-                    guard,
-                    arm.span.line,
-                    arm.span.column,
-                    SUB_GUARD,
-                    &mut guard_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?;
+                let guard_val = {
+                    let _clear_guard_target = crate::interpreter::push_expected_target_type(None);
+                    eval_decision_cond(
+                        guard,
+                        arm.span.line,
+                        arm.span.column,
+                        SUB_GUARD,
+                        &mut guard_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?
+                };
                 // COVERAGE: a guard is a decision (an unguarded arm is not; the
                 // old "arm taken" probe could only ever record `true`).
                 let guard_result = is_condition_present(guard, &guard_val);
@@ -5462,6 +5732,20 @@ pub(crate) fn exec_match_core(
             // Execute the match arm body and capture both flow and value
             let result = exec_block_fn(&arm.body, env, functions, classes, enums, impl_methods);
 
+            // Carry container mutations made through this arm's payload
+            // bindings back into the match subject BEFORE the shadowed
+            // bindings are restored (restoring drops the mutated payload
+            // binding). Only shared containers move — scalar writes through a
+            // by-value payload binding keep value semantics. See
+            // doc/08_tracking/bug/seed_interpreter_cross_module_struct_field_read_zero_2026-11-05.md.
+            crate::interpreter::interpreter_patterns::merge_arm_bindings_into_subject(
+                subject_place.as_ref(),
+                &subject,
+                &arm.pattern,
+                env,
+                classes,
+            );
+
             // Restore shadowed values (or remove arm-only bindings) even on error
             for (name, prev) in shadowed.into_iter().rev() {
                 env.exit_block_local(&name);
@@ -5480,8 +5764,33 @@ pub(crate) fn exec_match_core(
         }
     }
 
-    // No arm matched
-    Ok((Control::Next, None))
+    // No arm matched: a match STATEMENT fails closed exactly like a match
+    // expression (owner decision 2026-11-14) instead of silently doing nothing.
+    Err(match_no_arm_error("statement", &subject, &match_stmt.arms))
+}
+
+/// The single "no arm matched" runtime error for both match forms. `form` is
+/// `"statement"` or `"expression"`; the message names the scrutinee's type and
+/// value plus every arm's location and pattern.
+pub(crate) fn match_no_arm_error(form: &str, subject: &Value, arms: &[simple_parser::ast::MatchArm]) -> CompileError {
+    let ctx = crate::error::ErrorContext::new()
+        .with_code(crate::error::codes::INVALID_PATTERN)
+        .with_help("add a wildcard pattern (_) or another pattern to handle this case");
+    let arm_patterns = arms
+        .iter()
+        .map(|arm| format!("{}:{} {:?}", arm.span.line, arm.span.column, arm.pattern))
+        .collect::<Vec<_>>()
+        .join(", ");
+    CompileError::semantic_with_context(
+        format!(
+            "invalid pattern: match {} exhausted without matching any pattern for {} value {}; arms [{}]",
+            form,
+            subject.type_name(),
+            subject.to_display_string(),
+            arm_patterns
+        ),
+        ctx,
+    )
 }
 
 pub(super) fn exec_match(
@@ -5492,6 +5801,7 @@ pub(super) fn exec_match(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
+    let _clear_expected = crate::interpreter::push_expected_target_type(None);
     let (flow, _last_val) = exec_match_core(match_stmt, env, functions, classes, enums, impl_methods)?;
     match flow {
         Control::Return(_) | Control::Break(..) | Control::Continue(_) => Ok(flow),
@@ -5524,8 +5834,11 @@ pub(crate) fn exec_if_core(
         // `exec_if_core` sibling of the fix already landed in `exec_if` — `if val`
         // reaches THIS function instead whenever the `if` is the last statement
         // of a function/block body (implicit-return / value position).
-        let value = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
-        match optional_let_binding(pattern, &value) {
+        let value = {
+            let _clear_cond = crate::interpreter::push_expected_target_type(None);
+            evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?
+        };
+        match optional_let_binding_condition(pattern, &value, &if_stmt.condition)? {
             LetBind::Bind(name, inner) => {
                 // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
                 // so is load-bearing, not cosmetic: `Env::insert` alone leaves
@@ -5534,11 +5847,11 @@ pub(crate) fn exec_if_core(
                 // NON-local binding. A bound name that also exists as a module
                 // global therefore read back as the GLOBAL — in the bootstrap
                 // closure `if val get_value = …` returned `<fn:get_value>`.
-                env.mark_local(name.clone());
-                env.insert(name, inner);
+                let saved = crate::interpreter::bind_block_scope_shadows(std::collections::HashMap::from([(name, inner)]), env);
                 record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
-                let (flow, last_val) =
-                    exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
+                let branch = exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
+                crate::interpreter::restore_block_scope_shadows(saved, env);
+                let (flow, last_val) = branch?;
                 return match flow {
                     Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
                     other => Ok((other, Value::Nil)),
@@ -5548,12 +5861,11 @@ pub(crate) fn exec_if_core(
             LetBind::NotApplicable => {
                 let mut bindings = HashMap::new();
                 if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                    for (name, val) in bindings {
-                        env.insert(name, val);
-                    }
+                    let saved = crate::interpreter::bind_block_scope_shadows(bindings, env);
                     record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
-                    let (flow, last_val) =
-                        exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
+                    let branch = exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
+                    crate::interpreter::restore_block_scope_shadows(saved, env);
+                    let (flow, last_val) = branch?;
                     return match flow {
                         Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
                         other => Ok((other, Value::Nil)),
@@ -5567,17 +5879,20 @@ pub(crate) fn exec_if_core(
         record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, false);
     } else {
         // Normal if condition
-        let cond_val = eval_decision_cond(
-            &if_stmt.condition,
-            if_stmt.span.line,
-            if_stmt.span.column,
-            SUB_STMT,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?;
+        let cond_val = {
+            let _clear_cond = crate::interpreter::push_expected_target_type(None);
+            eval_decision_cond(
+                &if_stmt.condition,
+                if_stmt.span.line,
+                if_stmt.span.column,
+                SUB_STMT,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+        };
         let cond_val = if if_stmt.is_suspend {
             await_value(cond_val)?
         } else {
@@ -5609,8 +5924,11 @@ pub(crate) fn exec_if_core(
 
     for (elif_idx, (pattern, cond, block)) in if_stmt.elif_branches.iter().enumerate() {
         if let Some(pattern) = pattern {
-            let value = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
-            match optional_let_binding(pattern, &value) {
+            let value = {
+                let _clear_cond = crate::interpreter::push_expected_target_type(None);
+                evaluate_expr(cond, env, functions, classes, enums, impl_methods)?
+            };
+            match optional_let_binding_condition(pattern, &value, cond)? {
                 LetBind::Bind(name, inner) => {
                     // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
                     // so is load-bearing, not cosmetic: `Env::insert` alone leaves
@@ -5619,10 +5937,11 @@ pub(crate) fn exec_if_core(
                     // NON-local binding. A bound name that also exists as a module
                     // global therefore read back as the GLOBAL — in the bootstrap
                     // closure `if val get_value = …` returned `<fn:get_value>`.
-                    env.mark_local(name.clone());
-                    env.insert(name, inner);
+                    let saved = crate::interpreter::bind_block_scope_shadows(std::collections::HashMap::from([(name, inner)]), env);
                     record_decision_site(if_stmt.span.line, if_stmt.span.column, sub_elif(elif_idx), true);
-                    let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
+                    let branch = exec_block_fn(block, env, functions, classes, enums, impl_methods);
+                    crate::interpreter::restore_block_scope_shadows(saved, env);
+                    let (flow, last_val) = branch?;
                     return match flow {
                         Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
                         other => Ok((other, Value::Nil)),
@@ -5632,11 +5951,11 @@ pub(crate) fn exec_if_core(
                 LetBind::NotApplicable => {
                     let mut bindings = HashMap::new();
                     if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                        for (name, val) in bindings {
-                            env.insert(name, val);
-                        }
+                        let saved = crate::interpreter::bind_block_scope_shadows(bindings, env);
                         record_decision_site(if_stmt.span.line, if_stmt.span.column, sub_elif(elif_idx), true);
-                        let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
+                        let branch = exec_block_fn(block, env, functions, classes, enums, impl_methods);
+                        crate::interpreter::restore_block_scope_shadows(saved, env);
+                        let (flow, last_val) = branch?;
                         return match flow {
                             Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
                             other => Ok((other, Value::Nil)),
@@ -5646,17 +5965,20 @@ pub(crate) fn exec_if_core(
             }
             record_decision_site(if_stmt.span.line, if_stmt.span.column, sub_elif(elif_idx), false);
         } else {
-            let elif_val = eval_decision_cond(
-                cond,
-                if_stmt.span.line,
-                if_stmt.span.column,
-                sub_elif(elif_idx),
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let elif_val = {
+                let _clear_cond = crate::interpreter::push_expected_target_type(None);
+                eval_decision_cond(
+                    cond,
+                    if_stmt.span.line,
+                    if_stmt.span.column,
+                    sub_elif(elif_idx),
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?
+            };
             let elif_val = if if_stmt.is_suspend {
                 await_value(elif_val)?
             } else {

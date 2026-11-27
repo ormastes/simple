@@ -7,7 +7,11 @@ fn _extract_flag(cmd_args: [text], flag_name: text, default_val: text) -> text:
     """Extract a flag value from args. E.g., --json fields -> "fields"."""
     var i = 0
     while i < cmd_args.len():
+        if cmd_args[i] == "--":
+            return default_val
         if cmd_args[i] == flag_name and i + 1 < cmd_args.len():
+            if cmd_args[i + 1].starts_with("--") or _flag_is_valueless(cmd_args[i + 1]) or _flag_is_short_value(cmd_args[i + 1]):
+                return default_val
             return cmd_args[i + 1]
         # Support --flag=value syntax
         if cmd_args[i].starts_with(flag_name + "="):
@@ -19,20 +23,43 @@ fn _extract_flag(cmd_args: [text], flag_name: text, default_val: text) -> text:
 fn _has_flag(cmd_args: [text], flag_name: text) -> bool:
     """Check if a boolean flag is present. E.g., --yes, --json (no value)."""
     for arg in cmd_args:
+        if arg == "--":
+            return false
         if arg == flag_name:
             return true
     false
 
 
+fn _flag_is_valueless(arg: text) -> bool:
+    # Keep optional-value --json and required-value --jq/config options out
+    # of this table. Merely checking their presence does not make them boolean.
+    match arg:
+        "--acli" | "--all" | "--approve" | "--attachments" | "--bytes" | "--confirm" | "--confluence" | "--dry-run" | "--force" | "--help" | "--include" | "--jira" | "--keep-source" | "--no-pager" | "--non-interactive" | "--off" | "--push" | "--quiet" | "--raw" | "--ready-check" | "--recursive" | "--remove" | "--silent" | "--threads" | "--unapprove" | "--unread" | "--verbose" | "--web" | "--yes" | "-a" | "-h" | "-r": true
+        _: false
+
+fn _flag_is_short_value(arg: text) -> bool:
+    match arg:
+        "-B" | "-H" | "-L" | "-R" | "-b" | "-t": true
+        _: false
+
 fn _positional_args(cmd_args: [text]) -> [text]:
+    _positional_args_with_booleans(cmd_args, [])
+
+fn _positional_args_with_booleans(cmd_args: [text], boolean_flags: [text]) -> [text]:
     """Extract positional arguments (skip flags and their values)."""
     var result: [text] = []
     var i = 0
     while i < cmd_args.len():
         val arg = cmd_args[i]
-        if arg.starts_with("--"):
+        if arg == "--":
+            # An explicit terminator makes all remaining values positional,
+            # including object keys and filenames that begin with dashes.
+            return result + cmd_args[i + 1:]
+        if _flag_is_valueless(arg) or boolean_flags.contains(arg):
+            i = i + 1
+        elif arg.starts_with("--") or _flag_is_short_value(arg):
             # Skip flag + value pair (unless it's a boolean flag)
-            if i + 1 < cmd_args.len() and not cmd_args[i + 1].starts_with("--"):
+            if not arg.contains("=") and i + 1 < cmd_args.len() and not cmd_args[i + 1].starts_with("--") and not _flag_is_valueless(cmd_args[i + 1]) and not _flag_is_short_value(cmd_args[i + 1]):
                 i = i + 2
             else:
                 i = i + 1
@@ -48,6 +75,8 @@ fn _remove_flags(cmd_args: [text], flag_names: [text]) -> [text]:
     var i = 0
     while i < cmd_args.len():
         val arg = cmd_args[i]
+        if arg == "--":
+            return result + cmd_args[i:]
         var is_flag = false
         for name in flag_names:
             if arg == name:
@@ -55,7 +84,7 @@ fn _remove_flags(cmd_args: [text], flag_names: [text]) -> [text]:
             if arg.starts_with(name + "="):
                 is_flag = true
         if is_flag:
-            if not arg.contains("=") and i + 1 < cmd_args.len() and not cmd_args[i + 1].starts_with("--"):
+            if not _flag_is_valueless(arg) and not arg.contains("=") and i + 1 < cmd_args.len() and not cmd_args[i + 1].starts_with("--") and not _flag_is_valueless(cmd_args[i + 1]) and not _flag_is_short_value(cmd_args[i + 1]):
                 i = i + 2
             else:
                 i = i + 1

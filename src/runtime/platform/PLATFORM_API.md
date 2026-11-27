@@ -45,7 +45,7 @@ bool rt_dir_remove_all(const char* path);
 /**
  * Acquire exclusive file lock.
  * @param path File path (created if doesn't exist)
- * @param timeout_secs Timeout in seconds (0 = blocking, >0 = timeout)
+ * @param timeout_secs Timeout in seconds (<=0 = one nonblocking attempt, >0 = timeout)
  * @return File handle (>0) on success, -1 on failure/timeout
  */
 int64_t rt_file_lock(const char* path, int64_t timeout_secs);

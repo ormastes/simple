@@ -1,0 +1,182 @@
+# Complete structural identity projected by the existing semantic type owner.
+# This is transport/equality, not a second type resolver or an admission token.
+pub const DATA_SEMANTIC_TYPE_VERSION_V1: i64 = 1
+pub const DATA_SEMANTIC_TYPE_MAX_BYTES_V1: i64 = 65536
+pub const DATA_SEMANTIC_TYPE_MAX_DEPTH_V1: i64 = 32
+pub const DATA_SEMANTIC_TYPE_MAX_NODES_V1: i64 = 1024
+
+pub struct DataSemanticTypeIdentityV1:
+    version: i64
+    canonical: text
+    byte_len: i64
+
+fn type_field_v1(value: text) -> text:
+    "{value.bytes().len()}:{value}"
+
+# Only the semantic adapter supplies meaning. The final constructor below
+# validates the whole byte-framed tree, including nested boundaries and arity.
+pub fn data_semantic_type_node_v1(tag: text, fields: [text], children: [text]) -> text:
+    var out = type_field_v1(tag) + "{fields.len()}:"
+    for value in fields: out = out + type_field_v1(value)
+    out = out + "{children.len()}:"
+    for child in children: out = out + type_field_v1(child)
+    out
+
+pub fn data_semantic_type_bounded_node_v1(tag: text, fields: [text], children: [text]) -> Result<text, text>:
+    if fields.len() > 16 or children.len() > 256: return Err("type identity field/child bound")
+    var count = "{fields.len()}:".bytes().len() + "{children.len()}:".bytes().len()
+    val groups: [[text]] = [[tag], fields, children]
+    for group in groups:
+        for value in group:
+            val bytes = value.bytes().len()
+            if bytes > DATA_SEMANTIC_TYPE_MAX_BYTES_V1: return Err("type identity byte bound")
+            val framed = bytes + "{bytes}:".bytes().len()
+            if framed > DATA_SEMANTIC_TYPE_MAX_BYTES_V1 - count: return Err("type identity byte bound")
+            count = count + framed
+    Ok(data_semantic_type_node_v1(tag, fields, children))
+
+fn type_natural_v1(value: text) -> i64:
+    val number = value.to_i64() ?? -1
+    if number < 0 or "{number}" != value: return -1
+    number
+
+fn type_shape_v1(tag: text, fields: [text], children: [text], child_forms: [text]) -> bool:
+    if tag == "function":
+        if fields.len() != 2: return false
+        val parameters = type_natural_v1(fields[0])
+        val effects = type_natural_v1(fields[1])
+        if parameters < 0 or parameters > 255 or effects < 0 or effects > 256: return false
+        if parameters + effects + 1 != children.len(): return false
+        for index in 0..children.len():
+            if children[index].starts_with("effect.") != (index > parameters): return false
+            if index > parameters + 1 and child_forms[index] <= child_forms[index - 1]: return false
+        return true
+    for child in children:
+        if child.starts_with("effect."): return false
+    if tag == "int":
+        return fields.len() == 2 and children.len() == 0 and type_natural_v1(fields[0]) > 0 and (fields[1] == "signed" or fields[1] == "unsigned")
+    if tag == "float":
+        return fields.len() == 1 and children.len() == 0 and type_natural_v1(fields[0]) > 0
+    if tag == "bool" or tag == "char" or tag == "text" or tag == "unit" or tag == "never" or tag == "any":
+        return fields.len() == 0 and children.len() == 0
+    if tag == "named" or tag == "dyn":
+        if fields.len() != 3 or fields[0] == "" or fields[1] == "": return false
+        if fields[0].contains("/") or fields[0].contains("\\") or fields[0].contains("\0") or fields[1].contains("\0"): return false
+        if fields[2] != "struct" and fields[2] != "class" and fields[2] != "enum" and fields[2] != "trait": return false
+        return tag == "named" or (fields[2] == "trait" and children.len() == 0)
+    if tag == "array":
+        return fields.len() == 1 and children.len() == 1 and (fields[0] == "?" or type_natural_v1(fields[0]) >= 0)
+    if tag == "ref" or tag == "ptr":
+        return fields.len() == 1 and children.len() == 1 and (fields[0] == "mutable" or fields[0] == "immutable")
+    if tag == "slice" or tag == "optional" or tag == "isolated" or tag == "unique" or tag == "shared" or tag == "weak":
+        return fields.len() == 0 and children.len() == 1
+    if tag == "dict" or tag == "result": return fields.len() == 0 and children.len() == 2
+    if tag == "tuple" or tag == "union": return fields.len() == 0
+    if tag == "effect.throws": return fields.len() == 0 and children.len() == 1
+    if tag == "effect.pure" or tag == "effect.io" or tag == "effect.async" or tag == "effect.mutates" or tag == "effect.allocates":
+        return fields.len() == 0 and children.len() == 0
+    false
+
+class DataTypeFrameReaderV1:
+    bytes: [u8]
+    offset: i64
+    nodes: i64
+    tag: text
+    error: text
+
+    static fn create(value: text) -> DataTypeFrameReaderV1:
+        DataTypeFrameReaderV1(bytes: value.bytes(), offset: 0, nodes: 0, tag: "", error: "")
+
+    me reject(message: text):
+        if self.error == "": self.error = message
+
+    me number(limit: i64) -> i64:
+        val start = self.offset
+        var result: i64 = 0
+        while self.offset < self.bytes.len():
+            val byte = self.bytes[self.offset] as i64
+            self.offset = self.offset + 1
+            if byte == 58:
+                if self.offset == start + 1 or (self.offset > start + 2 and self.bytes[start] == 48):
+                    self.reject("type identity has a noncanonical count")
+                return result
+            if byte < 48 or byte > 57:
+                self.reject("type identity count is not decimal")
+                return 0
+            # Bound before multiplication, so malicious framing cannot overflow.
+            if result > (limit - (byte - 48)) / 10:
+                self.reject("type identity count exceeds its bound")
+                return 0
+            result = result * 10 + byte - 48
+        self.reject("type identity count is truncated")
+        0
+
+    me frame() -> text:
+        val count = self.number(DATA_SEMANTIC_TYPE_MAX_BYTES_V1)
+        if self.error != "": return ""
+        if count > self.bytes.len() - self.offset:
+            self.reject("type identity field is truncated")
+            return ""
+        val raw = self.bytes[self.offset:self.offset + count]
+        val result = text.from_bytes(raw)
+        self.offset = self.offset + count
+        val decoded = result.bytes()
+        if decoded.len() != count:
+            self.reject("type identity field splits UTF-8")
+        else:
+            for index in 0..count:
+                if decoded[index] != raw[index]: self.reject("type identity field splits UTF-8")
+        result
+
+    me node(depth: i64) -> bool:
+        if depth > DATA_SEMANTIC_TYPE_MAX_DEPTH_V1:
+            self.reject("type identity depth exceeds its bound")
+            return false
+        self.nodes = 1
+        self.tag = self.frame()
+        val field_count = self.number(16)
+        if self.error != "": return false
+        var fields: [text] = []
+        for _ in 0..field_count: fields = fields.push(self.frame())
+        val child_count = self.number(256)
+        if self.error != "": return false
+        var child_tags: [text] = []
+        var child_forms: [text] = []
+        for _ in 0..child_count:
+            val payload = self.frame()
+            if self.error != "": return false
+            var child = DataTypeFrameReaderV1.create(payload)
+            if not child.node(depth + 1):
+                self.reject(child.error)
+                return false
+            self.nodes = self.nodes + child.nodes
+            if self.nodes > DATA_SEMANTIC_TYPE_MAX_NODES_V1:
+                self.reject("type identity node count exceeds its bound")
+                return false
+            child_tags = child_tags.push(child.tag)
+            child_forms = child_forms.push(payload)
+        if self.error != "": return false
+        if self.offset != self.bytes.len():
+            self.reject("type identity has trailing bytes")
+            return false
+        if not type_shape_v1(self.tag, fields, child_tags, child_forms):
+            self.reject("type identity constructor or arity is unsupported")
+            return false
+        true
+
+pub fn data_semantic_type_identity_v1(canonical: text) -> Result<DataSemanticTypeIdentityV1, text>:
+    val count = canonical.bytes().len()
+    if count == 0 or count > DATA_SEMANTIC_TYPE_MAX_BYTES_V1: return Err("type identity byte bound")
+    var reader = DataTypeFrameReaderV1.create(canonical)
+    if not reader.node(0): return Err(reader.error)
+    if reader.tag.starts_with("effect."): return Err("an effect is not a type")
+    Ok(DataSemanticTypeIdentityV1(version: DATA_SEMANTIC_TYPE_VERSION_V1, canonical: canonical, byte_len: count))
+
+pub fn data_semantic_type_identity_valid_v1(value: DataSemanticTypeIdentityV1) -> bool:
+    if value.version != DATA_SEMANTIC_TYPE_VERSION_V1 or value.byte_len != value.canonical.bytes().len(): return false
+    match data_semantic_type_identity_v1(value.canonical):
+        case Ok(_): true
+        case Err(_): false
+
+pub fn data_semantic_type_identity_equal_v1(left: DataSemanticTypeIdentityV1, right: DataSemanticTypeIdentityV1) -> bool:
+    data_semantic_type_identity_valid_v1(left) and data_semantic_type_identity_valid_v1(right) and left.canonical == right.canonical

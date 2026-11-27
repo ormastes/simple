@@ -16,20 +16,43 @@ val JS_STORAGE_TEXT_LIMIT: i64 = 5 * 1024 * 1024
 impl JsInterpreter:
     # Register a native function placeholder and return its index
     me _register_native(name: text, native_id: i64) -> i64:
+        # In-place pushes, not local-alias-store-back: the alias form
+        # deep-copies both tables per registration, so each timer handle's
+        # eight native method registrations cost O(total functions) — the
+        # O(n^2) that hung the 4096-entry timer queue
+        # (js_timer_queue_4096_entries_hang_2026-09-01).
         val fn_idx = self.functions.len()
-        val placeholder = JsFunction(name: name, params: [], body: [], closure_env: -1, is_arrow: false)
-        var functions: [JsFunction] = self.functions
-        functions.push(placeholder)
-        self.functions = functions
-        var native_id_map: [NativeIdMapping] = self.native_id_map
-        native_id_map.push(NativeIdMapping(first: fn_idx, second: native_id))
-        self.native_id_map = native_id_map
+        self.functions.push(JsFunction(name: name, params: [], body: [], closure_env: -1, is_arrow: false))
+        self.native_id_map.push(NativeIdMapping(first: fn_idx, second: native_id))
         fn_idx
 
+    # Native id registered for `fn_id`, or 0 when it is a script function
+    # (native ids are strictly negative, so 0 is unambiguous).
+    # native_id_map is sorted by fn_id (registrations append increasing
+    # function indices), so binary search replaces the former linear scan
+    # that made every JS call O(registered natives) — O(n^2) once
+    # per-object natives grow the table (timer handles, promises).
+    me _lookup_native_id(fn_id: i64) -> i64:
+        var lo = 0
+        var hi = self.native_id_map.len() - 1
+        while lo <= hi:
+            val mid = (lo + hi) / 2
+            val mapping = self.native_id_map[mid]
+            if mapping.first == fn_id:
+                return mapping.second
+            if mapping.first < fn_id:
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        0
+
     # Define a native function in the global scope
-    me _define_global_native(name: text, native_id: i64):
+    me define_global_native_fn(name: text, native_id: i64):
         val fn_idx = self._register_native(name, native_id)
         self.define_global_value(name, JsValue.Function(id: fn_idx))
+
+    me _define_global_native(name: text, native_id: i64):
+        self.define_global_native_fn(name, native_id)
 
     me define_global_value(name: text, value: JsValue):
         var global_var_names: [text] = self.global_var_names
@@ -43,10 +66,192 @@ impl JsInterpreter:
         # Single-owner mutation: aliasing self.object_store into a local and
         # storing it back deep-copies the entire object store per object
         # creation. See .claude/rules/code-style.md.
-        val id = self.object_store.next_id
-        self.object_store.next_id = id + 1
-        self.object_store.obj_proto_ids.push(-1)
-        id
+        # `alloc_object` is a `me` on the store: the nested
+        # `self.object_store.obj_proto_ids.push(-1)` was dropped by the seed
+        # interpreter, so the proto table never grew.
+        self.object_store.alloc_object()
+
+    me collect_garbage() -> i64:
+        """Reachability-based reclamation of the object heap.
+
+        Roots: globals (latest binding per name wins, matching
+        lookup_global_value), environments, call frames, pending
+        callbacks/promises, timers, host bindings, and listener registries —
+        everything that can hold a live reference across a quiescence point.
+        Only objects proven unreachable are reclaimed. Callers must invoke
+        this only at event-loop quiescence points, never during dispatch.
+        """
+        var roots: [i64] = []
+        var shadowed_globals: [text] = []
+        var global_i = self.global_var_names.len() - 1
+        while global_i >= 0:
+            val global_name = self.global_var_names[global_i]
+            var already_shadowed = false
+            for seen in shadowed_globals:
+                if seen == global_name:
+                    already_shadowed = true
+            if not already_shadowed:
+                shadowed_globals.push(global_name)
+                match self.global_var_values[global_i]:
+                    JsValue.Object(id):
+                        roots.push(id)
+                    JsValue.Array(id):
+                        roots.push(id)
+                    _:
+                        pass_dn
+            global_i = global_i - 1
+        for env_frame in self.env_stack.frames:
+            for binding_name in env_frame.bindings.keys():
+                match env_frame.bindings[binding_name]:
+                    Some(JsValue.Object(id)):
+                        roots.push(id)
+                    Some(JsValue.Array(id)):
+                        roots.push(id)
+                    _:
+                        pass_dn
+        for call in self.call_stack:
+            match call.this_value:
+                JsValue.Object(id):
+                    roots.push(id)
+                JsValue.Array(id):
+                    roots.push(id)
+                _:
+                    pass_dn
+            match call.return_value:
+                JsValue.Object(id):
+                    roots.push(id)
+                JsValue.Array(id):
+                    roots.push(id)
+                _:
+                    pass_dn
+        for timer_task in self.pending_timer_tasks:
+            for timer_arg in timer_task.callback_args:
+                match timer_arg:
+                    JsValue.Object(id):
+                        roots.push(id)
+                    JsValue.Array(id):
+                        roots.push(id)
+                    _:
+                        pass_dn
+        for promise_task in self.pending_promise_tasks:
+            roots.push(promise_task.promise_id)
+        for promise_record in self.promise_handlers:
+            roots.push(promise_record.id)
+            roots.push(promise_record.next_promise_id)
+        for promise_registration in self.promise_handler_registrations:
+            roots.push(promise_registration.promise_id)
+            roots.push(promise_registration.next_promise_id)
+        for async_request in self.pending_async_requests:
+            roots.push(async_request.request_obj_id)
+        for async_request in self.pending_async_request_registry:
+            roots.push(async_request.request_obj_id)
+        for event_callback in self.pending_host_event_callbacks:
+            match event_callback:
+                JsValue.Object(id):
+                    roots.push(id)
+                JsValue.Array(id):
+                    roots.push(id)
+                _:
+                    pass_dn
+        for timer_handle_object_id in self.timer_handle_object_ids:
+            roots.push(timer_handle_object_id)
+        for bound_arg_array_id in self.bound_function_arg_array_ids:
+            roots.push(bound_arg_array_id)
+        for bound_this in self.bound_function_this_values:
+            match bound_this:
+                JsValue.Object(id):
+                    roots.push(id)
+                JsValue.Array(id):
+                    roots.push(id)
+                _:
+                    pass_dn
+        for wasm_import in self.wasm_export_bound_imports:
+            match wasm_import:
+                JsValue.Object(id):
+                    roots.push(id)
+                JsValue.Array(id):
+                    roots.push(id)
+                _:
+                    pass_dn
+        for require_cache_value in self.node_require_cache_values:
+            match require_cache_value:
+                JsValue.Object(id):
+                    roots.push(id)
+                JsValue.Array(id):
+                    roots.push(id)
+                _:
+                    pass_dn
+        match self.node_require_last_cache_value:
+            JsValue.Object(id):
+                roots.push(id)
+            JsValue.Array(id):
+                roots.push(id)
+            _:
+                pass_dn
+        match self.return_value:
+            JsValue.Object(id):
+                roots.push(id)
+            JsValue.Array(id):
+                roots.push(id)
+            _:
+                pass_dn
+        match self.thrown_value:
+            JsValue.Object(id):
+                roots.push(id)
+            JsValue.Array(id):
+                roots.push(id)
+            _:
+                pass_dn
+        match self.host_document_title_value:
+            JsValue.Object(id):
+                roots.push(id)
+            JsValue.Array(id):
+                roots.push(id)
+            _:
+                pass_dn
+        match self.host_document_cookie_value:
+            JsValue.Object(id):
+                roots.push(id)
+            JsValue.Array(id):
+                roots.push(id)
+            _:
+                pass_dn
+        match self.host_body_inner_html_value:
+            JsValue.Object(id):
+                roots.push(id)
+            JsValue.Array(id):
+                roots.push(id)
+            _:
+                pass_dn
+        match self.host_body_text_content_value:
+            JsValue.Object(id):
+                roots.push(id)
+            JsValue.Array(id):
+                roots.push(id)
+            _:
+                pass_dn
+        # Host bindings and well-known prototypes.
+        roots.push(self.host_window_id)
+        roots.push(self.host_document_id)
+        roots.push(self.host_body_id)
+        roots.push(self.host_location_id)
+        roots.push(self.host_navigator_id)
+        roots.push(self.host_chrome_id)
+        roots.push(self.host_session_storage_id)
+        roots.push(self.host_local_storage_id)
+        roots.push(self.host_promise_id)
+        roots.push(self.host_dom_element_list_id)
+        roots.push(self.promise_ctor_id)
+        roots.push(self.promise_proto_id)
+        roots.push(self.response_proto_id)
+        roots.push(self.array_buffer_proto_id)
+        roots.push(self.uint8_array_proto_id)
+        roots.push(self.data_view_proto_id)
+        for host_element_id in self.host_dom_element_ids:
+            roots.push(host_element_id)
+        for host_style_id in self.host_dom_style_ids:
+            roots.push(host_style_id)
+        self.object_store.collect_unreachable(roots)
 
     me _storage_api_property(key: text) -> bool:
         key == "__proto__" or key == "getItem" or key == "setItem" or
@@ -62,7 +267,7 @@ impl JsInterpreter:
     me _storage_public_key_from_internal(key: text) -> text:
         val prefix = self._storage_internal_prefix()
         if key.starts_with(prefix):
-            return key.slice(prefix.len(), key.len())
+            return key.slice(prefix.len(), key.byte_len())
         key
 
     me _storage_property_key(key: text) -> text:
@@ -169,21 +374,16 @@ impl JsInterpreter:
         # The latest slot for (obj_id, key) comes from ObjectStore's slot
         # index (same answer as the former backward scan over every stored
         # property, which made each write O(total properties)).
+        # The nested array writes go through ObjectStore `me` methods: the seed
+        # interpreter drops `self.object_store.<array>.push(x)` made from here
+        # (the array is read as a copy), which left every property write lost.
         self.object_store.sync_prop_slots()
         val existing_i = self.object_store.find_prop_slot(obj_id, key)
         if existing_i >= 0:
-            if self.object_store.prop_enumerables.get(existing_i) or self.object_store.prop_configurables.get(existing_i):
-                self.object_store.prop_values[existing_i] = stored_value
-                self.object_store.prop_ref_tags[existing_i] = ""
-                self.object_store.prop_ref_ids[existing_i] = ""
+            if self.object_store.prop_enumerables[existing_i] or self.object_store.prop_configurables[existing_i]:
+                self.object_store.update_slot(existing_i, stored_value)
                 return
-        self.object_store.prop_obj_ids.push(obj_id)
-        self.object_store.prop_keys.push(key)
-        self.object_store.prop_values.push(stored_value)
-        self.object_store.prop_ref_tags.push("")
-        self.object_store.prop_ref_ids.push("")
-        self.object_store.prop_enumerables.push(true)
-        self.object_store.prop_configurables.push(true)
+        self.object_store.append_slot(obj_id, key, stored_value)
         self.object_store.sync_prop_slots()
 
     me get_object_property(obj_id: i64, key: text) -> JsValue:
@@ -221,7 +421,7 @@ impl JsInterpreter:
                     if is_buffer:
                         val early_i = self.object_store.find_prop_slot(obj_id, key)
                         if early_i >= 0:
-                            return self.object_store.prop_values.get(early_i)
+                            return self.object_store.prop_values[early_i]
                         match self.get_object_property(obj_id, "byteLength"):
                             JsValue.Number(byte_length):
                                 if indexed_key < f64_to_i64(byte_length):
@@ -232,7 +432,7 @@ impl JsInterpreter:
                     pass_dn
         val slot = self.object_store.find_prop_slot(obj_id, key)
         if slot >= 0:
-            return self.object_store.prop_values.get(slot)
+            return self.object_store.prop_values[slot]
         if indexed_key >= 0:
             match self.get_object_property(obj_id, "__simple_array_buffer"):
                 JsValue.Boolean(is_buffer):
@@ -248,20 +448,22 @@ impl JsInterpreter:
         JsValue.Undefined
 
     me get_object_property_exact_key(obj_id: i64, key: text) -> JsValue:
-        val store = self.object_store
-        var i = store.prop_keys.len() - 1
+        # Same last-match-wins exact-key scan as before, restricted to this
+        # object's indexed slots instead of every stored property.
+        val slots = self.object_store.object_slots(obj_id)
+        var i = slots.len() - 1
         while i >= 0:
-            if store.prop_obj_ids.get(i) == obj_id:
-                val prop_key = store.prop_keys.get(i)
-                if prop_key.len() == key.len():
-                    var exact = true
-                    var j = 0
-                    while j < key.len():
-                        if prop_key.slice(j, j + 1) != key.slice(j, j + 1):
-                            exact = false
-                        j = j + 1
-                    if exact:
-                        return store.prop_values.get(i)
+            val s = slots[i]
+            val prop_key = self.object_store.prop_keys[s]
+            if prop_key.len() == key.len():
+                var exact = true
+                var j = 0
+                while j < key.len():
+                    if prop_key.slice(j, j + 1) != key.slice(j, j + 1):
+                        exact = false
+                    j = j + 1
+                if exact:
+                    return self.object_store.prop_values[s]
             i = i - 1
         JsValue.Undefined
 
@@ -307,15 +509,18 @@ impl JsInterpreter:
             return Some(found)
         var i = self.global_var_names.len() - 1
         while i >= 0:
-            if self.global_var_names.get(i) == name:
-                return Some(self.global_var_values.get(i))
+            if self.global_var_names[i] == name:
+                return Some(self.global_var_values[i])
             i = i - 1
         nil
 
     # Define a native method on an object
-    me _define_method_on(obj_id: i64, method_name: text, native_id: i64):
+    me define_method_on_object(obj_id: i64, method_name: text, native_id: i64):
         val fn_idx = self._register_native(method_name, native_id)
         self.set_object_property(obj_id, method_name, JsValue.Function(id: fn_idx))
+
+    me _define_method_on(obj_id: i64, method_name: text, native_id: i64):
+        self.define_method_on_object(obj_id, method_name, native_id)
 
     # Initialize global environment with built-in objects and functions.
     # Must be a `me` method on JsInterpreter — JsRuntime wrapper hits copy-semantics bug.
@@ -331,6 +536,11 @@ impl JsInterpreter:
         self._define_global_native("isNaN", -12)
         self._define_global_native("isFinite", -13)
         self._define_global_native("Symbol", -44)
+        # fetch global: parity with the pre-split common runtime
+        # (std.common.js.engine.runtime JsRuntime.initialize installed it
+        # unconditionally). Without a host window the native handler fails
+        # closed (returns Undefined), so a bare runtime is safe.
+        self._define_global_native("fetch", -50)
 
         # console object
         val console_id = self.create_object()

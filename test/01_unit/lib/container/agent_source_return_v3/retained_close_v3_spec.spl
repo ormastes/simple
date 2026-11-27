@@ -1,0 +1,67 @@
+"""
+## Purpose and audience
+milestone_0030 owner decision N9-a: the FINAL close of a workload whose written
+root is retained completes. The lifecycle closes (so the host settle, the
+service loan, the epoch and the admission can end and a successor can start),
+while the written root, its lease and its storage charge stay in the retained
+custody for a later authorized cleanup only. Written for owners of the fresh
+workload lifecycle and the machine authority, for agent and remote-build runs.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-19).
+## Compatibility and limitations
+Structural pins over committed source text; the genuine close needs native
+owners a data spec cannot construct. `close_v1` of the root and the custody
+`cleanup_v3` still refuse a retained custody (the pins below keep both).
+## Verification guidance and troubleshooting
+A failing pin names the close gate that would still refuse a retained run.
+"""
+use std.spec.step
+use std.io.file_read_text
+
+fn rc_from(source: text, start: text) -> text:
+    val at = source.index_of(start)
+    if at < 0: return ""
+    source.substring(at, source.byte_len())
+
+describe "closing a retained workload (N9-a)":
+    it "lets the lifecycle close accept a retained-returned source and nothing earlier":
+        # @req M0030-N9A-01
+        val lifecycle = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_lifecycle_v2.spl")
+        val close = rc_from(lifecycle, "    pub fn close_native_v2() -> Result<(), text>:")
+        expect(close.byte_len() > 0).to_equal(true)
+        expect(close).to_contain("if not [\"none\", \"returned\", \"retained-returned\"].contains(state.source_phase): return Err(\"machine-fresh-workspace-source-parent-retained\")")
+        step("a not-yet-returned or merely pre-reserve `retained` source still refuses")
+        expect(close.contains("\"retained\"]")).to_equal(false)
+        expect(close.contains("\"runtime-active\"")).to_equal(false)
+
+    it "skips the acquisition cleanup for a retained-returned source at the authority close":
+        # @req M0030-N9A-02
+        val authority = file_read_text("src/lib/nogc_sync_mut/container/machine_authority_v1.spl")
+        val close = rc_from(authority, "    pub fn close_workload_v3() -> Result<(), text>:")
+        expect(close.byte_len() > 0).to_equal(true)
+        expect(close).to_contain("if not [\"none\", \"returned\", \"retained-returned\"].contains(phase) and self.state.installed_record_v3().is_err():")
+        step("the close still goes through close_native_v2 (the one authority) and then closes the lifecycle")
+        expect(close).to_contain("self.state.close_native_v2()?")
+        expect(close).to_contain("self.state.closed_v2()")
+
+    it "never releases the retained root, lease or storage charge on the close path":
+        # @req M0030-N9A-03
+        val custody = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workspace_source_custody_v3.spl")
+        val cleanup = rc_from(custody, "    pub(package) fn cleanup_v3() -> MachineFreshWorkspaceSourceCustodyTurnV3:")
+        expect(cleanup).to_contain("workspace-source-retained-requires-authorized-cleanup")
+        val lifecycle = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_lifecycle_v2.spl")
+        val close = rc_from(lifecycle, "    pub fn close_native_v2() -> Result<(), text>:")
+        val body = close.substring(0, close.index_of("    pub fn diagnostic_v2()"))
+        expect(body.contains("cleanup_v3")).to_equal(false)
+        expect(body.contains("workspace_storage_release")).to_equal(false)
+
+    it "records a retained build's source return honestly in its outcome":
+        # @req M0030-N9A-04
+        val build = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_v4.spl")
+        val settle = rc_from(build, "fn remote_build_host_settle_v4(")
+        expect(settle).to_contain("source_return: \"retained-returned\"")
+        val evidence = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_completion_evidence_v3.spl")
+        val validate = rc_from(evidence, "fn host_remote_build_outcome_validate_v4(")
+        expect(validate.contains("value.source_return != \"returned\"")).to_equal(false)
+        expect(validate).to_contain("value.source_return != \"retained-returned\"")

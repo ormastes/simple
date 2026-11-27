@@ -1,0 +1,50 @@
+# @cover src/lib/nogc_sync_mut/test_runner/doctest_child_execution.spl
+# @req REQ-DOCTEST-NATIVE-CHILD
+use std.spec.{describe, it, expect}
+use std.test_runner.doctest_child_execution.{doctest_child_cli_args_v1,
+    doctest_child_request_error_v1, doctest_native_compile_error_v1, doctest_native_body_result_v1}
+use std.test_runner.native_compile_contract.{native_test_compile_args_with_threads}
+use std.test_runner.native_execution_evidence.{native_execution_completion_v1}
+
+describe "doctest child execution contract":
+    it "preserves full CLI positional source and run-config argv boundaries":
+        expect(doctest_child_cli_args_v1("/owned path/snippet.spl", "")).to_equal(["/owned path/snippet.spl"])
+        expect(doctest_child_cli_args_v1("/owned path/snippet.spl", "custom profile")).to_equal(
+            ["--run-config=custom profile", "/owned path/snippet.spl"])
+
+    it "refuses native run-config without changing the full CLI route":
+        expect(doctest_child_request_error_v1("", "custom")).to_equal("")
+        expect(doctest_child_request_error_v1("cranelift", "custom")).to_contain("not supported")
+
+    it "uses the native compiler command and declared source roots":
+        val args = native_test_compile_args_with_threads("test/native-generated-owned/entry.spl",
+            "/owned path/snippet.exe", "cranelift", 20, ["src/lib", "src/compiler"])
+        expect(args).to_equal(["native-build", "--backend", "cranelift", "--refresh-source-authority",
+            "--entry-closure", "--source", "src/lib", "--source", "src/compiler", "--entry",
+            "test/native-generated-owned/entry.spl", "--runtime-bundle", "core-c-bootstrap",
+            "--threads", "20", "--cache-dir", "/owned path/snippet.exe.cache", "--output", "/owned path/snippet.exe"])
+
+    it "never treats compile failure or a missing artifact as an example failure":
+        expect(doctest_native_compile_error_v1(1, true)).to_contain("compilation failed")
+        expect(doctest_native_compile_error_v1(0, false)).to_contain("artifact missing")
+        expect(doctest_native_compile_error_v1(0, true)).to_equal("")
+
+    it "requires normal completion for successful native snippets":
+        val missing = doctest_native_body_result_v1("", "", 0, "/owned/completion", "")
+        expect(missing.infrastructure_error).to_contain("completion evidence missing")
+        val receipt = native_execution_completion_v1("/owned/completion", "plain", 0)
+        val good = doctest_native_body_result_v1("41\n", "", 0, "/owned/completion", receipt)
+        expect(good.infrastructure_error).to_equal("")
+        expect(good.stdout).to_equal("41\n")
+        expect(good.exit_code).to_equal(0)
+
+    it "keeps body failure separate from spawn and timeout failures":
+        val body = doctest_native_body_result_v1("", "panic: expected failure", 1, "/owned/completion", "")
+        expect(body.infrastructure_error).to_equal("")
+        expect(body.exit_code).to_equal(1)
+        expect(doctest_native_body_result_v1("", "TIMEOUT", -1, "/owned/completion", "").infrastructure_error).to_contain("TIMEOUT")
+        expect(doctest_native_body_result_v1("", "", 127, "/owned/completion", "").infrastructure_error).to_contain("could not be executed")
+
+    it "does not accept an earlier panic when the child subsequently times out":
+        val result = doctest_native_body_result_v1("", "panic: earlier diagnostic\nTIMEOUT", -1, "/owned/completion", "")
+        expect(result.infrastructure_error).to_contain("TIMEOUT")

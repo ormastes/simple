@@ -2,26 +2,20 @@
 #
 # Converts a laid-out, styled document (`StyledLayout`, from
 # `blink.layout.style_bridge`) into the flat rect+colour list
-# (`PaintChunkRects`, from `common.ui.render_opt.paint_chunk_rasterizer`) that
-# the existing, already-proven rasterizer consumes.
-#
-# Scope (deliberately minimal — see
-# doc/03_plan/lib/browser/blink_style_paint_plan_2026-08-10.md):
-#   IN:  one axis-aligned rect per box (from `layout.rect_for`) plus its
-#        `background_color`, packed via `SkColor4f.to_sk_color()`.
-#   OUT: no borders, no text/glyph rendering, no transparent-background skip
-#        (alpha=0 rects are still emitted), no z-order/stacking sort (the
-#        block-flow lane is already a flat document-order list), and no
-#        `PaintChunks`/`RenderRevisions` staleness wiring (an orthogonal
-#        damage-tracking optimization layered on top of this rect list).
+# (`PaintChunkRects`, from `common.ui.render_opt.paint_chunk_rasterizer`) and
+# paired retained `PaintChunks` + stable command IDs consumed by DrawIR lowering.
 
 use std.blink.layout.style_bridge.{StyledLayout}
 use std.common.ui.render_opt.paint_chunk_rasterizer.{PaintChunkRects}
+use std.common.ui.render_opt.property_trees.{PaintChunks}
 
-# Walk `layout.node_ids`/`layout.styles` in index-parallel order (the index
-# `i` is a POSITION, not a node id) and emit one rect per box that actually
-# laid out. A node with no computed rect (should not happen for anything in
-# `node_ids`, but `rect_for` returns an option) contributes nothing.
+pub struct StyledLayoutPaintRows:
+    valid: bool
+    reason: text
+    rects: PaintChunkRects
+    chunks: PaintChunks
+    stable_command_ids: [text]
+
 pub fn paint_chunks_from_styled_layout(layout: StyledLayout) -> PaintChunkRects:
     """Flatten a styled, laid-out document into background-colour paint rects."""
     var rects = PaintChunkRects.create()
@@ -36,11 +30,61 @@ pub fn paint_chunks_from_styled_layout(layout: StyledLayout) -> PaintChunkRects:
                 val right = r.2
                 val bottom = r.3
                 val argb = style.background_color.to_sk_color()
-                rects.add_rect(l.to_i64(), t.to_i64(),
-                                (right - l).to_i64(), (bottom - t).to_i64(), argb)
+                rects.add_rect(l as i64, t as i64,
+                               (right - l) as i64, (bottom - t) as i64, argb)
             None:
                 pass_do_nothing()
         i = i + 1
     rects
+
+pub fn paint_chunk_rows_from_styled_layout(layout: StyledLayout) -> StyledLayoutPaintRows:
+    """Emit paired PaintChunkRects, PaintChunks, and semantic stable command IDs."""
+    var rects = PaintChunkRects.create()
+    var chunks = PaintChunks.create()
+    var stable_ids: [text] = []
+    if layout.node_ids.len() != layout.styles.len():
+        return StyledLayoutPaintRows(
+            valid: false,
+            reason: "styled-layout-shape-mismatch",
+            rects: rects,
+            chunks: chunks,
+            stable_command_ids: stable_ids
+        )
+    var seen_counts: Dict<i64, i64> = {}
+    var paint_order: i64 = 0
+    var i = 0
+    while i < layout.node_ids.len():
+        val node_id = layout.node_ids[i as i32]
+        val style = layout.styles[i as i32]
+        match layout.rect_for(node_id):
+            Some(r):
+                val x = r.0 as i64
+                val y = r.1 as i64
+                val w = (r.2 - r.0) as i64
+                val h = (r.3 - r.1) as i64
+                val argb = style.background_color.to_sk_color()
+                val nid = node_id as i64
+                val ord = if seen_counts.has(nid): seen_counts[nid] else: 0
+                seen_counts[nid] = ord + 1
+                rects.add_rect(x, y, w, h, argb)
+                val area = if w > 0 and h > 0: w * h else: 0
+                chunks.add_chunk_sized(
+                    if nid >= 0: nid as u32 else: 0u32,
+                    0, 0, 0, 0u32, 0u32,
+                    paint_order as u32,
+                    area
+                )
+                stable_ids.push("blink-bg:{nid}:{ord}")
+                paint_order = paint_order + 1
+            None:
+                pass_do_nothing()
+        i = i + 1
+    StyledLayoutPaintRows(
+        valid: true,
+        reason: "",
+        rects: rects,
+        chunks: chunks,
+        stable_command_ids: stable_ids
+    )
 
 export paint_chunks_from_styled_layout

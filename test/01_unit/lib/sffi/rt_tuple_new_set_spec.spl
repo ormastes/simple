@@ -1,0 +1,51 @@
+"""
+# rt_tuple_new / rt_tuple_set are dispatchable from the interpreter
+
+enum_wire_restore_nil (sffi/enum_wire.spl) rebuilds a multi-field enum payload
+with rt_tuple_new + rt_tuple_set, the same raw-handle ABI the C runtime and the
+JIT already serve. The interpreter extern table lacked both, so the first
+interpreted tuple-payload restore died with
+`unknown extern function: rt_tuple_new` (same class as the rt_tuple_len gap).
+"""
+
+use std.spec.*
+
+@unsafe(reason: "spec probes the raw tuple ABI directly", capabilities: [ffi])
+extern fn rt_tuple_new(length: i64) -> i64
+@unsafe(reason: "spec probes the raw tuple ABI directly", capabilities: [ffi])
+extern fn rt_tuple_set(tuple: i64, index: i64, value: i64) -> i8
+@unsafe(reason: "spec probes the raw tuple ABI directly", capabilities: [ffi])
+extern fn rt_tuple_len(tuple: i64) -> i64
+@unsafe(reason: "spec probes the raw tuple ABI directly", capabilities: [ffi])
+extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
+@unsafe(reason: "spec probes the raw value ABI directly", capabilities: [ffi])
+extern fn rt_value_int(value: i64) -> i64
+@unsafe(reason: "spec probes the raw value ABI directly", capabilities: [ffi])
+extern fn rt_value_as_int(value: i64) -> i64
+@unsafe(reason: "spec probes the raw value ABI directly", capabilities: [ffi])
+extern fn rt_value_nil() -> i64
+
+describe "rt_tuple_new / rt_tuple_set raw tuple ABI":
+    it "allocates a tuple whose length is observable through rt_tuple_len":
+        unsafe(capabilities: [ffi]):
+            val tuple = rt_tuple_new(3)
+            expect(rt_tuple_len(tuple)).to_equal(3)
+
+    it "writes in-range slots and reads them back through rt_tuple_get":
+        unsafe(capabilities: [ffi]):
+            val tuple = rt_tuple_new(2)
+            expect(rt_tuple_set(tuple, 0, rt_value_int(41))).to_equal(1)
+            expect(rt_tuple_set(tuple, 1, rt_value_int(42))).to_equal(1)
+            expect(rt_value_as_int(rt_tuple_get(tuple, 0))).to_equal(41)
+            expect(rt_value_as_int(rt_tuple_get(tuple, 1))).to_equal(42)
+
+    it "refuses an out-of-range slot and a non-tuple target":
+        unsafe(capabilities: [ffi]):
+            val tuple = rt_tuple_new(1)
+            expect(rt_tuple_set(tuple, 1, rt_value_int(1))).to_equal(0)
+            expect(rt_tuple_set(tuple, -1, rt_value_int(1))).to_equal(0)
+            expect(rt_tuple_set(rt_value_nil(), 0, rt_value_int(1))).to_equal(0)
+
+    it "reports a failed allocation as a non-tuple (length -1)":
+        unsafe(capabilities: [ffi]):
+            expect(rt_tuple_len(rt_tuple_new(-1))).to_equal(-1)

@@ -1,0 +1,54 @@
+# @cover scripts/check/check-baremetal-efi-boot.shs 80%
+# @req REQ-SSPEC-SYSTEM
+"""# Bare-metal freestanding runtime contract
+
+A `<arch>-unknown-none` Simple program prints, interpolates and panics through
+the pure-Simple freestanding runtime and boots under real firmware only. The
+live boot is `sh scripts/check/check-baremetal-efi-boot.shs` (QEMU + OVMF /
+AAVMF / OpenSBI fw_payload); this spec pins the contract so a regression in
+the runtime surface or the firmware rule is caught without QEMU.
+"""
+use std.io_runtime.{file_read}
+use std.spec.*
+
+val RT = "src/lib/nogc_async_mut_noalloc/baremetal/freestanding/bm_rt.spl"
+val CHECK = "scripts/check/check-baremetal-efi-boot.shs"
+val CRT0_DIR = "src/lib/nogc_async_mut_noalloc/baremetal/freestanding/"
+
+describe "Bare-metal freestanding runtime":
+    it "defines every runtime symbol the backend emits for print, interpolation and panic":
+        step("Read the pure-Simple runtime")
+        val rt = file_read(RT)
+        for sym in ["rt_string_new", "rt_string_new_literal", "rt_string_data", "rt_string_len",
+                    "rt_raw_i64_to_string", "rt_strcat_tagged", "rt_interp_cstr",
+                    "rt_println_str", "rt_println", "rt_panic"]:
+            expect(rt).to_contain("pub fn {sym}(")
+
+    it "uses no division or modulo (riscv64-unknown-none has no M extension)":
+        val rt = file_read(RT)
+        expect(rt).not_to_contain(" / ")
+        expect(rt).not_to_contain(" % ")
+
+    it "keeps asm to entry, stack, putc, byte access, halt and arena per arch":
+        for arch in ["x86_64", "aarch64", "riscv64"]:
+            val s = file_read(CRT0_DIR + "crt0_" + arch + ".S")
+            for label in ["_start:", "bm_putc:", "bm_load8:", "bm_store8:", "bm_halt:", "bm_arena_base:", "bm_arena_size:"]:
+                expect(s).to_contain(label)
+
+    it "boots through real firmware only and asserts the exact transcript":
+        val c = file_read(CHECK)
+        expect(c).to_contain("hello from Simple bare metal")
+        expect(c).to_contain("panic: boom")
+        expect(c).to_contain("after panic")
+        expect(c).to_contain("FW_PAYLOAD=y")
+        expect(c).to_contain("-bios")
+        expect(c).to_contain("if=pflash")
+        expect(c).to_contain("-kernel|*isa-debug-exit*")
+        expect(c).to_contain("llvm-nm -u")
+        expect(c).to_contain("absolute-reloc")
+
+    it "pins integer printing edge cases (0, negative, i64 max, i64 min) in the booted transcript":
+        val c = file_read(CHECK)
+        expect(c).to_contain("ints 0 -7 9223372036854775807 -9223372036854775808")
+        val rt = file_read(RT)
+        expect(rt).to_contain("NEGATIVE domain")

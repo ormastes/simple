@@ -1,0 +1,236 @@
+# Bug: mir_let_annotated_result_overwritten_by_join_metadata_2026-11-12
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl
+#
+# `val r: Result<i64, text> = if/match ...` whose typed arm is a
+# `Result<u8, text>` call joined with an untyped `Err(..)`: the join type
+# `Result<u8, text>` used to overwrite the annotation, so `r.unwrap()` lowered
+# with MIR type U8 instead of I64. Let locals are unnamed in MIR, so the probe
+# reads the lowering's per-local HIR metadata for the unnamed temporaries of
+# `pick`: the annotated binding must carry the declared wrapper type and no
+# unnamed integer temporary may be u8 (the only u8 is the named parameter).
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.driver_core_compile_options_default
+use compiler.driver.driver_mir_target.driver_mir_target_context
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_lowering.expressions.*
+use compiler.hir.hir_lowering._Expressions.expression_core.*
+use compiler.hir.hir_lowering._Expressions.expression_support.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.MirLowering
+use compiler.mir.mir_serialization.{serialize_mir_function}
+use compiler.types.type_infer.*
+use compiler.types.type_infer_types.{HmInferContext}
+use compiler.frontend.core.interpreter.mod.{core_interpret}
+use compiler.frontend.core.interpreter.eval.{eval_has_error, eval_get_error}
+use compiler.frontend.core.interpreter.value.{val_get_int}
+
+struct LetResultProbe:
+    errors: [text]
+    # Unnamed temporaries carrying the probed wrapper type.
+    wrapper_locals: i64
+    # Unnamed temporaries with integer HIR metadata, by shape.
+    u8_temps: i64
+    i64_temps: i64
+    # Unnamed temporaries whose MIR type is U8 / I64 with int HIR metadata.
+    u8_mir_temps: i64
+
+fn let_result_hir_shape(t: HirType) -> text:
+    match t.kind:
+        case HirTypeKind.Int(bits, signed):
+            if signed: "i{bits}" else: "u{bits}"
+        case HirTypeKind.Str: "text"
+        case HirTypeKind.Any: "any"
+        case HirTypeKind.Result(ok, err): "Result<{let_result_hir_shape(ok)}, {let_result_hir_shape(err)}>"
+        case HirTypeKind.Optional(inner): "{let_result_hir_shape(inner)}?"
+        case _: "other"
+
+fn let_result_hir_is_int(t: HirType) -> bool:
+    match t.kind:
+        case HirTypeKind.Int(_, _): true
+        case _: false
+
+fn let_result_mir_is_u8(t: MirType) -> bool:
+    match t.kind:
+        case MirTypeKind.U8: true
+        case _: false
+
+fn let_result_probe(source: text, wrapper: text) -> LetResultProbe:
+    val parsed = parse_full_frontend(source, "let_result.spl", "let_result", Logger(level: 0))
+    var hir_owner = HirLowering.with_filename("let_result.spl")
+    val hir = hir_owner.lower_module(parsed)
+    var mir_owner = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = mir_owner.lower_module(hir)
+    var errors: [text] = []
+    for error in hir_owner.errors:
+        errors.push("HIR: " + error.message)
+    for error in mir_owner.errors:
+        errors.push("MIR: " + error.message)
+    var wrapper_locals = 0
+    var u8_temps = 0
+    var i64_temps = 0
+    var u8_mir_temps = 0
+    for function in mir.functions.values():
+        if function.name.ends_with(".pick"):
+            for local in function.locals:
+                if local.name == None:
+                    if val local_hir = mir_owner.find_local_hir_type(local.id.id):
+                        val shape = let_result_hir_shape(local_hir)
+                        if shape == wrapper:
+                            wrapper_locals = wrapper_locals + 1
+                        if let_result_hir_is_int(local_hir):
+                            if shape == "u8": u8_temps = u8_temps + 1
+                            if shape == "i64": i64_temps = i64_temps + 1
+                            if let_result_mir_is_u8(local.type_): u8_mir_temps = u8_mir_temps + 1
+    LetResultProbe(errors: errors, wrapper_locals: wrapper_locals, u8_temps: u8_temps,
+        i64_temps: i64_temps, u8_mir_temps: u8_mir_temps)
+
+fn let_result_expect_declared(probe: LetResultProbe):
+    expect(probe.errors).to_equal([])
+    expect(probe.wrapper_locals).to_be_greater_than(0)
+    expect(probe.u8_temps).to_equal(0)
+    expect(probe.u8_mir_temps).to_equal(0)
+    expect(probe.i64_temps).to_be_greater_than(0)
+
+val LET_RESULT_MK = "fn mk(x: u8) -> Result<u8, text>:\n    Ok(x)\n"
+val LET_RESULT_MKO = "fn mko(x: u8) -> u8?:\n    Some(x)\n"
+
+describe "annotated Let keeps its declared Result type over the join type":
+    it "if-join of a Result<u8, text> call and Err(text) under val Result<i64, text>":
+        step("Lower the annotated if-join and its unwrap through HIR and MIR")
+        val probe = let_result_probe(LET_RESULT_MK + "fn pick(c: bool, x: u8) -> i64:\n    val r: Result<i64, text> = if c: mk(x) else: Err(\"e\")\n    val n = r.unwrap()\n    n + 300\n", "Result<i64, text>")
+        let_result_expect_declared(probe)
+
+    it "match-join of a Result<u8, text> call and Err(text) under val Result<i64, text>":
+        step("Lower the annotated match-join and its unwrap through HIR and MIR")
+        val probe = let_result_probe(LET_RESULT_MK + "fn pick(c: bool, x: u8) -> i64:\n    val r: Result<i64, text> = match c:\n        case true: mk(x)\n        case false: Err(\"e\")\n    val n = r.unwrap()\n    n + 300\n", "Result<i64, text>")
+        let_result_expect_declared(probe)
+
+    it "if-join under var Result<i64, text>":
+        step("Lower the var-annotated if-join and its unwrap through HIR and MIR")
+        val probe = let_result_probe(LET_RESULT_MK + "fn pick(c: bool, x: u8) -> i64:\n    var r: Result<i64, text> = if c: mk(x) else: Err(\"e\")\n    val n = r.unwrap()\n    n + 300\n", "Result<i64, text>")
+        let_result_expect_declared(probe)
+
+    it "direct Result<u8, text> call under val Result<i64, text>":
+        step("No join: the initializer local itself carries Result<u8, text>")
+        val probe = let_result_probe(LET_RESULT_MK + "fn pick(c: bool, x: u8) -> i64:\n    val r: Result<i64, text> = mk(x)\n    val n = r.unwrap()\n    n + 300\n", "Result<i64, text>")
+        let_result_expect_declared(probe)
+
+    it "annotated if-join inside a loop body":
+        step("Lower the annotated join in a nested block")
+        val probe = let_result_probe(LET_RESULT_MK + "fn pick(c: bool, x: u8) -> i64:\n    var t = 0\n    for i in 0..2:\n        val r: Result<i64, text> = if c: mk(x) else: Err(\"e\")\n        val n = r.unwrap()\n        t = t + n\n    t\n", "Result<i64, text>")
+        let_result_expect_declared(probe)
+
+    it "pins an annotated Optional if-join of a u8? call and nil as i64?":
+        step("Already declared before the fix: the nil join does not adopt u8?")
+        val probe = let_result_probe(LET_RESULT_MKO + "fn pick(c: bool, x: u8) -> i64:\n    val o: i64? = if c: mko(x) else: nil\n    val n = o.unwrap()\n    n + 300\n", "i64?")
+        let_result_expect_declared(probe)
+
+    it "pins the filed literal repro (untyped Ok(u8) arm) as declared":
+        step("The untyped-constructor join is withheld under an annotation already")
+        val probe = let_result_probe("fn pick(c: bool, x: u8) -> i64:\n    val r: Result<i64, text> = if c: Ok(x + 0u8) else: Err(\"e\")\n    val n = r.unwrap()\n    n + 300\n", "Result<i64, text>")
+        expect(probe.errors).to_equal([])
+        expect(probe.wrapper_locals).to_be_greater_than(0)
+        expect(probe.i64_temps).to_be_greater_than(0)
+
+    it "an unannotated join still adopts the typed arm's Result type":
+        step("Negative control: without an annotation the join type is the only evidence")
+        val probe = let_result_probe(LET_RESULT_MK + "fn pick(c: bool, x: u8) -> i64:\n    val r = if c: mk(x) else: Err(\"e\")\n    val n = r.unwrap()\n    n + 300\n", "Result<i64, text>")
+        expect(probe.errors).to_equal([])
+        expect(probe.wrapper_locals).to_equal(0)
+        expect(probe.u8_temps).to_be_greater_than(0)
+        expect(probe.u8_mir_temps).to_be_greater_than(0)
+
+    it "lowers r.unwrap() and downstream i64 array/call consumers as i64 without U8 locals":
+        step("Lower the suggested array-store and call consumer shape and inspect MIR locals + JSON")
+        val src = LET_RESULT_MK + "fn take_i64(v: i64) -> i64:\n    v\nfn pick(c: bool, x: u8) -> i64:\n    val r: Result<i64, text> = if c: mk(x) else: Err(\"e\")\n    var arr: [i64] = [0]\n    val u = r.unwrap()\n    arr[0] = u + 300\n    take_i64(u + 300)\n"
+        val probe = let_result_probe(src, "Result<i64, text>")
+        let_result_expect_declared(probe)
+        val parsed = parse_full_frontend(src, "let_result_mir.spl", "let_result_mir", Logger(level: 0))
+        var hir_owner = HirLowering.with_filename("let_result_mir.spl")
+        val hir = hir_owner.lower_module(parsed)
+        var mir_owner = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+        val mir = mir_owner.lower_module(hir)
+        var pick_json = ""
+        for function in mir.functions.values():
+            if function.name.ends_with(".pick"):
+                pick_json = serialize_mir_function(function)
+        expect(pick_json).to_contain("rt_enum_payload")
+        expect(pick_json).to_contain("take_i64")
+        expect(pick_json.contains("\"target\":\"U8\"")).to_equal(false)
+
+    it "keeps Result<i64, text> across mixed mk(u8) and Ok(i64) arms":
+        step("Mixed Result<u8, text> and Ok(1000) arms under Result<i64, text>")
+        val mixed_probe = let_result_probe(LET_RESULT_MK + "fn pick(c: bool, x: u8) -> i64:\n    val r: Result<i64, text> = if c: mk(x) else: Ok(1000)\n    val n = r.unwrap()\n    n + 300\n", "Result<i64, text>")
+        let_result_expect_declared(mixed_probe)
+
+    it "keeps Result<i64, text> across an if-val join whose only u8 temp is the pattern binder":
+        step("if-val join with a Result<u8, text> arm under Result<i64, text>")
+        val ifval_src = LET_RESULT_MK + "fn pick(opt: u8?) -> i64:\n    val r: Result<i64, text> = if val h = opt: mk(h) else: Err(\"e\")\n    val n = r.unwrap()\n    n + 300\n"
+        val ifval_probe = let_result_probe(ifval_src, "Result<i64, text>")
+        expect(ifval_probe.errors).to_equal([])
+        expect(ifval_probe.wrapper_locals).to_be_greater_than(0)
+        expect(ifval_probe.u8_temps).to_equal(1)
+        expect(ifval_probe.u8_mir_temps).to_equal(1)
+        expect(ifval_probe.i64_temps).to_be_greater_than(0)
+
+    it "preserves the any-payload guard while letting settled Result<i64, text> override Result<any, text>":
+        step("Result<any, text> must not override a typed Result<u8, text> initializer")
+        val any_ok_probe = let_result_probe(LET_RESULT_MK + "fn pick(c: bool, x: u8) -> i64:\n    unsafe(capabilities: [type_erasure]):\n        val r: Result<any, text> = if c: mk(x) else: Err(\"e\")\n        val n = r.unwrap()\n        n + 300\n", "Result<any, text>")
+        expect(any_ok_probe.errors).to_equal([])
+        expect(any_ok_probe.wrapper_locals).to_equal(0)
+        expect(any_ok_probe.u8_temps).to_be_greater_than(0)
+
+        step("Result<i64, any> must not override a typed Result<u8, text> initializer")
+        val any_err_probe = let_result_probe(LET_RESULT_MK + "fn pick(c: bool, x: u8) -> i64:\n    unsafe(capabilities: [type_erasure]):\n        val r: Result<i64, any> = if c: mk(x) else: Err(\"e\")\n        val n = r.unwrap()\n        n + 300\n", "Result<i64, any>")
+        expect(any_err_probe.errors).to_equal([])
+        expect(any_err_probe.wrapper_locals).to_equal(0)
+        expect(any_err_probe.u8_temps).to_be_greater_than(0)
+
+        step("Settled Result<i64, text> overrides an erased Result<any, text> initializer")
+        val settled_over_any = let_result_probe("fn pick(c: bool, x: u8) -> i64:\n    unsafe(capabilities: [type_erasure]):\n        val src: Result<any, text> = Ok(x)\n        val r: Result<i64, text> = if c: src else: Err(\"e\")\n        val n = r.unwrap()\n        n + 300\n", "Result<i64, text>")
+        let_result_expect_declared(settled_over_any)
+
+    it "verifies HM type inference, seed interpreter execution, and core_interpret runtime value":
+        step("Run HM type inference on a Result<u8, text> initializer under Result<i64, text>")
+        val hm_src = "enum Result<T, E>:\n    Ok(T)\n    Err(E)\n" + LET_RESULT_MK + "fn take_i64(v: i64) -> i64:\n    v\nfn pick(c: bool, x: u8) -> i64:\n    val r: Result<i64, text> = if c: mk(x) else: Result.Err(\"e\")\n    var arr: [i64] = [0]\n    arr[0] = r.unwrap() + 300\n    take_i64(arr[0])\n"
+        val parsed_hm = parse_full_frontend(hm_src, "let_result_hm.spl", "let_result_hm", Logger(level: 0))
+        var hir_hm_owner = HirLowering.with_filename("let_result_hm.spl")
+        val hir_hm = hir_hm_owner.lower_module(parsed_hm)
+        var hm = HmInferContext.with_builtins()
+        hm.infer_module(hir_hm)
+        var mismatch_seen = false
+        for e in hm.errors:
+            if e.message.contains("type mismatch"):
+                mismatch_seen = true
+        expect(mismatch_seen).to_equal(true)
+
+        step("Execute the 200u8 + 300 (> 255) repro directly in the running host engine")
+        fn rt_mk(x: u8) -> Result<u8, text>:
+            Ok(x)
+        fn rt_take(v: i64) -> i64:
+            v
+        val r_lit: Result<i64, text> = if true: Ok(200u8 + 0u8) else: Err("e")
+        var arr_lit: [i64] = [0]
+        arr_lit[0] = r_lit.unwrap() + 300
+        expect(rt_take(arr_lit[0])).to_equal(500)
+        val r_call: Result<i64, text> = if true: rt_mk(200u8) else: Err("e")
+        expect(rt_take(r_call.unwrap() + 300)).to_equal(500)
+
+        step("Execute the 200 + 300 (> 255) repro in pure-Simple core_interpret")
+        val rt_prelude = "enum Result<T, E>:\n    Ok(T)\n    Err(E)\n"
+        val lit_src = rt_prelude + "fn take_i64(v: i64) -> i64:\n    v\nfn pick(c: bool, x: u8) -> i64:\n    val r: Result<i64, text> = if c: Result.Ok(x + (0 as u8)) else: Result.Err(\"e\")\n    var arr: [i64] = [0]\n    arr[0] = r.unwrap() + 300\n    take_i64(arr[0])\nfn main() -> i64:\n    pick(true, 200 as u8)\n"
+        val lit_vid = core_interpret(lit_src, "let_result_rt_lit.spl")
+        expect(eval_has_error()).to_equal(false)
+        expect(lit_vid >= 0).to_equal(true)
+        expect(val_get_int(lit_vid)).to_equal(500)
+
+        val call_src = rt_prelude + "fn mk(x: u8) -> Result<u8, text>:\n    Result.Ok(x)\nfn take_i64(v: i64) -> i64:\n    v\nfn pick(c: bool, x: u8) -> i64:\n    val r: Result<i64, text> = if c: mk(x) else: Result.Err(\"e\")\n    var arr: [i64] = [0]\n    arr[0] = r.unwrap() + 300\n    take_i64(arr[0])\nfn main() -> i64:\n    pick(true, 200 as u8)\n"
+        val call_vid = core_interpret(call_src, "let_result_rt_call.spl")
+        expect(eval_has_error()).to_equal(false)
+        expect(call_vid >= 0).to_equal(true)
+        expect(val_get_int(call_vid)).to_equal(500)

@@ -1,0 +1,43 @@
+# Frozen SCV source snapshot and witness bridge
+
+Date: 2026-10-27. Status: source implementation submitted for review; runtime qualification not run. This slice implements source mechanisms toward P1–P4 of the [approved compiler plan](../03_plan/app/tools/simple_scv_compiler_tldr_build_cache_implementation_plan_2026-10-27.md); it does not complete those phases or the full SCV objective.
+
+Owner/session: `/root/impl_snapshot_witness`. Worktree: `/tmp/simple-scv-impl-witness-20261027`. Branch: `work/scv-impl-witness-20261027`. Exact base: `25cdeee5d5da8f8c7c3ab530d43bc2fd4a360d26`. Target: parent integration into `release/1.0.0`. This lane owns only the new snapshot/witness modules, dedicated tests and this document; existing inventory, storage, compiler and parsing owners are unchanged.
+
+## Contract and authority
+
+`snapshot_v2.spl` owns `ScvSnapshotV2`, exact raw-byte file records and pure in-memory overlay application. `snapshot_v1_adapter.spl` owns `CompileSnapshotV1Adapter`, which wraps the actual `ScvCompileSnapshotV1`. `snapshot_changes_v1.spl` owns `ScvChangeBatchV1`; `source_witness_v1.spl` owns `DirectoryWitnessV1`, `ScvSourceWitnessV1` and source-only `VerificationReceiptV1`.
+
+The existing compiler owner `compiler.common.cache_contract.semantic_query_read_manifest_v1` continues to own `SemanticQueryReadManifestV1`, `SemanticQueryReadV1` and `SemanticCoverageV1`. There is no competing semantic manifest, transaction engine, semantic lowering, scheduler or artifact encoding here. The compiler integration registers real semantic observations separately.
+
+`scv_snapshot_freeze_v2(namespace, files, scopes, generation, acknowledged_generation, coverage, unsupported_inputs)` constructs a closed **declared source model**, copying every payload. It validates canonical logical paths, tagged secure SHA-256 byte identity, regular/materialized kind and mode, unique paths, ancestor conflicts, disjoint declared scopes and generation bounds. Scope names must be nonempty; an empty root is never completeness evidence. The closed model can contain zero files in an explicitly named scope. Coverage is complete only for that declared namespace. No filesystem capture is performed by this function, and it does not assert arbitrary multi-file filesystem atomicity.
+
+`ScvOverlayFileV2` names a path, exact bytes or deletion, and its generation. `scv_snapshot_overlay_v2` produces another independently owned model and refuses duplicates, stale/future overlays, deletion payloads and regressing barriers. The caller supplies the complete acknowledged overlay batch; this API does not drain editors, reconcile watcher events or prove external event coverage.
+
+The V1 adapter requires the actual legacy receipt/root, a frozen `CompileSourceInventoryV1`, declared scopes and `acknowledged_generation = 0`. It reopens the legacy owner, verifies the complete selected row set against the immutable legacy manifest, checks physical containment, and reads every selected object exclusively from the frozen root with bounded no-follow byte reads. Missing/corrupt objects refuse; the live checkout is never a fallback. `source_drifted` refuses. Original V1 formats, IDs and parser source SHA semantics remain unchanged.
+
+V1 completeness means exactly `compile-inventory-v1` membership, **not filesystem absence**. V1 inventory generation is recorded as model generation, never promoted to an editor/filesystem event acknowledgement. Unsupported inputs explicitly include editor overlays, generated inputs, external inputs, configuration, event coverage, physical modes and physical aliases. Empty values are never synthesized as proof for these capabilities. The adapter does not independently discover files or establish the inventory's event completeness.
+
+## Lookup, deltas and verification
+
+`scv_snapshot_read_v2` returns a fresh byte array and checks its content identity. Missing paths distinguish absent under complete declared scope from unknown. `scv_snapshot_lookup_v2` performs exact-file queries **inside the snapshot namespace**. Integration callers should use `scv_snapshot_lookup_domain_v2(snapshot, path, required_namespace)`; a filesystem query against a compile inventory returns unknown. There is no universal negative lookup. Positive witnesses include canonical path, materialized kind/mode, exact content identity and byte count. Negative witnesses require complete coverage in the requested domain.
+
+Directory witnesses describe recursive file membership in the declared source namespace. Their identity includes domain, exact path policy, directory, query policy and canonical path/kind/mode records, excluding file body digests. Empty membership is a complete logical subtree query, not proof that a physical directory exists. A body edit preserves membership; addition/deletion invalidates it.
+
+`scv_snapshot_diff_exact_v1(base, requested, scope)` compares arbitrary snapshot pairs without ancestry assumptions. Both models and scopes must be valid and complete in the same namespace/path policy. It reports exact added, removed and modified files plus affected old/new directory membership scopes. Unknown coverage refuses comparison rather than treating sparse objects or event holes as deletions. Physical rename lineage is not inferred; a move appears as old removal plus new addition.
+
+`scv_verify_source_witnesses_v1(requested, action_digest, witnesses)` checks every supported source query against the **requested** snapshot. It refuses empty read sets, unknown kinds/domains/coverage, corrupt subject identity and changed observations. A formerly absent file becoming present invalidates its old negative witness. The resulting receipt binds requested snapshot, raw 64-hex SHA-256 action digest, original ordered source observations and verifier version. Its `source_only = true` is mandatory. The receipt is in-memory source evidence, **never full action/artifact admission**; unsupported inputs and actual compiler semantic providers remain separate gates. There is no durable receipt publication in this slice.
+
+## Costs and trust boundary
+
+Construction is proportional to retained bytes with O(n log n) canonical file ordering and O(path-depth × log n) ancestor validation. File lookup uses binary search; no repeated live-tree scan occurs. A verification request validates the source subject once before checking its queries; directory queries enumerate only the retained model. Overlay replacement currently copies the retained model. Pair comparison validates both subjects and performs binary indexed lookup. These are bounded reference mechanisms, not qualified large-repository hot-path performance. Retention, shared handles, persistent indexes, deduplication and numerical latency/RSS evidence remain future work.
+
+Snapshot structs are logical values owned by a trusted caller after successful construction; callers must not manufacture or mutate their fields. Byte payloads are copied at construction and on read. `scv_snapshot_valid_v2` independently rechecks canonical subject identity and payloads before receipts/deltas. This is not a sandbox or capability implementation. Existing bounded/no-follow file primitives plus digest checks are reused; this slice claims no new adversarial filesystem race protection.
+
+## Evidence and remaining gates
+
+The executable specifications are [snapshot source/witness cases](../../test/01_unit/lib/scv/snapshot_v2_source_witness_spec.spl) and [actual V1 acquire/adapter cases](../../test/01_unit/lib/scv/snapshot_v1_adapter_spec.spl). They exercise real byte preservation and independent buffer mutation, invalid identities/paths/scopes/modes, overlay generations, absence becoming presence, directory changes, unrelated pair comparison, requested-snapshot receipts, unknown coverage and missing/corrupt frozen objects with valid live sources.
+
+Runtime status: **not_run**. No admitted runtime was available/authorized for this lane; no seed, bootstrap, native build, runtime check, SSpec execution or docgen was used. Branch coverage, compilation, generated-manual quality, performance and full P1–P4 acceptance are unverified. These source tests are not generated execution manuals. Parent integration must execute the focused specs, compiler/core/MCP smoke gates and manual quality workflow with an admitted runtime before any PASS or phase completion claim.
+
+Static checks performed once: staged whitespace check passed; `direct-env-runtime-guard.shs --working` and `--staged` passed; executable `_spec.spl` count beneath `doc/06_spec` was 0. These checks establish layout/facade hygiene only, not Simple compilation or behavior.

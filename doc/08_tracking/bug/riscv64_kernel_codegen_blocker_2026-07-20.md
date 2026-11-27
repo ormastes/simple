@@ -464,3 +464,19 @@ parallel fix for the currently-dead build path),
 `src/compiler_rust/compiler/src/pipeline/native_project/linker.rs:1017-1027`
 (`configured_extra_link_objects` only reachable from the hosted sibling
 path). Reproduction: same exact command as earlier in this doc.
+
+## Triage note 2026-11-25 (release/1.0.0 tip, worktree wt-p2w4-aj)
+
+SKIP (environment-blocked, large remaining program). The doc has no top-level
+status line; the accurate state per the body is: the original 2026-07-20
+codegen blockers and the 2026-08-06 follow-ons are FIXED in source, and the
+remaining blocker is the documented "NEW BLOCKER" — the riscv64 freestanding
+runtime lacks a heap allocator (`rt_alloc` undefined) and the ~30+
+dict/string/enum/array `rt_*` constructors built on it, which the doc itself
+scopes as "a dedicated design pass, not a rushed subset landing". Verifying
+or advancing that here is not possible: it needs the Rust-seed
+`native-build` riscv64 cross-build on a Linux host (multi-minute builds,
+freestanding linker), and this Windows worktree is limited to the pinned
+`bin/simple.exe` seed, which additionally rejects the tree-wide
+`@representation_boundary` decorator at HEAD. No code change made; the
+remaining work item stands as documented above.

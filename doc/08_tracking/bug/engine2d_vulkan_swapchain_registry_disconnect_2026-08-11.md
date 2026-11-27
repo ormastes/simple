@@ -72,3 +72,106 @@ that strict readback and verify its checksum outside the measured frames.
   measured reacquire/re-present operation.
 - 7680x4320 dynamic and retained rows report p50/p95, RSS/device memory,
   fallback=false, completion known, and exact presentation receipts.
+
+## Triage addendum (2026-11-11, lane ne7)
+
+**Status: PARTIAL — remains OPEN; live presentation proof still outstanding
+(matches 2026-10-27 v3 lane02 freeze: keep_open, no admission without live
+checksum evidence).**
+
+Current tip state (branch work/p3-ne7-20261111):
+
+- The presentation ownership moved again: the engine now exposes
+  `present_window_device()` (`src/lib/gc_async_mut/gpu/engine2d/engine.spl:3603`),
+  forwarding to the strict-submission Vulkan owner
+  (`src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl`), with
+  compositor-side fail-closed scalar gates in
+  `src/os/compositor/vulkan_present_damage_gate.spl` (rect validation,
+  overlap rejection, receipt byte accounting).
+- The symbols this bug's 2026-08-11 update named
+  (`VulkanEngine2dPresenter`, `rt_vk_swapchain_copy_engine2d_buffer_and_present`)
+  no longer exist in `src/` — `VulkanEngine2dPresenter` survives only in a
+  comment in `vulkan_present_damage_gate.spl:3`.
+- No live presentation evidence exists on disk: no presentation receipts,
+  timed-frame checksums, or 8K p50/p95 rows anywhere under `build/`, `var/`,
+  or `doc/08_tracking/` newer than this bug. The sibling bug
+  `engine2d_vulkan_window_8k_gate_is_device_present_proxy_2026-08-31`
+  (v3 freeze) records that the 8K window gate passes via an Xvfb
+  device-present PROXY, not real window rendering — consistent with live
+  proof still being open.
+
+Not attempted here: the acceptance criteria (Xvfb/physical surface live
+presentation, verification readback outside timed frames, zero-readback
+timed frames, 7680x4320 p50/p95 + RSS + presentation receipts) require a
+Linux display environment and are out of scope for a Windows P3 lane.
+
+## 2026-11-12 source trace (vulkan-mac lane, work/fix-vulkan-mac-20261112)
+
+Re-traced the presentation path at `7a06b4aafd5` to establish what is and is
+not still disconnected:
+
+- `Engine2D.present_window_device()` (`engine.spl:3603`) forwards to the
+  strict-submission Vulkan owner and records the backend write-back.
+- `VulkanBackend._present_device` (`backend_vulkan.spl:1989`) refuses
+  fail-closed without a live `presentation_swapchain`/device framebuffer,
+  flushes pending compute, then copies the Engine2D device framebuffer into
+  the acquired swapchain image on-device via
+  `vulkan_sffi_present_buffer{,_regions}` — no host readback
+  (`present_readback_bytes = 0` is recorded before the call).
+- The SFFI surface (`src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl:1349`)
+  delegates to `rt_vulkan_present_buffer{,_regions}` plus byte/rect receipts
+  (`rt_vulkan_last_present_copy_bytes/rects`), i.e. the one device/swapchain
+  owner allocated by `rt_vulkan_init_window_present`.
+- Compositor-side gates exist on both ends: `vulkan_present_damage_gate.spl`
+  (rect validation, overlap rejection, receipt byte accounting) and
+  `host_compositor_core.spl` validates `latest_vulkan_frame_receipt()`
+  freshness/content (`exact-vulkan-present-receipt`,
+  `stale-vulkan-present-receipt` refusal).
+
+Conclusion: at the Simple-source layer the buffer-to-swapchain transfer is a
+single-registry, device-local path with receipt accounting; the disconnect
+named in the 2026-08-11 defect (no API transfers the buffer into a canonical
+acquired image) is not present in this tree's source. What remains open is
+exactly what the 2026-11-11 triage recorded: live presentation proof (Xvfb or
+physical surface, verification readback outside timed frames, zero-readback
+timed frames, 7680x4320 p50/p95 + receipts), which needs a display
+environment and an admitted compiler — neither available to this lane. No
+source change was made; status remains open (PARTIAL).
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: PARTIAL, unchanged from the 2026-11-11 ne7 triage — live
+presentation proof still outstanding; not producible on a Windows P3 lane.**
+Presentation ownership remains at `present_window_device()`
+(`src/lib/gc_async_mut/gpu/engine2d/engine.spl`) with the strict-submission
+Vulkan owner and the compositor fail-closed gates; the acceptance criteria
+(Xvfb/physical surface live presentation, verification readback outside timed
+frames, zero-readback timed frames, 7680x4320 p50/p95 + RSS + presentation
+receipts) require a Linux display environment. No live presentation evidence
+was searched for or claimed here; per the v3 freeze this row stays OPEN with
+no admission without live checksum evidence.
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+On release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5 the source-level contract specs pass: engine_vulkan_present_api_spec 2/2, engine_vulkan_window_present_spec 7/7, engine2d_strict_vulkan_submit_no_readback_contract_spec 7/7. The old bridge symbols have no definition left. Blocked for closure on this host: the Acceptance section needs a live Xvfb or physical-display present with checksum, and this host has no Xvfb (xwd only) and the live tests are ignored Rust tests that go through Vulkan instance creation (other lane). Same missing evidence as engine2d_vulkan_window_8k_gate_is_device_present_proxy_2026-08-31.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: PARTIAL (deferred).** Acceptance criteria (Xvfb/physical-surface live presentation, verification readback outside timed frames, zero-readback timed frames, 8K p50/p95 + RSS + receipts) require a Linux display environment; not attempted on this Windows lane.
+
+## 2026-11-27 W5-3 Fix & Host Contract Verification (`fix-implemented-verification-pending`)
+
+- **Source (`src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl`)**:
+  - Confirmed canonical swapchain lifecycle wiring (`init_headless_present`, `init_window_present`, `init_external_window_present`, `_present_device`, `present_window_device`, `present_headless_device`, `latest_frame_receipt`, and swapchain cleanup in `shutdown`).
+  - Hardened `_present_device()` to sync `host_buf` once onto `d_framebuffer` before swapchain copy when presenting a demoted `cpu_fallback_host_surface` frame (failing closed with `<mode>-host-upload-failed` if upload fails), and updated `present()` to handle clean `cpu_fallback_host_surface` frames without hitting the `"none"` no-op path.
+- **Host verification (`SIMPLE_LIB=src`, `--mode=interpreter` on Windows)**:
+  - `test/01_unit/lib/gc_async_mut/gpu/engine2d/engine_vulkan_present_api_spec.spl`: 2/2 PASS.
+  - `test/01_unit/lib/gc_async_mut/gpu/engine2d/engine_vulkan_window_present_spec.spl`: 7/7 PASS.
+  - `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_demotion_recovery_spec.spl`: 7/7 PASS (includes fail-closed swapchain receipts, `-host-upload-failed`, and clean `present()` host-surface verification).
+- **Pending**: live Linux Xvfb / physical display Vulkan presentation proof (`waiting-for: Linux Vulkan / lavapipe verification`).

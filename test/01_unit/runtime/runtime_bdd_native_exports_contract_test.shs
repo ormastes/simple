@@ -1,0 +1,103 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+rt="$root/src/runtime"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/runtime-bdd-exports.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+
+pick_cc() {
+    if [ -n "${CC:-}" ]; then
+        printf '%s\n' "$CC"
+        return 0
+    fi
+    for cand in clang cc; do
+        if command -v "$cand" >/dev/null 2>&1; then
+            triple=$("$cand" -dumpmachine 2>/dev/null || true)
+            case "$triple" in
+                *-msvc) continue ;;
+            esac
+            printf '%s\n' "$cand"
+            return 0
+        fi
+    done
+    for cand in "$HOME"/.simple/toolchains/llvm-mingw-*-ucrt-x86_64/bin/clang.exe; do
+        if [ -x "$cand" ]; then
+            printf '%s\n' "$cand"
+            return 0
+        fi
+    done
+    return 1
+}
+
+CC_BIN=$(pick_cc) || fail "no compatible C compiler (clang or cc) found"
+
+NM_BIN=${NM:-}
+if [ -z "$NM_BIN" ]; then
+    cc_dir=$(dirname "$CC_BIN")
+    if [ -x "$cc_dir/llvm-nm" ] || [ -x "$cc_dir/llvm-nm.exe" ]; then
+        NM_BIN="$cc_dir/llvm-nm"
+    elif command -v llvm-nm >/dev/null 2>&1; then
+        NM_BIN=llvm-nm
+    elif command -v nm >/dev/null 2>&1; then
+        NM_BIN=nm
+    else
+        fail "no nm tool (llvm-nm or nm) found on PATH"
+    fi
+fi
+
+extract_defined_symbols() {
+    obj=$1
+    out=$2
+    raw=$out.raw
+    "$NM_BIN" -g --defined-only "$obj" > "$raw"
+    tr -d '\r' < "$raw" | awk 'NF { print $NF }' | sed 's/^_//' > "$out"
+}
+
+"$CC_BIN" -std=gnu11 -O2 -I"$rt" -c "$rt/runtime_native.c" -o "$tmp/runtime_native.o"
+extract_defined_symbols "$tmp/runtime_native.o" "$tmp/runtime_native.syms"
+for sym in \
+    rt_bdd_record_result \
+    rt_bdd_executed_total \
+    rt_bdd_failed_total \
+    rt_bdd_it_end \
+    rt_bdd_describe_end \
+    rt_bdd_format_results \
+    rt_bdd_clear_state
+do
+    grep -Fxq "$sym" "$tmp/runtime_native.syms" || fail "runtime_native.o missing export $sym"
+done
+
+for profile in memowner standalone; do
+    extra=
+    if [ "$profile" = standalone ]; then
+        extra=-DSIMPLE_CORE_C_STANDALONE=1
+    fi
+    "$CC_BIN" -std=gnu11 -O2 -DSIMPLE_RUNTIME_MEMORY_OWNER=1 $extra -I"$rt" \
+        -c "$rt/runtime.c" -o "$tmp/runtime_$profile.o"
+    extract_defined_symbols "$tmp/runtime_$profile.o" "$tmp/runtime_$profile.syms"
+    for sym in \
+        rt_bdd_record_result \
+        rt_bdd_executed_total \
+        rt_bdd_failed_total \
+        rt_bdd_describe_start_rv \
+        rt_bdd_describe_end \
+        rt_bdd_it_start_rv \
+        rt_bdd_it_end \
+        rt_bdd_expect_eq_rv
+    do
+        if grep -Fxq "$sym" "$tmp/runtime_$profile.syms"; then
+            fail "runtime.c ($profile) must not export $sym alongside runtime_native.o"
+        fi
+    done
+done
+
+"$CC_BIN" -std=gnu11 -O2 -I"$rt" -c "$rt/runtime.c" -o "$tmp/runtime_legacy.o"
+extract_defined_symbols "$tmp/runtime_legacy.o" "$tmp/runtime_legacy.syms"
+for sym in rt_bdd_record_result rt_bdd_executed_total rt_bdd_failed_total; do
+    grep -Fxq "$sym" "$tmp/runtime_legacy.syms" || fail "legacy runtime.c missing export $sym"
+done
+
+echo "PASS: runtime_native.c owns rt_bdd_* exports across core-c, memowner, standalone, and legacy profiles"

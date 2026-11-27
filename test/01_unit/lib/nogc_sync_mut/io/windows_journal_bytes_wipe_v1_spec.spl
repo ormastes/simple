@@ -1,0 +1,75 @@
+"""
+## Purpose and audience
+Pins the bytes path of the Windows journal store (src/lib/nogc_sync_mut/io/windows_private_file_v1.spl
+`WindowsJournalStoreV1.read_bytes` / `publish_bytes`) and its use by the retained identity store
+(src/lib/nogc_sync_mut/io/host_identity_store_windows_v1.spl). Private key files no longer pass through immutable
+`text`: the read copy is a pre-sized `[u8]` (no push), the native buffer is zeroed before `rt_free` on every exit, a
+refused copy is wiped, and publish zeroes its native copy before freeing it. The text methods are unchanged for their
+non-key callers.
+Bug: doc/08_tracking/bug/host_identity_ed25519_std_temporaries_unwiped_2026-11-19.md (Windows store section).
+Written for owners of the host identity store.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-20, milestone_0058).
+## Compatibility and limitations
+Pinned by source shape: the journal is Windows-native (no Linux unit spec can open one). Copies the native
+`rt_windows_journal_*` bodies make behind the ABI are outside Simple code and are recorded in the bug doc.
+## Verification guidance and troubleshooting
+A failing count names the exact needle. `_journal_free_wiped(buffer, ` must be the only way the bytes methods free a
+payload buffer. The success read wipes `count + 1` bytes (one FFI write per byte), the error exits the whole
+`maximum + 1` allocation.
+"""
+use std.spec.{step}
+use std.io.file_read_text
+
+fn jb_count(source: text, needle: text) -> i64:
+    source.split(needle).len() - 1
+
+fn jb_body(source: text, start: text, end: text) -> text:
+    val tail = source.substring(source.index_of(start), source.byte_len())
+    tail.substring(0, tail.index_of(end))
+
+fn jb_journal() -> text:
+    file_read_text("src/lib/nogc_sync_mut/io/windows_private_file_v1.spl")
+
+describe "Windows journal carries private files as wipeable bytes":
+    it "zeroes the native buffer before freeing it":
+        # @req JBWIPE-01
+        val helper = jb_body(jb_journal(), "fn _journal_free_wiped(", "pub class WindowsJournalStoreV1:")
+        expect(jb_count(helper, "volatile_write_u8(buffer + index, 0)")).to_equal(1)
+        expect(jb_count(helper, "rt_free(buffer)")).to_equal(1)
+        expect(helper.index_of("volatile_write_u8(") < helper.index_of("rt_free(buffer)")).to_equal(true)
+
+    it "reads into a pre-sized byte copy, wipes the native buffer on every exit and the copy on refusal":
+        # @req JBWIPE-02
+        val read = jb_body(jb_journal(), "pub fn read_bytes(", "pub fn publish(")
+        expect(jb_count(read, "var bytes: [u8] = [0u8; count]")).to_equal(1)
+        expect(jb_count(read, "bytes.push(")).to_equal(0)
+        expect(jb_count(read, "bytes_to_text(")).to_equal(0)
+        expect(jb_count(read, "rt_free(buffer)")).to_equal(0)
+        expect(jb_count(read, "_journal_free_wiped(buffer, maximum + 1)")).to_equal(2)
+        step("the success path wipes only the bytes the native read could have written (count + 1), not the whole bound")
+        expect(jb_count(read, "_journal_free_wiped(buffer, count + 1)")).to_equal(1)
+        step("a non-UTF8 file is refused only after its copy is wiped")
+        val refuse_at = read.index_of("if not utf8_bytes_valid(bytes):")
+        val refuse_tail = read.substring(refuse_at, read.byte_len())
+        expect(refuse_tail.index_of("secure_zero_u8_slots(bytes)") > 0).to_equal(true)
+        expect(refuse_tail.index_of("secure_zero_u8_slots(bytes)") < refuse_tail.index_of("WINDOWS_JOURNAL_UTF8")).to_equal(true)
+
+    it "publishes from bytes, revalidating UTF8 and wiping its native copy":
+        # @req JBWIPE-03
+        val publish = jb_body(jb_journal(), "pub fn publish_bytes(", "pub fn publish_consumption(")
+        expect(jb_count(publish, "utf8_bytes_valid(payload)")).to_equal(1)
+        expect(jb_count(publish, "rt_windows_journal_publish_v1(self.token, name, buffer, payload.len(), 0)")).to_equal(1)
+        expect(jb_count(publish, "rt_free(buffer)")).to_equal(0)
+        expect(jb_count(publish, "_journal_free_wiped(buffer, payload.len() + 1)")).to_equal(1)
+
+    it "routes the identity store's reads and publishes through the bytes methods":
+        # @req JBWIPE-04
+        val store = file_read_text("src/lib/nogc_sync_mut/io/host_identity_store_windows_v1.spl")
+        val read = jb_body(store, "fn identity_windows_read_v1(", "fn identity_windows_publish_v1(")
+        expect(jb_count(read, "journal.read_bytes(leaf, maximum)")).to_equal(1)
+        expect(jb_count(read, "text_to_utf8_bytes(")).to_equal(0)
+        val publish = jb_body(store, "fn identity_windows_publish_v1(", "fn identity_windows_close_v1(")
+        expect(jb_count(publish, "journal.publish_bytes(leaf, bytes)")).to_equal(1)
+        expect(jb_count(publish, "bytes_to_text(")).to_equal(0)

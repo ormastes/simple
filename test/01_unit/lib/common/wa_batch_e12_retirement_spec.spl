@@ -1,0 +1,63 @@
+"""Regression spec for Wave E Batch E12 workaround retirement.
+
+Covers all 3 retired clusters:
+1. `lambdaabi_mir_2026-10-31` (statements.spl, nogc_async_mut/io/buffer.spl)
+2. `phase2_octal_permission_mode_lowering_2026_10_27` (0o600/0o700 octal literals)
+3. `mir_enum_payload_inline_dict_literal_key_annotation_mismatch_2026-11-14`
+   (inline `SdnValue.Dict({...})` payloads including remote_build_input_manifest_v3)
+"""
+
+use std.spec.{describe, it, expect}
+use std.common.build_manager.remote_build_input_manifest_v3.{
+    RemoteBuildInputEntryV3,
+    remote_build_input_manifest_entries_digest_v3
+}
+use std.nogc_sync_mut.terminal.credential.store.{KEY_FILE_MODE, KEY_DIR_MODE}
+use std.nogc_sync_mut.oauth2.{OAUTH2_CACHE_FILE_MODE}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+describe "Wave E Batch E12 workaround retirement":
+    it "evaluates restored octal permission modes 0o600/0o700 to exact OS masks":
+        expect(0o600).to_equal(384)
+        expect(0o700).to_equal(448)
+        expect(KEY_FILE_MODE).to_equal(384 as i32)
+        expect(KEY_DIR_MODE).to_equal(448 as i32)
+        expect(OAUTH2_CACHE_FILE_MODE).to_equal(384)
+
+    it "computes canonical remote build input manifest digest with inline SdnValue.Dict":
+        val digest_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val res = remote_build_input_manifest_entries_digest_v3([
+            RemoteBuildInputEntryV3(path: "bin/producer", digest: digest_hex),
+            RemoteBuildInputEntryV3(path: "src/main.spl", digest: digest_hex)
+        ])
+        expect(res.is_ok()).to_equal(true)
+        expect(res.unwrap().len()).to_equal(64)
+
+    it "keeps all 3 Batch E12 @workaround tags absent from the 14 retired source files":
+        val files = [
+            "src/compiler/20.hir/hir_lowering/statements.spl",
+            "src/lib/nogc_async_mut/io/buffer.spl",
+            "src/app/devhub/adapter_outlook_curl.spl",
+            "src/lib/common/oauth_token_cache.spl",
+            "src/lib/gc_async_mut/oauth2.spl",
+            "src/lib/nogc_async_mut/oauth2.spl",
+            "src/lib/nogc_sync_mut/oauth2.spl",
+            "src/lib/nogc_sync_mut/terminal/credential/store.spl",
+            "src/lib/common/build_manager/remote_build_input_manifest_v3.spl",
+            "src/lib/nogc_async_mut/container/providers/linux/containment_observer_v1.spl",
+            "src/lib/nogc_async_mut/container/providers/linux/engine_policy_v1.spl",
+            "src/lib/nogc_async_mut/container/providers/linux/installed_containment_policy_v1.spl",
+            "src/lib/nogc_async_mut/container/providers/linux/request_codec_v1.spl",
+            "src/lib/nogc_async_mut/container/providers/windows/docker_exec_control_probe_v3.spl"
+        ]
+        val retired = [
+            "lambdaabi_mir_2026-10-31",
+            "phase2_octal_permission_mode_lowering_2026_10_27",
+            "mir_enum_payload_inline_dict_literal_key_annotation_mismatch_2026-11-14"
+        ]
+        for path in files:
+            val body = rt_file_read_text(path) ?? ""
+            expect(body.len()).to_be_greater_than(0)
+            for tag in retired:
+                expect(body.contains("@workaround bug=" + tag)).to_equal(false)

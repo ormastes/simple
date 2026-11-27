@@ -1,0 +1,94 @@
+use std.spec.*
+use std.test_runner.sdoctest.types.{SdoctestBlock, BlockResult, BlockStatus, SdoctestFileResult}
+use std.test_runner.sdoctest.extractor.{extract_blocks_from_content}
+use std.test_runner.sdoctest.runner.{build_file_preambles, extract_block_error}
+
+fn extract(parts: [text]) -> [SdoctestBlock]:
+    extract_blocks_from_content(parts.join("\n"), "doc.md")
+
+describe "sdoctest block line numbers":
+    it "reports line 1 for a fence on the first line":
+        val bs = extract(["```simple", "val a = 1", "```"])
+        expect(bs[0].line_number).to_equal(1)
+
+    it "reports the 1-based line of the opening fence":
+        val bs = extract(["# Title", "", "```simple", "val a = 1", "```"])
+        expect(bs[0].line_number).to_equal(3)
+
+    it "reports each block at its own fence line":
+        val bs = extract(["```simple", "val a = 1", "```", "", "text", "```simple", "val b = 2", "```"])
+        expect(bs[0].line_number).to_equal(1)
+        expect(bs[1].line_number).to_equal(6)
+
+    it "counts lines of multi-line bodies":
+        val bs = extract(["```simple", "val a = 1", "val b = 2", "val c = 3", "```", "```simple", "val d = 4", "```"])
+        expect(bs[1].line_number).to_equal(6)
+
+    it "counts HTML marker lines":
+        val bs = extract(["<!--sdoctest:skip-next-->", "```simple", "val a = 1", "```"])
+        expect(bs[0].line_number).to_equal(2)
+
+    it "counts lines of an earlier non-simple fence":
+        val bs = extract(["```python", "x", "y", "```", "```simple", "val a = 1", "```"])
+        expect(bs[0].line_number).to_equal(5)
+
+    it "reports the indented fence line":
+        val bs = extract(["- item", "  ```simple", "  val a = 1", "  ```"])
+        expect(bs[0].line_number).to_equal(2)
+
+    it "is ordered ascending across blocks":
+        val bs = extract(["```simple", "val a = 1", "```", "```simple", "val b = 2", "```", "```simple", "val c = 3", "```"])
+        expect(bs[0].line_number < bs[1].line_number).to_equal(true)
+        expect(bs[1].line_number < bs[2].line_number).to_equal(true)
+
+describe "sdoctest preambles between blocks":
+    it "gives the first block an empty preamble":
+        val bs = extract(["```simple", "fn f() -> i64:", "    1", "```"])
+        val pre = build_file_preambles(bs)
+        expect(pre[0]).to_equal("")
+
+    it "carries a function from block one into block two":
+        val bs = extract(["```simple", "fn f() -> i64:", "    1", "```", "```simple", "print f()", "```"])
+        val pre = build_file_preambles(bs)
+        expect(pre[1].contains("fn f()")).to_equal(true)
+
+    it "carries use lines forward":
+        val bs = extract(["```simple", "use std.text", "```", "```simple", "print 1", "```"])
+        val pre = build_file_preambles(bs)
+        expect(pre[1].contains("use std.text")).to_equal(true)
+
+    it "does not carry bare statements forward":
+        val bs = extract(["```simple", "val a = 1", "print a", "```", "```simple", "print 2", "```"])
+        val pre = build_file_preambles(bs)
+        expect(pre[1]).to_equal("")
+
+    it "accumulates definitions across three blocks":
+        val bs = extract(["```simple", "fn f() -> i64:", "    1", "```", "```simple", "fn g() -> i64:", "    2", "```", "```simple", "print 3", "```"])
+        val pre = build_file_preambles(bs)
+        expect(pre[2].contains("fn f()")).to_equal(true)
+        expect(pre[2].contains("fn g()")).to_equal(true)
+
+    it "carries a struct with its indented body":
+        val bs = extract(["```simple", "struct P:", "    x: i64", "```", "```simple", "print 1", "```"])
+        val pre = build_file_preambles(bs)
+        expect(pre[1].contains("x: i64")).to_equal(true)
+
+    it "returns one preamble per block":
+        val bs = extract(["```simple", "val a = 1", "```", "```simple", "val b = 2", "```"])
+        expect(build_file_preambles(bs).len()).to_equal(2)
+
+describe "sdoctest failure reports":
+    it "extracts an error: line from stderr":
+        expect(extract_block_error("junk\nerror: boom\nmore", "")).to_equal("error: boom")
+
+    it "extracts a semantic: line":
+        expect(extract_block_error("semantic: bad thing", "")).to_equal("semantic: bad thing")
+
+    it "falls back to the first stderr line":
+        expect(extract_block_error("something odd happened", "")).to_equal("something odd happened")
+
+    it "falls back to a generic message with no output":
+        expect(extract_block_error("", "")).to_equal("Exit code non-zero")
+
+    it "reads an error from stdout when stderr is empty":
+        expect(extract_block_error("", "error: from stdout")).to_equal("error: from stdout")

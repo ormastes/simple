@@ -132,3 +132,8 @@ native-build failing to match a reference — the reference itself is broken.
 
 If this needs fixing, it should be re-filed against `src/compiler_rust` (seed JIT) rather than
 "native codegen."
+
+## Triage 2026-11-04 (mir slice 16)
+Closed-obsolete: not reproducible under pure-Simple native-build (re-verified repeatedly above); the
+only reproduction is the Rust seed's own JIT, which is bootstrap-only and not fixed in seed per
+policy ("fix it in pure-Simple"). Re-open with a native-build repro if the symptom returns.

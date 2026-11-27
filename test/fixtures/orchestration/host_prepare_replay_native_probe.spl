@@ -1,0 +1,101 @@
+# Real durable-owner replay regression; no provider process or network required.
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionGrantV2}
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_lookup_v2
+
+fn host_replay_fixture_v1(root: text, cap: HostCapacityV1,
+        intent: HostReservationIntentV1, operation: OperationEnvelopeV2,
+        grant: ExecutionGrantV2, context: HostReservationAuthorizationContextV1) -> HostCapacityOwnerV1:
+    val owner = host_capacity_owner_open_v1(root, cap, "c".repeat(64), 20, true).unwrap()
+    host_capacity_owner_prepare_v1(owner, intent, operation, grant, context).unwrap()
+
+fn host_replay_assert_rejected_v1(owner: HostCapacityOwnerV1,
+        intent: HostReservationIntentV1, operation: OperationEnvelopeV2,
+        grant: ExecutionGrantV2, context: HostReservationAuthorizationContextV1, reason: text):
+    val sequence = owner.journal.sequence
+    val retained = distributed_operation_journal_lookup_v2(owner.journal, operation.id).unwrap()
+    val rejected = host_capacity_owner_prepare_v1(owner, intent, operation, grant, context)
+    assert(rejected.is_err())
+    assert(rejected.unwrap_err() == reason)
+    # Independent journal read validates CURRENT and the retained writer lease;
+    # a rejection that secretly appended would make this capability stale.
+    val current = distributed_operation_journal_lookup_v2(owner.journal, operation.id).unwrap()
+    assert(owner.journal.sequence == sequence)
+    assert(current.state == retained.state)
+    assert(current.envelope == retained.envelope)
+    assert(current.outcome_digest == retained.outcome_digest)
+
+pub fn host_prepare_replay_checks() -> i64:
+    val cap = HostCapacityV1(physical_host_id: "machine", authority_id: "owner", boot_id: "boot",
+        provider_generation: 1, cpu_millis: 4000, memory_bytes: 8000, exclusive_devices: ["gpu"])
+    val row = HostReservationV1(id: "one", operation_id: "op-one", payload_digest: "a".repeat(64),
+        service_scope_id: "user", assignment_generation: 1, nonce: "nonce-one", cpu_millis: 2000,
+        memory_bytes: 4000, exclusive_devices: ["gpu"], prepare_deadline_ms: 100,
+        state: HostReservationStateV1.Prepared)
+    val intent = host_reservation_bind_intent_v1(HostReservationIntentV1(physical_host_id: "machine",
+        fence: HostLedgerFenceV1(authority_id: "owner", boot_id: "boot", provider_generation: 1, revision: 1),
+        plan_digest: "1".repeat(64), reservation: row)).unwrap()
+    val operation = OperationEnvelopeV2(version: 2, id: "op-one", payload_digest: intent.reservation.payload_digest,
+        principal: "user", project: "project", host_id: "machine", operation: "host_reservation_v1",
+        environment_digest: "b".repeat(64), policy_revision: 1, revocation_epoch: 0,
+        session_generation: 1, memory_bytes: 4000, duration_ms: 100)
+    val grant = ExecutionGrantV2(id: "grant", principal: "user", project: "project", host_id: "machine",
+        operations: ["host_reservation_v1"], environment_digest: "b".repeat(64), policy_revision: 1,
+        revocation_epoch: 0, expires_at: 1000, maximum_memory_bytes: 8000, maximum_duration_ms: 1000)
+    val context = HostReservationAuthorizationContextV1(grant_clock: 1, monotonic_ms: 1,
+        policy_revision: 1, revocation_epoch: 0, session_generation: 1)
+    val root = secure_temp_dir("build", "host-replay").unwrap()
+    val prepared = host_replay_fixture_v1(root, cap, intent, operation, grant, context)
+    val duplicate = host_capacity_owner_prepare_v1(prepared, intent, operation, grant, context).unwrap()
+    assert(duplicate.journal.sequence == prepared.journal.sequence)
+    assert(host_available_capacity_v1(duplicate.ledger).unwrap().cpu_millis == 2000)
+    var discontinuous = duplicate
+    discontinuous.ledger.continuity_proven = false
+    host_replay_assert_rejected_v1(discontinuous, intent, operation, grant, context, "host-reconciliation-required")
+    assert(host_available_capacity_v1(discontinuous.ledger).unwrap().cpu_millis == 2000)
+    var different_boot = duplicate
+    different_boot.ledger.capacity.boot_id = "replacement-boot"
+    host_replay_assert_rejected_v1(different_boot, intent, operation, grant, context, "host-fence-stale")
+    var different_provider = duplicate
+    different_provider.ledger.capacity.provider_generation = 2
+    host_replay_assert_rejected_v1(different_provider, intent, operation, grant, context, "host-fence-stale")
+    var expired = context
+    expired.monotonic_ms = 100
+    host_replay_assert_rejected_v1(duplicate, intent, operation, grant, expired, "prepare-expired")
+    assert(host_available_capacity_v1(duplicate.ledger).unwrap().cpu_millis == 2000)
+    assert(host_available_capacity_v1(duplicate.ledger).unwrap().exclusive_devices.len() == 0)
+    val fence = HostLedgerFenceV1(authority_id: "owner", boot_id: "boot", provider_generation: 1,
+        revision: duplicate.ledger.revision)
+    var abort_grant = grant
+    abort_grant.operations = ["host_abort_prepared_v1"]
+    val receipt = host_capacity_owner_prepared_receipt_v1(duplicate, intent, operation, grant, context).unwrap()
+    val aborted = host_capacity_owner_abort_prepared_v1(duplicate, intent, operation, receipt,
+        fence, abort_grant, expired).unwrap()
+    host_replay_assert_rejected_v1(aborted, intent, operation, grant, context, "execution-reconciliation-required")
+    assert(host_available_capacity_v1(aborted.ledger).unwrap().cpu_millis == 4000)
+    assert(host_capacity_owner_close_v1(aborted).unwrap())
+    dir_remove(root, true)
+
+    val execution_root = secure_temp_dir("build", "host-replay-executing").unwrap()
+    val ready = host_replay_fixture_v1(execution_root, cap, intent, operation, grant, context)
+    var execution_grant = grant
+    execution_grant.operations = ["host_execute_v1"]
+    val executing = host_capacity_owner_begin_v1(ready, intent, operation, receipt,
+        fence, execution_grant, context).unwrap()
+    host_replay_assert_rejected_v1(executing, intent, operation, grant, context, "execution-reconciliation-required")
+    assert(host_available_capacity_v1(executing.ledger).unwrap().cpu_millis == 2000)
+    assert(host_capacity_owner_close_v1(executing).unwrap())
+    val unknown = host_capacity_owner_open_v1(execution_root, cap, "d".repeat(64), 20, true).unwrap()
+    assert(unknown.journal.operations[operation.id].state == "outcome-unknown")
+    host_replay_assert_rejected_v1(unknown, intent, operation, grant, context, "execution-reconciliation-required")
+    assert(host_available_capacity_v1(unknown.ledger).unwrap().cpu_millis == 2000)
+    assert(host_capacity_owner_close_v1(unknown).unwrap())
+    dir_remove(execution_root, true)
+    0
+
+fn main() -> i64:
+    host_prepare_replay_checks()

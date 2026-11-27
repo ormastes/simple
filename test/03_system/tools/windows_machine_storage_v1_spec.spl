@@ -1,0 +1,134 @@
+# AUTHORED_NOT_RUN. Disposable administrator-prepared actual Windows fixture.
+# Fixed policy binding can persist; do not run against a live installation.
+# No synthetic roots, path override, fabricated owner, self-install or skip.
+# @req REQ-WINDOWS-MACHINE-POLICY-002
+# @req REQ-WINDOWS-MACHINE-POLICY-003
+use std.spec.{describe, it, expect, step}
+use std.common.crypto.sha256.sha256_text
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.nogc_sync_mut.database.wal.{WalEntry, WalEntryType}
+use std.nogc_sync_mut.io.windows_machine_policy_owner_v1.*
+
+# Keep every real owner, including failed competing opens, for diagnosis when
+# native cleanup remains retained. Copies never manufacture another owner.
+var machine_storage_fixture_readers_v1: [WindowsMachinePolicyOwnerV1] = []
+var machine_storage_fixture_stores_v1: [WindowsMachineStorageV1] = []
+
+fn machine_storage_fixture_reader_v1() -> Result<WindowsMachinePolicyOwnerV1, text>:
+    match windows_machine_policy_open_v1():
+        case WindowsMachinePolicyOpenV1.Ready(reader):
+            machine_storage_fixture_readers_v1.push(reader)
+            Ok(reader)
+        case WindowsMachinePolicyOpenV1.CleanupRequired(reader, reason):
+            machine_storage_fixture_readers_v1.push(reader)
+            val cleanup = reader.close_v1()
+            Err("actual machine reader failed: " + reason + "; cleanup=" + cleanup)
+        case WindowsMachinePolicyOpenV1.Rejected(reason):
+            Err("actual machine reader required: " + reason)
+
+fn machine_storage_fixture_transfer_v1(reader: WindowsMachinePolicyOwnerV1) -> Result<WindowsMachineStorageV1, text>:
+    match reader.open_storage_v1():
+        case WindowsMachineStorageOpenV1.Ready(storage):
+            machine_storage_fixture_stores_v1.push(storage)
+            Ok(storage)
+        case WindowsMachineStorageOpenV1.CleanupRequired(storage, reason):
+            machine_storage_fixture_stores_v1.push(storage)
+            val cleanup = storage.close_v1()
+            Err("actual machine storage failed: " + reason + "; cleanup=" + cleanup)
+        case WindowsMachineStorageOpenV1.Rejected(reason):
+            val cleanup = reader.close_v1()
+            Err("actual machine storage required: " + reason + "; reader-cleanup=" + cleanup)
+
+fn machine_storage_fixture_text_v1(storage: WindowsMachineStorageV1) -> Result<text, text>:
+    val observed = storage.policy_bytes_v1()
+    if observed.is_err():
+        val cleanup = storage.close_v1()
+        return Err("actual storage policy read failed: " + observed.unwrap_err() + "; cleanup=" + cleanup)
+    val bytes = observed.unwrap()
+    if bytes.len() == 0 or not utf8_bytes_valid(bytes):
+        val cleanup = storage.close_v1()
+        return Err("actual UTF8 installed policy required; cleanup=" + cleanup)
+    Ok(bytes_to_text(bytes))
+
+# Always retire the actual second-open result before reporting it. A Ready
+# result is a real bug, not permission to lose the competing native owner.
+fn machine_storage_fixture_competitor_v1() -> Result<(bool, text), text>:
+    val reader = machine_storage_fixture_reader_v1()?
+    match reader.open_storage_v1():
+        case WindowsMachineStorageOpenV1.Ready(storage):
+            machine_storage_fixture_stores_v1.push(storage)
+            Ok((false, storage.close_v1()))
+        case WindowsMachineStorageOpenV1.CleanupRequired(storage, reason):
+            machine_storage_fixture_stores_v1.push(storage)
+            Ok((true, storage.close_v1()))
+        case WindowsMachineStorageOpenV1.Rejected(reason):
+            Ok((true, reader.close_v1()))
+
+fn machine_storage_fixture_retransfer_v1(reader: WindowsMachinePolicyOwnerV1) -> text:
+    match reader.open_storage_v1():
+        case WindowsMachineStorageOpenV1.Rejected(reason): reason
+        case WindowsMachineStorageOpenV1.Ready(storage):
+            machine_storage_fixture_stores_v1.push(storage)
+            "unexpected-ready:" + storage.close_v1()
+        case WindowsMachineStorageOpenV1.CleanupRequired(storage, reason):
+            machine_storage_fixture_stores_v1.push(storage)
+            "unexpected-cleanup:" + storage.close_v1() + reason
+
+describe "Actual Windows fixed machine storage ownership v1":
+    it "transfers once, binds actual bytes, refuses another writer and preserves its WAL head":
+        step("Transfer the actual installed reader into fixed state and journal ownership")
+        val reader = machine_storage_fixture_reader_v1().unwrap()
+        val storage = machine_storage_fixture_transfer_v1(reader).unwrap()
+        val copied_storage = storage
+        val source = machine_storage_fixture_text_v1(storage).unwrap()
+        val transferred_read = reader.read_policy_v1()
+        val transferred_close = reader.close_v1()
+        val repeated_transfer = machine_storage_fixture_retransfer_v1(reader)
+        step("Reject a competing actual writer without abandoning its cleanup owner")
+        val competitor = machine_storage_fixture_competitor_v1()
+        step("Bind only exact installed bytes and reject invalid transactions before publication")
+        val differing = storage.bind_policy_v1(source + "\n")
+        val bound = storage.bind_policy_v1(source)
+        val head_before = storage.wal_head_v1()
+        val empty_commit = storage.wal_commit_v1("", [])
+        val refused = WalEntry(sequence: 0, entry_type: WalEntryType.Insert,
+            table_name: "fixture-table-not-authorized", row_key: "fixture", data: "fixture", timestamp: 0)
+        val foreign_commit = storage.wal_commit_v1("", [refused])
+        val head_after = copied_storage.wal_head_v1()
+        step("Close the canonical storage before asserting collected results")
+        val closed = storage.close_v1()
+        val copied_read = copied_storage.policy_bytes_v1()
+        val copied_head = copied_storage.wal_head_v1()
+        val copied_close = copied_storage.close_v1()
+        val reader_close_after = reader.close_v1()
+        # Every native owner above has received its authoritative cleanup call.
+        expect(closed).to_equal("released")
+        expect(transferred_read.is_err()).to_equal(true)
+        expect(transferred_close).to_equal("retained")
+        expect(repeated_transfer).to_equal("windows-machine-policy-reader-not-transferable")
+        expect(competitor.is_ok()).to_equal(true)
+        expect(competitor.unwrap().0).to_equal(true)
+        expect(competitor.unwrap().1).to_equal("released")
+        expect(differing.is_err()).to_equal(true)
+        expect(bound.is_ok()).to_equal(true)
+        expect(bound.unwrap()).to_equal(sha256_text(source))
+        expect(head_before.is_ok()).to_equal(true)
+        expect(empty_commit.is_err()).to_equal(true)
+        expect(foreign_commit.is_err()).to_equal(true)
+        expect(head_after.is_ok()).to_equal(true)
+        expect(head_after.unwrap()).to_equal(head_before.unwrap())
+        expect(copied_read.is_err()).to_equal(true)
+        expect(copied_head.is_err()).to_equal(true)
+        expect(copied_close).to_equal("stale")
+        expect(reader_close_after).to_equal("stale")
+        step("Reopen the same fixed state without resetting durable policy or WAL")
+        val next_reader = machine_storage_fixture_reader_v1().unwrap()
+        val next_storage = machine_storage_fixture_transfer_v1(next_reader).unwrap()
+        val next_bound = next_storage.bind_policy_v1(source)
+        val next_head = next_storage.wal_head_v1()
+        val next_closed = next_storage.close_v1()
+        expect(next_closed).to_equal("released")
+        expect(next_bound.is_ok()).to_equal(true)
+        expect(next_bound.unwrap()).to_equal(bound.unwrap())
+        expect(next_head.is_ok()).to_equal(true)
+        expect(next_head.unwrap()).to_equal(head_before.unwrap())

@@ -2,6 +2,12 @@
 pub(super) enum EscapeResult {
     /// Successfully processed escape, push this char
     Char(char),
+    /// Not an escape: push the backslash AND this char (2 chars).
+    /// Matches the pure-Simple lexer contract (lexer_struct.spl scan_string):
+    /// only n/t/r/\\/"/'/x/u/octal are escapes; every other `\X` keeps both
+    /// bytes, so `C:\Users` and `a\b` survive with the backslash intact
+    /// (bug doc lexer_drops_backslash_escape_in_string_literal_2026-09-02).
+    KeepBoth(char),
     /// Invalid escape sequence error
     Error(String),
     /// Unterminated string (EOF after backslash)
@@ -62,22 +68,6 @@ impl<'a> super::Lexer<'a> {
                     None => EscapeResult::Error(format!("Invalid octal escape value: {}", val)),
                 }
             }
-            Some('a') => {
-                self.advance();
-                EscapeResult::Char('\x07') // bell
-            }
-            Some('b') => {
-                self.advance();
-                EscapeResult::Char('\x08') // backspace
-            }
-            Some('f') => {
-                self.advance();
-                EscapeResult::Char('\x0C') // form feed
-            }
-            Some('v') => {
-                self.advance();
-                EscapeResult::Char('\x0B') // vertical tab
-            }
             Some('x') => {
                 // Hex escape: \xNN (2 hex digits)
                 self.advance(); // consume 'x'
@@ -96,31 +86,15 @@ impl<'a> super::Lexer<'a> {
                 self.advance();
                 EscapeResult::Char('}')
             }
-            // Allow \: as literal colon (used in format strings)
-            Some(':') => {
-                self.advance();
-                EscapeResult::Char(':')
-            }
-            // Allow \/ as literal slash (used in regex/path patterns)
-            Some('/') => {
-                self.advance();
-                EscapeResult::Char('/')
-            }
-            // Allow \. as literal dot
-            Some('.') => {
-                self.advance();
-                EscapeResult::Char('.')
-            }
-            // Allow \- as literal dash
-            Some('-') => {
-                self.advance();
-                EscapeResult::Char('-')
-            }
-            // Treat unknown escape sequences as literal characters (e.g., \U, \P, \w, \d)
-            // This matches Python/Simple behavior where unknown escapes pass through
+            // Unknown escape: keep the backslash and the char, exactly like the
+            // pure-Simple lexer (`else: parts.push("\\"); parts.push(esc)`).
+            // `\U`, `\T`, `\W`, `\b`, `\a`, `\f`, `\v`, `\:` , `\/`, `\.`, `\-`
+            // all survive as two literal bytes. A backslash is a legal POSIX
+            // filename character; `\` means exactly one literal backslash on
+            // every platform.
             Some(c) => {
                 self.advance();
-                EscapeResult::Char(c)
+                EscapeResult::KeepBoth(c)
             }
             None => EscapeResult::Unterminated,
         }

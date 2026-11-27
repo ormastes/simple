@@ -1,35 +1,16 @@
 # Interpreter Debug Backend
 # Implements DebugBackend trait for the tree-walking interpreter.
-# Delegates to rt_debug_* SFFI functions for breakpoint/step state,
-# and to the interpreter for execution.
+# Delegates to the interpreter-mode debug facade (in-memory debug_state
+# owner) for breakpoint/step state, and to the interpreter for execution.
 
 use compiler.core.{String, Result, Bool}
 use std.nogc_sync_mut.debug.coordinator.{DebugBackend, FrameInfo, VarInfo, LocationInfo}
-
-# Raw runtime declarations.  The backend validates the status-bearing calls
-# below before exposing a successful `Result` to the debugger.
-@unsafe(reason: "raw debugger activation ABI", capabilities: [ffi])
-extern fn rt_debug_set_active(active: i64)
-@unsafe(reason: "raw debugger borrowed breakpoint text/status ABI", capabilities: [ffi])
-extern fn rt_debug_add_breakpoint(file_ptr: i64, file_len: i64, line: i64) -> i64
-@unsafe(reason: "raw debugger borrowed breakpoint text/status ABI", capabilities: [ffi])
-extern fn rt_debug_remove_breakpoint(file_ptr: i64, file_len: i64, line: i64) -> i64
-@unsafe(reason: "raw debugger breakpoint-state mutation ABI", capabilities: [ffi])
-extern fn rt_debug_remove_all_breakpoints()
-@unsafe(reason: "raw debugger step-mode mutation ABI", capabilities: [ffi])
-extern fn rt_debug_set_step_mode(mode: i64)
-@unsafe(reason: "raw debugger pause-state mutation ABI", capabilities: [ffi])
-extern fn rt_debug_pause()
-@unsafe(reason: "raw debugger pause-state mutation ABI", capabilities: [ffi])
-extern fn rt_debug_continue()
-@unsafe(reason: "raw debugger runtime-owned stack-trace array ABI", capabilities: [ffi])
-extern fn rt_debug_stack_trace() -> [String]
-@unsafe(reason: "raw debugger runtime-owned locals array ABI", capabilities: [ffi])
-extern fn rt_debug_locals() -> [String]
-@unsafe(reason: "raw debugger runtime-owned current-file text ABI", capabilities: [ffi])
-extern fn rt_debug_current_file() -> String
-@unsafe(reason: "raw debugger current-line ABI", capabilities: [ffi])
-extern fn rt_debug_current_line() -> i64
+use std.nogc_sync_mut.io.debug_stubs.{
+    rt_debug_set_active, rt_debug_add_breakpoint_at, rt_debug_remove_breakpoint_at,
+    rt_debug_remove_all_breakpoints, rt_debug_set_step_mode_val,
+    rt_debug_continue_exec, rt_debug_pause_exec, rt_debug_stack_trace_lines,
+    rt_debug_local_vars, rt_debug_get_current_file, rt_debug_get_current_line
+}
 
 @unsafe(reason: "raw CLI path/argument-array execution status ABI", capabilities: [ffi])
 extern fn rt_cli_run_file(path: String, args: [String], debug: Bool, verbose: Bool) -> i64
@@ -55,22 +36,19 @@ impl DebugBackend for InterpreterBackend:
         self.program_path = program_path
         self.args = args
         self.attached = true
-        unsafe(capabilities: [ffi]):
-            rt_debug_set_active(1)
+        rt_debug_set_active(true)
         Ok(())
 
     me detach() -> Result<(), String>:
-        unsafe(capabilities: [ffi]):
-            rt_debug_set_active(0)
-            rt_debug_remove_all_breakpoints()
+        rt_debug_set_active(false)
+        rt_debug_remove_all_breakpoints()
         self.attached = false
         Ok(())
 
     fn run() -> Result<(), String>:
         if not self.attached:
             return Err("Not attached to a program")
-        unsafe(capabilities: [ffi]):
-            rt_debug_set_active(1)
+        rt_debug_set_active(true)
         # The interpreter will check debug hooks via should_stop()
         # on each statement execution.
         val status = unsafe(capabilities: [ffi]):
@@ -80,47 +58,37 @@ impl DebugBackend for InterpreterBackend:
         Ok(())
 
     fn pause() -> Result<(), String>:
-        unsafe(capabilities: [ffi]):
-            rt_debug_pause()
+        rt_debug_pause_exec()
         Ok(())
 
     fn resume() -> Result<(), String>:
-        unsafe(capabilities: [ffi]):
-            rt_debug_continue()
+        rt_debug_continue_exec()
         Ok(())
 
     fn step_over() -> Result<(), String>:
-        unsafe(capabilities: [ffi]):
-            rt_debug_set_step_mode(1)  # StepOver
+        rt_debug_set_step_mode_val(1)  # StepOver
         Ok(())
 
     fn step_in() -> Result<(), String>:
-        unsafe(capabilities: [ffi]):
-            rt_debug_set_step_mode(2)  # StepIn
+        rt_debug_set_step_mode_val(2)  # StepIn
         Ok(())
 
     fn step_out() -> Result<(), String>:
-        unsafe(capabilities: [ffi]):
-            rt_debug_set_step_mode(3)  # StepOut
+        rt_debug_set_step_mode_val(3)  # StepOut
         Ok(())
 
-    fn add_breakpoint(file: String, line: Int) -> Result<Int, String>:
-        val bp_id = unsafe(capabilities: [ffi]):
-            rt_debug_add_breakpoint(file.ptr(), file.len(), line)
+    me add_breakpoint(file: String, line: Int) -> Result<Int, String>:
+        val bp_id = rt_debug_add_breakpoint_at(file, line)
         if bp_id <= 0:
             return Err("debug breakpoint rejected")
         Ok(bp_id)
 
-    fn remove_breakpoint(file: String, line: Int) -> Result<(), String>:
-        val status = unsafe(capabilities: [ffi]):
-            rt_debug_remove_breakpoint(file.ptr(), file.len(), line)
-        if status < 0:
-            return Err("debug breakpoint removal rejected")
+    me remove_breakpoint(file: String, line: Int) -> Result<(), String>:
+        rt_debug_remove_breakpoint_at(file, line)
         Ok(())
 
     fn stack_trace() -> Result<[FrameInfo], String>:
-        val raw_frames = unsafe(capabilities: [ffi]):
-            rt_debug_stack_trace()
+        val raw_frames = rt_debug_stack_trace_lines()
         var frames: [FrameInfo] = []
         var idx = 0
         for raw in raw_frames:
@@ -130,8 +98,7 @@ impl DebugBackend for InterpreterBackend:
         Ok(frames)
 
     fn locals() -> Result<[VarInfo], String>:
-        val raw_locals = unsafe(capabilities: [ffi]):
-            rt_debug_locals()
+        val raw_locals = rt_debug_local_vars()
         var vars: [VarInfo] = []
         for raw in raw_locals:
             # Format: "name = value : type"
@@ -150,8 +117,7 @@ impl DebugBackend for InterpreterBackend:
     fn evaluate(expr: String) -> Result<String, String>:
         if not self.attached:
             return Err("not attached — cannot evaluate expressions")
-        val locals = unsafe(capabilities: [ffi]):
-            rt_debug_locals()
+        val locals = rt_debug_local_vars()
         for local in locals:
             val parts = local.split(" = ")
             if parts.len() >= 2 and parts[0] == expr:
@@ -159,8 +125,6 @@ impl DebugBackend for InterpreterBackend:
         Err("expression eval requires compiled mode or GDB backend")
 
     fn current_location() -> Result<LocationInfo, String>:
-        val file = unsafe(capabilities: [ffi]):
-            rt_debug_current_file()
-        val line = unsafe(capabilities: [ffi]):
-            rt_debug_current_line()
+        val file = rt_debug_get_current_file()
+        val line = rt_debug_get_current_line()
         Ok(LocationInfo.at(file, line, ""))

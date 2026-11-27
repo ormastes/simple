@@ -321,3 +321,27 @@ record of the gap; they must not be weakened or marked pending. Status OPEN.
 `interaction_state.spl` and `node.spl` (no `form_state.spl`), and
 `src/lib/blink/input/` does not exist at all. The four specs still import modules
 with no implementation. Unchanged from the filed evidence.
+
+## Verification 2026-11-25 (fleet lane p2w1-ad, Windows host)
+
+STALE-CLOSED confirmed. All four modules exist and behave per the spec
+contracts. `bin/simple.exe test` is blocked repo-wide at this HEAD (the pinned
+Rust seed v1.0.0-rc.1 rejects `@representation_boundary`, added tree-wide by
+cfd89933699, including in the test runner itself), so verification used
+executed `bin/simple.exe run` probes (SIMPLE_LIB=src) against the real modules:
+
+- input.event: `mouse_event(EventType.MouseDown, 50.0, 50.0, ...)` -> position.x == 50.0.
+- input.hit_test: `hit_test_point_in_rect` true inside / false outside;
+  nested parent(10)/child(11) at the same point -> `hit_test` returns 11
+  (innermost wins); outside point -> -1 sentinel; `hit_test_event` -> 11.
+- dom.form_state: value round-trip ("hello"); `with_field` upsert keeps
+  `fields.len() == 1`; `set_value` preserves placeholder "search...".
+- paint.paint_tree_walker (mirrors paint_tree_walker_spec scenarios exactly):
+  single opaque box via `paint_box` -> op_count 1; transparent background ->
+  op_count 0; full `paint_tree(ctx, styles)` walk of a 2-box tree -> op_count 2.
+
+The 2026-09-13 regression note above (op count never increments, attributed to
+`option_class_unwrap_binding_copies_instead_of_referencing_2026-09-13.md`)
+does NOT reproduce on this binary: the DrawRect ops land in the recorder
+(op_count 1/2 as expected), so the Option-unwrap mutation path used by
+`SkCanvas.draw_rect` works here. That separate bug's ledger row is untouched.

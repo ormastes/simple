@@ -21,10 +21,11 @@ val canonical_struct_other = "pub struct Tool:\n    path: i64\n    name: i64\n"
 
 fn canonical_struct_registry(source: text, owner: text) -> ModuleSurfacesByName:
     val logger = Logger(level: 0)
+    val owner_path = owner.replace(".", "/") + ".spl"
     var modules: Dict<text, Module> = {}
-    modules[owner] = parse_full_frontend(source, owner, owner, logger)
+    modules[owner] = parse_full_frontend(source, owner_path, owner, logger)
     modules["probe.other"] = parse_full_frontend(canonical_struct_other, "probe/other.spl", "probe.other", logger)
-    val files = [SourceFile(path: owner, content: source, module_name: owner), SourceFile(path: "probe/other.spl", content: canonical_struct_other, module_name: "probe.other")]
+    val files = [SourceFile(path: owner_path, content: source, module_name: owner), SourceFile(path: "probe/other.spl", content: canonical_struct_other, module_name: "probe.other")]
     module_surfaces_from_modules(modules, files).unwrap()
 
 fn canonical_struct_count(symbols: SymbolTable, owner: text, name: text) -> i64:
@@ -42,10 +43,10 @@ fn canonical_struct_has_error(lowering: HirLowering, message: text) -> bool:
 fn canonical_struct_mir_fixture() -> MirLowering:
     val registry = canonical_struct_registry(canonical_struct_source, "probe.owner")
     val consumer_source = "use probe.owner.\{Holder, Tool as Alias, Tool as Again\}\nfn pick(tool: Alias) -> Again?:\n    Some(tool)\nfn inspect(tool: Again) -> text:\n    val stored = pick(tool)\n    val copied = stored\n    match copied:\n        case Some(value): value.path\n        case nil: \"missing\"\n"
-    var provider_lowering = hirlowering_for_module("probe.owner", registry)
-    val provider = provider_lowering.lower_module(parse_full_frontend(canonical_struct_source, "probe.owner", "probe.owner", Logger(level: 0)))
-    var consumer_lowering = hirlowering_for_module("probe.consumer", registry)
-    val consumer = consumer_lowering.lower_module(parse_full_frontend(consumer_source, "probe.consumer", "probe.consumer", Logger(level: 0)))
+    var provider_lowering = hirlowering_for_module("probe/owner.spl", registry)
+    val provider = provider_lowering.lower_module(parse_full_frontend(canonical_struct_source, "probe/owner.spl", "probe.owner", Logger(level: 0)))
+    var consumer_lowering = hirlowering_for_module("probe/consumer.spl", registry)
+    val consumer = consumer_lowering.lower_module(parse_full_frontend(consumer_source, "probe/consumer.spl", "probe.consumer", Logger(level: 0)))
     expect(provider_lowering.errors.len()).to_equal(0)
     expect(consumer_lowering.errors.len()).to_equal(0)
     expect(canonical_struct_count(consumer.symbols, "probe.owner", "Tool")).to_equal(1)
@@ -63,7 +64,7 @@ fn canonical_struct_mir_fixture() -> MirLowering:
 describe "canonical imported struct declarations":
     it "binds two explicit aliases to one current qualified ID":
         val registry = canonical_struct_registry(canonical_struct_source, "probe.owner")
-        var lowering = hirlowering_for_module("probe.consumer", registry)
+        var lowering = hirlowering_for_module("probe/consumer.spl", registry)
         val index = registry.index_by_name["probe.owner"]
         lowering.register_imported_symbol(index, "probe.owner", "Tool", "Alias", Span.empty(), true)
         val first = lowering.symbols.lookup_qualified_type_raw("probe.owner", "Tool")
@@ -78,7 +79,7 @@ describe "canonical imported struct declarations":
 
     it "reuses a transitive field dependency after explicit import supersedes its bare binding":
         val registry = canonical_struct_registry(canonical_struct_source, "probe.owner")
-        var lowering = hirlowering_for_module("probe.consumer", registry)
+        var lowering = hirlowering_for_module("probe/consumer.spl", registry)
         val index = registry.index_by_name["probe.owner"]
         lowering.register_imported_symbol(index, "probe.owner", "Holder", "Holder", Span.empty(), true)
         val dependency = lowering.symbols.lookup_qualified_type_raw("probe.owner", "Tool")
@@ -97,7 +98,7 @@ describe "canonical imported struct declarations":
 
     it "keeps different physical providers distinct despite the same leaf name":
         val registry = canonical_struct_registry(canonical_struct_source, "probe.owner")
-        var lowering = hirlowering_for_module("probe.consumer", registry)
+        var lowering = hirlowering_for_module("probe/consumer.spl", registry)
         lowering.register_imported_symbol(registry.index_by_name["probe.owner"], "probe.owner", "Tool", "First", Span.empty(), true)
         lowering.register_imported_symbol(registry.index_by_name["probe.other"], "probe.other", "Tool", "Second", Span.empty(), true)
         val first = lowering.symbols.local_type_binding_raw("First")
@@ -109,7 +110,7 @@ describe "canonical imported struct declarations":
 
     it "rejects a stale qualified declaration before publishing an alias":
         val registry = canonical_struct_registry(canonical_struct_source, "probe.owner")
-        var lowering = hirlowering_for_module("probe.consumer", registry)
+        var lowering = hirlowering_for_module("probe/consumer.spl", registry)
         lowering.symbols.qualified_types["probe.owner#Tool"] = 999999
         lowering.register_imported_symbol(registry.index_by_name["probe.owner"], "probe.owner", "Tool", "Alias", Span.empty(), true)
         expect(canonical_struct_has_error(lowering, "stale qualified declaration")).to_be(true)
@@ -117,7 +118,7 @@ describe "canonical imported struct declarations":
 
     it "rejects a qualified declaration of the wrong kind":
         val registry = canonical_struct_registry(canonical_struct_source, "probe.owner")
-        var lowering = hirlowering_for_module("probe.consumer", registry)
+        var lowering = hirlowering_for_module("probe/consumer.spl", registry)
         val wrong = lowering.symbols.define("Tool", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, Some("probe.owner"))
         lowering.symbols.bind_qualified_type("probe.owner", "Tool", wrong)
         lowering.register_imported_symbol(registry.index_by_name["probe.owner"], "probe.owner", "Tool", "Alias", Span.empty(), true)
@@ -126,7 +127,7 @@ describe "canonical imported struct declarations":
 
     it "rejects a valid foreign declaration stored under the provider key":
         val registry = canonical_struct_registry(canonical_struct_source, "probe.owner")
-        var lowering = hirlowering_for_module("probe.consumer", registry)
+        var lowering = hirlowering_for_module("probe/consumer.spl", registry)
         lowering.register_imported_symbol(registry.index_by_name["probe.other"], "probe.other", "Tool", "Foreign", Span.empty(), true)
         val foreign = lowering.symbols.lookup_qualified_type_raw("probe.other", "Tool")
         lowering.symbols.qualified_types["probe.owner#Tool"] = foreign
@@ -139,7 +140,7 @@ describe "canonical imported struct declarations":
         expect(source.len()).to_be_greater_than(0)
         val owner = "lib.common.env_access.model"
         val registry = canonical_struct_registry(source, owner)
-        var lowering = hirlowering_for_module("probe.consumer", registry)
+        var lowering = hirlowering_for_module("probe/consumer.spl", registry)
         val index = registry.index_by_name[owner]
         lowering.register_imported_symbol(index, owner, "EnvAccessPlan", "EnvAccessPlan", Span.empty(), true)
         val dependency = lowering.symbols.lookup_qualified_type_raw(owner, "EnvToolIdentity")

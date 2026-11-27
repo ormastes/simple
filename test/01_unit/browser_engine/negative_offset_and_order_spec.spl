@@ -1,0 +1,117 @@
+"""
+## Purpose and audience
+Purpose: Prove that a NEGATIVE `left`, `top` or `order` keeps its sign.
+Audience: browser-engine layout maintainers.
+
+`left`, `top` and `order` were read with `parse_int`, which skips every
+non-digit before the first digit — including the minus sign. `top:-5px` was
+laid out as `top:5px` and `order:-1` as `order:1`, so a box meant to move up
+and left moved down and right, and a flex item meant to come first came last.
+
+Found by the web combination matrix (cells `cc-po-relative-neg`,
+`cc-po-absolute-neg` and the 18 `cc-fx-*-order-1` cells).
+
+Chrome oracle (Chrome 159.0.8154.6 headless shell, 900x2000,
+getBoundingClientRect, `body{margin:0;font:16px/1.5 sans-serif}`):
+  position:relative;top:-5px;left:-5px     x=-5  y=-5  w=300 h=24
+  position:absolute;top:-5px;left:-5px     x=-5  y=-5  w=17  h=24
+  position:relative;left:-12px;top:-7px    x=-12 y=-7  w=300 h=24
+  flex row of three 50px items, middle one order:-1
+      first x=50, middle x=0, last x=100
+  flex row, orders -1, -2, (none), 1, (none)
+      x = 50, 0, 100, 200, 150
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-SIGNED-OFFSET-ORDER-001 — negative left/top/order keep their sign.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 2000
+
+val HEAD: text = (
+    "<html><head><style>body{margin:0;font:16px/1.5 sans-serif}" +
+    ".s{position:relative;width:400px;height:140px;overflow:hidden}" +
+    ".i{width:50px}</style></head><body><div class=\"s\">"
+)
+val TAIL: text = "</div></body></html>"
+
+fn positioned(decl: text) -> text:
+    (HEAD +
+     "<div style=\"position:relative;width:300px;height:80px\">" +
+     "<div id=\"t\" style=\"" + decl + "\">cd</div><div id=\"b\">bb</div></div>" +
+     TAIL)
+
+val ORDER_ROW: text = (
+    HEAD +
+    "<div style=\"display:flex;width:300px;height:90px\">" +
+    "<div id=\"a\" class=\"i\">aa</div>" +
+    "<div id=\"t\" class=\"i\" style=\"order:-1\">cd</div>" +
+    "<div id=\"b\" class=\"i\">bb</div></div>" +
+    TAIL
+)
+
+val ORDER_MIXED: text = (
+    HEAD +
+    "<div style=\"display:flex;width:300px;height:90px\">" +
+    "<div id=\"o1\" class=\"i\" style=\"order:-1\">aa</div>" +
+    "<div id=\"o2\" class=\"i\" style=\"order:-2\">cd</div>" +
+    "<div id=\"o3\" class=\"i\">bb</div>" +
+    "<div id=\"o4\" class=\"i\" style=\"order:1\">dd</div>" +
+    "<div id=\"o5\" class=\"i\">ee</div></div>" +
+    TAIL
+)
+
+fn geom(html: text, id: text, field: text) -> text:
+    simple_web_layout_debug_layout_by_id(html, VW, VH, id, field)
+
+describe "a negative left/top offset moves the box up and left":
+    it "position:relative;top:-5px;left:-5px sits at -5,-5 as Chrome reports":
+        val html = positioned("position:relative;top:-5px;left:-5px")
+        expect(geom(html, "t", "x")).to_equal("-5")
+        expect(geom(html, "t", "y")).to_equal("-5")
+        expect(geom(html, "t", "w")).to_equal("300")
+
+    it "position:absolute;top:-5px;left:-5px sits at -5,-5 as Chrome reports":
+        val html = positioned("position:absolute;top:-5px;left:-5px")
+        expect(geom(html, "t", "x")).to_equal("-5")
+        expect(geom(html, "t", "y")).to_equal("-5")
+
+    it "a relative box leaves its in-flow sibling where it was":
+        val html = positioned("position:relative;top:-5px;left:-5px")
+        expect(geom(html, "b", "x")).to_equal("0")
+        expect(geom(html, "b", "y")).to_equal("24")
+
+describe "generalization: other signed values of the same properties":
+    it "multi-digit negatives keep every digit: left:-12px;top:-7px":
+        val html = positioned("position:relative;left:-12px;top:-7px")
+        expect(geom(html, "t", "x")).to_equal("-12")
+        expect(geom(html, "t", "y")).to_equal("-7")
+
+    it "positive offsets are unchanged: left:10px;top:5px":
+        val html = positioned("position:relative;left:10px;top:5px")
+        expect(geom(html, "t", "x")).to_equal("10")
+        expect(geom(html, "t", "y")).to_equal("5")
+
+    it "an explicit plus sign is a positive offset: left:+10px":
+        val html = positioned("position:relative;left:+10px;top:+5px")
+        expect(geom(html, "t", "x")).to_equal("10")
+        expect(geom(html, "t", "y")).to_equal("5")
+
+describe "a negative order moves a flex item ahead of unordered items":
+    it "order:-1 on the middle item puts it first, as Chrome reports":
+        expect(geom(ORDER_ROW, "t", "x")).to_equal("0")
+        expect(geom(ORDER_ROW, "a", "x")).to_equal("50")
+        expect(geom(ORDER_ROW, "b", "x")).to_equal("100")
+
+    it "generalization: -2 sorts before -1, which sorts before 0 and 1":
+        expect(geom(ORDER_MIXED, "o2", "x")).to_equal("0")
+        expect(geom(ORDER_MIXED, "o1", "x")).to_equal("50")
+        expect(geom(ORDER_MIXED, "o3", "x")).to_equal("100")
+        expect(geom(ORDER_MIXED, "o5", "x")).to_equal("150")
+        expect(geom(ORDER_MIXED, "o4", "x")).to_equal("200")

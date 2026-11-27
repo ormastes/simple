@@ -1,0 +1,99 @@
+# Ordinary diagnostic: genuine checked HIR -> production lowerer -> real VM.
+use compiler.hir.hir_types.{SymbolId, HirType, HirTypeKind, MethodResolution}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirStmt, HirStmtKind, HirBlock, HirBinOp, HirAssignOp, HirCallArg}
+use compiler.common.diagnostics.span.{Span}
+use compiler.backend.svmg_lowering.{lower_svmg_program}
+use std.common.svmg.ref_vm.{assemble_and_run, read_records, read_log}
+
+fn shift_require(condition: bool, message: text):
+    if not condition:
+        panic(message)
+
+fn shift_i32() -> HirType:
+    HirType(kind: HirTypeKind.Int(bits: 32, signed: true), span: Span.empty())
+
+fn shift_e(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: shift_i32(), span: Span.empty())
+
+fn shift_s(kind: HirStmtKind) -> HirStmt:
+    HirStmt(kind: kind, span: Span.empty())
+
+fn shift_int(value: i64) -> HirExpr:
+    shift_e(HirExprKind.IntLit(value: value, suffix: None))
+
+fn shift_var(symbol: SymbolId) -> HirExpr:
+    shift_e(HirExprKind.Var(symbol: symbol))
+
+fn shift_block(stmts: [HirStmt]) -> HirBlock:
+    HirBlock(stmts: stmts, has: false, value: shift_int(0), span: Span.empty())
+
+fn shift_arg(value: HirExpr) -> HirCallArg:
+    HirCallArg(has_name: false, name: "", value: value, span: Span.empty())
+
+fn shift_expect(actual: HirExpr, expected: i64) -> HirStmt:
+    val callee = shift_e(HirExprKind.NamedVar(symbol: SymbolId(id: 9000), name: "expect"))
+    val receiver = shift_e(HirExprKind.Call(callee: callee, args: [shift_arg(actual)], type_args: []))
+    shift_s(HirStmtKind.Expr(expr: shift_e(HirExprKind.MethodCall(receiver: receiver,
+        method: "to_equal", args: [shift_arg(shift_int(expected))], resolution: MethodResolution.Unresolved))))
+
+fn integer_shift_body(value: i64, count: i64, signed: bool, compound: bool, expected: i64) -> HirBlock:
+    val type_ = HirType(kind: HirTypeKind.Int(bits: 32, signed: signed), span: Span.empty())
+    val symbol = SymbolId(id: 1)
+    val initial = HirExpr(kind: HirExprKind.IntLit(value: value, suffix: None), has_type_: true, type_: type_, span: Span.empty())
+    val target = HirExpr(kind: HirExprKind.Var(symbol: symbol), has_type_: true, type_: type_, span: Span.empty())
+    val amount = HirExpr(kind: HirExprKind.IntLit(value: count, suffix: None), has_type_: true, type_: shift_i32(), span: Span.empty())
+    var stmts = [shift_s(HirStmtKind.Let(symbol: symbol, type_: type_, init: initial))]
+    if compound:
+        stmts = stmts.push(shift_s(HirStmtKind.Assign(target: target, op: HirAssignOp.Shr, value: amount)))
+    val actual = if compound: target else: HirExpr(kind: HirExprKind.Binary(op: HirBinOp.Shr, left: target, right: amount), has_type_: true, type_: type_, span: Span.empty())
+    stmts = stmts.push(shift_expect(actual, expected))
+    shift_block(stmts)
+
+fn expect_vm_shift_result(body: HirBlock, expected: i64):
+    val prog = lower_svmg_program(body, [], 1000)
+    shift_require(prog.ok, prog.error)
+    val result = assemble_and_run(prog.code, prog.step_budget, prog.entry_pc)
+    shift_require(result.halted, "shift VM did not halt")
+    shift_require(not result.trapped, "shift VM trapped")
+    shift_require(not result.timed_out, "shift VM exhausted its budget")
+    shift_require(read_log(result.arena, result.log_cap) == "", "shift emitted unexpected text")
+    val records = read_records(result.arena, result.log_cap, result.record_count)
+    shift_require(records.len() == 1, "wrong shift assertion count")
+    shift_require(records[0].passed == 1, "executed shift assertion failed")
+    shift_require(records[0].value == expected, "executed shift value differs")
+
+fn main():
+    val counts = [0, 1, 31, 33]
+    val expected = [-8, -4, -1, -4]
+    for index in 0..4:
+        expect_vm_shift_result(integer_shift_body(-8, counts[index], true, false, expected[index]), expected[index])
+        expect_vm_shift_result(integer_shift_body(-8, counts[index], true, true, expected[index]), expected[index])
+    expect_vm_shift_result(integer_shift_body(8, 1, true, false, 4), 4)
+    for compound in [false, true]:
+        expect_vm_shift_result(integer_shift_body(2147483648, 1, false, compound, 1073741824), 1073741824)
+        val symbol = SymbolId(id: 1)
+        var stmts = [shift_s(HirStmtKind.Let(symbol: symbol, type_: shift_i32(), init: shift_int(-8)))]
+        if compound:
+            stmts = stmts.push(shift_s(HirStmtKind.Assign(target: shift_var(symbol), op: HirAssignOp.Shr, value: shift_int(1))))
+        val actual = if compound: shift_var(symbol) else: shift_e(HirExprKind.Binary(op: HirBinOp.Shr, left: shift_var(symbol), right: shift_int(1)))
+        stmts = stmts.push(shift_expect(actual, 2147483644))
+        expect_vm_shift_result(shift_block(stmts), 2147483644)
+
+    # Both float shift forms remain outside the supported instruction mapping.
+    val float_ty = HirType(kind: HirTypeKind.Float(bits: 32), span: Span.empty())
+    val left_float = HirExpr(kind: HirExprKind.FloatLit(value: 8.0, suffix: None), has_type_: true, type_: float_ty, span: Span.empty())
+    val right_float = HirExpr(kind: HirExprKind.FloatLit(value: 1.0, suffix: None), has_type_: true, type_: float_ty, span: Span.empty())
+    val rejected_binary = lower_svmg_program(shift_block([
+        shift_s(HirStmtKind.Expr(expr: shift_e(HirExprKind.Binary(op: HirBinOp.Shr, left: left_float, right: right_float)))),
+    ]), [], 1000)
+    shift_require(not rejected_binary.ok, "float binary shift was admitted")
+    shift_require(rejected_binary.error.contains("float operands"), "missing float binary shift diagnostic")
+    val float_sym = SymbolId(id: 2)
+    val float_target = HirExpr(kind: HirExprKind.Var(symbol: float_sym), has_type_: true, type_: float_ty, span: Span.empty())
+    val rejected_compound = lower_svmg_program(shift_block([
+        shift_s(HirStmtKind.Let(symbol: float_sym, type_: float_ty, init: left_float)),
+        shift_s(HirStmtKind.Assign(target: float_target, op: HirAssignOp.Shr, value: right_float)),
+    ]), [], 1000)
+    shift_require(not rejected_compound.ok, "float compound shift was admitted")
+    shift_require(rejected_compound.error.contains("float operands"), "missing float compound shift diagnostic")
+    print "pure-svmg-signed-shift-owner: PASS"

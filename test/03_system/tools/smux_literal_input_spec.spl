@@ -1,0 +1,141 @@
+# REQ-CMUX-003/008; NFR-CMUX-005/007. AUTHORED NOT_RUN, fixture NOT_BUILT.
+# Run serially under an admitted Windows native provider and external Job guard.
+# Invalid-byte queue/channel acceptance is NOT invalid-byte child fidelity.
+# codex-system-test
+# @manual: primary
+# @capture: text
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{env_get}
+use std.common.text_bytes.{boxed_text_bytes_checked}
+use std.common.contracts.mux.execution_v1.{MuxPasteV1}
+use std.sosix.host.{sosix_file_exists}
+use std.sosix.pty.{PtyLaunchV1, PtyLaunchModeV1, sosix_pty_cleanup_pending,
+    sosix_pty_literal_bytes_supported_v1}
+use std.sosix.process.{sosix_process_exists}
+use std.sosix.time.{sosix_sleep_ms, sosix_time_now_monotonic_ms}
+use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.contract.{MuxSession, MuxWindow, MuxPane}
+use os.apps.smux.pane_configured_launch_service.{pane_spawn_configured_pty_state}
+use os.apps.smux.pane_io_service.{pane_capture_state, pane_send_bytes_state, pane_input_status_state, pane_poll_state}
+use os.apps.smux.core_mux_input_service.{core_mux_paste_state_v1}
+use os.apps.smux.child_lifecycle.{close_owned_children}
+
+struct LiteralObservation:
+    launched: bool
+    ready: bool
+    accepted: bool
+    observed: bool
+    alive: bool
+    cleaned: bool
+    remains: bool
+    state: ServiceState
+
+fn literal_input_setup() -> ServiceState:
+    var state = ServiceState.empty().add_session(MuxSession.create("s", "literal"))
+    state = state.add_window(MuxWindow.create("w", "s", "literal"))
+    return state.add_pane(PaneRecord.create(MuxPane.create("p", "w", "s")))
+
+fn literal_input_observe(image: text, mode: text) -> LiteralObservation:
+    val launch = PtyLaunchV1(mode: PtyLaunchModeV1.Exec(image, [mode]), cwd: nil, environment: [])
+    val started = pane_spawn_configured_pty_state(literal_input_setup(), false, "s", "w", "p", launch)
+    var state = started.state
+    val pid = if started.result.is_ok(): started.result.unwrap() else: -1
+    var ready = false
+    var attempts = 0
+    var begin = sosix_time_now_monotonic_ms()
+    var now = begin
+    while pid > 0 and not ready and attempts < 200 and begin >= 0 and now >= begin and now - begin < 5000:
+        val capture = pane_capture_state(state, false, "s", "w", "p", 60)
+        state = capture.state
+        if capture.result.is_ok(): ready = capture.result.unwrap().content.contains("LITERAL_CHILD_READY")
+        if not ready: sosix_sleep_ms(25)
+        attempts = attempts + 1
+        now = sosix_time_now_monotonic_ms()
+    var accepted = false
+    if ready:
+        if mode == "paste":
+            val body = boxed_text_bytes_checked("PASTE 한글😀")
+            if body.is_ok():
+                val sent = core_mux_paste_state_v1(state, false, "s", "w", "p",
+                    MuxPasteV1(bytes: body.unwrap(), bracketed: false, append_enter: true))
+                state = sent.state
+                accepted = sent.commit and sent.result.is_ok()
+        else:
+            val payload = if mode == "channel": Ok([0u8, 128u8, 255u8]) else: boxed_text_bytes_checked("LITERAL 한글😀\r")
+            if payload.is_ok():
+                val sent = pane_send_bytes_state(state, false, "s", "w", "p", payload.unwrap())
+                state = sent.state
+                accepted = sent.commit and sent.result.is_ok()
+    var observed = false
+    attempts = 0
+    begin = sosix_time_now_monotonic_ms()
+    now = begin
+    while accepted and not observed and attempts < 200 and begin >= 0 and now >= begin and now - begin < 5000:
+        if mode == "channel":
+            # Status observes pending work but does not submit a queued suffix.
+            # Run the actual bounded owner pump, retaining all failure-side state.
+            val pumped = pane_poll_state(state, [], [])
+            state = pumped.state
+            val status = pane_input_status_state(state, false, "s", "w", "p")
+            state = status.state
+            if status.result.is_ok(): observed = status.result.unwrap() == "idle"
+            # This proves native queue completion only, not child byte identity.
+        else:
+            val capture = pane_capture_state(state, false, "s", "w", "p", 60)
+            state = capture.state
+            if capture.result.is_ok(): observed = capture.result.unwrap().content.contains("LITERAL_EFFECT_42")
+        if not observed: sosix_sleep_ms(25)
+        attempts = attempts + 1
+        now = sosix_time_now_monotonic_ms()
+    val alive = pid > 0 and sosix_process_exists(pid)
+    # No post-acquisition assertions precede bounded checked cleanup. Retain
+    # failed-spawn tokens and every state returned by capture/write/status.
+    attempts = 0
+    var cleaned = false
+    while not cleaned and attempts < 200:
+        state = close_owned_children(state, "s", "w", "p")
+        cleaned = state.get_pane(0).pty_fd < 0 and state.get_pane(0).child_pid <= 0
+        if not cleaned: sosix_sleep_ms(25)
+        attempts = attempts + 1
+    cleaned = cleaned and sosix_pty_cleanup_pending() == 0
+    return LiteralObservation(launched: started.commit and started.result.is_ok(), ready: ready,
+        accepted: accepted, observed: observed, alive: alive, cleaned: cleaned,
+        remains: pid > 0 and sosix_process_exists(pid), state: state)
+
+fn literal_input_check(result: LiteralObservation):
+    expect(result.cleaned).to_equal(true)
+    expect(result.remains).to_equal(false)
+    expect(result.launched).to_equal(true)
+    expect(result.ready).to_equal(true)
+    expect(result.accepted).to_equal(true)
+    expect(result.observed).to_equal(true)
+    expect(result.alive).to_equal(true)
+    expect(result.state.get_pane(0).child_incarnation).to_equal(1u64)
+
+describe "Literal channel and explicit paste with real Windows children":
+    it "should deliver Unicode terminal input to the actual child":
+        step("Require the separately compiled real console child and selected byte owner")
+        val image = env_get("SIMPLE_TEST_LITERAL_CHILD")
+        expect(image != "" and sosix_file_exists(image)).to_equal(true)
+        expect(sosix_pty_literal_bytes_supported_v1()).to_equal(true)
+        val result = literal_input_observe(image, "literal")
+        step("Assert child-computed effects only after checked cleanup")
+        literal_input_check(result)
+
+    it "should append explicit paste Enter without reconstructing the body as text":
+        step("Launch the same real child with an explicit paste expectation")
+        val image = env_get("SIMPLE_TEST_LITERAL_CHILD")
+        expect(image != "" and sosix_file_exists(image)).to_equal(true)
+        expect(sosix_pty_literal_bytes_supported_v1()).to_equal(true)
+        val result = literal_input_observe(image, "paste")
+        step("Observe exact supported Unicode input and release all retained owners")
+        literal_input_check(result)
+
+    it "should accept arbitrary channel octets without claiming child stdin identity":
+        step("Keep a real nonreading child while submitting NUL 0x80 and 0xff")
+        val image = env_get("SIMPLE_TEST_LITERAL_CHILD")
+        expect(image != "" and sosix_file_exists(image)).to_equal(true)
+        expect(sosix_pty_literal_bytes_supported_v1()).to_equal(true)
+        val result = literal_input_observe(image, "channel")
+        step("Require actual native queue completion and cleanup, not decoded child bytes")
+        literal_input_check(result)

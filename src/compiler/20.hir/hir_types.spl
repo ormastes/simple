@@ -56,6 +56,17 @@ struct HirModule:
     nogc_param_effects_checked: bool = false
     nogc_param_effect_symbol_ids: [i64] = []
     nogc_param_effects: [[text]] = []
+    # Logical attribute access sites of `@node_tree` classes (data plan W2b).
+    # Metadata only: lowering never reads it, so MIR code is unchanged.
+    attr_sites: [HirAttrAccessV1] = []
+    # Exact local SymbolId.id: true explicitly annotated, false inferred.
+    # Absent keys mean unknown provenance, never inferred by default.
+    local_annotation_provenance: Dict<i64, bool> = {}
+    # Non-owning rows for imported structs, keyed by the importer's SymbolId:
+    # identity only (name, visibility, span, generic flag); `fields` is always
+    # empty, the layout stays with the declaring module. Never part of
+    # `structs`: MIR treats `structs` as this module's own declarations.
+    imported_layouts: Dict<SymbolId, HirStruct> = {}
 
 struct HirExtendEnum:
     """One `complete:`/`dyn:` section of an `extend <Enum>:` declaration."""
@@ -119,13 +130,30 @@ struct HirSymbol:
     is_mutable: bool
     defining_module: text?   # Which module defined this symbol (for visibility checking)
     builtin_method_tag: i64  # Scalar BuiltinMethodTag value.
+    # Explicit generic marker: type-parameter count of a callable symbol
+    # (0 = not generic). Set from the module surface for imported generic
+    # functions, whose `type_` is deliberately nil; consumers read this instead of inferring "generic" from a missing type.
+    generic_param_count: i64 = 0
+    # Immutable declaration origin, never a requester/export permission bit.
+    # Unknown is empty; scoped/member visibility remains independently typed.
+    declaration_modifier_v1: text = ""
+    declaration_source_path_v1: text = ""
+    declaration_projection_key_v1: text = ""
+    declaration_owner_v1: text = ""
+    # Independent declaration evidence: no return annotation must not erase
+    # parameter types. None means unknown, Some([]) means known zero arity.
+    # Named identities belong to this symbol table, never a foreign table.
+    declared_param_types_v1: [HirType]? = None
 
-val BUILTIN_METHOD_NONE = 0
-val BUILTIN_METHOD_STR_STRIP = 1
-val BUILTIN_METHOD_STR_LINES = 2
+pub val BUILTIN_METHOD_NONE = 0
+pub val BUILTIN_METHOD_STR_STRIP = 1
+pub val BUILTIN_METHOD_STR_LINES = 2
 val BUILTIN_METHOD_STR_LEN = 3
 val BUILTIN_METHOD_STR_CONTAINS = 4
 val BUILTIN_METHOD_STR_STARTS_WITH = 5
+# Assigned by HIR only after lexical lookup misses a builtin constructor.
+pub val BUILTIN_METHOD_RESULT_OK = 6
+pub val BUILTIN_METHOD_RESULT_ERR = 7
 
 fn hir_builtin_method_tag(qualified_name: text) -> i64:
     # This classifier runs while building the compiler itself. Keep it wholly
@@ -246,8 +274,8 @@ impl MethodResolution:
             case TraitMethod(_, method_id): method_id
             case FreeFunction(func_id): func_id
             case StaticMethod(_, method_id): method_id
-            case Unresolved: nil
-            case BuiltinCollection(_): nil
+            case Unresolved: None
+            case BuiltinCollection(_): None
 
 struct ScopeId:
     """Unique identifier for a scope."""
@@ -259,6 +287,9 @@ struct Scope:
     parent: ScopeId?
     kind: ScopeKind
     symbols: Dict<text, i64>
+    # Per-spelling mutation identity, including tombstones after unbind. A
+    # same-SymbolId rebind must invalidate the old selected facade route.
+    binding_versions_v1: Dict<text, i64> = {}
 
 """Kind of scope."""
 enum ScopeKind:
@@ -331,9 +362,10 @@ impl SymbolTable:
         # Create root scope (direct mutation avoids copy-modify-reassign bug)
         table.scopes[0] = Scope(
             id: ScopeId(id: 0),
-            parent: nil,
+            parent: None,
             kind: ScopeKind.Module,
-            symbols: root_scope_symbols
+            symbols: root_scope_symbols,
+            binding_versions_v1: {}
         )
         table
 
@@ -358,8 +390,9 @@ impl SymbolTable:
         self.next_symbol_id = 0
         self.next_scope_id = 1
         self.scopes[0] = Scope(
-            id: ScopeId(id: 0), parent: nil,
-            kind: ScopeKind.Module, symbols: self.root_scope_symbols)
+            id: ScopeId(id: 0), parent: None,
+            kind: ScopeKind.Module, symbols: self.root_scope_symbols,
+            binding_versions_v1: {})
 
     fn module_snapshot() -> SymbolTable:
         """A distinct owner of this module's containers, for its HirModule.
@@ -496,7 +529,13 @@ impl SymbolTable:
             is_public: retained_visibility == Visibility.Public,
             is_mutable: is_mutable,
             defining_module: defining_module,
-            builtin_method_tag: hir_builtin_method_tag(name)
+            builtin_method_tag: hir_builtin_method_tag(name),
+            generic_param_count: 0,
+            declaration_modifier_v1: "",
+            declaration_source_path_v1: "",
+            declaration_projection_key_v1: "",
+            declaration_owner_v1: "",
+            declared_param_types_v1: None
         )
 
         self.symbols[raw_id] = symbol
@@ -515,7 +554,10 @@ impl SymbolTable:
         # Preserve the first unqualified spelling.  Qualified lookup reaches
         # the canonical declaration above, including aliases and re-exports.
         if bind_lexical and (not is_canonical_class or self.scopes[self.current_scope.id].symbols.get(name) == nil):
+            self.advance_binding_version_v1(self.current_scope.id, name)
             self.scopes[self.current_scope.id].symbols[name] = raw_id
+            if self.current_scope.id == 0:
+                self.root_scope_symbols[name] = raw_id
 
         id
 
@@ -531,7 +573,7 @@ impl SymbolTable:
         val raw_id = self.lookup_qualified_function_raw(module_name, member_name)
         if raw_id >= 0:
             return SymbolId(id: raw_id)
-        nil
+        None
 
     fn lookup_qualified_function_raw(module_name: text, member_name: text) -> i64:
         """Native-safe scalar qualified-function lookup, including id zero."""
@@ -552,7 +594,10 @@ impl SymbolTable:
     me bind_local_type_if_free(name: text, id: SymbolId):
         """Publish a lexical alias without changing canonical ownership."""
         if self.scopes[self.current_scope.id].symbols.get(name) == nil:
+            self.advance_binding_version_v1(self.current_scope.id, name)
             self.scopes[self.current_scope.id].symbols[name] = id.id
+            if self.current_scope.id == 0:
+                self.root_scope_symbols[name] = id.id
 
     fn local_type_binding_raw(name: text) -> i64:
         """Raw id bound to `name` in the current scope, or -1."""
@@ -571,20 +616,26 @@ impl SymbolTable:
         also drops the name for every scope. Only call it at module scope
         (the declare pass), never from a nested scope."""
         if self.scopes[self.current_scope.id].symbols.get(name) != nil:
+            self.advance_binding_version_v1(self.current_scope.id, name)
             self.scopes[self.current_scope.id].symbols.remove(name)
+            if self.current_scope.id == 0:
+                self.root_scope_symbols.remove(name)
         if self.exact_symbols.has(name):
             self.exact_symbols.remove(name)
 
     me rebind_local_type(name: text, id: SymbolId):
         """Make `id` the current scope's unqualified binding of `name`."""
+        self.advance_binding_version_v1(self.current_scope.id, name)
         self.scopes[self.current_scope.id].symbols[name] = id.id
+        if self.current_scope.id == 0:
+            self.root_scope_symbols[name] = id.id
         self.exact_symbols[name] = id.id
 
     fn lookup_qualified_type(module_name: text, member_name: text) -> SymbolId?:
         val raw_id = self.lookup_qualified_type_raw(module_name, member_name)
         if raw_id >= 0:
             return SymbolId(id: raw_id)
-        nil
+        None
 
     fn lookup_qualified_type_raw(module_name: text, member_name: text) -> i64:
         """Native-safe qualified type lookup.
@@ -632,7 +683,8 @@ impl SymbolTable:
             id: id,
             parent: Some(self.current_scope),
             kind: kind,
-            symbols: {}
+            symbols: {},
+            binding_versions_v1: {}
         )
         self.next_scope_id = raw_id + 1
 
@@ -652,7 +704,7 @@ impl SymbolTable:
         match scope.parent:
             case Some(parent):
                 self.current_scope = parent
-            case nil:
+            case None:
                 pass
 
 # ============================================================================
@@ -735,8 +787,18 @@ enum HirTypeKind:
     Unique(inner: HirType)           # &T  unique owner
     Shared(inner: HirType)           # *T  shared (Rc) owner
     Weak(inner: HirType)             # -T  weak observer
+    # Explicit nil singleton type: the annotation written `nil` (parser
+    # keyword TOK_KW_NIL -> TYPE_NIL, flat bridge -> Named("nil")). Distinct
+    # from Unit (()/void/unit) and from an Optional's absence state (None is
+    # a constructor, not this type). Its only value is the nil literal,
+    # materialized at MIR/backend level as the tagged SplValue word constant
+    # 3 (see 50.mir MirTypeKind.Nil). unresolved_type_declared_nowhere_family
+    # 2026-08-01 (p2_28): previously the name had no HIR mapping at all and
+    # hard-errored as "unresolved type: nil". Appended to preserve
+    # discriminants, matching the ownership sigils above.
+    Nil                              # nil
 
-fn hir_type_kind_ownership_name(kind: HirTypeKind) -> text:
+pub fn hir_type_kind_ownership_name(kind: HirTypeKind) -> text:
     """Ownership/pointer reading of a HIR type, for diagnostics and specs."""
     match kind:
         case Unique(_): "unique"
@@ -772,7 +834,6 @@ fn hir_type_metadata_symbol_free(type_: HirType) -> bool:
     true
 
 impl HirType:
-    # @workaround bug=a174_named_enum_payload_owner_2026_10_16 reason=retain-declared-owner-through-positional-payloads
     static fn named(name: text) -> HirType:
         """Build a primitive HirType from its canonical name (i64, u32, f64, bool, unit, usize).
         Used by backends to convert MIR types to HirType for layout computation."""
@@ -843,7 +904,7 @@ impl DimExpr:
     fn get_literal() -> i64?:
         match self.kind:
             case Literal(v): Some(v)
-            case _: nil
+            case _: None
 
 """Device type for tensors."""
 enum DeviceType:
@@ -878,7 +939,7 @@ impl LayerType:
             input_shape: input,
             output_shape: output,
             params: [],
-            device: nil
+            device: None
         )
 
     static fn with_device_of(layer: LayerType, device: DeviceType) -> LayerType:
@@ -903,11 +964,46 @@ enum EffectKind:
     Mutates         # Mutates state
     Allocates       # Heap allocation
     Custom(name: text)
+    # Inference could not classify the effect (fail-closed marker).
+    # Appended LAST: the HIR codec tags variants positionally.
+    Unknown
 
 # ============================================================================
 # Exports
 # ============================================================================
 
+# ============================================================================
+# Attribute access sites (data plan W2b, doc/03_plan/compiler/data/
+# data_attributes_layout_containers_xray_2026-11-06.md sections 3.3, 9.1).
+# One row per logical access to a field of a `@node_tree` class: a read, a
+# committed write, a compound update (one read-modify-write), or a
+# constructor initializer. Generated or physical loads are not sites.
+# ============================================================================
+enum HirAttrAccessKindV1:
+    Read
+    Write
+    Init
+    ReadModifyWrite
+
+fn hir_attr_access_kind_name_v1(kind: HirAttrAccessKindV1) -> text:
+    match kind:
+        case HirAttrAccessKindV1.Read: "read"
+        case HirAttrAccessKindV1.Write: "write"
+        case HirAttrAccessKindV1.Init: "init"
+        case HirAttrAccessKindV1.ReadModifyWrite: "read_modify_write"
+
+struct HirAttrAccessV1:
+    # `<module>:<function>@<symbol id>#<ordinal>`; ordinals follow HIR
+    # visit order within one function.
+    site_id: text
+    kind: HirAttrAccessKindV1
+    tree: text
+    class_name: text
+    attr: text
+    function: text
+    span: Span
+
+export HirAttrAccessKindV1, HirAttrAccessV1, hir_attr_access_kind_name_v1
 export HirModule, HirImport, HirImportItem, HirDomainBlock
 export SymbolId, HirSymbol, SymbolKind, MethodResolution, CollectionBuiltinOperation
 export ScopeId, Scope, ScopeKind, SymbolTable
@@ -944,12 +1040,12 @@ extern fn rt_enum_discriminant(value: HirTypeKind) -> i64
 fn _hir_optional_container_payload(t: HirType) -> HirType?:
     val tk: HirTypeKind = t.kind
     if rt_enum_discriminant(tk) != rt_enum_discriminant(HirTypeKind.Optional(t)):
-        return nil
+        return None
     val inner: HirType? = match tk:
         case HirTypeKind.Optional(payload): payload
         case _: nil
     if not inner.?:
-        return nil
+        return None
     val inner_t: HirType = inner ?? t
     val ik: HirTypeKind = inner_t.kind
     val ik_disc = rt_enum_discriminant(ik)
@@ -959,7 +1055,7 @@ fn _hir_optional_container_payload(t: HirType) -> HirType?:
         return inner_t
     if ik_disc == rt_enum_discriminant(HirTypeKind.Slice(inner_t)):
         return inner_t
-    nil
+    None
 
 export Effect, EffectKind
 export _hir_optional_container_payload

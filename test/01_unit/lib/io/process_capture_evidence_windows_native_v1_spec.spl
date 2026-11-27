@@ -1,0 +1,54 @@
+# SOURCE_AUTHORED_NOT_RUN. Actual native canonical Windows-thread runner and
+# Windows C:/Windows/System32/whoami.exe required; absent setup FAILS, no skip.
+use std.spec.*
+use std.nogc_sync_mut.io.process_capture_evidence_v1.*
+use std.nogc_sync_mut.io.windows_command_owner_v2.WindowsCommandRequestV2
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure, sleep_ms}
+
+var capture_windows_owner_v1: Option<ProcessCaptureOwnerV1> = nil
+
+fn capture_windows_cleanup_v1() -> bool:
+    for turn in 0..512:
+        if capture_windows_owner_v1.is_none(): return true
+        val closed = process_capture_step_v1(capture_windows_owner_v1.unwrap(), true)
+        capture_windows_owner_v1 = closed.owner
+        if capture_windows_owner_v1.is_some(): sleep_ms(10)
+    capture_windows_owner_v1.is_none()
+
+describe "Actual Windows command-backed capture prerequisite specimen":
+    after_each:
+        expect(capture_windows_cleanup_v1()).to_equal(true)
+
+    it "preserves actual command EOF and cleanup without inventing POSIX counters":
+        step("Run actual readonly whoami with explicit native command environment/cwd/expiry")
+        if capture_windows_owner_v1.is_some() and not capture_windows_cleanup_v1():
+            panic("prior real Windows capture owner cleanup remains retained")
+        val micros = time_sample_unix_micros_or_failure()
+        if micros <= 0: panic("required genuine Windows capture clock unavailable")
+        var actual = process_capture_windows_begin_v1(WindowsCommandRequestV2(
+            program: "C:/Windows/System32/whoami.exe", args: ["/user", "/fo", "csv", "/nh"],
+            environment: ["SystemRoot=C:/Windows"], directory: "C:/Windows/System32",
+            timeout_ms: 1000, max_output_bytes: 65536, expires_at_unix_ms: micros / 1000 + 10000))
+        capture_windows_owner_v1 = actual.owner
+        if actual.owner.is_none(): panic("required actual Windows command capture setup unavailable: {actual.error}")
+        for turn in 0..512:
+            if capture_windows_owner_v1.is_some():
+                actual = process_capture_step_v1(capture_windows_owner_v1.unwrap())
+                capture_windows_owner_v1 = actual.owner
+                if capture_windows_owner_v1.is_some(): sleep_ms(10)
+        expect(capture_windows_owner_v1.is_none()).to_equal(true)
+        val evidence = actual.evidence.unwrap()
+        expect(evidence.stdout_eof_v1()).to_equal(Some(true))
+        expect(evidence.stderr_eof_v1()).to_equal(Some(true))
+        expect(evidence.output_complete_v1()).to_equal(Some(true))
+        expect(evidence.terminal_v1()).to_equal(Some(true))
+        expect(evidence.retirement_confirmed_v1()).to_equal(true)
+        expect(evidence.stdout_seen_v1().is_none()).to_equal(true)
+        expect(evidence.stdout_truncated_v1().is_none()).to_equal(true)
+        expect(evidence.reaped_v1().is_none()).to_equal(true)
+        expect(evidence.identity_revalidated_v1().is_none()).to_equal(true)
+        expect(evidence.native_error_v1().is_none()).to_equal(true)
+        expect(evidence.stdout_kept_v1()).to_equal(Some(evidence.stdout_delivered_v1()))
+        expect(evidence.stdout_delivered_v1()).to_be_greater_than(0)
+        # Native bytes remain available even when localized whoami uses a
+        # non-UTF8 code page and the text ProcessResult is consequently refused.

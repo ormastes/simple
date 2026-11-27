@@ -1,5 +1,7 @@
 # LintDiag config, levels, profiles, and the LintDiag/LintRunResult/Linter model.
-use compiler.tools.lint.main.*
+use compiler.tools.lint._LintMain.semantic_markdown_lints.{semantic_markdown_authority_option_v1}
+use compiler.tools.lint._LintMain.traceability_and_assertions.{get_parent_directory}
+use compiler.semantics.symbol_id.semantic_markdown.{SemanticMarkdownSourceV1}
 # Simple Language Linter
 # Semantic lints for code quality and safety
 # Usage: simple_lint <file.spl> [--deny-all] [--warn-all]
@@ -12,11 +14,12 @@ use app.io.cli_ops (get_args)
 # Logging imports
 use std.log.{error, info}
 
+use compiler.common.diagnostics.interpreter_policy_ids.{interpreter_policy_rule_ids}
 # Shared lint contract from the tooling layer.
 # Re-export-compatible enum identities must remain canonical to avoid
 # false-positive bare-name collisions when lint and tooling are both imported
 # by the same module (canonical failure mode: compiler.tools.lint.main).
-use std.tooling.easy_fix.types.{EasyFix, LintLevel, LintCategory}
+use std.tooling.easy_fix.types.{EasyFix, easyfix_is_effective, LintLevel, LintCategory}
 use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debuggability}
 use compiler.common.assurance.policy_names.{normalize_profile_name, deprecated_profile_alias_replacement}
 use compiler.common.assurance.warning_phase.{warning_phase_enabled_for_value,
@@ -26,8 +29,17 @@ use compiler.common.assurance.mc_exceptions.{McException, parse_mc_exceptions,
     mc_exception_reason_for}
 use compiler.semantics.lint.option_me_call.{OptionMeCallWarning}
 use compiler.semantics.lint.raw_rt_access.{RawRtLexState}
+use compiler.common.diagnostics.diagnostic_rule_policy.{
+    DiagnosticPolicyInputV1, DiagnosticPolicySnapshot, DiagnosticRuleLevel,
+    ResolvedSeverity, diagnostic_policy_default_edition,
+    diagnostic_policy_default_path, lint_level_name_for_rule_level,
+    load_diagnostic_policy_text, resolve_policy_with_input
+}
+use compiler.tools.lint._LintMain.rule_cost_tier.{
+    LintTierProfile, lint_apply_perf_profile, lint_rule_cost_tier, lint_tier_admits
+}
 
-extern fn rt_env_get(key: text) -> text
+extern fn rt_env_get(key: text) -> text?  # nil when unset; callers here use `?? ""` because unset == empty is the intended semantics
 
 # File I/O wrapper
 
@@ -35,7 +47,7 @@ enum LintReadFileResult:
     ReadFileOk(String)
     ReadFileErr(String)
 
-fn lint_read_file(path: String) -> LintReadFileResult:
+pub fn lint_read_file(path: String) -> LintReadFileResult:
     val file_content = file_read(path)
     if file_content == "":
         return LintReadFileResult.ReadFileErr("Failed to read file: {path}")
@@ -63,6 +75,43 @@ enum LintProfile:
     Strict
     Robust
     Critical
+
+pub enum PerfLintProfile:
+    PerfFast
+    Perf
+    PerfDeep
+
+# reason: profile strings are canonical CLI/SDN identifiers at the lint configuration boundary
+@allow(primitive_api)
+pub fn parse_perf_lint_profile(profile_str: String) -> Option<PerfLintProfile>:
+    val lower = profile_str.lower()
+    if lower == "perf-fast" or lower == "perf_fast":
+        return Some(PerfLintProfile.PerfFast)
+    if lower == "perf":
+        return Some(PerfLintProfile.Perf)
+    if lower == "perf-deep" or lower == "perf_deep":
+        return Some(PerfLintProfile.PerfDeep)
+    None
+
+# reason: profile name formatter at the CLI/receipt boundary
+@allow(primitive_api)
+pub fn perf_lint_profile_name(profile: PerfLintProfile) -> text:
+    match profile:
+        case PerfLintProfile.PerfFast: "perf-fast"
+        case PerfLintProfile.Perf: "perf"
+        case PerfLintProfile.PerfDeep: "perf-deep"
+
+var _ACTIVE_CLI_PERF_PROFILE_V1: [PerfLintProfile] = []
+
+pub fn set_active_cli_perf_profile_v1(profile: Option<PerfLintProfile>):
+    match profile:
+        case Some(p): _ACTIVE_CLI_PERF_PROFILE_V1 = [p]
+        case None: _ACTIVE_CLI_PERF_PROFILE_V1 = []
+
+pub fn active_cli_perf_profile_v1() -> Option<PerfLintProfile>:
+    if _ACTIVE_CLI_PERF_PROFILE_V1.len() == 0:
+        return None
+    Some(_ACTIVE_CLI_PERF_PROFILE_V1[0])
 
 # Tracks which deprecated profile spellings have already warned this
 # process. Module-level state, not a struct field: a once-only flag
@@ -102,7 +151,7 @@ fn parse_lint_profile(profile_str: String) -> Option<LintProfile>:
     val lower = profile_str.lower()
     val canonical = normalize_profile_name(lower)
     if canonical == "":
-        return nil
+        return None
     # --- Deprecated aliases (pre-rename spellings); warn once, keep working ---
     val alias_target = deprecated_profile_alias_replacement(lower)
     if alias_target != "":
@@ -126,7 +175,7 @@ fn parse_lint_profile(profile_str: String) -> Option<LintProfile>:
         # engineering-restriction projection and must therefore deny exactly as
         # critical rather than reject or weaken the profile.
         return Some(LintProfile.Critical)
-    nil
+    None
 
 # All configurable lint names.
 fn all_lint_names() -> [text]:
@@ -183,6 +232,8 @@ fn build_default_levels() -> Dict<String, String>:
     var levels: Dict<String, String> = {}
     levels["primitive_api"] = "deny"
     levels["bare_bool"] = "warn"
+    levels["bare_text_domain"] = "warn"
+    levels["bare_text"] = "warn"
     levels["simple_script_required"] = "warn"
     levels["print_in_test_spec"] = "warn"
     levels["todo_format"] = "warn"
@@ -220,6 +271,7 @@ fn build_default_levels() -> Dict<String, String>:
     levels["ui_no_raw_variant"] = "warn"
     levels["ui_no_raw_theme_name"] = "warn"
     levels["stale_md_diagrams"] = "warn"
+    levels["semantic_markdown_links"] = "warn"
     levels["llvm_backend_type_safety"] = "deny"
     levels["hash_bracket_attribute"] = "warn"
     # Newly-configurable families. Preserve the original suppression level for
@@ -230,6 +282,12 @@ fn build_default_levels() -> Dict<String, String>:
     levels["concurrency_misuse"] = "warn"
     levels["closure_capture"] = "warn"
     levels["ignored_return"] = "warn"
+    # RB-DIAG-01: interpreter-only warning families (no CLI detector); bound to
+    # policy rows via compiler.common.diagnostics.interpreter_policy_ids.
+    levels["match_fallthrough"] = "warn"
+    levels["match_wildcard_catch"] = "warn"
+    levels["gc_family_import"] = "warn"
+    levels["use_unprovided_name"] = "warn"
     levels["multiline_bool"] = "warn"
     levels["memory_safety"] = "warn"
     # Stable policy owner for COLL001-COLL019 and future typed CollectionPlan
@@ -252,6 +310,9 @@ fn build_default_levels() -> Dict<String, String>:
     levels["representation_boundary"] = "warn"
     levels["unwrapped_foreign_resource"] = "allow"
     levels["raw_sffi_call"] = "allow"
+    levels["bound_late_cast"] = "warn"
+    levels["bound_unit_reassert"] = "warn"
+    levels["sffi_abi_mismatch"] = "deny"
     # ===== SILENT-DEFAULT ESCALATION POINT =====
     # "warn" today: existing code must keep compiling ("at least warning now,
     # latter bug when sw stable for compatibility"). Change this single line to
@@ -297,10 +358,43 @@ fn build_default_levels() -> Dict<String, String>:
     # DEFAULT OFF, same reasoning: gpu_2d_perf is opt-in via --gpu-2d-perf,
     # --warn-all, or an explicit simple.sdn [lints] entry.
     levels["gpu_2d_perf"] = "allow"
-    # DEFAULT OFF until the tree-wide nil -> None sweep lands (~26k findings):
-    # nil_outside_unsafe (NIL-UNSAFE-001) is opt-in via --warn-all or an
-    # explicit simple.sdn [lints] entry. lint-cached caches clean files only.
-    levels["nil_outside_unsafe"] = "allow"
+    # nil_outside_unsafe (NIL-UNSAFE-001): WARN by default now that the safe
+    # nil -> None auto-fix has landed. Never deny here; NEW sites are blocked
+    # by the push-tier ratchet scripts/check/check-nil-outside-unsafe-added.shs.
+    levels["nil_outside_unsafe"] = "warn"
+    # robust_option_surface (ROB-OPT-001/002/003): raw Option<T> / T? on a public
+    # input or field. Allow by default (compatibility census first, design
+    # phase W); warn in the Robust and Critical profiles. Never deny here.
+    levels["robust_option_surface"] = "allow"
+    # nil_return_non_optional (NIL-RET-001): nil flowing into a non-optional
+    # return. Warn by default; the interpreter already faults on it at run time.
+    levels["nil_return_non_optional"] = "warn"
+    # panic_free (PANIC-W-INDEX/UNWRAP/DIV): ADR-006 migration phase P1 -- warn
+    # by default; flips to error at P5 (see the ADR).
+    levels["panic_free"] = "warn"
+    levels["cow_alias_hotpath"] = "warn"
+    levels["nogc_ownership"] = "warn"
+    levels["option_me_call"] = "warn"
+    levels["newunit_deprecation"] = "warn"
+    levels["illegal_unit_arithmetic"] = "deny"
+    levels["numeric_newtype_deprecation"] = "warn"
+    levels["undeclared_derived_unit"] = "warn"
+    levels["bound_raw_escape"] = "warn"
+    levels["source_inventory_drift"] = "warn"
+    levels["boundary_role_grant"] = "warn"
+    levels["provider_abi_mismatch"] = "deny"
+    levels["sffi_constrained_return"] = "deny"
+    levels["non_option_pattern_match"] = "deny"
+    # Performance analysis and collection refactoring rules (PERF-*, section 9.2).
+    levels["perf_loop_idiom_style"] = "allow"
+    levels["perf_repeated_scan_cost"] = "warn"
+    levels["perf_complexity_bound_increase"] = "warn"
+    levels["perf_avoidable_materialization"] = "warn"
+    levels["perf_algorithm_redesign"] = "allow"
+    levels["perf_resource_contract_refuted"] = "warn"
+    levels["perf_resource_contract_unproved"] = "warn"
+    levels["perf_analysis_coverage_note"] = "allow"
+    levels["perf_fix_blocked_precondition"] = "allow"
     levels
 
 # Per-tier default levels, layered on top of build_default_levels().
@@ -309,7 +403,156 @@ fn build_default_levels() -> Dict<String, String>:
 #   Robust   = strict: public-surface + safety/correctness lints elevated to
 #              "deny"; formerly `Reliable`
 #   Critical = Robust + REQ-MC rules; formerly `MissionCritical`
-fn profile_default_levels(profile: LintProfile) -> Dict<String, String>:
+pub fn profile_default_levels(profile: LintProfile) -> Dict<String, String>:
+    policy_overlay_levels(profile_table_levels(profile), lint_diagnostic_policy(), policy_mode_of_profile(profile))
+
+# --- DiagnosticRulePolicy consumption (plan §4, REQ-DPOL-001/006) ----------
+# Complete binding table across all 14 seeded rules in
+# config/policy/diagnostic_policy.sdn. Resolved via `snapshot.resolve(...)` with
+# deterministic explicit inputs and zero ambient wall-clock reads.
+# reason: lint rule names and DiagnosticRulePolicy IDs are canonical string keys at the configuration boundary
+@allow(primitive_api)
+pub fn lint_policy_rule_ids() -> Dict<String, String>:
+    var ids: Dict<String, String> = {}
+    ids["newunit_deprecation"] = "SPL-UNIT-001"
+    ids["primitive_api"] = "SPL-TYPE-001"
+    ids["illegal_unit_arithmetic"] = "SPL-UNIT-002"
+    ids["bound_raw_escape"] = "SPL-BOUND-001"
+    ids["bound_late_cast"] = "SPL-BOUND-002"
+    ids["bound_unit_reassert"] = "SPL-BOUND-003"
+    ids["numeric_newtype_deprecation"] = "SPL-UNIT-003"
+    ids["undeclared_derived_unit"] = "SPL-UNIT-004"
+    ids["source_inventory_drift"] = "SPL-BUILD-SRC-001"
+    ids["boundary_role_grant"] = "SPL-BUILD-ROLE-001"
+    ids["provider_abi_mismatch"] = "SPL-PROVIDER-ABI-001"
+    ids["sffi_abi_mismatch"] = "SPL-SFFI-ABI-001"
+    ids["sffi_constrained_return"] = "SPL-SFFI-RANGE-001"
+    ids["non_option_pattern_match"] = "SPL-PAT-001"
+    ids["perf_loop_idiom_style"] = "PERF-STYLE-001"
+    ids["perf_repeated_scan_cost"] = "PERF-COST-001"
+    ids["perf_complexity_bound_increase"] = "PERF-COST-002"
+    ids["perf_avoidable_materialization"] = "PERF-ALLOC-001"
+    ids["perf_algorithm_redesign"] = "PERF-ALG-001"
+    ids["perf_resource_contract_refuted"] = "PERF-CONTRACT-001"
+    ids["perf_resource_contract_unproved"] = "PERF-CONTRACT-002"
+    ids["perf_analysis_coverage_note"] = "PERF-ANALYSIS-001"
+    ids["perf_fix_blocked_precondition"] = "PERF-FIX-001"
+    # Interpreter warning families share one table with the interpreter.
+    val interp = interpreter_policy_rule_ids()
+    for name in interp.keys():
+        ids[name] = interp[name]
+    ids
+
+# reason: lint names and policy codes are canonical string identifiers
+@allow(primitive_api)
+pub fn lint_policy_code_for_rule(lint_or_code: text) -> text:
+    val bindings = lint_policy_rule_ids()
+    if bindings.contains_key(lint_or_code):
+        return bindings[lint_or_code]
+    for name in bindings.keys():
+        if bindings[name] == lint_or_code:
+            return bindings[name]
+    # Diagnostic codes (e.g. MEXH001, RET001) resolve through their lint family.
+    val family = map_lint_code_to_config_name(lint_or_code)
+    if family != lint_or_code and bindings.contains_key(family):
+        return bindings[family]
+    ""
+
+# reason: lint names and policy codes are canonical string identifiers
+@allow(primitive_api)
+pub fn lint_resolve_policy_rule(
+    snapshot: DiagnosticPolicySnapshot,
+    lint_or_code: text,
+    input: DiagnosticPolicyInputV1,
+    emitted: DiagnosticRuleLevel
+) -> ResolvedSeverity:
+    val code = lint_policy_code_for_rule(lint_or_code)
+    val effective_code = if code != "": code else: lint_or_code
+    resolve_policy_with_input(snapshot, effective_code, input, emitted)
+
+fn _lint_name_is_security_policy(lint_name: text) -> bool:
+    val code = lint_policy_code_for_rule(lint_name)
+    if code == "":
+        return false
+    match lint_diagnostic_policy():
+        case Some(snapshot):
+            if snapshot.has_rule(code):
+                return snapshot.rule(code).is_security()
+            false
+        case None:
+            false
+
+fn policy_mode_of_profile(profile: LintProfile) -> text:
+    match profile:
+        case Moderate: return "moderate"
+        case Strict: return "strict"
+        case Robust: return "robust"
+        case Critical: return "critical"
+
+# reason: explicit deterministic policy resolution inputs at the lint configuration boundary
+@allow(primitive_api)
+pub fn policy_overlay_levels_with_context(
+    levels: Dict<String, String>,
+    policy: DiagnosticPolicySnapshot?,
+    mode: text,
+    language_edition: text,
+    warning_phase: bool,
+    target_triple: text,
+    source_path: text
+) -> Dict<String, String>:
+    match policy:
+        case None:
+            return levels
+        case Some(snapshot):
+            var out = levels
+            val input = DiagnosticPolicyInputV1.for_mode(
+                mode, language_edition, warning_phase, target_triple, source_path)
+            val bindings = lint_policy_rule_ids()
+            for name in bindings.keys():
+                val code = bindings[name]
+                if snapshot.has_rule(code):
+                    val resolved = resolve_policy_with_input(
+                        snapshot, code, input, DiagnosticRuleLevel.Warn)
+                    out[name] = lint_level_name_for_rule_level(resolved.level)
+            return out
+
+# Policy row wins; a lint with no row (or no snapshot) keeps the table level.
+# reason: lint level tables and policy mode names use canonical string keys at the configuration boundary
+@allow(primitive_api)
+pub fn policy_overlay_levels(levels: Dict<String, String>, policy: DiagnosticPolicySnapshot?, mode: text) -> Dict<String, String>:
+    policy_overlay_levels_with_context(
+        levels, policy, mode, diagnostic_policy_default_edition(), false, "", "")
+
+# reason: policy digest is a canonical sha256 string identifier
+@allow(primitive_api)
+pub fn lint_policy_digest_for_snapshot(policy: DiagnosticPolicySnapshot?) -> text:
+    match policy:
+        case Some(snapshot): snapshot.policy_digest()
+        case None: ""
+
+# reason: policy digest is a canonical sha256 string identifier
+@allow(primitive_api)
+pub fn lint_diagnostic_policy_digest() -> text:
+    lint_policy_digest_for_snapshot(lint_diagnostic_policy())
+
+# Loaded at most once per process; a missing or malformed file is remembered
+# too, so the profile table stays the fallback without re-reading the file.
+var _LINT_DIAGNOSTIC_POLICY_LOADED = false
+var _LINT_DIAGNOSTIC_POLICY: [DiagnosticPolicySnapshot] = []
+
+fn lint_diagnostic_policy() -> DiagnosticPolicySnapshot?:
+    if not _LINT_DIAGNOSTIC_POLICY_LOADED:
+        _LINT_DIAGNOSTIC_POLICY_LOADED = true
+        val path = diagnostic_policy_default_path()
+        if file_exists(path):
+            match load_diagnostic_policy_text(file_read(path)):
+                case Ok(snapshot): _LINT_DIAGNOSTIC_POLICY.push(snapshot)
+                case Err(e): info("lint", "diagnostic policy not applied: {e}")
+    if _LINT_DIAGNOSTIC_POLICY.len() == 0:
+        return None
+    Some(_LINT_DIAGNOSTIC_POLICY[0])
+
+pub fn profile_table_levels(profile: LintProfile) -> Dict<String, String>:
     val levels = build_default_levels()
     match profile:
         case Strict:
@@ -340,6 +583,8 @@ fn profile_default_levels(profile: LintProfile) -> Dict<String, String>:
 fn _strict_robust_levels(levels: Dict<String, String>) -> Dict<String, String>:
     var strict = levels
     strict["primitive_api"] = "deny"
+    strict["bare_bool"] = "deny"
+    strict["bare_text_domain"] = "deny"
     strict["unsafe_pattern"] = "deny"
     strict["raw_sffi_call"] = "deny"
     strict["memory_safety"] = "deny"
@@ -352,6 +597,8 @@ fn _strict_robust_levels(levels: Dict<String, String>) -> Dict<String, String>:
     strict["written_any_decl"] = "warn"
     strict["any_fallback_use"] = "warn"
     strict["any_receiver_use"] = "warn"
+    strict["robust_option_surface"] = "warn"
+    strict["nil_outside_unsafe"] = "warn"
     strict
 
 # Explicit family severities take priority; an environment level overrides
@@ -421,7 +668,7 @@ fn parse_lint_level(level_str: String) -> Option<LintLevel>:
         return Some(LintLevel.Warn)
     if lower == "deny":
         return Some(LintLevel.Deny)
-    nil
+    None
 
 # ---------------------------------------------------------------------------
 # WARNING PHASE — lint's projection of the one-level severity downgrade.
@@ -476,38 +723,131 @@ class LintCliPolicy:
     fix_dry_run: bool
     wm_lane: bool
     gpu_2d_perf: bool
+    fast: bool
     profile: Option<LintProfile>
     error: String
+    semantic_options: Dict<text, text>
+    perf_profile: Option<PerfLintProfile> = None
+    changed_only: bool = false
+    explain_code: String = ""
+    fix_safe: bool = false
+    output_format: String = ""
+    diagnostic: String = ""
 
 impl LintCliPolicy:
     static fn from_args(args: [text]) -> LintCliPolicy:
         var policy = LintCliPolicy(
             deny_all: false, warn_all: false, json_output: false,
             fix_mode: false, fix_all: false, fix_dry_run: false,
-            wm_lane: false, gpu_2d_perf: false, profile: nil, error: "")
+            wm_lane: false, gpu_2d_perf: false, fast: false, profile: None, error: "", semantic_options: {},
+            perf_profile: None, changed_only: false, explain_code: "", fix_safe: false, output_format: "", diagnostic: "")
         var expect_profile = false
+        var expect_format = false
+        var expect_diagnostic = false
+        var expect_explain = false
+        var semantic_key = ""
         for arg in args:
-            if expect_profile:
-                val parsed = parse_lint_profile(arg)
-                match parsed:
-                    case Some(profile): policy.profile = Some(profile)
-                    case nil: policy.error = "unknown profile: {arg}"
+            if semantic_key != "":
+                if arg == "" or arg.starts_with("-") or policy.semantic_options.contains_key(semantic_key):
+                    policy.error = "duplicate or missing semantic source authority: " + semantic_key
+                else:
+                    policy.semantic_options[semantic_key] = arg
+                semantic_key = ""
+            elif semantic_markdown_authority_option_v1(arg):
+                semantic_key = arg
+            elif expect_diagnostic:
+                val diag_arg = arg.lower()
+                if diag_arg == "medium" or diag_arg == "high":
+                    policy.diagnostic = diag_arg
+                else:
+                    policy.error = "unknown diagnostic tier: {diag_arg} (expected medium|high)"
+                expect_diagnostic = false
+            elif expect_format:
+                val fmt_lower = arg.lower()
+                if fmt_lower == "json":
+                    policy.json_output = true
+                    policy.output_format = "json"
+                elif fmt_lower == "text":
+                    policy.output_format = "text"
+                else:
+                    policy.error = "unknown format: {arg}"
+                expect_format = false
+            elif expect_explain:
+                if arg == "" or arg.starts_with("-"):
+                    policy.error = "--explain requires a rule code"
+                else:
+                    policy.explain_code = arg
+                expect_explain = false
+            elif expect_profile:
+                match parse_perf_lint_profile(arg):
+                    case Some(perf_p):
+                        policy.perf_profile = Some(perf_p)
+                    case None:
+                        val parsed = parse_lint_profile(arg)
+                        match parsed:
+                            case Some(profile): policy.profile = Some(profile)
+                            case None: policy.error = "unknown profile: {arg}"
                 expect_profile = false
             elif arg == "--deny-all": policy.deny_all = true
             elif arg == "--warn-all": policy.warn_all = true
-            elif arg == "--json": policy.json_output = true
+            elif arg == "--json":
+                policy.json_output = true
+                policy.output_format = "json"
             elif arg == "--fix": policy.fix_mode = true
             elif arg == "--fix-all": policy.fix_all = true
             elif arg == "--fix-dry-run": policy.fix_dry_run = true
+            elif arg == "--fix-safe": policy.fix_safe = true
+            elif arg == "--changed": policy.changed_only = true
             elif arg == "--wm-lane": policy.wm_lane = true
             elif arg == "--gpu-2d-perf": policy.gpu_2d_perf = true
+            elif arg == "--fast": policy.fast = true
+            elif arg == "--diagnostic": expect_diagnostic = true
+            elif arg.starts_with("--diagnostic="):
+                val diag_val = arg.slice(13, arg.byte_len()).lower()
+                if diag_val == "medium" or diag_val == "high":
+                    policy.diagnostic = diag_val
+                else:
+                    policy.error = "unknown diagnostic tier: {diag_val} (expected medium|high)"
+            elif arg == "--format": expect_format = true
+            elif arg.starts_with("--format="):
+                val fmt_val = arg.slice(9, arg.byte_len()).lower()
+                if fmt_val == "json":
+                    policy.json_output = true
+                    policy.output_format = "json"
+                elif fmt_val == "text":
+                    policy.output_format = "text"
+                else:
+                    policy.error = "unknown format: {fmt_val}"
+            elif arg == "--explain": expect_explain = true
+            elif arg.starts_with("--explain="):
+                val exp_val = arg.slice(10, arg.byte_len())
+                if exp_val == "":
+                    policy.error = "--explain requires a rule code"
+                else:
+                    policy.explain_code = exp_val
             elif arg == "--profile": expect_profile = true
             elif arg.starts_with("--profile="):
-                val profile_text = arg.slice(10, arg.len())
-                val parsed = parse_lint_profile(profile_text)
-                match parsed:
-                    case Some(profile): policy.profile = Some(profile)
-                    case nil: policy.error = "unknown profile: {profile_text}"
+                val profile_text = arg.slice(10, arg.byte_len())
+                match parse_perf_lint_profile(profile_text):
+                    case Some(perf_p):
+                        policy.perf_profile = Some(perf_p)
+                    case None:
+                        val parsed = parse_lint_profile(profile_text)
+                        match parsed:
+                            case Some(profile): policy.profile = Some(profile)
+                            case None: policy.error = "unknown profile: {profile_text}"
+        if semantic_key != "":
+            policy.error = "missing semantic source authority: " + semantic_key
+        if expect_format and policy.error == "":
+            policy.error = "--format requires 'json' or 'text'"
+        if expect_explain and policy.error == "":
+            policy.error = "--explain requires a rule code"
+        if expect_diagnostic and policy.error == "":
+            policy.error = "--diagnostic requires medium or high"
+        if policy.fast and policy.diagnostic != "" and policy.error == "":
+            policy.error = "--fast and --diagnostic cannot be combined (--fast already selects the Low tier)"
+        if (policy.profile.is_some() or policy.perf_profile.is_some()) and policy.diagnostic != "" and policy.error == "":
+            policy.error = "--profile and --diagnostic cannot be combined (--diagnostic selects the rule tier)"
         if expect_profile and policy.error == "":
             policy.error = "--profile requires a tier"
         policy
@@ -546,6 +886,10 @@ class LintConfig:
     mc_exceptions: [McException]
     suppression_issues: [LintSuppressionIssue] = []
     representation_project: RepresentationProjectContextV1 = representation_context_missing_v1()
+    language_edition: text = "2026.11"
+    target_triple: text = ""
+    tier_profile: LintTierProfile = LintTierProfile.DefaultLint
+    perf_profile: Option<PerfLintProfile> = None
 
     # Create a default config (all defaults, no overrides).
 impl LintConfig:
@@ -555,11 +899,24 @@ impl LintConfig:
         # SafetyPassSeverity, interpreter bool). The SDN `warning_phase:` key
         # and `LintConfig.set_warning_phase` both override it afterwards.
         # Unset/unrecognised => false => today's exact behaviour.
-        LintConfig(levels: {}, effective_defaults: build_default_levels(),
-                   source_path: "", profile: nil, error: "",
+        # Unprofiled lint IS the Strict table (profile_table_levels(Strict)
+        # returns build_default_levels() unchanged), so it reads the policy's
+        # `strict` column.
+        var cfg = LintConfig(levels: {}, effective_defaults: profile_default_levels(LintProfile.Strict),
+                   source_path: "", profile: None, error: "",
                    warning_phase: warning_phase_enabled_for_value(
                        rt_env_get(warning_phase_env_var_name()) ?? ""),
-                   mc_exceptions: [])
+                   mc_exceptions: [],
+                   language_edition: diagnostic_policy_default_edition(),
+                   target_triple: "",
+                   tier_profile: LintTierProfile.DefaultLint,
+                   perf_profile: None)
+        match active_cli_perf_profile_v1():
+            case Some(perf_p):
+                lint_apply_perf_profile(cfg, perf_p)
+            case None:
+                val _ = 0
+        cfg
 
     # Load config from an SDN file.  Parses the canonical `lints:` section.
     static fn from_sdn_file(path: String) -> LintConfig:
@@ -597,6 +954,7 @@ impl LintConfig:
     static fn from_sdn_string(content: String) -> LintConfig:
         var config = LintConfig.new()
         var in_lints_section = false
+        var in_project_section = false
 
         val lines = content.split("\n")
         for line in lines:
@@ -608,9 +966,20 @@ impl LintConfig:
 
             val indented = line.starts_with(" ") or line.starts_with("\t")
 
-            # `lints:` with no inline value opens the section.
+            # `lints:` or `project:` with no inline value opens its section.
             if not indented:
                 in_lints_section = trimmed == "lints:"
+                in_project_section = trimmed == "project:"
+                continue
+
+            if in_project_section and trimmed.contains(":"):
+                val psep = trimmed.index_of(":") ?? -1
+                if psep > 0:
+                    val pkey = trimmed.substring(0, psep).trim()
+                    var pval = trimmed.substring(psep + 1).trim()
+                    pval = pval.replace("\"", "").replace("'", "").trim()
+                    if pkey == "edition" and pval != "":
+                        config.set_language_edition(pval)
                 continue
 
             # Parse `name: level` entries nested under `lints:`
@@ -638,7 +1007,9 @@ impl LintConfig:
                         # rejects (a parse error there drops the whole manifest).
                         config.mc_exceptions = parse_mc_exceptions(level_str)
                     elif lint_name == "profile":
-                        if parse_lint_profile(level_str).?:
+                        if parse_perf_lint_profile(level_str).?:
+                            config.set_profile_from_string(level_str)
+                        elif parse_lint_profile(level_str).?:
                             config.set_profile_from_string(level_str)
                         else:
                             config.set_error_once("unknown profile: {level_str}")
@@ -647,7 +1018,7 @@ impl LintConfig:
                         match parse_lint_level(level_str):
                             case Some(level):
                                 config.set_level(lint_name, level)
-                            case nil:
+                            case None:
                                 config.set_error_once("invalid level for {lint_name}: {level_str}")
                     elif lint_name == "default_level":
                         # Section-wide default (formatting_lints.md:438). LintConfig
@@ -659,9 +1030,29 @@ impl LintConfig:
 
         config
 
+    fn _effective_warning_phase(lint_name: String) -> bool:
+        if not self.warning_phase:
+            return false
+        not _lint_name_is_security_policy(lint_name)
+
+    me _recompute_effective_defaults():
+        val effective_profile = match self.profile:
+            case Some(p): p
+            case None: LintProfile.Strict
+        self.effective_defaults = policy_overlay_levels_with_context(
+            profile_table_levels(effective_profile),
+            lint_diagnostic_policy(),
+            policy_mode_of_profile(effective_profile),
+            self.language_edition,
+            false,
+            self.target_triple,
+            self.source_path
+        )
+
     # Get the effective level for a lint name.
     # Checks overrides first, then falls back to built-in defaults.
     fn get_level(lint_name: String) -> LintLevel:
+        val apply_phase = self._effective_warning_phase(lint_name)
         var level_str = ""
         if self.levels.has(lint_name):
             level_str = self.levels[lint_name]
@@ -669,19 +1060,37 @@ impl LintConfig:
             if self.effective_defaults.has(lint_name):
                 level_str = self.effective_defaults[lint_name]
             else:
-                return phased_lint_level(LintLevel.Warn, self.warning_phase)  # Unknown lint defaults to Warn
+                return phased_lint_level(LintLevel.Warn, apply_phase)  # Unknown lint defaults to Warn
 
         val parsed = parse_lint_level(level_str)
         match parsed:
             case Some(level):
-                return phased_lint_level(level, self.warning_phase)
-            case nil:
-                return phased_lint_level(LintLevel.Warn, self.warning_phase)
+                return phased_lint_level(level, apply_phase)
+            case None:
+                return phased_lint_level(LintLevel.Warn, apply_phase)
 
     # Select the strictness tier directly.
     me set_profile(profile: LintProfile):
         self.profile = Some(profile)
-        self.effective_defaults = profile_default_levels(profile)
+        self._recompute_effective_defaults()
+
+    # reason: language edition is an explicit string identifier from simple.sdn or CLI
+    # @allow(primitive_api)
+    pub me set_language_edition(edition: text):
+        if edition != "":
+            self.language_edition = edition
+            self._recompute_effective_defaults()
+
+    # reason: target triple is an explicit toolchain identifier string
+    # @allow(primitive_api)
+    pub me set_target_triple(triple: text):
+        self.target_triple = triple
+        self._recompute_effective_defaults()
+
+    # reason: policy digest is a canonical sha256 string identifier
+    # @allow(primitive_api)
+    pub fn policy_digest() -> text:
+        lint_diagnostic_policy_digest()
 
     # Enable/disable the one-level severity downgrade (assurance warning phase).
     me set_warning_phase(on: bool):
@@ -703,12 +1112,21 @@ impl LintConfig:
 
     # Select the strictness tier from a string; unknown strings are ignored.
     me set_profile_from_string(profile_str: String):
+        match parse_perf_lint_profile(profile_str):
+            case Some(perf_p):
+                self.set_perf_profile(perf_p)
+                return
+            case None:
+                val _ = 0
         val parsed = parse_lint_profile(profile_str)
         match parsed:
             case Some(p):
                 self.set_profile(p)
-            case nil:
+            case None:
                 val _ = 0
+
+    pub me set_perf_profile(perf_p: PerfLintProfile):
+        lint_apply_perf_profile(self, perf_p)
 
     # Set the level for a specific lint name.
     me set_level(lint_name: String, level: LintLevel):
@@ -773,7 +1191,7 @@ impl LintConfig:
                 continue
 
             # Parse @allow(...), @warn(...), @deny(...)
-            var level_opt: Option<LintLevel> = nil
+            var level_opt: Option<LintLevel> = None
             var inner_start = 0
 
             if attr_line.starts_with("@allow("):
@@ -787,7 +1205,7 @@ impl LintConfig:
                 inner_start = 6
 
             match level_opt:
-                case nil:
+                case None:
                     continue
                 case Some(level):
                     # Extract the content between parens
@@ -836,7 +1254,11 @@ impl LintConfig:
                    profile: self.profile, error: self.error,
                    warning_phase: self.warning_phase,
                    mc_exceptions: self.mc_exceptions,
-                   representation_project: self.representation_project)
+                   representation_project: self.representation_project,
+                   language_edition: self.language_edition,
+                   target_triple: self.target_triple,
+                   tier_profile: self.tier_profile,
+                   perf_profile: self.perf_profile)
 
 fn resolve_lint_config(base: LintConfig, path: String, content: String) -> LintConfig:
     resolve_lint_config_with_lines(base, path, content.split("\n"))
@@ -877,11 +1299,15 @@ fn lint_suppression_issue_level(config: LintConfig) -> LintLevel:
 
 # Check if a lint result should be suppressed based on config.
 # Returns true if the result should be kept (not suppressed).
-fn should_keep_lint_result(config: LintConfig, lint_code: String) -> Bool:
+fn should_keep_lint_result(config: LintConfig, lint_code: String) -> bool:
+    if not lint_tier_admits(config.tier_profile, lint_rule_cost_tier(lint_code)):
+        return false
     # Map internal lint codes to config lint names where possible
     val config_name = map_lint_code_to_config_name(lint_code)
     if config_name == "":
         return true  # Unknown lint code — keep it
+    if not lint_tier_admits(config.tier_profile, lint_rule_cost_tier(config_name)):
+        return false
     val level = config.get_level(config_name)
     match level:
         case Allow:
@@ -910,22 +1336,14 @@ fn apply_config_level(config: LintConfig, lint_code: String, original_level: Lin
 # Map internal lint code (e.g. "T001") to config name (e.g. "todo_format").
 # Returns "" for codes with no direct mapping.
 fn map_lint_code_to_config_name(code: String) -> String:
+    if lint_name_is_known(code):
+        return code
     if code.starts_with("COLL"):
         return "collection_performance"
     match code:
-        case "primitive_api" | "bare_bool" | "simple_script_required" |
-             "print_in_test_spec" | "spipe_no_print_based_tests" |
-             "spipe_missing_docstrings" | "spipe_minimal_docstrings" |
-             "spipe_manual_assertions" | "unnamed_duplicate_typed_args" |
-             "resource_leak" | "non_exhaustive_match" |
-             "export_outside_init" | "init_boundary_violation" |
-             "bypass_with_code_files" | "unknown_annotation" | "unknown_decorator" |
-             "unknown_attribute" | "stub_impl": return code
-        case "parser_contextual_keyword" | "deprecated_if_let" |
-             "struct_construction_parens" | "raw_unit_postfix" |
-             "simd_opportunity": return code
         case "short_grammar_method_ref" | "short_grammar_function_ref" |
-             "short_grammar_placeholder" | "short_grammar_ignored_param":
+             "short_grammar_placeholder" | "short_grammar_ignored_param" |
+             "short_grammar" | "short_grammar_field_access":
             return "short_grammar_refactor"
         case _: pass
     if code == "T001" or code == "T002" or code == "T003" or code == "T004":
@@ -934,8 +1352,16 @@ fn map_lint_code_to_config_name(code: String) -> String:
         return "too_many_arguments"
     if code == "WML001" or code == "WML002":
         return "wm_lane_boundary"
+    if code == "OPT-CATCHALL-001":
+        return "option_catchall"
     if code == "NIL-UNSAFE-001":
         return "nil_outside_unsafe"
+    if code == "ROB-OPT-001" or code == "ROB-OPT-002" or code == "ROB-OPT-003":
+        return "robust_option_surface"
+    if code == "NIL-RET-001":
+        return "nil_return_non_optional"
+    if code == "PANIC-W-INDEX" or code == "PANIC-W-UNWRAP" or code == "PANIC-W-DIV":
+        return "panic_free"
     if code == "G2DP001" or code == "G2DP002" or code == "G2DP003":
         return "gpu_2d_perf"
     if code == "ACC001":
@@ -999,14 +1425,23 @@ fn map_lint_code_to_config_name(code: String) -> String:
     if code == "SAFE001" or code == "SAFE003":
         return "memory_safety"  # safety
     if (code == "W0401" or code == "W0402" or code == "W0403" or
-        code == "W0404" or code == "W0406"):
+        code == "W0404" or code == "W0406" or code == "W0407" or
+        code == "star_import" or code == "wide_public"):
         return "visibility_boundary"  # visibility
+    if code == "PTAG001" or code == "PTAG002":
+        return "unnamed_duplicate_typed_args"
+    if code == "DEPR005":
+        return "hash_bracket_attribute"
+    if code == "OPTME001":
+        return "option_me_call"
     if code == "UI001":
         return "ui_no_raw_widget_kind"
     if code == "UI002":
         return "ui_no_raw_variant"
     if code == "UI003":
         return "ui_no_raw_theme_name"
+    if code == "W-DOC-AST-001":
+        return "semantic_markdown_links"
     if code == "DIAG001":
         return "stale_md_diagrams"
     if code == "LLVM001":
@@ -1037,6 +1472,52 @@ fn map_lint_code_to_config_name(code: String) -> String:
         return "representation_boundary"
     if code == "W-MC-RES-001":
         return "unwrapped_foreign_resource"
+    if code == "SPL-TYPE-001":
+        return "primitive_api"
+    if code == "SPL-UNIT-001":
+        return "newunit_deprecation"
+    if code == "SPL-UNIT-002":
+        return "illegal_unit_arithmetic"
+    if code == "SPL-UNIT-003":
+        return "numeric_newtype_deprecation"
+    if code == "SPL-UNIT-004":
+        return "undeclared_derived_unit"
+    if code == "SPL-BOUND-001":
+        return "bound_raw_escape"
+    if code == "SPL-BOUND-002":
+        return "bound_late_cast"
+    if code == "SPL-BOUND-003":
+        return "bound_unit_reassert"
+    if code == "SPL-BUILD-SRC-001":
+        return "source_inventory_drift"
+    if code == "SPL-BUILD-ROLE-001":
+        return "boundary_role_grant"
+    if code == "SPL-PROVIDER-ABI-001":
+        return "provider_abi_mismatch"
+    if code == "SPL-SFFI-ABI-001":
+        return "sffi_abi_mismatch"
+    if code == "SPL-SFFI-RANGE-001":
+        return "sffi_constrained_return"
+    if code == "SPL-PAT-001":
+        return "non_option_pattern_match"
+    if code == "PERF-STYLE-001":
+        return "perf_loop_idiom_style"
+    if code == "PERF-COST-001":
+        return "perf_repeated_scan_cost"
+    if code == "PERF-COST-002":
+        return "perf_complexity_bound_increase"
+    if code == "PERF-ALLOC-001":
+        return "perf_avoidable_materialization"
+    if code == "PERF-ALG-001":
+        return "perf_algorithm_redesign"
+    if code == "PERF-CONTRACT-001":
+        return "perf_resource_contract_refuted"
+    if code == "PERF-CONTRACT-002":
+        return "perf_resource_contract_unproved"
+    if code == "PERF-ANALYSIS-001":
+        return "perf_analysis_coverage_note"
+    if code == "PERF-FIX-001":
+        return "perf_fix_blocked_precondition"
     if code == "SFFI009" or code == "SFFI010":
         return "raw_sffi_call"
     if code == "W-MC-DEF-001" or code == "W-MC-DEF-002" or code == "W-MC-DEF-003":
@@ -1094,16 +1575,17 @@ class LintDiag:
     evidence_tier: LintEvidenceTier
 
 impl LintDiag:
-    fn new(code: String, level: LintLevel, category: LintCategory, message: String) -> LintDiag:
+    # WA-MIR-UNRESOLVED-new: explicit static; see doc/08_tracking/bug/mir_unresolved_method_nonstatic_new_and_array_call_elem_2026-10-25.md
+    static fn new(code: String, level: LintLevel, category: LintCategory, message: String) -> LintDiag:
         LintDiag(
             code: code,
             level: level,
             category: category,
             message: message,
-            fix_hint: nil,
-            easy_fix: nil,
+            fix_hint: None,
+            easy_fix: None,
             evidence: [],
-            uncertainty: nil,
+            uncertainty: None,
             evidence_tier: LintEvidenceTier.LegacyCompatible
         )
 
@@ -1158,6 +1640,14 @@ impl LintDiag:
             uncertainty: self.uncertainty, evidence_tier: tier
         )
 
+    fn without_easy_fix() -> LintDiag:
+        LintDiag(
+            code: self.code, level: self.level, category: self.category,
+            message: self.message, fix_hint: self.fix_hint,
+            easy_fix: None, evidence: self.evidence,
+            uncertainty: self.uncertainty, evidence_tier: self.evidence_tier
+        )
+
     fn with_level(level: LintLevel) -> LintDiag:
         LintDiag(
             code: self.code, level: level, category: self.category,
@@ -1171,7 +1661,8 @@ fn lint_code_is_performance(code: text) -> bool:
     code.starts_with("MEM") or code.starts_with("COPY") or
     code.starts_with("LAYOUT") or code.starts_with("ALLOC") or
     code.starts_with("ESCAPE") or code.starts_with("RETENTION") or
-    code.starts_with("CACHE") or code.starts_with("STACK")
+    code.starts_with("CACHE") or code.starts_with("STACK") or
+    (code.starts_with("PERF-") and not code.starts_with("PERF-CONTRACT-"))
 
 fn lint_evidence_tier_is_unproven(tier: LintEvidenceTier) -> bool:
     match tier:
@@ -1201,9 +1692,13 @@ fn lint_policy_decision(
     evidence_tier: LintEvidenceTier
 ) -> LintPolicyDecision:
     """Resolve suppression and severity with one code map and level lookup."""
+    if not lint_tier_admits(config.tier_profile, lint_rule_cost_tier(code)):
+        return LintPolicyDecision(false, default_level)
     val config_name = map_lint_code_to_config_name(code)
     if config_name == "":
         return LintPolicyDecision(true, default_level)
+    if not lint_tier_admits(config.tier_profile, lint_rule_cost_tier(config_name)):
+        return LintPolicyDecision(false, default_level)
     val configured = config.get_level(config_name)
     match configured:
         case Allow:
@@ -1231,12 +1726,13 @@ fn lint_diag_effective_level(lint: LintDiag, deny_all: bool) -> LintLevel:
 
 class LintRunResult:
     file_path: String
-    line: Int
-    column: Int
+    line: i64
+    column: i64
     lint: LintDiag
 
 impl LintRunResult:
-    fn new(file_path: String, line: Int, column: Int, lint: LintDiag) -> LintRunResult:
+    # WA-MIR-UNRESOLVED-new: explicit static; see doc/08_tracking/bug/mir_unresolved_method_nonstatic_new_and_array_call_elem_2026-10-25.md
+    static fn new(file_path: String, line: i64, column: i64, lint: LintDiag) -> LintRunResult:
         LintRunResult(
             file_path: file_path,
             line: line,
@@ -1259,17 +1755,22 @@ impl LintRunResult:
             self.column.to_string() + ": " + level_str + "[" +
             self.lint.code + "]: " + self.lint.message
         ]
+        # RB-DIAG-01: the policy rule ID (config/policy/diagnostic_policy.sdn) is
+        # printed by the surface itself so CLI, LSP, and interpreter agree on it.
+        val policy_id = lint_policy_code_for_rule(self.lint.code)
+        if policy_id != "" and policy_id != self.lint.code:
+            lines.push("  policy: " + policy_id)
 
         match self.lint.fix_hint:
             case Some(hint):
                 lines.push("  hint: " + hint)
-            case nil:
+            case None:
                 val _ = 0
 
         match self.lint.easy_fix:
             case Some(fix):
                 lines.push("  fix: available [{fix.id}] ({fix.confidence_str()})")
-            case nil:
+            case None:
                 val rule_name = map_lint_code_to_config_name(self.lint.code)
                 if rule_name != "" and self.lint.level != LintLevel.Allow:
                     lines.push("  fix: no machine-applicable rewrite; prefer a safe idiom. If intentional, scope @allow({rule_name}) with # reason: <description>. Mark an operation unsafe only when its contract actually requires it.")
@@ -1283,13 +1784,15 @@ impl LintRunResult:
         match self.lint.uncertainty:
             case Some(reason):
                 lines.push("  uncertainty: " + reason)
-            case nil:
+            case None:
                 val _ = 0
 
         lines.join("\n")
 
-    fn has_easy_fix() -> Bool:
-        self.lint.easy_fix.? == true
+    fn has_easy_fix() -> bool:
+        match self.lint.easy_fix:
+            case Some(_): true
+            case None: false
 
 fn lint_run_result_apply_cli_policy(result: LintRunResult, deny_all: bool) -> LintRunResult:
     val effective_level = lint_diag_effective_level(result.lint, deny_all)
@@ -1299,17 +1802,24 @@ fn lint_run_result_apply_cli_policy(result: LintRunResult, deny_all: bool) -> Li
         result.file_path, result.line, result.column,
         result.lint.with_level(effective_level))
 
+# Drops the "fix available" claim when the attached fix changes nothing in the
+# analysed source; the diagnostic itself is kept.
+fn lint_run_result_drop_noop_fix(result: LintRunResult, source: text) -> LintRunResult:
+    match result.lint.easy_fix:
+        case Some(fix):
+            var sources: Dict<text, text> = {}
+            sources[result.file_path] = source
+            if easyfix_is_effective(fix, sources):
+                return result
+            LintRunResult.new(
+                result.file_path, result.line, result.column,
+                result.lint.without_easy_fix())
+        case None:
+            result
+
 enum LintFileResult:
     LintFileOk([LintRunResult])
     LintFileErr(String)
-
-# Valid TODO areas and priorities
-fn _todo_areas() -> [text]:
-    ["runtime", "codegen", "compiler", "parser", "type",
-     "stdlib", "gpu", "ui", "test", "driver", "loader", "pkg", "sdn"]
-
-fn _todo_priorities() -> [text]:
-    ["P0", "P1", "P2", "P3", "critical", "high", "medium", "low"]
 
 class Linter:
     lints: [LintDiag]
@@ -1340,6 +1850,7 @@ class Linter:
     last_error_count: i64
     last_warning_count: i64
     last_not_analyzed: bool
+    semantic_markdown_sources: [SemanticMarkdownSourceV1]
 
 fn linter_find_project_sdn(linter: Linter, file_path: String) -> String:
     """Resolve one source's project manifest with a bounded command cache."""

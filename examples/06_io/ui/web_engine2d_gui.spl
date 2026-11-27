@@ -1,30 +1,41 @@
-# web_engine2d_gui.spl — GUI app: Simple Web Renderer + Engine2D CPU SIMD backend
+# web_engine2d_gui.spl — GUI app: Simple Web Renderer + Engine2D backend
 #
-# Renders HTML through SimpleWebRenderer with the explicit Engine2D backend
-# requested below, then presents the resulting [u32] pixel buffer to a host
-# winit window via winit_present_rgba (std.io.window_winit) when SIMPLE_GUI=1.
+# Renders HTML through Simple Web layout + Engine2D readback with the backend
+# selected via SIMPLE_2D_BACKEND (default: vulkan), then presents the resulting
+# [u32] pixel buffer to a host winit window via winit_present_rgba
+# (std.io.window_winit) when SIMPLE_GUI=1.
 #
-# The renderer is corpus-driven, not a full layout engine: it maps recognized
-# HTML markers to colored rects (background color + wm-app-titlebar header +
-# wm-app-content panel + a "Simple Web" title block). This entry uses markers
-# that produce three visually distinct regions.
-#
-# Run (window):   SIMPLE_GUI=1 SIMPLE_EXECUTION_MODE=interpret bin/simple examples/ui/web_engine2d_gui.spl
-# Run (headless):                SIMPLE_EXECUTION_MODE=interpret bin/simple examples/ui/web_engine2d_gui.spl
-#
-# NOTE: must run under SIMPLE_EXECUTION_MODE=interpret — the renderer uses the
-# array-repeat form [bg; w*h] (rt_array_repeat) which the JIT cannot resolve.
+# Run (window):   SIMPLE_GUI=1 SIMPLE_EXECUTION_MODE=interpret bin/simple examples/06_io/ui/web_engine2d_gui.spl
+# Run (headless):                SIMPLE_EXECUTION_MODE=interpret bin/simple examples/06_io/ui/web_engine2d_gui.spl
 
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    simple_web_layout_render_html_readback}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
-    SimpleWebRenderer,
     simple_web_resolved_engine2d_backend_name_with_reason}
 
 use std.io.window_winit.{WinitLoop, WinitWindow, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_close_requested}
 
 use std.io_runtime.{env_get}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
-val SCREEN_W: i32 = 32
-val SCREEN_H: i32 = 24
+fn _gui_screen_dim(env_name: text, fallback: i32) -> i32:
+    val raw = env_get(env_name).trim()
+    val n = raw.len() as i32
+    if n == 0:
+        return fallback
+    var i = 0
+    var acc = 0
+    while i < n:
+        val c = raw.char_code_at(i)
+        if c < 48 or c > 57:
+            return fallback
+        acc = acc * 10 + (c - 48)
+        if acc > 8192:
+            return fallback
+        i = i + 1
+    if acc > 0: acc else: fallback
+
+val SCREEN_W: i32 = _gui_screen_dim("SIMPLE_WEB_GUI_WIDTH", 640)
+val SCREEN_H: i32 = _gui_screen_dim("SIMPLE_WEB_GUI_HEIGHT", 480)
 val WINDOW_W: i32 = 640
 val WINDOW_H: i32 = 480
 
@@ -49,13 +60,14 @@ fn pack_pixels(src: [u32]) -> [i64]:
 
 fn requested_backend() -> text:
     val v = env_get("SIMPLE_2D_BACKEND") ?? ""
-    if v == "": "cpu_simd" else: v
+    if v == "": "vulkan" else: v
 
 fn render_backend(backend: text) -> [u32]:
     val (resolved, reason) = simple_web_resolved_engine2d_backend_name_with_reason(SCREEN_W, SCREEN_H, backend)
-    val renderer = SimpleWebRenderer.create_with_backend(SCREEN_W, SCREEN_H, backend)
-    val pixels = renderer.render_html_to_pixels(demo_html())
-    print "Rendered {pixels.len()} px via requested backend '{renderer.backend_name}' resolved='{resolved}' backend_fallback_reason='{reason}' sample={pixels[0]}/{pixels[6 + 6 * SCREEN_W]}/{pixels[pixels.len() - 1]}"
+    val readback = simple_web_layout_render_html_readback(demo_html(), SCREEN_W, SCREEN_H, backend)
+    val pixels = readback.pixels
+    val gpu_backend_used = readback.source == "device_readback" and readback.backend_handle > 0 and readback.device_identity > 0
+    print "Rendered {pixels.len()} px via requested backend '{backend}' resolved='{resolved}' readback_source='{readback.source}' gpu_backend_used={gpu_backend_used} backend_handle={readback.backend_handle} device_identity={readback.device_identity} backend_fallback_reason='{reason}' sample={pixels[0]}/{pixels[6 + 6 * SCREEN_W]}/{pixels[pixels.len() - 1]}"
     pixels
 
 fn main() -> i64:
@@ -65,7 +77,7 @@ fn main() -> i64:
     if requested != "cpu" and requested != "software" and requested != "cpu_simd" and pre_resolved == "software" and (env_get("SIMPLE_2D_BACKEND_STRICT") ?? "") == "1":
         print "error: requested backend '{requested}' unavailable (strict mode): {pre_reason}"
         return 1
-    val cpu_simd_pixels = render_backend(requested)
+    val rendered_pixels = render_backend(requested)
 
     if env_get("SIMPLE_GUI") != "1":
         print "No GUI requested (set SIMPLE_GUI=1 to open a window); headless render only."
@@ -75,12 +87,12 @@ fn main() -> i64:
     if not lp.is_valid:
         print "No GUI runtime (set SIMPLE_GUI=1 to open a window); headless render only."
         return 0
-    val win = winit_window_new(lp, WINDOW_W.to_i64(), WINDOW_H.to_i64(), "Simple Web + Engine2D CPU SIMD")
+    val win = winit_window_new(lp, WINDOW_W.to_i64(), WINDOW_H.to_i64(), "Simple Web + Engine2D")
     if not win.is_valid:
         print "Window creation failed."
         winit_loop_free(lp)
         return 0
-    val packed = pack_pixels(cpu_simd_pixels)
+    val packed = pack_pixels(rendered_pixels)
     winit_present_rgba(win, SCREEN_W.to_i64(), SCREEN_H.to_i64(), packed)
     # macOS: winit_poll_close_requested pumps the native event loop, and the
     # interpreter owns the main thread — so poll CONTINUOUSLY (never rt_thread_sleep)

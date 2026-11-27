@@ -1,0 +1,119 @@
+# Shared request-binding diagnostic fixtures. Builtin assertions fail closed;
+# no std.spec runner, alternate provider, shell executor, or runtime qualification.
+use std.common.contracts.container.runtime_v1.*
+use std.common.contracts.container.bound_intent_v2.*
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use std.nogc_async_mut.container.providers.linux.request_v1.*
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.io_runtime.dir_remove_all
+
+pub fn oci_binding_request_v1() -> LinuxOciRequestV1:
+    LinuxOciRequestV1(pod_uid: "bound-1", attempt: 1, operation_id: "create-bound",
+        image: "example/compiler@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        bundle_path: "", command: ["/agent", "literal ; $(task)"], args: ["a b"],
+        timeout_ms: 5000, cpu_limit_millis: 1000, memory_limit_bytes: 268435456,
+        pid_limit: 64, network_policy: "none", filesystem_policy: "read-only")
+
+pub fn oci_binding_intent_v1(native: text = "", phase: text = RUNTIME_PHASE_PREPARED) -> RuntimeIntentV1:
+    RuntimeIntentV1(pod_uid: "bound-1", attempt: 1, provider_generation: 7,
+        operation_id: "create-bound", engine: OCI_ENGINE_PODMAN, native_id: native,
+        node_boot_id: "boot-1", phase: phase)
+
+pub fn oci_binding_bound_v1(row: RuntimeIntentV1) -> RuntimeBoundIntentV2:
+    val digest = match linux_oci_request_digest_v1(oci_binding_request_v1()):
+        case Ok(value): value
+        case Err(reason):
+            assert(false, reason)
+            ""
+    RuntimeBoundIntentV2(identity: row, request_digest: digest)
+
+pub fn oci_binding_bytes_v1(row: RuntimeIntentV1) -> text:
+    match runtime_bound_intent_encode_v2(oci_binding_bound_v1(row)):
+        case Ok(value): value
+        case Err(reason):
+            assert(false, reason)
+            ""
+
+pub fn oci_binding_result_v1(command: RuntimeCommandV1, output: text) -> ScriptedCommandResultV1:
+    ScriptedCommandResultV1(operation: command.operation, program: command.program,
+        args: command.args, stdout: output, stderr: "", exit_code: 0)
+
+pub fn oci_binding_dir_v1() -> text:
+    match secure_temp_dir("/tmp", "oci-binding-spec-"):
+        case Ok(path): path
+        case Err(_):
+            assert(false, "secure test directory unavailable")
+            ""
+
+pub fn oci_binding_read_v1(path: text) -> text:
+    match file_read_regular_no_follow_bounded(path, 8192):
+        case Ok(value): value
+        case Err(_):
+            assert(false, "expected retained journal")
+            ""
+
+pub fn oci_binding_check_changed_payload_v1() -> i64:
+    val original = oci_binding_request_v1()
+    val command = build_create_command(OCI_ENGINE_PODMAN, "/unused/binding",
+        original, original.operation_id, 7, "boot-1").1
+    val provider = LinuxOciRuntimeProviderV1.scripted("linux", OCI_ENGINE_PODMAN,
+        "/unused/binding", "boot-1", 7, [oci_binding_result_v1(command, "native-bound")])
+    assert(provider.prepare_pod(original).status == RUNTIME_STATUS_OK)
+    var changed = original
+    changed.command = ["/different"]
+    assert(provider.prepare_pod(changed).reason == "intent-request-mismatch")
+    assert(provider.create(changed).reason == "intent-request-mismatch")
+    assert(provider.scripted_cursor == 0)
+    assert(provider.executor_call_count() == 0)
+    assert(provider.create(original).status == RUNTIME_STATUS_OK)
+    assert(provider.create(changed).reason == "intent-request-mismatch")
+    changed = original
+    changed.args = ["different"]
+    assert(provider.create(changed).reason == "intent-request-mismatch")
+    changed = original
+    changed.image = "example/other@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    assert(provider.create(changed).reason == "intent-request-mismatch")
+    changed = original
+    changed.memory_limit_bytes = 536870912
+    assert(provider.create(changed).reason == "intent-request-mismatch")
+    changed = original
+    changed.operation_id = "other-operation"
+    assert(provider.create(changed).reason == "intent-operation-id-mismatch")
+    changed = original
+    changed.replace_entrypoint = true
+    assert(provider.create(changed).reason == "intent-request-mismatch")
+    assert(provider.scripted_cursor == 1)
+    assert(provider.executor_call_count() == 1)
+    provider.executor_call_count()
+
+pub fn oci_binding_check_legacy_cleanup_v1() -> i64:
+    val directory = oci_binding_dir_v1()
+    val path = directory + "/runtime-intent-bound-1-1-7"
+    val native = "c".repeat(64)
+    val legacy = "runtime-intent-v1|bound-1|1|7|create-bound|podman|" + native + "|boot-1|running"
+    assert(file_atomic_write_mode(path, legacy, 0o600) == true)
+    val inspect = build_inspect_command(OCI_ENGINE_PODMAN, directory, native).1
+    val stop = build_stop_command(OCI_ENGINE_PODMAN, directory, native, OCI_DEFAULT_STOP_TIMEOUT_SECONDS).1
+    val destroy = build_destroy_command(OCI_ENGINE_PODMAN, directory, native, true).1
+    val provider = LinuxOciRuntimeProviderV1.scripted("linux", OCI_ENGINE_PODMAN,
+        directory, "boot-1", 7, [oci_binding_result_v1(inspect,
+            "bound-1|1|boot-1|7|create-bound|" + native + "|running"),
+            oci_binding_result_v1(inspect, "bound-1|1|boot-1|7|create-bound|" + native + "|running"),
+            oci_binding_result_v1(stop, ""), oci_binding_result_v1(destroy, "")],
+        persist_scripted_journal: true)
+    assert(provider.create(oci_binding_request_v1()).reason == "intent-legacy-unbound")
+    assert(provider.start(oci_binding_request_v1()).reason == "intent-legacy-unbound")
+    assert(provider.recover(oci_binding_request_v1()).status == RUNTIME_STATUS_OK)
+    assert(provider.inspect(oci_binding_request_v1()).status == RUNTIME_STATUS_OK)
+    assert(provider.stop(oci_binding_request_v1()).status == RUNTIME_STATUS_OK)
+    assert(oci_binding_read_v1(path) == legacy.replace("|running", "|stopped"))
+    assert(provider.destroy(oci_binding_request_v1(), true).status == RUNTIME_STATUS_OK)
+    assert(provider.request_bindings.len() == 0)
+    assert(oci_binding_read_v1(path) == legacy.replace("|running", "|destroyed"))
+    assert(provider.intent_for(oci_binding_request_v1()).phase == "destroyed")
+    assert(provider.stop(oci_binding_request_v1()).status == RUNTIME_STATUS_REJECTED)
+    assert(provider.persist_intent(oci_binding_request_v1(), "create-bound") == false)
+    assert(provider.scripted_cursor == 4)
+    assert(dir_remove_all(directory) == true)
+    provider.executor_call_count()

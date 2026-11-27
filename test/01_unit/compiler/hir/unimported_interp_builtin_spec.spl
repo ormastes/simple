@@ -1,0 +1,70 @@
+"""
+Purpose: Pin that a compiled (non-interpreter) HIR lowering rejects a bare,
+unimported call to an interpreter-only builtin that has no native lowering
+(`env_get` and friends), naming it at name-resolution time. Before this, HIR's
+unresolved-name fallback (`lower_unresolved_ident` -> `is_interp_builtin_fn`)
+silently synthesized a module-less symbol and the defect surfaced only as a
+`MirCallOrigin.Unknown` backend SIGABRT (run-21 Phase 3,
+compiler.driver.driver_pipeline_lowering). The interpreter lane keeps the
+fallback.
+Audience: compiler engineers maintaining HIR name resolution.
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
+fn hir_errors(src: text, compiled: bool) -> text:
+    val filename = "unimported_interp_builtin.spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var lowering = HirLowering.with_filename(filename)
+    lowering.forbid_interp_builtin_fallback = compiled
+    val _hir = lowering.lower_module(module)
+    var result = ""
+    for error in lowering.errors:
+        result = result + "HIR_ERROR:" + error.message + "\n"
+    result
+
+val BARE_ENV_GET_SRC = """
+fn read_home() -> text:
+    env_get("HOME") ?? ""
+"""
+
+val BARE_FILE_EXISTS_SRC = """
+fn probe() -> bool:
+    file_exists("/tmp")
+"""
+
+val DEFINED_ENV_GET_SRC = """
+fn env_get(key: text) -> text:
+    key
+
+fn read_home() -> text:
+    env_get("HOME")
+"""
+
+val BARE_PRINT_SRC = """
+fn hello():
+    print "hi"
+    println("there")
+"""
+
+describe "unimported interpreter-only builtin in a compiled lowering":
+    it "names a bare env_get at HIR time":
+        val errors = hir_errors(BARE_ENV_GET_SRC, true)
+        expect(errors).to_contain("[E-HIR-BUILTIN-IMPORT-001] `env_get` is not imported here")
+
+    it "names a bare file_exists at HIR time":
+        val errors = hir_errors(BARE_FILE_EXISTS_SRC, true)
+        expect(errors).to_contain("[E-HIR-BUILTIN-IMPORT-001] `file_exists` is not imported here")
+
+    it "accepts a module-defined env_get":
+        expect(hir_errors(DEFINED_ENV_GET_SRC, true)).to_equal("")
+
+    it "keeps natively lowered builtins (print, println) accepted":
+        expect(hir_errors(BARE_PRINT_SRC, true)).to_equal("")
+
+    it "keeps the interpreter-lane fallback for a bare env_get":
+        expect(hir_errors(BARE_ENV_GET_SRC, false)).to_equal("")

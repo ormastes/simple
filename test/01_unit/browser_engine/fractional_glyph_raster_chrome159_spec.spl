@@ -1,0 +1,104 @@
+"""
+## Purpose and audience
+Purpose: Pin the GLYPH RASTER of a fractional computed font-size against
+Chrome 159. Since the fractional font-size change, layout uses the float size
+(run width, line height, strut), but the glyphs were still drawn at the
+rounded whole size (18.72 px drawn as 19 px) on the whole-pixel pens of the
+run. Chrome/Skia rasterises at the float size, with each glyph at the quarter
+phase of its exact float pen. Measured split on these pages (mismatched px
+> 8 / summed |delta|, 320x40):
+
+| page         | base         | pens only    | x scale only | both        |
+|--------------|--------------|--------------|--------------|-------------|
+| sans 18.72   | 1264 / 158k  | 1066 / 99k   | 933 / 130k   | 725 / 70k   |
+| sans 13.28   | 666 / 74k    | 535 / 33k    | 532 / 71k    | 309 / 28k   |
+
+Vertical hinting is NOT part of it: Chrome's 18.72 px rows equal its 19 px
+rows and its 13.28 px rows equal its 13 px rows (FreeType's light autohinter
+fits the y scale to the whole-pixel x-height), so only x takes the float size.
+Audience: web renderer text / Engine2D font maintainers.
+
+Chrome oracle (Chrome for Testing 159.0.8154.6, `--headless=new --disable-gpu
+--hide-scrollbars --force-device-scale-factor=1 --window-size=320,40
+--screenshot`), Liberation Sans, `color:#000` on white,
+`<p style="margin:0;position:absolute;left:0;top:2px;font-family:sans-serif;font-size:S">Hamburgefonstiv lxHo</p>`.
+
+| size  | row | x       | Chrome                                      |
+|-------|-----|---------|---------------------------------------------|
+| 18.72 | 12  | 36..41  | `e7af57 17000f 4fa7df ffffff efbf67 1f0000` |
+| 18.72 | 11  | 62..67  | `000000 1757a7 e7ffff ffffff fffff7 d79747` |
+| 13.28 | 9   | 39..44  | `ffffff efbf6f 2f2757 afe7ff dfa74f 1f2767` |
+| 13.28 | 10  | 48..53  | `371f47 9fdff7 ffffff fffff7 cf8f3f 1f4797` |
+
+Base (glyphs at 19 / 13 px, whole pens) at the same spots:
+`ffd797 3f0f00 1f67bf efffff ffffdf 9f3f0f`, `00000f 3f97d7 ffffff ffffff
+ffffff ffefbf`, `fff7cf 872f1f 4fafe7 ffffff ffd78f 371737`, `1f3f97 dfffff
+ffffff fff7cf 87371f 47a7e7`.
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-LCD-002 — a fractional computed font-size rasterises its glyphs at the float size and float pens.
+"""
+# @tag: unit, browser_engine, text, engine2d, chrome159
+# @cover src/lib/common/encoding/sfnt_glyf.spl 1%
+# @cover src/lib/nogc_sync_mut/text_layout/font_renderer.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 320
+val H: i32 = 40
+# Two LCD16 steps, as in lcd_subpixel_text_chrome159_spec.
+val TOL: i32 = 16
+
+fn _page(size: text) -> text:
+    "<!doctype html><html><body style=\"margin:0;background:#fff\"><p style=\"margin:0;position:absolute;left:0;top:2px;font-family:sans-serif;font-size:" + size + ";color:#000\">Hamburgefonstiv lxHo</p></body></html>"
+
+fn _chan(px: u32, shift: u32) -> i32:
+    ((px >> shift) & 0xFFu32).to_i32()
+
+fn _abs(v: i32) -> i32:
+    if v < 0: 0 - v else: v
+
+# Largest per-channel |ours - chrome| over x0..x0+chrome.len()-1 on row y.
+fn _worst_delta(px: [u32], y: i32, x0: i32, chrome: [u32]) -> i32:
+    var worst = 0
+    var i = 0
+    while i < chrome.len().to_i32():
+        val ours = px[y * W + x0 + i]
+        for sh in [16u32, 8u32, 0u32]:
+            val d = _abs(_chan(ours, sh) - _chan(chrome[i], sh))
+            if d > worst:
+                worst = d
+        i = i + 1
+    worst
+
+describe "fractional font-size glyph raster against Chrome 159":
+    it "AC-1: 18.72 px glyphs take the float size and float pens":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(_page("18.72px"), W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome row 12, x=36..41: e7af57 17000f 4fa7df ffffff efbf67 1f0000")
+        val a: [u32] = [0xe7af57u32, 0x17000fu32, 0x4fa7dfu32, 0xffffffu32, 0xefbf67u32, 0x1f0000u32]
+        expect(_worst_delta(px, 12, 36, a) <= TOL).to_be(true)
+        step("Chrome row 11, x=62..67: 000000 1757a7 e7ffff ffffff fffff7 d79747")
+        val b: [u32] = [0x000000u32, 0x1757a7u32, 0xe7ffffu32, 0xffffffu32, 0xfffff7u32, 0xd79747u32]
+        expect(_worst_delta(px, 11, 62, b) <= TOL).to_be(true)
+
+    it "AC-2: 13.28 px (UA h5) glyphs take the float size and float pens":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(_page("13.28px"), W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome row 9, x=39..44: ffffff efbf6f 2f2757 afe7ff dfa74f 1f2767")
+        val a: [u32] = [0xffffffu32, 0xefbf6fu32, 0x2f2757u32, 0xafe7ffu32, 0xdfa74fu32, 0x1f2767u32]
+        expect(_worst_delta(px, 9, 39, a) <= TOL).to_be(true)
+        step("Chrome row 10, x=48..53: 371f47 9fdff7 ffffff fffff7 cf8f3f 1f4797")
+        val b: [u32] = [0x371f47u32, 0x9fdff7u32, 0xffffffu32, 0xfffff7u32, 0xcf8f3fu32, 0x1f4797u32]
+        expect(_worst_delta(px, 10, 48, b) <= TOL).to_be(true)

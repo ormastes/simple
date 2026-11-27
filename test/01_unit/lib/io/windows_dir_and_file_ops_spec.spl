@@ -1,0 +1,93 @@
+"""
+# Windows Directory and File Operations Regression Spec
+
+Pins native Windows path handling across `dir_ops`, `io_runtime`, and `file_ops`:
+- `dir_ops.dir_create_all`, `is_dir`, `dir_list`, `dir_remove_all` work without `/bin/sh` or `ls`
+- `io_runtime.file_write` creates missing parent directories for both `/` and `\` paths
+- `io_runtime.is_file` uses native stat checks without shelling out to `test -f '{path}'`
+- `file_ops.package_chmod` routes canonical paths through `host_path_native`
+"""
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, is_dir, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{package_chmod}
+use std.io_runtime.{env_get_opt, file_write, file_read, is_file, list_dir, getpid, time_now_unix_micros}
+
+fn _tmp_base() -> text:
+    val raw = env_get_opt("TEMP") ?? env_get_opt("TMP") ?? env_get_opt("TMPDIR") ?? "/tmp"
+    val clean = raw.replace("\\", "/")
+    if clean.byte_len() > 1 and clean.ends_with("/"):
+        return clean.substring(0, clean.byte_len() - 1)
+    clean
+
+describe "Windows native dir_ops and io_runtime without POSIX shells":
+    it "creates, lists, identifies, and removes nested directories with slashes and backslashes":
+        val is_win = host_is_windows_host()
+        val tag = str(getpid()) + "_" + str(time_now_unix_micros())
+        val root = _tmp_base() + "/simple_win_dir_ops_" + tag
+        val nested_fwd = root + "/sub_a/sub_b"
+        val created = dir_create_all(nested_fwd)
+        val dir_fwd_ok = if created: is_dir(nested_fwd) else: false
+        val dir_bs_ok = if created and is_win: is_dir(nested_fwd.replace("/", "\\")) else: false
+        val dir_not_file = if created: not is_file(nested_fwd) else: false
+
+        val file_fwd = nested_fwd + "/probe.txt"
+        val wrote = if created: file_write(file_fwd, "hello") else: false
+        val file_fwd_ok = if wrote: is_file(file_fwd) else: false
+        val file_bs_ok = if wrote and is_win: is_file(file_fwd.replace("/", "\\")) else: false
+
+        val listed = if wrote: dir_list(nested_fwd) else: []
+        val listed_rt = if wrote: list_dir(nested_fwd) else: []
+        val missing_rt = list_dir(root + "/no_such_dir_xyz")
+        val chmod_rc = if wrote: package_chmod(file_fwd, 420) else: -1
+        val removed = if created: dir_remove_all(root) else: false
+        val gone = if removed: not is_dir(root) else: false
+
+        expect(created).to_equal(true)
+        expect(dir_fwd_ok).to_equal(true)
+        if is_win:
+            expect(dir_bs_ok).to_equal(true)
+        expect(dir_not_file).to_equal(true)
+        expect(wrote).to_equal(true)
+        expect(file_fwd_ok).to_equal(true)
+        if is_win:
+            expect(file_bs_ok).to_equal(true)
+        expect(listed.contains("probe.txt")).to_equal(true)
+        expect(listed_rt.contains("probe.txt")).to_equal(true)
+        expect(missing_rt.len()).to_equal(0)
+        expect(chmod_rc).to_be_greater_than(-1)
+        expect(removed).to_equal(true)
+        expect(gone).to_equal(true)
+
+    it "creates missing parent directories in file_write for Windows backslash and forward-slash paths":
+        val is_win = host_is_windows_host()
+        val tag = str(getpid()) + "_" + str(time_now_unix_micros())
+        val root = _tmp_base() + "/simple_win_file_write_" + tag
+        val fwd_target = root + "/other/nested/fwd.txt"
+
+        var wrote_bs = false
+        var read_bs = ""
+        var is_bs = false
+        if is_win:
+            val backslash_target = root.replace("/", "\\") + "\\deep\\nested\\win.txt"
+            wrote_bs = file_write(backslash_target, "win-payload")
+            read_bs = if wrote_bs: file_read(backslash_target) else: ""
+            is_bs = if wrote_bs: is_file(backslash_target) else: false
+
+        val wrote_fwd = file_write(fwd_target, "fwd-payload")
+        val read_fwd = if wrote_fwd: file_read(fwd_target) else: ""
+        val is_fwd = if wrote_fwd: is_file(fwd_target) else: false
+
+        val missing_is_file = is_file(root + "/missing_never_created.txt")
+        val removed = dir_remove_all(root)
+
+        if is_win:
+            expect(wrote_bs).to_equal(true)
+            expect(read_bs).to_equal("win-payload")
+            expect(is_bs).to_equal(true)
+        expect(wrote_fwd).to_equal(true)
+        expect(read_fwd).to_equal("fwd-payload")
+        expect(is_fwd).to_equal(true)
+        expect(missing_is_file).to_equal(false)
+        expect(removed).to_equal(true)

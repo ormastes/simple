@@ -1,0 +1,266 @@
+# REQ-002/004/005/014; SCVN-D01/D02/D03 local proposal coverage.
+# Authored scenarios, not execution evidence. No settlement or alias allocation.
+use std.spec.*
+use std.scv.db_schema_identity_v2.*
+use std.scv.db_schema_codec_v2.*
+use std.scv.db_schema_merge_v2.*
+use std.scv.db_schema_migration_v2.*
+use std.scv.distributed_identity.*
+use std.scv.db_patch.*
+use test.fixtures.scv.db_schema_v2_fixture.*
+
+fn check_expected_conflicts(result: DbSchemaMergeResultV2, expected: text):
+    expect(result.candidate == nil).to_equal(true)
+    var codes: [text] = []
+    for conflict in result.conflicts: codes.push(conflict.code)
+    expect(codes).to_contain(expected)
+
+describe "SCV V2 schema identity, migration and immutable drafts":
+    it "REQ-004/005 AT-D01/D04/D05 merges offline additions then renames and maps a real old-schema row edit":
+        step("setup")
+        val base = setup_scv_fixture()
+        val legacy = setup_scv_legacy_patch("legacy-schema-title-v1")
+        val original_bytes = db_patch_bytes(legacy).unwrap()
+        val original_digest = db_patch_digest(legacy).unwrap()
+        val binding = DbV1SchemaBindingV2(v1_schema_revision: legacy.schema_revision, original_schema_revision: base.revision, binding_digest: db_schema_v1_binding_digest_v2(legacy.schema_revision, base).unwrap())
+        step("exercise")
+        val left = exercise_scv_schema_add(base, 2u64, "labels", false, DbDefaultRuleV2.NoDefault)
+        val right = exercise_scv_schema_add(base, 2u64, "priority", true, DbDefaultRuleV2.Constant(DbValue.Text("normal")))
+        val merged = db_schema_merge_v2(base, left, right).unwrap()
+        val candidate = merged.candidate.unwrap()
+        val title_uid = base.columns[0].column_uid
+        val rename = exercise_scv_schema_change(candidate, title_uid, 20u64, DbSchemaChangeV2.RenameColumn(title_uid, "summary"))
+        val renamed = db_schema_apply_v2(candidate, rename).unwrap()
+        val row = entity_ref_provisional(setup_scv_schema_uid("task", 1u64, false))
+        val adapted = db_schema_adapt_v1_edit_v2(binding, base, renamed, legacy, row, FieldEdit(field: "title", before: DbValue.Text("draft"), after: DbValue.Text("edited offline"))).unwrap()
+        step("assert")
+        expect(merged.conflicts.len()).to_equal(0)
+        expect(candidate.columns.len()).to_equal(3)
+        expect(db_schema_uid_equal_v2(adapted.address.column_uid, title_uid)).to_equal(true)
+        val index = db_schema_column_index_v2(renamed, adapted.address.column_uid)
+        expect(renamed.columns[index].name).to_equal("summary")
+        expect(db_cell_state_bytes_v2(adapted.after).unwrap()).to_equal(db_cell_state_bytes_v2(DbCellStateV2.Value(DbValue.Text("edited offline"))).unwrap())
+        expect(adapted.authored_schema_revision).to_equal(legacy.schema_revision)
+        expect(adapted.target_schema_revision).to_equal(renamed.revision)
+        expect(db_patch_bytes(legacy).unwrap()).to_equal(original_bytes)
+        expect(db_patch_digest(legacy).unwrap()).to_equal(original_digest)
+        expect(legacy.signature).to_equal([7u8, 8u8])
+        expect(base.columns.len()).to_equal(1)
+        expect(base.columns[0].name).to_equal("title")
+        val swapped = db_schema_merge_v2(base, right, left).unwrap().candidate.unwrap()
+        expect(swapped.revision).to_equal(candidate.revision)
+
+    it "REQ-004 AT-D02 keeps independent same-name same-definition additions as separate drafts":
+        step("setup")
+        val base = setup_scv_fixture()
+        val left = exercise_scv_schema_add(base, 2u64, "status", false, DbDefaultRuleV2.NoDefault)
+        val right = exercise_scv_schema_add(base, 2u64, "status", true, DbDefaultRuleV2.NoDefault)
+        step("exercise")
+        val result = db_schema_merge_v2(base, left, right).unwrap()
+        step("assert")
+        check_expected_conflicts(result, "SCVDB_SCHEMA_NAME_COLLISION")
+        expect(result.left.revision).to_equal(left.revision)
+        expect(result.right.revision).to_equal(right.revision)
+        expect(result.left.columns.len()).to_equal(2)
+        expect(result.right.columns.len()).to_equal(2)
+
+    it "REQ-004 AT-D03 refuses same-name additions with different types":
+        step("setup")
+        val base = setup_scv_fixture()
+        val left = exercise_scv_schema_add(base, 2u64, "status", false, DbDefaultRuleV2.NoDefault)
+        var right_column = setup_scv_schema_column(base, 2u64, "status", true, DbDefaultRuleV2.NoDefault)
+        right_column.logical_type = "u64"
+        val right = db_schema_apply_v2(base, DbSchemaOperationV2(operation_uid: right_column.introduction_migration, base_revision: base.revision, expected_definition: "", dependencies: [], change: DbSchemaChangeV2.AddColumn(right_column))).unwrap()
+        step("assert")
+        check_expected_conflicts(db_schema_merge_v2(base, left, right).unwrap(), "SCVDB_SCHEMA_NAME_COLLISION")
+
+    it "REQ-004 AT-D04 retains drop-versus-schema-edit drafts and blocks old-schema row edits":
+        step("setup")
+        val base = setup_scv_fixture()
+        val uid = base.columns[0].column_uid
+        val dropped = db_schema_apply_v2(base, exercise_scv_schema_change(base, uid, 2u64, DbSchemaChangeV2.DropColumn(uid))).unwrap()
+        val renamed = db_schema_apply_v2(base, exercise_scv_schema_change(base, uid, 3u64, DbSchemaChangeV2.RenameColumn(uid, "summary"))).unwrap()
+        step("exercise")
+        val result = db_schema_merge_v2(base, dropped, renamed).unwrap()
+        val edit = db_schema_adapt_v1_field_v2(base, dropped, base.revision, entity_ref_provisional(setup_scv_schema_uid("task", 1u64, false)), "title")
+        step("assert")
+        check_expected_conflicts(result, "SCVDB_SCHEMA_DROP_EDIT_CONFLICT")
+        expect(edit.unwrap_err()).to_equal("SCVDB_SCHEMA_DROP_EDIT_CONFLICT")
+        expect(result.left.columns[0].tombstone).to_equal(true)
+        expect(result.right.columns[0].name).to_equal("summary")
+
+    it "REQ-004 AT-D04 never resurrects old values after drop-and-recreate with the same name":
+        step("setup")
+        val base = setup_scv_fixture()
+        val uid = base.columns[0].column_uid
+        val dropped = db_schema_apply_v2(base, exercise_scv_schema_change(base, uid, 2u64, DbSchemaChangeV2.DropColumn(uid))).unwrap()
+        val recreated = exercise_scv_schema_add(dropped, 3u64, "title", false, DbDefaultRuleV2.NoDefault)
+        step("assert")
+        expect(recreated.columns.len()).to_equal(2)
+        expect(db_schema_uid_equal_v2(uid, recreated.columns[1].column_uid)).to_equal(false)
+        expect(db_schema_adapt_v1_field_v2(base, recreated, base.revision, entity_ref_provisional(setup_scv_schema_uid("task", 1u64, false)), "title").unwrap_err()).to_equal("SCVDB_SCHEMA_DROP_EDIT_CONFLICT")
+
+    it "REQ-005 AT-D06/D07 stamps lazy defaults and preserves historical interpretation after future-default changes":
+        step("setup")
+        val base = setup_scv_fixture()
+        val added = exercise_scv_schema_add(base, 2u64, "status", false, DbDefaultRuleV2.Constant(DbValue.Text("open")))
+        val uid = added.columns[1].column_uid
+        val changed = db_schema_apply_v2(added, exercise_scv_schema_change(added, uid, 3u64, DbSchemaChangeV2.SetDefault(uid, DbDefaultRuleV2.Constant(DbValue.Text("queued"))))).unwrap()
+        step("exercise")
+        val lazy = db_schema_lazy_cell_v2(base, changed, uid, DbCellStateV2.Absent).unwrap()
+        val expected = DbCellStateV2.Defaulted(DbValue.Text("open"), added.columns[1].introduction_migration, base.revision)
+        step("assert")
+        expect(db_cell_state_bytes_v2(lazy).unwrap()).to_equal(db_cell_state_bytes_v2(expected).unwrap())
+        expect(db_cell_state_bytes_v2(db_schema_lazy_cell_v2(added, changed, uid, DbCellStateV2.Absent).unwrap()).unwrap()).to_equal(db_cell_state_bytes_v2(DbCellStateV2.Absent).unwrap())
+        expect(db_cell_state_bytes_v2(db_schema_lazy_cell_v2(added, changed, uid, DbCellStateV2.Null).unwrap()).unwrap()).to_equal(db_cell_state_bytes_v2(DbCellStateV2.Null).unwrap())
+        val states = [DbCellStateV2.Absent, DbCellStateV2.Null, DbCellStateV2.Value(DbValue.Text("open")), lazy, DbCellStateV2.Tombstoned]
+        var encodings: [[u8]] = []
+        for state in states:
+            val encoded = db_cell_state_bytes_v2(state).unwrap()
+            expect(encodings.contains(encoded)).to_equal(false)
+            encodings.push(encoded)
+        expect(base.columns.len()).to_equal(1)
+
+    it "REQ-014 acknowledges identical operation replay and rejects divergent reuse and stale base":
+        step("setup")
+        val base = setup_scv_fixture()
+        val uid = base.columns[0].column_uid
+        val rename = exercise_scv_schema_change(base, uid, 2u64, DbSchemaChangeV2.RenameColumn(uid, "summary"))
+        val renamed = db_schema_apply_v2(base, rename).unwrap()
+        step("assert")
+        expect(db_schema_apply_v2(renamed, rename).unwrap().revision).to_equal(renamed.revision)
+        var divergent = rename
+        divergent.change = DbSchemaChangeV2.RenameColumn(uid, "different")
+        expect(db_schema_apply_v2(renamed, divergent).unwrap_err()).to_equal("SCVDB_SCHEMA_OPERATION_DIVERGENCE")
+        val stale = exercise_scv_schema_change(base, uid, 3u64, DbSchemaChangeV2.DropColumn(uid))
+        expect(db_schema_apply_v2(renamed, stale).unwrap_err()).to_equal("SCVDB_SCHEMA_STALE_BASE")
+
+    it "REQ-004 preserves identity through presentation reorder and round-trips a bounded V2 address":
+        step("setup")
+        val base = setup_scv_fixture()
+        val uid = base.columns[0].column_uid
+        val reordered = db_schema_apply_v2(base, exercise_scv_schema_change(base, uid, 2u64, DbSchemaChangeV2.MoveColumnPresentation(uid, 99u64))).unwrap()
+        val address = db_schema_adapt_v1_field_v2(base, reordered, base.revision, entity_ref_provisional(setup_scv_schema_uid("task", 1u64, false)), "title").unwrap()
+        step("assert")
+        expect(db_schema_uid_equal_v2(address.column_uid, uid)).to_equal(true)
+        val wire = db_cell_address_encode_v2(address).unwrap()
+        expect(db_cell_address_bytes_v2(db_cell_address_decode_v2(wire).unwrap()).unwrap()).to_equal(db_cell_address_bytes_v2(address).unwrap())
+        expect(db_cell_address_decode_v2(wire + [0u8]).is_err()).to_equal(true)
+
+    it "REQ-005 refuses unsupported type coercion, policy reinterpretation and unbackfilled non-null additions":
+        step("setup")
+        val base = setup_scv_fixture()
+        val uid = base.columns[0].column_uid
+        step("assert")
+        expect(db_schema_apply_v2(base, exercise_scv_schema_change(base, uid, 2u64, DbSchemaChangeV2.AlterType(uid, "u64"))).unwrap_err()).to_equal("SCVDB_SCHEMA_MIGRATION_REQUIRED")
+        expect(db_schema_apply_v2(base, exercise_scv_schema_change(base, uid, 2u64, DbSchemaChangeV2.SetMergePolicy(uid, "latest-time"))).unwrap_err()).to_equal("SCVDB_SCHEMA_POLICY_MIGRATION_REQUIRED")
+        var column = setup_scv_schema_column(base, 2u64, "required", false, DbDefaultRuleV2.NoDefault)
+        column.nullable = false
+        val operation = DbSchemaOperationV2(operation_uid: column.introduction_migration, base_revision: base.revision, expected_definition: "", dependencies: [], change: DbSchemaChangeV2.AddColumn(column))
+        expect(db_schema_apply_v2(base, operation).unwrap_err()).to_equal("SCVDB_SCHEMA_BACKFILL_REQUIRED")
+
+    it "REQ-005 adds and drops UID constraints while retaining combined-row checks":
+        step("setup")
+        val base = setup_scv_fixture()
+        val uid = base.columns[0].column_uid
+        val constraint = DbConstraintDefinitionV2(constraint_uid: setup_scv_schema_uid("constraint", 1u64, false), kind: "unique", columns: [uid], expression: "")
+        val constrained = db_schema_apply_v2(base, exercise_scv_schema_change(base, uid, 2u64, DbSchemaChangeV2.AddConstraint(uid, constraint))).unwrap()
+        val removed = db_schema_apply_v2(constrained, exercise_scv_schema_change(constrained, uid, 3u64, DbSchemaChangeV2.DropConstraint(uid, constraint.constraint_uid))).unwrap()
+        step("assert")
+        expect(constrained.columns[0].constraints.len()).to_equal(1)
+        expect(removed.columns[0].constraints.len()).to_equal(0)
+        expect(db_schema_merge_v2(base, constrained, base).unwrap().required_checks).to_contain("combined-row-constraint-closure")
+
+    it "REQ-004 refuses wrong UID kinds, missing exact original revision and forged lazy defaults":
+        step("setup")
+        val base = setup_scv_fixture()
+        val row = entity_ref_provisional(setup_scv_schema_uid("task", 1u64, false))
+        step("assert")
+        expect(db_schema_create_v2(setup_scv_schema_uid("column", 1u64, false), "bad").unwrap_err()).to_equal("SCVDB_SCHEMA_UID_KIND")
+        expect(db_schema_adapt_v1_field_v2(base, base, "unpinned", row, "title").unwrap_err()).to_equal("SCVDB_SCHEMA_ORIGINAL_REVISION_REQUIRED")
+        expect(db_schema_adapt_v1_field_v2(base, base, base.revision, row, "missing").unwrap_err()).to_equal("SCVDB_SCHEMA_V1_NAME_UNMAPPED")
+        val forged = DbCellStateV2.Defaulted(DbValue.Text("invented"), base.columns[0].introduction_migration, base.columns[0].introduction_revision)
+        expect(db_schema_cell_type_v2(base.columns[0], forged).unwrap_err()).to_equal("SCVDB_SCHEMA_DEFAULT_STAMP")
+
+    it "REQ-004 rejects independently sealed tombstone resurrection during merge":
+        step("setup")
+        val original = setup_scv_fixture()
+        val uid = original.columns[0].column_uid
+        val base = db_schema_apply_v2(original, exercise_scv_schema_change(original, uid, 2u64, DbSchemaChangeV2.DropColumn(uid))).unwrap()
+        var forged = base
+        var column = forged.columns[0]
+        column.tombstone = false
+        forged.columns[0] = column
+        val resealed = db_schema_seal_v2(forged).unwrap()
+        step("assert")
+        check_expected_conflicts(db_schema_merge_v2(base, resealed, base).unwrap(), "SCVDB_SCHEMA_TOMBSTONE_RESURRECTION")
+
+    it "REQ-005 rejects stored defaults forged from another column, namespace, revision or value":
+        step("setup")
+        val original = setup_scv_fixture()
+        val added = exercise_scv_schema_add(original, 2u64, "status", false, DbDefaultRuleV2.Constant(DbValue.Text("open")))
+        val other = exercise_scv_schema_add(added, 3u64, "state", false, DbDefaultRuleV2.Constant(DbValue.Text("open")))
+        val column = other.columns[1]
+        val foreign_column = other.columns[2]
+        var foreign_namespace = column.introduction_migration
+        foreign_namespace.database_namespace = "22222222222222222222222222222222"
+        val forged = [DbCellStateV2.Defaulted(DbValue.Text("wrong"), column.introduction_migration, column.introduction_revision), DbCellStateV2.Defaulted(DbValue.Text("open"), foreign_column.introduction_migration, foreign_column.introduction_revision), DbCellStateV2.Defaulted(DbValue.Text("open"), foreign_namespace, column.introduction_revision), DbCellStateV2.Defaulted(DbValue.Text("open"), column.introduction_migration, "wrong-revision")]
+        step("assert")
+        for state in forged:
+            expect(db_schema_lazy_cell_v2(other, other, column.column_uid, state).unwrap_err()).to_equal("SCVDB_SCHEMA_DEFAULT_STAMP")
+
+    it "REQ-005 validates both default types, rejects unsupported types and enforces nullability":
+        step("setup")
+        val base = setup_scv_fixture()
+        var wrong_future = setup_scv_schema_column(base, 2u64, "count", false, DbDefaultRuleV2.Constant(DbValue.Unsigned(1u64)))
+        wrong_future.introduction_default = DbDefaultRuleV2.NoDefault
+        var wrong_introduction = setup_scv_schema_column(base, 2u64, "count", false, DbDefaultRuleV2.NoDefault)
+        wrong_introduction.introduction_default = DbDefaultRuleV2.Constant(DbValue.Unsigned(1u64))
+        var unsupported = setup_scv_schema_column(base, 2u64, "count", false, DbDefaultRuleV2.NoDefault)
+        unsupported.logical_type = "i64"
+        var required = setup_scv_schema_column(base, 2u64, "required", false, DbDefaultRuleV2.Constant(DbValue.Text("pinned")))
+        required.nullable = false
+        step("assert")
+        expect(db_schema_column_validate_v2(wrong_future, base.table_uid.database_namespace).unwrap_err()).to_equal("SCVDB_SCHEMA_DEFAULT_TYPE")
+        expect(db_schema_column_validate_v2(wrong_introduction, base.table_uid.database_namespace).unwrap_err()).to_equal("SCVDB_SCHEMA_DEFAULT_TYPE")
+        expect(db_schema_column_validate_v2(unsupported, base.table_uid.database_namespace).unwrap_err()).to_equal("SCVDB_SCHEMA_UNSUPPORTED_TYPE")
+        expect(db_schema_cell_type_v2(required, DbCellStateV2.Null).unwrap_err()).to_equal("SCVDB_SCHEMA_NULL_NOT_ALLOWED")
+        expect(db_schema_cell_type_v2(required, DbCellStateV2.Absent).unwrap_err()).to_equal("SCVDB_SCHEMA_MISSING_REQUIRED_VALUE")
+        expect(db_schema_cell_type_v2(base.columns[0], DbCellStateV2.Null).unwrap()).to_equal(true)
+
+    it "REQ-004 rejects merged same-operation different-payload receipts while retaining both sides":
+        step("setup")
+        val base = setup_scv_fixture()
+        val uid = base.columns[0].column_uid
+        val left = db_schema_apply_v2(base, exercise_scv_schema_change(base, uid, 2u64, DbSchemaChangeV2.RenameColumn(uid, "summary"))).unwrap()
+        val right = db_schema_apply_v2(base, exercise_scv_schema_change(base, uid, 2u64, DbSchemaChangeV2.RenameColumn(uid, "subject"))).unwrap()
+        step("assert")
+        val result = db_schema_merge_v2(base, left, right).unwrap()
+        check_expected_conflicts(result, "SCVDB_SCHEMA_OPERATION_DIVERGENCE")
+        expect(result.left.revision).to_equal(left.revision)
+        expect(result.right.revision).to_equal(right.revision)
+
+    it "REQ-005 pins reviewed mappings and never executes an unimplemented conversion":
+        step("setup")
+        val base = setup_scv_fixture()
+        val uid = base.columns[0].column_uid
+        val renamed = db_schema_apply_v2(base, exercise_scv_schema_change(base, uid, 2u64, DbSchemaChangeV2.RenameColumn(uid, "summary"))).unwrap()
+        val row = entity_ref_provisional(setup_scv_schema_uid("task", 1u64, false))
+        val plan = DbReviewedMigrationV2(migration_uid: setup_scv_schema_uid("migration", 3u64, false), source_revision: base.revision, target_revision: renamed.revision, mappings: [DbColumnMappingV2(source_column_uid: uid, target_column_uid: uid, source_type: "text", target_type: "text")], review_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        step("assert")
+        expect(db_schema_uid_equal_v2(db_schema_adapt_reviewed_v2(base, renamed, plan, row, uid).unwrap().column_uid, uid)).to_equal(true)
+        var unreviewed = plan
+        unreviewed.review_digest = ""
+        expect(db_schema_adapt_reviewed_v2(base, renamed, unreviewed, row, uid).unwrap_err()).to_equal("SCVDB_SCHEMA_MIGRATION_REVIEW_REQUIRED")
+        var wrong_target = plan
+        wrong_target.target_revision = base.revision
+        expect(db_schema_adapt_reviewed_v2(base, renamed, wrong_target, row, uid).unwrap_err()).to_equal("SCVDB_SCHEMA_MIGRATION_TARGET")
+        var changed_type = renamed
+        var column = changed_type.columns[0]
+        column.logical_type = "u64"
+        changed_type.columns[0] = column
+        val evaluated_target = db_schema_seal_v2(changed_type).unwrap()
+        var conversion = plan
+        conversion.target_revision = evaluated_target.revision
+        conversion.mappings = [DbColumnMappingV2(source_column_uid: uid, target_column_uid: uid, source_type: "text", target_type: "u64")]
+        expect(db_schema_adapt_reviewed_v2(base, evaluated_target, conversion, row, uid).unwrap_err()).to_equal("SCVDB_SCHEMA_MIGRATION_EXECUTION_REQUIRED")

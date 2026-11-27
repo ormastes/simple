@@ -13,6 +13,7 @@ use app.build.scheduler.parent_graph_runner.{run_parent_graph_v1}
 use app.build.scheduler.parent_staged_link_cli.{
     parent_staged_link_cli_selected_v1, run_parent_staged_link_cli_v1}
 use std.common.crypto.sha256.{sha256_text}
+use app.build.host_path_policy.{build_host_abs_path_valid_v1}
 
 val PARENT_GRAPH_RUNNER_MAX_WORKERS_V1: i64 = 16
 
@@ -53,8 +54,7 @@ fn parse_parent_graph_runner_args_v1(args: [text]) -> ParentGraphRunnerArgsV1:
     while i < remaining.len():
         if remaining[i] != "--config" or i + 1 >= remaining.len(): return invalid
         val path = remaining[i + 1]
-        if not path.starts_with("/") or path.len() < 2 or
-           path.len() > 4096 or path.ends_with("/"):
+        if not build_host_abs_path_valid_v1(path, false, false, 4096, 4096):
             return invalid
         paths.push(path)
         i = i + 2
@@ -67,29 +67,29 @@ fn _parent_graph_runner_load_workers_v1(paths: [text]) -> [DistBuildConfigV1]?:
     for path in paths:
         val read = file_read_regular_no_follow_bounded(path,
             DIST_BUILD_CONFIG_MAX_BYTES_V1)
-        if read.is_err(): return nil
+        if read.is_err(): return None
         val config = parse_dist_build_config_v1(read.unwrap())
-        if config == nil or config.unwrap().graph_path == "": return nil
+        if config.is_none() or config.unwrap().graph_path == "": return None
         workers.push(config.unwrap())
     workers
 
 fn load_pinned_parent_graph_manifest_v1(path: text,
         protected_digest: text) -> ParentGraphManifestV1?:
-    if not _parent_graph_runner_digest_v1(protected_digest): return nil
+    if not _parent_graph_runner_digest_v1(protected_digest): return None
     val manifest_read = file_read_regular_no_follow_bounded(path,
         PARENT_GRAPH_MANIFEST_MAX_BYTES_V1)
     if manifest_read.is_err() or
        sha256_text(manifest_read.unwrap()) != protected_digest:
-        return nil
+        return None
     val manifest = parse_parent_graph_manifest_v1(manifest_read.unwrap())
-    if not manifest.valid: return nil
+    if not manifest.valid: return None
     manifest
 
 fn _parent_graph_runner_graph_v1(worker: DistBuildConfigV1,
         protected_digest: text) -> ParentGraphRequestV1?:
     val pinned_manifest = load_pinned_parent_graph_manifest_v1(
         worker.graph_path, protected_digest)
-    if pinned_manifest == nil: return nil
+    if pinned_manifest.is_none(): return None
     val manifest = pinned_manifest.unwrap()
     var wires: [text] = []
     var total_bytes: i64 = 0
@@ -98,14 +98,14 @@ fn _parent_graph_runner_graph_v1(worker: DistBuildConfigV1,
             BUILD_WORKER_REQUEST_MAX_BYTES_V1)
         if request_read.is_err() or
            sha256_text(request_read.unwrap()) != entry.digest:
-            return nil
+            return None
         val wire = request_read.unwrap()
         total_bytes = total_bytes + wire.len()
-        if total_bytes > PARENT_GRAPH_MAX_WIRE_BYTES_V1: return nil
+        if total_bytes > PARENT_GRAPH_MAX_WIRE_BYTES_V1: return None
         wires.push(wire)
     val graph = admit_parent_graph_requests_v1(wires, "",
         worker.node.ssh.node.worker_id, 0)
-    if not graph.valid: return nil
+    if not graph.valid: return None
     graph
 
 fn main() -> i64:
@@ -117,13 +117,13 @@ fn main() -> i64:
         print("parent-graph: BLOCKED reason=expected-graph-digest-and-one-to-sixteen-config-paths")
         return 2
     val workers = _parent_graph_runner_load_workers_v1(command.config_paths)
-    if workers == nil:
+    if workers.is_none():
         print("parent-graph: BLOCKED reason=config-unreadable-invalid-or-not-graph")
         return 1
     val configs = workers.unwrap()
     val graph = _parent_graph_runner_graph_v1(configs[0],
         command.graph_manifest_digest)
-    if graph == nil:
+    if graph.is_none():
         print("parent-graph: BLOCKED reason=graph-manifest-or-request-invalid")
         return 1
     val result = run_parent_graph_v1(graph.unwrap(), configs, 0)

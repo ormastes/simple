@@ -534,3 +534,42 @@ day `pure-simple-bootstrap-compiler` provenance lands.
 
 Out of lane: EFI/QEMU real-firmware boot-chain migration, needs a self-hosted bin/simple to build the unified kernel (per .claude/rules/board-runnable.md), which this host does not have. No change made.
 
+
+
+## 2026-11-03 unified-launch source repair; native verification pending
+
+The unified launcher now invokes the existing ESP builder with
+`BOOT_PROTOCOL=linux` and a flat Image extracted from its attested ELF,
+including on `--no-build` runs. The extraction uses `llvm-objcopy -O binary`;
+the 64-byte header must have ARM64 magic at offset 56 and nonzero image size.
+The raw ELF container is never supplied as a Linux Image payload.
+It boots staged read-only EDK2/AAVMF code, fresh writable NVRAM, and the ESP
+through a boot-indexed PCI block device. The font disk remains a distinct
+read-only MMIO device; input, sound, and host-GPU transport remain in that same
+QEMU process. Missing firmware/image construction fails before daemon startup.
+Firmware/ESP hashes are checked again after readiness waits before launch.
+
+`sh scripts/check/check-simpleos-arm64-unified-firmware-contract.shs`
+executes the production preparation and argv fragments. A real clang/LLD ELF
+fixture is extracted by llvm-objcopy, and a raw-ELF negative control is refused.
+It passed quoted-path
+argument boundaries, firmware/ESP devices, retained primitive devices, failed
+builder, missing artifacts, and prelaunch image mutation checks. Shell syntax
+and diff whitespace checks passed. This is host-side launch-contract evidence,
+not a successful kernel build or firmware boot.
+
+Status remains verification-pending: no QEMU boot, physical-board run, unified
+Vulkan/input/audio admission, or current-source kernel qualification occurred in
+this repair. Resume with the canonical unified live gate after the admitted
+self-hosted compiler can build the kernel. Do not infer native admission from
+these shell regressions or the historical marker-kernel firmware proof.
+
+## Triage 2026-11-25 (p2w1-ab lane) — still blocked, unchanged
+
+Re-checked at release/1.0.0 tip (38265c7f249) on a Windows host: the lane
+migration remains gated on a deployed pure-Simple self-hosted compiler able
+to build the unified arm64 kernel (item 2 of the remaining work above),
+which this host cannot provide — only the pinned Rust seed is present, and
+it rejects the `@representation_boundary` decorator tree-wide
+(cfd89933699). No code change; status correctly remains open /
+verification-pending.

@@ -1,0 +1,34 @@
+#!/bin/sh
+# Fixture driver for reviewed_native_sanity_argv_spec.spl. Runs the production
+# run-reviewed-native-sanity.shs against stub artifacts and prints one
+# "CASE <name> rc=<n> argv=<captured argv> stderr=<text>" line per artifact.
+# Only the process-resource wrapper is replaced; argv selection, literal
+# expectations and hash checks are the production code.
+set -u
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+d=$(mktemp -d) || exit 2
+trap 'rm -rf "$d"' EXIT
+mkdir -p "$d/scripts" "$d/repo/src/app/simple_lsp_mcp"
+cp "$repo/scripts/bootstrap/run-reviewed-native-sanity.shs" "$d/scripts/"
+printf 'val SERVER_NAME = "simple-lsp-mcp"\nval SERVER_VERSION = "0.9.8"\n' > "$d/repo/src/app/simple_lsp_mcp/main.spl"
+cat > "$d/scripts/run-native-sanity.shs" <<'WRAP'
+#!/bin/sh
+eo=$3; ex=$5; out=$2; shift 5
+mkdir "$out"; "$@" >"$out/o" 2>"$out/e"; rc=$?
+if [ "$rc" = "$ex" ] && [ "$(tr -d '\r' <"$out/o")" = "$(tr -d '\r' <"$eo")" ]; then s=PASS; else s=FAIL; fi
+echo "status=$s" > "$out/sanity.env"; [ "$s" = PASS ] || exit 86
+WRAP
+cat > "$d/fix" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" > "$d/argv"
+case "\$(basename "\$0")" in simple_lsp_mcp_server) want="--version" ;; *) want="simple_lsp_mcp_server --version" ;; esac
+[ "\$*" = "\$want" ] || exit 17
+echo "simple-lsp-mcp 0.9.8"
+STUB
+for name in simple_lsp_mcp_server renamed-lsp-artifact simple_mcp_server; do
+    cp "$d/fix" "$d/$name"; chmod +x "$d/$name"; rm -f "$d/argv"
+    task=lsp_build; [ "$name" = simple_mcp_server ] && task=mcp_build
+    sh "$d/scripts/run-reviewed-native-sanity.shs" "$d/repo" "$d/$name-receipt" "$task" "$d/$name" >"$d/so" 2>"$d/se"; rc=$?
+    a=""; [ -f "$d/argv" ] && a=$(tr -d '\015' < "$d/argv")
+    echo "CASE $name rc=$rc argv=$a stderr=$(tr -d '\015' < "$d/se")"
+done

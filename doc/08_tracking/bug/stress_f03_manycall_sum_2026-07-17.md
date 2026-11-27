@@ -2,7 +2,8 @@
 
 - **Date documented:** 2026-07-17 (cert stress-suite salvage)
 - **Date re-verified:** 2026-07-17 (STRESS lane)
-- **Status:** PARTIALLY RESOLVED.
+- **Status:** RESOLVED (2026-11-25 — residual interpreter finding fixed and
+  verified on the pinned seed; see final section). Previously:
   - Default execution path (`simple run`, resolves to Cranelift JIT) — the
     path the stress-suite's own `_run` helper actually exercises — NO LONGER
     REPRODUCES. Fixed by some earlier, unrelated commit already on `main`
@@ -125,3 +126,44 @@ re-verification.
 cd src/compiler_rust && cargo build --release
 SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check/cert/stress-suite.shs
 ```
+
+## 2026-11-10 p2fix-interp lane (work/p2fix-interp-20261110, base d8c0a761988c) — VERIFIED-GREEN (seed-smoke)
+
+Fix confirmed in source (`builtin_wins_over_user_fn` gate at Priority 2;
+PRELUDE_UNSHADOWABLE = exit/dprint only) and executed with the deployed seed
+bin/simple.exe (which contains the fix): the exact stress shape
+`manycall_sum_300.spl` (fn f0..f299 -> int, main prints f0()+...+f299())
+prints 44850 on BOTH `SIMPLE_EXECUTION_MODE=interpret` and the default JIT
+lane (interpreter was 44786 when this was filed; the sole miscounted term was
+zero-arg `f64()` losing to the cast builtin). Isolated repro
+`fn f64() -> int: return 64; print(f64())` prints 64 on both lanes.
+Retained unit `interpreter_call::precedence_tests::user_defined_function_wins_over_builtin`
+passes in a fresh cargo build (46/46 interpreter_call tests). Seed-smoke
+evidence only; compiled-contract confirmation per stress-suite gate.
+
+## 2026-11-25 p2w6-ak lane (work/p2w6-ak-20261125, release/1.0.0 tip f3fb8f24dc9) — RESOLVED
+
+The residual interpreter-only finding (zero-arg `f64()` losing to the cast
+builtin) is fixed in the pinned seed (`bin/simple.exe`, Rust seed
+v1.0.0-rc.1). The exact isolated repro from this doc:
+
+```
+fn f64() -> int:
+    return 64
+fn main():
+    print(f64())
+```
+
+prints `64` on BOTH `SIMPLE_EXECUTION_MODE=interpret` and the default lane
+(run from the worktree root with `SIMPLE_LIB=src`). This matches the
+2026-11-10 p2fix-interp note above (`builtin_wins_over_user_fn` gate at
+Priority 2) and extends it to the release/1.0.0 pinned binary. The 300-call
+chain case was already verified green on both lanes by that lane; not re-run
+here. Both halves of this bug are now closed; marking RESOLVED.
+
+## 2026-11-26 BF-4 (work/bf-4-rust-interp-semantics-20261126, release/1.0.0) — Re-verified RESOLVED
+
+Direct live regression test `cargo test -j 2 -p simple-compiler --test bf4_interpreter_bugs bug3_manycall_sum_300_and_f64_user_fn` passes on `release/1.0.0`:
+- Full 300-call sum `f0() + f1() + ... + f299()` evaluates to `Ok(44850)`.
+- Isolated collision case `fn f64() -> i64: return 64` evaluates `f64()` to `Ok(64)`.
+Also `--lib interpreter_call::` passes 50/50.

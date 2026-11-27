@@ -52,7 +52,7 @@
 # ---------------------------------------------------------------------------
 # ALGORITHM
 # ---------------------------------------------------------------------------
-# 1. Enumerate tracked `bootstrap/**/simple` paths via `git ls-files`.
+# 1. Enumerate tracked `bootstrap/**/simple` and `simple.exe` via git ls-files.
 # 2. Materialise the content to execute. By default the WORKING-TREE file is
 #    used when it exists (that is the artifact a developer actually has); a
 #    tracked path with no working-tree file is materialised from committed
@@ -278,49 +278,13 @@ probe_binary() {
 # reads as a crashing compiler and misled an investigation. They are not
 # crashing; Linux cannot exec a Mach-O at all. Classify format FIRST.)
 #
-# artifact_format <file> -> elf-x86_64 | elf-aarch64 | elf-other | macho |
-#                           pe | script | unknown
+# artifact_format <file> -> ELF/Mach-O/PE architecture | script | unknown.
+# Header/host helpers are shared with the private Windows fixture checker.
 # ---------------------------------------------------------------------------
-artifact_format() {
-    _magic=$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')
-    case "$_magic" in
-        7f454c46)
-            _mach=$(od -An -tx1 -j18 -N2 "$1" 2>/dev/null | tr -d ' \n')
-            case "$_mach" in
-                3e00|003e) printf 'elf-x86_64' ;;
-                b700|00b7) printf 'elf-aarch64' ;;
-                *)         printf 'elf-other' ;;
-            esac ;;
-        cffaedfe|cefaedfe|feedface|feedfacf|cafebabe|bebafeca) printf 'macho' ;;
-        4d5a*)   printf 'pe' ;;
-        2321*)   printf 'script' ;;
-        *)       printf 'unknown' ;;
-    esac
-}
-
-# Format this host can exec natively. `script` and `unknown` are always
-# probed (unknown falls through to a real exec attempt -- conservative).
-host_native_format() {
-    case "$(uname -s)-$(uname -m)" in
-        Linux-x86_64)  printf 'elf-x86_64' ;;
-        Linux-aarch64) printf 'elf-aarch64' ;;
-        Darwin-*)      printf 'macho' ;;
-        FreeBSD-amd64|FreeBSD-x86_64) printf 'elf-x86_64' ;;
-        *)             printf 'unknown' ;;
-    esac
-}
-
-# This host's stage-triple directory name ('' when unrecognized).
-host_triple() {
-    case "$(uname -s)-$(uname -m)" in
-        Linux-x86_64)  printf 'x86_64-unknown-linux-gnu' ;;
-        Linux-aarch64) printf 'aarch64-unknown-linux-gnu' ;;
-        Darwin-arm64|Darwin-aarch64) printf 'aarch64-apple-darwin-macho' ;;
-        Darwin-x86_64) printf 'x86_64-apple-darwin-macho' ;;
-        FreeBSD-amd64|FreeBSD-x86_64) printf 'x86_64-unknown-freebsd' ;;
-        *) printf '' ;;
-    esac
-}
+case "$0" in
+    */*) . "${0%/*}/lib/stage-binary-platform.shs" ;;
+    *) . ./scripts/check/lib/stage-binary-platform.shs ;;
+esac
 
 # path_triple <tracked-path> -> the triple subdirectory the artifact sits in,
 # or '' when the path is BARE (unscoped). A triple dir looks like
@@ -334,11 +298,12 @@ path_triple() {
 }
 
 # ---------------------------------------------------------------------------
-# list_stage_binaries <root> -- tracked `simple` files under bootstrap/
+# list_stage_binaries <root> -- tracked simple/simple.exe under bootstrap/
 # ---------------------------------------------------------------------------
 list_stage_binaries() {
     git -C "$1" ls-files -- 'bootstrap/*/simple' 'bootstrap/*/*/simple' \
-        'bootstrap/*/*/*/simple' 2>/dev/null
+        'bootstrap/*/*/*/simple' 'bootstrap/*/simple.exe' \
+        'bootstrap/*/*/simple.exe' 'bootstrap/*/*/*/simple.exe' 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -392,17 +357,16 @@ scan_tree() {
             chmod +x "$_exe" 2>/dev/null
         fi
 
-        if [ ! -x "$_exe" ]; then
-            SCAN_BAD=$((SCAN_BAD + 1))
-            SCAN_BADNAMES="$SCAN_BADNAMES $_p:not-executable"
-            continue
-        fi
-
         # Format check BEFORE any exec attempt. A foreign-format binary is not
         # a crashing compiler -- this host cannot exec it at all -- and
         # classifying it as "crashed/failed" already misled one investigation.
         _fmt=$(artifact_format "$_exe")
         _ptriple=$(path_triple "$_p")
+        if [ "$_fmt" = 'pe-invalid' ]; then
+            SCAN_BAD=$((SCAN_BAD + 1))
+            SCAN_BADNAMES="$SCAN_BADNAMES $_p:invalid-pe-header"
+            continue
+        fi
         if [ "$_fmt" != 'script' ] && [ "$_fmt" != 'unknown' ] \
             && [ "$_host_fmt" != 'unknown' ] && [ "$_fmt" != "$_host_fmt" ]; then
             if [ -n "$_ptriple" ] && [ "$_ptriple" != "$_host_triple" ]; then
@@ -439,6 +403,11 @@ scan_tree() {
         if [ -z "$_ptriple" ] && [ "$_fmt" != 'script' ] && [ "$_fmt" != 'unknown' ]; then
             SCAN_BAD=$((SCAN_BAD + 1))
             SCAN_BADNAMES="$SCAN_BADNAMES $_p:unscoped-stage-path(deploy-clobber-residue,$_fmt)"
+            continue
+        fi
+        if [ ! -x "$_exe" ]; then
+            SCAN_BAD=$((SCAN_BAD + 1))
+            SCAN_BADNAMES="$SCAN_BADNAMES $_p:not-executable"
             continue
         fi
         printf '%s: probing %s\n' "$SELF_NAME" "$_p"
@@ -479,6 +448,20 @@ write_host_native_blob() {
     case "$(host_native_format)" in
         macho)       printf '\317\372\355\376\014\000\000\001' >"$1" ;;
         elf-aarch64) printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000\002\000\267\000' >"$1" ;;
+        pe-*)
+            # Complete DOS pointer and COFF header, but no executable body:
+            # like the ELF fixture this must be classified before exec fails.
+            {
+                printf 'MZ'
+                _zero=0; while [ "$_zero" -lt 58 ]; do printf '\000'; _zero=$((_zero + 1)); done
+                printf '\100\000\000\000PE\000\000'
+                case "$(host_native_format)" in
+                    pe-aarch64) printf '\144\252' ;;
+                    pe-i386) printf '\114\001' ;;
+                    *) printf '\144\206' ;;
+                esac
+                _zero=0; while [ "$_zero" -lt 18 ]; do printf '\000'; _zero=$((_zero + 1)); done
+            } >"$1" ;;
         *)           printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000\002\000\076\000' >"$1" ;;
     esac
 }
@@ -670,6 +653,12 @@ kill -SEGV $$
     _d="$TMPROOT/fx_noexec"
     make_fake_repo "$_d" "$_good"
     chmod -x "$_d/bootstrap/stage9/simple"
+    case "$(host_native_format)" in
+        pe-*)
+            # MSYS derives executable status from file content/extension;
+            # chmod -x cannot make a shebang script non-executable on NTFS.
+            : > "$_d/bootstrap/stage9/simple" ;;
+    esac
     scan_tree "$_d"
     if [ -z "$SCAN_ERR" ] && [ "$SCAN_BAD" -gt 0 ]; then
         _pass=$((_pass + 1))

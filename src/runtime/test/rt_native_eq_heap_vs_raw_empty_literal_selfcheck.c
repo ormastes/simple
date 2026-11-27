@@ -150,9 +150,11 @@ static void expect(const char *what, RuntimeValue got, RuntimeValue want)
 
 int main(void)
 {
-    /* Raw, untagged string-literal pointers, as emit_bootstrap_str_const emits. */
-    static const char raw_empty[] = "";
-    static const char raw_vulkan[] = "vulkan";
+    /* Raw, untagged string-literal pointers, as emit_bootstrap_str_const emits.
+     * Untagged means the low 3 bits are 0: a 1-aligned char array can land on
+     * an odd address (seen on llvm-mingw), which reads as TAG_HEAP. */
+    static const char raw_empty[] __attribute__((aligned(8))) = "";
+    static const char raw_vulkan[] __attribute__((aligned(8))) = "vulkan";
     RuntimeValue L_empty  = (RuntimeValue)(uintptr_t)raw_empty;
     RuntimeValue L_vulkan = (RuntimeValue)(uintptr_t)raw_vulkan;
 

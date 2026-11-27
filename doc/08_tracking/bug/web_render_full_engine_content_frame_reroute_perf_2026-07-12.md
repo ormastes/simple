@@ -79,3 +79,16 @@ persist at some ratio in compiled code too.
   re-renders (coalesce rapid successive content changes within one frame
   tick) rather than reverting to the tag-strip fallback.
 
+
+## Verification 2026-11-25 (lane p3-bab, worktree wt-p3-bab, release/1.0.0)
+
+Confirmed the 2026-09-16 obsolete marking on the release/1.0.0 tree: the
+referenced probe runner `src/compiler_rust/target/bootstrap/simple` does not
+exist (untracked Rust seed build artifact), so the measurement procedure as
+written is not re-runnable. The renderer sources themselves
+(`src/os/compositor/simple_web_window_renderer.spl`,
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer*`)
+are still present; the ~55-60x ratio was only ever measured under the
+interpreted seed and was never re-measured on a self-hosted binary. Kept
+obsolete: any future perf work here should file a fresh measurement against
+the current deployed binary rather than revive this probe.

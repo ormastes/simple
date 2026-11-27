@@ -206,3 +206,27 @@ Requires real NVIDIA GPU hardware + libcuda.so to reproduce/verify
 (filed against a host with two working GPUs). No GPU hardware
 available in this environment. Leaving OPEN.
 
+## Verification 2026-11-25 (p2w1-ag lane, source inspection)
+
+The 2026-08-17 fix is still present on release/1.0.0 HEAD
+(`src/lib/nogc_sync_mut/gpu/engine2d/ffi_cuda.spl`):
+
+- `is_available()` Dynamic arm calls `cuInit` with the required flags
+  argument via `call1("cuInit", 0)` (:93) and additionally requires
+  `rt_cuda_device_count() > 0` (:100), so "available but zero devices" is
+  no longer reportable.
+- `device_count()` routes to the out-param-marshalling static extern
+  `rt_cuda_device_count()` in both Static and Dynamic arms (:124, :134).
+- Both regression specs exist:
+  `test/01_unit/lib/gpu/engine2d/ffi_cuda_out_param_marshalling_spec.spl`
+  and
+  `test/01_unit/lib/gpu/engine2d/ffi_out_param_via_return_value_detection_spec.spl`.
+
+Behavioral verification remains GPU-host-gated: this lane's host is Windows
+with no NVIDIA GPU/libcuda, and spec execution at this HEAD is additionally
+blocked repo-wide by the pinned seed rejecting `@representation_boundary`
+(known release/1.0.0 source/binary inconsistency). Defect 3 (Static-mode
+`synchronize()` fail-open on a missing extern) was not part of the 2026-08-17
+fix and is interpreter-behavior-dependent; it was not re-verified here.
+Status stays OPEN per the 2026-09-13 hardware-gating triage.
+

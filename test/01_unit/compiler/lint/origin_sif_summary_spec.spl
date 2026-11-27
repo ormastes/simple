@@ -1,0 +1,82 @@
+"""
+## Purpose and audience
+Purpose: Prove per-function ORIGIN summaries of exported functions travel
+across files through the SIF origin section, N import hops deep, with a cycle
+guard, and that a section with an unknown version is a cache miss.
+Audience: compiler and tooling engineers maintaining robust-boundary origins.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+The producer lowers each file to HIR and reads the lane-1 HIR origin table.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.driver.sif.sif_origin.{FnOriginSummary, sif_origin_serialize, sif_origin_parse, sif_origin_status}
+use compiler.tools.lint.rules.origin_import_graph.{OriginModuleSummary, origin_import_summaries, origin_import_summaries_cached, origin_summary_of_source}
+
+val FIX_DIR = "test/01_unit/compiler/lint/fixtures/origin_sif_chain"
+
+fn _origin_of(sums: [OriginModuleSummary], name: text) -> text:
+    for m in sums:
+        for f in m.fns:
+            if f.fn_name == name:
+                return f.return_origin
+    "<absent>"
+
+fn _flows_of(sums: [OriginModuleSummary], name: text) -> [i64]:
+    for m in sums:
+        for f in m.fns:
+            if f.fn_name == name:
+                return f.boundary_params
+    []
+
+describe "SIF origin summary across files":
+    it "one hop alone cannot see the extern behind B's wrapper":
+        step("Summarise B without A's summary (the PR #11808 one-hop view)")
+        val b = origin_summary_of_source(file_read(FIX_DIR + "/orig_b.spl"), [])
+        expect(b[0].fn_name).to_equal("wrap_read")
+        expect(b[0].return_origin).to_equal("")
+
+    it "carries extern_return A -> B -> C":
+        step("Summaries for C's imports, two hops deep")
+        val path = FIX_DIR + "/orig_c.spl"
+        val sums = origin_import_summaries(file_read(path), path)
+        expect(_origin_of(sums, "wrap_read")).to_equal("extern_return")
+        expect(_flows_of(sums, "wrap_write").contains(0)).to_equal(true)
+
+    it "terminates on an import cycle":
+        step("x imports y imports x")
+        val path = FIX_DIR + "/cyc_x.spl"
+        val sums = origin_import_summaries(file_read(path), path)
+        expect(_origin_of(sums, "y_get")).to_equal("param:0")
+
+    it "round-trips a section and rejects an unknown version":
+        step("Serialize, parse, then bump the version line")
+        val s = sif_origin_serialize("m", [FnOriginSummary(fn_name: "f", return_origin: "extern_return", boundary_params: [0, 2])])
+        expect(sif_origin_status(s)).to_equal("")
+        expect(sif_origin_parse(s)[0].boundary_params.len()).to_equal(2)
+        val bad = s.replace("sif-origin-version: 1", "sif-origin-version: 99")
+        expect(sif_origin_status(bad)).to_equal("sif-origin: unknown version")
+        expect(sif_origin_parse(bad).len()).to_equal(0)
+
+    it "treats a stale-version cached section as a miss and recomputes":
+        step("Seed the cache with a v99 section for B")
+        val b_path = FIX_DIR + "/orig_b.spl"
+        val stale = sif_origin_serialize("orig_b", []).replace("sif-origin-version: 1", "sif-origin-version: 99")
+        val path = FIX_DIR + "/orig_c.spl"
+        val sums = origin_import_summaries_cached(file_read(path), path, [b_path], [stale])
+        expect(_origin_of(sums, "wrap_read")).to_equal("extern_return")
+
+describe "SIF origin summary from the HIR origin table":
+    it "sees an extern return through a let-copy chain":
+        # @req: REQ-DIAG-POLICY-001
+        step("val r = extern(); val s = r; s -> extern_return; param copies -> param:k")
+        val a = OriginModuleSummary(module: "orig_a", fns: origin_summary_of_source(file_read(FIX_DIR + "/orig_a.spl"), []))
+        val src = "use orig_a.{rt_read_raw, rt_write_raw}\n\npub fn chained() -> i64:\n    val r = rt_read_raw()\n    val s = r\n    s\n\npub fn pass_on(v: i64, w: i64):\n    val u = w\n    rt_write_raw(u)\n"
+        val fns = origin_summary_of_source(src, [a])
+        expect(fns[0].fn_name).to_equal("chained")
+        expect(fns[0].return_origin).to_equal("extern_return")
+        expect(fns[1].boundary_params).to_equal([1])

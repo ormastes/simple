@@ -1,5 +1,13 @@
 # KV260 tiny-BRAM SoC: firmware runs TWICE per reset on silicon (GHDL runs once)
 ## Open 2026-09-16 — needs owner triage
+## Triage 2026-11-25 — still OPEN, silicon-only; blocked on physical KV260 hardware
+
+2026-11-25 triage (work/p3-baq-20261125): the defect reproduces only on real
+xck26 silicon (GHDL rehearsal of the same RTL runs once); the next diagnostic
+step (run-counter register in the obs command set) requires an RTL change, a
+bitstream build, and JTAG access to a physical KV260 board. None of that is
+possible from this Windows host. Left OPEN; no doc content changed beyond
+this note.
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.

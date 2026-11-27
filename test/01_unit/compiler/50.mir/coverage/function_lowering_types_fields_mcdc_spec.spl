@@ -1,0 +1,548 @@
+# @req REQ-GEN-COV-MIRERASED
+"""
+# MC/DC coverage: function_lowering.spl — lower_type, kernel params, attrs, field resolution
+
+Target: src/compiler/50.mir/_MirLowering/function_lowering.spl
+Direct calls on a fresh `MirLowering`; table state is set on the lowering.
+Function-body decisions (lower_function / lower_block_expected) are in
+`function_lowering_body_mcdc_spec.spl`; trace-gated decisions are in
+`function_lowering_trace_mcdc_spec.spl`.
+
+## Decision inventory (this file)
+
+| Line | Decision | Covering its |
+|------|----------|--------------|
+| 945/947/956/962 | Vulkan param: array / slice / u32 element / u32 bound / reject | MIRERASED-101..103 |
+| 978/980 | CUDA param: array / slice / scalar | MIRERASED-104 |
+| 993..1030 | apply_function_attr_to_mir flags | MIRERASED-105 (all T), 106 (all F) |
+| 1115 | `type_ == nil` | MIRERASED-110 (unsafe nil) |
+| 1119 c0 | tag probe gate | F only: needs SIMPLE_MIR_TAG_PROBE=1 before the first read (process-cached); gap |
+| 1125/1127/1128/1131 | `callee_disc < 0` corrupt kind carrier | unreachable on the interpreter (a HirType kind always has a valid discriminant); gap |
+| 1186 | Dict predispatch | MIRERASED-111 |
+| 1193/1198/1200/1202 | Named predispatch + custom primitive bool / i64 / f64 / struct | MIRERASED-112 |
+| 1212 | Any predispatch | MIRERASED-113 |
+| 1219/1229 | Optional predispatch, inner Named / scalar | MIRERASED-114 |
+| 1236/1237/1242 | optional-inner trace generation gate | first call T, later F; 1237/1242 T in the trace spec |
+| 1252 | Int signed / unsigned | MIRERASED-115 |
+| 1286 | Array size present / absent | MIRERASED-116 |
+| 1324/1328/1330/1332 | Named match arm | unreachable: the 1193 predispatch returns for every Named first; gap |
+| 1348/1352 | Infer arm fn name, span file / line | MIRERASED-117 |
+| 1376/1378/1382/1386/1401/1403 | Error arm levels and rate limit | MIRERASED-118..120 |
+| 1448 | Any match arm profile gate | unreachable: the 1212 Any predispatch returns first (bug suspect, MIRERASED-121); gap |
+| (match) | TypeParam arm erases to i64 | MIRERASED-122 |
+| 1774/1776/1777 | Result-Err owner provenance | MIRERASED-130..132 |
+| 1784/1788/1791/1792/1795 | value provenance tier | MIRERASED-133, 134 |
+| 1799 | Err record without exact layout | MIRERASED-132 |
+| 1826/1829/1833/1834 | module-qualified tier | MIRERASED-135, 136 |
+| 1842/1863/1865/1867/1871/1872/1875/1878/1879/1882 | field_map tier and its trust checks | MIRERASED-137..139 |
+| 1887/1893/1896/1897 | bare-name tier | MIRERASED-140 |
+| 1906 | provider layout missed | F only: demand-on-read (provider_layout_demand_v1) materializes the same leaf just before; gap |
+| 1908/1910/1912/1921 | unresolved owner, field trace, qualified miss | MIRERASED-141 |
+| (match) | erased `T` base without record identity is fatal | MIRERASED-142 |
+| 1947/1949/1958/1960/1962/1966/1968 | resolve_base_struct_name | MIRERASED-143..145 |
+| 1980 | expr_type_symbol nil type | MIRERASED-146 |
+
+Bug suspects:
+- function_lowering.spl:1212 returns `MirType.i64()` for every `Any` before the
+  `case HirTypeKind.Any` arm (~1446-1452) is reached, so the profile-gated
+  E-MIR-TYPE-Any diagnostic (fatal under critical, warning otherwise) never
+  fires. Repro: MIRERASED-121.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+# @tag:generics
+# @tag:coverage
+
+use std.spec.*
+use std.io_runtime.{env_set}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.common.diagnostics.span.Span
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{FunctionAttr}
+use compiler.core.types.{TYPE_BOOL, TYPE_I64, TYPE_F64}
+use compiler.frontend.core.types.{custom_primitive_register, custom_primitive_bind_symbol}
+use compiler.mir.mir.*
+use compiler.mir._MirLoweringExpr.result_err_record_owner.*
+
+fn ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn tp() -> HirType:
+    ty(HirTypeKind.TypeParam("T", []))
+
+fn u32_t() -> HirType:
+    ty(HirTypeKind.Int(32, false))
+
+fn i64_t() -> HirType:
+    ty(HirTypeKind.Int(64, true))
+
+fn fresh() -> MirLowering:
+    MirLowering.new(SymbolTable.new())
+
+fn with(symbols: SymbolTable) -> MirLowering:
+    MirLowering.new(symbols)
+
+fn unit_expr() -> HirExpr:
+    HirExpr(kind: HirExprKind.UnitLit, has_type_: false, type_: ty(HirTypeKind.Unit), span: Span.empty())
+
+fn typed_expr(t: HirType) -> HirExpr:
+    HirExpr(kind: HirExprKind.UnitLit, has_type_: true, type_: t, span: Span.empty())
+
+fn param(t: HirType) -> HirParam:
+    HirParam(symbol: SymbolId(id: 1), name: "p", type_: t, has_default: false, default: unit_expr(), span: Span.empty(), is_mutable: false)
+
+fn fatal_count(l: MirLowering) -> i64:
+    var n = 0
+    for e in l.errors:
+        if e.fatal:
+            n = n + 1
+    n
+
+fn kind_text(t: MirType) -> text:
+    "{t.kind}"
+
+describe "kernel parameter types":
+    # @req REQ-GEN-COV-MIRERASED-101
+    it "function_lowering.spl:945/947/956 c0 Vulkan [u32] array and [i64] array":
+        var l = fresh()
+        val ok = l.lower_vulkan_kernel_param_type(param(ty(HirTypeKind.Array(u32_t(), nil))))
+        expect(kind_text(ok)).to_start_with("MirTypeKind::Ptr")
+        expect(fatal_count(l)).to_equal(0)
+        l.lower_vulkan_kernel_param_type(param(ty(HirTypeKind.Array(i64_t(), nil))))
+        expect(fatal_count(l)).to_equal(1)
+
+    # @req REQ-GEN-COV-MIRERASED-102
+    it "function_lowering.spl:945 c1 Vulkan slice":
+        var l = fresh()
+        val ok = l.lower_vulkan_kernel_param_type(param(ty(HirTypeKind.Slice(u32_t()))))
+        expect(kind_text(ok)).to_start_with("MirTypeKind::Ptr")
+        expect(fatal_count(l)).to_equal(0)
+
+    # @req REQ-GEN-COV-MIRERASED-103
+    it "function_lowering.spl:962 Vulkan u32 bound accepted, other scalar rejected":
+        var l = fresh()
+        val b = l.lower_vulkan_kernel_param_type(param(u32_t()))
+        expect(b.kind == MirTypeKind.U32).to_equal(true)
+        l.lower_vulkan_kernel_param_type(param(ty(HirTypeKind.Bool)))
+        expect(fatal_count(l)).to_equal(1)
+        expect(l.errors[0].message).to_contain("Vulkan kernel parameters")
+
+    # @req REQ-GEN-COV-MIRERASED-104
+    it "function_lowering.spl:978/980 CUDA array, slice and scalar":
+        var l = fresh()
+        expect(kind_text(l.lower_cuda_kernel_param_type(param(ty(HirTypeKind.Array(i64_t(), nil)))))).to_start_with("MirTypeKind::Ptr")
+        expect(kind_text(l.lower_cuda_kernel_param_type(param(ty(HirTypeKind.Slice(i64_t())))))).to_start_with("MirTypeKind::Ptr")
+        expect(l.lower_cuda_kernel_param_type(param(i64_t())).kind == MirTypeKind.I64).to_equal(true)
+        expect(fatal_count(l)).to_equal(0)
+
+describe "apply_function_attr_to_mir":
+    # @req REQ-GEN-COV-MIRERASED-105
+    it "function_lowering.spl:993-1030 every attribute flag set":
+        var l = fresh()
+        val base = l.builder
+        var fa = FunctionAttr.default()
+        fa.is_gpu_kernel = true
+        fa.gpu_target = "cuda"
+        fa.gpu_backends = "cuda"
+        fa.has_fast_math = true
+        fa.unroll_factor = 4
+        fa.pipeline_ii = 2
+        fa.memory_banks = 3
+        fa.is_naked = true
+        fa.is_inline = true
+        fa.section = Some(".text.x")
+        fa.align = 16
+        fa.is_comdat_instance = true
+        fa.is_global = true
+        fa.simd_disable = true
+        val f0 = empty_fn()
+        val r = l.apply_function_attr_to_mir(f0, fa)
+        expect(r.is_kernel).to_equal(true)
+        expect(r.has_fast_math).to_equal(true)
+        expect(r.unroll_factor).to_equal(4)
+        expect(r.pipeline_ii).to_equal(2)
+        expect(r.memory_banks).to_equal(3)
+        expect(r.is_naked).to_equal(true)
+        expect(r.is_inline).to_equal(true)
+        expect(r.section).to_equal(".text.x")
+        expect(r.align).to_equal(16)
+        expect(r.is_comdat).to_equal(true)
+        expect(r.is_global).to_equal(true)
+        expect(r.simd_disabled).to_equal(true)
+
+    # @req REQ-GEN-COV-MIRERASED-106
+    it "function_lowering.spl:993-1030 default attributes leave the function plain":
+        val l = fresh()
+        var fa = FunctionAttr.default()
+        val r0 = l.apply_function_attr_to_mir(empty_fn(), fa)
+        expect(r0.is_kernel).to_equal(false)
+        expect(r0.unroll_factor).to_equal(0)
+        expect(r0.simd_disabled).to_equal(false)
+        step("kernel without explicit backends takes the target's order")
+        fa.is_gpu_kernel = true
+        fa.gpu_target = "cuda"
+        val r1 = l.apply_function_attr_to_mir(empty_fn(), fa)
+        expect(r1.is_kernel).to_equal(true)
+        expect(r1.gpu_target).to_equal("cuda")
+
+fn empty_fn() -> MirFunction:
+    var b = MirBuilder.new()
+    val sig = MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Unit), is_variadic: false)
+    b.begin_function(SymbolId(id: 0), "f", sig, Span.empty())
+    b.terminate_return(nil)
+    b.end_function()
+
+describe "lower_type predispatch":
+    # @req REQ-GEN-COV-MIRERASED-110
+    it "function_lowering.spl:1115 T nil type is fatal and lowers to i64":
+        var l = fresh()
+        unsafe:
+            val n: HirType = nil
+            val r = l.lower_type(n)
+            expect(r.kind == MirTypeKind.I64).to_equal(true)
+        expect(l.errors[0].message).to_contain("missing HIR type")
+
+    # @req REQ-GEN-COV-MIRERASED-111
+    it "function_lowering.spl:1186 T Dict lowers key and value":
+        var l = fresh()
+        val r = l.lower_type(ty(HirTypeKind.Dict(i64_t(), ty(HirTypeKind.Bool))))
+        expect(kind_text(r)).to_start_with("MirTypeKind::Dict")
+
+    # @req REQ-GEN-COV-MIRERASED-112
+    it "function_lowering.spl:1193/1198/1200/1202 Named custom primitives and plain struct":
+        var syms = SymbolTable.new()
+        val b_id = syms.define("CovFlag", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, nil)
+        val i_id = syms.define("CovCount", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, nil)
+        val f_id = syms.define("CovRatio", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, nil)
+        val s_id = syms.define("CovPlain", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, nil)
+        custom_primitive_register("CovFlag", TYPE_BOOL)
+        custom_primitive_bind_symbol("CovFlag", b_id.id)
+        custom_primitive_register("CovCount", TYPE_I64)
+        custom_primitive_bind_symbol("CovCount", i_id.id)
+        custom_primitive_register("CovRatio", TYPE_F64)
+        custom_primitive_bind_symbol("CovRatio", f_id.id)
+        var l = with(syms)
+        expect(l.lower_type(ty(HirTypeKind.Named(b_id, []))).kind == MirTypeKind.Bool).to_equal(true)
+        expect(l.lower_type(ty(HirTypeKind.Named(i_id, []))).kind == MirTypeKind.I64).to_equal(true)
+        expect(l.lower_type(ty(HirTypeKind.Named(f_id, []))).kind == MirTypeKind.F64).to_equal(true)
+        expect(kind_text(l.lower_type(ty(HirTypeKind.Named(s_id, []))))).to_start_with("MirTypeKind::Struct")
+
+    # @req REQ-GEN-COV-MIRERASED-113
+    it "function_lowering.spl:1212 T Any predispatch lowers to i64":
+        var l = fresh()
+        env_set("SIMPLE_SAFETY_PROFILE", "")
+        val r = l.lower_type(ty(HirTypeKind.Any))
+        expect(r.kind == MirTypeKind.I64).to_equal(true)
+        expect(fatal_count(l)).to_equal(0)
+
+    # @req REQ-GEN-COV-MIRERASED-114
+    it "function_lowering.spl:1219/1229 Optional of Named and of scalar":
+        var syms = SymbolTable.new()
+        val s_id = syms.define("CovBox", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, nil)
+        var l = with(syms)
+        expect(kind_text(l.lower_type(ty(HirTypeKind.Optional(ty(HirTypeKind.Named(s_id, []))))))).to_start_with("MirTypeKind::Tuple")
+        expect(kind_text(l.lower_type(ty(HirTypeKind.Optional(i64_t()))))).to_start_with("MirTypeKind::Tuple")
+
+    # @req REQ-GEN-COV-MIRERASED-115
+    it "function_lowering.spl:1252 signed and unsigned ints":
+        var l = fresh()
+        expect(l.lower_type(ty(HirTypeKind.Int(8, true))).kind == MirTypeKind.I8).to_equal(true)
+        expect(l.lower_type(ty(HirTypeKind.Int(16, false))).kind == MirTypeKind.U16).to_equal(true)
+        expect(l.lower_type(u32_t()).kind == MirTypeKind.U32).to_equal(true)
+
+    # @req REQ-GEN-COV-MIRERASED-116
+    it "function_lowering.spl:1286 array with and without a size":
+        var l = fresh()
+        expect(kind_text(l.lower_type(ty(HirTypeKind.Array(i64_t(), Some(4)))))).to_contain("4")
+        expect(kind_text(l.lower_type(ty(HirTypeKind.Array(i64_t(), nil))))).to_start_with("MirTypeKind::Array")
+
+describe "lower_type diagnostic arms":
+    # @req REQ-GEN-COV-MIRERASED-117
+    it "function_lowering.spl:1348/1352 Infer names the function and keeps a real span":
+        var l = fresh()
+        l.lower_type(ty(HirTypeKind.Infer(3, 0)))
+        expect(l.errors[0].message).to_contain("<module-level>")
+        expect(l.errors[0].span.?).to_equal(false)
+        l.mir_tag_probe_active_function = "covfn"
+        l.lower_type(HirType(kind: HirTypeKind.Infer(4, 0), span: Span(start: 0, end: 1, line: 0, col: 1, file: "a.spl", length: 1)))
+        expect(l.errors[1].message).to_contain("covfn")
+        expect(l.errors[1].span.?).to_equal(true)
+        l.lower_type(HirType(kind: HirTypeKind.Infer(5, 0), span: Span(start: 0, end: 1, line: 7, col: 1, file: "", length: 1)))
+        expect(l.errors[2].span.?).to_equal(true)
+
+    # @req REQ-GEN-COV-MIRERASED-118
+    it "function_lowering.spl:1376 Error arm off level records nothing":
+        var l = fresh()
+        l.mir_advisory_levels["E-MIR-TYPE-Error"] = "off"
+        l.mir_advisory_levels_loaded = true
+        expect(l.lower_type(ty(HirTypeKind.Error)).kind == MirTypeKind.I64).to_equal(true)
+        expect(l.mir_advisories.len()).to_equal(0)
+
+    # @req REQ-GEN-COV-MIRERASED-119
+    it "function_lowering.spl:1386 Error arm promoted to error is fatal":
+        var l = fresh()
+        l.mir_advisory_levels["E-MIR-TYPE-Error"] = "error"
+        l.mir_advisory_levels_loaded = true
+        l.mir_tag_probe_active_function = "covfn"
+        l.lower_type(HirType(kind: HirTypeKind.Error, span: Span(start: 0, end: 1, line: 2, col: 1, file: "e.spl", length: 1)))
+        expect(fatal_count(l)).to_equal(1)
+        expect(l.errors[0].message).to_contain("covfn")
+        step("1382 c1: no file but a real line still carries the span")
+        l.lower_type(HirType(kind: HirTypeKind.Error, span: Span(start: 0, end: 1, line: 5, col: 1, file: "", length: 1)))
+        expect(l.errors[1].span.?).to_equal(true)
+
+    # @req REQ-GEN-COV-MIRERASED-120
+    it "function_lowering.spl:1401/1403 Error arm warns 3 times, then one summary, then silence":
+        var l = fresh()
+        l.mir_advisory_levels_loaded = true
+        var n = 0
+        while n < 5:
+            l.lower_type(ty(HirTypeKind.Error))
+            n = n + 1
+        expect(l.mir_advisories.len()).to_equal(4)
+        expect(l.mir_advisories[3].message).to_contain("suppressed after 3")
+        expect(fatal_count(l)).to_equal(0)
+
+    # @req REQ-GEN-COV-MIRERASED-121
+    it "function_lowering.spl:1212 Any predispatch shadows the profile-gated Any arm (1448) even under critical":
+        step("BUG SUSPECT: the 1448 E-MIR-TYPE-Any arm is dead; critical Any is erased silently")
+        var l = fresh()
+        env_set("SIMPLE_SAFETY_PROFILE", "critical")
+        val r = l.lower_type(ty(HirTypeKind.Any))
+        env_set("SIMPLE_SAFETY_PROFILE", "")
+        expect(r.kind == MirTypeKind.I64).to_equal(true)
+        expect(l.errors.len()).to_equal(0)
+
+    # @req REQ-GEN-COV-MIRERASED-122
+    it "function_lowering.spl TypeParam arm erases T to the tagged i64 word without a diagnostic":
+        var l = fresh()
+        val r = l.lower_type(tp())
+        expect(r.kind == MirTypeKind.I64).to_equal(true)
+        expect(l.errors.len()).to_equal(0)
+        step("a generic container element is erased the same way")
+        expect(kind_text(l.lower_type(ty(HirTypeKind.Array(tp(), nil))))).to_start_with("MirTypeKind::Array((MirType(kind: MirTypeKind::I64)")
+
+describe "resolve_field_index":
+    # @req REQ-GEN-COV-MIRERASED-130
+    it "function_lowering.spl:1774/1776 T Err record without a provider snapshot is 0 and fatal":
+        var l = fresh()
+        l.result_err_record_owners[5] = "m::E"
+        expect(l.resolve_field_index(unit_expr(), LocalId(id: 5), "code", nil)).to_equal(0)
+        expect(fatal_count(l)).to_equal(1)
+
+    # @req REQ-GEN-COV-MIRERASED-131
+    it "function_lowering.spl:1777 c0 / c1 Err provenance must match the value owner":
+        val owner = "m::E"
+        val identity = result_err_layout_identity(owner)
+        var l = fresh()
+        l.composite_layout_digests[identity] = "d"
+        l.composite_layout_owner_counts[identity] = 1
+        l.result_err_layout_types[identity] = "i64"
+        l.struct_field_order[owner] = ["code", "msg"]
+        l.struct_field_hir_type[owner] = [i64_t(), i64_t()]
+        l.result_err_record_owners[5] = owner
+        step("c0: no value provenance")
+        expect(l.resolve_field_index(unit_expr(), LocalId(id: 5), "msg", nil)).to_equal(0)
+        expect(l.errors[0].message).to_contain("conflicting value provenance")
+        step("c1: provenance names another owner")
+        l.struct_value_syms[5] = "m::Other"
+        expect(l.resolve_field_index(unit_expr(), LocalId(id: 5), "msg", nil)).to_equal(0)
+        expect(fatal_count(l)).to_equal(2)
+        step("FF: matching provenance resolves the exact layout")
+        l.struct_value_syms[5] = owner
+        expect(l.resolve_field_index(unit_expr(), LocalId(id: 5), "msg", nil)).to_equal(1)
+        expect(fatal_count(l)).to_equal(2)
+
+    # @req REQ-GEN-COV-MIRERASED-132
+    it "function_lowering.spl:1799 T Err record whose field is not in its dotted-owner layout":
+        val owner = "m.E"
+        val identity = result_err_layout_identity(owner)
+        var l = fresh()
+        l.composite_layout_digests[identity] = "d"
+        l.composite_layout_owner_counts[identity] = 1
+        l.result_err_layout_types[identity] = "i64"
+        l.struct_field_order[owner] = ["code"]
+        l.struct_field_hir_type[owner] = [i64_t()]
+        l.result_err_record_owners[5] = owner
+        l.struct_value_syms[5] = owner
+        expect(l.resolve_field_index(unit_expr(), LocalId(id: 5), "missing", nil)).to_equal(0)
+        expect(l.errors[0].message).to_contain("Result Err record field has no exact provider layout")
+
+    # @req REQ-GEN-COV-MIRERASED-133
+    it "function_lowering.spl:1784/1788/1791/1792 value provenance hit, miss and conflict":
+        var l = fresh()
+        l.struct_field_order["P"] = ["x", "y"]
+        l.struct_value_syms[1] = "P"
+        expect(l.resolve_field_index(unit_expr(), LocalId(id: 1), "y", nil)).to_equal(1)
+        step("1795 F: bare owner without the field falls through to 0")
+        expect(l.resolve_field_index(unit_expr(), LocalId(id: 1), "z", nil)).to_equal(0)
+        expect(fatal_count(l)).to_equal(0)
+        step("1788 c0 F: owner with no layout")
+        l.struct_value_syms[2] = "Q"
+        expect(l.resolve_field_index(unit_expr(), LocalId(id: 2), "x", nil)).to_equal(0)
+        step("1788 c1 F: conflicting bare name")
+        l.struct_field_order_conflict_warned["P"] = true
+        expect(l.resolve_field_index(unit_expr(), LocalId(id: 1), "y", nil)).to_equal(0)
+
+    # @req REQ-GEN-COV-MIRERASED-134
+    it "function_lowering.spl:1795 T exact value layout without the field is fatal":
+        var l = fresh()
+        l.struct_field_order["m::P"] = ["x"]
+        l.struct_value_syms[1] = "m::P"
+        expect(l.resolve_field_index(unit_expr(), LocalId(id: 1), "q", nil)).to_equal(0)
+        expect(l.errors[0].message).to_contain("absent from exact value layout")
+
+    # @req REQ-GEN-COV-MIRERASED-135
+    it "function_lowering.spl:1826/1829/1833/1834 module-qualified tier hit, miss and conflict":
+        var syms = SymbolTable.new()
+        val id = syms.define("Node", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "lib.nodes")
+        val node_t = ty(HirTypeKind.Named(id, []))
+        var l = with(syms)
+        l.struct_field_order["lib.nodes::Node"] = ["a", "b"]
+        expect(l.resolve_field_index(typed_expr(node_t), LocalId(id: 9), "b", nil)).to_equal(1)
+        expect(l.resolve_field_index(typed_expr(node_t), LocalId(id: 9), "c", nil)).to_equal(0)
+        expect(l.errors[0].message).to_contain("absent from exact struct/class layout")
+        l.struct_field_order_conflict_warned["lib.nodes::Node"] = true
+        expect(l.resolve_field_index(typed_expr(node_t), LocalId(id: 9), "a", nil)).to_equal(0)
+        expect(l.errors[1].message).to_contain("conflicting exact layout")
+
+    # @req REQ-GEN-COV-MIRERASED-136
+    it "function_lowering.spl:1829 c0 F unqualified symbol skips the qualified tier":
+        var syms = SymbolTable.new()
+        val id = syms.define("Pt", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, nil)
+        var l = with(syms)
+        l.struct_field_order["Pt"] = ["x", "y"]
+        expect(l.resolve_field_index(typed_expr(ty(HirTypeKind.Named(id, []))), LocalId(id: 9), "y", nil)).to_equal(1)
+        expect(fatal_count(l)).to_equal(0)
+
+    # @req REQ-GEN-COV-MIRERASED-137
+    it "function_lowering.spl:1842/1875/1878/1879 trusted field_map answers the index":
+        var syms = SymbolTable.new()
+        val id = syms.define("Fm", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, nil)
+        var l = with(syms)
+        l.field_map[id.id] = ["u", "v"]
+        expect(l.resolve_field_index(typed_expr(ty(HirTypeKind.Named(id, []))), LocalId(id: 9), "v", nil)).to_equal(1)
+        step("1865 T agreeing name-keyed row keeps trust")
+        l.struct_field_order["Fm"] = ["u", "v"]
+        expect(l.resolve_field_index(typed_expr(ty(HirTypeKind.Named(id, []))), LocalId(id: 9), "u", nil)).to_equal(0)
+        expect(l.resolve_field_index(typed_expr(ty(HirTypeKind.Named(id, []))), LocalId(id: 9), "v", nil)).to_equal(1)
+        step("1878 exhausts: absent field falls to 0")
+        expect(l.resolve_field_index(typed_expr(ty(HirTypeKind.Named(id, []))), LocalId(id: 9), "w", nil)).to_equal(0)
+
+    # @req REQ-GEN-COV-MIRERASED-138
+    it "function_lowering.spl:1867/1872 disagreeing field_map is distrusted for the named tier":
+        var syms = SymbolTable.new()
+        val id = syms.define("Fx", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, nil)
+        var l = with(syms)
+        l.field_map[id.id] = ["a", "b"]
+        step("length mismatch")
+        l.struct_field_order["Fx"] = ["b"]
+        expect(l.resolve_field_index(typed_expr(ty(HirTypeKind.Named(id, []))), LocalId(id: 9), "b", nil)).to_equal(0)
+        step("same length, different order: named tier gives 0 for b")
+        l.struct_field_order["Fx"] = ["b", "a"]
+        expect(l.resolve_field_index(typed_expr(ty(HirTypeKind.Named(id, []))), LocalId(id: 9), "a", nil)).to_equal(1)
+
+    # @req REQ-GEN-COV-MIRERASED-139
+    it "function_lowering.spl:1863/1882/1887 conflict-warned bare name is fatal; field trace prints":
+        var syms = SymbolTable.new()
+        val id = syms.define("Cw", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "m")
+        var l = with(syms)
+        l.field_map[id.id] = ["a"]
+        l.struct_field_order_conflict_warned["Cw"] = true
+        env_set("SIMPLE_MIR_FIELD_TRACE", "1")
+        val r = l.resolve_field_index(typed_expr(ty(HirTypeKind.Named(id, []))), LocalId(id: 9), "a", nil)
+        env_set("SIMPLE_MIR_FIELD_TRACE", "")
+        expect(r).to_equal(0)
+        expect(l.errors[0].message).to_contain("ambiguous struct/class name")
+
+    # @req REQ-GEN-COV-MIRERASED-140
+    it "function_lowering.spl:1893/1896/1897 bare-name tier hit and miss":
+        var syms = SymbolTable.new()
+        val id = syms.define("Bn", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, nil)
+        var l = with(syms)
+        l.struct_field_order["Bn"] = ["p", "q", "r"]
+        expect(l.resolve_field_index(typed_expr(ty(HirTypeKind.Named(id, []))), LocalId(id: 9), "r", nil)).to_equal(2)
+        expect(l.resolve_field_index(typed_expr(ty(HirTypeKind.Named(id, []))), LocalId(id: 9), "s", nil)).to_equal(0)
+        step("symbol without any layout: every tier misses")
+        val other = syms.define("Nl", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, nil)
+        var m = with(syms)
+        expect(m.resolve_field_index(typed_expr(ty(HirTypeKind.Named(other, []))), LocalId(id: 9), "s", nil)).to_equal(0)
+        expect(fatal_count(m)).to_equal(0)
+
+    # @req REQ-GEN-COV-MIRERASED-141
+    it "function_lowering.spl:1908/1910/1912 unresolved ambiguous owner is fatal and traced":
+        var l = fresh()
+        l.struct_value_syms[3] = "Amb"
+        l.struct_field_order_conflict_warned["Amb"] = true
+        env_set("SIMPLE_MIR_FIELD_TRACE", "1")
+        val r = l.resolve_field_index(unit_expr(), LocalId(id: 3), "f", nil)
+        env_set("SIMPLE_MIR_FIELD_TRACE", "")
+        expect(r).to_equal(0)
+        expect(l.errors[0].message).to_contain("ambiguous struct/class owner 'Amb'")
+        step("1910 F: unambiguous unknown owner is silent")
+        var m = fresh()
+        m.struct_value_syms[3] = "Unk"
+        expect(m.resolve_field_index(unit_expr(), LocalId(id: 3), "f", nil)).to_equal(0)
+        expect(fatal_count(m)).to_equal(0)
+
+    # @req REQ-GEN-COV-MIRERASED-142
+    it "function_lowering.spl erased T base without record identity is fatal":
+        var l = fresh()
+        l.remember_local_hir_type(4, tp(), 2, 0)
+        expect(l.resolve_field_index(unit_expr(), LocalId(id: 4), "f", nil)).to_equal(0)
+        expect(l.errors[0].message).to_contain("erased generic value 'T'")
+        step("a concrete local type stays the silent 0 fallback")
+        var m = fresh()
+        m.remember_local_hir_type(4, i64_t(), 2, 0)
+        expect(m.resolve_field_index(unit_expr(), LocalId(id: 4), "f", nil)).to_equal(0)
+        expect(fatal_count(m)).to_equal(0)
+
+describe "resolve_base_struct_name and expr_type_symbol":
+    # @req REQ-GEN-COV-MIRERASED-143
+    it "function_lowering.spl:1947/1949 value provenance wins unless ambiguous":
+        var l = fresh()
+        l.struct_value_syms[1] = "P"
+        expect(l.resolve_base_struct_name(unit_expr(), LocalId(id: 1)) ?? "").to_equal("P")
+        l.struct_field_order_conflict_warned["P"] = true
+        expect(l.resolve_base_struct_name(unit_expr(), LocalId(id: 1)).?).to_equal(false)
+        expect(l.errors[0].message).to_contain("no module-qualified type provenance")
+
+    # @req REQ-GEN-COV-MIRERASED-144
+    it "function_lowering.spl:1958/1960/1962 declared struct and class owners":
+        var syms = SymbolTable.new()
+        val s_id = syms.define("Sv", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, nil)
+        val c_id = syms.define("Cv", SymbolKind.Class, nil, Span.empty(), Visibility.Public, false, nil)
+        var l = with(syms)
+        step("struct without layout: bare name")
+        expect(l.resolve_base_struct_name(typed_expr(ty(HirTypeKind.Named(s_id, []))), LocalId(id: 9)) ?? "").to_equal("Sv")
+        step("struct with layout")
+        l.struct_field_order["Sv"] = ["a"]
+        expect(l.resolve_base_struct_name(typed_expr(ty(HirTypeKind.Named(s_id, []))), LocalId(id: 9)) ?? "").to_equal("Sv")
+        step("class identity")
+        expect(l.resolve_base_struct_name(typed_expr(ty(HirTypeKind.Named(c_id, []))), LocalId(id: 9)) ?? "").to_equal("Cv")
+        step("ambiguous registered name")
+        l.struct_field_order_conflict_warned["Sv"] = true
+        expect(l.resolve_base_struct_name(typed_expr(ty(HirTypeKind.Named(s_id, []))), LocalId(id: 9)).?).to_equal(false)
+        expect(fatal_count(l)).to_equal(1)
+
+    # @req REQ-GEN-COV-MIRERASED-145
+    it "function_lowering.spl:1966/1968 no type and no provenance is nil":
+        var l = fresh()
+        expect(l.resolve_base_struct_name(unit_expr(), LocalId(id: 2)).?).to_equal(false)
+        l.struct_value_syms[2] = "Fine"
+        l.struct_field_order_conflict_warned["Other"] = true
+        expect(l.resolve_base_struct_name(unit_expr(), LocalId(id: 2)) ?? "").to_equal("Fine")
+        expect(fatal_count(l)).to_equal(0)
+
+    # @req REQ-GEN-COV-MIRERASED-146
+    it "function_lowering.spl:1980 nil and non-Named types give no symbol":
+        val l = fresh()
+        unsafe:
+            val n: HirType = nil
+            val e = HirExpr(kind: HirExprKind.UnitLit, has_type_: false, type_: n, span: Span.empty())
+            expect(l.expr_type_symbol(e).?).to_equal(false)
+        expect(l.expr_type_symbol(typed_expr(i64_t())).?).to_equal(false)
+        expect(l.expr_type_symbol(typed_expr(ty(HirTypeKind.Named(SymbolId(id: 3), [])))).?).to_equal(true)

@@ -1,0 +1,37 @@
+"""
+## Purpose and audience
+Purpose: Pin the runtime-ABI call form `rt_string_new(bytes, len) -> text`
+(Rust and C runtimes: `rt_string_new(const uint8_t*, uint64_t)`) so the
+interpreter copies `len` bytes from a raw address into a `text`, as
+`packed_blob_view.spl` relies on.
+Audience: interpreter and runtime engineers.
+## Compatibility and limitations
+Uses `rt_alloc` / `rt_ptr_write_u8` for the source bytes.
+"""
+
+use std.spec
+use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_write_u8}
+
+extern fn rt_string_new(bytes: i64, len: i64) -> text
+
+fn write_ascii(addr: i64, s: text):
+    var i = 0
+    val bytes = s.bytes()
+    while i < bytes.len():
+        unsafe(capabilities: [ffi, raw_ptr]): rt_ptr_write_u8(addr, i, bytes[i] as i64)
+        i = i + 1
+
+describe "rt_string_new ABI form (bytes, len)":
+    it "copies exactly len bytes from the address into text":
+        val addr = unsafe(capabilities: [ffi, raw_ptr]): rt_alloc(16)
+        write_ascii(addr, "hello world")
+        val s = unsafe(capabilities: [ffi, raw_ptr]): rt_string_new(addr, 5)
+        expect(s).to_equal("hello")
+        expect(s.len()).to_equal(5)
+        val tail = unsafe(capabilities: [ffi, raw_ptr]): rt_string_new(addr + 6, 5)
+        expect(tail).to_equal("world")
+        unsafe(capabilities: [ffi, raw_ptr]): rt_free(addr)
+
+    it "returns empty text for a zero length":
+        val s = unsafe(capabilities: [ffi, raw_ptr]): rt_string_new(0, 0)
+        expect(s).to_equal("")

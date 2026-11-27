@@ -1,0 +1,851 @@
+use compiler.common.driver_source_file.{source_file_with_manifest_evidence_v1}
+# CompilerDriver phase-2 source parsing.
+
+use compiler.driver.cache.tldr_layout_v1.{tldr_dir_v1}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use std.io_runtime.{env_set, exit}
+use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_native_objectless_proof.{driver_native_parser_can_persist_objectless, driver_native_objectless_proof_key, driver_native_retained_objectless_proofs}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.native_source_interface_index.{NativeSourceInterfaceIndexV1,
+    native_source_interface_index_from_sources_with_digests_v1}
+use compiler.driver.cache.native_module_input_fact_snapshots.{
+    native_module_input_fact_snapshots_v1, native_module_input_fact_snapshots_for_modules_v1}
+use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
+use compiler.driver.driver_worker_surface_graph_v1.{worker_surface_gap_v1, worker_surface_gap_message_v1}
+use compiler.driver.perf.compiler_work_counters.{compiler_work_parser_schedule_v1}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.driver_core_modes.{CompileMode}
+use compiler.frontend.frontend.{parse_full_frontend_with_advisory_policy_v1, parse_full_frontend_in_borrowed_scope_with_advisory_policy_v1}
+use compiler.frontend.frontend.{parse_full_frontend_target_receipted_v1,
+    parse_full_frontend_target_receipted_in_borrowed_scope_v1}
+use compiler.frontend.frontend.{parse_full_frontend_target_receipted_uncached_in_borrowed_scope_v1,
+    parse_full_frontend_uncached_in_borrowed_scope_with_advisory_policy_v1}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid_v1}
+use compiler.frontend.core.parser_preprocessor.{pp_declare_parse_scope}
+use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
+use compiler.frontend.core.lexer_struct.{core_token_text_intern_reset}
+use compiler.frontend.aspect_registry.{aspect_registry_promote_transient_owner}
+use compiler.frontend.effect_registry.{effect_registry_promote_transient_owner}
+use compiler.frontend.rt_criticality_registry.{rt_criticality_promote_transient_owner}
+use compiler.frontend.layer_eq_registry.{layer_eq_registry_promote_transient_owner}
+use compiler.core.ast.{ast_reset, ast_prepare_persistent_owner_v1}
+use compiler.core.ast_coverage_inventory.{
+    compiler_coverage_inventory_promote_transient_owner,
+    compiler_coverage_inventory_release_parse_scratch}
+use compiler.frontend.desugar.placeholder_lambda.{placeholder_release_parse_scratch}
+use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
+use compiler.driver.driver_parse_shard_rows_v1.{driver_parse_shard_row_plan_v1}
+use compiler.frontend.flat_ast_bridge.{flat_parse_module_body_calls}
+use compiler.core.parser.{par_had_error_get}
+use compiler.core.parser.{parser_promote_transient_owners, parser_initialization_generation_v1}
+use compiler.core.parser_decls.{parser_declaration_metadata_promote_transient_owner}
+use compiler.frontend.resource_registry.{resource_registry_promote_transient_owner}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_promote_transient_owner}
+use compiler.driver.driver_hir_worker_surface_v1.{driver_surface_parse_text_v1,
+    driver_hir_worker_parse_verdict_v1}
+use compiler.driver.driver_mir_shard_hir_residency_v1.{file_worker_unit_keep_full_record_v1}
+use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_closure_selected_v1,
+    worker_surface_seed_v1, worker_surface_closure_v1, worker_surface_ready_v1,
+    worker_surface_restrict_claims_v1, worker_surface_text_v1, worker_surface_counters_v1,
+    worker_mir_scoped_targets_v1, worker_surface_import_closure_v1,
+    worker_hir_restrict_loads_v1, source_path_by_canonical_map_v1,
+    worker_source_may_declare_advice_v1, worker_unit_pick_order_v1, worker_unit_pick_with_cycle_peers_v1,
+    worker_admitted_edges_v1, worker_admitted_edges_selected_v1, worker_admitted_closure_v1, worker_admitted_order_v1,
+    worker_admitted_error_v1, WorkerAdmittedGraphV1}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_bind_row_identity,
+    module_surface_admitted_roots_v1, module_surface_admitted_logical_id_v1,
+    module_surface_match_admitted_logical_v1}
+use compiler.driver.driver_tldr_import_route_v1.{tldr_closure_walk_check_v1, tldr_imports_enabled_v1, unit_tldr_imports_enabled_v1}
+use compiler.driver.driver_unit_tldr_imports_v1.{UnitTldrPlanV1, UnitTldrSurfaceIndexV1, unit_tldr_plan_v1, unit_tldr_empty_plan_v1,
+    unit_tldr_module_paths_v1, unit_tldr_needed_flags_v1, unit_tldr_surface_for_v1,
+    unit_tldr_surface_index_empty_v1, unit_tldr_surface_index_v1, unit_tldr_surface_for_row_indexed_v1, unit_tldr_log_line_v1}
+use compiler.driver.driver_tldr_import_route_v1.{TldrFrozenRoutePlanV1, tldr_route_frozen_inputs_v1}
+use compiler.driver.driver_tldr_frozen_surface_route_v1.{tldr_frozen_surface_lane_error_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_closure_incomplete_publish_v1,
+    native_file_worker_unit_active_v1, native_file_worker_batch_v1, NATIVE_FILE_WORKER_ONLY_PATHS_ENV_V1,
+    native_file_unit_tldr_root_v1, native_file_unit_tldr_route_error_v1, NATIVE_FILE_UNIT_TLDR_ROOT_ENV_V1}
+use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_promote_transient_owner_v1}
+use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_frontend_identity, native_build_frontend_portable_source_digest_v1}
+use compiler.driver.cache.phase_compatibility_admission.{
+    driver_import_phase2_frontend_v1, driver_stage_phase2_frontend_frozen_raw_v1
+}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_hits, frontend_parse_cache_misses,
+    frontend_cache_native_digest_unavailable}
+use compiler.frontend.parser_types.*
+use compiler.hir.hir_lowering.module_surface.{
+    ModuleSurface,
+    ModuleSurfaceBuilder,
+    ModuleSurfacesByName,
+    ModuleSurfaceParserOwner,
+    module_surface_canonical_path,
+    module_surface_from_owner,
+    module_surface_promote,
+    module_surfaces_promote,
+    module_surfaces_promote_reason,
+    module_surfaces_retained_alignment_error
+}
+use compiler.driver.driver_source_loading.{
+    _driver_physical_source_key,
+    _driver_text_bucket_index,
+    _driver_unique_physical_sources
+}
+use compiler.driver.driver_log_helpers.{
+    driver_phase_trace_enabled,
+    log_debug,
+    log_phase,
+    log_module_surface_released,
+    log_module_surface_stage,
+    log_build_progress
+}
+use compiler.driver.driver_cache_scope_policy_v1.{driver_frontend_cache_scope_publish_allowed_v1}
+use compiler.driver.driver_phase_gates.{
+    driver_streaming_surface_enabled,
+    driver_source_entry_request,
+    driver_source_entry_closure_enabled,
+    driver_source_matches_entry,
+    bootstrap_entry_source_index
+}
+use compiler.semantics.layer_call_wiring.{check_project_layer_calls}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
+use std.io_runtime.{file_exists}
+use compiler.common.structural_contracts.offload_profile.{OffloadDecision, validate_offload_profile}
+use compiler.common.structural_contracts.frontend_offload_switch.{
+    FrontendOffloadInputs, FrontendOffloadSwitch, resolve_frontend_offload,
+    frontend_offload_decision, frontend_offload_profile,
+    FRONTEND_OFFLOAD_GPU_PARSE_AVAILABLE, frontend_offload_receipt_line
+}
+
+use compiler.common.diagnostics.span.{Span}
+# Explicit public owner facades (owner decision 7: cross-module private access is an error).
+use compiler.driver.driver_source_parse_support.{
+    rt_transient_heap_promote, driver_parse_exit_v1, driver_parse_stdout_flush_v1,
+    driver_parse_env_get_v1, driver_parse_env_set_v1, driver_parse_transient_scope_begin_v1,
+    driver_parse_transient_scope_pause_v1, driver_parse_transient_scope_end_v1, driver_parse_shard_active,
+    driver_parse_shard_claimed, _driver_parse_shard_owns, driver_parse_shard_strided_start_v1, _driver_publish_frontend_cache_scope,
+    _STREAM_PARSE_ERROR_PREFIX, driver_frontend_offload_decision
+}
+
+use compiler.driver.driver_unit_order_index_v1.{unit_admitted_graph_v1, unit_order_index_enabled_v1,
+    UNIT_ORDER_INDEX_ENV_V1, UNIT_ORDER_SKIP_FRESH_ENV_V1, unit_order_skip_fresh_enabled_v1,
+    unit_order_fresh_flags_v1, unit_order_skip_fresh_order_v1}
+
+var _worker_readiness_edges_reported_v1: bool = false
+
+impl CompilerDriver:
+    # The streaming surface owner is intentionally committed in place.  Do not
+    # transport CompileContext through a tuple here: native tuple lowering can
+    # preserve the boolean while reconstructing an older value snapshot whose
+    # optional module_surfaces field is still nil.
+    me parse_all_streaming_surfaces_in_place_impl() -> bool:
+        self.tldr_surface_source_parses = 0
+        self.tldr_surface_interface_parses = 0
+        self.ctx.native_objectless_decl_proofs = {}
+        self.streaming_module_surfaces_owner = ModuleSurfacesByName.empty()
+        self.streaming_surface_owner_ready = false
+        self.streaming_entry_source_index_owner = bootstrap_entry_source_index(self.ctx)
+        # Same compiler-identity scope the non-streaming parse publishes: the
+        # HIR cache keys off it, and without it the streaming path had no cache.
+        log_phase("phase2:surface:cache-scope:start")
+        val _cache_scope_published = _driver_publish_frontend_cache_scope(self.ctx)
+        # The memo retains the scope text across files. Initialize it before
+        # opening any per-file arena, so it cannot retain a reclaimed string.
+        val _cache_scope_initialized = frontend_parse_cache_enabled()
+        log_phase("phase2:surface:cache-scope:done")
+        self.ctx.modules = {}
+        self.ctx.module_surfaces = None
+        # Phase 1 owns independent scalar text arrays; phase 2 never re-reads a
+        # SourceFile field after the load boundary.
+        val source_paths = self.ctx.source_paths_owner
+        val source_authored_paths = self.ctx.source_authored_paths_owner
+        val source_module_names = self.ctx.source_module_names_owner
+        var canonical_paths: [text] = []
+        log_phase("phase2:surface:canonical-paths:start")
+        for source_path in source_paths:
+            val frozen_path = module_surface_canonical_path(source_path)
+            if frozen_path == "":
+                self.ctx.add_error(
+                    "Module surface extraction error: empty canonical path in retained source inventory")
+                return false
+            canonical_paths = canonical_paths.push(frozen_path)
+        log_phase("phase2:surface:canonical-paths:done")
+        val frozen_source_count = source_paths.len()
+        if source_authored_paths.len() != frozen_source_count or
+           self.ctx.source_contents_owner.len() != frozen_source_count or
+           source_module_names.len() != frozen_source_count or
+           canonical_paths.len() != frozen_source_count or
+           frozen_source_count != self.ctx.sources.len():
+            self.ctx.add_error(
+                "Module surface extraction error: frozen source inventory length mismatch")
+            return false
+
+        var builder = ModuleSurfaceBuilder.new(self.ctx.options.library_mode)
+        var source_index = 0
+        var release_seq: i64 = 0
+        val parse_shard = driver_parse_shard_active()
+        # P5: a HIR shard worker builds real surfaces only for its seeds'
+        # import closure (driver_worker_surface_closure_v1.spl).
+        val worker_spec = driver_parse_env_get_v1("SIMPLE_HIR_SHARD") ?? ""
+        val worker_flag = driver_parse_env_get_v1("SIMPLE_HIR_WORKER_SKELETON") ?? ""
+        # P-A: a module-scoped MIR child (file-worker lane) seeds from its
+        # admitted targets and later loads HIR only for their import closure.
+        # Per-file unit child (native_file_worker_v1.spl): picks its batch here,
+        # deps first, and runs HIR + MIR + object for exactly those modules.
+        val worker_unit = worker_spec != "" and native_file_worker_unit_active_v1()
+        if tldr_imports_enabled_v1() and worker_unit:
+            self.ctx.add_error("TLDR-IMPORTS-E-BODY-REQUIRED: file worker needs admitted imported bodies")
+            return false
+        var admitted_graph = WorkerAdmittedGraphV1(edges: [], errors: [])
+        if worker_unit:
+            # Skip-fresh reads the PREVIOUS index, so it runs before the
+            # graph step below republishes it.
+            val unit_fresh = unit_order_fresh_flags_v1(
+                unit_order_skip_fresh_enabled_v1(driver_parse_env_get_v1(UNIT_ORDER_SKIP_FRESH_ENV_V1) ?? "",
+                    driver_parse_env_get_v1(UNIT_ORDER_INDEX_ENV_V1) ?? ""),
+                driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "", source_paths, self.ctx.source_contents_owner,
+                self.ctx.source_identities_owner)
+            val edge_result = unit_admitted_graph_v1(
+                unit_order_index_enabled_v1(driver_parse_env_get_v1(UNIT_ORDER_INDEX_ENV_V1) ?? ""),
+                driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "",
+                source_paths, self.ctx.source_contents_owner, source_module_names,
+                self.ctx.source_resolution_roots_owner, self.ctx.options.library_mode,
+                self.ctx.source_identities_owner)
+            if edge_result.is_err():
+                self.ctx.add_error(edge_result.unwrap_err())
+                return false
+            admitted_graph = edge_result.unwrap()
+            val unit_batch = native_file_worker_batch_v1(driver_parse_env_get_v1("SIMPLE_HIR_SHARD_CLAIM_LIMIT") ?? "")
+            val pick_result = worker_unit_pick_with_cycle_peers_v1(driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "",
+                driver_parse_env_get_v1("SIMPLE_HIR_SHARD_OWNER") ?? "", source_paths,
+                unit_order_skip_fresh_order_v1(worker_admitted_order_v1(admitted_graph.edges), unit_fresh),
+                unit_batch, admitted_graph.edges)
+            if pick_result.is_err():
+                self.ctx.add_error("file-worker unit pick failed: {pick_result.unwrap_err()}")
+                return false
+            val picked = pick_result.unwrap()
+            print "[file-worker] unit picked={picked.len()}"
+            # Import-cycle peers ride past the batch; the HIR claim limit
+            # (hir_shard_begin) must admit every pick or it seals as an orphan.
+            if picked.len() > unit_batch and not driver_parse_env_set_v1("SIMPLE_HIR_SHARD_CLAIM_LIMIT", "{picked.len()}"):
+                self.ctx.add_error("file-worker unit claim limit could not be raised for an import cycle")
+                return false
+            if picked.len() == 0:
+                driver_parse_stdout_flush_v1()
+                driver_parse_exit_v1(0)
+            if not driver_parse_env_set_v1(NATIVE_FILE_WORKER_ONLY_PATHS_ENV_V1, picked.join("\n")):
+                self.ctx.add_error("file-worker unit target environment could not be installed")
+                return false
+        val mir_targets = if worker_spec == "" or worker_unit:
+            worker_mir_scoped_targets_v1(driver_parse_env_get_v1("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "",
+                driver_parse_env_get_v1("SIMPLE_MIR_SHARD_ONLY_PATHS") ?? "", worker_flag)
+        else:
+            []
+        val mir_scoped = mir_targets.len() > 0
+        var mir_target_set: Dict<text, bool> = {}
+        for mt in mir_targets:
+            mir_target_set[mt] = true
+        if worker_unit and not mir_scoped:
+            self.ctx.add_error("file-worker unit requires module-scoped MIR targets (SIMPLE_HIR_WORKER_SKELETON=0 or SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 is not a unit lane)")
+            return false
+        val worker_closure = not parse_shard and (mir_scoped or
+            worker_surface_closure_selected_v1(worker_spec, worker_flag))
+        # PM3: a unit child parses only its picked files; imports resolve
+        # through TLDR summary surfaces (driver_unit_tldr_imports_v1.spl).
+        # No --cache-dir: the parent hands the unit the shared HIR queue's
+        # frontend root (NativeFileUnitProcessInvokerV1.run_unit). An empty
+        # root used to fall back to body-parsing the whole import closure.
+        val unit_tldr_root = native_file_unit_tldr_root_v1(
+            driver_parse_env_get_v1("SIMPLE_FRONTEND_CACHE_DIR") ?? "",
+            driver_parse_env_get_v1(NATIVE_FILE_UNIT_TLDR_ROOT_ENV_V1) ?? "")
+        val unit_root_error = native_file_unit_tldr_route_error_v1(worker_unit and worker_closure,
+            worker_unit and unit_tldr_imports_enabled_v1(true), unit_tldr_root)
+        if unit_root_error != "":
+            self.ctx.add_error(unit_root_error)
+            return false
+        val unit_tldr_on = worker_unit and worker_closure and unit_tldr_root != "" and
+            unit_tldr_imports_enabled_v1(true)
+        var unit_tldr_plan: UnitTldrPlanV1 = unit_tldr_empty_plan_v1()
+        val frozen_tldr_route = tldr_imports_enabled_v1()
+        var unit_snapshot_modules: Dict<text, bool> = {}
+        var unit_snapshot_scoped = false
+        val tldr_parser_calls_before = flat_parse_module_body_calls()
+        var frozen_tldr_plan = TldrFrozenRoutePlanV1(parse_texts: [],
+            source_parses: 0, interface_parses: 0, fallbacks: 0)
+        if frozen_tldr_route:
+            val lane_error = tldr_frozen_surface_lane_error_v1(
+                self.ctx.options.mode == CompileMode.Check, worker_spec != "",
+                parse_shard, mir_scoped, worker_unit,
+                self.ctx.runtime_std_full_inventory_selection.is_some())
+            if lane_error != "":
+                self.ctx.add_error(lane_error)
+                return false
+            if (driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "") != "":
+                self.ctx.add_error("TLDR-IMPORTS-E-UNSUPPORTED-LANE: dynamic HIR claims lack a frozen claim set")
+                return false
+            var claims: [bool] = []
+            for source_path in source_paths:
+                claims.push(not worker_closure or worker_surface_seed_v1(worker_spec, source_path))
+            val planned = tldr_route_frozen_inputs_v1(source_paths, source_module_names,
+                self.ctx.source_contents_owner, claims)
+            if planned.is_err():
+                self.ctx.add_error(planned.unwrap_err())
+                return false
+            frozen_tldr_plan = planned.unwrap()
+        var worker_needed: [bool] = []
+        var worker_built: [bool] = []
+        var mir_advice_paths: [text] = []
+        if worker_closure and not frozen_tldr_route:
+            var seeds: [bool] = []
+            var seed_index = 0
+            for seed_path in source_paths:
+                if mir_scoped:
+                    # Possible AOP advice modules are seeded too: the weave
+                    # reads advice from every loaded HIR module.
+                    val is_advice = worker_source_may_declare_advice_v1(self.ctx.source_contents_owner[seed_index])
+                    if is_advice and not mir_advice_paths.contains(seed_path):
+                        mir_advice_paths.push(seed_path)
+                    seeds.push(mir_target_set.contains_key(seed_path) or is_advice)
+                else: seeds.push(worker_surface_seed_v1(worker_spec, seed_path))
+                seed_index = seed_index + 1
+            if unit_tldr_on:
+                var unit_tldr_seeds: [text] = []
+                for tp in mir_targets:
+                    if not unit_tldr_seeds.contains(tp):
+                        unit_tldr_seeds.push(tp)
+                for ap in mir_advice_paths:
+                    if not unit_tldr_seeds.contains(ap):
+                        unit_tldr_seeds.push(ap)
+                unit_tldr_plan = unit_tldr_plan_v1(driver_parse_env_get_v1("SIMPLE_HIR_SHARD_OWNER") ?? "",
+                    tldr_dir_v1(unit_tldr_root), unit_tldr_seeds,
+                    unit_tldr_module_paths_v1(source_module_names, source_paths))
+                worker_needed = unit_tldr_needed_flags_v1(unit_tldr_plan, source_paths, mir_advice_paths)
+                # Imports lower no HIR here: loads are restricted to targets,
+                # advice and fallback modules below.
+                print unit_tldr_log_line_v1(unit_tldr_plan.unit_id, unit_tldr_plan.parsed,
+                    unit_tldr_plan.summaries, unit_tldr_plan.fallbacks, 0)
+            else:
+                if tldr_imports_enabled_v1():
+                    match tldr_closure_walk_check_v1(true, "parse_all_streaming_surfaces_in_place_impl"):
+                        case Err(msg): panic(msg)
+                        case Ok(_): pass
+                log_phase("phase2:surface:closure:start")
+                if not worker_unit:
+                    val edge_result = worker_admitted_edges_selected_v1(source_paths, self.ctx.source_contents_owner, source_module_names,
+                        self.ctx.source_resolution_roots_owner, self.ctx.options.library_mode, seeds)
+                    if edge_result.is_err():
+                        self.ctx.add_error(edge_result.unwrap_err())
+                        return false
+                    admitted_graph = edge_result.unwrap()
+                worker_needed = worker_admitted_closure_v1(admitted_graph.edges, seeds)
+                val edge_error = worker_admitted_error_v1(admitted_graph, worker_needed)
+                if edge_error != "":
+                    self.ctx.add_error(edge_error)
+                    return false
+            for _p in source_paths:
+                worker_built.push(false)
+        val parse_shard_start = if parse_shard: driver_parse_shard_strided_start_v1(frozen_source_count) else: 0
+        # Rotation can begin at a logical alias of a physical source whose
+        # canonical row appears earlier. Establish the authoritative first
+        # rows before rotation/claims, rather than admitting that alias as a
+        # canonical source in an otherwise empty shard-local registry.
+        val parse_shard_rows = if parse_shard:
+            driver_parse_shard_row_plan_v1(canonical_paths, parse_shard_start)
+        else: []
+        val parse_step_count = if parse_shard: parse_shard_rows.len() else: frozen_source_count
+        val summary_surface_index: UnitTldrSurfaceIndexV1 = if unit_tldr_on: unit_tldr_surface_index_v1(unit_tldr_plan) else: unit_tldr_surface_index_empty_v1()
+        var source_step = 0
+        while source_step < parse_step_count:
+            source_index = if parse_shard: parse_shard_rows[source_step] else: source_step
+            source_step = source_step + 1
+            # A parse shard exists only to warm the front-end cache for the
+            # files it owns (static hash slice, or a claim from the shared
+            # queue). The rotated plan retains the full physical-file ring
+            # for work-stealing while excluding nonauthoritative alias rows.
+            if parse_shard and not _driver_parse_shard_owns(source_paths[source_index]):
+                continue
+            val canonical_path = canonical_paths[source_index]
+            val is_alias = builder.has_canonical_path(canonical_path)
+            val row_summary: ModuleSurface? = if not is_alias and unit_tldr_on and not source_paths[source_index].ends_with("/__init__.spl") and not worker_needed[source_index]:
+                unit_tldr_surface_for_row_indexed_v1(unit_tldr_plan, summary_surface_index, source_module_names[source_index], canonical_path)
+            else:
+                None
+            if is_alias:
+                val alias_result = builder.add_alias_canonical_identity(
+                    source_module_names[source_index],
+                    self.ctx.source_contents_owner[source_index], canonical_path)
+                if alias_result.is_err():
+                    self.ctx.add_error(
+                        "Module surface extraction error: {alias_result.unwrap_err()} source='{source_paths[source_index]}' module='{source_module_names[source_index]}' index={source_index}")
+                    return false
+            elif row_summary.is_some():
+                # PM3: an import not parsed here gets its summary-built surface.
+                var tldr_surface: ModuleSurface = row_summary.unwrap()
+                # Bind the summary surface to this admitted row, exactly like a
+                # placeholder: HIR deps records resolve import edges through
+                # surface.source_index (layer 2), the lib.X/std.X alias lane
+                # compares content length/hash with this row's bytes, and the
+                # HIR closure digest folds the names, so a worker with summaries
+                # must digest the row like one that parsed it.
+                tldr_surface = module_surface_bind_row_identity(tldr_surface, source_paths[source_index],
+                    canonical_path, source_module_names[source_index], source_index, self.ctx.source_contents_owner[source_index])
+                val tldr_added = builder.add_surface_canonical_identity(tldr_surface,
+                    source_module_names[source_index], canonical_path)
+                if tldr_added.is_err():
+                    self.ctx.add_error(
+                        "Module surface extraction error: {tldr_added.unwrap_err()} source='{source_paths[source_index]}'")
+                    return false
+                worker_built[source_index] = true
+                var summary_paths = self.unit_tldr_summary_paths_v1
+                summary_paths[source_paths[source_index]] = true
+                self.unit_tldr_summary_paths_v1 = summary_paths
+            else:
+                val parsed_result = self.add_streaming_module_surface(
+                    builder,
+                    source_paths[source_index],
+                    source_authored_paths[source_index],
+                    self.ctx.source_contents_owner[source_index],
+                    source_module_names[source_index],
+                    source_index, canonical_path, frozen_tldr_route,
+                    if frozen_tldr_route or not worker_closure: 0 elif worker_needed[source_index]: 1 else: 2,
+                    if frozen_tldr_route: Some(frozen_tldr_plan.parse_texts[source_index]) else: None)
+                if parsed_result.is_err():
+                    val stream_err = parsed_result.unwrap_err()
+                    # Emit while the local Result still owns the reason. Native
+                    # CompileContext transport can retain the error count but
+                    # lose the message array before orchestration reports it.
+                    eprint("[streaming-parse-failure] {source_paths[source_index]}: {stream_err}")
+                    # Collect-all default, same as parse_all_impl's entry-closure
+                    # and plain loops. A parse error leaves no surface for THIS
+                    # module, but every other file can still be parsed, so poison
+                    # this one and keep going instead of abandoning the remaining
+                    # sources. Only parse failures are recoverable here: a scope /
+                    # promotion / builder failure is an internal invariant break
+                    # and still bails immediately. `par_had_error` is reset per
+                    # file in parser_init_with_path, so continuing cannot leak a
+                    # stale flag. --fail-fast / SIMPLE_COMPILE_FAIL_FAST=1 restores
+                    # stop-at-first via the shared poison_budget cap.
+                    if stream_err.starts_with(_STREAM_PARSE_ERROR_PREFIX):
+                        self.ctx.add_error(stream_err)
+                        var poison_ctx: CompileContext = self.ctx
+                        poison_ctx.mark_module_poisoned(source_module_names[source_index])
+                        self.ctx = poison_ctx
+                        if poison_ctx.poison_budget_exhausted():
+                            return false
+                        continue
+                    self.ctx.add_error(
+                        "Module surface extraction error: {stream_err}")
+                    return false
+                builder = parsed_result.unwrap()
+                if worker_closure and not frozen_tldr_route and worker_needed[source_index]:
+                    worker_built[source_index] = true
+                release_seq = release_seq + 1
+                log_module_surface_released(source_paths[source_index], release_seq)
+
+        # One receipt per process, same shape as the non-streaming loop's.
+        # Every process on this route (parse shard, HIR shard, main build)
+        # re-parses or restores the whole frozen closure, and until
+        # 2026-10-19 none of them said whether it hit or missed: a
+        # `phase2:surface:file:parse-start` line fires before the cache is
+        # consulted, so counting those lines over-reports cold parses.
+        if frontend_parse_cache_enabled():
+            print "[frontend-cache] hits={frontend_parse_cache_hits()} misses={frontend_parse_cache_misses()} parses={flat_parse_module_body_calls()} native_digest_unavailable={frontend_cache_native_digest_unavailable()}"
+        if parse_shard:
+            # The shard's job ends with the cache warm. The surface registry
+            # below is the real build's, and a shard child must never carry on
+            # into HIR/MIR/codegen (it did: each child lowered the whole
+            # closure in process, N times over).
+            print "[parse-shard] done shard={driver_parse_env_get_v1(\"SIMPLE_PARSE_SHARD\") ?? \"\"} parses={flat_parse_module_body_calls()} claimed={driver_parse_shard_claimed()}"
+            driver_parse_stdout_flush_v1()
+            driver_parse_exit_v1(0)
+
+        # Rebuild the phase-3 record inventory from the retained SoA strings.
+        # The original boxed SourceFile records may have been reclaimed even
+        # though their promoted field owners remain valid.
+        var retained_sources: [SourceFile] = []
+        var retained_index = 0
+        while retained_index < frozen_source_count:
+            var retained_source = SourceFile(
+                path: source_paths[retained_index],
+                authored_path: source_authored_paths[retained_index],
+                content: self.ctx.source_contents_owner[retained_index],
+                module_name: source_module_names[retained_index])
+            if retained_index < self.ctx.source_manifest_evidence_owner_v1.len():
+                retained_source = source_file_with_manifest_evidence_v1(retained_source,
+                    self.ctx.source_manifest_evidence_owner_v1[retained_index])
+            retained_sources.push(retained_source)
+            retained_index = retained_index + 1
+        self.ctx.sources = retained_sources
+
+        # Build the completed owner inside one dedicated transient scope, then
+        # deep-promote the whole registry graph before committing it. Promoting
+        # individual surfaces is insufficient: the registry's Dict and aligned
+        # name/index arrays are allocated only during finalization.
+        if not driver_parse_transient_scope_begin_v1():
+            self.ctx.add_error(
+                "Module surface retention scope unavailable after phase 2")
+            return false
+        val retained_surfaces = ModuleSurfacesByName(
+            surfaces: [], index_by_name: {},
+            ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+        val finish_error: text = builder.finish_into(retained_surfaces)
+        if finish_error != "":
+            val paused = driver_parse_transient_scope_pause_v1()
+            val error_owned = if paused: rt_transient_heap_promote(finish_error) else: false
+            val ended = driver_parse_transient_scope_end_v1()
+            if not (paused and error_owned and ended):
+                self.ctx.add_error("Module surface alignment error ownership failed")
+                return false
+            self.ctx.add_error(
+                "Module surface alignment error: {finish_error}")
+            return false
+        if not driver_parse_transient_scope_pause_v1():
+            val _ended = driver_parse_transient_scope_end_v1()
+            self.ctx.add_error(
+                "Module surface retention scope pause failed after phase 2")
+            return false
+        val promote_reason = module_surfaces_promote_reason(retained_surfaces)
+        if promote_reason != "":
+            val error_owned = rt_transient_heap_promote(promote_reason)
+            val ended = driver_parse_transient_scope_end_v1()
+            if not (error_owned and ended):
+                self.ctx.add_error("Module surface registry promotion error ownership failed")
+                return false
+            self.ctx.add_error(
+                "Module surface registry graph promotion failed after phase 2: {promote_reason}")
+            return false
+        if not driver_parse_transient_scope_end_v1():
+            self.ctx.add_error(
+                "Module surface retention scope end failed after phase 2")
+            return false
+        val retained_alignment_error = module_surfaces_retained_alignment_error(
+            retained_surfaces)
+        if retained_alignment_error != "":
+            self.ctx.add_error(
+                "Module surface registry graph lost after phase 2 retention: {retained_alignment_error}; surfaces={retained_surfaces.surfaces.len()} names={retained_surfaces.ordered_names.len()} indices={retained_surfaces.ordered_indices.len()} dict={retained_surfaces.index_by_name.len()}")
+            return false
+        # Commit the retained surface owner directly to the mutable driver
+        # context.  Assigning it through a copied `streaming_ctx` returned
+        # parse_ok=true while the caller still observed module_surfaces=nil
+        # under native value semantics.
+        if frozen_tldr_route:
+            val parser_calls = flat_parse_module_body_calls() - tldr_parser_calls_before
+            log_phase("phase2:tldr-frozen source_parses={self.tldr_surface_source_parses} interface_parses={self.tldr_surface_interface_parses} fallbacks={frozen_tldr_plan.fallbacks} parser_calls={parser_calls}")
+        elif worker_closure:
+            # Claim only modules whose resolved import/export-route closure is
+            # fully built; placeholders are never lowered by this worker.
+            var resolution_roots_with_scv: [text] = []
+            for rr in self.ctx.source_resolution_roots_owner:
+                resolution_roots_with_scv.push(rr)
+            val active_scv_root = driver_parse_env_get_v1("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""
+            if active_scv_root != "":
+                val active_scv_canon = module_surface_canonical_path(active_scv_root)
+                if active_scv_canon != "" and not resolution_roots_with_scv.contains(active_scv_canon):
+                    resolution_roots_with_scv.push(active_scv_canon)
+                if not resolution_roots_with_scv.contains(active_scv_root):
+                    resolution_roots_with_scv.push(active_scv_root)
+            val admitted_roots = module_surface_admitted_roots_v1(canonical_paths,
+                resolution_roots_with_scv, module_surface_canonical_path("."))
+            var row_logical_ids: [text] = []
+            var admitted_logical: Dict<text, bool> = {}
+            var rli = 0
+            while rli < frozen_source_count:
+                var rlid = module_surface_admitted_logical_id_v1(canonical_paths[rli], admitted_roots)
+                if rlid == "":
+                    rlid = module_surface_admitted_logical_id_v1(source_paths[rli], admitted_roots)
+                row_logical_ids.push(rlid)
+                if rlid != "":
+                    admitted_logical[rlid] = true
+                rli = rli + 1
+            var built_canonical: Dict<text, bool> = {}
+            var built_logical: Dict<text, bool> = {}
+            var bi = 0
+            while bi < frozen_source_count:
+                if worker_built[bi]:
+                    built_canonical[canonical_paths[bi]] = true
+                    if row_logical_ids[bi] != "":
+                        built_logical[row_logical_ids[bi]] = true
+                bi = bi + 1
+            var surface_built: [bool] = []
+            var surface_edges: [[i64]] = []
+            for ws in retained_surfaces.surfaces:
+                val ws_lid = module_surface_match_admitted_logical_v1(ws.canonical_path, admitted_roots, admitted_logical)
+                surface_built.push(built_canonical.contains_key(ws.canonical_path) or
+                    (ws_lid != "" and built_logical.contains_key(ws_lid)))
+                var edges: [i64] = []
+                for t in ws.import_target_indices: edges.push(t)
+                for t in ws.export_route_target_indices: edges.push(t)
+                surface_edges.push(edges)
+            val surface_ready = worker_surface_ready_v1(surface_built, surface_edges)
+            # Report direct missing providers, not every transitive blocked
+            # consumer. Keep diagnostics bounded and outside the normal path.
+            if driver_phase_trace_enabled() and not _worker_readiness_edges_reported_v1:
+                _worker_readiness_edges_reported_v1 = true
+                var missing_rows = 0
+                var source_index = 0
+                while source_index < retained_surfaces.surfaces.len() and missing_rows < 8:
+                    if surface_built[source_index]:
+                        val source_surface = retained_surfaces.surfaces[source_index]
+                        for target_index in source_surface.import_target_indices:
+                            if missing_rows < 8 and target_index >= 0 and target_index < surface_built.len() and not surface_built[target_index]:
+                                val target_path = retained_surfaces.surfaces[target_index].canonical_path
+                                log_phase("phase2:surface:missing-direct-edge worker={worker_spec} kind=import source={source_surface.canonical_path} target={target_path}")
+                                missing_rows = missing_rows + 1
+                        for target_index in source_surface.export_route_target_indices:
+                            if missing_rows < 8 and target_index >= 0 and target_index < surface_built.len() and not surface_built[target_index]:
+                                val target_path = retained_surfaces.surfaces[target_index].canonical_path
+                                log_phase("phase2:surface:missing-direct-edge worker={worker_spec} kind=export source={source_surface.canonical_path} target={target_path}")
+                                missing_rows = missing_rows + 1
+                    source_index = source_index + 1
+                log_phase("phase2:surface:missing-direct-edge-summary worker={worker_spec} rows={missing_rows} limit=8")
+            var ready_canonical: Dict<text, bool> = {}
+            var ready_logical: Dict<text, bool> = {}
+            var si = 0
+            while si < surface_ready.len():
+                if surface_ready[si]:
+                    val ready_path = retained_surfaces.surfaces[si].canonical_path
+                    ready_canonical[ready_path] = true
+                    val ready_lid = module_surface_match_admitted_logical_v1(ready_path, admitted_roots, admitted_logical)
+                    if ready_lid != "":
+                        ready_logical[ready_lid] = true
+                si = si + 1
+            var allowed_paths: [text] = []
+            var ai = 0
+            while ai < frozen_source_count:
+                val row_lid = row_logical_ids[ai]
+                if ready_canonical.contains_key(canonical_paths[ai]) or
+                        (row_lid != "" and ready_logical.contains_key(row_lid)):
+                    allowed_paths.push(source_paths[ai])
+                ai = ai + 1
+            if mir_scoped:
+                # Every target and every possible advice module must have a
+                # fully built closure, else fail closed (CLOSURE-INCOMPLETE):
+                # no MIR from a placeholder surface, no weave missing an advice.
+                val mir_queue_dir = driver_parse_env_get_v1("SIMPLE_MIR_SHARD_QUEUE") ?? ""
+                val source_of_canonical = source_path_by_canonical_map_v1(canonical_paths, source_paths)
+                var source_of_logical: Dict<text, text> = {}
+                var sli = 0
+                while sli < frozen_source_count:
+                    val slid = row_logical_ids[sli]
+                    if slid != "" and not source_of_logical.contains_key(slid):
+                        source_of_logical[slid] = source_paths[sli]
+                    sli = sli + 1
+                var surface_source: [text] = []
+                for rs in retained_surfaces.surfaces:
+                    var mapped_source = source_of_canonical.get(rs.canonical_path) ?? ""
+                    if mapped_source == "":
+                        val rs_lid = module_surface_match_admitted_logical_v1(rs.canonical_path, admitted_roots, admitted_logical)
+                        if rs_lid != "" and source_of_logical.contains_key(rs_lid):
+                            mapped_source = source_of_logical[rs_lid]
+                    surface_source.push(mapped_source)
+                var root_indices: [i64] = []
+                var found_targets: [text] = []
+                var pending_reason = ""
+                var pending_surface_index = -1
+                var ti = 0
+                while ti < surface_source.len():
+                    val tpath = surface_source[ti]
+                    val is_target = mir_target_set.contains_key(tpath)
+                    if is_target or mir_advice_paths.contains(tpath):
+                        if not surface_ready[ti]:
+                            pending_surface_index = ti
+                            pending_reason = if is_target: "import-closure surface missing for {tpath}"
+                                else: "aop advice outside import closure ({tpath})"
+                        root_indices.push(ti)
+                        if is_target and not found_targets.contains(tpath): found_targets.push(tpath)
+                    ti = ti + 1
+                if pending_reason == "" and found_targets.len() != mir_targets.len():
+                    pending_reason = "a MIR target has no surface in this closure"
+                if pending_reason != "":
+                    if pending_surface_index >= 0:
+                        val gap = worker_surface_gap_v1(pending_surface_index, surface_built, surface_edges)
+                        val blocking_path = retained_surfaces.surfaces[pending_surface_index].canonical_path
+                        var gap_source_path = "<no-surface>"
+                        var gap_target_path = "<no-surface>"
+                        if gap.source_index >= 0 and gap.source_index < retained_surfaces.surfaces.len():
+                            gap_source_path = retained_surfaces.surfaces[gap.source_index].canonical_path
+                        if gap.target_index >= 0 and gap.target_index < retained_surfaces.surfaces.len():
+                            gap_target_path = retained_surfaces.surfaces[gap.target_index].canonical_path
+                        pending_reason = pending_reason + "; blocking_target_index={pending_surface_index} " + worker_surface_gap_message_v1(
+                            gap, blocking_path, gap_source_path, gap_target_path)
+                    for target in mir_targets:
+                        val _pending = native_file_worker_closure_incomplete_publish_v1(mir_queue_dir, target, pending_reason)
+                    self.ctx.add_error("FILE-WORKER-E-CLOSURE-INCOMPLETE: {pending_reason}")
+                    return false
+                var load_paths: [text] = []
+                var load_path_set: Dict<text, bool> = {}
+                if unit_tldr_on:
+                    # PM3: no closure walk; only targets, advice and fallback modules load HIR.
+                    for tp in mir_targets:
+                        if not load_path_set.contains_key(tp):
+                            load_path_set[tp] = true
+                            load_paths.push(tp)
+                    for ap in mir_advice_paths:
+                        if not load_path_set.contains_key(ap):
+                            load_path_set[ap] = true
+                            load_paths.push(ap)
+                    for fp in unit_tldr_plan.parse_paths:
+                        if not load_path_set.contains_key(fp):
+                            load_path_set[fp] = true
+                            load_paths.push(fp)
+                else:
+                    if tldr_imports_enabled_v1():
+                        match tldr_closure_walk_check_v1(true, "worker_surface_import_closure_v1"):
+                            case Err(msg): panic(msg)
+                            case Ok(_): pass
+                    val closure = worker_surface_import_closure_v1(root_indices, surface_edges)
+                    # Rows that must keep bodies in this unit: every target and
+                    # advice module, by source and canonical path. The HIR stage
+                    # loads the rest of the closure interface-only
+                    # (file_worker_unit_row_interface_only_v1).
+                    var keep_full_paths: [text] = []
+                    for kt in mir_targets:
+                        keep_full_paths.push(kt)
+                    for ka in mir_advice_paths:
+                        keep_full_paths.push(ka)
+                    for kri in root_indices:
+                        keep_full_paths.push(surface_source[kri])
+                        keep_full_paths.push(retained_surfaces.surfaces[kri].canonical_path)
+                    file_worker_unit_keep_full_record_v1(keep_full_paths)
+                    var ci = 0
+                    while ci < closure.len():
+                        if closure[ci] and surface_source[ci] != "":
+                            val cp = surface_source[ci]
+                            if not load_path_set.contains_key(cp):
+                                load_path_set[cp] = true
+                                load_paths.push(cp)
+                        ci = ci + 1
+                worker_hir_restrict_loads_v1(load_paths)
+                # Unit-scoped native input facts: phase 1 no longer slices the
+                # whole inventory in a unit (driver_source_pipeline_loading.spl).
+                # Only this unit's targets reach MIR, and their dependency
+                # witnesses read the interfaces of their direct imports. Build
+                # that slice now, before unloaded bodies are reclaimed below.
+                if worker_unit and not self.ctx.native_source_interface_index_v1.?:
+                    var unit_fact_paths: Dict<text, bool> = {}
+                    for fact_root in root_indices:
+                        val root_surface = retained_surfaces.surfaces[fact_root]
+                        unit_fact_paths[root_surface.canonical_path] = true
+                        for fact_target in root_surface.import_target_indices:
+                            if fact_target >= 0 and fact_target < retained_surfaces.surfaces.len():
+                                unit_fact_paths[retained_surfaces.surfaces[fact_target].canonical_path] = true
+                    if not self.install_unit_interface_index_v1(canonical_paths, unit_fact_paths, false):
+                        return false
+                if worker_unit:
+                    var root_canonical_set: Dict<text, bool> = {}
+                    for fact_root in root_indices:
+                        root_canonical_set[retained_surfaces.surfaces[fact_root].canonical_path] = true
+                    var snap_i = 0
+                    while snap_i < retained_surfaces.ordered_names.len() and snap_i < retained_surfaces.ordered_indices.len():
+                        val surf_idx = retained_surfaces.ordered_indices[snap_i]
+                        if surf_idx >= 0 and surf_idx < retained_surfaces.surfaces.len():
+                            if root_canonical_set.contains_key(retained_surfaces.surfaces[surf_idx].canonical_path):
+                                unit_snapshot_modules[retained_surfaces.ordered_names[snap_i]] = true
+                        snap_i = snap_i + 1
+                    unit_snapshot_scoped = true
+                # Free C-heap `.spl` source allocations (~95 MB across ~7,000 rows)
+                # for unloaded physical files in unit children before HIR/MIR/LLVM.
+                if worker_unit and (driver_parse_env_get_v1("SIMPLE_KEEP_SOURCE_CONTENTS") ?? "") != "1":
+                    var kept_canonical: Dict<text, bool> = {}
+                    var keep_idx = 0
+                    while keep_idx < frozen_source_count:
+                        if load_path_set.contains_key(source_paths[keep_idx]):
+                            kept_canonical[canonical_paths[keep_idx]] = true
+                        keep_idx = keep_idx + 1
+                    val _reclaimed = self.ctx.reclaim_unloaded_streaming_sources_v1(kept_canonical, canonical_paths)
+                # A unit child HIR-claims only its picked targets.
+                if worker_unit: worker_surface_restrict_claims_v1(mir_targets)
+                print "[file-worker] mir-child hir closure modules={load_paths.len()} of={frozen_source_count} advice_modules={mir_advice_paths.len()}"
+            else:
+                worker_surface_restrict_claims_v1(allowed_paths)
+                # Emitted at freeze, before lowering: survives a later crash.
+                print "[hir-shard] surfaces-ready shard={worker_spec} claimable={allowed_paths.len()} of={frozen_source_count} {worker_surface_counters_v1()}"
+        self.streaming_module_surfaces_owner = retained_surfaces
+        self.streaming_surface_owner_ready = true
+        self.ctx.module_surfaces = Some(retained_surfaces)
+        if (parse_shard or worker_spec != "") and not worker_unit:
+            self.ctx.native_module_input_fact_snapshots_v1 = {}
+        else:
+            if worker_unit and not self.ctx.native_source_interface_index_v1.?:
+                # A unit route that skipped the scoped build above (no module-
+                # scoped closure) still owns every body here: index them all.
+                if not self.install_unit_interface_index_v1(canonical_paths, {}, true):
+                    return false
+            val native_source_facts = self.ctx.native_source_interface_index_v1 ?? NativeSourceInterfaceIndexV1(facts: {}, source_count: 0, digest_count: 0)
+            if unit_snapshot_scoped:
+                self.ctx.native_module_input_fact_snapshots_v1 = native_module_input_fact_snapshots_for_modules_v1(
+                    retained_surfaces, native_source_facts, unit_snapshot_modules)
+            else:
+                self.ctx.native_module_input_fact_snapshots_v1 = native_module_input_fact_snapshots_v1(
+                    retained_surfaces, native_source_facts)
+        self.ctx.modules = {}
+        ast_reset()
+        lexer_release_parse_source_globals()
+        # Read the authoritative scalar field directly.  Avoid both a receiver
+        # method call and a phase-local boolean: the current native backend has
+        # independently mis-lowered each form in this large mutable method.
+        # A HIR shard worker goes on past per-module parse errors (poisoned
+        # above); they become FAILED rows in its HIR claim loop.
+        driver_hir_worker_parse_verdict_v1(self.ctx.error_count_value,
+            self.ctx.poisoned_module_count_value, worker_spec)
+
+    # Compatibility surface for focused driver callers.  Production
+    # orchestration uses parse_all_committing_impl so the retained owner never
+    # crosses the tuple carrier.
+    me parse_all_streaming_surfaces_impl() -> (CompileContext, bool):
+        val ok = self.parse_all_streaming_surfaces_in_place_impl()
+        (self.ctx, ok)
+
+    # Unit child: install the native source interface index for the rows
+    # whose canonical path is in `keep` (or every row when `all_rows`). Rows
+    # are the retained phase-1 owners, so paths, bodies and SHA identities
+    # stay aligned exactly as in the phase-1 whole-inventory build.
+    me install_unit_interface_index_v1(canonical_paths: [text], keep: Dict<text, bool>,
+            all_rows: bool) -> bool:
+        var unit_sources: [SourceFile] = []
+        var unit_paths: [text] = []
+        var unit_digests: [text] = []
+        var row = 0
+        while row < self.ctx.sources.len():
+            val selected = all_rows or
+                (row < canonical_paths.len() and keep.contains_key(canonical_paths[row]))
+            if selected:
+                val row_source = self.ctx.sources[row]
+                var row_digest = ""
+                if row < self.ctx.source_identities_owner.len():
+                    row_digest = self.ctx.source_identities_owner[row]
+                unit_sources.push(row_source)
+                unit_paths.push(row_source.path)
+                unit_digests.push(row_digest)
+            row = row + 1
+        val built = native_source_interface_index_from_sources_with_digests_v1(
+            unit_sources, unit_paths, unit_digests)
+        if built.is_err():
+            self.ctx.add_error("native source interface index refused: " + built.unwrap_err())
+            return false
+        self.ctx.native_source_interface_index_v1 = Some(built.unwrap())
+        true
+
+    me parse_all_committing_impl() -> bool:
+        self.ctx.native_objectless_decl_proofs = {}
+        if tldr_imports_enabled_v1() and not driver_streaming_surface_enabled(self.ctx):
+            self.ctx.add_error("TLDR-IMPORTS-E-UNSUPPORTED-LANE: frozen streaming surface route required")
+            return false
+        val offload = driver_frontend_offload_decision()
+        if offload.is_err():
+            self.ctx.add_error(offload.unwrap_err())
+            return false
+        compiler_work_parser_schedule_v1(self.ctx.sources.len())
+        if driver_streaming_surface_enabled(self.ctx):
+            return self.parse_all_streaming_surfaces_in_place_impl()
+        val (parsed_ctx, parse_ok) = self.parse_all_impl()
+        self.ctx = parsed_ctx
+        # Ordinary native --low-memory drops the retained AST after HIR.
+        # Other routes need no extra parser scan or source hashing here.
+        if parse_ok and self.ctx.options.low_memory and
+                (self.ctx.options.mode == CompileMode.Aot or self.ctx.options.cli_mode_text == "aot"):
+            self.ctx.native_objectless_decl_proofs = driver_native_retained_objectless_proofs(
+                self.ctx.modules, self.ctx.sources)
+        parse_ok
+

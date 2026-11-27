@@ -1,0 +1,89 @@
+"""
+## Purpose and audience
+Purpose: Pin the LCD pen PHASE of a text run that starts mid-line, after an
+inline element, against Chrome 159. Chrome lays the line out in fractional
+units, so a run that follows `<span>ll</span>` starts at
+`1 + 7.1094 + 4.4453 = 12.5547` px and its first glyph takes the 12.5 quarter
+phase. Simple lays the line out in whole pixels (span 7, space 4: pen 12) and
+used to paint that glyph at phase 0 -- the whole run shifted by the lost
+fraction. On the catalog `forms-media` page every `<li><code>..</code> — ..`
+line lost 0.24..0.62 px this way; Chrome alone repaints 4,329 pixels of one
+such line when its origin moves from .617 to .0.
+Audience: web renderer inline layout / Engine2D font maintainers.
+
+Chrome oracle (Chrome for Testing 159.0.8154.6, `--headless=new --disable-gpu
+--hide-scrollbars --force-device-scale-factor=1 --window-size=64,64
+--screenshot`, Liberation Sans 16 px, `color:#000` on white,
+`<p style="margin:0;position:absolute;left:1px;top:0;font-size:16px;line-height:1">`),
+stem row y=6. Range geometry from `--dump-dom` + `getBoundingClientRect`:
+span 7.1094 wide, the following text node starts at 8.1094.
+
+| page                      | 3rd `l` pen | x=12..15 (row 6)                    |
+|---------------------------|-------------|-------------------------------------|
+| `<span>ll</span> l`       | 12.5547     | `fffff7 d78f3f 0f174f a7e7ff`       |
+
+| page                      | 2nd `l` pen | x=9..12 (row 6)                     |
+|---------------------------|-------------|-------------------------------------|
+| `<span>l</span> l`        | 9.0000      | `ffe7b7 5f1f07 2f77cf f7ffff`       |
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-LCD-001 — a mid-line text run keeps Chrome's fractional pen origin for its LCD phase.
+"""
+# @tag: unit, browser_engine, text, engine2d, chrome159
+# @cover src/lib/nogc_sync_mut/text_layout/font_renderer.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 64
+val H: i32 = 64
+# Two LCD16 steps, as in lcd_subpixel_text_chrome159_spec.
+val TOL: i32 = 16
+
+val PAGE_FRAC: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font-family:sans-serif\"><p style=\"margin:0;position:absolute;left:1px;top:0px;font-size:16px;line-height:1;color:#000\"><span>ll</span> l</p></body></html>"
+val PAGE_INT: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font-family:sans-serif\"><p style=\"margin:0;position:absolute;left:1px;top:0px;font-size:16px;line-height:1;color:#000\"><span>l</span> l</p></body></html>"
+
+fn _chan(px: u32, shift: u32) -> i32:
+    ((px >> shift) & 0xFFu32).to_i32()
+
+fn _abs(v: i32) -> i32:
+    if v < 0: 0 - v else: v
+
+# Largest per-channel |ours - chrome| over x0..x0+chrome.len()-1 on row y.
+fn _worst_delta(px: [u32], y: i32, x0: i32, chrome: [u32]) -> i32:
+    var worst = 0
+    var i = 0
+    while i < chrome.len().to_i32():
+        val ours = px[y * W + x0 + i]
+        for sh in [16u32, 8u32, 0u32]:
+            val d = _abs(_chan(ours, sh) - _chan(chrome[i], sh))
+            if d > worst:
+                worst = d
+        i = i + 1
+    worst
+
+describe "mid-line text run pen origin against Chrome 159":
+    it "AC-1: a run after `<span>ll</span>` paints its first glyph at Chrome's 12.5 phase":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_FRAC, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome row 6, x=12..15: fffff7 d78f3f 0f174f a7e7ff (pen 12.5547)")
+        val chrome: [u32] = [0xfffff7u32, 0xd78f3fu32, 0x0f174fu32, 0xa7e7ffu32]
+        expect(_worst_delta(px, 6, 12, chrome) <= TOL).to_be(true)
+
+    it "AC-2: a run whose Chrome origin is a whole pixel keeps phase 0":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_INT, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome row 6, x=9..12: ffe7b7 5f1f07 2f77cf f7ffff (pen 9.0)")
+        val chrome: [u32] = [0xffe7b7u32, 0x5f1f07u32, 0x2f77cfu32, 0xf7ffffu32]
+        expect(_worst_delta(px, 6, 9, chrome) <= TOL).to_be(true)

@@ -85,3 +85,43 @@ Probe: `probe10_disk_image.spl` (minimal reproduction of `os.port.disk_image` us
 **Status correction:** Interp path is now fixed; native path still open with
 altered error signature. Status remains OPEN (native blocker unchanged).
 
+
+## Resolution (2026-11-25)
+
+Root cause of the remaining interpreter-path failure: the 2026-09 tree
+transplant `88aac2ffe28` resurrected a pre-fix revision of
+`src/os/port/disk_image.spl`, dropping every declaration the 2026-07 fixes
+added. `build()` referenced `flat_name83`, `nested_leaf_keys`,
+`dir_long_name`, `nested_leaf_long_name` and `_push_vfat_name_units`
+referenced `units`, none of which were declared, so any config with at
+least one payload failed with `error: semantic: variable 'flat_name83'
+not found` (the 2026-07-17 "interp FIXED-AT-TIP" note predates the
+transplant).
+
+Fix: restored `src/os/port/disk_image.spl` from the last known-good
+revision `ae55a746719` (verbatim; its `std.common.encoding` imports are
+still present and signature-compatible at HEAD).
+
+Verification on this Windows host with the pinned seed
+(`SIMPLE_LIB=src bin/simple.exe run`, interpreter fallback path):
+- Flat payload probe: `BUILD_OK`, 2097152-byte image, `file` reports a
+  valid FAT32 ("DOS/MBR boot sector ... OEM-ID SIMPLEOS ... FAT (32 bit)"),
+  `HELLO   TXT` dirent present with correct payload bytes.
+- Nested payload probe (`guest_path: "/usr/bin/clang"`): `BUILD_OK`, root
+  dir contains `USR` and `BIN` subdirectory entries (attr 0x10) and the
+  `CLANG` leaf entry.
+
+Verification limits: `bin/simple.exe test test/01_unit/os/port/disk_image_builder_spec.spl
+--mode=interpreter` cannot run at release/1.0.0 HEAD — the spec runner
+itself fails with `unknown decorator '@representation_boundary'`
+(known source/binary inconsistency between the 940-annotation commit
+cfd89933699 and the pinned v1.0.0-rc.1 seed). For the same reason the
+native-build half of the original symptom could not be re-attempted:
+`native-build` stops at the same decorator in
+`src/app/cli/native_build_main.spl` before reaching `disk_image` codegen.
+The interpreter path — the blocker for building FAT images from Simple —
+is fixed and verified; the native-build half remains unverifiable at HEAD
+until the seed/decorator inconsistency is resolved.
+
+**Status:** resolved (interpreter path); native-build half deferred to the
+repo-wide seed/decorator repair, not a `disk_image` defect.

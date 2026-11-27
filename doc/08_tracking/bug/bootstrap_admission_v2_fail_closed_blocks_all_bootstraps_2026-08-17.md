@@ -199,3 +199,25 @@ separately-tracked Stage 3/Stage 4 self-host blocker, not this defect.
   `HEAD`), so the detection artifact shipped with this record does not in fact
   catch this incident's own shape. That is a separate gap in that gate, not
   fixed here.
+
+## Verification 2026-11-25 (release/1.0.0, Windows x86_64)
+
+FIXED status re-verified by source inspection on `origin/release/1.0.0`
+(`0819b116ecb`). All three fix components are present in the tree:
+
+- `scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs` (canonical
+  producer) exists.
+- `scripts/check/lib/bootstrap-planner-admission-bound.shs` no longer contains
+  the unconditional `planner-admission-v2-producer-unavailable` refusal;
+  `bootstrap_planner_v2_verify()` now delegates to
+  `bootstrap_planner_v2_verify_bound` and emits the typed
+  `planner-admission-v2-unbound` diagnostic with a binding detail line.
+- `scripts/check/check-bootstrap-planner-admission-producer.shs` (the
+  8-fixture producer gate) exists.
+
+The producer gate itself was not executed: a prior Windows attempt
+(2026-09-22 note in the sibling record
+`bootstrap_planner_v1_unbound_authorization_2026-08-14.md`) was stopped after
+325 s without a verdict, and this lane's budget does not permit an unbounded
+shell-gate run. Verification is by code inspection only; no fresh fixture PASS
+is claimed. The header's FIXED status stands.

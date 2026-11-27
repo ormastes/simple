@@ -1,0 +1,95 @@
+# Internal controller receipt-commit port, over the shared V2 journal.
+# The controller's desired-state owner retains the immutable binding and is
+# responsible for workload fencing and authenticated host receipt provenance.
+# Never expose this port directly to untrusted callers or treat it as a scheduler.
+use std.common.contracts.orchestration.assignment_v1.*
+use std.common.contracts.orchestration.workload_fence_v1.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.{HostPreparedReservationReceiptV1, host_reservation_receipt_v1}
+use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionGrantV2, distributed_grant_authorize_v2}
+use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalV2
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.{daemon_operation_admit_v2,
+    daemon_operation_exact_v2, daemon_operation_begin_v2, daemon_operation_record_outcome_v2}
+use std.common.crypto.sha256.sha256_text
+
+pub struct ControllerAssignmentContextV1:
+    workload: ControllerWorkloadFenceV1
+    controller_epoch: i64
+    grant_clock: i64
+    policy_revision: i64
+    revocation_epoch: i64
+    session_generation: i64
+
+fn controller_assignment_authorize_v1(journal: DistributedOperationJournalV2,
+        binding: ControllerAssignmentBindingV1, operation: OperationEnvelopeV2,
+        grant: ExecutionGrantV2, context: ControllerAssignmentContextV1, action: text) -> Result<bool, text>:
+    var request = operation
+    request.operation = action
+    val authorized = distributed_grant_authorize_v2(grant, request, context.grant_clock,
+        context.policy_revision, context.revocation_epoch, context.session_generation)
+    if authorized != "": return Err(authorized)
+    val matched = controller_assignment_match_v1(binding, operation)?
+    val fenced = controller_workload_matches_v1(context.workload, binding)?
+    if context.controller_epoch != binding.controller_epoch:
+        return Err("controller-epoch-stale")
+    val authority = controller_assignment_authority_v1(binding.controller_id)?
+    if journal.authority_digest != authority: return Err("controller-journal-authority-mismatch")
+    Ok(true)
+
+pub fn controller_assignment_admit_v1(journal: DistributedOperationJournalV2,
+        binding: ControllerAssignmentBindingV1, operation: OperationEnvelopeV2,
+        grant: ExecutionGrantV2, context: ControllerAssignmentContextV1) -> Result<DistributedOperationJournalV2, text>:
+    val authorized = controller_assignment_authorize_v1(journal, binding, operation, grant, context, "controller_assignment_v1")?
+    if context.workload.cancellation_requested: return Err("workload-cancellation-requested")
+    val admitted = daemon_operation_admit_v2(journal, operation)?
+    Ok(admitted.journal)
+
+# Commit before requesting host preparation. An already-started operation must
+# reconcile the original host request, not authorize another attempt.
+pub fn controller_assignment_begin_prepare_v1(journal: DistributedOperationJournalV2,
+        binding: ControllerAssignmentBindingV1, operation: OperationEnvelopeV2,
+        grant: ExecutionGrantV2, context: ControllerAssignmentContextV1) -> Result<DistributedOperationJournalV2, text>:
+    val authorized = controller_assignment_authorize_v1(journal, binding, operation, grant, context, "controller_assignment_v1")?
+    if context.workload.cancellation_requested: return Err("workload-cancellation-requested")
+    daemon_operation_begin_v2(journal, operation)
+
+# Called only with a receipt delivered by the trusted host channel. Its digest
+# checks integrity, not provenance. Recovery from outcome-unknown is permitted
+# after the original host's preparation has been reconciled by that channel.
+pub fn controller_assignment_commit_v1(journal: DistributedOperationJournalV2,
+        binding: ControllerAssignmentBindingV1, operation: OperationEnvelopeV2,
+        receipt: HostPreparedReservationReceiptV1, grant: ExecutionGrantV2,
+        context: ControllerAssignmentContextV1) -> Result<DistributedOperationJournalV2, text>:
+    val authorized = controller_assignment_authorize_v1(journal, binding, operation, grant, context, "controller_assignment_v1")?
+    val outcome = controller_assignment_outcome_v1(binding, receipt)?
+    daemon_operation_record_outcome_v2(journal, operation, "completed", sha256_text(outcome))
+
+# Recover a committed receipt after response loss. No mutation, host preparation
+# or execution authorization occurs here. Current grants/epoch still apply.
+pub fn controller_assignment_committed_v1(journal: DistributedOperationJournalV2,
+        binding: ControllerAssignmentBindingV1, operation: OperationEnvelopeV2,
+        receipt: HostPreparedReservationReceiptV1, grant: ExecutionGrantV2,
+        context: ControllerAssignmentContextV1) -> Result<text, text>:
+    val authorized = controller_assignment_authorize_v1(journal, binding, operation, grant, context, "controller_assignment_v1")?
+    controller_assignment_retained_outcome_v1(journal, binding, operation, receipt)
+
+fn controller_assignment_retained_outcome_v1(journal: DistributedOperationJournalV2,
+        binding: ControllerAssignmentBindingV1, operation: OperationEnvelopeV2,
+        receipt: HostPreparedReservationReceiptV1) -> Result<text, text>:
+    val outcome = controller_assignment_outcome_v1(binding, receipt)?
+    val prior = daemon_operation_exact_v2(journal, operation)?
+    if prior.state != "completed" or prior.outcome_digest != sha256_text(outcome):
+        return Err("assignment-not-committed")
+    Ok(outcome)
+
+# Execution eligibility has a separate grant. This reconstructs the receipt only
+# after verifying its authoritative committed outcome; it never contacts a host.
+pub fn controller_assignment_execution_ready_v1(journal: DistributedOperationJournalV2,
+        binding: ControllerAssignmentBindingV1, operation: OperationEnvelopeV2,
+        grant: ExecutionGrantV2, context: ControllerAssignmentContextV1) -> Result<ControllerExecutionReadinessV1, text>:
+    val authorized = controller_assignment_authorize_v1(journal, binding, operation, grant, context, "controller_execute_v1")?
+    if context.workload.cancellation_requested: return Err("workload-cancellation-requested")
+    val receipt = host_reservation_receipt_v1(binding.host_intent, binding.host_operation)?
+    val outcome = controller_assignment_retained_outcome_v1(journal, binding, operation, receipt)?
+    Ok(ControllerExecutionReadinessV1(workload_uid: binding.workload_uid,
+        workload_revision: context.workload.revision, assignment_digest: context.workload.assignment_digest,
+        controller_operation_id: operation.id, outcome_digest: sha256_text(outcome), host_receipt: receipt))

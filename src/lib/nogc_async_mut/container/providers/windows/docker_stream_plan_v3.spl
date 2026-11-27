@@ -1,0 +1,63 @@
+# Private broker template construction. No Engine effect or control authority.
+# Template bytes may contain literal exec environment values and belong only in
+# the protected broker root; public plans and receipts contain their digest.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, ContainerOutputResourcesV2, container_output_identity_digest_v2}
+use std.common.contracts.container.windows_stream_v3.*
+use std.common.contracts.container.exec_v3.container_exec_request_encode_v3
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{WindowsDockerPolicyV1, WindowsDockerRequestV1,
+    windows_docker_request_digest_v1}
+use std.nogc_async_mut.container.providers.windows.docker_codec_v1.windows_docker_request_encode_v1
+use std.nogc_async_mut.container.providers.windows.docker_policy_codec_v1.windows_docker_policy_encode_v1
+
+pub fn windows_docker_stream_template_v3(request: ContainerExecutionRequestV2, native: WindowsDockerRequestV1,
+        runtime: RuntimeIdentityV1, identity: ContainerOutputIdentityV2, resources: ContainerOutputResourcesV2,
+        policy: WindowsContainerStreamPolicyV3, intent: WindowsContainerStreamIntentV3,
+        installed: WindowsDockerPolicyV1, provider_pin: text, exec_control_pin: text) -> Result<(WindowsContainerStreamPlanV3, text), text>:
+    val semantic = windows_docker_request_digest_v1(installed, native)?
+    if request.plan.request_digest != semantic or request.plan.workload_uid != native.pod_uid or
+            request.plan.attempt != native.attempt or request.plan.operation_id != native.operation_id:
+        return Err("windows-stream-retained-request-mismatch")
+    if intent.operation_kind != "exec" and (intent.tty != native.terminal_tty or
+            (intent.stdin_requested and not native.stdin_open)):
+        return Err("windows-stream-primary-terminal-request-mismatch")
+    val policy_bytes = windows_container_stream_policy_bytes_v3(policy)?
+    val intent_bytes = windows_container_stream_intent_bytes_v3(intent)?
+    val helper_identity = container_output_identity_digest_v2(identity)?
+    val root = policy.root + "\\" + identity.operation_id
+    if not windows_container_stream_path_v3(root): return Err("windows-stream-helper-root-invalid")
+    val exec_bytes = match intent.exec_request:
+        case Some(value): container_exec_request_encode_v3(value)?
+        case None: ""
+    # No generated launch expiry, transport token or native exec ID appears in
+    # the pre-admission template. Actual grants and birth are separate records.
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("windows-container-broker-template-v3"),
+        "root": SdnValue.String(root), "streamPolicy": SdnValue.String(policy_bytes),
+        "providerPolicy": SdnValue.String(windows_docker_policy_encode_v1(installed)?),
+        "workloadPlan": SdnValue.String(container_execution_plan_bytes_v2(request.plan)?),
+        "workloadRequest": SdnValue.String(windows_docker_request_encode_v1(installed, native)?),
+        "helperIdentityDigest": SdnValue.String(helper_identity), "helperOperationId": SdnValue.String(identity.operation_id),
+        "parentOperationDigest": SdnValue.String(identity.parent_operation_digest),
+        "parentAssignmentDigest": SdnValue.String(identity.parent_assignment_digest),
+        "parentBudgetDigest": SdnValue.String(identity.parent_budget_digest), "bindingDigest": SdnValue.String(identity.binding_digest),
+        "targetNativeId": SdnValue.String(runtime.native_id), "targetFence": SdnValue.String(runtime.node_boot_id),
+        "cpuMillis": SdnValue.Int(resources.cpu_millis), "memoryBytes": SdnValue.Int(resources.memory_bytes),
+        "providerIdentityDigest": SdnValue.String(provider_pin), "intent": SdnValue.String(intent_bytes),
+        "execControlIdentityDigest": SdnValue.String(exec_control_pin),
+        "execRequest": SdnValue.String(exec_bytes)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields))
+    if bytes.byte_len() > 262144: return Err("windows-stream-private-template-bound")
+    var plan = WindowsContainerStreamPlanV3(workload: request.plan, runtime: runtime, identity: identity,
+        resources: resources, provider_identity_digest: provider_pin, exec_control_identity_digest: exec_control_pin,
+        policy_digest: sha256_text(policy_bytes),
+        intent: intent, broker_template_digest: sha256_text(bytes), request_digest: "")
+    val scope = windows_container_stream_scope_v3(plan)
+    if installed.node_boot_id != container_scope_fence_id_v2(scope)? or
+            installed.provider_generation != scope.provider_generation:
+        return Err("windows-stream-installed-policy-scope-mismatch")
+    plan.request_digest = windows_container_stream_plan_digest_v3(plan)?
+    Ok((plan, bytes))

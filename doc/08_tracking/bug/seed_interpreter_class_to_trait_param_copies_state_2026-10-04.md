@@ -1,6 +1,6 @@
 # Seed interpreter: class passed as a trait-typed argument is copied; `it`-block global assignment lost (2026-10-04)
 
-**Status:** open (worked around). **Where:** Rust seed `simple test` (interpreter),
+**Status:** FIXED (already, verified 2026-11-06) — see "Resolution". Was worked around. **Where:** Rust seed `simple test` (interpreter),
 release/1.0 seed built at `9731374b4f2`.
 
 ## Observed
@@ -31,3 +31,20 @@ functions (`sd_model_reset`, `sd_model_inject_dcrc`).
 Minimal repro: `class C: n: i64`, `trait T: fn bump()`, `impl T for C` with
 `me fn bump(): self.n = self.n + 1`, `fn f(t: T): t.bump()`; check `c.n` after
 `f(c)` in the interpreter and in a native build.
+
+## Resolution (verified 2026-11-06)
+
+No longer reproduces on a seed built from `release/1.0.0` @ `ecb705896a4` (debug).
+
+- `test/fixtures/seed_interp/class_to_trait_param_shares_state_repro.spl`
+  (`run`, interpreter): `trait_param 2` — two `me fn bump()` calls through
+  a trait-typed parameter are visible on the caller's instance.
+- `test/fixtures/seed_interp/class_to_trait_param_test_lane_repro.spl`
+  (`simple test`): 3/3 passed — state shared through a trait-typed param
+  (field and pushed log), through a driver that stores the trait object
+  from a static `open` and mutates it later, and an `it`-block assignment
+  to a module `var` is seen by a module function.
+
+Classes are `Value::ClassInstance` (shared reference storage) by default.
+The dw_mshc model's global-state workaround can be reverted at leisure.
+No code change in this pass.

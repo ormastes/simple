@@ -23,3 +23,15 @@ The harness now rejects a missing or non-executable `bin/simple` with exit 2
 before creating worker state. The integration test covers that exact fail-fast
 case and the adjacent admitted-child aggregation/cache-preservation path.
 
+
+## Verification 2026-11-25 (work/p3-bao-20261125)
+
+Closed status confirmed on current source by inspection. The preflight is in
+`scripts/check/bootstrap-diagnostic-sweep.shs:57-65`: the harness resolves the
+canonical child at `<runner_repo>/bin/simple` and exits 2 with
+`error: diagnostic child compiler is not executable: ...` before any worker
+state is created. The integration test
+`test/02_integration/bootstrap_diagnostic_sweep_test.shs:53-64` covers exactly
+that fail-fast case (asserts exit status 2, the error message, and that no
+worker invocation file was created). Not re-run here (shell harness spawns
+parallel workers; the fail-fast path is fully covered by the committed test).

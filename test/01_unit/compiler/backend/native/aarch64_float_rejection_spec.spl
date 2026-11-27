@@ -1,0 +1,107 @@
+# @req REQ-AARCH64-FLOAT-REJECT-001
+# Executable evidence for native_aarch64_scalar_float_silent_integer_lowering_2026_11_03:
+# the direct AArch64 backend must reject floating-point programs with an
+# explicit diagnostic instead of silently lowering scalar floats as integers
+# and float constants as zero.
+use std.spec.*
+use std.spec.step
+
+use compiler.mir.mir_data.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.backend.native.isel_aarch64.{isel_module_aarch64, a64_module_float_rejections}
+
+val I64_T = MirType(kind: MirTypeKind.I64)
+val F64_T = MirType(kind: MirTypeKind.F64)
+val F32_T = MirType(kind: MirTypeKind.F32)
+
+fn ret_local() -> MirLocal:
+    MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: I64_T, kind: LocalKind.Return)
+
+fn mir_function(name: text, sig: MirSignature, locals: [MirLocal], insts: [MirInst]) -> MirFunction:
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: insts,
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
+    )
+    MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: sig,
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+
+fn wrap_module(func: MirFunction) -> MirModule:
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: func.name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn integer_control_module() -> MirModule:
+    val sig = MirSignature(params: [], return_type: I64_T, is_variadic: false)
+    val insts = [
+        MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(42), I64_T), span: nil)
+    ]
+    wrap_module(mir_function("int_control", sig, [ret_local()], insts))
+
+fn float_return_module() -> MirModule:
+    val sig = MirSignature(params: [], return_type: F64_T, is_variadic: false)
+    wrap_module(mir_function("float_ret", sig, [ret_local()], []))
+
+fn float_param_module() -> MirModule:
+    val sig = MirSignature(params: [F64_T], return_type: I64_T, is_variadic: false)
+    wrap_module(mir_function("float_param", sig, [ret_local()], []))
+
+fn float_local_module() -> MirModule:
+    val sig = MirSignature(params: [], return_type: I64_T, is_variadic: false)
+    val local = MirLocal(id: LocalId(id: 1), name: Some("f"), type_: F32_T, kind: LocalKind.Temp)
+    wrap_module(mir_function("float_local", sig, [ret_local(), local], []))
+
+fn float_const_module() -> MirModule:
+    val sig = MirSignature(params: [], return_type: I64_T, is_variadic: false)
+    val insts = [
+        MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Float(1.5), F64_T), span: nil)
+    ]
+    wrap_module(mir_function("float_const", sig, [ret_local()], insts))
+
+describe "AArch64 direct backend rejects scalar floating point":
+    it "accepts the integer control module through isel":
+        step("isel integer control")
+        expect(a64_module_float_rejections(integer_control_module()).len()).to_equal(0)
+        val mach = isel_module_aarch64(integer_control_module())
+        expect(mach.functions.len()).to_equal(1)
+
+    it "rejects a floating-point return type with a diagnostic":
+        step("float return rejection")
+        val rejections = a64_module_float_rejections(float_return_module())
+        expect(rejections.len()).to_equal(1)
+        expect(rejections[0]).to_contain("float_ret")
+        expect(rejections[0]).to_contain("floating-point return type")
+
+    it "rejects a floating-point parameter type with a diagnostic":
+        step("float parameter rejection")
+        val rejections = a64_module_float_rejections(float_param_module())
+        expect(rejections.len()).to_equal(1)
+        expect(rejections[0]).to_contain("float_param")
+        expect(rejections[0]).to_contain("floating-point parameter type")
+
+    it "rejects a floating-point local type with a diagnostic":
+        step("float local rejection")
+        val rejections = a64_module_float_rejections(float_local_module())
+        expect(rejections.len()).to_equal(1)
+        expect(rejections[0]).to_contain("float_local")
+        expect(rejections[0]).to_contain("local 1")
+
+    it "rejects a floating-point constant with a diagnostic":
+        step("float constant rejection")
+        val rejections = a64_module_float_rejections(float_const_module())
+        expect(rejections.len()).to_equal(1)
+        expect(rejections[0]).to_contain("float_const")
+        expect(rejections[0]).to_contain("floating-point constant")

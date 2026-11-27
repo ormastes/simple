@@ -1,0 +1,71 @@
+"""
+# Native-Build 49 GB Free Pool Admission Specification
+
+**Tracks:** `native_build_default_worker_budget_26gib_refuses_pool_at_49gb_free_2026-11-09`
+**Category:** CLI / Admission
+
+Verifies that on a ~49 GB free host (`49251808` kB free commit), per-file pool
+pricing uses the measured per-file worker budgets (`FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1`,
+`SHARD_HIR_WORKER_KB_V1`) rather than the 26 GiB (`27262976` kB) shard ceiling
+from `worker_mem_mib=26624`, so standalone and tree admission in `shard_mem_clamp`
+admits >= 2 workers instead of failing closed to 1.
+"""
+
+use std.spec.*
+use app.cli.shard_mem_clamp.{
+    SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1,
+    shard_standalone_host_cap_v1, shard_pool_effective_budget_for_v1,
+    shard_pool_workers_v1, shard_threads_cap_for, shard_threads_parent_cap_for,
+    shard_host_worker_budget_kb
+}
+use app.cli.file_worker_pool_refusal.{
+    FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1,
+    file_worker_pool_phase_price_kb_v1,
+    file_worker_pool_scaled_budget_kb_v1,
+    file_worker_pool_usable_kb_v1,
+    file_worker_pool_refusal_v1
+}
+
+val AVAIL_49GB_KB: i64 = 49251808
+val BUDGET_26GIB_KB: i64 = 27262976
+val RESERVE_16GIB_KB: i64 = 16777216
+val RESERVE_96G_90PCT_KB: i64 = 9830400
+
+describe "49 GB free native-build per-file pool admission":
+    it "reproduces pool refusal at 49 GB free when worker budget was priced at 26 GiB":
+        expect(shard_host_worker_budget_kb("26624")).to_equal(BUDGET_26GIB_KB)
+        expect(shard_standalone_host_cap_v1(8, BUDGET_26GIB_KB, AVAIL_49GB_KB, RESERVE_16GIB_KB, 2000000)).to_equal(1)
+        val eff_64g = shard_pool_effective_budget_for_v1(AVAIL_49GB_KB, 0, 0, 0, RESERVE_16GIB_KB)
+        expect(eff_64g).to_equal(32474592)
+        expect(shard_pool_workers_v1(eff_64g, BUDGET_26GIB_KB)).to_equal(1)
+        val refused = file_worker_pool_refusal_v1(1, 1, AVAIL_49GB_KB, BUDGET_26GIB_KB, BUDGET_26GIB_KB, 8)
+        expect(refused.starts_with("error: per-file worker pool refused")).to_equal(true)
+
+    it "ignores host worker_mem_mib=26624 for per-file pricing and keeps >= 2 workers admitted at 49 GB free":
+        val hir_kb = file_worker_pool_phase_price_kb_v1("", "26624", SHARD_HIR_WORKER_KB_V1, false)
+        val mir_kb = file_worker_pool_phase_price_kb_v1("", "26624", FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1, false)
+        expect(hir_kb).to_equal(SHARD_HIR_WORKER_KB_V1)
+        expect(mir_kb).to_equal(FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1)
+
+        val usable = file_worker_pool_usable_kb_v1(AVAIL_49GB_KB, 0)
+        expect(usable).to_equal(29551084)
+        expect(file_worker_pool_scaled_budget_kb_v1(hir_kb, usable, false)).to_equal(SHARD_HIR_WORKER_KB_V1)
+        expect(file_worker_pool_scaled_budget_kb_v1(mir_kb, usable, false)).to_equal(FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1)
+
+        val hir_slots = shard_standalone_host_cap_v1(8, hir_kb, AVAIL_49GB_KB, RESERVE_16GIB_KB, 2000000)
+        val mir_slots = shard_standalone_host_cap_v1(8, mir_kb, AVAIL_49GB_KB, RESERVE_16GIB_KB, 2000000)
+        expect(hir_slots).to_equal(3)
+        expect(mir_slots).to_equal(3)
+        expect(file_worker_pool_refusal_v1(hir_slots, mir_slots, AVAIL_49GB_KB, hir_kb, mir_kb, 8)).to_equal("")
+
+    it "admits >= 3 workers under 96 GiB 90-percent reserve and direct shard clamp helpers at 49 GB free":
+        val eff_96g = shard_pool_effective_budget_for_v1(AVAIL_49GB_KB, 0, 0, 0, RESERVE_96G_90PCT_KB)
+        expect(eff_96g).to_equal(AVAIL_49GB_KB - RESERVE_96G_90PCT_KB)
+        expect(shard_pool_workers_v1(eff_96g, FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1)).to_equal(4)
+        expect(shard_standalone_host_cap_v1(8, FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1, AVAIL_49GB_KB, RESERVE_96G_90PCT_KB, 2000000)).to_equal(4)
+        expect(shard_threads_cap_for(8, FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1, AVAIL_49GB_KB) >= 2).to_equal(true)
+        expect(shard_threads_parent_cap_for(8, FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1, AVAIL_49GB_KB, 0, true, 2000000) >= 2).to_equal(true)
+
+    it "preserves shard-mode host worker_mem_mib honoring and explicit env overrides":
+        expect(file_worker_pool_phase_price_kb_v1("", "26624", FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1, true)).to_equal(BUDGET_26GIB_KB)
+        expect(file_worker_pool_phase_price_kb_v1("12000000", "26624", FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1, false)).to_equal(12000000)

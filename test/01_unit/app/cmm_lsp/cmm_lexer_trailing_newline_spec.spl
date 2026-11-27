@@ -1,0 +1,46 @@
+# Lexer trailing-segment behavior: a final newline terminates the last real
+# line; it must not manufacture a phantom EmptyLine statement, while interior
+# blank lines keep theirs.
+use std.spec.*
+use app.cmm_lsp.cmm_ast.{CmmStmt}
+use app.cmm_lsp.cmm_parser_source.{parse_cmm_source}
+
+fn count_kind(stmts: [CmmStmt], kind: text) -> i64:
+    var n: i64 = 0
+    for s in stmts:
+        match s:
+            case CmmStmt.EmptyLine(_):
+                if kind == "empty":
+                    n = n + 1
+            case CmmStmt.PrintStmt(_, _):
+                if kind == "print":
+                    n = n + 1
+            case CmmStmt.Command(_, _, _):
+                if kind == "command":
+                    n = n + 1
+            case _:
+                n = n
+    n
+
+describe "cmm lexer trailing newline":
+    it "does not manufacture a statement for the file-terminating newline":
+        val two = parse_cmm_source("SYStem.CPU CortexA53\nPRINT \"hello\"\n")
+        expect(two.statements.len()).to_equal(2)
+        expect(count_kind(two.statements, "command")).to_equal(1)
+        expect(count_kind(two.statements, "print")).to_equal(1)
+        expect(count_kind(two.statements, "empty")).to_equal(0)
+
+    it "parses the same file with or without the terminating newline":
+        val with_nl = parse_cmm_source("PRINT \"a\"\n")
+        val without_nl = parse_cmm_source("PRINT \"a\"")
+        expect(with_nl.statements.len()).to_equal(1)
+        expect(without_nl.statements.len()).to_equal(1)
+
+    it "keeps EmptyLine for interior blank lines including before the final newline":
+        val spaced = parse_cmm_source("PRINT \"a\"\n\nPRINT \"b\"\n")
+        expect(spaced.statements.len()).to_equal(3)
+        expect(count_kind(spaced.statements, "print")).to_equal(2)
+        expect(count_kind(spaced.statements, "empty")).to_equal(1)
+        val trailing_blank = parse_cmm_source("PRINT \"a\"\n\n")
+        expect(trailing_blank.statements.len()).to_equal(2)
+        expect(count_kind(trailing_blank.statements, "empty")).to_equal(1)

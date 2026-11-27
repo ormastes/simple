@@ -1,0 +1,216 @@
+# rootfs_materialize_v1: lower/ of store-object links, writes land in upper/.
+use std.spec.{describe, it, expect, only_on_windows}
+use std.nogc_sync_mut.storage.storage_view_v1.{ViewBytesV1, ViewFlagV1,
+    storage_view_v1_create, storage_view_v1_write, storage_view_v1_read, storage_view_v1_save,
+    storage_view_v1_load, storage_view_v1_base_entries, storage_view_v1_destroy, StorageViewV1}
+use std.nogc_sync_mut.storage.rootfs_materialize_v1.{rootfs_materialize_v1, rootfs_dematerialize_v1}
+use std.nogc_sync_mut.storage.immutable_store_v1.{immutable_store_v1_init, immutable_store_v1_collect,
+    immutable_store_v1_link_object, immutable_store_v1_ingest, StoreGenerationV1, StoreFlagV1}
+use std.nogc_sync_mut.io.file_ops.{file_exists, secure_temp_dir_raw,
+    file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all, is_dir}
+use std.io_runtime.{file_delete}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use app.io.file_ops.{path_absolute}
+
+fn _temp(tag: text) -> text:
+    dir_create_all("build/test-artifacts")
+    val owned = secure_temp_dir_raw("build/test-artifacts", "rf-" + tag + "-")
+    expect(owned == "").to_equal(false)
+    path_absolute(owned).replace("\\", "/")
+
+fn _cleanup(root: text):
+    val parent = path_absolute("build/test-artifacts").replace("\\", "/") + "/"
+    expect(root.starts_with(parent)).to_equal(true)
+    expect(dir_remove_all(root)).to_equal(true)
+
+fn _name_count(path: text) -> i64:
+    val r = process_run("fsutil", ["hardlink", "list", path.replace("/", "\\")])
+    var n: i64 = 0
+    for line in r.0.split("\n"):
+        if line.trim().starts_with("\\"):
+            n = n + 1
+    n
+
+fn _text(path: text) -> text:
+    file_read_regular_no_follow_bounded(path, 1000).unwrap()
+
+fn _obj(store: text, key: text) -> text:
+    store + "/objects/" + key.substring(0, 2) + "/" + key + ".obj"
+
+# Two-file base saved as root "main"; returns the store root.
+fn _base(base: text) -> text:
+    val store = base + "/store"
+    expect(immutable_store_v1_init(store)).to_equal("")
+    val seed = storage_view_v1_create(store, base + "/seedviews", "seed", "", StoreGenerationV1(0), ViewBytesV1(100000))
+    expect(seed.status).to_equal("ok")
+    expect(storage_view_v1_write(seed.view, "bin/tool.txt", "tool-bytes".bytes()).status).to_equal("ok")
+    expect(storage_view_v1_write(seed.view, "etc.txt", "etc-bytes".bytes()).status).to_equal("ok")
+    expect(storage_view_v1_save(seed.view, "main", StoreGenerationV1(0)).status).to_equal("ok")
+    store
+
+fn _load(store: text, base: text, id: text):
+    val h = storage_view_v1_load(store, base + "/views", id, "main")
+    expect(h.reason).to_equal("")
+    expect(h.status).to_equal("ok")
+    h.view
+
+describe "rootfs_materialize_v1":
+    it "lists base entries in step and materializes linked lower files":
+        val base = _temp("mat")
+        val store = _base(base)
+        val view = _load(store, base, "v1")
+        val entries = storage_view_v1_base_entries(view)
+        expect(entries.status).to_equal("ok")
+        expect(entries.paths.len()).to_equal(2)
+        expect(entries.keys.len()).to_equal(2)
+        val m = rootfs_materialize_v1(view, ViewFlagV1(false))
+        expect(m.reason).to_equal("")
+        expect(m.status).to_equal("ok")
+        expect(m.linked.value).to_equal(2)
+        expect(m.copied.value).to_equal(0)
+        expect(_text(m.lower_dir + "/bin/tool.txt")).to_equal("tool-bytes")
+        expect(_text(m.lower_dir + "/etc.txt")).to_equal("etc-bytes")
+        expect(is_dir(m.upper_dir)).to_equal(true)
+        expect(rootfs_dematerialize_v1(view)).to_equal("")
+        expect(is_dir(m.lower_dir)).to_equal(false)
+        _cleanup(base)
+
+    only_on_windows "measures link count 2 on NTFS between lower file and store object":
+        val base = _temp("ntfs")
+        val store = _base(base)
+        val view = _load(store, base, "v1")
+        val entries = storage_view_v1_base_entries(view)
+        val m = rootfs_materialize_v1(view, ViewFlagV1(false))
+        expect(m.status).to_equal("ok")
+        val obj = _obj(store, entries.keys[0])
+        expect(_name_count(obj)).to_equal(2)
+        expect(_name_count(m.lower_dir + "/" + entries.paths[0])).to_equal(2)
+        expect(rootfs_dematerialize_v1(view)).to_equal("")
+        expect(_name_count(obj)).to_equal(1)
+        _cleanup(base)
+
+    it "writes land in upper, lower and store objects stay unchanged":
+        val base = _temp("write")
+        val store = _base(base)
+        val view = _load(store, base, "v1")
+        val m = rootfs_materialize_v1(view, ViewFlagV1(false))
+        expect(m.status).to_equal("ok")
+        val w = storage_view_v1_write(view, "etc.txt", "changed".bytes())
+        expect(w.status).to_equal("ok")
+        expect(_text(m.upper_dir + "/etc.txt")).to_equal("changed")
+        expect(_text(m.lower_dir + "/etc.txt")).to_equal("etc-bytes")
+        expect(storage_view_v1_read(view, "etc.txt").bytes.len()).to_equal(7)
+        val entries = storage_view_v1_base_entries(view)
+        for i in 0..entries.keys.len():
+            if entries.paths[i] == "etc.txt":
+                expect(_text(_obj(store, entries.keys[i]))).to_equal("etc-bytes")
+            else:
+                expect(_text(_obj(store, entries.keys[i]))).to_equal("tool-bytes")
+        expect(rootfs_dematerialize_v1(view)).to_equal("")
+        _cleanup(base)
+
+    it "shares bytes between two views; real gc keeps them and quarantines an unreferenced object":
+        val base = _temp("two")
+        val store = _base(base)
+        val junk = immutable_store_v1_ingest(store, "unreferenced-junk".bytes(), "xxh3-128")
+        expect(junk.status).to_equal("ok")
+        val a = _load(store, base, "va")
+        val b = _load(store, base, "vb")
+        val ma = rootfs_materialize_v1(a, ViewFlagV1(false))
+        val mb = rootfs_materialize_v1(b, ViewFlagV1(false))
+        expect(ma.linked.value).to_equal(2)
+        expect(mb.linked.value).to_equal(2)
+        expect(_text(ma.lower_dir + "/etc.txt")).to_equal(_text(mb.lower_dir + "/etc.txt"))
+        expect(rootfs_dematerialize_v1(a)).to_equal("")
+        val gc = immutable_store_v1_collect(store, StoreFlagV1(false))
+        expect(gc.reason).to_equal("")
+        expect(gc.status).to_equal("ok")
+        expect(gc.moved.value).to_equal(1)
+        expect(gc.unreachable.len()).to_equal(1)
+        expect(gc.unreachable[0]).to_equal(junk.object_key)
+        expect(file_exists(_obj(store, junk.object_key))).to_equal(false)
+        val entries = storage_view_v1_base_entries(b)
+        for key in entries.keys:
+            expect(file_exists(_obj(store, key))).to_equal(true)
+        expect(_text(mb.lower_dir + "/bin/tool.txt")).to_equal("tool-bytes")
+        expect(_text(mb.lower_dir + "/etc.txt")).to_equal("etc-bytes")
+        expect(rootfs_dematerialize_v1(b)).to_equal("")
+        _cleanup(base)
+
+    it "destroy refuses while lower exists and succeeds after dematerialize":
+        val base = _temp("destroy")
+        val store = _base(base)
+        val view = _load(store, base, "v1")
+        expect(rootfs_materialize_v1(view, ViewFlagV1(false)).status).to_equal("ok")
+        val refused = storage_view_v1_destroy(view)
+        expect(refused.status).to_equal("rejected")
+        expect(refused.reason).to_equal("lower-materialized")
+        expect(is_dir(base + "/views/v1/upper")).to_equal(true)
+        expect(rootfs_dematerialize_v1(view)).to_equal("")
+        expect(storage_view_v1_destroy(view).status).to_equal("ok")
+        _cleanup(base)
+
+    it "dematerialize validates the view id and root":
+        val base = _temp("valid")
+        val store = _base(base)
+        val view = _load(store, base, "v1")
+        val bad = StorageViewV1(store: view.store, view_root: view.view_root, view_id: "../v1",
+            base_root: view.base_root, base_generation: view.base_generation,
+            base_manifest_key: view.base_manifest_key, quota: view.quota, volumes: [])
+        expect(rootfs_dematerialize_v1(bad)).to_equal("view-id-invalid")
+        _cleanup(base)
+
+    it "rejects a second materialize while lower exists":
+        val base = _temp("twice")
+        val store = _base(base)
+        val view = _load(store, base, "v1")
+        expect(rootfs_materialize_v1(view, ViewFlagV1(false)).status).to_equal("ok")
+        val again = rootfs_materialize_v1(view, ViewFlagV1(false))
+        expect(again.status).to_equal("rejected")
+        expect(again.reason).to_equal("lower-exists")
+        expect(_text(base + "/views/v1/lower/etc.txt")).to_equal("etc-bytes")
+        expect(rootfs_dematerialize_v1(view)).to_equal("")
+        _cleanup(base)
+
+    it "fails closed on a missing store object and leaves no lower or pin":
+        val base = _temp("miss")
+        val store = _base(base)
+        val view = _load(store, base, "v1")
+        val entries = storage_view_v1_base_entries(view)
+        val victim = _obj(store, entries.keys[1])
+        expect(file_exists(victim)).to_equal(true)
+        expect(file_delete(victim)).to_equal(true)
+        val m = rootfs_materialize_v1(view, ViewFlagV1(true))
+        expect(m.status).to_equal("rejected")
+        expect(is_dir(base + "/views/v1/lower")).to_equal(false)
+        expect(is_dir(store + "/pins/v1")).to_equal(false)
+        _cleanup(base)
+
+    it "a view with no base materializes an empty lower":
+        val base = _temp("empty")
+        val store = base + "/store"
+        expect(immutable_store_v1_init(store)).to_equal("")
+        val made = storage_view_v1_create(store, base + "/views", "v1", "", StoreGenerationV1(0), ViewBytesV1(1000))
+        val m = rootfs_materialize_v1(made.view, ViewFlagV1(false))
+        expect(m.status).to_equal("ok")
+        expect(m.linked.value).to_equal(0)
+        expect(rootfs_dematerialize_v1(made.view)).to_equal("")
+        _cleanup(base)
+
+describe "immutable_store_v1_link_object":
+    it "reports missing for an absent object and links a present one":
+        val base = _temp("obj")
+        val store = base + "/store"
+        expect(immutable_store_v1_init(store)).to_equal("")
+        val ing = immutable_store_v1_ingest(store, "abc".bytes(), "xxh3-128")
+        expect(ing.status).to_equal("ok")
+        val l = immutable_store_v1_link_object(store, ing.object_key, base + "/out.bin", StoreFlagV1(false))
+        expect(l.reason).to_equal("")
+        expect(l.status).to_equal("linked")
+        expect(_text(base + "/out.bin")).to_equal("abc")
+        val again = immutable_store_v1_link_object(store, ing.object_key, base + "/out.bin", StoreFlagV1(true))
+        expect(again.status).to_equal("rejected")
+        val miss = immutable_store_v1_link_object(store, "xxh3_128_00000000000000000000000000000000", base + "/o2.bin", StoreFlagV1(true))
+        expect(miss.status).to_equal("missing")
+        _cleanup(base)

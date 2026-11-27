@@ -1,0 +1,121 @@
+# Pure metadata integrity only. No authenticated principal, native endpoint,
+# verified rights, issuer state or exec-birth proof is constructed here.
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2,
+    container_host_scope_bytes_v2, container_scope_fence_id_v2}
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.exec_v3.exec_runtime_bytes_v3
+use std.common.contracts.mux.request_validation_v1.mux_validate_name_v1
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+
+pub enum SessionRuntimeControlKindV1:
+    Input
+    Geometry
+
+pub struct SessionRuntimeControlTargetV1:
+    scope: ContainerHostScopeV2
+    runtime: RuntimeIdentityV1
+    workload_request_digest: text
+    binding_uid: text
+    binding_digest: text
+    service_incarnation: text
+    session_id: text
+    window_id: text
+    pane_id: text
+    service_epoch: i64
+    child_incarnation: i64
+    client_id: text
+    attachment_generation: i64
+    execution_kind: text
+    native_exec_id: text
+    exec_request_digest: text
+
+pub struct SessionRuntimeControlLeaseV1:
+    target: SessionRuntimeControlTargetV1
+    kind: SessionRuntimeControlKindV1
+    principal_id: text
+    nonce_digest: text
+    revision: i64
+    issued_monotonic_ms: i64
+    expires_monotonic_ms: i64
+
+pub fn session_runtime_control_incarnation_valid_v1(value: text) -> bool:
+    if value.len() != 32: return false
+    for ch in value.chars():
+        if not "0123456789abcdef".contains(ch): return false
+    true
+
+pub fn session_runtime_control_target_validate_v1(target: SessionRuntimeControlTargetV1) -> Result<(), text>:
+    val _scope = container_host_scope_bytes_v2(target.scope)?
+    val _runtime = exec_runtime_bytes_v3(target.runtime)?
+    val fence = container_scope_fence_id_v2(target.scope)?
+    if (target.runtime.node_boot_id != fence or
+            target.runtime.provider_generation != target.scope.provider_generation): return Err("control-runtime-scope-mismatch")
+    for digest in [target.workload_request_digest, target.binding_digest]:
+        if not builder_digest_valid_v1(digest): return Err("control-target-digest-invalid")
+    if not builder_identifier_valid_v1(target.binding_uid): return Err("control-binding-uid-invalid")
+    if not session_runtime_control_incarnation_valid_v1(target.service_incarnation): return Err("control-service-incarnation-invalid")
+    for identity in [target.session_id, target.window_id, target.pane_id, target.client_id]:
+        if mux_validate_name_v1(identity).is_err(): return Err("control-target-name-invalid")
+    if target.service_epoch <= 0 or target.child_incarnation <= 0 or target.attachment_generation <= 0:
+        return Err("control-target-generation-invalid")
+    if target.execution_kind == "primary":
+        if target.native_exec_id != "" or target.exec_request_digest != "": return Err("control-primary-exec-fields")
+    elif target.execution_kind == "exec":
+        # The actual service must resolve a retained native birth receipt. These
+        # digest fields alone cannot prove birth or authorize an exec channel.
+        if not builder_digest_valid_v1(target.native_exec_id) or not builder_digest_valid_v1(target.exec_request_digest):
+            return Err("control-exec-identity-invalid")
+    else: return Err("control-execution-kind-unsupported")
+    Ok(())
+
+pub fn session_runtime_control_target_bytes_v1(target: SessionRuntimeControlTargetV1) -> Result<text, text>:
+    session_runtime_control_target_validate_v1(target)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("session-runtime-control-target"),
+        "scope": SdnValue.String(container_host_scope_bytes_v2(target.scope)?),
+        "runtime": SdnValue.String(exec_runtime_bytes_v3(target.runtime)?),
+        "workloadRequestDigest": SdnValue.String(target.workload_request_digest), "bindingUid": SdnValue.String(target.binding_uid),
+        "bindingDigest": SdnValue.String(target.binding_digest), "serviceIncarnation": SdnValue.String(target.service_incarnation),
+        "sessionId": SdnValue.String(target.session_id), "windowId": SdnValue.String(target.window_id), "paneId": SdnValue.String(target.pane_id),
+        "serviceEpoch": SdnValue.Int(target.service_epoch), "childIncarnation": SdnValue.Int(target.child_incarnation),
+        "clientId": SdnValue.String(target.client_id), "attachmentGeneration": SdnValue.Int(target.attachment_generation),
+        "executionKind": SdnValue.String(target.execution_kind), "nativeExecId": SdnValue.String(target.native_exec_id),
+        "execRequestDigest": SdnValue.String(target.exec_request_digest)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+pub fn session_runtime_control_target_digest_v1(target: SessionRuntimeControlTargetV1) -> Result<text, text>:
+    Ok(sha256_text(session_runtime_control_target_bytes_v1(target)?))
+
+pub fn session_runtime_control_target_match_v1(requested: SessionRuntimeControlTargetV1,
+        observed: SessionRuntimeControlTargetV1) -> Result<(), text>:
+    if session_runtime_control_target_bytes_v1(requested)? != session_runtime_control_target_bytes_v1(observed)?:
+        return Err("control-target-changed")
+    Ok(())
+
+pub fn session_runtime_control_target_binding_match_v1(requested: SessionRuntimeControlTargetV1,
+        observed: SessionRuntimeControlTargetV1) -> Result<(), text>:
+    session_runtime_control_target_validate_v1(requested)?
+    var stable = requested
+    stable.client_id = observed.client_id
+    stable.attachment_generation = observed.attachment_generation
+    session_runtime_control_target_match_v1(stable, observed)
+
+pub fn session_runtime_control_lease_validate_v1(lease: SessionRuntimeControlLeaseV1) -> Result<(), text>:
+    session_runtime_control_target_validate_v1(lease.target)?
+    if not builder_identifier_valid_v1(lease.principal_id) or not builder_digest_valid_v1(lease.nonce_digest):
+        return Err("control-lease-identity-invalid")
+    if (lease.revision <= 0 or lease.issued_monotonic_ms <= 0 or lease.expires_monotonic_ms <= lease.issued_monotonic_ms or
+            lease.expires_monotonic_ms - lease.issued_monotonic_ms > 15000): return Err("control-lease-window-invalid")
+    Ok(())
+
+pub fn session_runtime_control_lease_check_v1(lease: SessionRuntimeControlLeaseV1,
+        current_target: SessionRuntimeControlTargetV1, kind: SessionRuntimeControlKindV1,
+        principal_id: text, nonce_digest: text, revision: i64, now_ms: i64) -> Result<(), text>:
+    session_runtime_control_lease_validate_v1(lease)?
+    if lease.kind != kind: return Err("control-kind-denied")
+    if lease.principal_id != principal_id: return Err("control-principal-denied")
+    if lease.nonce_digest != nonce_digest or lease.revision != revision: return Err("control-capability-stale")
+    if now_ms < lease.issued_monotonic_ms or now_ms >= lease.expires_monotonic_ms: return Err("control-lease-expired")
+    session_runtime_control_target_match_v1(lease.target, current_target)

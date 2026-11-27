@@ -1,5 +1,5 @@
 # check-engine2d-vulkan-window-8k passes via an xvfb device-present PROXY, not real window rendering
-## Open 2026-09-16 — needs owner triage
+## Open 2026-11-11 — re-verified LIVE by lane ne8 (see dated addendum at end)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -46,3 +46,56 @@ Treat `scope=xvfb-device-present-proxy` as NOT proving rendering. Rendering
 claims for the window lane must cite `check-gui-vulkan-window.shs`
 (`assert_vulkan_frame=pass`, `assert_widget_content=pass`) instead.
 
+
+---
+
+## 2026-11-11 addendum — lane ne8 (P3 traverse, batch ne8)
+
+**Verdict: LIVE — the default gate lane is still a device-present proxy with no pixel
+verification. Kept OPEN.**
+
+- `scripts/check/check-engine2d-vulkan-window-8k.shs` (release tip, last touched by PR #7597,
+  2026-11-07) still runs only the Rust swapchain-bookkeeping test
+  `bench_window_swapchain_present_8k_one_percent_damage` under Xvfb and, on the default lane,
+  still emits exactly `engine2d_vulkan_window_8k_evidence_status=pass
+  scope=xvfb-device-present-proxy`. Its header now states honestly that "the default disposable
+  Xvfb lane is evidence collection, not an 8K/80 pass gate".
+- The receipt assertions on the default lane remain bookkeeping-only
+  (`readback_bytes=0`, `completion_known=true`, `present_mode=window-swapchain`,
+  `device_type=...`); no presented frame is captured and no pixel/content oracle runs. A
+  regression presenting garbage or nothing while keeping bookkeeping consistent would still
+  pass — the doc's core finding stands.
+- A PHYSICAL lane (`ENGINE2D_VULKAN_PHYSICAL=1`, added in the 2026-11-07 render hardening
+  series) now requires a real EDID-verified 7680x4320@80 X11 mode and enforces p95 timing +
+  non-zero checksum + RSS. That raises the bar for the hardware lane but (a) cannot run in CI
+  or on this Windows lane (no Xvfb/NVIDIA ICD here), and (b) still does not compare presented
+  pixels against an expectation — `checksum > 0` is presence, not correctness. The sibling
+  pixel-verified gates (`check-engine2d-vulkan-clear-8k.shs` readback-compare,
+  `check-gui-vulkan-window.shs` `window_distinct_colors` + widget oracle) remain the bar this
+  gate does not meet.
+- **Not fixed in this lane:** strengthening needs a Rust runtime change (frame capture /
+  swapchain-image readback + checksum vs the source damage buffer in the
+  `vulkan_graphics_runtime` test), which is outside a no-cargo interpreter-seed lane and
+  un-runnable on this host. The "until strengthened" reporting rule below remains in force.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: LIVE, unchanged — default gate lane still emits
+`scope=xvfb-device-present-proxy` at this tip (source re-verified).**
+
+- `scripts/check/check-engine2d-vulkan-window-8k.shs:243` still prints
+  `engine2d_vulkan_window_8k_evidence_status=pass scope=xvfb-device-present-proxy`
+  on the default disposable Xvfb lane; no presented-frame capture or pixel oracle
+  runs there. The PHYSICAL lane (`ENGINE2D_VULKAN_PHYSICAL=1`) remains
+  Xvfb/EDID-gated and cannot run on this Windows host.
+- Strengthening (frame capture / swapchain-image readback + checksum vs the
+  source damage buffer in the `vulkan_graphics_runtime` Rust test) is a Rust
+  runtime change outside a no-cargo lane. The "until strengthened" reporting
+  rule remains in force.
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+Blocked on this host: no Xvfb. Static confirmation at release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: in bench_window_swapchain_present_8k_one_percent_damage the checksum folds the host source vector, not the presented frame (vulkan_graphics_runtime_swapchain.rs), so the gate still proves device present only. The fix is in that ignored Rust test plus the gate script and needs cargo --features vulkan with a display.

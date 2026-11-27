@@ -1,0 +1,213 @@
+"""
+## Purpose and audience
+Purpose: Prove that HmInferContext.unify structurally unifies Union, Isolated
+and Projection carriers instead of falling through to the Mismatch default.
+Audience: compiler engineers who maintain HM unification in
+src/compiler/30.types/type_infer/core.spl.
+"""
+# @req: REQ-COMPILER-TYPE-INFER-001 — stable requirement identity for this spec.
+
+# Regression for doc/08_tracking/bug/type_infer_unify_missing_union_arm_2026-11-01.md
+#
+# Before the fix, `unify` had no arm for `Union`, `Isolated` or `Projection`,
+# so two structurally identical `Union[i64, str]` values hit the `case _`
+# Mismatch arm. The fix adds member-wise (positional) arms for all three.
+#
+# Ordering choice: Union unification is POSITIONAL (same arity, same order),
+# matching `hir_type_lists_equal` in hir_lowering/type_equality.spl, the HIR
+# unifier in hir/inference/unify.spl, Substitution.apply and occurs. HIR
+# lowering preserves source member order, so `i64 | str` and `str | i64` are
+# distinct carriers here; an order-insensitive match would be ambiguous once a
+# member is an unbound inference variable (which concrete member binds it?).
+
+use compiler.types.type_infer_types.*
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.types.type_infer.generalization.*
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+
+# ============================================================================
+# Fixtures / observation helpers
+# ============================================================================
+
+fn uu_sp() -> Span:
+    lex_span_empty()
+
+fn uu_mk(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: uu_sp())
+
+fn uu_i64() -> HirType:
+    uu_mk(HirTypeKind.Int(64, true))
+
+fn uu_str() -> HirType:
+    uu_mk(HirTypeKind.Str)
+
+fn uu_bool() -> HirType:
+    uu_mk(HirTypeKind.Bool)
+
+fn uu_union(members: [HirType]) -> HirType:
+    uu_mk(HirTypeKind.Union(members))
+
+fn uu_iso(inner: HirType) -> HirType:
+    uu_mk(HirTypeKind.Isolated(inner))
+
+fn uu_proj(base: HirType, assoc: text) -> HirType:
+    uu_mk(HirTypeKind.Projection(base, assoc))
+
+fn uu_named(id: i64) -> HirType:
+    uu_mk(HirTypeKind.Named(SymbolId.new(id), []))
+
+fn uu_verdict(result: Result<(), TypeInferError>) -> text:
+    match result:
+        case Ok(_): "ok"
+        case Err(TypeInferError.Mismatch(_, _, _)): "mismatch"
+        case Err(TypeInferError.OccursCheck(_, _, _)): "occurs"
+        case Err(TypeInferError.Other(message, _)): message
+        case Err(_): "other-error"
+
+fn uu_show(ty: HirType) -> text:
+    """Short readable tag for a resolved HirType."""
+    match ty.kind:
+        case Int(bits, _): "i{bits}"
+        case Str: "str"
+        case Bool: "bool"
+        case Infer(id, _): "?{id}"
+        case Union(members): "union/{members.len()}"
+        case Isolated(_): "iso"
+        case Projection(_, assoc): "proj.{assoc}"
+        case Named(_, _): "named"
+        case _: "leaf"
+
+# ============================================================================
+# Specs
+# ============================================================================
+
+describe "unify Union arm (regression)":
+    it "unifies two structurally identical unions":
+        step("Unify Union[i64, str] with an independent Union[i64, str]")
+        # @req: REQ-COMPILER-TYPE-INFER-001
+        var ctx = HmInferContext.new()
+        val left = uu_union([uu_i64(), uu_str()])
+        val right = uu_union([uu_i64(), uu_str()])
+        expect(uu_verdict(ctx.unify(left, right))).to_equal("ok")
+
+    it "rejects unions whose members differ":
+        step("Unify Union[i64, str] with Union[i64, bool]; second member mismatches")
+        # @req: REQ-COMPILER-TYPE-INFER-001
+        var ctx = HmInferContext.new()
+        val left = uu_union([uu_i64(), uu_str()])
+        val right = uu_union([uu_i64(), uu_bool()])
+        expect(uu_verdict(ctx.unify(left, right))).to_equal("mismatch")
+
+    it "rejects unions of different arity":
+        step("Unify Union[i64, str] with Union[i64, str, bool]; arity guard fails")
+        # @req: REQ-COMPILER-TYPE-INFER-001
+        var ctx = HmInferContext.new()
+        val left = uu_union([uu_i64(), uu_str()])
+        val right = uu_union([uu_i64(), uu_str(), uu_bool()])
+        expect(uu_verdict(ctx.unify(left, right))).to_equal("mismatch")
+
+    it "is positional: reordered members do not unify":
+        step("Unify Union[i64, str] with Union[str, i64]; documented positional choice")
+        # @req: REQ-COMPILER-TYPE-INFER-001
+        var ctx = HmInferContext.new()
+        val left = uu_union([uu_i64(), uu_str()])
+        val right = uu_union([uu_str(), uu_i64()])
+        expect(uu_verdict(ctx.unify(left, right))).to_equal("mismatch")
+
+    it "binds an inference variable inside a union member-wise":
+        step("Unify Union[?a, str] with Union[i64, str]; ?a must resolve to i64")
+        # @req: REQ-COMPILER-TYPE-INFER-001
+        var ctx = HmInferContext.new()
+        val a = ctx.fresh_var(uu_sp())
+        val left = uu_union([a, uu_str()])
+        val right = uu_union([uu_i64(), uu_str()])
+        expect(uu_verdict(ctx.unify(left, right))).to_equal("ok")
+        expect(uu_show(ctx.resolve(a))).to_equal("i64")
+
+    it "binds a bare inference variable to a whole union":
+        step("Unify ?a with Union[i64, str]; ?a resolves to the union carrier")
+        # @req: REQ-COMPILER-TYPE-INFER-001
+        var ctx = HmInferContext.new()
+        val a = ctx.fresh_var(uu_sp())
+        val right = uu_union([uu_i64(), uu_str()])
+        expect(uu_verdict(ctx.unify(a, right))).to_equal("ok")
+        expect(uu_show(ctx.resolve(a))).to_equal("union/2")
+
+    it "fails the occurs check when a variable appears inside the union it binds to":
+        step("Unify ?a with Union[?a, str]; the occurs walk through Union must reject")
+        # @req: REQ-COMPILER-TYPE-INFER-001
+        var ctx = HmInferContext.new()
+        val a = ctx.fresh_var(uu_sp())
+        val right = uu_union([a, uu_str()])
+        expect(uu_verdict(ctx.unify(a, right))).to_equal("occurs")
+
+    it "does not unify a union with a non-union member type":
+        step("Unify Union[i64, str] with i64; no subsumption arm exists in the HM kernel")
+        # @req: REQ-COMPILER-TYPE-INFER-001
+        var ctx = HmInferContext.new()
+        val left = uu_union([uu_i64(), uu_str()])
+        expect(uu_verdict(ctx.unify(left, uu_i64()))).to_equal("mismatch")
+
+describe "unify Isolated arm (regression)":
+    it "unifies two identical isolated carriers":
+        step("Unify iso i64 with iso i64")
+        # @req: REQ-COMPILER-TYPE-INFER-001
+        var ctx = HmInferContext.new()
+        expect(uu_verdict(ctx.unify(uu_iso(uu_i64()), uu_iso(uu_i64())))).to_equal("ok")
+
+    it "binds an inference variable under an isolated carrier":
+        step("Unify iso ?a with iso str; ?a must resolve to str")
+        # @req: REQ-COMPILER-TYPE-INFER-001
+        var ctx = HmInferContext.new()
+        val a = ctx.fresh_var(uu_sp())
+        expect(uu_verdict(ctx.unify(uu_iso(a), uu_iso(uu_str())))).to_equal("ok")
+        expect(uu_show(ctx.resolve(a))).to_equal("str")
+
+    it "rejects isolated carriers with mismatched inner types":
+        step("Unify iso i64 with iso str")
+        # @req: REQ-COMPILER-TYPE-INFER-001
+        var ctx = HmInferContext.new()
+        expect(uu_verdict(ctx.unify(uu_iso(uu_i64()), uu_iso(uu_str())))).to_equal("mismatch")
+
+    it "does not erase the isolated capability against a bare type":
+        step("Unify iso i64 with i64; the capability is part of the type")
+        # @req: REQ-COMPILER-TYPE-INFER-001
+        var ctx = HmInferContext.new()
+        expect(uu_verdict(ctx.unify(uu_iso(uu_i64()), uu_i64()))).to_equal("mismatch")
+
+describe "unify Projection arm (regression)":
+    it "unifies projections with the same associated name and base":
+        step("Unify Named(7).Item with Named(7).Item")
+        # @req: REQ-COMPILER-TYPE-INFER-001
+        var ctx = HmInferContext.new()
+        val left = uu_proj(uu_named(7), "Item")
+        val right = uu_proj(uu_named(7), "Item")
+        expect(uu_verdict(ctx.unify(left, right))).to_equal("ok")
+
+    it "binds an inference variable as the projection base":
+        step("Unify ?a.Item with Named(7).Item; ?a must resolve to Named(7)")
+        # @req: REQ-COMPILER-TYPE-INFER-001
+        var ctx = HmInferContext.new()
+        val a = ctx.fresh_var(uu_sp())
+        val left = uu_proj(a, "Item")
+        val right = uu_proj(uu_named(7), "Item")
+        expect(uu_verdict(ctx.unify(left, right))).to_equal("ok")
+        expect(uu_show(ctx.resolve(a))).to_equal("named")
+
+    it "rejects projections with different associated names":
+        step("Unify Named(7).Item with Named(7).Output; the assoc_name guard fails")
+        # @req: REQ-COMPILER-TYPE-INFER-001
+        var ctx = HmInferContext.new()
+        val left = uu_proj(uu_named(7), "Item")
+        val right = uu_proj(uu_named(7), "Output")
+        expect(uu_verdict(ctx.unify(left, right))).to_equal("mismatch")
+
+    it "rejects projections whose bases differ":
+        step("Unify i64.Item with str.Item; same name, base mismatch")
+        # @req: REQ-COMPILER-TYPE-INFER-001
+        var ctx = HmInferContext.new()
+        val left = uu_proj(uu_i64(), "Item")
+        val right = uu_proj(uu_str(), "Item")
+        expect(uu_verdict(ctx.unify(left, right))).to_equal("mismatch")

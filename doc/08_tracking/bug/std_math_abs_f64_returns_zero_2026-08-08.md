@@ -167,3 +167,10 @@ before.
    checked, and should be.
 3. `native-build` / LLVM lanes not exercised (see the lane note at the top of
    this section).
+
+## Behavioral re-verification — 2026-11-05
+
+On an aarch64 Linux host with the deployed seed: `math_abs(-3.0)` prints
+GOT=3.0 (was 0.0) and `math_abs(2.5)` prints POS=2.5 on the default JIT
+lane. builtin_method_extras_lowering_spec.spl (rt_math_abs routing): 22/22
+under the seed interpreter.

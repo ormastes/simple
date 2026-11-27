@@ -163,39 +163,25 @@ static int64_t next_handle(void)
     return g_next_id++;
 }
 
-static WndSlot *wnd_find(int64_t id)
-{
-    if (id <= 0) return NULL;
-    for (int i = 0; i < TABLE_CAP; i++) {
-        if (g_wnds[i].id == id) return &g_wnds[i];
-    }
-    return NULL;
+#define DEFINE_SLOT_FIND_ALLOC(Type, find_fn, alloc_fn, table) \
+static Type *find_fn(int64_t id) \
+{ \
+    if (id <= 0) return NULL; \
+    for (int i = 0; i < TABLE_CAP; i++) { \
+        if (table[i].id == id) return &table[i]; \
+    } \
+    return NULL; \
+} \
+static Type *alloc_fn(void) \
+{ \
+    for (int i = 0; i < TABLE_CAP; i++) { \
+        if (table[i].id == 0) return &table[i]; \
+    } \
+    return NULL; \
 }
 
-static WndSlot *wnd_alloc(void)
-{
-    for (int i = 0; i < TABLE_CAP; i++) {
-        if (g_wnds[i].id == 0) return &g_wnds[i];
-    }
-    return NULL;
-}
-
-static DibSlot *dib_find(int64_t id)
-{
-    if (id <= 0) return NULL;
-    for (int i = 0; i < TABLE_CAP; i++) {
-        if (g_dibs[i].id == id) return &g_dibs[i];
-    }
-    return NULL;
-}
-
-static DibSlot *dib_alloc(void)
-{
-    for (int i = 0; i < TABLE_CAP; i++) {
-        if (g_dibs[i].id == 0) return &g_dibs[i];
-    }
-    return NULL;
-}
+DEFINE_SLOT_FIND_ALLOC(WndSlot, wnd_find, wnd_alloc, g_wnds)
+DEFINE_SLOT_FIND_ALLOC(DibSlot, dib_find, dib_alloc, g_dibs)
 
 /* -------------------------------------------------------------------------
  * Window procedure — stateless, forwards to DefWindowProc.
@@ -583,24 +569,33 @@ bool rt_win32_dib_fill_rect(int64_t dib, int64_t x, int64_t y,
     return true;
 }
 
-bool rt_win32_dib_present(int64_t hwnd_id, int64_t dib)
+/* Look up a presentable window + its HWND-owned DIB. Called with g_cs held;
+ * on failure (NULL) the lock has already been released. */
+static WndSlot *present_lookup_locked(int64_t hwnd_id, int64_t dib)
 {
-    ensure_init();
-
-    EnterCriticalSection(&g_cs);
-
     WndSlot *wnd = wnd_find(hwnd_id);
     if (!wnd || !wnd->mem_dc || !wnd->bitmap) {
         LeaveCriticalSection(&g_cs);
-        return false;
+        return NULL;
     }
 
     /* Only HWND-owned DIBs can present */
     DibSlot *ds = dib_find(dib);
     if (!ds || ds->owner_wnd != hwnd_id) {
         LeaveCriticalSection(&g_cs);
-        return false;
+        return NULL;
     }
+    return wnd;
+}
+
+bool rt_win32_dib_present(int64_t hwnd_id, int64_t dib)
+{
+    ensure_init();
+
+    EnterCriticalSection(&g_cs);
+
+    WndSlot *wnd = present_lookup_locked(hwnd_id, dib);
+    if (!wnd) return false;
 
     HWND hwnd  = wnd->hwnd;
     HDC  mem_dc = wnd->mem_dc;
@@ -623,17 +618,8 @@ bool rt_win32_dib_present_rect(int64_t hwnd_id, int64_t dib,
 
     EnterCriticalSection(&g_cs);
 
-    WndSlot *wnd = wnd_find(hwnd_id);
-    if (!wnd || !wnd->mem_dc || !wnd->bitmap) {
-        LeaveCriticalSection(&g_cs);
-        return false;
-    }
-
-    DibSlot *ds = dib_find(dib);
-    if (!ds || ds->owner_wnd != hwnd_id) {
-        LeaveCriticalSection(&g_cs);
-        return false;
-    }
+    WndSlot *wnd = present_lookup_locked(hwnd_id, dib);
+    if (!wnd) return false;
 
     int64_t x0, y0, x1, y1;
     clip_rect(wnd->w, wnd->h, x, y, w, h, &x0, &y0, &x1, &y1);

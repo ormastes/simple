@@ -1,0 +1,251 @@
+# @cover scripts/bootstrap/phase3-expanded-test-runner.shs 80%
+# @cover scripts/bootstrap/phase3-test-inventory.shs 80%
+# @req REQ-P3-EXPANDED-RUNNER-001
+"""
+## Purpose and audience
+Exercises `scripts/bootstrap/phase3-expanded-test-runner.shs` against an
+isolated git-backed source tree with a real `phase3-test-inventory.shs`
+discovery pass, frozen `simple-bootstrap-command-owners-v3` owner receipt, and
+nested receipt verification:
+- reuses existing repository results without re-executing `test/` owners
+- executes embedded `src/lib` `describe` owners, `tools/` `npm-test` owners,
+  and doctest owners exactly once and verifies `counts.tsv` via
+  `phase3-test-inventory.shs check-results`
+- refuses tampered owner receipts, mismatched `PHASE3_TEST_RUNNER` SHA-256
+  digests, tampered nested receipts, and vacuous/false tool or doctest outputs
+
+Audience: Phase-3 bootstrap and release verification maintainers.
+
+## Compatibility and limitations
+Stubs only the leaf external executables (`compiler-cli`, `test-runner`,
+`mcp-server`, `npm`, and `run-process-group-timeout.shs` passthrough) inside an
+OS-portable temp fixture while executing the real
+`phase3-expanded-test-runner.shs`, `phase3-test-inventory.shs`,
+`phase3-nested-test-inventory.shs`, `phase3-test-skip-policy.shs`,
+`validate-test-runner-json.pl`, and `validate-jest-json.pl` code unchanged.
+
+## Examples
+```sh
+bin/simple test test/02_integration/bootstrap/phase3_expanded_runner_contract_spec.spl
+```
+"""
+
+# @tag: integration, bootstrap, phase3, expanded-runner
+
+use std.spec.*
+use std.spec.{step}
+use app.io.mod.{cwd, dir_create_all, dir_remove_all, file_atomic_write, file_copy, file_exists, file_read, getpid, time_now_unix_micros}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io.process_ops.{process_run, resolve_shell_argv}
+
+fn _p3er_make_root(tag: text) -> text:
+    val base = get_temp_dir().replace("\\", "/")
+    val root = base + "/p3-expanded-runner-" + tag + "-" +
+        getpid().to_text() + "-" + time_now_unix_micros().to_text()
+    expect(dir_create_all(root)).to_be(true)
+    root
+
+fn _p3er_sh(cmd: text) -> (text, text, i64):
+    val prefix = "case \"$(uname -s 2>/dev/null)\" in MINGW*|MSYS*|CYGWIN*) PATH=\"/usr/bin:/bin:$PATH\"; export PATH ;; esac; "
+    val (sh_bin, sh_args) = resolve_shell_argv(prefix + cmd)
+    process_run(sh_bin, sh_args)
+
+fn _p3er_build_fixture(root: text):
+    val repo_root = cwd().replace("\\", "/")
+    val src_root = root + "/source"
+    val bin_dir = root + "/bin"
+    val logs_dir = root + "/logs"
+    expect(dir_create_all(src_root + "/scripts/bootstrap")).to_be(true)
+    expect(dir_create_all(src_root + "/scripts/check")).to_be(true)
+    expect(dir_create_all(src_root + "/src/lib/demo")).to_be(true)
+    expect(dir_create_all(src_root + "/test/01_unit/lib")).to_be(true)
+    expect(dir_create_all(src_root + "/tools/demo/tests")).to_be(true)
+    expect(dir_create_all(bin_dir)).to_be(true)
+    expect(dir_create_all(logs_dir)).to_be(true)
+
+    val scripts = [
+        "phase3-expanded-test-runner.shs",
+        "phase3-test-inventory.shs",
+        "phase3-nested-test-inventory.shs",
+        "phase3-nested-test-policy.tsv",
+        "phase3-test-skip-policy.shs",
+        "validate-test-runner-json.pl",
+        "validate-jest-json.pl"
+    ]
+    for s in scripts:
+        expect(file_copy(repo_root + "/scripts/bootstrap/" + s, src_root + "/scripts/bootstrap/" + s)).to_be(true)
+
+    val timeout_stub = "#!/bin/sh\nshift 2\nexec \"$@\"\n"
+    expect(file_atomic_write(src_root + "/scripts/bootstrap/run-process-group-timeout.shs", timeout_stub)).to_be(true)
+
+    val doctest_stub =
+        "#!/bin/sh\n" +
+        "# run_explicit_fixture --sdoctest\n" +
+        "# run_explicit_fixture --spl-doctest\n" +
+        "# \"$SIMPLE\" test --whole --mode=interpreter\n" +
+        "# lane_is_green \"$_out\" Sdoctest\n" +
+        "# lane_is_green \"$_out\" 'SPL Doctest'\n" +
+        "if [ \"${" + "FAKE_DOC_EMPTY:-0}\" = 1 ]; then exit 0; fi\n" +
+        "printf '%s\\n' 'Sdoctest: 2 passed, 0 failed, 0 skipped'\n" +
+        "printf '%s\\n' 'SPL Doctest: 3 passed, 0 failed, 0 skipped'\n" +
+        "printf 'check-sdoctest-bootstrap: PASS (markdown=1, spl-comment=1)\\n'\n"
+    expect(file_atomic_write(src_root + "/scripts/check/check-sdoctest-bootstrap.shs", doctest_stub)).to_be(true)
+
+    val runner_stub =
+        "#!/bin/sh\n" +
+        "printf '%s\\n' \"$1\" >> \"$FAKE_EXECUTIONS\"\n" +
+        "printf '%s\\n' '{\"success\":true,\"spec\":{\"success\":true,\"total_passed\":2,\"total_failed\":0,\"total_skipped\":0,\"total_pending\":0,\"total_duration_ms\":0,\"groups\":[],\"files\":[]},\"spl_doctest\":null,\"sdoctest\":null}'\n"
+    expect(file_atomic_write(root + "/test-runner", runner_stub)).to_be(true)
+    expect(file_atomic_write(root + "/compiler-cli", "#!/bin/sh\nexit 0\n")).to_be(true)
+    expect(file_atomic_write(root + "/mcp-server", "#!/bin/sh\nexit 0\n")).to_be(true)
+
+    val npm_stub =
+        "#!/bin/sh\n" +
+        "out=\n" +
+        "for arg in \"$@\"; do case \"$arg\" in --outputFile=*) out=${" + "arg#*=} ;; esac; done\n" +
+        "[ -n \"$out\" ] || exit 80\n" +
+        "if [ \"${" + "FAKE_NPM_STALE:-0}\" = 1 ]; then exit 0; fi\n" +
+        "if [ \"${" + "FAKE_NPM_FALSE:-0}\" = 1 ]; then ok=false; else ok=true; fi\n" +
+        "printf '{\"success\":%s,\"numPassedTests\":1,\"numFailedTests\":0,\"numPendingTests\":0}\\n' \"$ok\" > \"$out\"\n" +
+        "exit 0\n"
+    expect(file_atomic_write(bin_dir + "/npm", npm_stub)).to_be(true)
+
+    expect(file_atomic_write(src_root + "/src/lib/demo/embedded.spl", "describe(\"embedded\"):\n    it \"ok\":\n        expect(1).to_equal(1)\n")).to_be(true)
+    expect(file_atomic_write(src_root + "/test/01_unit/lib/canonical_spec.spl", "describe \"canonical\":\n    it \"ok\":\n        expect(1).to_equal(1)\n")).to_be(true)
+    expect(file_atomic_write(src_root + "/tools/demo/tests/tool.test.ts", "test('tool', () => expect(1).toBe(1));\n")).to_be(true)
+    expect(file_atomic_write(src_root + "/tools/demo/package.json", "{\"scripts\":{\"test\":\"jest\"}}\n")).to_be(true)
+
+    val setup_cmd =
+        "set -eu; " +
+        "chmod +x '" + src_root + "/scripts/bootstrap/run-process-group-timeout.shs' " +
+        "'" + src_root + "/scripts/check/check-sdoctest-bootstrap.shs' " +
+        "'" + root + "/test-runner' '" + root + "/compiler-cli' '" + root + "/mcp-server' '" + bin_dir + "/npm'; " +
+        "git -C '" + src_root + "' init -q && " +
+        "git -C '" + src_root + "' config user.name p3test && " +
+        "git -C '" + src_root + "' config user.email p3test@example.invalid && " +
+        "git -C '" + src_root + "' add . && " +
+        "git -C '" + src_root + "' commit -qm fixture && " +
+        "sh '" + src_root + "/scripts/bootstrap/phase3-test-inventory.shs' discover '" + src_root + "' '" + root + "/nested.tsv' > '" + root + "/inventory.tsv'; " +
+        "printf 'runner\\tpath\\tresult\\texecuted\\tskipped\\n' > '" + root + "/repository.tsv'; " +
+        "printf 'simple-spec\\ttest/01_unit/lib/canonical_spec.spl\\tPASS\\t1\\t0\\n' >> '" + root + "/repository.tsv'; " +
+        "cli_sha=$(sha256sum '" + root + "/compiler-cli' | awk '{print $1}'); " +
+        "runner_sha=$(sha256sum '" + root + "/test-runner' | awk '{print $1}'); " +
+        "mcp_sha=$(sha256sum '" + root + "/mcp-server' | awk '{print $1}'); " +
+        "printf '%s\\n' " +
+        "  'schema=simple-bootstrap-command-owners-v3' " +
+        "  'status=frozen' " +
+        "  'phase=stage3' " +
+        "  \"compiler_cli_path=" + root + "/compiler-cli\" " +
+        "  \"compiler_cli_sha256=$cli_sha\" " +
+        "  \"test_runner_path=" + root + "/test-runner\" " +
+        "  \"test_runner_sha256=$runner_sha\" " +
+        "  \"mcp_server_path=" + root + "/mcp-server\" " +
+        "  \"mcp_server_sha256=$mcp_sha\" > '" + root + "/owners.env'; " +
+        "sha256sum '" + root + "/owners.env' | awk '{print $1}' > '" + root + "/owners.sha256'"
+    val (_out, _err, rc) = _p3er_sh(setup_cmd)
+    expect(rc).to_equal(0)
+
+fn _p3er_run_runner(root: text, extra_env: text) -> (text, text, i64):
+    val src_root = root + "/source"
+    val cmd =
+        "set -eu; receipt_sha=$(cat '" + root + "/owners.sha256'); " +
+        ": > '" + root + "/executions.log'; " +
+        "PATH=\"$(CDPATH= cd -- '" + root + "/bin' && pwd):$PATH\" " +
+        "FAKE_EXECUTIONS='" + root + "/executions.log' " +
+        "PHASE3_COMMAND_OWNER_RECEIPT='" + root + "/owners.env' " +
+        "PHASE3_COMMAND_OWNER_RECEIPT_SHA256=\"$receipt_sha\" " +
+        "PHASE3_TEST_RUNNER='" + root + "/test-runner' " +
+        "PHASE3_COMPILER_CLI='" + root + "/compiler-cli' " +
+        "PHASE3_MCP_SERVER='" + root + "/mcp-server' " +
+        "PHASE3_TIMEOUT_SECONDS=10 " +
+        extra_env + " " +
+        "sh '" + src_root + "/scripts/bootstrap/phase3-expanded-test-runner.shs' " +
+        "'" + src_root + "' '" + root + "/inventory.tsv' '" + root + "/repository.tsv' " +
+        "'" + root + "/results.tsv' '" + root + "/counts.tsv' '" + root + "/logs' '" + root + "/nested.tsv'"
+    _p3er_sh(cmd)
+
+describe "phase3-expanded-test-runner.shs integration":
+    it "reuses repository test/ rows, runs non-repository owners once, and reconciles counts.tsv":
+        step("Build isolated git-backed source tree and execute expanded runner")
+        val root = _p3er_make_root("green")
+        _p3er_build_fixture(root)
+
+        val (_out, _err, rc) = _p3er_run_runner(root, "")
+        expect(rc).to_equal(0)
+
+        val execs = file_read(root + "/executions.log").trim()
+        expect(execs).to_equal("src/lib/demo/embedded.spl")
+        expect(execs.contains("test/01_unit/lib/canonical_spec.spl")).to_be(false)
+
+        val results = file_read(root + "/results.tsv")
+        expect(results).to_contain("simple-spec\ttest/01_unit/lib/canonical_spec.spl\tPASS\t1\t0")
+        expect(results).to_contain("simple-spec\tsrc/lib/demo/embedded.spl\tPASS\t2\t0")
+        expect(results).to_contain("npm-test\ttools/demo/tests/tool.test.ts\tPASS\t1\t0")
+        expect(results).to_contain("doctest-bootstrap\tscripts/check/check-sdoctest-bootstrap.shs\tPASS\t5\t0")
+
+        val counts = file_read(root + "/counts.tsv")
+        expect(counts).to_contain("docs\t2\t2\t0\t5\t0")
+        expect(counts).to_contain("library\t2\t2\t0\t3\t0")
+        expect(counts).to_contain("tool\t1\t1\t0\t1\t0")
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "refuses tampered owner receipts and tampered PHASE3_TEST_RUNNER digests":
+        step("Refuse modified owners.env receipt whose SHA-256 no longer matches env")
+        val root = _p3er_make_root("tamper-receipt")
+        _p3er_build_fixture(root)
+
+        val (_o1, err1, rc1) = _p3er_sh(
+            "set -eu; " +
+            "receipt_sha=$(cat '" + root + "/owners.sha256'); " +
+            "printf '# tampered\\n' >> '" + root + "/owners.env'; " +
+            "PATH=\"$(CDPATH= cd -- '" + root + "/bin' && pwd):$PATH\" FAKE_EXECUTIONS='" + root + "/executions.log' " +
+            "PHASE3_COMMAND_OWNER_RECEIPT='" + root + "/owners.env' " +
+            "PHASE3_COMMAND_OWNER_RECEIPT_SHA256=\"$receipt_sha\" " +
+            "PHASE3_TEST_RUNNER='" + root + "/test-runner' " +
+            "PHASE3_COMPILER_CLI='" + root + "/compiler-cli' " +
+            "PHASE3_MCP_SERVER='" + root + "/mcp-server' " +
+            "sh '" + root + "/source/scripts/bootstrap/phase3-expanded-test-runner.shs' " +
+            "'" + root + "/source' '" + root + "/inventory.tsv' '" + root + "/repository.tsv' " +
+            "'" + root + "/results.tsv' '" + root + "/counts.tsv' '" + root + "/logs' '" + root + "/nested.tsv'"
+        )
+        expect(rc1).to_equal(1)
+        expect(err1).to_contain("command-owner receipt mismatch")
+        expect(dir_remove_all(root)).to_be(true)
+
+        step("Refuse unpinned modification of PHASE3_TEST_RUNNER binary")
+        val root2 = _p3er_make_root("tamper-bin")
+        _p3er_build_fixture(root2)
+        val (_o2, err2, rc2) = _p3er_sh(
+            "set -eu; " +
+            "printf '# tampered binary\\n' >> '" + root2 + "/test-runner'; " +
+            "receipt_sha=$(cat '" + root2 + "/owners.sha256'); " +
+            "PATH=\"$(CDPATH= cd -- '" + root2 + "/bin' && pwd):$PATH\" FAKE_EXECUTIONS='" + root2 + "/executions.log' " +
+            "PHASE3_COMMAND_OWNER_RECEIPT='" + root2 + "/owners.env' " +
+            "PHASE3_COMMAND_OWNER_RECEIPT_SHA256=\"$receipt_sha\" " +
+            "PHASE3_TEST_RUNNER='" + root2 + "/test-runner' " +
+            "PHASE3_COMPILER_CLI='" + root2 + "/compiler-cli' " +
+            "PHASE3_MCP_SERVER='" + root2 + "/mcp-server' " +
+            "sh '" + root2 + "/source/scripts/bootstrap/phase3-expanded-test-runner.shs' " +
+            "'" + root2 + "/source' '" + root2 + "/inventory.tsv' '" + root2 + "/repository.tsv' " +
+            "'" + root2 + "/results.tsv' '" + root2 + "/counts.tsv' '" + root2 + "/logs' '" + root2 + "/nested.tsv'"
+        )
+        expect(rc2).to_equal(1)
+        expect(err2).to_contain("command-owner receipt mismatch")
+        expect(dir_remove_all(root2)).to_be(true)
+
+    it "rejects vacuous doctest output and false or stale Jest JSON":
+        val root = _p3er_make_root("vacuous")
+        _p3er_build_fixture(root)
+
+        val (_o_doc, err_doc, rc_doc) = _p3er_run_runner(root, "FAKE_DOC_EMPTY=1")
+        expect(rc_doc).to_equal(1)
+        expect(err_doc).to_contain("status=96")
+
+        val (_o_npm_f, err_npm_f, rc_npm_f) = _p3er_run_runner(root, "FAKE_NPM_FALSE=1")
+        expect(rc_npm_f).to_equal(1)
+        expect(err_npm_f).to_contain("status=93")
+
+        val (_o_npm_s, err_npm_s, rc_npm_s) = _p3er_run_runner(root, "FAKE_NPM_STALE=1")
+        expect(rc_npm_s).to_equal(1)
+        expect(err_npm_s).to_contain("status=91")
+        expect(dir_remove_all(root)).to_be(true)

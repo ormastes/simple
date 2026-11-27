@@ -1,0 +1,45 @@
+# Purpose and audience: regression spec for reading the bytes of a file that does
+# not exist. The Rust runtime returns nil; the C runtime linked into native
+# binaries returned a raw 0, which is not nil, so `file_read_bytes_result` said
+# `Ok` with zero bytes and a missing SQLCipher store was classified
+# `corrupt-source` ("not a whole number of pages") instead of `source-unavailable`.
+# Runs under both lanes; the native verdict is the one that matters.
+# @req REQ-SSPEC-UNIT
+# Bug: doc/08_tracking/bug/devhub_native_missing_store_reported_as_corrupt_source_2026-11-14.md
+# Fix: src/runtime/runtime_native.c (rt_file_read_bytes returns nil on failure).
+
+"""
+When I read a file that is not there I get an error, never an empty success, so I
+can tell "missing" from "present but empty".
+"""
+
+use std.spec
+use std.io_runtime.{file_read_bytes_result, file_write_bytes, dir_create_all}
+use std.database.server.storage_port.{storage_backend_sqlcipher4_open}
+
+val MISSING_PATH: text = "build/missing_file_read_bytes_spec/no_such_file.bin"
+val EMPTY_PATH: text = "build/missing_file_read_bytes_spec/empty.bin"
+
+fn read_verdict(path: text) -> text:
+    match file_read_bytes_result(path):
+        case Ok(bytes): "ok:{bytes.len()}"
+        case Err(_): "err"
+
+fn open_code(path: text) -> text:
+    match storage_backend_sqlcipher4_open(path, "secret://messenger/dense"):
+        case Ok(_): "opened"
+        case Err(e): e.code()
+
+describe("reading bytes from a path with no file"):
+    it("fails instead of returning an empty success"):
+        assert_equal(read_verdict(MISSING_PATH), "err")
+
+    it("still returns an empty success for a file that exists and is empty"):
+        dir_create_all("build/missing_file_read_bytes_spec")
+        val empty: [u8] = []
+        assert_equal(file_write_bytes(EMPTY_PATH, empty), true)
+        assert_equal(read_verdict(EMPTY_PATH), "ok:0")
+
+describe("opening an encrypted store whose file is missing"):
+    it("reports an I/O failure, not a corrupt source"):
+        assert_equal(open_code(MISSING_PATH), "STORAGE_PORT_IO")

@@ -1,8 +1,7 @@
 # A user-defined `class Promise<T>` with a `static fn resolved(...)`/`rejected(...)` is shadowed by the builtin async `Promise` class name
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-25 — seed no longer shadows user `Promise.resolved`/`rejected` (verified, see final section)
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+**Status:** RESOLVED (2026-11-25, p2w6-ak lane). Previously:
 
 **Date:** 2026-07-20
 **Component:** Rust interpreter static-method dispatch for a locally-defined
@@ -118,3 +117,36 @@ Verified with:
 `SIMPLE_RUST_SEED_WARNING=0 timeout 90 bin/release/x86_64-unknown-linux-gnu/simple test test/feature/usage/futures_promises_spec.spl --no-session-daemon 2>&1 | sed 's/\x1b\[[0-9;]*m//g'`
 → `Passed: 6, Failed: 9`
 
+
+## Verification 2026-11-25 (p2w6-ak lane, release/1.0.0 tip f3fb8f24dc9) — RESOLVED
+
+Re-ran the exact minimal repro from this doc on the pinned seed
+(`bin/simple.exe`, Rust seed v1.0.0-rc.1), from the worktree root with
+`SIMPLE_LIB=src`: `Promise.resolved(21)` now resolves the user-defined static
+method and prints `21` — the `semantic: unknown static method resolved on
+class Promise` failure is gone.
+
+Stronger evidence: a `run`-lane script exercising ALL 9 previously-failing
+spec examples verbatim (same `PromiseState`/`Promise<T>` definitions and
+bodies as `test/feature/usage/futures_promises_spec.spl`: `resolved`, `map`
+chains, `flat_map`, `rejected`, `catch`, `all`, `race`) prints PASS for all 9:
+
+```
+PASS maps future to new value
+PASS chains multiple map operations
+PASS flattens nested futures
+PASS chains async operations with flatMap
+PASS recovers with fallback value
+PASS retries failed future
+PASS combines multiple futures
+PASS handles timeout on future
+PASS cancels pending future
+```
+
+Limit stated honestly: `bin/simple.exe test` on the spec file itself cannot
+run at release/1.0.0 HEAD because of the known repo-wide
+`unknown decorator '@representation_boundary'` seed/source inconsistency
+(the test runner module fails to load before any spec body executes). The
+`run`-lane evidence above covers the identical evaluation semantics — the
+original doc confirmed the failure was universal across `run` and `test`,
+so the `run`-lane fix covers both. Marking RESOLVED.

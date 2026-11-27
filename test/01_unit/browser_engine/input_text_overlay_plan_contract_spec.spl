@@ -1,0 +1,186 @@
+"""
+## Purpose and audience
+Purpose: Cover the two public text-input mapping functions in
+`simple_web_html_layout_renderer_paint_raster.spl` that no spec reached
+directly:
+- `input_text_source_byte_at_x`, the x -> caret-byte hit test used by
+  `src/os/hosted/hosted_browser_renderer_worker.spl`. It was never called by
+  any spec: 15 of its executable lines were missed.
+- The overlay branches of `input_text_paint_plan_with_overlay`, which handle
+  selection, caret and horizontal scroll. 14 of its executable lines were
+  missed.
+Audience: browser-engine form-control paint and hosted-renderer maintainers.
+
+These are not CSS computed values, so the expectations come from the
+documented contract of the overlay (`BrowserTextInputOverlay` in
+`src/lib/common/web/browser_renderer_protocol.spl`: anchor, focus and view
+start are source BYTE offsets, `caret_visible` is the blink phase) and from
+the function bodies' stated intent:
+- An empty `target_key` means "no overlay": the result equals the static plan.
+- A selection exists exactly when anchor != focus. The selection rect runs
+  from the smaller to the larger caret x, and a caret is painted only when
+  `caret_visible` is set and there is no selection.
+- A caret is a 1px-wide rect at the focus byte's boundary x.
+- A focus byte that is not a boundary resolves to the end of the value.
+- The view start never lies after the focus. When the focus would fall
+  outside the content box, the view scrolls forward until it fits, and the
+  caret stays inside the content clip.
+- `input_text_source_byte_at_x` returns the byte of the boundary nearest to
+  x. On a tie it returns the earlier boundary. With an empty map it returns 0.
+  It is the inverse of `input_text_x_at_source_byte` on every boundary.
+
+Known divergence, left RED (not skipped): for a focus byte that is not a
+boundary, the function's own scroll step resolves focus to the LAST boundary
+(`focus_index = len - 1`), but the caret and selection x come from
+`input_text_x_at_source_byte`, which returns 0 for an unknown byte. The caret
+then paints at the value start (x=2 here) instead of the end (x=17), inside a
+view scrolled for the end.
+"""
+
+"""
+Traceability: REQ-WEB-RENDER-001 — text-input caret, selection and scroll mapping.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_raster.spl 14%
+use std.spec.*
+use std.common.web.browser_renderer_protocol.{BrowserTextInputOverlay}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_result_with_overlay_at_time
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_raster.{
+    InputTextVisualMap, InputTextPaintPlan, input_text_visual_map,
+    input_text_x_at_source_byte, input_text_source_byte_at_x,
+    input_text_paint_plan, input_text_paint_plan_with_overlay
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{ClipRect}
+
+fn _overlay(key: text, anchor: i64, focus: i64, view: i64, caret: bool) -> BrowserTextInputOverlay:
+    BrowserTextInputOverlay(
+        target_key: key, anchor_byte: anchor, focus_byte: focus,
+        view_start_byte: view, caret_visible: caret
+    )
+
+fn _no_overlay() -> BrowserTextInputOverlay:
+    _overlay("", 0, 0, 0, false)
+
+fn _html(width_px: i32, value: text) -> text:
+    "<style>html,body{{margin:0}}#q{{width:{width_px}px;height:18px;padding:2px;border:0}}</style><input id='q' value='{value}'>"
+
+fn _input_index(html: text) -> i64:
+    val r = simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(html, 300, 60, 0, _no_overlay())
+    var i = 0
+    while i < r.hit_index.nodes.len():
+        if r.hit_index.nodes[i].tag == "input":
+            return i
+        i = i + 1
+    -1
+
+fn _wide_clip() -> ClipRect:
+    ClipRect(x0: 0, y0: 0, x1: 10000, y1: 10000)
+
+fn _plan(html: text, overlay: BrowserTextInputOverlay) -> InputTextPaintPlan:
+    val r = simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(html, 300, 60, 0, _no_overlay())
+    val i = _input_index(html)
+    val b = r.hit_index.boxes
+    input_text_paint_plan_with_overlay(
+        r.hit_index.nodes[i], r.hit_index.styles[i],
+        b.bx[i], b.by[i], b.bw[i], b.bh[i], _wide_clip(), overlay
+    )
+
+fn _static_plan(html: text) -> InputTextPaintPlan:
+    val r = simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(html, 300, 60, 0, _no_overlay())
+    val i = _input_index(html)
+    val b = r.hit_index.boxes
+    input_text_paint_plan(
+        r.hit_index.nodes[i], r.hit_index.styles[i],
+        b.bx[i], b.by[i], b.bw[i], b.bh[i], _wide_clip()
+    )
+
+fn _map(xs: [i32]) -> InputTextVisualMap:
+    var bytes: [i64] = []
+    var i = 0
+    while i < xs.len():
+        bytes.push(i)
+        i = i + 1
+    InputTextVisualMap(display_text: "", source_boundary_bytes: bytes, boundary_x_px: xs)
+
+describe "input_text_source_byte_at_x":
+    it "returns byte 0 for an empty visual map":
+        val empty = InputTextVisualMap(display_text: "", source_boundary_bytes: [], boundary_x_px: [])
+        expect(input_text_source_byte_at_x(empty, 17)).to_equal(0)
+
+    it "returns the byte of a boundary hit exactly":
+        expect(input_text_source_byte_at_x(_map([0, 8, 16, 24]), 16)).to_equal(2)
+
+    it "returns the nearest boundary and the earlier one on a tie":
+        val m = _map([0, 8, 16, 24])
+        expect(input_text_source_byte_at_x(m, 11)).to_equal(1)
+        expect(input_text_source_byte_at_x(m, 13)).to_equal(2)
+        expect(input_text_source_byte_at_x(m, 12)).to_equal(1)
+
+    it "clamps x before the first and after the last boundary":
+        val m = _map([0, 8, 16, 24])
+        expect(input_text_source_byte_at_x(m, -40)).to_equal(0)
+        expect(input_text_source_byte_at_x(m, 400)).to_equal(3)
+
+    it "works on right-to-left maps whose x decreases with the byte offset":
+        val m = _map([30, 20, 10, 0])
+        expect(input_text_source_byte_at_x(m, 11)).to_equal(2)
+        expect(input_text_source_byte_at_x(m, 29)).to_equal(0)
+
+    it "inverts input_text_x_at_source_byte on every boundary of a rendered input":
+        val html = _html(120, "ab cd")
+        val r = simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(html, 300, 60, 0, _no_overlay())
+        val i = _input_index(html)
+        val m = input_text_visual_map(r.hit_index.nodes[i], r.hit_index.styles[i])
+        expect(m.source_boundary_bytes.len()).to_equal(6)
+        for b in m.source_boundary_bytes:
+            expect(input_text_source_byte_at_x(m, input_text_x_at_source_byte(m, b))).to_equal(b)
+
+describe "input_text_paint_plan_with_overlay":
+    it "matches the static plan when the overlay has no target":
+        val html = _html(120, "abc")
+        val with_none = _plan(html, _no_overlay())
+        val stat = _static_plan(html)
+        expect(with_none.baseline_x).to_equal(stat.baseline_x)
+        expect(with_none.text_value).to_equal(stat.text_value)
+        expect(with_none.source_window_end_byte).to_equal(stat.source_window_end_byte)
+        expect(with_none.selection_present).to_equal(false)
+        expect(with_none.caret_present).to_equal(false)
+
+    it "paints a 1px caret at the focus boundary for a collapsed visible caret":
+        val p = _plan(_html(120, "abc"), _overlay("id:q", 1, 1, 0, true))
+        expect(p.selection_present).to_equal(false)
+        expect(p.caret_present).to_equal(true)
+        expect(p.caret_rect.x0).to_equal(p.boundary_x_px[1])
+        expect(p.caret_rect.x1 - p.caret_rect.x0).to_equal(1)
+        expect(p.resolved_view_start_byte).to_equal(0)
+
+    it "paints no caret while the blink phase hides it":
+        val p = _plan(_html(120, "abc"), _overlay("id:q", 1, 1, 0, false))
+        expect(p.caret_present).to_equal(false)
+
+    it "orders a backward selection from the smaller to the larger x and hides the caret":
+        val p = _plan(_html(120, "abcd"), _overlay("id:q", 3, 1, 0, true))
+        expect(p.selection_present).to_equal(true)
+        expect(p.caret_present).to_equal(false)
+        expect(p.selection_rect.x0).to_equal(p.boundary_x_px[1])
+        expect(p.selection_rect.x1).to_equal(p.boundary_x_px[3])
+
+    it "resolves a focus byte that is not a boundary to the end of the value":
+        # RED: the scroll step uses the end, the caret x uses byte-not-found = 0.
+        val p = _plan(_html(120, "abc"), _overlay("id:q", 999, 999, 0, true))
+        expect(p.caret_rect.x0).to_equal(p.boundary_x_px[3])
+
+    it "scrolls a long value so the caret at its end stays inside the content box":
+        val value = "abcdefghijklmnopqrstuvwxyz"
+        val p = _plan(_html(40, value), _overlay("id:q", 26, 26, 0, true))
+        expect(p.resolved_view_start_byte).to_be_greater_than(0)
+        expect(p.source_window_start_byte).to_equal(p.resolved_view_start_byte)
+        expect(p.source_window_end_byte).to_equal(26)
+        expect(p.caret_rect.x0).to_be_greater_than(p.clip.x0 - 1)
+        expect(p.caret_rect.x0).to_be_less_than(p.clip.x1 + 1)
+
+    it "never keeps a view start that lies after the focus":
+        val p = _plan(_html(40, "abcdefghijklmnopqrstuvwxyz"), _overlay("id:q", 0, 0, 20, true))
+        expect(p.resolved_view_start_byte).to_equal(0)
+        expect(p.caret_rect.x0).to_equal(p.boundary_x_px[0])

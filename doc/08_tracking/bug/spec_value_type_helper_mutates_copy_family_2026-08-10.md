@@ -1,5 +1,26 @@
 # Spec helpers that take a struct BY VALUE and mutate it — third vacuity family
 
+## Verification 2026-11-25 — closure confirmed by code inspection
+
+Confirmed at release/1.0.0 HEAD (`ae1572aeb67`, worktree `wt-p2w5-al`) that
+the 2026-09-13 triage below is real in the tree:
+
+- `test/01_unit/lib/service/request_queue_spec.spl:19` declares
+  `class RequestQueue` (the `struct`→`class` fix; the by-value field
+  mutation vacuity is gone by reference semantics).
+- `test/01_unit/lib/service/lease_grant_spec.spl:39` and
+  `test/01_unit/app/sj/busy_contract_spec.spl:44` both
+  `use std.service.lease_manager` — they exercise the real library type, so
+  the "local reimplementation tests nothing in src/" second defect is also
+  closed.
+- **limit:** re-executing the three specs is blocked at this HEAD repo-wide
+  (pinned seed rejects the `@representation_boundary` decorator from
+  cfd89933699 — known source/binary inconsistency), so this verification is
+  by code inspection of the exact files the triage names, not a fresh spec
+  run.
+
+Status: RESOLVED.
+
 ## Triage 2026-09-13 — all three "Left RED" specs now GREEN
 Re-ran all three "Left RED (real defects — do not weaken)" specs named below:
 `lease_grant_spec.spl` (16/16, was 4/10) and `busy_contract_spec.spl` (7/7,
@@ -18,7 +39,7 @@ declared>=8 executed=8 passed=8 failed=0` on both paths. This closes the
 non-value-type callers listed as "Not affected" needed no change).
 
 - **ID:** spec_value_type_helper_mutates_copy_family_2026-08-10
-- **Status:** PARTIALLY FIXED (2 specs fixed; 3 left RED, see below)
+- **Status:** RESOLVED (2026-11-25; was PARTIALLY FIXED — the 3 left-RED specs were closed by the 2026-09-13 triage, confirmed in-tree 2026-11-25)
 - **Found by:** sweep following `6f8f3230db4` (dbfs BTree delete spec)
 - **Binary:** `src/compiler_rust/target/bootstrap/simple` (33,653,056 bytes, mtime 2026-08-09 23:10)
 

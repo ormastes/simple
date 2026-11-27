@@ -1,7 +1,7 @@
 # `rv64_compliance_spec.spl` imports modules that don't exist in `src/lib/hardware/rv64gc`
 
 - **Date:** 2026-07-20
-- **Status:** open
+- **Status:** FIXED 2026-11-06
 - **Area:** `src/lib/hardware/rv64gc/**` (pure Simple RISC-V RV64GC core model)
 
 ## Symptom
@@ -48,3 +48,47 @@ pass. Flagging for follow-up: either implement
 `src/lib/hardware/rv64gc/{core/rv64_execute,ext/rv64_muldiv,ext/rv64_atomics,pkg/rv64_types_pkg}.spl`
 to match what the spec expects, or retire the spec if RV64GC compliance
 testing was superseded by `top/rv64_machine.spl`.
+
+## Resolution (2026-11-06)
+
+The root-cause section above was wrong: the modules were never missing, they
+live in `src/hardware/rv64gc/{core,ext,pkg}/` (not `src/lib/hardware/...`) and
+`hardware.rv64gc.*` resolves to them. On the Rust seed the spec already ran
+20/22 (RED at this checkout: 2 failures, not 0/22). The two failures were spec
+bugs: `(misa >> 5) and 1` / `(misa >> 3) and 1` used logical `and` (yields
+`true`) instead of bitwise `&`. Fixed to `& 1`, assertions unchanged
+(expect `== 1`). Result: 22/22 passed.
+
+## Re-verification (2026-11-07, work/riscv-bugs-20261107)
+
+Still FIXED at `origin/release/1.0.0` @ `1965f658d45`; no code change needed.
+The spec file is `test/02_integration/hardware/rv64gc/rv64_compliance_spec.spl`
+(the `.spipe_matchers_` name in the Command section above no longer exists).
+Binary: privately built Rust seed `target-rv/release/simple` (54154944 bytes,
+built 2026-11-07 08:56 from this tip; `cargo build --release --bin simple`).
+
+```
+simple test test/02_integration/hardware/rv64gc/rv64_compliance_spec.spl
+SPEC FILE VERDICT: ... outcome=OK declared>=22 executed=22 passed=22 failed=0 skipped=0 dropped=0
+```
+
+Not verified on the pure-Simple self-hosted binary (none deployed in this
+worktree).
+
+## Re-verification (2026-11-25, work/p2w4-af-20261125)
+
+Still FIXED at `origin/release/1.0.0` tip `63e791180d3`; no code change
+needed. Confirmed `src/hardware/rv64gc/{core,ext,pkg}/` all exist with
+`rv64_execute.spl`, `rv64_muldiv.spl`, `rv64_atomics.spl`, and
+`rv64_types_pkg.spl`, and the spec's two misa-bit assertions use bitwise
+`& 1` (the 2026-11-06 fix), not logical `and`.
+
+`bin/simple.exe test` is not runnable at this tip (the pinned Rust seed
+v1.0.0-rc.1 rejects the `@representation_boundary` decorator used by
+`src/app/test_runner_new`), so execution evidence comes from a `run`-mode
+probe (`test/_probe_root_tmp/rv64_probe_p2w4af.spl`, session-local, not
+committed) importing the same four modules and exercising `alu_execute`
+64-bit ADD wrap, `alu_execute_word` ADDW sign-extension, and both misa bit
+checks with `& 1`: `RV64 PROBE OK`, exit 0, on the pinned seed. This
+complements the 22/22 full-spec PASS recorded 2026-11-07 on a privately
+built seed.

@@ -1,0 +1,59 @@
+"""VHDL lane slot: the kernel driver reaches the VHDL plugin only through an
+install-once slot.
+
+Purpose: `--backend=vhdl` and `aot_vhdl_file` used to import the VHDL plugin
+and the HWIR closure straight into every compiler, including the bootstrap
+CLI. The slot is written once during composition (the full static backend
+registry installs it; the essential bootstrap composition leaves it empty)
+and is read-only afterwards.
+
+Operator workflow: a build without the lane answers PLUG-E-NOTFOUND naming
+the vhdl backend and how to get it; it never crashes and never falls back to
+another backend.
+
+Troubleshooting: if the diagnostic does not appear, check that the request
+went through compiler.driver.driver_vhdl_lane and not a direct plugin import.
+"""
+# @manual_section: compiler/backend_plugins
+use std.spec.*
+use compiler.common.driver_core_types.{CompileResult, compile_result_is_success,
+    compile_result_errors}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_vhdl_lane.{DriverVhdlLaneV1, install_driver_vhdl_lane_v1,
+    installed_driver_vhdl_lane_name_v1, driver_vhdl_lane_compile_file_v1}
+
+fn fake_driver_compile(driver: CompilerDriver, output: text) -> CompileResult:
+    CompileResult.Success("driver:" + output)
+
+fn fake_file_compile(path: text, output: text) -> CompileResult:
+    CompileResult.Success("file:" + path + ">" + output)
+
+fn fake_lane(name: text) -> DriverVhdlLaneV1:
+    DriverVhdlLaneV1(name: name, compile_driver_fn: fake_driver_compile,
+        compile_file_fn: fake_file_compile)
+
+describe "driver vhdl lane slot":
+    it "fails closed with a named diagnostic while the slot is empty":
+        # @req REQ-BACKEND-DYN-006
+        step("no lane installed: PLUG-E-NOTFOUND names vhdl, no fallback")
+        expect(installed_driver_vhdl_lane_name_v1()).to_equal("")
+        val result = driver_vhdl_lane_compile_file_v1("in.spl", "out.vhd")
+        expect(compile_result_is_success(result)).to_equal(false)
+        val message = compile_result_errors(result).join("\n")
+        expect(message).to_contain("PLUG-E-NOTFOUND")
+        expect(message).to_contain("vhdl")
+        expect(message).to_contain("full")
+
+    it "installs exactly once and dispatches to the installed lane":
+        # @req REQ-BACKEND-DYN-006
+        step("first install wins; a different lane is refused; same lane is idempotent")
+        expect(install_driver_vhdl_lane_v1(fake_lane("fake-vhdl"))).to_equal(true)
+        expect(install_driver_vhdl_lane_v1(fake_lane("fake-vhdl"))).to_equal(true)
+        expect(install_driver_vhdl_lane_v1(fake_lane("other-vhdl"))).to_equal(false)
+        expect(install_driver_vhdl_lane_v1(fake_lane(""))).to_equal(false)
+        expect(installed_driver_vhdl_lane_name_v1()).to_equal("fake-vhdl")
+        val result = driver_vhdl_lane_compile_file_v1("in.spl", "out.vhd")
+        expect(compile_result_is_success(result)).to_equal(true)
+        match result:
+            case CompileResult.Success(value): expect(value).to_equal("file:in.spl>out.vhd")
+            case _: expect(false).to_equal(true)

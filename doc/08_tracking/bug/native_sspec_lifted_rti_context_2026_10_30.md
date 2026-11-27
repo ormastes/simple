@@ -1,0 +1,19 @@
+# Lifted native closures lose admitted return-only declarations
+
+Status: reproduced in attempt13; source repair pending focused native validation.
+
+The unchanged SSpec green source (`test/fixtures/test_runner_source_routes/calibration/sspec_green_spec.spl`, SHA256 `c4648433886fb0a46a4b6e5e609d5a0ec512b5b36fc8b86497694e2e05e07921`) still exits1 after native compilation. Actual executable SHA256 `f3c64dd0519c4fbc89a8c251d9e53b09507ca66ca2be3efa58423e07246c28aa` reports `unresolved method call: to_equal`. LLDB evidence `/tmp/simple-sspec13-runtime-diagnosis-20261030/lldb.log` shows the generated `entry.__lambda_lift_1` calls `spec.expect`, then directly `rt_panic`, without a matcher call. Its callers are `_execute_it`, `it`, and `describe`.
+
+The retained entry HIR under `/tmp/simple-phase2-runner-native-attempt13-20261030/sspec-green-direct-mcdc-off/cache/hir/fc9be9b9275c2f45e79e3d4c0a54923b475de2427185c22ae6ec932171d23364.parser-v4.hir` has SHA256 `f6997e578ae7618ea143d41003492ac61be2fffaf37c5ccb4123eedc9e19ee1d`; its envelope checksum was independently verified. Selected codec records retain Function42 `expect` without a complete symbol type (line1243), visible Trait65 `ExpectScalarMatcher` (line1890), and `to_equal` at line4147. This is selected-record evidence, not whole-module decoder admission.
+
+Source69c0 constructs a fresh MirLowering for each lifted closure. It copies trait implementation maps and closure admission, but leaves `rti` at its empty default. `enum_match_expr_type(Call)` first consults that interface. The intentionally untyped parameter of `expect` prevents a complete Function symbol, so the empty lambda interface loses the available declared i64 return and scalar dispatch cannot select the matcher. The top-level scalar repair did not address this nested lowering boundary.
+
+The repair shares only the parent's admitted return interface with the child. The child's builder, locals, errors and inference scratch remain fresh. Existing RTI lookup retains exact callable identity and rejection behavior. The interface is declaration authority already populated before function lowering; no arbitrary callable-name fallback or guessed parameter type is introduced.
+
+`scalar_trait_call_receiver/nested.spl` covers ordinary, lifted and nested lifted calls, exactly-once receiver effects, and two same-leaf imported functions with different i64/bool return declarations. Existing `sspec_green.spl` and `sspec_red.spl` retain real matching/failing expectations; the unchanged production calibration source must also run. Native compilation/execution is pending the build owner; source review is not runtime qualification.
+
+## Separate fatal-diagnostic propagation repair
+
+The same lift path forwards `lw.errors` only when the parent has a declaration repository, at both body-lowering and return-coercion checkpoints. Full-HIR parents therefore discard fatal child diagnostics and may accept the `rt_panic` placeholder emitted by unresolved method handling. This source defect is consistent with the actual13 accepted executable and panic; the retained runtime artifact alone does not identify the internal repository flag.
+
+The separate repair removes only that repository gate. Fatal child diagnostics are copied to the parent and the lift returns nil in both lanes; successfully lowered bodies retain their previous flow. `lifted_unresolved_negative.spl` and `nested_unresolved_negative.spl` require compilation rejection with their exact missing-method diagnostics. Running a generated executable and observing panic is not a passing negative. Test the native full-HIR and declaration-backed routes; no execution is claimed yet.

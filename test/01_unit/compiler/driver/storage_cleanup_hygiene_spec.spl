@@ -1,0 +1,117 @@
+use app.io.time_ops.{time_now_unix_micros}
+use std.io_runtime.{dir_create_all, dir_exists, dir_list_or_empty, dir_remove_all, file_exists, file_write, getpid}
+use compiler.backend.llvm_native_link_hosted_support.{cleanup_entry_object_v1}
+use compiler.backend.linker.lib_smf_writer.{LibSmfBuilder}
+use compiler.backend.linker.smf_getter.{SmfGetter}
+use compiler.backend.linker.native_config.{NativeLinkConfig}
+use compiler.backend.linker.mold.{MoldBackend, MoldConfig, LinkerType, ResolvedObject}
+use compiler.driver.driver_build.native_link_receipt_v1.{native_shared_link_with_receipt_v1}
+
+fn _append_minimal_smf() -> [u8]:
+    var out: [u8] = []
+    out.push(83)
+    out.push(77)
+    out.push(70)
+    out.push(0)
+    out.push(1)
+    out.push(1)
+    out.push(1)
+    out.push(0)
+    var z = 0
+    while z < 12:
+        out.push(0)
+        z = z + 1
+    out.push(128.to_u8())
+    var z2 = 0
+    while z2 < 7:
+        out.push(0)
+        z2 = z2 + 1
+    out.push(128.to_u8())
+    var z3 = 0
+    while z3 < 15:
+        out.push(0)
+        z3 = z3 + 1
+    while out.len() < 128:
+        out.push(0)
+    out
+
+fn _count_entries_with_prefix(dir: text, prefix: text) -> i64:
+    var count = 0
+    for name in dir_list_or_empty(dir):
+        if name.starts_with(prefix):
+            count = count + 1
+    count
+
+describe "Storage cleanup hygiene":
+    it "removes entry object file and simple_entry_<pid> parent directory":
+        val root = "build/test_storage_cleanup_entry_{getpid()}_{time_now_unix_micros()}"
+        val entry_dir = "{root}/simple_entry_4242"
+        val other_dir = "{root}/keep_parent"
+        val entry_obj = "{entry_dir}/simple_entry.o"
+        val entry_c = "{entry_dir}/simple_entry.c"
+        val other_obj = "{other_dir}/keep.o"
+        val _mk1 = dir_create_all(entry_dir)
+        val _mk2 = dir_create_all(other_dir)
+        val _w1 = file_write(entry_obj, "obj")
+        val _w2 = file_write(entry_c, "c")
+        val _w3 = file_write(other_obj, "obj")
+
+        expect(cleanup_entry_object_v1(entry_obj)).to_equal(true)
+        expect(file_exists(entry_obj)).to_equal(false)
+        expect(dir_exists(entry_dir)).to_equal(false)
+
+        # Non-simple_entry_* parent directories must not be deleted.
+        expect(cleanup_entry_object_v1(other_obj)).to_equal(true)
+        expect(file_exists(other_obj)).to_equal(false)
+        expect(dir_exists(other_dir)).to_equal(true)
+
+        val _rm = dir_remove_all(root)
+
+    it "loads library modules via SmfGetter.get_reader without creating /tmp/smf_getter_* temp files":
+        val root = "build/test_storage_cleanup_getter_{getpid()}_{time_now_unix_micros()}"
+        val _mk = dir_create_all(root)
+        val lib_path = "{root}/sample.lsm"
+        val mod_name = "hygiene/test_mod_{getpid()}_{time_now_unix_micros()}"
+        val expected_tmp = "/tmp/smf_getter_" + mod_name.replace("/", "_") + ".smf"
+
+        var builder = LibSmfBuilder.new()
+        expect(builder.add_module_data(mod_name, _append_minimal_smf()).is_ok()).to_equal(true)
+        expect(builder.write(lib_path).is_ok()).to_equal(true)
+
+        var getter = SmfGetter.new()
+        expect(getter.add_library(lib_path).is_ok()).to_equal(true)
+        val reader_res = getter.get_reader(mod_name)
+        expect(reader_res.is_ok()).to_equal(true)
+        expect(file_exists(expected_tmp)).to_equal(false)
+
+        reader_res.unwrap().close()
+        getter.close()
+        val _rm = dir_remove_all(root)
+
+    it "removes .link-tmp-<pid> directory when native_shared_link_with_receipt_v1 fails":
+        val root = "build/test_storage_cleanup_dynlink_{getpid()}_{time_now_unix_micros()}"
+        val _mk = dir_create_all(root)
+        val out_so = "{root}/libfail.so"
+
+        val res = native_shared_link_with_receipt_v1(
+            ["/nonexistent/missing_input_{getpid()}.o"],
+            out_so,
+            NativeLinkConfig.default()
+        )
+        expect(res.is_err()).to_equal(true)
+        expect(_count_entries_with_prefix(root, ".link-tmp-")).to_equal(0)
+
+        val _rm = dir_remove_all(root)
+
+    it "removes /tmp/simple_link_* temp dir when MoldBackend.link fails":
+        val before_count = _count_entries_with_prefix("/tmp", "simple_link_")
+        val backend = MoldBackend(
+            linker_path: "/nonexistent/missing_linker_{getpid()}",
+            linker_type: LinkerType.Ld,
+            config: MoldConfig.default()
+        )
+        val fake_obj = ResolvedObject(name: "bad_obj", code: [127, 69, 76, 70])
+        val res = backend.link([fake_obj], "/nonexistent_dir_{getpid()}/out.bin")
+        expect(res.is_err()).to_equal(true)
+        val after_count = _count_entries_with_prefix("/tmp", "simple_link_")
+        expect(after_count).to_equal(before_count)

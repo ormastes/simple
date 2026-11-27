@@ -1,0 +1,108 @@
+use std.spec
+use compiler.frontend.parser_types_expr.{AsmConstraintKind, AsmLocation}
+use compiler.mir.mir_instructions.{BlockId, MirAsmOperand, MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind, MirTerminator}
+use compiler.mir.mir_types.{LocalId, LocalKind, MirConstValue, MirLocal, MirType}
+use compiler.mir_opt.var_reassign_ssa.{ssa_alloca_transform_blocks, ssa_max_local_from_inst, ssa_collect_inst_operand_locals}
+
+fn make_asm_op(name: text, kind: AsmConstraintKind, local_id: i64, idx: i64) -> MirAsmOperand:
+    MirAsmOperand(
+        name: name,
+        kind: kind,
+        location: AsmLocation.Reg,
+        operand: MirOperand(kind: MirOperandKind.Copy(LocalId(id: local_id))),
+        constraint_index: idx
+    )
+
+describe "SSA alloca inline assembly support":
+    it "slots a reassigned variable written back after InlineAsm (csrr_cycle shape)":
+        val value_local = LocalId(id: 1)
+        val zero_temp = LocalId(id: 2)
+        val asm_out_temp = LocalId(id: 3)
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: None,
+            instructions: [
+                MirInst(kind: MirInstKind.Const(zero_temp, MirConstValue.Int(0), MirType.i64()), span: None),
+                MirInst(kind: MirInstKind.Copy(value_local, zero_temp), span: None),
+                MirInst(
+                    kind: MirInstKind.InlineAsm(
+                        asm_template: "csrr {{result}}, cycle",
+                        is_volatile: true,
+                        inputs: [],
+                        outputs: [make_asm_op("result", AsmConstraintKind.Out, 3, 0)],
+                        clobbers: [],
+                        clobber_abis: [],
+                        options: []
+                    ),
+                    span: None
+                ),
+                MirInst(kind: MirInstKind.Copy(value_local, asm_out_temp), span: None)
+            ],
+            terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(value_local))))
+        )
+        val locals = [
+            MirLocal(id: value_local, name: Some("value"), type_: MirType.i64(), kind: LocalKind.Var, is_ghost: false),
+            MirLocal(id: zero_temp, name: None, type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false),
+            MirLocal(id: asm_out_temp, name: None, type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false)
+        ]
+        val result = ssa_alloca_transform_blocks([block], locals, BlockId(id: 0))
+        expect(result.applied).to_equal(true)
+        expect(result.reason).to_equal("ready")
+        expect(result.renamed_count).to_equal(1)
+
+    it "loads a slotted input operand and stores a directly slotted InlineAsm output":
+        val acc = LocalId(id: 0)
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: None,
+            instructions: [
+                MirInst(kind: MirInstKind.Const(acc, MirConstValue.Int(7), MirType.i64()), span: None),
+                MirInst(
+                    kind: MirInstKind.InlineAsm(
+                        asm_template: "addi {{out}}, {{inp}}, 1",
+                        is_volatile: true,
+                        inputs: [make_asm_op("inp", AsmConstraintKind.In, 0, 0)],
+                        outputs: [make_asm_op("out", AsmConstraintKind.Out, 0, 1)],
+                        clobbers: [],
+                        clobber_abis: [],
+                        options: []
+                    ),
+                    span: None
+                )
+            ],
+            terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(acc))))
+        )
+        val locals = [
+            MirLocal(id: acc, name: Some("acc"), type_: MirType.i64(), kind: LocalKind.Var, is_ghost: false)
+        ]
+        val result = ssa_alloca_transform_blocks([block], locals, BlockId(id: 0))
+        expect(result.applied).to_equal(true)
+        var saw_asm = false
+        for inst in result.blocks[0].instructions:
+            match inst.kind:
+                case InlineAsm(_, _, inputs, outputs, _, _, _):
+                    saw_asm = true
+                    match inputs[0].operand.kind:
+                        case Copy(in_local): expect(in_local.id == 0).to_equal(false)
+                        case _: expect(false).to_equal(true)
+                    match outputs[0].operand.kind:
+                        case Copy(out_local): expect(out_local.id == 0).to_equal(false)
+                        case _: expect(false).to_equal(true)
+                case _: ()
+        expect(saw_asm).to_equal(true)
+
+    it "tracks max local id across InlineAsm inputs and outputs and reads only inputs":
+        val inst = MirInst(
+            kind: MirInstKind.InlineAsm(
+                asm_template: "mv {{dst}}, {{src}}",
+                is_volatile: false,
+                inputs: [make_asm_op("src", AsmConstraintKind.In, 12, 0)],
+                outputs: [make_asm_op("dst", AsmConstraintKind.Out, 47, 1)],
+                clobbers: [],
+                clobber_abis: [],
+                options: []
+            ),
+            span: None
+        )
+        expect(ssa_max_local_from_inst(0, inst)).to_equal(47)
+        expect(ssa_collect_inst_operand_locals([], inst)).to_equal([12])

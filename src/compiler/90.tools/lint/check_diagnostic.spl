@@ -1,0 +1,120 @@
+# Structured check diagnostics: keep inference payloads until rendering.
+use common.text.{escape_json}
+use compiler.hir.hir.{HirType, HirTypeKind}
+use compiler.types.type_infer_types.{TypeInferError}
+
+pub struct CheckDiagnostic:
+    path: text
+    code: text
+    message: text
+    line: i64 = 0
+    column: i64 = 0
+    expected: text = ""
+    found: text = ""
+    help: text = ""
+    severity: text = "error"
+
+pub fn check_type_name(type_: HirType) -> text:
+    match type_.kind:
+        case Int(bits, signed):
+            val prefix = if signed: "i" else: "u"
+            "{prefix}{bits}"
+        case Float(bits): "f{bits}"
+        case Bool: "bool"
+        case Char: "char"
+        case Str: "text"
+        case Unit: "()"
+        case Optional(inner): "{check_type_name(inner)}?"
+        case _: "{type_.kind}"
+
+pub fn check_inference_diagnostic(path: text, error: TypeInferError) -> CheckDiagnostic:
+    val span = error.span()
+    match error:
+        case TypeInferError.Mismatch(expected, found, _):
+            val expected_name = check_type_name(expected)
+            val found_name = check_type_name(found)
+            CheckDiagnostic(path: path, code: "E1003",
+                message: "type mismatch: expected {expected_name}, found {found_name}",
+                line: span.line, column: span.col, expected: expected_name, found: found_name,
+                help: "change the annotation or use a value with the declared type")
+        case _:
+            CheckDiagnostic(path: path, code: "semantic", message: error.message(),
+                line: span.line, column: span.col)
+
+pub fn check_diagnostic_text(diagnostic: CheckDiagnostic) -> text:
+    var rendered = "{diagnostic.path}:{diagnostic.line}:{diagnostic.column}: {diagnostic.severity}[{diagnostic.code}]: {diagnostic.message}"
+    if diagnostic.expected != "":
+        rendered = rendered + "\nexpected: {diagnostic.expected}\nfound:    {diagnostic.found}"
+    if diagnostic.help != "":
+        rendered = rendered + "\n= help: {diagnostic.help}"
+    rendered
+
+pub fn check_diagnostic_json(diagnostic: CheckDiagnostic) -> text:
+    val path = escape_json(diagnostic.path)
+    val code = escape_json(diagnostic.code)
+    val message = escape_json(diagnostic.message)
+    val expected = escape_json(diagnostic.expected)
+    val found = escape_json(diagnostic.found)
+    val help = escape_json(diagnostic.help)
+    "{{\"type\": \"check-diagnostic\", \"severity\": \"{escape_json(diagnostic.severity)}\", \"file\": \"{path}\", \"line\": {diagnostic.line}, \"column\": {diagnostic.column}, \"code\": \"{code}\", \"message\": \"{message}\", \"expected\": \"{expected}\", \"found\": \"{found}\", \"help\": \"{help}\"}}"
+
+# Stable E0002 form of a raw parser error string such as
+# "line 3:1: unexpected token in expression: Dedent ''".
+pub fn check_parser_diagnostic(path: text, raw: text) -> CheckDiagnostic:
+    var rest = raw
+    var line = 0
+    var column = 0
+    if rest.starts_with("line "):
+        val parts = rest.split(": ")
+        val loc = parts[0].split(" ")[1].split(":")
+        line = loc[0].to_int() ?? 0
+        column = if loc.len() > 1: loc[1].to_int() ?? 0 else: 0
+        var tail: [text] = []
+        var i = 1
+        while i < parts.len():
+            tail.push(parts[i])
+            i = i + 1
+        rest = tail.join(": ")
+    val marker = "unexpected token in "
+    if rest.starts_with(marker):
+        val parts = rest.split(": ")
+        val expected = parts[0].replace(marker, "")
+        var found = ""
+        if parts.len() > 1:
+            found = parts[1].split(" ")[0]
+        return CheckDiagnostic(path: path, code: "E0002", message: "unexpected token",
+            line: line, column: column, expected: expected, found: found,
+            help: "try adding `{expected}` before this token")
+    CheckDiagnostic(path: path, code: "E0002", message: rest, line: line, column: column)
+
+# W0410: `use` lines whose root segment names no known module root.
+# Returns (line, module_path, root_segment) per top-level-or-indented `use`.
+pub fn check_import_roots(source: text) -> [(i64, text, text)]:
+    var out: [(i64, text, text)] = []
+    var line_no = 0
+    for raw in source.split("\n"):
+        line_no = line_no + 1
+        val trimmed = raw.trim()
+        if not trimmed.starts_with("use "):
+            continue
+        var module = trimmed[4:].trim()
+        val brace = module.index_of(".\{")
+        if brace >= 0:
+            module = module[:brace]
+        module = module.split(" ")[0]
+        if module == "":
+            continue
+        out.push((line_no, module, module.split(".")[0]))
+    out
+
+# Conservative by design: only the root segment is checked against
+# `known_roots`, which the caller derives from the filesystem, so a real
+# module tree never yields a false W0410.
+pub fn check_unresolved_import_diagnostics(path: text, source: text, known_roots: [text]) -> [CheckDiagnostic]:
+    var out: [CheckDiagnostic] = []
+    for entry in check_import_roots(source):
+        if not known_roots.contains(entry.2):
+            out.push(CheckDiagnostic(path: path, code: "W0410", severity: "warning",
+                message: "unresolved import '{entry.1}'", line: entry.0, column: 1,
+                help: "check the module path or add the source root with --source-root"))
+    out

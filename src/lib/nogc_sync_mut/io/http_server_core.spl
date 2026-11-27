@@ -1,0 +1,170 @@
+# Pure-Simple backing for the http_sffi server, upload and client-header
+# surface. These `rt_*` names used to be extern declarations with no runtime
+# implementation. They are not a second HTTP stack: the server side is a thin
+# handle table over std.nogc_sync_mut.http_server (SimpleHttpServer accept
+# loop, request parser, Router dispatch, static_dir_response, response writer);
+# upload goes through std.nogc_sync_mut.io.http_client_core.
+#
+# Route semantics: `handler` is the literal response body for that route. The
+# reserved handler `@echo` answers with the parsed request head plus body, which
+# lets a caller observe exactly what reached the server.
+# `rt_http_server_start` binds 127.0.0.1:<port> (plaintext development policy)
+# and blocks in an owner-thread accept loop until `rt_http_server_stop`.
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_text}
+use std.nogc_sync_mut.io.http_client_core.{http_request_raw}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse, http_method_from_text, http_method_to_text}
+use std.nogc_sync_mut.http_server.router.{Router, static_dir_response}
+use std.nogc_sync_mut.io.tcp.{TcpListener}
+use std.nogc_sync_mut.http_server.server.{SimpleHttpServer, SecureServerPolicy, plaintext_development_capability}
+
+val HTTP_SERVER_ECHO_HANDLER = "@echo"
+
+var _hs_ports: [i64] = []
+var _hs_live: [bool] = []
+var _hs_stopped: [bool] = []
+var _hs_route_server: [i64] = []
+var _hs_route_method: [text] = []
+var _hs_route_path: [text] = []
+var _hs_route_body: [text] = []
+var _hs_static_server: [i64] = []
+var _hs_static_prefix: [text] = []
+var _hs_static_dir: [text] = []
+var _hc_header_client: [i64] = []
+var _hc_header_line: [text] = []
+
+fn _hs_valid(server: i64) -> bool:
+    val idx = server - 1
+    idx >= 0 and idx < _hs_live.len() and _hs_live[idx]
+
+fn rt_http_server_create(port: i64) -> i64:
+    if port < 0 or port > 65535:
+        return 0
+    _hs_ports.push(port)
+    _hs_live.push(true)
+    _hs_stopped.push(true)
+    _hs_live.len()
+
+fn rt_http_server_route(server: i64, method: text, path: text, handler: text) -> bool:
+    if not _hs_valid(server) or method == "" or not path.starts_with("/"):
+        return false
+    _hs_route_server.push(server)
+    _hs_route_method.push(method.upper())
+    _hs_route_path.push(path)
+    _hs_route_body.push(handler)
+    true
+
+fn rt_http_server_static(server: i64, path: text, dir: text) -> bool:
+    if not _hs_valid(server) or not path.starts_with("/") or dir == "":
+        return false
+    _hs_static_server.push(server)
+    _hs_static_prefix.push(path)
+    _hs_static_dir.push(dir)
+    true
+
+fn http_server_echo_response(req: HttpRequest) -> HttpResponse:
+    """Answer with the parsed request line, headers and body (the `@echo` handler)."""
+    var head = "{http_method_to_text(req.method)} {req.path} {req.version}\n"
+    for pair in req.headers:
+        head = head + "{pair.0}: {pair.1}\n"
+    HttpResponse.ok(head + "\n" + req.body)
+
+fn _hs_route_handler(body: text) -> fn(HttpRequest) -> HttpResponse:
+    if body == HTTP_SERVER_ECHO_HANDLER:
+        return http_server_echo_response
+    \req: HttpResponse.ok(body)
+
+fn _hs_static_handler(prefix: text, dir: text) -> fn(HttpRequest) -> HttpResponse:
+    \req: static_dir_response(prefix, dir, req)
+
+fn _hs_router(server: i64) -> Router:
+    var router = Router.new()
+    var i = 0
+    while i < _hs_route_server.len():
+        if _hs_route_server[i] == server:
+            router.route(http_method_from_text(_hs_route_method[i]), _hs_route_path[i], _hs_route_handler(_hs_route_body[i]))
+        i = i + 1
+    i = 0
+    while i < _hs_static_server.len():
+        if _hs_static_server[i] == server:
+            router.mount(_hs_static_prefix[i], _hs_static_handler(_hs_static_prefix[i], _hs_static_dir[i]))
+        i = i + 1
+    router
+
+fn rt_http_server_start(server: i64) -> bool:
+    if not _hs_valid(server):
+        return false
+    match plaintext_development_capability("rt_http_server loopback listener"):
+        Err(_):
+            false
+        Ok(cap):
+            var srv = SimpleHttpServer.new("127.0.0.1", _hs_ports[server - 1].to_i32(), _hs_router(server)).with_policy(SecureServerPolicy.plaintext_dev(cap))
+            match TcpListener.bind("127.0.0.1:{_hs_ports[server - 1]}"):
+                Err(_):
+                    false
+                Ok(listener):
+                    # Owner-thread accept loop: each connection goes through
+                    # SimpleHttpServer.handle_connection (parser, Router, writer)
+                    # without the per-connection thread spawn of serve_loop.
+                    _hs_stopped[server - 1] = false
+                    while not _hs_stopped[server - 1]:
+                        match listener.accept_timeout(200):
+                            Ok(stream): srv.handle_connection(stream)
+                            Err(_): pass
+                    val _ = listener.close()
+                    true
+
+fn rt_http_server_stop(server: i64) -> bool:
+    if not _hs_valid(server):
+        return false
+    _hs_stopped[server - 1] = true
+    true
+
+fn rt_http_server_destroy(server: i64):
+    if rt_http_server_stop(server):
+        _hs_live[server - 1] = false
+
+fn rt_http_client_set_header(client: i64, key: text, value: text) -> bool:
+    if client <= 0 or key == "" or key.contains(":") or key.contains("\n") or value.contains("\n"):
+        return false
+    _hc_header_client.push(client)
+    _hc_header_line.push("{key}: {value}")
+    true
+
+fn http_client_default_headers(client: i64) -> [text]:
+    """Default header lines recorded for `client` by rt_http_client_set_header."""
+    var out: [text] = []
+    var i = 0
+    while i < _hc_header_client.len():
+        if _hc_header_client[i] == client:
+            out.push(_hc_header_line[i])
+        i = i + 1
+    out
+
+fn http_client_forget_headers(client: i64):
+    """Drop default headers of a destroyed client so a reused handle starts clean."""
+    var clients: [i64] = []
+    var lines: [text] = []
+    var i = 0
+    while i < _hc_header_client.len():
+        if _hc_header_client[i] != client:
+            clients.push(_hc_header_client[i])
+            lines.push(_hc_header_line[i])
+        i = i + 1
+    _hc_header_client = clients
+    _hc_header_line = lines
+
+fn rt_http_upload(url: text, file_path: text, field_name: text) -> (i64, text, text):
+    if not file_exists(file_path):
+        return (0, "", "upload file not found: {file_path}")
+    val parts = file_path.replace("\\", "/").split("/")
+    val filename = parts[parts.len() - 1]
+    val boundary = "----SimpleUploadBoundary7d1f"
+    val content = file_read_text(file_path)
+    val body = "--{boundary}\r\nContent-Disposition: form-data; name=\"{field_name}\"; filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n{content}\r\n--{boundary}--\r\n"
+    http_request_raw("POST", url, "Content-Type: multipart/form-data; boundary={boundary}", body)
+
+export HTTP_SERVER_ECHO_HANDLER, http_server_echo_response
+export rt_http_server_create, rt_http_server_route, rt_http_server_static
+export rt_http_server_start, rt_http_server_stop, rt_http_server_destroy
+export rt_http_client_set_header, http_client_default_headers, http_client_forget_headers
+export rt_http_upload

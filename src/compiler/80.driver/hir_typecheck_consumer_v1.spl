@@ -1,24 +1,77 @@
 # Complete-body read-only HM/frontend/visibility consumer shared by retained
-# driver and owned archive leases. No CompileContext/mono/driver orchestration.
+# driver and owned archive leases. No CompileContext/driver orchestration.
 use compiler.hir.hir_types.{HirModule}
 use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity}
-use compiler.types.type_infer_types.{HmInferContext}
+use compiler.types.type_infer_types.{HmInferContext, TypeInferError}
+use compiler.hir.hir.{HirType, HirTypeKind}
 use compiler.types.type_infer.*
 use compiler.types.type_infer.format_error.{format_type_infer_error_v1}
 use compiler.semantics.visibility_integration.{check_module_visibility}
 use compiler.semantics.lint.hir_frontend_diagnostics.{run_hir_frontend_diagnostics, frontend_diag_enabled}
+use compiler.types.cfg_decl_check.{cfg_decl_check_module}
+use compiler.common.api_signature_facts_v1.{ApiSignatureFactsV1}
+use compiler.types.type_infer.api_signature_projection_v1.{project_api_signatures_v1}
+use compiler.driver.driver_unit_profile.{unit_profile_apply, unit_profile_drain_diagnostics}
+use compiler.core.unit_constraint.{unit_constraint_drain_conflicts_for}
+use compiler.semantics.must_use_discard.{must_use_discard_scan_module}
+use compiler.common.must_use_policy.{must_use_finding_severity}
+use std.nogc_sync_mut.io.env_ops.{env_get}
 
 # The only values a typecheck body lease may retain. No HIR/type/symbol roots.
 struct HirTypecheckReceiptV1:
     messages: [text]
     warnings: [text]
     errors: [text]
+    # Retained path only; archive leases keep their existing diagnostic payload.
+    # Owned flat observations, never HIR/type/symbol roots or admission evidence.
+    api_signatures: ApiSignatureFactsV1? = None
 
 export HirTypecheckReceiptV1, collect_module_typecheck_receipt_v1
 
 # Shared actual-body consumer. Policy is resolved by the caller outside scratch.
+# E-TYPE-FN-VALUE (bug typecheck_accepts_fn_value_for_text_param_2026-11-06).
+# A function value (fn name, lambda, `_1` placeholder lambda) unified against a
+# plain DATA slot (scalar, text, collection, tuple) is never a representation
+# the backend can carry: natively the slot receives a code pointer and the
+# callee reads it as text/int (real AV: builder.build(... _1), fixed at the call
+# site by 45fb9585333). The HM checker already reports the Mismatch; this makes
+# that one class an error at every SIMPLE_TYPECHECK_PROFILE, like cfg-check.
+# Named/TypeParam/Infer/Any-like slots stay at pass severity (an alias or a
+# generic may legitimately be function-typed).
+fn typecheck_type_is_fn_v1(t: HirType) -> bool:
+    match t.kind:
+        case HirTypeKind.Function(_, _, _): true
+        case _: false
+
+fn typecheck_type_is_plain_data_v1(t: HirType) -> bool:
+    match t.kind:
+        case HirTypeKind.Int(_, _): true
+        case HirTypeKind.Float(_): true
+        case HirTypeKind.Bool: true
+        case HirTypeKind.Char: true
+        case HirTypeKind.Str: true
+        case HirTypeKind.Array(_, _): true
+        case HirTypeKind.Slice(_): true
+        case HirTypeKind.Dict(_, _): true
+        case HirTypeKind.Tuple(_): true
+        case HirTypeKind.Optional(inner):
+            typecheck_type_is_plain_data_v1(inner)
+        case _: false
+
+pub fn typecheck_error_is_fn_value_into_data_slot_v1(ictx: HmInferContext, err: TypeInferError) -> bool:
+    match err:
+        case TypeInferError.Mismatch(expected, found, _):
+            val e = ictx.resolve(expected)
+            val f = ictx.resolve(found)
+            if typecheck_type_is_fn_v1(f) and typecheck_type_is_plain_data_v1(e):
+                return true
+            typecheck_type_is_fn_v1(e) and typecheck_type_is_plain_data_v1(f)
+        case _: false
+
 pub fn collect_module_typecheck_receipt_v1(
-    name: text, m: HirModule, severity: TypecheckPassSeverity
+    name: text, m: HirModule, severity: TypecheckPassSeverity,
+    collect_api_signatures: bool = false, script_mode: bool = false,
+    project_modules: Dict<text, HirModule> = {}
 ) -> HirTypecheckReceiptV1:
     var warnings: [text] = []
     var errors: [text] = []
@@ -26,11 +79,54 @@ pub fn collect_module_typecheck_receipt_v1(
     # Type inference diagnostics (unification / occurs-check / mismatch),
     # including declared-vs-actual return type mismatches.
     var ictx = HmInferContext.with_builtins()
+    # SPL-UNIT-004: the active profile's policy row picks unit_ops strict
+    # mode (Deny verdicts arrive via ictx.errors); default-mode warnings are
+    # drained below. Stale warnings from an earlier module are discarded.
+    # SPL-UNIT-002 (mixed-unit product/quotient) is an error unless
+    # script_mode (CompileMode.Interpret), where it is a warning.
+    unit_profile_apply(env_get("SIMPLE_TYPECHECK_PROFILE"), script_mode)
+    val _stale_unit = unit_profile_drain_diagnostics(name)
     ictx.infer_module(m)
+    for umsg in unit_profile_drain_diagnostics(name):
+        out = out.push(umsg)
+        match severity:
+            case TypecheckPassSeverity.Advisory:
+                val _ = 0
+            case _:
+                warnings.push(umsg)
+    # SPL-UNIT-006: two units sharing a name with different bounds (the later
+    # declaration won in the constraint pool). Warning at every non-Advisory
+    # severity; never an error. Only conflicts queued while this module was
+    # parsed (keyed by its source path) are drained here.
+    for cmsg in unit_constraint_drain_conflicts_for(m.path):
+        val cfmsg = "[unit SPL-UNIT-006] " + name + ": " + cmsg
+        out = out.push(cfmsg)
+        match severity:
+            case TypecheckPassSeverity.Advisory:
+                val _ = 0
+            case _:
+                warnings.push(cfmsg)
+    var signature_facts: ApiSignatureFactsV1? = None
+    if collect_api_signatures:
+        var projected = project_api_signatures_v1(m, ictx)
+        # Retain under the pass's logical module identity (the registry alias
+        # and diagnostic key), not the parser's filename-derived HirModule.name.
+        if name.len() > 0 and name.len() <= 512 and projected.module_name.len() > 0:
+            projected.module_name = name
+        signature_facts = Some(projected)
     var e_idx = 0
     while e_idx < ictx.errors.len():
+        val ierr = ictx.errors[e_idx]
+        if typecheck_error_is_fn_value_into_data_slot_v1(ictx, ierr):
+            val fmsg = "[typecheck] {name}: E-TYPE-FN-VALUE: " +
+                format_type_infer_error_v1(ierr) +
+                "|||HELP:a function value cannot be passed where a data value is expected; call it, or check placeholder `_1` scoping"
+            out = out.push(fmsg)
+            errors.push(fmsg)
+            e_idx = e_idx + 1
+            continue
         val msg = "[typecheck] {name}: " +
-            format_type_infer_error_v1(ictx.errors[e_idx])
+            format_type_infer_error_v1(ierr)
         out = out.push(msg)
         # E-TYPE-NIL-COMPARE rides this list at the pass's own severity:
         # a non-optional-vs-nil comparison was a unification ERROR here
@@ -56,6 +152,30 @@ pub fn collect_module_typecheck_receipt_v1(
                     val _ = 0
                 case _:
                     warnings.push(fmsg)
+    # ROB-USE-01/02: discarded Result/Option/@must_use value. Error when compiled,
+    # warning in script mode (same script_mode as SPL-UNIT-002); the pass
+    # severity still bounds it (Advisory drops, Warn downgrades).
+    # `project_modules` is the project's whole HIR set so imported callees
+    # resolve across modules; absent (single-module callers) it is just `m`.
+    var scan_modules: Dict<text, HirModule> = {}
+    if project_modules.contains_key(name):
+        scan_modules = project_modules
+    else:
+        scan_modules[name] = m
+    val use_severity = must_use_finding_severity(script_mode)
+    for finding in must_use_discard_scan_module(scan_modules, name, []):
+        val umsg = "[must-use {finding.code}] {name}: in `{finding.function}`: value of `{finding.callee}` is discarded; consume it, or write `_ = {finding.callee}(...)`"
+        out = out.push(umsg)
+        match severity:
+            case TypecheckPassSeverity.Advisory:
+                val _ = 0
+            case TypecheckPassSeverity.Warn:
+                warnings.push(umsg)
+            case TypecheckPassSeverity.Deny:
+                if use_severity == "error":
+                    errors.push(umsg)
+                else:
+                    warnings.push(umsg)
     # Visibility diagnostics (cross-module private/friend/package access).
     val vwarnings = check_module_visibility(m, name)
     var v_idx = 0
@@ -71,4 +191,12 @@ pub fn collect_module_typecheck_receipt_v1(
             case TypecheckPassSeverity.Deny:
                 errors.push(vmsg)
         v_idx = v_idx + 1
-    HirTypecheckReceiptV1(messages: out, warnings: warnings, errors: errors)
+    # Decl-level @cfg coherence (E-CFG-*): real errors at every severity, since
+    # an overlapping or non-exhaustive guarded declaration is ill-formed, not
+    # a style finding. Returns [] immediately for a module with no guarded item.
+    for cfg_msg in cfg_decl_check_module(m):
+        val cmsg = "[cfg-check] {name}: {cfg_msg}"
+        out = out.push(cmsg)
+        errors.push(cmsg)
+    HirTypecheckReceiptV1(messages: out, warnings: warnings, errors: errors,
+        api_signatures: signature_facts)

@@ -6,7 +6,7 @@
 # Phase 5: Load-Time JIT Instantiation
 
 use std.env.{env_get_or}
-use std.nogc_sync_mut.io_runtime.{file_write_exact}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 
 use .object_mapper.{
     SharedExecMapper,
@@ -100,7 +100,6 @@ struct LoaderInstantiationRecord:
     to_obj: text
     status: text
     output_file: text?
-    mangled_name: text?
 
 # ============================================================================
 # Template and Type Helpers
@@ -305,52 +304,30 @@ impl JitInstantiator:
         _ = self.exec_mapper.unmap_symbol(symbol)
 
     me read_note_sdn_from_file(smf_path: text) -> Result<LoadedMetadata, text>:
-        """Read note.sdn section from SMF file using mmap cache."""
-        # Get mapped SMF file from the shared cache (auto-loads if not cached).
-        val mapped_smf = self.smf_cache.get(smf_path)?
-        val note_metadata = mapped_smf.read_note_sdn()?
+        """Load-time generic instantiation metadata for an SMF file.
 
-        # Convert shared note.sdn metadata to the local JIT bookkeeping shape.
-        var possible: [PossibleInstantiation] = []
-        for entry in note_metadata.possible:
-            possible = possible.push(PossibleInstantiation(
-                template_name: entry.template_name,
-                type_args: entry.type_args,
-                mangled_name: entry.mangled_name
-            ))
-
-        var instantiations: [LoaderInstantiationRecord] = []
-        var id = 0
-        for entry in note_metadata.instantiations:
-            instantiations = instantiations.push(LoaderInstantiationRecord(
-                id: id,
-                template_name: entry.template_name,
-                type_args: entry.type_args,
-                mangled_name: entry.mangled_name,
-                from_file: entry.from_file,
-                from_loc: entry.from_loc,
-                to_obj: entry.output_file,
-                status: entry.status.as_str(),
-                output_file: nil,
-                mangled_name: nil
-            ))
-            id = id + 1
-
-        Ok(LoadedMetadata(possible: possible, instantiations: instantiations))
+        The note.sdn section that carried `possible`/`instantiations` rows was
+        written by a pass removed 2026-10-31. No SMF carries it any more, so this is an explicit
+        refusal: no template can be JIT-instantiated from this file, and
+        `try_jit_instantiate` answers NotFound for every symbol in it."""
+        # Keep the mmap-cache contract (the file must exist and map) so a
+        # missing/corrupt SMF still reports as such rather than as "no metadata".
+        val _mapped_smf = self.smf_cache.get(smf_path)?
+        Err("generic instantiation removed: {smf_path} carries no note.sdn instantiation metadata")
 
     me can_jit_instantiate(symbol: text) -> bool:
         """Check if a symbol can be JIT-instantiated."""
         if not self.config.enabled:
             return false
 
-        self.find_possible(symbol) != nil
+        self.find_possible(symbol).is_some()
 
     me find_possible(symbol: text) -> (text, PossibleInstantiation)?:
         """Find possible instantiation for a symbol."""
         if self.possible_lookup.has(symbol):
             return Some(self.possible_lookup[symbol])
         if self.possible_misses.has(symbol):
-            return nil
+            return None
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
         for path in self.loaded_metadata.keys():
             val metadata = self.loaded_metadata[path]
@@ -360,7 +337,7 @@ impl JitInstantiator:
                     self.possible_lookup[symbol] = found
                     return Some(found)
         self.remember_possible_miss(symbol)
-        nil
+        None
 
     me try_jit_instantiate(symbol: text) -> JitInstantiationResult:
         """Try to JIT-instantiate a missing symbol."""
@@ -398,7 +375,7 @@ impl JitInstantiator:
 
         val (smf_path, entry) = match found:
             case Some(found_entry): found_entry
-            case nil: return JitInstantiationResult.NotFound(symbol)
+            case None: return JitInstantiationResult.NotFound(symbol)
 
         # Start JIT compilation
         self.in_progress[symbol] = true
@@ -433,7 +410,12 @@ impl JitInstantiator:
             compiler_ctx_handle, entry.template_name, type_params, types
         )
 
-        val code_result = if typed_result.success:
+        # Annotated: the native-build lowering leaves an unannotated
+        # `if c: Ok(a) else: Err(b)` subject untyped, so the bare Ok/Err arms
+        # below were "ambiguous" and the JitInstantiationResult payloads
+        # mismatched (Stage 2 run 15). bug
+        # mir_untyped_if_expr_result_subject_2026-11-07.
+        val code_result: Result<[u8], text> = if typed_result.success:
             Ok(typed_result.code)
         else:
             Err(if typed_result.has_error: typed_result.error else: "Unknown error")
@@ -448,10 +430,10 @@ impl JitInstantiator:
                             "Failed to map executable memory: {map_error}"
                         )
 
-                # Cache the result
+                # Cache address only; machine code is already mapped into exec_mapper.
                 if not self.jit_cache.has(entry.mangled_name):
                     self.cached_count = self.cached_count + 1
-                self.jit_cache[entry.mangled_name] = (compiled_code, fn_pointer)
+                self.jit_cache[entry.mangled_name] = ([], fn_pointer)
                 if self.smf_semantic_keys.has(smf_path):
                     self.jit_semantic_keys[entry.mangled_name] = self.smf_semantic_keys[smf_path]
 
@@ -514,14 +496,13 @@ impl JitInstantiator:
                 from_loc: "{smf_path}:0:0:jit",
                 to_obj: "jit_memory",
                 status: "jit_compiled",
-                output_file: nil,
-                mangled_name: nil
+                output_file: None
             )
             metadata.instantiations = metadata.instantiations.push(new_inst)
 
             self.loaded_metadata[smf_path] = metadata
             val sidecar_path = _metadata_sidecar_path(smf_path)
-            val persisted = file_write_exact(sidecar_path, serialize_loaded_metadata(metadata))
+            val persisted = file_atomic_write(sidecar_path, serialize_loaded_metadata(metadata))
             if not persisted:
                 return Err("Failed to persist JIT metadata sidecar: {sidecar_path}")
 
@@ -613,10 +594,10 @@ impl JitSymbolResolver:
                     case Some(resolved_address):
                         self.symbols[symbol] = resolved_address
                         return address
-                    case nil:
-                        nil
+                    case None:
+                        None
             case _:
-                nil
+                None
 
     me load_smf(path: text) -> Result<(), text>:
         """Load metadata from SMF file."""

@@ -1,6 +1,6 @@
 // Block closure execution helpers for interpreter_call module
 
-use super::super::interpreter_control::{assert_stmt_failure, is_condition_present, optional_let_binding, LetBind};
+use super::super::interpreter_control::{assert_stmt_failure, is_condition_present, optional_let_binding_condition, LetBind};
 use super::super::interpreter_helpers::{
     bind_for_pattern_value, bind_pattern_value, handle_method_call_with_self_update,
     range_object_values, restore_pattern_scope, save_pattern_scope,
@@ -30,15 +30,16 @@ enum ModuleGlobalTarget {
 }
 
 fn module_global_target(name: &str, env: &Env) -> Option<ModuleGlobalTarget> {
+    // A frame local shadows any same-named module global (e.g. a module namespace).
+    if env.is_local(name) {
+        return None;
+    }
     let current_owner = CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
     let Some(owner) = current_owner else {
         return MODULE_GLOBALS
             .with(|cell| cell.borrow().contains_key(name))
             .then_some(ModuleGlobalTarget::Legacy);
     };
-    if env.is_local(name) {
-        return None;
-    }
     if crate::interpreter::owned_global_present(&owner, name) {
         return Some(ModuleGlobalTarget::Owned {
             owner,
@@ -160,9 +161,16 @@ fn inject_mixins(class_def: &ClassDef) -> ClassDef {
 }
 
 fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
+    // `List<T>` is a plain class whose payload is the `items` array.
+    if iterable.aggregate_class() == Some("List") {
+        if let Some(items @ (Value::Array(_) | Value::FrozenArray(_))) = iterable.aggregate_field("items") {
+            return get_iterator_values(&items);
+        }
+    }
     match iterable {
         Value::Array(arr) => Ok(arr.to_vec()),
         Value::FrozenArray(arr) => Ok(arr.to_vec()),
+        Value::ByteArray(bytes) | Value::FrozenByteArray(bytes) => Ok(Value::byte_array_values(bytes)),
         Value::FixedSizeArray { data, .. } => Ok(data.clone()),
         Value::Tuple(t) => Ok(t.clone()),
         Value::Str(s) => Ok(s.chars().map(|c| Value::text(c.to_string())).collect()),
@@ -171,20 +179,34 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
         // and `interpreter_helpers::collections` -- module-scope and
         // function-body for-loops must agree on dict iteration order.
         Value::FrozenDict(map) => {
-            let entries: Vec<Value> = crate::value::dict_entries_sorted(map)
+            let entries: Vec<Value> = crate::value::dict_entries_ordered(map)
                 .into_iter()
-                .map(|(k, v)| Value::Tuple(vec![Value::text(k.clone()), v.clone()]))
+                .map(|(k, v)| {
+                    Value::Tuple(vec![
+                        Value::dict_entry_key_for_iteration(v, k),
+                        Value::dict_entry_value_for_iteration(v),
+                    ])
+                })
                 .collect();
             Ok(entries)
         }
         Value::Dict(map) => {
             // Iterate over dict returns (key, value) tuples; a layered module
             // value iterates its whole visible surface.
+            let is_namespace = crate::interpreter::is_module_namespace_dict(map);
             let flat = crate::interpreter::module_dict_flat(map);
             let map = flat.as_ref().unwrap_or(map);
-            let entries: Vec<Value> = crate::value::dict_entries_sorted(map)
+            if is_namespace {
+                super::gate_namespace_private_entries(map)?;
+            }
+            let entries: Vec<Value> = crate::value::dict_entries_ordered(map)
                 .into_iter()
-                .map(|(k, v)| Value::Tuple(vec![Value::text(k.clone()), v.clone()]))
+                .map(|(k, v)| {
+                    Value::Tuple(vec![
+                        Value::dict_entry_key_for_iteration(v, k),
+                        Value::dict_entry_value_for_iteration(v),
+                    ])
+                })
                 .collect();
             Ok(entries)
         }
@@ -255,7 +277,7 @@ fn evaluate_block_while_condition(
     };
     let value = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
 
-    let decision: WhileConditionDecision = match optional_let_binding(pattern, &value) {
+    let decision: WhileConditionDecision = match optional_let_binding_condition(pattern, &value, &while_stmt.condition)? {
         LetBind::Skip => WhileConditionDecision::Stop,
         LetBind::Bind(name, inner) => {
             let mut bindings = HashMap::with_capacity(1);
@@ -395,11 +417,23 @@ pub(super) fn exec_block_closure_into(
     // Advice declared by an `on pc{...}` statement in this block is scoped to
     // the block, like the const/immutable name sets this executor restores.
     let _aop_scope = super::core::aop_runtime::AdviceScope::enter();
+    let _closure_fn_return_guard = crate::interpreter::push_current_fn_return_type(None);
+    let _closure_expected_guard = crate::interpreter::push_expected_target_type(None);
     let mut last_value = Value::Nil;
 
-    for node in nodes {
+    for (idx, node) in nodes.iter().enumerate() {
+        let is_last = idx + 1 == nodes.len();
+        crate::interpreter::set_current_node_span(node.span().map(Into::into));
+        // COVERAGE: this executor interprets every statement kind itself and
+        // never reaches exec_node, the only other place a line is recorded.
+        crate::interpreter::coverage_helpers::record_node_coverage_lexical(node);
         match node {
             Node::Expression(expr) => {
+                let _non_tail_expected_guard = if !is_last {
+                    Some(crate::interpreter::push_expected_target_type(None))
+                } else {
+                    None
+                };
                 // Handle functional update (e.g., list->append(3))
                 if let Expr::FunctionalUpdate { target, method, args } = expr {
                     if let Some((name, new_value)) = super::super::interpreter_helpers::handle_functional_update(
@@ -428,6 +462,8 @@ pub(super) fn exec_block_closure_into(
             Node::Let(let_stmt) => {
                 if let Some(ref value_expr) = let_stmt.value {
                     // Handle method calls with self-update (e.g., m.call("method", []))
+                    let _expected_target_guard =
+                        crate::interpreter::push_expected_target_type(declared_let_type(let_stmt).cloned());
                     let (val, update) = handle_method_call_with_self_update(
                         value_expr,
                         &mut local_env,
@@ -436,6 +472,7 @@ pub(super) fn exec_block_closure_into(
                         enums,
                         impl_methods,
                     )?;
+                    drop(_expected_target_guard);
                     if let Some((obj_name, new_self)) = update {
                         local_env.insert(obj_name, new_self);
                     }
@@ -448,7 +485,11 @@ pub(super) fn exec_block_closure_into(
                     visit_pattern_binding_names(&let_stmt.pattern, &mut |name| local_env.mark_local(name.to_owned()));
                     // Use bind_pattern_value to handle all pattern types including tuples
                     let is_mutable = let_stmt.mutability.is_mutable();
-                    let val = crate::interpreter::coerce_to_declared_type(val, declared_let_type(let_stmt));
+                    if let Some(message) = crate::impl_duplicate_check::let_literal_mismatch(let_stmt) {
+                        return Err(CompileError::semantic(message));
+                    }
+                    let val = crate::interpreter::coerce_let_value(val, declared_let_type(let_stmt), let_stmt.value.as_ref());
+                    crate::interpreter::record_let_declared_width(let_stmt, &mut local_env);
                     bind_pattern_value(&let_stmt.pattern, val, is_mutable, &mut local_env);
                 }
                 last_value = Value::Nil;
@@ -620,7 +661,7 @@ pub(super) fn exec_block_closure_into(
                         enums,
                         impl_methods,
                     )?;
-                    match optional_let_binding(pattern, &value) {
+                    match optional_let_binding_condition(pattern, &value, &if_stmt.condition)? {
                         LetBind::Bind(name, inner) => {
                             // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
                             // so is load-bearing, not cosmetic: `Env::insert` alone leaves
@@ -629,35 +670,36 @@ pub(super) fn exec_block_closure_into(
                             // NON-local binding. A bound name that also exists as a module
                             // global therefore read back as the GLOBAL — in the bootstrap
                             // closure `if val get_value = …` returned `<fn:get_value>`.
-                            local_env.mark_local(name.clone());
-                            local_env.insert(name, inner);
+                            let saved = crate::interpreter::bind_block_scope_shadows(std::collections::HashMap::from([(name, inner)]), &mut local_env);
                             record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
-                            last_value = exec_block_closure_mut(
+                            let branch = exec_block_closure_mut(
                                 &if_stmt.then_block.statements,
                                 &mut local_env,
                                 functions,
                                 classes,
                                 enums,
                                 impl_methods,
-                            )?;
+                            );
+                            crate::interpreter::restore_block_scope_shadows(saved, &mut local_env);
+                            last_value = branch?;
                             handled = true;
                         }
                         LetBind::Skip => {}
                         LetBind::NotApplicable => {
                             let mut bindings = std::collections::HashMap::new();
                             if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                                for (name, val) in bindings {
-                                    local_env.insert(name, val);
-                                }
+                                let saved = crate::interpreter::bind_block_scope_shadows(bindings, &mut local_env);
                                 record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
-                                last_value = exec_block_closure_mut(
+                                let branch = exec_block_closure_mut(
                                     &if_stmt.then_block.statements,
                                     &mut local_env,
                                     functions,
                                     classes,
                                     enums,
                                     impl_methods,
-                                )?;
+                                );
+                                crate::interpreter::restore_block_scope_shadows(saved, &mut local_env);
+                                last_value = branch?;
                                 handled = true;
                             }
                         }
@@ -703,7 +745,7 @@ pub(super) fn exec_block_closure_into(
                     for (elif_idx, (pattern, cond, block)) in if_stmt.elif_branches.iter().enumerate() {
                         if let Some(pattern) = pattern {
                             let value = evaluate_expr(cond, &mut local_env, functions, classes, enums, impl_methods)?;
-                            match optional_let_binding(pattern, &value) {
+                            match optional_let_binding_condition(pattern, &value, cond)? {
                                 LetBind::Bind(name, inner) => {
                                     // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
                                     // so is load-bearing, not cosmetic: `Env::insert` alone leaves
@@ -712,22 +754,23 @@ pub(super) fn exec_block_closure_into(
                                     // NON-local binding. A bound name that also exists as a module
                                     // global therefore read back as the GLOBAL — in the bootstrap
                                     // closure `if val get_value = …` returned `<fn:get_value>`.
-                                    local_env.mark_local(name.clone());
-                                    local_env.insert(name, inner);
+                                    let saved = crate::interpreter::bind_block_scope_shadows(std::collections::HashMap::from([(name, inner)]), &mut local_env);
                                     record_decision_site(
                                         if_stmt.span.line,
                                         if_stmt.span.column,
                                         sub_elif(elif_idx),
                                         true,
                                     );
-                                    last_value = exec_block_closure_mut(
+                                    let branch = exec_block_closure_mut(
                                         &block.statements,
                                         &mut local_env,
                                         functions,
                                         classes,
                                         enums,
                                         impl_methods,
-                                    )?;
+                                    );
+                                    crate::interpreter::restore_block_scope_shadows(saved, &mut local_env);
+                                    last_value = branch?;
                                     handled = true;
                                     break;
                                 }
@@ -735,23 +778,23 @@ pub(super) fn exec_block_closure_into(
                                 LetBind::NotApplicable => {
                                     let mut bindings = std::collections::HashMap::new();
                                     if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                                        for (name, val) in bindings {
-                                            local_env.insert(name, val);
-                                        }
+                                        let saved = crate::interpreter::bind_block_scope_shadows(bindings, &mut local_env);
                                         record_decision_site(
                                             if_stmt.span.line,
                                             if_stmt.span.column,
                                             sub_elif(elif_idx),
                                             true,
                                         );
-                                        last_value = exec_block_closure_mut(
+                                        let branch = exec_block_closure_mut(
                                             &block.statements,
                                             &mut local_env,
                                             functions,
                                             classes,
                                             enums,
                                             impl_methods,
-                                        )?;
+                                        );
+                                        crate::interpreter::restore_block_scope_shadows(saved, &mut local_env);
+                                        last_value = branch?;
                                         handled = true;
                                         break;
                                     }
@@ -826,7 +869,7 @@ pub(super) fn exec_block_closure_into(
                 // is why control_flow_spec's "creates new scope for loop
                 // variable" stayed red while a top-level repro passed.
                 // doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
-                let for_saved_scope = save_pattern_scope(&for_stmt.pattern, &local_env);
+                let for_saved_scope = save_pattern_scope(&for_stmt.pattern, &mut local_env);
                 'for_loop_own: for val in iter_values.into_iter() {
                     // A comma loop pattern is ALWAYS a tuple destructure,
                     // whatever the iterable is; there is no enumerate
@@ -861,21 +904,26 @@ pub(super) fn exec_block_closure_into(
                 restore_pattern_scope(for_saved_scope, &mut local_env);
             }
             Node::Match(match_stmt) => {
-                let subject = evaluate_expr(
-                    &match_stmt.subject,
-                    &mut local_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?;
+                // Read the subject through its place and remember it, so
+                // arm payload-binding container mutations can merge back
+                // into the caller's storage (two-hop place chain).
+                let (subject, subject_place) =
+                    crate::interpreter::interpreter_patterns::evaluate_match_subject(
+                        &match_stmt.subject,
+                        &mut local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
                 let mut matched = false;
                 for arm in &match_stmt.arms {
                     let mut bindings = std::collections::HashMap::new();
-                    if pattern_matches(&arm.pattern, &subject, &mut bindings, enums, classes)? {
+                    if crate::interpreter::interpreter_patterns::match_arm_matches(&arm.pattern, &subject, &mut bindings, enums, classes)? {
                         if let Some(guard) = &arm.guard {
                             let mut guard_env = local_env.clone();
                             for (name, value) in &bindings {
+                                guard_env.enter_block_local(name.clone());
                                 guard_env.insert(name.clone(), value.clone());
                             }
                             let guard_val = eval_decision_cond(
@@ -900,6 +948,10 @@ pub(super) fn exec_block_closure_into(
                         let mut shadowed: Vec<(String, Option<Value>)> = Vec::with_capacity(bindings.len());
                         for (name, value) in bindings {
                             let prev = local_env.insert(name.clone(), value);
+                            // Block-local, as in `exec_match_core`: otherwise the
+                            // read prefers a same-named module global (e.g. the
+                            // `sdn.value` namespace for `case Failure(value):`).
+                            local_env.enter_block_local(name.clone());
                             shadowed.push((name, prev));
                         }
                         let arm_result = exec_block_closure_mut(
@@ -910,7 +962,18 @@ pub(super) fn exec_block_closure_into(
                             enums,
                             impl_methods,
                         );
+                        // Carry payload-binding container mutations back into
+                        // the subject BEFORE the shadowed bindings are
+                        // restored away.
+                        crate::interpreter::interpreter_patterns::merge_arm_bindings_into_subject(
+                            subject_place.as_ref(),
+                            &subject,
+                            &arm.pattern,
+                            &mut local_env,
+                            classes,
+                        );
                         for (name, prev) in shadowed.into_iter().rev() {
+                            local_env.exit_block_local(&name);
                             match prev {
                                 Some(v) => {
                                     local_env.insert(name, v);
@@ -926,7 +989,11 @@ pub(super) fn exec_block_closure_into(
                     }
                 }
                 if !matched {
-                    last_value = Value::Nil;
+                    return Err(crate::interpreter::interpreter_control::match_no_arm_error(
+                        "statement",
+                        &subject,
+                        &match_stmt.arms,
+                    ));
                 }
             }
             Node::Function(f) => {
@@ -941,7 +1008,10 @@ pub(super) fn exec_block_closure_into(
                 let plain = Value::Function {
                     name: f.name.clone(),
                     def: arc_f,
-                    captured_env: Arc::new(local_env.clone()), // Capture current scope
+                    // Capture current scope, stamped with its lexical origin.
+                    captured_env: Arc::new(crate::interpreter::interpreter_module::capture_env_with_origin(
+                        local_env,
+                    )),
                 };
                 local_env.insert(f.name.clone(), plain.clone());
                 // A user-defined (non-directive) decorator rebinds the name to
@@ -959,6 +1029,7 @@ pub(super) fn exec_block_closure_into(
                     // Keep the plain definition in `functions` so the original
                     // body can still recurse; the sentinel makes `evaluate_call`
                     // prefer the wrapper for calls from outside it.
+                    crate::decorator_apply::mark_decorated_fn_bound();
                     local_env.insert(crate::decorator_apply::decorated_fn_key(&f.name), Value::Bool(true));
                     local_env.insert(f.name.clone(), decorated);
                 }
@@ -1047,26 +1118,7 @@ pub(super) fn exec_block_closure_into(
                 );
                 classes.insert(
                     s.name.clone(),
-                    Arc::new(ClassDef {
-                        span: s.span,
-                        name: s.name.clone(),
-                        generic_params: Vec::new(),
-                        where_clause: vec![],
-                        fields: s.fields.clone(),
-                        methods: s.methods.clone(),
-                        parent: None,
-                        visibility: s.visibility,
-                        effects: Vec::new(),
-                        attributes: Vec::new(),
-                        doc_comment: None,
-                        invariant: None,
-                        macro_invocations: vec![],
-                        mixins: vec![],
-                        is_generic_template: false,
-                        specialization_of: None,
-                        type_bindings: std::collections::HashMap::new(),
-                        is_value_type: true,
-                    }),
+                    Arc::new(crate::interpreter::core_types::struct_def_to_class_def(s)),
                 );
                 // Register static methods as mangled free functions (StructName__method)
                 for method in &s.methods {
@@ -1363,7 +1415,9 @@ pub(super) fn exec_block_closure_into(
                     enums,
                     impl_methods,
                 ) {
-                    Ok(val) => last_value = val,
+                    // Retain this result across continue/error paths and release the
+                    // previous result at the existing overwrite boundary.
+                    Ok(val) => drop(std::mem::replace(&mut last_value, val)),
                     Err(CompileError::LoopBreak(val)) => {
                         last_value = val.unwrap_or(Value::Nil);
                         break;
@@ -1403,6 +1457,8 @@ pub(super) fn exec_block_closure_into(
                 // `exec_block_closure_mut` calls and is caught at the lambda/
                 // block-closure/BDD call boundary (see `CompileError::BlockReturn`).
                 let value = if let Some(expr) = &ret.value {
+                    let _expected_guard =
+                        crate::interpreter::push_expected_target_type(crate::interpreter::current_fn_return_type());
                     evaluate_expr(expr, &mut local_env, functions, classes, enums, impl_methods)?
                 } else {
                     Value::Nil
@@ -1506,11 +1562,23 @@ fn exec_block_closure_mut_inner(
     // Advice declared by an `on pc{...}` statement in this block is scoped to
     // the block, like the const/immutable name sets this executor restores.
     let _aop_scope = super::core::aop_runtime::AdviceScope::enter();
+    let _closure_fn_return_guard = crate::interpreter::push_current_fn_return_type(None);
+    let _closure_expected_guard = crate::interpreter::push_expected_target_type(None);
     let mut last_value = Value::Nil;
 
-    for node in nodes {
+    for (idx, node) in nodes.iter().enumerate() {
+        let is_last = idx + 1 == nodes.len();
+        crate::interpreter::set_current_node_span(node.span().map(Into::into));
+        // COVERAGE: this executor interprets every statement kind itself and
+        // never reaches exec_node, the only other place a line is recorded.
+        crate::interpreter::coverage_helpers::record_node_coverage_lexical(node);
         match node {
             Node::Expression(expr) => {
+                let _non_tail_expected_guard = if !is_last {
+                    Some(crate::interpreter::push_expected_target_type(None))
+                } else {
+                    None
+                };
                 // Handle self-updating method calls (e.g., arr.append(3))
                 let (result, update) =
                     handle_method_call_with_self_update(expr, local_env, functions, classes, enums, impl_methods)?;
@@ -1522,6 +1590,8 @@ fn exec_block_closure_mut_inner(
             Node::Let(let_stmt) => {
                 if let Some(ref value_expr) = let_stmt.value {
                     // Handle method calls with self-update (e.g., m.call("method", []))
+                    let _expected_target_guard =
+                        crate::interpreter::push_expected_target_type(declared_let_type(let_stmt).cloned());
                     let (val, update) = handle_method_call_with_self_update(
                         value_expr,
                         local_env,
@@ -1530,6 +1600,7 @@ fn exec_block_closure_mut_inner(
                         enums,
                         impl_methods,
                     )?;
+                    drop(_expected_target_guard);
                     if let Some((obj_name, new_self)) = update {
                         local_env.insert(obj_name, new_self);
                     }
@@ -1539,7 +1610,11 @@ fn exec_block_closure_mut_inner(
                     // Mark the names local first; see the `exec_block_closure_into` twin.
                     visit_pattern_binding_names(&let_stmt.pattern, &mut |name| local_env.mark_local(name.to_owned()));
                     let is_mutable = let_stmt.mutability.is_mutable();
-                    let val = crate::interpreter::coerce_to_declared_type(val, declared_let_type(let_stmt));
+                    if let Some(message) = crate::impl_duplicate_check::let_literal_mismatch(let_stmt) {
+                        return Err(CompileError::semantic(message));
+                    }
+                    let val = crate::interpreter::coerce_let_value(val, declared_let_type(let_stmt), let_stmt.value.as_ref());
+                    crate::interpreter::record_let_declared_width(let_stmt, local_env);
                     bind_pattern_value(&let_stmt.pattern, val, is_mutable, local_env);
                 }
                 last_value = Value::Nil;
@@ -1586,7 +1661,7 @@ fn exec_block_closure_mut_inner(
                     // above (bug #188a) — `pattern_matches` alone always matches a bare
                     // identifier pattern, even against nil/None, so it must be tried first.
                     let value = evaluate_expr(&if_stmt.condition, local_env, functions, classes, enums, impl_methods)?;
-                    match optional_let_binding(pattern, &value) {
+                    match optional_let_binding_condition(pattern, &value, &if_stmt.condition)? {
                         LetBind::Bind(name, inner) => {
                             // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
                             // so is load-bearing, not cosmetic: `Env::insert` alone leaves
@@ -1595,35 +1670,36 @@ fn exec_block_closure_mut_inner(
                             // NON-local binding. A bound name that also exists as a module
                             // global therefore read back as the GLOBAL — in the bootstrap
                             // closure `if val get_value = …` returned `<fn:get_value>`.
-                            local_env.mark_local(name.clone());
-                            local_env.insert(name, inner);
+                            let saved = crate::interpreter::bind_block_scope_shadows(std::collections::HashMap::from([(name, inner)]), local_env);
                             record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
-                            last_value = exec_block_closure_mut(
+                            let branch = exec_block_closure_mut(
                                 &if_stmt.then_block.statements,
                                 local_env,
                                 functions,
                                 classes,
                                 enums,
                                 impl_methods,
-                            )?;
+                            );
+                            crate::interpreter::restore_block_scope_shadows(saved, local_env);
+                            last_value = branch?;
                             handled = true;
                         }
                         LetBind::Skip => {}
                         LetBind::NotApplicable => {
                             let mut bindings = std::collections::HashMap::new();
                             if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                                for (name, val) in bindings {
-                                    local_env.insert(name, val);
-                                }
+                                let saved = crate::interpreter::bind_block_scope_shadows(bindings, local_env);
                                 record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
-                                last_value = exec_block_closure_mut(
+                                let branch = exec_block_closure_mut(
                                     &if_stmt.then_block.statements,
                                     local_env,
                                     functions,
                                     classes,
                                     enums,
                                     impl_methods,
-                                )?;
+                                );
+                                crate::interpreter::restore_block_scope_shadows(saved, local_env);
+                                last_value = branch?;
                                 handled = true;
                             }
                         }
@@ -1666,7 +1742,7 @@ fn exec_block_closure_mut_inner(
                     for (elif_idx, (pattern, cond, block)) in if_stmt.elif_branches.iter().enumerate() {
                         if let Some(pattern) = pattern {
                             let value = evaluate_expr(cond, local_env, functions, classes, enums, impl_methods)?;
-                            match optional_let_binding(pattern, &value) {
+                            match optional_let_binding_condition(pattern, &value, cond)? {
                                 LetBind::Bind(name, inner) => {
                                     // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
                                     // so is load-bearing, not cosmetic: `Env::insert` alone leaves
@@ -1675,22 +1751,23 @@ fn exec_block_closure_mut_inner(
                                     // NON-local binding. A bound name that also exists as a module
                                     // global therefore read back as the GLOBAL — in the bootstrap
                                     // closure `if val get_value = …` returned `<fn:get_value>`.
-                                    local_env.mark_local(name.clone());
-                                    local_env.insert(name, inner);
+                                    let saved = crate::interpreter::bind_block_scope_shadows(std::collections::HashMap::from([(name, inner)]), local_env);
                                     record_decision_site(
                                         if_stmt.span.line,
                                         if_stmt.span.column,
                                         sub_elif(elif_idx),
                                         true,
                                     );
-                                    last_value = exec_block_closure_mut(
+                                    let branch = exec_block_closure_mut(
                                         &block.statements,
                                         local_env,
                                         functions,
                                         classes,
                                         enums,
                                         impl_methods,
-                                    )?;
+                                    );
+                                    crate::interpreter::restore_block_scope_shadows(saved, local_env);
+                                    last_value = branch?;
                                     handled = true;
                                     break;
                                 }
@@ -1698,23 +1775,23 @@ fn exec_block_closure_mut_inner(
                                 LetBind::NotApplicable => {
                                     let mut bindings = std::collections::HashMap::new();
                                     if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                                        for (name, val) in bindings {
-                                            local_env.insert(name, val);
-                                        }
+                                        let saved = crate::interpreter::bind_block_scope_shadows(bindings, local_env);
                                         record_decision_site(
                                             if_stmt.span.line,
                                             if_stmt.span.column,
                                             sub_elif(elif_idx),
                                             true,
                                         );
-                                        last_value = exec_block_closure_mut(
+                                        let branch = exec_block_closure_mut(
                                             &block.statements,
                                             local_env,
                                             functions,
                                             classes,
                                             enums,
                                             impl_methods,
-                                        )?;
+                                        );
+                                        crate::interpreter::restore_block_scope_shadows(saved, local_env);
+                                        last_value = branch?;
                                         handled = true;
                                         break;
                                     }
@@ -1807,14 +1884,23 @@ fn exec_block_closure_mut_inner(
                 restore_pattern_scope(for_saved_scope, local_env);
             }
             Node::Match(match_stmt) => {
-                let subject = evaluate_expr(&match_stmt.subject, local_env, functions, classes, enums, impl_methods)?;
+                let (subject, subject_place) =
+                    crate::interpreter::interpreter_patterns::evaluate_match_subject(
+                        &match_stmt.subject,
+                        &mut *local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
                 let mut matched = false;
                 for arm in &match_stmt.arms {
                     let mut bindings = std::collections::HashMap::new();
-                    if pattern_matches(&arm.pattern, &subject, &mut bindings, enums, classes)? {
+                    if crate::interpreter::interpreter_patterns::match_arm_matches(&arm.pattern, &subject, &mut bindings, enums, classes)? {
                         if let Some(guard) = &arm.guard {
                             let mut guard_env = local_env.clone();
                             for (name, value) in &bindings {
+                                guard_env.enter_block_local(name.clone());
                                 guard_env.insert(name.clone(), value.clone());
                             }
                             let guard_val = eval_decision_cond(
@@ -1839,6 +1925,10 @@ fn exec_block_closure_mut_inner(
                         let mut shadowed: Vec<(String, Option<Value>)> = Vec::with_capacity(bindings.len());
                         for (name, value) in bindings {
                             let prev = local_env.insert(name.clone(), value);
+                            // Block-local, as in `exec_match_core`: otherwise the
+                            // read prefers a same-named module global (e.g. the
+                            // `sdn.value` namespace for `case Failure(value):`).
+                            local_env.enter_block_local(name.clone());
                             shadowed.push((name, prev));
                         }
                         let arm_result = exec_block_closure_mut(
@@ -1849,7 +1939,18 @@ fn exec_block_closure_mut_inner(
                             enums,
                             impl_methods,
                         );
+                        // Carry payload-binding container mutations back into
+                        // the subject BEFORE the shadowed bindings are
+                        // restored away.
+                        crate::interpreter::interpreter_patterns::merge_arm_bindings_into_subject(
+                            subject_place.as_ref(),
+                            &subject,
+                            &arm.pattern,
+                            local_env,
+                            classes,
+                        );
                         for (name, prev) in shadowed.into_iter().rev() {
+                            local_env.exit_block_local(&name);
                             match prev {
                                 Some(v) => {
                                     local_env.insert(name, v);
@@ -1865,7 +1966,11 @@ fn exec_block_closure_mut_inner(
                     }
                 }
                 if !matched {
-                    last_value = Value::Nil;
+                    return Err(crate::interpreter::interpreter_control::match_no_arm_error(
+                        "statement",
+                        &subject,
+                        &match_stmt.arms,
+                    ));
                 }
             }
             Node::With(with_stmt) => {
@@ -1909,26 +2014,7 @@ fn exec_block_closure_mut_inner(
                 );
                 classes.insert(
                     s.name.clone(),
-                    Arc::new(ClassDef {
-                        span: s.span,
-                        name: s.name.clone(),
-                        generic_params: Vec::new(),
-                        where_clause: vec![],
-                        fields: s.fields.clone(),
-                        methods: s.methods.clone(),
-                        parent: None,
-                        visibility: s.visibility,
-                        effects: Vec::new(),
-                        attributes: Vec::new(),
-                        doc_comment: None,
-                        invariant: None,
-                        macro_invocations: vec![],
-                        mixins: vec![],
-                        is_generic_template: false,
-                        specialization_of: None,
-                        type_bindings: std::collections::HashMap::new(),
-                        is_value_type: true,
-                    }),
+                    Arc::new(crate::interpreter::core_types::struct_def_to_class_def(s)),
                 );
                 // Register static methods as mangled free functions (StructName__method)
                 for method in &s.methods {
@@ -2102,7 +2188,10 @@ fn exec_block_closure_mut_inner(
                 let plain = Value::Function {
                     name: f.name.clone(),
                     def: arc_f,
-                    captured_env: Arc::new(local_env.clone()), // Capture current scope
+                    // Capture current scope, stamped with its lexical origin.
+                    captured_env: Arc::new(crate::interpreter::interpreter_module::capture_env_with_origin(
+                        local_env,
+                    )),
                 };
                 local_env.insert(f.name.clone(), plain.clone());
                 // A user-defined (non-directive) decorator rebinds the name to
@@ -2120,6 +2209,7 @@ fn exec_block_closure_mut_inner(
                     // Keep the plain definition in `functions` so the original
                     // body can still recurse; the sentinel makes `evaluate_call`
                     // prefer the wrapper for calls from outside it.
+                    crate::decorator_apply::mark_decorated_fn_bound();
                     local_env.insert(crate::decorator_apply::decorated_fn_key(&f.name), Value::Bool(true));
                     local_env.insert(f.name.clone(), decorated);
                 }
@@ -2144,7 +2234,9 @@ fn exec_block_closure_mut_inner(
                     enums,
                     impl_methods,
                 ) {
-                    Ok(val) => last_value = val,
+                    // Retain this result across continue/error paths and release the
+                    // previous result at the existing overwrite boundary.
+                    Ok(val) => drop(std::mem::replace(&mut last_value, val)),
                     Err(CompileError::LoopBreak(val)) => {
                         last_value = val.unwrap_or(Value::Nil);
                         break;
@@ -2171,6 +2263,8 @@ fn exec_block_closure_mut_inner(
                 // whole enclosing lambda/block-closure body, not just this nested
                 // call.
                 let value = if let Some(expr) = &ret.value {
+                    let _expected_guard =
+                        crate::interpreter::push_expected_target_type(crate::interpreter::current_fn_return_type());
                     evaluate_expr(expr, local_env, functions, classes, enums, impl_methods)?
                 } else {
                     Value::Nil

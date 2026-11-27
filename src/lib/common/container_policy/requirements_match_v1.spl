@@ -1,0 +1,109 @@
+# Capability requirement versus observation (design §6.3, §7.2, §12.1).
+#
+# Refusal happens before any effect. Every unmet requirement is reported, in
+# a fixed order, so the diagnostic set is deterministic. Nothing is weakened
+# implicitly: `pod-ip-v1` is never translated to endpoint emulation, a hard
+# memory/CPU cap is never downgraded to monitoring, and strict descendant
+# absence is never inferred from leader exit or process-group capability.
+# An `Unqualified` observation (every host without native evidence) always
+# refuses with SCMAC-PLATFORM-001; admission is blocked, not "best effort".
+
+use std.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use std.common.contracts.container.sandbox_capability_v1.*
+use std.common.contracts.container.endpoint_policy_v1.*
+use std.common.container_policy.diagnostics_v1.{scmac_diagnostic_v1}
+
+pub struct AdmittedSandboxPlanV1:
+    policy: SandboxPolicyV1
+    backend: text
+    engine: text
+    qualification_ref: text
+    observed: SandboxEvidenceProfileV1
+
+fn refuse(code: text, message: text, source_ref: text, path: text) -> DiagnosticV1:
+    scmac_diagnostic_v1(code, message, source_ref, path, 0, 0)
+
+fn needs_support(out: [DiagnosticV1], requested: bool, support: SandboxSupportV1, code: text, message: text,
+                 source_ref: text, path: text) -> [DiagnosticV1]:
+    var r = out
+    if requested and not sandbox_support_qualified_v1(support):
+        r.push(refuse(code, message, source_ref, path))
+    r
+
+fn hard_limit_required(l: SandboxHardLimitV1) -> bool:
+    match l:
+        SandboxHardLimitV1.NotRequired: false
+        SandboxHardLimitV1.Required(_): true
+
+pub fn sandbox_requirements_diagnostics_v1(policy: SandboxPolicyV1, observed: SandboxObservedCapabilityV1,
+                                           source_ref: text) -> [DiagnosticV1]:
+    var out: [DiagnosticV1] = []
+    # 1. identity pin
+    if observed.backend != policy.backend:
+        out.push(refuse(SCMAC_ADMIT_001, "observed backend '" + observed.backend + "' does not match policy backend '" +
+            policy.backend + "'", source_ref, "backend"))
+    if observed.host_os != policy.execution_os:
+        out.push(refuse(SCMAC_PLATFORM_001, "observed host os '" + observed.host_os + "' cannot run execution os '" +
+            policy.execution_os + "'", source_ref, "execution.os"))
+    # 2. qualification
+    match observed.qualification:
+        SandboxQualificationV1.Unqualified(reason):
+            out.push(refuse(SCMAC_PLATFORM_001, "provider is not qualified on this host: " + reason +
+                "; run the supported qualification, do not disable enforcement", source_ref, "backend"))
+        SandboxQualificationV1.Qualified(r):
+            if r == "":
+                out.push(refuse(SCMAC_PLATFORM_001, "qualification evidence reference is empty", source_ref, "backend"))
+    # 3. network profile and direct-access requests
+    if policy.network.profile == ENDPOINT_PROFILE_POD_IP_V1:
+        out.push(refuse(SCMAC_NET_001, "network profile pod-ip-v1 is not provided: this backend offers endpoint-v1 " +
+            "emulation only, and will not substitute it without explicit semantic acceptance", source_ref, "network.profile"))
+    elif not observed.network_profiles.contains(policy.network.profile):
+        out.push(refuse(SCMAC_PLATFORM_001, "network profile '" + policy.network.profile + "' is not qualified on this host",
+            source_ref, "network.profile"))
+    out = needs_support(out, endpoint_permission_allows_v1(policy.network.direct_ip), observed.direct_ip, SCMAC_NET_002,
+        "direct IP access is unavailable; use a broker endpoint (proxy, Unix socket or Simple endpoint)", source_ref, "network.directIp")
+    out = needs_support(out, endpoint_permission_allows_v1(policy.network.host_listen), observed.host_listen, SCMAC_NET_002,
+        "host-wide listening is unavailable; serve through a broker ingress endpoint", source_ref, "network.hostListen")
+    out = needs_support(out, endpoint_permission_allows_v1(policy.network.udp), observed.udp, SCMAC_NET_002,
+        "UDP datagrams are not qualified on this backend", source_ref, "network.udp")
+    # 4. hard resource limits
+    out = needs_support(out, hard_limit_required(policy.hard_memory), observed.hard_memory_limit, SCMAC_RESOURCE_001,
+        "a hard memory limit is required but this provider does not enforce one; monitored usage is not enforcement",
+        source_ref, "resources.hardMemoryLimit")
+    out = needs_support(out, hard_limit_required(policy.hard_cpu), observed.hard_cpu_limit, SCMAC_RESOURCE_001,
+        "a hard CPU limit is required but this provider does not enforce one", source_ref, "resources.hardCpuLimit")
+    # 5. evidence profile guarantees
+    val want = policy.evidence
+    val have = observed.guarantees
+    if sandbox_file_rank_v1(have.file) < sandbox_file_rank_v1(want.file):
+        out.push(refuse(SCMAC_PLATFORM_001, "file access policy enforcement is not qualified for evidence profile " + want.name,
+            source_ref, "execution.evidenceProfile"))
+    if sandbox_network_rank_v1(have.network) < sandbox_network_rank_v1(want.network):
+        out.push(refuse(SCMAC_PLATFORM_001, "direct-network denial is not qualified for evidence profile " + want.name,
+            source_ref, "execution.evidenceProfile"))
+    if sandbox_process_rank_v1(have.process) < sandbox_process_rank_v1(want.process):
+        out.push(refuse(SCMAC_ADMIT_002, "lifecycle evidence for " + want.name +
+            " is unavailable: required process containment is not observed", source_ref, "execution.evidenceProfile"))
+    if sandbox_cleanup_rank_v1(have.cleanup) < sandbox_cleanup_rank_v1(want.cleanup):
+        out.push(refuse(SCMAC_ADMIT_002, "cleanup evidence for " + want.name + " is unavailable", source_ref,
+            "execution.evidenceProfile"))
+    # 6. strict descendant absence (§6.3, SC-MAC-014)
+    val qualified_absence = sandbox_cleanup_rank_v1(have.cleanup) >= sandbox_cleanup_rank_v1(SandboxCleanupGuaranteeV1.QualifiedTreeAbsence) and
+        sandbox_process_rank_v1(have.process) >= sandbox_process_rank_v1(SandboxProcessGuaranteeV1.StrictDescendantContainment)
+    if policy.require_qualified_absence and not qualified_absence:
+        out.push(refuse(SCMAC_OWNER_001, "qualified descendant absence is required but not observed; leader exit or " +
+            "process-group retirement does not prove tree absence", source_ref, "cleanup.requireQualifiedAbsence"))
+    out
+
+# Design §12.1. Ok only when every requirement is met by a QUALIFIED observation.
+pub fn sandbox_requirements_match_v1(policy: SandboxPolicyV1, observed: SandboxObservedCapabilityV1,
+                                     source_ref: text) -> Result<AdmittedSandboxPlanV1, [DiagnosticV1]>:
+    val diags = sandbox_requirements_diagnostics_v1(policy, observed, source_ref)
+    if diags.len() > 0:
+        return Err(diags)
+    var qref = ""
+    match observed.qualification:
+        SandboxQualificationV1.Qualified(r): qref = r
+        SandboxQualificationV1.Unqualified(_): return Err([refuse(SCMAC_PLATFORM_001, "provider is not qualified", source_ref, "backend")])
+    Ok(AdmittedSandboxPlanV1(policy: policy, backend: observed.backend, engine: observed.engine,
+        qualification_ref: qref, observed: observed.guarantees))

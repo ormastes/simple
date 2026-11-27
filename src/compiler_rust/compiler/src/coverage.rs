@@ -303,6 +303,79 @@ pub fn is_coverage_enabled() -> bool {
     GLOBAL_COVERAGE.get().is_some()
 }
 
+/// CRC-32 (IEEE, reflected polynomial 0xEDB88320); byte-for-byte the value
+/// `std.nogc_sync_mut.compression.gzip.crc.crc32_text` gives in Simple.
+pub fn crc32_ieee(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in bytes {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+        }
+    }
+    !crc
+}
+
+/// The digest `sources |file, crc32|` records: CRC-32 of `bytes` with every
+/// CR dropped. `spl-coverage module` hashes the text `read_to_string` returns,
+/// and that drops every CR, so hashing raw bytes here refused every CRLF
+/// checkout as a different source version.
+pub fn source_digest(bytes: &[u8]) -> u32 {
+    let lf: Vec<u8> = bytes.iter().copied().filter(|&b| b != b'\r').collect();
+    crc32_ieee(&lf)
+}
+
+/// Append `sources |file, crc32|` naming the source digest of every file a
+/// `lines`/`decisions`/`conditions` row of `sdn` refers to.
+///
+/// Line numbers and decision ids are positions in ONE version of a file. Two
+/// artifacts recorded against different versions cannot be unioned: the
+/// report would count both versions' decision sets (measured 94.0% against
+/// an honest 95.9%). The digest lets `spl-coverage module` refuse that merge
+/// and refuse an artifact older than the source it is scored against.
+/// Unreadable files (in-memory `<entry>` sources) get no row.
+pub fn append_source_digests(sdn: &mut String) {
+    let mut files: BTreeSet<String> = BTreeSet::new();
+    let mut column: Option<usize> = None;
+    for raw in sdn.lines() {
+        if raw.starts_with("    ") || raw.starts_with('\t') {
+            if let Some(c) = column {
+                if let Some(field) = raw.split(',').nth(c) {
+                    let file = field.trim();
+                    if !file.is_empty() {
+                        files.insert(file.to_string());
+                    }
+                }
+            }
+        } else {
+            let t = raw.trim();
+            column = if t.starts_with("lines |") {
+                Some(0)
+            } else if t.starts_with("decisions |") {
+                Some(1)
+            } else if t.starts_with("conditions |") {
+                Some(2)
+            } else {
+                None
+            };
+        }
+    }
+    let mut rows = String::new();
+    for file in &files {
+        if let Ok(bytes) = std::fs::read(file) {
+            rows.push_str(&format!("    {}, {:08x}\n", file, source_digest(&bytes)));
+        }
+    }
+    if rows.is_empty() {
+        return;
+    }
+    if !sdn.ends_with('\n') {
+        sdn.push('\n');
+    }
+    sdn.push_str("\nsources |file, crc32|\n");
+    sdn.push_str(&rows);
+}
+
 pub fn save_global_coverage() -> Result<(), String> {
     let mut sdn = String::new();
     if let Some(cov) = get_global_coverage() {
@@ -318,6 +391,7 @@ pub fn save_global_coverage() -> Result<(), String> {
         sdn.push_str("\n# Runtime decision/condition coverage\n");
         sdn.push_str(&runtime_sdn);
     }
+    append_source_digests(&mut sdn);
 
     if sdn.trim().is_empty() {
         sdn = "# Coverage Report\nversion: 1.0\n\nsummary:\n    total_files: 0\n    total_lines: 0\n    covered_lines: 0\n    total_functions: 0\n    covered_functions: 0\n".to_string();
@@ -391,6 +465,34 @@ mod tests {
         assert_eq!(cov.function_call_count("main"), 2);
         assert_eq!(cov.sffi_call_count("rt_print"), 1);
         assert!(cov.was_line_executed_compat("test.spl", 10));
+    }
+
+    #[test]
+    fn crc32_ieee_matches_the_standard_check_value() {
+        assert_eq!(crc32_ieee(b"123456789"), 0xCBF4_3926);
+        assert_eq!(crc32_ieee(b""), 0);
+    }
+
+    #[test]
+    fn source_digest_drops_every_cr() {
+        assert_eq!(source_digest(b"a\nb\n"), 0x1857_2A97);
+        assert_eq!(source_digest(b"a\r\nb\r\n"), 0x1857_2A97);
+    }
+
+    #[test]
+    fn source_digests_name_only_readable_row_files() {
+        let dir = std::env::temp_dir().join(format!("simple_cov_digest_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("m.spl");
+        std::fs::write(&file, b"123456789").unwrap();
+        let f = file.to_string_lossy().to_string();
+        let mut sdn = format!(
+            "lines |file, line, hit_count|\n    {f}, 1, 1\n    <entry>, 2, 1\n\ndecisions |id, file, line, column, true_count, false_count|\n    7, {f}, 1, 5, 1, 0\n"
+        );
+        append_source_digests(&mut sdn);
+        assert!(sdn.contains(&format!("sources |file, crc32|\n    {f}, cbf43926\n")), "{sdn}");
+        assert!(!sdn.contains("<entry>, cbf"), "{sdn}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1,0 +1,50 @@
+"""
+# NativeAll Stdio Single-Owner Export Contract Prevention Spec
+
+Prevention coverage for `nativeall_stdio_facade_exports_missing_2026-11-07`:
+1. Executes live interpreter-backed `std.nogc_sync_mut.io.pipe` (`Stderr`,
+   `stdout_flush`, `stderr_flush`) and `std.nogc_sync_mut.sffi.diag`
+   (`stdout_flush`) exports on empty payloads without symbol conflicts.
+2. Verifies that `simple_runtime` owns the shared stdio C-ABI symbols while
+   `native_all` exports `stdout_flush` without redefining duplicate stdio symbols.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use std.nogc_sync_mut.io.pipe.{Stderr, stdout_flush, stderr_flush}
+use std.nogc_sync_mut.sffi.diag.{stdout_flush as diag_stdout_flush}
+
+describe "native_all and simple_runtime stdio export boundary":
+    """Prevents missing stdout_flush or duplicate stdio symbol regressions."""
+
+    it "executes pipe stderr write/flush and diag flush facades cleanly":
+        val err = Stderr.new()
+        val w = err.write([])
+        expect(w.is_ok()).to_equal(true)
+        expect(w.unwrap()).to_equal(0)
+        expect(err.write_text("").is_ok()).to_equal(true)
+        expect(err.flush().is_ok()).to_equal(true)
+        stdout_flush()
+        stderr_flush()
+        diag_stdout_flush()
+
+    it "exports stdout_flush in native_all without duplicating runtime stdio symbols":
+        val native_all = file_read("src/compiler_rust/native_all/src/lib.rs")
+        expect(native_all).to_contain("pub extern \"C\" fn stdout_flush()")
+        expect(native_all).to_contain("native_term_flush")
+        expect(native_all).to_contain("native_term_write")
+        expect(native_all.contains("pub extern \"C\" fn rt_stdout_write(")).to_equal(false)
+        expect(native_all.contains("pub extern \"C\" fn rt_stderr_write(")).to_equal(false)
+        expect(native_all.contains("pub extern \"C\" fn rt_stdout_flush(")).to_equal(false)
+        expect(native_all.contains("pub extern \"C\" fn rt_stderr_flush(")).to_equal(false)
+
+    it "exports all stdio and terminal SFFI symbols in simple_runtime io_print.rs":
+        val io_print = file_read("src/compiler_rust/runtime/src/value/sffi/io_print.rs")
+        expect(io_print).to_contain("pub extern \"C\" fn rt_stdin_read(")
+        expect(io_print).to_contain("pub extern \"C\" fn rt_stdin_read_all(")
+        expect(io_print).to_contain("pub extern \"C\" fn rt_term_write(")
+        expect(io_print).to_contain("pub extern \"C\" fn rt_term_flush(")
+        expect(io_print).to_contain("pub extern \"C\" fn stdout_write(")
+        expect(io_print).to_contain("pub extern \"C\" fn stderr_write(")
+        expect(io_print).to_contain("pub extern \"C\" fn stderr_flush(")
+        expect(io_print).to_contain("pub extern \"C\" fn stdin_read_char(")

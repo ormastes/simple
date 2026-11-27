@@ -1,0 +1,67 @@
+use std.spec
+use std.spec.step
+use std.io_runtime.{dir_create_all, dir_remove_all, file_write_exact, file_read_result, file_delete}
+use os.installer.image_rootfs_markers.{image_stage_rootfs_markers, image_validate_rootfs_markers}
+
+fn marker_fixture(name: text) -> text:
+    val root = "build/test-artifacts/rootfs-markers/{name}.img.contents/rootfs"
+    dir_remove_all(root)
+    expect(dir_create_all(root)).to_equal(true)
+    root
+
+describe "Rootfs marker staging":
+    it "creates actual nvfs marker files in a fresh staged image":
+        step("Reproduce the exact failure")
+        val root = marker_fixture("missing")
+        expect(image_validate_rootfs_markers(root, "nvfs").is_err()).to_equal(true)
+        expect(image_stage_rootfs_markers(root, "nvfs").is_ok()).to_equal(true)
+        val marker = file_read_result("{root}/SYS/ROOTFS.CFG")
+        expect(marker.is_ok()).to_equal(true)
+        if val Ok(content) = marker:
+            expect(content).to_equal("rootfs_backend=nvfs\nrootfs_carrier=fat32\nrootfs_boot_mode=fat32-carrier\n")
+        expect(image_validate_rootfs_markers(root, "nvfs").is_ok()).to_equal(true)
+
+    it "replaces preexisting markers when rebuilding for a different backend":
+        step("Exercise the repaired owner")
+        val root = marker_fixture("preexisting")
+        expect(image_stage_rootfs_markers(root, "dbfs").is_ok()).to_equal(true)
+        expect(image_validate_rootfs_markers(root, "nvfs").is_err()).to_equal(true)
+        expect(image_stage_rootfs_markers(root, "nvfs").is_ok()).to_equal(true)
+        expect(image_validate_rootfs_markers(root, "nvfs").is_ok()).to_equal(true)
+        expect(image_validate_rootfs_markers(root, "dbfs").is_err()).to_equal(true)
+
+    it "rejects a missing boot marker after population":
+        step("Reject the adjacent regression")
+        val root = marker_fixture("removed")
+        expect(image_stage_rootfs_markers(root, "nvfs").is_ok()).to_equal(true)
+        expect(file_delete("{root}/SYS/ROOTFS.CFG")).to_equal(true)
+        expect(image_validate_rootfs_markers(root, "nvfs").is_err()).to_equal(true)
+
+    it "rejects malformed and empty boot markers despite a valid rootfs config":
+        step("Reject the adjacent regression")
+        val root = marker_fixture("malformed")
+        expect(image_stage_rootfs_markers(root, "nvfs").is_ok()).to_equal(true)
+        expect(file_write_exact("{root}/SYS/ROOTFS.CFG", "rootfs_backend=nvfs\nrootfs_carrier=nvfs\n")).to_equal(true)
+        expect(image_validate_rootfs_markers(root, "nvfs").is_err()).to_equal(true)
+        expect(file_write_exact("{root}/SYS/ROOTFS.CFG", "")).to_equal(true)
+        expect(image_validate_rootfs_markers(root, "nvfs").is_err()).to_equal(true)
+
+    it "fails staging when a preexisting file blocks the marker directory":
+        step("Reject the adjacent regression")
+        val root = marker_fixture("blocked-directory")
+        expect(file_write_exact("{root}/SYS", "not a directory")).to_equal(true)
+        expect(image_stage_rootfs_markers(root, "nvfs").is_err()).to_equal(true)
+        expect(image_validate_rootfs_markers(root, "nvfs").is_err()).to_equal(true)
+
+    it "rejects malformed rootfs metadata even when the boot marker is intact":
+        step("Reject the adjacent regression")
+        val root = marker_fixture("bad-config")
+        expect(image_stage_rootfs_markers(root, "fat32").is_ok()).to_equal(true)
+        expect(file_write_exact("{root}/etc/rootfs.sdn", "[rootfs]\nbackend = \"nvfs\"\n")).to_equal(true)
+        expect(image_validate_rootfs_markers(root, "fat32").is_err()).to_equal(true)
+
+    it "propagates a boot marker write failure instead of admitting the image":
+        step("Reject the adjacent regression")
+        val root = marker_fixture("blocked-marker")
+        expect(dir_create_all("{root}/SYS/ROOTFS.CFG")).to_equal(true)
+        expect(image_stage_rootfs_markers(root, "nvfs").is_err()).to_equal(true)

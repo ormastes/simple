@@ -118,3 +118,78 @@ policy question (gate violations counted as failed tests vs. a separate
 verdict category) — architectural, not a shard-scale fix. No change made.
 Leaving OPEN.
 
+
+## 2026-11-03 bounded checkpoint continuation repair
+
+Current source already contains c8bf2505768: strict default admission aborts,
+while explicit `--unstable` excludes rejected files and appends named admission
+failures to daemon, parallel and sequential results. The library entry is a
+facade, not a second divergent runner. Historical unchanged-source descriptions
+above do not describe this current implementation.
+
+A remaining early return was found: `--resume --unstable` with all admitted
+files checkpoint-complete returned the checkpoint totals before appending
+current missing-cover failures. This could report a passing checkpoint despite
+rejected files. The return now uses the same admission combiner; the combiner
+preserves `carried_from_checkpoint`, including the clean no-rejection case.
+Strict-default refusal, exit-failure policy and Results counters are unchanged.
+No legacy annotations or percentages are fabricated.
+
+Spec-first commit: 35a348796ad. Two focused combiner regressions plus a real
+`run_tests` fixture cover mixed rejected/resumed, clean resumed and strict
+refusal paths. Fixture: test/fixtures/test_runner/cover_resume_admission/main.spl.
+Run it only in a fresh scratch cwd with marker `cover-resume-isolated-root`,
+no existing checkpoint, and an admitted runner resolving the repository module
+closure. Expected stdout ends `cover-resume-admission-ok`, exit0. The fixture
+creates its own files/checkpoint, and deliberate failing child bodies detect
+accidental execution of checkpoint-complete or rejected files.
+
+AUTHORED_UNRUN: no admitted runtime was available; no baseline RED, fixed GREEN,
+compiled fixture, docgen or full-run coverage result is claimed. Original bug
+remains OPEN. The 791 legacy annotations require truthful owner-by-owner work;
+this narrow checkpoint fix neither resolves that backlog nor changes the
+existing accounting of policy failures as named failed-file rows. No compiler
+rebuild or seed execution was attempted.
+
+## 2026-11-03 source repair candidate — execution pending
+
+Policy rejection is now represented separately from executed test failures:
+`ADMISSION` rows have zero example counters and a named coverage-gate verdict.
+The command remains nonzero (usage/gate exit 2 unless a real execution failure
+has a stronger outcome); SDN success remains false through the canonical result
+classifier. Annotated files run in normal mode even when neighboring files are
+rejected. Checkpoint figures are preserved without admitting rejected paths.
+No legacy coverage annotations or thresholds were fabricated or bypassed.
+
+Exact and adjacent regressions live in
+`test/01_unit/app/test_runner_new/cover_admission_spec.spl` and
+`scripts/check/check-test-runner-cover-admission.shs`.
+Status remains OPEN / TEST_BLOCKED pending execution with a qualified self-hosted
+CLI. No new behavioral PASS is claimed.
+
+## 2026-11-25 verification (P2 fleet, release/1.0.0 @ d1b74b3fa1d)
+
+Item 2 (gate mis-reported as test failures / whole-directory abort) — the
+2026-11-03 "source repair candidate" IS in-tree at HEAD, confirmed by
+inspection:
+
+- `src/app/test_runner_new/cover_admission.spl:21` emits the named
+  `COVER ADMISSION FAILED ... test not executed` row;
+- `src/app/test_runner_new/test_runner_main.spl:419` prints per-file admission
+  failures and `:1386` classifies results via
+  `test_file_result_outcome_class(r) == "ADMISSION"` — policy rejection is a
+  separate outcome class from executed test failures, as the 2026-11-03 note
+  describes;
+- the regression spec `test/01_unit/app/test_runner_new/cover_admission_spec.spl`
+  and checker `scripts/check/check-test-runner-cover-admission.shs` both exist.
+
+Execution of that spec remains environment-blocked on this host: the tracked
+release/1.0.0 binary rejects the `@representation_boundary` decorator carried
+by release/1.0.0 source, so `bin/simple.exe test` aborts before any spec runs
+(known seed/source inconsistency, not this bug). Status therefore stays
+OPEN / TEST_BLOCKED exactly as the 2026-11-03 note left it — no new PASS is
+claimed.
+
+Item 1 (791 missing `# @cover` annotations) remains an owner-by-owner content
+migration program, out of scope for a single lane; nothing here fabricates
+annotations.

@@ -32,7 +32,7 @@ Updated 2026-07-13. Companion plan:
   preemption, green-thread carriers with CPU affinity.
 - **SMP**: per-CPU state + IPIs; riscv AP bringup proven; x86_64 INIT/SIPI
   code present with a gated live spec
-  (`test/system/simpleos_smp_ap_live_spec.spl`, SIMPLEOS_QEMU_SMP_AP_LIVE=1).
+  (`test/03_system/os/simpleos_smp_ap_live_spec.spl`, SIMPLEOS_QEMU_SMP_AP_LIVE=1).
 - **Memory**: per-process address spaces on 6 arches; transactional
   checksummed NVMe swap wired to the page-fault owner (x86_64); multiarch
   hook plan in `doc/03_plan/os/memory/paging_swap_multiarch_plan.md`.

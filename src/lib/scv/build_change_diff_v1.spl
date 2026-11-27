@@ -1,0 +1,107 @@
+# Exact managed-input snapshot differences. No filesystem or watcher authority.
+use std.scv.build_capture_v1.{BuildInputEntryV1, BuildInputUniverseV1, BuildFrozenSnapshotV1, ScvBuildCursorV1, scv_build_snapshot_valid_v1, scv_build_snapshot_freeze_v1}
+use std.scv.compile_source_inventory_core.{compile_source_inventory_identity_cmp_v1}
+
+pub struct ScvBuildEntryChangeV1:
+    operation: text
+    path: text
+    before: BuildInputEntryV1?
+    after: BuildInputEntryV1?
+
+pub struct ScvBuildSnapshotDeltaV1:
+    from_snapshot_id: text
+    to_snapshot_id: text
+    from_cursor: ScvBuildCursorV1
+    to_cursor: ScvBuildCursorV1
+    changes: [ScvBuildEntryChangeV1]
+    membership_changed: bool
+    universe_changed: bool
+
+pub fn scv_build_cursor_equal_v1(left: ScvBuildCursorV1, right: ScvBuildCursorV1) -> bool:
+    left.epoch == right.epoch and left.sequence == right.sequence
+
+pub fn scv_build_entry_equal_v1(left: BuildInputEntryV1, right: BuildInputEntryV1) -> bool:
+    if left.path != right.path or left.kind != right.kind or left.mode != right.mode:
+        return false
+    if left.origin != right.origin or left.producer_digest != right.producer_digest:
+        return false
+    if left.bytes.len() != right.bytes.len(): return false
+    for index in 0..left.bytes.len():
+        if left.bytes[index] != right.bytes[index]: return false
+    true
+
+fn scv_build_text_array_equal_v1(left: [text], right: [text]) -> bool:
+    if left.len() != right.len(): return false
+    for index in 0..left.len():
+        if left[index] != right[index]: return false
+    true
+
+pub fn scv_build_universe_equal_v1(left: BuildInputUniverseV1, right: BuildInputUniverseV1) -> bool:
+    if left.namespace != right.namespace or left.path_policy_digest != right.path_policy_digest:
+        return false
+    if left.configuration_digest != right.configuration_digest or left.target_digest != right.target_digest:
+        return false
+    if left.compiler_digest != right.compiler_digest or left.runtime_digest != right.runtime_digest:
+        return false
+    if left.environment_digest != right.environment_digest: return false
+    scv_build_text_array_equal_v1(left.complete_scopes, right.complete_scopes) and scv_build_text_array_equal_v1(left.external_roots, right.external_roots)
+
+pub fn scv_build_snapshot_diff_v1(before: BuildFrozenSnapshotV1, after: BuildFrozenSnapshotV1) -> Result<ScvBuildSnapshotDeltaV1, text>:
+    """Compare canonical captures including empty directories and symlink bytes.
+
+    No UID is present in this DTO: equal-content moves remain add/delete.
+    This pairwise comparison alone grants no continuous event coverage.
+    """
+    if not scv_build_snapshot_valid_v1(before) or not scv_build_snapshot_valid_v1(after):
+        return Err("invalid-frozen-snapshot")
+    val canonical_before = scv_build_snapshot_freeze_v1(before.universe, before.entries, before.cursor)?
+    val canonical_after = scv_build_snapshot_freeze_v1(after.universe, after.entries, after.cursor)?
+    scv_build_snapshot_diff_validated_v1(canonical_before, canonical_after)
+
+fn scv_build_snapshot_diff_validated_v1(before: BuildFrozenSnapshotV1, after: BuildFrozenSnapshotV1) -> Result<ScvBuildSnapshotDeltaV1, text>:
+    # Capture canonicalizes entry paths; merge the two sorted inventories.
+    var changes: [ScvBuildEntryChangeV1] = []
+    var membership = false
+    var left = 0
+    var right = 0
+    while left < before.entries.len() or right < after.entries.len():
+        if right >= after.entries.len():
+            val entry = before.entries[left]
+            changes = changes.push(ScvBuildEntryChangeV1("delete", entry.path, Some(entry), nil))
+            membership = true
+            left = left + 1
+        elif left >= before.entries.len():
+            val entry = after.entries[right]
+            changes = changes.push(ScvBuildEntryChangeV1("add", entry.path, nil, Some(entry)))
+            membership = true
+            right = right + 1
+        elif compile_source_inventory_identity_cmp_v1(before.entries[left].path, after.entries[right].path) < 0:
+            val entry = before.entries[left]
+            changes = changes.push(ScvBuildEntryChangeV1("delete", entry.path, Some(entry), nil))
+            membership = true
+            left = left + 1
+        elif compile_source_inventory_identity_cmp_v1(after.entries[right].path, before.entries[left].path) < 0:
+            val entry = after.entries[right]
+            changes = changes.push(ScvBuildEntryChangeV1("add", entry.path, nil, Some(entry)))
+            membership = true
+            right = right + 1
+        else:
+            val old_entry = before.entries[left]
+            val new_entry = after.entries[right]
+            if not scv_build_entry_equal_v1(old_entry, new_entry):
+                changes = changes.push(ScvBuildEntryChangeV1("modify", old_entry.path, Some(old_entry), Some(new_entry)))
+                if old_entry.kind != new_entry.kind: membership = true
+            left = left + 1
+            right = right + 1
+    val universe_changed = not scv_build_universe_equal_v1(before.universe, after.universe)
+    Ok(ScvBuildSnapshotDeltaV1(before.snapshot_id, after.snapshot_id, before.cursor, after.cursor,
+        changes, membership or universe_changed, universe_changed))
+
+pub fn scv_build_delta_affects_path_v1(delta: ScvBuildSnapshotDeltaV1, path: text) -> bool:
+    """Invalidate positive and negative lookups, and ancestor/descendant scopes."""
+    if delta.universe_changed: return true
+    for change in delta.changes:
+        if path == "" or change.path == path: return true
+        if change.path.starts_with(path + "/") or path.starts_with(change.path + "/"):
+            return true
+    false

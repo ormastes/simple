@@ -1,0 +1,554 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# @tag: unit, compiler, mir
+"""
+# MIR: Demand-Driven Provider Layout Registration, Parity & Session Safety
+
+Verifies pure-Simple MIR demand-driven provider layout registration (`layout_demand`)
+and session-indexed provider reuse across large provider closures:
+1. Lowering a consumer alongside 50+ unrelated provider modules (structs, classes,
+   enums, constants, and unrelated native traits/impls) does NOT eagerly relocate
+   unrelated providers' structs/classes or snowball trait-signature layouts, while
+   `SIMPLE_MIR_EAGER_PROVIDER_LAYOUT=1` forces legacy eager registration.
+2. Direct (`-> HiddenStruct`, `-> HiddenClass`), transitive, enum-payload, optional
+   (`-> HiddenStruct?`, `-> HiddenClass?`), error-record (`-> Result<i64, HiddenErr>`),
+   array-element (`-> [HiddenElem]`), and structural-equality (`a == b`) provider
+   records ARE registered on demand with 100% identical deterministic `MirModule`
+   output and layout traces to eager mode even without `prescan_module_struct_names`.
+3. Explicit `begin_provider_session_v1(key)` reuses the session index once across
+   consumers with zero cross-consumer contamination (including order-independent
+   homonym struct/class isolation and sparse `SymbolId` safety), while an empty
+   requested session key never reuses stale session state across calls and session
+   rebuilds reset cached constant defaults and provider class classifications.
+"""
+
+use std.spec
+use std.io_runtime.{env_get, env_set, time_now_monotonic_ms}
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule, SymbolTable, HirSymbol, SymbolId, Scope, ScopeId, SymbolKind}
+use compiler.hir.hir_definitions.{HirStruct, HirClass, HirEnum, HirVariant, HirConst, HirFunction}
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.provider_metadata.*
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type, serialize_const_value, serialize_mir_enum_declaration_v1}
+use compiler.mir.mir_instruction_graph.{mir_module_functions_sorted, mir_module_statics_sorted}
+
+val deep_src = "pub struct DeepLeaf:\n    pad: i64\n    v: i64\n\npub struct HiddenStruct:\n    tag: i64\n    score: i64\n\npub class HiddenClass:\n    label: text\n    weight: i64\n\npub struct HiddenErr:\n    code: i64\n    detail: text\n\npub struct HiddenElem:\n    rank: i64\n    amount: i64\n\npub enum DeepCarry:\n    Wrapped(DeepLeaf)\n    Empty\n"
+
+val direct_src = "use lib.deep.\{DeepLeaf, HiddenStruct, HiddenClass, HiddenErr, HiddenElem, DeepCarry\}\n\npub struct MidNode:\n    bias: i64\n    leaf: DeepLeaf\n\npub struct DirectBox:\n    head: i64\n    mid: MidNode\n    carry: DeepCarry\n\npub fn fetch_hidden_struct(ok: bool) -> HiddenStruct?:\n    if ok:\n        Some(HiddenStruct(tag: 7, score: 42))\n    else:\n        None\n\npub fn fetch_hidden_class(ok: bool) -> HiddenClass?:\n    if ok:\n        Some(HiddenClass(label: \"ok\", weight: 99))\n    else:\n        None\n\npub fn make_hidden_struct(seed: i64) -> HiddenStruct:\n    HiddenStruct(tag: 1, score: seed)\n\npub fn make_hidden_class(seed: i64) -> HiddenClass:\n    HiddenClass(label: \"direct\", weight: seed)\n\npub fn fail_hidden_err() -> Result<i64, HiddenErr>:\n    Err(HiddenErr(code: 5, detail: \"boom\"))\n\npub fn fetch_hidden_elems() -> [HiddenElem]:\n    [HiddenElem(rank: 1, amount: 30)]\n"
+
+val unrel_trait_src = "pub struct UnrelTraitArg:\n    a: i64\n    b: i64\n\npub struct UnrelTraitRet:\n    r: i64\n\npub trait UnrelTrait:\n    fn eval(arg: UnrelTraitArg) -> UnrelTraitRet\n"
+
+val unrel_proto_src = "use lib.unrel_trait.\{UnrelTrait, UnrelTraitArg, UnrelTraitRet\}\n\npub val UNREL_CONST_PROTO: i64 = 100\n\npub struct UnrelStructProto:\n    x: i64 = UNREL_CONST_PROTO\n    y: text = \"u\"\n\npub class UnrelClassProto:\n    c: i64\n    fn read_c() -> i64:\n        self.c\n\npub enum UnrelEnumProto:\n    AProto\n    BProto(i64)\n\nimpl UnrelTrait for UnrelStructProto:\n    fn eval(arg: UnrelTraitArg) -> UnrelTraitRet:\n        UnrelTraitRet(r: self.x + arg.a)\n"
+
+val prov_b_homonym_src = "pub struct Homonym:\n    first: i64\n    second: i64\n\npub fn make_homonym(base: i64) -> Homonym:\n    Homonym(first: base, second: base + 10)\n"
+
+val prov_cls_homonym_src = "pub class Homonym:\n    pad_x: text\n    pad_y: text\n    third: i64\n"
+
+val consumer_main_src = "use lib.direct.\{DirectBox, fetch_hidden_struct, fetch_hidden_class, make_hidden_struct, make_hidden_class, fail_hidden_err, fetch_hidden_elems\}\n\nstruct LocalDecoy:\n    noise: text\n\nfn read_box(b: DirectBox) -> i64:\n    val carry_v = match b.carry:\n        case Wrapped(dl): dl.v\n        case Empty: 0\n    b.head + b.mid.leaf.v + carry_v\n\nfn read_hidden_optional(flag: bool) -> i64:\n    val hs = fetch_hidden_struct(flag)\n    val hc = fetch_hidden_class(flag)\n    var total = 0\n    if val s = hs:\n        total = total + s.score\n    if val c = hc:\n        total = total + c.weight\n    total\n\nfn read_hidden_direct_and_eq(seed: i64) -> i64:\n    val s1 = make_hidden_struct(seed)\n    var s2 = s1\n    s2.score = seed + 5\n    val eq_bonus = if s1 == s2: 1000 else: 1\n    val c1 = make_hidden_class(seed)\n    s1.score + s2.score + c1.weight + eq_bonus\n\nfn read_hidden_err_and_array() -> i64:\n    val err_len = match fail_hidden_err():\n        case Ok(v): v\n        case Err(e): e.detail.len()\n    val items = fetch_hidden_elems()\n    var sum = err_len\n    for item in items:\n        sum = sum + item.amount\n    sum\n"
+
+val consumer_a_src = "extern fn ext_only_in_a(v: i64) -> i64\n\nclass Homonym:\n    pad_a: text\n    pad_b: text\n    count: i64\n\nfn run_a(n: i64) -> i64:\n    val h = Homonym(pad_a: \"a\", pad_b: \"b\", count: n)\n    ext_only_in_a(h.count)\n"
+
+val consumer_b_src = "use lib.prov_b.\{Homonym, make_homonym\}\nuse lib.direct.\{fetch_hidden_struct, fetch_hidden_class\}\n\nfn local_helper_b(v: i64) -> i64:\n    v + 1\n\nfn run_b(n: i64) -> i64:\n    val h = make_homonym(local_helper_b(n))\n    var h_copy = h\n    h_copy.second = h_copy.second + 3\n    val hs = fetch_hidden_struct(true)\n    val hc = fetch_hidden_class(true)\n    var acc = h.second + h_copy.second\n    if val s = hs:\n        acc = acc + s.score\n    if val c = hc:\n        acc = acc + c.weight\n    acc\n"
+
+val consumer_c_src = "use lib.direct.\{DirectBox\}\n\nstruct Homonym:\n    left: i64\n    right: i64\n\nfn run_c(b: DirectBox) -> i64:\n    val local_h = Homonym(left: b.head, right: b.mid.leaf.v)\n    local_h.right - local_h.left\n"
+
+struct DemandPerfFixture:
+    providers: [HirModule]
+    providers_class_first: [HirModule]
+    provider_map: Dict<text, HirModule>
+    consumer_main: HirModule
+    consumer_a: HirModule
+    consumer_b: HirModule
+    consumer_c: HirModule
+
+struct SingleLowerResult:
+    errors: [text]
+    mir_text: text
+    trace_text: text
+    unrelated_layout_rows: i64
+    demanded_leaves: [text]
+    bare_homonym_is_class: bool
+
+fn rename_proto_text(raw: text, i: i64) -> text:
+    raw
+        .replace("lib.unrel_proto", "lib.unrel{i}")
+        .replace("lib/unrel_proto.spl", "lib/unrel{i}.spl")
+        .replace("UnrelStructProto", "UnrelStruct{i}")
+        .replace("UnrelClassProto", "UnrelClass{i}")
+        .replace("UnrelEnumProto", "UnrelEnum{i}")
+        .replace("UNREL_CONST_PROTO", "UNREL_CONST_{i}")
+        .replace("AProto", "A{i}")
+        .replace("BProto", "B{i}")
+
+fn clone_symbol_table(src: SymbolTable, specialize_unrel: bool, idx: i64) -> SymbolTable:
+    var dst = SymbolTable.new()
+    dst.current_scope = src.current_scope
+    dst.next_symbol_id = src.next_symbol_id
+    dst.next_scope_id = src.next_scope_id
+
+    var new_symbols: Dict<i64, HirSymbol> = {}
+    for sid in src.symbols.keys():
+        var sym: HirSymbol = src.symbols[sid]
+        if specialize_unrel:
+            sym.name = rename_proto_text(sym.name, idx)
+            val def_mod = sym.defining_module ?? ""
+            if def_mod == "" or def_mod == "lib.unrel_proto" or def_mod == "lib/unrel_proto.spl":
+                sym.defining_module = Some("lib.unrel{idx}")
+        new_symbols[sid] = sym
+    dst.symbols = new_symbols
+
+    var new_scopes: Dict<i64, Scope> = {}
+    for sc_id in src.scopes.keys():
+        var sc: Scope = src.scopes[sc_id]
+        var sc_syms: Dict<text, i64> = {}
+        for k in sc.symbols.keys():
+            val nk = if specialize_unrel: rename_proto_text(k, idx) else: k
+            sc_syms[nk] = sc.symbols[k]
+        sc.symbols = sc_syms
+        new_scopes[sc_id] = sc
+    dst.scopes = new_scopes
+
+    var new_qfuncs: Dict<text, i64> = {}
+    for k in src.qualified_functions.keys():
+        val nk = if specialize_unrel: rename_proto_text(k, idx) else: k
+        new_qfuncs[nk] = src.qualified_functions[k]
+    dst.qualified_functions = new_qfuncs
+
+    var new_qtypes: Dict<text, i64> = {}
+    for k in src.qualified_types.keys():
+        val nk = if specialize_unrel: rename_proto_text(k, idx) else: k
+        new_qtypes[nk] = src.qualified_types[k]
+    dst.qualified_types = new_qtypes
+
+    var new_exact: Dict<text, i64> = {}
+    for k in src.exact_symbols.keys():
+        val nk = if specialize_unrel: rename_proto_text(k, idx) else: k
+        new_exact[nk] = src.exact_symbols[k]
+    dst.exact_symbols = new_exact
+
+    var new_mcall: Dict<text, i64> = {}
+    for k in src.module_callables.keys():
+        val nk = if specialize_unrel: rename_proto_text(k, idx) else: k
+        new_mcall[nk] = src.module_callables[k]
+    dst.module_callables = new_mcall
+
+    var new_root: Dict<text, i64> = {}
+    for k in src.root_scope_symbols.keys():
+        val nk = if specialize_unrel: rename_proto_text(k, idx) else: k
+        new_root[nk] = src.root_scope_symbols[k]
+    dst.root_scope_symbols = new_root
+    dst
+
+fn clone_unrel_provider_hir(proto: HirModule, idx: i64, keep_impls: bool) -> HirModule:
+    var cloned: HirModule = proto
+    cloned.name = "lib.unrel{idx}"
+    cloned.path = "lib/unrel{idx}.spl"
+    cloned.symbols = clone_symbol_table(proto.symbols, true, idx)
+
+    var new_structs: Dict<SymbolId, HirStruct> = {}
+    for sk in proto.structs.keys():
+        var sd: HirStruct = proto.structs[sk]
+        sd.name = rename_proto_text(sd.name, idx)
+        new_structs[sk] = sd
+    cloned.structs = new_structs
+
+    var new_classes: Dict<SymbolId, HirClass> = {}
+    for ck in proto.classes.keys():
+        var cd: HirClass = proto.classes[ck]
+        cd.name = rename_proto_text(cd.name, idx)
+        new_classes[ck] = cd
+    cloned.classes = new_classes
+
+    var new_enums: Dict<SymbolId, HirEnum> = {}
+    for ek in proto.enums.keys():
+        var ed: HirEnum = proto.enums[ek]
+        ed.name = rename_proto_text(ed.name, idx)
+        ed.runtime_name = "lib.unrel{idx}.UnrelEnum{idx}"
+        var new_variants: [HirVariant] = []
+        for v in ed.variants:
+            var cv: HirVariant = v
+            cv.name = rename_proto_text(cv.name, idx)
+            new_variants.push(cv)
+        ed.variants = new_variants
+        new_enums[ek] = ed
+    cloned.enums = new_enums
+
+    var new_consts: Dict<SymbolId, HirConst> = {}
+    for ctk in proto.constants.keys():
+        var ctd: HirConst = proto.constants[ctk]
+        ctd.name = rename_proto_text(ctd.name, idx)
+        new_consts[ctk] = ctd
+    cloned.constants = new_consts
+
+    var new_funcs: Dict<SymbolId, HirFunction> = {}
+    for fk in proto.functions.keys():
+        var fd: HirFunction = proto.functions[fk]
+        fd.name = rename_proto_text(fd.name, idx)
+        new_funcs[fk] = fd
+    cloned.functions = new_funcs
+
+    if not keep_impls:
+        cloned.impls = []
+    cloned
+
+fn clone_consumer_hir(src: HirModule, new_name: text, new_path: text) -> HirModule:
+    var cloned: HirModule = src
+    cloned.name = new_name
+    cloned.path = new_path
+    cloned.symbols = clone_symbol_table(src.symbols, false, 0)
+    cloned
+
+fn build_fixture(unrelated_count: i64) -> DemandPerfFixture:
+    val log = Logger(level: 0)
+    var modules: Dict<text, ParserModule> = {}
+    var sources: [SourceFile] = []
+
+    modules["lib.deep"] = parse_full_frontend(deep_src, "lib/deep.spl", "lib.deep", log)
+    sources.push(SourceFile(path: "lib/deep.spl", content: deep_src, module_name: "lib.deep"))
+
+    modules["lib.direct"] = parse_full_frontend(direct_src, "lib/direct.spl", "lib.direct", log)
+    sources.push(SourceFile(path: "lib/direct.spl", content: direct_src, module_name: "lib.direct"))
+
+    modules["lib.prov_b"] = parse_full_frontend(prov_b_homonym_src, "lib/prov_b.spl", "lib.prov_b", log)
+    sources.push(SourceFile(path: "lib/prov_b.spl", content: prov_b_homonym_src, module_name: "lib.prov_b"))
+
+    modules["lib.prov_cls"] = parse_full_frontend(prov_cls_homonym_src, "lib/prov_cls.spl", "lib.prov_cls", log)
+    sources.push(SourceFile(path: "lib/prov_cls.spl", content: prov_cls_homonym_src, module_name: "lib.prov_cls"))
+
+    modules["lib.unrel_trait"] = parse_full_frontend(unrel_trait_src, "lib/unrel_trait.spl", "lib.unrel_trait", log)
+    sources.push(SourceFile(path: "lib/unrel_trait.spl", content: unrel_trait_src, module_name: "lib.unrel_trait"))
+
+    modules["lib.unrel_proto"] = parse_full_frontend(unrel_proto_src, "lib/unrel_proto.spl", "lib.unrel_proto", log)
+    sources.push(SourceFile(path: "lib/unrel_proto.spl", content: unrel_proto_src, module_name: "lib.unrel_proto"))
+
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var providers: [HirModule] = []
+    var providers_class_first: [HirModule] = []
+    var provider_map: Dict<text, HirModule> = {}
+
+    var deep_h = hirlowering_for_module("lib/deep.spl", surfaces)
+    val deep_hir = deep_h.lower_module(modules["lib.deep"])
+    providers.push(deep_hir)
+    providers_class_first.push(deep_hir)
+    provider_map["lib.deep"] = deep_hir
+
+    var direct_h = hirlowering_for_module("lib/direct.spl", surfaces)
+    val direct_hir = direct_h.lower_module(modules["lib.direct"])
+    providers.push(direct_hir)
+    providers_class_first.push(direct_hir)
+    provider_map["lib.direct"] = direct_hir
+
+    var prov_b_h = hirlowering_for_module("lib/prov_b.spl", surfaces)
+    val prov_b_hir = prov_b_h.lower_module(modules["lib.prov_b"])
+    provider_map["lib.prov_b"] = prov_b_hir
+
+    var prov_cls_h = hirlowering_for_module("lib/prov_cls.spl", surfaces)
+    val prov_cls_hir = prov_cls_h.lower_module(modules["lib.prov_cls"])
+    provider_map["lib.prov_cls"] = prov_cls_hir
+
+    # Both homonym orderings: struct-first in `providers`, class-first in `providers_class_first`.
+    providers.push(prov_b_hir)
+    providers.push(prov_cls_hir)
+    providers_class_first.push(prov_cls_hir)
+    providers_class_first.push(prov_b_hir)
+
+    var trait_h = hirlowering_for_module("lib/unrel_trait.spl", surfaces)
+    val trait_hir = trait_h.lower_module(modules["lib.unrel_trait"])
+    providers.push(trait_hir)
+    providers_class_first.push(trait_hir)
+    provider_map["lib.unrel_trait"] = trait_hir
+
+    var proto_h = hirlowering_for_module("lib/unrel_proto.spl", surfaces)
+    val proto_hir = proto_h.lower_module(modules["lib.unrel_proto"])
+
+    var i = 0
+    while i < unrelated_count:
+        val u_hir = clone_unrel_provider_hir(proto_hir, i, i < 10)
+        providers.push(u_hir)
+        providers_class_first.push(u_hir)
+        provider_map["lib.unrel{i}"] = u_hir
+        i = i + 1
+
+    var main_h = hirlowering_for_module("app/consumer.spl", surfaces)
+    val main_hir = main_h.lower_module(parse_full_frontend(consumer_main_src, "app/consumer.spl", "app.consumer", log))
+
+    var ca_h = hirlowering_for_module("app/consumer_a.spl", surfaces)
+    val ca_hir = ca_h.lower_module(parse_full_frontend(consumer_a_src, "app/consumer_a.spl", "app.consumer_a", log))
+
+    var cb_h = hirlowering_for_module("app/consumer_b.spl", surfaces)
+    val cb_hir = cb_h.lower_module(parse_full_frontend(consumer_b_src, "app/consumer_b.spl", "app.consumer_b", log))
+
+    var cc_h = hirlowering_for_module("app/consumer_c.spl", surfaces)
+    val cc_hir = cc_h.lower_module(parse_full_frontend(consumer_c_src, "app/consumer_c.spl", "app.consumer_c", log))
+
+    DemandPerfFixture(
+        providers: providers,
+        providers_class_first: providers_class_first,
+        provider_map: provider_map,
+        consumer_main: main_hir,
+        consumer_a: ca_hir,
+        consumer_b: cb_hir,
+        consumer_c: cc_hir
+    )
+
+fn deterministic_mir_text(lowered: MirModule) -> text:
+    var rows: [text] = []
+    for func in mir_module_functions_sorted(lowered):
+        rows.push("fn:" + serialize_mir_function(func))
+    for st in mir_module_statics_sorted(lowered):
+        rows.push("static:{st.symbol.id}|{st.name}|{serialize_mir_type(st.type_)}")
+    var const_rows: [text] = []
+    for csym in lowered.constants.keys():
+        val c = lowered.constants[csym]
+        const_rows.push("const:{csym.id}|{c.name}|{serialize_mir_type(c.type_)}|{serialize_const_value(c.value)}")
+    for row in const_rows.sorted():
+        rows.push(row)
+    var type_rows: [text] = []
+    for tsym in lowered.types.keys():
+        val t = lowered.types[tsym]
+        type_rows.push("type:{tsym.id}|{t.name}|{t.is_export_c}|{t.export_name}")
+    for row in type_rows.sorted():
+        rows.push(row)
+    for record in lowered.enum_semantic_declarations:
+        rows.push("enum:" + serialize_mir_enum_declaration_v1(record))
+    rows.join("\n")
+
+fn deterministic_trace_text(lowered: MirModule) -> text:
+    var rows: [text] = []
+    for tr in lowered.external_layout_traces:
+        rows.push("{tr.owner_module_id}::{tr.type_id}={tr.layout_digest}:{tr.owner_count}")
+    rows.sorted().join("\n")
+
+fn non_warning_errors(lowering: MirLowering) -> [text]:
+    var out: [text] = []
+    for e in lowering.errors:
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        out.push(e.message)
+    out
+
+fn count_unrelated_layout_rows(lowering: MirLowering) -> i64:
+    var count = 0
+    for key in lowering.struct_field_order.keys():
+        if key.contains("UnrelStruct") or key.contains("UnrelClass") or key.contains("UnrelTrait"):
+            count = count + 1
+    count
+
+fn prescan_callable_return_shapes_only(lowering: MirLowering, provider_map: Dict<text, HirModule>):
+    for mod_key in ["lib.deep", "lib.direct", "lib.prov_b", "lib.prov_cls"]:
+        if provider_map.has(mod_key):
+            val pm: HirModule = provider_map[mod_key]
+            lowering.prescan_module_functions_v1(provider_map, mod_key, pm.name, pm.symbols)
+
+var _cached_demand_perf_fixture: DemandPerfFixture? = None
+
+fn get_shared_fixture() -> DemandPerfFixture:
+    if val present = _cached_demand_perf_fixture:
+        return present
+    val built = build_fixture(50)
+    _cached_demand_perf_fixture = Some(built)
+    built
+
+fn lower_single_consumer_with_providers(fixture: DemandPerfFixture, providers_in: [HirModule], consumer_template: HirModule, eager_env: bool, inject_sparse_id: bool = false) -> SingleLowerResult:
+    var consumer = clone_consumer_hir(consumer_template, consumer_template.name, consumer_template.path)
+    if inject_sparse_id:
+        val high_sym = HirSymbol(
+            id: SymbolId(id: 900000050),
+            name: "__preserved_sparse_probe",
+            kind: SymbolKind.Variable,
+            type_: None,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            visibility: Visibility.Private,
+            is_public: false,
+            is_mutable: false,
+            defining_module: None,
+            builtin_method_tag: 0
+        )
+        consumer.symbols.register_preserved_symbol(high_sym)
+    val old_eager = env_get("SIMPLE_MIR_EAGER_PROVIDER_LAYOUT")
+    env_set("SIMPLE_MIR_EAGER_PROVIDER_LAYOUT", if eager_env: "1" else: "")
+    bootstrap_fn_registries_reset_after_session_v1()
+    val target = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(consumer.symbols, target)
+    lowering.use_explicit_semantic_policy()
+    lowering.begin_provider_session_v1(mir_provider_session_content_key_v1(providers_in))
+    prescan_callable_return_shapes_only(lowering, fixture.provider_map)
+    val mir = lowering.lower_module(consumer, providers_in, false)
+    env_set("SIMPLE_MIR_EAGER_PROVIDER_LAYOUT", old_eager)
+
+    var leaves: [text] = []
+    for key in lowering.struct_field_order.keys():
+        leaves.push(key)
+    SingleLowerResult(
+        errors: non_warning_errors(lowering),
+        mir_text: deterministic_mir_text(mir),
+        trace_text: deterministic_trace_text(mir),
+        unrelated_layout_rows: count_unrelated_layout_rows(lowering),
+        demanded_leaves: leaves.sorted(),
+        bare_homonym_is_class: lowering.class_type_names.has("Homonym")
+    )
+
+fn lower_single_consumer(fixture: DemandPerfFixture, consumer_template: HirModule, eager_env: bool) -> SingleLowerResult:
+    lower_single_consumer_with_providers(fixture, fixture.providers, consumer_template, eager_env, false)
+
+fn run_batch_perf(fixture: DemandPerfFixture, batch_count: i64, eager_env: bool) -> (i64, i64, i64, i64):
+    var batch: [HirModule] = []
+    var bi = 0
+    while bi < batch_count:
+        batch.push(clone_consumer_hir(fixture.consumer_main, "app.batch{bi}", "app/batch{bi}.spl"))
+        bi = bi + 1
+
+    val old_eager = env_get("SIMPLE_MIR_EAGER_PROVIDER_LAYOUT")
+    env_set("SIMPLE_MIR_EAGER_PROVIDER_LAYOUT", if eager_env: "1" else: "")
+    bootstrap_fn_registries_reset_after_session_v1()
+    val target = driver_mir_target_context(driver_core_compile_options_default())
+    val first_consumer: HirModule = batch[0]
+    var lowering = MirLowering.new_for_target(first_consumer.symbols, target)
+    lowering.use_explicit_semantic_policy()
+    lowering.trait_impl_closure_complete = true
+    lowering.begin_provider_session_v1(mir_provider_session_content_key_v1(fixture.providers))
+    prescan_callable_return_shapes_only(lowering, fixture.provider_map)
+
+    val started_ms = time_now_monotonic_ms()
+    var ci = 0
+    while ci < batch.len():
+        val c_mod: HirModule = batch[ci]
+        val _mir = lowering.lower_module(c_mod, fixture.providers, false)
+        ci = ci + 1
+    val elapsed_ms = time_now_monotonic_ms() - started_ms
+    env_set("SIMPLE_MIR_EAGER_PROVIDER_LAYOUT", old_eager)
+    (
+        elapsed_ms,
+        count_unrelated_layout_rows(lowering),
+        lowering.trait_impl_provider_index_builds,
+        non_warning_errors(lowering).len()
+    )
+
+describe "MIR demand provider layout isolation, parity, and session safety":
+    it "does not eagerly relocate 50 unrelated providers' structs/classes or unrelated trait types":
+        val shared_fixture = get_shared_fixture()
+        val (demand_ms, demand_unrel, demand_builds, demand_errs) = run_batch_perf(shared_fixture, 6, false)
+        val (eager_ms, eager_unrel, _eager_builds, eager_errs) = run_batch_perf(shared_fixture, 6, true)
+        print "[mir-demand-perf] consumers=6 providers={shared_fixture.providers.len()} demand_ms={demand_ms} eager_ms={eager_ms} demand_unrel={demand_unrel} eager_unrel={eager_unrel}"
+
+        expect(demand_errs).to_equal(0)
+        expect(eager_errs).to_equal(0)
+        expect(demand_unrel).to_equal(0)
+        expect(eager_unrel).to_be_greater_than(99)
+        expect(demand_builds).to_equal(1)
+
+    it "demands direct, optional, Result Err, [Record], and structural-eq provider layouts with identical MIR to eager":
+        val shared_fixture = get_shared_fixture()
+        val demand_res = lower_single_consumer_with_providers(shared_fixture, shared_fixture.providers, shared_fixture.consumer_main, false, true)
+        val eager_res = lower_single_consumer_with_providers(shared_fixture, shared_fixture.providers, shared_fixture.consumer_main, true, true)
+
+        expect(demand_res.errors).to_equal([])
+        expect(eager_res.errors).to_equal([])
+        expect(demand_res.mir_text).to_equal(eager_res.mir_text)
+        expect(demand_res.trace_text).to_equal(eager_res.trace_text)
+        expect(demand_res.unrelated_layout_rows).to_equal(0)
+        expect(eager_res.unrelated_layout_rows).to_be_greater_than(99)
+
+        val joined_keys = demand_res.demanded_leaves.join("\n")
+        expect(joined_keys).to_contain("DirectBox")
+        expect(joined_keys).to_contain("MidNode")
+        expect(joined_keys).to_contain("DeepLeaf")
+        expect(joined_keys).to_contain("HiddenStruct")
+        expect(joined_keys).to_contain("HiddenClass")
+        expect(joined_keys).to_contain("HiddenErr")
+        expect(joined_keys).to_contain("HiddenElem")
+        # Value-copy proof for `var s2 = s1` on unimported direct return `make_hidden_struct`
+        expect(demand_res.mir_text).to_contain("read_hidden_direct_and_eq")
+
+    it "isolates sequential consumers and preserves homonym value-struct semantics in either provider order":
+        val shared_fixture = get_shared_fixture()
+        val solo_a = lower_single_consumer(shared_fixture, shared_fixture.consumer_a, false)
+        val solo_b = lower_single_consumer(shared_fixture, shared_fixture.consumer_b, false)
+        val solo_b_rev = lower_single_consumer_with_providers(shared_fixture, shared_fixture.providers_class_first, shared_fixture.consumer_b, false, false)
+        val solo_c = lower_single_consumer(shared_fixture, shared_fixture.consumer_c, false)
+        expect(solo_a.errors).to_equal([])
+        expect(solo_b.errors).to_equal([])
+        expect(solo_b_rev.errors).to_equal([])
+        expect(solo_c.errors).to_equal([])
+        expect(solo_b.bare_homonym_is_class).to_equal(false)
+        expect(solo_b_rev.bare_homonym_is_class).to_equal(false)
+        expect(solo_b.mir_text).to_equal(solo_b_rev.mir_text)
+
+        val seq_in_a = clone_consumer_hir(shared_fixture.consumer_a, "app.consumer_a", "app/consumer_a.spl")
+        val seq_in_b = clone_consumer_hir(shared_fixture.consumer_b, "app.consumer_b", "app/consumer_b.spl")
+        val seq_in_c = clone_consumer_hir(shared_fixture.consumer_c, "app.consumer_c", "app/consumer_c.spl")
+
+        bootstrap_fn_registries_reset_after_session_v1()
+        val target = driver_mir_target_context(driver_core_compile_options_default())
+        var shared_lowering = MirLowering.new_for_target(seq_in_a.symbols, target)
+        shared_lowering.use_explicit_semantic_policy()
+        shared_lowering.trait_impl_closure_complete = true
+        shared_lowering.begin_provider_session_v1(mir_provider_session_content_key_v1(shared_fixture.providers_class_first))
+        prescan_callable_return_shapes_only(shared_lowering, shared_fixture.provider_map)
+
+        val seq_mir_a = shared_lowering.lower_module(seq_in_a, shared_fixture.providers_class_first, false)
+        val seq_mir_b = shared_lowering.lower_module(seq_in_b, shared_fixture.providers_class_first, false)
+        val seq_mir_c = shared_lowering.lower_module(seq_in_c, shared_fixture.providers_class_first, false)
+
+        expect(non_warning_errors(shared_lowering)).to_equal([])
+        expect(shared_lowering.trait_impl_provider_index_builds).to_equal(1)
+        expect(count_unrelated_layout_rows(shared_lowering)).to_equal(0)
+        expect(deterministic_mir_text(seq_mir_a)).to_equal(solo_a.mir_text)
+        expect(deterministic_mir_text(seq_mir_b)).to_equal(solo_b.mir_text)
+        expect(deterministic_mir_text(seq_mir_c)).to_equal(solo_c.mir_text)
+
+    it "never reuses an unsealed session and resets default constants plus class classifications on session rebuild":
+        val log = Logger(level: 0)
+        val p1_src = "pub val DEF_K: i64 = 11\n\npub class Morph:\n    k: i64 = DEF_K\n"
+        val p2_src = "pub val DEF_K: i64 = 77\n\npub struct Morph:\n    k: i64 = DEF_K\n"
+        val use_src = "use lib.morph.\{Morph\}\n\nfn build_morph() -> i64:\n    val m = Morph()\n    m.k\n"
+
+        var mods1: Dict<text, ParserModule> = {}
+        mods1["lib.morph"] = parse_full_frontend(p1_src, "lib/morph.spl", "lib.morph", log)
+        val surf1 = module_surfaces_from_modules(mods1, [SourceFile(path: "lib/morph.spl", content: p1_src, module_name: "lib.morph")]).unwrap()
+        var ph1 = hirlowering_for_module("lib/morph.spl", surf1)
+        val prov1 = ph1.lower_module(mods1["lib.morph"])
+        var ch1 = hirlowering_for_module("app/use_morph.spl", surf1)
+        val cons1 = ch1.lower_module(parse_full_frontend(use_src, "app/use_morph.spl", "app.use_morph", log))
+
+        var mods2: Dict<text, ParserModule> = {}
+        mods2["lib.morph"] = parse_full_frontend(p2_src, "lib/morph.spl", "lib.morph", log)
+        val surf2 = module_surfaces_from_modules(mods2, [SourceFile(path: "lib/morph.spl", content: p2_src, module_name: "lib.morph")]).unwrap()
+        var ph2 = hirlowering_for_module("lib/morph.spl", surf2)
+        val prov2 = ph2.lower_module(mods2["lib.morph"])
+        var ch2 = hirlowering_for_module("app/use_morph.spl", surf2)
+        val cons2 = ch2.lower_module(parse_full_frontend(use_src, "app/use_morph.spl", "app.use_morph", log))
+
+        bootstrap_fn_registries_reset_after_session_v1()
+        val target = driver_mir_target_context(driver_core_compile_options_default())
+        # Empty requested key: each lower_module builds a fresh one-shot session
+        # and resets provider constant defaults + provider class_type_names!
+        var unsealed = MirLowering.new_for_target(cons1.symbols, target)
+        unsealed.use_explicit_semantic_policy()
+        val mir1 = unsealed.lower_module(cons1, [prov1], false)
+        expect(unsealed.class_type_names.has("lib.morph.Morph")).to_equal(true)
+        expect(unsealed.trait_impl_provider_index_builds).to_equal(1)
+
+        val mir2 = unsealed.lower_module(cons2, [prov2], false)
+        expect(non_warning_errors(unsealed)).to_equal([])
+        expect(unsealed.trait_impl_provider_index_builds).to_equal(2)
+        expect(unsealed.class_type_names.has("lib.morph.Morph")).to_equal(false)
+        expect(unsealed.class_type_names.has("Morph")).to_equal(false)
+        expect(deterministic_mir_text(mir1)).to_contain("11")
+        expect(deterministic_mir_text(mir2)).to_contain("77")
+
+        # Compare mir2 against a brand-new MirLowering that never saw prov1:
+        var fresh2 = MirLowering.new_for_target(clone_consumer_hir(cons2, cons2.name, cons2.path).symbols, target)
+        fresh2.use_explicit_semantic_policy()
+        val fresh_mir2 = fresh2.lower_module(clone_consumer_hir(cons2, cons2.name, cons2.path), [prov2], false)
+        expect(deterministic_mir_text(mir2)).to_equal(deterministic_mir_text(fresh_mir2))

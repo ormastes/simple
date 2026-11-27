@@ -3,7 +3,7 @@
 - **Date:** 2026-07-24
 - **Severity:** high (breaks `bin/simple run` for hardware probes when seed
   delegation is not taken)
-- **Status:** open — workaround in place
+- **Status:** resolved — fixed in source by `4b88aebf00b` (2026-08-21); re-verified 2026-11-07 (seed-driven pipeline) and 2026-11-25 (source inspection, see below)
 
 ## Symptom
 
@@ -57,3 +57,71 @@ Root-fix (1) in the pure-Simple HIR import binder (test: the three
 `test/01_unit/lib/hardware/link_mux/*_probe.spl` under the native in-process
 path). For (2), make `run` delegation depend only on sibling presence, not on
 binary location/name.
+
+## Re-verification 2026-11-07 (release/1.0.0 @ 0e56cc6bade) — no longer reproduces
+
+No self-hosted CLI is deployed on this host, so the native binary itself was
+not run. Instead the regression spec
+`test/01_unit/compiler/hir/std_hardware_brace_import_hir_spec.spl` drives the
+same pure-Simple pipeline the in-process `run` uses — the driver's import
+scanner/resolver (`_driver_entry_import_module_paths`,
+`_driver_resolve_entry_import`), `parse_full_frontend`,
+`module_surfaces_from_modules`, `hirlowering_for_module(...).lower_module` —
+over the real probe sources, executed by the Rust seed
+(`/home/yoon/dev/seed-try-target/release/simple`, sha256 `87693d9e927f9bd5...`).
+
+Findings, per stage:
+- scanner: the multi-line `use std.hardware.link_mux.mux.{ ... }` yields
+  `[std.hardware.link_mux.frame, std.hardware.link_mux.mux, std.hardware.link_mux.jtag_route]`;
+- resolver: each maps to `src/lib/hardware/link_mux/<name>.spl`
+  (`driver_entry_closure_core.spl:1369` std.-prefix arm);
+- HIR: `resolve_module_key` / `module_surface_resolve_absolute_key` fold
+  `std.X` -> `lib.X`, matching the path-derived `lib.hardware.link_mux.*`
+  surface keys; `jtag_route_probe`, `mux_probe`, `frame_probe` all lower with
+  0 HIR errors.
+- negative control (same harness, a misspelled name in a multi-line
+  `std.hardware` brace-import that is then called) reports
+  `unresolved name: mux_create_misspelled` — so 0 errors on the real probes is
+  not vacuous.
+
+`SPEC FILE VERDICT: ... outcome=OK declared>=5 executed=5 passed=5 failed=0`.
+There is no red phase: the defect was already fixed in source, so no code was
+changed here. The `std.X` -> `lib.X` fold in `resolve_module_key`
+(`module_import_registration.spl:1179-1187`) landed in `4b88aebf00b`
+(2026-08-21), after this bug was filed — i.e. it was fixed, not absent.
+
+Defect (2) (delegation): `_cli_driver_binary` (`src/app/io/cli_ops.spl:351`)
+no longer treats a `simple_seed` sibling as an implicit authority; it delegates
+only on an explicit `SIMPLE_BOOTSTRAP_DRIVER` (with the self-exec and
+release-wrapper guards) and `SIMPLE_NO_BOOTSTRAP_DELEGATE=1` disables it — one
+rule, independent of binary name/location (present since `88aac2ffe28`).
+
+Unverified: the natively compiled CLI was not executed (no deployed binary);
+a native-codegen miscompile of the same source would be a separate defect.
+
+Side finding: under the seed interpreter, destructuring a 4-tuple returned
+from a fn (`val (a, b, c, d) = f()` where the tuple carries `Dict`s and a
+`ModuleSurfacesByName`) failed with `semantic: value is not callable`; the
+spec uses a struct return instead.
+
+## Verification 2026-11-25 (release/1.0.0 @ 4c6024f8271, Windows host) — still fixed
+
+The regression spec
+`test/01_unit/compiler/hir/std_hardware_brace_import_hir_spec.spl` could not be
+executed on this host: `bin/simple.exe test` (pinned Rust seed v1.0.0-rc.1)
+fails repo-wide at HEAD with `unknown decorator '@representation_boundary'`
+(seed predates commit `cfd89933699`). Verified by source inspection instead:
+
+- The `std.X` -> `lib.X` fold lives on in `resolve_module_key`, relocated to
+  `src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl:1359`
+  (the `60.hir` path cited above no longer exists). It still tries the literal
+  key, `lib.` mirror, the `std.`->`lib.` swap, and the concurrency-tier
+  fallbacks, so `std.hardware.link_mux.*` brace-imports resolve to
+  `lib.hardware.link_mux.*` surface keys.
+- `_cli_driver_binary` (`src/app/io/cli_ops.spl:376`) still delegates only on
+  an explicit `SIMPLE_BOOTSTRAP_DRIVER`; no `simple_seed`-sibling implicit
+  authority. One rule, independent of binary name/location.
+
+Both fixes from the 2026-11-07 re-verification are present at the current
+release/1.0.0 HEAD. Marking resolved; native-CLI execution remains unverified
+(no self-hosted binary on this host), same limit as the 2026-11-07 pass.

@@ -80,7 +80,7 @@ impl Age:
 
 match Age.new(25):
     Some(age): print "Valid: {age.value}"
-    nil: print "Invalid age"
+    None: print "Invalid age"
 ```
 
 ### Builder Pattern
@@ -247,6 +247,27 @@ val result = add_5(3)                 # 8
 
 ---
 
+## Char Literals and Text Indexing
+
+```text
+val c = '7'                        # char literal (exactly one scalar or escape)
+val re = r"[a-z]+\d{2,3}"          # raw text: r"..." (single quotes are char-only)
+# if c: ...                        # type error; write c != '\0'
+"72"[0] == '7'                   # s[i] yields char
+"72"[0].ord()                     # 55
+```
+
+Single quotes mean only `char`: one Unicode scalar (1-4 UTF-8 bytes) or one
+escape. Text forms are `"..."` (interpolating), `r"..."` / `r"""..."""` (raw) and
+`"""..."""` (multi-line, literal braces). A decomposed `e` + U+0301 or a ZWJ
+emoji is several scalars, so it is text, not a char. `s[i]` indexes by code
+point; `.byte_len()` / `byte_at` are byte-level.
+
+See [ADR-005](../../04_architecture/adr/ADR-005-text-index-yields-char.md) and
+the quick reference for conversions and the staged warning. The lexer switch
+(old multi-scalar `'...'` raw strings become errors) lands after the stage3
+self-build passes; write `r"..."` now.
+
 ## String Interpolation
 
 ```text
@@ -278,11 +299,27 @@ must not first create an eagerly interpolated `text`.
 ```simple:skip
 match value:
     Some(x): process(x)
-    nil: handle_missing()
+    None: handle_missing()
 
 match shape:
     Circle(r): pi * r * r
     Rectangle(w, h): w * h
+```
+
+**Exhaustiveness of value matches.** A `match` used as a value (assigned,
+passed, returned, or the implicit return of a non-unit function) must be
+exhaustive, or it is a compile-time error `E-MATCH-NONEXHAUSTIVE-VALUE`.
+Exhaustive means: an unguarded `_`/binder arm, or all enum variants (payload
+arms with irrefutable sub-patterns), or `true`+`false`, or `Some`+`None`, or
+`Ok`+`Err`. Literal scrutinees (`int`, `float`, `text`, `char`) always need
+`_`. Statement matches are unaffected. Staged: currently a warning by default
+(`SIMPLE_VALUE_MATCH_EXHAUSTIVENESS=error` to enforce). Full rule:
+`doc/05_design/exhaustive_value_match.md`.
+
+```simple:skip
+val n = match s:          # error without the `_` arm
+    case "a": 1
+    case _: panic("unexpected: " + s)
 ```
 
 ---

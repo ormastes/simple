@@ -34,7 +34,7 @@ use super::{
     BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
     BLANKET_IMPL_METHODS, CLASS_OVERLOADS, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, FUNCTION_OVERLOADS,
     FUNCTION_MODULE_OWNER, tag_function_module_owner, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
-    FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS,
+    FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_NAMESPACE_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS,
     MACRO_DEFINITION_ORDER, MIXINS, TRAIT_IMPLS, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
     MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC,
     UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS, USER_SI_BASE_UNITS, USER_UNIT_SUFFIX_TO_FAMILY,
@@ -68,6 +68,14 @@ fn bind_module_namespace_after_import(
 
     env.insert(binding_name.to_string(), module_value.clone());
     true
+}
+
+/// Closure origin for a flattened global initializer: it runs at the entry's
+/// top level but is written in `owner` (test_private_access_closure_attribution).
+fn flattened_initializer_origin(
+    owner: Option<&str>,
+) -> Option<crate::interpreter::interpreter_module::ClosureOriginGuard> {
+    owner.map(|owner| crate::interpreter::interpreter_module::ClosureOriginGuard::enter_module_top_level(Some(owner)))
 }
 
 fn record_flattened_global(owner: Option<&Arc<str>>, name: String, value: Value) {
@@ -183,12 +191,19 @@ pub(crate) fn call_value_with_args(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    use crate::interpreter::interpreter_module::{owner_written_in_test, ClosureOriginGuard};
+    // Both arms run the body here rather than through exec_lambda /
+    // execute_function_body, so they enter the body's lexical origin for the
+    // private-fn call rule themselves: a decorator body is judged where it was
+    // written, not by the frame applying it
+    // (test_private_access_closure_attribution_2026-11-14).
     match callee {
         Value::Lambda {
             params,
             body,
             env: captured,
         } => {
+            let _closure_origin = ClosureOriginGuard::enter_closure(&captured);
             // Execute lambda with given args
             let mut local_env = Env::clone(captured);
             for (i, param) in params.iter().enumerate() {
@@ -199,16 +214,32 @@ pub(crate) fn call_value_with_args(
             evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)
         }
         Value::Function { def, captured_env, .. } => {
-            // Execute function with given args, using the captured environment for closure
+            // An owned fn is written in its owner module; an owner-less one
+            // (a nested `fn` value) where its captured env was stamped.
+            let _closure_origin = match super::interpreter_call::function_module_owner(def) {
+                Some(owner) => ClosureOriginGuard::enter_owned(&owner),
+                None => ClosureOriginGuard::enter_closure(captured_env),
+            };
             let mut local_env = Env::clone(captured_env);
+            let mut bound_args = HashMap::new();
             for (i, param) in def.params.iter().enumerate() {
                 if let Some(arg) = args.get(i) {
-                    local_env.insert(param.name.clone(), arg.clone());
+                    bound_args.insert(param.name.clone(), arg.clone());
+                } else if let Some(default_expr) = &param.default {
+                    let val = evaluate_expr(default_expr, &mut local_env, functions, classes, enums, impl_methods)?;
+                    bound_args.insert(param.name.clone(), val);
                 }
             }
-            // Execute the function body
-            let result = exec_block(&def.body, &mut local_env, functions, classes, enums, impl_methods);
-            control_to_value(result)
+            super::interpreter_call::execute_function_body(
+                def,
+                bound_args,
+                &mut local_env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+                false,
+            )
         }
         Value::Object { ref class, ref fields } => {
             // Support __call__ protocol
@@ -400,7 +431,10 @@ pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
 /// interpreted.
 ///
 /// See doc/08_tracking/bug/prelude_builtins_rebindable_by_transitive_import_2026-08-10.md
-pub const PRELUDE_UNSHADOWABLE: &[&str] = &["exit"];
+///
+/// `dprint` (debug print) is fenced too: no Simple source defines a `fn dprint`,
+/// so a transitive one can only hijack debug output (fencing is behaviour-preserving).
+pub const PRELUDE_UNSHADOWABLE: &[&str] = &["exit", "dprint", "panic"];
 
 /// True for the user-facing prelude names (`print`, `exit`, `abs`, ...) as
 /// opposed to the `rt_*` / `compiler__*` runtime-bridge entries that share
@@ -463,6 +497,9 @@ impl ModuleItems<'_> {
 
 fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileError> {
     let items = module_items.as_slice();
+    if let Some(message) = crate::impl_duplicate_check::find_duplicate_impl_method(items) {
+        return Err(CompileError::semantic(message));
+    }
     if crate::interpreter::is_coverage_enabled() {
         // Coverage denominator: every decision/condition site of the entry
         // module (and of every import flattened into it), visited or not.
@@ -492,6 +529,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
     SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
     USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow_mut().clear());
     USER_SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
+    crate::units::scope::unit_scope_reset();
     // Clear module-level globals from previous runs
     MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
     crate::interpreter::reset_owned_globals_from_initial();
@@ -499,6 +537,9 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
     super::BITFIELDS.with(|cell| cell.borrow_mut().clear());
     // Clear the struct/class overload registry from previous runs.
     CLASS_OVERLOADS.with(|cell| cell.borrow_mut().clear());
+    // The entry script is being (re-)evaluated: drop the previous entry's
+    // owner-keyed classes so they cannot answer for this one.
+    crate::interpreter::clear_entry_owner_classes();
 
     let mut env = Env::new();
     let mut functions: HashMap<String, Arc<FunctionDef>> = HashMap::new();
@@ -546,6 +587,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
     // First pass: register all functions, structs, enums, and classes
     // (needed for forward references — structs defined after describe blocks)
     for item in items {
+        super::interpreter_state::set_current_node_span(item.span().map(Into::into));
         match item {
             Node::Function(f) => {
                 // Never register an inactive `@cfg(<arch>)` variant: the
@@ -619,36 +661,27 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                         class_name: s.name.clone(),
                     },
                 );
-                let struct_class = Arc::new(ClassDef {
-                    span: s.span,
-                    name: s.name.clone(),
-                    generic_params: Vec::new(),
-                    where_clause: vec![],
-                    fields: s.fields.clone(),
-                    methods: s.methods.clone(),
-                    parent: None,
-                    visibility: s.visibility,
-                    effects: Vec::new(),
-                    attributes: Vec::new(),
-                    doc_comment: None,
-                    invariant: None,
-                    macro_invocations: Vec::new(),
-                    mixins: vec![],
-                    is_generic_template: false,
-                    specialization_of: None,
-                    type_bindings: std::collections::HashMap::new(),
-                    is_value_type: true,
-                });
+                // Keep the flattening loader's owner tag via `attributes`: an imported
+                // `struct` must not be mistaken for an entry-declared class.
+                let struct_class = Arc::new(crate::interpreter::core_types::struct_def_to_class_def(s));
+                crate::interpreter::record_flattened_owner_class(&struct_class);
+                crate::interpreter::record_entry_owner_class(&struct_class);
                 classes.insert(s.name.clone(), Arc::clone(&struct_class));
                 CLASS_OVERLOADS.with(|cell| {
                     cell.borrow_mut().entry(s.name.clone()).or_default().push(struct_class);
                 });
             }
             Node::Enum(e) => {
-                // Pre-register enum
+                // Pre-register enum (and its positional discriminants)
+                simple_runtime::value::register_enum_variants(e.variants.iter().map(|v| v.name.as_str()));
                 let arc_e = Arc::new(e.clone());
+                crate::interpreter::record_flattened_owner_enum(&arc_e);
                 enums.insert(e.name.clone(), Arc::clone(&arc_e));
                 GLOBAL_ENUMS.with(|cell| {
+                    crate::interpreter::interpreter_module::module_evaluator::evaluation_helpers::warn_on_ambiguous_bare_enum_name(
+                        cell.borrow().get(&e.name),
+                        &arc_e,
+                    );
                     cell.borrow_mut().insert(e.name.clone(), arc_e.clone());
                 });
                 env.insert(
@@ -667,6 +700,8 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                     },
                 );
                 let arc_c = Arc::new(c.clone());
+                crate::interpreter::record_flattened_owner_class(&arc_c);
+                crate::interpreter::record_entry_owner_class(&arc_c);
                 classes.insert(c.name.clone(), Arc::clone(&arc_c));
                 CLASS_OVERLOADS.with(|cell| {
                     cell.borrow_mut().entry(c.name.clone()).or_default().push(arc_c);
@@ -676,6 +711,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                 super::register_bitfield(bitfield);
             }
             Node::Newtype(nt) => {
+                crate::interpreter_unit::register_record_unit_class(&nt.name);
                 // Lower newtype to a synthetic class with single `value` field.
                 // `Width(value: 3)` then routes through normal class instantiation.
                 let synth_field = simple_parser::ast::Field {
@@ -747,8 +783,29 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
     // Holds the value of the last direct top-level `main()` call.
     let mut top_level_main_result: Option<Value> = None;
 
-    // Second pass: apply decorators and register other items
-    for item in items {
+    // Second pass: apply decorators and register other items.
+    //
+    // Type declarations written AFTER the first top-level expression are
+    // registered before that expression runs: a `describe` block may call a
+    // method whose `impl` block (or class) is declared further down, and the
+    // first pass above registers constructors but not impl-block methods.
+    // Everything up to the first top-level expression keeps source order.
+    let first_expr = items
+        .iter()
+        .position(|n| matches!(n, Node::Expression(_)))
+        .unwrap_or(items.len());
+    let is_type_decl = |n: &&Node| {
+        matches!(
+            n,
+            Node::Struct(_) | Node::Enum(_) | Node::Class(_) | Node::Impl(_) | Node::Trait(_) | Node::Mixin(_)
+        )
+    };
+    let ordered = items[..first_expr]
+        .iter()
+        .chain(items[first_expr..].iter().filter(is_type_decl))
+        .chain(items[first_expr..].iter().filter(|n| !is_type_decl(n)));
+    for item in ordered {
+        super::interpreter_state::set_current_node_span(item.span().map(Into::into));
         match item {
             Node::Function(f) => {
                 // Skip inactive @cfg(<arch>) variants (mirrors the first
@@ -802,26 +859,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                 // Also register as a class so instantiation works
                 classes.insert(
                     s.name.clone(),
-                    Arc::new(ClassDef {
-                        span: s.span,
-                        name: s.name.clone(),
-                        generic_params: Vec::new(),
-                        where_clause: vec![],
-                        fields: s.fields.clone(),
-                        methods: s.methods.clone(),
-                        parent: None,
-                        visibility: s.visibility,
-                        effects: Vec::new(),
-                        attributes: Vec::new(),
-                        doc_comment: None,
-                        invariant: None,
-                        macro_invocations: Vec::new(),
-                        mixins: vec![],
-                        is_generic_template: false,
-                        specialization_of: None,
-                        type_bindings: std::collections::HashMap::new(),
-                        is_value_type: true,
-                    }),
+                    Arc::new(crate::interpreter::core_types::struct_def_to_class_def(s)),
                 );
                 // Register static methods as mangled free functions (StructName__method)
                 for method in &s.methods {
@@ -848,6 +886,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                 }
             }
             Node::Enum(e) => {
+                simple_runtime::value::register_enum_variants(e.variants.iter().map(|v| v.name.as_str()));
                 enums.insert(e.name.clone(), Arc::new(e.clone()));
                 // Also register in env so EnumName.VariantName syntax works
                 env.insert(
@@ -940,7 +979,9 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                     updated
                 };
 
-                classes.insert(final_class.name.clone(), Arc::new(final_class.clone()));
+                let final_arc = Arc::new(final_class.clone());
+                crate::interpreter::record_flattened_owner_class(&final_arc);
+                classes.insert(final_class.name.clone(), final_arc);
                 // Store in env as Constructor value so it can be called like MyClass()
                 env.insert(
                     final_class.name.clone(),
@@ -1255,14 +1296,27 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
             Node::Unit(u) => {
                 // Unit types define a newtype wrapper with a literal suffix
                 // Register the unit type name and its suffix for later use
-                units.insert(u.suffix.clone(), u.clone());
-                UNIT_SUFFIX_TO_FAMILY.with(|cell| {
-                    cell.borrow_mut().insert(u.suffix.clone(), u.name.clone());
-                });
-                USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| {
-                    cell.borrow_mut().insert(u.suffix.clone(), u.name.clone());
-                });
-                env.insert(u.name.clone(), Value::Nil);
+                if !u.suffix.is_empty() {
+                    units.insert(u.suffix.clone(), u.clone());
+                    UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+                        cell.borrow_mut().insert(u.suffix.clone(), u.name.clone());
+                    });
+                    USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+                        cell.borrow_mut().insert(u.suffix.clone(), u.name.clone());
+                    });
+                }
+                if let Some(class) = crate::interpreter_unit::unit_constructor_class(u) {
+                    env.insert(
+                        u.name.clone(),
+                        Value::Constructor {
+                            class_name: u.name.clone(),
+                        },
+                    );
+                    crate::interpreter_unit::register_record_unit_class(&u.name);
+                    classes.insert(u.name.clone(), Arc::new(class));
+                } else {
+                    env.insert(u.name.clone(), Value::Nil);
+                }
             }
             Node::UnitFamily(uf) => {
                 // Unit family defines multiple related units with conversion factors
@@ -1392,8 +1446,12 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
             Node::Const(marker) if marker.name.starts_with(FLATTEN_IMPORT_BINDING_MARKER_PREFIX) => {
                 record_flattened_import_binding(&marker.name);
             }
+            // HIR-lowering metadata only; the interpreter resolves namespaces itself.
+            Node::Const(marker) if marker.name.starts_with(FLATTEN_MODULE_NAMESPACE_MARKER_PREFIX) => {}
             Node::Let(let_stmt) => {
                 use super::Control;
+                // A flattened global initializer is lexically in its owner module.
+                let _origin = flattened_initializer_origin(pending_flattened_global_owner.as_deref());
                 if let Control::Return(val) =
                     exec_node(item, &mut env, &mut functions, &mut classes, &enums, &impl_methods)?
                 {
@@ -1412,6 +1470,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
             }
             Node::Const(const_stmt) => {
                 use super::Control;
+                let _origin = flattened_initializer_origin(pending_flattened_global_owner.as_deref());
                 if let Control::Return(val) =
                     exec_node(item, &mut env, &mut functions, &mut classes, &enums, &impl_methods)?
                 {
@@ -1428,6 +1487,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
             }
             Node::Static(static_stmt) => {
                 use super::Control;
+                let _origin = flattened_initializer_origin(pending_flattened_global_owner.as_deref());
                 if let Control::Return(val) =
                     exec_node(item, &mut env, &mut functions, &mut classes, &enums, &impl_methods)?
                 {
@@ -1600,6 +1660,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
             }
             // Module system nodes
             Node::UseStmt(use_stmt) => {
+                crate::units::scope::unit_scope_record_use(use_stmt);
                 // Handle runtime module loading
                 // Determine the binding name (alias or imported item name)
                 let binding_name = match &use_stmt.target {
@@ -1780,7 +1841,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                 // Handle inline modules with a body
                 if let Some(body_items) = &mod_decl.body {
                     // Create a module dict to hold the module's exports
-                    let mut module_dict: HashMap<String, Value> = HashMap::new();
+                    let mut module_dict = crate::value::DictMap::new();
 
                     // Process items in the inline module body
                     for item in body_items {
@@ -1851,18 +1912,41 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                             Node::Enum(e) => {
                                 let prefixed_name = format!("{}.{}", mod_decl.name, e.name);
                                 let arc_e = Arc::new(e.clone());
+                                simple_runtime::value::register_enum_variants(e.variants.iter().map(|v| v.name.as_str()));
                                 enums.insert(prefixed_name, Arc::clone(&arc_e));
                                 enums.insert(e.name.clone(), arc_e);
 
-                                // Add enum variants to module dict as constructors
+                                // `X.Kind` is the enum type, as for a file-level
+                                // module. Never replaces an entry: a variant of an
+                                // earlier enum spelled `Kind` keeps its value, and
+                                // this enum's own variants are inserted after.
+                                module_dict
+                                    .entry(e.name.clone())
+                                    .or_insert_with(|| Value::EnumType {
+                                        enum_name: e.name.clone(),
+                                    });
+
+                                // Add enum variants to the module dict: a unit variant
+                                // is its enum value, a payload variant a constructor
+                                // (same rule as `Enum.Variant` in interpreter/expr/calls.rs).
+                                // Storing unit variants as constructors made `X.F32`
+                                // unequal to itself and unmatchable
+                                // (match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14).
                                 for variant in &e.variants {
-                                    module_dict.insert(
-                                        variant.name.clone(),
+                                    let has_fields = variant.fields.as_ref().is_some_and(|f| !f.is_empty());
+                                    let value = if has_fields {
                                         Value::EnumVariantConstructor {
                                             enum_name: e.name.clone(),
                                             variant_name: variant.name.clone(),
-                                        },
-                                    );
+                                        }
+                                    } else {
+                                        Value::Enum {
+                                            enum_name: e.name.clone(),
+                                            variant: variant.name.clone(),
+                                            payload: None,
+                                        }
+                                    };
+                                    module_dict.insert(variant.name.clone(), value);
                                 }
                             }
                             Node::Const(c) => {
@@ -1887,8 +1971,19 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                         }
                     }
 
-                    // Store module dict in environment
-                    env.insert(mod_decl.name.clone(), Value::Dict(Arc::new(module_dict)));
+                    // Store module dict in environment, and as a global of its
+                    // declaring file (like a top-level `val`) so function bodies
+                    // can name it. A block flattened in from an imported file
+                    // carries that file as an owner attribute
+                    // (`strip_flattened_import_nodes`); none means the entry script.
+                    let module_value = Value::Dict(Arc::new(module_dict));
+                    env.insert(mod_decl.name.clone(), module_value.clone());
+                    let owner: Option<Arc<str>> = mod_decl.attributes.iter().find_map(|a| {
+                        a.name
+                            .strip_prefix(FLATTEN_MODULE_OWNER_ATTR_PREFIX)
+                            .map(|raw| Arc::from(normalize_path_key(Path::new(raw)).to_string_lossy().as_ref()))
+                    });
+                    record_flattened_global(owner.as_ref(), mod_decl.name.clone(), module_value);
                 }
                 // External module declarations (no body) are handled by the module resolver
             }
@@ -1904,6 +1999,9 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
             | Node::StructuredExportStmt(_)
             | Node::AutoImportStmt(_)
             | Node::RequiresCapabilities(_)
+            | Node::FriendDecl(_)
+            | Node::InternalExportDecl(_)
+            | Node::LayerDecl(_)
             | Node::HandlePool(_)
             | Node::DiBinding(_)
             | Node::InjectGraph(_)
@@ -1977,6 +2075,9 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
         // automatic entry call below (unit/nil -> 0), matching the default
         // engine's run-once, value-propagating behavior.
         let result = await_value(result)?;
+        if main_to_run.as_deref().is_some_and(main_declares_unit_return) {
+            return Ok(0);
+        }
         return match &result {
             Value::Tuple(t) if t.is_empty() => Ok(0),
             Value::Nil => Ok(0),
@@ -1996,6 +2097,13 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
         )?;
         // Await the result if it's a Promise (async function)
         let result = await_value(result)?;
+        // A unit-typed `main` (`-> ()` / `-> Nil`) exits 0 whatever its tail
+        // expression evaluated to: the interpreter returns the implicit tail
+        // value, which leaked (`describe(...)` -> true -> exit 1). Bug:
+        // seed_unit_main_leaks_tail_value_as_exit_code_2026-11-16.
+        if main_declares_unit_return(&main_func) {
+            return Ok(0);
+        }
         // If main returns unit/tuple (void), treat it as exit code 0
         return match &result {
             Value::Tuple(t) if t.is_empty() => Ok(0),
@@ -2010,4 +2118,267 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
     let main_val = await_value(main_val)?;
     let main_val = main_val.as_int()? as i32;
     Ok(main_val)
+}
+
+/// True when `main` explicitly declares a unit return type (`()` or `Nil`).
+fn main_declares_unit_return(main_func: &FunctionDef) -> bool {
+    match &main_func.return_type {
+        Some(Type::Tuple(elems)) => elems.is_empty(),
+        Some(Type::Simple(name)) => name == "Nil" || name == "()",
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod function_value_call_tests {
+    use super::*;
+    use simple_parser::{ast::Block, ast::Expr, ast::Node, ast::Parameter, ast::Visibility, Span};
+
+    #[test]
+    fn call_value_with_args_function_preserves_implicit_tail_return() {
+        let span = Span::new(0, 0, 1, 1);
+        let def = Arc::new(FunctionDef {
+            span,
+            name: "mk_implicit".to_string(),
+            generic_params: vec![],
+            where_clause: vec![],
+            params: vec![Parameter {
+                span,
+                name: "x".to_string(),
+                ty: None,
+                default: None,
+                mutability: simple_parser::ast::Mutability::Immutable,
+                inject: false,
+                variadic: false,
+                call_site_label: None,
+            }],
+            return_type: None,
+            return_constraint: None,
+            body: Block {
+                span,
+                statements: vec![Node::Expression(Expr::Binary {
+                    op: simple_parser::ast::BinOp::Add,
+                    left: Box::new(Expr::Identifier("x".to_string())),
+                    right: Box::new(Expr::Integer(1)),
+                })],
+            },
+            effects: vec![],
+            decorators: vec![],
+            visibility: Visibility::Public,
+            bounds_block: None,
+            attributes: vec![],
+            doc_comment: None,
+            is_static: false,
+            is_abstract: false,
+            is_me_method: false,
+            is_sync: false,
+            is_generator: false,
+            contract: None,
+            is_generic_template: false,
+            specialization_of: None,
+            type_bindings: HashMap::new(),
+        });
+        let fn_val = Value::Function {
+            name: "mk_implicit".to_string(),
+            def,
+            captured_env: Arc::new(Env::new()),
+        };
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+        let out = call_value_with_args(
+            &fn_val,
+            vec![Value::Int(41)],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("call_value_with_args should succeed");
+        assert_eq!(out, Value::Int(42));
+    }
+
+    #[test]
+    fn expected_target_type_does_not_leak_across_calls_or_unannotated_lets() {
+        let src = r#"
+trait FromIter:
+    fn from_iter(v: i64) -> Self
+
+struct Bag:
+    tag: i64
+    items: [i64]
+
+impl FromIter for Bag:
+    static fn from_iter(v: i64) -> Self:
+        Bag(tag: 99, items: [v])
+
+impl FromIter for [i64]:
+    static fn from_iter(v: i64) -> Self:
+        [v]
+
+struct Step:
+    n: i64
+
+impl Step:
+    fn collect<C: FromIter>(self) -> C:
+        return C.from_iter(self.n)
+
+fn wrap(x: [i64]) -> Bag:
+    # `x` must arrive as default `[i64]` (len == 1), NOT `Bag`!
+    return Bag(tag: x.len(), items: x)
+
+fn helper() -> Bag:
+    val tmp = Step(n: 5).collect()
+    # Unannotated `val tmp` inside helper must stay `[i64]`, not inherit caller's `Bag`.
+    return Bag(tag: 10 + tmp.len(), items: tmp)
+
+fn main() -> i64:
+    val direct: Bag = Step(n: 7).collect()
+    val wrapped: Bag = wrap(Step(n: 3).collect())
+    val via_helper: Bag = helper()
+    val in_if: Bag = if true:
+        val nested = Step(n: 4).collect()
+        Bag(tag: 20 + nested.len(), items: nested)
+    else:
+        Bag(tag: 0, items: [])
+    if direct.tag != 99:
+        return 1
+    if wrapped.tag != 1 or wrapped.items[0] != 3:
+        return 2
+    if via_helper.tag != 11 or via_helper.items[0] != 5:
+        return 3
+    if in_if.tag != 21 or in_if.items[0] != 4:
+        return 4
+    return 0
+"#;
+        let module = simple_parser::Parser::new(src).parse().expect("parse source");
+        let code = evaluate_module_impl(&module.items).expect("evaluate_module_impl");
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn expected_target_type_isolated_across_if_unsafe_match_conditions_and_lambdas() {
+        let src = r#"
+trait FromIter:
+    fn from_iter(v: i64) -> Self
+
+struct Bag:
+    tag: i64
+    items: [i64]
+
+struct OtherBag:
+    tag: i64
+    items: [i64]
+
+impl FromIter for Bag:
+    static fn from_iter(v: i64) -> Self:
+        Bag(tag: 99, items: [v])
+
+impl FromIter for OtherBag:
+    static fn from_iter(v: i64) -> Self:
+        OtherBag(tag: 77, items: [v])
+
+impl FromIter for [i64]:
+    static fn from_iter(v: i64) -> Self:
+        [v]
+
+struct Step:
+    n: i64
+
+impl Step:
+    fn collect<C: FromIter>(self) -> C:
+        return C.from_iter(self.n)
+
+fn implicit_unsafe_tail(v: i64) -> Bag:
+    unsafe:
+        Step(n: v).collect()
+
+fn implicit_if_tail(v: i64) -> Bag:
+    if true:
+        Step(n: v).collect()
+    else:
+        Bag(tag: 0, items: [])
+
+fn helper_cases() -> Bag:
+    # Unannotated if-expr inside fn() -> Bag must stay [i64], not Bag
+    val unann_if = if true:
+        Step(n: 1).collect()
+    else:
+        []
+    # Explicit local annotation over if/unsafe/match-nested-if must NOT be clobbered by Bag
+    val ann_if: OtherBag = if true:
+        Step(n: 2).collect()
+    else:
+        OtherBag(tag: 0, items: [])
+    val ann_unsafe: OtherBag = unsafe:
+        Step(n: 3).collect()
+    val ann_match_if: OtherBag = match 1:
+        case 1:
+            if true:
+                Step(n: 4).collect()
+            else:
+                OtherBag(tag: 0, items: [])
+        case _:
+            OtherBag(tag: 0, items: [])
+    # Non-tail unsafe block must see None, not Bag
+    unsafe:
+        val inner = Step(n: 5).collect()
+        if inner.len() != 1:
+            return Bag(tag: -1, items: [])
+    # Bare tail expression inside non-tail unsafe block must see None, not Bag
+    unsafe:
+        Step(n: 15).collect().len()
+    val unann_unsafe = unsafe:
+        Step(n: 16).collect()
+    if unann_unsafe.len() != 1 or unann_unsafe[0] != 16:
+        return Bag(tag: -7, items: [])
+    # DoBlock lambda explicit return inside fn() -> Bag must see None, not Bag
+    val lam = \:
+        return Step(n: 6).collect()
+    val lam_res = lam()
+    if unann_if.len() != 1 or unann_if[0] != 1:
+        return Bag(tag: -2, items: [])
+    if ann_if.tag != 77 or ann_if.items[0] != 2:
+        return Bag(tag: -3, items: [])
+    if ann_unsafe.tag != 77 or ann_unsafe.items[0] != 3:
+        return Bag(tag: -4, items: [])
+    if ann_match_if.tag != 77 or ann_match_if.items[0] != 4:
+        return Bag(tag: -5, items: [])
+    if lam_res.len() != 1 or lam_res[0] != 6:
+        return Bag(tag: -6, items: [])
+    return Bag(tag: 100, items: [1])
+
+fn main() -> i64:
+    val b_unsafe = implicit_unsafe_tail(8)
+    if b_unsafe.tag != 99 or b_unsafe.items[0] != 8:
+        return 1
+    val b_if = implicit_if_tail(9)
+    if b_if.tag != 99 or b_if.items[0] != 9:
+        return 2
+    val b_help = helper_cases()
+    if b_help.tag != 100:
+        return 3
+    # If condition / Match subject / Match guard must see None under val x: Bag = ...
+    val cond_bag: Bag = if Step(n: 10).collect().len() == 1:
+        Step(n: 11).collect()
+    else:
+        Bag(tag: 0, items: [])
+    if cond_bag.tag != 99 or cond_bag.items[0] != 11:
+        return 4
+    val subj_bag: Bag = match Step(n: 12).collect().len():
+        case 1 if Step(n: 13).collect().len() == 1:
+            Step(n: 14).collect()
+        case _:
+            Bag(tag: 0, items: [])
+    if subj_bag.tag != 99 or subj_bag.items[0] != 14:
+        return 5
+    return 0
+"#;
+        let module = simple_parser::Parser::new(src).parse().expect("parse source");
+        let code = evaluate_module_impl(&module.items).expect("evaluate_module_impl");
+        assert_eq!(code, 0);
+    }
 }

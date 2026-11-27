@@ -1,0 +1,168 @@
+# SOURCE_AUTHORED_NOT_RUN. Genuine ELF pin/hash/canonical-close specimens only.
+# Requires installed native x86_64 Linux, genuine main-thread procfs origin,
+# fixture ELF+actual SHA256 and independently owned trusted fixture directory.
+# Does NOT invoke replace() in the test runner or claim exec/signal qualification.
+use std.spec.*
+use std.io_runtime.env_get_opt
+use std.nogc_sync_mut.io.linux_process_replace_v1.*
+use std.nogc_sync_mut.io.retained_file.{RetainedDirectoryOwnerV1, retained_directory_open_trusted_v1}
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure, time_sample_monotonic_nanos_or_failure}
+
+fn replace_fixture_architecture_v1() -> text:
+    @when(arch="x86_64"):
+    "linux-x86_64"
+    @elif(arch="aarch64"):
+    "linux-aarch64"
+    @else:
+    "unsupported"
+    @end
+
+# Fixture-environment gate (owner decision 2026-11-16, OPEN_ISSUE B-10). Every
+# example reports BLOCKED (counted, never a pass) and returns BEFORE any fixture
+# helper runs when one of these is unset, so open_v1 -- which irreversibly
+# unshares the runner's FILES/FS context -- never executes in an ordinary
+# shared-process runner. A configured but malformed fixture still fails.
+fn replace_fixture_missing_env_v1() -> text:
+    var missing = ""
+    for name in ["SIMPLE_REPLACE_FIXTURE_ELF", "SIMPLE_REPLACE_FIXTURE_SHA256",
+            "SIMPLE_REPLACE_FIXTURE_DIRECTORY", "SIMPLE_REPLACE_FIXTURE_BYTES",
+            "SIMPLE_REPLACE_FIXTURE_OTHER_DIRECTORY"]:
+        if (env_get_opt(name) ?? "") == "":
+            missing = if missing == "": name else: missing + ", " + name
+    missing
+
+val replace_fixture_missing_v1 = replace_fixture_missing_env_v1()
+val replace_fixture_blocked_v1 = "BLOCKED: native process-replace fixture env unset: {replace_fixture_missing_v1} (needs a dedicated native single-threaded runner)"
+
+var replace_fixture_owner_v1: Option<LinuxProcessReplaceOwnerV1> = nil
+var replace_fixture_cwd_v1: Option<RetainedDirectoryOwnerV1> = nil
+
+fn replace_fixture_cleanup_v1() -> bool:
+    if replace_fixture_owner_v1.is_some():
+        val closed = linux_process_replace_close_v1(replace_fixture_owner_v1.unwrap())
+        replace_fixture_owner_v1 = closed.owner
+        # close() owns only its private duplicate, never returns caller original.
+        if closed.cwd.is_some(): return false
+    if replace_fixture_owner_v1.is_some(): return false
+    if replace_fixture_cwd_v1.is_some():
+        var cwd = replace_fixture_cwd_v1.unwrap()
+        if not cwd.close():
+            replace_fixture_cwd_v1 = Some(cwd)
+            return false
+        replace_fixture_cwd_v1 = nil
+    true
+
+fn replace_fixture_begin_v1(mismatch: bool, prepare: bool = true) -> Result<LinuxProcessReplaceTurnV1, text>:
+    if not replace_fixture_cleanup_v1(): return Err("prior actual replacement cleanup remains retained")
+    val program = env_get_opt("SIMPLE_REPLACE_FIXTURE_ELF") ?? ""
+    val digest = env_get_opt("SIMPLE_REPLACE_FIXTURE_SHA256") ?? ""
+    val directory = env_get_opt("SIMPLE_REPLACE_FIXTURE_DIRECTORY") ?? ""
+    val size = (env_get_opt("SIMPLE_REPLACE_FIXTURE_BYTES") ?? "").to_int() ?? -1
+    if program == "" or digest.len() != 64 or directory == "" or size < 64 or size > 536870912:
+        return Err("required actual native replacement fixture is not configured")
+    val now = time_sample_monotonic_nanos_or_failure()
+    val micros = time_sample_unix_micros_or_failure()
+    if now < 0 or micros < 0: return Err("actual native fixture clocks unavailable")
+    val cwd = retained_directory_open_trusted_v1(directory)?
+    replace_fixture_cwd_v1 = Some(cwd)
+    var expected = digest
+    if mismatch:
+        val first = if digest.starts_with("0"): "1" else: "0"
+        expected = first + digest.substring(1, 64)
+    val request = LinuxProcessReplaceRequestV1(program: program, expected_digest: expected,
+        expected_size_bytes: size, max_image_bytes: size, architecture: replace_fixture_architecture_v1(),
+        args: ["exact-test-argv0", "literal argument"], environment: ["LANG=C"],
+        expires_at_unix_ms: micros / 1000 + 60000,
+        preparation_started_ns: now, preparation_budget_ns: 60000000000)
+    var turn = linux_process_replace_open_v1(request, cwd)
+    replace_fixture_owner_v1 = turn.owner
+    replace_fixture_cwd_v1 = turn.cwd
+    if turn.owner.is_none() or turn.error != "": return Err("actual native pin admission failed: {turn.error}")
+    if not prepare: return Ok(turn)
+    for index in 0..40000:
+        if turn.phase != "preparing": break
+        turn = linux_process_replace_prepare_step_v1(turn.owner.unwrap())
+        replace_fixture_owner_v1 = turn.owner
+    if turn.phase == "preparing": return Err("actual bounded ELF hashing did not complete")
+    Ok(turn)
+
+describe "Actual Linux replacement pin ownership specimens":
+    after_each:
+        expect(replace_fixture_cleanup_v1()).to_equal(true)
+
+    it "hashes the actual sealed descriptor then closes once across copied owner retries":
+        if replace_fixture_missing_v1 != "":
+            pending(replace_fixture_blocked_v1)
+            return
+        step("Use a configured real ELF and independent cwd; never execute the test runner away")
+        val prepared = replace_fixture_begin_v1(false).unwrap()
+        expect(prepared.error).to_equal("")
+        expect(prepared.phase).to_equal("ready")
+        expect(prepared.exec_attempted).to_equal(false)
+        val alias = prepared.owner.unwrap()
+        val closed = linux_process_replace_close_v1(prepared.owner.unwrap())
+        replace_fixture_owner_v1 = closed.owner
+        expect(closed.owner.is_none()).to_equal(true)
+        expect(closed.cwd.is_none()).to_equal(true)
+        expect(closed.phase).to_equal("closed")
+        val copied_close = linux_process_replace_close_v1(alias)
+        expect(copied_close.owner.is_none()).to_equal(true)
+        expect(copied_close.cwd.is_none()).to_equal(true)
+        expect(copied_close.error).to_equal(closed.error)
+        val copied_prepare = linux_process_replace_prepare_step_v1(alias)
+        expect(copied_prepare.phase).to_equal("closed")
+        expect(copied_prepare.owner.is_none()).to_equal(true)
+
+    it "keeps real pin and cwd cleanup on a digest mismatch and preserves its first error":
+        if replace_fixture_missing_v1 != "":
+            pending(replace_fixture_blocked_v1)
+            return
+        step("Compare actual sealed image bytes to a deliberately different expected digest")
+        val failed = replace_fixture_begin_v1(true).unwrap()
+        expect(failed.error).to_equal("linux-replace-image-digest-mismatch")
+        expect(failed.owner.is_some()).to_equal(true)
+        expect(failed.cleanup_pending).to_equal(true)
+        expect(failed.exec_attempted).to_equal(false)
+        val refused = linux_process_replace_replace_v1(failed.owner.unwrap())
+        replace_fixture_owner_v1 = refused.owner
+        expect(refused.exec_attempted).to_equal(false)
+        expect(refused.error).to_equal(failed.error)
+        val closed = linux_process_replace_close_v1(refused.owner.unwrap())
+        replace_fixture_owner_v1 = closed.owner
+        expect(closed.owner.is_none()).to_equal(true)
+        expect(closed.error).to_equal(failed.error)
+
+    it "keeps the private cwd after caller alias close and opening a different directory":
+        if replace_fixture_missing_v1 != "":
+            pending(replace_fixture_blocked_v1)
+            return
+        step("Close the actual borrowed original during preparation; inspect independent real custody")
+        val pending = replace_fixture_begin_v1(false, false).unwrap()
+        expect(pending.owner.is_some()).to_equal(true)
+        expect(pending.cwd.is_some()).to_equal(true)
+        val expected = pending.cwd.unwrap().stage_identity_v1().unwrap()
+        val owner = pending.owner.unwrap()
+        expect(linux_process_replace_cwd_identity_v1(owner).unwrap()).to_equal(expected)
+        var old_alias = pending.cwd.unwrap()
+        val closed_original = old_alias.close()
+        expect(closed_original).to_equal(true)
+        if not closed_original:
+            replace_fixture_cwd_v1 = Some(old_alias)
+            return
+        replace_fixture_cwd_v1 = nil
+        val other_path = env_get_opt("SIMPLE_REPLACE_FIXTURE_OTHER_DIRECTORY") ?? ""
+        if other_path == "": panic("required distinct real directory fixture missing")
+        val other = retained_directory_open_trusted_v1(other_path).unwrap()
+        replace_fixture_cwd_v1 = Some(other)
+        val other_identity = other.stage_identity_v1().unwrap()
+        if other_identity == expected: panic("required fixture directory must be distinct")
+        expect(other_identity == expected).to_equal(false)
+        var turn = pending
+        for index in 0..40000:
+            if turn.phase != "preparing": break
+            turn = linux_process_replace_prepare_step_v1(owner)
+            replace_fixture_owner_v1 = turn.owner
+        expect(turn.phase).to_equal("ready")
+        expect(turn.error).to_equal("")
+        expect(linux_process_replace_cwd_identity_v1(owner).unwrap()).to_equal(expected)
+        expect(turn.exec_attempted).to_equal(false)

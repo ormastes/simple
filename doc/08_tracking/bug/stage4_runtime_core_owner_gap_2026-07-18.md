@@ -1,6 +1,21 @@
 # Stage4 omitted core C runtime owners
 ## Open 2026-09-16 — needs owner triage
 
+## Triage 2026-11-25
+
+Still open; the header is accurate. The owner-resolution machinery the fix
+section describes is present in the tree (requested-owner / pairwise-global
+resolution in `src/compiler/70.backend/backend/llvm_native_link_orchestrator.spl`
+and callers), but every "Remaining related blockers" item — the localized
+projected capsule, the strict final link without duplicate-definition
+suppression, candidate machine-header verification, partitioning the
+remaining core C objects, and the SQLite/CLI capability owners — is
+bootstrap-lane program work that cannot be advanced or verified on this
+Windows host (no admitted self-hosted binary; `bin/simple.exe test` is
+blocked repo-wide at HEAD by the known `@representation_boundary`
+source/binary inconsistency). No execution evidence claimed; left open for
+the bootstrap owner.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 

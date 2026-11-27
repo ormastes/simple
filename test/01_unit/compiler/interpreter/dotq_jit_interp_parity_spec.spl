@@ -1,0 +1,41 @@
+# Interpreter / JIT parity for `.?` and `??` on Option and Result.
+#
+# Owner decision 2026-11-06: the Rust seed must behave exactly like pure Simple.
+# Bug seed_jit_dotq_coalesce_parity_2026-11-06: under the JIT `Some(nil) ?? 7`
+# printed the raw nil sentinel `3`, `if Err("e").?:` was taken and
+# `not Some(0).?` was true. The probe prints one `name=value` line per shape;
+# both engines must print the pure-Simple contract value.
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/interpreter/probe_dotq_jit_parity.spl"
+
+fn run_probe(env_prefix: text) -> text:
+    var bin = env_get("SIMPLE_TEST_BINARY")
+    if bin == "":
+        bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 " + env_prefix + " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+fn expect_contract(out: text):
+    expect(out).to_contain("some_nil_coalesce=7")
+    expect(out).to_contain("nil_coalesce=9")
+    expect(out).to_contain("some_zero_coalesce=0")
+    expect(out).to_contain("err_if_present=false")
+    expect(out).to_contain("ok_if_present=true")
+    expect(out).to_contain("not_some_zero=false")
+    expect(out).to_contain("not_nil=true")
+    expect(out).to_contain("some_zero_if=true")
+
+describe "seed JIT and interpreter agree on .? / ?? (pure-Simple contract)":
+    it "JIT prints the contract values":
+        expect_contract(run_probe("SIMPLE_EXECUTION_MODE=jit"))
+
+    it "interpreter prints the contract values":
+        expect_contract(run_probe("SIMPLE_EXECUTION_MODE=interpreter"))
+
+    it "both engines print identical output":
+        expect(run_probe("SIMPLE_EXECUTION_MODE=interpreter")).to_equal(run_probe("SIMPLE_EXECUTION_MODE=jit"))

@@ -1,0 +1,75 @@
+# @req HOST-EXECUTION-STORE-01 HOST-EXECUTION-STORE-02
+# AUTHORED_NOT_RUN. Real journal and signed Ed25519 packets, explicitly scripted
+# Linux provider effects. This is not Windows native execution qualification.
+use std.spec.{describe, it, expect, step}
+use test.fixtures.orchestration.host_authorized_execution_fixture_v2.*
+use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.*
+use std.nogc_sync_mut.orchestration.host_execution_archive_v3.*
+use std.nogc_sync_mut.orchestration.host_execution_intent_v1.*
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.host_capacity_owner_close_v1
+use std.nogc_sync_mut.orchestration.host_service_command_v3.host_service_command_shape_v3
+use std.common.contracts.orchestration.host_execute_request_v2.host_execute_request_encode_v2
+use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_lookup_v2, distributed_operation_journal_read_required_v3}
+
+describe "Owned Host execution storage with explicitly scripted provider":
+    after_each:
+        host_execution_fixture_sweep_v2()
+
+    it "retains exact packets creation intent and observation through the shared executor":
+        step("Prepare a real signed reservation and invoke the common executor with a scripted provider")
+        val fixture = host_execution_fixture_v2("success")
+        val packet = host_execute_request_encode_v2(fixture.envelope).unwrap()
+        val turn = host_authorized_execute_v2(fixture.owner, fixture.container, packet, fixture.policy,
+            fixture.provider_digest, "user_1", fixture.context, host_execution_clock_v2)
+        expect(turn.error).to_equal("")
+        expect(distributed_operation_journal_lookup_v2(turn.owner.journal, "operation_1").unwrap().state).to_equal("executing")
+        val relative = host_execution_archive_relative_v3("host-execute-packets", "operation_1").unwrap()
+        expect(distributed_operation_journal_read_required_v3(turn.owner.journal, relative, 2097152).unwrap()).to_equal(packet)
+        val created = host_execution_intent_load_owned_v3(turn.owner.journal, "operation_1").unwrap()
+        val observed = host_execution_observation_load_owned_v3(turn.owner.journal, "operation_1").unwrap()
+        expect(created.phase).to_equal("created")
+        expect(created.native_id).to_equal(observed.runtime.native_id)
+        expect(host_execution_observation_encode_v2(observed).unwrap()).to_equal(host_execution_observation_encode_v2(turn.observation.unwrap()).unwrap())
+        expect(host_capacity_owner_close_v1(turn.owner).unwrap()).to_equal(true)
+
+    it "refuses a conflicting retained execution packet before journal begin or provider effects":
+        step("Publish conflicting original bytes under the exact operation archive name")
+        val fixture = host_execution_fixture_v2("success")
+        val original = "conflicting-original-packet\n"
+        host_execution_archive_publish_v3(fixture.owner.journal, "host-execute-packets", "operation_1", original, 2097152).unwrap()
+        val packet = host_execute_request_encode_v2(fixture.envelope).unwrap()
+        val turn = host_authorized_execute_v2(fixture.owner, fixture.container, packet, fixture.policy,
+            fixture.provider_digest, "user_1", fixture.context, host_execution_clock_v2)
+        expect(turn.error).to_equal("host-execution-retained-archive-mismatch")
+        expect(fixture.provider.scripted_cursor).to_equal(0)
+        expect(distributed_operation_journal_lookup_v2(turn.owner.journal, "operation_1").unwrap().state).to_equal("admitted")
+        val relative = host_execution_archive_relative_v3("host-execute-packets", "operation_1").unwrap()
+        expect(distributed_operation_journal_read_required_v3(turn.owner.journal, relative, 2097152).unwrap()).to_equal(original)
+        expect(host_capacity_owner_close_v1(turn.owner).unwrap()).to_equal(true)
+
+    it "preserves an uncertain post-create observation and refuses execution replay":
+        step("Run the signed executor with a scripted start failure after actual journal begin")
+        val fixture = host_execution_fixture_v2("start-failed")
+        val packet = host_execute_request_encode_v2(fixture.envelope).unwrap()
+        val first = host_authorized_execute_v2(fixture.owner, fixture.container, packet, fixture.policy,
+            fixture.provider_digest, "user_1", fixture.context, host_execution_clock_v2)
+        expect(first.recovery_required).to_equal(true)
+        expect(host_execution_intent_load_owned_v3(first.owner.journal, "operation_1").unwrap().native_id).to_equal("1".repeat(64))
+        val before = fixture.provider.scripted_cursor
+        val replay = host_authorized_execute_v2(first.owner, first.container, packet, fixture.policy,
+            fixture.provider_digest, "user_1", fixture.context, host_execution_clock_v2)
+        expect(replay.error).to_equal("execution-reconciliation-required")
+        expect(fixture.provider.scripted_cursor).to_equal(before)
+        expect(host_execution_observation_load_owned_v3(replay.owner.journal, "operation_1").is_ok()).to_equal(true)
+        expect(host_capacity_owner_close_v1(replay.owner).unwrap()).to_equal(true)
+
+    it "refuses arbitrary archive namespaces and keeps execute on the explicit effect action":
+        step("Use production path and command admission guards")
+        expect(host_execution_archive_relative_v3("../outside", "operation_1").is_err()).to_equal(true)
+        expect(host_execution_archive_relative_v3("parent.lease", "operation_1").is_err()).to_equal(true)
+        expect(host_execution_archive_relative_v3("host-execute-packets", "../operation").is_err()).to_equal(true)
+        expect(host_service_command_shape_v3(["host-service", "windows-docker-process", "C:/Installed/Host",
+            "a".repeat(64), "binding.sdn", "host-execute", "operation_1", "execute.sdn"])).to_equal("")
+        expect(host_service_command_shape_v3(["host-service", "windows-docker-process", "C:/Installed/Host",
+            "a".repeat(64), "binding.sdn", "host-parent-budget", "operation_1", "budget.sdn"])).to_equal("")

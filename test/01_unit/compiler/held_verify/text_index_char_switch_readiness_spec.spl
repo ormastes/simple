@@ -1,0 +1,179 @@
+# Bug 1 switch-readiness and runtime/MIR parity verification:
+#   text_index_char_compiler_codegen_switch_held_2026-11-03
+#
+# Verifies:
+# 1. HIR staged char diagnostics (`W-CHAR-INT-CONTEXT` / `W-CHAR-CONDITION`)
+#    are wired cleanly and promote cleanly under env/safety-profile overrides.
+# 2. Safe explicit char/byte conversions maintain runtime semantics parity.
+# 3. `50.mir` preserves the held Stage 2 `text[i]` -> `Opaque("str")` gate while
+#    `MirTypeKind.Char` (`chr()` -> `rt_char_from_code`) is ready in MIR.
+# 4. Lexer (`10.frontend/core/lexer_struct.spl`) and `20.hir` stay free of
+#    `[i].to_i64()` regressions that would break when the Stage 3 switch flips.
+
+use std.spec.{describe, context, it, expect}
+use std.io_runtime.{file_read}
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.exhaustiveness.char_condition.{
+    cc_code, cc_error_code, cc_default_mode, cc_message, cc_mode_resolve, cc_is_char_type
+}
+use compiler.hir.exhaustiveness.char_int_context.{
+    ci_code, ci_error_code, ci_default_mode, ci_message, ci_mode_resolve,
+    ci_is_int_conversion_method
+}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+struct HvCharLowerDiag:
+    errors: [text]
+    warnings: [text]
+
+fn hv_char_lower_hir(src: text, int_ctx_mode: text, cond_mode: text) -> HvCharLowerDiag:
+    val prev_ctx = env_get("SIMPLE_CHAR_INT_CONTEXT")
+    val prev_cond = env_get("SIMPLE_CHAR_CONDITION")
+    val prev_prof = env_get("SIMPLE_SAFETY_PROFILE")
+    val _a = env_set("SIMPLE_CHAR_INT_CONTEXT", int_ctx_mode)
+    val _b = env_set("SIMPLE_CHAR_CONDITION", cond_mode)
+    val _c = env_set("SIMPLE_SAFETY_PROFILE", "")
+
+    val parsed = parse_full_frontend(src, "testdata/hv_char_ready.spl", "hv_char_ready", Logger(level: 0))
+    var hl = HirLowering.with_filename("testdata/hv_char_ready.spl")
+    val _hir = hl.lower_module(parsed)
+
+    val _ra = env_set("SIMPLE_CHAR_INT_CONTEXT", prev_ctx)
+    val _rb = env_set("SIMPLE_CHAR_CONDITION", prev_cond)
+    val _rc = env_set("SIMPLE_SAFETY_PROFILE", prev_prof)
+    var err_msgs: [text] = []
+    for err in hl.errors:
+        err_msgs.push(err.message)
+    HvCharLowerDiag(errors: err_msgs, warnings: hl.diagnostic_messages)
+
+fn hv_char_has_prefix(items: [text], code: text) -> bool:
+    for item in items:
+        if item.contains(code):
+            return true
+    false
+
+fn hv_char_callee_names(src: text) -> [text]:
+    val parsed = parse_full_frontend(src, "testdata/hv_char_mir.spl", "hv_char_mir", Logger(level: 0))
+    var hl = HirLowering.with_filename("testdata/hv_char_mir.spl")
+    val hir = hl.lower_module(parsed)
+    var ml = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = ml.lower_module(hir, [])
+    var callees: [text] = []
+    for func in mir.functions.values():
+        for blk in func.blocks:
+            for inst in blk.instructions:
+                match inst.kind:
+                    case MirInstKind.Call(_, func_op, _):
+                        match func_op.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                callees.push(name)
+                            case _: ()
+                    case _: ()
+    callees
+
+describe "text[i] -> char compiler codegen switch readiness":
+    context "staged HIR char diagnostics and gate wiring":
+        it "keeps warn default and honors error overrides for char-int and char-condition":
+            expect(ci_default_mode()).to_equal("warn")
+            expect(cc_default_mode()).to_equal("warn")
+            expect(ci_code()).to_equal("W-CHAR-INT-CONTEXT")
+            expect(ci_error_code()).to_equal("E-CHAR-INT-CONTEXT")
+            expect(cc_code()).to_equal("W-CHAR-CONDITION")
+            expect(cc_error_code()).to_equal("E-CHAR-CONDITION")
+            expect(ci_mode_resolve("", "")).to_equal("warn")
+            expect(ci_mode_resolve("error", "")).to_equal("error")
+            expect(ci_mode_resolve("warn", "verified")).to_equal("error")
+            expect(cc_mode_resolve("", "")).to_equal("warn")
+            expect(cc_mode_resolve("error", "")).to_equal("error")
+            expect(cc_mode_resolve("warn", "critical")).to_equal("error")
+            expect(ci_is_int_conversion_method("to_i64")).to_equal(true)
+            expect(ci_is_int_conversion_method("to_int")).to_equal(true)
+            expect(ci_is_int_conversion_method("ord")).to_equal(false)
+            expect(cc_is_char_type(HirType(kind: HirTypeKind.Char, span: Span.empty()))).to_equal(true)
+            expect(cc_is_char_type(HirType(kind: HirTypeKind.Str, span: Span.empty()))).to_equal(false)
+            expect(ci_message("error", 4, 2, "s[i].to_i64()")).to_contain("E-CHAR-INT-CONTEXT")
+            expect(cc_message("error", 5, 4)).to_contain("E-CHAR-CONDITION")
+
+        it "emits W/E-CHAR-INT-CONTEXT and accepts explicit char conversions":
+            val bad_src = "fn bad_hash(s: text, i: i64) -> i64:\n    s[i].to_i64()\n"
+            val warn_diag = hv_char_lower_hir(bad_src, "warn", "warn")
+            expect(hv_char_has_prefix(warn_diag.warnings, "W-CHAR-INT-CONTEXT")).to_equal(true)
+            expect(hv_char_has_prefix(warn_diag.errors, "E-CHAR-INT-CONTEXT")).to_equal(false)
+
+            val err_diag = hv_char_lower_hir(bad_src, "error", "warn")
+            expect(hv_char_has_prefix(err_diag.errors, "E-CHAR-INT-CONTEXT")).to_equal(true)
+
+            val clean_src = "fn good_hash(s: text, i: i64) -> i64:\n" +
+                "    val a = s[i].ord()\n" +
+                "    val b = s.char_code_at(i)\n" +
+                "    val c = s.byte_at(i)\n" +
+                "    a + b + c\n"
+            val clean_diag = hv_char_lower_hir(clean_src, "error", "error")
+            expect(hv_char_has_prefix(clean_diag.errors, "E-CHAR-INT-CONTEXT")).to_equal(false)
+            expect(hv_char_has_prefix(clean_diag.warnings, "W-CHAR-INT-CONTEXT")).to_equal(false)
+
+        it "emits W/E-CHAR-CONDITION on char truthiness while permitting explicit equality":
+            val cond_src = "fn bad_cond(c: char) -> i64:\n    if c:\n        return 1\n    0\n"
+            val warn_diag = hv_char_lower_hir(cond_src, "warn", "warn")
+            expect(hv_char_has_prefix(warn_diag.warnings, "W-CHAR-CONDITION")).to_equal(true)
+            val err_diag = hv_char_lower_hir(cond_src, "warn", "error")
+            expect(hv_char_has_prefix(err_diag.errors, "E-CHAR-CONDITION")).to_equal(true)
+
+            val ok_cond = "fn ok_cond(c: char) -> i64:\n    if c == 'a':\n        return 1\n    0\n"
+            val ok_diag = hv_char_lower_hir(ok_cond, "error", "error")
+            expect(hv_char_has_prefix(ok_diag.errors, "E-CHAR-CONDITION")).to_equal(false)
+
+    context "runtime conversion parity for replacement helpers":
+        it "preserves codepoint vs byte indexing and explicit char conversions":
+            val digits = "729"
+            expect(digits[0].ord()).to_equal(55)
+            expect(digits.char_code_at(0)).to_equal(55)
+            expect(digits.byte_at(0)).to_equal(55)
+            expect(digits[0].to_digit()).to_equal(Some(7))
+            expect("x"[0].to_digit()).to_equal(None)
+            expect(digits[1].to_text()).to_equal("2")
+            expect(digits[0:2]).to_equal("72")
+
+            val e_ch = char.from_code(233)
+            val e_acute = "{e_ch}"
+            val accented = "caf" + e_acute + "!"
+            expect(accented[3].ord()).to_equal(233)
+            expect(accented.char_code_at(3)).to_equal(233)
+            expect(accented[3].to_text()).to_equal(e_acute)
+            expect(accented[-1].ord()).to_equal(33)
+            expect(char.from_code(55)).to_equal('7')
+            expect(char.from_code(233)).to_equal('é')
+
+    context "frozen Stage 2 MIR hold and Char codegen readiness":
+        it "keeps frozen Stage 2 rt_index_get hold intact while chr() emits rt_char_from_code":
+            val mir_src = "fn peek_and_chr(s: text, i: i64, c: i64) -> text:\n" +
+                "    val a = s[i]\n" +
+                "    val b = c.chr()\n" +
+                "    b\n"
+            val callees = hv_char_callee_names(mir_src)
+            expect(callees.contains("rt_index_get")).to_equal(true)
+            expect(callees.contains("rt_char_from_code")).to_equal(true)
+
+            val dispatch_src = file_read("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
+            expect(dispatch_src).to_contain("MirTypeKind.Opaque(\"str\")")
+            expect(dispatch_src).to_contain("rt_char_from_code")
+
+        it "keeps lexer_struct and 20.hir free of single-char index to_i64() coercions":
+            val lexer_src = file_read("src/compiler/10.frontend/core/lexer_struct.spl")
+            expect(lexer_src).to_contain("source_chars: [text]")
+            expect(lexer_src.contains("].to_i64()")).to_equal(false)
+
+            val hir_defs = file_read("src/compiler/20.hir/hir_definitions.spl")
+            val hir_fwd = file_read("src/compiler/20.hir/hir_forward_lowering.spl")
+            expect(hir_defs.contains("].to_i64()")).to_equal(false)
+            expect(hir_fwd.contains("].to_i64()")).to_equal(false)

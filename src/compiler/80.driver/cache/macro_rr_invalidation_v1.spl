@@ -1,0 +1,177 @@
+# Macro RR invalidation: exact affected-source computation for one changed
+# path, from the legacy source-path receipt and the committed companion
+# inventory.
+#
+#   changed path  -> old (pre-edit companion bound to the RECORDED source
+#                    hash, raw) vs new (re-emitted) states
+#                 -> MacroRrChangedSubjectsV1 (definition subjects, name subjects)
+#                 -> closure over dependent_macros (macro-uses-macro chains)
+#                 -> receipt consumers per subject/family (exact or widen)
+#
+# Every unknown is fail closed (`exact=false` with a reason); the caller then
+# widens to its complete scope. The changed path itself is never in the
+# result: its own fingerprint already marks it.
+#
+# Design: doc/05_design/compiler/macro_rr_invalidation.md §3.
+
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{MacroUseV1,
+    macro_use_status_tag_v1}
+use compiler.common.cache_contract.macro_rr_contract_v1.{MacroInputRootV1,
+    MacroRrChangedSubjectsV1, MacroRrDefinitionStateV1, macro_input_root_v1,
+    macro_rr_changed_subjects_v1, macro_rr_changed_subjects_incomplete_v1,
+    macro_rr_dependents_closure_v1, macro_rr_family_definition_v1,
+    macro_rr_family_resolution_v1, macro_rr_family_absence_v1}
+use compiler.driver.cache.macro_rr_inventory_v1.{MacroRrModuleStateV1, MacroRrInventoryV1,
+    macro_rr_module_state_empty_v1, macro_rr_module_state_raw_v1,
+    macro_rr_module_state_refresh_v1, macro_rr_module_state_complete_v1,
+    macro_rr_uses_with_uncacheable_v1}
+use compiler.driver.cache.reverse_reference_receipt.{ReverseReferenceReceiptReadV1,
+    reverse_reference_consumers_v1, REVERSE_REFERENCE_RECEIPT_SCHEMA_V2}
+
+pub struct MacroRrAffectedV1:
+    exact: bool
+    reason: text
+    sources: [text]
+
+fn _not_exact_v1(reason: text) -> MacroRrAffectedV1:
+    MacroRrAffectedV1(exact: false, reason: reason, sources: [])
+
+fn _sorted_unique_v1(values: [text]) -> [text]:
+    val sorted = canonical_identity_sort_texts(values)
+    var out: [text] = []
+    for v in sorted:
+        if out.len() == 0 or out[out.len() - 1] != v:
+            out.push(v)
+    out
+
+# Old vs new definition state of `path` for one change kind
+# ("added" | "modified" | "deleted"). `recorded_source_hash` is the SHA-256
+# hex the BuildCache recorded for the path (ignored for "added"): the raw
+# pre-edit read is admitted only for the companion of THAT source, and it
+# happens BEFORE the refresh overwrites the companion.
+pub fn macro_rr_changed_subjects_for_path_v1(path: text, kind: text,
+        tldr_root: text, recorded_source_hash: text) -> MacroRrChangedSubjectsV1:
+    if tldr_root == "":
+        return macro_rr_changed_subjects_incomplete_v1("tldr-root-unset")
+    var old = macro_rr_module_state_empty_v1(path)
+    var new = macro_rr_module_state_empty_v1(path)
+    if kind == "added":
+        new = macro_rr_module_state_refresh_v1(path, tldr_root)
+    elif kind == "modified":
+        old = macro_rr_module_state_raw_v1(path, tldr_root, recorded_source_hash)
+        new = macro_rr_module_state_refresh_v1(path, tldr_root)
+    elif kind == "deleted":
+        old = macro_rr_module_state_raw_v1(path, tldr_root, recorded_source_hash)
+    else:
+        return macro_rr_changed_subjects_incomplete_v1("unknown-change-kind:" + kind)
+    val old_complete = macro_rr_module_state_complete_v1(old)
+    val new_complete = macro_rr_module_state_complete_v1(new)
+    val changed = macro_rr_changed_subjects_v1(old.defs, old_complete, new.defs, new_complete)
+    if not changed.complete:
+        val detail = if not old_complete: old.reason else: new.reason
+        return macro_rr_changed_subjects_incomplete_v1(changed.reason + ":" + detail)
+    changed
+
+fn _consumers_v1(receipt: ReverseReferenceReceiptReadV1, subject: text, family: text,
+        known_sources: [text], changed_path: text, acc: [text]) -> (bool, text, [text]):
+    val lookup = reverse_reference_consumers_v1(receipt, subject, family)
+    if not lookup.exact:
+        return (false, lookup.fallback_reason, acc)
+    var out = acc
+    for c in lookup.consumers:
+        if not known_sources.contains(c):
+            return (false, "receipt-consumer-unknown:" + c, acc)
+        if c != changed_path and not out.contains(c):
+            out.push(c)
+    (true, "ok", out)
+
+# Exact affected sources for the changed subjects, or `exact=false`.
+pub fn macro_rr_affected_sources_v1(receipt: ReverseReferenceReceiptReadV1,
+        changed: MacroRrChangedSubjectsV1, inventory: MacroRrInventoryV1,
+        known_sources: [text]) -> MacroRrAffectedV1:
+    macro_rr_affected_sources_of_path_v1(receipt, changed, inventory, known_sources, "")
+
+pub fn macro_rr_affected_sources_of_path_v1(receipt: ReverseReferenceReceiptReadV1,
+        changed: MacroRrChangedSubjectsV1, inventory: MacroRrInventoryV1,
+        known_sources: [text], changed_path: text) -> MacroRrAffectedV1:
+    if not changed.complete:
+        return _not_exact_v1("changed-subjects-incomplete:" + changed.reason)
+    if not inventory.complete:
+        return _not_exact_v1("macro-inventory-incomplete:" + inventory.reason)
+    if not receipt.valid:
+        return _not_exact_v1("receipt-invalid:" + receipt.reason)
+    if val r = receipt.receipt:
+        if r.schema_version != REVERSE_REFERENCE_RECEIPT_SCHEMA_V2:
+            return _not_exact_v1("receipt-schema-without-macro-families")
+    else:
+        return _not_exact_v1("receipt-missing")
+    if changed.definition_subjects.len() == 0 and changed.name_subjects.len() == 0:
+        return MacroRrAffectedV1(exact: true, reason: "ok", sources: [])
+    val subjects = macro_rr_dependents_closure_v1(changed.definition_subjects, inventory.all_defs)
+    var acc: [text] = []
+    for s in subjects:
+        val (ok, reason, next) = _consumers_v1(receipt, s, macro_rr_family_definition_v1(),
+            known_sources, changed_path, acc)
+        if not ok: return _not_exact_v1(reason)
+        acc = next
+    for n in changed.name_subjects:
+        val (ok_r, reason_r, next_r) = _consumers_v1(receipt, n, macro_rr_family_resolution_v1(),
+            known_sources, changed_path, acc)
+        if not ok_r: return _not_exact_v1(reason_r)
+        acc = next_r
+        val (ok_a, reason_a, next_a) = _consumers_v1(receipt, n, macro_rr_family_absence_v1(),
+            known_sources, changed_path, acc)
+        if not ok_a: return _not_exact_v1(reason_a)
+        acc = next_a
+    MacroRrAffectedV1(exact: true, reason: "ok", sources: _sorted_unique_v1(acc))
+
+fn _current_key_v1(inventory: MacroRrInventoryV1, def_id: text) -> text:
+    for d in inventory.all_defs:
+        if d.def_id == def_id: return d.key
+    ""
+
+fn _definitions_named_v1(inventory: MacroRrInventoryV1, name: text) -> i64:
+    var n = 0
+    for d in inventory.all_defs:
+        if d.macro_name == name: n = n + 1
+    n
+
+# The input root a module WOULD have against the current definer companions:
+# every resolved use is re-keyed to the definition's current MacroDefKey (the
+# expand key is re-folded through the key swap marker so it moves with it).
+# Unknown (the gate then fails closed): a resolved definition that no longer
+# exists, an unresolved name that is now defined, a requested name with more
+# than one current definition (a newly added same-name definition could win
+# resolution), or an expansion of an uncacheable definition.
+pub fn macro_rr_current_input_root_v1(state: MacroRrModuleStateV1,
+        inventory: MacroRrInventoryV1) -> MacroInputRootV1:
+    if not macro_rr_module_state_complete_v1(state):
+        return MacroInputRootV1(known: false, complete: false, root: "", reason: "module-state:" + state.reason)
+    if not inventory.complete:
+        return MacroInputRootV1(known: false, complete: false, root: "", reason: "macro-inventory-incomplete:" + inventory.reason)
+    var rewritten: [MacroUseV1] = []
+    for u in state.uses:
+        val tag = macro_use_status_tag_v1(u.status)
+        var v = u
+        if tag == "resolved":
+            val current = _current_key_v1(inventory, u.resolved_def_id)
+            if current == "":
+                return MacroInputRootV1(known: false, complete: false, root: "", reason: "definition-missing")
+            if _definitions_named_v1(inventory, u.requested_scoped_name) > 1:
+                return MacroInputRootV1(known: false, complete: false, root: "", reason: "name-ambiguous")
+            if current != u.resolved_def_key:
+                v.resolved_def_key = current
+                # The expand key folds the def key; mark the swap so the root
+                # moves even when a producer left expand_key unchanged.
+                v.expand_key = current
+        elif tag == "unresolved":
+            if _definitions_named_v1(inventory, u.requested_scoped_name) > 0:
+                return MacroInputRootV1(known: false, complete: false, root: "", reason: "name-now-defined")
+        rewritten.push(v)
+    macro_input_root_v1(macro_rr_uses_with_uncacheable_v1(rewritten, inventory.uncacheable_def_ids))
+
+export MacroRrAffectedV1
+export macro_rr_changed_subjects_for_path_v1
+export macro_rr_affected_sources_v1, macro_rr_affected_sources_of_path_v1
+export macro_rr_current_input_root_v1

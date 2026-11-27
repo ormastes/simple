@@ -1,0 +1,24 @@
+# Linker name decoding is strict UTF-8 (owner decision 2026-11-23).
+# Invalid name bytes are a link error, never U+FFFD or raw bytes.
+
+use compiler.backend.linker.elf_parser.{ElfStringTable, elf_strtab_get}
+use compiler.backend.linker.name_text.{linker_name_text}
+
+describe "linker name UTF-8":
+    it "rejects an ELF strtab name with an invalid byte":
+        val strtab = ElfStringTable(data: [0x66u8, 0xFFu8, 0x00u8], offset: 0)
+        val got = elf_strtab_get(strtab, 0)
+        expect(got.is_err()).to_be(true)
+        expect(got.unwrap_err()).to_contain("byte offset 1")
+
+    it "round-trips a valid ELF strtab name":
+        val strtab = ElfStringTable(data: [0x00u8, 0x66u8, 0x6Fu8, 0x6Fu8, 0x00u8], offset: 0)
+        expect(elf_strtab_get(strtab, 1).unwrap()).to_equal("foo")
+
+    it "round-trips a valid multi-byte UTF-8 name":
+        val got = linker_name_text([0xC3u8, 0xA9u8], "test")
+        expect(got.unwrap()).to_equal("\u{e9}")
+
+    it "names the role in the error":
+        val got = linker_name_text([0xC3u8], "COFF symbol")
+        expect(got.unwrap_err()).to_contain("COFF symbol")

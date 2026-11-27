@@ -1,0 +1,165 @@
+# MCP progressive hint policy — pure decision function.
+#
+# Plan: simple_traceability_spipe_bug_mcp_skills_improvement_plan_2026-11-14 §7.2.
+# First use of a capability = full guidance, second = brief tip, third onward =
+# quiet. Re-hint thresholds (plan §7.2 table, initial NFR targets):
+#   - 3 errors within 10 minutes  -> corrective mini-hint (then suppressed for 10 min)
+#   - 5 failed attempts           -> full re-hint once
+#   - 30 days since the last hint -> full re-hint once
+#   - schema/command version change -> full re-hint once
+#   - explicit help               -> full, always, overrides suppression
+#
+# No I/O, no globals, no clock read: `now` is a parameter and every call returns
+# a fresh HintState value, so one session's state can never leak into another.
+#
+# Provides: HintCount, HintTimestamp, HintSpan, HintSchemaVersion, HintErrorWindow,
+#           HintLevel, HintEvent, HintState, new_hint_state, decide_hint.
+
+"""Count of uses or successes of one capability in one session."""
+struct HintCount:
+    value: i64
+
+"""Caller-supplied wall-clock instant, in seconds."""
+struct HintTimestamp:
+    seconds: i64
+
+"""Length of a policy time window, in seconds."""
+struct HintSpan:
+    seconds: i64
+
+"""Schema/command version of the capability the hint describes."""
+struct HintSchemaVersion:
+    id: text
+
+"""Failure instants since the last success, oldest first, bounded to 5 entries."""
+struct HintErrorWindow:
+    times: [HintTimestamp]
+
+"""Detail level of the guidance attached to a tool response."""
+enum HintLevel:
+    Full
+    Brief
+    Corrective
+    Quiet
+
+"""What the agent just did with the capability."""
+enum HintEvent:
+    ToolSucceeded
+    ToolFailed
+    HelpRequested
+
+"""Per-session/capability/version hint state (plan §7.2)."""
+struct HintState:
+    seen_count: HintCount
+    success_count: HintCount
+    last_hint_time: HintTimestamp?
+    last_version: HintSchemaVersion?
+    recent_errors: HintErrorWindow
+    suppressed_until: HintTimestamp?
+
+fn _hint_error_window() -> HintSpan:
+    HintSpan(seconds: 600)
+
+fn _hint_corrective_error_count() -> HintCount:
+    HintCount(value: 3)
+
+fn _hint_rehint_failure_count() -> HintCount:
+    HintCount(value: 5)
+
+fn _hint_inactivity() -> HintSpan:
+    HintSpan(seconds: 2592000)
+
+"""State for a capability never used in this session."""
+pub fn new_hint_state() -> HintState:
+    HintState(seen_count: HintCount(value: 0), success_count: HintCount(value: 0),
+        last_hint_time: None, last_version: None,
+        recent_errors: HintErrorWindow(times: []), suppressed_until: None)
+
+fn _hint_push_error(window: HintErrorWindow, now: HintTimestamp) -> HintErrorWindow:
+    var out: [HintTimestamp] = []
+    var start = 0
+    if window.times.len() >= _hint_rehint_failure_count().value:
+        start = window.times.len() - _hint_rehint_failure_count().value + 1
+    var i = start
+    while i < window.times.len():
+        out.push(window.times[i])
+        i = i + 1
+    out.push(now)
+    HintErrorWindow(times: out)
+
+fn _hint_errors_within_window(window: HintErrorWindow, now: HintTimestamp) -> i64:
+    var count = 0
+    for t in window.times:
+        if now.seconds - t.seconds < _hint_error_window().seconds:
+            count = count + 1
+    count
+
+fn _hint_is_suppressed(state: HintState, now: HintTimestamp) -> bool:
+    if val Some(until) = state.suppressed_until:
+        return now.seconds < until.seconds
+    false
+
+fn _hint_version_changed(state: HintState, version: HintSchemaVersion) -> bool:
+    if val Some(last) = state.last_version:
+        return last.id != version.id
+    false
+
+fn _hint_inactive_long(state: HintState, now: HintTimestamp) -> bool:
+    if val Some(last) = state.last_hint_time:
+        return now.seconds - last.seconds >= _hint_inactivity().seconds
+    false
+
+"""Decide the hint level for one event and return the next state."""
+pub fn decide_hint(state: HintState, event: HintEvent, now: HintTimestamp, version: HintSchemaVersion) -> (HintLevel, HintState):
+    val help = match event:
+        case HintEvent.HelpRequested: true
+        case HintEvent.ToolSucceeded | HintEvent.ToolFailed: false
+    if help:
+        val helped = HintState(seen_count: state.seen_count, success_count: state.success_count,
+            last_hint_time: Some(now), last_version: Some(version),
+            recent_errors: state.recent_errors, suppressed_until: state.suppressed_until)
+        return (HintLevel.Full, helped)
+
+    val failed = match event:
+        case HintEvent.ToolFailed: true
+        case HintEvent.ToolSucceeded | HintEvent.HelpRequested: false
+    val seen = HintCount(value: state.seen_count.value + 1)
+    var success = state.success_count
+    var errors = HintErrorWindow(times: [])
+    if failed:
+        errors = _hint_push_error(state.recent_errors, now)
+    else:
+        success = HintCount(value: state.success_count.value + 1)
+
+    var level = HintLevel.Quiet
+    var suppressed_until = state.suppressed_until
+    if _hint_is_suppressed(state, now):
+        level = HintLevel.Quiet
+    elif state.seen_count.value == 0:
+        level = HintLevel.Full
+    elif failed and errors.times.len() >= _hint_rehint_failure_count().value:
+        level = HintLevel.Full
+        errors = HintErrorWindow(times: [])
+    elif failed and _hint_errors_within_window(errors, now) >= _hint_corrective_error_count().value:
+        level = HintLevel.Corrective
+        suppressed_until = Some(HintTimestamp(seconds: now.seconds + _hint_error_window().seconds))
+    elif _hint_version_changed(state, version):
+        level = HintLevel.Full
+    elif _hint_inactive_long(state, now):
+        level = HintLevel.Full
+    elif state.seen_count.value == 1:
+        level = HintLevel.Brief
+
+    var last_hint_time = state.last_hint_time
+    var last_version = state.last_version
+    val hinted = match level:
+        case HintLevel.Quiet: false
+        case HintLevel.Full | HintLevel.Brief | HintLevel.Corrective: true
+    if hinted:
+        last_hint_time = Some(now)
+        last_version = Some(version)
+
+    val next = HintState(seen_count: seen, success_count: success,
+        last_hint_time: last_hint_time, last_version: last_version,
+        recent_errors: errors, suppressed_until: suppressed_until)
+    (level, next)

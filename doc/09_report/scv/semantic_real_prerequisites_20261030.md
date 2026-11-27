@@ -1,0 +1,13 @@
+# Real semantic prerequisites implementation lane
+
+Owner `/root/impl_solver_host`; 2026-10-30; base `60f3e00e8c9d26db18fb120d16ba02d372311802`; worktree `/tmp/simple-scv-semantic-real-prerequisites-20261030`; branch `work/scv-semantic-real-prerequisites-20261030`. Implementation/coding skills applied. Exact API and diagnostic scope frozen by parent/Astra before source edits.
+
+Adds a real exported compiler-driver caller over frozen bytes: target-receipted uncached parser, actual module surfaces, HIR lowering with explicit semantic policy and actual HM Deny diagnostics. Separate supported-profile visitor and scalar HIR observations retain no new semantic IR. Authored tests include known literal values, real return-type mismatch, changing actual function counts, cleanup ownership and unsupported/stale/budget negative controls.
+
+Actual reused APIs: `parse_full_frontend_target_receipted_uncached_in_borrowed_scope_v1`, `frontend_cfg_receipt_valid_v1`, `module_surfaces_from_modules`, `module_surfaces_retained_alignment`, `hirlowering_for_module`, `use_explicit_semantic_policy`, `lower_module`, `collect_module_typecheck_receipt_v1`, and established transient/parser-owner lifecycle helpers. The no-op `type_check_impl`, cache success flags, descriptor-as-authority and synthetic five-owner empty grants are absent.
+
+No builders/tests/compiler checks/docgen/native probes were run by this worker. Admitted-runtime execution and final Astra source review are separate gates. This source slice does not complete the full goal.
+
+Astra initial source review found no P0/P1 in inspected implementation; scope clarifications added parser-order observations and explicitly unmeasured facade startup/import overhead. One static pass: staged whitespace clean, direct-env runtime guards `--working`/`--staged` PASS, executable `_spec.spl` count under `doc/06_spec` zero. These checks are not native compilation, executed semantic evidence or a production-readiness PASS.
+
+Outstanding five owner hooks: declaration owner must retain completed full parser/source-universe coverage; coherence owner must exhaust actual trait/builtin lookup scope; aspect owner must retain actual traversal/candidate-domain completion; macro owner must exhaust parser/CFG/CTFE/injection opportunities; body owner must retain actual typed-HIR/canonical verifier and dependency closure authority. Existing diagnostic receipts stay Unknown/incomplete and existing compiled-execution gates stay unavailable. Actual sealed compilation/result production, codec/native/corpus qualification, cache/output admission and BuildRunner consumer remain pending.

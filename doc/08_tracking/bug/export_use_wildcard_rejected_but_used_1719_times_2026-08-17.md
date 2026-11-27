@@ -75,3 +75,5 @@ of 1,719 and the next module in the graph fails identically.
 - `doc/08_tracking/bug/deployed_seed_predates_landed_parser_fixes_blocks_repo_2026-08-17.md`
   — why a stale deployed binary masks and shifts these failures; the observed
   blocker moved between seed builds today.
+
+**Revalidated 2026-11-02: still plausible because the report title (`export use X.*` is rejected by the compiler but used 1,719 times in its own so) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

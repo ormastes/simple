@@ -1,0 +1,32 @@
+# Purpose and audience: regression evidence for test-runner coverage owners.
+# @req REQ-SSPEC-UNIT
+# Bug: `simple test <spec> --coverage` on the single-file lane
+# (test_runner_single.spl main) ignored the flag: SIMPLE_COVERAGE was never
+# set, the spec ran uninstrumented, printed no coverage line and exited 0, so a
+# coverage request produced a plain PASS with no evidence (2026-11-13).
+# Contract: a --coverage run either publishes a `coverage:` line or fails.
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use app.io.mod.{file_exists, process_run}
+
+fn simple_binary() -> text:
+    if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+
+describe "single-file --coverage":
+    it "never reports a silent PASS without coverage evidence":
+        step("run a small passing spec with --coverage on the single-file lane")
+        val target = "test/01_unit/app/doc_coverage/doc_coverage_root_arg_spec.spl"
+        val (out, err, code) = process_run(simple_binary(), ["test", target, "--coverage", "--no-session-daemon"])
+        val all = out + err
+        step("either coverage evidence was published or the run failed closed")
+        val has_evidence = all.contains("coverage: ")
+        expect(has_evidence or code != 0).to_equal(true)
+
+    it "routes the flag into the instrumented lane":
+        step("the flag must reach the runtime-coverage contract, not be dropped")
+        val target = "test/01_unit/app/doc_coverage/doc_coverage_root_arg_spec.spl"
+        val (out, err, _code) = process_run(simple_binary(), ["test", target, "--coverage", "--no-session-daemon"])
+        val all = out + err
+        val instrumented = all.contains("coverage: ") or all.contains("child APK") or all.contains("coverage evidence")
+        expect(instrumented).to_equal(true)

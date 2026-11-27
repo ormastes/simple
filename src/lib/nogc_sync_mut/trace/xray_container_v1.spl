@@ -1,0 +1,137 @@
+# XRay aspect containers V1: switchable profile / logging containers fed by
+# either compiled-in (static) hooks or the XRay spy (dynamic sleds).
+#
+# Containers:
+#   Profile - keeps the raw edges it saw; profile() folds them with
+#             trace_profile_fold_v1 (calls, inclusive/exclusive ns, depth).
+#   Logging - "enter <name>" / "exit <name>" lines, kept paired: an exit is
+#             logged only when it closes the innermost logged entry, else it
+#             is counted in `unpaired_exits`.
+# Modes:
+#   Static  - instrumentation is compiled in and calls hook_enter/hook_exit;
+#             no sled is patched. When Off, a hook returns at its first
+#             compare (no event, no allocation, no proxy).
+#   Dynamic - edges come from XraySpyV1: apply() enables the spy (sleds /
+#             flag guards patched by the leaf) when a container goes active
+#             and disables it (sleds unpatched) on Off; pump() moves drained
+#             spy events into the active container.
+# Switch: switch_to() enables, disables (Off) or swaps the active container
+# at run time. Each container keeps its own data across swaps; a logging
+# segment re-entered after a swap starts with an empty open stack.
+#
+# Concurrency: single control-plane owner, as XraySpyV1; no lock.
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_profile_v1.{TraceProfileV1, trace_profile_fold_v1}
+use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.{XRAY_LLVM_STATE_IDLE_V1}
+use std.nogc_sync_mut.trace.xray_spy_v1.{XraySpyV1}
+
+pub enum XrayContainerModeV1:
+    Static
+    Dynamic
+
+pub enum XrayContainerKindV1:
+    Off
+    Profile
+    Logging
+
+pub class XrayContainerSwitchV1:
+    mode: XrayContainerModeV1
+    active: XrayContainerKindV1
+    names: [text]
+    profile_events: [TraceEventV1]
+    log: [text]
+    log_open: [u32]
+    unpaired_exits: i64
+    spy_cursor: i64
+
+fn _xray_edge_event_v1(kind: TraceEventKindV1, function_id: u32, ts: u64) -> TraceEventV1:
+    TraceEventV1(kind: kind, flags: 0, generation: 0u64, module_instance: 0u64,
+        function_id: function_id, site_id: function_id, context_id: 0u64, sequence: 0u64,
+        timestamp: ts, span_token: 0u64, payload0: 0u64, payload1: 0u64, payload2: 0u64)
+
+impl XrayContainerSwitchV1:
+    # Starts Off. names: 1-based function id -> name for static hooks.
+    static fn create(mode: XrayContainerModeV1, names: [text]) -> XrayContainerSwitchV1:
+        XrayContainerSwitchV1(mode: mode, active: XrayContainerKindV1.Off, names: names,
+            profile_events: [], log: [], log_open: [], unpaired_exits: 0, spy_cursor: 0)
+
+    fn is_on() -> bool:
+        self.active != XrayContainerKindV1.Off
+
+    me switch_to(kind: XrayContainerKindV1):
+        if kind == XrayContainerKindV1.Logging and self.active != XrayContainerKindV1.Logging:
+            self.log_open = []
+        self.active = kind
+
+    # Dynamic mode: switch, then make the spy match (patched iff on).
+    me apply(spy: XraySpyV1, kind: XrayContainerKindV1, config: TraceConfigV1,
+            selection: TraceSelectionV1) -> Result<i64, TraceFailureV1>:
+        val idle = spy.adapter.state_code() == XRAY_LLVM_STATE_IDLE_V1
+        if kind == XrayContainerKindV1.Off:
+            if not idle:
+                self.pump(spy)
+                spy.disable()?
+                self.pump(spy)
+            self.switch_to(kind)
+            return Ok(0)
+        if idle:
+            spy.enable(config, selection)?
+            self.spy_cursor = 0
+        else:
+            # Swap while patched: edges so far belong to the old container.
+            self.pump(spy)
+        self.switch_to(kind)
+        Ok(1)
+
+    # Dynamic mode: collect from the spy and deliver new events. Count delivered.
+    me pump(spy: XraySpyV1) -> i64:
+        spy.collect()
+        var n = 0
+        while self.spy_cursor < spy.events.len():
+            val event = spy.events[self.spy_cursor]
+            self.spy_cursor = self.spy_cursor + 1
+            val name = spy.backend.edges.site_name(event.function_id as i64)
+            if self._deliver(event, name): n = n + 1
+        n
+
+    # Static mode hooks, compiled into the instrumented function.
+    me hook_enter(function_id: u32, ts: u64):
+        if self.active == XrayContainerKindV1.Off: return
+        self._deliver(_xray_edge_event_v1(TraceEventKindV1.Entry, function_id, ts),
+            self._name(function_id))
+
+    me hook_exit(function_id: u32, ts: u64):
+        if self.active == XrayContainerKindV1.Off: return
+        self._deliver(_xray_edge_event_v1(TraceEventKindV1.Exit, function_id, ts),
+            self._name(function_id))
+
+    fn _name(function_id: u32) -> text:
+        val id = function_id as i64
+        if id < 1 or id > self.names.len(): return ""
+        self.names[id - 1]
+
+    me _deliver(event: TraceEventV1, name: text) -> bool:
+        if self.active == XrayContainerKindV1.Profile:
+            self.profile_events.push(event)
+            return true
+        if self.active != XrayContainerKindV1.Logging: return false
+        if event.kind == TraceEventKindV1.Entry:
+            self.log_open.push(event.function_id)
+            self.log.push("enter {name}")
+            return true
+        if event.kind != TraceEventKindV1.Exit and event.kind != TraceEventKindV1.TailExit: return false
+        val depth = self.log_open.len()
+        if depth > 0 and self.log_open[depth - 1] == event.function_id:
+            self.log_open.pop()
+            self.log.push("exit {name}")
+            return true
+        self.unpaired_exits = self.unpaired_exits + 1
+        false
+
+    fn profile() -> TraceProfileV1:
+        trace_profile_fold_v1(self.profile_events)
+
+    fn log_lines() -> [text]:
+        self.log
+
+export XrayContainerModeV1, XrayContainerKindV1, XrayContainerSwitchV1

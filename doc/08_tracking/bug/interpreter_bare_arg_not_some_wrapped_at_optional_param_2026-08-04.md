@@ -1,5 +1,22 @@
 # Interpreter does not Some-wrap a bare argument at a `T?` parameter — `case Some(x)` matches nothing and the whole `match` falls through
 
+## Verification 2026-11-25 (release/1.0.0, Windows host)
+
+- **verified fixed**: the committed minimal fixture
+  `test/fixtures/optional_arg_coercion/opt_min_main.spl`, run on the pinned
+  Rust seed (`bin/simple.exe` v1.0.0-rc.1) under the exact broken-path
+  environment (`SIMPLE_RUNTIME_MODE=interpreter SIMPLE_EXECUTION_MODE=interpret`),
+  prints all four correct lines — `MAIN_box=Some:x`, `MAIN_box_nil=None`,
+  `MAIN_int=Some:7`, `MAIN_text=Some:hi` — no `FELL_THROUGH`.
+- The fix is present in source: the flat-`Some` arm in
+  `src/compiler_rust/compiler/src/interpreter_patterns.rs` (see the JIT-alignment
+  comment at :790 and the regression assertions at :1395/:1416).
+- **limit**: the second fixture `selector_child_combinator_main.spl` cannot run
+  at HEAD — its import chain now carries `@representation_boundary`, which the
+  pinned seed rejects (`unknown decorator` at :61 via `detect_profile`). The
+  primary fixture plus source inspection cover the pattern-match fix itself.
+- Status remains **FIXED**; no code change needed.
+
 - **Filed:** 2026-08-04
 - **Status:** FIXED 2026-08-05 in
   `src/compiler_rust/compiler/src/interpreter_patterns.rs` (the `Pattern::Enum`

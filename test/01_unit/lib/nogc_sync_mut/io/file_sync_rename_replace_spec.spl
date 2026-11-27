@@ -1,0 +1,68 @@
+use std.spec.*
+use std.io_runtime.{file_write, file_read, file_exists, file_delete, file_rename}
+use std.io_runtime.{dir_create_all}
+
+fn tmp_dir(name: text) -> text:
+    val dir = "build/spec_tmp/{name}"
+    dir_create_all(dir)
+    dir
+
+extern fn rt_file_sync(path: text) -> bool
+extern fn rt_file_rename(src: text, dst: text) -> bool
+
+describe "rt_file_sync and rt_file_rename (host-independent contract)":
+    it "syncs a freshly written file":
+        val dir = tmp_dir("sync_rename_a")
+        val path = "{dir}/fresh.txt"
+        expect(file_write(path, "payload")).to_equal(true)
+        expect(rt_file_sync(path)).to_equal(true)
+        file_delete(path)
+
+    it "reports false when syncing a missing file":
+        val dir = tmp_dir("sync_rename_b")
+        expect(rt_file_sync("{dir}/absent.txt")).to_equal(false)
+
+    it "renames onto an existing destination atomically (replace)":
+        val dir = tmp_dir("sync_rename_c")
+        val src = "{dir}/src.txt"
+        val dst = "{dir}/dst.txt"
+        expect(file_write(src, "new")).to_equal(true)
+        expect(file_write(dst, "old")).to_equal(true)
+        expect(file_rename(src, dst)).to_equal(true)
+        expect(file_read(dst)).to_equal("new")
+        expect(file_exists(src)).to_equal(false)
+        file_delete(dst)
+
+    it "renames onto a missing destination":
+        val dir = tmp_dir("sync_rename_d")
+        val src = "{dir}/src.txt"
+        val dst = "{dir}/dst.txt"
+        expect(file_write(src, "only")).to_equal(true)
+        expect(file_rename(src, dst)).to_equal(true)
+        expect(file_read(dst)).to_equal("only")
+        file_delete(dst)
+
+    it "fails to rename a missing source":
+        val dir = tmp_dir("sync_rename_e")
+        expect(file_rename("{dir}/nothing.txt", "{dir}/dst.txt")).to_equal(false)
+
+    it "rt_file_rename replaces an existing file destination":
+        val dir = tmp_dir("sync_rename_f")
+        val src = "{dir}/src.txt"
+        val dst = "{dir}/dst.txt"
+        expect(file_write(src, "fresh")).to_equal(true)
+        expect(file_write(dst, "stale")).to_equal(true)
+        expect(rt_file_rename(src, dst)).to_equal(true)
+        expect(file_read(dst)).to_equal("fresh")
+        expect(file_exists(src)).to_equal(false)
+        file_delete(dst)
+
+    it "rt_file_rename moves onto a missing destination and rejects a missing source":
+        val dir = tmp_dir("sync_rename_g")
+        val src = "{dir}/src.txt"
+        val dst = "{dir}/dst.txt"
+        expect(file_write(src, "only")).to_equal(true)
+        expect(rt_file_rename(src, dst)).to_equal(true)
+        expect(file_read(dst)).to_equal("only")
+        expect(rt_file_rename(src, dst)).to_equal(false)
+        file_delete(dst)

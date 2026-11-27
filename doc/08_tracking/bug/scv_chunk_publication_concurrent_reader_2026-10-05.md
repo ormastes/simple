@@ -84,3 +84,5 @@ collector on both backends. Retain exact stdout checks/failure counts, wall time
 RSS and closure receipts. The prior compile-snapshot reclamation regression
 remains relevant because per-file transient scope still owns staged hash buffers.
 No running source snapshot, build request, or cache was modified by this repair.
+
+**Revalidated 2026-11-02: still plausible because OPEN; source-level publication race identified, incident causality not yet reproduced deterministically; no merged fix commit with a passing regression is cited in this doc.**

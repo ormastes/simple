@@ -23,3 +23,10 @@ Markdown remains a positive control. A valid first semantic URI followed by a
 bad second URI checks the production batch row and the exact later UTF8
 Markdown byte interval. No generic nonzero status or source-text search is an
 acceptance oracle.
+
+
+## Authored root lint scenarios — execution UNRUN (2026-10-25)
+
+The executable spec now invokes the actual root `run_lint_command` handler on temporary Markdown and source files. It checks that critical lint rejects line destinations, ordinary lint reports them, revision-authenticated dry-run preserves bytes, and `--fix` rewrites to a semantic URI accepted by the next lint command. Duplicate authority options, stale source revisions, invalid semantic URIs, and duplicate source bindings must fail while preserving the document. A temporary `simple.sdn` exercises `semantic_markdown_links: deny`, `allow`, and `warn` through target-relative config discovery.
+
+These scenarios are authored assertions, not an execution receipt. SPipe docgen, maintain scan, and qualified runtime execution are UNRUN while the Phase 3 matrix owns the memory budget. The selected reviewed transient-report exception remains OPEN because no authoritative review/identity contract was found; no path-based bypass was added.

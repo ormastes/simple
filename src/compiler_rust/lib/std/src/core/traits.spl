@@ -181,7 +181,7 @@ trait Iterator:
         loop:
             match self.next():
                 case Some(v): last = Some(v)
-                case nil: break
+                case None: break
         return last
 
     fn nth(n: u64) -> Option<Self.Item>:
@@ -189,19 +189,8 @@ trait Iterator:
             self.next()
         return self.next()
 
-    # ponytail: Array-only compatibility ceiling. The generic
-    # `collect<C: FromIterator<Self.Item>>() -> C` signature cannot be restored
-    # until HIR retains method generic parameters and native lowering can emit
-    # `C.from_iter(self)`. Existing working callers all collect into arrays.
-    # Track restoration in:
-    # doc/08_tracking/bug/iterator_collect_generic_restoration_2026-07-17.md
-    fn collect(self) -> [Self.Item]:
-        var items: [Self.Item] = []
-        loop:
-            match self.next():
-                case Some(item): items.push(item)
-                case nil: break
-        items
+    fn collect<C: FromIterator<Self.Item>>(self) -> C:
+        return C.from_iter(self)
 
 # FromIterator trait - create collections from iterators
 trait FromIterator<T>:
@@ -212,6 +201,37 @@ trait IntoIterator:
     type Item
     type IntoIter: Iterator  # Bounds with generics (Iterator<Item=Self.Item>) not yet supported
     fn into_iter() -> Self.IntoIter
+
+struct ArraySliceIter<T>:
+    data: [T]
+    index: usize
+
+impl Iterator for ArraySliceIter<T>:
+    type Item = T
+
+    fn next() -> Option<Self.Item>:
+        if self.index < self.data.len():
+            val item = self.data[self.index]
+            self.index = self.index + 1
+            Some(item)
+        else:
+            None
+
+impl IntoIterator for [T]:
+    type Item = T
+    type IntoIter = ArraySliceIter<T>
+
+    fn into_iter() -> Self.IntoIter:
+        ArraySliceIter { data: self, index: 0 }
+
+impl FromIterator<T> for [T]:
+    fn from_iter<I: Iterator<Item=T>>(iter: I) -> Self:
+        var items: [T] = []
+        loop:
+            match iter.next():
+                case Some(item): items.push(item)
+                case None: break
+        items
 
 # Add trait - addition operator
 trait Add<Rhs = Self>:
@@ -476,7 +496,7 @@ trait BufRead:
                     buf.extend_from_slice(&slice_to_i)
                     self.consume(i + 1)
                     return Ok(read + i + 1)
-                case nil:
+                case None:
                     buf.extend_from_slice(available)
                     val len = available.len()
                     self.consume(len)
@@ -603,7 +623,7 @@ trait DoubleEndedIterator:
                 case Some(item):
                     if predicate(&item):
                         return Some(item)
-                case nil:
+                case None:
                     return nil
 
 # ExactSizeIterator - knows its exact length

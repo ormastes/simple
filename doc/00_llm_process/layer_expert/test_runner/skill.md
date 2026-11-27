@@ -291,9 +291,20 @@ redeploy this lane's contract holds only for the `Results:` line. Note
   its cursor-invariant spec is RED for the interpreter trap below, not for a
   defect in the code under test.
 - [prevention_mocks](../../feature_expert/prevention_mocks/skill.md) — its
-  directory-wide scope is blocked specifically by this layer's lack of a
-  per-directory config/fixture hook (`find_config_file`,
-  `test_runner/test_config.spl:297-302`, cwd-relative parent-walk only).
+  directory-wide scope landed 2026-11-04 as this layer's first per-directory
+  hook: `std.nogc_sync_mut.spec.dir_prevention` walks the spec's directory
+  chain for `_prevention.sdn` (cached per directory) and both dispatch
+  sites — the lane `match` in `test_runner_main.spl` (`[route] mode=...`,
+  directory targets, all lanes) and the direct single-file lane in
+  `test_runner_single.spl` `main` (file targets: "light daemon requires
+  Linux /proc; running directly") — set and restore
+  `SIMPLE_SPEC_DIR_PREVENTION` around the child. Trap met while landing:
+  the env was first set inside `run_test_file_interpreter`, which exists in
+  BOTH `src/lib/nogc_sync_mut/test_runner/` and `src/app/test_runner_new/`
+  under the same name; the copy that actually ran was neither of the edited
+  ones (no marker print ever appeared), so the set moved up to the
+  dispatcher. Any new spawn site outside those two must do the same or that
+  lane silently runs policy-free.
 
 ## Update Rule
 
@@ -523,3 +534,54 @@ CLI, seed parser behind main); measure with
 `sh scripts/check/sspec-score-seed-lane.shs <spec|dir>`, which prints both
 surfaces per spec from proven copies of the real scorer modules. Feature
 expert: [modern_sspec](../../feature_expert/modern_sspec/skill.md).
+
+
+## HAL scenario execution evidence
+
+Follow the [HAL testing procedure](../../../07_guide/infra/testing.md#hal-and-runtime-tests-through-simple)
+for Simple facade/FFI tests. Retain actual compiler/runtime/provider identity
+and executed example counts; host guards, interpreter emulation, missing
+externs, and supporting C-harness passes cannot qualify native Simple HAL
+acceptance.
+
+## Native resource projection regression (2026-10-28)
+
+Retained phase2 code can read imported `ScopedChildRun.usage` and
+`budget_status` at offset zero after a `Result` tuple extraction. Preserve
+resource evidence through owner-module projection helpers; nil substitution
+would conceal the defect. Native tests must include distinct nonzero metrics,
+absent evidence, and the limited-result path. See
+`doc/08_tracking/bug/phase2_runner_tuple_resource_projection_2026_10_28.md` and
+`scripts/check/check-native-resource-projection.shs`.
+
+
+Native SDN group counters on the retained phase2 compiler need explicit array
+mutation: indexed assignment can leave zero counts. See
+`doc/08_tracking/bug/phase2_runner_indexed_group_accumulation_2026_10_28.md`
+and the native `check-native-sdn-groups.shs` regression gate.
+
+
+Public SDN aliases (`--sdn`, `--format sdn`, `--format=sdn`) must enter the same
+transport admission path. Do not bypass unsupported V4 process ownership by
+printing a partial legacy console summary. See
+`doc/08_tracking/bug/test_runner_sdn_equals_transport_bypass_2026_10_28.md`.
+
+The Rust diagnostic driver's scenario artifact slugs are bounded to 180 ASCII
+bytes. Long names retain a readable prefix and a SHA-256 suffix over the
+original length-framed group/name fields; short paths are unchanged. Preserve
+full names in the manifest. A manifest-write warning is separate from scenario
+assertion outcomes. The pure-Simple runner does not share this writer in the
+inspected source. See `doc/08_tracking/bug/scenario_artifact_component_length_2026_10_29.md`.
+
+## BLOCKED outcome class (2026-11-12)
+
+Environment-gated examples — `pending("BLOCKED: ...")` and failures whose
+message is `precondition: ...` — are counted BLOCKED by
+`parse_blocked_examples` (`test_executor_parsing.spl`), on both the single-file
+lane (`test_runner_single.spl`) and the directory lane (`make_result_from_output`).
+A real failure keeps the file `ERROR`; otherwise any blocked example makes it
+`outcome=BLOCKED`, `blocked=<n>` on the verdict line, `, <n> blocked` on
+`Results:`, exit 6, DB status `blocked`. The Rust seed (`bdd.rs` +
+`basic.rs report_spec_file_verdict`) prints the same field. Guide:
+`doc/07_guide/infra/testing.md` § BLOCKED. Spec:
+`test/01_unit/app/test_daemon/blocked_outcome_spec.spl`.

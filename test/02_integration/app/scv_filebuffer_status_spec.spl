@@ -1,0 +1,136 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+Purpose: Proves the SCV one-read FileBuffer (SCV-MIG-19, scv_v2_final_report
+§6.5): a snapshot reads each changed file exactly once, and everything —
+content id, chunk-store write, CDC chunk map, file object — derives from that
+single buffer. Byte-compat is critical: buffer-path ids must equal the legacy
+read-per-derivation path's ids, so existing repositories' hashes never change.
+Single-read is proven by clobbering the on-disk file AFTER the buffer read and
+showing the written objects still carry the ORIGINAL content. Oversize files
+are rejected against SCV_MAX_* bounds before allocation.
+Audience: Maintainers of the SCV storage layer.
+"""
+# @req: REQ-SSPEC-INTEGRATION
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+
+use app.io.mod (cwd, dir_create_all, file_write)
+
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.scv.store.{scv_write_chunk_from_file, scv_write_file_object, scv_content_id_for_file}
+use std.scv.file_buffer.{ScvFileBuffer, scv_file_buffer_read, scv_file_buffer_read_bounded, scv_file_buffer_content_id, scv_file_buffer_write_objects}
+
+# Fixture roots must live where BOTH the POSIX fixture shell and the Simple
+# filesystem APIs can address them: the runtime does not translate a POSIX
+# "/tmp" prefix on Windows, so anchor under the host temp dir instead.
+fn _new_root() -> text:
+    # Host-portable fixture: canonical forward-slash spelling under the host
+    # temp area (POSIX /tmp and /bin/sh mktemp do not resolve on Windows).
+    val root = secure_temp_dir(path_absolute(cwd()), "scv-fb-").unwrap()
+    expect(dir_create_all("{root}/.scv/objects/chunks")).to_equal(true)
+    expect(dir_create_all("{root}/.scv/objects/files")).to_equal(true)
+    root
+
+fn _write_file(path: text, content: text):
+    expect(file_write(path, content)).to_equal(true)
+
+fn _seq_content() -> text:
+    # Deterministic equivalent of `seq 1 1500 | tr '\n' 'x'` (host-portable;
+    # the original POSIX pipeline cannot run on Windows).
+    var out = ""
+    for i in 1..1501:
+        out = out + "{i}x"
+    out
+
+    # The FileBuffer write path also publishes a structural record under
+    # objects/syntax, so the minimal store fixture must include that dir.
+    val (out, _err, _code) = process_run("/bin/sh", ["-c", "d=$(mktemp -d {_fixture_base()}/scv-fb.XXXXXX); mkdir -p \"$d/.scv/objects/chunks\" \"$d/.scv/objects/files\" \"$d/.scv/objects/syntax\"; printf '%s' \"$d\""])
+    out.trim()
+
+fn _fixture_base() -> text:
+    get_temp_dir().replace("\\", "/")
+
+fn _write_file(path: text, spec: text):
+    # spec is a shell printf format producing the file's content
+    process_run("/bin/sh", ["-c", "{spec} > {path}"])
+
+
+describe "SCV one-read FileBuffer":
+    # @manual scenario evidence
+    it "matches the legacy multi-read path byte-for-byte (small file)":
+        # @req REQ-SSPEC-INTEGRATION
+        step("matches the legacy multi-read path byte-for-byte (small file)")
+        val root_a = _new_root()
+        val root_b = _new_root()
+        val path_a = "{root_a}/a.txt"
+        val path_b = "{root_b}/a.txt"
+        _write_file(path_a, "hello scv\n")
+        _write_file(path_b, "hello scv\n")
+        # legacy path: separate reads for content id, chunk copy, file object
+        val legacy_chunk = scv_write_chunk_from_file(root_a, path_a).unwrap()
+        val legacy_file = scv_write_file_object(root_a, "a.txt", legacy_chunk, 10, 42).unwrap()
+        # buffer path: one read
+        val buffer = scv_file_buffer_read(path_b)
+        expect(buffer.error).to_equal("")
+        expect(buffer.size).to_equal(10)
+        val (buf_file, buf_chunk) = scv_file_buffer_write_objects(root_b, "a.txt", buffer, 42).unwrap()
+        expect(buf_chunk).to_equal(legacy_chunk)
+        expect(buf_file).to_equal(legacy_file)
+        expect(scv_file_buffer_content_id(buffer).unwrap()).to_equal(legacy_chunk)
+
+    it "matches the legacy path on a CDC-chunked file (> chunk min size)":
+        # @req REQ-SSPEC-INTEGRATION
+        step("matches the legacy path on a CDC-chunked file (> chunk min size)")
+        val root_a = _new_root()
+        val root_b = _new_root()
+        val path_a = "{root_a}/big.bin"
+        val path_b = "{root_b}/big.bin"
+        _write_file(path_a, _seq_content())
+        _write_file(path_b, _seq_content())
+        val size_a = scv_file_buffer_read(path_a).size
+        val legacy_chunk = scv_write_chunk_from_file(root_a, path_a).unwrap()
+        val legacy_file = scv_write_file_object(root_a, "big.bin", legacy_chunk, size_a, 42).unwrap()
+        val buffer = scv_file_buffer_read(path_b)
+        expect(buffer.error).to_equal("")
+        expect(buffer.size).to_equal(size_a)
+        val (buf_file, buf_chunk) = scv_file_buffer_write_objects(root_b, "big.bin", buffer, 42).unwrap()
+        expect(buf_chunk).to_equal(legacy_chunk)
+        expect(buf_file).to_equal(legacy_file)
+
+    it "reads exactly once: clobbering the file after buffering changes nothing":
+        # @req REQ-SSPEC-INTEGRATION
+        step("reads exactly once: clobbering the file after buffering changes nothing")
+        val root = _new_root()
+        val path = "{root}/once.txt"
+        _write_file(path, "original content\n")
+        val buffer = scv_file_buffer_read(path)
+        expect(buffer.error).to_equal("")
+        val original_id = scv_file_buffer_content_id(buffer).unwrap()
+        # clobber the on-disk file — if any derivation re-read the disk, the
+        # written chunk id would follow the new content
+        _write_file(path, "CLOBBERED after buffer read\n")
+        val (_file_id, chunk) = scv_file_buffer_write_objects(root, "once.txt", buffer, 42).unwrap()
+        expect(chunk).to_equal(original_id)
+        expect(chunk == scv_content_id_for_file(path).unwrap()).to_equal(false)
+
+    it "rejects an oversize file before reading it":
+        # @req REQ-SSPEC-INTEGRATION
+        step("rejects an oversize file before reading it")
+        val root = _new_root()
+        val path = "{root}/big.txt"
+        _write_file(path, "0123456789")
+        val buffer = scv_file_buffer_read_bounded(path, 4)
+        expect(buffer.error.contains("over bound")).to_equal(true)
+        expect(buffer.bytes.len()).to_equal(0)
+        # in-bound read succeeds through the same entry point
+        val ok = scv_file_buffer_read_bounded(path, 10)
+        expect(ok.error).to_equal("")
+        expect(ok.size).to_equal(10)

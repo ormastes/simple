@@ -1,0 +1,39 @@
+# @req REQ-LOCKLESS-MAP-001
+# Public map operations keep returning one exact result slot across publication.
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_async_mut.concurrent.lockless_map_i64.{LocklessMapI64}
+use std.nogc_async_mut.async_ring.async_ref.{AsyncRefStateI64}
+
+fn boundary_contract_map(keys: i64, descriptors: i64, waiters: i64) -> LocklessMapI64:
+    unsafe(capabilities: [ffi]):
+        match LocklessMapI64.create(keys, descriptors, descriptors, waiters):
+            case Ok(map): map
+            case Err(error): fail("boundary contract map creation failed: {error}")
+
+fn close_boundary_contract_map(map: LocklessMapI64):
+    unsafe(capabilities: [ffi]): map.close_quiescent()
+
+describe "LocklessMapI64 public request integration":
+    it "joins repeated map requests to one exact slot before and after publication":
+        step("Preserve exact keys at fixed capacity")
+        val map = boundary_contract_map(4, 4, 2)
+        val key = -9223372036854775807i64 - 1i64
+        val value = 9223372036854775807i64
+        unsafe(capabilities: [ffi]):
+            val original = map.request(key, 8101).unwrap()
+            val joined_before = map.request(key, 8101).unwrap()
+            expect(joined_before.same_reference(original)).to_equal(true)
+            expect(map.find(key).unwrap().same_reference(original)).to_equal(true)
+            expect(map.get(key).unwrap().same_reference(original)).to_equal(true)
+            expect(map.contains_key(key)).to_equal(true)
+            expect(map.contains_key(0)).to_equal(false)
+            expect(original.try_start()).to_equal(true)
+            expect(original.complete(value).unwrap()).to_equal(true)
+            val joined_after = map.request(key, 8101).unwrap()
+            expect(joined_after.same_reference(original)).to_equal(true)
+            expect(map.find(key).unwrap().same_reference(original)).to_equal(true)
+            match joined_after.try_ready():
+                case AsyncRefStateI64.Ready(observed): expect(observed).to_equal(value)
+                case state: fail("post-publication map join lost the exact scalar result: {state}")
+        close_boundary_contract_map(map)

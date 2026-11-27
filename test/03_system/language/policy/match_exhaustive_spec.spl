@@ -1,0 +1,73 @@
+# Requirement: match exhaustiveness policy (warning now, error staged; critical profile already error)
+"""
+# Non-exhaustive value match is diagnosed
+
+A match over a closed enum that omits a variant (and has no wildcard) gets
+MEXH001 with severity warning (LSP severity 2) today. The error severity is
+staged. Under the `critical` assurance profile the hard error already exists
+(`match_coverage_requires_hard_error`). Reuses the helpers of
+test/01_unit/compiler/lint/mexh004_dedup_spec.spl and
+test/01_unit/compiler/semantics/match_coverage_critical_spec.spl.
+
+| Scenario | Status |
+|----------|--------|
+| missing variant -> MEXH001 warning (severity 2) | passing |
+| missing variant message names the variant | passing |
+| exhaustive match -> no diagnostic | passing |
+| wildcard arm absorbs missing variants | passing |
+| coverage escalates to hard error only under critical | passing |
+| fully covered match never escalates | passing |
+| default-profile missing variant is severity 1 (error) | see match_exhaustive_staged_spec (in-development) |
+"""
+# @tag: system, language, policy, diag
+
+use std.spec.*
+use app.cli.query_lint_checks.{_check_match_exhaustiveness_text}
+use app.cli.query_rich_common.{_DIAG_COLLECT_MODE, _DIAG_COLLECTED}
+use compiler.semantics.match_exhaustiveness.{build_match_coverage, match_coverage_requires_hard_error}
+
+fn mexh(lines: [text]) -> [text]:
+    _DIAG_COLLECT_MODE = true
+    _DIAG_COLLECTED = []
+    val count = _check_match_exhaustiveness_text(lines, "policy.spl", "json")
+    val result = _DIAG_COLLECTED
+    _DIAG_COLLECTED = []
+    _DIAG_COLLECT_MODE = false
+    expect(count).to_equal(result.len())
+    result
+
+val enum_lines = ["enum Color:", "    Red", "    Green", "    Blue", ""]
+
+fn missing_blue() -> [text]:
+    mexh(enum_lines + ["fn f(c: Color) -> i64:", "    match c:", "        case Red: 1", "        case Green: 2"])
+
+describe "non-exhaustive match diagnostic":
+    it "emits MEXH001 at warning severity for a missing enum variant":
+        val ds = missing_blue()
+        expect(ds.len()).to_equal(1)
+        expect(ds[0]).to_contain("\"code\":\"MEXH001\"")
+        expect(ds[0]).to_contain("\"severity\":2")
+
+    it "names the missing variant":
+        val ds = missing_blue()
+        expect(ds.len()).to_equal(1)
+        expect(ds[0]).to_contain("Blue")
+
+    it "is silent when every variant is covered":
+        val ds = mexh(enum_lines + ["fn f(c: Color) -> i64:", "    match c:", "        case Red: 1", "        case Green: 2", "        case Blue: 3"])
+        expect(ds.len()).to_equal(0)
+
+    it "is silent when a wildcard arm absorbs the rest":
+        val ds = mexh(enum_lines + ["fn f(c: Color) -> i64:", "    match c:", "        case Red: 1", "        case _: 0"])
+        expect(ds.len()).to_equal(0)
+
+describe "severity by profile":
+    it "keeps a missing variant a warning for non-critical profiles and an error for critical":
+        val cov = build_match_coverage(1, 1, "Color", [0, 1, 2], ["Red", "Green", "Blue"], [0, 1], false)
+        expect(match_coverage_requires_hard_error(cov, "moderate")).to_be_false()
+        expect(match_coverage_requires_hard_error(cov, "strict")).to_be_false()
+        expect(match_coverage_requires_hard_error(cov, "critical")).to_be_true()
+
+    it "does not escalate a fully covered match even under critical":
+        val cov = build_match_coverage(1, 1, "Color", [0, 1, 2], ["Red", "Green", "Blue"], [0, 1, 2], false)
+        expect(match_coverage_requires_hard_error(cov, "critical")).to_be_false()

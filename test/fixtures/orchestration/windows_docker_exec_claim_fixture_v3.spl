@@ -1,0 +1,190 @@
+# SCRIPTED lower-port fixture for the actual claim consumer. No native file,
+# deployment authority, Engine response or verified Host admission is provided.
+use std.common.contracts.container.exec_state_access_v3.*
+use std.common.contracts.container.execution_v2.ContainerHostScopeV2
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+use std.common.contracts.container.exec_v3.*
+use std.common.contracts.container.exec_admission_v3.*
+use std.common.contracts.container.windows_stream_v3.*
+use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, ContainerOutputResourcesV2}
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.orchestration.host_runtime_exec_v3.{HostRuntimeExecIntentV3, host_runtime_exec_intent_digest_v3}
+use std.nogc_async_mut.container.providers.windows.docker_engine_codec_v3.*
+use std.nogc_async_mut.container.providers.windows.docker_exec_claim_v3.*
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.*
+
+# Retain owner values BEFORE assertions. These scripted copies are never used
+# as independent continuations or as evidence of native generation enforcement.
+var claim_fixture_owners_v3: [WindowsDockerExecClaimV3] = []
+var claim_fixture_records_v3: Dict<text, text> = {}
+var claim_fixture_new_publications_v3: Dict<text, i64> = {}
+
+pub fn claim_fixture_owner_v3(outcome: WindowsDockerExecClaimOutcomeV3) -> Result<WindowsDockerExecClaimV3, text>:
+    match outcome:
+        case WindowsDockerExecClaimOutcomeV3.Ready(owner):
+            claim_fixture_owners_v3.push(owner)
+            Ok(owner)
+        case WindowsDockerExecClaimOutcomeV3.CleanupRequired(owner, reason):
+            claim_fixture_owners_v3.push(owner)
+            Err(reason)
+        case WindowsDockerExecClaimOutcomeV3.Rejected(reason): Err(reason)
+
+pub fn claim_fixture_failure_owner_v3(outcome: WindowsDockerExecClaimOutcomeV3) -> Result<WindowsDockerExecClaimV3, text>:
+    match outcome:
+        case WindowsDockerExecClaimOutcomeV3.CleanupRequired(owner, _reason):
+            claim_fixture_owners_v3.push(owner)
+            Ok(owner)
+        case WindowsDockerExecClaimOutcomeV3.Ready(owner):
+            claim_fixture_owners_v3.push(owner)
+            Err("expected retained failure, got ready")
+        case WindowsDockerExecClaimOutcomeV3.Rejected(reason): Err(reason)
+
+fn claim_fixture_kind_v3(kind: ContainerExecStateRecordKindV3) -> text:
+    match kind:
+        case ContainerExecStateRecordKindV3.Create: "create"
+        case ContainerExecStateRecordKindV3.Birth: "birth"
+        case ContainerExecStateRecordKindV3.Start: "start"
+
+pub class ScriptedWindowsExecStateAccessV3:
+    bound: ContainerExecStateBindingV3
+    namespace: text
+    close_failures: i64 = 0
+    readback_failure: bool = false
+    closed: bool = false
+
+impl ContainerExecStateAccessV3 for ScriptedWindowsExecStateAccessV3:
+    fn binding() -> ContainerExecStateBindingV3: self.bound
+
+    me read_record(kind: ContainerExecStateRecordKindV3) -> Result<text, text>:
+        if self.closed: return Err("scripted-access-closed")
+        if self.readback_failure: return Err("scripted-readback-failure")
+        val key = self.namespace + ":" + claim_fixture_kind_v3(kind)
+        if not claim_fixture_records_v3.contains_key(key): return Err("scripted-record-unknown")
+        Ok(claim_fixture_records_v3[key])
+
+    me publish_record_no_replace(kind: ContainerExecStateRecordKindV3, bytes: text) -> ContainerExecStatePublishResultV3:
+        if self.closed:
+            return ContainerExecStatePublishResultV3(false, None, "scripted-access-closed")
+        val key = self.namespace + ":" + claim_fixture_kind_v3(kind)
+        if claim_fixture_records_v3.contains_key(key):
+            return ContainerExecStatePublishResultV3(false, Some(claim_fixture_records_v3[key]), "")
+        claim_fixture_records_v3[key] = bytes
+        claim_fixture_new_publications_v3[key] = 1
+        ContainerExecStatePublishResultV3(true, None, "")
+
+    me close() -> ContainerExecStateCloseResultV3:
+        if self.close_failures > 0:
+            self.close_failures = self.close_failures - 1
+            return ContainerExecStateCloseResultV3(false, true, "scripted-close-retained")
+        self.closed = true
+        ContainerExecStateCloseResultV3(true, false, "")
+
+pub fn claim_fixture_access_v3(plan: WindowsContainerStreamPlanV3,
+        readback_failure: bool = false, close_failures: i64 = 0) -> ScriptedWindowsExecStateAccessV3:
+    val admission = claim_fixture_admission_v3(plan)
+    val parent = plan.workload
+    val scope = ContainerHostScopeV2(physical_host_id: parent.physical_host_id,
+        service_scope_id: parent.service_scope_id, boot_id: parent.boot_id,
+        provider_generation: parent.provider_generation, native_machine_id: parent.native_machine_id,
+        continuity_mode: parent.continuity_mode, continuity_id: parent.continuity_id)
+    val binding = ContainerExecStateBindingV3(scope: scope,
+        child_operation_id: admission.operation.id,
+        request_digest: container_exec_request_digest_v3(admission.request).unwrap(),
+        intent_digest: host_runtime_exec_intent_digest_v3(admission.intent).unwrap(),
+        installation_artifact_digest: claim_fixture_digest_v3(),
+        exec_control_identity_digest: plan.exec_control_identity_digest,
+        deployment_claim_digest: claim_fixture_digest_v3())
+    ScriptedWindowsExecStateAccessV3(bound: binding,
+        namespace: container_exec_state_namespace_key_v3(scope, admission.operation.id).unwrap(),
+        readback_failure: readback_failure, close_failures: close_failures)
+
+pub fn claim_fixture_open_v3(plan: WindowsContainerStreamPlanV3,
+        readback_failure: bool = false, close_failures: i64 = 0) -> WindowsDockerExecClaimOutcomeV3:
+    WindowsDockerExecClaimV3.from_installed_access_v3(
+        claim_fixture_access_v3(plan, readback_failure, close_failures), plan,
+        claim_fixture_query_v3(plan), claim_fixture_admission_v3(plan),
+        claim_fixture_digest_v3(), claim_fixture_digest_v3())
+
+pub fn claim_fixture_publications_v3(plan: WindowsContainerStreamPlanV3, kind: text) -> i64:
+    val key = claim_fixture_access_v3(plan).namespace + ":" + kind
+    if claim_fixture_new_publications_v3.contains_key(key): claim_fixture_new_publications_v3[key] else: 0
+
+pub fn claim_fixture_named_plan_v3(operation: text) -> WindowsContainerStreamPlanV3:
+    var plan = claim_fixture_plan_v3()
+    var request = plan.intent.exec_request.unwrap()
+    request.operation_id = operation
+    plan.intent.exec_request = Some(request)
+    plan.request_digest = windows_container_stream_plan_digest_v3(plan).unwrap()
+    plan
+
+pub fn claim_fixture_digest_v3() -> text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+pub fn claim_fixture_plan_v3() -> WindowsContainerStreamPlanV3:
+    val workload = windows_adapter_request_fixture_v2().plan
+    val runtime = RuntimeIdentityV1(pod_uid: workload.workload_uid, attempt: workload.attempt,
+        provider_generation: workload.provider_generation, operation_id: workload.operation_id,
+        engine: "docker", native_id: windows_adapter_native_id_fixture_v2(),
+        node_boot_id: windows_adapter_policy_fixture_v2().node_boot_id)
+    val digest = claim_fixture_digest_v3()
+    val request = ContainerExecRequestV3(parent: workload, parent_runtime: runtime, operation_id: "exec-a",
+        nonce: digest, argv: ["C:\\work\\tool.exe", "test"],
+        environment: [ContainerExecEnvironmentEntryV3.Literal("TASK", "fixture")],
+        working_directory: "C:\\work", selected_user: "ContainerUser", terminal_mode: "tty", stdin_requested: true, timeout_ms: 5000)
+    val intent = WindowsContainerStreamIntentV3(operation_kind: "exec", exec_request: Some(request), tty: true,
+        stdin_requested: true, initial_rows: 24, initial_cols: 80, nonce: digest)
+    var plan = WindowsContainerStreamPlanV3(workload: workload, runtime: runtime,
+        identity: ContainerOutputIdentityV2(operation_id: "helper-exec", parent_operation_id: workload.operation_id,
+            parent_operation_digest: digest, parent_assignment_digest: digest, parent_budget_digest: digest, binding_digest: digest),
+        resources: ContainerOutputResourcesV2(cpu_millis: 100, memory_bytes: 67108864), provider_identity_digest: digest,
+        exec_control_identity_digest: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        policy_digest: digest, intent: intent, broker_template_digest: digest, request_digest: "")
+    plan.request_digest = windows_container_stream_plan_digest_v3(plan).unwrap()
+    plan
+
+pub fn claim_fixture_query_v3(plan: WindowsContainerStreamPlanV3) -> text:
+    val exec = plan.intent.exec_request.unwrap()
+    var environment: [(text, text)] = []
+    for entry in exec.environment:
+        match entry:
+            case ContainerExecEnvironmentEntryV3.Literal(name, value): environment.push((name, value))
+            case _: panic("scripted literal environment required")
+    val request = WindowsEngineExecRequestV3(container_id: plan.runtime.native_id, argv: exec.argv,
+        environment: environment, working_directory: exec.working_directory, tty: true, stdin_requested: true)
+    windows_docker_exec_query_digest_v3(windows_engine_exec_create_v3("1.48", request).unwrap()).unwrap()
+
+# These are STRUCTURAL contract inputs only, never a real verified host lease.
+pub fn claim_fixture_admission_v3(plan: WindowsContainerStreamPlanV3, expired: bool = false) -> ContainerExecAdmissionV3:
+    val request = plan.intent.exec_request.unwrap()
+    val digest = container_exec_request_digest_v3(request).unwrap()
+    val sampled = time_sample_unix_micros_or_failure()
+    if sampled <= 0: panic("real fixture clock unavailable")
+    val expiry = sampled / 1000 + (if expired: -1 else: 30000)
+    val intent = HostRuntimeExecIntentV3(request: request,
+        parent_operation_digest: plan.identity.parent_operation_digest,
+        parent_assignment_digest: plan.identity.parent_assignment_digest,
+        parent_controller_operation_digest: claim_fixture_digest_v3(),
+        parent_provider_identity_digest: plan.provider_identity_digest,
+        exec_control_identity_digest: plan.exec_control_identity_digest)
+    val operation = OperationEnvelopeV2(version: 2, id: request.operation_id,
+        payload_digest: host_runtime_exec_intent_digest_v3(intent).unwrap(),
+        principal: "fixture-principal", project: "simple", host_id: plan.workload.physical_host_id,
+        operation: "host_runtime_exec_v3", environment_digest: claim_fixture_digest_v3(), policy_revision: 1,
+        revocation_epoch: 1, session_generation: 1, memory_bytes: 67108864, duration_ms: 5000)
+    ContainerExecAdmissionV3(intent: intent, request: request, operation: operation,
+        parent_operation_digest: plan.identity.parent_operation_digest, parent_assignment_digest: plan.identity.parent_assignment_digest,
+        provider_identity_digest: plan.exec_control_identity_digest,
+        deadline: container_effect_deadline_v1(digest, request.operation_id, ["exec"], expiry).unwrap(),
+        grant_id: "fixture-grant", issuer_id: "fixture-issuer", approver_id: "fixture-approver", execution_proof_digest: claim_fixture_digest_v3())
+
+# Synthetic mapping tests protocol binding only, NOT an actual Engine birth.
+pub fn claim_fixture_synthetic_birth_v3(plan: WindowsContainerStreamPlanV3) -> WindowsExecBirthMappingV3:
+    val request = plan.intent.exec_request.unwrap()
+    val sampled = time_sample_unix_micros_or_failure()
+    if sampled <= 0: panic("real fixture clock unavailable")
+    WindowsExecBirthMappingV3(birth: ContainerExecBirthReceiptV3(request_digest: container_exec_request_digest_v3(request).unwrap(),
+        parent_runtime: plan.runtime, native_exec_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        provider_identity_digest: plan.exec_control_identity_digest, created_unix_ms: sampled / 1000,
+        query_digest: claim_fixture_query_v3(plan), evidence_digest: claim_fixture_digest_v3(), proof_kind: "exact-native-exec-birth-v3"),
+        stream_template_digest: plan.request_digest, user_assurance: "requested-exec-user-container-observed-v1")

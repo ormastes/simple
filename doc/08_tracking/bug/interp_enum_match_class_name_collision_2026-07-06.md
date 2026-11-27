@@ -73,3 +73,32 @@ load-order dependent. Workaround used in probes: avoid importing `app.io.mod`
 into graphs that load the JS engine (raw `rt_file_read_text` extern instead).
 Real fix should make interpreter class resolution module-scoped.
 
+
+## Triage note 2026-11-25 (p2w2-aj)
+
+**Disposition: SKIP — self-hosted interpreter pattern-resolution fix,
+bootstrap-required; environment-blocked for verification.** The defect lives
+in the self-hosted interpreter's qualified enum-variant pattern resolution
+(suspected fix area per this record), i.e. `src/compiler/**` sources that the
+pinned Rust seed never executes. The record's own evidence shows a minimal
+script does NOT reproduce (closure-dependent), so the only meaningful repro is
+the full `src/app/ui.browser/main.spl --open` GUI closure — not runnable on
+this seed-only Windows host, and `bin/simple.exe test` additionally fails
+repo-wide at HEAD with `unknown decorator '@representation_boundary'`.
+
+Code-inspection state on release/1.0.0 HEAD:
+
+- The symptom site is unchanged: `capability_name()` in
+  `src/lib/common/ui/capability_policy.spl:117-121` still matches
+  `Capability.Color: "Color"` against `enum Capability` in
+  `src/lib/common/ui/capability.spl:3` — same shape as filed.
+- The workaround guard is still in place: `semantic_contract.spl:293`
+  (`val cap_name = capability_name(cap) ?? ""`), so the app cannot crash on
+  this path today; only the cosmetic empty-name loss remains.
+- The `Logger` duplicate-class-name instance (2026-07-11 section) is the same
+  unresolved class — module-scoped interpreter class resolution is the real
+  fix and is likewise bootstrap-gated.
+
+Header (open, needs owner triage) is accurate. Remains OPEN for a
+bootstrap-capable lane; a fix must be verified against the browser-app
+closure, not a minimal script.

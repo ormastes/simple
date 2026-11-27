@@ -1,0 +1,46 @@
+# Stable W0410 unresolved-import warnings for `simple check`.
+# Bug: simple_check_diagnostics_contract_raw_parser_error_not_stable_format_2026-07-20
+# (and check_run_diagnostics_help_text_and_type_check_gaps_2026-07-20, W0410 half)
+
+use std.spec
+use compiler.tools.lint.check_diagnostic.{CheckDiagnostic, check_import_roots, check_unresolved_import_diagnostics, check_diagnostic_text, check_diagnostic_json}
+
+describe "check_import_roots":
+    it "extracts module path and root segment from plain and grouped imports":
+        val roots = check_import_roots("use definitely.missing.module\nuse std.spec\n  use app.check.\{a, b\}\nfn main():\n    pass\n")
+        expect(roots.len()).to_equal(3)
+        expect(roots[0].1).to_equal("definitely.missing.module")
+        expect(roots[0].2).to_equal("definitely")
+        expect(roots[0].0).to_equal(1)
+        expect(roots[2].1).to_equal("app.check")
+        expect(roots[2].2).to_equal("app")
+
+    it "ignores non-import lines that merely contain use":
+        val roots = check_import_roots("fn user():\n    val usefully = 1\n# use x.y\n")
+        expect(roots.len()).to_equal(0)
+
+describe "check_unresolved_import_diagnostics":
+    it "warns W0410 with help when the root segment is unknown":
+        val ds = check_unresolved_import_diagnostics("a.spl", "use definitely.missing.module\n", ["std", "app"])
+        expect(ds.len()).to_equal(1)
+        expect(ds[0].code).to_equal("W0410")
+        expect(ds[0].severity).to_equal("warning")
+        expect(ds[0].line).to_equal(1)
+        expect(ds[0].message).to_equal("unresolved import 'definitely.missing.module'")
+        expect(ds[0].help).to_equal("check the module path or add the source root with --source-root")
+
+    it "stays silent for known roots":
+        val ds = check_unresolved_import_diagnostics("a.spl", "use std.spec\nuse app.check.\{x\}\n", ["std", "app"])
+        expect(ds.len()).to_equal(0)
+
+    it "renders warning severity in text and JSON":
+        val ds = check_unresolved_import_diagnostics("a.spl", "use definitely.missing.module\n", [])
+        expect(check_diagnostic_text(ds[0])).to_contain("warning[W0410]: unresolved import 'definitely.missing.module'")
+        expect(check_diagnostic_text(ds[0])).to_contain("= help: check the module path")
+        expect(check_diagnostic_json(ds[0])).to_contain("\"severity\": \"warning\"")
+        expect(check_diagnostic_json(ds[0])).to_contain("\"code\": \"W0410\"")
+
+    it "keeps error severity as the default for existing diagnostics":
+        val d = CheckDiagnostic(path: "a.spl", code: "E0001", message: "m")
+        expect(check_diagnostic_text(d)).to_contain("error[E0001]")
+        expect(check_diagnostic_json(d)).to_contain("\"severity\": \"error\"")

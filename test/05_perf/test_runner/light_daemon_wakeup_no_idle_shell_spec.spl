@@ -1,0 +1,161 @@
+# PERF follow-up to
+# doc/08_tracking/bug/light_test_daemon_lane_slower_than_direct_after_shell_spawn_fix_2026-09-13.md
+# (filed as light_test_daemon_lane_slower_than_direct_after_shell_spawn_fix_2026-08-17, P3).
+#
+# PERF-5 removed the /bin/sh spawns from daemon_lock_alive(), yet a strace of
+# a warm daemon-lane run (2026-11-05, phase1 seed binary, this repo) shows the
+# lane still pays two coarse, uncoordinated polling loops:
+#
+#   1. light_daemon.spl's idle loop calls dir_list(LIGHT_REQ_DIR) every
+#      250 ms, and std.io_runtime.dir_list() is a SHELL-OUT: each poll is
+#      `execve("/bin/sh", ["-c", "ls -1 ..."]) + execve("/usr/bin/ls")` — two
+#      fork/execs per 250 ms of idle lifetime (~480 per 60 s daemon life).
+#      So the daemon lane did NOT actually reach "zero shell spawns": it moved
+#      them from the client into the daemon's poll loop.
+#   2. run_one_via_daemon() polls for the response every 100 ms, adding up to
+#      100 ms of pickup latency per request.
+#
+# Together with the per-request worker re-compile they keep the daemon lane
+# measured SLOWER than the direct lane (warm, 2026-11-05, this host:
+# daemon ~1.47 s median vs direct ~0.68 s median over 5 samples each).
+#
+# Fix under test: the client bumps a wakeup sequence file
+# (.build/test_daemon_light/wakeup.seq, atomic tmp+rename) AFTER publishing
+# its request; the daemon's idle loop stat()s that one file in-process every
+# 10 ms (no dir_list, no shell) and only then lists the request dir, keeping
+# a 500 ms dir_list sweep purely as a fallback for clients predating the
+# wakeup protocol. The client response pickup polls every 10 ms.
+#
+# Pins (deterministic, no wall-clock thresholds):
+#   * example 1: a real daemon-lane run leaves a non-empty wakeup sequence
+#     whose value changes per request (old code never writes the file).
+#   * example 2: a daemon traced from birth, put into post-contact steady
+#     state by a pre-written wakeup bump, performs NO subprocess work during
+#     a 3 s idle window — the only execve()s in its trace are the two that
+#     started it (old code: ~2 execves per 250 ms poll via the dir_list ls
+#     shell-out, measured 26 over the same window).
+#
+# A real daemon lifecycle needs the nested `simple test` to reach the daemon
+# lane, so the pinned-runner env vars that force binary_override_bypass are
+# stripped via env -u (same constraint documented in
+# daemon_lock_alive_shell_spawn_spec.spl). The binary itself comes from the
+# runner-pinned SIMPLE_BINARY (the invoking compiler), so this spec runs on
+# any checkout layout.
+
+use std.io_runtime.{file_exists, file_delete, file_write, dir_create_all, dir_remove_all, read_file_text, getpid, env_get}
+
+extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
+
+val FIXTURE: text = "test/fixtures/concurrency/conc_a_spec.spl"
+val DAEMON_DIR: text = ".build/test_daemon_light"
+val LOCK_PATH: text = ".build/test_daemon_light/daemon.lock"
+val WAKE_PATH: text = ".build/test_daemon_light/wakeup.seq"
+val STOP_PATH: text = ".build/test_daemon_light/stop"
+
+# The compiler binary executing THIS spec, as pinned by the outer runner.
+# Falls back to bin/simple for source-mode invocations.
+fn invoking_binary() -> text:
+    val pinned = env_get("SIMPLE_BINARY") ?? ""
+    if pinned != "" and file_exists(pinned):
+        return pinned
+    "bin/simple"
+
+# Run one nested `simple test` with the runner-pinned env stripped so the
+# nested client re-resolves its own binary and takes the daemon lane.
+fn nested_test(binary: text) -> (text, i64):
+    val (out, err, code) = rt_process_run_bounded("env", [
+        "-u", "SIMPLE_BINARY",
+        "-u", "SIMPLE_TEST_BINARY",
+        "-u", "SIMPLE_TEST_DAEMON_CHILD",
+        "-u", "SIMPLE_TIMEOUT_SECONDS",
+        "-u", "SIMPLE_TEST_RESULT_FILE",
+        binary, "test", FIXTURE], 180000, 400000)
+    (out + err, code)
+
+fn lock_owner_pid() -> text:
+    if not file_exists(LOCK_PATH):
+        return ""
+    ((read_file_text(LOCK_PATH)).split("\n")[0]).trim()
+
+fn daemon_alive() -> bool:
+    val pid = lock_owner_pid()
+    pid != "" and file_exists("/proc/{pid}")
+
+fn count_lines_containing(path: text, needle: text) -> i64:
+    if not file_exists(path):
+        return -1
+    val content = read_file_text(path)
+    var count = 0
+    for line in content.split("\n"):
+        if line.contains(needle):
+            count = count + 1
+    count
+
+describe "light daemon wakeup protocol replaces the 250 ms dir_list shell poll":
+    it "serves a real daemon-lane run and publishes a changing wakeup sequence":
+        dir_remove_all(DAEMON_DIR)
+        file_delete(WAKE_PATH)
+        val binary = invoking_binary()
+        val (out1, code1) = nested_test(binary)
+        print "[perf] cold daemon-lane run: rc={code1}"
+        expect(code1).to_equal(0)
+        expect(out1.contains("1 passed")).to_equal(true)
+        # The client must have bumped the wakeup sequence after publishing
+        # its request. Old code never writes this file at all.
+        expect(file_exists(WAKE_PATH)).to_equal(true)
+        val wake1 = (read_file_text(WAKE_PATH)).trim()
+        expect(wake1.len() > 0).to_equal(true)
+        expect(wake1.ends_with(".req")).to_equal(true)
+        # A warm second request reuses the daemon and must bump the sequence.
+        val (out2, code2) = nested_test(binary)
+        print "[perf] warm daemon-lane run: rc={code2}"
+        expect(code2).to_equal(0)
+        expect(out2.contains("1 passed")).to_equal(true)
+        val wake2 = (read_file_text(WAKE_PATH)).trim()
+        expect(wake2.len() > 0).to_equal(true)
+        expect(wake2 == wake1).to_equal(false)
+
+    it "spawns zero processes while idle and exits promptly on the stop file":
+        # Spawn a FRESH daemon whose entire lifetime is traced. ptrace_scope=1
+        # on this host forbids attaching to a non-child, so the daemon must be
+        # strace'd from birth (strace -f follows it). A fresh lane dir also
+        # removes any daemon the first example left running, so the traced
+        # daemon provably owns the lane and its idle window.
+        dir_remove_all(DAEMON_DIR)
+        dir_create_all(DAEMON_DIR)
+        file_delete(WAKE_PATH)
+        file_delete(STOP_PATH)
+        # Pre-bump the wakeup sequence BEFORE the daemon starts: its first
+        # poll sees the bump (drains an empty dir, marks the wakeup protocol
+        # as seen), which puts the traced window in post-contact steady
+        # state, where the fallback dir_list sweep relaxes to its 5 s cadence
+        # and a 3 s idle window must contain zero sweeps.
+        file_write(WAKE_PATH, "fake-client-{getpid()}.req")
+        val binary = invoking_binary()
+        val trace_log = "/tmp/perf_wakeup_idle_{getpid()}.strace"
+        file_delete(trace_log)
+        # Wait for the lane lock to appear (daemon claimed the lane), watch it
+        # idle for 3 s, then drop the stop file and let strace reap the
+        # daemon's exit_group. The stop finale doubles as the harness sanity
+        # check: if the daemon never started or strace lost it, the log
+        # carries no exit_group line and the spec fails closed instead of
+        # reading an empty log as "0 spawns".
+        val trace_cmd = "strace -f -e trace=execve,exit_group -o {trace_log} env -u SIMPLE_BINARY -u SIMPLE_TEST_BINARY -u SIMPLE_TEST_DAEMON_CHILD {binary} run src/app/test_daemon/light_daemon.spl 2>/dev/null & SPID=$!; i=0; while [ $i -lt 100 ] && [ ! -f {LOCK_PATH} ]; do sleep 0.1; i=$((i+1)); done; sleep 3; printf x > {STOP_PATH}; wait $SPID; true"
+        val (_tout, _terr, _tcode) = rt_process_run_bounded("sh", ["-c", trace_cmd], 120000, 4000)
+        val total_execve = count_lines_containing(trace_log, "execve(")
+        val end_count = count_lines_containing(trace_log, "exit_group(")
+        print "[perf] idle-daemon 3 s window: execve count = {total_execve}, daemon ends = {end_count}"
+        # Harness sanity: the trace must have observed the daemon's exit.
+        expect(end_count > 0).to_equal(true)
+        # The pin: in post-contact steady state an idle daemon performs no
+        # subprocess work at all — the only execves in the log are the two
+        # that START the daemon (env, then the compiler binary). Pre-fix
+        # baseline measured on this host: 26 (one `/bin/sh -c "ls -1 ..."`
+        # shell-out per 250 ms dir_list poll, ~2 execves each, for the whole
+        # 3 s window). Budget: the 2 startup execves plus one pre-contact
+        # sweep pair of slack.
+        expect(total_execve <= 4).to_equal(true)
+        # The stop file must have brought the daemon down (new loop: <= 10 ms
+        # stop-file latency; the old 250 ms loop also passes, so this is a
+        # liveness assertion, not a latency one).
+        expect(daemon_alive()).to_equal(false)

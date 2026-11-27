@@ -14,7 +14,8 @@ single backend, or a CPU fallback. Relevant backend keys:
 | key | renders via | notes |
 |-----|-------------|-------|
 | `vulkan` | `VulkanBackend` (`backend_vulkan.spl`) through the Vulkan SFFI facades | 9/10 primitives wired (blit pending) |
-| `metal` | native `MetalBackend` (macOS); else **Vulkan emulation** → name `metal-on-vulkan` | non-macOS hosts serve the Metal API request through Vulkan |
+| `metal` | native `MetalBackend` (macOS only; off macOS reports "Metal requires macOS") | strict key, never substituted |
+| `metal-on-vulkan` (`metal_on_vulkan`) | `VulkanBackend`; probe discloses "Vulkan execution emulating the Metal backend surface (not Apple Metal semantics)" | explicit opt-in lane, mirrors `directx-on-vulkan` |
 | `directx-on-vulkan` | `VulkanBackend` (vkd3d/DXVK concept) | additive alias; the legacy `directx` key stays CPU-raster gated by a real vkd3d/Vulkan ICD probe |
 | `software` / `cpu` | `SoftwareBackend` | the bit-exact reference oracle |
 

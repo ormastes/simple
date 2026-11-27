@@ -1,7 +1,16 @@
 # `base64url_decode` silently accepts out-of-alphabet input (RFC 4648 §3.3) and diverges from the differential oracle
 
-- **Status:** OPEN
+- **Status:** CLOSED (2026-11-08 record reconciliation)
 - **Date:** 2026-08-18
+
+Resolution: `de163c7d0f1` added `base64url_decode_strict` and its dedicated
+strict rejection spec (historical 10/10 strict and 11/11 cross-language
+results). `8c96a5b5819` then migrated the JWT and password-reset token paths,
+deleted their local duplicate decoders, and added caller coverage (historical
+9/9). Current source retains the shared strict decoder and caller migrations;
+`base64url_decode_strict_spec.spl` covers the reported inputs and adjacent
+invalid classes. The BugDB already marked this fixed on 2026-11-05; this update
+removes the contradictory stale OPEN document status.
 - **Area:** `src/lib/common/base_encoding/base64.spl` (`base64url_decode`)
 - **Related migration:** C-MIG-0023 (base64url). This is a **correctness** gap;
   the separate perf gap is tracked in

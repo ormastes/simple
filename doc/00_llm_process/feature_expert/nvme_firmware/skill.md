@@ -91,6 +91,49 @@ relative raw-log path, its SHA-256, and the independent reviewer. The gate
 rejects missing/duplicate rows, changed logs, escaping paths, duplicate fields,
 same operator/reviewer, and package/source/board/artifact mismatches.
 
+## Six-Arch Bare-Metal Slice (fw_xc, 2026-11-16, verification-pending)
+
+`examples/09_embedded/simpleos_nvme_fw/fw_xc/` is an integer-only firmware
+slice: CQE status encoding, CDW0 decode, LBA range validation, and
+log-structured PPN placement. It has no text, arrays or allocation, because no
+freestanding runtime exists yet (`baremetal_no_freestanding_runtime_2026_11_15`).
+It is built with Simple `native-build --emit-object`, plus a clang crt0 per arch
+(`crt0_*.S`), linked with `ld.lld -T link_<arch>.ld`. No GCC is used.
+
+```sh
+SIMPLE_BIN=~/xc/simple-p2 OUT_DIR=/tmp/nvxc_out sh examples/09_embedded/simpleos_nvme_fw/fw_xc/build.shs
+sh scripts/check/check-nvme-fw-xc-elf.shs --dir /tmp/nvxc_out    # pins targets + ELF headers
+sh examples/09_embedded/simpleos_nvme_fw/fw_xc/boot.shs --dir /tmp/nvxc_out   # rv32/rv64/Cortex-M
+BM_SRC=$PWD/examples/09_embedded/simpleos_nvme_fw/fw_xc/main.spl sh scripts/check/check-baremetal-efi-boot.shs
+```
+
+| target | ELF header (pinned) | boot |
+|---|---|---|
+| i686-unknown-none-elf | ELF32 80386 0x0 | build-only (`baremetal_i686_no_real_firmware_boot_lane_2026_11_16`) |
+| x86_64-unknown-none-elf | ELF64 X86-64 0x0 | OVMF pflash -> EFI app: PASS |
+| thumbv7em-none-eabihf | ELF32 ARM 0x5000400 (EABI5, hard-float) | mps2-an386 vector-table reset: PASS |
+| aarch64-unknown-none-elf | ELF64 AArch64 0x0 | AAVMF pflash -> EFI app: PASS |
+| riscv32imac-unknown-none-elf | ELF32 RISC-V 0x1 (RVC, ilp32) | virt M-mode `-bios <elf>`: PASS |
+| riscv64gc-unknown-none-elf | pinned 0x5 (lp64d), gets 0x1: RED | virt M-mode `-bios <elf>`: PASS (lp64 workaround) |
+
+Landmines:
+- 32-bit targets have no `__divdi3`/`__aeabi_ldivmod` (no bare-metal compiler-rt).
+  Keep geometry power-of-two and use shift/mask.
+- Under ilp32/i686 an `i64` argument takes a register pair (or 8 stack bytes), so
+  the `value` of `rt_mmio_write8(addr: i64, value: i64)` is in `a2`, or at `12(%esp)`.
+- RISC-V Simple objects are base `rv32i`/`rv64i`; the rv64 crt0 uses `lp64`
+  (`baremetal_riscv_target_contract_not_applied_2026_11_16`).
+- With `--target thumbv7em-none-eabihf` alone, native-build emits ARMv7-A
+  ARM-state code, and the Cortex-M HardFaults. `build.shs` exports
+  `SIMPLE_NATIVE_BUILD_TARGET` (TODO workaround, bug
+  `native_build_target_flag_not_propagated_to_env_target_2026_11_16`), and the check requires a
+  Thumb `__simple_main`.
+- A thumbv7em image is hard-float only because no float values cross a call.
+  The Simple object carries no `Tag_ABI_VFP_args`.
+- The rv and Cortex-M images are the reset-level firmware itself (no `-kernel`).
+  Board: change `ORIGIN` in `link_<arch>.ld` and the UART base in `crt0_<arch>.S`.
+  No board run is evidenced yet.
+
 ## Code Map
 
 - Shared firmware: `examples/09_embedded/simpleos_nvme_fw/fw/`

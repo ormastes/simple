@@ -1,0 +1,88 @@
+# @cover src/lib/nogc_async_mut/compute/backend_dispatch.spl
+# @req REQ-COMPUTE-SFFI-FAIL-CLOSED
+"""
+# Compute backend_dispatch — real SFFI launch and fail-closed contract
+
+Verifies that device compute targets execute real GPU SFFI kernels when
+available and fail closed rather than silently computing on the CPU when a
+GPU backend or operation is unavailable.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_async_mut.compute.exec_target.{
+    ComputeDeviceClass, ComputeBackend, EnforceMode, BackendCaps,
+    ExecTarget, resolve_exec_target
+}
+use std.nogc_async_mut.compute.backend_dispatch.{
+    gpu_payload_present, dispatch_reduce_i64, dispatch_reduce_i64_checked,
+    dispatch_requirement_met
+}
+
+fn _device_target(b: ComputeBackend) -> ExecTarget:
+    ExecTarget.create(ComputeDeviceClass.Gpu, b, EnforceMode.Require, true, "unit-test")
+
+fn _cpu_target() -> ExecTarget:
+    resolve_exec_target(ComputeDeviceClass.Cpu, ComputeBackend.Scalar, EnforceMode.Suggest, BackendCaps.none())
+
+fn _none_target() -> ExecTarget:
+    resolve_exec_target(ComputeDeviceClass.Gpu, ComputeBackend.NoneBackend, EnforceMode.Require, BackendCaps.none())
+
+fn _add_i64(a: i64, b: i64) -> i64:
+    a + b
+
+fn _custom_non_monoid(a: i64, b: i64) -> i64:
+    a * 3 + b
+
+fn _bool_int(v: bool) -> i64:
+    if v: 1 else: 0
+
+describe "backend_dispatch fail-closed and real SFFI dispatch":
+
+    it "fails closed for unavailable device backend instead of silently running CPU":
+        step("Dispatch reduce to unavailable WebGpu target")
+        val target = _device_target(ComputeBackend.WebGpu)
+        val outcome = dispatch_reduce_i64([10, 20, 30], 0, _add_i64, target)
+        expect(_bool_int(outcome.ok)).to_equal(0)
+        expect(outcome.value).to_equal(0)
+        expect(_bool_int(outcome.stats.ran_on_cpu)).to_equal(0)
+        expect(outcome.error).to_contain("unavailable")
+        val checked = dispatch_reduce_i64_checked([10, 20, 30], 0, _add_i64, target)
+        var is_err = false
+        match checked:
+            case Err(msg):
+                is_err = msg.contains("unavailable")
+            case Ok(_):
+                is_err = false
+        expect(_bool_int(is_err)).to_equal(1)
+
+    it "fails closed for unresolved NoneBackend instead of running CPU":
+        step("Dispatch reduce to NoneBackend target")
+        val outcome = dispatch_reduce_i64([5, 7, 9], 0, _add_i64, _none_target())
+        expect(_bool_int(outcome.ok)).to_equal(0)
+        expect(outcome.value).to_equal(0)
+        expect(_bool_int(outcome.stats.ran_on_cpu)).to_equal(0)
+
+    it "runs CPU reference honestly only on explicit CPU target":
+        step("Dispatch reduce to explicit CPU target")
+        val outcome = dispatch_reduce_i64([10, 20, 30], 0, _add_i64, _cpu_target())
+        expect(_bool_int(outcome.ok)).to_equal(1)
+        expect(outcome.value).to_equal(60)
+        expect(_bool_int(outcome.stats.ran_on_cpu)).to_equal(1)
+
+    it "executes real SFFI dispatch when Vulkan GPU is available and fails closed on unsupported op":
+        step("Check real Vulkan SFFI availability and dispatch behavior")
+        val target = _device_target(ComputeBackend.Vulkan)
+        val has_vk = gpu_payload_present("vulkan")
+        val ok_out = dispatch_reduce_i64([4, 8, 12, 16], 2, _add_i64, target)
+        if has_vk:
+            expect(_bool_int(ok_out.ok)).to_equal(1)
+            expect(ok_out.value).to_equal(42)
+            expect(_bool_int(ok_out.stats.ran_on_cpu)).to_equal(0)
+            expect(ok_out.stats.backend).to_equal("vulkan")
+        else:
+            expect(_bool_int(ok_out.ok)).to_equal(0)
+            expect(ok_out.value).to_equal(0)
+        # Unsupported reduction closure must fail closed regardless of GPU presence.
+        val bad_op_out = dispatch_reduce_i64([1, 2, 3], 0, _custom_non_monoid, target)
+        expect(_bool_int(bad_op_out.ok)).to_equal(0)
+        expect(_bool_int(bad_op_out.stats.ran_on_cpu)).to_equal(0)

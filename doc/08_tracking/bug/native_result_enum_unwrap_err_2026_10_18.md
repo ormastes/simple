@@ -1,8 +1,6 @@
 # Native Result unwrap_err rejects named enum payloads
 
-Status: OPEN. Native workaround mechanism PASS; production-owner probes UNRUN.
-Authoritative bug DB reconciliation is pending because no qualified full CLI
-or test runner is available. Canonical ID:
+Status: RESOLVED (2026-11-25). Root fix in `method_calls_literals.spl` (`lower_result_unwrap_core`, natively verified on `s3_fable43` `b2r_errunwrap.spl`); all 5 workarounds in `src/compiler/20.hir/archive/interface_action_archive.spl` reverted back to `unwrap_err()`. Canonical ID:
 `native_result_enum_unwrap_err_2026_10_18`.
 
 ## Evidence
@@ -159,3 +157,7 @@ inner types. An unused generic class metadata issue must be reproduced before
 changing template handling; Future's Poll<T> field is Named, whose MIR lowering
 does not recursively lower its type arguments. No broad generic exclusion or
 TypeParam-to-i64 fallback is justified by current evidence.
+
+## Resolution (2026-11-04, opus-n88b)
+
+Status: fix-implemented-verification-pending. Landed in 3a16118c603 (array range slices via lower_runtime_array_slice in text_index_ranges.spl; Result unwrap/unwrap_err admit Enum payloads in method_calls_literals.spl lower_result_unwrap_core). Pass-level spec: `bin/simple.exe test test/01_unit/compiler/50.mir/array_range_unwrap_enum_lowering_spec.spl` (2/2 pass). Native verify (stage3): rebuild with a native producer and compile a[1..].join / Result<_, Enum>.unwrap_err() fixtures; then remove the source workarounds.

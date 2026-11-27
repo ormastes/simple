@@ -42,3 +42,73 @@ the same streaming-surface settings and then—only if the first receipt proves
 the crash owner—with streaming release disabled. Preserve the core, executable
 hash, environment transcript, last surface identity, and stack trace. Treat
 `driver.spl` as the first observed victim, not yet the proven source owner.
+
+## Triage 2026-11-10 (p3-boot3 lane, assignment row 20)
+
+**Verdict: BLOCKED-needs-grant — verification-pending, no script owner in this lane.**
+
+- The crash owner is the self-hosted compiler's streaming-surface parse
+  (`src/compiler/80.driver`), which is outside this lane's bootstrap
+  tooling/scripts scope; no `scripts/bootstrap` defect is identifiable from
+  the retained evidence (no core/stack; `driver.spl` is a victim, not a
+  proven owner).
+- The 2026-10-27 ledger triage round already source-reviewed this row
+  (`doc/08_tracking/bug/triage_20261027/evidence_v3/lane00_accepted.md`,
+  accepted): the current streaming loop publishes `surface-released` only
+  after parse/result handling and scope teardown ends transient allocation
+  before replacing process-lifetime frontend globals — an ordering fix for a
+  documented adjacent lifetime hazard — but there is no artifact/stack link
+  from this report to that fix, so `keep_open` stands.
+- Reproducing per the doc's "Next diagnostic" requires a full bootstrap to
+  admit a Stage 2 compiler, then the Stage 3 transcript under a retained
+  core. That is a HEAVY build, forbidden in this lane.
+
+Exact command for the granted lane (Linux host, from the doc's transcript
+settings):
+
+```sh
+sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage2
+ulimit -c unlimited
+gdb -batch -ex run -ex bt --args \
+  build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple native-build \
+  --source src/compiler --source src/app --source src/lib \
+  --entry src/app/cli/bootstrap_main.spl --entry-closure --threads 4 \
+  -o build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple
+```
+
+Preserve the core, executable sha256, environment transcript, last surface
+identity, and backtrace; treat `driver.spl` as first observed victim until the
+stack says otherwise. Related current tracker for the same surface-promote
+path (perf, not crash): `stage3_quadratic_transient_heap_promote_2026-09-02.md`.
+
+## Triage 2026-11-11 (P3 boot11 lane, work/p3-boot11-20261111)
+
+**Verdict: BLOCKED-needs-grant — status stays OPEN.** Same posture as the
+2026-10-27 ledger triage round (accepted, `keep_open`) and the 2026-11-10
+p3-boot3 lane: the crash owner is the self-hosted compiler's
+streaming-surface parse (`src/compiler/80.driver`), outside this lane's
+bootstrap-script scope, and there is still no artifact/stack link from this
+report to the 2026-10-27 surface-release ordering fix. This Windows lane
+cannot run the retained-core reproduction (no admitted Stage 2 Linux binary;
+full bootstrap + gdb repro is the heavy grant below).
+
+Exact command for the granted lane (Linux host, per this doc's "Next
+diagnostic"; do not discard Stage2/Stage3 caches):
+
+```sh
+sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage2
+ulimit -c unlimited
+gdb -batch -ex run -ex bt --args \
+  build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple native-build \
+  --source src/compiler --source src/app --source src/lib \
+  --entry src/app/cli/bootstrap_main.spl --entry-closure --threads 4 \
+  -o build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple
+```
+
+Preserve core, executable sha256, environment transcript, last surface
+identity, and backtrace; treat `driver.spl` as first observed victim until the
+stack says otherwise.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**BLOCKED-needs-grant (confirmed)** — boot3/boot11 posture stands: crash owner is the self-hosted streaming-surface parse; no artifact/stack link to the 2026-10-27 ordering fix. Repro needs a full bootstrap + retained-core gdb run (heavy grant, Linux host).

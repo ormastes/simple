@@ -1,0 +1,85 @@
+#!/bin/sh
+# hir_rss_slope_budget.shs — pins the per-module RSS slope of the in-process
+# HIR phase (the compiler_cli_build rss-cap-exceeded class, exit 88).
+#
+# Reads a durable memory snapshot (SIMPLE_MEM_SNAPSHOT_FILE, schema
+# simple.compiler.mem_snapshot.v1) and least-squares fits rss_kib of the
+# `hir-post-store` records against retained_modules. FAILs when the slope is
+# above the budget. heap_live_bytes is NOT used: it counts heap-registry
+# header bytes only (compiler_rust .../interpreter_extern/memory.rs bit0).
+#
+#   sh test/05_perf/compiler/hir/hir_rss_slope_budget.shs --selftest
+#   sh test/05_perf/compiler/hir/hir_rss_slope_budget.shs <memsnap.bin> [budget_kib_per_module]
+#
+# Producing a snapshot (native stage2 compiler, fresh cache dir, any closure):
+#   SIMPLE_FILE_WORKERS=0 SIMPLE_MEM_SNAPSHOT_FILE=/tmp/m.bin \
+#     <stage2> native-build src/app/cli/bootstrap_main.spl --backend=cranelift \
+#     --low-memory --entry-closure --cache-dir <fresh> -o /tmp/a.out
+#   (stop it after >= 150 HIR modules; the file is append-only.)
+#
+# Budget default 2200 KiB/module: the slope at which the 3998-module
+# compiler_cli_build closure fits a 16 GiB cap (~7.5 GiB HIR-start floor of
+# that closure + 2.2 MiB/module x 3998). Measured 2026-11-19 on
+# 2cf8e62e41f stage2: 5610 and 6102 KiB/module on two runs (FAIL). See
+# doc/08_tracking/bug/hir_phase_rss_slope_retained_bodies_2026-11-19.md.
+# Verdict line is last on stdout: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+
+fit_slope() {
+  # stdin: snapshot text; stdout: "<n> <slope_kib>"
+  tr '\000' '\n' | grep 'phase=hir-post-store ' |
+    sed -n 's/.* retained_modules=\([0-9][0-9]*\) .* rss_kib=\([0-9][0-9]*\).*/\1 \2/p' |
+    awk '{n++; sx+=$1; sy+=$2; sxx+=$1*$1; sxy+=$1*$2}
+      END { if (n < 2 || n*sxx-sx*sx == 0) { print n+0, "nan"; exit }
+            printf "%d %.0f\n", n, (n*sxy-sx*sy)/(n*sxx-sx*sx) }'
+}
+
+verdict() {
+  # $1 file, $2 budget -> prints verdict, returns 0/1/2
+  case "$2" in ''|*[!0-9]*) echo "ERROR — nothing was checked (budget '$2' is not a positive integer KiB/module)"; return 2;; esac
+  [ -r "$1" ] || { echo "ERROR — nothing was checked (unreadable snapshot $1)"; return 2; }
+  set -- "$1" "$2" $(fit_slope < "$1")
+  n=$3 slope=$4
+  if [ "${n:-0}" -lt 20 ] || [ "$slope" = nan ]; then
+    echo "ERROR — nothing was checked (${n:-0} parsable hir-post-store record(s) with retained_modules= before rss_kib=; need >= 20)"
+    return 2
+  fi
+  case "$slope" in ''|-|*[!0-9-]*) echo "ERROR — nothing was checked (unparsable slope '$slope')"; return 2;; esac
+  if [ "$slope" -gt "$2" ]; then
+    echo "FAIL — $n module(s) checked, HIR RSS slope ${slope} KiB/module > budget $2 KiB/module"
+    return 1
+  fi
+  echo "PASS — $n module(s) checked, HIR RSS slope ${slope} KiB/module <= budget $2 KiB/module"
+  return 0
+}
+
+fixture() {
+  # $1 per-module KiB growth, $2 record count
+  awk -v g="$1" -v c="$2" 'BEGIN { for (i = 1; i <= c; i++)
+    printf "schema=simple.compiler.mem_snapshot.v1 event=snapshot phase=hir-post-store source_index=%d retained_modules=%d validation_keys=0 heap_live_bytes=1 rss_kib=%d hwm_kib=0\n", i-1, i, 3500000 + i*g }'
+}
+
+selftest() {
+  d=$(mktemp -d) || return 2
+  fixture 2201 60 > "$d/fail"; fixture 2200 60 > "$d/pass"; fixture 1000 5 > "$d/short"
+  # NUL-separated records, as the real binary snapshot is written
+  fixture 2201 60 | tr '\n' '\000' > "$d/nul"
+  # rss_kib before retained_modules: must be dropped -> ERROR, never PASS
+  fixture 10 60 | sed 's/retained_modules=\([0-9]*\) \(.*\) \(rss_kib=[0-9]*\)/\3 \2 retained_modules=\1/' > "$d/order"
+  verdict "$d/fail" 2200 >/dev/null; f=$?
+  verdict "$d/pass" 2200 >/dev/null; p=$?
+  verdict "$d/short" 2200 >/dev/null; s=$?
+  verdict "$d/missing" 2200 >/dev/null; m=$?
+  verdict "$d/nul" 2200 >/dev/null; z=$?
+  verdict "$d/order" 2200 >/dev/null; o=$?
+  verdict "$d/pass" 2.2k >/dev/null; b=$?
+  rm -rf "$d"
+  if [ $f -eq 1 ] && [ $p -eq 0 ] && [ $s -eq 2 ] && [ $m -eq 2 ] && [ $z -eq 1 ] && [ $o -eq 2 ] && [ $b -eq 2 ]; then
+    echo "selftest PASS — 7 fixture(s)"; return 0
+  fi
+  echo "selftest FAIL — fail=$f pass=$p short=$s missing=$m nul=$z order=$o badbudget=$b"; return 2
+}
+
+selftest || exit 2
+[ "${1:-}" = --selftest ] && exit 0
+[ -n "${1:-}" ] || { echo "ERROR — nothing was checked (no snapshot given)"; exit 2; }
+verdict "$1" "${2:-2200}"

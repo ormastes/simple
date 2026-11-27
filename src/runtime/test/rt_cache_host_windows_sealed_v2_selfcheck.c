@@ -7,7 +7,7 @@ static int checks;
 #define CHECK(x) do{++checks;if(!(x)){printf("FAIL line%d %s winerr%lu\n",__LINE__,#x,GetLastError());return 1;}}while(0)
 static int same(HANDLE h,BY_HANDLE_FILE_INFORMATION *a){BY_HANDLE_FILE_INFORMATION b;return GetFileInformationByHandle(h,&b)&&a->dwVolumeSerialNumber==b.dwVolumeSerialNumber&&a->nFileIndexHigh==b.nFileIndexHigh&&a->nFileIndexLow==b.nFileIndexLow;}
 int main(void){
- wchar_t path[256];swprintf(path,256,L"C:\\dev\\p3-retained-seal-probe\\root-%lu",GetCurrentProcessId());CHECK(CreateDirectoryW(path,NULL));char utf[1024];int n=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,path,-1,utf,sizeof utf,NULL,NULL);CHECK(n>0);
+ wchar_t path[256];swprintf(path,256,L"C:\\dev\\p3-retained-seal-probe\\root-%lu",GetCurrentProcessId());BOOL made=CreateDirectoryW(path,NULL);if(!made&&GetLastError()==ERROR_PATH_NOT_FOUND){puts("probe parent C:/dev/p3-retained-seal-probe not provisioned: harness setup required");return 64;}CHECK(made);char utf[1024];int n=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,path,-1,utf,sizeof utf,NULL,NULL);CHECK(n>0);
  HANDLE tok;TOKEN_ELEVATION e;DWORD z;CHECK(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&tok));CHECK(GetTokenInformation(tok,TokenElevation,&e,sizeof e,&z));CloseHandle(tok);CHECK(!e.TokenIsElevated);
  int64_t r=rt_cache_host_open_root_v1((uint8_t*)utf,n-1);CHECK(r>0);CHECK(rt_cache_host_fsync_v1(r)==1);
  CHECK(rt_cache_host_publish_retained_noreplace_v2(r,(uint8_t*)"bad",3)<0);CHECK(rt_cache_host_publish_retained_noreplace_v2(-1,(uint8_t*)"bad",3)<0);

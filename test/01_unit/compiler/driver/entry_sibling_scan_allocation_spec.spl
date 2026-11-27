@@ -1,0 +1,45 @@
+"""
+Allocation regression for the entry-sibling scanner.
+
+Ordinary declarations must not be materialized into per-line strings. The
+behavioral assertion keeps real sibling declarations visible, the heap assertion
+bounds retained allocation, and the source contract keeps the fast reject ahead
+of substring creation so a later edit cannot silently reintroduce the hot path.
+"""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use compiler.driver.driver_source_loading.{_driver_entry_sibling_module_paths}
+
+extern fn rt_heap_live_bytes() -> i64
+
+fn allocation_fixture() -> text:
+    var source = "mod first\n"
+    var index: i64 = 0
+    while index < 4000:
+        source = source + "val ordinary_{index} = compute(ordinary_{index})\n"
+        index = index + 1
+    source + "export second.*\n"
+
+describe "entry sibling scan allocation":
+    it "rejects ordinary lines without retaining source-sized scratch":
+        val source = allocation_fixture()
+        val before = rt_heap_live_bytes()
+        expect(_driver_entry_sibling_module_paths(source)).to_equal([".first", ".second"])
+        val retained = rt_heap_live_bytes() - before
+        expect(retained >= 0).to_equal(true)
+        expect(retained).to_be_less_than(source.byte_len())
+
+    it "keeps the allocation-free reject ahead of substring creation":
+        val source = file_read("src/compiler/80.driver/driver_entry_closure_core.spl")
+        val fn_start = source.index_of("pub fn _driver_entry_sibling_module_paths(")
+        val fn_end = source.index_of("pub enum DriverEntryResolverSelectionKindV1", fn_start)
+        expect(fn_start).to_be_greater_than(0)
+        expect(fn_end).to_be_greater_than(fn_start)
+        val body = source.substring(fn_start, fn_end)
+        val reject = body.index_of("if not materialize_line:")
+        val substring = body.index_of("raw_line = content.substring(current_start, line_end)")
+        expect(reject).to_be_greater_than(0)
+        expect(substring).to_be_greater_than(reject)
+        expect(body).to_contain("var next_triple_quote = _driver_triple_quote_byte_index_v1(content, 0)")
+        expect(body).to_contain("generated_owner != \"\"")

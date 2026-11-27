@@ -1,0 +1,55 @@
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, HIR_CODEC_VERSION}
+# Named-owner propagation. Full parser/codec integration requires the admitted runner.
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types.{AopAdvice}
+use compiler.frontend.frontend_aop_owner.{frontend_aop_bind_module_owner}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mdsoc.weaving.weaving_config.{weavingconfig_from_hir_advices}
+
+fn named_advice() -> AopAdvice:
+    AopAdvice(pointcut: "execution(* target(..))", form: "before", handler: "trace",
+        priority: 4, span: Span.new(0, 0, 0, 0), aspect_name: "Trace")
+
+describe "named advice HIR authority":
+    it "rejects a named owner without loader authority":
+        var lowering = HirLowering.new()
+        val advice = lowering.lower_aop_advice(named_advice())
+        expect(lowering.errors.len()).to_be_greater_than(0)
+
+    it "carries loader module and lexical name into HIR and weaving rules":
+        val bound = frontend_aop_bind_module_owner([named_advice()], "app.owner")
+        var lowering = HirLowering.new()
+        val advice = lowering.lower_aop_advice(bound[0])
+        expect(lowering.errors.len()).to_equal(0)
+        expect(advice.aspect_module).to_equal("app.owner")
+        expect(advice.aspect_name).to_equal("Trace")
+        val config = weavingconfig_from_hir_advices([advice])
+        expect(config.before_advices[0].aspect_module).to_equal("app.owner")
+        expect(config.before_advices[0].aspect_name).to_equal("Trace")
+
+    it "keeps legacy construction explicit rather than inventing a named aspect":
+        val legacy = AopAdvice(pointcut: "*", form: "before", handler: "trace",
+            priority: 0, span: Span.new(0, 0, 0, 0))
+        var lowering = HirLowering.new()
+        val advice = lowering.lower_aop_advice(legacy)
+        expect(advice.aspect_name).to_equal("")
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "preserves named ownership through actual HIR encoding and rejects older version headers":
+        val source = "aspect Trace:\n    on pc{{ execution(* target(..)) }} use trace before\n"
+        var parsed = parse_and_build_module(source, "hir_owner.spl")
+        parsed.aop_advices = frontend_aop_bind_module_owner(parsed.aop_advices, "app.owner")
+        var lowering = HirLowering.new()
+        val module = lowering.lower_module(parsed)
+        val blob = hir_module_encode(module)
+        expect(blob.len()).to_be_greater_than(0)
+        val decoded = hir_module_decode(blob)
+        expect(decoded.?).to_equal(true)
+        val restored = decoded.unwrap()
+        expect(restored.aop_advices[0].aspect_module).to_equal("app.owner")
+        expect(restored.aop_advices[0].aspect_name).to_equal("Trace")
+        val old_blob = blob.replace(HIR_CODEC_VERSION, "spl-hircodec-v18-bracket-slice")
+        val old = hir_module_decode(old_blob)
+        expect(old.?).to_equal(false)

@@ -66,3 +66,17 @@ Executable SSpec:
 
 Generated manual:
 `doc/06_spec/03_system/feature/language/host_gpu_lane_spec.md`
+
+## Frontend bridge note (2026-11-05)
+
+`target.later(...) gpu \:` / `host \:` parses through the ordinary
+trailing-lambda sugar as `gpu(target.later(...), \: block)`, so the lane
+marker previously survived only as a source-text check diagnostic
+(`src/app/cli/check.spl`). The flat bridge
+(`_FlatAstBridge/convert_nodes.spl`) now recognizes exactly that canonical
+shape (callee ident `gpu`/`host`, first arg the `target.later(...)` call,
+second arg the `\:` block) and lifts it to
+`StmtKind.TargetLater(TargetLaterConfig, Block)` with `lane: TargetLane`,
+`max_packet: i64?`, and the original call preserved in `config.call`. Any
+non-canonical shape stays a plain `Expr` statement. Pinned by
+`test/01_unit/compiler/frontend/host_gpu_lane_structural_bridge_spec.spl`.

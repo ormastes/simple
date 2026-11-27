@@ -19,10 +19,10 @@
 #   use app.io (file_write)
 #   file_write("doc/08_tracking/bug/bug_db.sdn", content)  // ❌ Race condition!
 
-use nogc_sync_mut.database.atomic (atomic_write, atomic_read)
+use nogc_sync_mut.database.atomic (atomic_write, atomic_write_exclusive, atomic_read)
 use std.convert (try_parse_int, try_parse_i32)
 
-use std.nogc_sync_mut.compression.gzip.crc.{crc32_text}
+use std.nogc_sync_mut.database.csm_seal.{csm_load_body, csm_seal_add, csm_seal_prune, csm_writer_algo}
 use nogc_sync_mut.database.wal (WriteAheadLog, WalEntry, WalEntryType, wal_payload_to_row)
 use nogc_sync_mut.database.db_metrics (DbMetrics)
 # Minimal StringId definition (avoids external dependency during bootstrap)
@@ -31,15 +31,14 @@ struct StringId:
 
 # Direct extern declarations for bootstrap runtime compatibility
 # (use app.io.{...} import doesn't resolve reliably in bootstrap interpreter)
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 use std.io_runtime.{file_rename}
-
-fn file_read(path: text) -> text:
-    # Bootstrap runtime wraps rt_file_read_text result in Option
-    val result = rt_file_read_text(path)
-    result ?? ""
+# Canonical text read: std.io_runtime's single blessed `pub fn file_read`; absent
+# or unreadable still yields "" for this module's callers. Not redefined here
+# (doc/08_tracking/bug/file_read_has_23_definitions_with_two_return_types_2026-08-16.md).
+use std.io_runtime.{file_read}
 fn file_write(path: text, content: text) -> bool:
     rt_file_write_text(path, content)
 fn file_exists(path: text) -> bool:
@@ -132,6 +131,10 @@ class StringInterner:
             table.add_row(row)
         table
 
+# Hidden row field holding raw extra fields of an overwide legacy row.
+pub fn sdn_opaque_tail_key() -> text:
+    "__opaque_tail"
+
 # ============================================================================
 # SdnRow - Single row in SDN table
 # ============================================================================
@@ -163,7 +166,7 @@ struct SdnRow:
         val value = self.get(column)?
         val parsed = try_parse_i32(value)
         if parsed == nil:
-            return nil
+            return None
         val n: i64 = parsed ?? 0
         n.to_i32()
 
@@ -172,7 +175,7 @@ struct SdnRow:
         val value = self.get(column)?
         val parsed = try_parse_int(value)
         if parsed == nil:
-            return nil
+            return None
         val n: i64 = parsed ?? 0
         n
 
@@ -206,6 +209,23 @@ struct SdnRow:
     fn has_column(column: text) -> bool:
         self.fields.contains_key(column)
 
+
+# An in-place update replaces the declared columns only. An overwide legacy
+# row's opaque tail (its extra raw fields) is not part of any typed record, so
+# a writer that rebuilds the row from typed fields (BugDatabase.update_bug)
+# would silently drop it; keep the current tail unless the new row sets one.
+# bug_database_roundtrip_drops_overwide_legacy_rows_2026_10_27
+pub fn sdn_row_keep_opaque_tail(current: SdnRow, row: SdnRow) -> SdnRow:
+    val key = sdn_opaque_tail_key()
+    if not current.has_column(key) or row.has_column(key):
+        return row
+    val tail = current.get(key) ?? ""
+    val kept = SdnRow(fields: {}, _version: row._version)
+    for (column, value) in row.fields:
+        kept.set(column, value)
+    kept.set(key, tail)
+    kept
+
 # ============================================================================
 # SdnTable - In-memory representation of SDN table
 # ============================================================================
@@ -224,7 +244,7 @@ class SdnTable:
     static fn parse(content: text) -> SdnTable?:
         val lines: [text] = content.split("\n")
         if lines.len() == 0:
-            return nil
+            return None
 
         # Find table header line (format: "table_name |col1, col2, col3|")
         var header_idx = -1
@@ -238,18 +258,23 @@ class SdnTable:
             if trimmed.contains("|") and not trimmed.starts_with("#"):
                 # Parse header
                 val parts: [text] = trimmed.split("|")
-                if parts.len() >= 3:
-                    table_name = parts[0].trim()
-                    val col_part = parts[1].trim()
-                    # NOTE: Cannot chain .split().map() - bootstrap runtime bug
-                    val raw_cols: [text] = col_part.split(",")
-                    columns = raw_cols.map(&:trim)
-                    header_idx = i
-                    break
+                if parts.len() != 3:
+                    return None
+                if parts[2].trim() != "":
+                    return None
+                table_name = parts[0].trim()
+                val col_part = parts[1].trim()
+                if table_name == "" or col_part == "":
+                    return None
+                # NOTE: Cannot chain .split().map() - bootstrap runtime bug
+                val raw_cols: [text] = col_part.split(",")
+                columns = raw_cols.map(&:trim)
+                header_idx = i
+                break
             i = i + 1
 
         if header_idx == -1:
-            return nil
+            return None
 
         # Parse rows
         # Cycle-173: bind-once family throughout -- measured on
@@ -273,10 +298,20 @@ class SdnTable:
             # Parse row with quote-aware CSV splitting
             # Handles quoted values that contain commas
             val parts = split_sdn_row(line)
-            if parts.len() != columns_parsed.len():
-                continue
+            # Underwide rows are corrupt: fail closed. Overwide legacy rows keep
+            # their extra raw fields as an opaque tail so a save round trip is
+            # lossless (bug_database_roundtrip_drops_overwide_legacy_rows_2026_10_27).
+            if parts.len() < columns_parsed.len():
+                return None
 
             val row = SdnRow(fields: {}, _version: 0)
+            if parts.len() > columns_parsed.len():
+                var tail: [text] = []
+                var k = columns_parsed.len()
+                while k < parts.len():
+                    tail.push(parts[k].trim())
+                    k = k + 1
+                row.set(sdn_opaque_tail_key(), tail.join(", "))
             var j = 0
             while j < columns_parsed.len():
                 val col: text = columns_parsed[j]
@@ -306,6 +341,10 @@ class SdnTable:
                 val formatted = quote_if_needed(value)
                 values.push(formatted)
             parts.push(values.join(", "))
+            if row.has_column(sdn_opaque_tail_key()):
+                val opaque_tail = row.get(sdn_opaque_tail_key()) ?? ""
+                parts.push(", ")
+                parts.push(opaque_tail)
             parts.push("\n")
 
         parts.join("")
@@ -353,7 +392,7 @@ class SdnTable:
             val current = self.rows[i]
             val current_row: SdnRow = current
             if current_row.get(pk) == Some(key):
-                self.rows[i] = row
+                self.rows[i] = sdn_row_keep_opaque_tail(current_row, row)
                 self.index[key] = i
                 return Ok(())
             i = i + 1
@@ -380,7 +419,7 @@ class SdnTable:
             if current_row.get(pk) == Some(key):
                 if current_row._version != expected_version:
                     return Err("version mismatch: expected {expected_version}, got {current_row._version}")
-                val new_row = SdnRow(fields: row.fields, _version: expected_version + 1)
+                val new_row = SdnRow(fields: sdn_row_keep_opaque_tail(current_row, row).fields, _version: expected_version + 1)
                 self.rows[i] = new_row
                 self.index[key] = i
                 return Ok(true)
@@ -471,48 +510,42 @@ class SdnDatabase:
             interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0)),
             tables: {},
             modified: false,
-            wal: nil,
-            metrics: nil
+            wal: None,
+            metrics: None
         )
 
     # Load existing database
     static fn load(path: text) -> SdnDatabase?:
         if not file_exists(path):
-            return nil
+            return None
 
         val raw_content = file_read(path)
         if raw_content == "":
-            return nil
+            return None
 
         var content: text = raw_content
-        if content.starts_with("#sdn-crc32:"):
-            val newline_idx = content.index_of("\n")
-            if newline_idx > 0:
-                val header = content.slice(0, newline_idx)
-                val stored_crc_str = header.slice(11, header.len())
-                # Fail-CLOSED: a malformed CRC header must reject the file.
-                # `.to_int() ?? -1` could not do that -- `.to_int()` never
-                # yields nil, so "#sdn-crc32:garbage" parsed as 0 and would
-                # have matched any body whose crc32 is 0.
-                val parsed_crc = try_parse_int(stored_crc_str)
-                if parsed_crc == nil:
-                    return nil
-                val stored_crc: i64 = parsed_crc ?? -1
-                val body = content.slice(newline_idx + 1, content.len())
-                val computed_crc = crc32_text(body)
-                if stored_crc != computed_crc:
-                    return nil
-                content = body
+        # Sidecar seal (<stem>.<algo>_<hex>.csm): fail-CLOSED on CORRUPT, and on
+        # MISSING for policy-listed files. See database/csm_seal.spl.
+        val sealed_body = csm_load_body(path, raw_content)
+        if sealed_body == nil:
+            return None
+        content = sealed_body ?? raw_content
 
-        var db = SdnDatabase(path: path, tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0)), modified: false, wal: nil, metrics: nil)
+        var db = SdnDatabase(path: path, tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0)), modified: false, wal: None, metrics: None)
 
-        val sections: [text] = content.split("\n\n")
+        val normalized: text = content.replace("\r\n", "\n")
+        val sections: [text] = normalized.split("\n\n")
         for section in sections:
             if section.trim() == "":
                 continue
 
             val table_opt = parse_sdn_table(section)
             if not table_opt.?:
+                if sdn_section_has_table_header(section):
+                    # A table-shaped section that fails parsing is corrupt.
+                    # Reject the whole database instead of silently saving a
+                    # smaller view that omits its malformed rows.
+                    return None
                 # Tracked SDN files may contain prose/report sections between
                 # tables. Ignore any section that does not parse as a table.
                 continue
@@ -558,8 +591,10 @@ class SdnDatabase:
 
         Some(db)
 
-    # Save to disk (atomic with file locking)
-    me save() -> bool:
+    # Render one canonical SDN payload for both replacement and create-only
+    # publication. Keep the checksum and table ordering identical across both
+    # writer paths.
+    fn serialized_content() -> text:
         var sections: [text] = []
 
         # Write strings table first. Built via the uniquely-named
@@ -580,12 +615,19 @@ class SdnDatabase:
             val typed_table: SdnTable = table
             sections.push(typed_table.to_sdn())
 
-        val body = sections.join("\n\n") + "\n\n"
-        val crc = crc32_text(body)
-        val content = "#sdn-crc32:{crc}\n" + body
+        sections.join("\n\n") + "\n\n"
 
+    # Save to disk (atomic with file locking)
+    me save() -> bool:
+        val content = self.serialized_content()
+        # Seal first (old + new sidecars => MERGED_UNSEALED, still loadable), publish
+        # the data, then prune the stale seals.
+        val seal = csm_seal_add(self.path, content, csm_writer_algo(self.path))
+        if seal == "":
+            return false
         if not atomic_write(self.path, content):
             return false
+        csm_seal_prune(self.path, seal)
 
         self.modified = false
 
@@ -598,6 +640,20 @@ class SdnDatabase:
             nil:
                 pass
 
+        true
+
+    # Publish an initially absent database without replacing any path entry.
+    # Used when a nil load could mean either absence or unreadable contents:
+    # the exclusive no-replace publish is the atomic absence proof.
+    me save_exclusive() -> bool:
+        val content = self.serialized_content()
+        val seal = csm_seal_add(self.path, content, csm_writer_algo(self.path))
+        if seal == "":
+            return false
+        if not atomic_write_exclusive(self.path, content):
+            return false
+        csm_seal_prune(self.path, seal)
+        self.modified = false
         true
 
     # Get table by name
@@ -638,7 +694,7 @@ class SdnDatabase:
     # Export a table to SDN text
     fn export_table_sdn(name: text) -> text?:
         if not self.tables.contains_key(name):
-            return nil
+            return None
         val table: SdnTable = self.tables[name]
         Some(table.to_sdn())
 
@@ -675,10 +731,7 @@ class SdnDatabase:
 
         # Check valid column in all tables
         for (name, table) in self.tables:
-            val typed_table: SdnTable = table
-            # @workaround bug=a174_aggregate_receiver_provenance_2026_10_16 reason=retain-explicit-aggregate-receiver-type
-            val typed_rows: [SdnRow] = typed_table.rows
-            for row_value in typed_rows:
+            for row_value in table.rows:
                 val row: SdnRow = row_value
                 val valid_opt = row.get("valid")
                 if val Some(valid_str) = valid_opt:
@@ -707,21 +760,47 @@ fn split_sdn_row(line: text) -> [text]:
     val cs = line.chars()
     while i < cs.len():
         val ch = cs[i]
-        if ch == '"':
-            in_quotes = not in_quotes
+        if ch == "\\" and in_quotes and i + 1 < cs.len():
+            # Backslash escapes the next character inside quotes: an escaped
+            # quote must not toggle quote state, matching the canonical
+            # scripts/check/check-bug-db-table-shape.shs field counter.
             chars.push(ch)
-        elif ch == ',' and not in_quotes:
-            parts.push(chars.join(""))
-            chars = []
+            chars.push(cs[i + 1])
+            i = i + 2
         else:
-            chars.push(ch)
-        i = i + 1
+            if ch == '"':
+                in_quotes = not in_quotes
+                chars.push(ch)
+            elif ch == ',' and not in_quotes:
+                parts.push(chars.join(""))
+                chars = []
+            else:
+                chars.push(ch)
+            i = i + 1
 
     # Add last field
     if chars.len() > 0 or parts.len() > 0:
         parts.push(chars.join(""))
 
+    if in_quotes:
+        return []
+
     parts
+
+# True when a section begins with an SDN table-shaped header. This lets the
+# loader continue to ignore prose sections while rejecting malformed tables.
+fn sdn_section_has_table_header(section: text) -> bool:
+    val lines: [text] = section.split("\n")
+    for raw_line in lines:
+        val line = raw_line.trim()
+        if line == "" or line.starts_with("#"):
+            continue
+        if not line.contains("|"):
+            continue
+        # SdnTable.parse treats the first non-comment pipe line as its header
+        # candidate and fails malformed candidates immediately.
+        return true
+    false
 
 # Strip surrounding double quotes from a value.
 # '"hello"' -> 'hello', 'plain' -> 'plain'
@@ -745,10 +824,10 @@ fn quote_if_needed(value: text) -> text:
 # Standalone wrappers for static methods (bootstrap runtime compatibility)
 # ============================================================================
 
-fn parse_sdn_table(content: text) -> SdnTable?:
+pub fn parse_sdn_table(content: text) -> SdnTable?:
     SdnTable.parse(content)
 
-fn interner_from_sdn(table: SdnTable) -> StringInterner:
+pub fn interner_from_sdn(table: SdnTable) -> StringInterner:
     StringInterner.from_sdn(table)
 
 fn new_sdn_database(path: text) -> SdnDatabase:

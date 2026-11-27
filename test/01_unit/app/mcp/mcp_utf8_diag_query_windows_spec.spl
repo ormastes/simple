@@ -1,0 +1,74 @@
+"""
+# MCP Diag & Query UTF-8 / Windows Regression Spec
+
+Pins byte-offset and UTF-8 handling in `main_lazy_diag_tools` and `main_lazy_query_tools`:
+- `find_in_text` guards negative/out-of-range offsets and `extract_quoted_after` advances past UTF-8 prefixes
+- `handle_simple_multi_edit` advances `search_pos` past `new_val` on UTF-8 files
+- `_mcp_json_escape` preserves multi-byte UTF-8 without trailing NULs while keeping historical control-char parity
+- `_mcp_escape_ere_literal` escapes ERE metacharacters cleanly alongside UTF-8 text
+"""
+
+use std.spec.{describe, it, expect}
+use app.mcp.main_lazy_json.{LB, RB}
+use app.mcp.main_lazy_diag_tools.{find_in_text, extract_quoted_after, handle_simple_multi_edit}
+use app.mcp.main_lazy_query_tools.{_mcp_json_escape, _mcp_escape_ere_literal}
+use std.io_runtime.{env_get_opt, file_write, file_read, getpid, time_now_unix_micros}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+
+fn _tmp_base() -> text:
+    val raw = env_get_opt("TEMP") ?? env_get_opt("TMP") ?? env_get_opt("TMPDIR") ?? "/tmp"
+    val clean = raw.replace("\\", "/")
+    if clean.byte_len() > 1 and clean.ends_with("/"):
+        return clean.substring(0, clean.byte_len() - 1)
+    clean
+
+describe "MCP diag and query UTF-8 / Windows helpers":
+    it "find_in_text and extract_quoted_after extract values after multi-byte UTF-8 text":
+        val payload = "{\"prefix\":\"\uD55C\uAE00\",\"old_string\":\"C:\\\\a\\\\b\",\"new_string\":\"C:\\\\c\\\\d\"}"
+        val key = "\"old_string\":"
+        val idx = find_in_text(payload, key, 0)
+        expect(idx).to_be_greater_than(0)
+        val extracted = extract_quoted_after(payload, idx + key.byte_len())
+        expect(extracted).to_equal("C:\\a\\b")
+
+        val key2 = "\"new_string\":"
+        val idx2 = find_in_text(payload, key2, idx)
+        expect(idx2).to_be_greater_than(idx)
+        val extracted2 = extract_quoted_after(payload, idx2 + key2.byte_len())
+        expect(extracted2).to_equal("C:\\c\\d")
+
+        expect(find_in_text(payload, key, -1)).to_equal(-1)
+        expect(find_in_text(payload, key, payload.byte_len())).to_equal(-1)
+
+    it "handle_simple_multi_edit advances past new_string containing old_string marker":
+        val tag = str(getpid()) + "_" + str(time_now_unix_micros())
+        val dir = _tmp_base() + "/simple_mcp_multi_edit_" + tag
+        val target = dir + "/sample.txt"
+        val created = dir_create_all(dir)
+        val wrote = if created: file_write(target, "prefix \uD55C\uAE00 first second\n") else: false
+        val edits = "[{\"old_string\":\"first\",\"new_string\":\"\\\"old_string\\\":\\\"bogus\\\"\"},{\"old_string\":\"second\",\"new_string\":\"done\"}]"
+        val body = "{\"path\":\"" + target + "\",\"edits\":\"" + edits.replace("\\", "\\\\").replace("\"", "\\\"") + "\"}"
+        val resp = if wrote: handle_simple_multi_edit("1", body) else: ""
+        val after = if wrote: file_read(target) else: ""
+        val cleaned = dir_remove_all(dir)
+        expect(created).to_equal(true)
+        expect(wrote).to_equal(true)
+        expect(cleaned).to_equal(true)
+        expect(resp.contains("2 edits applied")).to_equal(true)
+        expect(after).to_equal("prefix \uD55C\uAE00 \"old_string\":\"bogus\" done\n")
+
+    it "_mcp_json_escape preserves UTF-8 code points across fast and escaped paths":
+        expect(_mcp_json_escape("é漢🙂")).to_equal("é漢🙂")
+        val input = "é漢\\\"\n🙂"
+        val escaped = _mcp_json_escape(input)
+        expect(escaped).to_equal("é漢\\\\\\\"\\n🙂")
+        expect(escaped.byte_len()).to_equal("é漢\\\\\\\"\\n🙂".byte_len())
+        val input2 = "\uD55C\uAE00\\path\"x\"\ny"
+        expect(_mcp_json_escape(input2)).to_equal("\uD55C\uAE00\\\\path\\\"x\\\"\\ny")
+        expect(_mcp_json_escape("a\tb\rc")).to_equal("a\tb\rc")
+
+    it "_mcp_escape_ere_literal escapes ERE metacharacters around UTF-8 text":
+        val raw = "fn_\uD55C\uAE00(a.b)+?[0]" + LB() + "1" + RB() + "|^$\\"
+        val esc = _mcp_escape_ere_literal(raw)
+        val expected = "fn_\uD55C\uAE00\\(a\\.b\\)\\+\\?\\[0\\]\\" + LB() + "1\\" + RB() + "\\|\\^\\$\\\\"
+        expect(esc).to_equal(expected)

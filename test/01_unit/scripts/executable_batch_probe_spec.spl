@@ -1,0 +1,79 @@
+# @cover scripts/bootstrap/lib/executable_batch_probe.spl 80%
+"""
+## Purpose and audience
+Purpose: pin the Windows commit-headroom probe that replaced the ctypes
+`GetPerformanceInfo` call of the former `executable_batch_policy.py`.
+The probe reads `FreeVirtualMemory` and `TotalVirtualMemorySize` (KB) from
+`Win32_OperatingSystem` through PowerShell; this spec covers the pure output
+parser and the command line, plus a live probe that only runs on Windows.
+Audience: maintainers of `scripts/bootstrap/lib/executable_batch_probe.spl`.
+"""
+
+use std.spec.*
+use scripts.bootstrap.lib.executable_batch_probe.{parse_commit_probe_output, commit_probe_script, commit_probe_args, available_commit_bytes}
+
+describe "executable_batch_probe parser":
+    it "converts FreeVirtualMemory KB to bytes":
+        val r = parse_commit_probe_output("4096 8192\n")
+        expect(r.is_ok()).to_equal(true)
+        expect(r.unwrap()).to_equal(4096 * 1024)
+
+    it "accepts CRLF line endings and surrounding blanks":
+        val r = parse_commit_probe_output("\r\n  123456   654321 \r\n\r\n")
+        expect(r.unwrap()).to_equal(123456 * 1024)
+
+    it "handles commit sizes above 2^32 KB without wrapping":
+        val r = parse_commit_probe_output("68719476736 137438953472")
+        expect(r.unwrap()).to_equal(68719476736 * 1024)
+
+    it "accepts free equal to total and zero free commit":
+        expect(parse_commit_probe_output("8 8").unwrap()).to_equal(8 * 1024)
+        expect(parse_commit_probe_output("0 8").unwrap()).to_equal(0)
+
+    it "rejects empty output":
+        expect(parse_commit_probe_output("").is_ok()).to_equal(false)
+        expect(parse_commit_probe_output("\n\n").is_ok()).to_equal(false)
+
+    it "rejects a single number":
+        expect(parse_commit_probe_output("4096").is_ok()).to_equal(false)
+
+    it "rejects non-numeric and signed fields":
+        expect(parse_commit_probe_output("abc 8192").is_ok()).to_equal(false)
+        expect(parse_commit_probe_output("4096 8x").is_ok()).to_equal(false)
+        expect(parse_commit_probe_output("-1 8192").is_ok()).to_equal(false)
+        expect(parse_commit_probe_output("1.5 8192").is_ok()).to_equal(false)
+
+    it "rejects trailing junk and multiple lines":
+        expect(parse_commit_probe_output("4096 8192 1").is_ok()).to_equal(false)
+        expect(parse_commit_probe_output("4096 8192\n1 2").is_ok()).to_equal(false)
+
+    it "rejects a zero commit limit and free above total":
+        expect(parse_commit_probe_output("0 0").is_ok()).to_equal(false)
+        expect(parse_commit_probe_output("9000 8192").is_ok()).to_equal(false)
+
+    it "rejects values that overflow when scaled to bytes":
+        expect(parse_commit_probe_output("9223372036854775807 9223372036854775807").is_ok()).to_equal(false)
+
+describe "executable_batch_probe command":
+    it "queries Win32_OperatingSystem for both fields":
+        val script = commit_probe_script()
+        expect(script.contains("Get-CimInstance Win32_OperatingSystem")).to_equal(true)
+        expect(script.contains("{")).to_equal(false)
+        expect(script.contains("FreeVirtualMemory")).to_equal(true)
+        expect(script.contains("TotalVirtualMemorySize")).to_equal(true)
+
+    it "runs without profile or prompts":
+        val args = commit_probe_args()
+        expect(args[0]).to_equal("-NoProfile")
+        expect(args[1]).to_equal("-NonInteractive")
+        expect(args[2]).to_equal("-Command")
+        expect(args[3]).to_equal(commit_probe_script())
+        expect(args.len()).to_equal(4)
+
+describe "executable_batch_probe live":
+    it "reports positive available commit on this host or a named error":
+        val r = available_commit_bytes()
+        if r.is_ok():
+            expect(r.unwrap() > 0).to_equal(true)
+        else:
+            expect(r.is_err()).to_equal(true)

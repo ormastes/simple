@@ -24,24 +24,84 @@ quotes messages so they stay one SDN row.
 use std.spec.step
 use std.spec.{describe, it, assert_equal, assert_true, assert_false}
 use compiler.driver.driver_build.go_to_end.{GoToEndLedgerV1,
-    go_to_end_manifest_path_v1, go_to_end_import_names_module_v1,
+    go_to_end_manifest_path_v1, go_to_end_module_index_v1, go_to_end_import_target_v1,
     go_to_end_blocked_modules_v1, go_to_end_sdn_quote_v1,
     go_to_end_manifest_text_v1, go_to_end_resolve_import_v1}
+
+# The module key `import_path` (written in `importer`) binds among `names`,
+# or "" when it binds none of them.
+fn target_of(names: [text], importer: text, import_path: text) -> text:
+    go_to_end_import_target_v1(go_to_end_module_index_v1(names), importer, import_path)
 
 describe "go-to-end import matching":
     it "matches exact and logical std imports":
         # @req REQ-SSPEC-COMPILER
         step("matches exact and logical std imports")
-        assert_true(go_to_end_import_names_module_v1("bad_b", "bad_b"))
-        assert_true(go_to_end_import_names_module_v1("std.common.text", "lib.common.text"))
-        assert_true(go_to_end_import_names_module_v1("compiler.hir.hir_types", "compiler.hir.hir_types"))
+        assert_equal(target_of(["bad_b"], "x", "bad_b"), "bad_b")
+        assert_equal(target_of(["lib.common.text"], "x", "std.common.text"), "lib.common.text")
+        assert_equal(target_of(["compiler.hir.hir_types"], "x", "compiler.hir.hir_types"), "compiler.hir.hir_types")
 
     it "does not match an unrelated module":
         # @req REQ-SSPEC-COMPILER
         step("does not match an unrelated module")
-        assert_false(go_to_end_import_names_module_v1("good_a", "bad_b"))
-        assert_false(go_to_end_import_names_module_v1("", "bad_b"))
-        assert_false(go_to_end_import_names_module_v1("text_extra", "lib.common.text"))
+        assert_equal(target_of(["bad_b"], "x", "good_a"), "")
+        assert_equal(target_of(["bad_b"], "x", ""), "")
+        assert_equal(target_of(["lib.common.text"], "x", "text_extra"), "")
+
+    it "does not bind std or bare imports to a deep same-leaf module":
+        # @req REQ-SSPEC-COMPILER
+        step("does not bind std or bare imports to a deep same-leaf module")
+        # Stage 3 self-build 2026-11-16: `use std.env` in _AstExpr.accessors
+        # matched the failed-closure module compiler.backend.env (the census
+        # key of 70.backend/backend/env.spl) by leaf, so the whole ast_expr
+        # SCC was excluded as a false dependent.
+        assert_equal(target_of(["compiler.backend.env"], "compiler.frontend.core._AstExpr.accessors", "std.env"), "")
+        assert_equal(target_of(["compiler.hir.hir_lowering.types"], "a.b", "std.types"), "")
+        # The resolver accepts only lib.X or lib.<family>.X for a bare import.
+        assert_equal(target_of(["lib.x.y.provider"], "app.z.main", "provider"), "")
+        assert_equal(target_of(["lib.nogc_sync_mut.env"], "a.b", "std.env"), "lib.nogc_sync_mut.env")
+        # Family-relative lib spellings (`use common.text`, ~3000 sites).
+        assert_equal(target_of(["lib.common.text"], "a.b", "common.text"), "lib.common.text")
+        assert_equal(target_of(["lib.nogc_sync_mut.io.file_ops"], "a.b", "nogc_sync_mut.io.file_ops"), "lib.nogc_sync_mut.io.file_ops")
+
+    it "matches the rewrite-table and tier spellings of one module":
+        # @req REQ-SSPEC-COMPILER
+        step("matches the rewrite-table and tier spellings of one module")
+        assert_equal(target_of(["compiler.frontend.core.ast_expr"], "a.b", "compiler.core.ast_expr"), "compiler.frontend.core.ast_expr")
+        assert_equal(target_of(["compiler.core.ast_expr"], "a.b", "compiler.frontend.core.ast_expr"), "compiler.core.ast_expr")
+        assert_equal(target_of(["compiler.frontend.core.ast_expr"], "a.b", "compiler.10.frontend.core.ast_expr"), "compiler.frontend.core.ast_expr")
+        assert_equal(target_of(["compiler.frontend.core.ast_expr"], "a.b", "compiler.core.ast"), "")
+        # 50.mir/mir_contract.spl: `use compiler.interpreter.contracts`.
+        assert_equal(target_of(["compiler.interp.interpreter.contracts"], "compiler.mir.mir_contract", "compiler.interpreter.contracts"), "compiler.interp.interpreter.contracts")
+        assert_equal(target_of(["compiler.interpreter.contracts"], "a.b", "compiler.interp.interpreter.contracts"), "compiler.interpreter.contracts")
+        assert_equal(target_of(["compiler.driver.shb.shb_writer"], "a.b", "compiler.shb.shb_writer"), "compiler.driver.shb.shb_writer")
+        # backend/: both nested spellings are distinct files and keep their keys.
+        val backend = ["compiler.backend.env", "compiler.backend.backend_types", "compiler.backend.backend.backend_types"]
+        assert_equal(target_of(backend, "a.b", "compiler.backend.env"), "compiler.backend.env")
+        assert_equal(target_of(backend, "a.b", "compiler.backend.backend.backend_types"), "compiler.backend.backend.backend_types")
+        assert_equal(target_of(backend, "a.b", "compiler.backend.backend_types"), "compiler.backend.backend_types")
+
+    it "strips a trailing item name, full module first":
+        # @req REQ-SSPEC-COMPILER
+        step("strips a trailing item name, full module first")
+        assert_equal(target_of(["compiler.hir.hir_types"], "a.b", "compiler.hir.hir_types.HirImport"), "compiler.hir.hir_types")
+        # `use span.Span` binds the importer-directory sibling span.spl.
+        assert_equal(target_of(["compiler.frontend.core.span"], "compiler.frontend.core.lexer", "span.Span"), "compiler.frontend.core.span")
+        assert_equal(target_of(["a.b", "a"], "x", "a.b"), "a.b")
+        assert_equal(target_of(["a.b", "a"], "x", "a.c"), "a")
+
+    it "binds a package import to its __init__ or mod entry":
+        # @req REQ-SSPEC-COMPILER
+        step("binds a package import to its __init__ or mod entry")
+        assert_equal(target_of(["compiler.hir.__init__"], "a.b", "compiler.hir"), "compiler.hir.__init__")
+        assert_equal(target_of(["compiler.frontend.core.interpreter.mod"], "a.b", "compiler.core.interpreter"), "compiler.frontend.core.interpreter.mod")
+        assert_equal(target_of(["a.b.__init__", "a.b"], "x", "a.b"), "a.b")
+
+    it "binds a bare import to an importer-directory sibling before lib":
+        # @req REQ-SSPEC-COMPILER
+        step("binds a bare import to an importer-directory sibling before lib")
+        assert_equal(target_of(["lib.provider", "app.z.provider"], "app.z.main", "provider"), "app.z.provider")
+        assert_equal(target_of(["lib.provider"], "app.z.main", "provider"), "lib.provider")
 
 describe "go-to-end dependency selection":
     it "excludes direct and transitive importers of a failed module only":
@@ -63,6 +123,46 @@ describe "go-to-end dependency selection":
         step("excludes nothing when no candidate imports a failure")
         val blocked = go_to_end_blocked_modules_v1(["a", "b"], ["a"], ["b"], ["c"])
         assert_equal(blocked.len(), 0)
+
+    it "keeps a provider and its alias-spelled importers consistent":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps a provider and its alias-spelled importers consistent")
+        # Replay of the Stage 3 self-build cascade: a provider excluded while
+        # an importer stays lowers MIR with no provider
+        # ("missing provider declaration for imported global").
+        val candidates = ["compiler.backend.env", "compiler.frontend.core._AstExpr.accessors",
+            "compiler.frontend.core.ast_expr", "compiler.frontend.core.interpreter.eval_tables"]
+        val edge_from = ["compiler.backend.env", "compiler.frontend.core._AstExpr.accessors",
+            "compiler.frontend.core.ast_expr", "compiler.frontend.core.interpreter.eval_tables"]
+        val edge_to = ["compiler.backend.llvm_backend", "std.env",
+            "compiler.frontend.core._AstExpr.accessors", "compiler.core.ast_expr"]
+        val blocked = go_to_end_blocked_modules_v1(candidates, edge_from, edge_to,
+            ["compiler.backend.llvm_backend"])
+        assert_equal(blocked.len(), 1)
+        assert_true(blocked.contains("compiler.backend.env"))
+        # A genuinely failed provider still excludes its alias-spelled importer.
+        val alias_blocked = go_to_end_blocked_modules_v1(candidates, edge_from, edge_to,
+            ["compiler.frontend.core._AstExpr.accessors"])
+        assert_true(alias_blocked.contains("compiler.frontend.core.ast_expr"))
+        assert_true(alias_blocked.contains("compiler.frontend.core.interpreter.eval_tables"))
+        assert_false(alias_blocked.contains("compiler.backend.env"))
+
+    it "binds edges through item, package and rewrite spellings to failed modules":
+        # @req REQ-SSPEC-COMPILER
+        step("binds edges through item, package and rewrite spellings to failed modules")
+        # Failed modules are already dropped from the HIR set: they are not candidates.
+        val candidates = ["compiler.mir.mir_contract", "compiler.frontend.core.lexer",
+            "compiler.hir.user", "app.z.main"]
+        val edge_from = candidates
+        val edge_to = ["compiler.interpreter.contracts", "span.Span", "compiler.hir", "provider"]
+        val failed = ["compiler.interp.interpreter.contracts", "compiler.frontend.core.span",
+            "compiler.hir.__init__", "lib.x.y.provider"]
+        val blocked = go_to_end_blocked_modules_v1(candidates, edge_from, edge_to, failed)
+        assert_equal(blocked.len(), 3)
+        assert_true(blocked.contains("compiler.mir.mir_contract"))
+        assert_true(blocked.contains("compiler.frontend.core.lexer"))
+        assert_true(blocked.contains("compiler.hir.user"))
+        assert_false(blocked.contains("app.z.main"))
 
 describe "go-to-end relative imports":
     it "resolves .x, ..x and absolute paths against the importer":

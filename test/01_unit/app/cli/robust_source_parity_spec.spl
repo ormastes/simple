@@ -1,0 +1,121 @@
+"""
+## Purpose and audience
+Purpose: Parity gate between the `text` (reference) and `hir` origin-fact
+sources behind `simple robust inventory`, `simple robust boundaries`, the
+inventory `--sdn` document and the SPL-BOUND-00x lint findings. Every robust
+fixture under test/ is rendered through both sources; any disagreement fails
+unless an allowlist entry (with a non-empty reason) names the line where HIR
+is more precise.
+Audience: compiler and tooling engineers migrating robust consumers to HIR.
+## Operator workflow
+Run this spec with the test runner; a FAIL names each unallowed diff line.
+## Compatibility and limitations
+`hir` is the default source. Its origin column is the HIR root origin, so the
+let-copy alias fixture differs from text by design and is allowlisted with a
+reason; any other diff fails.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read}
+use app.cli.robust_source.{ROBUST_DEFAULT_SOURCE, robust_render, robust_source_available, robust_parity_check, robust_parity_diff, robust_fixture_paths, ROBUST_PARITY_ALLOW, RobustParityAllow, ROBUST_SURFACES}
+use app.cli.robust_command.{run_robust}
+
+fn fixture_sources(paths: [text]) -> [text]:
+    var out: [text] = []
+    for p in paths:
+        out.push(file_read(p))
+    out
+
+# @manual_section: robust_source_parity
+describe "robust text/hir source parity":
+    """Both origin-fact sources agree on every robust fixture."""
+
+    it "finds the robust fixtures under test/":
+        step("Collect the bound_graph and bound_unit_graph fixtures")
+        val paths = robust_fixture_paths()
+        expect(paths.len() >= 10).to_equal(true)
+
+    it "text source renders every surface deterministically":
+        step("Render each surface twice from the text source and compare")
+        val paths = robust_fixture_paths()
+        val sources = fixture_sources(paths)
+        for s in ROBUST_SURFACES:
+            val a = robust_render(s, "text", paths, sources)
+            val b = robust_render(s, "text", paths, sources)
+            expect(a.?).to_equal(true)
+            expect(a.unwrap()).to_equal(b.unwrap())
+
+    it "hir source agrees with text on every fixture, modulo allowlist":
+        step("Run both sources over every fixture and diff each surface")
+        val paths = robust_fixture_paths()
+        val sources = fixture_sources(paths)
+        if robust_source_available("hir"):
+            expect(robust_parity_check("text", "hir", paths, sources, ROBUST_PARITY_ALLOW)).to_equal([])
+        else:
+            expect(robust_render("inventory_sdn", "hir", paths, sources).?).to_equal(false)
+
+    it "harness fails on a disagreement and on a reasonless allowlist entry":
+        step("Diff a text render against a render of doctored sources")
+        val paths = robust_fixture_paths()
+        val sources = fixture_sources(paths)
+        expect(robust_parity_check("text", "text", paths, sources, [])).to_equal([])
+        var doctored: [text] = []
+        for s in sources:
+            doctored.push(s)
+        doctored[0] = doctored[0] + "\nfn extra_parity_probe(z: i64) -> i64:\n    val q = 1\n    q\n"
+        val a = robust_render("inventory_sdn", "text", paths, sources).unwrap()
+        val b = robust_render("inventory_sdn", "text", paths, doctored).unwrap()
+        val all = robust_parity_diff("inventory_sdn", a, b, [])
+        expect(all.len() > 0).to_equal(true)
+        step("An allowlist entry naming the diff suppresses it only with a reason")
+        val ok_allow = [RobustParityAllow(surface: "inventory_sdn", needle: "extra_parity_probe", reason: "probe")]
+        expect(robust_parity_diff("inventory_sdn", a, b, ok_allow).len()).to_equal(all.len() - 2)
+        val noreason = [RobustParityAllow(surface: "inventory_sdn", needle: "x", reason: "")]
+        expect(robust_parity_check("text", "text", paths, sources, noreason).len()).to_equal(1)
+
+    it "every shipped allowlist entry carries a reason":
+        for e in ROBUST_PARITY_ALLOW:
+            expect(e.reason != "").to_equal(true)
+
+    it "cli rejects an unknown --source and reports an unavailable hir":
+        step("Drive run_robust with bad and pending sources")
+        expect(run_robust(["inventory", "--source", "bogus", "test/01_unit/compiler/lint/fixtures/bound_graph"])).to_equal(2)
+        expect(run_robust(["inventory", "--source", "text", "test/01_unit/compiler/lint/fixtures/bound_graph"])).to_equal(0)
+        if not robust_source_available("hir"):
+            expect(run_robust(["boundaries", "--source", "hir", "test/01_unit/compiler/lint/fixtures/bound_graph"])).to_equal(2)
+
+describe "robust hir source is the default":
+    """`--source hir` is the default and its alias-chain precision is allowlisted."""
+
+    it "defaults to hir and renders it":
+        # @req: REQ-DIAG-POLICY-001
+        step("Default source and an hir render of the alias fixture")
+        expect(ROBUST_DEFAULT_SOURCE).to_equal("hir")
+        expect(robust_source_available("hir")).to_equal(true)
+        val p = "test/01_unit/compiler/lint/fixtures/robust_alias/alias_chain.spl"
+        val out = robust_render("inventory_text", "hir", [p], [file_read(p)]).unwrap()
+        expect(out.contains("alias_chain.spl:6 alias_chain b extern_return plain")).to_equal(true)
+        expect(run_robust(["inventory", p])).to_equal(0)
+
+    it "the alias-chain diff is real and only the allowlist hides it":
+        # @req: REQ-DIAG-POLICY-001
+        step("Without the allowlist the alias fixture diffs; with it, nothing")
+        val paths = robust_fixture_paths()
+        val sources = fixture_sources(paths)
+        val raw = robust_parity_check("text", "hir", paths, sources, [])
+        expect(raw.len() > 0).to_equal(true)
+        for d in raw:
+            expect(d.contains("alias_chain")).to_equal(true)
+        var alias_entries = 0
+        for e in ROBUST_PARITY_ALLOW:
+            if e.needle.contains("alias_chain"):
+                alias_entries = alias_entries + 1
+                expect(e.reason.contains("alias")).to_equal(true)
+        expect(alias_entries).to_equal(5)
+
+    it "an unparseable file makes the hir render unavailable, not text":
+        # @req: REQ-DIAG-POLICY-001
+        step("Render hir over a source with a syntax error")
+        expect(robust_render("inventory_sdn", "hir", ["bad.spl"], ["fn broken(:\n    )\n"]).?).to_equal(false)

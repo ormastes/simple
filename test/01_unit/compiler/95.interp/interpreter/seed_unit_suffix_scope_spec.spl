@@ -1,0 +1,66 @@
+# @tag: unit, language, interpreter, units
+# Rust seed interpreter: a unit suffix backed by a library unit module
+# (src/unit/<org>/<family>/<sfx>.spl) is only in scope after `use unit.<family>...`
+# or a same-file `unit X: T as sfx` — the same rule as the pure-Simple core
+# interpreter (use_unit_suffix_scope_spec.spl, eval_units.spl).
+# Seed implementation: src/compiler_rust/compiler/src/units/scope.rs.
+#
+# Each case runs a fixture through the compiler binary (`SIMPLE_BINARY` or
+# `bin/simple`) in interpreter mode, because the failure is a process exit.
+# Import lists use r"..." so `{kmph}` is not interpolated by the spec itself.
+use std.spec
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+fn work_dir() -> text:
+    # Inside the repo so `use unit.*` resolves against this tree's src/unit.
+    val dir = "build/tmp/simple-spec-seed-unit-suffix-scope"
+    dir_create_all(dir)
+    dir
+
+fn run_interp(name: text, source: text) -> (text, text, i64):
+    val path = work_dir() + "/" + name + ".spl"
+    assert_true(file_write(path, source))
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    env_set("SIMPLE_TIMEOUT_SECONDS", "0")
+    # The runner exports SIMPLE_JIT_STRICT[_ALL]; the seed's JIT HIR lowering
+    # cannot resolve `use unit.*`, so let the child fall back to the interpreter.
+    env_set("SIMPLE_JIT_STRICT", "0")
+    env_set("SIMPLE_JIT_STRICT_ALL", "0")
+    val configured = env_get("SIMPLE_BINARY")
+    val bin = if configured == "": "bin/simple" else: configured
+    # env_set does not forward SIMPLE_EXECUTION_MODE to the child, so set it
+    # on the child's command line.
+    val ran = process_run("sh", ["-c", "SIMPLE_EXECUTION_MODE=interpret exec \"$0\" run \"$1\"", bin, path])
+    (ran[0].trim(), ran[1], ran[2])
+
+describe "seed interpreter unit suffix scope":
+    it "accepts an imported suffix":
+        val (out, _err, rc) = run_interp("imported", r"use unit.velocity.{kmph}" + "\nval s = 60_kmph\nprint s.value()\n")
+        expect(rc).to_equal(0)
+        expect(out).to_equal("60")
+
+    it "rejects a library suffix that is not imported, naming the import":
+        val (out, err, rc) = run_interp("unscoped", "val s = 60_kmph\nprint s.value()\n")
+        expect(rc != 0).to_equal(true)
+        expect(out + err).to_contain("unit suffix 'kmph' is not in scope")
+        expect(out + err).to_contain(r"use unit.velocity.{kmph}")
+
+    it "does not admit a sibling suffix of a selective import":
+        val (out, err, rc) = run_interp("sibling", r"use unit.velocity.{kmph}" + "\nval s = 5_mps\nprint s.value()\n")
+        expect(rc != 0).to_equal(true)
+        expect(out + err).to_contain("unit suffix 'mps' is not in scope")
+
+    it "accepts any family suffix after a glob import":
+        val (out, _err, rc) = run_interp("glob", "use unit.velocity.*\nval s = 5_mps\nprint s.value()\n")
+        expect(rc).to_equal(0)
+        expect(out).to_equal("5")
+
+    it "accepts a suffix declared in the same file":
+        val (out, _err, rc) = run_interp("declared", "unit MyKm: i64 as kmph\nval s = 7_kmph\nprint s.value()\n")
+        expect(rc).to_equal(0)
+        expect(out).to_equal("7")
+
+    it "keeps a file-declared non-library suffix free":
+        val (out, _err, rc) = run_interp("free", "unit FreeBytes: i64 as fbytes\nval b = 12_fbytes\nprint b.value()\n")
+        expect(rc).to_equal(0)
+        expect(out).to_equal("12")

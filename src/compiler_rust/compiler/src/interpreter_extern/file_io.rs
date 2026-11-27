@@ -48,6 +48,8 @@ static MEM_SNAPSHOT_FILES: LazyLock<Mutex<(i64, HashMap<i64, std::fs::File>)>> =
 struct LockState {
     next_id: i64,
     active: HashMap<i64, std::path::PathBuf>,
+    /// Open lock files whose OS lock this process holds, keyed by lock path.
+    files: HashMap<std::path::PathBuf, std::fs::File>,
 }
 
 impl LockState {
@@ -55,6 +57,7 @@ impl LockState {
         LockState {
             next_id: 1,
             active: HashMap::new(),
+            files: HashMap::new(),
         }
     }
 }
@@ -360,6 +363,29 @@ pub fn rt_file_size(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// `rt_file_modified(path) -> i64`: native whole-second mtime via the linked
+/// runtime twin (`simple_runtime::value::rt_file_modified`); -1 on failure
+/// (missing file, path over 4095 bytes, invalid UTF-8). The `file_modified`
+/// facade in src/lib/nogc_sync_mut/sffi/io.spl is its only live caller.
+pub fn rt_file_modified(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let path_rv = simple_runtime::value::rt_string_new(path.as_ptr(), path.len() as u64);
+    Ok(Value::Int(simple_runtime::value::rt_file_modified(path_rv)))
+}
+
+/// `rt_file_modified_time(path) -> i64`: same native mtime policy as
+/// `rt_file_modified`; the `file_modified_time` facade in
+/// src/lib/nogc_sync_mut/sffi/io.spl (re-exported through
+/// std.nogc_sync_mut.io.file_ops) is its live caller, and `scv snapshot`
+/// reaches it through the std.nogc_sync_mut.database/daemon_sdk lock paths.
+/// Without this row the interpret lane died with
+/// "unknown extern function: rt_file_modified_time" (PB-1).
+pub fn rt_file_modified_time(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let path_rv = simple_runtime::value::rt_string_new(path.as_ptr(), path.len() as u64);
+    Ok(Value::Int(simple_runtime::value::rt_file_modified_time(path_rv)))
+}
+
 /// Open a raw Unix file descriptor for the loader's mmap path.
 #[cfg(unix)]
 pub fn rt_open_fd(args: &[Value]) -> Result<Value, CompileError> {
@@ -466,23 +492,23 @@ pub fn rt_file_hash_sha256(args: &[Value]) -> Result<Value, CompileError> {
 // File Operations
 // ============================================================================
 
-/// Canonicalize path
+/// Canonicalize path: realpath semantics (absolute, symlinks resolved, the
+/// path must exist), `Value::Nil` on failure. This is the ONE cross-engine
+/// contract shared with the native Rust runtime
+/// (runtime/src/value/sffi/file_io/file_ops.rs) and the C runtime
+/// (src/runtime/runtime_native.c). The former cwd-join fallback made this
+/// lane the only one that never failed, so a missing path canonicalized to
+/// a guess here and to nil natively.
 pub fn rt_file_canonicalize(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
+    if path.is_empty() {
+        return Ok(Value::Nil);
+    }
     match fs::canonicalize(&path) {
         Ok(canonical) => Ok(Value::text(strip_verbatim_prefix(
             canonical.to_string_lossy().to_string(),
         ))),
-        Err(_) => {
-            // Fallback: make absolute
-            match std::env::current_dir() {
-                Ok(cwd) => {
-                    let abs = cwd.join(&path);
-                    Ok(Value::text(abs.to_string_lossy().to_string()))
-                }
-                Err(_) => Ok(Value::text(path)),
-            }
-        }
+        Err(_) => Ok(Value::Nil),
     }
 }
 
@@ -519,6 +545,36 @@ fn strip_verbatim_prefix(path: String) -> String {
 mod canonicalize_tests {
     use super::*;
 
+    /// A cwd failure must yield nil, never the relative input text.
+    #[test]
+    fn path_absolute_cwd_failure_is_none() {
+        let got = absolute_against_cwd(Path::new("rel/child.spl"), || {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "cwd gone"))
+        });
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn path_absolute_absolute_input_skips_cwd() {
+        let abs = std::env::temp_dir().join("x.spl");
+        let got = absolute_against_cwd(&abs, || panic!("cwd must not be read"));
+        assert_eq!(got, Some(abs));
+    }
+
+    /// A missing path is made absolute against the cwd (matching
+    /// runtime/src/value/sffi/file_io/path.rs); nil only when the cwd fails.
+    #[test]
+    fn path_absolute_of_missing_path_is_text_not_nil() {
+        let got = rt_path_absolute(&[Value::text("no_such_dir_xyz/child.spl".to_string())])
+            .expect("path_absolute call");
+        let text = match got {
+            Value::Str(s) => s.to_string(),
+            other => panic!("rt_path_absolute returned {other:?} for a missing path"),
+        };
+        assert!(std::path::Path::new(&text).is_absolute(), "not absolute: {text}");
+        assert!(text.ends_with("child.spl"), "lost leaf: {text}");
+    }
+
     /// Canonicalizing an existing file must not leak the Windows `\\?\`
     /// verbatim prefix (the runtime lane strips it; the lanes must agree).
     #[test]
@@ -536,6 +592,39 @@ mod canonicalize_tests {
         assert!(!text.starts_with(&verbatim), "verbatim prefix leaked: {}", text);
         assert!(std::path::Path::new(&text).is_absolute(), "not absolute: {}", text);
         assert!(text.ends_with("probe.spl"), "wrong target: {}", text);
+    }
+
+    /// Cross-engine contract (see runtime file_ops.rs
+    /// `canonicalize_resolves_symlinks_and_fails_closed`): a symlink resolves
+    /// to its target and a missing path is `Nil`, never a cwd-joined guess.
+    #[test]
+    fn canonicalize_resolves_symlinks_and_returns_nil_when_missing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let real = dir.path().join("real.txt");
+        std::fs::write(&real, "x").expect("write");
+        let expected = strip_verbatim_prefix(
+            std::fs::canonicalize(&real).expect("std canonicalize").to_string_lossy().to_string(),
+        );
+
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.txt");
+            std::os::unix::fs::symlink(&real, &link).expect("symlink");
+            let got = rt_file_canonicalize(&[Value::text(link.to_string_lossy().to_string())])
+                .expect("canonicalize call");
+            match got {
+                Value::Str(s) => assert_eq!(s.to_string(), expected),
+                other => panic!("expected text, got {}", other.type_name()),
+            }
+        }
+
+        let missing = dir.path().join("missing.txt");
+        let got = rt_file_canonicalize(&[Value::text(missing.to_string_lossy().to_string())])
+            .expect("canonicalize call");
+        assert!(matches!(got, Value::Nil), "missing path must be Nil, got {}", got.type_name());
+
+        let got = rt_file_canonicalize(&[Value::text(String::new())]).expect("canonicalize call");
+        assert!(matches!(got, Value::Nil), "empty path must be Nil");
     }
 }
 
@@ -556,6 +645,23 @@ pub fn rt_file_read_text(args: &[Value]) -> Result<Value, CompileError> {
             };
             Ok(Value::text(content))
         }
+        Err(_) => Ok(Value::Nil),
+    }
+}
+
+/// `extern fn rt_fs_read_text(path: text) -> text?` (sffi/fs.spl).
+///
+/// Mirrors the C runtime (`runtime_native.c` `rt_fs_read_text`, which delegates
+/// to `rt_file_read_text`): the whole file's BYTES become the text, unchanged,
+/// and only a failed open/read yields nil. Unlike this module's
+/// `rt_file_read_text` it does NOT strip `\r` and does NOT turn non-UTF-8
+/// content into nil; invalid UTF-8 stays byte-exact as raw text
+/// (`Value::text_from_bytes`), exactly what the C lane's
+/// `rt_string_new(content, len)` returns. An empty file is "" (not nil).
+pub fn rt_fs_read_text(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    match fs::read(&path) {
+        Ok(bytes) => Ok(Value::text_from_bytes(bytes)),
         Err(_) => Ok(Value::Nil),
     }
 }
@@ -667,6 +773,56 @@ pub fn rt_file_read_regular_no_follow_bounded(args: &[Value]) -> Result<Value, C
     }
 }
 
+/// Decode a raw `(ptr, len)` argument pair (the low-level sffi tier,
+/// `src/compiler/70.backend/sffi_minimal.spl`) into an owned UTF-8 string.
+/// Rejects a null pointer, a negative length and invalid UTF-8 rather than
+/// guessing.
+pub(crate) fn raw_ptr_len_text(args: &[Value], index: usize, name: &str) -> Result<String, CompileError> {
+    let ptr = match args.get(index) {
+        Some(value) => value.as_int()?,
+        None => return Err(CompileError::runtime(format!("{name} requires (ptr, len) arguments"))),
+    };
+    let len = match args.get(index + 1) {
+        Some(value) => value.as_int()?,
+        None => return Err(CompileError::runtime(format!("{name} requires (ptr, len) arguments"))),
+    };
+    // Paths and env names only: bound the slice so a forged length cannot
+    // walk arbitrary memory. Callers are `@unsafe(capabilities: [ffi])`
+    // sffi_minimal wrappers; the (ptr, len) liveness is their contract.
+    const RAW_PTR_LEN_TEXT_MAX: i64 = 64 * 1024;
+    if len < 0 || len > RAW_PTR_LEN_TEXT_MAX || (ptr == 0 && len != 0) {
+        return Err(CompileError::runtime(format!(
+            "{name} requires a nonnull pointer and a length in 0..={RAW_PTR_LEN_TEXT_MAX}"
+        )));
+    }
+    if len == 0 {
+        return Ok(String::new());
+    }
+    // SAFETY: the raw sffi tier's contract is that (ptr, len) names a live,
+    // borrowed byte range for the duration of the call (same as the runtime's
+    // own `rt_file_read_text(path_ptr, path_len)`).
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    match std::str::from_utf8(bytes) {
+        Ok(text) => Ok(text.to_string()),
+        Err(_) => Err(CompileError::runtime(format!("{name}: argument is not valid UTF-8"))),
+    }
+}
+
+/// `extern fn rt_file_read_text_raw(path_ptr: i64, path_len: i64) -> i64?`:
+/// raw-ABI twin of [`rt_file_read_text`]; identical result for the same path.
+pub fn rt_file_read_text_raw(args: &[Value]) -> Result<Value, CompileError> {
+    let path = raw_ptr_len_text(args, 0, "rt_file_read_text_raw")?;
+    rt_file_read_text(&[Value::text(path)])
+}
+
+/// `extern fn rt_file_read_regular_no_follow_bounded_raw(path_ptr, path_len, max_bytes) -> i64?`:
+/// raw-ABI twin of [`rt_file_read_regular_no_follow_bounded`].
+pub fn rt_file_read_regular_no_follow_bounded_raw(args: &[Value]) -> Result<Value, CompileError> {
+    let path = raw_ptr_len_text(args, 0, "rt_file_read_regular_no_follow_bounded_raw")?;
+    let max_bytes = args.get(2).cloned().unwrap_or(Value::Nil);
+    rt_file_read_regular_no_follow_bounded(&[Value::text(path), max_bytes])
+}
+
 /// Byte-array sibling of `rt_file_read_regular_no_follow_bounded` for binary
 /// payloads (images, archives). Identical admission arms and bound; the
 /// content is returned as a `[u8]` value instead of being UTF-8 decoded,
@@ -730,6 +886,16 @@ pub fn rt_file_write_text(args: &[Value]) -> Result<Value, CompileError> {
 /// Synchronize file contents and metadata with durable storage.
 pub fn rt_file_fsync(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
+    // Windows: FlushFileBuffers needs write access (and BACKUP_SEMANTICS for
+    // directories), so delegate to the runtime's CreateFileW-based twin.
+    #[cfg(windows)]
+    {
+        let bytes = path.as_bytes();
+        return Ok(Value::Bool(unsafe {
+            simple_runtime::value::rt_file_fsync(bytes.as_ptr(), bytes.len() as u64)
+        }));
+    }
+    #[cfg(not(windows))]
     match OpenOptions::new().read(true).open(&path) {
         Ok(file) => Ok(Value::Bool(file.sync_all().is_ok())),
         Err(_) => Ok(Value::Bool(false)),
@@ -739,6 +905,72 @@ pub fn rt_file_fsync(args: &[Value]) -> Result<Value, CompileError> {
 /// Interpreter fallback for the runtime cached fsync entrypoint.
 pub fn rt_file_fsync_cached(args: &[Value]) -> Result<Value, CompileError> {
     rt_file_fsync(args)
+}
+
+/// `rt_dir_sync(path) -> bool`: make directory-entry changes durable.
+/// Unix: open the directory and fsync it. Windows/NTFS has no portable
+/// directory fsync and journals metadata, so report whether `path` is an
+/// existing directory. Missing path or non-directory is false.
+pub fn rt_dir_sync(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    #[cfg(windows)]
+    {
+        return Ok(Value::Bool(std::path::Path::new(&path).is_dir()));
+    }
+    #[cfg(not(windows))]
+    {
+        if !std::path::Path::new(&path).is_dir() {
+            return Ok(Value::Bool(false));
+        }
+        Ok(Value::Bool(
+            std::fs::File::open(&path).and_then(|dir| dir.sync_all()).is_ok(),
+        ))
+    }
+}
+
+/// `rt_file_read_under_root_bytes(root, rel, max_bytes) -> [u8]?`: read `rel`
+/// under the trusted `root`, refusing a link at every component at open time
+/// (todo 479). Shares the runtime crate's implementation; failure arm is
+/// recorded for `rt_file_read_regular_no_follow_last_failure`.
+pub fn rt_file_read_under_root_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    let root = extract_path(args, 0)?;
+    let rel = extract_path(args, 1)?;
+    let max_bytes = match args.get(2) {
+        Some(Value::Int(value)) if *value >= 0 => *value,
+        _ => return Ok(interp_read_no_follow_fail(INTERP_READ_NF_BAD_ARGS)),
+    };
+    match simple_runtime::value::sffi::file_io::under_root::read_under_root(&root, &rel, max_bytes) {
+        Ok(bytes) => {
+            INTERP_READ_NF_LAST_FAILURE.with(|cell| cell.set(INTERP_READ_NF_OK));
+            Ok(Value::byte_array(bytes))
+        }
+        Err(code) => Ok(interp_read_no_follow_fail(code)),
+    }
+}
+
+/// `rt_file_write_under_root_bytes(root, rel, data) -> bool` (todo 479).
+pub fn rt_file_write_under_root_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    let root = extract_path(args, 0)?;
+    let rel = extract_path(args, 1)?;
+    let bytes: Vec<u8> = if let Some(view) = args.get(2).and_then(Value::byte_array_view) {
+        view.to_vec()
+    } else {
+        let items: Vec<Value> = match args.get(2) {
+            Some(Value::Array(items)) => items.iter().cloned().collect(),
+            Some(Value::FrozenArray(items)) => items.iter().cloned().collect(),
+            _ => return Ok(Value::Bool(false)),
+        };
+        let mut out = Vec::with_capacity(items.len());
+        for item in items.iter() {
+            match item {
+                Value::Int(value) => out.push(*value as u8),
+                Value::UInt { value, .. } => out.push(*value as u8),
+                _ => return Ok(Value::Bool(false)),
+            }
+        }
+        out
+    };
+    Ok(Value::Bool(simple_runtime::value::sffi::file_io::under_root::write_under_root(&root, &rel, &bytes)))
 }
 
 /// CRC32 checksum of a text string. Returns the checksum as i64.
@@ -875,27 +1107,27 @@ fn snapshot_token(value: &str) -> String {
     out
 }
 
-fn process_status_kib(key: &str) -> i64 {
-    fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|status| {
-            status
-                .lines()
-                .find(|line| line.starts_with(key))
-                .and_then(|line| line[key.len()..].split_whitespace().next())
-                .and_then(|value| value.parse::<i64>().ok())
-        })
-        .unwrap_or(-1)
-}
-
 /// Return current resident memory in KiB, or -1 when host status is unavailable.
 pub fn rt_process_rss_kib(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(process_status_kib("VmRSS:")))
+    Ok(Value::Int(simple_runtime::mem_snapshot::rt_process_rss_kib()))
 }
 
 /// Return peak resident memory in KiB, or -1 when host status is unavailable.
 pub fn rt_process_hwm_kib(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(process_status_kib("VmHWM:")))
+    // Delegate to the runtime twin: it covers Linux /proc, macOS/FreeBSD
+    // getrusage and Windows, where /proc/self/status alone returned -1.
+    Ok(Value::Int(simple_runtime::mem_snapshot::rt_process_hwm_kib()))
+}
+
+/// Peak RSS in KiB of the child reaped by the most recent bounded/timeout
+/// process run on this thread, or -1 when it was not measured.
+pub fn rt_process_last_child_peak_rss_kib(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(simple_runtime::child_peak_rss::rt_process_last_child_peak_rss_kib()))
+}
+
+/// User+system CPU ms of the same child, or -1 when it was not measured.
+pub fn rt_process_last_child_cpu_ms(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(simple_runtime::child_peak_rss::rt_process_last_child_cpu_ms()))
 }
 
 fn snapshot_monotonic_ms() -> i64 {
@@ -942,7 +1174,7 @@ pub fn rt_mem_snapshot_record(args: &[Value]) -> Result<Value, CompileError> {
         std::process::id(), snapshot_monotonic_ms(),
         if path.is_empty() { "none" } else { "recorded" }, if path.is_empty() { "-" } else { &path },
         counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7], counts[8], counts[9], counts[10],
-        process_status_kib("VmRSS:"), process_status_kib("VmHWM:"));
+        simple_runtime::mem_snapshot::rt_process_rss_kib(), simple_runtime::mem_snapshot::rt_process_hwm_kib());
     let mut files = MEM_SNAPSHOT_FILES.lock().expect("memory snapshot lock");
     let ok = files
         .1
@@ -983,6 +1215,23 @@ pub fn rt_file_write_text_at(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 /// Read text at an absolute byte offset without reading the full file.
+/// Read up to `size` bytes at `offset`. `size` is a caller cap, not the expected
+/// length (SCV inventory passes 1 GiB per source file): allocate only what the
+/// file still holds. Zero-filling the cap per call made the seed spend ~93% of
+/// cold inventory in Vec::extend_with (single core, 40+ min). Interpreter twin
+/// of the clamp in runtime file_ops.rs rt_file_read_text_at_checked.
+fn read_at_capped(file: &mut fs::File, offset: u64, size: usize) -> Option<Vec<u8>> {
+    let remaining = file.metadata().ok().filter(|m| m.is_file()).map(|m| m.len().saturating_sub(offset));
+    let cap = match remaining {
+        Some(r) => usize::try_from(r).map_or(size, |r| size.min(r)),
+        None => size.min(1 << 20),
+    };
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(cap).ok()?;
+    file.take(size as u64).read_to_end(&mut buf).ok()?;
+    Some(buf)
+}
+
 pub fn rt_file_read_text_at(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     let offset = match args.get(1) {
@@ -1000,13 +1249,9 @@ pub fn rt_file_read_text_at(args: &[Value]) -> Result<Value, CompileError> {
     if file.seek(SeekFrom::Start(offset)).is_err() {
         return Ok(Value::text(String::new()));
     }
-    let mut buf = vec![0u8; size];
-    match file.read(&mut buf) {
-        Ok(n) => {
-            buf.truncate(n);
-            Ok(Value::text(String::from_utf8_lossy(&buf).to_string()))
-        }
-        Err(_) => Ok(Value::text(String::new())),
+    match read_at_capped(&mut file, offset, size) {
+        Some(buf) => Ok(Value::text(String::from_utf8_lossy(&buf).to_string())),
+        None => Ok(Value::text(String::new())),
     }
 }
 
@@ -1032,17 +1277,9 @@ pub fn rt_file_read_text_at_checked(args: &[Value]) -> Result<Value, CompileErro
     if file.seek(SeekFrom::Start(offset)).is_err() {
         return Ok(Value::Nil);
     }
-    let mut buf = Vec::new();
-    if buf.try_reserve_exact(size).is_err() {
-        return Ok(Value::Nil);
-    }
-    buf.resize(size, 0);
-    match file.read(&mut buf) {
-        Ok(n) => {
-            buf.truncate(n);
-            Ok(Value::text(String::from_utf8_lossy(&buf).to_string()))
-        }
-        Err(_) => Ok(Value::Nil),
+    match read_at_capped(&mut file, offset, size) {
+        Some(buf) => Ok(Value::text(String::from_utf8_lossy(&buf).to_string())),
+        None => Ok(Value::Nil),
     }
 }
 
@@ -1058,19 +1295,28 @@ fn atomic_write_file(path: &Path, content: &[u8]) -> bool {
         return false;
     }
     let permissions = fs::metadata(path).ok().map(|metadata| metadata.permissions());
-    let Ok(mut temp) = tempfile::NamedTempFile::new_in(parent) else {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut temp_name = path.as_os_str().to_os_string();
+    temp_name.push(format!(
+        ".tmp.{}.{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let temp_path = std::path::PathBuf::from(temp_name);
+    // Not tempfile::NamedTempFile: its 0600 would reach new files. create_new
+    // uses 0666 & ~umask, matching file_write and the native runtimes.
+    let Ok(mut temp) = fs::OpenOptions::new().write(true).create_new(true).open(&temp_path) else {
         return false;
     };
-    if temp.write_all(content).is_err() {
-        return false;
+    let staged = temp.write_all(content).is_ok()
+        && permissions.map_or(true, |permissions| temp.set_permissions(permissions).is_ok())
+        && temp.sync_all().is_ok();
+    drop(temp);
+    if staged && fs::rename(&temp_path, path).is_ok() {
+        return true;
     }
-    if permissions.is_some_and(|permissions| temp.as_file().set_permissions(permissions).is_err()) {
-        return false;
-    }
-    if temp.as_file().sync_all().is_err() {
-        return false;
-    }
-    temp.persist(path).is_ok()
+    let _ = fs::remove_file(&temp_path);
+    false
 }
 
 /// Atomically write text to a file through a same-directory unique temp file.
@@ -1078,6 +1324,28 @@ pub fn rt_file_atomic_write(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     let content = extract_content(args, 1)?;
     Ok(Value::Bool(atomic_write_file(Path::new(&path), content.as_bytes())))
+}
+
+/// Atomically write bytes to a file; same provider as `rt_file_atomic_write`.
+pub fn rt_file_atomic_write_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    if let Some(bytes) = args.get(1).and_then(Value::byte_array_view) {
+        return Ok(Value::Bool(atomic_write_file(Path::new(&path), bytes)));
+    }
+    let items: Vec<Value> = match args.get(1) {
+        Some(Value::Array(items)) => items.iter().cloned().collect(),
+        Some(Value::FrozenArray(items)) => items.iter().cloned().collect(),
+        _ => return Ok(Value::Bool(false)),
+    };
+    let mut bytes = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        match item {
+            Value::Int(value) => bytes.push(*value as u8),
+            Value::UInt { value, .. } => bytes.push(*value as u8),
+            _ => return Ok(Value::Bool(false)),
+        }
+    }
+    Ok(Value::Bool(atomic_write_file(Path::new(&path), &bytes)))
 }
 
 /// Atomically write text to a file with an EXPLICIT permission mode.
@@ -1213,6 +1481,20 @@ pub fn rt_file_remove(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_file_rename(args: &[Value]) -> Result<Value, CompileError> {
     let from = extract_path(args, 0)?;
     let to = extract_path(args, 1)?;
+    // Windows: delegate to the runtime twin (atomic replace of an existing
+    // file destination, long-path aware), matching POSIX rename(2).
+    #[cfg(windows)]
+    {
+        return Ok(Value::Bool(unsafe {
+            simple_runtime::value::rt_file_rename(
+                from.as_ptr(),
+                from.len() as u64,
+                to.as_ptr(),
+                to.len() as u64,
+            )
+        }));
+    }
+    #[cfg(not(windows))]
     match fs::rename(&from, &to) {
         Ok(_) => Ok(Value::Bool(true)),
         Err(_) => Ok(Value::Bool(false)),
@@ -1278,9 +1560,45 @@ pub fn rt_file_append_text(args: &[Value]) -> Result<Value, CompileError> {
 /// interpreter-only extern binding.
 pub fn rt_file_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
-    match fs::read(&path) {
+    match read_bytes_retrying(&path, "rt_file_read_bytes") {
         Ok(bytes) => Ok(Value::byte_array(bytes)),
         Err(_) => Ok(Value::Nil),
+    }
+}
+
+/// Windows `ERROR_SHARING_VIOLATION` / `ERROR_LOCK_VIOLATION`: another process
+/// (typically an on-access scanner or indexer) holds a freshly written file
+/// with an exclusive share mode for a few milliseconds. The file exists and
+/// has its full size, so `file_size` succeeds while `fs::read` fails.
+fn is_transient_read_error(err: &std::io::Error) -> bool {
+    matches!(err.kind(), std::io::ErrorKind::Interrupted) || matches!(err.raw_os_error(), Some(32) | Some(33))
+}
+
+/// `fs::read` with a bounded retry on transient sharing/lock violations, and
+/// the OS error surfaced on stderr under `SIMPLE_FILE_IO_DEBUG=1`.
+///
+/// bug doc seed_file_read_bytes_nil_after_in_process_write_2026-11-12.md: the
+/// seed returned nil for a file this process had just written while
+/// `file_size` reported its full length; the extern mapped every `Err` to nil
+/// without logging, so the failing syscall was invisible. Total wait is bounded
+/// (~0.5 s) so a genuinely locked file still fails closed.
+pub(crate) fn read_bytes_retrying(path: &str, who: &str) -> std::io::Result<Vec<u8>> {
+    const MAX_ATTEMPTS: u32 = 10;
+    let mut attempt = 0u32;
+    loop {
+        match fs::read(path) {
+            Ok(bytes) => return Ok(bytes),
+            Err(err) if attempt + 1 < MAX_ATTEMPTS && is_transient_read_error(&err) => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(5 * u64::from(attempt)));
+            }
+            Err(err) => {
+                if std::env::var_os("SIMPLE_FILE_IO_DEBUG").is_some() {
+                    eprintln!("{who}: read failed for {path:?} after {} attempt(s): {err}", attempt + 1);
+                }
+                return Err(err);
+            }
+        }
     }
 }
 
@@ -1290,9 +1608,11 @@ pub fn rt_file_mmap_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
         return Err(CompileError::runtime("rt_file_mmap_read_bytes requires 1 argument"));
     }
     let path = extract_path(args, 0)?;
-    let bytes =
-        fs::read(&path).map_err(|error| CompileError::runtime(format!("rt_file_mmap_read_bytes failed: {error}")))?;
-    Ok(Value::byte_array(bytes))
+    match read_bytes_retrying(&path, "rt_file_mmap_read_bytes") {
+        Ok(bytes) => Ok(Value::byte_array(bytes)),
+        // Declared `[i64]?`: nil means mapping or read failure (C-runtime parity).
+        Err(_) => Ok(Value::Nil),
+    }
 }
 
 /// Identity function the optimizer must not see through.
@@ -1918,6 +2238,70 @@ pub fn rt_file_truncate(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// `rt_mmap(path, size, offset, readonly) -> addr`: map an existing file
+/// via the linked runtime twin (`simple_runtime::value::rt_mmap`). 0 on any
+/// failure (missing file, short file, capability denied).
+pub fn rt_mmap(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let int_at = |idx: usize| match args.get(idx) {
+        Some(Value::Int(n)) => Ok(*n),
+        Some(Value::UInt { value, .. }) => Ok(*value as i64),
+        Some(Value::Bool(b)) => Ok(*b as i64),
+        other => Err(CompileError::semantic(format!(
+            "rt_mmap() expects (path: text, size: i64, offset: i64, readonly: i64), got {:?}",
+            other
+        ))),
+    };
+    let (size, offset, readonly) = (int_at(1)?, int_at(2)?, int_at(3)?);
+    let path_rv = simple_runtime::value::rt_string_new(path.as_ptr(), path.len() as u64);
+    let addr = simple_runtime::value::rt_mmap(path_rv.to_raw() as i64, size, offset, readonly);
+    Ok(Value::Int(addr))
+}
+
+/// `rt_mmap_create(path, size) -> addr`: create/truncate `path` to exactly
+/// `size` bytes and map it read-write, via the linked runtime twin
+/// (`simple_runtime::value::rt_mmap_create`). 0 on any failure.
+pub fn rt_mmap_create(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let size = match args.get(1) {
+        Some(Value::Int(n)) => *n,
+        Some(Value::UInt { value, .. }) => *value as i64,
+        other => {
+            return Err(CompileError::semantic(format!(
+                "rt_mmap_create() expects (path: text, size: i64), got size arg {:?}",
+                other
+            )))
+        }
+    };
+    let path_rv = simple_runtime::value::rt_string_new(path.as_ptr(), path.len() as u64);
+    let addr = simple_runtime::value::rt_mmap_create(path_rv.to_raw() as i64, size);
+    Ok(Value::Int(addr))
+}
+
+fn mapping_extent(args: &[Value], symbol: &str) -> Result<(i64, i64), CompileError> {
+    let int_at = |idx: usize| match args.get(idx) {
+        Some(Value::Int(n)) => Ok(*n),
+        Some(Value::UInt { value, .. }) => Ok(*value as i64),
+        other => Err(CompileError::semantic(format!(
+            "{symbol}() expects (addr: i64, size: i64), got {:?}",
+            other
+        ))),
+    };
+    Ok((int_at(0)?, int_at(1)?))
+}
+
+/// `rt_munmap(addr, size) -> bool`: release a view from `rt_mmap` / `rt_mmap_create`.
+pub fn rt_munmap(args: &[Value]) -> Result<Value, CompileError> {
+    let (addr, size) = mapping_extent(args, "rt_munmap")?;
+    Ok(Value::Bool(simple_runtime::value::rt_munmap(addr, size)))
+}
+
+/// `rt_msync(addr, size) -> bool`: flush a writable view to its file.
+pub fn rt_msync(args: &[Value]) -> Result<Value, CompileError> {
+    let (addr, size) = mapping_extent(args, "rt_msync")?;
+    Ok(Value::Bool(simple_runtime::value::rt_msync(addr, size)))
+}
+
 /// Move file (works across filesystems)
 pub fn rt_file_move(args: &[Value]) -> Result<Value, CompileError> {
     let src = extract_path(args, 0)?;
@@ -2119,6 +2503,197 @@ pub fn rt_file_publish_noreplace(args: &[Value]) -> Result<Value, CompileError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Replays seed_file_read_bytes_nil_after_in_process_write_2026-11-12: a
+    /// file this process just wrote is briefly held with share mode 0 (what an
+    /// on-access scanner does); the read must wait it out, not return nil.
+    #[cfg(windows)]
+    #[test]
+    fn rt_file_read_bytes_waits_out_a_transient_sharing_violation() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("fresh.bin");
+        let payload: Vec<u8> = (0..36864u32).map(|i| (i % 251) as u8).collect();
+        fs::write(&path, &payload).expect("write");
+        let holder = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .expect("exclusive holder");
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            drop(holder);
+        });
+        let got = rt_file_read_bytes(&[Value::text(path.to_string_lossy().to_string())]).expect("extern ok");
+        releaser.join().expect("releaser");
+        match got {
+            Value::ByteArray(bytes) => assert_eq!(bytes.as_ref(), &payload),
+            other => panic!("expected the written bytes, got {other:?}"),
+        }
+    }
+
+    /// A missing file is not transient: exactly one attempt, nil, no hang.
+    #[test]
+    fn rt_file_read_bytes_missing_file_is_nil_without_retry() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("absent.bin");
+        let started = std::time::Instant::now();
+        let got = rt_file_read_bytes(&[Value::text(path.to_string_lossy().to_string())]).expect("extern ok");
+        assert!(matches!(got, Value::Nil));
+        assert!(started.elapsed() < std::time::Duration::from_millis(200));
+    }
+
+    fn lock_test_path(dir: &tempfile::TempDir) -> (String, std::path::PathBuf) {
+        let lock = dir.path().join("res.lock");
+        let supplied = lock.to_string_lossy().to_string();
+        (supplied, lock)
+    }
+
+    fn lock_arg(path: &str, timeout: i64) -> [Value; 2] {
+        [Value::text(path.to_string()), Value::Int(timeout)]
+    }
+
+    /// A live holder must never be displaced, however old its lock file is.
+    /// The supplied path is the locked file itself, matching the native owners.
+    #[test]
+    fn file_lock_does_not_steal_from_live_holder_even_when_old() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (supplied, lock) = lock_test_path(&dir);
+        let holder = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&lock)
+            .expect("holder open");
+        holder.lock().expect("holder lock");
+        holder
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .expect("age lock file");
+        // A positive-timeout waiter must time out, not steal.
+        assert_eq!(rt_file_lock(&lock_arg(&supplied, 1)).unwrap(), Value::Int(-1));
+        assert_eq!(rt_file_lock(&lock_arg(&supplied, 0)).unwrap(), Value::Int(-1));
+        drop(holder);
+        // Once the holder is gone, the lock is acquirable.
+        let h = rt_file_lock(&lock_arg(&supplied, 0)).unwrap();
+        assert!(matches!(h, Value::Int(n) if n > 0), "got {:?}", h);
+        assert_eq!(rt_file_unlock(&[h]).unwrap(), Value::Bool(true));
+    }
+
+    /// Nonpositive timeouts try exactly once and return promptly when held.
+    #[test]
+    fn file_lock_nonpositive_timeouts_try_once() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (supplied, lock) = lock_test_path(&dir);
+        let holder = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&lock)
+            .expect("holder open");
+        holder.lock().expect("holder lock");
+        for timeout in [0, -1] {
+            let start = std::time::Instant::now();
+            assert_eq!(rt_file_lock(&lock_arg(&supplied, timeout)).unwrap(), Value::Int(-1));
+            assert!(start.elapsed() < std::time::Duration::from_millis(400));
+        }
+    }
+
+    /// A leftover lock file whose holder died (no OS lock) is not a held lock.
+    #[test]
+    fn file_lock_leftover_file_without_holder_is_acquirable() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (supplied, lock) = lock_test_path(&dir);
+        fs::write(&lock, b"99999999:ghost").expect("leftover");
+        let h = rt_file_lock(&lock_arg(&supplied, 0)).unwrap();
+        assert!(matches!(h, Value::Int(n) if n > 0), "got {:?}", h);
+        assert_eq!(rt_file_unlock(&[h]).unwrap(), Value::Bool(true));
+    }
+
+    /// Re-entrant handles share one file, released only after the last unlock.
+    #[test]
+    fn file_lock_reentrant_handles_preserve_exclusive_ownership() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (supplied, lock) = lock_test_path(&dir);
+        let first = rt_file_lock(&lock_arg(&supplied, 0)).unwrap();
+        let second = rt_file_lock(&lock_arg(&supplied, 0)).unwrap();
+        assert!(matches!(first, Value::Int(n) if n > 0));
+        assert!(matches!(second, Value::Int(n) if n > 0));
+        assert_ne!(first, second);
+        assert_eq!(rt_file_unlock(&[first]).unwrap(), Value::Bool(true));
+        let contender = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&lock)
+            .expect("contender open");
+        assert!(
+            contender.try_lock().is_err(),
+            "first unlock released the shared OS lock"
+        );
+        drop(contender);
+        assert_eq!(rt_file_unlock(&[second]).unwrap(), Value::Bool(true));
+        let reacquired = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&lock)
+            .expect("reacquire open");
+        reacquired.try_lock().expect("last unlock must release the OS lock");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_exists_sees_the_current_process_without_proc() {
+        let me = Value::Int(std::process::id() as i64);
+        assert!(matches!(rt_process_exists(&[me]).unwrap(), Value::Bool(true)));
+        assert!(matches!(rt_process_exists(&[Value::Int(0)]).unwrap(), Value::Bool(false)));
+        assert!(matches!(rt_process_exists(&[Value::Int(-1)]).unwrap(), Value::Bool(false)));
+    }
+
+    #[test]
+    fn fs_read_text_returns_exact_file_bytes_like_the_c_runtime() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let arg = |name: &str| Value::text(dir.path().join(name).to_string_lossy().to_string());
+
+        fs::write(dir.path().join("crlf.txt"), b"a\r\nb\r\n").expect("write");
+        assert_eq!(rt_fs_read_text(&[arg("crlf.txt")]).unwrap(), Value::text("a\r\nb\r\n"));
+
+        fs::write(dir.path().join("utf8.txt"), "h\u{e9}\n").expect("write");
+        assert_eq!(rt_fs_read_text(&[arg("utf8.txt")]).unwrap(), Value::text("h\u{e9}\n"));
+
+        // Invalid UTF-8 (a lone 0xFF) stays byte-exact: 5 bytes, no U+FFFD.
+        fs::write(dir.path().join("raw.bin"), b"a\r\nb\xff").expect("write");
+        let raw = rt_fs_read_text(&[arg("raw.bin")]).unwrap();
+        assert_eq!(raw.text_bytes_view(), Some(&b"a\r\nb\xff"[..]));
+
+        fs::write(dir.path().join("empty.txt"), b"").expect("write");
+        assert_eq!(rt_fs_read_text(&[arg("empty.txt")]).unwrap(), Value::text(""));
+
+        assert_eq!(rt_fs_read_text(&[arg("missing.txt")]).unwrap(), Value::Nil);
+    }
+
+    /// A 1 GiB size cap (what SCV inventory passes per source file) must not
+    /// allocate or zero-fill 1 GiB per call: the read is bounded by the bytes the
+    /// file holds and returns the whole file even when one read() is short.
+    #[test]
+    fn read_text_at_checked_bounds_allocation_by_file_length() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("src.spl");
+        fs::write(&path, "fn main():
+    0
+").expect("write");
+        let p = Value::text(path.to_string_lossy().to_string());
+        let start = std::time::Instant::now();
+        for _ in 0..40 {
+            let v = rt_file_read_text_at_checked(&[p.clone(), Value::Int(0), Value::Int(1 << 30)]).unwrap();
+            assert_eq!(v, Value::text("fn main():
+    0
+".to_string()));
+            let tail = rt_file_read_text_at(&[p.clone(), Value::Int(3), Value::Int(1 << 30)]).unwrap();
+            assert_eq!(tail, Value::text("main():
+    0
+".to_string()));
+        }
+        // Old behaviour zero-filled 80 x 1 GiB here (tens of seconds).
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "took {:?}", start.elapsed());
+        let past = rt_file_read_text_at_checked(&[p, Value::Int(999), Value::Int(1 << 30)]).unwrap();
+        assert_eq!(past, Value::text(String::new()));
+    }
 
     /// Interpreter twin of the cycle-170 split crossing
     /// (runtime_native.c rt_secure_temp_dir_set_parent/_set_prefix/_make):
@@ -2686,9 +3261,8 @@ mod tests {
         }
 
         let missing = dir.path().join("missing.bin").to_string_lossy().to_string();
-        let error =
-            rt_file_mmap_read_bytes(&[Value::text(missing)]).expect_err("missing mmap input must not become Nil");
-        assert!(error.to_string().contains("rt_file_mmap_read_bytes failed"));
+        let missing_result = rt_file_mmap_read_bytes(&[Value::text(missing)]).expect("missing mmap input yields nil, not an abort");
+        assert!(matches!(missing_result, Value::Nil), "declared [i64]? failure state is nil");
 
         let arity = rt_file_mmap_read_bytes(&[]).expect_err("mmap byte reader must reject missing arguments");
         assert!(arity.to_string().contains("requires 1 argument"));
@@ -2920,6 +3494,49 @@ pub fn rt_dir_walk(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::array(results))
 }
 
+/// Recursive file listing filtered by extension: `rt_list_dir_recursive(path, ext) -> [text]`.
+///
+/// Mirrors the only native definition, `src/runtime/runtime_core_io_exports.c`
+/// (the symbol is in neither the JIT `RuntimeFuncSpec` table nor the Rust
+/// runtime): `ext` may be `"spl"` or `".spl"`, an empty `ext` lists every file,
+/// the suffix is matched on the entry name, directories are entered without
+/// following symlinks (C uses `lstat`; symlinks are emitted as files when they
+/// match), nesting is capped at 64 levels, and a missing or unreadable
+/// directory yields an empty array. Live caller: `80.driver/project.spl`
+/// (`list_dir_recursive(source_root, ".spl")`), which died in the interpreter
+/// with "unknown extern function: rt_list_dir_recursive".
+pub fn rt_list_dir_recursive(args: &[Value]) -> Result<Value, CompileError> {
+    const MAX_DEPTH: usize = 64;
+
+    let path = extract_path(args, 0)?;
+    let ext = extract_content(args, 1)?;
+    let suffix = if ext.is_empty() || ext.starts_with('.') { ext } else { format!(".{ext}") };
+
+    fn walk(dir: &Path, suffix: &str, depth: usize, results: &mut Vec<Value>) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let full = entry.path();
+            if file_type.is_dir() {
+                walk(&full, suffix, depth + 1, results);
+            } else if entry.file_name().to_string_lossy().ends_with(suffix) {
+                results.push(Value::text(full.to_string_lossy().to_string()));
+            }
+        }
+    }
+
+    let mut results = Vec::new();
+    walk(Path::new(&path), &suffix, 0, &mut results);
+    Ok(Value::array(results))
+}
+
 /// Get current directory.
 ///
 /// Returns a bare `Value::Str` on success and an empty string on failure --
@@ -3014,7 +3631,7 @@ pub fn rt_dir_remove_all(args: &[Value]) -> Result<Value, CompileError> {
 // ============================================================================
 
 /// Open file and return a real descriptor (-1 on error), mirroring the
-/// runtime's `rt_file_open` (mode 0=ReadOnly, 1=ReadWrite, 2=WriteOnly).
+/// runtime's `rt_file_open` (mode 0=ReadOnly, 1=ReadWrite, 2=WriteOnly, 3=ReadWrite+create).
 pub fn rt_file_open(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     let mode = match args.get(1) {
@@ -3028,6 +3645,7 @@ pub fn rt_file_open(args: &[Value]) -> Result<Value, CompileError> {
             0 => OpenOptions::new().read(true).open(&path),
             1 => OpenOptions::new().read(true).write(true).open(&path),
             2 => OpenOptions::new().write(true).open(&path),
+            3 => OpenOptions::new().read(true).write(true).create(true).open(&path),
             _ => return Ok(Value::Int(-1)),
         };
         match result {
@@ -3035,7 +3653,15 @@ pub fn rt_file_open(args: &[Value]) -> Result<Value, CompileError> {
             Err(_) => Ok(Value::Int(-1)),
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // CRT descriptor from the runtime, the kind rt_fd_pread/pwrite resolve.
+        let fd = unsafe {
+            simple_runtime::value::sffi::file_io::descriptor::rt_file_open(path.as_ptr(), path.len() as u64, mode as i32)
+        };
+        Ok(Value::Int(i64::from(fd)))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (path, mode);
         Ok(Value::Int(-1))
@@ -3057,7 +3683,11 @@ pub fn rt_file_close(args: &[Value]) -> Result<Value, CompileError> {
     {
         Ok(Value::Bool(unsafe { libc::close(fd) } == 0))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        Ok(Value::Bool(simple_runtime::value::sffi::file_io::descriptor::rt_file_close(fd) != 0))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = fd;
         Ok(Value::Bool(false))
@@ -3108,13 +3738,16 @@ pub fn rt_fd_pread(args: &[Value]) -> Result<Value, CompileError> {
         }
         Ok(Value::Int(n as i64))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // ENOSYS. Spelled literally rather than as `libc::ENOSYS` so this
-        // non-unix branch does not depend on the libc crate exposing that
-        // constant for Windows targets, which cannot be verified on the
-        // aarch64 Linux host this landed from.
-        Ok(Value::Int(-38))
+        Ok(Value::Int(unsafe {
+            simple_runtime::value::sffi::file_io::descriptor::windows_positioned::pread(fd, buffer as *mut u8, len, offset)
+        }))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (fd, buffer, len, offset);
+        Ok(Value::Int(-38)) // ENOSYS
     }
 }
 
@@ -3132,13 +3765,16 @@ pub fn rt_fd_pwrite(args: &[Value]) -> Result<Value, CompileError> {
         }
         Ok(Value::Int(n as i64))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // ENOSYS. Spelled literally rather than as `libc::ENOSYS` so this
-        // non-unix branch does not depend on the libc crate exposing that
-        // constant for Windows targets, which cannot be verified on the
-        // aarch64 Linux host this landed from.
-        Ok(Value::Int(-38))
+        Ok(Value::Int(unsafe {
+            simple_runtime::value::sffi::file_io::descriptor::windows_positioned::pwrite(fd, buffer as *const u8, len, offset)
+        }))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (fd, buffer, len, offset);
+        Ok(Value::Int(-38)) // ENOSYS
     }
 }
 
@@ -3167,9 +3803,33 @@ pub fn rt_path_ext(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::text(ext.to_string()))
 }
 
-/// Get absolute path
+/// Get absolute path. Resolves symlinks when the path exists; otherwise joins
+/// it onto the cwd, matching the runtime's `rt_path_absolute`
+/// (runtime/src/value/sffi/file_io/path.rs). Returns `Value::Nil` when the
+/// path is relative, does not exist, and the cwd cannot be read: returning the
+/// relative input would be a silent default. Simple externs under src/{lib,app,compiler,os} declare it `-> text?`.
 pub fn rt_path_absolute(args: &[Value]) -> Result<Value, CompileError> {
-    rt_file_canonicalize(args)
+    let path = extract_path(args, 0)?;
+    let p = Path::new(&path);
+    if let Ok(canonical) = p.canonicalize() {
+        return Ok(Value::text(strip_verbatim_prefix(canonical.to_string_lossy().to_string())));
+    }
+    match absolute_against_cwd(p, std::env::current_dir) {
+        Some(abs) => Ok(Value::text(abs.to_string_lossy().to_string())),
+        None => Ok(Value::Nil),
+    }
+}
+
+/// Make `p` absolute without touching the filesystem. `cwd` is only called for
+/// a relative path; its failure yields `None` (never the relative input).
+fn absolute_against_cwd(
+    p: &Path,
+    cwd: impl FnOnce() -> std::io::Result<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    if p.is_absolute() {
+        return Some(p.to_path_buf());
+    }
+    cwd().ok().map(|dir| dir.join(p))
 }
 
 /// Get path separator
@@ -3210,11 +3870,27 @@ pub fn rt_path_join(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::text(joined.to_string_lossy().to_string()))
 }
 
+/// Normalize path lexically, matching `simple_runtime::value::normalize_lexical_path`.
+pub fn rt_path_normalize(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    Ok(Value::text(simple_runtime::value::normalize_lexical_path(&path)))
+}
+
 // ============================================================================
 // File Locking
 // ============================================================================
 
-/// Acquire a file lock (PID-based lock file with timeout)
+/// Acquire a file lock backed by an OS advisory lock on the supplied `path`
+/// (flock on Unix, LockFileEx on Windows, via `File::try_lock`). This is the
+/// same file the native C and Rust providers lock; no suffix is appended.
+///
+/// The OS releases the lock when the holder dies, so a crashed holder never
+/// needs time-based "stale" detection and a live holder can never be displaced
+/// no matter how long it holds the lock. The lock file itself is left in place
+/// on unlock (deleting it would let a waiter lock an orphaned inode).
+///
+/// Nonpositive timeouts try exactly once; a positive timeout polls until the
+/// deadline.
 ///
 /// Callable from Simple as: `rt_file_lock(path, timeout_secs)`
 ///
@@ -3226,65 +3902,51 @@ pub fn rt_file_lock(args: &[Value]) -> Result<Value, CompileError> {
         _ => 10, // default 10 seconds
     };
 
-    let lock_path = format!("{}.lock", path);
-    let pid = std::process::id();
-    let hostname = get_hostname();
-    let lock_content = format!("{}:{}", pid, hostname);
+    let lock_path = std::path::PathBuf::from(path);
 
     // Re-entrant same-process acquisition: the seed fires both unsafe lanes
     // of process helpers, so a compiled file_lock executes twice and the
-    // second attempt previously deadlocked against the first (create_new
-    // sees our own lock file, waits out the timeout, returns -1 -- e.g.
-    // every env create on Windows). If this process already holds the lock
-    // for this path, hand out another handle to the same lock instead.
+    // second attempt previously deadlocked against the first. If this process
+    // already holds the lock for this path, hand out another handle to the
+    // same lock instead.
     {
         let mut state = LOCK_HANDLES.lock().unwrap();
         let state = state.get_or_insert_with(LockState::new);
-        let existing = state
-            .active
-            .values()
-            .any(|p| p == &std::path::PathBuf::from(&lock_path));
-        if existing {
+        if state.files.contains_key(&lock_path) {
             let handle = state.next_id;
             state.next_id += 1;
-            state
-                .active
-                .insert(handle, std::path::PathBuf::from(&lock_path));
+            state.active.insert(handle, lock_path);
             return Ok(Value::Int(handle));
         }
     }
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs as u64);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs.max(0) as u64);
     let mut backoff_ms = 10u64;
 
     loop {
-        // Try to create lock file exclusively
-        match OpenOptions::new().write(true).create_new(true).open(&lock_path) {
-            Ok(mut f) => {
-                let _ = f.write_all(lock_content.as_bytes());
-                // Register handle
+        let file = match OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&lock_path) {
+            Ok(f) => f,
+            Err(_) => return Ok(Value::Int(-1)),
+        };
+        match file.try_lock() {
+            Ok(()) => {
+                // Informational only; the OS lock is the source of truth.
+                let mut f = &file;
+                let _ = f.set_len(0);
+                let _ = f.write_all(format!("{}:{}", std::process::id(), get_hostname()).as_bytes());
                 let mut state = LOCK_HANDLES.lock().unwrap();
                 let state = state.get_or_insert_with(LockState::new);
                 let handle = state.next_id;
                 state.next_id += 1;
-                state.active.insert(handle, std::path::PathBuf::from(&lock_path));
+                state.files.insert(lock_path.clone(), file);
+                state.active.insert(handle, lock_path);
                 return Ok(Value::Int(handle));
             }
             Err(_) => {
-                // Check if lock is stale (>60 seconds old)
-                if let Ok(meta) = fs::metadata(&lock_path) {
-                    if let Ok(modified) = meta.modified() {
-                        if modified.elapsed().unwrap_or_default() > std::time::Duration::from_secs(60) {
-                            let _ = fs::remove_file(&lock_path);
-                            continue;
-                        }
-                    }
-                }
-
+                drop(file);
                 if std::time::Instant::now() >= deadline {
                     return Ok(Value::Int(-1));
                 }
-
                 std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
                 backoff_ms = (backoff_ms * 2).min(500);
             }
@@ -3304,11 +3966,11 @@ pub fn rt_file_unlock(args: &[Value]) -> Result<Value, CompileError> {
     let mut state = LOCK_HANDLES.lock().unwrap();
     if let Some(state) = state.as_mut() {
         if let Some(lock_path) = state.active.remove(&handle) {
-            // Only delete the lock file when no other handle (re-entrant
+            // Release the OS lock only when no other handle (re-entrant
             // same-process acquisition) still references it.
             let still_held = state.active.values().any(|p| p == &lock_path);
             if !still_held {
-                let _ = fs::remove_file(&lock_path);
+                state.files.remove(&lock_path);
             }
             return Ok(Value::Bool(true));
         }
@@ -3321,6 +3983,50 @@ pub fn rt_file_unlock(args: &[Value]) -> Result<Value, CompileError> {
 // ============================================================================
 
 /// Get current process PID
+/// Windows kernel object identity (`CompareObjectHandles`); delegates to the
+/// runtime twin. Non-integer handles fail closed as "not identical" (0).
+pub fn rt_win_compare_object_handles(args: &[Value]) -> Result<Value, CompileError> {
+    let (Some(Value::Int(first)), Some(Value::Int(second))) = (args.first(), args.get(1)) else {
+        return Ok(Value::Int(0));
+    };
+    Ok(Value::Int(
+        simple_runtime::value::sffi::rt_win_compare_object_handles(*first, *second) as i64,
+    ))
+}
+
+/// Interpreter twin matching `simple_runtime::value::sffi::rt_windows_pty_owner_thread_guard_v1`.
+pub fn rt_windows_pty_owner_thread_guard_v1(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(unsafe {
+        simple_runtime::value::sffi::rt_windows_pty_owner_thread_guard_v1()
+    }))
+}
+
+/// Interpreter twin matching `simple_runtime::value::sffi::rt_windows_pipe_file_mode_v1`.
+pub fn rt_windows_pipe_file_mode_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let (
+        Some(Value::Int(handle)),
+        Some(Value::Int(storage)),
+        Some(Value::Int(mode_out)),
+        Some(Value::Int(operation)),
+    ) = (args.first(), args.get(1), args.get(2), args.get(3))
+    else {
+        return Ok(Value::Int(-1));
+    };
+    Ok(Value::Int(unsafe {
+        simple_runtime::value::sffi::rt_windows_pipe_file_mode_v1(*handle, *storage, *mode_out, *operation as i32)
+    }))
+}
+
+/// Interpreter twins matching `runtime/src/value/sffi/file_io/workspace_storage_v1.rs`:
+/// retain the explicit fail-closed `-95` / `""` capability-absent semantics.
+pub fn rt_workspace_storage_fail_closed_int(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(-95))
+}
+
+pub fn rt_workspace_storage_fail_closed_text(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::text(String::new()))
+}
+
 pub fn rt_getpid(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(std::process::id() as i64))
 }
@@ -3352,18 +4058,49 @@ pub fn rt_process_exists(args: &[Value]) -> Result<Value, CompileError> {
         _ => return Err(CompileError::semantic("rt_process_exists() expects i64 argument")),
     };
 
-    // On Unix systems, check /proc/<pid> directory
+    // kill(pid, 0), as the runtime's rt_process_exists does. `/proc/<pid>`
+    // does not exist on macOS or the BSDs, so the old probe reported every
+    // live process as absent there. EPERM means the process exists but
+    // belongs to another user.
     #[cfg(unix)]
     {
-        let proc_path = format!("/proc/{}", pid);
-        let exists = std::path::Path::new(&proc_path).exists();
+        if pid <= 0 || pid > libc::pid_t::MAX as i64 {
+            return Ok(Value::Bool(false));
+        }
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        let exists =
+            result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
         Ok(Value::Bool(exists))
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // Fallback for non-Unix: always return true
-        // This is conservative - assume process might exist
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        };
+        if pid <= 0 || pid > u32::MAX as i64 {
+            return Ok(Value::Bool(false));
+        }
+        let exists = unsafe {
+            let handle = OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
+            if handle.is_null() {
+                // A live process we may not inspect still exists.
+                GetLastError() == ERROR_ACCESS_DENIED
+            } else {
+                // Not the exit code: a process that exits with 259 would read
+                // as STILL_ACTIVE forever.
+                let alive = WaitForSingleObject(handle, 0) == WAIT_TIMEOUT;
+                CloseHandle(handle);
+                alive
+            }
+        };
+        Ok(Value::Bool(exists))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        // Fallback for other hosts: assume the process might exist.
         Ok(Value::Bool(true))
     }
 }
@@ -3402,17 +4139,13 @@ pub fn rt_system_cpu_count(_args: &[Value]) -> Result<Value, CompileError> {
 /// duration measured across a clock correction was wrong (and could be
 /// negative), corrupting every latency measurement taken through this extern.
 ///
-/// `Instant` has no absolute epoch, so the returned value is milliseconds since
-/// a process-start baseline captured on first call. Only DIFFERENCES between
-/// two readings are meaningful — which is all a monotonic clock ever promised.
-/// Callers that need a wall-clock timestamp must use `rt_time_now_ms` /
-/// `rt_time_now_unix_micros` instead.
+/// `Instant` has no absolute epoch, so the returned value is milliseconds on the
+/// interpreter's shared nonzero monotonic scale (`interp_monotonic_nanos`). Only
+/// DIFFERENCES between two readings are meaningful — which is all a monotonic
+/// clock ever promised. Callers that need a wall-clock timestamp must use
+/// `rt_time_now_ms` / `rt_time_now_unix_micros` instead.
 pub fn rt_time_now_monotonic_ms(_args: &[Value]) -> Result<Value, CompileError> {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static BASELINE: OnceLock<Instant> = OnceLock::new();
-    let baseline = BASELINE.get_or_init(Instant::now);
-    Ok(Value::Int(baseline.elapsed().as_millis() as i64))
+    Ok(Value::Int(super::time::interp_monotonic_nanos() / 1_000_000))
 }
 
 // ========================================================================
@@ -3752,7 +4485,6 @@ pub fn rt_hosted_safe_artifact_read_v1(args: &[Value]) -> Result<Value, CompileE
             return Ok(Value::Nil);
         }
         let root_fd = root_handle as i32;
-        let mut retries = 0;
         let mut root_identity: libc::stat = unsafe { std::mem::zeroed() };
         if unsafe { libc::fstat(root_fd, &mut root_identity) } != 0 {
             return Ok(Value::Nil);
@@ -3775,7 +4507,7 @@ pub fn rt_hosted_safe_artifact_read_v1(args: &[Value]) -> Result<Value, CompileE
         let wanted = if ok { before.st_size as usize } else { 0 };
         let mut bytes = vec![0u8; wanted];
         let mut used = 0usize;
-        retries = 0;
+        let mut retries = 0;
         while ok && used < wanted {
             let count = unsafe { libc::read(fd, bytes[used..].as_mut_ptr().cast(), wanted - used) };
             if count > 0 {
@@ -4075,4 +4807,28 @@ fn errno_from_io_error(e: &std::io::Error) -> i64 {
         std::io::ErrorKind::AlreadyExists => 17,
         _ => 5, // EIO
     }
+}
+
+// Owned locking never enters the legacy reentrant path cache above. The exact
+// canonical native generation owner is shared with compiled/JIT callers.
+pub fn rt_file_lock_owned_acquire_v2(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let timeout = match args.get(1) { Some(Value::Int(n)) => *n, _ => return Ok(Value::Int(0)) };
+    let bytes = path.as_bytes();
+    Ok(Value::Int(unsafe {
+        simple_runtime::value::sffi::file_lock_owned_v2::rt_file_lock_owned_acquire_v2(
+            bytes.as_ptr(), bytes.len() as u64, timeout)
+    }))
+}
+pub fn rt_file_lock_owned_state_v2(args: &[Value]) -> Result<Value, CompileError> {
+    let token = match args.first() { Some(Value::Int(n)) => *n, _ => return Ok(Value::Int(0)) };
+    Ok(Value::Int(unsafe {
+        simple_runtime::value::sffi::file_lock_owned_v2::rt_file_lock_owned_state_v2(token)
+    }))
+}
+pub fn rt_file_lock_owned_release_v2(args: &[Value]) -> Result<Value, CompileError> {
+    let token = match args.first() { Some(Value::Int(n)) => *n, _ => return Ok(Value::Int(0)) };
+    Ok(Value::Int(unsafe {
+        simple_runtime::value::sffi::file_lock_owned_v2::rt_file_lock_owned_release_v2(token)
+    }))
 }

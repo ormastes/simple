@@ -1,0 +1,92 @@
+# AUTHORED_UNRUN. Reserve mismatch regression for the source-repaired admission guard.
+"""
+## Purpose and audience
+Reject an authenticated SQLite header that contradicts the locked 80-byte SQLCipher
+reserve; distinguish authentication failure from structural admission failure.
+Audience: DevHub storage maintainers. All fixture secrets are public synthetic data.
+"""
+use std.spec.*
+use std.io_runtime.{file_hash_sha256_or_empty}
+use std.nogc_sync_mut.io.env_ops.{env_set}
+use std.database.server.storage_port.{database_storage_port_v1, StorageOpenResult}
+
+fn reserve_fixture_path(name: text) -> text:
+    "test/fixtures/database/sqlcipher4/{name}.sqlcipher4"
+
+fn reserve_open_code(name: text) -> text:
+    env_set("SIMPLE_SECRET_CIPHER_RESERVE_BOUNDARY", "public-reserve-boundary")
+    val port = database_storage_port_v1()
+    match port.open(reserve_fixture_path(name), "sqlcipher4", "secret://cipher/reserve_boundary"):
+        case Err(error): error.code()
+        case Ok(opened):
+            match opened:
+                case StorageOpenResult.SqliteView(view):
+                    val reserved = view.reserved_bytes
+                    port.close_view(view)
+                    "opened-reserve:{reserved}"
+                case StorageOpenResult.NativeStore(_): "unexpected-native-store"
+
+describe "REQ-CIPHER-RESERVE-001: authenticated headers agree with locked page geometry":
+    # @req REQ-CIPHER-RESERVE-001
+    it "should admit the independently encrypted reserve-80 header":
+        step("Pin the independently generated encrypted page")
+        expect(file_hash_sha256_or_empty(reserve_fixture_path("reserve_80"))).to_equal("ed4c8327164ae447dd3c7dddd9d87b00edef702aa2a70a5d9decdfffb46023a4")
+        step("Open through the production SQLCipher storage port")
+        val code = reserve_open_code("reserve_80")
+        step("Compare admission with the locked eighty-byte reserve contract")
+        expect(code).to_equal("opened-reserve:80")
+
+    # @req REQ-CIPHER-RESERVE-001
+    it "should reject the independently encrypted reserve-0 header":
+        step("Pin the independently generated encrypted page")
+        expect(file_hash_sha256_or_empty(reserve_fixture_path("reserve_0"))).to_equal("157ad55f79babb074617a3b3b6fe795c45f6c79dd0745f4ed26cbb42f01ebeca")
+        step("Open through the production SQLCipher storage port")
+        val code = reserve_open_code("reserve_0")
+        step("Compare admission with the locked eighty-byte reserve contract")
+        expect(code).to_equal("STORAGE_PORT_CORRUPT_SOURCE")
+
+    # @req REQ-CIPHER-RESERVE-001
+    it "should reject the independently encrypted reserve-79 header":
+        step("Pin the independently generated encrypted page")
+        expect(file_hash_sha256_or_empty(reserve_fixture_path("reserve_79"))).to_equal("c800d459c228ce9350e615ca99c693a9c573301240f6049f1b8098a00f8e0acb")
+        step("Open through the production SQLCipher storage port")
+        val code = reserve_open_code("reserve_79")
+        step("Compare admission with the locked eighty-byte reserve contract")
+        expect(code).to_equal("STORAGE_PORT_CORRUPT_SOURCE")
+
+    # @req REQ-CIPHER-RESERVE-001
+    it "should reject the independently encrypted reserve-81 header":
+        step("Pin the independently generated encrypted page")
+        expect(file_hash_sha256_or_empty(reserve_fixture_path("reserve_81"))).to_equal("3c2db043c9e0b0666bfe348dd20c03995be2383984f8f07db3f49aa64718bd50")
+        step("Open through the production SQLCipher storage port")
+        val code = reserve_open_code("reserve_81")
+        step("Compare admission with the locked eighty-byte reserve contract")
+        expect(code).to_equal("STORAGE_PORT_CORRUPT_SOURCE")
+
+describe "REQ-CIPHER-RESERVE-002: authentication failure precedes structural reserve validation":
+    # @req REQ-CIPHER-RESERVE-002
+    it "should report authentication failure when a malformed-reserve page also has a bad tag":
+        step("Pin the reserve-79 page with one changed tag byte")
+        expect(file_hash_sha256_or_empty(reserve_fixture_path("reserve_79_bad_tag"))).to_equal("d8c7b8821e62d953f1e09cf9b7ee4dca594301cf37c251c7f7214a96ba279992")
+        step("Open through the production authenticated storage path")
+        expect(reserve_open_code("reserve_79_bad_tag")).to_equal("STORAGE_PORT_AUTHENTICATION_FAILED")
+
+describe "REQ-CIPHER-RESERVE-003: preserve plaintext SQLite reserve semantics":
+    # @req REQ-CIPHER-RESERVE-003
+    it "should preserve plaintext SQLite admission with a zero-byte reserve":
+        step("Pin the independent valid plaintext SQLite control")
+        val path = "test/fixtures/database/sqlcipher4/reserve_0_plain.sqlite"
+        expect(file_hash_sha256_or_empty(path)).to_equal("cb2a842f5e03920b74f948284638e14d2254c781f6bf319e1b44e5f625efc165")
+        step("Open through the plaintext SQLite backend without a secret")
+        val port = database_storage_port_v1()
+        match port.open(path, "sqlite3", ""):
+            case Err(error):
+                fail("plaintext SQLite control rejected: {error.code()}")
+            case Ok(opened):
+                match opened:
+                    case StorageOpenResult.SqliteView(view):
+                        step("Require zero reserve to remain valid outside the SQLCipher backend")
+                        expect(view.reserved_bytes).to_equal(0)
+                        port.close_view(view)
+                    case StorageOpenResult.NativeStore(_):
+                        fail("plaintext SQLite control resolved to native store")

@@ -9,7 +9,47 @@
 # Tests for rate limiting configuration, defaults, and peer tracking.
 # Validates that request limits and time windows are correct.
 
-use std.http_server.rate_limit.{RateLimitConfig, default_rate_limit_config, RateLimitStore, new_rate_limit_store, check_rate_limit}
+use std.http_server.rate_limit.{RateLimitConfig, RateLimitStore, rate_limit_handler}
+use std.http_server.types.{HttpRequestData, ServerConfig, PhaseResult}
+
+# Helper: drive the real PreRead handler. Returns 0 when the request is
+# admitted, otherwise the rejection status code.
+fn _rl_server_config() -> ServerConfig:
+    ServerConfig(
+        listen_addr: "0.0.0.0:8080",
+        worker_count: 1,
+        max_connections: 100,
+        keepalive_timeout_ms: 65000,
+        read_timeout_ms: 60000,
+        write_timeout_ms: 60000,
+        idle_timeout_ms: 120000,
+        client_max_body_size: 1048576,
+        server_name: "TestServer",
+        locations: [],
+        upstreams: [],
+        access_log: "",
+        error_log: "",
+        tls_enabled: false,
+        tls_cert_path: "",
+        tls_key_path: "",
+        tls_min_version: "1.2",
+        drain_timeout_ms: 30000
+    )
+
+fn admit(store: RateLimitStore, config: RateLimitConfig, peer: text) -> i64:
+    val request = HttpRequestData(
+        method: "GET",
+        path: "/",
+        query: "",
+        version: "HTTP/1.1",
+        headers: [],
+        body: "",
+        params: {},
+        peer_addr: peer
+    )
+    match rate_limit_handler(request, _rl_server_config(), config, store):
+        case PhaseResult.Error(code, _): code
+        case _: 0
 
 # ============================================================================
 # Test Group 1: Configuration defaults

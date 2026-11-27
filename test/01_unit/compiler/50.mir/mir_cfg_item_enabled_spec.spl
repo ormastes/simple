@@ -1,0 +1,44 @@
+# @req: REQ-COMP-MIR-CFG-ITEM-001 — mir_cfg_item_enabled evaluates decl-level @cfg guards.
+"""
+## Purpose and audience
+Purpose: Prove mir_cfg_item_enabled correctly evaluates whether a declaration
+with cfg guards is enabled for a target, handling unguarded items, single
+conditions, conjunctions, and malformed atoms.
+Audience: COMP maintainers.
+Reference: doc/05_design/compiler/frontend/hir_cfg_decl_select_design.md (step 2)
+"""
+use std.spec.{describe, it, expect}
+use compiler.common.mir_target_context.{MirTargetContext}
+use compiler.mir.mir_cfg_select.{mir_cfg_item_enabled}
+
+fn tgt(arch: text, os: text) -> MirTargetContext:
+    MirTargetContext(arch: arch, os: os, abi: "gnu", backend: "llvm", version: 1)
+
+describe "mir_cfg_item_enabled guards decl lowering":
+    it "unguarded items (group==0, cfg empty) always return 1":
+        val linux_x64 = tgt("x86_64", "linux")
+        val no_cfg: [text] = []
+        expect(mir_cfg_item_enabled(no_cfg, linux_x64, [])).to_equal(1)
+        expect(mir_cfg_item_enabled([], linux_x64, [])).to_equal(1)
+
+    it "single os=linux condition returns 1 on linux, 0 on windows":
+        val linux_cfg: [text] = ["os=linux"]
+        val windows_cfg: [text] = ["os=windows"]
+        val linux_x64 = tgt("x86_64", "linux")
+        val win_x64 = tgt("x86_64", "windows")
+        val no_feat: [text] = []
+        expect(mir_cfg_item_enabled(linux_cfg, linux_x64, no_feat)).to_equal(1)
+        expect(mir_cfg_item_enabled(linux_cfg, win_x64, no_feat)).to_equal(0)
+        expect(mir_cfg_item_enabled(windows_cfg, win_x64, no_feat)).to_equal(1)
+        expect(mir_cfg_item_enabled(windows_cfg, linux_x64, no_feat)).to_equal(0)
+
+    it "conjunction of os and arch requires both to match":
+        val conj: [text] = ["os=linux", "arch=aarch64"]
+        val no_feat: [text] = []
+        expect(mir_cfg_item_enabled(conj, tgt("aarch64", "linux"), no_feat)).to_equal(1)
+        expect(mir_cfg_item_enabled(conj, tgt("x86_64", "linux"), no_feat)).to_equal(0)
+        expect(mir_cfg_item_enabled(conj, tgt("aarch64", "macos"), no_feat)).to_equal(0)
+
+    it "malformed atom returns -2":
+        val malformed: [text] = ["bogus_atom"]
+        expect(mir_cfg_item_enabled(malformed, tgt("x86_64", "linux"), [])).to_equal(-2)

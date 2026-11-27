@@ -1,0 +1,266 @@
+# REQ-CMUX-002/005; exact metadata slice, AUTHORED NOT_RUN.
+# Synthetic child observations are DTO values; no process/provider is exercised.
+# codex-system-test
+# @manual: primary
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.execution_v1.*
+use std.common.contracts.mux.observation_v1.*
+use os.apps.smux.core_mux_targets.{core_mux_resolve_exact_v1}
+
+fn target_ref(kind: MuxObjectKindV1, id: text) -> MuxObjectRefV1:
+    MuxObjectRefV1(owner_id: "target-owner", owner_generation: 7, kind: kind, object_id: id)
+
+fn target_context(session_id: text = "", window_id: text = "", pane_id: text = "", client_id: text = "") -> MuxContextV1:
+    MuxContextV1(
+        session: if session_id == "": nil else: Some(target_ref(MuxObjectKindV1.Session, session_id)),
+        window: if window_id == "": nil else: Some(target_ref(MuxObjectKindV1.Window, window_id)),
+        pane: if pane_id == "": nil else: Some(target_ref(MuxObjectKindV1.Pane, pane_id)),
+        client: if client_id == "": nil else: Some(target_ref(MuxObjectKindV1.Client, client_id)))
+
+fn target_window(id: text, session_id: text, pane_id: text) -> MuxWindowStateV1:
+    val rectangle = MuxRectV1(x_cells: 0, y_cells: 0, width_cells: 80, height_cells: 24)
+    val pane = target_ref(MuxObjectKindV1.Pane, pane_id)
+    MuxWindowStateV1(identity: target_ref(MuxObjectKindV1.Window, id),
+        session: target_ref(MuxObjectKindV1.Session, session_id), name: "build", index: 0,
+        active_pane: Some(pane), zoomed_pane: nil, restore_layout: nil,
+        layout: MuxLayoutStateV1(kind: MuxLayoutKindV1.Manual,
+            canvas: MuxCellSizeV1(columns: 80, rows: 24),
+            rectangles: [MuxPaneRectV1(pane: pane, rectangle: rectangle)]))
+
+fn target_pane(id: text, session_id: text, window_id: text) -> MuxPaneStateV1:
+    MuxPaneStateV1(identity: target_ref(MuxObjectKindV1.Pane, id),
+        session: target_ref(MuxObjectKindV1.Session, session_id),
+        window: target_ref(MuxObjectKindV1.Window, window_id), legacy_id: "%" + id, index: 0,
+        child: MuxChildStateV1.Unknown(last_pid: nil, reason: "metadata fixture only"),
+        title: "shell", current_command: "", focused: false, hidden: false,
+        rectangle: MuxRectV1(x_cells: 0, y_cells: 0, width_cells: 80, height_cells: 24),
+        border: MuxBorderV1.Single, border_status: MuxBorderStatusV1.Hidden, content_revision: 3)
+
+fn target_client(id: text, session_id: text, window_id: text, pane_id: text) -> MuxClientStateV1:
+    MuxClientStateV1(identity: target_ref(MuxObjectKindV1.Client, id),
+        context: target_context(session_id, window_id, pane_id, id),
+        viewport: MuxCellSizeV1(columns: 80, rows: 24), attached: true)
+
+fn target_setup() -> MuxSnapshotV1:
+    MuxSnapshotV1(backend: MuxBackendV1.Smux, namespace: "target-tests",
+        handle: MuxHandleV1(owner_id: "target-owner", owner_generation: 7, lease_id: "lease-a"),
+        revision: 19,
+        sessions: [
+            MuxSessionStateV1(identity: target_ref(MuxObjectKindV1.Session, "s1"), name: "alpha", current_window: Some(target_ref(MuxObjectKindV1.Window, "w1")), background: true),
+            MuxSessionStateV1(identity: target_ref(MuxObjectKindV1.Session, "s2"), name: "beta", current_window: Some(target_ref(MuxObjectKindV1.Window, "w3")), background: true)],
+        windows: [target_window("w1", "s1", "p1"), target_window("w2", "s1", "p3"), target_window("w3", "s2", "p4")],
+        panes: [target_pane("p1", "s1", "w1"), target_pane("p2", "s1", "w1"), target_pane("p3", "s1", "w2"), target_pane("p4", "s2", "w3")],
+        clients: [target_client("c1", "s1", "w1", "p1"), target_client("c2", "s2", "w3", "p4"), target_client("c3", "s1", "w1", "p2")],
+        limits: MuxCoreLimitsV1(discovery: MuxLimitsV1(max_sessions: 4, max_reply_bytes: 65536),
+            max_windows: 8, max_panes: 16, max_clients: 4, max_input_bytes: 4096,
+            max_capture_bytes: 4096, max_events: 32, max_request_timeout_ms: 1000),
+        capabilities: [])
+
+fn target_resolve(snapshot: MuxSnapshotV1, value: text, kind: MuxObjectKindV1, context: MuxContextV1) -> Result<MuxObjectRefV1, MuxErrorV1>:
+    core_mux_resolve_exact_v1(snapshot, "target-tests", snapshot.handle, value, kind, context)
+
+fn target_check_resolution(result: Result<MuxObjectRefV1, MuxErrorV1>, kind: MuxObjectKindV1, id: text):
+    expect(result.is_ok()).to_equal(true)
+    val identity = result.unwrap()
+    expect(identity.kind).to_equal(kind)
+    expect(identity.object_id).to_equal(id)
+    expect(identity.owner_id).to_equal("target-owner")
+    expect(identity.owner_generation).to_equal(7u64)
+
+fn target_check_refusal(result: Result<MuxObjectRefV1, MuxErrorV1>, kind: MuxErrorKindV1 = MuxErrorKindV1.InvalidTarget):
+    expect(result.is_err()).to_equal(true)
+    val failure = result.unwrap_err()
+    expect(failure.kind).to_equal(kind)
+    expect(failure.commit_state).to_equal(MuxCommitStateV1.NotApplied)
+    expect(failure.affected.len()).to_equal(0)
+    expect(failure.cleanup_pending).to_equal(false)
+
+describe "CoreMux exact metadata target resolution":
+    it "returns each existing kind without minting another owner identity":
+        step("Set up a two-session graph and resolve exact stable IDs")
+        val snapshot = target_setup()
+        target_check_resolution(target_resolve(snapshot, "s2", MuxObjectKindV1.Session, target_context()), MuxObjectKindV1.Session, "s2")
+        target_check_resolution(target_resolve(snapshot, "w2", MuxObjectKindV1.Window, target_context()), MuxObjectKindV1.Window, "w2")
+        target_check_resolution(target_resolve(snapshot, "p3", MuxObjectKindV1.Pane, target_context()), MuxObjectKindV1.Pane, "p3")
+        target_check_resolution(target_resolve(snapshot, "c3", MuxObjectKindV1.Client, target_context()), MuxObjectKindV1.Client, "c3")
+
+    it "resolves unique exact labels within their declared scope":
+        step("Resolve a session name, scoped window name and scoped pane title")
+        val snapshot = target_setup()
+        target_check_resolution(target_resolve(snapshot, "beta", MuxObjectKindV1.Session, target_context("s1")), MuxObjectKindV1.Session, "s2")
+        target_check_resolution(target_resolve(snapshot, "build", MuxObjectKindV1.Window, target_context("s2")), MuxObjectKindV1.Window, "w3")
+        target_check_resolution(target_resolve(snapshot, "shell", MuxObjectKindV1.Pane, target_context("s1", "w2")), MuxObjectKindV1.Pane, "p3")
+
+    it "refuses duplicate labels instead of selecting the first object":
+        step("Keep repeated window and pane labels and introduce a repeated session label")
+        var snapshot = target_setup()
+        target_check_refusal(target_resolve(snapshot, "build", MuxObjectKindV1.Window, target_context("s1")))
+        target_check_refusal(target_resolve(snapshot, "shell", MuxObjectKindV1.Pane, target_context("s1", "w1")))
+        var session = snapshot.sessions[1]
+        session.name = "alpha"
+        snapshot.sessions[1] = session
+        target_check_refusal(target_resolve(snapshot, "alpha", MuxObjectKindV1.Session, target_context()))
+
+    it "prefers stable identity over an equal peer label":
+        step("Give a peer window the requested object's ID as its name")
+        var snapshot = target_setup()
+        var window = snapshot.windows[2]
+        window.name = "w2"
+        snapshot.windows[2] = window
+        target_check_resolution(target_resolve(snapshot, "w2", MuxObjectKindV1.Window, target_context()), MuxObjectKindV1.Window, "w2")
+        step("Refuse the out-of-scope ID instead of falling back to the in-scope label")
+        target_check_refusal(target_resolve(snapshot, "w2", MuxObjectKindV1.Window, target_context("s2")))
+
+    it "allows sibling navigation but refuses cross-session and cross-window targets":
+        step("Use current context as search scope, never as the only selectable identity")
+        val snapshot = target_setup()
+        target_check_resolution(target_resolve(snapshot, "w2", MuxObjectKindV1.Window, target_context("s1", "w1", "p1")), MuxObjectKindV1.Window, "w2")
+        target_check_resolution(target_resolve(snapshot, "p2", MuxObjectKindV1.Pane, target_context("s1", "w1", "p1")), MuxObjectKindV1.Pane, "p2")
+        target_check_refusal(target_resolve(snapshot, "w3", MuxObjectKindV1.Window, target_context("s1")))
+        target_check_refusal(target_resolve(snapshot, "p3", MuxObjectKindV1.Pane, target_context("s1", "w1")))
+
+    it "validates every context reference and ancestor even for a namespace session lookup":
+        step("Refuse missing context and inconsistent session-window-pane chains")
+        val snapshot = target_setup()
+        target_check_refusal(target_resolve(snapshot, "s1", MuxObjectKindV1.Session, target_context("missing")))
+        target_check_refusal(target_resolve(snapshot, "s1", MuxObjectKindV1.Session, target_context("s1", "w3")))
+        target_check_refusal(target_resolve(snapshot, "s1", MuxObjectKindV1.Session, target_context("s1", "w1", "p3")))
+        target_check_refusal(target_resolve(snapshot, "s1", MuxObjectKindV1.Session, target_context("s1", "", "p4")))
+        target_check_refusal(target_resolve(snapshot, "s1", MuxObjectKindV1.Session, target_context("", "", "", "missing")))
+
+    it "refuses foreign stale and wrong-kind context identities":
+        step("Change owner, generation and typed kind without changing the ID text")
+        val snapshot = target_setup()
+        var context = target_context()
+        context.session = Some(MuxObjectRefV1(owner_id: "foreign", owner_generation: 7, kind: MuxObjectKindV1.Session, object_id: "s1"))
+        target_check_refusal(target_resolve(snapshot, "s1", MuxObjectKindV1.Session, context))
+        context.session = Some(MuxObjectRefV1(owner_id: "target-owner", owner_generation: 6, kind: MuxObjectKindV1.Session, object_id: "s1"))
+        target_check_refusal(target_resolve(snapshot, "s1", MuxObjectKindV1.Session, context))
+        context.session = Some(target_ref(MuxObjectKindV1.Window, "w1"))
+        target_check_refusal(target_resolve(snapshot, "s1", MuxObjectKindV1.Session, context))
+
+    it "binds the expected namespace and complete lease handle":
+        step("Reject another namespace, lease token or owner incarnation")
+        val snapshot = target_setup()
+        target_check_refusal(core_mux_resolve_exact_v1(snapshot, "other", snapshot.handle, "s1", MuxObjectKindV1.Session, target_context()))
+        var handle = snapshot.handle
+        handle.lease_id = "lease-b"
+        target_check_refusal(core_mux_resolve_exact_v1(snapshot, "target-tests", handle, "s1", MuxObjectKindV1.Session, target_context()))
+        handle = snapshot.handle
+        handle.owner_generation = 8
+        target_check_refusal(core_mux_resolve_exact_v1(snapshot, "target-tests", handle, "s1", MuxObjectKindV1.Session, target_context()))
+
+    it "checks candidate client context without forcing the requesting client ID":
+        step("Resolve a peer in the current session, refusing unrelated client contexts")
+        val snapshot = target_setup()
+        target_check_resolution(target_resolve(snapshot, "c3", MuxObjectKindV1.Client, target_context("s1", "", "", "c1")), MuxObjectKindV1.Client, "c3")
+        target_check_refusal(target_resolve(snapshot, "c2", MuxObjectKindV1.Client, target_context("s1")))
+        target_check_refusal(target_resolve(snapshot, "c3", MuxObjectKindV1.Client, target_context("s1", "w2")))
+        target_check_refusal(target_resolve(snapshot, "alpha", MuxObjectKindV1.Client, target_context()))
+
+    it "expands stored client scope without inventing active defaults":
+        step("Use existing client ancestry, while a session-only context does not select its active pane")
+        val snapshot = target_setup()
+        target_check_resolution(target_resolve(snapshot, "build", MuxObjectKindV1.Window, target_context("", "", "", "c2")), MuxObjectKindV1.Window, "w3")
+        target_check_resolution(target_resolve(snapshot, "shell", MuxObjectKindV1.Pane, target_context("", "", "", "c2")), MuxObjectKindV1.Pane, "p4")
+        target_check_refusal(target_resolve(snapshot, "shell", MuxObjectKindV1.Pane, target_context("s1")))
+        target_check_refusal(target_resolve(snapshot, "", MuxObjectKindV1.Pane, target_context("s1", "w1", "p1", "c1")))
+
+    it "treats exact labels literally without tmux grammar or normalization":
+        step("Match a Unicode punctuation label exactly and reject partial or altered text")
+        var snapshot = target_setup()
+        var window = snapshot.windows[2]
+        window.name = "한😀:1.*"
+        snapshot.windows[2] = window
+        target_check_resolution(target_resolve(snapshot, "한😀:1.*", MuxObjectKindV1.Window, target_context()), MuxObjectKindV1.Window, "w3")
+        for value in ["한😀", " 한😀:1.*", "build*", "BUILD", "1", "w", "s1:w1", "\n"]:
+            target_check_refusal(target_resolve(snapshot, value, MuxObjectKindV1.Window, target_context()))
+
+    it "returns present hidden and exited metadata without claiming live authority":
+        step("Retain the supplied lifecycle observation and resolve its existing identity")
+        var snapshot = target_setup()
+        var pane = snapshot.panes[3]
+        pane.hidden = true
+        pane.child = MuxChildStateV1.Exited(pid: 42, exit_code: Some(0), signal: nil)
+        snapshot.panes[3] = pane
+        target_check_resolution(target_resolve(snapshot, "p4", MuxObjectKindV1.Pane, target_context("s2")), MuxObjectKindV1.Pane, "p4")
+        expect(snapshot.panes[3].hidden).to_equal(true)
+        expect(snapshot.revision).to_equal(19u64)
+        expect(snapshot.panes[3].content_revision).to_equal(3u64)
+
+    it "refuses malformed snapshot membership instead of minting a reference":
+        step("Break a pane ancestor and then create a duplicate stable identity")
+        var snapshot = target_setup()
+        var pane = snapshot.panes[0]
+        pane.session = target_ref(MuxObjectKindV1.Session, "s2")
+        snapshot.panes[0] = pane
+        target_check_refusal(target_resolve(snapshot, "p1", MuxObjectKindV1.Pane, target_context()), MuxErrorKindV1.InvalidRequest)
+        snapshot = target_setup()
+        snapshot.windows.push(snapshot.windows[0])
+        target_check_refusal(target_resolve(snapshot, "w1", MuxObjectKindV1.Window, target_context()), MuxErrorKindV1.InvalidRequest)
+
+    it "keeps kind namespaces distinct and rejects absent objects":
+        step("A valid window ID is not a pane and an unknown ID cannot gain authority")
+        val snapshot = target_setup()
+        target_check_refusal(target_resolve(snapshot, "w1", MuxObjectKindV1.Pane, target_context()))
+        target_check_refusal(target_resolve(snapshot, "missing", MuxObjectKindV1.Session, target_context()))
+        expect(snapshot.sessions.len()).to_equal(2)
+        expect(snapshot.windows.len()).to_equal(3)
+        expect(snapshot.panes.len()).to_equal(4)
+        expect(snapshot.clients.len()).to_equal(3)
+
+    it "derives ancestor scope from explicit window-only and pane-only context":
+        step("An existing child reference disambiguates only within its real ancestors")
+        val snapshot = target_setup()
+        target_check_resolution(target_resolve(snapshot, "build", MuxObjectKindV1.Window, target_context("", "w3")), MuxObjectKindV1.Window, "w3")
+        target_check_resolution(target_resolve(snapshot, "build", MuxObjectKindV1.Window, target_context("", "", "p4")), MuxObjectKindV1.Window, "w3")
+        target_check_resolution(target_resolve(snapshot, "p2", MuxObjectKindV1.Pane, target_context("", "", "p1")), MuxObjectKindV1.Pane, "p2")
+        target_check_refusal(target_resolve(snapshot, "w2", MuxObjectKindV1.Window, target_context("", "w3")))
+        target_check_refusal(target_resolve(snapshot, "p3", MuxObjectKindV1.Pane, target_context("", "", "p1")))
+
+    it "rejects explicit context that contradicts the supplied client's stored ancestry":
+        step("Even individually valid references cannot override a conflicting client context")
+        val snapshot = target_setup()
+        target_check_refusal(target_resolve(snapshot, "s1", MuxObjectKindV1.Session, target_context("s2", "", "", "c1")))
+        target_check_refusal(target_resolve(snapshot, "s1", MuxObjectKindV1.Session, target_context("", "w2", "", "c1")))
+        target_check_refusal(target_resolve(snapshot, "s1", MuxObjectKindV1.Session, target_context("", "", "p2", "c1")))
+        target_check_refusal(target_resolve(snapshot, "s1", MuxObjectKindV1.Session, target_context("s2", "w3", "p4", "c1")))
+
+    it "rejects present empty IDs rather than treating them as absent context":
+        step("An empty ID in any optional reference is invalid")
+        val snapshot = target_setup()
+        var context = target_context()
+        context.session = Some(target_ref(MuxObjectKindV1.Session, ""))
+        target_check_refusal(target_resolve(snapshot, "s1", MuxObjectKindV1.Session, context))
+        context = target_context()
+        context.window = Some(target_ref(MuxObjectKindV1.Window, ""))
+        target_check_refusal(target_resolve(snapshot, "s1", MuxObjectKindV1.Session, context))
+        context = target_context()
+        context.pane = Some(target_ref(MuxObjectKindV1.Pane, ""))
+        target_check_refusal(target_resolve(snapshot, "s1", MuxObjectKindV1.Session, context))
+        context = target_context()
+        context.client = Some(target_ref(MuxObjectKindV1.Client, ""))
+        target_check_refusal(target_resolve(snapshot, "s1", MuxObjectKindV1.Session, context))
+
+    it "retains a late duplicate and late identity across candidate collection growth":
+        step("Construct a checked larger graph with duplicate labels at its first and last added windows")
+        var snapshot = target_setup()
+        var limits = snapshot.limits
+        limits.max_windows = 64
+        snapshot.limits = limits
+        var index = 0
+        while index < 32:
+            var window = target_window("grown-" + index.to_text(), "s1", "p1")
+            window.active_pane = nil
+            window.layout = MuxLayoutStateV1(kind: MuxLayoutKindV1.Manual,
+                canvas: MuxCellSizeV1(columns: 80, rows: 24), rectangles: [])
+            window.name = if index == 0 or index == 31: "growth-duplicate" else: "unique-" + index.to_text()
+            snapshot.windows.push(window)
+            expect(snapshot.windows.len()).to_equal(4 + index)
+            index = index + 1
+        step("Resolve the late stable ID and refuse the duplicate after complete candidate construction")
+        target_check_resolution(target_resolve(snapshot, "grown-31", MuxObjectKindV1.Window, target_context("s1")), MuxObjectKindV1.Window, "grown-31")
+        target_check_refusal(target_resolve(snapshot, "growth-duplicate", MuxObjectKindV1.Window, target_context("s1")))
+        target_check_resolution(target_resolve(snapshot, "unique-30", MuxObjectKindV1.Window, target_context("s1")), MuxObjectKindV1.Window, "grown-30")
+        expect(snapshot.windows.len()).to_equal(35)

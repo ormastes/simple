@@ -1,0 +1,300 @@
+#!/bin/sh
+# bug-db-shard.shs — shell view of the SHARDED bug database.
+#
+# Layout (doc/05_design/infra/tracking/bug_db_shards.md):
+#   doc/08_tracking/bug/bug_db.sdn        legacy file — FROZEN, read-only
+#   doc/08_tracking/bug/db/<bug_id>.sdn   one shard per bug: every row of that
+#                                         bug across all bug tables, sealed with
+#                                         its own .csm sidecar seal
+# A shard REPLACES the legacy rows of its bug id. Shard mode is on iff the
+# `db/` directory exists next to the legacy file. Independent PRs edit
+# different shards, so they never touch the same file.
+#
+# Subcommands (all print to stdout, errors to stderr):
+#   merged  [legacy.sdn]              merged body, no crc header (legacy rows of
+#                                     sharded ids dropped, shard rows spliced
+#                                     into their tables, shards in C-sort order)
+#   extract <id> <merged.sdn>         unsealed shard body for one bug id
+#   write   <id> <merged.sdn> [legacy.sdn]
+#                                     publish db/<id>.sdn (sealed) from a merged
+#                                     working copy; an id with no rows yields a
+#                                     tombstone shard (strings table only)
+#   changed <merged_a> <merged_b>     bug ids whose rows differ between two
+#                                     merged files (one per line)
+#   count   [legacy.sdn]              "<table> <severity> <status> <n>" over the
+#                                     merged view, plus TOTAL rows across both
+#                                     tables. Count open bugs ONLY this way.
+#   check   [legacy.sdn]              gate: every shard row id must equal its
+#                                     file stem, every shard must seal, and the
+#                                     merged view has no duplicate bug id.
+#                                     PASS/FAIL verdict is the last stdout line.
+#   --selftest                        fixtures; fatal on failure
+#   --selftest-count                  read-only count controls; no seal hasher
+set -u
+HERE=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$HERE/../.." && pwd)
+DEFAULT_LEGACY="$ROOT/doc/08_tracking/bug/bug_db.sdn"
+
+die() { echo "ERROR: $*" >&2; exit 2; }
+
+# Seals are .csm sidecars, the same mechanism as the legacy file (shell twin of
+# src/lib/nogc_sync_mut/database/csm_seal.spl). The algorithm comes from
+# config/check/sdn_seal_policy.sdn, which lists doc/08_tracking/bug/db/*.sdn.
+. "$HERE/sdn-seal-lib.shs"
+POLICY="$ROOT/config/check/sdn_seal_policy.sdn"
+shard_algo() { csm_policy_algo "$POLICY" "doc/08_tracking/bug/db/shard.sdn"; }
+seal_file() { csm_seal_file "$1" "$(shard_algo)" >/dev/null; }
+# seal_state <file> -> OK | LEGACY | MISSING | CORRUPT ... (first word)
+seal_state() { csm_state "$1" $(csm_fs_tags "$1") | awk '{print $1; exit}'; }
+
+shard_dir_of() { echo "$(dirname "$1")/db"; }
+shard_files() { # legacy -> sorted shard paths (may be empty)
+    _d=$(shard_dir_of "$1")
+    [ -d "$_d" ] || return 0
+    find "$_d" -maxdepth 1 -name '*.sdn' 2>/dev/null | LC_ALL=C sort
+}
+
+AWK_ROWID='function rowid(s) { sub(/^[ \t]+/, "", s); sub(/,.*/, "", s); sub(/[ \t]+$/, "", s); return s }'
+
+# merged: splice shards into the legacy body.
+# Pass shard paths via a manifest file rather than `-v shards=...`: BSD/macOS
+# awk rejects literal newlines inside `-v` variable values.
+cmd_merged() (
+    _legacy=${1:-$DEFAULT_LEGACY}
+    [ -f "$_legacy" ] || die "$_legacy not found"
+    _manifest=$(mktemp) || die "merged: cannot create shard manifest"
+    trap 'rm -f "$_manifest"' 0
+    shard_files "$_legacy" > "$_manifest" || die "merged: cannot list shards"
+    SHARD_MANIFEST="$_manifest" awk "$AWK_ROWID"'
+    function flush() { if (cur != "" && (cur in extra)) { printf "%s", extra[cur]; delete extra[cur] } }
+    BEGIN {
+        manifest = ENVIRON["SHARD_MANIFEST"]
+        while ((mrc = (getline fn < manifest)) > 0) {
+            if (fn == "") continue
+            id = fn; sub(/.*\//, "", id); sub(/\.sdn$/, "", id); ov[id] = 1
+            t = ""
+            while ((frc = (getline line < fn)) > 0) {
+                if (line ~ /^#/) continue
+                if (line ~ /^[A-Za-z_]+ \|/) { t = line; sub(/ .*/, "", t); if (!(t in hdr)) { hdr[t] = line; order[++no] = t }; continue }
+                if (t != "" && t != "strings" && line ~ /^[ \t]+[^ \t#]/) extra[t] = extra[t] line "\n"
+            }
+            close(fn)
+            if (frc < 0) { err = 2; exit 2 }
+        }
+        close(manifest)
+        if (mrc < 0) { err = 2; exit 2 }
+        cur = ""
+    }
+    NR == 1 && /^#sdn-crc32:/ { next }
+    /^[A-Za-z_]+ \|/ { flush(); cur = $1; seen[cur] = 1; print; next }
+    /^[ \t]+[^ \t#]/ { if (cur != "" && (rowid($0) in ov)) next; print; next }
+    /^[ \t]*$/ { flush(); cur = ""; print; next }
+    { print }
+    END {
+        if (err) exit err
+        flush()
+        for (i = 1; i <= no; i++) { t = order[i]; if (!(t in seen) && (t in extra)) { print hdr[t]; printf "%s\n", extra[t] } }
+    }' "$_legacy"
+)
+
+# extract: the unsealed shard body for one id out of a merged file.
+cmd_extract() {
+    _id=$1; _src=$2
+    [ -f "$_src" ] || die "$_src not found"
+    printf 'strings |id, value|\n\n'
+    awk -v id="$_id" "$AWK_ROWID"'
+    function emit() { if (buf != "") { print hdr; printf "%s\n", buf; buf = "" } }
+    /^[A-Za-z_]+ \|/ { emit(); hdr = $0; t = $1; next }
+    /^[ \t]+[^ \t#]/ { if (t != "" && t != "strings" && rowid($0) == id) buf = buf $0 "\n"; next }
+    /^[ \t]*$/ { emit(); t = ""; next }
+    END { emit() }' "$_src"
+}
+
+cmd_write() {
+    _id=$1; _src=$2; _legacy=${3:-$DEFAULT_LEGACY}
+    case "$_id" in *[!A-Za-z0-9_.-]*|"") die "bad bug id '$_id'" ;; esac
+    _d=$(shard_dir_of "$_legacy"); mkdir -p "$_d" || die "cannot create $_d"
+    _out="$_d/$_id.sdn"; _tmp="$_out.tmp.$$"
+    cmd_extract "$_id" "$_src" > "$_tmp" || die "cannot write $_tmp"
+    mv -f "$_tmp" "$_out" || die "cannot publish $_out"
+    seal_file "$_out" || die "seal failed for $_out"
+    echo "$_out"
+}
+
+rows_of() { # merged file -> "id<TAB>table<TAB>line", sorted
+    awk "$AWK_ROWID"'
+    /^[A-Za-z_]+ \|/ { t = $1; next }
+    /^[ \t]+[^ \t#]/ { if (t != "" && t != "strings") print rowid($0) "\t" t "\t" $0; next }
+    /^[ \t]*$/ { t = "" }' "$1" | LC_ALL=C sort
+}
+
+# changed: ids whose row set differs between two merged files.
+cmd_changed() {
+    _ra=$(mktemp); _rb=$(mktemp)
+    rows_of "$1" > "$_ra"; rows_of "$2" > "$_rb"
+    LC_ALL=C comm -3 "$_ra" "$_rb" | sed 's/^\t//' | cut -f1 | LC_ALL=C sort -u
+    rm -f "$_ra" "$_rb"
+}
+
+# count: open-bug tally over the MERGED view (both bug tables, shards applied).
+# Prints "<table> <severity> <status> <n>" rows, then per-severity TOTAL rows
+# summing both tables. The only sanctioned way to count bugs.
+cmd_count() (
+    # POSIX pipelines report only their last command. Materialize each
+    # producer so an ERROR from merged (or awk) cannot become a successful
+    # empty tally when sort exits zero. The subshell owns cleanup/status.
+    _count_merged=$(mktemp) || die "count: cannot create merged input"
+    _count_unsorted=""
+    trap 'rm -f "$_count_merged" "$_count_unsorted"' 0
+    _count_unsorted=$(mktemp) || die "count: cannot create tally output"
+    cmd_merged "$@" > "$_count_merged" || exit $?
+    awk -F', *' "$AWK_ROWID"'
+        /^bugs(_active)? [|]/ { t = $1; sub(/ .*/, "", t); next }
+        /^[A-Za-z_]+ [|]/ { t = ""; next }
+        /^[ 	]*$/ { t = ""; next }
+        t != "" && /^[ 	]+[^ 	#]/ { s = $2; st = $3; gsub(/[ 	]/, "", s); gsub(/[ 	]/, "", st); c[t " " s " " st]++; tot["TOTAL " s " " st]++ }
+        END { for (k in c) print k, c[k]; for (k in tot) print k, tot[k] }' \
+        "$_count_merged" > "$_count_unsorted" || exit $?
+    LC_ALL=C sort "$_count_unsorted"
+)
+
+# check: shard integrity gate.
+cmd_check() {
+    _legacy=${1:-$DEFAULT_LEGACY}
+    [ -f "$_legacy" ] || { echo "ERROR — nothing was checked ($_legacy not found)"; return 2; }
+    _n=0; _bad=""
+    _list=$(shard_files "$_legacy")
+    # one hasher process for every shard (csm_hash_batch), not one per file
+    _hashes=$(mktemp); : > "$_hashes"
+    if [ -n "$_list" ]; then
+        # shellcheck disable=SC2086
+        csm_hash_batch "$(shard_algo)" "$_hashes" $_list || { rm -f "$_hashes"; echo "ERROR — nothing was checked (cannot hash shards)"; return 2; }
+    fi
+    _i=0
+    for _f in $_list; do
+        _n=$((_n + 1)); _i=$((_i + 1))
+        _stem=$(basename "$_f" .sdn)
+        _got=$(sed -n "${_i}p" "$_hashes")
+        # shellcheck disable=SC2046
+        case "$(csm_judge "$_f" "$_got" $(csm_fs_tags "$_f") | awk '{print $1; exit}')" in
+            OK|LEGACY) ;;
+            MISSING) _bad="$_bad $_stem(unsealed)" ;;
+            *) _bad="$_bad $_stem(stale-seal)" ;;
+        esac
+        _mis=$(awk -v id="$_stem" "$AWK_ROWID"'
+            /^[A-Za-z_]+ \|/ { t = $1; next }
+            /^[ \t]+[^ \t#]/ { if (t != "" && t != "strings" && rowid($0) != id) { print rowid($0); exit } }
+            /^[ \t]*$/ { t = "" }' "$_f")
+        [ -z "$_mis" ] || _bad="$_bad $_stem(row-id=$_mis)"
+    done
+    _merged=$(mktemp) || { rm -f "$_hashes"; echo "ERROR — nothing was checked (cannot create merged view)"; return 2; }
+    if ! cmd_merged "$_legacy" > "$_merged"; then
+        rm -f "$_hashes" "$_merged"
+        echo "ERROR — nothing was checked (cannot build merged view)"
+        return 2
+    fi
+    _dup=$(awk "$AWK_ROWID"'
+        /^bugs(_active)? \|/ { t = 1; next } /^[A-Za-z_]+ \|/ { t = 0; next }
+        t && /^[ \t]+[^ \t#]/ { id = rowid($0); if (id in seen) print id; seen[id] = 1 }
+        /^[ \t]*$/ { t = 0 }' "$_merged" | LC_ALL=C sort -u | tr '\n' ' ')
+    rm -f "$_hashes" "$_merged"
+    [ -z "$_dup" ] || _bad="$_bad duplicate-bug-id:$_dup"
+    if [ -n "$_bad" ]; then echo "FAIL — $_n shard(s) checked, offenders:$_bad"; return 1; fi
+    echo "PASS — $_n shard(s) checked, 0 offenders (merged view has no duplicate bug id)"
+    return 0
+}
+
+selftest_count() (
+    _count_fx=$(mktemp -d) || die "selftest-count: mktemp"
+    trap 'rm -rf "$_count_fx"' 0
+    _count_rc=0
+    sh "$HERE/bug-db-shard.shs" count "$_count_fx/nonexistent.sdn" \
+        > "$_count_fx/out" 2> "$_count_fx/err" || _count_rc=$?
+    [ "$_count_rc" -eq 2 ] || die "selftest-count: missing input returned $_count_rc, expected 2"
+    [ ! -s "$_count_fx/out" ] || die "selftest-count: missing input emitted a tally"
+    grep -q '^ERROR: .*not found$' "$_count_fx/err" || die "selftest-count: missing diagnostic"
+
+    printf 'strings |id, value|\n\nbugs_active |id, severity, status|\n\n' > "$_count_fx/empty.sdn"
+    sh "$HERE/bug-db-shard.shs" count "$_count_fx/empty.sdn" \
+        > "$_count_fx/out" 2> "$_count_fx/err" || die "selftest-count: valid zero failed"
+    [ ! -s "$_count_fx/out" ] && [ ! -s "$_count_fx/err" ] || die "selftest-count: valid zero changed output"
+
+    cat > "$_count_fx/nonzero.sdn" <<'SDN'
+strings |id, value|
+
+bugs_active |id, severity, status|
+    a, P2, open
+    b, P2, open
+
+bugs |id, severity, status|
+    c, P2, open
+    d, P3, fixed
+
+SDN
+    cat > "$_count_fx/expected" <<'COUNTS'
+TOTAL P2 open 3
+TOTAL P3 fixed 1
+bugs P2 open 1
+bugs P3 fixed 1
+bugs_active P2 open 2
+COUNTS
+    sh "$HERE/bug-db-shard.shs" count "$_count_fx/nonzero.sdn" \
+        > "$_count_fx/out" 2> "$_count_fx/err" || die "selftest-count: valid nonzero failed"
+    cmp -s "$_count_fx/expected" "$_count_fx/out" && [ ! -s "$_count_fx/err" ] \
+        || die "selftest-count: valid nonzero tally changed"
+    echo 'selftest-count: PASS (missing input rejected; valid zero and nonzero accepted)'
+)
+
+selftest() {
+    SDN_SEAL_ALGO=crc32; export SDN_SEAL_ALGO   # fixtures need no external hasher
+    selftest_count || die "selftest: count controls"
+    _fx=$(mktemp -d); _l="$_fx/bug_db.sdn"; mkdir -p "$_fx/db"
+    printf 'strings |id, value|\n\n\nbugs_active |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n    a, P1, open, A, f, 1, , 2026-11-01, 2026-11-01, true\n    b, P2, open, B, f, 1, , 2026-11-01, 2026-11-01, true\n\n\nbug_descriptions |bug_id, line_num, content|\n    a, 0, "desc a"\n\n' > "$_l"
+    seal_file "$_l" || die "selftest: seal legacy"
+    _m=$(mktemp); cmd_merged "$_l" > "$_m"
+    _w=$(mktemp); awk '/^    b, P2, open/ { print "    b, P2, fixed, B, f, 1, , 2026-11-01, 2026-11-02, true"; next } { print }' "$_m" > "$_w"
+    printf 'bug_scope |bug_id, scope, root_layer, note|\n    b, lib, 20, "n"\n\n' >> "$_w"
+    [ "$(cmd_changed "$_m" "$_w")" = "b" ] || die "selftest: changed must name only b"
+    cmd_write b "$_w" "$_l" >/dev/null || die "selftest: write"
+    [ "$(seal_state "$_fx/db/b.sdn")" = OK ] || die "selftest: written shard must carry a verifying .csm seal"
+    _m2=$(mktemp); cmd_merged "$_l" > "$_m2"
+    grep -q '^    b, P2, fixed' "$_m2" || die "selftest: shard row must override legacy"
+    [ "$(grep -c '^    b, ' "$_m2")" = 2 ] || die "selftest: legacy b row must be dropped"
+    grep -q '^    a, P1, open' "$_m2" || die "selftest: untouched legacy row must survive"
+    grep -q '^bug_scope |' "$_m2" || die "selftest: shard-only table must be appended"
+    cmd_check "$_l" | tail -n 1 | grep -q '^PASS' || die "selftest: clean tree must PASS"
+    # Multi-shard merge/count/check (>= 2 shards triggers newlines in shard list).
+    _wa=$(mktemp); awk '/^    a, P1, open/ { print "    a, P1, closed, A, f, 1, , 2026-11-01, 2026-11-03, true"; next } { print }' "$_m2" > "$_wa"
+    cmd_write a "$_wa" "$_l" >/dev/null || die "selftest: write a"
+    _m3=$(mktemp); _m3_err=$(mktemp)
+    cmd_merged "$_l" > "$_m3" 2> "$_m3_err" || die "selftest: multi-shard merged failed"
+    [ ! -s "$_m3_err" ] || die "selftest: multi-shard merged emitted stderr: $(cat "$_m3_err")"
+    grep -q '^    a, P1, closed' "$_m3" || die "selftest: multi-shard merged lost a override"
+    grep -q '^    b, P2, fixed' "$_m3" || die "selftest: multi-shard merged lost b override"
+    [ "$(grep -c '^    a, ' "$_m3")" = 2 ] || die "selftest: legacy a row must be dropped"
+    cmd_count "$_l" > "$_m3_err" || die "selftest: multi-shard count failed"
+    grep -q '^TOTAL P1 closed 1$' "$_m3_err" || die "selftest: multi-shard count wrong for a"
+    grep -q '^TOTAL P2 fixed 1$' "$_m3_err" || die "selftest: multi-shard count wrong for b"
+    cmd_check "$_l" | tail -n 1 | grep -q '^PASS' || die "selftest: multi-shard clean tree must PASS"
+    cp "$_fx/db/b.sdn" "$_fx/db/c.sdn"; seal_file "$_fx/db/c.sdn" || die "selftest: seal c"
+    cmd_check "$_l" | tail -n 1 | grep -q 'c(row-id=b)' || die "selftest: foreign row id must FAIL"
+    rm -f "$_fx/db/c.sdn" "$_fx/db/c."*.csm
+    printf '    b, 1, "late"\n' >> "$_fx/db/b.sdn"
+    cmd_check "$_l" | tail -n 1 | grep -q 'stale-seal' || die "selftest: stale seal must FAIL"
+    rm -rf "$_fx" "$_m" "$_w" "$_m2" "$_wa" "$_m3" "$_m3_err"
+    echo "selftest: PASS"
+}
+
+[ $# -ge 1 ] || die "usage: bug-db-shard.shs merged|extract|write|changed|count|check|--selftest|--selftest-count ..."
+_cmd=$1; shift
+case "$_cmd" in
+    merged) cmd_merged "$@" ;;
+    extract) [ $# -ge 2 ] || die "usage: extract <id> <merged.sdn>"; cmd_extract "$@" ;;
+    write) [ $# -ge 2 ] || die "usage: write <id> <merged.sdn> [legacy.sdn]"; cmd_write "$@" ;;
+    changed) [ $# -ge 2 ] || die "usage: changed <a> <b>"; cmd_changed "$@" ;;
+    count) cmd_count "$@" ;;
+    check) cmd_check "$@" ;;
+    --selftest) selftest ;;
+    --selftest-count) selftest_count ;;
+    *) die "unknown subcommand $_cmd" ;;
+esac

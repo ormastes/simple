@@ -1,0 +1,147 @@
+# PureDatabase delete visibility and PK index parity spec.
+# @req REQ-LIB-DATABASE-002
+
+use std.spec.*
+use std.database.pure_sql.{PureDatabase}
+use std.database.sql.types.{DbValue}
+use std.io_runtime.{file_delete}
+
+describe "PureDatabase delete visibility and PK index parity":
+    it "removes rows deleted via delete_by_key from MVCC tuples and SQL queries":
+        var db = PureDatabase.memory().unwrap()
+        expect(db.exec_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)").is_ok()).to_equal(true)
+        expect(db.put("items", [DbValue.Integer(value: 1), DbValue.Text(value: "a")]).is_ok()).to_equal(true)
+        expect(db.put("items", [DbValue.Integer(value: 2), DbValue.Text(value: "b")]).is_ok()).to_equal(true)
+
+        val deleted = db.delete_by_key("items", "id", DbValue.Integer(value: 1)).unwrap()
+        expect(deleted).to_equal(1)
+
+        val g1 = db.get("items", "id", DbValue.Integer(value: 1)).unwrap()
+        expect(g1 == nil).to_equal(true)
+        expect(db.query("SELECT * FROM items WHERE id = 1", []).unwrap().len()).to_equal(0)
+        expect(db.query("SELECT * FROM items WHERE id = ?", [DbValue.Integer(value: 1)]).unwrap().len()).to_equal(0)
+        expect(db.query("SELECT * FROM items", []).unwrap().len()).to_equal(1)
+        val g2 = db.get("items", "id", DbValue.Integer(value: 2)).unwrap()
+        expect(g2 != nil).to_equal(true)
+
+        match db.count_by_key("items", "id", DbValue.Integer(value: 1)).unwrap():
+            case Integer(n): expect(n).to_equal(0)
+            case _: expect(false).to_equal(true)
+
+    it "does not resurrect SQL-deleted rows in PK lookups across checkpoint and reopen":
+        val path = "/tmp/pure_database_delete_visibility_spec.db"
+        file_delete(path)
+        var db = PureDatabase.open_deferred(path).unwrap()
+        expect(db.exec_sql("CREATE TABLE t2 (id INTEGER PRIMARY KEY, name TEXT)").is_ok()).to_equal(true)
+        expect(db.exec_sql("INSERT INTO t2 (id, name) VALUES (1, 'x')").is_ok()).to_equal(true)
+        expect(db.exec_sql("INSERT INTO t2 (id, name) VALUES (2, 'y')").is_ok()).to_equal(true)
+        expect(db.exec_sql("DELETE FROM t2 WHERE id = 1").is_ok()).to_equal(true)
+        expect(db.checkpoint().is_ok()).to_equal(true)
+
+        val d1 = db.get("t2", "id", DbValue.Integer(value: 1)).unwrap()
+        expect(d1 == nil).to_equal(true)
+        expect(db.query("SELECT * FROM t2 WHERE id = 1", []).unwrap().len()).to_equal(0)
+        expect(db.query("SELECT * FROM t2 WHERE id = ?", [DbValue.Integer(value: 1)]).unwrap().len()).to_equal(0)
+        val d2 = db.get("t2", "id", DbValue.Integer(value: 2)).unwrap()
+        expect(d2 != nil).to_equal(true)
+
+        match db.count_by_key("t2", "id", DbValue.Integer(value: 1)).unwrap():
+            case Integer(n): expect(n).to_equal(0)
+            case _: expect(false).to_equal(true)
+
+        var reopened = PureDatabase.open_deferred(path).unwrap()
+        val r1 = reopened.get("t2", "id", DbValue.Integer(value: 1)).unwrap()
+        expect(r1 == nil).to_equal(true)
+        expect(reopened.query("SELECT * FROM t2", []).unwrap().len()).to_equal(1)
+        file_delete(path)
+
+    it "handles put after checkpoint in open_deferred across SELECT, UPDATE, and DELETE":
+        val path = "/tmp/pure_database_deferred_put_after_checkpoint.db"
+        file_delete(path)
+        var db = PureDatabase.open_deferred(path).unwrap()
+        expect(db.exec_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, cat TEXT)").is_ok()).to_equal(true)
+        expect(db.put("items", [DbValue.Integer(value: 1), DbValue.Text(value: "one")]).is_ok()).to_equal(true)
+        expect(db.checkpoint().is_ok()).to_equal(true)
+        expect(db.put("items", [DbValue.Integer(value: 2), DbValue.Text(value: "alpha")]).is_ok()).to_equal(true)
+
+        val sel_all = db.query("SELECT * FROM items ORDER BY id", []).unwrap()
+        expect(sel_all.len()).to_equal(2)
+        val sel_cat = db.query("SELECT * FROM items WHERE cat = 'alpha'", []).unwrap()
+        expect(sel_cat.len()).to_equal(1)
+        expect(sel_cat[0].get("id").unwrap().to_text()).to_equal("2")
+
+        val upd_res = db.exec_sql("UPDATE items SET cat = 'alpha2' WHERE id = 2")
+        expect(upd_res.is_ok()).to_equal(true)
+        expect(upd_res.unwrap()).to_equal(1)
+        val g2 = db.get("items", "id", DbValue.Integer(value: 2)).unwrap()
+        expect(g2 != nil).to_equal(true)
+        expect(g2.unwrap().get("cat").unwrap().to_text()).to_equal("alpha2")
+
+        val del_res = db.exec_sql("DELETE FROM items WHERE id = 2")
+        expect(del_res.is_ok()).to_equal(true)
+        expect(del_res.unwrap()).to_equal(1)
+        val g2_after = db.get("items", "id", DbValue.Integer(value: 2)).unwrap()
+        expect(g2_after == nil).to_equal(true)
+        expect(db.query("SELECT * FROM items", []).unwrap().len()).to_equal(1)
+        expect(db.checkpoint().is_ok()).to_equal(true)
+
+        var reopened = PureDatabase.open_deferred(path).unwrap()
+        val r2 = reopened.get("items", "id", DbValue.Integer(value: 2)).unwrap()
+        expect(r2 == nil).to_equal(true)
+        expect(reopened.query("SELECT * FROM items", []).unwrap().len()).to_equal(1)
+        file_delete(path)
+
+    it "keeps _tbl_pk_map and _pk_flat consistent across non-PK SQL UPDATE and update_by_key PK changes":
+        var db = PureDatabase.memory_deferred().unwrap()
+        expect(db.exec_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, cat TEXT)").is_ok()).to_equal(true)
+        expect(db.put("users", [DbValue.Integer(value: 1), DbValue.Text(value: "alpha")]).is_ok()).to_equal(true)
+        expect(db.put("users", [DbValue.Integer(value: 2), DbValue.Text(value: "beta")]).is_ok()).to_equal(true)
+        expect(db.put("users", [DbValue.Integer(value: 3), DbValue.Text(value: "ubk0")]).is_ok()).to_equal(true)
+        expect(db.checkpoint().is_ok()).to_equal(true)
+
+        # Non-PK SQL UPDATE changing PK
+        val u1 = db.exec_sql("UPDATE users SET id = 20, cat = 'gamma' WHERE cat = 'beta'").unwrap()
+        expect(u1).to_equal(1)
+        val old_g2 = db.get("users", "id", DbValue.Integer(value: 2)).unwrap()
+        expect(old_g2 == nil).to_equal(true)
+        match db.count_by_key("users", "id", DbValue.Integer(value: 2)).unwrap():
+            case Integer(n): expect(n).to_equal(0)
+            case _: expect(false).to_equal(true)
+        val new_g20 = db.get("users", "id", DbValue.Integer(value: 20)).unwrap()
+        expect(new_g20 != nil).to_equal(true)
+        expect(new_g20.unwrap().get("cat").unwrap().to_text()).to_equal("gamma")
+        match db.count_by_key("users", "id", DbValue.Integer(value: 20)).unwrap():
+            case Integer(n): expect(n).to_equal(1)
+            case _: expect(false).to_equal(true)
+
+        # update_by_key changing PK (non-all_vis after SQL UPDATE)
+        var cols_up: Dict<text, DbValue> = {}
+        cols_up["id"] = DbValue.Integer(value: 33)
+        cols_up["cat"] = DbValue.Text(value: "ubk")
+        expect(db.update_by_key("users", "id", DbValue.Integer(value: 3), cols_up).unwrap()).to_equal(1)
+        val old_g3 = db.get("users", "id", DbValue.Integer(value: 3)).unwrap()
+        expect(old_g3 == nil).to_equal(true)
+        match db.count_by_key("users", "id", DbValue.Integer(value: 3)).unwrap():
+            case Integer(n): expect(n).to_equal(0)
+            case _: expect(false).to_equal(true)
+        val new_g33 = db.get("users", "id", DbValue.Integer(value: 33)).unwrap()
+        expect(new_g33 != nil).to_equal(true)
+        expect(new_g33.unwrap().get("cat").unwrap().to_text()).to_equal("ubk")
+        match db.count_by_key("users", "id", DbValue.Integer(value: 33)).unwrap():
+            case Integer(n): expect(n).to_equal(1)
+            case _: expect(false).to_equal(true)
+        expect(db.query("SELECT * FROM users WHERE id = 33", []).unwrap().len()).to_equal(1)
+        expect(db.query("SELECT * FROM users WHERE id = 3", []).unwrap().len()).to_equal(0)
+
+    it "excludes MVCC tombstones in count_by_key_text and count_by_key non-PK scans":
+        var db = PureDatabase.memory_deferred().unwrap()
+        expect(db.exec_sql("CREATE TABLE tags (id INTEGER PRIMARY KEY, cat TEXT)").is_ok()).to_equal(true)
+        expect(db.put("tags", [DbValue.Integer(value: 1), DbValue.Text(value: "alpha")]).is_ok()).to_equal(true)
+        expect(db.put("tags", [DbValue.Integer(value: 2), DbValue.Text(value: "alpha")]).is_ok()).to_equal(true)
+        expect(db.checkpoint().is_ok()).to_equal(true)
+        expect(db.exec_sql("DELETE FROM tags WHERE id = 1").unwrap()).to_equal(1)
+
+        expect(db.count_by_key_text("tags", "cat", DbValue.Text(value: "alpha"))).to_equal("1")
+        match db.count_by_key("tags", "cat", DbValue.Text(value: "alpha")).unwrap():
+            case Integer(n): expect(n).to_equal(1)
+            case _: expect(false).to_equal(true)

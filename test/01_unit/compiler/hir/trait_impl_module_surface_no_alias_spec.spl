@@ -1,0 +1,200 @@
+# Regression spec for HIR cross-module trait impl registration without
+# `var trait_module = imported_mod` parameter-slot aliasing.
+#
+# @cover src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl
+# @req: REQ-SSPEC-LOCAL-001
+
+"""
+## Purpose and audience
+
+Purpose: Verify that registering a class with a cross-module trait impl
+(`impl TraitA for X` where `TraitA` lives in a separate module with
+`live_len < imported_mod.impls.len()`) followed by a second impl block
+(`impl TraitB for X` and inherent `impl X`) registers every method without
+`stale surface index [impls]` and without mutating `imported_mod`.
+Audience: compiler engineers maintaining HIR import and surface lowering.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/hir/trait_impl_module_surface_no_alias_spec.spl --mode=interpreter`.
+2. Every scenario must pass with zero stale surface diagnostics.
+
+## Compatibility and limitations
+
+Interpreter-mode HIR lowering unit verification plus source-contract fence for
+native Stage 2/3 codegen.
+"""
+
+use std.spec.{describe, it, expect, assert_true}
+use std.spec.step
+use std.io_runtime.{file_read}
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering._Items.module_import_registration.*
+use compiler.hir.hir_lowering._Items.module_reexport_materialization.*
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_types.*
+
+fn trait_a_source() -> text:
+    "pub struct DummyA:\n" +
+    "    tag: i64\n\n" +
+    "impl DummyA:\n" +
+    "    fn helper_a() -> i64:\n" +
+    "        0\n\n" +
+    "pub trait TraitA:\n" +
+    "    fn trait_a_op() -> i64:\n" +
+    "        10\n" +
+    "    fn trait_a_default() -> i64:\n" +
+    "        20\n"
+
+fn trait_b_source() -> text:
+    "pub trait TraitB:\n" +
+    "    fn trait_b_op() -> i64:\n" +
+    "        30\n"
+
+fn local_trait_impl_source() -> text:
+    "use pkg.trait_a.\{TraitA\}\n" +
+    "use pkg.trait_b.\{TraitB\}\n\n" +
+    "pub trait LocalTrait:\n" +
+    "    fn local_trait_op() -> i64:\n" +
+    "        40\n\n" +
+    "pub class BaremetalBackend:\n" +
+    "    id: i64\n\n" +
+    "impl TraitA for BaremetalBackend:\n" +
+    "    fn trait_a_op() -> i64:\n" +
+    "        1\n\n" +
+    "impl TraitB for BaremetalBackend:\n" +
+    "    fn trait_b_op() -> i64:\n" +
+    "        2\n\n" +
+    "impl LocalTrait for BaremetalBackend:\n" +
+    "    fn local_trait_op() -> i64:\n" +
+    "        3\n\n" +
+    "impl BaremetalBackend:\n" +
+    "    fn inherent_op() -> i64:\n" +
+    "        4\n"
+
+fn consumer_source() -> text:
+    "use pkg.impl_mod.\{BaremetalBackend\}\n\n" +
+    "fn run_probe(backend: BaremetalBackend) -> i64:\n" +
+    "    val a = backend.trait_a_op()\n" +
+    "    val b = backend.trait_b_op()\n" +
+    "    val c = backend.inherent_op()\n" +
+    "    a + b + c\n"
+
+fn build_cross_module_trait_fixture() -> (Dict<text, ParserModule>, ModuleSurfacesByName):
+    val log = Logger(level: 0)
+    val src_a = trait_a_source()
+    val src_b = trait_b_source()
+    val src_impl = local_trait_impl_source()
+    val src_consumer = consumer_source()
+    var modules: Dict<text, ParserModule> = {}
+    modules["pkg.trait_a"] = parse_full_frontend(src_a, "pkg/trait_a.spl", "pkg.trait_a", log)
+    modules["pkg.trait_b"] = parse_full_frontend(src_b, "pkg/trait_b.spl", "pkg.trait_b", log)
+    modules["pkg.impl_mod"] = parse_full_frontend(src_impl, "pkg/impl_mod.spl", "pkg.impl_mod", log)
+    modules["pkg.consumer"] = parse_full_frontend(src_consumer, "pkg/consumer.spl", "pkg.consumer", log)
+    val sources = [
+        SourceFile(path: "pkg/trait_a.spl", content: src_a, module_name: "pkg.trait_a"),
+        SourceFile(path: "pkg/trait_b.spl", content: src_b, module_name: "pkg.trait_b"),
+        SourceFile(path: "pkg/impl_mod.spl", content: src_impl, module_name: "pkg.impl_mod"),
+        SourceFile(path: "pkg/consumer.spl", content: src_consumer, module_name: "pkg.consumer")
+    ]
+    val registry = module_surfaces_from_modules(modules, sources).unwrap()
+    (modules, registry)
+
+fn count_stale_surface_errors(lowering: HirLowering, kind: text) -> i64:
+    var count = 0
+    var i = 0
+    while i < lowering.lowering_error_count():
+        val message = lowering.lowering_error_message_at(i, "pkg.consumer")
+        if message.contains("stale surface index [" + kind + "]"):
+            count = count + 1
+        i = i + 1
+    count
+
+describe("cross-module trait impl registration preserves imported_mod surface", fn():
+    """Verify cross-module trait impl registration keeps imported_mod unaliased."""
+    it("lowers cross-module trait impls followed by later trait and inherent impls without stale impls error", fn():
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: trait module live_len < implementor module impls.len() lowers cleanly")
+        val fixture = build_cross_module_trait_fixture()
+        val modules = fixture.0
+        val registry = fixture.1
+        val trait_a_idx = registry.index_by_name["pkg.trait_a"]
+        val trait_b_idx = registry.index_by_name["pkg.trait_b"]
+        val impl_idx = registry.index_by_name["pkg.impl_mod"]
+        expect(registry.surfaces[trait_a_idx].impls.len()).to_equal(1)
+        expect(registry.surfaces[trait_b_idx].impls.len()).to_equal(0)
+        expect(registry.surfaces[impl_idx].impls.len()).to_equal(4)
+
+        var lowering = hirlowering_for_module("pkg/consumer.spl", registry)
+        val _hir = lowering.lower_module(modules["pkg.consumer"])
+        expect(count_stale_surface_errors(lowering, "impls")).to_equal(0)
+        expect(lowering.lowering_error_count()).to_equal(0)
+        assert_true(lowering.symbols.lookup_or_invalid("pkg.impl_mod.BaremetalBackend::trait_a_op").is_valid())
+        assert_true(lowering.symbols.lookup_or_invalid("pkg.impl_mod.BaremetalBackend::trait_a_default").is_valid())
+        assert_true(lowering.symbols.lookup_or_invalid("pkg.impl_mod.BaremetalBackend::trait_b_op").is_valid())
+        assert_true(lowering.symbols.lookup_or_invalid("pkg.impl_mod.BaremetalBackend::local_trait_op").is_valid())
+        assert_true(lowering.symbols.lookup_or_invalid("pkg.impl_mod.BaremetalBackend::inherent_op").is_valid())
+    )
+
+    it("does not mutate imported_mod when registering cross-module and same-module trait impls directly", fn():
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: direct register_imported_type_methods_inner leaves imported_mod intact")
+        val fixture = build_cross_module_trait_fixture()
+        val registry = fixture.1
+        val impl_idx = registry.index_by_name["pkg.impl_mod"]
+        val owner_surface: ModuleSurface = registry.surfaces[impl_idx]
+
+        var lowering = hirlowering_for_module("pkg/consumer.spl", registry)
+        lowering.begin_module("pkg/consumer.spl")
+        lowering.register_imported_type_methods_inner(
+            owner_surface, "pkg.impl_mod", "BaremetalBackend",
+            SymbolId(id: 0), Span.empty(), true)
+
+        expect(owner_surface.module_name).to_equal("pkg.impl_mod")
+        expect(owner_surface.impls.len()).to_equal(4)
+        expect(count_stale_surface_errors(lowering, "impls")).to_equal(0)
+        expect(lowering.lowering_error_count()).to_equal(0)
+        assert_true(lowering.symbols.lookup_or_invalid("pkg.impl_mod.BaremetalBackend::trait_a_default").is_valid())
+        assert_true(lowering.symbols.lookup_or_invalid("pkg.impl_mod.BaremetalBackend::trait_b_op").is_valid())
+        assert_true(lowering.symbols.lookup_or_invalid("pkg.impl_mod.BaremetalBackend::local_trait_op").is_valid())
+        assert_true(lowering.symbols.lookup_or_invalid("pkg.impl_mod.BaremetalBackend::inherent_op").is_valid())
+    )
+
+    it("keeps the trait_values stale-index check intact when trait_values is shrunk", fn():
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: stale trait_values index still emits diagnostic")
+        val fixture = build_cross_module_trait_fixture()
+        val registry = fixture.1
+        val impl_idx = registry.index_by_name["pkg.impl_mod"]
+        val trait_a_idx = registry.index_by_name["pkg.trait_a"]
+        val owner_surface: ModuleSurface = registry.surfaces[impl_idx]
+        var shrunk_trait_surface: ModuleSurface = registry.surfaces[trait_a_idx]
+        shrunk_trait_surface.trait_values = []
+
+        var lowering = hirlowering_for_module("pkg/consumer.spl", registry)
+        lowering.begin_module("pkg/consumer.spl")
+        lowering.register_imported_trait_impl_methods(
+            owner_surface, shrunk_trait_surface, "TraitA",
+            "1 2 4", "pkg.impl_mod", "BaremetalBackend",
+            SymbolId(id: 0), None, Span.empty(), true)
+
+        expect(count_stale_surface_errors(lowering, "trait_values")).to_equal(1)
+    )
+
+    it("eliminates the var trait_module = imported_mod alias in module_reexport_materialization", fn():
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: source keeps trait_module_index scalar and separate trait helper")
+        val src = file_read("src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl")
+        expect(src).to_not_contain("var trait_module = imported_mod")
+        expect(src).to_contain("var trait_module_index: i64 = -1")
+        expect(src).to_contain("me register_imported_trait_impl_methods(")
+    )
+)

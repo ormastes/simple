@@ -1,4 +1,33 @@
 # Legacy MCP feature tests target a REMOVED API and assert nothing
+## Closed 2026-11-25 — both defects verifiably gone from current source (inspection-verified; harness run host-blocked)
+
+Verified on release/1.0.0 (worktree wt-p3-bat, Windows x86_64):
+
+- **measured**: the "removed API" is back and imported successfully by the
+  tests: `src/lib/nogc_async_mut/mcp/session.spl` exists and defines
+  `class McpState` with `static fn create()` (line 61/75);
+  `helpers.spl` and `schema.spl` sit beside it.
+  `test/03_system/feature/lib/mcp/bootstrap_e2e_test.spl` imports
+  `std.nogc_async_mut.mcp.{session,helpers,schema}` and every imported symbol
+  resolves in those modules.
+- **measured**: the "asserts nothing" half is gone — all nine
+  `*_test.spl` files under `test/03_system/feature/lib/mcp/` now carry real
+  oracles (`expect(`/`describe ` counts: e2e 12, functions 9, import 5,
+  protocol 11, handler_function 1, handler_import 7, lazy_loading_v2 16,
+  schema_simple 6, simple_import 8) and none contains a `fn main`
+  print-only body. `bootstrap_e2e_test.spl` even asserts
+  `McpState.create()` directly. The only zero-oracle files left,
+  `working_check.spl`/`working_check_direct.spl`, are not harness specs
+  (no `*_test`/`*_spec` suffix) and import the live
+  `std.nogc_async_mut.mcp` API.
+- **limit stated**: a live `bin/simple test` re-run is host-blocked today —
+  the tracked seed (2026-11-17) predates seed fix `14a34acbe1e`
+  (@representation_boundary directive), so the runner and any
+  nogc-module closure die on `unknown decorator @representation_boundary`
+  before executing assertions (probe output recorded in the p3-bat lane).
+  Classification therefore rests on source inspection of the two specific
+  defects the title names, both verifiably absent.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

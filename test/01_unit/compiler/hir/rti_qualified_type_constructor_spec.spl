@@ -1,0 +1,75 @@
+"""
+RTI: a qualified carried callee that names a class/struct CONSTRUCTOR.
+
+Bootstrap run 15 (Stage 2 compiler_cli_build) failed with
+`E-RTI-002: qualified callee 'lib.common.ui.theme_render_snapshot.ThemeSemanticColors'
+has no exact return-type row` at theme_render_snapshot.spl:75 -- the field
+default `semantic: ThemeSemanticColors = ThemeSemanticColors()` is rewritten
+into every construction site that omits it, carrying the declaration's fully
+qualified name. A qualified name whose raw symbol IS that same nominal type
+(same defining module and leaf) must answer exactly like the unqualified
+constructor call (E-RTI-001, the non-fatal no-answer); any other qualified miss stays E-RTI-002.
+"""
+# @cover src/compiler/20.hir/return_type_interface_v1.spl
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.return_type_interface_v1.*
+
+fn ctor_hir(source: text, path: text) -> HirModule:
+    val ast = parse_full_frontend(source, path, path, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_module(ast)
+
+fn ctor_symbol_raw(symbols: SymbolTable, name: text) -> i64:
+    var found: i64 = -1
+    for sym in symbols.symbols.values():
+        if sym.name == name and found < 0:
+            match sym.kind:
+                case SymbolKind.Class | SymbolKind.Struct: found = sym.id.id
+                case _: ()
+    found
+
+fn ctor_result_text(r: Result<ReturnTypeEntry, RtiError>, table: ReturnTypeInterfaceTable) -> text:
+    match r:
+        case Err(e): "err:" + e.code
+        case Ok(entry):
+            match table.require_concrete(entry):
+                case Ok(term): "ok:" + rti_term_canonical_text(term)
+                case Err(e): "err:" + e.code
+
+describe "RTI qualified class constructor callee":
+    it "resolves a qualified ctor name the same as the unqualified ctor":
+        val hir = ctor_hir("class Colors:\n    info: u32 = 1u32\n", "src/rti_ctor/provider.spl")
+        var table = ReturnTypeInterfaceTable.new()
+        table.register_hir_module(hir).unwrap()
+        val raw = ctor_symbol_raw(hir.symbols, "Colors")
+        expect(raw >= 0).to_equal(true)
+        val plain = ctor_result_text(table.fn_return(hir.symbols, raw, ""), table)
+        val qualified = ctor_result_text(table.fn_return(hir.symbols, raw, "rti_ctor.provider.Colors"), table)
+        print "plain={plain} qualified={qualified}"
+        expect(plain).to_equal("err:E-RTI-001")
+        expect(qualified).to_equal(plain)
+
+    it "resolves a qualified struct ctor name the same as the unqualified ctor":
+        val hir = ctor_hir("struct Pt:\n    x: i64 = 0\n", "src/rti_ctor/provider.spl")
+        var table = ReturnTypeInterfaceTable.new()
+        table.register_hir_module(hir).unwrap()
+        val raw = ctor_symbol_raw(hir.symbols, "Pt")
+        expect(raw >= 0).to_equal(true)
+        val plain = ctor_result_text(table.fn_return(hir.symbols, raw, ""), table)
+        val qualified = ctor_result_text(table.fn_return(hir.symbols, raw, "rti_ctor.provider.Pt"), table)
+        expect(plain).to_equal("err:E-RTI-001")
+        expect(qualified).to_equal(plain)
+
+    it "keeps a qualified ctor name from a different module loud":
+        val hir = ctor_hir("class Colors:\n    info: u32 = 1u32\n", "src/rti_ctor/provider.spl")
+        var table = ReturnTypeInterfaceTable.new()
+        table.register_hir_module(hir).unwrap()
+        val raw = ctor_symbol_raw(hir.symbols, "Colors")
+        val other = ctor_result_text(table.fn_return(hir.symbols, raw, "rti_ctor.elsewhere.Colors"), table)
+        expect(other).to_equal("err:E-RTI-002")

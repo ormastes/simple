@@ -1,3 +1,8 @@
+use app.io.mod.{is_windows_platform}
+use app.mcpgdb.gdb_mi_probe_v1.{mcpgdb_gdb_mi_probe_v1}
+use app.mcpgdb.native_runners_v1.{mcpgdb_bundle_prepare_v1, mcpgdb_bundle_validate_v1}
+use app.io.mod.{file_read_regular_no_follow_bounded}
+use app.mcpgdb.platform_v1.{mcpgdb_runner_request_path_v1}
 # mcpgdb execution runner — narrow path for raw backend command execution
 
 use std.io_runtime.{env_get, file_read}
@@ -109,15 +114,32 @@ fn handle_debug_command_run(id: text, body: text) -> text:
     make_tool_result(id, session_command_or_error(session_id, command, dangerous))
 
 fn main():
-    val path = env_get("MCPGDB_REQUEST_PATH") ?? ""
+    val path = mcpgdb_runner_request_path_v1()
     if path == "":
         print make_tool_error("null", "missing request path")
         return
-    val body = file_read(path)
+    match mcpgdb_bundle_prepare_v1():
+        Ok(_): pass
+        Err(reason):
+            print make_tool_error("null", reason)
+            return
+    val body = match file_read_regular_no_follow_bounded(path, 1048576):
+        Ok(value): value
+        Err(reason):
+            print make_tool_error("null", reason)
+            return
     if body == "":
         print make_tool_error("null", "empty request body")
         return
     val id = local_extract_id(body)
+    if body.contains("\"name\":\"debug_backend_probe\"") or body.contains("\"name\": \"debug_backend_probe\""):
+        match mcpgdb_gdb_mi_probe_v1():
+            Ok(value): print make_tool_result(id, value)
+            Err(reason): print make_tool_error(id, reason)
+        return
+    if is_windows_platform():
+        print make_tool_error(id, "persistent debugger command transport is not implemented for Windows; use debug_backend_probe")
+        return
     load_persisted_state_safe()
     var response = make_tool_error(id, "Unknown debug exec tool")
     if body.contains("\"name\":\"debug_command_run\"") or body.contains("\"name\": \"debug_command_run\""):

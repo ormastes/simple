@@ -35,15 +35,15 @@ extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
 extern fn rt_stderr_write(s: text)
 extern fn rt_stderr_flush()
 extern fn rt_time_now_unix_micros() -> i64
-extern fn rt_env_get(key: text) -> text
+extern fn rt_env_get(key: text) -> text?
 
 # ---------------------------------------------------------------------------
 # Level enum (locked: Linux/Zephyr/Rust convention, lower = more verbose)
 # ---------------------------------------------------------------------------
 val LOG_TRACE: i64 = 0
 val LOG_DEBUG: i64 = 1
-val LOG_INFO: i64 = 2
-val LOG_WARN: i64 = 3
+pub val LOG_INFO: i64 = 2
+pub val LOG_WARN: i64 = 3
 val LOG_ERROR: i64 = 4
 val LOG_FATAL: i64 = 5
 val LOG_OFF: i64 = 6
@@ -416,8 +416,8 @@ fn ring_backend_first_at_subsys(rb: RingBackend, subsys: i64) -> _RingBackendRec
 # ---------------------------------------------------------------------------
 # Lite ring (40-byte LogRecord; offsets locked by Phase 4 advisor)
 # ---------------------------------------------------------------------------
-val RING_CAP_DEFAULT_LOG2: i64 = 10
-val RING_CAP_DEFAULT: i64 = 1024
+pub val RING_CAP_DEFAULT_LOG2: i64 = 10
+pub val RING_CAP_DEFAULT: i64 = 1024
 val LOG_RECORD_SIZE: i64 = 40
 
 fn record_size_bytes() -> i64: LOG_RECORD_SIZE
@@ -675,11 +675,26 @@ fn log_dispatch_record(level: i64, subsys: i64, fmt_handle: i64, p0: i64, p1: i6
         log_ring_push(level, subsys, fmt_handle, p0, p1, 0)
     _dispatch_to_backends(level, subsys, p0)
 
+# Bootstrap skip switch, resolved ONCE per process. Plan D14 (producer-path
+# rules): the producer path performs no environment read -- `rt_env_get`
+# allocates a fresh text on every call and the switch is a process-lifetime
+# property set by the spawner. Unset == empty is intended: only an explicit
+# "1" skips dispatch. Pinned by test/01_unit/lib/log_producer_path_spec.spl.
+var _g_skip_dispatch_resolved: bool = false
+var _g_skip_dispatch: bool = false
+
+fn _skip_dispatch() -> bool:
+    if not _g_skip_dispatch_resolved:
+        val switch = rt_env_get("SIMPLE_BOOTSTRAP_SKIP_LOG_DISPATCH") ?? ""
+        _g_skip_dispatch = switch == "1"
+        _g_skip_dispatch_resolved = true
+    _g_skip_dispatch
+
 fn log_dispatch_text(level: i64, subsys: i64, msg: text):
-    val skip_dispatch = rt_env_get("SIMPLE_BOOTSTRAP_SKIP_LOG_DISPATCH") ?? ""
-    if skip_dispatch == "1":
-        return
+    # Cheapest gate first: a below-level call costs one level compare.
     if not _level_passes(level, subsys):
+        return
+    if _skip_dispatch():
         return
     val handle = _text_intern(msg)
     _dispatch_to_backends(level, subsys, handle)
@@ -1059,3 +1074,18 @@ export use lib.nogc_sync_mut.log.{
     log_verbose, set_scope_level, trace
 }
 export ring_backend_subsys_at, ring_backend_seq_at, ring_backend_level_at
+
+# Typed application events (plan D20 vertical slice). `log_event_v1` is the
+# real hot-path entrypoint; the rest is the control plane.
+export use lib.nogc_sync_mut.log_event_v1.{
+    LogEventV1, LogEventRecordV1, log_event_v1, log_event_reset_v1,
+    log_event_collector_init_v1, log_event_collector_resident_v1,
+    log_event_collector_pending_v1, log_event_collector_dropped_v1,
+    log_event_site_register_v1, log_event_site_lookup_v1, log_event_site_state_v1,
+    log_event_site_contract_v1, log_event_site_kind_min_v1, log_event_site_emitted_v1,
+    log_event_site_activate_v1, log_event_policy_update_v1, log_event_site_disable_v1,
+    log_event_drain_v1, log_event_generation_v1, log_event_catalog_lookups_v1,
+    LOG_SITE_ERASED, LOG_SITE_DYNAMIC_READY, LOG_SITE_STATIC_ON,
+    LOG_SITE_STATE_UNREGISTERED, LOG_SITE_STATE_RESIDENT_OFF, LOG_SITE_STATE_ACTIVE,
+    LOG_SITE_STATE_DRAINING, LOG_EVENT_RECORD_VERSION
+}

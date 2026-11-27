@@ -1,0 +1,144 @@
+# @req REQ-SSPEC-UNIT
+# @cover src/compiler/90.tools/fix/engine.spl 80%
+# @cover src/compiler/90.tools/fix/source_edits.spl 70%
+"""
+# Shared source-edit engine — staged validation, preview, apply, reanalysis
+
+Design: doc/05_design/app/lsp/closure_refactor.md §2. Every caller (`simple
+fix`, `simple code refactor`, lint --fix, LSP, MCP) runs this lifecycle; the
+thin vertical slice (rev-3 §17) is the PANIC-W-INDEX `get` proposal.
+"""
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{write_file, read_file, file_delete}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.tooling.easy_fix.types.{EasyFix, Replacement, FixConfidence, easyfix_code, easyfix_with_base}
+use std.tooling.easy_fix.snapshot.{SourceSnapshot, source_snapshot}
+use std.tooling.easy_fix.unified_diff.{unified_diff}
+use compiler.tools.fix.engine.{snapshots_from_sources, fix_collect, fix_filter_by_code, fix_validate,
+    fix_outcome_diff, fix_outcome_json, fix_apply_outcome, fix_reanalyze, fix_outcome_changed_files}
+use compiler.tools.fix.main.{collect_fixes_from_source, apply_fixes_to_disk}
+use compiler.tools.fix.builtins.{builtin_fix_producers}
+use compiler.tools.fix.rules.registry.{run_registry_producers}
+use compiler.tools.fix.producer.{fix_unit_from_source}
+
+val SRC = "fn pick(xs: [i64], i: i64) -> i64:\n    val v = xs[i]\n    v\n"
+
+fn fix_at(file: text, start: i64, end: i64, new_text: text, id: text) -> EasyFix:
+    var f = EasyFix.create(id: id, description: "edit {id}", confidence: FixConfidence.Safe)
+    f.add_replacement(Replacement.create(file: file, start: start, end: end, line: 2, column: start - 34, new_text: new_text))
+    f
+
+describe "fix engine":
+    it "rejects overlapping proposals at the edits stage":
+        step("overlap")
+        var sources: Dict<text, text> = {}
+        sources["a.spl"] = SRC
+        val snaps = snapshots_from_sources(sources)
+        # `xs[i]` is at [47..52]; two proposals that overlap on it
+        val a = fix_at("a.spl", 47, 52, "xs.get(i)", "X:one:2")
+        val b = fix_at("a.spl", 49, 52, "[0]", "X:two:2")
+        val outcome = fix_validate([a, b], snaps)
+        expect(outcome.report.ok).to_equal(false)
+        expect(outcome.report.stage).to_equal("edits")
+        expect(outcome.report.errors[0].contains("overlap")).to_equal(true)
+        expect(fix_outcome_changed_files(outcome).len()).to_equal(0)
+
+    it "rejects a proposal whose result does not parse (reparse stage)":
+        step("reparse")
+        var sources: Dict<text, text> = {}
+        sources["a.spl"] = SRC
+        val broken = fix_at("a.spl", 47, 52, "xs.get(i", "X:broken:2")
+        val outcome = fix_validate([broken], snapshots_from_sources(sources))
+        expect(outcome.report.ok).to_equal(false)
+        expect(outcome.report.stage).to_equal("reparse")
+        expect(outcome.report.errors[0].contains("does not parse")).to_equal(true)
+
+    it "rejects a proposal bound to a different snapshot version":
+        step("version")
+        var sources: Dict<text, text> = {}
+        sources["a.spl"] = SRC
+        val stale = easyfix_with_base(fix_at("a.spl", 47, 52, "xs.get(i)", "X:stale:2"), "deadbeef")
+        val outcome = fix_validate([stale], snapshots_from_sources(sources))
+        expect(outcome.report.ok).to_equal(false)
+        expect(outcome.report.stage).to_equal("version")
+
+    it "produces the PANIC-W-INDEX get proposal, a unified diff and a WorkspaceEdit":
+        step("slice preview")
+        val snap = source_snapshot("a.spl", SRC)
+        val proposals = fix_filter_by_code(fix_collect(builtin_fix_producers(), [snap]), "PANIC-W-INDEX")
+        expect(proposals.len()).to_equal(1)
+        expect(easyfix_code(proposals[0])).to_equal("PANIC-W-INDEX")
+        expect(proposals[0].base_version).to_equal(snap.version)
+        var snaps: Dict<text, SourceSnapshot> = {}
+        snaps["a.spl"] = snap
+        val outcome = fix_validate(proposals, snaps)
+        expect(outcome.report.ok).to_equal(true)
+        val diff = fix_outcome_diff(outcome)
+        expect(diff.contains("--- a/a.spl")).to_equal(true)
+        expect(diff.contains("-    val v = xs[i]")).to_equal(true)
+        expect(diff.contains("+    val v = xs.get(i)")).to_equal(true)
+        val json = fix_outcome_json(outcome)
+        expect(json.contains("\"changes\"")).to_equal(true)
+        expect(json.contains("\"newText\":\"xs.get(i)\"")).to_equal(true)
+        expect(json.contains("\"line\":1,\"character\":12")).to_equal(true)
+        expect(json.contains("\"ok\":true")).to_equal(true)
+
+    it "applies with a version-checked snapshot writer, records receipts and reanalyses":
+        step("slice apply")
+        val path = get_temp_dir() + "/fix_engine_slice_spec.spl"
+        val _ = write_file(path, SRC)
+        val snap = source_snapshot(path, SRC)
+        val proposals = fix_filter_by_code(fix_collect(builtin_fix_producers(), [snap]), "PANIC-W-INDEX")
+        var snaps: Dict<text, SourceSnapshot> = {}
+        snaps[path] = snap
+        val outcome = fix_validate(proposals, snaps)
+        # drift: somebody edits the file after analysis -> refused, nothing written
+        val _ = write_file(path, SRC + "# touched\n")
+        match fix_apply_outcome(outcome, false):
+            case Ok(_): expect("applied despite drift").to_equal("refused")
+            case Err(e): expect(e.contains("source changed since analysis")).to_equal(true)
+        expect(read_file(path)).to_equal(SRC + "# touched\n")
+        val _ = write_file(path, SRC)
+        match fix_apply_outcome(outcome, false):
+            case Err(e): expect(e).to_equal("")
+            case Ok(report):
+                expect(report.applied).to_equal(1)
+                expect(report.modified_files.len()).to_equal(1)
+                expect(report.receipts.len()).to_equal(1)
+                expect(report.receipts[0].starts_with(path + " " + snap.version + " -> ")).to_equal(true)
+                expect(report.details[0].starts_with("[PANIC-W-INDEX:2]")).to_equal(true)
+        expect(read_file(path).contains("xs.get(i)")).to_equal(true)
+        expect(fix_filter_by_code(fix_reanalyze(builtin_fix_producers(), [path]), "PANIC-W-INDEX").len()).to_equal(0)
+        val _ = file_delete(path)
+
+    it "keeps `simple fix` proposals identical to the explicit legacy producer order":
+        step("driver regression")
+        val src = "# TODO: finish this\nfn f(xs: [i64], i: i64) -> i64:\n    xs[i]\n"
+        val fixes = collect_fixes_from_source("r.spl", src)
+        var ids: [text] = []
+        for f in fixes: ids.push(f.id)
+        # registry rules first, then the todo_format legacy rule, then the view slice
+        var legacy: [text] = []
+        for f in run_registry_producers(fix_unit_from_source("r.spl", src)): legacy.push(f.id)
+        legacy.push("L:todo_format:1")
+        legacy.push("PANIC-W-INDEX:3")
+        expect(ids.join(",")).to_equal(legacy.join(","))
+        expect(fixes[fixes.len() - 2].replacements[0].new_text).to_equal("[runtime][P2] ")
+        val path = get_temp_dir() + "/fix_engine_legacy_spec.spl"
+        val _ = write_file(path, src)
+        val on_disk = collect_fixes_from_source(path, src)
+        var sources: Dict<text, text> = {}
+        sources[path] = src
+        match apply_fixes_to_disk([on_disk[on_disk.len() - 2]], sources, true):
+            case Err(e): expect(e).to_equal("")
+            case Ok(report):
+                expect(report.details[0]).to_equal("[L:todo_format:1] add [area][priority] format to TODO comment")
+                expect(report.modified_files[0]).to_equal(path)
+        expect(read_file(path)).to_equal(src)  # dry run never writes
+        val _ = file_delete(path)
+
+    it "formats a minimal unified diff hunk":
+        step("diff")
+        val d = unified_diff("f.spl", "a\nb\nc\n", "a\nB\nc\n")
+        expect(d).to_equal("--- a/f.spl\n+++ b/f.spl\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n")

@@ -1,5 +1,20 @@
 # SimpleOS baremetal backend-resolve empty-override trap — partial fix, deeper trap remains
-## Open 2026-09-16 — needs owner triage
+
+## Triage 2026-11-25 — deferred to the SimpleOS QEMU/bootstrap lane (status unchanged: OPEN)
+
+Triaged in the P2 ledger pass on worktree `wt-p2w5-al` (release/1.0.0 HEAD
+`ae1572aeb67`). Root causes (a) and (b) are fixed and serial-verified; the
+root-cause (c) Qualcomm x86_64 source fix is in-tree and its regression spec
+`test/01_unit/lib/gpu/engine2d/backend_qualcomm_spec.spl` was verified
+20/20 on 2026-11-12 (see "Fix verification" below). What remains — the
+baremetal serial gate proving boot progress past the Qualcomm probe — is a
+QEMU/OVMF real-firmware run gated on an admitted Stage-4 bootstrap artifact,
+which this Windows host lane must not produce (no cargo/rust builds, no
+bootstrap, pinned seed binary only). Not closable here; the "needs owner
+triage" header is superseded by this note. Owner lane: SimpleOS
+visible-display evidence gate once Stage 4 lands.
+
+## Open 2026-09-16 — needs owner triage (superseded by 2026-11-25 triage above)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -341,3 +356,36 @@ objdump -dr build/os/simpleos_wm_simple_web_check_32.elf | grep rt_process_run
 TODO(deferred-environment): after Linux bootstrap admits the runtime, run the
 visible-display evidence command above in SimpleOS QEMU and retain serial output
 plus elapsed-time and max-RSS evidence.
+
+## Fix verification
+2026-11-12: Hosted re-run of the root-cause (c) regression spec
+`test/01_unit/lib/gpu/engine2d/backend_qualcomm_spec.spl` reproduced the
+hollow-verification defect: the spec errored at parse time
+(`reason=parse-error`, 0 examples executed) because four nested
+`describe` blocks (`create`, `RenderBackend trait`, `Adreno tuning`,
+`platform support`) had their `it` bodies at the wrong indentation, so
+the (c) source fix was never actually exercised by CI. Fixed indentation
+only. Seed-hosted result: `outcome=OK declared>=20 executed=20 passed=20
+failed=0` (real PASS, no pass_todo). Neighboring specs:
+`test/01_unit/gpu/qualcomm_vulkan_target_profile_spec.spl` 11/11 PASS;
+`backend_vulkan_text_fallback_spec.spl` 2/2 PASS;
+`host_bug_a07_baremetal_backend_probe_spec.spl` 4/4 PASS.
+`engine_platform_spec.spl` 23/24 with one pre-existing environment
+failure (`keeps explicit GPU compute diagnostics on requested backends`,
+turnip probing /dev/dri/renderD128) unrelated to this change. The
+baremetal serial gate itself remains pending a Stage-4 bootstrap
+artifact; the Qualcomm x86_64 source-level guard is now genuinely
+spec-covered.
+
+## Wave 5 Update (2026-11-27) — `fix-implemented-verification-pending`
+
+- **Implemented baremetal subprocess & hosted-GPU probe/create guards (`w5-2-simpleos-kernel-boot`)**:
+  - `src/lib/gc_async_mut/gpu/browser_engine/web_render_backend.spl`: added `web_render_backend_subprocess_refusal_reason(platform, kernel_env, target)` and `_subprocess_guard(context)` before `process_run` in both `_render_html_via_chromium` (returns `[]`) and `show_live_window` (returns `false`), preventing unguarded subprocess traps on baremetal/SimpleOS (`SIMPLE_OS_KERNEL=simpleos`, `platform`, or `SIMPLE_TARGET`).
+  - `src/lib/gc_async_mut/gpu/engine2d/engine.spl`: added `engine2d_is_hosted_hardware_backend` (excluding `"baremetal"`/`"virtio_gpu"`) and `engine2d_baremetal_hardware_refusal(backend_name, platform)`, invoked at entry to `Engine2D.create_requested_backend`, `Engine2D.create_with_backend_fast`, and `Engine2D.probe_backend`, failing closed before any hosted GPU `.create()`/`.init()`/FFI probe runs on baremetal/SimpleOS (covering every candidate post-`rocm` backend such as `qualcomm`, `vulkan`, `opengl`, `opencl`, `directx`, `webgpu`, `intel`, `metal`, `cuda`, `rocm` for cause (c) `FAULT @ 0x49bacXXX`).
+  - `src/lib/gc_async_mut/gpu/engine2d/compute_dispatch.spl`: refactored `ComputeDispatch.select_best()` to delegate to `select_best_for_platform(platform_name())`, skipping `probe_cuda`/`probe_rocm`/`probe_opencl` on baremetal/SimpleOS.
+- **Host specs run post-edit (interpreter, 3-slot semaphore)**:
+  - `test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_render_backend_baremetal_guard_spec.spl` -> `5 examples, 0 failures`.
+  - `test/01_unit/lib/gpu/engine2d/backend_qualcomm_spec.spl` -> `20 examples, 0 failures`.
+  - `test/01_unit/lib/gc_async_mut/gpu/engine2d/host_bug_a07_baremetal_backend_probe_spec.spl` -> `4 examples, 0 failures`.
+- **Verification pending**: `waiting-for: QEMU SimpleOS serial verification` (run `sh scripts/check/check-simpleos-wm-visible-display-evidence.shs` under Linux/OVMF and confirm `FAULT @ 0x49bacXXX` no longer appears in `serial.log`).
+

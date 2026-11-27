@@ -1,0 +1,74 @@
+# Regression: bug always_inline_cross_module_text_extern_abi_dropped_2026-11-06.
+# compiler.common.config.env_get is @always_inline over `extern fn rt_env_get(key: text)`.
+# Inlined into another module under native stage3 codegen, the text-extern (ptr,len)
+# expansion is dropped: rt_env_get receives (rcx=string handle, rdx=stale) and AVs
+# at rt_env_get+0x41 (CRT memmove) from infer_erased_call_result_records+0x11e
+# (s3_fable50 F3, phase-4 group E). The native AV cannot be reproduced in the
+# interpreter, so the source shape is pinned: _MirLoweringExpr reads env vars only
+# through the file-local _sffi_env_get (std.io_runtime.env_get_opt, a Simple fn).
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val MIR_EXPR_DIR = "src/compiler/50.mir/_MirLoweringExpr/"
+val MIR_EXPR_FILES = [
+    "builtin_method_extras.spl", "collection_literal_membership.spl",
+    "enum_constructor_payload.spl", "enum_pattern_expansion_v1.spl",
+    "enum_payload_type_identity.spl", "enum_semantic_capture_v1.spl",
+    "expr_dispatch.spl", "function_field_call.spl", "function_signature_owner.spl",
+    "lambda_abi.spl", "lambda_match_scope.spl", "method_calls_literals.spl",
+    "optional_collection_receiver_v1.spl", "optional_record_owner.spl",
+    "result_err_record_owner.spl", "result_predicates.spl", "result_tuple_payload.spl",
+    "static_enum_receiver_owner.spl", "struct_literal_order.spl",
+    "switch_operators_calls.spl", "text_index_ranges.spl", "text_static_builtins.spl",
+    "tuple_projection_types.spl"
+]
+
+fn _read(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn _is_ident_char(c: text) -> bool:
+    c == "_" or c == "." or (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9")
+
+# Count code lines calling a bare `env_get(` (not `_sffi_env_get(`, not `x.env_get(`).
+fn plain_env_get_calls(src: text) -> i64:
+    var n = 0
+    for line in src.split("\n"):
+        val t = line.trim()
+        if t.starts_with("#"):
+            continue
+        var rest = t
+        var idx = rest.index_of("env_get(") ?? -1
+        while idx >= 0:
+            val prev = if idx > 0: rest.substring(idx - 1, idx) else: ""
+            if not _is_ident_char(prev):
+                n = n + 1
+            rest = rest.substring(idx + 8, rest.len())
+            idx = rest.index_of("env_get(") ?? -1
+    n
+
+describe "_MirLoweringExpr env reads avoid inlined config.env_get":
+    it "switch_operators_calls.spl has no plain env_get( call":
+        val src = _read(MIR_EXPR_DIR + "switch_operators_calls.spl")
+        expect(src.len() > 0).to_equal(true)
+        expect(plain_env_get_calls(src)).to_equal(0)
+
+    it "no _MirLoweringExpr file calls plain env_get(":
+        var bad = 0
+        for f in MIR_EXPR_FILES:
+            val src = _read(MIR_EXPR_DIR + f)
+            expect(src.len() > 0).to_equal(true)
+            bad = bad + plain_env_get_calls(src)
+        expect(bad).to_equal(0)
+
+    it "the field-trace reads route through _sffi_env_get":
+        val src = _read(MIR_EXPR_DIR + "switch_operators_calls.spl")
+        expect(src.contains("fn _sffi_env_get(key: text) -> text?:")).to_equal(true)
+        expect(src.contains("env_get_opt(key)")).to_equal(true)
+        expect(src.contains("_sffi_env_get(\"SIMPLE_MIR_FIELD_TRACE\")")).to_equal(true)
+
+    it "the scanner itself discriminates":
+        expect(plain_env_get_calls("    val t = env_get(\"X\")")).to_equal(1)
+        expect(plain_env_get_calls("    val t = _sffi_env_get(\"X\")")).to_equal(0)
+        expect(plain_env_get_calls("    val t = cfg.env_get(\"X\")")).to_equal(0)
+        expect(plain_env_get_calls("    # env_get(\"X\") in a comment")).to_equal(0)

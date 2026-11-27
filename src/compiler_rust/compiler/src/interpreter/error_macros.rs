@@ -78,6 +78,27 @@ macro_rules! bail_unknown_method {
             ctx = ctx.with_note(format!("available methods: {}", methods_list));
         }
 
+        // Location probe (bug phase2_stage2_native_build_len_on_i64_aarch64_linux_2026-09-13):
+        // the bare "method `len` not found on type `i64`" carried no file and no
+        // enclosing function, so a failure inside a ~1800-module native-build
+        // worker graph could not be located. Interpreter exprs carry no spans, so
+        // attach the module being evaluated (always; error path only) and, under
+        // SIMPLE_BOOTSTRAP_DIAG / SIMPLE_DEBUG_FIELD_ACCESS (which populate
+        // DEBUG_CALL_STACK), the innermost interpreted functions.
+        if let Some(file) = crate::interpreter::get_current_file() {
+            let file = file.display().to_string();
+            ctx = ctx.with_note(format!("while evaluating module: {}", file)).with_file(file);
+        }
+        if crate::interpreter::field_access_debug_enabled() {
+            let stack = crate::interpreter::debug_call_stack_snapshot();
+            let tail: Vec<&str> = stack.iter().rev().take(12).map(|s| s.as_str()).collect();
+            ctx = ctx.with_note(format!("interpreted call stack (innermost first): {:?}", tail));
+            eprintln!(
+                "[unknown-method] method={} type={} call_stack_top={:?}",
+                $method, $type_name, tail
+            );
+        }
+
         return Err(crate::error::CompileError::semantic_with_context(
             format!("method `{}` not found on type `{}`", $method, $type_name),
             ctx,

@@ -25,9 +25,14 @@ int64_t rt_heap_live_bytes(void) { return 0; }
 int64_t rt_heap_peak_bytes(void) { return 0; }
 int64_t rt_time_now_monotonic_ms(void) { return 1; }
 int64_t rt_value_bool(int64_t n) { return n; }
+int64_t rt_process_spawn_async_owned_windows(const char* a, const char** b, int64_t c) {
+    (void)a; (void)b; (void)c; return -1;
+}
 int main(int argc, char** argv) {
     if (argc != 3) return 90;
     int64_t fd = rt_mem_snapshot_open(argv[2], (int64_t)strlen(argv[2]));
+    if (!strcmp(argv[1], "eexist")) return fd == -2 ? 0 : 97;
+    if (!strcmp(argv[1], "unsafe")) return fd == -1 ? 0 : 98;
     if (!strcmp(argv[1], "reject")) return fd < 0 ? 0 : 91;
     if (fd < 0) return 92;
     if (rt_process_rss_kib() <= 0 || rt_process_hwm_kib() < rt_process_rss_kib()) return 96;
@@ -50,8 +55,10 @@ int main(int argc, char** argv) {
     $lines = Get-Content -LiteralPath $sink
     if ($lines.Count -ne 2 -or $lines[0] -notmatch "^schema=simple.compiler.mem_snapshot.v1 .*seq=0 .*rss_kib=[1-9][0-9]* hwm_kib=[1-9][0-9]* group_charge_metric=unavailable group_charge_current_bytes=-1 group_charge_peak_bytes=-1$" -or
             $lines[1] -ne "seq=1 event=done") { throw "flushed sink records differ" }
-    & $exe reject $sink
-    if ($LASTEXITCODE -ne 0) { throw "existing sink was accepted" }
+    & $exe eexist $sink
+    if ($LASTEXITCODE -ne 0) { throw "existing sink did not return -2 (EEXIST/ERROR_FILE_EXISTS): $LASTEXITCODE" }
+    & $exe unsafe (Join-Path $testRoot "missing-parent/rejected.log")
+    if ($LASTEXITCODE -ne 0) { throw "missing parent did not return -1: $LASTEXITCODE" }
     $junction = Join-Path $testRoot "junction"
     $junctionCreated = $false
     try {
@@ -61,8 +68,8 @@ int main(int argc, char** argv) {
         Write-Host "junction check unavailable without privilege"
     }
     if ($junctionCreated) {
-        & $exe reject (Join-Path $junction "rejected.log")
-        if ($LASTEXITCODE -ne 0) { throw "reparse-point parent was accepted" }
+        & $exe unsafe (Join-Path $junction "rejected.log")
+        if ($LASTEXITCODE -ne 0) { throw "reparse-point parent did not return -1: $LASTEXITCODE" }
     }
     Write-Host "Windows memory snapshot sink contract: PASS"
 } finally {

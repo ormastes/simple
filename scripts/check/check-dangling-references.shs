@@ -13,8 +13,10 @@
 #      compiler.hir.hir_lowering.module_registry.{hir_registry_reset, ...}
 #      AFTER module_registry.spl had been deleted. Repaired in 24ebf39ffcdc.
 #
-# What this checks, over tracked .spl files under src/ (vendored trees excluded
-# per CLAUDE.md "Owned-Code Scope"):
+# What this checks, over .spl files under src/ (vendored trees excluded per
+# CLAUDE.md "Owned-Code Scope"). The DEFINITION INDEX is fed by tracked,
+# untracked-but-present, and symlink-reachable .spl files (see the index
+# construction below); the default SCAN TARGETS remain the tracked src set:
 #
 #   [1] MODULE  -- `use a.b.c.{...}` / `use a.b.c.*` naming a module that no
 #                  file plausibly provides.
@@ -74,8 +76,10 @@
 # stage's), pass 2 counts the files awk actually opened and requires that count
 # to equal the target count, and the verdict states the count so a run that
 # scanned nothing cannot be mistaken for a clean one. `--selftest` runs three
-# fixtures (clean must-PASS, dangling must-FAIL, unreadable-file must-ERROR)
-# and is fatal.
+# fixtures (clean must-PASS, dangling must-FAIL, disappearing-file must-ERROR)
+# and is fatal. (Six fixtures as of 2026-11-25: the original three plus an
+# export-use-alias must-PASS, a symlinked-directory must-PASS, and an
+# untracked-provider must-PASS.)
 #
 # Usage: check-dangling-references.shs [--quiet] [--path FILE|DIR]...
 #   --quiet    print only the final verdict line
@@ -99,13 +103,18 @@ selftest_only=0
 self_path=$(cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")
 
 # --------------------------------------------------------------------------
-# Self-check. Three fixture repos, each a throwaway git repo scanned by THIS
+# Self-check. Six fixture repos, each a throwaway git repo scanned by THIS
 # script through its normal entry point, so neutering any branch above turns
 # the selftest red.
 #   1. clean tree                -> must PASS, exit 0, count > 0
 #   2. one dangling self.method  -> must FAIL, exit 1
-#   3. fixture 2 plus ONE unreadable tracked .spl (the incident replay)
+#   3. fixture 2 plus ONE tracked .spl disappearing before index (incident replay)
 #                                -> must ERROR, exit 2 (never PASS)
+#   4. export-use alias + consumer -> must PASS (the alias is a definition)
+#   5. symbol declared only behind a tracked symlinked dir -> must PASS
+#      (symlink blind spot, bug 2026-07-28 class 1)
+#   6. symbol declared only in an untracked working-copy file -> must PASS
+#      (untracked blind spot, bug 2026-07-28 class 2)
 # --------------------------------------------------------------------------
 selftest_repo() {
     _st_dir=$1
@@ -133,6 +142,19 @@ run_selftest() {
         *) echo "selftest: FIXTURE 1 (clean) expected exit 0 and a PASS with a nonzero count, got rc=$_st_rc out='$_st_out'" >&2; _st_fail=$((_st_fail + 1)) ;;
     esac
 
+    # Fixture 4 (kept beside clean because both must PASS) -- an export-use
+    # alias is a definition contributed by the re-exporting module.
+    selftest_repo "$_st_root/alias" || { echo "selftest: cannot build fixture 4" >&2; rm -rf "$_st_root"; return 2; }
+    printf 'export use lib.alpha.{alpha as AliasAlpha}\n' > "$_st_root/alias/src/lib/reexport.spl"
+    printf 'use lib.reexport.{AliasAlpha}\nfn use_alias():\n    AliasAlpha()\n' > "$_st_root/alias/src/lib/consumer.spl"
+    ( cd "$_st_root/alias" && git add -A && git commit -qm alias ) >/dev/null 2>&1
+    _st_out=$( cd "$_st_root/alias" && DANGLING_REF_SELFTEST_CHILD=1 sh "$self_path" --quiet 2>/dev/null )
+    _st_rc=$?
+    case "$_st_rc:$_st_out" in
+        0:*PASS\ --\ [1-9]*) : ;;
+        *) echo "selftest: FIXTURE 4 (export-use alias) expected exit 0 and PASS, got rc=$_st_rc out='$_st_out'" >&2; _st_fail=$((_st_fail + 1)) ;;
+    esac
+
     # Fixture 2 -- a genuine dangling reference must be reported.
     selftest_repo "$_st_root/dirty" || { echo "selftest: cannot build fixture 2" >&2; rm -rf "$_st_root"; return 2; }
     printf 'fn delta():\n    self.no_such_method_selftest_xyz()\n' > "$_st_root/dirty/src/lib/zzz.spl"
@@ -149,22 +171,74 @@ run_selftest() {
     selftest_repo "$_st_root/poison" || { echo "selftest: cannot build fixture 3" >&2; rm -rf "$_st_root"; return 2; }
     printf 'fn delta():\n    self.no_such_method_selftest_xyz()\n' > "$_st_root/poison/src/lib/zzz.spl"
     ( cd "$_st_root/poison" && git add -A && git commit -qm dirty ) >/dev/null 2>&1
-    chmod 000 "$_st_root/poison/src/lib/beta.spl"
-    if [ -r "$_st_root/poison/src/lib/beta.spl" ]; then
-        # Running as root (or on a filesystem ignoring the mode): the fixture
-        # cannot be constructed, so the incident cannot be replayed. Absence of
-        # evidence is not a pass.
-        chmod 644 "$_st_root/poison/src/lib/beta.spl"
-        rm -rf "$_st_root"
-        echo "ERROR -- nothing was checked: selftest cannot build the unreadable-file fixture (running as uid $(id -u)?)"
-        return 2
-    fi
-    _st_out=$( cd "$_st_root/poison" && DANGLING_REF_SELFTEST_CHILD=1 sh "$self_path" --quiet 2>/dev/null )
+    # chmod 000 cannot make a file unreadable under root or Windows. Instead
+    # reproduce a concurrent checkout removing it AFTER the presence check.
+    # The shim only schedules deletion; the real awk must encounter real ENOENT.
+    _st_awk=$(command -v awk) || { rm -rf "$_st_root"; return 2; }
+    mkdir -p "$_st_root/poison/bin"
+    cat > "$_st_root/poison/bin/awk" <<'SELFTEST_AWK'
+#!/bin/sh
+if [ "$1" = -f ]; then
+    case "$2" in
+        */index.awk)
+            if [ -f "$DANGLING_REF_SELFTEST_VICTIM" ]; then
+                rm -- "$DANGLING_REF_SELFTEST_VICTIM" || exit 2
+            fi ;;
+    esac
+fi
+exec "$DANGLING_REF_SELFTEST_REAL_AWK" "$@"
+SELFTEST_AWK
+    chmod +x "$_st_root/poison/bin/awk"
+    _st_out=$( cd "$_st_root/poison" && LC_ALL=C PATH="$_st_root/poison/bin:$PATH" DANGLING_REF_SELFTEST_REAL_AWK="$_st_awk" DANGLING_REF_SELFTEST_VICTIM="$_st_root/poison/src/lib/beta.spl" DANGLING_REF_SELFTEST_CHILD=1 sh "$self_path" --quiet 2>"$_st_root/poison/stderr.txt" )
     _st_rc=$?
-    chmod 644 "$_st_root/poison/src/lib/beta.spl"
     case "$_st_rc:$_st_out" in
-        2:*ERROR\ --*) : ;;
-        *) echo "selftest: FIXTURE 3 (unreadable file) expected exit 2 and an ERROR verdict, got rc=$_st_rc out='$_st_out'" >&2; _st_fail=$((_st_fail + 1)) ;;
+        2:*ERROR\ --*index\ pass\ exited*)
+            if [ -e "$_st_root/poison/src/lib/beta.spl" ]; then
+                echo "selftest: FIXTURE 3 file did not disappear" >&2
+                _st_fail=$((_st_fail + 1))
+            fi
+            if ! grep 'beta.spl.*No such file or directory' "$_st_root/poison/stderr.txt" >/dev/null; then
+                echo "selftest: FIXTURE 3 missing real awk ENOENT diagnostic" >&2
+                _st_fail=$((_st_fail + 1))
+            fi
+            case "$_st_out" in
+                *PASS*) echo "selftest: FIXTURE 3 emitted PASS" >&2; _st_fail=$((_st_fail + 1)) ;;
+            esac ;;
+        *) echo "selftest: FIXTURE 3 (disappearing file) expected exit 2 and an index-pass ERROR verdict, got rc=$_st_rc out='$_st_out'" >&2; _st_fail=$((_st_fail + 1)) ;;
+    esac
+
+    # Fixture 5 -- symlink class: a symbol declared only in .spl files behind
+    # a tracked mode-120000 symlink to a directory must resolve (bug class 1).
+    selftest_repo "$_st_root/symlink" || { echo "selftest: cannot build fixture 5" >&2; rm -rf "$_st_root"; return 2; }
+    mkdir -p "$_st_root/symlink/ext/linked"
+    printf 'fn symlinked_provider_selftest_xyz():\n    pass\n' > "$_st_root/symlink/ext/linked/mod.spl"
+    printf 'use lib.linked.{symlinked_provider_selftest_xyz}\nfn use_linked():\n    symlinked_provider_selftest_xyz()\n' > "$_st_root/symlink/src/lib/consumer.spl"
+    ( cd "$_st_root/symlink" && git add -A && git commit -qm base ) >/dev/null 2>&1
+    # Plant the symlink as an index entry only: a working-copy symlink is not
+    # portable (core.symlinks=false on Windows), and the checker resolves the
+    # target from the blob content, not from the filesystem.
+    _st_blob=$( cd "$_st_root/symlink" && printf '../../ext/linked' | git hash-object -w --stdin ) || { rm -rf "$_st_root"; return 2; }
+    ( cd "$_st_root/symlink" \
+      && git update-index --add --cacheinfo "120000,$_st_blob,src/lib/linked" \
+      && git commit -qm symlink ) >/dev/null 2>&1
+    _st_out=$( cd "$_st_root/symlink" && DANGLING_REF_SELFTEST_CHILD=1 sh "$self_path" --quiet 2>/dev/null )
+    _st_rc=$?
+    case "$_st_rc:$_st_out" in
+        0:*PASS\ --\ [1-9]*) : ;;
+        *) echo "selftest: FIXTURE 5 (symlinked dir) expected exit 0 and a PASS with a nonzero count, got rc=$_st_rc out='$_st_out'" >&2; _st_fail=$((_st_fail + 1)) ;;
+    esac
+
+    # Fixture 6 -- untracked class: a provider present in the working copy but
+    # not yet committed must still feed the index (bug class 2).
+    selftest_repo "$_st_root/untracked" || { echo "selftest: cannot build fixture 6" >&2; rm -rf "$_st_root"; return 2; }
+    printf 'fn untracked_provider_selftest_xyz():\n    pass\n' > "$_st_root/untracked/src/lib/untracked_prov.spl"
+    printf 'use lib.untracked_prov.{untracked_provider_selftest_xyz}\nfn use_untracked():\n    untracked_provider_selftest_xyz()\n' > "$_st_root/untracked/src/lib/consumer.spl"
+    ( cd "$_st_root/untracked" && git add src/lib/consumer.spl && git commit -qm consumer ) >/dev/null 2>&1
+    _st_out=$( cd "$_st_root/untracked" && DANGLING_REF_SELFTEST_CHILD=1 sh "$self_path" --quiet 2>/dev/null )
+    _st_rc=$?
+    case "$_st_rc:$_st_out" in
+        0:*PASS\ --\ [1-9]*) : ;;
+        *) echo "selftest: FIXTURE 6 (untracked provider) expected exit 0 and a PASS with a nonzero count, got rc=$_st_rc out='$_st_out'" >&2; _st_fail=$((_st_fail + 1)) ;;
     esac
 
     rm -rf "$_st_root"
@@ -201,25 +275,66 @@ done
 if [ "${DANGLING_REF_SELFTEST_CHILD:-0}" != 1 ]; then
     run_selftest || exit 2
 fi
-[ "$selftest_only" -eq 1 ] && { echo "check-dangling-references: selftest 3/3 fixtures correct"; exit 0; }
+[ "$selftest_only" -eq 1 ] && { echo "check-dangling-references: selftest 6/6 fixtures correct"; exit 0; }
 
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
     echo "check-dangling-references: ERROR -- nothing was checked: not inside a git repository"
     exit 2
 }
 cd "$repo_root" || exit 2
+# Physical MSYS/POSIX form of the root: `git rev-parse --show-toplevel`
+# prints a drive-letter path (C:/...) on Windows, which realpath's
+# --relative-to cannot relate to the working directory.
+repo_root_phys=$(pwd -P)
 
 tmp=$(mktemp -d) || exit 2
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 # Vendored / third-party trees are not owned code (CLAUDE.md "Owned-Code Scope").
-git ls-files -- 'src/*.spl' 2>/dev/null \
+#
+# The index file set is tracked, untracked-but-present, and
+# symlink-reachable .spl files (2026-11-25; bug doc
+# doc/08_tracking/bug/dangling_reference_checker_symlink_and_untracked_blind_spots_2026-07-28.md):
+#
+#   * Class 1 (symlinks): `git ls-files` does not descend through tracked
+#     symlinks (mode 120000), and this repo deliberately symlinks whole source
+#     trees into src/ (e.g. src/app/t32_cli ->
+#     ../../examples/10_tooling/trace32_tools/t32_cli). Every .spl behind such
+#     a link was invisible to the index, so each import of it was a false
+#     "declared in no src file". Resolve each tracked 120000 entry's target
+#     from its blob content -- the working-copy link cannot be readlink()ed
+#     where core.symlinks=false -- and index the .spl files under the target.
+#   * Class 2 (untracked): the file SET was tracked-only while file CONTENT
+#     is read from the working copy, so a provider that exists but is not yet
+#     committed (parallel in-flight work) got no vote. Add untracked,
+#     non-ignored .spl files via --others --exclude-standard.
+#
+# Only the INDEX is widened. The default scan-target set below stays the
+# tracked src set, so in-flight or out-of-tree files feed definitions but are
+# never themselves reported on.
+git ls-files -- 'src/*.spl' 2>/dev/null > "$tmp/tracked_raw.txt"
+git ls-files --others --exclude-standard -- 'src/*.spl' 2>/dev/null > "$tmp/untracked_raw.txt"
+
+: > "$tmp/symlink_raw.txt"
+git ls-files -s -- 'src/' 2>/dev/null \
+    | awk -F'\t' '{ split($1, m, " "); if (m[1] == "120000") print m[2] "\t" $2 }' \
+    | while IFS="$(printf '\t')" read -r blob linkpath; do
+        target=$(git cat-file -p "$blob" 2>/dev/null) || continue
+        [ -n "$target" ] || continue
+        resolved=$(realpath -m --relative-to="$repo_root_phys" \
+            "$(dirname -- "$linkpath")/$target" 2>/dev/null) || continue
+        case "$resolved" in ..* | /*) continue ;; esac
+        git ls-files -- "$resolved" "$resolved/*.spl" 2>/dev/null
+    done > "$tmp/symlink_raw.txt"
+
+cat "$tmp/tracked_raw.txt" "$tmp/untracked_raw.txt" "$tmp/symlink_raw.txt" \
+    | grep '\.spl$' \
     | grep -v '^src/compiler_rust/vendor/' \
     | grep -v '^src/runtime/vendor/' \
-    > "$tmp/all.txt"
+    | sort -u > "$tmp/all.txt"
 
 if [ ! -s "$tmp/all.txt" ]; then
-    echo "check-dangling-references: ERROR -- nothing was checked: no tracked src/**/*.spl files found"
+    echo "check-dangling-references: ERROR -- nothing was checked: no src/**/*.spl files found"
     exit 2
 fi
 
@@ -235,7 +350,7 @@ done < "$tmp/all.txt" > "$tmp/present.txt"
 present=$(wc -l < "$tmp/present.txt" | tr -d ' ')
 missing=$((tracked - present))
 if [ "$present" -eq 0 ] || [ $((missing * 10)) -gt "$tracked" ]; then
-    echo "check-dangling-references: ERROR -- nothing was checked: $missing of $tracked tracked src files absent from the working copy -- refusing to index a partial tree"
+    echo "check-dangling-references: ERROR -- nothing was checked: $missing of $tracked indexed src files absent from the working copy -- refusing to index a partial tree"
     exit 2
 fi
 mv "$tmp/present.txt" "$tmp/all.txt"
@@ -254,7 +369,16 @@ if [ "$have_targets" -eq 1 ]; then
         fi
     done < "$tmp/raw_targets.txt"
 else
-    cp "$tmp/all.txt" "$tmp/targets.txt"
+    # Default scan targets: the tracked src set only, as before. Untracked
+    # and symlink-reachable files feed the definition index but are not
+    # themselves scanned, so in-flight or out-of-tree work is never reported
+    # on by this checker.
+    grep -v '^src/compiler_rust/vendor/' "$tmp/tracked_raw.txt" \
+        | grep -v '^src/runtime/vendor/' \
+        | sort -u > "$tmp/tracked_src.txt"
+    while IFS= read -r f; do
+        [ -f "$f" ] && printf '%s\n' "$f"
+    done < "$tmp/tracked_src.txt" > "$tmp/targets.txt"
 fi
 
 if [ ! -s "$tmp/targets.txt" ]; then

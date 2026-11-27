@@ -30,6 +30,7 @@ use compiler.core.ast.{
 }
 use compiler.common.gc_config.{is_nogc_family, is_gc_family, is_noalloc_family, is_allocating_family}
 use compiler.core.interpreter.eval.{eval_warnings}
+use compiler.common.diagnostics.interpreter_policy_ids.{interpreter_policy_tag}
 use compiler.core.interpreter.eval_tables.{
     func_register_return_type, func_table_lookup, func_table_register,
     func_table_register_owned, func_import_binding_register, func_import_binding_lookup,
@@ -57,19 +58,19 @@ fn gc_warning_trace_enabled() -> bool:
         _gc_warning_trace_state = if env_get_opt("SIMPLE_COMPILER_TRACE") == Some("1"): 1 else: 0
     _gc_warning_trace_state == 1
 use compiler.core.interpreter.module_loader_resolve.{resolve_module_path, module_resolve_cache_reset}
-use compiler.core.interpreter.module_loader_lazy.{lazy_parse_enabled, lazy_in_fallback, load_module_lazy}
+use compiler.core.interpreter.module_loader_lazy.{lazy_parse_enabled, lazy_in_fallback, load_module_lazy, lazy_release_module}
 use compiler.core.interpreter.eval_decls.{eval_decl}
 use compiler.core.interpreter.env.{env_lookup}
 
 # AST Declaration Tags (from ast.spl)
-val DECL_FN = 1
+pub val DECL_FN = 1
 val DECL_EXTERN_FN = 2
-val DECL_STRUCT = 3
-val DECL_VAL = 4
-val DECL_VAR = 5
+pub val DECL_STRUCT = 3
+pub val DECL_VAL = 4
+pub val DECL_VAR = 5
 val DECL_USE = 6
 val DECL_EXPORT = 7
-val DECL_ENUM = 8
+pub val DECL_ENUM = 8
 val DECL_IMPL = 9
 val DECL_CLI = 13
 val DECL_AOP_ADVICE = 14
@@ -109,7 +110,7 @@ fn loaded_module_file_paths_snapshot() -> [text]:
     loaded_module_file_paths
 var loaded_module_exports: [[text]] = []
 # Dict for O(1) module loaded check
-var loaded_module_set = {}
+var loaded_module_set: Dict<text, bool> = {}
 # PERF (2026-08-21): file_path -> FIRST index in the parallel arrays, and
 # module_name -> file_path. Without these, `module_find_by_file_path` (reached
 # from `module_alias_loaded` on EVERY import) and `module_get_file_path` walked
@@ -118,8 +119,8 @@ var loaded_module_set = {}
 # when the memoized index names a module that has since been unloaded, so the
 # observable semantics (first *currently loaded* match wins) are unchanged.
 # Pinned by test/01_unit/compiler/frontend/module_registry_lookup_o1_spec.spl.
-var loaded_module_file_index = {}
-var loaded_module_name_to_file = {}
+var loaded_module_file_index: Dict<text, i64> = {}
+var loaded_module_name_to_file: Dict<text, text> = {}
 # Counts elements visited by the linear fallback. A registry that is O(1) per
 # lookup leaves this at 0; the spec asserts on it rather than on wall time.
 var loaded_module_scan_steps: i64 = 0
@@ -133,13 +134,13 @@ pub fn module_registry_scan_steps() -> i64:
 var deferred_module_names: [text] = []
 var deferred_module_files: [text] = []
 var deferred_module_imports: [[text]] = []
-var deferred_module_set = {}
-var deferred_module_seen = {}
+var deferred_module_set: Dict<text, bool> = {}
+var deferred_module_seen: Dict<text, bool> = {}
 
 fn deferred_module_key(name: text, current_file: text) -> text:
     name.len().to_text() + ":" + name + "|" + current_file
 
-fn register_deferred_module(name: text, current_file: text, imported_names: [text]):
+pub fn register_deferred_module(name: text, current_file: text, imported_names: [text]):
     val key = deferred_module_key(name, current_file)
     if deferred_module_set.has(key):
         return
@@ -171,11 +172,13 @@ fn force_deferred_module(name: text, caller_file: text) -> i64:
                 module_bind_exports_for_caller(name, current_file)
             # Remove from deferred set (mark as loaded)
             deferred_module_set[deferred_module_key(name, caller_file)] = false
+            if load_result == 1:
+                lazy_release_module(name)
             return load_result
         i = i + 1
     0
 
-fn try_force_any_deferred_for(symbol_name: text, caller_file: text) -> i64:
+pub fn try_force_any_deferred_for(symbol_name: text, caller_file: text) -> i64:
     # Try each deferred module until symbol is found
     var i: i64 = 0
     for mod_name in deferred_module_names:
@@ -211,7 +214,7 @@ fn try_force_any_deferred_for(symbol_name: text, caller_file: text) -> i64:
         i = i + 1
     0
 
-fn module_loader_init():
+pub fn module_loader_init():
     loaded_module_paths = []
     loaded_module_file_paths = []
     loaded_module_exports = []
@@ -240,7 +243,7 @@ fn module_is_loaded(module_path: text) -> i64:
         return 1
     0
 
-fn module_mark_loaded(module_path: text, file_path: text, exports: [text]):
+pub fn module_mark_loaded(module_path: text, file_path: text, exports: [text]):
     val idx = loaded_module_paths.len()
     loaded_module_paths.push(module_path)
     loaded_module_file_paths.push(file_path)
@@ -291,11 +294,19 @@ fn module_alias_loaded(alias_name: text, file_path: text) -> i64:
     module_mark_loaded(alias_name, file_path, exports)
     1
 
-fn module_bind_exports_for_caller(module_name: text, caller_file: text):
+pub fn module_bind_exports_for_caller(module_name: text, caller_file: text):
     val owner_file = module_get_file_path(module_name)
     val owner_index = module_find_by_file_path(owner_file)
     if owner_index < 0:
         return
+    # Full-module imports expose their source namespace as well as bare
+    # exports. Keep the selected physical owner: a facade can forward members
+    # through its own import bindings without borrowing the flat table's last
+    # definition or replacing the namespace with its final dependency.
+    val module_parts = module_name.split(".")
+    if module_parts.len() > 0:
+        func_module_namespace_register(
+            caller_file, module_parts[module_parts.len() - 1], owner_file)
     for name in loaded_module_exports[owner_index]:
         if name != "" and name != "*" and not name.ends_with(".*"):
             # A broad import must not replace a caller's explicit item binding.
@@ -613,7 +624,7 @@ fn load_module(module_name: text, current_file: text) -> i64:
     _module_load_depth = _module_load_depth - 1
     1
 
-fn load_module_selective_with_unbraced_alias(
+pub fn load_module_selective_with_unbraced_alias(
     module_name: text, imported_names: [text], current_file: text
 ) -> i64:
     # A trailing `as local` on an unbraced path is encoded as one selective
@@ -774,7 +785,7 @@ fn check_gc_family_boundary(importer_path: text, imported_path: text, module_nam
 
     # Rule 1: nogc_* importing gc_* → warn
     if is_nogc_family(importer_family) and is_gc_family(imported_family):
-        val msg = "[gc-warning] GC module '{module_name}' (family: {imported_family}) imported in no-GC context (family: {importer_family})"
+        val msg = interpreter_policy_tag("[gc-warning] GC module '{module_name}' (family: {imported_family}) imported in no-GC context (family: {importer_family})", "gc_family_import")
         eval_warnings.push(msg)
         if gc_warning_trace_enabled():
             print msg
@@ -782,7 +793,7 @@ fn check_gc_family_boundary(importer_path: text, imported_path: text, module_nam
 
     # Rule 2: noalloc importing from allocating family → warn
     if is_noalloc_family(importer_family) and is_allocating_family(imported_family):
-        val msg = "[gc-warning] Allocating module '{module_name}' (family: {imported_family}) imported in no-alloc context (family: {importer_family})"
+        val msg = interpreter_policy_tag("[gc-warning] Allocating module '{module_name}' (family: {imported_family}) imported in no-alloc context (family: {importer_family})", "gc_family_import")
         eval_warnings.push(msg)
         if gc_warning_trace_enabled():
             print msg
@@ -832,9 +843,9 @@ fn use_list_warnings_enabled() -> bool:
     sdoctest:
         expect(use_list_warnings_enabled()).to_equal(true)
     """
-    env_get_opt("SIMPLE_NO_DEPRECATED_WARNINGS") == nil
+    env_get_opt("SIMPLE_NO_DEPRECATED_WARNINGS").is_none()
 
-fn record_module_surface(resolved_path: text, decls: [i64]):
+pub fn record_module_surface(resolved_path: text, decls: [i64]):
     """Record every name a freshly loaded module provides to importers.
 
     Surface = fns ∪ extern fns ∪ structs ∪ classes ∪ vals ∪ vars ∪ lazy vals ∪
@@ -890,6 +901,14 @@ fn record_module_surface(resolved_path: text, decls: [i64]):
                     val provided_item = if alias_at > 0: item.substring(alias_at + 1) else: item
                     if provided_item != "":
                         _module_surface_provided[resolved_path + "|" + provided_item] = true
+                        # Braced `export use M.{a, b}` qualifies items as `M.a` in
+                        # _export_record_reexport_surface; importers name `a` bare,
+                        # so record the trailing identifier too.
+                        val dot_at = provided_item.last_index_of(".")
+                        if dot_at >= 0:
+                            val bare_item = provided_item.substring(dot_at + 1)
+                            if bare_item != "":
+                                _module_surface_provided[resolved_path + "|" + bare_item] = true
         if tag == DECL_USE:
             # Bare `export use {A, B}` parses as a use-decl with an empty module
             # path; those names pull from siblings, so the surface is
@@ -937,7 +956,7 @@ fn warn_unprovided_use_names(module_name: text, resolved_path: text, imported_na
         if _use_warning_emitted.has(warn_key):
             continue
         _use_warning_emitted[warn_key] = true
-        val msg = "[use-warning] '" + source_name + "' is named in `use " + module_name + ".{{...}}` but module '" + resolved_path + "' does not provide it (imported from " + importer + ")"
+        val msg = interpreter_policy_tag("[use-warning] '" + source_name + "' is named in `use " + module_name + ".{{...}}` but module '" + resolved_path + "' does not provide it (imported from " + importer + ")", "use_unprovided_name")
         eval_warnings.push(msg)
         eprint(msg)
 
@@ -962,5 +981,6 @@ fn interp_unload_module(module_name: text) -> i64:
         if same_name or same_file:
             removed = removed + irt_unload_module(loaded_name)
             loaded_module_set[loaded_name] = false
+            lazy_release_module(loaded_name)
         i = i + 1
     removed

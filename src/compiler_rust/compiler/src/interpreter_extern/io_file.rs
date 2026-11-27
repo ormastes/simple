@@ -50,9 +50,133 @@ unsafe fn with_fd<T>(fd: i64, default: T, f: impl FnOnce(&mut File) -> T) -> T {
     out
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 unsafe fn with_fd<T>(_fd: i64, default: T, _f: impl FnOnce(&mut File) -> T) -> T {
     default
+}
+
+/// Windows twin of the unix `with_fd`: borrow the `File` from the raw HANDLE
+/// the Simple side carries, then leak it back with `into_raw_handle` so the
+/// Simple-side owner keeps closing it. Without this, every interpreter-mode
+/// fd operation (read, seek, meta_size, read_all, read_line, close) silently
+/// returned the default on Windows (2026-10-24: seed file_read returned empty
+/// text and close reported false on a valid descriptor).
+#[cfg(windows)]
+unsafe fn with_fd<T>(fd: i64, default: T, f: impl FnOnce(&mut File) -> T) -> T {
+    use std::os::windows::io::{FromRawHandle, IntoRawHandle};
+    let handle = match win_raw_handle(fd) {
+        Some(h) => h,
+        None => return default,
+    };
+    let mut file = File::from_raw_handle(handle);
+    let out = f(&mut file);
+    let _ = file.into_raw_handle();
+    out
+}
+
+/// Map a Simple-side descriptor to a Windows HANDLE. Descriptors 0..2 are the
+/// inherited standard streams, not HANDLE values.
+#[cfg(windows)]
+fn win_raw_handle(fd: i64) -> Option<*mut std::ffi::c_void> {
+    use std::os::windows::io::AsRawHandle;
+    Some(match fd {
+        0 => std::io::stdin().as_raw_handle(),
+        1 => {
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            std::io::stdout().as_raw_handle()
+        }
+        2 => std::io::stderr().as_raw_handle(),
+        _ if fd < 0 => return None,
+        _ => fd as *mut std::ffi::c_void,
+    })
+}
+
+/// Length of the longest prefix of `b` that does not end inside a UTF-8
+/// scalar: a trailing lead byte whose continuation bytes have not all arrived
+/// is held back so a scalar split across two writes is decoded whole.
+#[cfg(any(windows, test))]
+fn complete_utf8_prefix_len(b: &[u8]) -> usize {
+    let n = b.len();
+    for back in 1..=3.min(n) {
+        let i = n - back;
+        let c = b[i];
+        if c & 0xC0 == 0x80 {
+            continue; // continuation byte; keep looking for its lead
+        }
+        let need = match c {
+            0xF0..=0xF4 => 4,
+            0xE0..=0xEF => 3,
+            0xC2..=0xDF => 2,
+            _ => 1,
+        };
+        return if need > back { i } else { n };
+    }
+    n
+}
+
+/// Real-console output. Raw bytes written to a console are decoded in the
+/// console's output code page (CP437 turns UTF-8 into `├⌐τòî`), and changing
+/// the code page outlives the process, so convert per write instead:
+/// UTF-8 -> UTF-16 -> `WriteConsoleW`. Pipes and files are not consoles and
+/// keep raw bytes. Malformed UTF-8 becomes U+FFFD; an incomplete trailing
+/// scalar is held until the next write to the same handle (and dropped if the
+/// process ends first).
+#[cfg(windows)]
+mod console_utf8 {
+    use super::complete_utf8_prefix_len;
+    use std::sync::Mutex;
+    use windows_sys::Win32::System::Console::{GetConsoleMode, WriteConsoleW};
+
+    static PENDING: Mutex<Vec<(isize, Vec<u8>)>> = Mutex::new(Vec::new());
+
+    /// `None`: `handle` is not a console, caller writes the bytes raw.
+    pub fn write(handle: *mut std::ffi::c_void, data: &[u8]) -> Option<bool> {
+        let mut mode = 0u32;
+        if unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
+            return None;
+        }
+        let key = handle as isize;
+        let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+        let mut buf = match pending.iter().position(|(k, _)| *k == key) {
+            Some(i) => pending.swap_remove(i).1,
+            None => Vec::new(),
+        };
+        buf.extend_from_slice(data);
+        let keep = complete_utf8_prefix_len(&buf);
+        if keep < buf.len() {
+            pending.push((key, buf[keep..].to_vec()));
+        }
+        let wide: Vec<u16> = String::from_utf8_lossy(&buf[..keep]).encode_utf16().collect();
+        let mut pos = 0;
+        while pos < wide.len() {
+            let mut end = (pos + 8192).min(wide.len());
+            if end < wide.len() && (0xD800..0xDC00).contains(&wide[end - 1]) {
+                end -= 1; // do not split a surrogate pair
+            }
+            let mut written = 0u32;
+            let ok = unsafe {
+                WriteConsoleW(handle, wide[pos..end].as_ptr().cast(), (end - pos) as u32, &mut written, std::ptr::null())
+            };
+            if ok == 0 || written == 0 {
+                return Some(false);
+            }
+            pos += written as usize;
+        }
+        Some(true)
+    }
+}
+
+/// Write `data` to descriptor `fd` through the console path when it is a real
+/// console. `Some(ok)` when handled, `None` to fall back to the raw write.
+#[cfg(windows)]
+fn console_write(fd: i64, data: &[u8]) -> Option<bool> {
+    let handle = win_raw_handle(fd)?;
+    console_utf8::write(handle, data)
+}
+
+#[cfg(not(windows))]
+fn console_write(_fd: i64, _data: &[u8]) -> Option<bool> {
+    None
 }
 
 fn extract_path(args: &[Value], idx: usize) -> Result<String, CompileError> {
@@ -174,10 +298,50 @@ pub fn rt_io_file_open(args: &[Value]) -> Result<Value, CompileError> {
             Err(_) => Ok(Value::Int(-1)),
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::IntoRawHandle;
+        match opts.open(&path) {
+            Ok(file) => Ok(Value::Int(file.into_raw_handle() as i64)),
+            Err(_) => Ok(Value::Int(-1)),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         Ok(Value::Int(-1))
     }
+}
+
+/// Two-argument open twins `rt_io_file_open_{read,write,append}(path_ptr,
+/// path_len)`: `std.nogc_sync_mut.sffi.fs` calls these with
+/// `rt_string_data(path)` / `rt_string_len(path)` (the three-argument form is
+/// mis-passed by seed-produced candidates). The interpreter had no handler, so
+/// every interpreted file open died with "unknown extern function". The
+/// pointer is the interpreter's borrowed `rt_string_data` buffer, valid for
+/// this call.
+fn open_twin(args: &[Value], symbol: &str, mode: i64) -> Result<Value, CompileError> {
+    let ptr = extract_i64(args, 0, symbol)?;
+    let len = extract_i64(args, 1, symbol)?;
+    if ptr == 0 || len <= 0 {
+        return Ok(Value::Int(-1));
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as usize as *const u8, len as usize) };
+    let Ok(path) = std::str::from_utf8(bytes) else {
+        return Ok(Value::Int(-1));
+    };
+    rt_io_file_open(&[Value::text(path.to_string()), Value::Int(mode)])
+}
+
+pub fn rt_io_file_open_read(args: &[Value]) -> Result<Value, CompileError> {
+    open_twin(args, "rt_io_file_open_read", 0)
+}
+
+pub fn rt_io_file_open_write(args: &[Value]) -> Result<Value, CompileError> {
+    open_twin(args, "rt_io_file_open_write", 1)
+}
+
+pub fn rt_io_file_open_append(args: &[Value]) -> Result<Value, CompileError> {
+    open_twin(args, "rt_io_file_open_append", 3)
 }
 
 /// Read up to `size` bytes from `fd`. Returns a bare `[u8]`, empty at EOF or
@@ -255,6 +419,9 @@ pub fn rt_io_file_read_line(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_io_file_write(args: &[Value]) -> Result<Value, CompileError> {
     let fd = extract_fd(args, 0, "rt_io_file_write")?;
     let data = extract_write_data(args, "rt_io_file_write")?;
+    if let Some(ok) = console_write(fd, &data) {
+        return Ok(Value::Int(if ok { data.len() as i64 } else { -1 }));
+    }
     let n = unsafe {
         with_fd(fd, -1i64, |file| match file.write(&data) {
             Ok(n) => n as i64,
@@ -268,6 +435,9 @@ pub fn rt_io_file_write(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_io_file_write_all(args: &[Value]) -> Result<Value, CompileError> {
     let fd = extract_fd(args, 0, "rt_io_file_write_all")?;
     let data = extract_write_data(args, "rt_io_file_write_all")?;
+    if let Some(ok) = console_write(fd, &data) {
+        return Ok(Value::Bool(ok));
+    }
     let ok = unsafe { with_fd(fd, false, |file| file.write_all(&data).is_ok()) };
     Ok(Value::Bool(ok))
 }
@@ -320,13 +490,49 @@ pub fn rt_io_file_close(args: &[Value]) -> Result<Value, CompileError> {
             return Ok(Value::Bool(false));
         }
         let file = unsafe { File::from_raw_fd(fd as i32) };
-        let ok = file.sync_all().is_ok();
+        // fsync fails with EINVAL on descriptors that cannot be synchronized
+        // (procfs, sysfs, pipes): POSIX defines that as "nothing to sync", not
+        // a close failure. Treating it as failure made every `file_read` of
+        // /proc/meminfo return "" (slang's memory gate then refused all loads).
+        // The C twin (runtime_native.c rt_io_file_close) never fsyncs at all.
+        let ok = match file.sync_all() {
+            Ok(()) => true,
+            Err(error) => error.raw_os_error() == Some(libc::EINVAL),
+        };
         drop(file);
         Ok(Value::Bool(ok))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        if fd <= 0 {
+            return Ok(Value::Bool(false));
+        }
+        use std::os::windows::io::FromRawHandle;
+        let file = unsafe { File::from_raw_handle(fd as *mut std::ffi::c_void) };
+        // FlushFileBuffers on a handle opened without write access fails with
+        // ACCESS_DENIED, so every read-only open (every `file_read`) used to
+        // report "file text close failed" and `file_read` returned nothing.
+        // A read-only handle has nothing to flush: that error is a success.
+        let ok = match file.sync_all() {
+            Ok(()) => true,
+            Err(error) => error.kind() == std::io::ErrorKind::PermissionDenied,
+        };
+        drop(file);
+        Ok(Value::Bool(ok))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         Ok(Value::Bool(false))
+    }
+}
+
+/// i64 twin of `rt_io_file_close` (`fd -> 0/1`), the form `std` calls
+/// (`sffi/fs.spl` `io_file_close`). Without it every interpreter-mode
+/// `file_read` failed with `unknown extern function: rt_io_file_close_value`.
+pub fn rt_io_file_close_value(args: &[Value]) -> Result<Value, CompileError> {
+    match rt_io_file_close(args)? {
+        Value::Bool(true) => Ok(Value::Int(1)),
+        _ => Ok(Value::Int(0)),
     }
 }
 
@@ -422,6 +628,32 @@ pub fn rt_io_file_exists(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_io_file_delete(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     Ok(Value::Bool(std::fs::remove_file(&path).is_ok()))
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod close_value_tests {
+    use super::*;
+
+    #[test]
+    fn close_value_reports_one_for_an_open_fd() {
+        let path = std::env::temp_dir().join(format!("rt_io_close_value_{}", std::process::id()));
+        let path = path.to_string_lossy().to_string();
+        let fd = rt_io_file_open(&[Value::text(path.clone()), Value::Int(1)]).unwrap();
+        assert!(matches!(fd, Value::Int(n) if n > 0));
+        assert_eq!(rt_io_file_close_value(&[fd]).unwrap(), Value::Int(1));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // procfs rejects fsync with EINVAL; a read of /proc/meminfo must still
+    // close cleanly or `file_read` returns "" and slang's memory gate refuses
+    // every model load on Linux.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn close_value_reports_one_for_a_procfs_fd() {
+        let fd = rt_io_file_open(&[Value::text("/proc/self/status".to_string()), Value::Int(0)]).unwrap();
+        assert!(matches!(fd, Value::Int(n) if n >= 0));
+        assert_eq!(rt_io_file_close_value(&[fd]).unwrap(), Value::Int(1));
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -565,5 +797,64 @@ mod bytes_basis_write_tests {
         drop(packed);
         rt_io_file_close(&[Value::Int(fd)]).unwrap();
         assert_eq!(std::fs::read(path).unwrap(), b"abc");
+    }
+}
+
+#[cfg(test)]
+mod open_twin_tests {
+    use super::*;
+
+    #[test]
+    fn two_argument_open_twins_open_by_pointer_and_length() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("simple_open_twin_{}.txt", std::process::id()));
+        let path_text = path.to_string_lossy().to_string();
+        let ptr = Value::Int(path_text.as_ptr() as i64);
+        let len = Value::Int(path_text.len() as i64);
+        let fd = rt_io_file_open_write(&[ptr.clone(), len.clone()]).unwrap();
+        assert!(matches!(fd, Value::Int(n) if n >= 0), "write twin opens: {fd:?}");
+        rt_io_file_close(&[fd]).unwrap();
+        let fd = rt_io_file_open_read(&[ptr.clone(), len.clone()]).unwrap();
+        assert!(matches!(fd, Value::Int(n) if n >= 0), "read twin opens: {fd:?}");
+        rt_io_file_close(&[fd]).unwrap();
+        let fd = rt_io_file_open_append(&[ptr, len]).unwrap();
+        assert!(matches!(fd, Value::Int(n) if n >= 0), "append twin opens: {fd:?}");
+        rt_io_file_close(&[fd]).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(rt_io_file_open_read(&[Value::Int(0), Value::Int(3)]).unwrap(), Value::Int(-1));
+    }
+}
+
+#[cfg(test)]
+mod close_read_only_tests {
+    use super::*;
+
+    #[test]
+    fn closing_a_read_only_open_reports_success() {
+        let path = std::env::temp_dir().join(format!("simple_close_ro_{}.txt", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        let fd = rt_io_file_open(&[Value::text(path.to_string_lossy().to_string()), Value::Int(0)]).unwrap();
+        assert!(matches!(fd, Value::Int(n) if n > 0), "read-only open: {fd:?}");
+        assert_eq!(rt_io_file_close_value(&[fd]).unwrap(), Value::Int(1));
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod console_utf8_split_tests {
+    use super::complete_utf8_prefix_len;
+
+    #[test]
+    fn holds_back_incomplete_trailing_scalar() {
+        let s = "a\u{00E9}\u{754C}\u{1F600}".as_bytes();
+        assert_eq!(complete_utf8_prefix_len(s), s.len());
+        // Every cut inside a scalar holds back exactly that scalar's bytes.
+        assert_eq!(complete_utf8_prefix_len(&s[..2]), 1); // 'a' + lead of U+00E9
+        assert_eq!(complete_utf8_prefix_len(&s[..4]), 3); // + 1 of 3 bytes of U+754C
+        assert_eq!(complete_utf8_prefix_len(&s[..5]), 3); // + 2 of 3 bytes
+        assert_eq!(complete_utf8_prefix_len(&s[..7]), 6); // + 1 of 4 bytes of U+1F600
+        assert_eq!(complete_utf8_prefix_len(&s[..9]), 6); // + 3 of 4 bytes
+        assert_eq!(complete_utf8_prefix_len(b"plain ascii"), 11);
+        assert_eq!(complete_utf8_prefix_len(b""), 0);
     }
 }

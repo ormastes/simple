@@ -1,0 +1,35 @@
+# Bug: compiler_interpreter_integration_real_gaps_found_2026-09-06 (gap 1)
+#
+# Two `impl T:` blocks defining the same method with the same signature used
+# to compile and run silently (the call bound to the last definition). It is a
+# compile-time error now, in the interpreter AND the default (JIT) engine.
+# Needs the fixed seed: SIMPLE_BINARY=<seed built from this tree>.
+use std.spec.{describe, it, expect}
+use std.io_runtime.{write_file, file_exists, env_get, env_set_process}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use app.io.process_ops.{process_run_timeout}
+
+fn binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "": return env_bin
+    if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+
+val DUP = "class Box:\n    v: i64\nimpl Box:\n    fn get() -> i64:\n        self.v\nimpl Box:\n    fn get() -> i64:\n        self.v + 1\nfn main():\n    print Box(v: 10).get()\nmain()\n"
+
+fn run_src(tag: text, src: text, mode: text) -> (text, i64):
+    val file = get_temp_dir().replace("\\", "/") + "/impl_dup_" + tag + ".spl"
+    val _w = write_file(file, src)
+    val _e = env_set_process("SIMPLE_EXECUTION_MODE", mode)
+    val (out, err, rc) = process_run_timeout(binary(), [file], 300000)
+    val _r = env_set_process("SIMPLE_EXECUTION_MODE", "")
+    (out + err, rc)
+
+describe "duplicate impl methods":
+    it "is an error in the interpreter":
+        val (text_out, rc) = run_src("interp", DUP, "interpreter")
+        expect(rc != 0).to_equal(true)
+        expect(text_out.contains("duplicate method `get`")).to_equal(true)
+    it "is an error in the default engine":
+        val (text_out, rc) = run_src("jit", DUP, "jit")
+        expect(rc != 0).to_equal(true)
+        expect(text_out.contains("duplicate method `get`")).to_equal(true)

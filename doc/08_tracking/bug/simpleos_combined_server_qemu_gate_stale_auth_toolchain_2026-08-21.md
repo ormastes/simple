@@ -13,3 +13,10 @@ injecting an ephemeral authorized public key through the configured credential
 owner, removing password/`sshpass` use, and adding live HTTP H1 rejection plus
 SSH auth/channel/SFTP transcript checks. Until then this wrapper is diagnostic,
 not production protocol PASS evidence.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+SimpleOS release/admission/artifact-blocked item per in-file status; requires the SimpleOS target-artifact pipeline and owner lanes this Windows seed lane cannot run. No change from this lane.

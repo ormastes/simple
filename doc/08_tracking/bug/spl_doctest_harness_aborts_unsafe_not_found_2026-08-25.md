@@ -79,3 +79,10 @@ the touched directories shows only `http_server/static_file.spl` and
 `io/metal_ptr.spl` differing — neither is a file this work edits — so the
 transferred verification is clean. That caveat is stated rather than papered
 over.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+OPEN HIGH; every --spl-doctest run at the filed tip aborted on `function unsafe not found`. Quick check: at release/1.0.0 tip the doctest runner is exercised by green specs in test/01_unit (e.g. quality_entry_self_hosted_launcher 5/5 on this lane), so the filed mass-abort condition appears resolved; the wildcard/class residue records track the remaining doctest defects. Owner: spl-doctest lane for a fresh verdict-line audit.

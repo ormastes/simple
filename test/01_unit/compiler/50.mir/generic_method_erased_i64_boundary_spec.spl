@@ -1,0 +1,229 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, mir, generics
+#
+# Fixed 2026-11-26: Store<T> Result<T, E> / T? returns and Box<T>.get() -> T
+# now instantiate receiver type arguments at the call/match site so the caller
+# does not double-decode (>> 3 / >> 6), and AttributeStoreV1<T> stores `T?`
+# uniformly across owner/slots/hash (`Dict<i64, T?>`) so all four placements
+# agree on raw `i64` payloads (AttrI64StoreV1 @workaround retired).
+#
+# Erased <-> concrete i64 boundary of a generic-CLASS method
+# (doc/08_tracking/bug/native_erased_generic_optional_return_2026-11-15.md,
+# native_generic_payload_encoding_2026-11-15.md M2 "known_wrong" rows).
+#
+# A `Dict<K, T>` holds TAGGED words: concrete code boxes on write
+# (rt_value_int_wide) and an erased method body decodes on read
+# (rt_value_as_int_wide). The method's own write `self.hash[k] = value`
+# must therefore store the same tagged word, otherwise the read divides the
+# raw value by 8 (9000000000 -> 1125000000, 7 -> 0).
+#
+# Each example runs HIR -> 50.mir -> MirToLlvm in-process and reads the
+# LLVM text of ONE function.
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+val MODULE = "gmeb_probe"
+
+val PRELUDE = "class Store<T>:\n" +
+    "    hash: Dict<i64, T>\n" +
+    "\n" +
+    "impl Store<T>:\n" +
+    "    fn get(node: i64) -> Result<T, text>:\n" +
+    "        if self.hash.contains_key(node):\n" +
+    "            return Ok(self.hash[node])\n" +
+    "        Err(\"absent\")\n" +
+    "\n" +
+    "    me set(node: i64, value: T):\n" +
+    "        self.hash[node] = value\n" +
+    "\n"
+
+struct Shaped:
+    ir: text
+    errors: [text]
+
+fn shape_src(src: text, file: text) -> Shaped:
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(parse_full_frontend(src, file, MODULE, Logger(level: 0)))
+    var errors: [text] = []
+    for e in hl.errors:
+        errors.push("hir: " + e.message)
+    val m: HirModule = hir
+    var lowering = MirLowering.new_for_target(m.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(m)
+    for e in lowering.errors:
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        errors.push("mir: " + e.message)
+    val ir = MirToLlvm.create(MODULE, CodegenTarget.X86_64, nil).translate_module(mir)
+    Shaped(ir: ir, errors: errors)
+
+fn shape(body: text) -> Shaped:
+    shape_src(PRELUDE + body, "testdata/gmeb_probe.spl")
+
+fn function_body(ir: text, fn_name: text) -> [text]:
+    var out: [text] = []
+    var inside = false
+    for line in ir.split("\n"):
+        val l: text = line
+        if l.starts_with("define ") and (l.contains("." + fn_name + "(") or l.contains("@" + fn_name + "(")):
+            inside = true
+        if inside:
+            out = out.push(l)
+            if l.len() == 1:
+                inside = false
+    out
+
+fn count_calls(lines: [text], callee: text) -> i64:
+    var n = 0
+    for line in lines:
+        val l: text = line
+        if l.contains("call ") and l.contains("@" + callee + "("):
+            n = n + 1
+    n
+
+fn dump(s: Shaped, fn_name: text):
+    if (env_get("GMEB_DUMP") ?? "") == "1":
+        print "---- {fn_name}"
+        for line in function_body(s.ir, fn_name):
+            print line
+
+val PROBE = "fn probe(v: i64) -> i64:\n" +
+    "    val h: Dict<i64, i64> = {}\n" +
+    "    var s = Store(hash: h)\n" +
+    "    s.set(1, v)\n" +
+    "    match s.get(1):\n" +
+    "        case Ok(x): x\n" +
+    "        case Err(_): -1\n"
+
+describe "generic-class method: erased <-> concrete i64 Dict<K, T> boundary":
+    it "lowers without diagnostics":
+        val s = shape(PROBE)
+        expect(s.errors.len()).to_equal(0)
+
+    it "the erased read decodes the stored word exactly once":
+        val s = shape(PROBE)
+        dump(s, "Store.get")
+        expect(count_calls(function_body(s.ir, "Store.get"), "rt_value_as_int_wide")).to_equal(1)
+
+    it "the write path encodes the KEY and the VALUE (method body or its caller)":
+        # Measured 2026-11-17 (bin/simple.exe 11-17 07:54): Store.set emits ONE
+        # rt_value_int_wide -- for the key -- and stores the raw `value`
+        # param (`rt_dict_set(h, key_enc, %value)`); probe passes `v` raw.
+        # Expected 2 encodes on the write path (key + value).
+        val s = shape(PROBE)
+        dump(s, "Store.set")
+        dump(s, "probe")
+        val encodes = count_calls(function_body(s.ir, "Store.set"), "rt_value_int_wide") +
+            count_calls(function_body(s.ir, "probe"), "rt_value_int_wide")
+        expect(encodes).to_equal(2)
+
+    it "caller does not double-decode Result<T, text> Ok payload on Store<i64>":
+        val typed_probe = "fn probe(v: i64) -> i64:\n" +
+            "    val h: Dict<i64, i64> = {}\n" +
+            "    var s = Store(hash: h)\n" +
+            "    s.set(1, v)\n" +
+            "    match s.get(1):\n" +
+            "        case Ok(x):\n" +
+            "            val typed_x: i64 = x\n" +
+            "            typed_x\n" +
+            "        case Err(_): -1\n"
+        val s = shape(typed_probe)
+        expect(s.errors.len()).to_equal(0)
+        expect(count_calls(function_body(s.ir, "probe"), "rt_value_int_wide")).to_equal(1)
+        expect(count_calls(function_body(s.ir, "probe"), "rt_value_as_int_wide")).to_equal(0)
+
+    it "a T? Optional return (Store.get_opt) keeps caller encode and single decode":
+        val opt_src = "class OptStore<T>:\n" +
+            "    hash: Dict<i64, T>\n" +
+            "\n" +
+            "impl OptStore<T>:\n" +
+            "    fn get_opt(node: i64) -> T?:\n" +
+            "        self.hash.get(node)\n" +
+            "\n" +
+            "    me set(node: i64, value: T):\n" +
+            "        self.hash[node] = value\n" +
+            "\n" +
+            "fn probe_opt(v: i64) -> i64:\n" +
+            "    val h: Dict<i64, i64> = {}\n" +
+            "    var s = OptStore(hash: h)\n" +
+            "    s.set(1, v)\n" +
+            "    match s.get_opt(1):\n" +
+            "        case Some(x):\n" +
+            "            val typed_x: i64 = x\n" +
+            "            typed_x\n" +
+            "        case nil: -1\n"
+        val s = shape_src(opt_src, "testdata/gmeb_opt_probe.spl")
+        expect(s.errors.len()).to_equal(0)
+        expect(count_calls(function_body(s.ir, "probe_opt"), "rt_value_int_wide")).to_equal(1)
+        expect(count_calls(function_body(s.ir, "probe_opt"), "rt_value_as_int_wide")).to_equal(0)
+
+    it "a non-Dict Box<i64>.get() -> T caller keeps raw field word without rt_value_as_int_wide":
+        val box_src = "class Box<T>:\n" +
+            "    value: T\n" +
+            "\n" +
+            "impl Box<T>:\n" +
+            "    fn get() -> T:\n" +
+            "        self.value\n" +
+            "\n" +
+            "fn probe_box(v: i64) -> i64:\n" +
+            "    val b = Box(value: v)\n" +
+            "    val x: i64 = b.get()\n" +
+            "    x\n"
+        val s = shape_src(box_src, "testdata/gmeb_box_probe.spl")
+        expect(s.errors.len()).to_equal(0)
+        expect(count_calls(function_body(s.ir, "probe_box"), "rt_value_int_wide")).to_equal(0)
+        expect(count_calls(function_body(s.ir, "probe_box"), "rt_value_as_int_wide")).to_equal(0)
+
+    it "mixed slots [T?] + Dict<i64, T?> store keeps raw i64 caller/callee ABI without >> 3 or << 3":
+        val mixed_src = "class MixedAttrStore<T>:\n" +
+            "    slots: [T?]\n" +
+            "    hash: Dict<i64, T?>\n" +
+            "\n" +
+            "impl MixedAttrStore<T>:\n" +
+            "    me set(node: i64, use_hash: bool, value: T):\n" +
+            "        if use_hash:\n" +
+            "            self.hash[node] = Some(value)\n" +
+            "        else:\n" +
+            "            while self.slots.len() <= node:\n" +
+            "                self.slots = self.slots.push(None)\n" +
+            "            self.slots[node] = Some(value)\n" +
+            "\n" +
+            "    fn get(node: i64, use_hash: bool) -> Result<T, text>:\n" +
+            "        if use_hash:\n" +
+            "            if self.hash.contains_key(node):\n" +
+            "                match self.hash[node]:\n" +
+            "                    case Some(v): return Ok(v)\n" +
+            "                    case None: pass\n" +
+            "        elif node >= 0 and node < self.slots.len():\n" +
+            "            match self.slots[node]:\n" +
+            "                case Some(v): return Ok(v)\n" +
+            "                case None: pass\n" +
+            "        Err(\"absent\")\n" +
+            "\n" +
+            "fn probe_mixed(v: i64) -> i64:\n" +
+            "    val h: Dict<i64, i64?> = {}\n" +
+            "    val sl: [i64?] = []\n" +
+            "    var s = MixedAttrStore(slots: sl, hash: h)\n" +
+            "    s.set(1, true, v)\n" +
+            "    s.set(2, false, v)\n" +
+            "    val a = match s.get(1, true):\n" +
+            "        case Ok(x): x\n" +
+            "        case Err(_): -1\n" +
+            "    val b = match s.get(2, false):\n" +
+            "        case Ok(y): y\n" +
+            "        case Err(_): -1\n" +
+            "    a + b\n"
+        val s = shape_src(mixed_src, "testdata/gmeb_mixed_attr_probe.spl")
+        expect(s.errors.len()).to_equal(0)
+        expect(count_calls(function_body(s.ir, "probe_mixed"), "rt_value_int_wide")).to_equal(0)
+        expect(count_calls(function_body(s.ir, "probe_mixed"), "rt_value_as_int_wide")).to_equal(0)
+        expect(count_calls(function_body(s.ir, "MixedAttrStore.get"), "rt_value_as_int_wide")).to_equal(0)

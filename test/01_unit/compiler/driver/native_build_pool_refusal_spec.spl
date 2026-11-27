@@ -1,0 +1,135 @@
+use std.spec
+use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1, file_worker_pool_mir_price_kb_v1, file_worker_pool_mir_host_scaled_price_kb_v1}
+use app.cli.shard_mem_clamp.{SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1, SHARD_FLOOR_UNKNOWN_PARENT_KB_V1, shard_threads_cap_for, shard_threads_guarded_floor_v1}
+
+describe "native-build per-file pool refusal is fail-closed":
+    val hir_kb = 9000000
+    val mir_kb = 9000000
+
+    it "admits when 2 or more workers fit":
+        expect(file_worker_pool_refusal_v1(2, 2, 33554432, hir_kb, mir_kb)).to_equal("")
+        expect(file_worker_pool_refusal_v1(8, 3, 99999999, hir_kb, mir_kb)).to_equal("")
+
+    it "low free memory is an error, not a skip or fallback":
+        val msg = file_worker_pool_refusal_v1(1, 0, 1048576, hir_kb, mir_kb)
+        expect(msg.starts_with("error:")).to_be_true()
+        expect(msg.contains("Free memory=1048576 kB")).to_be_true()
+        expect(msg.contains("per-worker budget=")).to_be_true()
+        expect(msg.contains("SIMPLE_MIR_SHARD_WORKER_KB")).to_be_true()
+        expect(msg.contains("SIMPLE_HIR_SHARD_WORKER_KB")).to_be_true()
+        expect(msg.contains("No fallback")).to_be_true()
+
+    it "refuses when either phase admits fewer than 2 workers":
+        expect(file_worker_pool_refusal_v1(4, 1, 33554432, hir_kb, mir_kb) != "").to_be_true()
+        expect(file_worker_pool_refusal_v1(0, 4, 33554432, hir_kb, mir_kb) != "").to_be_true()
+
+    it "reports the needed free amount for two workers":
+        val msg = file_worker_pool_refusal_v1(0, 0, 0, 6000000, 9000000)
+        expect(msg.contains("need >= 30000000 kB free")).to_be_true()
+
+    it "names HIR sharding disabled, not memory":
+        val msg = file_worker_pool_refusal_v1(0, 4, 33554432, hir_kb, mir_kb, 8, "SIMPLE_HIR_CACHE=0")
+        expect(msg.contains("SIMPLE_HIR_CACHE=0")).to_be_true()
+        expect(msg.contains("not enough free memory")).to_be_false()
+
+    it "names a single requested worker, not memory":
+        val msg = file_worker_pool_refusal_v1(4, 0, 33554432, hir_kb, mir_kb, 1, "")
+        expect(msg.contains("only 1 worker was requested")).to_be_true()
+        expect(msg.contains("not enough free memory")).to_be_false()
+
+    it "names memory only when threads and HIR sharding allow 2":
+        val msg = file_worker_pool_refusal_v1(1, 1, 1048576, hir_kb, mir_kb, 8, "")
+        expect(msg.contains("not enough free memory")).to_be_true()
+
+    it "cites the tree-budget clamp only when the clamp was the limiter":
+        val limited = file_worker_pool_refusal_v1(1, 1, 1048576, hir_kb, mir_kb, 8, "", true)
+        expect(limited.contains("tree-budget clamp")).to_be_true()
+        val plain = file_worker_pool_refusal_v1(1, 1, 1048576, hir_kb, mir_kb, 8, "", false)
+        expect(plain.contains("tree-budget clamp")).to_be_false()
+        expect(plain.contains("not enough free memory")).to_be_true()
+
+# Honest MIR price (2026-11-13). Run 11 (tree-rss-policy.shs, 121 GiB aarch64,
+# compiler_cli_build) sampled two MIR shard workers at 24.0 and 25.2 GiB each:
+# a MIR shard worker holds the full HIR, so the old 9 GB default admitted a
+# second worker the host could not hold. SHARD_MIR_WORKER_KB_V1 is the single
+# owner of the price; for a floored plan the bootstrap shell publishes the same
+# figure to pinned stage binaries that predate it (BOOTSTRAP_TREE_RSS_FLOOR_MIR_WORKER_KB).
+describe "per-file pool MIR admission is priced at the measured worker peak":
+    val mir_kb = SHARD_MIR_WORKER_KB_V1
+    val floor_kb = 2 * SHARD_MIR_WORKER_KB_V1 + SHARD_FLOOR_UNKNOWN_PARENT_KB_V1
+    val avail_70_gb = 73400320
+    val headroom_4_gb = 4194304
+
+    it "MIR default carries the run-11 measured 25.2 GiB peak":
+        expect(mir_kb).to_equal(26424115)
+
+    it "the old underpriced default no longer admits 2 MIR workers on ~31 GiB free":
+        expect(shard_threads_cap_for(2, mir_kb, 32505856) <= 1).to_be_true()
+
+    it "enough memory for 2 at the honest price admits 2":
+        # 60% rule: 2 x price / 0.6 free.
+        expect(shard_threads_cap_for(2, mir_kb, 88080384)).to_equal(2)
+        # Guarded floor: 2 x price + coordinator base inside an enforcing tree cap.
+        expect(shard_threads_guarded_floor_v1(2, 1, floor_kb, avail_70_gb, headroom_4_gb, mir_kb, -1, "enforce")).to_equal(2)
+        expect(file_worker_pool_refusal_v1(2, 2, 88080384, SHARD_HIR_WORKER_KB_V1, mir_kb)).to_equal("")
+
+    it "enough for 1 only refuses and names the honest numbers":
+        # 36 GiB tree cap: the 9 GB price floored this to 2; two 25.2 GiB workers do not fit.
+        expect(shard_threads_guarded_floor_v1(2, 1, 37748736, avail_70_gb, headroom_4_gb, mir_kb, -1, "enforce")).to_equal(1)
+        val msg = file_worker_pool_refusal_v1(1, 1, 32505856, SHARD_HIR_WORKER_KB_V1, mir_kb, 8, "")
+        expect(msg.starts_with("error:")).to_be_true()
+        expect(msg.contains("per-worker budget=26424115 kB")).to_be_true()
+        expect(msg.contains("need >= 88080384 kB free")).to_be_true()
+        expect(msg.contains("2 x 26424115 kB + 4194304 kB coordinator = 57042534 kB")).to_be_true()
+
+    it "guarded floor boundary: one kB below two honest workers + coordinator stays at 1":
+        expect(shard_threads_guarded_floor_v1(2, 1, floor_kb - 1, avail_70_gb, headroom_4_gb, mir_kb, -1, "enforce")).to_equal(1)
+        expect(shard_threads_guarded_floor_v1(2, 1, floor_kb, avail_70_gb, headroom_4_gb, mir_kb, -1, "enforce")).to_equal(2)
+
+    it "the bootstrap shell mirror of the price equals the compiler default":
+        val policy = file_read("scripts/bootstrap/lib/tree-rss-policy.shs")
+        expect(policy.contains("\nBOOTSTRAP_TREE_RSS_FLOOR_MIR_WORKER_KB={mir_kb}\n")).to_be_true()
+
+# Closure-scaled MIR price (coordinator decision on 5159e54d554): a MIR shard
+# worker holds the full program HIR, which grows with the closure, so a flat
+# 25.2 GiB price would need 88 GB free for two workers on a 50-module program.
+# price = clamp(per_module x modules, 9 GB floor, 26424115 kB ceiling),
+# calibrated so the run-11 Stage 3 closure (~1650 modules) prices to the
+# ceiling and the ~3134-module full CLI stays there; unknown size (-1) is the
+# ceiling (fail closed). An explicit SIMPLE_MIR_SHARD_WORKER_KB still wins
+# (shard_worker_budget_kb precedence, unchanged).
+describe "MIR worker price scales with the closure a worker holds":
+    val ceiling = SHARD_MIR_WORKER_KB_V1
+
+    it "a 50-module closure keeps the 9 GB floor and admits 2 workers on 40 GB free":
+        expect(file_worker_pool_mir_price_kb_v1(50)).to_equal(9000000)
+        expect(shard_threads_cap_for(2, file_worker_pool_mir_price_kb_v1(50), 41943040)).to_equal(2)
+
+    it "the run-11 Stage 3 closure (1650 modules) prices to the honest 25.2 GiB figure":
+        expect(file_worker_pool_mir_price_kb_v1(1650)).to_equal(26424115)
+        expect(shard_threads_cap_for(2, file_worker_pool_mir_price_kb_v1(1650), 32505856) <= 1).to_be_true()
+
+    it "ceiling boundary: 1649 modules is below it, the 3134-module full CLI stays at it":
+        expect(file_worker_pool_mir_price_kb_v1(1649) < ceiling).to_be_true()
+        expect(file_worker_pool_mir_price_kb_v1(1649) > 9000000).to_be_true()
+        expect(file_worker_pool_mir_price_kb_v1(3134)).to_equal(ceiling)
+
+    it "unknown closure size is priced at the ceiling, an empty one at the floor":
+        expect(file_worker_pool_mir_price_kb_v1(-1)).to_equal(ceiling)
+        expect(file_worker_pool_mir_price_kb_v1(0)).to_equal(9000000)
+
+    it "price grows monotonically between floor and ceiling":
+        expect(file_worker_pool_mir_price_kb_v1(400) < file_worker_pool_mir_price_kb_v1(1000)).to_be_true()
+        expect(file_worker_pool_mir_price_kb_v1(1000) < file_worker_pool_mir_price_kb_v1(1650)).to_be_true()
+
+    it "scales host worker_mem_mib with closure size while honoring tight host limits":
+        val host_26g = 27262976
+        val small_group = file_worker_pool_mir_host_scaled_price_kb_v1(394, host_26g)
+        val mid_group = file_worker_pool_mir_host_scaled_price_kb_v1(1000, host_26g)
+        expect(file_worker_pool_mir_host_scaled_price_kb_v1(-1, host_26g)).to_equal(host_26g)
+        expect(file_worker_pool_mir_host_scaled_price_kb_v1(1650, host_26g)).to_equal(host_26g)
+        expect(small_group).to_equal(9285714)
+        expect(small_group < 10000000).to_be_true()
+        expect(small_group < mid_group).to_be_true()
+        expect(mid_group < host_26g).to_be_true()
+        expect(file_worker_pool_mir_host_scaled_price_kb_v1(50, 1228800)).to_equal(1228800)

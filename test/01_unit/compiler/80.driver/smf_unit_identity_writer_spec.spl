@@ -1,0 +1,59 @@
+# Writer side of the SMF unit identity record (lane lu4). The AOT SMF output
+# emits the identity record through smf_unit_identity_bytes_v1; a fresh SMF
+# written that way must be admitted by smf_cached_unit_identity_admit against
+# the manifest row for the same unit, and a mismatched row must be refused.
+# @req REQ-LU2-LOADER-IDENTITY
+use std.spec.step
+
+use compiler.driver.smf_writer.{SmfBuildOptions, Target, generate_smf_with_options}
+use compiler.driver.cache.action_key.{interface_digest_of_source}
+use compiler.driver.driver_aot_smf_output.{smf_unit_identity_bytes_v1}
+use compiler.driver.watcher.smf_manifest.{SmfManifestEntry, smf_manifest_entry_new_with_iface}
+use compiler.driver.driver_api_interpret.{smf_cached_unit_identity_admit}
+
+val SRC = "fn add(a: i64, b: i64) -> i64:\n    a + b\n"
+val TRIPLE = "x86_64-unknown-linux-gnu"
+
+fn written_image() -> [u8]:
+    var opts = SmfBuildOptions.create(Target.host())
+    opts.unit_identity_bytes = smf_unit_identity_bytes_v1(SRC, TRIPLE, "dev", ["io"])
+    generate_smf_with_options([0xC3], opts)
+
+fn row(iface: text, triple: text, profile: text, families: [text]) -> SmfManifestEntry:
+    smf_manifest_entry_new_with_iface("a.spl", "a.smf", 1, "cranelift", 0, false, false, false,
+        profile, families, iface, triple)
+
+describe "AOT SMF unit identity writer":
+    it "emits no record when no target triple is known":
+        step("emits no record without a triple")
+        expect(smf_unit_identity_bytes_v1(SRC, "", "dev", []).len()).to_equal(0)
+
+    it "admits a fresh SMF against its manifest row":
+        step("admits a fresh SMF")
+        val r = smf_cached_unit_identity_admit(row(interface_digest_of_source(SRC), TRIPLE, "dev", ["io"]), written_image())
+        expect(r.is_ok()).to_equal(true)
+        expect(r.unwrap()).to_equal(true)
+
+    it "refuses an SMF whose iface digest differs from the row":
+        step("refuses an iface mismatch")
+        val r = smf_cached_unit_identity_admit(row(interface_digest_of_source("fn other() -> i64:\n    1\n"), TRIPLE, "dev", ["io"]), written_image())
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("SMF-E-UNIT-IFACE-MISMATCH")).to_equal(true)
+
+    it "refuses an SMF built for another target":
+        step("refuses a triple mismatch")
+        val r = smf_cached_unit_identity_admit(row(interface_digest_of_source(SRC), "aarch64-unknown-linux-gnu", "dev", ["io"]), written_image())
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("SMF-E-UNIT-TRIPLE-MISMATCH")).to_equal(true)
+
+    it "refuses an SMF built under another profile":
+        step("refuses a policy mismatch")
+        val r = smf_cached_unit_identity_admit(row(interface_digest_of_source(SRC), TRIPLE, "prod", ["io"]), written_image())
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("SMF-E-UNIT-POLICY-MISMATCH")).to_equal(true)
+
+    it "refuses an SMF needing a capability the row does not grant":
+        step("refuses a capability not granted")
+        val r = smf_cached_unit_identity_admit(row(interface_digest_of_source(SRC), TRIPLE, "dev", []), written_image())
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("SMF-E-UNIT-CAPABILITY-DENIED")).to_equal(true)

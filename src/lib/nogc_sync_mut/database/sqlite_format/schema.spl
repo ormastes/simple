@@ -36,7 +36,7 @@ fn sqlite_schema_scan(pager: SqlitePager, text_encoding: i64) -> Result<[SqliteS
     val rows = table_btree_scan(pager, 1)?
     var entries: [SqliteSchemaEntry] = []
     for row in rows:
-        val values = sqlite_record_decode(row.1, text_encoding)?
+        val values = sqlite_record_decode(row.payload, text_encoding)?
         if values.len() < 5:
             return Err(SqliteError.MalformedSchema( message: "sqlite_schema row has {values.len()} values, need 5"))
         val obj_type = _as_text(values[0], "sqlite_schema.type")?
@@ -123,7 +123,7 @@ fn _skip_noise(s: text, i: i64) -> i64:
 fn _read_ident(s: text, i: i64) -> (text, i64)?:
     val p = _skip_noise(s, i)
     if p >= s.len():
-        return nil
+        return None
     val c = s[p]
     if c == "\"" or c == "[" or c == "`":
         val close = if c == "[": "]" else: c
@@ -138,9 +138,9 @@ fn _read_ident(s: text, i: i64) -> (text, i64)?:
                 return Some((out, j + 1))
             out = out + s[j]
             j = j + 1
-        return nil
+        return None
     if not _is_ident_char(c):
-        return nil
+        return None
     var j = p
     var out = ""
     while j < s.len() and _is_ident_char(s[j]):
@@ -154,8 +154,8 @@ fn _expect_keyword(s: text, i: i64, kw: text) -> i64?:
     val p = _skip_noise(s, i)
     val end = p + kw.len()
     if end > s.len():
-        return nil
-    if ascii_lower(s.substring(p, end)) == kw:
+        return None
+    if ascii_lower(s[p:end]) == kw:
         return Some(end)
     nil
 
@@ -194,10 +194,10 @@ fn _split_top_level_items(body: text) -> [text]:
         elif c == ")":
             depth = depth - 1
         elif c == "," and depth == 0:
-            items.push(body.substring(start, i))
+            items.push(body[start:i])
             start = i + 1
         i = i + 1
-    items.push(body.substring(start, body.len()))
+    items.push(body[start:])
     items
 
 # Find the "(" starting the column list, respecting quotes. Returns its index
@@ -274,7 +274,7 @@ fn parse_create_table_columns(sql: text) -> Result<[text], SqliteError>:
     if close < 0:
         return Err(SqliteError.MalformedSchema(message: "CREATE TABLE: unbalanced parens"))
 
-    val items = _split_top_level_items(sql.substring(open + 1, close))
+    val items = _split_top_level_items(sql[open + 1:close])
     var columns: [text] = []
     for item in items:
         val trimmed = _skip_noise(item, 0)
@@ -288,7 +288,7 @@ fn parse_create_table_columns(sql: text) -> Result<[text], SqliteError>:
         columns.push(first.0)
 
     # Reject WITHOUT ROWID trailing options explicitly (later gate).
-    val tail = ascii_lower(sql.substring(close + 1, sql.len()))
+    val tail = ascii_lower(sql[close + 1:])
     if tail.contains("without") and tail.contains("rowid"):
         return Err(SqliteError.UnsupportedFeature(what: "WITHOUT ROWID tables"))
 
@@ -343,7 +343,7 @@ fn parse_create_table_affinities(sql: text) -> [i64]:
     val close = _find_close_paren(sql, open)
     if close < 0:
         return []
-    val items = _split_top_level_items(sql.substring(open + 1, close))
+    val items = _split_top_level_items(sql[open + 1:close])
     var affinities: [i64] = []
     for item in items:
         val trimmed = _skip_noise(item, 0)
@@ -354,7 +354,7 @@ fn parse_create_table_affinities(sql: text) -> [i64]:
             return []
         if _is_constraint_keyword(first.0):
             continue
-        val rest = item.substring(first.1, item.len())
+        val rest = item[first.1:]
         val type_tok = _read_ident(rest, _skip_noise(rest, 0))
         if type_tok == nil:
             affinities.push(0)
@@ -378,7 +378,7 @@ fn parse_create_table_ipk(sql: text) -> i64:
     val close = _find_close_paren(sql, open)
     if close < 0:
         return -1
-    val items = _split_top_level_items(sql.substring(open + 1, close))
+    val items = _split_top_level_items(sql[open + 1:close])
     var col_idx: i64 = 0
     for item in items:
         val trimmed = _skip_noise(item, 0)
@@ -391,7 +391,7 @@ fn parse_create_table_ipk(sql: text) -> i64:
             continue
         if col_idx >= col_count:
             return -1
-        val rest = item.substring(first.1, item.len())
+        val rest = item[first.1:]
         if _item_is_integer_primary_key(rest):
             if ascii_lower(rest).contains("autoincrement"):
                 return -2
@@ -402,18 +402,20 @@ fn parse_create_table_ipk(sql: text) -> i64:
 # Find a table entry by name (exact, then ASCII case-insensitive) and parse
 # its column list. Fails closed when the table is missing or not a table.
 fn find_table_schema(entries: [SqliteSchemaEntry], table_name: text) -> Result<SqliteTableDef, SqliteError>:
-    var found: SqliteSchemaEntry? = nil
+    var found: SqliteSchemaEntry? = None
     for e in entries:
         if e.obj_type == "table" and e.name == table_name:
             found = Some(e)
-    if found == nil:
+    if found.is_none():
         val lower_wanted = ascii_lower(table_name)
         for e in entries:
             if e.obj_type == "table" and ascii_lower(e.name) == lower_wanted:
                 found = Some(e)
-    if found == nil:
-        return Err(SqliteError.SchemaNotFound(table: table_name))
-    val entry = found
+    # An explicit unwrap: reading fields through the `SqliteSchemaEntry?` value gave a
+    # garbage rootpage in a Phase 2 native build.
+    val entry: SqliteSchemaEntry = match found:
+        case Some(schema_entry): schema_entry
+        case None: return Err(SqliteError.SchemaNotFound(table: table_name))
     if entry.rootpage < 1:
         return Err(SqliteError.MalformedSchema( message: "table {entry.name} has invalid rootpage {entry.rootpage}"))
     val columns = parse_create_table_columns(entry.sql)?

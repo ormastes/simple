@@ -1,9 +1,12 @@
 #include <stdint.h>
+#include "../../common/boot/freestanding_bool_abi.h"
 #include <stddef.h>
+#include "../../common/simpleos_reclaim_heap.h"
 
 #include "embedded_ssh_host_rsa.h"
 #include "embedded_ssh_host_rsa_crt.h"
 #include "x86_64_nonce_slot_contract.h"
+#include "x86_64_text_codepoint.h"
 
 typedef int64_t RuntimeValue;
 
@@ -234,6 +237,18 @@ static void serial_put_hex(uint64_t v)
     }
 }
 
+
+/* Entry-closure probes can omit interrupt.spl. Keep a real fatal handler in
+ * this C object so a C-only reference never becomes an undefined link symbol.
+ * The pure-Simple export overrides this weak fallback in complete images. */
+__attribute__((weak, noreturn))
+void spl_x86_on_kernel_ud2_fault(uint64_t rip)
+{
+    serial_puts("\n[fault] FATAL: kernel #UD (ud2) trap at rip=");
+    serial_put_hex(rip);
+    serial_puts(" vector=6 (#UD)\n");
+    for (;;) __asm__ volatile("cli; hlt");
+}
 static void serial_put_dec(int64_t v)
 {
     if (v < 0) {
@@ -313,8 +328,13 @@ static int8_t _simpleos_log_write_cstr(int64_t level, const char *msg)
 #define IS_NIL(v)      ((v) == (RuntimeValue)TAG_SPECIAL)
 
 #define NIL_VALUE      ((RuntimeValue)TAG_SPECIAL)
-#define TRUE_VALUE     ENCODE_INT(1)
-#define FALSE_VALUE    ENCODE_INT(0)
+/* Codegen tags (src/compiler_rust/compiler/src/codegen/llvm/instructions.rs
+ * `tagged_bool_const`): true = 11, false = 19. Spelled out because this TU
+ * does not include arch/common/baremetal_runtime.h. */
+#define TRUE_VALUE     ((RuntimeValue)11)
+#define FALSE_VALUE    ((RuntimeValue)19)
+_Static_assert(TRUE_VALUE == 11, "TRUE_VALUE must match codegen tagged true (11)");
+_Static_assert(FALSE_VALUE == 19, "FALSE_VALUE must match codegen tagged false (19)");
 
 /* HeapHeader — 8 bytes, matches src/runtime/runtime_value.h and the Rust
  * runtime's repr(C) heap header (value/heap.rs): object_type u8, gc_flags u8,
@@ -446,9 +466,9 @@ RuntimeValue rt_bytes_alloc_packed(RuntimeValue len_val)
  * packed array. Every caller that had already sized its buffer exactly -- most
  * importantly _vfs_boot_read_file_chain_raw, which knows the FAT32 file size
  * before it reads a byte -- was therefore forced through the doubling growth
- * path in rt_array_push_handle: 128, 256, ... 1M, 2M, 4M, 8M, 16M, 32M. On this
- * BUMP-ONLY heap free() is a no-op, so every intermediate buffer is leaked
- * permanently -- a 24 MiB boot asset burns ~63 MiB. That is what drove
+ * path in rt_array_push_handle: 128, 256, ... 1M, 2M, 4M, 8M, 16M, 32M. On the
+ * former bump-only heap, free() was a no-op, so every intermediate buffer was
+ * leaked permanently -- a 24 MiB boot asset burned ~63 MiB. That is what drove
  * heap_off to 0xbf12660 during vfs-init, before any render code ran.
  * Honouring the reservation makes that one exact allocation instead.
  *
@@ -642,56 +662,25 @@ static const size_t BAREMETAL_HEAP_SIZE = 192ULL * 1024ULL * 1024ULL;
 static const size_t BAREMETAL_HEAP_WARN_SIZE = 144ULL * 1024ULL * 1024ULL;
 
 static char   _heap[192ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
-static size_t _heap_off = 0;
+static SimpleosReclaimHeap _heap_state = {(unsigned char *)_heap, sizeof(_heap), 0, NULL, {NULL}};
+#define _heap_off (_heap_state.used)
 
 void *malloc(size_t sz);
 
-static inline size_t simpleos_heap_align(size_t sz)
-{
-    return (sz + 15U) & ~(size_t)15U;
-}
+void *realloc(void *p, size_t sz);
 
+/* Array storage has a unique allocation owner. Preserve the stable header and
+ * release replaced auxiliary storage; retained RuntimeValue objects are not
+ * reclaimed implicitly. The allocator metadata owns the actual old extent. */
 static void *simpleos_heap_realloc_last(void *p, size_t old_sz, size_t new_sz)
 {
-    size_t old_aligned = simpleos_heap_align(old_sz);
-    size_t new_aligned = simpleos_heap_align(new_sz);
-    if (!p) return malloc(new_sz);
-
-    uint8_t *base = (uint8_t *)p;
-    if (base >= (uint8_t *)_heap &&
-        base + old_aligned == (uint8_t *)&_heap[_heap_off]) {
-        if (new_aligned > old_aligned) {
-            size_t grow = new_aligned - old_aligned;
-            if (_heap_off + grow > sizeof(_heap)) {
-                serial_puts("[PANIC] heap exhausted\r\n");
-                serial_puts("[PANIC] heap_off=");
-                serial_put_hex((uint64_t)_heap_off);
-                serial_puts(" req=");
-                serial_put_hex((uint64_t)grow);
-                serial_puts(" limit=");
-                serial_put_hex((uint64_t)sizeof(_heap));
-                serial_puts("\r\n");
-                for (;;) outb(0xF4, 0);
-            }
-            _heap_off += grow;
-        } else {
-            _heap_off -= (old_aligned - new_aligned);
-        }
-        return p;
-    }
-
-    void *n = malloc(new_sz);
-    if (p && n) {
-        size_t copy_sz = old_sz < new_sz ? old_sz : new_sz;
-        __builtin_memcpy(n, p, copy_sz);
-    }
-    return n;
+    (void)old_sz;
+    return realloc(p, new_sz);
 }
 
 void *malloc(size_t sz)
 {
     void *caller = __builtin_return_address(0);
-    sz = simpleos_heap_align(sz);
     if (sz >= 0x100000 || _heap_off >= BAREMETAL_HEAP_WARN_SIZE) {
         serial_puts("[heap] alloc sz=");
         serial_put_hex((uint64_t)sz);
@@ -701,7 +690,8 @@ void *malloc(size_t sz)
         serial_put_hex((uint64_t)(uintptr_t)caller);
         serial_puts("\r\n");
     }
-    if (_heap_off + sz > sizeof(_heap)) {
+    void *p = simpleos_reclaim_alloc(&_heap_state, sz);
+    if (!p) {
         serial_puts("[PANIC] heap exhausted\r\n");
         serial_puts("[PANIC] heap_off=");
         serial_put_hex((uint64_t)_heap_off);
@@ -712,8 +702,6 @@ void *malloc(size_t sz)
         serial_puts("\r\n");
         for(;;) outb(0xF4, 0);
     }
-    void *p = &_heap[_heap_off];
-    _heap_off += sz;
     if (sz >= 0x100000 || _heap_off >= BAREMETAL_HEAP_WARN_SIZE) {
         serial_puts("[heap] alloc off_after=");
         serial_put_hex((uint64_t)_heap_off);
@@ -724,18 +712,25 @@ void *malloc(size_t sz)
 
 void free(void *p)
 {
-    (void)p; /* bump allocator: no-op */
+    simpleos_reclaim_free(&_heap_state, p);
 }
 
 void *realloc(void *p, size_t sz)
 {
-    void *n = malloc(sz);
-    if (p && n) __builtin_memcpy(n, p, sz);
+    void *n = simpleos_reclaim_realloc(&_heap_state, p, sz);
+    if (!n && sz != 0) {
+        serial_puts("[PANIC] heap realloc exhausted\r\n");
+        for (;;) outb(0xF4, 0);
+    }
     return n;
 }
 
 void *calloc(size_t n, size_t sz)
 {
+    if (n != 0 && sz > SIZE_MAX / n) {
+        serial_puts("[PANIC] heap calloc overflow\r\n");
+        for (;;) outb(0xF4, 0);
+    }
     size_t total = n * sz;
     void *p = malloc(total);
     if (p) __builtin_memset(p, 0, total);
@@ -770,6 +765,9 @@ RuntimeValue rt_alloc_zeroed(RuntimeValue sz)
 
 RuntimeValue rt_dealloc(RuntimeValue ptr)
 {
+    /* A raw RuntimeValue does not prove unique ownership. Explicit C scratch
+     * free() is now reclaiming, but escaped/aliased objects stay retained until
+     * their language owner supplies a proven destruction boundary. */
     (void)ptr;
     return NIL_VALUE;
 }
@@ -914,14 +912,35 @@ RuntimeValue rt_for_iterable(RuntimeValue collection)
     return collection;
 }
 
+/* CODEPOINT-indexed UTF-8, matching hosted runtime_native.c (bug
+ * x64_freestanding_char_code_at_dynamic_text: was byte-indexed). Raw idx,
+ * raw result; non-heap values return 0 (a raw pointer is indistinguishable
+ * from TAG_INT here, so it is never dereferenced). */
 RuntimeValue rt_string_char_code_at(RuntimeValue str, RuntimeValue idx)
 {
     if (!IS_HEAP(str)) return 0;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
     if (!s || s->hdr.type != HEAP_STRING) return 0;
-    int64_t i = (int64_t)idx;
-    if (i < 0 || (uint64_t)i >= s->len) return 0;
-    return (RuntimeValue)(uint8_t)s->data[i];
+    return (RuntimeValue)x64_text_code_at((const unsigned char *)s->data, s->len, (int64_t)idx);
+}
+
+RuntimeValue __simple_rt_string_char_code_at(RuntimeValue str, RuntimeValue idx)
+{
+    return rt_string_char_code_at(str, idx);
+}
+
+/* BYTE-indexed raw byte read (text.byte_at); see x86_64_text_codepoint.h. */
+RuntimeValue rt_string_byte_at(RuntimeValue str, RuntimeValue idx)
+{
+    if (!IS_HEAP(str)) return 0;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+    if (!s || s->hdr.type != HEAP_STRING) return 0;
+    return (RuntimeValue)x64_text_byte_at((const unsigned char *)s->data, s->len, (int64_t)idx);
+}
+
+RuntimeValue __simple_rt_string_byte_at(RuntimeValue str, RuntimeValue idx)
+{
+    return rt_string_byte_at(str, idx);
 }
 
 int64_t rt_pool_safepoint(void)
@@ -931,12 +950,8 @@ int64_t rt_pool_safepoint(void)
 
 RuntimeValue char_code_at(RuntimeValue str, RuntimeValue idx)
 {
-    if (!IS_HEAP(str)) return 0;
-    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    if (!s || !IS_INT(idx)) return 0;
-    int64_t i = DECODE_INT(idx);
-    if (i < 0 || (uint32_t)i >= s->len) return 0;
-    return ENCODE_INT((unsigned char)s->data[i]);
+    if (!IS_HEAP(str) || !IS_INT(idx)) return ENCODE_INT(0);
+    return ENCODE_INT(rt_string_char_code_at(str, (RuntimeValue)DECODE_INT(idx)));
 }
 
 RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)
@@ -1423,6 +1438,33 @@ RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b)
     return rt_native_eq(a, b) ? 0 : 1;
 }
 
+/* Text-specific equality used by the Cranelift text lowering. Unlike the
+ * fabricated weak body, this must compare literal CONTENT: NVMe's
+ * nvme_controller_refusal_reason() and its caller can hold distinct allocations
+ * of "ready". Preserve the existing heap/raw guards and also handle two raw
+ * literals, which rt_native_eq deliberately compares only by identity. */
+static int rt_text_eq_raw_raw(RuntimeValue left, RuntimeValue right)
+{
+    if (left == right) return 1;
+    if ((uint64_t)left < 0x10000ULL || (uint64_t)right < 0x10000ULL) return 0;
+    if (IS_HEAP(left) || IS_HEAP(right)) return 0;
+    const char *a = (const char *)(uintptr_t)left;
+    const char *b = (const char *)(uintptr_t)right;
+    for (;;) {
+        if (*a != *b) return 0;
+        if (*a == '\0') return 1;
+        a++;
+        b++;
+    }
+}
+
+RuntimeValue rt_text_eq_any(RuntimeValue left, RuntimeValue right)
+{
+    if (IS_NIL(left) || IS_NIL(right)) return left == right ? 1 : 0;
+    if (IS_HEAP(left) || IS_HEAP(right)) return rt_native_eq(left, right);
+    return rt_text_eq_raw_raw(left, right);
+}
+
 #define MAX_PCI_CACHED 64
 static struct {
     uint8_t bus, dev, func;
@@ -1561,19 +1603,20 @@ static struct {
 } _nvme;
 
 typedef struct {
-    size_t prev_heap_off;
-    size_t alloc_end_off;
+    void *raw;
 } nvme_aligned_alloc_header_t;
 
-/* Allocate page-aligned memory from the bump allocator.
+/* Allocate page-aligned memory with an explicit raw-allocation owner.
  * NVMe requires queue and data buffers to be page-aligned (4KB).
  * We waste up to (alignment-1) bytes of padding to get the alignment. */
 static void *nvme_alloc_aligned(size_t size, size_t alignment)
 {
-    if (alignment == 0) return (void *)0;
-    /* Allocate extra space so we can align within it */
+    if (alignment == 0 || (alignment & (alignment - 1)) != 0 ||
+        alignment > SIZE_MAX - sizeof(nvme_aligned_alloc_header_t) ||
+        size > SIZE_MAX - alignment - sizeof(nvme_aligned_alloc_header_t))
+        return (void *)0;
+    /* Allocate extra space so we can align within it. */
     size_t total = size + alignment + sizeof(nvme_aligned_alloc_header_t);
-    size_t prev_heap_off = _heap_off;
     void *raw = malloc(total);
     if (!raw) return (void *)0;
     /* Align the pointer within the allocated region */
@@ -1581,8 +1624,7 @@ static void *nvme_alloc_aligned(size_t size, size_t alignment)
     uintptr_t aligned = (addr + alignment - 1) & ~(alignment - 1);
     nvme_aligned_alloc_header_t *hdr =
         (nvme_aligned_alloc_header_t *)(aligned - sizeof(nvme_aligned_alloc_header_t));
-    hdr->prev_heap_off = prev_heap_off;
-    hdr->alloc_end_off = _heap_off;
+    hdr->raw = raw;
     return (void *)aligned;
 }
 
@@ -1591,8 +1633,7 @@ static void nvme_free_aligned(void *ptr)
     if (!ptr) return;
     nvme_aligned_alloc_header_t *hdr =
         (nvme_aligned_alloc_header_t *)((uintptr_t)ptr - sizeof(nvme_aligned_alloc_header_t));
-    if (_heap_off == hdr->alloc_end_off && hdr->prev_heap_off <= hdr->alloc_end_off)
-        _heap_off = hdr->prev_heap_off;
+    free(hdr->raw);
 }
 
 /* Ring a doorbell: SQ tail doorbell = BAR0 + 0x1000 + (2*qid) * stride
@@ -2914,6 +2955,26 @@ uint64_t simpleos_fat32_read_buffer_addr(void)
 uint64_t simpleos_fat32_path_read_buffer_addr(void)
 {
     return (uint64_t)(uintptr_t)simpleos_fat32_path_read_buf;
+}
+
+/* Boot-time preload receipt for the merged SSH+ring-3 kernel
+ * (ssh_ring3_entry.spl). The entry pre-reads /FSEXEC.ELF into
+ * simpleos_fat32_path_read_buf BEFORE vmm (exec-time FAT streaming returns 0
+ * post-vmm in that kernel), then calls simpleos_fat32_note_preload_size() so
+ * the exec path can consume the resident bytes instead of re-streaming.
+ * This definition must stay: without it the extern binds to an auto-generated
+ * weak NIL stub (the silent-stub class of
+ * doc/08_tracking/bug/baremetal_entry_closure_class_instantiation_fault_2026-07-06.md). */
+static uint64_t simpleos_fat32_preload_size_state;
+
+void simpleos_fat32_note_preload_size(uint64_t sz)
+{
+    simpleos_fat32_preload_size_state = sz;
+}
+
+uint64_t simpleos_fat32_preload_size(void)
+{
+    return simpleos_fat32_preload_size_state;
 }
 
 static int64_t simpleos_fat32_read_known_app_size_raw(uint64_t app_id)
@@ -7960,8 +8021,38 @@ RuntimeValue rt_array_last(RuntimeValue a) { (void)a; return NIL_VALUE; }
 RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n) { (void)v; (void)n; return NIL_VALUE; }
 RuntimeValue rt_string_find(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return (RuntimeValue)(-1); }
 RuntimeValue rt_string_rfind(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return (RuntimeValue)(-1); }
-RuntimeValue rt_string_join(RuntimeValue a, RuntimeValue sep) { (void)a; (void)sep; return NIL_VALUE; }
-RuntimeValue rt_string_to_int(RuntimeValue s) { (void)s; return ENCODE_INT(0); }
+RuntimeValue rt_array_join(RuntimeValue arr, RuntimeValue sep);
+RuntimeValue rt_string_join(RuntimeValue a, RuntimeValue sep) { return rt_array_join(a, sep); }
+RuntimeValue rt_string_to_int(RuntimeValue s)
+{
+    if (!IS_HEAP(s)) return 0;
+    RuntimeString *text = (RuntimeString *)DECODE_PTR(s);
+    if (!text || text->hdr.type != HEAP_STRING) return 0;
+    /* Match the hosted lenient decimal prefix parser used by DBFS checkpoint
+     * headers. The previous body returned zero for every valid generation. */
+    uint32_t i = 0;
+    while (i < text->len && (text->data[i] == ' ' || text->data[i] == '\t' ||
+           text->data[i] == '\n' || text->data[i] == '\r')) i++;
+    int negative = 0;
+    if (i < text->len && (text->data[i] == '-' || text->data[i] == '+')) {
+        negative = text->data[i] == '-';
+        i++;
+    }
+    uint64_t limit = negative ? (uint64_t)INT64_MAX + 1ULL : (uint64_t)INT64_MAX;
+    uint64_t value = 0;
+    while (i < text->len && text->data[i] >= '0' && text->data[i] <= '9') {
+        uint32_t digit = (uint32_t)(text->data[i] - '0');
+        if (value > (limit - digit) / 10ULL) {
+            value = limit;
+            while (i + 1 < text->len && text->data[i + 1] >= '0' && text->data[i + 1] <= '9') i++;
+            break;
+        }
+        value = value * 10ULL + digit;
+        i++;
+    }
+    if (negative && value == (uint64_t)INT64_MAX + 1ULL) return INT64_MIN;
+    return negative ? -(int64_t)value : (int64_t)value;
+}
 RuntimeValue rt_option_map(RuntimeValue o, RuntimeValue f) { (void)o; (void)f; return NIL_VALUE; }
 RuntimeValue rt_file_read_text(const char *path, int64_t path_len) {
     return _fat32_read_file_text_value(path, path_len);
@@ -8177,7 +8268,7 @@ void _start(void)
 
     serial_puts("SimpleOS x86_64 boot\r\n");
     serial_puts("[BOOT] COM1 serial initialized at 115200 baud\r\n");
-    serial_puts("[BOOT] Heap: 512 MB bump allocator\r\n");
+    serial_puts("[BOOT] Heap: 192 MB explicit-free allocator\r\n");
     serial_puts("[BOOT] RuntimeValue: tagged 64-bit (int/heap/float/special)\r\n");
 
     /* BGA + GUI rendering is now done by Pure Simple code in spl_start().
@@ -8431,7 +8522,8 @@ void _start(void)
  *
  * Cranelift emits raw i64 values.  These operate on tagged RuntimeValues:
  * integer args are ENCODE_INT(n) = n<<3, results likewise.
- * Comparison results are raw 1 or 0 (Cranelift boolean convention).
+ * Comparison and logical results are tagged RuntimeValue booleans (11/19),
+ * distinct from internal Cranelift/MIR bools (raw 1/0).
  */
 
 RuntimeValue rt_add(RuntimeValue a, RuntimeValue b)
@@ -8510,17 +8602,17 @@ RuntimeValue rt_ge(RuntimeValue a, RuntimeValue b)
 
 RuntimeValue rt_and(RuntimeValue a, RuntimeValue b)
 {
-    return (DECODE_INT(a) && DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE;
+    return (simpleos_bool_or_integer_truthy((uint64_t)a) && simpleos_bool_or_integer_truthy((uint64_t)b)) ? TRUE_VALUE : FALSE_VALUE;
 }
 
 RuntimeValue rt_or(RuntimeValue a, RuntimeValue b)
 {
-    return (DECODE_INT(a) || DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE;
+    return (simpleos_bool_or_integer_truthy((uint64_t)a) || simpleos_bool_or_integer_truthy((uint64_t)b)) ? TRUE_VALUE : FALSE_VALUE;
 }
 
 RuntimeValue rt_not(RuntimeValue a)
 {
-    return DECODE_INT(a) ? FALSE_VALUE : TRUE_VALUE;
+    return simpleos_bool_or_integer_truthy((uint64_t)a) ? FALSE_VALUE : TRUE_VALUE;
 }
 
 RuntimeValue rt_shl(RuntimeValue a, RuntimeValue b)
@@ -8606,10 +8698,8 @@ RuntimeValue rt_is_string(RuntimeValue val)
 
 RuntimeValue rt_is_bool(RuntimeValue val)
 {
-    /* Booleans are encoded as ENCODE_INT(0) or ENCODE_INT(1) */
-    if (!IS_INT(val)) return 0;
-    int64_t v = DECODE_INT(val);
-    return (v == 0 || v == 1) ? 1 : 0;
+    /* Compatibility predicate ABI: raw 0/1, not a tagged RuntimeValue bool. */
+    return (val == TRUE_VALUE || val == FALSE_VALUE) ? 1 : 0;
 }
 
 RuntimeValue rt_is_array(RuntimeValue val)
@@ -8668,6 +8758,7 @@ RuntimeValue rt_to_string(RuntimeValue val)
 /* rt_to_bool: convert to boolean */
 RuntimeValue rt_to_bool(RuntimeValue val)
 {
+    if (val == TRUE_VALUE || val == FALSE_VALUE) return val;
     if (IS_NIL(val)) return FALSE_VALUE;
     if (IS_INT(val)) return DECODE_INT(val) ? TRUE_VALUE : FALSE_VALUE;
     if (IS_HEAP(val)) {
@@ -8850,8 +8941,9 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
         }
         if (j == d->len) {
             /* Found delimiter at i */
+            /* rt_string_slice takes RAW indices on this freestanding ABI. */
             RuntimeValue part = rt_string_slice(str,
-                ENCODE_INT(start), ENCODE_INT(i));
+                (RuntimeValue)start, (RuntimeValue)i);
             arr = rt_array_push_handle(arr, part);
             i += d->len;
             start = i;
@@ -8861,7 +8953,7 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
     }
     /* Remainder */
     RuntimeValue rest = rt_string_slice(str,
-        ENCODE_INT(start), ENCODE_INT(s->len));
+        (RuntimeValue)start, (RuntimeValue)s->len);
     arr = rt_array_push_handle(arr, rest);
     return arr;
 }
@@ -9641,11 +9733,9 @@ static RuntimeValue rt_array_push_handle(RuntimeValue arr, RuntimeValue val)
                 if (!new_data) return ENCODE_PTR(a);
                 for (uint32_t i = 0; i < a->len; i++) new_data[i] = data[i];
             } else {
-                /* REUSE rather than reallocate: free() is a no-op on the bump
-                 * heap, so an unconditional fresh malloc+copy leaks the entire
-                 * old buffer on every doubling. simpleos_heap_realloc_last
-                 * extends in place when this is the most recent allocation (the
-                 * common append-loop case) and copies only when it is not. The
+                /* Reallocate through the unique auxiliary-storage owner.
+                 * simpleos_heap_realloc_last extends the latest allocation in
+                 * place; otherwise it copies and releases the old buffer. The
                  * value-array branch below has always done this; the packed byte
                  * branch did not. Same realloc-instead-of-reuse defect fixed in
                  * _reset_font_atlas (font_renderer.spl). */
@@ -10449,17 +10539,17 @@ static void _tls_hmac_sha256(const uint8_t *key, uint32_t key_len, const uint8_t
 
 static uint8_t *_tls_copy_runtime_bytes(RuntimeValue rv, uint32_t *out_len)
 {
-    const uint32_t SIMPLEOS_TLS_RUNTIME_BYTE_CAP = 1U << 20;
+    const uint64_t SIMPLEOS_TLS_RUNTIME_BYTE_CAP = 1ULL << 20;
     *out_len = 0;
     if (!IS_HEAP(rv)) return NULL;
     RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(rv);
-    if (!arr || arr->hdr.type != HEAP_ARRAY) return NULL;
-    uint32_t len = arr->len;
-    if (len > SIMPLEOS_TLS_RUNTIME_BYTE_CAP) return NULL;
-    RuntimeValue *items = runtime_array_items(arr);
+    if (!arr || arr->hdr.object_type != HEAP_ARRAY) return NULL;
+    uint64_t raw_len = arr->len;
+    if (raw_len > SIMPLEOS_TLS_RUNTIME_BYTE_CAP) return NULL;
+    uint32_t len = (uint32_t)raw_len;
     uint8_t *buf = (uint8_t *)malloc(len > 0 ? len : 1);
     if (!buf) return NULL;
-    for (uint32_t i = 0; i < len; i++) buf[i] = _rv_byte(items[i]);
+    for (uint32_t i = 0; i < len; i++) buf[i] = _rt_bytes_get(arr, i);
     *out_len = len;
     return buf;
 }
@@ -10471,22 +10561,24 @@ static int _tls_materialize_runtime_bytes(RuntimeValue rv,
                                           uint8_t **out_heap,
                                           uint32_t *out_len)
 {
+    const uint64_t SIMPLEOS_TLS_RUNTIME_BYTE_CAP = 1ULL << 20;
     *out_data = NULL;
     *out_heap = NULL;
     *out_len = 0;
     if (!IS_HEAP(rv)) return 0;
     RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(rv);
-    if (!arr || arr->hdr.type != HEAP_ARRAY) return 0;
-    uint32_t len = arr->len;
+    if (!arr || arr->hdr.object_type != HEAP_ARRAY) return 0;
+    uint64_t raw_len = arr->len;
+    if (raw_len > SIMPLEOS_TLS_RUNTIME_BYTE_CAP) return 0;
+    uint32_t len = (uint32_t)raw_len;
     if (len <= stack_cap) {
-        RuntimeValue *items = runtime_array_items(arr);
-        for (uint32_t i = 0; i < len; i++) stack_buf[i] = _rv_byte(items[i]);
+        for (uint32_t i = 0; i < len; i++) stack_buf[i] = _rt_bytes_get(arr, i);
         *out_data = stack_buf;
         *out_len = len;
         return 1;
     }
     *out_heap = _tls_copy_runtime_bytes(rv, out_len);
-    if (!*out_heap && *out_len != 0U) return 0;
+    if (!*out_heap) return 0;
     *out_data = *out_heap;
     return 1;
 }
@@ -10573,6 +10665,8 @@ static RuntimeValue _tls_runtime_array_from_bytes(const uint8_t *buf, uint32_t l
     RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     if (!out) return NIL_VALUE;
     out->hdr.type = HEAP_ARRAY;
+    out->hdr.gc_flags = 0;
+    out->hdr.reserved = 0;
     out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     out->len = len;
     out->cap = len;
@@ -11720,7 +11814,11 @@ static int _tls_aes128_gcm_decrypt_raw(const uint8_t key[16], const uint8_t nonc
     _tls_gcm_ghash(h, aad, aad_len, ciphertext, ct_len, s);
     _tls_aes128_encrypt_block_raw(key, j0, ej0);
     for (uint32_t i = 0; i < 16U; i++) expected_tag[i] = (uint8_t)(s[i] ^ ej0[i]);
-    if (memcmp(expected_tag, tag, 16) != 0) return -1;
+    uint8_t tag_diff = 0U;
+    for (uint32_t i = 0; i < 16U; i++) {
+        tag_diff |= (uint8_t)(expected_tag[i] ^ tag[i]);
+    }
+    if (tag_diff != 0U) return -1;
 
     uint8_t counter[16];
     memcpy(counter, j0, 16);
@@ -11818,20 +11916,30 @@ RuntimeValue rt_tls13_aes128_gcm_decrypt(RuntimeValue key_rv, RuntimeValue nonce
     uint8_t *ciphertext = _tls_copy_runtime_bytes(ciphertext_rv, &ct_len);
     uint8_t *aad = _tls_copy_runtime_bytes(aad_rv, &aad_len);
     uint8_t *tag = _tls_copy_runtime_bytes(tag_rv, &tag_len);
-    uint8_t *plaintext = NULL;
-    RuntimeValue out = NIL_VALUE;
+    uint8_t *framed = NULL;
+    /* Status-prefixed encoding matching runtime/src/value/aes.rs and
+     * sffi/host.spl (tls13_aes128_gcm_decrypt_decode):
+     *   []           -> invalid input
+     *   [0x00]       -> tag mismatch (authentication failure)
+     *   [0x01, ..pt] -> authenticated plaintext (pt may be empty) */
+    RuntimeValue out = _tls_runtime_array_from_bytes((const uint8_t *)"", 0U);
 
-    if (!key || !nonce || !aad || !tag || (!ciphertext && ct_len != 0) ||
-        key_len != 16U || nonce_len != 12U || tag_len != 16U) {
+    if (!key || !nonce || !ciphertext || !aad || !tag ||
+        key_len != 16U || nonce_len != 12U || tag_len != 16U ||
+        ct_len > UINT32_MAX - 1U) {
         goto cleanup;
     }
 
-    plaintext = (uint8_t *)malloc(ct_len > 0 ? ct_len : 1U);
-    if (!plaintext) goto cleanup;
-    if (_tls_aes128_gcm_decrypt_raw(key, nonce, ciphertext, ct_len, aad, aad_len, tag, plaintext) != 0) {
+    uint32_t out_len = 1U + ct_len;
+    framed = (uint8_t *)malloc(out_len);
+    if (!framed) goto cleanup;
+    if (_tls_aes128_gcm_decrypt_raw(key, nonce, ciphertext, ct_len, aad, aad_len, tag, framed + 1U) != 0) {
+        uint8_t status_fail = 0x00U;
+        out = _tls_runtime_array_from_bytes(&status_fail, 1U);
         goto cleanup;
     }
-    out = _tls_runtime_array_from_bytes(plaintext, ct_len);
+    framed[0] = 0x01U;
+    out = _tls_runtime_array_from_bytes(framed, out_len);
 
 cleanup:
     if (key) free(key);
@@ -11839,7 +11947,7 @@ cleanup:
     if (ciphertext) free(ciphertext);
     if (aad) free(aad);
     if (tag) free(tag);
-    if (plaintext) free(plaintext);
+    if (framed) free(framed);
     return out;
 }
 
@@ -11854,7 +11962,7 @@ RuntimeValue rt_tls13_aes128_gcm_encrypt(RuntimeValue key_rv, RuntimeValue nonce
     uint8_t *ciphertext = NULL;
     RuntimeValue out = NIL_VALUE;
 
-    if (!key || !nonce || !aad || (!plaintext && pt_len != 0) ||
+    if (!key || !nonce || !plaintext || !aad ||
         key_len != 16U || nonce_len != 12U) {
         goto cleanup;
     }
@@ -13384,7 +13492,7 @@ static void map_grow(RuntimeMap *m)
         nk[i] = NIL_VALUE;
         nv[i] = NIL_VALUE;
     }
-    /* Bump allocator: old arrays leak but that is acceptable on bare metal */
+    /* Map auxiliary arrays have no explicit release boundary yet; old arrays stay retained. */
     m->keys   = nk;
     m->values = nv;
     m->cap    = new_cap;
@@ -13888,7 +13996,7 @@ RuntimeValue rt_abort(RuntimeValue msg)
     return NIL_VALUE;
 }
 
-/* GC: safe no-ops on bare metal (bump allocator, no GC) */
+/* GC: safe no-ops on bare metal (explicit C free only, no GC) */
 RuntimeValue rt_gc_collect(void) { return NIL_VALUE; }
 RuntimeValue rt_gc_disable(void) { return NIL_VALUE; }
 RuntimeValue rt_gc_enable(void)  { return NIL_VALUE; }
@@ -14638,10 +14746,43 @@ __attribute__((naked)) static void _rich_fault_entry(void)
         "addq $8, %%rsp\n\t"
         "iretq\n\t"
         "3:\n\t"
-        /* No error code: advance RIP (at [rsp]), iretq */
+        /* A kernel ud2 is an intentional trap. Diagnose and halt rather
+         * than turning it into a silent RIP+=2 recovery. */
+        "pushq %%rax\n\t"
+        "pushq %%rcx\n\t"
+        "movq 16(%%rsp), %%rax\n\t"
+        /* Do not let the diagnostic probe cross a page boundary while already
+         * handling an exception: an unmapped following page would recurse
+         * into #PF/#DF. The shared ISR has no vector number, so the boundary
+         * case is ambiguous; fail closed as a fatal ud2 candidate rather than
+         * ever advancing past an intentional cross-page ud2. */
+        "movq %%rax, %%rcx\n\t"
+        "andl $0xFFF, %%ecx\n\t"
+        "cmpl $0xFFF, %%ecx\n\t"
+        "jne 4f\n\t"
+        "movl $0x0B0F, %%ecx\n\t"
+        "jmp 5f\n\t"
+        "4:\n\t"
+        "movzwl (%%rax), %%ecx\n\t"
+        "5:\n\t"
+        "cmpl $0x0B0F, %%ecx\n\t"
+        "popq %%rcx\n\t"
+        "popq %%rax\n\t"
+        "je 6f\n\t"
+        /* Other no-error-code faults retain the legacy recovery. */
         "addq $2, (%%rsp)\n\t"
         "movq $0x3, %%rax\n\t"
         "iretq\n\t"
+        "6:\n\t"
+        /* Interrupts can arrive with either stack residue. The hook is
+         * noreturn, so align the abandoned interrupt stack dynamically. */
+        "movq (%%rsp), %%rdi\n\t"
+        "andq $-16, %%rsp\n\t"
+        "callq spl_x86_on_kernel_ud2_fault\n\t"
+        "cli\n\t"
+        "7:\n\t"
+        "hlt\n\t"
+        "jmp 7b\n\t"
         : : : "memory"
     );
 }

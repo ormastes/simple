@@ -1,0 +1,37 @@
+# Op (ii) DATA (milestone_0030 DESIGN 13.3.7, 14.6): the bounded evidence read of a SETTLED,
+# reserved, not-yet-returned remote-build workspace source. No workload exit status is read
+# here; exit observation belongs to L10 (DESIGN 14.1). AUTHORED_NOT_RUN.
+use std.common.contracts.container.build_workspace_profile_v1.{LinuxBuildWorkspaceProfileV1, linux_build_workspace_relative_v1}
+
+pub struct ContainerSettledWorkspaceBoundsV3:
+    # The signed task policy's `maximum_bytes`; the read also never exceeds the
+    # installed profile's `max_output_bytes`.
+    maximum_bytes: i64
+    # The task's declared outputs, relative to the profile's `output_root`.
+    output_paths: [text]
+
+pub struct ContainerSettledWorkspaceFileV3:
+    path: text
+    bytes: [u8]
+
+pub struct ContainerSettledWorkspaceReadV3:
+    binding_digest: text
+    stdout: [u8]
+    stderr: [u8]
+    outputs: [ContainerSettledWorkspaceFileV3]
+
+# One file read is at most 1 MiB (RetainedFile.read_stage_input_v1 bound).
+# @allow(primitive_api) fixed byte-count cap accessor (1 MiB); a count, not a domain value
+pub fn container_settled_workspace_file_cap_v3() -> i64: 1048576
+
+# The effective byte budget for one read: min(bounds, profile). Declared output paths must be
+# workspace-relative, distinct and at most 4096; refused before any file is opened.
+pub fn container_settled_workspace_budget_v3(profile: LinuxBuildWorkspaceProfileV1,
+        bounds: ContainerSettledWorkspaceBoundsV3) -> Result<i64, text>:
+    if bounds.maximum_bytes < 1: return Err("settled-workspace-read-budget")
+    if bounds.output_paths.len() > 4096: return Err("settled-workspace-read-output-count")
+    var seen: [text] = []
+    for path in bounds.output_paths:
+        if not linux_build_workspace_relative_v1(path) or seen.contains(path): return Err("settled-workspace-read-output-path")
+        seen.push(path)
+    Ok(if bounds.maximum_bytes < profile.max_output_bytes: bounds.maximum_bytes else: profile.max_output_bytes)

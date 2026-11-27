@@ -17,6 +17,9 @@ use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
 }
 use std.common.hash.djb2.{djb2_hash_text}
 use std.gpu.engine2d.backend_vulkan_spirv.{spirv_clear}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
+    vulkan_clear_dispatch_groups_x, vulkan_clear_dispatch_groups_y
+}
 
 struct ProcessingVulkanResult:
     completed: bool
@@ -105,10 +108,12 @@ fn processing_ir_execute_vulkan(ir: ProcessingIr) -> ProcessingVulkanResult:
         vulkan_sffi_shutdown_reaped()
         return ProcessingVulkanResult(completed: false, reason: submit_fault, values: [], backend_handle: 0, device_identity: 0)
     val dispatch_ineligible_fault = processing_ir_fault_reason("vulkan", "dispatch-ineligible")
-    val dispatch_status = if dispatch_ineligible_fault != "": 0 else:
+    val gx = vulkan_clear_dispatch_groups_x(ir.element_count)
+    val gy = vulkan_clear_dispatch_groups_y(ir.element_count)
+    val dispatch_status = if dispatch_ineligible_fault != "" or gx <= 0 or gy <= 0 or gy > 65535: 0 else:
         vulkan_sffi_dispatch_buffer_compute_checked(
             buffer.handle, pipeline.handle, _processing_fill_push_constants(ir),
-            (ir.element_count + 255) / 256, 1, 1)
+            gx, gy, 1)
     if dispatch_status < 0:
         vulkan_sffi_quarantine_dependencies(0, buffer.handle, pipeline.handle, shader.handle)
         return ProcessingVulkanResult(completed: false, reason: "vulkan-dispatch-completion-unknown", values: [], backend_handle: 0, device_identity: 0)

@@ -1,7 +1,7 @@
 # Interpreter cannot index/slice `Value::StrBytes`, aborting every batch `simple test` run
 
 - **ID:** `interpreter_strbytes_not_indexable_aborts_batch_test_runs_2026-08-04`
-- **Status:** OPEN
+- **Status:** SUPERSEDED (2026-11-11, lane int9) — fixed on origin/release/1.0.0 by `9e7e7a526edb` (PR #7597); see addenda below
 - **Found:** 2026-08-04
 - **Severity:** critical (a whole-directory `simple test` run dies at the first
   affected file and reports **no** verdict for the remaining files)
@@ -120,3 +120,52 @@ Workaround for measurement in the meantime: run each spec directly,
 file, minus the crashing output parser, and it agrees file-for-file with the
 runner where the runner survives (verified on
 `test/00_formal_verification/compiler`, 16 files).
+
+## Addendum 2026-11-11 (lane interp6) — SUPERSEDED
+
+**Verdict: SUPERSEDED — fixed on origin/release/1.0.0.**
+
+The three receiver matches in
+`src/compiler_rust/compiler/src/interpreter/expr/collections.rs` now all carry
+`Value::StrBytes` arms: scalar index (~line 691, byte-indexed, negative-index
+normalisation), the step-slice length match (~line 877) and step-slice dispatch
+(~line 1019), plus the range-index path — each with a comment citing the
+"cannot index/slice value of type str" abort this record documents. Bracket
+forms and the method lane now agree on StrBytes values.
+
+Fixing commit on this branch: `9e7e7a526edb43ab29171d920449367e5fd48127`
+(2026-11-07, squash-merge of PR #7597) — confirmed by
+`git log -S 'StrBytes(bytes) =>' -- .../collections.rs`.
+
+**Seed-smoke verification (refreshed seed, build-commit 0791c2b7f4a7):** the
+record's minimal repro plus the step-slice and scalar forms, plain run mode
+(`build/p3fix-interp6/fx/strbytes.spl`, gitignored):
+
+```
+val a = "日本語"; val b = a[0:2]; val c = b[0:1]   # the exact abort shape
+SIMPLE_LIB=src SIMPLE_EXECUTION_MODE=interpreter ./bin/simple.exe run strbytes.spl
+b.len=2   c.len=1   d.len=2 (a[0:6:2])   scalar=1 (b[0])
+```
+
+All four print the expected values; the second-slice abort
+(`cannot slice value of type str with step`) and the scalar sibling
+(`cannot index value of type str`) no longer fire.
+
+
+## Addendum 2026-11-11 (lane int9) — header flip; int9-firsthand seed-smoke confirms interp6 verdict
+
+Header Status flipped OPEN -> SUPERSEDED. Absorber unchanged:
+`9e7e7a526edb43ab29171d920449367e5fd48127` (2026-11-07, squash-merge of
+PR #7597) — the `Value::StrBytes` receiver arms in
+`src/compiler_rust/compiler/src/interpreter/expr/collections.rs` (present in
+tree at HEAD `9f3df4c125ad`).
+
+int9 re-verified on this lane's tracked seed (`bin/simple.exe`,
+build-commit `46fe8f6b6def`, `--mode=interpreter --no-cache`), scratch spec
+`build/p3fix-int9/int9_seed_smoke_spec.spl` (build/, gitignored): the record's
+exact repro shape — `val b = "日本語"[0:2]` (mid-codepoint split producing
+StrBytes), second slice `b[0:1]`, scalar index `b[0]`, and step-slice
+`"日本語"[0:6:2]` — asserts `len` 2 / 1 / 1 / 2; 4/4 examples PASS (the
+StrBytes example green; the other examples cover the sibling rows listed
+there). Neither `cannot slice value of type str with step` nor
+`cannot index value of type str` fires on this binary.

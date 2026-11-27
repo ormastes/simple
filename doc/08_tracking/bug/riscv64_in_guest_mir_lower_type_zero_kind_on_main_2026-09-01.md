@@ -1,6 +1,6 @@
 # riscv64 in-guest: MIR lowering rejects `main` with a raw-0 HirType kind
 
-- Status: **OPEN** — the current blocker for goal item 1 row 2, and a NEW one.
+- Status: **FIXED** 2026-11-11 — repair verified live at tip by p3-boot12; pinned guard-script classifier drift found and fixed in the same lane
 - Date: 2026-09-01
 - Lane: `scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs`
   row 2 (`buildrun`)
@@ -170,3 +170,97 @@ callee `add` from `main`'s body. That is a separate defect — row 1
 (`interpreter_hello`) is green but its program never makes a cross-function
 call, so nothing on this lane had exercised callee resolution before. Filed as
 the row's next blocker; it is NOT a regression of this fix.
+
+---
+
+## RE-VERIFIED at tip 2026-11-05 (release/1.0.0 lane `work/riscv-inguest-20261105`)
+
+Classification: **already fixed at tip; no change made.** The RESOLVED
+section above is confirmed against current source; the fix and its guard
+are both present and green.
+
+Source re-read (`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:1559`,
+`match_result_mir_type`): the function carries the exact documented repair —
+a formation guard (`expected_found == nil` and
+`hir_type_kind_discriminant(expected_found.kind) < 0`) before the
+`.kind` dereference, routing a miscompiled extraction to the same
+`MirType.i64()` returned for an absent expected type, with the measured
+in-guest probe (`calls=5 site=switch_operators_calls:839`, nonce-era)
+recorded in its comment.
+
+Commands run and outcomes (all on this host, Rust seed
+`src/compiler_rust/target/bootstrap/simple`):
+
+* `sh scripts/check/check-rv64-match-result-type-guarded.shs`
+  -> `PASS — 1 site checked, match_result_mir_type guards its if-val
+  extraction before dereferencing`; selftest `OK (8 fixtures)`.
+* `<seed> test test/01_unit/compiler/bootstrap/zerokind_nil_optional_aggregate_invariant_spec.spl --mode=interpreter`
+  -> `4 examples, 0 failures` (the ZeroKind-family platform invariants the
+  fix relies on hold hosted).
+
+A hosted end-to-end driver replaying the buildrun pipeline (frontend ->
+HIR -> `MirLowering.lower_module` -> interpret the `add(40,2)` program)
+reached `phase=mir-ok` but the seed then failed to type-check the
+release-branch interpreter's internal `self.call_hir_function` call — a
+seed-vs-branch skew artifact in the ad-hoc driver, not a defect in the
+fix; the pinned guard and the unit spec above are the authoritative
+hosted evidence. The behavioural in-guest half (real OpenSBI boot) is
+not re-run here; the guard's transcript mode plus the original measured
+nonce runs remain the in-guest evidence of record.
+
+
+## Triage 2026-11-11 (P3 boot12 lane, work/p3-boot12-20261111)
+
+**Verdict: FIXED — the documented repair is live at this base and re-verified
+first-hand; a pinned-guard-script drift found during verification is fixed in
+this lane (companion commit).**
+
+- Source re-read: `match_result_mir_type`
+  (`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:1672-1712`)
+  carries both formation guards — `if expected_found == None:` (:1703) and
+  `if hir_type_kind_discriminant(expected_found.kind) < 0:` (:1705) — before
+  the `.kind` match, with the measured in-guest probe comment intact.
+- Seed-smoke (fresh seed 46fe8f6b6def, label seed-smoke, 2026-11-11):
+  `SIMPLE_LIB=src bin/simple.exe test
+  test/01_unit/compiler/bootstrap/zerokind_nil_optional_aggregate_invariant_spec.spl
+  --mode=interpreter --no-cache` → `Results: 4 total, 4 passed, 0 failed`.
+- NEW FINDING, fixed in this lane:
+  `scripts/check/check-rv64-match-result-type-guarded.shs` (wired at
+  `.github/workflows/code-idiom-gates.yml:1213`) was falsely RED at this
+  base. Source drift d5943d124053 (`nil` → `None` across src/compiler/50.mir)
+  plus the discriminant-helper guard idiom introduced by later merges are not
+  recognized by the classifier's `== (0|nil):` regex, so the ratchet cried
+  wolf on the exact fix it pins (run 2026-11-11, pre-fix: FAIL / rc=1).
+  Classifier extended to accept `== None` and
+  `hir_type_kind_discriminant(<bound>.kind) < 0`, with two new must-PASS
+  selftest fixtures for the drifted shapes (selftest 8 → 10 fixtures).
+  Re-run post-fix: selftest OK (10 fixtures), source mode PASS (rc=0), and
+  still RED (rc=1) on a synthetic unguarded body — the ratchet keeps its
+  original sensitivity.
+
+The behavioural in-guest half (real OpenSBI boot) is not re-run here, per the
+2026-11-05 lane's scope note; the pinned guard plus the hosted unit spec
+remain the authoritative hosted evidence.
+
+## 2026-11-11 — FIXED confirmed (lane p3-comp12, row 4)
+
+Independent confirmation at this lane's base (6233df4b9f9ea, tracked seed
+46fe8f6b6def — the same seed boot12 smoked today, so the 4/4 unit-spec green
+was NOT re-run per the no-green-rerun rule):
+
+- boot12's companion classifier fix 2c2471ad5d411
+  ("fix(scripts): repair rv64 zero-kind guard ratchet classifier drift") is
+  the tip commit touching the pinned guard script in this lineage.
+- Source re-read at this base: `match_result_mir_type`
+  (src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:1703-1706)
+  carries both formation guards (`if expected_found == None:`,
+  `if hir_type_kind_discriminant(expected_found.kind) < 0:`) before the
+  `.kind` match, routing a miscompiled extraction to `MirType.i64()`.
+- Fresh run of the row's pinned hosted verification at this base:
+  `sh scripts/check/check-rv64-match-result-type-guarded.shs` → selftest OK
+  (10 fixtures, including the two drift shapes boot12 added), source mode
+  PASS — "1 site checked, match_result_mir_type guards its if-val extraction
+  before dereferencing".
+- The behavioural in-guest half (real OpenSBI boot) remains as recorded by
+  the nonce-era measured runs; not re-run in-lane (QEMU/OpenSBI riscv64 guest
+  outside this lane's bounded budget).

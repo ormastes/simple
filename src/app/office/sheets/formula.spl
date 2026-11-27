@@ -416,7 +416,7 @@ fn _eval_power(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult
 
 fn _eval_unary(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """Parse unary minus: '-' primary | primary"""
-    if pos < tokens.len() and tokens.get(pos) == "-":
+    if pos < tokens.len() and (tokens.get(pos) ?? "") == "-":
         val inner = _eval_primary(tokens, pos + 1, sheet, depth)
         val v = _to_number(inner.value)
         return EvalResult(
@@ -430,19 +430,19 @@ fn _eval_primary(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResu
     if pos >= tokens.len():
         return EvalResult(value: CellValue.NumberVal(value: 0.0), next_pos: pos)
 
-    val token = tokens.get(pos)
+    val token = (tokens.get(pos) ?? "")
 
     # Parenthesized expression
     if token == "(":
         val inner = _eval_concat(tokens, pos + 1, sheet, depth)
         var end_pos = inner.next_pos
-        if end_pos < tokens.len() and tokens.get(end_pos) == ")":
+        if end_pos < tokens.len() and (tokens.get(end_pos) ?? "") == ")":
             end_pos = end_pos + 1
         return EvalResult(value: inner.value, next_pos: end_pos)
 
     # String literal
     if token.starts_with("\""):
-        val str_content = token.substring(1, token.len() - 1)
+        val str_content = token.substring(1, token.byte_len() - 1)
         return EvalResult(
             value: CellValue.TextVal(value: str_content),
             next_pos: pos + 1
@@ -460,7 +460,7 @@ fn _eval_primary(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResu
     if _is_alpha(token.char_at(0)):
         val upper_token = token.upper()
         # Check if this is a function call: NAME(
-        if pos + 1 < tokens.len() and tokens.get(pos + 1) == "(":
+        if pos + 1 < tokens.len() and (tokens.get(pos + 1) ?? "") == "(":
             return _eval_function_call(_canonical_name(upper_token), tokens, pos + 2, sheet, depth)
         # Boolean literals
         if upper_token == "TRUE":
@@ -469,18 +469,18 @@ fn _eval_primary(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResu
             return EvalResult(value: CellValue.BoolVal(value: false), next_pos: pos + 1)
         # Otherwise it's a cell reference (possibly with range via colon)
         # Check if next token is ':' for a range
-        if pos + 1 < tokens.len() and tokens.get(pos + 1) == ":":
+        if pos + 1 < tokens.len() and (tokens.get(pos + 1) ?? "") == ":":
             if pos + 2 < tokens.len():
                 # This is a range reference like A1:B3 — return the first cell value
                 val ref_val = parse_cell_ref(upper_token)
-                if ref_val != nil:
+                if ref_val.is_some():
                     val v = _resolve_cell_value(upper_token, sheet, depth + 1)
                     return EvalResult(
                         value: CellValue.NumberVal(value: v),
                         next_pos: pos + 3  # skip ref, colon, ref
                     )
         val ref_val = parse_cell_ref(upper_token)
-        if ref_val != nil:
+        if ref_val.is_some():
             val v = _resolve_cell_value(upper_token, sheet, depth + 1)
             return EvalResult(
                 value: CellValue.NumberVal(value: v),
@@ -566,7 +566,7 @@ fn _parse_complex(s_in: text) -> [f64]:
         return [0.0, 0.0]
     if not s.ends_with("i"):
         return [s.to_f64(), 0.0]
-    val body = s.slice(0, s.len() - 1)
+    val body = s.slice(0, s.byte_len() - 1)
     # find the sign separating re and im (skip index 0)
     var split = -1
     var i = body.len() - 1
@@ -586,7 +586,7 @@ fn _parse_complex(s_in: text) -> [f64]:
         return [0.0, im_only]
     val re_txt = body.slice(0, split)
     val re = re_txt.to_f64()
-    val im_txt = body.slice(split, body.len())
+    val im_txt = body.slice(split, body.byte_len())
     if im_txt == "+":
         return [re, 1.0]
     if im_txt == "-":
@@ -599,25 +599,25 @@ fn _eval_text_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
     refs, string literals, and numbers all work. pos = first token after '('."""
     var args: [text] = []
     var cur_pos = pos
-    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
-        val tok = tokens.get(cur_pos)
-        val next_tok = if cur_pos + 1 < tokens.len(): tokens.get(cur_pos + 1) else: ""
+    while cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") != ")":
+        val tok = (tokens.get(cur_pos) ?? "")
+        val next_tok = if cur_pos + 1 < tokens.len(): (tokens.get(cur_pos + 1) ?? "") else: ""
         if tok.starts_with("\""):
             # String literal: strip the tokenizer's surrounding quotes.
             # slice() is codepoint-indexed but len() is byte-based, so for
             # multibyte literals slice(1, len-1) leaves the closing quote
             # attached — strip the trailing quote by codepoint count instead.
-            var lit = tok.slice(1, tok.len())
+            var lit = tok.slice(1, tok.byte_len())
             if lit.ends_with("\""):
                 lit = lit.slice(0, _text_cp_len(lit) - 1)
             args.push(lit)
             cur_pos = cur_pos + 1
         elif (_is_cell_ref_token(tok) and next_tok == ":" and
-              cur_pos + 2 < tokens.len() and _is_cell_ref_token(tokens.get(cur_pos + 2))):
+              cur_pos + 2 < tokens.len() and _is_cell_ref_token((tokens.get(cur_pos + 2) ?? ""))):
             # Range reference: expand to one display-string arg per cell
             # (TEXTJOIN/CONCAT accept ranges).
-            val range_val = parse_range("{tok}:{tokens.get(cur_pos + 2)}")
-            if range_val != nil:
+            val range_val = parse_range("{tok}:{tokens[cur_pos + 2]}")
+            if range_val.is_some():
                 for ref_str in expand_range_refs(range_val):
                     args.push(cell_display_text(sheet.get_cell(ref_str)))
             cur_pos = cur_pos + 3
@@ -630,9 +630,9 @@ fn _eval_text_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
             val result = _eval_comparison(tokens, cur_pos, sheet, depth)
             args.push(_cell_value_to_display(result.value))
             cur_pos = result.next_pos
-        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
             cur_pos = cur_pos + 1
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ")":
         cur_pos = cur_pos + 1
     EvalResult(value: _dispatch_text_function(name, args), next_pos: cur_pos)
 
@@ -824,7 +824,7 @@ fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
         return CellValue.TextVal(value: s.slice(0, n))
     if name == "RIGHT":
         val n = _clamp_i32(_arg_int(args, 1), 0, s.len())
-        return CellValue.TextVal(value: s.slice(s.len() - n, s.len()))
+        return CellValue.TextVal(value: s.slice(s.byte_len() - n, s.byte_len()))
     if name == "MID":
         # 1-based start, length
         val start = _clamp_i32(_arg_int(args, 1) - 1, 0, s.len())
@@ -847,7 +847,7 @@ fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
         val at = _find_nth_delim(s, delim, inst)
         if at < 0:
             return CellValue.ErrorVal(message: "#N/A: TEXTAFTER delimiter not found")
-        return CellValue.TextVal(value: s.slice(at + delim.len(), s.len()))
+        return CellValue.TextVal(value: s.slice(at + delim.len(), s.byte_len()))
     if name == "ARRAYTOTEXT":
         # A range expands to one display-string arg per cell in _eval_text_function;
         # join them comma+space per Excel's format-0 ARRAYTOTEXT.
@@ -932,12 +932,12 @@ fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
         var have_ampm = false
         if tv.ends_with(" AM"):
             have_ampm = true
-            tv = tv.substring(0, tv.len() - 3)
+            tv = tv.substring(0, tv.byte_len() - 3)
         else:
             if tv.ends_with(" PM"):
                 have_ampm = true
                 pm = true
-                tv = tv.substring(0, tv.len() - 3)
+                tv = tv.substring(0, tv.byte_len() - 3)
         tv = tv.trim()
         val tparts = tv.split(":")
         if tparts.len() < 2 or tparts.len() > 3:
@@ -1150,7 +1150,7 @@ fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
         val start = _clamp_i32(_arg_int(args, 1) - 1, 0, s.len())
         val num = _clamp_i32(_arg_int(args, 2), 0, s.len() - start)
         val rep = if args.len() > 3: args[3] else: ""
-        return CellValue.TextVal(value: "{s.slice(0, start)}{rep}{s.slice(start + num, s.len())}")
+        return CellValue.TextVal(value: "{s.slice(0, start)}{rep}{s.slice(start + num, s.byte_len())}")
     if name == "SEARCH" or name == "FIND":
         # SEARCH is case-insensitive; FIND is case-sensitive. Both 1-based.
         val within = if args.len() > 1: args[1] else: ""
@@ -1573,21 +1573,21 @@ fn _criteria_matches(display: text, value: f64, criteria: text) -> bool:
     var rhs = criteria
     if criteria.starts_with(">="):
         op = ">="
-        rhs = criteria.slice(2, criteria.len())
+        rhs = criteria.slice(2, criteria.byte_len())
     elif criteria.starts_with("<="):
         op = "<="
-        rhs = criteria.slice(2, criteria.len())
+        rhs = criteria.slice(2, criteria.byte_len())
     elif criteria.starts_with("<>"):
         op = "<>"
-        rhs = criteria.slice(2, criteria.len())
+        rhs = criteria.slice(2, criteria.byte_len())
     elif criteria.starts_with(">"):
         op = ">"
-        rhs = criteria.slice(1, criteria.len())
+        rhs = criteria.slice(1, criteria.byte_len())
     elif criteria.starts_with("<"):
         op = "<"
-        rhs = criteria.slice(1, criteria.len())
+        rhs = criteria.slice(1, criteria.byte_len())
     elif criteria.starts_with("="):
-        rhs = criteria.slice(1, criteria.len())
+        rhs = criteria.slice(1, criteria.byte_len())
     val rhs_num = rhs.to_f64()
     val rhs_is_num = rhs_num != 0.0 or rhs.trim() == "0" or rhs.trim().starts_with("0.")
     if op == ">":
@@ -1609,31 +1609,31 @@ fn _criteria_matches(display: text, value: f64, criteria: text) -> bool:
 fn _eval_criteria_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """COUNTIF/SUMIF/AVERAGEIF: (range, criteria[, sum_range])."""
     # range
-    if not (pos + 2 < tokens.len() and tokens.get(pos + 1) == ":"):
+    if not (pos + 2 < tokens.len() and (tokens.get(pos + 1) ?? "") == ":"):
         return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a range"), next_pos: pos)
-    val range_str = "{tokens.get(pos)}:{tokens.get(pos + 2)}"
+    val range_str = "{tokens[pos]}:{tokens[pos + 2]}"
     var cur_pos = pos + 3
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
         cur_pos = cur_pos + 1
     # criteria: quoted string or number token
     if cur_pos >= tokens.len():
         return EvalResult(value: CellValue.ErrorVal(message: "{name} requires criteria"), next_pos: cur_pos)
-    var criteria = tokens.get(cur_pos)
+    var criteria = (tokens.get(cur_pos) ?? "")
     if criteria.starts_with("\""):
-        criteria = criteria.slice(1, criteria.len() - 1)
+        criteria = criteria.slice(1, criteria.byte_len() - 1)
     cur_pos = cur_pos + 1
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
         cur_pos = cur_pos + 1
     # optional sum range
     var sum_range = range_str
-    if cur_pos + 2 < tokens.len() and tokens.get(cur_pos + 1) == ":" and _is_cell_ref_token(tokens.get(cur_pos)):
-        sum_range = "{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}"
+    if cur_pos + 2 < tokens.len() and (tokens.get(cur_pos + 1) ?? "") == ":" and _is_cell_ref_token((tokens.get(cur_pos) ?? "")):
+        sum_range = "{tokens[cur_pos]}:{tokens[cur_pos + 2]}"
         cur_pos = cur_pos + 3
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ")":
         cur_pos = cur_pos + 1
     val range_val = parse_range(range_str)
     val sum_val = parse_range(sum_range)
-    if range_val == nil or sum_val == nil:
+    if range_val.is_none() or sum_val.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid range"), next_pos: cur_pos)
     val refs = expand_range_refs(range_val)
     val sum_refs = expand_range_refs(sum_val)
@@ -1677,39 +1677,39 @@ fn _eval_ifs_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth:
     val has_value = name != "COUNTIFS"
     var value_refs: [text] = []
     if has_value:
-        if not (cur_pos + 2 < tokens.len() and tokens.get(cur_pos + 1) == ":"):
+        if not (cur_pos + 2 < tokens.len() and (tokens.get(cur_pos + 1) ?? "") == ":"):
             return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a value range"), next_pos: cur_pos)
-        val vr = "{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}"
+        val vr = "{tokens[cur_pos]}:{tokens[cur_pos + 2]}"
         val vrange = parse_range(vr)
-        if vrange == nil:
+        if vrange.is_none():
             return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid range"), next_pos: cur_pos)
         value_refs = expand_range_refs(vrange)
         cur_pos = cur_pos + 3
-        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
             cur_pos = cur_pos + 1
     var crit_ranges: [[text]] = []
     var criterias: [text] = []
-    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
-        if not (cur_pos + 2 < tokens.len() and tokens.get(cur_pos + 1) == ":"):
+    while cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") != ")":
+        if not (cur_pos + 2 < tokens.len() and (tokens.get(cur_pos + 1) ?? "") == ":"):
             return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a criteria range"), next_pos: cur_pos)
-        val cr = "{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}"
+        val cr = "{tokens[cur_pos]}:{tokens[cur_pos + 2]}"
         val crange = parse_range(cr)
-        if crange == nil:
+        if crange.is_none():
             return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid range"), next_pos: cur_pos)
         crit_ranges.push(expand_range_refs(crange))
         cur_pos = cur_pos + 3
-        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
             cur_pos = cur_pos + 1
-        if cur_pos >= tokens.len() or tokens.get(cur_pos) == ")":
+        if cur_pos >= tokens.len() or (tokens.get(cur_pos) ?? "") == ")":
             return EvalResult(value: CellValue.ErrorVal(message: "{name} requires criteria"), next_pos: cur_pos)
-        var crit = tokens.get(cur_pos)
+        var crit = (tokens.get(cur_pos) ?? "")
         if crit.starts_with("\""):
-            crit = crit.slice(1, crit.len() - 1)
+            crit = crit.slice(1, crit.byte_len() - 1)
         criterias.push(crit)
         cur_pos = cur_pos + 1
-        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
             cur_pos = cur_pos + 1
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ")":
         cur_pos = cur_pos + 1
     if crit_ranges.len() == 0:
         return EvalResult(value: CellValue.ErrorVal(message: "{name} requires criteria"), next_pos: cur_pos)
@@ -1770,17 +1770,17 @@ fn _eval_ifs_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth:
 
 fn _eval_count_range_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """COUNTA counts non-empty cells; COUNTBLANK counts empty cells in a range."""
-    if not (pos + 2 < tokens.len() and tokens.get(pos + 1) == ":"):
+    if not (pos + 2 < tokens.len() and (tokens.get(pos + 1) ?? "") == ":"):
         return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a range"), next_pos: pos)
-    val rs = "{tokens.get(pos)}:{tokens.get(pos + 2)}"
+    val rs = "{tokens[pos]}:{tokens[pos + 2]}"
     var cur_pos = pos + 3
     val rng = parse_range(rs)
-    if rng == nil:
+    if rng.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid range"), next_pos: cur_pos)
     val refs = expand_range_refs(rng)
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
         cur_pos = cur_pos + 1
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ")":
         cur_pos = cur_pos + 1
     var count = 0
     var i = 0
@@ -1947,31 +1947,31 @@ fn _eval_aggregate(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalRe
     val fr = _eval_comparison(tokens, cur_pos, sheet, depth)
     val fnum = _to_number(fr.value).to_i64()
     cur_pos = fr.next_pos
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
         cur_pos = cur_pos + 1
     val opr = _eval_comparison(tokens, cur_pos, sheet, depth)
     val opts = _to_number(opr.value).to_i64()
     cur_pos = opr.next_pos
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
         cur_pos = cur_pos + 1
-    if not (cur_pos + 2 < tokens.len() and tokens.get(cur_pos + 1) == ":"):
+    if not (cur_pos + 2 < tokens.len() and (tokens.get(cur_pos + 1) ?? "") == ":"):
         return EvalResult(value: CellValue.ErrorVal(message: "AGGREGATE requires a range"), next_pos: cur_pos)
-    val rng = parse_range("{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}")
+    val rng = parse_range("{tokens[cur_pos]}:{tokens[cur_pos + 2]}")
     cur_pos = cur_pos + 3
     var has_k = false
     var k_val = 0.0
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
         cur_pos = cur_pos + 1
-        if cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+        if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") != ")":
             val kr = _eval_comparison(tokens, cur_pos, sheet, depth)
             k_val = _to_number(kr.value)
             has_k = true
             cur_pos = kr.next_pos
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
         cur_pos = cur_pos + 1
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ")":
         cur_pos = cur_pos + 1
-    if rng == nil:
+    if rng.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "AGGREGATE invalid range"), next_pos: cur_pos)
     if fnum < 1 or fnum > 19:
         return EvalResult(value: CellValue.ErrorVal(message: "AGGREGATE function_num must be 1-19"), next_pos: cur_pos)
@@ -1984,7 +1984,7 @@ fn _eval_aggregate(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalRe
         var hidden = false
         if skip_hidden:
             val ref_val = parse_cell_ref(ref_str)
-            if ref_val != nil:
+            if ref_val.is_some():
                 hidden = sheet.is_row_hidden((ref_val.row + 1).to_i64())
         if not hidden:
             val cell = sheet.get_cell(ref_str)
@@ -2012,14 +2012,14 @@ fn _resolve_cell_range_subtotal(range_str: text, sheet: Sheet, depth: i32, skip_
     resolved to 0) so AutoFilter + SUBTOTAL(109,...) composes correctly."""
     var values: [f64] = []
     val range = parse_range(range_str)
-    if range == nil:
+    if range.is_none():
         return values
     val refs = expand_range_refs(range)
     for ref_str in refs:
         var include = true
         if skip_hidden:
             val ref_val = parse_cell_ref(ref_str)
-            if ref_val != nil:
+            if ref_val.is_some():
                 if sheet.is_row_hidden((ref_val.row + 1).to_i64()):
                     include = false
         if include:
@@ -2041,19 +2041,19 @@ fn _eval_subtotal(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalRes
     val fr = _eval_comparison(tokens, cur_pos, sheet, depth)
     var fnum = _to_number(fr.value).to_i64()
     cur_pos = fr.next_pos
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
         cur_pos = cur_pos + 1
     var skip_hidden = false
     if fnum >= 101 and fnum <= 111:
         skip_hidden = true
         fnum = fnum - 100
     var args: [[f64]] = []
-    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+    while cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") != ")":
         if (cur_pos + 2 < tokens.len() and
-            tokens.get(cur_pos + 1) == ":" and
-            _is_cell_ref_token(tokens.get(cur_pos)) and
-            _is_cell_ref_token(tokens.get(cur_pos + 2))):
-            val range_str = "{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}"
+            (tokens.get(cur_pos + 1) ?? "") == ":" and
+            _is_cell_ref_token((tokens.get(cur_pos) ?? "")) and
+            _is_cell_ref_token((tokens.get(cur_pos + 2) ?? ""))):
+            val range_str = "{tokens[cur_pos]}:{tokens[cur_pos + 2]}"
             val values = _resolve_cell_range_subtotal(range_str, sheet, depth, skip_hidden)
             args.push(values)
             cur_pos = cur_pos + 3
@@ -2062,9 +2062,9 @@ fn _eval_subtotal(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalRes
             val num_val = _to_number(result.value)
             args.push([num_val])
             cur_pos = result.next_pos
-        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
             cur_pos = cur_pos + 1
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ")":
         cur_pos = cur_pos + 1
     if fnum < 1 or fnum > 11:
         return EvalResult(value: CellValue.ErrorVal(message: "SUBTOTAL function_num out of range"), next_pos: cur_pos)
@@ -2095,11 +2095,11 @@ fn _eval_a_variant_function(name: text, tokens: [text], pos: i32, sheet: Sheet, 
     and scalar arguments (scalars are always countable)."""
     var vals: [f64] = []
     var cur_pos = pos
-    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
-        if (cur_pos + 2 < tokens.len() and tokens.get(cur_pos + 1) == ":" and
-            _is_cell_ref_token(tokens.get(cur_pos)) and _is_cell_ref_token(tokens.get(cur_pos + 2))):
-            val rng = parse_range("{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}")
-            if rng != nil:
+    while cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") != ")":
+        if (cur_pos + 2 < tokens.len() and (tokens.get(cur_pos + 1) ?? "") == ":" and
+            _is_cell_ref_token((tokens.get(cur_pos) ?? "")) and _is_cell_ref_token((tokens.get(cur_pos + 2) ?? ""))):
+            val rng = parse_range("{tokens[cur_pos]}:{tokens[cur_pos + 2]}")
+            if rng.is_some():
                 for ref_str in expand_range_refs(rng):
                     val cell = sheet.get_cell(ref_str)
                     if cell_display_text(cell) != "":
@@ -2110,8 +2110,8 @@ fn _eval_a_variant_function(name: text, tokens: [text], pos: i32, sheet: Sheet, 
                                 vals.push(_a_value_of(cell.value))
             cur_pos = cur_pos + 3
         else:
-            val tok = tokens.get(cur_pos)
-            val next_tok = if cur_pos + 1 < tokens.len(): tokens.get(cur_pos + 1) else: ""
+            val tok = (tokens.get(cur_pos) ?? "")
+            val next_tok = if cur_pos + 1 < tokens.len(): (tokens.get(cur_pos + 1) ?? "") else: ""
             if _is_cell_ref_token(tok) and (next_tok == "," or next_tok == ")"):
                 val cell = sheet.get_cell(tok)
                 if cell_display_text(cell) != "":
@@ -2125,9 +2125,9 @@ fn _eval_a_variant_function(name: text, tokens: [text], pos: i32, sheet: Sheet, 
                 val r = _eval_comparison(tokens, cur_pos, sheet, depth)
                 vals.push(_a_value_of(r.value))
                 cur_pos = r.next_pos
-        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
             cur_pos = cur_pos + 1
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ")":
         cur_pos = cur_pos + 1
     EvalResult(value: _dispatch_a_variant(name, vals), next_pos: cur_pos)
 
@@ -2177,10 +2177,10 @@ struct LookupArg:
 
 fn _lookup_value_arg(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> LookupArg:
     """One lookup argument: quoted string, bare cell ref, or numeric expr."""
-    val tok = tokens.get(pos)
-    val next_tok = if pos + 1 < tokens.len(): tokens.get(pos + 1) else: ""
+    val tok = (tokens.get(pos) ?? "")
+    val next_tok = if pos + 1 < tokens.len(): (tokens.get(pos + 1) ?? "") else: ""
     if tok.starts_with("\""):
-        return LookupArg(display: tok.slice(1, tok.len() - 1), num: 0.0, next_pos: pos + 1)
+        return LookupArg(display: tok.slice(1, tok.byte_len() - 1), num: 0.0, next_pos: pos + 1)
     if _is_cell_ref_token(tok) and (next_tok == "," or next_tok == ")"):
         val cell = sheet.get_cell(tok)
         return LookupArg(display: cell_display_text(cell), num: _to_number(cell.value), next_pos: pos + 1)
@@ -2198,7 +2198,7 @@ fn _lookup_eq(needle_display: text, needle_num: f64, cell: Cell) -> bool:
             return false
 
 fn _skip_comma(tokens: [text], pos: i32) -> i32:
-    if pos < tokens.len() and tokens.get(pos) == ",":
+    if pos < tokens.len() and (tokens.get(pos) ?? "") == ",":
         return pos + 1
     pos
 
@@ -2211,24 +2211,24 @@ fn _eval_lookup_function(name: text, tokens: [text], pos: i32, sheet: Sheet, dep
         needle = _lookup_value_arg(tokens, cur_pos, sheet, depth)
         cur_pos = _skip_comma(tokens, needle.next_pos)
     # range
-    if not (cur_pos + 2 < tokens.len() and tokens.get(cur_pos + 1) == ":"):
+    if not (cur_pos + 2 < tokens.len() and (tokens.get(cur_pos + 1) ?? "") == ":"):
         return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a range"), next_pos: cur_pos)
-    val range_val = parse_range("{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}")
+    val range_val = parse_range("{tokens[cur_pos]}:{tokens[cur_pos + 2]}")
     cur_pos = _skip_comma(tokens, cur_pos + 3)
-    if range_val == nil:
+    if range_val.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid range"), next_pos: cur_pos)
     # trailing numeric args (col/row indexes); ignore an optional FALSE/0 flag
     var idx1 = 1
     var idx2 = 1
-    if cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") != ")":
         val a1 = _eval_comparison(tokens, cur_pos, sheet, depth)
         idx1 = _to_number(a1.value).to_i64().to_i32()
         cur_pos = _skip_comma(tokens, a1.next_pos)
-    if cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") != ")":
         val a2 = _eval_comparison(tokens, cur_pos, sheet, depth)
         idx2 = _to_number(a2.value).to_i64().to_i32()
         cur_pos = _skip_comma(tokens, a2.next_pos)
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ")":
         cur_pos = cur_pos + 1
     val start = range_val.start
     val end_ref = range_val.end_ref
@@ -2286,16 +2286,16 @@ fn _eval_x_lookup(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32
     val needle = _lookup_value_arg(tokens, cur_pos, sheet, depth)
     cur_pos = _skip_comma(tokens, needle.next_pos)
     # lookup_range / lookup_vector (required)
-    if not (cur_pos + 2 < tokens.len() and tokens.get(cur_pos + 1) == ":"):
+    if not (cur_pos + 2 < tokens.len() and (tokens.get(cur_pos + 1) ?? "") == ":"):
         return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a range"), next_pos: cur_pos)
-    val range1 = parse_range("{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}")
+    val range1 = parse_range("{tokens[cur_pos]}:{tokens[cur_pos + 2]}")
     cur_pos = _skip_comma(tokens, cur_pos + 3)
-    if range1 == nil:
+    if range1.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid range"), next_pos: cur_pos)
     val refs1 = expand_range_refs(range1)
     # XMATCH ends after the single lookup range.
     if name == "XMATCH":
-        if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+        if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ")":
             cur_pos = cur_pos + 1
         var mpos = 1
         for ref_str in refs1:
@@ -2304,25 +2304,25 @@ fn _eval_x_lookup(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32
             mpos = mpos + 1
         return EvalResult(value: CellValue.ErrorVal(message: "XMATCH not found"), next_pos: cur_pos)
     # return_range / result_vector (required for XLOOKUP and LOOKUP)
-    if not (cur_pos + 2 < tokens.len() and tokens.get(cur_pos + 1) == ":"):
+    if not (cur_pos + 2 < tokens.len() and (tokens.get(cur_pos + 1) ?? "") == ":"):
         return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a return range"), next_pos: cur_pos)
-    val range2 = parse_range("{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}")
+    val range2 = parse_range("{tokens[cur_pos]}:{tokens[cur_pos + 2]}")
     cur_pos = _skip_comma(tokens, cur_pos + 3)
-    if range2 == nil:
+    if range2.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid return range"), next_pos: cur_pos)
     val refs2 = expand_range_refs(range2)
     # optional if_not_found (XLOOKUP only)
     var default_val = CellValue.ErrorVal(message: "{name} not found")
-    if name == "XLOOKUP" and cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
-        val dtok = tokens.get(cur_pos)
+    if name == "XLOOKUP" and cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") != ")":
+        val dtok = (tokens.get(cur_pos) ?? "")
         if dtok.starts_with("\""):
-            default_val = CellValue.TextVal(value: dtok.slice(1, dtok.len() - 1))
+            default_val = CellValue.TextVal(value: dtok.slice(1, dtok.byte_len() - 1))
             cur_pos = _skip_comma(tokens, cur_pos + 1)
         else:
             val dr = _eval_comparison(tokens, cur_pos, sheet, depth)
             default_val = dr.value
             cur_pos = _skip_comma(tokens, dr.next_pos)
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ")":
         cur_pos = cur_pos + 1
     if name == "XLOOKUP":
         var i = 0
@@ -2367,17 +2367,17 @@ fn _eval_db_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: 
     """DSUM/DCOUNT/DAVERAGE/DMAX/DMIN/DGET(database, field, criteria).
     Database and criteria ranges carry header rows; field is a quoted header
     name or 1-based column number; conditions AND across criteria columns."""
-    if not (pos + 2 < tokens.len() and tokens.get(pos + 1) == ":"):
+    if not (pos + 2 < tokens.len() and (tokens.get(pos + 1) ?? "") == ":"):
         return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a database range"), next_pos: pos)
-    val db = parse_range("{tokens.get(pos)}:{tokens.get(pos + 2)}")
+    val db = parse_range("{tokens[pos]}:{tokens[pos + 2]}")
     var cur_pos = _skip_comma(tokens, pos + 3)
-    if db == nil:
+    if db.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid database"), next_pos: cur_pos)
     # field: quoted header name or numeric 1-based index
     var field_col = -1
-    val ftok = tokens.get(cur_pos)
+    val ftok = (tokens.get(cur_pos) ?? "")
     if ftok.starts_with("\""):
-        field_col = _db_header_col(sheet, db, ftok.slice(1, ftok.len() - 1))
+        field_col = _db_header_col(sheet, db, ftok.slice(1, ftok.byte_len() - 1))
         cur_pos = _skip_comma(tokens, cur_pos + 1)
     else:
         val fr = _eval_comparison(tokens, cur_pos, sheet, depth)
@@ -2385,13 +2385,13 @@ fn _eval_db_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: 
         cur_pos = _skip_comma(tokens, fr.next_pos)
     if field_col < db.start.col or field_col > db.end_ref.col:
         return EvalResult(value: CellValue.ErrorVal(message: "{name} unknown field"), next_pos: cur_pos)
-    if not (cur_pos + 2 < tokens.len() and tokens.get(cur_pos + 1) == ":"):
+    if not (cur_pos + 2 < tokens.len() and (tokens.get(cur_pos + 1) ?? "") == ":"):
         return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a criteria range"), next_pos: cur_pos)
-    val crit = parse_range("{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}")
+    val crit = parse_range("{tokens[cur_pos]}:{tokens[cur_pos + 2]}")
     cur_pos = cur_pos + 3
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ")":
         cur_pos = cur_pos + 1
-    if crit == nil:
+    if crit.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid criteria"), next_pos: cur_pos)
     var count = 0
     var total = 0.0
@@ -2501,11 +2501,11 @@ fn _eval_info_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
     pos = first token after '('."""
     var args: [CellValue] = []
     var cur_pos = pos
-    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
-        val tok = tokens.get(cur_pos)
-        val next_tok = if cur_pos + 1 < tokens.len(): tokens.get(cur_pos + 1) else: ""
+    while cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") != ")":
+        val tok = (tokens.get(cur_pos) ?? "")
+        val next_tok = if cur_pos + 1 < tokens.len(): (tokens.get(cur_pos + 1) ?? "") else: ""
         if tok.starts_with("\""):
-            args.push(CellValue.TextVal(value: tok.slice(1, tok.len() - 1)))
+            args.push(CellValue.TextVal(value: tok.slice(1, tok.byte_len() - 1)))
             cur_pos = cur_pos + 1
         elif _is_cell_ref_token(tok) and (next_tok == "," or next_tok == ")"):
             # Bare cell ref: take the raw typed value so ISTEXT/ISBLANK/etc. see
@@ -2521,9 +2521,9 @@ fn _eval_info_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
             val result = _eval_comparison(tokens, cur_pos, sheet, depth)
             args.push(result.value)
             cur_pos = result.next_pos
-        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
             cur_pos = cur_pos + 1
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ")":
         cur_pos = cur_pos + 1
     EvalResult(value: _dispatch_info_function(name, args), next_pos: cur_pos)
 
@@ -2730,9 +2730,9 @@ fn _consume_to_paren(tokens: [text], pos: i32) -> i32:
     functions take only bare refs/ranges (no nested calls), so a flat scan to the
     first ')' is exact."""
     var cur = pos
-    while cur < tokens.len() and tokens.get(cur) != ")":
+    while cur < tokens.len() and (tokens.get(cur) ?? "") != ")":
         cur = cur + 1
-    if cur < tokens.len() and tokens.get(cur) == ")":
+    if cur < tokens.len() and (tokens.get(cur) ?? "") == ")":
         cur = cur + 1
     cur
 
@@ -2762,13 +2762,13 @@ fn _eval_address(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResu
     1-based; fails closed on non-positive row/col or an abs outside 1..4."""
     var nums: [f64] = []
     var cur = pos
-    while cur < tokens.len() and tokens.get(cur) != ")":
+    while cur < tokens.len() and (tokens.get(cur) ?? "") != ")":
         val r = _eval_comparison(tokens, cur, sheet, depth)
         nums.push(_to_number(r.value))
         cur = r.next_pos
-        if cur < tokens.len() and tokens.get(cur) == ",":
+        if cur < tokens.len() and (tokens.get(cur) ?? "") == ",":
             cur = cur + 1
-    if cur < tokens.len() and tokens.get(cur) == ")":
+    if cur < tokens.len() and (tokens.get(cur) ?? "") == ")":
         cur = cur + 1
     if nums.len() < 2:
         return EvalResult(value: CellValue.ErrorVal(message: "ADDRESS requires row and column"), next_pos: cur)
@@ -2806,27 +2806,27 @@ fn _eval_cell_info(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalRe
     The reference argument is required (Excel's last-changed-cell default has
     no analog here); a range argument uses its top-left cell."""
     val end = _consume_to_paren(tokens, pos)
-    val first = tokens.get(pos)
+    val first = (tokens.get(pos) ?? "")
     if not first.starts_with("\""):
         return EvalResult(value: CellValue.ErrorVal(message: "CELL requires a quoted info_type"), next_pos: end)
-    val info = first.slice(1, first.len() - 1).lower()
-    if pos + 2 >= tokens.len() or tokens.get(pos + 1) != ",":
+    val info = first.slice(1, first.byte_len() - 1).lower()
+    if pos + 2 >= tokens.len() or (tokens.get(pos + 1) ?? "") != ",":
         return EvalResult(value: CellValue.ErrorVal(message: "CELL requires a reference argument"), next_pos: end)
-    var ref_tok = tokens.get(pos + 2)
+    var ref_tok = (tokens.get(pos + 2) ?? "")
     if not _is_cell_ref_token(ref_tok):
         return EvalResult(value: CellValue.ErrorVal(message: "CELL requires a reference argument"), next_pos: end)
-    if (pos + 4 < tokens.len() and tokens.get(pos + 3) == ":" and
-        _is_cell_ref_token(tokens.get(pos + 4))):
+    if (pos + 4 < tokens.len() and (tokens.get(pos + 3) ?? "") == ":" and
+        _is_cell_ref_token((tokens.get(pos + 4) ?? ""))):
         # Range argument: act on its top-left cell (Excel behavior).
         val a = parse_cell_ref(ref_tok)
-        val b = parse_cell_ref(tokens.get(pos + 4))
-        if a == nil or b == nil:
+        val b = parse_cell_ref((tokens.get(pos + 4) ?? ""))
+        if a.is_none() or b.is_none():
             return EvalResult(value: CellValue.ErrorVal(message: "CELL bad reference"), next_pos: end)
         val minr = if a.row < b.row: a.row else: b.row
         val minc = if a.col < b.col: a.col else: b.col
         ref_tok = cell_ref_to_string(CellRef(col: minc, row: minr))
     val ref = parse_cell_ref(ref_tok)
-    if ref == nil:
+    if ref.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "CELL bad reference"), next_pos: end)
     if info == "row":
         return EvalResult(value: CellValue.NumberVal(value: (ref.row + 1).to_f64()), next_pos: end)
@@ -2870,25 +2870,25 @@ fn _eval_offset(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResul
     collector only accepts literal REF:REF tokens or scalar expressions).
     #ERR on: bad ref, missing rows/cols, height/width < 1, or a shifted
     coordinate falling above row 1 / left of column A."""
-    if pos >= tokens.len() or not _is_cell_ref_token(tokens.get(pos)):
+    if pos >= tokens.len() or not _is_cell_ref_token((tokens.get(pos) ?? "")):
         val e0 = _consume_to_paren(tokens, pos)
         return EvalResult(value: CellValue.ErrorVal(message: "OFFSET requires a reference argument"), next_pos: e0)
-    val ref = parse_cell_ref(tokens.get(pos))
+    val ref = parse_cell_ref((tokens.get(pos) ?? ""))
     var cur = pos + 1
     # Range reference: use its top-left corner (Excel behavior).
-    if (cur + 1 < tokens.len() and tokens.get(cur) == ":" and
-        _is_cell_ref_token(tokens.get(cur + 1))):
+    if (cur + 1 < tokens.len() and (tokens.get(cur) ?? "") == ":" and
+        _is_cell_ref_token((tokens.get(cur + 1) ?? ""))):
         cur = cur + 2
-    if ref == nil:
+    if ref.is_none():
         val e1 = _consume_to_paren(tokens, pos)
         return EvalResult(value: CellValue.ErrorVal(message: "OFFSET bad reference"), next_pos: e1)
-    if cur >= tokens.len() or tokens.get(cur) != ",":
+    if cur >= tokens.len() or (tokens.get(cur) ?? "") != ",":
         val e2 = _consume_to_paren(tokens, pos)
         return EvalResult(value: CellValue.ErrorVal(message: "OFFSET requires rows and cols"), next_pos: e2)
     cur = cur + 1
     val rr = _eval_comparison(tokens, cur, sheet, depth)
     cur = rr.next_pos
-    if cur >= tokens.len() or tokens.get(cur) != ",":
+    if cur >= tokens.len() or (tokens.get(cur) ?? "") != ",":
         val e3 = _consume_to_paren(tokens, cur)
         return EvalResult(value: CellValue.ErrorVal(message: "OFFSET requires rows and cols"), next_pos: e3)
     cur = cur + 1
@@ -2896,17 +2896,17 @@ fn _eval_offset(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResul
     cur = cc.next_pos
     var height = 1.0
     var width = 1.0
-    if cur < tokens.len() and tokens.get(cur) == ",":
+    if cur < tokens.len() and (tokens.get(cur) ?? "") == ",":
         cur = cur + 1
         val hh = _eval_comparison(tokens, cur, sheet, depth)
         height = _to_number(hh.value)
         cur = hh.next_pos
-    if cur < tokens.len() and tokens.get(cur) == ",":
+    if cur < tokens.len() and (tokens.get(cur) ?? "") == ",":
         cur = cur + 1
         val ww = _eval_comparison(tokens, cur, sheet, depth)
         width = _to_number(ww.value)
         cur = ww.next_pos
-    if cur < tokens.len() and tokens.get(cur) == ")":
+    if cur < tokens.len() and (tokens.get(cur) ?? "") == ")":
         cur = cur + 1
     val hi = height.to_i64().to_i32()
     val wi = width.to_i64().to_i32()
@@ -2923,12 +2923,12 @@ fn _read_ref_text_arg(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> Arr
     """Read INDIRECT's reference-text argument as a display string: a quoted
     literal, a bare cell ref's display text, or an evaluated expression at the
     CONCAT level (so \"A\"&\"1\" builds \"A1\" — '&' binds above comparison)."""
-    if pos >= tokens.len() or tokens.get(pos) == ")" or tokens.get(pos) == ",":
+    if pos >= tokens.len() or (tokens.get(pos) ?? "") == ")" or (tokens.get(pos) ?? "") == ",":
         return ArrTextArg(value: "", next_pos: pos, present: false)
-    val tok = tokens.get(pos)
-    val next_tok = if pos + 1 < tokens.len(): tokens.get(pos + 1) else: ""
+    val tok = (tokens.get(pos) ?? "")
+    val next_tok = if pos + 1 < tokens.len(): (tokens.get(pos + 1) ?? "") else: ""
     if tok.starts_with("\"") and (next_tok == "," or next_tok == ")"):
-        return ArrTextArg(value: tok.slice(1, tok.len() - 1), next_pos: pos + 1, present: true)
+        return ArrTextArg(value: tok.slice(1, tok.byte_len() - 1), next_pos: pos + 1, present: true)
     if _is_cell_ref_token(tok) and (next_tok == "," or next_tok == ")"):
         return ArrTextArg(value: cell_display_text(sheet.get_cell(tok)), next_pos: pos + 1, present: true)
     val r = _eval_concat(tokens, pos, sheet, depth)
@@ -2942,17 +2942,17 @@ fn _eval_indirect(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalRes
     UNSUPPORTED — only A1 notation parses. #ERR on unparseable text."""
     val arg = _read_ref_text_arg(tokens, pos, sheet, depth)
     var cur = arg.next_pos
-    if cur < tokens.len() and tokens.get(cur) == ")":
+    if cur < tokens.len() and (tokens.get(cur) ?? "") == ")":
         cur = cur + 1
     val ref_text = arg.value
     val ref_up = ref_text.trim()
     if ref_up.contains(":"):
         val rng = parse_range(ref_up)
-        if rng == nil:
+        if rng.is_none():
             return EvalResult(value: CellValue.ErrorVal(message: "INDIRECT cannot parse reference '{ref_text}'"), next_pos: cur)
         return EvalResult(value: CellValue.ErrorVal(message: "INDIRECT range form needs array context"), next_pos: cur)
     val ref = parse_cell_ref(ref_up.upper())
-    if ref == nil:
+    if ref.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "INDIRECT cannot parse reference '{ref_text}'"), next_pos: cur)
     val target = cell_ref_to_string(ref)
     EvalResult(value: _ref_target_value(target, sheet, depth), next_pos: cur)
@@ -2977,23 +2977,23 @@ fn _eval_ref_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth:
         # AREAS(ref) = 1 always: this model has no multi-area reference
         # unions (no "(A1:B2,D1:E2)" form), so every valid reference is a
         # single area. Honest stub per the SHEET precedent.
-        if pos < tokens.len() and _is_cell_ref_token(tokens.get(pos)):
+        if pos < tokens.len() and _is_cell_ref_token((tokens.get(pos) ?? "")):
             return EvalResult(value: CellValue.NumberVal(value: 1.0), next_pos: end)
         return EvalResult(value: CellValue.ErrorVal(message: "AREAS requires a reference argument"), next_pos: end)
-    if (name == "ROW" or name == "COLUMN") and tokens.get(pos) == ")":
+    if (name == "ROW" or name == "COLUMN") and (tokens.get(pos) ?? "") == ")":
         if _formula_origin_key.len() == 0:
             return EvalResult(value: CellValue.ErrorVal(message: "{name}() needs a cell context"), next_pos: end)
         val origin = parse_cell_ref(_formula_origin_key)
-        if origin == nil:
+        if origin.is_none():
             return EvalResult(value: CellValue.ErrorVal(message: "{name}() bad origin"), next_pos: end)
         if name == "ROW":
             return EvalResult(value: CellValue.NumberVal(value: (origin.row + 1).to_f64()), next_pos: end)
         return EvalResult(value: CellValue.NumberVal(value: (origin.col + 1).to_f64()), next_pos: end)
-    if (pos + 2 < tokens.len() and tokens.get(pos + 1) == ":" and
-        _is_cell_ref_token(tokens.get(pos)) and _is_cell_ref_token(tokens.get(pos + 2))):
-        val a = parse_cell_ref(tokens.get(pos))
-        val b = parse_cell_ref(tokens.get(pos + 2))
-        if a == nil or b == nil:
+    if (pos + 2 < tokens.len() and (tokens.get(pos + 1) ?? "") == ":" and
+        _is_cell_ref_token((tokens.get(pos) ?? "")) and _is_cell_ref_token((tokens.get(pos + 2) ?? ""))):
+        val a = parse_cell_ref((tokens.get(pos) ?? ""))
+        val b = parse_cell_ref((tokens.get(pos + 2) ?? ""))
+        if a.is_none() or b.is_none():
             return EvalResult(value: CellValue.ErrorVal(message: "{name} bad reference"), next_pos: end)
         val minr = if a.row < b.row: a.row else: b.row
         val maxr = if a.row > b.row: a.row else: b.row
@@ -3009,9 +3009,9 @@ fn _eval_ref_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth:
             return EvalResult(value: CellValue.NumberVal(value: (minc + 1).to_f64()), next_pos: end)
         val tl = cell_ref_to_string(CellRef(col: minc, row: minr))
         return _ref_cell_info(name, tl, sheet, end)
-    if _is_cell_ref_token(tokens.get(pos)):
-        val ref = parse_cell_ref(tokens.get(pos))
-        if ref == nil:
+    if _is_cell_ref_token((tokens.get(pos) ?? "")):
+        val ref = parse_cell_ref((tokens.get(pos) ?? ""))
+        if ref.is_none():
             return EvalResult(value: CellValue.ErrorVal(message: "{name} bad reference"), next_pos: end)
         if name == "ROWS" or name == "COLUMNS":
             return EvalResult(value: CellValue.NumberVal(value: 1.0), next_pos: end)
@@ -3019,7 +3019,7 @@ fn _eval_ref_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth:
             return EvalResult(value: CellValue.NumberVal(value: (ref.row + 1).to_f64()), next_pos: end)
         if name == "COLUMN":
             return EvalResult(value: CellValue.NumberVal(value: (ref.col + 1).to_f64()), next_pos: end)
-        return _ref_cell_info(name, tokens.get(pos), sheet, end)
+        return _ref_cell_info(name, (tokens.get(pos) ?? ""), sheet, end)
     EvalResult(value: CellValue.ErrorVal(message: "{name} requires a reference argument"), next_pos: end)
 
 fn _eval_test_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
@@ -3034,15 +3034,15 @@ fn _eval_test_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
     var rows: [i32] = []
     var cols: [i32] = []
     var cur_pos = pos
-    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
-        if (cur_pos + 2 < tokens.len() and tokens.get(cur_pos + 1) == ":" and
-            _is_cell_ref_token(tokens.get(cur_pos)) and _is_cell_ref_token(tokens.get(cur_pos + 2))):
-            val range_str = "{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}"
+    while cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") != ")":
+        if (cur_pos + 2 < tokens.len() and (tokens.get(cur_pos + 1) ?? "") == ":" and
+            _is_cell_ref_token((tokens.get(cur_pos) ?? "")) and _is_cell_ref_token((tokens.get(cur_pos + 2) ?? ""))):
+            val range_str = "{tokens[cur_pos]}:{tokens[cur_pos + 2]}"
             val v = _resolve_cell_range(range_str, sheet, depth)
-            val a = parse_cell_ref(tokens.get(cur_pos))
-            val b = parse_cell_ref(tokens.get(cur_pos + 2))
+            val a = parse_cell_ref((tokens.get(cur_pos) ?? ""))
+            val b = parse_cell_ref((tokens.get(cur_pos + 2) ?? ""))
             vals.push(v)
-            if a == nil or b == nil:
+            if a.is_none() or b.is_none():
                 rows.push(1)
                 cols.push(1)
             else:
@@ -3059,9 +3059,9 @@ fn _eval_test_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
             rows.push(1)
             cols.push(1)
             cur_pos = result.next_pos
-        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
             cur_pos = cur_pos + 1
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ")":
         cur_pos = cur_pos + 1
     if vals.len() < 2:
         return EvalResult(value: CellValue.ErrorVal(message: "{name} requires two ranges"), next_pos: cur_pos)
@@ -3217,12 +3217,12 @@ fn _eval_registry_function(name: text, tokens: [text], pos: i32, sheet: Sheet, d
     var args: [[f64]] = []
     var cur_pos = pos
 
-    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+    while cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") != ")":
         if (cur_pos + 2 < tokens.len() and
-            tokens.get(cur_pos + 1) == ":" and
-            _is_cell_ref_token(tokens.get(cur_pos)) and
-            _is_cell_ref_token(tokens.get(cur_pos + 2))):
-            val range_str = "{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}"
+            (tokens.get(cur_pos + 1) ?? "") == ":" and
+            _is_cell_ref_token((tokens.get(cur_pos) ?? "")) and
+            _is_cell_ref_token((tokens.get(cur_pos + 2) ?? ""))):
+            val range_str = "{tokens[cur_pos]}:{tokens[cur_pos + 2]}"
             val values = _resolve_cell_range(range_str, sheet, depth)
             args.push(values)
             cur_pos = cur_pos + 3
@@ -3232,10 +3232,10 @@ fn _eval_registry_function(name: text, tokens: [text], pos: i32, sheet: Sheet, d
             args.push([num_val])
             cur_pos = result.next_pos
 
-        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
             cur_pos = cur_pos + 1
 
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ")":
         cur_pos = cur_pos + 1
 
     val outcome = sheet_function_registry_evaluate(name, args, sheet)
@@ -3307,18 +3307,18 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
     if name == "PERCENTILE.EXC" or name == "QUARTILE.EXC":
         # (range, k) — the AGGREGATE k-form cores (fnum 18/19) already
         # implement both; standalone names just parse their own arguments.
-        if not (pos + 2 < tokens.len() and tokens.get(pos + 1) == ":"):
+        if not (pos + 2 < tokens.len() and (tokens.get(pos + 1) ?? "") == ":"):
             return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a range"), next_pos: pos)
-        val range_str = "{tokens.get(pos)}:{tokens.get(pos + 2)}"
+        val range_str = "{tokens[pos]}:{tokens[pos + 2]}"
         var cur_kf = pos + 3
-        if cur_kf < tokens.len() and tokens.get(cur_kf) == ",":
+        if cur_kf < tokens.len() and (tokens.get(cur_kf) ?? "") == ",":
             cur_kf = cur_kf + 1
         val kr = _eval_comparison(tokens, cur_kf, sheet, depth)
         # QUARTILE.EXC takes the raw quart 1..3; _aggregate_kform's fnum-19
         # arm maps it to k = quart/4 itself -- do not pre-divide.
         val k = _to_number(kr.value)
         cur_kf = kr.next_pos
-        if cur_kf < tokens.len() and tokens.get(cur_kf) == ")":
+        if cur_kf < tokens.len() and (tokens.get(cur_kf) ?? "") == ")":
             cur_kf = cur_kf + 1
         val vals = _resolve_cell_range(range_str, sheet, depth)
         return EvalResult(value: _aggregate_kform(if name == "PERCENTILE.EXC": 18 else: 19, vals, true, k), next_pos: cur_kf)
@@ -3328,26 +3328,28 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
         # formula_avariants MODE.MULT spill its -- debt until that lands).
         val modes = _array_mode_mult(tokens, pos, sheet)
         var end_mm = pos
-        while end_mm < tokens.len() and tokens.get(end_mm) != ")":
+        while end_mm < tokens.len() and (tokens.get(end_mm) ?? "") != ")":
             end_mm = end_mm + 1
         if end_mm < tokens.len():
             end_mm = end_mm + 1
         if modes.len() == 0 or modes[0].len() == 0:
             return EvalResult(value: CellValue.ErrorVal(message: "MODE.MULT: no repeated value"), next_pos: end_mm)
-        val mv = modes[0][0].parse_i64()
+        val mode_row: [text] = modes[0]
+        val mode_text: text = mode_row[0]
+        val mv = mode_text.parse_int()
         return EvalResult(value: CellValue.NumberVal(value: if mv.?: mv!.to_f64() else: 0.0), next_pos: end_mm)
     # Collect arguments separated by commas
     # Each argument can be a range (A1:B3) or an expression
     var args: [[f64]] = []
     var cur_pos = pos
 
-    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+    while cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") != ")":
         # Check for range argument: REF:REF
         if (cur_pos + 2 < tokens.len() and
-            tokens.get(cur_pos + 1) == ":" and
-            _is_cell_ref_token(tokens.get(cur_pos)) and
-            _is_cell_ref_token(tokens.get(cur_pos + 2))):
-            val range_str = "{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}"
+            (tokens.get(cur_pos + 1) ?? "") == ":" and
+            _is_cell_ref_token((tokens.get(cur_pos) ?? "")) and
+            _is_cell_ref_token((tokens.get(cur_pos + 2) ?? ""))):
+            val range_str = "{tokens[cur_pos]}:{tokens[cur_pos + 2]}"
             val values = _resolve_cell_range(range_str, sheet, depth)
             args.push(values)
             cur_pos = cur_pos + 3
@@ -3359,11 +3361,11 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
             cur_pos = result.next_pos
 
         # Skip comma
-        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
             cur_pos = cur_pos + 1
 
     # Skip closing paren
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ")":
         cur_pos = cur_pos + 1
 
     # Keep the ubiquitous range average on the compact evaluation path.  This
@@ -3409,12 +3411,12 @@ fn _let_name_error(tok: text, sheet: Sheet) -> text:
 
 fn _eval_isomitted(tokens: [text], pos: i32, sheet: Sheet) -> EvalResult:
     """ISOMITTED(param_name) inside a LAMBDA body: check if the param was omitted."""
-    if pos >= tokens.len() or tokens.get(pos) == ")":
+    if pos >= tokens.len() or (tokens.get(pos) ?? "") == ")":
         return EvalResult(
             value: CellValue.ErrorVal(message: "ISOMITTED requires a parameter name"),
             next_pos: pos + 1
         )
-    val tok = tokens.get(pos)
+    val tok = (tokens.get(pos) ?? "")
     if tok.len() == 0 or not _is_alpha(tok.char_at(0)):
         return EvalResult(
             value: CellValue.ErrorVal(message: "ISOMITTED requires a parameter name"),
@@ -3432,7 +3434,7 @@ fn _eval_isomitted(tokens: [text], pos: i32, sheet: Sheet) -> EvalResult:
     # nested call (mirrors the generic dispatch's "skip closing paren"
     # step at the end of _eval_function_call's default arg loop).
     var end_pos = pos + 1
-    if end_pos < tokens.len() and tokens.get(end_pos) == ")":
+    if end_pos < tokens.len() and (tokens.get(end_pos) ?? "") == ")":
         end_pos = end_pos + 1
     EvalResult(value: result, next_pos: end_pos)
 
@@ -3455,13 +3457,13 @@ fn _eval_let(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     var final_value = CellValue.Empty
     var done = false
     while not done:
-        if cur_pos >= tokens.len() or tokens.get(cur_pos) == ")":
+        if cur_pos >= tokens.len() or (tokens.get(cur_pos) ?? "") == ")":
             err_msg = "LET requires a name/value pair and a calculation"
             done = true
             break
-        val tok = tokens.get(cur_pos)
+        val tok = (tokens.get(cur_pos) ?? "")
         val looks_like_name = (_is_alpha(tok.char_at(0)) and cur_pos + 1 < tokens.len() and
-                                tokens.get(cur_pos + 1) == ",")
+                                (tokens.get(cur_pos + 1) ?? "") == ",")
         if looks_like_name:
             val name_err = _let_name_error(tok, sheet)
             if name_err.len() > 0:
@@ -3475,7 +3477,7 @@ fn _eval_let(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
             _let_values.push(_cell_value_to_display(value_result.value))
             pushed = pushed + 1
             cur_pos = value_result.next_pos
-            if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+            if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
                 cur_pos = cur_pos + 1
             else:
                 err_msg = "LET is missing its calculation argument"
@@ -3499,7 +3501,7 @@ fn _eval_let(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
         i = i + 1
 
     var end_pos = cur_pos
-    if end_pos < tokens.len() and tokens.get(end_pos) == ")":
+    if end_pos < tokens.len() and (tokens.get(end_pos) ?? "") == ")":
         end_pos = end_pos + 1
     if err_msg.len() > 0:
         return EvalResult(value: CellValue.ErrorVal(message: err_msg), next_pos: end_pos)
@@ -3516,7 +3518,7 @@ fn _skip_balanced_to_paren(tokens: [text], pos: i32) -> i32:
     var cur = pos
     var depth = 0
     while cur < tokens.len():
-        val t = tokens.get(cur)
+        val t = (tokens.get(cur) ?? "")
         if t == "(":
             depth = depth + 1
         elif t == ")":
@@ -3542,16 +3544,16 @@ fn _lambda_body_uses_omitted(tokens: [text], body_start: i32, body_end: i32, ona
     var has_isomitted_guard = false
     var i = body_start
     while i < body_end:
-        if (tokens.get(i).upper() == "ISOMITTED" and i + 3 < body_end and
-            tokens.get(i + 1) == "(" and tokens.get(i + 2).upper() == oname and
-            tokens.get(i + 3) == ")"):
+        if ((tokens.get(i) ?? "").upper() == "ISOMITTED" and i + 3 < body_end and
+            (tokens.get(i + 1) ?? "") == "(" and (tokens.get(i + 2) ?? "").upper() == oname and
+            (tokens.get(i + 3) ?? "") == ")"):
             has_isomitted_guard = true
         i = i + 1
     if has_isomitted_guard:
         return false
     var j = body_start
     while j < body_end:
-        val tok = tokens.get(j)
+        val tok = (tokens.get(j) ?? "")
         if tok.len() > 0 and _is_alpha(tok.char_at(0)) and tok.upper() == oname:
             return true
         j = j + 1
@@ -3572,10 +3574,10 @@ fn _eval_lambda_invoked(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> E
     bind the parameters."""
     var cur_pos = pos
     var params: [text] = []
-    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
-        val tok = tokens.get(cur_pos)
+    while cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") != ")":
+        val tok = (tokens.get(cur_pos) ?? "")
         val looks_like_param = (_is_alpha(tok.char_at(0)) and cur_pos + 1 < tokens.len() and
-                                 tokens.get(cur_pos + 1) == ",")
+                                 (tokens.get(cur_pos + 1) ?? "") == ",")
         if not looks_like_param:
             break
         val name_err = _let_name_error(tok, sheet)
@@ -3592,7 +3594,7 @@ fn _eval_lambda_invoked(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> E
     val body_start = cur_pos
     val lambda_end = _skip_balanced_to_paren(tokens, body_start)
 
-    if not (lambda_end < tokens.len() and tokens.get(lambda_end) == "("):
+    if not (lambda_end < tokens.len() and (tokens.get(lambda_end) ?? "") == "("):
         # Not immediately invoked — unsupported (stored/callable LAMBDA).
         return EvalResult(
             value: CellValue.ErrorVal(message: "LAMBDA must be immediately invoked: LAMBDA(...)(...)"),
@@ -3605,9 +3607,9 @@ fn _eval_lambda_invoked(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> E
     var omitted_names: [text] = []
     var pi = 0
     while pi < params.len():
-        _let_names.push(params.get(pi))
+        _let_names.push(params[pi])
         pushed = pushed + 1
-        if inv_pos >= tokens.len() or tokens.get(inv_pos) == ")":
+        if inv_pos >= tokens.len() or (tokens.get(inv_pos) ?? "") == ")":
             # Missing argument: bind to the omitted sentinel. Excel allows
             # this ONLY when the body checks ISOMITTED(param) — a bare
             # reference to an omitted param elsewhere in the body is itself
@@ -3615,22 +3617,22 @@ fn _eval_lambda_invoked(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> E
             # bound, since a later param's default expression could still
             # reference an earlier omitted one).
             _let_values.push("__OMITTED__")
-            omitted_names.push(params.get(pi))
+            omitted_names.push(params[pi])
         else:
             val arg_result = _eval_concat(tokens, inv_pos, sheet, depth)
             _let_values.push(_cell_value_to_display(arg_result.value))
             inv_pos = arg_result.next_pos
-            if inv_pos < tokens.len() and tokens.get(inv_pos) == ",":
+            if inv_pos < tokens.len() and (tokens.get(inv_pos) ?? "") == ",":
                 inv_pos = inv_pos + 1
         pi = pi + 1
 
-    if inv_pos < tokens.len() and tokens.get(inv_pos) != ")":
+    if inv_pos < tokens.len() and (tokens.get(inv_pos) ?? "") != ")":
         arity_err = "LAMBDA invocation arity mismatch (too many arguments)"
 
     if arity_err.len() == 0:
         var oi = 0
         while oi < omitted_names.len():
-            if _lambda_body_uses_omitted(tokens, body_start, lambda_end - 1, omitted_names.get(oi)):
+            if _lambda_body_uses_omitted(tokens, body_start, lambda_end - 1, omitted_names[oi]):
                 arity_err = "LAMBDA body references an omitted parameter directly (wrap it in ISOMITTED)"
             oi = oi + 1
 
@@ -3646,7 +3648,7 @@ fn _eval_lambda_invoked(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> E
         i = i + 1
 
     var end_pos = inv_pos
-    if end_pos < tokens.len() and tokens.get(end_pos) == ")":
+    if end_pos < tokens.len() and (tokens.get(end_pos) ?? "") == ")":
         end_pos = end_pos + 1
     if arity_err.len() > 0:
         return EvalResult(value: CellValue.ErrorVal(message: arity_err), next_pos: end_pos)
@@ -3683,10 +3685,10 @@ fn _parse_lambda_literal(tokens: [text], pos: i32, sheet: Sheet) -> LambdaLit:
     around each call (mirrors _eval_lambda_invoked's own discipline)."""
     var cur_pos = pos
     var params: [text] = []
-    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
-        val tok = tokens.get(cur_pos)
+    while cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") != ")":
+        val tok = (tokens.get(cur_pos) ?? "")
         val looks_like_param = (_is_alpha(tok.char_at(0)) and cur_pos + 1 < tokens.len() and
-                                 tokens.get(cur_pos + 1) == ",")
+                                 (tokens.get(cur_pos + 1) ?? "") == ",")
         if not looks_like_param:
             break
         val name_err = _let_name_error(tok, sheet)
@@ -3707,7 +3709,7 @@ fn _eval_reduce(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResul
     stays sane) on a malformed range or LAMBDA argument."""
     val init_result = _eval_concat(tokens, pos, sheet, depth)
     var cur = init_result.next_pos
-    if not (cur < tokens.len() and tokens.get(cur) == ","):
+    if not (cur < tokens.len() and (tokens.get(cur) ?? "") == ","):
         val bad_end = _skip_balanced_to_paren(tokens, pos)
         return EvalResult(value: CellValue.ErrorVal(message: "REDUCE requires initial, range, LAMBDA"), next_pos: bad_end)
     cur = cur + 1
@@ -3716,9 +3718,9 @@ fn _eval_reduce(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResul
         val bad_end = _skip_balanced_to_paren(tokens, pos)
         return EvalResult(value: CellValue.ErrorVal(message: "REDUCE requires a range argument"), next_pos: bad_end)
     cur = _skip_comma(tokens, cur + 3)
-    val lambda_tok = if cur < tokens.len(): tokens.get(cur) else: ""
+    val lambda_tok = if cur < tokens.len(): (tokens.get(cur) ?? "") else: ""
     val lambda_upper = lambda_tok.upper()
-    val after_lambda_tok = if cur + 1 < tokens.len(): tokens.get(cur + 1) else: ""
+    val after_lambda_tok = if cur + 1 < tokens.len(): (tokens.get(cur + 1) ?? "") else: ""
     if not (cur + 1 < tokens.len() and lambda_upper == "LAMBDA" and after_lambda_tok == "("):
         val bad_end = _skip_balanced_to_paren(tokens, pos)
         return EvalResult(value: CellValue.ErrorVal(message: "REDUCE requires a LAMBDA(acc, v, expr) argument"), next_pos: bad_end)
@@ -3728,7 +3730,7 @@ fn _eval_reduce(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResul
         val bad_end = _skip_balanced_to_paren(tokens, pos)
         return EvalResult(value: CellValue.ErrorVal(message: "REDUCE's LAMBDA needs exactly 2 parameters"), next_pos: bad_end)
     val rng = parse_range(a_rs)
-    if rng == nil:
+    if rng.is_none():
         val bad_end = _skip_balanced_to_paren(tokens, pos)
         return EvalResult(value: CellValue.ErrorVal(message: "REDUCE requires a valid range"), next_pos: bad_end)
     val rgrid = _array_range_grid(rng, sheet)
@@ -3754,7 +3756,7 @@ fn _eval_reduce(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResul
             c = c + 1
         r = r + 1
     var end_pos = lam.end_pos
-    if end_pos < tokens.len() and tokens.get(end_pos) == ")":
+    if end_pos < tokens.len() and (tokens.get(end_pos) ?? "") == ")":
         end_pos = end_pos + 1
     EvalResult(value: _let_value_from_display(acc_disp), next_pos: end_pos)
 
@@ -6832,8 +6834,8 @@ fn evaluate_formula_array(expr: text, sheet: Sheet) -> [[text]]:
     val tokens = tokenize_formula(formula)
     if tokens.len() < 2:
         return []
-    val name = tokens.get(0).upper()
-    if tokens.get(1) != "(":
+    val name = (tokens.get(0) ?? "").upper()
+    if (tokens.get(1) ?? "") != "(":
         return []
     if name == "SEQUENCE":
         return _array_sequence(tokens, 2, sheet)
@@ -6912,14 +6914,14 @@ fn evaluate_formula_array(expr: text, sheet: Sheet) -> [[text]]:
 fn _read_array_range_str(tokens: [text], pos: i32) -> text:
     """A range argument REF ':' REF starting at pos, or '' if not a range.
     Always spans exactly 3 tokens when present."""
-    if (pos + 2 < tokens.len() and tokens.get(pos + 1) == ":" and
-        _is_cell_ref_token(tokens.get(pos)) and _is_cell_ref_token(tokens.get(pos + 2))):
-        return "{tokens.get(pos)}:{tokens.get(pos + 2)}"
+    if (pos + 2 < tokens.len() and (tokens.get(pos + 1) ?? "") == ":" and
+        _is_cell_ref_token((tokens.get(pos) ?? "")) and _is_cell_ref_token((tokens.get(pos + 2) ?? ""))):
+        return "{tokens[pos]}:{tokens[pos + 2]}"
     ""
 
 fn _read_array_num_arg(tokens: [text], pos: i32, sheet: Sheet) -> ArrNumArg:
     """Read a numeric argument, or mark it absent at ')' / ',' / end."""
-    if pos >= tokens.len() or tokens.get(pos) == ")" or tokens.get(pos) == ",":
+    if pos >= tokens.len() or (tokens.get(pos) ?? "") == ")" or (tokens.get(pos) ?? "") == ",":
         return ArrNumArg(value: 0.0, next_pos: pos, present: false)
     val r = _eval_comparison(tokens, pos, sheet, 0)
     ArrNumArg(value: _to_number(r.value), next_pos: r.next_pos, present: true)
@@ -6935,22 +6937,22 @@ fn _read_fn_name_arg(tokens: [text], pos: i32) -> ArrTextArg:
     Unlike _read_array_text_arg this never evaluates the token as an
     expression -- a bare identifier like SUM has no defined value and would
     otherwise round-trip through the sheet's expression evaluator as #ERR."""
-    if pos >= tokens.len() or tokens.get(pos) == ")" or tokens.get(pos) == ",":
+    if pos >= tokens.len() or (tokens.get(pos) ?? "") == ")" or (tokens.get(pos) ?? "") == ",":
         return ArrTextArg(value: "", next_pos: pos, present: false)
-    val tok = tokens.get(pos)
+    val tok = (tokens.get(pos) ?? "")
     if tok.starts_with("\""):
-        return ArrTextArg(value: tok.slice(1, tok.len() - 1), next_pos: pos + 1, present: true)
+        return ArrTextArg(value: tok.slice(1, tok.byte_len() - 1), next_pos: pos + 1, present: true)
     ArrTextArg(value: tok, next_pos: pos + 1, present: true)
 
 fn _read_array_text_arg(tokens: [text], pos: i32, sheet: Sheet) -> ArrTextArg:
     """Read a text argument as a display string: a quoted literal, a single cell
     ref, or an evaluated expression. Marks absent at ')' / ',' / end."""
-    if pos >= tokens.len() or tokens.get(pos) == ")" or tokens.get(pos) == ",":
+    if pos >= tokens.len() or (tokens.get(pos) ?? "") == ")" or (tokens.get(pos) ?? "") == ",":
         return ArrTextArg(value: "", next_pos: pos, present: false)
-    val tok = tokens.get(pos)
-    val next_tok = if pos + 1 < tokens.len(): tokens.get(pos + 1) else: ""
+    val tok = (tokens.get(pos) ?? "")
+    val next_tok = if pos + 1 < tokens.len(): (tokens.get(pos + 1) ?? "") else: ""
     if tok.starts_with("\""):
-        return ArrTextArg(value: tok.slice(1, tok.len() - 1), next_pos: pos + 1, present: true)
+        return ArrTextArg(value: tok.slice(1, tok.byte_len() - 1), next_pos: pos + 1, present: true)
     if _is_cell_ref_token(tok) and (next_tok == "," or next_tok == ")"):
         return ArrTextArg(value: cell_display_text(sheet.get_cell(tok)), next_pos: pos + 1, present: true)
     val r = _eval_comparison(tokens, pos, sheet, 0)
@@ -7029,17 +7031,17 @@ fn _array_offset(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     every other case — height/width absent, both 1, out-of-domain values,
     negative target coordinates — returns [] so the scalar path either yields
     the single value or reports the precise #ERR."""
-    if pos >= tokens.len() or not _is_cell_ref_token(tokens.get(pos)):
+    if pos >= tokens.len() or not _is_cell_ref_token((tokens.get(pos) ?? "")):
         return []
-    val ref = parse_cell_ref(tokens.get(pos))
-    if ref == nil:
+    val ref = parse_cell_ref((tokens.get(pos) ?? ""))
+    if ref.is_none():
         return []
     var cur = pos + 1
     # Range reference: use its top-left corner (Excel behavior).
-    if (cur + 1 < tokens.len() and tokens.get(cur) == ":" and
-        _is_cell_ref_token(tokens.get(cur + 1))):
+    if (cur + 1 < tokens.len() and (tokens.get(cur) ?? "") == ":" and
+        _is_cell_ref_token((tokens.get(cur + 1) ?? ""))):
         cur = cur + 2
-    if cur >= tokens.len() or tokens.get(cur) != ",":
+    if cur >= tokens.len() or (tokens.get(cur) ?? "") != ",":
         return []
     val rr = _read_array_num_arg(tokens, cur + 1, sheet)
     if not rr.present:
@@ -7080,7 +7082,7 @@ fn _array_indirect(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if not trimmed.contains(":"):
         return []
     val rng = parse_range(trimmed)
-    if rng == nil:
+    if rng.is_none():
         return []
     _array_range_grid(rng, sheet)
 
@@ -7129,14 +7131,14 @@ fn _byrow_body_fn_name(tokens: [text], body_start: i32, end_pos: i32, pname: tex
         return ""
     if body_start + 3 >= tokens.len():
         return ""
-    val open_tok = tokens.get(body_start + 1)
-    val param_tok = tokens.get(body_start + 2)
-    val close_tok = tokens.get(body_start + 3)
+    val open_tok = (tokens.get(body_start + 1) ?? "")
+    val param_tok = (tokens.get(body_start + 2) ?? "")
+    val close_tok = (tokens.get(body_start + 3) ?? "")
     if open_tok != "(" or close_tok != ")":
         return ""
     if param_tok.upper() != pname:
         return ""
-    val fname = tokens.get(body_start).upper()
+    val fname = (tokens.get(body_start) ?? "").upper()
     if not _byrow_fn_is_range_agg(fname):
         return ""
     fname
@@ -7150,9 +7152,9 @@ fn _array_map(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if a_rs == "":
         return []
     var cur = _skip_comma(tokens, pos + 3)
-    val lambda_tok = if cur < tokens.len(): tokens.get(cur) else: ""
+    val lambda_tok = if cur < tokens.len(): (tokens.get(cur) ?? "") else: ""
     val lambda_upper = lambda_tok.upper()
-    val after_lambda_tok = if cur + 1 < tokens.len(): tokens.get(cur + 1) else: ""
+    val after_lambda_tok = if cur + 1 < tokens.len(): (tokens.get(cur + 1) ?? "") else: ""
     if not (lambda_upper == "LAMBDA" and after_lambda_tok == "("):
         return []
     val lam = _parse_lambda_literal(tokens, cur + 2, sheet)
@@ -7160,7 +7162,7 @@ fn _array_map(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if not lam.ok or lam_params.len() != 1:
         return []
     val rng = parse_range(a_rs)
-    if rng == nil:
+    if rng.is_none():
         return []
     val rgrid = _array_range_grid(rng, sheet)
     val pname = lam_params[0]
@@ -7193,9 +7195,9 @@ fn _array_scan(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if a_rs == "":
         return []
     cur = _skip_comma(tokens, cur + 3)
-    val lambda_tok = if cur < tokens.len(): tokens.get(cur) else: ""
+    val lambda_tok = if cur < tokens.len(): (tokens.get(cur) ?? "") else: ""
     val lambda_upper = lambda_tok.upper()
-    val after_lambda_tok = if cur + 1 < tokens.len(): tokens.get(cur + 1) else: ""
+    val after_lambda_tok = if cur + 1 < tokens.len(): (tokens.get(cur + 1) ?? "") else: ""
     if not (lambda_upper == "LAMBDA" and after_lambda_tok == "("):
         return []
     val lam = _parse_lambda_literal(tokens, cur + 2, sheet)
@@ -7203,7 +7205,7 @@ fn _array_scan(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if not lam.ok or lam_params.len() != 2:
         return []
     val rng = parse_range(a_rs)
-    if rng == nil:
+    if rng.is_none():
         return []
     val rgrid = _array_range_grid(rng, sheet)
     val acc_name = lam_params[0]
@@ -7248,9 +7250,9 @@ fn _array_byrow(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if a_rs == "":
         return []
     var cur = _skip_comma(tokens, pos + 3)
-    val lambda_tok = if cur < tokens.len(): tokens.get(cur) else: ""
+    val lambda_tok = if cur < tokens.len(): (tokens.get(cur) ?? "") else: ""
     val lambda_upper = lambda_tok.upper()
-    val after_lambda_tok = if cur + 1 < tokens.len(): tokens.get(cur + 1) else: ""
+    val after_lambda_tok = if cur + 1 < tokens.len(): (tokens.get(cur + 1) ?? "") else: ""
     if not (lambda_upper == "LAMBDA" and after_lambda_tok == "("):
         return []
     val lam = _parse_lambda_literal(tokens, cur + 2, sheet)
@@ -7258,7 +7260,7 @@ fn _array_byrow(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if not lam.ok or lam_params.len() != 1:
         return []
     val rng = parse_range(a_rs)
-    if rng == nil:
+    if rng.is_none():
         return []
     val min_col = if rng.start.col < rng.end_ref.col: rng.start.col else: rng.end_ref.col
     val max_col = if rng.start.col > rng.end_ref.col: rng.start.col else: rng.end_ref.col
@@ -7305,9 +7307,9 @@ fn _array_bycol(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if a_rs == "":
         return []
     var cur = _skip_comma(tokens, pos + 3)
-    val lambda_tok = if cur < tokens.len(): tokens.get(cur) else: ""
+    val lambda_tok = if cur < tokens.len(): (tokens.get(cur) ?? "") else: ""
     val lambda_upper = lambda_tok.upper()
-    val after_lambda_tok = if cur + 1 < tokens.len(): tokens.get(cur + 1) else: ""
+    val after_lambda_tok = if cur + 1 < tokens.len(): (tokens.get(cur + 1) ?? "") else: ""
     if not (lambda_upper == "LAMBDA" and after_lambda_tok == "("):
         return []
     val lam = _parse_lambda_literal(tokens, cur + 2, sheet)
@@ -7315,7 +7317,7 @@ fn _array_bycol(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if not lam.ok or lam_params.len() != 1:
         return []
     val rng = parse_range(a_rs)
-    if rng == nil:
+    if rng.is_none():
         return []
     val min_col = if rng.start.col < rng.end_ref.col: rng.start.col else: rng.end_ref.col
     val min_row = if rng.start.row < rng.end_ref.row: rng.start.row else: rng.end_ref.row
@@ -7374,9 +7376,9 @@ fn _array_makearray(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if not a1.present:
         return []
     cur = _skip_comma(tokens, a1.next_pos)
-    val lambda_tok = if cur < tokens.len(): tokens.get(cur) else: ""
+    val lambda_tok = if cur < tokens.len(): (tokens.get(cur) ?? "") else: ""
     val lambda_upper = lambda_tok.upper()
-    val after_lambda_tok = if cur + 1 < tokens.len(): tokens.get(cur + 1) else: ""
+    val after_lambda_tok = if cur + 1 < tokens.len(): (tokens.get(cur + 1) ?? "") else: ""
     if not (lambda_upper == "LAMBDA" and after_lambda_tok == "("):
         return []
     val lam = _parse_lambda_literal(tokens, cur + 2, sheet)
@@ -7450,7 +7452,7 @@ fn _array_transpose(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if rs == "":
         return []
     val rng = parse_range(rs)
-    if rng == nil:
+    if rng.is_none():
         return []
     val src = _array_range_grid(rng, sheet)
     if src.len() == 0:
@@ -7486,7 +7488,7 @@ fn _array_unique(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if rs == "":
         return []
     val rng = parse_range(rs)
-    if rng == nil:
+    if rng.is_none():
         return []
     val src = _array_range_grid(rng, sheet)
     var out: [[text]] = []
@@ -7556,7 +7558,7 @@ fn _array_sort(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if rs == "":
         return []
     val rng = parse_range(rs)
-    if rng == nil:
+    if rng.is_none():
         return []
     val src = _array_range_grid(rng, sheet)
     var cur = _skip_comma(tokens, pos + 3)
@@ -7593,7 +7595,7 @@ fn _array_filter(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if rs == "":
         return []
     val rng = parse_range(rs)
-    if rng == nil:
+    if rng.is_none():
         return []
     var cur = _skip_comma(tokens, pos + 3)
     val col_a = _read_array_num_arg(tokens, cur, sheet)
@@ -7603,9 +7605,9 @@ fn _array_filter(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     cur = _skip_comma(tokens, col_a.next_pos)
     if cur >= tokens.len():
         return []
-    var criteria = tokens.get(cur)
+    var criteria = (tokens.get(cur) ?? "")
     if criteria.starts_with("\""):
-        criteria = criteria.slice(1, criteria.len() - 1)
+        criteria = criteria.slice(1, criteria.byte_len() - 1)
     val key_col = rng.start.col + col_index - 1
     var out: [[text]] = []
     var r = rng.start.row
@@ -7638,7 +7640,7 @@ fn _array_collect_nums(tokens: [text], pos: i32, sheet: Sheet) -> [i32]:
     the scan making progress."""
     var out: [i32] = []
     var cur = pos
-    while cur < tokens.len() and tokens.get(cur) != ")":
+    while cur < tokens.len() and (tokens.get(cur) ?? "") != ")":
         val a = _read_array_num_arg(tokens, cur, sheet)
         if a.present:
             out.push(a.value.to_i64().to_i32())
@@ -7654,7 +7656,7 @@ fn _array_read_grid(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if rs == "":
         return []
     val rng = parse_range(rs)
-    if rng == nil:
+    if rng.is_none():
         return []
     _array_range_grid(rng, sheet)
 
@@ -7728,7 +7730,7 @@ fn _array_sortby(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if rs == "":
         return []
     val rng = parse_range(rs)
-    if rng == nil:
+    if rng.is_none():
         return []
     val src = _array_range_grid(rng, sheet)
     var cur = _skip_comma(tokens, pos + 3)
@@ -7736,7 +7738,7 @@ fn _array_sortby(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if brs == "":
         return []
     val brng = parse_range(brs)
-    if brng == nil:
+    if brng.is_none():
         return []
     val bgrid = _array_range_grid(brng, sheet)
     var keys: [text] = []
@@ -8019,16 +8021,16 @@ fn _array_stack_grids(tokens: [text], pos: i32, sheet: Sheet) -> [[[text]]]:
     grids, in order."""
     var grids: [[[text]]] = []
     var cur = pos
-    while cur < tokens.len() and tokens.get(cur) != ")":
+    while cur < tokens.len() and (tokens.get(cur) ?? "") != ")":
         val rs = _read_array_range_str(tokens, cur)
         if rs != "":
             val rng = parse_range(rs)
-            if rng != nil:
+            if rng.is_some():
                 grids.push(_array_range_grid(rng, sheet))
             cur = _skip_comma(tokens, cur + 3)
         else:
-            val tok = tokens.get(cur)
-            val next_tok = if cur + 1 < tokens.len(): tokens.get(cur + 1) else: ""
+            val tok = (tokens.get(cur) ?? "")
+            val next_tok = if cur + 1 < tokens.len(): (tokens.get(cur + 1) ?? "") else: ""
             if _is_cell_ref_token(tok) and (next_tok == "," or next_tok == ")"):
                 grids.push([[cell_display_text(sheet.get_cell(tok))]])
                 cur = _skip_comma(tokens, cur + 1)
@@ -8148,7 +8150,7 @@ fn _eval_mdeterm(tokens: [text], pos: i32, sheet: Sheet) -> EvalResult:
     path so the 2D shape survives the flattened scalar-arg path."""
     val cells = _array_read_grid(tokens, pos, sheet)
     var np = pos
-    while np < tokens.len() and tokens.get(np) != ")":
+    while np < tokens.len() and (tokens.get(np) ?? "") != ")":
         np = np + 1
     if np < tokens.len():
         np = np + 1
@@ -8380,12 +8382,12 @@ fn _array_linest(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
 
     # Optional trailing const, stats args (both booleans in Excel).
     cur = _skip_comma(tokens, cur)
-    if cur < tokens.len() and tokens.get(cur) != ")":
+    if cur < tokens.len() and (tokens.get(cur) ?? "") != ")":
         val const_result = _eval_comparison(tokens, cur, sheet, 0)
         cur = const_result.next_pos
     cur = _skip_comma(tokens, cur)
     var stats_requested = false
-    if cur < tokens.len() and tokens.get(cur) != ")":
+    if cur < tokens.len() and (tokens.get(cur) ?? "") != ")":
         val stats_result = _eval_comparison(tokens, cur, sheet, 0)
         stats_requested = _to_number(stats_result.value) != 0.0
 
@@ -8434,7 +8436,7 @@ fn _array_trend(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if nxrs != "":
         newxs = _resolve_cell_range(nxrs, sheet, 0)
     else:
-        if cur < tokens.len() and tokens.get(cur) != ")" and tokens.get(cur) != ",":
+        if cur < tokens.len() and (tokens.get(cur) ?? "") != ")" and (tokens.get(cur) ?? "") != ",":
             val nx_arg = _read_array_num_arg(tokens, cur, sheet)
             if nx_arg.present:
                 newxs.push(nx_arg.value)
@@ -8490,7 +8492,7 @@ fn _array_growth(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if nxrs != "":
         newxs = _resolve_cell_range(nxrs, sheet, 0)
     else:
-        if cur < tokens.len() and tokens.get(cur) != ")" and tokens.get(cur) != ",":
+        if cur < tokens.len() and (tokens.get(cur) ?? "") != ")" and (tokens.get(cur) ?? "") != ",":
             val nx_arg = _read_array_num_arg(tokens, cur, sheet)
             if nx_arg.present:
                 newxs.push(nx_arg.value)
@@ -8608,7 +8610,7 @@ fn resolve_cell_range(range_str: text, sheet: Sheet) -> [f64]:
 fn _resolve_cell_range(range_str: text, sheet: Sheet, depth: i32) -> [f64]:
     var values: [f64] = []
     val range = parse_range(range_str)
-    if range == nil:
+    if range.is_none():
         return values
     val refs = expand_range_refs(range)
     for ref_str in refs:
@@ -9464,10 +9466,10 @@ fn _eval_getpivotdata(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> Eva
     var cur_pos = pos
 
     # Parse data_field (first text argument)
-    if cur_pos >= tokens.len() or tokens.get(cur_pos) == ")":
+    if cur_pos >= tokens.len() or (tokens.get(cur_pos) ?? "") == ")":
         return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA requires data_field"), next_pos: cur_pos)
     var data_field = ""
-    val first_token = tokens.get(cur_pos)
+    val first_token = (tokens.get(cur_pos) ?? "")
     if _is_cell_ref_token(first_token):
         val data_val = _resolve_cell_value(first_token, sheet, depth)
         data_field = _format_number(data_val)
@@ -9475,61 +9477,61 @@ fn _eval_getpivotdata(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> Eva
         # String literal tokens keep their surrounding quotes ("East" ->
         # the 6-char token `"East"`, see tokenize_formula) -- strip them so
         # comparisons against plain sheet text (e.g. pivot_grid cells) match.
-        data_field = first_token.substring(1, first_token.len() - 1)
+        data_field = first_token.substring(1, first_token.byte_len() - 1)
     else:
         data_field = first_token
     cur_pos = cur_pos + 1
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
         cur_pos = cur_pos + 1
 
     # Parse pivot_anchor_ref (cell reference)
-    if cur_pos >= tokens.len() or not _is_cell_ref_token(tokens.get(cur_pos)):
+    if cur_pos >= tokens.len() or not _is_cell_ref_token((tokens.get(cur_pos) ?? "")):
         return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA requires pivot_anchor_ref"), next_pos: cur_pos)
-    val pivot_ref_str = tokens.get(cur_pos)
+    val pivot_ref_str = (tokens.get(cur_pos) ?? "")
     val pivot_anchor = parse_cell_ref(pivot_ref_str)
-    if pivot_anchor == nil:
+    if pivot_anchor.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA bad pivot_anchor_ref"), next_pos: cur_pos)
     cur_pos = cur_pos + 1
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
         cur_pos = cur_pos + 1
 
     # Parse field/item pairs
     var field_items: [text] = []
-    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+    while cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") != ")":
         # Parse field name (text or ref)
         if cur_pos >= tokens.len():
             return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA incomplete field/item pair"), next_pos: cur_pos)
         var field_str = ""
-        val ft = tokens.get(cur_pos)
+        val ft = (tokens.get(cur_pos) ?? "")
         if _is_cell_ref_token(ft):
             field_str = _format_number(_resolve_cell_value(ft, sheet, depth))
         elif ft.starts_with("\""):
-            field_str = ft.substring(1, ft.len() - 1)
+            field_str = ft.substring(1, ft.byte_len() - 1)
         else:
             field_str = ft
         cur_pos = cur_pos + 1
-        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
             cur_pos = cur_pos + 1
 
         # Parse item name (text or ref)
         if cur_pos >= tokens.len():
             return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA incomplete field/item pair"), next_pos: cur_pos)
         var item_str = ""
-        val it = tokens.get(cur_pos)
+        val it = (tokens.get(cur_pos) ?? "")
         if _is_cell_ref_token(it):
             item_str = _format_number(_resolve_cell_value(it, sheet, depth))
         elif it.starts_with("\""):
-            item_str = it.substring(1, it.len() - 1)
+            item_str = it.substring(1, it.byte_len() - 1)
         else:
             item_str = it
         cur_pos = cur_pos + 1
-        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
             cur_pos = cur_pos + 1
 
         field_items.push(field_str)
         field_items.push(item_str)
 
-    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+    if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ")":
         cur_pos = cur_pos + 1
 
     # Read the pivot grid from the sheet (starting at pivot_anchor).
@@ -9735,7 +9737,7 @@ fn _display_token_i64(token: text, sheet: Sheet, depth: i32) -> DisplayEvalResul
     if token.len() == 0:
         return DisplayEvalResult(ok: false, value: 0)
     val upper_token = token.upper()
-    if parse_cell_ref(upper_token) != nil:
+    if parse_cell_ref(upper_token).is_some():
         return _resolve_cell_display_i64(upper_token, sheet, depth)
     _parse_i64_text(token)
 

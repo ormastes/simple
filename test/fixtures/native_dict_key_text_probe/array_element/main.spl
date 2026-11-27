@@ -1,0 +1,49 @@
+# Native oracle, class A of doc/07_guide/compiler/robustness/stage2_native_miscompile_classes.md:
+# a text-keyed dict probed with a `[text]` element. box_runtime_dictionary_key_v1
+# (src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl) reinterprets the text
+# word as i64 to ask rt_string_data whether it is tagged; it emitted a MIR Cast,
+# which Cranelift lowers as `int(text)` (loads {ptr, len} through the word and
+# calls rt_string_new + rt_string_to_int_lenient), so a bare char* element
+# SIGSEGVed in rt_string_new. The reinterpret must be a Bitcast.
+# Build: SIMPLE_BOOTSTRAP=1 native-build main.spl --entry-closure (cranelift, llvm).
+# Expected stdout (seed `simple run main.spl`):
+# a0 hit
+# b0 hit
+# c0 true
+# a1 miss
+# b1 none
+# c1 false
+# d hello.spl true
+# d other.spl false
+# e 8
+#
+# a/b/c: has/get on an element probe (hit, then miss); d: for-in element;
+# e: read-modify-write through an element key.
+
+var cache: {text: text} = {}
+var counts: {text: i64} = {}
+
+fn lookup(path: text) -> text:
+    if cache.has(path):
+        return cache[path]
+    "miss"
+
+fn lookup_get(path: text) -> text:
+    cache.get(path) ?? "none"
+
+fn main():
+    cache["hello.spl"] = "hit"
+    counts["hello.spl"] = 7
+    val inputs: [text] = ["hello.spl", "other.spl"]
+    var i = 0
+    while i < inputs.len():
+        val p = inputs[i]
+        print "a{i} {lookup(p)}"
+        print "b{i} {lookup_get(p)}"
+        print "c{i} {counts.has(p)}"
+        i = i + 1
+    for q in inputs:
+        print "d {q} {cache.has(q)}"
+    val e = inputs[0]
+    counts[e] = counts[e] + 1
+    print "e {counts[\"hello.spl\"]}"

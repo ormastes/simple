@@ -1,0 +1,57 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# Overflow-safe bounds for ByteReader: near-wraparound n / pos must yield Err.
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.common.net.byte_cursor.{ByteReader}
+
+describe "ByteReader overflow-safe bounds":
+    it "read_bytes with near-u64-max length after one read is rejected":
+        # @req REQ-SSPEC-LIB
+        step("advance pos to 1, then request 0xFFFFFFFFFFFFFFFF bytes")
+        val data: [u8] = [1u8, 2u8, 3u8]
+        var r = ByteReader.new(data)
+        val first = r.read_u8()
+        expect(first.is_ok()).to_equal(true)
+        val res = r.read_bytes(0xFFFFFFFFFFFFFFFFu64)
+        expect(res.is_err()).to_equal(true)
+        expect(r.offset()).to_equal(1u64)
+
+    it "read_be with a wrapping width is rejected":
+        # @req REQ-SSPEC-LIB
+        step("request 0xFFFFFFFFFFFFFFFF-byte big-endian read at pos 1")
+        val data: [u8] = [1u8, 2u8, 3u8]
+        var r = ByteReader.new(data)
+        val first = r.read_u8()
+        expect(first.is_ok()).to_equal(true)
+        val res = r.read_be(0xFFFFFFFFFFFFFFFFu64)
+        expect(res.is_err()).to_equal(true)
+        expect(r.offset()).to_equal(1u64)
+
+    it "read_be wider than 8 bytes is rejected even when data is present":
+        # @req REQ-SSPEC-LIB
+        step("request a 9-byte big-endian read over a 10-byte buffer")
+        val data: [u8] = [1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8]
+        var r = ByteReader.new(data)
+        val res = r.read_be(9u64)
+        expect(res.is_err()).to_equal(true)
+        expect(r.offset()).to_equal(0u64)
+
+    it "a cursor whose pos is past the end reports zero remaining and rejects reads":
+        # @req REQ-SSPEC-LIB
+        step("construct a reader with pos beyond len")
+        val data: [u8] = [1u8, 2u8]
+        var r = ByteReader(data: data, pos: 0xFFFFFFFFFFFFFFFFu64)
+        expect(r.remaining()).to_equal(0u64)
+        expect(r.read_u8().is_err()).to_equal(true)
+        expect(r.read_bytes(1u64).is_err()).to_equal(true)
+        expect(r.read_u32().is_err()).to_equal(true)
+
+    it "truncated input of 3 bytes rejects read_u32 and keeps pos":
+        # @req REQ-SSPEC-LIB
+        step("read_u32 over a 3-byte buffer")
+        val data: [u8] = [1u8, 2u8, 3u8]
+        var r = ByteReader.new(data)
+        expect(r.read_u32().is_err()).to_equal(true)
+        expect(r.offset()).to_equal(0u64)

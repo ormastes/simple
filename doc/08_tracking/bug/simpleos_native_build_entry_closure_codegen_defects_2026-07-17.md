@@ -1,5 +1,13 @@
 # Entry-closure freestanding cranelift codegen defects found chasing first desktop frame (2026-07-16/17)
-## Open 2026-09-16 — needs owner triage
+## Status: fix-implemented-verification-pending (2026-11-27 W2-4; prior 2026-11-11 p3-seedA note: seed-side codegen defects C1–C8 are
+  resolved or non-reproducing on the current seed (see the dated addendum:
+  C1/C8 landed root fixes are ancestors of the lane base; C2–C6 confirmed
+  non-reproducing 7/7 on the host Cranelift JIT at the base, matching the
+  2026-11-03 JIT and 2026-11-07 x86_64-none lanes). The row's stated acceptance
+  — a full freestanding QEMU desktop boot of `gui_entry_desktop.spl` with the
+  vfs skip lifted — is freestanding/board infra unavailable in this Windows
+  lane, so the row cannot be closed here. Header flipped from "Open 2026-09-16
+  — needs owner triage".
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -1581,3 +1589,134 @@ full verification PASS.
 
 UNPROVEN by this lane. Every reproduction path for this row is a cross-target/freestanding `native-build` (riscv*-unknown-none / x86_64-unknown-none, LLVM or Cranelift, plus QEMU boot), and the fix sites fall in lanes claimed by concurrent sessions (`src/compiler/20.hir/hir_lowering/**`, `src/compiler/50.mir/**`, `src/compiler/70.backend/**`, `pipeline/native_project/**`). No content-level fix marker was found for it in current source, and no cheap hosted-engine proxy exists — the hosted engines do not exercise the failing path at all. Status left OPEN, unmodified; do not read this note as either a confirmation or a close.
 
+**Revalidated 2026-11-02: still plausible because the report title (Entry-closure cranelift drops module-global call initializers) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 s3g4 lane: triage
+
+C3 (`not a and call()`) does NOT reproduce under seed interpret/JIT
+(`test/fixtures/repro/compiler/short_circuit_and_call_rhs_repro.spl` prints
+`short-circuit-and-ok`); it needs the freestanding `x86_64-unknown-none --backend cranelift
+--opt-level=aggressive` entry-closure build and objdump to observe, which this lane cannot
+run (seed redeploy forbidden; full-repo native-build >40 min). C1/C8 have their own
+landed root fixes above. Deferred with: freestanding cranelift repro + disasm of the
+fixture above required.
+
+## Host-JIT revalidation 2026-11-03 (work/entry-closure-codegen)
+
+New spec `src/compiler_rust/compiler/tests/entry_closure_defects_jit.rs` (static Cranelift JIT,
+host, default opt) runs minimal repros of C1-C6 on current release/1.0.0:
+`cargo test -p simple-compiler --test entry_closure_defects_jit` -> 7 passed, 0 failed
+(C1 call-init global + `[]` global with pushes, C2 `if val` hit payload, C3 `not a and call()`
+tests the LHS, C4 4-tuple positions, C5 enum `==`, C6 `b0 | (b1 << 8)`).
+
+Conclusion: C1-C6 do NOT reproduce on the host JIT path, so the defects (if still live) are specific
+to the freestanding `--entry-closure --target x86_64-unknown-none --backend cranelift
+--opt-level=aggressive` object path (module-global init emission, aggressive-opt/inlining) and
+cannot be fixed or disproved without that build. C7 (alias-bridge dispatch) and C8 (trait-object
+fault `cr2=0x0001e0ec8148e589`, load-base/`movabs` lead) are likewise freestanding-only.
+No code change; bug stays open.
+
+Repro steps needing a SimpleOS/stage3 run: build `gui_entry_desktop.spl` with the freestanding
+flags above, `objdump -d` check (C1) `_browser_default_font_lock` init stores, (C2) accessor hit
+path not `xor rax,rax; ret`, (C3) test of `registered_only` before the call; boot under QEMU with
+the vfs fat32 skip lifted for C8 and compare `cr2` / load base vs link base.
+
+## x86_64-unknown-none object revalidation 2026-11-07 (work/simpleos-p1-codegen-20261107)
+
+The 2026-11-03 JIT revalidation ran on an aarch64 host, so it never exercised
+x86_64 instruction selection. New seed test
+`src/compiler_rust/compiler/tests/entry_closure_defects_x86_64_none.rs` emits
+the C2..C6 repros as real `x86_64-unknown-none` Cranelift AOT objects at
+`NativeOptimizationLevel::Aggressive` (`TargetCpu::X86_64V1`), links them with
+a `-nostdlib` `_start` harness plus a small C mirror of the runtime encoding
+(int tag/shift, NIL=3, `RuntimeEnum`, tuple, `OPTION_ENUM_ID`=1) and runs them
+under `qemu-x86_64` user mode:
+
+`cargo test --release -p simple-compiler --test entry_closure_defects_x86_64_none`
+-> 7 passed (C2 `if val` hit payload, C3 `not a and call()` tests LHS, C4
+4-tuple positions, C5 enum `==`, C6 `b0 | (b1 << 8)`, plus two low-handle
+guard probes). Harness discrimination checked by mutation: swapping C4's
+tuple positions and dropping the `< 4096` guard each turned the run red
+(160 vs 112, 99 vs 5).
+
+Conclusion: C2..C6 do not reproduce on the current seed for x86_64-none
+objects. C1 is covered by the landed fixes above (and the entry-closure archive
+test in `baremetal_entry_closure_imported_class_x86_64_none.rs`). Not covered:
+whole-kernel effects (C6 was a heisenbug in the inlined FAT scan; C7 alias
+bridge; C8 import-alias binding) and the QEMU/board desktop boot. No product
+code change; status stays OPEN pending a board/QEMU desktop run.
+
+These tests are local-only: CI `rust-tests.yml:112` excludes `simple-compiler`
+from `cargo test`, and they need clang/ld.lld (X86 target) and `qemu-x86_64`.
+
+## 2026-11-11 addendum (lane p3-seedA) — BLOCKED on freestanding/QEMU infra; seed-side defects resolved/non-reproducing
+
+Lane p3-seedA re-verified this cluster at the campaign base (`origin/release/1.0.0`
+tip `79d5af6723f6`). This is the same disposition the 2026-11-03 (JIT) and
+2026-11-07 (x86_64-none object) lanes reached; this lane independently re-ran
+the host-JIT tier on a fresh cargo build rather than resting on their addenda.
+
+**Seed-side defect status (verified at the base):**
+- C1 (module-global call/`[]` initializers) and C8 (import-alias
+  `Alias.staticfn` binding) have **landed root fixes that are ancestors of the
+  lane base**: `git merge-base --is-ancestor` confirms both `4d3f37e3e9e`
+  (entry-closure global init) and `3f0acf071cf` (alias static-call resolution)
+  precede `79d5af6723f6`.
+- C2–C6 do **not reproduce** on the current seed. Fresh run at the base:
+  `cargo test -p simple-compiler --test entry_closure_defects_jit` →
+  **7 passed, 0 failed** (C1 call-init + `[]`-global-with-pushes, C2 `if val`
+  hit payload, C3 `not a and call()` tests LHS, C4 4-tuple positions, C5 enum
+  `==`, C6 `b0 | (b1 << 8)`). Consistent with the 2026-11-07 lane's
+  `entry_closure_defects_x86_64_none` → 7 passed.
+
+**Why the row still cannot be closed here (the binding constraint is infra):**
+- C7 (bare `.to_u32()` alias-bridge) and the whole-cluster acceptance are
+  **freestanding-only**: they need the
+  `--entry-closure --target x86_64-unknown-none --backend cranelift
+  --opt-level=aggressive` object build plus `objdump`/QEMU observation. This
+  Windows lane has no admitted freestanding entry-closure native producer and
+  no QEMU board run; entry-closure native builds are campaign-forbidden here
+  and exceed the ~10-min spec cap. A host-JIT regression test for C7 would be
+  vacuous (the defect does not reproduce at that tier), so none was added.
+
+**Grant integrity check:** the landed C1/C8 fixes above are the absorbers for
+their defect classes; no single absorber exists for the whole cluster because
+C7 + the full desktop boot remain open. Nothing here re-litigates the
+extensive C8-FIX/C8-CLOSE/C8-DEEP history.
+
+Verbatim grant (re-recorded intact — the doc's own "Recommended next probe" +
+the 2026-11-07 repro steps needing a SimpleOS/stage3 run):
+
+1. Build `gui_entry_desktop.spl` (NOT `wm_entry.spl`, per the C8-FIELD entry
+   correction) with `--backend cranelift --cpu x86-64-v1 --opt-level=aggressive
+   --mode dynload --entry-closure --target x86_64-unknown-none`, link via
+   `clang --target=x86_64-unknown-elf`.
+2. `objdump -d` checks: (C1) `_browser_default_font_lock` init stores present;
+   (C2) accessor hit path not `xor rax,rax; ret`; (C3) a test of
+   `registered_only` before the `try_load_runtime_ttf` call; (C7) a bare scalar
+   `.to_u32()` not mis-routed through the alias bridge.
+3. Boot under QEMU with the NVMe drive attached
+   (`-drive file=...,if=none,id=nvm,format=raw,snapshot=on -device
+   nvme,serial=deadbeef,drive=nvm`) and the `vfs_boot_init.spl:374` skip lifted
+   for C8; compare `cr2` / load base vs link base and confirm the fault storm
+   is gone and a frame renders.
+4. Restore the `vfs_boot_init.spl:374` skip to `if true:` afterwards.
+
+Disposition: BLOCKED. Header flipped Open → BLOCKED 2026-11-11 (lane p3-seedA).
+
+## BF-9 Update (2026-11-26) — OS-side C7 cleanup & verify waiting (`fix-implemented-verification-pending`)
+
+- **OS-side fix**: Replaced remaining scalar `.to_u32()` alias-bridge calls on `u8`/`u64` receivers in `src/os/services/vfs/direct_fat32_boot_reader.spl` (`138`, `361`, `394`, `400`, `412`) with `as u32` casts matching `_vfs_boot_mem_u16_le`. (No `.sdn` shard exists for this bug; `bug_db.sdn` untouched.)
+- **Host spec**: `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel_bf9/bf9_freestanding_init_and_u32_contract_spec.spl --mode=interpreter` -> `2 examples, 0 failures`.
+- **QEMU/baremetal verification pending**:
+  ```sh
+  sh scripts/os/build-simpleos-x86-64-desktop-engine2d-kernel.shs && sh scripts/os/run_simpleos_q35_smoke.shs
+  bin/simple test test/03_system/os/simpleos_native_build_entry_closure_spec.spl
+  ```
+
+## W2-4 Update (2026-11-27) — `gui_entry_*.spl` C7 `.to_u32()` cleanup & shard extracted (`fix-implemented-verification-pending`)
+
+- **Shard:** Extracted legacy row from `bug_db.sdn` to `doc/08_tracking/bug/db/simpleos_native_build_entry_closure_codegen_defects_2026-07-17.sdn` (`status: fix-implemented-verification-pending`).
+- **OS/entry-closure fix:** Replaced remaining scalar `.to_u32()` alias-bridge calls with explicit `as u32` casts across `examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl`, `gui_entry_browser.spl`, `gui_entry_engine2d.spl`, `gui_entry_engine2d_virtio.spl`, and `gui_entry_engine2d_virtio_factory.spl`.
+- **Host specs:** Added `test/01_unit/os/gui/x86_64_entry_u32_cast_contract_spec.spl` (`1 total, 1 passed, 0 failed`) and re-verified `test/01_unit/os/kernel_bf9/bf9_freestanding_init_and_u32_contract_spec.spl` (`2 total, 2 passed, 0 failed`).
+- **Waiting-for:** x86_64 freestanding native-build + QEMU desktop boot verification (`build-simpleos-x86-64-desktop-engine2d-kernel.shs`, `run_simpleos_q35_smoke.shs`, `simpleos_native_build_entry_closure_spec.spl`) including the `vfs_boot_init.spl` C8 check.

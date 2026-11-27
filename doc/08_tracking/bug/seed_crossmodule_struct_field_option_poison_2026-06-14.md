@@ -1,5 +1,24 @@
 # BUG: seed interpreter poisons cross-module struct field access to `Option` under a broad import closure
 
+## Verification 2026-11-25 — closure re-confirmed on the pinned release/1.0.0 seed
+
+- **measured** (pinned `bin/simple.exe`, Rust seed v1.0.0-rc.1, Windows, worktree
+  at `origin/release/1.0.0`): the doc's own irreducible 3-import minimal repro
+  (`backend_cpu` + `builder` + `widget_draw_cmds`, `for cmd in cmds: if cmd.kind
+  == "rect"`) compiles and runs to completion under
+  `SIMPLE_LIB=src bin/simple.exe run`, printing `RECT_OK`, rc=0 — no
+  `unknown property or method 'kind' on Option`. The cross-module `[DrawCmd]`
+  loop element is typed and marshalled correctly again.
+- The full `examples/06_io/ui/responsive_showcase_gui.spl` app could NOT be
+  re-run at this HEAD: it (and parts of `src/`) now carry
+  `@representation_boundary` decorators that the pinned rc.1 seed rejects
+  (`unknown decorator '@representation_boundary'`), a known source/binary
+  inconsistency at release/1.0.0 HEAD unrelated to this bug. The minimal repro
+  above exercises the exact poisoning mechanism (same three-import closure,
+  same `cmd.kind` field access) and is the decisive evidence.
+- Status remains **CLOSED**; the 2026-09-13 measurement is independently
+  re-confirmed.
+
 ## Closed 2026-09-13 — Does not reproduce: the broad-import closure type-checks and runs
 
 - **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): `bin/simple run examples/06_io/ui/responsive_showcase_gui.spl` — the exact app named in the report — compiles and begins executing. It ends only at the harness's own `error: example timed out after 10s` (a GUI event loop), never at `semantic: undefined field: unknown property or method 'kind' on Option`. The loop element over `[DrawCmd]` is typed correctly again.

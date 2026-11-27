@@ -1,0 +1,387 @@
+# ScvAdapterV1: legacy SCV chunk -> ImmutableStoreV1 bridge. Real temp repos
+# under build/test-artifacts (never mocks): identity preserved (store key ==
+# legacy sha256_<hex> id), corrupt blobs rejected, two clients share one
+# object, and pin_reachable only pins existing sha256_ chunks.
+# Design: doc/05_design/platform/container/simple_container_improvement.md (Increment 2, Lane A)
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_u8_fast_hex}
+use std.common.hash.hash_policy_v1.{HASH_POLICY_V1_SHA256_LEGACY}
+use std.nogc_sync_mut.storage.immutable_store_v1.{immutable_store_v1_init, immutable_store_v1_collect,
+    immutable_store_v1_ingest_pinned, immutable_store_v1_release_pin, StoreFlagV1}
+use std.nogc_sync_mut.storage.scv_adapter_v1.{scv_adapter_v1_store_root, scv_adapter_v1_import_chunk,
+    scv_adapter_v1_import_bytes, scv_adapter_v1_pin_reachable, scv_adapter_v1_pin_write, scv_adapter_v1_pin_release_older,
+    scv_adapter_v1_run_owner, scv_adapter_v1_open_projection,
+    scv_adapter_v1_enable}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes, secure_temp_dir_raw}
+use std.nogc_sync_mut.io_runtime.{file_write, file_delete}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.sosix.time.{time_sample_unix_micros_or_failure}
+use std.nogc_sync_mut.io_runtime.{file_read}
+
+fn _hex(b: [u8]) -> text:
+    var s = ""
+    val digits = "0123456789abcdef"
+    for x in b:
+        val v = x.to_i64()
+        s = s + digits[v / 16] + digits[v % 16]
+    s
+
+fn _repo(tag: text) -> text:
+    dir_create_all("build/test-artifacts")
+    val owned = secure_temp_dir_raw("build/test-artifacts", "scv-adapter-" + tag + "-")
+    expect(owned == "").to_equal(false)
+    val root = path_absolute(owned).replace("\\", "/")
+    expect(dir_create_all(root + "/.scv/objects/chunks")).to_equal(true)
+    root
+
+fn _cleanup(root: text):
+    val parent = path_absolute("build/test-artifacts").replace("\\", "/") + "/"
+    expect(root.starts_with(parent)).to_equal(true)
+    expect(dir_remove_all(root)).to_equal(true)
+
+fn _legacy_id(bytes: [u8]) -> text:
+    "sha256_" + sha256_u8_fast_hex(bytes)
+
+fn _put_chunk(root: text, bytes: [u8]) -> text:
+    val id = _legacy_id(bytes)
+    expect(file_write_bytes(root + "/.scv/objects/chunks/" + id + ".blob", bytes)).to_equal(true)
+    id
+
+fn _count_objects(root: text) -> i64:
+    var count: i64 = 0
+    val objects_dir = root + "/objects"
+    if not is_dir(objects_dir):
+        return 0
+    for shard in dir_list(objects_dir):
+        val shard_path = objects_dir + "/" + shard.trim()
+        if shard.trim() == "" or not is_dir(shard_path):
+            continue
+        for entry in dir_list(shard_path):
+            if entry.trim().ends_with(".obj"):
+                count = count + 1
+    count
+
+describe "scv_adapter_v1 import":
+    it "preserves the legacy id as the store key and reuses on repeat":
+        val repo = _repo("import")
+        val bytes = "legacy chunk payload".bytes()
+        val id = _put_chunk(repo, bytes)
+        val first = scv_adapter_v1_import_chunk(repo, id)
+        expect(first.status).to_equal("ok")
+        expect(first.object_key).to_equal(id)
+        expect(first.reused.value).to_equal(false)
+        val opened = scv_adapter_v1_open_projection(repo, id)
+        expect(opened.status).to_equal("ok")
+        expect(_hex(opened.bytes)).to_equal(_hex(bytes))
+        val second = scv_adapter_v1_import_chunk(repo, id)
+        expect(second.status).to_equal("ok")
+        expect(second.reused.value).to_equal(true)
+        expect(_count_objects(scv_adapter_v1_store_root(repo))).to_equal(1)
+        _cleanup(repo)
+
+    it "rejects a corrupted blob, a bad id, and a missing chunk":
+        val repo = _repo("reject")
+        val id = _put_chunk(repo, "good bytes".bytes())
+        expect(file_write_bytes(repo + "/.scv/objects/chunks/" + id + ".blob", "tampered".bytes())).to_equal(true)
+        val corrupt = scv_adapter_v1_import_chunk(repo, id)
+        expect(corrupt.status).to_equal("rejected")
+        expect(corrupt.reason).to_equal("legacy-digest-mismatch")
+        expect(scv_adapter_v1_import_chunk(repo, "commit_abc").reason).to_equal("legacy-id-invalid")
+        expect(scv_adapter_v1_import_chunk(repo, "sha256_../x").status).to_equal("rejected")
+        expect(scv_adapter_v1_import_chunk(repo, "sha256_" + "0".repeat(64)).reason).to_equal("chunk-missing")
+        expect(scv_adapter_v1_import_bytes(repo, id, "other".bytes()).status).to_equal("rejected")
+        expect(scv_adapter_v1_open_projection(repo, id).status).to_equal("missing")
+        _cleanup(repo)
+
+describe "scv_adapter_v1 shared object":
+    it "is one object for SCV and a container client, kept by either pin":
+        val repo = _repo("shared")
+        val bytes = "shared between scv and container".bytes()
+        val id = _put_chunk(repo, bytes)
+        val root = scv_adapter_v1_store_root(repo)
+        expect(scv_adapter_v1_import_chunk(repo, id).status).to_equal("ok")
+        val container = immutable_store_v1_ingest_pinned(root, bytes, HASH_POLICY_V1_SHA256_LEGACY, "container-1", "container")
+        expect(container.status).to_equal("ok")
+        expect(container.object_key).to_equal(id)
+        expect(container.reused.value).to_equal(true)
+        expect(_count_objects(root)).to_equal(1)
+        # The container pin alone keeps it across GC.
+        val held = immutable_store_v1_collect(root, StoreFlagV1(true))
+        expect(held.status).to_equal("ok")
+        expect(held.unreachable.len()).to_equal(0)
+        expect(immutable_store_v1_release_pin(root, "container-1", "container")).to_equal("")
+        val gone = immutable_store_v1_collect(root, StoreFlagV1(true))
+        expect(gone.unreachable.len()).to_equal(1)
+        expect(gone.unreachable[0]).to_equal(id)
+        _cleanup(repo)
+
+describe "scv_adapter_v1 pin_reachable":
+    it "pins existing sha256 chunks only and releases stale batches":
+        val repo = _repo("pin")
+        val a = _put_chunk(repo, "chunk a".bytes())
+        val b = _put_chunk(repo, "chunk b".bytes())
+        val root = scv_adapter_v1_store_root(repo)
+        expect(immutable_store_v1_init(root)).to_equal("")
+        val missing = "sha256_" + "1".repeat(64)
+        val reachable = "commit_x\nfile_y\ntree_z\n" + a + "\n" + missing + "\n" + b + "\n" + a + "\n"
+        val pinned = scv_adapter_v1_pin_reachable(repo, reachable, "scv")
+        expect(pinned.status).to_equal("ok")
+        expect(pinned.pinned.value).to_equal(2)
+        expect(pinned.skipped.value).to_equal(4)
+        expect(_count_objects(root)).to_equal(2)
+        val held = immutable_store_v1_collect(root, StoreFlagV1(true))
+        expect(held.unreachable.len()).to_equal(0)
+        # Dropping b from the reachable set writes a new generation; b becomes collectable.
+        val narrowed = scv_adapter_v1_pin_reachable(repo, a + "\n", "scv")
+        expect(narrowed.pinned.value).to_equal(1)
+        val after = immutable_store_v1_collect(root, StoreFlagV1(true))
+        expect(after.unreachable.len()).to_equal(1)
+        expect(after.unreachable[0]).to_equal(b)
+        # Empty reachable set releases the last generation; a becomes collectable too.
+        val empty = scv_adapter_v1_pin_reachable(repo, "", "scv")
+        expect(empty.status).to_equal("ok")
+        val none = immutable_store_v1_collect(root, StoreFlagV1(true))
+        expect(none.unreachable.len()).to_equal(2)
+        _cleanup(repo)
+
+describe "scv_adapter_v1 fail-closed":
+    it "rejects on a store-side failure and keeps the previous generation pinned":
+        val repo = _repo("failclosed")
+        val a = _put_chunk(repo, "chunk a".bytes())
+        val b = _put_chunk(repo, "chunk b".bytes())
+        val root = scv_adapter_v1_store_root(repo)
+        expect(scv_adapter_v1_pin_reachable(repo, a + "\n", "scv").status).to_equal("ok")
+        # Break ingest: objects/ becomes a file, so importing b cannot publish.
+        expect(dir_remove_all(root + "/objects")).to_equal(true)
+        expect(file_write_bytes(root + "/objects", "x".bytes())).to_equal(true)
+        val failed = scv_adapter_v1_pin_reachable(repo, a + "\n" + b + "\n", "scv")
+        expect(failed.status).to_equal("rejected")
+        # The previous generation was not released: its pin dir still names a.
+        expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(true)
+        _cleanup(repo)
+
+    it "releases an ownerless pin dir and lets gc proceed":
+        val repo = _repo("ownerless")
+        val a = _put_chunk(repo, "chunk a".bytes())
+        val root = scv_adapter_v1_store_root(repo)
+        expect(scv_adapter_v1_pin_reachable(repo, a + "\n", "scv").status).to_equal("ok")
+        # Half-created generation: pin dir with no owner file.
+        expect(dir_create_all(root + "/pins/scv-gc-5-0/refs")).to_equal(true)
+        expect(immutable_store_v1_release_pin(root, "scv-gc-5-0", "other")).to_equal("")
+        expect(dir_create_all(root + "/pins/scv-gc-6-0/refs")).to_equal(true)
+        val again = scv_adapter_v1_pin_reachable(repo, a + "\n", "scv")
+        expect(again.status).to_equal("ok")
+        expect(is_dir(root + "/pins/scv-gc-6-0")).to_equal(false)
+        val gc = immutable_store_v1_collect(root, StoreFlagV1(true))
+        expect(gc.status).to_equal("ok")
+        expect(gc.unreachable.len()).to_equal(0)
+        _cleanup(repo)
+
+describe "scv_adapter_v1 enable":
+    it "is idempotent and rejects an empty repo root":
+        val repo = _repo("enable")
+        expect(scv_adapter_v1_enable(repo)).to_equal("")
+        expect(scv_adapter_v1_enable(repo)).to_equal("")
+        expect(is_dir(scv_adapter_v1_store_root(repo))).to_equal(true)
+        expect(scv_adapter_v1_enable("")).to_equal("repo-root-empty")
+        _cleanup(repo)
+
+describe "scv_adapter_v1 corrupt legacy blob":
+    it "keeps the pin for a key already in the store and GC leaves the good object":
+        val repo = _repo("keeppin")
+        val good = "good chunk".bytes()
+        val id = _put_chunk(repo, good)
+        val root = scv_adapter_v1_store_root(repo)
+        val first = scv_adapter_v1_pin_reachable(repo, id + "\n", "scv")
+        expect(first.pinned.value).to_equal(1)
+        expect(file_write_bytes(repo + "/.scv/objects/chunks/" + id + ".blob", "corrupt".bytes())).to_equal(true)
+        val again = scv_adapter_v1_pin_reachable(repo, id + "\n", "scv")
+        expect(again.status).to_equal("ok")
+        expect(again.pinned.value).to_equal(1)
+        expect(again.skipped.value).to_equal(0)
+        val held = immutable_store_v1_collect(root, StoreFlagV1(true))
+        expect(held.unreachable.len()).to_equal(0)
+        expect(_count_objects(root)).to_equal(1)
+        _cleanup(repo)
+
+    it "still skips a corrupt blob whose key was never imported":
+        val repo = _repo("nopin")
+        val id = _legacy_id("never imported".bytes())
+        expect(file_write_bytes(repo + "/.scv/objects/chunks/" + id + ".blob", "corrupt".bytes())).to_equal(true)
+        val root = scv_adapter_v1_store_root(repo)
+        val pinned = scv_adapter_v1_pin_reachable(repo, id + "\n", "scv")
+        expect(pinned.status).to_equal("ok")
+        expect(pinned.pinned.value).to_equal(0)
+        expect(pinned.skipped.value).to_equal(1)
+        expect(_count_objects(root)).to_equal(0)
+        _cleanup(repo)
+
+describe "scv_adapter_v1 concurrent gc runs":
+    it "keeps a concurrent run's fresh pin until that run completes":
+        val repo = _repo("race")
+        val a = _put_chunk(repo, "chunk a".bytes())
+        val b = _put_chunk(repo, "chunk b".bytes())
+        val root = scv_adapter_v1_store_root(repo)
+        val owner_a = scv_adapter_v1_run_owner(repo)
+        val owner_b = scv_adapter_v1_run_owner(repo)
+        expect(owner_a.starts_with("scv-gc:")).to_equal(true)
+        expect(owner_a == owner_b).to_equal(false)
+        # Seed generation 0 (older completed run).
+        expect(scv_adapter_v1_pin_reachable(repo, a + "\n", "scv").generation.value).to_equal(0)
+        # A writes generation 1 and B writes generation 2 before either releases.
+        val wa = scv_adapter_v1_pin_write(repo, a + "\n", owner_a)
+        expect(wa.generation.value).to_equal(1)
+        val wb = scv_adapter_v1_pin_write(repo, b + "\n", owner_b)
+        expect(wb.generation.value).to_equal(2)
+        # A releases: B's fresh pin survives, A's own older-than-newest pin goes.
+        expect(scv_adapter_v1_pin_release_older(repo, owner_a)).to_equal("")
+        expect(is_dir(root + "/pins/scv-gc-2-0")).to_equal(true)
+        expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(false)
+        expect(is_dir(root + "/pins/scv-gc-1-0")).to_equal(false)
+        # B finishes: only the newest generation remains.
+        expect(scv_adapter_v1_pin_release_older(repo, owner_b)).to_equal("")
+        expect(is_dir(root + "/pins/scv-gc-2-0")).to_equal(true)
+        expect(is_dir(root + "/pins/scv-gc-done-2")).to_equal(true)
+        expect(is_dir(root + "/pins/scv-gc-1-0")).to_equal(false)
+        expect(is_dir(root + "/pins/scv-gc-done-1")).to_equal(false)
+        _cleanup(repo)
+
+    it "never releases an older in-flight run's pin when a newer run completes":
+        val repo = _repo("race2")
+        val a = _put_chunk(repo, "chunk a".bytes())
+        val b = _put_chunk(repo, "chunk b".bytes())
+        val root = scv_adapter_v1_store_root(repo)
+        val owner_a = scv_adapter_v1_run_owner(repo)
+        val owner_b = scv_adapter_v1_run_owner(repo)
+        # A is generation 0 but B (generation 1) completes and releases first.
+        # A's pin has no marker yet only if A is mid-write: stage A's pin by hand.
+        val wa = scv_adapter_v1_pin_write(repo, a + "\n", owner_a)
+        expect(wa.generation.value).to_equal(0)
+        expect(immutable_store_v1_release_pin(root, "scv-gc-done-0", owner_a)).to_equal("")
+        val wb = scv_adapter_v1_pin_write(repo, b + "\n", owner_b)
+        expect(wb.generation.value).to_equal(1)
+        expect(scv_adapter_v1_pin_release_older(repo, owner_b)).to_equal("")
+        expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(true)
+        expect(is_dir(root + "/pins/scv-gc-1-0")).to_equal(true)
+        _cleanup(repo)
+
+# Liveness of an unmarked `scv-gc:` pin's owner: record `<store>/run-live/<nonce>`
+# holds the owner's last refresh (unix ms).
+fn _unmarked_gen0_then_gen1(repo: text, tag: text) -> [text]:
+    val a = _put_chunk(repo, "chunk a {tag}".bytes())
+    val b = _put_chunk(repo, "chunk b {tag}".bytes())
+    val root = scv_adapter_v1_store_root(repo)
+    val owner_a = scv_adapter_v1_run_owner(repo)
+    val owner_b = scv_adapter_v1_run_owner(repo)
+    expect(scv_adapter_v1_pin_write(repo, a + "\n", owner_a).generation.value).to_equal(0)
+    # A is mid-run: its pin exists but its marker does not.
+    expect(immutable_store_v1_release_pin(root, "scv-gc-done-0", owner_a)).to_equal("")
+    expect(scv_adapter_v1_pin_write(repo, b + "\n", owner_b).generation.value).to_equal(1)
+    [owner_a, owner_b, root + "/run-live/" + owner_a.substring(7, owner_a.byte_len())]
+
+# 25 h ago in unix ms (past the 24 h bound, above the plausibility floor).
+fn _old_ms() -> text:
+    "{time_sample_unix_micros_or_failure() / 1000 - 90000000}"
+
+describe "scv_adapter_v1 unmarked pin liveness":
+    it "reclaims an unmarked pin whose owner's liveness record is stale":
+        val repo = _repo("live-stale")
+        val s = _unmarked_gen0_then_gen1(repo, "s")
+        val root = scv_adapter_v1_store_root(repo)
+        expect(file_write(s[2], _old_ms())).to_equal(true)
+        expect(scv_adapter_v1_pin_release_older(repo, s[1])).to_equal("")
+        expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(false)
+        expect(is_dir(root + "/pins/scv-gc-1-0")).to_equal(true)
+        _cleanup(repo)
+
+    it "keeps an unmarked pin whose owner refreshed its record recently":
+        val repo = _repo("live-fresh")
+        val s = _unmarked_gen0_then_gen1(repo, "f")
+        val root = scv_adapter_v1_store_root(repo)
+        expect(file_exists(s[2])).to_equal(true)
+        expect(scv_adapter_v1_pin_release_older(repo, s[1])).to_equal("")
+        expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(true)
+        expect(file_exists(s[2])).to_equal(true)
+        _cleanup(repo)
+
+    it "keeps an unmarked pin when liveness is unknown or the owner is the current run":
+        val repo = _repo("live-unknown")
+        val s = _unmarked_gen0_then_gen1(repo, "u")
+        val root = scv_adapter_v1_store_root(repo)
+        # Unparsable record, then a missing record: both unknown.
+        expect(file_write(s[2], "not-a-time")).to_equal(true)
+        expect(scv_adapter_v1_pin_release_older(repo, s[1])).to_equal("")
+        expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(true)
+        expect(file_delete(s[2])).to_equal(true)
+        expect(scv_adapter_v1_pin_release_older(repo, s[1])).to_equal("")
+        expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(true)
+        # Stale record but the pin's owner IS the calling run: kept.
+        expect(file_write(s[2], _old_ms())).to_equal(true)
+        expect(scv_adapter_v1_pin_release_older(repo, s[0])).to_equal("")
+        expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(true)
+        _cleanup(repo)
+
+    it "keeps an unmarked pin whose owner's record is dated in the future":
+        val repo = _repo("live-future")
+        val s = _unmarked_gen0_then_gen1(repo, "fu")
+        val root = scv_adapter_v1_store_root(repo)
+        expect(file_write(s[2], "99999999999999999")).to_equal(true)
+        expect(scv_adapter_v1_pin_release_older(repo, s[1])).to_equal("")
+        expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(true)
+        expect(file_exists(s[2])).to_equal(true)
+        _cleanup(repo)
+
+    it "treats a record below the plausibility floor (torn write) as unknown":
+        val repo = _repo("live-torn")
+        val s = _unmarked_gen0_then_gen1(repo, "to")
+        val root = scv_adapter_v1_store_root(repo)
+        expect(file_write(s[2], "17")).to_equal(true)
+        expect(scv_adapter_v1_pin_release_older(repo, s[1])).to_equal("")
+        expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(true)
+        _cleanup(repo)
+
+    it "prunes a stale record no pin refers to and keeps the fresh one":
+        val repo = _repo("live-prune")
+        val s = _unmarked_gen0_then_gen1(repo, "pr")
+        val root = scv_adapter_v1_store_root(repo)
+        val fresh = root + "/run-live/" + s[1].substring(7, s[1].byte_len())
+        expect(file_write(s[2], _old_ms())).to_equal(true)
+        expect(scv_adapter_v1_pin_release_older(repo, s[1])).to_equal("")
+        expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(false)
+        expect(file_exists(s[2])).to_equal(false)
+        expect(file_exists(fresh)).to_equal(true)
+        _cleanup(repo)
+
+    it "keeps a stale record that a kept pin still refers to":
+        val repo = _repo("live-held")
+        val s = _unmarked_gen0_then_gen1(repo, "he")
+        val root = scv_adapter_v1_store_root(repo)
+        expect(file_write(s[2], _old_ms())).to_equal(true)
+        # The calling run owns the old pin, so it is kept and its record survives.
+        expect(scv_adapter_v1_pin_release_older(repo, s[0])).to_equal("")
+        expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(true)
+        expect(file_exists(s[2])).to_equal(true)
+        _cleanup(repo)
+
+    it "pin_write refreshes the owner's record":
+        val repo = _repo("live-refresh")
+        val a = _put_chunk(repo, "chunk a rf".bytes())
+        val root = scv_adapter_v1_store_root(repo)
+        val owner = scv_adapter_v1_run_owner(repo)
+        val rec = root + "/run-live/" + owner.substring(7, owner.byte_len())
+        expect(file_write(rec, _old_ms())).to_equal(true)
+        expect(scv_adapter_v1_pin_write(repo, a + "\n", owner).status).to_equal("ok")
+        val ms = file_read(rec).trim().to_i64() ?? 0
+        expect(ms > time_sample_unix_micros_or_failure() / 1000 - 600000).to_equal(true)
+        _cleanup(repo)
+
+    it "rejects a path-unsafe nonce (no record is written)":
+        val repo = _repo("live-nonce")
+        val a = _put_chunk(repo, "chunk a nn".bytes())
+        val root = scv_adapter_v1_store_root(repo)
+        expect(scv_adapter_v1_pin_write(repo, a + "\n", "scv-gc:bad:ads").status).to_equal("ok")
+        expect(file_exists(root + "/run-live/bad:ads")).to_equal(false)
+        expect(file_exists(root + "/run-live/bad")).to_equal(false)
+        _cleanup(repo)

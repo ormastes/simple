@@ -58,14 +58,29 @@ fn get_cli_args() -> [text]:
 #
 # Takes an explicit path so it is testable; resolve_effective_profile supplies
 # the cwd-relative default.
+fn _strip_sdn_comment(line: text) -> text:
+    var quote = ""
+    var kept = ""
+    for ch in line.chars():
+        val c = ch.to_text()
+        if quote != "":
+            if c == quote:
+                quote = ""
+        elif c == "\"" or c == "'":
+            quote = c
+        elif c == "#":
+            return kept.trim()
+        kept = kept + c
+    kept.trim()
+
 pub fn read_sdn_lints_profile(sdn_path: text) -> text:
     val content = file_read(sdn_path) ?? ""
     if content == "":
         return ""
     var in_lints = false
     for line in content.split("\n"):
-        val trimmed = line.trim()
-        if trimmed == "" or trimmed.starts_with("#"):
+        val trimmed = _strip_sdn_comment(line)
+        if trimmed == "":
             continue
         val indented = line.starts_with(" ") or line.starts_with("\t")
         if not indented:
@@ -134,14 +149,45 @@ fn resolve_mcdc_mode_for_profile(
 # what a real edition mechanism would gate and why it isn't gated yet.
 # =========================================================================
 #
-# PLUMBING ONLY: nothing beyond resolve_edition() and its spec consumes this
-# value -- no language/lint semantics are gated on an edition anywhere in
-# the compiler or test runner today. Do not wire new behavior to this
-# accessor without a design decision recorded in the scoping doc first.
+# Owner decision 5C (plan doc/03_plan/release/1.0.0/
+# robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md §7) defines
+# editions 2026.11 (warn) and 2027.2 (error_since_lang_version); its one
+# consumer is driver_unit_profile.spl, which promotes SPL-UNIT-004 by
+# edition + profile. Do not wire other behavior to this accessor without a
+# design decision recorded in the scoping doc first.
 
-val EDITION_DEFAULT = "2026"
+# Default edition bumped 2026 -> 2027.2 (owner-requested follow-up to decision
+# 4B; needs owner sign-off): projects without project.edition now get the
+# 2027.2 SPL-UNIT-004 promotion. "2026" stays accepted as a legacy explicit
+# edition (EDITION_LEGACY), resolving unchanged.
+val EDITION_DEFAULT = "2027.2"
+val EDITION_LEGACY = "2026"
 
-# Tracks which unknown simple.sdn [package] edition= values have already
+# Recognized editions = EDITION_DEFAULT, EDITION_LEGACY, plus every edition-promotion value
+# (warn_since_lang_version / error_since_lang_version) the diagnostic policy
+# schedules. Other *_lang_version keys (e.g. remove_since_lang_version) are
+# not editions. The policy file is the single source; no second list.
+val EDITION_POLICY_PATH = "config/policy/diagnostic_policy.sdn"
+val EDITION_POLICY_KEYS = ["warn_since_lang_version", "error_since_lang_version"]
+
+fn edition_values_from_policy(content: text) -> [text]:
+    var out: [text] = [EDITION_DEFAULT, EDITION_LEGACY]
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("#"):
+            continue
+        val sep = trimmed.index_of(":") ?? -1
+        if sep <= 0 or not EDITION_POLICY_KEYS.contains(trimmed.substring(0, sep).trim()):
+            continue
+        val v = trimmed.substring(sep + 1).replace("\"", "").trim()
+        if v != "" and not out.contains(v):
+            out.push(v)
+    out
+
+fn _policy_editions() -> [text]:
+    edition_values_from_policy(file_read(EDITION_POLICY_PATH) ?? "")
+
+# Tracks which unknown simple.sdn project: edition values have already
 # warned this process. Mirrors _warn_deprecated_profile_alias_once
 # (src/compiler/90.tools/lint/_LintMain/config_and_model.spl:60-74):
 # module-level state, not a struct field (structs are value types), keyed by
@@ -153,7 +199,11 @@ fn _warn_unknown_edition_once(raw: text):
     if _EDITION_UNKNOWN_WARN_COUNTS.contains_key(raw):
         return
     _EDITION_UNKNOWN_WARN_COUNTS[raw] = 1
-    print "warning: simple.sdn [package] edition=\"{raw}\" is not a recognized edition; using the default edition \"{EDITION_DEFAULT}\". Valid: {EDITION_DEFAULT}."
+    if (file_read(EDITION_POLICY_PATH) ?? "") == "":
+        print "warning: simple.sdn project.edition \"{raw}\" cannot be validated: edition policy {EDITION_POLICY_PATH} is unreadable or empty; using the default edition \"{EDITION_DEFAULT}\" instead of the requested one."
+        return
+    val valid = _policy_editions().join(", ")
+    print "warning: simple.sdn project.edition \"{raw}\" is not a recognized edition; using the default edition \"{EDITION_DEFAULT}\". Valid: {valid}."
 
 # Test-support accessor: how many times has the unknown-edition warning
 # actually fired for this raw value (0 or 1, never more)? Mirrors
@@ -165,61 +215,96 @@ fn edition_unknown_warn_count(raw: text) -> i64:
         return 1
     0
 
-# Minimal, self-contained [package] section scan -- mirrors
+# Reads `edition:` from the SDN `project:` block (same block simple.sdn uses
+# for name/version). Minimal, self-contained scan -- mirrors
 # _read_sdn_lints_profile above for the same reason: a self-contained
 # scanner avoids importing a heavier sdn loader into this interpreter
 # session. See doc/01_research/language/editions_mechanism_scoping_2026-07-29.md
 # section 2 for the caveat that no simple.sdn checked into this repo
-# currently has a [package] section either -- this reader is precedent-
+# currently has a project: edition either -- this reader is precedent-
 # matching, decision-free plumbing, not proof the format is in active use.
 fn _read_sdn_package_edition(sdn_path: text) -> text:
     val content = file_read(sdn_path) ?? ""
     if content == "":
         return ""
-    var in_package = false
+    var in_project = false
     for line in content.split("\n"):
-        val trimmed = line.trim()
-        if trimmed == "" or trimmed.starts_with("#"):
+        val trimmed = _strip_sdn_comment(line)
+        if trimmed == "":
             continue
-        if trimmed == "[package]":
-            in_package = true
+        val indented = line.starts_with(" ") or line.starts_with("\t")
+        if not indented:
+            in_project = trimmed == "project:"
             continue
-        if trimmed.starts_with("[") and trimmed.ends_with("]"):
-            in_package = false
-            continue
-        if in_package and trimmed.starts_with("edition") and trimmed.contains("="):
-            val parts = trimmed.split("=")
-            if parts.len() >= 2:
-                var val_str = parts[1].trim()
-                val_str = val_str.replace("\"", "")
-                val_str = val_str.replace("'", "")
-                val_str = val_str.trim()
-                return val_str
+        val sep = trimmed.index_of(":") ?? -1
+        if in_project and sep > 0 and trimmed.substring(0, sep).trim() == "edition":
+            var val_str = trimmed.substring(sep + 1).trim()
+            val_str = val_str.replace("\"", "")
+            val_str = val_str.replace("'", "")
+            return val_str.trim()
     ""
 
 # Pure resolution step (mirrors normalize_profile_name's shape: takes a raw
 # value, not a path, so specs can drive the unknown-value -> warn-once ->
 # fallback path directly without needing a real simple.sdn on disk -- this
-# repo has none with a [package] section, see scoping doc section 2). Not
+# repo has none with a project: edition, see scoping doc section 2). Not
 # underscore-prefixed since, like normalize_profile_name, it is meant to be
 # spec'd directly.
 fn resolve_edition_from_value(raw: text) -> text:
     if raw == "":
         return EDITION_DEFAULT
-    if raw == EDITION_DEFAULT:
+    if _policy_editions().contains(raw):
         return raw
     _warn_unknown_edition_once(raw)
     EDITION_DEFAULT
 
-# Resolution order (scoping doc section 3): simple.sdn [package] edition= >
-# engine default (the one currently-defined value, EDITION_DEFAULT -- today's
-# implicit edition, since no prior edition ever existed). No CLI flag exists
-# yet: nothing consumes an edition today, so there is nothing to override --
+# Resolution order (scoping doc section 3): simple.sdn project: edition >
+# engine default (EDITION_DEFAULT, 2027.2). No CLI flag exists yet: the only
+# edition consumer is driver_unit_profile.spl, so there is nothing to override --
 # see the scoping doc for why adding one is a design decision, not plumbing.
 # Unknown values warn once and fall back to EDITION_DEFAULT rather than
 # failing -- an edition value error should never itself break `test`/`run`.
-fn resolve_edition() -> text:
-    resolve_edition_from_value(_read_sdn_package_edition("simple.sdn"))
+pub fn resolve_edition() -> text:
+    resolve_edition_from_sdn("simple.sdn")
+
+pub fn resolve_edition_from_sdn(sdn_path: text) -> text:
+    resolve_edition_from_value(_read_sdn_package_edition(sdn_path))
+
+# Resolve the effective MC/DC mode from the environment for `resolved_profile`
+# and publish it for child processes. Every runner lane (full runner, the
+# `--no-session-daemon` single lane, and the daemon's per-file children, which
+# use the single lane) goes through this one function, so they cannot disagree.
+# Returns "on", "dynamic", "off", "invalid-off" or "invalid-mode"; on an
+# invalid result SIMPLE_MCDC_MODE is forced to "on" (fail closed) and
+# SIMPLE_MCDC_MODE_ERROR names the reason -- the caller must refuse to run
+# (mcdc_mode_error_message) using this call's result: a second call in the same
+# process resolves the forced "on" and clears the error flag.
+fn apply_mcdc_mode_env(resolved_profile: text) -> text:
+    val effective_mcdc_mode = resolve_mcdc_mode_for_profile(
+        env_get("SIMPLE_MCDC_MODE") ?? "",
+        resolved_profile,
+        env_get("SIMPLE_MCDC_OFF_WAIVER_REASON") ?? "",
+        env_get("SIMPLE_MCDC_OFF_WAIVER_REVIEWER") ?? "",
+        env_get("SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID") ?? "",
+        env_get("SIMPLE_MCDC_OFF_WAIVER_VERSION") ?? "")
+    if effective_mcdc_mode == "invalid-off" or effective_mcdc_mode == "invalid-mode":
+        env_set("SIMPLE_MCDC_MODE_ERROR", effective_mcdc_mode)
+        # Fail closed: never leave "off" or a bogus value for children, even
+        # if a caller ignores the refusal.
+        env_set("SIMPLE_MCDC_MODE", "on")
+    else:
+        env_set("SIMPLE_MCDC_MODE_ERROR", "")
+        env_set("SIMPLE_MCDC_MODE", effective_mcdc_mode)
+    effective_mcdc_mode
+
+# The refusal text for an invalid resolved MC/DC mode, or "" when the mode is
+# runnable. Shared by every lane so the diagnostic is identical.
+fn mcdc_mode_error_message(effective_mode: text) -> text:
+    if effective_mode == "invalid-off":
+        return "error: test-runner: SIMPLE_MCDC_MODE=off is refused for a normal-or-stricter profile without a complete waiver (SIMPLE_MCDC_OFF_WAIVER_REASON, _REVIEWER, _REVIEW_ID, _VERSION)"
+    if effective_mode == "invalid-mode":
+        return "error: test-runner: SIMPLE_MCDC_MODE has an unrecognised value (expected on, dynamic or off)"
+    ""
 
 fn propagate_env_vars(options: TestOptions):
     # Set SIMPLE_TEST_MODE for child processes
@@ -235,18 +320,7 @@ fn propagate_env_vars(options: TestOptions):
     if resolved_profile != "":
         env_set("SIMPLE_SAFETY_PROFILE", resolved_profile)
 
-    val effective_mcdc_mode = resolve_mcdc_mode_for_profile(
-        env_get("SIMPLE_MCDC_MODE") ?? "",
-        resolved_profile,
-        env_get("SIMPLE_MCDC_OFF_WAIVER_REASON") ?? "",
-        env_get("SIMPLE_MCDC_OFF_WAIVER_REVIEWER") ?? "",
-        env_get("SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID") ?? "",
-        env_get("SIMPLE_MCDC_OFF_WAIVER_VERSION") ?? "")
-    if effective_mcdc_mode == "invalid-off" or effective_mcdc_mode == "invalid-mode":
-        env_set("SIMPLE_MCDC_MODE_ERROR", effective_mcdc_mode)
-    else:
-        env_set("SIMPLE_MCDC_MODE_ERROR", "")
-        env_set("SIMPLE_MCDC_MODE", effective_mcdc_mode)
+    val _ = apply_mcdc_mode_env(resolved_profile)
 
     if options.only_slow:
         env_set("SIMPLE_TEST_FILTER", "slow")
@@ -385,18 +459,49 @@ fn handle_run_management(args: [text]) -> i64:
 # MEMORY DEBUG: report free memory
 # =========================================================================
 
-fn report_free_mem(label: text):
-    val avail_line = file_read("/proc/meminfo") ?? ""
-    val lines = avail_line.split("\n")
+extern fn rt_host_memory_headroom_bytes_v1() -> i64
+
+# Pure formatter: Linux MemAvailable line when /proc/meminfo has one, else the
+# host headroom (Windows: min(free phys, free commit) via rt_host_memory_headroom_bytes_v1),
+# else an "unavailable" note. Never an error: this is a debug report.
+fn free_mem_report_line(label: text, meminfo: text, headroom_bytes: i64) -> text:
+    val lines = meminfo.split("\n")
     var i = 0
     while i < lines.len():
         val line = lines[i]
         if line.starts_with("MemAvailable"):
-            print "[MEM] {label}: {line}"
-            return
+            return "[MEM] {label}: {line}"
         i = i + 1
-    print "[MEM] {label}: (could not read /proc/meminfo)"
+    if headroom_bytes > 0:
+        val mb = headroom_bytes / 1048576
+        return "[MEM] {label}: headroom {mb} MB"
+    "[MEM] {label}: (memory info unavailable)"
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in report_free_mem", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn report_free_mem(label: text):
+    val meminfo = file_read("/proc/meminfo") ?? ""
+    var headroom: i64 = 0
+    if meminfo == "":
+        unsafe(capabilities: [ffi]):
+            headroom = rt_host_memory_headroom_bytes_v1()
+    print free_mem_report_line(label, meminfo, headroom)
 
 # =========================================================================
 # Exports
 # =========================================================================
+
+# An interpreter run stays on the interpreter. Only explicit coverage (MIR
+# owned probes the HIR interpreter never executes) selects the native lane;
+# a default-on MC/DC mode must NOT divert it
+# (doc/08_tracking/bug/mcdc_default_on_diverts_interpreter_runs_to_native_2026-09-05.md).
+fn interpreter_run_diverts_to_native(coverage: bool) -> bool:
+    coverage
+
+# Visible notice printed when MC/DC is on but the interpreter path cannot
+# instrument it; "" when MC/DC is off.
+fn interpreter_mcdc_not_instrumented_notice(mcdc_mode: text) -> text:
+    if mcdc_mode == "on" or mcdc_mode == "dynamic":
+        return "[mcdc] SIMPLE_MCDC_MODE={mcdc_mode}: interpreter run is not MC/DC-instrumented; running on the interpreter (use --coverage or native for MC/DC evidence)"
+    ""
+
+export interpreter_run_diverts_to_native, interpreter_mcdc_not_instrumented_notice

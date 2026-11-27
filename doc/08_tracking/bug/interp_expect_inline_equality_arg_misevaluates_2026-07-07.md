@@ -1,5 +1,28 @@
 # Bug: `expect(a == b).to_equal(false)` mis-evaluates the inline `==` argument
-## Open 2026-09-16 — needs owner triage
+
+## Resolved — verified 2026-11-25 (P1 ledger sweep, Windows worktree)
+
+Re-verified on the pinned tracked binary (`bin/simple.exe`, 38,403,072 B, Rust
+seed v1.0.0-rc.1):
+
+- Gating spec `test/01_unit/bugs/spec_expect_inline_comparison_argument_spec.spl`
+  passes **8/8** under `SIMPLE_TEST_RUNNER_RUST=1 bin/simple.exe test`
+  (the default runner is blocked at HEAD by the pinned seed rejecting
+  `@representation_boundary` — seed/source drift, unrelated to this bug).
+- Both directions probed directly via `bin/simple.exe run` on the
+  interpreter lane: the entry's exact snippet
+  (`val a: u32 = 4294901760; val b: u32 = 4278190335;
+  expect(a == b).to_equal(false)`) now passes, and the inverted assertion
+  `expect(a == b).to_equal(true)` correctly fails with
+  `expected false to equal true` — the matcher receives the boolean result,
+  not the raw operands. The filed symptom (`expected 4294901760 to equal
+  4278190335`) is gone.
+
+Verified on the Rust seed interpreter; the self-hosted lane is not runnable
+on this host (no deployed self-hosted binary). The intermediate-`val`
+workaround is no longer required on the verified lane.
+
+## Open 2026-09-16 — superseded by the 2026-11-25 verification above
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.

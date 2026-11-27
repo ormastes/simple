@@ -1,0 +1,48 @@
+# Typed Windows pre-sign counterpart. Requires the provider's V5 workload-env
+# extension and its separately observed/admitted non-none network contract.
+# Configuration delivery and immutable identity are not proof of connectivity.
+use std.common.config_core.server_context_types_v1.{ServerConfigV1, ResolvedServerV1}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerExecutionPlanV2,
+    ContainerExecutionRequestV2, container_execution_request_encode_v2}
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_scope_v2,
+    simple_container_backend_v2, simple_container_project_v2}
+use std.nogc_async_mut.container.server_discovery_v1.simple_container_server_v1
+use std.nogc_async_mut.container.server_launch_projection_v1.container_server_environment_v1
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{WindowsDockerPolicyV1,
+    WindowsDockerRequestV1, windows_docker_request_digest_v1}
+use std.nogc_async_mut.container.providers.windows.docker_codec_v1.windows_docker_request_encode_v1
+
+# Trusted policy is an input to the platform codec, never loaded from snapshot.
+# This pure constructor supplies no network admission or authority grant.
+pub fn container_server_windows_request_v1(scope: ContainerHostScopeV2, policy: WindowsDockerPolicyV1,
+        unsigned_request: WindowsDockerRequestV1, selection: ResolvedServerV1) -> Result<ContainerExecutionRequestV2, text>:
+    if unsigned_request.network == "none": return Err("container-server-network-unavailable")
+    var native = unsigned_request
+    native.environment = container_server_environment_v1(native.environment, selection)?
+    val digest = windows_docker_request_digest_v1(policy, native)?
+    val retained = windows_docker_request_encode_v1(policy, native)?
+    val plan = ContainerExecutionPlanV2(backend: "windows-docker-process", workload_uid: native.pod_uid,
+        attempt: native.attempt, operation_id: native.operation_id, request_digest: digest,
+        physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id,
+        boot_id: scope.boot_id, provider_generation: scope.provider_generation,
+        native_machine_id: scope.native_machine_id, continuity_mode: scope.continuity_mode,
+        continuity_id: scope.continuity_id)
+    val request = ContainerExecutionRequestV2(plan: plan, request_bytes: retained)
+    val bounded = container_execution_request_encode_v2(request)?
+    Ok(request)
+
+# The tagged owner's existing request decoder verifies policy/scope and digest
+# agreement. Actual native network observation stays in its effect owner.
+pub fn simple_container_server_windows_prepare_v1(owner: SimpleContainerOwnerV2,
+        policy: WindowsDockerPolicyV1, unsigned_request: WindowsDockerRequestV1,
+        config: ServerConfigV1, consumer: text, explicit_server: text,
+        explicit_context: text) -> Result<ContainerExecutionRequestV2, text>:
+    if simple_container_backend_v2(owner) != "windows-docker-process":
+        return Err("container-server-windows-owner-required")
+    val discovery = simple_container_server_v1(owner, config, consumer, explicit_server, explicit_context)?
+    val request = container_server_windows_request_v1(simple_container_scope_v2(owner), policy,
+        unsigned_request, discovery.selection)?
+    val projected = simple_container_project_v2(owner, request)?
+    Ok(request)
+
+export container_server_windows_request_v1, simple_container_server_windows_prepare_v1

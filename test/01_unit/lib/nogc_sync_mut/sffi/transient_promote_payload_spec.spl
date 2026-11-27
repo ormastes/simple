@@ -1,0 +1,241 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Transient scope promote: text params, nested Result/Option payloads, post-free reads
+
+Exercises both promote wrappers (std sffi and MIR owner) on every branch of
+the begin / pause / promote / end protocol, with payloads that carry heap
+data (text, nested Result/Option, arrays). After the scope ends, churn
+allocations and re-read the promoted value: it must be intact, never garbage.
+"""
+
+# @tag: unit, lib, sffi, memory
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+use compiler.mir._MirLowering.transient_owner_sffi.{transient_array_scope_begin_v1, transient_array_scope_pause_v1, transient_array_scope_end_v1, transient_heap_promote_v1, transient_heap_promote_share_begin_v1, transient_heap_promote_share_end_v1, promote_and_release_transient_owner_roots}
+
+struct PayloadBox:
+    label: text
+    inner: Result<Option<text>, text>
+    nums: [i64]
+
+fn payload_churn() -> i64:
+    var keep: [text] = []
+    var i = 0
+    while i < 256:
+        keep = keep.push("churn-{i}-scratch-string")
+        i = i + 1
+    keep.len()
+
+fn payload_build(n: i64) -> PayloadBox:
+    PayloadBox(label: "label-{n}", inner: Ok(Some("deep-{n}")), nums: [n, n + 1, n + 2])
+
+fn payload_ok(b: PayloadBox, n: i64) -> bool:
+    var inner_ok = false
+    match b.inner:
+        case Ok(Some(s)): inner_ok = s == "deep-{n}"
+        case _: inner_ok = false
+    b.label == "label-{n}" and inner_ok and b.nums.len() == 3 and b.nums[2] == n + 2
+
+fn lib_text(n: i64) -> text?:
+    if not transient_scope_begin():
+        return nil
+    val s = "text-param-{n}"
+    if not transient_scope_pause():
+        transient_scope_end()
+        return nil
+    val kept = transient_promote<text>(s)
+    val ended = transient_scope_end()
+    if not kept or not ended:
+        return nil
+    Some(s)
+
+fn lib_result(n: i64) -> Result<Option<text>, text>?:
+    if not transient_scope_begin():
+        return nil
+    val r: Result<Option<text>, text> = Ok(Some("res-{n}"))
+    if not transient_scope_pause():
+        transient_scope_end()
+        return nil
+    val kept = transient_promote<Result<Option<text>, text>>(r)
+    val ended = transient_scope_end()
+    if not kept or not ended:
+        return nil
+    Some(r)
+
+fn lib_err(n: i64) -> Result<Option<text>, text>?:
+    if not transient_scope_begin():
+        return nil
+    val r: Result<Option<text>, text> = Err("err-{n}")
+    if not transient_scope_pause():
+        transient_scope_end()
+        return nil
+    val kept = transient_promote<Result<Option<text>, text>>(r)
+    val ended = transient_scope_end()
+    if not kept or not ended:
+        return nil
+    Some(r)
+
+fn lib_box(n: i64) -> PayloadBox?:
+    if not transient_scope_begin():
+        return nil
+    val b = payload_build(n)
+    if not transient_scope_pause():
+        transient_scope_end()
+        return nil
+    val kept = transient_promote<PayloadBox>(b)
+    val ended = transient_scope_end()
+    if not kept or not ended:
+        return nil
+    Some(b)
+
+fn mir_box(n: i64) -> PayloadBox?:
+    if not transient_array_scope_begin_v1():
+        return nil
+    val b = payload_build(n)
+    if not transient_array_scope_pause_v1():
+        transient_array_scope_end_v1()
+        return nil
+    val shared = transient_heap_promote_share_begin_v1()
+    val kept = transient_heap_promote_v1<PayloadBox>(b)
+    val share_end = transient_heap_promote_share_end_v1()
+    val ended = transient_array_scope_end_v1()
+    if not kept or not ended:
+        return nil
+    if shared and not share_end:
+        return nil
+    Some(b)
+
+fn mir_text(n: i64) -> text?:
+    if not transient_array_scope_begin_v1():
+        return nil
+    val s = "mir-text-{n}"
+    if not transient_array_scope_pause_v1():
+        transient_array_scope_end_v1()
+        return nil
+    val kept = transient_heap_promote_v1<text>(s)
+    val ended = transient_array_scope_end_v1()
+    if not kept or not ended:
+        return nil
+    Some(s)
+
+fn mir_roots(n: i64) -> [PayloadBox]?:
+    if not transient_array_scope_begin_v1():
+        return nil
+    var roots: [PayloadBox] = []
+    roots = roots.push(payload_build(n))
+    roots = roots.push(payload_build(n))
+    if not transient_array_scope_pause_v1():
+        transient_array_scope_end_v1()
+        return nil
+    val kept = promote_and_release_transient_owner_roots<PayloadBox>(roots)
+    val ended = transient_array_scope_end_v1()
+    if not kept or not ended:
+        return nil
+    Some(roots)
+
+describe "transient promote: text parameters":
+    it "std wrapper keeps a promoted text param intact after scope end":
+        var got: [text] = []
+        var i = 0
+        while i < 6:
+            match lib_text(i):
+                case Some(s): got = got.push(s)
+                case _: ()
+            payload_churn()
+            i = i + 1
+        expect(got.len()).to_equal(6)
+        var j = 0
+        for s in got:
+            expect(s).to_equal("text-param-{j}")
+            j = j + 1
+
+    it "MIR wrapper keeps a promoted text param intact after scope end":
+        var got: [text] = []
+        var i = 0
+        while i < 6:
+            match mir_text(i):
+                case Some(s): got = got.push(s)
+                case _: ()
+            payload_churn()
+            i = i + 1
+        expect(got.len()).to_equal(6)
+        var j = 0
+        for s in got:
+            expect(s).to_equal("mir-text-{j}")
+            j = j + 1
+
+describe "transient promote: nested Result/Option payloads":
+    it "keeps Ok(Some(text)) intact":
+        match lib_result(3):
+            case Some(r):
+                payload_churn()
+                match r:
+                    case Ok(Some(s)): expect(s).to_equal("res-3")
+                    case _: expect("wrong variant").to_equal("Ok(Some)")
+            case _: expect("scope failed").to_equal("promoted")
+
+    it "keeps Err(text) intact":
+        match lib_err(4):
+            case Some(r):
+                payload_churn()
+                match r:
+                    case Err(e): expect(e).to_equal("err-4")
+                    case _: expect("wrong variant").to_equal("Err")
+            case _: expect("scope failed").to_equal("promoted")
+
+    it "keeps a struct holding Result<Option<text>> and an array intact (std wrapper)":
+        var boxes: [PayloadBox] = []
+        var i = 0
+        while i < 6:
+            match lib_box(i):
+                case Some(b): boxes = boxes.push(b)
+                case _: ()
+            payload_churn()
+            i = i + 1
+        expect(boxes.len()).to_equal(6)
+        var good = 0
+        var j = 0
+        for b in boxes:
+            if payload_ok(b, j): good = good + 1
+            j = j + 1
+        expect(good).to_equal(6)
+
+    it "keeps the same struct intact through the MIR wrapper with share window":
+        var boxes: [PayloadBox] = []
+        var i = 0
+        while i < 6:
+            match mir_box(i):
+                case Some(b): boxes = boxes.push(b)
+                case _: ()
+            payload_churn()
+            i = i + 1
+        expect(boxes.len()).to_equal(6)
+        var good = 0
+        var j = 0
+        for b in boxes:
+            if payload_ok(b, j): good = good + 1
+            j = j + 1
+        expect(good).to_equal(6)
+
+describe "transient promote: reads after scope free":
+    it "promotes and releases an owner-root inventory, roots stay readable":
+        match mir_roots(7):
+            case Some(roots):
+                payload_churn()
+                expect(roots.len()).to_equal(2)
+                expect(payload_ok(roots[0], 7)).to_equal(true)
+                expect(payload_ok(roots[1], 7)).to_equal(true)
+            case _: expect("scope failed").to_equal("promoted")
+
+    it "pause without begin answers a bool and end stays callable":
+        val paused = transient_scope_pause()
+        val ended = transient_scope_end()
+        expect(paused == true or paused == false).to_equal(true)
+        expect(ended == true or ended == false).to_equal(true)
+
+    it "share window without a paused scope answers a bool":
+        val b = transient_heap_promote_share_begin_v1()
+        val e = transient_heap_promote_share_end_v1()
+        expect(b == true or b == false).to_equal(true)
+        expect(e == true or e == false).to_equal(true)

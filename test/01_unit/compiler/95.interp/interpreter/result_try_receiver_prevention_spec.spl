@@ -1,0 +1,41 @@
+# Bug: interp_result_question_operator_wrapper_unmatchable_2026-09-01
+#
+# `f()?.m()` lexes as the SAFE-NAVIGATION operator `?.` (Err/None -> nil), NOT
+# as `?` followed by `.m()`. A Result-returning one-line wrapper written that
+# way returns nil on Err, which matches neither Ok nor Err at the caller.
+# The try-then-call form is `(f()?).m()`: Ok unwraps, Err early-returns.
+# This spec pins the parenthesised form (the one src/compiler hwir uses) so the
+# early-return-through-method-receiver shape cannot regress.
+use std.spec
+
+class Prep:
+    v: i64
+    fn evaluate(x: i64) -> Result<i64, text>:
+        Ok(self.v + x)
+
+fn prep(ok: bool) -> Result<Prep, text>:
+    if ok:
+        Ok(Prep(v: 10))
+    else:
+        Err("bad")
+
+fn wrap_tail(ok: bool) -> Result<i64, text>:
+    (prep(ok)?).evaluate(1)
+
+fn wrap_return(ok: bool) -> Result<i64, text>:
+    return (prep(ok)?).evaluate(1)
+
+fn classify(r: Result<i64, text>) -> text:
+    match r:
+        case Ok(v): "ok {v}"
+        case Err(m): "err {m}"
+
+describe "try operator on a method-call receiver":
+    it "unwraps Ok in tail position":
+        expect(classify(wrap_tail(true))).to_equal("ok 11")
+    it "early-returns Err in tail position":
+        expect(classify(wrap_tail(false))).to_equal("err bad")
+    it "early-returns Err through explicit return":
+        expect(classify(wrap_return(false))).to_equal("err bad")
+    it "unwraps Ok through explicit return":
+        expect(classify(wrap_return(true))).to_equal("ok 11")

@@ -42,3 +42,27 @@ The same script already implements elaborate + run under its non-`--analyze`
 phase. Either invoke that phase from the hardware-gates entrypoint, or rename
 the gate to `ghdl_analyze_rv32 (syntax only)` and stop counting it toward a
 hardware claim. Do not leave it counted as-is under its current name.
+
+## Resolution (2026-11-25, P2 ledger sweep) — STALE, gate-honesty fixed
+
+The "green reads as validated" defect is closed in current `release/1.0.0`:
+
+1. The gate no longer runs "under its current name": every pass/fail/warn line
+   in `scripts/check/check-riscv-hardware-gates.shs:357-365` labels it
+   `ghdl_validate_rv32 --analyze (ANALYZE-ONLY: no elaboration/simulation)`,
+   and the entrypoint header (lines 19-21) documents that it proves parsing
+   only.
+2. It no longer counts toward a hardware claim: since `082e50256b3`
+   ("fix(riscv): reject seed and unqualified gate attribution", 2026-08-17)
+   the entrypoint refuses to emit `PASS`/exit 0 for real runs — green
+   measurements remain diagnostic and exit 2 until an admitted producer
+   receipt exists (header lines 28-30). A green `--analyze` therefore cannot
+   be quoted as RV32 CPU validation anywhere.
+3. The rc-swallow regression guard `scripts/check/check-ghdl-gate-rc-swallow.shs`
+   treats `ghdl_validate_rv32.shs` as fixed, so a regression there is a hard
+   FAIL.
+
+Residual, accepted by design: the analyze gate still appears in the `n/m`
+diagnostic tally. GHDL is not available on this Windows host, so this closure
+rests on code inspection of the gate scripts, not a re-run of the injection
+matrix. Closed.

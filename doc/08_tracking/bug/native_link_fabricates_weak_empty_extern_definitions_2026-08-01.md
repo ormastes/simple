@@ -1,5 +1,24 @@
 # Native link fabricates strong, non-empty definitions for unimplemented `@extern` fns
 
+## Resolved 2026-09-18 (pure-Simple hosted lane); re-verified 2026-11-25
+
+Re-verification 2026-11-25 (p2w4-ac lane, release/1.0.0): the 2026-09-18 fix
+below is present and wired in current source. Code inspection confirms
+`src/compiler/70.backend/backend/llvm_native_link.spl` defines
+`hosted_nm_fabricated_extern_names` (:61) and
+`hosted_check_no_fabricated_extern_definitions` (:105), and the public
+`link_llvm_native` delegates to `link_llvm_native_with_receipt_v2` (:146),
+which calls the guard fail-CLOSED before `orchestrator_link_with_receipt_v2`
+(:151-156); both symbols are exported (:158). The executable spec
+`test/01_unit/compiler/linker/hosted_extern_fabrication_fence_spec.spl`
+exists (14 `it` blocks). Runtime re-execution of that spec is blocked on this
+host by the known seed/source inconsistency at release/1.0.0 HEAD (the pinned
+Rust seed rejects `@representation_boundary`, added tree-wide by cfd89933699,
+before any spec runs) — verification is therefore by code inspection, stated
+as the limit. The seed-lane strong-`T` variant remains fenced as KNOWN-OPEN by
+`scripts/check/check-native-extern-fabrication.shs`, per the boundary pinned
+in the 2026-09-18 update. Status: RESOLVED for the pure-Simple hosted lane.
+
 - **Date:** 2026-08-01
 - **Status:** A link-time guard exists in the Rust seed's
   `linker/native_binary` code (`check_no_fabricated_extern_definitions`), but

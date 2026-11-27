@@ -95,3 +95,55 @@ allocated a substring per input byte and made every typed-`text`
 (SCV cold init, `doc/08_tracking/bug/stage2_scv_cold_init_str_contains_per_byte_slice_2026-10-09.md`).
 Rule: never scan `text` byte-by-byte with slices in this layer; use the
 native search and slice once per match. Specs: `string_core_{ops,basic_coverage,advanced_coverage}_spec`.
+
+## Native test-runner capture limit visibility (2026-10-30)
+
+`TEST_OUTPUT_CAPTURE_BYTES` is shared across runner, doctest, lifecycle, and
+process-tracker modules and is exported by the test-runner facade. Its defining
+declaration must also be public for native imported-static code generation.
+The limit remains 4 MiB; keep rejection of genuinely private statics intact.
+The native import fixture is
+`test/fixtures/test_runner/native_output_capture_limit.spl`; failure and
+validation evidence are recorded in
+`doc/08_tracking/bug/test_runner_capture_limit_visibility_2026_10_30.md`.
+A compiled fixture is not evidence that native SSpec or HAL/SOSIX suites ran.
+
+## `std.io_runtime` facade imports (2026-11-22)
+
+- Tier-less `use std.io_runtime` binds to the ROOT facade
+  `src/lib/io_runtime.spl` (direct `lib/` path wins before the tier search,
+  `src/compiler/99.loader/module_resolver/resolution.spl`). Its export list is
+  explicit; no tier variant fills the gap. An unlisted name is an HIR
+  `unresolved name` at native-build even though `compile --format=smf` only
+  warns (`[hir-reexport-chase-unresolved] facade=lib.io_runtime ...`).
+- Import unlisted names from their owner: `cpu_count_checked` from
+  `std.nogc_sync_mut.io.sysinfo_ops`, `dir_list` from `.io.dir_ops`,
+  `file_read_text` from `.io.file_ops` (PRs #10770, #10777).
+- Guard: `scripts/check/check-io-runtime-facade-imports.shs` (bootstrap-tier
+  advisory, fatal selftest, fixtures `test/fixtures/io_runtime/`). Scans
+  `src/` + `examples/`, not `test/`. Record:
+  `doc/08_tracking/bug/io_runtime_facade_unexported_import_hir_unresolved_2026-11-22.md`.
+
+## Engine3D backends: trait methods live in the primary impl (2026-11-22)
+
+A plain `impl Backend:` block in a sibling `backend_*_ext.spl` is never
+imported, so trait-required methods placed there do not attach and the backend
+fails `RenderBackend3D` checking. Required methods belong in
+`impl RenderBackend3D for <Backend>` in `backend_<name>.spl`; the `_ext.spl`
+files of the emulated backends are re-exports only. `RocmBackend3D` and
+`CudaBackend3D` are software rasterizers with `emu_*` fallbacks, not GPU
+dispatch: a passing spec there is interpreter evidence, never GPU evidence.
+ROCm coverage of all 26 former extension methods:
+`test/01_unit/lib/gpu/engine3d/backend_rocm_ext_methods_spec.spl`; record:
+`doc/08_tracking/bug/engine3d_ext_impl_blocks_never_imported_2026-07-02.md`.
+
+## Container shared immutable store (2026-11-26)
+
+`std.nogc_sync_mut.storage.immutable_store_v1` (file I/O, so not in `common/`)
+over pure `std.common.hash.hash_policy_v1` and `std.common.storage.object_record_v1`.
+Root CAS truth is the never-deleted `roots/<name>.g<N>.claim` chain
+(`immutable_store_v1_root_head`); `roots/<name>.sdn` is a cache. Pins are
+append-only dirs `pins/<id>/owner` + `pins/<id>/refs/<key>`; GC is list-first
+with re-check/restore. Also `storage_view_v1` and `scv_adapter_v1` (opt-in via
+`scv store-init`). Details:
+`doc/00_llm_process/feature_expert/simple_container_store/skill.md`.

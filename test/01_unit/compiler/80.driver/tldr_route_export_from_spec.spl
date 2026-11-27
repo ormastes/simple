@@ -1,0 +1,126 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+## Purpose and audience
+PM3 unit plan import walk (unit_tldr_plan_v1) follows only what
+tldr_route_import_specs_v1 returns. `src/lib/io_runtime.spl` re-exports with
+`export a, b from nogc_sync_mut.io_runtime`; that form was dropped, so the
+re-export targets were never summarized or parsed, their rows stayed unbuilt,
+and every unit whose target imports std.io_runtime (e.g. io/dir_ops.spl)
+failed FILE-WORKER-E-CLOSURE-INCOMPLETE at the phase-2 readiness check.
+Audience: compiler engineers maintaining the per-file driver.
+"""
+
+# @tag: unit, compiler, driver
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.driver.driver_tldr_import_route_v1.{tldr_route_import_specs_v1}
+use compiler.driver.driver_unit_tldr_imports_v1.{unit_tldr_relative_module_id_v1}
+
+fn trse_bases(source: text) -> [text]:
+    var out: [text] = []
+    for spec in tldr_route_import_specs_v1(source, true):
+        out.push(spec.0)
+    out
+
+describe "TLDR route import scan":
+    it "follows `export names from module` re-exports":
+        val specs = tldr_route_import_specs_v1("export file_read, file_write from nogc_sync_mut.io_runtime\nexport host_os from nogc_async_mut.sosix.host_facade # note from x\n", true)
+        expect(specs.len()).to_equal(2)
+        expect(specs[0].0).to_equal("nogc_sync_mut.io_runtime")
+        expect(specs[0].1).to_equal(["file_read", "file_write"])
+        expect(specs[1].0).to_equal("nogc_async_mut.sosix.host_facade")
+
+    it "still ignores a plain `export names` without a source module":
+        expect(trse_bases("export a, b\n").len()).to_equal(0)
+
+    it "keeps use and export use":
+        expect(trse_bases("use std.a.*\nexport use std.b\n")).to_equal(["std.a", "std.b"])
+
+    it "leaves frozen-route callers (default) unchanged":
+        expect(tldr_route_import_specs_v1("export a from m.x\n").len()).to_equal(0)
+
+    it "follows paren-group imports `use mod (a, b)`":
+        # process_ops.spl: `use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)`
+        # kept the group in the module id, so process_governor was never planned.
+        val specs = tldr_route_import_specs_v1("use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)\nuse a.b(c as d)\n")
+        expect(specs.len()).to_equal(2)
+        expect(specs[0].0).to_equal("std.nogc_sync_mut.io.process_governor")
+        expect(specs[0].1.len()).to_equal(2)
+        expect(specs[0].1[1]).to_equal("proc_slot_release")
+        expect(specs[1].0).to_equal("a.b")
+        expect(specs[1].1[0]).to_equal("c")
+
+    it "follows multi-line paren-group imports":
+        val specs = tldr_route_import_specs_v1("use app.gc.core (\n    gc_alloc,\n    gc_free\n)\nuse x.y\n")
+        expect(specs.len()).to_equal(2)
+        expect(specs[0].0).to_equal("app.gc.core")
+        expect(specs[0].1.len()).to_equal(2)
+        expect(specs[1].0).to_equal("x.y")
+
+    it "ignores comments, prose and lazy prefixes around paren groups":
+        val specs = tldr_route_import_specs_v1("use a.b  # note (x)\nuse lazy c.d (e)\nuse the returned session (copy semantics.\nuse f.g\n")
+        expect(specs[0].0).to_equal("a.b")
+        expect(specs[1].0).to_equal("c.d")
+        expect(specs[1].1[0]).to_equal("e")
+        expect(specs[specs.len() - 1].0).to_equal("f.g")
+
+    it "does not let an unclosed or dotless paren group swallow later imports":
+        val specs = tldr_route_import_specs_v1("use send_eoi(vector) instead.\nuse a.b (x\nuse c.d\n")
+        expect(specs[0].0 == "send_eoi").to_equal(false)
+        expect(specs[specs.len() - 1].0).to_equal("c.d")
+    it "follows `import mod.path` lines like `use`":
+        # env/mod.spl: `import std.env.types` ... the unit plan never summarized
+        # the providers -> FILE-WORKER-E-CLOSURE-INCOMPLETE (bug ..._2026-11-19 update h).
+        expect(trse_bases("import std.env.types\nimport std.env.paths as p\n")).to_equal(["std.env.types", "std.env.paths"])
+        expect(trse_bases("val important = 1\n").len()).to_equal(0)
+
+    it "follows qualified sibling re-exports `export pkg.name, ...`":
+        # env/__init__.spl: `export variables.env_get, paths.split_path`
+        val specs = tldr_route_import_specs_v1("export variables.env_get, variables.env_set, paths.split_path\nexport a, b\nexport ()\n", true)
+        expect(specs.len()).to_equal(2)
+        expect(specs[0].0).to_equal(".variables")
+        expect(specs[0].1).to_equal(["env_get", "env_set"])
+        expect(specs[1].0).to_equal(".paths")
+        expect(specs[1].1).to_equal(["split_path"])
+
+    it "follows braced qualified re-exports `export pkg.{a, b}`":
+        # bug file_worker_closure_incomplete_braced_qualified_export_2026-11-27:
+        # src/lib/common/diagnostics/__init__.spl spells its facade this way.
+        val specs = tldr_route_import_specs_v1("export severity.Severity\n" + 'export diagnostic_v1.{DiagnosticV1, LabelV1 as L}' + "\n" + 'export pkg.sub.{x}' + "\n", true)
+        expect(specs.len()).to_equal(4)
+        expect(specs[0].0).to_equal(".severity")
+        expect(specs[1].0).to_equal(".diagnostic_v1")
+        expect(specs[1].1).to_equal(["DiagnosticV1", "LabelV1"])
+        expect(specs[2].0).to_equal(".pkg.sub")
+        expect(specs[3].0).to_equal("pkg.sub")
+
+    it "follows multi-line braced qualified re-exports":
+        val specs = tldr_route_import_specs_v1('export types.{' + "\n    A,  # note\n    B\n" + '}' + "\n" + 'export collector.{C}' + "\nuse std.z\n", true)
+        expect(specs.len()).to_equal(3)
+        expect(specs[0].0).to_equal(".types")
+        expect(specs[0].1).to_equal(["A", "B"])
+        expect(specs[1].0).to_equal(".collector")
+        expect(specs[2].0).to_equal("std.z")
+
+    it "plans every sibling of the real std.common.diagnostics facade":
+        val bases = trse_bases(file_read("src/lib/common/diagnostics/__init__.spl"))
+        for sibling in ["severity", "span", "diagnostic_v1", "diagnostic_batch", "source_position", "fix_ranking", "fix_transaction"]:
+            expect(bases.contains("." + sibling)).to_equal(true)
+
+    it "keeps braced qualified exports out of frozen-route callers":
+        expect(tldr_route_import_specs_v1('export diagnostic_v1.{DiagnosticV1}').len()).to_equal(0)
+
+    it "keeps qualified exports out of frozen-route callers":
+        expect(tldr_route_import_specs_v1("export variables.env_get\n").len()).to_equal(0)
+
+describe "unit plan relative module ids":
+    it "resolves a sibling id against the owner's directory to a logical id":
+        val owner = "src/lib/nogc_async_mut/env/__init__.spl"
+        val variables = unit_tldr_relative_module_id_v1(".variables", owner)
+        expect(variables.ends_with("env.variables")).to_equal(true)
+        expect(unit_tldr_relative_module_id_v1(".variables", "src/lib/nogc_async_mut/env/mod.spl")).to_equal(variables)
+        expect(unit_tldr_relative_module_id_v1(".no_such_sibling_zz", owner)).to_equal("")
+        expect(unit_tldr_relative_module_id_v1("std.env", owner)).to_equal("std.env")

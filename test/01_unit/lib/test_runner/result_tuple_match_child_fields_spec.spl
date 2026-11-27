@@ -1,0 +1,78 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# bug: doc/08_tracking/bug/phase2_runner_empty_limit_classification_2026_10_28.md
+# Regression for "Runner Result tuple match corrupts child fields": a struct
+# carried in a tuple inside Result/Option must keep every field through match
+# destructuring (original form) and through the typed-projection workaround.
+# Native evidence for the same shapes: the bug record's 2026-11-07 section.
+
+use std.spec.step
+
+struct TmInner:
+    exit_code: i64
+    limit_type: text
+    limit_exceeded: bool
+
+struct TmRun:
+    result: TmInner
+    stdout: text
+
+fn tm_make(code: i64) -> TmRun:
+    return TmRun(result: TmInner(exit_code: code, limit_type: "", limit_exceeded: false), stdout: "out")
+
+fn tm_wrap(code: i64) -> Result<(TmRun, text), text>:
+    if code < 0:
+        return Err("bad")
+    return Ok((tm_make(code), "evidence"))
+
+fn tm_wrap_opt(code: i64) -> Option<(TmRun, text)>:
+    if code < 0:
+        return None
+    return Some((tm_make(code), "evidence"))
+
+fn tm_destructured(code: i64) -> text:
+    var seen = "unmatched"
+    match tm_wrap(code):
+        case Ok((run, path)):
+            seen = "{run.result.exit_code}|{run.result.limit_type}|{run.result.limit_exceeded}|{run.stdout}|{path}"
+        case Err(e):
+            seen = "err:{e}"
+    return seen
+
+fn tm_typed(code: i64) -> text:
+    val pair: (TmRun, text) = match tm_wrap(code):
+        case Ok(value): value
+        case Err(e): (tm_make(-9), "err:{e}")
+    val run: TmRun = pair.0
+    val path: text = pair.1
+    return "{run.result.exit_code}|{run.result.limit_type}|{run.result.limit_exceeded}|{run.stdout}|{path}"
+
+fn tm_option(code: i64) -> text:
+    var seen = "unmatched"
+    match tm_wrap_opt(code):
+        case Some((run, path)):
+            seen = "{run.result.exit_code}|{run.result.limit_type}|{run.result.limit_exceeded}|{run.stdout}|{path}"
+        case None:
+            seen = "none"
+    return seen
+
+
+describe "Result tuple match keeps child struct fields":
+    it "destructures Ok((run, path)) without corrupting nested fields":
+        step("original tuple-pattern form, exit 0 and exit 7")
+        expect(tm_destructured(0)).to_equal("0||false|out|evidence")
+        expect(tm_destructured(7)).to_equal("7||false|out|evidence")
+
+    it "keeps the Err branch of the tuple-pattern form":
+        step("error branch")
+        expect(tm_destructured(-1)).to_equal("err:bad")
+
+    it "keeps fields through the typed .0/.1 projection workaround":
+        step("typed projection form")
+        expect(tm_typed(7)).to_equal("7||false|out|evidence")
+        expect(tm_typed(-1)).to_equal("-9||false|out|err:bad")
+
+    it "destructures Some((run, path)) without corrupting nested fields":
+        step("similar pattern: Option payload tuple")
+        expect(tm_option(7)).to_equal("7||false|out|evidence")
+        expect(tm_option(-1)).to_equal("none")

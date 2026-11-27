@@ -1,0 +1,167 @@
+# Source-only NOT_RUN. These scenarios acquire real Linux retained journals.
+# No fabricated WindowsJournalStore/live lock or alternate WAL is constructed.
+use std.common.task_runner.distributed_operation_journal_v2.*
+use std.common.contracts.orchestration.assignment_v1.*
+use std.common.contracts.orchestration.workload_fence_v1.controller_workload_create_v1
+use std.common.contracts.orchestration.agent_preflight_binding_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.orchestration.controller_dispatch_request_v2.*
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.orchestration.workload_store_v1.*
+use std.nogc_sync_mut.orchestration.assignment_objects_v1.*
+use std.nogc_sync_mut.orchestration.desired_input_objects_v1.*
+use std.nogc_sync_mut.orchestration.agent_preflight_objects_v1.*
+use std.nogc_sync_mut.orchestration.controller_dispatch_objects_v2.*
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
+use std.nogc_sync_mut.io_runtime.dir_remove
+use test.fixtures.orchestrator_acceptance.controller_container_dispatch_v2.*
+
+fn storage_journal_open_v3(root: text, controller: text, nonce: text) -> DistributedOperationJournalV2:
+    val authority = controller_assignment_authority_v1(controller).unwrap()
+    match distributed_operation_journal_open_owned_v2(root, authority, nonce, 4096):
+        case DistributedOperationJournalOpenV2.Ready(journal): journal
+        case DistributedOperationJournalOpenV2.Rejected(reason): fail("actual journal open rejected: " + reason)
+        case DistributedOperationJournalOpenV2.CleanupRequired(cleanup, reason):
+            val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+            expect(closed.cleanup.is_none()).to_equal(true)
+            expect(closed.closed).to_equal(true)
+            expect(closed.error).to_equal("")
+            fail("actual journal unexpectedly required cleanup: " + reason)
+
+fn storage_journal_close_v3(journal: DistributedOperationJournalV2):
+    val closed = distributed_operation_journal_close_owned_v2(journal)
+    expect(closed.cleanup.is_none()).to_equal(true)
+    expect(closed.closed).to_equal(true)
+    expect(closed.error).to_equal("")
+    expect(closed.state).to_equal(FileLockReleaseStateV2.Released)
+
+describe "Controller objects through the retained shared journal owner":
+    it "projects and replays workload metadata through the same actual journal and authority":
+        step("Reuse the acquired lease and WAL for Controller metadata without a second journal")
+        val root = secure_temp_dir("/tmp", "controller-storage-replay-").unwrap()
+        val original = storage_journal_open_v3(root, "controller", "a".repeat(64))
+        var owner = controller_workload_store_project_owned_v3(original, "controller").unwrap()
+        expect(owner.journal.health_id).to_equal(original.health_id)
+        expect(owner.journal.lease_digest).to_equal(original.lease_digest)
+        val state = controller_workload_create_v1("controller", 1, "workload", 1, "b".repeat(64)).unwrap()
+        owner = controller_workload_store_create_v1(owner, state).unwrap()
+        val operation = workload_store_operation_v1(state).unwrap()
+        val payload = distributed_operation_journal_read_required_v3(owner.journal,
+            "workload-payloads/" + operation.payload_digest + ".sdn", 8192).unwrap()
+        expect(sha256_text(payload)).to_equal(operation.payload_digest)
+        storage_journal_close_v3(owner.journal)
+        val reopened = storage_journal_open_v3(root, "controller", "c".repeat(64))
+        owner = controller_workload_store_project_owned_v3(reopened, "controller").unwrap()
+        expect(controller_workload_store_lookup_v1(owner, "workload").unwrap().plan_digest).to_equal("b".repeat(64))
+        expect(owner.journal.operations.len()).to_equal(1)
+        storage_journal_close_v3(owner.journal)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "replays retained desired input policy preflight and cancellation through owned object reads":
+        step("Preserve every existing Controller replay domain through shared owner IO")
+        val source = file_read_regular_no_follow_bounded("test/fixtures/orchestration/caret_agent_session.sdn", 1048576).unwrap()
+        val catalog = file_read_regular_no_follow_bounded("test/fixtures/orchestration/caret_policy_catalog.sdn", 1048576).unwrap()
+        val root = secure_temp_dir("/tmp", "controller-storage-domains-").unwrap()
+        var owner = controller_workload_store_project_owned_v3(storage_journal_open_v3(root, "controller", "a".repeat(64)), "controller").unwrap()
+        owner = controller_workload_store_submit_agent_v1(owner, "session", source, "caret", "review-simple").unwrap()
+        owner = controller_workload_store_pin_policy_v1(owner, "session", catalog, "caret", "review-simple").unwrap()
+        val policy = controller_workload_store_pinned_policy_v1(owner, "session").unwrap()
+        val plan = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: "probe-child", attempt: 1,
+            operation_id: "probe-operation", request_digest: "b".repeat(64), physical_host_id: "alias", service_scope_id: "service",
+            boot_id: "boot", provider_generation: 3, native_machine_id: "machine", continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot")
+        val binding = AgentPreflightBindingV1(controller_id: "controller", session_uid: "session", source_digest: policy.source_digest,
+            catalog_digest: policy.catalog_digest, task_digest: "c".repeat(64), image_digest: "d".repeat(64), probe_producer_digest: "e".repeat(64),
+            nonce: "f".repeat(64), preflight: plan, agent_provider: policy.session.agent.provider, executable_path: "/usr/bin/codex",
+            execution_os: policy.runtime.execution_os, architecture: policy.runtime.architecture, selected_user: "1000:1000")
+        owner = controller_workload_store_preflight_v1(owner, binding).unwrap()
+        owner = controller_workload_store_create_v1(owner,
+            controller_workload_create_v1("controller", 1, plan.workload_uid, 1, container_execution_plan_digest_v2(plan).unwrap()).unwrap()).unwrap()
+        owner = controller_workload_store_cancel_agent_v1(owner, "session", sha256_text(source)).unwrap()
+        storage_journal_close_v3(owner.journal)
+        owner = controller_workload_store_project_owned_v3(storage_journal_open_v3(root, "controller", "b".repeat(64)), "controller").unwrap()
+        expect(controller_workload_store_agent_source_v1(owner, "session").unwrap()).to_equal(source)
+        expect(controller_workload_store_pinned_policy_v1(owner, "session").unwrap().catalog_digest).to_equal(sha256_text(catalog))
+        expect(controller_workload_store_agent_cancelled_v1(owner, "session").unwrap()).to_equal(true)
+        expect(controller_workload_store_lookup_v1(owner, plan.workload_uid).unwrap().cancellation_requested).to_equal(true)
+        expect(agent_preflight_for_workload_v1(owner.journal, "controller", plan.workload_uid).unwrap().is_some()).to_equal(true)
+        storage_journal_close_v3(owner.journal)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "retains assignments and refreshed dispatch proofs without replacing the original immutable input":
+        step("Preserve canonical object names exact readback and existing refreshed-proof comparison")
+        val root = secure_temp_dir("/tmp", "controller-storage-packets-").unwrap()
+        val journal = storage_journal_open_v3(root, "controller", "a".repeat(64))
+        val packet = controller_container_wire_fixture_v2("linux-podman").dispatch
+        val digest = assignment_objects_retain_owned_v3(journal, packet.binding).unwrap()
+        expect(controller_assignment_bytes_v1(assignment_objects_read_owned_v3(journal, digest).unwrap()).unwrap()).to_equal(controller_assignment_bytes_v1(packet.binding).unwrap())
+        # Existing Linux root ABI can still read the exact same immutable files.
+        expect(controller_assignment_bytes_v1(assignment_objects_read_v1(root, digest).unwrap()).unwrap()).to_equal(controller_assignment_bytes_v1(packet.binding).unwrap())
+        expect(controller_dispatch_packet_retain_owned_v3(journal, packet).unwrap()).to_equal(true)
+        val refreshed = controller_container_renew_fixture_v2(packet)
+        expect(controller_dispatch_packet_retain_owned_v3(journal, refreshed).unwrap()).to_equal(true)
+        val retained = controller_dispatch_packet_load_owned_v3(journal, digest).unwrap()
+        expect(controller_dispatch_request_encode_v2(retained).unwrap()).to_equal(controller_dispatch_request_encode_v2(packet).unwrap())
+        expect(controller_dispatch_same_input_v2(retained, refreshed).unwrap()).to_equal(true)
+        var changed = packet
+        var execution = changed.execution
+        execution.request_bytes = "hostile alternate opaque body"
+        changed.execution = execution
+        expect(controller_dispatch_packet_retain_owned_v3(journal, changed).unwrap_err()).to_equal("dispatch-retained-input-mismatch")
+        storage_journal_close_v3(journal)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "archives framed message bytes under a bounded relative key and denies stale owner fallback":
+        step("Return an owner-relative archive key instead of projecting a diagnostic root into a path")
+        val root = secure_temp_dir("/tmp", "controller-storage-relative-").unwrap()
+        val journal = storage_journal_open_v3(root, "controller", "a".repeat(64))
+        val bytes = "version: 1\nkind: retained-controller-message\n"
+        val relative = controller_dispatch_message_retain_owned_v3(journal, bytes).unwrap()
+        expect(relative).to_equal("dispatch-messages/" + sha256_text(bytes) + ".sdn")
+        expect(relative.starts_with(root)).to_equal(false)
+        expect(distributed_operation_journal_read_required_v3(journal, relative, 2097152).unwrap()).to_equal(bytes)
+        storage_journal_close_v3(journal)
+        expect(controller_dispatch_message_retain_owned_v3(journal, bytes).is_err()).to_equal(true)
+        # The physical Linux file remains, proving that the failed owned call
+        # did not silently downgrade to a root-text read or writer.
+        expect(file_read_regular_no_follow_bounded(root + "/" + relative, 2097152).unwrap()).to_equal(bytes)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "rejects preexisting object corruption without overwrite or metadata admission":
+        step("Keep collision detection and exact readback on the real shared journal storage")
+        val root = secure_temp_dir("/tmp", "controller-storage-collision-").unwrap()
+        val journal = storage_journal_open_v3(root, "controller", "a".repeat(64))
+        val expected = "version: 1\nkind: desired-fixture\n"
+        val digest = sha256_text(expected)
+        val relative = "desired-input-objects/" + digest + ".sdn"
+        expect(distributed_operation_journal_publish_v3(journal, relative, "corrupt existing object").unwrap()).to_equal(true)
+        expect(desired_object_put_owned_v3(journal, digest, expected, 1024).unwrap_err()).to_equal("desired-object-content-mismatch")
+        expect(distributed_operation_journal_read_required_v3(journal, relative, 1024).unwrap()).to_equal("corrupt existing object")
+        expect(journal.operations.len()).to_equal(0)
+        storage_journal_close_v3(journal)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "refuses a different Controller authority while retaining the caller actual journal for close":
+        step("Projection failure does not manufacture a replacement owner or lose the existing lease")
+        val root = secure_temp_dir("/tmp", "controller-storage-authority-").unwrap()
+        val journal = storage_journal_open_v3(root, "controller", "a".repeat(64))
+        expect(controller_workload_store_project_owned_v3(journal, "different-controller").unwrap_err()).to_equal("workload-store-authority-mismatch")
+        expect(distributed_operation_journal_lookup_v2(journal, "absent").unwrap_err()).to_equal("OPERATION_NOT_FOUND")
+        storage_journal_close_v3(journal)
+        val reopened = storage_journal_open_v3(root, "controller", "b".repeat(64))
+        expect(controller_workload_store_project_owned_v3(reopened, "controller").is_ok()).to_equal(true)
+        storage_journal_close_v3(reopened)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "refuses oversized native path segments explicitly and preserves digest based archive names":
+        step("Never truncate an identifier or silently introduce another object hash scheme")
+        val root = secure_temp_dir("/tmp", "controller-storage-bounds-").unwrap()
+        val journal = storage_journal_open_v3(root, "controller", "a".repeat(64))
+        expect(distributed_operation_journal_publish_v3(journal, "desired-input-objects/" + "x".repeat(129), "payload").unwrap_err()).to_equal("OPERATION_JOURNAL_RECORD_PATH")
+        val bytes = "bounds fixture"
+        expect(desired_object_put_owned_v3(journal, sha256_text(bytes), bytes, 1024).unwrap()).to_equal(true)
+        val relative = "desired-input-objects/" + sha256_text(bytes) + ".sdn"
+        expect(relative.split("/")[1].byte_len()).to_equal(68)
+        expect(distributed_operation_journal_read_required_v3(journal, relative, 1024).unwrap()).to_equal(bytes)
+        storage_journal_close_v3(journal)
+        expect(dir_remove(root, true)).to_equal(true)

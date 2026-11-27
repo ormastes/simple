@@ -3,19 +3,59 @@
 use app.io._CliCompile.compile_targets.{
     cli_native_build_with_environment_variant_policy_v1}
 use app.io.env_ops.{env_get}
+use app.cli.worker_hir_profile_v1.{worker_hir_child_validate_v1}
 use app.cli.environment_variant_policy_handoff_owner_v1.{
     environment_variant_policy_handoff_extract_v1,
     environment_variant_policy_handoff_owner_error_label_v1}
+use compiler.driver.driver_log_helpers.{build_trace_enabled, log_build_trace,
+    build_trace_list}
+use compiler.driver.driver_build.native_file_worker_v1.{
+    native_file_worker_env_failure_receipt_publish_v1}
 
+# Publish a bounded HIR/MIR shard failure receipt before returning nonzero when
+# stdout/stderr is unavailable to the parent coordinator.
+# reason: shard exit receipt boundary accepts process exit status code and reason text
+@allow(primitive_api)
+pub fn native_build_worker_publish_failure_receipt_v1(args: [text], code: i64, reason: text) -> bool:
+    native_file_worker_env_failure_receipt_publish_v1(args, code, reason)
+
+# reason: native-build worker entrypoint returns process exit status code
+@allow(primitive_api)
 pub fn run_native_build_worker_entry(args: [text]) -> i64:
+    if (env_get("SIMPLE_HIR_WORKER_PROFILE_V1") ?? "") == "1":
+        match worker_hir_child_validate_v1(args):
+            case Ok(_): pass
+            case Err(reason):
+                val full_reason = "HIR worker profile rejected: " + reason
+                eprint(full_reason)
+                val _r = native_build_worker_publish_failure_receipt_v1(args, 1, full_reason)
+                return 1
     if (env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "") != "1":
         print "error: native_build_worker.spl is an internal entrypoint"
+        val _r = native_build_worker_publish_failure_receipt_v1(args, 1, "native_build_worker.spl is an internal entrypoint")
         return 1
     val opened = match environment_variant_policy_handoff_extract_v1(args):
         case Ok(value): value
         case Err(failure):
             val reason = environment_variant_policy_handoff_owner_error_label_v1(failure)
-            print "error: native-build worker rejected its internal policy handoff: {reason}"
+            val full_reason = "native-build worker rejected its internal policy handoff: {reason}"
+            print "error: {full_reason}"
+            log_build_trace("worker:handoff:refused reason={reason}")
+            val _r = native_build_worker_publish_failure_receipt_v1(args, 1, full_reason)
             return 1
-    cli_native_build_with_environment_variant_policy_v1(
+    if (env_get("SIMPLE_PARSE_CLOSURE_CONSUMER") ?? "") == "1" and opened.user_args.contains("--entry-closure"):
+        if (env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? "") == "" or (env_get("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST") ?? "") == "":
+            val full_reason = "parse-closure consumer worker missing inherited SIMPLE_PARSE_CLOSURE_REQUEST/DIGEST"
+            eprint("error: " + full_reason)
+            log_build_trace("worker:closure:missing")
+            val _r = native_build_worker_publish_failure_receipt_v1(opened.user_args, 1, full_reason)
+            return 1
+        log_build_trace("worker:closure:reused")
+    if build_trace_enabled():
+        log_build_trace("worker:start args={opened.user_args.len()} argv={build_trace_list(opened.user_args)}")
+    val rc = cli_native_build_with_environment_variant_policy_v1(
         opened.user_args, opened.handoff.collection)
+    if rc != 0:
+        val _r = native_build_worker_publish_failure_receipt_v1(opened.user_args, rc, "")
+    log_build_trace("worker:done rc={rc}")
+    rc

@@ -52,3 +52,17 @@ The two SDN stdlibs have genuinely diverged (different value model). Either:
 - formally deprecate `std.sdn.*` in favour of `std.common.sdn.*`.
 Touching the bundled copy or resolver order risks the bootstrap path, so this is
 deferred to a deliberate change.
+
+## Behavioral re-verification 2026-11-25 (work/p2w2-aa-20261125, Windows host)
+
+Re-ran the fence at release/1.0.0 HEAD (`8aa26f51e72`) with the pinned tracked
+Rust seed (`SIMPLE_LIB=src bin/simple.exe run`, seed v1.0.0-rc.1):
+
+- `use std.sdn.value.{SdnValue}` + `print(SdnValue.Int(5))` — **succeeds**
+  (prints the enum value; no "unknown variant" error).
+- `print(SdnValue.i32(5))` — **fails** with
+  `unknown variant or method 'i32' on enum SdnValue (declared variants: Null, Bool, Int, Float, String, Array, Dict, Table, ...)`.
+
+This matches the 2026-09-13 closure exactly: `std.sdn.*` resolves to the
+canonical Int-API `SdnValue`; the stale bundled `i32` variant set is
+unreachable. Closure confirmed behaviorally on this host.

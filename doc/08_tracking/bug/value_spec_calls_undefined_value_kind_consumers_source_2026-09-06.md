@@ -74,3 +74,10 @@ declare `extern fn val_get_kind` — but that set is not recorded anywhere, and
 guessing it would produce an assertion that passes for the wrong reason, which
 is worse than the current honest red. Until then this stays RED and this record
 is its explanation.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+deliberately left RED (assertion is real and pins a missing helper; no greenwash). Left as recorded.

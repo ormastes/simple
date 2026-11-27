@@ -1,0 +1,79 @@
+# milestone_0030 PR-1a: `simple orchestrator remote-run-plan` -- issue and verify the controller authority for one
+# remote build/test request envelope and print only digests. AUTHORED_NOT_RUN. The store/dispatch-root path needs an
+# independently prepared OS fixture; these cases pin the pure parsing, grant derivation and usage refusals.
+use std.spec.{describe, it, expect}
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use app.orchestrator.command.orchestrator_command_v1
+use app.orchestrator.remote_run_plan_v1.{remote_run_environment_decode_v1, remote_run_plan_grant_v1,
+    remote_run_plan_options_v1}
+
+fn plan_environment_source_v1(isolation: text) -> text:
+    "{version: 1, kind: \"remote-run-environment\", hostId: \"worker_1\", executionPlatform: \"linux-x86_64\", " +
+        "targetPlatform: \"linux-x86_64\", testRuntime: \"none\", isolationClass: \"" + isolation + "\", " +
+        "toolchainDigest: \"" + "c".repeat(64) + "\", sdkDigest: \"" + "d".repeat(64) + "\", abi: \"sysv\", " +
+        "isa: \"x86_64\", optimization: \"release\"}\n"
+
+fn plan_request_v1() -> OperationEnvelopeV2:
+    OperationEnvelopeV2(version: 2, id: "operation_1", payload_digest: "b".repeat(64), principal: "user_1",
+        project: "project_1", host_id: "worker_1", operation: "build", environment_digest: "a".repeat(64),
+        policy_revision: 4, revocation_epoch: 2, session_generation: 3, memory_bytes: 1024, duration_ms: 1000)
+
+describe "remote-run-plan V1 (milestone_0030 PR-1a)":
+    it "decodes the strict environment document and refuses unknown or missing fields":
+        val decoded = remote_run_environment_decode_v1(plan_environment_source_v1("native-container"))
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().isolation_class).to_equal("native-container")
+        expect(decoded.unwrap().toolchain_digest).to_equal("c".repeat(64))
+        expect(remote_run_environment_decode_v1(plan_environment_source_v1("native-container").replace(
+            "abi: \"sysv\", ", "abi: \"sysv\", extra: \"x\", ")).is_err()).to_equal(true)
+        expect(remote_run_environment_decode_v1(plan_environment_source_v1("native-container").replace(
+            "abi: \"sysv\", ", "")).is_err()).to_equal(true)
+        expect(remote_run_environment_decode_v1(plan_environment_source_v1("native-container").replace(
+            "version: 1", "version: 2")).is_err()).to_equal(true)
+
+    it "derives a one-action grant bound to the request scope, environment and budget":
+        val grant = remote_run_plan_grant_v1(plan_request_v1(), "grant_1", 1000, 60000, 4, 2).unwrap()
+        expect(grant.id).to_equal("grant_1")
+        expect(grant.operations).to_equal(["build"])
+        expect(grant.principal).to_equal("user_1")
+        expect(grant.host_id).to_equal("worker_1")
+        expect(grant.environment_digest).to_equal("a".repeat(64))
+        expect(grant.maximum_memory_bytes).to_equal(1024)
+        expect(grant.maximum_duration_ms).to_equal(1000)
+        expect(grant.expires_at).to_equal(61000)
+        expect(grant.policy_revision).to_equal(4)
+        expect(grant.revocation_epoch).to_equal(2)
+
+    it "refuses a grant lifetime outside (0, 1 day]":
+        expect(remote_run_plan_grant_v1(plan_request_v1(), "grant_1", 1000, 0, 4, 2)).to_equal(
+            Err("remote-run-plan-expiry-invalid"))
+        expect(remote_run_plan_grant_v1(plan_request_v1(), "grant_1", 1000, 86400001, 4, 2)).to_equal(
+            Err("remote-run-plan-expiry-invalid"))
+
+    it "parses the exact option set and refuses unknown, duplicate or missing options":
+        val args = ["remote-run-plan", "--dispatch-root", "/r", "--controller", "c1", "--key-store", "/k",
+            "--approver", "a1", "--operation", "/op", "--environment", "/env", "--grant-id", "g1",
+            "--expires-in-ms", "60000"]
+        val options = remote_run_plan_options_v1(args)
+        expect(options.is_ok()).to_equal(true)
+        expect(options.unwrap()["--controller"]).to_equal("c1")
+        val extra = ["remote-run-plan", "--dispatch-root", "/r", "--controller", "c1", "--key-store", "/k",
+            "--approver", "a1", "--operation", "/op", "--environment", "/env", "--grant-id", "g1",
+            "--expires-in-ms", "60000", "--extra", "x"]
+        expect(remote_run_plan_options_v1(extra)).to_equal(Err("remote-run-plan-usage"))
+        # Same length, `--key-store` replaced by a second `--controller`.
+        val duplicate = ["remote-run-plan", "--dispatch-root", "/r", "--controller", "c1", "--controller", "/k",
+            "--approver", "a1", "--operation", "/op", "--environment", "/env", "--grant-id", "g1",
+            "--expires-in-ms", "60000"]
+        expect(remote_run_plan_options_v1(duplicate)).to_equal(Err("remote-run-plan-usage"))
+        # Same length, a value that is itself an option name.
+        val swallowed = ["remote-run-plan", "--dispatch-root", "/r", "--controller", "--approver", "--key-store", "/k",
+            "--approver", "a1", "--operation", "/op", "--environment", "/env", "--grant-id", "g1",
+            "--expires-in-ms", "60000"]
+        expect(remote_run_plan_options_v1(swallowed)).to_equal(Err("remote-run-plan-usage"))
+        expect(remote_run_plan_options_v1(["remote-run-plan", "--controller", "c1"]).is_err()).to_equal(true)
+
+    it "refuses incomplete usage through the orchestrator dispatch with exit code 2 and no authority":
+        val reply = orchestrator_command_v1(["remote-run-plan"])
+        expect(reply.exit_code).to_equal(2)
+        expect(reply.output.contains("remote-run-plan-usage")).to_equal(true)

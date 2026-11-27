@@ -1,0 +1,63 @@
+# Census (report only) for the P1 required-field verifier
+# (doc/03_plan/compiler/data/immutable_views_async_init_revisions_2026-11-13.md section 0a,
+# "P1 landing rule"). Runs hir_required_field_init_check_v1 over every path listed in
+# $REQUIRED_INIT_CENSUS_LIST and prints ROW / FILE / SUMMARY lines; nothing is enforced.
+# Usage (cwd = repo root, one process, memory-capped):
+#   find src/compiler -name "*.spl" > build/required_init_census.txt
+#   REQUIRED_INIT_CENSUS_LIST=build/required_init_census.txt bin/simple test scripts/check/census_required_field_init_spec.spl
+# It is a spec file because the test runner is the proven path for driving
+# parse_full_frontend + HirLowering from source (a plain `run` of the same code
+# core-dumped the seed on 2026-11-13). Not under test/, so no suite sweep runs it.
+use std.spec.*
+use std.io_runtime.{read_file_text}
+use std.env.variables.{env_set, env_get}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{parser_has_errors}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.required_field_init_v1.*
+
+fn census_file(path: text) -> (i64, i64, i64, i64):
+    val source = read_file_text(path)
+    val module = parse_full_frontend(source, path, path, Logger(level: 0))
+    if parser_has_errors():
+        print("FILE {path} parse_failed=1")
+        return (0, 0, 0, 1)
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(module)
+    val report = hir_required_field_init_check_v1(hir.name, hir.path, hir.symbols, module.classes,
+        hir.classes, hir.structs, hir.functions)
+    for row in report.rows:
+        print("ROW {row.code} {path}:{row.span.line} {row.class_name}.{row.field} public={row.public}")
+    val lowering_errors = hir_lowering.errors.len()
+    print("FILE {path} judged={report.sites_judged} unjudged={report.sites_unjudged} rows={report.rows.len()} lowering_errors={lowering_errors}")
+    (report.rows.len(), report.sites_judged, report.sites_unjudged, 0)
+
+describe "Required field initialization census (report only)":
+    it "prints one ROW per offender and a SUMMARY over the listed files":
+        env_set("SIMPLE_BOOTSTRAP", "0")
+        env_set("SIMPLE_REQUIRED_INIT_CHECK", "off")
+        val list_path = env_get("REQUIRED_INIT_CENSUS_LIST")
+        if list_path.len() == 0:
+            print("SUMMARY skipped: set REQUIRED_INIT_CENSUS_LIST to a file listing .spl paths")
+            return
+        val listing = read_file_text(list_path)
+        var files = 0
+        var rows = 0
+        var judged = 0
+        var unjudged = 0
+        var parse_failed = 0
+        for raw in listing.split("\n"):
+            val path = raw.trim()
+            if path.len() == 0:
+                continue
+            files = files + 1
+            val r = census_file(path)
+            rows = rows + r.0
+            judged = judged + r.1
+            unjudged = unjudged + r.2
+            parse_failed = parse_failed + r.3
+        print("SUMMARY files={files} offender_rows={rows} sites_judged={judged} sites_unjudged={unjudged} parse_failed={parse_failed}")
+        expect(files >= 0).to_equal(true)

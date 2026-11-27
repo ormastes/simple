@@ -1,0 +1,139 @@
+# Bare-metal Spy emitter (DHR P5): a bounded observation ring for targets with
+# no allocator, speaking the observer contract's event kinds.
+#
+# Family boundary: this ring holds Spy OBSERVATION events only (Entry, Exit,
+# TailExit edges plus the Loss control record). Replay events live in the
+# separate std.replay.bm_replay_core ring; neither module reads the other.
+#
+# Bounded operation: storage is sized once by bm_spy_init(). bm_spy_emit and
+# bm_spy_pop never allocate. Emitting before init is not an implicit
+# allocation: the event is dropped and counted in bm_spy_lost_total() (there
+# is no storage to carry an in-stream Loss record until init).
+#
+# Disclosed loss: a full ring drops the NEW event (the buffered prefix stays
+# intact) and counts it. The drop is then reported in-stream as one Loss record
+# (kind = observer Loss code, lost = count) at the position where it happened:
+# before the next accepted event, or at the end of the drain. The total is
+# also kept for bm_spy_complete().
+use std.common.trace.observer_contract_v1.{TraceEventKindV1, trace_event_kind_code_v1}
+
+val BM_SPY_CAP: i32 = 256
+
+var spy_kinds: [i64] = []
+var spy_function_ids: [i64] = []
+var spy_timestamps: [i64] = []
+var spy_lost: [i64] = []
+var spy_head: i32 = 0
+var spy_count: i32 = 0
+var spy_pending_lost: i64 = 0
+var spy_lost_total: i64 = 0
+var spy_code_entry: i64 = 0
+var spy_code_exit: i64 = 0
+var spy_code_tail_exit: i64 = 0
+var spy_code_loss: i64 = 0
+var spy_last_function_id: i64 = 0
+var spy_last_timestamp: i64 = 0
+var spy_last_lost: i64 = 0
+
+pub fn bm_spy_init():
+    spy_code_entry = trace_event_kind_code_v1(TraceEventKindV1.Entry) as i64
+    spy_code_exit = trace_event_kind_code_v1(TraceEventKindV1.Exit) as i64
+    spy_code_tail_exit = trace_event_kind_code_v1(TraceEventKindV1.TailExit) as i64
+    spy_code_loss = trace_event_kind_code_v1(TraceEventKindV1.Loss) as i64
+    if spy_kinds.len() == 0:
+        var i = 0
+        while i < BM_SPY_CAP:
+            spy_kinds.push(0)
+            spy_function_ids.push(0)
+            spy_timestamps.push(0)
+            spy_lost.push(0)
+            i = i + 1
+    spy_head = 0
+    spy_count = 0
+    spy_pending_lost = 0
+    spy_lost_total = 0
+    spy_last_function_id = 0
+    spy_last_timestamp = 0
+    spy_last_lost = 0
+
+fn bm_spy_write(kind: i64, function_id: i64, timestamp: i64, lost: i64):
+    val tail = (spy_head + spy_count) % BM_SPY_CAP
+    spy_kinds[tail] = kind
+    spy_function_ids[tail] = function_id
+    spy_timestamps[tail] = timestamp
+    spy_lost[tail] = lost
+    spy_count = spy_count + 1
+
+fn bm_spy_drop():
+    spy_pending_lost = spy_pending_lost + 1
+    spy_lost_total = spy_lost_total + 1
+
+# Returns true when the event was buffered. Only the observer data edges are
+# accepted; any other code (Loss included, which only this ring may write) is
+# refused and buffers nothing.
+@allow(primitive_api)  # reason: bare-metal hot path; raw observer kind code, site id and tick count, no allocation for a domain wrapper
+pub fn bm_spy_emit(kind_code: i64, function_id: i64, timestamp: i64) -> bool:
+    if spy_kinds.len() == 0:
+        bm_spy_drop()
+        return false
+    if kind_code != spy_code_entry and kind_code != spy_code_exit and kind_code != spy_code_tail_exit:
+        return false
+    if spy_pending_lost > 0:
+        if spy_count >= BM_SPY_CAP:
+            bm_spy_drop()
+            return false
+        bm_spy_write(spy_code_loss, 0, timestamp, spy_pending_lost)
+        spy_pending_lost = 0
+    if spy_count >= BM_SPY_CAP:
+        bm_spy_drop()
+        return false
+    bm_spy_write(kind_code, function_id, timestamp, 0)
+    true
+
+# Pops the oldest record and returns its observer kind code (0 = empty). The
+# bm_spy_last_* readers return fields of THIS record (copied at pop).
+@allow(primitive_api)  # reason: bare-metal drain returns the raw observer kind code; 0 is the empty sentinel
+pub fn bm_spy_pop() -> i64:
+    if spy_count == 0:
+        if spy_pending_lost > 0 and spy_kinds.len() > 0:
+            spy_last_function_id = 0
+            spy_last_timestamp = 0
+            spy_last_lost = spy_pending_lost
+            spy_pending_lost = 0
+            return spy_code_loss
+        return 0
+    val kind = spy_kinds[spy_head]
+    spy_last_function_id = spy_function_ids[spy_head]
+    spy_last_timestamp = spy_timestamps[spy_head]
+    spy_last_lost = spy_lost[spy_head]
+    spy_head = (spy_head + 1) % BM_SPY_CAP
+    spy_count = spy_count - 1
+    kind
+
+@allow(primitive_api)  # reason: raw site id of the last popped record
+pub fn bm_spy_last_function_id() -> i64:
+    spy_last_function_id
+
+@allow(primitive_api)  # reason: raw tick count of the last popped record
+pub fn bm_spy_last_timestamp() -> i64:
+    spy_last_timestamp
+
+@allow(primitive_api)  # reason: lost-event count carried by the last popped Loss record (0 for edges)
+pub fn bm_spy_last_lost() -> i64:
+    spy_last_lost
+
+@allow(primitive_api)  # reason: buffered record count
+pub fn bm_spy_count() -> i64:
+    spy_count as i64
+
+@allow(primitive_api)  # reason: fixed capacity of the ring
+pub fn bm_spy_capacity() -> i64:
+    BM_SPY_CAP as i64
+
+@allow(primitive_api)  # reason: events dropped since init, reported or not
+pub fn bm_spy_lost_total() -> i64:
+    spy_lost_total
+
+@allow(primitive_api)  # reason: completeness predicate; bool is the predicate result
+pub fn bm_spy_complete() -> bool:
+    spy_lost_total == 0

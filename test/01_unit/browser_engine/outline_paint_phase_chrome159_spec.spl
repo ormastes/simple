@@ -1,0 +1,41 @@
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_software_pixels}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_resolved_engine2d_backend}
+
+# In-flow blocks paint their outlines in a later phase than block
+# backgrounds, so a following in-flow sibling does not cover an earlier
+# box's outline. Positioned siblings paint whole in tree order, so a later
+# positioned box (or opacity group) does cover it.
+val OP_PAGE = "<!DOCTYPE html><html><body style=\"margin:0;background:#fff\"><div style=\"margin:4px 0 0 4px;width:10px;height:6px;background:#00ff00;outline:2px solid #ff0000\"></div><div style=\"margin:-1px 0 0 2px;width:16px;height:6px;background:#0000ff\"></div><div style=\"position:absolute;left:24px;top:4px;width:10px;height:6px;background:#00ff00;outline:2px solid #ff0000\"></div><div style=\"position:absolute;left:22px;top:9px;width:16px;height:6px;background:#0000ff\"></div><div style=\"position:absolute;left:44px;top:4px;width:10px;height:6px;background:#00ff00;outline:2px solid #ff0000;opacity:0.999\"></div><div style=\"position:absolute;left:42px;top:9px;width:16px;height:6px;background:#0000ff\"></div></body></html>"
+
+# Chrome 159, k=4, --window-size=64,20, sampled at CSS pixel centres.
+val OP_X: [i32] = [14, 15, 8, 2, 3, 16, 22, 34, 28, 42, 54, 48, 8]
+val OP_Y: [i32] = [9, 10, 10, 11, 12, 9, 9, 9, 10, 9, 9, 11, 9]
+val OP_CHROME: [u32] = [
+    0xFFFF0000u32, 0xFFFF0000u32, 0xFFFF0000u32, 0xFFFF0000u32, 0xFF0000FFu32, 0xFF0000FFu32,
+    0xFF0000FFu32, 0xFF0000FFu32, 0xFF0000FFu32,
+    0xFF0000FFu32, 0xFF0000FFu32, 0xFF0000FFu32, 0xFF0000FFu32
+]
+
+fn op_mismatches(px: [u32], fw: i32, lane: text) -> i32:
+    if px.len() < fw * 20:
+        return 999
+    var bad = 0
+    var n = 0
+    while n < OP_CHROME.len():
+        val got = px[OP_Y[n] * fw + OP_X[n]] | 0xFF000000u32
+        if got != OP_CHROME[n]:
+            print "{lane} ({OP_X[n]},{OP_Y[n]}) got {got} want {OP_CHROME[n]}"
+            bad = bad + 1
+        n = n + 1
+    bad
+
+describe "outlines paint in Chrome 159's outline phase":
+    it "on the CPU raster":
+        expect(op_mismatches(simple_web_layout_render_html_software_pixels(OP_PAGE, 64, 20), 64, "raster")).to_equal(0)
+
+    it "on cpu_simd":
+        expect(op_mismatches(simple_web_render_html_to_pixels_with_resolved_engine2d_backend(OP_PAGE, 64, 20, "cpu_simd"), 64, "cpu_simd")).to_equal(0)
+
+    it "on Vulkan":
+        expect(op_mismatches(simple_web_render_html_to_pixels_with_resolved_engine2d_backend(OP_PAGE, 64, 20, "vulkan"), 64, "vulkan")).to_equal(0)

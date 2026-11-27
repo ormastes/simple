@@ -24,3 +24,98 @@ workaround commit is `657ca5c5fb55ec59f146a8946d710c79d1276def`, and the source 
 now uses `recover=0f7368cd97dca86e99379c5173a4c530d1d6f2c2`, its parent on that
 branch, which still has the original nested declaration. A row was added to
 `bug_db.sdn` by hand; qualified bug-database reconciliation remains pending.
+
+
+## Scoped signature-conflict repair (2026-11-02)
+
+Status: **OPEN** for the original lexical-scope requirement. This change repairs
+conflicting signatures among already-visible nongeneric extern declarations;
+it does not remove the `rt_cpu_count` declaration-hoisting workaround.
+
+`parse_extern_fn_stmt_inline` previously ignored every later same-named
+declaration. It now compares ordered parameter types and the return type and
+reports `conflicting extern declaration: <name>` at the later declaration.
+Identical signatures share one declaration regardless of parameter names.
+An existing ordinary module function remains authoritative.
+
+The existing `inline_extern_fn_registration_spec.spl` now contains 11 scenarios:
+registration, unsafe attributes, repeated identical signatures, prior top-level
+externs, ordinary-function twins, conflicting arity, first/later parameter type
+conflicts, zero-argument return conflicts, identical composite signatures, and
+conflicts with a prior top-level extern. The arity case pins the diagnostic
+location to line 6, column 5. These assertions execute the real parser/bridge.
+
+Astra reviewed the exact two-file patch and accepted it for landing with no
+outstanding static findings. **This is not a runtime verification PASS.** The
+authorized Windows Phase1 seed (`56664f6dbff85fd05a684c842d68fd16d96964e8f34953c4f2797df6c514c7f4`)
+failed before test assertions while loading
+`src/lib/nogc_sync_mut/io/windows_redirected_process.spl` with
+`Unexpected token: expected Fn, found Colon`; alternate root probes could not
+resolve the test tool or dependencies. Those initial attempts executed no test assertions.
+Local attempt logs are retained in
+`C:/dev/wt/p12-compiler-repairs/build/p12-extern-evidence/`.
+
+Remaining acceptance: execute the 11 regression scenarios with a compatible
+runner, then address lexical visibility, generic/effect metadata, and later
+top-level declarations separately. Full HIR/native original-reproducer
+qualification is still required before closing this broad bug or removing its
+workaround. This patch claims neither Phase1 suite nor Phase2 qualification.
+
+
+### Subsequent direct-owner diagnostic
+
+A newer `seed_nilfix.exe` (SHA256
+`fc56d4b5fc384ea93ed20befd4503ff6e27db7734214ca45e072b4df1b081828`)
+executed the changed parser with **11 scenarios and 34 real assertions**, exit 0.
+Each assertion panics on failure. Astra inspected the harness, actual log and
+matching source hashes and accepted this scoped evidence. The producer lacks
+an input admission receipt, so this is an **unadmitted Phase1-hosted diagnostic**,
+not standard SSpec or Phase2 qualification. The standard test command remained
+blocked before scenarios by unavailable/incomplete runner dependencies.
+
+The reproducible harness is
+`test/fixtures/compiler/inline_extern_signature_direct/main.spl`.
+The complete log and identity receipt are in
+`doc/08_tracking/bug/evidence/nested_extern_signatures_2026_11_02/`.
+Run the harness with the named seed using `run <harness> --mode=interpreter`
+against the recorded parser source. The broader issue and workaround remain
+open under the acceptance criteria above.
+
+## Nested extern declaration identity and location (2026-11-03)
+
+The inline declaration parser now uses the same `declaration_identifier_text`
+owner as top-level extern declarations. A contextual keyword such as `match`
+can therefore name an extern declaration in either position. Previously the
+inline path required an IDENT token even though the top-level path accepted
+contextual keyword names.
+
+Newly registered nested externs also retain their actual declaration start,
+end, line and column instead of span ID zero. The existing bridge already uses
+that span for `ParserFunction` and its parameter declarations. Repeated
+compatible declarations leave the first declaration and its span unchanged.
+The signature-conflict diagnostic still points to the later declaration.
+
+Four parser regression scenarios cover ordinary functions, static methods,
+repeated declarations and contextual keyword parity. They supplement the 11
+existing registration/signature scenarios without claiming lexical isolation.
+
+**TEST_BLOCKED:** no qualified self-hosted CLI is available in this Windows
+repair lane. The new scenarios have not executed; source review and whitespace
+checks are not behavioral qualification. Execute the complete 15-scenario
+`test/01_unit/compiler/frontend/inline_extern_fn_registration_spec.spl` using an
+admitted producer, then perform the required compiler/library/MCP checks before
+admission. The broader lexical-scope, generic/effect metadata and later
+module-declaration requirements remain OPEN. The `rt_cpu_count` hoisting
+workaround remains in place.
+
+## c28-w2 triage 2026-11-04: fix landed, verification pending
+
+PR #6369 (084fca5abf4) and #5958 (c78f0b004f5) landed the parser-side
+nested-extern registration and conflicting-signature diagnostic with spec
+`test/01_unit/compiler/frontend/inline_extern_fn_registration_spec.spl`
+(15 scenarios). The `rt_cpu_count` module-scope hoist in
+`src/compiler/00.common/parallel.spl:15` is KEPT. Status:
+fix-implemented-verification-pending. Stage3 repro: run the 15-scenario spec
+with a stage3 CLI, then restore the nested declaration in
+`ParallelConfig.default_config` and native-build `parallel.spl`; success is a
+COFF/ELF object with an undefined `rt_cpu_count` and no HIR "unresolved name".

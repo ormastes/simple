@@ -26,7 +26,7 @@ extern fn rt_dict_contains<K>(dict: i64, key: K) -> bool
 fn hir_expr_env_get(key: text) -> text?:
     env_get_opt(key)
 
-fn hir_expr_kind_disc(k: ExprKind) -> i64:
+pub fn hir_expr_kind_disc(k: ExprKind) -> i64:
     hir_ast_expr_runtime_discriminant(k)
 
 fn is_tuple_positional_field(name: text) -> bool:
@@ -82,6 +82,14 @@ fn is_interp_builtin_fn(name: text) -> bool:
      # direct_name == "len" intercept in lower_call).
      name == "len")
 
+fn is_interp_only_builtin_fn(name: text) -> bool:
+    """Interpreter builtins (`is_interp_builtin_fn`) with NO native MIR
+    lowering: bare and unimported, MIR has no owner for them. print, panic,
+    int, len, str, ... are lowered natively by name and stay accepted."""
+    name == "env_get" or name == "env_set" or name == "type_of" or
+        name == "file_exists" or name == "file_read" or name == "file_write" or
+        name == "file_delete" or name == "file_is_regular_no_follow"
+
 fn primitive_cast_type_kind(name: text) -> HirTypeKind?:
     """`i32(x)`-style primitive casts: a fixed-width numeric type name used
     as a call target is a CAST, not a function call. These names are not in
@@ -115,7 +123,7 @@ fn primitive_cast_type_kind(name: text) -> HirTypeKind?:
         case "u64": HirTypeKind.Int(64, false)
         case "f32": HirTypeKind.Float(32)
         case "f64": HirTypeKind.Float(64)
-        case _: nil
+        case _: None
 
 fn is_bootstrap_builtin_fn(name: text) -> bool:
     name == "get_args" or
@@ -142,7 +150,7 @@ fn hir_bootstrap_text_array_type(span: Span) -> HirType:
 fn hir_bootstrap_unit_type(span: Span) -> HirType:
     HirType(kind: HirTypeKind.Unit, span: span)
 
-fn bootstrap_builtin_return_type(name: text, span: Span) -> HirType:
+pub fn bootstrap_builtin_return_type(name: text, span: Span) -> HirType:
     if name == "get_args" or name == "get_cli_args" or name == "sys_get_args" or name == "rt_get_args":
         return hir_bootstrap_text_array_type(span)
     if name == "bootstrap_version" or name == "bootstrap_output_from_args":
@@ -154,7 +162,17 @@ fn bootstrap_builtin_return_type(name: text, span: Span) -> HirType:
 fn bootstrap_builtin_signature(name: text, span: Span) -> HirType:
     HirType(kind: HirTypeKind.Function([], bootstrap_builtin_return_type(name, span), []), span: span)
 
-fn _hir_expr_symbol_or_invalid(kind: HirExprKind) -> SymbolId:
+fn hir_dotted_callee_path(callee: Expr) -> text:
+    match callee.kind:
+        case ExprKind.Ident(name): return name
+        case ExprKind.Field(base, field):
+            val prefix = hir_dotted_callee_path(base)
+            if prefix != "":
+                return "{prefix}.{field}"
+        case _: ()
+    ""
+
+pub fn _hir_expr_symbol_or_invalid(kind: HirExprKind) -> SymbolId:
     match kind:
         case HirExprKind.Var(symbol): symbol
         case HirExprKind.NamedVar(symbol, _): symbol
@@ -163,7 +181,7 @@ fn _hir_expr_symbol_or_invalid(kind: HirExprKind) -> SymbolId:
 fn _hir_named_type_symbol(type_: HirType) -> SymbolId?:
     match type_.kind:
         case HirTypeKind.Named(symbol, _): symbol
-        case _: nil
+        case _: None
 
 fn _hir_missing_field_type() -> HirType:
     HirType(kind: HirTypeKind.Error, span: Span.empty())
@@ -211,27 +229,87 @@ impl HirLowering:
                     if candidate_module == module_name:
                         if candidate.name == field_name or candidate.name.ends_with("." + field_name):
                             return candidate.id
-        nil
+        None
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in field_tuple_element_type", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     me field_tuple_element_type(base_kind: HirExprKind, index: i64) -> HirType?:
         val base_symbol = _hir_expr_symbol_or_invalid(base_kind)
         if base_symbol.is_valid():
             unsafe(capabilities: [ffi]):
-                if rt_dict_contains(self.local_tuple_types, base_symbol.id):
-                    val element_types = self.local_tuple_types[base_symbol.id]
+                val base_symbol_raw: i64 = base_symbol.id
+                if rt_dict_contains(self.local_tuple_types, base_symbol_raw):
+                    # Native: a class-field `d[k]` bracket read of an array
+                    # value is unsafe (dict_native_pitfalls.md) and the by-value
+                    # element return fed a garbage HirType? to lower_hir_expr
+                    # (AV lower_hir_expr+0x495e). Read via get, re-root the type.
+                    val element_types: [HirType] = self.local_tuple_types.get(base_symbol_raw) ?? []
                     if index >= 0 and index < element_types.len():
-                        return element_types[index]
-        nil
+                        val element_type: HirType = element_types[index]
+                        return HirType(kind: element_type.kind, span: element_type.span)
+        None
+
+    me member_owner_key_for_hir_base(base: HirExpr) -> text:
+        # Same owner authorities as field_type_for_hir_base: local struct
+        # binding first, then the proven nominal owner of the expression.
+        val base_symbol = _hir_expr_symbol_or_invalid(base.kind)
+        if base_symbol.is_valid() and self.local_struct_types.has(base_symbol.id):
+            return self.local_struct_types[base_symbol.id]
+        val owner_id = self.field_owner_for_hir_expr(base)
+        if owner_id >= 0:
+            if val owner_symbol = self.symbols.get_symbol_raw(owner_id):
+                if val owner_module = owner_symbol.defining_module:
+                    return "{owner_module}.{owner_symbol.name}"
+                return owner_symbol.name
+        ""
+
+    me check_member_field_visible(base: HirExpr, field_name: text, span: Span):
+        if not self.enforce_member_visibility or self.member_field_denied.len() == 0:
+            return
+        val owner_key = self.member_owner_key_for_hir_base(base)
+        if owner_key != "" and self.member_field_denied.has("{owner_key}#{field_name}"):
+            self.error("field `{field_name}` is not visible from this module", span)
+
+    me check_aggregate_constructor_visible(callee: Expr, lowered_callee: HirExpr, span: Span):
+        if not self.enforce_member_visibility or self.member_ctor_denied.len() == 0:
+            return
+        var spelling = ""
+        match callee.kind:
+            case ExprKind.Ident(name): spelling = name
+            case ExprKind.Field(_, field): spelling = field
+            case _: return
+        var denied = false
+        val callee_symbol = _hir_expr_symbol_or_invalid(lowered_callee.kind)
+        if callee_symbol.is_valid():
+            if val callee_owner = self.symbols.get_symbol_raw(callee_symbol.id):
+                if val callee_module = callee_owner.defining_module:
+                    denied = self.member_ctor_denied.has("{callee_module}.{callee_owner.name}")
+        if not denied:
+            # Bare/alias spelling, or a module-qualified `pkg.mod.Type` path.
+            val qualified = hir_dotted_callee_path(callee)
+            if qualified != "":
+                denied = self.member_ctor_denied.has(qualified)
+        if denied:
+            self.error("aggregate constructor `{spelling}` is not visible from this module", span)
+
+    me check_qualified_constructor_visible(receiver: Expr, type_name: text, span: Span):
+        # `pkg.mod.Type(...)` parses as MethodCall(pkg.mod, Type, args).
+        if not self.enforce_member_visibility or self.member_ctor_denied.len() == 0:
+            return
+        val module_path = hir_dotted_callee_path(receiver)
+        if module_path != "" and self.member_ctor_denied.has("{module_path}.{type_name}"):
+            self.error("aggregate constructor `{type_name}` is not visible from this module", span)
 
     me field_type_for_owner(owner_symbol_id: SymbolId, field_name: text) -> HirType?:
         val found = self.field_type_for_owner_raw(owner_symbol_id.id, field_name)
         match found.kind:
-            case HirTypeKind.Error: nil
+            case HirTypeKind.Error: None
             case _: found
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in field_type_for_owner_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     me field_type_for_owner_raw(raw_owner_symbol_id: i64, field_name: text) -> HirType:
         unsafe(capabilities: [ffi]):
             if val owner_symbol = self.symbols.get_symbol_raw(raw_owner_symbol_id):
+                val owner_name: text = owner_symbol.name
                 if val owner_module = owner_symbol.defining_module:
                     # Interpolation, NOT a 3-operand `text` `+` chain: that form is
                     # a known silent-operand-drop landmine on the staged native /
@@ -240,12 +318,12 @@ impl HirLowering:
                     # when it comes out wrong, every field of the composite is
                     # denied at once with `field `X` is not visible from this
                     # module`.
-                    val canonical_name = owner_module + "." + owner_symbol.name
+                    val canonical_name: text = owner_module + "." + owner_symbol.name
                     if rt_dict_contains(self.struct_field_types_by_name, canonical_name):
                         val canonical_fields = self.struct_field_types_by_name[canonical_name]
                         if rt_dict_contains(canonical_fields, field_name):
                             return canonical_fields[field_name]
-                if rt_dict_contains(self.struct_field_types_by_name, owner_symbol.name):
+                if rt_dict_contains(self.struct_field_types_by_name, owner_name):
                     val owner_fields = self.struct_field_types_by_name[owner_symbol.name]
                     if rt_dict_contains(owner_fields, field_name):
                         return owner_fields[field_name]
@@ -254,9 +332,10 @@ impl HirLowering:
     me field_type_for_base(base_symbol: SymbolId, field_name: text) -> HirType?:
         val found = self.field_type_for_base_raw(base_symbol.id, field_name)
         match found.kind:
-            case HirTypeKind.Error: nil
+            case HirTypeKind.Error: None
             case _: found
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in field_type_for_base_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     me field_type_for_base_raw(raw_base_symbol_id: i64, field_name: text) -> HirType:
         unsafe(capabilities: [ffi]):
             if rt_dict_contains(self.local_struct_types, raw_base_symbol_id):
@@ -276,6 +355,7 @@ impl HirLowering:
                     return self.field_type_for_owner_raw(self.current_method_self_symbol_id, field_name)
         _hir_missing_field_type()
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in owner_type_id_for_base_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     me owner_type_id_for_base_raw(raw_base_symbol_id: i64) -> i64:
         """Resolve the owning struct/class TYPE symbol id for a receiver base
         symbol, mirroring the three lookup strategies `field_type_for_base_raw`
@@ -307,7 +387,7 @@ impl HirLowering:
         if count == 1:
             return conditions[0]
         val left = self.combine_pattern_conditions(conditions, count - 1, op, span)
-        HirExpr(kind: HirExprKind.Binary(op, left, conditions[count - 1]), has_type_: false, type_: nil, span: span)
+        HirExpr(kind: HirExprKind.Binary(op, left, conditions[count - 1]), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
 
     me lower_host_gpu_lane_payload(marker: Expr) -> i64:
         match marker.kind:
@@ -354,7 +434,7 @@ impl HirLowering:
                 # Typed rebinds of extracted pattern payloads: reading `.kind`
                 # directly off the extracted ANY-ish payload misreads on stage4
                 # (most-fields-wins), making `name == "host"` pass on garbage
-                # and misrouting print(1+1) into HostGpuLane → mono scan SEGV
+                # and misrouting print(1+1) into HostGpuLane → scan SEGV
                 # (bug doc iteration 17/18).
                 val callee_t: Expr = callee
                 val args_t: [CallArg] = args
@@ -370,9 +450,9 @@ impl HirLowering:
                     case _:
                         pass
                 if lane_code == 0:
-                    return nil
+                    return None
                 if args_t.len() != 2:
-                    return nil
+                    return None
                 val arg1_t: Expr = args_t[1].value
                 val arg1_kind_t: ExprKind = arg1_t.kind
                 match arg1_kind_t:
@@ -384,13 +464,35 @@ impl HirLowering:
                         val body = self.lower_host_gpu_lane_body(lambda_body_t)
                         Some(HirExpr(
                             kind: HirExprKind.HostGpuLane(lane_code, payload_size, marker, body),
-                            has_type_: false, type_: nil,
+                            has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span),
                             span: e.span
                         ))
                     case _:
-                        nil
+                        None
             case _:
-                nil
+                None
+
+    me is_bare_self_field_name(name: text) -> bool:
+        """True when a method body is being lowered and the enclosing class
+        declares an instance field `name`. Callers have already established
+        that `name` is NOT a local/parameter (the scope lookup missed, or
+        resolved to a non-local symbol), so a hit is a bare field reference."""
+        if self.current_method_self_symbol_id < 0:
+            return false
+        val found = self.field_type_for_owner_raw(self.current_method_self_symbol_id, name)
+        match found.kind:
+            case HirTypeKind.Error: false
+            case _: true
+
+    me warn_bare_field_shadowed_by_global(name: text, span: Span):
+        """Staged diagnostic for the bug above: a bare field name that happens
+        to resolve to a same-named module-level symbol silently binds to the
+        GLOBAL, not the field. A warning (not an error) while the in-tree
+        census of bare-field sites is non-zero; the error stage waits on a
+        zero census."""
+        if not self.is_bare_self_field_name(name):
+            return
+        self.warning("[W-HIR-BAREFIELD-001] bare field reference `{name}` at {span.file}:{span.line}:{span.col} resolves to module-level `{name}`, not the field; write `self.{name}`", span)
 
     me lower_unresolved_ident(name: text, span: Span) -> HirExprKind:
         """Unresolved identifier: known interpreter builtins (print, ...) are
@@ -459,18 +561,41 @@ impl HirLowering:
         # the receiver resolves to a NamedVar carrying the name. Emit one so
         # it reaches that routing instead of failing to compile.
         val is_result_or_option_type_name = name == "Result" or name == "Option"
+        # Compiled lanes: an interpreter-only builtin MIR cannot lower is a
+        # missing import. The fallback below would synthesize a module-less
+        # symbol that MIR can only stamp MirCallOrigin.Unknown (run-21 Phase 3
+        # SIGABRT, driver_pipeline_lowering bare `env_get`).
+        if self.forbid_interp_builtin_fallback and is_interp_only_builtin_fn(name):
+            self.error("[E-HIR-BUILTIN-IMPORT-001] `{name}` is not imported here: it resolves only to the interpreter-only builtin, which has no native lowering; import it from its std module (e.g. `use std.io_runtime` accessors) at {span.file}:{span.line}:{span.col}", span)
+            return HirExprKind.Error
         if is_interp_builtin_fn(name) or is_bootstrap_builtin or is_result_variant or is_option_variant or is_result_or_option_type_name or is_gpu_builtin:
             val symbol_type = if is_bootstrap_builtin:
                 bootstrap_builtin_signature(name, span)
             else:
                 nil
             val bsym = self.symbols.define(name, SymbolKind.Function, symbol_type, span, Visibility.Private, false, nil)
+            if is_result_variant:
+                # Only this unresolved-builtin fallback owns the tag. A user
+                # or imported function named Ok/Err returned at lookup above.
+                var builtin_symbol: HirSymbol = self.symbols.symbols[bsym.id]
+                builtin_symbol.builtin_method_tag = if name == "Ok": BUILTIN_METHOD_RESULT_OK else: BUILTIN_METHOD_RESULT_ERR
+                self.symbols.symbols[bsym.id] = builtin_symbol
             HirExprKind.NamedVar(bsym, name)
         else:
             if self.try_register_bootstrap_global_symbol(name, span):
                 val global_sym = self.symbols.lookup_or_invalid(name)
                 if global_sym.is_valid():
+                    self.warn_bare_field_shadowed_by_global(name, span)
                     return HirExprKind.NamedVar(global_sym, name)
+            # Bare field reference (`xlen` for `self.xlen`) inside a method:
+            # illegal in every lane (bug bare_field_reference_in_methods_
+            # is_illegal_but_pervasive_2026-08-10). Name the field and the
+            # required spelling instead of the generic unresolved-name text.
+            if self.is_bare_self_field_name(name):
+                self.error(
+                    "[E-HIR-BAREFIELD-001] bare field reference `{name}` at {span.file}:{span.line}:{span.col}; methods must spell fields as `self.{name}`",
+                    span)
+                return HirExprKind.Error
             # Preserve scalar source provenance before Span crosses the
             # aggregate diagnostic boundary. The driver intentionally carries
             # only rendered text under native closure pressure.

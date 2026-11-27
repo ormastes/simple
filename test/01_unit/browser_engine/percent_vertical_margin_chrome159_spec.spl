@@ -1,0 +1,102 @@
+"""
+## Purpose and audience
+Purpose: Pin that PERCENT vertical margins (`margin-top: 2.5%`, `margin: 3% 0`,
+`margin-block: 1.5%`) resolve against the containing block's WIDTH (CSS 2.2
+8.3, not its height) and carry the 1/64 px fraction through the block cursor
+like the author em/rem margins of PR #10008: the percent is stored as a
+negative `Style.margin_t_milli` / `margin_b_milli` (percent x 1000) and
+resolved by `block_margin_milli` against the parent's content width, floored
+to Chrome's LayoutUnit 1/64 px. Heights stay whole pixels; each box's painted
+top is round(true y).
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159 headless, `--dump-dom` + inline script reading
+getBoundingClientRect().y, 900x2000, `body{margin:0}`, `.w{padding-top:1px;
+height:160px}` (every container is 161 px tall, so the next one starts on a
+whole pixel), every `.w div{height:10px}`, 2026-11-17):
+
+| id | container width | margin           | Chrome y   | painted |
+|----|-----------------|------------------|------------|---------|
+| a1 | 300             | margin-top:2.5%  | 8.5        | 9       |
+| a2 | 300             | margin:3% 0      | 27.5       | 28      |
+| a3 | 300             | margin-block:1.5%| 46.5       | 47      |
+| b1 | 333             | margin-top:2.5%  | 170.3125   | 170     |
+| b2 | 333             | margin:3% 0      | 190.296875 | 190     |
+| b3 | 333             | margin-block:1.5%| 210.28125  | 210     |
+| c1 | 450             | margin-top:2.5%  | 334.25     | 334     |
+| c2 | 450             | margin:3% 0      | 357.75     | 358     |
+| c3 | 450             | margin-block:1.5%| 381.25     | 381     |
+| d1 | .in 200 in #n 400 + padding 30 | margin-top:5%  | 507 | 507 |
+| d2 | .in 200 in #n 400 + padding 30 | margin-top:2.5%| 522 | 522 |
+
+Nested: `.in{width:200px;margin-top:3%}` resolves against #n's 400 px content
+width (12 px, not the 340 px padding box and not the viewport); its children's
+5% / 2.5% resolve against `.in`'s own 200 px content width.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-PERCENT-VERTICAL-MARGIN-001 — percent vertical margins resolve against the containing block width with 1/64 px carry.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val PAGE: text = "<html><head><style>body{{margin:0}} .w{{padding-top:1px;height:160px}} .w div{{height:10px}} #n{{width:400px;padding:1px 30px 0;height:160px}} #n .in{{width:200px;padding-top:1px;height:80px;margin-top:3%}} #n .in div{{height:10px}}</style></head><body>" +
+    "<div class=\"w\" style=\"width:300px\"><div id=a1 style=\"margin-top:2.5%\"></div><div id=a2 style=\"margin:3% 0\"></div><div id=a3 style=\"margin-block:1.5%\"></div></div>" +
+    "<div class=\"w\" style=\"width:333px\"><div id=b1 style=\"margin-top:2.5%\"></div><div id=b2 style=\"margin:3% 0\"></div><div id=b3 style=\"margin-block:1.5%\"></div></div>" +
+    "<div class=\"w\" style=\"width:450px\"><div id=c1 style=\"margin-top:2.5%\"></div><div id=c2 style=\"margin:3% 0\"></div><div id=c3 style=\"margin-block:1.5%\"></div></div>" +
+    "<div id=n><div class=in><div id=d1 style=\"margin-top:5%\"></div><div id=d2 style=\"margin-top:2.5%\"></div></div></div>" +
+    "</body></html>"
+
+fn _y(id: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "y")
+
+describe "percent vertical margins, width 300":
+    it "AC-1: margin-top 2.5% (7.5 px)":
+        step("Chrome 159: 1 + 7.5 = 8.5 -> 9")
+        expect(_y("a1")).to_equal("9")
+
+    it "AC-2: margin 3% 0 (9 px, collapsed with the sibling's 0)":
+        step("Chrome 159: 27.5 -> 28")
+        expect(_y("a2")).to_equal("28")
+
+    it "AC-3: margin-block 1.5% collapses with the previous 3% bottom":
+        step("Chrome 159: 46.5 -> 47")
+        expect(_y("a3")).to_equal("47")
+
+describe "percent vertical margins, width 333 (1/64 px floor)":
+    it "AC-4: margin-top 2.5% = 8.325 -> 8.3125":
+        step("Chrome 159: 170.3125 -> 170")
+        expect(_y("b1")).to_equal("170")
+
+    it "AC-5: margin 3% 0 = 9.99 -> 9.984375":
+        step("Chrome 159: 190.296875 -> 190")
+        expect(_y("b2")).to_equal("190")
+
+    it "AC-6: margin-block 1.5%":
+        step("Chrome 159: 210.28125 -> 210")
+        expect(_y("b3")).to_equal("210")
+
+describe "percent vertical margins, width 450":
+    it "AC-7: margin-top 2.5% = 11.25":
+        step("Chrome 159: 334.25 -> 334")
+        expect(_y("c1")).to_equal("334")
+
+    it "AC-8: margin 3% 0 = 13.5":
+        step("Chrome 159: 357.75 -> 358")
+        expect(_y("c2")).to_equal("358")
+
+    it "AC-9: margin-block 1.5% = 6.75, collapsed into the 13.5 above":
+        step("Chrome 159: 381.25 -> 381")
+        expect(_y("c3")).to_equal("381")
+
+describe "percent vertical margins nested in a padded container":
+    it "AC-10: 3% of the 400 px content width, then 5% of the 200 px parent":
+        step("Chrome 159: 483 + 1 + 12 + 1 + 10 = 507")
+        expect(_y("d1")).to_equal("507")
+
+    it "AC-11: 2.5% of the 200 px parent after a 10 px sibling":
+        step("Chrome 159: 507 + 10 + 5 = 522")
+        expect(_y("d2")).to_equal("522")

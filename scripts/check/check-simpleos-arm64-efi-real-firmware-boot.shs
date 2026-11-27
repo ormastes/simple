@@ -116,6 +116,7 @@ if [ -z "${AAVMF_VARS:-}" ]; then
     AAVMF_VARS=$(find_fw "$ART_DIR/AAVMF_VARS.fd" \
              /usr/share/AAVMF/AAVMF_VARS.fd \
              /opt/homebrew/share/qemu/edk2-aarch64-vars.fd \
+             /opt/homebrew/share/qemu/edk2-arm-vars.fd \
              /usr/local/share/qemu/edk2-aarch64-vars.fd) || AAVMF_VARS=
 fi
 [ -n "${AAVMF_VARS:-}" ] || oops "no AAVMF_VARS.fd found (set AAVMF_VARS)"
@@ -167,6 +168,7 @@ for marker in \
     '[BOOT] Memory map:' \
     '[BOOT] Boot info assembled successfully' \
     '[BOOT] Handing off to memory layer' \
+    'SIMPLEOS-AARCH64-LIMINE-MEMORY-INIT-OK' \
     'SIMPLEOS-AARCH64-LIMINE-KERNEL-OK'
 do
     if grep -aqF "$marker" "$LOG"; then
@@ -177,6 +179,12 @@ do
 done
 
 [ "$n_checked" -gt 0 ] || oops "no markers were evaluated (log: $LOG)"
+
+# A kernel-reported stage failure is never a pass, even when the end marker
+# follows it: KERNEL-OK is printed after memory_init regardless of outcome, and
+# this gate once PASSed a boot whose PMM saw 0 memory regions (2026-11-05).
+fail_line=$(grep -a 'SIMPLEOS-AARCH64-LIMINE-[A-Z0-9-]*-FAIL' "$LOG" | head -1 || true)
+[ -z "$fail_line" ] || fail "kernel reported a boot-stage failure: $fail_line (log: $LOG)"
 
 n_lines=$(wc -l <"$LOG" | tr -d ' ')
 [ "$n_lines" -gt 0 ] || oops "serial transcript has no lines (log: $LOG)"

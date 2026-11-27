@@ -55,6 +55,17 @@
 
 set -u
 
+# Byte-order collation for every sort/comm below. The scan sorts name lists with
+# `sort -u` and intersects them with `comm`, which is only correct when both
+# agree on one order. Under a UTF-8 locale they need not: measured 2026-11-24 on
+# a uutils-coreutils 0.10.0 host with LANG=en_US.UTF-8, `sort -u` emitted locale
+# order (st-rev-100.shs before st-rev-10.shs; `LC_ALL=C sort -c` reports the
+# disorder) while `comm` required byte order, printed "comm: file 1 is not in
+# sorted order" and dropped matches -- so a wired guard was reported as
+# unwired and the --rev selftest fixture failed.
+LC_ALL=C
+export LC_ALL
+
 GREP=grep
 [ -x /usr/bin/grep ] && GREP=/usr/bin/grep
 
@@ -68,6 +79,80 @@ if command -v rg >/dev/null 2>&1; then
 else
     _fixed_strings_only() { $GREP -o -F -f "$1" 2>/dev/null; }
 fi
+
+# Drop standalone shell comments without discarding command text inside a
+# multiline quote or here-document. This is intentionally a bounded lexical
+# recognizer, not a shell parser: uncertain constructs stay in the scan, which
+# can over-credit an edge but cannot hide a real invocation.
+_without_shell_comment_lines() {
+    awk '
+        function here_doc(line,    i, n, c, q, word, strip_tabs) {
+            n = length(line)
+            q = ""
+            for (i = 1; i <= n; i++) {
+                c = substr(line, i, 1)
+                if (q != "") {
+                    if (c == q && substr(line, i - 1, 1) != "\\") q = ""
+                    continue
+                }
+                if (c == "\047" || c == "\"" || c == "`") { q = c; continue }
+                if (c == "\\") { i++; continue }
+                if (c == "#" && (i == 1 || substr(line, i - 1, 1) ~ /[ \t;]/)) break
+                if (c != "<" || substr(line, i + 1, 1) != "<" || substr(line, i + 2, 1) == "<") continue
+                i += 2
+                strip_tabs = 0
+                if (substr(line, i, 1) == "-") { strip_tabs = 1; i++ }
+                while (substr(line, i, 1) == " " || substr(line, i, 1) == "\t") i++
+                c = substr(line, i, 1)
+                word = ""
+                if (c == "\047" || c == "\"") {
+                    q = c; i++
+                    while (i <= n && substr(line, i, 1) != q) { word = word substr(line, i, 1); i++ }
+                    q = ""
+                } else {
+                    while (i <= n && substr(line, i, 1) !~ /[ \t;|&<>]/) { word = word substr(line, i, 1); i++ }
+                    i--
+                }
+                if (word != "") {
+                    count++
+                    delimiter[count] = word
+                    tabstrip[count] = strip_tabs
+                }
+            }
+        }
+        {
+            if (pending < count) {
+                body = $0
+                if (tabstrip[pending + 1]) sub(/^\t+/, "", body)
+                print
+                if (body == delimiter[pending + 1]) pending++
+                if (pending == count) { pending = 0; count = 0 }
+                next
+            }
+            if (!quote && $0 ~ /^[[:space:]]*#/) next
+            print
+
+            # Track multiline single/double/backtick strings conservatively.
+            for (i = 1; i <= length($0); i++) {
+                c = substr($0, i, 1)
+                if (escape) { escape = 0; continue }
+                if (quote == "\047") { if (c == quote) quote = ""; continue }
+                if (quote != "") {
+                    if (c == "\\") { escape = 1; continue }
+                    if (c == quote) quote = ""
+                    continue
+                }
+                if (c == "\\") { escape = 1; continue }
+                if (c == "\047" || c == "\"" || c == "`") { quote = c; continue }
+                if (c == "#" && (i == 1 || substr($0, i - 1, 1) ~ /[ \t;]/)) break
+            }
+            if (!quote) here_doc($0)
+            # A backslash-newline removes the newline; it does not escape the
+            # first character of the following input record.
+            escape = 0
+        }
+    '
+}
 
 # A tree this size always has hundreds of guards. Anything near zero means the
 # enumerator broke, not that the tree got clean. Raise as the tree grows; never
@@ -289,6 +374,7 @@ scan_wiring() {
             else
                 cat "$_f" 2>/dev/null
             fi |
+            _without_shell_comment_lines |
             $GREP -v -E '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*_(report_note|note|report)="' \
                 2>/dev/null |
                 _fixed_strings_only "$_wd/guards" |sort -u |
@@ -328,6 +414,30 @@ scan_wiring() {
     #     runner is itself reached. If the runner ever becomes unreachable these
     #     edges stop firing and the guards become orphans -- the ratchet FAILs,
     #     which is the safe direction for a gate.
+    #
+    #     tier=local rows are the same manifest-driven invocation one tier down:
+    #     run-gate-tier.shs --tier local runs every local row's command VERBATIM
+    #     (sh -c, from the repo root, under a wall budget) on every PR via the
+    #     fast-gates job in .github/workflows/required-gates.yml and on every
+    #     land via land.shs. run-gate-tier.shs is itself a guard reached from
+    #     those roots, so key local-row command mentions on it exactly like the
+    #     bootstrap rows below. Without this, a guard wired ONLY by a local
+    #     manifest row reads as an orphan no matter how honestly the tier runs
+    #     it -- the exact false debt the 2026-11-09 guard-wiring triage hit
+    #     (36 green local-tier guards reported unwired until this credit).
+    _tierunner="$_root/scripts/check/run-gate-tier.shs"
+    if [ -f "$_tierunner" ] && [ -f "$_manifest_file" ]; then
+        awk -F, -v R="$_tierunner" '
+            /^[[:space:]]+[a-z0-9][a-z0-9-]*,/ {
+                tier=$2; cmd=$5
+                gsub(/[ \t]/, "", tier)
+                if (tier != "local") next
+                while (match(cmd, /[A-Za-z0-9_.-]+\.shs/)) {
+                    printf "%s\t%s\n", R, substr(cmd, RSTART, RLENGTH)
+                    cmd = substr(cmd, RSTART + RLENGTH)
+                }
+            }' "$_manifest_file" >> "$_wd/hits" 2>/dev/null || :
+    fi
     _bootrunner="$_root/scripts/check/check-bootstrap-must-pass.shs"
     _manifest_file="$_root/config/check/must_check_gates.sdn"
     if [ -f "$_bootrunner" ] && [ -f "$_manifest_file" ]; then
@@ -490,6 +600,37 @@ selftest() {
     echo '#!/bin/sh' > "$_t/scripts/check/st-optout.shs"
     # orphan-unjustified: unreferenced and unlisted. MUST fail.
     echo '#!/bin/sh' > "$_t/scripts/check/st-orphan.shs"
+    # Comment prose must not create a wiring edge, even when it reads like a
+    # command. The string assignment and here-document below deliberately do
+    # create edges under the existing textual scan policy.
+    echo '#!/bin/sh' > "$_t/scripts/check/st-comment.shs"
+    echo '#!/bin/sh' > "$_t/scripts/check/st-string.shs"
+    echo '#!/bin/sh' > "$_t/scripts/check/st-heredoc.shs"
+    echo '#!/bin/sh' > "$_t/scripts/check/st-dot.shs"
+    echo '#!/bin/sh' > "$_t/scripts/check/st-quoted.shs"
+    echo '#!/bin/sh' > "$_t/scripts/check/st-continued-quote.shs"
+    echo '#!/bin/sh' > "$_t/scripts/check/st-comment-heredoc.shs"
+    {
+        echo '# Example: sh scripts/check/st-comment.shs'
+        echo 'command="sh scripts/check/st-string.shs"'
+        echo 'sh -c "$command"'
+        echo '. scripts/check/st-dot.shs'
+        echo 'cat <<EOF'
+        echo '# sh scripts/check/st-heredoc.shs'
+        echo 'EOF'
+        echo "quoted='"
+        echo '# sh scripts/check/st-quoted.shs'
+        echo "'"
+    } >> "$_t/scripts/check/st-direct.shs"
+    cat >> "$_t/scripts/check/st-direct.shs" <<'FIXTURE'
+command=\
+"
+# sh scripts/check/st-continued-quote.shs
+"
+: # <<ST_FAKE
+# sh scripts/check/st-comment-heredoc.shs
+ST_FAKE
+FIXTURE
     # lib helper: a sourced function library under scripts/check/lib/. It is
     # itself unreferenced, so to the old code it looked exactly like
     # st-orphan.shs. It must NOT be judged as a gate -- but it must still be a
@@ -515,7 +656,7 @@ selftest() {
     }
     _has() { $GREP -qx "$2" "$_w/$1" && echo yes || echo no; }
 
-    _assert "guards enumerated" 6 "$(wc -l < "$_w/guards" | tr -d ' ')"
+    _assert "guards enumerated" 13 "$(wc -l < "$_w/guards" | tr -d ' ')"
     _assert "lib helper stays a traversable node" yes \
         "$(_has guards st-lib-helper.shs)"
     _assert "lib helper is never judged an orphan" no \
@@ -526,14 +667,29 @@ selftest() {
         "$(_has orphans st-viahelper.shs)"
     _assert "direct guard reachable"   yes "$(_has reached st-direct.shs)"
     _assert "indirect guard reachable" yes "$(_has reached st-indirect.shs)"
+    _assert "comment prose does not wire a guard" yes \
+        "$(_has orphans st-comment.shs)"
+    _assert "command string still wires a guard" yes \
+        "$(_has reached st-string.shs)"
+    _assert "here-document command still wires a guard" yes \
+        "$(_has reached st-heredoc.shs)"
+    _assert "dot-source command still wires a guard" yes \
+        "$(_has reached st-dot.shs)"
+    _assert "multiline quoted command text is retained" yes \
+        "$(_has reached st-quoted.shs)"
+    _assert "continued multiline quote command text is retained" yes \
+        "$(_has reached st-continued-quote.shs)"
+    _assert "inline comment cannot open a fake here-document" yes \
+        "$(_has orphans st-comment-heredoc.shs)"
     _assert "optout guard is an orphan" yes "$(_has orphans st-optout.shs)"
     _assert "unlisted guard is an orphan" yes "$(_has orphans st-orphan.shs)"
     _assert "reachable guard is NOT an orphan" no "$(_has orphans st-direct.shs)"
 
     # The verdict the whole script exists to produce.
     comm -23 "$_w/orphans" "$_w/optout" > "$_w/st_unjust"
-    _assert "unjustified set is exactly st-orphan.shs" \
-        "st-orphan.shs" "$(cat "$_w/st_unjust" | tr '\n' ' ' | sed 's/ *$//')"
+    _assert "unjustified set contains only the three real orphans" \
+        "st-comment-heredoc.shs st-comment.shs st-orphan.shs" \
+        "$(cat "$_w/st_unjust" | tr '\n' ' ' | sed 's/ *$//')"
 
     # A bare basename with no reason must be rejected, not silently honoured.
     printf 'st-orphan.shs\n' >> "$_t/optout.txt"
@@ -785,7 +941,7 @@ selftest() {
         echo "Fix the scan. Do NOT delete these fixtures."
         return 1
     fi
-    echo "check-guard-wiring: selftest 36/36 fixtures correct"
+    echo "check-guard-wiring: selftest 43/43 fixtures correct"
     return 0
 }
 
@@ -811,7 +967,7 @@ MODE=scan
 REV=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --selftest-only) MODE=selftest-only; shift ;;
+        --selftest|--selftest-only) MODE=selftest-only; shift ;;
         --generate-baseline) MODE=generate; shift ;;
         --rev) [ $# -ge 2 ] || { echo "check-guard-wiring: ERROR — nothing was checked: --rev needs a value"; exit 2; }
                REV="$2"; shift 2 ;;

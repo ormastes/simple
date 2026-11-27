@@ -1,0 +1,140 @@
+// Packed Vulkan font atlas batch compositor (gray "over" blend + LCD subpixel).
+//
+// Provenance: grown from test/09_baselines/engine2d_vulkan/font_atlas_packed.comp
+// (gray-only, SPIR-V sha256 4b5f44e2...; that file stays as the C-bench
+// baseline kernel). The gray branch below is that kernel's math unchanged.
+//
+// LCD branch: byte-for-byte the CPU composite `engine2d_lcd_quad_composite`
+// (src/lib/gc_async_mut/gpu/engine2d/engine.spl), Skia blend_lcd16 style:
+//   per channel  c' = d + (((src - d) * s32[cov]) >> 5)     (signed, flooring)
+// with the s32 tables (3 x 256 per text colour, preblend and text alpha folded
+// in) built on the host by `_engine2d_lcd_s32_tables` and shipped inside the
+// params buffer, so the descriptor layout stays at three bindings.
+//
+// The decision is per QUAD, exactly like the CPU: LCD math only when the quad
+// holds an LCD cell (host flag = table index != 0xFFFF) AND every
+// destination pixel of the quad is opaque and on the surface; otherwise the
+// whole quad takes the gray branch. The opacity scan needs one workgroup per
+// quad, so the host dispatches X = 1 whenever the LCD trailer is present.
+//
+// Chains (LCD trailer only): LCD quads carry 1 px of padding, so neighbouring
+// glyphs of a word overlap, and two overlapping quads must blend in painter
+// order. The host sorts each connected group of overlapping quads ("chain")
+// into consecutive glyph records, in painter order. The workgroup of a chain's
+// FIRST quad blends the whole chain, one quad after another with a barrier
+// between them; the workgroups of the other members do nothing. Chains never
+// share a destination pixel, so the whole batch is ONE dispatch.
+//
+// Params words: [0..7] header, word 7 bit 31 = LCD trailer present;
+//   [8 + glyph*7 ..] 7 words per glyph (unchanged);
+//   trailer at W0 = 8 + 7*G: G words, low 16 bits = table index (0xFFFF = no
+//   LCD), high 16 bits = chain length at the chain's first quad and 0 at its
+//   other members; then the tables at W0 + G + index*768 (R 0..255,
+//   G 256..511, B 512..767).
+#version 450
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(std430, binding = 0) readonly buffer AtlasBuffer { uint atlas[]; };
+layout(std430, binding = 1) buffer DestinationBuffer { uint dst[]; };
+layout(std430, binding = 2) readonly buffer ParamsBuffer { uint words[]; } p;
+shared uint quad_opaque;
+void main() {
+    uint lid = gl_LocalInvocationID.x, first = gl_GlobalInvocationID.y;
+    uint nw = p.words.length();
+    if (nw < 8u || first >= p.words[6]) return;
+    uint aw=p.words[0], ah=p.words[1], ac=p.words[2];
+    uint dw=p.words[3], dh=p.words[4], dc=p.words[5];
+    if (aw*ah != ac || dw*dh != dc) return;
+    uint gc = p.words[6], trailer_at = 8u + gc * 7u;
+    bool trailer = (p.words[7] & 0x80000000u) != 0u;
+    // Quads this workgroup blends: 1 without a trailer, else the chain length
+    // stored at a chain's first quad (0 = an earlier workgroup owns this quad).
+    uint chain = 1u;
+    if (trailer) {
+        if (trailer_at + first >= nw) return;
+        chain = p.words[trailer_at + first] >> 16u;
+    }
+    uint stride = gl_NumWorkGroups.x * 64u;
+    for (uint link = 0u; link < chain; link++) {
+        uint glyph = first + link;
+        uint base = 8u + glyph * 7u;
+        if (glyph >= gc || base + 6u >= nw) return;
+        uint ax=p.words[base], ay=p.words[base+1u];
+        uint qw=p.words[base+2u], qh=p.words[base+3u];
+        int dx0=int(p.words[base+4u]), dy0=int(p.words[base+5u]);
+        uint color=p.words[base+6u], count=qw*qh;
+        // Table offset of this glyph's LCD s32 tables; 0 = gray-only quad.
+        uint tbl = 0u;
+        if (trailer && trailer_at + glyph < nw) {
+            uint t = p.words[trailer_at + glyph] & 0xFFFFu;
+            if (t < 4096u) {
+                uint off = 8u + gc * 8u + t * 768u;
+                if (off + 768u <= nw) tbl = off;
+            }
+        }
+        bool lcd = tbl != 0u;
+        if (lcd) {
+            // Quad-level gate: all destination pixels opaque and on the surface.
+            if (lid == 0u) quad_opaque = 1u;
+            memoryBarrierShared();
+            barrier();
+            for (uint k = lid; k < count; k += 64u) {
+                int kx = dx0 + int(k % qw), ky = dy0 + int(k / qw);
+                if (kx < 0 || ky < 0 || kx >= int(dw) || ky >= int(dh) ||
+                    (dst[uint(ky) * dw + uint(kx)] >> 24u) != 255u)
+                    atomicAnd(quad_opaque, 0u);
+            }
+            memoryBarrierShared();
+            barrier();
+            lcd = quad_opaque != 0u;
+        }
+        for (uint pixel = gl_GlobalInvocationID.x; pixel < count; pixel += stride) {
+            uint lx=pixel%qw, ly=pixel/qw, si=(ay+ly)*aw+ax+lx;
+            int dx=dx0+int(lx), dy=dy0+int(ly);
+            if (si>=ac || dx<0 || dy<0 || dx>=int(dw) || dy>=int(dh)) continue;
+            uint di=uint(dy)*dw+uint(dx);
+            uint cell=atlas[si];
+            uint d=dst[di];
+            if (lcd) {
+                // Gray cell (rgb 0xFFFFFF): coverage is alpha in all channels.
+                // LCD cell: per-channel coverage in rgb.
+                uint a=cell>>24u, cr=a, cg=a, cb=a;
+                if ((cell&0xFFFFFFu)!=0xFFFFFFu) { cr=(cell>>16u)&255u; cg=(cell>>8u)&255u; cb=cell&255u; }
+                int sr=int((color>>16u)&255u), sg=int((color>>8u)&255u), sb=int(color&255u);
+                int dr=int((d>>16u)&255u), dg=int((d>>8u)&255u), db=int(d&255u);
+                int r=dr+(((sr-dr)*int(p.words[tbl+cr]))>>5);
+                int g=dg+(((sg-dg)*int(p.words[tbl+256u+cg]))>>5);
+                int b=db+(((sb-db)*int(p.words[tbl+512u+cb]))>>5);
+                dst[di]=0xFF000000u|(uint(r)<<16u)|(uint(g)<<8u)|uint(b);
+            } else {
+                // CPU parity: color.spl blend() (Chrome 159 image rule), as
+                // _glsl_blit. Opaque dst: round(s*a/255) + div255r(d*(255-a));
+                // translucent dst: Skia's premultiplied layer value stored
+                // straight; transparent dst or opaque src: the source.
+                uint sa=((cell>>24u)*(color>>24u)+127u)/255u;
+                if(sa==0u)continue;
+                uint da=d>>24u,inv=255u-sa;
+                uint cr=(color>>16u)&255u,cg=(color>>8u)&255u,cb=color&255u;
+                uint dr=(d>>16u)&255u,dg=(d>>8u)&255u,db=d&255u;
+                if(sa==255u||da==0u){dst[di]=(sa<<24u)|(color&0xFFFFFFu);continue;}
+                if(da!=255u){
+                    uint oa=sa+(da*inv+127u)/255u,ho=oa/2u;
+                    uint pr=(cr*sa+127u)/255u+(((dr*da+127u)/255u)*inv+127u)/255u;
+                    uint pg=(cg*sa+127u)/255u+(((dg*da+127u)/255u)*inv+127u)/255u;
+                    uint pb=(cb*sa+127u)/255u+(((db*da+127u)/255u)*inv+127u)/255u;
+                    dst[di]=(oa<<24u)|(min((pr*255u+ho)/oa,255u)<<16u)|(min((pg*255u+ho)/oa,255u)<<8u)|min((pb*255u+ho)/oa,255u);
+                    continue;
+                }
+                uint vr=dr*inv+128u,vg=dg*inv+128u,vb=db*inv+128u;
+                uint r=(cr*sa+127u)/255u+((vr+(vr>>8u))>>8u);
+                uint g=(cg*sa+127u)/255u+((vg+(vg>>8u))>>8u);
+                uint b=(cb*sa+127u)/255u+((vb+(vb>>8u))>>8u);
+                dst[di]=0xFF000000u|(r<<16u)|(g<<8u)|b;
+            }
+        }
+        if (chain > 1u) {
+            // The next quad of the chain reads what this one wrote.
+            memoryBarrierBuffer();
+            barrier();
+        }
+    }
+}

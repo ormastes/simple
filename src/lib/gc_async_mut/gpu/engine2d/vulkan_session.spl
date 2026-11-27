@@ -28,9 +28,12 @@ use std.gpu.engine2d.backend_vulkan_font_spirv.{
     font_atlas_composite_vulkan_spirv_trusted
 }
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_rect_batch_spirv.{spirv_rect_batch}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_affine_coverage_spirv.{spirv_affine_coverage_rect}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_glass_material_spirv.{spirv_glass_material}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_blur_rect_spirv.{spirv_blur_rect}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_shadow_rect_spirv.{spirv_shadow_rect}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_css_group_restore_spirv.{spirv_css_group_restore}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_gradient_layer_spirv.{spirv_gradient_layer}
 use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_last_error,
     vulkan_sffi_compile_spirv, vulkan_sffi_destroy_shader,
@@ -87,6 +90,7 @@ class VulkanSession:
     # Compiled GLSL shader module handles
     shader_clear: i64
     shader_rect_filled: i64
+    shader_affine_coverage_rect: i64
     shader_rect_outline: i64
     shader_circle_filled: i64
     shader_circle_outline: i64
@@ -100,6 +104,7 @@ class VulkanSession:
     # Compute pipeline handles
     pipe_clear: i64
     pipe_rect_filled: i64
+    pipe_affine_coverage_rect: i64
     pipe_rect_outline: i64
     pipe_circle_filled: i64
     pipe_circle_outline: i64
@@ -139,6 +144,14 @@ class VulkanSession:
     pipe_shadow_rect: i64
     blur_error: text
     shadow_error: text
+    # Device CSS opacity group restore (css_group_restore.comp).
+    shader_css_group_restore: i64
+    pipe_css_group_restore: i64
+    css_group_restore_error: text
+    # Device CSS gradient layer evaluator + composite (gradient_layer.comp).
+    shader_gradient_layer: i64
+    pipe_gradient_layer: i64
+    gradient_layer_error: text
 
     font_atlas_artifact_mode: text
     font_atlas_artifact_identity: text
@@ -168,6 +181,7 @@ class VulkanSession:
             allocator: 0,
             shader_clear: 0,
             shader_rect_filled: 0,
+            shader_affine_coverage_rect: 0,
             shader_rect_outline: 0,
             shader_circle_filled: 0,
             shader_circle_outline: 0,
@@ -179,6 +193,7 @@ class VulkanSession:
             shader_font_atlas: 0,
             pipe_clear: 0,
             pipe_rect_filled: 0,
+            pipe_affine_coverage_rect: 0,
             pipe_rect_outline: 0,
             pipe_circle_filled: 0,
             pipe_circle_outline: 0,
@@ -200,6 +215,12 @@ class VulkanSession:
             pipe_shadow_rect: 0,
             blur_error: "not-installed",
             shadow_error: "not-installed",
+            shader_css_group_restore: 0,
+            pipe_css_group_restore: 0,
+            css_group_restore_error: "not-installed",
+            shader_gradient_layer: 0,
+            pipe_gradient_layer: 0,
+            gradient_layer_error: "not-installed",
             font_atlas_artifact_mode: "none",
             font_atlas_artifact_identity: "",
             font_atlas_emission_compile_ns: 0,
@@ -227,13 +248,29 @@ class VulkanSession:
           5 — one or more shader compilations failed
           6 — one or more pipeline creations failed
         """
+        var retained_refs: i64 = 1
+        if self.is_initialized and self.device > 0:
+            if self.selected_device_index < 0:
+                self.init_error = ""
+                return 0
+            val live_device = vulkan_get_device()
+            if live_device == self.device:
+                self.init_error = ""
+                return 0
+            # Runtime device was shut down or replaced externally: reset local
+            # handle slots without calling vulkan_sffi_destroy_* (which would
+            # destroy 1-based Vec indices belonging to a replacement device in
+            # gpu.rs), preserving live retain count across recovery.
+            if self.ref_count > 1:
+                retained_refs = self.ref_count
+            self._reset_local_handles()
         self.init_error = ""
         if not vulkan_sffi_is_available():
             self.init_error = "availability"
             return 1
 
         if not vulkan_sffi_init():
-            self.init_error = "runtime-init"
+            self.init_error = "runtime-init: {vulkan_sffi_last_error()}"
             return 2
 
         if vulkan_sffi_device_count() < 1:
@@ -260,6 +297,7 @@ class VulkanSession:
         val noop_spirv = spirv_noop_storage()
         self.shader_clear         = vulkan_sffi_compile_spirv(spirv_clear())
         self.shader_rect_filled   = vulkan_sffi_compile_spirv(spirv_rect_filled())
+        self.shader_affine_coverage_rect = vulkan_sffi_compile_spirv(spirv_affine_coverage_rect())
         self.shader_rect_outline  = vulkan_sffi_compile_spirv(spirv_rect_outline())
         self.shader_circle_filled = vulkan_sffi_compile_spirv(spirv_circle_filled())
         self.shader_circle_outline = vulkan_sffi_compile_spirv(noop_spirv)
@@ -300,6 +338,9 @@ class VulkanSession:
         # Create compute pipelines (all use push constants)
         self.pipe_clear          = vulkan_sffi_create_compute_pipeline(self.shader_clear,         "main", _VS_PUSH_CONSTANT_SIZE)
         self.pipe_rect_filled    = vulkan_sffi_create_compute_pipeline(self.shader_rect_filled,   "main", _VS_PUSH_CONSTANT_SIZE)
+        if self.shader_affine_coverage_rect > 0:
+            self.pipe_affine_coverage_rect = vulkan_sffi_create_compute_pipeline(
+                self.shader_affine_coverage_rect, "main", _VS_PUSH_CONSTANT_SIZE)
         self.pipe_rect_outline   = vulkan_sffi_create_compute_pipeline(self.shader_rect_outline,  "main", _VS_PUSH_CONSTANT_SIZE)
         self.pipe_circle_filled  = vulkan_sffi_create_compute_pipeline(self.shader_circle_filled, "main", _VS_PUSH_CONSTANT_SIZE)
         self.pipe_circle_outline = vulkan_sffi_create_compute_pipeline(self.shader_circle_outline,"main", _VS_PUSH_CONSTANT_SIZE)
@@ -392,7 +433,34 @@ class VulkanSession:
             else:
                 self.shadow_error = ""
 
-        self.ref_count = 1
+        # Optional device CSS opacity group restore, same swallow-and-record
+        # contract: when it is missing the host readback restore paints the
+        # same pixels.
+        self.shader_css_group_restore = vulkan_sffi_compile_spirv(spirv_css_group_restore())
+        if self.shader_css_group_restore <= 0:
+            self.css_group_restore_error = "css-group-restore-shader: {vulkan_sffi_last_error()}"
+        else:
+            self.pipe_css_group_restore = vulkan_sffi_create_compute_pipeline(
+                self.shader_css_group_restore, "main", _VS_PUSH_CONSTANT_SIZE)
+            if self.pipe_css_group_restore <= 0:
+                self.css_group_restore_error = "css-group-restore-pipeline: {vulkan_sffi_last_error()}"
+            else:
+                self.css_group_restore_error = ""
+
+        # Optional device CSS gradient layer pipeline, same swallow-and-record
+        # contract: when it is missing the host evaluator paints identical t.
+        self.shader_gradient_layer = vulkan_sffi_compile_spirv(spirv_gradient_layer())
+        if self.shader_gradient_layer <= 0:
+            self.gradient_layer_error = "gradient-layer-shader: {vulkan_sffi_last_error()}"
+        else:
+            self.pipe_gradient_layer = vulkan_sffi_create_compute_pipeline(
+                self.shader_gradient_layer, "main", _VS_PUSH_CONSTANT_SIZE)
+            if self.pipe_gradient_layer <= 0:
+                self.gradient_layer_error = "gradient-layer-pipeline: {vulkan_sffi_last_error()}"
+            else:
+                self.gradient_layer_error = ""
+
+        self.ref_count = retained_refs
         self.is_initialized = true
         self.generation = self.generation + 1
         self.install_pinned_font_atlas_pipeline(spirv_font_atlas_composite())
@@ -586,29 +654,59 @@ class VulkanSession:
         )
 
     me _cleanup():
-        """Destroy all GPU objects. Called automatically by release() on zero refcount."""
-        if self.pipe_font_atlas != 0:     vulkan_sffi_destroy_pipeline(self.pipe_font_atlas)
+        """Destroy all GPU objects when owned by the live runtime device, then reset local slots."""
+        if self.selected_device_index < 0 or vulkan_get_device() == self.device:
+            if self.pipe_font_atlas != 0:     vulkan_sffi_destroy_pipeline(self.pipe_font_atlas)
+            if self.pipe_clear != 0:          vulkan_sffi_destroy_pipeline(self.pipe_clear)
+            if self.pipe_rect_filled != 0:    vulkan_sffi_destroy_pipeline(self.pipe_rect_filled)
+            if self.pipe_affine_coverage_rect != 0: vulkan_sffi_destroy_pipeline(self.pipe_affine_coverage_rect)
+            if self.pipe_rect_outline != 0:   vulkan_sffi_destroy_pipeline(self.pipe_rect_outline)
+            if self.pipe_circle_filled != 0:  vulkan_sffi_destroy_pipeline(self.pipe_circle_filled)
+            if self.pipe_circle_outline != 0: vulkan_sffi_destroy_pipeline(self.pipe_circle_outline)
+            if self.pipe_line != 0:           vulkan_sffi_destroy_pipeline(self.pipe_line)
+            if self.pipe_rounded_rect != 0:   vulkan_sffi_destroy_pipeline(self.pipe_rounded_rect)
+            if self.pipe_triangle != 0:       vulkan_sffi_destroy_pipeline(self.pipe_triangle)
+            if self.pipe_gradient != 0:       vulkan_sffi_destroy_pipeline(self.pipe_gradient)
+            if self.pipe_blit != 0:           vulkan_sffi_destroy_pipeline(self.pipe_blit)
+            if self.pipe_blur_rect != 0: vulkan_sffi_destroy_pipeline(self.pipe_blur_rect)
+            if self.pipe_shadow_rect != 0: vulkan_sffi_destroy_pipeline(self.pipe_shadow_rect)
+            if self.pipe_css_group_restore != 0: vulkan_sffi_destroy_pipeline(self.pipe_css_group_restore)
+            if self.pipe_gradient_layer != 0: vulkan_sffi_destroy_pipeline(self.pipe_gradient_layer)
+            if self.pipe_glass_material != 0: vulkan_sffi_destroy_pipeline(self.pipe_glass_material)
+            if self.pipe_rect_batch != 0:     vulkan_sffi_destroy_pipeline(self.pipe_rect_batch)
+
+            if self.shader_clear != 0:          vulkan_sffi_destroy_shader(self.shader_clear)
+            if self.shader_rect_filled != 0:    vulkan_sffi_destroy_shader(self.shader_rect_filled)
+            if self.shader_affine_coverage_rect != 0: vulkan_sffi_destroy_shader(self.shader_affine_coverage_rect)
+            if self.shader_rect_outline != 0:   vulkan_sffi_destroy_shader(self.shader_rect_outline)
+            if self.shader_circle_filled != 0:  vulkan_sffi_destroy_shader(self.shader_circle_filled)
+            if self.shader_circle_outline != 0: vulkan_sffi_destroy_shader(self.shader_circle_outline)
+            if self.shader_line != 0:           vulkan_sffi_destroy_shader(self.shader_line)
+            if self.shader_rounded_rect != 0:   vulkan_sffi_destroy_shader(self.shader_rounded_rect)
+            if self.shader_triangle != 0:       vulkan_sffi_destroy_shader(self.shader_triangle)
+            if self.shader_gradient != 0:       vulkan_sffi_destroy_shader(self.shader_gradient)
+            if self.shader_blit != 0:           vulkan_sffi_destroy_shader(self.shader_blit)
+            if self.shader_font_atlas != 0:     vulkan_sffi_destroy_shader(self.shader_font_atlas)
+            if self.shader_blur_rect != 0: vulkan_sffi_destroy_shader(self.shader_blur_rect)
+            if self.shader_shadow_rect != 0: vulkan_sffi_destroy_shader(self.shader_shadow_rect)
+            if self.shader_css_group_restore != 0: vulkan_sffi_destroy_shader(self.shader_css_group_restore)
+            if self.shader_gradient_layer != 0: vulkan_sffi_destroy_shader(self.shader_gradient_layer)
+            if self.shader_glass_material != 0: vulkan_sffi_destroy_shader(self.shader_glass_material)
+            if self.shader_rect_batch != 0:     vulkan_sffi_destroy_shader(self.shader_rect_batch)
+        self._reset_local_handles()
+
+    me _reset_local_handles():
+        """Zero all local shader, pipeline, and device slots without FFI destroy calls."""
         self.pipe_font_atlas = 0
-        if self.pipe_clear != 0:          vulkan_sffi_destroy_pipeline(self.pipe_clear)
-        if self.pipe_rect_filled != 0:    vulkan_sffi_destroy_pipeline(self.pipe_rect_filled)
-        if self.pipe_rect_outline != 0:   vulkan_sffi_destroy_pipeline(self.pipe_rect_outline)
-        if self.pipe_circle_filled != 0:  vulkan_sffi_destroy_pipeline(self.pipe_circle_filled)
-        if self.pipe_circle_outline != 0: vulkan_sffi_destroy_pipeline(self.pipe_circle_outline)
-        if self.pipe_line != 0:           vulkan_sffi_destroy_pipeline(self.pipe_line)
-        if self.pipe_rounded_rect != 0:   vulkan_sffi_destroy_pipeline(self.pipe_rounded_rect)
-        if self.pipe_triangle != 0:       vulkan_sffi_destroy_pipeline(self.pipe_triangle)
-        if self.pipe_gradient != 0:       vulkan_sffi_destroy_pipeline(self.pipe_gradient)
-        if self.pipe_blit != 0:           vulkan_sffi_destroy_pipeline(self.pipe_blit)
-        if self.pipe_blur_rect != 0: vulkan_sffi_destroy_pipeline(self.pipe_blur_rect)
-        if self.pipe_shadow_rect != 0: vulkan_sffi_destroy_pipeline(self.pipe_shadow_rect)
-        if self.pipe_glass_material != 0: vulkan_sffi_destroy_pipeline(self.pipe_glass_material)
-        if self.pipe_rect_batch != 0:     vulkan_sffi_destroy_pipeline(self.pipe_rect_batch)
         self.pipe_rect_batch = 0
         self.pipe_glass_material = 0
         self.pipe_blur_rect = 0
         self.pipe_shadow_rect = 0
+        self.pipe_css_group_restore = 0
+        self.pipe_gradient_layer = 0
         self.pipe_clear = 0
         self.pipe_rect_filled = 0
+        self.pipe_affine_coverage_rect = 0
         self.pipe_rect_outline = 0
         self.pipe_circle_filled = 0
         self.pipe_circle_outline = 0
@@ -617,29 +715,16 @@ class VulkanSession:
         self.pipe_triangle = 0
         self.pipe_gradient = 0
         self.pipe_blit = 0
-
-        if self.shader_clear != 0:          vulkan_sffi_destroy_shader(self.shader_clear)
-        if self.shader_rect_filled != 0:    vulkan_sffi_destroy_shader(self.shader_rect_filled)
-        if self.shader_rect_outline != 0:   vulkan_sffi_destroy_shader(self.shader_rect_outline)
-        if self.shader_circle_filled != 0:  vulkan_sffi_destroy_shader(self.shader_circle_filled)
-        if self.shader_circle_outline != 0: vulkan_sffi_destroy_shader(self.shader_circle_outline)
-        if self.shader_line != 0:           vulkan_sffi_destroy_shader(self.shader_line)
-        if self.shader_rounded_rect != 0:   vulkan_sffi_destroy_shader(self.shader_rounded_rect)
-        if self.shader_triangle != 0:       vulkan_sffi_destroy_shader(self.shader_triangle)
-        if self.shader_gradient != 0:       vulkan_sffi_destroy_shader(self.shader_gradient)
-        if self.shader_blit != 0:           vulkan_sffi_destroy_shader(self.shader_blit)
-        if self.shader_font_atlas != 0:     vulkan_sffi_destroy_shader(self.shader_font_atlas)
-        if self.shader_blur_rect != 0: vulkan_sffi_destroy_shader(self.shader_blur_rect)
-        if self.shader_shadow_rect != 0: vulkan_sffi_destroy_shader(self.shader_shadow_rect)
-        if self.shader_glass_material != 0: vulkan_sffi_destroy_shader(self.shader_glass_material)
-        if self.shader_rect_batch != 0:     vulkan_sffi_destroy_shader(self.shader_rect_batch)
         self.shader_rect_batch = 0
         self.shader_glass_material = 0
         self.shader_blur_rect = 0
         self.shader_shadow_rect = 0
+        self.shader_css_group_restore = 0
+        self.shader_gradient_layer = 0
         self.rect_batch_error = "not-installed"
         self.shader_clear = 0
         self.shader_rect_filled = 0
+        self.shader_affine_coverage_rect = 0
         self.shader_rect_outline = 0
         self.shader_circle_filled = 0
         self.shader_circle_outline = 0

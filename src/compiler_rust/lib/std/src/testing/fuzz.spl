@@ -2,64 +2,106 @@
 # Property-Based Fuzzing for Simple
 # Lightweight fuzzing library for testing Simple programs
 
-# # reason: BoolGen.generate() -> bool (name not predicate-prefixed, cannot be renamed
-# without breaking API) and fn(any) -> bool property parameter are stdlib primitive boundary.
 
-use std.random as random
+use std.common.random_pure.{LcgRng, lcg_rng, lcg_advance, lcg_value}
+use std.common.string_core.{char_from_code}
+use std.io_runtime.{time_now_unix_micros}
 
 # ============================================================================
 # Generators - Produce random test inputs
 # ============================================================================
+
+# Each sample transfers the successor RNG explicitly: no captured mutable state.
+struct FuzzSample<T>:
+    value: T
+    next_rng: LcgRng
+
+# A typed callback carries the sample type without parameterized trait bounds.
+struct FuzzGenerator<T>:
+    sample: fn(LcgRng) -> FuzzSample<T>
+
+    fn generate(rng: LcgRng) -> FuzzSample<T>:
+        self.sample(rng)
 
 # Integer generator
 struct IntGen:
     min: i32
     max: i32
 
-    fn generate(self, rng: random.RandomState) -> i32:
-        val range = self.max - self.min + 1
-        val rand_val = rng.next()
-        self.min + (rand_val % range)
+    fn generate(self, rng: LcgRng) -> FuzzSample<i32>:
+        val next_rng = lcg_advance(rng)
+        val width = (self.max as i64) - (self.min as i64) + 1
+        val value = (self.min as i64) + (lcg_value(next_rng) % width)
+        FuzzSample(value: value as i32, next_rng: next_rng)
 
 # Text generator
 struct TextGen:
     min_len: i32
     max_len: i32
 
-    fn generate(self, rng: random.RandomState) -> text:
-        val len_range = self.max_len - self.min_len + 1
-        val len = self.min_len + (rng.next() % len_range)
-
+    fn generate(self, rng: LcgRng) -> FuzzSample<text>:
+        val length_rng = lcg_advance(rng)
+        val width = (self.max_len as i64) - (self.min_len as i64) + 1
+        val length = (self.min_len as i64) + (lcg_value(length_rng) % width)
+        var current_rng = length_rng
         var result = ""
-        for _ in 0..len:
-            # Printable ASCII (32-126)
-            val ch_code = 32 + (rng.next() % 95)
-            val ch = String.from_char_code(ch_code)
-            result = result + ch
-
-        result
+        for _ in 0..length:
+            current_rng = lcg_advance(current_rng)
+            val code = 32 + (lcg_value(current_rng) % 95)
+            result = result + char_from_code(code)
+        FuzzSample(value: result, next_rng: current_rng)
 
 # Boolean generator
 struct BoolGen:
-    fn generate(rng: random.RandomState) -> bool:
-        (rng.next() % 2) == 1
+    fn generate(rng: LcgRng) -> FuzzSample<bool>:
+        val next_rng = lcg_advance(rng)
+        FuzzSample(value: (lcg_value(next_rng) % 2) == 1, next_rng: next_rng)
 
 # List generator
-struct ListGen:
-    item_gen: any  # Generator for items
+struct ListGen<T>:
+    item_gen: FuzzGenerator<T>
     min_len: i32
     max_len: i32
 
-    fn generate(self, rng: random.RandomState) -> List:
-        val len_range = self.max_len - self.min_len + 1
-        val len = self.min_len + (rng.next() % len_range)
+    fn generate(self, rng: LcgRng) -> FuzzSample<[T]>:
+        val length_rng = lcg_advance(rng)
+        val width = (self.max_len as i64) - (self.min_len as i64) + 1
+        val length = (self.min_len as i64) + (lcg_value(length_rng) % width)
+        var current_rng = length_rng
+        var result: [T] = []
+        for _ in 0..length:
+            val item = self.item_gen.generate(current_rng)
+            result.append(item.value)
+            current_rng = item.next_rng
+        FuzzSample(value: result, next_rng: current_rng)
 
-        var result = []
-        for _ in 0..len:
-            val item = self.item_gen.generate(rng)
-            result.append(item)
+# Explicit adapters also keep directly constructed generator configurations usable.
+impl IntGen:
+    fn as_generator() -> FuzzGenerator<i32>:
+        val config = self
+        val sample = fn(rng: LcgRng) -> FuzzSample<i32>:
+            config.generate(rng)
+        FuzzGenerator(sample: sample)
 
-        result
+impl TextGen:
+    fn as_generator() -> FuzzGenerator<text>:
+        val config = self
+        val sample = fn(rng: LcgRng) -> FuzzSample<text>:
+            config.generate(rng)
+        FuzzGenerator(sample: sample)
+
+impl BoolGen:
+    fn as_generator() -> FuzzGenerator<bool>:
+        val sample = fn(rng: LcgRng) -> FuzzSample<bool>:
+            BoolGen.generate(rng)
+        FuzzGenerator(sample: sample)
+
+impl ListGen<T>:
+    fn as_generator() -> FuzzGenerator<[T]>:
+        val config = self
+        val sample = fn(rng: LcgRng) -> FuzzSample<[T]>:
+            config.generate(rng)
+        FuzzGenerator(sample: sample)
 
 # ============================================================================
 # Fuzzing Results
@@ -73,10 +115,9 @@ enum FuzzResult:
 # Main Fuzzing API
 # ============================================================================
 
-# reason: stdlib primitive boundary — changing signature breaks all callers and native SFFI
-pub fn fuzz(
-    property: fn(any) -> bool,
-    generator: any,
+pub fn fuzz<T>(
+    property: fn(T) -> bool,
+    generator: FuzzGenerator<T>,
     iterations: i32
 ) -> FuzzResult:
     """
@@ -98,56 +139,56 @@ pub fn fuzz(
         val gen = fuzz.list(fuzz.int(-100, 100), 0, 20)
         val result = fuzz.fuzz(prop_reverse, gen, 100)
     """
-    # Create RNG with time-based seed
-    val rng = random.RandomState.new(
-        (random.rt_time_now_seconds() * 1000000.0) as i32
-    )
+    fuzz_seeded(property, generator, iterations, time_now_unix_micros())
 
+pub fn fuzz_seeded<T>(
+    property: fn(T) -> bool,
+    generator: FuzzGenerator<T>,
+    iterations: i32,
+    seed: i64
+) -> FuzzResult:
+    """Run repeatable fuzzing with an independent explicit-state seed."""
+    var rng = lcg_rng(seed)
     for i in 0..iterations:
-        val input = generator.generate(rng)
-
-        val passed = property(input)
-        if not passed:
+        val sample = generator.generate(rng)
+        rng = sample.next_rng
+        if not property(sample.value):
             return FuzzResult.Fail(
-                input: input.to_string(),
+                input: "{sample.value}",
                 error: "Property returned false",
                 iteration: i + 1
             )
-
     FuzzResult.Pass(iterations: iterations)
 
 # ============================================================================
 # Convenience Constructors
 # ============================================================================
 
-# reason: stdlib primitive boundary — changing signature breaks all callers and native SFFI
-pub fn int(min: i32, max: i32) -> IntGen:
+pub fn int(min: i32, max: i32) -> FuzzGenerator<i32>:
     """Create integer generator.
 
     Example:
         val gen = fuzz.int(-100, 100)
     """
-    IntGen(min: min, max: max)
+    IntGen(min: min, max: max).as_generator()
 
-# reason: stdlib primitive boundary — changing signature breaks all callers and native SFFI
-pub fn text(min_len: i32, max_len: i32) -> TextGen:
+pub fn text(min_len: i32, max_len: i32) -> FuzzGenerator<text>:
     """Create text generator.
 
     Example:
         val gen = fuzz.text(0, 50)
     """
-    TextGen(min_len: min_len, max_len: max_len)
+    TextGen(min_len: min_len, max_len: max_len).as_generator()
 
-pub fn bool() -> BoolGen:
+pub fn bool() -> FuzzGenerator<bool>:
     """Create boolean generator.
 
     Example:
         val gen = fuzz.bool()
     """
-    BoolGen()
+    BoolGen().as_generator()
 
-# reason: stdlib primitive boundary — changing signature breaks all callers and native SFFI
-pub fn list(item_gen: any, min_len: i32, max_len: i32) -> ListGen:
+pub fn list<T>(item_gen: FuzzGenerator<T>, min_len: i32, max_len: i32) -> FuzzGenerator<[T]>:
     """Create list generator.
 
     Example:
@@ -157,7 +198,7 @@ pub fn list(item_gen: any, min_len: i32, max_len: i32) -> ListGen:
         item_gen: item_gen,
         min_len: min_len,
         max_len: max_len
-    )
+    ).as_generator()
 
 # ============================================================================
 # Result Helpers

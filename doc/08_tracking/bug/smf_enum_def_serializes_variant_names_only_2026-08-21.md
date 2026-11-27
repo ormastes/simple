@@ -134,3 +134,10 @@ those two without the writer produces exactly the failure mode the record's
 point 3 warns about — a reader that expects fields no writer emits — which is
 worse than the current honest lossiness. Deliberately left OPEN and
 untouched; needs to be picked up by a lane that owns 80.driver, as one change.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+deliberately NOT implemented in the filing lane; four properties pinned at parser/MIR boundaries. Owner: SMF wire-format lane.

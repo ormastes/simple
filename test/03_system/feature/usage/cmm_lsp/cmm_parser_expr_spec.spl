@@ -1,38 +1,116 @@
-# @cover src/lib/common/parser/parser_expr.spl 0%
-"""
-# CMM Expression Parser Specification
+# Feature CMM-EXPR: production AST assertions, with every historical scenario retained.
+use std.spec
+use app.cmm_lsp.cmm_parser_source.{parse_cmm_source}
+use app.cmm_lsp.cmm_ast.{CmmProgram, CmmStmt, CmmExpr, CmmLiteral, CmmBinOp, CmmUnaryOp}
 
-**Feature ID:** #CMM-EXPR
-**Category:** Tooling
-**Status:** Implemented
-"""
-#
-# ## Overview
-#
-# Tests for the CMM (PRACTICE Script) expression parser. Validates parsing
-# of all expression types: arithmetic, comparison, logical, bitwise, shift,
-# range, unary, function calls, macro references, address expressions,
-# parenthesized/braced expressions, and operator precedence.
-#
-# Expressions appear as command parameters, macro assignment RHS values,
-# and control-flow conditions.
-#
-# Interpreter mode: it block bodies don't execute. Tests verify that
-# all CMM expression parser concepts are structurally valid Simple code
-# that loads without errors.
+fn expr_spec_binary_name(op: CmmBinOp) -> text:
+    match op:
+        case CmmBinOp.Add: "Add"
+        case CmmBinOp.Sub: "Sub"
+        case CmmBinOp.Mul: "Mul"
+        case CmmBinOp.Div: "Div"
+        case CmmBinOp.Mod: "Mod"
+        case CmmBinOp.Shl: "Shl"
+        case CmmBinOp.Shr: "Shr"
+        case CmmBinOp.Eq: "Eq"
+        case CmmBinOp.NotEq: "NotEq"
+        case CmmBinOp.Lt: "Lt"
+        case CmmBinOp.Gt: "Gt"
+        case CmmBinOp.LtEq: "LtEq"
+        case CmmBinOp.GtEq: "GtEq"
+        case CmmBinOp.BitAnd: "BitAnd"
+        case CmmBinOp.BitXor: "BitXor"
+        case CmmBinOp.BitOr: "BitOr"
+        case CmmBinOp.LogAnd: "LogAnd"
+        case CmmBinOp.LogXor: "LogXor"
+        case CmmBinOp.LogOr: "LogOr"
+        case CmmBinOp.RangeTo: "RangeTo"
+        case CmmBinOp.RangeOffset: "RangeOffset"
+        case CmmBinOp.RangeDots: "RangeDots"
+        case CmmBinOp.Concat: "Concat"
 
-# tag: ["only-compiled"]
-# Imports require compiled mode (directory name starts with digit)
-# use examples.10_tooling.trace32_tools.cmm_lsp.cmm_parser.{parse_cmm_source}
-# use examples.10_tooling.trace32_tools.cmm_lsp.cmm_ast.{CmmProgram, CmmStmt, CmmExpr, CmmBinOp, CmmUnaryOp}
+fn expr_spec_unary_name(op: CmmUnaryOp) -> text:
+    match op:
+        case CmmUnaryOp.Neg: "Neg"
+        case CmmUnaryOp.BitNot: "BitNot"
+        case CmmUnaryOp.LogNot: "LogNot"
 
-# Stubs for interpreter mode (test bodies only run in compiled mode)
-struct CmmProgram:
-    errors: [text]
-    statements: [text]
-    file_path: text
-fn parse_cmm_source(source: text) -> CmmProgram:
-    CmmProgram(errors: [], statements: [], file_path: "")
+fn expr_spec_literal_name(value: CmmLiteral) -> text:
+    match value:
+        case CmmLiteral.HexInt(_): "HexInt"
+        case CmmLiteral.BinInt(_): "BinInt"
+        case CmmLiteral.DecInt(_): "DecInt"
+        case CmmLiteral.Float(_): "Float"
+        case CmmLiteral.PlainInt(_): "PlainInt"
+        case CmmLiteral.HexMask(_): "HexMask"
+        case CmmLiteral.BinMask(_): "BinMask"
+        case CmmLiteral.Time(_): "Time"
+        case CmmLiteral.Str(_): "Str"
+        case CmmLiteral.Char(_): "Char"
+        case CmmLiteral.BoolTrue: "BoolTrue"
+        case CmmLiteral.BoolFalse: "BoolFalse"
+
+fn expr_spec_shape(expr: CmmExpr) -> text:
+    match expr:
+        case CmmExpr.Lit(value): expr_spec_literal_name(value)
+        case CmmExpr.MacroRef(_): "MacroRef"
+        case CmmExpr.MacroRecRef(_): "MacroRecRef"
+        case CmmExpr.FunctionCall(name, args):
+            var shapes: [text] = []
+            for arg in args: shapes = shapes.push(expr_spec_shape(arg))
+            "Call(" + name + "," + shapes.join(",") + ")"
+        case CmmExpr.Binary(op, lhs, rhs): expr_spec_binary_name(op) + "(" + expr_spec_shape(lhs) + "," + expr_spec_shape(rhs) + ")"
+        case CmmExpr.Unary(op, value): expr_spec_unary_name(op) + "(" + expr_spec_shape(value) + ")"
+        case CmmExpr.Address(access, value): "Address(" + access + "," + expr_spec_shape(value) + ")"
+        case CmmExpr.Parenthesized(value): "Group(" + expr_spec_shape(value) + ")"
+        case CmmExpr.Braced(value): "Braced(" + expr_spec_shape(value) + ")"
+        case CmmExpr.Ident(_): "Ident"
+        case CmmExpr.DotPath(_): "DotPath"
+        case CmmExpr.FileChannel(_): "FileChannel"
+        case CmmExpr.OptionFlag(_): "OptionFlag"
+        case CmmExpr.MacroExpand(_, value): "MacroExpand(" + expr_spec_shape(value) + ")"
+        case CmmExpr.ExprEmpty: "Empty"
+
+fn expr_spec_program_expressions(program: CmmProgram) -> [CmmExpr]:
+    var expressions: [CmmExpr] = []
+    for statement in program.statements:
+        match statement:
+            case CmmStmt.MacroAssign(_, value, _): expressions = expressions.push(value)
+            case CmmStmt.MacroRecAssign(_, value, _): expressions = expressions.push(value)
+            case CmmStmt.IfElse(condition, _, _, _): expressions = expressions.push(condition)
+            case CmmStmt.WhileLoop(condition, _, _): expressions = expressions.push(condition)
+            case CmmStmt.Command(_, args, _):
+                for arg in args: expressions = expressions.push(arg)
+            case CmmStmt.PrintStmt(args, _):
+                for arg in args: expressions = expressions.push(arg)
+            case CmmStmt.OpenFile(channel, file, _, _):
+                expressions = expressions.push(channel)
+                expressions = expressions.push(file)
+            case CmmStmt.WriteFile(channel, args, _):
+                expressions = expressions.push(channel)
+                for arg in args: expressions = expressions.push(arg)
+            case CmmStmt.ReadFile(channel, _, _): expressions = expressions.push(channel)
+            case _: ()
+    expressions
+
+fn expr_spec_has_shape(program: CmmProgram, expected: text) -> bool:
+    for expr in expr_spec_program_expressions(program):
+        if expr_spec_shape(expr).starts_with(expected): return true
+    false
+
+fn expr_spec_has_option(program: CmmProgram, expected: text) -> bool:
+    for statement in program.statements:
+        match statement:
+            case CmmStmt.OpenFile(_, _, mode, _):
+                if mode == expected: return true
+            case CmmStmt.Command(_, args, _):
+                for arg in args:
+                    match arg:
+                        case CmmExpr.OptionFlag(value):
+                            if value == expected: return true
+                        case _: ()
+            case _: ()
+    false
 
 # ============================================================================
 # Test Group 1: Arithmetic Expressions
@@ -40,38 +118,59 @@ fn parse_cmm_source(source: text) -> CmmProgram:
 
 describe "CMM Expression Parser - Arithmetic":
     it "parses addition":
+        step("parses addition through the real expression parser")
         val source = "  &x=1+2\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Add(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses subtraction":
+        step("parses subtraction through the real expression parser")
         val source = "  &x=10-3\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Sub(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses multiplication":
+        step("parses multiplication through the real expression parser")
         val source = "  &x=4*5\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Mul(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses division":
+        step("parses division through the real expression parser")
         val source = "  &x=100/10\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Div(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses modulo":
+        step("parses modulo through the real expression parser")
         val source = "  &x=17%5\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Mod(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses chained addition":
+        step("parses chained addition through the real expression parser")
         val source = "  &x=1+2+3\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Add(Add(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses mixed arithmetic":
+        step("parses mixed arithmetic through the real expression parser")
         val source = "  &x=1+2*3\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Add(PlainInt,Mul(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
 # ============================================================================
@@ -80,33 +179,51 @@ describe "CMM Expression Parser - Arithmetic":
 
 describe "CMM Expression Parser - Comparison":
     it "parses equality":
+        step("parses equality through the real expression parser")
         val source = "  IF &x==0x1000\n    Step\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Eq(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses not-equal":
+        step("parses not-equal through the real expression parser")
         val source = "  IF &x!=0\n    Step\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "NotEq(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses less-than":
+        step("parses less-than through the real expression parser")
         val source = "  IF &count<10\n    Step\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Lt(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses greater-than":
+        step("parses greater-than through the real expression parser")
         val source = "  IF &addr>0xFFFF\n    Step\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Gt(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses less-than-or-equal":
+        step("parses less-than-or-equal through the real expression parser")
         val source = "  IF &i<=100.\n    Step\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "LtEq(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses greater-than-or-equal":
+        step("parses greater-than-or-equal through the real expression parser")
         val source = "  IF &addr>=0x1000\n    Step\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "GtEq(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
 # ============================================================================
@@ -115,18 +232,27 @@ describe "CMM Expression Parser - Comparison":
 
 describe "CMM Expression Parser - Logical":
     it "parses logical AND":
+        step("parses logical AND through the real expression parser")
         val source = "  IF &a&&(&b)\n    Step\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "LogAnd(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses logical OR":
+        step("parses logical OR through the real expression parser")
         val source = "  IF &a||&b\n    Step\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "LogOr(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses logical XOR":
+        step("parses logical XOR through the real expression parser")
         val source = "  IF &a^^&b\n    Step\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "LogXor(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
 # ============================================================================
@@ -135,18 +261,27 @@ describe "CMM Expression Parser - Logical":
 
 describe "CMM Expression Parser - Bitwise":
     it "parses bitwise AND":
+        step("parses bitwise AND through the real expression parser")
         val source = "  &mask=&value&0xFF\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "BitAnd(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses bitwise OR":
+        step("parses bitwise OR through the real expression parser")
         val source = "  &flags=&a|&b\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "BitOr(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses bitwise XOR":
+        step("parses bitwise XOR through the real expression parser")
         val source = "  &toggle=&x^0xFF\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "BitXor(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
 # ============================================================================
@@ -155,13 +290,19 @@ describe "CMM Expression Parser - Bitwise":
 
 describe "CMM Expression Parser - Shift":
     it "parses shift left":
+        step("parses shift left through the real expression parser")
         val source = "  &x=1<<4\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Shl(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses shift right":
+        step("parses shift right through the real expression parser")
         val source = "  &x=0xFF00>>8\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Shr(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
 # ============================================================================
@@ -170,55 +311,80 @@ describe "CMM Expression Parser - Shift":
 
 describe "CMM Expression Parser - Unary":
     it "parses unary minus":
+        step("parses unary minus through the real expression parser")
         val source = "  &x=-1\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Neg(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses bitwise NOT":
+        step("parses bitwise NOT through the real expression parser")
         val source = "  &x=~0xFF\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "BitNot(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses logical NOT":
+        step("parses logical NOT through the real expression parser")
         val source = "  IF !&flag\n    Step\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "LogNot(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses double unary minus":
+        step("Preserve the original compact nested-negation requirement with a real AST assertion")
+        # Open grammar issue: cmm_prefix_range_token_unary_negation_2026_10_26.
+        # The lexer currently reserves -- as RangeTo; do not turn this original
+        # positive scenario into a green negative test without a grammar decision.
         val source = "  &x=--1\n"
         val program = parse_cmm_source(source)
-        # Note: -- is the RangeTo operator, so this may parse differently
-        # The parser should handle it without crashing
-        expect(program.errors.len()).to_be_greater_than(-1)
+        expect(program.errors.len()).to_equal(0)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Neg(Neg(PlainInt))")).to_equal(true)
 
-# ============================================================================
-# Test Group 7: Range Expressions
-# ============================================================================
 
 describe "CMM Expression Parser - Ranges":
     it "parses range-to expression":
+        step("parses range-to expression through the real expression parser")
         val source = "  Data.dump 0x1000--0x1FFF\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "RangeTo(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses range-offset expression":
+        step("parses range-offset expression through the real expression parser")
         val source = "  Data.dump 0x1000++0xFF\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "RangeOffset(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses range-dots expression":
+        step("parses range-dots expression through the real expression parser")
         val source = "  Data.dump 0x1000..0x1FFF\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "RangeDots(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses range with hex endpoints":
+        step("parses range with hex endpoints through the real expression parser")
         val source = "  FLASH.Create 1. 0x0--0xFFF\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "RangeTo(HexInt,HexInt)")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses range with decimal endpoints":
+        step("parses range with decimal endpoints through the real expression parser")
         val source = "  Data.dump 100.--200.\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "RangeTo(DecInt,DecInt)")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
 # ============================================================================
@@ -227,43 +393,67 @@ describe "CMM Expression Parser - Ranges":
 
 describe "CMM Expression Parser - Function Calls":
     it "parses Register function":
+        step("parses Register function through the real expression parser")
         val source = "  &pc=Register(PC)\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Call(Register,")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses CPU function":
+        step("parses CPU function through the real expression parser")
         val source = "  &cpu=CPU()\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Call(CPU,")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses TRUE function":
+        step("parses TRUE function through the real expression parser")
         val source = "  WHILE TRUE()\n    Step\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "BoolTrue")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses FALSE function":
+        step("parses FALSE function through the real expression parser")
         val source = "  IF FALSE()\n    Step\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "BoolFalse")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses dot-path function call":
+        step("parses dot-path function call through the real expression parser")
         val source = "  &upper=STRing.UPpeR(\"hello\")\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Call(STRing.UPpeR,")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses function with multiple arguments":
+        step("parses function with multiple arguments through the real expression parser")
         val source = "  &result=FORMAT.DECIMAL(0, 10)\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Call(FORMAT.DECIMAL,PlainInt,PlainInt)")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses function with macro argument":
+        step("parses function with macro argument through the real expression parser")
         val source = "  &len=STRing.LENgth(&name)\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Call(STRing.LENgth,MacroRef)")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses nested function calls":
+        step("parses nested function calls through the real expression parser")
         val source = "  &x=Register(Register(PC))\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Call(Register,Call(Register,Ident))")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
 # ============================================================================
@@ -272,21 +462,30 @@ describe "CMM Expression Parser - Function Calls":
 
 describe "CMM Expression Parser - Grouping":
     it "parses parenthesized expression":
+        step("parses parenthesized expression through the real expression parser")
         val source = "  &x=(1+2)*3\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Mul(Group(Add(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses nested parentheses":
+        step("parses nested parentheses through the real expression parser")
         val source = "  &x=((1+2))\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Group(Group(Add(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses braced expression for constant conversion":
+        step("parses braced expression for constant conversion through the real expression parser")
         # {expr} in CMM freezes value to a constant
         val lbrace = "{"
         val rbrace = "}"
         val source = "  Data.dump " + lbrace + "&start" + rbrace + "--" + lbrace + "&end" + rbrace + "\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "RangeTo(Braced(MacroRef),Braced(MacroRef))")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
 # ============================================================================
@@ -295,53 +494,83 @@ describe "CMM Expression Parser - Grouping":
 
 describe "CMM Expression Parser - Literals":
     it "parses hex literal in assignment":
+        step("parses hex literal in assignment through the real expression parser")
         val source = "  &addr=0xDEADBEEF\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "HexInt")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses binary literal in assignment":
+        step("parses binary literal in assignment through the real expression parser")
         val source = "  &mask=0y11001100\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "BinInt")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses decimal literal in assignment":
+        step("parses decimal literal in assignment through the real expression parser")
         val source = "  &count=100.\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "DecInt")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses float literal in assignment":
+        step("parses float literal in assignment through the real expression parser")
         val source = "  &delay=1.5\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Float")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses plain integer in assignment":
+        step("parses plain integer in assignment through the real expression parser")
         val source = "  &count=42\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "PlainInt")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses string literal in assignment":
+        step("parses string literal in assignment through the real expression parser")
         val source = "  &name=\"test\"\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Str")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses char literal in assignment":
+        step("parses char literal in assignment through the real expression parser")
         val source = "  &ch='A'\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Char")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses time literal in assignment":
+        step("parses time literal in assignment through the real expression parser")
         val source = "  &timeout=10ms\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Time")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses hex mask literal in assignment":
+        step("parses hex mask literal in assignment through the real expression parser")
         val source = "  &pattern=0xFFXX\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "HexMask")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses binary mask literal in assignment":
+        step("parses binary mask literal in assignment through the real expression parser")
         val source = "  &pattern=0yXX11\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "BinMask")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
 # ============================================================================
@@ -350,23 +579,35 @@ describe "CMM Expression Parser - Literals":
 
 describe "CMM Expression Parser - Macro Refs":
     it "parses simple macro ref as expression":
+        step("parses simple macro ref as expression through the real expression parser")
         val source = "  PRINT &myvar\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "MacroRef")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses recursive macro ref as expression":
+        step("parses recursive macro ref as expression through the real expression parser")
         val source = "  PRINT &&indirect\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "MacroRecRef")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses macro in arithmetic":
+        step("parses macro in arithmetic through the real expression parser")
         val source = "  &result=&a+&b\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Add(MacroRef,MacroRef)")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses macro in comparison":
+        step("parses macro in comparison through the real expression parser")
         val source = "  IF &count==&max\n    Step\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Eq(MacroRef,MacroRef)")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
 # ============================================================================
@@ -375,13 +616,19 @@ describe "CMM Expression Parser - Macro Refs":
 
 describe "CMM Expression Parser - Address":
     it "parses data access class address":
+        step("parses data access class address through the real expression parser")
         val source = "  Data.dump D:0x1000\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Address(D,")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses program access class address":
+        step("parses program access class address through the real expression parser")
         val source = "  Break.Set P:main\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Address(P,")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
 # ============================================================================
@@ -390,13 +637,19 @@ describe "CMM Expression Parser - Address":
 
 describe "CMM Expression Parser - Option Flags":
     it "parses option flag as expression":
+        step("parses option flag as expression through the real expression parser")
         val source = "  OPEN #1 \"file.txt\" /Write\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_option(program, "Write")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses multiple option flags":
+        step("parses multiple option flags through the real expression parser")
         val source = "  Data.LOAD.auto \"prog.elf\" /NoCODE\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_option(program, "NoCODE")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
 # ============================================================================
@@ -405,13 +658,19 @@ describe "CMM Expression Parser - Option Flags":
 
 describe "CMM Expression Parser - File Channels":
     it "parses file channel in expression":
+        step("parses file channel in expression through the real expression parser")
         val source = "  WRITE #1 \"data\"\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "FileChannel")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses file channel number 2":
+        step("parses file channel number 2 through the real expression parser")
         val source = "  READ #2 &line\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "FileChannel")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
 # ============================================================================
@@ -420,13 +679,19 @@ describe "CMM Expression Parser - File Channels":
 
 describe "CMM Expression Parser - Dot Paths":
     it "parses dot path as expression":
+        step("parses dot path as expression through the real expression parser")
         val source = "  PRINT Data.Byte(0x1000)\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Call(Data.Byte,")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses SYStem.state as expression":
+        step("parses SYStem.state as expression through the real expression parser")
         val source = "  IF SYStem.state()==0\n    Step\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Eq(Call(SYStem.state,")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
 # ============================================================================
@@ -435,36 +700,66 @@ describe "CMM Expression Parser - Dot Paths":
 
 describe "CMM Expression Parser - Precedence":
     it "multiplication has higher precedence than addition":
+        step("multiplication has higher precedence than addition through the real expression parser")
         # 1 + 2 * 3 should parse as 1 + (2 * 3)
         val source = "  &x=1+2*3\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        val expressions = expr_spec_program_expressions(program)
+        expect(expressions.len()).to_equal(1)
+        expect(expr_spec_shape(expressions[0])).to_equal("Add(PlainInt,Mul(PlainInt,PlainInt))")
         expect(program.errors.len()).to_equal(0)
 
     it "comparison has lower precedence than addition":
+        step("comparison has lower precedence than addition through the real expression parser")
         # &a + 1 == &b + 2 should parse as (&a + 1) == (&b + 2)
         val source = "  IF &a+1==&b+2\n    Step\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        val expressions = expr_spec_program_expressions(program)
+        expect(expressions.len()).to_equal(1)
+        expect(expr_spec_shape(expressions[0])).to_equal("Eq(Add(MacroRef,PlainInt),Add(MacroRef,PlainInt))")
         expect(program.errors.len()).to_equal(0)
 
     it "logical AND has lower precedence than comparison":
+        step("logical AND has lower precedence than comparison through the real expression parser")
         # &a == 1 && &b == 2 should parse as (&a == 1) && (&b == 2)
         val source = "  IF &a==1&&(&b==2)\n    Step\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        val expressions = expr_spec_program_expressions(program)
+        expect(expressions.len()).to_equal(1)
+        expect(expr_spec_shape(expressions[0])).to_equal("LogAnd(Eq(MacroRef,PlainInt),Group(Eq(MacroRef,PlainInt)))")
         expect(program.errors.len()).to_equal(0)
 
     it "logical OR has lower precedence than logical AND":
+        step("logical OR has lower precedence than logical AND through the real expression parser")
         val source = "  IF &a&&(&b)||&c\n    Step\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        val expressions = expr_spec_program_expressions(program)
+        expect(expressions.len()).to_equal(1)
+        expect(expr_spec_shape(expressions[0])).to_equal("LogOr(LogAnd(MacroRef,Group(MacroRef)),MacroRef)")
         expect(program.errors.len()).to_equal(0)
 
     it "shift has higher precedence than addition":
+        step("shift has higher precedence than addition through the real expression parser")
         val source = "  &x=&a<<2+1\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        val expressions = expr_spec_program_expressions(program)
+        expect(expressions.len()).to_equal(1)
+        expect(expr_spec_shape(expressions[0])).to_equal("Add(Shl(MacroRef,PlainInt),PlainInt)")
         expect(program.errors.len()).to_equal(0)
 
     it "parentheses override precedence":
+        step("parentheses override precedence through the real expression parser")
         val source = "  &x=(1+2)*3\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        val expressions = expr_spec_program_expressions(program)
+        expect(expressions.len()).to_equal(1)
+        expect(expr_spec_shape(expressions[0])).to_equal("Mul(Group(Add(PlainInt,PlainInt)),PlainInt)")
         expect(program.errors.len()).to_equal(0)
 
 # ============================================================================
@@ -473,30 +768,45 @@ describe "CMM Expression Parser - Precedence":
 
 describe "CMM Expression Parser - Complex":
     it "parses complex arithmetic with macros":
+        step("parses complex arithmetic with macros through the real expression parser")
         val source = "  &total=&a*&b+&c/&d\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Add(Mul(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses function call result in arithmetic":
+        step("parses function call result in arithmetic through the real expression parser")
         val source = "  &next=Register(PC)+4\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Add(Call(Register,")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses braced subexpression in range":
+        step("parses braced subexpression in range through the real expression parser")
         val lbrace = "{"
         val rbrace = "}"
         val source = "  Data.dump " + lbrace + "&base" + rbrace + "--" + lbrace + "&base+0xFF" + rbrace + "\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "RangeTo(Braced(MacroRef),Braced(Add(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses comparison with hex in IF":
+        step("parses comparison with hex in IF through the real expression parser")
         val source = "  IF Register(PC)==0xDEAD\n    PRINT \"found\"\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Eq(Call(Register,")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses string concat with plus":
+        step("parses string concat with plus through the real expression parser")
         val source = "  &msg=\"hello\"+\" \"+\"world\"\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Add(Add(Str,Str),Str)")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
 # ============================================================================
@@ -505,18 +815,27 @@ describe "CMM Expression Parser - Complex":
 
 describe "CMM Expression Parser - Classic Operators":
     it "parses classic AND in expression":
+        step("parses classic AND in expression through the real expression parser")
         val source = "  &x=&a:A:&b\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "BitAnd(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses classic OR in expression":
+        step("parses classic OR in expression through the real expression parser")
         val source = "  &x=&a:O:&b\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "BitOr(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses classic XOR in expression":
+        step("parses classic XOR in expression through the real expression parser")
         val source = "  &x=&a:X:&b\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "BitXor(")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
 # ============================================================================
@@ -525,16 +844,25 @@ describe "CMM Expression Parser - Classic Operators":
 
 describe "CMM Expression Parser - Identifiers":
     it "parses bare identifier as command parameter":
+        step("parses bare identifier as command parameter through the real expression parser")
         val source = "  SYStem.CPU ARM\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Ident")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses multiple bare identifiers as parameters":
+        step("parses multiple bare identifiers as parameters through the real expression parser")
         val source = "  SYStem.CONFIG CoreNumber 2\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Ident")).to_equal(true)
         expect(program.errors.len()).to_equal(0)
 
     it "parses identifier in register call":
+        step("parses identifier in register call through the real expression parser")
         val source = "  &val=Register(SP)\n"
         val program = parse_cmm_source(source)
+        expect(program.statements.len()).to_be_greater_than(0)
+        expect(expr_spec_has_shape(program, "Call(Register,Ident)")).to_equal(true)
         expect(program.errors.len()).to_equal(0)

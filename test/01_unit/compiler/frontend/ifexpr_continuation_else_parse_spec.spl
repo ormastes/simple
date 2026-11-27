@@ -1,0 +1,94 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+# @cover src/compiler/10.frontend/core/parser_stmts.spl
+#
+# Regression for bug stage2_ifexpr_continuation_else_parse_2026_11_01: a
+# continued if-expression whose value and `else:` share the continuation line
+#     val v = if c:
+#         m[k] else: ""
+# must parse and lower with zero errors in the current pure-Simple frontend.
+# The frozen stage2 rejected it ("unexpected token in expression: ':'").
+#
+# HARNESS NOTE: the parse_full_frontend -> HirLowering -> lower_module pipeline
+# is inlined in every `it` block on purpose (see float_primitive_cast_spec.spl).
+#
+# tag: unit
+
+use std.spec
+use std.spec.step
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+use compiler.core.parser.{parser_error_count}
+
+
+describe "continued if-expression with trailing else parses":
+    it "index value then else on one continuation line lowers with zero errors":
+        # @req REQ-SSPEC-COMPILER
+        step("index value then else on one continuation line lowers with zero errors")
+        val src = "fn pick(m: Dict<text, text>, k: text) -> text:\n" +
+            "    val v = if m.contains_key(k):\n" +
+            "        m[k] else: \"\"\n" +
+            "    v\n"
+        val parsed = parse_full_frontend(src, "testdata/ifexpr_cont_index.spl", "ifexpr_cont_index", Logger(level: 0))
+        expect(parser_error_count()).to_equal(0)
+        var hl = HirLowering.with_filename("testdata/ifexpr_cont_index.spl")
+        val hir = hl.lower_module(parsed)
+
+        expect(hl.errors.len()).to_equal(0)
+        var found = false
+        for function_ in hir.functions.values():
+            if function_.name == "pick":
+                found = true
+        expect(found).to_equal(true)
+
+    it "field-chain value then else on one continuation line lowers with zero errors":
+        # @req REQ-SSPEC-COMPILER
+        step("field-chain value then else on one continuation line lowers with zero errors")
+        val src = "struct F:\n" +
+            "    content_hash: text\n" +
+            "fn pick(m: Dict<text, F>, k: text) -> text:\n" +
+            "    val v = if m.contains_key(k):\n" +
+            "        m[k].content_hash else: \"\"\n" +
+            "    v\n"
+        val parsed = parse_full_frontend(src, "testdata/ifexpr_cont_field.spl", "ifexpr_cont_field", Logger(level: 0))
+        expect(parser_error_count()).to_equal(0)
+        var hl = HirLowering.with_filename("testdata/ifexpr_cont_field.spl")
+        val hir = hl.lower_module(parsed)
+
+        expect(hl.errors.len()).to_equal(0)
+        var found = false
+        for function_ in hir.functions.values():
+            if function_.name == "pick":
+                found = true
+        expect(found).to_equal(true)
+
+    it "elif and else trailing the value on one continuation line lower with zero errors":
+        # @req REQ-SSPEC-COMPILER
+        step("elif and else trailing the value on one continuation line lower with zero errors")
+        val src = "fn pick(a: bool, b: bool) -> i64:\n" +
+            "    val v = if a:\n" +
+            "        1 elif b: 2 else: 3\n" +
+            "    v\n" +
+            "fn after() -> i64:\n" +
+            "    7\n"
+        val parsed = parse_full_frontend(src, "testdata/ifexpr_cont_elif.spl", "ifexpr_cont_elif", Logger(level: 0))
+        expect(parser_error_count()).to_equal(0)
+        var hl = HirLowering.with_filename("testdata/ifexpr_cont_elif.spl")
+        val hir = hl.lower_module(parsed)
+
+        expect(hl.errors.len()).to_equal(0)
+        expect(hir.functions.len()).to_equal(2)
+
+    it "a malformed then-value still reports a parse error":
+        # @req REQ-SSPEC-COMPILER
+        step("a malformed then-value still reports a parse error")
+        val src = "fn pick(k: text) -> text:\n" +
+            "    val v = if k:\n" +
+            "        ) else: \"\"\n" +
+            "    v\n"
+        val parsed = parse_full_frontend(src, "testdata/ifexpr_cont_bad.spl", "ifexpr_cont_bad", Logger(level: 0))
+        expect(parser_error_count()).to_be_greater_than(0)

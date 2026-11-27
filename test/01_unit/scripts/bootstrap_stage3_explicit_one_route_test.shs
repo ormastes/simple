@@ -1,0 +1,38 @@
+#!/bin/sh
+# Execute the production jobs translation and its child policy: an explicit
+# one-job resume must never inherit the legacy coordinator route.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d) || exit 2
+trap 'rm -f "$tmp/jobs.sh" "$tmp/child.sh" "$tmp/conflict.log"; rmdir "$tmp"' EXIT HUP INT TERM
+sed -n '/^  case "${jobs}" in$/,/^  esac$/p' \
+  "$root/scripts/bootstrap/bootstrap-from-scratch.sh" >"$tmp/jobs.sh"
+[ -s "$tmp/jobs.sh" ]
+cat >"$tmp/child.sh" <<'CHILD'
+set -eu
+. "$1/scripts/bootstrap/lib/stage3-direct-parallel.shs"
+bootstrap_stage3_resolve_parallel_policy
+printf '%s %s %s\n' "$bootstrap_stage3_policy_threads" \
+  "$bootstrap_stage3_policy_route" "$bootstrap_stage3_policy_fallback"
+CHILD
+resolve() (
+  unset SIMPLE_STAGE3_DIRECT_THREADS SIMPLE_NATIVE_BUILD_THREADS
+  jobs=$1
+  if [ -n "$2" ]; then
+    SIMPLE_NATIVE_BUILD_THREADS=$2
+    export SIMPLE_NATIVE_BUILD_THREADS
+  fi
+  . "$tmp/jobs.sh"
+  # A fresh shell checks the real exec boundary, including export semantics.
+  sh "$tmp/child.sh" "$root"
+)
+[ "$(resolve 1 '')" = '1 direct none' ]
+[ "$(resolve 1 1)" = '1 direct none' ]
+if resolve 1 4 >"$tmp/conflict.log" 2>&1; then
+  echo 'FAIL: explicit --jobs=1 inherited a coordinator route' >&2
+  exit 1
+fi
+grep -Fq 'conflicts with SIMPLE_NATIVE_BUILD_THREADS' "$tmp/conflict.log"
+# An omitted CLI value retains the documented legacy coordinator selection.
+[ "$(resolve '' 4)" = '4 coordinator direct' ]
+echo 'PASS: explicit Stage 3 --jobs=1 remains direct across exec'

@@ -192,3 +192,27 @@ concurrent lanes and this defect's own unblock condition explicitly
 requires a completed build plus two RED specs going green, which is
 well beyond this lane's per-item budget. Leaving OPEN, no new attempt.
 
+**Revalidated 2026-11-02: still plausible because OPEN — root cause isolated; the seed-side fail-open IS now fixed in; no merged fix commit with a passing regression is cited in this doc.**
+
+## Lane note 2026-11-03 (wl01 lane)
+Deferred: frontend fail-open already fixed in source (access.rs, see re-check above). Remaining defect is in the native aggregate-return transport and cannot be measured here: both RED specs need a completed native-build --entry-closure, which aborts at parse (2 GiB alloc) on the seed. Blocker is the missing runnable producer, not analysis; no source change is justified without a measurement.
+
+## Fix 2026-11-03 (session comp-structret2) — verification pending
+
+Root cause (found by dumping the pure-Simple MIR->LLVM IR in-process): the
+function-attribute scan in `_MirToLlvm/core_codegen.spl` (`is_readonly = not
+has_store and not has_call`) ignored `Aggregate`, which lowers to `rt_alloc` plus
+word stores. A struct-constructing fn (`make`) was therefore emitted as
+`define ptr @make(i64) nounwind readonly alwaysinline` -- UB for a callee that
+allocates and writes, so LLVM may drop the field stores and the caller reads
+wrong fields. Fix: `Aggregate` now sets `has_store` and `has_call`.
+
+Spec (codegen-output, no native-build): `native_struct_return_ir_readonly_spec.spl`
+asserts the `make` define line has no `readonly`. Green with the fix; the old IR
+(with `readonly`) is the pre-fix evidence above.
+
+Verification pending: a completed `native-build --entry-closure` of the
+reproducer must print `len=3 tag=77` on both lines, and
+`native_struct_return_by_value_field_read_spec.spl` /
+`native_aggregate_return_transport_class_spec.spl` must go green (need a
+stage3/seed redeploy). Not confirmed that this is the only contributor.

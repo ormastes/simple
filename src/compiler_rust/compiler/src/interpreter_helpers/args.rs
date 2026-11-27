@@ -88,6 +88,7 @@ pub(crate) fn apply_lambda_to_vec(
             body,
             env: captured,
         } => {
+            let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
             let mut results = Vec::new();
             for item in arr {
                 let mut local_env = Env::clone(captured);

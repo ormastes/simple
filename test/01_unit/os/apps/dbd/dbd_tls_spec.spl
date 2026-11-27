@@ -378,3 +378,61 @@ describe "DBD TLS encrypted response ownership":
         expect(session.send_sequence()).to_equal(TLS_MAX_SEQUENCE_V1)
         expect(session.status).to_equal(DbdTlsSessionStatusV1.Failed)
         expect(session.server_key_length()).to_equal(0u64)
+
+# AUTHORED_UNRUN; checked send admission, not a transport execution claim.
+# @req REQ-TLS-CHECKED-SEAL-002
+describe "DBD checked seal error and sequence propagation":
+    it "rejects empty application plaintext without changing the sequence":
+        var session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        expect(session.seal_application_checked([])).to_equal(Err("dbd-tls-plaintext-invalid"))
+        expect(session.server_sequence).to_equal(0i64)
+        expect(session.status).to_equal(DbdTlsSessionStatusV1.Established)
+
+    it "rejects oversized application plaintext without changing the sequence":
+        var session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        expect(session.seal_application_checked(_bytes(1u8, 16385))).to_equal(Err("dbd-tls-plaintext-invalid"))
+        expect(session.server_sequence).to_equal(0i64)
+        expect(session.status).to_equal(DbdTlsSessionStatusV1.Established)
+
+    it "rejects a closed session without returning wire bytes":
+        var session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        session.close()
+        expect(session.seal_application_checked([1u8])).to_equal(Err("dbd-tls-session-not-established"))
+        expect(session.server_sequence).to_equal(0i64)
+        expect(session.status).to_equal(DbdTlsSessionStatusV1.Closed)
+
+    it "fails closed at sequence exhaustion without increment":
+        var session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        session.server_sequence = TLS_MAX_SEQUENCE_V1
+        expect(session.seal_application_checked([1u8])).to_equal(Err("dbd-tls-sequence-exhausted"))
+        expect(session.server_sequence).to_equal(TLS_MAX_SEQUENCE_V1)
+        expect(session.status).to_equal(DbdTlsSessionStatusV1.Failed)
+
+    it "propagates key rejection and fails the session without increment":
+        var session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        session.server_key = RecordKey(key: _bytes(0u8, 17), iv: _bytes(0u8, 12))
+        expect(session.seal_application_checked([1u8])).to_equal(Err("tls-record-key-shape-invalid"))
+        expect(session.server_sequence).to_equal(0i64)
+        expect(session.status).to_equal(DbdTlsSessionStatusV1.Failed)
+
+    it "propagates IV rejection and fails the session without increment":
+        var session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        session.server_key = RecordKey(key: _bytes(0u8, 16), iv: _bytes(0u8, 11))
+        expect(session.seal_application_checked([1u8])).to_equal(Err("tls-record-iv-shape-invalid"))
+        expect(session.server_sequence).to_equal(0i64)
+        expect(session.status).to_equal(DbdTlsSessionStatusV1.Failed)
+
+    it "propagates unsupported suite rejection before increment":
+        var session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        session.cipher_suite = 4866u16
+        expect(session.seal_application_checked([1u8])).to_equal(Err("tls-record-cipher-suite-unsupported"))
+        expect(session.server_sequence).to_equal(0i64)
+        expect(session.status).to_equal(DbdTlsSessionStatusV1.Failed)
+
+    it "commits one sequence only for a successful legacy-compatible record":
+        var session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        val plaintext: [u8] = [0u8,127u8,128u8,255u8]
+        val expected = record13_encrypt_for_suite(CIPHER_AES_128_GCM_SHA256, session.server_key, 0u64, 23u8, plaintext)
+        expect(session.seal_application_checked(plaintext)).to_equal(Ok(expected))
+        expect(session.server_sequence).to_equal(1i64)
+        expect(session.status).to_equal(DbdTlsSessionStatusV1.Established)

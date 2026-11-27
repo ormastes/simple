@@ -144,3 +144,45 @@ Per-item at `f26970e9d93`:
 
 Net: record stays OPEN (items #1 and #3 unresolved, both out of scope for a
 shard triage pass); item #4 is stale and can be dropped from future re-checks.
+
+## Re-check 2026-11-06 (work/x86-simd-bugs)
+
+Not run: this Windows host has no Vulkan ICD (GPU NVIDIA GT 705, Fermi, no
+Vulkan; no `HKLM\SOFTWARE\Khronos\Vulkan\Drivers` entries), so item #1 cannot
+be reproduced here; item #3 is a Rust-seed module-limit issue. Stays OPEN for
+#1 and #3 on a Linux lavapipe host.
+
+## Triage note 2026-11-25 (p2w2-aj)
+
+**Disposition: SKIP — items #1/#3 need a Linux Vulkan host / Rust-seed
+change; #2 and #4 re-confirmed fixed.** Code inspection on release/1.0.0
+HEAD:
+
+- **#2 (CLOSED) fix still present**: `read_pixels_with_source()` in
+  `src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl:2723` still flushes
+  pending batched compute before readback (the `_flush_pending_compute_at`
+  call with the original rationale comment), so the metal-on-vulkan /
+  directx-on-vulkan readback ordering fix holds.
+- **#4 (stale) fix still present**: `simd_kernels_spec.spl:183` reads
+  `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`, which
+  contains the `rt_engine2d_simd_fill_span_u32` dispatch string (grep
+  confirmed). Nothing further to do.
+- **#1** (Vulkan `draw_rect_filled` interior-pixel corruption) remains OPEN
+  and cannot be reproduced here: this Windows host has no usable Vulkan
+  device for the llvmpipe-class repro, and `bin/simple.exe test` fails
+  repo-wide at HEAD with `unknown decorator '@representation_boundary'`
+  (seed/source inconsistency). Needs a Linux lavapipe host.
+- **#3** (module-count-limit 800 failure under `test/01_unit/check/`) is
+  rooted in `src/compiler_rust/compiler/src/memory_guard.rs` — a Rust seed
+  change, forbidden in this lane.
+
+Record stays OPEN for #1 and #3; no code or assertion was changed.
+
+## 2026-11-27 W5-3 Host Verification (`fix-implemented-verification-pending`)
+
+- **Host verification (`SIMPLE_LIB=src`, `--mode=interpreter` on Windows)**:
+  - **#1**: `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_processing_spec.spl` (22/22 PASS — ARGB literal `0xFF111111u32` / `0xFFAABBCCu32` fix verified) and `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_demotion_recovery_spec.spl` (7/7 PASS — exact ARGB interior pixel `0xFFAABBCCu32` on host fallback verified).
+  - **#2**: `test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_compute_oracle_spec.spl` (13/13 PASS).
+  - **#3**: `test/01_unit/check/vulkan_engine2d_frame_batch_contract_spec.spl` failed 0/3 in slim sparse checkout because `src/compiler_rust/**` is sparse-excluded here (`file_read` returns empty).
+  - **#4**: `test/01_unit/lib/gpu/engine2d/simd_kernels_spec.spl` ran 50/51 PASS (1 failure in `uses the cross-mode return-array span bridge for backend fills`, reading `backend_software.spl` / sparse-excluded `src/compiler_rust`).
+- Transitioned `.sdn` shard to `fix-implemented-verification-pending` (`waiting-for: Linux Vulkan / lavapipe verification`).

@@ -1,0 +1,55 @@
+"""
+## Purpose and audience
+Purpose: Pin the OuteTTS-0.2 prompt side of slang's TTS runner: text
+normalisation (llama.cpp tts.cpp process_text / number_to_words), prompt
+assembly with the default en_male_1 speaker, and audio-code extraction from
+generated text. Audience: engineers touching runners/tts_runner.spl.
+
+## Compatibility and limitations
+Expected strings are written out by hand from tts.cpp 67b2b7f2f2d's rules;
+English only, as in tts.cpp (no romanisation).
+"""
+
+use std.spec.{describe, it, expect}
+
+use std.gc_async_mut.slang.model_executor.runners.tts_runner.{outetts_process_text, outetts_prompt, outetts_spoken_codes, outetts_word_count}
+
+fn _count(hay: text, needle: text) -> i64:
+    hay.split(needle).len() - 1
+
+describe "slang OuteTTS prompt":
+    it "normalises a sentence into separated lower-case words":
+        expect(outetts_process_text("The capital of France is Paris.")).to_equal("the<|text_sep|>capital<|text_sep|>of<|text_sep|>france<|text_sep|>is<|text_sep|>paris")
+        expect(outetts_process_text("  well-known_a/b\\c,d  ")).to_equal("well<|text_sep|>known<|text_sep|>a<|text_sep|>b<|text_sep|>c<|text_sep|>d")
+
+    it "spells numbers the way tts.cpp does":
+        expect(outetts_process_text("I have 21 cats, 3.14 pies & 1000000 dogs")).to_equal("i<|text_sep|>have<|text_sep|>twenty<|text_sep|>one<|text_sep|>cats<|text_sep|>three<|text_sep|>point<|text_sep|>one<|text_sep|>four<|text_sep|>pies<|text_sep|>one<|text_sep|>million<|text_sep|>dogs")
+        expect(outetts_process_text("105 0")).to_equal("one<|text_sep|>hundred<|text_sep|>five<|text_sep|>zero")
+        expect(outetts_process_text("x 99999999999 y")).to_equal("x<|text_sep|>y")
+
+    it "assembles the prompt around the default speaker":
+        val p = outetts_prompt("The capital of France is Paris.")
+        expect(p.starts_with("<|im_start|>\n<|text_start|>the<|text_sep|>overall<|text_sep|>")).to_equal(true)
+        expect(p.contains("looks<|text_sep|>lovely<|text_sep|>the<|text_sep|>capital<|text_sep|>of<|text_sep|>france<|text_sep|>is<|text_sep|>paris<|text_end|>\n<|audio_start|>\nthe<|t_0.08|><|code_start|><|257|><|740|>")).to_equal(true)
+        expect(p.ends_with("<|1677|><|code_end|>")).to_equal(true)
+        expect(_count(p, "<|code_end|>")).to_equal(30)
+
+    it "extracts audio codes and nothing else":
+        val g = "\nparis<|t_0.40|><|code_start|><|12|><|4095|><|0|><|code_end|>\n<|4101|><|t_1|><|audio_end|><|7"
+        val codes = outetts_spoken_codes(g, 100)
+        expect(codes.len()).to_equal(3)
+        expect(codes[0]).to_equal(12)
+        expect(codes[1]).to_equal(4095)
+        expect(codes[2]).to_equal(0)
+        expect(outetts_spoken_codes("no codes here", 100).len()).to_equal(0)
+
+    it "stops at audio_end and after the input's words":
+        expect(outetts_word_count("The capital of France is Paris.")).to_equal(6)
+        expect(outetts_word_count(" ... ")).to_equal(0)
+        val g = "\nthe<|t_0.1|><|code_start|><|1|><|2|><|code_end|>\nparis<|t_0.2|><|code_start|><|3|><|code_end|>\nyeah<|t_0.2|><|code_start|><|9|><|code_end|>"
+        val two = outetts_spoken_codes(g, 2)
+        expect(two.len()).to_equal(3)
+        expect(two[2]).to_equal(3)
+        val ended = outetts_spoken_codes("\na<|code_start|><|5|><|code_end|>\n<|audio_end|>\nb<|code_start|><|6|><|code_end|>", 9)
+        expect(ended.len()).to_equal(1)
+        expect(ended[0]).to_equal(5)

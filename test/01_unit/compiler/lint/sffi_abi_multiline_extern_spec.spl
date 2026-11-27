@@ -1,0 +1,57 @@
+"""
+## Purpose and audience
+Purpose: Prove SPL-SFFI-ABI-001 also checks `extern fn` signatures whose
+parameter list or return type spans several lines.
+Audience: compiler and tooling engineers maintaining robust-boundary lints.
+## Operator workflow
+Run with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Findings are reported on the `extern fn` line that starts the signature.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use compiler.semantics.lint.sffi_abi_mismatch.{check_sffi_abi_mismatch}
+
+val LINUX = "x86_64-unknown-linux-gnu"
+val BAD = "@c_abi(\"int64_t\") unit Fd: i32 as fd\n"
+
+# @manual_section: sffi_abi_multiline_extern
+describe "SPL-SFFI-ABI-001: multi-line extern signatures":
+    """Units named on continuation lines of an extern fn are checked."""
+
+    it "reports a unit on a parameter continuation line":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint an extern whose params span lines")
+        val src = BAD + "extern fn c_close(\n    flags: i32,\n    fd: Fd\n) -> i32\n"
+        val fs = check_sffi_abi_mismatch(src, "app/x.spl", LINUX)
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].line_num).to_equal(2)
+        expect(fs[0].message).to_contain("width mismatch")
+
+    it "reports a unit after a trailing comma":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint an extern with a trailing comma in its param list")
+        val src = BAD + "pub extern fn c_dup(\n    a: i32,\n    fd: Fd,\n) -> i32\n"
+        expect(check_sffi_abi_mismatch(src, "app/x.spl", LINUX).len()).to_equal(1)
+
+    it "reports a unit in a return type on its own line":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint an extern whose return type is on the next line")
+        val src = BAD + "extern fn c_open(path: text)\n    -> Fd\n"
+        val fs = check_sffi_abi_mismatch(src, "app/x.spl", LINUX)
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].line_num).to_equal(2)
+
+    it "reports a unit nested in a generic split across lines":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint an extern with a nested generic param over two lines")
+        val src = BAD + "extern fn c_pick(\n    xs: Option<\n        Fd>\n) -> i32\n"
+        expect(check_sffi_abi_mismatch(src, "app/x.spl", LINUX).len()).to_equal(1)
+
+    it "does not read past the end of a multi-line signature":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a clean multi-line extern followed by unrelated code using Fd")
+        val src = BAD + "extern fn c_ok(\n    a: i32\n) -> i32\nfn local(fd: Fd) -> i32:\n    0\n"
+        expect(check_sffi_abi_mismatch(src, "app/x.spl", LINUX).len()).to_equal(0)

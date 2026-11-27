@@ -1,0 +1,101 @@
+use std.spec.*
+
+# Prevention for test_runner_fixed_session_cost_2026-08-21 (class guard).
+# A type name declared twice with DIFFERENT field shapes inside one module graph
+# makes HIR lowering abort ("Cannot infer field type") and drops the whole
+# enclosing module to the interpreter (~100x slower). The CompilerContext and
+# TypeInfo shadows were removed; this ratchet freezes the remaining duplicate
+# type names under src/compiler/99.loader so a NEW one cannot appear unnoticed.
+# Removing a baselined name is fine (shrink the baseline); adding one fails.
+# The compiler-side fix (resolve struct literals by construction-site module
+# scope; do not drop a whole module for one lowering error) is Rust-seed work.
+
+extern fn rt_dir_list(path: text) -> [text]?
+extern fn rt_file_read_text(path: text) -> text?
+
+val ROOT = "src/compiler/99.loader"
+val BASELINE: [text] = [
+    "FrontendLexicalAdvisoryBindingContextV1",
+    "JitCompilationContext",
+    "JitInstantiator",
+    "JitInstantiatorConfig",
+    "JitMapper",
+    "JitMapperConfig",
+    "JitStats",
+    "JitSymbolResolver",
+    "LoadedMetadata",
+    "LoadedModule",
+    "LoadedSymbol",
+    "LoaderMapper",
+    "LoaderMapperConfig",
+    "LoaderStats",
+    "PossibleInstantiation",
+    "SharedExecMapper",
+    "SharedExecMapperConfig",
+    "SharedExecMapperStats",
+    "SharedExecRecord",
+    "TemplateBytes",
+]
+
+fn _walk(dir: text, out: [text]) -> [text]:
+    var acc = out
+    val entries = rt_dir_list(dir) ?? []
+    for e in entries:
+        val p = dir + "/" + e
+        if e.ends_with(".spl"):
+            acc = acc.push(p)
+        elif not e.contains("."):
+            acc = _walk(p, acc)
+    acc
+
+fn _type_name(line: text) -> text:
+    var t = line
+    if t.starts_with("pub "):
+        t = t.substring(4)
+    var rest = ""
+    if t.starts_with("struct "):
+        rest = t.substring(7)
+    elif t.starts_with("class "):
+        rest = t.substring(6)
+    else:
+        return ""
+    var i = 0
+    while i < rest.len():
+        val c = rest.substring(i, i + 1)
+        if c == ":" or c == "<" or c == " " or c == "(" or c == "\r":
+            break
+        i = i + 1
+    rest.substring(0, i)
+
+fn _duplicate_names() -> [text]:
+    var seen: Dict<text, i64> = {}
+    for f in _walk(ROOT, []):
+        val src = rt_file_read_text(f) ?? ""
+        for line in src.split("\n"):
+            val name = _type_name(line)
+            if name != "":
+                seen[name] = (seen[name] ?? 0) + 1
+    var dups: [text] = []
+    for item in seen:
+        if item[1] > 1:
+            dups = dups.push(item[0])
+    dups
+
+describe "99.loader duplicate type-name ratchet":
+    it "finds the walker's known duplicates (non-vacuity)":
+        expect(_duplicate_names().len()).to_be_greater_than(0)
+
+    it "introduces no duplicate type name outside the baseline":
+        var fresh: [text] = []
+        for name in _duplicate_names():
+            if not BASELINE.contains(name):
+                fresh = fresh.push(name)
+        expect(fresh.len()).to_equal(0)
+
+    it "keeps the baseline free of stale entries":
+        val now = _duplicate_names()
+        var stale: [text] = []
+        for name in BASELINE:
+            if not now.contains(name):
+                stale = stale.push(name)
+        expect(stale.len()).to_equal(0)

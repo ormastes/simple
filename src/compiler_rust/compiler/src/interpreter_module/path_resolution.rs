@@ -374,7 +374,7 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
     let mut dir = start.to_path_buf();
     let result = loop {
         if p_is_dir(&dir.join("src")) || p_is_file(&dir.join("Cargo.toml")) {
-            break Some(dir.clone());
+            break Some(workspace_root_enclosing_src(&dir).unwrap_or(dir));
         }
         if !dir.pop() {
             break None;
@@ -385,6 +385,25 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
         cache.borrow_mut().insert(start.to_path_buf(), result.clone());
     });
     result
+}
+
+/// A `src/`-bearing directory that itself lives under the enclosing
+/// workspace's `src/` tree (e.g. `src/lib/nogc_sync_mut/src/`) is a nested
+/// library package, not a project; its workspace is the project root. Mirrors
+/// `module_resolver::types::workspace_root_enclosing_src` (same bug, HIR lane).
+/// Cargo crates are real projects and are kept.
+/// See doc/08_tracking/bug/lib_entry_file_cannot_resolve_app_prefix_imports_2026-08-17.md
+fn workspace_root_enclosing_src(nearest: &Path) -> Option<PathBuf> {
+    if p_is_file(&nearest.join("Cargo.toml")) {
+        return None;
+    }
+    let boundary = find_workspace_boundary(nearest.parent()?)?;
+    let ws_src = boundary.join("src");
+    if p_is_dir(&ws_src) && nearest.starts_with(&ws_src) {
+        Some(boundary)
+    } else {
+        None
+    }
 }
 
 /// Outermost directory a module search is allowed to climb to.
@@ -465,6 +484,10 @@ fn preferred_stdlib_variant(base_dir: &Path) -> Option<&'static str> {
     ];
 
     let base = base_dir.to_string_lossy();
+    // Windows paths may mix separators. POSIX backslashes are filename bytes,
+    // so retain them rather than inventing a stdlib-family path component.
+    #[cfg(windows)]
+    let base = base.replace('\\', "/");
     VARIANTS.iter().copied().find(|variant| {
         let marker = format!("/src/lib/{variant}");
         base.contains(&format!("{marker}/")) || base.ends_with(&marker)
@@ -611,6 +634,38 @@ fn resolve_unit_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf
 }
 
 /// Clear the path resolution cache (called between test runs)
+/// `src/app/<name>` entries that are git symlinks. With `core.symlinks=false`
+/// (the Windows default) git checks them out as plain text files holding the
+/// link target, so `app.<name>.*` must resolve to the target directory.
+/// Keep in sync with `driver_entry_closure_core.spl` and the tracked links.
+const APP_SYMLINK_ALIASES: &[(&str, &str)] = &[
+    ("cmm_lsp", "examples/10_tooling/trace32_tools/cmm_lsp"),
+    ("t32_lsp_mcp", "examples/10_tooling/trace32_tools/t32_lsp_mcp"),
+    ("mcp_t32", "examples/10_tooling/trace32_tools/t32_mcp"),
+    ("t32_cli", "examples/10_tooling/trace32_tools/t32_cli"),
+];
+
+fn resolve_app_symlink_alias(root: &Path, parts: &[String]) -> Option<PathBuf> {
+    let target = APP_SYMLINK_ALIASES.iter().find(|(name, _)| *name == parts[1])?.1;
+    let alias_dir = root.join(target);
+    if !p_is_dir(&alias_dir) {
+        return None;
+    }
+    let rest: PathBuf = parts[2..].iter().collect();
+    if !parts[2..].is_empty() {
+        let mut file = alias_dir.join(&rest);
+        file.set_extension("spl");
+        if p_exists(&file) && p_is_file(&file) {
+            return Some(file);
+        }
+    }
+    let init = alias_dir.join(&rest).join("__init__.spl");
+    if p_exists(&init) && p_is_file(&init) {
+        return Some(init);
+    }
+    None
+}
+
 pub fn clear_path_resolution_cache() {
     PATH_RESOLUTION_CACHE.with(|cache| cache.borrow_mut().clear());
     PROJECT_ROOT_CACHE.with(|cache| cache.borrow_mut().clear());
@@ -760,9 +815,16 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
             if at_search_boundary(&parent_dir, &boundary) {
                 break;
             }
-            if let Some(ref root) = project_root {
-                if parent_dir == *root || parent_dir.parent().is_none() {
-                    break;
+            // A nested directory that merely contains a `src/` folder (e.g.
+            // `test/01_unit/lib/nogc_sync_mut/src`) must not end the climb before
+            // the repository root, or `test.*` imports from specs beneath it never
+            // reach `<repo>/test`. With a workspace boundary, the boundary check
+            // above is authoritative.
+            if boundary.is_none() {
+                if let Some(ref root) = project_root {
+                    if parent_dir == *root || parent_dir.parent().is_none() {
+                        break;
+                    }
                 }
             }
         } else {
@@ -959,6 +1021,12 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                     }
                 }
 
+                if parts.len() > 1 && parts[0] == "app" {
+                    if let Some(found) = resolve_app_symlink_alias(&current, parts) {
+                        return Ok(found);
+                    }
+                }
+
                 if parts.len() > 1 && parts[0] == "core" {
                     let compiler_dir = src_candidate.join("compiler");
                     if p_is_dir(&compiler_dir) {
@@ -1014,6 +1082,33 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
             // This handles imports like `use sdn.parser.{parse}` where the module lives
             // under src/lib/common/sdn/parser.spl but doesn't have a `std.` prefix.
             if !is_stdlib {
+                // Root facade first: a bare legacy `import string` from a script
+                // outside the library tree names the ROOT `src/lib/string.spl`
+                // compatibility facade, not whichever concurrency family happens
+                // to carry a same-named package — the family hit served only the
+                // 8 `bm_*` symbols and ignored every facade export (`char_at`,
+                // `str_char_at`, ...). See doc/08_tracking/bug/legacy_import_string_namespace_dict_ignores_source_content_2026-08-11.md.
+                // Mirrors the pure-Simple resolver, which probes the root facade
+                // before the family fallback.
+                for lib_subpath in &["src/lib", "src/std"] {
+                    let lib_candidate = current.join(lib_subpath);
+                    if !p_exists(&lib_candidate) {
+                        continue;
+                    }
+                    let facade_relative: PathBuf = parts.iter().collect();
+                    let mut facade_path = lib_candidate.join(&facade_relative);
+                    facade_path.set_extension("spl");
+                    if p_exists(&facade_path) && p_is_file(&facade_path) {
+                        trace!(path = ?facade_path, "Found bare import at root lib facade (file)");
+                        return Ok(facade_path);
+                    }
+                    let mut facade_init = lib_candidate.join(&facade_relative);
+                    facade_init.push("__init__.spl");
+                    if p_exists(&facade_init) && p_is_file(&facade_init) {
+                        trace!(path = ?facade_init, "Found bare import at root lib facade (package)");
+                        return Ok(facade_init);
+                    }
+                }
                 for stdlib_subpath in &["src/lib", "src/std"] {
                     let stdlib_candidate = current.join(stdlib_subpath);
                     if !p_exists(&stdlib_candidate) {
@@ -1078,7 +1173,10 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_cache_key, find_numbered_dir, find_workspace_boundary, normalize_base_dir, resolve_module_path};
+    use super::{
+        compute_cache_key, find_numbered_dir, find_workspace_boundary, normalize_base_dir, preferred_stdlib_variant,
+        resolve_module_path,
+    };
     use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1574,6 +1672,34 @@ mod tests {
         );
     }
 
+    /// With `core.symlinks=false`, `src/app/cmm_lsp` is a text file holding the
+    /// link target; `app.cmm_lsp.*` must still resolve to the real directory.
+    #[test]
+    fn app_symlink_placeholder_file_resolves_through_alias_table() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir_all(repo.join("src/app")).unwrap();
+        fs::write(repo.join("src/app/cmm_lsp"), "../../examples/10_tooling/trace32_tools/cmm_lsp").unwrap();
+        let target = repo.join("examples/10_tooling/trace32_tools/cmm_lsp");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("cmm_parser.spl"), "fn marker():\n    0\n").unwrap();
+        fs::write(target.join("__init__.spl"), "").unwrap();
+
+        let leaf = vec!["app".to_string(), "cmm_lsp".to_string(), "cmm_parser".to_string()];
+        assert_eq!(
+            resolve_module_path(&leaf, &repo.join("src")).unwrap(),
+            target.join("cmm_parser.spl")
+        );
+        let pkg = vec!["app".to_string(), "cmm_lsp".to_string()];
+        assert_eq!(
+            resolve_module_path(&pkg, &repo.join("src")).unwrap(),
+            target.join("__init__.spl")
+        );
+        let unknown = vec!["app".to_string(), "not_aliased".to_string(), "x".to_string()];
+        assert!(resolve_module_path(&unknown, &repo.join("src")).is_err());
+    }
+
     /// A nested git worktree marks its root with a `.git` *file*, not a
     /// directory. Treating only directories as the marker would let the parent
     /// project's search walk straight through a nested worktree.
@@ -1601,5 +1727,35 @@ mod tests {
             find_numbered_dir(temp.path(), "frontend"),
             Some(temp.path().join("10.frontend"))
         );
+    }
+
+    #[test]
+    fn stdlib_family_preference_keeps_component_boundaries() {
+        assert_eq!(preferred_stdlib_variant(Path::new("/repo/src/lib/nogc_sync_mut")), Some("nogc_sync_mut"));
+        assert_eq!(preferred_stdlib_variant(Path::new("/repo/src/lib/nogc_sync_mut/module")), Some("nogc_sync_mut"));
+        assert_eq!(preferred_stdlib_variant(Path::new("/repo/src/lib/nogc_sync_mut_extra/module")), None);
+        assert_eq!(preferred_stdlib_variant(Path::new("/repo/not_src/lib/nogc_sync_mut/module")), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stdlib_family_preference_accepts_windows_and_mixed_separators() {
+        for variant in ["nogc_sync_mut", "nogc_async_mut", "nogc_async_immut", "gc_async_mut", "nogc_async_mut_noalloc", "common"] {
+            let native = format!(r"C:\repo\src\lib\{variant}\module");
+            let mixed = format!(r"C:\repo/src/lib\{variant}/module");
+            let family_root = format!(r"C:\repo\src\lib\{variant}");
+            assert_eq!(preferred_stdlib_variant(Path::new(&native)), Some(variant));
+            assert_eq!(preferred_stdlib_variant(Path::new(&mixed)), Some(variant));
+            assert_eq!(preferred_stdlib_variant(Path::new(&family_root)), Some(variant));
+        }
+        assert_eq!(preferred_stdlib_variant(Path::new(r"C:\repo\src\lib\nogc_sync_mut_extra\module")), None);
+        assert_eq!(preferred_stdlib_variant(Path::new(r"C:\repo\not_src\lib\nogc_sync_mut\module")), None);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn stdlib_family_preference_preserves_posix_backslash_filename_bytes() {
+        assert_eq!(preferred_stdlib_variant(Path::new(r"/repo/src/lib\nogc_sync_mut/module")), None);
+        assert_eq!(preferred_stdlib_variant(Path::new(r"/repo\src\lib\nogc_sync_mut/module")), None);
     }
 }

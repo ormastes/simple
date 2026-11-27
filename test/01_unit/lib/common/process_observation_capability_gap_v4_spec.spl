@@ -1,0 +1,54 @@
+# @cover src/lib/common/process/observation_v4.spl
+# @req REQ-POV4-C02
+"""
+BuildRunner worker admission reads the provider's capability bits per policy.
+`available` alone is not enough: the monitor request needs ProcessGroup
+retirement, an executable identity and an exec proof, in either their Linux
+(sealed pin, ptrace) or Darwin (snapshot, suspended spawn) form.
+"""
+
+use std.spec.*
+use std.common.process.observation_v4.{
+    POV4_CAP_PINNED_EXEC, POV4_CAP_PINNED_CWD, POV4_CAP_PTRACE_EXEC, POV4_CAP_EXACT_ENV,
+    POV4_CAP_ABSOLUTE_DEADLINE, POV4_CAP_WAIT4, POV4_CAP_RLIMIT_AS, POV4_CAP_TWO_PHASE_COLLECT,
+    POV4_CAP_LEADER_ONLY, POV4_CAP_DARWIN_SNAPSHOT_EXEC, POV4_CAP_DARWIN_SPAWN_EXEC_PROOF,
+    POV4_CAP_PROCESS_GROUP_RETIRE, process_observation_monitor_group_gap_v4
+}
+
+fn common_bits() -> i64:
+    POV4_CAP_PINNED_CWD | POV4_CAP_EXACT_ENV | POV4_CAP_ABSOLUTE_DEADLINE |
+        POV4_CAP_WAIT4 | POV4_CAP_TWO_PHASE_COLLECT | POV4_CAP_LEADER_ONLY
+
+fn linux_bits() -> i64:
+    common_bits() | POV4_CAP_PINNED_EXEC | POV4_CAP_PTRACE_EXEC | POV4_CAP_RLIMIT_AS
+
+fn darwin_bits() -> i64:
+    common_bits() | POV4_CAP_DARWIN_SNAPSHOT_EXEC | POV4_CAP_DARWIN_SPAWN_EXEC_PROOF |
+        POV4_CAP_PROCESS_GROUP_RETIRE
+
+describe "process observation V4 monitor ProcessGroup admission":
+    it "refuses the leader-only Linux provider for lack of group retirement":
+        step("Check the mask the Linux owner advertises (it rejects ProcessGroup requests)")
+        expect(process_observation_monitor_group_gap_v4(linux_bits())).to_equal("process-group-retire")
+
+    it "admits the partial Darwin provider":
+        step("Check the Darwin mask: snapshot pin, suspended-spawn exec proof, group retirement")
+        expect(process_observation_monitor_group_gap_v4(darwin_bits())).to_equal("")
+
+    it "accepts either form of executable identity and exec proof":
+        step("Mix the sealed pin with the Darwin exec proof, and the snapshot with ptrace")
+        val mixed_a = common_bits() | POV4_CAP_PINNED_EXEC | POV4_CAP_DARWIN_SPAWN_EXEC_PROOF | POV4_CAP_PROCESS_GROUP_RETIRE
+        val mixed_b = common_bits() | POV4_CAP_DARWIN_SNAPSHOT_EXEC | POV4_CAP_PTRACE_EXEC | POV4_CAP_PROCESS_GROUP_RETIRE
+        expect(process_observation_monitor_group_gap_v4(mixed_a)).to_equal("")
+        expect(process_observation_monitor_group_gap_v4(mixed_b)).to_equal("")
+
+    it "names every missing requirement and never treats zero bits as admitted":
+        step("Drop the identity and proof bits from the Darwin mask")
+        val no_identity = darwin_bits() & ~(POV4_CAP_DARWIN_SNAPSHOT_EXEC | POV4_CAP_DARWIN_SPAWN_EXEC_PROOF)
+        expect(process_observation_monitor_group_gap_v4(no_identity)).to_equal("executable-pin,exec-proof")
+        step("Drop the cwd pin and two-phase collection")
+        val no_cwd = darwin_bits() & ~(POV4_CAP_PINNED_CWD | POV4_CAP_TWO_PHASE_COLLECT)
+        expect(process_observation_monitor_group_gap_v4(no_cwd)).to_equal("pinned-cwd,two-phase-collect")
+        step("An unavailable provider reports no bits at all")
+        expect(process_observation_monitor_group_gap_v4(0)).to_equal(
+            "pinned-cwd,exact-env,absolute-deadline,wait4,two-phase-collect,executable-pin,exec-proof,process-group-retire")

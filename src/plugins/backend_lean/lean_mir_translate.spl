@@ -1,3 +1,4 @@
+#![allow(REQC004)]
 # Lean Backend - MIR-to-Lean Translation
 #
 # Extracted from lean_backend.spl. Contains MIR body/block/instruction
@@ -18,6 +19,7 @@ use compiler.mir.mir_data.*
 use compiler.backend.backend.backend_types.{BackendKind, CompileError, compileerror_backend_error}
 use compiler.mir.mir_types.{MirType}
 use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
+use compiler.mir.mir_instruction_support.{MirCallOrigin}
 
 fn lean_err(msg: text) -> CompileError:
     """Construct a named Lean-backend diagnostic."""
@@ -49,11 +51,11 @@ fn mir_type_to_lean(ty: MirType) -> Result<text, CompileError>:
         case Ptr(_, _):
             Err(lean_err("lean-backend: raw pointers require an explicit heap/capability semantics; refusing undeclared Ptr lowering"))
         case Array(elem, size):
-            val e = mir_type_to_lean(elem)?
-            Ok("Vector ({e}) {size}")
+            val elem_lean = mir_type_to_lean(elem)?
+            Ok("Vector ({elem_lean}) {size}")
         case Slice(elem):
-            val e = mir_type_to_lean(elem)?
-            Ok("Array ({e})")
+            val elem_lean = mir_type_to_lean(elem)?
+            Ok("Array ({elem_lean})")
         case Struct(id):
             Err(lean_err("lean-backend: MIR struct `{id}` requires its exact emitted inductive/structure definition"))
         case Enum(id):
@@ -84,20 +86,20 @@ fn translate_mir_body(body: MirBody) -> Result<text, CompileError>:
     error: the previous behaviour emitted `sorry`, which in Lean admits any
     goal and would silently validate false theorems.
     """
-    if body.blocks.is_empty():
+    if body.blocks.len() == 0:
         return Err(lean_err("lean-backend: function `{body.name}` has no MIR basic blocks; cannot emit a sound Lean term (refusing to emit `sorry`)"))
 
     val structured_match = translate_exact_result_match_body(body)
     match structured_match:
         case Ok(Some(code)): return Ok(code)
         case Err(error): return Err(error)
-        case Ok(nil): pass
+        case Ok(None): pass
 
     val structured_try = translate_exact_result_try_body(body)
     match structured_try:
         case Ok(Some(code)): return Ok(code)
         case Err(error): return Err(error)
-        case Ok(nil): pass
+        case Ok(None): pass
 
     var lines: [text] = []
     for block in body.blocks:
@@ -105,7 +107,7 @@ fn translate_mir_body(body: MirBody) -> Result<text, CompileError>:
         for line in block_lines:
             lines = lines.push(line)
 
-    if lines.is_empty():
+    if lines.len() == 0:
         return Err(lean_err("lean-backend: function `{body.name}` produced no translatable statements; refusing to emit an empty/placeholder body"))
 
     Ok(lines.join("\n"))
@@ -169,6 +171,7 @@ fn translate_mir_global_state_body_v1(body: MirBody) -> Result<LeanGlobalStateBo
         lines.join("\n"), "Nat → " + state_value_type, written_regions))
 
 fn lean_runtime_name(operand: MirOperand) -> text:
+    if operand.call_origin != MirCallOrigin.Runtime: return ""
     match operand.kind:
         case Const(MirConstValue.Str(name), _): name
         case _: ""
@@ -332,6 +335,7 @@ fn translate_exact_result_match_body(body: MirBody) -> Result<text?, CompileErro
                 if dest.id == ok_predecessor.2 and lean_runtime_name(func) == "rt_enum_discriminant" and
                         args.len() == 1 and lean_operand_local_id(args[0]) == scrutinee.id:
                     discriminator_index = index
+                pass
             case _: pass
     if discriminator_index < 0 or first_block.instructions.len() != discriminator_index + 3:
         return Err(lean_err("lean-backend: Result match first predecessor has no exact discriminator/key/comparison suffix"))
@@ -342,7 +346,7 @@ fn translate_exact_result_match_body(body: MirBody) -> Result<text?, CompileErro
     if fallthrough_block == nil:
         return Err(lean_err("lean-backend: Result match final fallthrough block is missing"))
     val impossible = fallthrough_block ?? body.blocks[0]
-    if not impossible.instructions.is_empty():
+    if impossible.instructions.len() != 0:
         return Err(lean_err("lean-backend: Result match impossible fallthrough contains effects"))
     match impossible.terminator:
         case Goto(target):
@@ -361,7 +365,7 @@ fn translate_exact_result_match_body(body: MirBody) -> Result<text?, CompileErro
     if merge_block == nil:
         return Err(lean_err("lean-backend: Result match witnessed merge block is missing"))
     val merge = merge_block ?? body.blocks[0]
-    if merge.instructions.is_empty():
+    if merge.instructions.len() == 0:
         return Err(lean_err("lean-backend: Result match merge lacks its semantic witness"))
     match merge.instructions[0].kind:
         case ResultMatchSemantic(_, _, _, _, _, _, _): pass
@@ -463,7 +467,7 @@ fn translate_exact_result_try_body(body: MirBody) -> Result<text?, CompileError>
         case _: return Err(lean_err("lean-backend: Result try owner lost its conditional terminator"))
 
     val err_block = lean_find_block(body, err_target) ?? entry
-    if not err_block.instructions.is_empty():
+    if err_block.instructions.len() != 0:
         return Err(lean_err("lean-backend: Result try Err edge has effects requiring state/resource semantics"))
     match err_block.terminator:
         case Ret(Some(value)):
@@ -472,7 +476,7 @@ fn translate_exact_result_try_body(body: MirBody) -> Result<text?, CompileError>
         case _: return Err(lean_err("lean-backend: Result try Err edge is not an unchanged early return"))
 
     val ok_block = lean_find_block(body, ok_target) ?? entry
-    if ok_block.instructions.is_empty():
+    if ok_block.instructions.len() == 0:
         return Err(lean_err("lean-backend: Result try Ok edge lacks payload extraction"))
     var payload_local_id = -1
     match ok_block.instructions[0].kind:
@@ -613,7 +617,7 @@ fn translate_mir_inst(inst: MirInst, body: MirBody) -> Result<text, CompileError
             # closed instead of becoming an uninterpreted Lean call.
             match func.kind:
                 case Const(MirConstValue.Str(runtime_name), _):
-                    if runtime_name == "rt_enum_new" and dest != nil:
+                    if func.call_origin == MirCallOrigin.Runtime and runtime_name == "rt_enum_new" and dest != nil:
                         val result_dest = dest ?? LocalId(id: -1)
                         val result_type = lean_body_local_type(body, result_dest)
                         if result_type != nil:
@@ -668,6 +672,8 @@ fn translate_operand_list_exact(body: MirBody, ops: [MirOperand], sep: text) -> 
     Ok(parts.join(sep))
 
 fn translate_direct_call_callee(operand: MirOperand) -> Result<text, CompileError>:
+    if operand.call_origin != MirCallOrigin.Source:
+        return Err(lean_err("lean-backend: call requires proven source origin or a registered exact Runtime semantic lowering; foreign and unknown call semantics are unsupported"))
     match operand.kind:
         case Const(MirConstValue.Str(name), type_):
             match type_.kind:
@@ -723,8 +729,8 @@ fn translate_mir_terminator(term: MirTerminator, body: MirBody) -> Result<text, 
             val c = translate_operand_exact(body, cond)?
             Err(lean_err("lean-backend: conditional branch on `{c}` (then block{then_.id}, else block{else_.id}) requires structured-CFG lowering; refusing to emit a term referencing undefined block labels"))
         case Switch(value, targets, default):
-            val v = translate_operand_exact(body, value)?
-            Err(lean_err("lean-backend: switch on `{v}` (default block{default.id}) requires structured-CFG lowering; refusing to emit a term that drops branch targets"))
+            val switch_value = translate_operand_exact(body, value)?
+            Err(lean_err("lean-backend: switch on `{switch_value}` (default block{default.id}) requires structured-CFG lowering; refusing to emit a term that drops branch targets"))
         case CallTerminator(dest, func, args, normal, _, _, _):
             val f = translate_operand_exact(body, func)?
             Err(lean_err("lean-backend: call terminator `{f}` continuing at block{normal.id} requires structured-CFG lowering; refusing to drop the successor edge"))
@@ -737,11 +743,11 @@ fn translate_operand_exact(body: MirBody, op: MirOperand) -> Result<text, Compil
     """
     match op.kind:
         case Copy(local):
-            if lean_body_local_type(body, local) == nil:
+            if lean_body_local_type(body, local).is_none():
                 return Err(lean_err("lean-backend: copied local _l{local.id} lacks retained exact MIR type"))
             Ok("_l{local.id}")
         case Move(local):
-            if lean_body_local_type(body, local) == nil:
+            if lean_body_local_type(body, local).is_none():
                 return Err(lean_err("lean-backend: moved local _l{local.id} lacks retained exact MIR type"))
             Ok("_l{local.id}")
         case Const(value, type_):

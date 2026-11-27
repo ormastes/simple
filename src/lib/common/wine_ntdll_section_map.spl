@@ -22,19 +22,19 @@ class WineNtdllSectionMapResult:
     mapped_base: i64
     operations: text
 
-fn _section(handle: i64, name: text, size: i64, mapped_base: i64) -> WineNtdllSection:
+fn _wine_ntdll_section_map_section(handle: i64, name: text, size: i64, mapped_base: i64) -> WineNtdllSection:
     WineNtdllSection(handle: handle, name: name, size: size, mapped_base: mapped_base)
 
-fn _table(sections: [WineNtdllSection], next_handle: i64) -> WineNtdllSectionTable:
+fn _wine_ntdll_section_map_table(sections: [WineNtdllSection], next_handle: i64) -> WineNtdllSectionTable:
     WineNtdllSectionTable(sections: sections, next_handle: next_handle)
 
-fn _result(ok: bool, error: text, table: WineNtdllSectionTable, space: WineVmSpace, handle: i64, mapped_base: i64, operations: text) -> WineNtdllSectionMapResult:
+fn _wine_ntdll_section_map_result(ok: bool, error: text, table: WineNtdllSectionTable, space: WineVmSpace, handle: i64, mapped_base: i64, operations: text) -> WineNtdllSectionMapResult:
     WineNtdllSectionMapResult(ok: ok, error: error, table: table, space: space, handle: handle, mapped_base: mapped_base, operations: operations)
 
 pub fn wine_ntdll_section_table_new() -> WineNtdllSectionTable:
-    _table([], 0x400)
+    _wine_ntdll_section_map_table([], 0x400)
 
-fn _sequence_gate(symbols: [text]) -> text:
+fn _wine_ntdll_section_map_sequence_gate(symbols: [text]) -> text:
     val dispatch_state = wine_nt_api_ntdll_section_map_dispatch_gate(symbols)
     if dispatch_state != "ready":
         return dispatch_state
@@ -48,47 +48,47 @@ fn _sequence_gate(symbols: [text]) -> text:
         return "ntdll-section-map-sequence-expected:NtUnmapViewOfSection"
     "ready"
 
-fn _find_section(table: WineNtdllSectionTable, handle: i64) -> WineNtdllSection:
+fn _wine_ntdll_section_map_find_section(table: WineNtdllSectionTable, handle: i64) -> WineNtdllSection:
     for section in table.sections:
         if section.handle == handle:
             return section
-    _section(0, "", 0, 0)
+    _wine_ntdll_section_map_section(0, "", 0, 0)
 
-fn _replace_section(table: WineNtdllSectionTable, replacement: WineNtdllSection) -> WineNtdllSectionTable:
+fn _wine_ntdll_section_map_replace_section(table: WineNtdllSectionTable, replacement: WineNtdllSection) -> WineNtdllSectionTable:
     var sections: [WineNtdllSection] = []
     for section in table.sections:
         if section.handle == replacement.handle:
             sections.push(replacement)
         else:
             sections.push(section)
-    _table(sections, table.next_handle)
+    _wine_ntdll_section_map_table(sections, table.next_handle)
 
 fn _map_failure(symbol: text, step: WineVmOpResult, table: WineNtdllSectionTable, operations: text) -> WineNtdllSectionMapResult:
-    _result(false, symbol + ":" + step.state, table, step.space, 0, 0, operations)
+    _wine_ntdll_section_map_result(false, symbol + ":" + step.state, table, step.space, 0, 0, operations)
 
 pub fn wine_ntdll_execute_section_map(symbols: [text], table: WineNtdllSectionTable, space: WineVmSpace, name: text, size: i64, base: i64) -> WineNtdllSectionMapResult:
-    val sequence_state = _sequence_gate(symbols)
+    val sequence_state = _wine_ntdll_section_map_sequence_gate(symbols)
     if sequence_state != "ready":
-        return _result(false, sequence_state, table, space, 0, 0, "")
+        return _wine_ntdll_section_map_result(false, sequence_state, table, space, 0, 0, "")
     if name == "":
-        return _result(false, "NtCreateSection:invalid-name", table, space, 0, 0, "")
+        return _wine_ntdll_section_map_result(false, "NtCreateSection:invalid-name", table, space, 0, 0, "")
     if size <= 0:
-        return _result(false, "NtCreateSection:invalid-size", table, space, 0, 0, "")
+        return _wine_ntdll_section_map_result(false, "NtCreateSection:invalid-size", table, space, 0, 0, "")
 
     val handle = table.next_handle
     var sections = table.sections
-    sections.push(_section(handle, name, size, 0))
-    val created = _table(sections, handle + 1)
+    sections.push(_wine_ntdll_section_map_section(handle, name, size, 0))
+    val created = _wine_ntdll_section_map_table(sections, handle + 1)
 
     val mapped = wine_vm_map_executable_image(space, base, size)
     if not mapped.ok:
         return _map_failure("NtMapViewOfSection", mapped, created, "NtCreateSection")
 
-    val section = _find_section(created, handle)
-    val mapped_table = _replace_section(created, _section(section.handle, section.name, section.size, mapped.region.base))
+    val section = _wine_ntdll_section_map_find_section(created, handle)
+    val mapped_table = _wine_ntdll_section_map_replace_section(created, _wine_ntdll_section_map_section(section.handle, section.name, section.size, mapped.region.base))
     val unmapped = wine_vm_unmap(mapped.space, mapped.region.base)
     if not unmapped.ok:
         return _map_failure("NtUnmapViewOfSection", unmapped, mapped_table, "NtCreateSection NtMapViewOfSection")
 
-    val final_table = _replace_section(mapped_table, _section(section.handle, section.name, section.size, 0))
-    _result(true, "", final_table, unmapped.space, handle, mapped.region.base, "NtCreateSection NtMapViewOfSection NtUnmapViewOfSection")
+    val final_table = _wine_ntdll_section_map_replace_section(mapped_table, _wine_ntdll_section_map_section(section.handle, section.name, section.size, 0))
+    _wine_ntdll_section_map_result(true, "", final_table, unmapped.space, handle, mapped.region.base, "NtCreateSection NtMapViewOfSection NtUnmapViewOfSection")

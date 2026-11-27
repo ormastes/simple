@@ -1,0 +1,73 @@
+"""
+Direct core expression interpreter interpolation regression.
+
+The fixture strings are assembled from character codes so the outer test
+runner cannot perform the interpolation being tested. Both entry points
+execute the actual pure-Simple frontend and evaluator sources.
+
+Bug: selfhosted_stage4_interpreter_string_interpolation_broken_2026-07-30.
+The expression-path repair does not replace the original non-delegating
+Stage4 CLI verification required by that bug.
+"""
+# @req: REQ-COMPILER-INTERPRETER-001
+# @cover src/compiler/10.frontend/core/interpreter/mod.spl
+
+use std.spec.{describe, it, expect, step}
+use std.string_core.{char_from_code}
+use compiler.core.interpreter.mod.{core_interpret, core_interpret_expr}
+use compiler.core.interpreter.eval.{eval_has_error}
+use compiler.core.interpreter.value.{val_get_text, val_is_text}
+
+fn parser_syntax_setup(body: text) -> text:
+    val quote = char_from_code(34)
+    quote + body + quote
+
+fn parser_syntax_check(source: text, expected: text):
+    val result = core_interpret_expr(source)
+    expect(eval_has_error()).to_equal(false)
+    expect(val_is_text(result)).to_equal(true)
+    expect(val_get_text(result)).to_equal(expected)
+
+describe "core expression interpolation follows the module frontend":
+    it "evaluates arithmetic and multiple regions through the expression entry point":
+        step("Parse and evaluate interpolation with the actual core expression interpreter")
+        val left = char_from_code(123)
+        val right = char_from_code(125)
+        parser_syntax_check(parser_syntax_setup("sum=" + left + "2 + 3" + right), "sum=5")
+        parser_syntax_check(parser_syntax_setup(left + "2" + right + "/" + left + "3 * 4" + right), "2/12")
+
+    it "matches module interpolation of a variable bound at runtime":
+        step("Evaluate a lambda-local variable through the expression entry point")
+        val left = char_from_code(123)
+        val right = char_from_code(125)
+        val quoted = parser_syntax_setup("value=" + left + "value" + right)
+        parser_syntax_check("(\\value: " + quoted + ")(7)", "value=7")
+        step("Evaluate the same variable interpolation through the module entry point")
+        val source = "fn main() -> text:\n    val value = 7\n    " + quoted + "\n"
+        val result = core_interpret(source, "parser_syntax_module.spl")
+        expect(eval_has_error()).to_equal(false)
+        expect(val_is_text(result)).to_equal(true)
+        expect(val_get_text(result)).to_equal("value=7")
+
+    it "decodes escaped braces once without treating their content as an expression":
+        step("Keep the escaped unknown identifier literal")
+        val left = char_from_code(123)
+        val right = char_from_code(125)
+        parser_syntax_check(parser_syntax_setup(left + left + "missing_name" + right + right), left + "missing_name" + right)
+
+    it "preserves raw strings and brace-free text":
+        step("Keep raw interpolation-looking text unchanged")
+        val left = char_from_code(123)
+        val right = char_from_code(125)
+        val raw_body = left + "2 + 3" + right
+        parser_syntax_check("r" + parser_syntax_setup(raw_body), raw_body)
+        step("Keep ordinary text on the existing evaluator path")
+        parser_syntax_check(parser_syntax_setup("plain text"), "plain text")
+
+    it "keeps malformed literal regions while evaluating their valid neighbor":
+        step("Apply the same region-only interpolation rule as module parsing")
+        val left = char_from_code(123)
+        val right = char_from_code(125)
+        val css = left + " color: red; " + right
+        val body = css + " value=" + left + "2 + 3" + right
+        parser_syntax_check(parser_syntax_setup(body), css + " value=5")

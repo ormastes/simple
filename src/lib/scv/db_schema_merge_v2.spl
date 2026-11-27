@@ -1,0 +1,238 @@
+# Pure proposal solver. A candidate is never a settlement/admission receipt.
+use std.scv.db_schema_identity_v2.*
+use std.scv.db_schema_codec_v2.*
+use std.scv.distributed_identity.*
+use std.scv.db_canonical.{db_bytes_less}
+
+struct DbSchemaConflictV2:
+    code: text
+    column_uid: EntityUid?
+    detail: text
+
+struct DbSchemaMergeResultV2:
+    candidate: DbSchemaV2?
+    conflicts: [DbSchemaConflictV2]
+    base: DbSchemaV2
+    left: DbSchemaV2
+    right: DbSchemaV2
+    required_checks: [text]
+
+fn db_schema_operation_target_v2(change: DbSchemaChangeV2) -> EntityUid:
+    match change:
+        AddColumn(column): column.column_uid
+        RenameColumn(uid, _): uid
+        DropColumn(uid): uid
+        MoveColumnPresentation(uid, _): uid
+        AlterType(uid, _): uid
+        SetDefault(uid, _): uid
+        SetNullability(uid, _): uid
+        SetMergePolicy(uid, _): uid
+        AddConstraint(uid, _): uid
+        DropConstraint(uid, _): uid
+
+fn db_schema_receipt_index_v2(schema: DbSchemaV2, uid: EntityUid) -> i64:
+    var index = 0
+    while index < schema.applied_operations.len():
+        if db_schema_uid_equal_v2(schema.applied_operations[index].operation_uid, uid): return index
+        index = index + 1
+    -1
+
+fn db_schema_apply_v2(schema: DbSchemaV2, operation: DbSchemaOperationV2) -> Result<DbSchemaV2, text>:
+    """Validate a typed operation and return a new revision; never mutate the input."""
+    val schema_checked = db_schema_check_revision_v2(schema)?
+    val operation_checked = db_schema_uid_validate_v2(operation.operation_uid, "migration", schema.table_uid.database_namespace)?
+    val digest = db_schema_operation_digest_v2(operation)?
+    val replay = db_schema_receipt_index_v2(schema, operation.operation_uid)
+    if replay >= 0:
+        if schema.applied_operations[replay].payload_digest != digest: return Err("SCVDB_SCHEMA_OPERATION_DIVERGENCE")
+        return Ok(schema)
+    if operation.base_revision != schema.revision: return Err("SCVDB_SCHEMA_STALE_BASE")
+    if schema.tombstone: return Err("SCVDB_SCHEMA_TABLE_TOMBSTONED")
+    for uid in operation.dependencies:
+        if db_schema_receipt_index_v2(schema, uid) < 0: return Err("SCVDB_SCHEMA_MISSING_DEPENDENCY")
+    val target = db_schema_operation_target_v2(operation.change)
+    val target_checked = db_schema_uid_validate_v2(target, "column", schema.table_uid.database_namespace)?
+    val index = db_schema_column_index_v2(schema, target)
+    var next = schema
+    match operation.change:
+        AddColumn(column):
+            if index >= 0: return Err("SCVDB_SCHEMA_UID_COLLISION")
+            if operation.expected_definition != "": return Err("SCVDB_SCHEMA_ADD_PRECONDITION")
+            if column.tombstone: return Err("SCVDB_SCHEMA_ADD_TOMBSTONE")
+            if column.introduction_revision != schema.revision: return Err("SCVDB_SCHEMA_INTRODUCTION")
+            if not db_schema_uid_equal_v2(column.introduction_migration, operation.operation_uid): return Err("SCVDB_SCHEMA_INTRODUCTION")
+            if db_schema_default_bytes_v2(column.default_rule)? != db_schema_default_bytes_v2(column.introduction_default)?: return Err("SCVDB_SCHEMA_INTRODUCTION_DEFAULT")
+            if not column.nullable:
+                match column.default_rule:
+                    NoDefault: return Err("SCVDB_SCHEMA_BACKFILL_REQUIRED")
+                    Constant(_): ()
+            next.columns.push(column)
+        _:
+            if index < 0: return Err("SCVDB_SCHEMA_COLUMN_MISSING")
+            var column = schema.columns[index]
+            if column.tombstone: return Err("SCVDB_SCHEMA_COLUMN_TOMBSTONED")
+            if operation.expected_definition != db_schema_column_digest_v2(column)?: return Err("SCVDB_SCHEMA_DEFINITION_PRECONDITION")
+            match operation.change:
+                RenameColumn(_, name): column.name = name
+                DropColumn(_): column.tombstone = true
+                MoveColumnPresentation(_, order): column.presentation_order = order
+                AlterType(_, logical_type):
+                    if logical_type != column.logical_type: return Err("SCVDB_SCHEMA_MIGRATION_REQUIRED")
+                SetDefault(_, rule): column.default_rule = rule
+                SetNullability(_, nullable):
+                    if not nullable and column.nullable: return Err("SCVDB_SCHEMA_BACKFILL_REQUIRED")
+                    column.nullable = nullable
+                SetMergePolicy(_, policy):
+                    if policy != column.merge_policy: return Err("SCVDB_SCHEMA_POLICY_MIGRATION_REQUIRED")
+                AddConstraint(_, constraint): column.constraints.push(constraint)
+                DropConstraint(_, constraint_uid):
+                    var retained: [DbConstraintDefinitionV2] = []
+                    var found = false
+                    for constraint in column.constraints:
+                        if db_schema_uid_equal_v2(constraint.constraint_uid, constraint_uid):
+                            found = true
+                        else:
+                            retained.push(constraint)
+                    if not found: return Err("SCVDB_SCHEMA_CONSTRAINT_MISSING")
+                    column.constraints = retained
+                AddColumn(_): return Err("SCVDB_SCHEMA_OPERATION_SHAPE")
+            next.columns[index] = column
+    next.parent_revision = schema.revision
+    next.merge_parent_revision = ""
+    next.applied_operations.push(DbSchemaOperationReceiptV2(operation_uid: operation.operation_uid, payload_digest: digest))
+    db_schema_seal_v2(next)
+
+fn db_schema_conflict_v2(code: text, uid: EntityUid?, detail: text) -> DbSchemaConflictV2:
+    DbSchemaConflictV2(code: code, column_uid: uid, detail: detail)
+
+fn db_schema_intro_equal_v2(left: DbColumnDefinitionV2, right: DbColumnDefinitionV2) -> Result<bool, text>:
+    Ok(left.introduction_revision == right.introduction_revision and db_schema_uid_equal_v2(left.introduction_migration, right.introduction_migration) and db_schema_default_bytes_v2(left.introduction_default)? == db_schema_default_bytes_v2(right.introduction_default)?)
+
+fn db_schema_merge_v2(base: DbSchemaV2, left: DbSchemaV2, right: DbSchemaV2) -> Result<DbSchemaMergeResultV2, text>:
+    """Identity-first three-way proposal; conflicts retain all immutable inputs."""
+    val base_checked = db_schema_check_revision_v2(base)?
+    val left_checked = db_schema_check_revision_v2(left)?
+    val right_checked = db_schema_check_revision_v2(right)?
+    if not db_schema_uid_equal_v2(base.table_uid, left.table_uid) or not db_schema_uid_equal_v2(base.table_uid, right.table_uid): return Err("SCVDB_SCHEMA_TABLE_MISMATCH")
+    var conflicts: [DbSchemaConflictV2] = []
+    var candidate = base
+    if left.table_name == right.table_name:
+        candidate.table_name = left.table_name
+    elif left.table_name == base.table_name:
+        candidate.table_name = right.table_name
+    elif right.table_name == base.table_name:
+        candidate.table_name = left.table_name
+    else:
+        conflicts.push(db_schema_conflict_v2("SCVDB_SCHEMA_TABLE_RENAME_CONFLICT", nil, "Both table names differ from base"))
+    if left.tombstone != base.tombstone or right.tombstone != base.tombstone:
+        conflicts.push(db_schema_conflict_v2("SCVDB_SCHEMA_TABLE_DROP_REVIEW_REQUIRED", nil, "Table removal requires combined data/reference review"))
+    var union_columns = base.columns
+    for side in [left, right]:
+        for column in side.columns:
+            var found = false
+            for existing in union_columns:
+                if db_schema_uid_equal_v2(existing.column_uid, column.column_uid): found = true
+            if not found: union_columns.push(column)
+    # Deterministic output inventory; display order remains an explicit attribute.
+    var cursor = 1
+    while cursor < union_columns.len():
+        var index = cursor
+        while index > 0 and db_bytes_less(db_schema_uid_bytes_v2(union_columns[index].column_uid)?, db_schema_uid_bytes_v2(union_columns[index - 1].column_uid)?):
+            val previous = union_columns[index - 1]
+            union_columns[index - 1] = union_columns[index]
+            union_columns[index] = previous
+            index = index - 1
+        cursor = cursor + 1
+    candidate.columns = []
+    for original in union_columns:
+        val uid = original.column_uid
+        val bi = db_schema_column_index_v2(base, uid)
+        val li = db_schema_column_index_v2(left, uid)
+        val ri = db_schema_column_index_v2(right, uid)
+        if bi < 0 and not original.nullable:
+            match original.introduction_default:
+                NoDefault:
+                    conflicts.push(db_schema_conflict_v2("SCVDB_SCHEMA_BACKFILL_REQUIRED", Some(uid), "New non-null column has no introduction default"))
+                Constant(_): ()
+        if bi >= 0 and (li < 0 or ri < 0):
+            conflicts.push(db_schema_conflict_v2("SCVDB_SCHEMA_HISTORY_LOST", Some(uid), "A base column must remain as a live definition or tombstone"))
+            continue
+        if li < 0:
+            candidate.columns.push(right.columns[ri])
+            continue
+        if ri < 0:
+            candidate.columns.push(left.columns[li])
+            continue
+        val lc = left.columns[li]
+        val rc = right.columns[ri]
+        val lb = db_schema_column_bytes_v2(lc)?
+        val rb = db_schema_column_bytes_v2(rc)?
+        if bi >= 0:
+            if not db_schema_intro_equal_v2(base.columns[bi], lc)? or not db_schema_intro_equal_v2(base.columns[bi], rc)?:
+                conflicts.push(db_schema_conflict_v2("SCVDB_SCHEMA_INTRODUCTION_REWRITE", Some(uid), "Introduction stamp/default are immutable"))
+                continue
+            val bc = base.columns[bi]
+            if bc.tombstone and (not lc.tombstone or not rc.tombstone):
+                conflicts.push(db_schema_conflict_v2("SCVDB_SCHEMA_TOMBSTONE_RESURRECTION", Some(uid), "A dropped UID is terminal; recreation requires a distinct UID"))
+                continue
+            if lc.logical_type != bc.logical_type or rc.logical_type != bc.logical_type:
+                conflicts.push(db_schema_conflict_v2("SCVDB_SCHEMA_MIGRATION_REQUIRED", Some(uid), "Type conversion requires reviewed evaluated migration evidence"))
+                continue
+            if lc.merge_policy != bc.merge_policy or rc.merge_policy != bc.merge_policy:
+                conflicts.push(db_schema_conflict_v2("SCVDB_SCHEMA_POLICY_MIGRATION_REQUIRED", Some(uid), "Historical reducer rules cannot be reinterpreted"))
+                continue
+            if bc.nullable and (not lc.nullable or not rc.nullable):
+                conflicts.push(db_schema_conflict_v2("SCVDB_SCHEMA_BACKFILL_REQUIRED", Some(uid), "Tightened nullability requires combined data review"))
+                continue
+        if lb == rb:
+            candidate.columns.push(lc)
+        elif bi < 0:
+            conflicts.push(db_schema_conflict_v2("SCVDB_SCHEMA_UID_DIVERGENCE", Some(uid), "One new UID carries different definitions"))
+        else:
+            val bb = db_schema_column_bytes_v2(base.columns[bi])?
+            if lb == bb:
+                candidate.columns.push(rc)
+            elif rb == bb:
+                candidate.columns.push(lc)
+            else:
+                var code = "SCVDB_SCHEMA_DEFINITION_CONFLICT"
+                if lc.tombstone != rc.tombstone: code = "SCVDB_SCHEMA_DROP_EDIT_CONFLICT"
+                conflicts.push(db_schema_conflict_v2(code, Some(uid), "Concurrent incompatible definitions retain both drafts"))
+    candidate.applied_operations = base.applied_operations
+    for side in [left, right]:
+        for receipt in base.applied_operations:
+            val index = db_schema_receipt_index_v2(side, receipt.operation_uid)
+            if index < 0:
+                conflicts.push(db_schema_conflict_v2("SCVDB_SCHEMA_HISTORY_LOST", nil, "Side lost a base operation receipt"))
+            elif side.applied_operations[index].payload_digest != receipt.payload_digest:
+                conflicts.push(db_schema_conflict_v2("SCVDB_SCHEMA_OPERATION_DIVERGENCE", nil, "Side rewrote a base operation receipt"))
+        for receipt in side.applied_operations:
+            val index = db_schema_receipt_index_v2(candidate, receipt.operation_uid)
+            if index < 0:
+                candidate.applied_operations.push(receipt)
+            elif candidate.applied_operations[index].payload_digest != receipt.payload_digest:
+                conflicts.push(db_schema_conflict_v2("SCVDB_SCHEMA_OPERATION_DIVERGENCE", nil, "Same operation UID carries different canonical payloads"))
+    # This also checks cross-column name collisions and constraint reference closure.
+    match db_schema_validate_v2(candidate):
+        Ok(_): ()
+        Err(code): conflicts.push(db_schema_conflict_v2(code, nil, "Combined schema is invalid; all drafts retained"))
+    var proposed: DbSchemaV2? = nil
+    if conflicts.len() == 0:
+        if left.revision == right.revision:
+            proposed = Some(left)
+        elif left.revision == base.revision:
+            proposed = Some(right)
+        elif right.revision == base.revision:
+            proposed = Some(left)
+        else:
+            if db_bytes_less(db_schema_bytes_v2(left)?, db_schema_bytes_v2(right)?):
+                candidate.parent_revision = left.revision
+                candidate.merge_parent_revision = right.revision
+            else:
+                candidate.parent_revision = right.revision
+                candidate.merge_parent_revision = left.revision
+            proposed = Some(db_schema_seal_v2(candidate)?)
+    Ok(DbSchemaMergeResultV2(candidate: proposed, conflicts: conflicts, base: base, left: left, right: right, required_checks: ["schema-v2-identity", "combined-row-constraint-closure", "old-schema-write-compatibility"]))
+
+export DbSchemaConflictV2, DbSchemaMergeResultV2
+export db_schema_operation_target_v2, db_schema_receipt_index_v2, db_schema_apply_v2, db_schema_merge_v2

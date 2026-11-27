@@ -1,0 +1,37 @@
+# Effect-free canonical ledger/retention derivation. These values are never
+# accepted as evidence of native retirement or Host settlement.
+use std.nogc_async_mut.container.providers.linux.agent_workspace_stage_v1.LinuxAgentWorkspaceCreationV1
+use std.common.contracts.orchestration.agent_workspace_invocation_v2.*
+use std.common.contracts.orchestration.resource_set_v1.{decode_resource_set, resource_set_item_identity, ResourceSetItemV1}
+use std.common.contracts.storage.linux_workspace_retention_v3.linux_workspace_retention_bytes_v3
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+
+pub fn linux_agent_creation_plan_digest_v3(plan: [text]) -> text:
+    var entries: [SdnValue] = []
+    for value in plan: entries.push(SdnValue.String(value))
+    sha256_text(sdn_encode_canonical(SdnValue.Array(entries)) + "\n")
+
+pub fn linux_agent_creation_receipts_digest_v3(receipts: [LinuxAgentWorkspaceCreationV1]) -> text:
+    var entries: [SdnValue] = []
+    for entry in receipts:
+        val fields: Dict<text, SdnValue> = {"path": SdnValue.String(entry.relative_path), "kind": SdnValue.String(entry.kind),
+            "parentIdentity": linux_workspace_retention_bytes_v3(entry.parent_identity), "identity": linux_workspace_retention_bytes_v3(entry.identity)}
+        entries.push(SdnValue.Dict(fields))
+    sha256_text(sdn_encode_canonical(SdnValue.Array(entries)) + "\n")
+
+pub fn linux_agent_invocation_retention_v3(source: text) -> Result<text, text>:
+    val invocation = agent_workspace_invocation_manifest_decode_v2(source)?
+    val resources = match decode_resource_set(invocation.base.desired_source):
+        case Ok(value): value
+        case Err(_): return Err("agent-retention-resource-set")
+    var retention = ""
+    for item in resources.items:
+        if resource_set_item_identity(item) != invocation.base.desired.resource_identity: continue
+        if retention != "": return Err("agent-retention-duplicate-session")
+        match item:
+            case ResourceSetItemV1.AgentSession(session): retention = session.workspace.retention
+            case _: return Err("agent-retention-desired-not-agent-session")
+    if retention != "retain" and retention != "retain-on-failure-or-dirty": return Err("agent-retention-policy")
+    Ok(retention)

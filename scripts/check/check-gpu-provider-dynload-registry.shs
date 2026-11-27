@@ -115,9 +115,51 @@ int64_t rt_cuda_memcpy_dtoh(int64_t dst, int64_t src, int64_t size) {
     memset((void *)(intptr_t)dst, 0x5a, 16);
     return 0;
 }
+/* Device queries answer only for the expected handle so the harness proves
+ * each forwarder passes its argument through, not merely that it links. */
+int64_t rt_cuda_device_get(int64_t id) { return id == 0 ? 5 : -1; }
+int64_t rt_cuda_device_compute_capability(int64_t device) { return device == 5 ? 121 : -1; }
+int64_t rt_cuda_device_identity(int64_t device) { return device == 5 ? 77 : 0; }
+int64_t rt_cuda_f64_slice_2d(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
+        int64_t a6, int64_t a7, int64_t a8, int64_t a9) {
+    return a1 + 2 * a2 + 3 * a3 + 4 * a4 + 5 * a5 + 6 * a6 + 7 * a7 + 8 * a8 + 9 * a9;
+}
+int64_t rt_cuda_module_load_data(const uint8_t *ptx, uint64_t len) {
+    return ptx && len == 3 && memcmp(ptx, "ptx", 3) == 0 ? 3 : -1;
+}
+int64_t rt_cuda_launch_kernel(int64_t module, const uint8_t *name, uint64_t len,
+        int64_t gx, int64_t gy, int64_t gz, int64_t bx, int64_t by, int64_t bz, int64_t args) {
+    if (!name || len != 4 || memcmp(name, "kern", 4) != 0) return -1;
+    return module + 2 * gx + 3 * gy + 4 * gz + 5 * bx + 6 * by + 7 * bz + 8 * args;
+}
+int64_t rt_cuda_module_get_function(int64_t module, const char *name) {
+    return name && strcmp(name, "kern") == 0 ? module + 40 : -1;
+}
+const char fake_cuda_name_storage[] = "fake-cuda";
+#ifdef REENTRANT_LOAD
+#include <dlfcn.h>
+/* A provider constructor that calls back into the loader it is being loaded
+ * by: the loader thread must not wait on itself. */
+int64_t fake_reentry_result = 99;
+__attribute__((constructor)) static void reentrant_provider_load(void) {
+    int64_t (*init)(void) = (int64_t (*)(void))dlsym(RTLD_DEFAULT, "rt_cuda_init");
+    fake_reentry_result = init ? init() : 98;
+}
+#endif
+#ifdef SLOW_LOAD
+#include <dlfcn.h>
+#include <stdatomic.h>
+#include <time.h>
+/* Widens the LOADING window so a second thread's first call lands in it,
+ * and tells the harness (if it exports the flag) that LOADING has begun. */
+__attribute__((constructor)) static void slow_provider_load(void) {
+    struct timespec delay = {0, 200000000};
+    atomic_int *started = (atomic_int *)dlsym(RTLD_DEFAULT, "fake_loading_started");
+    if (started) atomic_store(started, 1);
+    nanosleep(&delay, 0);
+}
+#endif
 #define STUB(name) int64_t name(void) { return 0; }
-STUB(rt_cuda_device_get)
-STUB(rt_cuda_device_compute_capability)
 STUB(rt_cuda_ctx_create)
 STUB(rt_cuda_ctx_set_current)
 STUB(rt_cuda_ctx_destroy)
@@ -132,26 +174,99 @@ STUB(rt_cuda_module_load_data_bytes)
 STUB(rt_cuda_module_unload)
 STUB(rt_cuda_launch_kernel_name)
 STUB(rt_cuda_sync)
-const char *rt_cuda_device_name(int64_t device) { (void)device; return "fake-cuda"; }
+const char *rt_cuda_device_name(int64_t device) { return device == 5 ? fake_cuda_name_storage : "bad"; }
 const char *rt_cuda_get_error_string(int64_t code) { (void)code; return "fake-error"; }
 EOF
 
 cat >"$TMP/cuda_harness.c" <<'EOF'
+#include <dlfcn.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
 int64_t rt_gpu_provider_loaded(int64_t);
 int64_t rt_cuda_available(void);
 int64_t rt_cuda_init(void);
 int64_t rt_cuda_mem_alloc(int64_t);
 int64_t rt_cuda_memset_d32(int64_t, int64_t, int64_t);
 int64_t rt_cuda_memcpy_dtoh(int64_t, int64_t, int64_t);
+int64_t rt_cuda_device_get(int64_t);
+int64_t rt_cuda_device_compute_capability(int64_t);
+int64_t rt_cuda_device_identity(int64_t);
+const char *rt_cuda_device_name(int64_t);
+const char *rt_cuda_get_error_string(int64_t);
+int64_t rt_cuda_f64_slice_2d(int64_t, int64_t, int64_t, int64_t, int64_t,
+    int64_t, int64_t, int64_t, int64_t);
+int64_t rt_cuda_module_load_data(const uint8_t *, uint64_t);
+int64_t rt_cuda_launch_kernel(int64_t, const uint8_t *, uint64_t, int64_t, int64_t,
+    int64_t, int64_t, int64_t, int64_t, int64_t);
+atomic_int fake_loading_started;
+int64_t rt_cuda_module_get_function(int64_t, const char *);
+static int64_t race_results[2];
+static void *race_init(void *slot) {
+    *(int64_t *)slot = rt_cuda_init();
+    return 0;
+}
 int main(int argc, char **argv) {
     uint32_t words[4] = {0, 0, 0, 0};
     int64_t ptr;
     int64_t fill;
     int64_t dtoh;
-    if (argc != 2 || setenv("SIMPLE_CUDA_PROVIDER_PATH", argv[1], 1) != 0) return 2;
+    int64_t device;
+    const char *name;
+    void *provider;
+    if (argc < 2 || setenv("SIMPLE_CUDA_PROVIDER_PATH", argv[1], 1) != 0) return 2;
+    if (argc == 3 && strcmp(argv[2], "race") == 0) {
+        /* Two first calls at once: the one that finds LOADING must wait. */
+        pthread_t a, b;
+        if (pthread_create(&a, 0, race_init, &race_results[0]) != 0 ||
+                pthread_create(&b, 0, race_init, &race_results[1]) != 0) return 2;
+        pthread_join(a, 0);
+        pthread_join(b, 0);
+        printf("race=%lld,%lld\n", (long long)race_results[0], (long long)race_results[1]);
+        return 0;
+    }
+    if (argc == 3 && strcmp(argv[2], "reentry") == 0) {
+        int64_t init_rc;
+        alarm(5);
+        init_rc = rt_cuda_init();
+        provider = dlopen(argv[1], RTLD_NOW | RTLD_NOLOAD);
+        printf("reentry=%lld init=%lld\n",
+            provider && dlsym(provider, "fake_reentry_result") ?
+                (long long)*(int64_t *)dlsym(provider, "fake_reentry_result") : -1LL,
+            (long long)init_rc);
+        return 0;
+    }
+    if (argc == 3 && strcmp(argv[2], "fork") == 0) {
+        /* Fork while another thread is LOADING: the child can never see that
+         * load finish, so its first call must answer "unavailable" (3), not
+         * hang. alarm() turns a hang into SIGALRM. */
+        pthread_t a;
+        struct timespec poll = {0, 1000000};
+        int waited = 0;
+        int status = 0;
+        pid_t child;
+        if (pthread_create(&a, 0, race_init, &race_results[0]) != 0) return 2;
+        /* Fork only once the provider constructor reports LOADING. */
+        while (!atomic_load(&fake_loading_started) && waited++ < 5000) nanosleep(&poll, 0);
+        if (!atomic_load(&fake_loading_started)) return 2;
+        child = fork();
+        if (child == 0) {
+            alarm(5);
+            _exit((int)rt_cuda_init());
+        }
+        if (child < 0 || waitpid(child, &status, 0) != child) return 2;
+        pthread_join(a, 0);
+        printf("fork_child=%s parent=%lld\n",
+            WIFEXITED(status) ? (WEXITSTATUS(status) == 3 ? "3" : "other") : "killed",
+            (long long)race_results[0]);
+        return 0;
+    }
     ptr = rt_cuda_mem_alloc(16);
     fill = rt_cuda_memset_d32(ptr, 0x5a5a5a5a, 4);
     dtoh = rt_cuda_memcpy_dtoh((int64_t)(intptr_t)words, ptr, 16);
@@ -159,6 +274,22 @@ int main(int argc, char **argv) {
         (long long)rt_gpu_provider_loaded(1), (long long)rt_cuda_available(),
         (long long)rt_cuda_init(), (long long)ptr,
         (long long)fill, (long long)dtoh, words[0]);
+    device = rt_cuda_device_get(0);
+    printf("dev=%lld cc=%lld id=%lld name=%s err=%s slice2d=%lld module=%lld\n",
+        (long long)device, (long long)rt_cuda_device_compute_capability(device),
+        (long long)rt_cuda_device_identity(device), rt_cuda_device_name(device),
+        rt_cuda_get_error_string(-100),
+        (long long)rt_cuda_f64_slice_2d(1, 2, 3, 4, 5, 6, 7, 8, 9),
+        (long long)rt_cuda_module_load_data((const uint8_t *)"ptx", 3));
+    /* The returned name must be a runtime-owned copy, never the provider's
+     * own storage (which an unload would unmap). */
+    name = rt_cuda_device_name(device);
+    provider = dlopen(argv[1], RTLD_NOW | RTLD_NOLOAD);
+    printf("launch=%lld fn=%lld name_owned=%d\n",
+        (long long)rt_cuda_launch_kernel(1, (const uint8_t *)"kern", 4, 1, 1, 1, 1, 1, 1, 1),
+        (long long)rt_cuda_module_get_function(2, "kern"),
+        provider && dlsym(provider, "fake_cuda_name_storage") != (void *)name &&
+            strcmp(name, "fake-cuda") == 0 ? 1 : 0);
     return 0;
 }
 EOF
@@ -277,6 +408,8 @@ cc -shared -fPIC -DPROVIDER_ABI=99 "$TMP/provider.c" -o "$TMP/wrong.so"
 cc -shared -fPIC -DOMIT_PIPELINE_RAW "$TMP/provider.c" -o "$TMP/incomplete.so"
 cc -shared -fPIC "$TMP/cuda_provider.c" -o "$TMP/cuda_provider.so"
 cc -shared -fPIC -DOMIT_CUDA_DTOD "$TMP/cuda_provider.c" -o "$TMP/cuda_incomplete.so"
+cc -shared -fPIC -DSLOW_LOAD "$TMP/cuda_provider.c" -o "$TMP/cuda_slow.so" -ldl
+cc -shared -fPIC -DREENTRANT_LOAD "$TMP/cuda_provider.c" -o "$TMP/cuda_reentrant.so" -ldl
 cc -D_GNU_SOURCE -std=gnu11 -O0 -ffunction-sections -fdata-sections \
     -DSIMPLE_RUNTIME_DYNLOAD_OWNER=1 \
     -I"$ROOT/src/runtime" -I"$ROOT/src/runtime/platform" \
@@ -287,7 +420,7 @@ cc -D_GNU_SOURCE -std=gnu11 -O0 -ffunction-sections -fdata-sections \
 cc -Wl,--gc-sections "$TMP/harness.c" "$TMP/runtime_native.o" \
     "$TMP/runtime_dynload.o" -ldl -lm -pthread -o "$TMP/harness"
 cc -Wl,--gc-sections "$TMP/cuda_harness.c" "$TMP/runtime_native.o" \
-    "$TMP/runtime_dynload.o" -ldl -lm -o "$TMP/cuda_harness"
+    "$TMP/runtime_dynload.o" -ldl -lm -pthread -Wl,--export-dynamic-symbol=rt_cuda_init -Wl,--export-dynamic-symbol=fake_loading_started -o "$TMP/cuda_harness"
 cc -Wl,--gc-sections "$TMP/demand_harness.c" "$TMP/runtime_native.o" \
     "$TMP/runtime_dynload.o" -ldl -lm -o "$TMP/demand_harness"
 
@@ -309,6 +442,9 @@ missing="$($TMP/harness "$TMP/missing.so" "$TMP/missing.so")"
 incomplete="$($TMP/harness "$TMP/incomplete.so" "$TMP/incomplete.so")"
 cuda_good="$($TMP/cuda_harness "$TMP/cuda_provider.so")"
 cuda_incomplete="$($TMP/cuda_harness "$TMP/cuda_incomplete.so")"
+cuda_race="$($TMP/cuda_harness "$TMP/cuda_slow.so" race)"
+cuda_fork="$($TMP/cuda_harness "$TMP/cuda_slow.so" fork)"
+cuda_reentry="$($TMP/cuda_harness "$TMP/cuda_reentrant.so" reentry)"
 [ "$good" = "loaded=1 abi=1 bits=2 path=1 available=1 count=7 vk=1 init=1 buffer=73
 concurrent=1
 unloaded=1 reloaded=1 count=9 buffer=88 path=1" ]
@@ -317,8 +453,19 @@ concurrent=0
 unloaded=1 reloaded=0 count=0 buffer=0 path=0" ]
 [ "$missing" = "$bad" ]
 [ "$incomplete" = "$bad" ]
-[ "$cuda_good" = "loaded=1 available=1 init=0 ptr=91 fill=0 dtoh=0 word=5a5a5a5a" ]
-[ "$cuda_incomplete" = "loaded=0 available=0 init=3 ptr=-3 fill=-3 dtoh=-3 word=00000000" ]
+[ "$cuda_good" = "loaded=1 available=1 init=0 ptr=91 fill=0 dtoh=0 word=5a5a5a5a
+dev=5 cc=121 id=77 name=fake-cuda err=CUDA_ERROR_NO_DEVICE slice2d=285 module=3
+launch=36 fn=42 name_owned=1" ]
+# A second first-call that lands in LOADING waits for the loader, never "unavailable".
+[ "$cuda_race" = "race=0,0" ]
+# A fork child of a process mid-load fails the load instead of waiting forever.
+[ "$cuda_fork" = "fork_child=3 parent=0" ]
+# The loader thread re-entering during its own load answers "unavailable".
+[ "$cuda_reentry" = "reentry=3 init=0" ]
+# Rejected provider: every query takes the Rust non-cuda twin's sentinel.
+[ "$cuda_incomplete" = "loaded=0 available=0 init=3 ptr=-3 fill=-3 dtoh=-3 word=00000000
+dev=-3 cc=0 id=0 name=No CUDA err=CUDA_ERROR_NO_DEVICE slice2d=-3 module=-3
+launch=-3 fn=-3 name_owned=0" ]
 
 if command -v readelf >/dev/null 2>&1; then
     if readelf -d "$TMP/harness" | grep -Fq 'provider.so'; then
@@ -343,6 +490,11 @@ printf '%s\n' \
     "gpu_provider_replacement_without_host_rebuild=true" \
     "gpu_provider_concurrent_registry_access=true" \
     "cuda_provider_operation_dispatch=true" \
+    "cuda_provider_device_query_dispatch=true" \
+    "cuda_provider_concurrent_first_call_waits=true" \
+    "cuda_provider_fork_child_never_waits=true" \
+    "cuda_provider_loader_reentry_never_waits=true" \
+    "cuda_provider_device_name_runtime_owned=true" \
     "cuda_provider_incomplete_surface_rejected=true" \
     "cuda_provider_missing_operation_fails_closed=true" \
     "gpu_provider_missing_rejected=true" \

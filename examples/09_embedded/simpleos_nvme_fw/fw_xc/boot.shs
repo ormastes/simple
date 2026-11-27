@@ -1,0 +1,42 @@
+#!/bin/sh
+# Boot the fw_xc NVMe FW images on QEMU and require the serial PASS line.
+#
+# Lanes (never QEMU -kernel, never isa-debug-exit; .claude/rules/board-runnable.md):
+#   riscv32/riscv64: the image IS the M-mode firmware, booted from the virt
+#     reset ROM via `-bios <elf>` (same position as OpenSBI on a board).
+#   thumbv7em: Cortex-M reset from the image's vector table (mps2-an386),
+#     loaded with `-device loader`; MCU firmware has no firmware layer below it.
+#   x86_64/aarch64: real UEFI firmware (OVMF/AAVMF) via
+#     `BM_SRC=.../fw_xc/main.spl sh scripts/check/check-baremetal-efi-boot.shs`.
+#   i686: no IA32 UEFI firmware on the host -> build-only (blocker filed).
+#
+# Usage: sh examples/09_embedded/simpleos_nvme_fw/fw_xc/boot.shs [--dir DIR] [arch...]
+# Verdict (last line): PASS -- <n> booted / FAIL -- ... / ERROR -- nothing was checked
+set -u
+dir=build/nvme_fw_xc
+[ "${1:-}" = --dir ] && { dir=$2; shift 2; }
+arches=${*:-"riscv32 riscv64 thumbv7em"}
+T=${XC_BOOT_TIMEOUT_S:-10}
+booted=0; checked=0; bad=""
+for a in $arches; do
+    elf="$dir/nvme_fw_xc_$a.elf"; log="$dir/serial_$a.log"; rm -f "$log"
+    [ -s "$elf" ] || { echo "[$a] missing $elf"; bad="$bad $a(missing)"; continue; }
+    case $a in
+        riscv32) q="qemu-system-riscv32 -machine virt -cpu rv32 -m 64M -bios $elf" ;;
+        riscv64) q="qemu-system-riscv64 -machine virt -m 64M -bios $elf" ;;
+        thumbv7em) q="qemu-system-arm -machine mps2-an386 -device loader,file=$elf" ;;
+        *) echo "[$a] no reset-vector lane here"; bad="$bad $a(no-lane)"; continue ;;
+    esac
+    # shellcheck disable=SC2086
+    timeout "$T" $q -nographic -monitor none -serial "file:$log" </dev/null >/dev/null 2>&1
+    checked=$((checked + 1))
+    if grep -a -q "SimpleOS NVMe FW PASS" "$log" 2>/dev/null; then
+        echo "[$a] $(grep -a -o 'SimpleOS NVMe FW PASS' "$log" | head -1)"; booted=$((booted + 1))
+    else
+        echo "[$a] no PASS line: $(tr -c '[:print:]' '.' < "$log" 2>/dev/null | head -c 120)"; bad="$bad $a(boot)"
+    fi
+done
+[ $checked -gt 0 ] || { echo "ERROR -- nothing was checked"; exit 2; }
+[ -z "$bad" ] || { echo "FAIL -- $booted of $checked booted; failed:$bad"; exit 1; }
+echo "PASS -- $booted image(s) booted, serial PASS line seen"
+exit 0

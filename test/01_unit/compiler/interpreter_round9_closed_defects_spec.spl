@@ -1,0 +1,146 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler_rust/compiler/src/interpreter 0%
+"""
+# Interpreter defects closed as already-fixed (round 9)
+
+**Category:** Language / Interpreter
+**Status:** Regression guard
+
+## Purpose and Audience
+
+Pins the observable behaviour of four interpreter defect records that no longer
+reproduce on the seed, so a regression is caught by a spec rather than by a
+re-filed bug:
+
+- `interp_trait_slot_receiver_reboxed_per_call_mutation_loss_2026-07-07`:
+  a `me` method reached through a module-level `Trait?` slot accumulates state
+  when the slot is re-read for every call.
+- `interp_option_dict_return_erased_2026-07-16`: `-> Dict<K,V>?` keeps its
+  `Some` payload; `.?` on the EMPTY dict is nil by the documented
+  present-and-non-empty rule, which is what the record mistook for erasure.
+- `interpreter_i64_dict_tuple_compare_and_me_fn_mutation_2026-08-31`: `i64` keys
+  and values from `for (k, v) in dict` compare normally, and a nested `me fn`
+  call reaches the caller's `self`.
+- `interp_debug_session_remove_breakpoint_lies_and_set_state_frozen_2026-08-18`:
+  mutating a class value bound out of a dict field is visible through the dict.
+
+The audience is anyone touching interpreter value representation.
+"""
+
+use std.spec.step
+
+use std.spec.*
+
+trait R9Counter:
+    me bump() -> i64
+
+class R9Impl:
+    n: i64
+
+impl R9Counter for R9Impl:
+    me bump() -> i64:
+        self.n = self.n + 1
+        self.n
+
+var r9_slot: R9Counter? = nil
+
+fn r9_step() -> i64:
+    if val p = r9_slot.?:
+        return p.bump()
+    -1
+
+fn r9_opt_dict() -> Dict<i64, i64>?:
+    var h: Dict<i64, i64> = {}
+    Some(h)
+
+class R9Index:
+    postings: Dict<text, Dict<i64, i64>>
+    n: i64
+    me inner_remove(row: i64):
+        self.n = self.n + 1
+        var m = self.postings["t"]
+        m.remove(row)
+        self.postings["t"] = m
+    me outer_update(row: i64):
+        self.inner_remove(row)
+        self.n = self.n + 10
+
+class R9Session:
+    marks: [i64]
+    state: i64
+
+class R9Mgr:
+    sessions: {text: R9Session}
+
+impl R9Mgr:
+    fn drop_mark(id: text, m: i64) -> bool:
+        if self.sessions.contains_key(id):
+            val s = self.sessions[id]
+            val before = s.marks.len()
+            s.marks = s.marks.filter(_1 != m)
+            s.marks.len() < before
+        else:
+            false
+
+describe "interpreter round 9 closed defects":
+    # @manual scenario evidence
+
+    it "accumulates state through a Trait? module slot re-read per call":
+        # @req REQ-SSPEC-COMPILER
+        step("accumulates state through a Trait? module slot re-read per call")
+        r9_slot = Some(R9Impl(n: 0))
+        expect(r9_step()).to_equal(1)
+        expect(r9_step()).to_equal(2)
+        expect(r9_step()).to_equal(3)
+
+    it "keeps the Some payload of an Option<Dict> return":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps the Some payload of an Option<Dict> return")
+        val p = r9_opt_dict()
+        var seen_some = false
+        match p:
+            case Some(x):
+                seen_some = x.len() == 0
+            case nil:
+                seen_some = false
+        expect(seen_some).to_equal(true)
+
+    it "compares i64 keys and values taken from a dict iteration tuple":
+        # @req REQ-SSPEC-COMPILER
+        step("compares i64 keys and values taken from a dict iteration tuple")
+        var d: Dict<i64, i64> = {}
+        d[3] = 9
+        d[5] = 2
+        val target: i64 = 5
+        var eq_hits = 0
+        var lt_hits = 0
+        var bad_vals = 0
+        for (k, v) in d:
+            if k == target:
+                eq_hits = eq_hits + 1
+            if k < target:
+                lt_hits = lt_hits + 1
+            if v != 9 and v != 2:
+                bad_vals = bad_vals + 1
+        expect(eq_hits).to_equal(1)
+        expect(lt_hits).to_equal(1)
+        expect(bad_vals).to_equal(0)
+
+    it "propagates a nested me fn call to the caller self":
+        # @req REQ-SSPEC-COMPILER
+        step("propagates a nested me fn call to the caller self")
+        var rm: Dict<i64, i64> = {}
+        rm[3] = 9
+        rm[5] = 2
+        var idx = R9Index(postings: {"t": rm}, n: 0)
+        idx.outer_update(3)
+        expect(idx.n).to_equal(11)
+        expect(idx.postings["t"].len()).to_equal(1)
+
+    it "makes a class value bound out of a dict field a live reference":
+        # @req REQ-SSPEC-COMPILER
+        step("makes a class value bound out of a dict field a live reference")
+        val g = R9Mgr(sessions: {"a": R9Session(marks: [1, 2], state: 0)})
+        expect(g.drop_mark("a", 1)).to_equal(true)
+        expect(g.sessions["a"].marks.len()).to_equal(1)

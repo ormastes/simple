@@ -1,0 +1,26 @@
+# SOSIX Darwin Seatbelt activation: the HOST/FFI half (sandbox_init pair). Pure policy (types, admission,
+# receipt decode, error sanitize) lives in std.common.container_policy.darwin_sandbox_policy_v1 and is
+# re-exported here under the same names. Activation is irreversible and process-wide: only the minimal
+# trusted worker may call it, immediately before exec; a refusal is final.
+# ponytail: N3 deviation - this host fn stays at nogc_async_mut/sosix (not sosix/macos/) because
+# existing importers and specs name it here, and a pub name under a variant dir would count against
+# the platform-variant api gate (207 cap).
+use std.common.container_policy.darwin_sandbox_policy_v1.{SosixDarwinSandboxStatusV1, SosixDarwinSandboxResultV1, sosix_darwin_sandbox_profile_admissible_v1, sosix_darwin_sandbox_decode_v1}
+export use std.common.container_policy.darwin_sandbox_policy_v1.{SosixDarwinSandboxStatusV1, SosixDarwinSandboxResultV1, sosix_darwin_sandbox_profile_admissible_v1, sosix_darwin_sandbox_sanitize_error_v1, sosix_darwin_sandbox_decode_v1}
+
+@when(os="macos"):
+@unsafe(reason: "irreversible process-wide Seatbelt activation; bounded preallocated receipt", capabilities: [ffi])
+extern fn sosix_darwin_sandbox_apply_profile_v1(profile: [u8]) -> [i64]?
+@end
+
+# Apply a compiled SBPL profile to the calling process. Never call from a
+# general-purpose process: success cannot be undone.
+pub fn sosix_darwin_sandbox_apply_v1(profile: [u8]) -> SosixDarwinSandboxResultV1:
+    @when(os="macos"):
+    if not sosix_darwin_sandbox_profile_admissible_v1(profile):
+        return SosixDarwinSandboxResultV1(SosixDarwinSandboxStatusV1.InvalidProfile, "sandbox_profile_invalid")
+    val raw = unsafe(capabilities: [ffi]): sosix_darwin_sandbox_apply_profile_v1(profile)
+    return sosix_darwin_sandbox_decode_v1(raw)
+    @else:
+    return SosixDarwinSandboxResultV1(SosixDarwinSandboxStatusV1.Unsupported, "sandbox_unsupported_host")
+    @end

@@ -1,0 +1,78 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Untyped array literal records its element type (capmap t1_forcoll)
+
+`val xs = [1, 2, 3]` then `for (i, x) in xs.enumerate():` used to fail MIR
+lowering with "array.enumerate() unsupported in stage2 (element type not
+statically known)" because an unannotated array literal never recorded an
+Array(elem) HIR type on its local. Homogeneous int/float/string literal arrays
+now record it; empty and mixed literals stay fail-closed.
+"""
+
+# @tag: unit, compiler, mir, stage2
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lower_src(source: text) -> text:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: source, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["hir"] = hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "hir")
+    val mir = mir_lowering.lower_module(hir, [hir])
+    var out = ""
+    for e in lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    print "errors: [{out}]"
+    out
+
+val NOT_KNOWN = "element type is not statically known"
+
+describe "untyped array literal enumerate element type":
+    it "REPRO: val xs = [1, 2, 3] enumerates":
+        val out = lower_src("fn f() -> i64:\n    val xs = [1, 2, 3]\n    var t = 0\n    for (i, x) in xs.enumerate():\n        t = t + i + x\n    t\n")
+        expect(out.contains(NOT_KNOWN)).to_equal(false)
+
+    it "float literal array enumerates":
+        val out = lower_src("fn f() -> i64:\n    val xs = [1.5, 2.5]\n    var t = 0\n    for (i, x) in xs.enumerate():\n        t = t + i\n    t\n")
+        expect(out.contains(NOT_KNOWN)).to_equal(false)
+
+    it "string literal array enumerates":
+        val out = lower_src("fn f() -> i64:\n    val xs = [\"a\", \"b\"]\n    var t = 0\n    for (i, x) in xs.enumerate():\n        t = t + i\n    t\n")
+        expect(out.contains(NOT_KNOWN)).to_equal(false)
+
+    it "annotated val xs: [i64] still enumerates":
+        val out = lower_src("fn f() -> i64:\n    val xs: [i64] = [1, 2, 3]\n    var t = 0\n    for (i, x) in xs.enumerate():\n        t = t + i + x\n    t\n")
+        expect(out.contains(NOT_KNOWN)).to_equal(false)
+
+    it "var binding mutated later still records":
+        val out = lower_src("fn f() -> i64:\n    var xs = [1, 2, 3]\n    xs.push(4)\n    var t = 0\n    for (i, x) in xs.enumerate():\n        t = t + i + x\n    t\n")
+        expect(out.contains(NOT_KNOWN)).to_equal(false)
+
+    it "PREVENTION: empty literal stays fail-closed":
+        val out = lower_src("fn f() -> i64:\n    val xs = []\n    var t = 0\n    for (i, x) in xs.enumerate():\n        t = t + i\n    t\n")
+        expect(out.contains(NOT_KNOWN)).to_equal(true)
+
+    it "PREVENTION: mixed literal stays fail-closed":
+        val out = lower_src("fn f() -> i64:\n    val xs = [1, \"a\"]\n    var t = 0\n    for (i, x) in xs.enumerate():\n        t = t + i\n    t\n")
+        expect(out.contains(NOT_KNOWN)).to_equal(true)

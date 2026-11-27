@@ -1,0 +1,87 @@
+"""
+# @req REQ-SSPEC-OS
+# @cover src/os/apps/sshd/sshd.spl
+# @cover src/os/kernel/net/rt_net_socket_facade.spl
+#
+# Host unit specification for BF-9 Bug #10:
+#   simpleos_x64_ssh_live_banner_exchange_timeout_2026-06-29
+#
+# Verifies x86_64/hosted/rv64 transport selection, C-ABI tagged status decode,
+# exact 22-byte SSH banner wire bytes, identification polling/validation,
+# encrypted read plan sizing, and @when baremetal/host routing invariants.
+"""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{file_read}
+use os.apps.sshd.sshd.{
+    SshDaemon, sshd_selected_listener_transport_for_test,
+    decode_net_runtime_i32, decode_net_runtime_fd, normalize_boot_tcp_client_fd
+}
+use os.kernel.net.rt_net_socket_facade.{
+    rt_net_ssh_banner_wire_bytes,
+    rt_net_decode_x64_status,
+    rt_net_ssh_identification_poll_action,
+    rt_net_ssh_identification_line_allowed,
+    rt_net_ssh_encrypted_read_plan
+}
+
+fn _ascii_bytes(s: text) -> [u8]:
+    var out: [u8] = []
+    for b in s.bytes():
+        out.push(b)
+    out
+
+describe "SimpleOS x86_64 SSH live banner and socket facade routing":
+    it "selects hosted transport on host and documents x86_64 baremetal routing":
+        step("check listener transport selection and @when source routing")
+        expect(sshd_selected_listener_transport_for_test()).to_equal("hosted")
+
+        val sshd_src = file_read("src/os/apps/sshd/sshd.spl")
+        expect(sshd_src).to_contain("@elif((baremetal or simpleos) and x86_64):")
+        expect(sshd_src).to_contain("rt_net_listen(sock_fd, 8)")
+        expect(sshd_src).to_contain("rt_net_accept(listen_fd)")
+
+        val facade_src = file_read("src/os/kernel/net/rt_net_socket_facade.spl")
+        expect(facade_src).to_contain("@when(not((baremetal or simpleos) and x86_64)):")
+        expect(facade_src).to_contain("extern fn rt_net_socket(proto: i64) -> i64")
+        expect(facade_src).to_contain("rt_net_ssh_banner_wire_bytes()")
+
+    it "builds exact 22-byte SSH-2.0 banner and decodes x86_64 tagged statuses":
+        step("verify wire banner matches SSH-2.0-SimpleOS_1.0 CRLF and status decoder handles negative ENCODE_INT")
+        val banner = rt_net_ssh_banner_wire_bytes()
+        expect(banner).to_equal(_ascii_bytes("SSH-2.0-SimpleOS_1.0\r\n"))
+        expect(rt_net_decode_x64_status(0)).to_equal(0)
+        expect(rt_net_decode_x64_status(8)).to_equal(1)
+        expect(rt_net_decode_x64_status(-88)).to_equal(-11)
+        expect(rt_net_decode_x64_status(-1)).to_equal(-1)
+        expect(decode_net_runtime_i32(8)).to_equal(1i32)
+        expect(decode_net_runtime_fd(16)).to_equal(2)
+        expect(normalize_boot_tcp_client_fd(0)).to_equal(200)
+
+    it "validates identification poll transitions and encrypted read plans":
+        step("verify identification line bounds and encrypted SSH GCM length sizing")
+        expect(rt_net_ssh_identification_poll_action(0u64, 0u64, -1)).to_equal(0)
+        expect(rt_net_ssh_identification_poll_action(14u64, 0u64, 10)).to_equal(2)
+        expect(rt_net_ssh_identification_poll_action(255u64, 0u64, 10)).to_equal(-1)
+        expect(rt_net_ssh_identification_line_allowed(_ascii_bytes("SSH-2.0-OpenSSH_9.6"))).to_equal(true)
+        expect(rt_net_ssh_identification_line_allowed(_ascii_bytes("HTTP/1.1"))).to_equal(false)
+
+        val plan = rt_net_ssh_encrypted_read_plan(64u32)
+        expect(plan.is_some()).to_equal(true)
+        expect(plan.unwrap().remaining_read_bytes).to_equal(80u64)
+        expect(plan.unwrap().total_frame_bytes).to_equal(84u64)
+        expect(rt_net_ssh_encrypted_read_plan(1u32)).to_be_nil()
+
+    it "binds and closes SshDaemon cleanly on hosted ephemeral port":
+        step("confirm bind_and_ready/stop lifecycle still operates cleanly on host")
+        var daemon = SshDaemon.new(0)
+        match daemon.bind_and_ready():
+            Ok(_):
+                expect(daemon.running).to_equal(true)
+                expect(daemon.listen_fd >= 0).to_equal(true)
+                daemon.stop()
+                expect(daemon.running).to_equal(false)
+                expect(daemon.listen_fd).to_equal(-1)
+            Err(err):
+                expect("hosted bind_and_ready failed: {err}").to_equal("")

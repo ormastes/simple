@@ -1,0 +1,171 @@
+# Erased generic `-> T` tail `.unwrap()` int-boxes a record payload (Stage 3 MIR SIGSEGV)
+
+- **Date:** 2026-11-19
+- **Status:** `ROOT-FIXED+STAGE2-GATED` — root cause fixed in `src/compiler/50.mir`
+  (`method_calls_literals.spl`, `expr_dispatch.spl`, `switch_operators_calls.spl`);
+  the `# @workaround bug=stage2_generic_tail_unwrap_reboxes_record_2026-11-19`
+  concrete typed payload owners in `expr_dispatch.spl` and `core_codegen.spl`
+  remain Stage-2-gated for one bootstrap hop past `162c481782f` because the
+  current Stage 2/3 seed (`162c481782f`) still emits `rt_value_int_wide` in
+  `generic_unwrap_req<T>` and shifts raw `i64` (`77 >> 3 = 9`) on
+  `Node.PairNum(77, ...)`.
+- **Lane:** Stage 2 (integ18, cranelift) -> Stage 3 -> Stage 3 self-build, aarch64 Linux
+- **Source pin:** release/1.0.0 `cbff0ece9e8`
+- **Family:** `stage3_array_copy_unique_static_leaf_2026-11-19.md`,
+  `optional_record_array_store_keeps_option_box_2026-11-19.md`
+
+## Symptom
+
+The Stage 3 self-build passes parse, surface and HIR of all 1599 modules. Then the first
+MIR shard worker dies:
+
+```
+[mir-shard] owner=0/14@0 status=CRASH exit=-139 ... signal=SIGSEGV(11)
+ICE[mir_lower] module compiler.mir._MirLoweringExpr.switch_operators_calls (attributed)
+```
+
+Worker 1 died the same way on `expr_dispatch`. Neither module is the cause: any index
+read crashes Stage 3 MIR lowering. A 3-line `val a = [1, 2]; val x = a[1]` program is
+enough. Stage 3's LLVM codegen also SIGSEGVs, even on hello world (same helper in
+`core_codegen.spl`).
+
+## Backtrace (Stage 3, gdb)
+
+```
+#0 MirLowering.lower_index_expr            +0xdc  ldr x5,[x5]   x5 = 0x55555a794bf08
+#1 MirLowering.lower_index_expr_from_hir
+#2 lower_expr_impl <- lower_expr <- lower_expr_for_slot <- lower_stmt_impl <- lower_block
+   <- lower_function <- lower_module ...
+```
+
+The fault is in `lower_index_expr`'s prologue, where it copies the `base: HirExpr`
+argument. The caller passed a non-pointer word.
+
+## Root cause
+
+`lower_index_expr_from_hir` reads the Index children through
+`_sffi_tuple_get_req<HirExpr>(payload, 0)`.
+
+```
+fn _sffi_tuple_get_req<T>(tuple: i64, index: i64) -> T:
+    compiler_value_tuple_at<T>(tuple, index).unwrap()
+```
+
+Generics have one erased body. Stage 2 lowered this body as follows. The disassembly of
+`expr_dispatch._sffi_tuple_get_req` in the Stage 3 binary shows it:
+
+1. `compiler_value_tuple_at`, then `rt_is_some` / `rt_panic` / `rt_unwrap_or_self`
+   (`.unwrap()`, `method_calls_literals.spl` Option arm). The inner type is `TypeParam`,
+   so `lower_type` gives `I64`, `enum_payload_value` passes the word through unchanged,
+   and the result is not marked as a runtime value.
+2. The `-> T` tail (`function_lowering.spl`, `case Any | TypeParam`) calls
+   `box_runtime_value`. That sees an unmarked `I64` local and emits
+   `rt_value_int_wide(word)`, boxing the record handle as an integer.
+
+An integer `T` round-trips correctly. A record, text or array `T` comes back as a
+shifted garbage word. The `if val present = ...: return present` form is lowered
+correctly for all four kinds.
+
+## Fixture (`test/fixtures/native_generic_tail_unwrap_record/main.spl`)
+
+The fixture has the same shape as the compiler helper: an enum payload tuple, a generic
+`get_req<T>` with a tail `.unwrap()`, and `T` = a record. Results with `check_fx.sh`
+(seed interpreter vs integ18 Stage 2):
+
+| variant | cranelift | llvm |
+|---|---|---|
+| tail `tuple_at<T>(..).unwrap()` (fixture) | run=139, no output | run=139 |
+| `if val present = ..: return present` + `panic` | SAME | SAME |
+| same, `rt_tuple_get` inside `unsafe` (backend shape) | SAME | SAME |
+| `fn req<T>(v: T?) -> T: v.unwrap()`, T=i64 | SAME | SAME |
+| same, T=text / T=record | run=139 | run=139 |
+| same body as `match v: case Some(x): x` | run=139 | run=139 |
+
+Seed output: `1 left 2 right`.
+
+## Workaround
+
+Both `_sffi_tuple_get_req` copies now use the `if val` + explicit `return` + `panic` form:
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` and
+`src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl`. These are the only two
+generic `-> T` functions in `src/compiler`, `src/app` and `src/lib` whose tail is
+`.unwrap()`. The new form adds no call on the hot path: one presence test, as before.
+
+## Lowering fix (2026-11-19)
+
+**The fixture's shape is ambiguous inside the erased body.** `rt_tuple_get` returns
+the stored tuple word verbatim, and an enum payload tuple stores RAW scalars
+(`NI.Two(7, 9)` lowers to `rt_tuple_set(t, 0, 7)`, no `Shl`/`rt_value_int_wide`).
+So in `get_req<T>` the unwrapped word is a raw 7 for `T=i64` and a handle for
+`T=Pair`; the tail box is right for the first and wrong for the second, and the
+erased body cannot tell them apart. Marking that word as a runtime value would
+make `get_req<i64>` return 7 and its caller decode `7 >> 3 = 0`. Every in-tree
+instantiation of `_sffi_tuple_get_req` is a record or enum (`HirExpr` x7,
+`LocalId` x4, `AggregateKind`, `MirConstValue`, `MirType`), so for that shape the
+`if val` + `return` workaround is the fix, not a stopgap.
+
+**What is fixed (MIR):** `option_unwrap_payload_is_erased_tagged_v1`
+(`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`) marks the
+`.unwrap()` result as a runtime value only for a direct call to a free function
+whose `T?` result's `T` is also carried by an ENCODED parameter slot (bare `T`,
+`[T]`, `Dict<K, T>`), e.g. `head<T>(xs) -> T: first(xs).unwrap()`. That is the
+same proof `decode_erased_scalar_call_payload` uses at a concrete caller (the slot
+test is now the shared `erased_encoded_slot_param_v1`). Such a callee stores the
+tagged `T` word, and the old tail re-boxed it: `T=i64` came back tagged twice
+(caller boxes 5 -> 40, tail -> 320, caller decodes 40) and a record handle shifted.
+`T?` parameters, closure results, generic-class methods (plain `T`) and forwarders
+without an encoded slot keep the
+tail box.
+
+Spec: `test/01_unit/compiler/mir/generic_tail_unwrap_record_spec.spl` (1 of 9 red
+before, 9/9 after). Per-function MIR of the 18-function probe module before and
+after is byte-identical except `head`.
+
+## Not done
+
+- The durable fix for the `tuple_at` forwarder shape is a producer/extern contract,
+  not MIR: restrict `_sffi_tuple_get_req` / `compiler_value_tuple_at` to handle-typed
+  `T`, or decode in a typed concrete wrapper.
+- The `T?` PARAMETER shape (`fn req<T>(v: T?) -> T: v.unwrap()`, T = record) still
+  re-boxes: a concrete caller passes `rt_enum_new(1, 0, raw)`. The fix belongs on the
+  caller side (box the payload of a `T?` argument). The `match v: case Some(x): x`
+  tail is not changed. `if val p = v: return p` on a param never boxes, so it returns
+  a raw int that the caller then decodes; check that case before relying on it.
+- `fn get_or<T>(f: fn() -> T?) -> T: f().unwrap()` called with a concrete
+  `\() -> i64?: Some(5)` lambda: the caller (`use_get_or` in the probe) has no decode
+  at all. Pre-existing, not investigated here.
+- Whether the Stage 3 self-build gets past MIR with this workaround still needs a fresh
+  Stage 3 build to confirm.
+
+
+## 2026-11-23 Darwin native follow-up — generic bug remains OPEN
+
+The earlier claim that `if val` plus explicit `return` fixes the untyped tuple
+forwarder is disproven by the qualified `assembly-v2` producer. Its native
+`_sffi_tuple_get_req` still calls `rt_value_int_wide` after `rt_unwrap_or_self`.
+Darwin crash `simple-2026-11-23-165412.ips` dereferences the int-boxed HirExpr
+operand in `lower_cast_expr+132`; an independent index fixture fails similarly.
+This is not an RSS limit: the first run peaked at 411536 KiB under a 4 GiB cap.
+
+Both compiler tuple-payload owners now use concrete typed required decoders:
+HirExpr in MIR; LocalId, MirConstValue, MirType, AggregateKind and [MirOperand]
+in LLVM translation. Each reads an explicitly typed optional and returns the
+concrete value, panicking on an absent required slot. Optional tuple reads and
+scalar tuple ABI are unchanged. This repairs the compiler's payload consumers;
+it does not resolve the general ambiguous erased generic-return contract.
+
+The new compiler bytes must execute cast/index native fixtures and compile/run
+the original runtime byte-at fixture before further bootstrap admission.
+
+## Uniform P3 audit & root-cause fix 2026-11-26 (`ROOT-FIXED+STAGE2-GATED`)
+
+Isolated native probes on uniform P3 (`162c481782f`) confirmed the erased generic `-> T` contract had four gaps in `50.mir`:
+- `payload.unwrap()` tail (`generic_unwrap_req<T>`): `i64` `42` double-boxed to `336`, and `ProbeRec` crashed with `SIGSEGV (exit 139)`.
+- `if val present = payload: return present` (`get_if_req<T>`): handled `Node.Two(Pair, Pair)` (`1 left 2 right`) and `rt_tuple_set(t, 0, 42)` (`42`), **but corrupted raw scalar `i64` from an enum payload tuple (`Node.PairNum(77, ...)` -> `9`, i.e., `77 >> 3`)** and `req_opt_if<i64>(Some(77))` -> `9` because neither multi-field enum tuple slots (`box_lowered_enum_tuple_payload`) nor concrete `T?` call arguments encoded scalar payloads into `RuntimeValue` words.
+- `match v: case Some(x): x` inside `-> T` left `x` unmarked and int-boxed records via `rt_value_int_wide`.
+
+**Root-cause fix in `50.mir` (`work/fix-wa3-generic-tail-unwrap-20261126` & `work/fix-wa3-generic-tail-followup-20261126`):**
+1. **Free generic `Option` (`T?`) unwrap / `!` / `if val` / `match` (`method_calls_literals.spl`, `expr_dispatch.spl`, `switch_operators_calls.spl`)**: any `Option` (`T?`) unwrap/match inside a free erased generic body (`not current_fn_is_method`) marks the extracted `T` payload as a runtime value so `-> T` returns do not emit `rt_value_int_wide` (no `ptr << 3` `SIGSEGV` on records and no `x8` double-boxing on scalars). Non-`Option` single-payload generic enums (`Result<T, E>`, `Wrap<T>`) keep `rt_value_int_wide` so concrete `Ok(77)` is not shifted `77 >> 3 = 9`; multi-field generic enum tuple matches (`Pair<A, B>`) mark `TypeParam` tuple binders as runtime values.
+2. **`T?` parameter & `fn() -> T?` callable encoding (`switch_operators_calls.spl`, `encode_erased_scalar_opt_arg_v1`, `adapt_erased_opt_callable_arg_v1`)**: concrete callers passing scalar `T?` (`Int` including `u64` via `rt_value_u64`, `Float`, `Bool`, `Char`, including presence-word locals) or scalar `fn() -> T?` callables (`\: Some(42)`, `mk_i64`, local callables) encode the `Some` payload (`rt_value_int_wide`, `rt_value_float`, `rt_value_u64`, bool/char tags), matching `decode_erased_scalar_call_payload` and `decode_runtime_value` (`rt_value_as_u64` for `U64`) on return. Multi-type-param turbofish calls (`fn f<K, V>`) bind `TypeParam` names via `resolve_callee_type_param_binding_v1`, and `ExistsCheck` checks `base`'s `HirExprKind.Call(..., call_type_args)` under `SIMPLE_BOOTSTRAP=1`.
+3. **Uniform multi-field enum payload tuples (`switch_operators_calls.spl`, `encode_enum_tuple_payload_slot_v1` / `decode_enum_tuple_payload_slot_v1` / `enum_tuple_slot_is_signed_int_v1`)**: `box_lowered_enum_tuple_payload` coerces declared slots (`Node.PairU64(77, ...)`) and encodes scalar slots (including concrete `i64` literals/calls/fields into `Pair<A, B>`) identically to `rt_tuple_set(..., Any)`; `lower_enum_match` and `emit_enum_payload_deep` (including `IntLit`/`u64`/`BoolLit`/`CharLit`/`FloatLit`) decode `rt_tuple_get` slots symmetrically, and `decode_erased_scalar_call_payload` handles explicit turbofish `-> T?` returns.
+4. **Stage-2 gate for concrete payload helpers (`expr_dispatch.spl`, `core_codegen.spl`)**: `# @workaround bug=stage2_generic_tail_unwrap_reboxes_record_2026-11-19 status=ROOT-FIXED+STAGE2-GATED retire_after_stage2_seed=162c481782f` and `_sffi_*_payload_req` remain in source for one bootstrap hop past `162c481782f` (until Stage 2/3 is rebuilt with the fix above, so `162c481782f` does not compile `.unwrap()` in `expr_dispatch.spl` / `core_codegen.spl` with `rt_value_int_wide`). Pinned by `test/01_unit/compiler/mir/generic_tail_unwrap_record_spec.spl`, `test/01_unit/compiler/50.mir/generic_tail_unwrap_scalar_and_record_spec.spl`, and `test/01_unit/compiler/50.mir/wa_src_lane5_workaround_audit_spec.spl`.

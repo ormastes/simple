@@ -1,0 +1,61 @@
+# SPL-BUILD-ROLE-001: boundary roles declared in the simple.sdn unit block need a
+# grant; an exception grant carries an expiry date.
+# @cover src/compiler/80.driver/driver_build/library_unit_role_v1.spl
+use std.spec
+use compiler.driver.driver_build.library_unit_role_v1.{
+    LibraryUnitRolesV1, library_unit_roles_parse_v1, library_unit_role_check_v1}
+
+val HEAD = "project:\n  name: u\n  version: 1.0.0\n  type: library\n"
+
+fn parse_ok(body: text) -> LibraryUnitRolesV1:
+    match library_unit_roles_parse_v1("u", HEAD + body):
+        case Ok(r): r
+        case Err(e): panic("parse failed: " + e)
+
+fn parse_err(body: text) -> text:
+    match library_unit_roles_parse_v1("u", HEAD + body):
+        case Ok(_): ""
+        case Err(e): e
+
+describe "library_unit_roles_parse_v1":
+    it "has no roles when the block is absent":
+        val r = parse_ok("")
+        expect(r.declared.len()).to_equal(0)
+        expect(r.grants.len()).to_equal(0)
+
+    it "reads declared roles, a permanent grant and an expiring exception":
+        val r = parse_ok("  roles:\n    declared: [sffi_boundary, hal_boundary]\n    grants:\n      - role: sffi_boundary\n      - role: hal_boundary\n        exception: true\n        expires: \"2027-03-01\"\n")
+        expect(r.declared.len()).to_equal(2)
+        expect(r.grants.len()).to_equal(2)
+        expect(r.grants[0].role).to_equal("sffi_boundary")
+        expect(r.grants[0].exception).to_equal(false)
+        expect(r.grants[1].exception).to_equal(true)
+        expect(r.grants[1].expires).to_equal("2027-03-01")
+
+    it "rejects an exception without an expiry":
+        expect(parse_err("  roles:\n    grants:\n      - role: x\n        exception: true\n")).to_contain("expires")
+
+    it "rejects a malformed expiry date":
+        expect(parse_err("  roles:\n    grants:\n      - role: x\n        exception: true\n        expires: \"soon\"\n")).to_contain("YYYY-MM-DD")
+
+    it "rejects a grant without a role":
+        expect(parse_err("  roles:\n    grants:\n      - exception: false\n")).to_contain("role")
+
+describe "library_unit_role_check_v1":
+    it "is clean when every declared role is granted":
+        val r = parse_ok("  roles:\n    declared: [a]\n    grants:\n      - role: a\n")
+        expect(library_unit_role_check_v1(r, "2026-11-18").len()).to_equal(0)
+
+    it "reports a declared role with no grant":
+        val r = parse_ok("  roles:\n    declared: [a, b]\n    grants:\n      - role: a\n")
+        val f = library_unit_role_check_v1(r, "2026-11-18")
+        expect(f.len()).to_equal(1)
+        expect(f[0]).to_contain("'b'")
+        expect(f[0]).to_contain("no grant")
+
+    it "reports an expired exception and accepts a live one":
+        val body = "  roles:\n    declared: [a, b]\n    grants:\n      - role: a\n        exception: true\n        expires: \"2026-11-17\"\n      - role: b\n        exception: true\n        expires: \"2026-11-18\"\n"
+        val f = library_unit_role_check_v1(parse_ok(body), "2026-11-18")
+        expect(f.len()).to_equal(1)
+        expect(f[0]).to_contain("'a'")
+        expect(f[0]).to_contain("expired on 2026-11-17")

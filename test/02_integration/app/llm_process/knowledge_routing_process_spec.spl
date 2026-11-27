@@ -1,6 +1,8 @@
 use std.spec.{describe, it, expect, step}
 use std.io_runtime.{file_read}
+use std.io_runtime.{file_exists}
 use std.common.llm.knowledge_selector.*
+use std.common.llm.task_skill_selector.*
 
 describe "SPipe deterministic knowledge routing process":
     it "should keep registry guide and process surfaces aligned":
@@ -104,3 +106,40 @@ describe "SPipe deterministic knowledge routing process":
         expect(group).to_contain("non-admitted")
         expect(expert).to_contain("nonblocking fence/timeline poll")
         expect(expert).to_contain("Missing canonical Chrome library or runner")
+
+    it "should route every goal task class in the real registry to existing skill files":
+        # @req SKILL-002
+        step("Read the canonical registry with its task_skills table")
+        val registry = file_read("doc/00_llm_process/knowledge_registry.sdn")
+        expect(registry).to_contain("task_skills:")
+        step("Select each task class for every enabled provider and check the files exist")
+        var selected_count = 0
+        for task in [GoalTaskClass.Dev, GoalTaskClass.Research, GoalTaskClass.Design,
+                GoalTaskClass.Impl, GoalTaskClass.Refactor, GoalTaskClass.Verify,
+                GoalTaskClass.Release]:
+            for provider in [SkillProvider.Claude, SkillProvider.Codex, SkillProvider.Gemini]:
+                val sel = select_goal_skills(registry, task, provider)
+                expect(sel.outcome == GoalSkillOutcome.Selected).to_equal(true)
+                match sel.primary:
+                    case Some(skill):
+                        expect(file_exists(skill.path.value)).to_equal(true)
+                        expect(file_exists(skill.canonical_path.value)).to_equal(true)
+                        selected_count = selected_count + 1
+                    case None:
+                        expect(false).to_equal(true)
+                for dep in sel.dependencies:
+                    expect(file_exists(dep.path.value)).to_equal(true)
+        expect(selected_count).to_equal(21)
+
+    it "should reject goal task classes the real registry cannot serve for a provider":
+        # @req SKILL-004
+        # @req SKILL-005
+        step("Debug has no Claude adapter and setup has no skill at all")
+        val registry = file_read("doc/00_llm_process/knowledge_registry.sdn")
+        val no_adapter = select_goal_skills(registry, GoalTaskClass.Debug, SkillProvider.Claude)
+        expect(no_adapter.outcome == GoalSkillOutcome.Rejected).to_equal(true)
+        val no_skill = select_goal_skills(registry, GoalTaskClass.Setup, SkillProvider.Codex)
+        expect(no_skill.outcome == GoalSkillOutcome.Rejected).to_equal(true)
+        step("Kimi has no skill directory yet, so every class is rejected for Kimi")
+        val kimi = select_goal_skills(registry, GoalTaskClass.Verify, SkillProvider.Kimi)
+        expect(kimi.outcome == GoalSkillOutcome.Rejected).to_equal(true)

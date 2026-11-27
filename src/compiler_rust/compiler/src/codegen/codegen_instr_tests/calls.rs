@@ -54,6 +54,7 @@ fn codegen_closure_create_and_indirect_call() {
         return_type: TypeId::I64,
         args: vec![arg],
         effect: crate::mir::Effect::Compute,
+        signature_declared: false,
     });
     block.terminator = Terminator::Return(Some(dest));
 
@@ -112,6 +113,7 @@ fn codegen_indirect_call_boxes_concrete_float_with_any_param_type() {
         return_type: TypeId::F64,
         args: vec![arg],
         effect: crate::mir::Effect::Compute,
+        signature_declared: false,
     });
     block.terminator = Terminator::Return(Some(dest));
 
@@ -154,6 +156,7 @@ fn codegen_indirect_call_boxes_f32_with_any_param_type() {
         return_type: TypeId::F64,
         args: vec![arg],
         effect: crate::mir::Effect::Compute,
+        signature_declared: false,
     });
     block.terminator = Terminator::Return(Some(dest));
     let mut module = MirModule::new();
@@ -184,6 +187,7 @@ fn codegen_indirect_call_keeps_word_shaped_any_argument() {
         return_type: TypeId::I64,
         args: vec![arg],
         effect: crate::mir::Effect::Compute,
+        signature_declared: false,
     });
     block.terminator = Terminator::Return(Some(dest));
     let mut module = MirModule::new();
@@ -491,6 +495,85 @@ fn codegen_chained_unwrap_calls_use_rt_unwrap_or_self_at_every_step() {
     assert!(
         !object_relocates_to_symbol(&object, "rt_enum_payload"),
         "no step of a chained .unwrap() should fall back to rt_enum_payload"
+    );
+}
+
+// Regression (2026-10-31, hello-world native-build blocker): a bare
+// `opt.unwrap()` on a `[u8]?` was bound by name-suffix to the only user
+// `Poll.unwrap` linked into the JIT driver closure. `Poll.unwrap` is
+// registered under its raw and mangled keys (2 candidates, 1 FuncId), which
+// took the same-FuncId shortcut before the Optional/Result helper refusal
+// ran, so `file_read_regular_no_follow_bounded_bytes` returned an empty
+// array and the inventory failed `untracked-membership-publish-failed`.
+// A bare enum helper must reach the runtime helper even when exactly one
+// same-named user method exists.
+#[test]
+fn codegen_bare_enum_helpers_never_bind_to_lone_user_method() {
+    let mut poll_unwrap = MirFunction::new(
+        "Poll.unwrap".to_string(),
+        TypeId::I64,
+        simple_parser::ast::Visibility::Public,
+    );
+    let self_vreg = poll_unwrap.new_vreg();
+    poll_unwrap.params.push(MirLocal {
+        name: "self".to_string(),
+        ty: TypeId::I64,
+        kind: LocalKind::Parameter,
+        is_ghost: false,
+    });
+    poll_unwrap.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(self_vreg));
+
+    let mut poll_is_some = MirFunction::new(
+        "Poll.is_some".to_string(),
+        TypeId::BOOL,
+        simple_parser::ast::Visibility::Public,
+    );
+    let _self_vreg = poll_is_some.new_vreg();
+    poll_is_some.params.push(MirLocal {
+        name: "self".to_string(),
+        ty: TypeId::I64,
+        kind: LocalKind::Parameter,
+        is_ghost: false,
+    });
+    let falsy = poll_is_some.new_vreg();
+    let block = poll_is_some.block_mut(BlockId(0)).unwrap();
+    block.instructions.push(MirInst::ConstBool { dest: falsy, value: false });
+    block.terminator = Terminator::Return(Some(falsy));
+
+    let mut caller = MirFunction::new(
+        "bare_unwrap_caller".to_string(),
+        TypeId::I64,
+        simple_parser::ast::Visibility::Public,
+    );
+    let recv = caller.new_vreg();
+    let present = caller.new_vreg();
+    let dest = caller.new_vreg();
+    let block = caller.block_mut(BlockId(0)).unwrap();
+    block.instructions.push(MirInst::ConstInt { dest: recv, value: 100 });
+    block.instructions.push(MirInst::MethodCallStatic {
+        dest: Some(present),
+        receiver: recv,
+        func_name: "is_some".to_string(),
+        args: vec![],
+    });
+    block.instructions.push(MirInst::MethodCallStatic {
+        dest: Some(dest),
+        receiver: recv,
+        func_name: "unwrap".to_string(),
+        args: vec![],
+    });
+    block.terminator = Terminator::Return(Some(dest));
+
+    let mut module = MirModule::new();
+    module.functions.push(poll_unwrap);
+    module.functions.push(poll_is_some);
+    module.functions.push(caller);
+    let codegen = crate::codegen::Codegen::new().expect("failed to create codegen");
+    let object = codegen.compile_module(&module).expect("AOT compilation failed");
+
+    assert!(
+        object_relocates_to_symbol(&object, "rt_unwrap_or_trap"),
+        "bare .unwrap() must lower to rt_unwrap_or_trap, not bind to the lone Poll.unwrap"
     );
 }
 
@@ -1016,7 +1099,17 @@ fn object_relocates_to_symbol(object: &[u8], symbol: &str) -> bool {
             let RelocationTarget::Symbol(index) = relocation.target() else {
                 return false;
             };
-            file.symbol_by_index(index).and_then(|sym| sym.name()) == Ok(symbol)
+            let Ok(name) = file.symbol_by_index(index).and_then(|sym| sym.name()) else {
+                return false;
+            };
+            // Mach-O spells every C-level global with a leading `_`; compare
+            // the source-level name so these assertions hold on every host.
+            let name = if file.format() == object::BinaryFormat::MachO {
+                name.strip_prefix('_').unwrap_or(name)
+            } else {
+                name
+            };
+            name == symbol
         })
     })
 }

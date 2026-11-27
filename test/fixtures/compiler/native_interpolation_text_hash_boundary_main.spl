@@ -1,0 +1,67 @@
+# Compile and execute natively with the core-c-bootstrap runtime provider.
+# Run in a private evidence directory: this probe writes one local SDN file.
+use std.io_runtime.{file_read, file_write, file_delete, hash_text}
+
+extern fn rt_string_len(value: text) -> i64
+extern fn rt_string_byte_at(value: text, index: i64) -> i64
+
+struct TextSlot:
+    value: text
+
+fn check_bytes(value: text, expected: text, expected_hash: i64) -> bool:
+    if hash_text(value) == 0 or hash_text(value) != expected_hash:
+        return false
+    val size = rt_string_len(value)
+    if size != rt_string_len(expected):
+        return false
+    var i = 0
+    while i < size:
+        if rt_string_byte_at(value, i) != rt_string_byte_at(expected, i):
+            return false
+        i = i + 1
+    true
+
+fn main() -> i64:
+    val suffix = "llo"
+    val computed = "he{suffix}"
+    if not check_bytes(computed, "hello", -6615550055289275125):
+        return 1
+    val slot = TextSlot(value: computed)
+    val stored: [text] = [slot.value]
+    if not check_bytes(stored[0], "hello", -6615550055289275125):
+        return 2
+    # Exercise the daemon shape: computed identity -> spool -> decoded identity.
+    val path = "interpolation_text_hash_boundary_probe.sdn"
+    if not file_write(path, "id={computed}"):
+        return 3
+    val wire = file_read(path)
+    file_delete(path)
+    val decoded = wire.substring(3)
+    if not check_bytes(decoded, "hello", -6615550055289275125):
+        return 4
+    if hash_text(decoded) != hash_text(computed):
+        return 5
+    # NUL in a literal segment and in an interpolated operand must survive.
+    val tail = "b"
+    val nul_segment = "a\0{tail}"
+    if not check_bytes(nul_segment, "a\0b", -1886276961191958862):
+        return 6
+    val nul_operand = "a\0b"
+    val only_operand = "{nul_operand}"
+    if not check_bytes(only_operand, "a\0b", -1886276961191958862):
+        return 7
+    val accent = "é"
+    val unicode = "h{accent}llo"
+    if not check_bytes(unicode, "héllo", -6674344407707008800):
+        return 8
+    val unicode_segment = "hé{suffix}"
+    if not check_bytes(unicode_segment, "héllo", -6674344407707008800):
+        return 9
+    # Preserve the existing scalar renderer dispatch while changing concat.
+    val number = 42
+    val boolean = true
+    val fraction = 1.5
+    val scalar = "{number}/{boolean}/{fraction}"
+    if scalar != "42/true/1.5":
+        return 10
+    return 0

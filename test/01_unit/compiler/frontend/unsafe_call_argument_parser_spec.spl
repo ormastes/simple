@@ -1,0 +1,193 @@
+"""
+## Purpose and audience
+Purpose: Preserve contextual unsafe and danger blocks when parsing call arguments.
+Audience: compiler frontend engineers.
+"""
+# @req: REQ-COMPILER-FRONTEND-001 — stable requirement identity for this spec.
+
+use std.spec.*
+use compiler.core.ast.{ast_reset, module_get_decls, decl_get_name, decl_get_tag,
+    decl_get_body, DECL_FN}
+use compiler.core.ast_expr.{expr_get_tag, expr_get_str, expr_get_int, expr_get_left,
+    expr_get_args, expr_get_arg_names, expr_get_stmts, expr_count,
+    EXPR_CALL, EXPR_METHOD_CALL, EXPR_IDENT, EXPR_INT_LIT, EXPR_BOOL_LIT,
+    EXPR_NIL_LIT, EXPR_UNSAFE_BLOCK}
+use compiler.core.ast_stmt.{stmt_get_expr, stmt_get_name}
+use compiler.core.parser.{parse_module, parser_has_errors}
+
+fn parse_clean_unsafe_source(source: text, path: text) -> bool:
+    ast_reset()
+    parse_module(source, path)
+    if parser_has_errors():
+        fail("unexpected parser errors for {path}")
+        return false
+    true
+
+fn parse_bad_unsafe_source(source: text, path: text):
+    ast_reset()
+    parse_module(source, path)
+    expect(parser_has_errors()).to_equal(true)
+
+fn function_decl_named(decls: [i64], wanted: text) -> i64:
+    for decl in decls:
+        if decl_get_name(decl) == wanted:
+            if decl_get_tag(decl) != DECL_FN:
+                fail("declaration `{wanted}` is not a function")
+                return -1
+            return decl
+    fail("missing function declaration `{wanted}`")
+    -1
+
+fn function_body(decls: [i64], wanted: text) -> [i64]:
+    val decl = function_decl_named(decls, wanted)
+    if decl < 0: return []
+    decl_get_body(decl)
+
+fn require_body_statements(body: [i64], needed: i64) -> bool:
+    if body.len() < needed:
+        fail("function body has {body.len()} statements; expected at least {needed}")
+        return false
+    true
+
+fn call_arg(call: i64, index: i64) -> i64:
+    val args = expr_get_args(call)
+    if index < 0 or index >= args.len():
+        fail("call argument index {index} absent (count {args.len()})")
+        return -1
+    args[index]
+
+fn unsafe_node_count() -> i64:
+    var count = 0
+    var index = 0
+    while index < expr_count():
+        if expr_get_tag(index) == EXPR_UNSAFE_BLOCK:
+            count = count + 1
+        index = index + 1
+    count
+
+describe "unsafe and danger expressions in call arguments":
+    it "parses exact positional Ok unsafe argument and preserves body calls and constants":
+        if not parse_clean_unsafe_source(
+            "fn wrapped():\n    Ok(unsafe(capabilities: [ffi]): from_core(1, 2))\n",
+            "unsafe_call_argument_ok.spl"): return
+        val body = function_body(module_get_decls(), "wrapped")
+        if not require_body_statements(body, 1): return
+        expect(body.len()).to_equal(1)
+        val ok_call = stmt_get_expr(body[0])
+        expect(expr_get_tag(ok_call)).to_equal(EXPR_CALL)
+        expect(expr_get_str(expr_get_left(ok_call))).to_equal("Ok")
+        val unsafe = call_arg(ok_call, 0)
+        expect(expr_get_tag(unsafe)).to_equal(EXPR_UNSAFE_BLOCK)
+        expect(expr_get_str(unsafe)).to_equal("ffi")
+        val unsafe_body = expr_get_stmts(unsafe)
+        expect(unsafe_body.len()).to_equal(1)
+        val core_call = stmt_get_expr(unsafe_body[0])
+        expect(expr_get_tag(core_call)).to_equal(EXPR_CALL)
+        expect(expr_get_str(expr_get_left(core_call))).to_equal("from_core")
+        val core_args = expr_get_args(core_call)
+        expect(core_args.len()).to_equal(2)
+        expect(expr_get_tag(core_args[0])).to_equal(EXPR_INT_LIT)
+        expect(expr_get_int(core_args[0])).to_equal(1)
+        expect(expr_get_int(core_args[1])).to_equal(2)
+
+    it "parses nested positional and method arguments with unsafe and danger capabilities":
+        if not parse_clean_unsafe_source(
+            "fn nested(receiver: Object):\n    outer(inner(danger(capabilities: [ffi, raw_ptr]): from_core(7)), receiver.map(unsafe(capabilities: [ffi]): from_core(8)))\n",
+            "unsafe_call_argument_nested.spl"): return
+        val body = function_body(module_get_decls(), "nested")
+        if not require_body_statements(body, 1): return
+        val outer = stmt_get_expr(body[0])
+        expect(expr_get_str(expr_get_left(outer))).to_equal("outer")
+        val inner = call_arg(outer, 0)
+        expect(expr_get_tag(inner)).to_equal(EXPR_CALL)
+        val danger = call_arg(inner, 0)
+        expect(expr_get_tag(danger)).to_equal(EXPR_UNSAFE_BLOCK)
+        expect(expr_get_str(danger)).to_equal("ffi,raw_ptr")
+        val method = call_arg(outer, 1)
+        expect(expr_get_tag(method)).to_equal(EXPR_METHOD_CALL)
+        expect(expr_get_str(method)).to_equal("map")
+        val method_unsafe = call_arg(method, 0)
+        expect(expr_get_tag(method_unsafe)).to_equal(EXPR_UNSAFE_BLOCK)
+        expect(expr_get_str(method_unsafe)).to_equal("ffi")
+
+    it "parses a named argument whose value is a scoped unsafe expression":
+        if not parse_clean_unsafe_source(
+            "fn configured():\n    configure(value: unsafe(capabilities: [ffi]): from_core(3))\n",
+            "unsafe_call_argument_named.spl"): return
+        val body = function_body(module_get_decls(), "configured")
+        if not require_body_statements(body, 1): return
+        val call = stmt_get_expr(body[0])
+        expect(expr_get_arg_names(call)).to_equal(["value"])
+        val value = call_arg(call, 0)
+        expect(expr_get_tag(value)).to_equal(EXPR_UNSAFE_BLOCK)
+        expect(expr_get_str(value)).to_equal("ffi")
+
+    it "keeps unsafe and danger variables, ordinary calls and named labels intact":
+        if not parse_clean_unsafe_source(
+            "fn ordinary(unsafe: i64, danger: i64):\n    sink(unsafe, danger())\n    sink(unsafe: 1, danger = 2)\n    sink(unsafe(capabilities: [ffi]))\n",
+            "unsafe_call_argument_ordinary.spl"): return
+        val body = function_body(module_get_decls(), "ordinary")
+        if not require_body_statements(body, 3): return
+        val ordinary = stmt_get_expr(body[0])
+        expect(expr_get_tag(call_arg(ordinary, 0))).to_equal(EXPR_IDENT)
+        expect(expr_get_str(call_arg(ordinary, 0))).to_equal("unsafe")
+        val danger_call = call_arg(ordinary, 1)
+        expect(expr_get_tag(danger_call)).to_equal(EXPR_CALL)
+        expect(expr_get_str(expr_get_left(danger_call))).to_equal("danger")
+        val labels = stmt_get_expr(body[1])
+        expect(expr_get_arg_names(labels)).to_equal(["unsafe", "danger"])
+        expect(expr_get_int(call_arg(labels, 0))).to_equal(1)
+        expect(expr_get_int(call_arg(labels, 1))).to_equal(2)
+        val ordinary_unsafe_call = call_arg(stmt_get_expr(body[2]), 0)
+        expect(expr_get_tag(ordinary_unsafe_call)).to_equal(EXPR_CALL)
+        expect(expr_get_str(expr_get_left(ordinary_unsafe_call))).to_equal("unsafe")
+        expect(expr_get_arg_names(ordinary_unsafe_call)).to_equal(["capabilities"])
+
+    it "keeps true, false, nil and keyword-labeled call arguments intact":
+        if not parse_clean_unsafe_source(
+            "fn literals():\n    sink(true, false, nil)\n    sink(return: true, pass = false)\n",
+            "unsafe_call_argument_literals.spl"): return
+        val body = function_body(module_get_decls(), "literals")
+        if not require_body_statements(body, 2): return
+        val literals = stmt_get_expr(body[0])
+        expect(expr_get_tag(call_arg(literals, 0))).to_equal(EXPR_BOOL_LIT)
+        expect(expr_get_int(call_arg(literals, 0))).to_equal(1)
+        expect(expr_get_tag(call_arg(literals, 1))).to_equal(EXPR_BOOL_LIT)
+        expect(expr_get_int(call_arg(literals, 1))).to_equal(0)
+        expect(expr_get_tag(call_arg(literals, 2))).to_equal(EXPR_NIL_LIT)
+        val keyword_labels = stmt_get_expr(body[1])
+        expect(expr_get_arg_names(keyword_labels)).to_equal(["return", "pass"])
+        expect(expr_get_tag(call_arg(keyword_labels, 0))).to_equal(EXPR_BOOL_LIT)
+        expect(expr_get_int(call_arg(keyword_labels, 0))).to_equal(1)
+        expect(expr_get_tag(call_arg(keyword_labels, 1))).to_equal(EXPR_BOOL_LIT)
+        expect(expr_get_int(call_arg(keyword_labels, 1))).to_equal(0)
+
+    it "rejects a malformed no-colon header followed by a trailing body":
+        parse_bad_unsafe_source(
+            "fn malformed():\n    sink(unsafe(capabilities: [ffi]) from_core(1))\n",
+            "unsafe_call_argument_bad_header.spl")
+
+    it "rejects invalid capability payload without inventing an unsafe block":
+        parse_bad_unsafe_source(
+            "fn malformed():\n    sink(unsafe(capabilities: [42]): from_core(1))\n",
+            "unsafe_call_argument_bad_caps.spl")
+        expect(unsafe_node_count()).to_equal(0)
+
+    it "retains the bootstrap local binding capability node and Ok local identity":
+        if not parse_clean_unsafe_source(
+            "fn lookup(scope: i64, entry: i64):\n    val reference = unsafe(capabilities: [ffi]): async_ref_from_core_i64(scope, entry)\n    Ok(reference)\n",
+            "unsafe_call_argument_bootstrap_local.spl"): return
+        val body = function_body(module_get_decls(), "lookup")
+        if not require_body_statements(body, 2): return
+        expect(body.len()).to_equal(2)
+        expect(stmt_get_name(body[0])).to_equal("reference")
+        val local_value = stmt_get_expr(body[0])
+        expect(expr_get_tag(local_value)).to_equal(EXPR_UNSAFE_BLOCK)
+        expect(expr_get_str(local_value)).to_equal("ffi")
+        val body_stmts = expr_get_stmts(local_value)
+        expect(body_stmts.len()).to_equal(1)
+        val async_ref_call = stmt_get_expr(body_stmts[0])
+        expect(expr_get_str(expr_get_left(async_ref_call))).to_equal("async_ref_from_core_i64")
+        val ok_call = stmt_get_expr(body[1])
+        expect(expr_get_str(expr_get_left(ok_call))).to_equal("Ok")
+        expect(expr_get_str(call_arg(ok_call, 0))).to_equal("reference")

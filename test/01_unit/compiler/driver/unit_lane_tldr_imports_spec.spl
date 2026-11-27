@@ -1,0 +1,293 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# plan: doc/03_plan/compiler/build_system/true_per_file_src_to_obj_plan.md (PM3)
+#
+# PM3: the per-file unit child (SIMPLE_FILE_WORKER_UNIT=1) parses only its picked
+# files and resolves imports through TLDR summaries, behind SIMPLE_UNIT_TLDR_IMPORTS
+# (default ON when the unit lane is active). "0" keeps the import-HIR path.
+use std.spec
+use std.io_runtime.{file_read, file_write, getpid, rt_env_get, rt_env_set}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use compiler.driver.driver_tldr_import_route_v1.{unit_tldr_imports_flag_v1, unit_tldr_imports_enabled_v1,
+    unit_tldr_imports_memo_reset_v1, tldr_imports_memo_reset_v1, tldr_route_import_specs_v1}
+use compiler.driver.driver_unit_tldr_imports_v1.{unit_tldr_plan_v1, unit_lower_v1}
+use compiler.driver.driver_hir_cache.{hir_shard_key_sidecar_path_v1, hir_shard_key_sidecar_write_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_hirkey_publish_v1}
+use compiler.driver.driver.{compiler_driver_create}
+use compiler.common.driver_compile_options.{driver_core_compile_options_default}
+use compiler.common.driver_core_modes.{CompileMode}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path}
+
+val A_SRC: text = "pub fn base_val() -> i64:\n    1\n\npub fn ident<T>(x: T) -> T:\n    x\n"
+val B_SRC: text = 'use pkg.a.{base_val}' + "\n\npub fn mid() -> i64:\n    base_val() + 1\n"
+val C_SRC: text = 'use pkg.b.{mid}' + "\n\nfn main() -> i64:\n    mid()\n"
+val D_SRC: text = "export use pkg.a.*\n\npub fn dval() -> i64:\n    4\n"
+val E_SRC: text = 'use pkg.b.{mid}' + "\n" + 'use pkg.d.{dval}' + "\n\nfn main() -> i64:\n    mid() + dval()\n"
+
+fn fixture_root(tag: text) -> text:
+    val r = "build/tmp/unit_lane_tldr_spec_{getpid()}_{tag}"
+    val _d = dir_create_all(r + "/src")
+    r
+
+fn put(root: text, module_id: text, src: text) -> text:
+    val module_path = module_id.replace(".", "/")
+    val p = root + "/src/" + module_path + ".spl"
+    val dir = root + "/src/" + module_path.substring(0, module_path.last_index_of("/"))
+    val _d = dir_create_all(dir)
+    val _w = file_write(p, src)
+    p
+
+fn inventory(root: text) -> Dict<text, text>:
+    var m: Dict<text, text> = {}
+    m["pkg.a"] = put(root, "pkg.a", A_SRC)
+    m["pkg.b"] = put(root, "pkg.b", B_SRC)
+    m["pkg.d"] = put(root, "pkg.d", D_SRC)
+    m
+
+fn make_driver(root: text, inputs: [text]) -> CompilerDriver:
+    var options = driver_core_compile_options_default()
+    options.input_files = inputs
+    options.mode = CompileMode.Check
+    options.bootstrap_input_count = 0
+    options.native_source_roots = ["src"]
+    options.native_source_snapshot_root = root
+    var driver = compiler_driver_create(options)
+    val (_ctx, loaded) = driver.load_sources_impl()
+    expect(loaded).to_equal(true)
+    expect(driver.stage_parse().is_none()).to_equal(true)
+    driver
+
+fn with_switch(value: text) -> text:
+    val saved = rt_env_get("SIMPLE_UNIT_TLDR_IMPORTS") ?? ""
+    rt_env_set("SIMPLE_UNIT_TLDR_IMPORTS", value)
+    unit_tldr_imports_memo_reset_v1()
+    tldr_imports_memo_reset_v1()
+    saved
+
+fn restore_switch(saved: text):
+    rt_env_set("SIMPLE_UNIT_TLDR_IMPORTS", saved)
+    unit_tldr_imports_memo_reset_v1()
+    tldr_imports_memo_reset_v1()
+
+describe "unit-lane TLDR imports switch (PM3)":
+    it "defaults to the unit-lane state and honours 0/1":
+        expect(unit_tldr_imports_flag_v1("", true)).to_equal(true)
+        expect(unit_tldr_imports_flag_v1("", false)).to_equal(false)
+        expect(unit_tldr_imports_flag_v1("0", true)).to_equal(false)
+        expect(unit_tldr_imports_flag_v1("1", false)).to_equal(true)
+
+    it "memoizes the read once per process until reset":
+        val saved = with_switch("")
+        expect(unit_tldr_imports_enabled_v1(true)).to_equal(true)
+        rt_env_set("SIMPLE_UNIT_TLDR_IMPORTS", "0")
+        expect(unit_tldr_imports_enabled_v1(true)).to_equal(true)
+        unit_tldr_imports_memo_reset_v1()
+        expect(unit_tldr_imports_enabled_v1(true)).to_equal(false)
+        restore_switch(saved)
+
+describe "unit-lane TLDR imports (PM3)":
+    it "leaf unit: parsed=1 summaries=2 import_hir_lowered=0 and the leaf lowers":
+        val saved = with_switch("")
+        val root = fixture_root("leaf_on")
+        val mods = inventory(root)
+        val leaf = put(root, "c", C_SRC)
+        val plan = unit_tldr_plan_v1("u0", root + "/tldr", [leaf], mods)
+        expect(plan.parsed).to_equal(1)
+        expect(plan.summaries).to_equal(2)
+        expect(plan.fallbacks).to_equal(0)
+        expect(plan.surfaces.len()).to_equal(2)
+        var driver = make_driver(root, [leaf])
+        val got = unit_lower_v1(driver, "u0", root + "/tldr", [leaf], mods, true)
+        expect(got.gap).to_equal("none")
+        expect(got.parsed).to_equal(1)
+        expect(got.summaries).to_equal(2)
+        expect(got.import_hir_lowered).to_equal(0)
+        expect(got.line).to_equal("[unit-tldr] unit=u0 parsed=1 summaries=2 fallbacks=0 import_hir_lowered=0")
+        restore_switch(saved)
+
+    it "switch 0 keeps the old path: import HIR is lowered":
+        val saved = with_switch("0")
+        val root = fixture_root("leaf_off")
+        val mods = inventory(root)
+        val leaf = put(root, "c", C_SRC)
+        var driver = make_driver(root, [leaf, mods["pkg.b"], mods["pkg.a"]])
+        val got = unit_lower_v1(driver, "u0", root + "/tldr", [leaf], mods, true)
+        expect(got.gap).to_equal("none")
+        expect(got.summaries).to_equal(0)
+        expect(got.import_hir_lowered > 0).to_equal(true)
+        restore_switch(saved)
+
+    it "a fallback module is parsed alone":
+        val saved = with_switch("")
+        val root = fixture_root("fallback")
+        val mods = inventory(root)
+        val leaf = put(root, "e", E_SRC)
+        val plan = unit_tldr_plan_v1("u1", root + "/tldr", [leaf], mods)
+        expect(plan.fallbacks).to_equal(1)
+        expect(plan.fallback_modules).to_equal(["pkg.d"])
+        expect(plan.parsed).to_equal(2)
+        expect(plan.parse_paths).to_equal([leaf, mods["pkg.d"]])
+        var has_b = false
+        var has_d = false
+        for s in plan.surfaces:
+            if s.module_name == "pkg.b": has_b = true
+            if s.module_name == "pkg.d": has_d = true
+        expect(has_b).to_equal(true)
+        expect(has_d).to_equal(false)
+        restore_switch(saved)
+
+    # bug per_file_unit_closure_incomplete_2026-11-22: the streaming loop never
+    # gives an `__init__.spl` row a summary surface, so a summarised package
+    # stayed a placeholder and its importers failed CLOSURE-INCOMPLETE.
+    it "parses an imported package __init__ instead of summarising it":
+        val saved = with_switch("")
+        val root = fixture_root("pkg_init")
+        var mods: Dict<text, text> = {}
+        mods["pkg.env.variables"] = put(root, "pkg.env.variables", "pub fn env_one() -> i64:\n    1\n")
+        mods["pkg.env.__init__"] = put(root, "pkg.env.__init__", "export variables.env_one\n")
+        val leaf = put(root, "f", 'use pkg.env.{env_one}' + "\n\nfn main() -> i64:\n    env_one()\n")
+        val plan = unit_tldr_plan_v1("u3", root + "/tldr", [leaf], mods)
+        expect(plan.fallback_modules).to_equal(["pkg.env"])
+        expect(plan.parse_paths).to_equal([leaf, mods["pkg.env.__init__"]])
+        for s in plan.surfaces:
+            expect(s.module_name == "pkg.env").to_equal(false)
+        restore_switch(saved)
+
+    # bug per_file_unit_imported_class_method_origin_2026-11-22: a summary
+    # surface proves no method call origin and carries no class layout, so a
+    # class provider is summarised only once its interface-HIR sidecar exists.
+    it "parses a class provider until its interface HIR sidecar is published":
+        val saved = with_switch("")
+        val saved_queue = rt_env_get("SIMPLE_HIR_SHARD_QUEUE") ?? ""
+        val root = fixture_root("class_provider")
+        val queue = root + "/queue"
+        val _q = dir_create_all(queue)
+        rt_env_set("SIMPLE_HIR_SHARD_QUEUE", queue)
+        var mods: Dict<text, text> = {}
+        mods["pkg.box"] = put(root, "pkg.box",
+            "class Box:\n    value: i64\n    static fn make(n: i64) -> Box:\n        Box(value: n)\n    fn doubled() -> i64:\n        self.value * 2\n")
+        val leaf = put(root, "g", 'use pkg.box.{Box}' + "\n\nfn main() -> i64:\n    Box.make(21).doubled()\n")
+        val early = unit_tldr_plan_v1("u4", root + "/tldr", [leaf], mods)
+        expect(early.fallback_modules).to_equal(["pkg.box"])
+        expect(early.parse_paths).to_equal([leaf, mods["pkg.box"]])
+        expect(early.surfaces.len()).to_equal(0)
+        val provider = mods["pkg.box"]
+        # Reopen a queue written by the previous worker. Its body key used
+        # the interface pathname but cannot identify a parser-bound entry.
+        expect(file_write(hir_shard_key_sidecar_path_v1(queue, provider), provider + "\nbody-key\n")).to_equal(true)
+        val legacy = unit_tldr_plan_v1("u4", root + "/tldr", [leaf], mods)
+        expect(legacy.parse_paths).to_equal([leaf, provider])
+        expect(legacy.surfaces.len()).to_equal(0)
+        val binding = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        expect(hir_shard_key_sidecar_write_v1(queue, provider, "iface-key", binding)).to_equal(true)
+        # A subsequent body receipt must leave the published interface readable.
+        expect(native_file_worker_hirkey_publish_v1(queue, provider, "body-key")).to_equal(true)
+        val late = unit_tldr_plan_v1("u4", root + "/tldr", [leaf], mods)
+        expect(late.fallbacks).to_equal(0)
+        expect(late.surfaces.len()).to_equal(1)
+        rt_env_set("SIMPLE_HIR_SHARD_QUEUE", saved_queue)
+        restore_switch(saved)
+
+    # bug per_file_lane_unit_mir_physical_ownership_missing_hir_2026-11-12
+    # layer 2: a summary surface is built from a module id, so its canonical
+    # path was "<cwd>/<module/path>.spl". The worker readiness walk keys on
+    # surface.canonical_path against the admitted rows' canonical paths, so the
+    # importing unit saw every summarised import as unbuilt and failed with
+    # FILE-WORKER-E-CLOSURE-INCOMPLETE.
+    it "binds every summary surface to its admitted source row's canonical path":
+        val saved = with_switch("")
+        val root = fixture_root("canonical")
+        val mods = inventory(root)
+        val leaf = put(root, "c", C_SRC)
+        val plan = unit_tldr_plan_v1("u2", root + "/tldr", [leaf], mods)
+        expect(plan.surfaces.len()).to_equal(2)
+        for s in plan.surfaces:
+            expect(s.canonical_path).to_equal(module_surface_canonical_path(mods[s.module_name]))
+        restore_switch(saved)
+
+    it "extracts mod, pub mod, reexport comment, from-import, bare export-from, and export-glob edges when enabled":
+        val src = "# Re-exported from helper.spl\nexport helper_fn\nmod child # inline comment\npub mod subpkg\nfrom pkg.dep import {x, y}\nexport a from sibling\nexport sib.*\n"
+        val specs = tldr_route_import_specs_v1(src, true)
+        var edges: [text] = []
+        for s in specs:
+            edges.push(s.0)
+        expect(edges.contains(".helper")).to_equal(true)
+        expect(edges.contains(".child")).to_equal(true)
+        expect(edges.contains(".subpkg")).to_equal(true)
+        expect(edges.contains("pkg.dep")).to_equal(true)
+        expect(edges.contains(".sibling")).to_equal(true)
+        expect(edges.contains(".sib")).to_equal(true)
+
+    it "plans mod child, directory mod subpkg/__init__.spl, and re-exported sibling edges for a package __init__":
+        val saved = with_switch("")
+        val root = fixture_root("pkg_mod_edges")
+        var mods: Dict<text, text> = {}
+        mods["pkg.core.child"] = put(root, "pkg.core.child", "pub fn child_val() -> i64:\n    10\n")
+        mods["pkg.core.subpkg.__init__"] = put(root, "pkg.core.subpkg.__init__", "pub fn sub_val() -> i64:\n    20\n")
+        mods["pkg.core.extra"] = put(root, "pkg.core.extra", "pub fn extra_val() -> i64:\n    30\n")
+        mods["pkg.core.__init__"] = put(root, "pkg.core.__init__",
+            "mod child\nmod subpkg # package subdir\n# Re-exported from extra.spl\nexport extra_val\n")
+        val leaf = put(root, "main", "use pkg.core.*\n\nfn main() -> i64:\n    1\n")
+        val plan = unit_tldr_plan_v1("u5", root + "/tldr", [leaf], mods)
+        expect(plan.parse_paths.contains(mods["pkg.core.__init__"])).to_equal(true)
+        expect(plan.parse_paths.contains(mods["pkg.core.subpkg.__init__"])).to_equal(true)
+        var has_child = false
+        for p in plan.parse_paths:
+            if p == mods["pkg.core.child"]: has_child = true
+        for s in plan.surfaces:
+            if s.canonical_path == module_surface_canonical_path(mods["pkg.core.child"]): has_child = true
+        expect(has_child).to_equal(true)
+        var has_extra = false
+        for p in plan.parse_paths:
+            if p == mods["pkg.core.extra"]: has_extra = true
+        for s in plan.surfaces:
+            if s.canonical_path == module_surface_canonical_path(mods["pkg.core.extra"]): has_extra = true
+        expect(has_extra).to_equal(true)
+        restore_switch(saved)
+
+    it "parses a constant-only provider until its interface HIR sidecar is published":
+        assert_decl_provider_waits_for_hirkey(
+            "const_provider",
+            "pkg.hash256",
+            "val HASH256_LEN: i64 = 32\nval HASH256_HEX_LEN: i64 = 64\n",
+            'use pkg.hash256.{HASH256_LEN, HASH256_HEX_LEN}' + "\n\nfn main() -> i64:\n    HASH256_LEN + HASH256_HEX_LEN\n"
+        )
+
+    it "parses enum-only and trait-only providers until their interface HIR sidecar is published":
+        assert_decl_provider_waits_for_hirkey(
+            "enum_provider",
+            "pkg.mode",
+            "enum Mode:\n    Fast\n    Slow\n",
+            'use pkg.mode.{Mode}' + "\n\nfn main() -> i64:\n    1\n"
+        )
+        assert_decl_provider_waits_for_hirkey(
+            "trait_provider",
+            "pkg.codec",
+            "trait Codec:\n    fn size() -> i64\n",
+            'use pkg.codec.{Codec}' + "\n\nfn main() -> i64:\n    2\n"
+        )
+
+fn assert_decl_provider_waits_for_hirkey(tag: text, module_id: text, provider_src: text, leaf_src: text):
+    """Verify a provider with non-callable declarations falls back before .hirkey publication."""
+    val saved = with_switch("")
+    val saved_queue = rt_env_get("SIMPLE_HIR_SHARD_QUEUE") ?? ""
+    val root = fixture_root(tag)
+    val queue = root + "/queue"
+    val _q = dir_create_all(queue)
+    rt_env_set("SIMPLE_HIR_SHARD_QUEUE", queue)
+    var mods: Dict<text, text> = {}
+    mods[module_id] = put(root, module_id, provider_src)
+    val leaf = put(root, "leaf", leaf_src)
+    val early = unit_tldr_plan_v1("u_" + tag, root + "/tldr", [leaf], mods)
+    expect(early.fallback_modules).to_equal([module_id])
+    expect(early.parse_paths).to_equal([leaf, mods[module_id]])
+    expect(early.surfaces.len()).to_equal(0)
+    val provider = mods[module_id]
+    val binding = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    expect(hir_shard_key_sidecar_write_v1(queue, provider, "iface-key", binding)).to_equal(true)
+    val late = unit_tldr_plan_v1("u_" + tag, root + "/tldr", [leaf], mods)
+    expect(late.fallbacks).to_equal(0)
+    expect(late.surfaces.len()).to_equal(1)
+    rt_env_set("SIMPLE_HIR_SHARD_QUEUE", saved_queue)
+    restore_switch(saved)

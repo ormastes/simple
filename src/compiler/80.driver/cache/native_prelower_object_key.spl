@@ -7,7 +7,7 @@
 #
 #   own source content digest
 #   + fold of every build module's "native interface" digest (see below)
-#   + the module's post-mono instance set (specialization names it emits)
+#   + the module's final instance set (specialization names it emits)
 #   + producer identity (compiler/runtime/ABI, target, cpu, backend, opt,
 #     release, symbol mode, effective environment, emitter scheme, config)
 #   + cache lane
@@ -37,9 +37,7 @@
 #     (A parsed-HIR interface would be stronger but has no canonical printer
 #     today; 35.semantics/interface/compile_interface.spl is the intended
 #     replacement.)
-#   * Mono: post-mono specializations are inserted into the OWNER module
-#     (monomorphize_integration.spl `spec_module`), requested by consumers.
-#     The instance set is therefore keyed explicitly, and an instance whose
+#   * Instances: the instance set is therefore keyed explicitly, and an instance whose
 #     type arguments are not all primitive is REFUSED (its layout comes from a
 #     module the owner need not import).
 
@@ -65,8 +63,6 @@ struct NativePrelowerKeyInputsV1:
     source_digest: text
     # "module=digest" rows for every module of the build except this one.
     dependency_digests: [text]
-    # Post-mono specialization names emitted by this module (may be empty).
-    mono_instances: [text]
     producer_identity: text
     cache_lane: text
 
@@ -194,28 +190,6 @@ fn native_prelower_dependency_digest_v1(source: text) -> text:
     else:
         "source:" + sha256_text(source)
 
-# A specialization is admissible when every type token after `$` is a
-# primitive whose layout is fixed by the producer identity alone.
-fn native_prelower_mono_instance_admissible_v1(name: text) -> bool:
-    val dollar = name.index_of("$")
-    if dollar < 0: return false
-    val suffix = name[dollar + 1:]
-    if suffix == "": return false
-    var token = ""
-    var i: i64 = 0
-    while i <= suffix.len():
-        val c = if i < suffix.len(): suffix[i:i + 1] else: "$"
-        val ident = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
-            (c >= "0" and c <= "9") or c == "_"
-        if ident:
-            token = token + c
-        else:
-            if token != "" and not NATIVE_PRELOWER_PRIMITIVE_TYPE_NAMES_V1.contains(token):
-                return false
-            token = ""
-        i = i + 1
-    true
-
 # Returns (key, reason). key == "" means refused; reason names the missing
 # or inadmissible input.
 fn native_prelower_object_key_v1(inputs: NativePrelowerKeyInputsV1) -> (text, text):
@@ -228,18 +202,11 @@ fn native_prelower_object_key_v1(inputs: NativePrelowerKeyInputsV1) -> (text, te
         val eq = row.index_of("=")
         if eq <= 0 or eq == row.len() - 1:
             return ("", "dependency-digest-missing:{row}")
-    for instance in inputs.mono_instances:
-        if not native_prelower_mono_instance_admissible_v1(instance):
-            return ("", "mono-instance-inadmissible:{instance}")
-    var mono_items: [text] = []
-    for instance in canonical_identity_sort_texts(inputs.mono_instances):
-        mono_items.push(canon_str(instance))
     var inner: [text] = []
     inner.push(canon_field("module", canon_str(inputs.module_name)))
     inner.push(canon_field("sourceContent", canon_str(inputs.source_digest)))
     inner.push(canon_field("depInterfaces",
         canon_str(dependency_interface_fold(inputs.dependency_digests))))
-    inner.push(canon_field("monoInstances", canon_seq(mono_items)))
     inner.push(canon_field("producer", canon_str(inputs.producer_identity)))
     inner.push(canon_field("lane", canon_str(inputs.cache_lane)))
     (sha256_text(canon_field(NATIVE_PRELOWER_KEY_DOMAIN_V1, canon_seq(inner))), "ok")
@@ -249,5 +216,4 @@ export NativePrelowerKeyInputsV1
 export native_prelower_source_body_opaque_v1
 export native_prelower_interface_parts_v1
 export native_prelower_dependency_digest_v1
-export native_prelower_mono_instance_admissible_v1
 export native_prelower_object_key_v1

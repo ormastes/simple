@@ -1,0 +1,115 @@
+# Purpose and audience: prevention specification for bug #119 (traversal rejection, fail-closed unconfigured ceiling, and atomic catalog rollback).
+# @req REQ-SSPEC-OS
+
+"""Prevent capability scope bypasses, unconfigured capability admission, and partial catalog mutation on reload failure."""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.nogc_sync_mut.composition.{parse_composition_source_v1, encode_composition_image_v1, decode_composition_image_v1}
+use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_EXEC}
+use os.kernel.loader.artifact_manifest.{
+    manifest_kind_script,
+    manifest_for_kind,
+    manifest_parse_scoped_capability_v1,
+    manifest_project_scoped_capabilities_v1
+}
+use os.services.launcher.launcher.{launcher_init}
+use os.services.launcher.launcher_composition.{launcher_load_composition_bytes_v1}
+use os.services.launcher.launcher_catalog_projection.{
+    launcher_replace_composition_catalog_v1,
+    launcher_composition_app_slot_v1
+}
+use os.services.launcher.launcher_association_registry.{launcher_associated_app_projected_v1}
+use os.services.launcher.launcher_registry.{
+    app_count,
+    _app_index_by_name,
+    launcher_record_process,
+    launcher_bind_process_app_id_v1,
+    launcher_process_app_id_v1,
+    launcher_configure_scoped_capability_ceiling_v1,
+    launcher_app_capability_mask_v1
+}
+
+fn _prev_sci_img(source: text):
+    match parse_composition_source_v1(source):
+        case Err(_): decode_composition_image_v1([]).image
+        case Ok(parsed): decode_composition_image_v1(encode_composition_image_v1(parsed)).image
+
+describe "SCI launcher scoped capability and atomic catalog prevention (#119)":
+    it "rejects path traversal, relative paths, invalid ports, and script FileExec ceiling escalation":
+        step("verify scoped capability parser rejects traversal/malformed specs and script kind clamps FileExec")
+        expect(manifest_parse_scoped_capability_v1("FileRead(../etc)").ok).to_equal(false)
+        expect(manifest_parse_scoped_capability_v1("FileRead(/home/../etc)").ok).to_equal(false)
+        expect(manifest_parse_scoped_capability_v1("FileRead(relative/dir)").ok).to_equal(false)
+        expect(manifest_parse_scoped_capability_v1("FileRead()").ok).to_equal(false)
+        expect(manifest_parse_scoped_capability_v1("NetConnect(0)").ok).to_equal(false)
+        expect(manifest_parse_scoped_capability_v1("NetConnect(70000)").ok).to_equal(false)
+        expect(manifest_parse_scoped_capability_v1("UnknownCap(/tmp)").ok).to_equal(false)
+
+        val script_m = manifest_for_kind(manifest_kind_script())
+        val p_read = manifest_parse_scoped_capability_v1("FileRead(/home)")
+        val p_exec = manifest_parse_scoped_capability_v1("FileExec(/sys/apps)")
+        expect(p_read.ok).to_equal(true)
+        expect(p_exec.ok).to_equal(true)
+        val script_proj = manifest_project_scoped_capabilities_v1(script_m, ["FileExec(/sys/apps)"], [p_read.capability, p_exec.capability])
+        expect(script_proj.ok).to_equal(false)
+
+    it "fails closed before mutation on malformed or unconfigured SCI capability specs":
+        step("reject unconfigured capability admission and invalid capability spec without corrupting existing catalog")
+        launcher_init()
+        val unconfigured = _prev_sci_img("schema: simple.composition/1\napps:\n  - id: blocked-app\n    name: Blocked App\n    artifact: /sys/apps/blocked_app.smf\n    capabilities: [FileRead(/home)]\n")
+        val before_unconf = app_count
+        val unconf_res = launcher_load_composition_bytes_v1(unconfigured.bytes)
+        expect(unconf_res.ok).to_equal(false)
+        expect(unconf_res.code).to_equal("SCI_LAUNCHER_MANIFEST_CAPABILITY_PROJECTION_REQUIRED")
+        expect(app_count).to_equal(before_unconf)
+
+        expect(launcher_configure_scoped_capability_ceiling_v1("good-app", ["FileRead(/home)"])).to_equal(true)
+        val baseline = _prev_sci_img("schema: simple.composition/1\napps:\n  - id: good-app\n    name: Good App\n    artifact: /sys/apps/good_app.smf\n    capabilities: [FileRead(/home)]\n")
+        expect(launcher_load_composition_bytes_v1(baseline.bytes).ok).to_equal(true)
+        val count_after_baseline = app_count
+
+        expect(launcher_configure_scoped_capability_ceiling_v1("bad-app", ["FileRead(/home)"])).to_equal(true)
+        val malformed = _prev_sci_img("schema: simple.composition/1\napps:\n  - id: bad-app\n    name: Bad App\n    artifact: /sys/apps/bad_app.smf\n    capabilities: [FileRead(/../secret)]\n")
+        val mal_res = launcher_load_composition_bytes_v1(malformed.bytes)
+        expect(mal_res.ok).to_equal(false)
+        expect(mal_res.code).to_equal("SCI_LAUNCHER_CAPABILITY_INVALID")
+        expect(app_count).to_equal(count_after_baseline)
+        expect(_app_index_by_name("Good App") >= 0).to_equal(true)
+        expect(launcher_app_capability_mask_v1("good-app")).to_equal(CAP_RIGHT_READ)
+
+    it "preserves entire prior catalog, processes, and associations atomically on failed replacement":
+        step("commit valid catalog + process binding + association, then reject failed atomic replace with full rollback")
+        launcher_init()
+        val base_code = launcher_replace_composition_catalog_v1(
+            ["notes-keep"],
+            ["Notes Keep"],
+            ["/sys/apps/notes_keep.smf"],
+            ["N"],
+            [0u32],
+            [0u32],
+            [".keep"],
+            ["/sys/apps/notes_keep.smf"]
+        )
+        expect(base_code).to_equal("SCI_LAUNCHER_OK")
+        val slot = launcher_composition_app_slot_v1("notes-keep")
+        expect(slot >= 0).to_equal(true)
+        expect(launcher_record_process(6200u64, slot, "running", 0, 0u64, true)).to_equal(true)
+        expect(launcher_bind_process_app_id_v1(6200u64, "notes-keep")).to_equal(true)
+        val before_count = app_count
+
+        val dup_code = launcher_replace_composition_catalog_v1(
+            ["notes-keep", "notes-keep"],
+            ["Notes A", "Notes B"],
+            ["/sys/apps/a.smf", "/sys/apps/b.smf"],
+            ["A", "B"],
+            [0u32, 0u32],
+            [0u32, 0u32],
+            [".other"],
+            ["/sys/apps/a.smf"]
+        )
+        expect(dup_code).to_equal("SCI_LAUNCHER_DUPLICATE_ID")
+        expect(app_count).to_equal(before_count)
+        expect(_app_index_by_name("Notes Keep")).to_equal(slot)
+        expect(launcher_process_app_id_v1(6200u64)).to_equal("notes-keep")
+        expect(launcher_associated_app_projected_v1("/home/f.keep")).to_equal("/sys/apps/notes_keep.smf")

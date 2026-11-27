@@ -148,6 +148,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::Float(_)
                 | TokenKind::String(_)
                 | TokenKind::RawString(_)
+                | TokenKind::CharLit(_)
                 | TokenKind::FString(_)
                 | TokenKind::True
                 | TokenKind::False
@@ -316,6 +317,8 @@ impl<'a> Parser<'a> {
             // set, or `var into = 3` is rejected while `into + 1` would be fine.
             TokenKind::Into => self.parse_keyword_as_pattern("into"),
             TokenKind::Bind => self.parse_keyword_as_pattern("bind"),
+            TokenKind::Allow => self.parse_keyword_as_pattern("allow"),
+            TokenKind::Forbid => self.parse_keyword_as_pattern("forbid"),
             TokenKind::Unwrap => self.parse_keyword_as_pattern("unwrap"),
             TokenKind::On => self.parse_keyword_as_pattern("on"),
             TokenKind::With => self.parse_keyword_as_pattern("with"),
@@ -461,6 +464,7 @@ impl<'a> Parser<'a> {
             | TokenKind::TypedFloat(_, _)
             | TokenKind::String(_)
             | TokenKind::RawString(_)
+            | TokenKind::CharLit(_)
             | TokenKind::FString(_)
             | TokenKind::Bool(_)
             | TokenKind::Nil => {
@@ -614,7 +618,7 @@ impl<'a> Parser<'a> {
             }
             // Allow additional keywords as identifier patterns (used as enum variant names)
             TokenKind::Loop => self.parse_keyword_as_pattern("Loop"),
-            TokenKind::Vec => self.parse_keyword_as_pattern("Vec"),
+            TokenKind::Vec => self.parse_keyword_as_pattern("vec"),
             TokenKind::Unit => self.parse_keyword_as_pattern("Unit"),
             TokenKind::Sync => self.parse_keyword_as_pattern("Sync"),
             TokenKind::Async => self.parse_keyword_as_pattern("Async"),

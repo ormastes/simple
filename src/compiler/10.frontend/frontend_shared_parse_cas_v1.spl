@@ -7,6 +7,7 @@
 # reparses. No target object, mutable index, or host-private cache state lives
 # under this root.
 
+use std.nogc_sync_mut.io.disk_admission.{disk_publish_admitted}
 use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
 use compiler.frontend.frontend_cache_root_admission_v1.{frontend_cache_root_admission_v1}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_dir}
@@ -76,7 +77,7 @@ pub fn frontend_shared_parse_logical_path_v1(path: text) -> text:
         return ""
     val at = if src_at > example_at: src_at else: example_at
     if at < 0: return ""
-    val logical = normalized.substring(at + 1, normalized.len())
+    val logical = normalized.substring(at + 1, normalized.byte_len())
     if frontend_shared_parse_path_portable_v1(logical): logical else: ""
 
 fn _shared_parse_payload_has_host_path_v1(path: text, blob: text) -> bool:
@@ -156,8 +157,9 @@ fn _shared_parse_source_authorized_v1(source_sha: text,
             not _shared_parse_authority_ready_for_v1(authority_path,
                 authority_digest):
         return false
-    val row = _shared_parse_authority_rows_v1.get_or(
-        _shared_parse_path_hex_v1(logical_path), "")
+    val authority_rows = _shared_parse_authority_rows_v1
+    val authority_row_key = _shared_parse_path_hex_v1(logical_path)
+    val row = if authority_rows.contains_key(authority_row_key): authority_rows[authority_row_key] else: ""
     val length = logical_path.bytes().len()
     if row != "{length}:0:{source_sha}" and
             row != "{length}:1:{source_sha}":
@@ -226,14 +228,14 @@ pub fn frontend_shared_parse_cell_decode_v1(key: text, cell: text) -> text:
     val first = cell.index_of("\n")
     if first < 0 or cell.substring(0, first) != SHARED_PARSE_CELL_VERSION_V1:
         return ""
-    val rest = cell.substring(first + 1, cell.len())
+    val rest = cell.substring(first + 1, cell.byte_len())
     val second = rest.index_of("\n")
     if second < 0 or rest.substring(0, second) != key: return ""
-    val remainder = rest.substring(second + 1, rest.len())
+    val remainder = rest.substring(second + 1, rest.byte_len())
     val third = remainder.index_of("\n")
     if third < 0: return ""
     val payload_digest = remainder.substring(0, third)
-    val payload = remainder.substring(third + 1, remainder.len())
+    val payload = remainder.substring(third + 1, remainder.byte_len())
     if payload == "" or not _shared_parse_digest_valid_v1(payload_digest) or
             sha256_text(payload) != payload_digest or
             not payload.starts_with(FLAT_POOL_CODEC_VERSION + "\n"):
@@ -285,6 +287,7 @@ pub fn frontend_shared_parse_store_v1(source_sha: text, parse_source: text,
     val nonce = sha256_text(key + "|" + getpid().to_text() + "|" +
         time_now_unix_micros().to_text())
     val temp = dir + "/." + nonce + ".tmp"
+    if not disk_publish_admitted(dir, cell.len()): return false
     if not file_create_exclusive(temp, cell): return false
     val published = file_publish_noreplace(temp, destination)
     val unique_publisher = match published:

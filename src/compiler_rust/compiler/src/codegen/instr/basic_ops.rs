@@ -186,8 +186,11 @@ pub fn compile_cast<M: Module>(
             src_val
         };
         let src_ty = builder.func.dfg.value_type(src_val);
-        let widened = if src_ty.is_int() {
-            if src_ty.bits() < 64 {
+        if src_ty.is_float() {
+            // Saturating, like the interpreter: `-5.5 as u8` = 0, not SIGILL.
+            super::helpers::float_to_int_saturating(builder, src_val, to_int_width.unwrap_or(types::I64), to_signed)
+        } else {
+            let widened = if src_ty.bits() < 64 {
                 if to_signed {
                     builder.ins().sextend(types::I64, src_val)
                 } else {
@@ -195,17 +198,13 @@ pub fn compile_cast<M: Module>(
                 }
             } else {
                 src_val
+            };
+            match to_int_width {
+                Some(types::I8) => builder.ins().ireduce(types::I8, widened),
+                Some(types::I16) => builder.ins().ireduce(types::I16, widened),
+                Some(types::I32) => builder.ins().ireduce(types::I32, widened),
+                _ => widened,
             }
-        } else if to_signed {
-            builder.ins().fcvt_to_sint(types::I64, src_val)
-        } else {
-            builder.ins().fcvt_to_uint(types::I64, src_val)
-        };
-        match to_int_width {
-            Some(types::I8) => builder.ins().ireduce(types::I8, widened),
-            Some(types::I16) => builder.ins().ireduce(types::I16, widened),
-            Some(types::I32) => builder.ins().ireduce(types::I32, widened),
-            _ => widened,
         }
     } else if !is_from_float && is_to_float {
         // Int to float conversion
@@ -320,7 +319,28 @@ pub fn compile_unary_op<M: Module>(
             if val_is_float {
                 builder.ins().fneg(val)
             } else {
-                builder.ins().ineg(val)
+                let negated = builder.ins().ineg(val);
+                // Narrow signed locals can arrive widened to i64, especially
+                // across blocks. Unary minus must wrap at the operand's
+                // declared width even when no narrowing Store follows it.
+                let declared = match ctx.vreg_types.get(&operand).copied() {
+                    Some(TypeId::I8) => Some(types::I8),
+                    Some(TypeId::I16) => Some(types::I16),
+                    Some(TypeId::I32) => Some(types::I32),
+                    _ => None,
+                };
+                if let Some(narrow) = declared {
+                    let wrapped = if narrow.bits() < val_type.bits() {
+                        builder.ins().ireduce(narrow, negated)
+                    } else {
+                        negated
+                    };
+                    // Normalize the signed result before the generic return
+                    // ABI can zero-extend a narrow parameter's negation.
+                    builder.ins().sextend(types::I64, wrapped)
+                } else {
+                    negated
+                }
             }
         }
         UnaryOp::Not => {

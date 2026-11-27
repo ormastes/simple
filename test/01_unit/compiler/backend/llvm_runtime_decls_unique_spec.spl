@@ -1,0 +1,52 @@
+"""
+Regression: every LLVM runtime-declaration generator must declare each
+`@rt_*` symbol at most once. A duplicate `declare void @rt_eprintln(ptr)` in
+`generate_wasm_runtime_declarations` made LLVM reject every module
+(doc/08_tracking/bug/llvm_runtime_decls_duplicate_rt_eprintln_2026-09-13.md).
+Prevention: scans every `fn` in both backend files, not just the one that broke.
+"""
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn declared_symbol(line: text) -> text:
+    val at = line.index_of("declare ")
+    if at < 0:
+        return ""
+    val sym_at = line.index_of("@")
+    if sym_at < 0:
+        return ""
+    val rest = line.substring(sym_at)
+    val paren = rest.index_of("(")
+    if paren < 0:
+        return ""
+    rest.substring(0, paren)
+
+fn duplicate_decls(path: text) -> [text]:
+    val src = rt_file_read_text(path) ?? ""
+    var dups: [text] = []
+    var seen: [text] = []
+    var fn_name = ""
+    for line in src.split("\n"):
+        if line.starts_with("fn ") or line.starts_with("me "):
+            fn_name = line
+            seen = []
+        val sym = declared_symbol(line)
+        if sym != "":
+            if seen.contains(sym):
+                dups.push(fn_name + " " + sym)
+            else:
+                seen.push(sym)
+    dups
+
+describe "LLVM runtime declarations":
+    it "source files are readable":
+        expect((rt_file_read_text("src/compiler/70.backend/backend/llvm_backend_tools.spl") ?? "").len() > 0).to_equal(true)
+        expect((rt_file_read_text("src/compiler/70.backend/backend/llvm_backend.spl") ?? "").len() > 0).to_equal(true)
+    it "llvm_backend_tools declares each runtime symbol once per generator":
+        expect(duplicate_decls("src/compiler/70.backend/backend/llvm_backend_tools.spl")).to_equal([])
+    it "llvm_backend declares each runtime symbol once per generator":
+        expect(duplicate_decls("src/compiler/70.backend/backend/llvm_backend.spl")).to_equal([])
+    it "declared_symbol extracts the symbol name":
+        expect(declared_symbol("    decls = decls + \"declare void @rt_eprintln(ptr)\\n\"")).to_equal("@rt_eprintln")
+        expect(declared_symbol("    x = 1")).to_equal("")

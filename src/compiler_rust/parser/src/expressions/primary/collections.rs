@@ -1,4 +1,4 @@
-use crate::ast::{Expr, LambdaParam, MoveMode, TupleExprField};
+use crate::ast::{Argument, Expr, LambdaParam, MoveMode, TupleExprField};
 use crate::error::ParseError;
 use crate::parser_impl::core::Parser;
 use crate::token::TokenKind;
@@ -139,7 +139,33 @@ impl<'a> Parser<'a> {
             if let Some(lambda) = self.try_arrow_lambda_from_paren_list(std::slice::from_ref(&first))? {
                 return Ok(lambda);
             }
-            Ok(first)
+            Ok(self.apply_paren_unit_suffix(first))
+        }
+    }
+
+    /// `(expr)_sfx` — a unit suffix glued (no whitespace) to a parenthesized
+    /// group. Desugared to `expr * 1_sfx`, which reuses the literal unit path
+    /// (interpreter `Value::Unit`, HIR plain numeric) with no new AST node.
+    /// Without this the group collapsed to `expr` and `_sfx` became a
+    /// no-paren call argument (`n _sfx` => "function `n` not found").
+    /// Bug: paren_expr_unit_suffix_parsed_as_call_2026-11-16.
+    fn apply_paren_unit_suffix(&mut self, inner: Expr) -> Expr {
+        let suffix = match &self.current.kind {
+            TokenKind::Identifier { name, .. }
+                if self.current.span.start == self.previous.span.end
+                    && name.len() > 1
+                    && name.starts_with('_')
+                    && name[1..].chars().next().map_or(false, |c| c.is_ascii_alphabetic()) =>
+            {
+                name[1..].to_string()
+            }
+            _ => return inner,
+        };
+        self.advance();
+        Expr::Binary {
+            op: crate::ast::BinOp::Mul,
+            left: Box::new(inner),
+            right: Box::new(Expr::TypedInteger(1, crate::token::NumericSuffix::Unit(suffix))),
         }
     }
 
@@ -180,6 +206,39 @@ impl<'a> Parser<'a> {
             move_mode: MoveMode::Copy,
             capture_all: false, // Fat arrow syntax doesn't auto-capture
         }))
+    }
+
+    /// `s{a, b, c}` set literal. Lowered at parse time to the existing Set
+    /// construction `Set.from([a, b, c])`, so no new AST/HIR/MIR node is
+    /// needed and the self-hosted parser produces the identical shape
+    /// (bug set_literal_s_brace_unparsed_2026-09-06, owner decision 2026-11-09).
+    pub(crate) fn parse_set_literal(&mut self) -> Result<Expr, ParseError> {
+        self.advance(); // consume `s{`
+        let mut elements = Vec::new();
+        loop {
+            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
+                self.advance();
+            }
+            if self.check(&TokenKind::RBrace) {
+                break;
+            }
+            elements.push(self.parse_expression()?);
+            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
+                self.advance();
+            }
+            if self.check(&TokenKind::Comma) {
+                self.advance();
+                continue;
+            }
+            break;
+        }
+        self.expect(&TokenKind::RBrace)?;
+        Ok(Expr::MethodCall {
+            receiver: Box::new(Expr::Identifier("Set".to_string())),
+            method: "from".to_string(),
+            args: vec![Argument::new(None, Expr::Array(elements))],
+            generic_args: Vec::new(),
+        })
     }
 
     fn parse_array_literal(&mut self) -> Result<Expr, ParseError> {

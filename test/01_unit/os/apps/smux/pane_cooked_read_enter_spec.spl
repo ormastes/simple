@@ -1,0 +1,95 @@
+"""
+Enter completes a cooked-mode read (bug smux_pane_cooked_read_enter_never_completes_2026-11-13).
+
+Under Windows ConPTY, Enter sent to a pane whose shell is in a plain
+`read -r x` (no readline) never completed the read within 40 s. Budget: the
+value plus Enter must produce `got=<value>` within 5 s.
+"""
+use std.spec
+use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_list_windows,
+    smux_list_panes, smux_resize, smux_pane_spawn_pty, smux_pane_close_pty,
+    smux_send_command, smux_capture_history}
+use std.nogc_sync_mut.io.{thread_sleep_ms}
+use std.io_runtime.{time_now_unix_micros}
+use std.nogc_async_mut.sosix.{sosix_platform}
+
+fn _shell() -> text:
+    if sosix_platform() == "windows": return "\"C:/Program Files/Git/usr/bin/sh.exe\" -i"
+    return "/bin/sh -i"
+
+fn _secs(t0: i64) -> f64:
+    return (time_now_unix_micros() - t0) as f64 / 1000000.0
+
+describe "smux PTY cooked read Enter":
+    it "completes read -r x and echoes got= within 5 s":
+        # @req BUG-smux_pane_cooked_read_enter_never_completes_2026-11-13
+        step("spawn sh -i and wait for the prompt")
+        smux_reset_for_test()
+        val s = smux_create_session("rd")
+        val w = smux_list_windows(s.id)[0]
+        val p = smux_list_panes(s.id, w.id)[0]
+        val _r = smux_resize(s.id, w.id, p.id, 120, 24)
+        expect(smux_pane_spawn_pty(s.id, w.id, p.id, _shell()).is_ok()).to_equal(true)
+        var warm = 0
+        while warm < 40:
+            thread_sleep_ms(50)
+            val _c = smux_capture_history(s.id, w.id, p.id, 20, true)
+            warm = warm + 1
+        step("start the read, then send a value plus Enter")
+        expect(smux_send_command(s.id, w.id, p.id, "read -r x; echo got=$x").is_ok()).to_equal(true)
+        var settle = 0
+        while settle < 20:
+            thread_sleep_ms(50)
+            val _c2 = smux_capture_history(s.id, w.id, p.id, 20, true)
+            settle = settle + 1
+        val t0 = time_now_unix_micros()
+        expect(smux_send_command(s.id, w.id, p.id, "valQ7").is_ok()).to_equal(true)
+        var seen = false
+        while not seen and _secs(t0) < 15.0:
+            val cap = smux_capture_history(s.id, w.id, p.id, 10, true)
+            if cap.is_ok() and cap.unwrap().content.contains("got=valQ7"):
+                seen = true
+            else:
+                thread_sleep_ms(10)
+        val elapsed = _secs(t0)
+        print "cooked read enter seconds=" + elapsed.to_string() + " seen=" + seen.to_string()
+        val _cp = smux_pane_close_pty(s.id, w.id, p.id)
+        expect(seen).to_equal(true)
+        expect(elapsed < 5.0).to_equal(true)
+
+fn _read_cmd() -> text:
+    if sosix_platform() == "windows": return "\"C:/Program Files/Git/usr/bin/sh.exe\" -c \"read -r x; echo got=$x; sleep 3\""
+    return "/bin/sh -c 'read -r x; echo got=$x; sleep 3'"
+
+describe "smux PTY cooked read Enter, non-interactive child":
+    it "completes a pane command that is a bare read -r x within 5 s":
+        # @req BUG-smux_pane_cooked_read_enter_never_completes_2026-11-13
+        step("spawn sh -c 'read -r x; echo got=$x' directly")
+        smux_reset_for_test()
+        val s = smux_create_session("rn")
+        val w = smux_list_windows(s.id)[0]
+        val p = smux_list_panes(s.id, w.id)[0]
+        val _r = smux_resize(s.id, w.id, p.id, 120, 24)
+        expect(smux_pane_spawn_pty(s.id, w.id, p.id, _read_cmd()).is_ok()).to_equal(true)
+        var warm = 0
+        while warm < 30:
+            thread_sleep_ms(50)
+            val _c = smux_capture_history(s.id, w.id, p.id, 20, true)
+            warm = warm + 1
+        step("send a value plus Enter")
+        val t0 = time_now_unix_micros()
+        expect(smux_send_command(s.id, w.id, p.id, "valN9").is_ok()).to_equal(true)
+        var seen = false
+        while not seen and _secs(t0) < 15.0:
+            val cap = smux_capture_history(s.id, w.id, p.id, 10, true)
+            if cap.is_ok() and cap.unwrap().content.contains("got=valN9"):
+                seen = true
+            else:
+                thread_sleep_ms(10)
+        val elapsed = _secs(t0)
+        val last = smux_capture_history(s.id, w.id, p.id, 10, true)
+        if last.is_ok(): print "bare read capture=[" + last.unwrap().content + "]"
+        print "bare read enter seconds=" + elapsed.to_string() + " seen=" + seen.to_string()
+        val _cp = smux_pane_close_pty(s.id, w.id, p.id)
+        expect(seen).to_equal(true)
+        expect(elapsed < 5.0).to_equal(true)

@@ -1,0 +1,75 @@
+"""
+## Purpose and audience
+Bug helper_abandon_proof_segment_over_limit_2026-11-19: every journal-relative path a signed operator proof (helper
+abandon, service-handoff abandon, retention release) or a remote-run record is published under must pass the journal's
+own path gate. The helper-abandon proof path was `<sha(op)>-<digest>.sdn`, one 133-byte segment over the journal's
+segment limit, so every publish was refused with `OPERATION_JOURNAL_RECORD_PATH`.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable `simple` binary on this host, 2026-11-19).
+## Compatibility and limitations
+Pure path arithmetic: no journal is opened. Inputs are worst case (64-hex digests, the largest i64 sequence/index,
+long operation ids and fences, which are hashed before they reach the path).
+## Verification guidance and troubleshooting
+A failure names the builder and the offending path; compare each segment against
+`OPERATION_JOURNAL_SEGMENT_LIMIT_V3`.
+"""
+use std.spec.{step, fail}
+use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_relative_v3,
+    OPERATION_JOURNAL_SEGMENT_LIMIT_V3}
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.orchestration.host_helper_abandon_record_v1.{host_helper_abandon_proof_relative_v1,
+    host_helper_abandoned_relative_v1}
+use std.nogc_sync_mut.orchestration.host_service_handoff_v1.{host_service_handoff_abandon_evidence_relative_v1,
+    host_service_handoff_abandoned_relative_v1}
+use std.nogc_sync_mut.orchestration.host_remote_build_retention_release_v1.{host_retention_release_proof_relative_v1,
+    host_retention_release_marker_relative_v1, retention_released_relative_v1}
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.{host_remote_build_open_relative_v4,
+    host_remote_build_input_relative_v4, host_remote_build_bundle_relative_v4, host_remote_build_reset_failure_relative_v4,
+    host_remote_build_reset_failure_refused_relative_v4}
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_reap_v4.{host_remote_build_reap_index_relative_v4,
+    host_remote_build_reap_relative_v4}
+
+fn jp_operation_id() -> text:
+    "op_" + "x".repeat(124)
+
+fn jp_digest() -> text:
+    sha256_text("journal-proof-path-worst-case")
+
+fn jp_assert_journal_path(name: text, path: text):
+    if not distributed_operation_journal_relative_v3(path): fail(name + " refused by the journal path gate: " + path)
+    for part in path.split("/"):
+        if part.byte_len() > OPERATION_JOURNAL_SEGMENT_LIMIT_V3:
+            fail(name + " segment over the limit (" + part.byte_len().to_text() + " bytes): " + part)
+
+describe "Journal proof paths stay inside the journal segment limit":
+    it "keeps the helper-abandon proof path inside the limit, as two hashed segments":
+        # @req AT-OPS-HELPER-ABANDON (the proof must be publishable at all)
+        val path = host_helper_abandon_proof_relative_v1(jp_operation_id(), jp_digest())
+        expect(path).to_equal("host-helper-abandon-proof/" + sha256_text(jp_operation_id()) + "/" + jp_digest() + ".sdn")
+        jp_assert_journal_path("helper-abandon proof", path)
+        jp_assert_journal_path("helper-abandon marker", host_helper_abandoned_relative_v1(jp_operation_id()))
+        step("the pre-fix single-segment shape is exactly what the gate refuses")
+        val old = "host-helper-abandon-proof/" + sha256_text(jp_operation_id()) + "-" + jp_digest() + ".sdn"
+        expect(distributed_operation_journal_relative_v3(old)).to_equal(false)
+
+    it "keeps the service-handoff abandon proof inside the limit at the largest sequence":
+        val sequence: i64 = 9223372036854775807
+        jp_assert_journal_path("service-handoff abandon proof", host_service_handoff_abandon_evidence_relative_v1(sequence, jp_digest()))
+        jp_assert_journal_path("service-handoff abandoned marker", host_service_handoff_abandoned_relative_v1(sequence))
+
+    it "keeps the retention-release proof and markers inside the limit":
+        jp_assert_journal_path("retention-release proof", host_retention_release_proof_relative_v1(jp_operation_id(), jp_digest()))
+        jp_assert_journal_path("retention-release marker", host_retention_release_marker_relative_v1(jp_operation_id()))
+        jp_assert_journal_path("retention-released marker", retention_released_relative_v1(jp_operation_id()))
+
+    it "keeps every remote-run record path inside the limit":
+        val fence = "fence_" + "f".repeat(250)
+        val index: i64 = 9223372036854775807
+        jp_assert_journal_path("remote-run open", host_remote_build_open_relative_v4(fence, jp_operation_id()))
+        jp_assert_journal_path("remote-run input", host_remote_build_input_relative_v4(fence, jp_operation_id(), index))
+        jp_assert_journal_path("remote-run bundle", host_remote_build_bundle_relative_v4(fence, jp_operation_id()))
+        jp_assert_journal_path("remote-run reset failure", host_remote_build_reset_failure_relative_v4(jp_operation_id()))
+        jp_assert_journal_path("remote-run reset refused", host_remote_build_reset_failure_refused_relative_v4(jp_operation_id()))
+        jp_assert_journal_path("remote-run reap index", host_remote_build_reap_index_relative_v4(jp_operation_id()))
+        jp_assert_journal_path("remote-run reap", host_remote_build_reap_relative_v4(fence, jp_operation_id()))

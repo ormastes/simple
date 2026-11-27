@@ -10,9 +10,18 @@ doc/08_tracking/bug/crash_signal_bundle_extern_gap_2026-07-29.md for the
 extern gap that blocks a real signal -> Simple hook). Instead this asserts
 the CrashBundleV1 data model + SDN serialization + std.log ring-record
 round-trip that ARE reachable today.
+
+The last describe block drives a REAL forked crash through the C runtime's
+fork bridge and rt_install_crash_handler (bug
+crash_handler_and_fork_bridge_absent_from_seed_macos_2026-09-06). It runs only
+on a compiled self-hosted binary that links src/runtime; on the interpreter
+(Rust seed) the externs are unbacked and return nil silently, so the examples
+report an explicit skip instead of a vacuous pass. Native C evidence for the
+same contract: src/runtime/test/rt_fork_crash_handler_selfcheck.c.
 """
 
 use std.spec
+use std.spec.{skip_on_interpreter}
 use std.nogc_sync_mut.crash.crash_bundle.{
     CrashBundleV1, crash_ring_register, crash_ring_clear, crash_ring_unregister
 }
@@ -125,3 +134,42 @@ describe "CrashBundleV1 — synthetic capture (DS7)":
         expect(on_disk).to_equal(bundle.to_sdn())
 
         crash_ring_unregister(id)
+
+extern fn rt_fork_child_setup() -> i64
+extern fn rt_fork_parent_wait(pid: i64, timeout_ms: i64) -> i64
+extern fn rt_fork_parent_stdout() -> text
+extern fn rt_fork_parent_stderr() -> text
+extern fn rt_fork_child_exit(code: i64)
+extern fn rt_fork_parent_signaled() -> bool
+extern fn rt_install_crash_handler() -> i64
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+
+fn check_fork_bridge_captures_clean_child():
+    val pid = rt_fork_child_setup()
+    if pid == 0:
+        print "fork-child-out"
+        rt_fork_child_exit(7)
+    expect(pid > 0).to_equal(true)
+    expect(rt_fork_parent_wait(pid, 10000)).to_equal(7)
+    expect(rt_fork_parent_signaled()).to_equal(false)
+    expect(rt_fork_parent_stdout().contains("fork-child-out")).to_equal(true)
+
+fn check_null_write_hits_crash_handler():
+    val pid = rt_fork_child_setup()
+    if pid == 0:
+        if rt_install_crash_handler() != 1:
+            rt_fork_child_exit(99)
+        rt_ptr_write_i64(0, 0, 1)
+        rt_fork_child_exit(98)
+    expect(pid > 0).to_equal(true)
+    # 139 = 128 + SIGSEGV: the handler _exit()s, so the child is WIFEXITED,
+    # not WIFSIGNALED. signaled == true would be the bare-crash failure mode.
+    expect(rt_fork_parent_wait(pid, 10000)).to_equal(139)
+    expect(rt_fork_parent_signaled()).to_equal(false)
+    val err = rt_fork_parent_stderr()
+    expect(err.contains("[simple-runtime] Fatal:")).to_equal(true)
+    expect(err.contains("Backtrace:")).to_equal(true)
+
+describe "Real forked crash through the C runtime (fork bridge + crash handler)":
+    skip_on_interpreter("fork bridge captures a clean child's exit code and stdout", check_fork_bridge_captures_clean_child)
+    skip_on_interpreter("a null write in a forked child exits 139 with the crash banner", check_null_write_hits_crash_handler)

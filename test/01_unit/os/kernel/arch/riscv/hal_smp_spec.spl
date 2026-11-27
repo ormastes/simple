@@ -24,8 +24,10 @@ use os.kernel.arch.riscv64.hal_smp.{
     sbi_mock_ipi_probe_path,
     hal_smp_cpu_start_with_mock,
     hal_smp_ipi_send_with_mock,
-    hal_smp_ipi_broadcast_with_mock
+    hal_smp_ipi_broadcast_with_mock,
+    hal_smp_ipi_windows
 }
+use os.kernel.boot.riscv_noalloc_dtb_capability.{riscv_noalloc_dtb_capability_init}
 
 # SA-2 scope: HalSmp impl — cpu_count, cpu_start return paths via mock SBI;
 #             ipi_send delivers to pending slot; ipi_broadcast targets all.
@@ -194,3 +196,68 @@ describe "HalSmp":
             hal_smp_init_from_bytes(fdt)
             hal_smp_ipi_broadcast_with_mock(mock, 77u32)
             expect(hal_smp_get_pending_ipi(1u32)).to_equal(77u32)
+
+        it "broadcast windows: sparse physical hart IDs fold per 64-hart SBI window":
+            # @req REQ-SSPEC-OS
+            step("broadcast windows: sparse physical hart IDs fold per 64-hart SBI window")
+            val phys: [u64; 8] = [3u64, 7u64, 64u64, 130u64, 0u64, 0u64, 0u64, 0u64]
+            # self = 99 is not in the set: base 0 holds 3,7; base 64 holds 64; base 128 holds 130
+            val w = hal_smp_ipi_windows(phys, 4u32, 99u64)
+            expect(w.1).to_equal(3)
+            expect(w.0[0].0).to_equal(0x88u64)
+            expect(w.0[0].1).to_equal(0u64)
+            expect(w.0[1].0).to_equal(1u64)
+            expect(w.0[1].1).to_equal(64u64)
+            expect(w.0[2].0).to_equal(4u64)
+            expect(w.0[2].1).to_equal(128u64)
+
+        it "broadcast windows: self is excluded by physical id, not logical position":
+            # @req REQ-SSPEC-OS
+            step("broadcast windows: self is excluded by physical id, not logical position")
+            val phys: [u64; 8] = [3u64, 7u64, 64u64, 130u64, 0u64, 0u64, 0u64, 0u64]
+            # boot hart 7 (not logical 0 position-wise): mask 0x88 loses bit 7
+            val w = hal_smp_ipi_windows(phys, 4u32, 7u64)
+            expect(w.1).to_equal(3)
+            expect(w.0[0].0).to_equal(0x08u64)
+            # boot hart 130 alone in its window: the window disappears entirely
+            val w2 = hal_smp_ipi_windows(phys, 4u32, 130u64)
+            expect(w2.1).to_equal(2)
+            expect(w2.0[1].1).to_equal(64u64)
+
+        it "broadcast mock records windowed physical (mask, base), not a logical mask":
+            # @req REQ-SSPEC-OS
+            step("broadcast mock records windowed physical (mask, base), not a logical mask")
+            val harts = [
+                HartDescSmp(id: 0u32, status: "okay", isa: "rv64gc"),
+                HartDescSmp(id: 1u32, status: "okay", isa: "rv64gc"),
+                HartDescSmp(id: 2u32, status: "okay", isa: "rv64gc")
+            ]
+            val fdt = make_fdt_with_cpus_smp(harts)
+            val mock = make_sbi_mock_v3_smp()
+            hal_smp_init_from_bytes(fdt)
+            hal_smp_ipi_broadcast_with_mock(mock, 9u32)
+            expect(mock.ipi_calls.len()).to_equal(1)
+            expect(mock.ipi_calls[0].0).to_equal(0x6u64)
+            expect(mock.ipi_calls[0].1).to_equal(0u64)
+
+        it "broadcast mock excludes the boot hart by physical id when capability falls back":
+            # @req REQ-SSPEC-OS
+            step("broadcast mock excludes the boot hart by physical id when capability falls back")
+            val harts = [
+                HartDescSmp(id: 0u32, status: "okay", isa: "rv64gc"),
+                HartDescSmp(id: 1u32, status: "okay", isa: "rv64gc"),
+                HartDescSmp(id: 2u32, status: "okay", isa: "rv64gc")
+            ]
+            val fdt = make_fdt_with_cpus_smp(harts)
+            val mock = make_sbi_mock_v3_smp()
+            hal_smp_init_from_bytes(fdt)
+            # boot hart is physical 2; addr 0 -> fallback (count 1) with harts[0] = 2
+            riscv_noalloc_dtb_capability_init(2u64, 0u64)
+            hal_smp_ipi_send_with_mock(mock, 2u32, 55u32)
+            val before = mock.ipi_calls.len()
+            hal_smp_ipi_broadcast_with_mock(mock, 9u32)
+            riscv_noalloc_dtb_capability_init(0u64, 0u64)
+            expect(mock.ipi_calls.len() - before).to_equal(1)
+            expect(mock.ipi_calls[before].0).to_equal(0x2u64)
+            expect(mock.ipi_calls[before].1).to_equal(0u64)
+            expect(hal_smp_get_pending_ipi(2u32)).to_equal(55u32)

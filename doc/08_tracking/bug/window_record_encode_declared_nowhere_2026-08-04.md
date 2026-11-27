@@ -84,3 +84,6 @@ the spec's length-only assertions replaced with byte-level assertions against a
 recorded reference encoding. That is an SPM/transport lane, not a compositor
 measurement lane.
 
+
+## Round 8 note 2026-11-06
+`window_record_encode` is now defined (`src/lib/common/win_fs/window_record.spl:84`); `wm_spm_client_spec.spl` 5/5 on the seed. Added byte-level reference assertions (exact wire string, distinct records differ) -> 7/7. Residual: the SpmService decoder side is still not cross-checked against this encoding.

@@ -103,6 +103,7 @@ pub(crate) fn owner_bindings(owner: &str) -> Option<Arc<ModuleBindings>> {
 }
 
 pub(crate) fn record_owner_binding(importer: Arc<str>, local_name: String, binding: (Arc<str>, String)) {
+    crate::interpreter::bump_registry_generation();
     MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cell| {
         let mut by_owner = cell.borrow_mut();
         let bindings = by_owner.entry(importer).or_default();
@@ -116,6 +117,7 @@ pub(crate) fn record_owner_binding(importer: Arc<str>, local_name: String, bindi
 /// table is snapshotted NOW, so later lazy lookups answer exactly what the
 /// per-name copy would have recorded at this point.
 pub(crate) fn record_owner_binding_layer(importer: Arc<str>, source_owner: Arc<str>, names: Arc<crate::value::ModuleTable>) {
+    crate::interpreter::bump_registry_generation();
     let source = owner_bindings(&source_owner);
     MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cell| {
         let mut by_owner = cell.borrow_mut();
@@ -181,6 +183,21 @@ pub struct LiteralFunctionInfo {
 pub(crate) const FLATTEN_MODULE_OWNER_ATTR_PREFIX: &str = "__simple_flatten_module_owner__=";
 pub(crate) const FLATTEN_GLOBAL_OWNER_MARKER_PREFIX: &str = "__simple_flatten_global_owner__=";
 pub(crate) const FLATTEN_IMPORT_BINDING_MARKER_PREFIX: &str = "__simple_flatten_import_binding__=";
+/// Whole-module import (`use a.b` / `use a.b as m`): importer, local namespace
+/// name, source owner. Kept apart from the import-binding prefix because a
+/// whole-module import binds no symbol and that prefix has several consumers.
+/// Read only by HIR lowering (`Lowerer::collect_flattened_import_aliases`).
+pub(crate) const FLATTEN_MODULE_NAMESPACE_MARKER_PREFIX: &str = "__simple_flatten_module_namespace__=";
+
+/// Decode a `__simple_flatten_module_namespace__=` marker into
+/// `(importer, local_name, source_owner)`.
+pub(crate) fn decode_module_namespace_marker(marker: &str) -> Option<(&str, &str, &str)> {
+    let mut raw = marker.strip_prefix(FLATTEN_MODULE_NAMESPACE_MARKER_PREFIX)?;
+    let importer = decode_marker_field(&mut raw)?;
+    let local_name = decode_marker_field(&mut raw)?;
+    let source_owner = decode_marker_field(&mut raw)?;
+    raw.is_empty().then_some((importer, local_name, source_owner))
+}
 
 /// Decode one `<len>:<value>` field of a flatten marker name.
 ///
@@ -292,6 +309,13 @@ thread_local! {
     pub(crate) static DEBUG_CALL_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// Current file being evaluated (for module resolution)
     pub(crate) static CURRENT_FILE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    /// Span of the module-level node currently being evaluated by the
+    /// interpreter. Set at each statement-execution loop head so semantic
+    /// errors raised deep in expression evaluation can still be reported with
+    /// the enclosing statement's file:line:col (bug row:
+    /// seed_semantic_error_missing_position_2026-11-09). `Expr` itself
+    /// carries no span, so statement granularity is the finest available.
+    pub(crate) static CURRENT_NODE_SPAN: RefCell<Option<simple_parser::Span>> = const { RefCell::new(None) };
     /// Interface bindings for static polymorphism (trait_name -> impl_type_name)
     /// When a binding exists, method calls on trait objects use static dispatch
     /// to the bound implementation type.
@@ -359,6 +383,426 @@ pub(crate) fn const_trace(site: &str, name: &str) {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PendingCallGenerics {
+    pub fn_args: Option<Vec<Type>>,
+    pub class_args: Option<Vec<Type>>,
+    pub class_name: Option<String>,
+}
+
+pub(crate) struct PendingCallGenericsGuard {
+    saved_len: usize,
+}
+
+impl PendingCallGenericsGuard {
+    pub(crate) fn push(generics: Option<PendingCallGenerics>) -> Self {
+        let resolved = generics.map(|g| PendingCallGenerics {
+            fn_args: g
+                .fn_args
+                .map(|args| args.iter().map(resolve_generic_type_in_scope).collect()),
+            class_args: g
+                .class_args
+                .map(|args| args.iter().map(resolve_generic_type_in_scope).collect()),
+            class_name: g.class_name,
+        });
+        let saved_len = PENDING_CALL_GENERICS.with(|cell| {
+            let mut stack = cell.borrow_mut();
+            let len = stack.len();
+            stack.push(resolved);
+            len
+        });
+        Self { saved_len }
+    }
+}
+
+impl Drop for PendingCallGenericsGuard {
+    fn drop(&mut self) {
+        PENDING_CALL_GENERICS.with(|cell| {
+            cell.borrow_mut().truncate(self.saved_len);
+        });
+    }
+}
+
+pub(crate) fn take_pending_call_generics() -> Option<PendingCallGenerics> {
+    PENDING_CALL_GENERICS.with(|cell| cell.borrow_mut().last_mut().and_then(|slot| slot.take()))
+}
+
+fn expected_target_from_generic(
+    receiver: &simple_parser::ast::Expr,
+    method: &str,
+    generic_args: &[Type],
+) -> (Option<Vec<Type>>, Option<String>, Option<Vec<Type>>) {
+    let (mut class_args, mut class_name) = match receiver {
+        simple_parser::ast::Expr::GenericInst { expr, type_args } if !type_args.is_empty() => (
+            Some(type_args.clone()),
+            match expr.as_ref() {
+                simple_parser::ast::Expr::Identifier(n) => Some(n.clone()),
+                _ => None,
+            },
+        ),
+        simple_parser::ast::Expr::Identifier(ident) => {
+            let bound = GENERIC_TYPE_BINDINGS.with(|cell| cell.borrow().get(ident).cloned());
+            match bound.map(|t| resolve_generic_type_in_scope(&t)) {
+                Some(Type::Generic { name, args }) if !args.is_empty() => (Some(args), Some(name)),
+                Some(Type::Array { size: None, .. }) => (None, Some("array".to_string())),
+                Some(Type::Simple(name)) => (None, Some(name)),
+                _ => (None, None),
+            }
+        }
+        _ => (None, None),
+    };
+    if class_args.is_none() {
+        if let simple_parser::ast::Expr::Identifier(cls) = receiver {
+            if let Some(Type::Generic { name, args }) = current_expected_target_type() {
+                if &name == cls && !args.is_empty() {
+                    class_name = Some(name);
+                    class_args = Some(args);
+                }
+            }
+        }
+    }
+    let fn_args = if !generic_args.is_empty() {
+        Some(generic_args.to_vec())
+    } else if method == "collect" {
+        Some(vec![current_expected_target_type().unwrap_or_else(|| Type::Array {
+            element: Box::new(Type::Simple("Any".to_string())),
+            size: None,
+        })])
+    } else {
+        None
+    };
+    (class_args, class_name, fn_args)
+}
+
+pub(crate) fn push_method_call_generics(
+    receiver: &simple_parser::ast::Expr,
+    generic_args: &[Type],
+) -> PendingCallGenericsGuard {
+    push_method_call_generics_with_method(receiver, "", generic_args)
+}
+
+pub(crate) fn push_method_call_generics_with_method(
+    receiver: &simple_parser::ast::Expr,
+    method: &str,
+    generic_args: &[Type],
+) -> PendingCallGenericsGuard {
+    let (class_args, class_name, fn_args) = expected_target_from_generic(receiver, method, generic_args);
+    let pending = if fn_args.is_some() || class_args.is_some() || class_name.is_some() {
+        Some(PendingCallGenerics {
+            fn_args,
+            class_args,
+            class_name,
+        })
+    } else {
+        None
+    };
+    PendingCallGenericsGuard::push(pending)
+}
+
+pub(crate) struct ExpectedTargetTypeGuard {
+    prev_len: usize,
+}
+
+pub(crate) fn push_expected_target_type(ty: Option<Type>) -> ExpectedTargetTypeGuard {
+    let prev_len = EXPECTED_TARGET_TYPE.with(|cell| {
+        let mut stack = cell.borrow_mut();
+        let len = stack.len();
+        stack.push(ty);
+        len
+    });
+    ExpectedTargetTypeGuard { prev_len }
+}
+
+impl Drop for ExpectedTargetTypeGuard {
+    fn drop(&mut self) {
+        EXPECTED_TARGET_TYPE.with(|cell| {
+            cell.borrow_mut().truncate(self.prev_len);
+        });
+    }
+}
+
+pub(crate) fn current_expected_target_type() -> Option<Type> {
+    EXPECTED_TARGET_TYPE.with(|cell| cell.borrow().last().cloned().flatten())
+}
+
+pub(crate) struct CurrentFnReturnTypeGuard {
+    prev_len: usize,
+}
+
+pub(crate) fn push_current_fn_return_type(ty: Option<Type>) -> CurrentFnReturnTypeGuard {
+    let prev_len = CURRENT_FN_RETURN_TYPE.with(|cell| {
+        let mut stack = cell.borrow_mut();
+        let len = stack.len();
+        stack.push(ty);
+        len
+    });
+    CurrentFnReturnTypeGuard { prev_len }
+}
+
+impl Drop for CurrentFnReturnTypeGuard {
+    fn drop(&mut self) {
+        CURRENT_FN_RETURN_TYPE.with(|cell| {
+            cell.borrow_mut().truncate(self.prev_len);
+        });
+    }
+}
+
+pub(crate) fn current_fn_return_type() -> Option<Type> {
+    CURRENT_FN_RETURN_TYPE.with(|cell| cell.borrow().last().cloned().flatten())
+}
+
+pub(crate) struct GenericTypeBindingsGuard {
+    prev: Option<HashMap<String, Type>>,
+}
+
+impl GenericTypeBindingsGuard {
+    pub(crate) fn enter(updates: HashMap<String, Type>) -> Self {
+        if updates.is_empty() {
+            return Self { prev: None };
+        }
+        let prev = GENERIC_TYPE_BINDINGS.with(|cell| {
+            let mut map = cell.borrow_mut();
+            let saved = map.clone();
+            for (k, v) in updates {
+                map.insert(k, v);
+            }
+            saved
+        });
+        Self { prev: Some(prev) }
+    }
+}
+
+impl Drop for GenericTypeBindingsGuard {
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev.take() {
+            GENERIC_TYPE_BINDINGS.with(|cell| {
+                *cell.borrow_mut() = prev;
+            });
+        }
+    }
+}
+
+pub(crate) fn resolve_generic_type_in_scope(ty: &Type) -> Type {
+    GENERIC_TYPE_BINDINGS.with(|cell| {
+        let bindings = cell.borrow();
+        if bindings.is_empty() {
+            return ty.clone();
+        }
+        substitute_type_with_bindings(ty, &bindings, 0)
+    })
+}
+
+fn substitute_type_with_bindings(ty: &Type, bindings: &HashMap<String, Type>, depth: usize) -> Type {
+    if depth >= 8 {
+        return ty.clone();
+    }
+    match ty {
+        Type::Simple(name) => {
+            if let Some(bound) = bindings.get(name) {
+                if !matches!(bound, Type::Simple(n) if n == name) {
+                    return substitute_type_with_bindings(bound, bindings, depth + 1);
+                }
+            }
+            ty.clone()
+        }
+        Type::Generic { name, args } => {
+            if args.is_empty() {
+                if let Some(bound) = bindings.get(name) {
+                    if !matches!(bound, Type::Generic { name: n, args: a } if a.is_empty() && n == name) {
+                        return substitute_type_with_bindings(bound, bindings, depth + 1);
+                    }
+                }
+            }
+            Type::Generic {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|a| substitute_type_with_bindings(a, bindings, depth + 1))
+                    .collect(),
+            }
+        }
+        Type::Optional(inner) => Type::Optional(Box::new(substitute_type_with_bindings(inner, bindings, depth + 1))),
+        Type::Array { element, size } => Type::Array {
+            element: Box::new(substitute_type_with_bindings(element, bindings, depth + 1)),
+            size: size.clone(),
+        },
+        Type::Tuple(items) => Type::Tuple(
+            items
+                .iter()
+                .map(|t| substitute_type_with_bindings(t, bindings, depth + 1))
+                .collect(),
+        ),
+        Type::Pointer { kind, inner } => Type::Pointer {
+            kind: *kind,
+            inner: Box::new(substitute_type_with_bindings(inner, bindings, depth + 1)),
+        },
+        Type::Capability { capability, inner } => Type::Capability {
+            capability: *capability,
+            inner: Box::new(substitute_type_with_bindings(inner, bindings, depth + 1)),
+        },
+        Type::Function { params, ret } => Type::Function {
+            params: params
+                .iter()
+                .map(|t| substitute_type_with_bindings(t, bindings, depth + 1))
+                .collect(),
+            ret: ret
+                .as_ref()
+                .map(|r| Box::new(substitute_type_with_bindings(r, bindings, depth + 1))),
+        },
+        Type::Union(items) => Type::Union(
+            items
+                .iter()
+                .map(|t| substitute_type_with_bindings(t, bindings, depth + 1))
+                .collect(),
+        ),
+        Type::Simd { lanes, element } => Type::Simd {
+            lanes: *lanes,
+            element: Box::new(substitute_type_with_bindings(element, bindings, depth + 1)),
+        },
+        _ => ty.clone(),
+    }
+}
+
+fn value_to_ast_type(val: &Value) -> Option<Type> {
+    match val {
+        Value::Int(_) => Some(Type::Simple("i64".to_string())),
+        Value::UInt { width, .. } => Some(Type::Simple(match width {
+            8 => "u8".to_string(),
+            16 => "u16".to_string(),
+            32 => "u32".to_string(),
+            _ => "u64".to_string(),
+        })),
+        Value::Float(_) => Some(Type::Simple("f64".to_string())),
+        Value::Float32(_) => Some(Type::Simple("f32".to_string())),
+        Value::Bool(_) => Some(Type::Simple("bool".to_string())),
+        Value::Str(_) | Value::StrBytes(_) => Some(Type::Simple("text".to_string())),
+        Value::Symbol(_) => Some(Type::Simple("Symbol".to_string())),
+        Value::Object { class, .. } => Some(Type::Simple(class.clone())),
+        Value::ClassInstance(inst) => Some(Type::Simple(inst.class().to_string())),
+        Value::Enum { enum_name, .. } => Some(Type::Simple(enum_name.clone())),
+        Value::Unique(u) => value_to_ast_type(u.inner()),
+        Value::Shared(s) => value_to_ast_type(s.inner()),
+        Value::Borrow(b) => value_to_ast_type(&*b.inner()),
+        Value::BorrowMut(b) => value_to_ast_type(&*b.inner()),
+        Value::Array(items) => {
+            let elem = items.iter().find(|v| !matches!(v, Value::Nil)).and_then(value_to_ast_type)?;
+            Some(Type::Array {
+                element: Box::new(elem),
+                size: None,
+            })
+        }
+        Value::Tuple(items) => {
+            let mut elem_tys = Vec::with_capacity(items.len());
+            for item in items {
+                elem_tys.push(value_to_ast_type(item)?);
+            }
+            Some(Type::Tuple(elem_tys))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn unify_generic_type_value(
+    expected: &Type,
+    actual: &Value,
+    type_params: &std::collections::HashSet<String>,
+    bindings: &mut HashMap<String, Type>,
+) {
+    if type_params.is_empty() {
+        return;
+    }
+    match expected {
+        Type::Simple(name) if type_params.contains(name) => {
+            if !bindings.contains_key(name) {
+                if let Some(inferred) = value_to_ast_type(actual) {
+                    bindings.insert(name.clone(), inferred);
+                }
+            }
+        }
+        Type::Array { element, size } => {
+            if let Value::Array(items) = actual {
+                if let Some(size_expr) = size {
+                    if let simple_parser::ast::Expr::Identifier(n) = size_expr.as_ref() {
+                        if type_params.contains(n) && !bindings.contains_key(n) {
+                            bindings.insert(n.clone(), Type::Simple(items.len().to_string()));
+                        }
+                    }
+                }
+                for item in items.iter() {
+                    if !matches!(item, Value::Nil) {
+                        unify_generic_type_value(element, item, type_params, bindings);
+                        break;
+                    }
+                }
+            }
+        }
+        Type::Tuple(elem_tys) => {
+            if let Value::Tuple(vals) = actual {
+                for (et, av) in elem_tys.iter().zip(vals.iter()) {
+                    unify_generic_type_value(et, av, type_params, bindings);
+                }
+            }
+        }
+        Type::Optional(inner) => match actual {
+            Value::Enum {
+                enum_name,
+                variant,
+                payload,
+            } if enum_name == "Option" && variant == "Some" => {
+                if let Some(first) = payload.as_deref() {
+                    unify_generic_type_value(inner, first, type_params, bindings);
+                }
+            }
+            Value::Nil => {}
+            Value::Enum { enum_name, variant, .. } if enum_name == "Option" && variant == "None" => {}
+            other => unify_generic_type_value(inner, other, type_params, bindings),
+        },
+        Type::Generic { name, args } if args.is_empty() && type_params.contains(name) => {
+            if !bindings.contains_key(name) {
+                if let Some(inferred) = value_to_ast_type(actual) {
+                    bindings.insert(name.clone(), inferred);
+                }
+            }
+        }
+        Type::Generic { name, args } if name == "Option" && args.len() == 1 => {
+            if let Value::Enum {
+                enum_name,
+                variant,
+                payload,
+            } = actual
+            {
+                if enum_name == "Option" && variant == "Some" {
+                    if let Some(first) = payload.as_deref() {
+                        unify_generic_type_value(&args[0], first, type_params, bindings);
+                    }
+                }
+            }
+        }
+        Type::Generic { name, args }
+            if matches!(name.as_str(), "Dict" | "Map" | "HashMap") && args.len() == 2 =>
+        {
+            if let Value::Dict(map) = actual {
+                if let Type::Simple(k) = &args[0] {
+                    if type_params.contains(k) && !bindings.contains_key(k) {
+                        bindings.insert(k.clone(), Type::Simple("text".to_string()));
+                    }
+                }
+                if let Some((_, first_v)) = map.iter().next() {
+                    unify_generic_type_value(&args[1], first_v, type_params, bindings);
+                }
+            }
+        }
+        Type::Capability { inner, .. } | Type::Pointer { inner, .. } => match actual {
+            Value::Unique(u) => unify_generic_type_value(inner, u.inner(), type_params, bindings),
+            Value::Shared(s) => unify_generic_type_value(inner, s.inner(), type_params, bindings),
+            Value::Borrow(b) => unify_generic_type_value(inner, &*b.inner(), type_params, bindings),
+            Value::BorrowMut(b) => unify_generic_type_value(inner, &*b.inner(), type_params, bindings),
+            other => unify_generic_type_value(inner, other, type_params, bindings),
+        },
+        _ => {}
+    }
+}
+
 thread_local! {
     pub(crate) static ACTOR_SPAWNER: ThreadSpawner = ThreadSpawner::new();
     pub(crate) static ACTOR_INBOX: RefCell<Option<Arc<Mutex<mpsc::Receiver<Message>>>>> = const { RefCell::new(None) };
@@ -394,6 +838,14 @@ thread_local! {
     pub(crate) static UNIT_FAMILY_ARITHMETIC: RefCell<HashMap<String, UnitArithmeticRules>> = RefCell::new(HashMap::new());
     /// Maps compound_unit_name -> Dimension (for dimensional analysis)
     pub(crate) static COMPOUND_UNIT_DIMENSIONS: RefCell<HashMap<String, Dimension>> = RefCell::new(HashMap::new());
+    /// Active generic type parameter bindings (`T -> ConcreteType`) in the current interpreter frame.
+    pub(crate) static GENERIC_TYPE_BINDINGS: RefCell<HashMap<String, Type>> = RefCell::new(HashMap::new());
+    /// Stack of explicit call-site generic arguments pushed across call boundaries.
+    pub(crate) static PENDING_CALL_GENERICS: RefCell<Vec<Option<PendingCallGenerics>>> = const { RefCell::new(Vec::new()) };
+    /// Stack of expected target Type annotations from enclosing let/return statements.
+    pub(crate) static EXPECTED_TARGET_TYPE: RefCell<Vec<Option<Type>>> = const { RefCell::new(Vec::new()) };
+    /// Stack of active function return type annotations.
+    pub(crate) static CURRENT_FN_RETURN_TYPE: RefCell<Vec<Option<Type>>> = const { RefCell::new(Vec::new()) };
     /// Maps base_family_name -> Dimension (for base unit families like length, time)
     pub(crate) static BASE_UNIT_DIMENSIONS: RefCell<HashMap<String, Dimension>> = RefCell::new(HashMap::new());
     /// Maps base unit suffix -> family name for SI prefix detection (e.g., "m" -> "length")
@@ -714,7 +1166,7 @@ impl Drop for RecursionGuard {
             // another thread) can zero it while this guard is live. A plain
             // fetch_sub would then wrap to usize::MAX and every subsequent
             // push_call_depth would fail as a phantom StackOverflow.
-            let _ = RECURSION_DEPTH.fetch_update(
+            let _ = simple_common::atomic_update::update_usize(&RECURSION_DEPTH,
                 std::sync::atomic::Ordering::Relaxed,
                 std::sync::atomic::Ordering::Relaxed,
                 |d| d.checked_sub(1),
@@ -825,7 +1277,7 @@ pub fn push_call_depth(function_name: &str) -> Result<RecursionGuard, crate::err
     if depth >= limit {
         // Undo the increment since we're about to error (saturating: see
         // RecursionGuard::drop for why a wrapping decrement is dangerous).
-        let _ = RECURSION_DEPTH.fetch_update(
+        let _ = simple_common::atomic_update::update_usize(&RECURSION_DEPTH,
             std::sync::atomic::Ordering::Relaxed,
             std::sync::atomic::Ordering::Relaxed,
             |d| d.checked_sub(1),
@@ -921,6 +1373,18 @@ pub fn get_current_file() -> Option<PathBuf> {
     CURRENT_FILE.with(|cell| cell.borrow().clone())
 }
 
+/// Set the span of the node currently being evaluated (statement granularity).
+pub fn set_current_node_span(span: Option<simple_parser::Span>) {
+    CURRENT_NODE_SPAN.with(|cell| {
+        *cell.borrow_mut() = span;
+    });
+}
+
+/// Span of the node currently being evaluated, if the executing lane set one.
+pub fn get_current_node_span() -> Option<simple_parser::Span> {
+    CURRENT_NODE_SPAN.with(|cell| cell.borrow().clone())
+}
+
 //==============================================================================
 // Move Tracking (for unique pointer semantics)
 //==============================================================================
@@ -1013,12 +1477,17 @@ pub fn clear_interpreter_state() {
     SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
     USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow_mut().clear());
     USER_SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
+    crate::units::scope::unit_scope_reset();
 
     // Clear literal functions
     LITERAL_FUNCTIONS.with(|cell| cell.borrow_mut().clear());
 
     // Clear interface bindings
     INTERFACE_BINDINGS.with(|cell| cell.borrow_mut().clear());
+    GENERIC_TYPE_BINDINGS.with(|cell| cell.borrow_mut().clear());
+    PENDING_CALL_GENERICS.with(|cell| cell.borrow_mut().clear());
+    EXPECTED_TARGET_TYPE.with(|cell| cell.borrow_mut().clear());
+    CURRENT_FN_RETURN_TYPE.with(|cell| cell.borrow_mut().clear());
 
     // Reset execution mode to Normal
     EXECUTION_MODE.with(|cell| *cell.borrow_mut() = ExecutionMode::Normal);
@@ -1278,4 +1747,80 @@ pub(crate) fn steal_owned_global(owner: &str, name: &str, promoted: &Value) -> b
         });
     }
     taken
+}
+
+// ---------------------------------------------------------------------------
+// Cross-thread interpreter state hand-off
+// ---------------------------------------------------------------------------
+
+macro_rules! interpreter_thread_state {
+    ($( $field:ident : $ty:ty = $path:path ),* $(,)?) => {
+        /// Thread-local interpreter state a closure needs to keep resolving
+        /// module globals, imported impl methods, traits and loaded modules
+        /// when it runs on another OS thread (`rt_thread_spawn_isolated*`).
+        /// Captured on the spawning thread and installed on the worker before
+        /// it evaluates anything. Values are cloned; runtime handles inside
+        /// them (atomics, mutexes, raw addresses) are process-global, so the
+        /// worker and the spawner share them. Interpreter-level state is a
+        /// snapshot, not shared: a worker's writes to module-level `var`s
+        /// stay on the worker (isolated-thread semantics) and are not merged
+        /// back on join. The snapshot is intentionally partial: unit tables,
+        /// DI singletons, move tracking and BDD registries start empty.
+        pub(crate) struct InterpreterThreadState {
+            $( $field: $ty, )*
+        }
+
+        impl InterpreterThreadState {
+            pub(crate) fn capture() -> Self {
+                Self { $( $field: $path.with(|cell| cell.borrow().clone()), )* }
+            }
+
+            pub(crate) fn install(self) {
+                $( $path.with(|cell| *cell.borrow_mut() = self.$field); )*
+            }
+        }
+    };
+}
+
+interpreter_thread_state! {
+    concurrent_registry: Arc<ConcurrentProviderRegistry> = CONCURRENT_REGISTRY,
+    interpreter_args: Vec<String> = INTERPRETER_ARGS,
+    current_file: Option<PathBuf> = CURRENT_FILE,
+    interface_bindings: HashMap<String, String> = INTERFACE_BINDINGS,
+    generic_type_bindings: HashMap<String, Type> = GENERIC_TYPE_BINDINGS,
+    const_names: std::collections::HashSet<String> = CONST_NAMES,
+    immutable_vars: std::collections::HashSet<String> = IMMUTABLE_VARS,
+    extern_functions: std::collections::HashSet<String> = EXTERN_FUNCTIONS,
+    block_scoped_enums: HashMap<String, Arc<EnumDef>> = BLOCK_SCOPED_ENUMS,
+    bitfields: HashMap<String, Arc<BitfieldDef>> = BITFIELDS,
+    newtypes: HashMap<String, Arc<NewtypeDef>> = NEWTYPES,
+    module_globals: HashMap<String, Value> = MODULE_GLOBALS,
+    module_globals_by_owner: OwnedGlobals = MODULE_GLOBALS_BY_OWNER,
+    module_globals_initial_by_owner: HashMap<Arc<str>, HashMap<String, Value>> = MODULE_GLOBALS_INITIAL_BY_OWNER,
+    user_macros: HashMap<String, MacroDef> = USER_MACROS,
+    macro_definition_order: Vec<String> = MACRO_DEFINITION_ORDER,
+    di_config: Option<Arc<DiConfig>> = DI_CONFIG,
+    aop_config: Option<Arc<AopConfig>> = AOP_CONFIG,
+    execution_mode: ExecutionMode = EXECUTION_MODE,
+    module_export_owners: HashMap<usize, Arc<str>> = crate::interpreter::module_cache::MODULE_EXPORT_OWNERS,
+    module_env_by_owner: HashMap<Arc<str>, Arc<crate::value::LayeredEnv>> = MODULE_ENV_BY_OWNER,
+    module_global_bindings_by_owner: HashMap<Arc<str>, Arc<ModuleBindings>> = MODULE_GLOBAL_BINDINGS_BY_OWNER,
+    literal_functions: HashMap<String, LiteralFunctionInfo> = LITERAL_FUNCTIONS,
+    blanket_impl_methods: HashMap<String, Vec<Arc<FunctionDef>>> = BLANKET_IMPL_METHODS,
+    trait_impls: HashMap<(String, String), Vec<Arc<FunctionDef>>> = TRAIT_IMPLS,
+    traits: HashMap<String, simple_parser::ast::TraitDef> = TRAITS,
+    mixins: HashMap<String, simple_parser::ast::MixinDef> = MIXINS,
+    global_enums: HashMap<String, Arc<EnumDef>> = GLOBAL_ENUMS,
+    global_impl_methods: HashMap<String, Vec<Arc<FunctionDef>>> = GLOBAL_IMPL_METHODS,
+    function_overloads: HashMap<String, Vec<Arc<FunctionDef>>> = FUNCTION_OVERLOADS,
+    function_module_owner: HashMap<usize, Arc<str>> = FUNCTION_MODULE_OWNER,
+    current_exec_module: Option<Arc<str>> = CURRENT_EXEC_MODULE,
+    class_overloads: HashMap<String, Vec<Arc<simple_parser::ast::ClassDef>>> = CLASS_OVERLOADS,
+    module_exports_cache: HashMap<PathBuf, Value> = crate::interpreter::module_cache::MODULE_EXPORTS_CACHE,
+    module_classes_cache: HashMap<PathBuf, HashMap<String, Arc<simple_parser::ast::ClassDef>>> =
+        crate::interpreter::module_cache::MODULE_CLASSES_CACHE,
+    module_functions_cache: HashMap<PathBuf, HashMap<String, Arc<FunctionDef>>> =
+        crate::interpreter::module_cache::MODULE_FUNCTIONS_CACHE,
+    module_enums_cache: HashMap<PathBuf, HashMap<String, Arc<EnumDef>>> =
+        crate::interpreter::module_cache::MODULE_ENUMS_CACHE,
 }

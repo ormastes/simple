@@ -50,6 +50,8 @@ pub fn is_directive_decorator(name: &str) -> bool {
             | "clocked"
             | "generic"
             | "flatten_struct_output"
+            // A5 representation boundary manifest metadata.
+            | "representation_boundary"
             // Allocation / mangling directives.
             | "noalloc"
             | "alloc"
@@ -75,6 +77,16 @@ pub fn is_directive_decorator(name: &str) -> bool {
     )
 }
 
+/// Opt-in strictness knob: `SIMPLE_STRICT_DECORATORS=1` turns the
+/// unknown-module-level-decorator warning back into the hard error from
+/// `unknown_function_annotation_evaluated_as_runtime_identifier_2026-08-08.md`.
+/// Follows the `SIMPLE_JIT_STRICT` env-knob pattern
+/// (`codegen/jit.rs`): any value other than `0` enables it. Read fresh on
+/// each unknown decorator so tests observe changes without a rebuild.
+fn strict_decorators_enabled() -> bool {
+    std::env::var_os("SIMPLE_STRICT_DECORATORS").is_some_and(|value| value != "0")
+}
+
 /// Env key under which a decorator-rebound function is recorded.
 ///
 /// `evaluate_call` resolves the `functions` map (Priority 5) before `env`
@@ -97,6 +109,28 @@ pub fn decorated_fn_key(name: &str) -> String {
     format!("{}{}", DECORATED_FN_PREFIX, name)
 }
 
+/// Set the first time a runtime decorator rebinds a function (every writer
+/// of a `decorated_fn_key` sentinel sets it). `evaluate_call`'s Priority 4.5
+/// used to build the sentinel key (a `format!` String) and run the full env
+/// lookup cascade on EVERY identifier call to find out that no decorator
+/// exists: measured 502 ns per call on a program with none (2026-11-07,
+/// `SIMPLE_PERF_COUNTERS=1` EVALCALL_NS_P45_DECORATED). Process-global, not
+/// thread-local: an Env carrying a sentinel can be called into from a
+/// spawned thread, and a per-thread flag would make that call skip the
+/// wrapper. Once set it stays set; it only says "worth looking", never
+/// "bound here", so a false positive costs exactly the old lookup.
+static DECORATED_FN_BOUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record that a decorated function has been bound somewhere in this process.
+pub fn mark_decorated_fn_bound() {
+    DECORATED_FN_BOUND.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// Has any runtime decorator ever bound a function in this process?
+pub fn any_decorated_fn_bound() -> bool {
+    DECORATED_FN_BOUND.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// Apply the runtime (wrapper) decorators of `f` to `base`.
 ///
 /// Returns `Ok(None)` when `f` carries no runtime decorator, in which case the
@@ -105,7 +139,10 @@ pub fn decorated_fn_key(name: &str) -> String {
 /// `strict` selects the behaviour for a decorator identifier that does not
 /// resolve in scope. The module-level path passes `true` and reports the
 /// decorator-specific diagnostic from
-/// `unknown_function_annotation_evaluated_as_runtime_identifier_2026-08-08.md`.
+/// `unknown_function_annotation_evaluated_as_runtime_identifier_2026-08-08.md`
+/// -- as a WARNING that skips the decorator (metadata, no semantic effect),
+/// matching the lint's unknown-decorator diagnostic; setting
+/// `SIMPLE_STRICT_DECORATORS=1` restores the hard error from that bug doc.
 /// Block-level callers pass `false`: a nested `fn` may carry any project- or
 /// tool-specific annotation, and treating an unresolvable one as metadata
 /// preserves the pre-existing behaviour exactly.
@@ -149,6 +186,18 @@ pub fn apply_runtime_decorators(
                     continue;
                 }
                 if let Expr::Identifier(name) = &decorator.name {
+                    if !strict_decorators_enabled() {
+                        // Unknown module-level decorator: warn once per
+                        // occurrence and skip it (metadata, no semantic
+                        // effect), matching the lint's unknown-decorator
+                        // diagnostic. SIMPLE_STRICT_DECORATORS=1 restores the
+                        // hard error below.
+                        eprintln!(
+                            "warning: unknown decorator `@{}` on function `{}` -- treating it as metadata with no semantic effect (set SIMPLE_STRICT_DECORATORS=1 to make this an error)",
+                            name, f.name
+                        );
+                        continue;
+                    }
                     return Err(CompileError::semantic_with_context(
                         format!("unknown decorator `@{}` on function `{}`", name, f.name),
                         ErrorContext::new()
@@ -229,4 +278,79 @@ fn is_callable(value: &Value) -> bool {
         value,
         Value::Lambda { .. } | Value::Function { .. } | Value::NativeFunction(_) | Value::Object { .. }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use simple_parser::ast::Node;
+
+    /// Serializes the two `SIMPLE_STRICT_DECORATORS` tests: the knob is a
+    /// process-global env var and `cargo test` runs tests on parallel threads.
+    static STRICT_DECORATORS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn parse_single_function(source: &str) -> FunctionDef {
+        let module = simple_parser::Parser::new(source).parse().expect("source must parse");
+        module
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                Node::Function(f) => Some(f),
+                _ => None,
+            })
+            .expect("source must define one function")
+    }
+
+    fn apply_at_module_level(f: &FunctionDef) -> Result<Option<Value>, CompileError> {
+        let base = Value::Function {
+            name: f.name.clone(),
+            def: Arc::new(f.clone()),
+            captured_env: Arc::new(Env::new()),
+        };
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+        apply_runtime_decorators(f, base, true, &mut env, &mut functions, &mut classes, &enums, &impl_methods)
+    }
+
+    #[test]
+    fn representation_boundary_is_directive_decorator() {
+        assert!(is_directive_decorator("representation_boundary"));
+    }
+
+    #[test]
+    fn unknown_module_level_decorator_warns_and_is_skipped_by_default() {
+        let _guard = STRICT_DECORATORS_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("SIMPLE_STRICT_DECORATORS");
+        let f = parse_single_function("@totally_unknown_tag\nfn foo() -> i64:\n    1\n");
+        let result = apply_at_module_level(&f);
+        let decorated = result.expect("unknown decorator must not be a hard error by default");
+        assert!(decorated.is_none(), "an unknown decorator has no semantic effect");
+    }
+
+    #[test]
+    fn unknown_module_level_decorator_is_hard_error_under_strict_knob() {
+        let _guard = STRICT_DECORATORS_ENV_LOCK.lock().unwrap();
+        std::env::set_var("SIMPLE_STRICT_DECORATORS", "1");
+        let f = parse_single_function("@totally_unknown_tag\nfn foo() -> i64:\n    1\n");
+        let result = apply_at_module_level(&f);
+        std::env::remove_var("SIMPLE_STRICT_DECORATORS");
+        let err = result.expect_err("SIMPLE_STRICT_DECORATORS=1 must restore the hard error");
+        let message = format!("{err}");
+        assert!(
+            message.contains("unknown decorator `@totally_unknown_tag` on function `foo`"),
+            "error must name the decorator and the function: {message}"
+        );
+    }
+
+    #[test]
+    fn known_directive_decorator_is_still_metadata_only() {
+        let _guard = STRICT_DECORATORS_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("SIMPLE_STRICT_DECORATORS");
+        let f = parse_single_function("@inline\nfn foo() -> i64:\n    1\n");
+        let decorated = apply_at_module_level(&f).expect("a known directive decorator must apply cleanly");
+        assert!(decorated.is_none(), "directive decorators stay metadata-only");
+    }
 }

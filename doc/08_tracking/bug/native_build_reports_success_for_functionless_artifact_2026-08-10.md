@@ -263,3 +263,5 @@ above returns 0 again.
 - The **pure-Simple** funnel `src/app/io/_CliCompile/compile_targets.spl:1239`
   still checks existence only; the placement argument above still stands, so
   that half keeps relying on the shell gate. Status stays OPEN for it.
+
+**Revalidated 2026-11-02: still plausible because OPEN (P1); no merged fix commit with a passing regression is cited in this doc.**

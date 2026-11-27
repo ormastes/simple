@@ -248,3 +248,14 @@ dc101ee1fd3  2e8eb2dfa6d  47796bfef23  5e9a0abd2e3
 The whole tip is also reachable at `refs/wip/pr255-host-path-fixes`, but that ref
 carries `77fa84919c4` too — do not land the ref wholesale without deciding about
 that commit separately with its author.
+
+
+## 2026-11-13 re-verification (lane p3-io, work/p3-io-20261113)
+
+The D1/D2 fixes ARE landed on release/1.0.0: `src/lib/nogc_sync_mut/fs/host_path.spl`
+opens with the platform guard and an identity early-return on the non-Windows
+branch (`host_path_canonical_for`, `host_path_native_for`), and uses the
+cached-bool `host_is_windows_host()`. The converter spec
+`test/01_unit/lib/nogc_sync_mut/fs/host_path_spec.spl` passes **7/7**
+(`--mode=interpreter --no-cache`). The "OPEN" status header and the
+cherry-pick landing instruction are stale — the work is in-tree. No change here.

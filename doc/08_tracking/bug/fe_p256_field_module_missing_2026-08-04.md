@@ -39,7 +39,9 @@ reading it.
 
 MEASURED. The fixing commit was not bisected.
 
-**Status:** OPEN
+**Status:** CLOSED 2026-09-13 (see the "Closed 2026-09-13" section at the top;
+this line previously read OPEN, which was the pre-fix status left stale below
+the closure note — annotated 2026-11-25)
 **Found:** 2026-08-04
 **Severity:** medium — P-256 field arithmetic is the base layer under
 `crypto/ecdsa_p256.spl`, and its two spec files have never executed a single
@@ -108,3 +110,24 @@ keeps partial products inside a signed i64 (29 bits is the practical ceiling:
 with its own correctness risk, and it wants to land against the 419-line
 `fe_p256_full_spec.spl` as its acceptance gate rather than be bolted on at the
 end of an unrelated session.
+
+## Verification 2026-11-25 (worktree work/p2w2-ah-20261125, source inspection)
+
+The 2026-09-13 closure holds: `src/lib/common/math/field/fe_p256.spl` exists
+(13,192 bytes) and declares the pinned API surface, including `fe_cond_select`
+(:77), `fe_is_zero` (:100) and `fe_to_bytes` (:357). The reported defect —
+"the module was never written" — is fixed.
+
+The residual-gap note in the closure section is also still accurate:
+`fe_pow` and `fe_cond_swap` are still absent from the module (grep over
+`^fn ` declarations), so the 5 "function not found" examples and the 2
+canonical-zero failures remain a separate, unfiled defect against
+fe_p256.spl's contents, exactly as the closure section says.
+
+Limit: neither spec could be executed on this host — `bin/simple.exe test`
+fails repo-wide at release/1.0.0 HEAD with
+`unknown decorator '@representation_boundary'` (pinned Rust seed predates
+cfd89933699). Verification is by source inspection only. Also annotated the
+stale `**Status:** OPEN` line in the original report below the closure
+section, which contradicted the "Closed 2026-09-13" header. Entry stays
+CLOSED.

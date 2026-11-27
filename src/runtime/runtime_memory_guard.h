@@ -35,19 +35,49 @@
 #include <stddef.h>
 #include <stdlib.h>
 
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__simpleos__)
 #define RT_MEM_GUARD_AVAILABLE 1
 #include <sys/mman.h>
+#include <signal.h>
+#include <unistd.h>
 #else
-/* No VirtualAlloc/VirtualProtect port yet -- sampling is a documented no-op
- * on Windows (rt_mem_guard_should_sample always returns 0), never a wrong
- * or crashing result. */
+/* No VirtualAlloc/VirtualProtect port yet, and SimpleOS does not expose the
+ * hosted siginfo_t/SA_ONSTACK signal ABI required by the fault handler.
+ * Sampling is a documented no-op on those targets, never a wrong or
+ * crashing result. */
 #define RT_MEM_GUARD_AVAILABLE 0
 #endif
 
+/* Guard boundaries must use the host VM page size: Apple Silicon uses 16 KiB,
+ * and 4 KiB offsets make mprotect fail and silently disable sampled guards.
+ * Resolve before recording any slot or installing the signal handler. After
+ * publication every read (including the fault reporter) is just an atomic
+ * load; the signal path never calls sysconf. */
+#if RT_MEM_GUARD_AVAILABLE
+static size_t rt_mem_guard_host_page_size;
+#define RT_MEM_GUARD_PAGE_SIZE \
+    __atomic_load_n(&rt_mem_guard_host_page_size, __ATOMIC_ACQUIRE)
+#else
 #define RT_MEM_GUARD_PAGE_SIZE ((size_t)4096)
+#endif
+
+static size_t rt_mem_guard_resolve_page_size(void) {
+    size_t cached = RT_MEM_GUARD_PAGE_SIZE;
+    if (cached != 0) return cached;
+#if RT_MEM_GUARD_AVAILABLE
+    long detected = sysconf(_SC_PAGESIZE);
+    if (detected <= 0) return 0;
+    cached = (size_t)detected;
+    __atomic_store_n(&rt_mem_guard_host_page_size, cached, __ATOMIC_RELEASE);
+    return cached;
+#else
+    return 0;
+#endif
+}
 #define RT_MEM_GUARD_FREE_RING_CAP 256
 #define RT_MEM_GUARD_MAX_SLOTS 4096
+#define RT_MEM_GUARD_OWNER_MAX 48
+#define RT_MEM_GUARD_REPORT_MAX 320
 
 typedef struct RtMemGuardSlot {
     uint8_t* user_ptr;   /* NULL = empty array slot, free for reuse */
@@ -55,6 +85,7 @@ typedef struct RtMemGuardSlot {
     size_t total_pages;
     size_t size;         /* requested (unpadded) size, for realloc/reporting */
     int freed;
+    char owner[RT_MEM_GUARD_OWNER_MAX]; /* alloc-time owner tag ("" = none) */
 } RtMemGuardSlot;
 
 static RtMemGuardSlot rt_mem_guard_slots[RT_MEM_GUARD_MAX_SLOTS];
@@ -65,19 +96,119 @@ static size_t rt_mem_guard_free_ring_len = 0;
 static uint64_t rt_mem_guard_sample_counter = 0;
 static int64_t rt_mem_guard_sampled_total = 0;
 
+/* Thread-local "current owner" tag captured into a slot at alloc time
+ * (mirrors rt_mem_attr_set_owner / ATTR_CURRENT_OWNER on the Rust side). */
+static _Thread_local char rt_mem_guard_cur_owner[RT_MEM_GUARD_OWNER_MAX];
+
+static void rt_mem_guard_set_owner(const char* name, size_t len) {
+    if (len >= RT_MEM_GUARD_OWNER_MAX) len = RT_MEM_GUARD_OWNER_MAX - 1;
+    if (name != NULL) {
+        for (size_t i = 0; i < len; i++) rt_mem_guard_cur_owner[i] = name[i];
+    } else {
+        len = 0;
+    }
+    rt_mem_guard_cur_owner[len] = '\0';
+}
+
+/* Record a slot in the table (platform independent so the fault-report
+ * lookup below is testable everywhere). Returns the index or
+ * RT_MEM_GUARD_MAX_SLOTS when the table is full. */
+static size_t rt_mem_guard_record_slot(uint8_t* user_ptr, uint8_t* page_base,
+                                       size_t total_pages, size_t size) {
+    size_t idx = RT_MEM_GUARD_MAX_SLOTS;
+    for (size_t i = 0; i < RT_MEM_GUARD_MAX_SLOTS; i++) {
+        if (rt_mem_guard_slots[i].user_ptr == NULL) { idx = i; break; }
+    }
+    if (idx == RT_MEM_GUARD_MAX_SLOTS) return idx;
+    RtMemGuardSlot* s = &rt_mem_guard_slots[idx];
+    s->page_base = page_base;
+    s->total_pages = total_pages;
+    s->size = size;
+    s->freed = 0;
+    size_t k = 0;
+    while (k + 1 < RT_MEM_GUARD_OWNER_MAX && rt_mem_guard_cur_owner[k] != '\0') {
+        s->owner[k] = rt_mem_guard_cur_owner[k];
+        k++;
+    }
+    s->owner[k] = '\0';
+    s->user_ptr = user_ptr; /* published last: NULL means empty */
+    if (idx >= rt_mem_guard_slot_hwm) rt_mem_guard_slot_hwm = idx + 1;
+    return idx;
+}
+
+/* ---- trap owner-attribution report (async-signal-safe: no malloc/stdio) -- */
+
+static size_t rt_mem_guard_rep_str(char* buf, size_t pos, size_t cap, const char* s) {
+    while (*s != '\0' && pos + 1 < cap) buf[pos++] = *s++;
+    return pos;
+}
+
+static size_t rt_mem_guard_rep_num(char* buf, size_t pos, size_t cap, uintptr_t v, int hex) {
+    char tmp[24];
+    size_t n = 0;
+    uintptr_t base = hex ? 16 : 10;
+    do { tmp[n++] = "0123456789abcdef"[v % base]; v /= base; } while (v != 0 && n < sizeof(tmp));
+    while (n > 0 && pos + 1 < cap) buf[pos++] = tmp[--n];
+    return pos;
+}
+
+/* If `addr` falls inside a tracked guard slot (leading guard, data, or
+ * trailing guard), write a one-line report into `buf` and return its length;
+ * return 0 for any other address (a non-guard SIGSEGV). Classification:
+ * freed slot = use-after-free; leading page = underflow; trailing page =
+ * overflow; otherwise a stray access to a live data page. */
+static size_t rt_mem_guard_fault_report(uintptr_t addr, char* buf, size_t cap) {
+    if (cap == 0) return 0;
+    for (size_t i = 0; i < rt_mem_guard_slot_hwm; i++) {
+        const RtMemGuardSlot* s = &rt_mem_guard_slots[i];
+        if (s->user_ptr == NULL) continue;
+        uintptr_t lo = (uintptr_t)s->page_base;
+        uintptr_t hi = lo + s->total_pages * RT_MEM_GUARD_PAGE_SIZE;
+        if (addr < lo || addr >= hi) continue;
+        const char* cls = "access";
+        if (s->freed) cls = "use-after-free";
+        else if (addr < lo + RT_MEM_GUARD_PAGE_SIZE) cls = "underflow";
+        else if (addr >= hi - RT_MEM_GUARD_PAGE_SIZE) cls = "overflow";
+        size_t p = 0;
+        p = rt_mem_guard_rep_str(buf, p, cap, "[mem_guard] guard-page trap: ");
+        p = rt_mem_guard_rep_str(buf, p, cap, cls);
+        p = rt_mem_guard_rep_str(buf, p, cap, " addr=0x");
+        p = rt_mem_guard_rep_num(buf, p, cap, addr, 1);
+        p = rt_mem_guard_rep_str(buf, p, cap, " slot=0x");
+        p = rt_mem_guard_rep_num(buf, p, cap, (uintptr_t)s->user_ptr, 1);
+        p = rt_mem_guard_rep_str(buf, p, cap, " size=");
+        p = rt_mem_guard_rep_num(buf, p, cap, (uintptr_t)s->size, 0);
+        p = rt_mem_guard_rep_str(buf, p, cap, " owner=");
+        p = rt_mem_guard_rep_str(buf, p, cap, s->owner[0] != '\0' ? s->owner : "<none>");
+        p = rt_mem_guard_rep_str(buf, p, cap, "\n");
+        buf[p] = '\0';
+        return p;
+    }
+    return 0;
+}
+
 static int rt_mem_guard_rate_cached = -1;
 static long rt_mem_guard_rate_value = 0;
 
 /* Cached SIMPLE_MEM_GUARD_RATE, read via getenv exactly once. 0 = disabled. */
 static long rt_mem_guard_rate(void) {
     if (rt_mem_guard_rate_cached < 0) {
+#if defined(_MSC_VER) || (defined(_WIN32) && defined(_UCRT))
+        char* v = NULL;
+        size_t value_size = 0;
+        if (_dupenv_s(&v, &value_size, "SIMPLE_MEM_GUARD_RATE") != 0) v = NULL;
+#else
         const char* v = getenv("SIMPLE_MEM_GUARD_RATE");
+#endif
         long parsed = 0;
         if (v != NULL && v[0] != '\0') {
             char* end = NULL;
             long n = strtol(v, &end, 10);
             if (end != v && n > 0) parsed = n;
         }
+#if defined(_MSC_VER) || (defined(_WIN32) && defined(_UCRT))
+        free(v);
+#endif
         rt_mem_guard_rate_value = parsed;
         rt_mem_guard_rate_cached = 1;
     }
@@ -96,6 +227,41 @@ static int rt_mem_guard_should_sample(size_t size) {
 
 #if RT_MEM_GUARD_AVAILABLE
 
+static struct sigaction rt_mem_guard_prev_segv;
+static struct sigaction rt_mem_guard_prev_bus;
+static int rt_mem_guard_handler_installed = 0;
+
+/* SIGSEGV handler: if the fault is inside a tracked guard slot, write the
+ * owner-attribution report to fd 2 (write(2) only), then restore the previous
+ * disposition and return so the faulting instruction re-executes and the
+ * process dies exactly as it would have without us (signal never swallowed).
+ * Any non-guard fault takes the same restore-and-return path. */
+static void rt_mem_guard_fault_handler(int sig, siginfo_t* info, void* ctx) {
+    (void)ctx;
+    char buf[RT_MEM_GUARD_REPORT_MAX];
+    size_t n = rt_mem_guard_fault_report((uintptr_t)info->si_addr, buf, sizeof(buf));
+    if (n > 0) { ssize_t w = write(2, buf, n); (void)w; }
+    sigaction(sig, sig == SIGBUS ? &rt_mem_guard_prev_bus : &rt_mem_guard_prev_segv, NULL);
+}
+
+static void rt_mem_guard_install_handler(void) {
+    if (__atomic_exchange_n(&rt_mem_guard_handler_installed, 1, __ATOMIC_ACQ_REL)) return; /* race-free: first caller installs */
+    struct sigaction sa;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_sigaction = rt_mem_guard_fault_handler;
+    if (sigaction(SIGSEGV, &sa, &rt_mem_guard_prev_segv) != 0) {
+        __atomic_store_n(&rt_mem_guard_handler_installed, 0, __ATOMIC_RELEASE);
+        return;
+    }
+    /* Darwin reports mprotect guard-page accesses as SIGBUS. Keep each
+     * signal's prior disposition so reporting preserves real fault deaths. */
+    if (sigaction(SIGBUS, &sa, &rt_mem_guard_prev_bus) != 0) {
+        sigaction(SIGSEGV, &rt_mem_guard_prev_segv, NULL);
+        __atomic_store_n(&rt_mem_guard_handler_installed, 0, __ATOMIC_RELEASE);
+    }
+}
+
 /* Allocate `size` bytes on their own guard-paged mmap slot. Right-aligns so
  * the allocation's last byte lands on the last byte of the last data page
  * (GWP-ASan default -- catches overflow). Returns NULL on mmap/mprotect
@@ -103,12 +269,7 @@ static int rt_mem_guard_should_sample(size_t size) {
  * allocator in either case. */
 static void* rt_mem_guard_alloc_sampled(size_t size) {
     if (size == 0) return NULL;
-
-    size_t idx = RT_MEM_GUARD_MAX_SLOTS;
-    for (size_t i = 0; i < RT_MEM_GUARD_MAX_SLOTS; i++) {
-        if (rt_mem_guard_slots[i].user_ptr == NULL) { idx = i; break; }
-    }
-    if (idx == RT_MEM_GUARD_MAX_SLOTS) return NULL;
+    if (rt_mem_guard_resolve_page_size() == 0) return NULL;
 
     size_t data_pages = (size + RT_MEM_GUARD_PAGE_SIZE - 1) / RT_MEM_GUARD_PAGE_SIZE;
     if (data_pages == 0) data_pages = 1;
@@ -132,12 +293,11 @@ static void* rt_mem_guard_alloc_sampled(size_t size) {
     /* Right-align within the data region [page_base+PAGE, trailing_page). */
     uint8_t* user_ptr = trailing_page - size;
 
-    rt_mem_guard_slots[idx].user_ptr = user_ptr;
-    rt_mem_guard_slots[idx].page_base = page_base;
-    rt_mem_guard_slots[idx].total_pages = total_pages;
-    rt_mem_guard_slots[idx].size = size;
-    rt_mem_guard_slots[idx].freed = 0;
-    if (idx >= rt_mem_guard_slot_hwm) rt_mem_guard_slot_hwm = idx + 1;
+    if (rt_mem_guard_record_slot(user_ptr, page_base, total_pages, size) == RT_MEM_GUARD_MAX_SLOTS) {
+        munmap(base, map_len);
+        return NULL;
+    }
+    rt_mem_guard_install_handler();
     rt_mem_guard_sampled_total++;
     return user_ptr;
 }
@@ -190,6 +350,7 @@ static int rt_mem_guard_free_sampled(void* ptr) {
 
 static void* rt_mem_guard_alloc_sampled(size_t size) { (void)size; return NULL; }
 static int rt_mem_guard_is_slot(void* ptr) { (void)ptr; return 0; }
+static void rt_mem_guard_install_handler(void) {}
 static int rt_mem_guard_free_sampled(void* ptr) { (void)ptr; return 0; }
 /* Both realloc paths -- runtime_memory.c (hosted/JIT) and runtime_native.c
  * (native/AOT) -- call rt_mem_guard_find unconditionally; only the *result* is

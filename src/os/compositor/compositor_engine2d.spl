@@ -1,7 +1,10 @@
 use std.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanFrameReceipt}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
-use common.ui.draw_ir.{DRAW_IR_COMMAND_IMAGE, DrawIrComposition}
+use common.ui.draw_ir.{
+    DRAW_IR_COMMAND_IMAGE, DrawIrComposition,
+    draw_ir_composition_content_equal
+}
 use common.ui.draw_ir_patch.{draw_ir_patch_between}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dDrawIrAdvResult,
@@ -18,9 +21,13 @@ use common.ui.render_opt.property_trees.{PropertyTrees}
 use common.ui.render_opt.damage_tiles.{
     DirtyTilePyramid, damage_tiles_mark_property_damage
 }
+use common.ui.render_opt.composition_damage.{composition_damage_between}
 use common.ui.render_opt.damage_plan.{
     DamagePlan, DamagePlanPolicy, build_damage_plan, DAMAGE_PLAN_NONE,
-    DAMAGE_PLAN_FULL
+    DAMAGE_PLAN_LOCAL, DAMAGE_PLAN_FULL
+}
+use std.gc_async_mut.gpu.browser_engine.web_draw_ir_damage_consumer.{
+    web_draw_ir_consume_damage
 }
 use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
 use os.compositor.vulkan_present_damage_gate.{
@@ -38,6 +45,10 @@ var _engine2d_compositor_override_width: i32 = 0
 var _engine2d_compositor_override_height: i32 = 0
 var _engine2d_compositor_override_pixels: [u32] = []
 val _ENGINE2D_REVISION_CACHE_COMPOSITION_SATURATION: i64 = 9223372036854775806
+val _ENGINE2D_REVISION_CACHE_RESULT_PIXEL_CAP: i64 = 1920 * 1080
+
+fn engine2d_revision_result_payload_cacheable(width: i32, height: i32) -> bool:
+    width > 0 and height > 0 and width.to_i64() <= _ENGINE2D_REVISION_CACHE_RESULT_PIXEL_CAP / height.to_i64()
 # Full presented frames the owner must seed before any clipped retained
 # replay is admitted. Deliberately small: each sample is a complete presented
 # frame, so warmup cost is bounded and the pre-admission behavior is exactly
@@ -64,6 +75,35 @@ pub struct Engine2dCompositorPackedDamage:
     pixels: [u32]
     selected_backend: text
     rendered_command_count: i32
+
+# Scalar proof that an exact retained revision was (or was not) reused for a
+# frame switch. It carries no pixels: at 8K a pixel payload is 132.7 MB per
+# switch, and the retained surface is already identified by its seed checksum.
+pub struct Engine2dFrameSwitchReceipt:
+    reused: bool
+    pixel_count: i64
+    checksum: i64
+    producer_generation: i64
+    composition_revision: i64
+    raster_count: i64
+    submission_count: i64
+    readback_count: i64
+    readback_source: text
+    present_mode: text
+    device_present: bool
+    backend_handle: i64
+    device_identity: i64
+
+fn _engine2d_frame_switch_miss(
+    producer_generation: i64, composition_revision: i64
+) -> Engine2dFrameSwitchReceipt:
+    Engine2dFrameSwitchReceipt(
+        reused: false, pixel_count: 0, checksum: 0,
+        producer_generation: producer_generation,
+        composition_revision: composition_revision,
+        raster_count: 0, submission_count: 0, readback_count: 0,
+        readback_source: "none", present_mode: "none",
+        device_present: false, backend_handle: 0, device_identity: 0)
 
 fn _engine2d_compositor_packed_damage_reject(
     reason: text, backend: text
@@ -150,7 +190,7 @@ fn engine2d_window_revision_exact_match(
         cached_resources != resources):
         return false
     if val Some(cached) = cached_composition:
-        return cached == composition
+        return draw_ir_composition_content_equal(cached, composition)
     false
 
 # WM raster backend key. SIMPLE_GUI_BACKEND selects the Engine2D backend for
@@ -191,6 +231,14 @@ class Engine2dCompositorBackend:
     revision_cache_composition: DrawIrComposition? = nil
     revision_cache_resources: [SimpleOsHostGpuImageResource] = []
     revision_cache_result: Engine2dDrawIrAdvResult? = nil
+    revision_cache_surface_valid: bool = false
+    revision_cache_checksum: i64 = 0
+    revision_cache_backend_handle: i64 = 0
+    revision_cache_device_identity: i64 = 0
+    web_effective_damage_mode: i64 = DAMAGE_PLAN_FULL
+    web_effective_damage_reason: text = ""
+    web_effective_damage_valid: bool = false
+    web_effective_damage_rects: [i64] = []
     revision_reuse_count: i64 = 0
     revision_render_count: i64 = 0
     window_revision_producer_generation: i64 = -1
@@ -335,6 +383,19 @@ class Engine2dCompositorBackend:
     me clear_damage():
         self.damage.clear_damage()
 
+    me damage_rects_to_i64() -> [i64]:
+        if self.damage.damage_len > 0:
+            var out: [i64] = []
+            var idx: i64 = 0
+            while idx < self.damage.damage_len:
+                out.push(self.damage.damage_x[idx].to_i64())
+                out.push(self.damage.damage_y[idx].to_i64())
+                out.push(self.damage.damage_w[idx].to_i64())
+                out.push(self.damage.damage_h[idx].to_i64())
+                idx = idx + 1
+            return out
+        self.web_effective_damage_rects
+
     fn invalidate_revision_cache():
         self.revision_cache_producer_generation = -1
         self.revision_cache_composition_revision = -1
@@ -342,7 +403,15 @@ class Engine2dCompositorBackend:
         self.revision_cache_transfer_profile = ""
         self.revision_cache_composition = nil
         self.revision_cache_resources = []
-        self.revision_cache_result = nil
+        self.revision_cache_result = None
+        self.revision_cache_surface_valid = false
+        self.revision_cache_checksum = 0
+        self.revision_cache_backend_handle = 0
+        self.revision_cache_device_identity = 0
+        self.web_effective_damage_mode = DAMAGE_PLAN_FULL
+        self.web_effective_damage_reason = ""
+        self.web_effective_damage_valid = false
+        self.web_effective_damage_rects = []
         self.window_revision_producer_generation = -1
         self.window_revision_composition_revision = -1
         self.window_revision_composition = nil
@@ -505,7 +574,7 @@ class Engine2dCompositorBackend:
         existing receipt so accumulated samples survive re-seeding."""
         if owner_token <= 0:
             return
-        if self.retained_damage_calibration != nil:
+        if self.retained_damage_calibration.is_some():
             return
         self.retained_damage_calibration = Some(
             Engine2dRetainedDamageCalibrationReceipt(
@@ -514,7 +583,7 @@ class Engine2dCompositorBackend:
                 presented: false, basis: "full-seed-warmup"))
 
     me record_retained_damage_full_sample(started_ns: i64, finished_ns: i64):
-        if self.retained_damage_calibration == nil or finished_ns <= started_ns:
+        if self.retained_damage_calibration.is_none() or finished_ns <= started_ns:
             return
         var receipt = self.retained_damage_calibration.unwrap()
         receipt.full_samples = receipt.full_samples + 1
@@ -524,7 +593,7 @@ class Engine2dCompositorBackend:
         """Host commit: called strictly AFTER the host presenter has presented
         the full seed frame. This is the ONLY place a full sample is counted,
         so a frame contributes exactly one sample and only when presented."""
-        if self.retained_damage_calibration == nil or finished_ns <= started_ns:
+        if self.retained_damage_calibration.is_none() or finished_ns <= started_ns:
             return
         self.record_retained_damage_full_sample(started_ns, finished_ns)
         var receipt = self.retained_damage_calibration.unwrap()
@@ -538,7 +607,7 @@ class Engine2dCompositorBackend:
     me admitted_retained_damage_schedule(
         external_presenter: bool
     ) -> DamagePlan?:
-        if self.retained_damage_calibration != nil:
+        if self.retained_damage_calibration.is_some():
             val receipt = self.retained_damage_calibration.unwrap()
             # Owner-token validation: the receipt must have been seeded by
             # THIS backend instance; a stale receipt carried across a backend
@@ -566,7 +635,7 @@ class Engine2dCompositorBackend:
 
     fn retained_damage_replay_manifest() -> text:
         """Greppable replay admission receipt for evidence harnesses."""
-        val seeded = self.retained_damage_calibration != nil
+        val seeded = self.retained_damage_calibration.is_some()
         var samples: i64 = 0
         var presented = false
         if seeded:
@@ -661,6 +730,7 @@ class Engine2dCompositorBackend:
         val transfer_profile = _engine2d_compositor_transfer_profile()
         if (
             cacheable and
+            self.revision_cache_surface_valid and
             self.revision_cache_producer_generation == producer_generation and
             self.revision_cache_composition_revision == composition_revision and
             self.revision_cache_backend == selected and
@@ -668,7 +738,7 @@ class Engine2dCompositorBackend:
             self.revision_cache_resources == resources
         ):
             if val Some(cached_composition) = self.revision_cache_composition:
-                if cached_composition == composition:
+                if draw_ir_composition_content_equal(cached_composition, composition):
                     if val Some(cached) = self.revision_cache_result:
                         self.revision_reuse_count = self.revision_reuse_count + 1
                         return cached
@@ -692,8 +762,214 @@ class Engine2dCompositorBackend:
             self.revision_cache_transfer_profile = transfer_profile
             self.revision_cache_composition = Some(composition)
             self.revision_cache_resources = resources
-            self.revision_cache_result = Some(result)
+            self.revision_cache_surface_valid = true
+            self.revision_cache_checksum = result.readback_checksum
+            self.revision_cache_backend_handle = result.backend_handle
+            self.revision_cache_device_identity = result.device_identity
+            self.revision_cache_result = if engine2d_revision_result_payload_cacheable(
+                self.w, self.h): Some(result) else: nil
         result
+
+    me render_web_draw_ir_composition_resources_revision(
+        composition: DrawIrComposition,
+        resources: [SimpleOsHostGpuImageResource],
+        producer_generation: i64,
+        composition_revision: i64
+    ) -> Engine2dDrawIrAdvResult:
+        """Render a Web DrawIR revision using composition damage when a prior retained surface exists."""
+        self.clear_damage()
+        val cacheable = (
+            producer_generation >= 0 and
+            composition_revision >= 0 and
+            composition_revision < _ENGINE2D_REVISION_CACHE_COMPOSITION_SATURATION
+        )
+        val selected = self.engine.backend_name()
+        val transfer_profile = _engine2d_compositor_transfer_profile()
+        val resources_stable = self.revision_cache_resources == resources
+        if (
+            cacheable and
+            self.revision_cache_surface_valid and
+            self.revision_cache_producer_generation == producer_generation and
+            self.revision_cache_composition_revision == composition_revision and
+            self.revision_cache_backend == selected and
+            self.revision_cache_transfer_profile == transfer_profile and
+            resources_stable
+        ):
+            if val Some(cached_composition) = self.revision_cache_composition:
+                if draw_ir_composition_content_equal(cached_composition, composition):
+                    self.revision_reuse_count = self.revision_reuse_count + 1
+                    self.web_effective_damage_mode = DAMAGE_PLAN_NONE
+                    self.web_effective_damage_reason = "web-revision-cache-hit"
+                    self.web_effective_damage_valid = true
+                    self.web_effective_damage_rects = []
+                    if val Some(cached) = self.revision_cache_result:
+                        return cached
+                    return Engine2dDrawIrAdvResult(
+                        schema: composition.schema,
+                        unit_id: composition.composition_id,
+                        selected_backend: selected,
+                        fallback_required: false,
+                        fallback_reason: "",
+                        rendered_command_count: 0,
+                        skipped_command_count: 0,
+                        pixels: [],
+                        readback_source: "retained_none",
+                        backend_handle: self.revision_cache_backend_handle,
+                        device_identity: self.revision_cache_device_identity,
+                        readback_checksum: self.revision_cache_checksum
+                    )
+        if (
+            self.revision_cache_surface_valid and
+            self.revision_cache_backend == selected and
+            self.revision_cache_transfer_profile == transfer_profile
+        ):
+            if val Some(prior) = self.revision_cache_composition:
+                val decision = composition_damage_between(
+                    prior, composition, self.w, self.h, true, resources_stable)
+                var images: [Engine2dResolvedDrawIrImage] = []
+                for resource in resources:
+                    images.push(engine2d_resolved_draw_ir_image(
+                        resource.image_uri, resource.width, resource.height,
+                        resource.pixels))
+                val consumed = web_draw_ir_consume_damage(
+                    self.engine, prior, composition, images,
+                    true, resources_stable)
+                self.engine = consumed.engine
+                var effective_mode = consumed.effective_plan_mode
+                var effective_rects = consumed.effective_plan_rects
+                var effective_reason = consumed.reason
+                val result = consumed.result
+                if (decision.mode == DAMAGE_PLAN_LOCAL and
+                    effective_mode == DAMAGE_PLAN_FULL and
+                    not _engine2d_compositor_gpu_backend(selected) and
+                    effective_reason == "composition-patch:fresh-device-opaque-full-target-first-command-required" and
+                    not result.fallback_required and
+                    result.skipped_command_count == 0 and
+                    result.rendered_command_count > 0 and
+                    decision.rects.len() > 0):
+                    effective_mode = DAMAGE_PLAN_LOCAL
+                    effective_rects = decision.rects
+                if effective_mode == DAMAGE_PLAN_NONE:
+                    self.revision_reuse_count = self.revision_reuse_count + 1
+                    self.web_effective_damage_mode = DAMAGE_PLAN_NONE
+                    self.web_effective_damage_reason = effective_reason
+                    self.web_effective_damage_valid = true
+                    self.web_effective_damage_rects = []
+                    if cacheable:
+                        self.revision_cache_producer_generation = producer_generation
+                        self.revision_cache_composition_revision = composition_revision
+                    if val Some(cached) = self.revision_cache_result:
+                        return cached
+                    return result
+                self.revision_render_count = self.revision_render_count + 1
+                self.cpu_damage_seeded = false
+                self.cpu_damage_rects = []
+                self.engine.invalidate_damage_mirror()
+                self.last_backend = result.selected_backend
+                self.last_readback_source = result.readback_source
+                self.last_backend_handle = result.backend_handle
+                self.last_readback_checksum = result.readback_checksum
+                val device_proven = (
+                    not _engine2d_compositor_gpu_backend(selected) or
+                    (result.readback_source == "device_readback" and
+                     result.backend_handle > 0 and result.device_identity > 0)
+                )
+                if (
+                    cacheable and not result.fallback_required and
+                    result.skipped_command_count == 0 and
+                    result.rendered_command_count > 0 and
+                    result.pixels.len() == self.w * self.h and device_proven
+                ):
+                    self.last_readback_completed = true
+                    self.last_readback_width = self.w
+                    self.last_readback_height = self.h
+                    self.last_readback_stride = self.w * 4
+                    self.last_readback_format = "argb8888"
+                    self.last_composition_id = result.unit_id
+                    self.last_scene_key = composition.scene_key
+                    self.revision_cache_producer_generation = producer_generation
+                    self.revision_cache_composition_revision = composition_revision
+                    self.revision_cache_backend = selected
+                    self.revision_cache_transfer_profile = transfer_profile
+                    self.revision_cache_composition = Some(composition)
+                    self.revision_cache_resources = resources
+                    self.revision_cache_surface_valid = true
+                    self.revision_cache_checksum = result.readback_checksum
+                    self.revision_cache_backend_handle = result.backend_handle
+                    self.revision_cache_device_identity = result.device_identity
+                    self.revision_cache_result = if engine2d_revision_result_payload_cacheable(
+                        self.w, self.h): Some(result) else: None
+                    self.web_effective_damage_mode = effective_mode
+                    self.web_effective_damage_reason = effective_reason
+                    self.web_effective_damage_valid = (
+                        effective_mode == DAMAGE_PLAN_LOCAL or
+                        effective_mode == DAMAGE_PLAN_NONE)
+                    self.web_effective_damage_rects = if effective_mode == DAMAGE_PLAN_NONE: [] else: effective_rects
+                else:
+                    self.invalidate_revision_cache()
+                    self.web_effective_damage_mode = DAMAGE_PLAN_FULL
+                    self.web_effective_damage_reason = effective_reason
+                    self.web_effective_damage_valid = false
+                    self.web_effective_damage_rects = if self.w > 0 and self.h > 0:
+                        [0, 0, self.w.to_i64(), self.h.to_i64()]
+                    else:
+                        []
+                return result
+        val full = self.render_draw_ir_composition_resources_revision(
+            composition, resources, producer_generation, composition_revision)
+        self.web_effective_damage_mode = DAMAGE_PLAN_FULL
+        self.web_effective_damage_reason = "cold-revision-cache"
+        self.web_effective_damage_valid = false
+        self.web_effective_damage_rects = if self.w > 0 and self.h > 0:
+            [0, 0, self.w.to_i64(), self.h.to_i64()]
+        else:
+            []
+        full
+
+    me try_reuse_draw_ir_composition_revision(
+        composition: DrawIrComposition,
+        resources: [SimpleOsHostGpuImageResource],
+        producer_generation: i64,
+        composition_revision: i64
+    ) -> Engine2dFrameSwitchReceipt:
+        """Frame switch on an exact retained revision, without the pixels.
+
+        Same exact-match rule as render_draw_ir_composition_resources_revision,
+        but a miss never rasters and a hit returns scalars only: the retained
+        frame is identified by its seed checksum, not copied out.
+        """
+        val selected = self.engine.backend_name()
+        if (
+            producer_generation < 0 or composition_revision < 0 or
+            composition_revision >= _ENGINE2D_REVISION_CACHE_COMPOSITION_SATURATION or
+            self.revision_cache_producer_generation != producer_generation or
+            self.revision_cache_composition_revision != composition_revision or
+            self.revision_cache_backend != selected or
+            self.revision_cache_transfer_profile != _engine2d_compositor_transfer_profile() or
+            self.revision_cache_resources != resources
+        ):
+            return _engine2d_frame_switch_miss(
+                producer_generation, composition_revision)
+        if val Some(cached_composition) = self.revision_cache_composition:
+            if (draw_ir_composition_content_equal(cached_composition, composition) and
+                self.revision_cache_surface_valid):
+                self.revision_reuse_count = self.revision_reuse_count + 1
+                val gpu = _engine2d_compositor_gpu_backend(selected)
+                return Engine2dFrameSwitchReceipt(
+                    reused: true,
+                    pixel_count: self.w.to_i64() * self.h.to_i64(),
+                    checksum: self.revision_cache_checksum,
+                    producer_generation: producer_generation,
+                    composition_revision: composition_revision,
+                    raster_count: 0, submission_count: 0, readback_count: 0,
+                    readback_source: (
+                        if gpu: "host_cache_after_device_copy"
+                        else: "host_cache"),
+                    present_mode: "host_cache",
+                    device_present: false,
+                    backend_handle: self.revision_cache_backend_handle,
+                    device_identity: self.revision_cache_device_identity)
+        _engine2d_frame_switch_miss(producer_generation, composition_revision)
 
     me render_draw_ir_composition_resources_revision_damaged(
         composition: DrawIrComposition,
@@ -722,7 +998,7 @@ class Engine2dCompositorBackend:
                 _engine2d_compositor_transfer_profile() and
             self.revision_cache_resources == resources)
         if (self.cpu_damage_seeded and self.cpu_damage_enabled() and
-            contiguous_base and self.revision_cache_result != nil):
+            contiguous_base and self.revision_cache_result.is_some()):
             val cached_composition = self.revision_cache_composition.unwrap()
             if not _engine2d_compositor_damage_covers_patch(
                 cached_composition, composition, dirty_rects):
@@ -746,7 +1022,7 @@ class Engine2dCompositorBackend:
                     self.cpu_damage_pixels())
                 self.present_cpu_damage()
                 if pixels.len() == self.w * self.h:
-                    if self.revision_cache_result != nil:
+                    if self.revision_cache_result.is_some():
                         val retained = Engine2dDrawIrAdvResult(
                             schema: "simple-draw-ir-v2",
                             unit_id: composition.composition_id,
@@ -771,7 +1047,12 @@ class Engine2dCompositorBackend:
                             _engine2d_compositor_transfer_profile())
                         self.revision_cache_composition = Some(composition)
                         self.revision_cache_resources = resources
-                        self.revision_cache_result = Some(retained)
+                        self.revision_cache_surface_valid = true
+                        self.revision_cache_checksum = retained.readback_checksum
+                        self.revision_cache_backend_handle = 0
+                        self.revision_cache_device_identity = 0
+                        self.revision_cache_result = if engine2d_revision_result_payload_cacheable(
+                            self.w, self.h): Some(retained) else: None
                         return retained
                 self.abort_cpu_damage()
         val full = self.render_draw_ir_composition_resources_revision(
@@ -806,7 +1087,7 @@ class Engine2dCompositorBackend:
             self.revision_cache_transfer_profile ==
                 _engine2d_compositor_transfer_profile() and
             self.revision_cache_resources == resources and
-            self.revision_cache_composition != nil)
+            self.revision_cache_composition.is_some())
         if not contiguous_base:
             return _engine2d_compositor_packed_damage_reject(
                 "missing-retained-base", selected)
@@ -851,7 +1132,11 @@ class Engine2dCompositorBackend:
         # This producer intentionally never materializes a whole-frame
         # snapshot. Retaining the prior result under the new exact key would
         # make a following NONE frame re-publish stale pixels.
-        self.revision_cache_result = nil
+        self.revision_cache_result = None
+        self.revision_cache_surface_valid = false
+        self.revision_cache_checksum = 0
+        self.revision_cache_backend_handle = 0
+        self.revision_cache_device_identity = 0
         Engine2dCompositorPackedDamage(
             ok: true, reason: "ok", rects: rects, pixels: packed,
             selected_backend: selected,
@@ -1095,6 +1380,8 @@ impl CompositorBackend for Engine2dCompositorBackend:
         self.engine.present()
 
     me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        if text_str.len() == 0:
+            return
         self.invalidate_frame_receipt()
         _engine2d_compositor_clear_override(self.id)
         self.engine.draw_text_bg(x, y, text_str, fg, bg, 16)

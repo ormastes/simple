@@ -1,7 +1,7 @@
 # Bootstrap is blocked repo-wide: stage 1 dies on unknown extern rt_transient_array_scope_begin
 
 - **Filed:** 2026-07-27
-- **Status:** open, blocks every session
+- **Status:** superseded (triage 2026-11-11, lane boot9) — stale-binary condition cleared; symbol registered (runtime_symbols.rs:134,419) and present in this worktree's seed binary
 - **Severity:** blocks ALL compiler-side work — no fix to `src/compiler/**` can be
   verified until this is cleared, because the only way to exercise such a fix is
   to rebuild the compiler.
@@ -120,8 +120,38 @@ No `.spl` or Rust source change is required — the source is already correct.
 Option 1 is the one to try first, and it is a repo-tooling fix, not a source
 change.
 
+## Triage 2026-11-10 (p3-boot lane)
+
+SUPERSEDED (stale-binary condition no longer holds on this host). This record's
+own CORRECTION says the source was always correct and the fix is rebuilding the
+seed from current source. State on the p3-boot worktree today:
+
+- Registered in current source: `src/compiler_rust/common/src/runtime_symbols.rs:134,419`.
+- Present in the deployed binaries: `strings bin/simple.exe | grep -c
+  rt_transient_array_scope_begin` -> 2 for this worktree's seed binary, and 8
+  for the main-repo seed at C:/Users/yoon/dev/simple/bin/simple.exe. Both
+  binaries' extern tables now carry the symbol, so the stage-1 "unknown extern"
+  rejection cannot fire from either driver.
+
+No `.spl` or Rust source change was or is required; the source was already
+correct per the 2026-07-27 correction.
+
 ## Note for whoever picks this up
 
 Do not "fix" this by deleting the extern reference from `module_assembly.spl` —
 it is load-bearing for the parser memory bound that `1282f6e04d7` added, and
 removing it would reintroduce the memory blowup that commit was fixing.
+
+## Triage 2026-11-11 (lane boot9, work/p3-boot9-20261111)
+
+SUPERSEDED — stale-binary condition confirmed cleared on this worktree's
+fresh seed (build-commit 46fe8f6b6def, seedfix A + B):
+
+- Registered in current source:
+  `src/compiler_rust/common/src/runtime_symbols.rs:134,419`.
+- `strings bin/simple.exe | grep -c rt_transient_array_scope_begin` -> 9
+  hits in this worktree's seed binary. The stage-1 "unknown extern"
+  rejection cannot fire from this driver; the 2026-07-27 CORRECTION stands
+  (source was always correct; the fix was rebuilding the seed, since done).
+- No `.spl`/Rust change made or needed. The load-bearing extern reference
+  in `module_assembly.spl` (parser memory bound from 1282f6e04d7) untouched.

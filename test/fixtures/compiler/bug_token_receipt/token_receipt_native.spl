@@ -1,0 +1,36 @@
+use nogc_sync_mut.database.bug.{Bug, BugSeverity, BugStatus, BugTokenReading, BugTokenCount, BugTokenUsage, BugTokenCategory, BugTokenProvider, BugTokenSource, BugKnowledgeLink, create_bug_database, bug_token_total, bug_token_reading_text}
+
+fn reading(value: i64) -> BugTokenReading:
+    BugTokenReading.Count(BugTokenCount(value: value))
+
+fn usage(input: BugTokenReading, output: BugTokenReading, cache_read: BugTokenReading, cache_create: BugTokenReading, knowledge: BugKnowledgeLink?) -> BugTokenUsage:
+    BugTokenUsage(category: BugTokenCategory.Compiler, provider: BugTokenProvider(value: "probe"), input: input, output: output, cache_read: cache_read, cache_create: cache_create, source: BugTokenSource(value: "native-probe"), knowledge: knowledge, recorded_at: "2026-11-23")
+
+fn main():
+    val summed = bug_token_total([reading(1), reading(2), reading(4), reading(8)])
+    match summed:
+        case Ok(value): assert(bug_token_reading_text(value) == "15")
+        case Err(_): assert(false)
+    match bug_token_total([reading(1), BugTokenReading.Unavailable]):
+        case Ok(value): assert(bug_token_reading_text(value) == "unavailable")
+        case Err(_): assert(false)
+    match bug_token_total([reading(9223372036854775807), reading(1)]):
+        case Ok(_): assert(false)
+        case Err(reason): assert(reason == "token total overflow")
+    var db = create_bug_database("build/bugtoken-layout-probe/unused.sdn")
+    assert(db.add_bug(Bug(id: "probe", severity: BugSeverity.P2, status: BugStatus.Open, title: "probe", description: [], file: "src/compiler/probe.spl", line: 1, reproducible_by: "native", fix_strategy: [], investigation_log: [], created_at: "2026-11-23", updated_at: "2026-11-23", valid: true)))
+    assert(db.add_token_usage("probe", usage(reading(1), reading(2), reading(4), reading(8), None)))
+    assert(db.add_token_usage("probe", usage(BugTokenReading.Unavailable, BugTokenReading.Unavailable, BugTokenReading.Unavailable, BugTokenReading.Unavailable, None)))
+    assert(not db.add_token_usage("probe", usage(reading(1), BugTokenReading.Unavailable, reading(4), reading(8), None)))
+    assert(db.add_token_usage("probe", usage(reading(1), BugTokenReading.Unavailable, reading(4), reading(8), Some(BugKnowledgeLink(path: "doc/native-probe.md")))))
+    assert(not db.add_token_usage("probe", usage(reading(9223372036854775807), reading(1), reading(0), reading(0), None)))
+    assert(db.add_token_usage("probe", usage(reading(0), reading(0), reading(0), reading(0), None)))
+    val table = db.db.get_table("bug_token_usage").unwrap()
+    assert(table.rows.len() == 4)
+    val first = table.rows[0]
+    assert((first.get("input_tokens") ?? "") == "1")
+    assert((first.get("output_tokens") ?? "") == "2")
+    assert((first.get("cache_read_tokens") ?? "") == "4")
+    assert((first.get("cache_create_tokens") ?? "") == "8")
+    assert((first.get("total_tokens") ?? "") == "15")
+    print "token-receipt-native-ok assertions=16"

@@ -141,8 +141,7 @@ pub(super) struct QuarantinedGraphicsSubmission {
 }
 
 pub(super) fn alloc_handle() -> i64 {
-    NEXT_HANDLE
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+    simple_common::atomic_update::update_i64(&NEXT_HANDLE, Ordering::Relaxed, Ordering::Relaxed, |next| {
             (next > 0).then(|| next.checked_add(1)).flatten()
         })
         .unwrap_or(0)
@@ -474,7 +473,14 @@ pub extern "C" fn rt_vulkan_init() -> i64 {
             1
         }
         Err(e) => {
-            state.set_error(format!("VulkanDevice::new_default: {e}"));
+            // A failed vkCreateDevice reports the same text as the interpreter
+            // lane, so `runtime-init: {last_error}` reads alike on both paths.
+            let msg = match e {
+                crate::vulkan::VulkanError::DeviceCreationFailed(msg) if msg.starts_with("vkCreateDevice(") => msg,
+                e => format!("VulkanDevice::new_default: {e}"),
+            };
+            eprintln!("[vulkan] rt_vulkan_init failed at {msg}");
+            state.set_error(msg);
             0
         }
     }
@@ -567,6 +573,37 @@ pub extern "C" fn rt_vulkan_shutdown() -> i64 {
 // Evidence to close: gate availability on the feature (or make the dlopen
 // path report a distinct "loader present but unsupported build" status) plus
 // a spec that pins both answers for a feature-on and a feature-off build.
+/// Single process-wide MoltenVK ICD environment discovery guard on macOS.
+///
+/// Shared by both `vulkan::instance` (`feature = "vulkan"`) and the compiler
+/// interpreter's `vulkan_dlopen` (`default = []`) so `setenv("VK_ICD_FILENAMES")`
+/// runs under one `Once` lock and cannot race concurrent `getenv` probes.
+pub fn ensure_macos_moltenvk_icd_env() {
+    #[cfg(target_os = "macos")]
+    {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            const MOLTENVK_ICD_CANDIDATES: &[&str] = &[
+                "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json",
+                "/opt/homebrew/share/vulkan/icd.d/MoltenVK_icd.json",
+                "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json",
+                "/usr/local/share/vulkan/icd.d/MoltenVK_icd.json",
+            ];
+            let has_icd = std::env::var_os("VK_ICD_FILENAMES").is_some_and(|v| !v.is_empty());
+            let has_drv = std::env::var_os("VK_DRIVER_FILES").is_some_and(|v| !v.is_empty());
+            if !has_icd && !has_drv {
+                if let Some(path) = MOLTENVK_ICD_CANDIDATES
+                    .iter()
+                    .find(|candidate| std::path::Path::new(candidate).is_file())
+                {
+                    std::env::set_var("VK_ICD_FILENAMES", path);
+                }
+            }
+        });
+    }
+}
+
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_is_available() -> i64 {
@@ -603,6 +640,7 @@ pub extern "C" fn rt_vulkan_is_available() -> i64 {
     const CANDIDATES: &[&str] = &["vulkan-1.dll"];
 
     let available = *AVAILABLE.get_or_init(|| {
+        ensure_macos_moltenvk_icd_env();
         CANDIDATES
             .iter()
             .any(|name| unsafe { libloading::Library::new(name).is_ok() })

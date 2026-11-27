@@ -1,7 +1,7 @@
 # M2 guard-page trap has no owner-attribution report on either backend
 
 **Date:** 2026-08-05
-Status: OPEN (P3)
+Status: FIX-IMPLEMENTED-VERIFICATION-PENDING (P3) -- 2026-11-04, see "Fix 2026-11-04" at the end
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 fixed" below).
 **Severity:** Medium. Not a false-safety claim like the guard-row bug this
@@ -151,3 +151,59 @@ not attempted in this lane.
 
 Out of lane: fix surface is the Rust seed's guard-page trap owner-attribution
 reporting (both backends), needs a seed rebuild to verify. No change made.
+
+## Fix 2026-11-04
+
+Both backends now install a SIGSEGV `sigaction` handler on the first sampled
+guard allocation. It looks the faulting address up in a lock-free,
+fixed-size slot table (no malloc/locks), writes one line with `write(2)`:
+
+`[mem_guard] guard-page trap: <overflow|underflow|use-after-free|access> addr=0x.. size=N owner=...`
+
+then restores the previous SIGSEGV disposition and returns, so the faulting
+instruction re-executes and the process dies exactly as before (non-guard
+faults take the same path).
+
+- Native C (`src/runtime/runtime_memory_guard.h`): `RtMemGuardSlot.owner`
+  (alloc-time thread-local tag, fed by `rt_mem_attr_set_owner`),
+  `rt_mem_guard_record_slot`, `rt_mem_guard_fault_report`.
+- Rust seed (`interpreter_extern/mem_guard.rs`): `FAULT_TABLE` atomic mirror of
+  the slot map (owner id from `current_owner_id()`), `fault_report`,
+  `fault_handler`.
+- Specs: `src/runtime/test/rt_mem_guard_owner_report_selfcheck.c` (report logic
+  runs on any host; POSIX part forks and asserts the printed stderr line plus
+  SIGSEGV death); Rust `report_tests` in `mem_guard.rs`.
+
+Not done (still open, narrower): free-site capture for the UAF report; the
+Windows guard allocator remains a no-op (no VirtualAlloc port), so the POSIX
+end-to-end path was not executed on this Windows host (WSL unavailable) --
+verification pending on a Linux/macOS run of the selfcheck.
+
+## Verification 2026-11-25 (Windows host, Part 1 only)
+
+Ran the all-hosts half of the selfcheck on this Windows host
+(`release/1.0.0` tip `47d6c5eddd5`):
+
+```
+gcc -O1 -o mem_guard_selfcheck.exe src/runtime/test/rt_mem_guard_owner_report_selfcheck.c
+./mem_guard_selfcheck.exe
+  ok   slot recorded
+  ok   trailing guard page -> overflow
+  ok   report names the owner
+  ok   report names the size
+  ok   leading guard page -> underflow
+  ok   freed slot -> use-after-free
+  ok   non-guard address produces no report
+  ok   unset owner reports <none>
+SELFCHECK PASSED   (exit 0, 8/8)
+```
+
+So the native-C report logic — slot recording, overflow/underflow/UAF
+classification, owner tag, and the no-report path for non-guard addresses —
+is now verified on a real run, not just by inspection. Still pending,
+unchanged from the 2026-11-04 note: the POSIX end-to-end half (fork +
+printed-stderr assertion + SIGSEGV death) needs a Linux/macOS run, and the
+Rust-seed `report_tests` need a seed build; neither can execute on this
+Windows host. Status stays FIX-IMPLEMENTED-VERIFICATION-PENDING with the
+pending scope narrowed to those two items (plus the already-listed
+free-site-capture gap).

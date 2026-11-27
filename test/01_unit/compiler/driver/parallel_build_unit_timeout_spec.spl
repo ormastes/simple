@@ -1,0 +1,59 @@
+# @cover src/compiler/80.driver/driver_build/parallel.spl
+# build_parallel's wait_for_finished_process was `while true` with no
+# deadline: ParallelBuildConfig.unit_timeout_ms was honoured by build_supervised
+# only, so one hung child parked the whole process-parallel build forever.
+# The wait now expires a child at the per-unit budget, kills it, and the unit
+# is recorded as a timeout error explicitly (R3: no silent absence).
+use std.spec
+use std.io_runtime.{time_now_monotonic_ms}
+use app.io.process_ops.{process_spawn_async, process_is_running}
+use compiler.driver.driver_build.parallel.{ParallelBuilder, ParallelBuildConfig,
+    parallel_unit_budget_expired_v1}
+
+var spawned_pid: i64 = -1
+
+fn spawn_sleeper(path: text) -> i64:
+    spawned_pid = process_spawn_async("sh", ["-c", "sleep 30"])
+    spawned_pid
+
+fn spawn_quick(path: text) -> i64:
+    process_spawn_async("sh", ["-c", "exit 0"])
+
+fn collect_any(exit_code: i64, path: text) -> Result<text, text>:
+    Ok("obj:{path}:{exit_code}")
+
+fn cfg(unit_timeout_ms: i64) -> ParallelBuildConfig:
+    ParallelBuildConfig(num_threads: 2, parallel_threshold: 1,
+        deterministic: false, verbose: false, unstable: false, unit_timeout_ms: unit_timeout_ms)
+
+describe "per-unit budget predicate":
+    it "expires only past a positive budget":
+        expect(parallel_unit_budget_expired_v1(1000, 1299, 300)).to_equal(false)
+        expect(parallel_unit_budget_expired_v1(1000, 1300, 300)).to_equal(true)
+        expect(parallel_unit_budget_expired_v1(1000, 5000, 300)).to_equal(true)
+
+    it "never expires when the budget is disabled (0 or negative)":
+        expect(parallel_unit_budget_expired_v1(1000, 999999, 0)).to_equal(false)
+        expect(parallel_unit_budget_expired_v1(1000, 999999, -1)).to_equal(false)
+
+describe "build_parallel unit timeout":
+    it "kills a child that outlives unit_timeout_ms and records the unit as a timeout error":
+        var b = ParallelBuilder.create(cfg(300))
+        b.add_unit("slow.spl", [])
+        val started = time_now_monotonic_ms()
+        val r = b.build_parallel(spawn_sleeper, collect_any)
+        val elapsed = time_now_monotonic_ms() - started
+        expect(elapsed < 15000).to_equal(true)
+        expect(r.success).to_equal(false)
+        expect(r.errors.len()).to_equal(1)
+        expect(r.errors[0].0).to_equal("slow.spl")
+        expect(r.errors[0].1.contains("timeout")).to_equal(true)
+        expect(spawned_pid > 0).to_equal(true)
+        expect(process_is_running(spawned_pid)).to_equal(false)
+
+    it "lets a child that exits inside the budget complete normally":
+        var b = ParallelBuilder.create(cfg(5000))
+        b.add_unit("quick.spl", [])
+        val r = b.build_parallel(spawn_quick, collect_any)
+        expect(r.success).to_equal(true)
+        expect(r.errors.len()).to_equal(0)

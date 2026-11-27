@@ -1,0 +1,50 @@
+"""HirType.named positional primitive payloads keep their declared owner.
+
+Repro/prevention for a174_named_enum_payload_owner_2026_10_16: the original
+named-argument constructor calls (HirTypeKind.Int(bits: 64, signed: true)) lost
+the declaring enum owner on a stale producer. HirType.named uses positional
+payloads as a workaround; this spec pins every name -> (kind, width, sign).
+"""
+# @req REQ-HIR-NAMED-PAYLOAD
+# @cover src/compiler/20.hir/hir_types.spl
+
+use std.spec
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+
+fn int_shape(name: text) -> text:
+    val t = HirType.named(name)
+    match t.kind:
+        case HirTypeKind.Int(bits, signed): "int:{bits}:{signed}"
+        case _: "other"
+
+fn float_bits(name: text) -> i64:
+    val t = HirType.named(name)
+    match t.kind:
+        case HirTypeKind.Float(bits): bits
+        case _: -1
+
+describe "HirType.named primitive payload owner":
+    it "maps signed integer names with exact widths":
+        expect(int_shape("i64")).to_equal("int:64:true")
+        expect(int_shape("i32")).to_equal("int:32:true")
+        expect(int_shape("i16")).to_equal("int:16:true")
+        expect(int_shape("i8")).to_equal("int:8:true")
+        expect(int_shape("isize")).to_equal("int:64:true")
+
+    it "maps unsigned integer names with exact widths":
+        expect(int_shape("u64")).to_equal("int:64:false")
+        expect(int_shape("u32")).to_equal("int:32:false")
+        expect(int_shape("u16")).to_equal("int:16:false")
+        expect(int_shape("u8")).to_equal("int:8:false")
+        expect(int_shape("usize")).to_equal("int:64:false")
+
+    it "maps float names":
+        expect(float_bits("f64")).to_equal(64)
+        expect(float_bits("f32")).to_equal(32)
+
+    it "maps bool and unit to payload-free kinds":
+        expect(HirType.named("bool").kind == HirTypeKind.Bool).to_equal(true)
+        expect(HirType.named("unit").kind == HirTypeKind.Unit).to_equal(true)
+
+    it "documents the CURRENT i64 fallback for unknown names (not a guarantee)":
+        expect(int_shape("no_such_prim")).to_equal("int:64:true")

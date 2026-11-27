@@ -12,8 +12,9 @@ use app.io.mod.{file_is_regular_no_follow, file_size_raw, file_hash_sha256,
     dir_remove_all, process_run_bounded}
 use compiler.driver.cache.binary_object_cas.{binary_object_cas_blob_path}
 use app.build.scheduler.retained_binary_cas.{retained_binary_cas_verify_v1}
+use app.build.host_path_policy.{build_host_abs_path_valid_v1, build_posix_abs_path_valid_v1}
 
-val BUILD_SFTP_MAX_FILES_V1: i64 = 256
+pub val BUILD_SFTP_MAX_FILES_V1: i64 = 256
 val BUILD_SFTP_MAX_FILE_BYTES_V1: i64 = 268435456
 val BUILD_SFTP_MAX_TOTAL_BYTES_V1: i64 = 1073741824
 val BUILD_SFTP_MAX_BATCH_BYTES_V1: i64 = 65536
@@ -54,12 +55,14 @@ fn _sftp_segment_v1(value: text) -> bool:
     true
 
 fn _sftp_path_v1(path: text, absolute: bool) -> bool:
+    if absolute:
+        return build_host_abs_path_valid_v1(path, true, true, 4096, 128)
     if path.len() == 0 or path.len() > 4096 or
-       path.starts_with("/") != absolute or path.ends_with("/") or
+       path.starts_with("/") or path.ends_with("/") or
        path.contains("//"):
         return false
     val segments = path.split("/")
-    var i: i64 = if absolute: 1 else: 0
+    var i: i64 = 0
     while i < segments.len():
         if not _sftp_segment_v1(segments[i]):
             return false
@@ -80,7 +83,7 @@ fn _sftp_add_file_v1(batch: text, directories: [text],
     if size < 0 or size > BUILD_SFTP_MAX_FILE_BYTES_V1 or
        size > BUILD_SFTP_MAX_TOTAL_BYTES_V1 - total:
         return (batch, directories, total, "input-size-invalid")
-    if file_hash_sha256(local) != expected_digest:
+    if not _file_sha256_matches_v1(local, expected_digest):
         return (batch, directories, total, "input-digest-mismatch")
     var next_batch = batch
     var next_dirs = directories
@@ -114,7 +117,7 @@ fn _plan_build_input_sftp_v1(config: TrustedSftpConfigV1,
        not _sftp_path_v1(config.sftp_executable, true) or
        not file_is_regular_no_follow(config.sftp_executable) or
        not scheduler_action_digest_valid_v1(config.sftp_digest) or
-       file_hash_sha256(config.sftp_executable) != config.sftp_digest or
+       not _file_sha256_matches_v1(config.sftp_executable, config.sftp_digest) or
        not _sftp_path_v1(config.remote_inbox_root, true) or
        not _sftp_path_v1(source_root, true) or
        (use_cas and not _sftp_path_v1(cas_root, true)):
@@ -222,7 +225,7 @@ fn transfer_prepared_build_inputs_sftp_v1(config: TrustedSftpConfigV1,
     if batch.is_err() or batch.unwrap() != plan.batch or
        not trusted_ssh_node_valid_v1(config.node) or
        not file_is_regular_no_follow(config.sftp_executable) or
-       file_hash_sha256(config.sftp_executable) != config.sftp_digest:
+       not _file_sha256_matches_v1(config.sftp_executable, config.sftp_digest):
         return BuildSftpTransferV1(false, "prepared-batch-changed", "", 0, 0)
     val node = config.node
     val args = ["-F", "none", "-b", batch_file, "-o", "BatchMode=yes",
@@ -263,3 +266,9 @@ export plan_build_input_sftp_v1, transfer_build_inputs_sftp_v1
 export plan_build_input_sftp_with_cas_v1
 export transfer_build_inputs_sftp_with_cas_v1
 export transfer_prepared_build_inputs_sftp_v1
+
+# Absent/unreadable file == mismatch: a missing digest never matches.
+fn _file_sha256_matches_v1(path: text, expected: text) -> bool:
+    if val digest = file_hash_sha256(path):
+        return digest == expected
+    false

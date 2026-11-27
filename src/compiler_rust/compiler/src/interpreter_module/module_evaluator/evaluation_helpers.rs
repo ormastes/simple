@@ -9,13 +9,13 @@ use std::sync::Arc;
 
 use tracing::{trace, warn};
 
-use simple_parser::ast::{Attribute, ClassDef, Expr, FunctionDef, ImportTarget, Node, Pattern, Visibility};
+use simple_parser::ast::{Attribute, ClassDef, Expr, FunctionDef, ImportTarget, Node, Pattern, Type, Visibility};
 
 use crate::error::CompileError;
 use crate::value::{Env, ExportTable, LayeredEnv, ModuleTable, TableView, Value};
 use crate::interpreter::{
     tag_function_module_owner, FUNCTION_MODULE_OWNER, FUNCTION_OVERLOADS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
-    MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER,
+    MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER, TRAIT_IMPLS, TRAITS,
 };
 
 use crate::interpreter::interpreter_module::export_handler::load_export_source;
@@ -83,6 +83,29 @@ fn record_import_binding(
     // common case for the lazy re-imports the lint/parse hot path performs
     // per declaration — so the shared table is not copied for it.
     crate::interpreter::record_owner_binding(importer, local_name.to_owned(), binding);
+}
+
+/// Re-export counterpart of [`record_import_binding`]: when the source module
+/// declares `source_name` itself, bind to THAT declaration instead of whatever
+/// the source's own binding table resolves the name to (a glob-imported twin).
+fn record_reexport_binding(
+    module_path: Option<&Path>,
+    local_name: &str,
+    source_owner: Option<&Arc<str>>,
+    source_name: &str,
+    functions: &HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
+) {
+    if let (Some(importer), Some(owner)) = (module_owner(module_path), source_owner) {
+        if crate::interpreter::interpreter_call::function_declared_by(owner, source_name, functions) {
+            crate::interpreter::record_owner_binding(
+                importer,
+                local_name.to_owned(),
+                (Arc::clone(owner), source_name.to_owned()),
+            );
+            return;
+        }
+    }
+    record_import_binding(module_path, local_name, source_owner, source_name);
 }
 
 /// Whole-surface counterpart of [`record_import_binding`]: bind every key of
@@ -222,26 +245,7 @@ pub(super) fn register_definitions(
             Node::Struct(s) => {
                 // Treat structs like classes for export purposes
                 // Include struct methods so they're available for method calls
-                let mut class_def = ClassDef {
-                    span: s.span,
-                    name: s.name.clone(),
-                    generic_params: s.generic_params.clone(),
-                    where_clause: s.where_clause.clone(),
-                    fields: s.fields.clone(),
-                    methods: s.methods.clone(), // Include struct methods!
-                    parent: None,
-                    visibility: s.visibility,
-                    effects: vec![],
-                    attributes: s.attributes.clone(),
-                    doc_comment: s.doc_comment.clone(),
-                    invariant: s.invariant.clone(),
-                    macro_invocations: vec![],
-                    mixins: vec![],
-                    is_generic_template: s.is_generic_template,
-                    specialization_of: s.specialization_of.clone(),
-                    type_bindings: s.type_bindings.clone(),
-                    is_value_type: true,
-                };
+                let mut class_def = crate::interpreter::core_types::struct_def_to_class_def(s);
                 tag_methods_owner(&mut class_def.methods, module_ident.as_ref());
                 let arc_class_def = Arc::new(class_def);
                 local_classes.insert(s.name.clone(), Arc::clone(&arc_class_def));
@@ -274,27 +278,8 @@ pub(super) fn register_definitions(
             }
             Node::Impl(impl_block) => {
                 // Add impl block methods to the corresponding class/struct/enum
-                let type_name = match &impl_block.target_type {
-                    simple_parser::ast::Type::Simple(name) => Some(name.clone()),
-                    simple_parser::ast::Type::Generic { name, .. } => Some(name.clone()),
-                    _ => None,
-                };
+                let type_name = crate::hir::lower::Lowerer::impl_target_type_name(&impl_block.target_type);
                 if let Some(type_name) = type_name {
-                    // Owner-tag every method pulled from this impl block, the
-                    // same way Node::Class/Node::Struct/Node::Enum already tag
-                    // their inline methods via `tag_methods_owner`. Without
-                    // this, `impl TypeName:` methods (as opposed to methods
-                    // written inline in the class/struct/enum body) never got
-                    // a `FUNCTION_MODULE_OWNER` entry or the
-                    // `FLATTEN_MODULE_OWNER_ATTR_PREFIX` attribute fallback,
-                    // so `function_module_owner()` always returned `None` for
-                    // them, `CURRENT_EXEC_MODULE` was never set while they
-                    // executed, and coverage attribution fell back to the
-                    // `<entry>` sentinel for every impl-block method body in
-                    // the codebase. `method_with_impl_driver_attrs` builds a
-                    // *new* `FunctionDef`, so tagging must happen on its
-                    // result, not on `impl_block.methods` itself. See
-                    // doc/08_tracking/bug/coverage_entry_placeholder_two_root_causes_2026-08-08.md.
                     let tagged_method = |m: &FunctionDef| -> FunctionDef {
                         let mut method = method_with_impl_driver_attrs(m, &impl_block.attributes);
                         if let Some(owner) = module_ident.as_ref() {
@@ -302,35 +287,55 @@ pub(super) fn register_definitions(
                         }
                         method
                     };
+                    let mut methods_to_register: Vec<FunctionDef> =
+                        impl_block.methods.iter().map(tagged_method).collect();
+                    if let Some(ref trait_name) = impl_block.trait_name {
+                        let trait_def_opt = TRAITS.with(|cell| cell.borrow().get(trait_name).cloned());
+                        if let Some(trait_def) = trait_def_opt {
+                            let existing_names: std::collections::HashSet<&str> =
+                                impl_block.methods.iter().map(|m| m.name.as_str()).collect();
+                            for dm in &trait_def.methods {
+                                if !dm.is_abstract && !existing_names.contains(dm.name.as_str()) {
+                                    methods_to_register.push(tagged_method(dm));
+                                }
+                            }
+                        }
+                        let trait_arcs: Vec<Arc<FunctionDef>> =
+                            methods_to_register.iter().cloned().map(Arc::new).collect();
+                        TRAIT_IMPLS.with(|cell| {
+                            cell.borrow_mut()
+                                .insert((trait_name.clone(), type_name.clone()), trait_arcs);
+                        });
+                    }
                     // Handle classes
                     if let Some(class_def) = local_classes.get_mut(&type_name) {
                         Arc::make_mut(class_def)
                             .methods
-                            .extend(impl_block.methods.iter().map(tagged_method));
+                            .extend(methods_to_register.iter().cloned());
                     }
+                    let prior_global_class = global_classes.get(&type_name).cloned();
                     if let Some(class_def) = global_classes.get_mut(&type_name) {
                         Arc::make_mut(class_def)
                             .methods
-                            .extend(impl_block.methods.iter().map(tagged_method));
+                            .extend(methods_to_register.iter().cloned());
                     }
                     // Handle enums - add impl methods to enum definition
                     if let Some(enum_def) = local_enums.get_mut(&type_name) {
                         Arc::make_mut(enum_def)
                             .methods
-                            .extend(impl_block.methods.iter().map(tagged_method));
+                            .extend(methods_to_register.iter().cloned());
                     }
                     if let Some(enum_def) = global_enums.get_mut(&type_name) {
                         Arc::make_mut(enum_def)
                             .methods
-                            .extend(impl_block.methods.iter().map(tagged_method));
+                            .extend(methods_to_register.iter().cloned());
                     }
                     // Register static methods from impl blocks as mangled free functions
-                    for method in &impl_block.methods {
-                        let method = tagged_method(method);
+                    for method in &methods_to_register {
                         let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                         if is_static {
                             let mangled = format!("{}__{}", type_name, method.name);
-                            let arc_method = Arc::new(method);
+                            let arc_method = Arc::new(method.clone());
                             record_function_owner(&arc_method, module_ident.as_ref());
                             local_functions.insert(mangled.clone(), Arc::clone(&arc_method));
                             global_functions.insert(mangled.clone(), Arc::clone(&arc_method));
@@ -349,20 +354,15 @@ pub(super) fn register_definitions(
                     GLOBAL_IMPL_METHODS.with(|cell| {
                         let mut global_impls = cell.borrow_mut();
                         let methods = global_impls.entry(type_name.clone()).or_default();
-                        methods.extend(impl_block.methods.iter().map(|m| Arc::new(tagged_method(m))));
+                        methods.extend(methods_to_register.into_iter().map(Arc::new));
                     });
-                    // Update MODULE_CLASSES_CACHE with the enriched class definition
-                    // so cross-module fallback lookups find impl-added methods
-                    if let Some(enriched_class) = global_classes.get(&type_name) {
-                        let enriched_clone = enriched_class.clone();
-                        MODULE_CLASSES_CACHE.with(|cache| {
-                            let mut cache = cache.borrow_mut();
-                            for (_path, module_classes) in cache.iter_mut() {
-                                if module_classes.contains_key(&type_name) {
-                                    module_classes.insert(type_name.clone(), enriched_clone.clone());
-                                }
-                            }
-                        });
+                    // Point the owner-keyed slots that held the PRE-enrichment
+                    // allocation at the enriched one (an extension `impl` of a
+                    // class another module declares). Keyed by allocation, not
+                    // by bare name: module A's cached `Config` must survive
+                    // module B's `impl Config:`.
+                    if let (Some(prior), Some(enriched)) = (prior_global_class.as_ref(), global_classes.get(&type_name)) {
+                        crate::interpreter::refresh_cached_class(prior, enriched);
                     }
                 }
             }
@@ -371,6 +371,7 @@ pub(super) fn register_definitions(
                 tag_methods_owner(&mut enum_def.methods, module_ident.as_ref());
                 let arc_e = Arc::new(enum_def);
                 local_enums.insert(e.name.clone(), Arc::clone(&arc_e));
+                warn_on_ambiguous_bare_enum_name(global_enums.get(&e.name), &arc_e);
                 global_enums.insert(e.name.clone(), Arc::clone(&arc_e));
                 // Export enum as EnumType so EnumName.VariantName syntax works
                 let enum_type = Value::EnumType {
@@ -441,6 +442,9 @@ pub(super) fn register_definitions(
                 });
             }
             Node::Trait(t) => {
+                TRAITS.with(|cell| {
+                    cell.borrow_mut().insert(t.name.clone(), t.clone());
+                });
                 // Export trait as TraitType so trait exports work
                 let trait_type = Value::TraitType {
                     trait_name: t.name.clone(),
@@ -476,9 +480,15 @@ pub(super) fn process_imports_and_assignments(
     exports: &mut ExportTable,
     bare_exports: &mut Vec<Vec<(String, String)>>,
 ) -> Result<(), CompileError> {
+    // Classes visible to module-level initializers: this module's own plus
+    // every class merged in by its imports. Built lazily, rebuilt after an
+    // import. See init_classes_view.
+    let mut init_classes_cache: Option<HashMap<String, Arc<ClassDef>>> = None;
     for item in items.iter() {
         match item {
             Node::UseStmt(use_stmt) => {
+                init_classes_cache = None;
+                crate::units::scope::unit_scope_record_use(use_stmt);
                 process_use_stmt(
                     use_stmt,
                     module_path,
@@ -492,8 +502,9 @@ pub(super) fn process_imports_and_assignments(
             Node::Let(stmt) => {
                 // Evaluate module-level let statements (for global variables)
                 if let Some(init) = &stmt.value {
+                    let init_classes = init_classes_view(&mut init_classes_cache, local_classes, global_classes);
                     if let Ok(value) =
-                        evaluate_expr(init, env, local_functions, local_classes, local_enums, impl_methods)
+                        evaluate_expr(init, env, local_functions, init_classes, local_enums, impl_methods)
                     {
                         // Apply the declared type exactly as a local `val` does:
                         // an imported `val K: u64 = 0xFFFF_8000_0000_0000` must
@@ -514,6 +525,44 @@ pub(super) fn process_imports_and_assignments(
                             // other modules (where the function's captured_env may not be used).
                             record_owned_global(module_path, &name, &value);
                         }
+                    }
+                } else if let (Some(Type::Array { element, size: Some(size_expr) }), Some(name)) = (
+                    match (&stmt.ty, &stmt.pattern) {
+                        (Some(ty), _) => Some(ty),
+                        (None, Pattern::Typed { ty, .. }) => Some(ty),
+                        _ => None,
+                    },
+                    get_pattern_name(&stmt.pattern),
+                ) {
+                    // `var table: [T; N]` with no initializer is zero-filled
+                    // module state. Without a binding the name is invisible to
+                    // the module's own functions ("variable not found"), see
+                    // interpreter_fd_ownership_private_module_globals_not_linked_2026-08-12.
+                    if let Ok(Value::Int(n)) =
+                        evaluate_expr(&size_expr, env, local_functions, local_classes, local_enums, impl_methods)
+                    {
+                        if n >= 0 {
+                            let zero = crate::interpreter::fixed_array_zero_element(element.as_ref());
+                            let value = Value::FixedSizeArray {
+                                size: n as usize,
+                                data: vec![zero; n as usize],
+                            };
+                            env.insert(name.clone(), value.clone());
+                            exports.insert(name.clone(), value.clone());
+                            record_owned_global(module_path, &name, &value);
+                        }
+                    }
+                } else if let Some(name) = get_pattern_name(&stmt.pattern) {
+                    // `var g: SomeEnum` / `var g: SomeClass` with no initializer
+                    // (owner decision 2026-11-09): first variant / default
+                    // construction, never nil. Classes/enums were registered in
+                    // the first pass, so later-declared and imported types resolve.
+                    if let Some(value) = crate::interpreter::node_exec_noinit_named_type_default_decl(
+                        stmt, env, local_functions, local_classes, local_enums, impl_methods,
+                    ) {
+                        env.insert(name.clone(), value.clone());
+                        exports.insert(name.clone(), value.clone());
+                        record_owned_global(module_path, &name, &value);
                     }
                 }
             }
@@ -565,6 +614,7 @@ pub(super) fn process_imports_and_assignments(
                 }
             }
             Node::ExportUseStmt(export_stmt) => {
+                init_classes_cache = None;
                 process_export_stmt(
                     export_stmt,
                     module_path,
@@ -576,10 +626,70 @@ pub(super) fn process_imports_and_assignments(
                     bare_exports,
                 )?;
             }
+            Node::InternalExportDecl(decl) => {
+                let names_to_export: Vec<(String, String)> = decl
+                    .symbols
+                    .iter()
+                    .map(|name| (name.clone(), name.clone()))
+                    .collect();
+                if !names_to_export.is_empty() {
+                    bare_exports.push(names_to_export);
+                }
+            }
             _ => {}
         }
     }
+    // Third step: resolve `type X = Y` aliases once imports are bound, so that
+    // `X.new()` / `X.static()` dispatch to the target type instead of seeing nil
+    // (bug type_alias_static_dispatch_unresolved_2026-08-04). Done after the
+    // loop because the target may be imported or declared after the alias.
+    for item in items.iter() {
+        if let Node::TypeAlias(t) = item {
+            let target = match &t.ty {
+                Type::Simple(name) => Some(name.as_str()),
+                Type::Generic { name, .. } => Some(name.as_str()),
+                _ => None,
+            };
+            let Some(target) = target else { continue };
+            let resolved = if local_classes.contains_key(target) || global_classes.contains_key(target) {
+                Some(Value::Constructor {
+                    class_name: target.to_string(),
+                })
+            } else if local_enums.contains_key(target) || global_enums.contains_key(target) {
+                Some(Value::EnumType {
+                    enum_name: target.to_string(),
+                })
+            } else {
+                None
+            };
+            if let Some(value) = resolved {
+                exports.insert(t.name.clone(), value.clone());
+                env.insert(t.name.clone(), value);
+            }
+        }
+    }
     Ok(())
+}
+
+/// Class map for evaluating a module-level initializer.
+///
+/// `local_classes` holds only this module's own classes, but an initializer
+/// such as `var g: Mutex = mutex_new(0)` runs an imported function whose body
+/// constructs ITS module's class (`Mutex(...)`). With only the local map that
+/// call failed ("function `Mutex` not found"), the error was swallowed and the
+/// var stayed unbound, so the module's own functions later reported
+/// "variable not found" (interp_transitive_import_private_globals_not_linked_2026-11-23).
+/// Local classes win over same-named imported ones.
+fn init_classes_view<'a>(
+    cache: &'a mut Option<HashMap<String, Arc<ClassDef>>>,
+    local_classes: &HashMap<String, Arc<ClassDef>>,
+    global_classes: &HashMap<String, Arc<ClassDef>>,
+) -> &'a mut HashMap<String, Arc<ClassDef>> {
+    cache.get_or_insert_with(|| {
+        let mut merged = global_classes.clone();
+        merged.extend(local_classes.iter().map(|(k, v)| (k.clone(), Arc::clone(v))));
+        merged
+    })
 }
 
 /// Process a use statement (import)
@@ -715,9 +825,10 @@ fn process_use_stmt(
                 }
             }
         }
+        Err(e) if super::super::module_loader::is_unprovided_use_error(&e) => return Err(e),
         Err(_e) => {
             // Module loading failed - use empty dict
-            env.insert(binding_name.clone(), Value::Dict(Arc::new(HashMap::new())));
+            env.insert(binding_name.clone(), Value::Dict(Arc::new(crate::value::DictMap::new())));
         }
     }
     Ok(())
@@ -753,21 +864,23 @@ fn process_export_stmt(
         bare_exports.push(names_to_export);
     } else {
         // Re-export: export X, Y from module
-        if let Ok((source_dict, source_owner)) =
-            load_export_source(export_stmt, module_path, global_functions, global_classes, global_enums)
-        {
+        let loaded = match load_export_source(export_stmt, module_path, global_functions, global_classes, global_enums) {
+            Err(e) if super::super::module_loader::is_unprovided_use_error(&e) => return Err(e),
+            other => other,
+        };
+        if let Ok((source_dict, source_owner)) = loaded {
             let source_exports = module_table_for(&source_dict);
             match &export_stmt.target {
                 ImportTarget::Single(name) => {
                     if let Some(value) = source_exports.get(name) {
-                        record_import_binding(module_path, name, source_owner.as_ref(), name);
+                        record_reexport_binding(module_path, name, source_owner.as_ref(), name, global_functions);
                         exports.insert(name.clone(), value.clone());
                         env.insert(name.clone(), value.clone());
                     }
                 }
                 ImportTarget::Aliased { name, alias } => {
                     if let Some(value) = source_exports.get(name) {
-                        record_import_binding(module_path, alias, source_owner.as_ref(), name);
+                        record_reexport_binding(module_path, alias, source_owner.as_ref(), name, global_functions);
                         exports.insert(alias.clone(), value.clone());
                         env.insert(alias.clone(), value.clone());
                     }
@@ -784,14 +897,14 @@ fn process_export_stmt(
                         match item {
                             ImportTarget::Single(name) => {
                                 if let Some(value) = source_exports.get(name) {
-                                    record_import_binding(module_path, name, source_owner.as_ref(), name);
+                                    record_reexport_binding(module_path, name, source_owner.as_ref(), name, global_functions);
                                     exports.insert(name.clone(), value.clone());
                                     env.insert(name.clone(), value.clone());
                                 }
                             }
                             ImportTarget::Aliased { name, alias } => {
                                 if let Some(value) = source_exports.get(name) {
-                                    record_import_binding(module_path, alias, source_owner.as_ref(), name);
+                                    record_reexport_binding(module_path, alias, source_owner.as_ref(), name, global_functions);
                                     exports.insert(alias.clone(), value.clone());
                                     env.insert(alias.clone(), value.clone());
                                 }
@@ -951,4 +1064,81 @@ pub(super) fn process_bare_exports(
         }
     }
     trace!(total_exports = exports.retained_len(), "Finished processing bare exports");
+}
+
+/// Staged diagnostic for `enum_bare_name_collision_registry_2026-08-01` /
+/// `seed_enum_variant_bare_name_last_registration_wins_2026_10_19`: enum lookup
+/// is keyed by bare name, so a second enum with the same name but a different
+/// variant set silently replaces the first. Stage 1 only WARNS (no rejection).
+/// Returns true when a warning was emitted.
+pub(crate) fn warn_on_ambiguous_bare_enum_name(
+    previous: Option<&Arc<simple_parser::ast::EnumDef>>,
+    new_def: &simple_parser::ast::EnumDef,
+) -> bool {
+    let Some(prev) = previous else { return false };
+    let names = |d: &simple_parser::ast::EnumDef| -> Vec<String> {
+        let mut v: Vec<String> = d.variants.iter().map(|x| x.name.clone()).collect();
+        v.sort();
+        v
+    };
+    if names(prev) == names(new_def) {
+        return false;
+    }
+    if simple_common::tool_closure_quiet::tool_closure_quiet() {
+        // The colliding enums belong to the lint tool's own closure.
+        return true;
+    }
+    eprintln!(
+        "warning[enum-bare-name-ambiguous]: enum `{}` is registered again with a different variant set \
+         ([{}] replaces [{}]); enum lookup is keyed by bare name and the last registration wins. \
+         Rename one enum (see seed_enum_variant_bare_name_last_registration_wins_2026_10_19)",
+        new_def.name,
+        names(new_def).join(", "),
+        names(prev).join(", ")
+    );
+    true
+}
+
+#[cfg(test)]
+mod enum_bare_name_warning_tests {
+    use super::*;
+    use simple_parser::ast::EnumDef;
+
+    fn parse_enum(src: &str) -> Arc<EnumDef> {
+        let mut parser = simple_parser::Parser::new(src);
+        let module = parser.parse().expect("parse");
+        for n in module.items {
+            if let Node::Enum(e) = n {
+                return Arc::new(e);
+            }
+        }
+        panic!("no enum in source");
+    }
+
+    #[test]
+    fn warns_when_same_name_has_different_variants() {
+        let a = parse_enum("enum ByteOrder:
+    NotApplicable
+    LittleEndian
+");
+        let b = parse_enum("enum ByteOrder:
+    LittleEndian
+    Native
+");
+        assert!(warn_on_ambiguous_bare_enum_name(Some(&a), &b));
+    }
+
+    #[test]
+    fn silent_for_first_registration_and_identical_redefinition() {
+        let a = parse_enum("enum E:
+    A
+    B
+");
+        let b = parse_enum("enum E:
+    B
+    A
+");
+        assert!(!warn_on_ambiguous_bare_enum_name(None, &a));
+        assert!(!warn_on_ambiguous_bare_enum_name(Some(&a), &b));
+    }
 }

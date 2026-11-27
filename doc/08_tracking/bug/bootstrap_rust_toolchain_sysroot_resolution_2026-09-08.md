@@ -223,3 +223,40 @@ matrix are not yet recorded, and this row remains proof-pending. The existing
 private Rust→Stage 2 contract test also currently fails before its fixture on a
 stale wrapper source-order assertion; that is a separate handoff-test defect,
 not evidence against sysroot resolution.
+
+## 2026-11-10 status: focused verification PASS; live bootstrap advance still needs grant
+
+P1 verification lane `p1verify-scripts-20261110` (worktree
+`simple-p1verify-scripts-20261110`, branch `work/p1verify-scripts-20261110`,
+HEAD af1fbbfc125e on the release/1.0.0 line) re-ran the retained
+verification against current source, each command once:
+
+- `sh -n` on `scripts/check/lib/bootstrap-stage3/authority.shs` and the
+  test: syntax OK.
+- `sh test/01_unit/scripts/bootstrap_rust_toolchain_resolution_test.shs`:
+  **PASS** (exit 0, ~54s, Git Bash on Windows). Covers POSIX / native
+  (`Z:\...`) / forward-slash / CRLF sysroot equivalence, the spaced long
+  toolchain-path fixture, exact `rustc.exe`/`cargo.exe` identity, legacy and
+  modern (no `default_host_tuple`) rustup settings schemas, MSVC and ARM64
+  host tuples, the global-channel-mismatch
+  `settings-host=channel-toolchain-scan` path, duplicate/conflicting/missing
+  settings-key rejections, clean-environment launch (no RUSTFLAGS/
+  RUSTUP_TOOLCHAIN leak), bounded two-attempt retry for both rustc sysroot
+  and version queries, missing binaries, relative PATH entries, and
+  relative/multiline sysroot rejection. This supersedes the stale 2026-09-08
+  `build/native_probe/astra_toolchain/` live-probe receipt, which is not
+  present in this worktree (build artifacts are not shared between
+  worktrees).
+
+Verdict for the checkable scope: **VERIFIED** (1 of 6 cycles used; no fix
+required). The doc's unblock condition — a changed bootstrap candidate
+advancing past Rust authority resolution — requires a live bootstrap run,
+which the lane rules forbid launching. Recorded as BLOCKED-needs-grant with
+the exact command in `build/review/p1verify-scripts-20261110.sdn`:
+
+    sh scripts/bootstrap/run-phase1-local.shs --output=build/bootstrap
+
+Per this doc, the parent bootstrap owner must also confirm no live writer
+owns that output and that the config/schema + sourced-shell lookup oracle
+passes before any new attempt. Stage 2 admission remains a separate owned
+gate; nothing here claims it.

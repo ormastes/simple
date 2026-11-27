@@ -1,7 +1,7 @@
 # Bug: `EnumName.assoc_fn()` is never called on the JIT — returns a bogus value, no error
 
 - **Date:** 2026-07-28
-- **Status:** open
+- **Status:** RESOLVED — verified fixed 2026-11-25 on the pinned seed (see note below)
 - **Severity:** critical (silent wrong values codebase-wide on the default engine; engines disagree)
 - **Found by:** lane S3 while diagnosing "SdnValue insert does not persist"; reproduced independently by the coordinator
 
@@ -120,3 +120,29 @@ sources so it matches HEAD.
    re-check them; assume vacuous until re-verified.
 3. Fix the interpreter's `case` binding so an enum payload is not deep-copied,
    or document that payload mutation must be written back by the caller.
+
+## 2026-11-25 — verified FIXED on release/1.0.0 (pinned seed v1.0.0-rc.1)
+
+All three behaviours re-probed against `bin/simple.exe` (Windows seed,
+v1.0.0-rc.1):
+
+1. **Defined `static fn` on an enum, JIT:** the 12-line repro
+   (`E1.make() -> E1.B`, `match`) now prints `got B` under the default JIT
+   (was `got NOTHING`). Interpreter also `got B`.
+2. **Undefined method, JIT:** `E1.totally_undefined()` is no longer a silent
+   fabricated value. The JIT now fails lowering with
+   `unknown variant or method 'totally_undefined' on enum E1 (declared
+   variants: A, B)`, demotes, and the interpreter raises the semantic error —
+   exactly the "next step 1" (hard error instead of silent fall-through) this
+   doc asked for.
+3. **AOT artifact:** `simple compile enum_eq.spl -o enum_eq.smf` then running
+   the `.smf` prints `EQ_B_OK` (was `EQ_NEITHER`).
+
+Source-level confirmation: the `unknown variant or method` diagnostic now
+exists in the MIR call-lowering path
+(`src/compiler_rust/compiler/src/mir/lower/lowering_expr_call.rs`, plus
+`hir/lower/module_lowering/flatten_struct_owner.rs`,
+`interpreter/expr/calls.rs`, `mir/lower/lowering_expr_ident.rs`), the same
+file this doc recorded as in-flight on 2026-07-28. The remaining "next step 3"
+(interpreter payload deep-copy) is tracked separately in
+`enum_payload_dict_copied_on_function_return_2026-07-28.md`.

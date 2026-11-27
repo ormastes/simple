@@ -1,0 +1,74 @@
+# Presentation decoder only. Container transport retains raw binary chunks;
+# terminal text replaces malformed UTF8 and holds incomplete scalar prefixes.
+use std.common.contracts.container.primary_connection_v2.ContainerTerminalChunkV2
+use std.common.encoding.utf8.{utf8_decode_one, text_from_codepoints}
+
+pub struct ContainerTerminalTextStateV2:
+    stdout_pending: [u8] = []
+    stderr_pending: [u8] = []
+    tty_pending: [u8] = []
+    finished: bool = false
+
+pub struct ContainerTerminalTextTurnV2:
+    state: ContainerTerminalTextStateV2
+    text: text
+    native_bytes: i64
+
+fn incomplete_prefix(bytes: [i64], offset: i64) -> bool:
+    val lead = bytes[offset]
+    val needed = if lead >= 194 and lead <= 223: 2 elif lead >= 224 and lead <= 239: 3 elif lead >= 240 and lead <= 244: 4 else: 1
+    val available = bytes.len() - offset
+    if needed == 1 or available >= needed: return false
+    for index in 1..available:
+        val byte = bytes[offset + index]
+        if byte < 128 or byte > 191: return false
+        if index == 1 and ((lead == 224 and byte < 160) or (lead == 237 and byte > 159) or
+                (lead == 240 and byte < 144) or (lead == 244 and byte > 143)): return false
+    true
+
+fn decode_chunk(pending: [u8], body: [u8], eof: bool) -> Result<(text, [u8]), text>:
+    if pending.len() > 3 or body.len() > 65536: return Err("terminal-text-buffer-bound")
+    var bytes: [i64] = [for byte in pending: byte as i64]
+    for byte in body: bytes.push(byte as i64)
+    var codepoints: [i64] = []
+    var offset: i64 = 0
+    while offset < bytes.len():
+        if not eof and incomplete_prefix(bytes, offset): break
+        val decoded = utf8_decode_one(bytes, offset)
+        if decoded.len() != 2 or decoded[1] <= 0 or decoded[1] > bytes.len() - offset:
+            return Err("terminal-text-decoder-progress")
+        codepoints.push(decoded[0])
+        offset = offset + decoded[1]
+    val rest: [u8] = [for index in offset..bytes.len(): bytes[index] as u8]
+    if rest.len() > 3: return Err("terminal-text-prefix-bound")
+    Ok((text_from_codepoints(codepoints), rest))
+
+pub fn container_terminal_text_feed_v2(state: ContainerTerminalTextStateV2,
+        chunks: [ContainerTerminalChunkV2], eof: bool) -> Result<ContainerTerminalTextTurnV2, text>:
+    if state.finished: return Err("terminal-text-after-eof")
+    if chunks.len() > 1024: return Err("terminal-text-chunk-bound")
+    if state.stdout_pending.len() > 3 or state.stderr_pending.len() > 3 or state.tty_pending.len() > 3:
+        return Err("terminal-text-state-bound")
+    var retained = state
+    var text = ""
+    var native_bytes: i64 = 0
+    for chunk in chunks:
+        if chunk.stream != "stdout" and chunk.stream != "stderr" and chunk.stream != "tty":
+            return Err("terminal-text-stream")
+        if chunk.bytes.len() > 65536 - native_bytes: return Err("terminal-text-turn-bound")
+        native_bytes = native_bytes + chunk.bytes.len()
+        val pending = if chunk.stream == "stdout": retained.stdout_pending elif chunk.stream == "stderr": retained.stderr_pending else: retained.tty_pending
+        val decoded = decode_chunk(pending, chunk.bytes, false)?
+        text = text + decoded.0
+        if chunk.stream == "stdout": retained.stdout_pending = decoded.1
+        elif chunk.stream == "stderr": retained.stderr_pending = decoded.1
+        else: retained.tty_pending = decoded.1
+    if eof:
+        for pending in [retained.stdout_pending, retained.stderr_pending, retained.tty_pending]:
+            val decoded = decode_chunk(pending, [], true)?
+            text = text + decoded.0
+        retained.stdout_pending = []
+        retained.stderr_pending = []
+        retained.tty_pending = []
+        retained.finished = true
+    Ok(ContainerTerminalTextTurnV2(state: retained, text: text, native_bytes: native_bytes))

@@ -1,0 +1,269 @@
+"""
+## Purpose and audience
+Purpose: Pin CSS generated-content boxes (`::before` / `::after`) against
+Chrome 159: a box exists only when the cascaded `content` is not
+`none`/`normal`, it takes its own cascaded style from the pseudo rule and
+inherits from its originating element, it paints in tree order (FIRST child
+for `::before`, LAST for `::after`), and it stays out of every DOM-facing
+surface (arena indices / structural ids, `:first-child`, `:last-child`,
+`:nth-child`, `:empty`, `+`, the querySelectorAll geometry mirror, hit
+targets).
+Audience: browser-engine cascade, layout and paint maintainers.
+
+Chrome oracle (Chrome 159 headless, `--window-size=400,300` unless noted,
+pixels read from the screenshot, `elementFromPoint` / getBoundingClientRect
+through a load script):
+
+| case | markup | Chrome |
+|------|--------|--------|
+| A | `body::before{content:'';display:block;height:50px;background:red}` + 20 px blue div | (5,5) and (5,45) red, (5,55) (5,65) blue, (5,75) white |
+| B (480x300) | window-fixture overlay: `body::before{content:'';position:fixed;inset:0;` 3 radial gradients `;opacity:0.9;z-index:0}` on `#1e1e2e` | (5,5)=34,34,50 (60,5)=41,41,56 (60,40)=44,44,59 (100,60)=49,49,64 (420,5)=37,37,53 (96,60)=49,49,64 (360,255)=42,46,68 (240,290)=30,30,46 (240,150)=30,30,46 |
+| C | `div::before{content:"WWW"}div::after{content:"MM"}` + `<span s>a</span><span t>b</span>` | s.x=44.03, t.x=51.14, div h=18; `children.length`=2, textContent "ab" |
+| D | as A with `content:none`, `content:normal`, or no `content` | no box: (5,5) (5,15) blue, (5,25) white |
+| E | `body::before/::after` 10 px green blocks around `div,div,p,div.a,div.b`; `p::before/::after{content:''}`, `.a::after{content:''}` | first-child red at 15, nth-child(2) yellow at 35, p:empty lime at 55, .a gray at 65, .a+.b cyan at 85, ::after green at 105 |
+| F | `.h::before` absolute 100x100 red z-index:0 over an in-flow blue child; `.h2` same but the child is `position:relative` | (10,10) red, (10,110) blue |
+| G | `.host::before{content:'';position:fixed;inset:0;z-index:0}` over `.host` 300x40 and a button at y 60..90 | pointer-events auto: (10,70) (350,10) (10,10) -> .host; none: (10,70) -> button, (10,10) -> .host, (350,10) -> body |
+| H | default body margin, 200x40 parent; fixed `top/bottom/left/right:0` red, fixed `top:10;bottom:10;height:50;left:5;right:5;width:60` blue | red covers the viewport (1,1) (395,295) (250,150); blue 5,10..64,59 |
+| S | `<div><p>b</p><span></span></div><div><p>b</p></div>` (also with `.e::after{content:''}`) | first div y=16 h=18, second y=50 |
+| R (160 wide) | `body::before{content:'';position:fixed;inset:0;background:rgb(200,0,0);opacity:0.5;z-index:0}` + later `.app{position:relative;margin:20px;100x50;background:rgb(0,0,200)}` | (5,5) (150,90) = 115,15,23; (50,40) (118,68) = 0,0,200: the later relative sibling paints over the overlay |
+| N (400x300) | nested glass (outer `rgba(255,255,255,0.72)` 300x220 at 20,20, inner 200x120, both `backdrop-filter:blur(8px)`) with `body::before{content:'';position:fixed;inset:0;background:rgb(200,0,0);opacity:0.5;z-index:0}` | inner glass (160,120)=252,250,250 (245,237,238 without the outer backdrop root); overlay (380,280) and (5,5)=122,23,34, outer glass (40,200)=218,190,193 |
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels,
+    simple_web_layout_hit_test_target_at_time
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_geometry.{
+    simple_web_layout_element_geometry_lines
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_html, build_child_index, html_tree_order}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{vulkan_readback_count}
+
+val HEAD = "<!DOCTYPE html><html><head><style>html,body{{margin:0}}"
+val BLUE_BODY = "</style></head><body><div style='height:20px;background:blue'></div></body></html>"
+
+fn page(css: text, body: text) -> text:
+    HEAD + css + "</style></head><body>" + body + "</body></html>"
+
+fn block_page(content_decl: text) -> text:
+    HEAD + "body::before{{" + content_decl + "display:block;height:50px;background:red}}" + BLUE_BODY
+
+fn overlay_page() -> text:
+    HEAD + "body{{min-height:100vh;background:#1e1e2e}}body::before{{content:'';position:fixed;inset:0;background:radial-gradient(circle at 20% 20%, rgba(255,255,255,0.10), transparent 30%), radial-gradient(circle at 80% 0%, rgba(255,255,255,0.05), transparent 24%), radial-gradient(circle at 75% 85%, rgba(137,180,250,0.12), transparent 28%);opacity:0.9;z-index:0}}</style></head><body></body></html>"
+
+fn glass_overlay_page() -> text:
+    "<!DOCTYPE html><html><head><style>body::before{{content:'';position:fixed;inset:0;background:rgb(200,0,0);opacity:0.5;z-index:0}}</style></head><body style='margin:0;background:#2d2f45'><div style='position:absolute;left:20px;top:20px;width:300px;height:220px;background:rgba(255,255,255,0.72);backdrop-filter:blur(8px)'><div style='position:absolute;left:40px;top:40px;width:200px;height:120px;background:rgba(255,255,255,0.72);backdrop-filter:blur(8px)'></div></div></body></html>"
+
+fn stripes_page() -> text:
+    page(
+        "body::before{{content:'';display:block;height:10px;background:green}}body::after{{content:'';display:block;height:10px;background:green}}div{{height:20px;background:#ccc}}div:first-child{{background:red}}div:last-child{{background:blue}}div:nth-child(2){{background:yellow}}p{{margin:0;height:10px;background:#888}}p:empty{{background:lime}}p::before{{content:''}}p::after{{content:''}}.a::after{{content:''}}.a+.b{{background:#0ff}}",
+        "<div></div><div></div><p></p><div class='a'></div><div class='b'></div>"
+    )
+
+fn order_page() -> text:
+    page(
+        ".h{{width:200px}}.h::before{{content:'';position:absolute;left:0;top:0;width:100px;height:100px;background:red;z-index:0}}.h2{{position:relative;width:200px}}.h2::before{{content:'';position:absolute;left:0;top:0;width:100px;height:100px;background:red;z-index:0}}",
+        "<div class='h'><div style='height:100px;background:blue'></div></div><div class='h2'><div style='position:relative;height:100px;background:blue'></div></div>"
+    )
+
+fn hit_page(pe: text) -> text:
+    page(
+        ".host{{height:40px;width:300px;background:#eee}}.host::before{{content:'';position:fixed;inset:0;z-index:0;pointer-events:" + pe + "}}button{{display:block;margin-top:20px;width:100px;height:30px}}",
+        "<div class='host'></div><button id='b'>x</button>"
+    )
+
+fn text_page(rule: text) -> text:
+    page(rule, "<div><span id='s'>a</span><span id='t'>b</span></div>")
+
+# Channel mismatches (beyond +-2) against `want` = x, y, r, g, b per point.
+fn mismatches(px: [u32], vw: i32, want: [i32]) -> i32:
+    if px.len() < vw * 300:
+        return -1
+    var bad = 0
+    var i = 0
+    while i < want.len():
+        val p = px[want[i + 1] * vw + want[i]]
+        var c = 0
+        while c < 3:
+            val d = ((p >> ((16 - c * 8) as u32)) & 0xFFu32) as i32 - want[i + 2 + c]
+            if d > 2 or d < -2:
+                bad = bad + 1
+            c = c + 1
+        i = i + 5
+    bad
+
+fn raster(html: text, vw: i32) -> [u32]:
+    simple_web_layout_render_html_software_pixels(html, vw, 300)
+
+fn simd(html: text, vw: i32) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(html, vw, 300, 1, "cpu_simd")
+
+# GEOM line field `k` (0 = "GEOM", 1 path, 2 tag, 3 x, 4 y, 5 w, 6 h) of the
+# element whose id-less path is `path`.
+fn geom_field(lines: [text], path: text, k: i32) -> text:
+    for l in lines:
+        val parts = l.split("|")
+        if parts.len() > 6 and parts[1] == path:
+            return parts[k]
+    "missing"
+
+val A_WANT = [5, 5, 255, 0, 0, 5, 45, 255, 0, 0, 5, 55, 0, 0, 255, 5, 65, 0, 0, 255, 5, 75, 255, 255, 255]
+val D_WANT = [5, 5, 0, 0, 255, 5, 15, 0, 0, 255, 5, 25, 255, 255, 255]
+val B_WANT = [5, 5, 34, 34, 50, 60, 5, 41, 41, 56, 60, 40, 44, 44, 59, 100, 60, 49, 49, 64, 420, 5, 37, 37, 53, 96, 60, 49, 49, 64, 360, 255, 42, 46, 68, 240, 290, 30, 30, 46, 240, 150, 30, 30, 46]
+val E_WANT = [5, 5, 0, 128, 0, 5, 15, 255, 0, 0, 5, 35, 255, 255, 0, 5, 55, 0, 255, 0, 5, 65, 204, 204, 204, 5, 85, 0, 255, 255, 5, 105, 0, 128, 0]
+val N_GLASS_WANT = [160, 120, 252, 250, 250]
+val N_OVERLAY_WANT = [380, 280, 122, 23, 34, 5, 5, 122, 23, 34, 40, 200, 218, 190, 193]
+val F_WANT = [10, 10, 255, 0, 0, 150, 50, 0, 0, 255, 10, 110, 0, 0, 255, 150, 150, 0, 0, 255]
+
+describe "::before / ::after generated content boxes (Chrome 159)":
+    it "raster: content:'' block ::before is a first-child box above the in-flow div":
+        expect(mismatches(raster(block_page("content:'';"), 400), 400, A_WANT)).to_equal(0)
+
+    it "cpu_simd: content:'' block ::before is a first-child box above the in-flow div":
+        expect(mismatches(simd(block_page("content:'';"), 400), 400, A_WANT)).to_equal(0)
+
+    it "raster: no box when content is none, normal or absent":
+        expect(mismatches(raster(block_page("content:none;"), 400), 400, D_WANT)).to_equal(0)
+        expect(mismatches(raster(block_page("content:normal;"), 400), 400, D_WANT)).to_equal(0)
+        expect(mismatches(raster(block_page(""), 400), 400, D_WANT)).to_equal(0)
+
+    it "cpu_simd: no box when content is none, normal or absent":
+        expect(mismatches(simd(block_page("content:none;"), 400), 400, D_WANT)).to_equal(0)
+        expect(mismatches(simd(block_page("content:normal;"), 400), 400, D_WANT)).to_equal(0)
+        expect(mismatches(simd(block_page(""), 400), 400, D_WANT)).to_equal(0)
+
+    it "raster: fixed inset:0 radial-gradient overlay matches Chrome":
+        expect(mismatches(raster(overlay_page(), 480), 480, B_WANT)).to_equal(0)
+
+    it "cpu_simd: fixed inset:0 radial-gradient overlay matches Chrome":
+        expect(mismatches(simd(overlay_page(), 480), 480, B_WANT)).to_equal(0)
+
+    it "vulkan: the overlay renders on the device and matches Chrome":
+        val readbacks = vulkan_readback_count()
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(overlay_page(), 480, 300, 1, "vulkan")
+        expect(vulkan_readback_count() - readbacks >= 1).to_equal(true)
+        expect(mismatches(px, 480, B_WANT)).to_equal(0)
+
+    it "cpu_simd: a fixed opacity:0.5 ::before overlay keeps the nested glass on the Backdrop Root path":
+        expect(mismatches(simd(glass_overlay_page(), 400), 400, N_GLASS_WANT)).to_equal(0)
+
+    it "vulkan: a fixed opacity:0.5 ::before overlay keeps the nested glass on the Backdrop Root path":
+        val readbacks = vulkan_readback_count()
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(glass_overlay_page(), 400, 300, 1, "vulkan")
+        expect(vulkan_readback_count() - readbacks >= 1).to_equal(true)
+        expect(mismatches(px, 400, N_GLASS_WANT)).to_equal(0)
+
+    it "cpu_simd: the opacity:0.5 overlay beside a glass group keeps its opacity":
+        expect(mismatches(simd(glass_overlay_page(), 400), 400, N_OVERLAY_WANT)).to_equal(0)
+
+    it "vulkan: the opacity:0.5 overlay beside a glass group keeps its opacity":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(glass_overlay_page(), 400, 300, 1, "vulkan")
+        expect(mismatches(px, 400, N_OVERLAY_WANT)).to_equal(0)
+
+    it "string content generates inline text before and after the children":
+        val lines = simple_web_layout_element_geometry_lines(text_page("div::before{{content:\"WWW\"}}div::after{{content:\"MM\"}}"), 400, 300)
+        val plain = simple_web_layout_element_geometry_lines(text_page(""), 400, 300)
+        # Chrome: s.x = 44.03 (after "WWW"), t.x = 51.14, div height 18.
+        val sx = geom_field(lines, "path:0/0", 3).to_int()
+        expect(sx >= 43 and sx <= 45).to_equal(true)
+        val tx = geom_field(lines, "path:0/1", 3).to_int()
+        expect(tx >= 50 and tx <= 52).to_equal(true)
+        expect(geom_field(lines, "path:0", 6)).to_equal("18")
+        # Without the rules the spans start at the line start.
+        expect(geom_field(plain, "path:0/0", 3)).to_equal("0")
+
+    it "pseudo boxes leave :first-child, :last-child, :nth-child, :empty and + untouched (raster)":
+        expect(mismatches(raster(stripes_page(), 400), 400, E_WANT)).to_equal(0)
+
+    it "pseudo boxes leave :first-child, :last-child, :nth-child, :empty and + untouched (cpu_simd)":
+        expect(mismatches(simd(stripes_page(), 400), 400, E_WANT)).to_equal(0)
+
+    it "real arena indices (structural ids) and the querySelectorAll geometry mirror do not shift":
+        val css = "body::before{{content:''}}div::before{{content:'x'}}div::after{{content:''}}"
+        val body = "<div id='a'>a</div><div id='b'><p>b</p></div>"
+        val with_rules = parse_html(page(css, body))
+        val without = parse_html(page("", body))
+        expect(with_rules.len() > without.len()).to_equal(true)
+        var same = 0
+        var i = 0
+        while i < without.len():
+            if with_rules[i].tag == without[i].tag and with_rules[i].parent == without[i].parent:
+                same = same + 1
+            i = i + 1
+        expect(same).to_equal(without.len() as i32)
+        # Every generated node sits after the real arena.
+        var generated_ok = true
+        var g = without.len()
+        while g < with_rules.len():
+            val tag = with_rules[g].tag
+            val parent_tag = with_rules[with_rules[g].parent].tag
+            if not (tag.starts_with("::") or (tag == "#text" and parent_tag.starts_with("::"))):
+                generated_ok = false
+            g = g + 1
+        expect(generated_ok).to_equal(true)
+        # Element enumeration (Chrome's querySelectorAll('*') walk) is unchanged
+        # for zero-size generated boxes.
+        val sized_css = "body::before{{content:''}}div::after{{content:''}}"
+        expect(simple_web_layout_element_geometry_lines(page(sized_css, body), 400, 300)).to_equal(simple_web_layout_element_geometry_lines(page("", body), 400, 300))
+
+    it "no pseudo node is generated without a ::before/::after content rule":
+        val body = "<div id='a'>a</div>"
+        expect(parse_html(page("div{{color:red}}", body)).len()).to_equal(parse_html(page("", body)).len())
+        expect(parse_html(page("div::before{{color:red}}", body)).len()).to_equal(parse_html(page("", body)).len())
+
+    it "a legacy single-colon div:before rule styles the pseudo box, not the div":
+        val html = page("div:before{{content:'';display:block;height:30px;background:red}}div{{background:blue;height:60px}}", "<div></div>")
+        expect(mismatches(raster(html, 400), 400, [5, 5, 255, 0, 0, 5, 45, 0, 0, 255])).to_equal(0)
+
+    it "paint order: positioned z-index:0 ::before covers a non-positioned child, a later positioned child covers it (cpu_simd)":
+        expect(mismatches(simd(order_page(), 400), 400, F_WANT)).to_equal(0)
+
+    it "paint order: a later relative z-auto sibling paints over a fixed z-index:0 ::before overlay (raster)":
+        val html = page("body{{background:rgb(30,30,46)}}body::before{{content:'';position:fixed;inset:0;background:rgb(200,0,0);opacity:0.5;z-index:0}}.app{{position:relative;margin:20px;width:100px;height:50px;background:rgb(0,0,200)}}", "<div class='app'></div>")
+        expect(mismatches(raster(html, 160), 160, [5, 5, 115, 15, 23, 50, 40, 0, 0, 200, 118, 68, 0, 0, 200, 150, 90, 115, 15, 23])).to_equal(0)
+
+    it "the paint tree order covers every node, generated ones included":
+        val nodes = parse_html("text before<!-- c --><!DOCTYPE html><html><head><style>p::before{{content:'x'}}</style></head><body><p>a</p></body></html>after")
+        val order = html_tree_order(nodes, build_child_index(nodes))
+        var seen: [bool] = [false; nodes.len()]
+        for v in order:
+            seen[v] = true
+        var missing = 0
+        for b in seen:
+            if not b:
+                missing = missing + 1
+        expect(order.len()).to_equal(nodes.len())
+        expect(missing).to_equal(0)
+
+    it "position:fixed resolves insets against the viewport inside a narrow, margined parent (cpu_simd)":
+        # Chrome: the fixed red box covers the whole viewport; the blue one
+        # (top+bottom+height, left+right+width) sits at 5,10 60x50: top/left win.
+        val html = "<!DOCTYPE html><html><head><style>.w{{height:40px;width:200px}}</style></head><body><div class='w'><div style='position:fixed;top:0;bottom:0;left:0;right:0;background:red'></div><div style='position:fixed;top:10px;bottom:10px;height:50px;left:5px;right:5px;width:60px;background:blue'></div></div></body></html>"
+        expect(mismatches(simd(html, 400), 400, [1, 1, 255, 0, 0, 395, 295, 255, 0, 0, 5, 10, 0, 0, 255, 64, 59, 0, 0, 255, 65, 60, 255, 0, 0, 250, 150, 255, 0, 0])).to_equal(0)
+
+    it "an empty inline after a block adds no line and lets the margin collapse through":
+        # Chrome: `<div><p>b</p><span></span></div>` is 18 tall at y=16 and the
+        # next div starts at 50, exactly as without the span; so is an empty
+        # `content:''` ::after.
+        val lines = simple_web_layout_element_geometry_lines(page("", "<div><p>b</p><span></span></div><div><p>b</p></div>"), 400, 300)
+        expect(geom_field(lines, "path:0", 4)).to_equal("16")
+        expect(geom_field(lines, "path:0", 6)).to_equal("18")
+        expect(geom_field(lines, "path:1", 4)).to_equal("50")
+        val gen = simple_web_layout_element_geometry_lines(page(".e::after{{content:''}}", "<div class='e'><p>b</p></div><div><p>b</p></div>"), 400, 300)
+        expect(geom_field(gen, "path:0", 6)).to_equal("18")
+        expect(geom_field(gen, "path:1", 4)).to_equal("50")
+
+    it "hit testing: an overlay without pointer-events:none targets its originating element":
+        val html = hit_page("auto")
+        expect(simple_web_layout_hit_test_target_at_time(html, 400, 300, 10, 70, -1)).to_equal("path:0")
+        expect(simple_web_layout_hit_test_target_at_time(html, 400, 300, 350, 10, -1)).to_equal("path:0")
+        expect(simple_web_layout_hit_test_target_at_time(html, 400, 300, 10, 10, -1)).to_equal("path:0")
+
+    it "hit testing: a pointer-events:none overlay does not swallow clicks":
+        val html = hit_page("none")
+        expect(simple_web_layout_hit_test_target_at_time(html, 400, 300, 10, 70, -1)).to_equal("path:1")
+        expect(simple_web_layout_hit_test_target_at_time(html, 400, 300, 10, 10, -1)).to_equal("path:0")
+        expect(simple_web_layout_hit_test_target_at_time(html, 400, 300, 350, 10, -1)).to_equal("path:")

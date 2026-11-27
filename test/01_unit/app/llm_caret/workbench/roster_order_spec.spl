@@ -1,0 +1,88 @@
+"""
+## Purpose and audience
+Purpose: the caret roster lists pinned sessions first, then the most recently
+used, and `/switch <query>` selects by fuzzy label without ever guessing.
+Audience: caret-suite workbench engineers.
+## Operator workflow
+Run `bin/simple test test/01_unit/app/llm_caret/workbench/roster_order_spec.spl`.
+"""
+use std.spec.*
+use app.llm_caret.workbench.session_contract.{SessionId, new_session_id}
+use app.llm_caret.workbench.roster_order.{roster_order}
+use app.llm_caret.cs_dashboard.{CsAgent, CsDashboard, cs_dashboard_new,
+    cs_handle_command, cs_render}
+
+fn _ids(xs: [SessionId]) -> [text]:
+    var out: [text] = []
+    for x in xs:
+        out = out + [x.value]
+    out
+
+fn _agent(id: text, spec: text) -> CsAgent:
+    CsAgent(agent_id: id, spec: spec, status: "running", pid: 1, pane_id: "%" + id,
+        cpu_pct: -1.0, rss_mb: -1, detail: "")
+
+fn _fixture() -> CsDashboard:
+    val base = cs_dashboard_new("caret")
+    CsDashboard(session: base.session, manager_status: "connected: smux",
+        agents: [_agent("a1", "claude/opus"), _agent("a2", "codex/gpt"),
+            _agent("a3", "claude/sonnet")],
+        selected: 0, input: "", log: [], screen: [], pins: [], mru: [])
+
+describe "roster ordering":
+    it "puts pinned first, then MRU, then original order":
+        # @req REQ-CARET-CU-001
+        step("pin c, use b most recently then d")
+        val s = [new_session_id("a"), new_session_id("b"), new_session_id("c"),
+            new_session_id("d"), new_session_id("e")]
+        val out = roster_order(s, ["c"], ["d", "b"])
+        expect(_ids(out)).to_equal(["c", "d", "b", "a", "e"])
+    it "is stable and ignores unknown pins and mru entries":
+        # @req REQ-CARET-CU-001
+        val s = [new_session_id("a"), new_session_id("b")]
+        expect(_ids(roster_order(s, ["zz"], ["yy"]))).to_equal(["a", "b"])
+        expect(_ids(roster_order(s, [], []))).to_equal(["a", "b"])
+    it "orders multiple pins by pin order":
+        # @req REQ-CARET-CU-001
+        val s = [new_session_id("a"), new_session_id("b"), new_session_id("c")]
+        expect(_ids(roster_order(s, ["c", "b"], []))).to_equal(["c", "b", "a"])
+
+describe "fuzzy switch, pin and mru in the dashboard":
+    it "switches by case-insensitive subsequence when unambiguous":
+        # @req REQ-CARET-CU-004
+        val (n, out) = cs_handle_command(_fixture(), "/switch CDX")
+        expect(n.selected).to_equal(1)
+        expect(out).to_equal("pane:select %a2")
+    it "refuses an ambiguous query and lists candidates":
+        # @req REQ-CARET-CU-004
+        val d = _fixture()
+        val (n, out) = cs_handle_command(d, "/switch cl")
+        expect(n.selected).to_equal(0)
+        expect(out).to_contain("ambiguous")
+        expect(out).to_contain("a1")
+        expect(out).to_contain("a3")
+    it "reports no match and keeps numeric and id switching":
+        # @req REQ-CARET-CU-004
+        val d = _fixture()
+        val (n0, out0) = cs_handle_command(d, "/switch zzz")
+        expect(out0).to_contain("no such agent")
+        expect(n0.selected).to_equal(0)
+        val (n1, _o1) = cs_handle_command(d, "/switch 3")
+        expect(n1.selected).to_equal(2)
+        val (n2, _o2) = cs_handle_command(d, "/switch a2")
+        expect(n2.selected).to_equal(1)
+    it "bumps MRU on select and renders MRU order":
+        # @req REQ-CARET-CU-001
+        val (n, _o) = cs_handle_command(_fixture(), "/switch 3")
+        expect(n.mru).to_equal(["a3"])
+        val rows = cs_render(n, 80, 14)
+        expect(rows.index_of("3 a3  ") < rows.index_of("1 a1  ")).to_equal(true)
+    it "pins and unpins, pinned agents render first":
+        # @req REQ-CARET-CU-001
+        val (p, out) = cs_handle_command(_fixture(), "/pin a2")
+        expect(p.pins).to_equal(["a2"])
+        expect(out).to_contain("pinned")
+        val rows = cs_render(p, 80, 14)
+        expect(rows.index_of("2 a2  ") < rows.index_of("1 a1  ")).to_equal(true)
+        val (u, _o) = cs_handle_command(p, "/unpin a2")
+        expect(u.pins).to_equal([])

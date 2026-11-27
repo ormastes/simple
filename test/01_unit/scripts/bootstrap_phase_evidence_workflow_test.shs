@@ -179,6 +179,10 @@ mkdir -p "$contract/bin"
 cat >"$contract/bin/bootstrap" <<'EOF'
 #!/bin/sh
 set -eu
+[ "$(pwd -P)" = "$PHASE23_EXPECTED_SOURCE_ROOT" ] || {
+  echo 'phase23 bootstrap invoked outside the source root' >&2
+  exit 1
+}
 root=$SIMPLE_WORKTREE_STORAGE_ROOT/build/bootstrap
 platform=aarch64-apple-darwin
 dir=$root/stage3/$platform
@@ -223,6 +227,11 @@ set -eu
 printf '%s\n' "$*" >>"$PHASE23_CONTRACT_LOG.evidence"
 EOF
 chmod +x "$contract/bin/"*
+# Local callers may launch this absolute-path runner outside the checkout.
+# Its relative source paths must still name this repository.
+(
+cd "$contract"
+PHASE23_EXPECTED_SOURCE_ROOT="$root" \
 PHASE23_CONTRACT_TEST=1 PHASE23_CONTRACT_LOG="$contract/calls" \
 SIMPLE_WORKTREE_STORAGE_ROOT="$storage" PHASE23_VERIFY_ROOT="$contract/verify" \
 PHASE23_BOOTSTRAP_COMMAND="$contract/bin/bootstrap" \
@@ -230,6 +239,7 @@ PHASE23_CAPSULE_COMMAND="$contract/bin/capsule" \
 PHASE23_VERIFIER_COMMAND="$contract/bin/verifier" \
 PHASE23_EVIDENCE_COMMAND="$contract/bin/evidence" \
   sh "$runner"
+)
 [ "$(wc -l <"$contract/calls.verifier" | tr -d ' ')" = 2 ] || fail 'runner did not reach both verifiers'
 grep -Fq -- '--phase=stage2' "$contract/calls.verifier" || fail 'Stage 2 verifier was not reached'
 grep -Fq -- '--phase=stage3' "$contract/calls.verifier" || fail 'Stage 3 verifier was not reached'

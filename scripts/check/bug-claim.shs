@@ -1,0 +1,829 @@
+#!/bin/sh
+# bug-claim.shs -- "fixing" claims for the bug DB (doc/08_tracking/bug/bug_db.sdn).
+#
+# Concurrent fixers must not work the same bug. A claim flips the bug's
+# `status` to `fixing` in the main tables (bugs_active/bugs; still 10 columns,
+# bug-gen requires exactly 10) and appends a row to the side table
+#   bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|
+# state: fixing, waiting_verify, released, done. History is kept.
+# A `fixing` claim whose max(claimed_at, heartbeat_at) is older than the max age
+# (default 24h) is STALE: anyone may take it over, and `reap` reverts it.
+#
+# Usage:
+#   bug-claim.shs claim <bug_id> <session_id> [note]
+#   bug-claim.shs heartbeat <bug_id> <session_id>
+#   bug-claim.shs release <bug_id> <session_id>
+#   bug-claim.shs done <bug_id> <session_id> [--pr <n> | <n>]
+#   bug-claim.shs wait-verify <bug_id> <session_id> <required-check>
+#   bug-claim.shs check <bug_id>
+#   bug-claim.shs environment <bug_id> <found-env> <repro-env> <unknown|candidate|verified> <evidence>
+#   bug-claim.shs status <bug_id>
+#   bug-claim.shs list-active
+#   bug-claim.shs list                 (alias of list-active)
+#   bug-claim.shs --selftest
+#   bug-claim.shs reap [--max-age 24h] [--report]
+#   bug-claim.shs show <bug_id> --intent for_fixing --session <id> [--note <n>]
+#   bug-claim.shs show <bug_id> --intent not_for_fixing          (read-only)
+#
+# Exit codes: 0 ok, 2 usage/error, 3 refused (held by another live session or
+# not the holder), 4 not claimable (bug closed/unknown).
+# Env (specs): BUG_CLAIM_DB (db path), BUG_CLAIM_NOW (ISO UTC "now"),
+#   BUG_CLAIM_MAX_AGE (e.g. 24h), BUG_CLAIM_TEST_RACE_ROW (inject a rival row).
+
+set -u
+
+die() { echo "ERROR: $*" >&2; exit 2; }
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$HERE/../.." && pwd)
+DB="${BUG_CLAIM_DB:-$ROOT/doc/08_tracking/bug/bug_db.sdn}"
+RESEAL="$HERE/reseal-sdn-crc32.shs"
+. "$HERE/sdn-seal-lib.shs"
+LEGACY_DB="$DB"; SHARD_MODE=0; MERGED_DB=""
+REAL_DB="$DB"; LOCKDIR="$LEGACY_DB.lock"; WORK_DB="$REAL_DB.work.$$"
+TABLE_HDR='bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|'
+CLOSED_RE='^(closed|fixed|invalid|resolved-|wontfix|cannot_reproduce|documented)'
+
+# Sharded bug DB (doc/05_design/infra/tracking/bug_db_shards.md): when a db/
+# directory sits next to the legacy file, every command works on the merged
+# view and commit_db publishes one sealed shard per changed bug; the legacy
+# file is frozen. Fixtures without db/ keep the single-file behaviour.
+init_db() {
+    LEGACY_DB="$DB"; SHARD_MODE=0; MERGED_DB=""
+    if [ -f "$DB" ] && [ -d "$(dirname "$DB")/db" ]; then
+        SHARD_MODE=1
+        MERGED_DB=$(mktemp) || die "mktemp failed"
+        trap 'rm -f "$MERGED_DB" "$MERGED_DB.before" 2>/dev/null' EXIT
+        sh "$HERE/bug-db-shard.shs" merged "$LEGACY_DB" > "$MERGED_DB" || die "cannot build the merged bug DB view"
+        DB="$MERGED_DB"
+    fi
+    REAL_DB="$DB"
+    LOCKDIR="$LEGACY_DB.lock"
+    WORK_DB="$REAL_DB.work.$$"
+    [ -f "$DB" ] || die "$DB not found"
+}
+
+now_iso() { if [ -n "${BUG_CLAIM_NOW:-}" ]; then echo "$BUG_CLAIM_NOW"; else date -u +%Y-%m-%dT%H:%M:%SZ; fi; }
+
+# awk helper library: ISO-8601 UTC -> epoch seconds
+AWKLIB='
+function epoch(ts,   y, m, d, hh, mi, ss, era, yoe, doy, doe, days, mp) {
+    if (ts !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z$/) return 0
+    y = substr(ts,1,4)+0; m = substr(ts,6,2)+0; d = substr(ts,9,2)+0
+    hh = substr(ts,12,2)+0; mi = substr(ts,15,2)+0; ss = substr(ts,18,2)+0
+    if (m <= 2) y -= 1
+    era = int(y / 400)
+    yoe = y - era * 400
+    mp = (m + 9) % 12
+    doy = int((153 * mp + 2) / 5) + d - 1
+    doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+    days = era * 146097 + doe - 719468
+    return days * 86400 + hh * 3600 + mi * 60 + ss
+}
+function trim(s) { gsub(/^[ \t\r]+/, "", s); gsub(/[ \t\r]+$/, "", s); return s }
+# id of an indented table row, tolerant of whitespace around the comma ("id," / "id, " / "id ,")
+function rowid(l,   p) { sub(/^[ \t]+/, "", l); p = index(l, ","); if (p == 0) return ""; return trim(substr(l, 1, p - 1)) }
+'
+
+to_epoch() { awk "$AWKLIB"' BEGIN { print epoch(ARGV[1]) }' "$1"; }
+
+# "24h" / "90m" / "2d" / "3600s" / "3600" -> seconds
+parse_age() {
+    _num="${1%[hmds]}"
+    case "$_num" in ''|*[!0-9]*) die "bad --max-age '$1' (use 24h, 90m, 2d, 3600s)" ;; esac
+    case "$1" in
+        *h) echo $(( _num * 3600 )) ;;
+        *m) echo $(( _num * 60 )) ;;
+        *d) echo $(( _num * 86400 )) ;;
+        *) echo "$_num" ;;
+    esac
+}
+MAX_AGE_S=$(parse_age "${BUG_CLAIM_MAX_AGE:-24h}")
+LOCK_RETRIES="${BUG_CLAIM_LOCK_RETRIES:-60}"
+case "$LOCK_RETRIES" in ''|*[!0-9]*) die "bad BUG_CLAIM_LOCK_RETRIES" ;; esac
+
+valid_id() { case "$1" in -*) die "flag-like value '$1' is not a valid id (flags are --session, --intent, --note, --pr; put the id before flags)" ;; esac; case "$1" in ''|*[!A-Za-z0-9._/:+-]*) return 1 ;; *) return 0 ;; esac; }
+flagval() { case "$2" in --*) die "$1 got flag-like value '$2'" ;; esac; }
+clean_note() { printf '%s' "$1" | tr '\r\n\t' '   ' | tr '"' ' ' | tr "'" ' ' | tr '\134' ' '; }
+
+# --- selftest ----------------------------------------------------------------
+selftest() {
+    SDN_SEAL_ALGO=crc32; export SDN_SEAL_ALGO   # fixtures need no external hasher
+    _d=$(mktemp -d) || die "mktemp failed"
+    _fx="$_d/bug_db.sdn"
+    cat > "$_fx" <<'FX'
+#sdn-crc32:0
+strings |id, value|
+
+bugs_active |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|
+    SP-A-1, high, open, "t", f.spl, 1, x, 2026-10-01, 2026-10-01, true
+    NOSP-B-2,high,open,"t",f.spl,1,x,2026-10-01,2026-10-01,true
+    FUT-D-4, P2, open, "t", f.spl, 1, x, 2026-10-01, 2026-12-31, true
+    MIXED_C_3,  high ,  open , "t", f.spl, 1, x, 2026-10-01, 2026-10-01, true
+bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|
+    SP-A-1, high, open, "t", f.spl, 1, x, 2026-10-01, 2026-10-01, true
+    NOSP-B-2,high,open,"t",f.spl,1,x,2026-10-01,2026-10-01,true
+    MIXED_C_3,  high ,  open , "t", f.spl, 1, x, 2026-10-01, 2026-10-01, true
+unindented_row_2026_11_03, P2, open, "t", f.spl, 1, x, 2026-10-01, 2026-10-01, true
+    after_unindented_2026-08-17, P1, open, "t", f.spl, 1, x, 2026-10-01, 2026-10-01, true
+    crlf-id-9_2026-08-10, P1, open, "t", f.spl, 1, x, 2026-10-01, 2026-10-01, true@CR@
+
+bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|
+FX
+    awk '{ sub(/@CR@$/, "\r"); print }' "$_fx" > "$_fx.cr" && mv "$_fx.cr" "$_fx"
+    sh "$RESEAL" --no-selftest "$_fx" >/dev/null 2>&1
+    _fails=0
+    # Isolate each CLI operation without spawning another shell per assertion.
+    # Git-for-Windows shell startup dominates these small fixtures under load.
+    run() { (
+        DB="$_fx"; LEGACY_DB="$DB"; SHARD_MODE=0; MERGED_DB=""
+        REAL_DB="$DB"; LOCKDIR="$DB.lock"; WORK_DB="$DB.work.$$"
+        BUG_CLAIM_NOW="${BUG_CLAIM_TEST_NOW:-2026-11-03T00:00:00Z}"
+        LOCK_RETRIES="${BUG_CLAIM_LOCK_RETRIES:-60}"
+        dispatch "$@"
+    ) 2>&1; }
+    chk() { # label expected-substring output
+        case "$3" in *"$2"*) ;; *) echo "selftest FAIL: $1: want '$2' got '$3'"; _fails=$((_fails+1)) ;; esac
+    }
+    for _id in SP-A-1 NOSP-B-2 MIXED_C_3; do
+        chk "claim $_id" "CLAIMED: $_id" "$(run claim "$_id" s1)"
+        chk "status $_id" "state=fixing" "$(run status "$_id")"
+        chk "list has $_id" "$_id session=s1" "$(run list)"
+        chk "release $_id" "RELEASED: $_id" "$(run release "$_id" s1)"
+    done
+    chk "claim --session" "CLAIMED: NOSP-B-2 fixing by s2" "$(run claim NOSP-B-2 --session s2 --note hi)"
+    chk "refused other" "REFUSED" "$(run claim NOSP-B-2 s3)"
+    chk "show for_fixing" "CLAIMED: SP-A-1 fixing by s4" "$(run show SP-A-1 --intent for_fixing --session s4)"
+    chk "show --session=" "CLAIMED: MIXED_C_3 fixing by s5" "$(run show MIXED_C_3 --session=s5 --intent=for_fixing)"
+    chk "show missing session value" "requires --session" "$(run show SP-A-1 --intent for_fixing --session)"
+    chk "claim flag as session" "flag-like value" "$(run claim SP-A-1 --intent)"
+    chk "claim flag as session not stored" "session=s4" "$(run status SP-A-1)"
+    chk "claim flag-led bug id" "flag-like value" "$(run claim --intent s9)"
+    chk "claim --session flag value" "flag-like value" "$(run claim SP-A-1 --session --note x)"
+    chk "claim --note missing value" "needs a value" "$(run claim SP-A-1 --session s9 --note)"
+    chk "show --session flag value" "flag-like value" "$(run show SP-A-1 --session --intent for_fixing)"
+    chk "show --intent flag value" "flag-like value" "$(run show SP-A-1 --intent --session s9)"
+    chk "show flag order" "CLAIMED: SP-A-1 already fixing by s4" "$(run show SP-A-1 --session s4 --intent for_fixing)"
+    chk "release flag session" "flag-like value" "$(run release SP-A-1 --intent)"
+    chk "heartbeat flag session" "flag-like value" "$(run heartbeat SP-A-1 --intent)"
+    chk "done flag session" "flag-like value" "$(run done SP-A-1 --intent)"
+    chk "unknown bug" "unknown bug" "$(run claim NOPE-9 s1)"
+    run claim FUT-D-4 s7 >/dev/null; chk "updated_at never moves backwards" "FUT-D-4, P2, fixing, \"t\", f.spl, 1, x, 2026-10-01, 2026-12-31, true" "$(run show FUT-D-4 --intent not_for_fixing)"
+    for _id in unindented_row_2026_11_03 after_unindented_2026-08-17 crlf-id-9_2026-08-10; do
+        chk "claim $_id" "CLAIMED: $_id" "$(run claim "$_id" s1)"
+        chk "release $_id" "RELEASED: $_id" "$(run release "$_id" s1)"
+    done
+    chk "show after unindented" "== main row ==" "$(run show after_unindented_2026-08-17 --intent not_for_fixing)"
+    run claim after_unindented_2026-08-17 d1 >/dev/null; chk "done --pr status" "(status fix-implemented-verification-pending)" "$(run done after_unindented_2026-08-17 d1 --pr 12 2>&1)"; run claim after_unindented_2026-08-17 d1 >/dev/null 2>&1; chk "done --pr" "PR #12" "$(run done after_unindented_2026-08-17 d1 --pr 12; run status after_unindented_2026-08-17)"
+    run claim crlf-id-9_2026-08-10 d2 >/dev/null; chk "done bare" "PR #34" "$(run done crlf-id-9_2026-08-10 d2 34; run status crlf-id-9_2026-08-10)"
+    run claim SP-A-1 s4 >/dev/null; chk "done no pr" "no PR" "$(run done SP-A-1 s4; run status SP-A-1)"
+    run claim MIXED_C_3 d3 >/dev/null; chk "done bad args" "usage: done <bug_id> <session_id> [--pr <n> | <n>]" "$(run done MIXED_C_3 d3 --pr abc)"
+    chk "done extra args" "usage: done" "$(run done MIXED_C_3 d3 1 2)"
+    chk "done --pr no value" "usage: done" "$(run done MIXED_C_3 d3 --pr)"
+    chk "reap sees all as live" "reap: 0 abandoned" "$(run reap --report)"
+    chk "wait requires check" "required-check" "$(run wait-verify NOSP-B-2 s2)"
+    chk "wait rejects sanitized-empty check" "required-check" "$(run wait-verify NOSP-B-2 s2 "'")"
+    chk "wait rejects other owner" "REFUSED" "$(run wait-verify NOSP-B-2 stranger native-smoke)"
+    chk "wait transition" "WAITING_VERIFY:" "$(run wait-verify NOSP-B-2 s2 native-smoke)"
+    chk "wait preserves owner" "session=s2" "$(run status NOSP-B-2)"
+    chk "wait records check" "native-smoke" "$(run status NOSP-B-2)"
+    chk "wait main status" "status=fix-implemented-verification-pending" "$(run status NOSP-B-2)"
+    chk "wait validates" "CHECK PASS:" "$(run check NOSP-B-2)"
+    chk "wait not reaped" "reap: 0 abandoned" "$(run reap --report)"
+    chk "wait resumes" "CLAIMED:" "$(BUG_CLAIM_TEST_NOW=2026-11-03T00:00:01Z run claim NOSP-B-2 verifier)"
+    chk "fixing validates" "CHECK PASS:" "$(run check NOSP-B-2)"
+    chk "verifier releases" "status fix-implemented-verification-pending" "$(BUG_CLAIM_TEST_NOW=2026-11-03T00:00:02Z run release NOSP-B-2 verifier)"
+    chk "released verification validates" "CHECK PASS:" "$(run check NOSP-B-2)"
+    BUG_CLAIM_TEST_NOW=2026-11-03T00:00:03Z
+    # Old age alone must never evict a still-running writer.
+    mkdir "$_fx.lock"; echo "$$" > "$_fx.lock/owner.pid"
+    touch -t 200001010000 "$_fx.lock"
+    chk "live old lock refused" "could not lock" "$(BUG_CLAIM_LOCK_RETRIES=0 run claim NOSP-B-2 blocked)"
+    [ -f "$_fx.lock/owner.pid" ] || { echo "selftest FAIL: live lock removed"; _fails=$((_fails+1)); }
+    echo 2147483647 > "$_fx.lock/owner.pid"
+    touch -t 200001010000 "$_fx.lock"
+    chk "dead old lock refused" "could not lock" "$(BUG_CLAIM_LOCK_RETRIES=0 run claim NOSP-B-2 recovered)"
+    rm -f "$_fx.lock/owner.pid"; rmdir "$_fx.lock"
+    chk "explicitly cleared lock usable" "CLAIMED:" "$(run claim NOSP-B-2 recovered)"
+    chk "unknown environments" "state=unknown" "$(run environment NOSP-B-2 unknown unknown unknown unknown)"
+    chk "candidate is not proof" "state=candidate" "$(run environment NOSP-B-2 unknown windows candidate unknown)"
+    chk "verified needs evidence" "requires evidence" "$(run environment NOSP-B-2 unknown windows verified unknown)"
+    chk "found needs evidence" "requires evidence" "$(run environment NOSP-B-2 windows windows candidate unknown)"
+    chk "verified environment" "state=verified" "$(run environment NOSP-B-2 windows windows verified retained-test-log)"
+    chk "environment shown" "retained-test-log" "$(run show NOSP-B-2 --intent not_for_fixing)"
+    # The database loader splits on literal blank lines. A line-state reader
+    # can still see an appended record after that separator while load drops
+    # it. Exercise real writer commands and read only header-led chunks.
+    chunk_rows() {
+        awk -v table="$1" '
+        /^$/ { t = 0; seen = 0; next }
+        /^[A-Za-z_][A-Za-z0-9_]* [|]/ {
+            if (!seen) { t = ($1 == table); seen = 1 } else t = 0
+            next
+        }
+        t && /^[ \t]+[^ \t#]/ { print }' "$_fx"
+    }
+    for _tail in next-header eof; do
+        _fx="$_d/layout-$_tail.sdn"
+        cat > "$_fx" <<'LAYOUT'
+bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|
+    layout_1, P2, open, "t", f.spl, 1, x, 2026-10-01, 2026-10-01, true
+
+bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|
+
+bug_environments |bug_id, found_env, reproduction_env, reproduction_state, evidence, recorded_at|
+    layout_1, unknown, unknown, unknown, old-env, 2026-10-01T00:00:00Z
+
+LAYOUT
+        if [ "$_tail" = next-header ]; then
+            printf '# Separator comment must stay outside both tables.\n\nbug_scope |bug_id, scope, root_layer, note|\n    layout_1, unknown, unknown, untouched\n' >> "$_fx"
+        fi
+        chk "layout first environment $_tail" "ENVIRONMENT:" "$(run environment layout_1 unknown linux candidate candidate-one)"
+        chk "layout second environment $_tail" "ENVIRONMENT:" "$(run environment layout_1 unknown windows candidate candidate-two)"
+        _env_order=$(chunk_rows bug_environments | awk -F, '{ v=$5; gsub(/[ \t"]/, "", v); printf "%s,", v }')
+        chk "environment chronology in loader chunk $_tail" "old-env,candidate-one,candidate-two," "$_env_order"
+        chk "layout claim $_tail" "CLAIMED:" "$(run claim layout_1 layout-owner)"
+        chk "layout release $_tail" "RELEASED:" "$(run release layout_1 layout-owner)"
+        _claim_order=$(chunk_rows bug_fix_claims | awk -F, '{ v=$2; gsub(/[ \t]/, "", v); printf "%s,", v }')
+        chk "claim chronology in loader chunk $_tail" "fixing,released," "$_claim_order"
+        if [ "$_tail" = next-header ]; then
+            chk "following table preserved" "layout_1, unknown, unknown, untouched" "$(chunk_rows bug_scope)"
+            chk "separator comment preserved outside tables" "outside" "$(awk '
+                /^$/ { t = 0; next }
+                /^[A-Za-z_][A-Za-z0-9_]* [|]/ { t = 1; next }
+                /^# Separator comment/ { if (!t) print "outside"; else print "inside" }
+            ' "$_fx")"
+        fi
+    done
+    # Claims at EOF must stay before the trailing separator, too.
+    _fx="$_d/layout-claims-eof.sdn"
+    printf 'bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n    layout_1, P2, open, "t", f.spl, 1, x, 2026-10-01, 2026-10-01, true\n\nbug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|\n\n' > "$_fx"
+    chk "layout claim EOF" "CLAIMED:" "$(run claim layout_1 layout-owner)"
+    chk "layout release EOF" "RELEASED:" "$(run release layout_1 layout-owner)"
+    _claim_order=$(chunk_rows bug_fix_claims | awk -F, '{ v=$2; gsub(/[ \t]/, "", v); printf "%s,", v }')
+    chk "claim chronology at EOF" "fixing,released," "$_claim_order"
+    _fx="$_d/layout-no-final-newline.sdn"
+    printf 'bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n    layout_1, P2, open, "t", f.spl, 1, x, 2026-10-01, 2026-10-01, true' > "$_fx"
+    chk "absent table no final newline" "ENVIRONMENT:" "$(run environment layout_1 unknown linux candidate no-final-newline)"
+    chk "absent table has own loader chunk" "no-final-newline" "$(chunk_rows bug_environments)"
+    # A duplicate/mismatched header must never publish a shadow table, which
+    # would make the loader keep only the last table's history.
+    for _bad_header in duplicate mismatched indented duplicate-indented; do
+        cp "$_fx" "$_d/clean-header.sdn"
+        case "$_bad_header" in
+            duplicate|duplicate-indented)
+                _indent=""; [ "$_bad_header" = duplicate-indented ] && _indent="    "
+                printf '\n%sbug_environments |bug_id, found_env, reproduction_env, reproduction_state, evidence, recorded_at|\n' "$_indent" >> "$_fx"
+                _want="duplicate bug_environments table headers" ;;
+            indented)
+                sed 's/^bug_environments /    bug_environments /' "$_fx" > "$_fx.new" && mv "$_fx.new" "$_fx"
+                _want="unexpected bug_environments table header" ;;
+            mismatched)
+                sed 's/^bug_environments |.*$/& /' "$_fx" > "$_fx.new" && mv "$_fx.new" "$_fx"
+                _want="unexpected bug_environments table header" ;;
+        esac
+        cp "$_fx" "$_d/bad-header-before.sdn"
+        chk "refuse $_bad_header header" "$_want" "$(run environment layout_1 unknown linux candidate must-not-publish)"
+        cmp -s "$_fx" "$_d/bad-header-before.sdn" || { echo "selftest FAIL: $_bad_header header changed the database"; _fails=$((_fails+1)); }
+        cp "$_d/clean-header.sdn" "$_fx"
+    done
+    # Regression: early startup failure (before dispatch) must invoke defined die(),
+    # exit 2 rather than continuing with an empty merged file, and clean up MERGED_DB.
+    _early="$_d/early"; mkdir -p "$_early/db" "$_early/tmp"
+    cp "$HERE/bug-claim.shs" "$_early/bug-claim.shs"
+    cp "$HERE/sdn-seal-lib.shs" "$_early/sdn-seal-lib.shs"
+    printf '#!/bin/sh\necho "stub shard failure" >&2\nexit 2\n' > "$_early/bug-db-shard.shs"
+    printf 'bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n    E-1, P1, open, "t", f.spl, 1, x, 2026-10-01, 2026-10-01, true\n' > "$_early/bug_db.sdn"
+    _early_rc=0
+    _early_out=$(BUG_CLAIM_DB="$_early/bug_db.sdn" TMPDIR="$_early/tmp" sh "$_early/bug-claim.shs" list-active 2>&1) || _early_rc=$?
+    [ "$_early_rc" -eq 2 ] || { echo "selftest FAIL: early merge fail returned $_early_rc, expected 2 ($_early_out)"; _fails=$((_fails+1)); }
+    chk "early merge fail calls die" "ERROR: cannot build the merged bug DB view" "$_early_out"
+    case "$_early_out" in *"command not found"*) echo "selftest FAIL: early merge fail hit missing die: $_early_out"; _fails=$((_fails+1)) ;; esac
+    [ -z "$(find "$_early/tmp" -mindepth 1 -print -quit)" ] || { echo "selftest FAIL: early merge fail leaked temp files"; _fails=$((_fails+1)); }
+
+    # Regression: sharded list-active across >= 2 shard files (macOS awk -v newline hazard).
+    _shd="$_d/sharded"; mkdir -p "$_shd/db" "$_shd/tmp"
+    cat > "$_shd/bug_db.sdn" <<'SHD'
+strings |id, value|
+
+bugs_active |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|
+    SHARD-1, P1, open, "one", a.spl, 1, test, 2026-11-01, 2026-11-01, true
+    SHARD-2, P2, open, "two", b.spl, 2, test, 2026-11-01, 2026-11-01, true
+    SHARD-3, P3, open, "three", c.spl, 3, test, 2026-11-01, 2026-11-01, true
+
+bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|
+SHD
+    chk "sharded claim 1" "CLAIMED: SHARD-1" "$(BUG_CLAIM_DB="$_shd/bug_db.sdn" BUG_CLAIM_NOW=2026-11-03T00:00:00Z TMPDIR="$_shd/tmp" sh "$HERE/bug-claim.shs" claim SHARD-1 s1 2>&1)"
+    chk "sharded claim 2" "CLAIMED: SHARD-2" "$(BUG_CLAIM_DB="$_shd/bug_db.sdn" BUG_CLAIM_NOW=2026-11-03T00:00:00Z TMPDIR="$_shd/tmp" sh "$HERE/bug-claim.shs" claim SHARD-2 s2 2>&1)"
+    _list_rc=0
+    _list_out=$(BUG_CLAIM_DB="$_shd/bug_db.sdn" BUG_CLAIM_NOW=2026-11-03T00:00:00Z TMPDIR="$_shd/tmp" sh "$HERE/bug-claim.shs" list-active 2>&1) || _list_rc=$?
+    [ "$_list_rc" -eq 0 ] || { echo "selftest FAIL: sharded list-active returned $_list_rc ($_list_out)"; _fails=$((_fails+1)); }
+    chk "sharded list-active has SHARD-1" "SHARD-1 session=s1" "$_list_out"
+    chk "sharded list-active has SHARD-2" "SHARD-2 session=s2" "$_list_out"
+    case "$_list_out" in *SHARD-3*) echo "selftest FAIL: sharded list-active listed unclaimed SHARD-3"; _fails=$((_fails+1)) ;; esac
+    case "$_list_out" in *awk:*) echo "selftest FAIL: sharded list-active emitted awk error: $_list_out"; _fails=$((_fails+1)) ;; esac
+    chk "sharded release 1" "RELEASED: SHARD-1" "$(BUG_CLAIM_DB="$_shd/bug_db.sdn" BUG_CLAIM_NOW=2026-11-03T00:00:01Z TMPDIR="$_shd/tmp" sh "$HERE/bug-claim.shs" release SHARD-1 s1 2>&1)"
+    _list_out2=$(BUG_CLAIM_DB="$_shd/bug_db.sdn" BUG_CLAIM_NOW=2026-11-03T00:00:01Z TMPDIR="$_shd/tmp" sh "$HERE/bug-claim.shs" list-active 2>&1) || _fails=$((_fails+1))
+    chk "sharded list-active keeps SHARD-2" "SHARD-2 session=s2" "$_list_out2"
+    case "$_list_out2" in *SHARD-1*) echo "selftest FAIL: sharded list-active listed released SHARD-1"; _fails=$((_fails+1)) ;; esac
+    [ -z "$(find "$_shd/tmp" -mindepth 1 -print -quit)" ] || { echo "selftest FAIL: sharded list-active leaked temp files"; _fails=$((_fails+1)); }
+    rm -rf "$_d"
+    if [ "$_fails" -eq 0 ]; then echo "bug-claim selftest PASS"; exit 0; fi
+    echo "bug-claim selftest FAIL ($_fails)"; exit 1
+}
+# --- table readers ---------------------------------------------------------
+# claims as TSV: pos bug state session claimed hb prev note
+claims_tsv() {
+    awk -F'\n' '
+    function trim(s) { gsub(/^[ \t\r]+/, "", s); gsub(/[ \t\r]+$/, "", s); return s }
+    /^bug_fix_claims \|/ { t = 1; next }
+    t && /^[A-Za-z_][A-Za-z0-9_]* [|]/ { t = 0 }
+    t && /^[ \t]*[^ \t#\r]/ {
+        s = $0; sub(/^[ \t]+/, "", s); sub(/\r$/, "", s)
+        for (i = 1; i <= 6; i++) { p = index(s, ","); if (p == 0) { f[i] = trim(s); s = "" } else { f[i] = trim(substr(s, 1, p - 1)); s = substr(s, p + 1) } }
+        n = trim(s); gsub(/^"|"$/, "", n)
+        printf "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", NR, f[1], f[2], f[3], f[4], f[5], f[6], n
+    }' "$DB"
+}
+
+# main-table row info for bug: prints "status<TAB>table" of first match
+main_status() {
+    awk -v id="$1" "$AWKLIB"'
+    /^bugs_active \|/ { t = "bugs_active"; next }
+    /^bugs \|/ { t = "bugs"; next }
+    /^[A-Za-z_][A-Za-z0-9_]* [|]/ { t = "" }
+    t != "" && /^[ \t]*[^ \t#\r]/ && rowid($0) == id {
+        s = $0; sub(/^[ \t]+/, "", s); p = index(s, ","); r = substr(s, p + 1)
+        p = index(r, ","); r = substr(r, p + 1)
+        q = index(r, ","); print trim(substr(r, 1, q - 1)) "\t" t; exit
+    }' "$DB"
+}
+
+# set status + updated_at (date) on every main row for bug
+set_main_status() { # bug status date
+    _tmp="$DB.edit.$$"
+    awk -v id="$1" -v st="$2" -v dt="$3" "$AWKLIB"'
+    /^bugs_active \|/ { t = 1; print; next }
+    /^bugs \|/ { t = 1; print; next }
+    /^[A-Za-z_][A-Za-z0-9_]* [|]/ { t = 0 }
+    t && /^[ \t]*[^ \t#\r]/ && rowid($0) == id {
+        s = $0; sub(/^[ \t]+/, "", s); p = index(s, ","); r = substr(s, p + 1)
+        p = index(r, ","); sev = trim(substr(r, 1, p - 1)); r = substr(r, p + 1)
+        q = index(r, ","); rest = substr(r, q)
+        line = "    " id ", " sev ", " st rest
+        if (match(line, /,[ \t]*[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9],[ \t]*(true|false)\r?$/)) {
+            m = substr(line, RSTART, RLENGTH); ms = RSTART
+            # updated_at never moves backwards: an earlier writer may have used
+            # a local date that is ahead of this UTC date.
+            match(m, /[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/)
+            nd = substr(m, RSTART, RLENGTH); if (dt > nd) nd = dt
+            sub(/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/, nd, m)
+            line = substr(line, 1, ms - 1) m
+        }
+        print line; next
+    }
+    { print }' "$DB" > "$_tmp" && mv "$_tmp" "$DB"
+}
+
+# current claim for a bug: sets C_* vars (holder rule below).
+load_current() { # bug
+    C_STATE=none; C_SESSION=''; C_CLAIMED=''; C_HB=''; C_PREV=''; C_NOTE=''; C_LIVE=0; C_STALE=0
+    _out=$(claims_tsv | awk -F'\t' -v id="$1" '
+    # ONE holder rule, shared with race resolution and bug-gen: the holder is the
+    # earliest `fixing` row strictly after the newest non-fixing row (released/done);
+    # with none, the newest row (ties -> later row) is the current state.
+    $2 == id { n++; st[n]=$3; se[n]=$4; cl[n]=$5; hb[n]=$6; pv[n]=$7; nt[n]=$8
+               if ($3 != "fixing" && $5 > cut) cut = $5 }
+    END {
+        h = 0
+        for (i = 1; i <= n; i++)
+            if (st[i] == "fixing" && cl[i] > cut && (h == 0 || cl[i] < cl[h])) h = i
+        if (h == 0) for (i = 1; i <= n; i++) if (h == 0 || cl[i] >= cl[h]) h = i
+        if (h > 0) printf "C_STATE=%s\nC_SESSION=%s\nC_CLAIMED=%s\nC_HB=%s\nC_PREV=%s\nC_NOTE=%s\n", q(st[h]), q(se[h]), q(cl[h]), q(hb[h]), q(pv[h]), q(nt[h])
+    }
+    function q(s) { gsub(/\047/, "", s); return "\047" s "\047" }')
+    [ -n "$_out" ] && eval "$_out"
+    if [ "$C_STATE" = fixing ]; then
+        _last="$C_HB"; [ -n "$_last" ] || _last="$C_CLAIMED"
+        _le=$(to_epoch "$_last"); _ne=$(to_epoch "$(now_iso)")
+        if [ $(( _ne - _le )) -le "$MAX_AGE_S" ]; then C_LIVE=1; else C_STALE=1; fi
+    fi
+}
+
+# --- table writers ---------------------------------------------------------
+
+append_table_row() { # exact header, complete indented row
+    _tmp="$DB.edit.$$"
+    _table=${1%% *}
+    _headers=$(awk -v table="$_table" '
+        /^[ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*[|]/ {
+            name = $0; sub(/^[ \t]+/, "", name); sub(/[ \t]*[|].*$/, "", name)
+            if (name == table) n++
+        }
+        END { print n + 0 }' "$DB")
+    [ "$_headers" -le 1 ] || die "duplicate $_table table headers"
+    if ! grep -Fqx "$1" "$DB"; then
+        [ "$_headers" -eq 0 ] || die "unexpected $_table table header"
+        # Two newlines also separate the new table if the input had no final
+        # newline. Extra empty sections are harmless to the database loader.
+        { cat "$DB"; printf '\n\n%s\n%s\n' "$1" "$2"; } > "$_tmp" && mv "$_tmp" "$DB"
+        return
+    fi
+    # SdnDatabase.load splits on literal blank lines. Append at the END of
+    # this header-led chunk, before its separator, preserving event order.
+    awk -v hdr="$1" -v row="$2" '
+    $0 == hdr { t = 1; print; next }
+    t && (/^$/ || /^[A-Za-z_][A-Za-z0-9_]* [|]/) {
+        if (!done) { print row; done = 1 }; t = 0
+    }
+    { print }
+    END { if (t && !done) print row }' "$DB" > "$_tmp" && mv "$_tmp" "$DB"
+}
+
+append_row() { # raw claim row text (without indent)
+    append_table_row "$TABLE_HDR" "    $1"
+}
+
+remove_row() { # exact row line (without indent); removes the last occurrence
+    _tmp="$DB.edit.$$"
+    awk -v row="    $1" '
+    { l[NR] = $0 }
+    END { gone = 0; for (i = NR; i >= 1; i--) if (!gone && l[i] == row) { gone = 1; skip = i }
+          for (i = 1; i <= NR; i++) if (i != skip) print l[i] }' "$DB" > "$_tmp" && mv "$_tmp" "$DB"
+}
+
+set_heartbeat() { # bug session ts : rewrite hb of the newest fixing row of session
+    _tmp="$DB.edit.$$"
+    awk -v id="$1" -v se="$2" -v ts="$3" '
+    function trim(s) { gsub(/^[ \t\r]+/, "", s); gsub(/[ \t\r]+$/, "", s); return s }
+    { l[NR] = $0 }
+    /^bug_fix_claims \|/ { t = 1; next }
+    t && /^[A-Za-z_][A-Za-z0-9_]* [|]/ { t = 0 }
+    t && /^[ \t]*[^ \t#\r]/ {
+        s = $0; sub(/^[ \t]+/, "", s)
+        for (i = 1; i <= 6; i++) { p = index(s, ","); f[i] = trim(substr(s, 1, p - 1)); s = substr(s, p + 1) }
+        if (f[1] == id && f[2] == "fixing" && f[3] == se) { last = NR; cl[NR] = f[4]; pv[NR] = f[6]; nt[NR] = trim(s) }
+    }
+    END { for (i = 1; i <= NR; i++) {
+              if (i == last) print "    " id ", fixing, " se ", " cl[i] ", " ts ", " pv[i] ", " nt[i]
+              else print l[i] } }' "$DB" > "$_tmp" && mv "$_tmp" "$DB"
+}
+
+date_of() { printf '%s' "${1%%T*}"; }
+
+refuse_held() { # prints holder info, exit 3
+    echo "REFUSED: $1 is being fixed by session $C_SESSION since $C_CLAIMED (last heartbeat ${C_HB:-$C_CLAIMED}); pick another bug" >&2
+    echo "REFUSED: $1 is being fixed by session $C_SESSION since $C_CLAIMED (last heartbeat ${C_HB:-$C_CLAIMED}); pick another bug"
+    exit 3
+}
+
+# --- commands --------------------------------------------------------------
+# Writers run on a private copy ($DB.work) and publish it with one mv after the
+# reseal, so a failed edit/reseal never leaves a half-written database.
+REAL_DB="$DB"
+LOCKDIR="$LEGACY_DB.lock"
+WORK_DB="$REAL_DB.work.$$"
+LOCK_OWNER_FILE=''
+owns_lock() { [ -n "$LOCK_OWNER_FILE" ] && [ -f "$LOCK_OWNER_FILE" ]; }
+cleanup() {
+    rm -f "$WORK_DB" "$WORK_DB".edit.* 2>/dev/null
+    [ -n "$MERGED_DB" ] && rm -f "$MERGED_DB" "$MERGED_DB.before" 2>/dev/null
+    # Only the owner can remove its marker. A replacement lock has a different
+    # mktemp token, so an old owner's cleanup cannot remove its directory.
+    if owns_lock && rm "$LOCK_OWNER_FILE" 2>/dev/null; then
+        rmdir "$LOCKDIR" 2>/dev/null || :
+    fi
+}
+recover_dead_lock() {
+    for _owner in "$LOCKDIR"/owner.*; do
+        [ -f "$_owner" ] || continue
+        _pid=${_owner##*/owner.}; _pid=${_pid%%.*}
+        case "$_pid" in ''|*[!0-9]*) continue ;; esac
+        # Directory age is never evidence that a live owner has died. kill is
+        # the shell builtin, using the same POSIX PID namespace as shell $$.
+        if ! kill -0 "$_pid" 2>/dev/null && ! ps -p "$_pid" >/dev/null 2>&1; then
+            # Successful removal of this unique marker is the recovery claim.
+            # A racing reaper whose rm fails must not rmdir a replacement lock.
+            if rm "$_owner" 2>/dev/null; then rmdir "$LOCKDIR" 2>/dev/null || :; fi
+        fi
+    done
+    # Ownerless/legacy locks fail closed: age alone cannot distinguish a dead
+    # creator from a live process delayed before publishing its owner marker.
+}
+lock() {
+    _i=0
+    while ! mkdir "$LOCKDIR" 2>/dev/null; do
+        recover_dead_lock
+        _i=$((_i + 1)); [ "$_i" -gt "$LOCK_RETRIES" ] && die "could not lock $REAL_DB (lock dir $LOCKDIR); recover ownerless legacy locks only after all writers are stopped"
+        sleep 1
+    done
+    LOCK_OWNER_FILE=$(mktemp "$LOCKDIR/owner.$$.XXXXXXXX") || die "cannot mark lock ownership for $REAL_DB"
+    trap cleanup EXIT
+    trap 'exit 130' INT TERM
+    if [ "$SHARD_MODE" = 1 ]; then
+        # the lock is held: rebuild the merged view so edits start from the
+        # shards as they are NOW, not as they were at startup
+        sh "$HERE/bug-db-shard.shs" merged "$LEGACY_DB" > "$REAL_DB" || die "cannot rebuild the merged bug DB view"
+        cp "$REAL_DB" "$REAL_DB.before" || die "cannot snapshot $REAL_DB"
+    fi
+    cp "$REAL_DB" "$WORK_DB" || die "cannot copy $REAL_DB"
+    DB="$WORK_DB"
+}
+commit_db() {
+    owns_lock || die "lost lock ownership for $REAL_DB"
+    if [ "$SHARD_MODE" = 1 ]; then
+        # one sealed shard per bug whose rows changed; the legacy file is frozen
+        for _sid in $(sh "$HERE/bug-db-shard.shs" changed "$REAL_DB.before" "$WORK_DB"); do
+            sh "$HERE/bug-db-shard.shs" write "$_sid" "$WORK_DB" "$LEGACY_DB" >/dev/null || die "cannot write shard $_sid"
+        done
+        mv "$WORK_DB" "$REAL_DB" || die "cannot publish $REAL_DB"
+        DB="$REAL_DB"
+        return 0
+    fi
+    # Sidecar seal: strip any legacy header, hash the work copy, create the new
+    # .csm FIRST (a crash then leaves MERGED_UNSEALED, never MISSING), publish
+    # with one mv, then prune the stale seals.
+    csm_strip_legacy "$WORK_DB" || die "cannot strip legacy header in $WORK_DB"
+    _alg=$(csm_policy_algo "$ROOT/config/check/sdn_seal_policy.sdn" "$REAL_DB")
+    _hx=$(csm_hash_hex "$_alg" "$WORK_DB") || die "cannot hash $WORK_DB with $_alg"
+    _new="$(csm_stem "$REAL_DB").${_alg}_$_hx.csm"
+    : > "$_new" || die "cannot write seal $_new"
+    owns_lock || die "lost lock ownership before publishing $REAL_DB"
+    mv "$WORK_DB" "$REAL_DB" || die "cannot publish $REAL_DB"
+    csm_prune_other_seals "$REAL_DB" "$_new"
+    DB="$REAL_DB"
+}
+
+cmd_claim() { # bug session [note]
+    if [ $# -ge 1 ] && case "$*" in *--session*|*--note*) true ;; *) false ;; esac; then
+        _cb="$1"; shift; _cs=""; _cn=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --session) [ $# -ge 2 ] || die "--session needs a value"; flagval --session "$2"; _cs="$2"; shift 2 ;;
+                --session=*) _cs="${1#--session=}"; shift ;;
+                --note) [ $# -ge 2 ] || die "--note needs a value"; flagval --note "$2"; _cn="$2"; shift 2 ;;
+                --note=*) _cn="${1#--note=}"; shift ;;
+                *) die "unknown claim option $1" ;;
+            esac
+        done
+        set -- "$_cb" "$_cs" "$_cn"
+    fi
+    [ $# -ge 2 ] || die "usage: claim <bug_id> <session_id> [note]"
+    _b="$1"; _s="$2"; _n=$(clean_note "${3:-}")
+    valid_id "$_b" || die "bad bug_id '$_b'"; valid_id "$_s" || die "bad session_id '$_s'"
+    lock
+    _ms=$(main_status "$_b"); _cur=${_ms%%	*}
+    [ -n "$_ms" ] || { echo "ERROR: unknown bug $_b" >&2; exit 4; }
+    load_current "$_b"
+    if [ "$C_STATE" = fixing ] && [ "$C_LIVE" = 1 ] && [ "$C_SESSION" != "$_s" ]; then refuse_held "$_b"; fi
+    _lc=$(printf '%s' "$_cur" | tr 'A-Z' 'a-z')
+    if [ "$_lc" != fixing ] && printf '%s' "$_lc" | grep -Eq "$CLOSED_RE"; then
+        echo "NOT CLAIMABLE: $_b is $_cur (closed bugs need no claim)"; exit 4
+    fi
+    _t=$(now_iso)
+    if [ "$C_STATE" = fixing ] && [ "$C_SESSION" = "$_s" ]; then
+        # the holder re-claiming is a refresh, not a second row
+        set_heartbeat "$_b" "$_s" "$_t"; commit_db
+        echo "CLAIMED: $_b already fixing by $_s since $C_CLAIMED (heartbeat refreshed at $_t)"; return 0
+    fi
+    _prev="$_cur"
+    if [ "$_lc" = fixing ]; then _prev="${C_PREV:-open}"; [ "$_prev" = fixing ] && _prev=open; fi
+    if [ "$C_STATE" = fixing ]; then
+        # stale takeover: close the old claim first so every reader agrees on the holder
+        append_row "$_b, released, takeover, $C_CLAIMED, $C_CLAIMED, $_prev, \"stale claim by $C_SESSION taken over\""
+    fi
+    _row="$_b, fixing, $_s, $_t, $_t, $_prev, \"$_n\""
+    append_row "$_row"
+    set_main_status "$_b" fixing "$(date_of "$_t")"
+    # test hook, honoured only together with a pinned clock
+    if [ -n "${BUG_CLAIM_TEST_RACE_ROW:-}" ] && [ -n "${BUG_CLAIM_NOW:-}" ]; then append_row "${BUG_CLAIM_TEST_RACE_ROW#    }"; fi
+    # re-read after writing: the earliest claim wins, the later one backs out
+    load_current "$_b"
+    if [ "$C_STATE" = fixing ] && [ "$C_SESSION" != "$_s" ]; then
+        remove_row "$_row"; commit_db
+        echo "LOST RACE: backed out my claim"; refuse_held "$_b"
+    fi
+    commit_db
+    echo "CLAIMED: $_b fixing by $_s at $_t (prev status $_prev)"
+}
+
+cmd_heartbeat() {
+    [ $# -ge 2 ] || die "usage: heartbeat <bug_id> <session_id>"
+    valid_id "$1" && valid_id "$2" || die "bad id"
+    lock; load_current "$1"
+    if [ "$C_STATE" != fixing ] || [ "$C_SESSION" != "$2" ]; then
+        echo "REFUSED: $1 is not claimed as fixing by $2 (state=$C_STATE session=$C_SESSION)"; exit 3
+    fi
+    _t=$(now_iso); set_heartbeat "$1" "$2" "$_t"; commit_db
+    echo "HEARTBEAT: $1 $2 at $_t"
+}
+
+finish() { # bug session newstate main_status note
+    valid_id "$1" && valid_id "$2" || die "bad id"
+    lock; load_current "$1"
+    if [ "$C_STATE" != fixing ] || [ "$C_SESSION" != "$2" ]; then
+        echo "REFUSED: $1 is not claimed as fixing by $2 (state=$C_STATE session=$C_SESSION)"; exit 3
+    fi
+    _t=$(now_iso); _prev="${C_PREV:-open}"
+    _st="$4"; [ -n "$_st" ] || _st="$_prev"
+    append_row "$1, $3, $2, $_t, $_t, $_prev, \"$5\""
+    set_main_status "$1" "$_st" "$(date_of "$_t")"; commit_db
+    echo "$(printf '%s' "$3" | tr 'a-z' 'A-Z'): $1 by $2 at $_t (status $_st)"
+}
+cmd_release() { [ $# -ge 2 ] || die "usage: release <bug_id> <session_id>"; finish "$1" "$2" released "" "released"; }
+cmd_done() {
+    _du="usage: done <bug_id> <session_id> [--pr <n> | <n>]"
+    [ $# -ge 2 ] || die "$_du"
+    _db="$1"; _ds="$2"; shift 2; _pr=""
+    case "$#:${1:-}" in
+        0:) ;;
+        1:--pr=?*) _pr="${1#--pr=}" ;;
+        2:--pr) _pr="$2" ;;
+        1:*) _pr="${1#\#}" ;;
+        *) die "$_du" ;;
+    esac
+    case "$_pr" in *[!0-9]*) die "$_du" ;; esac
+    _dn="no PR"; [ -n "$_pr" ] && _dn="PR #$_pr"
+    finish "$_db" "$_ds" done fix-implemented-verification-pending "$_dn"
+}
+
+cmd_wait_verify() {
+    [ $# -eq 3 ] || die "usage: wait-verify <bug_id> <session_id> <required-check>"
+    _required=$(clean_note "$3")
+    [ -n "$(printf '%s' "$_required" | tr -d '[:space:]')" ] || die "required-check must contain text after sanitization"
+    finish "$1" "$2" waiting_verify fix-implemented-verification-pending "$_required"
+}
+
+cmd_environment() {
+    [ $# -eq 5 ] || die "usage: environment <bug_id> <found-env> <repro-env> <unknown|candidate|verified> <evidence>"
+    valid_id "$1" || die "bad bug_id"
+    _found=$(clean_note "$2"); _repro=$(clean_note "$3"); _verification="$4"; _evidence=$(clean_note "$5")
+    for _value in "$_found" "$_repro" "$_evidence"; do
+        [ -n "$(printf '%s' "$_value" | tr -d '[:space:]')" ] || die "environment values must contain text (use unknown when absent)"
+    done
+    case "$_verification" in
+        unknown) [ "$_repro" = unknown ] || die "unknown reproduction requires unknown environment" ;;
+        candidate|verified) [ "$_repro" != unknown ] || die "candidate/verified reproduction needs an environment" ;;
+        *) die "reproduction state must be unknown, candidate or verified" ;;
+    esac
+    if { [ "$_found" != unknown ] || [ "$_verification" = verified ]; } && [ "$_evidence" = unknown ]; then
+        die "observed/verified environment requires evidence"
+    fi
+    lock
+    [ -n "$(main_status "$1")" ] || die "unknown bug $1"
+    _header='bug_environments |bug_id, found_env, reproduction_env, reproduction_state, evidence, recorded_at|'
+    _envrow="    $1, \"$_found\", \"$_repro\", $_verification, \"$_evidence\", $(now_iso)"
+    append_table_row "$_header" "$_envrow" || die "environment append failed"
+    commit_db
+    echo "ENVIRONMENT: $1 found=$_found reproduction=$_repro state=$_verification evidence=$_evidence"
+}
+
+# Read-only integrity check for owner-linked workflow states.
+cmd_check() {
+    [ $# -eq 1 ] || die "usage: check <bug_id>"
+    valid_id "$1" || die "bad bug_id"
+    _main=$(main_status "$1" | cut -f1)
+    [ -n "$_main" ] || die "unknown bug $1"
+    load_current "$1"
+    case "$_main" in
+        fixing) _expected=fixing ;;
+        fix-implemented-verification-pending)
+            # A verifier may release its later claim back to the waiting state.
+            # The last waiting event retains the submitter, time and requirement.
+            _wait=$(claims_tsv | awk -F'\t' -v id="$1" '$2 == id && $3 == "waiting_verify" { row = $4 "\t" $5 "\t" $8 } END { print row }')
+            _owner=$(printf '%s' "$_wait" | cut -f1)
+            _since=$(printf '%s' "$_wait" | cut -f2)
+            _check=$(printf '%s' "$_wait" | cut -f3-)
+            if [ -z "$_owner" ] || [ "$(to_epoch "$_since")" = 0 ] || [ -z "$_check" ]; then
+                echo "CHECK FAIL: $1 status=$_main requires waiting_verify owner/start/check details"; return 1
+            fi
+            echo "CHECK PASS: $1 status=$_main session=$_owner since=$_since check=$_check"; return 0 ;;
+        *) echo "CHECK PASS: $1 status=$_main (no active owner required)"; return 0 ;;
+    esac
+    if [ "$C_STATE" != "$_expected" ] || [ -z "$C_SESSION" ] || [ "$(to_epoch "$C_CLAIMED")" = 0 ] || { [ "$_expected" = waiting_verify ] && [ -z "$C_NOTE" ]; }; then
+        echo "CHECK FAIL: $1 status=$_main requires $_expected owner/start/check details"; return 1
+    fi
+    echo "CHECK PASS: $1 status=$_main session=$C_SESSION since=$C_CLAIMED"
+}
+
+cmd_status() {
+    [ $# -ge 1 ] || die "usage: status <bug_id>"
+    valid_id "$1" || die "bad bug_id"
+    load_current "$1"
+    _flag=''; [ "$C_STALE" = 1 ] && _flag=' STALE'; [ "$C_LIVE" = 1 ] && _flag=' live'
+    _main=$(main_status "$1" | cut -f1)
+    if [ "$C_STATE" = none ]; then echo "$1: state=none status=$_main"; return 0; fi
+    echo "$1: state=$C_STATE session=$C_SESSION claimed_at=$C_CLAIMED heartbeat_at=$C_HB prev_status=$C_PREV note=\"$C_NOTE\"$_flag status=$_main"
+}
+
+cmd_list_active() {
+    claims_tsv | cut -f2 | sort -u | while read -r _b; do
+        [ -n "$_b" ] || continue
+        load_current "$_b"
+        [ "$C_STATE" = fixing ] || continue
+        _f=live; [ "$C_STALE" = 1 ] && _f=STALE
+        echo "$_b session=$C_SESSION since=$C_CLAIMED heartbeat=${C_HB:-$C_CLAIMED} $_f"
+    done
+}
+
+# fixing bugs in the main tables whose claim is missing, not fixing, or stale
+reap_candidates() {
+    awk "$AWKLIB"'
+    /^bugs_active \|/ { t = 1; next }
+    /^bugs \|/ { t = 1; next }
+    /^[A-Za-z_][A-Za-z0-9_]* [|]/ { t = 0 }
+    t && /^[ \t]*[^ \t#\r]/ { s = $0; sub(/^[ \t]+/, "", s); id = rowid($0); p = index(s, ","); r = substr(s, p + 1)
+            q = index(r, ","); r = substr(r, q + 1); e = index(r, ","); if (trim(substr(r, 1, e - 1)) == "fixing") print id }' "$DB" | sort -u
+}
+
+cmd_reap() {
+    _report=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --report) _report=1; shift ;;
+            --max-age) [ $# -ge 2 ] || die "--max-age needs a value"; MAX_AGE_S=$(parse_age "$2"); shift 2 ;;
+            *) die "unknown reap option $1" ;;
+        esac
+    done
+    [ "$_report" = 1 ] || lock
+    _n=0
+    for _b in $(reap_candidates); do
+        load_current "$_b"
+        if [ "$C_STATE" = fixing ] && [ "$C_STALE" = 0 ]; then continue; fi
+        _prev="${C_PREV:-open}"; [ "$C_STATE" = fixing ] || _prev=open; [ "$_prev" = fixing ] && _prev=open
+        _n=$((_n + 1))
+        if [ "$_report" = 1 ]; then
+            echo "ABANDONED: $_b (state=$C_STATE session=${C_SESSION:--} last=${C_HB:-${C_CLAIMED:--}}) would revert to $_prev"
+        else
+            _t=$(now_iso)
+            append_row "$_b, released, reaper, $_t, $_t, $_prev, \"abandoned (reaped)\""
+            set_main_status "$_b" "$_prev" "$(date_of "$_t")"
+            echo "REAPED: $_b reverted to $_prev"
+        fi
+    done
+    if [ "$_report" != 1 ] && [ "$_n" -gt 0 ]; then commit_db; fi
+    echo "reap: $_n abandoned fixing bug(s)"
+    return 0
+}
+
+cmd_show() {
+    [ $# -ge 1 ] || die "usage: show <bug_id> --intent for_fixing|not_for_fixing [--session <id>] [--note <n>]"
+    _b="$1"; shift; _intent=''; _s=''; _n=''
+    valid_id "$_b" || die "bad bug_id"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --intent) [ $# -ge 2 ] || die "--intent needs a value"; flagval --intent "$2"; _intent="$2"; shift 2 ;;
+            --intent=*) _intent="${1#--intent=}"; shift ;;
+            --session) [ $# -ge 2 ] || die "show --intent for_fixing requires --session <id>"; flagval --session "$2"; _s="$2"; shift 2 ;;
+            --session=*) _s="${1#--session=}"; shift ;;
+            --note) [ $# -ge 2 ] || die "--note needs a value"; flagval --note "$2"; _n="$2"; shift 2 ;;
+            --note=*) _n="${1#--note=}"; shift ;;
+            *) die "unknown show option $1" ;;
+        esac
+    done
+    case "$_intent" in
+        for_fixing) [ -n "$_s" ] || die "show --intent for_fixing requires --session <id>" ;;
+        not_for_fixing) ;;
+        '') die "show requires --intent for_fixing|not_for_fixing" ;;
+        *) die "bad --intent '$_intent' (use for_fixing or not_for_fixing)" ;;
+    esac
+    [ -n "$(main_status "$_b")" ] || { echo "ERROR: unknown bug $_b" >&2; exit 4; }
+    if [ "$_intent" = for_fixing ]; then
+        # Keep the claim's merged view and lock alive through the display.
+        # A subshell's EXIT cleanup deletes the view this command still reads.
+        cmd_claim "$_b" "$_s" "$_n" || exit $?
+    fi
+    echo "== main row =="
+    awk -v id="$_b" "$AWKLIB"'/^bugs(_active)? [|]/ { t = 1; next } /^[A-Za-z_][A-Za-z0-9_]* [|]/ { t = 0 } t && /^[ \t]*[^ \t#\r]/ && rowid($0) == id { split($0, a, ","); st = trim(a[2]); if (st != "fixing" && st != "released" && st != "done") print }' "$DB" | head -4
+    echo "== description =="
+    awk -v id="$_b" "$AWKLIB"'/^bug_descriptions \|/ { t = 1; next } /^[A-Za-z_][A-Za-z0-9_]* [|]/ { t = 0 } t && /^[ \t]*[^ \t#\r]/ && rowid($0) == id { print }' "$DB" | head -20
+    echo "== difficulty =="
+    awk -v id="$_b" "$AWKLIB"'/^bug_difficulty \|/ { t = 1; next } /^[A-Za-z_][A-Za-z0-9_]* [|]/ { t = 0 } t && /^[ \t]*[^ \t#\r]/ && rowid($0) == id { l = $0 } END { if (l != "") print l; else print "(none)" }' "$DB"
+    echo "== claim =="
+    cmd_status "$_b"
+    echo "== environments (missing means unknown) =="
+    awk -v id="$_b" "$AWKLIB"'/^bug_environments \|/ { t = 1; next } /^[^ \t#]/ { t = 0 } t && /^[ \t]+[^ \t#]/ && rowid($0) == id { print; found = 1 } END { if (!found) print "(unknown)" }' "$DB"
+}
+
+dispatch() {
+[ $# -ge 1 ] || die "usage: bug-claim.shs claim|heartbeat|release|done|wait-verify|check|environment|status|list|list-active|reap|show ..."
+_cmd="$1"; shift
+case "$_cmd" in
+    claim) cmd_claim "$@" ;;
+    heartbeat) cmd_heartbeat "$@" ;;
+    release) cmd_release "$@" ;;
+    done) cmd_done "$@" ;;
+    wait-verify) cmd_wait_verify "$@" ;;
+    check) cmd_check "$@" ;;
+    environment) cmd_environment "$@" ;;
+    status) cmd_status "$@" ;;
+    list|list-active) cmd_list_active ;;
+    reap) cmd_reap "$@" ;;
+    show) cmd_show "$@" ;;
+    *) die "unknown command '$_cmd'" ;;
+esac
+}
+
+[ "${1:-}" = "--selftest" ] && selftest
+init_db
+dispatch "$@"

@@ -1,5 +1,19 @@
 # Native theme-package aggregate return becomes nil
 
+## Triage 2026-11-25 (p2w4-ac lane, release/1.0.0)
+
+Still OPEN and environment-blocked on this host. Re-ran the 2026-11-04
+fixture `test/03_system/native/theme_package_aggregate_return.spl` under the
+pinned seed interpreter (`SIMPLE_LIB=src bin/simple.exe run`): exits rc=42 as
+the doc records — the interpreted lane stays green, which says nothing about
+the native aggregate-return ABI defect. The actual repro requires a Stage 3
+pure-Simple compiler driving `native-build` (command in the fixture section
+below); no Stage 3 binary exists on this Windows host (pinned Rust seed
+only, which additionally rejects `@representation_boundary` at release/1.0.0
+HEAD), and building one (cargo/bootstrap) is out of lane scope. The
+generated-snapshot startup bypass therefore remains in force. Status
+unchanged: OPEN, awaiting a native-capable verification lane.
+
 Status: open compiler/runtime bug; production startup bypasses the unsafe
 boundary with the generated immutable `ThemeRenderSnapshot`.
 
@@ -70,3 +84,17 @@ nontrivial fields (`snapshot`, `token_map`, and `widget_css_by_name`) after:
 Inspect the HIR/MIR destination type and `Ret` operand in each row. A source
 workaround that defaults nil fields, adds raw runtime aliases, or further
 special-cases theme startup is explicitly rejected.
+
+## Native repro fixture (2026-11-04)
+Fixture: `test/03_system/native/theme_package_aggregate_return.spl` (expected rc 42; passes under seed interpreter).
+Stage3 command:
+```sh
+env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 <stage3-simple> native-build --entry test/03_system/native/theme_package_aggregate_return.spl -o /tmp/b && /tmp/b; echo rc=$?
+```
+
+## Triage 2026-11-26 (BF-5 lane, `origin/release/1.0.0`)
+
+Still `OPEN` and blocked on `src/compiler/**` + a Stage 3 native-build host.
+- Re-verified `test/03_system/native/theme_package_aggregate_return.spl` under `wa3_shared_bin\simple.exe` (`89b32c2e80d`) interpreter: exits `rc=42`.
+- `src/os/compositor/host_wm_theme_bootstrap.spl` and `src/app/test/aetheric_host_web_gui_producer.spl` still use the `aetheric_dark_theme_render_snapshot()` startup bypass.
+- Fixing the underlying `MirTypeKind.Struct` native aggregate return ABI across module boundaries belongs to `src/compiler/**` (untouched per BF-5 lane file ownership; `native-build` is also unavailable/unrunnable in this Windows Rust-seed-only lane, and app-side workarounds are explicitly rejected by this bug record).

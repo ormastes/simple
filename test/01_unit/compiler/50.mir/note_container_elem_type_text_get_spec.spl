@@ -1,0 +1,45 @@
+# Regression (p4 lane C, q0025 bounds_check AV on s3_fable46/48):
+# `note_container_elem_type` read the struct-name note as
+#     val struct_name = self.struct_value_syms.get(value_local.id)
+#     if val sn = struct_name:
+#         if sn != "" ...
+# On the native lane `.get()` on a Dict<i64, text> class field already decodes
+# the hit with rt_interp_cstr, and the `if val` unwrap then re-decodes the
+# payload as an integer (rt_value_as_int_wide) and again as text, so `sn` is a
+# wild pointer and `sn != ""` faults inside rt_text_eq_any -> strcmp.
+# The read must use the `.get(k) ?? ""` form (single decode) instead.
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+class SymNotes:
+    syms: Dict<i64, text>
+
+    fn owner_of(id: i64) -> text:
+        val sn = self.syms.get(id) ?? ""
+        sn
+
+fn _body_of(src: text, header: text) -> text:
+    val start = src.index_of(header) ?? -1
+    if start < 0:
+        return ""
+    val rest = src.substring(start + header.len())
+    val next = rest.index_of("\n    me ") ?? rest.len()
+    rest.substring(0, next)
+
+describe "note_container_elem_type struct-name note read":
+    it "does not unwrap a Dict<i64, text>.get() result with if-val":
+        val src = rt_file_read_text(
+            "src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl"
+        ) ?? ""
+        expect(src.len() > 0).to_equal(true)
+        val body = _body_of(src, "me note_container_elem_type(")
+        expect(body.len() > 0).to_equal(true)
+        expect(body.contains("if val sn = struct_name")).to_equal(false)
+        expect(body).to_contain("self.struct_value_syms.get(value_local.id) ?? \"\"")
+
+    it "reads hit and miss of a text-valued class-field dict":
+        val notes = SymNotes(syms: {})
+        notes.syms[7] = "Point"
+        expect(notes.owner_of(7) == "Point").to_equal(true)
+        expect(notes.owner_of(8) == "").to_equal(true)

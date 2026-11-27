@@ -1,0 +1,47 @@
+# Native and interpreter entrypoint; no environment contents are logged.
+use app.io.env_ops.{env_vars, env_set}
+use std.nogc_sync_mut.sffi.system_env_core.{env_get, env_remove, env_vars_nilable}
+
+fn check_snapshot(entries: [(text, text)], expected: text) -> bool:
+    var found_value = false
+    for pair in entries:
+        if pair.0 == "SIMPLE_ENV_OWNER_VALUE_PROBE":
+            if pair.1 != expected: return false
+            if pair.0 + "=" + pair.1 != "SIMPLE_ENV_OWNER_VALUE_PROBE=" + expected: return false
+            found_value = true
+    found_value
+
+fn probe() -> i64:
+    val literal = [("K", "V")]
+    # Nested literal[0].0 has a separate recorded compiler provenance defect.
+    for pair in literal:
+        if pair.0 + "=" + pair.1 != "K=V": return 1
+    if not env_set("SIMPLE_ENV_OWNER_VALUE_PROBE", "v=é"): return 2
+    if env_get("SIMPLE_ENV_OWNER_VALUE_PROBE") != "v=é": return 4
+    val owned = env_vars_nilable()
+    if owned == nil: return 6
+    if not check_snapshot(owned ?? [], "v=é"): return 7
+    val facade = env_vars()
+    if facade == nil: return 8
+    if not check_snapshot(facade ?? [], "v=é"): return 9
+    if not env_set("SIMPLE_ENV_OWNER_VALUE_PROBE", "changed"): return 10
+    if not check_snapshot(owned ?? [], "v=é"): return 11
+    val fresh = env_vars_nilable()
+    if fresh == nil: return 12
+    if not check_snapshot(fresh ?? [], "changed"): return 13
+    0
+
+fn restore(key: text, original: text?) -> bool:
+    if original == nil: return env_remove(key)
+    env_set(key, original ?? "")
+
+fn main() -> i64:
+    val original_value = env_get("SIMPLE_ENV_OWNER_VALUE_PROBE")
+    val status = probe()
+    val restored_value = restore("SIMPLE_ENV_OWNER_VALUE_PROBE", original_value)
+    if status != 0:
+        print "FAIL environment snapshot owner stage={status}"
+        return status
+    if not restored_value: return 14
+    print "PASS environment snapshot owner"
+    0

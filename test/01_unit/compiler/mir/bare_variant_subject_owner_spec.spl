@@ -1,0 +1,132 @@
+"""
+Bare enum-variant arms resolve against the match subject's declared owner
+even when the subject's expression type is lost or wrapped: a generic free
+function's declared return type, a trait-dispatched method's declared return
+type, and an Optional subject (`E?`) whose payload enum owns the variant.
+Before the fix each case reported "bare variant ... is ambiguous" because a
+second enum declares the same variant name (phase-3 WA-P3-ambig-variant).
+"""
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lower_messages(source: text, name: text) -> [text]:
+    val filename = "bare_variant_owner_" + name + ".spl"
+    val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val _mir = mir_lowering.lower_module(hir)
+    var messages: [text] = []
+    for err in mir_lowering.errors:
+        messages = messages.push(err.message)
+    messages
+
+fn ambiguity_hits(messages: [text]) -> i64:
+    var n = 0
+    for m in messages:
+        if m.contains("ambiguous") or m.contains("missing runtime identity"):
+            n = n + 1
+    n
+
+val GENERIC_FN_SOURCE = """
+enum Verdict:
+    Ok(i64)
+    Err(text)
+
+fn decode<T>(x: T) -> Result<i64, text>:
+    Ok(1)
+
+fn main() -> i64:
+    match decode(5):
+        case Ok(v): v
+        case Err(_): 0
+"""
+
+val TRAIT_METHOD_SOURCE = """
+enum Shape:
+    Tuple(i64)
+    Unit
+
+enum Payload:
+    Tuple(i64)
+    Struct(i64)
+
+trait Maker:
+    fn make() -> Payload
+
+class M:
+    n: i64
+
+impl Maker for M:
+    fn make() -> Payload:
+        Payload.Struct(self.n)
+
+fn run(m: Maker) -> i64:
+    match m.make():
+        case Tuple(a): a
+        case Struct(b): b
+"""
+
+val OPTIONAL_SOURCE = """
+enum Shape:
+    Tuple(i64)
+    Unit
+
+enum Payload:
+    Tuple(i64)
+    Struct(i64)
+
+fn pick(p: Payload?) -> i64:
+    if val q = p:
+        return 0
+    match p:
+        case Some(Tuple(a)): a
+        case Some(Struct(b)): b
+        case None: 0
+"""
+
+val OPTIONAL_BARE_SOURCE = """
+enum Shape:
+    Tuple(i64)
+    Unit
+
+enum Payload:
+    Tuple(i64)
+    Struct(i64)
+
+fn get() -> Payload?:
+    Some(Payload.Struct(2))
+
+fn pick() -> i64:
+    val p = get()
+    if p != nil:
+        match p:
+            case Tuple(a): a
+            case Struct(b): b
+    else:
+        0
+"""
+
+describe "bare variant subject owner":
+    it "resolves a generic free fn's declared Result return":
+        val msgs = lower_messages(GENERIC_FN_SOURCE, "generic")
+        expect(ambiguity_hits(msgs)).to_equal(0)
+
+    it "resolves a trait-dispatched method's declared return":
+        val msgs = lower_messages(TRAIT_METHOD_SOURCE, "trait")
+        expect(ambiguity_hits(msgs)).to_equal(0)
+
+    it "resolves nested bare arms inside Some over an Optional subject":
+        val msgs = lower_messages(OPTIONAL_SOURCE, "optional")
+        expect(ambiguity_hits(msgs)).to_equal(0)
+
+    it "resolves bare arms over an Optional-typed subject":
+        val msgs = lower_messages(OPTIONAL_BARE_SOURCE, "optional_bare")
+        expect(ambiguity_hits(msgs)).to_equal(0)

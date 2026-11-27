@@ -31,13 +31,95 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::hir::{HirExpr, HirExprKind, HirFunction, HirStmt, HirType, TypeId, TypeRegistry};
+use crate::hir::{HirContractClause, HirExpr, HirExprKind, HirFunction, HirStmt, HirType, TypeId, TypeRegistry};
 
 /// Copy sites that may hand the source buffer over instead of copying it.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ArrayMoveSites {
     /// Locals whose single array `Let` from a place may move its source.
     pub let_locals: HashSet<usize>,
+    /// `var` array locals whose every `obj.f = o` field store is proven
+    /// dead after the store: the field takes the buffer over with no
+    /// `rt_array_copy` (bug seed_jit_field_store_array_copy_never_freed_2026-11-04).
+    pub field_store_locals: HashSet<usize>,
+    /// Struct/class locals whose array-typed fields only ever hold a buffer
+    /// no other binding can reach: `st.f = v` may `rt_array_free` the
+    /// replaced buffer (bug seed_jit_array_copy_never_freed_2026-10-19).
+    /// See `Analysis::release_bad` for the proof obligations.
+    pub field_release_structs: HashSet<usize>,
+    /// S1 block-end release: scalar-element array locals whose declaring
+    /// statement list may `rt_array_free` them when it falls through. See
+    /// `Analysis::block_release_locals`; lowering additionally requires
+    /// that it stored a fresh buffer raw into the slot.
+    pub block_release_locals: HashSet<usize>,
+    /// Uniquely-owned `String` locals whose writes are all literals or fresh
+    /// concatenations and never escape; non-self-referential `Assign`s may
+    /// drop the replaced value immediately after storing the new one.
+    pub string_overwrite_locals: HashSet<usize>,
+}
+
+/// True when `e` evaluates to a freshly heap-allocated `RuntimeString`
+/// not shared with any other slot or literal table.
+pub(super) fn is_fresh_string_expr(e: &HirExpr) -> bool {
+    match &e.kind {
+        HirExprKind::Binary { op: crate::hir::BinOp::Add, left, right } => {
+            e.ty == TypeId::STRING && (left.ty == TypeId::STRING || right.ty == TypeId::STRING)
+        }
+        HirExprKind::BuiltinCall { name, .. } => matches!(
+            name.as_str(),
+            "rt_value_to_string"
+                | "rt_value_format_string"
+                | "rt_raw_i64_to_string"
+                | "rt_raw_u64_to_string"
+                | "rt_string_concat"
+        ),
+        HirExprKind::MethodCall { receiver, method, args, .. } => {
+            e.ty == TypeId::STRING
+                && args.is_empty()
+                && matches!(method.as_str(), "to_text" | "to_string")
+                && matches!(
+                    receiver.ty,
+                    TypeId::BOOL
+                        | TypeId::CHAR
+                        | TypeId::I8
+                        | TypeId::I16
+                        | TypeId::I32
+                        | TypeId::I64
+                        | TypeId::U8
+                        | TypeId::U16
+                        | TypeId::U32
+                        | TypeId::U64
+                        | TypeId::F32
+                        | TypeId::F64
+                )
+        }
+        _ => false,
+    }
+}
+
+/// True if `e` mentions `HirExprKind::Local(target_idx)` anywhere.
+pub(super) fn expr_mentions_local(e: &HirExpr, target_idx: usize) -> bool {
+    if let HirExprKind::Local(idx) = &e.kind {
+        if *idx == target_idx {
+            return true;
+        }
+    }
+    let mut children = Vec::new();
+    expr_children(e, &mut children);
+    children.into_iter().any(|c| expr_mentions_local(c, target_idx))
+}
+
+/// `obj.f = Local(o)` field store of an array value: the hand-over candidate.
+fn field_store_source(a: &Analysis<'_>, target: &HirExpr, value: &HirExpr) -> Option<usize> {
+    match (&target.kind, &value.kind) {
+        (HirExprKind::FieldAccess { .. }, HirExprKind::Local(o))
+            if (a.is_array(value.ty) || a.is_array(a.local_ty(*o)) || a.is_array(target.ty))
+                && a.handed_over.contains(o) =>
+        {
+            Some(*o)
+        }
+        _ => None,
+    }
 }
 
 /// True when a struct-literal array argument hands the struct a buffer no
@@ -98,11 +180,24 @@ struct Analysis<'a> {
     disqualified: HashSet<usize>,
     let_counts: HashMap<usize, usize>,
     struct_arg_counts: HashMap<usize, usize>,
+    /// Field-store hand-over uses per local; also counted in
+    /// `struct_arg_counts` so the fixpoint requires each to be proven.
+    field_store_counts: HashMap<usize, usize>,
     /// Locals mentioned anywhere inside a lambda/generator/future/actor body.
     closure_locals: HashSet<usize>,
     /// `var` locals assumed handed over at their struct-literal uses this
     /// round (see the fixpoint in `compute_array_move_sites`).
     handed_over: HashSet<usize>,
+    /// Locals that may NOT release replaced array-field buffers. A struct
+    /// local qualifies only when (1) every write to it is a struct literal
+    /// giving each array-typed field a private buffer (fresh literal or a
+    /// handed-over `var`), (2) every store to one of its array fields is a
+    /// fresh literal, a handed-over local, or a place (which lowering copies),
+    /// and (3) it and its non-primitive fields are never read in a context
+    /// that can create a second holder (call/struct argument, plain assign,
+    /// method receiver, capture, ...). Under those rules the field's buffer is
+    /// reachable from the field alone, so freeing it on overwrite is exact.
+    release_bad: HashSet<usize>,
     poisoned: bool,
 }
 
@@ -130,8 +225,10 @@ pub(crate) fn compute_array_move_sites(
             disqualified: HashSet::new(),
             let_counts: HashMap::new(),
             struct_arg_counts: HashMap::new(),
+            field_store_counts: HashMap::new(),
             closure_locals: HashSet::new(),
             handed_over: handed_over.clone(),
+            release_bad: HashSet::new(),
             poisoned: false,
         };
         // The body's trailing expression statement is the implicit return value.
@@ -157,10 +254,286 @@ pub(crate) fn compute_array_move_sites(
             .map(|(o, _)| *o)
             .collect();
         if not_moved.is_empty() {
+            sites.field_store_locals = a.field_store_counts.keys().copied().collect();
+            sites.field_release_structs = (a.nparams..a.local_tys.len())
+                .filter(|idx| {
+                    !a.release_bad.contains(idx)
+                        && !a.closure_locals.contains(idx)
+                        && a.let_counts.get(idx).is_some_and(|n| *n >= 1)
+                        && a.release_struct_fields(a.local_ty(*idx)).is_some()
+                })
+                .collect();
+            collect_take_sites(&a, &func.body, &mut sites);
+            sites.block_release_locals = a.block_release_locals(func, &sites.let_locals);
+            sites.string_overwrite_locals = a.string_overwrite_locals(func);
             return sites;
         }
         for o in not_moved {
             handed_over.remove(&o);
+        }
+    }
+}
+
+/// The "take" idiom on an array field (`r` a local or the `me` receiver):
+///
+/// ```text
+/// var x = r.f      # (or `x = r.f`) read the field place
+/// r.f = []         # IMMEDIATELY overwritten with a fresh empty literal
+/// ...x mutated in place...
+/// r.f = x          # stored back; x dead afterwards
+/// ```
+///
+/// After the overwrite `r.f` no longer holds the old buffer, so a `Let` take
+/// moves it into `x` instead of an `rt_array_copy`. Nothing frees that copy
+/// on the JIT lane, and nothing frees the buffer the overwrite drops either.
+/// The result equals mutating `r.f` in place, which compiled code already
+/// does. (An `Assign` take already moves: assignment never copies.)
+///
+/// The store back hands `x` over (no `rt_array_copy`) when every value `x`
+/// ever holds is a fresh literal or a take, and every other use of `x` is in
+/// place (`stmt_uses_local_in_place`). It also needs the store back to be the
+/// only one and the last use of `x`, outside any loop. `x`'s buffer then has
+/// no other holder, so the field becomes its only owner.
+///
+/// Excluded: a root whose field stores may `rt_array_free` the replaced
+/// buffer (`field_release_structs`), since `r.f = []` would then free the
+/// buffer `x` now holds.
+/// Bug: doc/08_tracking/bug/jit_take_field_array_idiom_copies_and_leaks_surface_2026-11-23.md
+fn collect_take_sites(a: &Analysis<'_>, body: &[HirStmt], sites: &mut ArrayMoveSites) {
+    let mut takes: Vec<(usize, *const HirStmt)> = Vec::new();
+    find_takes(a, body, sites, &mut takes);
+    let take_stmts: HashSet<*const HirStmt> = takes.iter().map(|(_, p)| *p).collect();
+    let locals: HashSet<usize> = takes.iter().map(|(x, _)| *x).collect();
+    for x in locals {
+        if x < a.nparams || a.closure_locals.contains(&x) {
+            continue;
+        }
+        let mut ev = TakeUses::default();
+        if scan_take_uses(body, x, &take_stmts, 0, &mut ev) && ev.stores == [ev.count - 1] && !ev.store_in_loop {
+            sites.field_store_locals.insert(x);
+        }
+    }
+}
+
+/// `x = r.f` / `Let x = r.f` immediately followed by `r.f = []`.
+fn find_takes(a: &Analysis<'_>, stmts: &[HirStmt], sites: &mut ArrayMoveSites, out: &mut Vec<(usize, *const HirStmt)>) {
+    for (i, stmt) in stmts.iter().enumerate() {
+        for child in child_stmt_lists(stmt) {
+            find_takes(a, child, sites, out);
+        }
+        let (x, value, is_let) = match stmt {
+            HirStmt::Let {
+                local_index,
+                value: Some(value),
+                ..
+            } => (*local_index, value, true),
+            HirStmt::Assign { target, value } => match target.kind {
+                HirExprKind::Local(x) => (x, value, false),
+                _ => continue,
+            },
+            _ => continue,
+        };
+        let HirExprKind::FieldAccess { receiver, field_index } = &value.kind else {
+            continue;
+        };
+        let HirExprKind::Local(r) = receiver.kind else {
+            continue;
+        };
+        if r == x || !a.let_is_array(x, value) || sites.field_release_structs.contains(&r) {
+            continue;
+        }
+        let overwritten_empty = matches!(stmts.get(i + 1), Some(HirStmt::Assign { target, value })
+            if matches!(&target.kind, HirExprKind::FieldAccess { receiver, field_index: g }
+                    if *g == *field_index && matches!(receiver.kind, HirExprKind::Local(q) if q == r))
+                && matches!(&value.kind, HirExprKind::Array(items) if items.is_empty()));
+        if !overwritten_empty {
+            continue;
+        }
+        if is_let && a.let_counts.get(&x) == Some(&1) && !a.closure_locals.contains(&x) {
+            sites.let_locals.insert(x);
+        }
+        out.push((x, stmt as *const HirStmt));
+    }
+}
+
+#[derive(Default)]
+struct TakeUses {
+    /// Statements mentioning `x`, in pre-order.
+    count: usize,
+    /// Event positions of `<field> = x` stores.
+    stores: Vec<usize>,
+    store_in_loop: bool,
+}
+
+/// Classify every mention of `x`; false when one is not allowed (see
+/// `collect_take_sites`).
+fn scan_take_uses(
+    stmts: &[HirStmt],
+    x: usize,
+    takes: &HashSet<*const HirStmt>,
+    loop_depth: usize,
+    ev: &mut TakeUses,
+) -> bool {
+    let fresh = |v: &HirExpr| {
+        matches!(&v.kind, HirExprKind::Array(_) | HirExprKind::ArrayRepeat { .. }) && count_mentions_expr(v, x) == 0
+    };
+    for stmt in stmts {
+        if count_mentions_stmt(stmt, x) == 0 {
+            continue;
+        }
+        let ok = match stmt {
+            HirStmt::Let {
+                local_index,
+                value: Some(value),
+                ..
+            } if *local_index == x => fresh(value) || takes.contains(&(stmt as *const HirStmt)),
+            HirStmt::Assign { target, value } if matches!(target.kind, HirExprKind::Local(t) if t == x) => {
+                fresh(value) || takes.contains(&(stmt as *const HirStmt))
+            }
+            HirStmt::Assign { target, value }
+                if matches!(target.kind, HirExprKind::FieldAccess { .. })
+                    && matches!(value.kind, HirExprKind::Local(o) if o == x)
+                    && count_mentions_expr(target, x) == 0 =>
+            {
+                ev.stores.push(ev.count);
+                ev.store_in_loop |= loop_depth > 0;
+                true
+            }
+            HirStmt::If {
+                condition,
+                then_block,
+                else_block,
+                ..
+            } => {
+                if !expr_uses_local_in_place(condition, x) {
+                    return false;
+                }
+                if !scan_take_uses(then_block, x, takes, loop_depth, ev) {
+                    return false;
+                }
+                if let Some(b) = else_block {
+                    if !scan_take_uses(b, x, takes, loop_depth, ev) {
+                        return false;
+                    }
+                }
+                continue;
+            }
+            HirStmt::While { condition, body, .. } => {
+                if !expr_uses_local_in_place(condition, x) || !scan_take_uses(body, x, takes, loop_depth + 1, ev) {
+                    return false;
+                }
+                continue;
+            }
+            HirStmt::Loop { body, .. } => {
+                if !scan_take_uses(body, x, takes, loop_depth + 1, ev) {
+                    return false;
+                }
+                continue;
+            }
+            _ => stmt_uses_local_in_place(stmt, x),
+        };
+        if !ok {
+            return false;
+        }
+        ev.count += 1;
+    }
+    true
+}
+
+/// Statement lists nested directly in `stmt` (not expression-embedded blocks).
+fn child_stmt_lists(stmt: &HirStmt) -> Vec<&[HirStmt]> {
+    match stmt {
+        HirStmt::If {
+            then_block, else_block, ..
+        } => {
+            let mut out: Vec<&[HirStmt]> = vec![then_block];
+            if let Some(b) = else_block {
+                out.push(b);
+            }
+            out
+        }
+        HirStmt::While { body, .. } | HirStmt::Loop { body, .. } | HirStmt::For { body, .. } | HirStmt::Defer { body } => {
+            vec![body]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Builtin array methods that read or mutate their receiver in place and
+/// never retain it.
+const IN_PLACE_ARRAY_METHODS: &[&str] = &[
+    "write_span", "push", "pop", "len", "fill", "clear", "insert", "remove", "swap", "reverse", "truncate",
+];
+
+/// True when every mention of local `x` in `stmt` is in place: the receiver
+/// of an `IN_PLACE_ARRAY_METHODS` call or the base of an index. A bare read,
+/// a capture, a call/struct argument or any unrecognised statement is not.
+fn stmt_uses_local_in_place(stmt: &HirStmt, x: usize) -> bool {
+    if count_mentions_stmt(stmt, x) == 0 {
+        return true;
+    }
+    match stmt {
+        HirStmt::Expr(e) => expr_uses_local_in_place(e, x),
+        HirStmt::Assign { target, value } => {
+            let target_ok = match &target.kind {
+                HirExprKind::Local(t) => *t != x,
+                _ => expr_uses_local_in_place(target, x),
+            };
+            target_ok && expr_uses_local_in_place(value, x)
+        }
+        HirStmt::Let { local_index, value, .. } => {
+            *local_index != x && value.as_ref().is_none_or(|v| expr_uses_local_in_place(v, x))
+        }
+        HirStmt::If {
+            condition,
+            then_block,
+            else_block,
+            ..
+        } => {
+            expr_uses_local_in_place(condition, x)
+                && then_block.iter().all(|s| stmt_uses_local_in_place(s, x))
+                && else_block
+                    .as_ref()
+                    .is_none_or(|b| b.iter().all(|s| stmt_uses_local_in_place(s, x)))
+        }
+        HirStmt::While { condition, body, .. } => {
+            expr_uses_local_in_place(condition, x) && body.iter().all(|s| stmt_uses_local_in_place(s, x))
+        }
+        _ => false,
+    }
+}
+
+fn expr_uses_local_in_place(e: &HirExpr, x: usize) -> bool {
+    if count_mentions_expr(e, x) == 0 {
+        return true;
+    }
+    match &e.kind {
+        HirExprKind::MethodCall {
+            receiver, method, args, ..
+        } if matches!(receiver.kind, HirExprKind::Local(r) if r == x)
+            && IN_PLACE_ARRAY_METHODS.contains(&method.as_str()) =>
+        {
+            args.iter().all(|a| expr_uses_local_in_place(a, x))
+        }
+        // `other.write_span(x, ...)` copies elements out of `x`; it keeps no
+        // reference to `x`'s buffer.
+        HirExprKind::MethodCall {
+            receiver, method, args, ..
+        } if method == "write_span" && matches!(args.first().map(|a| &a.kind), Some(HirExprKind::Local(s)) if *s == x) => {
+            expr_uses_local_in_place(receiver, x) && args[1..].iter().all(|a| expr_uses_local_in_place(a, x))
+        }
+        HirExprKind::Index { receiver, index } if matches!(receiver.kind, HirExprKind::Local(r) if r == x) => {
+            expr_uses_local_in_place(index, x)
+        }
+        HirExprKind::Local(_)
+        | HirExprKind::Lambda { .. }
+        | HirExprKind::LetIn { .. }
+        | HirExprKind::Block(_)
+        | HirExprKind::UnsafeBlock { .. } => false,
+        _ => {
+            let mut children = Vec::new();
+            expr_children(e, &mut children);
+            children.into_iter().all(|c| expr_uses_local_in_place(c, x))
         }
     }
 }
@@ -250,6 +623,54 @@ impl<'a> Analysis<'a> {
 
     fn disqualify(&mut self, idx: usize) {
         self.disqualified.insert(idx);
+        self.release_bad.insert(idx);
+    }
+
+    /// Disqualify `idx` as a move source only; field release has its own
+    /// write rules (`release_write_ok`, `release_field_store_ok`).
+    fn disqualify_move_only(&mut self, idx: usize) {
+        self.disqualified.insert(idx);
+    }
+
+    /// Declared fields of a concrete (non-generic) struct/class type.
+    fn release_struct_fields(&self, ty: TypeId) -> Option<&'a [(String, TypeId)]> {
+        match self.registry.get(ty) {
+            Some(HirType::Struct {
+                fields,
+                is_generic_template: false,
+                ..
+            }) => Some(fields.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// Rule (1): a write to a field-release candidate must be a full struct
+    /// literal of its own type whose array-typed fields all get private buffers.
+    fn release_write_ok(&self, idx: usize, value: Option<&HirExpr>) -> bool {
+        let Some(value) = value else { return false };
+        let Some(decl) = self.release_struct_fields(self.local_ty(idx)) else {
+            return false;
+        };
+        match &value.kind {
+            HirExprKind::StructInit { ty, fields } => {
+                *ty == self.local_ty(idx)
+                    && !self.has_inject_ctor(*ty)
+                    && fields.len() == decl.len()
+                    && fields.iter().zip(decl).all(|(f, (_, fty))| {
+                        !self.is_array(*fty) || struct_arg_gets_private_buffer(&f.kind, true, &self.handed_over)
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// Rule (2): what an `st.f = value` store into an array-typed field may be.
+    fn release_field_store_ok(&self, target: &HirExpr, value: &HirExpr) -> bool {
+        matches!(
+            value.kind,
+            HirExprKind::Array(_) | HirExprKind::ArrayRepeat { .. } | HirExprKind::VecLiteral(_)
+        ) || field_store_source(self, target, value).is_some()
+            || is_place(&value.kind)
     }
 
     fn owned(&self, idx: usize) -> bool {
@@ -299,9 +720,12 @@ impl<'a> Analysis<'a> {
         match stmt {
             HirStmt::Let { local_index, value, .. } => {
                 *self.let_counts.entry(*local_index).or_insert(0) += 1;
+                if !self.release_write_ok(*local_index, value.as_ref()) {
+                    self.release_bad.insert(*local_index);
+                }
                 if let Some(value) = value {
                     if !self.write_keeps_unique(*local_index, value, true) {
-                        self.disqualify(*local_index);
+                        self.disqualify_move_only(*local_index);
                     }
                     let array_place = is_place(&value.kind) && self.let_is_array(*local_index, value);
                     self.scan_expr(value, if array_place { Ctx::PlaceInit } else { Ctx::Bare });
@@ -310,15 +734,22 @@ impl<'a> Analysis<'a> {
             HirStmt::Assign { target, value } => {
                 match &target.kind {
                     HirExprKind::Local(idx) => {
+                        if !self.release_write_ok(*idx, Some(value)) {
+                            self.release_bad.insert(*idx);
+                        }
                         if !self.write_keeps_unique(*idx, value, false) {
-                            self.disqualify(*idx);
+                            self.disqualify_move_only(*idx);
                         }
                     }
                     HirExprKind::FieldAccess { receiver, .. } => {
                         // `s.f = arr` makes `s.f` share `arr`'s buffer.
                         if !is_primitive(value.ty) {
                             if let Some(root) = root_local(receiver) {
-                                self.disqualify(root);
+                                self.disqualify_move_only(root);
+                                let direct = matches!(receiver.kind, HirExprKind::Local(r) if r == root);
+                                if direct && self.is_array(target.ty) && !self.release_field_store_ok(target, value) {
+                                    self.release_bad.insert(root);
+                                }
                             }
                         }
                         self.scan_expr(receiver, Ctx::ProjectionBase);
@@ -329,7 +760,13 @@ impl<'a> Analysis<'a> {
                     }
                     _ => self.scan_expr(target, Ctx::Bare),
                 }
-                self.scan_expr(value, Ctx::Bare);
+                if let Some(o) = field_store_source(self, target, value) {
+                    *self.struct_arg_counts.entry(o).or_insert(0) += 1;
+                    *self.field_store_counts.entry(o).or_insert(0) += 1;
+                    self.scan_expr(value, Ctx::StructArg);
+                } else {
+                    self.scan_expr(value, Ctx::Bare);
+                }
             }
             HirStmt::Expr(e) => self.scan_expr(e, Ctx::Stmt),
             HirStmt::Return(Some(e)) => self.scan_expr(e, Ctx::Return),
@@ -522,6 +959,11 @@ impl<'a> Analysis<'a> {
                 for e in stmt_direct_exprs(stmt) {
                     struct_arg_locals(self, e, &mut args);
                 }
+                if let HirStmt::Assign { target, value } = stmt {
+                    if let Some(o) = field_store_source(self, target, value) {
+                        args.push(o);
+                    }
+                }
             }
             // A `return` ends the frame, so nothing after it can observe `o`.
             let is_return = matches!(stmt, HirStmt::Return(Some(_)));
@@ -569,6 +1011,754 @@ impl<'a> Analysis<'a> {
                 for child in children {
                     self.find_sites_in_expr(child, sites, proven);
                 }
+            }
+        }
+    }
+}
+
+// ---- S1 block-end release ----------------------------------------------------
+//
+// `doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md`, Option A
+// slice S1. A local is released (`rt_array_free`) when its declaring statement
+// list falls through, and only when every mention of it is on an ALLOWLIST.
+// The `owned` predicate above is a move-source predicate and stays true for
+// uses that leave a second holder (function result, struct-literal hand-over,
+// move source), so it is deliberately not reused here.
+
+/// Element types whose arrays hold no heap values: a shallow free is exact.
+/// `F32`/`F64` and `U64` are excluded: a float or u64 entering an array is
+/// heap-boxed (`RuntimeValue::from_float` / `from_u64`, every value), so a
+/// shallow free would leak every box. Measured: a 2,000,000-iteration
+/// `[1.5, 2.5, 3.5]` loop peaks at 212 MB with the release against 39 MB for
+/// the empty loop.
+fn is_release_scalar(ty: TypeId) -> bool {
+    matches!(
+        ty,
+        TypeId::BOOL
+            | TypeId::I8
+            | TypeId::I16
+            | TypeId::I32
+            | TypeId::I64
+            | TypeId::U8
+            | TypeId::U16
+            | TypeId::U32
+    )
+}
+
+fn is_release_index_ty(ty: TypeId) -> bool {
+    matches!(
+        ty,
+        TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+    )
+}
+
+/// Functions that initialise module globals; never release there.
+fn is_module_init_function(name: &str) -> bool {
+    name.starts_with("__module_init") || name.starts_with("__dyninit_part_")
+}
+
+trait StringReadScan {
+    fn local_ty(&self, idx: usize) -> TypeId;
+    fn mark_bad(&mut self, idx: usize);
+    fn visit_expr(&mut self, e: &HirExpr);
+}
+
+fn is_pure_string_scalar_method(method: &str, arg_count: usize) -> bool {
+    match method {
+        "len" | "char_count" | "byte_len" | "is_empty" | "parse_int" | "parse_i32"
+        | "parse_i64" | "parse_float" | "parse_f64" | "to_int" | "to_i64" | "to_f64"
+        | "is_digit" | "is_numeric" => arg_count == 0,
+        "starts_with" | "ends_with" | "contains" | "find" | "index_of" | "rfind"
+        | "last_index_of" | "char_code_at" | "byte_at" => arg_count == 1,
+        _ => false,
+    }
+}
+
+fn is_pure_string_read_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "print"
+            | "println"
+            | "eprint"
+            | "eprintln"
+            | "print_raw"
+            | "eprint_raw"
+            | "dprint"
+            | "rt_print_value"
+            | "rt_println_value"
+            | "rt_print_str"
+            | "rt_println_str"
+            | "rt_eprint_value"
+            | "rt_eprintln_value"
+            | "rt_eprint_str"
+            | "rt_eprintln_str"
+            | "rt_string_concat"
+            | "rt_value_to_string"
+            | "rt_term_write"
+    )
+}
+
+fn allow_typed_string_local<S: StringReadScan>(scan: &mut S, e: &HirExpr) {
+    if let HirExprKind::Local(idx) = &e.kind {
+        if e.ty == TypeId::STRING && scan.local_ty(*idx) == TypeId::STRING {
+            return;
+        }
+    }
+    scan.visit_expr(e);
+}
+
+fn scan_pure_string_consumer<S: StringReadScan>(scan: &mut S, e: &HirExpr) -> bool {
+    match &e.kind {
+        HirExprKind::MethodCall {
+            receiver,
+            method,
+            args,
+            ..
+        } if receiver.ty == TypeId::STRING && is_pure_string_scalar_method(method.as_str(), args.len()) => {
+            if let HirExprKind::Local(idx) = &receiver.kind {
+                if scan.local_ty(*idx) != TypeId::STRING {
+                    scan.mark_bad(*idx);
+                }
+            } else {
+                scan.visit_expr(receiver);
+            }
+            for arg in args {
+                allow_typed_string_local(scan, arg);
+            }
+            true
+        }
+        HirExprKind::Binary { op, left, right }
+            if left.ty == TypeId::STRING
+                && right.ty == TypeId::STRING
+                && (matches!(
+                    op,
+                    crate::hir::BinOp::Eq
+                        | crate::hir::BinOp::NotEq
+                        | crate::hir::BinOp::Lt
+                        | crate::hir::BinOp::LtEq
+                        | crate::hir::BinOp::Gt
+                        | crate::hir::BinOp::GtEq
+                ) || (*op == crate::hir::BinOp::Add && e.ty == TypeId::STRING)) =>
+        {
+            allow_typed_string_local(scan, left);
+            allow_typed_string_local(scan, right);
+            true
+        }
+        HirExprKind::BuiltinCall { name, args } if is_pure_string_read_builtin(name.as_str()) => {
+            for arg in args {
+                allow_typed_string_local(scan, arg);
+            }
+            true
+        }
+        HirExprKind::BuiltinCall { name, args } if name == "rt_value_format_string" && !args.is_empty() => {
+            allow_typed_string_local(scan, &args[0]);
+            for arg in &args[1..] {
+                scan.visit_expr(arg);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn stmts_have_defer(stmts: &[HirStmt]) -> bool {
+    stmts.iter().any(|s| match s {
+        HirStmt::Defer { .. } => true,
+        HirStmt::If {
+            then_block,
+            else_block,
+            ..
+        } => stmts_have_defer(then_block) || else_block.as_deref().is_some_and(stmts_have_defer),
+        HirStmt::While { body, .. } | HirStmt::Loop { body, .. } | HirStmt::For { body, .. } => {
+            stmts_have_defer(body)
+        }
+        _ => stmt_direct_exprs(s).into_iter().any(expr_has_block),
+    })
+}
+
+/// Allowlist scan: every `Local` mention that is not one of the three allowed
+/// shapes lands in `bad`.
+struct ReleaseScan<'x, 'a> {
+    a: &'x Analysis<'a>,
+    bad: HashSet<usize>,
+    /// Locals whose (single) `Let` initializer is a fresh literal or a place.
+    init_ok: HashSet<usize>,
+}
+
+impl StringReadScan for ReleaseScan<'_, '_> {
+    fn local_ty(&self, idx: usize) -> TypeId {
+        self.a.local_ty(idx)
+    }
+    fn mark_bad(&mut self, idx: usize) {
+        self.bad.insert(idx);
+    }
+    fn visit_expr(&mut self, e: &HirExpr) {
+        self.expr(e);
+    }
+}
+
+impl ReleaseScan<'_, '_> {
+    /// The use site must see the local at its declared type: the `len` and
+    /// index fast paths key on the expression type, and an `ANY`-typed
+    /// mention may dispatch elsewhere.
+    fn typed_as_local(&self, receiver: &HirExpr, idx: usize) -> bool {
+        receiver.ty == self.a.local_ty(idx)
+    }
+
+    /// Loop invariants are not lowered today; a local they mention is
+    /// disqualified so a future lowering cannot read a released slot.
+    fn poison_clauses(&mut self, clauses: &[HirContractClause]) {
+        for clause in clauses {
+            let mut locals = HashSet::new();
+            collect_locals_expr(&clause.condition, &mut locals);
+            self.bad.extend(locals);
+        }
+    }
+
+    /// Element type of an array of scalars, else `None`. A literal's inferred
+    /// type carries `size: Some(n)`; MIR and codegen never read `size`, and
+    /// every array value is the same `rt_array_new`-family heap handle.
+    fn scalar_array_elem(&self, ty: TypeId) -> Option<TypeId> {
+        match self.a.registry.get(ty) {
+            Some(HirType::Array { element, .. }) if is_release_scalar(*element) => Some(*element),
+            _ => None,
+        }
+    }
+
+    fn stmts(&mut self, stmts: &[HirStmt]) {
+        for stmt in stmts {
+            self.stmt(stmt);
+        }
+    }
+
+    fn stmt(&mut self, stmt: &HirStmt) {
+        match stmt {
+            HirStmt::Let { local_index, value, .. } => {
+                let Some(value) = value else {
+                    self.bad.insert(*local_index);
+                    return;
+                };
+                let slot_ty = self.a.local_ty(*local_index);
+                let elem = self.scalar_array_elem(slot_ty);
+                let fresh = match &value.kind {
+                    HirExprKind::Array(items) => items.iter().all(|it| is_release_scalar(it.ty)),
+                    HirExprKind::ArrayRepeat { value: item, .. } => is_release_scalar(item.ty),
+                    kind => is_place(kind),
+                };
+                let fresh_string = slot_ty == TypeId::STRING
+                    && value.ty == TypeId::STRING
+                    && is_fresh_string_expr(value);
+                // The initializer must be exactly the slot's type: no union,
+                // optional or `Any` wrapping between the buffer and the slot.
+                if (elem.is_some() && fresh && value.ty == slot_ty) || fresh_string {
+                    self.init_ok.insert(*local_index);
+                }
+                self.expr(value);
+            }
+            HirStmt::Assign { target, value } => {
+                match &target.kind {
+                    // `a[i] = scalar`
+                    HirExprKind::Index { receiver, index } if matches!(receiver.kind, HirExprKind::Local(_)) => {
+                        if let HirExprKind::Local(idx) = &receiver.kind {
+                            if !(is_release_scalar(target.ty)
+                                && is_release_scalar(value.ty)
+                                && is_release_index_ty(index.ty)
+                                && self.typed_as_local(receiver, *idx))
+                            {
+                                self.bad.insert(*idx);
+                            }
+                        }
+                        self.expr(index);
+                    }
+                    _ => self.expr(target),
+                }
+                self.expr(value);
+            }
+            HirStmt::If {
+                condition,
+                then_block,
+                else_block,
+                ..
+            } => {
+                self.expr(condition);
+                self.stmts(then_block);
+                if let Some(else_block) = else_block {
+                    self.stmts(else_block);
+                }
+            }
+            HirStmt::While {
+                condition,
+                body,
+                invariants,
+                ..
+            } => {
+                self.poison_clauses(invariants);
+                self.expr(condition);
+                self.stmts(body);
+            }
+            HirStmt::Loop { body, .. } | HirStmt::Defer { body } => self.stmts(body),
+            HirStmt::For {
+                pattern_local,
+                iterable,
+                body,
+                invariants,
+                ..
+            } => {
+                self.poison_clauses(invariants);
+                if let Some(idx) = pattern_local {
+                    self.bad.insert(*idx);
+                }
+                self.expr(iterable);
+                self.stmts(body);
+            }
+            _ => {
+                for e in stmt_direct_exprs(stmt) {
+                    self.expr(e);
+                }
+            }
+        }
+    }
+
+    fn expr(&mut self, e: &HirExpr) {
+        if scan_pure_string_consumer(self, e) {
+            return;
+        }
+        match &e.kind {
+            HirExprKind::Local(idx) => {
+                self.bad.insert(*idx);
+            }
+            // `a[i]` read yielding a scalar.
+            HirExprKind::Index { receiver, index } => {
+                if let HirExprKind::Local(idx) = &receiver.kind {
+                    if !(is_release_scalar(e.ty) && is_release_index_ty(index.ty) && self.typed_as_local(receiver, *idx))
+                    {
+                        self.bad.insert(*idx);
+                    }
+                } else {
+                    self.expr(receiver);
+                }
+                self.expr(index);
+            }
+            // `a.len()`: lowered straight to `rt_array_len`, before any user
+            // method lookup. The other NON_ESCAPING_ARRAY_METHODS are left to
+            // a later stage (mutating ones can move the buffer; several
+            // dispatch through `MethodCallStatic` with a user fallback).
+            HirExprKind::MethodCall {
+                receiver, method, args, ..
+            } => {
+                if let HirExprKind::Local(idx) = &receiver.kind {
+                    let read_only_method = matches!(method.as_str(), "len" | "char_count" | "byte_len");
+                    if !(read_only_method
+                        && args.is_empty()
+                        && is_release_index_ty(e.ty)
+                        && self.typed_as_local(receiver, *idx))
+                    {
+                        self.bad.insert(*idx);
+                    }
+                } else {
+                    self.expr(receiver);
+                }
+                for arg in args {
+                    self.expr(arg);
+                }
+            }
+            HirExprKind::Lambda { .. }
+            | HirExprKind::GeneratorCreate { .. }
+            | HirExprKind::FutureCreate { .. }
+            | HirExprKind::ActorSpawn { .. } => {
+                // Lambda bodies are lowered inside this function's local index
+                // space (parameter indices included): none of them qualifies.
+                let mut locals = HashSet::new();
+                collect_locals_expr(e, &mut locals);
+                self.bad.extend(locals);
+            }
+            HirExprKind::LetIn { local_idx, value, body } => {
+                self.bad.insert(*local_idx);
+                self.expr(value);
+                self.expr(body);
+            }
+            HirExprKind::Block(stmts) | HirExprKind::UnsafeBlock { statements: stmts, .. } => self.stmts(stmts),
+            _ => {
+                let mut children = Vec::new();
+                expr_children(e, &mut children);
+                for child in children {
+                    self.expr(child);
+                }
+            }
+        }
+    }
+}
+
+/// `return` / `break` / `continue` anywhere inside `stmt`, at any depth,
+/// including expression blocks (`?` lowers to a `Return` inside a `Block`)
+/// and lambda bodies (conservative).
+fn stmt_has_exit(stmt: &HirStmt) -> bool {
+    match stmt {
+        HirStmt::Return(_) | HirStmt::Break | HirStmt::Continue => true,
+        HirStmt::If {
+            condition,
+            then_block,
+            else_block,
+            ..
+        } => {
+            expr_has_exit(condition)
+                || then_block.iter().any(stmt_has_exit)
+                || else_block.as_ref().is_some_and(|b| b.iter().any(stmt_has_exit))
+        }
+        HirStmt::While { condition, body, .. } => expr_has_exit(condition) || body.iter().any(stmt_has_exit),
+        HirStmt::Loop { body, .. } | HirStmt::Defer { body } => body.iter().any(stmt_has_exit),
+        HirStmt::For { iterable, body, .. } => expr_has_exit(iterable) || body.iter().any(stmt_has_exit),
+        _ => stmt_direct_exprs(stmt).into_iter().any(expr_has_exit),
+    }
+}
+
+fn expr_has_exit(e: &HirExpr) -> bool {
+    match &e.kind {
+        HirExprKind::Block(stmts) | HirExprKind::UnsafeBlock { statements: stmts, .. } => {
+            stmts.iter().any(stmt_has_exit)
+        }
+        _ => {
+            let mut children = Vec::new();
+            expr_children(e, &mut children);
+            children.into_iter().any(expr_has_exit)
+        }
+    }
+}
+
+impl Analysis<'_> {
+    /// S1 result set: see the section comment above. `moved` are the `Let`s
+    /// lowering turns into moves (their slot does not hold a private copy).
+    fn block_release_locals(&self, func: &HirFunction, moved: &HashSet<usize>) -> HashSet<usize> {
+        let mut out = HashSet::new();
+        if is_module_init_function(&func.name) {
+            return out;
+        }
+        let mut scan = ReleaseScan {
+            a: self,
+            bad: HashSet::new(),
+            init_ok: HashSet::new(),
+        };
+        scan.stmts(&func.body);
+        let mut total: HashMap<usize, usize> = HashMap::new();
+        let mut uses = Vec::new();
+        for stmt in &func.body {
+            collect_local_uses_stmt(stmt, &mut uses);
+        }
+        for idx in uses {
+            *total.entry(idx).or_insert(0) += 1;
+        }
+        let candidates: HashSet<usize> = scan
+            .init_ok
+            .iter()
+            .copied()
+            .filter(|idx| {
+                *idx >= self.nparams
+                    && !scan.bad.contains(idx)
+                    && !moved.contains(idx)
+                    && !self.closure_locals.contains(idx)
+                    && self.let_counts.get(idx) == Some(&1)
+            })
+            .collect();
+        if !candidates.is_empty() {
+            release_sites_in_stmts(&func.body, &candidates, &total, &mut out);
+        }
+        out
+    }
+
+    fn string_overwrite_locals(&self, func: &HirFunction) -> HashSet<usize> {
+        let mut out = HashSet::new();
+        if is_module_init_function(&func.name) || self.poisoned {
+            return out;
+        }
+        let mut top_lets: HashSet<usize> = HashSet::new();
+        for stmt in &func.body {
+            if let HirStmt::Let { local_index, .. } = stmt {
+                top_lets.insert(*local_index);
+            }
+        }
+        struct StringOverwriteScan<'a> {
+            a: &'a Analysis<'a>,
+            bad: HashSet<usize>,
+            init_ok: HashSet<usize>,
+            has_defer: bool,
+        }
+        impl StringReadScan for StringOverwriteScan<'_> {
+            fn local_ty(&self, idx: usize) -> TypeId {
+                self.a.local_ty(idx)
+            }
+            fn mark_bad(&mut self, idx: usize) {
+                self.bad.insert(idx);
+            }
+            fn visit_expr(&mut self, e: &HirExpr) {
+                self.expr(e);
+            }
+        }
+        impl StringOverwriteScan<'_> {
+            fn is_fresh_or_lit(e: &HirExpr) -> bool {
+                e.ty == TypeId::STRING && (matches!(e.kind, HirExprKind::String(_)) || is_fresh_string_expr(e))
+            }
+            fn allow_direct_read(&mut self, e: &HirExpr) {
+                if matches!(e.kind, HirExprKind::Local(_)) {
+                    return;
+                }
+                self.expr(e);
+            }
+            fn stmts(&mut self, stmts: &[HirStmt], is_tail: bool) {
+                let last = stmts.len().saturating_sub(1);
+                for (i, s) in stmts.iter().enumerate() {
+                    self.stmt(s, is_tail && i == last);
+                }
+            }
+            fn stmt(&mut self, stmt: &HirStmt, is_tail: bool) {
+                match stmt {
+                    HirStmt::Let { local_index, value, .. } => {
+                        let slot_ty = self.a.local_ty(*local_index);
+                        if let Some(v) = value {
+                            if slot_ty == TypeId::STRING && Self::is_fresh_or_lit(v) {
+                                self.init_ok.insert(*local_index);
+                            } else {
+                                self.bad.insert(*local_index);
+                            }
+                            self.expr(v);
+                        } else {
+                            self.bad.insert(*local_index);
+                        }
+                    }
+                    HirStmt::Assign { target, value } => {
+                        if let HirExprKind::Local(idx) = &target.kind {
+                            if self.a.local_ty(*idx) == TypeId::STRING
+                                && target.ty == TypeId::STRING
+                                && Self::is_fresh_or_lit(value)
+                                && !expr_has_block(value)
+                            {
+                                // Safe overwriting assignment (including self-concats like `s = s + x`).
+                            } else {
+                                self.bad.insert(*idx);
+                            }
+                        } else {
+                            self.expr(target);
+                        }
+                        self.expr(value);
+                    }
+                    HirStmt::If {
+                        condition,
+                        then_block,
+                        else_block,
+                        ..
+                    } => {
+                        self.expr(condition);
+                        self.stmts(then_block, is_tail);
+                        if let Some(b) = else_block {
+                            self.stmts(b, is_tail);
+                        }
+                    }
+                    HirStmt::While {
+                        condition,
+                        body,
+                        invariants,
+                        ..
+                    } => {
+                        for c in invariants {
+                            self.expr(&c.condition);
+                        }
+                        self.expr(condition);
+                        self.stmts(body, false);
+                    }
+                    HirStmt::Loop { body, .. } | HirStmt::Defer { body } => self.stmts(body, false),
+                    HirStmt::For {
+                        pattern_local,
+                        iterable,
+                        body,
+                        invariants,
+                        ..
+                    } => {
+                        for c in invariants {
+                            self.expr(&c.condition);
+                        }
+                        if let Some(idx) = pattern_local {
+                            self.bad.insert(*idx);
+                        }
+                        self.expr(iterable);
+                        self.stmts(body, false);
+                    }
+                    HirStmt::Return(Some(e))
+                        if !self.has_defer && matches!(e.kind, HirExprKind::Local(_)) && e.ty == TypeId::STRING =>
+                    {
+                        // Returning the final value does not alias any previously overwritten string.
+                    }
+                    HirStmt::Expr(e)
+                        if is_tail
+                            && !self.has_defer
+                            && matches!(e.kind, HirExprKind::Local(_))
+                            && e.ty == TypeId::STRING =>
+                    {
+                        // Function tail expression return does not alias any previously overwritten string.
+                    }
+                    _ => {
+                        for e in stmt_direct_exprs(stmt) {
+                            self.expr(e);
+                        }
+                    }
+                }
+            }
+            fn expr(&mut self, e: &HirExpr) {
+                if scan_pure_string_consumer(self, e) {
+                    return;
+                }
+                match &e.kind {
+                    HirExprKind::Local(idx) => {
+                        self.bad.insert(*idx);
+                    }
+                    HirExprKind::MethodCall {
+                        receiver, method, args, ..
+                    } => {
+                        if let HirExprKind::Local(idx) = &receiver.kind {
+                            let ok = args.is_empty()
+                                && matches!(method.as_str(), "len" | "char_count" | "byte_len" | "is_empty")
+                                && receiver.ty == TypeId::STRING
+                                && self.a.local_ty(*idx) == TypeId::STRING;
+                            if !ok {
+                                self.bad.insert(*idx);
+                            }
+                        } else {
+                            self.expr(receiver);
+                        }
+                        for a in args {
+                            self.expr(a);
+                        }
+                    }
+                    HirExprKind::Binary {
+                        op: crate::hir::BinOp::Eq | crate::hir::BinOp::NotEq,
+                        left,
+                        right,
+                    } => {
+                        self.allow_direct_read(left);
+                        self.allow_direct_read(right);
+                    }
+                    HirExprKind::BuiltinCall { name, args }
+                        if matches!(
+                            name.as_str(),
+                            "print"
+                                | "println"
+                                | "rt_print_value"
+                                | "rt_println_value"
+                                | "rt_print_str"
+                                | "rt_println_str"
+                        ) =>
+                    {
+                        for a in args {
+                            self.allow_direct_read(a);
+                        }
+                    }
+                    HirExprKind::Lambda { .. }
+                    | HirExprKind::GeneratorCreate { .. }
+                    | HirExprKind::FutureCreate { .. }
+                    | HirExprKind::ActorSpawn { .. } => {
+                        let mut locals = HashSet::new();
+                        collect_locals_expr(e, &mut locals);
+                        self.bad.extend(locals);
+                    }
+                    HirExprKind::LetIn { local_idx, value, body } => {
+                        self.bad.insert(*local_idx);
+                        self.expr(value);
+                        self.expr(body);
+                    }
+                    HirExprKind::Block(stmts) | HirExprKind::UnsafeBlock { statements: stmts, .. } => {
+                        self.stmts(stmts, false);
+                    }
+                    _ => {
+                        let mut children = Vec::new();
+                        expr_children(e, &mut children);
+                        for c in children {
+                            self.expr(c);
+                        }
+                    }
+                }
+            }
+        }
+        let mut scan = StringOverwriteScan {
+            a: self,
+            bad: HashSet::new(),
+            init_ok: HashSet::new(),
+            has_defer: stmts_have_defer(&func.body),
+        };
+        scan.stmts(&func.body, true);
+        for idx in scan.init_ok {
+            if idx >= self.nparams
+                && !scan.bad.contains(&idx)
+                && !self.closure_locals.contains(&idx)
+                && self.let_counts.get(&idx) == Some(&1)
+                && top_lets.contains(&idx)
+            {
+                out.insert(idx);
+            }
+        }
+        out
+    }
+}
+
+/// Keep the candidates whose every mention lies in the declaring statement
+/// list strictly after the `Let`, with no early exit from the `Let` onward.
+fn release_sites_in_stmts(
+    stmts: &[HirStmt],
+    candidates: &HashSet<usize>,
+    total: &HashMap<usize, usize>,
+    out: &mut HashSet<usize>,
+) {
+    for (i, stmt) in stmts.iter().enumerate() {
+        if let HirStmt::Let {
+            local_index,
+            value: Some(_),
+            ..
+        } = stmt
+        {
+            if candidates.contains(local_index) {
+                let later: usize = stmts[i + 1..].iter().map(|s| count_mentions_stmt(s, *local_index)).sum();
+                // The `Let` itself is one mention; a self-reference in the
+                // initializer or any mention outside `stmts[i + 1..]` (an
+                // earlier statement of a loop body, a sibling list) breaks
+                // the equality.
+                if total.get(local_index) == Some(&(later + 1)) && !stmts[i..].iter().any(stmt_has_exit) {
+                    out.insert(*local_index);
+                }
+            }
+        }
+        match stmt {
+            HirStmt::If {
+                then_block, else_block, ..
+            } => {
+                release_sites_in_stmts(then_block, candidates, total, out);
+                if let Some(else_block) = else_block {
+                    release_sites_in_stmts(else_block, candidates, total, out);
+                }
+            }
+            HirStmt::While { body, .. } | HirStmt::Loop { body, .. } | HirStmt::For { body, .. } => {
+                release_sites_in_stmts(body, candidates, total, out)
+            }
+            _ => {}
+        }
+        for e in stmt_direct_exprs(stmt) {
+            release_sites_in_expr(e, candidates, total, out);
+        }
+    }
+}
+
+fn release_sites_in_expr(
+    e: &HirExpr,
+    candidates: &HashSet<usize>,
+    total: &HashMap<usize, usize>,
+    out: &mut HashSet<usize>,
+) {
+    match &e.kind {
+        HirExprKind::Block(stmts) | HirExprKind::UnsafeBlock { statements: stmts, .. } => {
+            release_sites_in_stmts(stmts, candidates, total, out)
+        }
+        HirExprKind::Lambda { .. } => {}
+        _ => {
+            let mut children = Vec::new();
+            expr_children(e, &mut children);
+            for child in children {
+                release_sites_in_expr(child, candidates, total, out);
             }
         }
     }
@@ -812,7 +2002,8 @@ fn expr_children<'e>(e: &'e HirExpr, out: &mut Vec<&'e HirExpr>) {
         | HirExprKind::VecLiteral(items)
         | HirExprKind::StructInit { fields: items, .. }
         | HirExprKind::BuiltinCall { args: items, .. }
-        | HirExprKind::GpuIntrinsic { args: items, .. } => out.extend(items.iter()),
+        | HirExprKind::GpuIntrinsic { args: items, .. }
+        | HirExprKind::TypeParamStaticCall { args: items, .. } => out.extend(items.iter()),
         HirExprKind::ArrayRepeat { value, count } => {
             out.push(value);
             out.push(count);
@@ -859,6 +2050,7 @@ fn expr_children<'e>(e: &'e HirExpr, out: &mut Vec<&'e HirExpr>) {
         | HirExprKind::Global(_)
         | HirExprKind::Block(_)
         | HirExprKind::UnsafeBlock { .. }
-        | HirExprKind::ContractResult => {}
+        | HirExprKind::ContractResult
+        | HirExprKind::ConstGeneric(_) => {}
     }
 }

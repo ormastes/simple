@@ -1,8 +1,16 @@
 # Membership queries (.contains/.has/in): untagged needle in the seed LLVM backend
-## Open 2026-09-16 — needs owner triage
+## OPEN — triaged 2026-11-25: 3/4 sites fixed; last site is seed-LLVM-only, needs an llvm-feature seed build
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+
+**Triage 2026-11-25:** the family is fixed everywhere except the seed LLVM
+trait emitter (`codegen/llvm/emitter.rs:1443`), which needs its own lane
+(vreg type info on `CodegenEmitter`). The fix surface is
+`src/compiler_rust/**` and behavioral proof needs an llvm-feature seed build
+— both out of scope for the pure-Simple P3 lanes (no cargo builds). Cranelift
+JIT, interpreter, spec lane, and native worker are already correct or
+fail-closed per the truth table below. Left OPEN, no code change.
 
 **Date:** 2026-08-02 · **Severity:** medium (latent — lane not currently shipped) · **Area:** seed LLVM codegen
 

@@ -80,3 +80,7 @@ a direct run producing a 0-byte log with rc=1 (exit status read into a variable 
 line after the invocation, not through a pipe). The `:543-544` post-build pair is the
 same shape by inspection; it was not separately triggered.
 
+
+## Triage 2026-11-03 (boot-script-fixes lane)
+
+Already fixed on origin: scripts/bootstrap/resume-stage3-from-admitted.sh:665-676 now wraps each snapshot cmp with a stderr reason (error: Stage-2 source/git/tool ... changed since admission) while keeping exit 1. Row closed fixed.

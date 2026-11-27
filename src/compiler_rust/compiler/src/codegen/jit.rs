@@ -10,6 +10,8 @@ use std::sync::Arc;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::Module;
 
+pub(crate) use super::jit_dlsym::{dlsym_lookup, dlsym_resolves};
+
 use crate::mir::{MirInst, MirModule};
 
 use super::common_backend::{
@@ -31,7 +33,7 @@ pub struct JitCompiler {
     /// Map of function names to their native function pointers
     compiled_funcs: HashMap<String, *const u8>,
     /// Runtime symbol provider (kept alive for the lifetime of the compiler;
-    /// also queried by `first_unresolved_import_called` to detect NULL-jump imports).
+    /// also queried by `unresolved_imports_called` to detect NULL-jump imports).
     provider: Arc<dyn RuntimeSymbolProvider>,
     /// Heap-backed global initialization runs once before the first JIT entry call.
     module_init_ran: AtomicBool,
@@ -64,14 +66,25 @@ impl JitCompiler {
         let settings = BackendSettings::jit();
         let (_flags, isa) = create_isa_and_flags(&settings)?;
 
-        let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut builder = JITBuilder::with_isa(isa.clone(), cranelift_module::default_libcall_names());
 
         // Register runtime SFFI symbols from the provider
-        register_runtime_symbols_from_provider(&mut builder, provider.as_ref());
-        register_compiler_owned_symbols(&mut builder);
+        register_seed_jit_runtime_symbols(&mut builder, &seed_jit_runtime_symbol_table(provider.as_ref()));
+        // Then every elf_utils name, at the address `jit_import_resolves` vouched
+        // for. Without this a seed linked without --export-dynamic spliced calls
+        // to the 81 elf_utils-only externs (rt_cranelift_*, spl_cranelift_*_v2, ...)
+        // through the interpreter. Only the seed's own JIT gets it:
+        // cranelift_sffi modules keep their runtime-table-only import contract.
+        builder.symbol_lookup_fn(Box::new(|name| {
+            crate::elf_utils::resolve_runtime_symbol(name).map(|addr| addr as *const u8)
+        }));
+        #[cfg(windows)]
+        builder.symbol_lookup_fn(Box::new(|name| dlsym_lookup(name)));
 
         let module = JITModule::new(builder);
-        let backend = CodegenBackend::with_module(module)?;
+        let mut backend = CodegenBackend::with_module(module)?;
+        backend.codegen_isa = Some(isa);
+        backend.codegen_workers = jit_codegen_workers();
 
         Ok(Self {
             backend,
@@ -87,6 +100,21 @@ impl JitCompiler {
     /// This is the most efficient option with zero runtime lookup cost.
     pub fn new_static() -> JitResult<Self> {
         Self::with_provider(static_provider())
+    }
+
+    /// Body-loop counters of the most recent `compile_module`.
+    pub fn body_loop_stats(&self) -> super::common_backend::BodyLoopStats {
+        self.backend.body_loop_stats.clone()
+    }
+
+    /// Record every defined body (name, final CLIF, machine code) from now on.
+    pub fn capture_compiled_code(&mut self) {
+        self.backend.capture_code = Some(Vec::new());
+    }
+
+    /// The bodies recorded since `capture_compiled_code`, in define order.
+    pub fn take_captured_code(&mut self) -> Vec<super::common_backend::CapturedFunction> {
+        self.backend.capture_code.take().unwrap_or_default()
     }
 
     /// Compile a MIR module and return function pointers.
@@ -159,9 +187,50 @@ impl JitCompiler {
                 mir.globals.len()
             );
         }
+        // SIMPLE_JIT_XLATE_VERIFY=1: compile this module's bodies again in a
+        // fresh serial JIT (same process, same MIR) and report every body whose
+        // name, final CLIF or machine code differs from the ones defined here.
+        let verify = std::env::var_os("SIMPLE_JIT_XLATE_VERIFY").is_some() && self.backend.capture_code.is_none();
+        if verify {
+            self.backend.capture_code = Some(Vec::new());
+        }
         let functions = self.backend.compile_all_functions(mir)?;
+        if verify {
+            let ours = self.backend.capture_code.take().unwrap_or_default();
+            let mut serial = Self::with_provider(self.provider.clone())?;
+            serial.backend.codegen_workers = 1;
+            serial.backend.capture_code = Some(Vec::new());
+            serial.backend.compile_all_functions(mir)?;
+            let theirs = serial.backend.capture_code.take().unwrap_or_default();
+            let mut mismatches = 0usize;
+            for (i, (a, b)) in ours.iter().zip(&theirs).enumerate() {
+                if a != b {
+                    mismatches += 1;
+                    if mismatches == 1 {
+                        eprintln!("[jit-xlate-verify] OURS\n{}\n[jit-xlate-verify] SERIAL\n{}", a.clif, b.clif);
+                    }
+                    if mismatches <= 5 {
+                        eprintln!(
+                            "[jit-xlate-verify] #{i} {} vs serial {}: name={} clif={} code={}",
+                            a.name,
+                            b.name,
+                            a.name == b.name,
+                            a.clif == b.clif,
+                            a.code == b.code
+                        );
+                    }
+                }
+            }
+            eprintln!(
+                "[jit-xlate-verify] bodies={} serial_bodies={} mismatches={}",
+                ours.len(),
+                theirs.len(),
+                mismatches
+            );
+        }
         if stage_trace {
             eprintln!("[jit-stage] compile_all:done compiled={}", functions.len());
+            eprintln!("[jit-stage] body_loop {:?}", self.backend.body_loop_stats);
         }
 
         // Pre-finalize guard against NULL-jump crashes.
@@ -176,31 +245,48 @@ impl JitCompiler {
         // reports these as a clean "undefined symbol" relocation error, but
         // JIT would crash. Detect them here and fail the JIT compile so the
         // driver's interpreter fallback runs instead (matching AOT behaviour).
-        if let Some(name) = self.first_unresolved_import_called(mir) {
+        let unresolved = self.unresolved_imports_called(mir);
+        if let Some(name) = unresolved.first() {
             // Make the de-JIT LOUD. A silent whole-module drop to the
             // interpreter is a proven catastrophic-cost defect class here: one
             // unresolvable name cost ~1000x (parse_html 3.56s -> 19.4ms,
             // compute_styles >10min -> 369ms once fixed, 365a643236b). Worse,
             // de-JITted code is *correct but slow*, so it silently hides real
             // miscompiles until someone makes it fast. Always emit a greppable
-            // marker naming the symbol.
-            eprintln!(
-                "[jit-fallback] unresolved external symbol '{name}': \
-                 whole module dropped to the interpreter (expect ~100-1000x slowdown). \
-                 Set SIMPLE_JIT_STRICT=1 to turn this into a hard error."
-            );
+            // marker naming EVERY symbol: naming only the first hid caret's
+            // three smux imports behind each other.
+            for each in &unresolved {
+                eprintln!(
+                    "[jit-fallback] unresolved external symbol '{each}' ({}): \
+                     whole module dropped to the interpreter (expect ~100-1000x slowdown). \
+                     Set SIMPLE_JIT_STRICT=1 to turn this into a hard error.",
+                    unresolved_import_kind(each)
+                );
+            }
+            let kind = unresolved_import_kind(name);
+            let rest = if unresolved.len() > 1 {
+                let others: Vec<String> = unresolved[1..]
+                    .iter()
+                    .map(|other| format!("'{other}' ({})", unresolved_import_kind(other)))
+                    .collect();
+                format!("; {} more unresolved: {}", others.len(), others.join(", "))
+            } else {
+                String::new()
+            };
             // Opt-in hard failure for lanes that must never silently de-JIT.
             // Off by default so legitimate fallbacks (cross-module Simple
             // method symbols) keep working.
             if jit_fallback_is_strict() {
-                self.emit_unresolved_symbol_trace(mir, &name);
+                for each in &unresolved {
+                    self.emit_unresolved_symbol_trace(mir, each);
+                }
                 return Err(BackendError::ModuleError(format!(
-                    "SIMPLE_JIT_STRICT: unresolved external symbol '{name}' would NULL-jump in JIT; \
+                    "SIMPLE_JIT_STRICT: unresolved external symbol '{name}' ({kind}) would NULL-jump in JIT{rest}; \
                      refusing to fall back to the interpreter"
                 )));
             }
             return Err(BackendError::ModuleError(format!(
-                "unresolved external symbol '{name}' would NULL-jump in JIT; deferring to interpreter"
+                "unresolved external symbol '{name}' ({kind}) would NULL-jump in JIT{rest}; deferring to interpreter"
             )));
         }
 
@@ -244,7 +330,7 @@ impl JitCompiler {
     /// (see `MirLowerer::lower_lambda_expr`); generators, futures and actors
     /// have their own instructions. See `compile_module` for why its presence
     /// disqualifies a module from JIT execution.
-    fn first_lambda_function_impl(mir: &MirModule) -> Option<String> {
+    pub(crate) fn first_lambda_function_impl(mir: &MirModule) -> Option<String> {
         Self::first_unsupported_lambda(mir).map(|(name, _)| name)
     }
 
@@ -284,12 +370,22 @@ impl JitCompiler {
     fn first_unsupported_lambda(mir: &MirModule) -> Option<(String, String)> {
         use crate::mir::MirInst;
 
+        // A closure built in one function is called back in ANOTHER
+        // (`fn call_once(f): return f(10)` fed `_1 + 1`): that callee has no
+        // `ClosureCreate`, but its `IndirectCall` boundary is just as
+        // untyped. Skipping it let `call_once(_1 + 1)` return the tagged 11
+        // (88) as a raw int. So once ANY function in the module builds a
+        // closure, every function's indirect-call boundary is checked.
+        let module_has_closure = mir
+            .functions
+            .iter()
+            .any(|f| !crate::mir::closure_call_types::closure_value_regs(f).is_empty());
+        if !module_has_closure {
+            return None;
+        }
         for func in &mir.functions {
             // Registers holding a closure built in THIS function.
             let closure_regs = crate::mir::closure_call_types::closure_value_regs(func);
-            if closure_regs.is_empty() {
-                continue;
-            }
 
             // A closure register may only be consumed as an `IndirectCall`
             // callee (case 1) or stored/loaded through a local — the shape a
@@ -338,15 +434,47 @@ impl JitCompiler {
                         callee,
                         param_types,
                         return_type,
+                        signature_declared,
                         ..
                     } = inst
                     {
                         let _ = callee;
-                        if !(crate::codegen::jit_closure_abi_supports(*return_type)
-                            && param_types
-                                .iter()
-                                .all(|ty| crate::codegen::jit_closure_abi_supports(*ty)))
-                        {
+                        // An `ANY` slot of a DECLARED signature (`fn(T) -> T`,
+                        // `fn(any) -> any`) is a tagged `RuntimeValue` word:
+                        // MIR lowering coerced every argument into its declared
+                        // slot, the boxed entry answers a tagged word, and both
+                        // sides carry an `ANY` word verbatim. Only an `ANY`
+                        // that is a mere guess (no declared function type)
+                        // has no correct encoding and stays refused.
+                        let slot_ok = |ty: crate::hir::TypeId| {
+                            crate::codegen::jit_closure_abi_supports(ty)
+                                || (*signature_declared && ty == crate::hir::TypeId::ANY)
+                        };
+                        // A VOID result carries no value, so no encoding can be
+                        // wrong for it: `block()` on a `fn()` (every std.spec
+                        // `describe`/`it`/`skip_if` body) is carryable.
+                        // BOOL is likewise carryable as a call RESULT: the boxed
+                        // entry boxes it full-width and `unbox_from_closure_boundary`
+                        // compares it against 0. (The documented BOOL defect is the
+                        // outlined BODY declared as `i8`, which shared.rs avoids by
+                        // keeping such bodies I64.) skip_if's `condition()` is this.
+                        let return_ok = *return_type == crate::hir::TypeId::VOID
+                            || *return_type == crate::hir::TypeId::BOOL
+                            || slot_ok(*return_type);
+                        // A narrow integer PARAMETER is carryable too: the call
+                        // site widens it (by signedness) and boxes it, and the
+                        // boxed entry decodes and narrows it to the type the
+                        // body declares (`fn(text, i32)`). A narrow RESULT is not
+                        // admitted: the outlined body is declared I64 for it.
+                        let param_ok = |ty: crate::hir::TypeId| {
+                            use crate::hir::TypeId;
+                            slot_ok(ty)
+                                || matches!(
+                                    ty,
+                                    TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::U8 | TypeId::U16 | TypeId::U32
+                                )
+                        };
+                        if !(return_ok && param_types.iter().all(|ty| param_ok(*ty))) {
                             return Some((
                                 func.name.clone(),
                                 format!(
@@ -367,8 +495,13 @@ impl JitCompiler {
                 // \\x: x + 100`). The object convention is right; the boxing of
                 // the HANDLE on the way out is not, so this one shape stays
                 // refused and named.
+                // Only an `any`-typed return slot boxes the handle. A slot typed
+                // as a function (`-> fn(text, fn())`, std.spec's `skip`
+                // decorator) carries the closure object pointer untouched, so
+                // refusing it de-JITed every module importing std.spec.
+                // See doc/08_tracking/bug/seed_jit_spec_files_never_jit_2026-11-04.md.
                 if let crate::mir::Terminator::Return(Some(reg)) = &block.terminator {
-                    if closure_regs.contains(reg) {
+                    if closure_regs.contains(reg) && func.return_type == crate::hir::TypeId::ANY {
                         return Some((
                             func.name.clone(),
                             "the closure is returned from the function, whose return slot boxes \
@@ -433,9 +566,9 @@ impl JitCompiler {
         None
     }
 
-    /// Return the name of a declared `Linkage::Import` function that will not
-    /// resolve to a real address at finalize time AND is directly called from
-    /// compiled code, if any.
+    /// Every declared `Linkage::Import` function that will not resolve to a
+    /// real address at finalize time AND is directly called from compiled
+    /// code, in declaration order (empty when all resolve).
     ///
     /// Mirrors cranelift-jit's own `lookup_symbol` (registered runtime symbols
     /// plus a `dlsym(RTLD_DEFAULT)` fallback). An import that neither resolves
@@ -449,7 +582,7 @@ impl JitCompiler {
     /// NULL slot is never jumped to, so rejecting it dropped whole modules to
     /// the interpreter for no safety gain (measured: every GPU/showcase run
     /// de-JITed on spl_thread_current_id even though the call bridged fine).
-    fn first_unresolved_import_called(&self, mir: &MirModule) -> Option<String> {
+    fn unresolved_imports_called(&self, mir: &MirModule) -> Vec<String> {
         use cranelift_module::{Linkage, Module};
         let mut directly_called: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for func in &mir.functions {
@@ -469,6 +602,7 @@ impl JitCompiler {
                 }
             }
         }
+        let mut unresolved = Vec::new();
         for (_id, decl) in self.backend.module.declarations().get_functions() {
             if decl.linkage != Linkage::Import {
                 continue;
@@ -480,11 +614,11 @@ impl JitCompiler {
                     continue;
                 }
                 if directly_called.contains(name) && !jit_import_resolves(self.provider.as_ref(), name) {
-                    return Some(name.to_string());
+                    unresolved.push(name.to_string());
                 }
             }
         }
-        None
+        unresolved
     }
 
     /// Emit bounded ownership evidence for a strict unresolved JIT import.
@@ -659,20 +793,37 @@ impl Default for JitCompiler {
     }
 }
 
-/// Register runtime SFFI function symbols with the JIT builder from a provider.
+/// The runtime symbol table every seed JIT builder registers: each runtime SFFI
+/// symbol the provider (static or dynamic) or the ELF fallback resolves, then
+/// the compiler-owned symbols, as `(name, address)` pairs.
 ///
-/// This allows the JIT to resolve external function calls to runtime SFFI functions
-/// like print, array operations, etc. The symbols are obtained from the provider,
-/// which can be static (compiled-in) or dynamic (loaded from shared library).
-fn register_runtime_symbols_from_provider(builder: &mut JITBuilder, provider: &dyn RuntimeSymbolProvider) {
+/// This is the ONE source for both JIT builders in the seed: `JitCompiler`
+/// (the seed's own JIT) and the `rt_cranelift_*` provider that pure-Simple
+/// code drives (`cranelift_sffi::rt_cranelift_new_module_impl`). Signatures
+/// for these names come from `runtime_sffi::RUNTIME_FUNCS`.
+pub(crate) fn seed_jit_runtime_symbol_table(provider: &dyn RuntimeSymbolProvider) -> Vec<(&'static str, *const u8)> {
     use simple_native_loader::RUNTIME_SYMBOL_NAMES;
 
+    let mut table = Vec::with_capacity(RUNTIME_SYMBOL_NAMES.len() + COMPILER_OWNED_RUNTIME_SYMBOLS.len());
     for &name in RUNTIME_SYMBOL_NAMES {
         if let Some(ptr) = provider.get_symbol(name) {
-            builder.symbol(name, ptr);
+            table.push((name, ptr));
         } else if let Some(addr) = crate::elf_utils::resolve_runtime_symbol(name) {
-            builder.symbol(name, addr as *const u8);
+            table.push((name, addr as *const u8));
         }
+    }
+    for &name in COMPILER_OWNED_RUNTIME_SYMBOLS {
+        if let Some(ptr) = compiler_owned_symbol(name) {
+            table.push((name, ptr));
+        }
+    }
+    table
+}
+
+/// Register a [`seed_jit_runtime_symbol_table`] with a `JITBuilder`.
+pub(crate) fn register_seed_jit_runtime_symbols(builder: &mut JITBuilder, table: &[(&'static str, *const u8)]) {
+    for &(name, ptr) in table {
+        builder.symbol(name, ptr);
     }
 }
 
@@ -692,25 +843,112 @@ fn register_runtime_symbols_from_provider(builder: &mut JITBuilder, provider: &d
 /// unbacked-extern defect class (see
 /// `doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md`).
 fn compiler_owned_symbol(name: &str) -> Option<*const u8> {
+    use crate::codegen::jit_sffi_bridges::*;
     match name {
         "rt_native_build" => Some(crate::native_build_sffi::rt_native_build as *const u8),
+        "rt_http_request" => Some(jit_rt_http_request as *const u8),
+        "rt_http_request_v2" => Some(jit_rt_http_request_v2 as *const u8),
+        "rt_process_spawn_piped" => Some(jit_rt_process_spawn_piped as *const u8),
+        "rt_process_read_stdout" => Some(jit_rt_process_read_stdout as *const u8),
+        "rt_process_write_stdin_some" => Some(jit_rt_process_write_stdin_some as *const u8),
+        "rt_process_is_alive" => Some(jit_rt_process_is_alive as *const u8),
+        "rt_process_close_piped" => Some(jit_rt_process_close_piped as *const u8),
+        "rt_process_stdout_state" => Some(jit_rt_process_stdout_state as *const u8),
+        "rt_process_piped_exit_status_value" => Some(jit_rt_process_piped_exit_status_value as *const u8),
+        "rt_process_spawn_piped_generation_v1" => Some(jit_rt_process_spawn_piped_generation_v1 as *const u8),
+        "rt_process_piped_pid_for_generation_v1" => Some(jit_rt_process_piped_pid_for_generation_v1 as *const u8),
+        "rt_process_read_stdout_ref_v1" => Some(jit_rt_process_read_stdout_ref_v1 as *const u8),
+        "rt_process_stdout_state_ref_v1" => Some(jit_rt_process_stdout_state_ref_v1 as *const u8),
+        "rt_process_validate_piped_ref_v1" => Some(jit_rt_process_validate_piped_ref_v1 as *const u8),
+        "rt_process_write_stdin_some_ref_v1" => Some(jit_rt_process_write_stdin_some_ref_v1 as *const u8),
+        "rt_process_is_piped_alive_ref_v1" => Some(jit_rt_process_is_piped_alive_ref_v1 as *const u8),
+        "rt_process_close_piped_ref_v1" => Some(jit_rt_process_close_piped_ref_v1 as *const u8),
+        "rt_local_unix_connect_v1" => Some(jit_rt_local_unix_connect_v1 as *const u8),
+        "rt_local_unix_read_v1" => Some(jit_rt_local_unix_read_v1 as *const u8),
+        "rt_local_unix_write_some_v1" => Some(jit_rt_local_unix_write_some_v1 as *const u8),
+        "rt_local_unix_write_some_admitted_v1" => Some(jit_rt_local_unix_write_some_admitted_v1 as *const u8),
+        "rt_local_unix_close_v1" => Some(jit_rt_local_unix_close_v1 as *const u8),
+        "rt_retained_private_credential_open_v1" => Some(jit_rt_retained_private_credential_open_v1 as *const u8),
+        "rt_retained_private_credential_state_v1" => Some(jit_rt_retained_private_credential_state_v1 as *const u8),
+        "rt_retained_private_credential_error_v1" => Some(jit_rt_retained_private_credential_error_v1 as *const u8),
+        "rt_retained_private_credential_read_v1" => Some(jit_rt_retained_private_credential_read_v1 as *const u8),
+        "rt_retained_private_credential_publish_v1" => Some(jit_rt_retained_private_credential_publish_v1 as *const u8),
+        "rt_retained_private_credential_close_v1" => Some(jit_rt_retained_private_credential_close_v1 as *const u8),
+        "rt_process_stream_reserve_v2" => Some(jit_rt_process_stream_reserve_v2 as *const u8),
+        "rt_process_stream_bind_v2" => Some(jit_rt_process_stream_bind_v2 as *const u8),
+        "rt_process_stream_abandon_unlaunched_v2" => Some(jit_rt_process_stream_abandon_unlaunched_v2 as *const u8),
+        "rt_process_stream_pid_v2" => Some(jit_rt_process_stream_pid_v2 as *const u8),
+        "rt_process_stream_retire_v2" => Some(jit_rt_process_stream_retire_v2 as *const u8),
+        "rt_process_read_stdout_owned_v2" => Some(jit_rt_process_read_stdout_owned_v2 as *const u8),
+        "rt_process_stdout_state_owned_v2" => Some(jit_rt_process_stdout_state_owned_v2 as *const u8),
+        "rt_process_validate_piped_owned_v2" => Some(jit_rt_process_validate_piped_owned_v2 as *const u8),
+        "rt_process_write_stdin_some_owned_v2" => Some(jit_rt_process_write_stdin_some_owned_v2 as *const u8),
+        "rt_process_input_enable_v1" => Some(jit_rt_process_input_enable_v1 as *const u8),
+        "rt_process_input_install_v1" => Some(jit_rt_process_input_install_v1 as *const u8),
+        "rt_process_input_revoke_v1" => Some(jit_rt_process_input_revoke_v1 as *const u8),
+        "rt_process_input_state_v1" => Some(jit_rt_process_input_state_v1 as *const u8),
+        "rt_process_input_write_some_v1" => Some(jit_rt_process_input_write_some_v1 as *const u8),
+        "rt_linux_group_stream_admit_v2" => Some(jit_rt_linux_group_stream_admit_v2 as *const u8),
+        "rt_linux_group_launch_stream_broker_v2" => Some(jit_rt_linux_group_launch_stream_broker_v2 as *const u8),
+        "rt_linux_group_stream_admit_profiled_v3" => Some(jit_rt_linux_group_stream_admit_profiled_v3 as *const u8),
+        "rt_linux_group_launch_stream_broker_profiled_v3" => {
+            Some(jit_rt_linux_group_launch_stream_broker_profiled_v3 as *const u8)
+        }
         _ => None,
     }
 }
 
 /// The names `compiler_owned_symbol` answers for. Kept beside it so a test can
 /// assert the two agree and neither can silently empty out.
-pub const COMPILER_OWNED_RUNTIME_SYMBOLS: &[&str] = &["rt_native_build"];
-
-/// Publish [`COMPILER_OWNED_RUNTIME_SYMBOLS`] to a `JITBuilder`, mirroring what
-/// `register_runtime_symbols_from_provider` does for the runtime-owned set.
-fn register_compiler_owned_symbols(builder: &mut JITBuilder) {
-    for &name in COMPILER_OWNED_RUNTIME_SYMBOLS {
-        if let Some(ptr) = compiler_owned_symbol(name) {
-            builder.symbol(name, ptr);
-        }
-    }
-}
+pub const COMPILER_OWNED_RUNTIME_SYMBOLS: &[&str] = &[
+    "rt_native_build",
+    "rt_http_request",
+    "rt_http_request_v2",
+    "rt_process_spawn_piped",
+    "rt_process_read_stdout",
+    "rt_process_write_stdin_some",
+    "rt_process_is_alive",
+    "rt_process_close_piped",
+    "rt_process_stdout_state",
+    "rt_process_piped_exit_status_value",
+    "rt_process_spawn_piped_generation_v1",
+    "rt_process_piped_pid_for_generation_v1",
+    "rt_process_read_stdout_ref_v1",
+    "rt_process_stdout_state_ref_v1",
+    "rt_process_validate_piped_ref_v1",
+    "rt_process_write_stdin_some_ref_v1",
+    "rt_process_is_piped_alive_ref_v1",
+    "rt_process_close_piped_ref_v1",
+    "rt_local_unix_connect_v1",
+    "rt_local_unix_read_v1",
+    "rt_local_unix_write_some_v1",
+    "rt_local_unix_write_some_admitted_v1",
+    "rt_local_unix_close_v1",
+    "rt_retained_private_credential_open_v1",
+    "rt_retained_private_credential_state_v1",
+    "rt_retained_private_credential_error_v1",
+    "rt_retained_private_credential_read_v1",
+    "rt_retained_private_credential_publish_v1",
+    "rt_retained_private_credential_close_v1",
+    "rt_process_stream_reserve_v2",
+    "rt_process_stream_bind_v2",
+    "rt_process_stream_abandon_unlaunched_v2",
+    "rt_process_stream_pid_v2",
+    "rt_process_stream_retire_v2",
+    "rt_process_read_stdout_owned_v2",
+    "rt_process_stdout_state_owned_v2",
+    "rt_process_validate_piped_owned_v2",
+    "rt_process_write_stdin_some_owned_v2",
+    "rt_process_input_enable_v1",
+    "rt_process_input_install_v1",
+    "rt_process_input_revoke_v1",
+    "rt_process_input_state_v1",
+    "rt_process_input_write_some_v1",
+    "rt_linux_group_stream_admit_v2",
+    "rt_linux_group_launch_stream_broker_v2",
+    "rt_linux_group_stream_admit_profiled_v3",
+    "rt_linux_group_launch_stream_broker_profiled_v3",
+];
 
 /// True if `name` is resolvable purely through the compiler-owned table.
 /// Exposed so the regression gate can check the same predicate the JIT uses.
@@ -719,22 +957,29 @@ pub fn compiler_owned_symbol_resolves(name: &str) -> bool {
 }
 
 /// True if a `Linkage::Import` symbol named `name` will resolve to a real
-/// address at JIT finalize time — i.e. it is a registered runtime symbol or is
-/// `dlsym`-resolvable in the current process. This is exactly the resolution
-/// cranelift-jit performs in `lookup_symbol` (registered symbols, then
-/// `lookup_with_dlsym`); an import resolving to neither is bound to a NULL GOT
-/// slot and would SIGSEGV when called.
-fn jit_import_resolves(provider: &dyn RuntimeSymbolProvider, name: &str) -> bool {
-    if provider.get_symbol(name).is_some() {
-        return true;
-    }
+/// address at JIT finalize time — i.e. it is registered by
+/// [`seed_jit_runtime_symbol_table`], bound by `with_provider`'s elf_utils
+/// lookup fn, or is `dlsym`-resolvable in the current process. This must match
+/// what `JitCompiler::with_provider` actually hands to `JITBuilder`: accepting
+/// an elf_utils name the builder did not bind made `rt_process_run_bounded_bytes`
+/// finalize to a NULL GOT slot and SIGSEGV on Windows (b52cbe7a2b7); the lookup
+/// fn now binds every elf_utils name, so accepting them is truthful again.
+pub fn jit_import_resolves(provider: &dyn RuntimeSymbolProvider, name: &str) -> bool {
+    jit_import_resolves_without_dlsym(provider, name) || dlsym_resolves(name)
+}
+
+/// [`jit_import_resolves`] minus the `dlsym` leg: what resolves even in a seed
+/// linked without `--export-dynamic` (a `RUSTFLAGS` env override drops the
+/// `.cargo/config.toml` rustflags that add it).
+pub fn jit_import_resolves_without_dlsym(provider: &dyn RuntimeSymbolProvider, name: &str) -> bool {
     if compiler_owned_symbol(name).is_some() {
         return true;
     }
-    if crate::elf_utils::resolve_runtime_symbol(name).is_some() {
-        return true;
-    }
-    dlsym_resolves(name)
+    // `with_provider` binds RUNTIME_SYMBOL_NAMES entries from the provider and
+    // every other import through its elf_utils lookup fn, so both legs here are
+    // exactly what JITBuilder resolves at finalize.
+    (simple_native_loader::RUNTIME_SYMBOL_NAMES.contains(&name) && provider.get_symbol(name).is_some())
+        || crate::elf_utils::resolve_runtime_symbol(name).is_some()
 }
 
 /// Whether a JIT fallback must fail the current process. `STRICT_ALL` is the
@@ -751,57 +996,34 @@ fn jit_fallback_is_strict_for(strict: bool, strict_all: bool) -> bool {
     strict || strict_all
 }
 
-#[cfg(not(windows))]
-fn dlsym_resolves(name: &str) -> bool {
-    let Ok(c_name) = std::ffi::CString::new(name) else {
-        return false;
-    };
-    // SAFETY: `dlsym(RTLD_DEFAULT, ..)` with a valid C string; this is the same
-    // call cranelift-jit's `lookup_with_dlsym` makes to resolve the symbol.
-    let sym = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c_name.as_ptr()) };
-    !sym.is_null()
-}
-
-#[cfg(windows)]
-fn dlsym_resolves(name: &str) -> bool {
-    // Mirror cranelift-jit's own Windows fallback resolver exactly
-    // (vendor `cranelift-jit-0.116.1/src/backend.rs::lookup_with_dlsym`):
-    // `GetProcAddress` against the running executable image, then against
-    // `ucrtbase.dll`. Blindly returning `true` here (the previous behaviour)
-    // meant `first_unresolved_import_called` could never detect an
-    // unresolvable cross-module Simple symbol on Windows: cranelift-jit
-    // itself would fail the SAME lookup, bind the GOT slot to NULL, and the
-    // first call through it SIGSEGVs with nothing on stderr — this is the
-    // root cause of `seed_jit_app_module_function_call_segfaults_windows_2026-09-13.md`
-    // and `seed_jit_function_local_use_segfaults_2026-09-13.md`: both
-    // repros reach a cross-module Simple function symbol that resolves to
-    // neither a registered runtime symbol nor a process/CRT export, so the
-    // guard must say `false` and let `compile_module` de-JIT to the
-    // interpreter instead of finalizing a NULL import.
-    use windows_sys::Win32::Foundation::HMODULE;
-    use windows_sys::Win32::System::LibraryLoader;
-
-    let Ok(c_name) = std::ffi::CString::new(name) else {
-        return false;
-    };
-    let c_name_ptr = c_name.as_ptr();
-
-    unsafe {
-        let handles: [*mut core::ffi::c_void; 2] = [
-            // The running executable image itself.
-            std::ptr::null_mut(),
-            // The local C runtime, exactly as cranelift-jit tries it.
-            LibraryLoader::GetModuleHandleA(b"ucrtbase.dll\0".as_ptr()) as *mut core::ffi::c_void,
-        ];
-        for handle in &handles {
-            if LibraryLoader::GetProcAddress(*handle as HMODULE, c_name_ptr.cast()).is_some() {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(test)]
 #[path = "jit_tests.rs"]
 mod tests;
+
+/// Classify an unresolved JIT import for the de-JIT diagnostic.
+///
+/// Runtime/SFFI externs (`rt_*`, `spl_*`) lack a registered runtime symbol; any
+/// other name is a Simple function defined in ANOTHER module, which the
+/// per-module JIT does not compile or link (it is declared as an undefined
+/// `Linkage::Import` with no provider).
+fn unresolved_import_kind(name: &str) -> &'static str {
+    if name.starts_with("rt_") || name.starts_with("spl_") {
+        "runtime extern with no JIT-resolvable backing"
+    } else {
+        "cross-module Simple function; per-module JIT does not link imported Simple functions"
+    }
+}
+
+/// Codegen worker threads for the JIT (`CodegenBackend::codegen_workers`):
+/// `SIMPLE_JIT_CODEGEN_THREADS` (0 or 1 = serial), else up to 8. Workers
+/// translate and compile (modules of >= 64 bodies); tab-bar 1x idle-host sweep
+/// 2026-11-24: 4 -> 3.2-3.3 s, 8 -> 2.9 s, 12-16 -> 2.8-2.9 s.
+fn jit_codegen_workers() -> usize {
+    if let Some(n) = std::env::var("SIMPLE_JIT_CODEGEN_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        return n;
+    }
+    std::thread::available_parallelism().map_or(1, |n| n.get()).min(8)
+}

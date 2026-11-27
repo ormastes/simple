@@ -82,11 +82,27 @@ bin/simple test test/03_system/check/windows_symlinked_spl_readable_as_code_spec
 
 use std.spec.step
 
-use std.io_runtime.{file_read, process_run}
+use std.io_runtime.{file_read, file_exists, process_run, env_get}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.nogc_sync_mut.io.process_ops.{resolve_shell_argv}
 use std.spec.*
+
+fn spl_contract_binary() -> text:
+    val override = env_get("SIMPLE_TEST_BINARY")
+    if override != "" and override != nil:
+        return override.replace("\\", "/")
+    val bin_override = env_get("SIMPLE_BINARY")
+    if bin_override != "" and bin_override != nil:
+        return bin_override.replace("\\", "/")
+    "bin/simple"
 
 describe "a git-symlinked .spl on a core.symlinks=false checkout":
     # @manual scenario evidence
+
+    after_each:
+        val root = "build/test-windows-symlinked-spl"
+        if file_exists(root):
+            dir_remove_all(root)
 
     it "reads as path text before materialisation and as code after":
         # @req REQ-SSPEC-SYSTEM
@@ -94,7 +110,7 @@ describe "a git-symlinked .spl on a core.symlinks=false checkout":
         # @req REQ-WIN-SPLLINK-002
         step("reads as path text before materialisation and as code after")
         val root = "build/test-windows-symlinked-spl"
-        val bin = "bin/simple"
+        val bin = spl_contract_binary()
         # Two compiles of the SAME path, straddling one materialiser run. The
         # exit status of each is captured on the line after the invocation and
         # written to a file -- never piped, because a pipeline's $? belongs to
@@ -117,14 +133,15 @@ describe "a git-symlinked .spl on a core.symlinks=false checkout":
             "rm -f pkg/alias.spl && git checkout -q -- pkg/alias.spl && " +
             "cd - >/dev/null && " +
             "cp " + root + "/pkg/alias.spl " + root + "/before.spl && " +
-            bin + " check " + root + "/before.spl > " + root + "/before.txt 2>&1; " +
+            "\"" + bin + "\" check " + root + "/before.spl > " + root + "/before.txt 2>&1; " +
             "echo \"EXIT=$?\" >> " + root + "/before.txt; " +
             "sh scripts/setup/materialize-symlinks-windows.shs --strict-missing " + root +
             " > " + root + "/mat.txt 2>&1; echo \"EXIT=$?\" >> " + root + "/mat.txt; " +
             "cp " + root + "/pkg/alias.spl " + root + "/after.spl && " +
-            bin + " check " + root + "/after.spl > " + root + "/after.txt 2>&1; " +
+            "\"" + bin + "\" check " + root + "/after.spl > " + root + "/after.txt 2>&1; " +
             "echo \"EXIT=$?\" >> " + root + "/after.txt"
-        val (_stdout, _stderr, code) = process_run("sh", ["-c", command])
+        val (sh_bin, sh_args) = resolve_shell_argv(command)
+        val (_stdout, _stderr, code) = process_run(sh_bin, sh_args)
         expect(code).to_equal(0)
 
         val mat = file_read(root + "/mat.txt")

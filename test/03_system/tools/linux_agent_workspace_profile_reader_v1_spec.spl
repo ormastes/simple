@@ -1,0 +1,48 @@
+# AUTHORED_NOT_RUN. Actual fixed root-installed profile and dedicated service
+# UID are required. No provision, writer acquisition, staging, or launch here.
+# @req REQ-LINUX-AGENT-WORKSPACE-PROFILE-001
+use std.spec.{describe, it, expect, step, fail}
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.*
+
+# Preserve actual ownership even when a native check/expectation fails.
+var agent_profile_readers_v1: [LinuxMachinePolicyOwnerV1] = []
+
+describe "Actual fixed administrator-installed agent workspace profile reader":
+    it "pins one UTF8 child while preserving machine context and canonical close":
+        step("Open the genuine installed reader without caller path or identity arguments")
+        val reader = match linux_machine_policy_open_v1():
+            case LinuxMachinePolicyOpenV1.Ready(owner):
+                agent_profile_readers_v1.push(owner)
+                owner
+            case LinuxMachinePolicyOpenV1.CleanupRequired(owner, reason):
+                agent_profile_readers_v1.push(owner)
+                val closed = owner.close_v1()
+                fail("actual reader setup failed:" + reason + ":" + closed)
+                return
+            case LinuxMachinePolicyOpenV1.Rejected(reason):
+                fail("actual administrator provision required:" + reason)
+                return
+        val before = reader.actual_process_context_v1()
+        if before.is_err():
+            val closed = reader.close_v1()
+            fail("actual context failed:" + before.unwrap_err() + ":" + closed)
+            return
+        step("Read and reread only the protected fixed agent-workspace-profile.sdn child")
+        val first = reader.read_agent_workspace_profile_v1()
+        val second = reader.read_agent_workspace_profile_v1()
+        val after = reader.actual_process_context_v1()
+        if first.is_err() or second.is_err() or after.is_err():
+            val closed = reader.close_v1()
+            fail("actual fixed UTF8 profile unavailable:first=" + str(first.is_err()) + ":second=" + str(second.is_err()) +
+                ":context=" + str(after.is_err()) + ":" + closed)
+            return
+        expect(first.unwrap().byte_len()).to_be_greater_than(0)
+        expect(second.unwrap()).to_equal(first.unwrap())
+        expect(after.unwrap().identity_digest).to_equal(before.unwrap().identity_digest)
+        expect(after.unwrap().effective_uid).to_equal(before.unwrap().effective_uid)
+        step("Close once; copied aliases cannot read the child or revive retained descriptors")
+        val alias = reader
+        val closed = reader.close_v1()
+        expect(closed == "released" or closed == "consumed-error").to_equal(true)
+        expect(alias.read_agent_workspace_profile_v1().is_err()).to_equal(true)
+        expect(alias.close_v1()).to_equal("stale")

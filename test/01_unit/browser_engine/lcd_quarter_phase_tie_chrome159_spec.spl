@@ -1,0 +1,72 @@
+"""
+## Purpose and audience
+Purpose: Pin the LCD quarter phase of a glyph whose exact pen fraction is a
+quarter-pixel TIE (k/8 px). At an integer size a Liberation Sans pen is a
+multiple of size/2048 px (16 px: 1/128), so ties are exact and Chrome 159
+(SkFixed pen + 1/8, floor to 1/4) rounds them up. The engine sums per-glyph
+advances that were each rounded to milli-px, so a pen can come out a few
+milli short of the tie and round DOWN: `p` below is at 190.622 instead of
+190.625 px (run-relative; the p is at left 4 px), phase 2 instead of Chrome's 3, and its whole ink sits
+0.25 px left (76 mismatching px vs about 25 for its neighbours).
+Audience: web renderer / text paint maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--force-device-scale-factor=1 --window-size=400,300`, Liberation Sans 16 px,
+`color:#172033` on white, `<p style="margin:0;position:absolute;left:4px;
+top:0;letter-spacing:5px">abcdefghijklmnopqrstuvwxyz`; Range rect of `p`
+left = 194.6250 px):
+
+| pixel    | Chrome 159 | before this fix |
+|----------|------------|-----------------|
+| (195,12) | f0ce8c | da9d5f |
+| (196,12) | 422646 | 253472 |
+| (197,12) | 6ec0f2 | b6eaff |
+| (197,18) | 75c0f2 | b6eaff |
+
+Tolerance: 8 levels per channel (the catalog differ's tolerance).
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-METRICS-006 - an exact quarter-pixel tie pen takes Chrome's round-up LCD phase.
+"""
+# @tag: unit, browser_engine, text, engine2d, chrome159
+# @cover src/lib/nogc_sync_mut/text_layout/font_renderer.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 400
+val H: i32 = 32
+val TOL: i64 = 8
+
+val PAGE: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font:16px/1.5 sans-serif;color:#172033\"><p style=\"margin:0;position:absolute;left:4px;top:0px;letter-spacing:5px\">abcdefghijklmnopqrstuvwxyz</p></body></html>"
+
+fn _chan(v: u32, shift: u32) -> i64:
+    ((v >> shift) & 0xFFu32).to_i64()
+
+fn _near(px: [u32], x: i32, y: i32, want: u32) -> bool:
+    val got = px[y * W + x] & 0xFFFFFFu32
+    var ok = true
+    var shift: u32 = 0u32
+    while shift <= 16u32:
+        var d = _chan(got, shift) - _chan(want, shift)
+        if d < 0: d = 0 - d
+        if d > TOL: ok = false
+        shift = shift + 8u32
+    ok
+
+describe "LCD quarter-phase tie (Chrome 159)":
+    it "AC-1: `p` at the exact tie pen 194.625 takes phase 3":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome p stem: (195,12) f0ce8c (196,12) 422646 (197,12) 6ec0f2 (197,18) 75c0f2")
+        expect(_near(px, 195, 12, 0xf0ce8cu32)).to_equal(true)
+        expect(_near(px, 196, 12, 0x422646u32)).to_equal(true)
+        expect(_near(px, 197, 12, 0x6ec0f2u32)).to_equal(true)
+        expect(_near(px, 197, 18, 0x75c0f2u32)).to_equal(true)

@@ -140,7 +140,7 @@ fn _edges_exact_set_equal_v2(left: [ReverseReferenceEdgeV1],
 
 fn _sort_digests_unique_v2(values: [text]) -> [text]:
     var sorted = values
-    sorted = array_sort(sorted)
+    sorted.sort()
     var out: [text] = []
     for value in sorted:
         if out.len() == 0 or out[out.len() - 1] != value: out.push(value)
@@ -152,7 +152,7 @@ fn _remove_digest_v2(values: [text], removed: text?) -> [text]:
         match removed:
             case Some(digest):
                 if value != digest: out.push(value)
-            case nil: out.push(value)
+            case None: out.push(value)
     out
 
 fn _shard_refs_v2(shards: [ReverseReferenceShardV1]) -> [text]:
@@ -188,8 +188,8 @@ fn _generation_valid_v2(value: RrAtomicGenerationV2) -> bool:
 
 fn _reject_v2(reason: text) -> RrAtomicGenerationStageV2:
     RrAtomicGenerationStageV2(accepted: false, rejection_reason: reason,
-        expected_prior_generation: nil, expected_prior_manifest_digest: nil,
-        candidate: nil, delta: nil)
+        expected_prior_generation: None, expected_prior_manifest_digest: None,
+        candidate: None, delta: None)
 
 fn _reject_bound_v2(reason: text, prior: RrAtomicGenerationV2?
     ) -> RrAtomicGenerationStageV2:
@@ -198,8 +198,8 @@ fn _reject_bound_v2(reason: text, prior: RrAtomicGenerationV2?
             RrAtomicGenerationStageV2(accepted: false, rejection_reason: reason,
                 expected_prior_generation: Some(generation.generation),
                 expected_prior_manifest_digest: Some(generation.manifest_digest),
-                candidate: nil, delta: nil)
-        case nil: _reject_v2(reason)
+                candidate: None, delta: None)
+        case None: _reject_v2(reason)
 
 fn _old_authority_rejection_v2(prior: RrAtomicGenerationV2,
         authority: RrOldOutgoingAuthorityV2,
@@ -240,7 +240,7 @@ fn _forward_refs_v2(prior: RrAtomicGenerationV2?, old_digest: text?,
     match prior:
         case Some(generation): refs = _remove_digest_v2(
             generation.manifest.forward_manifest_refs, old_digest)
-        case nil: pass
+        case None: pass
     refs.push(new_digest)
     _sort_digests_unique_v2(refs)
 
@@ -281,14 +281,14 @@ pub fn prepare_rr_atomic_generation_transition_model_v2(
             if not _non_rr_payload_unchanged_v2(generation, input):
                 return _reject_v2("non_rr_payload_changed_by_consumer_update")
             prior_shards = generation.shards
-        case nil: pass
+        case None: pass
 
-    if prior != nil and (old_reads == nil or old_authority == nil):
+    if prior.is_some() and (old_reads.is_none() or old_authority.is_none()):
         return _reject_bound_v2("old_history_missing", prior)
-    if (old_reads == nil) != (old_authority == nil):
+    if old_reads.is_none() != old_authority.is_none():
         return _reject_v2("old_history_authority_invalid")
 
-    var old_digest: text? = nil
+    var old_digest: text? = None
     match old_reads:
         case Some(manifest):
             if not semantic_query_read_manifest_valid_v1(manifest) or
@@ -296,23 +296,23 @@ pub fn prepare_rr_atomic_generation_transition_model_v2(
                 return _reject_v2("old_history_partial")
             val admitted = match prior:
                 case Some(generation): generation
-                case nil: return _reject_v2("old_history_manifest_mismatch")
+                case None: return _reject_v2("old_history_manifest_mismatch")
             val authority = match old_authority:
                 case Some(value): value
-                case nil: return _reject_v2("old_history_missing")
+                case None: return _reject_v2("old_history_missing")
             val rejection = _old_authority_rejection_v2(admitted, authority, manifest)
             if rejection != "": return _reject_v2(rejection)
             if not _old_edges_complete_v2(admitted, manifest):
                 return _reject_v2("old_history_edges_mismatch")
             old_digest = Some(_manifest_digest_v2(manifest))
-        case nil: pass
+        case None: pass
 
     val delta = stage_reverse_delta_v1(old_reads, new_reads)
     if not reverse_reference_delta_valid_v1(delta):
         return _reject_v2("rr_delta_invalid")
     val staged = match prior:
         case Some(_): stage_reverse_shards_v1(prior_shards, old_reads, new_reads, true)
-        case nil: seed_reverse_shards_v1(new_reads)
+        case None: seed_reverse_shards_v1(new_reads)
     if not staged.accepted: return _reject_v2("rr_stage_rejected")
 
     val shard_refs = _shard_refs_v2(staged.shards)
@@ -351,7 +351,7 @@ pub fn prepare_rr_atomic_generation_v2(prior: RrAtomicGenerationV2?,
         old_reads: SemanticQueryReadManifestV1?,
         new_reads: SemanticQueryReadManifestV1,
         input: RrAtomicGenerationInputV2) -> RrAtomicGenerationStageV2:
-    if prior != nil:
+    if prior.is_some():
         return _reject_bound_v2("old_history_authority_unavailable", prior)
     prepare_rr_atomic_generation_transition_model_v2(prior, old_authority,
         old_reads, new_reads, input)
@@ -364,26 +364,26 @@ pub fn rr_atomic_generation_transition_model_v2(prior: RrAtomicGenerationV2?,
         crash_point: RrAtomicCrashPointV2) -> RrAtomicRecoveryV2:
     val candidate = match staged.candidate:
         case Some(value): value
-        case nil: return RrAtomicRecoveryV2(active: prior, prepared: nil,
+        case None: return RrAtomicRecoveryV2(active: prior, prepared: None,
             recovery_reason: "stage_rejected")
     if not staged.accepted or not _generation_valid_v2(candidate):
-        return RrAtomicRecoveryV2(active: prior, prepared: nil,
+        return RrAtomicRecoveryV2(active: prior, prepared: None,
             recovery_reason: "stage_rejected")
     match prior:
         case Some(generation):
             if (staged.expected_prior_generation != Some(generation.generation) or
                     staged.expected_prior_manifest_digest !=
                         Some(generation.manifest_digest)):
-                return RrAtomicRecoveryV2(active: prior, prepared: nil,
+                return RrAtomicRecoveryV2(active: prior, prepared: None,
                     recovery_reason: "stale_prior_generation")
-        case nil:
-            if staged.expected_prior_generation != nil or
-                    staged.expected_prior_manifest_digest != nil:
-                return RrAtomicRecoveryV2(active: prior, prepared: nil,
+        case None:
+            if staged.expected_prior_generation.is_some() or
+                    staged.expected_prior_manifest_digest.is_some():
+                return RrAtomicRecoveryV2(active: prior, prepared: None,
                     recovery_reason: "stale_prior_generation")
     match crash_point:
         case RrAtomicCrashPointV2.BeforePrepare:
-            RrAtomicRecoveryV2(active: prior, prepared: nil,
+            RrAtomicRecoveryV2(active: prior, prepared: None,
                 recovery_reason: "recovered_prior_generation")
         case RrAtomicCrashPointV2.AfterPrepare:
             RrAtomicRecoveryV2(active: prior, prepared: Some(candidate),
@@ -392,10 +392,10 @@ pub fn rr_atomic_generation_transition_model_v2(prior: RrAtomicGenerationV2?,
             RrAtomicRecoveryV2(active: prior, prepared: Some(candidate),
                 recovery_reason: "recovered_prior_generation")
         case RrAtomicCrashPointV2.AfterActiveRootSwap:
-            RrAtomicRecoveryV2(active: Some(candidate), prepared: nil,
+            RrAtomicRecoveryV2(active: Some(candidate), prepared: None,
                 recovery_reason: "recovered_candidate_generation")
         case RrAtomicCrashPointV2.NoCrash:
-            RrAtomicRecoveryV2(active: Some(candidate), prepared: nil,
+            RrAtomicRecoveryV2(active: Some(candidate), prepared: None,
                 recovery_reason: "committed_candidate_generation")
 
 pub fn recover_rr_atomic_generation_v2(state: RrAtomicRecoveryV2
@@ -403,8 +403,8 @@ pub fn recover_rr_atomic_generation_v2(state: RrAtomicRecoveryV2
     match state.active:
         case Some(active):
             if _generation_valid_v2(active): return Some(active)
-        case nil: pass
-    nil
+        case None: pass
+    None
 
 pub fn rr_atomic_generation_publisher_authority_available_v2() -> bool:
     # Closed until the live generation publisher issues an unforgeable owner

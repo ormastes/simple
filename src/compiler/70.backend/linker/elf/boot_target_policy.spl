@@ -1,0 +1,69 @@
+# Freestanding ELF32 admission. Keep hosted GOT/TLS out of boot links until
+# their target-specific layout is implemented.
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.elf_parser.{ElfObject}
+use compiler.backend.linker.elf.elf_exec_writer.{ElfExecPlan}
+use compiler.backend.linker.elf.arm_float_abi.{elf_arm_float_flags_checked}
+
+fn boot_target_is_elf32(target: RelocArch) -> bool:
+    target == RelocArch.I386 or target == RelocArch.Arm32 or target == RelocArch.Riscv32
+
+fn boot_target_flags(objects: [ElfObject], target: RelocArch) -> Result<i64, text>:
+    if target != RelocArch.Arm32: return Ok(0)
+    var flags: i64 = -1
+    for obj in objects:
+        if obj.raw.len() < 52 or obj.raw[4] != 1 or obj.raw[5] != 1:
+            return Err("ARM boot object requires little-endian ELF32")
+        var current: i64 = 0
+        var i: i64 = 0
+        while i < 4:
+            current = current | ((obj.raw[36 + i] as i64) << (i * 8))
+            i = i + 1
+        # ET_REL often omits float e_flags: the shared ARM attributes owner
+        # resolves Tag_ABI_VFP_args and supplies the executable ABI bit below.
+        if (current & 0xff000000) != 0x05000000 or (current & 0x600) == 0x600:
+            return Err("ARM boot object has unsupported EABI or floating-point flags {current}")
+        if flags >= 0 and (flags & 0xfffff9ff) != (current & 0xfffff9ff):
+            return Err("ARM boot objects have incompatible e_flags")
+        flags = current
+    val float_flags = elf_arm_float_flags_checked(objects)?
+    Ok((if flags < 0: 0x05000000 else: flags & 0xfffff9ff) | float_flags)
+
+fn boot_target_validate_reloc(target: RelocArch, kind: i64) -> Result<bool, text>:
+    if target == RelocArch.Arm32:
+        # Ordinary static ARM/Thumb data, branches and split immediates.
+        if kind == 0 or kind == 1 or kind == 2 or kind == 3 or kind == 5 or kind == 8 or
+                kind == 10 or kind == 11 or kind == 28 or kind == 29 or kind == 30 or
+                kind == 38 or kind == 40 or (kind >= 42 and kind <= 51) or
+                kind == 54 or kind == 102 or kind == 103:
+            return Ok(true)
+        return Err("ARM boot relocation {kind} requires an unsupported GOT, TLS or dynamic link")
+    if target == RelocArch.Riscv32:
+        if kind == 2 or kind == 20 or kind == 21 or (kind >= 29 and kind <= 32) or kind == 41:
+            return Err("RV32 boot relocation {kind} requires unsupported 64-bit, GOT or TLS state")
+    Ok(true)
+
+fn boot_target_validate_image32(plan: ElfExecPlan, entry: i64, symbols: [i64]) -> Result<bool, text>:
+    if entry < 0 or entry > 0xffffffff or plan.file_end < 0 or plan.file_end > 0xffffffff:
+        return Err("ELF32 boot entry or file size exceeds 32 bits")
+    for value in symbols:
+        if value < 0 or value > 0xffffffff:
+            return Err("ELF32 boot symbol exceeds 32 bits")
+    var i: i64 = 0
+    while i < plan.secs.len():
+        val address = plan.vaddrs[i]
+        val size = plan.secs[i].size
+        if address < 0 or address > 0xffffffff or size < 0 or size > 0xffffffff or
+                size > 0x100000000 - address or plan.offsets[i] < 0 or plan.offsets[i] > 0xffffffff:
+            return Err("ELF32 boot section exceeds 32 bits")
+        i = i + 1
+    for segment in plan.segments:
+        if segment.p_paddr < 0 or segment.p_paddr > 0xffffffff or
+                segment.p_vaddr < 0 or segment.p_vaddr > 0xffffffff or
+                segment.p_memsz < 0 or segment.p_memsz > 0xffffffff or
+                segment.p_memsz > 0x100000000 - segment.p_vaddr or
+                segment.p_memsz > 0x100000000 - segment.p_paddr:
+            return Err("ELF32 boot segment exceeds 32 bits")
+    Ok(true)
+
+export boot_target_is_elf32, boot_target_flags, boot_target_validate_reloc, boot_target_validate_image32

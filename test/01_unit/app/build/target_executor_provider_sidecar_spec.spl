@@ -1,0 +1,59 @@
+"""
+## Purpose and audience
+Purpose: Prove the executor only READS the provider sidecar. The executor
+admission step (`target_provider_admission`) must refuse a missing sidecar, a
+wrong host triple and a wrong ABI, and must never write or overwrite a sidecar.
+Audience: compiler and tooling engineers who maintain backend build groups.
+"""
+# @req: REQ-APP-BUILD-001 — executor reads, never emits, the provider sidecar.
+
+use app.build.targets.build_targets.{parse_targets_text, find_target}
+use app.build.targets.provider_gate.{provider_sidecar_path}
+use app.build.targets.target_executor.{target_provider_admission}
+use std.nogc_sync_mut.io_runtime.{file_write, file_read, file_exists, file_delete, dir_create_all}
+
+val HOST = "x86_64-unknown-linux-gnu"
+val ROOT = "build/tmp/target_executor_provider_sidecar_spec"
+val SRC = "group host:\n    default: true\n    members: compiler\n\ngroup backends_cuda:\n    default: false\n    members: //backend:cuda\n\ntarget compiler:\n    kind: binary\n    entry: src/main.spl\n\ntarget //backend:cuda:\n    kind: shared\n    entry: src/plugins/backend_cuda/cuda_backend.spl\n    output: build/backends/host/backend_cuda-v1.so\n    triple: x86_64-unknown-linux-gnu\n"
+
+fn _sidecar(abi: text, triple: text) -> text:
+    "schema: provider_descriptor_v1\ngroup: backends_cuda\nabi_version: " + abi + "\nhost_triple: " + triple + "\ncapabilities: [object_emit]\n"
+
+fn _setup(case_name: text, sidecar: text) -> text:
+    val dir = ROOT + "/" + case_name
+    dir_create_all(dir)
+    file_delete(dir + "/receipts/backends_cuda.sdn")
+    file_delete(provider_sidecar_path(dir + "/backend.so"))
+    file_write(dir + "/backend.so", "provider-bytes")
+    if sidecar != "":
+        file_write(provider_sidecar_path(dir + "/backend.so"), sidecar)
+    dir
+
+fn _admit(dir: text) -> text:
+    val ts = parse_targets_text(SRC)
+    val t = ts.targets[find_target(ts, "//backend:cuda")]
+    target_provider_admission(ts, t, dir + "/backend.so", dir + "/backend.so", dir)
+
+describe "executor provider sidecar (read-only)":
+    it "refuses a missing sidecar with provider-missing and does not create one":
+        val dir = _setup("missing", "")
+        expect(_admit(dir)).to_start_with("SPL-PROVIDER-ABI-001: provider-missing: backends_cuda")
+        expect(file_exists(provider_sidecar_path(dir + "/backend.so"))).to_equal(false)
+
+    it "refuses a wrong host triple":
+        val dir = _setup("triple", _sidecar("1", "aarch64-unknown-linux-gnu"))
+        expect(_admit(dir)).to_start_with("SPL-PROVIDER-ABI-001: backend-admission: triple-mismatch")
+
+    it "refuses a wrong ABI":
+        val dir = _setup("abi", _sidecar("99", HOST))
+        expect(_admit(dir)).to_start_with("SPL-PROVIDER-ABI-001: backend-admission: abi-mismatch")
+
+    it "admits a valid sidecar written by the test and leaves it untouched":
+        val body = _sidecar("1", HOST)
+        val dir = _setup("ok", body)
+        expect(_admit(dir)).to_equal("")
+        expect(file_read(provider_sidecar_path(dir + "/backend.so"))).to_equal(body)
+
+    it "does not call emit_provider_sidecar from the executor":
+        val src = file_read("src/app/build/targets/target_executor.spl")
+        expect(src.contains("emit_provider_sidecar")).to_equal(false)

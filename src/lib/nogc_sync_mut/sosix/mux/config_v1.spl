@@ -1,0 +1,40 @@
+# Explicit local endpoint configuration. No environment reads, discovery,
+# fallback, server startup, TLS claim or public-interface runtime ABI.
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.observation_v1.*
+use std.common.contracts.mux.wire_types_v1.*
+use std.common.contracts.mux.wire_envelope_v1.{mux_wire_validate_auth_v1, mux_wire_validate_limit_v1}
+
+pub struct MuxSosixConfigV1:
+    host: text
+    port: i64
+    auth_token: text
+    max_frame_bytes: i64
+
+pub fn mux_sosix_error_v1(kind: MuxErrorKindV1, detail: text, request_id: u64, commitment: MuxCommitStateV1, cleanup: bool) -> MuxErrorV1:
+    MuxErrorV1(kind: kind, detail: detail, request_id: request_id,
+        commit_state: commitment, observed_revision: nil, affected: [], cleanup_pending: cleanup)
+
+pub fn mux_sosix_validate_config_v1(config: MuxSosixConfigV1) -> Result<MuxSosixConfigV1, MuxErrorV1>:
+    # Literal IPv4 loopback only: never DNS, wildcard, remote plaintext or auto route.
+    if config.host != "127.0.0.1" or config.port < 1 or config.port > 65535 or mux_wire_validate_auth_v1(config.auth_token).is_err() or mux_wire_validate_limit_v1(config.max_frame_bytes).is_err():
+        return Err(mux_sosix_error_v1(MuxErrorKindV1.InvalidRequest, "invalid explicit CoreMux endpoint configuration", 0, MuxCommitStateV1.NotApplied, false))
+    Ok(config)
+
+pub fn mux_sosix_lease_deadline_v1(start_ms: i64, duration_ms: i64) -> Result<i64, MuxErrorV1>:
+    if start_ms < 0 or duration_ms < 1 or duration_ms > 86400000 or start_ms > 9223372036854775807 - duration_ms:
+        return Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "invalid monotonic lease interval", 0, MuxCommitStateV1.Unknown, false))
+    Ok(start_ms + duration_ms)
+
+# Pure budget selection used by the actual exchange path. Rejected negotiated
+# metadata can never prevent receipt recovery or acquire normal data authority.
+pub fn mux_sosix_reply_limit_v1(call: MuxWireCallV1, config_limit: i64,
+        negotiated_limit: i64?, recovery_limit: i64) -> Result<i64, MuxErrorV1>:
+    val limit = match call:
+        case MuxWireCallV1.Connect(options, _): options.limits.max_reply_bytes
+        case MuxWireCallV1.Disconnect(_): recovery_limit
+        case MuxWireCallV1.Query(_, MuxQueryV1.RequestStatus(_), _): recovery_limit
+        case _: negotiated_limit ?? config_limit
+    if mux_wire_validate_limit_v1(config_limit).is_err() or mux_wire_validate_limit_v1(limit).is_err() or limit > config_limit:
+        return Err(mux_sosix_error_v1(MuxErrorKindV1.InvalidRequest, "invalid bounded reply transport limit", 0, MuxCommitStateV1.NotApplied, false))
+    Ok(limit)

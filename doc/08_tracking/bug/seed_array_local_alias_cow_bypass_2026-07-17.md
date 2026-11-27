@@ -1,10 +1,13 @@
 # Seed (Rust interpreter): arrays alias on local-bind despite Arc/COW design
-## Open 2026-09-16 — needs owner triage
+## FIXED 2026-11-11 (p3-interp11 lane)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** Open (root cause NOT pinned down)  **Found:** 2026-07-17 (task #186, lane S42)
+**Status:** FIXED 2026-11-11 (p3-interp11 lane) — the fresh seed 46fe8f6b6def
+exhibits correct array value semantics on every reported variant; the
+unpinned root cause is moot. See the 2026-11-11 addendum at the end.
+**Found:** 2026-07-17 (task #186, lane S42)
 **Path:** `bin/simple run` (Rust seed AST interpreter, `src/compiler_rust/driver` /
 `src/compiler_rust/compiler/src/interpreter*`) — sibling of #186's native-side fix
 (`src/compiler/50.mir/mir_lowering_stmts.spl`, `maybe_copy_array_value`).
@@ -95,3 +98,34 @@ total=17 pass=17 fail=0 codegen_fallback_hits=0), this seed-side gap is
 lower priority: `bin/simple run`/oracle-mode is a bootstrap/comparison tool,
 not the default tooling path.
 
+
+
+## 2026-11-11 — P3 interp11 triage verdict: FIXED (verified on fresh seed 46fe8f6b6def)
+
+Re-ran the exact headline reproducers against the fresh Windows seed
+(build-commit `46fe8f6b6def`, seedfix A+B), 2026-11-11, via
+`SIMPLE_EXECUTION_MODE=interpret bin/simple run` (the Rust seed tree-walking
+interpreter path named in this row):
+
+- index-assign repro (`build/review/interp11_cow_probe.spl`):
+  prints `ARR0=10|C0=99` and `ARR_LEN=3|C_LEN=4` — correct array value
+  semantics (the doc's buggy oracle printed `ARR0=99|C0=99` /
+  `ARR_LEN=4|C_LEN=4`).
+- extended variants (`build/review/interp11_cow_probe2.spl`): struct array
+  field `FIELD_A=1|FIELD_B=99`, nested array `NEST_OUTER=2|NEST_INNER=77`,
+  val-bind `SNAP=5|SRC=42` — all correct.
+
+Every variant the doc listed (index-assign, mutating method, val-bind, struct
+array field, nested) now privatizes correctly on the seed interpreter. The
+unpinned root cause is moot: the seed interpreter was reworked in the
+2026-11-07..10 window (array-value-COW work PR #7664 for the pure-Simple
+interpreter, merge `c3ec5335d3c7`; the seed tree-walking interpreter's
+`node_exec.rs` last changed in merge `9e7e526edb`, 2026-11-07), and the fresh
+seed built 2026-11-10 carries it. This doc was not among the sibling alias
+reports retired by `d805d9546f68`; it is closed here with the executed
+evidence above.
+
+Note: `bin/simple run` (JIT) is the default tooling and was already fixed and
+verified per the #186 native-side fix; this row's seed-interpreter gap is what
+closed today. The doc's lower-priority framing ("bootstrap/comparison tool,
+not the default path") still applies.

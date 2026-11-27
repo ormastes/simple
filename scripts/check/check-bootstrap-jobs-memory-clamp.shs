@@ -132,6 +132,20 @@ expect 'per-worker budget override honoured' 10 \
     "$(SIMPLE_BOOTSTRAP_WORKER_MEM_MIB=1024 BOOTSTRAP_MEMINFO_PATH=$(meminfo 10485760) \
        bootstrap_build_jobs_memory_clamp 20)"
 
+# 9. Stage 3 parallel floor (2026-11-12): a memory clamp that would leave the
+#    self-host build serial keeps it at 2. The compiler re-admits that request
+#    against the enforcing RSS guard (shard_threads_guarded_floor_v1), so the
+#    script must not pre-empt it. The general jobs count still floors at 1.
+#    1 GiB / 3300 MiB fits 0 -> jobs 1, selfhost 2.
+floor_out=$(jobs=8 selfhost_jobs=8 host_cpus=8 job_source=cpu BOOTSTRAP_MEMINFO_PATH=$(meminfo 1048576) sh -c '
+    . "$1"; bootstrap_startup_jobs_apply_policy auto default >/dev/null || exit 1
+    printf "%s:%s:%s" "$jobs" "$selfhost_jobs" "$jobs_memory_reason"' sh "$policy")
+expect 'self-host clamp keeps a two-worker floor' '1:2:memory-clamped' "$floor_out"
+floor_out=$(jobs=1 selfhost_jobs=1 host_cpus=8 job_source=cpu BOOTSTRAP_MEMINFO_PATH=$(meminfo 1048576) sh -c '
+    . "$1"; bootstrap_startup_jobs_apply_policy auto default >/dev/null || exit 1
+    printf "%s:%s" "$jobs" "$selfhost_jobs"' sh "$policy")
+expect 'explicit serial self-host request stays serial' '1:1' "$floor_out"
+
 # 8. Wiring: the bootstrap must actually call the clamp. Without this the fix
 #    silently reverts to CPU-only the next time someone edits the wrapper.
 CHECKED=$((CHECKED + 1))

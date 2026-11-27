@@ -1,0 +1,89 @@
+# SOURCE_AUTHORED_NOT_RUN. Production pure helpers only, no fabricated native
+# success receipt or public DTO->opaque-evidence constructor.
+use std.spec.*
+use std.common.process.observation_v1.{ObservedProcessResultStatusV1,
+    observed_process_result_status_v1, observed_process_collect_retired_v1}
+use std.nogc_sync_mut.io.process_capture_evidence_v1.{ProcessCaptureRequestV1,
+    process_capture_request_validate_v1, process_capture_bytes_copy_v1,
+    ProcessCaptureProgressV1, process_capture_progress_reduce_v1}
+
+fn capture_request_v1() -> ProcessCaptureRequestV1:
+    @when(os="windows"):
+    val command = "C:/Windows/System32/whoami.exe"
+    @else:
+    val command = "/usr/bin/printf"
+    @end
+    ProcessCaptureRequestV1(command: command, args: ["capture-v1"], timeout_ms: 1000,
+        stdout_limit: 4096, stderr_limit: 4096, term_grace_ms: 500)
+
+describe "Receipt-preserving capture V1 production contracts":
+    it "keeps the first diagnostic and requires positive consumed evidence for retirement":
+        step("Use the exact production progress reducer without fabricating a native owner")
+        val initial = ProcessCaptureProgressV1(retired: false, error: "")
+        val stale = process_capture_progress_reduce_v1(initial, false, "native-ESTALE-unknown")
+        expect(stale.retired).to_equal(false)
+        val pending = process_capture_progress_reduce_v1(stale, false, "later-cleanup-error")
+        expect(pending.error).to_equal("native-ESTALE-unknown")
+        expect(pending.retired).to_equal(false)
+        val consumed = process_capture_progress_reduce_v1(pending, true, "terminal-provider-error")
+        expect(consumed.retired).to_equal(true)
+        expect(consumed.error).to_equal("native-ESTALE-unknown")
+        val again = process_capture_progress_reduce_v1(consumed, false, "")
+        expect(again.retired).to_equal(true)
+        expect(again.error).to_equal("native-ESTALE-unknown")
+
+    it "preserves unknown EOF/count/error facts in legacy result construction":
+        step("Use the existing result factory with additive receipt fields defaulted")
+        val unknown = observed_process_result_status_v1(ObservedProcessResultStatusV1.Missing)
+        expect(unknown.output_complete_observed).to_equal(false)
+        expect(unknown.stream_counts_observed).to_equal(false)
+        expect(unknown.native_error.is_none()).to_equal(true)
+        expect(unknown.identity_revalidated.is_none()).to_equal(true)
+        expect(unknown.terminal_observed.is_none()).to_equal(true)
+        expect(unknown.native_retired).to_equal(false)
+
+    it "does not confuse terminal retirement with success or stream EOF":
+        step("Apply the exact native collect retirement rule including terminal provider error")
+        expect(observed_process_collect_retired_v1(true, 0)).to_equal(true)
+        expect(observed_process_collect_retired_v1(true, 5)).to_equal(true)
+        expect(observed_process_collect_retired_v1(true, 11)).to_equal(false)
+        expect(observed_process_collect_retired_v1(true, 16)).to_equal(false)
+        expect(observed_process_collect_retired_v1(false, 0)).to_equal(false)
+        expect(observed_process_collect_retired_v1(false, 5)).to_equal(false)
+
+    it "copies raw bytes without lossy text reencoding or mutable getter aliases":
+        step("Use the same copy function used when minting and reading real evidence")
+        var raw: [u8] = [0u8, 255u8, 65u8]
+        val saved = process_capture_bytes_copy_v1(raw)
+        raw[0] = 99u8
+        expect(saved).to_equal([0u8, 255u8, 65u8])
+
+    it "admits exact existing per-stream bounds without doubling an aggregate budget":
+        step("Validate the actual explicit observation request shape before effects")
+        var request = capture_request_v1()
+        expect(process_capture_request_validate_v1(request).is_ok()).to_equal(true)
+        request.stdout_limit = 1048576
+        request.stderr_limit = 0
+        expect(process_capture_request_validate_v1(request).is_ok()).to_equal(true)
+        request.stdout_limit = 1048577
+        expect(process_capture_request_validate_v1(request).is_err()).to_equal(true)
+        request = capture_request_v1()
+        request.stderr_limit = -1
+        expect(process_capture_request_validate_v1(request).is_err()).to_equal(true)
+
+    it "refuses unbounded or ambiguous request inputs before native admission":
+        step("Reject invalid deadlines, grace, relative path and NUL arguments")
+        var request = capture_request_v1()
+        request.timeout_ms = 0
+        expect(process_capture_request_validate_v1(request).is_err()).to_equal(true)
+        request.timeout_ms = 3600001
+        expect(process_capture_request_validate_v1(request).is_err()).to_equal(true)
+        request = capture_request_v1()
+        request.term_grace_ms = 30001
+        expect(process_capture_request_validate_v1(request).is_err()).to_equal(true)
+        request = capture_request_v1()
+        request.command = "printf"
+        expect(process_capture_request_validate_v1(request).is_err()).to_equal(true)
+        request = capture_request_v1()
+        request.args = ["bad\0argument"]
+        expect(process_capture_request_validate_v1(request).is_err()).to_equal(true)

@@ -1,0 +1,59 @@
+# T-EV1 twin of src/verification/build_cache/src/EvictionV1.lean over the REAL
+# planner cache_eviction_plan_v1: for every pin pattern of 4 entries and every
+# storage cap in a small range, no pinned entry is evicted or unloaded, every
+# index is evicted at most once, and the reported disk total is the sum of the
+# survivors and fits the cap unless pinned bytes alone exceed it.
+use std.spec.{describe, it, expect}
+use compiler.driver.cache.metadata.cache_limits.{CacheRetentionLimitsV1}
+use compiler.driver.cache.gc.cache_eviction_plan_v1.{
+    CacheEntryUseV1, cache_eviction_plan_v1, cache_eviction_admit_write_v1}
+
+fn entries(pins: i64) -> [CacheEntryUseV1]:
+    var out: [CacheEntryUseV1] = []
+    var i = 0
+    while i < 4:
+        val pinned = (pins / (1 << i)) % 2 == 1
+        out.push(CacheEntryUseV1(branch: if i < 2: "main" else: "feat",
+            source: "s{i % 2}", version_key: "v{i}", disk_bytes: 10 * (i + 1),
+            memory_bytes: 5, last_used_ms: 100 + i, live_views: if pinned: 1 else: 0))
+        i = i + 1
+    out
+
+fn limits(storage: i64) -> CacheRetentionLimitsV1:
+    CacheRetentionLimitsV1(memory_max_bytes: 8, storage_max_bytes: storage, max_branches: 1,
+        kept_branches: ["main"], versions_per_source: 1,
+        per_source_max_disk_bytes: 1000, per_source_max_memory_bytes: 1000)
+
+describe "T-EV1 twin: eviction plans respect pins and account bytes":
+    it "never evicts or unloads a pinned entry, over all 16 pin patterns x 8 caps":
+        var checked = 0
+        var pins = 0
+        while pins < 16:
+            var storage = 0
+            while storage < 80:
+                val es = entries(pins)
+                val plan = cache_eviction_plan_v1(es, limits(storage))
+                var seen: [i64] = []
+                for index in plan.evict:
+                    expect(es[index].live_views).to_equal(0)
+                    expect(seen.contains(index)).to_equal(false)
+                    seen.push(index)
+                for index in plan.unload:
+                    expect(es[index].live_views).to_equal(0)
+                var survivors: i64 = 0
+                var pinned_bytes: i64 = 0
+                var i = 0
+                while i < es.len():
+                    if not seen.contains(i):
+                        survivors = survivors + es[i].disk_bytes
+                    if es[i].live_views > 0:
+                        pinned_bytes = pinned_bytes + es[i].disk_bytes
+                    i = i + 1
+                expect(plan.disk_bytes_after).to_equal(survivors)
+                if pinned_bytes <= storage:
+                    expect(plan.disk_bytes_after <= storage).to_equal(true)
+                expect(cache_eviction_admit_write_v1(plan, 0, limits(storage))).to_equal(plan.disk_bytes_after <= storage)
+                checked = checked + 1
+                storage = storage + 10
+            pins = pins + 1
+        expect(checked).to_equal(128)

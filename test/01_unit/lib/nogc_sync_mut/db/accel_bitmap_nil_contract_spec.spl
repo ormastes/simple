@@ -1,0 +1,49 @@
+# rt_db_bitmap_{and,or,andnot}_u32 are `[u32]?`: nil when the span is invalid
+# (limit longer than an operand) or the kernel is unbacked. The row_bitmap_*_words
+# wrappers must then use the scalar twin, never a short/nil bitmap.
+
+use std.spec.step
+use std.nogc_sync_mut.db.accel.{row_bitmap_and_words, row_bitmap_or_words, row_bitmap_andnot_words}
+
+extern fn rt_db_bitmap_and_u32(lhs: [u32], rhs: [u32], limit: i64) -> [u32]?
+extern fn rt_db_bitmap_or_u32(lhs: [u32], rhs: [u32], limit: i64, lhs_words: i64, rhs_words: i64) -> [u32]?
+extern fn rt_db_bitmap_andnot_u32(lhs: [u32], rhs: [u32], limit: i64, rhs_words: i64) -> [u32]?
+
+describe "row bitmap kernels report failure as nil":
+    it "and: limit longer than an operand is nil":
+        step("and nil")
+        val a: [u32] = [1u32, 2u32]
+        expect(rt_db_bitmap_and_u32(a, a, 5)).to_equal(nil)
+
+    it "andnot: limit longer than lhs is nil":
+        step("andnot nil")
+        val a: [u32] = [1u32, 2u32]
+        expect(rt_db_bitmap_andnot_u32(a, a, 5, 2)).to_equal(nil)
+
+    it "and: valid span is non-nil with exact words":
+        step("and ok")
+        val a: [u32] = [0xFFu32, 0xF0u32, 0x0Fu32]
+        val b: [u32] = [0x0Fu32, 0xFFu32, 0xFFu32]
+        val got: [u32] = row_bitmap_and_words(a, b, 3)
+        expect(got.len()).to_equal(3)
+        expect(got[0]).to_equal(0x0Fu32)
+        expect(got[1]).to_equal(0xF0u32)
+        expect(got[2]).to_equal(0x0Fu32)
+
+    it "or: wrapper result has limit words":
+        step("or ok")
+        val a: [u32] = [1u32, 0u32]
+        val b: [u32] = [2u32, 4u32]
+        val got: [u32] = row_bitmap_or_words(a, b, 2, 2, 2)
+        expect(got.len()).to_equal(2)
+        expect(got[0]).to_equal(3u32)
+        expect(got[1]).to_equal(4u32)
+
+    it "andnot: wrapper result has limit words":
+        step("andnot ok")
+        val a: [u32] = [0xFFu32, 0xFFu32]
+        val b: [u32] = [0x0Fu32, 0xFFu32]
+        val got: [u32] = row_bitmap_andnot_words(a, b, 2, 2)
+        expect(got.len()).to_equal(2)
+        expect(got[0]).to_equal(0xF0u32)
+        expect(got[1]).to_equal(0u32)

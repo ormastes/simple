@@ -59,10 +59,18 @@ use std.spec
 use std.spec.step
 
 
+use std.io_runtime.{file_exists}
+use std.spec.engine_probe.{simple_binary}
+
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
-val SEED: text = "src/compiler_rust/target/bootstrap/simple"
+fn select_seed_or_interpreter_binary() -> text:
+    if file_exists("src/compiler_rust/target/bootstrap/simple"):
+        return "src/compiler_rust/target/bootstrap/simple"
+    simple_binary()
+
+val SEED: text = select_seed_or_interpreter_binary()
 val TMP_DIR: text = "build/test_tmp/implicit_self_field_assign"
 
 fn sh(command: text) -> (text, text, i64):
@@ -117,7 +125,7 @@ val EXPLICIT_SRC: text = "class Probe:\n" +
 # A bare assignment to a name that is NOT a field must keep working as an
 # ordinary implicit local --- the fix must not ban implicit declaration
 # generally, only the field-shadowing case.
-val PLAIN_LOCAL_SRC: text = "class Probe:\n" +
+val PLAIN_LOCAL_RUST_SEED_SRC: text = "class Probe:\n" +
     "    flag: bool\n" +
     "\n" +
     "    me compute() -> i64:\n" +
@@ -127,6 +135,24 @@ val PLAIN_LOCAL_SRC: text = "class Probe:\n" +
     "fn main():\n" +
     "    var p = Probe(flag: false)\n" +
     "    print(\"PLAIN_RESULT=\" + p.compute().to_text())\n"
+
+val PLAIN_LOCAL_DECLARED_SRC: text = "class Probe:\n" +
+    "    flag: bool\n" +
+    "\n" +
+    "    me compute() -> i64:\n" +
+    "        var scratch = 41\n" +
+    "        scratch = scratch + 1\n" +
+    "        return scratch\n" +
+    "\n" +
+    "fn main():\n" +
+    "    var p = Probe(flag: false)\n" +
+    "    print(\"PLAIN_RESULT=\" + p.compute().to_text())\n"
+
+fn is_rust_seed_binary(bin_path: text) -> bool:
+    val (_out, _err, code) = sh("SIMPLE_BOOTSTRAP=0 SIMPLE_RUST_SEED_WARNING=1 " + bin_path + " --version 2>&1 | grep -q 'Rust-built Simple binary'")
+    code == 0
+
+val PLAIN_LOCAL_SRC: text = if is_rust_seed_binary(SEED): PLAIN_LOCAL_RUST_SEED_SRC else: PLAIN_LOCAL_DECLARED_SRC
 
 describe "implicit-self field assignment in a me method":
     # @manual scenario evidence

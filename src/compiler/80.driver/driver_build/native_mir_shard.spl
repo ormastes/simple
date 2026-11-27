@@ -5,7 +5,7 @@
 # the one reclaim path that always works, so the native-build coordinator
 # (src/app/cli/native_build_main.spl run_mir_shards) runs K worker processes
 # after HIR aggregate PASS. Each worker runs the ordinary pipeline through
-# mono (parse/HIR are cache hits), lowers ONLY the modules it claims, runs the
+# HIR (parse/HIR are cache hits), lowers ONLY the modules it claims, runs the
 # per-module post-lowering chain, emits their objects into the shared native
 # object cache, writes one terminal record per claimed module, and exits.
 # The final worker (SIMPLE_MIR_SHARD_LINK=<ledger>) lowers nothing: it admits
@@ -23,8 +23,96 @@
 # the schedule largest-first (native_mir_shard_lpt_order_v1).
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable}
-use std.io_runtime.{file_exists, file_read, file_write, file_rename, getpid}
-use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal}
+use std.io_runtime.{file_exists, file_read, file_size_raw, dir_exists, dir_list_or_empty}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_atomic_write_bytes}
+use std.nogc_sync_mut.io_runtime.{file_read_bytes_result, file_hash_sha256_or_empty}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_inventory}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_mark_dir_used, disk_bound_keyed_hex_name_v1}
+use compiler.driver.driver_build.native_cache_lease.{NativeCacheLease, native_cache_sweep_with_lease}
+use compiler.driver.driver_build.native_file_worker_v1.{
+    native_file_worker_error_reason_publish_v1,
+    native_file_worker_in_flight_claims_v1}
+use compiler.driver.driver_build.build_outcome.{
+    build_outcome_abnormal_exit_label_v1,
+    build_outcome_diagnostics_dir_v1,
+    build_outcome_write_diag_artifact_v1,
+    build_outcome_unit_attribution_v1}
+use compiler.driver.driver_mir_shard_hir_residency_v1.{mir_shard_hir_residency_abort_context_v1}
+
+# Native cache scope retention (driver_aot_native_output.spl) removes scope
+# directories idle past its window. A build's children must never run it: a
+# worker or the link child would delete objects that an earlier child of the
+# SAME build published and its ledger still names. Only an unmarked top-level
+# process may evict. Arguments are the raw role environment values.
+# See doc/08_tracking/bug/native_cache_scope_evicted_during_long_build_2026-11-24.md.
+# reason: raw role environment values in, one admission decision out
+@allow(primitive_api)
+pub fn native_cache_scope_eviction_role_allowed_v1(mir_shard: text, hir_shard: text,
+        parse_shard: text, mir_shard_link: text, file_worker_unit: text,
+        build_worker: text) -> bool:
+    mir_shard == "" and hir_shard == "" and parse_shard == "" and
+        mir_shard_link == "" and file_worker_unit == "" and build_worker == ""
+
+# Set to "1" by the top-level coordinator once its build-start retention pass
+# has been decided; inherited by every nested coordinator and child.
+pub const NATIVE_CACHE_SCOPE_RETENTION_DONE_ENV_V1: text = "SIMPLE_NATIVE_CACHE_SCOPE_RETENTION_DONE"
+
+# Idle window of the scope retention policy, in seconds (6 hours); the same
+# value driver_aot_native_output.spl passes for an unsharded build.
+pub const NATIVE_CACHE_SCOPE_IDLE_SECONDS_V1: i64 = 21600
+
+# Whether this process is the top-level coordinator that owes the one
+# build-start retention pass. Never in a child: any role environment value, a
+# grouped or export-summary child, or a role flag in argv (bootstrap children
+# carry the flag and no role environment) refuses, and so does `already_ran`,
+# the inherited NATIVE_CACHE_SCOPE_RETENTION_DONE_ENV_V1 value.
+# reason: raw role environment values and argv in, one admission decision out
+@allow(primitive_api)
+pub fn native_cache_scope_start_retention_due_v1(mir_shard: text, hir_shard: text,
+        parse_shard: text, mir_shard_link: text, file_worker_unit: text,
+        build_worker: text, group_result: text, export_write: text,
+        already_ran: text, args: [text]) -> bool:
+    if already_ran != "" or group_result != "" or export_write != "":
+        return false
+    if not native_cache_scope_eviction_role_allowed_v1(mir_shard, hir_shard, parse_shard,
+            mir_shard_link, file_worker_unit, build_worker):
+        return false
+    for arg in args:
+        if arg.starts_with("--file-worker") or arg.starts_with("--parse-shard") or
+                arg.starts_with("--hir-shard") or arg.starts_with("--mir-shard") or
+                arg.starts_with("--parse-fibers"):
+            return false
+    true
+
+# The cache scope directory ("<cache>/s<32 hex>") that holds `object_path`, or
+# "" when the path is not under one. The object may sit directly in the scope
+# or in a subdirectory of it; the innermost scope-shaped component wins.
+# reason: a filesystem object path in, its cache scope directory path out
+@allow(primitive_api)
+pub fn native_cache_scope_dir_of_object_v1(object_path: text) -> text:
+    val parts = object_path.replace("\\", "/").split("/")
+    var found = -1
+    var index = 0
+    while index < parts.len() - 1:
+        val part = parts[index]
+        if disk_bound_keyed_hex_name_v1(part, "s", 33):
+            found = index
+        index = index + 1
+    if found < 0:
+        return ""
+    var scope = parts[0]
+    index = 1
+    while index <= found:
+        scope = scope + "/" + parts[index]
+        index = index + 1
+    scope
+
+# A ledger row naming `object_path` keeps that object's scope live: refresh
+# the scope's liveness marker so no concurrent build's retention sees it idle.
+fn _native_mir_shard_keep_scope_live_v1(object_path: text):
+    val scope = native_cache_scope_dir_of_object_v1(object_path)
+    if scope != "":
+        val _marked = disk_bound_mark_dir_used(scope)
 
 pub const NATIVE_MIR_SHARD_ENV_V1: text = "SIMPLE_MIR_SHARD"
 pub const NATIVE_MIR_SHARD_QUEUE_ENV_V1: text = "SIMPLE_MIR_SHARD_QUEUE"
@@ -49,7 +137,7 @@ pub fn native_mir_shard_count_of_v1(spec: text) -> i64:
     if slash <= 0:
         return 0
     val index = spec.substring(0, slash).to_i64() ?? -1
-    val count = spec.substring(slash + 1, spec.len()).to_i64() ?? 0
+    val count = spec.substring(slash + 1, spec.byte_len()).to_i64() ?? 0
     if count <= 0 or index < 0 or index >= count:
         return 0
     count
@@ -127,24 +215,148 @@ pub fn native_mir_shard_outcome_v1(aggregate_code: i64, failed_modules: i64,
         return "fallback"
     "fail"
 
+# A MIR shard worker runs the ordinary frontend before claiming any module.
+# When that frontend stops on HIR compile diagnostics (deterministic: the
+# same sources fail the same way in any process), the worker claims nothing
+# and the aggregate looks exactly like "fallback" (no HIR inventory/cache).
+# Falling back to in-process unsharded MIR then re-runs load/parse/HIR in the
+# final worker and only reproduces the same errors -- in s2c it did so while
+# retaining the first pass and hit the 12 GiB RSS cap
+# (doc/08_tracking/bug/stage2_compiler_cli_build_rss_cap_after_hir_poison_retry_2026-11-04.md).
+# The worker therefore leaves this marker beside the ledger and the
+# coordinator turns that fallback into a fail-fast "fail". Transient/infra
+# stops (no marker) keep the fallback.
+pub const NATIVE_MIR_SHARD_HIR_COMPILE_ERRORS_FILE_V1: text = "HIR_COMPILE_ERRORS"
+
+pub fn native_mir_shard_hir_compile_errors_path_v1(queue: text) -> text:
+    "{queue}/{NATIVE_MIR_SHARD_HIR_COMPILE_ERRORS_FILE_V1}"
+
+# Worker side: no-op outside a MIR shard child or without diagnostics.
+# The first writer wins; the content is the human-readable summary.
+pub fn native_mir_shard_record_hir_compile_errors_v1(queue: text, error_count: i64, poisoned_count: i64) -> bool:
+    if queue == "" or error_count <= 0:
+        return false
+    val target = native_mir_shard_hir_compile_errors_path_v1(queue)
+    if file_exists(target):
+        return true
+    file_atomic_write(target, "errors={error_count} poisoned_modules={poisoned_count}")
+
+pub fn native_mir_shard_hir_compile_errors_recorded_v1(queue: text) -> bool:
+    queue != "" and file_exists(native_mir_shard_hir_compile_errors_path_v1(queue))
+
+# Coordinator side: a recorded HIR compile failure is never retried in process.
+pub fn native_mir_shard_outcome_after_hir_errors_v1(outcome: text, hir_compile_errors: bool) -> text:
+    if outcome == "fallback" and hir_compile_errors:
+        return "fail"
+    outcome
+
 fn native_mir_shard_record_base_v1(queue: text, module_name: text) -> text:
     "{queue}/{sha256_text(module_name)}"
+
+fn _native_mir_shard_spec_slot_v1(spec: text) -> (i64, i64):
+    val parts = spec.split("/")
+    if parts.len() != 2:
+        return (0, 1)
+    val idx = parts[0].to_i64() ?? -1
+    val count = parts[1].to_i64() ?? 0
+    if count <= 1 or idx < 0 or idx >= count:
+        return (0, 1)
+    (idx, count)
+
+var _g_mir_visit_rotation_start: i64 = 0
+var _g_mir_visit_cursor_path: text = ""
+
+fn _native_mir_shard_cursor_path_for_slot_v1(queue: text, slot: i64, count: i64) -> text:
+    if count > 1 and slot >= 0 and slot < count:
+        return "{queue}/.mir_claim_cursor.{slot}-{count}"
+    "{queue}/.mir_claim_cursor"
+
+# reason: MIR ledger queue path and loop position for multi-round LPT cursor rotation
+@allow(primitive_api)
+pub fn native_mir_shard_note_cursor_v1(queue: text, loop_pos: i64, total: i64):
+    if queue == "" or _g_mir_visit_cursor_path == "" or total <= 0:
+        return
+    val raw_next = (_g_mir_visit_rotation_start + loop_pos + 1) % total
+    val bounded = if raw_next >= 0 and raw_next < total: raw_next else: 0
+    val _ = file_atomic_write(_g_mir_visit_cursor_path, "{bounded}")
+
+# Partition `lpt_order` across workers without losing LPT balance or work-stealing:
+# - Multi-shard workers (`0/K .. (K-1)/K`): worker `slot` visits `pos % K == slot`
+#   first (each worker gets 1st-group, 2nd-group, ... largest modules with zero
+#   contention), then the remaining LPT positions to steal stragglers if a peer slows/dies.
+# - Sequential batch children (`0/1` or `+fork` multi-round children): rotate
+#   the slot schedule from `.mir_claim_cursor` so 100+ rounds scan O(N) total.
+# reason: schedule index vector and MIR shard spec/queue/owner strings
+@allow(primitive_api)
+pub fn native_mir_shard_worker_order_v1(lpt_order: [i64], spec: text, queue: text, owner: text = "") -> [i64]:
+    _g_mir_visit_rotation_start = 0
+    _g_mir_visit_cursor_path = ""
+    val total = lpt_order.len()
+    if total <= 1 or spec == "":
+        return lpt_order
+    val (slot, count) = _native_mir_shard_spec_slot_v1(spec)
+    var partitioned = lpt_order
+    if count > 1:
+        var home: [i64] = []
+        var steal: [i64] = []
+        var rank = 0
+        while rank < total:
+            if (rank % count) == slot:
+                home.push(lpt_order[rank])
+            else:
+                steal.push(lpt_order[rank])
+            rank = rank + 1
+        for item in steal:
+            home.push(item)
+        partitioned = home
+    val effective_owner = if owner != "": owner else: native_mir_shard_owner_v1()
+    if queue != "" and (count <= 1 or effective_owner.contains("+fork")):
+        val cpath = _native_mir_shard_cursor_path_for_slot_v1(queue, slot, count)
+        _g_mir_visit_cursor_path = cpath
+        val raw_cursor = if file_exists(cpath): file_read(cpath).trim().to_i64() ?? 0 else: 0
+        val start = if raw_cursor >= 0 and raw_cursor < total: raw_cursor else: 0
+        _g_mir_visit_rotation_start = start
+        if start == 0:
+            return partitioned
+        var rotated: [i64] = []
+        var step = 0
+        while step < total:
+            rotated.push(partitioned[(start + step) % total])
+            step = step + 1
+        return rotated
+    partitioned
 
 # 1 = claimed by this worker, 0 = owned by another worker, -1 = ledger refused.
 pub fn native_mir_shard_claim_v1(queue: text, module_name: text, key: text) -> i64:
     hir_shard_recovery_claim(queue, native_mir_shard_owner_v1(), module_name, key)
 
+# Whether a claimed module may publish PASS. An OK outcome must carry its
+# object; no outcome and no object is compile_to_native's objectless facade
+# route (pure re-export / extern-only module). A module the worker's
+# go-to-end ledger recorded as failed (or excluded) has the same "no outcome,
+# no object" shape -- its MIR never reached codegen -- so it is refused here
+# and the seal turns it FAILED. Phase 3 run-27e published eight such modules
+# as PASS and the coordinator never counted them
+# (doc/08_tracking/bug/mir_shard_go_to_end_failure_published_as_pass_2026-10-25.md).
+pub fn native_mir_shard_module_passed_v1(outcome_label: text, has_object: bool,
+        go_to_end_failed: bool) -> bool:
+    if go_to_end_failed:
+        return false
+    (outcome_label == "OK" and has_object) or (outcome_label == "" and not has_object)
+
 # Publish one claimed module's PASS: sidecar first, terminal last, so a PASS
 # terminal always has its link inputs.
+# `capsule_identity` is the native capsule identity of the published object (or
+# "" when the worker captured no cold-HIR receipts); the link child replays it
+# into the cold-HIR receipt maps so persistence runs once, on the coordinator.
 pub fn native_mir_shard_publish_pass_v1(queue: text, module_name: text,
-        object_path: text, functions: i64, statics: i64) -> bool:
-    if module_name == "" or object_path.contains("\n"):
+        object_path: text, functions: i64, statics: i64, capsule_identity: text) -> bool:
+    if module_name == "" or object_path.contains("\n") or capsule_identity.contains("\n"):
         return false
     val sidecar = native_mir_shard_record_base_v1(queue, module_name) + ".object"
-    val temporary = "{sidecar}.{getpid()}.tmp"
-    if not file_write(temporary, "{object_path}\n{functions}\n{statics}\n") or
-            not file_rename(temporary, sidecar):
+    if not file_atomic_write(sidecar, "{object_path}\n{functions}\n{statics}\n{capsule_identity}\n"):
         return false
+    _native_mir_shard_keep_scope_live_v1(object_path)
     hir_shard_recovery_terminal(queue, native_mir_shard_owner_v1(), module_name,
         "PASS", object_path != "")
 
@@ -153,6 +365,10 @@ pub class NativeMirShardLinkInputsV1:
     # Index-aligned: the module that emitted each object.
     object_modules: [text]
     object_files: [text]
+    # Index-aligned with object_modules; "" when the worker recorded none.
+    capsule_identities: [text]
+    # Modules that published no object (export facades / parsed-objectless).
+    objectless_modules: [text]
     functions: i64
     statics: i64
     objectless: i64
@@ -170,7 +386,7 @@ pub fn native_mir_shard_link_inputs_v1(queue: text, identity: text) -> Result<Na
     if inventory.len() < 2 or inventory[0] != identity:
         return Err("MIR shard ledger inventory does not match this build's sources")
     var inputs = NativeMirShardLinkInputsV1(modules: [], object_modules: [], object_files: [],
-        functions: 0, statics: 0, objectless: 0)
+        capsule_identities: [], objectless_modules: [], functions: 0, statics: 0, objectless: 0)
     var index = 1
     while index < inventory.len():
         val name = inventory[index]
@@ -183,7 +399,7 @@ pub fn native_mir_shard_link_inputs_v1(queue: text, identity: text) -> Result<Na
                 terminal[3] != identity:
             return Err("MIR shard module did not PASS: {name}")
         val sidecar = file_read("{base}.object").split("\n")
-        if sidecar.len() != 4 or sidecar[3] != "":
+        if sidecar.len() != 5 or sidecar[4] != "":
             return Err("MIR shard module link record unreadable: {name}")
         val object_path = sidecar[0]
         val functions = sidecar[1].to_i64() ?? -1
@@ -194,12 +410,328 @@ pub fn native_mir_shard_link_inputs_v1(queue: text, identity: text) -> Result<Na
             if terminal[4] != "UNCACHED":
                 return Err("MIR shard objectless module record mismatch: {name}")
             inputs.objectless = inputs.objectless + 1
+            inputs.objectless_modules = inputs.objectless_modules.push(name)
         else:
-            if terminal[4] != "CACHE_STORED" or not file_exists(object_path):
-                return Err("MIR shard module object missing: {name} ({object_path})")
+            if terminal[4] != "CACHE_STORED":
+                return Err("MIR shard module object missing: {name} ({object_path}): ledger row is not CACHE_STORED")
+            if not file_exists(object_path):
+                return Err("MIR shard module object missing: {name} ({object_path}): " +
+                    "the ledger recorded this object but it is no longer in the native cache " +
+                    "(evicted or deleted after it was published); re-run the build to " +
+                    "recompile the missing modules")
+            _native_mir_shard_keep_scope_live_v1(object_path)
             inputs.object_files = inputs.object_files.push(object_path)
             inputs.object_modules = inputs.object_modules.push(name)
+            inputs.capsule_identities = inputs.capsule_identities.push(sidecar[3])
         inputs.modules = inputs.modules.push(name)
         inputs.functions = inputs.functions + functions
         inputs.statics = inputs.statics + statics
     Ok(inputs)
+
+# OutputFormat.Both: the module's SMF part (smf_staged_parts_v1.spl) lives next
+# to its ledger record. Written before the PASS terminal, so the link step only
+# reads parts of modules the ledger admitted.
+pub fn native_mir_shard_smf_part_write_v1(queue: text, module_name: text, part: [u8]) -> bool:
+    if queue == "" or module_name == "":
+        return false
+    file_atomic_write_bytes(native_mir_shard_record_base_v1(queue, module_name) + ".smfpart", part)
+
+pub fn native_mir_shard_smf_part_read_v1(queue: text, module_name: text) -> Result<[u8], text>:
+    if queue == "" or module_name == "":
+        return Err("MIR shard SMF part: ledger or module missing")
+    file_read_bytes_result(native_mir_shard_record_base_v1(queue, module_name) + ".smfpart")
+
+# ===== Claim resume across launches (run_mir_shards) =========================
+#
+# A relaunch of the same build adopts the killed launch's finished rows instead
+# of re-lowering them. Admission is whole-run equality: every input that can
+# change an object or which module lands in which claim is one named component
+# of the run key; the memory/thread knobs (worker KiB, --threads/--jobs/-j,
+# dataset cap) are not. Source edits move the projected environment
+# (SIMPLE_SCV_* rows).
+
+# --jobs and -j are native-build aliases of --threads: their only reader is
+# native_build_requested_shard_threads (process count, not object bytes).
+fn native_mir_shard_run_key_args_v1(args: [text]) -> [text]:
+    var kept: [text] = []
+    var skip_next = false
+    for arg in args:
+        if skip_next:
+            skip_next = false
+        elif arg == "--threads" or arg == "--jobs" or arg == "-j":
+            skip_next = true
+        elif not arg.starts_with("--threads=") and not arg.starts_with("--jobs="):
+            kept = kept.push(arg)
+    kept
+
+# Module-selection and failure-tolerance knobs the projected environment drops
+# (they do not change an object's bytes) but that change WHICH rows a pass
+# produces or whether the link is allowed. Without them a relaunch with
+# SIMPLE_ICE_SKIP_MODULES=gamma adopted every row of a complete run and linked
+# what a full pass with that skip refuses. Census of the sibling knobs:
+# - SIMPLE_ICE_SKIP_MODULES, SIMPLE_NATIVE_GO_TO_END, SIMPLE_MIR_SHARD_ONLY_PATHS:
+#   here (dropped by the module-environment projection).
+# - SIMPLE_COMPILE_FAIL_FAST, SIMPLE_NO_STUB_FALLBACK, SIMPLE_ALLOW_UNLOWERED_MIR,
+#   SIMPLE_STUB_HIR, SIMPLE_UNSTUB_HIR, SIMPLE_MCDC_EXCLUDE,
+#   SIMPLE_BOOTSTRAP_SKIP_MIR_LOWER, SIMPLE_MIR_SELECTIVE: already in the
+#   environment component (every SIMPLE_* the projection keeps).
+# - --go-to-end and other flags: the argv component.
+# - Shard count / fork workers: their own components.
+pub fn native_mir_shard_run_key_selection_v1(ice_skip: text, go_to_end: text,
+        only_paths: text) -> text:
+    "ice-skip={sha256_text(ice_skip)}\ngo-to-end={sha256_text(go_to_end)}\nonly-paths={sha256_text(only_paths)}\n"
+
+# The resume decision line printed for a full pass.
+pub fn native_mir_shard_resume_full_pass_line_v1(mismatch: text, prior: text) -> text:
+    if mismatch == "no-prior-ledger": return "[mir-shard] resume: no prior ledger; full pass"
+    "[mir-shard] resume: full pass; run key component {mismatch} differs from prior ledger {prior}"
+
+# One "<component>=<value>" row per input, in a fixed order.
+pub fn native_mir_shard_run_key_v1(compiler: text, environment: text, guards: text,
+        lane: text, args: [text], count: i64, fork_workers: i64, selection: text) -> text:
+    val argv = native_mir_shard_run_key_args_v1(args).join("\n")
+    "native-mir-shard-run-key-v1\ncompiler={sha256_text(compiler)}\nenvironment={sha256_text(environment)}\nguards={sha256_text(guards)}\nlane={sha256_text(lane)}\nargv={sha256_text(argv)}\nshards={count}\nfork-workers={fork_workers}\n{selection}"
+
+# "" when equal, else the name of the first differing component.
+pub fn native_mir_shard_run_key_mismatch_v1(prior: text, current: text) -> text:
+    if prior == current: return ""
+    if prior == "": return "run-key-absent"
+    val p = prior.split("\n")
+    val c = current.split("\n")
+    var index = 0
+    while index < p.len() and index < c.len():
+        if p[index] != c[index]:
+            val eq = c[index].index_of("=")
+            return if eq > 0: c[index].substring(0, eq) else: "version"
+        index = index + 1
+    "version"
+
+pub struct NativeMirShardResumeV1:
+    adopted: i64
+    requeued: i64
+    reason: text
+
+# Why a prior row cannot be adopted ("" = adoptable): it must be a PASS for
+# the prior inventory's identity with a whole sidecar; an object row's object
+# must still be the bytes its capsule receipt names, for the sidecar's capsule
+# (a later build of other sources at the same path writes another capsule).
+fn native_mir_shard_resume_row_reason_v1(prior: text, name: text, identity: text) -> text:
+    val base = native_mir_shard_record_base_v1(prior, name)
+    val terminal = file_read("{base}.terminal").split("\n")
+    if terminal.len() != 6 or terminal[0] != "PASS" or terminal[2] != name or terminal[3] != identity:
+        return "not-pass"
+    val sidecar = file_read("{base}.object").split("\n")
+    if sidecar.len() != 5 or sidecar[4] != "": return "sidecar-malformed"
+    val object_path = sidecar[0]
+    if object_path == "":
+        return if terminal[4] == "UNCACHED": "" else: "objectless-cache-mismatch"
+    if terminal[4] != "CACHE_STORED" or sidecar[3] == "": return "object-unbound"
+    if not file_exists(object_path): return "object-missing"
+    val size = file_size_raw(object_path)
+    val digest = file_hash_sha256_or_empty(object_path)
+    if size < 0 or digest == "": return "object-unreadable"
+    val expected = "native-capsule-result-v1\n{sidecar[3]}\n{object_path}\n{size}\n{digest}\n"
+    if file_read(object_path + ".capsule-receipt") != expected: return "receipt-mismatch"
+    ""
+
+# Seed `queue` (fresh, before any worker) from the prior ledger: publish its
+# inventory, then claim + record every adoptable row under owner "resume"
+# (never a coordinator "<i>/<n>@<g>" owner, so no seal touches it). Every
+# other row stays unclaimed and is lowered again by this launch's workers.
+pub fn native_mir_shard_resume_adopt_v1(prior: text, queue: text) -> NativeMirShardResumeV1:
+    val inventory = file_read("{prior}/inventory").split("\n")
+    if inventory.len() < 2 or inventory[0] == "":
+        return NativeMirShardResumeV1(adopted: 0, requeued: 0, reason: "prior inventory unreadable")
+    val identity = inventory[0]
+    val names = inventory[1:]
+    if not hir_shard_recovery_inventory(queue, identity, names):
+        return NativeMirShardResumeV1(adopted: 0, requeued: 0, reason: "inventory not published")
+    var adopted: i64 = 0
+    var requeued: i64 = 0
+    for name in names:
+        if native_mir_shard_resume_row_reason_v1(prior, name, identity) != "":
+            requeued = requeued + 1
+            continue
+        if hir_shard_recovery_claim(queue, "resume", name, identity) != 1:
+            return NativeMirShardResumeV1(adopted: adopted, requeued: requeued, reason: "claim refused: {name}")
+        val prior_base = native_mir_shard_record_base_v1(prior, name)
+        val base = native_mir_shard_record_base_v1(queue, name)
+        if file_exists("{prior_base}.smfpart"):
+            val part = file_read_bytes_result("{prior_base}.smfpart")
+            if part.is_err() or not file_atomic_write_bytes("{base}.smfpart", part.unwrap()):
+                return NativeMirShardResumeV1(adopted: adopted, requeued: requeued, reason: "SMF part not copied: {name}")
+        val sidecar = file_read("{prior_base}.object")
+        if not file_atomic_write("{base}.object", sidecar) or
+                not hir_shard_recovery_terminal(queue, "resume", name, "PASS", not sidecar.starts_with("\n")):
+            return NativeMirShardResumeV1(adopted: adopted, requeued: requeued, reason: "record not published: {name}")
+        _native_mir_shard_keep_scope_live_v1(sidecar.split("\n")[0])
+        adopted = adopted + 1
+    NativeMirShardResumeV1(adopted: adopted, requeued: requeued, reason: "")
+
+# The distinct cache scope directories named by the object sidecars of MIR
+# ledger `ledger` ([] when it has no readable inventory).
+pub fn native_mir_shard_ledger_scope_dirs_v1(ledger: text) -> [text]:
+    var scopes: [text] = []
+    if ledger == "" or not file_exists("{ledger}/inventory"):
+        return scopes
+    val inventory = file_read("{ledger}/inventory").split("\n")
+    if inventory.len() < 2 or inventory[0] == "":
+        return scopes
+    for name in inventory[1:]:
+        if name == "":
+            continue
+        val sidecar = "{native_mir_shard_record_base_v1(ledger, name)}.object"
+        if not file_exists(sidecar):
+            continue
+        val scope = native_cache_scope_dir_of_object_v1(file_read(sidecar).split("\n")[0])
+        if scope != "" and not scopes.contains(scope):
+            scopes = scopes.push(scope)
+    scopes
+
+# The one build-start retention pass of a sharded or coordinator-lane build,
+# run by the top-level coordinator before it adopts or produces any object.
+# Scopes named by `prior_ledgers` (the ledgers this launch may resume from)
+# get a fresh liveness marker first, so the pass never removes one. No scope
+# is "current" here: the coordinator does not know its scope name, so at most
+# `keep` - 1 scopes survive beyond the idle window and the build's own scope
+# takes the last slot when a child creates it. Returns directories removed.
+# reason: cache directory path, ledger paths and retention count in, removed-directory count out
+pub const NATIVE_CACHE_SCOPES_KEEP_DEFAULT_V1: i64 = 6
+pub const NATIVE_CACHE_SCOPES_KEEP_HEADROOM_V1: i64 = 2
+
+fn _append_unique_nonempty_v1(items: [text], candidate: text) -> [text]:
+    val trimmed = candidate.trim()
+    if trimmed == "" or items.contains(trimmed):
+        return items
+    var out = items
+    out.push(trimmed)
+    out
+
+fn _append_root_shard_ledgers_v1(items: [text], root: text) -> [text]:
+    var out = items
+    val dir = root.trim()
+    if dir == "" or not dir_exists(dir):
+        return out
+    val latest = "{dir}/mir-run-latest"
+    if file_exists(latest) and not dir_exists(latest):
+        val target = file_read(latest).trim()
+        if target != "":
+            out = _append_unique_nonempty_v1(out, target)
+    for entry in dir_list_or_empty(dir):
+        if entry.starts_with("mir-queue-"):
+            val qdir = "{dir}/{entry}"
+            if dir_exists(qdir):
+                out = _append_unique_nonempty_v1(out, qdir)
+    out
+
+# Default scope retention floor for sharded native builds: preserve at least 6
+# scopes, and raise the default to `mir_shard_count + 2` when sharding so
+# early shards (e.g., Shard 0/8, 1/8) are not evicted before late shards finish.
+@allow(primitive_api)
+pub fn native_cache_scopes_keep_default_v1(mir_shard_count_raw: text) -> i64:
+    val parsed = mir_shard_count_raw.trim().to_i64() ?? 0
+    val sharded_floor = if parsed > 0: parsed + NATIVE_CACHE_SCOPES_KEEP_HEADROOM_V1 else: NATIVE_CACHE_SCOPES_KEEP_DEFAULT_V1
+    if sharded_floor > NATIVE_CACHE_SCOPES_KEEP_DEFAULT_V1: sharded_floor else: NATIVE_CACHE_SCOPES_KEEP_DEFAULT_V1
+
+@allow(primitive_api)
+pub fn native_cache_scopes_keep_for_v1(explicit_keep_raw: text, mir_shard_count_raw: text) -> i64:
+    val fallback = native_cache_scopes_keep_default_v1(mir_shard_count_raw)
+    val parsed = explicit_keep_raw.trim().to_i64() ?? 0
+    if parsed > 0: parsed else: fallback
+
+pub fn native_mir_shard_active_ledger_paths_v1(cache_root: text, hir_cache_dir: text,
+        mir_queue: text, mir_link: text) -> [text]:
+    var out: [text] = []
+    out = _append_unique_nonempty_v1(out, mir_queue)
+    out = _append_unique_nonempty_v1(out, mir_link)
+    out = _append_root_shard_ledgers_v1(out, cache_root)
+    out = _append_root_shard_ledgers_v1(out, hir_cache_dir)
+    out
+
+@allow(primitive_api)
+pub fn native_cache_protect_active_shard_ledgers_v1(ledgers: [text]) -> i64:
+    var seen_scopes: [text] = []
+    var marked: i64 = 0
+    for ledger in ledgers:
+        for scope in native_mir_shard_ledger_scope_dirs_v1(ledger):
+            if not seen_scopes.contains(scope):
+                seen_scopes.push(scope)
+                if disk_bound_mark_dir_used(scope):
+                    marked = marked + 1
+    marked
+
+@allow(primitive_api)
+pub fn native_cache_scope_start_retention_v1(lease: NativeCacheLease, prior_ledgers: [text],
+        keep: i64) -> i64:
+    val _marked = native_cache_protect_active_shard_ledgers_v1(prior_ledgers)
+    native_cache_sweep_with_lease(lease, "", keep, NATIVE_CACHE_SCOPE_IDLE_SECONDS_V1)
+
+@allow(primitive_api)
+pub fn native_cache_scope_midbuild_sweep_v1(lease: NativeCacheLease, current: text,
+        hir_cache_dir: text, mir_queue: text, mir_link: text,
+        mir_shard_count_raw: text, min_age_s: i64 = NATIVE_CACHE_SCOPE_IDLE_SECONDS_V1) -> i64:
+    val active_ledgers = native_mir_shard_active_ledger_paths_v1(
+        lease.cache_root, hir_cache_dir, mir_queue, mir_link)
+    val _marked = native_cache_protect_active_shard_ledgers_v1(active_ledgers)
+    val explicit_keep = env_get_nullable("SIMPLE_NATIVE_CACHE_SCOPES_KEEP") ?? ""
+    val keep = native_cache_scopes_keep_for_v1(explicit_keep, mir_shard_count_raw)
+    native_cache_sweep_with_lease(lease, current, keep, min_age_s)
+
+# Active non-terminal module claims owned by `owner` in `queue`.
+pub fn native_mir_shard_in_flight_modules_v1(queue: text, owner: text) -> [text]:
+    native_file_worker_in_flight_claims_v1(queue, owner)
+
+fn _native_mir_shard_extract_diag_path_v1(line: text) -> text:
+    val marker = line.index_of(" diag=")
+    if marker < 0:
+        return ""
+    val after = line.substring(marker + 6)
+    val detail_pos = after.index_of(" detail=")
+    if detail_pos < 0: after else: after.substring(0, detail_pos)
+
+# Capture stderr + active module attribution + HIR residency context into
+# `diagnostics/` and publish an owner reason receipt BEFORE sealing claims.
+# reason: raw process exit status characterizes the abnormal MIR worker termination
+@allow(primitive_api)
+pub fn native_mir_shard_attribute_abort_v1(queue: text, owner: text, code: i64,
+        stderr_text: text, diag_dir: text = "") -> text:
+    val in_flight = native_mir_shard_in_flight_modules_v1(queue, owner)
+    val module_summary = if in_flight.len() == 0: "<before-first-claim>" else: in_flight.join(", ")
+    val label = build_outcome_abnormal_exit_label_v1(code, false)
+    val residency = mir_shard_hir_residency_abort_context_v1()
+    val target_dir = if diag_dir != "": diag_dir else: build_outcome_diagnostics_dir_v1(queue)
+    val threads = (env_get_nullable("SIMPLE_NATIVE_BUILD_THREADS") ?? "").trim().to_i64() ?? 0
+    val line = native_mir_shard_diagnostic_parity_v1(
+        module_summary, threads, code, stderr_text, target_dir,
+        "queue={queue} {residency}", owner)
+    val artifact_path = _native_mir_shard_extract_diag_path_v1(line)
+    if queue != "" and owner != "":
+        var reason_msg = "mir-shard child exited {code} ({label}) modules=[{module_summary}]"
+        if artifact_path != "":
+            reason_msg = reason_msg + " diag={artifact_path}"
+        val _pub = native_file_worker_error_reason_publish_v1(queue, owner, reason_msg)
+    line
+
+# `--threads 1` in-process diagnostic parity with sharded codegen/MIR workers:
+# both lanes emit identical module attribution and capture stderr in `diagnostics/`.
+# reason: thread count and exit code drive parity attribution formatting
+@allow(primitive_api)
+pub fn native_mir_shard_diagnostic_parity_v1(module_name: text, threads: i64,
+        code: i64, stderr_text: text, diag_dir: text = "",
+        detail_extra: text = "", owner_tag: text = "") -> text:
+    val mode = if threads <= 1: "in-process-threads-1" else: "sharded-threads-{threads}"
+    val target_dir = if diag_dir != "": diag_dir else: build_outcome_diagnostics_dir_v1("")
+    val prefix = if owner_tag != "": "mir-worker-abort" else: "mir-diag"
+    val slot_label = if owner_tag != "": owner_tag else: mode
+    val full_detail = if detail_extra != "":
+        "{detail_extra} threads={threads} mode={mode}"
+    else:
+        "threads={threads} mode={mode}"
+    val diag_path = build_outcome_write_diag_artifact_v1(
+        target_dir, prefix, module_name, slot_label,
+        code, false, full_detail, stderr_text)
+    val attr_extra = if owner_tag != "":
+        "owner={owner_tag} mode={mode}"
+    else:
+        "mode={mode}"
+    build_outcome_unit_attribution_v1(0, module_name, code, false, diag_path, attr_extra)

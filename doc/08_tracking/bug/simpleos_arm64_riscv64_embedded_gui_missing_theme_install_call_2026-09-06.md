@@ -1,7 +1,7 @@
 # arm64 and riscv64 embedded GUI entries import but never call `install_generated_simpleos_wm_theme()`
 
 Date: 2026-09-06
-Status: fixed (source regression verified 2026-09-23; live QEMU verification deferred)
+Status: superseded (triage 2026-11-11, lane boot9; was: fixed 2026-09-23) — arm64/riscv64 theme-install call re-verified in-tree; focused spec PASS (seed-smoke 2/2); QEMU/perf evidence remains host-limited
 Severity: P3 (visual regression: generated Aetheric base theme is never installed before the CSS override runs)
 Location:
 - `examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl:40` (import), no call site
@@ -82,6 +82,24 @@ TODO(deferred-perf): with the admitted ARM64/RV64 phase environment, retain
 first-frame latency and boot heap deltas before/after this one-time install.
 No additional theme installation or receipt formatting belongs in the frame loop.
 
+## Triage 2026-11-10 (p3-boot lane)
+
+SUPERSEDED — verified on branch work/p3-boot-20261110 (base origin/release/1.0.0).
+
+- `examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl:128` and
+  `examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl:50` each
+  contain exactly one `install_generated_simpleos_wm_theme()` call
+  (`grep -n "install_generated_simpleos_wm_theme()"` on both files, one hit
+  each).
+- Focused regression spec executed PASS (seed-smoke):
+  `SIMPLE_LIB=src bin/simple.exe test test/01_unit/os/simpleos_cross_arch_theme_install_source_spec.spl --mode=interpreter`
+  -> `outcome=OK declared>=2 executed=2 passed=2 failed=0` using this
+  worktree's own seed binary (sha256 prefix f719626aed33e42f). The main-repo
+  seed at C:/Users/yoon/dev/simple/bin/simple.exe is an older build whose
+  extern table predates GetProcessHeap and could not load this spec closure.
+- Deferred QEMU/perf TODOs from the 2026-09-23 resolution remain unchanged
+  (live ARM64/RV64 boot evidence is outside this lane's grant).
+
 ## Recovery note (2026-09-06)
 
 This record was accidentally lost once during authoring -- a concurrent
@@ -94,3 +112,20 @@ rewritten and re-verified (score + runtime pass count) after the fact. This
 is the documented shared-working-copy risk noted in
 `.claude/rules/vcs.md` / project memory: untracked files in this checkout
 can be swept by peer sessions mid-edit.
+
+## Triage 2026-11-11 (lane boot9, work/p3-boot9-20261111)
+
+SUPERSEDED — re-verified on this lane's own worktree (base
+origin/release/1.0.0 tip, fresh seed 46fe8f6b6def):
+
+- `grep -c "install_generated_simpleos_wm_theme()"` on all three
+  `gui_entry_desktop.spl` arch entries (arm64, riscv64, x86_64) -> exactly
+  1 hit each.
+- Focused regression re-executed (seed-smoke):
+  `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test
+  test/01_unit/os/simpleos_cross_arch_theme_install_source_spec.spl
+  --mode=interpreter --no-cache`
+  -> `outcome=OK declared>=2 executed=2 passed=2 failed=0` (~12 s).
+- The two deferred TODOs (ARM64/RV64 QEMU boot evidence; first-frame latency
+  / boot heap deltas) remain open and host-limited; no QEMU or heavy native
+  build was run in this lane.

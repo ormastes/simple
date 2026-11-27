@@ -1,0 +1,233 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_build/go_to_end_trial_link_v1.spl 0%
+"""
+# native-build --go-to-end: trial link of the surviving objects
+
+**Category:** Compiler / driver
+
+## Purpose and Audience
+
+"go to obj gen if possible, link them" (2026-11-13). Once go-to-end has every
+object a build can still produce, the census question is what the link would
+say. The trial link runs the normal link line with every error reported and
+a second pass tolerating unresolved symbols into `<out>.go-to-end-trial`,
+never the published path; each undefined symbol is attributed to the failed
+module that defines it, and the manifest records all of it.
+
+## Expected Outcome
+
+Three modules, one failed: the two objects link in a trial that names exactly
+the failed module's symbol, attributed to it; the artifact exists beside the
+output and is marked `admitted: false`; with all three objects the trial is
+clean. The ledger reader turns PASS rows with `.object` sidecars into inputs
+and every other row into a failure. The in-process and coordinator routes call
+the trial, and the manifest without a trial still says `attempted: false`.
+"""
+use std.spec.*
+use std.io_runtime.{file_read, file_write, file_exists, dir_create_all, getpid}
+use app.io.process_ops.{process_run}
+use compiler.backend.io_compat.{backend_tool_on_path}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.driver_build.go_to_end.{GoToEndLedgerV1, go_to_end_manifest_text_v1,
+    go_to_end_manifest_text_with_trial_v1}
+use compiler.driver.driver_build.go_to_end_trial_link_v1.*
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_inventory,
+    hir_shard_recovery_terminal}
+
+# clang + ld.lld from PATH (the linker authority's own lookup; never gcc).
+# Absent tools fail the case with a message, never skip it.
+fn spec_tool_v1(candidates: [text]) -> text:
+    val found = backend_tool_on_path(candidates)
+    if found == "":
+        fail("go_to_end_trial_link_spec: none of {candidates} on PATH; install LLVM (clang + lld) or extend PATH")
+    found
+
+fn lld_v1() -> text:
+    spec_tool_v1(["ld.lld", "ld.lld-23", "ld.lld-20", "ld.lld-19", "ld.lld-18"])
+
+fn clang_v1() -> text:
+    spec_tool_v1(["clang", "clang-23", "clang-20", "clang-19", "clang-18"])
+
+# Spec-local linker: bare lld over the fixture objects, entry at module a.
+struct FixtureLldLinkerV1:
+    lld: text
+
+impl GoToEndTrialLinkerV1 for FixtureLldLinkerV1:
+    fn link(objects: [text], output: text, extra_flags: [text]) -> Result<text, text>:
+        var args: [text] = ["-e", "fixture.mod_a.run", "-o", output]
+        for object in objects:
+            args = args.push(object)
+        for flag in extra_flags:
+            # cc -Wl,X hands lld X; bare lld takes X.
+            args = args.push(if flag.starts_with("-Wl,"): flag.substring(4) else: flag)
+        val (out, err, code) = process_run(self.lld, args)
+        if code == 0: Ok(out + err) else: Err(out + err)
+
+fn fixture_dir_v1(tag: text) -> text:
+    val dir = "/tmp/go_to_end_trial_{getpid()}_{tag}"
+    dir_create_all(dir)
+    dir
+
+# a calls c; b stands alone; c defines the helper a needs.
+fn build_fixture_objects_v1(dir: text) -> [text]:
+    file_write("{dir}/a.c", "void run_c(void) __asm__(\"fixture.mod_c.helper\");\nvoid run_a(void) __asm__(\"fixture.mod_a.run\");\nvoid run_a(void){ run_c(); }\n")
+    file_write("{dir}/b.c", "void run_b(void) __asm__(\"fixture.mod_b.run\");\nvoid run_b(void){}\n")
+    file_write("{dir}/c.c", "void run_c(void) __asm__(\"fixture.mod_c.helper\");\nvoid run_c(void){}\n")
+    for name in ["a", "b", "c"]:
+        val (_o, err, code) = process_run(clang_v1(), ["-c", "-fPIC", "{dir}/{name}.c", "-o", "{dir}/{name}.o"])
+        if code != 0:
+            fail("clang failed on {name}.c: {err}")
+    ["{dir}/a.o", "{dir}/b.o", "{dir}/c.o"]
+
+val LLD_UNRESOLVED_TEXT_V1 = "ld.lld: error: undefined symbol: fixture.mod_c.helper\n>>> referenced by a.c\n>>>               a.o:(fixture.mod_a.run)\nld.lld: error: duplicate symbol: fixture.mod_b.run\n>>> defined at b.c\n"
+
+describe "go-to-end trial link: pure parts":
+    it "names the trial artifact beside the user output, never the output":
+        # @req REQ-SSPEC-COMPILER
+        step("names the trial artifact beside the user output, never the output")
+        expect(go_to_end_trial_output_v1("build/out/simple")).to_equal("build/out/simple.go-to-end-trial")
+        expect(go_to_end_trial_output_v1("build/out/simple.go-to-end-trial")).to_equal("build/out/simple.go-to-end-trial.go-to-end-trial")
+
+    it "reports every error first and tolerates unresolved symbols only on the artifact pass":
+        # @req REQ-SSPEC-COMPILER
+        step("reports every error first and tolerates unresolved symbols only on the artifact pass")
+        expect(go_to_end_trial_report_flags_v1()).to_equal(["-Wl,--error-limit=0", "-Wl,--no-gc-sections"])
+        expect(go_to_end_trial_artifact_flags_v1()).to_equal(["-Wl,--unresolved-symbols=ignore-all", "-Wl,--warn-unresolved-symbols", "-Wl,--error-limit=0", "-Wl,--no-gc-sections"])
+
+    it "parses undefined symbols and other errors out of lld output":
+        # @req REQ-SSPEC-COMPILER
+        step("parses undefined symbols and other errors out of lld output")
+        expect(go_to_end_link_undefined_symbols_v1(LLD_UNRESOLVED_TEXT_V1)).to_equal(["fixture.mod_c.helper"])
+        expect(go_to_end_link_other_errors_v1(LLD_UNRESOLVED_TEXT_V1)).to_equal(["ld.lld: error: duplicate symbol: fixture.mod_b.run"])
+        expect(go_to_end_link_undefined_symbols_v1("/usr/bin/ld: a.o: undefined reference to `fixture.mod_c.helper'\n")).to_equal(["fixture.mod_c.helper"])
+
+    it "attributes a symbol to the longest failed module that defines it":
+        # @req REQ-SSPEC-COMPILER
+        step("attributes a symbol to the longest failed module that defines it")
+        val failed = ["lib.common", "lib.common.text", "app.main"]
+        expect(go_to_end_symbol_module_v1("lib.common.text.text_len", failed)).to_equal("lib.common.text")
+        expect(go_to_end_symbol_module_v1("lib.common.json.parse", failed)).to_equal("lib.common")
+        expect(go_to_end_symbol_module_v1("__simple_main_app_main", failed)).to_equal("app.main")
+        expect(go_to_end_symbol_module_v1("rt_string_len", failed)).to_equal("")
+
+    it "classifies a failed report pass":
+        # @req REQ-SSPEC-COMPILER
+        step("classifies a failed report pass")
+        val trial = go_to_end_trial_link_classify_v1(LLD_UNRESOLVED_TEXT_V1, ["a.o", "b.o"], ["fixture.mod_c"])
+        expect(trial.verdict).to_equal("unresolved")
+        expect(trial.symbol_modules).to_equal(["fixture.mod_c"])
+        expect(trial.link_errors.len()).to_equal(1)
+        expect(go_to_end_trial_link_classify_v1("ld.lld: error: relocation R_X86_64_32 out of range\n", ["a.o"], []).verdict).to_equal("error")
+
+    it "renders the manifest block with admitted: false and the symbol table":
+        # @req REQ-SSPEC-COMPILER
+        step("renders the manifest block with admitted: false and the symbol table")
+        val block = go_to_end_trial_manifest_block_v1(go_to_end_trial_link_classify_v1(LLD_UNRESOLVED_TEXT_V1, ["a.o", "b.o"], ["fixture.mod_c"]))
+        expect(block.contains("    verdict: \"unresolved\"\n")).to_equal(true)
+        expect(block.contains("    admitted: false\n")).to_equal(true)
+        expect(block.contains("    runnable: false\n")).to_equal(true)
+        expect(block.contains("trial_undefined |symbol, module|\n  \"fixture.mod_c.helper\", \"fixture.mod_c\"\n")).to_equal(true)
+        val manifest = go_to_end_manifest_text_with_trial_v1("out", GoToEndLedgerV1.empty(), 2, ["a", "b"], block)
+        expect(manifest.contains("  linked: false\n")).to_equal(true)
+        expect(manifest.contains(block)).to_equal(true)
+        expect(go_to_end_manifest_text_v1("out", GoToEndLedgerV1.empty(), 2, ["a", "b"]).contains("  trial_link:\n    attempted: false\n")).to_equal(true)
+
+describe "go-to-end trial link: ledger inputs":
+    it "turns PASS rows with objects into inputs and every other row into a failure":
+        # @req REQ-SSPEC-COMPILER
+        step("turns PASS rows with objects into inputs and every other row into a failure")
+        val dir = fixture_dir_v1("ledger")
+        val queue = "{dir}/mir-queue"
+        dir_create_all(queue)
+        expect(hir_shard_recovery_inventory(queue, "k", ["fixture.mod_a", "fixture.mod_b", "fixture.mod_c", "fixture.mod_d"])).to_equal(true)
+        file_write("{dir}/a.o", "obj")
+        file_write("{dir}/b.o", "obj")
+        for row in [("fixture.mod_a", "PASS", "{dir}/a.o"), ("fixture.mod_b", "PASS", "{dir}/b.o"), ("fixture.mod_c", "FAILED", "")]:
+            expect(hir_shard_recovery_claim(queue, "0/1@g", row.0, "k")).to_equal(1)
+            hir_shard_recovery_terminal(queue, "0/1@g", row.0, row.1, false)
+            if row.2 != "":
+                file_write("{queue}/{sha256_text(row.0)}.object", "{row.2}\n1\n0\nid\n")
+        val inputs = go_to_end_trial_inputs_from_ledger_v1(queue)
+        expect(inputs.object_modules).to_equal(["fixture.mod_a", "fixture.mod_b"])
+        expect(inputs.object_files).to_equal(["{dir}/a.o", "{dir}/b.o"])
+        expect(inputs.failed_rows).to_equal(["FAILED fixture.mod_c", "UNCLAIMED fixture.mod_d"])
+        expect(inputs.failed_modules.contains("fixture.mod_c")).to_equal(true)
+        expect(inputs.note).to_equal("")
+
+    it "reports an unreadable ledger as a note, not a crash":
+        # @req REQ-SSPEC-COMPILER
+        step("reports an unreadable ledger as a note, not a crash")
+        val inputs = go_to_end_trial_inputs_from_ledger_v1("/nonexistent/go-to-end-ledger")
+        expect(inputs.object_files).to_equal([])
+        expect(inputs.note.starts_with("ledger directory unreadable")).to_equal(true)
+
+describe "go-to-end trial link: real lld over a 3-module fixture":
+    it "links the two surviving objects and names exactly the failed module's symbol":
+        # @req REQ-SSPEC-COMPILER
+        step("links the two surviving objects and names exactly the failed module's symbol")
+        val dir = fixture_dir_v1("lld")
+        val objects = build_fixture_objects_v1(dir)
+        val output = "{dir}/simple"
+        val trial = go_to_end_trial_link_run_v1(FixtureLldLinkerV1(lld: lld_v1()),
+            [objects[0], objects[1]], output, ["fixture.mod_c"])
+        expect(trial.attempted).to_equal(true)
+        expect(trial.verdict).to_equal("unresolved")
+        expect(trial.undefined_symbols).to_equal(["fixture.mod_c.helper"])
+        expect(trial.symbol_modules).to_equal(["fixture.mod_c"])
+        expect(trial.link_errors).to_equal([])
+        expect(trial.artifact).to_equal("{dir}/simple.go-to-end-trial")
+        expect(file_exists(trial.artifact)).to_equal(true)
+        expect(file_exists(output)).to_equal(false)
+
+    it "is clean once the failed module's object is present too":
+        # @req REQ-SSPEC-COMPILER
+        step("is clean once the failed module's object is present too")
+        val dir = fixture_dir_v1("lld_clean")
+        val objects = build_fixture_objects_v1(dir)
+        val trial = go_to_end_trial_link_run_v1(FixtureLldLinkerV1(lld: lld_v1()), objects, "{dir}/simple", [])
+        expect(trial.verdict).to_equal("clean")
+        expect(trial.undefined_symbols).to_equal([])
+        # A clean report pass IS a full link: the file is a runnable binary,
+        # stated in the manifest, still never admitted as the output.
+        expect(trial.artifact).to_equal("{dir}/simple.go-to-end-trial")
+        expect(trial.note).to_contain("fully linked, runnable binary")
+        expect(go_to_end_trial_manifest_block_v1(trial).contains("    runnable: true\n")).to_equal(true)
+        expect(trial.summary().starts_with("trial link verdict=clean objects=3 undefined=0")).to_equal(true)
+
+    it "reports the failed module's symbol through the real hosted link line (cc -fuse-ld=lld, runtime, --gc-sections)":
+        # @req REQ-SSPEC-COMPILER
+        step("reports the failed module's symbol through the real hosted link line (cc -fuse-ld=lld, runtime, --gc-sections)")
+        val dir = fixture_dir_v1("hosted")
+        val objects = build_fixture_objects_v1(dir)
+        val opts = go_to_end_trial_link_options_v1("llvm", "", "")
+        val trial = go_to_end_trial_link_run_v1(GoToEndHostedTrialLinkerV1(opts: opts),
+            [objects[0], objects[1]], "{dir}/simple", ["fixture.mod_c"])
+        expect(trial.verdict).to_equal("unresolved")
+        expect(trial.undefined_symbols.contains("fixture.mod_c.helper")).to_equal(true)
+        expect(go_to_end_symbol_modules_v1(trial.undefined_symbols, ["fixture.mod_c"]).contains("fixture.mod_c")).to_equal(true)
+        expect(trial.link_errors).to_equal([])
+        expect(file_exists("{dir}/simple.go-to-end-trial")).to_equal(true)
+        expect(file_exists("{dir}/simple")).to_equal(false)
+
+    it "skips without objects":
+        # @req REQ-SSPEC-COMPILER
+        step("skips without objects")
+        val trial = go_to_end_trial_link_run_v1(FixtureLldLinkerV1(lld: lld_v1()), [], "/tmp/none", ["x"])
+        expect(trial.attempted).to_equal(false)
+        expect(trial.verdict).to_equal("skipped")
+
+describe "go-to-end trial link: route wiring (source contract)":
+    it "runs the trial at the in-process go-to-end codegen finish":
+        # @req REQ-SSPEC-COMPILER
+        step("runs the trial at the in-process go-to-end codegen finish")
+        val source = file_read("src/compiler/80.driver/driver_aot_native_output.spl")
+        expect(source.contains("go_to_end_trial_link_run_v1(GoToEndHostedTrialLinkerV1(opts: trial_opts)")).to_equal(true)
+        expect(source.contains("self.go_to_end_finish_with_trial_v1(object_files.len(), go_to_end_built,")).to_equal(true)
+
+    it "runs the trial after a failed MIR shard pool under go-to-end and still exits 1":
+        # @req REQ-SSPEC-COMPILER
+        step("runs the trial after a failed MIR shard pool under go-to-end and still exits 1")
+        val source = file_read("src/app/cli/native_build_main.spl")
+        expect(source.contains("native_build_go_to_end_trial_after_mir_pool_v1(mir_ledger, args)\n            eprint \"error: MIR shard aggregate failure; link and artifact publication blocked\"\n            return 1")).to_equal(true)
+        expect(source.contains("if outcome == \"link\" or outcome == \"fail\": (outcome, queue_dir) else: (outcome, \"\")")).to_equal(true)

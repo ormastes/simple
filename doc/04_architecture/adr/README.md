@@ -76,6 +76,7 @@ Examples:
 - `ADR-001-c-backend-for-bootstrap.md`
 - `ADR-002-jujutsu-version-control.md`
 - `ADR-003-numbered-compiler-layers.md`
+- `ADR-006-panic-free-safe-code.md`
 
 ## Status Lifecycle
 

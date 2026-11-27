@@ -1,0 +1,100 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+"""
+# Stage2 MIR: module-level `val` constants imported across modules
+
+Bug core_purity_runtime_split_blocked_native_const_resolution_2026-07-08: the
+JS-engine purity split moved `JsRuntime` to another module and its
+`use ...runtime.{NATIVE_*}` constants stopped resolving on the native lane.
+Provider `lib.a` defines `val K = 3`; the consumer reads it through
+`use lib.a.{K}` and through the qualified `a.K` form.
+"""
+
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+
+fn const_errors(provider: text, consumer: text) -> text:
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    modules["lib.a"] = parse_full_frontend(provider, "lib/a.spl", "lib.a", log)
+    val sources = [SourceFile(path: "lib/a.spl", content: provider, module_name: "lib.a")]
+    val consumer_ast = parse_full_frontend(consumer, "app/main.spl", "app.main", log)
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var out = ""
+    for he in consumer_lowering.errors:
+        out = out + "HIR " + he.message + "\n"
+    var provider_lowering = hirlowering_for_module("lib.a", surfaces)
+    val provider_hir = provider_lowering.lower_module(modules["lib.a"])
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    val _mir = mir_lowering.lower_module(consumer_hir, [provider_hir])
+    for e in mir_lowering.errors:
+        out = out + "MIR " + e.message + "\n"
+    out
+
+
+fn const_shape(provider: text, consumer: text) -> text:
+    # Consumer side: every global the function loads, as name@defining_module.
+    # Provider side: the exported static that backs it, as mangled=init.
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    modules["lib.a"] = parse_full_frontend(provider, "lib/a.spl", "lib.a", log)
+    val sources = [SourceFile(path: "lib/a.spl", content: provider, module_name: "lib.a")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val consumer_hir = consumer_lowering.lower_module(parse_full_frontend(consumer, "app/main.spl", "app.main", log))
+    var provider_lowering = hirlowering_for_module("lib.a", surfaces)
+    val provider_hir = provider_lowering.lower_module(modules["lib.a"])
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    val mir = mir_lowering.lower_module(consumer_hir, [provider_hir])
+    var out = ""
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for ins in block.instructions:
+                match ins.kind:
+                    case MirInstKind.LoadGlobal(_, sym):
+                        out = out + "load " + consumer_hir.symbols.symbol_name_scalar_raw(sym.id) + "@" + consumer_hir.symbols.symbol_defining_module_scalar_raw(sym.id) + ";"
+                    case _: ()
+    var provider_mir_lowering = MirLowering.new(provider_hir.symbols)
+    val provider_mir = provider_mir_lowering.lower_module(provider_hir)
+    for st in provider_mir.statics.values():
+        if st.name == "lib_a__K":
+            match st.init:
+                case Some(c): out = out + "static " + st.name + "={c.value}"
+                case _: out = out + "static " + st.name + "=none"
+    out
+val provider_src = "pub val K = 3\npub val L: i64 = -10\n"
+
+describe "imported module-level val constants":
+    it "resolves a brace-imported untyped val":
+        expect(const_errors(provider_src, "use lib.a.\{K\}\n\nfn f() -> i64:\n    K\n")).to_equal("")
+
+    it "resolves a brace-imported typed negative val":
+        expect(const_errors(provider_src, "use lib.a.\{L\}\n\nfn f() -> i64:\n    L + 1\n")).to_equal("")
+
+    it "resolves an imported val used as a call argument":
+        expect(const_errors(provider_src, "use lib.a.\{K\}\n\nfn g(x: i64) -> i64:\n    x\n\nfn f() -> i64:\n    g(K)\n")).to_equal("")
+
+    it "resolves an imported val compared in a condition":
+        expect(const_errors(provider_src, "use lib.a.\{K\}\n\nfn f(x: i64) -> bool:\n    if x == K:\n        return true\n    false\n")).to_equal("")
+
+    it "resolves a module-qualified val":
+        expect(const_errors(provider_src, "use lib.a\n\nfn f() -> i64:\n    a.K\n")).to_equal("")
+
+    it "lowers a brace-imported val to a load of the provider-defined global":
+        expect(const_shape(provider_src, "use lib.a.\{K\}\n\nfn f() -> i64:\n    K\n")).to_equal("load K@lib.a;static lib_a__K=MirConstValue::Int(3)")
+
+    it "lowers a module-qualified val to the same provider-defined global":
+        expect(const_shape(provider_src, "use lib.a\n\nfn f() -> i64:\n    a.K\n")).to_equal("load K@lib.a;static lib_a__K=MirConstValue::Int(3)")

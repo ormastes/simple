@@ -1,0 +1,91 @@
+"""Mapping a child's output and exit code to a TestFileResult, and a run's verdict.
+
+One behaviour per example. Pass/fail counts come from the child's summary;
+the exit code can only make a result worse, never better.
+"""
+
+use std.spec.*
+use std.test_runner.test_executor_parsing.{make_result_from_output}
+use std.test_runner.test_runner_output.{run_aborted_before_execution, aggregate_failed_count}
+use std.test_runner.test_runner_types.{TestFileResult, TestRunResult}
+
+val GREEN: text = "Results: 3 total, 3 passed, 0 failed"
+val RED: text = "Results: 3 total, 2 passed, 1 failed"
+
+fn map_out(out: text, err: text, code: i32) -> TestFileResult:
+    make_result_from_output("/x/a_spec.spl", out, err, code, 5, 60)
+
+fn file_of(passed: i64, failed: i64, error: text) -> TestFileResult:
+    TestFileResult(path: "f_spec.spl", passed: passed, failed: failed, skipped: 0, pending: 0, duration_ms: 1, setup_ms: 0, error: error, timed_out: false, cached: false)
+
+fn run_of(files: [TestFileResult], passed: i64, failed: i64, timed_out: i64) -> TestRunResult:
+    TestRunResult(files: files, total_passed: passed, total_failed: failed, total_skipped: 0, total_pending: 0, total_timed_out: timed_out, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
+
+describe "make_result_from_output counts":
+    it "reads passed from a green summary with exit 0":
+        expect(map_out(GREEN, "", 0).passed).to_equal(3)
+    it "reads zero failed from a green summary with exit 0":
+        expect(map_out(GREEN, "", 0).failed).to_equal(0)
+    it "leaves the error empty for a green child":
+        expect(map_out(GREEN, "", 0).error).to_equal("")
+    it "reads failed from a red summary":
+        expect(map_out(RED, "", 1).failed).to_equal(1)
+    it "reads passed from a red summary":
+        expect(map_out(RED, "", 1).passed).to_equal(2)
+    it "reports a red child as not ok":
+        expect(map_out(RED, "", 1).is_ok()).to_equal(false)
+    it "reports a green child as ok":
+        expect(map_out(GREEN, "", 0).is_ok()).to_equal(true)
+
+describe "make_result_from_output exit code":
+    it "fails a child that printed green but exited non-zero":
+        expect(map_out(GREEN, "", 1).failed).to_equal(1)
+    it "names the exit code when a green child exited non-zero":
+        expect(map_out(GREEN, "", 3).error).to_contain("exited with code 3")
+    it "fails a child with no summary and a non-zero exit":
+        expect(map_out("", "", 1).failed).to_equal(1)
+    it "refuses a synthetic pass when exit 0 has no parseable summary":
+        val r = map_out("hello\n", "", 0)
+        expect(r.failed).to_equal(1)
+        expect(r.error).to_contain("refusing synthetic pass")
+
+describe "make_result_from_output unverified and truncated":
+    it "marks a trailing TIMEOUT marker as timed out":
+        val r = map_out("", "\nTIMEOUT\n", -1)
+        expect(r.timed_out).to_equal(true)
+    it "does not count a timeout as a failure":
+        expect(map_out("", "\nTIMEOUT\n", -1).failed).to_equal(0)
+    it "keeps a timeout not-ok":
+        expect(map_out("", "\nTIMEOUT\n", -1).is_ok()).to_equal(false)
+    it "treats exit -1 without a marker as a spawn failure, not a timeout":
+        val r = map_out("", "", -1)
+        expect(r.timed_out).to_equal(false)
+        expect(r.error).to_contain("TERMINATED")
+    it "fails closed on truncated child output":
+        val r = map_out(GREEN + "\n[output truncated: 99 bytes omitted]\n", "", 0)
+        expect(r.failed).to_equal(1)
+        expect(r.error).to_contain("truncated")
+
+describe "run verdict":
+    it "is ok for one green file":
+        expect(run_of([file_of(2, 0, "")], 2, 0, 0).is_ok()).to_equal(true)
+    it "is not ok when total_failed is non-zero":
+        expect(run_of([file_of(1, 1, "boom")], 1, 1, 0).is_ok()).to_equal(false)
+    it "is not ok when a file timed out":
+        expect(run_of([file_of(0, 0, "")], 0, 0, 1).is_ok()).to_equal(false)
+    it "is not ok when a file has no examples and no error":
+        expect(run_of([file_of(0, 0, "")], 0, 0, 0).is_ok()).to_equal(false)
+    it "is not ok when a file carries an unrecognised error with failed 0":
+        expect(run_of([file_of(2, 0, "weird: something")], 2, 0, 0).is_ok()).to_equal(false)
+
+describe "run totals":
+    it "reports the real failed count for an ordinary red run":
+        expect(aggregate_failed_count(run_of([file_of(1, 1, "boom")], 1, 1, 0))).to_equal(1)
+    it "reports zero failed for a green run":
+        expect(aggregate_failed_count(run_of([file_of(2, 0, "")], 2, 0, 0))).to_equal(0)
+    it "detects an abort with failures but no files":
+        expect(run_aborted_before_execution(run_of([], 0, 5, 0))).to_equal(true)
+    it "does not call an empty selection an abort":
+        expect(run_aborted_before_execution(run_of([], 0, 0, 0))).to_equal(false)
+    it "does not call a run with files an abort":
+        expect(run_aborted_before_execution(run_of([file_of(0, 1, "boom")], 0, 1, 0))).to_equal(false)

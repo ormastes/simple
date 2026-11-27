@@ -1137,3 +1137,5 @@ re-running the `hello.spl` repro. A rebuild was out of scope for this wave
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Out of lane: self-hosted stage3 native-build SIGSEGV, needs a bootstrap build to reproduce/verify -- out of budget for a shared host. No change made.
+
+**Revalidated 2026-11-02: still plausible because root cause pinned to the exact source line with symbolized; no merged fix commit with a passing regression is cited in this doc.**

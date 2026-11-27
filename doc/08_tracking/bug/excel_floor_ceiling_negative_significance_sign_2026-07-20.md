@@ -1,4 +1,6 @@
 # Bug: `excel_floor`/`excel_ceiling` mishandle negative `significance` (should use `abs(significance)`)
+## RESOLVED 2026-11-25 — suggested fix is applied verbatim; see verification note at bottom
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
@@ -88,3 +90,25 @@ pub fn excel_ceiling(x: f64, significance: f64) -> f64:
 
 - `test/01_unit/app/office/sheets/math_bridge_extended_spec.spl` (4 of 23 examples)
 
+
+## Verification note (2026-11-25)
+
+STALE — the suggested fix is applied verbatim in
+`src/app/office/sheets/math_bridge.spl:234-246`: both `excel_floor` and
+`excel_ceiling` now compute `val sig = math_abs(significance)` and use `sig`
+for the divide/multiply, exactly the patch this document proposed.
+
+Hand-verified all 4 previously failing assertions against the current
+implementation:
+- `excel_floor(10.0, -3)`: sig=3, floor(10/3)*3 = 3*3 = 9.0 — spec expects 9.0
+- `excel_floor(-10.0, 3)`: floor(-10/3)*3 = -4*3 = -12.0 — spec expects -12.0
+- `excel_ceiling(10.0, -3)`: ceil(10/3)*3 = 4*3 = 12.0 — spec expects 12.0
+- `excel_ceiling(-10.0, 3)`: ceil(-10/3)*3 = -3*3 = -9.0 — spec expects -9.0
+(the positive-significance cases are unchanged since sig == significance there).
+
+Limit: a live spec run on this host is blocked by the known release/1.0.0
+source/binary inconsistency — the pinned Rust seed rejects
+`@representation_boundary` (added by cfd89933699) while parsing the test
+runner, so `bin/simple.exe test` errors out repo-wide at HEAD. Verified by
+source inspection and hand-evaluation of the spec assertions against the
+current implementation as cited above.

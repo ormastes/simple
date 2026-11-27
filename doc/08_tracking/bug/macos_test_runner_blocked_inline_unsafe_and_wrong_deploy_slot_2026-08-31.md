@@ -1,3 +1,53 @@
+> **Triage 2026-11-05 (release/1.0.0 worktree):** both source-level defects
+> confirmed fixed in ancestry (seed parser test + slot canonicalisation in
+> `scripts/setup/`); only the external full-CLI redeploy remains. Not selected
+> for this pass — blocked on deployment, not source.
+
+## Addendum 2026-11-11 — lane runner4: SUPERSEDED at source level (prior-lane triage confirmed)
+
+Spot-checked the 2026-11-04/05 triage from a Windows worktree at release/1.0.0
+tip `b364745fdbf8` (all seed-smoke):
+
+1. **Inline `unsafe(...): expr` (Defect 2) — confirmed fixed in tree AND at
+   runtime:** `parse_unsafe_block_expr_if_present` at
+   `src/compiler/10.frontend/core/parser_stmts.spl:644`; the doc's minimal
+   `inline.spl` repro (extern `rt_random_randint` + single-line
+   `unsafe(capabilities: [ffi]): rt_random_randint(a, b)`) parses and **prints
+   `ok`** under the refreshed 2026-11-11 seed
+   (`bin/simple.exe run --mode=interpreter`, engine-demotion notice for the
+   ffi splice only — no parse error).
+2. **Deploy slot (Defect 1) — confirmed fixed at source:**
+   `scripts/setup/release-platform.shs:7-9` canonicalises `*-apple-darwin` →
+   `*-apple-darwin-macho`; `scripts/setup/setup.shs:92-98` refuses to point
+   `bin/simple` at a slot binary identifying as `simple-bootstrap`.
+3. **Remaining: external macOS redeploy only.** The fresh Stage-4 full-CLI
+   deploy for `bin/release/aarch64-apple-darwin-macho/` is owned by the
+   bootstrap lane and lives on a macOS host; it cannot be produced or
+   verified from this Windows lane. `bin/simple test` on the self-hosted
+   macOS binary stays blocked until that deploy lands — deployment
+   dependency, not a source defect.
+
+Verdict: SUPERSEDED (source-level; confirms prior-lane triage). Residual
+action = bootstrap-lane macOS redeploy, external to this lane.
+
+# Status 2026-11-04 — source-level parts FIXED; redeploy dependency on the bootstrap lane
+- **Inline `unsafe(...): expr` (Defect 2): fixed.** Rust seed parser carries
+  `parser/src/unsafe_inline_body_test.rs`; pure-Simple parser handles it at
+  `src/compiler/10.frontend/core/parser_stmts.spl:644`. Re-verified 2026-11-04:
+  the minimal `inline.spl` reproduction below prints `ok` under the current seed
+  (`release100-7a0e6fe516f-20261031`).
+- **Wrong deploy slot (Defect 1): fixed at source.** Slot selection is
+  canonicalised by `scripts/setup/release-platform.shs`
+  (`aarch64-apple-darwin` -> `aarch64-apple-darwin-macho`, never a legacy dir).
+  `scripts/setup/setup.shs` now probes `--version` and refuses to point
+  `bin/simple` at a slot binary reporting `simple-bootstrap`, so the bootstrap
+  CLI can no longer silently become the tool path.
+- **Remaining (not fixable here): redeploy.** The only deployed macOS
+  self-hosted full CLI, `bin/release/aarch64-apple-darwin-macho/simple`
+  (`Simple v1.0.0-rc.1`, Sep 18), SIGSEGVs in test-runner setup. A fresh
+  admitted Stage 4 deploy is owned by the bootstrap lane; `bin/simple test` on
+  the self-hosted binary stays blocked until it lands.
+
 # CORRECTION (2026-08-31, after this record was drafted)
 ## Open 2026-09-16 — needs owner triage
 
@@ -42,7 +92,7 @@ this correction supersedes.
 - Date: 2026-08-31
 - Host: macOS aarch64 (aarch64-apple-darwin), `/Users/ormastes/simple`
 - Area: deploy slot + parser/grammar. **Not** `src/compiler/50.mir/**` or `src/compiler/20.hir/**`.
-- Status: OPEN. Two independent defects, both blocking the documented test path.
+- Status: FIX-IMPLEMENTED-VERIFICATION-PENDING (all source/launcher/wrapper defects fixed and covered by macOS contract tests 2026-11-26; Stage-4 macOS full-CLI deploy verification remains owned by the Stage-4 bootstrap pipeline). Two independent defects originally blocked the documented test path.
 
 ## Binary identities (recorded, since slots are repointed mid-session)
 
@@ -197,3 +247,45 @@ parses `inline.spl` fine.
    still build current source. Do **not** rewrite the 53 call sites to the block form —
    that normalizes a workaround over a compact form the language is supposed to accept.
 
+
+## Addendum 2026-11-13 — P3 runner priority lane (work/p3-runner-lane-20261113, base 80a8116e5e2): source fixes re-confirmed; still deploy-blocked externally
+
+Spot-confirmed all three source-level fixes at this base (newer than the
+2026-11-11 runner4 spot-check tip b364745fdbf8):
+
+1. Inline `unsafe(...): expr` — `parse_unsafe_block_expr_if_present` at
+   `src/compiler/10.frontend/core/parser_stmts.spl:644`; the record's minimal
+   `inline.spl` repro (extern `rt_random_randint` + one-line
+   `unsafe(capabilities: [ffi]): rt_random_randint(a, b)`) prints `ok` under
+   this base's Windows seed (`bin/simple.exe run <file> --mode=interpreter`,
+   engine-demotion notice for the ffi splice only — no parse error).
+2. Deploy slot canonicalisation — `scripts/setup/release-platform.shs:7-9`
+   maps `*-apple-darwin` -> `*-apple-darwin-macho`.
+3. Bootstrap-CLI refusal — `scripts/setup/setup.shs:92-98` probes `--version`
+   and refuses to point `bin/simple` at a slot binary reporting
+   `simple-bootstrap`.
+
+Residual unchanged and external to every Windows lane: a fresh Stage-4
+full-CLI macOS deploy of `bin/release/aarch64-apple-darwin-macho/simple` is
+owned by the bootstrap lane on a macOS host. Verdict stands: SUPERSEDED at
+source level; no code change.
+
+## Addendum 2026-11-26 — macOS arm64 (Darwin) full audit & remaining launcher/wrapper fixes
+
+Audited on macOS arm64 (`work/fix-macos-test-deploy-slot-20261126`):
+
+1. **Inline `unsafe(...): expr` parser (`src/compiler/10.frontend/core/parser_stmts.spl`, `primary_expr.spl`, `src/compiler_rust/parser/src/unsafe_inline_body_test.rs`)**:
+   - Confirmed `parse_unsafe_block_expr_if_present()` handles both statement position (`unsafe(capabilities: [ffi]): rt_random_randint(a, b)`) and expression position (`val a = unsafe(...): ...`, `Ok(unsafe(...): ...)`), with single/multiple capabilities and optional `reason:`.
+   - Added `test/01_unit/compiler/frontend/unsafe_inline_body_parser_spec.spl` covering statement position, expression position (`val` binding), single/multiple capabilities, `reason:` metadata, control-flow bodies, and malformed header rejection (note: live interpreter execution of `unsafe_inline_body_parser_spec.spl` and `unsafe_call_argument_parser_spec.spl` could not run here because the host's deployed Nov-15 seed predates newer `src/lib/common/types.spl` syntax and a heavy LLVM build prevented building a fresh compiler under the memory guard).
+2. **Remaining macOS deploy-slot & wrapper defects found and fixed**:
+   - `scripts/setup/release-platform.shs`: `simple_release_write_generation_launcher()` computed `dirname "$0"` without dereferencing symlinks on `$0`. When `simple_release_bind_generation_launchers()` symlinked `bin/simple -> release/aarch64-apple-darwin-macho/launcher.simple`, invoking `bin/simple` looped infinitely on `bin/simple`. Fixed by resolving symlinks on `$self` via POSIX `readlink` loop before `dirname` / `pwd -P`.
+   - `scripts/setup/setup.shs`:
+     - Removed a stale `bin/simple` symlink pointing at `release/${PLATFORM_TRIPLE}/simple` (or `launcher.simple`) when that slot holds `simple-bootstrap*`, instead of leaving `bin/simple` linked to `simple-bootstrap`.
+     - Reordered candidate lists in generated `simple_lsp_mcp_server`, `t32_mcp_server`, and `t32_lsp_mcp_server` wrappers to check `${platform_dir}` / `*-apple-darwin-macho` BEFORE legacy `aarch64-apple-darwin` / `x86_64-apple-darwin`.
+     - Only prints `setup: bin/simple -> release/${PLATFORM_TRIPLE}/simple` when the symlink was actually linked.
+   - `scripts/check/check-deployed-simple-runnable.shs`: added `run_with_timeout` (`timeout`/`gtimeout`/`perl` alarm fallback) and `shasum -a 256` fallback so `--selftest` and `setup.shs` work on stock macOS PATH without Homebrew coreutils (`timeout`).
+   - `bin/devhub`, `bin/caret`, `bin/office`, `scripts/lib/simple-runtime-provenance.shs`: reordered Darwin candidate lists so `aarch64-apple-darwin-macho` / `${platform_dir}` precedes legacy `aarch64-apple-darwin` (and added `x86_64-apple-darwin-macho`).
+3. **Contract evidence**:
+   - Added and ran `test/01_unit/scripts/macos_deploy_slot_contract_test.shs`: RED (`FAIL: check 4: symlinked bin/simple generation launcher failed (got '')`, rc=1) -> GREEN (`PASS: 18 macOS deploy-slot contract checks`, rc=0).
+   - Verified `PATH="/usr/bin:/bin:/usr/sbin:/sbin" sh scripts/check/check-deployed-simple-runnable.shs --selftest`: RED (`selftest: value-less --bin exited 127, expected 2`, rc=2) -> GREEN (`PASS — 8 selftest fixture(s) executed, all classified correctly`, rc=0).
+4. **Status**: `fix-implemented-verification-pending` (source, launcher, setup, and contract test fixes implemented; Stage-4 macOS full-CLI deploy + live test-runner execution remains part of the Stage-4 bootstrap pipeline).

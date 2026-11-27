@@ -10,6 +10,9 @@ use std.tooling.easy_fix.types.{FixConfidence, Replacement, EasyFix}
 use std.tooling.easy_fix.*
 use compiler.semantics.lint.primitive_types.{bare_primitive_types}
 use compiler.tools.fix.rules.impl_.lint_allow.{lines_allow_rule, line_is_allowed}
+use std.common.diagnostics.diagnostic_v1.{DiagnosticFix, FixApplicability, FixPrecondition}
+use std.common.diagnostics.diagnostic_v1.{DiagnosticFixConfidence as DiagFixConfidence}
+use std.common.diagnostics.span.{Span}
 
 struct PrimitiveApiAuditEntry:
     file: text
@@ -21,17 +24,12 @@ struct PrimitiveApiAuditEntry:
     suggested_wrapper: text
 
 # Canonical table: compiler.semantics.lint.primitive_types (includes bool).
+# text/str/String are classified there as not flagged (owner decision): no
+# finding, fix, hint or audit entry for a bare text API.
 fn primitive_api_types() -> [text]:
     bare_primitive_types()
 
-fn primitive_api_audit_types() -> [text]:
-    var out = bare_primitive_types()
-    out.push("text")
-    out.push("str")
-    out.push("String")
-    out
-
-fn primitive_api_audit_source(source: text, file: text) -> [PrimitiveApiAuditEntry]:
+pub fn primitive_api_audit_source(source: text, file: text) -> [PrimitiveApiAuditEntry]:
     var entries: [PrimitiveApiAuditEntry] = []
     val lines = source.split("\n")
     var line_num = 0
@@ -55,12 +53,18 @@ fn primitive_api_audit_source(source: text, file: text) -> [PrimitiveApiAuditEnt
             if return_type != "":
                 all_types.push(return_type)
 
-            val is_pure_math = all_types.len() > 0 and _all_same_primitive(all_types)
+            var is_pure_math = all_types.len() > 0 and _all_same_primitive(all_types)
+            # AC-D2 (primitive_api_lint_ac_d1_and_ac_d2_are_contradictory_2026-08-04):
+            # the all-same-primitive exemption is for pure math only. A pub fn
+            # whose entire body forwards its own params to an extern fn mirrors
+            # the extern signature and must still be flagged.
+            if is_pure_math and _extern_passthrough_body(lines, line_num, item_name, params):
+                is_pure_math = false
 
             if not is_pure_math:
                 for param in params:
                     val param_type = _extract_param_type(param)
-                    if _is_audited_primitive_type(param_type):
+                    if _is_bare_primitive_type(param_type):
                         val param_name = _extract_param_name(param)
                         entries.push(PrimitiveApiAuditEntry(
                             file: file,
@@ -72,7 +76,7 @@ fn primitive_api_audit_source(source: text, file: text) -> [PrimitiveApiAuditEnt
                             suggested_wrapper: _suggest_wrapper_name(param_name, param_type)
                         ))
 
-                if _is_audited_primitive_type(return_type):
+                if _is_bare_primitive_type(return_type):
                     entries.push(PrimitiveApiAuditEntry(
                         file: file,
                         line: line_num,
@@ -85,95 +89,281 @@ fn primitive_api_audit_source(source: text, file: text) -> [PrimitiveApiAuditEnt
 
     entries
 
-fn primitive_api_audit_report(source: text, file: text) -> text:
+pub fn primitive_api_audit_report(source: text, file: text) -> text:
     val entries = primitive_api_audit_source(source, file)
     var out = "primitive_api_audit file={file} count={entries.len()}\n"
     for entry in entries:
         out = out + "{entry.file}:{entry.line}: {entry.item_name} {entry.position} uses {entry.primitive_type} reason={entry.reason_code} suggest={entry.suggested_wrapper}\n"
     out
 
-fn check_primitive_api(source: text, file: text) -> [EasyFix]:
-    check_primitive_api_with_lines(file, source.split("\n"))
+# SPL-TEXT-001 kind: DomainNamed when the finding name reads as a semantic domain
+# (`_text_domain_of`) -> lint `bare_text_domain`; Plain -> lint `bare_text`. Non-text: Plain.
+pub enum TextFindingKind:
+    DomainNamed
+    Plain
 
-fn check_primitive_api_with_lines(file: text, lines: [text]) -> [EasyFix]:
-    var fixes: [EasyFix] = []
+# One primitive_api finding: exact span of the offending type token.
+# `fixes` holds ranked semantic-type rewrites of that token (possibly none);
+# the no-op same-line EasyFix this rule used to offer is gone for good.
+pub struct PrimitiveApiFinding:
+    code: text
+    file: text
+    symbol: text
+    type_path: text
+    primitive_type: text
+    line: i64
+    column: i64
+    start: i64
+    end: i64
+    message: text
+    help: text
+    fixes: [DiagnosticFix]
+    text_kind: TextFindingKind
+
+# Single owner of primitive_api detection. The lint driver consumes this
+# directly; the EasyFix producers no longer carry the rule (nothing to apply).
+# Findings are deduplicated by (code, symbol, type path, span).
+pub fn primitive_api_findings(file: text, lines: [text]) -> [PrimitiveApiFinding]:
+    var out: [PrimitiveApiFinding] = []
+    var seen: [text] = []
     var line_num = 0
     var byte_offset = 0
 
     # File-scope suppression: `#![allow(primitive_api)]` in the header block.
     if lines_allow_rule(lines, "primitive_api"):
-        return fixes
+        return out
 
+    var owner = ""
+    var owner_allowed = false
     for line in lines:
         line_num = line_num + 1
+        val line_start = byte_offset
+        byte_offset = byte_offset + line.byte_len() + 1
         val trimmed = line.trim()
-
-        val is_extern_fn = trimmed.starts_with("extern fn ")
+        if trimmed != "" and not line.starts_with(" ") and not line.starts_with("\t") and not trimmed.starts_with("#") and not trimmed.starts_with("@"):
+            owner = _type_block_name(trimmed)
+            # `@allow(primitive_api)` above a struct/class covers its fields too.
+            owner_allowed = line_is_allowed(lines, line_num - 1, "primitive_api")
         val is_pub_fn = trimmed.starts_with("pub fn ") or
             trimmed.starts_with("pub me ") or
             trimmed.starts_with("pub static fn ")
-        if is_extern_fn or not is_pub_fn:
-            byte_offset = byte_offset + line.len() + 1
+        if owner != "" and not owner_allowed and not is_pub_fn and trimmed.starts_with("pub ") and not line_is_allowed(lines, line_num - 1, "primitive_api"):
+            val field = _pub_text_field(trimmed)
+            if field.len() == 2:
+                val ty_col = line.find(":") + 1 + _leading_ws_len(line.slice(line.find(":") + 1))
+                val f = _finding(file, "{owner}.field.{field[0]}", field[0], field[1],
+                    line_num, ty_col, line_start,
+                    "public field '{field[0]}' of '{owner}' uses bare primitive type '{field[1]}'")
+                out = _push_unique(out, seen, f)
+                seen.push(_finding_key(f))
+        if not is_pub_fn:
             continue
-
         # Item-scope suppression: `@allow(primitive_api)` / `#[allow(...)]`
         # on the comment/annotation lines directly above this declaration.
         if line_is_allowed(lines, line_num - 1, "primitive_api"):
-            byte_offset = byte_offset + line.len() + 1
             continue
 
-        if not is_extern_fn and is_pub_fn:
-            val params = _extract_params(trimmed)
-            val return_type = _extract_return_type(trimmed)
+        val item_name = _extract_public_function_name(trimmed)
+        val params = _extract_params(trimmed)
+        val return_type = _extract_return_type(trimmed)
 
-            var all_types: [text] = []
-            for param in params:
-                val pt = _extract_param_type(param)
-                if pt != "":
-                    all_types.push(pt)
-            if return_type != "":
-                all_types.push(return_type)
+        var all_types: [text] = []
+        for param in params:
+            val pt = _extract_param_type(param)
+            if pt != "":
+                all_types.push(pt)
+        if return_type != "":
+            all_types.push(return_type)
 
-            val is_pure_math = all_types.len() > 0 and _all_same_primitive(all_types)
+        # TODO(primitive_api): retire the `_all_same_primitive` blanket
+        # exemption in favour of a scoped, documented pure-math exemption
+        # (plan 2026-11-12 §4). Kept for now: removing it flags every
+        # `pub fn f(a: i64, b: i64) -> i64` math helper in src/lib and fails
+        # the policies that deny primitive_api before lane U4 migrates them.
+        var is_pure_math = all_types.len() > 0 and _all_same_primitive(all_types)
+        # AC-D2 (primitive_api_lint_ac_d1_and_ac_d2_are_contradictory_2026-08-04):
+        # a pub fn whose entire body forwards its own params to an extern fn
+        # mirrors the extern signature and must still be flagged.
+        if is_pure_math and _extern_passthrough_body(lines, line_num, item_name, params):
+            is_pure_math = false
+        if is_pure_math:
+            continue
 
-            if not is_pure_math:
-                for param in params:
-                    val param_type = _extract_param_type(param)
-                    if _is_bare_primitive_type(param_type):
-                        val param_name = _extract_param_name(param)
-                        var fix = EasyFix.create(
-                            id: "L:primitive_api:{line_num}",
-                            description: "public API parameter '{param_name}' uses bare primitive type '{param_type}'",
-                            confidence: FixConfidence.Uncertain
-                        )
-                        fix.add_replacement(Replacement.create(
-                            file: file,
-                            start: byte_offset,
-                            end: byte_offset + line.len(),
-                            line: line_num,
-                            column: 1,
-                            new_text: line
-                        ))
-                        fixes.push(fix)
+        val indent = _leading_ws_len(line)
+        val paren = trimmed.find("(")
+        var seg_start = paren + 1
+        for param in params:
+            val param_type = _extract_param_type(param)
+            if _is_bare_primitive_type(param_type) or _is_text_family(param_type):
+                val param_name = _extract_param_name(param)
+                val colon = param.find(":")
+                val ty_col = seg_start + colon + 1 + _leading_ws_len(param.slice(colon + 1))
+                val f = _finding(file, "{item_name}.param.{param_name}", param_name, param_type,
+                    line_num, indent + ty_col, line_start,
+                    "public API parameter '{param_name}' of '{item_name}' uses bare primitive type '{param_type}'")
+                out = _push_unique(out, seen, f)
+                seen.push(_finding_key(f))
+            seg_start = seg_start + param.byte_len() + 1
 
-                if _is_bare_primitive_type(return_type):
-                    var fix = EasyFix.create(
-                        id: "L:primitive_api:{line_num}",
-                        description: "public API return type uses bare primitive type '{return_type}'",
-                        confidence: FixConfidence.Uncertain
-                    )
-                    fix.add_replacement(Replacement.create(
-                        file: file,
-                        start: byte_offset,
-                        end: byte_offset + line.len(),
-                        line: line_num,
-                        column: 1,
-                        new_text: line
-                    ))
-                    fixes.push(fix)
+        if _is_bare_primitive_type(return_type) or _is_text_family(return_type):
+            val arrow = trimmed.find("->")
+            val ty_col = arrow + 2 + _leading_ws_len(trimmed.slice(arrow + 2))
+            val f = _finding(file, "{item_name}.return", item_name, return_type,
+                line_num, indent + ty_col, line_start,
+                "public API return type of '{item_name}' uses bare primitive type '{return_type}'")
+            out = _push_unique(out, seen, f)
+            seen.push(_finding_key(f))
 
-        byte_offset = byte_offset + line.len() + 1
+    out
 
+# col0 = 0-based byte column of the type token within its line.
+# `name` is the parameter name (or the fn name for a return type); it selects
+# the semantic-type candidates.
+fn _finding(file: text, type_path: text, name: text, ty: text, line: i64, col0: i64, line_start: i64, message: text) -> PrimitiveApiFinding:
+    val symbol = type_path.slice(0, type_path.find("."))
+    val span = Span.new(line_start + col0, line_start + col0 + ty.byte_len(), line, col0 + 1)
+    PrimitiveApiFinding(
+        code: if ty == "bool": "SPL-BOOL-001" else: if _is_text_family(ty): "SPL-TEXT-001" else: "primitive_api",
+        file: file,
+        symbol: symbol,
+        type_path: type_path,
+        primitive_type: ty,
+        line: line,
+        column: col0 + 1,
+        start: line_start + col0,
+        end: line_start + col0 + ty.byte_len(),
+        message: message,
+        help: if _is_text_family(ty): _text_domain_help(name) else: "replace '{ty}' with a semantic unit/domain type (e.g. `unit {_suggest_wrapper_name(symbol, ty)}: {ty}`), or add `@allow(primitive_api)` with a reason at an ABI/math boundary",
+        text_kind: if _is_text_family(ty) and _text_domain_of(name).len() > 0: TextFindingKind.DomainNamed else: TextFindingKind.Plain,
+        fixes: _ranked_type_fixes(file, type_path, name, ty, span)
+    )
+
+# --- Ranked semantic-type fixes (plan 2026-11-12 §5, fix rule 3) -----------
+# Each row: [comma-separated names, type, wrapped repr, module]. Only existing
+# semantic types are listed. Names match exactly (no fuzzy guessing); a name
+# outside the table yields no fix, only the help text. Row order is the
+# tie-break, so a name listed in several rows is ranked deterministically.
+fn _semantic_type_table() -> [[text]]:
+    [["port,port_number", "PortNumber", "i32", "std.common.types"],
+     ["offset,pos,position,byte_offset", "Offset", "i64", "std.common.types"],
+     ["size,byte_size,size_bytes,nbytes", "ByteSize", "i64", "std.common.types"],
+     ["len,length,size", "Length", "i64", "std.common.types"],
+     ["capacity,cap", "Capacity", "i64", "std.common.types"],
+     ["count", "Count", "i64", "std.common.types"],
+     ["ms,millis,timeout_ms,delay_ms,duration_ms,elapsed_ms,budget_ms", "Millis", "i64", "std.common.types"],
+     ["ms,millis,timeout_ms,delay_ms,duration_ms,elapsed_ms,budget_ms", "DurationMs", "i32", "std.common.types"],
+     ["ns,nanos,elapsed_ns,duration_ns", "Nanos", "i64", "std.common.types"],
+     ["timestamp,ts", "Timestamp", "i64", "std.common.types"],
+     ["line,line_no,lineno,line_number", "LineNumber", "i64", "std.common.types"],
+     ["col,column,column_number", "ColumnNumber", "i64", "std.common.types"],
+     ["pid,process_id", "ProcessId", "i64", "std.common.types"],
+     ["exit_code", "ExitCode", "i64", "std.common.types"],
+     ["error_code,errno", "ErrorCode", "i64", "std.common.types"],
+     ["addr,address,mem_addr", "MemAddr", "i64", "std.common.types"],
+     ["inode,ino", "Inode", "u64", "std.nogc_sync_mut.fs_driver.types"],
+     ["file_handle,fh", "FileHandle", "u64", "std.nogc_sync_mut.fs_driver.types"],
+     ["rate,hit_rate", "HitRate", "f64", "std.common.types"]]
+
+fn _primitive_family(ty: text) -> text:
+    if ty == "f32" or ty == "f64":
+        return "float"
+    if ty.starts_with("i") or ty.starts_with("u"):
+        return "int"
+    ""
+
+fn _name_in_csv(name: text, csv: text) -> bool:
+    for n in csv.split(","):
+        if n == name:
+            return true
+    false
+
+# Candidates for `name: ty`: same numeric family only; rows whose wrapped
+# repr equals `ty` rank first, then the rest, each group in table order.
+fn _semantic_type_candidates(name: text, ty: text) -> [[text]]:
+    val family = _primitive_family(ty)
+    var exact: [[text]] = []
+    var other: [[text]] = []
+    if family == "":
+        return exact
+    for row in _semantic_type_table():
+        if not _name_in_csv(name, row[0]) or _primitive_family(row[2]) != family:
+            continue
+        if row[2] == ty:
+            exact.push(row)
+        else:
+            other.push(row)
+    for row in other:
+        exact.push(row)
+    exact
+
+# Every candidate changes the public signature and so every caller, and the
+# rewrite here is the type token only (no caller/import edits). Plan §5 fix
+# rule 3 asks for "ranked candidates, full cross-file edits, check call
+# sites/overloads", so these are Uncertain + review_required: never applied
+# automatically and never promoted to the legacy single `fix` alias.
+fn _ranked_type_fixes(file: text, type_path: text, name: text, ty: text, span: Span) -> [DiagnosticFix]:
+    var fixes: [DiagnosticFix] = []
+    var rank = 0
+    for row in _semantic_type_candidates(name, ty):
+        rank = rank + 1
+        val target = row[1]
+        val repr_note = if row[2] == ty: "wraps {ty}" else: "wraps {row[2]}, not {ty}: check value range"
+        var fix = DiagnosticFix.new(
+            "L:primitive_api:{type_path}:{rank}:{target}",
+            "replace '{ty}' with '{target}' ({repr_note}); import {target} from {row[3]} and update every caller to pass {target}(value: ...)",
+            DiagFixConfidence.Uncertain)
+        fix.title = "Use {target} for '{name}'"
+        fix.rank = rank
+        fix.applicability = FixApplicability.ReviewRequired
+        fix = fix.with_replacement(file, span, target)
+        fix.preconditions.push(FixPrecondition(file: file, span: span, expected_text: ty))
+        fixes.push(fix)
+    fixes
+
+# Lint hint: the help text plus the ranked candidates (LintDiag carries one
+# hint and one EasyFix, so the ranked list is rendered here, not applied).
+pub fn primitive_api_fix_hint(f: PrimitiveApiFinding) -> text:
+    if f.fixes.len() == 0:
+        return f.help
+    var parts: [text] = []
+    for fix in f.fixes:
+        parts.push("{fix.rank}. {fix.replacements[0].new_text}")
+    "{f.help}; ranked fixes (review required, update callers): " + parts.join(", ")
+
+fn _finding_key(f: PrimitiveApiFinding) -> text:
+    "{f.code}|{f.symbol}|{f.type_path}|{f.start}|{f.end}"
+
+fn _push_unique(out: [PrimitiveApiFinding], seen: [text], f: PrimitiveApiFinding) -> [PrimitiveApiFinding]:
+    val key = _finding_key(f)
+    for k in seen:
+        if k == key:
+            return out
+    var next = out
+    next.push(f)
+    next
+
+fn _leading_ws_len(s: text) -> i64:
+    var i = 0
+    while i < s.len():
+        val c = s.slice(i, i + 1)
+        if c != " " and c != "\t":
+            return i
+        i = i + 1
+    i
+
+# Compat view for callers that count findings as EasyFix records. Each record
+# is help-only: it carries NO replacement, so it can never be applied.
+pub fn check_primitive_api(source: text, file: text) -> [EasyFix]:
+    check_primitive_api_with_lines(file, source.split("\n"))
+
+fn check_primitive_api_with_lines(file: text, lines: [text]) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    for f in primitive_api_findings(file, lines):
+        fixes.push(EasyFix.create(
+            id: "L:primitive_api:{f.line}:{f.column}",
+            description: f.message,
+            confidence: FixConfidence.Uncertain
+        ))
     fixes
 
 fn _all_same_primitive(types: [text]) -> bool:
@@ -182,10 +372,104 @@ fn _all_same_primitive(types: [text]) -> bool:
     val first = types[0]
     if not _is_bare_primitive_type(first):
         return false
+    # SPL-BOOL-001: a public bool is never a pure-math shape.
+    if first == "bool":
+        return false
     for ty in types:
         if ty != first:
             return false
     true
+
+# --- AC-D1/AC-D2 body discriminator ---------------------------------------
+# Bug: primitive_api_lint_ac_d1_and_ac_d2_are_contradictory_2026-08-04.
+# AC-D1 (`negate(x: i64) -> i64` with body `return 0 - x`) and AC-D2
+# (`wrap_alloc(size: i64) -> i64` with body `return rt_alloc(size)`) have
+# textually identical declaration lines, so no line-only predicate can
+# separate them. The D-1 all-same-primitive exemption is a pure-math
+# exemption; a pub fn whose entire body is a pass-through call forwarding
+# its own params to an extern fn mirrors the extern signature and is NOT
+# pure math, so the exemption must not suppress it.
+
+fn _single_body_statement(lines: [text], decl_line_num: i64) -> text:
+    # Body = the indented lines following the 1-based declaration line.
+    # Returns the single effective (non-comment, non-blank) statement when the
+    # body is exactly one statement, else "".
+    var stmts: [text] = []
+    var i = decl_line_num
+    while i < lines.len():
+        val raw = lines[i]
+        val trimmed = raw.trim()
+        i = i + 1
+        if trimmed == "":
+            continue
+        if not raw.starts_with(" ") and not raw.starts_with("\t"):
+            break
+        if trimmed.starts_with("#"):
+            continue
+        stmts.push(trimmed)
+    if stmts.len() == 1:
+        return stmts[0]
+    ""
+
+fn _extern_passthrough_body(lines: [text], decl_line_num: i64, fn_name: text, params: [text]) -> bool:
+    if params.len() == 0:
+        return false
+    var call = _single_body_statement(lines, decl_line_num)
+    if call == "":
+        return false
+    if call.starts_with("return "):
+        call = call.slice(7).trim()
+    val hash_pos = call.find(" #")
+    if hash_pos >= 0:
+        call = call.slice(0, hash_pos).trim()
+    if not call.ends_with(")"):
+        return false
+    val paren_pos = call.find("(")
+    if paren_pos <= 0:
+        return false
+    val callee = call.slice(0, paren_pos).trim()
+    if callee == "" or callee == fn_name:
+        return false
+    var ci = 0
+    while ci < callee.len():
+        val c = callee.slice(ci, ci + 1)
+        val is_alnum = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9")
+        if not (is_alnum or c == "_"):
+            return false
+        ci = ci + 1
+    val args_str = call.slice(paren_pos + 1, call.byte_len() - 1).trim()
+    var arg_texts: [text] = []
+    if args_str != "":
+        arg_texts = args_str.split(",")
+    if arg_texts.len() != params.len():
+        return false
+    var pi = 0
+    while pi < params.len():
+        if arg_texts[pi].trim() != _extract_param_name(params[pi]):
+            return false
+        pi = pi + 1
+    # The callee must be an extern: declared `extern fn` in this source or
+    # carrying the runtime `rt_` extern prefix.
+    if callee.starts_with("rt_"):
+        return true
+    val extern_names = _extern_declared_names(lines)
+    var ei = 0
+    while ei < extern_names.len():
+        if extern_names[ei] == callee:
+            return true
+        ei = ei + 1
+    false
+
+fn _extern_declared_names(lines: [text]) -> [text]:
+    var names: [text] = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("extern fn "):
+            val rest = trimmed.slice(10)
+            val paren_pos = rest.find("(")
+            if paren_pos >= 0:
+                names.push(rest.slice(0, paren_pos).trim())
+    names
 
 fn _extract_params(line: text) -> [text]:
     val paren_start = line.find("(")
@@ -219,14 +503,76 @@ fn _extract_return_type(line: text) -> text:
         return after_arrow.trim()
     after_arrow.slice(0, colon_pos).trim()
 
+fn _is_text_family(ty: text) -> bool:
+    ty == "text" or ty == "str" or ty == "String"
+
+# Name of the public struct/class opened by a column-0 header line, else "".
+# Fields of private types are not public API, so only `pub struct`/`pub class`.
+fn _type_block_name(header: text) -> text:
+    var rest = ""
+    if header.starts_with("pub struct "):
+        rest = header.slice(11)
+    elif header.starts_with("pub class "):
+        rest = header.slice(10)
+    else:
+        return ""
+    var end = 0
+    while end < rest.len():
+        val c = rest.slice(end, end + 1)
+        if c == ":" or c == "<" or c == " " or c == "(":
+            break
+        end = end + 1
+    rest.slice(0, end)
+
+# `pub [val|var] name: text` -> [name, type] when the field type is the text
+# family, else []. A trailing `# comment` and any default (`= ...`) are cut off.
+fn _pub_text_field(trimmed: text) -> [text]:
+    val comment = trimmed.find("#")
+    val code = if comment >= 0: trimmed.slice(0, comment) else: trimmed
+    var rest = code.slice(4).trim()
+    if rest.starts_with("val "):
+        rest = rest.slice(4).trim()
+    elif rest.starts_with("var "):
+        rest = rest.slice(4).trim()
+    if rest.starts_with("fn ") or rest.starts_with("me ") or rest.starts_with("static "):
+        return []
+    val colon = rest.find(":")
+    if colon <= 0:
+        return []
+    val name = rest.slice(0, colon).trim()
+    var ty = rest.slice(colon + 1).trim()
+    val eq = ty.find("=")
+    if eq >= 0:
+        ty = ty.slice(0, eq).trim()
+    if _is_text_family(ty):
+        return [name, ty]
+    []
+
+# SPL-TEXT-001: every public text param/return/field is flagged (owner decision
+# 2026-11-19). This table only picks the suggestion: [domain name, domain type]
+# when the NAME is one of these or ends in `_<name>`.
+fn _text_domain_table() -> [[text]]:
+    [["url", "Url"], ["uri", "Url"], ["path", "Path"],
+     ["host", "HostName"], ["hostname", "HostName"],
+     ["sql", "SqlText"], ["query", "SqlText"], ["html", "HtmlText"],
+     ["digest", "Sha256Hex"], ["hash", "Sha256Hex"],
+     ["token", "Secret"], ["secret", "Secret"], ["password", "Secret"], ["key", "Secret"],
+     ["cmd", "CommandLine"], ["command", "CommandLine"]]
+
+fn _text_domain_of(name: text) -> [text]:
+    for row in _text_domain_table():
+        if name == row[0] or name.ends_with("_" + row[0]):
+            return row
+    []
+
+fn _text_domain_help(name: text) -> text:
+    val row = _text_domain_of(name)
+    if row.len() == 0:
+        return "SPL-TEXT-001: public text must carry a domain: use Path, Url, HostName, ExternalText (or another std.common.types domain type / `unit X: text`) instead of bare text, or add `@allow(primitive_api)` with a reason"
+    "SPL-TEXT-001 (name hint: '{name}' reads as a {row[0]}): use {row[1]} (or another std.common.types domain type / `unit X: text`) instead of bare text, or add `@allow(primitive_api)` with a reason"
+
 fn _is_bare_primitive_type(ty: text) -> bool:
     for primitive in primitive_api_types():
-        if ty == primitive:
-            return true
-    false
-
-fn _is_audited_primitive_type(ty: text) -> bool:
-    for primitive in primitive_api_audit_types():
         if ty == primitive:
             return true
     false
@@ -234,14 +580,11 @@ fn _is_audited_primitive_type(ty: text) -> bool:
 fn _primitive_reason_code(ty: text) -> text:
     match ty:
         case "bool": "needs_bool_wrapper_or_enum"
-        case "text" | "str" | "String": "needs_domain_text_type"
         case _: "needs_newunit"
 
 fn _suggest_wrapper_name(name: text, ty: text) -> text:
     if ty == "bool":
         return "{_title_token(name)}Flag"
-    if ty == "text" or ty == "str" or ty == "String":
-        return "{_title_token(name)}Text"
     "{_title_token(name)}Value"
 
 fn _extract_public_function_name(line: text) -> text:
@@ -401,13 +744,17 @@ fn check_raw_unit_postfix(source: text, file: text) -> [EasyFix]:
             fix.add_replacement(Replacement.create(
                 file: file,
                 start: byte_offset,
-                end: byte_offset + line.len(),
+                end: byte_offset + line.byte_len(),
                 line: line_num,
                 column: 1,
                 new_text: new_line
             ))
             fixes.push(fix)
 
-        byte_offset = byte_offset + line.len() + 1
+        byte_offset = byte_offset + line.byte_len() + 1
 
     fixes
+
+# Unit name offered for a bare bool parameter (`unit <Name>Flag: bool`).
+pub fn bool_flag_unit_name(param_name: text) -> text:
+    _suggest_wrapper_name(param_name, "bool")

@@ -1,0 +1,62 @@
+# @req REQ-PUBVIEW-010 REQ-PUBVIEW-011 REQ-PUBVIEW-012
+# simple-mcp source_open served through the shared per-session MDSOC+ view
+# (app.simple_lsp_mcp.visibility_state): it uses the session level, counts
+# down the same auto-revert, states the same `view:` line in content[1], and a
+# per-request `visibility` still serves once without touching the session.
+# design: doc/05_design/app/source_view/public_view_by_feature_layer.md
+use std.spec
+use std.spec.step
+use app.mcp.main_dispatch.{dispatch_tool}
+use app.simple_lsp_mcp.visibility_state.{lsp_mcp_view_reset, lsp_mcp_view_current, lsp_mcp_view_set}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_text_or, json_value_items}
+
+val X_CORE = "test/fixtures/mdsoc_pubview/feature_x/10.core/core.spl"
+
+fn open_blocks(extra: text) -> [text]:
+    val reply = dispatch_tool("1", "source_open", "{\"path\":\"" + X_CORE + "\",\"mode\":\"outline\"" + extra + "}")
+    val wire = json_parse_value_strict(reply).unwrap()
+    var out: [text] = []
+    for block in json_value_items(json_value_field(json_value_field(wire, "result"), "content")):
+        out.push(json_value_text_or(json_value_field(block, "text"), ""))
+    out
+
+fn level_of(blocks: [text]) -> text:
+    json_value_text_or(json_value_field(json_parse_value_strict(blocks[0]).unwrap(), "visibility"), "")
+
+describe "source_open session view":
+    it "defaults to the public session view and states it":
+        lsp_mcp_view_reset()
+        val blocks = open_blocks("")
+        expect(blocks.len()).to_equal(2)
+        expect(blocks[1]).to_equal("view: public")
+        expect(level_of(blocks)).to_equal("public")
+
+    it "serves the session level and auto-reverts after the same countdown":
+        # @capture(countdown): view lines across the 3-request countdown
+        lsp_mcp_view_reset()
+        lsp_mcp_view_set("layer_private", "", "")
+        step("request 1 uses the session level")
+        val one = open_blocks("")
+        expect(level_of(one)).to_equal("layer_private")
+        expect(one[1]).to_contain("auto-revert in 2 requests")
+        step("requests 2 and 3")
+        expect(open_blocks("")[1]).to_contain("auto-revert in 1 request;")
+        expect(open_blocks("")[1]).to_contain("auto-reverts to public after this request")
+        step("request 4 is public again and says why")
+        val four = open_blocks("")
+        expect(four[1]).to_equal("view: public (reverted from layer_private: auto-revert after 3 private requests)")
+        expect(level_of(four)).to_equal("public")
+
+    it "a per-request visibility serves once and leaves the session public":
+        lsp_mcp_view_reset()
+        val blocks = open_blocks(",\"visibility\":\"all\"")
+        expect(blocks[1]).to_equal("view: all (per-request override; session view: public)")
+        expect(level_of(blocks)).to_equal("all")
+        expect(lsp_mcp_view_current().level).to_equal("public")
+
+    it "an invalid per-request level is rejected without using up a private request":
+        lsp_mcp_view_reset()
+        lsp_mcp_view_set("all", "", "")
+        val blocks = open_blocks(",\"visibility\":\"secret\"")
+        expect(blocks[0]).to_contain("unsupported_visibility")
+        expect(lsp_mcp_view_current().served).to_equal(0)

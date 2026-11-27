@@ -108,3 +108,73 @@ run.
   ABI exports are owned solely by `src/runtime/runtime_simd_dispatch.c`. Rust
   SIMD lane helpers must retain mangled Rust symbols; adding `#[no_mangle]` to
   those helpers recreates the 23-symbol runtime-cdylib link failure.
+
+## Windows owned-scope admission (2026-10-25)
+
+`rt_dir_create_cpath` now shares the recursive worker instead of trying to mkdir
+`C:`. An actual native probe progressed beyond capture-directory creation and
+failed environment validation. Checked admission preserves its reason; existing
+token APIs retain their signatures. This is partial evidence, not child-launch
+PASS. See [bounded owner evidence](../../../08_tracking/bug/windows_owned_scope_admission_2026_10_25.md).
+
+## Darwin descendant retirement (2026-10-29)
+
+The snapshot process owner retains an unreaped leader while observing group
+retirement. A repeated SIGKILL EPERM after successful delivery and leader exit
+is an observation retry, bounded by cleanup_deadline. Never infer retirement
+from that signal result. The deterministic signal-race selfcheck covers retained
+authority, persistent-denial timeout, and propagation of initial EPERM; the
+native component still verifies actual descendants are retired.
+
+## Live Linux containment evidence (2026-10-29)
+
+The cgroup owner now has live setsid-descendant retirement and kernel OOM
+fixtures. Run `scripts/check/check-linux-capacity-containment.shs` only with an
+already-delegated isolated memory controller; missing prerequisites are errors.
+Native C evidence remains distinct from the authored, unexecuted SSpec and full
+BuildRunner qualification. See `doc/08_tracking/bug/buildrunner_linux_containment_evidence_2026_10_29.md`.
+
+## Completed session page release (2026-10-30)
+
+The native C session owner requests `malloc_trim(0)` only on glibc, after
+successful `rt_session_heap_end` reclamation and after releasing its lifecycle
+lock. A trim failure is advisory; ownership and session completion are unchanged.
+Do not move this into hot per-module boundaries without separate evidence.
+`scripts/check/check-session-heap-reclaim.shs` links the actual runtime and checks
+surviving unrelated allocations, refused ends and one trim per successful end;
+its advisory push gate is `push-session-heap-reclaim`. Non-glibc hosts exercise
+the unchanged owner path. Controlled RSS evidence and remaining native manager
+qualification are recorded in
+`doc/01_research/local/native_session_allocator_residency_2026_10_30.md`.
+
+### Rust hosted owner parity (2026-10-30)
+
+P2 bootstrap entry selection resolves `rt_session_heap_end` from the Rust
+`native_all` archive. Its implementation now drops session bookkeeping and
+requests glibc trim on Linux GNU after TLS and registry locks end. This is
+separate from the valid C-owner fix above. Require archive-linked owner tests
+and final compiler disassembly before attributing manager behavior to either
+implementation. `check-session-heap-reclaim.shs --runtime-archive PATH` links the
+explicit archive through the same scalar public ABI; the default still tests C.
+The source-matched Rust archive fixture and focused ownership unit have passed;
+its RSS probe releases resident pages at session end. Final P2 linkage and
+actual manager memory qualification remain separate required observations.
+
+## Windows descriptor snapshot include order
+
+`runtime_native.c` selects the existing `_WIN32_WINNT` floor 0x0602 before
+any includes; preserve explicitly newer values. The defensive definition in
+`runtime_fd_stat_v1.h` alone is too late after transitive Windows includes.
+Check the production translation unit as well as the standalone header:
+header-first selfchecks cannot reproduce this include-order defect. GNU Clang
+syntax and native fd-stat selfcheck evidence do not establish runner admission.
+
+## Large module scratch residency (2026-10-30)
+
+The actual Rust module owner can reclaim objects while libc retains resident
+pages inside a live build session. The isolated fix requests glibc trim after
+successful scope/raw retirement when tracked reclaimed bytes reach 16 MiB; it
+preserves raw ownership and avoids tiny-scope sweeps. The focused Rust unit,
+actual archive ABI fixture and LLDB boundary control pass. Rebuilt manager
+acceptance remains pending. See
+`doc/01_research/local/native_module_scope_allocator_residency_2026_10_30.md`.

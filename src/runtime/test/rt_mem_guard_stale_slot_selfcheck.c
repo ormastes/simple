@@ -1,3 +1,10 @@
+/* Guard-page faults are SIGBUS on Darwin and SIGSEGV on Linux;
+ * both are real memory-fault deaths. Other signals remain failures. */
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_mem_guard_stale_slot_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 /* Stale-slot use-after-free self-check for the native-C guard-page
  * allocator (`runtime_memory_guard.h`).
  *
@@ -50,7 +57,7 @@ static int child_segfaults(rt_mem_guard_touch_fn touch, volatile uint8_t* ptr) {
     }
     int status = 0;
     if (waitpid(pid, &status, 0) != pid) return -1;
-    return (WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV) ? 1 : 0;
+    return (WIFSIGNALED(status) && (WTERMSIG(status) == SIGSEGV || WTERMSIG(status) == SIGBUS)) ? 1 : 0;
 }
 
 static void touch_read(volatile uint8_t* ptr) {
@@ -105,9 +112,9 @@ int main(void) {
      *        pending pointer instead of a real bounded ring) would fail
      *        this and pass check #2's per-iteration UAF trivially instead. --- */
     check(child_segfaults(touch_read, stale) == 1,
-          "read of a stale (40-alloc-old) freed guarded slot still SIGSEGVs");
+          "read of a stale (40-alloc-old) freed guarded slot still faults");
     check(child_segfaults(touch_write, stale) == 1,
-          "write to a stale (40-alloc-old) freed guarded slot still SIGSEGVs");
+          "write to a stale (40-alloc-old) freed guarded slot still faults");
 
     /* --- 4. Double free of the now-stale slot is still refused, not acted
      *        on twice, even after all the intervening churn. --- */
@@ -118,3 +125,5 @@ int main(void) {
            failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }
+
+#endif /* !_WIN32 */

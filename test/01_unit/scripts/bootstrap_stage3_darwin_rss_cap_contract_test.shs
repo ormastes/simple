@@ -18,9 +18,127 @@ actual=$(bootstrap_stage3_memory_darwin_rss_cap_kib 52428800 5859375) ||
 [ "$actual" = 5859375 ] || fail "tree cap became $actual"
 
 # Invalid configured tree caps must fail closed, including when Stage 3 is lower.
-if bootstrap_stage3_memory_darwin_rss_cap_kib 1048576 6835938 >/dev/null; then
+actual=$(bootstrap_stage3_memory_darwin_rss_cap_kib 52428800 20971520) ||
+  fail '20 GiB Darwin ceiling cap was rejected'
+[ "$actual" = 20971520 ] || fail "20 GiB ceiling became $actual"
+if bootstrap_stage3_memory_darwin_rss_cap_kib 1048576 20971521 >/dev/null; then
   fail 'watchdog-illegal tree cap was accepted'
 fi
+
+# Default cap scales as max(11 GiB, min(20 GiB, host_kib / 3)).
+gib_bytes=$((1024 * 1024 * 1024))
+[ "$(bootstrap_stage3_memory_darwin_default_cap_kib 0)" = 11534336 ] ||
+  fail 'unknown Darwin RAM did not fall back to 11534336 KiB'
+[ "$(bootstrap_stage3_memory_darwin_default_cap_kib $((24 * gib_bytes)))" = 11534336 ] ||
+  fail '24 GiB Darwin host fell below 11534336 KiB floor'
+[ "$(bootstrap_stage3_memory_darwin_default_cap_kib $((48 * gib_bytes)))" = 16777216 ] ||
+  fail '48 GiB Darwin host did not scale to host_kib/3 (16 GiB)'
+[ "$(bootstrap_stage3_memory_darwin_default_cap_kib $((96 * gib_bytes)))" = 20971520 ] ||
+  fail '96 GiB Darwin host exceeded 20 GiB ceiling'
+over64_err=$(mktemp "${TMPDIR:-/tmp}/darwin-cap-over64.XXXXXX")
+over64_cap=$(bootstrap_stage3_memory_darwin_default_cap_kib 9999999999999999999 2>"$over64_err")
+[ "$over64_cap" = 20971520 ] && [ ! -s "$over64_err" ] || {
+  rm -f "$over64_err"
+  fail "over-64-bit byte count returned cap=$over64_cap err=$(cat "$over64_err" 2>/dev/null || true)"
+}
+rm -f "$over64_err"
+
+# Non-Linux process classification must ignore -c wrapper strings naming
+# bootstrap-from-scratch.sh/native-build while catching flat bootstrap binaries.
+[ "$(bootstrap_stage3_memory_posix_args_kind 'bash -c "sh scripts/bootstrap/bootstrap-from-scratch.sh --resume"')" = none ] ||
+  fail 'bash -c wrapper was misclassified as a bootstrap process'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'sh -ec "scripts/bootstrap/bootstrap-from-scratch.sh"')" = none ] ||
+  fail 'sh -ec wrapper was misclassified as a bootstrap process'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'bash -c "/tmp/simple_stage3 native-build"')" = none ] ||
+  fail 'bash -c wrapper invoking native-build was misclassified'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'sh -ec "/tmp/simple_stage2 native-build"')" = none ] ||
+  fail 'sh -ec wrapper invoking simple_stage2 was misclassified'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'sh /tmp/helper.sh native-build')" = none ] ||
+  fail 'non-bootstrap shell script with native-build arg was misclassified'
+[ "$(bootstrap_stage3_memory_posix_args_kind '/bin/sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap')" = bootstrap ] ||
+  fail 'direct bootstrap-from-scratch invocation was missed'
+[ "$(bootstrap_stage3_memory_posix_args_kind '/tmp/simple_stage3 native-build --threads 1')" = native-build ] ||
+  fail 'simple_stage3 native-build was missed'
+[ "$(bootstrap_stage3_memory_posix_args_kind '/tmp/simple_stage2 native-build')" = native-build ] ||
+  fail 'simple_stage2 native-build was missed'
+[ "$(bootstrap_stage3_memory_posix_args_kind '/tmp/simple_stage3.exe native-build')" = native-build ] ||
+  fail 'simple_stage3.exe native-build was missed'
+[ "$(bootstrap_stage3_memory_posix_args_kind '/tmp/simple_stage3 replay missing-build-log.json')" = replay-chain ] ||
+  fail 'simple_stage3 replay-chain was missed'
+[ "$(bootstrap_stage3_memory_posix_args_kind '/tmp/simple_stage2 replay missing-build-log.json')" = replay-chain ] ||
+  fail 'simple_stage2 replay-chain was missed'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'env -u FOO /tmp/simple_stage3 native-build --threads 1')" = native-build ] ||
+  fail 'env -u VAR simple_stage3 native-build was missed'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'grep native-build /tmp/log')" = none ] ||
+  fail 'grep native-build was misclassified as native-build'
+
+# Hardened exact argv[0]/argv[1], login-shell, env, option-arg, and quoted-path cases.
+[ "$(bootstrap_stage3_memory_posix_args_kind 'grep qemu-system-aarch64 /tmp/log')" = none ] ||
+  fail 'grep qemu-system-aarch64 was misclassified as qemu'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'grep scripts/bootstrap/bootstrap-from-scratch.sh /tmp/log')" = none ] ||
+  fail 'grep bootstrap-from-scratch.sh was misclassified as bootstrap'
+[ "$(bootstrap_stage3_memory_posix_args_kind '-bash -c "cd /tmp && sh scripts/bootstrap/bootstrap-from-scratch.sh"')" = none ] ||
+  fail 'login -bash -c wrapper was misclassified'
+[ "$(bootstrap_stage3_memory_posix_args_kind '-sh -c "grep native-build foo"')" = none ] ||
+  fail 'login -sh -c wrapper was misclassified'
+[ "$(bootstrap_stage3_memory_posix_args_kind '-sh scripts/bootstrap/bootstrap-from-scratch.sh --jobs=1')" = bootstrap ] ||
+  fail 'login -sh bootstrap invocation was missed'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'env -i VAR=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --jobs=1')" = bootstrap ] ||
+  fail 'env-wrapped bootstrap invocation was missed'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'env VAR=1 bash -c "sh scripts/bootstrap/bootstrap-from-scratch.sh"')" = none ] ||
+  fail 'env-wrapped bash -c was misclassified'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'bash --command "sh scripts/bootstrap/bootstrap-from-scratch.sh"')" = none ] ||
+  fail 'bash --command wrapper was misclassified'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'bash --rcfile /tmp/scripts/bootstrap/bootstrap-from-scratch.sh /tmp/other.sh')" = none ] ||
+  fail 'bash --rcfile argument was misclassified as bootstrap script'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'bash --rcfile /tmp/rc scripts/bootstrap/bootstrap-from-scratch.sh --jobs=1')" = bootstrap ] ||
+  fail 'bash --rcfile bootstrap invocation was missed'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'bash --init-file /tmp/init -c "sh scripts/bootstrap/bootstrap-from-scratch.sh"')" = none ] ||
+  fail 'bash --init-file -c wrapper was misclassified'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'bash -O extglob -c "echo scripts/bootstrap/bootstrap-from-scratch.sh"')" = none ] ||
+  fail 'bash -O extglob -c wrapper was misclassified'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'bash -O extglob "/Users/my user/simple/scripts/bootstrap/bootstrap-from-scratch.sh" --jobs=1')" = bootstrap ] ||
+  fail 'quoted spaced bootstrap script path with -O was missed'
+[ "$(bootstrap_stage3_memory_posix_args_kind '"/Users/my user/simple/bin/simple" native-build --threads 1')" = native-build ] ||
+  fail 'quoted spaced simple native-build path was missed'
+[ "$(bootstrap_stage3_memory_posix_args_kind '"/Users/my user/simple/bin/simple" replay missing-build-log.json')" = replay-chain ] ||
+  fail 'quoted spaced simple replay-chain path was missed'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'qemu-system-aarch64 -m 4096')" = qemu ] ||
+  fail 'direct qemu-system-aarch64 invocation was missed'
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/darwin-admission-snap.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+cat >"$tmp/procs" <<'EOF'
+501|1|1024|bash -c "sh scripts/bootstrap/bootstrap-from-scratch.sh --resume-stage3-from-admitted=/tmp/out"
+502|1|2048|unrelated process
+504|1|1024|-bash -c "cd /tmp && sh scripts/bootstrap/bootstrap-from-scratch.sh"
+505|1|1024|-sh -c "grep native-build foo"
+506|1|1024|grep qemu-system-aarch64 /tmp/log
+507|1|1024|bash --command "sh scripts/bootstrap/bootstrap-from-scratch.sh"
+508|1|1024|bash --rcfile /tmp/scripts/bootstrap/bootstrap-from-scratch.sh /tmp/other.sh
+EOF
+SIMPLE_BOOTSTRAP_STAGE3_MEMORY_PLATFORM=Darwin
+SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT="$tmp/procs"
+export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_PLATFORM SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT
+bootstrap_stage3_memory_append_processes "$tmp/ev_wrap" ||
+  fail 'Darwin snapshot with wrapper cmdline failed process scan'
+grep -Fxq 'concurrent_process_count=0' "$tmp/ev_wrap" ||
+  fail 'Darwin admission miscounted wrapper/grep cmdlines as concurrent processes'
+grep -Fxq 'concurrent_bootstrap_count=0' "$tmp/ev_wrap" ||
+  fail 'Darwin admission counted bash -c wrapper as concurrent bootstrap'
+printf '%s\n' \
+  '503|1|2048|/bin/sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap' \
+  '509|1|2048|-sh scripts/bootstrap/bootstrap-from-scratch.sh --jobs=1' \
+  '510|1|2048|env -i VAR=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --jobs=1' \
+  '511|1|4096|"/Users/my user/simple/bin/simple" native-build --threads 1' \
+  >>"$tmp/procs"
+bootstrap_stage3_memory_append_processes "$tmp/ev_peer" ||
+  fail 'Darwin snapshot with peer bootstrap failed process scan'
+grep -Fxq 'concurrent_bootstrap_count=3' "$tmp/ev_peer" ||
+  fail 'Darwin admission missed sibling/login/env bootstrap-from-scratch process'
+grep -Fxq 'concurrent_native_build_count=1' "$tmp/ev_peer" ||
+  fail 'Darwin admission missed quoted-space native-build process'
+unset SIMPLE_BOOTSTRAP_STAGE3_MEMORY_PLATFORM SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT
 
 # A clean caller starts a session. Either inherited field selects inherit;
 # the watchdog itself rejects a partial pair rather than silently starting new.
@@ -46,11 +164,16 @@ grep -Fq -- '--max-rss-kib="$stage3_darwin_rss_cap_kib"' \
 grep -Fq -- '--session-mode="$stage3_darwin_rss_session_mode"' \
   "$root/scripts/bootstrap/resume-stage3-from-admitted.sh" ||
   fail 'resume launcher does not pass the selected session mode to the watchdog'
-grep -Fq -- '--rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}"' \
-  "$root/scripts/bootstrap/resume-stage3-from-admitted.sh" ||
+grep -Fq 'stage3_rss_cap_mode=${SIMPLE_BOOTSTRAP_RSS_CAP_MODE-enforce}' \
+  "$root/scripts/bootstrap/resume-stage3-from-admitted.sh" &&
+  grep -Fq -- '--rss-cap-mode="$stage3_rss_cap_mode"' \
+    "$root/scripts/bootstrap/resume-stage3-from-admitted.sh" ||
   fail 'resume launcher does not preserve explicit monitor mode'
-grep -Fq ': "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:=6835937}"' \
+grep -Fq 'bootstrap_stage3_memory_darwin_default_cap_kib' \
   "$root/scripts/bootstrap/resume-stage3-from-admitted.sh" ||
-  fail 'resume launcher does not default Darwin Stage 3 to the 7 GB tree cap'
+  fail 'resume launcher does not compute host-scaled Darwin default cap'
+grep -Fq ': "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:=11534336}"' \
+  "$root/scripts/bootstrap/resume-stage3-from-admitted.sh" ||
+  fail 'resume launcher does not keep 11 GiB fallback tree cap'
 
 echo 'PASS: Darwin Stage 3 RSS watchdog honors cap and inherited session'

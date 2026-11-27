@@ -1,10 +1,11 @@
-export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.*
-export use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.*
+export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{SIMPLE_WEB_STICKY_TOP_AUTO, Style, renderer_default_style, inherit_style_legacy, inherit_style, is_inline_tag, is_heading, is_non_rendered_tag, parse_font_shorthand_number, parse_font_shorthand_size_milli, parse_font_shorthand_family, BoxShadowAgg, text_list_prefix, split_top_level_commas, parse_float_to_255, shadow_layer_alpha, shadow_length_prefix, paren_matching_close, BgLayers, parse_background_layers, parse_box_shadow_agg, CssDeclarationPrioritySplit, css_important_marker_start, css_declaration_priority_split, ComputedStyleHot, computed_style_hot_from, simple_web_style_hot_is_display_none, css_math_fn_name, css_math_args, css_math_primary, css_math_implied_max_px, css_math_implied_min_px, WEB_STYLE_CASCADE_MEMO_LIMIT, web_style_cascade_memo_reset, web_style_cascade_memo_hits, web_style_cascade_memo_misses, web_style_cascade_memo_lookup, web_style_cascade_memo_store}
+export use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{CSS_INTEGER_PX_INVALID, CSS_INTEGER_PX_ABS_MAX, CssCornerRadii, WebBoxShadowLayer, WebBoxShadowParseResult, parse_border_radius_shorthand, resolve_authored_border_radii, parse_box_shadow_layers}
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_decl_apply.*
-export use std.gc_async_mut.gpu.browser_engine.simple_web_css_property_id.*
+export use std.gc_async_mut.gpu.browser_engine.simple_web_css_property_id.{CSS_PROP_UNKNOWN, CSS_PROP_BOX_SIZING, CSS_PROP_COLOR, CSS_PROP_WIDTH, CSS_PROP_HEIGHT, CSS_PROP_MIN_HEIGHT, CSS_PROP_MARGIN_LEFT, CSS_PROP_Z_INDEX, CSS_PROP_DISPLAY, CSS_PROP_GRID_TEMPLATE_COLUMNS, CSS_PROP_GRID_TEMPLATE_ROWS, CSS_PROP_GRID_COLUMN, CSS_PROP_GRID_ROW, CSS_PROP_BORDER_COLLAPSE, CSS_PROP_JUSTIFY_CONTENT, CSS_PROP_ALIGN_ITEMS, CSS_PROP_GAP, CSS_PROP_FLEX_BASIS, CSS_PROP_TEXT_ALIGN, CSS_PROP_FONT_STYLE, CSS_PROP_CURSOR, CSS_PROP_OUTLINE, CSS_PROP_OVERFLOW, CSS_PROP_BOX_SHADOW, CSS_PROP_PADDING, CSS_PROP_MARGIN, CSS_PROP_BORDER_RADIUS, CSS_PROP_RADIUS_TL, CSS_PROP_RADIUS_TR, CSS_PROP_RADIUS_BR, CSS_PROP_RADIUS_BL, CSS_PROP_RADIUS_SS, CSS_PROP_RADIUS_SE, CSS_PROP_RADIUS_ES, CSS_PROP_RADIUS_EE, css_prop_id, css_prop_mask, css_prop_mask_has, css_prop_mask_has_radius_family, css_probe_reset, css_probe_note, css_probe_count}
 use std.gc_async_mut.gpu.browser_engine.simple_web_box_geometry_provenance.{
     web_box_geometry_capture_tokens, web_box_geometry_tokens_reason,
     web_fractional_capture_authored_decls}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, parse_percent_permille, gradient_has_length_stop, font_milli_of, font_milli_round_px, font_milli_store, grid_fr_number_micro, grid_fr_format_micro}
 
 fn sticky_top_inset_value(
     raw: text, parsed: i32, position_sticky: bool
@@ -21,12 +22,13 @@ fn border_spacing_px(raw: text) -> i32:
     val value = raw.trim().lower()
     if value == "0":
         return 0
-    if not value.ends_with("px") or value.len() <= 2:
+    if not value.ends_with("px") or value.byte_len() <= 2:
         return -1
-    val digits = value.substring(0, value.len() - 2)
+    val digits = value.substring(0, value.byte_len() - 2)
     var index = 0
-    while index < digits.len():
-        val ch = digits.char_at(index)
+    val digits_blen = digits.byte_len()
+    while index < digits_blen:
+        val ch = digits.substring(index, index + 1)
         if ch < "0" or ch > "9":
             return -1
         index = index + 1
@@ -57,7 +59,11 @@ fn _background_is_exact_typed_linear_layer(raw: text, gradient_from: u32, gradie
     if open != "linear-gradient".len():
         return false
     val close = paren_matching_close(image_layer, open)
-    if close != image_layer.len() - 1:
+    if close != image_layer.byte_len() - 1:
+        return false
+    # A px / em stop is resolved against the box's gradient line, which the
+    # cascade does not know: the gradient layer path paints it.
+    if gradient_has_length_stop(image_layer):
         return false
     if layers.len() == 1:
         return true
@@ -78,9 +84,9 @@ fn _background_exact_single_url(raw: text) -> text:
     if close < 0 or find_from(lower, "url(", close + 1) >= 0:
         return ""
     var uri = value.substring(open + 1, close).trim()
-    if uri.len() >= 2:
+    if uri.byte_len() >= 2:
         if (uri.starts_with("\"") and uri.ends_with("\"")) or (uri.starts_with("'") and uri.ends_with("'")):
-            uri = uri.substring(1, uri.len() - 1).trim()
+            uri = uri.substring(1, uri.byte_len() - 1).trim()
     if uri == "":
         return ""
     uri
@@ -89,13 +95,14 @@ fn _padding_integer_px(token: text) -> i32:
     val value = token.trim().lower()
     if value == "0":
         return 0
-    if not value.ends_with("px") or value.len() <= 2:
+    if not value.ends_with("px") or value.byte_len() <= 2:
         return -1
-    val digits = value.substring(0, value.len() - 2)
+    val digits = value.substring(0, value.byte_len() - 2)
     var number = 0
     var index = 0
-    while index < digits.len():
-        val digit = dec_val(digits.char_at(index))
+    val digits_blen = digits.byte_len()
+    while index < digits_blen:
+        val digit = dec_val(digits.substring(index, index + 1))
         if digit >= 10 or number > (1000000 - digit) / 10:
             return -1
         number = number * 10 + digit
@@ -112,6 +119,17 @@ fn css_cascade_viewport_set(viewport_w: i32, viewport_h: i32):
     _css_cascade_viewport_w = viewport_w
     _css_cascade_viewport_h = viewport_h
 
+# Root (`html`) computed font-size for `rem` (CSS Values 4 6.1.1). The
+# cascade sets it once the root is styled; 16px (the initial value) outside
+# a pass and for the root element itself.
+var _css_cascade_root_font_px: i32 = 16
+
+fn css_cascade_root_font_set(px: i32):
+    _css_cascade_root_font_px = if px > 0: px else: 16
+
+fn css_cascade_root_font_px() -> i32:
+    _css_cascade_root_font_px
+
 # Non-negative decimal "12", "1.5", ".25" -> thousandths; -1 when malformed.
 fn _padding_decimal_milli(digits: text) -> i64:
     if digits == "" or digits == ".":
@@ -121,8 +139,9 @@ fn _padding_decimal_milli(digits: text) -> i64:
     var frac_digits = 0
     var seen_dot = false
     var index = 0
-    while index < digits.len():
-        val ch = digits.char_at(index)
+    val digits_blen = digits.byte_len()
+    while index < digits_blen:
+        val ch = digits.substring(index, index + 1)
         if ch == ".":
             if seen_dot:
                 return -1
@@ -145,18 +164,44 @@ fn _padding_decimal_milli(digits: text) -> i64:
         frac_digits = frac_digits + 1
     whole * 1000 + frac
 
-# One padding token -> px. px (integer, as before), 0, em (element font
-# size), rem (16px root), vw/vh (cascade viewport). -1 rejects the token,
+# Padding slot codec shared by the cascade: >= 0 is whole px, -1 rejects the
+# token, <= -2 is an author percent encoded as -(2 + percent x 1000).
+fn padding_slot(px: i32, pct_milli: i32) -> i32:
+    if pct_milli > 0: 0 - 2 - pct_milli else: px
+
+fn padding_slot_px(slot: i32) -> i32:
+    if slot < 0: 0 else: slot
+
+fn padding_slot_pct_milli(slot: i32) -> i32:
+    if slot <= -2: 0 - 2 - slot else: 0
+
+# One padding token -> slot. px (integer, as before), 0, em (element font
+# size), rem (root font-size), vw/vh (cascade viewport), or a percent (of the
+# containing block inline size, resolved at layout). -1 rejects the token,
 # which drops the whole declaration, as before.
 fn _padding_length_px(token: text, font_px: i32) -> i32:
     val value = token.trim().lower()
+    if value.ends_with("%"):
+        val pct_milli = _padding_decimal_milli(value.substring(0, value.byte_len() - 1))
+        if pct_milli < 0 or pct_milli > 1000000:
+            return -1
+        return (0 - 2 - pct_milli) as i32
+    # px / em / rem / calc() through the shared length core (`1e1px`,
+    # `10.5px`, `calc(4px + 1em)`), truncated to whole px. A negative length
+    # is invalid; a negative calc() clamps to 0 (CSS Values 4 10.12).
+    val exact = css_length_milli(value, font_px, false)
+    if exact != CSS_LENGTH_NONE:
+        if exact < 0:
+            return if value.starts_with("calc("): 0 else: -1
+        val whole = exact / 1000
+        return if whole > 1000000: -1 else: whole as i32
     if value.ends_with("px"):
         return _padding_integer_px(value)
     var unit_suffix = ""
     var basis: i64 = 0
     if value.ends_with("rem"):
         unit_suffix = "rem"
-        basis = 16
+        basis = _css_cascade_root_font_px as i64
     elif value.ends_with("em"):
         unit_suffix = "em"
         basis = font_px as i64
@@ -170,7 +215,7 @@ fn _padding_length_px(token: text, font_px: i32) -> i32:
         return _padding_integer_px(value)
     if basis <= 0:
         return -1
-    val milli = _padding_decimal_milli(value.substring(0, value.len() - unit_suffix.len()))
+    val milli = _padding_decimal_milli(value.substring(0, value.byte_len() - unit_suffix.byte_len()))
     if milli < 0:
         return -1
     val scaled = if unit_suffix == "vh" or unit_suffix == "vw": basis * milli / 100000 else: basis * milli / 1000
@@ -179,13 +224,13 @@ fn _padding_length_px(token: text, font_px: i32) -> i32:
     scaled as i32
 
 fn _padding_integer_px_values(raw: text, maximum: i32, font_px: i32 = 16) -> [i32]:
-    val tokens = ws_tokens(raw.trim().lower())
+    val tokens = css_value_tokens(raw)
     var values: [i32] = []
     if tokens.len() == 0 or tokens.len() > maximum:
         return values
     for token in tokens:
         val value = _padding_length_px(token, font_px)
-        if value < 0:
+        if value == -1:
             return []
         values.push(value)
     values
@@ -271,7 +316,7 @@ fn _background_exact_url_value(raw: text) -> text:
     if not lower.starts_with("url("):
         return ""
     val close = paren_matching_close(value, 3)
-    if close != value.len() - 1:
+    if close != value.byte_len() - 1:
         return ""
     _background_exact_single_url(value)
 
@@ -412,18 +457,24 @@ fn _parse_background_shorthand(raw: text) -> BackgroundShorthand:
     var after_slash = false
     var slash_seen = false
     for token in tokens:
-        val norm = token.trim().lower()
+        val trimmed = token.trim()
+        val norm = trimmed.lower()
         if norm == "":
             continue
+        # The size group after `/` is one or two sizes; the first other token
+        # ends it and is parsed as any other layer component.
+        if after_slash:
+            if _background_size_token(norm) and sizes.len() < 2:
+                sizes.push(norm)
+                continue
+            if sizes.len() == 0:
+                return empty
+            after_slash = false
         if norm == "/":
             if slash_seen or positions.len() == 0:
                 return empty
             slash_seen = true
             after_slash = true
-        elif after_slash:
-            if not _background_size_token(norm) or sizes.len() >= 2:
-                return empty
-            sizes.push(norm)
         elif norm == "fixed" or norm == "local":
             return empty
         elif norm == "scroll":
@@ -445,11 +496,15 @@ fn _parse_background_shorthand(raw: text) -> BackgroundShorthand:
                 clip = norm
             box_count = box_count + 1
         elif _background_position_token(norm):
+            # The position group sits before `/`; another one after the size
+            # (`center / 1px 2px 3px`) is invalid.
+            if slash_seen:
+                return empty
             if positions.len() >= 2:
                 return empty
             positions.push(norm)
         elif norm.starts_with("url("):
-            val uri = _background_exact_url_value(norm)
+            val uri = _background_exact_url_value(trimmed)
             if image_uri != "" or uri == "":
                 return empty
             image_uri = uri
@@ -540,14 +595,15 @@ fn _decl_tbl_resolve_writing_mode(current: text, decl_tbl: [text]) -> text:
 fn parse_supported_nonnegative_px(raw: text) -> i32:
     val value = raw.trim().lower()
     val digits = if value.ends_with("px"):
-        value.substring(0, value.len() - 2)
+        value.substring(0, value.byte_len() - 2)
     else:
         value
     if digits.len() == 0:
         return -1
     var digit_index = 0
-    while digit_index < digits.len():
-        val ch = digits.char_at(digit_index)
+    val digits_blen = digits.byte_len()
+    while digit_index < digits_blen:
+        val ch = digits.substring(digit_index, digit_index + 1)
         if ch < "0" or ch > "9":
             return -1
         digit_index = digit_index + 1
@@ -570,7 +626,7 @@ fn decl_tbl_get_last_valid_nonnegative_px(
             ):
                 return Some(value)
         i = i - 2
-    nil
+    None
 
 fn parse_supported_outline_shorthand_width_px(raw: text) -> i32:
     val value = raw.trim().lower()
@@ -611,7 +667,9 @@ fn _apply_decls_dispatch(
     if css_prop_mask_has(mask, CSS_PROP_BOX_SIZING):
         css_probe_note()
         val box_sizing = decl_tbl_get(decl_tbl, "box-sizing")
-        if box_sizing.len() > 0:
+        if box_sizing.trim().lower() == "inherit":
+            st.border_box = st.inherit_border_box
+        elif box_sizing.len() > 0:
             st.border_box = box_sizing == "border-box"
     if css_prop_mask_has(mask, CSS_PROP_BORDER_COLLAPSE):
         css_probe_note()
@@ -641,10 +699,10 @@ fn _apply_decls_dispatch(
             val cv = parse_color(col)
             if cv != 0u32:
                 st.fg = cv
-            elif col.trim().lower() == "transparent":
-                # parse_color returns 0 both for "transparent" and for an
-                # unparsable value; only the keyword sets the fully
-                # transparent color (alpha 0), which paint then skips.
+            elif _decl_transparent_color(col):
+                # parse_color returns 0 both for a transparent colour and for
+                # an unparsable value; only a transparent one (`transparent`,
+                # `rgba(0,0,0,0)`, `#0000`) sets fg 0, which paint skips.
                 st.fg = 0u32
     if css_prop_mask_has(mask, CSS_PROP_WIDTH):
         css_probe_note()
@@ -652,19 +710,23 @@ fn _apply_decls_dispatch(
         val width = css_math_primary(width_raw)
         val implied_max = css_math_implied_max_px(width_raw)
         val implied_min = css_math_implied_min_px(width_raw)
-        if implied_max > 0 and st.max_width_px <= 0:
+        if implied_max > 0 and st.max_width_px == 0:
             st.max_width_px = implied_max
-        if implied_min > 0 and st.min_width_px <= 0:
+        if implied_min > 0 and st.min_width_px == 0:
             st.min_width_px = implied_min
         if width.len() > 0:
             if width.ends_with("%"):
                 val wp = parse_int(width)
                 st.width_px = if wp > 0: 0 - wp else: 0
+                st.width_milli = -1
             elif width.ends_with("vw"):
                 val wv = parse_int(width)
                 st.width_px = if wv > 0: 0 - wv else: 0
+                st.width_milli = -1
             else:
-                st.width_px = parse_int(width)
+                st.width_px = _decl_width_length_px(width, st.font_size)
+                st.width_milli = _decl_width_frac_milli(width, st.font_size, st.width_px)
+            st.width_zero = st.width_px == 0 and "0123456789.".contains(width.substring(0, 1))
     if css_prop_mask_has(mask, CSS_PROP_HEIGHT):
         css_probe_note()
         val height = decl_tbl_get(decl_tbl, "height")
@@ -673,7 +735,7 @@ fn _apply_decls_dispatch(
                 val hp = parse_int(height)
                 st.height_px = if hp > 0: 0 - hp else: 0
             else:
-                st.height_px = parse_int(height)
+                st.height_px = _decl_font_relative_length_px(height, st.font_size)
     if css_prop_mask_has(mask, CSS_PROP_MIN_HEIGHT):
         css_probe_note()
         val min_height = decl_tbl_get(decl_tbl, "min-height")
@@ -682,7 +744,10 @@ fn _apply_decls_dispatch(
                 st.min_height_vh = true
             else:
                 st.min_height_vh = false
-                st.min_height_px = parse_int(min_height)
+                # A percentage is the negative sentinel, resolved at layout
+                # time against a definite containing height (else `none`).
+                val min_height_n = parse_int(min_height)
+                st.min_height_px = if min_height.trim().ends_with("%"): (if min_height_n > 0: 0 - min_height_n else: 0) else: min_height_n
     # Cascade order for the margin family mirrors the full-probe body:
     # decl_tbl is source-ordered, so the margin-left longhand only applies
     # when it was declared AFTER the last `margin` shorthand (last-declared
@@ -699,7 +764,7 @@ fn _apply_decls_dispatch(
         margin_sh_pos = decl_tbl_last_index(decl_tbl, "margin")
         margin = decl_tbl_get(decl_tbl, "margin")
     if margin.len() > 0:
-        val mtoks = ws_tokens(margin.trim().lower())
+        val mtoks = css_value_tokens(margin)
         val mn = mtoks.len()
         if mn > 0:
             var t_tok = mtoks[0]
@@ -721,10 +786,16 @@ fn _apply_decls_dispatch(
             st.margin_r_auto = r_tok == "auto"
             st.margin_b_auto = b_tok == "auto"
             st.margin_l_auto = l_tok == "auto"
-            st.margin_t = if t_tok == "auto": 0 else: margin_token_vh_px(t_tok)
-            st.margin_r = if r_tok == "auto": 0 else: margin_token_px(r_tok)
-            st.margin_b = if b_tok == "auto": 0 else: margin_token_vh_px(b_tok)
-            st.margin_l = if l_tok == "auto": 0 else: margin_token_px(l_tok)
+            st.margin_t = if t_tok == "auto": 0 else: _decl_vertical_margin_px(t_tok, st.font_size, margin_token_vh_px(t_tok))
+            st.margin_r = if r_tok == "auto": 0 else: _decl_horizontal_margin_px(r_tok, st.font_size)
+            st.margin_r_pct = r_tok.ends_with("%")
+            st.margin_r_milli = if r_tok == "auto": 0 else: _decl_horizontal_margin_milli(r_tok, st.font_size)
+            st.margin_b = if b_tok == "auto": 0 else: _decl_vertical_margin_px(b_tok, st.font_size, margin_token_vh_px(b_tok))
+            st.margin_t_milli = if t_tok == "auto": 0 else: _decl_vertical_margin_milli(t_tok, st.font_size)
+            st.margin_b_milli = if b_tok == "auto": 0 else: _decl_vertical_margin_milli(b_tok, st.font_size)
+            st.margin_l = if l_tok == "auto": 0 else: _decl_horizontal_margin_px(l_tok, st.font_size)
+            st.margin_l_pct = l_tok.ends_with("%")
+            st.margin_l_milli = if l_tok == "auto": 0 else: _decl_horizontal_margin_milli(l_tok, st.font_size)
     var ml = ""
     var ml_pos: i32 = -1
     if css_prop_mask_has(mask, CSS_PROP_MARGIN_LEFT):
@@ -735,8 +806,12 @@ fn _apply_decls_dispatch(
         if ml == "auto":
             st.margin_l = 0
             st.margin_l_auto = true
+            st.margin_l_pct = false
+            st.margin_l_milli = 0
         else:
-            st.margin_l = if ml.ends_with("%"): 0 - parse_int(ml) else: parse_int(ml)
+            st.margin_l_pct = ml.ends_with("%")
+            st.margin_l = _decl_horizontal_margin_px(ml, st.font_size)
+            st.margin_l_milli = _decl_horizontal_margin_milli(ml, st.font_size)
             st.margin_l_auto = false
     if css_prop_mask_has(mask, CSS_PROP_Z_INDEX):
         css_probe_note()
@@ -755,7 +830,7 @@ fn _apply_decls_dispatch(
         val align_items_decl = decl_tbl_get(decl_tbl, "align-items")
         if align_items_decl.len() > 0:
             st.align_items = align_items_decl
-    var gap: text? = nil
+    var gap: text? = None
     if css_prop_mask_has(mask, CSS_PROP_GAP):
         css_probe_note()
         gap = decl_tbl_get_last_valid_nonnegative_px(decl_tbl, "gap")
@@ -779,16 +854,33 @@ fn _apply_decls_dispatch(
             val basis_v = parse_supported_nonnegative_px(flex_basis_decl)
             if basis_v >= 0:
                 st.flex_basis_px = basis_v
+                st.flex_basis_zero = basis_v == 0
+                st.flex_basis_permille = -1
+            elif flex_basis_decl.trim() == "0%":
+                st.flex_basis_px = 0
+                st.flex_basis_zero = true
+                st.flex_basis_permille = -1
+            elif flex_basis_decl.trim() == "auto":
+                st.flex_basis_px = 0
+                st.flex_basis_zero = false
+                st.flex_basis_permille = -1
+            elif parse_percent_permille(flex_basis_decl.trim()) > 0:
+                st.flex_basis_px = 0
+                st.flex_basis_zero = false
+                st.flex_basis_permille = parse_percent_permille(flex_basis_decl.trim())
     if css_prop_mask_has(mask, CSS_PROP_TEXT_ALIGN):
         css_probe_note()
         val ta = decl_tbl_get(decl_tbl, "text-align")
         if ta.len() > 0:
             st.text_align = ta
+            st.text_align_set = true
     if css_prop_mask_has(mask, CSS_PROP_FONT_STYLE):
         css_probe_note()
         val font_style_decl = decl_tbl_get(decl_tbl, "font-style").trim().lower()
         if font_style_decl == "normal":
             st.font_style_italic = false
+        elif font_style_decl == "inherit":
+            st.font_style_italic = st.inherit_italic
         elif font_style_decl == "italic" or font_style_decl == "oblique":
             st.font_style_italic = true
     if css_prop_mask_has(mask, CSS_PROP_CURSOR):
@@ -802,14 +894,12 @@ fn _apply_decls_dispatch(
         css_probe_note()
         val outline = decl_tbl_get(decl_tbl, "outline")
         if outline.len() > 0:
-            val ow = parse_supported_outline_shorthand_width_px(outline)
-            if ow >= 0:
-                st.outline_w = ow
+            st.outline_w = outline_shorthand_paint_width_px(outline)
             val oc = parse_color_any(outline)
-            if oc != 0u32:
+            if oc != 0u32 or _decl_transparent_color(outline):
                 st.outline_color = oc
-            if border_style_disables_paint(outline):
-                st.outline_w = 0
+            else:
+                st.outline_color = st.fg
     if css_prop_mask_has(mask, CSS_PROP_OVERFLOW):
         css_probe_note()
         val overflow_decl = decl_tbl_get(decl_tbl, "overflow")
@@ -844,12 +934,17 @@ fn _apply_decls_dispatch(
     if css_prop_mask_has(mask, CSS_PROP_PADDING):
         css_probe_note()
         val (resolved_pad_t, resolved_pad_r, resolved_pad_b, resolved_pad_l) = _resolve_authored_padding(
-            decl_tbl, st.pad_t, st.pad_r, st.pad_b, st.pad_l, st.font_size
+            decl_tbl, padding_slot(st.pad_t, st.pad_t_pct), padding_slot(st.pad_r, st.pad_r_pct),
+            padding_slot(st.pad_b, st.pad_b_pct), padding_slot(st.pad_l, st.pad_l_pct), st.font_size
         )
-        st.pad_t = resolved_pad_t
-        st.pad_r = resolved_pad_r
-        st.pad_b = resolved_pad_b
-        st.pad_l = resolved_pad_l
+        st.pad_t = padding_slot_px(resolved_pad_t)
+        st.pad_r = padding_slot_px(resolved_pad_r)
+        st.pad_b = padding_slot_px(resolved_pad_b)
+        st.pad_l = padding_slot_px(resolved_pad_l)
+        st.pad_t_pct = padding_slot_pct_milli(resolved_pad_t)
+        st.pad_r_pct = padding_slot_pct_milli(resolved_pad_r)
+        st.pad_b_pct = padding_slot_pct_milli(resolved_pad_b)
+        st.pad_l_pct = padding_slot_pct_milli(resolved_pad_l)
     var display_decl = ""
     if css_prop_mask_has(mask, CSS_PROP_DISPLAY):
         css_probe_note()
@@ -867,6 +962,8 @@ fn _apply_decls_dispatch(
             st.display = "flex"
         elif display_decl == "grid":
             st.display = "grid"
+        elif display_decl == "flow-root":
+            st.display = "flow-root"
         elif display_decl == "contents":
             st.display = "contents"
         elif display_decl == "block":
@@ -890,6 +987,10 @@ fn _apply_decls_dispatch(
         st.pad_t = 0
         st.pad_r = 0
         st.pad_b = 0
+        st.pad_l_pct = 0
+        st.pad_t_pct = 0
+        st.pad_r_pct = 0
+        st.pad_b_pct = 0
         st.border_w = 0
         st.border_l = 0
         st.border_t = 0
@@ -906,8 +1007,14 @@ fn _apply_decls_dispatch(
         st.margin_t = 0
         st.margin_r = 0
         st.margin_b = 0
+        st.margin_t_milli = 0
+        st.margin_b_milli = 0
         st.margin_l_auto = false
+        st.margin_l_pct = false
+        st.margin_l_milli = 0
         st.margin_r_auto = false
+        st.margin_r_pct = false
+        st.margin_r_milli = 0
         st.margin_t_auto = false
         st.margin_b_auto = false
     st
@@ -917,8 +1024,9 @@ fn normalized_grid_positive_int(raw: text) -> i32:
     if value == "":
         return 0
     var index = 0
-    while index < value.len():
-        val ch = value.char_at(index)
+    val value_blen = value.byte_len()
+    while index < value_blen:
+        val ch = value.substring(index, index + 1)
         if ch < "0" or ch > "9":
             return 0
         index = index + 1
@@ -928,7 +1036,7 @@ fn normalized_grid_positive_int(raw: text) -> i32:
 fn grid_matching_paren(raw: text, open_at: i32) -> i32:
     var depth = 0
     var i = open_at
-    val n = raw.len() as i32
+    val n = raw.byte_len() as i32
     while i < n:  # cpu-lane-loop-ok: one pass over ONE track-list declaration during style resolution, never on a paint path
         val ch = raw.substring(i, i + 1)
         if ch == "(":
@@ -972,8 +1080,9 @@ fn grid_top_level_comma(raw: text, start: i32, endv: i32, last_wins: bool) -> i3
 # rows totalling 168 px, and the +120 px shifted every element below it.
 #
 # `minmax(min, max)` reduces to its MAX — the growth limit, which is what an
-# unconstrained track resolves to once free space is distributed; the `min`
-# side would need min-content sizing, which this track sizer does not model.
+# unconstrained track resolves to once free space is distributed — except that
+# an `fr` max keeps a `0` or whole-px min as a `0+` / `L+` floor mark (below);
+# other `min` values would need min-content sizing, which is not modelled.
 # `repeat(n, X)` expands to n space-separated copies of X. Nothing else is
 # rewritten: `auto-fill`/`auto-fit` counts, `fit-content()` and named lines
 # still fall through to the existing reject-and-block-layout path.
@@ -1002,7 +1111,7 @@ fn grid_expand_track_functions(raw: text) -> text:
         while k < count:  # cpu-lane-loop-ok: bounded by the repeat() count, capped at 64 above
             expanded = expanded + " " + body
             k = k + 1
-        out = out.substring(0, rep) + expanded + out.substring(close_at + 1, out.len() as i32)
+        out = out.substring(0, rep) + expanded + out.substring(close_at + 1, out.byte_len() as i32)
         guard = guard + 1
     guard = 0
     while guard < 64:  # cpu-lane-loop-ok: bounded rewrite of ONE declaration during style resolution, never on a paint path
@@ -1017,9 +1126,23 @@ fn grid_expand_track_functions(raw: text) -> text:
         if mm_comma < 0:
             return out
         val growth_limit = out.substring(mm_comma + 1, mm_close).trim()
-        if growth_limit == "":
+        # ponytail: `minmax(<length>, auto)` would reduce to a bare `auto` and
+        # lose its floor, so it stays unreduced and the list is rejected (block
+        # path). Upgrade: carry the floor as `<N>auto` like
+        # `normalized_grid_auto_track` and read it in the column sizing.
+        if growth_limit == "" or growth_limit.lower() == "auto":
             return out
-        out = out.substring(0, mm) + growth_limit + out.substring(mm_close + 1, out.len() as i32)
+        # `minmax(0, Nfr)` keeps its 0 floor as `0+Nfr` (a bare `Nfr` is
+        # floored at its items' min-content); `normalized_grid_track_list`
+        # keeps the mark only beside `auto`, the one sizing that reads it.
+        # `minmax(<L>px, Nfr)` keeps its whole-px floor as `L+Nfr` (CSS Grid
+        # 12.7.1: the track is inflexible at L when its fr share is smaller).
+        val min_size = out.substring(mm_open + 1, mm_comma).trim().lower()
+        val fr_limit = growth_limit.lower().ends_with("fr")
+        val zero_floor = (min_size == "0" or min_size == "0px") and fr_limit
+        val px_floor = if fr_limit and min_size.ends_with("px") and min_size.byte_len() > 2: normalized_grid_positive_int(min_size.substring(0, min_size.byte_len() - 2)) else: 0
+        val reduced = if zero_floor: "0+" + growth_limit elif px_floor > 0: px_floor.to_string() + "+" + growth_limit else: growth_limit
+        out = out.substring(0, mm) + reduced + out.substring(mm_close + 1, out.byte_len() as i32)
         guard = guard + 1
     out
 
@@ -1027,6 +1150,7 @@ fn normalized_grid_track_list(raw_declaration: text) -> text:
     val raw = grid_expand_track_functions(raw_declaration)
     val parts = raw.trim().split(" ")
     var normalized = ""
+    var has_auto = false
     for part in parts:
         val token = part.trim().lower()
         if token == "":
@@ -1036,26 +1160,114 @@ fn normalized_grid_track_list(raw_declaration: text) -> text:
         # rejecting the whole list. Resolution to pixels happens at layout
         # time in grid_track_sizes (simple_web_html_layout_renderer_layout.spl),
         # once the container's available width is known.
-        if token.ends_with("fr") and token.len() > 2:
-            val fr_size = normalized_grid_positive_int(
-                token.substring(0, token.len() - 2)
+        if token.ends_with("fr") and token.byte_len() > 2:
+            val plus = find_from(token, "+", 0)
+            val zero_floor = token.starts_with("0+")
+            val px_floor = if plus > 0 and not zero_floor: normalized_grid_positive_int(token.substring(0, plus)) else: 0
+            if plus >= 0 and not zero_floor and px_floor <= 0:
+                return ""
+            val fr_micro = grid_fr_number_micro(
+                token.substring(if plus >= 0: plus + 1 else: 0, token.byte_len() - 2)
             )
-            if fr_size <= 0:
+            if fr_micro <= 0:
                 return ""
             if normalized != "":
                 normalized = normalized + " "
-            normalized = normalized + fr_size.to_string() + "fr"
+            val floor_mark = if zero_floor: "0+" elif px_floor > 0: px_floor.to_string() + "+" else: ""
+            normalized = normalized + floor_mark + grid_fr_format_micro(fr_micro)
             continue
-        if not token.ends_with("px") or token.len() <= 2:
+        # `auto` is kept for the column layout to size from its items
+        # (`grid_explicit_auto_column_sizes`); `grid_track_sizes` still reads a
+        # list holding it as no tracks, as it read the old empty list.
+        if token == "auto":
+            has_auto = true
+            if normalized != "":
+                normalized = normalized + " "
+            normalized = normalized + "auto"
+            continue
+        if not token.ends_with("px") or token.byte_len() <= 2:
             return ""
         val size = normalized_grid_positive_int(
-            token.substring(0, token.len() - 2)
+            token.substring(0, token.byte_len() - 2)
         )
         if size <= 0:
             return ""
         if normalized != "":
             normalized = normalized + " "
         normalized = normalized + size.to_string() + "px"
+    # A `0+` mark is dropped from a token start (never from inside `10+1fr`).
+    if has_auto: normalized else: (" " + normalized).replace(" 0+", " ").trim()
+
+# A track list with every `<L>+` floor mark dropped (`120+1fr` -> `1fr`).
+# Rows are sized with no available height, so a floored `fr` row keeps the
+# 0 px it had. ponytail: a `minmax(<L>px, Nfr)` row floor is not measured
+# against Chrome; read it in row sizing once it is.
+fn grid_track_list_without_floors(list: text) -> text:
+    var out = ""
+    for part in list.split(" "):
+        if part == "":
+            continue
+        val plus = find_from(part, "+", 0)
+        if out != "":
+            out = out + " "
+        out = out + (if plus >= 0: part.substring(plus + 1, part.byte_len()) else: part)
+    out
+
+# One `grid-auto-rows` / `grid-auto-columns` track -> `<N>px` (fixed), `auto`
+# (content sized),
+# `<N>auto` (content sized, N px floor: `minmax(<length>, auto)`) or `<N>fr`.
+# "" rejects the track. A percentage is `auto` for a row (auto-height grid)
+# and `<N>%` of the grid width for a column (`percent_definite`, whole N).
+fn normalized_grid_auto_track(token: text, font_px: i32, percent_definite: bool) -> text:
+    if percent_definite and token.ends_with("%"):
+        val percent = normalized_grid_positive_int(token.substring(0, token.byte_len() - 1))
+        if percent > 0:
+            return "{percent}%"
+    if token == "auto" or token == "min-content" or token == "max-content" or token.ends_with("%"):
+        return "auto"
+    if token.starts_with("minmax(") and token.ends_with(")"):
+        val comma = grid_top_level_comma(token, 7, token.byte_len() as i32 - 1, false)
+        if comma < 0:
+            return ""
+        val floor_px = _padding_length_px(token.substring(7, comma), font_px)
+        val limit = normalized_grid_auto_track(token.substring(comma + 1, token.byte_len() as i32 - 1).trim(), font_px, false)
+        if floor_px < 0 or limit == "" or limit.ends_with("px") or limit.ends_with("%"):
+            return ""
+        if limit.ends_with("fr"):
+            return limit
+        return "{floor_px}auto"
+    if token.ends_with("fr") and token.byte_len() > 2:
+        val fr_micro = grid_fr_number_micro(token.substring(0, token.byte_len() - 2))
+        return if fr_micro > 0: grid_fr_format_micro(fr_micro) else: ""
+    val size = _padding_length_px(token, font_px)
+    if size >= 0: "{size}px" else: ""
+
+# `grid-auto-rows` / `grid-auto-columns` -> space-joined tracks, cycled over
+# the implicit rows / columns (CSS
+# Grid 7.6). "" drops the declaration (every implicit row stays content sized).
+fn normalized_grid_auto_tracks(raw: text, font_px: i32, percent_definite: bool) -> text:
+    val value = raw.trim().lower()
+    val n = value.byte_len() as i32
+    var normalized = ""
+    var start = 0
+    var depth = 0
+    var i = 0
+    while i <= n:  # cpu-lane-loop-ok: one pass over ONE declaration during style resolution, never on a paint path
+        val ch = if i < n: value.substring(i, i + 1) else: " "
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+        elif ch == " " and depth == 0:
+            if i > start:
+                val track = normalized_grid_auto_track(value.substring(start, i), font_px, percent_definite)
+                if track == "":
+                    return ""
+                if normalized != "":
+                    normalized = normalized + " "
+                normalized = normalized + track
+            start = i + 1
+        i = i + 1
     normalized
 
 fn normalized_grid_placement(raw: text) -> text:
@@ -1065,15 +1277,31 @@ fn normalized_grid_placement(raw: text) -> text:
         value.substring(0, slash).trim()
     else:
         value
+    # `span N` with an auto start is auto-placed N tracks wide; before an
+    # explicit end line it is the definite range ending there (CSS Grid 8.3).
+    if start_raw.starts_with("span "):
+        val lead_span = normalized_grid_positive_int(
+            start_raw.substring(5, start_raw.byte_len()).trim()
+        )
+        if lead_span <= 0:
+            return ""
+        if slash < 0:
+            return "span {lead_span}"
+        val span_end = normalized_grid_positive_int(
+            value.substring(slash + 1, value.byte_len()).trim()
+        )
+        if span_end > lead_span:
+            return "{span_end - lead_span} / {span_end}"
+        return ""
     val start = normalized_grid_positive_int(start_raw)
     if start <= 0:
         return ""
     if slash < 0:
         return start.to_string()
-    val tail = value.substring(slash + 1, value.len()).trim()
+    val tail = value.substring(slash + 1, value.byte_len()).trim()
     if tail.starts_with("span "):
         val span = normalized_grid_positive_int(
-            tail.substring(5, tail.len()).trim()
+            tail.substring(5, tail.byte_len()).trim()
         )
         if span > 0:
             return "{start} / span {span}"
@@ -1130,9 +1358,9 @@ fn normalized_grid_template_areas(raw: text) -> text:
     var result = ""
     var col_count = -1
     var pos = 0
-    val n = value.len()
+    val n = value.byte_len()
     while pos < n:
-        val ch = value.char_at(pos)
+        val ch = value.substring(pos, pos + 1)
         if ch == "\"" or ch == "'":
             val close = find_from(value, ch, pos + 1)
             if close < 0:
@@ -1162,16 +1390,76 @@ fn normalized_grid_template_areas(raw: text) -> text:
             pos = pos + 1
     result
 
+struct _GridAreaAxisResult:
+    valid: bool
+    placement: text
+
+struct _GridAreaShorthand:
+    valid: bool
+    row: text
+    col: text
+
+fn _grid_area_axis_placement(start_raw: text, end_raw: text, has_end: bool) -> _GridAreaAxisResult:
+    val s = start_raw.trim()
+    val s_lower = s.lower()
+    if s == "":
+        return _GridAreaAxisResult(valid: false, placement: "")
+    if not has_end:
+        if s_lower == "auto":
+            return _GridAreaAxisResult(valid: true, placement: "")
+        val single = normalized_grid_placement(s)
+        return _GridAreaAxisResult(valid: single != "", placement: single)
+    val e = end_raw.trim()
+    val e_lower = e.lower()
+    if e == "":
+        return _GridAreaAxisResult(valid: false, placement: "")
+    if s_lower == "auto":
+        if e_lower == "auto":
+            return _GridAreaAxisResult(valid: true, placement: "")
+        if e_lower.starts_with("span "):
+            val span_only = normalized_grid_placement(e)
+            return _GridAreaAxisResult(valid: span_only != "", placement: span_only)
+        val end_only = normalized_grid_placement("span 1 / " + e)
+        return _GridAreaAxisResult(valid: end_only != "", placement: end_only)
+    if e_lower == "auto":
+        val start_only = normalized_grid_placement(s)
+        return _GridAreaAxisResult(valid: start_only != "", placement: start_only)
+    val pair = normalized_grid_placement(s + " / " + e)
+    _GridAreaAxisResult(valid: pair != "", placement: pair)
+
+fn _parse_grid_area_shorthand(raw: text) -> _GridAreaShorthand:
+    val trimmed = raw.trim()
+    if trimmed == "" or find_from(trimmed, "/", 0) < 0:
+        return _GridAreaShorthand(valid: false, row: "", col: "")
+    val parts = trimmed.split("/")
+    if parts.len() < 2 or parts.len() > 4:
+        return _GridAreaShorthand(valid: false, row: "", col: "")
+    val row_res = _grid_area_axis_placement(
+        parts[0],
+        if parts.len() >= 3: parts[2] else: "",
+        parts.len() >= 3
+    )
+    val col_res = _grid_area_axis_placement(
+        parts[1],
+        if parts.len() == 4: parts[3] else: "",
+        parts.len() == 4
+    )
+    if not row_res.valid or not col_res.valid:
+        return _GridAreaShorthand(valid: false, row: "", col: "")
+    _GridAreaShorthand(valid: true, row: row_res.placement, col: col_res.placement)
+
 fn apply_grid_decls(mut st: Style, table: [text]):
     val columns = normalized_grid_track_list(
         decl_tbl_get(table, "grid-template-columns")
     )
     if columns != "":
         st.grid_template_columns = columns
-    val rows = normalized_grid_track_list(
+    val rows = grid_track_list_without_floors(normalized_grid_track_list(
         decl_tbl_get(table, "grid-template-rows")
-    )
-    if rows != "":
+    ))
+    # Rows have no `auto` sizing: a row list holding it stays unset, as before
+    # `auto` was kept for columns (the GPU adapter reads `auto` as unsupported).
+    if rows != "" and not (" " + rows + " ").contains(" auto "):
         st.grid_template_rows = rows
     val column = normalized_grid_placement(
         decl_tbl_get(table, "grid-column")
@@ -1186,11 +1474,74 @@ fn apply_grid_decls(mut st: Style, table: [text]):
     )
     if areas != "":
         st.grid_template_areas = areas
+    val auto_rows = normalized_grid_auto_tracks(
+        decl_tbl_get(table, "grid-auto-rows"), st.font_size, false
+    )
+    if auto_rows != "":
+        st.grid_auto_rows = auto_rows
+    val auto_columns = normalized_grid_auto_tracks(
+        decl_tbl_get(table, "grid-auto-columns"), st.font_size, true
+    )
+    if auto_columns != "":
+        st.grid_auto_columns = auto_columns
     if normalized_grid_auto_flow(decl_tbl_get(table, "grid-auto-flow")):
         st.grid_auto_flow_column = true
-    val area = normalized_grid_area(decl_tbl_get(table, "grid-area"))
-    if area != "":
-        st.grid_area = area
+    val raw_area = decl_tbl_get(table, "grid-area")
+    val area_idx = decl_tbl_last_index(table, "grid-area")
+    val shorthand = _parse_grid_area_shorthand(raw_area)
+    if shorthand.valid:
+        st.grid_area = ""
+        if decl_tbl_last_index(table, "grid-row") < area_idx:
+            st.grid_row = shorthand.row
+        if decl_tbl_last_index(table, "grid-column") < area_idx:
+            st.grid_column = shorthand.col
+    else:
+        val line_only = normalized_grid_placement(raw_area)
+        if line_only != "":
+            st.grid_area = ""
+            if decl_tbl_last_index(table, "grid-row") < area_idx:
+                st.grid_row = line_only
+            if decl_tbl_last_index(table, "grid-column") < area_idx:
+                st.grid_column = ""
+        else:
+            val area = normalized_grid_area(raw_area)
+            if area != "":
+                st.grid_area = area
+
+fn _decl_tbl_raw_or(table: [text], prop: text, fallback: text) -> text:
+    if decl_tbl_last_index(table, prop) < 0:
+        return fallback
+    decl_tbl_get(table, prop).trim().lower()
+
+# `inherit` is not resolved against the parent's inset here, so it keeps the
+# pre-existing parent-relative placement rather than snapping to the origin.
+fn _inset_token_is_auto(token: text) -> bool:
+    token == "" or token == "auto" or token == "initial" or
+        token == "unset" or token == "revert" or token == "inherit"
+
+fn _authored_inset_auto(
+    previous_auto: bool, table: [text], longhand: text, inset_index: i32,
+    axis_shorthand: text, start_longhand: text
+) -> bool:
+    var is_auto = previous_auto
+    val longhand_pos = decl_tbl_last_index(table, longhand)
+    # apply_decls ignores an empty longhand value, so the flag must too.
+    val longhand_value = decl_tbl_get(table, longhand)
+    if longhand_pos >= 0 and longhand_value.len() > 0:
+        is_auto = _inset_token_is_auto(longhand_value.trim().lower())
+    val inset_pos = decl_tbl_last_index(table, "inset")
+    if inset_pos >= 0 and inset_pos > longhand_pos:
+        is_auto = _inset_token_is_auto(
+            nth_box_token(decl_tbl_get(table, "inset"), inset_index))
+    val axis_pos = decl_tbl_last_index(table, axis_shorthand)
+    if axis_pos >= 0 and axis_pos > longhand_pos:
+        is_auto = _inset_token_is_auto(
+            nth_box_token(decl_tbl_get(table, axis_shorthand), 0))
+    val start_pos = decl_tbl_last_index(table, start_longhand)
+    val start_value = decl_tbl_get(table, start_longhand)
+    if start_pos >= 0 and start_pos > longhand_pos and start_value.len() > 0:
+        is_auto = _inset_token_is_auto(start_value.trim().lower())
+    is_auto
 
 fn apply_authored_style_metadata(
     mut st: Style, previous: Style, table: [text],
@@ -1202,6 +1553,29 @@ fn apply_authored_style_metadata(
     st.height_auto = previous.height_auto
     st.align_items_authored = previous.align_items_authored
     st.scrollbar_width_none = previous.scrollbar_width_none
+    st.display_inline_flex_authored = previous.display_inline_flex_authored
+    st.pointer_events_none = previous.pointer_events_none
+    val pointer_events = decl_tbl_get(table, "pointer-events").trim().lower()
+    if pointer_events.len() > 0 and pointer_events != "inherit":
+        st.pointer_events_none = pointer_events == "none"
+    # Mirrors the left/top precedence in apply_decls: the longhand, then each
+    # shorthand that appears after it.
+    st.left_auto = _authored_inset_auto(
+        previous.left_auto, table, "left", 3, "inset-inline", "inset-inline-start")
+    st.top_auto = _authored_inset_auto(
+        previous.top_auto, table, "top", 0, "inset-block", "inset-block-start")
+    st.white_space_newline = previous.white_space_newline
+    st.white_space_spaces_kept = previous.white_space_spaces_kept
+    val white_space = decl_tbl_get(table, "white-space").trim().lower()
+    if white_space.len() > 0:
+        st.white_space_newline = white_space == "pre" or white_space == "pre-wrap" or white_space == "pre-line" or white_space == "break-spaces"
+        st.white_space_spaces_kept = white_space == "pre" or white_space == "pre-wrap" or white_space == "break-spaces"
+    # Same normal form as web_fractional_capture_authored_decls, which the
+    # fractional resolver compares these against.
+    st.transform_raw = _decl_tbl_raw_or(table, "transform", previous.transform_raw)
+    st.translate_raw = _decl_tbl_raw_or(table, "translate", previous.translate_raw)
+    st.scale_raw = _decl_tbl_raw_or(table, "scale", previous.scale_raw)
+    st.rotate_raw = _decl_tbl_raw_or(table, "rotate", previous.rotate_raw)
     # Match ordinary logical sizing exactly: the cascade owner supplies the
     # already-final cross-phase writing mode. Only standalone apply_decls calls
     # resolve this phase locally from the incoming computed value.
@@ -1259,6 +1633,8 @@ fn _apply_decls_on_writing_mode(
         decl_tbl_last_index(table, "grid-row") >= 0 or
         decl_tbl_last_index(table, "grid-template-areas") >= 0 or
         decl_tbl_last_index(table, "grid-auto-flow") >= 0 or
+        decl_tbl_last_index(table, "grid-auto-rows") >= 0 or
+        decl_tbl_last_index(table, "grid-auto-columns") >= 0 or
         decl_tbl_last_index(table, "grid-area") >= 0
     )
     if not has_grid_declaration:
@@ -1279,6 +1655,8 @@ fn _apply_decls_on_writing_mode(
     val areas = st.grid_template_areas
     val area = st.grid_area
     val auto_flow_column = st.grid_auto_flow_column
+    val auto_rows = st.grid_auto_rows
+    val auto_columns = st.grid_auto_columns
     var result = _apply_decls_without_grid(
         st, decls, table, em_base, logical_writing_mode, apply_display
     )
@@ -1289,6 +1667,8 @@ fn _apply_decls_on_writing_mode(
     result.grid_template_areas = areas
     result.grid_area = area
     result.grid_auto_flow_column = auto_flow_column
+    result.grid_auto_rows = auto_rows
+    result.grid_auto_columns = auto_columns
     apply_grid_decls(result, table)
     result = apply_authored_style_metadata(
         result, st, table, logical_writing_mode)
@@ -1316,8 +1696,11 @@ fn apply_decls(st: Style, decls: text, em_base: i32) -> Style:
 
 # Chrome's UA stylesheet gives form controls their own font instead of letting
 # them inherit the page's: `font: 400 13.3333px <system>`, `line-height: normal`.
-# 13.3333 px rounds to this engine's integer px.
+# `font_size` keeps the whole px (13) every integer reader sees; the fraction
+# rides in `font_size_milli`, so the control's text is measured and painted at
+# 13.333 px (`Simple` in a default field ends on column 43, 42 at 13 px).
 val FORM_CONTROL_UA_FONT_SIZE_PX: i32 = 13
+val FORM_CONTROL_UA_FONT_SIZE_MILLI: i32 = 13333
 # `normal` as a unitless ratio sentinel (-12 == 1.2), which resolves to the 15 px
 # line box Chrome reports at 13 px. The plain `normal` sentinel (0) is NOT used:
 # `style_line_h`'s fallback is `9 * (fs / 8)`, which yields 9 px at fs=13.
@@ -1329,6 +1712,7 @@ val FORM_CONTROL_UA_LINE_HEIGHT_RATIO: i32 = -12
 fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
     var display_v = st.display
     var font_size_v = st.font_size
+    var font_size_milli_v = st.font_size_milli
     var font_family_v = st.font_family
     var pad_l_v = st.pad_l
     var pad_t_v = st.pad_t
@@ -1338,6 +1722,7 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
     var margin_t_v = st.margin_t
     var margin_r_v = st.margin_r
     var margin_b_v = st.margin_b
+    var margin_milli_v = 0
     var border_box_v = st.border_box
     var bold_v = st.bold
     var fg_v = st.fg
@@ -1361,6 +1746,8 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         st.grid_template_areas = ""
         st.grid_area = ""
         st.grid_auto_flow_column = false
+        st.grid_auto_rows = ""
+        st.grid_auto_columns = ""
         st.text_decoration_overline = false
         st.text_decoration_line_through = false
         st.resolved_font_identity = ""
@@ -1371,40 +1758,72 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
     if is_inline_tag(tag):
         display_v = "inline"
     if tag == "h1":
-        font_size_v = 32
+        # UA `font-size: 2em` of the parent (Chrome html.css).
+        val h1_milli = font_milli_of(st.font_size, st.font_size_milli) * 2000 / 1000
+        font_size_v = font_milli_round_px(h1_milli)
+        font_size_milli_v = font_milli_store(h1_milli)
         bold_v = true
         margin_t_v = 21
         margin_b_v = 21
+        margin_milli_v = 21437
     elif tag == "h2":
-        font_size_v = 24
+        # UA `font-size: 1.5em` of the parent (Chrome html.css).
+        val h2_milli = font_milli_of(st.font_size, st.font_size_milli) * 1500 / 1000
+        font_size_v = font_milli_round_px(h2_milli)
+        font_size_milli_v = font_milli_store(h2_milli)
         bold_v = true
         margin_t_v = 20
         margin_b_v = 20
+        margin_milli_v = 19906
     elif tag == "h3":
-        font_size_v = 19
+        # UA `font-size: 1.17em` of the parent (Chrome html.css).
+        val h3_milli = font_milli_of(st.font_size, st.font_size_milli) * 1170 / 1000
+        font_size_v = font_milli_round_px(h3_milli)
+        font_size_milli_v = font_milli_store(h3_milli)
         bold_v = true
         margin_t_v = 19
         margin_b_v = 19
+        margin_milli_v = 18718
     elif tag == "h4":
-        font_size_v = 16
+        # UA `font-size: 1em` of the parent (Chrome html.css).
+        val h4_milli = font_milli_of(st.font_size, st.font_size_milli) * 1000 / 1000
+        font_size_v = font_milli_round_px(h4_milli)
+        font_size_milli_v = font_milli_store(h4_milli)
         bold_v = true
         margin_t_v = 21
         margin_b_v = 21
+        margin_milli_v = 21265
     elif tag == "h5":
-        font_size_v = 13
+        # UA `font-size: 0.83em` of the parent (Chrome html.css).
+        val h5_milli = font_milli_of(st.font_size, st.font_size_milli) * 830 / 1000
+        font_size_v = font_milli_round_px(h5_milli)
+        font_size_milli_v = font_milli_store(h5_milli)
         bold_v = true
         margin_t_v = 22
         margin_b_v = 22
+        margin_milli_v = 22171
     elif tag == "h6":
-        font_size_v = 11
+        # UA `font-size: 0.67em` of the parent (Chrome html.css).
+        val h6_milli = font_milli_of(st.font_size, st.font_size_milli) * 670 / 1000
+        font_size_v = font_milli_round_px(h6_milli)
+        font_size_milli_v = font_milli_store(h6_milli)
         bold_v = true
-        margin_t_v = 26
-        margin_b_v = 26
+        # 2.33em of the 10.72 px h6 font is 24.98 (Chrome 159), not 26.
+        margin_t_v = 25
+        margin_b_v = 25
+        margin_milli_v = 24968
+    elif tag == "b" or tag == "strong":
+        # Chrome UA sheet: b/strong are font-weight:bold with no size change.
+        bold_v = true
     elif tag == "small":
-        font_size_v = (st.font_size * 5 + 3) / 6
+        # `smaller` = 5/6 of the inherited size, kept fractional (16 px -> 13.333).
+        val smaller_milli = font_milli_of(st.font_size, st.font_size_milli) * 5 / 6
+        font_size_v = font_milli_round_px(smaller_milli)
+        font_size_milli_v = font_milli_store(smaller_milli)
     elif tag == "code" or tag == "kbd" or tag == "samp":
         font_family_v = "monospace"
-    elif tag == "var":
+    elif tag == "var" or tag == "em" or tag == "i" or tag == "cite" or tag == "dfn":
+        # Chrome html.css: `i, cite, em, var, dfn { font-style: italic }`.
         st.font_style_italic = true
     elif tag == "address":
         display_v = "block"
@@ -1415,9 +1834,13 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         fg_v = web_argb(0, 0, 0)
     elif tag == "sub" or tag == "sup":
         # Selected medium-UA profile: `smaller` is 5/6 of the inherited size,
-        # rounded half up. The inherited zero line-height sentinel stays normal.
-        font_size_v = (st.font_size * 5 + 3) / 6
-        line_height_v = 0
+        # rounded half up. `line-height` is inherited like any other inline
+        # box (html.css sets only vertical-align and font-size): a unitless
+        # factor re-resolves against the smaller font, a px value stays.
+        # `smaller` = 5/6 of the inherited size, kept fractional (16 px -> 13.333).
+        val smaller_milli = font_milli_of(st.font_size, st.font_size_milli) * 5 / 6
+        font_size_v = font_milli_round_px(smaller_milli)
+        font_size_milli_v = font_milli_store(smaller_milli)
         vertical_align_v = if tag == "sub": "sub" else: "super"
     elif tag == "hr":
         var rule = st
@@ -1496,9 +1919,17 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         # the FORM_CONTROL_UA_* note below the `button` branch.
         display_v = if tag == "textarea": "inline-block" else: "inline"
         font_size_v = FORM_CONTROL_UA_FONT_SIZE_PX
+        font_size_milli_v = FORM_CONTROL_UA_FONT_SIZE_MILLI
         line_height_v = FORM_CONTROL_UA_LINE_HEIGHT_RATIO
         if tag == "textarea":
             font_family_v = "monospace"
+        else:
+            font_family_v = "sans-serif"
+        # `font: -webkit-small-control` is a whole shorthand: it resets weight
+        # and style too, so a control in a heading or an <em> is not bold or
+        # italic unless the author says so.
+        bold_v = false
+        st.font_style_italic = false
         if tag == "input":
             pad_l_v = 2
             pad_r_v = 2
@@ -1520,7 +1951,11 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         text_align_v = "center"
         # Form controls do not inherit `font` from their ancestors.
         font_size_v = FORM_CONTROL_UA_FONT_SIZE_PX
+        font_size_milli_v = FORM_CONTROL_UA_FONT_SIZE_MILLI
         line_height_v = FORM_CONTROL_UA_LINE_HEIGHT_RATIO
+        font_family_v = "sans-serif"
+        bold_v = false
+        st.font_style_italic = false
     elif tag == "a":
         fg_v = web_argb(0, 0, 238)
         underline_v = true
@@ -1531,6 +1966,11 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         margin_b_v = 16
     elif tag == "table":
         display_v = "table"
+        # UA default (Chrome html.css): `table { border-spacing: 2px }`. It is a
+        # rule ON the table, so it replaces whatever spacing was inherited;
+        # authored `border-spacing` and `border-collapse` apply after this.
+        st.border_spacing_x_px = 2
+        st.border_spacing_y_px = 2
     elif tag == "caption":
         display_v = "table-caption"
         text_align_v = "center"
@@ -1540,6 +1980,11 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         display_v = "table-row"
     elif tag == "td" or tag == "th":
         display_v = "table-cell"
+        # UA default (Chrome html.css): `td, th { padding: 1px }`.
+        pad_l_v = 1
+        pad_r_v = 1
+        pad_t_v = 1
+        pad_b_v = 1
         if tag == "th":
             bold_v = true
             text_align_v = "center"
@@ -1550,10 +1995,14 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         # skipped like display:none by the flow pass and positioned by the
         # ::marker post-pass in layout()).
         display_v = "marker"
+    elif tag == "::before" or tag == "::after":
+        # Generated content boxes are inline unless the author says otherwise.
+        display_v = "inline"
     elif tag == "details" or tag == "article" or tag == "header" or tag == "footer" or tag == "nav" or tag == "section" or tag == "div" or tag == "li" or tag == "center":
         display_v = "block"
     st.fg = fg_v
     st.font_size = font_size_v
+    st.font_size_milli = font_size_milli_v
     st.font_family = font_family_v
     st.line_height_px = line_height_v
     st.border_box = border_box_v
@@ -1565,6 +2014,8 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
     st.margin_t = margin_t_v
     st.margin_r = margin_r_v
     st.margin_b = margin_b_v
+    st.margin_t_milli = margin_milli_v
+    st.margin_b_milli = margin_milli_v
     st.display = display_v
     st.text_align = text_align_v
     st.text_decoration_underline = underline_v
@@ -1579,6 +2030,8 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
     st.grid_template_areas = ""
     st.grid_area = ""
     st.grid_auto_flow_column = false
+    st.grid_auto_rows = ""
+    st.grid_auto_columns = ""
     st.text_decoration_overline = false
     st.text_decoration_line_through = false
     st.resolved_font_identity = ""
@@ -1590,9 +2043,23 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
 fn tag_defaults(st: Style, tag: text) -> Style:
     val out = _tag_defaults_without_metadata(st, tag)
     out.height_auto = st.height_auto
+    out.left_auto = st.left_auto
+    out.top_auto = st.top_auto
+    out.left_milli = st.left_milli
+    out.width_milli = st.width_milli
+    out.top_milli = st.top_milli
+    out.right_milli = st.right_milli
+    out.bottom_milli = st.bottom_milli
+    out.white_space_newline = st.white_space_newline or tag == "pre" or tag == "textarea" or tag == "listing" or tag == "plaintext"
+    out.white_space_spaces_kept = st.white_space_spaces_kept or tag == "pre" or tag == "textarea" or tag == "listing" or tag == "plaintext"
     out.align_items_authored = st.align_items_authored
     out.scrollbar_width_none = st.scrollbar_width_none
+    out.display_inline_flex_authored = st.display_inline_flex_authored
     out.list_style_none = st.list_style_none
+    out.pointer_events_none = st.pointer_events_none
+    out.contain_size = st.contain_size
+    out.contain_intrinsic_w_px = st.contain_intrinsic_w_px
+    out.contain_intrinsic_h_px = st.contain_intrinsic_h_px
     out
 
 # ---------------------------------------------------------------------------

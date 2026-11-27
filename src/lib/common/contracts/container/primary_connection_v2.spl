@@ -1,0 +1,110 @@
+# Direct provider connection plan, not a helper process/Job or effect grant.
+# No decoder can recreate a native connection or a live terminal adoption.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, ContainerOutputResourcesV2,
+    container_output_identity_digest_v2, ContainerHelperAdmissionV2, ContainerHelperAssociationV3,
+    container_primary_connection_helper_validate_v4}
+use std.common.contracts.container.exec_v3.exec_runtime_bytes_v3
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlTargetV1,
+    session_runtime_control_target_validate_v1}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+
+pub struct ContainerPrimaryConnectionPlanV2:
+    workload: ContainerExecutionPlanV2
+    runtime: RuntimeIdentityV1
+    identity: ContainerOutputIdentityV2
+    resources: ContainerOutputResourcesV2
+    provider_identity_digest: text
+    installation_digest: text
+    journal_lease_digest: text
+    policy_digest: text
+    terminal_mode: text
+    timeout_ms: i64
+    request_digest: text
+
+pub struct ContainerTerminalChunkV2:
+    stream: text
+    bytes: [u8]
+
+pub fn container_primary_connection_scope_v2(plan: ContainerPrimaryConnectionPlanV2) -> ContainerHostScopeV2:
+    val workload = plan.workload
+    ContainerHostScopeV2(physical_host_id: workload.physical_host_id, service_scope_id: workload.service_scope_id,
+        boot_id: workload.boot_id, provider_generation: workload.provider_generation,
+        native_machine_id: workload.native_machine_id, continuity_mode: workload.continuity_mode,
+        continuity_id: workload.continuity_id)
+
+pub fn container_primary_connection_plan_bytes_v2(plan: ContainerPrimaryConnectionPlanV2) -> Result<text, text>:
+    if plan.workload.backend != "windows-docker-process" or plan.runtime.engine != "docker":
+        return Err("primary-connection-backend-engine")
+    if plan.terminal_mode != "stdin" and plan.terminal_mode != "tty": return Err("primary-connection-terminal-mode")
+    if (plan.resources.cpu_millis <= 0 or plan.resources.cpu_millis > 64000 or
+            plan.resources.memory_bytes <= 0 or plan.resources.memory_bytes > 1125899906842624 or
+            plan.timeout_ms <= 0 or plan.timeout_ms > 300000): return Err("primary-connection-resource-window")
+    val scope = container_primary_connection_scope_v2(plan)
+    val scope_bytes = container_host_scope_bytes_v2(scope)?
+    if scope.continuity_mode != "service-incarnation-v1" or scope.boot_id != "":
+        return Err("primary-connection-service-incarnation-required")
+    if (plan.runtime.pod_uid != plan.workload.workload_uid or plan.runtime.attempt != plan.workload.attempt or
+            plan.runtime.operation_id != plan.workload.operation_id or
+            plan.runtime.provider_generation != scope.provider_generation or
+            plan.runtime.node_boot_id != container_scope_fence_id_v2(scope)? or
+            plan.identity.parent_operation_id != plan.workload.operation_id):
+        return Err("primary-connection-runtime-workload")
+    for digest in [plan.runtime.native_id, plan.provider_identity_digest, plan.installation_digest, plan.journal_lease_digest, plan.policy_digest]:
+        if not builder_digest_valid_v1(digest): return Err("primary-connection-pin")
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("container-primary-connection-plan-v2"),
+        "version": SdnValue.Int(2), "workload": SdnValue.String(container_execution_plan_bytes_v2(plan.workload)?),
+        "runtime": SdnValue.String(exec_runtime_bytes_v3(plan.runtime)?),
+        "scope": SdnValue.String(scope_bytes),
+        "identityDigest": SdnValue.String(container_output_identity_digest_v2(plan.identity)?),
+        "cpuMillis": SdnValue.Int(plan.resources.cpu_millis), "memoryBytes": SdnValue.Int(plan.resources.memory_bytes),
+        "providerIdentityDigest": SdnValue.String(plan.provider_identity_digest),
+        "installationDigest": SdnValue.String(plan.installation_digest), "policyDigest": SdnValue.String(plan.policy_digest),
+        "journalLeaseDigest": SdnValue.String(plan.journal_lease_digest),
+        "terminalMode": SdnValue.String(plan.terminal_mode), "timeoutMs": SdnValue.Int(plan.timeout_ms),
+        "stdinEnabled": SdnValue.Bool(true), "signalProxy": SdnValue.Bool(false), "detachKeys": SdnValue.String("")}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn container_primary_connection_plan_digest_v2(plan: ContainerPrimaryConnectionPlanV2) -> Result<text, text>:
+    Ok(sha256_text(container_primary_connection_plan_bytes_v2(plan)?))
+
+pub fn container_primary_connection_admission_validate_v2(plan: ContainerPrimaryConnectionPlanV2,
+        helper: ContainerHelperAdmissionV2) -> Result<bool, text>:
+    val digest = container_primary_connection_plan_digest_v2(plan)?
+    if plan.request_digest != digest: return Err("primary-connection-plan-digest")
+    container_primary_connection_helper_validate_v4(ContainerHelperAssociationV3(workload: plan.workload,
+        runtime: plan.runtime, identity: plan.identity, resources: plan.resources,
+        request_digest: digest, timeout_ms: plan.timeout_ms), helper)
+
+pub fn container_primary_connection_target_match_v2(plan: ContainerPrimaryConnectionPlanV2,
+        target: SessionRuntimeControlTargetV1) -> Result<(), text>:
+    if plan.request_digest != container_primary_connection_plan_digest_v2(plan)?:
+        return Err("primary-connection-plan-digest")
+    session_runtime_control_target_validate_v1(target)?
+    if (container_host_scope_bytes_v2(target.scope)? != container_host_scope_bytes_v2(container_primary_connection_scope_v2(plan))? or
+            exec_runtime_bytes_v3(target.runtime)? != exec_runtime_bytes_v3(plan.runtime)? or
+            target.workload_request_digest != plan.workload.request_digest or
+            target.binding_digest != plan.identity.binding_digest or target.execution_kind != "primary" or
+            target.native_exec_id != "" or target.exec_request_digest != ""):
+        return Err("primary-connection-target-plan")
+    Ok(())
+
+# Exactly the equivalence used by session_runtime_control_target_binding_match:
+# retain every field except clientId and attachmentGeneration. This is a new
+# hash domain, never a synthetic target, lease or authorization.
+pub fn container_primary_connection_binding_digest_v2(target: SessionRuntimeControlTargetV1) -> Result<text, text>:
+    session_runtime_control_target_validate_v1(target)?
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("container-primary-connection-binding-v2"),
+        "scope": SdnValue.String(container_host_scope_bytes_v2(target.scope)?),
+        "runtime": SdnValue.String(exec_runtime_bytes_v3(target.runtime)?),
+        "workloadRequestDigest": SdnValue.String(target.workload_request_digest), "bindingUid": SdnValue.String(target.binding_uid),
+        "bindingDigest": SdnValue.String(target.binding_digest), "serviceIncarnation": SdnValue.String(target.service_incarnation),
+        "sessionId": SdnValue.String(target.session_id), "windowId": SdnValue.String(target.window_id), "paneId": SdnValue.String(target.pane_id),
+        "serviceEpoch": SdnValue.Int(target.service_epoch), "childIncarnation": SdnValue.Int(target.child_incarnation),
+        "executionKind": SdnValue.String(target.execution_kind), "nativeExecId": SdnValue.String(target.native_exec_id),
+        "execRequestDigest": SdnValue.String(target.exec_request_digest)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))

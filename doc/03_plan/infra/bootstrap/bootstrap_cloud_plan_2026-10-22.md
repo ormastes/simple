@@ -36,17 +36,19 @@ gh workflow run phase-ladder.yml --ref release/1.0.0 -f lanes=linux-x86_64,windo
 gh workflow run component-build.yml --ref release/1.0.0 -f components=simd-x86_64-avx512
 ```
 
-## 3. Progress (2026-10-22, 10:25 UTC)
+## 3. Progress (2026-10-24, 04:14 UTC; ladder run 40057877101)
 
 | Lane | Phase 1 | Phase 2 | Phase 3–4 | State |
 |---|---|---|---|---|
-| linux-x86_64 | ✅ | ❌ → fix landed | — | stage 2 SEGV in `surface_build` root-caused and fixed (#4151); rebuilt stage 2 validating in run 39759900654 |
-| linux-riscv64 | ✅ cross-built | — | — | cross-link fixes landed (#4137); next phase comes from the ladder |
-| darwin-arm64 | ✅ | ❌ (same SEGV) | — | LLVM lane unblocked by #4146 + macOS LLVM 23 fix (#4139) |
-| darwin-x86_64 | ⏳ | — | — | rc1 packaging still running (last job before rc1 publishes) |
-| windows-x86_64 | ✅ (MSVC) | ❌ (same SEGV) | — | MinGW UCRT switch in progress on `work/windows-mingw-ucrt` |
-| freebsd-x86_64 | ✅ earlier | ❌ (bus error, same SEGV class) | — | #4151 landed; needs a ladder rerun |
-| freebsd-riscv64 | ✅ hello runs | ⏳ running in guest | — | perl-less spawn fix (#4148) applied in the guest; runtime archive predates #4151, so a riscv64 runtime rebuild is still needed |
+| linux-x86_64 | ✅ from the Rust seed | ⏳ ladder | — | stage 2 admitted on release/1.0.0 (#4260); rung 2 now builds phase 2 (#4254) |
+| linux-riscv64 | ✅ cross-built | ⏳ ladder | — | handoff exec bit restored (#4254); climbs one rung behind linux-x86_64 |
+| darwin-arm64 | ✅ from the Rust seed | ⏳ ladder | — | absolute compiler path for phase 2 (#4254) |
+| darwin-x86_64 | ❌ hello SEGV | — | — | phase 1 builds but SEGVs (exit 139) compiling the hello sanity |
+| windows-x86_64 | ❌ | — | — | rung still on MSVC (clang-cl LNK1120); MinGW rung setup unlanded |
+| freebsd-x86_64 | ✅ from the Rust seed | ⏳ ladder | — | handoff now survives a failed step (#4251); essentials $name fix (#4267) |
+| freebsd-riscv64 | ✅ hello runs | ⏳ guest | — | local VM down after container restart; needs a runtime rebuild with #4151/#4225 |
+
+Essentials (`simple_cli`, `simple_test_runner`, `simple_build_runner`) build from phase 3 on (#4291). Compile errors found on phase 1 and fixed: #4247, #4248, #4250, #4270 (owner).
 
 ### Landed today
 - #4142 version line restored to `1.0.0-rc.1`; #4143, #4147 `release_phase3` ⇄ `release/1.0.0` synced (fast-forward, no force push).
@@ -57,6 +59,10 @@ gh workflow run component-build.yml --ref release/1.0.0 -f components=simd-x86_6
 - #4149 (owner) pinned LLVM discovery for clang-cl/lld-link.
 
 ### Landed in this round
+- #4247, #4248, #4250 pure-Simple compile errors in the essentials closures (undeclared reverse-reference mirrors, undeclared rt_* calls, missing ValidationViolation, generic-enum match on self, untyped transient_promote).
+- #4251, #4254, #4267, #4291 ladder: FreeBSD handoff survives a failed step, rung 2 SCV cold init + absolute compiler path + exec bit, FreeBSD sh assignment order, essentials from phase 3.
+- #4225 transient promote walks unowned roots that hold scope-owned children (stage-2 publish SEGV); stage 2 now passes p2_add, scv_prime and mir_retention on CI.
+- #4234 phase ladder builds phase 1 from the Rust seed when no RC qualifies (every native lane had failed rung 1); records the naming-probe walk_hir_type site.
 - #4144 `release/1.0.0` → `main` (owner admin merge, 09:17 UTC).
 - #4152 component builds report SKIPPED (with the resolver's reason) until a proven compiler qualifies, instead of failing every `src/` PR.
 - #4151 `rt_transient_heap_promote` promotes scope-owned heap roots. Root cause of the stage-2 SEGV on every lane: the Rust twin returned `true` for any registered heap root, so the retained parse `Result<ParserModule>` was freed at scope end and `surface_build` read a dangling module. New regression test fails without the fix; runtime lib failures 19 → 10, none new.

@@ -9,11 +9,11 @@ use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.mir.mir_types.{MirType}
 
 fn _llvm_left_brace() -> text:
-    val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{{|}}~"
     ascii_table[91:92]
 
 fn _llvm_right_brace() -> text:
-    val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{{|}}~"
     ascii_table[93:94]
 
 # ============================================================================
@@ -42,7 +42,7 @@ struct LlvmContext:
         if self.named_structs.has(name):
             Some(self.named_structs[name])
         else:
-            nil
+            None
 
     me next_struct_name() -> text:
         """Generate a unique struct name."""
@@ -97,6 +97,25 @@ fn llvm_type_mapper_create_for_target(target: CodegenTarget) -> LlvmTypeMapper:
     else:
         LlvmTypeMapper(target_bits: 64, ctx: LlvmContext.empty())
 
+impl LlvmTypeMapper:
+    # === Override map_type to handle generics ===
+
+    # === Custom LLVM-specific methods ===
+
+    fn map_function_signature(params: [MirType], ret: MirType) -> text:
+        """
+        Map function signature (for declarations/definitions).
+
+        Returns: "ret_type (param_types)"
+
+        Example:
+            (i64, i64) -> i64 → "i64 (i64, i64)"
+        """
+        val param_types = params.map(self.map_type(_))
+        val ret_type = self.map_type(ret)
+        val joined = param_types.join(", ")
+        ret_type + " (" + joined + ")"
+
 impl TypeMapper for LlvmTypeMapper:
     fn map_primitive(ty: PrimitiveType) -> text:
         """
@@ -119,6 +138,7 @@ impl TypeMapper for LlvmTypeMapper:
             case U8: "i8"
             case F64: "double"
             case F32: "float"
+            case F16: "half"
             case Bool: "i1"
             case Unit: "void"  # Void type for unit
 
@@ -136,9 +156,6 @@ impl TypeMapper for LlvmTypeMapper:
     fn backend_name() -> text:
         "LLVM"
 
-impl LlvmTypeMapper:
-    # === Override map_type to handle generics ===
-
     fn map_type(ty: MirType) -> text:
         """
         Map MIR type to LLVM IR type string.
@@ -153,6 +170,7 @@ impl LlvmTypeMapper:
             case F32: "float"
             case Bool: "i1"
             case Unit: "void"
+            case Nil: "i64"  # tagged SplValue word (runtime nil = constant 3); MirTypeKind.Nil, not a PrimitiveType
 
             case Ptr(t_inner, t_mutability):
                 val inner_ty = self.map_type(t_inner)
@@ -178,8 +196,6 @@ impl LlvmTypeMapper:
 
             case _:
                 panic("Unsupported type in LLVM backend: {ty}")
-
-    # === Custom LLVM-specific methods ===
 
     fn map_struct(fields: [(text, MirType)]) -> text:
         """
@@ -238,22 +254,6 @@ impl LlvmTypeMapper:
         """
         "ptr"  # All function pointers are opaque in LLVM 15+
 
-    fn map_function_signature(params: [MirType], ret: MirType) -> text:
-        """
-        Map function signature (for declarations/definitions).
-
-        Returns: "ret_type (param_types)"
-
-        Example:
-            (i64, i64) -> i64 → "i64 (i64, i64)"
-        """
-        val param_types = params.map(self.map_type(_))
-        val ret_type = self.map_type(ret)
-        val joined = param_types.join(", ")
-        ret_type + " (" + joined + ")"
-
-    # === Size and alignment (LLVM-specific) ===
-
     fn size_of(ty: MirType) -> i64:
         """
         Get size in bytes of a type (LLVM target-specific).
@@ -266,6 +266,7 @@ impl LlvmTypeMapper:
             case I16 | U16: 2
             case I8 | U8 | Bool: 1
             case Unit: 0
+            case Nil: 8  # tagged SplValue word
             case Ptr(_, _):
                 self.target_bits / 8  # 4 bytes on 32-bit, 8 on 64-bit
             case Struct(_):
@@ -281,7 +282,10 @@ impl LlvmTypeMapper:
             case Array(elem, size):
                 self.size_of(elem) * size
             case Tuple(elements):
-                elements.map(self.size_of(_)).sum()
+                var elements_size = 0
+                for element in elements:
+                    elements_size = elements_size + self.size_of(element)
+                elements_size
             case _:
                 panic("Cannot compute size of {ty}")
 
@@ -302,6 +306,7 @@ impl LlvmTypeMapper:
             case I32 | U32 | F32: 4
             case I16 | U16: 2
             case I8 | U8 | Bool: 1
+            case Nil: 8  # tagged SplValue word, aligned like i64
             case Ptr(_, _):
                 self.target_bits / 8
             case Struct(_):
@@ -315,7 +320,12 @@ impl LlvmTypeMapper:
                 if elements.len() == 0:
                     1
                 else:
-                    elements.map(self.align_of(_)).max()
+                    var max_align = self.align_of(elements[0])
+                    for element in elements:
+                        val element_align = self.align_of(element)
+                        if element_align > max_align:
+                            max_align = element_align
+                    max_align
             case _:
                 1  # Default alignment
 

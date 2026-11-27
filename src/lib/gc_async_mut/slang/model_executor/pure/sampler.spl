@@ -1,0 +1,263 @@
+# @gc — module uses GC runtime
+#
+# sampler — token sampling over a logits PureTensor for the pure-Simple runner.
+#
+# Order: repetition penalty -> temperature -> top-k -> top-p -> draw.
+# temperature <= 0 is argmax over the (penalized) logits and, with no penalty,
+# is `tensor_argmax` itself. The PRNG (minstd, 31-bit) lives in `SamplerState`,
+# a value the caller threads through: same seed + same logits sequence => same
+# tokens, no host randomness, no globals. Cost: top-k uses a bounded insertion
+# selection (no vocab sort); top-p alone buckets the vocab by log-probability
+# and sorts only the boundary bucket, so the nucleus is exact without ordering
+# the whole vocab.
+# top_k <= 0 or >= vocab disables top-k; top_p outside (0, 1) disables top-p;
+# repetition_penalty == 1.0 disables the penalty (CTRL-style: positive logits
+# are divided, negative multiplied); penalty_window <= 0 means all of `recent`.
+
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_argmax}
+use std.common.math.math.{math_exp}
+
+pub struct SamplerConfig:
+    temperature: f64
+    top_k: i64
+    top_p: f64
+    repetition_penalty: f64
+    penalty_window: i64
+
+pub struct SamplerState:
+    rng: i64
+
+pub struct SampleOut:
+    token: i64
+    state: SamplerState
+
+pub fn sampler_config_greedy() -> SamplerConfig:
+    SamplerConfig(temperature: 0.0, top_k: 0, top_p: 1.0, repetition_penalty: 1.0, penalty_window: 0)
+
+fn _rng_next(s: i64) -> i64:
+    (s * 48271) % 2147483647
+
+# reason: sampler API takes raw RNG seed and token ids; no seed/token-id domain type exists in std.common.types
+# @allow(primitive_api)
+pub fn sampler_state_new(seed: i64) -> SamplerState:
+    val m: i64 = 2147483647
+    var x = seed % m
+    if x < 0:
+        x = x + m
+    # decorrelate neighbouring seeds before the minstd walk
+    x = (x * 1103515245 + 12345) % m
+    if x == 0:
+        x = 1
+    var i: i64 = 0
+    while i < 8:
+        x = _rng_next(x)
+        i = i + 1
+    SamplerState(rng: x)
+
+fn _penalize(d: [f64], recent: [i64], pen: f64, window: i64) -> [f64]:
+    var out = d
+    var start: i64 = 0
+    if window > 0 and recent.len() > window:
+        start = recent.len() - window
+    var i = start
+    while i < recent.len():
+        val id = recent[i]
+        var dup = false
+        var j = start
+        while j < i:
+            if recent[j] == id:
+                dup = true
+            j = j + 1
+        if not dup and id >= 0 and id < out.len():
+            if out[id] > 0.0:
+                out[id] = out[id] / pen
+            else:
+                out[id] = out[id] * pen
+        i = i + 1
+    out
+
+# Indices of the k largest values, descending; ties keep the lower index first
+# (so k == 1 matches tensor_argmax). Insertion into a k-sized sorted list.
+fn _select_top(d: [f64], k: i64) -> [i64]:
+    var idx: [i64] = []
+    var vals: [f64] = []
+    var i: i64 = 0
+    while i < d.len():
+        val v = d[i]
+        if idx.len() < k or v > vals[idx.len() - 1]:
+            if idx.len() < k:
+                idx.push(i)
+                vals.push(v)
+            var p = idx.len() - 1
+            while p > 0 and vals[p - 1] < v:
+                idx[p] = idx[p - 1]
+                vals[p] = vals[p - 1]
+                p = p - 1
+            idx[p] = i
+            vals[p] = v
+        i = i + 1
+    idx
+
+fn _max_of(d: [f64]) -> f64:
+    var m = d[0]
+    var i: i64 = 1
+    while i < d.len():
+        if d[i] > m:
+            m = d[i]
+        i = i + 1
+    m
+
+# Smallest prefix length whose mass reaches p * zref (at least 1).
+fn _nucleus_len(es: [f64], zref: f64, p: f64) -> i64:
+    val need = p * zref
+    var cum = 0.0
+    var j: i64 = 0
+    while j < es.len():
+        cum = cum + es[j]
+        if cum >= need:
+            return j + 1
+        j = j + 1
+    es.len()
+
+# Walk the first `count` weights to the cumulative point r * sum; returns the position.
+fn _draw(es: [f64], count: i64, r: f64) -> i64:
+    var total = 0.0
+    var j: i64 = 0
+    while j < count:
+        total = total + es[j]
+        j = j + 1
+    val target = r * total
+    var cum = 0.0
+    j = 0
+    while j < count:
+        cum = cum + es[j]
+        if cum > target:
+            return j
+        j = j + 1
+    count - 1
+
+fn _exps(d: [f64], idx: [i64], mx: f64, inv_t: f64) -> [f64]:
+    var es: [f64] = []
+    for i in idx:
+        es.push(math_exp((d[i] - mx) * inv_t))
+    es
+
+fn _exps_all(d: [f64], mx: f64, inv_t: f64) -> [f64]:
+    var es: [f64] = []
+    for v in d:
+        es.push(math_exp((v - mx) * inv_t))
+    es
+
+# Stable bottom-up merge sort of idx by key descending (ties keep input order).
+fn _sort_desc(idx: [i64], key: [f64]) -> [i64]:
+    var src = idx
+    var width: i64 = 1
+    while width < src.len():
+        var dst: [i64] = []
+        var lo: i64 = 0
+        while lo < src.len():
+            var mid = lo + width
+            if mid > src.len():
+                mid = src.len()
+            var hi = lo + 2 * width
+            if hi > src.len():
+                hi = src.len()
+            var a = lo
+            var b = mid
+            while a < mid and b < hi:
+                if key[src[a]] >= key[src[b]]:
+                    dst.push(src[a])
+                    a = a + 1
+                else:
+                    dst.push(src[b])
+                    b = b + 1
+            while a < mid:
+                dst.push(src[a])
+                a = a + 1
+            while b < hi:
+                dst.push(src[b])
+                b = b + 1
+            lo = hi
+        src = dst
+        width = width * 2
+    src
+
+# Exact top-p nucleus over the whole vocab without sorting it: bucket tokens by
+# log-probability (512 buckets of 1/16 nat), find the bucket where the mass from
+# the top reaches p, keep every token in higher buckets and sort only that
+# boundary bucket. `es` are the unnormalized probabilities exp((d - mx) / T).
+fn _nucleus_all(es: [f64], d: [f64], mx: f64, inv_t: f64, p: f64) -> [i64]:
+    val nb: i64 = 512
+    var zfull = 0.0
+    var mass: [f64] = []
+    var b0: i64 = 0
+    while b0 < nb:
+        mass.push(0.0)
+        b0 = b0 + 1
+    var bucket: [i64] = []
+    var i: i64 = 0
+    while i < es.len():
+        var b = ((mx - d[i]) * inv_t * 16.0) as i64
+        if b >= nb:
+            b = nb - 1
+        bucket.push(b)
+        mass[b] = mass[b] + es[i]
+        zfull = zfull + es[i]
+        i = i + 1
+    val need = p * zfull
+    var cum = 0.0
+    var edge: i64 = 0
+    while edge < nb - 1 and cum + mass[edge] < need:
+        cum = cum + mass[edge]
+        edge = edge + 1
+    var out: [i64] = []
+    var boundary: [i64] = []
+    i = 0
+    while i < es.len():
+        if bucket[i] < edge:
+            out.push(i)
+        elif bucket[i] == edge:
+            boundary.push(i)
+        i = i + 1
+    for j in _sort_desc(boundary, es):
+        if cum >= need:
+            break
+        out.push(j)
+        cum = cum + es[j]
+    out
+
+# reason: sampler API takes raw RNG seed and token ids; no seed/token-id domain type exists in std.common.types
+# @allow(primitive_api)
+pub fn sampler_sample(cfg: SamplerConfig, state: SamplerState, logits: PureTensor, recent: [i64]) -> SampleOut:
+    var d = logits.data
+    val penalized = cfg.repetition_penalty != 1.0 and recent.len() > 0
+    if penalized:
+        d = _penalize(d, recent, cfg.repetition_penalty, cfg.penalty_window)
+    if cfg.temperature <= 0.0:
+        if penalized:
+            return SampleOut(token: tensor_argmax(PureTensor(data: d, shape: logits.shape)), state: state)
+        return SampleOut(token: tensor_argmax(logits), state: state)
+    val n = d.len()
+    val inv_t = 1.0 / cfg.temperature
+    val next_rng = _rng_next(state.rng)
+    val r = (next_rng as f64) / 2147483647.0
+    val next_state = SamplerState(rng: next_rng)
+    val mx = _max_of(d)
+    val use_k = cfg.top_k > 0 and cfg.top_k < n
+    val use_p = cfg.top_p > 0.0 and cfg.top_p < 1.0
+    if not use_k and not use_p:
+        val es = _exps_all(d, mx, inv_t)
+        return SampleOut(token: _draw(es, n, r), state: next_state)
+    if use_k:
+        val sel = _select_top(d, cfg.top_k)
+        val es = _exps(d, sel, mx, inv_t)
+        var count = sel.len()
+        if use_p:
+            var z = 0.0
+            for e in es:
+                z = z + e
+            count = _nucleus_len(es, z, cfg.top_p)
+        return SampleOut(token: sel[_draw(es, count, r)], state: next_state)
+    val nuc = _nucleus_all(_exps_all(d, mx, inv_t), d, mx, inv_t, cfg.top_p)
+    val ces = _exps(d, nuc, mx, inv_t)
+    SampleOut(token: nuc[_draw(ces, nuc.len(), r)], state: next_state)

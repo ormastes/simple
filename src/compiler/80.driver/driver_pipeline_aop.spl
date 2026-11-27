@@ -16,7 +16,7 @@ use compiler.frontend.core.aop_log_policy.{
 }
 use compiler.mir.mir_aop_injection.{
     extract_mir_block_info,
-    apply_weaving_result,
+    apply_weaving_result_checked_v1,
     aop_weave_accounting_reset,
     aop_weave_accounting_add
 }
@@ -30,6 +30,7 @@ use compiler.frontend.core.aop_predicate_parser.{
     validate_advice_form
 }
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_xray_policy.{XrayBuildPolicy, xray_policy_apply}
 use compiler.driver.driver_log_helpers.{log_debug, log_build_progress}
 use common.plugin.aspect_params.{AspectParamsV1, aspect_coverage_cutover_state_v1, aspect_log_level_to_text}
 
@@ -45,6 +46,8 @@ impl CompilerDriver:
 
     me weave_aop_with_params(allow_ambient_log_rules: bool, aspect_params: AspectParamsV1):
         var all_advices: [HirAopAdvice] = []
+        for saved_advice in self.ctx.hir_aop_advices_saved:
+            all_advices.push(saved_advice)
         for name in self.ctx.hir_modules.keys():
             val hir_mod = self.ctx.hir_modules[name]
             for advice in hir_mod.aop_advices:
@@ -54,6 +57,8 @@ impl CompilerDriver:
 
         aop_weave_accounting_reset(all_advices.len())
         for advice in all_advices:
+            if advice.aspect_name != "" and advice.aspect_module == "":
+                self.ctx.add_error("[AOP] E-AOP-OWNER: named aspect requires a loader-bound module identity")
             val pred_err = validate_predicate(advice.predicate_text)
             if pred_err.len() > 0:
                 self.ctx.add_error(
@@ -110,9 +115,13 @@ impl CompilerDriver:
                 val result = weave_function(
                     config, func.name, mod_name, [], [], blocks)
                 if result.advices_inserted > 0:
-                    val woven_func = apply_weaving_result(func, result)
-                    woven_functions[func.symbol] = woven_func
-                    aop_weave_accounting_add(result.advices_inserted)
+                    match apply_weaving_result_checked_v1(func, result):
+                        case Ok(woven_func):
+                            woven_functions[func.symbol] = woven_func
+                            aop_weave_accounting_add(result.advices_inserted)
+                        case Err(message):
+                            self.ctx.add_error(message)
+                            woven_functions[func.symbol] = func
                 else:
                     woven_functions[func.symbol] = func
                 for diag in result.diagnostics:
@@ -121,17 +130,23 @@ impl CompilerDriver:
                     elif diag.is_warning():
                         self.ctx.warnings.push("[AOP] {diag.message}")
             self.ctx.mir_modules[mod_name] = MirModule(
-                name: mir_module.name,
-                functions: woven_functions,
-                statics: mir_module.statics,
-                constants: mir_module.constants,
-                types: mir_module.types,
-                external_layout_traces: mir_module.external_layout_traces,
-                collection_plan_explanations: mir_module.collection_plan_explanations
+                mir_module.name,
+                woven_functions,
+                mir_module.statics,
+                mir_module.constants,
+                mir_module.types,
+                mir_module.external_layout_traces,
+                mir_module.collection_plan_explanations,
+                mir_module.enum_semantic_declarations,
+                mir_module.attr_sites,
+                mir_module.initializer_plan_v1,
+                mir_module.xray_ring_wrap
             )
         log_build_progress("aop_weave", "modules", self.ctx.mir_modules.len(), self.ctx.mir_modules.len(), "all", 1, 1, 0, 0, "complete")
 
     me apply_debug_trace():
+        # Post-mir_opt instrumentation stage; every pipeline reaches it once.
+        self.apply_xray_policy()
         val level = self.ctx.options.debug_trace_level
         if level == "" or level == "none":
             return
@@ -140,4 +155,21 @@ impl CompilerDriver:
         for name in self.ctx.mir_modules.keys():
             self.ctx.mir_modules[name] = inject_debug_trace(
                 self.ctx.mir_modules[name], level)
+
+    me apply_xray_policy():
+        # compile() and compile_vhdl_only() reject an unresolvable policy or a
+        # rejected observer request before any pipeline runs. This second check
+        # only RECORDS the error (it runs before the static-off return because
+        # an observer request needs no --xray); a pipeline entered without
+        # compile() must check has_errors itself — the weave/instrumentation
+        # has_errors early return is split out to its own PR (design Q9).
+        if self.ctx.config.contains_key("xray_config_error"):
+            self.ctx.add_error(self.ctx.config["xray_config_error"] ?? "invalid XRay configuration")
+            return
+        # Static off (default): no traversal, no allocation, MIR untouched.
+        if not self.ctx.options.xray_enabled:
+            return
+        for name in self.ctx.mir_modules.keys():
+            self.ctx.mir_modules[name] = xray_policy_apply(
+                self.ctx.mir_modules[name], XrayBuildPolicy.on())
 use compiler.common.diagnostics.span.{Span}

@@ -1,0 +1,1053 @@
+# EasyFix Rules - Opt-in Compiler Warning Autofixes
+#
+# Provides three opt-in EasyFix rules (NOT in default `registry.spl`):
+#   1. W-BARE-VARIANT-001 (`check_bare_variant_match`, FixConfidence.Safe):
+#      Qualifies bare unit variant patterns in `case` arms (`case Before:` ->
+#      `case AdviceForm.Before:`, `case Bool | Char:` ->
+#      `case HirTypeKind.Bool | HirTypeKind.Char:`) when the enum type is
+#      unambiguously known from another arm or from an enclosing local
+#      declaration (`val s = ... ?? Enum.Variant` or `val s: Enum = ...`).
+#   2. W-ANY-COMPILE-001 (`check_any_param_to_generic`, Likely / Uncertain):
+#      Rewrites non-generic safe `fn name(param: Any)` -> `fn name<T>(param: T)`
+#      with `FixConfidence.Likely` when the body only forwards `param`; otherwise
+#      emits an `Uncertain` suggestion-only fix recommending `<T>`, a concrete
+#      type, or `unsafe(capabilities: [type_erasure])`.
+#   3. W-MIR-STRUCT-COLLISION (`check_mir_struct_collision`, Uncertain):
+#      Cross-file detector finding any `struct`/`class` in `file` whose bare
+#      name is also declared in `other_sources` with a DIFFERENT field list,
+#      emitting an `Uncertain` suggestion-only fix naming the colliding file,
+#      differing fields, and a module-prefixed struct name.
+
+use std.tooling.easy_fix.types.{FixConfidence, Replacement, EasyFix}
+use compiler.tools.fix.rules.impl_.lint_allow.{lines_allow_rule, line_is_allowed}
+
+struct LwaMatchBlock:
+    match_indent: i64
+    arm_indent: i64
+    subject: text
+    local_enum: text
+    match_allowed: bool
+    arm_lines: [i64]
+
+struct LwaFnScope:
+    fn_indent: i64
+    fn_allowed: bool
+    locals: Dict<text, text>
+    ambiguous: [text]
+
+struct LwaStructDecl:
+    name: text
+    line_idx: i64
+    col: i64
+    fields: [text]
+
+# ============================================================================
+# Shared lexical & byte-offset helpers (unique `_lwa_` prefix)
+# ============================================================================
+
+fn _lwa_is_word_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+
+fn _lwa_is_upper(ch: text) -> bool:
+    ch >= "A" and ch <= "Z"
+
+fn _lwa_is_digit(ch: text) -> bool:
+    ch >= "0" and ch <= "9"
+
+fn _lwa_is_ident(s: text) -> bool:
+    if s == "":
+        return false
+    val first = s.substring(0, 1)
+    if _lwa_is_digit(first):
+        return false
+    var i = 0
+    while i < s.byte_len():
+        if not _lwa_is_word_char(s.substring(i, i + 1)):
+            return false
+        i = i + 1
+    true
+
+fn _lwa_is_pascal_ident(s: text) -> bool:
+    if not _lwa_is_ident(s):
+        return false
+    _lwa_is_upper(s.substring(0, 1))
+
+fn _lwa_leading_ident(s: text) -> text:
+    var i = 0
+    while i < s.byte_len() and _lwa_is_word_char(s.substring(i, i + 1)):
+        i = i + 1
+    s.substring(0, i)
+
+fn _lwa_indent_of(line: text) -> i64:
+    var n = 0
+    while n < line.byte_len():
+        val ch = line.substring(n, n + 1)
+        if ch != " " and ch != "\t":
+            break
+        n = n + 1
+    n
+
+fn _lwa_line_offsets(lines: [text]) -> [i64]:
+    var offsets: [i64] = []
+    var off = 0
+    for line in lines:
+        offsets.push(off)
+        off = off + line.byte_len() + 1
+    offsets
+
+fn _lwa_triple_quote_count(line: text) -> i64:
+    var n = 0
+    var start = 0
+    while start < line.byte_len():
+        val at = line.index_of("\"\"\"", start)
+        if at < 0:
+            break
+        n = n + 1
+        start = at + 3
+    n
+
+fn _lwa_blank_triple_spans(line: text) -> text:
+    var out = ""
+    var inside = false
+    var i = 0
+    while i < line.byte_len():
+        if i + 3 <= line.byte_len() and line.substring(i, i + 3) == "\"\"\"":
+            inside = not inside
+            out = out + "   "
+            i = i + 3
+            continue
+        out = out + (if inside: " " else: line.substring(i, i + 1))
+        i = i + 1
+    out
+
+# Preserves exact byte column of non-string/non-comment code on the line.
+fn _lwa_code_of(line: text) -> text:
+    var out = ""
+    var quote = ""
+    var i = 0
+    val n = line.byte_len()
+    while i < n:
+        val ch = line.substring(i, i + 1)
+        if quote != "":
+            if ch == "\\" and i + 1 < n:
+                out = out + "  "
+                i = i + 2
+                continue
+            if ch == quote:
+                quote = ""
+                out = out + ch
+            else:
+                out = out + " "
+        elif ch == "\"" or ch == "'":
+            quote = ch
+            out = out + ch
+        elif ch == "#":
+            return out
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+fn _lwa_code_lines(lines: [text]) -> [text]:
+    var out: [text] = []
+    var in_doc = false
+    for line in lines:
+        val quotes = if line.contains("\"\"\""): _lwa_triple_quote_count(line) else: 0
+        if in_doc:
+            if quotes % 2 == 1:
+                in_doc = false
+            out.push("")
+            continue
+        if quotes % 2 == 1:
+            in_doc = true
+            out.push("")
+            continue
+        val unquoted = if quotes > 0: _lwa_blank_triple_spans(line) else: line
+        if unquoted.contains("\"") or unquoted.contains("'") or unquoted.contains("#"):
+            out.push(_lwa_code_of(unquoted))
+        else:
+            out.push(unquoted)
+    out
+
+fn _lwa_strip_words(t: text, words: [text]) -> text:
+    var s = t
+    var changed = true
+    while changed:
+        changed = false
+        for w in words:
+            if s.starts_with(w):
+                s = s.substring(w.byte_len(), s.byte_len()).trim()
+                changed = true
+    s
+
+fn _lwa_has_word(code: text, word: text) -> bool:
+    var start = 0
+    while start < code.byte_len():
+        val at = code.index_of(word, start)
+        if at < 0:
+            return false
+        val end = at + word.byte_len()
+        val before_ok = at == 0 or not _lwa_is_word_char(code.substring(at - 1, at))
+        val after_ok = end >= code.byte_len() or not _lwa_is_word_char(code.substring(end, end + 1))
+        if before_ok and after_ok:
+            return true
+        start = end
+    false
+
+fn _lwa_normalize_path(path: text) -> text:
+    var p = path.replace("\\", "/")
+    while p.starts_with("./"):
+        p = p.substring(2, p.byte_len())
+    p
+
+# ============================================================================
+# Rule 1: W-BARE-VARIANT-001 (check_bare_variant_match)
+# ============================================================================
+
+fn _lwa_is_non_enum_type_name(name: text) -> bool:
+    name == "Any" or name == "Self" or name == "String" or name == "Int" or name == "Float" or name == "Bool" or name == "Option" or name == "Result"
+
+fn _lwa_is_prelude_variant(name: text) -> bool:
+    name == "None" or name == "Some" or name == "Ok" or name == "Err"
+
+fn _lwa_is_fn_header(trimmed: text) -> bool:
+    val s = _lwa_strip_words(trimmed, ["pub ", "export ", "static ", "async "])
+    if s.starts_with("extern "):
+        return false
+    (s.starts_with("fn ") or s.starts_with("me ")) and s.ends_with(":")
+
+fn _lwa_record_fn_local(mut scope: LwaFnScope, var_name: text, enum_name: text) -> LwaFnScope:
+    if var_name == "" or enum_name == "":
+        return scope
+    if scope.ambiguous.contains(var_name):
+        return scope
+    if scope.locals.has(var_name):
+        if scope.locals[var_name] != enum_name:
+            scope.ambiguous.push(var_name)
+        return scope
+    scope.locals[var_name] = enum_name
+    scope
+
+fn _lwa_enum_from_qualified_expr(rhs_trimmed: text) -> text:
+    val dot = rhs_trimmed.index_of(".", 0)
+    if dot <= 0:
+        return ""
+    val enum_part = rhs_trimmed.substring(0, dot).trim()
+    if not _lwa_is_pascal_ident(enum_part) or _lwa_is_non_enum_type_name(enum_part):
+        return ""
+    var rest = rhs_trimmed.substring(dot + 1, rhs_trimmed.byte_len()).trim()
+    val paren = rest.index_of("(", 0)
+    if paren >= 0:
+        if not rest.ends_with(")"):
+            return ""
+        rest = rest.substring(0, paren).trim()
+    if not _lwa_is_pascal_ident(rest):
+        return ""
+    enum_part
+
+fn _lwa_last_null_coalesce_rhs(expr: text) -> text:
+    var last_pos = -1
+    var depth = 0
+    var i = 0
+    val n = expr.byte_len()
+    while i < n:
+        val ch = expr.substring(i, i + 1)
+        if ch == "(" or ch == "[" or ch == "{{":
+            depth = depth + 1
+        elif ch == ")" or ch == "]" or ch == "}}":
+            if depth > 0:
+                depth = depth - 1
+        elif depth == 0 and i + 1 < n and expr.substring(i, i + 2) == "??":
+            last_pos = i
+            i = i + 2
+            continue
+        i = i + 1
+    if last_pos < 0:
+        return ""
+    expr.substring(last_pos + 2, n).trim()
+
+fn _lwa_parse_local_enum_decl(trimmed: text) -> [text]:
+    var rest = ""
+    if trimmed.starts_with("val "):
+        rest = trimmed.substring(4, trimmed.byte_len()).trim()
+    elif trimmed.starts_with("var "):
+        rest = trimmed.substring(4, trimmed.byte_len()).trim()
+    else:
+        return []
+    val eq = rest.index_of("=", 0)
+    if eq <= 0:
+        return []
+    val lhs = rest.substring(0, eq).trim()
+    val rhs = rest.substring(eq + 1, rest.byte_len()).trim()
+    val colon = lhs.index_of(":", 0)
+    if colon > 0:
+        val vname = lhs.substring(0, colon).trim()
+        val ty = lhs.substring(colon + 1, lhs.byte_len()).trim()
+        if _lwa_is_ident(vname) and _lwa_is_pascal_ident(ty) and not _lwa_is_non_enum_type_name(ty):
+            return [vname, ty]
+        return []
+    if not _lwa_is_ident(lhs):
+        return []
+    val coalesce_rhs = _lwa_last_null_coalesce_rhs(rhs)
+    val target = if coalesce_rhs != "": coalesce_rhs else: rhs
+    val enum_name = _lwa_enum_from_qualified_expr(target)
+    if enum_name != "":
+        return [lhs, enum_name]
+    []
+
+fn _lwa_match_subject(trimmed: text) -> text:
+    if not trimmed.ends_with(":"):
+        return ""
+    if trimmed.starts_with("match "):
+        return trimmed.substring(6, trimmed.byte_len() - 1).trim()
+    val eq = trimmed.index_of("=", 0)
+    if eq > 0:
+        val after_eq = trimmed.substring(eq + 1, trimmed.byte_len() - 1).trim()
+        if after_eq.starts_with("match "):
+            return after_eq.substring(6, after_eq.byte_len()).trim()
+    if trimmed.starts_with("return "):
+        val after_ret = trimmed.substring(7, trimmed.byte_len() - 1).trim()
+        if after_ret.starts_with("match "):
+            return after_ret.substring(6, after_ret.byte_len()).trim()
+    ""
+
+# Returns byte index of the colon ending `case <pattern>[ if <guard>]:`, or -1.
+fn _lwa_case_colon_col(code_line: text, case_start: i64) -> i64:
+    var depth = 0
+    var i = case_start
+    val n = code_line.byte_len()
+    while i < n:
+        val ch = code_line.substring(i, i + 1)
+        if ch == "(" or ch == "[" or ch == "{{":
+            depth = depth + 1
+        elif ch == ")" or ch == "]" or ch == "}}":
+            if depth > 0:
+                depth = depth - 1
+        elif ch == ":" and depth == 0:
+            if i + 1 < n and code_line.substring(i + 1, i + 2) == ":":
+                i = i + 2
+                continue
+            return i
+        i = i + 1
+    -1
+
+# Strips trailing ` if <guard>` at depth 0 before the colon.
+fn _lwa_case_pattern_end(code_line: text, pat_start: i64, colon_col: i64) -> i64:
+    var depth = 0
+    var i = pat_start
+    while i + 4 <= colon_col:
+        val ch = code_line.substring(i, i + 1)
+        if ch == "(" or ch == "[" or ch == "{{":
+            depth = depth + 1
+        elif ch == ")" or ch == "]" or ch == "}}":
+            if depth > 0:
+                depth = depth - 1
+        elif depth == 0 and code_line.substring(i, i + 4) == " if ":
+            return i
+        i = i + 1
+    colon_col
+
+# Returns array of [start_col, end_col] byte spans (in `code_line`) for each `|`-separated segment.
+fn _lwa_case_segment_spans(code_line: text, pat_start: i64, pat_end: i64) -> [[i64]]:
+    var out: [[i64]] = []
+    var depth = 0
+    var seg_start = pat_start
+    var i = pat_start
+    while i < pat_end:
+        val ch = code_line.substring(i, i + 1)
+        if ch == "(" or ch == "[" or ch == "{{":
+            depth = depth + 1
+        elif ch == ")" or ch == "]" or ch == "}}":
+            if depth > 0:
+                depth = depth - 1
+        elif ch == "|" and depth == 0:
+            out.push([seg_start, i])
+            seg_start = i + 1
+        i = i + 1
+    out.push([seg_start, pat_end])
+    out
+
+fn _lwa_trimmed_span(line: text, raw_start: i64, raw_end: i64) -> [i64]:
+    var s = raw_start
+    var e = raw_end
+    while s < e:
+        val ch = line.substring(s, s + 1)
+        if ch != " " and ch != "\t":
+            break
+        s = s + 1
+    while e > s:
+        val ch = line.substring(e - 1, e)
+        if ch != " " and ch != "\t":
+            break
+        e = e - 1
+    [s, e]
+
+fn _lwa_qualified_enum_from_pattern_seg(seg: text) -> text:
+    val dot = seg.index_of(".", 0)
+    if dot <= 0:
+        return ""
+    val enum_part = seg.substring(0, dot).trim()
+    if not _lwa_is_pascal_ident(enum_part) or _lwa_is_non_enum_type_name(enum_part):
+        return ""
+    var rest = seg.substring(dot + 1, seg.byte_len()).trim()
+    val paren = rest.index_of("(", 0)
+    if paren >= 0:
+        rest = rest.substring(0, paren).trim()
+    if not _lwa_is_pascal_ident(rest):
+        return ""
+    enum_part
+
+fn _lwa_is_bare_unit_variant(seg: text) -> bool:
+    if seg == "" or seg == "_" or seg == "true" or seg == "false" or seg == "nil":
+        return false
+    if _lwa_is_prelude_variant(seg):
+        return false
+    if not _lwa_is_pascal_ident(seg):
+        return false
+    true
+
+fn _lwa_emit_match_block_fixes(block: LwaMatchBlock, lines: [text], code: [text], offsets: [i64], file: text, mut fixes: [EasyFix]):
+    if block.match_allowed or block.arm_lines.len() == 0:
+        return
+    var arm_enums: [text] = []
+    for li in block.arm_lines:
+        val c = code[li]
+        val indent = _lwa_indent_of(c)
+        val pat_start = indent + 5
+        val colon_col = _lwa_case_colon_col(c, pat_start)
+        if colon_col < 0:
+            continue
+        val pat_end = _lwa_case_pattern_end(c, pat_start, colon_col)
+        for span in _lwa_case_segment_spans(c, pat_start, pat_end):
+            val tspan = _lwa_trimmed_span(c, span[0], span[1])
+            if tspan[1] > tspan[0]:
+                val seg = c.substring(tspan[0], tspan[1])
+                val q_enum = _lwa_qualified_enum_from_pattern_seg(seg)
+                if q_enum != "" and not arm_enums.contains(q_enum):
+                    arm_enums.push(q_enum)
+    if arm_enums.len() > 1:
+        return
+    val cond_a = if arm_enums.len() == 1: arm_enums[0] else: ""
+    val cond_b = block.local_enum
+    if cond_a != "" and cond_b != "" and cond_a != cond_b:
+        return
+    val resolved_enum = if cond_a != "": cond_a else: cond_b
+    if resolved_enum == "":
+        return
+    for li in block.arm_lines:
+        if line_is_allowed(lines, li, "bare_variant") or line_is_allowed(lines, li, "W-BARE-VARIANT-001"):
+            continue
+        val c = code[li]
+        val indent = _lwa_indent_of(c)
+        val pat_start = indent + 5
+        val colon_col = _lwa_case_colon_col(c, pat_start)
+        if colon_col < 0:
+            continue
+        val pat_end = _lwa_case_pattern_end(c, pat_start, colon_col)
+        for span in _lwa_case_segment_spans(c, pat_start, pat_end):
+            val tspan = _lwa_trimmed_span(c, span[0], span[1])
+            if tspan[1] <= tspan[0]:
+                continue
+            val seg = c.substring(tspan[0], tspan[1])
+            if not _lwa_is_bare_unit_variant(seg):
+                continue
+            val abs_start = offsets[li] + tspan[0]
+            val abs_end = offsets[li] + tspan[1]
+            var fix = EasyFix.create(
+                id: "W-BARE-VARIANT-001:{abs_start}",
+                description: "qualify bare variant `{seg}` as `{resolved_enum}.{seg}`",
+                confidence: FixConfidence.Safe
+            )
+            fix.add_replacement(Replacement.create(
+                file: file,
+                start: abs_start,
+                end: abs_end,
+                line: li + 1,
+                column: tspan[0] + 1,
+                new_text: "{resolved_enum}.{seg}"
+            ))
+            fixes.push(fix)
+
+pub fn check_bare_variant_match(source: text, file: text) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    val lines = source.split("\n")
+    if lines_allow_rule(lines, "bare_variant") or lines_allow_rule(lines, "W-BARE-VARIANT-001"):
+        return fixes
+    val code = _lwa_code_lines(lines)
+    val offsets = _lwa_line_offsets(lines)
+    var fn_stack: [LwaFnScope] = []
+    var match_stack: [LwaMatchBlock] = []
+
+    var li = 0
+    while li < code.len():
+        val c = code[li]
+        val t = c.trim()
+        if t == "":
+            li = li + 1
+            continue
+        val indent = _lwa_indent_of(c)
+
+        while match_stack.len() > 0:
+            val top = match_stack[match_stack.len() - 1]
+            if indent <= top.match_indent:
+                match_stack.pop()
+                _lwa_emit_match_block_fixes(top, lines, code, offsets, file, fixes)
+            else:
+                break
+
+        while fn_stack.len() > 0:
+            val ftop = fn_stack[fn_stack.len() - 1]
+            if indent <= ftop.fn_indent:
+                fn_stack.pop()
+            else:
+                break
+
+        if _lwa_is_fn_header(t):
+            val empty_locals: Dict<text, text> = {}
+            val fn_allowed = line_is_allowed(lines, li, "bare_variant") or line_is_allowed(lines, li, "W-BARE-VARIANT-001")
+            fn_stack.push(LwaFnScope(fn_indent: indent, fn_allowed: fn_allowed, locals: empty_locals, ambiguous: []))
+            li = li + 1
+            continue
+
+        if fn_stack.len() > 0:
+            val decl = _lwa_parse_local_enum_decl(t)
+            if decl.len() == 2:
+                val fidx = fn_stack.len() - 1
+                fn_stack[fidx] = _lwa_record_fn_local(fn_stack[fidx], decl[0], decl[1])
+
+        val subj = _lwa_match_subject(t)
+        if subj != "":
+            var local_enum = ""
+            var fn_allowed = false
+            if fn_stack.len() > 0:
+                val cur_fn = fn_stack[fn_stack.len() - 1]
+                fn_allowed = cur_fn.fn_allowed
+                if _lwa_is_ident(subj) and not cur_fn.ambiguous.contains(subj) and cur_fn.locals.has(subj):
+                    local_enum = cur_fn.locals[subj]
+            val m_allowed = fn_allowed or line_is_allowed(lines, li, "bare_variant") or line_is_allowed(lines, li, "W-BARE-VARIANT-001")
+            match_stack.push(LwaMatchBlock(
+                match_indent: indent,
+                arm_indent: -1,
+                subject: subj,
+                local_enum: local_enum,
+                match_allowed: m_allowed,
+                arm_lines: []
+            ))
+            li = li + 1
+            continue
+
+        if match_stack.len() > 0 and t.starts_with("case "):
+            val midx = match_stack.len() - 1
+            var top = match_stack[midx]
+            if top.arm_indent < 0:
+                top.arm_indent = indent
+            if indent == top.arm_indent:
+                top.arm_lines.push(li)
+                match_stack[midx] = top
+
+        li = li + 1
+
+    while match_stack.len() > 0:
+        val top = match_stack[match_stack.len() - 1]
+        match_stack.pop()
+        _lwa_emit_match_block_fixes(top, lines, code, offsets, file, fixes)
+
+    fixes
+
+# ============================================================================
+# Rule 2: W-ANY-COMPILE-001 (check_any_param_to_generic)
+# ============================================================================
+
+fn _lwa_params_close(t: text, open: i64) -> i64:
+    var depth = 0
+    var i = open
+    while i < t.byte_len():
+        val ch = t.substring(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
+
+fn _lwa_split_param_spans(line: text, start_col: i64, end_col: i64) -> [[i64]]:
+    var out: [[i64]] = []
+    var depth = 0
+    var seg_start = start_col
+    var i = start_col
+    while i < end_col:
+        val ch = line.substring(i, i + 1)
+        if ch == "(" or ch == "[" or ch == "{{" or ch == "<":
+            depth = depth + 1
+        elif ch == ")" or ch == "]" or ch == "}}":
+            if depth > 0:
+                depth = depth - 1
+        elif ch == ">" and i > 0 and line.substring(i - 1, i) != "-":
+            if depth > 0:
+                depth = depth - 1
+        elif ch == "," and depth == 0:
+            out.push([seg_start, i])
+            seg_start = i + 1
+        i = i + 1
+    out.push([seg_start, end_col])
+    out
+
+# Parses `fn` header on `code_line`. Returns [fn_name, open_paren_col, close_paren_col, has_generics_flag, is_safe_decl] or [].
+fn _lwa_parse_fn_sig_cols(code_line: text) -> [text]:
+    val indent = _lwa_indent_of(code_line)
+    val t = code_line.trim()
+    if t == "" or not t.contains("("):
+        return []
+    var pos = indent
+    var changed = true
+    while changed:
+        changed = false
+        for w in ["pub ", "export ", "static ", "async "]:
+            if code_line.substring(pos, code_line.byte_len()).starts_with(w):
+                pos = pos + w.byte_len()
+                while pos < code_line.byte_len() and (code_line.substring(pos, pos + 1) == " " or code_line.substring(pos, pos + 1) == "\t"):
+                    pos = pos + 1
+                changed = true
+    val tail = code_line.substring(pos, code_line.byte_len())
+    if tail.starts_with("extern "):
+        return []
+    var kw_len = 0
+    if tail.starts_with("fn "):
+        kw_len = 3
+    elif tail.starts_with("me "):
+        kw_len = 3
+    else:
+        return []
+    pos = pos + kw_len
+    while pos < code_line.byte_len() and (code_line.substring(pos, pos + 1) == " " or code_line.substring(pos, pos + 1) == "\t"):
+        pos = pos + 1
+    val fn_name = _lwa_leading_ident(code_line.substring(pos, code_line.byte_len()))
+    if fn_name == "":
+        return []
+    val after_name = pos + fn_name.byte_len()
+    val open_paren = code_line.index_of("(", after_name)
+    if open_paren < 0:
+        return []
+    val between = code_line.substring(after_name, open_paren).trim()
+    var has_generics = "0"
+    if between != "":
+        if between.starts_with("<") and between.ends_with(">"):
+            has_generics = "1"
+        else:
+            return []
+    val close_paren = _lwa_params_close(code_line, open_paren)
+    if close_paren < 0:
+        return []
+    [fn_name, "{open_paren}", "{close_paren}", has_generics]
+
+# Inspects one parameter segment `[seg_start, seg_end)` on `code_line`.
+# Returns `[param_name, any_start_col, any_end_col]` if parameter has explicit type `Any`, else [].
+fn _lwa_any_param_info(code_line: text, seg_start: i64, seg_end: i64) -> [text]:
+    var s = seg_start
+    while s < seg_end and (code_line.substring(s, s + 1) == " " or code_line.substring(s, s + 1) == "\t"):
+        s = s + 1
+    var changed = true
+    while changed:
+        changed = false
+        for w in ["mut ", "val ", "var "]:
+            if s + w.byte_len() <= seg_end and code_line.substring(s, s + w.byte_len()) == w:
+                s = s + w.byte_len()
+                while s < seg_end and (code_line.substring(s, s + 1) == " " or code_line.substring(s, s + 1) == "\t"):
+                    s = s + 1
+                changed = true
+    val seg = code_line.substring(s, seg_end)
+    val rel_colon = seg.index_of(":", 0)
+    if rel_colon <= 0:
+        return []
+    val pname = seg.substring(0, rel_colon).trim()
+    if not _lwa_is_ident(pname):
+        return []
+    var ty_start = s + rel_colon + 1
+    var ty_end = seg_end
+    val eq_rel = seg.index_of("=", rel_colon + 1)
+    if eq_rel >= 0:
+        ty_end = s + eq_rel
+    val tspan = _lwa_trimmed_span(code_line, ty_start, ty_end)
+    if tspan[1] <= tspan[0]:
+        return []
+    val ptype = code_line.substring(tspan[0], tspan[1])
+    if ptype != "Any":
+        return []
+    [pname, "{tspan[0]}", "{tspan[1]}"]
+
+fn _lwa_line_has_unsafe_annotation(lines: [text], idx: i64) -> bool:
+    var i = idx - 1
+    while i >= 0:
+        val t = lines[i].trim()
+        if t == "":
+            i = i - 1
+            continue
+        if not t.starts_with("#") and not t.starts_with("@"):
+            return false
+        if t.starts_with("@unsafe(") or t.starts_with("@unsafe ") or t.starts_with("#[unsafe"):
+            return true
+        i = i - 1
+    false
+
+fn _lwa_body_only_forwards_param(body_lines: [text], param_name: text) -> bool:
+    if body_lines.len() == 0:
+        return false
+    var saw_param = false
+    for c in body_lines:
+        val t = c.trim()
+        if t == "" or t == "pass":
+            continue
+        if _lwa_has_word(c, "T"):
+            return false
+        var start = 0
+        while start < c.byte_len():
+            val at = c.index_of(param_name, start)
+            if at < 0:
+                break
+            val end = at + param_name.byte_len()
+            val before_ch = if at > 0: c.substring(at - 1, at) else: ""
+            val after_ch = if end < c.byte_len(): c.substring(end, end + 1) else: ""
+            val before_ok = at == 0 or (not _lwa_is_word_char(before_ch) and before_ch != ".")
+            val after_ok = end >= c.byte_len() or not _lwa_is_word_char(after_ch)
+            if before_ok and after_ok:
+                saw_param = true
+                var next_nb = end
+                while next_nb < c.byte_len() and (c.substring(next_nb, next_nb + 1) == " " or c.substring(next_nb, next_nb + 1) == "\t"):
+                    next_nb = next_nb + 1
+                if next_nb < c.byte_len():
+                    val nch = c.substring(next_nb, next_nb + 1)
+                    if nch == "." or nch == "[":
+                        return false
+                    val tail = c.substring(next_nb, c.byte_len())
+                    if tail.starts_with("as ") or tail.starts_with("is "):
+                        return false
+                    if nch == "+" or nch == "-" or nch == "*" or nch == "/" or nch == "%":
+                        return false
+                if at > 0:
+                    val prev_part = c.substring(0, at).trim()
+                    if prev_part == "match" or prev_part.ends_with(" match") or prev_part.ends_with("= match"):
+                        return false
+                    if prev_part.ends_with("+") or prev_part.ends_with("-") or prev_part.ends_with("*") or prev_part.ends_with("/") or prev_part.ends_with("%"):
+                        return false
+            start = end
+    saw_param
+
+fn _lwa_type_block_header(trimmed: text) -> text:
+    val s = _lwa_strip_words(trimmed, ["pub ", "export "])
+    if not s.ends_with(":"):
+        return ""
+    if s.starts_with("trait "):
+        return "trait"
+    if s.starts_with("impl ") and s.contains(" for "):
+        return "trait_impl"
+    if s.starts_with("class "):
+        return "class"
+    if s.starts_with("struct "):
+        return "struct"
+    if s.starts_with("impl "):
+        return "impl"
+    ""
+
+pub fn check_any_param_to_generic(source: text, file: text) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    val lines = source.split("\n")
+    if lines_allow_rule(lines, "any_compile") or lines_allow_rule(lines, "W-ANY-COMPILE-001"):
+        return fixes
+    val code = _lwa_code_lines(lines)
+    val offsets = _lwa_line_offsets(lines)
+
+    var unsafe_indent = -1
+    var block_kind = ""
+    var block_indent = -1
+
+    var li = 0
+    while li < code.len():
+        val c = code[li]
+        val t = c.trim()
+        if t == "":
+            li = li + 1
+            continue
+        val indent = _lwa_indent_of(c)
+
+        if unsafe_indent >= 0 and indent <= unsafe_indent:
+            unsafe_indent = -1
+        if block_kind != "" and indent <= block_indent:
+            block_kind = ""
+            block_indent = -1
+
+        if t.starts_with("unsafe:") or t.starts_with("unsafe(") and t.ends_with(":") or t.starts_with("danger:"):
+            if unsafe_indent < 0:
+                unsafe_indent = indent
+            li = li + 1
+            continue
+
+        val bkind = _lwa_type_block_header(t)
+        if bkind != "":
+            block_kind = bkind
+            block_indent = indent
+            li = li + 1
+            continue
+
+        if unsafe_indent >= 0:
+            li = li + 1
+            continue
+
+        val sig = _lwa_parse_fn_sig_cols(c)
+        if sig.len() == 4:
+            if line_is_allowed(lines, li, "any_compile") or line_is_allowed(lines, li, "W-ANY-COMPILE-001") or _lwa_line_has_unsafe_annotation(lines, li):
+                li = li + 1
+                continue
+            val fn_name = sig[0]
+            val open_paren = sig[1].to_i64() ?? -1
+            val close_paren = sig[2].to_i64() ?? -1
+            val has_generics = sig[3] == "1"
+            var any_params: [[text]] = []
+            for pspan in _lwa_split_param_spans(c, open_paren + 1, close_paren):
+                val info = _lwa_any_param_info(c, pspan[0], pspan[1])
+                if info.len() == 3:
+                    any_params.push(info)
+            if any_params.len() > 0:
+                val after_paren = c.substring(close_paren + 1, c.byte_len()).trim()
+                val has_body = after_paren.ends_with(":")
+                val ret_mentions_any = _lwa_has_word(after_paren, "Any")
+                val in_trait_contract = block_kind == "trait" or block_kind == "trait_impl"
+                var body_lines: [text] = []
+                if has_body:
+                    var bi = li + 1
+                    while bi < code.len():
+                        val bc = code[bi]
+                        val bt = bc.trim()
+                        if bt != "" and _lwa_indent_of(bc) <= indent:
+                            break
+                        body_lines.push(bc)
+                        bi = bi + 1
+
+                val first_param = any_params[0]
+                val pname = first_param[0]
+                val can_rewrite = (
+                    not has_generics
+                    and any_params.len() == 1
+                    and has_body
+                    and not ret_mentions_any
+                    and not in_trait_contract
+                    and not _lwa_has_word(c, "T")
+                    and _lwa_body_only_forwards_param(body_lines, pname)
+                )
+                if can_rewrite:
+                    val p_any_start = first_param[1].to_i64() ?? 0
+                    val p_any_end = first_param[2].to_i64() ?? 0
+                    val abs_open = offsets[li] + open_paren
+                    val abs_any_start = offsets[li] + p_any_start
+                    val abs_any_end = offsets[li] + p_any_end
+                    var fix = EasyFix.create(
+                        id: "W-ANY-COMPILE-001:{abs_any_start}",
+                        description: "parameterize `{fn_name}` with `<T>` instead of `{pname}: Any`",
+                        confidence: FixConfidence.Likely
+                    )
+                    fix.add_replacement(Replacement.create(
+                        file: file,
+                        start: abs_open,
+                        end: abs_open,
+                        line: li + 1,
+                        column: open_paren + 1,
+                        new_text: "<T>"
+                    ))
+                    fix.add_replacement(Replacement.create(
+                        file: file,
+                        start: abs_any_start,
+                        end: abs_any_end,
+                        line: li + 1,
+                        column: p_any_start + 1,
+                        new_text: "T"
+                    ))
+                    fixes.push(fix)
+                else:
+                    for ap in any_params:
+                        val ap_name = ap[0]
+                        val ap_start = ap[1].to_i64() ?? 0
+                        val abs_start = offsets[li] + ap_start
+                        val fix = EasyFix.create(
+                            id: "W-ANY-COMPILE-001:{abs_start}",
+                            description: "suggestion: parameter `{ap_name}: Any` in `{fn_name}` uses `Any` in safe code; replace with `<T>`, a concrete type, or `unsafe(capabilities: [type_erasure])`",
+                            confidence: FixConfidence.Uncertain
+                        )
+                        fixes.push(fix)
+        li = li + 1
+    fixes
+
+# ============================================================================
+# Rule 3: W-MIR-STRUCT-COLLISION (check_mir_struct_collision)
+# ============================================================================
+
+fn _lwa_struct_header_name(trimmed: text) -> text:
+    val s = _lwa_strip_words(trimmed, ["pub ", "export "])
+    if not s.ends_with(":"):
+        return ""
+    var rest = ""
+    if s.starts_with("struct "):
+        rest = s.substring(7, s.byte_len() - 1).trim()
+    elif s.starts_with("class "):
+        rest = s.substring(6, s.byte_len() - 1).trim()
+    else:
+        return ""
+    val name = _lwa_leading_ident(rest)
+    if name == "":
+        return ""
+    val after = rest.substring(name.byte_len(), rest.byte_len()).trim()
+    if after != "" and not (after.starts_with("<") and after.ends_with(">")):
+        return ""
+    name
+
+fn _lwa_parse_field_decl(trimmed: text) -> text:
+    if trimmed == "" or trimmed == "pass":
+        return ""
+    for kw in ["fn ", "me ", "static ", "async ", "extern ", "@", "#"]:
+        if trimmed.starts_with(kw):
+            return ""
+    val clean = _lwa_strip_words(trimmed, ["pub ", "val ", "var ", "mut "])
+    val colon = clean.index_of(":", 0)
+    if colon <= 0:
+        return ""
+    val fname = clean.substring(0, colon).trim()
+    if not _lwa_is_ident(fname):
+        return ""
+    var ty = clean.substring(colon + 1, clean.byte_len())
+    val eq = ty.index_of("=", 0)
+    if eq >= 0:
+        ty = ty.substring(0, eq)
+    ty = ty.trim()
+    if ty == "":
+        return ""
+    "{fname}: {ty}"
+
+fn _lwa_collect_structs(source: text, respect_allows: bool) -> [LwaStructDecl]:
+    var out: [LwaStructDecl] = []
+    val lines = source.split("\n")
+    if respect_allows and (lines_allow_rule(lines, "mir_struct_collision") or lines_allow_rule(lines, "W-MIR-STRUCT-COLLISION")):
+        return out
+    val code = _lwa_code_lines(lines)
+    var cur_name = ""
+    var cur_line = -1
+    var cur_col = 0
+    var cur_indent = -1
+    var body_indent = -1
+    var cur_fields: [text] = []
+    var cur_allowed = false
+
+    var li = 0
+    while li < code.len():
+        val c = code[li]
+        val t = c.trim()
+        if t == "":
+            li = li + 1
+            continue
+        val indent = _lwa_indent_of(c)
+        if cur_name != "" and indent <= cur_indent:
+            if not cur_allowed:
+                out.push(LwaStructDecl(name: cur_name, line_idx: cur_line, col: cur_col, fields: cur_fields))
+            cur_name = ""
+            cur_line = -1
+            cur_col = 0
+            cur_indent = -1
+            body_indent = -1
+            cur_fields = []
+            cur_allowed = false
+
+        val sname = _lwa_struct_header_name(t)
+        if sname != "":
+            cur_name = sname
+            cur_line = li
+            cur_col = indent
+            cur_indent = indent
+            body_indent = -1
+            cur_fields = []
+            cur_allowed = respect_allows and (line_is_allowed(lines, li, "mir_struct_collision") or line_is_allowed(lines, li, "W-MIR-STRUCT-COLLISION"))
+            li = li + 1
+            continue
+
+        if cur_name != "":
+            if body_indent < 0:
+                body_indent = indent
+            if indent == body_indent:
+                val field = _lwa_parse_field_decl(t)
+                if field != "":
+                    cur_fields.push(field)
+        li = li + 1
+
+    if cur_name != "" and not cur_allowed:
+        out.push(LwaStructDecl(name: cur_name, line_idx: cur_line, col: cur_col, fields: cur_fields))
+    out
+
+fn _lwa_field_lists_equal(a: [text], b: [text]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn _lwa_format_fields(fields: [text]) -> text:
+    if fields.len() == 0:
+        return "(no fields)"
+    fields.join(", ")
+
+fn _lwa_module_prefix(file: text) -> text:
+    val norm = _lwa_normalize_path(file)
+    val slash = norm.last_index_of("/") ?? -1
+    val base = if slash >= 0: norm.substring(slash + 1, norm.byte_len()) else: norm
+    val dot = base.last_index_of(".") ?? -1
+    val stem = if dot > 0: base.substring(0, dot) else: base
+    var prefix = ""
+    for part in stem.replace("-", "_").split("_"):
+        if part != "":
+            val head = part.substring(0, 1).upper()
+            val tail = part.substring(1, part.byte_len())
+            prefix = prefix + head + tail
+    if prefix == "":
+        return "Module"
+    prefix
+
+pub fn check_mir_struct_collision(source: text, file: text, other_sources: Dict<text, text>) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    val local_structs = _lwa_collect_structs(source, true)
+    if local_structs.len() == 0:
+        return fixes
+    val norm_file = _lwa_normalize_path(file)
+    var sorted_paths: [text] = []
+    for p in other_sources.keys():
+        if _lwa_normalize_path(p) != norm_file:
+            sorted_paths.push(p)
+    sorted_paths.sort()
+    if sorted_paths.len() == 0:
+        return fixes
+
+    # Index other structs by bare name -> list of "other_path (fields)"
+    var other_structs_by_path: Dict<text, [LwaStructDecl]> = {}
+    for p in sorted_paths:
+        other_structs_by_path[p] = _lwa_collect_structs(other_sources[p], false)
+
+    val offsets = _lwa_line_offsets(source.split("\n"))
+    val mod_prefix = _lwa_module_prefix(file)
+
+    for local in local_structs:
+        var collisions: [text] = []
+        for p in sorted_paths:
+            for other in other_structs_by_path[p]:
+                if other.name == local.name and not _lwa_field_lists_equal(local.fields, other.fields):
+                    collisions.push("{p} ({_lwa_format_fields(other.fields)})")
+        if collisions.len() > 0:
+            val decl_off = offsets[local.line_idx] + local.col
+            val suggested = if local.name.starts_with(mod_prefix): "{mod_prefix}V2{local.name}" else: "{mod_prefix}{local.name}"
+            val local_desc = _lwa_format_fields(local.fields)
+            val other_desc = collisions.join("; ")
+            val fix = EasyFix.create(
+                id: "W-MIR-STRUCT-COLLISION:{decl_off}",
+                description: "suggestion: struct `{local.name}` ({local_desc}) collides in MIR with {other_desc}; rename to a module-prefixed struct name such as `{suggested}`",
+                confidence: FixConfidence.Uncertain
+            )
+            fixes.push(fix)
+    fixes

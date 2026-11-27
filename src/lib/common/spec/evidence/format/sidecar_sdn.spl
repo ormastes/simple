@@ -1,0 +1,361 @@
+# Bounded, versioned SDN transport for typed evidence sidecars.
+# Candidate-authored manifests remain claims; docgen must label rendered data
+# unverified until a separate trusted owner admission API exists.
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.parser.{parse_with_spans_and_issues}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.spec.evidence.model.{
+    EvidenceManifest, EvidenceStatus, ManualBlock, ManualBlockKind, EvidenceAudience,
+    EVIDENCE_MANIFEST_SCHEMA, evidence_manifest, manual_block_for,
+    manual_block_kind_name, evidence_manifest_is_complete, is_sha256_hex
+}
+
+pub val EVIDENCE_SIDECAR_V2_SCHEMA: text = "simple.sspec.evidence-sidecar/v2"
+pub val EVIDENCE_SIDECAR_V1_SCHEMA: text = "simple.sspec.evidence.v1"
+pub val EVIDENCE_SIDECAR_MAX_BYTES: i64 = 1_048_576
+pub val EVIDENCE_SIDECAR_MAX_BLOCKS: i64 = 4096
+pub val EVIDENCE_SIDECAR_MAX_LINES: i64 = 65536
+
+pub enum EvidenceSidecarSource:
+    SchemaV2
+    HistoricalV1
+
+pub struct EvidenceSidecar:
+    source: EvidenceSidecarSource
+    manifest: EvidenceManifest
+    subject_id: text
+    definition_sha256: text
+    expectation_sha256: text
+    blocks: [ManualBlock]
+
+fn sidecar_status_name(status: EvidenceStatus) -> text:
+    match status:
+        case EvidenceStatus.passed: "passed"
+        case EvidenceStatus.failed: "failed"
+        case EvidenceStatus.ignored: "ignored"
+        case EvidenceStatus.pending_review: "pending_review"
+
+fn sidecar_audience_name(audience: EvidenceAudience) -> text:
+    match audience:
+        case EvidenceAudience.user: "user"
+        case EvidenceAudience.qa: "qa"
+
+pub fn validate_evidence_sidecar_encoded_size(encoded_len: i64) -> Result<(), text>:
+    if encoded_len < 0 or encoded_len > EVIDENCE_SIDECAR_MAX_BYTES - 1:
+        return Err("canonical evidence sidecar leaves no room for its final line ending")
+    Ok(())
+
+fn sidecar_budget_text(used: i64, value: text) -> Result<i64, text>:
+    # Reserve worst-case SDN quoting (two output bytes per input byte plus
+    # quote delimiters), without multiplying until the input length is bounded.
+    val length = value.len()
+    if length > (EVIDENCE_SIDECAR_MAX_BYTES - 2) / 2:
+        return Err("evidence sidecar text field exceeds the encoded size budget")
+    val charge = length * 2 + 2
+    if used > EVIDENCE_SIDECAR_MAX_BYTES - charge:
+        return Err("evidence sidecar exceeds the encoded size budget")
+    Ok(used + charge)
+
+fn sidecar_preflight(value: EvidenceSidecar) -> Result<(), text>:
+    var budget = 512
+    val manifest = value.manifest
+    budget = sidecar_budget_text(budget, manifest.schema)?
+    budget = sidecar_budget_text(budget, manifest.evidence_id)?
+    budget = sidecar_budget_text(budget, manifest.profile_id)?
+    budget = sidecar_budget_text(budget, manifest.spec_path)?
+    budget = sidecar_budget_text(budget, manifest.spec_sha256)?
+    budget = sidecar_budget_text(budget, manifest.provider_id)?
+    budget = sidecar_budget_text(budget, manifest.provider_version)?
+    budget = sidecar_budget_text(budget, manifest.run_id)?
+    budget = sidecar_budget_text(budget, manifest.environment)?
+    budget = sidecar_budget_text(budget, manifest.artifact_sha256)?
+    budget = sidecar_budget_text(budget, sidecar_status_name(manifest.status))?
+    budget = sidecar_budget_text(budget, value.subject_id)?
+    budget = sidecar_budget_text(budget, value.definition_sha256)?
+    budget = sidecar_budget_text(budget, value.expectation_sha256)?
+    if value.blocks.len() > EVIDENCE_SIDECAR_MAX_BLOCKS:
+        return Err("evidence sidecar exceeds its block bound")
+    var total_lines = 0
+    for block in value.blocks:
+        if budget > EVIDENCE_SIDECAR_MAX_BYTES - 128:
+            return Err("evidence sidecar exceeds its encoded block budget")
+        budget += 128
+        budget = sidecar_budget_text(budget, manual_block_kind_name(block.kind))?
+        budget = sidecar_budget_text(budget, block.title)?
+        budget = sidecar_budget_text(budget, sidecar_audience_name(block.audience))?
+        if block.lines.len() > EVIDENCE_SIDECAR_MAX_LINES - total_lines:
+            return Err("evidence sidecar exceeds its total line bound")
+        total_lines += block.lines.len()
+        for line in block.lines:
+            if budget > EVIDENCE_SIDECAR_MAX_BYTES - 4:
+                return Err("evidence sidecar exceeds its encoded line budget")
+            budget += 4
+            budget = sidecar_budget_text(budget, line)?
+    Ok(())
+
+pub fn validate_evidence_sidecar_append(value: EvidenceSidecar, requested_spec_path: text) -> Result<(), text>:
+    if value.source != EvidenceSidecarSource.SchemaV2:
+        return Err("evidence sidecar append requires a v2 record")
+    if requested_spec_path == "" or value.manifest.spec_path != requested_spec_path:
+        return Err("evidence sidecar spec path does not match the append target")
+    if value.manifest.status != EvidenceStatus.pending_review:
+        return Err("evidence sidecar is final; appending would invalidate its claimed artifact digest")
+    Ok(())
+
+fn sidecar_record(names: [text], values: [SdnValue]) -> SdnValue:
+    var fields: Dict<text, SdnValue> = {}
+    var i = 0
+    while i < names.len():
+        fields[names[i]] = values[i]
+        i += 1
+    SdnValue.Dict(fields)
+
+fn sidecar_text(value: text) -> SdnValue:
+    SdnValue.String(value)
+
+fn sidecar_record_fields(value: SdnValue, names: [text], label: text) -> Result<Dict<text, SdnValue>, text>:
+    match value:
+        case SdnValue.Dict(fields):
+            if fields.len() != names.len():
+                return Err(label + " has unknown or missing fields")
+            for name in names:
+                if not fields.contains_key(name):
+                    return Err(label + " is missing field: " + name)
+            Ok(fields)
+        case _:
+            Err(label + " must be an SDN dictionary")
+
+fn sidecar_text_field(fields: Dict<text, SdnValue>, name: text, label: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err(label + " field must be text: " + name)
+
+fn sidecar_text_array(values: [text]) -> SdnValue:
+    var encoded: [SdnValue] = []
+    for value in values:
+        encoded.push(SdnValue.String(value))
+    SdnValue.Array(encoded)
+
+fn sidecar_text_array_field(fields: Dict<text, SdnValue>, name: text) -> Result<[text], text>:
+    val values = match fields[name]:
+        case SdnValue.Array(items): items
+        case _: return Err("evidence sidecar field must be an array: " + name)
+    if values.len() > EVIDENCE_SIDECAR_MAX_LINES:
+        return Err("evidence sidecar line array exceeds its bound")
+    var lines: [text] = []
+    for value in values:
+        match value:
+            case SdnValue.String(line): lines.push(line)
+            case _: return Err("evidence sidecar lines must contain text")
+    Ok(lines)
+
+fn sidecar_parse_status(value: text) -> Result<EvidenceStatus, text>:
+    match value:
+        case "passed": Ok(EvidenceStatus.passed)
+        case "failed": Ok(EvidenceStatus.failed)
+        case "ignored": Ok(EvidenceStatus.ignored)
+        case "pending_review": Ok(EvidenceStatus.pending_review)
+        case _: Err("evidence sidecar status is unknown")
+
+fn sidecar_parse_kind(value: text) -> Result<ManualBlockKind, text>:
+    match value:
+        case "paragraph": Ok(ManualBlockKind.paragraph)
+        case "action_list": Ok(ManualBlockKind.action_list)
+        case "code_block": Ok(ManualBlockKind.code_block)
+        case "terminal_grid": Ok(ManualBlockKind.terminal_grid)
+        case "image": Ok(ManualBlockKind.image)
+        case "table": Ok(ManualBlockKind.table)
+        case "field_tree": Ok(ManualBlockKind.field_tree)
+        case "byte_table": Ok(ManualBlockKind.byte_table)
+        case "expected_actual": Ok(ManualBlockKind.expected_actual)
+        case "warning": Ok(ManualBlockKind.warning)
+        case "troubleshooting": Ok(ManualBlockKind.troubleshooting)
+        case "artifact_link": Ok(ManualBlockKind.artifact_link)
+        case _: Err("evidence sidecar block kind is unknown")
+
+fn sidecar_parse_audience(value: text) -> Result<EvidenceAudience, text>:
+    match value:
+        case "user": Ok(EvidenceAudience.user)
+        case "qa": Ok(EvidenceAudience.qa)
+        case _: Err("evidence sidecar audience is unknown")
+
+fn sidecar_manifest_value(manifest: EvidenceManifest) -> SdnValue:
+    sidecar_record(
+        ["schema", "evidence_id", "profile_id", "spec_path", "spec_sha256", "provider_id", "provider_version", "run_id", "environment", "artifact_sha256", "status"],
+        [sidecar_text(manifest.schema), sidecar_text(manifest.evidence_id), sidecar_text(manifest.profile_id), sidecar_text(manifest.spec_path), sidecar_text(manifest.spec_sha256), sidecar_text(manifest.provider_id), sidecar_text(manifest.provider_version), sidecar_text(manifest.run_id), sidecar_text(manifest.environment), sidecar_text(manifest.artifact_sha256), sidecar_text(sidecar_status_name(manifest.status))])
+
+fn sidecar_block_value(block: ManualBlock) -> SdnValue:
+    sidecar_record(
+        ["kind", "title", "audience", "lines"],
+        [sidecar_text(manual_block_kind_name(block.kind)), sidecar_text(block.title), sidecar_text(sidecar_audience_name(block.audience)), sidecar_text_array(block.lines)])
+
+pub fn encode_evidence_sidecar_v2(value: EvidenceSidecar) -> Result<text, text>:
+    sidecar_preflight(value)?
+    if value.source != EvidenceSidecarSource.SchemaV2:
+        return Err("only v2 evidence sidecars can be encoded")
+    if value.manifest.schema != EVIDENCE_MANIFEST_SCHEMA:
+        return Err("evidence manifest schema is invalid")
+    if value.manifest.status != EvidenceStatus.pending_review:
+        if not evidence_manifest_is_complete(value.manifest):
+            return Err("non-pending evidence manifest is missing required provenance")
+        if (value.subject_id == "" or not is_sha256_hex(value.definition_sha256) or
+            not is_sha256_hex(value.expectation_sha256)):
+            return Err("non-pending evidence sidecar is missing subject, definition, or expectation binding")
+    if value.blocks.len() > EVIDENCE_SIDECAR_MAX_BLOCKS:
+        return Err("evidence sidecar exceeds its block bound")
+    var blocks: [SdnValue] = []
+    var line_count = 0
+    for block in value.blocks:
+        if block.lines.len() > EVIDENCE_SIDECAR_MAX_LINES - line_count:
+            return Err("evidence sidecar exceeds its total line bound")
+        line_count += block.lines.len()
+        blocks.push(sidecar_block_value(block))
+    val root = sidecar_record(
+        ["schema", "manifest", "subject_id", "definition_sha256", "expectation_sha256", "blocks"],
+        [sidecar_text(EVIDENCE_SIDECAR_V2_SCHEMA), sidecar_manifest_value(value.manifest), sidecar_text(value.subject_id), sidecar_text(value.definition_sha256), sidecar_text(value.expectation_sha256), SdnValue.Array(blocks)])
+    val encoded = sdn_encode_canonical(root)
+    validate_evidence_sidecar_encoded_size(encoded.len())?
+    Ok(encoded + "\n")
+
+fn sidecar_decode_blocks(value: SdnValue) -> Result<[ManualBlock], text>:
+    val items = match value:
+        case SdnValue.Array(values): values
+        case _: return Err("evidence sidecar blocks must be an SDN array")
+    if items.len() > EVIDENCE_SIDECAR_MAX_BLOCKS:
+        return Err("evidence sidecar exceeds its block bound")
+    var blocks: [ManualBlock] = []
+    var line_count = 0
+    for item in items:
+        val fields = sidecar_record_fields(item, ["kind", "title", "audience", "lines"], "evidence sidecar block")?
+        val kind = sidecar_parse_kind(sidecar_text_field(fields, "kind", "evidence sidecar")?)?
+        val title = sidecar_text_field(fields, "title", "evidence sidecar")?
+        val audience = sidecar_parse_audience(sidecar_text_field(fields, "audience", "evidence sidecar")?)?
+        val lines = sidecar_text_array_field(fields, "lines")?
+        if lines.len() > EVIDENCE_SIDECAR_MAX_LINES - line_count:
+            return Err("evidence sidecar exceeds its total line bound")
+        line_count += lines.len()
+        blocks.push(manual_block_for(kind, title, audience, lines))
+    Ok(blocks)
+
+fn sidecar_decode_manifest(value: SdnValue) -> Result<EvidenceManifest, text>:
+    val fields = sidecar_record_fields(value, ["schema", "evidence_id", "profile_id", "spec_path", "spec_sha256", "provider_id", "provider_version", "run_id", "environment", "artifact_sha256", "status"], "evidence manifest")?
+    val schema = sidecar_text_field(fields, "schema", "evidence manifest")?
+    if schema != EVIDENCE_MANIFEST_SCHEMA:
+        return Err("unsupported evidence manifest schema")
+    val manifest = evidence_manifest(
+        sidecar_text_field(fields, "evidence_id", "evidence manifest")?,
+        sidecar_text_field(fields, "profile_id", "evidence manifest")?,
+        sidecar_text_field(fields, "spec_path", "evidence manifest")?,
+        sidecar_text_field(fields, "spec_sha256", "evidence manifest")?,
+        sidecar_text_field(fields, "provider_id", "evidence manifest")?,
+        sidecar_text_field(fields, "provider_version", "evidence manifest")?,
+        sidecar_text_field(fields, "run_id", "evidence manifest")?,
+        sidecar_text_field(fields, "environment", "evidence manifest")?,
+        sidecar_text_field(fields, "artifact_sha256", "evidence manifest")?,
+        sidecar_parse_status(sidecar_text_field(fields, "status", "evidence manifest")?)?)
+    if manifest.status != EvidenceStatus.pending_review and not evidence_manifest_is_complete(manifest):
+        return Err("non-pending evidence manifest is missing required provenance")
+    Ok(manifest)
+
+pub fn decode_evidence_sidecar_v2(source: text) -> Result<EvidenceSidecar, text>:
+    if source.len() > EVIDENCE_SIDECAR_MAX_BYTES:
+        return Err("evidence sidecar exceeds the 1 MiB document bound")
+    val parsed = parse_with_spans_and_issues(source)?
+    if parsed.2.len() > 0:
+        return Err("evidence sidecar contains malformed or duplicate SDN fields")
+    val canonical = sdn_encode_canonical(parsed.0)
+    if source != canonical and source != canonical + "\n" and source != canonical + "\r\n":
+        return Err("evidence sidecar SDN must use canonical bytes with at most one line ending")
+    val fields = sidecar_record_fields(parsed.0, ["schema", "manifest", "subject_id", "definition_sha256", "expectation_sha256", "blocks"], "evidence sidecar")?
+    if sidecar_text_field(fields, "schema", "evidence sidecar")? != EVIDENCE_SIDECAR_V2_SCHEMA:
+        return Err("unsupported evidence sidecar schema")
+    val manifest = sidecar_decode_manifest(fields["manifest"])?
+    val subject_id = sidecar_text_field(fields, "subject_id", "evidence sidecar")?
+    val definition_sha256 = sidecar_text_field(fields, "definition_sha256", "evidence sidecar")?
+    val expectation_sha256 = sidecar_text_field(fields, "expectation_sha256", "evidence sidecar")?
+    if manifest.status != EvidenceStatus.pending_review:
+        if subject_id == "" or not is_sha256_hex(definition_sha256) or not is_sha256_hex(expectation_sha256):
+            return Err("non-pending evidence sidecar is missing subject, definition, or expectation binding")
+    Ok(EvidenceSidecar(
+        source: EvidenceSidecarSource.SchemaV2,
+        manifest: manifest,
+        subject_id: subject_id,
+        definition_sha256: definition_sha256,
+        expectation_sha256: expectation_sha256,
+        blocks: sidecar_decode_blocks(fields["blocks"])?))
+
+fn legacy_value(lines: [text], key: text) -> Result<text, text>:
+    var found = false
+    var value = ""
+    val prefix = key + "="
+    for line in lines:
+        val trimmed = line.trim()
+        if not trimmed.starts_with(prefix):
+            continue
+        if found:
+            return Err("duplicate legacy evidence sidecar field: " + key)
+        found = true
+        value = trimmed[prefix.len():]
+    if found: Ok(value) else: Ok("")
+
+fn legacy_check_fields(lines: [text], allowed: [text], repeat_line: bool) -> Result<(), text>:
+    var seen: [text] = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val split = trimmed.split("=")
+        if split.len() < 2:
+            return Err("malformed legacy evidence sidecar field")
+        val key = split[0]
+        if not allowed.contains(key):
+            return Err("unknown legacy evidence sidecar field: " + key)
+        if key == "line" and repeat_line:
+            continue
+        if seen.contains(key):
+            return Err("duplicate legacy evidence sidecar field: " + key)
+        seen.push(key)
+    Ok(())
+
+pub fn import_legacy_evidence_sidecar_v1(source: text) -> Result<EvidenceSidecar, text>:
+    if source.len() > EVIDENCE_SIDECAR_MAX_BYTES:
+        return Err("legacy evidence sidecar exceeds the 1 MiB document bound")
+    val sections = source.split("---")
+    if sections.len() == 0:
+        return Err("legacy evidence sidecar is empty")
+    val header = sections[0].split("\n")
+    legacy_check_fields(header, ["schema", "evidence_id", "profile_id", "spec_path", "spec_sha256", "provider_id", "provider_version", "run_id", "environment", "artifact_sha256", "status"], false)?
+    if legacy_value(header, "schema")? != EVIDENCE_SIDECAR_V1_SCHEMA:
+        return Err("legacy evidence importer requires the exact v1 schema")
+    if sections.len() - 1 > EVIDENCE_SIDECAR_MAX_BLOCKS:
+        return Err("legacy evidence sidecar exceeds its block bound")
+    var blocks: [ManualBlock] = []
+    var line_count = 0
+    var index = 1
+    while index < sections.len():
+        val lines = sections[index].split("\n")
+        if sections[index].trim() != "":
+            legacy_check_fields(lines, ["kind", "title", "audience", "line"], true)?
+            val kind = sidecar_parse_kind(legacy_value(lines, "kind")?)?
+            val audience = sidecar_parse_audience(legacy_value(lines, "audience")?)?
+            val title = legacy_value(lines, "title")?
+            var body: [text] = []
+            for line in lines:
+                val trimmed = line.trim()
+                if trimmed.starts_with("line="):
+                    body.push(trimmed[5:])
+            if body.len() > EVIDENCE_SIDECAR_MAX_LINES - line_count:
+                return Err("legacy evidence sidecar exceeds its total line bound")
+            line_count += body.len()
+            blocks.push(manual_block_for(kind, title, audience, body))
+        index += 1
+    val manifest = evidence_manifest(
+        legacy_value(header, "evidence_id")?,
+        legacy_value(header, "profile_id")?,
+        legacy_value(header, "spec_path")?,
+        "", "", "", "", "", "", EvidenceStatus.pending_review)
+    Ok(EvidenceSidecar(
+        source: EvidenceSidecarSource.HistoricalV1,
+        manifest: manifest,
+        subject_id: "", definition_sha256: "", expectation_sha256: "",
+        blocks: blocks))

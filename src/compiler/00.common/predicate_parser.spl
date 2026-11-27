@@ -6,13 +6,13 @@
 # Port of rust/compiler/src/predicate_parser.rs (484 lines)
 
 
-use predicate.*
+use compiler.common.predicate.{Predicate, Selector, SignaturePattern, ArgPatterns}
 
 # ============================================================================
 # Tokens
 # ============================================================================
 
-enum Token:
+pub enum PredToken:
     Not
     And
     Or
@@ -25,8 +25,8 @@ enum Token:
 # Tokenizer
 # ============================================================================
 
-fn tokenize(input: text) -> text:
-    var tokens: [Token] = []
+pub fn pred_tokenize(input: text) -> Result<[PredToken], text>:
+    var tokens: [PredToken] = []
     var i = 0
     val chars = input.chars()
     val len = chars.len()
@@ -36,22 +36,22 @@ fn tokenize(input: text) -> text:
         if c == " " or c == "\t" or c == "\n":
             i = i + 1
         elif c == "!":
-            tokens = tokens.push(Token.Not)
+            tokens = tokens.push(PredToken.Not)
             i = i + 1
         elif c == "&":
-            tokens = tokens.push(Token.And)
+            tokens = tokens.push(PredToken.And)
             i = i + 1
         elif c == "|":
-            tokens = tokens.push(Token.Or)
+            tokens = tokens.push(PredToken.Or)
             i = i + 1
         elif c == "(":
-            tokens = tokens.push(Token.LParen)
+            tokens = tokens.push(PredToken.LParen)
             i = i + 1
         elif c == ")":
-            tokens = tokens.push(Token.RParen)
+            tokens = tokens.push(PredToken.RParen)
             i = i + 1
         elif c == ",":
-            tokens = tokens.push(Token.Comma)
+            tokens = tokens.push(PredToken.Comma)
             i = i + 1
         elif c.is_alpha() or c == "_":
             # Parse selector name
@@ -100,7 +100,7 @@ fn tokenize(input: text) -> text:
                     current = current + chars[i]
                     i = i + 1
 
-            tokens = tokens.push(Token.Sel(name, args))
+            tokens = tokens.push(PredToken.Sel(name, args))
         else:
             return Err("unexpected character '{c}' in predicate")
 
@@ -110,7 +110,7 @@ fn tokenize(input: text) -> text:
 # Parser (recursive descent)
 # ============================================================================
 
-fn parse_predicate(input: text) -> text:
+pub fn parse_predicate(input: text) -> Result<Predicate, text>:
     """Parse a predicate expression from string."""
     val trimmed = input.trim()
     val inner = if trimmed.starts_with("pc{") and trimmed.ends_with("}"):
@@ -118,9 +118,9 @@ fn parse_predicate(input: text) -> text:
     else:
         trimmed
 
-    val tokens = tokenize(inner)?
+    val tokens = pred_tokenize(inner)?
     var pos = 0
-    match parse_or(tokens, pos):
+    match _pred_parse_or(tokens, pos):
         case Ok((pred, new_pos)):
             if new_pos < tokens.len():
                 Err("unexpected trailing tokens in predicate")
@@ -128,64 +128,64 @@ fn parse_predicate(input: text) -> text:
                 Ok(pred)
         case Err(e): Err(e)
 
-fn parse_or(tokens: [Token], pos: i64) -> text:
-    var result = parse_and(tokens, pos)?
+fn _pred_parse_or(tokens: [PredToken], pos: i64) -> Result<(Predicate, i64), text>:
+    var result = _pred_parse_and(tokens, pos)?
     val _destruct_0 = result
     var expr = _destruct_0[0]
     var p = _destruct_0[1]
     while p < tokens.len():
         match tokens[p]:
             case Or:
-                val rhs = parse_and(tokens, p + 1)?
+                val rhs = _pred_parse_and(tokens, p + 1)?
                 expr = Predicate.Or(expr, rhs[0])
                 p = rhs[1]
             case _: break
     val _tup_1 = (expr, p)
     Ok(_tup_1)
 
-fn parse_and(tokens: [Token], pos: i64) -> text:
-    var result = parse_not(tokens, pos)?
+fn _pred_parse_and(tokens: [PredToken], pos: i64) -> Result<(Predicate, i64), text>:
+    var result = _pred_parse_not(tokens, pos)?
     val _destruct_1 = result
     var expr = _destruct_1[0]
     var p = _destruct_1[1]
     while p < tokens.len():
         match tokens[p]:
             case And:
-                val rhs = parse_not(tokens, p + 1)?
+                val rhs = _pred_parse_not(tokens, p + 1)?
                 expr = Predicate.And(expr, rhs[0])
                 p = rhs[1]
             case _: break
     val _tup_2 = (expr, p)
     Ok(_tup_2)
 
-fn parse_not(tokens: [Token], pos: i64) -> text:
+fn _pred_parse_not(tokens: [PredToken], pos: i64) -> Result<(Predicate, i64), text>:
     if pos < tokens.len():
         match tokens[pos]:
             case Not:
-                val inner = parse_not(tokens, pos + 1)?
+                val inner = _pred_parse_not(tokens, pos + 1)?
                 return Ok((Predicate.Not(inner[0]), inner[1]))
             case _: ()
-    parse_primary(tokens, pos)
+    _pred_parse_primary(tokens, pos)
 
-fn parse_primary(tokens: [Token], pos: i64) -> text:
+fn _pred_parse_primary(tokens: [PredToken], pos: i64) -> Result<(Predicate, i64), text>:
     if pos >= tokens.len():
         return Err("unexpected end of predicate expression")
 
     match tokens[pos]:
         case LParen:
-            val inner = parse_or(tokens, pos + 1)?
+            val inner = _pred_parse_or(tokens, pos + 1)?
             if inner[1] >= tokens.len():
                 return Err("unclosed parenthesis in predicate")
             match tokens[inner[1]]:
                 case RParen: Ok((inner[0], inner[1] + 1))
                 case _: Err("expected ')' in predicate")
         case Sel(name, args):
-            val sel = make_selector(name, args)?
+            val sel = _pred_make_selector(name, args)?
             Ok((Predicate.Sel(sel), pos + 1))
         case _:
             Err("unexpected token in predicate expression")
 
-fn make_selector(name: text, args: [text]) -> text:
+fn _pred_make_selector(name: text, args: [text]) -> Result<Selector, text>:
     """Convert a selector name and arguments into a Selector."""
     match name:
         case "execution":
@@ -231,7 +231,7 @@ fn make_selector(name: text, args: [text]) -> text:
             else: Ok(Selector.Config(args[0]))
         case _: Err("unknown selector '{name}'")
 
-fn parse_signature_pattern(input: text) -> SignaturePattern:
+pub fn parse_signature_pattern(input: text) -> SignaturePattern:
     """Parse a signature pattern like '* User.new(..)' or 'i64 *.calc(i64, i64)'."""
     val parts = input.trim().split(" ")
     if parts.len() < 2:

@@ -1,0 +1,170 @@
+#!/bin/sh
+# W27/W32/W36: host-config keys frontend_cache, mir_sharding, mir_shard_count
+# and mir_shard_worker_kib (scripts/bootstrap/lib/host-bootstrap-settings.shs)
+# fill an UNSET SIMPLE_FRONTEND_CACHE / SIMPLE_MIR_SHARDING /
+# SIMPLE_MIR_SHARD_COUNT / SIMPLE_MIR_SHARD_WORKER_KB:
+#   - no key + env unset  -> nothing exported, caller frontend value unchanged;
+#   - key + env unset     -> exported (frontend: on|off -> 1|0, not exported);
+#   - env set             -> env wins, host value ignored;
+#   - invalid key value   -> hard error naming the key (no fall-through).
+# Also sanity_build_timeout_seconds -> COMPILER_BUILD_TIMEOUT_SECONDS (same
+# rules; applied before each entry script's `:-180` default).
+# Plus text contracts: every lane applies them where its consumer reads them,
+# the matrix tool-row allowlist forwards all four, and the committed
+# DESKTOP-VMF96U6 values validate. Fixture host files under mktemp; nothing is
+# compiled. Bug: doc/08_tracking/bug/host_config_matrix_shard_knobs_unreachable_2026-11-23.md
+set -u
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+temp_parent=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
+tmp=$(mktemp -d "$temp_parent/simple-host-matrix.XXXXXX")
+case "$tmp" in "$temp_parent"/simple-host-matrix.*) ;; *) exit 2 ;; esac
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+checks=0
+fail() { printf 'FAIL host-config matrix knobs: %s\n' "$*" >&2; exit 1; }
+expect() { checks=$((checks + 1)); [ "$2" = "$3" ] || fail "$1: expected '$2' got '$3'"; }
+
+host=$(hostname 2>/dev/null) || host=
+[ -n "$host" ] || host=$(uname -n 2>/dev/null) || host=
+[ -n "$host" ] || fail "cannot resolve a hostname for the fixture host file"
+root="$tmp/root"
+mkdir -p "$root/scripts/setup" "$root/config/host" || fail "fixture root"
+cp "$repo/scripts/setup/host-env.shs" "$root/scripts/setup/host-env.shs" || fail "copy host-env.shs"
+
+# write_host BODY -> the per-host file for this hostname with BODY keys.
+write_host() {
+  printf 'host_env:\n  schema: simple-host-env-v1\n  hostname: %s\n%s' "$host" "$1" \
+    >"$root/config/host/$host.sdn" || fail "write fixture host file"
+}
+
+# probe [VAR=value ...] -> runs the appliers in a clean subshell and prints
+# FC|SHARDING|COUNT|WORKER_KB|rc (FC = bootstrap_caller_frontend_cache).
+probe() {
+  env -u SIMPLE_FRONTEND_CACHE -u SIMPLE_MIR_SHARDING -u SIMPLE_MIR_SHARD_COUNT \
+    -u SIMPLE_MIR_SHARD_WORKER_KB -u SIMPLE_HOST_FRONTEND_CACHE -u SIMPLE_HOST_MIR_SHARDING \
+    -u SIMPLE_HOST_MIR_SHARD_COUNT -u SIMPLE_HOST_MIR_SHARD_WORKER_KB \
+    SIMPLE_HOST_CONFIG="$tmp/no-user-host.sdn" "$@" \
+    sh -c '
+      . "$1/scripts/bootstrap/lib/host-bootstrap-settings.shs"
+      bootstrap_caller_frontend_cache=${SIMPLE_FRONTEND_CACHE-}
+      rc=0
+      bootstrap_host_apply_frontend_cache_default "$2" || rc=1
+      [ "$rc" = 1 ] || bootstrap_host_apply_matrix_settings "$2" || rc=1
+      printf "%s|%s|%s|%s|%s" "$bootstrap_caller_frontend_cache" "${SIMPLE_MIR_SHARDING-}" \
+        "${SIMPLE_MIR_SHARD_COUNT-}" "${SIMPLE_MIR_SHARD_WORKER_KB-}" "$rc"
+    ' probe "$repo" "$root" 2>"$tmp/probe.err"
+}
+
+# 1. no key, env unset -> unchanged.
+write_host ''
+expect 'no key: nothing exported' '||||0' "$(probe)"
+
+# 2. keys, env unset -> exported (frontend off -> 0, on -> 1).
+write_host '  frontend_cache: off
+  mir_sharding: 1
+  mir_shard_count: 16
+  mir_shard_worker_kib: 31457280
+'
+expect 'keys: exported' '0|1|16|31457280|0' "$(probe)"
+grep -q 'source: host config mir_shard_count' "$tmp/probe.err" || fail "keys: source not printed"
+grep -q 'source: host config frontend_cache=off' "$tmp/probe.err" || fail "keys: frontend source not printed"
+write_host '  frontend_cache: on
+'
+expect 'frontend on -> 1' '1||||0' "$(probe)"
+
+# 3. env set -> env wins.
+write_host '  frontend_cache: off
+  mir_sharding: 1
+  mir_shard_count: 16
+  mir_shard_worker_kib: 31457280
+'
+expect 'env wins' '1|0|4|1000|0' "$(probe SIMPLE_FRONTEND_CACHE=1 SIMPLE_MIR_SHARDING=0 \
+  SIMPLE_MIR_SHARD_COUNT=4 SIMPLE_MIR_SHARD_WORKER_KB=1000)"
+expect 'env wins per key' '0|0|16|31457280|0' "$(probe SIMPLE_MIR_SHARDING=0)"
+
+# 4. invalid -> hard error naming the key (no silent fall-through).
+for bad in 'frontend_cache: 0' 'mir_sharding: 2' 'mir_shard_count: 0' 'mir_shard_count: 129' \
+    'mir_shard_count: x' 'mir_shard_worker_kib: 0' 'mir_shard_worker_kib: 12kb'; do
+  write_host "  $bad
+"
+  out=$(probe)
+  expect "invalid '$bad' fails" 1 "${out##*|}"
+  grep -q "error: host config key ${bad%%:*} is invalid" "$tmp/probe.err" ||
+    fail "invalid '$bad': error does not name the key ($(cat "$tmp/probe.err"))"
+done
+# Invalid host value with the env var set: env wins, the host key is not read.
+write_host '  mir_shard_count: 999
+'
+expect 'invalid host value ignored when env set' '||7||0' "$(probe SIMPLE_MIR_SHARD_COUNT=7)"
+
+# 4b. sanity_build_timeout_seconds -> COMPILER_BUILD_TIMEOUT_SECONDS (unset only).
+probe_timeout() { # [VAR=value ...] -> TIMEOUT|rc
+  env -u COMPILER_BUILD_TIMEOUT_SECONDS -u SIMPLE_HOST_SANITY_BUILD_TIMEOUT_SECONDS \
+    SIMPLE_HOST_CONFIG="$tmp/no-user-host.sdn" "$@" \
+    sh -c '
+      . "$1/scripts/bootstrap/lib/host-bootstrap-settings.shs"
+      rc=0
+      bootstrap_host_apply_sanity_build_timeout "$2" || rc=1
+      printf "%s|%s" "${COMPILER_BUILD_TIMEOUT_SECONDS-}" "$rc"
+    ' probe "$repo" "$root" 2>"$tmp/probe.err"
+}
+write_host ''
+expect 'timeout: no key -> unset' '|0' "$(probe_timeout)"
+write_host '  sanity_build_timeout_seconds: 900
+'
+expect 'timeout: key -> exported' '900|0' "$(probe_timeout)"
+grep -q 'source: host config sanity_build_timeout_seconds' "$tmp/probe.err" || fail "timeout: source not printed"
+expect 'timeout: env wins' '42|0' "$(probe_timeout COMPILER_BUILD_TIMEOUT_SECONDS=42)"
+for bad in 'sanity_build_timeout_seconds: 0' 'sanity_build_timeout_seconds: 12s' 'sanity_build_timeout_seconds: 1234567'; do
+  write_host "  $bad
+"
+  out=$(probe_timeout)
+  expect "invalid '$bad' fails" 1 "${out##*|}"
+  grep -q "error: host config key sanity_build_timeout_seconds is invalid" "$tmp/probe.err" ||
+    fail "invalid '$bad': error does not name the key ($(cat "$tmp/probe.err"))"
+done
+
+# 5. committed DESKTOP-VMF96U6 values validate.
+. "$repo/scripts/bootstrap/lib/host-bootstrap-settings.shs"
+desk="$repo/config/host/DESKTOP-VMF96U6.sdn"
+for kv in frontend_cache:off mir_sharding:1 mir_shard_count:16 mir_shard_worker_kib:31457280 \
+    sanity_build_timeout_seconds:900; do
+  v=$(awk -v k="${kv%%:*}" '$0 ~ "^  " k ":" { sub("^  " k ":[ \t]*", ""); sub(/[ \t]+#.*$/, ""); print; exit }' "$desk")
+  expect "DESKTOP-VMF96U6 ${kv%%:*}" "${kv#*:}" "$v"
+  bootstrap_host_valid_matrix_value "${kv%%:*}" "$v" || fail "DESKTOP-VMF96U6 ${kv%%:*}=$v invalid"
+done
+
+# 6. text contracts: each lane applies the knobs before its consumer.
+scratch="$repo/scripts/bootstrap/bootstrap-from-scratch.sh"
+resume="$repo/scripts/bootstrap/resume-stage3-from-admitted.sh"
+order() { # FILE FIRST SECOND LABEL -> FIRST occurs before the first SECOND after it
+  awk -v a="$2" -v b="$3" 'index($0, a) && !sa { sa = NR } index($0, b) && sa && !sb { sb = NR }
+    END { exit !(sa && sb) }' "$1" || fail "$4"
+  checks=$((checks + 1))
+}
+order "$scratch" 'bootstrap_host_apply_frontend_cache_default' 'stage3_frontend_cache=${bootstrap_caller_frontend_cache}' \
+  'from-scratch: frontend default resolved before the Stage 3 launch reads it'
+order "$scratch" 'bootstrap_host_apply_matrix_settings "${bootstrap_early_repo_root}" || exit 64' \
+  'case "${SIMPLE_MIR_SHARDING:-}" in' 'from-scratch: matrix knobs applied before the Stage 3 SHARDING pass-through'
+order "$scratch" 'bootstrap_host_apply_matrix_settings "${bootstrap_early_repo_root}" || exit 125' \
+  'bootstrap_tree_rss_whole_build_export "${stage2_tests_build_threads}"' \
+  'from-scratch: matrix knobs applied before the whole-build plan'
+order "$scratch" '0|1) SIMPLE_FRONTEND_CACHE=${bootstrap_caller_frontend_cache}; export SIMPLE_FRONTEND_CACHE' \
+  'bootstrap-phase-verification.shs" \' 'from-scratch: matrix re-applies the caller/host frontend cache'
+order "$resume" 'bootstrap_host_apply_matrix_settings "$root" || exit 64' \
+  'stage3_mir_shard_count=${SIMPLE_MIR_SHARD_COUNT:-' 'resume: knobs applied before the shard-count read'
+order "$resume" 'bootstrap_host_apply_frontend_cache_default "$root" || exit 64' \
+  'case "${SIMPLE_FRONTEND_CACHE:-}" in' 'resume: frontend default applied before the W24/W27 pass-through'
+order "$scratch" 'bootstrap_host_apply_sanity_build_timeout "${bootstrap_early_repo_root}" || exit 64' \
+  'COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-180}' \
+  'from-scratch: sanity build timeout applied before the :-180 default'
+order "$resume" 'bootstrap_host_apply_sanity_build_timeout "$root" || exit 64' \
+  'COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-180}' \
+  'resume: sanity build timeout applied before the :-180 default'
+keys=$(. "$repo/scripts/bootstrap/phase-c-backend-commands.shs" && bootstrap_phase_c_tool_row_environment_keys) ||
+  fail "cannot list the phase-c tool-row environment keys"
+for k in SIMPLE_FRONTEND_CACHE SIMPLE_MIR_SHARDING SIMPLE_MIR_SHARD_COUNT SIMPLE_MIR_SHARD_WORKER_KB; do
+  printf '%s\n' $keys | grep -qx "$k" || fail "phase-c tool-row allowlist drops $k"
+  checks=$((checks + 1))
+done
+
+printf 'PASS host-config matrix knobs: %s checks\n' "$checks"

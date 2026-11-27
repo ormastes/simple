@@ -1,8 +1,29 @@
 # Stage 2 Native SSpec Runner Process Crash
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-25 — ABI FIXED and admitted for the NVMe Phase 2 path (was mislabeled "Open — needs owner triage")
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+## Verification note — 2026-11-25 (release/1.0.0 P2 batch)
+
+Re-confirmed FIXED by code inspection on release/1.0.0 HEAD (4bc2c986375,
+Windows host):
+- `process_c_runtime_arg_indices` in
+  `src/compiler_rust/compiler/src/codegen/instr/calls.rs:3577` maps
+  `rt_process_run` (and the other process entry points) to the
+  `(cmd_ptr, cmd_len, args)` expansion.
+- Both LLVM call paths consume it: direct-call in
+  `src/compiler_rust/compiler/src/codegen/llvm/functions.rs:3660` and
+  method-call in `src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs:2932`.
+- The focused Rust regression `process_run_uses_ptr_len_array_runtime_abi`
+  exists at `llvm/functions.rs:5278`.
+- The companion pure-Simple fixes are present: literal LaTeX braces escaped
+  as `{{T}}` in `src/lib/common/math_repr.spl:408,508`.
+The cargo regression and the Stage-2/QEMU evidence cannot be re-run on this
+host (no cargo builds permitted; pinned seed rejects
+`@representation_boundary` at HEAD), so verification is by code inspection.
+The 2026-09-16 normalization heading ("Open — needs owner triage") was a
+bookkeeping error contradicting this record's own Status section; corrected
+above. Follow-up work explicitly retained by the record:
+`rt_process_run_with_limits` ABI mismatch (fail-closed) and global full-CLI
+admission — those are separate rows, not this defect.
 
 ## Status
 

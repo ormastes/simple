@@ -21,6 +21,21 @@ separate processes that share only files.
 
 ## Feature Links
 
+- Standards/PDF-derived scenarios: follow the canonical
+  [specification sources to executed evidence workflow](../../../07_guide/infra/sspec_typed_evidence.md#specification-sources-to-executed-evidence)
+  and its scenario-manual guidance. Preserve primary-source revision/hash,
+  clause provenance and independent expected values; distinguish standard rules
+  from repository contracts. TDD claims require observed RED/GREEN receipts;
+  unexecuted tests remain AUTHORED_UNRUN; authored manuals remain labeled
+  AUTHORED until docgen-generated, with test execution status recorded separately. Label
+  injection versus real-provider evidence and scope branch coverage to the
+  actual owner/backend/target. This link is the maintained procedure, not the
+  historical implementation inventory below.
+- HAL behavior scenarios prefer Simple SSpec through production SOSIX/HAL,
+  with focused runtime FFI where needed; see the
+  [HAL testing procedure](../../../07_guide/infra/testing.md#hal-and-runtime-tests-through-simple).
+  Native acceptance requires real provider execution; C probes remain
+  supporting evidence for documented gaps in Simple reachability.
 - Research: [doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md](../../../01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md)
 - Design: [doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md](../../../05_design/infra/sspec/modern_sspec_typed_evidence_design.md)
 - Plan (wave breakdown E0-E9, design authority for scope/sequencing):
@@ -29,7 +44,7 @@ separate processes that share only files.
 - Related feature: [prevention_mocks](../prevention_mocks/skill.md) (separate
   fail-closed idiom, same "observation is not an oracle" family of traps)
 
-## What landed today (2026-08-08, wave E0)
+## Historical implementation inventory (2026-08-08/09, waves E0–E9)
 
 - **`src/lib/common/spec/evidence/model.spl`** — pure records only, no
   acquisition/parsing/rendering code (deliberately, so a capture-runtime
@@ -68,7 +83,8 @@ The "E2-E9 design-only" claim this section previously carried was STALE — it
 described the E0-era state and was never updated when the later waves landed,
 violating this file's own Update Rule. Corrected, verified status:
 
-- **Implemented (all verified present on origin/main and spec-proven):**
+- **Implementation recorded on 2026-08-08/09 (historical seed verification;
+  not current self-hosted qualification):**
   E0 contract (`model.spl`, `evidence_comparator.spl`), E1 red-team gates,
   E2/E2b/E3/E4/E7a-e format adapters
   (`src/lib/common/spec/evidence/format/{terminal_grid,text_protocol,
@@ -435,3 +451,15 @@ implements.
 
 ## Lane docs (2026-09-05)
 - design: `doc/05_design/infra/sspec/sspec_training_heldout_gate_design.md` · plan: `doc/03_plan/infra/sspec/sspec_training_heldout_gate_plan.md` · state: `.spipe/sspec_training_heldout_gate/state.md`
+
+## Native test-runner capture limit visibility (2026-10-30)
+
+`TEST_OUTPUT_CAPTURE_BYTES` is shared across runner, doctest, lifecycle, and
+process-tracker modules and is exported by the test-runner facade. Its defining
+declaration must also be public for native imported-static code generation.
+The limit remains 4 MiB; keep rejection of genuinely private statics intact.
+The native import fixture is
+`test/fixtures/test_runner/native_output_capture_limit.spl`; failure and
+validation evidence are recorded in
+`doc/08_tracking/bug/test_runner_capture_limit_visibility_2026_10_30.md`.
+A compiled fixture is not evidence that native SSpec or HAL/SOSIX suites ran.

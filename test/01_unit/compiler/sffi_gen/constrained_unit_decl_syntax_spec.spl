@@ -1,0 +1,27 @@
+# The SFFI constrained-unit scanner reads the range from the `unit`
+# declaration itself (`in lo..=hi`, `lo..hi`, `where lo <= self <= hi`) and
+# keeps `# @unit_range` only as a deprecated alias.
+use std.spec.{describe, it, expect}
+use compiler.tools.sffi_gen.constrained_unit_scan.{generate_constrained_unit_facades}
+
+describe "constrained unit scanner: range from the declaration":
+    it "reads `in 1..=65535` as an inclusive range":
+        val r = generate_constrained_unit_facades("unit Port: i32 as Pt in 1..=65535\nextern fn rt_net_port(fd: i32) -> Port\n")
+        expect(r.source).to_contain("Result<Port, ConstraintError>")
+        expect(r.source).to_contain("if raw < 1 or raw > 65535:")
+
+    it "reads `in 0..256` with an exclusive upper bound":
+        val r = generate_constrained_unit_facades("unit Byte: i32 as By in 0..256\nextern fn rt_byte() -> Byte\n")
+        expect(r.source).to_contain("if raw < 0 or raw > 255:")
+
+    it "reads a chained `where` range predicate":
+        val r = generate_constrained_unit_facades("unit Port: i32 as Pt where 1 <= self <= 65535\nextern fn rt_net_port(fd: i32) -> Port\n")
+        expect(r.source).to_contain("if raw < 1 or raw > 65535:")
+
+    it "reads the `and` spelling of the where range":
+        val r = generate_constrained_unit_facades("unit Port: i32 as Pt where 1 <= self and self <= 65535\nextern fn rt_net_port(fd: i32) -> Port\n")
+        expect(r.source).to_contain("if raw < 1 or raw > 65535:")
+
+    it "still honours the deprecated `# @unit_range` alias":
+        val r = generate_constrained_unit_facades("unit Count: i64 as Cn\n# @unit_range Count 0..\nextern fn rt_count() -> Count\n")
+        expect(r.source).to_contain("if raw < 0:")

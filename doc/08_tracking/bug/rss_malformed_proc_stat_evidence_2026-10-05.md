@@ -20,7 +20,7 @@ record contains the process comm name, not its command-line arguments.
 
 ## Verification
 
-`scripts/test/test-rss-proc-stat-diagnostic.py` invokes the production Perl
+`scripts/test/test-rss-proc-stat-diagnostic.py [deleted 2026-11-26]` invokes the production Perl
 parser with partial, embedded-newline, and 4096-byte malformed records. Before
 the patch it failed because the diagnostic lacked evidence. After the patch it
 passed: every malformed record remained fatal, lengths and exact prefixes
@@ -28,7 +28,7 @@ matched, and output stayed bounded. `perl -c` and `git diff --check` passed.
 The green regression was not repeated for landing.
 
 ```sh
-python3 scripts/test/test-rss-proc-stat-diagnostic.py
+python3 scripts/test/test-rss-proc-stat-diagnostic.py [deleted 2026-11-26]
 perl -c scripts/resource/process-tree-rss-watchdog.pl
 ```
 

@@ -11,9 +11,16 @@
 
 use std.spec.*
 use app.sspec_maintain.*
+use std.common.json.parser.{json_parse_strict_bounded_with_error, json_parse_limits_default}
+
+fn _json_error(value: text) -> text:
+    val (_v, err) = json_parse_strict_bounded_with_error(value, json_parse_limits_default())
+    err
+
+val WEAK_SOURCE = "describe \"weak\":\n    it \"is unresolved\":\n        pass_todo\n"
 
 fn _weak_report(path: text) -> SspecDocumentizationReport:
-    analyze_sspec_text(path, "describe \"weak\":\n    it \"is unresolved\":\n        pass_todo\n")
+    analyze_sspec_text(path, WEAK_SOURCE)
 
 describe "sspec-maintain multi-report renderers":
 
@@ -33,3 +40,12 @@ describe "sspec-maintain multi-report renderers":
         val one = render_sarif_report(_weak_report("e_spec.spl"))
         expect(one).to_contain("e_spec.spl")
         expect(one).to_contain("sarif-2.1.0")
+
+    it "renders SARIF that parses as strict JSON":
+        # Bug mir_json_hole_followed_by_closers_unbalanced_2026-11-26: every
+        # `}}` is one brace, so the result/fix/driver closers came up short.
+        val sarif = render_sarif_reports([analyze_sspec_text("f_spec.spl", "@step Do work\n" + WEAK_SOURCE), _weak_report("g_spec.spl")])
+        expect(sarif).to_contain("\"results\":[{{")
+        expect(sarif).to_contain("artifactChanges")
+        expect(_json_error(sarif)).to_equal("")
+        expect(_json_error(render_sarif_report(_weak_report("h_spec.spl")))).to_equal("")

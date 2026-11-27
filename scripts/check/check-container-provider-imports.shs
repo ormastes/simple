@@ -1,0 +1,97 @@
+#!/bin/sh
+# Architecture gate: applications, runners and orchestrators reach containers
+# ONLY through the public Simple Container facade (std.container,
+# std.container.oci, std.container.policy). Importing
+# `container.providers.**` (Linux OCI/Podman, Windows Docker, macOS, FreeBSD
+# provider internals) from those layers is forbidden.
+# Design: doc/05_design/simple_container_macos_seatbelt.md §16.2, §16.5.1.
+#
+# Pre-existing violations are frozen in container_provider_imports_baseline.txt
+# (one repo-relative path per line). A NEW violating file FAILs; a baselined
+# file that no longer violates is a STALE baseline and also FAILs, so the
+# ratchet can only shrink.
+#
+# Usage: check-container-provider-imports.shs [--selftest] [--root DIR] [--baseline FILE]
+# Verdict (last stdout line): PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+
+SCOPES="src/app src/lib/nogc_sync_mut/orchestration src/lib/common/task_runner src/lib/nogc_sync_mut/test_runner src/lib/nogc_async_mut/test_runner"
+PATTERN='^[[:space:]]*(export[[:space:]]+)?use[[:space:]]+[A-Za-z_.]*container\.providers\.'
+
+# scan ROOT BASELINE -> prints offenders, verdict; returns 0/1/2.
+scan() {
+    root=$1
+    baseline=$2
+    git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+        echo "ERROR — nothing was checked (not a git work tree: $root)"; return 2; }
+    [ -f "$baseline" ] || { echo "ERROR — nothing was checked (baseline missing: $baseline)"; return 2; }
+    existing=""
+    for s in $SCOPES; do
+        [ -d "$root/$s" ] && existing="$existing $s"
+    done
+    [ -n "$existing" ] || { echo "ERROR — nothing was checked (no scope directory under $root)"; return 2; }
+    # shellcheck disable=SC2086
+    scanned=$(git -C "$root" ls-files -co --exclude-standard -- $existing | grep -c '\.spl$')
+    [ "$scanned" -gt 0 ] || { echo "ERROR — nothing was checked (0 .spl files in scope)"; return 2; }
+    # shellcheck disable=SC2086
+    found=$(git -C "$root" grep --untracked -l -E "$PATTERN" -- $existing 2>/dev/null | grep '\.spl$' | sort -u)
+    allowed=$(grep -v '^[[:space:]]*#' "$baseline" | grep -v '^[[:space:]]*$' | sort -u)
+    lists=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp)"; return 2; }
+    printf '%s\n' "$found" | grep -v '^$' > "$lists/found"
+    printf '%s\n' "$allowed" | grep -v '^$' > "$lists/allowed"
+    new=$(comm -23 "$lists/found" "$lists/allowed")
+    stale=$(comm -13 "$lists/found" "$lists/allowed")
+    rm -rf "$lists"
+    nfound=$(printf '%s\n' "$found" | grep -c .)
+    if [ -n "$new" ] || [ -n "$stale" ]; then
+        [ -n "$new" ] && printf 'new provider import: %s\n' $new
+        [ -n "$stale" ] && printf 'stale baseline entry: %s\n' $stale
+        nn=$(printf '%s\n' "$new" | grep -c .)
+        ns=$(printf '%s\n' "$stale" | grep -c .)
+        echo "FAIL — $scanned file(s) scanned, $nn new provider import(s), $ns stale baseline entr(ies); use std.container / std.container.oci instead"
+        return 1
+    fi
+    echo "PASS — $scanned file(s) scanned, $nfound baselined pre-existing violation(s), 0 new, 0 stale"
+    return 0
+}
+
+selftest() {
+    d=$(mktemp -d) || { echo "ERROR — nothing was checked (selftest mktemp)"; exit 2; }
+    git -C "$d" init -q 2>/dev/null || { rm -rf "$d"; echo "ERROR — nothing was checked (selftest git init)"; exit 2; }
+    mkdir -p "$d/src/app/ci" "$d/src/app/tool"
+    printf 'use std.container.{SimpleContainerOwnerV2}\n' > "$d/src/app/tool/good.spl"
+    printf 'use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.LinuxOciRuntimeProviderV1\n' > "$d/src/app/ci/old.spl"
+    printf '# comment\nsrc/app/ci/old.spl\n' > "$d/base.txt"
+    scan "$d" "$d/base.txt" >/dev/null; r_base=$?
+    printf '    export use lib.nogc_async_mut.container.providers.windows.docker_runtime_v1.*\n' > "$d/src/app/tool/bad.spl"
+    out_new=$(scan "$d" "$d/base.txt"); r_new=$?
+    rm -f "$d/src/app/tool/bad.spl" "$d/src/app/ci/old.spl"
+    out_stale=$(scan "$d" "$d/base.txt"); r_stale=$?
+    printf '' > "$d/base.txt"
+    scan "$d" "$d/base.txt" >/dev/null; r_clean=$?
+    rm -rf "$d/src/app"
+    scan "$d" "$d/base.txt" >/dev/null; r_empty=$?
+    rm -rf "$d"
+    if [ $r_base -ne 0 ] || [ $r_new -ne 1 ] || [ $r_stale -ne 1 ] || [ $r_clean -ne 0 ] || [ $r_empty -ne 2 ]; then
+        echo "ERROR — nothing was checked (selftest failed: base=$r_base new=$r_new stale=$r_stale clean=$r_clean empty=$r_empty)"
+        exit 2
+    fi
+    case "$out_new" in *"new provider import: src/app/tool/bad.spl"*) ;; *)
+        echo "ERROR — nothing was checked (selftest: new import not named)"; exit 2;; esac
+    case "$out_stale" in *"stale baseline entry: src/app/ci/old.spl"*) ;; *)
+        echo "ERROR — nothing was checked (selftest: stale entry not named)"; exit 2;; esac
+}
+
+selftest
+here=$(cd "$(dirname "$0")" && pwd)
+root=$(cd "$here/../.." && pwd)
+baseline="$here/container_provider_imports_baseline.txt"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) echo "PASS — selftest (5 fixtures)"; exit 0 ;;
+        --root) root=$2; shift 2 ;;
+        --baseline) baseline=$2; shift 2 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+scan "$root" "$baseline"
+exit $?

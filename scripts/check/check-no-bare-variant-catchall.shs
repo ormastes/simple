@@ -1,0 +1,48 @@
+#!/bin/sh
+# Fail when a compiler build log carries the HIR bare-variant catch-all
+# warning ("bare `X` over an untyped subject ... binds as a catch-all", or
+# "... is not one of its variants ... binds as a catch-all").  Such an arm
+# matches EVERY value -- a silent logic bug (e.g. `case Var:` serialised every
+# MIR local as "Var").  Fix by qualifying the variant (`LocalKind.Var`).
+#
+# Usage: check-no-bare-variant-catchall.shs [--selftest] <build.log> [more logs...]
+# Verdict (last stdout line): PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+
+PATTERN='binds as a catch-all'
+
+scan() {
+    sites=$(grep -h "$PATTERN" "$@" 2>/dev/null \
+        | sed -E 's/.*bare `([A-Za-z_]*)`.*\(([^;]*);.*/\2 \1/; s#.*/snapshots/[^/]*/##' \
+        | sort -u)
+    if [ -n "$sites" ]; then
+        printf '%s\n' "$sites"
+        n=$(printf '%s\n' "$sites" | wc -l | tr -d ' ')
+        echo "FAIL — $n bare-variant catch-all site(s) in $# log(s); qualify the variant or annotate the subject"
+        return 1
+    fi
+    echo "PASS — $# log(s) checked, 0 bare-variant catch-all sites"
+    return 0
+}
+
+selftest() {
+    d=$(mktemp -d) || { echo "ERROR — nothing was checked (selftest mktemp)"; exit 2; }
+    printf '[hir-lower] WARNING: bare `Var` over an untyped subject is a unit variant of several visible enums; it binds as a catch-all -- annotate the subject or qualify the variant (C:/x/build/scv/snapshots/r1/src/a.spl; SIMPLE_BARE_VARIANT_WARN=0 silences)\n' > "$d/bad.log"
+    printf 'ok line\n' > "$d/good.log"
+    scan "$d/bad.log" >/dev/null; rb=$?
+    scan "$d/good.log" >/dev/null; rg=$?
+    out=$(scan "$d/bad.log" | head -1)
+    rm -rf "$d"
+    if [ $rb -ne 1 ] || [ $rg -ne 0 ] || [ "$out" != "src/a.spl Var" ]; then
+        echo "ERROR — nothing was checked (selftest failed: bad=$rb good=$rg site='$out')"
+        exit 2
+    fi
+}
+
+selftest
+[ "$1" = "--selftest" ] && { echo "PASS — selftest (2 fixtures)"; exit 0; }
+[ $# -eq 0 ] && { echo "ERROR — nothing was checked (no log given)"; exit 2; }
+for f in "$@"; do
+    [ -s "$f" ] || { echo "ERROR — nothing was checked (missing or empty log: $f)"; exit 2; }
+done
+scan "$@"
+exit $?

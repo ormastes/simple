@@ -1,0 +1,123 @@
+# @req REQ-MCDC-ENFORCEMENT-005
+"""
+# MC/DC mode resolution for every requested mode, profile and waiver shape
+
+An operator picks an MC/DC mode (SIMPLE_MCDC_MODE) under an assurance profile.
+Normal-or-stricter profiles (including unknown ones) must never reach "off"
+without a complete, well-formed waiver; dev/advisory may turn it off.
+"""
+
+use std.spec.*
+use std.test_runner.test_runner_config.{resolve_mcdc_mode_for_profile}
+
+val W_REASON = "hardware scenario cannot be produced"
+val W_REV = "safety-reviewer"
+val W_ID = "review-42"
+val W_VER = "source-offset-v1"
+
+fn mode(m: text, p: text) -> text:
+    resolve_mcdc_mode_for_profile(m, p, "", "", "", "")
+
+fn waived(m: text, p: text, reason: text, rev: text, id: text, ver: text) -> text:
+    resolve_mcdc_mode_for_profile(m, p, reason, rev, id, ver)
+
+fn repeat(ch: text, n: i64) -> text:
+    var s = ""
+    var i = 0
+    while i < n:
+        s = s + ch
+        i = i + 1
+    s
+
+describe "requested mode spellings":
+    it "maps on and static-on to on for every profile":
+        for p in ["", "dev", "advisory", "moderate", "strict", "critical", "bogus"]:
+            expect(mode("on", p)).to_equal("on")
+            expect(mode("static-on", p)).to_equal("on")
+
+    it "maps dynamic and dynamic-aspect to dynamic for every profile":
+        for p in ["", "dev", "advisory", "moderate", "strict", "critical", "bogus"]:
+            expect(mode("dynamic", p)).to_equal("dynamic")
+            expect(mode("dynamic-aspect", p)).to_equal("dynamic")
+
+    it "is case and whitespace insensitive":
+        expect(mode("  ON  ", "strict")).to_equal("on")
+        expect(mode("Static-On", "strict")).to_equal("on")
+        expect(mode("DYNAMIC", "strict")).to_equal("dynamic")
+        expect(mode("Dynamic-Aspect", "")).to_equal("dynamic")
+
+    it "rejects an unrecognised mode as invalid-mode, never as on or off":
+        for m in ["maybe", "0", "false", "disable", "none", "onn", "static", "dynamic-x"]:
+            expect(mode(m, "strict")).to_equal("invalid-mode")
+            expect(mode(m, "dev")).to_equal("invalid-mode")
+
+describe "unset mode defaults":
+    it "defaults to on for unresolved, moderate, strict, critical and unknown profiles":
+        for p in ["", "moderate", "strict", "critical", "robust", "weird"]:
+            expect(mode("", p)).to_equal("on")
+
+    it "defaults to off only for dev and advisory":
+        expect(mode("", "dev")).to_equal("off")
+        expect(mode("", "advisory")).to_equal("off")
+
+    it "treats a whitespace-only mode as unset":
+        expect(mode("   ", "strict")).to_equal("on")
+        expect(mode("   ", "dev")).to_equal("off")
+
+describe "explicit off":
+    it "is allowed without a waiver on dev and advisory":
+        for m in ["off", "static-off", "OFF"]:
+            expect(mode(m, "dev")).to_equal("off")
+            expect(mode(m, "advisory")).to_equal("off")
+
+    it "is invalid-off without a waiver on every normal-or-stricter profile":
+        for p in ["", "moderate", "strict", "critical", "unknown-profile"]:
+            expect(mode("off", p)).to_equal("invalid-off")
+            expect(mode("static-off", p)).to_equal("invalid-off")
+
+    it "is honoured with a complete waiver":
+        for p in ["", "moderate", "critical", "unknown-profile"]:
+            expect(waived("off", p, W_REASON, W_REV, W_ID, W_VER)).to_equal("off")
+            expect(waived("static-off", p, W_REASON, W_REV, W_ID, W_VER)).to_equal("off")
+
+    it "is invalid-off when any one waiver atom is empty":
+        expect(waived("off", "strict", "", W_REV, W_ID, W_VER)).to_equal("invalid-off")
+        expect(waived("off", "strict", W_REASON, "", W_ID, W_VER)).to_equal("invalid-off")
+        expect(waived("off", "strict", W_REASON, W_REV, "", W_VER)).to_equal("invalid-off")
+        expect(waived("off", "strict", W_REASON, W_REV, W_ID, "")).to_equal("invalid-off")
+
+    it "is invalid-off when an atom is whitespace only":
+        expect(waived("off", "strict", "   ", W_REV, W_ID, W_VER)).to_equal("invalid-off")
+        expect(waived("off", "strict", W_REASON, "\t", W_ID, W_VER)).to_equal("invalid-off")
+
+describe "waiver atom hygiene":
+    it "rejects a pipe in any atom":
+        expect(waived("off", "strict", "a|b", W_REV, W_ID, W_VER)).to_equal("invalid-off")
+        expect(waived("off", "strict", W_REASON, "a|b", W_ID, W_VER)).to_equal("invalid-off")
+        expect(waived("off", "strict", W_REASON, W_REV, "a|b", W_VER)).to_equal("invalid-off")
+        expect(waived("off", "strict", W_REASON, W_REV, W_ID, "a|b")).to_equal("invalid-off")
+
+    it "rejects a newline or carriage return in any atom":
+        expect(waived("off", "strict", "a\nb", W_REV, W_ID, W_VER)).to_equal("invalid-off")
+        expect(waived("off", "strict", W_REASON, "a\nb", W_ID, W_VER)).to_equal("invalid-off")
+        expect(waived("off", "strict", W_REASON, W_REV, "a\rb", W_VER)).to_equal("invalid-off")
+        expect(waived("off", "strict", W_REASON, W_REV, W_ID, "a\r\nb")).to_equal("invalid-off")
+
+    it "accepts atoms exactly at the length limit and rejects one byte over":
+        expect(waived("off", "strict", repeat("r", 2048), W_REV, W_ID, W_VER)).to_equal("off")
+        expect(waived("off", "strict", repeat("r", 2049), W_REV, W_ID, W_VER)).to_equal("invalid-off")
+        expect(waived("off", "strict", W_REASON, repeat("v", 256), W_ID, W_VER)).to_equal("off")
+        expect(waived("off", "strict", W_REASON, repeat("v", 257), W_ID, W_VER)).to_equal("invalid-off")
+        expect(waived("off", "strict", W_REASON, W_REV, repeat("i", 256), W_VER)).to_equal("off")
+        expect(waived("off", "strict", W_REASON, W_REV, repeat("i", 257), W_VER)).to_equal("invalid-off")
+        expect(waived("off", "strict", W_REASON, W_REV, W_ID, repeat("n", 128))).to_equal("off")
+        expect(waived("off", "strict", W_REASON, W_REV, W_ID, repeat("n", 129))).to_equal("invalid-off")
+
+describe "waivers never weaken enforcement elsewhere":
+    it "ignores a waiver when the mode is on, dynamic or unset":
+        expect(waived("on", "strict", W_REASON, W_REV, W_ID, W_VER)).to_equal("on")
+        expect(waived("dynamic", "strict", W_REASON, W_REV, W_ID, W_VER)).to_equal("dynamic")
+        expect(waived("", "strict", W_REASON, W_REV, W_ID, W_VER)).to_equal("on")
+
+    it "does not let a waiver rescue an invalid mode":
+        expect(waived("bogus", "strict", W_REASON, W_REV, W_ID, W_VER)).to_equal("invalid-mode")

@@ -253,3 +253,34 @@ programs under test rather than reporting green unconditionally.
   llvm::` as a cheap sanity check) at the moment of testing, not just "the
   deployed binary," so a later reconciliation can confirm or rule out a
   binary swap as the explanation (§3a).
+
+## Verification 2026-11-25 (p3-bam lane, Windows worktree) — §3a contradiction resolved toward "still open" on the current binary
+
+Binary: worktree-tracked `bin/simple.exe` (38,403,072 bytes, x86_64
+Windows), `SIMPLE_LIB=src`, branch `work/p3-bam-20261125` off
+`release/1.0.0`.
+
+- Runner pin unchanged: `src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl`
+  (now :345) still forces `env_set("SIMPLE_EXECUTION_MODE", "interpret")`
+  for child spec runs (with the `# @jit_spec_entry` opt-in at :353). The
+  structural blind spot described in §1 still exists; changing it remains a
+  bootstrap-rebuild-gated runner change, not attempted here.
+- Harness and pinned fixtures still present:
+  `scripts/check/check_jit_interpreter_differential.spl` and
+  `test/fixtures/jit_differential/` (15 fixtures).
+- **`list_get_shifted` REPRODUCES on this binary**, resolving the §3a
+  cross-lane contradiction in favor of "still open": fixture run under the
+  default engine prints `idx=5 get=Option::Some(<enum@0x...>)` (JIT wrong);
+  under `SIMPLE_EXECUTION_MODE=interpret` it prints `idx=5 get=5` (correct).
+  Engines disagree, JIT wrong — matching lane a894's report, not this
+  lane's 2026-07-30 non-reproduction. An independent accidental repro was
+  also observed the same day: a `while k < len: data[k]` checksum loop read
+  `data[k]` as `(value << 3) | low-bits` under the JIT engine only
+  (120000300000 vs. true 14999950000), while the equivalent range-`for`
+  loop was correct in both engines.
+- `module_level_val_from_call` / `struct_field_compound_assign` were not
+  re-run in this pass (their fixtures remain pinned in the harness).
+
+Disposition: the two §3a UNRESOLVED bugs should be treated as **open**;
+this binary reproduces `list_get_shifted` deterministically in both a
+fixture and an independent probe shape.

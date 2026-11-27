@@ -1,0 +1,42 @@
+use compiler.common.runtime_value_v1.{Value, EnumPayloadValue}
+use compiler.mir.mir_types.{MirTypeKind}
+
+fn value_get_type_is_opaque(value: Value, expected: text) -> bool:
+    match value.get_type():
+        case Some(type_):
+            match type_.kind:
+                case Opaque(name): name == expected
+                case _: false
+        case _: false
+
+fn value_get_type_aggregates() -> bool:
+    val empty_fields: Dict<text, Value> = {}
+    val fields: Dict<text, Value> = {"count": Value.Int(7)}
+    val absent: EnumPayloadValue? = nil
+    val tuple_payload: EnumPayloadValue? = Some(EnumPayloadValue.Tuple([Value.Int(9)]))
+    val record_payload: EnumPayloadValue? = Some(EnumPayloadValue.Struct(fields))
+    value_get_type_is_opaque(Value.Struct("Empty", empty_fields), "struct") and value_get_type_is_opaque(Value.Struct("Record", fields), "struct") and value_get_type_is_opaque(Value.Enum("State", "Idle", absent), "enum") and value_get_type_is_opaque(Value.Enum("State", "Tuple", tuple_payload), "enum") and value_get_type_is_opaque(Value.Enum("State", "Record", record_payload), "enum")
+
+fn value_get_type_controls() -> bool:
+    # Typed local avoids open bug mir_enum_payload_inline_dict_literal_key_annotation_mismatch_2026-11-14.
+    val control_fields: Dict<text, Value> = {}
+    val integer_ok = match Value.Int(42).get_type():
+        case Some(type_):
+            match type_.kind:
+                case I64: true
+                case _: false
+        case _: false
+    val nil_ok = match Value.Nil.get_type():
+        case Some(_): false
+        case _: true
+    integer_ok and nil_ok and not value_get_type_is_opaque(Value.Int(42), "struct") and not value_get_type_is_opaque(Value.Struct("Control", control_fields), "enum")
+
+fn main() -> i64:
+    if not value_get_type_aggregates():
+        print "FAIL Value.get_type aggregate payload arity"
+        return 1
+    if not value_get_type_controls():
+        print "FAIL Value.get_type controls"
+        return 2
+    print "PASS Value.get_type: five aggregate shapes and four controls"
+    0

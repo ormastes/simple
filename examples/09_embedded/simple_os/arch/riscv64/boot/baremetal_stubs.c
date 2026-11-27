@@ -26,8 +26,13 @@ typedef intptr_t RuntimeValue;
 #define TAG_FLOAT   ((uintptr_t)0x2)
 #define TAG_SPECIAL ((uintptr_t)0x3)
 #define NIL_VALUE   ((RuntimeValue)TAG_SPECIAL)
-#define TRUE_VALUE  ENCODE_INT(1)
-#define FALSE_VALUE ENCODE_INT(0)
+/* Codegen tags (src/compiler_rust/compiler/src/codegen/llvm/instructions.rs
+ * `tagged_bool_const`): true = 11, false = 19. Spelled out because this TU
+ * does not include arch/common/baremetal_runtime.h. */
+#define TRUE_VALUE  ((RuntimeValue)11)
+#define FALSE_VALUE ((RuntimeValue)19)
+_Static_assert(TRUE_VALUE == 11, "TRUE_VALUE must match codegen tagged true (11)");
+_Static_assert(FALSE_VALUE == 19, "FALSE_VALUE must match codegen tagged false (19)");
 
 #define ENCODE_INT(v) ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3) | TAG_INT))
 #define DECODE_INT(v) ((int64_t)(v) >> 3)
@@ -96,8 +101,14 @@ extern unsigned char __heap_end[];
  * one shared base would let them hand out the same bytes twice; before this
  * change each TU owned a separate 1 MiB array, and halving preserves exactly
  * that disjointness at 32x the size. baremetal_stubs.c takes the LOW half. */
+/* First of three disjoint thirds of the linker-reserved .heap; the other
+ * two TUs (baremetal_runtime_core.inc.c, ghdl_boot_info_runtime.c) own the
+ * second and third. Thirds -- not halves -- since the ghdl proof TU also
+ * carries a full allocator duplicate (see the matching comment there and
+ * doc/08_tracking/bug/riscv64_in_guest_parse_recursion_par_state_uninit_2026-11-05.md:
+ * a duplicate that served from a static .bss array overlaid module globals). */
 #define RV_HEAP_BASE (__heap_start)
-#define RV_HEAP_SIZE ((size_t)(__heap_end - __heap_start) / 2U)
+#define RV_HEAP_SIZE ((size_t)(__heap_end - __heap_start) / 3U)
 static uintptr_t g_heap_off = 0;
 static unsigned char g_virtq[8192] __attribute__((aligned(4096)));
 static unsigned char g_dma[1024] __attribute__((aligned(512)));
@@ -2771,4 +2782,34 @@ RuntimeValue rt_raw_u64_to_string(RuntimeValue raw)
 int64_t rt_pool_safepoint(void)
 {
     return 0;
+}
+
+/* ---- riscv64_virtio_blk_adapter.spl providers -------------------------------
+ * Thin wrappers over the existing virtio-blk MMIO driver in
+ * arch/common/riscv_common.h (the same driver the rv64 fs-exec media lane
+ * mounts with). No second driver instance: this TU owns g_blk_mmio. */
+RuntimeValue rt_riscv64_virtio_blk_fat32_init(void)
+{
+    return (RuntimeValue)(virtio_blk_init() ? 0 : 1);
+}
+
+RuntimeValue rt_riscv64_virtio_blk_fat32_capacity_sectors(void)
+{
+    if (!g_blk_mmio && !virtio_blk_init()) return 0;
+    /* virtio-mmio device config starts at 0x100; blk capacity is le64 sectors. */
+    uint64_t lo = g_blk_mmio[0x100 / 4];
+    uint64_t hi = g_blk_mmio[0x104 / 4];
+    return (RuntimeValue)((hi << 32) | lo);
+}
+
+RuntimeValue rt_riscv64_virtio_blk_fat32_read_sector_bytes(RuntimeValue lba)
+{
+    RuntimeValue arr = rt_array_new((RuntimeValue)512);
+    if (arr == NIL_VALUE) return NIL_VALUE;
+    if ((uint64_t)lba > 0xffffffffULL || !virtio_blk_read_sector((uint32_t)lba)) return arr;
+    const unsigned char *data = sector_data();
+    for (int i = 0; i < 512; i++) {
+        if (!rt_array_push(arr, ENCODE_INT(data[i]))) return NIL_VALUE;
+    }
+    return arr;
 }

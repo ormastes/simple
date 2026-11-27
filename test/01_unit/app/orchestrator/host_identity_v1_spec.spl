@@ -1,0 +1,194 @@
+# Source-only regression specification; execution requires an admitted runtime.
+# Public test vectors are RFC 8032 test-1/test-2 PUBLIC keys, never private seeds.
+# Fingerprints independently calculated from OpenSSH wire bytes with SHA-256.
+use app.orchestrator.host_identity_public_v1.*
+use app.orchestrator.host_identity_command_v1.*
+use app.orchestrator.host_identity_key_v1.*
+
+val KEY_A = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINdamAGCsQq31Uv+08lkBzoO4XLz2qYjJa8CGmj3B1Ea"
+val KEY_B = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID1AF8PoQ4lakrcKp00bfrycmCzPLsSWjMDNVfEq9GYM"
+val FP_A = "SHA256:bbXpuKG6zhzdmnxq256TlqzFBzRl2f6OOg722cYNbU8"
+val FP_B = "SHA256:F34nin7tcaYH6WR5LSWSfj6weFBPfBpuyUUoPFP9YjA"
+
+fn public_error(source: text) -> text:
+    match host_identity_public_parse_v1(source):
+        case Err(reason): reason
+        case Ok(_): "unexpected-success"
+
+fn pin_error(existing: text, candidate: text, fingerprint: text) -> text:
+    match host_identity_pin_check_v1(existing, candidate, fingerprint):
+        case Err(reason): reason
+        case Ok(_): "unexpected-success"
+
+describe "Public SSH identity and immutable trust decisions":
+    it "computes the OpenSSH fingerprint from public wire bytes":
+        val parsed = host_identity_public_parse_v1(KEY_A)
+        expect(parsed.is_ok()).to_equal(true)
+        expect(parsed.unwrap().fingerprint).to_equal(FP_A)
+        expect(parsed.unwrap().algorithm).to_equal("ssh-ed25519")
+
+    it "discards public comments and accepts one terminal CRLF":
+        val parsed = host_identity_public_parse_v1(KEY_A + " operator laptop\r\n")
+        expect(parsed.is_ok()).to_equal(true)
+        expect(parsed.unwrap().public_key).to_equal(KEY_A)
+        expect(parsed.unwrap().fingerprint).to_equal(FP_A)
+
+    it "rejects private-key headers without copying source into a diagnostic":
+        val reason = public_error("-----BEGIN OPENSSH PRIVATE KEY-----")
+        expect(reason).to_equal("host-identity-public-algorithm")
+
+    it "rejects multiple keys and control characters":
+        expect(public_error(KEY_A + "\n" + KEY_B)).to_equal("host-identity-public-characters")
+        expect(public_error(KEY_A + "\tcomment")).to_equal("host-identity-public-characters")
+
+    it "rejects empty, malformed and unsupported public encodings":
+        expect(public_error("")).to_equal("host-identity-public-size")
+        expect(public_error("ssh-rsa AAAA")).to_equal("host-identity-public-algorithm")
+        expect(public_error("ssh-ed25519 AAAA")).to_equal("host-identity-public-encoding")
+        expect(public_error("ssh-ed25519  AAAA")).to_equal("host-identity-public-encoding")
+
+    it "rejects a base64 blob whose embedded wire algorithm differs":
+        val wrong = "ssh-ed25519 AAAAC3RzaC1lZDI1NTE5AAAAINdamAGCsQq31Uv+08lkBzoO4XLz2qYjJa8CGmj3B1Ea"
+        expect(public_error(wrong)).to_equal("host-identity-public-wire-type")
+
+    it "requires the expected fingerprint even for a first pin decision":
+        expect(pin_error("", KEY_A, FP_B)).to_equal("host-identity-server-fingerprint-mismatch")
+        expect(host_identity_pin_check_v1("", KEY_A, FP_A).is_ok()).to_equal(true)
+
+    it "accepts the same public key with a different comment":
+        expect(host_identity_pin_check_v1(KEY_A, KEY_A + " renamed", FP_A).is_ok()).to_equal(true)
+
+    it "hard fails a changed key even when its new fingerprint is supplied":
+        expect(pin_error(KEY_A, KEY_B, FP_B)).to_equal("host-identity-server-key-changed")
+
+describe "Identity command authority boundaries":
+    it "exports a registration request without claiming enrollment or sending":
+        val key = host_identity_public_parse_v1(KEY_A).unwrap()
+        val reply = host_identity_registration_v1("build", "secret://shared-host", key)
+        expect(reply.exit_code).to_equal(0)
+        expect(reply.output).to_contain("registration-request-exported")
+        expect(reply.output).to_contain(KEY_A)
+        expect(reply.output).to_contain("shared-host")
+        expect(reply.output).to_contain("serverGrantRequired")
+        expect(reply.output).to_contain("not-performed")
+
+    it "revalidates a fabricated public struct before export":
+        val fabricated = HostPublicKeyV1(algorithm: "ssh-ed25519",
+            public_key: "-----BEGIN PRIVATE KEY-----", fingerprint: FP_A)
+        val reply = host_identity_registration_v1("build", "secret://shared-host", fabricated)
+        expect(reply.exit_code).to_equal(2)
+        expect(reply.output.contains("BEGIN PRIVATE")).to_equal(false)
+
+    it "rejects invalid references and server identities before export":
+        val key = host_identity_public_parse_v1(KEY_A).unwrap()
+        expect(host_identity_registration_v1("build", "plaintext-password", key).exit_code).to_equal(2)
+        expect(host_identity_registration_v1("bad/server", "secret://host", key).exit_code).to_equal(2)
+
+    it "requires an explicit store authority before attempting generation":
+        val reply = host_identity_command_v1(["key-generate", "--auth-ref", "secret://shared-host", "--name", "laptop"])
+        expect(reply.exit_code).to_equal(2)
+        expect(reply.output).to_contain("host-identity-generate-usage")
+
+    it "validates generation name and reference before store IO":
+        expect(host_identity_command_v1(["key-generate", "--store-root", "/unused", "--auth-ref", "secret://host", "--name", ""]).exit_code).to_equal(2)
+        expect(host_identity_command_v1(["key-generate", "--store-root", "/unused", "--auth-ref", "raw-key", "--name", "laptop"]).exit_code).to_equal(2)
+
+    it "admits omitted name as current-time naming without store IO":
+        val parsed = host_identity_generate_arguments_v1(["key-generate", "--store-root", "/unused", "--auth-ref", "secret://host"])
+        expect(parsed.is_ok()).to_equal(true)
+        val options = parsed.unwrap()
+        expect(options.contains_key("--name")).to_equal(false)
+        expect(options["--auth-ref"]).to_equal("secret://host")
+        val label = host_identity_generation_label_v1(nil, 1700000000123456)
+        expect(label.is_ok()).to_equal(true)
+        expect(label.unwrap()).to_equal("host-1700000000123456")
+
+    it "preserves an explicit name and the named public-label format":
+        val parsed = host_identity_generate_arguments_v1(["key-generate", "--store-root", "/unused", "--auth-ref", "secret://host", "--name", "abc"])
+        expect(parsed.is_ok()).to_equal(true)
+        val options = parsed.unwrap()
+        expect(options["--name"]).to_equal("abc")
+        val label = host_identity_generation_label_v1(Some("abc"), 1234)
+        expect(label.is_ok()).to_equal(true)
+        expect(label.unwrap()).to_equal("host-ba7816bf8f01cfea-1234")
+
+    it "rejects explicit empty and overlong names instead of falling back to time":
+        expect(host_identity_generate_arguments_v1(["key-generate", "--store-root", "/unused", "--auth-ref", "secret://host", "--name", ""]).is_err()).to_equal(true)
+        expect(host_identity_generate_arguments_v1(["key-generate", "--store-root", "/unused", "--auth-ref", "secret://host", "--name", "x".repeat(257)]).is_err()).to_equal(true)
+        expect(host_identity_generation_label_v1(Some(""), 1234).is_err()).to_equal(true)
+        expect(host_identity_generation_label_v1(Some("x".repeat(257)), 1234).is_err()).to_equal(true)
+
+    it "bounds current-time labels and rejects a failed clock sample":
+        val longest = host_identity_generation_label_v1(nil, 9223372036854775807)
+        expect(longest.is_ok()).to_equal(true)
+        val label = longest.unwrap()
+        expect(label).to_equal("host-9223372036854775807")
+        expect(label.byte_len()).to_equal(24)
+        expect(host_identity_generation_label_v1(nil, -1).is_err()).to_equal(true)
+
+    it "rejects unknown duplicate missing and extraneous options":
+        expect(host_identity_command_v1([]).exit_code).to_equal(2)
+        expect(host_identity_command_v1(["key-send"]).exit_code).to_equal(2)
+        expect(host_identity_command_v1(["key-public", "--secret", "no"]).exit_code).to_equal(2)
+        expect(host_identity_command_v1(["key-public", "--public-key-file"]).exit_code).to_equal(2)
+        expect(host_identity_command_v1(["key-public", "--public-key-file", "/tmp/a.pub", "--public-key-file", "/tmp/b.pub"]).exit_code).to_equal(2)
+        expect(host_identity_command_v1(["key-public", "--public-key-file", "/tmp/a.pub", "--name", "extra"]).exit_code).to_equal(2)
+
+    it "refuses relative paths and private-key filenames before reading":
+        expect(host_identity_command_v1(["key-public", "--public-key-file", "relative.pub"]).exit_code).to_equal(2)
+        expect(host_identity_command_v1(["key-public", "--public-key-file", "/tmp/id_ed25519"]).exit_code).to_equal(2)
+        expect(host_identity_command_v1(["key-public", "--public-key-file", "/tmp/../id.pub"]).exit_code).to_equal(2)
+
+describe "OpenSSH Ed25519 private-file interoperability contract":
+    # RFC 8032 test-1 published seed; deliberately public fixture material.
+    it "round trips a published RFC key through the OpenSSH private codec":
+        val seed: [u8] = [157, 97, 177, 157, 239, 253, 90, 96, 186, 132, 74, 244, 146, 236, 44, 196, 68, 73, 197, 105, 123, 50, 105, 25, 112, 59, 172, 3, 28, 174, 127, 96]
+        val public_key: [u8] = [215, 90, 152, 1, 130, 177, 10, 183, 213, 75, 254, 211, 201, 100, 7, 58, 14, 225, 114, 243, 218, 166, 35, 37, 175, 2, 26, 104, 247, 7, 81, 26]
+        val encoded = host_identity_private_encode_v1(seed, public_key, [1, 2, 3, 4], "public-rfc8032-fixture")
+        expect(encoded.is_ok()).to_equal(true)
+        val parsed = host_identity_private_public_v1(encoded.unwrap())
+        expect(parsed.is_ok()).to_equal(true)
+        expect(parsed.unwrap().public_key).to_equal(KEY_A)
+        expect(parsed.unwrap().fingerprint).to_equal(FP_A)
+
+    it "rejects an embedded public key inconsistent with the private seed":
+        val seed: [u8] = [157, 97, 177, 157, 239, 253, 90, 96, 186, 132, 74, 244, 146, 236, 44, 196, 68, 73, 197, 105, 123, 50, 105, 25, 112, 59, 172, 3, 28, 174, 127, 96]
+        val wrong_public: [u8] = [61, 64, 23, 195, 232, 67, 137, 90, 146, 183, 10, 167, 77, 27, 126, 188, 156, 152, 44, 207, 46, 196, 150, 140, 192, 205, 85, 241, 42, 244, 102, 12]
+        val encoded = host_identity_private_encode_v1(seed, wrong_public, [1, 2, 3, 4], "public-negative-fixture")
+        expect(encoded.is_ok()).to_equal(true)
+        val parsed = host_identity_private_public_v1(encoded.unwrap())
+        expect(parsed.is_err()).to_equal(true)
+
+    it "rejects malformed and zero entropy without deriving any key":
+        expect(host_identity_entropy_valid_v1("")).to_equal(false)
+        expect(host_identity_entropy_valid_v1("000000000000000000000000000000000000000000000000000000000000000000000000")).to_equal(false)
+        expect(host_identity_entropy_valid_v1("gg0000000000000000000000000000000000000000000000000000000000000000000000")).to_equal(false)
+        expect(host_identity_entropy_valid_v1("100000000000000000000000000000000000000000000000000000000000000000000000")).to_equal(true)
+
+    it "rejects invalid codec sizes and malformed private input":
+        expect(host_identity_private_encode_v1([], [], [], "fixture").is_err()).to_equal(true)
+        expect(host_identity_private_public_v1("-----BEGIN OPENSSH PRIVATE KEY-----".bytes()).is_err()).to_equal(true)
+
+    it "hashes control-bearing user text into a one-line naming label":
+        val label = host_identity_label_v1("operator\nsecond-line\r\u0000", 1234)
+        expect(label.is_ok()).to_equal(true)
+        expect(label.unwrap()).to_start_with("host-")
+        expect(label.unwrap()).to_end_with("-1234")
+        expect(label.unwrap().contains("\n")).to_equal(false)
+        expect(label.unwrap().contains("\r")).to_equal(false)
+        expect(label.unwrap().contains("\u0000")).to_equal(false)
+        expect(host_identity_label_v1("operator", -1).is_err()).to_equal(true)
+
+    it "refuses control characters in a direct OpenSSH comment codec call":
+        val seed: [u8] = [157, 97, 177, 157, 239, 253, 90, 96, 186, 132, 74, 244, 146, 236, 44, 196, 68, 73, 197, 105, 123, 50, 105, 25, 112, 59, 172, 3, 28, 174, 127, 96]
+        val public_key: [u8] = [215, 90, 152, 1, 130, 177, 10, 183, 213, 75, 254, 211, 201, 100, 7, 58, 14, 225, 114, 243, 218, 166, 35, 37, 175, 2, 26, 104, 247, 7, 81, 26]
+        expect(host_identity_private_encode_v1(seed, public_key, [1, 2, 3, 4], "label\nextra-key").is_err()).to_equal(true)
+        expect(host_identity_private_encode_v1(seed, public_key, [1, 2, 3, 4], "label\rreturn").is_err()).to_equal(true)
+        expect(host_identity_private_encode_v1(seed, public_key, [1, 2, 3, 4], "label\u0000nul").is_err()).to_equal(true)
+
+    it "rejects Unicode and control suffixes in the complete private-file envelope":
+        for suffix in ["λ", "😀", "λ\n", "😀\u0000"]:
+            val source = "-----BEGIN OPENSSH PRIVATE KEY-----\n" + "A".repeat(300) + suffix + "\n-----END OPENSSH PRIVATE KEY-----\n"
+            val parsed = host_identity_private_public_v1(source.bytes())
+            expect(parsed.is_err()).to_equal(true)
+            expect(parsed.unwrap_err()).to_equal("host-identity-private-format")

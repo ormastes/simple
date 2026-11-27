@@ -1,0 +1,42 @@
+"""
+# path identity is dispatchable from the interpreter on every host
+
+`_native_build_entry_closure` resolves its source roots through
+`path_final_existing` / `path_entry_present`. The Windows branch of
+path_identity_abi.spl was already served by the interpreter (windows_abi), but
+the POSIX branch (malloc, free, realpath, readlink, __error/__errno_location)
+had no interpreter twin, so the seed interpreter died with
+`unknown extern function: malloc` on Linux, macOS and FreeBSD.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_entry_present, path_identity_same}
+
+describe "path identity through the interpreter extern table":
+    it "resolves the working directory to an absolute final path":
+        val root = path_final_existing(".")
+        expect(root.is_ok()).to_equal(true)
+        val resolved = root.unwrap()
+        expect(resolved.path.len() > 0).to_equal(true)
+        expect(resolved.path).to_equal(resolved.identity)
+        expect(resolved.path.ends_with("/.")).to_equal(false)
+
+    it "gives the same identity for two spellings of one existing file":
+        val direct = path_final_existing("CLAUDE.md")
+        val via_dot = path_final_existing("./CLAUDE.md")
+        expect(direct.is_ok()).to_equal(true)
+        expect(via_dot.is_ok()).to_equal(true)
+        expect(path_identity_same(direct.unwrap(), via_dot.unwrap())).to_equal(true)
+
+    it "refuses a missing path instead of inventing one":
+        val missing = path_final_existing("build/tmp/path_identity_interp_posix_abi_spec_missing")
+        expect(missing.is_err()).to_equal(true)
+
+    it "observes leaf presence and absence under an existing parent":
+        val root = path_final_existing(".").unwrap()
+        val present = path_entry_present("{root.path}/CLAUDE.md")
+        val absent = path_entry_present("{root.path}/path_identity_interp_posix_abi_spec_missing_leaf")
+        expect(present.is_ok()).to_equal(true)
+        expect(present.unwrap()).to_equal(true)
+        expect(absent.is_ok()).to_equal(true)
+        expect(absent.unwrap()).to_equal(false)

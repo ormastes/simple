@@ -9,9 +9,9 @@
 # - _update_history / _refresh_current_history
 # - bounded active-load warning retention
 
-use std.js.types.pair.{Pair}
-use std.js.types.js_types.{JsValue}
-use std.common.string_core.{bytes_to_text}
+use std.common.js.types.pair.{Pair}
+use lib.js.types.js_types.{JsValue}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserLoadState, BrowserImageSource, BrowserPendingModuleEval, BrowserScriptBlock, BrowserHistoryEntry, BrowserResponse, BrowserWasmModuleRecord, BrowserHstsPolicy, BrowserHstsSnapshot, BrowserHstsSnapshotEntry, BROWSER_MAX_IMAGE_RESOURCES, BROWSER_MAX_IMAGE_PIXELS, browser_header_media_type, browser_header_is_javascript, browser_header_has_nosniff, browser_history_push_bounded}
 use std.gc_async_mut.web.browser_session_storage.{pair_value, upsert_pair}
 use std.gc_async_mut.web.browser_session_url.{
@@ -156,7 +156,7 @@ fn _url_search_params_query(url: text) -> text:
     val q = url.index_of("?")
     if q < 0:
         return ""
-    val tail = url.slice(q + 1, url.len())
+    val tail = url.slice(q + 1, url.byte_len())
     val hash = tail.index_of("#")
     if hash >= 0:
         return tail.slice(0, hash)
@@ -165,7 +165,7 @@ fn _url_search_params_query(url: text) -> text:
 fn _url_search_params_plus_to_space(value: text) -> text:
     var out = ""
     var i = 0
-    val value_len = value.len()
+    val value_len = value.byte_len()
     while i < value_len:
         val ch = value.slice(i, i + 1)
         out = out + if ch == "+": " " else: ch
@@ -175,7 +175,7 @@ fn _url_search_params_plus_to_space(value: text) -> text:
 fn _url_search_params_space_to_plus(value: text) -> text:
     var out = ""
     var i = 0
-    val value_len = value.len()
+    val value_len = value.byte_len()
     while i < value_len:
         val ch = value.slice(i, i + 1)
         out = out + if ch == " ": "+" else: ch
@@ -191,7 +191,7 @@ fn _url_search_params_key(pair: text) -> text:
 fn _url_search_params_value(pair: text) -> text:
     val eq = pair.index_of("=")
     if eq >= 0:
-        return _url_search_params_plus_to_space(pair.slice(eq + 1, pair.len()))
+        return _url_search_params_plus_to_space(pair.slice(eq + 1, pair.byte_len()))
     ""
 
 fn _url_search_params_get(query: text, name: text) -> text?:
@@ -238,14 +238,14 @@ fn _simple_script_unquote(value: text) -> text:
     val trimmed = value.trim()
     if trimmed.len() >= 2:
         val first = trimmed.slice(0, 1)
-        val last = trimmed.slice(trimmed.len() - 1, trimmed.len())
+        val last = trimmed.slice(trimmed.byte_len() - 1, trimmed.byte_len())
         if (first == "\"" and last == "\"") or (first == "'" and last == "'"):
             return trimmed.slice(1, trimmed.len() - 1)
     trimmed
 
 fn _simple_script_tail(line: text, prefix: text) -> text:
     if line.starts_with(prefix):
-        return line.slice(prefix.len(), line.len()).trim()
+        return line.slice(prefix.len(), line.byte_len()).trim()
     ""
 
 fn _simple_script_int(value: text, fallback: i32) -> i32:
@@ -346,7 +346,7 @@ impl BrowserSession:
         val published = self.publish_dom_snapshot(
             next_dom, true, next_runtime_state
         )
-        if published.? == true:
+        if published.is_ok():
             self.current_body_html = html
             self._advance_ui_access_revision()
             self._mark_css_animation_reconcile(true)
@@ -372,7 +372,7 @@ impl BrowserSession:
         val published = self.publish_dom_snapshot(
             next_dom, true, next_runtime_state
         )
-        if published.? == true:
+        if published.is_ok():
             self.current_body_html = value
             self._advance_ui_access_revision()
             self._mark_css_animation_reconcile(true)
@@ -649,7 +649,7 @@ impl BrowserSession:
                 elif simple_script:
                     self._apply_response_headers(response.headers, response.url)
                     self._execute_simple_script(response.body, Some(load))
-                else if self.runtime_state != nil:
+                else if self.runtime_state.is_some():
                     self._apply_response_headers(response.headers, response.url)
                     match self.eval_script(response.body):
                         Ok(_):
@@ -877,7 +877,7 @@ impl BrowserSession:
             # data: images are decoded here, never fetched; the decoded bytes
             # enter the same store a network response does.
             val data_url = browser_data_url_decode(source.resolved_url)
-            val warning = if data_url == nil:
+            val warning = if data_url.is_none():
                 "image load error: malformed data: URL"
             elif not browser_resource_size_allowed(data_url.unwrap().body.len()):
                 "image load error: data: URL exceeds 50 MiB resource limit"
@@ -979,14 +979,18 @@ impl BrowserSession:
                         # data: stylesheets are decoded here, never fetched.
                         if val Some(data_url) = browser_data_url_decode(resolved):
                             if browser_resource_size_allowed(data_url.body.len()):
-                                if val Some(expanded) = load.admit_stylesheet(
-                                    load.document_url, load.document_url,
-                                    bytes_to_text(data_url.body),
-                                    source.csp_policy, source.source_offset
-                                ):
-                                    if expanded.sources.len() > 0:
-                                        load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
-                                        style_source_count = load.style_sources.len()
+                                match bytes_to_text_checked(data_url.body):
+                                    case Ok(css_text):
+                                        if val Some(expanded) = load.admit_stylesheet(
+                                            load.document_url, load.document_url,
+                                            css_text,
+                                            source.csp_policy, source.source_offset
+                                        ):
+                                            if expanded.sources.len() > 0:
+                                                load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
+                                                style_source_count = load.style_sources.len()
+                                    case Err(e):
+                                        load.append_warning("stylesheet load error: data: URL is not valid UTF-8 at byte {e.byte_offset}")
                             else:
                                 load.append_warning("stylesheet load error: data: URL exceeds 50 MiB resource limit")
                         else:
@@ -1069,7 +1073,7 @@ impl BrowserSession:
                         self._record_wasm_module(load.document_url, block.content, load)
                     else if block.script_type == "text/simple":
                         self._execute_simple_script(block.content, Some(load))
-                    else if self.runtime_state != nil:
+                    else if self.runtime_state.is_some():
                         self._trace_guest("eval inline script start")
                         val script_source = block.content
                         self._trace_guest("eval inline script source-len={script_source.len()}")
@@ -1116,7 +1120,7 @@ impl BrowserSession:
                             self._record_wasm_module(resolved, override_body, load)
                         else if block.script_type == "text/simple":
                             self._execute_simple_script(override_body, Some(load))
-                        else if self.runtime_state != nil:
+                        else if self.runtime_state.is_some():
                             match self.eval_script(override_body):
                                 Ok(_):
                                     pass_dn("override script eval success has no value to consume")
@@ -1265,7 +1269,7 @@ impl BrowserSession:
                 self.pending_requests.push(request)
                 return Ok(false)
         self.module_source_cache = upsert_pair(self.module_source_cache, module_url, source)
-        if self.runtime_state != nil:
+        if self.runtime_state.is_some():
             val transformed_source = transform_module_source(module_url, source, self.module_source_cache)
             val eval_result = self.eval_script(transformed_source)
             self.module_eval_stack = remove_text_once(self.module_eval_stack, module_url)
@@ -1366,7 +1370,7 @@ impl BrowserSession:
     me _apply_hsts_header(header: text, response_url: text) -> bool:
         if not response_url.starts_with("https://"):
             return false
-        var max_age: i64? = nil
+        var max_age: i64? = None
         var include_subdomains = false
         var max_age_seen = false
         var include_subdomains_seen = false
@@ -1392,7 +1396,7 @@ impl BrowserSession:
                     return false
                 include_subdomains_seen = true
                 include_subdomains = true
-        if max_age == nil:
+        if max_age.is_none():
             return false
         val host = url_hostname(response_url).lower()
         if (not network_navigation_hostname_valid(host) or
@@ -1529,7 +1533,7 @@ impl BrowserSession:
 
     fn _current_history_entry_is_committed() -> bool:
         (
-            not self.is_loading and self.active_load == nil and
+            not self.is_loading and self.active_load.is_none() and
             self.current_index >= 0 and
             self.current_index < self.history.len() and
             self.document_url == self.current_url and

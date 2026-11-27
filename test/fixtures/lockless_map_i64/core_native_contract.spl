@@ -1,0 +1,101 @@
+# Diagnostic native scalar-core contract, independent of the blocked typed
+# AsyncRef/SimpleRing fixture. This executes the production core, not a copied
+# algorithm. It proves sequential exact-key/terminal/capacity behavior only;
+# 3,000 keys here are NOT 3,000 concurrent callers or scheduler qualification.
+use std.nogc_async_mut.concurrent.lockless_i64_core.{
+    core_create_i64, core_request_i64, core_find_i64, core_try_start_i64,
+    core_outcome_i64, core_outcome_kind_i64, core_outcome_value_i64,
+    core_publish_i64, core_close_quiescent_i64
+}
+
+@unsafe(reason: "diagnostic exercises raw arena APIs with caller-proven scope lifetime", capabilities: [ffi])
+fn core_native_contract() -> i64:
+    # @workaround bug=BUG-2026-10-27-PHASE2-COMPACT-RTI-IMPORTED-OPTIONAL-RESULT reason=scalar core fixture avoids imported generic enum payload lowering; typed AsyncRef fixture remains blocked
+    val undersized = core_create_i64(4, 4, 3, 1)
+    if undersized.error != 1 or undersized.scope != 0: return 33
+    val created = core_create_i64(4096, 3002, 3002, 4)
+    if created.error != 0 or created.scope == 0: return 1
+    val scope = created.scope
+    var index: i64 = 0
+    var accepted: i64 = 0
+    while index < 3000:
+        val key = index * 97
+        val entry = core_request_i64(scope, key, index + 1)
+        if entry <= 0: return 2
+        if core_find_i64(scope, key) != entry: return 3
+        if core_request_i64(scope, key, index + 1) != entry: return 4
+        # Raw ABI -4 is RecipeConflict; it must not replace the entry.
+        if core_request_i64(scope, key, index + 2) != -4: return 5
+        if core_outcome_i64(scope, entry) != 0: return 6
+        # A producer must claim execution before accepting its outcome.
+        if core_publish_i64(scope, entry, 1, index * 3) != -2: return 7
+        if not core_try_start_i64(scope, entry): return 8
+        # This assertion detects deliberate removal of start deduplication.
+        if core_try_start_i64(scope, entry): return 9
+        if core_publish_i64(scope, entry, 1, index * 3) != 1: return 10
+        if core_publish_i64(scope, entry, 2, -999) != 0: return 11
+        val outcome = core_outcome_i64(scope, entry)
+        if outcome <= 0: return 12
+        if core_outcome_kind_i64(scope, outcome) != 1: return 13
+        if core_outcome_value_i64(scope, outcome) != index * 3: return 14
+        accepted = accepted + 1
+        index = index + 1
+    if accepted != 3000: return 15
+
+    # Re-read all accepted outcomes independently after later insertions.
+    index = 0
+    while index < 3000:
+        val entry = core_find_i64(scope, index * 97)
+        if entry <= 0: return 16
+        val outcome = core_outcome_i64(scope, entry)
+        if outcome <= 0: return 17
+        if core_outcome_value_i64(scope, outcome) != index * 3: return 18
+        index = index + 1
+    if core_find_i64(scope, -1) != 0: return 19
+
+    # Descriptor identity reserves no key value: both signed extremes work.
+    val minimum = -9223372036854775807i64 - 1i64
+    val min_entry = core_request_i64(scope, minimum, 41)
+    val max_entry = core_request_i64(scope, 9223372036854775807i64, 42)
+    if min_entry <= 0 or max_entry <= 0 or min_entry == max_entry: return 20
+    if core_find_i64(scope, minimum) != min_entry: return 21
+    if core_find_i64(scope, 9223372036854775807i64) != max_entry: return 22
+    if not core_try_start_i64(scope, min_entry): return 23
+    # Admission reserves enough terminal slots for every descriptor. The
+    # authorized start winner must therefore be able to publish its result.
+    if core_publish_i64(scope, min_entry, 1, 19) != 1: return 24
+    val min_outcome = core_outcome_i64(scope, min_entry)
+    if min_outcome <= 0 or core_outcome_kind_i64(scope, min_outcome) != 1 or
+       core_outcome_value_i64(scope, min_outcome) != 19: return 25
+    # Existing exact requests survive exhausted descriptor storage.
+    if core_request_i64(scope, 0, 1) != core_find_i64(scope, 0): return 26
+    if core_request_i64(scope, -7, 99) != -3: return 27
+
+    val tiny = core_create_i64(2, 2, 2, 1)
+    if tiny.error != 0 or tiny.scope == 0: return 28
+    # 1 and 3 collide modulo two; full exact equality still separates them.
+    val left = core_request_i64(tiny.scope, 1, 1)
+    val right = core_request_i64(tiny.scope, 3, 3)
+    if left <= 0 or right <= 0 or left == right: return 29
+    if core_find_i64(tiny.scope, 1) != left: return 30
+    if core_find_i64(tiny.scope, 3) != right: return 31
+    # Raw ABI -2 is directory Full, distinct from descriptor exhaustion.
+    if core_request_i64(tiny.scope, 5, 5) != -2: return 32
+    if not core_try_start_i64(tiny.scope, right): return 33
+    if core_publish_i64(tiny.scope, right, 2, -701) != 1: return 34
+    val failed = core_outcome_i64(tiny.scope, right)
+    if failed <= 0 or core_outcome_kind_i64(tiny.scope, failed) != 2: return 35
+    if core_outcome_value_i64(tiny.scope, failed) != -701: return 36
+    # All operations finished; neither scope nor entry is used after close.
+    unsafe(capabilities: [ffi]):
+        core_close_quiescent_i64(tiny.scope)
+        core_close_quiescent_i64(scope)
+    0
+
+fn main() -> i64:
+    val result = unsafe(capabilities: [ffi]): core_native_contract()
+    if result != 0:
+        print "LOCKLESS_CORE_NATIVE_FAIL:{result}"
+        return result
+    print "LOCKLESS_CORE_NATIVE_PASS:keys=3000;mode=sequential;typed_async=unqualified"
+    0

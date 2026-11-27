@@ -1,0 +1,71 @@
+"""
+## Purpose and audience
+Purpose: Pin the line-break opportunity after U+002D HYPHEN-MINUS inside a
+word, against Chrome 159. `aaaa keyword-number-value` in a 150 CSS px box
+breaks after `keyword-` in Chrome (UAX #14 class HY): line 1 is
+`aaaa keyword-`, line 2 `number-value`. This engine breaks only at spaces, so
+line 1 is `aaaa` alone and `keyword-number-value` overflows the box on line 2.
+Found on the catalog css-layout inventory list (`values=keyword-number;`),
+where the break moves once the line is narrower than the catalog's 728px.
+Audience: web renderer text layout maintainers (layout_text line breaking).
+
+Chrome oracle (Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=1
+--window-size=500,300`, the page below). `getBoundingClientRect()`: the first
+div is 48 high; the `keyword-number-value` range is 104.953 wide and 41 high
+(two lines); `bbbb` is at y=51.
+
+Measured from the screenshot: last column holding a pixel with red < 128 in
+each 24-row line band. Chrome: line 1 column 113, line 2 column 107.
+Base (ecff7320c13): line 1 column 45, line 2 column 171.
+"""
+
+"""
+Traceability: REQ-WEB-LINEBREAK-HYPHEN-001 — a line may break after a hyphen-minus inside a word, as in Chrome 159.
+"""
+# @tag: unit, browser_engine, text, line_break, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_text.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 500
+val CSS_H: i32 = 100
+
+val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;color:#000;font:16px/1.5 'Liberation Sans'}} div{{margin:0 0 0 10px;width:150px}}</style></head><body>" +
+    "<div>aaaa keyword-number-value</div><div>bbbb</div></body></html>"
+
+fn _red(px: u32) -> i32:
+    ((px >> 16u32) & 0xFFu32) as i32
+
+# Last column that holds ink (red < 128) in rows y0..y0+24.
+fn _last_ink_col(px: [u32], y0: i32) -> i32:
+    if px.len() != (CSS_W * CSS_H) as i64:
+        return -2
+    var last = -1
+    var y = y0
+    while y < y0 + 24:
+        var x = 0
+        while x < 300:
+            if _red(px[y * CSS_W + x]) < 128 and x > last:
+                last = x
+            x = x + 1
+        y = y + 1
+    last
+
+fn _near(got: i32, chrome: i32) -> bool:
+    got >= chrome - 1 and got <= chrome + 1
+
+describe "A line may break after a hyphen inside a word (Chrome 159)":
+    it "AC-1: line 1 holds `aaaa keyword-` and ends at column 113":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 1, "cpu_simd")
+        expect(_near(_last_ink_col(px, 0), 113)).to_equal(true)
+
+    it "AC-2: line 2 holds `number-value` and ends at column 107, inside the box":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 1, "cpu_simd")
+        expect(_near(_last_ink_col(px, 24), 107)).to_equal(true)
+
+    it "AC-3 (guard): the next block stays on the third line, ending at column 44":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 1, "cpu_simd")
+        expect(_near(_last_ink_col(px, 48), 44)).to_equal(true)

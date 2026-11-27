@@ -1,0 +1,119 @@
+# @cover src/compiler/80.driver/driver_build/parallel.spl
+# Branch coverage for ParallelBuilder.build() owner-collect handling:
+# callback "" (success), non-empty (unit error), compile failure (no collect call),
+# and spawn-dispatch (has_spawn_dispatch true) vs sequential path.
+
+use std.spec
+use compiler.driver.driver_build.parallel.{ParallelBuilder, ParallelBuildConfig}
+
+fn ok_compile(path: text) -> Result<text, text>:
+    Ok("obj:{path}")
+
+fn failing_compile(path: text) -> Result<text, text>:
+    Err("compile failed: {path}")
+
+fn collect_ok(path: text, output: text) -> text:
+    ""
+
+fn collect_err(path: text, output: text) -> text:
+    "collect rejected {path}"
+
+fn seq_cfg() -> ParallelBuildConfig:
+    ParallelBuildConfig(num_threads: 1, parallel_threshold: 999,
+        deterministic: true, verbose: false, unstable: false, unit_timeout_ms: 0)
+
+fn par_cfg() -> ParallelBuildConfig:
+    ParallelBuildConfig(num_threads: 4, parallel_threshold: 1,
+        deterministic: false, verbose: false, unstable: false, unit_timeout_ms: 0)
+
+fn spawn_stub(path: text) -> i64:
+    -1
+
+fn spawn_collect_stub(exit_code: i64, path: text) -> Result<text, text>:
+    Ok("spawned:{path}")
+
+describe "ParallelBuilder owner-collect branches":
+    it "callback returning empty text keeps the object and counts success":
+        var b = ParallelBuilder.create(seq_cfg())
+        b.add_unit("u1", [])
+        b.set_owner_collect(collect_ok)
+        val r = b.build(ok_compile)
+        expect(r.success).to_be_true()
+        expect(r.errors.len()).to_equal(0)
+        expect(r.outputs).to_equal(["obj:u1"])
+        expect(r.stats.completed).to_equal(1)
+        expect(r.stats.failed).to_equal(0)
+
+    it "callback returning non-empty text records the unit as an error and drops the object":
+        var b = ParallelBuilder.create(seq_cfg())
+        b.add_unit("u2", [])
+        b.set_owner_collect(collect_err)
+        val r = b.build(ok_compile)
+        expect(r.success).to_be_false()
+        expect(r.errors.len()).to_equal(1)
+        expect(r.errors[0].0).to_equal("u2")
+        expect(r.errors[0].1).to_equal("collect rejected u2")
+        expect(r.outputs.len()).to_equal(0)
+        expect(r.stats.failed).to_equal(1)
+
+    it "compile failure with a callback set never calls collect":
+        var b = ParallelBuilder.create(seq_cfg())
+        b.add_unit("u3", [])
+        b.set_owner_collect(collect_err)
+        val r = b.build(failing_compile)
+        expect(r.success).to_be_false()
+        expect(r.errors.len()).to_equal(1)
+        expect(r.errors[0].1).to_equal("compile failed: u3")
+
+    it "dependent of a collect-rejected unit is failed as dependency failed":
+        var b = ParallelBuilder.create(seq_cfg())
+        val a = b.add_unit("dep_a", [])
+        b.add_unit("dep_b", [a])
+        b.set_owner_collect(collect_err)
+        val r = b.build(ok_compile)
+        expect(r.success).to_be_false()
+        expect(r.stats.failed).to_equal(2)
+
+    it "non-deterministic above-threshold path without dispatch applies owner-collect":
+        var b = ParallelBuilder.create(par_cfg())
+        b.add_unit("p1", [])
+        b.add_unit("p2", [])
+        b.set_owner_collect(collect_err)
+        val r = b.build(ok_compile)
+        expect(r.success).to_be_false()
+        expect(r.errors.len()).to_equal(2)
+        expect(r.stats.completed).to_equal(0)
+
+    it "non-deterministic path with empty-returning callback completes all units":
+        var b = ParallelBuilder.create(par_cfg())
+        b.add_unit("q1", [])
+        b.add_unit("q2", [])
+        b.set_owner_collect(collect_ok)
+        val r = b.build(ok_compile)
+        expect(r.success).to_be_true()
+        expect(r.stats.completed).to_equal(2)
+
+    it "has_spawn_dispatch false keeps the in-process compile_fn":
+        var b = ParallelBuilder.create(par_cfg())
+        b.add_unit("s1", [])
+        val r = b.build(ok_compile)
+        expect(r.outputs).to_equal(["obj:s1"])
+
+    it "has_spawn_dispatch true routes through the spawn collector, not compile_fn":
+        var b = ParallelBuilder.create(par_cfg())
+        b.add_unit("d1", [])
+        b.set_spawn_dispatch(spawn_stub, spawn_collect_stub)
+        val r = b.build(failing_compile)
+        # compile_fn would have produced "compile failed: d1"; dispatch must bypass it.
+        var saw_compile_err = false
+        for e in r.errors:
+            if e.1 == "compile failed: d1":
+                saw_compile_err = true
+        expect(saw_compile_err).to_be_false()
+
+    it "spawn-dispatch is ignored on the deterministic sequential path":
+        var b = ParallelBuilder.create(seq_cfg())
+        b.add_unit("d2", [])
+        b.set_spawn_dispatch(spawn_stub, spawn_collect_stub)
+        val r = b.build(ok_compile)
+        expect(r.outputs).to_equal(["obj:d2"])

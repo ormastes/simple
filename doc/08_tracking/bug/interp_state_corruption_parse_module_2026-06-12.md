@@ -1,5 +1,7 @@
 # Interpreter state corruption around interpreted parse_module (hex-literal conversion)
 
+## Closed 2026-11-25 — not reproducible on the committed seed; see the dated verification note at the bottom
+
 ## Not closed 2026-09-13 — left open; seed-interpreter defect, and the fix surface is off limits
 
 - **inferred** The entry isolates the trigger precisely (`parse_module(src, name)` fails iff
@@ -52,3 +54,38 @@ crashing — this affects only the seed-interpreted lean parser.
 
 Pass a fake module name to parse_module and keep the real path only for
 reporting. See `tmp/site12/lean_parse_sweep.spl`.
+
+## Verification 2026-11-25 (p2w3-al lane, Windows) — not reproducible on the committed seed, closing
+
+Runtime: committed `bin/simple.exe` (Rust bootstrap seed v1.0.0-rc.1,
+38,403,072 bytes), `SIMPLE_LIB=src ... run`, Windows Git Bash, worktree at
+release/1.0.0 @ 4c6024f8271.
+
+The original repro harnesses (`tmp/site12/name_matrix.spl`,
+`tmp/site12/lean_parse_sweep.spl`) are gone from this tree, so the documented
+isolation was rebuilt as a standalone probe
+(`build/p2w3-al-probes/parse_module_realname.spl`, not committed): it calls
+`parse_module_silent_checked(src, name)` (the same
+`_parse_module_with_diagnostics` path as `parse_module`,
+`src/compiler/10.frontend/core/parser.spl:1512`) on source containing the
+`0xff` hex-literal shapes from `src/lib/bitwise_utils.spl`, once with a fake
+name (`plain.spl`) and once with the real existing path
+(`src/lib/bitwise_utils.spl` — confirmed present, still contains `0xff` at
+lines 10/16/17).
+
+```
+fake-name parse failed=false
+real-name parse failed=false
+EXIT=0
+```
+
+The exact isolated trigger from this doc — real existing file path as the
+module name — parses cleanly; the `cannot parse 'f' as i64` death does not
+occur. The run went through the interpreter (the module demoted off the JIT
+per the `[engine-demotion]` lines), so the seed-interpreter path named in
+this doc was genuinely exercised. The seed has been rebuilt many times since
+2026-06-12, so whatever seed-side defect this was is no longer present in the
+committed binary. LIMIT: this host is Windows and the filing was on Linux;
+if the defect is host-specific it could persist elsewhere, but there is no
+evidence of that and the fix surface (`src/compiler_rust`) remains off limits
+regardless. CLOSED as not reproducible on the committed seed.

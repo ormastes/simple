@@ -7,15 +7,19 @@
 use std.daemon_sdk.client.{
     daemon_submit, daemon_poll_result, daemon_submit_and_wait, daemon_stop
 }
-use std.daemon_sdk.types.{DaemonResponse, DaemonState}
+use std.daemon_sdk.types.{DaemonRequest, DaemonResponse, DaemonState}
 use std.daemon_sdk.lock.{is_daemon_running}
+use std.test_runner.test_runner_types.{TestOptions}
+use app.test_daemon.native_profile.{NATIVE_SESSION_PROFILE_V1, native_session_request, native_session_shape_error}
 use app.test_daemon.types.{
     TestDaemonConfig, test_daemon_config_default,
-    test_request_to_daemon, daemon_response_to_test_result, TestResult
+    test_request_to_daemon, daemon_response_to_test_result, TestResult,
+    test_request_set_mcdc, test_request_mcdc_mode, test_daemon_mcdc_waiver_names
 }
+use std.io_runtime.{env_get}
 use app.test_daemon.types.{
     TREQ_RUN_SINGLE, TREQ_CLEAN_RUN, TREQ_STATUS, TREQ_STOP,
-    TRESP_COMPLETED
+    TRESP_COMPLETED, TRESP_FAILED, TRESP_CACHED
 }
 
 # ============================================================================
@@ -63,8 +67,47 @@ fn test_submit_and_wait(path: text, config: TestDaemonConfig, clean: bool, timeo
     if not test_daemon_ensure_responsive(config):
         return TestResult(test_path: path, status: -1, passed: 0, failed: 1, skipped: 0, duration_ms: 0, output: "test daemon unavailable", cached: false)
     val kind = if clean: TREQ_CLEAN_RUN else: TREQ_RUN_SINGLE
-    val req = test_request_to_daemon(kind, path, "", clean)
+    val req = test_request_with_client_mcdc(test_request_to_daemon(kind, path, "", clean))
     val resp = daemon_submit_and_wait(req, config.daemon, timeout_ms)
+    test_result_checked_mcdc(req.fields["mcdc_mode"] ?? "", resp)
+
+# The caller already ran apply_mcdc_mode_env (propagate_env_vars), which
+# refused invalid-off with exit 2 and left the RESOLVED mode in
+# SIMPLE_MCDC_MODE. Send that and, only for "off", the client's waiver atoms.
+fn test_request_with_client_mcdc(req: DaemonRequest) -> DaemonRequest:
+    var waivers: [text] = []
+    for name in test_daemon_mcdc_waiver_names():
+        waivers.push(env_get(name) ?? "")
+    test_request_set_mcdc(req, test_request_mcdc_mode({"mcdc_mode": env_get("SIMPLE_MCDC_MODE") ?? ""}), waivers,
+        env_get("SIMPLE_SAFETY_PROFILE") ?? "")
+
+# A daemon that does not echo the requested mode predates per-request MC/DC
+# and ran the child with its OWN environment: refuse its verdict.
+fn test_result_checked_mcdc(requested_mode: text, resp: DaemonResponse) -> TestResult:
+    val result = daemon_response_to_test_result(resp)
+    val ran = resp.status == TRESP_COMPLETED or resp.status == TRESP_FAILED or resp.status == TRESP_CACHED
+    if not ran or (resp.fields["mcdc_mode"] ?? "") == requested_mode:
+        return result
+    TestResult(test_path: result.test_path, status: -1, passed: 0, failed: 1, skipped: 0, duration_ms: result.duration_ms,
+        output: "test daemon did not apply the client's MC/DC mode ({requested_mode}); refusing its verdict", cached: false)
+
+fn test_submit_native_and_wait(path: text, config: TestDaemonConfig, options: TestOptions) -> TestResult:
+    # Old generic daemons ignore unknown request fields. Negotiate support
+    # before submitting, so they cannot silently run an unbound bin/simple.
+    val status = daemon_submit_and_wait(test_request_to_daemon(TREQ_STATUS, "", "", false), config.daemon, 1500)
+    if status.status != TRESP_COMPLETED or (status.fields["native_profile"] ?? "") != NATIVE_SESSION_PROFILE_V1:
+        return TestResult(path, -1, 0, 1, 0, 0, "test daemon does not support pinned native execution", false)
+    val req = native_session_request(test_request_to_daemon(TREQ_RUN_SINGLE, path, "", true), options)
+    val shape_error = native_session_shape_error(req)
+    if shape_error != "":
+        return TestResult(path, -1, 0, 1, 0, 0, shape_error, false)
+    val resp = daemon_submit_and_wait(req, config.daemon, options.timeout * 1000 + 2000)
+    if resp.request_id != req.id:
+        return TestResult(path, -1, 0, 1, 0, 0, "native daemon did not return this request's result", false)
+    if resp.status == TRESP_COMPLETED:
+        for field in ["native_profile", "worker_sha256", "producer_sha256", "runtime_sha256", "environment_sha256"]:
+            if (resp.fields[field] ?? "") != (req.fields[field] ?? ""):
+                return TestResult(path, -1, 0, 1, 0, 0, "native daemon result binding mismatch: " + field, false)
     daemon_response_to_test_result(resp)
 
 # ============================================================================

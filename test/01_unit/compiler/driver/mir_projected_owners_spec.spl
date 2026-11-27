@@ -1,0 +1,60 @@
+use std.spec.*
+use compiler.driver.driver_mir_physical_owners.{driver_mir_projected_source_identities_v1, driver_mir_physical_source_indices_v1, driver_mir_entry_alias_projection_required_v1}
+
+val PROJECTED_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val PROJECTED_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+describe "projected MIR sources retain actual admission and selected order":
+    it "joins a reordered subset without moving the entry from index zero":
+        val result = driver_mir_projected_source_identities_v1(
+            ["provider.spl", "entry.spl", "unused.spl"],
+            [PROJECTED_A, PROJECTED_B, PROJECTED_A],
+            ["entry.spl", "provider.spl", "provider.spl"])
+        expect(result.is_ok()).to_equal(true)
+        val identities = result.unwrap()
+        expect(identities[0]).to_equal(PROJECTED_B)
+        expect(identities[1]).to_equal(PROJECTED_A)
+        val selected = driver_mir_physical_source_indices_v1(
+            ["entry.spl", "provider.spl", "provider.spl"], identities,
+            ["app.entry", "lib.common.provider", "std.common.provider"]).unwrap()
+        expect(selected.len()).to_equal(2)
+        expect(selected[0]).to_equal(0)
+        expect(selected[1]).to_equal(1)
+
+    it "accepts repeated retained aliases with identical full content":
+        val result = driver_mir_projected_source_identities_v1(
+            ["provider.spl", "provider.spl"], [PROJECTED_A, PROJECTED_A], ["provider.spl"])
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()[0]).to_equal(PROJECTED_A)
+
+    it "refuses contradictory admission under one physical path":
+        val result = driver_mir_projected_source_identities_v1(
+            ["provider.spl", "provider.spl"], [PROJECTED_A, PROJECTED_B], ["provider.spl"])
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("content conflict")
+
+    it "refuses a selected source absent from retained admission":
+        expect(driver_mir_projected_source_identities_v1(
+            ["entry.spl"], [PROJECTED_A], ["other/entry.spl"]).is_err()).to_equal(true)
+
+    it "refuses malformed and missing full-content identities":
+        expect(driver_mir_projected_source_identities_v1(["entry.spl"], ["aaa"], ["entry.spl"]).is_err()).to_equal(true)
+        expect(driver_mir_projected_source_identities_v1(["entry.spl"], [], ["entry.spl"]).is_err()).to_equal(true)
+
+    it "refuses a missing selected path":
+        expect(driver_mir_projected_source_identities_v1(["entry.spl"], [PROJECTED_A], [""]).is_err()).to_equal(true)
+
+describe "entry alias projection activation preserves the native route":
+    it "checks streaming bootstrap entries even when logical counts are equal":
+        expect(driver_mir_entry_alias_projection_required_v1(567, 567, true, true, true)).to_equal(true)
+
+    it "checks a selected nonstreaming projection with a distinct index domain":
+        expect(driver_mir_entry_alias_projection_required_v1(3, 8, true, false, false)).to_equal(true)
+
+    it "leaves normal equal-count source ownership on its existing route":
+        expect(driver_mir_entry_alias_projection_required_v1(3, 3, true, false, false)).to_equal(false)
+        expect(driver_mir_entry_alias_projection_required_v1(3, 3, true, true, false)).to_equal(false)
+
+    it "does not manufacture a projection for missing sources or no entry":
+        expect(driver_mir_entry_alias_projection_required_v1(0, 3, true, true, true)).to_equal(false)
+        expect(driver_mir_entry_alias_projection_required_v1(3, 8, false, true, true)).to_equal(false)

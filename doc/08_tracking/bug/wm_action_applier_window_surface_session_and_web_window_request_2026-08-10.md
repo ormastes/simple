@@ -1,11 +1,21 @@
 # `wm_action_applier_spec` — 2 real product gaps, exposed once the spec stopped being dead
-## Closed 2026-09-16 — ...-08-10.md` (that blocker is now resolved — see `aliased_use_import_does_not_bind_in_transi
+## Closed 2026-11-06 - spec was stale, not the product
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
-bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
-fresh dated repro if the symptom returns.
+The 2026-09-16 "Closed" header was bookkeeping only; the spec still failed
+11/18 until now. Verdict: the spec was stale against an intentional redesign.
+Commit 4ad1c8058b9 removed `WindowSurface.session` (content is now
+`content_kind`/`content_handle`/`content_html`/`content_revision`, GUI trees
+live in the Compositor registry via `gui_content_tree(handle)`), and web
+windows carry body HTML; `wm_action_web_window_request` no longer exists.
+Resize/restore now clamp to `WM_WINDOW_MIN_*` and the work area (top 48,
+bottom 56 -> maximized h=376). The one real product gap was
+`HOST_WM_MAX_WINDOW_ID` (identity exhaustion guard): added in
+`src/os/compositor/wm_action_lifecycle.spl`. Spec updated to the current
+contract with equivalent coverage: 18/18 on `01_unit` (was 11/18). The
+mirror `test/unit/` leg is already on the new contract but executes 0
+examples (separate defect).
 
-## Triage 2026-09-13
+## Triage 2026-09-13 (historical)
 Re-ran test/01_unit/os/compositor/wm_action_applier_spec.spl: now
 declared>=18 executed=18 passed=11 failed=7 -- MORE failures than the doc's
 own "after" snapshot (17 declared, 2 failed), so this has regressed further
@@ -17,7 +27,7 @@ restore). OPEN, out of scope for this pass: this is compositor/window-manager
 product code (src/os/compositor/wm_action_applier.spl-class), not a
 contained fix -- 7 distinct gaps need their own investigation.
 
-**Status:** OPEN — RED and left RED. The spec is correct; the product is not.
+**Status:** CLOSED 2026-11-06 (spec updated + HOST_WM_MAX_WINDOW_ID added)
 **Filed:** 2026-08-10
 **Supersedes the "zero-examples" half of**
 `doc/08_tracking/bug/wm_action_applier_spec_dead_on_both_legs_vulkan_order_env_get_2026-08-10.md`

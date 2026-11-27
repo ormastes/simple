@@ -1,0 +1,1116 @@
+# Complexity Baseline Serialization and Differential Comparison (V1)
+#
+# Implements structured PerfBaselineSnapshotV1 / PerfBaselineEntryV1 serialization
+# (SDN default + explicit JSON interop via char_from_code(123/125)) and
+# differential complexity classification (design §§9.2, 9.4, 11.3, 12.1, 12.5;
+# scenario C16; PERF-COST-002).
+#
+# Key soundness invariant (C16):
+#   Analyzer or model version upgrades on unchanged function_semantic_revision +
+#   callee_summary_hashes classify as ModelOrAnalyzerChange ("model_change") and
+#   NEVER emit false PERF-COST-002 source-regression warnings.
+
+use std.common.string_core.{char_from_code}
+use std.common.sdn.parser.{parse_untrusted, parse_with_issues}
+use std.common.sdn.value.{SdnValue}
+use std.common.json.tokenizer.{json_tokenize, json_unescape_string}
+use compiler.semantics.perf.perf_analysis_contracts_v1.{
+    PerfResourceDimension, BoundRelation, BoundRegime,
+    AnalysisResultStatus, BoundOrigin, FunctionCostSummaryV1
+}
+use compiler.semantics.perf.resource_contract_verifier_v1.{
+    cost_expr_degree_v1, cost_expr_log_power_v1, render_cost_expr_v1
+}
+
+struct PerfBaselineEntryV1:
+    function_id: text
+    resource: PerfResourceDimension
+    function_semantic_revision: text
+    callee_summary_hashes: [text]
+    bound_expression: text
+    max_degree: i64
+    log_power: i64
+    relation: BoundRelation
+    regime: BoundRegime
+    status: AnalysisResultStatus
+    origin: BoundOrigin
+    unresolved_terms: [text]
+    is_hot_path: bool
+
+struct PerfBaselineSnapshotV1:
+    schema_version: i64
+    source_revision: text
+    analyzer_version: text
+    model_version: text
+    numeric_policy: text
+    target_config: text
+    analysis_profile: text
+    entries: [PerfBaselineEntryV1]
+
+enum BaselineDeltaKindV1:
+    SourceRegression
+    ModelOrAnalyzerChange
+    CoverageChange
+    ConfigChange
+    Unchanged
+    Improved
+
+impl BaselineDeltaKindV1:
+    fn name() -> text:
+        match self:
+            case BaselineDeltaKindV1.SourceRegression: "SourceRegression"
+            case BaselineDeltaKindV1.ModelOrAnalyzerChange: "ModelOrAnalyzerChange"
+            case BaselineDeltaKindV1.CoverageChange: "CoverageChange"
+            case BaselineDeltaKindV1.ConfigChange: "ConfigChange"
+            case BaselineDeltaKindV1.Unchanged: "Unchanged"
+            case BaselineDeltaKindV1.Improved: "Improved"
+
+    fn category_label() -> text:
+        match self:
+            case BaselineDeltaKindV1.SourceRegression: "source_regression"
+            case BaselineDeltaKindV1.ModelOrAnalyzerChange: "model_change"
+            case BaselineDeltaKindV1.CoverageChange: "coverage_change"
+            case BaselineDeltaKindV1.ConfigChange: "config_change"
+            case BaselineDeltaKindV1.Unchanged: "unchanged"
+            case BaselineDeltaKindV1.Improved: "improved"
+
+struct ComplexityBaselineDeltaV1:
+    function_id: text
+    resource: PerfResourceDimension
+    kind: BaselineDeltaKindV1
+    category_label: text
+    rule_code: text
+    previous_bound: text
+    current_bound: text
+    root_dependency_changed: bool
+    is_hot_path: bool
+    message: text
+
+struct ComplexityBaselineDiffReportV1:
+    baseline_revision: text
+    current_revision: text
+    baseline_analyzer_version: text
+    current_analyzer_version: text
+    baseline_model_version: text
+    current_model_version: text
+    deltas: [ComplexityBaselineDeltaV1]
+    warnings: [ComplexityBaselineDeltaV1]
+    source_regression_count: i64
+    model_change_count: i64
+    coverage_change_count: i64
+    config_change_count: i64
+    improved_count: i64
+    unchanged_count: i64
+
+fn _cbd_lb() -> text:
+    char_from_code(123)
+
+fn _cbd_rb() -> text:
+    char_from_code(125)
+
+fn _cbd_join(items: [text], sep: text) -> text:
+    var out = ""
+    var first = true
+    for item in items:
+        if not first:
+            out = out + sep
+        out = out + item
+        first = false
+    out
+
+fn _cbd_text_list_eq(lhs: [text], rhs: [text]) -> bool:
+    if lhs.len() != rhs.len():
+        return false
+    var i = 0
+    while i < lhs.len():
+        if lhs[i] != rhs[i]:
+            return false
+        i = i + 1
+    true
+
+fn _cbd_escape_string(raw: text) -> text:
+    var out = ""
+    val total = raw.byte_len()
+    var seg_start = 0
+    var i = 0
+    while i < total:
+        val b = raw.byte_at(i)
+        var esc = ""
+        if b == 92:
+            esc = "\\\\"
+        elif b == 34:
+            esc = "\\\""
+        elif b == 10:
+            esc = "\\n"
+        elif b == 13:
+            esc = "\\r"
+        elif b == 9:
+            esc = "\\t"
+        if esc != "":
+            if i > seg_start:
+                out = out + raw.slice(seg_start, i)
+            out = out + esc
+            seg_start = i + 1
+        i = i + 1
+    if seg_start == 0:
+        return raw
+    if seg_start < total:
+        out = out + raw.slice(seg_start, total)
+    out
+
+fn _cbd_quote(raw: text) -> text:
+    "\"" + _cbd_escape_string(raw) + "\""
+
+fn _cbd_bool_text(flag: bool) -> text:
+    if flag: "true" else: "false"
+
+fn _cbd_quote_list(items: [text]) -> text:
+    var parts: [text] = []
+    for item in items:
+        parts.push(_cbd_quote(item))
+    "[" + _cbd_join(parts, ", ") + "]"
+
+fn _cbd_parse_resource(raw: text) -> Result<PerfResourceDimension, text>:
+    match raw:
+        case "work": Ok(PerfResourceDimension.Work)
+        case "alloc_count": Ok(PerfResourceDimension.AllocCount)
+        case "alloc_bytes_total": Ok(PerfResourceDimension.AllocBytesTotal)
+        case "aux_peak_bytes": Ok(PerfResourceDimension.AuxPeakBytes)
+        case "output_bytes": Ok(PerfResourceDimension.OutputBytes)
+        case "io_calls": Ok(PerfResourceDimension.IoCalls)
+        case "io_bytes": Ok(PerfResourceDimension.IoBytes)
+        case "lock_ops": Ok(PerfResourceDimension.LockOps)
+        case "gpu_transfer_bytes": Ok(PerfResourceDimension.GpuTransferBytes)
+        case _: Err("perf-baseline-invalid-resource:" + raw)
+
+fn _cbd_parse_relation(raw: text) -> Result<BoundRelation, text>:
+    match raw:
+        case "UpperBound": Ok(BoundRelation.UpperBound)
+        case "LowerBound": Ok(BoundRelation.LowerBound)
+        case "Exact": Ok(BoundRelation.Exact)
+        case "TightBound": Ok(BoundRelation.TightBound)
+        case "Estimate": Ok(BoundRelation.Estimate)
+        case _: Err("perf-baseline-invalid-relation:" + raw)
+
+fn _cbd_parse_regime(raw: text) -> Result<BoundRegime, text>:
+    match raw:
+        case "WorstCase": Ok(BoundRegime.WorstCase)
+        case "Expected": Ok(BoundRegime.Expected)
+        case "Amortized": Ok(BoundRegime.Amortized)
+        case "ExpectedAmortized": Ok(BoundRegime.ExpectedAmortized)
+        case _: Err("perf-baseline-invalid-regime:" + raw)
+
+fn _cbd_parse_status(raw: text) -> Result<AnalysisResultStatus, text>:
+    match raw:
+        case "Complete": Ok(AnalysisResultStatus.Complete)
+        case "Partial": Ok(AnalysisResultStatus.Partial)
+        case "Unknown": Ok(AnalysisResultStatus.Unknown)
+        case "Cancelled": Ok(AnalysisResultStatus.Cancelled)
+        case _: Err("perf-baseline-invalid-status:" + raw)
+
+fn _cbd_parse_origin(raw: text) -> Result<BoundOrigin, text>:
+    match raw:
+        case "Inferred": Ok(BoundOrigin.Inferred)
+        case "ImportedContract": Ok(BoundOrigin.ImportedContract)
+        case "Measured": Ok(BoundOrigin.Measured)
+        case "Heuristic": Ok(BoundOrigin.Heuristic)
+        case _: Err("perf-baseline-invalid-origin:" + raw)
+
+fn baseline_entry_from_summary_v1(
+    summary: FunctionCostSummaryV1,
+    resource: PerfResourceDimension,
+    is_hot_path: bool
+) -> PerfBaselineEntryV1:
+    for ev in summary.resource_bounds:
+        if ev.resource == resource:
+            val shown = if ev.rendered_expression != "": ev.rendered_expression else: render_cost_expr_v1(ev.expression)
+            return PerfBaselineEntryV1(
+                function_id: summary.function_id,
+                resource: resource,
+                function_semantic_revision: summary.semantic_revision,
+                callee_summary_hashes: summary.dependency_summary_hashes,
+                bound_expression: shown,
+                max_degree: cost_expr_degree_v1(ev.expression),
+                log_power: cost_expr_log_power_v1(ev.expression),
+                relation: ev.relation,
+                regime: ev.regime,
+                status: ev.status,
+                origin: ev.origin,
+                unresolved_terms: summary.unresolved_terms,
+                is_hot_path: is_hot_path
+            )
+    PerfBaselineEntryV1(
+        function_id: summary.function_id,
+        resource: resource,
+        function_semantic_revision: summary.semantic_revision,
+        callee_summary_hashes: summary.dependency_summary_hashes,
+        bound_expression: "unknown",
+        max_degree: 0,
+        log_power: 0,
+        relation: BoundRelation.UpperBound,
+        regime: BoundRegime.WorstCase,
+        status: AnalysisResultStatus.Unknown,
+        origin: BoundOrigin.Inferred,
+        unresolved_terms: summary.unresolved_terms,
+        is_hot_path: is_hot_path
+    )
+
+# ============================================================================
+# SDN Serialization and Parsing
+# ============================================================================
+
+fn serialize_baseline_sdn_v1(snapshot: PerfBaselineSnapshotV1) -> text:
+    var lines: [text] = []
+    lines.push("schema_version: " + snapshot.schema_version.to_string())
+    lines.push("source_revision: " + _cbd_quote(snapshot.source_revision))
+    lines.push("analyzer_version: " + _cbd_quote(snapshot.analyzer_version))
+    lines.push("model_version: " + _cbd_quote(snapshot.model_version))
+    lines.push("numeric_policy: " + _cbd_quote(snapshot.numeric_policy))
+    lines.push("target_config: " + _cbd_quote(snapshot.target_config))
+    lines.push("analysis_profile: " + _cbd_quote(snapshot.analysis_profile))
+    if snapshot.entries.len() == 0:
+        lines.push("entries: []")
+    else:
+        lines.push("entries:")
+        for entry in snapshot.entries:
+            lines.push("  - function_id: " + _cbd_quote(entry.function_id))
+            lines.push("    resource: " + _cbd_quote(entry.resource.name()))
+            lines.push("    function_semantic_revision: " + _cbd_quote(entry.function_semantic_revision))
+            lines.push("    callee_summary_hashes: " + _cbd_quote_list(entry.callee_summary_hashes))
+            lines.push("    bound_expression: " + _cbd_quote(entry.bound_expression))
+            lines.push("    max_degree: " + entry.max_degree.to_string())
+            lines.push("    log_power: " + entry.log_power.to_string())
+            lines.push("    relation: " + _cbd_quote(entry.relation.name()))
+            lines.push("    regime: " + _cbd_quote(entry.regime.name()))
+            lines.push("    status: " + _cbd_quote(entry.status.name()))
+            lines.push("    origin: " + _cbd_quote(entry.origin.name()))
+            lines.push("    unresolved_terms: " + _cbd_quote_list(entry.unresolved_terms))
+            lines.push("    is_hot_path: " + _cbd_bool_text(entry.is_hot_path))
+    _cbd_join(lines, "\n") + "\n"
+
+fn _cbd_sdn_fields(value: SdnValue, allowed: [text]) -> Result<Dict<text, SdnValue>, text>:
+    val fields = match value:
+        case SdnValue.Dict(items): items
+        case _: return Err("perf-baseline-sdn-mapping-required")
+    if fields.len() != allowed.len():
+        return Err("perf-baseline-sdn-field-set-invalid")
+    for key in allowed:
+        if not fields.has(key):
+            return Err("perf-baseline-sdn-missing-field:" + key)
+    Ok(fields)
+
+fn _cbd_sdn_text(fields: Dict<text, SdnValue>, key: text, allow_empty: bool) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(s):
+            if not allow_empty and s.trim() == "":
+                return Err("perf-baseline-sdn-empty-text:" + key)
+            Ok(s)
+        case _: Err("perf-baseline-sdn-text-required:" + key)
+
+fn _cbd_sdn_int(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(v): Ok(v)
+        case _: Err("perf-baseline-sdn-int-required:" + key)
+
+fn _cbd_sdn_bool(fields: Dict<text, SdnValue>, key: text) -> Result<bool, text>:
+    match fields[key]:
+        case SdnValue.Bool(v): Ok(v)
+        case _: Err("perf-baseline-sdn-bool-required:" + key)
+
+fn _cbd_sdn_text_list(fields: Dict<text, SdnValue>, key: text) -> Result<[text], text>:
+    match fields[key]:
+        case SdnValue.Array(items):
+            var out: [text] = []
+            for item in items:
+                match item:
+                    case SdnValue.String(s): out.push(s)
+                    case _: return Err("perf-baseline-sdn-list-element-must-be-text:" + key)
+            Ok(out)
+        case _: Err("perf-baseline-sdn-list-required:" + key)
+
+fn _cbd_sdn_parse_entry(value: SdnValue) -> Result<PerfBaselineEntryV1, text>:
+    val fields = _cbd_sdn_fields(value, [
+        "function_id", "resource", "function_semantic_revision",
+        "callee_summary_hashes", "bound_expression", "max_degree",
+        "log_power", "relation", "regime", "status", "origin",
+        "unresolved_terms", "is_hot_path"
+    ])?
+    val fn_id: text = match _cbd_sdn_text(fields, "function_id", false):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    val res_raw: text = match _cbd_sdn_text(fields, "resource", false):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    val resource = _cbd_parse_resource(res_raw)?
+    val sem_rev: text = match _cbd_sdn_text(fields, "function_semantic_revision", true):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    val callees = _cbd_sdn_text_list(fields, "callee_summary_hashes")?
+    val bound_expr: text = match _cbd_sdn_text(fields, "bound_expression", true):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    val max_deg = _cbd_sdn_int(fields, "max_degree")?
+    val log_pow = _cbd_sdn_int(fields, "log_power")?
+    val rel_raw: text = match _cbd_sdn_text(fields, "relation", false):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    val relation = _cbd_parse_relation(rel_raw)?
+    val reg_raw: text = match _cbd_sdn_text(fields, "regime", false):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    val regime = _cbd_parse_regime(reg_raw)?
+    val st_raw: text = match _cbd_sdn_text(fields, "status", false):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    val status = _cbd_parse_status(st_raw)?
+    val orig_raw: text = match _cbd_sdn_text(fields, "origin", false):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    val origin = _cbd_parse_origin(orig_raw)?
+    val unresolved = _cbd_sdn_text_list(fields, "unresolved_terms")?
+    val hot = _cbd_sdn_bool(fields, "is_hot_path")?
+    Ok(PerfBaselineEntryV1(
+        function_id: fn_id,
+        resource: resource,
+        function_semantic_revision: sem_rev,
+        callee_summary_hashes: callees,
+        bound_expression: bound_expr,
+        max_degree: max_deg,
+        log_power: log_pow,
+        relation: relation,
+        regime: regime,
+        status: status,
+        origin: origin,
+        unresolved_terms: unresolved,
+        is_hot_path: hot
+    ))
+
+fn parse_baseline_sdn_v1(raw: text) -> Result<PerfBaselineSnapshotV1, text>:
+    if raw.trim() == "" or raw.byte_len() > 1048576:
+        return Err("perf-baseline-sdn-size-invalid")
+    match parse_untrusted(raw):
+        case Err(e): return Err("perf-baseline-sdn-invalid:" + e)
+        case Ok(_): pass_do_nothing
+    val parsed = match parse_with_issues(raw):
+        case Err(e): return Err("perf-baseline-sdn-invalid:" + e)
+        case Ok(pair): pair
+    if parsed.1.len() != 0:
+        return Err("perf-baseline-sdn-duplicate-or-issue")
+    val root = _cbd_sdn_fields(parsed.0, [
+        "schema_version", "source_revision", "analyzer_version",
+        "model_version", "numeric_policy", "target_config",
+        "analysis_profile", "entries"
+    ])?
+    val schema_version = _cbd_sdn_int(root, "schema_version")?
+    if schema_version != 1:
+        return Err("perf-baseline-unsupported-schema:" + schema_version.to_string())
+    val source_revision: text = match _cbd_sdn_text(root, "source_revision", true):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    val analyzer_version: text = match _cbd_sdn_text(root, "analyzer_version", false):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    val model_version: text = match _cbd_sdn_text(root, "model_version", false):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    val numeric_policy: text = match _cbd_sdn_text(root, "numeric_policy", true):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    val target_config: text = match _cbd_sdn_text(root, "target_config", true):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    val analysis_profile: text = match _cbd_sdn_text(root, "analysis_profile", true):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    val raw_entries = match root["entries"]:
+        case SdnValue.Array(items): items
+        case _: return Err("perf-baseline-sdn-entries-must-be-array")
+    if raw_entries.len() > 16384:
+        return Err("perf-baseline-sdn-entries-limit-exceeded")
+    var entries: [PerfBaselineEntryV1] = []
+    for item in raw_entries:
+        val entry = _cbd_sdn_parse_entry(item)?
+        entries.push(entry)
+    Ok(PerfBaselineSnapshotV1(
+        schema_version: schema_version,
+        source_revision: source_revision,
+        analyzer_version: analyzer_version,
+        model_version: model_version,
+        numeric_policy: numeric_policy,
+        target_config: target_config,
+        analysis_profile: analysis_profile,
+        entries: entries
+    ))
+
+# ============================================================================
+# JSON Serialization and Token-Stream Parsing (brace-safe via char_from_code)
+# ============================================================================
+
+fn _cbd_serialize_entry_json(entry: PerfBaselineEntryV1) -> text:
+    val lb = _cbd_lb()
+    val rb = _cbd_rb()
+    var fields: [text] = []
+    fields.push("\"function_id\":" + _cbd_quote(entry.function_id))
+    fields.push("\"resource\":" + _cbd_quote(entry.resource.name()))
+    fields.push("\"function_semantic_revision\":" + _cbd_quote(entry.function_semantic_revision))
+    fields.push("\"callee_summary_hashes\":" + _cbd_quote_list(entry.callee_summary_hashes).replace(", ", ","))
+    fields.push("\"bound_expression\":" + _cbd_quote(entry.bound_expression))
+    fields.push("\"max_degree\":" + entry.max_degree.to_string())
+    fields.push("\"log_power\":" + entry.log_power.to_string())
+    fields.push("\"relation\":" + _cbd_quote(entry.relation.name()))
+    fields.push("\"regime\":" + _cbd_quote(entry.regime.name()))
+    fields.push("\"status\":" + _cbd_quote(entry.status.name()))
+    fields.push("\"origin\":" + _cbd_quote(entry.origin.name()))
+    fields.push("\"unresolved_terms\":" + _cbd_quote_list(entry.unresolved_terms).replace(", ", ","))
+    fields.push("\"is_hot_path\":" + _cbd_bool_text(entry.is_hot_path))
+    lb + _cbd_join(fields, ",") + rb
+
+fn serialize_baseline_json_v1(snapshot: PerfBaselineSnapshotV1) -> text:
+    val lb = _cbd_lb()
+    val rb = _cbd_rb()
+    var entry_parts: [text] = []
+    for entry in snapshot.entries:
+        entry_parts.push(_cbd_serialize_entry_json(entry))
+    var fields: [text] = []
+    fields.push("\"schema_version\":" + snapshot.schema_version.to_string())
+    fields.push("\"source_revision\":" + _cbd_quote(snapshot.source_revision))
+    fields.push("\"analyzer_version\":" + _cbd_quote(snapshot.analyzer_version))
+    fields.push("\"model_version\":" + _cbd_quote(snapshot.model_version))
+    fields.push("\"numeric_policy\":" + _cbd_quote(snapshot.numeric_policy))
+    fields.push("\"target_config\":" + _cbd_quote(snapshot.target_config))
+    fields.push("\"analysis_profile\":" + _cbd_quote(snapshot.analysis_profile))
+    fields.push("\"entries\":[" + _cbd_join(entry_parts, ",") + "]")
+    lb + _cbd_join(fields, ",") + rb
+
+fn _cbd_json_expect_token(tokens: [(text, text)], pos: i64, expected_type: text) -> Result<i64, text>:
+    if pos >= tokens.len():
+        return Err("perf-baseline-json-unexpected-eof")
+    if tokens[pos].0 != expected_type:
+        return Err("perf-baseline-json-expected-" + expected_type + "-got-" + tokens[pos].0)
+    Ok(pos + 1)
+
+fn _cbd_json_read_string(tokens: [(text, text)], pos: i64) -> Result<(text, i64), text>:
+    if pos >= tokens.len():
+        return Err("perf-baseline-json-unexpected-eof")
+    if tokens[pos].0 != "STRING":
+        return Err("perf-baseline-json-string-required")
+    Ok((json_unescape_string(tokens[pos].1), pos + 1))
+
+fn _cbd_json_read_int(tokens: [(text, text)], pos: i64) -> Result<(i64, i64), text>:
+    if pos >= tokens.len():
+        return Err("perf-baseline-json-unexpected-eof")
+    if tokens[pos].0 != "NUMBER":
+        return Err("perf-baseline-json-number-required")
+    match tokens[pos].1.parse_int():
+        case Option.Some(v): Ok((v, pos + 1))
+        case Option.None: Err("perf-baseline-json-int-invalid")
+
+fn _cbd_json_read_bool(tokens: [(text, text)], pos: i64) -> Result<(bool, i64), text>:
+    if pos >= tokens.len():
+        return Err("perf-baseline-json-unexpected-eof")
+    if tokens[pos].0 == "TRUE":
+        return Ok((true, pos + 1))
+    if tokens[pos].0 == "FALSE":
+        return Ok((false, pos + 1))
+    Err("perf-baseline-json-bool-required")
+
+fn _cbd_json_read_string_array(tokens: [(text, text)], pos: i64) -> Result<([text], i64), text>:
+    var p = _cbd_json_expect_token(tokens, pos, "LBRACKET")?
+    var out: [text] = []
+    if p < tokens.len() and tokens[p].0 == "RBRACKET":
+        return Ok((out, p + 1))
+    var running = true
+    while running:
+        val pair = _cbd_json_read_string(tokens, p)?
+        out.push(pair.0)
+        p = pair.1
+        if p >= tokens.len():
+            return Err("perf-baseline-json-unterminated-array")
+        if tokens[p].0 == "COMMA":
+            p = p + 1
+        elif tokens[p].0 == "RBRACKET":
+            p = p + 1
+            running = false
+        else:
+            return Err("perf-baseline-json-expected-comma-or-rbracket")
+    Ok((out, p))
+
+fn _cbd_json_seen_add(seen: [text], key: text) -> Result<[text], text>:
+    for existing in seen:
+        if existing == key:
+            return Err("perf-baseline-json-duplicate-key:" + key)
+    var next = seen
+    next.push(key)
+    Ok(next)
+
+fn _cbd_json_read_entry(tokens: [(text, text)], pos: i64) -> Result<(PerfBaselineEntryV1, i64), text>:
+    var p = _cbd_json_expect_token(tokens, pos, "LBRACE")?
+    if p < tokens.len() and tokens[p].0 == "RBRACE":
+        return Err("perf-baseline-json-empty-entry")
+    var seen: [text] = []
+    var fn_id = ""
+    var res_raw = ""
+    var sem_rev = ""
+    var callees: [text] = []
+    var bound_expr = ""
+    var max_deg = 0
+    var log_pow = 0
+    var rel_raw = ""
+    var reg_raw = ""
+    var st_raw = ""
+    var orig_raw = ""
+    var unresolved: [text] = []
+    var hot = false
+
+    var running = true
+    while running:
+        val key_pair = _cbd_json_read_string(tokens, p)?
+        val key = key_pair.0
+        p = _cbd_json_expect_token(tokens, key_pair.1, "COLON")?
+        seen = _cbd_json_seen_add(seen, key)?
+        if key == "function_id":
+            val v = _cbd_json_read_string(tokens, p)?
+            fn_id = v.0
+            p = v.1
+        elif key == "resource":
+            val v = _cbd_json_read_string(tokens, p)?
+            res_raw = v.0
+            p = v.1
+        elif key == "function_semantic_revision":
+            val v = _cbd_json_read_string(tokens, p)?
+            sem_rev = v.0
+            p = v.1
+        elif key == "callee_summary_hashes":
+            val v = _cbd_json_read_string_array(tokens, p)?
+            callees = v.0
+            p = v.1
+        elif key == "bound_expression":
+            val v = _cbd_json_read_string(tokens, p)?
+            bound_expr = v.0
+            p = v.1
+        elif key == "max_degree":
+            val v = _cbd_json_read_int(tokens, p)?
+            max_deg = v.0
+            p = v.1
+        elif key == "log_power":
+            val v = _cbd_json_read_int(tokens, p)?
+            log_pow = v.0
+            p = v.1
+        elif key == "relation":
+            val v = _cbd_json_read_string(tokens, p)?
+            rel_raw = v.0
+            p = v.1
+        elif key == "regime":
+            val v = _cbd_json_read_string(tokens, p)?
+            reg_raw = v.0
+            p = v.1
+        elif key == "status":
+            val v = _cbd_json_read_string(tokens, p)?
+            st_raw = v.0
+            p = v.1
+        elif key == "origin":
+            val v = _cbd_json_read_string(tokens, p)?
+            orig_raw = v.0
+            p = v.1
+        elif key == "unresolved_terms":
+            val v = _cbd_json_read_string_array(tokens, p)?
+            unresolved = v.0
+            p = v.1
+        elif key == "is_hot_path":
+            val v = _cbd_json_read_bool(tokens, p)?
+            hot = v.0
+            p = v.1
+        else:
+            return Err("perf-baseline-json-unknown-entry-key:" + key)
+
+        if p >= tokens.len():
+            return Err("perf-baseline-json-unterminated-entry")
+        if tokens[p].0 == "COMMA":
+            p = p + 1
+        elif tokens[p].0 == "RBRACE":
+            p = p + 1
+            running = false
+        else:
+            return Err("perf-baseline-json-expected-comma-or-rbrace")
+
+    if seen.len() != 13 or fn_id.trim() == "":
+        return Err("perf-baseline-json-entry-incomplete")
+    val resource = _cbd_parse_resource(res_raw)?
+    val relation = _cbd_parse_relation(rel_raw)?
+    val regime = _cbd_parse_regime(reg_raw)?
+    val status = _cbd_parse_status(st_raw)?
+    val origin = _cbd_parse_origin(orig_raw)?
+    Ok((PerfBaselineEntryV1(
+        function_id: fn_id,
+        resource: resource,
+        function_semantic_revision: sem_rev,
+        callee_summary_hashes: callees,
+        bound_expression: bound_expr,
+        max_degree: max_deg,
+        log_power: log_pow,
+        relation: relation,
+        regime: regime,
+        status: status,
+        origin: origin,
+        unresolved_terms: unresolved,
+        is_hot_path: hot
+    ), p))
+
+fn _cbd_json_read_entries_array(tokens: [(text, text)], pos: i64) -> Result<([PerfBaselineEntryV1], i64), text>:
+    var p = _cbd_json_expect_token(tokens, pos, "LBRACKET")?
+    var out: [PerfBaselineEntryV1] = []
+    if p < tokens.len() and tokens[p].0 == "RBRACKET":
+        return Ok((out, p + 1))
+    var running = true
+    while running:
+        val pair = _cbd_json_read_entry(tokens, p)?
+        out.push(pair.0)
+        p = pair.1
+        if out.len() > 16384:
+            return Err("perf-baseline-json-entries-limit-exceeded")
+        if p >= tokens.len():
+            return Err("perf-baseline-json-unterminated-entries")
+        if tokens[p].0 == "COMMA":
+            p = p + 1
+        elif tokens[p].0 == "RBRACKET":
+            p = p + 1
+            running = false
+        else:
+            return Err("perf-baseline-json-expected-comma-or-rbracket")
+    Ok((out, p))
+
+fn parse_baseline_json_v1(raw: text) -> Result<PerfBaselineSnapshotV1, text>:
+    if raw.trim() == "" or raw.byte_len() > 1048576:
+        return Err("perf-baseline-json-size-invalid")
+    val tokens = json_tokenize(raw)
+    if tokens.len() == 0:
+        return Err("perf-baseline-json-empty")
+    for tok in tokens:
+        if tok.0 == "INVALID":
+            return Err("perf-baseline-json-invalid-token:" + tok.1)
+    var p = _cbd_json_expect_token(tokens, 0, "LBRACE")?
+    if p < tokens.len() and tokens[p].0 == "RBRACE":
+        return Err("perf-baseline-json-empty-object")
+
+    var seen: [text] = []
+    var schema_version = 0
+    var source_revision = ""
+    var analyzer_version = ""
+    var model_version = ""
+    var numeric_policy = ""
+    var target_config = ""
+    var analysis_profile = ""
+    var entries: [PerfBaselineEntryV1] = []
+
+    var running = true
+    while running:
+        val key_pair = _cbd_json_read_string(tokens, p)?
+        val key = key_pair.0
+        p = _cbd_json_expect_token(tokens, key_pair.1, "COLON")?
+        seen = _cbd_json_seen_add(seen, key)?
+        if key == "schema_version":
+            val v = _cbd_json_read_int(tokens, p)?
+            schema_version = v.0
+            p = v.1
+        elif key == "source_revision":
+            val v = _cbd_json_read_string(tokens, p)?
+            source_revision = v.0
+            p = v.1
+        elif key == "analyzer_version":
+            val v = _cbd_json_read_string(tokens, p)?
+            analyzer_version = v.0
+            p = v.1
+        elif key == "model_version":
+            val v = _cbd_json_read_string(tokens, p)?
+            model_version = v.0
+            p = v.1
+        elif key == "numeric_policy":
+            val v = _cbd_json_read_string(tokens, p)?
+            numeric_policy = v.0
+            p = v.1
+        elif key == "target_config":
+            val v = _cbd_json_read_string(tokens, p)?
+            target_config = v.0
+            p = v.1
+        elif key == "analysis_profile":
+            val v = _cbd_json_read_string(tokens, p)?
+            analysis_profile = v.0
+            p = v.1
+        elif key == "entries":
+            val v = _cbd_json_read_entries_array(tokens, p)?
+            entries = v.0
+            p = v.1
+        else:
+            return Err("perf-baseline-json-unknown-key:" + key)
+
+        if p >= tokens.len():
+            return Err("perf-baseline-json-unterminated-root")
+        if tokens[p].0 == "COMMA":
+            p = p + 1
+        elif tokens[p].0 == "RBRACE":
+            p = p + 1
+            running = false
+        else:
+            return Err("perf-baseline-json-expected-comma-or-rbrace")
+
+    if p != tokens.len():
+        return Err("perf-baseline-json-trailing-tokens")
+    if seen.len() != 8:
+        return Err("perf-baseline-json-missing-required-fields")
+    if schema_version != 1:
+        return Err("perf-baseline-unsupported-schema:" + schema_version.to_string())
+    if analyzer_version.trim() == "" or model_version.trim() == "":
+        return Err("perf-baseline-json-empty-version")
+
+    Ok(PerfBaselineSnapshotV1(
+        schema_version: schema_version,
+        source_revision: source_revision,
+        analyzer_version: analyzer_version,
+        model_version: model_version,
+        numeric_policy: numeric_policy,
+        target_config: target_config,
+        analysis_profile: analysis_profile,
+        entries: entries
+    ))
+
+fn parse_baseline_auto_v1(raw: text, path_hint: text) -> Result<PerfBaselineSnapshotV1, text>:
+    val trimmed = raw.trim()
+    val lb = _cbd_lb()
+    if path_hint.ends_with(".json") or trimmed.starts_with(lb):
+        return parse_baseline_json_v1(raw)
+    parse_baseline_sdn_v1(raw)
+
+# ============================================================================
+# Differential Baseline Comparison (§12.5, C16, PERF-COST-002)
+# ============================================================================
+
+fn _cbd_find_entry(
+    entries: [PerfBaselineEntryV1],
+    function_id: text,
+    resource: PerfResourceDimension
+) -> Option<PerfBaselineEntryV1>:
+    for entry in entries:
+        if entry.function_id == function_id and entry.resource == resource:
+            return Option.Some(entry)
+    Option.None
+
+fn _cbd_compare_bounds(base: PerfBaselineEntryV1, curr: PerfBaselineEntryV1) -> i64:
+    if curr.max_degree > base.max_degree:
+        return 1
+    if curr.max_degree < base.max_degree:
+        return -1
+    if curr.log_power > base.log_power:
+        return 1
+    if curr.log_power < base.log_power:
+        return -1
+    0
+
+fn _cbd_classify_pair(
+    baseline: PerfBaselineSnapshotV1,
+    current: PerfBaselineSnapshotV1,
+    base_entry: PerfBaselineEntryV1,
+    curr_entry: PerfBaselineEntryV1
+) -> ComplexityBaselineDeltaV1:
+    val config_changed = (baseline.numeric_policy != current.numeric_policy) or (baseline.target_config != current.target_config)
+    val model_or_analyzer_changed = (baseline.analyzer_version != current.analyzer_version) or (baseline.model_version != current.model_version)
+    val root_dep_changed = not _cbd_text_list_eq(base_entry.callee_summary_hashes, curr_entry.callee_summary_hashes)
+    val source_or_deps_changed = (base_entry.function_semantic_revision != curr_entry.function_semantic_revision) or root_dep_changed
+    val res_name = curr_entry.resource.name()
+    val hot = base_entry.is_hot_path or curr_entry.is_hot_path
+
+    if config_changed:
+        val kind = BaselineDeltaKindV1.ConfigChange
+        return ComplexityBaselineDeltaV1(
+            function_id: curr_entry.function_id,
+            resource: curr_entry.resource,
+            kind: kind,
+            category_label: kind.category_label(),
+            rule_code: "",
+            previous_bound: base_entry.bound_expression,
+            current_bound: curr_entry.bound_expression,
+            root_dependency_changed: root_dep_changed,
+            is_hot_path: hot,
+            message: "Target or numeric configuration changed (" + baseline.target_config + "/" + baseline.numeric_policy + " -> " + current.target_config + "/" + current.numeric_policy + "); bounds are not directly comparable"
+        )
+
+    if model_or_analyzer_changed:
+        val kind = BaselineDeltaKindV1.ModelOrAnalyzerChange
+        val detail = if not source_or_deps_changed:
+            "Analyzer/model version changed with unchanged function and callee revisions (" + base_entry.bound_expression + " -> " + curr_entry.bound_expression + ")"
+        else:
+            "Analyzer/model version changed alongside source revision (" + base_entry.bound_expression + " -> " + curr_entry.bound_expression + "); rebaseline under matching model before attributing to code"
+        return ComplexityBaselineDeltaV1(
+            function_id: curr_entry.function_id,
+            resource: curr_entry.resource,
+            kind: kind,
+            category_label: kind.category_label(),
+            rule_code: "",
+            previous_bound: base_entry.bound_expression,
+            current_bound: curr_entry.bound_expression,
+            root_dependency_changed: root_dep_changed,
+            is_hot_path: hot,
+            message: detail
+        )
+
+    if (base_entry.status != AnalysisResultStatus.Complete or
+            curr_entry.status != AnalysisResultStatus.Complete or
+            base_entry.regime != curr_entry.regime):
+        val kind = BaselineDeltaKindV1.CoverageChange
+        return ComplexityBaselineDeltaV1(
+            function_id: curr_entry.function_id,
+            resource: curr_entry.resource,
+            kind: kind,
+            category_label: kind.category_label(),
+            rule_code: "",
+            previous_bound: base_entry.bound_expression,
+            current_bound: curr_entry.bound_expression,
+            root_dependency_changed: root_dep_changed,
+            is_hot_path: hot,
+            message: "Analysis coverage or bound regime changed (" + base_entry.status.name() + "/" + base_entry.regime.name() + " -> " + curr_entry.status.name() + "/" + curr_entry.regime.name() + ")"
+        )
+
+    val cmp = _cbd_compare_bounds(base_entry, curr_entry)
+    if cmp > 0:
+        if source_or_deps_changed:
+            val kind = BaselineDeltaKindV1.SourceRegression
+            return ComplexityBaselineDeltaV1(
+                function_id: curr_entry.function_id,
+                resource: curr_entry.resource,
+                kind: kind,
+                category_label: kind.category_label(),
+                rule_code: "PERF-COST-002",
+                previous_bound: base_entry.bound_expression,
+                current_bound: curr_entry.bound_expression,
+                root_dependency_changed: root_dep_changed,
+                is_hot_path: hot,
+                message: "Inferred " + res_name + " upper bound increased from " + base_entry.bound_expression + " to " + curr_entry.bound_expression
+            )
+        val kind = BaselineDeltaKindV1.ModelOrAnalyzerChange
+        return ComplexityBaselineDeltaV1(
+            function_id: curr_entry.function_id,
+            resource: curr_entry.resource,
+            kind: kind,
+            category_label: kind.category_label(),
+            rule_code: "",
+            previous_bound: base_entry.bound_expression,
+            current_bound: curr_entry.bound_expression,
+            root_dependency_changed: false,
+            is_hot_path: hot,
+            message: "Bound representation changed without function or callee revision change (" + base_entry.bound_expression + " -> " + curr_entry.bound_expression + ")"
+        )
+
+    if cmp < 0:
+        val kind = BaselineDeltaKindV1.Improved
+        return ComplexityBaselineDeltaV1(
+            function_id: curr_entry.function_id,
+            resource: curr_entry.resource,
+            kind: kind,
+            category_label: kind.category_label(),
+            rule_code: "",
+            previous_bound: base_entry.bound_expression,
+            current_bound: curr_entry.bound_expression,
+            root_dependency_changed: root_dep_changed,
+            is_hot_path: hot,
+            message: "Inferred " + res_name + " bound improved from " + base_entry.bound_expression + " to " + curr_entry.bound_expression
+        )
+
+    if (base_entry.relation != curr_entry.relation or
+            not _cbd_text_list_eq(base_entry.unresolved_terms, curr_entry.unresolved_terms)):
+        val kind = BaselineDeltaKindV1.CoverageChange
+        return ComplexityBaselineDeltaV1(
+            function_id: curr_entry.function_id,
+            resource: curr_entry.resource,
+            kind: kind,
+            category_label: kind.category_label(),
+            rule_code: "",
+            previous_bound: base_entry.bound_expression,
+            current_bound: curr_entry.bound_expression,
+            root_dependency_changed: root_dep_changed,
+            is_hot_path: hot,
+            message: "Evidence relation or unresolved coverage terms changed at bound " + curr_entry.bound_expression
+        )
+
+    val kind = BaselineDeltaKindV1.Unchanged
+    ComplexityBaselineDeltaV1(
+        function_id: curr_entry.function_id,
+        resource: curr_entry.resource,
+        kind: kind,
+        category_label: kind.category_label(),
+        rule_code: "",
+        previous_bound: base_entry.bound_expression,
+        current_bound: curr_entry.bound_expression,
+        root_dependency_changed: root_dep_changed,
+        is_hot_path: hot,
+        message: "Inferred " + res_name + " bound unchanged at " + curr_entry.bound_expression
+    )
+
+fn compare_complexity_baselines_v1(
+    baseline: PerfBaselineSnapshotV1,
+    current: PerfBaselineSnapshotV1
+) -> ComplexityBaselineDiffReportV1:
+    var deltas: [ComplexityBaselineDeltaV1] = []
+    var warnings: [ComplexityBaselineDeltaV1] = []
+    var src_reg = 0
+    var mod_chg = 0
+    var cov_chg = 0
+    var cfg_chg = 0
+    var imp_cnt = 0
+    var unc_cnt = 0
+
+    for curr_entry in current.entries:
+        match _cbd_find_entry(baseline.entries, curr_entry.function_id, curr_entry.resource):
+            case Option.Some(base_entry):
+                val delta = _cbd_classify_pair(baseline, current, base_entry, curr_entry)
+                deltas.push(delta)
+                if delta.rule_code == "PERF-COST-002":
+                    warnings.push(delta)
+                match delta.kind:
+                    case BaselineDeltaKindV1.SourceRegression: src_reg = src_reg + 1
+                    case BaselineDeltaKindV1.ModelOrAnalyzerChange: mod_chg = mod_chg + 1
+                    case BaselineDeltaKindV1.CoverageChange: cov_chg = cov_chg + 1
+                    case BaselineDeltaKindV1.ConfigChange: cfg_chg = cfg_chg + 1
+                    case BaselineDeltaKindV1.Improved: imp_cnt = imp_cnt + 1
+                    case BaselineDeltaKindV1.Unchanged: unc_cnt = unc_cnt + 1
+            case Option.None:
+                val kind = BaselineDeltaKindV1.CoverageChange
+                val added_delta = ComplexityBaselineDeltaV1(
+                    function_id: curr_entry.function_id,
+                    resource: curr_entry.resource,
+                    kind: kind,
+                    category_label: kind.category_label(),
+                    rule_code: "",
+                    previous_bound: "absent",
+                    current_bound: curr_entry.bound_expression,
+                    root_dependency_changed: false,
+                    is_hot_path: curr_entry.is_hot_path,
+                    message: "New analyzed function entry in current snapshot (" + curr_entry.bound_expression + ")"
+                )
+                deltas.push(added_delta)
+                cov_chg = cov_chg + 1
+
+    for base_entry in baseline.entries:
+        match _cbd_find_entry(current.entries, base_entry.function_id, base_entry.resource):
+            case Option.Some(_): pass_do_nothing
+            case Option.None:
+                val kind = BaselineDeltaKindV1.CoverageChange
+                val removed_delta = ComplexityBaselineDeltaV1(
+                    function_id: base_entry.function_id,
+                    resource: base_entry.resource,
+                    kind: kind,
+                    category_label: kind.category_label(),
+                    rule_code: "",
+                    previous_bound: base_entry.bound_expression,
+                    current_bound: "absent",
+                    root_dependency_changed: false,
+                    is_hot_path: base_entry.is_hot_path,
+                    message: "Function entry present in baseline is absent from current snapshot"
+                )
+                deltas.push(removed_delta)
+                cov_chg = cov_chg + 1
+
+    ComplexityBaselineDiffReportV1(
+        baseline_revision: baseline.source_revision,
+        current_revision: current.source_revision,
+        baseline_analyzer_version: baseline.analyzer_version,
+        current_analyzer_version: current.analyzer_version,
+        baseline_model_version: baseline.model_version,
+        current_model_version: current.model_version,
+        deltas: deltas,
+        warnings: warnings,
+        source_regression_count: src_reg,
+        model_change_count: mod_chg,
+        coverage_change_count: cov_chg,
+        config_change_count: cfg_chg,
+        improved_count: imp_cnt,
+        unchanged_count: unc_cnt
+    )
+
+# ============================================================================
+# Diff Report Formatters (SDN default, JSON interop, human-readable text)
+# ============================================================================
+
+fn format_diff_report_sdn_v1(report: ComplexityBaselineDiffReportV1) -> text:
+    var lines: [text] = []
+    lines.push("schema_version: 1")
+    lines.push("baseline_revision: " + _cbd_quote(report.baseline_revision))
+    lines.push("current_revision: " + _cbd_quote(report.current_revision))
+    lines.push("baseline_analyzer_version: " + _cbd_quote(report.baseline_analyzer_version))
+    lines.push("current_analyzer_version: " + _cbd_quote(report.current_analyzer_version))
+    lines.push("baseline_model_version: " + _cbd_quote(report.baseline_model_version))
+    lines.push("current_model_version: " + _cbd_quote(report.current_model_version))
+    lines.push("source_regression_count: " + report.source_regression_count.to_string())
+    lines.push("model_change_count: " + report.model_change_count.to_string())
+    lines.push("coverage_change_count: " + report.coverage_change_count.to_string())
+    lines.push("config_change_count: " + report.config_change_count.to_string())
+    lines.push("improved_count: " + report.improved_count.to_string())
+    lines.push("unchanged_count: " + report.unchanged_count.to_string())
+    if report.deltas.len() == 0:
+        lines.push("deltas: []")
+    else:
+        lines.push("deltas:")
+        for d in report.deltas:
+            lines.push("  - function_id: " + _cbd_quote(d.function_id))
+            lines.push("    resource: " + _cbd_quote(d.resource.name()))
+            lines.push("    kind: " + _cbd_quote(d.kind.name()))
+            lines.push("    category: " + _cbd_quote(d.category_label))
+            lines.push("    rule_code: " + _cbd_quote(d.rule_code))
+            lines.push("    previous_bound: " + _cbd_quote(d.previous_bound))
+            lines.push("    current_bound: " + _cbd_quote(d.current_bound))
+            lines.push("    root_dependency_changed: " + _cbd_bool_text(d.root_dependency_changed))
+            lines.push("    is_hot_path: " + _cbd_bool_text(d.is_hot_path))
+            lines.push("    message: " + _cbd_quote(d.message))
+    _cbd_join(lines, "\n") + "\n"
+
+fn format_diff_report_json_v1(report: ComplexityBaselineDiffReportV1) -> text:
+    val lb = _cbd_lb()
+    val rb = _cbd_rb()
+    var delta_items: [text] = []
+    for d in report.deltas:
+        var df: [text] = []
+        df.push("\"function_id\":" + _cbd_quote(d.function_id))
+        df.push("\"resource\":" + _cbd_quote(d.resource.name()))
+        df.push("\"kind\":" + _cbd_quote(d.kind.name()))
+        df.push("\"category\":" + _cbd_quote(d.category_label))
+        df.push("\"rule_code\":" + _cbd_quote(d.rule_code))
+        df.push("\"previous_bound\":" + _cbd_quote(d.previous_bound))
+        df.push("\"current_bound\":" + _cbd_quote(d.current_bound))
+        df.push("\"root_dependency_changed\":" + _cbd_bool_text(d.root_dependency_changed))
+        df.push("\"is_hot_path\":" + _cbd_bool_text(d.is_hot_path))
+        df.push("\"message\":" + _cbd_quote(d.message))
+        delta_items.push(lb + _cbd_join(df, ",") + rb)
+
+    var fields: [text] = []
+    fields.push("\"schema_version\":1")
+    fields.push("\"baseline_revision\":" + _cbd_quote(report.baseline_revision))
+    fields.push("\"current_revision\":" + _cbd_quote(report.current_revision))
+    fields.push("\"baseline_analyzer_version\":" + _cbd_quote(report.baseline_analyzer_version))
+    fields.push("\"current_analyzer_version\":" + _cbd_quote(report.current_analyzer_version))
+    fields.push("\"baseline_model_version\":" + _cbd_quote(report.baseline_model_version))
+    fields.push("\"current_model_version\":" + _cbd_quote(report.current_model_version))
+    fields.push("\"source_regression_count\":" + report.source_regression_count.to_string())
+    fields.push("\"model_change_count\":" + report.model_change_count.to_string())
+    fields.push("\"coverage_change_count\":" + report.coverage_change_count.to_string())
+    fields.push("\"config_change_count\":" + report.config_change_count.to_string())
+    fields.push("\"improved_count\":" + report.improved_count.to_string())
+    fields.push("\"unchanged_count\":" + report.unchanged_count.to_string())
+    fields.push("\"deltas\":[" + _cbd_join(delta_items, ",") + "]")
+    lb + _cbd_join(fields, ",") + rb
+
+fn format_diff_report_text_v1(report: ComplexityBaselineDiffReportV1) -> text:
+    var lines: [text] = []
+    lines.push("Complexity Baseline Comparison (" + report.baseline_revision + " -> " + report.current_revision + ")")
+    lines.push("  analyzer: " + report.baseline_analyzer_version + " -> " + report.current_analyzer_version)
+    lines.push("  model:    " + report.baseline_model_version + " -> " + report.current_model_version)
+    lines.push("  counts:   source_regression=" + report.source_regression_count.to_string() + " model_change=" + report.model_change_count.to_string() + " coverage_change=" + report.coverage_change_count.to_string() + " config_change=" + report.config_change_count.to_string() + " improved=" + report.improved_count.to_string() + " unchanged=" + report.unchanged_count.to_string())
+    for d in report.deltas:
+        val prefix = if d.rule_code != "": d.rule_code + " [" + d.category_label + "]" else: "[" + d.category_label + "]"
+        lines.push("  - " + prefix + " " + d.function_id + " (" + d.resource.name() + "): " + d.message)
+    _cbd_join(lines, "\n")
+
+export PerfBaselineEntryV1, PerfBaselineSnapshotV1
+export BaselineDeltaKindV1, ComplexityBaselineDeltaV1, ComplexityBaselineDiffReportV1
+export baseline_entry_from_summary_v1
+export serialize_baseline_sdn_v1, parse_baseline_sdn_v1
+export serialize_baseline_json_v1, parse_baseline_json_v1, parse_baseline_auto_v1
+export compare_complexity_baselines_v1
+export format_diff_report_sdn_v1, format_diff_report_json_v1, format_diff_report_text_v1

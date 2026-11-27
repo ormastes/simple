@@ -1,0 +1,34 @@
+# Regression guard for
+# interpreter_lane_raw_boundaries_abort_instead_of_failing_closed_2026-09-05.
+#
+# Three raw extern boundaries must return their documented failure value
+# instead of raising (or fabricating a success-shaped value), on BOTH
+# execution lanes, so Simple-side Result/sentinel contracts stay live:
+#   spl_dlopen(missing)               -> 0   (documented non-handle)
+#   rt_file_mmap_read_bytes(missing)  -> nil (mapping/read failure)
+#   rt_webgpu_create_surface(...)     -> -1  (WEBGPU_INVALID_HANDLE, never 0)
+# Needs a seed built from a tree containing the boundary fix (lane base
+# d8c0a761988c or later; the 2026-11-07 deployed seed predates it).
+@unsafe(reason: "raw dynamic library admission ABI under test", capabilities: [ffi])
+extern fn spl_dlopen(path: text) -> i64
+@unsafe(reason: "raw nullable mmap byte-array ABI under test", capabilities: [ffi])
+extern fn rt_file_mmap_read_bytes(path: text) -> [i64]?
+@unsafe(reason: "raw WebGPU opaque surface-handle ABI under test", capabilities: [ffi])
+extern fn rt_webgpu_create_surface(width: i32, height: i32) -> i64
+
+use std.spec.{describe, it, expect}
+
+describe "raw extern failure boundaries fail closed":
+    it "spl_dlopen of a missing provider returns 0, not an abort":
+        expect(spl_dlopen("definitely/missing/provider_xyz_987.dll")).to_equal(0)
+
+    it "rt_file_mmap_read_bytes of a missing file returns nil, not an abort":
+        val missing = rt_file_mmap_read_bytes("definitely/missing/file_xyz_987.bin")
+        expect(missing == nil).to_equal(true)
+
+    it "rt_file_mmap_read_bytes of an existing file returns the bytes":
+        val bytes = rt_file_mmap_read_bytes("release/version.sdn")
+        expect(bytes == nil).to_equal(false)
+
+    it "rt_webgpu_create_surface returns the invalid handle -1, never 0":
+        expect(rt_webgpu_create_surface(640, 480)).to_equal(-1)

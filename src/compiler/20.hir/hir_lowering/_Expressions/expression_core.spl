@@ -9,21 +9,41 @@ use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
-use compiler.common.assurance.unsafe_capabilities.{unknown_unsafe_capability_names, valid_unsafe_capability_names_help}
+use compiler.common.assurance.unsafe_capabilities.{UnsafeCapability, unsafe_capability_set_contains, unknown_unsafe_capability_names, valid_unsafe_capability_names_help}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_disc, is_tuple_positional_field, parse_tuple_field_index, primitive_cast_type_kind, _hir_expr_symbol_or_invalid}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.hir.hir_lowering._Expressions.unit_cast_target.{unit_cast_symbol_is_unit}
 use compiler.hir.hir_lowering._Expressions.type_test_operand.{binary_is_type_operand}
 use compiler.hir.hir_lowering._Expressions.source_union_pattern_v1.*
 use compiler.hir.hir_lowering._Expressions.declared_enum_constructor.*
+use compiler.hir.hir_lowering._Expressions.accessor_forwarding.*
 use compiler.hir.hir_lowering._Expressions.collection_factory_types.{collection_factory_type_concrete}
+use compiler.hir.hir_lowering.pattern_enum_substitution.{substitute_declared_pattern_type, declared_pattern_slot_type_is_concrete, declared_pattern_slot_type_is_resolved}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.hir.hir_lowering._Expressions.cfg_when_marker.{cfg_when_marker_cond, cfg_when_chain_is_marker}
+use compiler.hir.hir_lowering._Expressions.call_arity.*
 
 # A concrete parameter retains the symbol owner after optional extraction.
 fn _hir_callable_named_var_payload(symbol: SymbolId, name: text) -> HirExprKind:
     HirExprKind.NamedVar(symbol, name)
 
 impl HirLowering:
+    # Preprocessor cfg-select marker chain -> target-neutral CfgSelect: every
+    # arm is kept with its condition text; MIR picks the arm for its target.
+    me lower_cfg_when_chain(arms: [IfArm], else_block: Block?, span: Span) -> HirExpr:
+        var conds: [text] = []
+        var hir_arms: [HirBlock] = []
+        for arm in arms:
+            val arm_t: IfArm = arm
+            val marker = cfg_when_marker_cond(arm_t.cond)
+            conds = conds.push(marker ?? "")
+            hir_arms = hir_arms.push(self.lower_hir_block(arm_t.then_))
+        var hir_else: HirBlock? = None
+        if val else_src = else_block:
+            hir_else = Some(self.lower_hir_block(else_src))
+        HirExpr(kind: HirExprKind.CfgSelect(conds, hir_arms, hir_else), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
+
     fn attributed_collection_family_identity(name: text, owner: text) -> text:
         # A local type may reuse an adaptive leaf name. Only the stdlib type's
         # defining module grants this compiler-owned attribute admission.
@@ -59,6 +79,77 @@ impl HirLowering:
             case _: ()
         ""
 
+    # Bug: unit_decl_table_name_keyed_2026-11-16 -- judge the RESOLVED target
+    # symbol, never the bare spelling, so a same-named class elsewhere is not a unit.
+    fn cast_target_resolves_to_unit(cast_target: HirType) -> bool:
+        match cast_target.kind:
+            case HirTypeKind.Named(tg_sym, tg_args):
+                if tg_args.len() != 0:
+                    return false
+                if val present = self.symbols.get_symbol_raw(tg_sym.id):
+                    val sym: HirSymbol = present
+                    return unit_cast_symbol_is_unit(sym.kind, sym.name)
+                false
+            case _: false
+
+    fn cast_operand_declared_type(operand: Expr) -> HirType?:
+        """Declared static type of an `as` operand, for the two shapes this
+        lowerer can resolve without inference: a named local/parameter
+        (`symbols.define(..., binding_type, ...)`) and a call of a named
+        function (the `ret` of its `HirTypeKind.Function`). Anything else is
+        nil -- never guessed. Used by the `T? as <numeric>` diagnostic
+        (optional_as_cast_yields_zero_2026_11_09)."""
+        match operand.kind:
+            case ExprKind.Ident(name):
+                val ident_t: text = name
+                val raw: i64 = self.symbols.lookup_or_invalid(ident_t).id
+                if raw < 0:
+                    return None
+                self.symbols.get_symbol_type_raw(raw)
+            case ExprKind.Call(callee, _):
+                match callee.kind:
+                    case ExprKind.Ident(fname):
+                        val fname_t: text = fname
+                        val fraw: i64 = self.symbols.lookup_or_invalid(fname_t).id
+                        if fraw < 0:
+                            return None
+                        if val fn_type = self.symbols.get_symbol_type_raw(fraw):
+                            match fn_type.kind:
+                                case HirTypeKind.Function(_, ret, _): ret
+                                case _: None
+                        else:
+                            None
+                    case _: None
+            case _: None
+
+    me mark_optional_call_init(symbol_id: i64, init: Expr, has_annotation: bool, bind_optional_payload: bool, sym_type: HirType?):
+        """Record an unannotated local whose initialiser is a direct call of a
+        function declared to return `T?` and whose symbol type stayed
+        unknown, so `[E-OPT-CAST-001]` sees it as optional (bug
+        pure_err01_untyped_local_of_optional_call_not_rejected_2026-11-13).
+        An `if val`/`while val` binder (bind_optional_payload) binds the
+        payload and is never marked."""
+        if has_annotation or bind_optional_payload or sym_type.is_some():
+            return
+        match init.kind:
+            case ExprKind.Call(_, _): ()
+            case _: return
+        if val declared = self.cast_operand_declared_type(init):
+            match declared.kind:
+                case HirTypeKind.Optional(_):
+                    self.local_optional_call_init[symbol_id] = true
+                case _: ()
+
+    fn cast_operand_is_optional_call_local(operand: Expr) -> bool:
+        match operand.kind:
+            case ExprKind.Ident(name):
+                val ident_t: text = name
+                val raw: i64 = self.symbols.lookup_or_invalid(ident_t).id
+                if raw < 0:
+                    return false
+                self.local_optional_call_init.contains_key(raw)
+            case _: false
+
     fn attributed_factory_return_type(source: HirExpr) -> HirType?:
         if source.has_type_:
             return source.type_
@@ -72,13 +163,13 @@ impl HirLowering:
                     case _: ()
             case _: ()
         if not callable.is_valid():
-            return nil
+            return None
         if val symbol = self.symbols.get_symbol_raw(callable.id):
             if val signature = symbol.type_:
                 match signature.kind:
                     case HirTypeKind.Function(_, returned, _): return returned
                     case _: ()
-        nil
+        None
 
     fn attributed_factory_return_name(source: HirExpr) -> text:
         if val returned = self.attributed_factory_return_type(source):
@@ -139,7 +230,7 @@ impl HirLowering:
 
     me retain_attributed_collection_type(initializer: HirExpr, declared: HirType?) -> HirExpr:
         """Carry a written instance type through the compiler-owned wrapper."""
-        if declared == nil:
+        if declared.is_none():
             return initializer
         val family = self.attributed_collection_family(declared)
         if family == "": return initializer
@@ -148,12 +239,19 @@ impl HirLowering:
                 if method != "attributed_at_site" and method != "attributed_with_prior_at_site":
                     return initializer
                 val owner = _hir_expr_symbol_or_invalid(receiver.kind)
-                match declared.kind:
-                    case HirTypeKind.Named(declared_owner, _):
-                        if owner.id != declared_owner.id: return initializer
-                    case _: return initializer
+                # HirExpr.type_ is a non-optional HirType; unwrap `declared`
+                # into a bare HirType before constructing typed_receiver.
+                var declared_type: HirType = HirType(kind: HirTypeKind.Error, span: receiver.span)
+                if val declared_unwrapped = declared:
+                    match declared_unwrapped.kind:
+                        case HirTypeKind.Named(declared_owner, declared_args):
+                            if owner.id != declared_owner.id: return initializer
+                            declared_type = HirType(kind: HirTypeKind.Named(declared_owner, declared_args), span: receiver.span)
+                        case _: return initializer
+                else:
+                    return initializer
                 val typed_receiver = HirExpr(kind: receiver.kind, has_type_: true,
-                    type_: declared, span: receiver.span)
+                    type_: declared_type, span: receiver.span, bracket_slice: receiver.bracket_slice)
                 # The ordinary expression path already checks family errors.
                 # Recheck only matching/unknown families for generic arguments.
                 if args.len() >= 3:
@@ -164,25 +262,46 @@ impl HirLowering:
                     has_type_: initializer.has_type_, type_: initializer.type_, span: initializer.span)
             case _: initializer
 
-    fn declared_static_method_resolution(receiver: HirExpr, method: text) -> MethodResolution:
+    fn declared_static_method_resolution(receiver_kind: HirExprKind, method: text) -> MethodResolution:
         # Keep the declared owner while HIR still owns the receiver expression.
         # Native MIR cannot reconstruct this from a nested MethodCall payload;
         # a leaf-name fallback is ambiguous when two types declare the method.
-        val owner = _hir_expr_symbol_or_invalid(receiver.kind)
+        val owner = _hir_expr_symbol_or_invalid(receiver_kind)
         if not owner.is_valid():
             return MethodResolution.Unresolved
-        val owner_symbol = self.symbols.get_symbol_raw(owner.id)
-        if owner_symbol == nil:
-            return MethodResolution.Unresolved
-        match owner_symbol.kind:
-            case SymbolKind.Class | SymbolKind.Struct | SymbolKind.Enum:
-                val method_symbol = self.symbols.lookup_static_method_raw(owner.id, method)
-                if val declared_method = method_symbol:
-                    if declared_method != nil and declared_method.is_valid():
-                        val method_id: SymbolId = declared_method
-                        return MethodResolution.StaticMethod(owner, method_id)
-            case _: ()
+        if val owner_symbol = self.symbols.get_symbol_raw(owner.id):
+            match owner_symbol.kind:
+                case SymbolKind.Class | SymbolKind.Struct | SymbolKind.Enum:
+                    if val declared_method = self.symbols.lookup_static_method_raw(owner.id, method):
+                        if declared_method.is_valid():
+                            return MethodResolution.StaticMethod(owner, declared_method)
+                case _: ()
         MethodResolution.Unresolved
+
+    fn declared_instance_method_owner_raw_v1(receiver_kind: HirExprKind, method: text, static_resolution: MethodResolution) -> i64:
+        """Owner symbol id when `receiver` is a Variable/Parameter whose declared
+        type is a Struct/Class that itself declares `method` as an instance
+        Method; -1 otherwise. A static, enum-constructor, Optional, generic,
+        trait or UFCS shape keeps its existing resolution path."""
+        match static_resolution:
+            case MethodResolution.Unresolved: ()
+            case _: return -1
+        val receiver_symbol = _hir_expr_symbol_or_invalid(receiver_kind)
+        if not receiver_symbol.is_valid(): return -1
+        var owner_raw: i64 = self.symbols.binding_declared_record_owner_scalar_raw(receiver_symbol.id)
+        if owner_raw < 0:
+            # `var w = Widget(...)` has no declared type yet at HIR time (the
+            # binding is Infer until 30.types). The Let lowering already
+            # recorded the constructor's spelling for this binding symbol
+            # (try_register_local_struct_type); resolve that name in the
+            # current scope and let the owner-qualified registry decide.
+            if not self.local_struct_types.has(receiver_symbol.id): return -1
+            val constructed_name: text = self.local_struct_types[receiver_symbol.id]
+            val constructed_owner = self.symbols.lookup_or_invalid(constructed_name)
+            if not constructed_owner.is_valid(): return -1
+            owner_raw = constructed_owner.id
+        if self.symbols.record_instance_method_scalar_raw(owner_raw, method) < 0: return -1
+        owner_raw
 
     me lower_static_owner_receiver(receiver: Expr) -> HirExpr:
         var lowered = self.lower_hir_expr(receiver)
@@ -217,19 +336,73 @@ impl HirLowering:
         # An empty literal or any untyped/mixed element provides no
         # authoritative element type. Only propagate a type when every
         # lowered element carries the same concrete HIR type.
+        #
+        # HIR literals are lowered `has_type_: false`, so an unannotated
+        # `val paths = ["/a", root + "/b"]` used to stay untyped: its binding
+        # settled with no element type, and the element read by for-in or
+        # index reached the MIR enum-payload check as a settled no-shape type
+        # and was rejected from a `text` slot (bug
+        # untyped_text_array_element_rejected_as_enum_payload_2026-11-21).
+        # An untyped element whose KIND proves `text` (string literal, a
+        # binding declared `text`, a `+` of two such) is typed `text` here,
+        # at the literal's producer. Nothing else is inferred: numeric
+        # literals keep taking their width from context, and Any/unknown
+        # never becomes an element type.
         if elements.is_empty(): return HirType(kind: HirTypeKind.Error, span: span)
-        val first = elements[0]
-        if not first.has_type_: return HirType(kind: HirTypeKind.Error, span: span)
-        match first.type_.kind:
-            case HirTypeKind.Error | HirTypeKind.Infer(_, _) | HirTypeKind.Any | HirTypeKind.Never:
-                return HirType(kind: HirTypeKind.Error, span: span)
-            case _: ()
+        var first_type = HirType(kind: HirTypeKind.Error, span: span)
+        var first_seen = false
         for raw_element in elements:
             # ANY-transport hazard sweep round 3: annotated rebind.
             val element: HirExpr = raw_element
-            if not element.has_type_: return HirType(kind: HirTypeKind.Error, span: span)
-            if not hir_types_equal(first.type_, element.type_): return HirType(kind: HirTypeKind.Error, span: span)
-        first.type_
+            # Read `type_` only when `has_type_` is true (the authoritative
+            # presence bit on HirExpr).
+            var element_type = HirType(kind: HirTypeKind.Error, span: span)
+            if element.has_type_:
+                element_type = element.type_
+            elif self.hir_kind_proves_text(element.kind):
+                element_type = HirType(kind: HirTypeKind.Str, span: element.span)
+            match element_type.kind:
+                case HirTypeKind.Error | HirTypeKind.Infer(_, _) | HirTypeKind.Any | HirTypeKind.Never:
+                    return HirType(kind: HirTypeKind.Error, span: span)
+                case _: ()
+            if not first_seen:
+                first_type = element_type
+                first_seen = true
+            elif not hir_types_equal(first_type, element_type):
+                return HirType(kind: HirTypeKind.Error, span: span)
+        first_type
+
+    fn hir_kind_proves_text(kind: HirExprKind) -> bool:
+        # Positive `text` evidence for an untyped array-literal element. A
+        # string literal (plain or interpolated) is text; a variable is text
+        # only when its symbol is DECLARED `text`; `a + b` is text only when
+        # both operands are. Anything else is not evidence.
+        match kind:
+            case HirExprKind.StringLit(_, _): return true
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                if val declared = self.symbols.get_symbol_type_raw(symbol.id):
+                    match declared.kind:
+                        case HirTypeKind.Str: return true
+                        case _: ()
+                return false
+            case HirExprKind.Binary(op, left, right):
+                match op:
+                    case HirBinOp.Add:
+                        var left_text = false
+                        if left.has_type_:
+                            match left.type_.kind:
+                                case HirTypeKind.Str: left_text = true
+                                case _: ()
+                        else:
+                            left_text = self.hir_kind_proves_text(left.kind)
+                        if not left_text: return false
+                        if right.has_type_:
+                            match right.type_.kind:
+                                case HirTypeKind.Str: return true
+                                case _: return false
+                        return self.hir_kind_proves_text(right.kind)
+                    case _: return false
+            case _: return false
 
     me field_owner_for_hir_expr(base: HirExpr) -> i64:
         # Preserve the explicit HIR type when one is already attached (for
@@ -245,7 +418,12 @@ impl HirLowering:
             case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
                 if val declared_type = self.symbols.get_symbol_type_raw(symbol.id):
                     return self.named_owner_for_hir_type(declared_type)
-            case HirExprKind.Call(callee, _, _):
+            case HirExprKind.Call(callee, _, call_type_args):
+                val applied_args: [HirType] = call_type_args
+                if applied_args.len() > 0:
+                    if val inst_ret = self.instantiated_direct_call_return_kind(base.kind):
+                        return self.named_owner_for_hir_type(inst_ret)
+                    return -1
                 val callee_symbol = _hir_expr_symbol_or_invalid(callee.kind)
                 if callee_symbol.is_valid():
                     if val signature = self.symbols.get_symbol_type_raw(callee_symbol.id):
@@ -277,11 +455,27 @@ impl HirLowering:
                 source_type = self.symbols.get_symbol_type_raw(source_symbol.id) ?? source_type
             var callable = SymbolId(id: -1)
             match source.kind:
-                case HirExprKind.Call(callee, _, _):
+                case HirExprKind.Call(callee, _, call_type_args):
+                    # Bug p2_generic_t_return_of_if_val_unwrapped_erased_record_int_boxed_2026_11_24:
+                    # a turbofish call whose actual is itself an erased binder
+                    # (`tuple_at<T>(..)` inside `fn get<T>`) has no concrete
+                    # instantiation; keep the callee's declared `TElement?`
+                    # so the binder stays an erased Optional word and the
+                    # `-> T` return does not int-box the record handle.
                     callable = _hir_expr_symbol_or_invalid(callee.kind)
+                    val applied_args: [HirType] = call_type_args
+                    if applied_args.len() > 0:
+                        if val inst_ret = self.instantiated_direct_call_return_kind(source.kind):
+                            source_type = inst_ret
+                            callable = SymbolId(id: -1)
                 case HirExprKind.MethodCall(receiver, method_name, _, resolution):
                     match resolution:
                         case MethodResolution.StaticMethod(_, method_id):
+                            callable = method_id
+                        case MethodResolution.InstanceMethod(_, method_id):
+                            # HIR now resolves same-owner instance methods on
+                            # declared-type bindings; keep the declared return
+                            # type reachable for `if val x = w.find()`.
                             callable = method_id
                         case MethodResolution.Unresolved:
                             val receiver_owner = self.field_owner_for_hir_expr(receiver)
@@ -308,11 +502,315 @@ impl HirLowering:
             val direct = self.field_type_for_base_raw(base_symbol.id, field_name)
             match direct.kind:
                 case HirTypeKind.Error: ()
-                case _: return direct
+                case _: return self.instantiate_field_type_for_base(base, direct)
         val owner_id = self.field_owner_for_hir_expr(base)
         if owner_id >= 0:
-            return self.field_type_for_owner_raw(owner_id, field_name)
+            return self.instantiate_field_type_for_base(base, self.field_type_for_owner_raw(owner_id, field_name))
         HirType(kind: HirTypeKind.Error, span: base.span)
+
+    me instantiate_field_type_for_base(base: HirExpr, declared: HirType) -> HirType:
+        # Bug tldr_future_static_owner_typeparam_2026_10_25: the field table
+        # holds the DECLARED field type (`poll_result: Poll<T>`). A read on an
+        # instantiated receiver (`b: Box<text?>`) must see `Poll<text?>`, or a
+        # `match b.poll_result: case Poll.Ready(v)` binds `v: T` and every use
+        # of `v` is lowered as an erased i64 word (native: `{v ?? "nil"}`
+        # printed the text handle as a decimal). Substitute only with a fully
+        # resolved, declaration-ordered argument list; otherwise keep the
+        # declared type unchanged (the pre-existing behaviour).
+        match declared.kind:
+            case HirTypeKind.Error: return declared
+            case _: ()
+        var base_type = base.type_
+        if not base.has_type_:
+            val base_symbol = _hir_expr_symbol_or_invalid(base.kind)
+            if not base_symbol.is_valid():
+                return declared
+            val symbol_type = self.symbols.get_symbol_type_raw(base_symbol.id)
+            if not symbol_type.?:
+                return declared
+            base_type = symbol_type.unwrap()
+        match base_type.kind:
+            case HirTypeKind.Named(owner, arguments):
+                if arguments.len() == 0:
+                    return declared
+                val names = self.owner_type_param_names_raw(owner.id)
+                if names.len() != arguments.len():
+                    return declared
+                val substituted = substitute_declared_pattern_type(declared, names, arguments)
+                match substituted.kind:
+                    case HirTypeKind.Error: return declared
+                    case _: return substituted
+            case _: return declared
+
+    fn hir_infer_type_param_bindings(formal: HirType, actual: HirType, names: [text], bindings: Dict<text, HirType>) -> Dict<text, HirType>:
+        var out = bindings
+        match actual.kind:
+            case HirTypeKind.Error | HirTypeKind.Infer(_, _):
+                return out
+            case _: ()
+        match formal.kind:
+            case HirTypeKind.TypeParam(name, _):
+                for expected_name in names:
+                    if expected_name == name and not out.has(name):
+                        out[name] = actual
+                        return out
+                out
+            case HirTypeKind.Optional(f_inner) | HirTypeKind.Array(f_inner, _) | HirTypeKind.Slice(f_inner) | HirTypeKind.Unique(f_inner) | HirTypeKind.Shared(f_inner) | HirTypeKind.Weak(f_inner) | HirTypeKind.Isolated(f_inner) | HirTypeKind.Ref(f_inner, _) | HirTypeKind.Ptr(f_inner, _):
+                match actual.kind:
+                    case HirTypeKind.Optional(a_inner) | HirTypeKind.Array(a_inner, _) | HirTypeKind.Slice(a_inner) | HirTypeKind.Unique(a_inner) | HirTypeKind.Shared(a_inner) | HirTypeKind.Weak(a_inner) | HirTypeKind.Isolated(a_inner) | HirTypeKind.Ref(a_inner, _) | HirTypeKind.Ptr(a_inner, _):
+                        return self.hir_infer_type_param_bindings(f_inner, a_inner, names, out)
+                    case _: ()
+            case HirTypeKind.Dict(fk, fv) | HirTypeKind.Result(fk, fv):
+                match actual.kind:
+                    case HirTypeKind.Dict(ak, av) | HirTypeKind.Result(ak, av):
+                        out = self.hir_infer_type_param_bindings(fk, ak, names, out)
+                        return self.hir_infer_type_param_bindings(fv, av, names, out)
+                    case _: ()
+            case HirTypeKind.Tuple(felems) | HirTypeKind.Union(felems):
+                match actual.kind:
+                    case HirTypeKind.Tuple(aelems) | HirTypeKind.Union(aelems):
+                        if felems.len() == aelems.len():
+                            var ti = 0
+                            while ti < felems.len():
+                                out = self.hir_infer_type_param_bindings(felems[ti], aelems[ti], names, out)
+                                ti = ti + 1
+                    case _: ()
+            case HirTypeKind.Named(f_owner, f_args):
+                match actual.kind:
+                    case HirTypeKind.Named(_, a_args):
+                        if f_args.len() == a_args.len():
+                            var ni = 0
+                            while ni < f_args.len():
+                                out = self.hir_infer_type_param_bindings(f_args[ni], a_args[ni], names, out)
+                                ni = ni + 1
+                    case _: ()
+            case HirTypeKind.Function(f_params, f_ret, _):
+                match actual.kind:
+                    case HirTypeKind.Function(a_params, a_ret, _):
+                        if f_params.len() == a_params.len():
+                            var fi = 0
+                            while fi < f_params.len():
+                                out = self.hir_infer_type_param_bindings(f_params[fi], a_params[fi], names, out)
+                                fi = fi + 1
+                        out = self.hir_infer_type_param_bindings(f_ret, a_ret, names, out)
+                    case _: ()
+            case _: ()
+        out
+
+    fn hir_arg_inferred_type_for_static_call(arg_expr: HirExpr) -> HirType:
+        if arg_expr.has_type_:
+            match arg_expr.type_.kind:
+                case HirTypeKind.Error | HirTypeKind.Infer(_, _): ()
+                case _: return arg_expr.type_
+        val bound = self.binding_kind_type(arg_expr.kind, arg_expr.span)
+        match bound.kind:
+            case HirTypeKind.Error | HirTypeKind.Infer(_, _): ()
+            case _: return bound
+        match arg_expr.kind:
+            case HirExprKind.IntLit(_, _): HirType(kind: HirTypeKind.Int(64, true), span: arg_expr.span)
+            case HirExprKind.FloatLit(_, _): HirType(kind: HirTypeKind.Float(64), span: arg_expr.span)
+            case HirExprKind.BoolLit(_): HirType(kind: HirTypeKind.Bool, span: arg_expr.span)
+            case HirExprKind.StringLit(_, _): HirType(kind: HirTypeKind.Str, span: arg_expr.span)
+            case _: HirType(kind: HirTypeKind.Error, span: arg_expr.span)
+
+    fn hir_collect_type_param_names(ty: HirType, names: [text]) -> [text]:
+        var out = names
+        match ty.kind:
+            case HirTypeKind.TypeParam(name, _):
+                for existing in out:
+                    if existing == name:
+                        return out
+                return out.push(name)
+            case HirTypeKind.Optional(inner) | HirTypeKind.Array(inner, _) | HirTypeKind.Slice(inner) | HirTypeKind.Unique(inner) | HirTypeKind.Shared(inner) | HirTypeKind.Weak(inner) | HirTypeKind.Isolated(inner) | HirTypeKind.Ref(inner, _) | HirTypeKind.Ptr(inner, _) | HirTypeKind.Tensor(inner, _, _):
+                return self.hir_collect_type_param_names(inner, out)
+            case HirTypeKind.Dict(k, v) | HirTypeKind.Result(k, v):
+                out = self.hir_collect_type_param_names(k, out)
+                return self.hir_collect_type_param_names(v, out)
+            case HirTypeKind.Tuple(elems) | HirTypeKind.Union(elems):
+                for e in elems:
+                    out = self.hir_collect_type_param_names(e, out)
+                return out
+            case HirTypeKind.Named(_, args):
+                for a in args:
+                    out = self.hir_collect_type_param_names(a, out)
+                return out
+            case HirTypeKind.Function(params, ret, _):
+                for p in params:
+                    out = self.hir_collect_type_param_names(p, out)
+                return self.hir_collect_type_param_names(ret, out)
+            case _: ()
+        out
+
+    fn callable_has_leading_self_param(callee_sym: SymbolId) -> bool:
+        if not callee_sym.is_valid():
+            return false
+        if self.lowered_impl_functions.contains_key(callee_sym.id):
+            val impl_fn: HirFunction = self.lowered_impl_functions[callee_sym.id]
+            if impl_fn.params.len() > 0 and (impl_fn.params[0].name == "self" or impl_fn.params[0].name == "me"):
+                return true
+            return false
+        if val sym = self.symbols.get_symbol_raw(callee_sym.id):
+            return sym.kind == SymbolKind.Method
+        false
+
+    fn infer_generic_callable_return_from_args(fn_type: HirType, type_param_names: [text], args: [HirCallArg], callee_sym: SymbolId = SymbolId(id: -1), declared_ret_override: HirType? = None) -> HirType?:
+        match fn_type.kind:
+            case HirTypeKind.Function(params, ret_raw, _):
+                val ret = declared_ret_override ?? ret_raw
+                var names = type_param_names
+                if names.len() == 0:
+                    for p in params:
+                        names = self.hir_collect_type_param_names(p, names)
+                    names = self.hir_collect_type_param_names(ret, names)
+                if names.len() == 0:
+                    return None
+                var bindings: Dict<text, HirType> = {}
+                val offset = if self.callable_has_leading_self_param(callee_sym) and params.len() > args.len(): 1 else: 0
+                var ai = 0
+                while ai < args.len() and (ai + offset) < params.len():
+                    val arg_t: HirCallArg = args[ai]
+                    val actual_arg_ty = self.hir_arg_inferred_type_for_static_call(arg_t.value)
+                    bindings = self.hir_infer_type_param_bindings(params[ai + offset], actual_arg_ty, names, bindings)
+                    ai = ai + 1
+                var actuals: [HirType] = []
+                for tp_name in names:
+                    if not bindings.has(tp_name):
+                        return None
+                    actuals = actuals.push(bindings[tp_name])
+                val substituted = substitute_declared_pattern_type(ret, names, actuals)
+                if not declared_pattern_slot_type_is_resolved(substituted):
+                    return None
+                return Some(substituted)
+            case _: ()
+        None
+
+    fn owner_type_param_names_raw(raw_owner_symbol_id: i64) -> [text]:
+        # Same key order as field_type_for_owner_raw: module-qualified first.
+        var empty: [text] = []
+        if val owner_symbol = self.symbols.get_symbol_raw(raw_owner_symbol_id):
+            val owner_name: text = owner_symbol.name
+            if val owner_module = owner_symbol.defining_module:
+                val canonical_name: text = owner_module + "." + owner_name
+                if self.struct_type_param_names_by_name.has(canonical_name):
+                    return self.struct_type_param_names_by_name[canonical_name]
+            if self.struct_type_param_names_by_name.has(owner_name):
+                return self.struct_type_param_names_by_name[owner_name]
+        empty
+
+    fn instantiated_direct_call_return_kind(kind: HirExprKind) -> HirType?:
+        """Instantiate a generic free/extern function's declared return type with explicit turbofish type_args or inferred argument types."""
+        match kind:
+            case HirExprKind.Call(callee, args, call_type_args):
+                val callee_symbol = _hir_expr_symbol_or_invalid(callee.kind)
+                if not callee_symbol.is_valid():
+                    return None
+                val applied: [HirType] = call_type_args
+                val sym_key = callee_symbol.id.to_text()
+                val tp_key = "#fn_tp#" + sym_key
+                val ret_key = "#fn_ret#" + sym_key
+                if applied.len() > 0:
+                    if not self.struct_type_param_names_by_name.has(tp_key) or not self.class_method_return_types_by_name.has(ret_key):
+                        return None
+                    val names = self.struct_type_param_names_by_name[tp_key]
+                    if names.len() != applied.len():
+                        return None
+                    val declared = self.class_method_return_types_by_name[ret_key]
+                    val substituted = substitute_declared_pattern_type(declared, names, applied)
+                    if not declared_pattern_slot_type_is_concrete(substituted):
+                        return None
+                    return Some(substituted)
+            case _: ()
+        None
+
+    fn instantiated_method_call_return_kind(kind: HirExprKind) -> HirType?:
+        # Bug generic_method_return_subst_2026_11_09: method-call sibling of
+        # instantiate_field_type_for_base. `b.poll()` on `b: Box<text?>` must
+        # see the declared `Poll<T>` as `Poll<text?>`, or `match b.poll():
+        # case Poll.Ready(v)` has no subject owner. Also handles imported generic
+        # classes (lookup_method_in_type_raw) and static generic calls such as
+        # `Future.from_value(task())` when the receiver is the type symbol.
+        match kind:
+            case HirExprKind.MethodCall(receiver, method, args, resolution):
+                var receiver_type: HirType? = None
+                if receiver.has_type_:
+                    match receiver.type_.kind:
+                        case HirTypeKind.Error | HirTypeKind.Infer(_, _): ()
+                        case _: receiver_type = Some(receiver.type_)
+                if receiver_type == None:
+                    val receiver_symbol = _hir_expr_symbol_or_invalid(receiver.kind)
+                    if receiver_symbol.is_valid():
+                        if val sym_rec = self.symbols.get_symbol_raw(receiver_symbol.id):
+                            if sym_rec.kind == SymbolKind.Class or sym_rec.kind == SymbolKind.Struct or sym_rec.kind == SymbolKind.Enum:
+                                val names = self.owner_type_param_names_raw(receiver_symbol.id)
+                                if val static_sym = self.symbols.lookup_static_method_raw(receiver_symbol.id, method):
+                                    if val fn_sym_ty = self.symbols.get_symbol_type_raw(static_sym.id):
+                                        return self.infer_generic_callable_return_from_args(fn_sym_ty, names, args, static_sym)
+                            receiver_type = sym_rec.type_
+                if receiver_type == None:
+                    val bound_rec = self.binding_kind_type(receiver.kind, receiver.span)
+                    match bound_rec.kind:
+                        case HirTypeKind.Error | HirTypeKind.Infer(_, _): ()
+                        case _: receiver_type = Some(bound_rec)
+                if val owner_type = receiver_type:
+                    match owner_type.kind:
+                        case HirTypeKind.Named(owner, arguments):
+                            if arguments.len() == 0:
+                                val names = self.owner_type_param_names_raw(owner.id)
+                                if val static_sym = self.symbols.lookup_static_method_raw(owner.id, method):
+                                    if val fn_sym_ty = self.symbols.get_symbol_type_raw(static_sym.id):
+                                        return self.infer_generic_callable_return_from_args(fn_sym_ty, names, args, static_sym)
+                                return None
+                            val names = self.owner_type_param_names_raw(owner.id)
+                            if names.len() != arguments.len():
+                                return None
+                            if val declared = self.class_method_return_type_raw(owner.id, method):
+                                val substituted = substitute_declared_pattern_type(declared, names, arguments)
+                                match substituted.kind:
+                                    case HirTypeKind.Error: return None
+                                    case _: return Some(substituted)
+                        case _: ()
+                match resolution:
+                    case MethodResolution.StaticMethod(owner_id, static_method_id):
+                        if owner_id.is_valid() and static_method_id.is_valid():
+                            val names = self.owner_type_param_names_raw(owner_id.id)
+                            if val fn_sym_ty = self.symbols.get_symbol_type_raw(static_method_id.id):
+                                return self.infer_generic_callable_return_from_args(fn_sym_ty, names, args, static_method_id)
+                    case _: ()
+            case _: ()
+        None
+
+    fn class_method_return_type_raw(raw_owner_symbol_id: i64, method: text) -> HirType?:
+        # Same key order as owner_type_param_names_raw: module-qualified first.
+        if val owner_symbol = self.symbols.get_symbol_raw(raw_owner_symbol_id):
+            val owner_name: text = owner_symbol.name
+            if val owner_module = owner_symbol.defining_module:
+                val canonical_key: text = owner_module + "." + owner_name + "::" + method
+                if self.class_method_return_types_by_name.has(canonical_key):
+                    return Some(self.class_method_return_types_by_name[canonical_key])
+            val bare_key: text = owner_name + "::" + method
+            if self.class_method_return_types_by_name.has(bare_key):
+                return Some(self.class_method_return_types_by_name[bare_key])
+        if val method_id = self.symbols.lookup_method_in_type_raw(raw_owner_symbol_id, method):
+            if val method_sym_ty = self.symbols.get_symbol_type_raw(method_id.id):
+                match method_sym_ty.kind:
+                    case HirTypeKind.Function(_, ret, _):
+                        return Some(ret)
+                    case _: ()
+        None
+
+    fn resolve_method_call_arity_symbol_id(resolution: MethodResolution, receiver: HirExpr, method_name: text) -> i64:
+        match resolution:
+            case MethodResolution.StaticMethod(_, method_id):
+                if method_id.is_valid():
+                    return method_id.id
+            case MethodResolution.InstanceMethod(_, method_id):
+                if method_id.is_valid():
+                    return method_id.id
+            case _: ()
+        val receiver_owner = self.field_owner_for_hir_expr(receiver)
+        if receiver_owner >= 0:
+            return self.symbols.record_instance_method_scalar_raw(receiver_owner, method_name)
+        -1
 
     me lower_hir_expr(e: Expr) -> HirExpr:
         if e == nil:
@@ -324,6 +822,18 @@ impl HirLowering:
                 type_: HirType(kind: HirTypeKind.Unit, span: missing_span),
                 span: missing_span
             )
+        if e.bracket_slice:
+            # Lower the bracket slice exactly as its `.slice` call, then carry
+            # the marker on the HIR node for MIR's text code-point cut.
+            var marked = self.lower_hir_expr(Expr(kind: e.kind, span: e.span, explicit_call_types: e.explicit_call_types))
+            marked.bracket_slice = true
+            return marked
+        if e.arrow_update:
+            # `x->m()` lowers exactly as `x.m()`; the marker only lets the
+            # checker name `->` on a receiver/return type mismatch.
+            var arrow_marked = self.lower_hir_expr(Expr(kind: e.kind, span: e.span, explicit_call_types: e.explicit_call_types))
+            arrow_marked.arrow_update = true
+            return arrow_marked
         # Probes UNGATED: Trap D (iteration 17) — env-gated probes are mute in
         # hir_lowering modules. Remove before deploy.
         # DIRECT typed field read, NOT `match e: case Expr(k, _): k`: the struct
@@ -357,6 +867,9 @@ impl HirLowering:
                                     type_: cast_target,
                                     span: e.span
                                 )
+                    case ExprKind.OptionalChain(oc_receiver, oc_method):
+                        # `recv?.m(args)` parses as Call(OptionalChain(recv, m), args).
+                        return self.lower_hir_expr(optional_chain_desugar(oc_receiver, oc_method, true, call_args_t, e.explicit_call_types, e.span, self.optional_chain_receiver_is_result(oc_receiver)))
                     case _:
                         pass
                 var hir_args: [HirCallArg] = []
@@ -372,7 +885,12 @@ impl HirLowering:
                 for call_type in e.explicit_call_types:
                     val call_type_t: Type = call_type
                     hir_type_args = hir_type_args.push(self.lower_type(call_type_t))
-                return HirExpr(kind: HirExprKind.Call(self.lower_hir_expr(call_callee_t), hir_args, hir_type_args), has_type_: false, type_: nil, span: e.span)
+                val lowered_call_callee = self.lower_hir_expr(call_callee_t)
+                self.check_aggregate_constructor_visible(call_callee_t, lowered_call_callee, e.span)
+                self.check_call_arity(lowered_call_callee, hir_args, e.span)
+                return HirExpr(kind: HirExprKind.Call(lowered_call_callee, hir_args, hir_type_args), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span)
+            case ExprKind.OptionalChain(oc_base, oc_field):
+                return self.lower_hir_expr(optional_chain_desugar(oc_base, oc_field, false, [], [], e.span, self.optional_chain_receiver_is_result(oc_base)))
             case _:
                 pass
         # SEED PATTERN HAZARD (bug doc iteration 18): when a variant pattern's
@@ -394,15 +912,47 @@ impl HirLowering:
                     val method_receiver_t: Expr = receiver
                     val method_name_t: text = method
                     val method_args_t: [CallArg] = args
+                    self.check_qualified_constructor_visible(method_receiver_t, method_name_t, e.span)
                     # Consume the receiver payload before recursively lowering
                     # arguments; nested lowering may advance interpreter-owned
                     # enum payload storage.
                     val mc_lowered_receiver = self.lower_static_owner_receiver(method_receiver_t)
-                    val mc_static_resolution = self.declared_static_method_resolution(mc_lowered_receiver, method_name_t)
+                    self.check_char_int_method(mc_lowered_receiver, method_name_t, e.span)
+                    val mc_static_resolution = self.declared_static_method_resolution(mc_lowered_receiver.kind, method_name_t)
                     val mc_enum_owner = self.declared_enum_constructor_owner(mc_lowered_receiver, mc_static_resolution)
+                    # Same-owner instance method on a declared-type binding:
+                    # statement-shaped rebuild from raw ids (no enum through an
+                    # if-expression result boundary, see 35.semantics/resolve.spl).
+                    var mc_resolution: MethodResolution = mc_static_resolution
+                    val mc_instance_owner_raw = self.declared_instance_method_owner_raw_v1(mc_lowered_receiver.kind, method_name_t, mc_static_resolution)
+                    if mc_instance_owner_raw >= 0:
+                        val mc_instance_method_raw: i64 = self.symbols.record_instance_method_scalar_raw(mc_instance_owner_raw, method_name_t)
+                        mc_resolution = MethodResolution.InstanceMethod(SymbolId(id: mc_instance_owner_raw), SymbolId(id: mc_instance_method_raw))
+                    elif val trait_self_type = self.current_method_self_type:
+                        # Inside a trait default method body, `self` has the
+                        # enclosing Trait type. Retain that trait identity on
+                        # `self.<method>()` for methods declared on that trait
+                        # so scalar/nominal defaults do not collide with
+                        # unrelated visible traits on the concrete Self type.
+                        match mc_static_resolution:
+                            case MethodResolution.Unresolved:
+                                match trait_self_type.kind:
+                                    case HirTypeKind.Named(trait_sym, _):
+                                        if val trait_sym_info = self.symbols.get_symbol_raw(trait_sym.id):
+                                            if trait_sym_info.kind == SymbolKind.Trait:
+                                                val recv_sym = _hir_expr_symbol_or_invalid(mc_lowered_receiver.kind)
+                                                if recv_sym.is_valid():
+                                                    if val recv_info = self.symbols.get_symbol_raw(recv_sym.id):
+                                                        if recv_info.name == "self" or recv_info.name == "me":
+                                                            if val trait_method = self.symbols.lookup_trait_method_raw(trait_sym.id, method_name_t):
+                                                                mc_resolution = MethodResolution.TraitMethod(trait_sym, trait_method)
+                                    case _: ()
+                            case _: ()
                     var hir_args: [HirCallArg] = []
+                    val mc_lambda_hint: HirType = self.lambda_element_hint_for_method(mc_lowered_receiver.kind, method_name_t, e.span)
                     for arg in method_args_t:
                         val marg_t: CallArg = arg
+                        self.stage_lambda_param_hint(marg_t.value, mc_lambda_hint)
                         hir_args = hir_args.push(HirCallArg(
                             has_name: marg_t.has_name,
                             name: marg_t.name,
@@ -452,14 +1002,15 @@ impl HirLowering:
                                 val mc_module_callable = self.field_module_callable(mc_module_name, method_name_t)
                                 if val mc_resolved_callable = mc_module_callable:
                                     val mc_callable_name = self.symbols.symbol_display_name(mc_resolved_callable, method_name_t)
+                                    self.check_call_arity_by_symbol_id(mc_resolved_callable.id, hir_args, e.span)
                                     return HirExpr(
                                         kind: HirExprKind.Call(
-                                            HirExpr(kind: _hir_callable_named_var_payload(mc_resolved_callable, mc_callable_name), has_type_: false, type_: nil, span: e.span),
+                                            HirExpr(kind: _hir_callable_named_var_payload(mc_resolved_callable, mc_callable_name), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span),
                                             hir_args,
                                             []
                                         ),
                                         has_type_: false,
-                                        type_: nil,
+                                        type_: HirType(kind: HirTypeKind.Unit, span: e.span),
                                         span: e.span
                                     )
                         # A call through a struct FIELD that holds a function
@@ -519,11 +1070,12 @@ impl HirLowering:
                                                 []
                                             ),
                                             has_type_: false,
-                                            type_: nil,
+                                            type_: HirType(kind: HirTypeKind.Unit, span: e.span),
                                             span: e.span
                                         )
                                     case _:
                                         ()
+                    self.check_call_arity_by_symbol_id(self.resolve_method_call_arity_symbol_id(mc_resolution, mc_lowered_receiver, method_name_t), hir_args, e.span)
                     # Type `Dict<K,V>.keys()` as `[K]` and `.values()` as `[V]`
                     # while the freshly lowered receiver is still local. The
                     # pure-Simple layer had NO per-method result-type table at
@@ -576,8 +1128,8 @@ impl HirLowering:
                     # declared type is the fallback.
                     if method_name_t == "keys" or method_name_t == "values":
                         if hir_args.len() == 0:
-                            var mc_recv_type_opt: HirType? = nil
-                            if mc_lowered_receiver.has_type_ and mc_lowered_receiver.type_ != nil:
+                            var mc_recv_type_opt: HirType? = None
+                            if mc_lowered_receiver.has_type_:
                                 mc_recv_type_opt = mc_lowered_receiver.type_
                             else:
                                 val mc_recv_sym = _hir_expr_symbol_or_invalid(mc_lowered_receiver.kind)
@@ -589,22 +1141,24 @@ impl HirLowering:
                                 case HirTypeKind.Dict(mc_dict_key, mc_dict_value):
                                     if method_name_t == "keys":
                                         return HirExpr(
-                                            kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, mc_static_resolution),
+                                            kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, mc_resolution),
                                             has_type_: true,
                                             type_: HirType(kind: HirTypeKind.Array(mc_dict_key, None), span: e.span),
                                             span: e.span)
                                     return HirExpr(
-                                        kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, mc_static_resolution),
+                                        kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, mc_resolution),
                                         has_type_: true,
                                         type_: HirType(kind: HirTypeKind.Array(mc_dict_value, None), span: e.span),
                                         span: e.span)
                                 case _: ()
-                    self.validate_attributed_collection_factory(
-                        mc_lowered_receiver, method_name_t, hir_args, e.span)
+                    # Fast-path guard: skip by-value receiver copy for ordinary method calls.
+                    if method_name_t == "attributed_at_site" or method_name_t == "attributed_with_prior_at_site":
+                        self.validate_attributed_collection_factory(
+                            mc_lowered_receiver, method_name_t, hir_args, e.span)
                     return HirExpr(
-                        kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, mc_static_resolution),
+                        kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, mc_resolution),
                         has_type_: false,
-                        type_: nil,
+                        type_: HirType(kind: HirTypeKind.Unit, span: e.span),
                         span: e.span
                     )
                 case _:
@@ -612,12 +1166,17 @@ impl HirLowering:
         if kind_disc_v == hir_expr_kind_disc(ExprKind.IfChain([], None)):
             match expr_kind_value:
                 case ExprKind.IfChain(arms, else_):
+                    if cfg_when_chain_is_marker(arms):
+                        val marker_else: Block? = else_
+                        return self.lower_cfg_when_chain(arms, marker_else, e.span)
                     var hir_arms: [HirIfArm] = []
                     var arm_idx = 0
                     while arm_idx < arms.len():
                         val arm: IfArm = arms[arm_idx]
+                        val arm_hir_cond = self.lower_hir_expr(arm.cond)
+                        self.check_char_condition(arm_hir_cond)
                         hir_arms = hir_arms.push(HirIfArm(
-                            cond: self.lower_hir_expr(arm.cond),
+                            cond: arm_hir_cond,
                             then_: self.lower_hir_block(arm.then_),
                             span: arm.span
                         ))
@@ -629,29 +1188,35 @@ impl HirLowering:
                         return HirExpr(
                             kind: HirExprKind.IfChain(hir_arms, self.lower_hir_block(else_block_src)),
                             has_type_: false,
-                            type_: nil,
+                            type_: HirType(kind: HirTypeKind.Unit, span: e.span),
                             span: e.span
                         )
-                    return HirExpr(kind: HirExprKind.IfChain(hir_arms, None), has_type_: false, type_: nil, span: e.span)
+                    return HirExpr(kind: HirExprKind.IfChain(hir_arms, None), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span)
                 case _:
                     pass
         if kind_disc_v == hir_expr_kind_disc(ExprKind.If(kind_disc_dummy, Block(stmts: [], span: e.span), None)):
             match expr_kind_value:
                 case ExprKind.If(cond, then_, else_):
+                    val marker_cond_expr: Expr = cond
+                    val single_arm = IfArm(cond: marker_cond_expr, then_: then_, span: e.span)
+                    if cfg_when_chain_is_marker([single_arm]):
+                        val single_else: Block? = else_
+                        return self.lower_cfg_when_chain([single_arm], single_else, e.span)
                     val hir_cond = self.lower_hir_expr(cond)
+                    self.check_char_condition(hir_cond)
                     val hir_then = self.lower_hir_block(then_)
                     val else_opt: Block? = else_
                     if val else_block_src = else_opt:
                         return HirExpr(
                             kind: HirExprKind.If(hir_cond, hir_then, self.lower_hir_block(else_block_src)),
                             has_type_: false,
-                            type_: nil,
+                            type_: HirType(kind: HirTypeKind.Unit, span: e.span),
                             span: e.span
                         )
                     return HirExpr(
                         kind: HirExprKind.If(hir_cond, hir_then, None),
                         has_type_: false,
-                        type_: nil,
+                        type_: HirType(kind: HirTypeKind.Unit, span: e.span),
                         span: e.span
                     )
                 case _:
@@ -686,7 +1251,7 @@ impl HirLowering:
                                 val module_callable = self.field_module_callable(module_name, fld_name_t)
                                 if val resolved_callable = module_callable:
                                     val callable_name = self.symbols.symbol_display_name(resolved_callable, fld_name_t)
-                                    return HirExpr(kind: _hir_callable_named_var_payload(resolved_callable, callable_name), has_type_: false, type_: nil, span: e.span)
+                                    return HirExpr(kind: _hir_callable_named_var_payload(resolved_callable, callable_name), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span)
                     # Numeric tuple positional access (`t.0`, `t.1`, ...):
                     # route through HirExprKind.Index (rt_array_get at
                     # runtime) instead of the generic struct-field path
@@ -717,10 +1282,22 @@ impl HirLowering:
                         val fld_tuple_elem_type = self.field_tuple_element_type(fld_lowered_base.kind, fld_tuple_idx)
                         # Tuple-returning calls need MIR's declared-return
                         # fallback; an absent local annotation is not a type.
+                        # HirExpr.type_ is a non-optional HirType; unwrap
+                        # fld_tuple_elem_type (`HirType?`) before storing.
+                        var fld_tuple_has_type = false
+                        var fld_tuple_type: HirType = HirType(kind: HirTypeKind.Unit, span: e.span)
+                        if val fld_tuple_found = fld_tuple_elem_type:
+                            fld_tuple_has_type = true
+                            fld_tuple_type = HirType(kind: fld_tuple_found.kind, span: e.span)
+                        # The index literal carries the BASE's span: MIR
+                        # (index_is_tuple_positional) reads that as "positional
+                        # `t.N`", so an `Any` receiver keeps the native tuple
+                        # word read instead of rt_index_get. A source `x[N]`
+                        # literal always has its own token span.
                         return HirExpr(
-                            kind: HirExprKind.Index(fld_lowered_base, HirExpr(kind: HirExprKind.IntLit(fld_tuple_idx, None), has_type_: false, type_: nil, span: e.span)),
-                            has_type_: fld_tuple_elem_type != nil,
-                            type_: fld_tuple_elem_type,
+                            kind: HirExprKind.Index(fld_lowered_base, HirExpr(kind: HirExprKind.IntLit(fld_tuple_idx, None), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: fld_lowered_base.span)),
+                            has_type_: fld_tuple_has_type,
+                            type_: fld_tuple_type,
                             span: e.span
                         )
                     # Nested-field-access support (native --entry path bug --
@@ -733,6 +1310,7 @@ impl HirLowering:
                     # array accessor). It resolves the existing symbol-table
                     # shape or an owner proven by HIR/call/index type metadata;
                     # unresolved bases retain the pre-existing fallback.
+                    self.check_member_field_visible(fld_lowered_base, fld_name_t, e.span)
                     val fld_field_type = self.field_type_for_hir_base(fld_lowered_base, fld_name_t)
                     match fld_field_type.kind:
                         case HirTypeKind.Error: ()
@@ -750,13 +1328,19 @@ impl HirLowering:
                                 has_type_: true,
                                 type_: live_field_type,
                                 span: e.span)
-                    return HirExpr(kind: HirExprKind.Field(fld_lowered_base, fld_name_t, None), has_type_: false, type_: nil, span: e.span)
+                    # Accessor forwarding (REQ-SELFHOST-ACCESSOR-001): no real field.
+                    var fld_acc_owner = self.field_owner_for_hir_expr(fld_lowered_base)
+                    if fld_acc_owner < 0 and fld_base_sym.is_valid():
+                        fld_acc_owner = self.owner_type_id_for_base_raw(fld_base_sym.id)
+                    if val fld_forwarded = self.lower_accessor_read(fld_lowered_base, fld_name_t, fld_acc_owner, e.span):
+                        return fld_forwarded
+                    return HirExpr(kind: HirExprKind.Field(fld_lowered_base, fld_name_t, None), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span)
                 case _:
                     pass
         if kind_disc_v == hir_expr_kind_disc(ExprKind.Block(Block(stmts: [], span: e.span))):
             match expr_kind_value:
                 case ExprKind.Block(block):
-                    return HirExpr(kind: HirExprKind.Block(self.lower_hir_block(block)), has_type_: false, type_: nil, span: e.span)
+                    return HirExpr(kind: HirExprKind.Block(self.lower_hir_block(block)), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span)
                 case _:
                     pass
         val kind = match expr_kind_value:
@@ -779,7 +1363,7 @@ impl HirLowering:
                 # binaries. The parser has already built `interps` correctly
                 # by this point regardless of SIMPLE_BOOTSTRAP; always lower
                 # it when present.
-                var hir_interps: [HirInterpolation]? = nil
+                var hir_interps: [HirInterpolation]? = None
                 if val parsed_interps = interps:
                     val interpolation_parts: [Interpolation] = parsed_interps
                     val lowered_interps: [HirInterpolation] = self.lower_interpolation_list(interpolation_parts)
@@ -839,7 +1423,6 @@ impl HirLowering:
                 # Typed rebind: extracted ANY-ish payload misreads on stage4
                 # when consumed directly (bug doc iteration 18).
                 val ident_name_t: text = name
-                val symbol = self.symbols.lookup(ident_name_t)
                 # Cycle-160 (v21, 2026-10-18): the `if val` presence bind of
                 # this lookup optional copied the Some payload from an
                 # erased-draw optional and SIGSEGV'd inside lower_hir_expr
@@ -851,10 +1434,11 @@ impl HirLowering:
                 # absent (either level of nil) -> lower_unresolved_ident;
                 # present -> NamedVar. (The older NOTE's nil-recheck is
                 # subsumed by the pre-guard.)
-                if symbol == nil or symbol.? == nil:
-                    self.lower_unresolved_ident(ident_name_t, e.span)
-                else:
-                    val found_symbol: SymbolId = symbol.?
+                var resolved_ident_symbol: SymbolId? = None
+                if val candidate_symbol = self.symbols.lookup(ident_name_t):
+                    if candidate_symbol.is_valid() and candidate_symbol.id < self.symbols.next_symbol_id:
+                        resolved_ident_symbol = Some(candidate_symbol)
+                if val found_symbol = resolved_ident_symbol:
                     # Under a --entry-closure bootstrap build, a
                     # cross-module imported (or same-module,
                     # non-entry-module) function's stored symbol name may
@@ -885,8 +1469,18 @@ impl HirLowering:
                     # same-module calls) round-trips to `ident_name_t`
                     # unchanged, so this is a no-op there.
                     val display_name = self.symbols.symbol_display_name(found_symbol, ident_name_t)
+                    # A found symbol that is NOT a local/parameter while the
+                    # enclosing class declares a same-named field is a bare
+                    # field reference binding to the module-level name
+                    # (W-HIR-BAREFIELD-001, warning stage).
+                    if val found_def = self.symbols.get_symbol_raw(found_symbol.id):
+                        match found_def.kind:
+                            case SymbolKind.Variable | SymbolKind.Parameter: ()
+                            case _: self.warn_bare_field_shadowed_by_global(ident_name_t, e.span)
                     val named_var_kind = HirExprKind.NamedVar(found_symbol, display_name)
                     named_var_kind
+                else:
+                    self.lower_unresolved_ident(ident_name_t, e.span)
 
             # NOTE: ExprKind.Field and ExprKind.Block arms are handled by the
             # discriminant pre-dispatch above (seed always-true struct-pattern
@@ -901,7 +1495,7 @@ impl HirLowering:
                         val indexed = HirExpr(
                             kind: HirExprKind.Index(self.lower_hir_expr(exists_base_t), lowered_index),
                             has_type_: false,
-                            type_: nil,
+                            type_: HirType(kind: HirTypeKind.Unit, span: e.span),
                             span: e.span
                         )
                         HirExprKind.ExistsCheck(indexed)
@@ -925,10 +1519,34 @@ impl HirLowering:
                         # true`. That malformed word later reaches the 16-byte
                         # HirType clone in `lower_hir_block`'s HirBlock
                         # construction and SIGSEGVs.
-                        if lowered_base.has_type_ and lowered_base.type_ != nil:
-                            val base_type = lowered_base.type_ ?? HirType(kind: HirTypeKind.Error, span: e.span)
+                        # A Var/NamedVar base (a parameter or an inferred
+                        # local such as `val param = params[i]`) carries no
+                        # `type_` on the expression itself; its declared or
+                        # inferred type lives in the symbol table (same
+                        # fallback as declared_exists_check_type). Without it
+                        # `params[i]` and `param[0]` both lowered untyped
+                        # (bug native_tuple_array_local_text_provenance_2026-10-30).
+                        var index_base_type: HirType? = None
+                        if lowered_base.has_type_:
+                            index_base_type = lowered_base.type_
+                        else:
+                            val index_base_symbol = _hir_expr_symbol_or_invalid(lowered_base.kind)
+                            if index_base_symbol.is_valid():
+                                index_base_type = self.symbols.get_symbol_type_raw(index_base_symbol.id)
+                        # `xs[1..]` is a sub-array, not an element: a range
+                        # index never names the element type.
+                        val index_is_range = match lowered_index.kind:
+                            case HirExprKind.Range(_, _, _, _): true
+                            case _: false
+                        if val base_type = index_base_type:
                             match base_type.kind:
                                 case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
+                                    if index_is_range:
+                                        return HirExpr(
+                                            kind: HirExprKind.Index(lowered_base, lowered_index),
+                                            has_type_: false,
+                                            type_: HirType(kind: HirTypeKind.Unit, span: e.span),
+                                            span: e.span)
                                     return HirExpr(
                                         kind: HirExprKind.Index(lowered_base, lowered_index),
                                         has_type_: true,
@@ -940,11 +1558,21 @@ impl HirLowering:
                                         has_type_: true,
                                         type_: value,
                                         span: e.span)
+                                case HirTypeKind.Tuple(tuple_elements):
+                                    # `t[0]` on a tuple: only a literal slot
+                                    # names one element type; a runtime index
+                                    # over a mixed tuple stays untyped.
+                                    match lowered_index.kind:
+                                        case HirExprKind.IntLit(tuple_slot, _):
+                                            if tuple_slot >= 0 and tuple_slot < tuple_elements.len():
+                                                return HirExpr(
+                                                    kind: HirExprKind.Index(lowered_base, lowered_index),
+                                                    has_type_: true,
+                                                    type_: tuple_elements[tuple_slot],
+                                                    span: e.span)
+                                        case _: ()
                                 case _: ()
                         HirExprKind.Index(lowered_base, lowered_index)
-
-            case ExprKind.OptionalChain(base, field):
-                HirExprKind.OptionalChain(self.lower_hir_expr(base), field)
 
             case ExprKind.NullCoalesce(left, right):
                 HirExprKind.NullCoalesce(self.lower_hir_expr(left), self.lower_hir_expr(right))
@@ -963,7 +1591,72 @@ impl HirLowering:
                 HirExprKind.Unwrap(self.lower_hir_expr(base))
 
             case ExprKind.Cast(operand, target_type):
-                HirExprKind.Cast(self.lower_hir_expr(operand), self.lower_type(target_type))
+                val cast_operand = self.lower_hir_expr(operand)
+                val cast_target = self.lower_type(target_type)
+                # `raw as Unit` for a declared `unit Name: T as sfx`: a unit is
+                # lowered to the one-field record `Name { value: T }`, so the cast
+                # is that record's construction, the same value `Name(raw)` builds.
+                # Bug: unit_from_primitive_construction_unsupported_runtime_2026-11-15.
+                match target_type.kind:
+                    case TypeKind.Named(_, unit_args):
+                        if unit_args.len() == 0 and self.cast_target_resolves_to_unit(cast_target):
+                            # `u as Unit` where `u` is ALREADY that unit is the
+                            # identity (seed parity); wrapping again would build
+                            # `Unit { value: Unit {...} }`.
+                            # Bug: unit_cast_identity_double_wrap_2026-11-16.
+                            var operand_type: HirType? = None
+                            if cast_operand.has_type_:
+                                operand_type = Some(cast_operand.type_)
+                            else:
+                                operand_type = self.cast_operand_declared_type(operand)
+                            if val ot = operand_type:
+                                val same_unit = match ot.kind:
+                                    case HirTypeKind.Named(op_sym, op_args):
+                                        match cast_target.kind:
+                                            case HirTypeKind.Named(tg_sym, _): op_args.len() == 0 and op_sym.id == tg_sym.id
+                                            case _: false
+                                    case _: false
+                                if same_unit:
+                                    return cast_operand
+                            val unit_fields: [(text, HirExpr)] = [("value", cast_operand)]
+                            return HirExpr(kind: HirExprKind.StructLit(cast_target, unit_fields),
+                                has_type_: true, type_: cast_target, span: e.span)
+                    case _: ()
+                # `T? as <numeric>` outside `unsafe` is a type error, never a
+                # value (nil-only-in-unsafe, ERR-01). The seed produced a
+                # silent 0 / garbage for it; the seed's HIR lowerer now
+                # rejects it (LowerError::OptionalCast) and this is the
+                # self-hosted twin. Only fires when the operand is KNOWN to be
+                # Optional: its HIR type, its declared symbol/return type, or
+                # an unannotated local initialised from a call declared to
+                # return `T?`. Any other untyped operand is not guessed at.
+                # Bug: optional_as_cast_yields_zero_2026_11_09.
+                if self.unsafe_block_depth == 0:
+                    var operand_is_optional = false
+                    if cast_operand.has_type_:
+                        operand_is_optional = match cast_operand.type_.kind:
+                            case HirTypeKind.Optional(_): true
+                            case _: false
+                    if not operand_is_optional:
+                        # This lowerer types few expressions itself; for a
+                        # named local/parameter or a call of a named function
+                        # the DECLARED type is in the symbol table.
+                        if val declared = self.cast_operand_declared_type(operand):
+                            operand_is_optional = match declared.kind:
+                                case HirTypeKind.Optional(_): true
+                                case _: false
+                    if not operand_is_optional:
+                        # An unannotated local of a `T?`-returning call whose
+                        # symbol type stayed unknown (generic `T?`), marked at
+                        # its `val`/`var` (mark_optional_call_init).
+                        operand_is_optional = self.cast_operand_is_optional_call_local(operand)
+                    val target_is_numeric = match cast_target.kind:
+                        case HirTypeKind.Int(_, _): true
+                        case HirTypeKind.Float(_): true
+                        case _: false
+                    if operand_is_optional and target_is_numeric:
+                        self.error("[E-OPT-CAST-001] cannot cast an optional `T?` to a numeric type with `as` outside `unsafe`; narrow it first with `?? <default>`, `if val x = ...`, or `match`", e.span)
+                HirExprKind.Cast(cast_operand, cast_target)
 
             case ExprKind.Binary(op, left, right):
                 # Typed rebinds: extracted ANY-ish payloads misread on stage4
@@ -982,20 +1675,30 @@ impl HirLowering:
                 # values is untouched.
                 val is_type_name = binary_is_type_operand(bin_op_t, bin_right_t)
                 if is_type_name != "":
-                    val tested = HirExpr(kind: HirExprKind.TypeTest(self.lower_hir_expr(bin_left_t), is_type_name), has_type_: false, type_: nil, span: e.span)
+                    val tested = HirExpr(kind: HirExprKind.TypeTest(self.lower_hir_expr(bin_left_t), is_type_name), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span)
                     match bin_op_t:
                         case BinOp.IsNot: HirExprKind.Unary(HirUnaryOp.Not, tested)
                         case _: HirExprKind.TypeTest(self.lower_hir_expr(bin_left_t), is_type_name)
                 else:
                     val lowered_left: HirExpr = self.lower_hir_expr(bin_left_t)
                     val lowered_right: HirExpr = self.lower_hir_expr(bin_right_t)
+                    match hir_op:
+                        case HirBinOp.And | HirBinOp.Or:
+                            self.check_char_condition(lowered_left)
+                            self.check_char_condition(lowered_right)
+                        case _: pass
+                    self.check_char_int_binary(hir_op, lowered_left, lowered_right, e.span)
                     HirExprKind.Binary(hir_op, lowered_left, lowered_right)
 
             case ExprKind.Unary(op, operand):
                 val un_op_t: UnaryOp = op
                 val un_operand_t: Expr = operand
                 val hir_op = self.lower_unaryop(un_op_t)
-                HirExprKind.Unary(hir_op, self.lower_hir_expr(un_operand_t))
+                val un_lowered: HirExpr = self.lower_hir_expr(un_operand_t)
+                match hir_op:
+                    case HirUnaryOp.Not: self.check_char_condition(un_lowered)
+                    case _: pass
+                HirExprKind.Unary(hir_op, un_lowered)
 
             case ExprKind.MethodCall(receiver, method, args):
                 # Same #130 fix as the Call arm: the former SIMPLE_BOOTSTRAP branch
@@ -1007,11 +1710,22 @@ impl HirLowering:
                 # still authoritative. Lowering argument expressions can
                 # advance interpreter-owned enum payload storage.
                 val lowered_method_receiver = self.lower_static_owner_receiver(method_receiver_t)
-                val fallback_static_resolution = self.declared_static_method_resolution(lowered_method_receiver, method_name_t)
+                self.check_char_int_method(lowered_method_receiver, method_name_t, e.span)
+                val fallback_static_resolution = self.declared_static_method_resolution(lowered_method_receiver.kind, method_name_t)
                 val fallback_enum_owner = self.declared_enum_constructor_owner(lowered_method_receiver, fallback_static_resolution)
+                # Same instance-method resolution as arm A above (both arms are
+                # patched because the discriminant pre-dispatch is not
+                # guaranteed to fire on Stage 2).
+                var fallback_resolution: MethodResolution = fallback_static_resolution
+                val fallback_instance_owner_raw = self.declared_instance_method_owner_raw_v1(lowered_method_receiver.kind, method_name_t, fallback_static_resolution)
+                if fallback_instance_owner_raw >= 0:
+                    val fallback_instance_method_raw: i64 = self.symbols.record_instance_method_scalar_raw(fallback_instance_owner_raw, method_name_t)
+                    fallback_resolution = MethodResolution.InstanceMethod(SymbolId(id: fallback_instance_owner_raw), SymbolId(id: fallback_instance_method_raw))
                 var hir_args: [HirCallArg] = []
+                val fb_lambda_hint: HirType = self.lambda_element_hint_for_method(lowered_method_receiver.kind, method_name_t, e.span)
                 for arg in method_args_t:
                     val marg_t: CallArg = arg
+                    self.stage_lambda_param_hint(marg_t.value, fb_lambda_hint)
                     # All-four-fields construction: see Call arm above.
                     hir_args = hir_args.push(HirCallArg(
                         has_name: marg_t.has_name,
@@ -1021,6 +1735,7 @@ impl HirLowering:
                     ))
                 if val enum_constructor = self.declared_enum_constructor_expr(fallback_enum_owner, method_name_t, hir_args, e.span):
                     return enum_constructor
+                self.check_call_arity_by_symbol_id(self.resolve_method_call_arity_symbol_id(fallback_resolution, lowered_method_receiver, method_name_t), hir_args, e.span)
                 # Same Dict<K,V>.keys()/.values() typing as the pre-dispatch
                 # MethodCall arm above -- see the full rationale there. Both
                 # arms are patched because the discriminant-gated pre-dispatch
@@ -1034,8 +1749,8 @@ impl HirLowering:
                 # is not sufficient.
                 if method_name_t == "keys" or method_name_t == "values":
                     if hir_args.len() == 0:
-                        var fb_recv_type_opt: HirType? = nil
-                        if lowered_method_receiver.has_type_ and lowered_method_receiver.type_ != nil:
+                        var fb_recv_type_opt: HirType? = None
+                        if lowered_method_receiver.has_type_:
                             fb_recv_type_opt = lowered_method_receiver.type_
                         else:
                             val fb_recv_sym = _hir_expr_symbol_or_invalid(lowered_method_receiver.kind)
@@ -1047,17 +1762,17 @@ impl HirLowering:
                             case HirTypeKind.Dict(fb_dict_key, fb_dict_value):
                                 if method_name_t == "keys":
                                     return HirExpr(
-                                        kind: HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, fallback_static_resolution),
+                                        kind: HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, fallback_resolution),
                                         has_type_: true,
                                         type_: HirType(kind: HirTypeKind.Array(fb_dict_key, None), span: e.span),
                                         span: e.span)
                                 return HirExpr(
-                                    kind: HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, fallback_static_resolution),
+                                    kind: HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, fallback_resolution),
                                     has_type_: true,
                                     type_: HirType(kind: HirTypeKind.Array(fb_dict_value, None), span: e.span),
                                     span: e.span)
                             case _: ()
-                HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, fallback_static_resolution)
+                HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, fallback_resolution)
 
             case ExprKind.MatchCase(scrutinee, arms):
                 # The scrutinee is lowered FIRST and OUTSIDE every arm scope:
@@ -1074,7 +1789,7 @@ impl HirLowering:
                     # treats `arm` as ANY and field reads mis-decode (a list
                     # field comes back as a scalar handle, so a later `.len()`
                     # crashes with "len on i64"). Every other arm-iterating pass
-                    # (40.mono, 30.types) does the same rebind. guard is a
+                    # (30.types) does the same rebind. guard is a
                     # DESUGARED (has_guard, guard) pair — not an Option.
                     val typed_arm: MatchArm = arm
 
@@ -1115,6 +1830,19 @@ impl HirLowering:
                 self.build_match_expr(hir_scrutinee, hir_arms, scrutinee.span)
 
             case ExprKind.Lambda(params, body):
+                # The closure may escape its enclosing unsafe block, so an
+                # outer type_erasure grant cannot authorize its stored types.
+                val enclosing_any_unsafe_depth = self.written_any_unsafe_depth
+                self.written_any_unsafe_depth = 0
+                # Consume the element hint staged by an element-wise array
+                # method call (lambda_element_hint_for_method); clear it so no
+                # nested lambda inherits it.
+                val lam_elem_hint: HirType = self.lambda_param_hint
+                self.lambda_param_hint = HirType(kind: HirTypeKind.Error, span: e.span)
+                var lam_has_hint = false
+                match lam_elem_hint.kind:
+                    case HirTypeKind.Error: ()
+                    case _: lam_has_hint = params.len() == 1
                 self.symbols.push_scope(ScopeKind.Function)
                 var hir_params: [HirParam] = []
                 # Cycle-161 (v22, 2026-10-18): NO for-in element rebind --
@@ -1128,13 +1856,19 @@ impl HirLowering:
                 while lam_param_i < params.len():
                     val lam_p_name: text = params[lam_param_i].name
                     val lam_p_type_raw: Type = params[lam_param_i].type_
+                    val lam_p_annotated: bool = params[lam_param_i].has_type_
                     val lam_p_span: Span = params[lam_param_i].span
-                    val type_ = if lam_p_type_raw.?: self.lower_type(lam_p_type_raw) else: HirType(kind: HirTypeKind.Infer(0, 0), span: lam_p_span)
+                    var type_: HirType = HirType(kind: HirTypeKind.Infer(0, 0), span: lam_p_span)
+                    if lam_has_hint and not lam_p_annotated:
+                        type_ = lam_elem_hint
+                    elif lam_p_type_raw.?:
+                        type_ = self.lower_type(lam_p_type_raw)
                     val symbol = self.symbols.define(lam_p_name, SymbolKind.Parameter, Some(type_), lam_p_span, Visibility.Private, false, nil)
                     hir_params = hir_params.push(HirParam(
                         symbol: symbol,
                         name: lam_p_name,
                         type_: type_,
+                        has_default: false,
                         default: nil,
                         span: lam_p_span,
                         is_mutable: false
@@ -1142,6 +1876,7 @@ impl HirLowering:
                     lam_param_i = lam_param_i + 1
                 val hir_body = self.lower_hir_expr(body)
                 self.symbols.pop_scope()
+                self.written_any_unsafe_depth = enclosing_any_unsafe_depth
                 HirExprKind.Lambda(hir_params, hir_body, [])
 
             case ExprKind.Return(value):
@@ -1149,7 +1884,9 @@ impl HirLowering:
                 HirExprKind.Return(rv)
 
             case ExprKind.Break(label):
-                HirExprKind.Break(label, None)
+                # HIR Break.label is `text` ("" = unlabeled); the AST label is `text?`.
+                val break_label: text = label ?? ""
+                HirExprKind.Break(break_label, None)
 
             case ExprKind.Continue(label):
                 HirExprKind.Continue(label)
@@ -1289,9 +2026,17 @@ impl HirLowering:
                 val unknown_caps = unknown_unsafe_capability_names(caps)
                 if unknown_caps.len() > 0:
                     self.error("unknown unsafe capability `" + unknown_caps[0] + "`; " + valid_unsafe_capability_names_help(), e.span)
-                self.written_any_unsafe_depth = self.written_any_unsafe_depth + 1
+                val grants_type_erasure = unknown_caps.len() == 0 and
+                    unsafe_capability_set_contains(caps, UnsafeCapability.TypeErasure)
+                if grants_type_erasure:
+                    self.written_any_unsafe_depth = self.written_any_unsafe_depth + 1
+                # Capability-agnostic depth: any `unsafe:` admits `T? as <numeric>`
+                # (see the Cast arm above).
+                self.unsafe_block_depth = self.unsafe_block_depth + 1
                 var unsafe_hir_body = self.lower_hir_block(body)
-                self.written_any_unsafe_depth = self.written_any_unsafe_depth - 1
+                self.unsafe_block_depth = self.unsafe_block_depth - 1
+                if grants_type_erasure:
+                    self.written_any_unsafe_depth = self.written_any_unsafe_depth - 1
                 unsafe_hir_body.unsafe_caps = caps
                 HirExprKind.UnsafeBlock(unsafe_hir_body)
 
@@ -1314,5 +2059,81 @@ impl HirLowering:
             case _:
                 self.error("unsupported expression kind", e.span)
                 HirExprKind.Error
-        val wrapped_expr = HirExpr(kind: kind, has_type_: false, type_: nil, span: e.span)
+        val wrapped_expr = HirExpr(kind: kind, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span)
         wrapped_expr
+
+
+# ---------------------------------------------------------------------------
+# Safe navigation (`recv?.f`, `recv?.m(args)`) -- syntax_quick_reference.md
+# § Safe Navigation: a present receiver (Some/Ok payload, or any non-nil
+# value) is accessed, an absent one (nil/None/Err) yields nil, and a chain
+# short-circuits on the first absent link.
+#
+# Desugared here into the exact shape the flat-AST bridge emits for
+# `if val` (convert_nodes.spl STMT_VAL_DECL, bind_optional_payload), which is
+# already lowered on every lane:
+#
+#     { val __optchain_<line>_<col>_<depth> = recv.?
+#       if __optchain_.. != nil: __optchain_...f  else: nil }
+#
+# so `tmp` is bound to the PAYLOAD with its payload type and the access
+# resolves exactly like a hand-written if-val body. Before this, HIR kept an
+# OptionalChain node that native MIR rejects (E-MIR-EXPR-OptionalChain), and
+# the method form reached MIR as an indirect Call through it.
+# ---------------------------------------------------------------------------
+
+fn optional_chain_spine_depth(e: Expr) -> i64:
+    """Number of `?.` links under `e`, so nested links get distinct temps
+    (`a?.b?.c` puts both links at the same source position)."""
+    match e.kind:
+        case ExprKind.OptionalChain(inner, _): return 1 + optional_chain_spine_depth(inner)
+        case ExprKind.Call(callee, _): return optional_chain_spine_depth(callee)
+        case ExprKind.MethodCall(recv, _, _): return optional_chain_spine_depth(recv)
+        # No `Field`/`Block` arms: both are also struct names, and the seed
+        # compiles such a variant test as always-true (see lower_hir_expr's
+        # SEED PATTERN HAZARD note). Spine depth only needs `?.` links.
+        case _: return 0
+
+impl HirLowering:
+    me optional_chain_receiver_is_result(receiver: Expr) -> bool:
+        """True when `receiver` is statically a `Result`. `.?`/`if val` keep a
+        Result opaque-present on every lane (docs: `if val v = r.ok.?`), so
+        `?.` alone must project `Ok(v)` -> v and `Err(_)` -> absent, as the
+        seed interpreter (try_unwrap_option_or_result) and seed JIT
+        (lower_optional_chain, static Result) do. A nested `?.` link yields a
+        flattened value-or-nil, never a Result, so it is not probed. The probe
+        lowering is discarded; its diagnostics are rolled back so the real
+        lowering of the desugared form reports each one once."""
+        if optional_chain_spine_depth(receiver) > 0:
+            return false
+        val saved_errors = self.errors
+        val saved_messages = self.diagnostic_messages
+        val probe = self.lower_hir_expr(receiver)
+        self.errors = saved_errors
+        self.diagnostic_messages = saved_messages
+        val probe_type = self.binding_source_type(probe)
+        match probe_type.kind:
+            case HirTypeKind.Result(_, _): return true
+            case _: return false
+
+fn optional_chain_desugar(receiver: Expr, member: text, is_call: bool, args: [CallArg], call_types: [Type], span: Span, receiver_is_result: bool = false) -> Expr:
+    val tmp = "__optchain_{span.line}_{span.col}_{optional_chain_spine_depth(receiver)}"
+    val tmp_ref = Expr(kind: ExprKind.Ident(tmp), span: span)
+    # A static Result receiver goes through its `.ok` projection (Ok(v) ->
+    # Some(v), Err -> None; lowered natively by lower_result_projection), so
+    # the shared if-val shape below binds the Ok payload and treats Err as
+    # absent instead of binding the Result itself.
+    val present_source = if receiver_is_result:
+        Expr(kind: ExprKind.Field(receiver, "ok"), span: span)
+    else:
+        receiver
+    val bind = Stmt(kind: StmtKind.Val(tmp, None, Expr(kind: ExprKind.ExistsCheck(present_source), span: span)), span: span, bind_optional_payload: true)
+    val present_test = Expr(kind: ExprKind.Binary(BinOp.NotEq, tmp_ref, Expr(kind: ExprKind.NilLit, span: span)), span: span)
+    val access = if is_call:
+        Expr(kind: ExprKind.MethodCall(tmp_ref, member, args), span: span, explicit_call_types: call_types)
+    else:
+        Expr(kind: ExprKind.Field(tmp_ref, member), span: span)
+    val then_block = Block(stmts: [Stmt(kind: StmtKind.Expr(access), span: span)], span: span)
+    val else_block = Block(stmts: [Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)], span: span)
+    val select = Expr(kind: ExprKind.If(present_test, then_block, Some(else_block)), span: span)
+    Expr(kind: ExprKind.Block(Block(stmts: [bind, Stmt(kind: StmtKind.Expr(select), span: span)], span: span)), span: span)

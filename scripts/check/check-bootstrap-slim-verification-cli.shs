@@ -1,0 +1,121 @@
+#!/bin/sh
+# Bounded scheduling/admission contract; not compiler or test-suite evidence.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+verifier="$root/scripts/bootstrap/bootstrap-phase-verification.shs"
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+sed -n '/^bootstrap_phase_select_compiler_cli() {$/,/^}$/p' "$verifier" >"$scratch/select.shs"
+[ -s "$scratch/select.shs" ] || die 'production CLI selector missing'
+. "$scratch/select.shs"
+
+# Execute the production selector, including impossible combinations so a
+# future caller cannot accidentally apply the slim entry to another phase.
+for phase in stage1 stage2 stage3 stage4; do
+  for stage2_slim_profile in 0 1; do
+    for stage2_test_delegate in 0 1; do
+      bootstrap_phase_select_compiler_cli
+      expected_entry=src/app/cli/_CliMain/main_and_help.spl
+      expected_cache=full-cli
+      if [ "$phase/$stage2_slim_profile/$stage2_test_delegate" = stage2/1/1 ]; then
+        expected_entry=src/app/cli/bootstrap_verify_main.spl
+        expected_cache=verification-cli
+      fi
+      [ "$compiler_cli_entry" = "$expected_entry" ] || die "wrong entry: $phase/$stage2_slim_profile/$stage2_test_delegate"
+      [ "$compiler_cli_cache_name" = "$expected_cache" ] || die 'CLI cache identity crossed routes'
+    done
+  done
+done
+
+# Execute the production receipt/profile validator. A cached command-owner
+# receipt from another entry or profile must never admit this artifact.
+sed -n '/^bootstrap_phase_validate_cli_profile_receipt() {$/,/^}$/p' "$verifier" >"$scratch/profile-receipt.shs"
+[ -s "$scratch/profile-receipt.shs" ] || die 'CLI profile receipt validator missing'
+manifest_value() { awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$2"; }
+. "$scratch/profile-receipt.shs"
+compiler_cli_entry=src/app/cli/bootstrap_verify_main.spl
+compiler_cli_cache_name=verification-cli
+cat >"$scratch/owner.env" <<'EOF'
+compiler_cli_entry=src/app/cli/bootstrap_verify_main.spl
+compiler_cli_profile=verification-cli
+EOF
+bootstrap_phase_validate_cli_profile_receipt "$scratch/owner.env" || die 'matching CLI profile receipt rejected'
+sed 's/compiler_cli_profile=verification-cli/compiler_cli_profile=full-cli/' \
+  "$scratch/owner.env" >"$scratch/mismatched-owner.env"
+if bootstrap_phase_validate_cli_profile_receipt "$scratch/mismatched-owner.env"; then
+  die 'mismatched CLI profile receipt admitted'
+fi
+sed 's#compiler_cli_entry=src/app/cli/bootstrap_verify_main.spl#compiler_cli_entry=src/app/cli/_CliMain/main_and_help.spl#' \
+  "$scratch/owner.env" >"$scratch/mismatched-entry-owner.env"
+if bootstrap_phase_validate_cli_profile_receipt "$scratch/mismatched-entry-owner.env"; then
+  die 'mismatched CLI entry receipt admitted'
+fi
+grep -v '^compiler_cli_entry=' "$scratch/owner.env" >"$scratch/missing-entry-owner.env"
+if bootstrap_phase_validate_cli_profile_receipt "$scratch/missing-entry-owner.env"; then
+  die 'missing CLI entry receipt admitted'
+fi
+
+# Exercise the actual five-row terminal gate, including each missing row and
+# each false PASS substitute. Fixtures do not claim that any spec executed.
+sed -n '/^if \[ "$stage2_slim_profile" -eq 1 \]; then$/,/^fi$/p' "$verifier" >"$scratch/gate.shs"
+[ -s "$scratch/gate.shs" ] || die 'slim PASS gate missing'
+stage2_slim_profile=1
+summary="$scratch/summary.env"
+tasks='compiler_cli_build test_runner_build compiler_bootstrap_tests interpreter_interpreter_tests loader_interpreter_tests'
+for omitted in none $tasks; do
+  for disposition in absent FAIL SKIPPED; do
+    : >"$summary"
+    for task in $tasks; do
+      if [ "$task" != "$omitted" ]; then
+        printf 'task=%s|result=PASS|status=0|\n' "$task" >>"$summary"
+      elif [ "$disposition" != absent ]; then
+        printf 'task=%s|result=%s|status=0|\n' "$task" "$disposition" >>"$summary"
+      fi
+    done
+    matrix_failed=0
+    . "$scratch/gate.shs" 2>"$scratch/diagnostic"
+    expected_failed=1
+    [ "$omitted" != none ] || expected_failed=0
+    [ "$matrix_failed" -eq "$expected_failed" ] || die "five-row gate admitted $omitted/$disposition"
+  done
+done
+
+python3 - "$verifier" "$root/src/app/cli/bootstrap_verify_main.spl" \
+  "$root/.github/workflows/simpleos-build.yml" <<'PY'
+from pathlib import Path
+import re
+import sys
+verifier, entry, workflow = (Path(p).read_text() for p in sys.argv[1:])
+assert 'run_phase_c_tool_worker cli compiler_cli_build "$compiler_cli_entry"' in verifier
+assert 'run_phase_c_tool_build compiler_cli_build "$compiler_cli_entry"' in verifier
+assert 'tool_cache_cli="$tool_cache/full-cli"' in verifier
+assert 'tool_cache_cli="$tool_cache/$compiler_cli_cache_name"' in verifier
+assert 'echo "compiler_cli_entry=$compiler_cli_entry"' in verifier
+assert entry.index('compiler_entrypoint_admit_v1(["src"])') < entry.index('if is_check_help:')
+assert 'if not admission.valid:' in entry and 'SCV-E-ADMISSION:' in entry
+assert 'val driver = _cli_driver_binary()' in entry and 'if driver.len() == 0:' in entry
+assert 'process_run_inherit(driver, child_args)' in entry
+imports = [line for line in entry.splitlines() if line.startswith('use ')]
+assert not any('main_and_help' in line or 'driver_api' in line or 'run_commands' in line for line in imports)
+required_delegation_env = (
+    "BOOTSTRAP_STAGE2_TEST_DELEGATE: '1'",
+    "SIMPLE_MCDC_OFF_WAIVER_REASON:",
+    "SIMPLE_MCDC_OFF_WAIVER_REVIEWER:",
+    "SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID:",
+    "SIMPLE_MCDC_OFF_WAIVER_VERSION:",
+)
+for job_id, step_name in (
+    ('toolchain_artifacts_phase2', 'Build admitted pure-Simple host on this runner'),
+    ('smoke', 'Build and deploy admitted pure-Simple host CLI'),
+    ('full', 'Build and deploy admitted pure-Simple host CLI'),
+):
+    job_match = re.search(
+        rf'(?ms)^  {re.escape(job_id)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)',
+        workflow,
+    )
+    assert job_match, job_id
+    step = job_match.group('body').split(f'- name: {step_name}', 1)[1].split('\n      - name:', 1)[0]
+    assert all(atom in step for atom in required_delegation_env), f'{job_id}: {step_name}'
+PY
+printf 'PASS: delegated slim selector, SimpleOS wiring, isolated cache, local SCV/explicit-driver contract, five required PASS rows\n'

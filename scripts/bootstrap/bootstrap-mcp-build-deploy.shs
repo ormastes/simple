@@ -86,8 +86,11 @@
 #                          - exactly where .spipe/spipe/bin/spipe-mcp[.cmd]
 #                          admits a native binary from, via its own
 #                          <exe>.sha256 sidecar check).
-#   --platform=TRIPLE      Target triple, used only to name --deploy-root when
-#                          --deploy-root is not given explicitly.
+#   --platform=TRIPLE      Target triple. Names --deploy-root when it is not
+#                          given explicitly, and is forwarded to native-build
+#                          as --target: without an explicit --target the Rust
+#                          seed (Phase 1) does not finish even a 71-module
+#                          entry in 180s, while with it the same build takes 12s.
 #   --exe-suffix=SUF       ".exe" on Windows, "" elsewhere (default: auto).
 #   --jobs=N               --threads forwarded to native-build (default 1).
 #   --mcp-candidate=PATH   Pre-built simple_mcp_server binary (skips its build).
@@ -697,6 +700,7 @@ mcp_bd_build_one() {
   set +e
   env SIMPLE_NO_STUB_FALLBACK=1 \
     "${MCP_BD_COMPILER}" native-build \
+    ${MCP_BD_TARGET:+--target "${MCP_BD_TARGET}"} \
     ${MCP_BD_BACKEND:+--backend "${MCP_BD_BACKEND}"} \
     --source src/compiler --source src/app --source src/lib \
     ${extra_source:+--source "${extra_source}"} --entry-closure \
@@ -746,8 +750,10 @@ mcp_bd_run_system_tests() {
   # Real-launcher handshake against the freshly built candidates, never the
   # currently-deployed servers.
   cfg_tmp=$(mktemp "${TMPDIR:-/tmp}/mcp-bd-handshake.XXXXXX")
+  # One key per line: check-mcp-config-launchable.shs parses mcpServers
+  # line by line, so a single-line object yields "no mcpServers entries".
   {
-    printf '{"mcpServers":{'
+    printf '{\n  "mcpServers": {\n'
     first=1
     for pair in \
       "simple-mcp:${MCP_BD_MCP_CANDIDATE:-}" \
@@ -755,12 +761,12 @@ mcp_bd_run_system_tests() {
       "spipe-mcp:${MCP_BD_SPIPE_CANDIDATE:-}"; do
       cmd=${pair#*:}
       [ -n "${cmd}" ] && [ -x "${cmd}" ] || continue
-      [ "${first}" -eq 1 ] || printf ','
+      [ "${first}" -eq 1 ] || printf ',\n'
       first=0
-      printf '"%s":{"command":"%s","args":[]}' \
+      printf '    "%s": {\n      "command": "%s",\n      "args": []\n    }' \
         "$(mcp_bd_json_escape "${pair%%:*}")" "$(mcp_bd_json_escape "${cmd}")"
     done
-    printf '}}\n'
+    printf '\n  }\n}\n'
   } >"${cfg_tmp}"
   if [ "${first:-1}" -eq 0 ]; then
     if ! sh "${repo_root}/scripts/check/check-mcp-config-launchable.shs" "${cfg_tmp}" \
@@ -869,12 +875,13 @@ mcp_bd_main() {
 
   MCP_BD_COMPILER=${compiler}
   MCP_BD_BACKEND=${backend}
+  MCP_BD_TARGET=${platform}
   MCP_BD_CACHE_DIR=${cache_dir}
   MCP_BD_RUNTIME_PATH=${runtime_path}
   MCP_BD_JOBS=${jobs}
   MCP_BD_OUTPUT_DIR=${output_dir}
   MCP_BD_TEST_RUNNER=${test_runner}
-  export MCP_BD_COMPILER MCP_BD_BACKEND MCP_BD_CACHE_DIR MCP_BD_RUNTIME_PATH MCP_BD_JOBS MCP_BD_OUTPUT_DIR
+  export MCP_BD_COMPILER MCP_BD_BACKEND MCP_BD_TARGET MCP_BD_CACHE_DIR MCP_BD_RUNTIME_PATH MCP_BD_JOBS MCP_BD_OUTPUT_DIR
 
   # build_state per leg is tri-state, never just ok/fail:
   #   ok     - built (or a usable pre-supplied candidate exists)

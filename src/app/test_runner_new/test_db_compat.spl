@@ -11,7 +11,14 @@ use std.database.test_extended.{
     load_test_database_extended,
     load_with_migration,
     RunRecord,
-    TestInfo
+    TestInfo,
+    TestRunCount,
+    TestRunAgeHours,
+    TestRunKeepCount,
+    TestStatusCounts,
+    TestDurationMs,
+    TestDbSaveOutcome,
+    TestSourceRevision
 }
 use std.test_runner.test_db_types.{TestStatus, status_to_str}
 use std.test_runner.test_db_core.{parse_rfc3339_to_micros}
@@ -38,7 +45,7 @@ class TestDatabase:
     # Save database
     fn save() -> Result<(), text>:
         val success = self.db.save()
-        if success:
+        if success == TestDbSaveOutcome.Saved:
             Ok(())
         else:
             Err("Failed to save database")
@@ -50,7 +57,7 @@ class TestDatabase:
         suite_name: text,
         category: text,            # Ignored in unified implementation (derived from path)
         status: TestStatus,
-        duration_ms: f64
+        duration_ms: TestDurationMs
     ):
         # Convert TestStatus enum to string
         val status_str = status_to_str(status)
@@ -69,23 +76,26 @@ class TestDatabase:
         )
 
     # Start run tracking
-    me start_run() -> text:
-        val run_id = self.db.start_run()
+    me start_run(source: TestSourceRevision? = None) -> text:
+        val run_id = self.db.start_run(source)
         self.current_run_id = run_id
         run_id
 
+    fn run_source_revision(run_id: text) -> TestSourceRevision?:
+        self.db.run_source_revision(run_id)
+
     # Complete run
-    me complete_run(run_id: text, test_count: i64, passed: i64, failed: i64, timed_out: i64):
+    me complete_run(run_id: text, test_count: TestRunCount, passed: TestRunCount, failed: TestRunCount, timed_out: TestRunCount):
         self.db.complete_run(run_id: run_id, test_count: test_count, passed: passed, failed: failed, timed_out: timed_out)
 
     # Cleanup stale runs
-    me cleanup_stale_runs(max_age_hours: i64):
+    me cleanup_stale_runs(max_age_hours: TestRunAgeHours):
         val _deleted = self.db.cleanup_stale_runs(max_age_hours)
         # Custom API returns void, unified returns count - discard result
         ()
 
     # Prune old runs
-    me prune_runs(keep_count: i64):
+    me prune_runs(keep_count: TestRunKeepCount):
         val _deleted = self.db.prune_runs(keep_count)
         # Custom API returns void, unified returns count - discard result
         ()
@@ -107,7 +117,7 @@ class TestDatabase:
         self.db.tests_by_status(status)
 
     # Get test counts (total, passed, failed, skipped)
-    fn test_count_by_status() -> (i64, i64, i64, i64):
+    fn test_count_by_status() -> TestStatusCounts:
         self.db.test_count_by_status()
 
     # Get flaky test names

@@ -1,0 +1,317 @@
+# One exact primary-container resize attempt. No helper/exec resize or attach
+# input gate is touched. The parent owns durable attempt admission and current
+# issuer/Host checks; this capsule owns the readonly probe and mutation pipe.
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerHostObservationV2,
+    container_execution_plan_bytes_v2}
+use std.common.contracts.container.primary_geometry_v1.{ContainerPrimaryGeometryRequestV1,
+    container_primary_geometry_request_check_v1, container_primary_geometry_request_same_v1}
+use std.common.contracts.container.primary_connection_v2.container_primary_connection_target_match_v2
+use std.nogc_async_mut.container.providers.windows.primary_connection_v2.*
+use std.nogc_async_mut.container.providers.windows.primary_geometry_wire_v2.*
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.WindowsDockerPolicyV1
+use std.nogc_async_mut.container.providers.windows.docker_policy_codec_v1.windows_docker_policy_encode_v1
+use std.nogc_async_mut.container.providers.windows.docker_inspection_freshness_v4.windows_primary_inspection_fresh_v4
+use std.common.crypto.sha256.sha256_text
+use std.nogc_async_mut.container.providers.windows.docker_exec_control_probe_v3.*
+use std.nogc_async_mut.container.providers.windows.docker_engine_codec_v3.{windows_engine_http_parse_v3,
+    WindowsEngineHttpParseV3, WINDOWS_ENGINE_HEADER_MAX_V3}
+use std.nogc_sync_mut.io.windows_engine_pipe_owner_v1.*
+use std.common.process.windows_engine_control_v2.windows_engine_control_equal_v2
+use std.nogc_sync_mut.io.windows_command_owner_v2.windows_command_thread_check_v2
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+
+pub class WindowsPrimaryGeometryOwnerV2:
+    slot: i64
+
+pub struct WindowsPrimaryGeometryTurnV2:
+    owner: WindowsPrimaryGeometryOwnerV2?
+    phase: text
+    disposition: text
+    cleanup_pending: bool
+    error: text
+
+struct GeometryState:
+    request: ContainerExecutionRequestV2
+    installed: WindowsDockerPolicyV1
+    baseline: ContainerHostObservationV2
+    geometry: ContainerPrimaryGeometryRequestV1
+    session_identity: text
+    wire: WindowsPrimaryGeometryWireV2
+    phase: text = "probe-begin"
+    probe: WindowsDockerExecControlProbeV3? = None
+    # Captured before the first readonly probe effect, never at completion.
+    # Cleanup retains this lower freshness bound without restamping it.
+    probe_started_ns: i64 = -1
+    endpoint: WindowsEnginePipeObservationV1? = None
+    pipe: WindowsEnginePipeLeaseV1? = None
+    attempted: bool = false
+    acknowledged: bool = false
+    response: [u8] = []
+    error: text = ""
+
+var geometry_slots: [GeometryState?] = []
+
+# Public pure reducers are the actual production decisions, not native evidence.
+pub fn windows_primary_geometry_disposition_v2(attempted: bool, acknowledged: bool) -> text:
+    if acknowledged: "acknowledged" elif attempted: "unknown" else: "rejected"
+
+pub fn windows_primary_geometry_endpoint_match_v2(left: WindowsEnginePipeObservationV1,
+        right: WindowsEnginePipeObservationV1) -> Result<(), text>:
+    if left.server_pid <= 0 or left.server_pid != right.server_pid or left.owner_class != right.owner_class or
+            not ["system", "administrators"].contains(right.owner_class) or not left.dacl_protected or
+            not right.dacl_protected or left.untrusted_control_rights or right.untrusted_control_rights:
+        return Err("windows-primary-geometry-endpoint-changed")
+    Ok(())
+
+fn metadata(session: WindowsPrimaryConnectionV2, geometry: ContainerPrimaryGeometryRequestV1) -> Result<(), text>:
+    val plan = windows_primary_connection_plan_v2(session)
+    container_primary_connection_target_match_v2(plan, geometry.target)?
+    if plan.terminal_mode != "tty": return Err("windows-primary-geometry-tty-required")
+    val adoption = match windows_primary_connection_adoption_v2(session):
+        case Some(value): value
+        case None: return Err("windows-primary-geometry-not-adopted")
+    val target = geometry.target
+    if adoption.binding_uid != target.binding_uid or adoption.service_incarnation != target.service_incarnation or
+            adoption.session_id != target.session_id or adoption.window_id != target.window_id or adoption.pane_id != target.pane_id or
+            adoption.service_epoch != target.service_epoch or adoption.child_incarnation != target.child_incarnation:
+        return Err("windows-primary-geometry-adoption-mismatch")
+    Ok(())
+
+impl WindowsPrimaryGeometryOwnerV2:
+    # Only the canonical-thread registry guard is native here. No session poll,
+    # Engine connection, probe begin, lease install or write occurs in new.
+    pub static fn new(request: ContainerExecutionRequestV2, session: WindowsPrimaryConnectionV2,
+            installed: WindowsDockerPolicyV1, baseline: ContainerHostObservationV2,
+            geometry: ContainerPrimaryGeometryRequestV1) -> Result<WindowsPrimaryGeometryOwnerV2, text>:
+        metadata(session, geometry)?
+        val plan = windows_primary_connection_plan_v2(session)
+        if container_execution_plan_bytes_v2(request.plan)? != container_execution_plan_bytes_v2(plan.workload)? or
+                baseline.provider_identity_digest != plan.provider_identity_digest or
+                sha256_text(windows_docker_policy_encode_v1(installed)?) != plan.policy_digest:
+            return Err("windows-primary-geometry-request-plan-mismatch")
+        # Shape/self-digest checking at issuance time is pure; actual live clock
+        # and session authority are checked at every step, including write.
+        val wire = windows_primary_geometry_wire_v2(plan, geometry, geometry.lease.issued_monotonic_ms)?
+        if wire.wire.len() < 1 or wire.wire.len() > 65536: return Err("windows-primary-geometry-wire-bound")
+        windows_command_thread_check_v2()?
+        if geometry_slots.len() >= 100000: return Err("windows-primary-geometry-slot-bound")
+        val slot = geometry_slots.len()
+        geometry_slots.push(Some(GeometryState(request: request, installed: installed, baseline: baseline,
+            geometry: geometry, session_identity: windows_primary_connection_identity_v2(session), wire: wire)))
+        Ok(WindowsPrimaryGeometryOwnerV2(slot: slot))
+
+    pub fn step(session: WindowsPrimaryConnectionV2, geometry: ContainerPrimaryGeometryRequestV1,
+            cancel: bool = false) -> WindowsPrimaryGeometryTurnV2:
+        windows_primary_geometry_step_v2(self, session, geometry, cancel)
+
+    # Cleanup needs no live pane/session or new authority. It can only collect
+    # this owner's probe/Geometry pipe, never acquire or write a new transport.
+    pub fn cancel(reason: text) -> WindowsPrimaryGeometryTurnV2:
+        windows_primary_geometry_cancel_v2(self, reason)
+
+fn failed(state: GeometryState, reason: text) -> GeometryState:
+    var retained = state
+    if retained.error == "": retained.error = reason
+    retained.phase = "cleanup"
+    retained
+
+fn accept_probe(state: GeometryState, outcome: WindowsDockerExecControlProbeOutcomeV3) -> GeometryState:
+    var retained = state
+    match outcome:
+        case WindowsDockerExecControlProbeOutcomeV3.Pending(owner): retained.probe = Some(owner)
+        case WindowsDockerExecControlProbeOutcomeV3.Complete(owner):
+            retained.probe = Some(owner)
+            val endpoint = owner.endpoint_v3()
+            if endpoint.is_err(): return failed(retained, endpoint.unwrap_err())
+            retained.endpoint = Some(endpoint.unwrap())
+            # Complete proves every readonly exchange is already collected.
+            retained.probe = None
+            retained.phase = "connect"
+        case WindowsDockerExecControlProbeOutcomeV3.CleanupRequired(owner, reason):
+            retained.probe = Some(owner)
+            return failed(retained, reason)
+        case WindowsDockerExecControlProbeOutcomeV3.Closed(owner):
+            retained.probe = None
+            return failed(retained, "windows-primary-geometry-probe-closed")
+        case WindowsDockerExecControlProbeOutcomeV3.Rejected(reason): return failed(retained, reason)
+    retained
+
+fn validate_live(state: GeometryState, session: WindowsPrimaryConnectionV2,
+        geometry: ContainerPrimaryGeometryRequestV1) -> Result<(), text>:
+    if windows_primary_connection_identity_v2(session) != state.session_identity:
+        return Err("windows-primary-geometry-session-changed")
+    if not container_primary_geometry_request_same_v1(state.geometry, geometry)?:
+        return Err("windows-primary-geometry-request-changed")
+    metadata(session, geometry)?
+    if not windows_primary_connection_transport_active_v2(session)?:
+        return Err("windows-primary-geometry-session-not-live")
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now <= 0: return Err("windows-primary-geometry-clock-unavailable")
+    container_primary_geometry_request_check_v1(geometry, now / 1000000)
+
+pub fn windows_primary_geometry_write_phase_v2(receipt: WindowsEnginePipeWriteReceiptV2,
+        control: WindowsEnginePipeControlV2, digest: text, bytes: i64) -> Result<text, text>:
+    val attempt = receipt.attempt
+    if bytes < 1 or bytes > 65536 or not windows_engine_control_equal_v2(attempt.control, control) or attempt.sequence != 1 or
+            attempt.frame_sequence != 1 or attempt.offset != 0 or attempt.payload_digest != digest or
+            attempt.payload_bytes != bytes or attempt.requested_bytes != bytes:
+        return Err("windows-primary-geometry-write-receipt-mismatch")
+    match receipt.status:
+        case WindowsEnginePipeWriteStatusV2.Queued:
+            if receipt.accepted_bytes != 0: return Err("windows-primary-geometry-queued-bytes-unknown")
+            Ok("write-wait")
+        case WindowsEnginePipeWriteStatusV2.Unknown: Err("windows-primary-geometry-write-unknown")
+        case WindowsEnginePipeWriteStatusV2.Completed:
+            if receipt.accepted_bytes != bytes: return Err("windows-primary-geometry-partial-write-unknown")
+            Ok("read")
+
+fn accept_write(state: GeometryState, receipt: WindowsEnginePipeWriteReceiptV2) -> GeometryState:
+    var retained = state
+    val phase = windows_primary_geometry_write_phase_v2(receipt, state.wire.control,
+        state.geometry.request_digest, state.wire.wire.len())
+    if phase.is_err(): return failed(retained, phase.unwrap_err())
+    retained.phase = phase.unwrap()
+    retained
+
+fn clean(state: GeometryState) -> GeometryState:
+    var retained = state
+    if val original = retained.probe:
+        var probe = original
+        match probe.collect_v3():
+            case WindowsDockerExecControlProbeOutcomeV3.Closed(_): retained.probe = None
+            case WindowsDockerExecControlProbeOutcomeV3.CleanupRequired(owner, reason):
+                retained.probe = Some(owner)
+                if retained.error == "": retained.error = reason
+            case WindowsDockerExecControlProbeOutcomeV3.Pending(owner): retained.probe = Some(owner)
+            case WindowsDockerExecControlProbeOutcomeV3.Complete(owner): retained.probe = Some(owner)
+            case WindowsDockerExecControlProbeOutcomeV3.Rejected(reason):
+                if retained.error == "": retained.error = reason
+        return retained
+    if val pipe = retained.pipe:
+        match windows_engine_pipe_collect_v1(pipe):
+            case Err(reason):
+                if retained.error == "": retained.error = reason
+            case Ok(observed):
+                if observed.closed: retained.pipe = None
+                elif retained.error == "": retained.error = "windows-primary-geometry-cleanup-unconfirmed"
+        return retained
+    retained.phase = "done"
+    retained
+
+fn publish(owner: WindowsPrimaryGeometryOwnerV2, state: GeometryState) -> WindowsPrimaryGeometryTurnV2:
+    val disposition = if state.error == "" and not state.acknowledged: "pending"
+        else: windows_primary_geometry_disposition_v2(state.attempted, state.acknowledged)
+    if state.phase == "done":
+        geometry_slots[owner.slot] = None
+        return WindowsPrimaryGeometryTurnV2(None, "done", disposition, false, state.error)
+    geometry_slots[owner.slot] = Some(state)
+    WindowsPrimaryGeometryTurnV2(Some(owner), state.phase, disposition,
+        state.phase == "cleanup" or state.probe.is_some() or state.pipe.is_some(), state.error)
+
+pub fn windows_primary_geometry_cancel_v2(owner: WindowsPrimaryGeometryOwnerV2,
+        reason: text) -> WindowsPrimaryGeometryTurnV2:
+    match windows_command_thread_check_v2():
+        case Err(error): return WindowsPrimaryGeometryTurnV2(Some(owner), "retained", "unknown", true, error)
+        case Ok(_): pass
+    if owner.slot < 0 or owner.slot >= geometry_slots.len():
+        return WindowsPrimaryGeometryTurnV2(Some(owner), "retained", "unknown", true, "windows-primary-geometry-owner-invalid")
+    val state = match geometry_slots[owner.slot]:
+        case Some(value): value
+        case None: return WindowsPrimaryGeometryTurnV2(None, "retired", "unknown", false, "windows-primary-geometry-owner-retired")
+    val retained = failed(state, if reason == "": "windows-primary-geometry-cancelled" else: reason)
+    publish(owner, clean(retained))
+
+pub fn windows_primary_geometry_step_v2(owner: WindowsPrimaryGeometryOwnerV2,
+        session: WindowsPrimaryConnectionV2, geometry: ContainerPrimaryGeometryRequestV1,
+        cancel: bool = false) -> WindowsPrimaryGeometryTurnV2:
+    match windows_command_thread_check_v2():
+        case Err(reason): return WindowsPrimaryGeometryTurnV2(Some(owner), "retained", "unknown", true, reason)
+        case Ok(_): pass
+    if owner.slot < 0 or owner.slot >= geometry_slots.len():
+        return WindowsPrimaryGeometryTurnV2(Some(owner), "retained", "unknown", true, "windows-primary-geometry-owner-invalid")
+    var state = match geometry_slots[owner.slot]:
+        case Some(value): value
+        case None: return WindowsPrimaryGeometryTurnV2(None, "retired", "unknown", false, "windows-primary-geometry-owner-retired")
+    if state.phase != "cleanup":
+        val checked = validate_live(state, session, geometry)
+        if checked.is_err(): state = failed(state, checked.unwrap_err())
+        elif cancel: state = failed(state, "windows-primary-geometry-cancelled")
+    match state.phase:
+        case "probe-begin":
+            state.probe_started_ns = time_sample_monotonic_nanos_or_failure()
+            if state.probe_started_ns <= 0: state = failed(state, "windows-primary-geometry-probe-clock")
+            else:
+                state = accept_probe(state, WindowsDockerExecControlProbeV3.begin_primary_v4(state.request,
+                    windows_primary_connection_plan_v2(session).runtime, state.installed, state.baseline))
+                if state.phase == "probe-begin": state.phase = "probe"
+        case "probe":
+            var probe = state.probe.unwrap()
+            state = accept_probe(state, probe.poll_v3())
+        case "connect":
+            match windows_engine_pipe_connect_v1():
+                case WindowsEnginePipeAdmissionV1.Ready(pipe):
+                    state.pipe = Some(pipe)
+                    state.phase = "endpoint"
+                case WindowsEnginePipeAdmissionV1.CleanupRequired(pipe, reason):
+                    state.pipe = Some(pipe)
+                    state = failed(state, reason)
+                case WindowsEnginePipeAdmissionV1.Rejected(reason): state = failed(state, reason)
+        case "endpoint":
+            val observed = windows_engine_pipe_observe_v1(state.pipe.unwrap())
+            if observed.is_err(): state = failed(state, observed.unwrap_err())
+            else:
+                val matched = windows_primary_geometry_endpoint_match_v2(state.endpoint.unwrap(), observed.unwrap())
+                if matched.is_err(): state = failed(state, matched.unwrap_err())
+                else: state.phase = "bind"
+        case "bind":
+            val bound = windows_engine_pipe_bind_control_v2(state.pipe.unwrap(), state.wire.binding)
+            if bound.is_err(): state = failed(state, bound.unwrap_err())
+            else: state.phase = "install"
+        case "install":
+            val installed = windows_engine_pipe_install_control_v2(state.pipe.unwrap(), state.wire.control)
+            if installed.is_err(): state = failed(state, installed.unwrap_err())
+            else: state.phase = "write"
+        case "write":
+            # Whole probe+cleanup+connect/bind/install time consumes the same
+            # conservative min(installed timeout, 1000ms) inspection window.
+            # A still-valid Geometry lease cannot refresh old running evidence.
+            val fresh = windows_primary_inspection_fresh_v4(state.probe_started_ns,
+                time_sample_monotonic_nanos_or_failure(), state.installed.timeout_ms)
+            if not fresh: state = failed(state, "windows-primary-geometry-inspection-stale")
+            else:
+                # Record uncertainty BEFORE entering the native pre-effect barrier.
+                # Never call this write again: completion is polled, not retried.
+                state.attempted = true
+                val attempt = WindowsEnginePipeAttemptV2(control: state.wire.control, sequence: 1, frame_sequence: 1,
+                    payload_digest: state.geometry.request_digest, payload_bytes: state.wire.wire.len(),
+                    offset: 0, requested_bytes: state.wire.wire.len())
+                val written = windows_engine_pipe_write_controlled_v2(state.pipe.unwrap(), attempt, state.wire.wire)
+                if written.is_err(): state = failed(state, written.unwrap_err())
+                else: state = accept_write(state, written.unwrap())
+        case "write-wait":
+            val controlled = windows_engine_pipe_control_state_v2(state.pipe.unwrap())
+            if controlled.is_err(): state = failed(state, controlled.unwrap_err())
+            elif controlled.unwrap().last.is_none(): state = failed(state, "windows-primary-geometry-write-receipt-lost")
+            else: state = accept_write(state, controlled.unwrap().last.unwrap())
+        case "read":
+            match windows_engine_pipe_read_some_v1(state.pipe.unwrap(), 4096):
+                case WindowsEnginePipeReadV1.Pending: pass
+                case WindowsEnginePipeReadV1.End: state = failed(state, "windows-primary-geometry-response-lost")
+                case WindowsEnginePipeReadV1.Failed(reason): state = failed(state, reason)
+                case WindowsEnginePipeReadV1.Data(bytes):
+                    if bytes.len() > WINDOWS_ENGINE_HEADER_MAX_V3 - state.response.len():
+                        state = failed(state, "windows-primary-geometry-response-bound")
+                    else:
+                        for byte in bytes: state.response.push(byte)
+                        match windows_engine_http_parse_v3(state.response, "container-resize", true):
+                            case Err(reason): state = failed(state, reason)
+                            case Ok(WindowsEngineHttpParseV3.NeedMore): pass
+                            case Ok(WindowsEngineHttpParseV3.Complete(response)):
+                                if response.status != 200 or response.leftover.len() != 0:
+                                    state = failed(state, "windows-primary-geometry-response-not-exact-ack")
+                                else:
+                                    state.acknowledged = true
+                                    state.phase = "cleanup"
+        case "cleanup": state = clean(state)
+        case _: state = failed(state, "windows-primary-geometry-phase-invalid")
+    publish(owner, state)

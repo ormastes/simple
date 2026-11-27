@@ -1,0 +1,174 @@
+# @req REQ-TESTRUNNER-COMMENT-KIND
+# @cover src/lib/nogc_sync_mut/test_runner/doctest_runner.spl 10%
+"""
+# Comment doctests report PASS, FAIL and per-example counts
+
+**Feature IDs:** #test-runner-comment-kind
+**Category:** Tooling
+
+## Overview
+
+An author writes runnable examples in the doc comments of a `.spl` file and
+runs `simple test --spl-doctest <file.spl>`. An all-green file is reported
+PASS with exit 0, a file with a broken example is reported FAIL with exit 1
+and the broken example's line, and the summary line counts every example.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+val DIR = "build/comment_kind/verdicts"
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY")
+    if b != "":
+        return b
+    "bin/simple"
+
+# Writes DIR/<name>.spl and returns its (repo-relative) path.
+fn fixture(name: text, body: text) -> text:
+    process_run_bounded("mkdir", ["-p", DIR], 10000, 65536)
+    val path = DIR + "/" + name + ".spl"
+    file_write(path, body)
+    path
+
+fn block(marker: text, lines: [text]) -> text:
+    var out = marker + " ```simple\n"
+    for l in lines:
+        out = out + marker + " " + l + "\n"
+    out + marker + " ```\n"
+
+fn run_doctest(path: text) -> (text, i64):
+    val (out, err, code) = process_run_bounded(real_binary(), ["test", "--no-session-daemon", "--spl-doctest", path], 600000, 4194304)
+    (out + err, code)
+
+describe "simple test --spl-doctest on a comment-only fixture":
+    # @capture(exec)
+    it "reports a file whose examples all pass as PASS with exit 0":
+        step("Write a file with one green example")
+        val path = fixture("green", block("##", ["val x = 1 + 1", "assert_equal(x, 2)"]) + "fn f():\n    1\n")
+        step("Run the comment doctest")
+        val (report, code) = run_doctest(path)
+        expect(code).to_equal(0)
+        expect(report).to_contain("PASS  " + path)
+        expect(report).to_contain("SPL Doctest: 1 passed, 0 failed")
+
+    # @capture(exec)
+    it "reports a file with a failing example as FAIL with exit 1":
+        step("Write a file with one red example")
+        val path = fixture("red", block("##", ["assert_equal(1 + 1, 3)"]) + "fn f():\n    1\n")
+        step("Run the comment doctest")
+        val (report, code) = run_doctest(path)
+        expect(code).to_equal(1)
+        expect(report).to_contain("FAIL  " + path)
+        expect(report).to_contain("SPL Doctest: 0 passed, 1 failed")
+
+    # @capture(exec)
+    it "names the line of the failing example":
+        step("Write a file whose red example opens on line 4")
+        val path = fixture("red_line", "# header\n# more\n\n" + block("##", ["assert_equal(1, 2)"]) + "fn f():\n    1\n")
+        val (report, code) = run_doctest(path)
+        expect(code).to_equal(1)
+        expect(report).to_contain("Line 4:")
+
+    # @capture(exec)
+    it "counts passed and failed examples of a mixed file":
+        step("Write a file with two green and one red example")
+        val body = block("##", ["assert_equal(1, 1)"]) + "fn a():\n    1\n" + block("##", ["assert_equal(1, 2)"]) + "fn b():\n    1\n" + block("##", ["assert_equal(2, 2)"]) + "fn c():\n    1\n"
+        val path = fixture("mixed", body)
+        val (report, code) = run_doctest(path)
+        expect(code).to_equal(1)
+        expect(report).to_contain("FAIL  " + path)
+        expect(report).to_contain("2 passed, 1 failed")
+        expect(report).to_contain("SPL Doctest: 2 passed, 1 failed")
+
+    # @capture(exec)
+    it "does not let a failing example hide the passing ones":
+        step("Write a file with one red example first and one green after it")
+        val path = fixture("red_then_green", block("##", ["assert_equal(1, 2)"]) + "fn a():\n    1\n" + block("##", ["assert_equal(3, 3)"]) + "fn b():\n    1\n")
+        val (report, code) = run_doctest(path)
+        expect(code).to_equal(1)
+        expect(report).to_contain("SPL Doctest: 1 passed, 1 failed")
+
+    # @capture(exec)
+    it "counts every example of an all-green file":
+        step("Write a file with three green examples")
+        val body = block("##", ["assert_equal(1, 1)"]) + "fn a():\n    1\n" + block("##", ["assert_equal(2, 2)"]) + "fn b():\n    1\n" + block("##", ["assert_equal(3, 3)"]) + "fn c():\n    1\n"
+        val path = fixture("three_green", body)
+        val (report, code) = run_doctest(path)
+        expect(code).to_equal(0)
+        expect(report).to_contain("SPL Doctest: 3 passed, 0 failed")
+
+    # @capture(exec)
+    it "runs an example written in a triple-slash comment":
+        step("Write a green and a red triple-slash example")
+        val green = fixture("slash_green", block("///", ["assert_equal(4, 4)"]) + "fn f():\n    1\n")
+        val red = fixture("slash_red", block("///", ["assert_equal(4, 5)"]) + "fn f():\n    1\n")
+        val (green_report, green_code) = run_doctest(green)
+        val (red_report, red_code) = run_doctest(red)
+        expect(green_code).to_equal(0)
+        expect(green_report).to_contain("SPL Doctest: 1 passed, 0 failed")
+        expect(red_code).to_equal(1)
+        expect(red_report).to_contain("SPL Doctest: 0 passed, 1 failed")
+
+    # @capture(exec)
+    it "runs an example written in a single-hash comment":
+        step("Write a green and a red single-hash example")
+        val green = fixture("hash_green", block("#", ["assert_equal(5, 5)"]) + "fn f():\n    1\n")
+        val red = fixture("hash_red", block("#", ["assert_equal(5, 6)"]) + "fn f():\n    1\n")
+        val (green_report, green_code) = run_doctest(green)
+        val (red_report, red_code) = run_doctest(red)
+        expect(green_code).to_equal(0)
+        expect(green_report).to_contain("SPL Doctest: 1 passed, 0 failed")
+        expect(red_code).to_equal(1)
+        expect(red_report).to_contain("SPL Doctest: 0 passed, 1 failed")
+
+    # @capture(exec)
+    it "lets an example call the function it documents":
+        step("Write an example that calls the documented function")
+        val body = block("##", ["assert_equal(double(21), 42)"]) + "fn double(n: i64) -> i64:\n    n * 2\n"
+        val path = fixture("calls_fn", body)
+        val (report, code) = run_doctest(path)
+        expect(code).to_equal(0)
+        expect(report).to_contain("SPL Doctest: 1 passed, 0 failed")
+
+    # @capture(exec)
+    it "fails an example that calls the documented function wrongly":
+        step("Write an example with a wrong expectation of the documented function")
+        val body = block("##", ["assert_equal(double(21), 43)"]) + "fn double(n: i64) -> i64:\n    n * 2\n"
+        val path = fixture("calls_fn_wrong", body)
+        val (report, code) = run_doctest(path)
+        expect(code).to_equal(1)
+        expect(report).to_contain("SPL Doctest: 0 passed, 1 failed")
+
+    # @capture(exec)
+    it "runs a multi-line example with an indented block":
+        step("Write an example with a loop")
+        val body = block("##", ["var total = 0", "for i in [1, 2, 3]:", "    total = total + i", "assert_equal(total, 6)"]) + "fn f():\n    1\n"
+        val path = fixture("multi_line", body)
+        val (report, code) = run_doctest(path)
+        expect(code).to_equal(0)
+        expect(report).to_contain("SPL Doctest: 1 passed, 0 failed")
+
+    # @capture(exec)
+    it "passes a should_fail example that fails and fails one that succeeds":
+        step("Write one should_fail example that raises and one that does not")
+        val raises = fixture("should_fail_ok", "## ```simple should_fail\n## assert_equal(1, 2)\n## ```\nfn f():\n    1\n")
+        val quiet = fixture("should_fail_bad", "## ```simple should_fail\n## assert_equal(1, 1)\n## ```\nfn f():\n    1\n")
+        val (raises_report, raises_code) = run_doctest(raises)
+        val (quiet_report, quiet_code) = run_doctest(quiet)
+        expect(raises_code).to_equal(0)
+        expect(raises_report).to_contain("SPL Doctest: 1 passed, 0 failed")
+        expect(quiet_code).to_equal(1)
+        expect(quiet_report).to_contain("SPL Doctest: 0 passed, 1 failed")
+
+    # @capture(exec)
+    it "reports a syntax error in an example as FAIL":
+        step("Write an example that does not parse")
+        val path = fixture("syntax_error", block("##", ["val = = 1"]) + "fn f():\n    1\n")
+        val (report, code) = run_doctest(path)
+        expect(code).to_equal(1)
+        expect(report).to_contain("SPL Doctest: 0 passed, 1 failed")

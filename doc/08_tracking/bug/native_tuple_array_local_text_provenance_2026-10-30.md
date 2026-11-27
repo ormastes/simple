@@ -1,0 +1,94 @@
+# Implicit text locals from tuple-array elements lose native text representation
+
+- **ID:** native_tuple_array_local_text_provenance_2026-10-30
+- **Date:** 2026-10-30
+- **Status:** OPEN (P2)
+- **Lane:** Native Cranelift build using admitted Stage 2 producer
+- **Owner:** Compiler/type-provenance investigation
+
+## Symptom
+
+With `build_query_string(params: [(text, text)])`, implicit locals extracted
+from `params[i]` can lose their textual representation on the admitted native
+producer. In the URL fixture, the fields had expected scalar lengths but
+concatenation produced decimal pointer-like names. This is not evidence that
+all tuple projections or all producers are broken.
+
+## Evidence
+
+- Producer: admitted Stage 2 `simple`, compiler SHA
+  `9633bf0af8b70d5f0324a35b244b3d08a62cdbcd1f8a3cd2aff246620f572dbd`.
+- Runtime capsule matched that compiler SHA.
+- Source was frozen in private diagnostic worktree
+  `/home/yoon/dev/simple-url-query-contract-diagnostic-20261030`.
+- The implicit local diagnostic source had SHA-256
+  `1c85d09575b8a2c715a76dc57ef94aa39f5f067ba4e0b1abf7841a8c05dbfa21`;
+  the explicit-local diagnostic source had SHA-256
+  `ca1704201efdb63023ee8f1daa9f7550a6e31ebcd70e26ff72c57175df9a0792`.
+  Both temporary fixture variants used SHA-256
+  `214f729b0d49f5ea3e5f432824ab79cc35f2651895b6db97bb9fa38b0b9c56e9`.
+  The current production source with the workaround and join correction is
+  SHA-256 `56626fd50fecc434fa9bdea4b5cfc49072fa5dae156ce8205d36c215c81c36ad`;
+  the unchanged contract fixture is SHA-256
+  `0fe3089a5b2efffaf3b396344b40bdd1ff0a8bec0f9042f08fc12820926ff97d`.
+- With the array receiver corrected to `parts.join("&")`, but without local
+  type annotations, direct ASCII and UTF-8 encoders were correct. The builder
+  reported `name_len=1` and `value_len=11`, but built a name such as
+  `198946527114577`; the final expected-string assertion failed with `-7`.
+- An isolated diagnostic variant added explicit local types:
+  `param: (text, text)`, `name: text`, and `value: text`. It built
+  `a=hello%20world&emoji=caf%C3%A9`, passed ordered duplicate-key roundtrip,
+  and printed `URL_QUERY_CONTRACT_PASS|checks=8`.
+- Diagnostic captures and source hashes remain under the named worktree's
+  `build/url-query-contract-debug` and `build/url-query-contract-explicit`
+  directories. Temporary diagnostic prints are not part of the production
+  patch. The committed fixture passes with the workaround; removing the
+  explicit local annotations is what reproduces the failure on this producer.
+
+## Scope and follow-up
+
+Keep explicit local annotations at this call boundary until the producer's
+tuple-field type provenance is understood. The evidence does not identify the
+compiler phase that loses the text type, and does not close a compiler bug.
+Do not weaken `[(text, text)]`, erase the public type, or add unsafe casts.
+Add a compiler-level regression and remove this workaround only after a
+producer-bound fix passes the native fixture.
+
+
+## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
+
+test/01_unit/compiler/50.mir/tuple_array_local_text_provenance_spec.spl: MIR local types of implicit and annotated forms are identical and str, so the loss is after MIR (codegen). Native repro: remove the explicit annotations in lib/nogc_sync_mut/http/url.spl build_query_string and run the url query contract fixture.
+
+## Fix (2026-11-09, work/tuple-array-text-prov) — fix-implemented-verification-pending
+
+The url.spl site indexes the tuple local with BRACKETS (`param[0]`), not
+`param.0`; the round-15 spec exercised only the `.0` form.
+
+Root cause (HIR): `lower_hir_expr`'s `ExprKind.Index` arm
+(`src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl`) typed
+`base[i]` only when the lowered base expression itself carried `type_`
+(Array/Slice/Dict). A `Var`/`NamedVar` base — a parameter such as `params` or
+an inferred local such as `val param = params[i]` — carries no expression
+`type_`; its type lives in the symbol table. So `params[i]`, `param[0]` and
+`param[1]` all lowered with `has_type_: false`, and there was no
+`HirTypeKind.Tuple` arm at all, so even a typed tuple base yielded an untyped
+index. The MIR lowering recovered the element type independently (MIR locals
+were already `str` for both forms), which is why the round-15 MIR-only check
+was green while the HIR carried no text type for the extracted locals.
+
+Fix: fall back to the base symbol's declared/inferred type (same fallback as
+`declared_exists_check_type`), add a `Tuple` arm for a literal slot index
+(`t[0]`), and leave range indexes (`xs[1..]`) and non-literal tuple indexes
+untyped.
+
+Red/green: `test/01_unit/compiler/50.mir/tuple_array_local_text_provenance_spec.spl`
+"(HIR)" cases — before: `expected untyped to equal typed:HirTypeKind::Str`
+(x2) and `param` untyped; after: 6/6 pass. MIR cases for the bracket form
+(locals identical to annotated form, extracted locals `Opaque(str)`) are green
+before and after (prevention).
+
+Workaround in `src/lib/nogc_sync_mut/http/url.spl:51` is KEPT (tagged): the
+spec proves the HIR/MIR type is now carried, but the native symptom was
+recorded on an admitted Stage 2 producer and must be re-verified natively
+(`test/fixtures/url_query_contract/main.spl` with the annotations removed) by
+a producer built from this fix before the annotations are dropped.

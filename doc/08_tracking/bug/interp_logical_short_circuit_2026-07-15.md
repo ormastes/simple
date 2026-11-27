@@ -77,3 +77,28 @@ and a three-line hand-written probe). That is a silent vacuous pass on the
 default test command. `SIMPLE_TEST_RUNNER_RUST=1` is the documented escape hatch
 and is what every measurement above used.
 
+
+## Verification 2026-11-25 (P1 ledger sweep, Windows worktree) — RESOLVED stands
+
+- **Fix confirmed present in source:** `eval_binary` in
+  `src/compiler/10.frontend/core/interpreter/eval.spl:750-758` still returns
+  early (`val_make_bool(false)` for a falsy left `and`, `val_make_bool(true)`
+  for a truthy left `or`) BEFORE `eval_expr(e_node.right)` — the exact fix
+  this record describes, unchanged.
+- **Gating spec re-run attempted, environment-blocked:**
+  `test/01_unit/compiler_core/interpreter/short_circuit_eval_spec.spl` fails
+  as a whole file (0 passed / 1 failed, `error: null`) under
+  `SIMPLE_TEST_RUNNER_RUST=1 bin/simple.exe test` on the pinned tracked
+  binary (`bin/simple.exe`, 38,403,072 B, Rust seed v1.0.0-rc.1). Cause is
+  NOT a short-circuit regression: the spec imports private fns
+  (`eval_reset`, `val_reset`, `val_get_bool`, `ops_clear_error` — all
+  confirmed non-`pub` in the current source), and the pinned seed now
+  enforces private-fn visibility. Reproduced with a minimal spec importing
+  only `eval_reset`: same opaque whole-file failure. This is the same
+  pinned-seed/source drift class as the `@representation_boundary` rejection
+  that blocks the default runner at HEAD (the 2026-09-06 green run used a
+  newer aarch64 seed build). The spec needs either `pub` exports in
+  `src/compiler` or a seed that matches HEAD's visibility rules — a
+  harness/infra item, not this bug.
+- No code changed; the 2026-09-16 closure stands on the source inspection
+  above plus the original 2026-09-06 executable proof.

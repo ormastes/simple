@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** open
+**Status:** FIXED (verified 2026-11-11, lane boot13)
 **Found:** 2026-07-27 (Simple RISC-V hardening campaign, Lane C)
 **Area:** `scripts/check/check-riscv-fpga-sidecar-contract.shs`
 **Severity:** high — an evidence-integrity defect: the gate that exists to reject
@@ -77,3 +77,55 @@ evidence-integrity fix into an unrelated lane. Filed for a focused change.
 - `doc/08_tracking/bug/seed_parser_rejects_multiline_if_expression_chain_2026-07-27.md`
 - Campaign plan: `doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-27.md`
 
+## 2026-11-05 — Verification (work branch work/riscv-rtl-infra-20261105)
+
+Status: **already fixed at tip of release/1.0.0** (base c909eb427c3). The
+guard was hardened on 2026-07-28 (see the "Identity probe, not just a path
+pattern" comment at `check-riscv-fpga-sidecar-contract.shs:9-34` and
+`doc/08_tracking/todo/check_scripts_seed_identity_fail_open_2026-07-28.md`):
+`is_rust_seed_simple()` now runs `"$bin" --version 2>&1` and fails closed
+(seed, or unverifiable) when the banner contains "bootstrap seed only" /
+"Rust-built" / "debug build", or when `--version` is nonzero or empty — the
+identity probe this doc's "Suggested fix" asked for.
+
+Verified 2026-11-05 on this host:
+
+1. Hermetic classifier self-test:
+
+   ```
+   sh scripts/check/check-riscv-fpga-sidecar-contract.shs --self-test
+   ```
+   → `STATUS: PASS riscv-fpga-sidecar-contract self-test — 8 fixture(s) checked`
+   (covers both banner polarities plus the fail-closed branches).
+
+2. The exact seed-clobbered scenario from this doc: copied the real Rust seed
+   binary to a neutral deploy path and drove the gate with it:
+
+   ```
+   cp /home/yoon/dev/simple/src/compiler_rust/target/bootstrap/simple \
+      /tmp/seedclobber-test/bin/release/x86_64-unknown-linux-gnu/simple
+   SIMPLE_BIN=/tmp/seedclobber-test/bin/release/x86_64-unknown-linux-gnu/simple \
+     sh scripts/check/check-riscv-fpga-sidecar-contract.shs
+   ```
+   → `FAIL: RISC-V formal sidecar gate must use self-hosted Simple, not Rust seed: ...`
+   → exit 1. The guard now fires against a seed-clobbered `bin/release`
+   exactly as required. No code change needed in this lane.
+
+
+## 2026-11-11 — lane boot13 (work/p3-boot13-20261111)
+
+Status: **FIXED** — first Status line flipped (was still `open`); the 2026-07-28
+hardening and the 2026-11-05 verification above stand. This lane re-verified on a
+Windows/Git-Bash host at tip c8b6d0ebe90e:
+
+- Source: `is_rust_seed_simple()` at `scripts/check/check-riscv-fpga-sidecar-contract.shs:9-34`
+  is the identity probe this doc asked for — `"$bin" --version 2>&1` fail-closed on
+  the "bootstrap seed only" / "Rust-built" / "debug build" banners, on nonzero
+  exit, and on empty output; the `src/compiler_rust/` path rule remains as a
+  first-line shortcut.
+- Hermetic classifier self-test, run here:
+  `sh scripts/check/check-riscv-fpga-sidecar-contract.shs --self-test`
+  -> `STATUS: PASS riscv-fpga-sidecar-contract self-test — 8 fixture(s) checked`
+  (both banner polarities plus all fail-closed branches; fixtures are
+  synthesized in a temp dir, so the verdict is host-independent).
+- No code change was needed in this lane.

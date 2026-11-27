@@ -1,0 +1,44 @@
+use std.spec
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io.tcp.{TcpListener}
+use std.nogc_sync_mut.io_runtime.{dir_remove, remove_file_if_exists}
+use app.io.mod.cwd
+use app.orchestrator.caret_session_protocol_v1.{OrchestratorCaretServerInfoV1,
+    orchestrator_caret_client_call_v1, orchestrator_caret_server_info_load_v1,
+    orchestrator_caret_server_info_save_v1}
+
+fn caret_test_server_info_v1(root: text, addr: text) -> OrchestratorCaretServerInfoV1:
+    OrchestratorCaretServerInfoV1(controller_id: "caret-test", state_root: root,
+        listen_addr: addr, token: "test-bearer", pid: 1, session: "test-session",
+        server_name: "caret-server", context_name: "test-context")
+
+fn caret_test_remove_server_info_v1(root: text):
+    val _file = remove_file_if_exists(root + "/server.sdn")
+    val _dir = dir_remove(root, false)
+
+describe "Caret session local listener authority":
+    it "loads the assigned address from the local listener and preserves the selection labels":
+        val root = secure_temp_dir("/tmp", "caret-local-authority-").unwrap()
+        val listener = TcpListener.bind("127.0.0.1:0").unwrap()
+        val addr = listener.local_addr().unwrap()
+        val saved = orchestrator_caret_server_info_save_v1(root, caret_test_server_info_v1(root, addr))
+        val loaded = orchestrator_caret_server_info_load_v1(root)
+        val _close = listener.close()
+        caret_test_remove_server_info_v1(root)
+        expect(saved).to_equal(true)
+        val info = loaded.unwrap()
+        expect(info.listen_addr).to_equal(addr)
+        expect(info.server_name).to_equal("caret-server")
+        expect(info.context_name).to_equal("test-context")
+
+    it "refuses remote or noncanonical runtime destinations in the client before connecting":
+        val root = secure_temp_dir("/tmp", "caret-local-authority-").unwrap()
+        val config = cwd() + "/test/fixtures/server_contexts/shared.sdn"
+        for addr in ["192.0.2.1:49152", "example.invalid:49152", "localhost:49152",
+                "[::1]:49152", "127.0.0.2:49152", "127.0.0.1:0", "127.0.0.1:65536",
+                "127.0.0.1:", "127.0.0.1:00080", "127.0.0.1:+80", "127.0.0.1:80 "]:
+            val saved = orchestrator_caret_server_info_save_v1(root, caret_test_server_info_v1(root, addr))
+            expect(saved).to_equal(true)
+            val reply = orchestrator_caret_client_call_v1(root, config, "status", "", [])
+            expect(reply.unwrap_err()).to_equal("orchestrator-caret-listen-address-invalid")
+        caret_test_remove_server_info_v1(root)

@@ -1,0 +1,285 @@
+# @req: REQ-COMP-MIR-CFG-ITEM-002 - MIR lowering drops decls whose @cfg guard is off for the target.
+"""
+## Purpose and audience
+Purpose: Prove MirLowering.lower_module applies decl-level @cfg guards: of two same-named
+functions guarded os=linux (group 1 arm 0) and os=windows (group 1 arm 1) only the one matching
+the MirTargetContext reaches MIR, the same HIR serves both targets, unguarded functions survive,
+and a malformed guard is a fatal error. Audience: COMP maintainers.
+"""
+# @tag: unit, compiler, mir, hir
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.common.mir_target_context.{MirTargetContext}
+
+val SRC = "fn f_lin() -> i64:\n    7101\n\nfn f_win() -> i64:\n    7202\n\nfn g() -> i64:\n    7303\n"
+
+fn tgt(os: text) -> MirTargetContext:
+    MirTargetContext(arch: "x86_64", os: os, abi: "gnu", backend: "llvm", version: 1)
+
+fn module_with_guards(lin_cfg: [text], win_cfg: [text]) -> HirModule:
+    val parsed = parse_full_frontend(SRC, "testdata/decl_cfg.spl", "decl_cfg", Logger(level: 0))
+    var hl = HirLowering.with_filename("testdata/decl_cfg.spl")
+    val hir = hl.lower_module(parsed)
+    for key in hir.functions.keys():
+        var fn_ = hir.functions[key]
+        if fn_.name == "f_lin" or fn_.name.ends_with(".f_lin"):
+            fn_.name = "f"
+            fn_.cfg = lin_cfg
+            fn_.cfg_group = 1
+            fn_.cfg_arm = 0
+            hir.functions[key] = fn_
+        elif fn_.name == "f_win" or fn_.name.ends_with(".f_win"):
+            fn_.name = "f"
+            fn_.cfg = win_cfg
+            fn_.cfg_group = 1
+            fn_.cfg_arm = 1
+            hir.functions[key] = fn_
+    hir
+
+struct Lowered:
+    consts: [text]
+    errors: [MirError]
+
+fn lower_for(hir: HirModule, os: text) -> Lowered:
+    var lowering = MirLowering.new_for_target(hir.symbols, tgt(os))
+    val mir = lowering.lower_module(hir)
+    var consts: [text] = []
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case MirInstKind.Const(_, v, _): consts = consts.push("{v}")
+                    case _: pass
+    Lowered(consts: consts, errors: lowering.errors)
+
+fn has_const(l: Lowered, needle: text) -> bool:
+    for c in l.consts:
+        if c.contains(needle): return true
+    false
+
+describe "MirLowering.lower_module decl-level @cfg":
+    it "keeps only the arm matching the target, from the same HIR":
+        val hir = module_with_guards(["os=linux"], ["os=windows"])
+        val lin = lower_for(hir, "linux")
+        val win = lower_for(hir, "windows")
+        expect(has_const(lin, "7101")).to_equal(true)
+        expect(has_const(lin, "7202")).to_equal(false)
+        expect(has_const(win, "7202")).to_equal(true)
+        expect(has_const(win, "7101")).to_equal(false)
+
+    it "keeps unguarded functions for every target":
+        val hir = module_with_guards(["os=linux"], ["os=windows"])
+        expect(has_const(lower_for(hir, "linux"), "7303")).to_equal(true)
+        expect(has_const(lower_for(hir, "windows"), "7303")).to_equal(true)
+
+    it "reports a fatal error for a malformed guard":
+        val hir = module_with_guards(["bogus_atom"], ["os=windows"])
+        val l = lower_for(hir, "linux")
+        var fatal = false
+        for e in l.errors:
+            if e.fatal and e.message.contains("malformed @cfg guard in group"): fatal = true
+        expect(fatal).to_equal(true)
+
+fn module_with_arms(lin_cfg: [text], lin_group: i64, lin_arm: i64, win_cfg: [text], win_group: i64, win_arm: i64) -> HirModule:
+    val hir = module_with_guards([], [])
+    for key in hir.functions.keys():
+        var fn_ = hir.functions[key]
+        if fn_.name == "f" and fn_.cfg_arm == 0:
+            fn_.cfg = lin_cfg
+            fn_.cfg_group = lin_group
+            fn_.cfg_arm = lin_arm
+            hir.functions[key] = fn_
+        elif fn_.name == "f" and fn_.cfg_arm == 1:
+            fn_.cfg = win_cfg
+            fn_.cfg_group = win_group
+            fn_.cfg_arm = win_arm
+            hir.functions[key] = fn_
+    hir
+
+val IMPL_SRC = "struct P:\n    x: i64\n\nimpl P:\n    fn m(self) -> i64:\n        7404\n"
+
+fn impl_module(cfg: [text]) -> HirModule:
+    val parsed = parse_full_frontend(IMPL_SRC, "testdata/impl_cfg.spl", "impl_cfg", Logger(level: 0))
+    var hl = HirLowering.with_filename("testdata/impl_cfg.spl")
+    val hir = hl.lower_module(parsed)
+    var impls: [HirImpl] = []
+    for im in hir.impls:
+        var g = im
+        g.cfg = cfg
+        impls.push(g)
+    hir.impls = impls
+    hir
+
+describe "MirLowering.lower_module decl-level @cfg groups":
+    it "an @else arm only survives when the earlier arm does not match":
+        # group 1: arm 0 os=linux, arm -1 (else)
+        val hir = module_with_arms(["os=linux"], 1, 0, [], 1, -1)
+        val lin = lower_for(hir, "linux")
+        val win = lower_for(hir, "windows")
+        expect(has_const(lin, "7101")).to_equal(true)
+        expect(has_const(lin, "7202")).to_equal(false)
+        expect(has_const(win, "7202")).to_equal(true)
+        expect(has_const(win, "7101")).to_equal(false)
+
+    it "drops the whole group when no arm matches and there is no else":
+        val hir = module_with_arms(["os=freebsd"], 1, 0, ["os=freebsd"], 1, 1)
+        val lin = lower_for(hir, "linux")
+        expect(has_const(lin, "7101")).to_equal(false)
+        expect(has_const(lin, "7202")).to_equal(false)
+        expect(has_const(lin, "7303")).to_equal(true)
+        expect(lin.errors.len()).to_equal(0)
+
+    it "a disabled impl drops its methods from the function table":
+        val hir = impl_module(["os=windows"])
+        expect(hir.impls.len() > 0).to_equal(true)
+        expect(has_const(lower_for(hir, "linux"), "7404")).to_equal(false)
+        expect(has_const(lower_for(hir, "windows"), "7404")).to_equal(true)
+
+val KINDS_SRC = "struct S1:\n    x: i64\n\nstruct S2:\n    y: i64\n\nenum E:\n    A\n    B\n\ntrait T:\n    fn t() -> i64\n\nval K: i64 = 5\n"
+val CLASS_SRC = "class C:\n    x: i64\n    fn m(self) -> i64:\n        7505\n"
+
+fn parse_hir(src: text, name: text) -> HirModule:
+    val parsed = parse_full_frontend(src, "testdata/{name}.spl", name, Logger(level: 0))
+    var hl = HirLowering.with_filename("testdata/{name}.spl")
+    hl.lower_module(parsed)
+
+fn guarded_for(hir: HirModule, os: text) -> HirModule:
+    var lowering = MirLowering.new_for_target(hir.symbols, tgt(os))
+    lowering.apply_decl_cfg_guards(hir)
+
+fn fatal_in(l: Lowered, needle: text) -> bool:
+    for e in l.errors:
+        if e.fatal and e.message.contains(needle): return true
+    false
+
+describe "MirLowering decl-level @cfg across kinds":
+    it "a disabled class drops its methods (its impl goes with the type)":
+        val hir = parse_hir(CLASS_SRC, "class_cfg")
+        var classes: Dict<SymbolId, HirClass> = {}
+        for c in hir.classes.values():
+            var g = c
+            g.cfg = ["os=windows"]
+            classes[g.symbol] = g
+        hir.classes = classes
+        expect(hir.classes.len()).to_equal(1)
+        expect(has_const(lower_for(hir, "linux"), "7505")).to_equal(false)
+        expect(has_const(lower_for(hir, "windows"), "7505")).to_equal(true)
+
+    it "struct, enum, trait and const are each dropped by a guard":
+        val hir = parse_hir(KINDS_SRC, "kinds_cfg")
+        var structs: Dict<SymbolId, HirStruct> = {}
+        for s in hir.structs.values():
+            var g = s
+            g.cfg = ["os=windows"]
+            structs[g.symbol] = g
+        hir.structs = structs
+        var enums: Dict<SymbolId, HirEnum> = {}
+        for e in hir.enums.values():
+            var g = e
+            g.cfg = ["os=windows"]
+            enums[g.symbol] = g
+        hir.enums = enums
+        var traits: Dict<SymbolId, HirTrait> = {}
+        for t in hir.traits.values():
+            var g = t
+            g.cfg = ["os=windows"]
+            traits[g.symbol] = g
+        hir.traits = traits
+        var consts: Dict<SymbolId, HirConst> = {}
+        for k in hir.constants.values():
+            var g = k
+            g.cfg = ["os=windows"]
+            consts[g.symbol] = g
+        hir.constants = consts
+        val had_structs = hir.structs.len()
+        expect(had_structs > 0).to_equal(true)
+        val lin = guarded_for(hir, "linux")
+        expect(lin.structs.len()).to_equal(0)
+        expect(lin.enums.len()).to_equal(0)
+        expect(lin.traits.len()).to_equal(0)
+        expect(lin.constants.len()).to_equal(0)
+        val win = guarded_for(hir, "windows")
+        expect(win.structs.len()).to_equal(had_structs)
+        expect(win.enums.len()).to_equal(hir.enums.len())
+
+    it "a cross-kind group follows one winner":
+        # group 1: arm 0 (os=linux) = struct S1 + f(7101); else arm (-1) = struct S2 + f(7202)
+        val hir = module_with_arms(["os=linux"], 1, 0, [], 1, -1)
+        var structs: Dict<SymbolId, HirStruct> = {}
+        for s in hir.structs.values():
+            var g = s
+            if g.name.ends_with("S1"):
+                g.cfg = ["os=linux"]
+                g.cfg_group = 1
+                g.cfg_arm = 0
+            elif g.name.ends_with("S2"):
+                g.cfg = []
+                g.cfg_group = 1
+                g.cfg_arm = -1
+            structs[g.symbol] = g
+        hir.structs = structs
+        val kinds = parse_hir(KINDS_SRC, "kinds_cfg2")
+        var merged: Dict<SymbolId, HirStruct> = {}
+        for s in kinds.structs.values():
+            var g = s
+            if g.name.ends_with("S1"):
+                g.cfg = ["os=linux"]
+                g.cfg_group = 1
+                g.cfg_arm = 0
+            else:
+                g.cfg = []
+                g.cfg_group = 1
+                g.cfg_arm = -1
+            merged[g.symbol] = g
+        val mod = kinds
+        mod.structs = merged
+        mod.functions = hir.functions
+        val lin = guarded_for(mod, "linux")
+        val win = guarded_for(mod, "windows")
+        expect(lin.structs.len()).to_equal(1)
+        expect(win.structs.len()).to_equal(1)
+        for s in lin.structs.values():
+            expect(s.name.ends_with("S1")).to_equal(true)
+        for s in win.structs.values():
+            expect(s.name.ends_with("S2")).to_equal(true)
+        expect(has_const(lower_for(mod, "linux"), "7101")).to_equal(true)
+        expect(has_const(lower_for(mod, "linux"), "7202")).to_equal(false)
+        expect(has_const(lower_for(mod, "windows"), "7202")).to_equal(true)
+        expect(has_const(lower_for(mod, "windows"), "7101")).to_equal(false)
+
+    it "first matching numbered arm wins when two are true":
+        val hir = module_with_arms(["os=linux"], 1, 0, ["os=linux"], 1, 1)
+        val lin = lower_for(hir, "linux")
+        expect(has_const(lin, "7101")).to_equal(true)
+        expect(has_const(lin, "7202")).to_equal(false)
+
+    it "a numbered arm with an empty cfg is fatal":
+        val hir = module_with_arms([], 1, 0, ["os=windows"], 1, 1)
+        expect(fatal_in(lower_for(hir, "linux"), "malformed @cfg guard")).to_equal(true)
+
+    it "winners over a bare function list serve the bootstrap flat-store lane":
+        val hir = module_with_arms(["os=linux"], 1, 0, [], 1, -1)
+        var lowering = MirLowering.new_for_target(hir.symbols, tgt("windows"))
+        var fns: [HirFunction] = []
+        for f in hir.functions.values():
+            fns.push(f)
+        val no_classes: [HirClass] = []
+        val no_structs: [HirStruct] = []
+        val no_enums: [HirEnum] = []
+        val no_traits: [HirTrait] = []
+        val no_consts: [HirConst] = []
+        val no_impls: [HirImpl] = []
+        val winners = lowering.cfg_group_winners(fns, no_classes, no_structs, no_enums, no_traits, no_consts, no_impls)
+        var kept = 0
+        for f in fns:
+            if lowering.decl_cfg_keep(f.name, f.cfg, f.cfg_group, f.cfg_arm, winners): kept = kept + 1
+        # windows: the else arm of group 1 plus unguarded g
+        expect(kept).to_equal(2)
+

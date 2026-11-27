@@ -6,7 +6,7 @@
 # argv/envp setup is handled by stack_builder → process_image.
 
 use os.kernel.loader.elf64.{elf64_parse_header, elf64_program_headers, elf64_load, elf64_has_magic, PT_LOAD64}
-use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.hal.arch_context.{Architecture}
 use os.kernel.loader.smf.{smf_has_header, smf_load, smf_extract_library_stub, smf_extract_library_stub_for_arch}
 use os.kernel.loader.dylib_registry.{
     dylib_registry_register,
@@ -18,7 +18,7 @@ use os.kernel.loader.dylib_registry.{
 }
 use os.kernel.types.vmspace_types.{ProcessVmSpace}
 
-extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_read_bytes(path: text) -> [u8]?
 
 # ============================================================================
 # Internal dispatch (testable without file I/O)
@@ -36,7 +36,7 @@ fn loader_dispatch(bytes: [u8], space: ProcessVmSpace) -> i64:
     # ELF64 magic: 0x7F 'E' 'L' 'F'
     if elf64_has_magic(bytes):
         val hdr_opt = elf64_parse_header(bytes)
-        if hdr_opt == nil:
+        if hdr_opt.is_none():
             return -8
         return elf64_load(bytes, space)
     # SMF v1.1 trailer or legacy offset-0 magic: 'S' 'M' 'F' '\0'
@@ -70,7 +70,8 @@ fn loader_dynopen_path(path: text) -> i64:
     """Read and register a dynamic library image by path."""
     if path == "":
         return -22
-    val bytes = rt_file_read_bytes(path)
+    # Unreadable and empty both map to -ENOENT (documented above).
+    val bytes: [u8] = rt_file_read_bytes(path) ?? []
     if bytes.len() == 0:
         return -2
     loader_dynopen_bytes(path, bytes)
@@ -86,7 +87,7 @@ fn _loader_dynlib_native_bytes(bytes: [u8]) -> [u8]:
 
 fn _loader_dynlib_load_segment_count(bytes: [u8]) -> i64:
     val hdr_opt = elf64_parse_header(bytes)
-    if hdr_opt == nil:
+    if hdr_opt.is_none():
         return 0
     val phdrs = elf64_program_headers(bytes, hdr_opt.unwrap())
     var count = 0
@@ -130,7 +131,8 @@ fn loader_dynopen_mapped_path(path: text, space: ProcessVmSpace) -> i64:
     """Read, register, and map a dynamic library image by path."""
     if path == "":
         return -22
-    val bytes = rt_file_read_bytes(path)
+    # Unreadable and empty both map to -ENOENT (documented above).
+    val bytes: [u8] = rt_file_read_bytes(path) ?? []
     if bytes.len() == 0:
         return -2
     loader_dynopen_mapped_bytes(path, bytes, space)
@@ -164,7 +166,8 @@ fn loader_exec(path: text, argv: [text], envp: [text], space: ProcessVmSpace) ->
       -8  (-ENOEXEC)  not a recognised binary format
       -38 (-ENOSYS)   format recognised but loader not yet fully implemented
     """
-    val bytes = rt_file_read_bytes(path)
+    # Unreadable and empty both map to -ENOENT (documented above).
+    val bytes: [u8] = rt_file_read_bytes(path) ?? []
     if bytes.len() == 0:
         return -2
     loader_dispatch(bytes, space)

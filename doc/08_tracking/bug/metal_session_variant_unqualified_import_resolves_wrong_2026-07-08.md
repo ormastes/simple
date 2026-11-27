@@ -57,3 +57,32 @@ names the ambiguous candidates, or (b) deterministically prefer the variant
 matching the importing module's memory-model family. Filed as a record; not
 fixed in the GPU-dict pilot change.
 
+
+## Verification 2026-11-25 (p3-bam lane, Windows worktree) — symptom dead, closing
+
+Binary: worktree-tracked `bin/simple.exe` (38,403,072 bytes, x86_64 Windows),
+`SIMPLE_LIB=src`, branch `work/p3-bam-20261125` off `release/1.0.0`.
+
+The premise of this record no longer holds: the `nogc_sync_mut` variant
+(`src/lib/nogc_sync_mut/gpu/engine2d/metal_session.spl`) no longer defines
+`MetalSession` at all — it now exports `MetalPipelineCache` (:16) and
+`MetalComputeSession` (:73). `MetalSession` exists only in the `gc_async_mut`
+variant (`src/lib/gc_async_mut/gpu/engine2d/metal_session.spl:36`), so there
+is no same-named class with a divergent method set left to mis-resolve to.
+
+Live probes from a scratch script outside either variant directory:
+
+- `use std.gpu.engine2d.metal_session.{MetalSession}` (unqualified) now fails
+  LOUDLY at compile time: `[use-warning] 'MetalSession' is named in ... but
+  module '.../nogc_sync_mut/gpu/engine2d/metal_session.spl' does not provide
+  it`, then `error: semantic: ... variable 'MetalSession' not found`. The
+  original silent failure mode (construction succeeds, then `method 'init'
+  not found` at the first call) can no longer occur — the wrong-variant
+  import is rejected up front with a diagnostic naming the module.
+- `use std.gc_async_mut.gpu.engine2d.metal_session.{MetalSession}`
+  (fully-qualified, the documented workaround) resolves and constructs:
+  `MetalSession.create("offscreen")` prints `created`.
+
+Effectively this is fix option (a) from the Suggested-fix section, arrived at
+by class-name divergence plus the use-warning diagnostic rather than by an
+ambiguity error. No production caller was ever affected. **Status: CLOSED.**

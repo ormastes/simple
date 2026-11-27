@@ -189,3 +189,22 @@ describe "packed Draw IR generation storage and bounded handoff":
         expect(right_hash).to_equal(left_hash)
         expect(other_hash).to_not_equal(left_hash)
         expect(left_hash.len()).to_equal(16)  # oracle: _draw_ir_packed_hash_v3 renders one FNV-1a u64 as 16 hex digits
+
+    it "moves a published generation QUEUED then IN_FLIGHT on take":
+        var store = DrawIrPackedGenerationStoreV3.bounded(43u64, 1u32, 2u32, 1u32)
+        var admitted = DrawIrPackedGenerationRefV3(arena_id: 0u64, generation: 0u64, slot: 0u32)
+        match store.admit(1u32):
+            DrawIrPackedAdmissionV3.Admitted(value): admitted = value
+            DrawIrPackedAdmissionV3.Refused(reason): expect(false).to_equal(true)
+        expect(store.write(admitted, 5u64)).to_equal(DRAW_IR_PACKED_REASON_OK)
+        var sealed = DrawIrPackedSubmissionV3(generation_ref: admitted, row_count: 0u32, content_hash: "")
+        match store.seal(admitted):
+            DrawIrPackedSealV3.Sealed(value): sealed = value
+            DrawIrPackedSealV3.Refused(reason): expect(false).to_equal(true)
+        expect(store.slot_states[admitted.slot]).to_equal(DRAW_IR_PACKED_SLOT_SEALED)
+        expect(store.publish(sealed)).to_equal(DRAW_IR_PACKED_REASON_OK)
+        expect(store.slot_states[admitted.slot]).to_equal(DRAW_IR_PACKED_SLOT_QUEUED)
+        match store.take():
+            DrawIrPackedHandoffV3.Ready(value): expect(value.generation_ref.generation).to_equal(admitted.generation)
+            DrawIrPackedHandoffV3.Refused(reason): expect(false).to_equal(true)
+        expect(store.slot_states[admitted.slot]).to_equal(DRAW_IR_PACKED_SLOT_IN_FLIGHT)

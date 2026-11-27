@@ -1,0 +1,38 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+# Bug: bare_result_return_type_any_payload_2026-10-24
+# A bare `-> Result` return has an Any payload. MIR `Result.unwrap` fails
+# closed on Any (policy: Any is an error outside unsafe; see
+# lower_result_unwrap_core), and the RTI row erases it to `b:any`. So the
+# permanent source form is the spelled `Result<T, E>`. Structural guard: the
+# linker wrapper sources that hit the stage2 miscompile must keep the spelled
+# form, and must never regress to a bare `-> Result:` declaration.
+
+fn has_bare_result_return(src: text) -> bool:
+    for line in src.split("\n"):
+        val t = line.trim()
+        if t.starts_with("#"):
+            continue
+        if t.starts_with("fn ") or t.starts_with("me ") or t.starts_with("pub fn "):
+            if t.ends_with("-> Result:"):
+                return true
+    false
+
+describe "bare Result return guard":
+    it "detector flags a bare return and accepts a spelled one":
+        expect(has_bare_result_return("fn f() -> Result:\n    Ok(1)\n")).to_equal(true)
+        expect(has_bare_result_return("fn f() -> Result<text, text>:\n    Ok(\"a\")\n")).to_equal(false)
+        expect(has_bare_result_return("# fn f() -> Result:\n")).to_equal(false)
+
+    it "find_runtime_binary spells Result<text, text>":
+        val src = rt_file_read_text("src/compiler/70.backend/linker/linker_wrapper_helpers.spl") ?? ""
+        expect(src).to_contain("fn find_runtime_binary() -> Result<text, text>:")
+        expect(has_bare_result_return(src)).to_equal(false)
+
+    it "sibling linker wrapper sources have no bare Result return":
+        for p in ["src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl", "src/compiler/70.backend/linker/_LinkerWrapper/shared_linking.spl"]:
+            val src = rt_file_read_text(p) ?? ""
+            expect(src.len() > 0).to_equal(true)
+            expect(has_bare_result_return(src)).to_equal(false)

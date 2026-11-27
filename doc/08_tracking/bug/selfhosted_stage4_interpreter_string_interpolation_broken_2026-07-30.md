@@ -1,5 +1,29 @@
 # Self-hosted stage4 `run` (interpreted) drops string interpolation
 
+## 2026-11-10 expression-entry sibling repair — verification pending
+
+The module pipeline already calls `core_frontend_parse_reset`, including
+interpolation expansion. A source audit found a separate live omission:
+`core_interpret_expr` parsed one expression and immediately evaluated it,
+leaving ordinary string nodes unpromoted. It now runs the same existing
+interpolation expansion and placeholder-argument transform as the module
+frontend after parsing completes. The evaluator does not acquire a parser
+dependency, and appended fragments remain in the same AST arena.
+
+`test/01_unit/compiler/interpreter/core_expression_interpolation_spec.spl`
+adds direct product-API scenarios for arithmetic/multiple regions, a runtime
+lambda variable with module parity, escaped braces, raw/plain text, and mixed
+malformed/valid regions. Fixture braces are assembled from character codes,
+so the outer runner cannot supply the behavior under test.
+
+These tests are authored but unexecuted: this Windows campaign has no proven
+self-hosted full CLI/test runner. Runtime checks, generated-doc validation,
+and the compiler/core/MCP smoke gates remain pending. The original Stage4
+`run` reproduction still requires a fresh full CLI with seed delegation
+impossible; this expression-path repair does not claim to settle it.
+
+Historical evidence and failed attempts below are retained unchanged.
+
 **Status:** open, blocking self-hosted deploy. **Filed:** 2026-07-30.
 
 ## Symptom (PROVED, reproduced twice, isolated from seed delegation)
@@ -331,3 +355,12 @@ Crash debugging on `ae4c3d56ce3`'s `expand_string_interpolations` path is
 being handed to a fresh lane, starting from this localization (frontend
 wiring point identified, failure mode is a nil-receiver field access,
 reproducible via the regression spec above) rather than continued here.
+
+**Revalidated 2026-11-02: still plausible because open, blocking self-hosted deploy. Filed: 2026-07-30; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 status: fix-implemented-verification-pending
+`test/01_unit/compiler/interpreter/string_interpolation_spec.spl` passes (3/3) under `bin/simple.exe test`
+on release/1.0.0; the wiring (`expand_string_interpolations` in `10.frontend/core/frontend.spl:175`) is present.
+The stage4-specific failure cannot be re-checked without a fresh self-hosted stage4 binary.
+Verify: build stage4, then from a dir with no `build/bootstrap/simple_seed` sibling run
+`stage4 run` on `fn main(): val x = 5; print("x={x}")` and expect `x=5`.

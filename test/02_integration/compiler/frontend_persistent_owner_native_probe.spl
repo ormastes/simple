@@ -1,21 +1,36 @@
+use std.spec.{describe, it, expect}
 use compiler.common.config.{Logger}
-use compiler.core.ast.{ast_reset, decl_count, expr_count, stmt_count}
-use compiler.core.parser.{parser_error_count, parser_release_parse_globals}
+use compiler.core.ast.{ast_prepare_persistent_owner_v1, ast_reset, decl_count, expr_count, stmt_count}
+use compiler.core.parser.{parser_error_count}
+use compiler.core.tokens.{TOK_EOF}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals, lex_cur_kind_get, lex_cur_text_get}
 use compiler.frontend.frontend.{parse_full_frontend}
-use compiler.frontend.flat_ast_bridge.{frontend_prepare_transient_parse_scope}
-use compiler.frontend.frontend_parse_ownership.{frontend_discard_failed_parse_registries, frontend_promote_compilation_registries}
+use compiler.frontend.retained_parse_owners_v1.{frontend_promote_retained_parse_owners_v1}
+use compiler.frontend.aspect_registry.{aspect_registry_reset_module, aspect_pending_reset}
+use compiler.frontend.effect_registry.{effect_registry_reset_module, effect_pending_reset}
+use compiler.frontend.layer_eq_registry.{layer_eq_registry_reset_module, layer_field_pending_reset}
+use compiler.frontend.rt_criticality_registry.{rt_criticality_reset_module}
+use compiler.frontend.resource_registry.{resource_registry_reset}
 
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_array_scope_end() -> bool
 
+fn discard_failed_parse_registries(path: text):
+    aspect_registry_reset_module(path)
+    aspect_pending_reset()
+    effect_registry_reset_module(path)
+    effect_pending_reset()
+    layer_eq_registry_reset_module(path)
+    layer_field_pending_reset()
+    rt_criticality_reset_module(path)
+    resource_registry_reset()
+
 fn finish_probe_scope() -> bool:
     val paused = rt_transient_array_scope_pause()
-    parser_release_parse_globals()
-    lexer_release_parse_source_globals()
-    val promoted = if paused: frontend_promote_compilation_registries() else: false
+    val promoted = if paused: frontend_promote_retained_parse_owners_v1(true) else: false
     val ended = rt_transient_array_scope_end()
+    lexer_release_parse_source_globals()
     ast_reset()
     paused and promoted and ended
 
@@ -23,11 +38,11 @@ fn probe_fail(message: text) -> i32:
     print("frontend_persistent_owner_probe=FAIL reason=" + message)
     1
 
-fn main() -> i32:
+fn run_frontend_persistent_owner_probe() -> i32:
     val logger = Logger(level: 0)
     val failed_path = "frontend_owner_probe_malformed.spl"
     val valid_path = "frontend_owner_probe_valid.spl"
-    frontend_prepare_transient_parse_scope()
+    ast_prepare_persistent_owner_v1()
 
     if not rt_transient_array_scope_begin():
         return probe_fail("failed-scope-begin")
@@ -39,12 +54,12 @@ fn main() -> i32:
         return probe_fail("failed-owner-state-unreadable")
     if lex_cur_kind_get() < -1 or lex_cur_text_get().len() < 0:
         return probe_fail("failed-lexer-state-unreadable")
-    frontend_discard_failed_parse_registries(failed_path)
+    discard_failed_parse_registries(failed_path)
     if not finish_probe_scope():
         return probe_fail("failed-scope-cleanup")
     if decl_count() != 0 or expr_count() != 0 or stmt_count() != 0:
         return probe_fail("failed-ast-not-neutral")
-    if lex_cur_kind_get() != 0 or lex_cur_text_get() != "":
+    if lex_cur_kind_get() != TOK_EOF or lex_cur_text_get() != "":
         return probe_fail("failed-lexer-not-neutral")
 
     if not rt_transient_array_scope_begin():
@@ -62,8 +77,15 @@ fn main() -> i32:
         return probe_fail("valid-owner-state-unreadable")
     if not finish_probe_scope():
         return probe_fail("valid-scope-cleanup")
-    if decl_count() != 0 or lex_cur_kind_get() != 0:
+    if decl_count() != 0 or lex_cur_kind_get() != TOK_EOF:
         return probe_fail("valid-owners-not-neutral")
 
     print("frontend_persistent_owner_probe=PASS malformed_then_valid=1")
     0
+
+fn main() -> i32:
+    run_frontend_persistent_owner_probe()
+
+describe "frontend persistent owner native probe":
+    it "recovers cleanly from malformed parse to valid parse across transient scopes":
+        expect(run_frontend_persistent_owner_probe()).to_equal(0)

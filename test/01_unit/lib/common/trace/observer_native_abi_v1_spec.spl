@@ -1,0 +1,225 @@
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_native_abi_v1.*
+use std.common.trace.observer_config_v1.{TRACE_CONFIG_SCHEMA_HASH_V1}
+use std.common.trace.observer_event_codec_v1.{trace_event_decode_v1}
+
+fn abi_test_bytes_v1(count: i64, fill: u8) -> [u8]:
+    var output: [u8] = []
+    for index in 0..count: output.push(fill)
+    output
+
+fn abi_test_write_v1(bytes: [u8], offset: i64, width: i64, value: u64) -> [u8]:
+    var output = bytes
+    for index in 0..width:
+        output[offset + index] = ((value >> (index * 8)) & 255u64) as u8
+    output
+
+fn abi_test_request_v1(opcode: u64) -> [u8]:
+    var bytes = abi_test_bytes_v1(144, 0)
+    bytes = abi_test_write_v1(bytes, 0, 2, 1)
+    bytes = abi_test_write_v1(bytes, 2, 2, 144)
+    bytes = abi_test_write_v1(bytes, 4, 2, opcode)
+    if opcode >= 3:
+        bytes = abi_test_write_v1(bytes, 8, 8, 1)
+        bytes = abi_test_write_v1(bytes, 16, 8, 2)
+        if opcode >= 4: bytes = abi_test_write_v1(bytes, 24, 8, 3)
+    if opcode == 5 or opcode == 7 or opcode == 8:
+        bytes = abi_test_write_v1(bytes, 80, 8, 56)
+    if opcode == 6:
+        bytes = abi_test_write_v1(bytes, 68, 4, 1)
+        bytes = abi_test_write_v1(bytes, 72, 8, 8)
+        bytes = abi_test_write_v1(bytes, 80, 8, 96)
+    bytes
+
+fn abi_test_prepare_v1() -> [u8]:
+    var bytes = abi_test_request_v1(2)
+    val config = "trace:\n    schema: 1\n"
+    bytes = abi_test_write_v1(bytes, 48, 8, config.len() as u64)
+    bytes = abi_test_write_v1(bytes, 56, 8, 64)
+    bytes = abi_test_write_v1(bytes, 64, 4, 1)
+    bytes = abi_test_write_v1(bytes, 88, 8, 4)
+    val digest = trace_copied_config_schema_digest_v1()
+    for index in 0..32: bytes[96 + index] = digest[index]
+    bytes
+
+fn abi_test_prepare_input_v1() -> [u8]:
+    var bytes = abi_test_bytes_v1(80, 0)
+    val config = "trace:\n    schema: 1\n".bytes()
+    for index in 0..config.len(): bytes[index] = config[index]
+    bytes = abi_test_write_v1(bytes, 64, 8, 5)
+    abi_test_write_v1(bytes, 72, 4, 6)
+
+describe "observer draft copied-buffer native boundary":
+    it "API-01 binds raw schema digest metadata to the configuration owner":
+        val alphabet = "0123456789abcdef"
+        var encoded = ""
+        for byte in trace_copied_config_schema_digest_v1():
+            val hi = (byte >> 4) as i64
+            val lo = (byte & 15) as i64
+            encoded = encoded + alphabet.slice(hi, hi + 1) + alphabet.slice(lo, lo + 1)
+        expect(encoded).to_equal(TRACE_CONFIG_SCHEMA_HASH_V1)
+
+    it "API-01 decodes versioned requests without casting a language struct":
+        val empty: [u8] = []
+        val request = trace_copied_request_decode_v1(abi_test_request_v1(3), empty, empty).unwrap()
+        expect(request.opcode).to_equal(3)
+        expect(request.slot).to_equal(1)
+        expect(request.incarnation).to_equal(2)
+        expect(request.generation).to_equal(0)
+        expect(request.config_schema_hash.len()).to_equal(32)
+        for offset in [0, 1, 2, 3, 4, 5, 6, 7, 128, 143]:
+            var corrupt = abi_test_request_v1(3)
+            corrupt[offset] = 255
+            expect(trace_copied_request_decode_v1(corrupt, empty, empty).is_err()).to_equal(true)
+        expect(trace_copied_request_decode_v1(abi_test_bytes_v1(143, 0), empty, empty).is_err()).to_equal(true)
+        expect(trace_copied_request_decode_v1(abi_test_bytes_v1(145, 0), empty, empty).is_err()).to_equal(true)
+
+    it "API-01 validates handle shape without issuing or authorizing handles":
+        val empty: [u8] = []
+        for opcode in [3, 4, 5, 6, 7, 8, 9]:
+            var bytes = abi_test_request_v1(opcode as u64)
+            bytes = abi_test_write_v1(bytes, 16, 8, 0)
+            expect(trace_copied_request_decode_v1(bytes, empty, abi_test_bytes_v1(104, 0)).is_err()).to_equal(true)
+        val high: u64 = (1u64 << 63) | 17u64
+        var bytes = abi_test_request_v1(4)
+        bytes = abi_test_write_v1(bytes, 8, 8, high)
+        bytes = abi_test_write_v1(bytes, 16, 8, high | 2u64)
+        bytes = abi_test_write_v1(bytes, 24, 8, high | 4u64)
+        val shaped = trace_copied_request_decode_v1(bytes, empty, empty).unwrap()
+        expect(shaped.slot).to_equal(high)
+        expect(shaped.incarnation).to_equal(high | 2u64)
+        expect(shaped.generation).to_equal(high | 4u64)
+
+    it "API-01 rejects reserved operation fields before output or lifecycle changes":
+        val empty: [u8] = []
+        for opcode in [1, 3, 4, 5, 6, 7, 8, 9]:
+            val destination = abi_test_bytes_v1(112, 170)
+            # These input fields are reserved for prepare on every other op.
+            for offset in [40, 48, 56, 64, 88, 96, 127]:
+                var bytes = abi_test_request_v1(opcode as u64)
+                bytes[offset] = 1
+                expect(trace_copied_request_decode_v1(bytes, empty, destination).is_err()).to_equal(true)
+                for byte in destination: expect(byte).to_equal(170)
+            if opcode != 5 and opcode != 7:
+                var deadline = abi_test_request_v1(opcode as u64)
+                deadline[32] = 1
+                expect(trace_copied_request_decode_v1(deadline, empty, destination).is_err()).to_equal(true)
+            if opcode != 6:
+                var count = abi_test_request_v1(opcode as u64)
+                count[68] = 1
+                expect(trace_copied_request_decode_v1(count, empty, destination).is_err()).to_equal(true)
+        for offset in [8, 16, 24, 32, 68, 72, 80]:
+            var bytes = abi_test_prepare_v1()
+            bytes[offset] = 1
+            expect(trace_copied_request_decode_v1(bytes, abi_test_prepare_input_v1(),
+                abi_test_bytes_v1(112, 170)).is_err()).to_equal(true)
+        for opcode in [3, 4, 9]:
+            var bytes = abi_test_request_v1(opcode as u64)
+            bytes[80] = 8
+            expect(trace_copied_request_decode_v1(bytes, empty, abi_test_bytes_v1(112, 170)).is_err()).to_equal(true)
+
+    it "API-01 rejects offset wraparound alignment and fictitious output capacities":
+        val top: u64 = 18446744073709551615u64
+        expect(trace_copied_range_valid_v1(8, 96, 104, 8)).to_equal(true)
+        expect(trace_copied_range_valid_v1(9, 95, 104, 8)).to_equal(false)
+        expect(trace_copied_range_valid_v1(top - 7u64, 16, top, 8)).to_equal(false)
+        expect(trace_copied_range_valid_v1(0, top, 104, 8)).to_equal(false)
+        expect(trace_copied_range_valid_v1(0, 0, 0, 0)).to_equal(false)
+        val empty: [u8] = []
+        val bytes = abi_test_request_v1(6)
+        expect(trace_copied_request_decode_v1(bytes, empty, abi_test_bytes_v1(103, 0)).is_err()).to_equal(true)
+        var oversized = abi_test_write_v1(bytes, 80, 8, top)
+        expect(trace_copied_request_decode_v1(oversized, empty, abi_test_bytes_v1(104, 0)).is_err()).to_equal(true)
+        oversized = abi_test_write_v1(bytes, 68, 4, 4294967295)
+        expect(trace_copied_request_decode_v1(oversized, empty, abi_test_bytes_v1(104, 0)).is_err()).to_equal(true)
+
+    it "API-01 decodes bounded prepare config and manifest-bound site selectors":
+        val empty: [u8] = []
+        val input = abi_test_prepare_input_v1()
+        val request = trace_copied_request_decode_v1(abi_test_prepare_v1(), input, empty).unwrap()
+        val decoded = trace_copied_prepare_decode_v1(request, input).unwrap()
+        expect(decoded.0.instrumentation).to_equal(TraceInstrumentationV1.Off)
+        expect(decoded.1.manifest_incarnation).to_equal(4)
+        expect(decoded.1.sites.len()).to_equal(1)
+        expect(decoded.1.sites[0].module_instance).to_equal(5)
+        expect(decoded.1.sites[0].site_id).to_equal(6)
+        for offset in [64, 88, 96]:
+            var bytes = abi_test_prepare_v1()
+            bytes[offset] = 0
+            expect(trace_copied_request_decode_v1(bytes, input, empty).is_err()).to_equal(true)
+        var overlap = abi_test_write_v1(abi_test_prepare_v1(), 56, 8, 8)
+        expect(trace_copied_request_decode_v1(overlap, input, empty).is_err()).to_equal(true)
+        overlap = abi_test_write_v1(abi_test_prepare_v1(), 56, 8, 65)
+        expect(trace_copied_request_decode_v1(overlap, input, empty).is_err()).to_equal(true)
+
+    it "MAP-01 rejects overlapping prepare spans without touching any caller buffer":
+        val input = abi_test_prepare_input_v1()
+        val destination = abi_test_bytes_v1(112, 170)
+        val overlap = abi_test_write_v1(abi_test_prepare_v1(), 56, 8, 8)
+        expect(trace_copied_request_decode_v1(overlap, input, destination).is_err()).to_equal(true)
+        expect(input).to_equal(abi_test_prepare_input_v1())
+        for byte in destination: expect(byte).to_equal(170)
+
+    it "MAP-01 rejects malformed selectors and invalid UTF8 before provider calls":
+        val empty: [u8] = []
+        for offset in [0, 76]:
+            var input = abi_test_prepare_input_v1()
+            input[offset] = 255
+            val request = trace_copied_request_decode_v1(abi_test_prepare_v1(), input, empty).unwrap()
+            expect(trace_copied_prepare_decode_v1(request, input).is_err()).to_equal(true)
+        var input = abi_test_prepare_input_v1()
+        input[72] = 0
+        val request = trace_copied_request_decode_v1(abi_test_prepare_v1(), input, empty).unwrap()
+        expect(trace_copied_prepare_decode_v1(request, input).is_err()).to_equal(true)
+
+    it "API-01 writes event bytes only inside the validated output slice":
+        val empty: [u8] = []
+        val output = abi_test_bytes_v1(112, 170)
+        val request = trace_copied_request_decode_v1(abi_test_request_v1(6), empty, output).unwrap()
+        var event = TraceEventV1(kind: TraceEventKindV1.Entry, flags: 0,
+            generation: 3, module_instance: 5, function_id: 6, site_id: 7,
+            context_id: 8, sequence: 9, timestamp: 10, span_token: 0,
+            payload0: 0, payload1: 0, payload2: 0)
+        val written = trace_copied_poll_output_v1(request, [event], output).unwrap()
+        for index in 0..8: expect(written[index]).to_equal(170)
+        for index in 104..112: expect(written[index]).to_equal(170)
+        var record: [u8] = []
+        for index in 8..104: record.push(written[index])
+        expect(trace_event_decode_v1(record).unwrap().generation).to_equal(3)
+        expect(trace_copied_poll_output_v1(request, [event, event], output).is_err()).to_equal(true)
+        for byte in output: expect(byte).to_equal(170)
+        event.generation = 4
+        expect(trace_copied_poll_output_v1(request, [event], output).is_err()).to_equal(true)
+        for byte in output: expect(byte).to_equal(170)
+        val short = abi_test_bytes_v1(103, 170)
+        expect(trace_copied_poll_output_v1(request, [], short).is_err()).to_equal(true)
+        for byte in short: expect(byte).to_equal(170)
+
+    it "API-01 serializes state stats and status metadata with fixed offsets":
+        val empty: [u8] = []
+        val output = abi_test_bytes_v1(64, 170)
+        val request = trace_copied_request_decode_v1(abi_test_request_v1(8), empty, output).unwrap()
+        val stats = TraceStatsV1(generation: 3, recorded: 4, lost: 5, transitions: 6,
+            unsupported_sites: 7, queue_high_water: 8, backend_errors: 9)
+        val written = trace_copied_stats_output_v1(request, stats, output).unwrap()
+        expect(written[0]).to_equal(3)
+        expect(written[8]).to_equal(4)
+        expect(written[48]).to_equal(9)
+        for index in 56..64: expect(written[index]).to_equal(170)
+        val high: u64 = (1u64 << 63) | 5u64
+        val reply = trace_copied_response_encode_v1(8, 2, high, high, high, 0, 56).unwrap()
+        expect(reply.len()).to_equal(64)
+        expect(reply[0]).to_equal(1)
+        expect(reply[2]).to_equal(64)
+        expect(reply[4]).to_equal(8)
+        expect(reply[8]).to_equal(2)
+        expect(reply[16]).to_equal(5)
+        expect(reply[23]).to_equal(128)
+        expect(reply[31]).to_equal(128)
+        expect(reply[39]).to_equal(128)
+        expect(reply[48]).to_equal(56)
+        for index in 56..64: expect(reply[index]).to_equal(0)
+        expect(trace_copied_response_encode_v1(12, 0, 0, 0, 0, 0, 0).is_err()).to_equal(true)
+        expect(trace_copied_response_encode_v1(0, 5, 1, 2, 3, 0, 0).is_err()).to_equal(true)
+        expect(trace_copied_response_encode_v1(8, 2, 1, 2, 3, 1, 0).is_err()).to_equal(true)
+        expect(trace_copied_state_code_v1(TraceSessionStateV1.Faulted)).to_equal(4)

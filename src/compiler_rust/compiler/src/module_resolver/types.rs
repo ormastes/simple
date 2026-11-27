@@ -8,7 +8,7 @@
 
 use crate::fs_probe::{p_exists, p_is_dir, p_is_file};
 use simple_dependency_tracker::symbol::ProjectSymbols;
-use simple_parser::ast::{Attribute, AutoImportStmt, Capability, CommonUseStmt, ExportUseStmt, Visibility};
+use simple_parser::ast::{Attribute, AutoImportStmt, Capability, CommonUseStmt, ExportUseStmt, ModulePath, Visibility};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -116,6 +116,10 @@ pub struct DirectoryManifest {
     pub exports: Vec<ExportUseStmt>,
     /// Macro auto-imports (auto import)
     pub auto_imports: Vec<AutoImportStmt>,
+    /// Friend packages declared via `friend <package.path>`
+    pub friends: Vec<ModulePath>,
+    /// Symbols exported to friends via `internal_export <name>`
+    pub internal_exports: Vec<String>,
     /// Required capabilities (from `requires [pure, io, ...]`)
     /// Empty means unrestricted (all effects allowed)
     pub capabilities: Vec<Capability>,
@@ -401,7 +405,37 @@ fn find_project_root(path: &Path) -> Option<PathBuf> {
 
     loop {
         if p_is_dir(&current.join("src")) || p_is_file(&current.join("Cargo.toml")) {
-            return Some(current);
+            return Some(workspace_root_enclosing_src(&current).unwrap_or(current));
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+/// A `src/`-bearing directory that itself lives under the enclosing
+/// repository/workspace's `src/` tree (e.g. `src/lib/nogc_sync_mut/src/`) is a
+/// nested library package, not a project. Taking it as the project root made
+/// `source_root` = `<pkg>/src`, so a `src/lib/<pkg>/**` ENTRY file could not
+/// resolve `app.*` (E1034, `module path segment 'app' not found`) while the
+/// same file imported from an `src/app/**` entry resolved fine. Return the
+/// workspace root instead. A Cargo crate is a real project and is kept; a
+/// `src/`-bearing dir outside the workspace's `src/` (spec-mirror dirs under
+/// `test/**`) is kept too.
+/// See doc/08_tracking/bug/lib_entry_file_cannot_resolve_app_prefix_imports_2026-08-17.md
+fn workspace_root_enclosing_src(nearest: &Path) -> Option<PathBuf> {
+    if p_is_file(&nearest.join("Cargo.toml")) {
+        return None;
+    }
+    let mut current = nearest.parent()?.to_path_buf();
+    loop {
+        if p_exists(&current.join(".git")) || p_is_dir(&current.join(".jj")) {
+            let ws_src = current.join("src");
+            return if p_is_dir(&ws_src) && nearest.starts_with(&ws_src) {
+                Some(current)
+            } else {
+                None
+            };
         }
         if !current.pop() {
             return None;
@@ -427,8 +461,24 @@ fn detect_stdlib_root(project_root: &Path, file_parent: &Path) -> Option<PathBuf
         }
     }
 
+    // Climb to the repository/workspace boundary below (or to `/` when no
+    // `.git`/`.jj` ancestor exists), not a fixed depth.
+    // A five-level cap stopped short of the repo root for any file six or more
+    // directories deep (e.g. test/01_unit/lib/nogc_async_mut/gpu/x_spec.spl)
+    // whenever `project_root` was a spec-mirror dir holding its own `src/`
+    // (test/01_unit/lib/nogc_async_mut/src/), so `common.*` / `std.*` imports
+    // failed on the run/HIR lane while the interpreter lane resolved them.
+    // On the climb, the project stdlib `src/lib` (where `std.*` and the
+    // `common`/`nogc_*` families live) wins over the Rust seed's own
+    // `src/compiler_rust/lib/std/src`, which sits first in the list above and
+    // would otherwise be picked at the repository root. The first `src/lib`
+    // met on the climb wins, including an intermediate one.
     let mut current = file_parent.to_path_buf();
-    for _ in 0..5 {
+    loop {
+        let project_stdlib = current.join("src/lib");
+        if p_is_dir(&project_stdlib) {
+            return Some(project_stdlib);
+        }
         for candidate_path in &stdlib_candidates {
             let candidate = current.join(candidate_path);
             if p_exists(&candidate) {
@@ -451,4 +501,70 @@ fn detect_stdlib_root(project_root: &Path, file_parent: &Path) -> Option<PathBuf
     }
 
     None
+}
+
+#[cfg(test)]
+mod project_root_tests {
+    use super::*;
+    use std::fs;
+
+    fn unique_tmp(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "simple_modroot_{}_{}_{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Repro for `lib_entry_file_cannot_resolve_app_prefix_imports_2026-08-17`:
+    /// `src/lib/<pkg>/` carries its own nested `src/` (as
+    /// `src/lib/nogc_sync_mut/src/` does), so the nearest `src/`-bearing
+    /// ancestor of a `src/lib/<pkg>/**` ENTRY file is the package itself, not
+    /// the workspace. `app.*` then resolves against `<pkg>/src/app` and fails
+    /// with E1034 while the same file imported from an `src/app/**` entry works.
+    #[test]
+    fn lib_entry_inside_workspace_src_uses_workspace_root() {
+        let ws = unique_tmp("libentry");
+        fs::write(ws.join(".git"), "gitdir: elsewhere\n").unwrap();
+        fs::create_dir_all(ws.join("src/app/test_daemon")).unwrap();
+        fs::write(ws.join("src/app/test_daemon/session_types.spl"), "val X = 1\n").unwrap();
+        fs::create_dir_all(ws.join("src/lib/pkg/src/app")).unwrap();
+        fs::write(ws.join("src/lib/pkg/src/__init__.spl"), "").unwrap();
+        fs::create_dir_all(ws.join("src/lib/pkg/runner")).unwrap();
+        let entry = ws.join("src/lib/pkg/runner/main.spl");
+        fs::write(&entry, "use app.test_daemon.session_types\n").unwrap();
+
+        let resolver = ModuleResolver::single_file(&entry);
+        assert_eq!(resolver.project_root(), ws.as_path(), "project root must be the workspace");
+        assert_eq!(resolver.source_root(), ws.join("src").as_path(), "source root must be <workspace>/src");
+
+        let resolved = resolver
+            .resolve(&simple_parser::ast::ModulePath::new(vec!["app".into(), "test_daemon".into(), "session_types".into()]), &entry)
+            .expect("app.* must resolve from a src/lib/** entry file");
+        assert_eq!(resolved.path, ws.join("src/app/test_daemon/session_types.spl"));
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    /// A project that is NOT inside another workspace's `src/` keeps the
+    /// nearest `src/`-bearing ancestor (spec-mirror dirs under `test/**` rely
+    /// on this, see `detect_stdlib_root`).
+    #[test]
+    fn nearest_src_root_kept_outside_workspace_src() {
+        let ws = unique_tmp("mirror");
+        fs::write(ws.join(".git"), "gitdir: elsewhere\n").unwrap();
+        fs::create_dir_all(ws.join("src")).unwrap();
+        fs::create_dir_all(ws.join("test/unit/lib/src")).unwrap();
+        let entry = ws.join("test/unit/lib/x_spec.spl");
+        fs::write(&entry, "").unwrap();
+
+        let resolver = ModuleResolver::single_file(&entry);
+        assert_eq!(resolver.project_root(), ws.join("test/unit/lib").as_path());
+        let _ = fs::remove_dir_all(&ws);
+    }
 }

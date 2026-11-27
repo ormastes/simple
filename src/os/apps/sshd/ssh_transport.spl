@@ -4,7 +4,7 @@
 # Version exchange, algorithm negotiation, and key exchange init.
 # Handles KEXINIT messages and algorithm selection.
 
-use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_text, ssh_put_bool, ssh_put_byte, ssh_get_u32, ssh_get_string, ssh_get_text, ssh_ascii_bytes_to_text, SshTextResult, SshStringResult}
+use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_text, ssh_put_bool, ssh_put_byte, ssh_get_u32, ssh_get_string, ssh_get_text, ssh_utf8_bytes_to_text, SshTextResult, SshStringResult}
 use os.kernel.log.klog_api.{log_info}
 
 # ============================================================================
@@ -263,7 +263,9 @@ fn ssh_parse_version_string(data: [u8]) -> Result<text, text>:
                 while i < end:
                     version_bytes.push(_u8_at(data, i))
                     i = i + 1
-                var version: text = ssh_ascii_bytes_to_text(version_bytes)
+                val version: text = match ssh_utf8_bytes_to_text(version_bytes):
+                    case Ok(v): v
+                    case Err(e): return Err("version string: " + e)
                 return Ok(version)
         else:
             end = end + 1
@@ -509,6 +511,9 @@ fn _preferred_host_key_match(client_list: text, server_list: text) -> text:
 fn _is_aes_gcm(cipher: text) -> bool:
     cipher == "aes256-gcm@openssh.com" or cipher == "aes128-gcm@openssh.com"
 
+fn _is_supported_cipher(cipher: text) -> bool:
+    _is_aes_gcm(cipher) or _is_aes256_ctr(cipher)
+
 fn _is_aes256_ctr(cipher: text) -> bool:
     cipher == "aes256-ctr"
 
@@ -532,6 +537,27 @@ fn ssh_negotiate_algorithms(client: SshKexInit, server: SshKexInit) -> Result<Ss
     Returns the first matching algorithm for each category, following
     client preference order per RFC 4253 section 7.1.
     """
+    # Callers may construct SshKexInit directly instead of using the validating
+    # parser. Apply the same trust-boundary check here so malformed lists can
+    # never reach selection helpers that trim or skip empty members.
+    if not ssh_algorithm_name_list_is_well_formed(client.kex_algorithms) or
+        not ssh_algorithm_name_list_is_well_formed(client.server_host_key_algorithms) or
+        not ssh_algorithm_name_list_is_well_formed(client.encryption_client_to_server) or
+        not ssh_algorithm_name_list_is_well_formed(client.encryption_server_to_client) or
+        not ssh_algorithm_name_list_is_well_formed(client.mac_client_to_server) or
+        not ssh_algorithm_name_list_is_well_formed(client.mac_server_to_client) or
+        not ssh_algorithm_name_list_is_well_formed(client.compression_client_to_server) or
+        not ssh_algorithm_name_list_is_well_formed(client.compression_server_to_client) or
+        not ssh_algorithm_name_list_is_well_formed(server.kex_algorithms) or
+        not ssh_algorithm_name_list_is_well_formed(server.server_host_key_algorithms) or
+        not ssh_algorithm_name_list_is_well_formed(server.encryption_client_to_server) or
+        not ssh_algorithm_name_list_is_well_formed(server.encryption_server_to_client) or
+        not ssh_algorithm_name_list_is_well_formed(server.mac_client_to_server) or
+        not ssh_algorithm_name_list_is_well_formed(server.mac_server_to_client) or
+        not ssh_algorithm_name_list_is_well_formed(server.compression_client_to_server) or
+        not ssh_algorithm_name_list_is_well_formed(server.compression_server_to_client):
+        return Err("malformed algorithm name-list")
+
     val kex = _first_match(client.kex_algorithms, server.kex_algorithms)
     if kex != "curve25519-sha256":
         return Err("no matching kex algorithm")
@@ -540,24 +566,16 @@ fn ssh_negotiate_algorithms(client: SshKexInit, server: SshKexInit) -> Result<Ss
     if host_key == "":
         return Err("no matching host key algorithm")
 
-    var cipher_c2s = ""
-    if _list_contains(client.encryption_client_to_server, "aes256-gcm@openssh.com") and _list_contains(server.encryption_client_to_server, "aes256-gcm@openssh.com"):
-        cipher_c2s = "aes256-gcm@openssh.com"
-    elif _list_contains(client.encryption_client_to_server, "aes128-gcm@openssh.com") and _list_contains(server.encryption_client_to_server, "aes128-gcm@openssh.com"):
-        cipher_c2s = "aes128-gcm@openssh.com"
-    elif _list_contains(client.encryption_client_to_server, "aes256-ctr") and _list_contains(server.encryption_client_to_server, "aes256-ctr"):
-        cipher_c2s = "aes256-ctr"
-    if cipher_c2s == "":
+    # RFC 4253 section 7.1: the first client-proposed algorithm that also
+    # appears on the server's list wins. Fail closed when that first common
+    # name is outside the implemented allowlist — never skip ahead to a
+    # weaker mutually-listed preference.
+    val cipher_c2s = _first_match(client.encryption_client_to_server, server.encryption_client_to_server)
+    if cipher_c2s == "" or not _is_supported_cipher(cipher_c2s):
         return Err("no matching cipher (c2s)")
 
-    var cipher_s2c = ""
-    if _list_contains(client.encryption_server_to_client, "aes256-gcm@openssh.com") and _list_contains(server.encryption_server_to_client, "aes256-gcm@openssh.com"):
-        cipher_s2c = "aes256-gcm@openssh.com"
-    elif _list_contains(client.encryption_server_to_client, "aes128-gcm@openssh.com") and _list_contains(server.encryption_server_to_client, "aes128-gcm@openssh.com"):
-        cipher_s2c = "aes128-gcm@openssh.com"
-    elif _list_contains(client.encryption_server_to_client, "aes256-ctr") and _list_contains(server.encryption_server_to_client, "aes256-ctr"):
-        cipher_s2c = "aes256-ctr"
-    if cipher_s2c == "":
+    val cipher_s2c = _first_match(client.encryption_server_to_client, server.encryption_server_to_client)
+    if cipher_s2c == "" or not _is_supported_cipher(cipher_s2c):
         return Err("no matching cipher (s2c)")
 
     var mac_c2s = ""
@@ -678,4 +696,4 @@ fn ssh_build_disconnect(reason: u32, description: text) -> [u8]:
     buf
 
 export SSH_VERSION_STRING, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_DEBUG, SSH_MSG_SERVICE_REQUEST, SSH_MSG_SERVICE_ACCEPT, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_EXT_INFO
-export SSH_DISCONNECT_PROTOCOL_ERROR
+export SSH_DISCONNECT_PROTOCOL_ERROR, SSH_DISCONNECT_KEY_EXCHANGE_FAILED

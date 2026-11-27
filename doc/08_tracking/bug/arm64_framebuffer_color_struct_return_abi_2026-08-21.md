@@ -1,7 +1,7 @@
 # ARM64 framebuffer `Color.rgb` struct return faults before SimpleOS desktop-ready
 
 Date: 2026-08-21
-Status: OPEN — focused native owner fixed; fresh attested QEMU evidence pending
+Status: fix-implemented-verification-pending — FbColor rename landed in #5982 (merge b21cf9956cb); board/QEMU verification steps below
 Owner: native aggregate-return ABI / SimpleOS ARM64 rendering
 Severity: P0 for the resumed QEMU desktop-rendering goal
 
@@ -200,3 +200,60 @@ receipt, and resume. QEMU evidence remains pending and unclaimed.
 ## Host-environment classification (2026-09-18)
 
 Audited by the fix-pipeline classification review: **environment-blocked: windows** — [env-blocked:windows]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+Revalidated 2026-11-02: still plausible because doc requires fresh attested QEMU evidence before closing and none is recorded.
+
+## Analysis (2026-11-02, opf-8)
+
+Checked against current policy/design: re-scoped to evidence-only (attested ARM64 QEMU run); consistent with target-neutral HIR and MIR-selected target, no nil/Any involved.
+
+Windows x86_64 host: **not affected / not reproducible**.
+
+- The native backend has no AAPCS64 small-aggregate/HFA register-return path:
+  `src/compiler/70.backend/backend/native/isel_aarch64.spl` contains no
+  struct/aggregate return lowering (no x8 indirect-result, no HFA classification);
+  Simple struct values ride the target-independent aggregate transport already
+  swept by `native_aggregate_return_transport_class_spec.spl`.
+- The 2026-08-21 focused result above isolates the historical fault to the
+  ambiguous duplicate short-name `Color` binding (framebuffer vs paint), fixed at
+  consumers by the `FbColor` alias. That is a frontend/type-registration issue,
+  not an arm64 ABI defect; the duplicate-registration root stays tracked
+  separately.
+- No new fix commit since 91d21404821 (triage). What remains is evidence-only:
+  an attested ARM64 QEMU run reaching `desktop-ready`.
+
+Invariant spec (target-independent, assert-only):
+`test/01_unit/compiler/70.backend/color_struct_return_invariant_spec.spl`
+— `bin/simple.exe run` on Windows: 3 examples, 0 failures.
+
+TODO(opf-8): repro needs an aarch64 host (macOS arm64 or Linux arm64) with an
+admitted pure-Simple Stage-2/3 compiler: run
+`native_arm64_framebuffer_color_return_spec.spl` natively (expect
+`17,31,47,255`), then one attested ARM64 QEMU `ramfb` run to `desktop-ready`
+with a nonblank device-origin framebuffer capture and serial/QMP evidence.
+
+## 2026-11-03 FbColor rename (name-clash mitigation) and verification steps
+
+The framebuffer driver's `struct Color` (four `u8`) is renamed `FbColor` and
+every importer (compositor, decorations, fb_backend, display_service,
+wm_host_2d_simpleos, wm_compare, gui_entry, specs) uses `FbColor`, removing the
+short-name collision with `common.color.types.Color` (class). Guarded by
+`test/01_unit/os/drivers/framebuffer/fb_color_name_clash_spec.spl`. This does
+not by itself prove the aggregate-return ABI fix; the status stays pending
+until the steps below produce evidence.
+
+### Board verification (arm64 board)
+1. Build the SimpleOS aarch64 unified kernel with a pure-Simple Stage-3 compiler
+   (`kernel.elf`); build the ESP with `scripts/os/build-simpleos-aarch64-efi-esp.shs`.
+2. Boot via the real-firmware path: EDK2/AAVMF -> `vendor/limine/BOOTAA64.EFI`
+   -> `kernel.elf` (`protocol: linux`), never `-kernel`.
+3. Record board identity, download/boot path, and the serial (or SSH) transcript.
+   Expected: `[desktop-gui-arm64] desktop-ready` with no fault at `FbColor.rgb`
+   (previously PC `0x4037c300`), and a nonblank framebuffer capture.
+
+### QEMU real-firmware verification
+1. `sh scripts/check/check-simpleos-arm64-efi-real-firmware-boot.shs`
+2. Expect serial to reach `[desktop-gui-arm64] desktop-ready`, RAMFB discovered,
+   and QMP/device-origin framebuffer capture nonblank.
+3. Run `native_arm64_framebuffer_color_return_spec.spl` natively; expect
+   `17,31,47,255`.

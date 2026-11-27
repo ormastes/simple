@@ -1,0 +1,57 @@
+# CSS outline on the Engine2D lanes (cpu_simd, Vulkan) vs Chrome 159.
+#
+# The raster lane paints the outline ring (`fb_outline_clip`): `outline-width`
+# thick, square, grown `outline-width + outline-offset` past the border box.
+# The Draw IR producer already carries outline-width / outline-color /
+# outline-offset on the box command, but the Engine2D executor never painted
+# them, so every outline was missing on cpu_simd and Vulkan.
+#
+# Chrome 159 oracle: OL_PAGE at k=4 (`--force-device-scale-factor=4
+# --window-size=24,28`), sampled at each CSS pixel centre (4x+2, 4y+2).
+# #a: 2px red outline, offset 1px, around a 6x4 blue box at (6,6) -> ring
+# x 3..4 / 13..14, y 3..4 / 11..12, a 1px white offset gap. #b: 1px 50%
+# black outline around a positioned 5x3 green box at (3,20) -> 7F7F7F.
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_software_pixels}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_resolved_engine2d_backend}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d_at_device_scale}
+
+val OL_PAGE: text = "<!DOCTYPE html><html><head><style>html,body\{margin:0;background:#fff}#a\{margin:6px;width:6px;height:4px;background:#0000ff;outline:2px solid #ff0000;outline-offset:1px}#b\{position:absolute;left:3px;top:20px;width:5px;height:3px;background:#008000;outline:1px solid rgba(0,0,0,0.5)}</style></head><body><div id=a></div><div id=b></div></body></html>"
+
+val OL_X: [i32] = [3, 4, 14, 3, 13, 14, 5, 12, 6, 11, 15, 2, 8, 2, 8, 3, 7, 9, 2]
+val OL_Y: [i32] = [3, 4, 3, 8, 8, 12, 5, 10, 6, 9, 12, 19, 19, 23, 23, 20, 22, 20, 18]
+val OL_CHROME: [u32] = [
+    0xFFFF0000u32, 0xFFFF0000u32, 0xFFFF0000u32, 0xFFFF0000u32,
+    0xFFFF0000u32, 0xFFFF0000u32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+    0xFF0000FFu32, 0xFF0000FFu32, 0xFFFFFFFFu32, 0xFF7F7F7Fu32,
+    0xFF7F7F7Fu32, 0xFF7F7F7Fu32, 0xFF7F7F7Fu32, 0xFF008000u32,
+    0xFF008000u32, 0xFFFFFFFFu32, 0xFFFFFFFFu32
+]
+
+fn ol_mismatches(px: [u32], stride: i32, scale: i32) -> i32:
+    if px.len() < (stride * 28 * scale).to_i64():
+        return 999
+    var bad = 0
+    var n = 0
+    while n < OL_CHROME.len():
+        val sx = OL_X[n] * scale + scale / 2
+        val sy = OL_Y[n] * scale + scale / 2
+        val got = px[sy * stride + sx] | 0xFF000000u32
+        if got != OL_CHROME[n]:
+            print "outline cell {n} ({OL_X[n]},{OL_Y[n]}) got {got} want {OL_CHROME[n]}"
+            bad = bad + 1
+        n = n + 1
+    bad
+
+describe "CSS outline on the Engine2D lanes (Chrome 159)":
+    it "paints the outline ring with offset and translucency on the CPU raster as Chrome does":
+        expect(ol_mismatches(simple_web_layout_render_html_software_pixels(OL_PAGE, 24, 28), 24, 1)).to_equal(0)
+
+    it "paints the outline ring with offset and translucency on cpu_simd as Chrome does":
+        expect(ol_mismatches(simple_web_render_html_to_pixels_with_resolved_engine2d_backend(OL_PAGE, 24, 28, "cpu_simd"), 24, 1)).to_equal(0)
+
+    it "paints the outline ring with offset and translucency on Vulkan as Chrome does":
+        expect(ol_mismatches(simple_web_render_html_to_pixels_with_resolved_engine2d_backend(OL_PAGE, 24, 28, "vulkan"), 24, 1)).to_equal(0)
+
+    it "paints the outline ring at device scale 4 on cpu_simd as Chrome does":
+        expect(ol_mismatches(simple_web_layout_render_html_pixels_engine2d_at_device_scale(OL_PAGE, 24, 28, 4, "cpu_simd"), 96, 4)).to_equal(0)

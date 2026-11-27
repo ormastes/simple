@@ -3,6 +3,13 @@
 - **Status:** RECOVERY ROUND 2 COMPLETE — 170 of 244 in-scope files restored;
   remaining 74 confirmed obsolete-by-design (no action needed). `tools/tauri-shell`
   was restored separately (see Related).
+  **Verified 2026-11-25 on `origin/release/1.0.0` (`47d6c5eddd5`):** every
+  restored group is present in the release tree — `git ls-tree
+  origin/release/1.0.0` resolves `variants`, `tools/claude-plugin`,
+  `tools/mcp-registry`, `tools/lsp-mcp-registry/{README.md,package.json,server.json}`,
+  `tools/gui_perf_bench`, `tools/tauri-live-bitmap`, `tools/electron-wasm-gui-exec`,
+  `tools/docker`, `tools/pixel_compare`, `tools/web-render-backend`. Recovery
+  holds on release/1.0.0; no further action.
 - **Priority:** P1
 - **Date:** 2026-07-07
 - **Area:** repo-wide (compiler variant overlays, dev tooling, one src edit)

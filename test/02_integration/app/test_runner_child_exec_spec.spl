@@ -1,0 +1,79 @@
+"""Runner executes a child spec and reports its result and exit code.
+
+A tiny green spec and a tiny red spec are written to a temp dir and run through
+the real `simple test`. Also pins the --compiler=phase2 refusals at the CLI
+surface (sha256 mismatch, missing file): the runner must refuse, never fall
+back to the invoking binary.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.test_runner.test_executor_parsing.{_tp_get_temp_dir}
+
+val WRONG_SHA: text = "abababababababababababababababababababababababababababababababab"
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY")
+    if b != "":
+        return b
+    "bin/simple"
+
+fn new_root() -> text:
+    secure_temp_dir(_tp_get_temp_dir(), "runner-exec-").unwrap().replace("\\", "/")
+
+fn write_green(root: text) -> text:
+    val path = root + "/two_green_spec.spl"
+    file_write(path, "use std.spec\ndescribe \"green\":\n    it \"adds\":\n        expect(1 + 1).to_equal(2)\n    it \"multiplies\":\n        expect(6 * 7).to_equal(42)\n")
+    path
+
+fn write_red(root: text) -> text:
+    val path = root + "/one_red_spec.spl"
+    file_write(path, "use std.spec\ndescribe \"red\":\n    it \"holds\":\n        expect(1).to_equal(1)\n    it \"breaks\":\n        expect(1).to_equal(2)\n")
+    path
+
+fn run_test(args: [text], env_pairs: [text]) -> (text, i64):
+    var argv: [text] = env_pairs
+    argv.push(real_binary())
+    argv.push("test")
+    argv.push("--no-session-daemon")
+    for a in args:
+        argv.push(a)
+    val (out, err, code) = process_run_bounded("env", argv, 300000, 4194304)
+    (out + err, code)
+
+describe "runner child execution":
+    it "reports a green child spec with exit 0":
+        val (report, code) = run_test([write_green(new_root())], [])
+        expect(code).to_equal(0)
+        expect(report).to_contain("Results: 2 total, 2 passed, 0 failed")
+
+    it "reports a red child spec with exit 1":
+        val (report, code) = run_test([write_red(new_root())], [])
+        expect(code).to_equal(1)
+        expect(report).to_contain("1 failed")
+
+    it "counts the passing example in a red child spec":
+        val (report, code) = run_test([write_red(new_root())], [])
+        expect(report).to_contain("Results: 2 total, 1 passed, 1 failed")
+
+    it "refuses an unknown --compiler value":
+        val (report, code) = run_test(["--compiler=phase9", write_green(new_root())], [])
+        expect(code).to_equal(2)
+        expect(report).to_contain("phase9")
+
+    it "refuses --compiler=phase2 when the CLI file is missing":
+        val root = new_root()
+        val (report, code) = run_test(["--compiler=phase2", write_green(root)], ["SIMPLE_PHASE2_FULL_CLI=" + root + "/absent_cli", "SIMPLE_PHASE2_FULL_CLI_SHA256=" + WRONG_SHA])
+        expect(code != 0).to_equal(true)
+        expect(report).to_contain("does not exist")
+
+    it "refuses --compiler=phase2 on a sha256 mismatch":
+        val root = new_root()
+        val cli = root + "/fake_cli"
+        file_write(cli, "#!/bin/sh\nexit 0\n")
+        process_run_bounded("chmod", ["+x", cli], 10000, 65536)
+        val (report, code) = run_test(["--compiler=phase2", write_green(root)], ["SIMPLE_PHASE2_FULL_CLI=" + cli, "SIMPLE_PHASE2_FULL_CLI_SHA256=" + WRONG_SHA])
+        expect(code != 0).to_equal(true)
+        expect(report).to_contain("sha256 mismatch")

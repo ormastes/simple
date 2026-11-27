@@ -6,7 +6,7 @@ use cranelift_module::Module;
 
 use crate::mir::{BindingStep, MirLiteral, MirPattern, PatternBinding, VReg};
 
-use super::helpers::{call_runtime_1, call_runtime_2, call_runtime_3};
+use super::helpers::{call_runtime_1, call_runtime_2, call_runtime_3, create_string_constant};
 use super::{InstrContext, InstrResult};
 
 pub(crate) fn compile_pattern_test<M: Module>(
@@ -81,17 +81,15 @@ pub(crate) fn compile_pattern_test<M: Module>(
         },
         MirPattern::Binding(_) => builder.ins().iconst(types::I8, 1),
         MirPattern::Variant {
-            enum_name,
-            variant_name,
-            ..
+            enum_name, discriminant, ..
         } => {
             // All enums now use rt_enum_new format consistently.
             // rt_enum_discriminant extracts the discriminant.
             let disc = call_runtime_1(ctx, builder, "rt_enum_discriminant", subject_val);
             let enum_id = call_runtime_1(ctx, builder, "rt_enum_id", subject_val);
 
-            // All enums use hashed variant name discriminants consistently
-            let expected_disc = calculate_variant_discriminant(variant_name) as i64;
+            // The owning enum's declared index, fixed at MIR lowering (#6953).
+            let expected_disc = i64::from(*discriminant);
             let expected_val = builder.ins().iconst(types::I64, expected_disc);
             let disc_matches = builder
                 .ins()
@@ -168,23 +166,13 @@ pub(crate) fn compile_pattern_bind<M: Module>(
     ctx.vreg_values.insert(dest, current);
 }
 
-/// Calculate discriminant for enum variant (stub - returns hash of name)
-fn calculate_variant_discriminant(variant_name: &str) -> u32 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    variant_name.hash(&mut hasher);
-    (hasher.finish() & 0xFFFFFFFF) as u32
-}
-
 pub(crate) fn compile_enum_unit<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
     enum_name: &str,
-    variant_name: &str,
+    disc: u32,
 ) {
-    let disc = calculate_variant_discriminant(variant_name);
     let disc_val = builder.ins().iconst(types::I32, disc as i64);
     let enum_id = builder.ins().iconst(
         types::I32,
@@ -192,6 +180,7 @@ pub(crate) fn compile_enum_unit<M: Module>(
     );
     // Nil payload: tagged value 3 (TAG_SPECIAL=0b011 | SPECIAL_NIL=0)
     let nil_val = builder.ins().iconst(types::I64, 3);
+    emit_enum_name_registration(ctx, builder, enum_name, disc, enum_id, disc_val);
     let result = call_runtime_3(ctx, builder, "rt_enum_new", enum_id, disc_val, nil_val);
     ctx.vreg_values.insert(dest, result);
 }
@@ -201,16 +190,49 @@ pub(crate) fn compile_enum_with<M: Module>(
     builder: &mut FunctionBuilder,
     dest: VReg,
     enum_name: &str,
-    variant_name: &str,
+    disc: u32,
     payload: VReg,
 ) {
-    let disc = calculate_variant_discriminant(variant_name);
     let disc_val = builder.ins().iconst(types::I32, disc as i64);
     let enum_id = builder.ins().iconst(
         types::I32,
         i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)),
     );
     let payload_val = ctx.vreg_values[&payload];
+    emit_enum_name_registration(ctx, builder, enum_name, disc, enum_id, disc_val);
     let result = call_runtime_3(ctx, builder, "rt_enum_new", enum_id, disc_val, payload_val);
     ctx.vreg_values.insert(dest, result);
+}
+
+/// Emit `rt_enum_register_name(id, disc, "Enum::Variant", len, arity)` so the
+/// runtime can print user enums as `Enum::Variant` instead of an address.
+/// `disc` is the declared variant index into `enum_defs`; unknown rows emit
+/// nothing and keep the existing fallback.
+fn emit_enum_name_registration<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    enum_name: &str,
+    disc: u32,
+    enum_id: cranelift_codegen::ir::Value,
+    disc_val: cranelift_codegen::ir::Value,
+) {
+    let tail = enum_name.rsplit(['.', ':']).next().unwrap_or(enum_name);
+    let Some((variant, payload)) = ctx
+        .enum_defs
+        .get(enum_name)
+        .or_else(|| ctx.enum_defs.get(tail))
+        .and_then(|variants| variants.get(disc as usize))
+        .cloned()
+    else {
+        return;
+    };
+    let display = format!("{tail}::{variant}");
+    let arity = payload.map_or(0, |fields| fields.len() as i64);
+    let Ok((ptr, len)) = create_string_constant(ctx, builder, &display) else {
+        return;
+    };
+    let arity_val = builder.ins().iconst(types::I64, arity);
+    let func_id = super::helpers::resolve_runtime_func(ctx, "rt_enum_register_name");
+    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+    let _ = super::helpers::adapted_call(builder, func_ref, &[enum_id, disc_val, ptr, len, arity_val]);
 }

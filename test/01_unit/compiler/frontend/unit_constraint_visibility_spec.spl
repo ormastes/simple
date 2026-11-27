@@ -1,0 +1,47 @@
+# Constraint-row visibility across the flat AST bridge restore.
+# unit_scope_restore_keeping_constraints (core/unit_scope.spl) restores the
+# caller's unit scope but keeps the rows the just-parsed file registered, via
+# unit_constraint_pool_merge (core/unit_constraint.spl).
+#
+# Same-name policy (chosen + pinned here): DETERMINISTIC, the just-parsed file's
+# row wins on merge (MIR lowering of that file must see its own bounds).
+use std.spec.{describe, it, expect}
+use compiler.core.unit_constraint.{unit_constraint_pool_reset, unit_constraint_pool_save, unit_constraint_register, unit_constraint_find, unit_constraint_count, unit_constraint_min_text, unit_constraint_max_text, unit_constraint_pool_merge}
+use compiler.core.unit_scope.{unit_scope_save, unit_scope_restore_keeping_constraints}
+
+describe "unit constraint rows across the bridge restore":
+    it "makes the parsed file's rows visible, and only the units that file declared":
+        unit_constraint_pool_reset()
+        val _c = unit_constraint_register("CallerUnit", "self >= 0", 0, "0", "")
+        val snap = unit_scope_save()
+        # The bridge resets the pools for its own file, which declares only FileUnit.
+        unit_constraint_pool_reset()
+        val _f = unit_constraint_register("FileUnit", "self in 1..=10", 0, "1", "10")
+        unit_scope_restore_keeping_constraints(snap)
+        expect(unit_constraint_find("FileUnit") >= 0).to_equal(true)
+        expect(unit_constraint_min_text("FileUnit")).to_equal("1")
+        expect(unit_constraint_max_text("FileUnit")).to_equal("10")
+        expect(unit_constraint_find("CallerUnit") >= 0).to_equal(true)
+        # Nothing else leaks in: exactly the caller's row plus the file's row.
+        expect(unit_constraint_count()).to_equal(2)
+        expect(unit_constraint_find("NeverDeclared")).to_equal(-1)
+
+    it "does not add rows when the parsed file declared no units":
+        unit_constraint_pool_reset()
+        val _c = unit_constraint_register("CallerUnit", "self >= 0", 0, "0", "")
+        val snap = unit_scope_save()
+        unit_constraint_pool_reset()
+        unit_scope_restore_keeping_constraints(snap)
+        expect(unit_constraint_count()).to_equal(1)
+        expect(unit_constraint_find("CallerUnit") >= 0).to_equal(true)
+
+    it "resolves a same-name unit with different bounds deterministically":
+        unit_constraint_pool_reset()
+        val _c = unit_constraint_register("Port", "self in 1..=100", 0, "1", "100")
+        val snap = unit_scope_save()
+        unit_constraint_pool_reset()
+        val _f = unit_constraint_register("Port", "self in 1..=65535", 0, "1", "65535")
+        unit_scope_restore_keeping_constraints(snap)
+        # Deterministic: one row, the parsed file's bounds win.
+        expect(unit_constraint_count()).to_equal(1)
+        expect(unit_constraint_max_text("Port")).to_equal("65535")

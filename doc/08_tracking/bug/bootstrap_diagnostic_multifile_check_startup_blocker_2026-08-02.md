@@ -1,10 +1,10 @@
 # Bootstrap diagnostic multi-file check startup blocker
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-11 (lane boot9) — SUPERSEDED for the reported blocker: check_entry.spl ships chunked workers with per-file fallback; cached-artifact design remains future work
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** BLOCKED — unsafe to enable chunking without per-file terminal records
+**Status:** superseded for the reported blocker (triage 2026-11-11, lane boot9) — chunked workers ship with per-file fallback for exact attribution; the cached check-runner artifact + five proofs remain future work
 **Area:** bootstrap diagnostics / check entrypoint / interpreter startup
 
 ## Live evidence
@@ -128,6 +128,34 @@ found while the canonical hosted rlib at
 Using `.../target/bootstrap` would align both selectors, but a fourth build was
 not run because the mandatory three-cycle cap had been reached.
 
+## Triage 2026-11-10 (p3-boot lane)
+
+SUPERSEDED for the live symptom. The core finding — "the production
+`src/app/cli/check_entry.spl` does not execute one multi-file worker; a 12-file
+check launches 12 expensive workers" — no longer holds. Current
+`src/app/cli/check_entry.spl` on work/p3-boot-20261110:
+
+- `main()` expands targets and packs them into bounded chunks
+  (`CHECK_CHUNK_SIZE = 32`, :67; loop at :341-349).
+- `run_worker_chunk()` (:286-311) launches ONE worker for the whole chunk with
+  a scaled timeout (`CHECK_WORKER_TIMEOUT_MS + chunk.len() *
+  CHECK_CHUNK_TIMEOUT_PER_FILE_MS`, :68, :296).
+- On a chunk failure, the caller re-runs the chunk's members one file at a
+  time (:356-363) to recover exact per-file attribution and isolate a file
+  that crashed or timed out the shared worker — directly addressing this
+  record's "cannot prove which files completed" concern for the chunk path.
+
+Residual, intentionally NOT taken up in this lane: the larger "one cached
+diagnostic-only check-runner artifact with append-only per-file terminal
+records" design (this doc's "Safe stronger design") plus its five required
+proofs. That is a feature-sized build with heavy native verification, and the
+doc itself blesses the slow-but-correct default until the proofs exist; the
+chunked middle path now shipped covers the reported production blocker. The
+cached-selector tail of this doc lives in the Rust seed
+(`src/compiler_rust/compiler/src/linker/native_binary/options.rs`,
+`bootstrap/deps` authority search) — agent-10's area, needs a seed rebuild to
+verify.
+
 ## Static selector resolution
 
 Hosted runtime archive and rlib discovery now share one normalized authority
@@ -137,3 +165,19 @@ and its `deps` without producing duplicate nested-bootstrap candidates. Exact
 tests cover both accepted path forms and fail closed when neither authority is
 present. No additional checker build was run after the three-cycle cap.
 
+
+## Triage 2026-11-11 (lane boot9, work/p3-boot9-20261111)
+
+SUPERSEDED for the reported blocker — re-confirmed in
+`src/app/cli/check_entry.spl`: `CHECK_CHUNK_SIZE = 32` (:67),
+`run_worker_chunk()` (:279) launches one worker per chunk with a scaled
+timeout, and on chunk failure the members re-run one-file-per-worker
+(:355-363) for exact per-file attribution. The record's core finding ("a
+12-file public check launches 12 expensive workers; no batching speedup")
+no longer holds in the production entrypoint.
+
+Residual, intentionally not taken up: the "cached diagnostic-only
+check-runner artifact with append-only per-file terminal records" design
+and its five required proofs remain future work (feature-sized, needs
+heavy native verification). The Rust-seed runtime-selector tail of this
+doc was already resolved per the in-doc "Static selector resolution" note.

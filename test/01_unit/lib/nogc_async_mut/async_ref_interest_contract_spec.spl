@@ -1,0 +1,75 @@
+# @req REQ-ASYNC-REF-001
+# A malformed token must not consume a valid ring reservation's AsyncRef interest slot.
+use std.spec.{describe, it, expect, fail}
+use std.spec.step
+use std.nogc_async_mut.concurrent.lockless_map_i64.{LocklessMapI64}
+use std.nogc_async_mut.async_ring.async_ref.{AsyncRefError, AsyncRefI64}
+use std.nogc_async_mut.async_ring.simple_ring.{SimpleRing, RingCancelOutcome}
+use std.common.contracts.execution.simple_ring_async_v1.{
+    RingToken, RingGeneration, TaskPollResult
+}
+
+fn interest_contract_map() -> LocklessMapI64:
+    unsafe(capabilities: [ffi]):
+        match LocklessMapI64.create(4, 4, 4, 1):
+            case Ok(map): map
+            case Err(error): fail("interest contract map creation failed: {error}")
+
+fn close_interest_contract_map(map: LocklessMapI64):
+    unsafe(capabilities: [ffi]): map.close_quiescent()
+
+fn expect_invalid_interest_token(reference: AsyncRefI64, token: RingToken):
+    unsafe(capabilities: [ffi]):
+        match reference.subscribe(token):
+            case Err(AsyncRefError.InvalidToken): ()
+            case Err(error): fail("malformed token returned the wrong error: {error}")
+            case Ok(_): fail("malformed token consumed an AsyncRef interest")
+
+describe "AsyncRefI64 interest token contract":
+    it "should reject a zero ring id without consuming a live reservation":
+        step("Reject malformed tokens before registering an interest")
+        unsafe(capabilities: [ffi]):
+            val map = interest_contract_map()
+            val reference = map.request(41, 4101).unwrap()
+            val ring = SimpleRing<i64, i64>.create(951u64, 952u64, 1).unwrap()
+            val reservation = ring.reserve(952u64, 4101u64).unwrap()
+            val malformed = RingToken(ring_id: 0u64, slot: reservation.token.slot,
+                generation: reservation.token.generation)
+            expect_invalid_interest_token(reference, malformed)
+            val subscription = reference.subscribe(reservation.token).unwrap()
+            match subscription.poll():
+                case TaskPollResult.Pending(token):
+                    expect(token.ring_id).to_equal(reservation.token.ring_id)
+                    expect(token.slot).to_equal(reservation.token.slot)
+                    expect(token.generation.value).to_equal(reservation.token.generation.value)
+                case _: fail("valid reservation lost its subscription after malformed input")
+            match ring.cancel(952u64, reservation.token):
+                case RingCancelOutcome.CancelledBeforeCommit(token):
+                    expect(token.generation.value).to_equal(reservation.token.generation.value)
+                case _: fail("reserved unit-test token did not cancel before commit")
+            expect(subscription.cancel_interest().unwrap()).to_equal(true)
+            close_interest_contract_map(map)
+
+    it "should reject a zero generation without consuming a live reservation":
+        step("Reject malformed tokens before registering an interest")
+        unsafe(capabilities: [ffi]):
+            val map = interest_contract_map()
+            val reference = map.request(42, 4202).unwrap()
+            val ring = SimpleRing<i64, i64>.create(953u64, 954u64, 1).unwrap()
+            val reservation = ring.reserve(954u64, 4202u64).unwrap()
+            val malformed = RingToken(ring_id: reservation.token.ring_id,
+                slot: reservation.token.slot, generation: RingGeneration(value: 0u64))
+            expect_invalid_interest_token(reference, malformed)
+            val subscription = reference.subscribe(reservation.token).unwrap()
+            match subscription.poll():
+                case TaskPollResult.Pending(token):
+                    expect(token.ring_id).to_equal(reservation.token.ring_id)
+                    expect(token.slot).to_equal(reservation.token.slot)
+                    expect(token.generation.value).to_equal(reservation.token.generation.value)
+                case _: fail("valid reservation lost its subscription after malformed input")
+            match ring.cancel(954u64, reservation.token):
+                case RingCancelOutcome.CancelledBeforeCommit(token):
+                    expect(token.generation.value).to_equal(reservation.token.generation.value)
+                case _: fail("reserved unit-test token did not cancel before commit")
+            expect(subscription.cancel_interest().unwrap()).to_equal(true)
+            close_interest_contract_map(map)

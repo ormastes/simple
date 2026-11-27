@@ -15,3 +15,5 @@ U+0000..U+001F characters, preserve UTF-8 and existing escapes, and execute the
 actual serializer plus a JSON decoder with independent golden byte assertions.
 Native serializer execution is currently blocked by its existing MIR dependency
 lowering failures. No source repair or end-to-end parity is claimed here.
+
+**Revalidated 2026-11-02: still plausible because OPEN, source-confirmed; no repair in the runtime join change; no merged fix commit with a passing regression is cited in this doc.**

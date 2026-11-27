@@ -1,19 +1,26 @@
 """Strict command options. Validation finishes before any input capture."""
 
 use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.common.traceability.profile_v1.{TraceProfile, trace_profile_parse_v1}
+
+# A command-line switch: absent (`Unset`) or given (`Set`).
+pub enum TraceCliFlagV1:
+    Unset
+    Set
 
 pub struct TraceCliOptionsV1:
     scope: text = "all"
     paths: [text] = []
     progress: text = "summary"
-    quiet: bool = false
-    verbose: bool = false
-    help: bool = false
+    profile: TraceProfile = TraceProfile.Worktree
+    quiet: TraceCliFlagV1 = TraceCliFlagV1.Unset
+    verbose: TraceCliFlagV1 = TraceCliFlagV1.Unset
+    help: TraceCliFlagV1 = TraceCliFlagV1.Unset
 
 fn trace_cli_option_issue_v1(option: text, reason: text) -> text:
     "traceability: " + option + ": " + reason + "; structured output is SDN"
 
-pub fn trace_cli_options_validate_v1(options: TraceCliOptionsV1) -> Result<bool, text>:
+pub fn trace_cli_options_validate_v1(options: TraceCliOptionsV1) -> Result<TraceCliOptionsV1, text>:
     if options.scope != "all" and options.scope != "src" and options.scope != "spec" and options.scope != "doc":
         return Err("unsupported structural scope")
     if options.progress != "summary" and options.progress != "count" and options.progress != "dot" and options.progress != "none":
@@ -30,7 +37,7 @@ pub fn trace_cli_options_validate_v1(options: TraceCliOptionsV1) -> Result<bool,
         if path.len() > 65536 - bytes:
             return Err("input selector byte budget exceeded")
         bytes = bytes + path.len()
-    Ok(true)
+    Ok(options)
 
 pub fn trace_cli_options_parse_v1(args: [text]) -> Result<TraceCliOptionsV1, text>:
     if args.len() > 4096:
@@ -55,11 +62,11 @@ pub fn trace_cli_options_parse_v1(args: [text]) -> Result<TraceCliOptionsV1, tex
         elif arg == "--":
             positional = true
         elif arg == "--help" or arg == "-h":
-            options.help = true
+            options.help = TraceCliFlagV1.Set
         elif arg == "--quiet":
-            options.quiet = true
+            options.quiet = TraceCliFlagV1.Set
         elif arg == "--verbose":
-            options.verbose = true
+            options.verbose = TraceCliFlagV1.Set
         elif arg == "--no-progress":
             options.progress = "none"
         elif arg == "--dots":
@@ -76,9 +83,9 @@ pub fn trace_cli_options_parse_v1(args: [text]) -> Result<TraceCliOptionsV1, tex
             var value = ""
             if equal >= 0:
                 name = arg.substring(0, equal)
-                value = arg.substring(equal + 1, arg.len())
+                value = arg.substring(equal + 1, arg.byte_len())
             else:
-                if name != "--scope" and name != "--format" and name != "--progress" and name != "--log-mode" and name != "--surface":
+                if name != "--scope" and name != "--format" and name != "--progress" and name != "--profile" and name != "--log-mode" and name != "--surface":
                     return Err(trace_cli_option_issue_v1(name, "unknown option"))
                 if index + 1 >= args.len() or args[index + 1].starts_with("-"):
                     return Err(trace_cli_option_issue_v1(name, "missing value"))
@@ -95,6 +102,10 @@ pub fn trace_cli_options_parse_v1(args: [text]) -> Result<TraceCliOptionsV1, tex
                 if value != "summary" and value != "count" and value != "dot" and value != "none":
                     return Err(trace_cli_option_issue_v1(name, "unsupported progress: " + value))
                 options.progress = value
+            elif name == "--profile":
+                match trace_profile_parse_v1(value):
+                    case Ok(profile): options.profile = profile
+                    case Err(reason): return Err(trace_cli_option_issue_v1(name, reason))
             elif name == "--log-mode":
                 if value != "human" and value != "llm":
                     return Err(trace_cli_option_issue_v1(name, "unsupported log mode: " + value))
@@ -108,7 +119,7 @@ pub fn trace_cli_options_parse_v1(args: [text]) -> Result<TraceCliOptionsV1, tex
         else:
             options.paths.push(arg)
         index = index + 1
-    if options.quiet:
+    if options.quiet == TraceCliFlagV1.Set:
         options.progress = "none"
     trace_cli_options_validate_v1(options)?
     Ok(options)
@@ -118,6 +129,8 @@ pub fn trace_cli_help_v1() -> text:
     "\nChecks source/test/doc traceability. Structured stdout is SDN.\n\n" +
     "  --scope=<name>     all (default), src, spec, doc\n" +
     "  --format=sdn       SDN (default)\n" +
+    "  --profile=<name>   worktree (default), editor, commit, push, remote, audit, ci, release;\n" +
+    "                     only worktree is certified here, others exit 2 (incomplete)\n" +
     "  --progress=<mode>  summary, count, dot, none; stderr only\n" +
     "  --quiet            Suppress progress; retain the SDN verdict\n" +
     "  --verbose          Show structural progress on stderr\n" +
@@ -125,5 +138,3 @@ pub fn trace_cli_help_v1() -> text:
     "  --surface=stdout   SDN stdout\n" +
     "  --                  End options\n" +
     "  -h, --help          Show this help\n"
-
-export trace_cli_options_validate_v1, TraceCliOptionsV1, trace_cli_options_parse_v1, trace_cli_help_v1

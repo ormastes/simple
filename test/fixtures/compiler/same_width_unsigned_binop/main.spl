@@ -1,0 +1,148 @@
+# REQ-MIR-SAME-WIDTH-UNSIGNED-ARITHMETIC
+# UNRUN: compile and execute with a current-source admitted producer on LLVM
+# and Cranelift. The completed operation widens to i64 before returning, so a
+# narrow destination store cannot hide a wrongly widened arithmetic result.
+fn add8(a: u8, b: u8) -> i64: (a + b) as i64
+fn sub8(a: u8, b: u8) -> i64: (a - b) as i64
+fn mul8(a: u8, b: u8) -> i64: (a * b) as i64
+fn add16(a: u16, b: u16) -> i64: (a + b) as i64
+fn sub16(a: u16, b: u16) -> i64: (a - b) as i64
+fn mul16(a: u16, b: u16) -> i64: (a * b) as i64
+fn add32(a: u32, b: u32) -> i64: (a + b) as i64
+fn sub32(a: u32, b: u32) -> i64: (a - b) as i64
+fn mul32(a: u32, b: u32) -> i64: (a * b) as i64
+fn mixed8(a: u8, b: i64) -> i64: a * b
+
+# Comparison consumers must widen narrow unsigned results, never truncate
+# their i64 bounds or negative signed peers. Exercise both operand orders.
+fn less8(a: u8, b: u8, bound: i64) -> bool: a + b < bound
+fn less_reverse8(bound: i64, a: u8, b: u8) -> bool: bound < a + b
+fn equal8(a: u8, b: u8, bound: i64) -> bool: a + b == bound
+fn not_equal8(a: u8, b: u8, bound: i64) -> bool: a + b != bound
+fn less_equal8(a: u8, b: u8, bound: i64) -> bool: a + b <= bound
+fn greater8(a: u8, b: u8, bound: i64) -> bool: a + b > bound
+fn greater_equal8(a: u8, b: u8, bound: i64) -> bool: a + b >= bound
+fn less16(a: u16, b: u16, bound: i64) -> bool: a + b < bound
+fn less32(a: u32, b: u32, bound: i64) -> bool: a + b < bound
+fn chain8(a: u8, b: u8, c: u8) -> i64: ((a + b) + c) as i64
+fn implicit_return8(a: u8, b: u8) -> i64: a + b
+fn implicit_let8(a: u8, b: u8) -> i64:
+    val wide: i64 = a + b
+    wide
+fn bound_after_binding(a: u8, b: u8, bound: i64) -> bool:
+    val wide: i64 = a + b
+    wide < bound
+fn equal_after_binding(a: u8, b: u8, bound: i64) -> bool:
+    val wide: i64 = a + b
+    wide == bound
+fn is8(a: u8, b: u8, bound: i64) -> bool: (a + b) is bound
+fn is_not8(a: u8, b: u8, bound: i64) -> bool: (a + b) is not bound
+fn is_reverse8(bound: i64, a: u8, b: u8) -> bool: bound is (a + b)
+fn is_not_reverse8(bound: i64, a: u8, b: u8) -> bool: bound is not (a + b)
+fn accept_wide(value: i64) -> i64: value
+fn implicit_call8(a: u8, b: u8) -> i64: accept_wide(a + b)
+struct WideField:
+    value: i64
+fn implicit_field8(a: u8, b: u8) -> i64:
+    val wide = WideField(value: a + b)
+    wide.value
+fn implicit_index8(a: u8, b: u8) -> i64:
+    var values: [i64] = []
+    var i: i64 = 0
+    while i < 256:
+        values.push(i)
+        i = i + 1
+    values[a + b]
+fn implicit_text8(a: u8, b: u8) -> text: "{a + b}"
+
+fn mixed_div8(a: u8, b: u8, divisor: i64) -> i64: (a + b) / divisor
+fn mixed_rem8(a: u8, b: u8, divisor: i64) -> i64: (a + b) % divisor
+fn mixed_reverse_div8(dividend: i64, a: u8, b: u8) -> i64: dividend / (a + b)
+fn mixed_reverse_rem8(dividend: i64, a: u8, b: u8) -> i64: dividend % (a + b)
+fn signed_call(value: i8) -> i64: accept_wide(value)
+fn branch8(condition: bool, a: u8, b: u8) -> i64:
+    var value: i64 = -1
+    if condition:
+        value = a + b
+    value
+
+var global_wide: i64 = 0
+fn implicit_global8(a: u8, b: u8) -> i64:
+    global_wide = a + b
+    global_wide
+
+fn implicit_neg8(a: u8, b: u8) -> i64: -(a + b)
+fn implicit_bitnot8(a: u8, b: u8) -> i64: ~(a + b)
+fn implicit_match8(a: u8, b: u8) -> i64:
+    match a + b:
+        case 200: 1
+        case _: 0
+
+fn signed_neg(value: i64) -> i64: -value
+fn signed_bitnot(value: i64) -> i64: ~value
+
+fn unsigned_range_bound(a: u8, b: u8) -> i64:
+    var count: i64 = 0
+    for i in 0..(a + b):
+        count = count + 1
+    count
+
+fn main() -> i64:
+    if add8(200, 60) != 4: return 1
+    if sub8(60, 200) != 116: return 2
+    if mul8(200, 60) != 224: return 3
+    if add16(60000, 10000) != 4464: return 4
+    if sub16(10000, 60000) != 15536: return 5
+    if mul16(60000, 10000) != 17920: return 6
+    if add32(4000000000, 500000000) != 205032704: return 7
+    if sub32(500000000, 4000000000) != 794967296: return 8
+    if mul32(4000000000, 500000000) != 1321730048: return 9
+    if mixed8(200, 300) != 60000: return 10
+    if not less8(100, 100, 256): return 11
+    if less_reverse8(256, 100, 100): return 12
+    if equal8(200, 56, 256): return 13
+    if not not_equal8(200, 56, 256): return 14
+    if less8(100, 100, -1): return 15
+    if not less_reverse8(-1, 100, 100): return 16
+    if not less_equal8(100, 100, 200): return 17
+    if not greater8(100, 100, -1): return 18
+    if not greater_equal8(100, 100, 200): return 19
+    if not less16(30000, 30000, 65536): return 20
+    if not less32(2000000000, 2000000000, 4294967296): return 21
+    if chain8(200, 60, 255) != 3: return 22
+    if implicit_return8(100, 100) != 200: return 23
+    if implicit_let8(100, 100) != 200: return 24
+    if implicit_call8(100, 100) != 200: return 25
+    if implicit_field8(100, 100) != 200: return 26
+    if implicit_index8(100, 100) != 200: return 27
+    if implicit_text8(100, 100) != "200": return 28
+    if mixed_div8(100, 100, -2) != -100: return 29
+    if mixed_rem8(100, 100, -3) != 2: return 30
+    if mixed_reverse_div8(-400, 100, 100) != -2: return 31
+    if mixed_reverse_rem8(-401, 100, 100) != -1: return 32
+    if signed_call(-1) != -1: return 33
+    if branch8(true, 100, 100) != 200: return 34
+    if branch8(false, 100, 100) != -1: return 35
+    if implicit_global8(100, 100) != 200: return 36
+    if implicit_neg8(100, 100) != 56: return 37
+    if implicit_bitnot8(100, 100) != 55: return 38
+    if implicit_match8(100, 100) != 1: return 39
+    if signed_neg(200) != -200: return 40
+    if signed_bitnot(200) != -201: return 41
+    if unsigned_range_bound(100, 100) != 200: return 42
+    if not bound_after_binding(100, 100, 256): return 43
+    if bound_after_binding(100, 100, -1): return 44
+    if equal_after_binding(100, 100, 456): return 45
+    if not equal_after_binding(100, 100, 200): return 46
+    if is8(100, 100, 456): return 47
+    if not is_not8(100, 100, 456): return 48
+    if is_reverse8(456, 100, 100): return 49
+    if not is_not_reverse8(456, 100, 100): return 50
+    if not is8(100, 100, 200): return 51
+    if is_not8(100, 100, 200): return 52
+    if not is_reverse8(200, 100, 100): return 53
+    if is_not_reverse8(200, 100, 100): return 54
+    if is8(100, 100, -56): return 55
+    if not is_not_reverse8(-56, 100, 100): return 56
+    print "PASS same-width unsigned arithmetic 56 checks"
+    0

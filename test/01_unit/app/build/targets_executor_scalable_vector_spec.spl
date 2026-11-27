@@ -1,0 +1,74 @@
+"""
+## Purpose and audience
+I prove SIMD tier selection fails closed for scalable vectors: a target whose
+`cpu_tier:` requests SVE, SVE2 or RVV is refused with a named diagnostic
+(native-build has no SVE/RVV codegen), never built at a silent baseline, and the
+target cache namespace is split by SIMD class so tiers never share entries.
+
+## Operator workflow
+Run `bin/simple test test/01_unit/app/build/targets_executor_scalable_vector_spec.spl`.
+
+## Compatibility and limitations
+Cross-target checks only: no SVE/RVV hardware is available, so nothing here
+executes vector code. armv9-a classes as SVE2 (architecturally mandatory).
+
+## Verification guidance and troubleshooting
+`target-error: scalable-vector-unsupported: <name>: <tier> (<class>)` names the
+refused tier and its SIMD class (`aarch64_sve`, `aarch64_sve2`, `riscv64_rvv`).
+"""
+# @manual_section: scalable vector tier fail-closed
+# @req REQ-BUILD-GROUP-018 SVE/SVE2/RVV tiers are refused with a named diagnostic
+# @req REQ-BUILD-GROUP-019 the target cache namespace distinguishes SIMD classes
+
+use app.build.targets.build_targets.{parse_targets_text}
+use app.build.targets.target_executor.{target_action, target_action_args, target_action_error, target_cache_dir}
+use std.common.cpu_tier.tier_id.{tier_spec_simd_class, simd_class_is_scalable}
+use std.spec.step
+
+fn _ts(extra: text):
+    parse_targets_text("target t:\n    kind: binary\n    entry: src/app/configc/main.spl\n" + extra)
+
+describe "scalable vector tier selection":
+    it "classes tier specs into distinct SIMD classes":
+        # @req REQ-BUILD-GROUP-019
+        expect(tier_spec_simd_class("armv8.2-a")).to_equal("aarch64_neon")
+        expect(tier_spec_simd_class("armv8.2-a+sve")).to_equal("aarch64_sve")
+        expect(tier_spec_simd_class("armv8.2-a+sve+sve2")).to_equal("aarch64_sve2")
+        expect(tier_spec_simd_class("armv9-a")).to_equal("aarch64_sve2")
+        expect(tier_spec_simd_class("rv64gc")).to_equal("scalar")
+        expect(tier_spec_simd_class("rv64gcv")).to_equal("riscv64_rvv")
+        expect(tier_spec_simd_class("rv64gc+v")).to_equal("riscv64_rvv")
+        expect(tier_spec_simd_class("x86-64-v3")).to_equal("x86_64_avx2")
+        expect(tier_spec_simd_class("x86-64-v4")).to_equal("x86_64_avx512")
+        step("Given no base level, no arch is guessed")
+        expect(tier_spec_simd_class("+sve")).to_equal("")
+        expect(tier_spec_simd_class("")).to_equal("")
+        expect(simd_class_is_scalable("aarch64_neon")).to_equal(false)
+        expect(simd_class_is_scalable("riscv64_rvv")).to_equal(true)
+
+    it "refuses SVE, SVE2 and RVV tiers with a named diagnostic":
+        # @req REQ-BUILD-GROUP-018
+        for pair in [("armv8.2-a+sve", "aarch64_sve"), ("armv9-a", "aarch64_sve2"), ("armv9-a+sve", "aarch64_sve2"), ("rv64gcv", "riscv64_rvv")]:
+            val ts = _ts("    cpu_tier: " + pair.0 + "\n")
+            expect(target_action_error(ts.targets[0])).to_equal(
+                "target-error: scalable-vector-unsupported: t: " + pair.0 + " (" + pair.1 + "): native-build has no SVE/RVV codegen; drop cpu_tier for a scalar build")
+            val args = target_action_args("/r", target_action("/r", ts, ts.targets[0]))
+            expect(args.contains("--cpu")).to_equal(false)
+
+    it "keeps the fixed-vector-length refusal ahead of the scalable one":
+        # @req REQ-BUILD-GROUP-018
+        val ts = _ts("    cpu_tier: armv9-a+sve256\n")
+        expect(target_action_error(ts.targets[0])).to_start_with("target-error: fixed-vector-length")
+
+    it "splits the cache namespace by SIMD class":
+        # @req REQ-BUILD-GROUP-019
+        val plain = _ts("")
+        expect(target_cache_dir("/r", plain.targets[0])).to_equal("/r/build/target_cache/t")
+        val neon = _ts("    cpu_tier: armv8.2-a\n")
+        val sve = _ts("    cpu_tier: armv8.2-a+sve\n")
+        val sve2 = _ts("    cpu_tier: armv9-a\n")
+        val rvv = _ts("    cpu_tier: rv64gcv\n")
+        expect(target_cache_dir("/r", neon.targets[0])).to_equal("/r/build/target_cache/t/simd-aarch64_neon")
+        expect(target_cache_dir("/r", sve.targets[0])).to_equal("/r/build/target_cache/t/simd-aarch64_sve")
+        expect(target_cache_dir("/r", sve2.targets[0])).to_equal("/r/build/target_cache/t/simd-aarch64_sve2")
+        expect(target_cache_dir("/r", rvv.targets[0])).to_equal("/r/build/target_cache/t/simd-riscv64_rvv")

@@ -25,7 +25,7 @@
 # ponytail: substring/anchor matching only. Upgrade to the std regex engine
 # when a real toolchain needs alternation that `detect` rows cannot express.
 
-use std.io_runtime.{env_get, file_read, file_exists, dir_list}
+use std.io_runtime.{env_get, file_read, file_exists, dir_list_or_empty}
 use std.database.core.{parse_sdn_table}
 use .main_lazy_telemetry.{tok_record}
 
@@ -48,7 +48,7 @@ fn log_opt_match(pattern: text, line: text) -> bool:
     if pattern == "":
         return false
     if pattern.starts_with("^"):
-        return line.starts_with(pattern.substring(1, pattern.len()))
+        return line.starts_with(pattern.substring(1, pattern.byte_len()))
     line.contains(pattern)
 
 fn log_opt_any(patterns: [text], line: text) -> bool:
@@ -75,17 +75,17 @@ fn log_opt_parse(name: text, content: text) -> LogOptPlugin?:
                     keep.push(pattern)
                 elif kind == "drop":
                     drop.push(pattern)
-        nil:
-            return nil
+        None:
+            return None
     if detect.len() == 0:
-        return nil
+        return None
     LogOptPlugin(name: name, detect: detect, keep: keep, drop: drop)
 
 fn _log_opt_basename(entry: text) -> text:
     val parts = entry.split("/")
     var name = parts[parts.len() - 1]
     if name.ends_with(".sdn"):
-        return name.substring(0, name.len() - 4)
+        return name.substring(0, name.byte_len() - 4)
     name
 
 fn log_opt_load_plugins() -> [LogOptPlugin]:
@@ -93,7 +93,7 @@ fn log_opt_load_plugins() -> [LogOptPlugin]:
     val dir = log_opt_dir()
     if not file_exists(dir):
         return out
-    for entry in dir_list(dir):
+    for entry in dir_list_or_empty(dir):
         if not entry.ends_with(".sdn"):
             continue
         val path = if entry.contains("/"): entry else: dir + "/" + entry
@@ -102,7 +102,7 @@ fn log_opt_load_plugins() -> [LogOptPlugin]:
         match log_opt_parse(_log_opt_basename(entry), file_read(path)):
             Some(p):
                 out.push(p)
-            nil:
+            None:
                 pass
     out
 
@@ -116,7 +116,7 @@ fn log_opt_score(p: LogOptPlugin, lines: [text]) -> i64:
     n
 
 fn log_opt_select(plugins: [LogOptPlugin], lines: [text]) -> LogOptPlugin?:
-    var best: LogOptPlugin? = nil
+    var best: LogOptPlugin? = None
     var best_score: i64 = 0
     for p in plugins:
         val s = log_opt_score(p, lines)
@@ -168,7 +168,7 @@ fn log_opt_optimize(raw: text) -> (text, text, i64):
             var body = kept.join("\n")
             body = body + "\n[log-opt " + p.name + "] " + str(dropped) + " noise line(s) removed of " + str(lines.len())
             return (body, p.name, dropped)
-        nil:
+        None:
             pass
     (raw, "", 0)
 

@@ -415,20 +415,43 @@ fn resolve_stdlib_from_root(
     segments: &[String],
     original_path: &ModulePath,
 ) -> ResolveResult<ResolvedModule> {
-    if let Ok(resolved) = resolver.resolve_from_base(root, segments, original_path) {
-        return Ok(resolved);
-    }
-
-    for subdir in STDLIB_FAMILY_DIRS {
-        let candidate = root.join(subdir);
-        if p_is_dir(&candidate) {
-            if let Ok(resolved) = resolver.resolve_from_base(&candidate, segments, original_path) {
+    // A "package is its own module" match (`a.pkg.pkg` -> `a/pkg/__init__.spl`,
+    // see `resolve_module_in_dir`) is only a fallback: a later family that has
+    // the real `a/pkg/pkg.spl` must win. Otherwise an importer outside every
+    // family (native-project entry under `test/`) bound
+    // `std.mcp_sdk.transport.transport` to `nogc_async_mut/.../transport/__init__.spl`
+    // instead of `nogc_sync_mut/.../transport/transport.spl`, so no trait
+    // declaration was bound for it.
+    // doc/08_tracking/bug/native_user_class_imported_trait_vtable_missing_2026-11-15.md
+    let mut deferred: Option<ResolvedModule> = None;
+    let bases = std::iter::once(root.to_path_buf())
+        .chain(STDLIB_FAMILY_DIRS.iter().map(|subdir| root.join(subdir)).filter(|c| p_is_dir(c)));
+    for base in bases {
+        if let Ok(resolved) = resolver.resolve_from_base(&base, segments, original_path) {
+            if !is_self_package_match(&resolved, segments) {
                 return Ok(resolved);
             }
+            deferred.get_or_insert(resolved);
         }
     }
 
-    Err(CompileError::semantic("stdlib module not found".to_string()))
+    deferred.ok_or_else(|| CompileError::semantic("stdlib module not found".to_string()))
+}
+
+/// `segments = [.., pkg, pkg]` resolved to `pkg/__init__.spl` (the package
+/// itself), not to a child package `pkg/pkg/__init__.spl`.
+fn is_self_package_match(resolved: &ResolvedModule, segments: &[String]) -> bool {
+    let n = segments.len();
+    if !resolved.is_directory || n < 2 || segments[n - 1] != segments[n - 2] {
+        return false;
+    }
+    let module_name = |dir: Option<&Path>| {
+        dir.and_then(|d| d.file_name()).and_then(|s| s.to_str())
+            .map(|name| name.split_once('.').map_or(name, |(_, rest)| rest).to_string())
+    };
+    let package_dir = resolved.path.parent();
+    module_name(package_dir).as_deref() == Some(segments[n - 1].as_str())
+        && module_name(package_dir.and_then(Path::parent)).as_deref() != Some(segments[n - 1].as_str())
 }
 
 fn resolve_stdlib_namespace_from_root(root: &Path, original_path: &ModulePath) -> ResolveResult<ResolvedModule> {
@@ -682,7 +705,23 @@ impl ModuleResolver {
         // from "the edit did not matter" — measurements taken that way are
         // silently about a different tree. Skip straight to the project-rooted
         // stdlib strategy below.
-        let anchored_stdlib = segments[0] == "std" || segments[0] == "std_lib";
+        // A bare reserved root (`use lib.{X}`, one segment) is the stdlib root
+        // itself. The `lib.*` branch above needs two segments, so a bare `lib`
+        // used to fall through to the importer's directory and load a sibling
+        // `lib.spl`'s TYPES -- which the interpreter and the flattening loader
+        // never load, so JIT `run` died at runtime ("Function 'Acc.add' not
+        // found"). When such a sibling exists, say so at compile time.
+        let bare_reserved_root = segments.len() == 1 && matches!(segments[0].as_str(), "std" | "std_lib" | "lib");
+        let anchored_stdlib = segments[0] == "std" || segments[0] == "std_lib" || bare_reserved_root;
+        if bare_reserved_root {
+            let root = segments[0].as_str();
+            if p_is_file(&base_dir.join(format!("{root}.spl"))) || p_is_file(&base_dir.join(root).join("__init__.spl")) {
+                return Err(CompileError::semantic(format!(
+                    "cannot resolve import: `{root}` is a reserved stdlib root, so `use {root}...` never imports the sibling module `{root}` beside {}; rename that module",
+                    from_file.display()
+                )));
+            }
+        }
         let base_result = if anchored_stdlib {
             Err(CompileError::semantic(format!(
                 "stdlib import `{}` resolves from the project stdlib roots only",
@@ -752,7 +791,11 @@ impl ModuleResolver {
                         segments
                     };
 
-                    let mut stdlib_roots = vec![self.project_root.join("src/lib"), self.project_root.join("src/std")];
+                    let mut stdlib_roots = vec![
+                        self.project_root.join("src/lib"),
+                        self.project_root.join("src/std"),
+                        self.project_root.join("src/compiler_rust/lib/std/src"),
+                    ];
                     if let Some(ref stdlib_root) = self.stdlib_root {
                         stdlib_roots.push(stdlib_root.clone());
                     }
@@ -834,6 +877,21 @@ impl ModuleResolver {
                     }
                 }
 
+                // Strategy 4b: a single-segment name ("use trust_cfg.{...}") may be
+                // a module file directly under a source root, e.g. a build-generated
+                // module passed as `--source <gendir>`. Native discovery already
+                // finds it there (discovery.rs source-root fallback); resolve it the
+                // same way. Runs after the importer-directory attempt, so siblings win.
+                // Only the EXTRA roots (--source dirs): bare `use app`/`use compiler`
+                // must not start binding to top-level packages under the main src/.
+                if segments[0] != "crate" && segments.len() == 1 {
+                    for root in &self.extra_source_roots {
+                        if let Ok(resolved) = self.resolve_from_base(root, &segments[..], path) {
+                            return Ok(resolved);
+                        }
+                    }
+                }
+
                 // Strategy 5: Try project_root for top-level dirs not under source_root
                 // e.g., "use examples.browser.*" → project_root/examples/browser/
                 if segments[0] != "crate" && segments.len() > 1 {
@@ -842,6 +900,28 @@ impl ModuleResolver {
                         if let Ok(resolved) = self.resolve_from_base(&proj_dir, &segments[1..], path) {
                             return Ok(resolved);
                         }
+                    }
+                }
+
+                // Strategy 6: the detected project root may be a NESTED
+                // directory that merely contains a `src` folder (the test tree
+                // mirrors `src/lib/<x>/src` as `test/01_unit/lib/<x>/src`, so a
+                // spec below it gets that directory as its root). A top-level
+                // namespace such as `test.fixtures.*` then lives in an
+                // ENCLOSING root. Last resort only, so no import that resolves
+                // today can change.
+                if segments[0] != "crate" && segments.len() > 1 {
+                    let mut outer = self.project_root.parent();
+                    while let Some(candidate) = outer {
+                        if p_is_dir(&candidate.join("src")) {
+                            let outer_dir = candidate.join(&segments[0]);
+                            if p_is_dir(&outer_dir) {
+                                if let Ok(resolved) = self.resolve_from_base(&outer_dir, &segments[1..], path) {
+                                    return Ok(resolved);
+                                }
+                            }
+                        }
+                        outer = candidate.parent();
                     }
                 }
 

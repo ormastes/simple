@@ -171,3 +171,32 @@ describe "agent_routing.shs — subagent routing injection (parity: Agent/Task m
         val (out, code) = selftest("agent_routing.shs")
         assert_equal(code, 0)
         assert_contains(out, "PASS")
+
+describe "hint hooks — Windows paths, short chains, simple-mcp launcher gate":
+    it "decodes a JSON-escaped Windows path so a large file is still hinted":
+        # Wire format doubles backslashes (C:\dev\x). Needs cygpath (Git Bash/MSYS).
+        val code = "command -v cygpath >/dev/null 2>&1 || { echo SKIP; exit 0; }; p=$(cygpath -w \"$PWD/src/app/mcp/main_lazy_ctx_tools.spl\"); d=$(printf '%s' \"$p\" | sed 's/[\\]/&&/g'); printf '{\"tool_input\":{\"file_path\":\"%s\"}}' \"$d\" | sh .claude/hooks/read_analysis_hint.shs"
+        val (out, _err, rc) = process_run("sh", ["-c", code])
+        assert_equal(rc, 0)
+        if out.trim() != "SKIP":
+            assert_contains(out, "simple_ctx_execute_file")
+
+    it "stays silent for a short git/ls/cd chain":
+        val (out, code) = hook_run("bash_output_hint.shs", "{\"tool_input\":{\"command\":\"git status; ls; cd /w\"}}")
+        assert_equal(code, 0)
+        assert_equal(out.trim(), "")
+
+    it "does not split a quoted printf with a literal backslash-n into statements":
+        val (out, code) = hook_run("bash_output_hint.shs", "{\"tool_input\":{\"command\":\"printf \\\"a\\nb\\nc\\\"; cat f | head -3; ls\"}}")
+        assert_equal(code, 0)
+        assert_equal(out.trim(), "")
+
+    it "hints when two or more statements are verbose and unbounded":
+        val (out, _c) = hook_run("bash_output_hint.shs", "{\"tool_input\":{\"command\":\"git diff; git log; cat f\"}}")
+        assert_contains(out, "\"additionalContext\"")
+
+    it "is silent when .mcp.json names no existing simple-mcp launcher":
+        val shell_cmd = "printf '%s' '{\"tool_input\":{\"command\":\"cat src/a.spl\"}}' | CLAUDE_PROJECT_DIR=/no/such/project sh .claude/hooks/bash_output_hint.shs"
+        val (out, _err, code) = process_run("sh", ["-c", shell_cmd])
+        assert_equal(code, 0)
+        assert_equal(out.trim(), "")

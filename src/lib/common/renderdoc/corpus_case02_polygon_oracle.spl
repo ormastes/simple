@@ -5,7 +5,7 @@ use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow, file_hash_sha256}
 use std.common.crypto.sha256.{sha256_bytes}
 use std.common.crypto.types.{bytes_to_hex}
 use common.renderdoc.final_output_pixels.{
-    FinalOutputCapture, final_output_canonical_rgba}
+    FinalOutputCapture, final_output_canonical_rgba, final_output_rgba_u8}
 
 pub val CORPUS_CASE02_FIXTURE_ID: text = "corpus-02-fractional-edges-v1"
 pub val CORPUS_CASE02_SOURCE_PATH: text =
@@ -152,7 +152,7 @@ fn _case02_channel(foreground: i64, coverage: f64) -> i64:
 
 fn case02_analytic_oracle() -> Result<Case02OracleImage, text>:
     if not file_is_regular_no_follow(CORPUS_CASE02_SOURCE_PATH) or
-        file_hash_sha256(CORPUS_CASE02_SOURCE_PATH) != CORPUS_CASE02_SOURCE_SHA256:
+        not _file_sha256_matches(CORPUS_CASE02_SOURCE_PATH, CORPUS_CASE02_SOURCE_SHA256):
         return Err("case02-pinned-source-mismatch")
     val polygon = _case02_tile_polygon()
     var rgba: [i64] = []
@@ -205,7 +205,7 @@ fn case02_analytic_oracle() -> Result<Case02OracleImage, text>:
     if (tile_interior != 17730 or bar_interior != 558 or
         exterior != 287998 or tile_edge != 629 or bar_edge != 285):
         return Err("case02-oracle-region-count-mismatch")
-    if bytes_to_hex(sha256_bytes(rgba)) != CORPUS_CASE02_RGBA_SHA256:
+    if bytes_to_hex(sha256_bytes(final_output_rgba_u8(rgba))) != CORPUS_CASE02_RGBA_SHA256:
         return Err("case02-oracle-rgba-digest-mismatch")
     Ok(Case02OracleImage(
         rgba: rgba, edge_mask: edge_mask,
@@ -213,7 +213,7 @@ fn case02_analytic_oracle() -> Result<Case02OracleImage, text>:
         bar_interior_pixels: bar_interior, exterior_pixels: exterior,
         tile_edge_pixels: tile_edge, bar_edge_pixels: bar_edge))
 
-fn case02_compare_canonical_rgba(actual: [i64]) -> Result<Case02OracleVerdict, text>:
+pub fn case02_compare_canonical_rgba(actual: [i64]) -> Result<Case02OracleVerdict, text>:
     val oracle = case02_analytic_oracle()?
     if actual.len() != oracle.rgba.len():
         return Err("case02-canonical-byte-length-mismatch")
@@ -278,3 +278,9 @@ fn case02_capture_matches_oracle(
 export Case02OracleImage, Case02OracleVerdict,
     case02_analytic_oracle, case02_compare_canonical_rgba,
     case02_capture_matches_oracle
+
+# Absent digest (missing or unreadable file) is an explicit mismatch.
+fn _file_sha256_matches(path: text, expected: text) -> bool:
+    if val digest = file_hash_sha256(path):
+        return digest == expected
+    false

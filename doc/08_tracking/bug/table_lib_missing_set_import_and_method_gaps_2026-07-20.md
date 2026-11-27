@@ -81,3 +81,34 @@ bin/release/x86_64-unknown-linux-gnu/simple test test/feature/usage/table_spec.s
 self-hosted compiler — only the Rust seed interpreter was probed, though this
 particular fix (unlike the other bugs filed this pass) does not require a
 rebuild since `table.spl` is regular interpreted library source.
+
+## Verification 2026-11-25 — STALE, all four gaps fixed; RESOLVED
+
+Verified on `release/1.0.0` (7998d6ba40d), Windows host, pinned
+`bin/simple.exe` (Rust seed v1.0.0-rc.1):
+
+```
+env SIMPLE_LIB=src bin/simple.exe run test/feature/usage/table_spec.spl
+...
+SPEC FILE VERDICT: test/feature/usage/table_spec.spl outcome=OK declared>=25
+executed=25 passed=25 failed=0 skipped=0 blocked=0 dropped=0
+```
+
+(The `test` subcommand is blocked repo-wide at this HEAD by the known
+`@representation_boundary` seed/binary inconsistency — cfd89933699 added
+decorators the pinned seed rejects — so the spec was executed via `run`, which
+loads the same spec framework and assertions without the test-runner client.)
+
+Code inspection confirms the four gaps no longer exist in
+`src/lib/nogc_sync_mut/src/table.spl`:
+
+1. `Column.unique()` (~line 184) no longer references `Set` — it uses a
+   `Dict<T, bool>` seen-map, so the missing-import gap is gone.
+2. `Table.sort_by()` (~line 404) no longer calls `indices.sorted_by(...)` — it
+   uses an in-place insertion sort with an explicit comment that `[i64]` has
+   no `sorted_by`.
+3. `group_by`/`agg` — the "supports multiple aggregations" example passes.
+4. `Column.value_counts()` (~line 194) — the "counts value occurrences"
+   example passes (one row per distinct value).
+
+Status: RESOLVED.

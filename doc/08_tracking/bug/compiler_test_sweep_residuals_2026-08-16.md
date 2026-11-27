@@ -417,3 +417,18 @@ lane cannot perform (blocked bootstrap), and the remainder (interpreter items
 1-8) each need dedicated `src/compiler/10.frontend/core/interpreter/` work
 well beyond a single triage pass. Leaving OPEN, no fix attempted here — too
 large for this lane's per-item budget as a single row.
+
+## Re-check 2026-11-25 (fleet lane p2w1-ac, Windows worktree @ origin/release/1.0.0)
+
+SKIP — still OPEN, header accurate; re-run environment-blocked. The named
+repro spec `test/01_unit/compiler_core/parser_spec.spl` cannot execute on this
+host: `bin/simple.exe test` aborts at load with `unknown decorator
+'@representation_boundary'` (the known source/binary inconsistency at
+release/1.0.0 HEAD — commit cfd89933699's 940 annotations vs the pinned Rust
+seed). The latest trustworthy count therefore remains the 2026-09-13 re-run
+(24 declared / 20 passed / 4 failed). The residual items are unchanged in
+kind: interpreter features 1-8 need `src/compiler/10.frontend/core/
+interpreter/` work, and the seed-side items (erased-receiver dispatch,
+`rt_process_run_capture`, wasm `CompileOptions`) need a seed rebuild — both
+outside this lane's budget and permissions. No assertion was weakened; no
+code change made.

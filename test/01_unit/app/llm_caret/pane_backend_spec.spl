@@ -30,7 +30,7 @@ run can be killed with tmux before rerunning.
 
 use std.spec.{step}
 
-use app.llm_caret.pane_backend.{pane_send_literal_argv, pane_send_enter_argv, Pane, PANE_FORMAT, pane_parse_line,
+use app.llm_caret.pane_backend.{pane_send_literal_argv, posix_pane_launcher_line, pane_send_enter_argv, Pane, PANE_FORMAT, pane_parse_line,
     pane_parse_lines, pane_list_argv, pane_select_argv, pane_zoom_argv,
     pane_kill_argv, pane_backend_name, pane_list, pane_select,
     pane_zoom, pane_spawn, pane_kill, pane_send, pane_capture}
@@ -215,7 +215,17 @@ describe "cs pane backend drives a live pane":
         val seen = _await_pane_text(session, pane.pane_id, "14133")
         expect(seen).to_contain("14133")
 
-        step("Maximize the pane, then toggle it back")
+        step("A lone pane has nothing to maximize over: zoom succeeds and changes nothing")
+        assert_true(pane_zoom(session, pane.pane_id))
+        var lone_zoomed = false
+        for p in pane_list(session):
+            if p.zoomed:
+                lone_zoomed = true
+        assert_false(lone_zoomed)
+
+        step("With a sibling pane, maximize the pane, then toggle it back")
+        val sibling = pane_spawn(session, "spec-sibling", _live_shell(), [])
+        expect(sibling.pane_id).to_not_equal("")
         assert_true(pane_zoom(session, pane.pane_id))
         var zoomed = false
         for p in pane_list(session):
@@ -223,6 +233,12 @@ describe "cs pane backend drives a live pane":
                 zoomed = true
         assert_true(zoomed)
         assert_true(pane_zoom(session, pane.pane_id))
+        var restored = true
+        for p in pane_list(session):
+            if p.zoomed:
+                restored = false
+        assert_true(restored)
+        assert_true(pane_kill(session, sibling.pane_id))
 
         step("Kill the pane; the session no longer lists it")
         assert_true(pane_kill(session, pane.pane_id))
@@ -252,3 +268,28 @@ describe "cs pane backend drives a live pane":
         assert_true(listed)
         assert_true(pane_kill(session, second.pane_id))
 
+    it "reuses an exited pane slot on relaunch after its child exits on its own":
+        val session = "cs-pane-backend-self-exit-spec"
+        val first = pane_spawn(session, "spec-exit", _live_shell(), ["-c", "exit 2"])
+        expect(first.pane_id).to_not_equal("")
+        var waited_ms = 0
+        while waited_ms < 5000 and pane_list(session).len() > 0:
+            thread_sleep_ms(50)
+            waited_ms = waited_ms + 50
+        expect(pane_list(session).len()).to_equal(0)
+
+        val second = pane_spawn(session, "spec-relaunch", _live_shell(), [])
+        expect(second.pane_id).to_not_equal("")
+        expect(second.pid).to_be_greater_than(0)
+        assert_true(pane_kill(session, second.pane_id))
+
+
+describe "cs pane backend runs a launcher through the shell":
+    it "names the shell first so the just-written script is read, never exec'd":
+        step("Build the spawn line for a launcher directory")
+        val line = posix_pane_launcher_line("/tmp/cs-pane-x y")
+        # Exec'ing the script directly failed with ETXTBSY on every dashboard
+        # launch; the line must start with a shell and quote the script path.
+        assert_true(line.ends_with(" '/tmp/cs-pane-x y/launch'"))
+        assert_true(line.starts_with("'/"))
+        expect(line == "/tmp/cs-pane-x y/launch").to_equal(false)

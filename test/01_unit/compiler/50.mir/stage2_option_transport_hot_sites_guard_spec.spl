@@ -1,0 +1,144 @@
+# Purpose and audience: compiler engineers owning HIR/MIR Option transport.
+# @req REQ-SSPEC-COMPILER
+"""
+# HIR/MIR Option transport uses idiomatic Option/`if val` bindings
+
+Verifies that the stale frozen-stage2 workarounds
+(`stage2_symbol_display_name_option_transport_2026-11-03` and
+`stage2_if_val_struct_option_binding_as_int_wide_2026-11-03`) are removed from
+the compiler source and that HIR + MIR lower every restored Option-transport
+shape (struct Option `if val`, generic turbofish `if val` with field access,
+nested `text?` `if val`, `Dict.get` `if val`, `SymbolId?` `.is_none()`, and
+direct `Option<Struct>` return `.unwrap()`) without errors or `rt_value_as_int_wide`.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+
+use std.spec
+use std.io_runtime.{env_set}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+val bug_tag_1 = "stage2_symbol_display_name_option_transport_2026-11-03"
+val bug_tag_2 = "stage2_if_val_struct_option_binding_as_int_wide_2026-11-03"
+
+val COMPILER_FILES: [text] = [
+    "src/compiler/10.frontend/parser_types_expr.spl",
+    "src/compiler/20.hir/hir_lowering/_Expressions/call_arity.spl",
+    "src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl",
+    "src/compiler/20.hir/hir_symbol_table_methods.spl",
+    "src/compiler/35.semantics/any_escape/checker.spl",
+    "src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl",
+    "src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl",
+    "src/compiler/50.mir/mir_lowering_stmts.spl",
+    "src/compiler/80.driver/driver_pipeline_lowering.spl"
+]
+
+val OPTION_TRANSPORT_SRC: text = "struct SymId:\n    id: i64\n\nstruct SymInfo:\n    id: SymId\n    owner: text?\n\nstruct TypeWrap:\n    tag: i64\n\n@unsafe(reason: \"fixture\", capabilities: [ffi])\nextern fn rt_tuple_get<T>(tuple: i64, index: i64) -> T?\n\nfn find_sym(flag: bool) -> SymId?:\n    if flag: return Some(SymId(id: 5))\n    None\n\nfn get_info(flag: bool) -> SymInfo?:\n    if flag: return Some(SymInfo(id: SymId(id: 5), owner: Some(\"mod\")))\n    None\n\nfn via_struct_if_val(flag: bool) -> i64:\n    if val s = find_sym(flag):\n        return s.id\n    -1\n\nfn via_nested_text_if_val(flag: bool) -> text:\n    if val info = get_info(flag):\n        if val owner = info.owner:\n            return owner\n    \"\"\n\nfn via_turbofish_if_val(payload: i64) -> i64:\n    unsafe(capabilities: [ffi]):\n        if val element = rt_tuple_get<TypeWrap>(payload, 0):\n            return element.tag\n    -1\n\nfn via_dict_get_if_val(k: text) -> text:\n    val d: {{text: text}} = {{\"k\": \"v\"}}\n    if val hit = d.get(k):\n        if hit != \"\":\n            return hit\n    \"\"\n\nfn via_option_var_is_none(flag: bool) -> i64:\n    var m: SymId? = None\n    if flag:\n        m = find_sym(true)\n    if m.is_none():\n        return -1\n    if val resolved = m:\n        return resolved.id\n    -1\n\nfn via_direct_unwrap(flag: bool) -> i64:\n    val s: SymId = find_sym(flag).unwrap()\n    s.id\n"
+
+fn lower_option_probe(bootstrap: bool) -> Dict<text, text>:
+    val module = parse_full_frontend(OPTION_TRANSPORT_SRC, "option_transport_probe.spl", "option_transport_probe", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("option_transport_probe.spl")
+    if bootstrap:
+        env_set("SIMPLE_BOOTSTRAP", "1")
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+    else:
+        env_set("SIMPLE_BOOTSTRAP", "")
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "")
+    val hir = hir_lowering.lower_module(module)
+    env_set("SIMPLE_BOOTSTRAP", "")
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "")
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errs = ""
+    for e in hir_lowering.errors:
+        errs = errs + "hir:" + e.message + ";"
+    for e in mir_lowering.errors:
+        errs = errs + "mir:" + e.message + ";"
+    var out: Dict<text, text> = {}
+    out["__errors__"] = errs
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    out
+
+describe "stale frozen-stage2 Option-transport workarounds are removed":
+    it "leaves none of the target workaround tags in the 9 compiler files":
+        for path in COMPILER_FILES:
+            val src = file_read(path)
+            expect(src.contains(bug_tag_1)).to_equal(false)
+            expect(src.contains(bug_tag_2)).to_equal(false)
+
+    it "restores idiomatic Option/`if val` forms in HIR and MIR hot sites":
+        val ec = file_read("src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl")
+        expect(ec).to_contain("if val owner_symbol = self.symbols.get_symbol_raw(owner.id):")
+        expect(ec).to_contain("if val declared_method = self.symbols.lookup_static_method_raw(owner.id, method):")
+        expect(ec).to_contain("if val candidate_symbol = self.symbols.lookup(ident_name_t):")
+        val ca = file_read("src/compiler/20.hir/hir_lowering/_Expressions/call_arity.spl")
+        expect(ca).to_contain("if val found_symbol = self.symbols.lookup(fn_.name):")
+        val ed = file_read("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
+        expect(ed).to_contain("if val pre_resolved = self.symbols.lookup(named_var_name):")
+        expect(ed).to_contain("if val foreign_symbol = self.symbols.get_symbol_raw(pre_sym_id):")
+        expect(ed).to_contain("if val foreign_owner = foreign_symbol.defining_module:")
+        val st = file_read("src/compiler/50.mir/mir_lowering_stmts.spl")
+        expect(st).to_contain("if val symbol_value = let_symbol:")
+        val mc = file_read("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
+        expect(mc).to_contain("if val static_owner = self.symbols.get_symbol_raw(resolved_static_receiver_symbol):")
+        expect(mc).to_contain("var static_method_id: SymbolId? = None")
+        expect(mc).to_contain("if val static_result_name = self.struct_method_return_names.get(")
+        val pt = file_read("src/compiler/10.frontend/parser_types_expr.spl")
+        expect(pt).not_to_contain("val element_type: Type = element")
+
+describe "HIR and MIR lower all restored Option-transport shapes cleanly":
+    it "lowers every restored shape without errors or rt_value_as_int_wide (normal mode)":
+        val fns = lower_option_probe(false)
+        expect(fns["__errors__"] ?? "missing").to_equal("")
+        for name in [
+            "via_struct_if_val",
+            "via_nested_text_if_val",
+            "via_turbofish_if_val",
+            "via_dict_get_if_val",
+            "via_option_var_is_none",
+            "via_direct_unwrap"
+        ]:
+            val mir = fns[name] ?? ""
+            expect(mir != "").to_equal(true)
+            val wide_at = mir.index_of("rt_value_as_int_wide")
+            val wide_ctx = if wide_at >= 0:
+                val ws = if wide_at > 400: wide_at - 400 else: 0
+                val we = if wide_at + 400 < mir.len(): wide_at + 400 else: mir.len()
+                "{name}:has_wide:" + mir.substring(ws, we)
+            else:
+                "{name}:clean"
+            expect(wide_ctx).to_equal("{name}:clean")
+
+    it "lowers every restored shape without errors or rt_value_as_int_wide (entry-closure bootstrap)":
+        val fns = lower_option_probe(true)
+        expect(fns["__errors__"] ?? "missing").to_equal("")
+        for name in [
+            "via_struct_if_val",
+            "via_nested_text_if_val",
+            "via_turbofish_if_val",
+            "via_dict_get_if_val",
+            "via_option_var_is_none",
+            "via_direct_unwrap"
+        ]:
+            val mir = fns[name] ?? ""
+            expect(mir != "").to_equal(true)
+            val wide_at = mir.index_of("rt_value_as_int_wide")
+            val wide_ctx = if wide_at >= 0:
+                val ws = if wide_at > 400: wide_at - 400 else: 0
+                val we = if wide_at + 400 < mir.len(): wide_at + 400 else: mir.len()
+                "{name}:has_wide:" + mir.substring(ws, we)
+            else:
+                "{name}:clean"
+            expect(wide_ctx).to_equal("{name}:clean")

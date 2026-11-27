@@ -64,6 +64,25 @@ registry hunk presence. After any expr_dispatch refactor, re-verify:
 - [src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl](../../../../src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl)
   (construct/read/write codegen).
 
+### Declaration-level cfg guards (2026-10-27)
+
+**Pattern:** `lower_module` first calls `apply_decl_cfg_guards(module)` (asm_and_targets.spl), which drops
+guarded decls that are off for `self.target_context` and returns the module untouched (no allocation) when
+nothing is guarded. Grouped arms (`cfg_group != 0`) are decided once per group by `cfg_group_winners`
+(arms ordered by `cfg_arm`, else = `-1` last, cond = cfg joined with " and ", `mir_cfg_select_arm`; -1 drops the
+group, -2 or a numbered arm without cfg is `error_fatal`). Group 0 items use
+`mir_cfg_item_enabled(cfg, target, features)`. A dropped class/struct/enum also drops its impls; a dropped
+impl or class drops its methods from `module.functions`. The bootstrap flat-store lane calls
+`cfg_group_winners_for_functions` + `decl_cfg_keep` per function (`bootstrap_globals.spl`), as does the JIT path.
+
+**File refs:**
+- [src/compiler/50.mir/_MirLowering/asm_and_targets.spl](../../../../src/compiler/50.mir/_MirLowering/asm_and_targets.spl)
+  (apply_decl_cfg_guards, cfg_group_winners, decl_cfg_keep).
+- [src/compiler/50.mir/mir_cfg_select.spl](../../../../src/compiler/50.mir/mir_cfg_select.spl)
+  (mir_cfg_item_enabled).
+
+**TODO (decl-level @cfg):** Dropping a type drops its impls by type name, but specialization records and trait impls declared in other modules are not covered yet. Follow up in step 3 or 5.
+
 ## Gotchas
 
 1. **Arrays are value types:** passed by copy, so `.push()` / `.pop()` /
@@ -430,7 +449,6 @@ in MIR to "fix" a dropped write. Escape: `SIMPLE_CAPTURE_WRITE_CHECK=warning|off
 - So the JIT keeps base aliasing at literals (a known bug, DEFERRED). Any argument that
   is not handed over makes the struct non-unique, and so do `@inject`-constructor types.
 - Bug record: `doc/08_tracking/bug/seed_jit_array_copy_never_freed_2026-10-19.md`.
-||||||| parent of c3b03b5c78c (docs(llm-wiki): mir_lowering note for the array move-vs-copy pass)
 
 
 ## 2026-10-19 — array move instead of copy (`mir_array_move.spl`)
@@ -500,3 +518,389 @@ programs never change layout. Rules to keep when editing:
 - Known, NOT fixed: sorting a TAGGED array that holds wide (heap-boxed) ints is
   wrong (`primitive_sort`/array_sort provider ignore the boxes); packed arrays sort
   correctly. Bug record: `doc/08_tracking/bug/jit_array_store_wide_i64_leak_2026-10-20.md`.
+
+## 2026-10-25 — diverging arms and nil-tested dict reads (Phase 3 run-27e)
+
+- `panic(...)` returns a **Unit** temp from a fresh `after_panic` block, so
+  `current_block_has_explicit_terminator()` is FALSE after it. Any value merge
+  (match arm, if arm, default) must also skip a Unit-typed arm result
+  (`local_is_unit`), or the first-wins type inference retypes the shared result
+  to Unit and every later arm's value reads as `iconst 0`. `lower_if` had this
+  guard; all 8 match merge sites in `switch_operators_calls.spl` now do too.
+  Bug: `doc/08_tracking/bug/match_expr_panic_first_arm_drops_result_2026-10-25.md`.
+- The `??` left operand goes through `lower_optional_probe_operand`. A `d[k]`
+  read there returns the UNDECODED `rt_dict_get` word (`nil_probe` ->
+  `raw_probe`), so `rt_is_some` sees the miss word 3, and the `??` present
+  branch is the single decode. Do NOT reuse the `as_option` (`d.get`) lane for
+  this: it decodes and then marks the result as a runtime value, so `??`
+  decodes an i64 hit a second time (5 -> 0; still open for `d.get(k) ?? x`).
+  `d[k].?`, `if val x = d[k]` and `match d[k]` remain open.
+  Bug: `doc/08_tracking/bug/dict_index_coalesce_decodes_before_nil_test_2026-10-25.md`.
+- **BSM P3 bootstrap MIR store:** the flat `_bootstrap_mir_*` / function-value / callable registries live on `BootstrapMirStore` (`_MirLowering/bootstrap_mir_store.spl`); never add a module-level registry var back — add a store field + forwarder, keep reads read-through (committed then pending), and publish only at `bootstrap_mir_registries_promote` (scope paused).
+
+## 2026-10-26 - HirCfgSelect lowering picks the arm (target-neutral HIR step 2)
+
+- `HirExprKind.CfgSelect(conds, arms, else_)` reaches MIR via `lower_cfg_select`
+  (`_MirLowering/asm_and_targets.spl`). It calls `mir_cfg_select_arm` with
+  `self.target_context` and `cfg_enabled_features()`; the else arm is appended
+  as condition `""`. `-2` = `error_fatal` (never a silent false); `-1` with no
+  else lowers to a unit temp (arm dropped). No env is read: the same HIR lowers
+  per target. Plan: `doc/03_plan/compiler/hir_target_neutral_mir_target_plan.md`.
+
+## 2026-10-27 - cfg-select source path (SIMPLE_HIR_CFG_SELECT=1, default off)
+
+- Parser path for `HirExprKind.CfgSelect`: in flag mode `_pp_preprocess_conditionals`
+  (`10.frontend/core/parser_preprocessor.spl`) does NOT strip an indented (function-body)
+  `@when/@elif/@else/@end`; it rewrites it, line-count stable, to `if/elif/else` whose
+  conditions are the marker call `__cfg_when__("<cond>")` (arm bodies indented one level
+  per open marker). Top-level `@when` and target-receipt mode keep stripping.
+- No lexer/parser/AST change: `expression_core.spl` (`If`/`IfChain` cases) recognizes the
+  marker via `_Expressions/cfg_when_marker.spl` and `lower_cfg_when_chain` builds one
+  `CfgSelect(conds, arms, else_)`; MIR picks the arm per target. Empty `@when()` becomes an
+  unknown atom so MIR reports the fatal malformed-@cfg error. Per-declaration `@cfg` is out of
+  scope (needs a module-level node). The interpreter shares the preprocessor: do not set the flag
+  for interpreted runs. Spec: `test/01_unit/compiler/20.hir/hir_cfg_select_source_spec.spl`.
+- Marker mode is statement-only: a chain whose arm declares a `val`/`var`/`let` at the chain indent, has `{`/`}` in a condition, or has an empty/comment-only arm keeps flat-strip semantics (binding-declaring chains keep flat-strip semantics until a non-scoping CfgSelect design lands). Marker lowering is also gated on the flag and requires every arm to be a string-literal marker.
+
+## 2026-10-27 - @cfg build-profile and ARM sub-arch atoms (plan step 5)
+- `MirTargetContext` gained `build_profile` ("debug"/"release", default "debug"; the driver sets it
+  from `CompileOptions.release` in `driver_mir_target.spl`) and `subarch` (first triple component when
+  it starts with `armv`/`thumbv`, else ""; set by `mir_target_context_from`).
+- `mir_cfg_select.spl`: `debug`/`release` evaluate from the context and never return -2. `thumb` matches
+  `thumbv*`; `armv7`/`armv6` match by subarch prefix (empty subarch falls back to arch `arm` for
+  hand-built contexts); `subarch = "thumbv7em"` is an exact match; `arm` still matches all 32-bit ARM.
+- WA: the parser preprocessor `_pp_eval_atom` still hardcodes debug=true / release=false, so the two
+  lanes differ for release builds until the parser reads the profile.
+- `target_presets.spl` names these triples `thumbv7em`/`thumbv8m.main`/`thumbv6m` (arch field).
+  Spec: `test/01_unit/compiler/50.mir/mir_cfg_select_cross_target_spec.spl` (10 examples).
+- **Imported trait method returns:** a consumer's table holds an imported
+  trait SYMBOL but no method symbols, so `lookup_trait_method` misses and a
+  bare `Ok`/`Err` arm on `recv.method()` was "ambiguous" (stage3
+  `SIMPLE_BOOTSTRAP=1`, e.g. `self.codegen.compile_module(...)`). Both
+  prescans (`prescan_declaration_callables_v1`, `prescan_module_functions_v1`)
+  now register each trait method signature in the name-keyed
+  `bootstrap_fn_ret_hir_type_*` registry under
+  `mir_trait_method_ret_key_v1` = `trait-ret:{canonical module}.{Trait}::{method}`;
+  `enum_match_expr_type` falls back to it. Symbol-free returns only (the
+  registry rejects `Named` payloads, which are table-local ids).
+  Spec: `test/01_unit/compiler/mir/imported_trait_method_declared_return_spec.spl`.
+
+- HIR cache key neutral rule (plan step 4): with `SIMPLE_HIR_CFG_SELECT=1`, `hir_cache_key`
+  (`80.driver/driver_hir_cache.spl`) replaces the target fold with the constant
+  `hir-target-neutral-v1` only when the source made ZERO preprocessor strip decisions AND every
+  surface in its closure did (`hir_closure_all_neutral`, set by `hir_cache_closure_digest_from_rows`).
+  Target-dependent code therefore must stay in MIR/object keys; a file with a top-level `@cfg`
+  or binding-declaring `@when` stays target-keyed and also folds its strip-decision digest.
+  Decisions come from `pp_last_strip_decision_count()` / the memo `pp_recorded_strip_*` in
+  `parser_preprocessor.spl`. Spec: `test/01_unit/compiler/80.driver/hir_cache_key_neutral_spec.spl`.
+  Neutrality is read ONLY from a marker-mode memo entry keyed by (content hash, cfg identity,
+  native target, mode), and only while the driver declared marker mode (`pp_declare_parse_scope`).
+  A target-receipted parse (flat-strips chains) or an unknown entry is never neutral; the key path
+  never re-runs the preprocessor in another mode to manufacture a neutral answer.
+
+## Panic call ABI (2026-10-30)
+
+Generated one-message panic calls must split the evaluated text into raw bytes
+and byte length at MirBuilder.emit_call. Keep Abort and explicit two-argument
+calls intact. A successful native build can still contain logged rejected
+declarations; inspect those diagnostics before qualification. See
+[panic ABI evidence](../../../08_tracking/bug/cranelift_panic_call_abi_conflict_2026_10_30.md).
+
+The a52 producer's four native panic controls passed with clean compiler
+diagnostics, including runtime-concatenated text evaluated once and the cast's
+intended panic. Its separate full CLI matrix exceeded the enforced RSS cap;
+native SSpec/docgen and complete BuildRunner admission are not implied.
+
+## Tagged tuple projection contract
+
+`rt_tuple_get` returns an already-tagged runtime value. Keep its Simple
+declaration generic (`<T> -> T?`) and pass `<T>` explicitly through the MIR
+and LLVM decoder wrappers. A semantic i64 declaration causes aggregate
+handles to be integer-boxed, even though the physical C return word is 64-bit.
+Use `test/04_smoke/bootstrap_tuple_projection.spl` with exact stdout and
+empty-stderr checks; assert-only PASS markers missed the invalid-handle
+diagnostic in the negative control. Fresh compiler admission remains required.
+See `doc/08_tracking/bug/cross_bootstrap_stage2_p2_add_mir_sigbus_20261101.md`.
+
+## 2026-11-04 - TargetHIR migration (immutable HIR plan §11)
+
+Governing plan: `doc/03_plan/compiler/hir/immutable_hir_targethir_mir_refactor_plan_2026-11-03.md`.
+Package: `src/compiler/20.hir/target_hir/` (kept in a subdirectory, not the 20.hir root).
+
+- **PR-A** `hir_snapshot.spl` (`HirSnapshotId`: module + content digest + generation, scoped, never a
+  global hash) and `target_hir.spl` (`TargetHIR` identity facade). A `TargetHIR` is only constructible
+  through `target_hir_for_explicit`, which delegates to `mir_target_context_from_explicit` — implicit
+  host / lossy triples / `auto` backends cannot bind one. No MIR lowerer consumes it yet; the raw-HIR
+  entrypoints from the P0 inventory are pinned by name in
+  `test/01_unit/compiler/hir/target_hir_identity_facade_spec.spl`.
+- **PR-B** `hir_freeze.spl`: `hir_snapshot_freeze(module, generation)` deep-freezes by capturing codec
+  bytes (no aliasing of builder dicts/arrays); id digest = sha256 of those bytes; `hir_snapshot_read`
+  verifies the digest and decodes a fresh copy each call. The canonical codec generator reports
+  unavailable on release/1.0.0, so freezing falls back to the legacy codec and records `codec`.
+  Spec: `test/01_unit/compiler/hir/hir_snapshot_freeze_spec.spl`.
+- **PR-C** `target_hir_resolution.spl`: `TargetHIRBuilder` (new -> resolve_required -> freeze) resolves
+  scalar layouts (size/align; i386-SysV 8-byte align 4, MSVC natural) and the calling ABI per explicit
+  target into an immutable `TargetHIRResolved`. Unknown types / out-of-region reads are named errors.
+  Spec: `test/01_unit/compiler/hir/target_hir_builder_layout_spec.spl` (two targets, one frozen snapshot).
+- **PR-D** `src/compiler/50.mir/mir_target_hir_select.spl`: `mir_target_hir_select_arm(view, snapshot,
+  conditions, features)` — typed cfg-arm reader; rejects a handle bound to another snapshot, delegates to
+  `mir_cfg_select_arm`. Shadow equivalence vs legacy for x86/x86_64 x Linux/Windows/SimpleOS, forward and
+  reverse order, snapshot bytes unchanged. `lower_cfg_select` is NOT switched yet (legacy path unchanged).
+  Spec: `test/01_unit/compiler/50.mir/mir_target_hir_select_spec.spl`.
+
+- **TargetHIR flags (U0, 2026-11-04):** all TargetHIR env knobs are owned by `src/compiler/20.hir/target_hir/target_hir_flags.spl` — `target_hir_mode()` (`SIMPLE_TARGET_HIR_MODE`, legacy|shadow|typed, invalid->legacy; `target_hir_mode_strict()` returns Err on a typo), `target_hir_verify()`, `target_hir_storage()`, `stage3_compiler_path()` (`SIMPLE_STAGE3_COMPILER`, nil = Stage-3 work reports PENDING). Import these; never read the env vars directly. Spec: `test/01_unit/compiler/hir/target_hir_flags_spec.spl`.
+- **TargetHIR P5 region slots (2026-11-04, U4):** `src/compiler/20.hir/target_hir/target_hir_region_slot.spl` — `region_slot_key(snapshot_id, target_id, region)`, `RegionSlotTable` claim/publish/cancel/await with per-key generation (one producer per key; stale/non-owner publish rejected) and one refcounted pinned `HirModule` decode per snapshot id. Spec `test/01_unit/compiler/hir/target_hir_region_slot_spec.spl` (THIR-09/10, IHIR-03/06) exercises deterministic interleavings only; real multi-thread runs wait on Stage 3.
+- **TargetHIR P7 bench (U6, 2026-11-04):** `20.hir/target_hir/target_hir_counters.spl` counts resolutions/probes/decodes/fresh_builds for a 1/2/4/8-target fan-out over one frozen snapshot (decodes stays 1). Harness `scripts/bench/target_hir_bench.shs` runs the seed workload now and prints `PENDING_STAGE3=1` (exit 0) until `SIMPLE_STAGE3_COMPILER` is set; evidence under `doc/09_report/evidence/target_hir_p7_<date>/` is never committed. Spec: `test/01_unit/compiler/hir/target_hir_counters_spec.spl` (PERF-TH-01).
+- **TargetHIR P2 constraints (U1, 2026-11-04):** `20.hir/target_hir/hir_target_constraints.spl` records static-guard reads as positive/negative witnesses + feature snapshot; `hir_target_constraints_digest(c) -> text` (sha256, agreed U5 signature) and `hir_target_constraints_satisfied` (feature-set change or flipped read => false; unknown key such as `cpu` => named Err). `target_hir_identity_with_constraints(view, digest)` appends `|constraints:<digest>`. Not yet wired into the guard evaluator (needs Stage 3 / P4). Spec: `test/01_unit/compiler/hir/hir_target_constraints_spec.spl` (THIR-04/05, IHIR-02).
+- **TargetHIR P8 migration matrix (U7, 2026-11-04):** `spec/compiler_schema/target_hir_migration_matrix.sdn` lists every raw-HIR MIR entrypoint from the P0 inventory as migrated|pending|retained plus the legacy-deletion checklist; `test/01_unit/compiler/hir/target_hir_migration_matrix_spec.spl` enforces coverage and that the default stays `legacy` until zero pending AND the Stage-3 gate. PR-D's arm reader is still `pending` (not wired); flip a row only with live-wiring + Stage-3 evidence.
+- **P4 wiring** live `MirLowering.lower_cfg_select` now consults `SIMPLE_TARGET_HIR_MODE=legacy|shadow|typed`
+  via U0 `target_hir_mode_strict()` (default `legacy`, unknown value = fatal MIR error). `shadow` recomputes the arm via
+  `mir_target_hir_live_select` (TargetHIR reader) and makes a divergence fatal
+  (`target_hir_shadow_mismatch`) while keeping the legacy arm; `typed` uses the typed arm. The view is
+  bound by `target_hir_for_context` (refuses empty arch/os/backend; MirTargetContext keeps no triple, so
+  no explicit round trip). The live path binds a synthetic `live-lowering-unfrozen` snapshot id: snapshot
+  identity is NOT enforced there until P5/P6. Env is read per select (cfg selects are rare).
+  Evidence: `mir_target_hir_select_spec.spl` (6 cases incl. injected-divergence) and
+  `hir_cfg_select_lowering_spec.spl` green under legacy/shadow/typed (fails under a bogus mode).
+- **TargetHIR P6 cache identity (U5, 2026-11-04):** `80.driver/driver_hir_cache.spl` `_hir_cache_key_target_part` reads `target_hir_mode()`; legacy (default) uses the unchanged fold (key byte-identical, CACHE-TH-01), otherwise appends `;thir:target-hir-cache-v1:<hir_target_constraints_digest(c)>` (`none` when no constraints passed to `hir_cache_key(..., thir_constraints)` — no caller passes them yet). `80.driver/driver_target_hir_cache_v1.spl` overlay record codec (parent snapshot id + schema); unknown/old/corrupt/mismatched -> Err. Spec `test/01_unit/compiler/80.driver/target_hir_cache_identity_spec.spl` (CACHE-TH-01..04).
+- **TargetHIR P3 struct/fn ABI (U2, 2026-11-04):** `50.mir/mir_target_hir_layout.spl` — `mir_target_hir_struct_layout(view, snapshot, type_name, fields, attr)` delegates to `compute_struct_layout_for_arch` with the view's explicit arch (offsets in declaration order); `mir_target_hir_fn_abi(view, snapshot, fn_name)` reuses the TargetHIR builder ABI. Snapshot mismatch / unsupported arch are named Errs. Not yet wired into lowering. Spec `test/01_unit/compiler/50.mir/mir_target_hir_layout_spec.spl` (THIR-01/02/07).
+- **TargetHIR U3 (2026-11-04):** `50.mir/mir_target_hir_simd.spl` (pure (arch,cpu_tier)->SIMD class table, named `target_hir_simd_unsupported` errors, no host probe) and `50.mir/mir_target_hir_asm_guard.spl` (typed re-implementation of `asm_target_spec_match_kind` + exhaustiveness; snapshot-mismatch rejected). Legacy route untouched; equivalence pinned by `test/01_unit/compiler/50.mir/mir_target_hir_simd_asm_spec.spl` (THIR-06/08, TMIR-01 grid). Wired 2026-11-04 (unit wire): `lower_inline_asm_match` (per-arm kind + missing-arch list) and `lower_asm_assert` route through `mir_target_hir_live_asm_match_kind` / `mir_target_hir_live_asm_missing_archs` behind `SIMPLE_TARGET_HIR_MODE` (default legacy; shadow mismatch fatal). Spec `mir_target_hir_asm_live_spec.spl`. Layout/fn-ABI/SIMD readers NOT wired: layout site is in off-limits `module_lowering.spl` and legacy `compute_struct_layout` is host-arch (shadow would diverge on cross targets); ABI/SIMD have no live MIR consumer.
+- **TargetHIR P8 decl @cfg (2026-11-04):** `decl_cfg_keep`/`cfg_group_winners` route through `mir_target_hir_decl_cfg.spl`/`mir_target_hir_live_select` when `SIMPLE_TARGET_HIR_MODE=shadow|typed` (shadow mismatch fatal; legacy default unchanged). Remaining matrix rows annotated BLOCKED-P5/P6 or BLOCKED-owner.
+
+- **TargetHIR cache feed (2026-11-04):** non-legacy HIR cache keys now carry REAL constraints. `20.hir/target_hir/hir_guard_read_scan.spl` recovers `@when`/`@cfg`/`__cfg_when__` guard reads from module source (key is computed before lowering) and evaluates them with the frontend's `cfg_eval_key_value` (observe-only); `driver_hir_cache._hir_cache_thir_digest` captures them when callers pass no constraints. Legacy keys unchanged (CACHE-TH-01). Spec: `test/01_unit/compiler/80.driver/target_hir_cache_feed_spec.spl`.
+- **TargetHIR struct layout (2026-11-04, unit layout):** `lower_struct_type`/`lower_class_type` call `self.lowering_struct_layout` -> `mir_target_aware_struct_layout` (legacy LP64 `compute_struct_layout` on 64-bit targets, byte-identical; `compute_struct_layout_for_arch` on x86/arm/riscv32 — fixes host-arch offsets on cross builds, bug `legacy_struct_layout_host_arch_2026-11-04`), then `mir_target_hir_live_struct_layout` behind `SIMPLE_TARGET_HIR_MODE` (shadow mismatch fatal; typed uses reader). `canonical_layout_digest` is target-aware only. Spec `mir_target_hir_layout_live_spec.spl`. fn_abi/simd_lanes matrix rows: retained, no MIR consumer.
+- **TargetHIR P6 task overlay (2026-11-04, owner decision):** parallel lowering tasks write derived symbol/MIR facts into a PRIVATE `TaskOverlay` (`20.hir/target_hir/target_hir_task_overlay.spl`), read only base + own overlay, and merge in owner `(rank, owner)` order; same key from two owners is fatal naming both (no last-writer-wins). Mode-gated (legacy/shadow-fatal/typed). The 8 aliased-SymbolTable writer rows in the migration matrix are `pending-stage3` until MirLowering carries a frozen HirSnapshot. Spec `target_hir_task_overlay_spec.spl`.
+- **TargetHIR P6 symbol-writer wiring (2026-11-04):** the 8 writer rows record every live `SymbolTable` allocation into `MirLowering.symbol_write_ledger` (`50.mir/mir_target_hir_symbol_writes.spl`, value struct of parallel arrays — no Dict field). `lower_module_guarded_v1` opens it at the `self.symbols = module.symbols` alias (strict mode read once; snapshot = module id + `next_symbol_id` watermark); `lower_module` resolves it (shadow: owner-order overlay merge must equal the legacy journal, same key re-written with a different id is fatal; typed: merge conflicts fatal). Nested lambda lowerers are child owners adopted on success. Legacy records nothing. Typed does NOT yet read through the overlay; rows stay `pending-stage3` until a self-hosted shadow run. Spec `mir_target_hir_symbol_writes_spec.spl`.
+
+## 2026-11-06 — trait-bounded erased generics take the trait object ABI, decided by the signature
+- `fn f<R: Tr>(r: R)` lowers like `fn f(r: Tr)` when `R`'s ONLY bound is an object-safe trait, `R` appears only as direct parameter types, and the function SYMBOL carries a declared type (HIR types a generic symbol only when it has a return type). Otherwise `R` stays the erased tagged `i64` word.
+- Both sides must read the same data: callee `with_native_bounded_params` (`_MirLowering/function_lowering.spl`) and callers `resolved_call_hir_param_types` (`expr_dispatch.spl`) both apply `native_bounded_param_types` to the symbol's declared signature. Never decide from the caller's own type-param context.
+- Trap: teaching only the dispatch predicates (`native_trait_owner_for_kind`, `trait_receiver_identity`) about `TypeParam` vtable-calls a tagged word. The ABI has to change at the call boundary, where the concrete type is still known.
+- The body may use the object only as a method receiver or a positional argument to a native-trait slot. `native_bounded_param_escape` makes any other use a compile error.
+- Record: `doc/08_tracking/bug/mir_generic_trait_bound_receiver_unresolved_2026-11-06.md`; spec `test/01_unit/compiler/mir/generic_trait_bound_receiver_spec.spl`.
+
+## 2026-11-07 — `Optional(Any)` at integer sinks: use `option_payload_for_int_sink`
+
+`list` is `Array(Any)`; its native `get`/`at` (`lower_array_first_or_last`)
+returns an `Optional(Any)` handle whose payload is already int-decoded
+(`lower_type(Any) = i64`). `option_scalar_payload_of` unwraps only plain-scalar
+inners, so `-> i64` tails/returns and `val y: i64 =` handed the HANDLE pointer
+to the caller (4 read as 200634408607585). Integer sinks now call
+`option_payload_for_int_sink` (switch_operators_calls.spl). Trap: the if-val
+binder still decodes that payload a second time (4 -> 0) — producer/consumer
+disagree on whether an `Any` payload is tagged. Bug:
+`doc/08_tracking/bug/native_list_any_get_i64_sink_returns_option_handle_2026-11-07.md`.
+
+## 2026-11-12 — array-HOF lambda parameters need the element record
+
+`resolve_field_index` returns 0 when the base local has no `struct_value_syms`
+row and no HIR `Named` type, and an untyped lambda parameter has neither. The
+`for` loop publishes the element record (`array_element_struct_syms` ->
+`struct_value_syms[loop_var]`); `lower_array_map` (inlined lambda) and the
+lifted `filter`/`any`/`all`/`fold` lambdas did not, so `xs.map(\f: f.c)` read
+`f.a` natively. `array_hof_element_record_owner(arr)` gives the element record;
+pass it as `param_records` to `lower_lambda_value[_for_type]` when you add a
+new array HOF. Trap: a direct call (`g(s)`) is correct and hides the bug,
+because the argument local already carries its record. Bug:
+`doc/08_tracking/bug/stage2_array_hof_lambda_record_param_field0_2026-11-12.md`;
+spec `test/01_unit/compiler/50.mir/array_hof_lambda_record_param_field_spec.spl`.
+
+## 2026-11-12 — all-untyped `Ok`/`Err` if/elif joins own `Result<ok, err>`
+
+- `val r = if c: Ok(a) else: Err(b)` has no HIR type on the native path. The
+  merge join (`remember_merged_result_ctor_arm_type`, `mir_lowering_stmts.spl`)
+  adopted a Result only from an already-typed arm, so an all-constructor join
+  stayed untyped and `match r: case Ok(x)` died "bare variant ambiguous" once
+  another enum declared `Ok`/`Err`.
+- Fix: `lower_enum_construct_named` records each untyped ctor's payload witness
+  (`untyped_result_ctor_payload_witness`: local HIR type → expr type → declared
+  non-generic field type → MIR `Str`; Infer/Error/Any refused) in
+  `untyped_ok_ctor_payload_types` / `untyped_err_ctor_payload_types`;
+  `remember_all_untyped_result_ctor_join` owns `Result<ok, err>` only when every
+  arm is such a ctor, both sides are present and each side agrees. New
+  per-function maps must be reset in `function_lowering`, saved/restored in
+  `native_trait_thunks`, and released in `transient_owner`.
+- Trap: on a seed-compiled Stage 2, `hir_types_equal` returns true for most
+  mismatched kinds (seed binds bare fieldless variants in tuple patterns —
+  `seed_tuple_pattern_bare_fieldless_variant_binds_hir_types_equal_true_2026-11-12`),
+  so "disagreeing arms stay unknown" holds only in pure-Simple-compiled code.
+- Harness trap: `parse_full_frontend` MIR specs lower 0 functions on the seed;
+  `untyped_if_result_ctor_join_spec` now reports that instead of passing
+  vacuously. Behavioural check = a Stage 2 built from the worktree by the seed
+  (stage2-command.transcript argv, ~250 s) native-building
+  `test/fixtures/compiler/hir_untyped_if_result_subject/*.spl`.
+- Follow-up (post-merge review): the match join (`lower_enum_match_flat` ->
+  `remember_merged_arm_identity(.., expected_type == None)`) now withholds the
+  all-ctor join under an expected type, like the if/elif joins; and every
+  witness tier refuses a payload type that mentions a type parameter
+  (`Ok(x)` with `x: T` -> no witness). MIR-level probe: `SIMPLE_ANYQ_PROBE=1`
+  prints `early-Let remember ... init_hir_type=` per Let; the generic fixture
+  flips non-nil -> nil. Open, NOT fixed here: an annotated
+  `val r: Result<i64, text> = if/match .. Ok(x_u8) ..` still copies the join's
+  `Result<u8, text>` over the annotation (`let_declared_type_override_v1`
+  returns 0 for a Result init); no native behaviour difference observed.
+
+## 2026-11-12 — struct ctor operands are in DECLARED order (pinned, no-repro)
+
+`Aggregate(Struct)` operands are the field values in declared order regardless
+of the named-argument order at the call site (`M(z: 3, x: 1, y: 2)` -> `1,2,3`),
+and `GetField` carries the declared slot. A negative literal arrives as
+`UnaryOp(Neg, Copy(<const local>))`, not as a negative `Const` — a MIR probe
+that only reads `Const` operands sees a plain local there. The s3_fable44
+`P(a: 7).a == 7` FAIL did not reproduce on Stage 2 `bootstrap-fable-13`
+(cranelift + llvm). Spec `test/01_unit/compiler/50.mir/struct_i64_field_ctor_spec.spl`;
+native twin `test/fixtures/compiler/struct_i64_field_ctor_native.spl`; bug
+`native_struct_i64_field_ctor_reads_wrong_value_2026-11-05`.
+
+## 2026-11-14 — seed JIT reclamation design (options, not implemented)
+
+The seed JIT frees heap objects at one lowering site only (`lowering_stmt.rs`, the
+`array_move.rs` field-release proof); every other array, string, dict, tuple, closure,
+enum and `rt_alloc` struct block lives until exit, and struct blocks are invisible to the
+`rt_heap_*` counters. The JIT also aliases arrays where the interpreter copies (call
+return, struct-literal argument, capture, global write, push into an outer array, plain
+assign, tuple, and seven more measured forms), so a release is safe only for a proven-unique local. Measured per-operation
+leak table, the aliasing matrix, the options (proven-unique block-end release, refcount,
+regions, do nothing, tracing GC) and the recommended first slice are in
+`doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md`. Read it before
+emitting any `rt_*_free` from lowering; `emit_function_drops` is not a safe hook.
+
+## 2026-11-14 — JIT block-end array release (slice S1)
+
+- On the in-process JIT lane (`lower_to_mir_jit` only) lowering emits `rt_array_free(local)`
+  where a statement list falls through, for array locals with int/bool elements that
+  `block_release_locals` (`mir/lower/array_move.rs`, `ReleaseScan`) proves have one holder.
+  Design: `doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md`.
+- It is an allowlist. The only uses that keep a local eligible are `a[i]` reads yielding a
+  scalar, `a[i] = scalar`, and `a.len()`, each with the receiver typed exactly as the local.
+  Any other mention disqualifies it, because the JIT aliases arrays where the interpreter
+  copies (call results, struct-literal args, captures, assigns, `for r in rows`, and more).
+- Two gates must both hold: the analysis, and `block_release_ready`, which the `Let`
+  lowering sets only when it stored a fresh literal or an emitted `rt_array_copy` result.
+- Trap: lambda bodies lower in the enclosing function's local index space, so every local
+  a lambda mentions is disqualified. A list containing `return`/`break`/`continue` after
+  the declaration is skipped whole; `Defer`/`Yield`/`Await` disqualify the function.
+- Trap: `len_local_sources` and `array_capacity_local_sources` are keyed by function-scoped
+  indices and are now cleared in `lower_function`. A stale entry makes a loop pre-header
+  read a slot with no HIR `Local` mention, which the analysis cannot see.
+- Trap: the freed handle stays in the slot. `MirInst::Drop` is a no-op today; making it
+  real would double-free these locals.
+- Runtime: `rt_array_free` now removes the array from the open transient scope and session
+  (`transient_untrack_freed`). `SIMPLE_ARRAY_FREE_QUARANTINE=1` keeps freed headers
+  unregistered and aborts on a registry lookup of one; it prints `quarantined=<n>` at exit.
+  It does not catch reads through Cranelift-inlined accessors.
+- Tests: `mir/lower/tests/array_release_tests.rs`, `runtime/src/value/transient_scope_state_tests.rs`,
+  `test/01_unit/compiler_core/interpreter/jit_block_array_release_spec.spl` (9 release
+  forms, 27 forms that must stay unreleased incl. float arrays, one open-transient-scope case).
+- Float and u64 arrays are excluded: `from_float` / `from_u64` heap-box each element, so a
+  shallow free leaks the boxes (2M-iteration `[1.5, 2.5, 3.5]` loop: 212 MB vs 39 MB empty loop).
+
+## Provider type relocation retraction (2026-11-14, opt-in)
+
+`relocate_provider_type_symbol` copies provider class/struct/enum/trait symbols
+into the CONSUMER's persistent HIR table (`self.symbols = module.symbols`); the
+per-consumer p1 native-trait walk makes even a facade retain every type a
+provider trait signature names (~955 KiB/module on the bootstrap_main closure).
+`SIMPLE_MIR_RETRACT_PROVIDER_TYPES=1` / `retract_provider_type_relocations`
+retracts the journaled copies (`provider_type_relocation_journal`) after
+`s5_scope_end` on the success path of `lower_module_transient_scoped`, via
+`SymbolTable.retract_symbol_rows_v1`. Default OFF until a Stage 2 run flips it
+(record: `stage2_compiler_cli_build_mir_shard_share_unbounded_2026-11-06.md`,
+"Item 1" section). Traps met:
+
+- **Byte-identical MIR means identical ids**: `mir_json` serializes
+  `Struct/Enum(symbol)` as the raw id, so any design that changes WHICH
+  provider types get relocated (demand-driven p1, a shared relocation table)
+  renumbers MIR. Only post-promotion retraction keeps the MIR unchanged.
+- **Demand-driven p1 is unsafe anyway**: `native_trait_conversion.spl` builds a
+  concrete type's runtime trait-cast dispatcher from ALL impls of that owner,
+  including traits the lowering module never names.
+- **Never rewind `next_symbol_id`** on a retraction: a reissued id would alias
+  a stale holder to a different symbol; a retired id can only miss.
+- **`Dict.remove` differs by lane** (returns a new dict interpreted, mutates
+  natively): rebuild the map without the keys, filtering by VALUE for the
+  text->id indexes (`qualified_types`, `module_callables`).
+- **No new `SymbolTable` field**: `20.hir/generated/hir_codec.spl` constructs it
+  literally; a field means regenerating the codec. Add methods instead.
+- **Journal fields follow the Stage 4 rule**: copy, push, store back; add the
+  field to `transient_owner.spl`'s promote inventory
+  (`check-mir-transient-scope-boundary.shs`) and hand it across the lifted-
+  lambda nested lowerer in both directions (`switch_operators_calls.spl`).
+- **`mir_module_canonical_fingerprint_v1` is not run-to-run stable on the seed
+  for type-defining modules** (`{t.kind}` struct Display, hash order) -- compare
+  serialized rows, not the fingerprint
+  (`mir_canonical_fingerprint_type_row_hash_order_seed_2026-11-14.md`).
+
+## 2026-11-14 — an annotated `val x: T` does not launder a `T?` initializer
+
+`val x: T = if c: opt else: plain` keeps the initializer's `T?` (a `T?` / `T` join is `T?` in
+either arm order; `let_declared_type_override_v1` only lets the annotation win over Infer / Error /
+erased / Result). `Enum.Variant(x)` into a non-optional slot is then refused, now with
+`optional 'T?' value into non-optional payload slot ... unwrap it first`. Fix the source with
+`if val`, or bind the plain value once; do not make the annotation win. Struct fields and
+plain parameters still accept the same value silently. Red/green in about 30 s on the seed:
+`test/01_unit/compiler/mir/let_annotated_optional_join_spec.spl` (it also pins the three
+`HirStmtKind.Let` sites in `statements.spl`, lost once to a rebase). Record:
+`doc/08_tracking/bug/stage3_let_payload_unguarded_optional_arm_2026-11-14.md`.
+
+## 2026-11-14 — dict literal payloads, and what module coverage can show
+
+- HIR gives every dict literal the key type `Infer(0, 0)`; MIR must read that as "no
+  ascription" (`enum_payload_dict_key_is_ascribed`). Treating it as a key type refused every
+  inline `Enum.V({...})`. Seed-interpreted proof only; the `@workaround` sites stay until a
+  native Phase 2 lowers the inline form.
+- `enum_constructor_payload.spl` is unit-testable without a Stage 2: lower a small module,
+  then call the helpers on the `MirLowering` with a synthetic temp
+  (`test/01_unit/compiler/mir/enum_payload_local_evidence_spec.spl`). Add temps to
+  `lowering.builder` inline in the `it` body: a lowering passed to a helper function is not
+  updated in the caller. Private free functions come in through the module's wildcard import.
+- Measure coverage on a seed that contains PR #9041. An older seed does not record an
+  `if` / `match` in expression position and made this module look capped at 82.2%; on the
+  current seed it is 100.0% (237/237) lines. Check the seed's base commit before believing a
+  coverage ceiling.
+- The per-entry check in `lower_dict_lit` reads nil's I64 carrier as an integer, so a dict
+  literal payload vetoes a `nil` key or value unless the declared entry type is optional or
+  `Nil` (`enum_payload_dict_entry_nil_vetoed`). A top-level `E.N(nil)` into an `i64` slot is
+  still accepted; see `doc/08_tracking/bug/enum_payload_nil_into_scalar_slot_accepted_2026-11-14.md`.
+- A method call on a receiver that is not a variable (constructor temporary, call result,
+  field, array element) reaches `lower_method_call` as `Unresolved`; its user owner is only
+  known after the receiver is lowered (`struct_value_syms`). Any builtin fallback that gates
+  on the method name and `Unresolved` alone steals a same-named user method. Ask
+  `receiver_local_owns_user_method_v1(local, method)` first and pass the lowered local on as
+  `prelowered_method_receiver`, so the receiver is not lowered twice. `join/1`, `char_at/1`,
+  `index_of|find|find_str/2` and `len|length/0` were stolen until 2026-11-18
+  (`test/01_unit/compiler/mir/user_method_builtin_name_lowering_spec.spl`,
+  `doc/08_tracking/bug/native_user_method_builtin_name_hijacked_2026-11-18.md`).
+- A `Result<(…, Option<T>, …), E>` payload slot is ONE native word (the canonical Option
+  handle or the nil sentinel), the same contract as an Optional struct field — never
+  `lower_type(Optional(T))`'s inline `(Bool, T)` pair. `result_try_tuple_field_type`
+  admits it as `MirType.i64()` when `result_optional_inner_supported(inner)` holds, and
+  `remember_result_try_tuple_projection` marks the projected local
+  `option_value_locals` + runtime value so `if val` / `.is_some()` decode it. Missing until
+  2026-11-18 ("slot 2 is Optional", Phase 4 `machine_fresh_workload_lifecycle_v2`;
+  `test/01_unit/compiler/mir/result_payload_shape_gaps_spec.spl`,
+  `test/fixtures/native_result_try_tuple_optional_slot/`). The `case Ok((a, b, c))`
+  match-binding route (`wrapper_native_tuple_field_type`) still has no Optional arm.
+- A destructured slot (`val (n, note) = f()?`) gets its MIR decode only if HIR typed the
+  NAME: `lower_tuple_destructure` (`20.hir/hir_lowering/statements.spl`) typed elements
+  from `local_tuple_types` (bare Var) or `fn_tuple_returns` (bare Call) only, so a `f()?`
+  initializer left every name `Infer` although the temp was the full tuple. Then `if val s
+  = note` on a `text?` slot skipped the present-edge `rt_interp_cstr` decode (native printed
+  the raw word, e.g. `note=218313411616753`) and `note.unwrap()` was "unresolved method
+  call"; `t.1` worked because MIR types the Index receiver from the base tuple. Fixed
+  2026-11-18 by `hir_binding_tuple_elements` (binding_types.spl): settled elements of the
+  temp's own tuple type (also used by `lower_hir_tuple_destructure_assign`).
+  `test/01_unit/compiler/mir/result_tuple_destructure_optional_slot_spec.spl`.
+- Native `text` is tagged-or-raw: a `for x in [text]` binder, an indexed local `[text]`
+  element and literals are raw `char*`, and a `text` parameter is whatever the caller
+  passed. Externs in `tagged_text_value_arg_indices` (`text_extern_abi.spl`) skip the
+  `rt_interp_cstr` bridge; until 2026-11-18 the operand then crossed unchanged, so strict
+  decoders (`rt_core_as_string`) rejected a raw one: `rt_hash_text(key)` was 0, the
+  selected-export key table missed every lookup and Stage 3 died `bounds_check
+  index=-1` on hello world. `lower_call_with_value` now runs `ensure_tagged_str` on those
+  operands (identity owners excluded: `tagged_text_value_arg_is_identity`).
+  `test/01_unit/compiler/mir/tagged_text_extern_raw_operand_spec.spl`,
+  `test/fixtures/native_tagged_text_extern_raw_operand/`. OPEN: a raw text returned out of
+  a transient scratch scope cannot be promoted and dangles
+  (`test/fixtures/native_transient_scope_raw_text_escape/`); see
+  `doc/08_tracking/bug/stage3_selfbuild_raw_text_strict_extern_2026-11-18.md`.

@@ -37,3 +37,27 @@ product; interpreter regression spec red on the pre-fix seed (0 vs 3/1).
 - GGUF chat template: `doc/08_tracking/bug/caret_slang_local_ignores_gguf_chat_template_2026-10-03.md`.
 - The repo's deployed Windows seeds are stale; `bin/cs.cmd` needs a phase-1
   redeploy from this source to pick up the seed fixes.
+
+## Update 2026-10-31 (release/1.0.0 sweep, Windows 11)
+
+**Evidence is Rust-seed only.** No self-hosted Windows binary exists on this host; Stage 4 is the bootstrap lane's (PR #5540). Binary: seed built from this branch, sha256 `ea7b4d9d7e2dc93d` (merged tree; the 187-spec counts below were taken on the pre-merge seed `8ce923d2df72814f` with identical results to branch head). This is not release-grade PASS.
+
+Caret + smux sweep of 187 specs, run one at a time:
+
+| Run | Seed | Passed | Failed | Other |
+|---|---|---|---|---|
+| Start | tracked `bin/simple.exe` (95 seed commits behind) | 127 | 51 | 6 broken, 3 could-not-complete |
+| End | built from this branch | 160 | 22 | 4 pending-only, 1 timed out |
+
+The old seed counted pending-only specs as passes, so the start figure is inflated by 4.
+
+Still RED, each with a named cause (records: `doc/08_tracking/bug/caret_system_specs_windows_red_2026-10-31.md`, `smux_native_provider_lane_blocked_on_windows_seed_2026-10-31.md`, `smux_live_pty_multi_pane_needs_native_resize_2026-10-31.md`, `bin_caret_dropped_native_only_launcher_policy_2026-09-06.md`):
+
+- Owner declined the native-only `bin/caret` policy: `caret_launcher_policy_spec`, `llm_caret_cli_hardening_spec`. Left RED on purpose.
+- No native build on this host (seed `native-build` panics in vendored cranelift; no Stage 4): `smux_{configured_launch,literal_input,presentation_native,window_rename,windows_conpty_features,windows_owner_lifecycle,windows_shared_clients,interactive_windows_input,zoom}`, `pane_backend`, `llm_caret_{cli_cached,cli_hidden_cached,native_closure,messaging_phase_cli}`.
+- Missing host tools or services: tmux (`workspace_cli`, `workspace_recovery`), `script` (`tui_pty`), `pgrep` (`installed_claude_cli`), model root (`slang_local_hello`), framed endpoint config (`coremux_sosix_endpoint`).
+- `cs_live_agents` timed out at the runner's 120s budget; live agents stopped at first-run prompts.
+
+SUPERSEDES the 2026-10-03 "Open" note on `caret_workbench_e2e` seam 1: fixed by routing shebang scripts through the POSIX shell, now 2/2.
+
+Known open: `to_int_nil_coalesce_dead_fallback_2026-10-31.md`; C and Rust `rt_bytes_to_text` disagree on malformed bytes; `bin/simple lint` crashes on several smux and caret files on both this branch and the base.

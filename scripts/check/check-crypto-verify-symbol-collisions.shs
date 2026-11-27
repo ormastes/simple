@@ -40,10 +40,17 @@
 # type-name collision gate alongside this script.
 #
 # STRICT BY DEFAULT: a duplicate here is a security defect, not a style nit.
-set -eu
+#
+# Verdict convention (repo guard standard), last line of stdout:
+#   PASS — <n> guarded symbol(s) checked across src/, 0 new collisions   (exit 0)
+#   FAIL — <n> guarded symbol(s) checked, new/worsened collision(s): ...  (exit 1)
+#   ERROR — nothing was checked (<reason>)                                (exit 2)
+# A failed scan (unreadable src/, grep error) is an incomplete scan:
+# ERROR, never a silent clean.
+set -u
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
-cd "$ROOT_DIR"
+cd "$ROOT_DIR" || { echo "ERROR — nothing was checked (cannot cd to $ROOT_DIR)"; exit 2; }
 
 SCAN_DIRS="src"
 
@@ -110,7 +117,7 @@ for arg in "$@"; do
     case "$arg" in
         --list) LIST_ONLY=1 ;;
         -h|--help) usage; exit 0 ;;
-        *) echo "check-crypto-verify-symbol-collisions: unknown option: $arg" >&2; usage; exit 2 ;;
+        *) echo "check-crypto-verify-symbol-collisions: unknown option: $arg" >&2; usage >&2; echo "ERROR — nothing was checked (unknown option $arg)"; exit 2 ;;
     esac
 done
 
@@ -132,13 +139,20 @@ GREP=/usr/bin/grep
 [ -x "$GREP" ] || GREP=grep
 
 FAILED=0
+CHECKED=0
 
 for sym in $GUARDED_SYMBOLS; do
     [ -n "$sym" ] || continue
 
     # Top-level definitions only: `fn NAME(` at column 0. Nested/indented defs
     # and `extern fn rt_NAME(` declarations are deliberately NOT counted.
-    hits=$("$GREP" -rn --include='*.spl' "^fn ${sym}(" $SCAN_DIRS 2>/dev/null || true)
+    hits=$("$GREP" -rn --include='*.spl' "^fn ${sym}(" $SCAN_DIRS 2>/dev/null)
+    grep_rc=$?        # read DIRECTLY into a variable, never masked by `|| true`
+    if [ "$grep_rc" -gt 1 ]; then
+        echo "ERROR — nothing was checked (grep rc=$grep_rc scanning $SCAN_DIRS for ${sym}; scan incomplete)"
+        exit 2
+    fi
+    CHECKED=$((CHECKED+1))
 
     if [ -z "$hits" ]; then
         count=0
@@ -174,8 +188,9 @@ fi
 if [ "$FAILED" -ne 0 ]; then
     echo "" >&2
     echo "check-crypto-verify-symbol-collisions: FAILED" >&2
+    echo "FAIL — $CHECKED guarded symbol(s) scanned, new or worsened same-signature collision(s) named above (exit detail on stderr)"
     exit 1
 fi
 
-echo "check-crypto-verify-symbol-collisions: OK (all guarded symbols uniquely defined)"
+echo "PASS — $CHECKED guarded symbol(s) checked across $SCAN_DIRS, 0 new collisions beyond baseline"
 exit 0

@@ -44,3 +44,23 @@ Spec left unmodified — no evidence found that the tool names/params are
 stale; flagged as a genuine gap for someone with more context on the debug
 MCP stdio handler to investigate.
 
+## Triage 2026-11-25 (P2 ledger sweep, Windows worktree)
+
+The "isn't wired into the tool dispatch table" half of the hypothesis is
+disproven by inspection at this HEAD: `debug_log_tree` is registered in the
+tool table (`src/app/mcp/tool_table.spl:460`), mapped in the CLI-passthrough
+dispatch (`src/app/mcp/main_dispatch.spl:292` -> `("log tree", 10)`), handled
+by `handle_debug_log_tree` (`src/app/mcp/debug_log_tools.spl:228`), and its
+`format` argument is forwarded in `src/app/mcp/cli_passthrough.spl:375`.
+
+The end-to-end stdio re-run is BLOCKED at this HEAD: `src/app/mcp/main.spl`
+itself carries `@representation_boundary` (added repo-wide by `cfd89933699`),
+which the pinned tracked seed (`bin/simple.exe`, Rust v1.0.0-rc.1) rejects,
+so `bin/simple.exe run src/app/mcp/main.spl --mode=interpreter` — the exact
+command the spec shells out to — fails at module load
+(`unknown decorator '@representation_boundary'`) before the session starts.
+Whether the response for id `"3"` is now emitted therefore remains
+unverified at runtime. Status stays OPEN pending a re-run once the tracked
+seed accepts the decorator (or a self-hosted binary is deployed); no source
+change made by this sweep.
+

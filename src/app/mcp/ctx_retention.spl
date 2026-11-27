@@ -1,0 +1,168 @@
+# Context store retention — pure purge decision.
+#
+# `simple_ctx_purge` deletes chunks from `.simple/ctx/chunks.sdn`. Deletion is
+# destructive, so the decision is kept pure and conservative:
+#
+#   * a policy must name at least one selector (source label prefix, age
+#     limit, byte cap) — an empty policy is `NoSelector`, never "purge all";
+#   * limits must be positive;
+#   * the plan is computed from rows only, so the tool can show it as a dry
+#     run (the default) before anything is rewritten.
+#
+# Selection: a chunk is dropped when it is in the source scope (every chunk if
+# no source selector) AND, when an age limit is set, it is strictly older than
+# that limit. The byte cap then applies to the chunks that remain in the
+# source scope: oldest are dropped (ts, then id) until the scope fits the cap.
+# Chunks outside the source scope are never touched. An age limit combined with
+# a cap means "drop the old ones, then trim the rest down to the cap".
+#
+# No I/O: the caller converts stored chunks to rows and applies the plan.
+
+struct CtxChunkId:
+    value: i64
+
+# Source label of a chunk (`doc:...`, `cmd:...`, `manual:...`).
+struct CtxSourceLabel:
+    value: text
+
+struct CtxUnixSecs:
+    secs: i64
+
+# Age in seconds.
+struct CtxAgeLimit:
+    secs: i64
+
+struct CtxByteCount:
+    bytes: i64
+
+struct CtxRetentionRow:
+    id: CtxChunkId
+    source: CtxSourceLabel
+    ts: CtxUnixSecs
+    size: CtxByteCount
+
+struct CtxRetentionPolicy:
+    source_prefix: CtxSourceLabel?
+    older_than: CtxAgeLimit?
+    max_bytes: CtxByteCount?
+
+enum CtxPolicyCheck:
+    Valid
+    NoSelector
+    NonPositiveLimit
+
+# Whether the tool rewrites the store (`Apply`) or only reports (`DryRun`).
+enum CtxPurgeMode:
+    DryRun
+    Apply
+
+struct CtxRetentionPlan:
+    keep: [CtxChunkId]
+    drop: [CtxChunkId]
+    dropped: CtxByteCount
+    kept: CtxByteCount
+
+pub fn ctx_retention_row(id: CtxChunkId, source: CtxSourceLabel, ts: CtxUnixSecs, size: CtxByteCount) -> CtxRetentionRow:
+    CtxRetentionRow(id: id, source: source, ts: ts, size: size)
+
+pub fn ctx_retention_policy(source_prefix: CtxSourceLabel?, older_than: CtxAgeLimit?, max_bytes: CtxByteCount?) -> CtxRetentionPolicy:
+    CtxRetentionPolicy(source_prefix: source_prefix, older_than: older_than, max_bytes: max_bytes)
+
+pub fn ctx_retention_check(policy: CtxRetentionPolicy) -> CtxPolicyCheck:
+    if not policy.source_prefix.? and not policy.older_than.? and not policy.max_bytes.?:
+        return CtxPolicyCheck.NoSelector
+    if policy.older_than.?:
+        if policy.older_than.unwrap().secs <= 0:
+            return CtxPolicyCheck.NonPositiveLimit
+    if policy.max_bytes.?:
+        if policy.max_bytes.unwrap().bytes <= 0:
+            return CtxPolicyCheck.NonPositiveLimit
+    if policy.source_prefix.?:
+        if policy.source_prefix.unwrap().value == "":
+            return CtxPolicyCheck.NonPositiveLimit
+    CtxPolicyCheck.Valid
+
+pub fn ctx_policy_check_label(check: CtxPolicyCheck) -> text:
+    match check:
+        case CtxPolicyCheck.Valid: "valid"
+        case CtxPolicyCheck.NoSelector: "no_selector"
+        case CtxPolicyCheck.NonPositiveLimit: "non_positive_limit"
+
+fn _ctx_in_source_scope(row: CtxRetentionRow, policy: CtxRetentionPolicy) -> bool:
+    if policy.source_prefix.?:
+        return row.source.value.starts_with(policy.source_prefix.unwrap().value)
+    true
+
+fn _ctx_too_old(row: CtxRetentionRow, policy: CtxRetentionPolicy, now: CtxUnixSecs) -> bool:
+    if policy.older_than.?:
+        return now.secs - row.ts.secs > policy.older_than.unwrap().secs
+    false
+
+# Direct selection inside the source scope: with an age limit, the old rows;
+# with only a byte cap, none (the cap trims below); with only a source
+# selector, the whole scope.
+fn _ctx_selected_directly(row: CtxRetentionRow, policy: CtxRetentionPolicy, now: CtxUnixSecs) -> bool:
+    if policy.older_than.?:
+        return _ctx_too_old(row, policy, now)
+    not policy.max_bytes.?
+
+# Index of the oldest remaining in-scope row (ts, then id), or the row count
+# when none is left.
+fn _ctx_oldest_in_scope(rows: [CtxRetentionRow], dropped: [bool], scope: [bool]) -> i64:
+    var best = rows.len()
+    var i = 0
+    while i < rows.len():
+        if scope[i] and not dropped[i]:
+            if best == rows.len():
+                best = i
+            elif rows[i].ts.secs < rows[best].ts.secs:
+                best = i
+            elif rows[i].ts.secs == rows[best].ts.secs and rows[i].id.value < rows[best].id.value:
+                best = i
+        i = i + 1
+    best
+
+# Plan for `policy` at time `now`. An invalid policy yields an empty plan that
+# keeps everything: this function never selects rows for a policy the caller
+# has not checked.
+pub fn ctx_retention_decide(rows: [CtxRetentionRow], policy: CtxRetentionPolicy, now: CtxUnixSecs) -> CtxRetentionPlan:
+    var dropped: [bool] = []
+    var scope: [bool] = []
+    var valid = false
+    match ctx_retention_check(policy):
+        case CtxPolicyCheck.Valid:
+            valid = true
+        case _:
+            valid = false
+    var scope_bytes: i64 = 0
+    for r in rows:
+        val in_scope = valid and _ctx_in_source_scope(r, policy)
+        scope.push(in_scope)
+        dropped.push(in_scope and _ctx_selected_directly(r, policy, now))
+    if valid and policy.max_bytes.?:
+        var i = 0
+        while i < rows.len():
+            if scope[i] and not dropped[i]:
+                scope_bytes = scope_bytes + rows[i].size.bytes
+            i = i + 1
+        val cap = policy.max_bytes.unwrap().bytes
+        while scope_bytes > cap:
+            val victim = _ctx_oldest_in_scope(rows, dropped, scope)
+            if victim >= rows.len():
+                break
+            dropped[victim] = true
+            scope_bytes = scope_bytes - rows[victim].size.bytes
+    var keep: [CtxChunkId] = []
+    var drop: [CtxChunkId] = []
+    var dropped_bytes: i64 = 0
+    var kept_bytes: i64 = 0
+    var j = 0
+    while j < rows.len():
+        if dropped[j]:
+            drop.push(rows[j].id)
+            dropped_bytes = dropped_bytes + rows[j].size.bytes
+        else:
+            keep.push(rows[j].id)
+            kept_bytes = kept_bytes + rows[j].size.bytes
+        j = j + 1
+    CtxRetentionPlan(keep: keep, drop: drop, dropped: CtxByteCount(bytes: dropped_bytes), kept: CtxByteCount(bytes: kept_bytes))

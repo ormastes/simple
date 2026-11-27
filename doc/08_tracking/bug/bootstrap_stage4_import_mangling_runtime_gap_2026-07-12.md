@@ -51,6 +51,82 @@ linking, not an isolated function. Cross-referenced verification against
   from the production `link_llvm_native` body" and "Provider composition, TODO
   535" remains incomplete.
 
-**Status:** PARTIALLY-FIXED. Sub-issue (a) resolved; sub-issue (b) remains
+**Status:** SUPERSEDED. Sub-issue (a) resolved; sub-issue (b) remains
 explicit open TODO per cross-referenced doc.
 
+## 2026-11-10 status — P3 runtime-lane triage (worktree simple-p3-rt-20261110)
+
+**Verdict: SUPERSEDED.** Sub-issue (a) (bare `run_check`/`run_arch_check`
+mangling) stays FIXED-AT-TIP per the in-doc 2026-07-17 verification. Sub-issue
+(b) (Stage-4 full-CLI capability providers) is no longer tracked here: the
+current authority is the newer OPEN bug
+`stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-09-01.md`
+(2026-09-01), which tracks the same link boundary host-independently.
+
+Source audit at base 1504212d788b — all three sub-issue-(b) symbols have live
+runtime providers, so no `src/runtime` gap remains on this side of the
+boundary:
+
+- `rt_array_concat` — `src/runtime/runtime_native.c:11122`
+- `spl_dlsym` — `src/runtime/runtime_native.c:11370` (also `runtime_dynload.c:2077`)
+- `spl_wffi_call_i64` — `src/runtime/runtime_native.c:11421`
+
+What remains is the Stage-4 linker/provider-composition boundary itself
+(compiler/native_project lane, per the TODO's own "fix call-target mangling at
+its canonical owner" note), which the 2026-09-01 bug tracks. No `src/runtime`
+change made; nothing further actionable in this lane. Execution label:
+host-independent-source (presence verified by source audit at a pinned base).
+
+
+## Triage 2026-11-10 (p3-boot3 lane, assignment row 21)
+
+**Verdict: SUPERSEDED — corroborated independently.**
+
+The same-day runtime-lane triage above stands. Re-verified at this lane's
+base (origin/release/1.0.0, worktree simple-p3-boot3-20261110):
+
+- The superseding tracker
+  `stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-09-01.md`
+  exists.
+- All three sub-issue-(b) providers are live at the cited lines:
+  `rt_array_concat` `src/runtime/runtime_native.c:11122`,
+  `spl_dlsym` `:11370`, `spl_wffi_call_i64` `:11421`. No `src/runtime` gap
+  on this side of the Stage-4 link boundary.
+
+No change made in this lane; the Stage-4 linker/provider-composition boundary
+remains with the compiler/native_project lane under the 2026-09-01 tracker.
+
+## 2026-11-11 status — P3 rt2 lane triage (worktree simple-p3-rt2-20261111)
+
+**Verdict: SUPERSEDED-by-prior-lane** — spot-check corroborates the
+2026-11-10 p3-rt addendum (and its same-day p3-boot3 corroboration); no deep
+triage redone.
+
+Spot-check at this lane's base (origin/release/1.0.0 tip 790b54f7c4fc):
+
+- All three sub-issue-(b) providers still live at the exact cited lines of
+  `src/runtime/runtime_native.c`: `rt_array_concat` (:11122),
+  `spl_dlsym` (:11370), `spl_wffi_call_i64` (:11421). No `src/runtime` gap
+  on this side of the Stage-4 link boundary.
+- Superseding tracker
+  `stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-09-01.md`
+  present in the tree.
+- Prior-lane base 1504212d788b is an ancestor of this base, so the cited
+  fix state is not newer than what was triaged.
+- seed-smoke (refreshed seed 0791c2b7f4a7): `bin/simple.exe --version`
+  exit 0, v1.0.0-rc.1 — seed healthy for this lane's runs.
+
+Nothing actionable in the `src/runtime` lane; the Stage-4 linker/provider
+boundary stays with the compiler/native_project lane under the 2026-09-01
+tracker. No change made.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — Sub-issue (a) fixed at tip; sub-issue (b) provider composition remains an explicit open TODO tracked by `stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-09-01.md` (present in tree, rt2 spot-checked the three providers live in runtime_native.c).
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**SUPERSEDED (confirmed)** — All three sub-issue-(b) providers live at this base (`rt_array_concat` `src/runtime/runtime_native.c:11220`; `spl_dlsym`/`spl_wffi_call_i64` per prior lanes); superseding tracker `stage4_full_cli_unlinkable_579_unresolved_runtime_symbols_2026-09-01.md` in-tree. No `src/runtime` gap on this side of the boundary.

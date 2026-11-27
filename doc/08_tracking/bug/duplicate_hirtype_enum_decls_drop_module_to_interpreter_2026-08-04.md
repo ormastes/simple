@@ -118,3 +118,38 @@ de-duplicate `HirType` so exactly one declaration is registered. (a) is the
 smaller change and turns every remaining instance of this class into a visible
 failure instead of a silent wrong answer; `SIMPLE_JIT_STRICT=1` already does
 this for the JIT path only.
+
+## Verification 2026-11-25 (P3 fleet, release/1.0.0) — symptom not reproducing
+
+Runs on the tracked self-hosted bin/simple.exe at tree fcd95d41d60
+(SIMPLE_LIB=src):
+
+- The doc's own time-boxed repro (`timeout 200 bin/simple.exe test`, full
+  suite) was executed; on this Windows host the 200 s window is consumed by
+  test/ discovery ("[setup] discover: begin" is the last line), so the
+  co-compilation phase the fallback fired in is not reached — this specific
+  run is environment-limited and proves nothing by itself.
+- However, four substantial compile logs from this session — including one
+  (a full native-build of the compiler CLI closure) that DID hit the
+  jit-fallback path — contain **zero** occurrences of the bug's signature
+  (`case Str:` / `irrefutable BINDING` / enum-variant binding against
+  `HirType`): `grep -c 'jit-fallback\|irrefutable BINDING'` = 0 in the
+  window_scene_draw_ir spec log, the nand_emu module_import_spec run log, and
+  the full-suite startup log. The single jit-fallback that did occur
+  (native-build log) is the *cross-module duplicate-symbol collision* family
+  (`ambiguous call to file_write: 5 co-compiled definitions`), a different
+  documented defect class, not the HirType enum-binding defect.
+
+Combined with the 2026-08-17 re-verification above (0 irrefutable BINDING
+lines), the manifesting symptom of this bug — a module silently dropped to
+the interpreter by a `case Str:` irrefutable binding against a stray
+`enum HirType` — does not reproduce on the current tree.
+
+What remains true: the 26 duplicate `enum HirType` declarations still exist
+(source-level latent hazard), and the diagnostic-improvement suggestion
+(name the winning declaration in the error) is unimplemented. De-duplicating
+27 HirType declarations across src/compiler is a design program, not a
+bounded P3 fix; the hazard stays documented here.
+
+**Status:** symptom RESOLVED (not reproducing, evidence above); duplicate-decl
+hazard remains as documented latent debt.

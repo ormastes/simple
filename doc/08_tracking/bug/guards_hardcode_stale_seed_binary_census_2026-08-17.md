@@ -3,7 +3,7 @@
 - **Filed:** 2026-08-17
 - **Severity:** P1 — these guards can pass BY CONSTRUCTION, and one of them has
   already been used to retire four real defects
-- **Status:** OPEN
+- **Status:** FIXED 2026-11-03 (items 1-3 landed; item 4 residuals listed below)
 
 ## The defect
 
@@ -92,3 +92,54 @@ three-binary probe table is another lane's measurement, reproduced by them on tw
 independent fresh builds; full detail in
 `doc/08_tracking/bug/engine_divergence_guard_hardcodes_stale_seed_2026-08-17.md`
 (`2d461171550`).
+
+**Revalidated 2026-11-02: still plausible because the report title (27 guards and gates hardcode `bin/simple`) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 (lane p01-c): required-fix item 1 completed
+
+`sh scripts/check/check-guard-binary-injectable.shs` was RED on
+`origin/release/1.0.0` (`FAIL — 68 file(s) checked, 15 hardcode the compiler`).
+All 15 now resolve the compiler as `${SIMPLE_BIN:-$ROOT/bin/simple}`; the gate
+reports `PASS — 68 file(s) checked, 0 hardcoded`. Default behavior is unchanged
+when `SIMPLE_BIN` is unset. Still open: item 2 (fail closed on a stale binary in
+the remaining guards), item 3 (reopen the 4 rows retired by `e21824a4ed4`), and
+the per-guard audit of item 4.
+
+## 2026-11-03 (lane guard-seed-prov): items 2-4
+
+- Item 2: `scripts/check/lib/guard-binary-provenance.shs` is the single helper
+  (`guard_require_binary <bin> <root> selfhosted|any`): seed banner (`--version`
+  contains "bootstrap seed") with `selfhosted` -> `ERROR — nothing was checked`,
+  exit 2, naming the binary; stale (older than src/compiler or src/lib `.spl`)
+  -> exit 2 under `SIMPLE_REQUIRE_FRESH=1`, else disclosed. Wired into
+  `check-pure-simple-pipe-lambda-parse.shs`; `--selftest` (5 fixtures) runs inside
+  `check-guard-binary-injectable.shs`. engine-divergence keeps its own inline
+  stale check (FAIL stays FAIL). Other guards adopt the helper per need.
+- Item 3: the 4 rows retired by `e21824a4ed4` are reopened in bug_db.sdn
+  (`jit_class_mutation_drop_characterization` was already open).
+- Item 4: 5 real hardcodes fixed with `${SIMPLE_BIN:-...}`:
+  check-engine-probe-no-self-spawn, check-native-option-unwrap-receiver,
+  check-office-desktop-render, check-rt-hash-text-cross-lane,
+  test/perf/bench/http_server/run_bench. Still not fixed (listed): 
+  check-startup-perf-budget.shs:156 (SKIPs on absence; separate perf lane),
+  test/perf/port_algorithms + test/05_perf/port_algorithms run_cipher_compress_gate.shs:11
+  (fallback only), check-hir-visitors-fresh.shs:48 and check-main-test-runnable-push.shs:335
+  (fallback after SIMPLE_BIN), SIMPLE_BINARY-only guards (check-bootstrap-receipt-instruction,
+  check-caret-suite-bootstrap, check-sdoctest-bootstrap, check-nvme-firmware-remaining-gates,
+  check-build-outcome-reason-attribution accepts both). Note the injectable gate only tests
+  that a file mentions `SIMPLE_BIN`, so it cannot see a mere mention; tighten as follow-up.
+
+## 2026-11-03 (lane isl-seedcensus): close-out
+
+- The injectable gate (`check-guard-binary-injectable.shs`) was RED on
+  origin/release/1.0.0: 1 "offender" was
+  `test/01_unit/app/llm_caret/cs_smux_launcher_spec.spl`, a spec that asserts the
+  literal launcher text `"$ROOT/bin/simple"` and runs no compiler. `*_spec.spl`
+  string assertions are now skipped, with a selftest fixture that fails if a
+  spec string is flagged. Result: `PASS — 87 file(s) checked, 0 hardcoded`.
+- Windows: `guard_require_binary` accepts a bare `.../bin/simple` when only
+  `bin/simple.exe` exists (6th selftest fixture), instead of exiting 2 with
+  "not executable".
+- Residual (unchanged, listed above): the SIMPLE_BINARY-only guards and the
+  fallback-after-SIMPLE_BIN sites; the gate cannot see a mere mention of
+  `SIMPLE_BIN`. Track as follow-up if a concrete false green appears.

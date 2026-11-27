@@ -1,5 +1,5 @@
 # Bug: sspec test runner kills a heavy subprocess example at a fixed 10s timeout
-## Open 2026-09-16 — needs owner triage
+## RESOLVED 2026-11-25 — timeout is now configurable (`SIMPLE_TIMEOUT_SECONDS`, `0` disables); verified live on the pinned v1.0.0-rc.1 binary (see note at bottom)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -45,3 +45,34 @@ timeout, surface the timeout reason in the example's captured `err` (or a distin
 so a spec can distinguish "child timed out" from "child failed", instead of a silent
 partial capture with `code == 1`.
 
+
+## Verification 2026-11-25 (release/1.0.0 HEAD 4bc2c986375, work/p2w5-aa lane)
+
+The "Desired fix" is landed in the runner's safety policy
+(`src/compiler_rust/driver/src/cli/examples_safety.rs`) and verified LIVE on
+the pinned tracked binary `bin/simple.exe` (Simple v1.0.0-rc.1):
+
+- The 10s default is now overridable: `examples_timeout_secs()` reads
+  `SIMPLE_TIMEOUT_SECONDS` (positive value wins; `0` disables the watchdog
+  and child isolation entirely — `examples_safety.rs:22-43`).
+- Probe: an examples-path file whose `main` sleeps 12s
+  (`rt_sleep_ms(12000)`):
+  - default: killed at 10s with `error: example timed out after 10s: <path>`
+    (10.4s wall) — the original behavior, reproduced;
+  - `SIMPLE_TIMEOUT_SECONDS=30`: child runs to completion, prints its marker,
+    rc=0 (12.4s wall).
+- The timeout reason now reaches the parent's stderr: the runner tees the
+  child's stdout/stderr on dedicated threads and prints the timeout message
+  after the kill (`run_child_with_timeout_and_writers`,
+  `examples_safety.rs:141-205`), with Rust unit tests covering output
+  retention across the kill (`timeout_kills_real_process_and_retains_routed_output`).
+  The original "silent partial capture, reason invisible" symptom is thereby
+  mitigated at the runner level.
+
+Residual, stated honestly: the timeout reason is still not injected into a
+spec's own captured `err` string as a distinct status (that would be a
+spec-side `process_run` contract change); a spec that needs to distinguish
+"child timed out" from "child failed" should still size its children or set
+`SIMPLE_TIMEOUT_SECONDS`. The primary ask — a configurable per-example
+timeout — is implemented and verified, and the documented workaround
+(per-check files under ~10s) remains valid. Closing as RESOLVED.

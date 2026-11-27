@@ -1,0 +1,155 @@
+# Trusted mechanisms under the existing Controller writer. The service verifies
+# independent retain/access approvals and fresh installed authority BEFORE entry.
+# No public DATA, stored binding, model or metadata envelope grants permission.
+use std.common.contracts.orchestration.agent_invocation_binding_v1.AgentTaskInputV1
+use std.common.contracts.orchestration.agent_task_object_v1.*
+use std.common.contracts.orchestration.agent_task_use_v1.*
+use std.common.contracts.orchestration.assignment_v1.controller_assignment_authority_v1
+use std.common.contracts.orchestration.agent_policy_resolution_v1.AgentPolicyResolutionV1
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
+use std.common.contracts.distributed_operation_history_v2.DistributedOperationJournalHistoryBatchV2
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_lookup_v2, distributed_operation_journal_read_required_v3}
+use std.nogc_sync_mut.orchestration.desired_input_objects_v1.*
+use std.nogc_sync_mut.orchestration.agent_policy_objects_v1.controller_agent_policy_read_v1
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.common.crypto.sha256.sha256_text
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub fn controller_agent_task_operation_id_v1(controller_id: text, ns: text,
+        reference: text, digest: text) -> Result<text, text>:
+    if not builder_identifier_valid_v1(controller_id): return Err("agent-task-controller-invalid")
+    val identity = agent_task_identity_digest_v1(ns, reference, digest)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("controller-agent-task-identity"), "controllerId": SdnValue.String(controller_id),
+        "taskIdentityDigest": SdnValue.String(identity)}
+    Ok("task-" + sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"))
+
+pub fn controller_agent_task_retain_operation_v1(controller_id: text,
+        task: AgentTaskInputV1) -> Result<OperationEnvelopeV2, text>:
+    val bytes = agent_task_object_encode_v1(task)?
+    val id = controller_agent_task_operation_id_v1(controller_id, task.ns, task.reference, task.content_digest)?
+    val authority = controller_assignment_authority_v1(controller_id)?
+    Ok(OperationEnvelopeV2(version: 2, id: id, payload_digest: sha256_text(bytes),
+        principal: controller_id, project: controller_id, host_id: controller_id,
+        operation: "controller_agent_task_retain_v1", environment_digest: authority, policy_revision: 1,
+        revocation_epoch: 0, session_generation: 1, memory_bytes: 1, duration_ms: 1))
+
+pub fn controller_agent_task_use_operation_v1(binding: AgentTaskUseBindingV1) -> Result<OperationEnvelopeV2, text>:
+    val digest = agent_task_use_digest_v1(binding)?
+    val authority = controller_assignment_authority_v1(binding.controller_id)?
+    val id = "task-use-" + agent_task_use_identity_digest_v1(binding)?
+    Ok(OperationEnvelopeV2(version: 2, id: id, payload_digest: digest,
+        principal: binding.controller_id, project: binding.controller_id, host_id: binding.controller_id,
+        operation: "controller_agent_task_use_v1", environment_digest: authority, policy_revision: 1,
+        revocation_epoch: 0, session_generation: 1, memory_bytes: 1, duration_ms: 1))
+
+fn controller_agent_task_bytes_v1(journal: DistributedOperationJournalV2,
+        digest: text, maximum: i64) -> Result<text, text>:
+    val current = controller_storage_owner_check_v3(journal)?
+    if not builder_digest_valid_v1(digest): return Err("agent-task-object-digest-invalid")
+    # The protected reader chooses its actual retained Windows store, never root.
+    val bytes = distributed_operation_journal_read_required_v3(journal,
+        "desired-input-objects/" + digest + ".sdn", maximum)?
+    if sha256_text(bytes) != digest: return Err("agent-task-object-content-mismatch")
+    Ok(bytes)
+
+pub fn controller_agent_task_object_retain_v1(journal: DistributedOperationJournalV2,
+        task: AgentTaskInputV1) -> Result<bool, text>:
+    val bytes = agent_task_object_encode_v1(task)?
+    desired_object_put_owned_v3(journal, sha256_text(bytes), bytes, 32768)
+
+pub fn controller_agent_task_use_retain_v1(journal: DistributedOperationJournalV2,
+        binding: AgentTaskUseBindingV1) -> Result<bool, text>:
+    val bytes = agent_task_use_encode_v1(binding)?
+    desired_object_put_owned_v3(journal, sha256_text(bytes), bytes, 8192)
+
+# Historical read validates exact bytes and envelope. It is an internal replay
+# mechanism and deliberately does not interpret current cancellation as erasure.
+pub fn controller_agent_task_object_read_v1(journal: DistributedOperationJournalV2,
+        operation: OperationEnvelopeV2, controller_id: text) -> Result<AgentTaskInputV1, text>:
+    val envelope = distributed_encode_operation_v2(operation)?
+    if operation.operation != "controller_agent_task_retain_v1" or operation.host_id != controller_id:
+        return Err("agent-task-controller-mismatch")
+    val task = agent_task_object_decode_v1(controller_agent_task_bytes_v1(journal, operation.payload_digest, 32768)?)?
+    if distributed_encode_operation_v2(controller_agent_task_retain_operation_v1(controller_id, task)?)? != envelope:
+        return Err("agent-task-envelope-mismatch")
+    Ok(task)
+
+pub fn controller_agent_task_committed_v1(journal: DistributedOperationJournalV2,
+        binding: AgentTaskUseBindingV1) -> Result<AgentTaskInputV1, text>:
+    val checked = agent_task_use_encode_v1(binding)?
+    val id = controller_agent_task_operation_id_v1(binding.controller_id, binding.ns, binding.task_ref, binding.task_digest)?
+    val record = distributed_operation_journal_lookup_v2(journal, id)?
+    val operation = distributed_decode_operation_v2(record.envelope)?
+    val task = controller_agent_task_object_read_v1(journal, operation, binding.controller_id)?
+    if record.state != "completed" or record.outcome_digest != operation.payload_digest:
+        return Err("agent-task-not-committed")
+    if task.ns != binding.ns or task.reference != binding.task_ref or task.content_digest != binding.task_digest:
+        return Err("agent-task-version-mismatch")
+    Ok(task)
+
+# Always reopen the actual stored desired parent, not a caller-built policy DTO.
+pub fn controller_agent_task_policy_v1(journal: DistributedOperationJournalV2,
+        binding: AgentTaskUseBindingV1) -> Result<AgentPolicyResolutionV1, text>:
+    val checked = agent_task_use_encode_v1(binding)?
+    val desired_id = controller_desired_operation_id_v1(binding.controller_id, binding.session_uid)?
+    val desired_record = distributed_operation_journal_lookup_v2(journal, desired_id)?
+    val desired_operation = distributed_decode_operation_v2(desired_record.envelope)?
+    val desired = controller_desired_objects_read_owned_v3(journal, desired_operation, binding.controller_id)?
+    if desired_operation.operation != "controller_desired_input_v1" or desired.input.workload_uid != binding.session_uid:
+        return Err("agent-task-desired-parent-mismatch")
+    if desired_record.state != "completed" or desired_record.outcome_digest != desired_operation.payload_digest:
+        return Err("agent-task-desired-not-committed")
+    if desired.input.source_digest != binding.source_digest: return Err("agent-task-source-mismatch")
+    val policy_record = distributed_operation_journal_lookup_v2(journal, "policy-" + desired_id)?
+    val policy_operation = distributed_decode_operation_v2(policy_record.envelope)?
+    if policy_record.state != "completed" or policy_record.outcome_digest != policy_operation.payload_digest:
+        return Err("agent-task-policy-not-committed")
+    val policy = controller_agent_policy_read_v1(journal, policy_operation, binding.controller_id)?
+    # Check the real stored policy belongs to this exact desired parent, even if
+    # another valid policy record has identical namespace/reference/provider.
+    if (policy_operation.id != "policy-" + desired_id or policy.source_digest != desired.input.source_digest or
+            policy.source_digest != binding.source_digest or policy.catalog_digest != binding.catalog_digest or
+            policy.session.meta.ns != binding.ns or policy.session.agent.task_ref != binding.task_ref or
+            policy.session.agent.provider != binding.provider): return Err("agent-task-pinned-policy-mismatch")
+    Ok(policy)
+
+pub fn controller_agent_task_use_read_v1(journal: DistributedOperationJournalV2,
+        operation: OperationEnvelopeV2, controller_id: text) -> Result<AgentTaskUseBindingV1, text>:
+    val envelope = distributed_encode_operation_v2(operation)?
+    if operation.operation != "controller_agent_task_use_v1" or operation.host_id != controller_id:
+        return Err("agent-task-use-controller-mismatch")
+    val binding = agent_task_use_decode_v1(controller_agent_task_bytes_v1(journal, operation.payload_digest, 8192)?)?
+    if binding.controller_id != controller_id or distributed_encode_operation_v2(controller_agent_task_use_operation_v1(binding)?)? != envelope:
+        return Err("agent-task-use-envelope-mismatch")
+    val policy = controller_agent_task_policy_v1(journal, binding)?
+    val task = controller_agent_task_committed_v1(journal, binding)?
+    Ok(binding)
+
+# Replay builds one actual-owner history batch; never scan WAL on hot reads.
+# Public history DATA cannot bypass the actual parent reads above.
+pub fn controller_agent_task_use_history_v1(journal: DistributedOperationJournalV2,
+        operation: OperationEnvelopeV2, controller_id: text,
+        history: DistributedOperationJournalHistoryBatchV2) -> Result<bool, text>:
+    val binding = controller_agent_task_use_read_v1(journal, operation, controller_id)?
+    if history.authority_digest != journal.authority_digest or history.head_commit_digest != journal.revision or history.head_sequence != journal.sequence:
+        return Err("agent-task-history-owner-mismatch")
+    if not history.operations.contains_key(operation.id): return Err("agent-task-history-missing")
+    val use_history = history.operations[operation.id]
+    if use_history.envelope_digest != sha256_text(distributed_encode_operation_v2(operation)?): return Err("agent-task-history-envelope-mismatch")
+    val desired_id = controller_desired_operation_id_v1(controller_id, binding.session_uid)?
+    val task_id = controller_agent_task_operation_id_v1(controller_id, binding.ns, binding.task_ref, binding.task_digest)?
+    for id in [desired_id, "policy-" + desired_id, task_id]:
+        if not history.operations.contains_key(id): return Err("agent-task-parent-history-missing")
+        val parent = history.operations[id]
+        if parent.last_to_state != "completed" or parent.last_sequence >= use_history.admitted_sequence:
+            return Err("agent-task-parent-history-order")
+    val cancel_id = "cancel-" + desired_id
+    if history.operations.contains_key(cancel_id):
+        if history.operations[cancel_id].admitted_sequence < use_history.admitted_sequence:
+            return Err("agent-task-use-after-cancellation")
+    Ok(true)

@@ -141,6 +141,7 @@ fn finish_bounded_output_reader(reader: Option<BoundedOutputReader>, bounded_wai
 }
 
 fn finish_child_output_bounded(mut child: Child, timeout_ms: i64, max_output_bytes: usize) -> (Vec<u8>, Vec<u8>, i64) {
+    simple_runtime::child_peak_rss::reset();
     let stdout_reader = spawn_bounded_output_reader(child.stdout.take(), max_output_bytes);
     let stderr_reader = spawn_bounded_output_reader(child.stderr.take(), max_output_bytes);
     let deadline = std::time::Instant::now().checked_add(std::time::Duration::from_millis(timeout_ms.max(0) as u64));
@@ -150,9 +151,9 @@ fn finish_child_output_bounded(mut child: Child, timeout_ms: i64, max_output_byt
     let mut status = None;
     loop {
         if status.is_none() {
-            match child.try_wait() {
+            match simple_runtime::child_peak_rss::reap(&mut child, true) {
                 Ok(Some(exit_status)) => status = Some(exit_status),
-                Ok(None) if timeout_ms <= 0 => status = child.wait().ok(),
+                Ok(None) if timeout_ms <= 0 => status = simple_runtime::child_peak_rss::reap(&mut child, false).ok().flatten(),
                 Ok(None) => {}
                 Err(_) => {
                     aborted = true;
@@ -179,7 +180,7 @@ fn finish_child_output_bounded(mut child: Child, timeout_ms: i64, max_output_byt
             #[cfg(not(unix))]
             let _ = child.kill();
             if status.is_none() {
-                let _ = child.wait();
+                let _ = simple_runtime::child_peak_rss::reap(&mut child, false);
             }
             break;
         }
@@ -207,6 +208,7 @@ fn finish_child_output_bounded(mut child: Child, timeout_ms: i64, max_output_byt
 }
 
 fn finish_child_output_with_timeout(mut child: Child, timeout_ms: i64) -> Result<(String, String, i64), ()> {
+    simple_runtime::child_peak_rss::reset();
     let stdout_handle = child.stdout.take().map(|mut pipe| {
         std::thread::spawn(move || {
             let mut buf = String::new();
@@ -227,10 +229,23 @@ fn finish_child_output_with_timeout(mut child: Child, timeout_ms: i64) -> Result
     let poll_interval = std::time::Duration::from_millis(10);
 
     let status = loop {
-        match child.try_wait() {
+        match simple_runtime::child_peak_rss::reap(&mut child, true) {
             Ok(Some(status)) => break Ok(status),
             Ok(None) => {
                 if start.elapsed() >= timeout {
+                    // The leader was spawned as a process-group leader
+                    // (configure_timeout_child_process_group), so kill the
+                    // group: a leader-only kill left `sh -c 'x &'` children
+                    // running and, holding the pipe write ends, kept the
+                    // reader threads below from reaching EOF.
+                    #[cfg(unix)]
+                    {
+                        let rc = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                        if rc != 0 {
+                            let _ = child.kill();
+                        }
+                    }
+                    #[cfg(not(unix))]
                     let _ = child.kill();
                     let _ = child.wait();
                     break Err(());
@@ -239,7 +254,7 @@ fn finish_child_output_with_timeout(mut child: Child, timeout_ms: i64) -> Result
             }
             Err(_) => {
                 let _ = child.kill();
-                let _ = child.wait();
+                let _ = simple_runtime::child_peak_rss::reap(&mut child, false);
                 break Err(());
             }
         }
@@ -391,6 +406,13 @@ pub fn rt_env_get(args: &[Value]) -> Result<Value, CompileError> {
         let result = sffi_env_get(key.as_ptr(), key.len() as u64);
         Ok(runtime_to_value(result))
     }
+}
+
+/// `extern fn rt_env_get_raw(name_ptr: i64, name_len: i64) -> i64?`: raw-ABI
+/// twin of [`rt_env_get`] for `src/compiler/70.backend/sffi_minimal.spl`.
+pub fn rt_env_get_raw(args: &[Value]) -> Result<Value, CompileError> {
+    let key = super::file_io::raw_ptr_len_text(args, 0, "rt_env_get_raw")?;
+    rt_env_get(&[Value::text(key)])
 }
 
 pub fn rt_lexer_source_set(args: &[Value]) -> Result<Value, CompileError> {
@@ -826,6 +848,9 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
 
     let mut command = std::process::Command::new(resolve_command_path(&*cmd));
     clear_simple_child_stack_env(&mut command);
+    // Same group-leader contract as rt_process_run_bounded: the deadline must
+    // reach the children the leader forked, not just the leader.
+    configure_timeout_child_process_group(&mut command);
     let mut child = match command
         .args(&cmd_args)
         .stdin(std::process::Stdio::null())
@@ -874,6 +899,25 @@ fn bounded_output_limit(value: &Value) -> Option<usize> {
 }
 
 pub fn rt_process_run_bounded(args: &[Value]) -> Result<Value, CompileError> {
+    let (stdout, stderr, exit_code) = process_run_bounded_raw(args)?;
+    Ok(Value::Tuple(vec![
+        Value::text(String::from_utf8_lossy(&stdout).into_owned()),
+        Value::text(String::from_utf8_lossy(&stderr).into_owned()),
+        Value::Int(exit_code),
+    ]))
+}
+
+/// Byte-exact twin of `rt_process_run_bounded` (std process_run_bounded_bytes).
+pub fn rt_process_run_bounded_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    let (stdout, stderr, exit_code) = process_run_bounded_raw(args)?;
+    Ok(Value::Tuple(vec![
+        Value::byte_array(stdout),
+        Value::byte_array(stderr),
+        Value::Int(exit_code),
+    ]))
+}
+
+fn process_run_bounded_raw(args: &[Value]) -> Result<(Vec<u8>, Vec<u8>, i64), CompileError> {
     if args.len() < 4 {
         return Err(CompileError::runtime(
             "rt_process_run_bounded requires 4 arguments (cmd, args, timeout_ms, max_output_bytes)",
@@ -929,20 +973,10 @@ pub fn rt_process_run_bounded(args: &[Value]) -> Result<Value, CompileError> {
         .spawn()
     {
         Ok(child) => child,
-        Err(_) => {
-            return Ok(Value::Tuple(vec![
-                Value::text(String::new()),
-                Value::text(String::new()),
-                Value::Int(-1),
-            ]))
-        }
+        Err(_) => return Ok((Vec::new(), Vec::new(), -1)),
     };
     let (stdout, stderr, exit_code) = finish_child_output_bounded(child, timeout_ms, max_output_bytes);
-    Ok(Value::Tuple(vec![
-        Value::text(String::from_utf8_lossy(&stdout).into_owned()),
-        Value::text(String::from_utf8_lossy(&stderr).into_owned()),
-        Value::Int(exit_code),
-    ]))
+    Ok((stdout.to_vec(), stderr.to_vec(), exit_code))
 }
 
 /// Mirror of `RtOwnedProcessReceipt` in `src/runtime/runtime.h`.
@@ -1015,6 +1049,14 @@ pub fn rt_process_owned_v3_capabilities_unavailable(_args: &[Value]) -> Result<V
         Value::Int(0),
         Value::Int(0),
     ]))
+}
+
+/// Cooperative snapshots are native-only; interpreter never acquires authority.
+pub fn rt_sosix_darwin_snapshot_v1_capabilities_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::array([1,0,0,0,0,1,95,0,0,0].iter().map(|v| Value::Int(*v)).collect::<Vec<_>>()))
+}
+pub fn rt_sosix_darwin_snapshot_v1_provider_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime("Darwin snapshot V1 requires the native Darwin runtime; interpreter cannot acquire process authority"))
 }
 
 pub fn rt_process_observation_v4_capabilities_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
@@ -1316,13 +1358,16 @@ pub fn rt_process_wait(args: &[Value]) -> Result<Value, CompileError> {
         None => 0,
     };
 
+    // Reaping goes through child_peak_rss::reap so the supervised builder can
+    // read this child's own peak RSS via rt_process_last_child_peak_rss_kib.
+    simple_runtime::child_peak_rss::reset();
     if timeout_ms > 0 {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
         loop {
             let poll = {
                 let mut processes = SPAWNED_PROCESSES.lock().unwrap();
                 match processes.get_mut(&pid) {
-                    Some(child) => child.try_wait(),
+                    Some(child) => simple_runtime::child_peak_rss::reap(child, true),
                     None => return Ok(Value::Int(-1)),
                 }
             };
@@ -1343,9 +1388,9 @@ pub fn rt_process_wait(args: &[Value]) -> Result<Value, CompileError> {
 
     let mut processes = SPAWNED_PROCESSES.lock().unwrap();
     match processes.remove(&pid) {
-        Some(mut child) => match child.wait() {
-            Ok(status) => Ok(Value::Int(wait_status_to_code(status))),
-            Err(_) => Ok(Value::Int(-1)),
+        Some(mut child) => match simple_runtime::child_peak_rss::reap(&mut child, false) {
+            Ok(Some(status)) => Ok(Value::Int(wait_status_to_code(status))),
+            _ => Ok(Value::Int(-1)),
         },
         None => {
             // Process not found in our map - may have already been waited on
@@ -1465,7 +1510,25 @@ lazy_static::lazy_static! {
     /// Children spawned by `rt_process_spawn_piped`, keyed by OS pid.
     /// Kept separate from `SPAWNED_PROCESSES` because these own live pipe
     /// handles that `rt_process_wait`/`rt_process_kill` must not steal.
-    static ref PIPED_PROCESSES: Mutex<HashMap<i64, std::process::Child>> = Mutex::new(HashMap::new());
+    static ref PIPED_PROCESSES: Mutex<HashMap<i64, PipedProcess>> = Mutex::new(HashMap::new());
+}
+
+struct PipedProcess {
+    child: std::process::Child,
+    stdout_state: i64,
+    stdout_tail: Vec<u8>,
+    exit_status: Option<std::process::ExitStatus>,
+    /// Registry generation for `PipedProcessRefV1` (0 = legacy pid-only spawn).
+    generation: i64,
+}
+
+impl PipedProcess {
+    fn observe_exit(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        if self.exit_status.is_none() {
+            self.exit_status = self.child.try_wait()?;
+        }
+        Ok(self.exit_status)
+    }
 }
 
 fn piped_arg_pid(args: &[Value], who: &str) -> Result<i64, CompileError> {
@@ -1527,7 +1590,13 @@ pub fn rt_process_spawn_piped(args: &[Value]) -> Result<Value, CompileError> {
                     }
                 }
             }
-            PIPED_PROCESSES.lock().unwrap().insert(pid, child);
+            PIPED_PROCESSES.lock().unwrap().insert(pid, PipedProcess {
+                child,
+                stdout_state: 0,
+                stdout_tail: Vec::new(),
+                exit_status: None,
+                generation: 0,
+            });
             Ok(Value::Int(pid))
         }
         Err(error) => {
@@ -1555,7 +1624,7 @@ pub fn rt_process_write_stdin(args: &[Value]) -> Result<Value, CompileError> {
         _ => return Err(CompileError::runtime("rt_process_write_stdin: data must be a string")),
     };
     let mut map = PIPED_PROCESSES.lock().unwrap();
-    let ok = match map.get_mut(&pid).and_then(|c| c.stdin.as_mut()) {
+    let ok = match map.get_mut(&pid).and_then(|c| c.child.stdin.as_mut()) {
         Some(stdin) => stdin.write_all(data.as_bytes()).and_then(|()| stdin.flush()).is_ok(),
         None => false,
     };
@@ -1618,7 +1687,7 @@ pub fn rt_process_write_stdin_some(args: &[Value]) -> Result<Value, CompileError
     }
 
     let mut map = PIPED_PROCESSES.lock().unwrap();
-    match map.get_mut(&pid).and_then(|c| c.stdin.as_mut()) {
+    match map.get_mut(&pid).and_then(|c| c.child.stdin.as_mut()) {
         Some(stdin) => match stdin.write(&bytes[start..start + request]) {
             Ok(n) => {
                 let _ = stdin.flush();
@@ -1627,6 +1696,36 @@ pub fn rt_process_write_stdin_some(args: &[Value]) -> Result<Value, CompileError
             Err(_) => Ok(Value::Int(-1)),
         },
         None => Ok(Value::Int(-1)),
+    }
+}
+
+/// Decode bytes already joined with the previous stdout tail. Malformed UTF-8
+/// follows the native owner's maximal-subpart replacement policy. Only a final
+/// incomplete valid prefix is retained while the OS observer is still pending.
+/// Stream state is an input: decoding cannot turn data errors into I/O errors or
+/// clear a genuine read failure. Valid text retains the original allocation.
+fn piped_stdout_text(mut bytes: Vec<u8>, stdout_state: i64, tail: &mut Vec<u8>) -> String {
+    if stdout_state == 0 {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            match std::str::from_utf8(&bytes[offset..]) {
+                Ok(_) => break,
+                Err(error) => {
+                    offset += error.valid_up_to();
+                    match error.error_len() {
+                        Some(length) => offset += length,
+                        None => {
+                            *tail = bytes.split_off(offset);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
     }
 }
 
@@ -1640,21 +1739,38 @@ pub fn rt_process_read_stdout(args: &[Value]) -> Result<Value, CompileError> {
     let pid = piped_arg_pid(args, "rt_process_read_stdout")?;
     let mut map = PIPED_PROCESSES.lock().unwrap();
     let mut out = Vec::new();
-    if let Some(stdout) = map.get_mut(&pid).and_then(|c| c.stdout.as_mut()) {
+    if let Some(process) = map.get_mut(&pid) {
+        if process.stdout_state != 0 {
+            return Ok(Value::text(String::new()));
+        }
+        let Some(stdout) = process.child.stdout.as_mut() else {
+            process.stdout_state = -1;
+            return Ok(Value::text(String::new()));
+        };
+        out.append(&mut process.stdout_tail);
         let mut buf = [0u8; 8192];
-        loop {
+        // One bounded nonblocking chunk per call, like the C owner. A noisy
+        // peer must not hold the registry lock by continually refilling it.
+        for _ in 0..1 {
             // Windows anonymous pipes have no O_NONBLOCK: a read with nothing
             // pending blocks until the child writes. Ask how much is waiting
             // and read only that, so "no data yet" is "" here too.
             #[cfg(windows)]
             let want = match piped_bytes_available(stdout) {
-                0 => break,
-                n => n.min(buf.len()),
+                Ok(0) => break,
+                Ok(n) => n.min(buf.len()),
+                Err(error) => {
+                    process.stdout_state = if error.raw_os_error() == Some(109) { 1 } else { -1 };
+                    break;
+                }
             };
             #[cfg(not(windows))]
             let want = buf.len();
             match stdout.read(&mut buf[..want]) {
-                Ok(0) => break,
+                Ok(0) => {
+                    process.stdout_state = 1;
+                    break;
+                }
                 Ok(n) => {
                     out.extend_from_slice(&buf[..n]);
                     if n < want {
@@ -1663,17 +1779,22 @@ pub fn rt_process_read_stdout(args: &[Value]) -> Result<Value, CompileError> {
                 }
                 // WouldBlock is the normal "nothing yet" answer on the
                 // O_NONBLOCK fd; every other error also yields "".
-                Err(_) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => break,
+                Err(_) => {
+                    process.stdout_state = -1;
+                    break;
+                }
             }
         }
+        return Ok(Value::text(piped_stdout_text(out, process.stdout_state, &mut process.stdout_tail)));
     }
-    Ok(Value::text(String::from_utf8_lossy(&out).into_owned()))
+    Ok(Value::text(String::new()))
 }
 
-/// Bytes waiting in a child's stdout pipe; 0 when empty or on any error
-/// (a broken pipe means the child is gone, which is also "nothing to read").
+/// Preserve empty versus broken/error: only an observed broken pipe proves EOF.
 #[cfg(windows)]
-fn piped_bytes_available(stdout: &std::process::ChildStdout) -> usize {
+fn piped_bytes_available(stdout: &std::process::ChildStdout) -> std::io::Result<usize> {
     use std::os::windows::io::AsRawHandle;
     unsafe extern "system" {
         fn PeekNamedPipe(
@@ -1697,9 +1818,9 @@ fn piped_bytes_available(stdout: &std::process::ChildStdout) -> usize {
         )
     };
     if ok == 0 {
-        0
+        Err(std::io::Error::last_os_error())
     } else {
-        available as usize
+        Ok(available as usize)
     }
 }
 
@@ -1711,7 +1832,7 @@ pub fn rt_process_is_alive(args: &[Value]) -> Result<Value, CompileError> {
     let mut map = PIPED_PROCESSES.lock().unwrap();
     let alive = match map.get_mut(&pid) {
         // try_wait -> Ok(None) means "still running".
-        Some(child) => matches!(child.try_wait(), Ok(None)),
+        Some(process) => matches!(process.observe_exit(), Ok(None)),
         None => false,
     };
     Ok(Value::Bool(alive))
@@ -1724,15 +1845,194 @@ pub fn rt_process_close_piped(args: &[Value]) -> Result<Value, CompileError> {
     let pid = piped_arg_pid(args, "rt_process_close_piped")?;
     let child = PIPED_PROCESSES.lock().unwrap().remove(&pid);
     match child {
-        Some(mut child) => {
+        Some(mut process) => {
             // Dropping stdin sends EOF, giving a well-behaved child the chance
             // to exit on its own before we escalate.
-            drop(child.stdin.take());
-            let _ = child.kill();
-            let _ = child.wait();
+            drop(process.child.stdin.take());
+            let _ = process.child.kill();
+            let _ = process.child.wait();
             Ok(Value::Bool(true))
         }
         None => Ok(Value::Bool(false)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PipedProcessRefV1: generation-checked twin of the C registry
+// (`src/runtime/runtime_process.c` rt_process_*_ref_v1). Same sentinels:
+// -2 stale/unknown reference, -3 "POSIX unsupported" for liveness and close
+// (a generation is not kernel group authority, so nothing is signalled or
+// reaped through a reference), -1 failure.
+// ---------------------------------------------------------------------------
+
+const PIPED_REF_MAX_ARGS_V1: usize = 64;
+static NEXT_PIPED_GENERATION_V1: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+
+fn piped_ref_int(args: &[Value], index: usize) -> i64 {
+    match args.get(index) {
+        Some(Value::Int(n)) => *n,
+        _ => -1,
+    }
+}
+
+/// True when (pid, generation) names a live generation-checked entry.
+fn piped_ref_matches(map: &HashMap<i64, PipedProcess>, pid: i64, generation: i64) -> bool {
+    pid > 0 && pid <= i32::MAX as i64 && generation > 0 && map.get(&pid).is_some_and(|p| p.generation == generation)
+}
+
+/// `rt_process_spawn_piped_generation_v1(cmd: text, cmd_len: i64, args: [text]) -> i64`
+pub fn rt_process_spawn_piped_generation_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let (Some(Value::Str(cmd)), Some(Value::Int(cmd_len)), Some(Value::Array(argv))) =
+        (args.first(), args.get(1), args.get(2))
+    else {
+        return Ok(Value::Int(-1));
+    };
+    if *cmd_len <= 0 || *cmd_len as usize != cmd.len() || cmd.contains('\0') || argv.len() > PIPED_REF_MAX_ARGS_V1 {
+        return Ok(Value::Int(-1));
+    }
+    if !argv.iter().all(|a| matches!(a, Value::Str(s) if !s.contains('\0'))) {
+        return Ok(Value::Int(-1));
+    }
+    let Value::Int(pid) = rt_process_spawn_piped(&[Value::Str(cmd.clone()), Value::Array(argv.clone())])? else {
+        return Ok(Value::Int(-1));
+    };
+    if pid <= 0 {
+        return Ok(Value::Int(-1));
+    }
+    let generation = NEXT_PIPED_GENERATION_V1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    match PIPED_PROCESSES.lock().unwrap().get_mut(&pid) {
+        Some(process) => process.generation = generation,
+        None => return Ok(Value::Int(-1)),
+    }
+    Ok(Value::Int(generation))
+}
+
+/// `rt_process_piped_pid_for_generation_v1(generation: i64) -> i64` (-2 unknown).
+pub fn rt_process_piped_pid_for_generation_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let generation = piped_ref_int(args, 0);
+    if generation <= 0 {
+        return Ok(Value::Int(-2));
+    }
+    let map = PIPED_PROCESSES.lock().unwrap();
+    let pid = map
+        .iter()
+        .find(|(_, p)| p.generation == generation)
+        .map_or(-2, |(pid, _)| *pid);
+    Ok(Value::Int(pid))
+}
+
+/// `rt_process_read_stdout_ref_v1(pid, generation) -> text` ("" for a stale reference).
+pub fn rt_process_read_stdout_ref_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let (pid, generation) = (piped_ref_int(args, 0), piped_ref_int(args, 1));
+    if !piped_ref_matches(&PIPED_PROCESSES.lock().unwrap(), pid, generation) {
+        return Ok(Value::text(String::new()));
+    }
+    rt_process_read_stdout(&[Value::Int(pid)])
+}
+
+/// `rt_process_stdout_state_ref_v1(pid, generation) -> i64` (0 deferred, 1 EOF, -1 failure, -2 stale).
+pub fn rt_process_stdout_state_ref_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let (pid, generation) = (piped_ref_int(args, 0), piped_ref_int(args, 1));
+    let map = PIPED_PROCESSES.lock().unwrap();
+    if !piped_ref_matches(&map, pid, generation) {
+        return Ok(Value::Int(-2));
+    }
+    Ok(Value::Int(map.get(&pid).map_or(-2, |p| p.stdout_state)))
+}
+
+/// `rt_process_validate_piped_ref_v1(pid, generation) -> i64` (0 valid, -2 stale).
+pub fn rt_process_validate_piped_ref_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let (pid, generation) = (piped_ref_int(args, 0), piped_ref_int(args, 1));
+    let valid = piped_ref_matches(&PIPED_PROCESSES.lock().unwrap(), pid, generation);
+    Ok(Value::Int(if valid { 0 } else { -2 }))
+}
+
+/// `rt_process_write_stdin_some_ref_v1(pid, generation, data, data_len, offset, max_bytes) -> i64`.
+pub fn rt_process_write_stdin_some_ref_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let (pid, generation) = (piped_ref_int(args, 0), piped_ref_int(args, 1));
+    if args.len() < 6 {
+        return Ok(Value::Int(-1));
+    }
+    if !piped_ref_matches(&PIPED_PROCESSES.lock().unwrap(), pid, generation) {
+        return Ok(Value::Int(-2));
+    }
+    let mut forwarded = vec![Value::Int(pid)];
+    forwarded.extend_from_slice(&args[2..6]);
+    rt_process_write_stdin_some(&forwarded)
+}
+
+/// `rt_process_is_piped_alive_ref_v1(pid, generation) -> i64`: -3 for a live
+/// reference (POSIX liveness through a generation is unsupported), -2 stale.
+pub fn rt_process_is_piped_alive_ref_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let (pid, generation) = (piped_ref_int(args, 0), piped_ref_int(args, 1));
+    let valid = piped_ref_matches(&PIPED_PROCESSES.lock().unwrap(), pid, generation);
+    Ok(Value::Int(if valid { -3 } else { -2 }))
+}
+
+/// `rt_process_close_piped_ref_v1(pid, generation) -> i64`: -3 for a live
+/// reference (close unsupported; descriptors and the slot are retained), -2 stale.
+pub fn rt_process_close_piped_ref_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let (pid, generation) = (piped_ref_int(args, 0), piped_ref_int(args, 1));
+    let valid = piped_ref_matches(&PIPED_PROCESSES.lock().unwrap(), pid, generation);
+    Ok(Value::Int(if valid { -3 } else { -2 }))
+}
+
+/// Read the same owned stream state consumed by process_read_stdout_result.
+pub fn rt_process_stdout_state(args: &[Value]) -> Result<Value, CompileError> {
+    let pid = piped_arg_pid(args, "rt_process_stdout_state")?;
+    let map = PIPED_PROCESSES.lock().unwrap();
+    Ok(Value::Int(map.get(&pid).map_or(-1, |process| process.stdout_state)))
+}
+
+/// ABI v1: [version, state, exit_code, OS_error]. Pending is not exit zero.
+/// The piped owner and observed stdout EOF are required; async wait owns a
+/// different registry and must never consume this child.
+pub fn rt_process_piped_exit_status_value(args: &[Value]) -> Result<Value, CompileError> {
+    let pid = piped_arg_pid(args, "rt_process_piped_exit_status_value")?;
+    let receipt = |state, code, error| Value::array(vec![
+        Value::Int(1), Value::Int(state), Value::Int(code), Value::Int(error),
+    ]);
+    #[cfg(windows)]
+    let (invalid, unknown, read_error) = (87, 6, 30);
+    #[cfg(not(windows))]
+    let (invalid, unknown, read_error) = (libc::EINVAL as i64, libc::EINVAL as i64, libc::EIO as i64);
+    if pid <= 0 {
+        return Ok(receipt(-1, 0, invalid));
+    }
+    #[cfg(windows)]
+    if pid > u32::MAX as i64 {
+        return Ok(receipt(-1, 0, invalid));
+    }
+    let mut map = PIPED_PROCESSES.lock().unwrap();
+    let Some(process) = map.get_mut(&pid) else {
+        return Ok(receipt(-1, 0, unknown));
+    };
+    if process.stdout_state < 0 {
+        return Ok(receipt(-1, 0, read_error));
+    }
+    if process.stdout_state != 1 {
+        return Ok(receipt(0, 0, 0));
+    }
+    match process.observe_exit() {
+        Ok(None) => Ok(receipt(0, 0, 0)),
+        Ok(Some(status)) => {
+            #[cfg(unix)]
+            let code = {
+                use std::os::unix::process::ExitStatusExt;
+                match (status.code(), status.signal()) {
+                    (Some(code), _) => i64::from(code),
+                    (_, Some(signal)) => 128 + i64::from(signal),
+                    _ => return Ok(receipt(-1, 0, libc::EINVAL as i64)),
+                }
+            };
+            #[cfg(not(unix))]
+            let code = match status.code() {
+                Some(code) => i64::from(code as u32),
+                None => return Ok(receipt(-1, 0, 13)), // ERROR_INVALID_DATA
+            };
+            Ok(receipt(1, code, 0))
+        }
+        Err(error) => Ok(receipt(-1, 0, error.raw_os_error().map(i64::from).unwrap_or(read_error))),
     }
 }
 
@@ -1966,6 +2266,192 @@ pub fn rt_shell_exec_tuple(args: &[Value]) -> Result<Value, CompileError> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    fn piped_text_chunk(tail: &mut Vec<u8>, chunk: &[u8], state: i64) -> String {
+        let mut bytes = Vec::new();
+        bytes.append(tail);
+        bytes.extend_from_slice(chunk);
+        piped_stdout_text(bytes, state, tail)
+    }
+
+    #[test]
+    fn piped_stdout_replaces_invalid_byte_without_retaining_it() {
+        let mut tail = Vec::new();
+        assert_eq!(piped_text_chunk(&mut tail, &[0xff], 0), "\u{fffd}");
+        assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn piped_stdout_replaces_maximal_subparts_and_truncated_eof() {
+        let mut tail = Vec::new();
+        assert_eq!(piped_text_chunk(&mut tail, &[0xe1, 0x80, 0x41, 0xe2, 0x82], 1),
+            "\u{fffd}A\u{fffd}");
+        assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn piped_stdout_scans_invalid_subparts_before_retaining_valid_suffix() {
+        let mut tail = Vec::new();
+        assert_eq!(piped_text_chunk(&mut tail, &[0xe1, 0x80, 0x41, 0xe2, 0x82], 0),
+            "\u{fffd}A");
+        assert_eq!(tail, vec![0xe2, 0x82]);
+        assert_eq!(piped_text_chunk(&mut tail, &[0xac], 1), "\u{20ac}");
+        assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn piped_stdout_scans_multiple_invalid_subparts_before_four_byte_tail() {
+        let mut tail = Vec::new();
+        assert_eq!(piped_text_chunk(&mut tail, &[0xff, 0xe1, 0x80, 0x41, 0xfe, 0xf0, 0x9f], 0),
+            "\u{fffd}\u{fffd}A\u{fffd}");
+        assert_eq!(tail, vec![0xf0, 0x9f]);
+        assert_eq!(piped_text_chunk(&mut tail, &[0x98, 0x80], 1), "\u{1f600}");
+        assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn piped_stdout_keeps_ready_and_split_scalar_without_premature_replacement() {
+        let mut tail = Vec::new();
+        assert_eq!(piped_text_chunk(&mut tail, b"ready\n\xe2\x82", 0), "ready\n");
+        assert_eq!(tail, vec![0xe2, 0x82]);
+        // An empty pending poll must not flush the still-valid suffix.
+        assert_eq!(piped_text_chunk(&mut tail, &[], 0), "");
+        assert_eq!(tail, vec![0xe2, 0x82]);
+        assert_eq!(piped_text_chunk(&mut tail, &[0xac], 1), "\u{20ac}");
+        assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn piped_stdout_flushes_retained_suffix_at_real_eof_or_read_failure() {
+        for state in [1, -1] {
+            let mut tail = vec![0xe2, 0x82];
+            assert_eq!(piped_text_chunk(&mut tail, &[], state), "\u{fffd}");
+            assert!(tail.is_empty());
+        }
+    }
+
+    #[test]
+    fn piped_stdout_does_not_defer_impossible_utf8_prefixes() {
+        let mut tail = Vec::new();
+        assert_eq!(piped_text_chunk(&mut tail, &[0xe0, 0x80, 0x80], 0),
+            "\u{fffd}\u{fffd}\u{fffd}");
+        assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn piped_stdout_valid_text_reuses_allocation_and_preserves_nul() {
+        let bytes = b"valid\0text".to_vec();
+        let pointer = bytes.as_ptr();
+        let mut tail = Vec::new();
+        let text = piped_stdout_text(bytes, 0, &mut tail);
+        assert_eq!(text.as_bytes(), b"valid\0text");
+        assert_eq!(text.as_ptr(), pointer);
+        assert!(tail.is_empty());
+    }
+
+    fn piped_dispatch(name: &str, args: &[Value]) -> Value {
+        let handler = crate::interpreter::interpreter_extern::EXTERN_DISPATCH
+            .get(name).unwrap_or_else(|| panic!("missing public extern {name}"));
+        handler(args, &mut crate::value::Env::new(), &mut HashMap::new(),
+            &mut HashMap::new(), &HashMap::new(), &HashMap::new()).unwrap()
+    }
+
+    #[test]
+    fn piped_exit_receipt_requires_eof_and_preserves_real_exit_and_registry() {
+        use std::time::{Duration, Instant};
+        for exit in [0, 7, 259] {
+            // POSIX exit status is one byte; Windows must preserve 259 rather
+            // than misclassify STILL_ACTIVE's numeric value as pending.
+            #[cfg(unix)]
+            if exit == 259 { continue; }
+            let (cmd, script) = if cfg!(windows) {
+                ("cmd.exe", vec!["/C".to_string(), format!("echo receipt-marker& exit /b {exit}")])
+            } else {
+                ("/bin/sh", vec!["-c".to_string(), format!("printf receipt-marker; exit {exit}")])
+            };
+            let Value::Int(pid) = piped_dispatch("rt_process_spawn_piped", &[
+                Value::text(cmd.to_string()),
+                Value::array(script.into_iter().map(Value::text).collect::<Vec<_>>()),
+            ]) else { panic!("expected pid"); };
+            assert!(pid > 0);
+            let args = [Value::Int(pid)];
+            // Neither waiting on the async registry nor liveness may steal
+            // this owner's child. A completed process still needs observed EOF.
+            assert!(!SPAWNED_PROCESSES.lock().unwrap().contains_key(&pid));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while rt_process_is_alive(&args).unwrap() == Value::Bool(true) {
+                assert!(Instant::now() < deadline, "child did not exit");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(piped_dispatch("rt_process_stdout_state", &args), Value::Int(0));
+            assert_eq!(piped_dispatch("rt_process_piped_exit_status_value", &args),
+                Value::array(vec![Value::Int(1), Value::Int(0), Value::Int(0), Value::Int(0)]));
+            let mut output = String::new();
+            let expected = Value::array(vec![Value::Int(1), Value::Int(1), Value::Int(exit), Value::Int(0)]);
+            loop {
+                let Value::Str(chunk) = piped_dispatch("rt_process_read_stdout", &args) else { panic!("expected text"); };
+                output.push_str(&chunk);
+                if piped_dispatch("rt_process_piped_exit_status_value", &args) == expected { break; }
+                assert!(Instant::now() < deadline, "EOF/status not observed");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(output.trim(), "receipt-marker");
+            assert_eq!(piped_dispatch("rt_process_stdout_state", &args), Value::Int(1));
+            for _ in 0..3 {
+                assert_eq!(piped_dispatch("rt_process_read_stdout", &args), Value::text(String::new()));
+                assert_eq!(piped_dispatch("rt_process_stdout_state", &args), Value::Int(1));
+                assert_eq!(piped_dispatch("rt_process_piped_exit_status_value", &args), expected);
+            }
+            assert_eq!(piped_dispatch("rt_process_close_piped", &args), Value::Bool(true));
+            assert_eq!(piped_dispatch("rt_process_stdout_state", &args), Value::Int(-1));
+            let Value::Array(receipt) = rt_process_piped_exit_status_value(&args).unwrap() else { panic!("expected receipt"); };
+            assert_eq!(receipt[1], Value::Int(-1));
+            assert_eq!(receipt[2], Value::Int(0));
+            assert_ne!(receipt[3], Value::Int(0));
+        }
+    }
+
+    #[test]
+    fn piped_exit_receipt_rejects_unknown_and_invalid_owners() {
+        for pid in [-1, 0, i64::MAX] {
+            assert_eq!(piped_dispatch("rt_process_stdout_state", &[Value::Int(pid)]), Value::Int(-1));
+            let Value::Array(receipt) = rt_process_piped_exit_status_value(&[Value::Int(pid)]).unwrap() else { panic!("expected receipt"); };
+            assert_eq!(receipt.len(), 4);
+            assert_eq!(receipt[0], Value::Int(1));
+            assert_eq!(receipt[1], Value::Int(-1));
+            assert_eq!(receipt[2], Value::Int(0));
+            assert_ne!(receipt[3], Value::Int(0));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn piped_dispatch_replaces_real_invalid_utf8_and_reports_clean_exit() {
+        use std::time::{Duration, Instant};
+        let Value::Int(pid) = piped_dispatch("rt_process_spawn_piped", &[
+            Value::text("/bin/sh".to_string()),
+            Value::array(vec![Value::text("-c".to_string()),
+                Value::text("printf '\\377'; exit 0".to_string())]),
+        ]) else { panic!("expected pid"); };
+        assert!(pid > 0);
+        let args = [Value::Int(pid)];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut output = String::new();
+        let expected = Value::array(vec![Value::Int(1), Value::Int(1), Value::Int(0), Value::Int(0)]);
+        loop {
+            let Value::Str(chunk) = piped_dispatch("rt_process_read_stdout", &args) else { panic!("expected text"); };
+            output.push_str(&chunk);
+            assert_ne!(piped_dispatch("rt_process_stdout_state", &args), Value::Int(-1),
+                "malformed bytes are replacement text, not a read failure");
+            if piped_dispatch("rt_process_piped_exit_status_value", &args) == expected { break; }
+            assert!(Instant::now() < deadline, "replacement/EOF/exit receipt not observed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(output, "\u{fffd}");
+        assert_eq!(piped_dispatch("rt_process_stdout_state", &args), Value::Int(1));
+        assert_eq!(piped_dispatch("rt_process_piped_exit_status_value", &args), expected);
+        assert_eq!(piped_dispatch("rt_process_close_piped", &args), Value::Bool(true));
+    }
 
     #[cfg(unix)]
     #[test]

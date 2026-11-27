@@ -1,0 +1,42 @@
+# Cleanup-only exact-object observation. The caller MUST first retain the
+# matching birth/operation record and exact native ID; labels alone are not a
+# birth grant. This cannot authorize start, admission, or container readiness.
+use std.common.contracts.container.execution_v2.ContainerHostScopeV2
+use std.common.contracts.container.runtime_v1.{RuntimeCommandV1, RuntimeStateV1}
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_scope_v2.{WINDOWS_DOCKER_SCOPED_INSPECT_FORMAT_V2, windows_docker_scope_values_v2}
+use std.nogc_async_mut.container.providers.windows.docker_observation_codec_v2.windows_docker_observed_identity_v2
+
+pub fn windows_docker_cleanup_inspect_command_v6(policy: WindowsDockerPolicyV1,
+        scope: ContainerHostScopeV2?, native_id: text) -> Result<RuntimeCommandV1, text>:
+    if not windows_docker_id_v1(native_id): return Err("docker-cleanup-exact-native-id-required")
+    val format = match scope:
+        case Some(_): WINDOWS_DOCKER_SCOPED_INSPECT_FORMAT_V2
+        case None: WINDOWS_DOCKER_INSPECT_FORMAT_V1
+    Ok(windows_docker_command_v1(policy, "cleanup-inspect", ["container", "inspect", "--format", format, native_id]))
+
+pub fn windows_docker_cleanup_observation_v6(policy: WindowsDockerPolicyV1, request: WindowsDockerRequestV1,
+        scope: ContainerHostScopeV2?, native_id: text, stdout: text) -> Result<RuntimeStateV1, text>:
+    if not windows_docker_id_v1(native_id): return Err("docker-cleanup-exact-native-id-required")
+    val digest = windows_docker_request_digest_v1(policy, request)?
+    if stdout.byte_len() > 8192: return Err("docker-cleanup-observation-bound")
+    val fields = stdout.trim().split("|")
+    val count = if scope.?: 23 else: 17
+    if fields.len() != count: return Err("docker-cleanup-observation-fields")
+    var boot = policy.node_boot_id
+    match scope:
+        case Some(selected):
+            boot = selected.boot_id
+            val values = windows_docker_scope_values_v2(selected)?
+            if policy.node_boot_id != values[5] or policy.provider_generation != selected.provider_generation:
+                return Err("docker-cleanup-policy-scope-mismatch")
+            for index in 0..values.len():
+                if fields[17 + index] != values[index]: return Err("docker-cleanup-scope-mismatch")
+        case None: ()
+    if (fields[0] != native_id or fields[8] != WINDOWS_DOCKER_ENGINE_V1 or fields[9] != request.pod_uid or
+            fields[10] != request.attempt.to_text() or fields[11] != request.operation_id or fields[12] != boot or
+            fields[13] != policy.provider_generation.to_text() or fields[14] != digest):
+        return Err("docker-cleanup-owned-identity-mismatch")
+    if not ["created", "running", "exited"].contains(fields[15]): return Err("docker-cleanup-state-unproven")
+    Ok(RuntimeStateV1(phase: fields[15], identity: windows_docker_observed_identity_v2(policy, request, native_id),
+        exit_code: -1, reason: "docker-cleanup-owned-identity-only"))

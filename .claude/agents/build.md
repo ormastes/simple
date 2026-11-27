@@ -88,6 +88,21 @@ bin/simple test --only-slow              # Slow tests only
 | `simple` | `bin/simple` | CLI entry point |
 | `simple` | `bin/release/simple` | Release runtime (33MB) |
 
+## Cross-Compile
+
+Status, recipe, and target matrix (verified/unverified tagged):
+`doc/07_guide/infra/toolchain/cross_compile_status_2026-11-15.md`. Use the
+self-hosted phase-2 builder with `SIMPLE_BUILD_MEMORY_RESERVE_BYTES=2147483648`;
+after a seed rebuild add `--invalidate-cache=stage2`. No lint or test-runner
+cross artifact exists yet; landed fixes are verification-pending.
+
+Run the matrix with `sh scripts/check/check-cross-compile-matrix.shs` on a
+Linux host (WSL Ubuntu-24.04): `--dry-run` first (plan + toolchain preflight),
+then e.g. `--targets linux-x86_64 --artifacts lint`. It builds one target at a
+time behind a `--min-free-gb` gate (default 8), uses a per-target
+`SIMPLE_CACHE_SCOPE`, checks arch/class, fails on libgcc, and `--run` uses
+qemu-user only. Do not use the old ad-hoc `xc*.sh` helpers.
+
 ## See Also
 
 - `/release` - Full release guide with rollback procedures

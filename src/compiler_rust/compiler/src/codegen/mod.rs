@@ -10,6 +10,7 @@ pub mod cranelift_sffi;
 pub mod dispatch;
 pub mod emitter_trait;
 pub mod execution_manager;
+pub mod func_id_table;
 pub mod instr;
 pub mod inline_asm;
 pub mod instr_gpu;
@@ -21,6 +22,8 @@ pub mod mir_interpreter;
 mod mir_inline;
 #[cfg(not(doctest))]
 pub mod jit;
+pub(crate) mod jit_dlsym;
+pub(crate) mod jit_sffi_bridges;
 pub mod lean;
 pub mod llvm;
 pub mod parallel;
@@ -30,6 +33,7 @@ pub mod shared;
 pub mod types_util;
 pub mod vtable_c8_debug;
 pub mod vulkan;
+pub(crate) mod xlate_view;
 pub mod wasm_bindgen_gen;
 
 #[cfg(all(test, feature = "llvm-tests"))]
@@ -45,7 +49,10 @@ mod codegen_instr_tests;
 #[path = "codegen_shared_tests/mod.rs"]
 mod codegen_shared_tests;
 
-#[cfg(all(test, not(doctest), target_arch = "x86_64"))]
+#[cfg(test)]
+mod enum_discriminant_convention_tests;
+
+#[cfg(all(test, not(doctest)))]
 #[path = "local_execution_tests.rs"]
 mod local_execution_tests;
 

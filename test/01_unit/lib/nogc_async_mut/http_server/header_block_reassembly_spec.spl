@@ -1,0 +1,98 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# Pins fragmented-ingress reassembly correctness for the incremental request
+# parser: the retained receive buffer must produce the identical parsed
+# request whether it arrives whole, one byte at a time, or in uneven chunks
+# with CRLF boundaries split across feeds.
+# @cover src/lib/nogc_async_mut/http_server/parser.spl 30%
+use std.spec.*
+
+use std.http_server.parser.{HttpRequestParser}
+
+fn _feed_chunks(parser: HttpRequestParser, payload: text, chunk_size: i64) -> i64:
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < payload.len():
+        var end = i + chunk_size
+        if end > payload.len():
+            end = payload.len()
+        val r = parser.feed(payload.slice(i, end))
+        match r:
+            Ok(n):
+                total = total + n
+            Err(_):
+                return -1
+        i = end
+    total
+
+describe "HTTP request reassembly under fragmented ingress":
+    it "parses identical requests from whole-feed and one-byte-feed ingress":
+        step("parses identical requests from whole-feed and one-byte-feed ingress")
+        val req = "POST /upload?x=1 HTTP/1.1\r\nHost: example.test\r\nContent-Length: 5\r\nX-Trace: abc\r\n\r\nhello"
+        val whole = HttpRequestParser.new()
+        val whole_r = whole.feed(req)
+        match whole_r:
+            Ok(n):
+                expect(n).to_equal(req.len())
+            Err(_):
+                expect(false).to_equal(true)
+        val byte_wise = HttpRequestParser.new()
+        expect(_feed_chunks(byte_wise, req, 1)).to_equal(req.len())
+        expect(byte_wise.is_complete()).to_equal(true)
+        val a = whole.to_request("t")
+        val b = byte_wise.to_request("t")
+        expect(b.method).to_equal(a.method)
+        expect(b.path).to_equal(a.path)
+        expect(b.query).to_equal(a.query)
+        expect(b.version).to_equal(a.version)
+        expect(b.headers).to_equal(a.headers)
+        expect(b.body).to_equal(a.body)
+
+    it "reassembles when CRLF boundaries are split across uneven fragments":
+        step("reassembles when CRLF boundaries are split across uneven fragments")
+        val req = "GET /a HTTP/1.1\r\nHost: h\r\nAccept: text/plain\r\n\r\n"
+        val p = HttpRequestParser.new()
+        # 3-byte chunks deliberately land mid-CRLF and mid-header-name.
+        expect(_feed_chunks(p, req, 3)).to_equal(req.len())
+        expect(p.is_complete()).to_equal(true)
+        val r = p.to_request("t")
+        expect(r.method).to_equal("GET")
+        expect(r.path).to_equal("/a")
+        expect(r.headers).to_equal([("Host", "h"), ("Accept", "text/plain")])
+
+    it "keeps pipelined bytes of the next request after a fragmented body":
+        step("keeps pipelined bytes of the next request after a fragmented body")
+        val p = HttpRequestParser.new()
+        val first = "POST /u HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n\r\nBODY"
+        val second = "GET /v HTTP/1.1\r\nHost: h\r\n\r\n"
+        # Feed the first request plus the first 7 bytes of the second, one
+        # byte at a time, then the rest.
+        val mixed = first + second
+        expect(_feed_chunks(p, mixed.slice(0, first.len() + 7), 1)).to_equal(first.len())
+        expect(p.to_request("t").body).to_equal("BODY")
+        p.reset()
+        # reset() retains the 7 pipelined bytes in the buffer; they are
+        # consumed (and accounted) in this phase together with the rest.
+        expect(_feed_chunks(p, mixed.slice(first.len() + 7, mixed.len()), 1)).to_equal(second.len())
+        expect(p.to_request("t").path).to_equal("/v")
+
+    it "rejects a fragmented oversized header line with 431, not a hang":
+        step("rejects a fragmented oversized header line with 431, not a hang")
+        val p = HttpRequestParser.with_limits(128, 32, 64, 256)
+        var oversized = "GET / HTTP/1.1\r\nHost: h\r\nX-Big: "
+        var i: i64 = 0
+        while i < 200:
+            oversized = oversized + "y"
+            i = i + 1
+        oversized = oversized + "\r\n\r\n"
+        expect(_feed_chunks(p, oversized, 1)).to_equal(-1)
+        expect(p.has_error()).to_equal(true)
+        expect(p.error_message).to_contain("431")
+
+    it "rejects a fragmented request-smuggling header shape under one-byte feeds":
+        step("rejects a fragmented request-smuggling header shape under one-byte feeds")
+        val p = HttpRequestParser.new()
+        val hostile = "GET / HTTP/1.1\r\nHost : example.test\r\n\r\n"
+        expect(_feed_chunks(p, hostile, 1)).to_equal(-1)
+        expect(p.has_error()).to_equal(true)
+        expect(p.error_message).to_contain("400")

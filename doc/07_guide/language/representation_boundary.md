@@ -58,3 +58,12 @@ It rejects old codec versions instead of reusing dropped or stale authority.
 The codec generator's opaque-carrier refusal is explicit; generator execution,
 cache performance, compiler/MCP smoke, and runtime tests remain unqualified.
 No automatic annotation insertion or invented reviewer/reason is provided.
+
+## Owners and reviewers (owner decision 2026-11-03)
+
+Reason, owner and reviewer values for unsafe-region annotations come from
+`config/policy/unsafe_region_owners.sdn`. Each area there is a path prefix,
+and the longest matching prefix wins. Tools that insert annotations must read
+that table. They must not make up reviewers. The `reason` comes from the
+region's actual purpose (ffi, layout, hardware or intrinsics), and the per-area
+Opus review is recorded in `review_ref`.

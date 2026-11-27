@@ -1,0 +1,608 @@
+"""
+## Purpose and audience
+
+Purpose: verify end-to-end `simple workaround-recover` and `simple bug-resolve
+--recover` / `--recover-apply` against isolated temporary git repositories:
+rollback commit discovery (`--link-recover`), narrow hunk extraction and
+recovery preserving unrelated edits, Stage 2 bootstrap safety gating,
+unmerged `--fix-commit` rejection, conflict fail-closed semantics, sharded
+bug database `--all-fixed --json`, and closure-triggered recovery.
+"""
+# @cover src/app/workaround_recover/main.spl
+# @cover src/app/bug/workaround_recover.spl
+# @cover src/app/bug_resolve/main.spl
+# @cover src/app/bug/workaround_autoretire_cli.spl
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_async_mut.sosix.workaround_host.{
+    workaround_host_mkdir, workaround_host_temp_dir, workaround_host_publish,
+    workaround_host_read, workaround_host_exists, workaround_host_process
+}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.nogc_sync_mut.io.env_ops.{env_get, cwd}
+use std.nogc_sync_mut.database.bug.{create_bug_database}
+use std.nogc_sync_mut.database.core.{SdnRow}
+use app.bug.workaround_store.{refresh_workarounds_at, WorkaroundScanV1}
+
+fn _norm(p: text) -> text:
+    p.replace("\\", "/")
+
+fn _is_win() -> bool:
+    env_get("OS").lower().contains("windows")
+
+fn _find_simple_bin(repo_root: text) -> text:
+    val env_bin = env_get("SIMPLE_BINARY")
+    if env_bin != "" and workaround_host_exists(env_bin):
+        return _norm(env_bin)
+    var candidates: [text] = [
+        repo_root + "/bin/simple.exe",
+        repo_root + "/bin/simple",
+        repo_root + "/bin/release/x86_64-pc-windows-msvc/simple.exe",
+        repo_root + "/bin/release/x86_64-unknown-linux-gnu/simple",
+        repo_root + "/src/compiler_rust/target/bootstrap/simple.exe",
+        repo_root + "/src/compiler_rust/target/bootstrap/simple"
+    ]
+    val local_app = env_get("LOCALAPPDATA")
+    if local_app != "":
+        candidates.push(_norm(local_app) + "/Temp/wa3_shared_bin/simple.exe")
+    for c in candidates:
+        if workaround_host_exists(c):
+            return c
+    ""
+
+fn _git(root: text, args: [text]) -> (text, text, i64):
+    var full: [text] = ["-C", root]
+    for a in args:
+        full.push(a)
+    workaround_host_process("git", full, 30000, 1048576)
+
+fn _git_ok(root: text, args: [text]) -> text:
+    val (out, err, code) = _git(root, args)
+    expect(code).to_equal(0)
+    out.trim()
+
+fn _sys_temp_parent() -> text:
+    for key in ["TEMP", "TMP", "TMPDIR"]:
+        val v = env_get(key)
+        if v != "":
+            return _norm(v)
+    "/tmp"
+
+fn _init_scratch_repo(prefix: text) -> text:
+    val temp_res = workaround_host_temp_dir(_sys_temp_parent(), prefix)
+    expect(temp_res.is_ok()).to_equal(true)
+    val dir = _norm(temp_res.unwrap())
+    val _ = workaround_host_mkdir(dir + "/src")
+    val _ = workaround_host_mkdir(dir + "/doc")
+    val _ = workaround_host_mkdir(dir + "/test")
+    val _ = _git_ok(dir, ["init"])
+    val _ = _git_ok(dir, ["config", "user.name", "WA Recover Spec"])
+    val _ = _git_ok(dir, ["config", "user.email", "wa-recover@test.local"])
+    dir
+
+fn _write_text(path: text, content: text):
+    val ok = workaround_host_publish(path, content)
+    expect(ok).to_equal(true)
+
+fn _read_text(path: text) -> text:
+    val res = workaround_host_read(path, 1048576)
+    expect(res.is_ok()).to_equal(true)
+    res.unwrap().replace("\r\n", "\n")
+
+fn _run_recover_cli(bin: text, repo_root: text, args: [text]) -> (text, text, i64):
+    var full: [text] = ["run", repo_root + "/src/app/workaround_recover/main.spl"]
+    for a in args:
+        full.push(a)
+    workaround_host_process(bin, full, 60000, 2097152)
+
+fn _ps_quote(s: text) -> text:
+    "'" + s.replace("'", "''") + "'"
+
+fn _sh_quote(s: text) -> text:
+    "'" + s.replace("'", "'\"'\"'") + "'"
+
+fn _run_script_in_dir(bin: text, work_dir: text, script_path: text, args: [text]) -> (text, text, i64):
+    if _is_win():
+        var parts: [text] = ["Set-Location", _ps_quote(work_dir) + ";", "&", _ps_quote(bin), _ps_quote("run"), _ps_quote(script_path)]
+        for a in args:
+            parts.push(_ps_quote(a))
+        val ps_cmd = parts.join(" ")
+        return workaround_host_process("powershell", ["-NoProfile", "-Command", ps_cmd], 60000, 2097152)
+    var sh_parts: [text] = ["cd", _sh_quote(work_dir), "&&", _sh_quote(bin), "run", _sh_quote(script_path)]
+    for a in args:
+        sh_parts.push(_sh_quote(a))
+    workaround_host_process("sh", ["-c", sh_parts.join(" ")], 60000, 2097152)
+
+fn _seed_bug_db(db_path: text, bugs: [(text, text, text)]):
+    var db = create_bug_database(db_path)
+    var table = db.db.get_table_mut("bugs_active").unwrap()
+    for (bug_id, status, title) in bugs:
+        val row = SdnRow.empty()
+        row.set("id", bug_id)
+        row.set("severity", "P1")
+        row.set("status", status)
+        row.set("title", title)
+        row.set("file", "src/calc.spl")
+        row.set("line", "2")
+        row.set("reproducible_by", "test/repro_spec.spl")
+        row.set("created_at", "2026-11-26")
+        row.set("updated_at", "2026-11-26")
+        row.set("valid", "true")
+        table.add_row(row)
+    db.db.set_table("bugs_active", table)
+    expect(db.save()).to_equal(true)
+
+describe "workaround-recover CLI integration":
+    it "links recover commits, recovers only narrow workaround hunks, protects Stage 2 gates, and fails closed on conflicts or foreign commits":
+        val repo_root = _norm(cwd())
+        val bin = _find_simple_bin(repo_root)
+        expect(bin != "").to_equal(true)
+
+        val scratch = _init_scratch_repo("wa_recover_cli_1")
+        val demo_file = scratch + "/src/demo.spl"
+
+        step("Commit R: clean baseline functions")
+        val content_r = [
+            "fn compute(x: i64) -> i64:",
+            "    x * 2",
+            "",
+            "fn stage2_fn(x: i64) -> i64:",
+            "    x + 10",
+            "",
+            "fn helper(y: i64) -> i64:",
+            "    y + 1"
+        ].join("\n") + "\n"
+        _write_text(demo_file, content_r)
+        val _ = _git_ok(scratch, ["add", "src/demo.spl"])
+        val _ = _git_ok(scratch, ["commit", "-m", "R: baseline"])
+        val sha_r = _git_ok(scratch, ["rev-parse", "HEAD"])
+
+        step("Commit W: introduce two @workaround blocks (one regular, one ROOT-FIXED+STAGE2-GATED)")
+        val content_w = [
+            "fn compute(x: i64) -> i64:",
+            "# @workaround bug=demo_bug_1 reason=negative input clamp",
+            "    if x < 0:",
+            "        return 0",
+            "    x * 2",
+            "",
+            "fn stage2_fn(x: i64) -> i64:",
+            "# @workaround bug=demo_stage2_bug reason=ROOT-FIXED+STAGE2-GATED until bootstrap rebuild",
+            "    if x == 0:",
+            "        return 10",
+            "    x + 10",
+            "",
+            "fn helper(y: i64) -> i64:",
+            "    y + 1"
+        ].join("\n") + "\n"
+        _write_text(demo_file, content_w)
+        val _ = _git_ok(scratch, ["add", "src/demo.spl"])
+        val _ = _git_ok(scratch, ["commit", "-m", "W: add workarounds"])
+
+        step("Commit U: unrelated helper edit in the SAME file")
+        val content_u = content_w.replace("    y + 1", "    y + 99")
+        _write_text(demo_file, content_u)
+        val _ = _git_ok(scratch, ["add", "src/demo.spl"])
+        val _ = _git_ok(scratch, ["commit", "-m", "U: unrelated edit"])
+
+        step("Dry-run --link-recover previews without modifying file")
+        val (dry_link_out, _dry_link_err, dry_link_code) = _run_recover_cli(bin, repo_root, [
+            "--root=" + scratch, "--link-recover", "--progress=none", "--quiet"
+        ])
+        expect(dry_link_code).to_equal(0)
+        expect(dry_link_out).to_contain("would_link")
+        expect(dry_link_out).to_contain("demo_bug_1")
+        expect(_read_text(demo_file).contains("recover=")).to_equal(false)
+
+        step("Apply --link-recover inserts recover=<R> on both markers")
+        val (link_out, _link_err, link_code) = _run_recover_cli(bin, repo_root, [
+            "--root=" + scratch, "--link-recover", "--apply", "--progress=none", "--quiet"
+        ])
+        expect(link_code).to_equal(0)
+        expect(link_out).to_contain("linked")
+        val after_link = _read_text(demo_file)
+        expect(after_link).to_contain("# @workaround bug=demo_bug_1 recover=" + sha_r + " reason=negative input clamp")
+        expect(after_link).to_contain("# @workaround bug=demo_stage2_bug recover=" + sha_r + " reason=ROOT-FIXED+STAGE2-GATED until bootstrap rebuild")
+        val _ = _git_ok(scratch, ["add", "src/demo.spl"])
+        val _ = _git_ok(scratch, ["commit", "-m", "Link recover SHAs"])
+
+        step("Commit F on main branch + unrelated unmerged commit FOREIGN on side branch")
+        val main_branch = _git_ok(scratch, ["rev-parse", "--abbrev-ref", "HEAD"])
+        _write_text(scratch + "/doc/fix.md", "fixed demo_bug_1\n")
+        val _ = _git_ok(scratch, ["add", "doc/fix.md"])
+        val _ = _git_ok(scratch, ["commit", "-m", "F: fix demo_bug_1"])
+        val sha_f = _git_ok(scratch, ["rev-parse", "HEAD"])
+
+        val _ = _git_ok(scratch, ["checkout", "-b", "side_unmerged", sha_r])
+        _write_text(scratch + "/doc/foreign.md", "foreign unmerged commit\n")
+        val _ = _git_ok(scratch, ["add", "doc/foreign.md"])
+        val _ = _git_ok(scratch, ["commit", "-m", "FOREIGN commit"])
+        val sha_foreign = _git_ok(scratch, ["rev-parse", "HEAD"])
+        val _ = _git_ok(scratch, ["checkout", main_branch])
+
+        step("Reject unmerged --fix-commit without mutating files")
+        val (bad_out, bad_err, bad_code) = _run_recover_cli(bin, repo_root, [
+            "--root=" + scratch, "--bug=demo_bug_1", "--fix-commit=" + sha_foreign, "--apply", "--progress=none", "--quiet"
+        ])
+        expect(bad_code != 0).to_equal(true)
+        expect((bad_out + bad_err).contains("ancestor")).to_equal(true)
+        expect(_read_text(demo_file)).to_contain("bug=demo_bug_1")
+
+        step("Dry-run recovery for demo_bug_1 leaves file unchanged")
+        val (dry_rec_out, _dry_rec_err, dry_rec_code) = _run_recover_cli(bin, repo_root, [
+            "--root=" + scratch, "--bug=demo_bug_1", "--fix-commit=" + sha_f, "--progress=none", "--quiet"
+        ])
+        expect(dry_rec_code).to_equal(0)
+        expect(dry_rec_out).to_contain("would_recover")
+        expect(_read_text(demo_file)).to_contain("bug=demo_bug_1")
+
+        step("Apply recovery for demo_bug_1 removes only demo_bug_1 and preserves U and demo_stage2_bug")
+        val (rec_out, _rec_err, rec_code) = _run_recover_cli(bin, repo_root, [
+            "--root=" + scratch, "--bug=demo_bug_1", "--fix-commit=" + sha_f, "--apply", "--progress=none", "--quiet"
+        ])
+        expect(rec_code).to_equal(0)
+        expect(rec_out).to_contain("recovered")
+        val after_rec = _read_text(demo_file)
+        expect(after_rec.contains("bug=demo_bug_1")).to_equal(false)
+        expect(after_rec.contains("if x < 0:")).to_equal(false)
+        expect(after_rec).to_contain("    y + 99")
+        expect(after_rec).to_contain("bug=demo_stage2_bug")
+
+        step("Stage 2 gated workaround is skipped by default and recovered with --allow-stage2-gated")
+        val (s2_skip_out, _s2_skip_err, s2_skip_code) = _run_recover_cli(bin, repo_root, [
+            "--root=" + scratch, "--bug=demo_stage2_bug", "--fix-commit=" + sha_f, "--apply", "--progress=none", "--quiet"
+        ])
+        expect(s2_skip_code).to_equal(0)
+        expect(s2_skip_out).to_contain("skipped_stage2_gated")
+        expect(_read_text(demo_file)).to_contain("bug=demo_stage2_bug")
+
+        val (s2_ok_out, _s2_ok_err, s2_ok_code) = _run_recover_cli(bin, repo_root, [
+            "--root=" + scratch, "--bug=demo_stage2_bug", "--fix-commit=" + sha_f,
+            "--allow-stage2-gated", "--apply", "--progress=none", "--quiet"
+        ])
+        expect(s2_ok_code).to_equal(0)
+        expect(s2_ok_out).to_contain("recovered")
+        val after_s2 = _read_text(demo_file)
+        expect(after_s2.contains("bug=demo_stage2_bug")).to_equal(false)
+        expect(after_s2.contains("if x == 0:")).to_equal(false)
+        expect(after_s2).to_contain("    x + 10")
+        expect(after_s2).to_contain("    y + 99")
+
+        step("Conflict detection fails closed when workaround body was later edited")
+        val conflict_file = scratch + "/src/conflict.spl"
+        _write_text(conflict_file, "fn c(x: i64) -> i64:\n    x + 1\n")
+        val _ = _git_ok(scratch, ["add", "src/conflict.spl"])
+        val _ = _git_ok(scratch, ["commit", "-m", "R2: clean conflict.spl"])
+
+        _write_text(conflict_file, "fn c(x: i64) -> i64:\n# @workaround bug=demo_conflict_bug reason=wa\n    if x == 5:\n        return 55\n    x + 1\n")
+        val _ = _git_ok(scratch, ["add", "src/conflict.spl"])
+        val _ = _git_ok(scratch, ["commit", "-m", "W2: add conflict workaround"])
+
+        _write_text(conflict_file, "fn c(x: i64) -> i64:\n# @workaround bug=demo_conflict_bug reason=wa\n    if x == 5:\n        return 77\n    x + 1\n")
+        val _ = _git_ok(scratch, ["add", "src/conflict.spl"])
+        val _ = _git_ok(scratch, ["commit", "-m", "M2: diverge workaround body"])
+        val sha_m2 = _git_ok(scratch, ["rev-parse", "HEAD"])
+
+        val (conf_out, conf_err, conf_code) = _run_recover_cli(bin, repo_root, [
+            "--root=" + scratch, "--bug=demo_conflict_bug", "--fix-commit=" + sha_m2,
+            "--link-recover", "--apply", "--progress=none", "--quiet"
+        ])
+        expect(conf_code != 0).to_equal(true)
+        expect((conf_out + conf_err).contains("conflict")).to_equal(true)
+        expect(_read_text(conflict_file)).to_contain("return 77")
+        expect(_read_text(conflict_file)).to_contain("bug=demo_conflict_bug")
+
+        val _ = dir_remove_all(scratch)
+
+    it "supports sharded bug DB --all-fixed --json and bug-resolve --recover / --recover-apply":
+        val repo_root = _norm(cwd())
+        val bin = _find_simple_bin(repo_root)
+        expect(bin != "").to_equal(true)
+
+        val scratch = _init_scratch_repo("wa_recover_cli_2")
+        val _ = workaround_host_mkdir(scratch + "/doc/08_tracking/bug/db")
+        val calc_file = scratch + "/src/calc.spl"
+
+        val base_calc = [
+            "fn add1(x: i64) -> i64:",
+            "    x + 1",
+            "",
+            "fn mul2(x: i64) -> i64:",
+            "    x * 2",
+            "",
+            "fn sub3(x: i64) -> i64:",
+            "    x - 3",
+            "",
+            "fn stage2_calc(x: i64) -> i64:",
+            "    x + 4"
+        ].join("\n") + "\n"
+        _write_text(calc_file, base_calc)
+        _write_text(scratch + "/test/repro_spec.spl", "# reproducer\n")
+        _write_text(scratch + "/test/prev_spec.spl", "# prevention\n")
+        val _ = _git_ok(scratch, ["add", "src/calc.spl", "test/repro_spec.spl", "test/prev_spec.spl"])
+        val _ = _git_ok(scratch, ["commit", "-m", "R: calc baseline"])
+        val sha_r = _git_ok(scratch, ["rev-parse", "HEAD"])
+
+        val wa_calc = [
+            "fn add1(x: i64) -> i64:",
+            "# @workaround bug=db_bug_1 recover=" + sha_r + " reason=temp add1",
+            "    return 0",
+            "",
+            "fn mul2(x: i64) -> i64:",
+            "# @workaround bug=db_bug_2 recover=" + sha_r + " reason=temp mul2",
+            "    return 0",
+            "",
+            "fn sub3(x: i64) -> i64:",
+            "# @workaround bug=db_bug_3 recover=" + sha_r + " reason=temp sub3",
+            "    return 0",
+            "",
+            "fn stage2_calc(x: i64) -> i64:",
+            "# @workaround bug=db_bug_stage2 recover=" + sha_r + " reason=frozen Stage 2 parser",
+            "    return 0"
+        ].join("\n") + "\n"
+        _write_text(calc_file, wa_calc)
+
+        val _ = workaround_host_mkdir(scratch + "/custom_bug_db/db")
+        _write_text(scratch + "/custom_bug_db/db/db_bug_1.sdn",
+            "bugs |id, severity, status, valid|\n    db_bug_1, P1, Closed, true\n")
+        _write_text(scratch + "/custom_bug_db/db/db_bug_stage2.sdn",
+            "bugs |id, severity, status, valid|\n    db_bug_stage2, P1, Closed, true\n")
+        _seed_bug_db(scratch + "/doc/08_tracking/bug/bug_db.sdn", [
+            ("db_bug_1", "Closed", "closed add1 bug"),
+            ("db_bug_2", "Open", "open mul2 bug"),
+            ("db_bug_3", "Open", "open sub3 bug"),
+            ("db_bug_stage2", "Closed", "closed stage2 bug")
+        ])
+        val _ = _git_ok(scratch, ["add", "-A"])
+        val _ = _git_ok(scratch, ["commit", "-m", "W: add calc workarounds and shards"])
+
+        step("--list dry-run lists open, fixed, and Stage 2 sites without editing files")
+        val (list_out, _list_err, list_code) = _run_recover_cli(bin, repo_root, [
+            "--root=" + scratch, "--bug-db=custom_bug_db/bug_db.sdn",
+            "--list", "--progress=none", "--quiet"
+        ])
+        expect(list_code).to_equal(0)
+        expect(list_out).to_contain("db_bug_1")
+        expect(list_out).to_contain("would_recover")
+        expect(list_out).to_contain("db_bug_2")
+        expect(list_out).to_contain("listed")
+        expect(list_out).to_contain("db_bug_stage2")
+        expect(list_out).to_contain("skipped_stage2_gated")
+
+        step("--all-fixed --apply --json with --bug-db shard directory recovers db_bug_1 and skips db_bug_stage2 while leaving open db_bug_2")
+        val (all_out, _all_err, all_code) = _run_recover_cli(bin, repo_root, [
+            "--root=" + scratch, "--bug-db=custom_bug_db/bug_db.sdn",
+            "--all-fixed", "--apply", "--json", "--progress=none", "--quiet"
+        ])
+        expect(all_code).to_equal(0)
+        expect(all_out).to_contain("\"bug_id\":\"db_bug_1\"")
+        expect(all_out).to_contain("\"recovered\":1")
+        expect(all_out).to_contain("\"skipped_stage2_gated\":1")
+        val after_all = _read_text(calc_file)
+        expect(after_all.contains("bug=db_bug_1")).to_equal(false)
+        expect(after_all).to_contain("    x + 1")
+        expect(after_all).to_contain("bug=db_bug_2")
+        expect(after_all).to_contain("bug=db_bug_3")
+        expect(after_all).to_contain("bug=db_bug_stage2")
+
+        step("bug-resolve --recover (preview) with non-fix disposition resolves db_bug_3 and previews recovery without editing calc.spl")
+        val _ = _git_ok(scratch, ["add", "-A"])
+        val _ = _git_ok(scratch, ["commit", "-m", "Commit recovered db_bug_1"])
+        val _ = workaround_host_mkdir(scratch + "/.simple")
+        val ref_res = refresh_workarounds_at(scratch, WorkaroundScanV1.Full, [])
+        expect(ref_res.is_ok()).to_equal(true)
+        val sha_head = _git_ok(scratch, ["rev-parse", "HEAD"])
+
+        val (prev_out, _prev_err, prev_code) = _run_script_in_dir(
+            bin, scratch, repo_root + "/src/app/bug_resolve/main.spl", [
+                "--id=db_bug_3", "--date=2026-11-26",
+                "--input-tokens=100", "--output-tokens=50", "--cache-read-tokens=0", "--cache-create-tokens=0",
+                "--token-source=session", "--token-provider=codex", "--knowledge=none",
+                "--disposition=wontfix", "--rationale=superseded in integration test",
+                "--reproducer=test/repro_spec.spl", "--prevention=test/prev_spec.spl",
+                "--source-head=" + sha_head, "--recover", "--progress=none", "--quiet"
+            ]
+        )
+        expect(prev_code).to_equal(0)
+        expect(prev_out).to_contain("Resolved bug db_bug_3")
+        expect(prev_out).to_contain("would_recover")
+        expect(_read_text(calc_file)).to_contain("bug=db_bug_3")
+
+        step("bug-resolve --recover-apply with --fix-commit clears live workaround, passes closure gate, and resolves db_bug_2")
+        val (apply_out, _apply_err, apply_code) = _run_script_in_dir(
+            bin, scratch, repo_root + "/src/app/bug_resolve/main.spl", [
+                "--id=db_bug_2", "--date=2026-11-26",
+                "--input-tokens=100", "--output-tokens=50", "--cache-read-tokens=0", "--cache-create-tokens=0",
+                "--token-source=session", "--token-provider=codex", "--knowledge=none",
+                "--disposition=fixed", "--reproducer=test/repro_spec.spl", "--prevention=test/prev_spec.spl",
+                "--source-head=" + sha_head, "--fix-commit=" + sha_head, "--recover-apply", "--progress=none", "--quiet"
+            ]
+        )
+        expect(apply_code).to_equal(0)
+        expect(apply_out).to_contain("Resolved bug db_bug_2")
+        expect(apply_out).to_contain("recovered")
+        val final_calc = _read_text(calc_file)
+        expect(final_calc.contains("bug=db_bug_2")).to_equal(false)
+        expect(final_calc).to_contain("    x * 2")
+        expect(final_calc).to_contain("bug=db_bug_stage2")
+
+        val _ = dir_remove_all(scratch)
+
+    it "enforces stacked sibling fail-closed/full-stack, atomic per-file --apply, 3-tier DB priority, explicit recover=, dir-prefix --path=, and bare --":
+        val repo_root = _norm(cwd())
+        val bin = _find_simple_bin(repo_root)
+        expect(bin != "").to_equal(true)
+
+        val scratch = _init_scratch_repo("wa_recover_cli_3")
+        val _ = workaround_host_mkdir(scratch + "/src/sub")
+        val _ = workaround_host_mkdir(scratch + "/src_other")
+        val _ = workaround_host_mkdir(scratch + "/doc/08_tracking/bug/db")
+
+        step("1. Seed baseline files across stacked_co, stacked_seq, atomic, explicit_rec, db_prio, and dir-prefix files")
+        val stacked_co = scratch + "/src/stacked_co.spl"
+        val stacked_seq = scratch + "/src/stacked_seq.spl"
+        val atomic_file = scratch + "/src/atomic.spl"
+        val explicit_file = scratch + "/src/explicit_rec.spl"
+        val db_prio_file = scratch + "/src/db_prio.spl"
+        val sub_file = scratch + "/src/sub/in.spl"
+        val other_file = scratch + "/src_other/out.spl"
+
+        _write_text(stacked_co, "fn f(x: i64) -> i64:\n    x + 1\n")
+        _write_text(stacked_seq, "fn g(x: i64) -> i64:\n    x + 2\n")
+        _write_text(atomic_file, "fn a() -> i64:\n    1\n\nfn b() -> i64:\n    2\n")
+        _write_text(explicit_file, "fn e() -> i64:\n    10\n")
+        _write_text(db_prio_file, "fn p1() -> i64:\n    1\n\nfn p2() -> i64:\n    2\n\nfn p3() -> i64:\n    3\n")
+        _write_text(sub_file, "fn inc_fn() -> i64:\n    1\n")
+        _write_text(other_file, "fn other_fn() -> i64:\n    2\n")
+        val _ = _git_ok(scratch, ["add", "-A"])
+        val _ = _git_ok(scratch, ["commit", "-m", "R: baseline"])
+        val sha_r = _git_ok(scratch, ["rev-parse", "HEAD"])
+
+        step("2. Add intermediate non-recover commit on explicit_rec so broken_C2 != R_exp")
+        _write_text(explicit_file, "fn e() -> i64:\n    20\n")
+        val _ = _git_ok(scratch, ["add", "src/explicit_rec.spl"])
+        val _ = _git_ok(scratch, ["commit", "-m", "C2: broken edit before explicit recover="])
+
+        step("3. Add sequential W1 on stacked_seq plus co-introduced, atomic, db_prio, and dir-prefix workarounds")
+        _write_text(stacked_seq, "fn g(x: i64) -> i64:\n# @workaround bug=seq_1 reason=first seq\n    if x == 1:\n        return 11\n    x + 2\n")
+        _write_text(stacked_co, "fn f(x: i64) -> i64:\n# @workaround bug=stack_fixed recover=" + sha_r + " reason=co first\n# @workaround bug=stack_open recover=" + sha_r + " reason=co second\n    return 0\n")
+        _write_text(atomic_file, "fn a() -> i64:\n# @workaround bug=atom_conflict recover=" + sha_r + " reason=diverge\n    92\n\nfn b() -> i64:\n# @workaround bug=atom_clean recover=" + sha_r + " reason=clean\n    91\n")
+        _write_text(explicit_file, "fn e() -> i64:\n# @workaround bug=exp_bug recover=" + sha_r + " reason=must honor R\n    99\n")
+        _write_text(db_prio_file, "fn p1() -> i64:\n# @workaround bug=md_open_bug recover=" + sha_r + " reason=db open\n    11\n\nfn p2() -> i64:\n# @workaround bug=md_qual_bug recover=" + sha_r + " reason=md qualified\n    22\n\nfn p3() -> i64:\n# @workaround bug=md_real_fixed recover=" + sha_r + " reason=md fixed\n    33\n")
+        _write_text(sub_file, "fn inc_fn() -> i64:\n# @workaround bug=inc_bug recover=" + sha_r + " reason=inside src\n    101\n")
+        _write_text(other_file, "fn other_fn() -> i64:\n# @workaround bug=excl_bug recover=" + sha_r + " reason=outside src\n    202\n")
+        val _ = _git_ok(scratch, ["add", "-A"])
+        val _ = _git_ok(scratch, ["commit", "-m", "W1: add workarounds"])
+
+        step("4. Add W2 on stacked_seq and diverge atom_conflict body on atomic_file")
+        _write_text(stacked_seq, "fn g(x: i64) -> i64:\n# @workaround bug=seq_2 reason=second seq\n# @workaround bug=seq_1 reason=first seq\n    if x == 2:\n        return 22\n    if x == 1:\n        return 11\n    x + 2\n")
+        _write_text(atomic_file, "fn a() -> i64:\n# @workaround bug=atom_conflict recover=" + sha_r + " reason=diverge\n    999\n\nfn b() -> i64:\n# @workaround bug=atom_clean recover=" + sha_r + " reason=clean\n    91\n")
+        val _ = _git_ok(scratch, ["add", "src/stacked_seq.spl", "src/atomic.spl"])
+        val _ = _git_ok(scratch, ["commit", "-m", "W2: stack seq_2 and diverge atom_conflict"])
+        val sha_head = _git_ok(scratch, ["rev-parse", "HEAD"])
+
+        step("5. Seed canonical bug_db.sdn and markdown files for 3-tier priority verification")
+        _seed_bug_db(scratch + "/doc/08_tracking/bug/bug_db.sdn", [
+            ("stack_fixed", "Closed", "fixed stack member"),
+            ("stack_open", "Open", "open stack sibling"),
+            ("seq_1", "Closed", "closed seq 1"),
+            ("seq_2", "Closed", "closed seq 2"),
+            ("atom_clean", "Closed", "closed atomic clean"),
+            ("atom_conflict", "Closed", "closed atomic conflict"),
+            ("exp_bug", "Closed", "closed explicit recover"),
+            ("md_open_bug", "Open", "explicitly open in bug_db.sdn")
+        ])
+        _write_text(scratch + "/doc/08_tracking/bug/md_open_bug.md", "# Bug\n\n**Status:** Fixed\n")
+        _write_text(scratch + "/doc/08_tracking/bug/md_qual_bug.md", "# Bug\n\n**Status:** fixed in source; verification pending\n")
+        _write_text(scratch + "/doc/08_tracking/bug/md_real_fixed.md", "# Bug\n\n**Status:** Fixed in main\n")
+        val _ = _git_ok(scratch, ["add", "doc/08_tracking/bug"])
+        val _ = _git_ok(scratch, ["commit", "-m", "D: seed bug DB and md status files"])
+
+        step("6. Partial stack recovery fails closed without mutating open sibling or reverting block")
+        val before_co = _read_text(stacked_co)
+        val (part_out, part_err, part_code) = _run_recover_cli(bin, repo_root, [
+            "--root=" + scratch, "--path=src/stacked_co.spl", "--bug=stack_fixed",
+            "--fix-commit=" + sha_head, "--apply", "--progress=none", "--quiet"
+        ])
+        expect(part_code != 0).to_equal(true)
+        expect((part_out + part_err).contains("conflict")).to_equal(true)
+        expect((part_out + part_err).contains("stacked sibling")).to_equal(true)
+        expect(_read_text(stacked_co)).to_equal(before_co)
+
+        step("7. Full stack recovery retires both co-introduced stack_fixed+stack_open and sequential seq_1+seq_2")
+        _seed_bug_db(scratch + "/doc/08_tracking/bug/bug_db.sdn", [
+            ("stack_fixed", "Closed", "fixed stack member"),
+            ("stack_open", "Closed", "now closed sibling"),
+            ("seq_1", "Closed", "closed seq 1"),
+            ("seq_2", "Closed", "closed seq 2"),
+            ("atom_clean", "Closed", "closed atomic clean"),
+            ("atom_conflict", "Closed", "closed atomic conflict"),
+            ("exp_bug", "Closed", "closed explicit recover"),
+            ("md_open_bug", "Open", "explicitly open in bug_db.sdn")
+        ])
+        val (co_out, _co_err, co_code) = _run_recover_cli(bin, repo_root, [
+            "--root=" + scratch, "--path=src/stacked_co.spl", "--all-fixed",
+            "--fix-commit=" + sha_head, "--apply", "--progress=none", "--quiet"
+        ])
+        expect(co_code).to_equal(0)
+        expect(co_out).to_contain("recovered")
+        val after_co = _read_text(stacked_co)
+        expect(after_co.contains("@workaround")).to_equal(false)
+        expect(after_co).to_contain("    x + 1")
+
+        val (seq_out, _seq_err, seq_code) = _run_recover_cli(bin, repo_root, [
+            "--root=" + scratch, "--path=src/stacked_seq.spl", "--all-fixed", "--link-recover",
+            "--fix-commit=" + sha_head, "--apply", "--progress=none", "--quiet"
+        ])
+        expect(seq_code).to_equal(0)
+        expect(seq_out).to_contain("recovered")
+        val after_seq = _read_text(stacked_seq)
+        expect(after_seq.contains("@workaround")).to_equal(false)
+        expect(after_seq).to_contain("    x + 2")
+        expect(after_seq.contains("return 11")).to_equal(false)
+        expect(after_seq.contains("return 22")).to_equal(false)
+
+        step("8. Atomic per-file --apply leaves file completely unchanged when another marker in the same file conflicts")
+        val before_atomic = _read_text(atomic_file)
+        val (atom_out, atom_err, atom_code) = _run_recover_cli(bin, repo_root, [
+            "--root=" + scratch, "--path=src/atomic.spl", "--all-fixed",
+            "--fix-commit=" + sha_head, "--apply", "--progress=none", "--quiet"
+        ])
+        expect(atom_code != 0).to_equal(true)
+        expect(atom_out + atom_err).to_contain("aborted-atomic")
+        expect(atom_out + atom_err).to_contain("conflict")
+        expect(_read_text(atomic_file)).to_equal(before_atomic)
+
+        step("9. Explicit recover=<sha> restores R rather than intermediate commit C2")
+        val (exp_out, _exp_err, exp_code) = _run_recover_cli(bin, repo_root, [
+            "--root=" + scratch, "--path=src/explicit_rec.spl", "--bug=exp_bug",
+            "--fix-commit=" + sha_head, "--apply", "--progress=none", "--quiet"
+        ])
+        expect(exp_code).to_equal(0)
+        expect(exp_out).to_contain("recovered")
+        val after_exp = _read_text(explicit_file)
+        expect(after_exp.contains("@workaround")).to_equal(false)
+        expect(after_exp).to_contain("    10")
+        expect(after_exp.contains("    20")).to_equal(false)
+
+        step("10. 3-tier DB priority keeps bug_db.sdn Open and qualified .md as not_eligible while unqualified Fixed .md is would_recover")
+        val (prio_list_out, _prio_list_err, prio_list_code) = _run_recover_cli(bin, repo_root, [
+            "--root=" + scratch, "--path=src/db_prio.spl", "--list", "--json", "--progress=none", "--quiet"
+        ])
+        expect(prio_list_code).to_equal(0)
+        expect(prio_list_out).to_contain("\"bug_id\":\"md_open_bug\"")
+        expect(prio_list_out).to_contain("\"status\":\"listed\"")
+        expect(prio_list_out).to_contain("bug=Open;")
+        expect(prio_list_out).to_contain("\"bug_id\":\"md_qual_bug\"")
+        expect(prio_list_out).to_contain("bug=fixed-qualified;")
+        expect(prio_list_out).to_contain("\"bug_id\":\"md_real_fixed\"")
+        expect(prio_list_out).to_contain("\"status\":\"would_recover\"")
+        expect(prio_list_out).to_contain("bug=fixed;")
+        expect(prio_list_out).to_contain("\"would_recover\":1")
+
+        val (prio_out, _prio_err, prio_code) = _run_recover_cli(bin, repo_root, [
+            "--root=" + scratch, "--path=src/db_prio.spl", "--all-fixed", "--json", "--progress=none", "--quiet"
+        ])
+        expect(prio_code).to_equal(0)
+        expect(prio_out).to_contain("\"bug_id\":\"md_real_fixed\"")
+        expect(prio_out.contains("md_open_bug")).to_equal(false)
+        expect(prio_out.contains("md_qual_bug")).to_equal(false)
+        expect(prio_out).to_contain("\"would_recover\":1")
+
+        step("11. Directory-prefix --path=src/, --exclude slash boundary, and bare -- separator work end-to-end")
+        val (dir_out, _dir_err, dir_code) = _run_recover_cli(bin, repo_root, [
+            "--", "--", "--root=" + scratch, "--list", "--path=src/", "--exclude=src_other",
+            "--json", "--progress=none", "--quiet"
+        ])
+        expect(dir_code).to_equal(0)
+        expect(dir_out).to_contain("inc_bug")
+        expect(dir_out.contains("excl_bug")).to_equal(false)
+
+        val (bnd_out, _bnd_err, bnd_code) = _run_recover_cli(bin, repo_root, [
+            "--", "--", "--root=" + scratch, "--list", "--path=src_other/", "--exclude=src",
+            "--json", "--progress=none", "--quiet"
+        ])
+        expect(bnd_code).to_equal(0)
+        expect(bnd_out).to_contain("excl_bug")
+        expect(bnd_out).to_contain("\"skipped_excluded\":0")
+
+        val _ = dir_remove_all(scratch)

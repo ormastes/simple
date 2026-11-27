@@ -44,8 +44,44 @@ use simple_runtime::debug;
 /// module-level `val`/`var`, `const`, `static`, and declared function returns
 /// (scalars only there; see `function_exec.rs`).
 /// Bug: doc/08_tracking/bug/seed_u64_signed_compare_and_u8_data_ptr_2026-10-19.md
+/// Let-binding coercion: a `bool`-declared local initialised by `expr.?`
+/// takes presence exactly like a `bool` parameter (`present_value_as_bool_arg`),
+/// so `val has: bool = Some(0).?` is true; everything else goes through
+/// [`coerce_to_declared_type`].
+pub(crate) fn coerce_let_value(value: Value, ty: Option<&Type>, init: Option<&simple_parser::ast::Expr>) -> Value {
+    if matches!(init, Some(simple_parser::ast::Expr::ExistsCheck(_))) {
+        if let Some(b) = crate::interpreter::interpreter_call::present_value_as_bool_arg(&value, ty) {
+            return b;
+        }
+    }
+    coerce_to_declared_type(value, ty)
+}
+
 pub(crate) fn coerce_to_declared_type(value: Value, ty: Option<&Type>) -> Value {
     match ty {
+        // A `bool`-declared binding: absent (`Value::Nil`) is false and an
+        // Option wrapper is its presence. Other payloads pass through (an
+        // extern's bool-as-Int keeps its value); a `.?` initializer is
+        // handled by `coerce_let_value`, which knows the expression.
+        // Bug: stage2_dotq_presence_value_is_nil_sentinel_2026-11-03.
+        Some(Type::Simple(name)) if name == "bool" => match &value {
+            Value::Nil => Value::Bool(false),
+            Value::Enum { enum_name, variant, .. } if enum_name == "Option" => Value::Bool(variant == "Some"),
+            _ => value,
+        },
+        // Integer -> float widening for a float-declared binding/parameter
+        // (bug: seed_constructor_static_method_no_literal_coercion_2026-07-20).
+        Some(Type::Simple(name)) if name == "f64" && matches!(value, Value::Int(_)) => match value {
+            Value::Int(i) => Value::Float(i as f64),
+            other => other,
+        },
+        Some(Type::Simple(name)) if name == "f32" && matches!(value, Value::Int(_)) => match value {
+            Value::Int(i) => Value::Float32(i as f32),
+            other => other,
+        },
+        Some(Type::Simple(name)) if matches!(name.as_str(), "i8" | "i16" | "i32" | "i64") => {
+            coerce_to_declared_signed(value, name)
+        }
         Some(Type::Simple(_)) => coerce_to_declared_unsigned(value, ty),
         Some(Type::Array { element, size: None }) if matches!(element.as_ref(), Type::Simple(name) if name == "u8") => {
             pack_u8_array(value)
@@ -54,7 +90,76 @@ pub(crate) fn coerce_to_declared_type(value: Value, ty: Option<&Type>) -> Value 
     }
 }
 
+/// The identifier a `let` pattern binds when it is a plain (optionally typed
+/// or `mut`) name; destructuring patterns yield `None`.
+fn plain_binding_name(pattern: &simple_parser::ast::Pattern) -> Option<&str> {
+    use simple_parser::ast::Pattern;
+    match pattern {
+        Pattern::Identifier(name) | Pattern::MutIdentifier(name) => Some(name.as_str()),
+        Pattern::Typed { pattern, .. } => match pattern.as_ref() {
+            Pattern::Identifier(name) | Pattern::MutIdentifier(name) => Some(name.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Record a `let`'s declared narrow SIGNED width (i8/i16/i32) beside the
+/// value it binds. `Value::Int` carries no width, and `impl Trait for i32`
+/// dispatch on `y.m()` keys on the receiver's STATIC type exactly as the
+/// pure-Simple resolver does (`CowEnv::declared_int_widths`). The width comes
+/// from the annotation (`val y: i32`, `val y: i32 = ...` typed pattern) or,
+/// for an unannotated binding, from a cast initializer (`val w = x as i32`);
+/// any other re-declaration of the name clears the entry. Every Let executor
+/// must call this — there are two (`exec_node` and the block-body path in
+/// `interpreter_call/block_execution.rs`).
+pub(crate) fn record_let_declared_width(let_stmt: &simple_parser::ast::LetStmt, env: &mut Env) {
+    let Some(name) = plain_binding_name(&let_stmt.pattern) else {
+        return;
+    };
+    let annotation: Option<&Type> = match &let_stmt.ty {
+        Some(ty) => Some(ty),
+        None => match &let_stmt.pattern {
+            simple_parser::ast::Pattern::Typed { ty, .. } => Some(ty),
+            _ => None,
+        },
+    };
+    // Unannotated: the initializer's static width (`val w = x as i32`,
+    // `val n = m + 1` with `m: i32`), so later arithmetic on `w`/`n` wraps
+    // at the same width the pure-Simple compiler types it with.
+    let width = match annotation {
+        Some(_) => Env::narrow_signed_width_of(annotation),
+        None => match let_stmt.value.as_ref().map(|v| super::expr::static_int_width(v, env)) {
+            Some(super::expr::StaticIntWidth::Narrow(w)) => Some(w),
+            _ => None,
+        },
+    };
+    env.set_declared_int_width(name, width);
+}
+
 /// Scalar half of [`coerce_to_declared_type`]: only the unsigned widths.
+/// Signed counterpart of [`coerce_to_declared_unsigned`]: a value bound to a
+/// declared `i8`/`i16`/`i32`/`i64` (parameter, typed `val`) takes that width's
+/// two's-complement value, as native lowering stores it. A `Value::UInt`
+/// argument bound to an `i64` parameter used to stay unsigned, so `x - 10`
+/// with `x = 5u64` wrapped to 18446744073709551611
+/// (follow-up of 2026-10-30_seed_uint_scrutinee_never_matches_int_patterns.md),
+/// and `val x: i32 = 3000000000` kept the i64
+/// (follow-up of seed_i32_overflow_interp_vs_jit_divergence_2026-11-05.md).
+pub(crate) fn coerce_to_declared_signed(value: Value, type_name: &str) -> Value {
+    let raw: i64 = match value {
+        Value::Int(i) => i,
+        Value::UInt { value, .. } => value as i64,
+        other => return other,
+    };
+    Value::Int(match type_name {
+        "i8" => raw as i8 as i64,
+        "i16" => raw as i16 as i64,
+        "i32" => raw as i32 as i64,
+        _ => raw,
+    })
+}
+
 pub(crate) fn coerce_to_declared_unsigned(value: Value, ty: Option<&Type>) -> Value {
     let Some(Type::Simple(type_name)) = ty else {
         return value;
@@ -80,6 +185,210 @@ pub(crate) fn coerce_to_declared_unsigned(value: Value, ty: Option<&Type>) -> Va
         // object newtypes around u32) pass through.
         other => other,
     }
+}
+
+/// Field half of [`coerce_to_declared_unsigned`]: a value stored into a class
+/// or struct field whose DECLARED type is an unsigned width is coerced to
+/// `Value::UInt` of that width, exactly as a `val x: u64 = ...` local is.
+///
+/// Both class-field stores — construction (`Hdr(magic: expr)`, defaults) and
+/// assignment (`h.magic = expr`, `self.magic = expr`, `arr[i].magic = expr`,
+/// `a.b.magic = expr`) — used to insert the raw `Value::Int`, so a `u64` field
+/// holding a value >= 2^63 stayed a NEGATIVE `i64`. Comparing it with a `u64`
+/// produced by a byte-parse (`Value::UInt`) then went through the mixed
+/// `Int`/`UInt` ordering, where a negative `Int` is less than every `UInt`:
+/// `p.module_hash == h.module_hash` was false for the same 64 bits
+/// (`src/compiler/70.backend/linker/test/smf_layout_parity_spec.spl` 5/7).
+/// Coercion at the declared-type boundary is the existing policy for every
+/// other binding site (locals, consts, statics, args, returns); widening the
+/// comparison instead would make `-1 == 0xFFFF_FFFF_FFFF_FFFF` true for
+/// genuinely signed operands. Unknown class or field: the value passes
+/// through unchanged (dynamic field, bitfield, or an un-registered class).
+/// Bug: seed_interp_u64_field_store_not_coerced_2026-11-03 (bug_db.sdn); spec
+/// test/01_unit/compiler/95.interp/interpreter/u64_field_store_coerces_to_declared_width_spec.spl
+pub(crate) fn coerce_to_declared_field(
+    class_name: &str,
+    field: &str,
+    value: Value,
+    classes: &HashMap<String, Arc<ClassDef>>,
+) -> Value {
+    match classes.get(class_name) {
+        Some(class_def) => coerce_to_declared_field_of(class_def, field, value),
+        None => value,
+    }
+}
+
+/// [`coerce_to_declared_field`] with the class definition already in hand
+/// (construction, where the picked `ClassDef` may be a same-name overload).
+pub(crate) fn coerce_to_declared_field_of(class_def: &ClassDef, field: &str, value: Value) -> Value {
+    match class_def.fields.iter().find(|f| f.name == field) {
+        Some(decl) => coerce_to_declared_unsigned(value, Some(&decl.ty)),
+        None => value,
+    }
+}
+
+/// Class name of the object stored at `owner` (a class instance or object).
+fn owner_class_name(env: &Env, owner: &super::place::Place) -> Option<String> {
+    // `place_slot_ref` cannot borrow through a shared `ClassInstance` hop, so a
+    // three-level `a.b.c.f = v` owner (`a.b.c`) resolved to None and the store
+    // skipped u64 coercion. Walk owned values instead; a ClassInstance field
+    // hop reads through `field()`.
+    let mut slot = env.get(&owner.root)?.clone();
+    for projection in &owner.projections {
+        slot = match (&slot, projection) {
+            (Value::ClassInstance(inst), super::place::Projection::Field(name)) => inst.field(name)?,
+            _ => super::place::step_ref(&slot, projection)?.clone(),
+        };
+    }
+    match &slot {
+        Value::ClassInstance(inst) => Some(inst.class().to_string()),
+        Value::Object { class, .. } => Some(class.clone()),
+        _ => None,
+    }
+}
+
+/// Coerce `value` for a store into the declared field `field_place` (a place
+/// ending in `Field(f)`): the field's own declared unsigned width, or, when
+/// `element` is true, the declared element type of a `[uN]` field
+/// (`o.f[i] = v`). Unknown owner/field: unchanged. Covers the place-based
+/// store paths (`a.b.f = v`, `arr[i].f = v`, `self.rows[i].f = v`) that
+/// `write_place` serves.
+fn coerce_store_at_field_place(
+    env: &Env,
+    field_place: &super::place::Place,
+    element: bool,
+    value: Value,
+    classes: &HashMap<String, Arc<ClassDef>>,
+) -> Value {
+    let Some((super::place::Projection::Field(field), owner_projs)) = field_place.projections.split_last() else {
+        return value;
+    };
+    let owner = super::place::Place {
+        root: field_place.root.clone(),
+        projections: owner_projs.to_vec(),
+    };
+    let Some(class_name) = owner_class_name(env, &owner) else {
+        return value;
+    };
+    if !element {
+        return coerce_to_declared_field(&class_name, field, value, classes);
+    }
+    let Some(class_def) = classes.get(&class_name) else {
+        return value;
+    };
+    match class_def.fields.iter().find(|f| &f.name == field).map(|f| &f.ty) {
+        Some(Type::Array { element: elem, .. }) => coerce_to_declared_unsigned(value, Some(elem.as_ref())),
+        _ => value,
+    }
+}
+
+/// [`coerce_store_at_field_place`] for a complete assignment-target place:
+/// a trailing `Index` means an element store into the preceding field.
+fn coerce_store_at_place(
+    env: &Env,
+    place: &super::place::Place,
+    value: Value,
+    classes: &HashMap<String, Arc<ClassDef>>,
+) -> Value {
+    match place.projections.last() {
+        Some(super::place::Projection::Field(_)) => coerce_store_at_field_place(env, place, false, value, classes),
+        Some(super::place::Projection::Index(_)) => {
+            let mut field_place = place.clone();
+            field_place.projections.pop();
+            coerce_store_at_field_place(env, &field_place, true, value, classes)
+        }
+        Some(super::place::Projection::Unwrap) | None => value,
+    }
+}
+
+/// True for place expressions whose evaluation has no side effects, so
+/// resolving them an extra time (only to read a declared type) is harmless.
+fn is_pure_place_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Identifier(_) | Expr::Integer(_) => true,
+        Expr::FieldAccess { receiver, .. } => is_pure_place_expr(receiver),
+        Expr::Index { receiver, index } => is_pure_place_expr(receiver) && is_pure_place_expr(index),
+        _ => false,
+    }
+}
+
+/// True when some index subexpression on the place path may run user code
+/// (anything but an identifier or a literal). Only such places need the
+/// receiver-first place route; side-effect-free paths keep their old route.
+fn index_may_have_effects(expr: &Expr) -> bool {
+    fn effect_free(index: &Expr) -> bool {
+        matches!(
+            index,
+            Expr::Identifier(_) | Expr::Integer(_) | Expr::TypedInteger(..) | Expr::String(_) | Expr::Bool(_)
+        )
+    }
+    match expr {
+        Expr::FieldAccess { receiver, .. } => index_may_have_effects(receiver),
+        Expr::Index { receiver, index } => !effect_free(index) || index_may_have_effects(receiver),
+        _ => false,
+    }
+}
+
+/// Zero element for an initializer-less `[T; N]` declaration.
+pub(crate) fn fixed_array_zero_element(element: &Type) -> Value {
+    match element {
+        Type::Simple(t) if t == "bool" => Value::Bool(false),
+        Type::Simple(t) if t.starts_with('i') || t.starts_with('u') => {
+            coerce_to_declared_type(Value::Int(0), Some(element))
+        }
+        Type::Simple(t) if t == "f64" || t == "f32" => Value::Float(0.0),
+        _ => Value::Nil,
+    }
+}
+
+/// `var a: [T; N]` (no initializer) -> zero-filled `FixedSizeArray`, or `None`
+/// when the declaration is not a sized array.
+fn zero_filled_fixed_array_decl(
+    let_stmt: &simple_parser::ast::LetStmt,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Option<Value> {
+    let ty = match (&let_stmt.ty, &let_stmt.pattern) {
+        (Some(ty), _) => ty,
+        (None, simple_parser::ast::Pattern::Typed { ty, .. }) => ty,
+        _ => return None,
+    };
+    let Type::Array { element, size: Some(size_expr) } = ty else {
+        return None;
+    };
+    let Ok(Value::Int(n)) = evaluate_expr(size_expr, env, functions, classes, enums, impl_methods) else {
+        return None;
+    };
+    if n < 0 {
+        return None;
+    }
+    Some(Value::FixedSizeArray {
+        size: n as usize,
+        data: vec![fixed_array_zero_element(element); n as usize],
+    })
+}
+
+/// Declared named-type default for an initializer-less `var`/`val` (see
+/// `class_instantiation::noinit_named_type_default`).
+pub(crate) fn noinit_named_type_default_decl(
+    let_stmt: &simple_parser::ast::LetStmt,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Option<Value> {
+    let ty = match (&let_stmt.ty, &let_stmt.pattern) {
+        (Some(ty), _) => ty,
+        (None, simple_parser::ast::Pattern::Typed { ty, .. }) => ty,
+        _ => return None,
+    };
+    super::interpreter_call::noinit_named_type_default(
+        ty, env, functions, classes, enums, impl_methods,
+    )
 }
 
 fn pack_u8_array(value: Value) -> Value {
@@ -154,9 +463,23 @@ pub(crate) fn exec_node(
         }
         Node::Let(let_stmt) => {
             if let Some(value_expr) = &let_stmt.value {
+                // Validate unit type annotation if present
+                // Type can come from either let_stmt.ty OR from a typed pattern (x: Type)
+                // Borrowed, not cloned: this runs on EVERY execution of the
+                // statement (per loop iteration), and a generic annotation such
+                // as `Dict<text, i64>` is a Vec plus several Strings to clone.
+                let type_annotation: Option<&Type> = match &let_stmt.ty {
+                    Some(ty) => Some(ty),
+                    None => match &let_stmt.pattern {
+                        simple_parser::ast::Pattern::Typed { ty, .. } => Some(ty),
+                        _ => None,
+                    },
+                };
                 // Handle method calls on objects - need to persist mutations to self
+                let _expected_target_guard = super::push_expected_target_type(type_annotation.cloned());
                 let (value, update) =
                     handle_method_call_with_self_update(value_expr, env, functions, classes, enums, impl_methods)?;
+                drop(_expected_target_guard);
                 if let Some((obj_name, new_self)) = update {
                     env.insert(obj_name, new_self);
                 }
@@ -176,19 +499,6 @@ pub(crate) fn exec_node(
                     value
                 };
 
-                // Validate unit type annotation if present
-                // Type can come from either let_stmt.ty OR from a typed pattern (x: Type)
-                // Borrowed, not cloned: this runs on EVERY execution of the
-                // statement (per loop iteration), and a generic annotation such
-                // as `Dict<text, i64>` is a Vec plus several Strings to clone.
-                let type_annotation: Option<&Type> = match &let_stmt.ty {
-                    Some(ty) => Some(ty),
-                    None => match &let_stmt.pattern {
-                        simple_parser::ast::Pattern::Typed { ty, .. } => Some(ty),
-                        _ => None,
-                    },
-                };
-
                 // Helper to extract variable name for error messages
                 let get_var_name = |pattern: &simple_parser::ast::Pattern| -> String {
                     match pattern {
@@ -203,8 +513,28 @@ pub(crate) fn exec_node(
                     }
                 };
 
+                if let Some(message) = crate::impl_duplicate_check::let_literal_mismatch(let_stmt) {
+                    return Err(CompileError::semantic(message));
+                }
+                // A function/type value can never be an enum value: twin of
+                // the HIR typed-`val` check (reject_callable_for_enum_slot).
+                // Bug: match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14
+                if let Some(e) =
+                    crate::interpreter::interpreter_call::reject_callable_for_enum_param(&value, type_annotation, enums)
+                {
+                    return Err(CompileError::semantic_with_context(
+                        format!("type mismatch: binding `{}` {}", get_var_name(&let_stmt.pattern), e),
+                        crate::error::ErrorContext::new()
+                            .with_code(crate::error::codes::TYPE_MISMATCH)
+                            .with_help("bind a variant of the enum; a function or type value can never be an enum value"),
+                    ));
+                }
                 // Validate and constrain value based on type annotation
                 let value = match type_annotation {
+                    // `bool` locals take `.?` presence (see `coerce_to_declared_type`).
+                    Some(ty @ Type::Simple(type_name)) if type_name == "bool" => {
+                        coerce_let_value(value, Some(ty), let_stmt.value.as_ref())
+                    }
                     // Coerce to Value::UInt when the annotation is an unsigned integer type
                     // so subsequent arithmetic on the bound variable applies modulo-2^width
                     // wrap. See doc/08_tracking/bug/interpreter_u32_wrap_subtraction_2026-05-01.md.
@@ -212,6 +542,9 @@ pub(crate) fn exec_node(
                         if matches!(type_name.as_str(), "u8" | "u16" | "u32" | "u64") =>
                     {
                         coerce_to_declared_unsigned(value, Some(ty))
+                    }
+                    Some(Type::Simple(type_name)) if matches!(type_name.as_str(), "i8" | "i16" | "i32" | "i64") => {
+                        coerce_to_declared_signed(value, type_name)
                     }
                     // `[u8]` bindings get packed byte storage (see
                     // `coerce_to_declared_type`).
@@ -286,6 +619,32 @@ pub(crate) fn exec_node(
                 } else {
                     value
                 };
+                // Record the binding's declared narrow SIGNED width (i8/i16/i32)
+                // beside the value: `Value::Int` carries no width, and
+                // `impl Trait for i32` dispatch on `y.m()` keys on the static
+                // type exactly as the pure-Simple resolver does
+                // (`CowEnv::declared_int_widths`). A `val w = x as i32` takes the
+                // cast's target; any other re-declaration clears the entry.
+                record_let_declared_width(let_stmt, env);
+                let is_mutable = let_stmt.mutability.is_mutable();
+                bind_pattern_value(&let_stmt.pattern, value, is_mutable, env);
+            } else if let Some(value) =
+                zero_filled_fixed_array_decl(let_stmt, env, functions, classes, enums, impl_methods)
+            {
+                // `var a: [T; N]` with no initializer is zero-filled storage, the
+                // same as the module evaluator's binding. Imported non-std
+                // modules are flattened into the entry program and reach their
+                // module-level `var`s here, so without this the name was never
+                // bound ("variable `q_active` not found",
+                // os_namespace_uninitialized_array_module_var_not_found_2026-08-02).
+                let is_mutable = let_stmt.mutability.is_mutable();
+                bind_pattern_value(&let_stmt.pattern, value, is_mutable, env);
+            } else if let Some(value) = noinit_named_type_default_decl(let_stmt, env, functions, classes, enums, impl_methods)
+            {
+                // `var g: SomeEnum` / `var g: SomeClass` with no initializer
+                // (owner decision 2026-11-09): first variant / default
+                // construction, never nil (bug
+                // noinit_module_var_nonlocal_type_nil_fallback_needs_hir_zero_2026-11-09).
                 let is_mutable = let_stmt.mutability.is_mutable();
                 bind_pattern_value(&let_stmt.pattern, value, is_mutable, env);
             } else if strict_mem_enabled() {
@@ -334,19 +693,25 @@ pub(crate) fn exec_node(
             Ok(Control::Next)
         }
         Node::Assignment(assign) if assign.op == AssignOp::Assign => {
+            let _clear_expected = super::push_expected_target_type(None);
             exec_assignment(assign, env, functions, classes, enums, impl_methods)
         }
         // Handle augmented assignments (+=, -=, *=, /=) and suspension variants (~+=, ~-=, etc.)
-        Node::Assignment(assign) => exec_augmented_assignment(assign, env, functions, classes, enums, impl_methods),
+        Node::Assignment(assign) => {
+            let _clear_expected = super::push_expected_target_type(None);
+            exec_augmented_assignment(assign, env, functions, classes, enums, impl_methods)
+        }
         Node::If(if_stmt) => exec_if(if_stmt, env, functions, classes, enums, impl_methods),
         Node::While(while_stmt) => exec_while(while_stmt, env, functions, classes, enums, impl_methods),
         Node::Loop(loop_stmt) => exec_loop(loop_stmt, env, functions, classes, enums, impl_methods),
         Node::For(for_stmt) => exec_for(for_stmt, env, functions, classes, enums, impl_methods),
         Node::Return(ret) => {
             let value = if let Some(expr) = &ret.value {
+                let _expected_guard = super::push_expected_target_type(super::current_fn_return_type());
                 // Handle method calls on objects - need to persist mutations to self
                 let (val, update) =
                     handle_method_call_with_self_update(expr, env, functions, classes, enums, impl_methods)?;
+                drop(_expected_guard);
                 if let Some((name, new_self)) = update {
                     env.insert(name, new_self);
                 }
@@ -411,6 +776,7 @@ pub(crate) fn exec_node(
             // If condition is Some and true, or if condition is None (else), return the result
             let should_return = match &guard_stmt.condition {
                 Some(cond_expr) => {
+                    let _clear_cond = super::push_expected_target_type(None);
                     let cond = evaluate_expr(cond_expr, env, functions, classes, enums, impl_methods)?;
                     // `is_condition_present` (not plain `.truthy()`): see its
                     // doc comment in `interpreter_control.rs` -- an `.?`
@@ -421,6 +787,7 @@ pub(crate) fn exec_node(
                 None => true, // `? else -> result` always matches
             };
             if should_return {
+                let _expected_guard = super::push_expected_target_type(super::current_fn_return_type());
                 let result = evaluate_expr(&guard_stmt.result, env, functions, classes, enums, impl_methods)?;
                 Ok(Control::Return(result))
             } else {
@@ -431,6 +798,7 @@ pub(crate) fn exec_node(
         Node::Context(ctx_stmt) => exec_context(ctx_stmt, env, functions, classes, enums, impl_methods),
         Node::With(with_stmt) => exec_with(with_stmt, env, functions, classes, enums, impl_methods),
         Node::Expression(expr) => {
+            let _clear_expected = super::push_expected_target_type(None);
             if let Expr::UnsafeBlock(nodes, _) = expr {
                 let (flow, _) = super::exec_unsafe_block(nodes, env, functions, classes, enums, impl_methods)?;
                 return Ok(flow);
@@ -456,7 +824,8 @@ pub(crate) fn exec_node(
             let plain = Value::Function {
                 name: f.name.clone(),
                 def: Arc::new(f.clone()),
-                captured_env: Arc::new(env.clone()), // Capture current scope
+                // Capture current scope, stamped with its lexical origin.
+                captured_env: Arc::new(crate::interpreter::interpreter_module::capture_env_with_origin(env)),
             };
             env.insert(f.name.clone(), plain.clone());
             // A user-defined (non-directive) decorator rebinds the name to
@@ -474,6 +843,7 @@ pub(crate) fn exec_node(
                 // Keep the plain definition in `functions` so the original body
                 // can still recurse; the sentinel makes `evaluate_call` prefer
                 // the wrapper for calls from outside it.
+                crate::decorator_apply::mark_decorated_fn_bound();
                 env.insert(crate::decorator_apply::decorated_fn_key(&f.name), Value::Bool(true));
                 env.insert(f.name.clone(), decorated);
             }
@@ -508,26 +878,7 @@ pub(crate) fn exec_node(
             );
             classes.insert(
                 s.name.clone(),
-                Arc::new(ClassDef {
-                    span: s.span,
-                    name: s.name.clone(),
-                    generic_params: Vec::new(),
-                    where_clause: vec![],
-                    fields: s.fields.clone(),
-                    methods: s.methods.clone(),
-                    parent: None,
-                    visibility: s.visibility,
-                    effects: Vec::new(),
-                    attributes: Vec::new(),
-                    doc_comment: None,
-                    invariant: None,
-                    macro_invocations: vec![],
-                    mixins: vec![],
-                    is_generic_template: false,
-                    specialization_of: None,
-                    type_bindings: std::collections::HashMap::new(),
-                    is_value_type: true,
-                }),
+                Arc::new(crate::interpreter::core_types::struct_def_to_class_def(s)),
             );
             // Register static methods as mangled free functions (StructName__method)
             for method in &s.methods {
@@ -582,7 +933,18 @@ pub(crate) fn exec_node(
         // literals silently fall back to the preloaded on-disk unit tree.
         Node::Unit(u) => {
             register_standalone_unit_locals(u);
-            env.insert(u.name.clone(), Value::Nil);
+            if let Some(class) = crate::interpreter_unit::unit_constructor_class(u) {
+                crate::interpreter_unit::register_record_unit_class(&u.name);
+                classes.insert(u.name.clone(), Arc::new(class));
+                env.insert(
+                    u.name.clone(),
+                    Value::Constructor {
+                        class_name: u.name.clone(),
+                    },
+                );
+            } else {
+                env.insert(u.name.clone(), Value::Nil);
+            }
             Ok(Control::Next)
         }
         Node::UnitFamily(uf) => {
@@ -624,6 +986,7 @@ pub(crate) fn exec_node(
                 type_bindings: std::collections::HashMap::new(),
                 is_value_type: false,
             };
+            crate::interpreter_unit::register_record_unit_class(&nt.name);
             classes.insert(nt.name.clone(), Arc::new(synth_class));
             env.insert(
                 nt.name.clone(),
@@ -791,7 +1154,7 @@ fn try_assign_module_global_index(
             Value::Dict(dict) => {
                 let key = index_val.to_key_string();
                 let stored = Value::wrap_dict_entry(index_val, value);
-                crate::interpreter::module_dict_make_mut(dict).insert(key, stored);
+                crate::interpreter::interpreter_call::namespace_make_mut_for_write(dict)?.insert(key, stored);
                 Ok(None)
             }
             Value::Tuple(tuple) => {
@@ -818,7 +1181,177 @@ fn try_assign_module_global_index(
     })
 }
 
+/// The class of `obj_name` when it is a class/struct value with no field
+/// `field` (so `obj.field` can only be a getter/setter property). `None` for
+/// `_`-prefixed names, real fields and unknown receivers.
+fn field_less_class(
+    obj_name: &str,
+    field: &str,
+    env: &Env,
+    classes: &HashMap<String, Arc<ClassDef>>,
+) -> Option<(String, Arc<ClassDef>)> {
+    if field.starts_with('_') {
+        return None;
+    }
+    let current = match env.get(obj_name).cloned() {
+        Some(v) => Some(v),
+        None => MODULE_GLOBALS.with(|cell| cell.borrow().get(obj_name).cloned()),
+    };
+    let (class_name, has_field) = match current.map(Value::into_option_payload) {
+        Some(Value::ClassInstance(ref inst)) => (inst.class().to_string(), inst.field(field).is_some()),
+        Some(Value::Object { ref class, ref fields }) => (class.clone(), fields.contains_key(field)),
+        _ => return None,
+    };
+    if has_field {
+        return None;
+    }
+    let class_def = classes.get(class_name.as_str()).cloned()?;
+    if class_def.fields.iter().any(|f| f.name == field) {
+        return None;
+    }
+    Some((class_name, class_def))
+}
+
+fn class_has_method(class_name: &str, class_def: &ClassDef, impl_methods: &ImplMethods, method: &str) -> bool {
+    class_def.methods.iter().any(|m| m.name == method)
+        || impl_methods
+            .get(class_name)
+            .is_some_and(|ms| ms.iter().any(|m| m.name == method))
+}
+
+/// `obj.prop op= rhs` where `prop` is a getter/setter pair (no field `prop`):
+/// one getter read, then one setter write, after the already-evaluated RHS
+/// (owner contract 2026-11-06). Returns `None` when `obj.prop` is not such a
+/// property, leaving the field paths in charge.
+/// Bug: doc/08_tracking/bug/compound_assign_through_property_setter_fails_seed_2026-11-06.md
+#[allow(clippy::too_many_arguments)]
+fn augmented_through_setter(
+    obj_name: &str,
+    field: &str,
+    op: BinOp,
+    rhs_value: Value,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Control>, CompileError> {
+    let Some((class_name, class_def)) = field_less_class(obj_name, field, env, classes) else {
+        return Ok(None);
+    };
+    if !class_has_method(&class_name, &class_def, impl_methods, &format!("set_{field}")) {
+        return Ok(None);
+    }
+    // The read goes through the ordinary field-access path, which forwards a
+    // missing field to `get_<field>()` / `is_<field>()` exactly as a plain
+    // read of `obj.prop` does.
+    let read = Expr::FieldAccess {
+        receiver: Box::new(Expr::Identifier(obj_name.to_string())),
+        field: field.to_string(),
+    };
+    let current = evaluate_expr(&read, env, functions, classes, enums, impl_methods)?;
+    let old_temp = "\u{0}setter_old".to_string();
+    let rhs_temp = "\u{0}setter_rhs".to_string();
+    env.insert(old_temp.clone(), current);
+    env.insert(rhs_temp.clone(), rhs_value);
+    let binary = Expr::Binary {
+        op,
+        left: Box::new(Expr::Identifier(old_temp.clone())),
+        right: Box::new(Expr::Identifier(rhs_temp.clone())),
+    };
+    let combined = evaluate_expr(&binary, env, functions, classes, enums, impl_methods);
+    env.remove(&old_temp);
+    env.remove(&rhs_temp);
+    let combined = combined?;
+    forward_field_setter(obj_name, field, &combined, env, functions, classes, enums, impl_methods)?;
+    Ok(Some(Control::Next))
+}
+
 // Helper function for regular assignment
+/// `obj.name = v` where `name` is not a field of `obj`'s class: forward to
+/// `obj.set_name(v)` when that method exists (the setter half of the
+/// get_/is_/no-paren getter forwarding in expr/calls.rs), otherwise a hard
+/// E1012 "undefined field" error. Before this, the write silently created a
+/// dynamic field and the setter never ran (wrong result, exit 0).
+/// Returns Ok(true) when the assignment was handled by the setter.
+/// `_`-prefixed names keep their auto-backing-field semantics (mirrors the
+/// getter's `_` auto-zero), and receivers whose class is unknown are left to
+/// the existing paths.
+#[allow(clippy::too_many_arguments)]
+fn forward_field_setter(
+    obj_name: &str,
+    field: &str,
+    value: &Value,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<bool, CompileError> {
+    let Some((class_name, class_def)) = field_less_class(obj_name, field, env, classes) else {
+        return Ok(false);
+    };
+    let setter = format!("set_{field}");
+    let has_setter = class_has_method(&class_name, &class_def, impl_methods, &setter);
+    if !has_setter {
+        let ctx = ErrorContext::new().with_code(codes::UNDEFINED_FIELD).with_help(format!(
+            "declare field '{field}' or a setter 'fn {setter}(v)' on {class_name}"
+        ));
+        return Err(CompileError::semantic_with_context(
+            format!("undefined field '{field}': class {class_name} has no such field or setter"),
+            ctx,
+        ));
+    }
+    // NUL-prefixed: no Simple program can spell (and so clobber) this binding.
+    let tmp = "\u{0}setter_arg".to_string();
+    env.insert(tmp.clone(), value.clone());
+    let call = Expr::MethodCall {
+        receiver: Box::new(Expr::Identifier(obj_name.to_string())),
+        method: setter,
+        args: vec![simple_parser::ast::Argument::new(None, Expr::Identifier(tmp.clone()))],
+        generic_args: vec![],
+    };
+    let result = handle_method_call_with_self_update(&call, env, functions, classes, enums, impl_methods);
+    env.remove(&tmp);
+    let (_, update) = result?;
+    if let Some((upd_name, new_self)) = update {
+        if env.contains_key(&upd_name) {
+            env.insert(upd_name, new_self);
+        } else {
+            MODULE_GLOBALS.with(|cell| {
+                cell.borrow_mut().insert(upd_name, new_self);
+            });
+        }
+    }
+    Ok(true)
+}
+
+/// Write `value` through a place whose call-result root was already bound by
+/// `place::bind_call_root`; the indices on the path are evaluated here, after
+/// the root.
+#[allow(clippy::too_many_arguments)]
+fn write_rebound_place(
+    target: &Expr,
+    value: Value,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Control, CompileError> {
+    if let Some(place) = super::place::resolve_place(target, env, functions, classes, enums, impl_methods)? {
+        super::place::refuse_shared_call_root(env, &place)?;
+        let value = coerce_store_at_place(env, &place, value, classes);
+        if super::place::write_place(env, &place, value) {
+            return Ok(Control::Next);
+        }
+    }
+    let ctx = ErrorContext::new()
+        .with_code(codes::INVALID_ASSIGNMENT)
+        .with_help("the indexed place does not exist or cannot be written");
+    Err(CompileError::semantic_with_context("invalid assignment: invalid index assignment", ctx))
+}
+
 pub(crate) fn exec_assignment(
     assign: &simple_parser::ast::AssignmentStmt,
     env: &mut Env,
@@ -856,20 +1389,23 @@ pub(crate) fn exec_assignment(
         // pre-bound bindings and is cleared by any genuine local declaration.
         // doc/08_tracking/bug/implicit_self_field_assignment_still_silent_in_plain_fn_methods_2026-08-31.md
         if is_first_assignment || env.is_field_prebind(name) {
-            if let Some(Value::Object { class, fields }) = env.get("self") {
-                if fields.contains_key(name) {
-                    let ctx = ErrorContext::new()
-                        .with_code(codes::INVALID_ASSIGNMENT)
-                        .with_help(format!(
-                            "write `self.{name} = ...` to assign the field; `self` is implicit only in the parameter list, not in field access"
-                        ));
-                    return Err(CompileError::semantic_with_context(
-                        format!(
-                            "invalid assignment: `{name}` is a field of `{class}`; a bare `{name} = ...` creates a new local and leaves `self.{name}` unchanged"
-                        ),
-                        ctx,
+            let shadowed_class = match env.get("self") {
+                Some(Value::Object { class, fields }) if fields.contains_key(name) => Some(class.clone()),
+                Some(Value::ClassInstance(instance)) if instance.field(name).is_some() => Some(instance.class().to_string()),
+                _ => None,
+            };
+            if let Some(class) = shadowed_class {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_ASSIGNMENT)
+                    .with_help(format!(
+                        "write `self.{name} = ...` to assign the field; `self` is implicit only in the parameter list, not in field access"
                     ));
-                }
+                return Err(CompileError::semantic_with_context(
+                    format!(
+                        "invalid assignment: `{name}` is a field of `{class}`; a bare `{name} = ...` creates a new local and leaves `self.{name}` unchanged"
+                    ),
+                    ctx,
+                ));
             }
         }
 
@@ -915,7 +1451,7 @@ pub(crate) fn exec_assignment(
                                 // and this path runs on EVERY local assignment. Until 2026-08-21
                                 // that made each intra-module call rebuild its env (~5 ms in a
                                 // driver module) -- see bootstrap_main_native_build_stalls_after_source_closure_2026-08-21.md
-                                if !cell.borrow().contains_key(name) {
+                                if env.is_local(name) || !cell.borrow().contains_key(name) {
                                     return;
                                 }
                                 if let Some(v) = env.get(name) {
@@ -948,7 +1484,7 @@ pub(crate) fn exec_assignment(
                                     // and this path runs on EVERY local assignment. Until 2026-08-21
                                     // that made each intra-module call rebuild its env (~5 ms in a
                                     // driver module) -- see bootstrap_main_native_build_stalls_after_source_closure_2026-08-21.md
-                                    if !cell.borrow().contains_key(name) {
+                                    if env.is_local(name) || !cell.borrow().contains_key(name) {
                                         return;
                                     }
                                     if let Some(v) = env.get(name) {
@@ -979,7 +1515,7 @@ pub(crate) fn exec_assignment(
                                     // and this path runs on EVERY local assignment. Until 2026-08-21
                                     // that made each intra-module call rebuild its env (~5 ms in a
                                     // driver module) -- see bootstrap_main_native_build_stalls_after_source_closure_2026-08-21.md
-                                    if !cell.borrow().contains_key(name) {
+                                    if env.is_local(name) || !cell.borrow().contains_key(name) {
                                         return;
                                     }
                                     if let Some(v) = env.get(name) {
@@ -1044,7 +1580,7 @@ pub(crate) fn exec_assignment(
                 MODULE_GLOBALS.with(|cell| {
                     // Peek first (see the note above): an unconditional borrow_mut here
                     // bumped the globals generation on every local assignment.
-                    if !cell.borrow().contains_key(name) {
+                    if env.is_local(name) || !cell.borrow().contains_key(name) {
                         return;
                     }
                     cell.borrow_mut().insert(name.clone(), env.get(name).unwrap().clone());
@@ -1057,9 +1593,13 @@ pub(crate) fn exec_assignment(
         let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         // Get the object name (must be an identifier for now)
         if let Expr::Identifier(obj_name) = receiver.as_ref() {
+            if forward_field_setter(obj_name, field, &value, env, functions, classes, enums, impl_methods)? {
+                return Ok(Control::Next);
+            }
             if let Some(obj_val) = env.remove(obj_name).map(Value::into_option_payload) {
                 match obj_val {
                     Value::ClassInstance(instance) => {
+                        let value = coerce_to_declared_field(instance.class(), field, value, classes);
                         instance.set_field(field.clone(), value);
                         env.insert(obj_name.clone(), Value::ClassInstance(instance));
                     }
@@ -1074,6 +1614,7 @@ pub(crate) fn exec_assignment(
                                 return Ok(Control::Next);
                             }
                         }
+                        let value = coerce_to_declared_field(&class, field, value, classes);
                         Arc::make_mut(&mut fields).insert(field.clone(), value);
                         env.insert(obj_name.clone(), Value::Object { class, fields });
                     }
@@ -1097,6 +1638,7 @@ pub(crate) fn exec_assignment(
                 if let Some(obj_val) = global_obj.map(Value::into_option_payload) {
                     match obj_val {
                         Value::ClassInstance(instance) => {
+                            let value = coerce_to_declared_field(instance.class(), field, value, classes);
                             instance.set_field(field.clone(), value);
                             MODULE_GLOBALS.with(|cell| {
                                 cell.borrow_mut()
@@ -1117,6 +1659,7 @@ pub(crate) fn exec_assignment(
                                     return Ok(Control::Next);
                                 }
                             }
+                            let value = coerce_to_declared_field(&class, field, value, classes);
                             Arc::make_mut(&mut fields).insert(field.clone(), value);
                             MODULE_GLOBALS.with(|cell| {
                                 cell.borrow_mut()
@@ -1167,8 +1710,12 @@ pub(crate) fn exec_assignment(
         {
             if let Expr::Identifier(array_name) = array_expr.as_ref() {
                 let index_value = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
-                let idx = index_value.as_int()? as usize;
                 if let Some(Value::Array(mut values)) = env.get(array_name).cloned() {
+                    // The integer conversion belongs to the ARRAY arm only: it
+                    // used to run first, so `d["k"].v = 2` on a dict died with
+                    // "cannot convert string to int" before the place path
+                    // below could handle it.
+                    let idx = index_value.as_int()? as usize;
                     let items = Arc::make_mut(&mut values);
                     if idx >= items.len() {
                         let ctx = ErrorContext::new()
@@ -1181,12 +1728,14 @@ pub(crate) fn exec_assignment(
                     }
                     match items[idx].clone() {
                         Value::ClassInstance(instance) => {
+                            let value = coerce_to_declared_field(instance.class(), field, value, classes);
                             instance.set_field(field.clone(), value);
                             items[idx] = Value::ClassInstance(instance);
                             env.insert(array_name.clone(), Value::Array(values));
                             Ok(Control::Next)
                         }
                         Value::Object { class, mut fields } => {
+                            let value = coerce_to_declared_field(&class, field, value, classes);
                             Arc::make_mut(&mut fields).insert(field.clone(), value);
                             items[idx] = Value::Object { class, fields };
                             env.insert(array_name.clone(), Value::Array(values));
@@ -1207,10 +1756,18 @@ pub(crate) fn exec_assignment(
                     }
                 } else {
                     // Not a local array binding (dict-rooted, module global,
-                    // class instance, ...). It may still be a writable place.
-                    if let Some(place) =
-                        super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)?
-                    {
+                    // class instance, ...). It may still be a writable place:
+                    // the index is already evaluated, so build the place
+                    // directly instead of re-running the index expression.
+                    if env.contains_key(array_name) {
+                        let place = super::place::Place {
+                            root: array_name.clone(),
+                            projections: vec![
+                                super::place::Projection::Index(index_value),
+                                super::place::Projection::Field(field.clone()),
+                            ],
+                        };
+                let value = coerce_store_at_place(env, &place, value, classes);
                         if super::place::write_place(env, &place, value) {
                             return Ok(Control::Next);
                         }
@@ -1234,6 +1791,7 @@ pub(crate) fn exec_assignment(
                 if let Some(place) =
                     super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)?
                 {
+                let value = coerce_store_at_place(env, &place, value, classes);
                     if super::place::write_place(env, &place, value) {
                         return Ok(Control::Next);
                     }
@@ -1266,6 +1824,7 @@ pub(crate) fn exec_assignment(
                                     } => {
                                         // Set the field on the inner object
                                         let mut inner_fields = inner_fields;
+                                        let value = coerce_to_declared_field(&inner_class, field, value, classes);
                                         Arc::make_mut(&mut inner_fields).insert(field.clone(), value);
                                         // Update the inner object in the outer object
                                         Arc::make_mut(&mut fields).insert(
@@ -1276,6 +1835,15 @@ pub(crate) fn exec_assignment(
                                             },
                                         );
                                         // Update the outer object in env
+                                        env.insert(obj_name.clone(), Value::Object { class, fields });
+                                        Ok(Control::Next)
+                                    }
+                                    // A class-typed field of a struct holds a shared
+                                    // reference (SIMPLE_INTERP_CLASS_REF carrier): mutate
+                                    // the instance in place so every alias observes it.
+                                    Value::ClassInstance(inner_inst) => {
+                                        let value = coerce_to_declared_field(inner_inst.class(), field, value, classes);
+                                        inner_inst.set_field(field.clone(), value);
                                         env.insert(obj_name.clone(), Value::Object { class, fields });
                                         Ok(Control::Next)
                                     }
@@ -1309,6 +1877,7 @@ pub(crate) fn exec_assignment(
                             let inner_val = instance.field(inner_field);
                             let result = match inner_val {
                                 Some(Value::ClassInstance(inner_inst)) => {
+                                    let value = coerce_to_declared_field(inner_inst.class(), field, value, classes);
                                     inner_inst.set_field(field.clone(), value);
                                     Ok(Control::Next)
                                 }
@@ -1317,6 +1886,7 @@ pub(crate) fn exec_assignment(
                                     fields: inner_fields,
                                 }) => {
                                     let mut inner_fields = inner_fields;
+                                    let value = coerce_to_declared_field(&inner_class, field, value, classes);
                                     Arc::make_mut(&mut inner_fields).insert(field.clone(), value);
                                     instance.set_field(
                                         inner_field.clone(),
@@ -1379,6 +1949,7 @@ pub(crate) fn exec_assignment(
                 if let Some(place) =
                     super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)?
                 {
+                let value = coerce_store_at_place(env, &place, value, classes);
                     if super::place::write_place(env, &place, value) {
                         return Ok(Control::Next);
                     }
@@ -1399,6 +1970,7 @@ pub(crate) fn exec_assignment(
             if let Some(place) =
                 super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)?
             {
+                let value = coerce_store_at_place(env, &place, value, classes);
                 if super::place::write_place(env, &place, value) {
                     return Ok(Control::Next);
                 }
@@ -1414,7 +1986,47 @@ pub(crate) fn exec_assignment(
     } else if let Expr::Index { receiver, index } = &assign.target {
         // Handle index assignment: arr[i] = value or dict["key"] = value or self.dict[key] = value
         let mut value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+        // A call-result root (`get()[i()] = v`): evaluate the call once after
+        // the RHS, then the indices, and write through the bound result.
+        if let Some((target, binding)) =
+            super::place::bind_call_root(&assign.target, env, functions, classes, enums, impl_methods)?
+        {
+            let written = write_rebound_place(&target, value, env, functions, classes, enums, impl_methods);
+            super::place::unbind_call_root(env, binding);
+            return written;
+        }
+        // Evaluation order contract (owner decision 2026-11-06, data plan W2a):
+        // RHS first, then the place — receiver, then index subexpressions
+        // outer to inner — each exactly once. A receiver whose path holds an
+        // index subexpression (`boxes[r()].items[i()]`, `grid[r()][i()]`) is
+        // resolved as a place so its indices run before this one.
+        if index_may_have_effects(receiver) {
+            if let Some(place) =
+                super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)?
+            {
+                super::place::refresh_module_global_root(env, &place.root);
+                if super::place::write_place(env, &place, value) {
+                    return Ok(Control::Next);
+                }
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_ASSIGNMENT)
+                    .with_help("the indexed place does not exist or cannot be written");
+                return Err(CompileError::semantic_with_context("invalid assignment: invalid index assignment", ctx));
+            }
+        }
         let index_val = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
+
+        // `o.f[i] = v` / `a.b.f[i] = v` where `f` is declared `[uN]`: coerce the
+        // element to the declared width (bug
+        // seed_interp_u64_field_store_not_coerced_2026-11-03). Done once up
+        // front because the container paths below are many and bespoke.
+        if matches!(receiver.as_ref(), Expr::FieldAccess { .. }) && is_pure_place_expr(receiver) {
+            if let Some(field_place) =
+                super::place::resolve_place(receiver, env, functions, classes, enums, impl_methods)?
+            {
+                value = coerce_store_at_field_place(env, &field_place, true, value, classes);
+            }
+        }
 
         // Case 1: Plain identifier: arr[i] = value
         if let Expr::Identifier(container_name) = receiver.as_ref() {
@@ -1440,6 +2052,42 @@ pub(crate) fn exec_assignment(
                     value = unhandled_value;
                 } else {
                     return Ok(Control::Next);
+                }
+            }
+
+            // An owner-bound module-global array written from a function
+            // (`val_ints[idx] = n` in value.spl) is not `is_module_global`
+            // (it has a `global_binding`), so it took the generic path below,
+            // whose `env.get(..).cloned()` + `Arc::make_mut` deep-copied the
+            // WHOLE array on every element write: the live owner store and the
+            // flat MODULE_GLOBALS mirror both pin the same Arc. That made
+            // arena-style interpreters (`core_interpret`) quadratic in their
+            // value count. Park the store copies exactly as the `g.push(x)`
+            // path does (`release_global_aliases`), mutate the now-unique Arc
+            // in place, then re-publish it to both stores. Only for a binding
+            // the executing module owns under the same name; any other
+            // binding keeps the generic copy-and-publish path.
+            // doc/08_tracking/bug/seed_interp_global_array_index_store_cow_quadratic_2026-11-13.md
+            if !is_module_global
+                && matches!(env.get(container_name), Some(Value::Array(_)))
+                && super::interpreter_helpers::owns_global_binding(container_name, env)
+            {
+                let idx = index_val.as_int()? as usize;
+                if super::interpreter_helpers::release_global_aliases(container_name, env) {
+                    if let Some(Value::Array(arc)) = env.get_mut(container_name) {
+                        crate::perf_counters::bump(&crate::perf_counters::INDEX_STORE_GLOBAL_IN_PLACE, 1);
+                        Arc::make_mut(arc).assign_index(idx, value);
+                        let current = Value::Array(Arc::clone(arc));
+                        super::interpreter_helpers::sync_flat_global(container_name, &current);
+                        env.refresh_scope(crate::interpreter::owned_globals_snapshot());
+                        return Ok(Control::Next);
+                    }
+                    // Unreachable (release promoted the binding), but never
+                    // leave the stores parked.
+                    if let Some(current) = env.get(container_name).cloned() {
+                        super::interpreter_helpers::sync_flat_global(container_name, &current);
+                    }
+                    env.refresh_scope(crate::interpreter::owned_globals_snapshot());
                 }
             }
 
@@ -1501,10 +2149,39 @@ pub(crate) fn exec_assignment(
             if let Some(container) = container {
                 let new_container = match container {
                     Value::Array(mut arc) => {
+                        if crate::perf_counters::enabled() && Arc::strong_count(&arc) > 1 {
+                            crate::perf_counters::bump(&crate::perf_counters::INDEX_STORE_COW_CLONES, 1);
+                            crate::perf_counters::bump(
+                                &crate::perf_counters::INDEX_STORE_COW_ELEMS_CLONED,
+                                arc.len() as u64,
+                            );
+                            crate::perf_counters::trace_array("index_store_cow", container_name, arc.len());
+                        }
                         let arr = Arc::make_mut(&mut arc);
                         let idx = index_val.as_int()? as usize;
                         arr.assign_index(idx, value);
                         Value::Array(arc)
+                    }
+                    // Fixed-size array module state (`var t: [T; N]`): in-bounds
+                    // element write only; the size is part of the type.
+                    Value::FixedSizeArray { size, mut data } => {
+                        let idx = index_val.as_int()? as usize;
+                        if idx >= data.len() {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                                .with_help(format!("fixed-size array has {} element(s)", data.len()))
+                                .with_note(format!("index {} is out of bounds", idx));
+                            return Err(CompileError::semantic_with_context(
+                                format!(
+                                    "index out of bounds: array index {} out of bounds (len={})",
+                                    idx,
+                                    data.len()
+                                ),
+                                ctx,
+                            ));
+                        }
+                        data[idx] = value;
+                        Value::FixedSizeArray { size, data }
                     }
                     // `rt_bytes_alloc` / `rt_byte_array_new` hand back a packed
                     // `Value::ByteArray`; `var buf = rt_bytes_alloc(n); buf[i] = b`
@@ -1526,7 +2203,7 @@ pub(crate) fn exec_assignment(
                     Value::Dict(mut dict) => {
                         let key = index_val.to_key_string();
                         let stored = Value::wrap_dict_entry(&index_val, value);
-                        crate::interpreter::module_dict_make_mut(&mut dict).insert(key, stored);
+                        crate::interpreter::interpreter_call::namespace_make_mut_for_write(&mut dict)?.insert(key, stored);
                         Value::Dict(dict)
                     }
                     Value::Tuple(mut tup) => {
@@ -1775,7 +2452,7 @@ pub(crate) fn exec_assignment(
                                     }
                                     Value::Dict(dict) => {
                                         let stored = Value::wrap_dict_entry(&index_val, value.clone());
-                                        crate::interpreter::module_dict_make_mut(dict).insert(pre_key.clone(), stored);
+                                        crate::interpreter::interpreter_call::namespace_make_mut_for_write(dict)?.insert(pre_key.clone(), stored);
                                         Ok(())
                                     }
                                     Value::Tuple(tup) => {
@@ -1883,7 +2560,7 @@ pub(crate) fn exec_assignment(
                                     Value::Dict(mut dict) => {
                                         let key = index_val.to_key_string();
                                         let stored = Value::wrap_dict_entry(&index_val, value);
-                                        crate::interpreter::module_dict_make_mut(&mut dict).insert(key, stored);
+                                        crate::interpreter::interpreter_call::namespace_make_mut_for_write(&mut dict)?.insert(key, stored);
                                         Value::Dict(dict)
                                     }
                                     Value::Tuple(mut tup) => {
@@ -2033,7 +2710,7 @@ pub(crate) fn exec_assignment(
                             Value::Dict(dict) => {
                                 let key = index_val.to_key_string();
                                 let stored = Value::wrap_dict_entry(&index_val, value);
-                                crate::interpreter::module_dict_make_mut(dict).insert(key, stored);
+                                crate::interpreter::interpreter_call::namespace_make_mut_for_write(dict)?.insert(key, stored);
                             }
                             other => {
                                 let ctx = ErrorContext::new()
@@ -2312,6 +2989,69 @@ fn try_string_append_in_place(
 }
 
 // Helper function for augmented assignment
+/// `place op= rhs` through the general place model: the RHS (already
+/// evaluated) first, then the place resolved once (receiver, then index
+/// subexpressions outer to inner), then one read and one write. Returns
+/// `Ok(None)` when the target is not a place, so the caller keeps its error.
+fn augmented_through_place(
+    assign: &simple_parser::ast::AssignmentStmt,
+    bin_op: Option<BinOp>,
+    rhs_value: Value,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Control>, CompileError> {
+    let Some(place) = super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)? else {
+        return Ok(None);
+    };
+    super::place::refuse_shared_call_root(env, &place)?;
+    super::place::refresh_module_global_root(env, &place.root);
+    let new_value = match bin_op {
+        Some(op) => {
+            let Some(old_value) = super::place::place_read(env, &place) else {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_ASSIGNMENT)
+                    .with_help("the place must exist before an augmented assignment");
+                return Err(CompileError::semantic_with_context(
+                    "invalid assignment: augmented assignment to a missing place",
+                    ctx,
+                ));
+            };
+            let old_temp = "__aug_place_old__".to_string();
+            let rhs_temp = "__aug_place_rhs__".to_string();
+            let saved_old = env.get(&old_temp).cloned();
+            let saved_rhs = env.get(&rhs_temp).cloned();
+            env.insert(old_temp.clone(), old_value);
+            env.insert(rhs_temp.clone(), rhs_value);
+            let binary = Expr::Binary {
+                op,
+                left: Box::new(Expr::Identifier(old_temp.clone())),
+                right: Box::new(Expr::Identifier(rhs_temp.clone())),
+            };
+            let result = evaluate_expr(&binary, env, functions, classes, enums, impl_methods);
+            match saved_old {
+                Some(v) => env.insert(old_temp, v),
+                None => env.remove(&old_temp),
+            };
+            match saved_rhs {
+                Some(v) => env.insert(rhs_temp, v),
+                None => env.remove(&rhs_temp),
+            };
+            result?
+        }
+        None => rhs_value,
+    };
+    if super::place::write_place(env, &place, new_value) {
+        return Ok(Some(Control::Next));
+    }
+    let ctx = ErrorContext::new()
+        .with_code(codes::INVALID_ASSIGNMENT)
+        .with_help("the place does not exist or cannot be written");
+    Err(CompileError::semantic_with_context("invalid assignment: augmented place write failed", ctx))
+}
+
 pub(crate) fn exec_augmented_assignment(
     assign: &simple_parser::ast::AssignmentStmt,
     env: &mut Env,
@@ -2422,7 +3162,13 @@ pub(crate) fn exec_augmented_assignment(
             };
             let result = evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
             env.remove(&temp_name);
-            result
+            // `x op= rhs` has the type of `x`: wrap to its declared narrow
+            // signed width (the RHS temp hides it from the binary-op wrap).
+            // Bug: seed_i32_overflow_interp_vs_jit_divergence_2026-11-05.
+            match (result, env.declared_int_width(name)) {
+                (Value::Int(r), Some(w)) => Value::Int(super::expr::wrap_signed(r, w)),
+                (other, _) => other,
+            }
         } else {
             // Simple ~= assignment
             rhs_value
@@ -2448,6 +3194,21 @@ pub(crate) fn exec_augmented_assignment(
             let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
             if is_suspend {
                 rhs_value = await_value(rhs_value)?;
+            }
+            if let Some(op) = bin_op {
+                if let Some(control) = augmented_through_setter(
+                    obj_name,
+                    field,
+                    op,
+                    rhs_value.clone(),
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
+                    return Ok(control);
+                }
             }
             if let Some(obj_val) = env.remove(obj_name).map(Value::into_option_payload) {
                 match obj_val {
@@ -2601,225 +3362,76 @@ pub(crate) fn exec_augmented_assignment(
         // Case 2: Nested field access: obj.inner.field += value
         else if let Expr::FieldAccess {
             receiver: inner_receiver,
-            field: inner_field,
+            field: _,
         } = receiver.as_ref()
         {
             if let Expr::Identifier(obj_name) = inner_receiver.as_ref() {
-                if let Some(obj_val) = env.get(obj_name).cloned() {
-                    match obj_val {
-                        Value::Object { class, fields } => {
-                            let mut fields = fields;
-                            // Get the inner object
-                            if let Some(inner_val) = fields.get(inner_field).cloned() {
-                                match inner_val {
-                                    Value::Object {
-                                        class: inner_class,
-                                        fields: inner_fields,
-                                    } => {
-                                        let mut inner_fields = inner_fields;
-                                        // Evaluate the RHS
-                                        let mut rhs_value =
-                                            evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
-
-                                        // If suspension, await the value
-                                        if is_suspend {
-                                            rhs_value = await_value(rhs_value)?;
-                                        }
-
-                                        // If compound assignment, combine with current value
-                                        let new_value = if let Some(op) = bin_op {
-                                            let current = inner_fields
-                                                .get(field)
-                                                .cloned()
-                                                .ok_or_else(|| crate::error::factory::undefined_field(field))?;
-                                            let temp_lhs = "__lhs_temp__".to_string();
-                                            let temp_rhs = "__rhs_temp__".to_string();
-                                            env.insert(temp_lhs.clone(), current);
-                                            env.insert(temp_rhs.clone(), rhs_value);
-                                            let binary_expr = Expr::Binary {
-                                                op,
-                                                left: Box::new(Expr::Identifier(temp_lhs.clone())),
-                                                right: Box::new(Expr::Identifier(temp_rhs.clone())),
-                                            };
-                                            let result = evaluate_expr(
-                                                &binary_expr,
-                                                env,
-                                                functions,
-                                                classes,
-                                                enums,
-                                                impl_methods,
-                                            )?;
-                                            env.remove(&temp_lhs);
-                                            env.remove(&temp_rhs);
-                                            result
-                                        } else {
-                                            rhs_value
-                                        };
-
-                                        // Set the field on the inner object
-                                        Arc::make_mut(&mut inner_fields).insert(field.clone(), new_value);
-                                        // Update the inner object in the outer object
-                                        Arc::make_mut(&mut fields).insert(
-                                            inner_field.clone(),
-                                            Value::Object {
-                                                class: inner_class,
-                                                fields: inner_fields,
-                                            },
-                                        );
-                                        // Update the outer object in env
-                                        env.insert(obj_name.clone(), Value::Object { class, fields });
-                                        Ok(Control::Next)
-                                    }
-                                    _ => {
-                                        let ctx = ErrorContext::new().with_code(codes::INVALID_ASSIGNMENT).with_help(
-                                            "nested augmented field assignment requires inner value to be an object",
-                                        );
-                                        Err(CompileError::semantic_with_context(
-                                            format!(
-                                                "invalid assignment: cannot use augmented assignment on field '{}' of non-object field '{}'",
-                                                field, inner_field
-                                            ),
-                                            ctx,
-                                        ))
-                                    }
-                                }
-                            } else {
-                                let ctx = ErrorContext::new()
-                                    .with_code(codes::UNDEFINED_FIELD)
-                                    .with_help("check the field name");
-                                Err(CompileError::semantic_with_context(
-                                    format!("field '{}' not found on object", inner_field),
-                                    ctx,
-                                ))
-                            }
-                        }
-                        Value::ClassInstance(instance) => {
-                            let inner_val = instance.field(inner_field);
-                            let mut rhs_value =
-                                evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
-                            if is_suspend {
-                                rhs_value = await_value(rhs_value)?;
-                            }
-                            match inner_val {
-                                Some(Value::ClassInstance(inner_inst)) => {
-                                    let current = inner_inst
-                                        .field(field)
-                                        .ok_or_else(|| crate::error::factory::undefined_field(field))?;
-                                    let new_value = if let Some(op) = bin_op {
-                                        let temp_lhs = "__lhs_temp__".to_string();
-                                        let temp_rhs = "__rhs_temp__".to_string();
-                                        env.insert(temp_lhs.clone(), current);
-                                        env.insert(temp_rhs.clone(), rhs_value);
-                                        let binary_expr = Expr::Binary {
-                                            op,
-                                            left: Box::new(Expr::Identifier(temp_lhs.clone())),
-                                            right: Box::new(Expr::Identifier(temp_rhs.clone())),
-                                        };
-                                        let result =
-                                            evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
-                                        env.remove(&temp_lhs);
-                                        env.remove(&temp_rhs);
-                                        result
-                                    } else {
-                                        rhs_value
-                                    };
-                                    inner_inst.set_field(field.clone(), new_value);
-                                    Ok(Control::Next)
-                                }
-                                Some(Value::Object {
-                                    class: inner_class,
-                                    fields: inner_fields,
-                                }) => {
-                                    let mut inner_fields = inner_fields;
-                                    let current = inner_fields
-                                        .get(field)
-                                        .cloned()
-                                        .ok_or_else(|| crate::error::factory::undefined_field(field))?;
-                                    let new_value = if let Some(op) = bin_op {
-                                        let temp_lhs = "__lhs_temp__".to_string();
-                                        let temp_rhs = "__rhs_temp__".to_string();
-                                        env.insert(temp_lhs.clone(), current);
-                                        env.insert(temp_rhs.clone(), rhs_value);
-                                        let binary_expr = Expr::Binary {
-                                            op,
-                                            left: Box::new(Expr::Identifier(temp_lhs.clone())),
-                                            right: Box::new(Expr::Identifier(temp_rhs.clone())),
-                                        };
-                                        let result =
-                                            evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
-                                        env.remove(&temp_lhs);
-                                        env.remove(&temp_rhs);
-                                        result
-                                    } else {
-                                        rhs_value
-                                    };
-                                    Arc::make_mut(&mut inner_fields).insert(field.clone(), new_value);
-                                    instance.set_field(
-                                        inner_field.clone(),
-                                        Value::Object {
-                                            class: inner_class,
-                                            fields: inner_fields,
-                                        },
-                                    );
-                                    Ok(Control::Next)
-                                }
-                                Some(_) => {
-                                    let ctx = ErrorContext::new().with_code(codes::INVALID_ASSIGNMENT).with_help(
-                                        "nested augmented field assignment requires inner value to be an object",
-                                    );
-                                    Err(CompileError::semantic_with_context(
-                                        format!(
-                                            "invalid assignment: cannot use augmented assignment on field '{}' of non-object field '{}'",
-                                            field, inner_field
-                                        ),
-                                        ctx,
-                                    ))
-                                }
-                                None => {
-                                    let ctx = ErrorContext::new()
-                                        .with_code(codes::UNDEFINED_FIELD)
-                                        .with_help("check the field name");
-                                    Err(CompileError::semantic_with_context(
-                                        format!("field '{}' not found on object", inner_field),
-                                        ctx,
-                                    ))
-                                }
-                            }
-                        }
-                        _ => {
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::INVALID_ASSIGNMENT)
-                                .with_help("nested augmented field assignment requires an object");
-                            Err(CompileError::semantic_with_context(
-                                "invalid assignment: cannot use augmented assignment on non-object value",
-                                ctx,
-                            ))
-                        }
-                    }
-                } else {
+                // `obj.inner.field op= rhs`: RHS first, then the place once,
+                // through the general place model (a snapshot taken before the
+                // RHS would drop any write the RHS makes to `obj`).
+                if !env.contains_key(obj_name) {
                     let ctx = ErrorContext::new()
                         .with_code(codes::UNDEFINED_VARIABLE)
                         .with_help("check that the variable is defined and in scope");
-                    Err(CompileError::semantic_with_context(
+                    return Err(CompileError::semantic_with_context(
                         format!("variable '{}' not found", obj_name),
                         ctx,
-                    ))
+                    ));
                 }
-            } else {
+                let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+                if is_suspend {
+                    rhs_value = await_value(rhs_value)?;
+                }
+                if let Some(control) =
+                    augmented_through_place(assign, bin_op, rhs_value, env, functions, classes, enums, impl_methods)?
+                {
+                    return Ok(control);
+                }
                 let ctx = ErrorContext::new()
                     .with_code(codes::INVALID_ASSIGNMENT)
-                    .with_help("deeply nested augmented field assignment (more than 2 levels) is not supported");
+                    .with_help("nested augmented field assignment requires an object");
                 Err(CompileError::semantic_with_context(
-                    "invalid assignment: deeply nested augmented field access requires intermediate variables",
+                    "invalid assignment: nested augmented field assignment requires inner value to be an object",
+                    ctx,
+                ))
+            } else {
+                // Deeper field paths (`a.b.c.x += 1`): RHS first, then the
+                // place once, through the general place model (pure-Simple
+                // accepts any depth).
+                let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+                if is_suspend {
+                    rhs_value = await_value(rhs_value)?;
+                }
+                if let Some(control) =
+                    augmented_through_place(assign, bin_op, rhs_value, env, functions, classes, enums, impl_methods)?
+                {
+                    return Ok(control);
+                }
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_ASSIGNMENT)
+                    .with_help("augmented field assignment requires a place: a variable or a path of fields and indexes from one");
+                Err(CompileError::semantic_with_context(
+                    "invalid assignment: augmented field assignment target is not a place",
                     ctx,
                 ))
             }
         } else {
+            // Any other field place (`boxes[r()].x += v`): RHS first, then the
+            // place once, through the general place model.
+            let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+            if is_suspend {
+                rhs_value = await_value(rhs_value)?;
+            }
+            if let Some(control) =
+                augmented_through_place(assign, bin_op, rhs_value, env, functions, classes, enums, impl_methods)?
+            {
+                return Ok(control);
+            }
             let ctx = ErrorContext::new().with_code(codes::INVALID_ASSIGNMENT).with_help(
-                "augmented field assignment requires an identifier or simple nested field access as the object",
+                "augmented field assignment requires a place: a variable or a path of fields and indexes from one",
             );
             Err(CompileError::semantic_with_context(
-                "invalid assignment: augmented field assignment requires identifier or simple nested field access as object",
+                "invalid assignment: augmented field assignment target is not a place",
                 ctx,
             ))
         }
@@ -2837,14 +3449,45 @@ pub(crate) fn exec_augmented_assignment(
     // is evaluated exactly ONCE into a temp binding so that side-effecting
     // subscripts (`arr[next()] += 1`) do not run twice.
     else if let Expr::Index { receiver, index } = &assign.target {
-        let idx_value = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
-        let idx_temp = "__aug_idx_temp__".to_string();
-        let rhs_temp = "__aug_rhs_temp__".to_string();
-
+        // Evaluation order contract: RHS first, then the place once.
         let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         if is_suspend {
             rhs_value = await_value(rhs_value)?;
         }
+        // A call-result root (`get()[i()] += v`): the root call runs once,
+        // after the RHS and before the indices.
+        // Bug: doc/08_tracking/bug/seed_interp_call_root_place_order_2026-11-06.md
+        if let Some((target, binding)) =
+            super::place::bind_call_root(&assign.target, env, functions, classes, enums, impl_methods)?
+        {
+            let rebound = simple_parser::ast::AssignmentStmt {
+                span: assign.span,
+                target,
+                op: assign.op,
+                value: Expr::Nil,
+            };
+            let result = augmented_through_place(&rebound, bin_op, rhs_value, env, functions, classes, enums, impl_methods);
+            super::place::unbind_call_root(env, binding);
+            return match result? {
+                Some(control) => Ok(control),
+                None => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_ASSIGNMENT)
+                        .with_help("the indexed place does not exist or cannot be written");
+                    Err(CompileError::semantic_with_context("invalid assignment: invalid index assignment", ctx))
+                }
+            };
+        }
+        if index_may_have_effects(receiver) {
+            if let Some(control) =
+                augmented_through_place(assign, bin_op, rhs_value.clone(), env, functions, classes, enums, impl_methods)?
+            {
+                return Ok(control);
+            }
+        }
+        let idx_value = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
+        let idx_temp = "__aug_idx_temp__".to_string();
+        let rhs_temp = "__aug_rhs_temp__".to_string();
 
         // Save/restore any shadowed bindings so the temps never leak.
         let saved_idx = env.get(&idx_temp).cloned();
@@ -3550,7 +4193,7 @@ mod nested_assignment_target_tests {
     #[test]
     fn nested_dict_under_indexed_struct_assignment_lands() {
         let mut env = Env::new();
-        let scope = obj("Scope", vec![("symbols", Value::Dict(Arc::new(HashMap::new())))]);
+        let scope = obj("Scope", vec![("symbols", Value::Dict(Arc::new(crate::value::DictMap::new())))]);
         env.insert("s".to_string(), obj("S", vec![("scopes", Value::array(vec![scope]))]));
         let target = index(
             field(index(field(ident("s"), "scopes"), Expr::Integer(0)), "symbols"),
@@ -3767,5 +4410,85 @@ mod indexed_field_receiver_tests {
             exec(target, Expr::Integer(1), &mut env).is_err(),
             "a call-result indexed field target is not a place and must be an error"
         );
+    }
+}
+
+/// os_namespace_uninitialized_array_module_var_not_found_2026-08-02: an
+/// initializer-less `var a: [T; N]` binds zero-filled storage through
+/// `exec_node` (the flattened-import path), matching the module evaluator.
+#[cfg(test)]
+mod uninit_fixed_array_let_tests {
+    use super::*;
+    use simple_parser::Parser;
+
+    fn exec_let(src: &str, env: &mut Env) {
+        let parsed = Parser::new(src).parse().expect("let fixture");
+        for node in &parsed.items {
+            exec_node(node, env, &mut HashMap::new(), &mut HashMap::new(), &HashMap::new(), &HashMap::new())
+                .expect("exec let");
+        }
+    }
+
+    #[test]
+    fn uninit_fixed_array_is_zero_filled() {
+        let cases: [(&str, Value); 3] = [
+            ("var q_active: [bool; 4]\n", Value::Bool(false)),
+            ("var q_count: [i64; 4]\n", Value::Int(0)),
+            ("var q_ratio: [f64; 4]\n", Value::Float(0.0)),
+        ];
+        for (src, zero) in cases {
+            let mut env = Env::new();
+            exec_let(src, &mut env);
+            let name = src.trim_start_matches("var ").split(':').next().unwrap();
+            match env.get(name) {
+                Some(Value::FixedSizeArray { size, data }) => {
+                    assert_eq!(*size, 4, "{src}");
+                    assert!(data.iter().all(|v| v == &zero), "{src}: {data:?}");
+                }
+                other => panic!("{src}: expected zero-filled FixedSizeArray, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn uninit_unsigned_fixed_array_is_zero() {
+        let mut env = Env::new();
+        exec_let("var q_ids: [u64; 2]\n", &mut env);
+        let Some(Value::FixedSizeArray { data, .. }) = env.get("q_ids") else {
+            panic!("expected FixedSizeArray");
+        };
+        assert!(data.iter().all(|v| v.as_int().ok() == Some(0)), "{data:?}");
+    }
+}
+
+#[cfg(test)]
+mod declared_signed_binding_tests {
+    //! A value bound to a declared signed width takes that width's
+    //! two's-complement value, as native lowering stores it. Follow-ups of
+    //! 2026-10-30_seed_uint_scrutinee_never_matches_int_patterns.md (UInt arg
+    //! into an `i64` param) and seed_i32_overflow_interp_vs_jit_divergence_2026-11-05.md
+    //! (out-of-range value bound to a declared `i32`).
+    use crate::interpreter::evaluate_module;
+    use simple_parser::Parser;
+
+    fn run(src: &str) -> i32 {
+        evaluate_module(&Parser::new(src).parse().expect("parse").items).expect("evaluate")
+    }
+
+    #[test]
+    fn uint_argument_bound_to_i64_param_is_signed() {
+        // `main` is truncated to i32, so compare inside the program: a UInt
+        // result 18446744073709551611 truncates to the same -5.
+        let src = "fn minus_ten(x: i64) -> i64:\n    x - 10\nfn probe() -> i64:\n    val u: u64 = 5\n    if minus_ten(u) < 0:\n        return 1\n    0\nmain = probe()\n";
+        assert_eq!(run(src), 1);
+    }
+
+    #[test]
+    fn out_of_range_value_bound_to_declared_i32_wraps() {
+        // Divide in-program: `main`'s own i32 truncation would hide the width.
+        let local = "fn probe() -> i64:\n    val x: i32 = 3000000000\n    x / 1000\nmain = probe()\n";
+        assert_eq!(run(local), -1294967);
+        let param = "fn echo32(x: i32) -> i64:\n    x / 1000\nmain = echo32(3000000000)\n";
+        assert_eq!(run(param), -1294967);
     }
 }

@@ -1,0 +1,55 @@
+"""
+## Purpose and audience
+Purpose: Prove lint vendor-path gates treat Windows backslash paths like POSIX
+ones, so vendored third-party source is skipped and owned source still checked.
+Audience: compiler and tooling engineers maintaining lint rules.
+## Operator workflow
+Run with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Covers the shared helper and the bound-unit-reassert, bound-late-cast and
+silent-default gates.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use compiler.semantics.lint.lint_text.{lint_is_vendor_path}
+use compiler.semantics.lint.bound_unit_reassert.{check_bound_unit_reasserts}
+use compiler.semantics.lint.bound_late_cast.{check_bound_late_casts}
+use compiler.semantics.lint.silent_default.{check_silent_default}
+
+val BAD = "unit Meters: f64 as m\nunit Seconds: f64 as s\nfn bad(d: Meters) -> Seconds:\n    Seconds(d.value)\n"
+val LATE = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    DistanceKm(c_read_distance())\n"
+val SD = "fn f():\n    val s = table.slot_of(key).unwrap_or(0)\n"
+
+describe "lint vendor path gate":
+    """Backslash and slash vendor paths are both skipped."""
+
+    it "recognises slash and backslash vendor paths":
+        # @req: REQ-DIAG-POLICY-001
+        step("Classify vendor and non-vendor paths")
+        expect(lint_is_vendor_path("src/x/vendor/y.spl")).to_equal(true)
+        expect(lint_is_vendor_path("src\app\vendor\y.spl")).to_equal(true)
+        expect(lint_is_vendor_path("src\app\owned\y.spl")).to_equal(false)
+
+    it "skips a backslash vendor path in check_bound_unit_reasserts":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a reassert under a backslash vendor path")
+        expect(check_bound_unit_reasserts(BAD, "src\app\vendor\y.spl").len()).to_equal(0)
+
+    it "still checks a non-vendor backslash path":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a reassert under a backslash owned path")
+        expect(check_bound_unit_reasserts(BAD, "src\app\owned\y.spl").len()).to_equal(1)
+
+    it "skips a backslash vendor path in check_bound_late_casts":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a late cast under backslash vendor and owned paths")
+        expect(check_bound_late_casts(LATE, "src\app\vendor\y.spl").len()).to_equal(0)
+        expect(check_bound_late_casts(LATE, "src\app\owned\y.spl").len()).to_equal(1)
+
+    it "skips a backslash vendor path in check_silent_default":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a silent default under backslash vendor and owned paths")
+        expect(check_silent_default(SD, "src\app\vendor\y.spl").len()).to_equal(0)
+        expect(check_silent_default(SD, "src\app\owned\y.spl").len()).to_equal(1)

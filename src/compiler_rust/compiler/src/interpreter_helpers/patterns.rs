@@ -1,7 +1,7 @@
 //! Pattern matching and binding
 
 use crate::error::{codes, CompileError, ErrorContext};
-use crate::value::{Env, Value};
+use crate::value::{DictMap, Env, Value};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Pattern};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,9 +12,9 @@ use super::super::{
     resolve_object_method, ResolvedMethod, Enums, ImplMethods, CONST_NAMES, MODULE_GLOBALS,
 };
 
-use super::args::{eval_arg, eval_arg_usize};
+use super::args::{eval_arg, eval_arg_int, eval_arg_usize};
 use super::collections::bind_sequence_pattern;
-use super::method_dispatch::call_method_on_value;
+use super::method_dispatch::call_method_on_value_with_args;
 use crate::value::{OptionVariant, ResultVariant};
 
 /// Snapshot the current value of every name a pattern binds, so a scoped
@@ -30,13 +30,22 @@ use crate::value::{OptionVariant, ResultVariant};
 /// binds no names and so contributes nothing.
 ///
 /// See doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
-pub(crate) fn save_pattern_scope(pattern: &Pattern, env: &Env) -> Vec<(String, Option<Value>)> {
+pub(crate) fn save_pattern_scope(pattern: &Pattern, env: &mut Env) -> Vec<(String, Option<Value>)> {
     let mut names = Vec::new();
     collect_pattern_binding_names(pattern, &mut names);
     names
         .into_iter()
         .map(|name| {
             let prior = env.get(&name).cloned();
+            // A loop variable is a fresh binding: it must not inherit the
+            // declared narrow width of an outer `val y: i32` it shadows (see
+            // `CowEnv::declared_int_widths` INVARIANT). Stashed once per
+            // loop here; `restore_pattern_scope` puts it back.
+            // Block-local for the whole loop (twin of `exec_for`): without it a
+            // same-named imported fn (`error`) reachable as a module global
+            // wins over the loop variable inside an `it`/block body. This
+            // also stashes the outer declared int width.
+            env.enter_block_local(name.clone());
             (name, prior)
         })
         .collect()
@@ -46,6 +55,8 @@ pub(crate) fn save_pattern_scope(pattern: &Pattern, env: &Env) -> Vec<(String, O
 /// go back to their previous value, names that did not are removed.
 pub(crate) fn restore_pattern_scope(saved: Vec<(String, Option<Value>)>, env: &mut Env) {
     for (name, prior) in saved {
+        // Twin of the stash in `bind_for_pattern_value`.
+        env.exit_block_local(&name);
         match prior {
             Some(value) => {
                 env.insert(name, value);
@@ -57,7 +68,7 @@ pub(crate) fn restore_pattern_scope(saved: Vec<(String, Option<Value>)>, env: &m
     }
 }
 
-fn collect_pattern_binding_names(pattern: &Pattern, out: &mut Vec<String>) {
+pub(crate) fn collect_pattern_binding_names(pattern: &Pattern, out: &mut Vec<String>) {
     match pattern {
         Pattern::Identifier(name) | Pattern::MutIdentifier(name) | Pattern::MoveIdentifier(name) => {
             out.push(name.clone())
@@ -192,7 +203,16 @@ pub(crate) const ARRAY_MUTATING_METHODS: &[&str] = &[
     "extend",
     "clear",
     "write_span",
+    "fill_span",
+    "set",
 ];
+
+/// The span mutators take their own operand lists (`write_span` four,
+/// `fill_span` three) and have dedicated paths everywhere below; the generic
+/// item/idx/second plumbing must never see them.
+fn is_span_mutator(method: &str) -> bool {
+    matches!(method, "write_span" | "fill_span")
+}
 
 /// Apply an array mutating method to a `&mut Vec<Value>` in place.
 ///
@@ -220,6 +240,20 @@ fn apply_array_mutation_in_place(
             Ok(None)
         }
         "pop" => Ok(Some(vec.pop().unwrap_or(Value::Nil))),
+        // `[T].set(i, v)`: same semantics as codegen `rt_array_set` (negative `i`
+        // counts from the end). `idx` carries the i64 bits (see
+        // `eval_array_mutator_args`). Returns `true` on success and `false`
+        // (no mutation) when out of range, exactly like the native `bool` result.
+        "set" => {
+            let raw = idx.unwrap_or(0) as i64;
+            let len = vec.len() as i64;
+            let i = if raw < 0 { len + raw } else { raw };
+            if i < 0 || i >= len {
+                return Ok(Some(Value::Bool(false)));
+            }
+            vec[i as usize] = second.unwrap_or(Value::Nil);
+            Ok(Some(Value::Bool(true)))
+        }
         "insert" => {
             let i = idx.unwrap_or(0);
             if i <= vec.len() {
@@ -314,6 +348,20 @@ fn eval_array_mutator_args(
         _ => None,
     };
     let (idx, second) = match method {
+        "set" => (
+            // i64 bits carried in a usize so a negative index survives to the kernel.
+            Some(eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)? as usize),
+            Some(eval_arg(
+                args,
+                1,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?),
+        ),
         "insert" => (
             Some(eval_arg_usize(
                 args,
@@ -354,6 +402,132 @@ fn eval_array_mutator_args(
     Ok((item, idx, second))
 }
 
+/// Evaluate (and validate) the operands of a `DICT_MUTATING_METHODS` call
+/// BEFORE the leaf is touched, so a rejected `merge` argument leaves the dict
+/// untouched exactly as the functional path did. Shared by the place-mutation
+/// kernel and the class-instance field fast path.
+#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
+/// True when the dict stores a FUNCTION under `method` (own entry, or a layer of
+/// a module value). `m.remove(x)` on a module that defines `remove` is a call
+/// to that function, never the built-in dict mutator -- the functional path in
+/// `interpreter_method` already resolves it that way; the in-place fast paths
+/// below must not pre-empt it.
+fn dict_member_is_callable(map: &Arc<DictMap>, method: &str) -> bool {
+    let is_fn = |v: &Value| matches!(v, Value::Function { .. });
+    map.get(method).map_or(false, is_fn)
+        || crate::interpreter::module_dict_layers(map)
+            .and_then(|view| view.get(method).cloned())
+            .map_or(false, |v| is_fn(&v))
+}
+
+fn eval_dict_mutator_args(
+    method: &str,
+    args: &[simple_parser::ast::Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<(Option<Value>, Option<Value>, Option<Arc<DictMap>>), CompileError> {
+    let out = match method {
+        "set" | "insert" => (
+            Some(eval_arg(
+                args,
+                0,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?),
+            Some(eval_arg(
+                args,
+                1,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?),
+            None,
+        ),
+        "remove" | "delete" => (
+            Some(eval_arg(
+                args,
+                0,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?),
+            None,
+            None,
+        ),
+        "merge" | "extend" => {
+            let arg0 = eval_arg(
+                args,
+                0,
+                Value::Dict(Arc::new(crate::value::DictMap::new())),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+            match arg0 {
+                Value::Dict(map) => {
+                    // Merging a module namespace copies its fns into a plain dict.
+                    crate::interpreter::interpreter_call::gate_module_namespace_handout(&map)?;
+                    (None, None, Some(crate::interpreter::module_dict_flat(&map).unwrap_or(map)))
+                }
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::TYPE_MISMATCH)
+                        .with_help("merge expects a dict argument");
+                    return Err(CompileError::semantic_with_context("merge expects dict argument", ctx));
+                }
+            }
+        }
+        // "clear" takes no operands.
+        _ => (None, None, None),
+    };
+    Ok(out)
+}
+
+/// Apply a `DICT_MUTATING_METHODS` call to an owned map. Mirrors
+/// `interpreter_method/collections.rs::handle_dict_methods` arm for arm,
+/// including `wrap_dict_entry` on the stored value.
+fn apply_dict_mutation_in_place(
+    method: &str,
+    map: &mut DictMap,
+    key_val: Option<Value>,
+    value: Option<Value>,
+    other: Option<Arc<DictMap>>,
+) {
+    match method {
+        "set" | "insert" => {
+            let key_val = key_val.expect("set/insert evaluated its key above");
+            let stored = Value::wrap_dict_entry(&key_val, value.unwrap_or(Value::Nil));
+            map.insert(key_val.to_key_string(), stored);
+        }
+        "remove" | "delete" => {
+            map.shift_remove(&key_val.expect("remove/delete evaluated its key above").to_key_string());
+        }
+        "merge" | "extend" => {
+            if let Some(other) = other {
+                map.extend(other.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+        }
+        "clear" => map.clear(),
+        _ => unreachable!("DICT_MUTATING_METHODS is exhaustive here"),
+    }
+}
+
 /// Ownership-gated in-place mutation for the `obj.field.push(x)` shape.
 ///
 /// The bare-identifier receiver (`arr.push(x)`) already gets in-place mutation via
@@ -386,21 +560,93 @@ pub(crate) fn try_field_array_mutation_in_place(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
-    // `write_span` takes four arguments and is handled by its own path; keep this
-    // helper to the generic item/idx/second mutators.
-    if method == "write_span" || !ARRAY_MUTATING_METHODS.contains(&method) {
+    // The span mutators take their own operands and are handled by their own
+    // paths; keep this helper to the generic item/idx/second mutators.
+    if is_span_mutator(method) {
+        return Ok(None);
+    }
+    let is_array_method = ARRAY_MUTATING_METHODS.contains(&method);
+    let is_dict_method = DICT_MUTATING_METHODS.contains(&method);
+    if !is_array_method && !is_dict_method {
         return Ok(None);
     }
     // Only fire for a local object binding whose field is currently a plain array.
-    match env.get(obj_name) {
+    // A reference-semantics `class` binding (`Value::ClassInstance`) takes the
+    // same shape for an array OR a dict field: the field lives behind the
+    // instance's lock, so the mutation happens in place there and is visible
+    // through every handle (the generic path clones the handle and pays a full
+    // copy-on-write per call — O(n^2) accumulation into any class field).
+    let class_instance = match env.get(obj_name) {
         Some(Value::Object { fields, .. }) => match fields.get(field) {
-            Some(Value::Array(_)) => {}
+            Some(Value::Array(_)) if is_array_method => None,
             _ => return Ok(None),
         },
+        Some(Value::ClassInstance(instance)) => {
+            let shape_ok = instance.field_mut(field, |v| match v {
+                Value::Array(_) => is_array_method,
+                Value::Dict(_) => is_dict_method,
+                _ => false,
+            });
+            match shape_ok {
+                Some(true) => Some(Arc::clone(instance)),
+                _ => return Ok(None),
+            }
+        }
         _ => return Ok(None),
+    };
+
+    if let Some(instance) = &class_instance {
+        if is_dict_method && instance.field_mut(field, |v| matches!(v, Value::Dict(_))) == Some(true) {
+            // Operands are evaluated and validated before the lock is taken.
+            let (key_val, value, other) =
+                eval_dict_mutator_args(method, args, env, functions, classes, enums, impl_methods)?;
+            // Mutating a module namespace copies its fns into a plain dict.
+            let receiver = instance.field_mut(field, |v| match v {
+                Value::Dict(entries) => Some(Arc::clone(entries)),
+                _ => None,
+            });
+            if let Some(Some(receiver)) = receiver {
+                crate::interpreter::interpreter_call::gate_module_namespace_handout(&receiver)?;
+            }
+            let mutated = instance.field_mut(field, |v| match v {
+                Value::Dict(entries) => {
+                    apply_dict_mutation_in_place(method, Arc::make_mut(entries), key_val, value, other);
+                    Some(Value::Dict(Arc::clone(entries)))
+                }
+                _ => None,
+            });
+            return Ok(mutated.flatten());
+        }
+        if !is_array_method {
+            return Ok(None);
+        }
     }
 
     let (item, idx, second) = eval_array_mutator_args(method, args, env, functions, classes, enums, impl_methods)?;
+
+    if let Some(instance) = class_instance {
+        // Re-read after argument evaluation (an argument may have replaced the
+        // field); the instance handle itself cannot be rebound out from under us.
+        let mutated = instance.field_mut(field, |v| match v {
+            Value::Array(arc) => {
+                crate::perf_counters::bump(&crate::perf_counters::SELF_FIELD_ARR_MUT_CALLS, 1);
+                if Arc::strong_count(arc) > 1 {
+                    crate::perf_counters::bump(&crate::perf_counters::SELF_FIELD_ARR_COW_CLONES, 1);
+                    crate::perf_counters::bump(&crate::perf_counters::SELF_FIELD_ARR_COW_ELEMS_CLONED, arc.len() as u64);
+                }
+                let vec = Arc::make_mut(arc);
+                Some(
+                    apply_array_mutation_in_place(method, vec, item, idx, second)
+                        .map(|popped| popped.unwrap_or_else(|| Value::Array(Arc::clone(arc)))),
+                )
+            }
+            _ => None,
+        });
+        return match mutated {
+            Some(Some(result)) => result.map(Some),
+            _ => Ok(None),
+        };
+    }
 
     // Re-read after argument evaluation: an argument may have rebound `obj_name`
     // or replaced the field, in which case the shape no longer applies.
@@ -430,6 +676,9 @@ enum PlaceMutation {
     /// `[T]` leaf reached by `write_span(src, dst_off, src_off, count)`, the
     /// four-operand bulk span copy whose expression result is the COUNT.
     WriteSpan,
+    /// `[T]` leaf reached by `fill_span(dst_off, count, value)`, the
+    /// three-operand bulk volatile fill whose expression result is the COUNT.
+    FillSpan,
     /// Packed `[u8]` leaf reached by `push`/`append` (`self.buf.push(b)`).
     BytePush,
     /// `{K: V}` leaf reached by a `DICT_MUTATING_METHODS` method.
@@ -437,6 +686,33 @@ enum PlaceMutation {
     /// Object leaf whose class (carried here) defines the method, together
     /// with the method itself, resolved once while the slot was still borrowed.
     Object(String, ResolvedMethod),
+}
+
+/// Resolve a field/unwrap chain whose every holder is a `ClassInstance` to the
+/// innermost holder and the leaf field name. `None` for any other shape (index
+/// steps, struct/dict holders), which keeps those on their existing paths.
+fn class_hop_leaf(env: &Env, target: &super::super::place::Place) -> Option<(Arc<crate::value::ClassInstance>, String)> {
+    use super::super::place::Projection;
+    let mut cur = env.get(&target.root)?.clone();
+    let last = target.projections.len().checked_sub(1)?;
+    for (i, projection) in target.projections.iter().enumerate() {
+        if matches!(projection, Projection::Unwrap) {
+            cur = super::super::expr::try_unwrap_option_or_result(&cur)?;
+            continue;
+        }
+        let Projection::Field(name) = projection else {
+            return None;
+        };
+        let Value::ClassInstance(instance) = &cur else {
+            return None;
+        };
+        if i == last {
+            return Some((Arc::clone(instance), name.clone()));
+        }
+        let next = instance.field(name)?;
+        cur = next;
+    }
+    None
 }
 
 /// In-place mutation through an arbitrary PLACE receiver — the single kernel for
@@ -515,11 +791,42 @@ pub(crate) fn try_place_mutation_in_place(
     if target.projections.is_empty() {
         return Ok(None);
     }
+    // Field hops through reference-semantics `class` instances
+    // (`self.store.items.push(x)`): the place walk cannot step through a
+    // `ClassInstance` lock, so this shape used to fall to the copy path
+    // (read the array, mutate a copy, `write_place` it back) -- O(len) per push.
+    // Mutate the array where it lives, under the owning instance's lock, as the
+    // single-hop `try_field_array_mutation_in_place` does.
+    if !is_span_mutator(method) && ARRAY_MUTATING_METHODS.contains(&method) {
+        if let Some((instance, field)) = class_hop_leaf(env, &target) {
+            let is_array = instance.field_mut(&field, |v| matches!(v, Value::Array(_)));
+            if is_array == Some(true) {
+                let (item, idx, second) =
+                    eval_array_mutator_args(method, args, env, functions, classes, enums, impl_methods)?;
+                let mutated = instance.field_mut(&field, |v| match v {
+                    Value::Array(arc) => {
+                        let vec = Arc::make_mut(arc);
+                        Some(
+                            apply_array_mutation_in_place(method, vec, item, idx, second)
+                                .map(|popped| popped.unwrap_or_else(|| Value::Array(Arc::clone(arc)))),
+                        )
+                    }
+                    _ => None,
+                });
+                return match mutated {
+                    Some(Some(result)) => result.map(Some),
+                    _ => Ok(None),
+                };
+            }
+        }
+    }
     // Decide the arm from a READ-ONLY peek: a peek that bails must not have paid
     // a copy-on-write isolation on the way in.
     let kind = match place::place_slot_ref(env, &target) {
         // `write_span` takes four operands and has its own path.
         Some(Value::Array(_) | Value::ByteArray(_)) if method == "write_span" => PlaceMutation::WriteSpan,
+        // `fill_span` takes three operands and has its own path.
+        Some(Value::Array(_) | Value::ByteArray(_)) if method == "fill_span" => PlaceMutation::FillSpan,
         Some(Value::Array(_)) if ARRAY_MUTATING_METHODS.contains(&method) => PlaceMutation::Array,
         Some(Value::ByteArray(_)) if matches!(method, "push" | "append") => PlaceMutation::BytePush,
         Some(Value::Dict(_)) if DICT_MUTATING_METHODS.contains(&method) => PlaceMutation::Dict,
@@ -527,11 +834,16 @@ pub(crate) fn try_place_mutation_in_place(
         // after argument evaluation and must still hold an object of the same
         // class — so this one keeps its `clone()`. The resolution rides along so
         // the executor does not probe the method table a second time.
-        Some(Value::Object { class, .. }) => match resolve_object_method(classes, impl_methods, class, method) {
+        Some(Value::Object { class, fields }) => match resolve_object_method(classes, impl_methods, class, fields, method) {
             Some(resolved) => PlaceMutation::Object(class.clone(), resolved),
             None => return Ok(None),
         },
-        _ => return Ok(None),
+        other => {
+            if let Some(v) = other {
+                crate::interpreter::place::classinstance_tripwire("patterns::place_method_mutation", v);
+            }
+            return Ok(None);
+        }
     };
 
     let result = match kind {
@@ -615,6 +927,46 @@ pub(crate) fn try_place_mutation_in_place(
                 _ => return Ok(None),
             }
         }
+        PlaceMutation::FillSpan => {
+            // Same discipline as `WriteSpan`: operands evaluated once, in order,
+            // then the leaf is re-read and filled through `Arc::make_mut`, so a
+            // secret buffer held in a field (`self.key.fill_span(0, n, 0u8)`) is
+            // wiped on the caller's exclusive storage and never through a raw
+            // pointer into a shared allocation.
+            let (dst_off, count, value) = super::super::interpreter_method::collections::eval_fill_span_args(
+                args, env, functions, classes, enums, impl_methods,
+            )?;
+            match place::place_slot_mut(env, &target) {
+                Some(Value::Array(arc)) => {
+                    note_place_mutation(arc.len(), Arc::strong_count(arc));
+                    let written = super::super::interpreter_method::collections::array_fill_span(
+                        Arc::make_mut(arc),
+                        dst_off,
+                        count,
+                        &value,
+                    )?;
+                    Value::Int(written)
+                }
+                Some(slot @ Value::ByteArray(_)) => {
+                    let Value::ByteArray(arc) = slot else { unreachable!("matched ByteArray") };
+                    note_place_mutation(arc.len(), Arc::strong_count(arc));
+                    let written = super::super::interpreter_method::collections::byte_array_fill_span(
+                        Arc::make_mut(arc),
+                        dst_off,
+                        count,
+                        &value,
+                    )?;
+                    match written {
+                        super::super::interpreter_method::collections::ByteSpanWrite::InPlace(count) => Value::Int(count),
+                        super::super::interpreter_method::collections::ByteSpanWrite::Widened(values, count) => {
+                            *slot = Value::array(values);
+                            Value::Int(count)
+                        }
+                    }
+                }
+                _ => return Ok(None),
+            }
+        }
         PlaceMutation::BytePush => {
             // `[u8]`-typed bindings are packed, so a builder stored in a field
             // reaches this leaf. Without this arm every push widened the whole
@@ -652,6 +1004,11 @@ pub(crate) fn try_place_mutation_in_place(
             }
         }
         PlaceMutation::Dict => {
+            if let Some(Value::Dict(entries)) = place::place_slot_ref(env, &target) {
+                if dict_member_is_callable(entries, method) {
+                    return Ok(None);
+                }
+            }
             // Every operand is evaluated AND validated before the leaf is re-read,
             // so a rejected `merge` argument leaves the dict untouched exactly as
             // the functional path did. Behaviour mirrors
@@ -659,90 +1016,17 @@ pub(crate) fn try_place_mutation_in_place(
             // including `wrap_dict_entry` on the stored value and the fact that
             // `remove` yields the DICT (unlike `[T].remove`, which yields the
             // element).
-            let (key_val, value, other) = match method {
-                "set" | "insert" => (
-                    Some(eval_arg(
-                        args,
-                        0,
-                        Value::Nil,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    )?),
-                    Some(eval_arg(
-                        args,
-                        1,
-                        Value::Nil,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    )?),
-                    None,
-                ),
-                "remove" | "delete" => (
-                    Some(eval_arg(
-                        args,
-                        0,
-                        Value::Nil,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    )?),
-                    None,
-                    None,
-                ),
-                "merge" | "extend" => {
-                    let arg0 = eval_arg(
-                        args,
-                        0,
-                        Value::Dict(Arc::new(HashMap::new())),
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    )?;
-                    match arg0 {
-                        Value::Dict(map) => (None, None, Some(crate::interpreter::module_dict_flat(&map).unwrap_or(map))),
-                        _ => {
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::TYPE_MISMATCH)
-                                .with_help("merge expects a dict argument");
-                            return Err(CompileError::semantic_with_context("merge expects dict argument", ctx));
-                        }
-                    }
-                }
-                // "clear" takes no operands.
-                _ => (None, None, None),
-            };
+            let (key_val, value, other) =
+                eval_dict_mutator_args(method, args, env, functions, classes, enums, impl_methods)?;
+            if let Some(Value::Dict(entries)) = place::place_slot_ref(env, &target) {
+                // Mutating a module namespace copies its fns into a plain dict.
+                crate::interpreter::interpreter_call::gate_module_namespace_handout(entries)?;
+            }
             let Some(Value::Dict(entries)) = place::place_slot_mut(env, &target) else {
                 return Ok(None);
             };
             note_place_mutation(entries.len(), Arc::strong_count(entries));
-            let map = Arc::make_mut(entries);
-            match method {
-                "set" | "insert" => {
-                    let key_val = key_val.expect("set/insert evaluated its key above");
-                    let stored = Value::wrap_dict_entry(&key_val, value.unwrap_or(Value::Nil));
-                    map.insert(key_val.to_key_string(), stored);
-                }
-                "remove" | "delete" => {
-                    map.remove(&key_val.expect("remove/delete evaluated its key above").to_key_string());
-                }
-                "merge" | "extend" => {
-                    if let Some(other) = other {
-                        map.extend(other.iter().map(|(k, v)| (k.clone(), v.clone())));
-                    }
-                }
-                "clear" => map.clear(),
-                _ => unreachable!("DICT_MUTATING_METHODS is exhaustive here"),
-            }
+            apply_dict_mutation_in_place(method, Arc::make_mut(entries), key_val, value, other);
             Value::Dict(Arc::clone(entries))
         }
         PlaceMutation::Object(class, resolved) => {
@@ -823,6 +1107,11 @@ pub(crate) fn handle_method_call_with_self_update(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<(String, Value)>), CompileError> {
+    if let Expr::MethodCall { receiver, .. } = value_expr {
+        if let Some(name) = crate::interpreter::expr::receiver_root_identifier(receiver) {
+            crate::interpreter::expr::refresh_stale_module_global_receiver(env, name);
+        }
+    }
     let out = handle_method_call_with_self_update_inner(value_expr, env, functions, classes, enums, impl_methods)?;
     // A bare `expect <subject>` statement (no matcher chained, so it is a plain
     // Call, not a MethodCall): outside any `it` there is no example end to judge
@@ -871,8 +1160,8 @@ pub(crate) fn handle_method_call_with_self_update(
 /// in a single `lint` of driver_types.spl. Since the (owner, name) pair is
 /// known here, the write is recorded instead, and the cache patches just that
 /// name. Both stores are kept in step so a later rebuild cannot resurrect the
-/// pre-write value. When the executing module is unknown there is no owner to
-/// key a patch on, so that path keeps the blunt invalidation.
+/// pre-write value. An unknown executing module is the entry script, whose
+/// store is `"<entry>"`.
 pub(crate) fn sync_flat_global(name: &str, value: &Value) {
     let present = crate::interpreter::MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name));
     if !present {
@@ -881,10 +1170,15 @@ pub(crate) fn sync_flat_global(name: &str, value: &Value) {
     crate::interpreter::MODULE_GLOBALS.with(|cell| {
         cell.borrow_mut().insert(name.to_string(), value.clone());
     });
-    let owner = crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
-    if let Some(owner) = owner {
-        crate::interpreter::set_owned_global(&owner, name, value.clone(), false);
-    }
+    // No executing module = the entry script's own top-level code (incl. a
+    // spec `it` block), whose functions own the `"<entry>"` store. Skipping
+    // it left that store at the value the frame's last call-out published,
+    // so every later write was invisible to the entry script's functions.
+    // `create == false`: only a name already global in that store is written.
+    let owner = crate::interpreter::CURRENT_EXEC_MODULE
+        .with(|cell| cell.borrow().clone())
+        .unwrap_or_else(|| std::sync::Arc::from("<entry>"));
+    crate::interpreter::set_owned_global(&owner, name, value.clone(), false);
 }
 
 /// Park the global stores' copies of a module-global array and drop the frame's
@@ -892,7 +1186,7 @@ pub(crate) fn sync_flat_global(name: &str, value: &Value) {
 /// mutation. Returns whether anything was parked; the caller MUST follow with
 /// `sync_flat_global` + `refresh_scope` (normal path via
 /// `handle_method_call_with_self_update`, error path explicitly).
-fn release_global_aliases(name: &str, env: &mut Env) -> bool {
+pub(crate) fn release_global_aliases(name: &str, env: &mut Env) -> bool {
     if env.is_local(name) {
         return false;
     }
@@ -909,11 +1203,34 @@ fn release_global_aliases(name: &str, env: &mut Env) -> bool {
     crate::interpreter::MODULE_GLOBALS.with(|cell| {
         cell.borrow_mut().insert(name.to_string(), Value::Nil);
     });
-    let owner = crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
-    if let Some(owner) = owner {
-        crate::interpreter::set_owned_global(&owner, name, Value::Nil, false);
-    }
+    // Same owner resolution as `sync_flat_global`, which re-publishes into
+    // `"<entry>"` when no module is executing (the entry script's top-level
+    // code, incl. a spec `it` block). Not parking that store left it pinning
+    // the Arc, so every top-level `g.push(x)` deep-copied the whole array.
+    let owner = current_exec_owner();
+    crate::interpreter::set_owned_global(&owner, name, Value::Nil, false);
     true
+}
+
+/// The store owner of the executing code: the current module, or `"<entry>"`
+/// for the entry script's own top-level code.
+fn current_exec_owner() -> std::sync::Arc<str> {
+    crate::interpreter::CURRENT_EXEC_MODULE
+        .with(|cell| cell.borrow().clone())
+        .unwrap_or_else(|| std::sync::Arc::from("<entry>"))
+}
+
+/// True when `name` is a non-local global that the executing module owns
+/// under the same name — the only binding `release_global_aliases` +
+/// `sync_flat_global` park and re-publish exactly.
+pub(crate) fn owns_global_binding(name: &str, env: &Env) -> bool {
+    if env.is_local(name) {
+        return false;
+    }
+    match env.global_binding(name) {
+        Some((owner, source_name)) => source_name == name && owner == current_exec_owner(),
+        None => false,
+    }
 }
 
 /// True when `method` on `class` is declared `me` (a mutating method).
@@ -947,9 +1264,47 @@ fn handle_method_call_with_self_update_inner(
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<(String, Value)>), CompileError> {
     if let Expr::MethodCall {
-        receiver, method, args, ..
+        receiver,
+        method,
+        args,
+        generic_args,
     } = value_expr
     {
+        if let Some(default_arr) = crate::interpreter::expr::try_eval_array_repeat_default(
+            receiver,
+            method,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )? {
+            return Ok((default_arr, None));
+        }
+        let _pending_generics =
+            crate::interpreter::push_method_call_generics_with_method(receiver, method, generic_args);
+        let _clear_expected_target = crate::interpreter::push_expected_target_type(None);
+        // BDD negation link in STATEMENT position: `expect(x).not_().to_be_none()`.
+        // The nested-call recursion below would otherwise evaluate
+        // `expect(x).not_()` as an ordinary call (dispatching to a stdlib
+        // `not_` on the bare subject) and never run the negated matcher.
+        // Mirrors the expression-position check in interpreter/expr/calls.rs.
+        if method.starts_with("to") {
+            if let Some((expect_call, true)) = crate::interpreter::interpreter_method::peel_bdd_matcher_receiver(receiver) {
+                let result = crate::interpreter::interpreter_method::evaluate_negated_bdd_matcher(
+                    expect_call,
+                    method,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                return Ok((result, None));
+            }
+        }
         // Handle nested method calls like self.advance().unwrap()
         // The receiver itself might be a method call that mutates an object
         if let Expr::MethodCall {
@@ -981,60 +1336,46 @@ fn handle_method_call_with_self_update_inner(
             // non-self reference-typed argument such as `buf`. See
             // doc/08_tracking/bug/bytebuffer_struct_param_mutation_not_persisted_2026-09-01.md.
             if let Value::Object { class, fields } = &inner_result {
-                if let Some(resolved) = resolve_object_method(classes, impl_methods, class, method) {
+                if let Some(resolved) = resolve_object_method(classes, impl_methods, class, fields, method) {
                     let eval_args = evaluate_call_args(args, env, functions, classes, enums, impl_methods)?;
-                    {
-                        // `_updated_inner_self` is deliberately dropped: the
-                        // write-back gate below keys on `inner_update`'s own
-                        // self, not on the outer call's receiver (see the
-                        // 2026-09-01 bug note).
-                        let (outer_result, _updated_inner_self) = exec_resolved_method_with_self_owned_values(
-                            &resolved,
-                            &eval_args,
-                            args,
-                            class,
-                            Arc::clone(fields),
-                            env,
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        )?;
-                        if let Some((ref obj_name, ref inner_self)) = inner_update {
-                            // Same gate as the non-owned fallback below, and for
-                            // the same reason: overwrite the ROOT binding with
-                            // the outer result only when the chain provably
-                            // threads one mutable identity through both links.
-                            //
-                            // The old gate here compared `updated_inner_self`'s
-                            // class to `class` -- the class of the OUTER call's
-                            // own receiver -- which is the same object, so it was
-                            // trivially true and said nothing about `obj_name`.
-                            // `val ok = self.symbols.lookup_or_invalid(n).is_valid()`
-                            // therefore wrote `is_valid()`'s BOOL into the frame's
-                            // `self` slot, and every later `self.<field>` in that
-                            // frame failed with "cannot access field on value of
-                            // type 'bool'". The 2026-08-31 fix hardened the
-                            // fallback path below but missed this owned-values
-                            // sibling.
-                            // doc/08_tracking/bug/hir_register_imported_symbol_inner_self_bound_to_bool_2026-09-01.md
-                            // doc/08_tracking/bug/chained_method_call_writes_result_back_into_receiver_variable_2026-08-31.md
-                            if let (
-                                Value::Object { class: inner_class, .. },
-                                Value::Object { class: outer_class, .. },
-                            ) = (inner_self, &outer_result)
-                            {
-                                if inner_class == outer_class
-                                    && method_is_me(classes, impl_methods, inner_class, inner_method)
-                                    && method_is_me(classes, impl_methods, inner_class, method)
-                                {
-                                    return Ok((outer_result.clone(), Some((obj_name.clone(), outer_result))));
-                                }
-                            }
-                            return Ok((outer_result, inner_update));
+                    // The chain threads one mutable identity only when the
+                    // inner `me` returned its own self (same field storage) and
+                    // the outer call is `me` too. A `me` that returns a NEW
+                    // object of the same class is a pure result: the outer call
+                    // acts on that temporary and must not reach the root. Both
+                    // earlier gates got this wrong by comparing classes and
+                    // writing the outer RESULT into the root binding.
+                    // doc/08_tracking/bug/hir_register_imported_symbol_inner_self_bound_to_bool_2026-09-01.md
+                    // doc/08_tracking/bug/chained_method_call_writes_result_back_into_receiver_variable_2026-08-31.md
+                    // doc/08_tracking/bug/smux_native_provider_lane_blocked_on_windows_seed_2026-10-31.md
+                    let threaded_root = inner_update.as_ref().and_then(|(obj_name, inner_self)| match inner_self {
+                        Value::Object {
+                            class: inner_class,
+                            fields: self_fields,
+                        } if Arc::ptr_eq(self_fields, fields)
+                            && method_is_me(classes, impl_methods, inner_class, inner_method)
+                            && method_is_me(classes, impl_methods, inner_class, method) =>
+                        {
+                            Some(obj_name.clone())
                         }
-                        return Ok((outer_result, None));
+                        _ => None,
+                    });
+                    let (outer_result, updated_outer_self) = exec_resolved_method_with_self_owned_values(
+                        &resolved,
+                        &eval_args,
+                        args,
+                        class,
+                        Arc::clone(fields),
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
+                    if let Some(obj_name) = threaded_root {
+                        return Ok((outer_result, Some((obj_name, updated_outer_self))));
                     }
+                    return Ok((outer_result, inner_update));
                 }
             }
 
@@ -1060,10 +1401,11 @@ fn handle_method_call_with_self_update_inner(
             }
 
             // Call the method on the inner_result value
-            let outer_result = call_method_on_value(
+            let outer_result = call_method_on_value_with_args(
                 inner_result.clone(),
                 method,
                 &eval_args,
+                Some(args),
                 &mut working_env,
                 functions,
                 classes,
@@ -1071,34 +1413,7 @@ fn handle_method_call_with_self_update_inner(
                 impl_methods,
             )?;
 
-            // For chained mutable method calls, propagate the final result
-            // If the outer method returned an object of the SAME CLASS, it's likely
-            // the modified self from a `me` method
-            if let Some((ref obj_name, ref inner_self)) = inner_update {
-                // Write the OUTER result back into the root variable only when the
-                // chain provably threads one mutable identity through both links:
-                // the inner AND the outer method must be declared `me`. The old
-                // gate was class equality alone ("same type in/out = mutated
-                // self"), which corrupted every non-mutating fluent chain on the
-                // interpreter lane: `val h = t.head(2).head(1)` overwrote the
-                // immutable `t` with the final result (nrows 3 -> 1) while the
-                // split form and the JIT both kept `t` intact. Builder-style
-                // `me` chains (`b.add(1).add(2)`) still write back. Mock chains
-                // (`m.when(..).returns(..)`) never reached this path: mocks are
-                // `Value::Mock` with interior mutability, not `Value::Object`.
-                // doc/08_tracking/bug/chained_method_call_writes_result_back_into_receiver_variable_2026-08-31.md
-                if let (Value::Object { class: inner_class, .. }, Value::Object { class: outer_class, .. }) =
-                    (inner_self, &outer_result)
-                {
-                    if inner_class == outer_class
-                        && method_is_me(classes, impl_methods, inner_class, inner_method)
-                        && method_is_me(classes, impl_methods, inner_class, method)
-                    {
-                        return Ok((outer_result.clone(), Some((obj_name.clone(), outer_result))));
-                    }
-                }
-            }
-            // Fall back to propagating the inner update for non-object results or different types
+            // No user method was resolved, so only the inner update can apply.
             return Ok((outer_result, inner_update));
         }
 
@@ -1180,8 +1495,8 @@ fn handle_method_call_with_self_update_inner(
                     Some(Value::Object {
                         fields: parent_fields, ..
                     }) => match parent_fields.get(field) {
-                        Some(Value::Object { class: field_class, .. }) => {
-                            resolve_object_method(classes, impl_methods, field_class, method)
+                        Some(Value::Object { class: field_class, fields: field_fields }) => {
+                            resolve_object_method(classes, impl_methods, field_class, field_fields, method)
                         }
                         _ => None,
                     },
@@ -1457,7 +1772,7 @@ fn handle_method_call_with_self_update_inner(
             // The outer `Option` is "the receiver is an Object" (which selects
             // this arm at all); the inner one is "its class defines `method`".
             let receiver_method = match env.get(obj_name) {
-                Some(Value::Object { class, .. }) => Some(resolve_object_method(classes, impl_methods, class, method)),
+                Some(Value::Object { class, fields }) => Some(resolve_object_method(classes, impl_methods, class, fields, method)),
                 _ => None,
             };
             if let Some(resolved) = receiver_method {
@@ -1586,6 +1901,25 @@ fn handle_method_call_with_self_update_inner(
                     // holds a second strong ref) → clone-then-mutate, which is exactly what
                     // gives the documented memmove-style overlap semantics (the src Value is
                     // a pre-copy snapshot). Expression result is the COUNT WRITTEN.
+                    //
+                    // `fill_span(dst_off, count, value)` -- bulk in-place volatile fill --
+                    // follows the same discipline with three operands.
+                    if method.as_str() == "fill_span" {
+                        let (dst_off, count, value) =
+                            super::super::interpreter_method::collections::eval_fill_span_args(
+                                args, env, functions, classes, enums, impl_methods,
+                            )?;
+                        if let Some(Value::Array(arc)) = env.get_mut(obj_name) {
+                            let written = super::super::interpreter_method::collections::array_fill_span(
+                                Arc::make_mut(arc),
+                                dst_off,
+                                count,
+                                &value,
+                            )?;
+                            let new_array_val = Value::Array(Arc::clone(arc));
+                            return Ok((Value::Int(written), Some((obj_name.clone(), new_array_val))));
+                        }
+                    }
                     if method.as_str() == "write_span" {
                         let src = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
                         let mut ints = [-1i64, -1, 0];
@@ -1640,6 +1974,20 @@ fn handle_method_call_with_self_update_inner(
                         _ => None,
                     };
                     let (idx, second) = match m {
+                        "set" => (
+                            // i64 bits in a usize so a negative index reaches the kernel.
+                            Some(eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)? as usize),
+                            Some(eval_arg(
+                                args,
+                                1,
+                                Value::Nil,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?),
+                        ),
                         "insert" => (
                             Some(eval_arg_usize(
                                 args,
@@ -1814,6 +2162,35 @@ fn handle_method_call_with_self_update_inner(
                         ));
                     }
 
+                    // `fill_span` on a packed binding: the secure-memory owner's
+                    // wipe of a `mut bytes: [u8]` parameter lands here. The fill
+                    // runs on the binding's exclusive storage (`Arc::make_mut`)
+                    // and the result is published to the binding, which the
+                    // `mut`-parameter write-back then carries to the caller's
+                    // place -- no raw pointer, no shared-allocation write.
+                    if method.as_str() == "fill_span" {
+                        let (dst_off, count, value) =
+                            super::super::interpreter_method::collections::eval_fill_span_args(
+                                args, env, functions, classes, enums, impl_methods,
+                            )?;
+                        if let Some(Value::ByteArray(arc)) = env.get_mut(obj_name) {
+                            let written = super::super::interpreter_method::collections::byte_array_fill_span(
+                                Arc::make_mut(arc),
+                                dst_off,
+                                count,
+                                &value,
+                            )?;
+                            let (new_value, count) = match written {
+                                super::super::interpreter_method::collections::ByteSpanWrite::InPlace(count) => {
+                                    (Value::ByteArray(Arc::clone(arc)), count)
+                                }
+                                super::super::interpreter_method::collections::ByteSpanWrite::Widened(values, count) => {
+                                    (Value::array(values), count)
+                                }
+                            };
+                            return Ok((Value::Int(count), Some((obj_name.clone(), new_value))));
+                        }
+                    }
                     // `write_span` on a packed binding: same operand order and
                     // ownership-gated `Arc::make_mut` discipline as the boxed
                     // identifier path above. It used to fall through to the
@@ -1875,6 +2252,20 @@ fn handle_method_call_with_self_update_inner(
                         _ => None,
                     };
                     let (idx, second) = match m {
+                        "set" => (
+                            // i64 bits in a usize so a negative index reaches the kernel.
+                            Some(eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)? as usize),
+                            Some(eval_arg(
+                                args,
+                                1,
+                                Value::Nil,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?),
+                        ),
                         "insert" => (
                             Some(eval_arg_usize(
                                 args,
@@ -2012,9 +2403,10 @@ fn handle_method_call_with_self_update_inner(
                 }
             }
             // Handle Dict mutations for mutating methods
-            if let Some(Value::Dict(_)) = env.get(obj_name) {
+            if let Some(Value::Dict(dict_recv)) = env.get(obj_name) {
+                let member_call = dict_member_is_callable(dict_recv, method);
                 let dict_mutating = ["set", "insert", "remove", "delete", "merge", "extend", "clear"];
-                if dict_mutating.contains(&method.as_str()) {
+                if !member_call && dict_mutating.contains(&method.as_str()) {
                     let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(obj_name));
                     if is_const {
                         let ctx = ErrorContext::new()
@@ -2054,7 +2446,7 @@ fn handle_method_call_with_self_update_inner(
                             Some(eval_arg(
                                 args,
                                 0,
-                                Value::Dict(Arc::new(HashMap::new())),
+                                Value::Dict(Arc::new(crate::value::DictMap::new())),
                                 env,
                                 functions,
                                 classes,
@@ -2076,6 +2468,10 @@ fn handle_method_call_with_self_update_inner(
                     // caller's write-through (`sync_flat_global`) republishes the mutated Arc.
                     // A FrozenDict never reaches here -- `env.get` matched `Value::Dict` above
                     // -- so `handle_frozen_dict_methods`' rejection still fires for it.
+                    if let Some(Value::Dict(arc)) = env.get(obj_name) {
+                        // Mutating a module namespace copies its fns into a plain dict.
+                        crate::interpreter::interpreter_call::gate_module_namespace_handout(arc)?;
+                    }
                     let released = release_global_aliases(obj_name, env);
                     if let Some(Value::Dict(arc)) = env.get_mut(obj_name) {
                         crate::perf_counters::bump(&crate::perf_counters::DICT_MUT_CALLS, 1);
@@ -2261,6 +2657,31 @@ fn bind_collection_pattern(patterns: &[Pattern], values: Vec<Value>, is_mutable:
 mod cow_alias_mechanism_tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn forceunwrap_class_array_holder_keeps_the_in_place_fast_path() {
+        use crate::interpreter::place::{Place, Projection};
+        use crate::value::ClassInstance;
+        let instance = Arc::new(ClassInstance::new("Cell".into(),
+            [("items".into(), Value::array(vec![]))].into_iter().collect()));
+        let mut env = Env::new();
+        for wrapped in [
+            Value::ClassInstance(instance.clone()),
+            Value::Enum { enum_name: "Option".into(), variant: "Some".into(),
+                payload: Some(Box::new(Value::ClassInstance(instance.clone()))) },
+        ] {
+            env.insert("item".into(), wrapped);
+            let place = Place { root: "item".into(),
+                projections: vec![Projection::Unwrap, Projection::Field("items".into())] };
+            let (holder, field) = class_hop_leaf(&env, &place).expect("shared class field owner");
+            assert!(Arc::ptr_eq(&holder, &instance));
+            assert_eq!(field, "items");
+        }
+        env.insert("item".into(), Value::Nil);
+        let absent = Place { root: "item".into(),
+            projections: vec![Projection::Unwrap, Projection::Field("items".into())] };
+        assert!(class_hop_leaf(&env, &absent).is_none());
+    }
 
     fn arr_ptr(v: &Value) -> usize {
         match v {
@@ -2660,7 +3081,7 @@ mod cow_alias_mechanism_tests {
         // test/05_perf/interp/dict_mutator_scaling_spec.spl.
         const N: usize = 500;
         let mut env = Env::new();
-        env.insert("d".to_string(), Value::Dict(Arc::new(HashMap::new())));
+        env.insert("d".to_string(), Value::Dict(Arc::new(crate::value::DictMap::new())));
         let mut seen: HashSet<usize> = HashSet::new();
         for i in 0..N {
             let call = insert_call(ident("d"), &format!("k{i}"));
@@ -2686,7 +3107,7 @@ mod cow_alias_mechanism_tests {
         // Value semantics must survive the optimization, exactly as for arrays: a
         // second LIVE binding to the same Arc must not observe the mutation.
         let mut env = Env::new();
-        let mut seed: HashMap<String, Value> = HashMap::new();
+        let mut seed = crate::value::DictMap::new();
         seed.insert("a".to_string(), Value::Int(0));
         env.insert("d".to_string(), Value::Dict(Arc::new(seed)));
         let aliased = env.get("d").expect("d").clone();
@@ -2714,7 +3135,7 @@ mod cow_alias_mechanism_tests {
         // `apply_dict_mutation_in_place`, the same kernel `handle_dict_methods` uses,
         // so pin that the RESULT is unchanged.
         let mut env = Env::new();
-        let mut seed: HashMap<String, Value> = HashMap::new();
+        let mut seed = crate::value::DictMap::new();
         seed.insert("a".to_string(), Value::Int(1));
         seed.insert("b".to_string(), Value::Int(2));
         env.insert("d".to_string(), Value::Dict(Arc::new(seed)));
@@ -2973,7 +3394,7 @@ mod cow_alias_mechanism_tests {
         const N: usize = 2_000;
         let mut env = Env::new();
         let mut fields: HashMap<String, Value> = HashMap::new();
-        fields.insert("d".to_string(), Value::Dict(Arc::new(HashMap::new())));
+        fields.insert("d".to_string(), Value::Dict(Arc::new(crate::value::DictMap::new())));
         env.insert(
             "r".to_string(),
             Value::Object {
@@ -3164,7 +3585,7 @@ mod cow_alias_mechanism_tests {
     #[test]
     fn genuinely_aliased_field_dict_still_copies_on_write() {
         let mut env = Env::new();
-        let mut entries: HashMap<String, Value> = HashMap::new();
+        let mut entries = crate::value::DictMap::new();
         entries.insert("seed".to_string(), Value::Int(0));
         let mut fields: HashMap<String, Value> = HashMap::new();
         fields.insert("d".to_string(), Value::Dict(Arc::new(entries)));
@@ -3227,5 +3648,32 @@ mod cow_alias_mechanism_tests {
             result
         );
         assert_eq!(arr_len(field_of(&env, "o", "xs")), 2, "pop must shrink the field array");
+    }
+}
+
+#[cfg(test)]
+mod array_set_kernel_tests {
+    use super::*;
+
+    fn ints(xs: &[i64]) -> Vec<Value> {
+        xs.iter().map(|x| Value::Int(*x)).collect()
+    }
+
+    #[test]
+    fn set_in_range_and_negative_index_mutate_in_place() {
+        let mut v = ints(&[1, 2, 3]);
+        apply_array_mutation_in_place("set", &mut v, None, Some(1usize), Some(Value::Int(9))).unwrap();
+        apply_array_mutation_in_place("set", &mut v, None, Some((-1i64) as usize), Some(Value::Int(7))).unwrap();
+        assert_eq!(v, ints(&[1, 9, 7]));
+    }
+
+    #[test]
+    fn set_out_of_range_returns_false_without_mutating() {
+        for raw in [3i64, 100, -4] {
+            let mut v = ints(&[1, 2, 3]);
+            let r = apply_array_mutation_in_place("set", &mut v, None, Some(raw as usize), Some(Value::Int(9)));
+            assert_eq!(r.unwrap(), Some(Value::Bool(false)), "index {raw} must report false");
+            assert_eq!(v, ints(&[1, 2, 3]));
+        }
     }
 }

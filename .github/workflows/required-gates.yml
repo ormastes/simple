@@ -9,8 +9,6 @@ name: Required Gates
 # to main / dispatch only; the PR pays for this one job.
 
 on:
-  push:
-    branches: [main, master, develop]
   pull_request:
     branches: [main, master, develop, release_windows, release_phase3, 'release/**']
   workflow_dispatch:
@@ -32,11 +30,16 @@ jobs:
   #
   # Checkout is sparse (scripts/check, bootstrap, config/check, and the hosted
   # runtime probe source reach the working tree) and depth 1; the PR endpoints
-  # are fetched at PR_COMMITS+1 depth exactly as the extended job does.
+  # are fetched at PR_COMMITS+41 depth (the rewind gate reads a 40-commit
+  # window), then scripts/check/pr-range-exact-fetch.shs makes BASE..HEAD exact
+  # for a PR that merges another line.
   fast-gates:
     name: Code Idiom & Structural Ratchet Gates
-    runs-on: [self-hosted, ARM64]
-    timeout-minutes: 5
+    # Hosted (free CI plan, doc/03_plan/infra/bootstrap/free_github_actions_ci_plan_2026-10-22.md
+    # 2.1): the self-hosted ARM64 runner left this required check queued and
+    # blocked every PR on 2026-10-25. The check name is unchanged.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -57,15 +60,213 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
+          # The local tier below runs gate scripts that read tracked files
+          # OUTSIDE the original fast-lane set (wired 2026-11-09, PR #7973):
+          #   scripts/resource        process-tree-rss-watchdog.pl — local-
+          #                           bootstrap-ceiling-headroom/transport,
+          #                           local-watchdog-monotonic-budget,
+          #                           local-item5-app-runner-preflight
+          #   scripts/os              simpleos-native-build.shs —
+          #                           local-fast-verify-bootstrap-scripts
+          #   .github/workflows       simpleos-build.yml — local-bootstrap-slim-
+          #                           verification-cli
+          #   cmake                   SimpleClangPolicy.cmake — local-clang-
+          #                           policy-native-dependency
+          #   examples/09_embedded    riscv arch trees — local-riscv-text-eq-any
+          #   release                 version.sdn — local-stage2-candidate-
+          #                           requalification (canonical version)
+          #   doc/04_architecture/compiler/plugin_arch
+          #                           kernel_closure.sdn — local-stage2-
+          #                           candidate-requalification (ABI policy)
+          #   src/compiler_rust/compiler  hir/lower/type_resolver.rs — local-hir-
+          #                               lower-list-generic-not-any
+          #   src/os/libc             simpleos_simple_runtime.c + include/ —
+          #                           local-simpleos-module-init-stub-weak
+          #   src/app                 cli/hash sffi decls + all network servers
+          #                           scanned by local-no-unbounded-tcp-read-line
+          #   test/05_perf/ctype and test/perf/ctype — canonical and legacy
+          #                           owners compared by local-ctype-benchmark-enforcement
+          # These rows are honest static/contract checks over tracked content;
+          # keep the checkout sparse, but materialize exactly the roots they
+          # read so the checks genuinely run here instead of failing on absent
+          # inputs.
           sparse-checkout: |
+            bin
             scripts/check
+            scripts/vcs
             scripts/bootstrap
+            scripts/setup
             scripts/lib
+            scripts/resource
+            scripts/os
+            config
             config/check
+            .github/workflows
+            cmake
+            release
+            doc/04_architecture/compiler/plugin_arch
+            examples/09_embedded
             src/runtime/startup/common
+            src/runtime/test
+            src/runtime
+            src/compiler
+            src/compiler_rust/compiler
+            src/compiler_rust/runtime
+            src/compiler_rust/native_all
+            src/compiler_rust/native_loader
+            src/compositions
+            src/plugins
+            src/lib
+            src/app
+            src/os/libc
+            src/os/port/llvm
+            test/01_unit/scripts
+            test/01_unit/os/port
+            test/fixtures/xray
+            test/05_perf/ctype
+            test/perf/ctype
+            tools/counterpart/sdk/c
           sparse-checkout-cone-mode: true
 
-      - name: Fast push-tier gates on the PR range
+      # Release promotion (2026-11-27): a PR based on main whose head is already
+      # published on a versioned release/<x.y> line, with main an ancestor of
+      # it, carries no content that was not already gated by this same
+      # job when it landed on the release line. Scanning base..head instead
+      # (21,916 commits on the first promotion) cannot pass the 64-commit
+      # bound or the +-0.15% size band, and the depth fetch below would pull
+      # most of the repository. release-promotion-admission.shs decides, fail
+      # closed, in a private commit-only scratch repository (this clone is not
+      # touched), by the predicate as committed at the BASE; exit 0 is the only
+      # admission. --expect-tree binds the verdict to the tree checked out
+      # here, so the tree checks in the gate step are checks of the promoted
+      # tree. Decided BEFORE the endpoint fetch.
+      - name: Release promotion admission
+        shell: sh
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          rm -f "$RUNNER_TEMP/release-promotion-admitted"
+          sh scripts/check/release-promotion-admission.shs --selftest ||
+              { echo "fast-gates: release-promotion-admission selftest failed"; exit 1; }
+          if [ "$BASE_REF" = main ] && [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
+            # The predicate that admits the PR is read from the BASE commit,
+            # not from the PR's checkout, so a PR cannot edit the script that
+            # admits it (same trust root as --manifest-rev "$BASE_SHA" below).
+            # It is read through a private blob-less depth-1 repository; this
+            # clone is not touched. ONE stated exception: while the base does
+            # not carry the script at all (the first promotion, which is what
+            # brings it to main), the checked-out copy runs and the log says
+            # so. A base that cannot be fetched admits nothing.
+            _pin="$RUNNER_TEMP/release-promotion-pin.git"
+            _promo_script=""
+            rm -rf "$_pin" "$RUNNER_TEMP/release-promotion-admission.base.shs"
+            if git init -q --bare "$_pin" &&
+                git -C "$_pin" remote add origin "$(git config --get remote.origin.url)" &&
+                git -C "$_pin" fetch --no-tags --no-recurse-submodules --quiet --depth=1 --filter=blob:none origin "$BASE_SHA"; then
+              # ls-tree's exit status is read, never just its output: an
+              # errored listing has empty output too, and must not be taken
+              # for "the base has no predicate" (that would run the PR's copy).
+              _pin_rc=0
+              _pin_ls=$(git -C "$_pin" ls-tree --name-only "$BASE_SHA" scripts/check/release-promotion-admission.shs) || _pin_rc=$?
+              if [ "$_pin_rc" -ne 0 ]; then
+                echo "fast-gates: could not list base $BASE_SHA (ls-tree exit $_pin_rc); nothing is admitted"
+              elif [ "$_pin_ls" = scripts/check/release-promotion-admission.shs ]; then
+                if git -C "$_pin" show "$BASE_SHA:scripts/check/release-promotion-admission.shs" > "$RUNNER_TEMP/release-promotion-admission.base.shs" &&
+                    [ -s "$RUNNER_TEMP/release-promotion-admission.base.shs" ]; then
+                  _promo_script="$RUNNER_TEMP/release-promotion-admission.base.shs"
+                  echo "fast-gates: release-promotion predicate pinned to base $BASE_SHA"
+                else
+                  echo "fast-gates: could not read the base's release-promotion predicate; nothing is admitted"
+                fi
+              elif [ -z "$_pin_ls" ]; then
+                _promo_script=scripts/check/release-promotion-admission.shs
+                echo "fast-gates: NOTE — base $BASE_SHA has no release-promotion predicate (first promotion); using the checked-out copy"
+              else
+                echo "fast-gates: unexpected listing for the base's release-promotion predicate; nothing is admitted"
+              fi
+            else
+              echo "fast-gates: could not fetch base $BASE_SHA to pin the release-promotion predicate; nothing is admitted"
+            fi
+            rm -rf "$_pin"
+            _promo_rc=1
+            : > "$RUNNER_TEMP/release-promotion.out"
+            if [ -n "$_promo_script" ]; then
+              _promo_rc=0
+              sh "$_promo_script" --base-ref "$BASE_REF" \
+                  --base "$BASE_SHA" --head "$HEAD_SHA" --remote origin \
+                  --expect-tree "$(git rev-parse 'HEAD^{tree}')" --scratch-fetch \
+                  > "$RUNNER_TEMP/release-promotion.out" || _promo_rc=$?
+            fi
+            cat "$RUNNER_TEMP/release-promotion.out"
+            if [ "$_promo_rc" -eq 0 ]; then
+              tail -n 1 "$RUNNER_TEMP/release-promotion.out" > "$RUNNER_TEMP/release-promotion-admitted"
+            else
+              echo "fast-gates: not a release promotion (exit $_promo_rc); the normal range gates apply"
+            fi
+          fi
+
+      - name: Provision xxhsum and verify LLVM toolchain
+        shell: sh
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_COMMITS: ${{ github.event.pull_request.commits }}
+        run: |
+          _fetch_pid=""
+          _fetch_rc=0
+          if [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ] && [ ! -s "$RUNNER_TEMP/release-promotion-admitted" ]; then
+            case "$PR_COMMITS" in ''|*[!0-9]*) PR_COMMITS=1 ;; esac
+            (
+              git fetch --no-tags --no-recurse-submodules --quiet --depth="$(( PR_COMMITS + 41 ))" origin "$BASE_SHA" "$HEAD_SHA"
+            ) >"$RUNNER_TEMP/pr-fetch.log" 2>&1 </dev/null &
+            _fetch_pid=$!
+          fi
+          _llvm_dir=""
+          _best_ver=0
+          for _d in /usr/lib/llvm-*/bin; do
+            [ -d "$_d" ] || continue
+            _v=${_d#/usr/lib/llvm-}; _v=${_v%/bin}
+            case "$_v" in ''|*[!0-9]*) continue ;; esac
+            if [ "$_v" -gt "$_best_ver" ] && [ -x "$_d/llvm-nm" ]; then
+              _best_ver=$_v
+              _llvm_dir=$_d
+            fi
+          done
+          if [ -n "$_llvm_dir" ]; then
+            case ":$PATH:" in *":$_llvm_dir:"*) ;; *) PATH="$_llvm_dir:$PATH" ;; esac
+            printf '%s\n' "$_llvm_dir" >> "$GITHUB_PATH"
+            export PATH
+          fi
+          pkgs=""
+          command -v xxhsum >/dev/null 2>&1 || pkgs="$pkgs xxhash"
+          command -v clang >/dev/null 2>&1 || pkgs="$pkgs clang"
+          command -v ld.lld >/dev/null 2>&1 || pkgs="$pkgs lld"
+          sh scripts/check/check-runtime-link-completeness.shs --resolve-only >/dev/null 2>&1 || pkgs="$pkgs llvm"
+          if [ -n "$pkgs" ]; then
+            if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+              ( sudo apt-get update -qq -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- &&
+                sudo apt-get install -y -qq --no-install-recommends $pkgs ) ||
+              ( sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends $pkgs )
+            else
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq --no-install-recommends $pkgs
+            fi
+          fi
+          xxhsum -V
+          sh scripts/check/check-runtime-link-completeness.shs --resolve-only
+          if [ -n "$_fetch_pid" ]; then
+            wait "$_fetch_pid" || _fetch_rc=$?
+            if [ "$_fetch_rc" -ne 0 ]; then
+              cat "$RUNNER_TEMP/pr-fetch.log" 2>/dev/null || true
+              echo "fast-gates: could not fetch the PR endpoints"
+              exit 1
+            fi
+            : > "$RUNNER_TEMP/pr-endpoints-fetched"
+          fi
+
+      - name: Fast push-tier and contract gates on the PR range
         shell: sh
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -73,26 +274,82 @@ jobs:
           PR_COMMITS: ${{ github.event.pull_request.commits }}
         run: |
           # `shell: sh` is `sh -e`; without this a red runner exit aborts the
-          # step before the exit-code check below runs.
+          # step before background subshells are waited and checked below.
           set +e
-          if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
-              echo "fast-gates: not a pull_request event, no PR range; the extended job is the lane for push/main"
-              exit 0
+          _promoted=0
+          [ ! -s "$RUNNER_TEMP/release-promotion-admitted" ] || _promoted=1
+          if [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ] && [ "$_promoted" -eq 0 ]; then
+            case "$PR_COMMITS" in ''|*[!0-9]*) PR_COMMITS=1 ;; esac
+            if [ ! -f "$RUNNER_TEMP/pr-endpoints-fetched" ]; then
+              git fetch --no-tags --no-recurse-submodules --quiet --depth="$(( PR_COMMITS + 41 ))" origin "$BASE_SHA" "$HEAD_SHA" ||
+                  { echo "fast-gates: could not fetch the PR endpoints"; exit 1; }
+            fi
+            # A PR that merges another line makes the depth-bounded clone
+            # over-count BASE..HEAD (5,094 vs 61 on #12180); every range gate
+            # below would scan the excess. No fetch when the count is exact.
+            sh scripts/check/pr-range-exact-fetch.shs --selftest ||
+                { echo "fast-gates: pr-range-exact-fetch selftest failed"; exit 1; }
+            sh scripts/check/pr-range-exact-fetch.shs "$BASE_SHA" "$HEAD_SHA" "$PR_COMMITS" ||
+                { echo "fast-gates: could not make the PR range exact"; exit 1; }
+            if [ ! -s scripts/check/private_import_baseline.txt ]; then
+              echo "fast-gates: private-import baseline is missing or empty"
+              exit 1
+            fi
           fi
-          case "$PR_COMMITS" in ''|*[!0-9]*) PR_COMMITS=1 ;; esac
-          # PR_COMMITS + 1 is enough for every diff-scoped gate, but
-          # check-no-stale-snapshot-rewind consults up to --window (default 40)
-          # first-parent ancestors of each commit's parent as contributors. With
-          # only one ancestor beyond the range it would still exit 0 while
-          # examining a near-empty contributor window — a silent weakening, not a
-          # FAIL, which is exactly the fail-open shape this workflow avoids
-          # elsewhere. 41 extra commits keeps the window real.
-          # --no-recurse-submodules: the range routinely spans a .spipe/spipe (or
-          # other) gitlink bump, and on-demand recursion then tries to fetch a
-          # submodule this sparse job never initialised -> "Could not access
-          # submodule" and a spurious RED on every PR (2026-09-26, PR #1619/#1621).
-          git fetch --no-tags --no-recurse-submodules --quiet --depth="$(( PR_COMMITS + 41 ))" origin "$BASE_SHA" "$HEAD_SHA" ||
-              { echo "fast-gates: could not fetch the PR endpoints"; exit 1; }
+
+          _bg_fail=0
+          _unified_pid=""
+
+          (
+            sh scripts/check/check-llvm-nm-resolve-selftest.shs
+          ) >"$RUNNER_TEMP/fg-llvm-nm.log" 2>&1 </dev/null &
+          _pid_llvm_nm=$!
+
+          (
+            sh scripts/check/check-pure-provider-runtime-capsule.shs --selftest
+          ) >"$RUNNER_TEMP/fg-capsule.log" 2>&1 </dev/null &
+          _pid_capsule=$!
+
+          (
+            sh scripts/check/check-bootstrap-sandbox-copy-closure.shs
+          ) >"$RUNNER_TEMP/fg-copy-closure.log" 2>&1 </dev/null &
+          _pid_copy_closure=$!
+
+          (
+            sh scripts/check/check-land-target-range.shs
+          ) >"$RUNNER_TEMP/fg-land-range.log" 2>&1 </dev/null &
+          _pid_land_range=$!
+
+          _run_unified=0
+          if [ "$_promoted" -eq 1 ]; then
+            # The PR endpoints are not fetched for an admitted promotion, and
+            # the bootstrap paths it carries were swept on the release line.
+            _run_unified=2
+          elif [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
+            _run_unified=1
+          elif git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -Eq '^(scripts/bootstrap/|scripts/check/check-bootstrap-unified-scripts-contract\.shs$|scripts/check/fast-verify-bootstrap-scripts\.shs$)'; then
+            _run_unified=1
+          fi
+          if [ "$_run_unified" -eq 1 ]; then
+            if [ -n "$BASE_SHA" ] && git show "$BASE_SHA:config/check/must_check_gates.sdn" 2>/dev/null | grep -q 'local-bootstrap-unified-scripts-contract'; then
+              (
+                sh scripts/check/check-bootstrap-unified-scripts-contract.shs --selftest
+              ) >"$RUNNER_TEMP/fg-unified.log" 2>&1 </dev/null &
+              _unified_pid=$!
+            else
+              (
+                set -e
+                sh scripts/check/check-bootstrap-unified-scripts-contract.shs --selftest
+                sh scripts/check/check-bootstrap-unified-scripts-contract.shs --require-unit-suites
+              ) >"$RUNNER_TEMP/fg-unified.log" 2>&1 </dev/null &
+              _unified_pid=$!
+            fi
+          elif [ "$_run_unified" -eq 2 ]; then
+            echo "fast-gates: release promotion; the unified-contract sweep ran on the release line and is not repeated"
+          else
+            echo "fast-gates: no bootstrap unified-contract paths changed in range; skipping standalone duplicate unified-contract sweep"
+          fi
+
           # One runner, one manifest, for both local and remote (goal item 5,
           # WP3): this used to be 9 hardcoded `run_gate` lines that had
           # drifted from the pre-push `local` tier (rust-dup --rev vs --range,
@@ -142,8 +399,79 @@ jobs:
           # endpoints from THIS event, never from the manifest file, so a row
           # runs against the real PR content even though its COMMAND TEXT
           # came from BASE.
-          sh scripts/check/run-gate-tier.shs --tier local \
-              --range "$BASE_SHA..$HEAD_SHA" --ref "$HEAD_SHA" --base "$BASE_SHA" \
-              --manifest-rev "$BASE_SHA" --jobs 16 --budget 240
-          rc=$?
-          [ "$rc" -eq 0 ] || { echo "fast-gates: one or more fast gates failed or errored (exit $rc)"; exit 1; }
+          #
+          # Release promotion: the range-bound rows are not run (see the
+          # admission step). The promoted TREE is still checked here, on the
+          # checked-out merge ref whose tree the admission bound with
+          # --expect-tree: no conflict tree; the tree-size guard's absolute
+          # band, duplicate-entry, src/ band and path-floor checks; every
+          # sealed *.sdn against its seal; and no conflict markers in any
+          # file that differs from the base (the base's trees are fetched
+          # blob-less at depth 1 for that diff).
+          _tier_rc=0
+          if [ "$_promoted" -eq 1 ]; then
+            sh scripts/check/check-no-conflict-tree-push.shs --rev-list-args-or-tips HEAD -- HEAD --not HEAD || _tier_rc=1
+            sh scripts/check/check-tree-size-push.shs --push-tip "HEAD..HEAD" || _tier_rc=1
+            if git fetch --no-tags --no-recurse-submodules --quiet --depth=1 --filter=blob:none origin "$BASE_SHA"; then
+              # This clone is blob-less (sparse checkout): fetch the blobs
+              # the two content checks read in ONE batch (28,342 blobs / 23 s
+              # measured) instead of one lazy fetch per file.
+              _pf="$RUNNER_TEMP/release-promotion-prefetch"
+              rm -rf "$_pf"; mkdir -p "$_pf"
+              {
+                git diff --raw --no-abbrev --no-renames "$BASE_SHA" HEAD | awk '$2 != "160000" && $4 !~ /^0+$/ { print $4 }'
+                git ls-tree -r HEAD | awk '$2 == "blob" && $0 ~ /\.(sdn|csm)$/ { print $3 }'
+              } | sort -u > "$_pf/want"
+              git cat-file --batch-all-objects --unordered --batch-check='%(objectname)' | sort -u > "$_pf/have"
+              comm -23 "$_pf/want" "$_pf/have" > "$_pf/missing"
+              if [ -s "$_pf/missing" ]; then
+                git -c fetch.negotiationAlgorithm=noop fetch origin --no-tags --no-write-fetch-head \
+                    --recurse-submodules=no --filter=blob:none --quiet --stdin < "$_pf/missing" ||
+                    echo "fast-gates: NOTE — batched blob prefetch failed; the checks below fall back to per-blob fetches"
+              fi
+              echo "fast-gates: release promotion: $(wc -l < "$_pf/want" | tr -d ' ') blob(s) needed by the seal and conflict-marker checks, $(wc -l < "$_pf/missing" | tr -d ' ') fetched in one batch"
+              sh scripts/check/check-sdn-crc32-sealed.shs --rev HEAD || _tier_rc=1
+              sh scripts/check/check-no-conflict-markers-push.shs "$BASE_SHA..HEAD" || _tier_rc=1
+            else
+              echo "fast-gates: could not fetch base $BASE_SHA for the seal and conflict-marker checks"
+              _tier_rc=1
+            fi
+            if [ "$_tier_rc" -eq 0 ]; then
+              echo "fast-gates: $(cat "$RUNNER_TEMP/release-promotion-admitted")"
+              echo "fast-gates: PASS — release promotion: range gates not run; conflict-tree, tree-size, SDN seal and conflict-marker checks of the promoted tree passed"
+            fi
+          elif [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
+            PRIVATE_IMPORT_BASE="$BASE_SHA" sh scripts/check/run-gate-tier.shs --tier local \
+                --range "$BASE_SHA..$HEAD_SHA" --ref "$HEAD_SHA" --base "$BASE_SHA" \
+                --manifest-rev "$BASE_SHA" --jobs 8 --budget 240
+            _tier_rc=$?
+          else
+            echo "fast-gates: not a pull_request event, no PR range; the extended job is the lane for push/main"
+          fi
+
+          wait_bg() {
+            _wb_pid=$1; _wb_name=$2; _wb_log=$3
+            [ -n "$_wb_pid" ] || return 0
+            wait "$_wb_pid"
+            _wb_rc=$?
+            echo "=== $_wb_name (exit $_wb_rc) ==="
+            cat "$_wb_log" 2>/dev/null || true
+            if [ "$_wb_rc" -ne 0 ]; then
+              _bg_fail=1
+            fi
+          }
+
+          wait_bg "$_pid_llvm_nm" "LLVM nm resolver self-test" "$RUNNER_TEMP/fg-llvm-nm.log"
+          wait_bg "$_pid_capsule" "Pure provider runtime capsule admission contract controls" "$RUNNER_TEMP/fg-capsule.log"
+          wait_bg "$_pid_copy_closure" "Bootstrap sandbox copy-list closure gate" "$RUNNER_TEMP/fg-copy-closure.log"
+          wait_bg "$_pid_land_range" "Landing target range regression" "$RUNNER_TEMP/fg-land-range.log"
+          wait_bg "$_unified_pid" "Unified bootstrap build-scripts contract gate" "$RUNNER_TEMP/fg-unified.log"
+
+          if [ "$_tier_rc" -ne 0 ]; then
+            echo "fast-gates: one or more fast gates failed or errored (exit $_tier_rc)"
+            exit 1
+          fi
+          if [ "$_bg_fail" -ne 0 ]; then
+            echo "fast-gates: one or more background contract gates failed"
+            exit 1
+          fi

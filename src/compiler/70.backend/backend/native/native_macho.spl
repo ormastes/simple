@@ -11,9 +11,10 @@ use compiler.backend.native.regalloc.{regalloc_module}
 use compiler.backend.native.encode_x86_64.{encode_module}
 use compiler.backend.native.encode_aarch64.{encode_module_aarch64}
 use compiler.backend.native.layout_solver.{solve_layout, LayoutPlan}
-use compiler.backend.native.macho_writer.{MachOWriter, MachOSection, MachOReloc, MachOSymbol, macho_writer_aarch64, macho_writer_x86_64, macho_add_section, macho_add_symbol, new_macho_text_section, new_macho_const_section, new_macho_data_section, macho_section_add_reloc, new_macho_func_symbol, new_macho_extern_symbol, new_macho_local_symbol, macho_symbol_name, map_elf_reloc_to_macho_arm64, map_elf_reloc_to_macho_x86_64, write_macho64}
-use compiler.backend.native.native_layout.{reorder_by_layout}
+use compiler.backend.native.macho_writer.{MachOWriter, MachOSection, MachOReloc, MachOSymbol, macho_writer_aarch64, macho_writer_x86_64, macho_add_section, macho_add_symbol, new_macho_text_section, new_macho_const_section, new_macho_data_section, macho_section_add_reloc, new_macho_func_symbol, new_macho_weak_func_symbol, new_macho_extern_symbol, new_macho_local_symbol, macho_symbol_name, map_elf_reloc_to_macho_arm64, map_elf_reloc_to_macho_x86_64, write_macho64}
+use compiler.backend.native.native_layout.{reorder_by_layout, native_comdat_function_names}
 use compiler.backend.native.native_section_bytes.{collect_section_bytes}
+use compiler.backend.native.xray_sled_emit.{xray_reject_unsupported_native}
 
 # ============================================================================
 # Mach-O Compilation Entry Points
@@ -31,6 +32,7 @@ fn reject_macho_recoverable_unwind(module: MirModule):
                 case _: ()
 
 fn compile_native_macho_aarch64(module: MirModule) -> [i64]:
+    xray_reject_unsupported_native(module, "aarch64 Mach-O")
     reject_macho_recoverable_unwind(module)
     # Reuse existing AArch64 pipeline: ISel -> RegAlloc -> Encode
     val mach_module = isel_module_aarch64(module)
@@ -40,6 +42,7 @@ fn compile_native_macho_aarch64(module: MirModule) -> [i64]:
     emit_macho_aarch64(encoded_funcs, allocated, module)
 
 fn compile_native_macho_x86_64(module: MirModule) -> [i64]:
+    xray_reject_unsupported_native(module, "x86_64 Mach-O")
     reject_macho_recoverable_unwind(module)
     if module.statics.len() > 0:
         panic("x86_64 Mach-O native backend does not yet support MIR module statics; use the ELF target")
@@ -62,7 +65,7 @@ fn emit_macho_aarch64(
     var writer = macho_writer_aarch64()
 
     # Layout: reorder functions
-    val layout_plan = solve_layout(mir_module, nil)
+    val layout_plan = solve_layout(mir_module, None)
     val ordered_funcs = reorder_by_layout(encoded_funcs, layout_plan)
 
     # Combine all function code into a single __text section
@@ -110,7 +113,10 @@ fn emit_macho_aarch64(
         func_offsets[func.name] = all_code.len()
 
         val code_start = all_code.len()
-        all_code = all_code + func.code
+        var fbi = 0
+        while fbi < func.code.len():
+            all_code.push(func.code[fbi])
+            fbi = fbi + 1
 
         # Convert relocations to Mach-O format
         for reloc in func.relocations:
@@ -173,11 +179,13 @@ fn emit_macho_aarch64(
             writer = macho_add_symbol(writer, new_macho_extern_symbol(ext_sym))
 
     # Add function symbols (defined, global)
+    val comdat_names = native_comdat_function_names(mir_module)
     for func in ordered_funcs:
         var offset = 0
         if func_offsets.contains(func.name):
             offset = func_offsets[func.name]
-        writer = macho_add_symbol(writer, new_macho_func_symbol(func.name, 1, offset))
+        val func_sym = if comdat_names.has(func.name): new_macho_weak_func_symbol(func.name, 1, offset) else: new_macho_func_symbol(func.name, 1, offset)
+        writer = macho_add_symbol(writer, func_sym)
 
     write_macho64(writer)
 
@@ -193,7 +201,7 @@ fn emit_macho_x86_64(
     var writer = macho_writer_x86_64()
 
     # Layout: reorder functions
-    val layout_plan = solve_layout(mir_module, nil)
+    val layout_plan = solve_layout(mir_module, None)
     val ordered_funcs = reorder_by_layout(encoded_funcs, layout_plan)
 
     # Combine all function code into a single __text section
@@ -241,7 +249,10 @@ fn emit_macho_x86_64(
         func_offsets[func.name] = all_code.len()
 
         val code_start = all_code.len()
-        all_code = all_code + func.code
+        var fbi = 0
+        while fbi < func.code.len():
+            all_code.push(func.code[fbi])
+            fbi = fbi + 1
 
         # Convert relocations to Mach-O format
         for reloc in func.relocations:
@@ -304,11 +315,13 @@ fn emit_macho_x86_64(
             writer = macho_add_symbol(writer, new_macho_extern_symbol(ext_sym))
 
     # Add function symbols (defined, global)
+    val comdat_names = native_comdat_function_names(mir_module)
     for func in ordered_funcs:
         var offset = 0
         if func_offsets.contains(func.name):
             offset = func_offsets[func.name]
-        writer = macho_add_symbol(writer, new_macho_func_symbol(func.name, 1, offset))
+        val func_sym = if comdat_names.has(func.name): new_macho_weak_func_symbol(func.name, 1, offset) else: new_macho_func_symbol(func.name, 1, offset)
+        writer = macho_add_symbol(writer, func_sym)
 
     write_macho64(writer)
 

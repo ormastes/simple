@@ -1,0 +1,204 @@
+# @gc — module uses GC runtime
+#
+# istft — WavTokenizer spectrogram frames -> waveform, pure Simple.
+#
+# Port of `embd_to_audio` (and its fill_hann_window / irfft / fold helpers)
+# from llama.cpp `tools/tts/tts.cpp` at commit 67b2b7f2f2d, the last revision
+# before that tool was rewritten onto mtmd (07132750825). Same pipeline:
+#   row l of the vocoder output = [log|X| (n_embd/2) | phase (n_embd/2)]
+#   X = min(exp(log|X|), 100) * e^(i*phase)
+#   frame = irfft(X) * hann            (periodic Hann, length n_fft)
+#   audio = overlap-add(frames) / overlap-add(hann^2), centre pad cropped
+# which is torch.istft(center=True), the transform WavTokenizer was trained
+# against.
+#
+# One deliberate difference: tts.cpp's "very poor-man" irfft sums only the
+# n/2+1 stored bins and divides by n/2+1, which double-weights the DC and
+# Nyquist bins. This port uses the exact Hermitian inverse (the missing bins
+# are the conjugates of the stored ones, scaled by 1/n) through a mixed-radix
+# FFT, so it is both correct and O(n log n) instead of O(n^2).
+
+use std.common.math.math.{math_sin, math_cos, math_exp, MATH_PI}
+
+# A complex vector as two parallel component arrays.
+struct Spectrum:
+    re: [f64]
+    im: [f64]
+
+# Short-time transform geometry. The window length equals n_fft.
+struct IstftParams:
+    n_fft: i64
+    hop: i64
+
+# WavTokenizer-Large-75 at 24 kHz: n_fft 1280, hop 320 (75 frames per second).
+fn wavtokenizer_istft_params() -> IstftParams:
+    IstftParams(n_fft: 1280, hop: 320)
+
+# 0.5 * (1 - cos(2*pi*i / (length + offset))), offset 0 when periodic, else -1.
+fn hann_window(length: i64, periodic: bool) -> [f64]:
+    val denom = if periodic: length else: length - 1
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < length:
+        out.push(0.5 * (1.0 - math_cos(2.0 * MATH_PI * (i as f64) / (denom as f64))))
+        i = i + 1
+    out
+
+fn _smallest_factor(n: i64) -> i64:
+    if n % 2 == 0:
+        return 2
+    var p: i64 = 3
+    while p * p <= n:
+        if n % p == 0:
+            return p
+        p = p + 2
+    n
+
+# e^(+2*pi*i*e/n) for e in [0, n): the inverse-transform twiddles of size n.
+fn _twiddles(n: i64) -> Spectrum:
+    var re: [f64] = []
+    var im: [f64] = []
+    var e: i64 = 0
+    while e < n:
+        val a = 2.0 * MATH_PI * (e as f64) / (n as f64)
+        re.push(math_cos(a))
+        im.push(math_sin(a))
+        e = e + 1
+    Spectrum(re: re, im: im)
+
+# Unnormalised inverse DFT, y[k] = sum_j x[j] e^(+2*pi*i*jk/n), by recursive
+# mixed-radix decimation in time. `tw` holds the twiddles of size n_full,
+# and n divides n_full.
+fn _inverse_dft(x: Spectrum, tw: Spectrum, n_full: i64) -> Spectrum:
+    val n = x.re.len()
+    if n == 1:
+        return x
+    val p = _smallest_factor(n)
+    val m = n / p
+    val step = n_full / n
+    var subs: [Spectrum] = []
+    var r: i64 = 0
+    while r < p:
+        var sr: [f64] = []
+        var si: [f64] = []
+        var j: i64 = 0
+        while j < m:
+            sr.push(x.re[j * p + r])
+            si.push(x.im[j * p + r])
+            j = j + 1
+        subs.push(_inverse_dft(Spectrum(re: sr, im: si), tw, n_full))
+        r = r + 1
+    var out_re: [f64] = []
+    var out_im: [f64] = []
+    var idx: i64 = 0
+    while idx < n:
+        val k = idx % m
+        var acc_re = 0.0
+        var acc_im = 0.0
+        var q: i64 = 0
+        while q < p:
+            val s = subs[q]
+            val t = ((q * idx) % n) * step
+            val wr = tw.re[t]
+            val wi = tw.im[t]
+            val a = s.re[k]
+            val b = s.im[k]
+            acc_re = acc_re + a * wr - b * wi
+            acc_im = acc_im + a * wi + b * wr
+            q = q + 1
+        out_re.push(acc_re)
+        out_im.push(acc_im)
+        idx = idx + 1
+    Spectrum(re: out_re, im: out_im)
+
+fn _irfft_with(half: Spectrum, n: i64, tw: Spectrum) -> [f64]:
+    val bins = half.re.len()
+    var re: [f64] = []
+    var im: [f64] = []
+    var m: i64 = 0
+    while m < n:
+        if m < bins:
+            re.push(half.re[m])
+            # DC and (for even n) Nyquist are real in a real signal's spectrum.
+            if m == 0 or m * 2 == n:
+                im.push(0.0)
+            else:
+                im.push(half.im[m])
+        else:
+            re.push(half.re[n - m])
+            im.push(0.0 - half.im[n - m])
+        m = m + 1
+    val y = _inverse_dft(Spectrum(re: re, im: im), tw, n)
+    var out: [f64] = []
+    val scale = 1.0 / (n as f64)
+    for v in y.re:
+        out.push(v * scale)
+    out
+
+# Real inverse FFT of length n from its n/2+1 non-negative-frequency bins.
+fn irfft(half: Spectrum, n: i64) -> Result<[f64], text>:
+    if n <= 0 or half.re.len() != n / 2 + 1 or half.im.len() != half.re.len():
+        return Err("irfft: need n/2+1 = " + (n / 2 + 1).to_text() + " bins for n = " + n.to_text() + ", got " + half.re.len().to_text())
+    Ok(_irfft_with(half, n, _twiddles(n)))
+
+fn _zeros(n: i64) -> [f64]:
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < n:
+        out.push(0.0)
+        i = i + 1
+    out
+
+# Vocoder output (n_codes rows of n_embd values, row-major) -> mono samples,
+# n_codes * hop of them. n_embd must be 2 * (n_fft/2 + 1).
+fn embd_to_audio(embd: [f64], n_codes: i64, n_embd: i64, p: IstftParams) -> Result<[f64], text>:
+    val bins = p.n_fft / 2 + 1
+    if n_embd != 2 * bins:
+        return Err("istft: n_embd " + n_embd.to_text() + " does not match n_fft " + p.n_fft.to_text() + " (want " + (2 * bins).to_text() + ")")
+    if n_codes <= 0 or embd.len() != n_codes * n_embd:
+        return Err("istft: expected " + n_codes.to_text() + " x " + n_embd.to_text() + " values, got " + embd.len().to_text())
+    if p.hop <= 0 or p.hop > p.n_fft:
+        return Err("istft: hop " + p.hop.to_text() + " is outside (0, n_fft]")
+    val n_fft = p.n_fft
+    val hop = p.hop
+    val n_out = (n_codes - 1) * hop + n_fft
+    val pad = (n_fft - hop) / 2
+    val hann = hann_window(n_fft, true)
+    val tw = _twiddles(n_fft)
+    var audio = _zeros(n_out)
+    var env = _zeros(n_out)
+    var l: i64 = 0
+    while l < n_codes:
+        val row = l * n_embd
+        var re: [f64] = []
+        var im: [f64] = []
+        var k: i64 = 0
+        while k < bins:
+            var mag = math_exp(embd[row + k])
+            if mag > 100.0:
+                mag = 100.0
+            val phi = embd[row + bins + k]
+            re.push(mag * math_cos(phi))
+            im.push(mag * math_sin(phi))
+            k = k + 1
+        val frame = _irfft_with(Spectrum(re: re, im: im), n_fft, tw)
+        var j: i64 = 0
+        while j < n_fft:
+            val w = hann[j]
+            audio[l * hop + j] = audio[l * hop + j] + frame[j] * w
+            env[l * hop + j] = env[l * hop + j] + w * w
+            j = j + 1
+        l = l + 1
+    var out: [f64] = []
+    var i = pad
+    while i < n_out - pad:
+        # tts.cpp divides unconditionally; a zero envelope (only possible at a
+        # window edge) would give NaN, so it yields silence here instead.
+        if env[i] > 1e-11:
+            out.push(audio[i] / env[i])
+        else:
+            out.push(0.0)
+        i = i + 1
+    Ok(out)
+
+export Spectrum, IstftParams, wavtokenizer_istft_params, hann_window, irfft, embd_to_audio

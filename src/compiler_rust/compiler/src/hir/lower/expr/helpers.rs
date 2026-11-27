@@ -159,7 +159,7 @@ impl Lowerer {
     /// hir/lower/stmt_lowering.rs), so `UnboxInt` is the exact inverse either
     /// way. `u64` (HeapUInt), `f64`/`f32` (raw enum payload bits vs BoxFloat)
     /// and `bool` (`rt_value_bool`) each have asymmetric representations and
-    /// stay on the old path.
+    /// are not accepted by this BoxInt-specific helper.
     pub(in crate::hir::lower) fn optional_boxint_scalar_inner(&self, ty: TypeId) -> Option<TypeId> {
         match self.module.types.get(ty) {
             Some(HirType::Pointer {
@@ -174,6 +174,225 @@ impl Lowerer {
                 Some(*inner)
             }
             _ => None,
+        }
+    }
+
+    /// Inner scalar of a tagged optional scalar slot (`bool?`, `i64?`, ...:
+    /// `Pointer<T>` holding a tagged word), including `bool` which
+    /// `optional_boxint_scalar_inner` leaves out.
+    pub(in crate::hir::lower) fn optional_tagged_scalar_inner(&self, ty: TypeId) -> Option<TypeId> {
+        match self.module.types.get(ty) {
+            Some(HirType::Pointer {
+                kind: PointerKind::Shared,
+                inner,
+                ..
+            }) if *inner == TypeId::BOOL => Some(*inner),
+            _ => self.optional_boxint_scalar_inner(ty),
+        }
+    }
+
+    /// Lower an expression that is about to be tested for ABSENCE (`??`,
+    /// `if val`, `match Some(..)`), keeping genuinely-optional array accessors
+    /// in their tagged `T?` form.
+    ///
+    /// `[i64].first()/last()/get(i)/min()/max()/pop()/remove(i)` are typed as the
+    /// bare element `T` and MIR unboxes the runtime's tagged result. The
+    /// unboxed word then reached the runtime nil test, which treats the raw
+    /// words 0/3 as nil: a PRESENT element 3 read as absent under the JIT.
+    /// Here the accessor is lowered to the runtime call itself, typed
+    /// `Pointer<T>` (what a `T?` slot holds), so presence is the runtime's tag
+    /// (NIL vs boxed int), never a value comparison.
+    /// Bug: doc/08_tracking/bug/coalesce_optional_accessor_sentinel_value_eaten_jit_2026-08-17.md
+    pub(in crate::hir::lower) fn lower_optional_subject(
+        &mut self,
+        expr: &ast::Expr,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        let lowered = self.lower_expr(expr, ctx)?;
+        Ok(self.optionalize_array_accessor(lowered, ctx))
+    }
+
+    /// Like `lower_optional_subject`, but only when some pattern actually tests
+    /// optionality (`Some(..)`, `None`, `nil`, or - for `if val`/`while val` -
+    /// a payload binding). A literal-pattern `match xs.first(): case 3:` or any
+    /// other non-optional pattern keeps the plain `T` subject.
+    pub(in crate::hir::lower) fn lower_subject_for_patterns<'p>(
+        &mut self,
+        expr: &ast::Expr,
+        patterns: impl IntoIterator<Item = &'p ast::Pattern>,
+        binding_is_payload: bool,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        if patterns
+            .into_iter()
+            .any(|p| Self::pattern_tests_optional(p, binding_is_payload))
+        {
+            self.lower_optional_subject(expr, ctx)
+        } else {
+            self.lower_expr(expr, ctx)
+        }
+    }
+
+    fn pattern_tests_optional(pattern: &ast::Pattern, binding_is_payload: bool) -> bool {
+        match pattern {
+            ast::Pattern::Enum { variant, .. } => variant == "Some" || variant == "None",
+            ast::Pattern::Identifier(name) => name == "None" || binding_is_payload,
+            ast::Pattern::MutIdentifier(_) | ast::Pattern::MoveIdentifier(_) => binding_is_payload,
+            ast::Pattern::Literal(e) => matches!(**e, ast::Expr::Nil),
+            ast::Pattern::Or(ps) => ps.iter().any(|p| Self::pattern_tests_optional(p, binding_is_payload)),
+            ast::Pattern::Typed { pattern, .. } => Self::pattern_tests_optional(pattern, binding_is_payload),
+            _ => false,
+        }
+    }
+
+    pub(in crate::hir::lower) fn optionalize_array_accessor(
+        &mut self,
+        lowered: HirExpr,
+        ctx: &mut FunctionContext,
+    ) -> HirExpr {
+        // `d[k]` on a Dict with a scalar value type is typed as the bare `V`,
+        // so MIR unboxed `rt_index_get`'s result and `??` took the
+        // statically-non-nullable identity path: a miss leaked the nil
+        // sentinel as the integer 3 (`d[k] ?? -1` == 3) while `d.get(k) ?? -1`
+        // was correct. Retype the index to `V?`: MIR then keeps the tagged
+        // word (no unbox for a Pointer type), presence is the runtime tag
+        // (`rt_is_some`), and the payload is decoded by `rt_unwrap_or_self`.
+        // Bug: doc/08_tracking/bug/seed_dict_int_index_nil_coalesce_2026-10-31.md
+        if let HirExprKind::Index { receiver, .. } = &lowered.kind {
+            let value = match self.module.types.get(receiver.ty) {
+                Some(HirType::Dict { value, .. }) => *value,
+                _ => return lowered,
+            };
+            if lowered.ty != value
+                || !matches!(
+                    value,
+                    TypeId::I8
+                        | TypeId::I16
+                        | TypeId::I32
+                        | TypeId::I64
+                        | TypeId::U8
+                        | TypeId::U16
+                        | TypeId::U32
+                        | TypeId::U64
+                        | TypeId::BOOL
+                        | TypeId::F32
+                        | TypeId::F64
+                )
+            {
+                return lowered;
+            }
+            let optional_ty = self.module.types.register(HirType::Pointer {
+                kind: PointerKind::Shared,
+                capability: ast::ReferenceCapability::Shared,
+                inner: value,
+            });
+            return HirExpr {
+                kind: lowered.kind,
+                ty: optional_ty,
+            };
+        }
+        let HirExprKind::MethodCall {
+            receiver,
+            method,
+            args,
+            ..
+        } = &lowered.kind
+        else {
+            return lowered;
+        };
+        let element = match self.module.types.get(receiver.ty) {
+            Some(HirType::Array { element, .. }) => *element,
+            _ => return lowered,
+        };
+        if !matches!(
+            element,
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+        ) || lowered.ty != element
+        {
+            return lowered;
+        }
+        let (rt_name, arity) = match method.as_str() {
+            "first" => ("rt_array_first", 0),
+            "last" => ("rt_array_last", 0),
+            "pop" => ("rt_array_pop", 0),
+            "min" => ("rt_array_min", 0),
+            "max" => ("rt_array_max", 0),
+            "get" => ("rt_array_get", 1),
+            "remove" => ("rt_array_remove", 1),
+            _ => return lowered,
+        };
+        if args.len() != arity || (arity == 1 && args[0].ty != TypeId::I64) {
+            return lowered;
+        }
+        let mut call_args = vec![(**receiver).clone()];
+        call_args.extend(args.iter().cloned());
+        let optional_ty = self.module.types.register(HirType::Pointer {
+            kind: PointerKind::Shared,
+            capability: ast::ReferenceCapability::Shared,
+            inner: element,
+        });
+        let tagged_call = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: rt_name.to_string(),
+                args: call_args,
+            },
+            ty: optional_ty,
+        };
+        if element != TypeId::U64 {
+            return tagged_call;
+        }
+
+        // Packed u64 accessors may produce a signed integer box. Keep that word
+        // for the absence test, but normalize a present payload to HeapUInt.
+        // The temp is essential: pop/remove must not run once for each use.
+        let subject_idx = ctx.add_local(
+            "$optional_u64_accessor".to_string(),
+            optional_ty,
+            ast::Mutability::Immutable,
+        );
+        let subject = || HirExpr {
+            kind: HirExprKind::Local(subject_idx),
+            ty: optional_ty,
+        };
+        let condition = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_is_some".to_string(),
+                args: vec![subject()],
+            },
+            ty: TypeId::BOOL,
+        };
+        let raw_payload = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_value_as_u64".to_string(),
+                args: vec![subject()],
+            },
+            ty: TypeId::U64,
+        };
+        let present = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_value_u64".to_string(),
+                args: vec![raw_payload],
+            },
+            ty: optional_ty,
+        };
+        let absent = HirExpr {
+            kind: HirExprKind::Nil,
+            ty: TypeId::NIL,
+        };
+        HirExpr {
+            kind: HirExprKind::LetIn {
+                local_idx: subject_idx,
+                value: Box::new(tagged_call),
+                body: Box::new(HirExpr {
+                    kind: HirExprKind::If {
+                        condition: Box::new(condition),
+                        then_branch: Box::new(present),
+                        else_branch: Some(Box::new(absent)),
+                    },
+                    ty: optional_ty,
+                }),
+            },
+            ty: optional_ty,
         }
     }
 }

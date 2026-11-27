@@ -114,3 +114,29 @@ The production restructure in `src/lib/gc_async_mut/gpu/engine2d/backend_softwar
 was left in place — it is correct code either way, and unwinding it is not this
 lane's call.
 
+
+## Re-verification 2026-11-25 (release/1.0.0 pinned seed, Windows) — PARTIAL: two-hop fixed, self.field still lost
+
+Executed both defect shapes against the release/1.0.0 pinned seed
+(`bin/simple.exe`, Rust seed v1.0.0-rc.1, 38,403,072 bytes) under
+`SIMPLE_EXECUTION_MODE=interpreter`, using a struct `Table { slots: [i64] }`
+and a free fn `register(mut t: Table)` that appends to `t.slots`:
+
+- **Nested free-fn hop (the headline shape): FIXED in this binary.**
+  caller -> `probe(mut t)` -> `register(t)` now persists: caller observes
+  `slots.len() == 1` (was LOST on 2026-08-07). The direct one-hop call also
+  persists, as before.
+- **`self.field` passed to a `mut` free fn: STILL LOST.** A `me` method doing
+  `register(self.table)` leaves the caller's `h.table.slots.len() == 0`.
+  This matches the 2026-08-17 source triage exactly:
+  `merge_shared_collection_fields` propagates Array/Dict/ByteArray *fields*
+  but deliberately keeps nested structs value-typed, and `Table`/`CpuKernelTable`
+  is a struct passed by field — precisely the case that still loses.
+
+Consequence: the production local-table indirection in
+`src/lib/gc_async_mut/gpu/engine2d/backend_software.spl` remains
+load-bearing for the `self.field` shape and must not be removed. The residual
+defect is in the Rust interpreter's argument write-back (out of scope for any
+pure-Simple lane; needs a seed rebuild lane). Status: OPEN, narrowed — the
+nested-hop half is verified fixed in the deployed binary; the `self.field`
+half is verified still broken in the deployed binary.

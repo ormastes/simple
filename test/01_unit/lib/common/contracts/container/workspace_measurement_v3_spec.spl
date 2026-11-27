@@ -1,0 +1,106 @@
+"""
+## Purpose and audience
+Pins milestone_0030 DESIGN 13.1 / 14.1 / 14.11 (G4): the shared V3 workspace measurement encoder in
+`src/lib/common/contracts/container/workspace_measurement_v3.spl`. Written for owners of the remote-build wire.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-18).
+## Compatibility and limitations
+The exit status crosses the wire only as L10's `runtime_exit_status_text_v1` form; decode accepts exactly the
+canonical forms and refuses everything else. `exitCode` (legacy, -1 on V3) is a digest field only.
+## Verification guidance and troubleshooting
+Each refusal names the exact error string; a changed string is a contract change.
+"""
+use std.spec.step
+use std.io.file_read_text
+use std.common.contracts.container.runtime_v1.*
+use std.common.contracts.container.workspace_measurement_v3.*
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+
+fn wm_identity() -> RuntimeIdentityV1:
+    RuntimeIdentityV1(pod_uid: "pod_1", attempt: 1, provider_generation: 3, operation_id: "operation_1",
+        engine: "podman", native_id: "c".repeat(64), node_boot_id: "boot_1")
+
+fn wm_operation(phase: text, exit: RuntimeExitStatusV1) -> RuntimeOperationV1:
+    RuntimeOperationV1(status: "ok", operation: "destroy", command: RuntimeCommandV1(operation: "destroy", program: "", args: []),
+        state: RuntimeStateV1(phase: phase, identity: wm_identity(), exit_code: -1, reason: "", workload_exit: exit),
+        exit_code: 0, stdout: "", stderr: "", reason: "")
+
+fn wm_measurements() -> RemoteContainerMeasurementsV3:
+    RemoteContainerMeasurementsV3(task_digest: "1".repeat(64), input_manifest_digest: "2".repeat(64),
+        request_digest: "3".repeat(64), provider_identity_digest: "4".repeat(64), workspace_binding_digest: "5".repeat(64),
+        runtime: wm_identity(),
+        exit: container_workspace_op_fields_v3("linux-host-remote-build-exit", wm_operation("stopped", RuntimeExitStatusV1.Exited(0))),
+        destroy: container_workspace_op_fields_v3("linux-host-remote-build-destroy", wm_operation("destroyed", RuntimeExitStatusV1.Exited(0))),
+        machine_settle_digest: "6".repeat(64), settled_unix_ms: 1700000000000)
+
+describe "V3 workspace measurements (milestone_0030 13.1, G4)":
+    it "decodes exactly the canonical exit-status forms of runtime_exit_status_text_v1":
+        # @req M0030-MEAS-01
+        for status in [RuntimeExitStatusV1.Unobserved, RuntimeExitStatusV1.NotExited("running"), RuntimeExitStatusV1.Exited(0),
+                RuntimeExitStatusV1.Exited(255), RuntimeExitStatusV1.Unknown("fresh-workspace-exit-inspect-code-type")]:
+            val wire = runtime_exit_status_text_v1(status)
+            expect(runtime_exit_status_text_v1(container_exit_status_decode_v3(wire).unwrap())).to_equal(wire)
+        step("unknown, non-canonical and out-of-range forms are refused")
+        for bad in ["", "exited", "exited:", "exited:007", "exited:+0", "exited:-1", "exited:256", "exited: 0", "Exited:0",
+                "not-exited:", "unknown:", "signalled:9", "unobserved ", "exited:0\n"]:
+            expect(container_exit_status_decode_v3(bad)).to_equal(Err("container-exit-status-form"))
+
+    it "treats only Exited(0) as success":
+        # @req M0030-MEAS-02
+        expect(container_exit_status_succeeded_v3(RuntimeExitStatusV1.Exited(0))).to_equal(true)
+        for status in [RuntimeExitStatusV1.Exited(1), RuntimeExitStatusV1.NotExited("exited"), RuntimeExitStatusV1.Unknown("x"),
+                RuntimeExitStatusV1.Unobserved]:
+            expect(container_exit_status_succeeded_v3(status)).to_equal(false)
+
+    it "digests op fields byte-identically to the V4 agent digest (both exitCode and workloadExit)":
+        # @req M0030-MEAS-03
+        val operation = wm_operation("stopped", RuntimeExitStatusV1.Exited(3))
+        val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-host-agent-exit"), "status": SdnValue.String("ok"),
+            "phase": SdnValue.String("stopped"), "nativeId": SdnValue.String("c".repeat(64)), "exitCode": SdnValue.Int(-1),
+            "workloadExit": SdnValue.String("exited:3")}
+        expect(container_workspace_op_digest_v3(container_workspace_op_fields_v3("linux-host-agent-exit", operation))).to_equal(
+            sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
+
+    it "round-trips measurements canonically and refuses a foreign exit form":
+        # @req M0030-MEAS-04
+        val bytes = remote_container_measurements_encode_v3(wm_measurements()).unwrap()
+        expect(bytes).to_contain("exited:0")
+        val back = remote_container_measurements_decode_v3(bytes).unwrap()
+        expect(remote_container_measurements_encode_v3(back).unwrap()).to_equal(bytes)
+        expect(container_exit_status_succeeded_v3(back.exit.workload_exit)).to_equal(true)
+        step("an unknown exit-status form, an extra key and trailing bytes are refused")
+        expect(remote_container_measurements_decode_v3(bytes.replace("exited:0", "signalled:9"))).to_equal(Err("container-exit-status-form"))
+        expect(remote_container_measurements_decode_v3(bytes.replace("requestDigest:", "extra: \"x\"\n  requestDigest:")).is_err()).to_equal(true)
+        expect(remote_container_measurements_decode_v3(bytes + "\n").is_err()).to_equal(true)
+        step("bad digests, a foreign op kind and a zero settle clock are refused")
+        var digest = wm_measurements()
+        digest.request_digest = "short"
+        expect(remote_container_measurements_encode_v3(digest)).to_equal(Err("remote-container-measurements-invalid"))
+        var kind = wm_measurements()
+        kind.exit.kind = "linux-host-agent-exit"
+        expect(remote_container_measurements_encode_v3(kind)).to_equal(Err("remote-container-measurements-invalid"))
+        var clock = wm_measurements()
+        clock.settled_unix_ms = 0
+        expect(remote_container_measurements_encode_v3(clock)).to_equal(Err("remote-container-measurements-invalid"))
+
+    it "pins the V3 exitCode to -1: it never carries the runtime's state.exit_code":
+        # @req M0030-MEAS-05 (lane B review P3-4)
+        step("an op field carrying a runtime state.exit_code is refused at encode, for exit and destroy")
+        var leaked = wm_measurements()
+        leaked.exit.exit_code = 7
+        expect(remote_container_measurements_encode_v3(leaked)).to_equal(Err("remote-container-measurements-invalid"))
+        var leaked_destroy = wm_measurements()
+        leaked_destroy.destroy.exit_code = 0
+        expect(remote_container_measurements_encode_v3(leaked_destroy)).to_equal(Err("remote-container-measurements-invalid"))
+        step("and at decode, so a peer cannot carry it either")
+        val bytes = remote_container_measurements_encode_v3(wm_measurements()).unwrap()
+        expect(bytes).to_contain("exitCode: -1")
+        expect(remote_container_measurements_decode_v3(bytes.replace("exitCode: -1", "exitCode: 7")).is_err()).to_equal(true)
+        step("the remote-build host pins -1 at both construction sites, whatever state.exit_code the runtime reports")
+        val source = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_v4.spl")
+        expect(source.split("container_workspace_op_fields_v3(\"linux-host-remote-build-").len() - 1).to_equal(2)
+        expect(source.split(".exit_code = -1").len() - 1).to_equal(2)
+        expect(source.contains("state.exit_code")).to_equal(false)

@@ -1,0 +1,70 @@
+# Prevention: the DebugServiceV1 class and the central_debug_service_v1_* free
+# functions are two faces of ONE registry, and the release record shapes that
+# app consumers read (cli_debug, mcp, dap) must survive the class landing.
+# Guards the 2026-11 regression where service_v1.spl shipped without
+# DebugServiceV1 while 5 specs and 3 adapters depended on it.
+
+use std.spec.*
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.contracts_v1.{
+    DebugCapabilityV1, DebugVerificationV1, DebugPerturbationV1, DebugTargetNodeV1,
+    DebugProbeKindV1, DebugRootOperationV1, DebugSessionId, debug_policy_development_v1,
+    debug_policy_observe_only_v1,
+}
+use std.common.debug.service_v1 as service_v1
+use std.common.debug.service_v1.{
+    DebugServiceV1, central_debug_service_v1_open, central_debug_service_v1_add_target,
+    central_debug_service_v1_apply_probe, central_debug_service_v1_authorize,
+    central_debug_service_v1_receipts, central_debug_service_v1_record,
+    central_debug_service_v1_record_denied, central_debug_service_v1_close,
+    central_debug_service_v1_session_count,
+}
+
+fn open_one() -> DebugSessionId:
+    val session = central_debug_service_v1_open("sha256:prevention", debug_policy_development_v1()).unwrap()
+    central_debug_service_v1_add_target(
+        session,
+        DebugTargetNodeV1("t0", "", "process", "target zero"),
+        DebugCapabilityV1("t0", CapLevel.Native, DebugVerificationV1.LiveVerified, DebugPerturbationV1.Cooperative, "reachable"),
+    ).unwrap()
+    session
+
+describe "debug service v1 restore prevention":
+    it "keeps policy factories importable from contracts_v1 and service_v1 with the same identity":
+        expect(debug_policy_development_v1().name).to_equal("development")
+        expect(debug_policy_observe_only_v1().name).to_equal("observe-only")
+        expect(service_v1.debug_policy_development_v1().name).to_equal("development")
+        expect(service_v1.debug_policy_observe_only_v1().allow_probe).to_equal(false)
+
+    it "keeps receipt and probe record shapes read by app consumers":
+        val session = open_one()
+        val probe = central_debug_service_v1_apply_probe(session, DebugProbeKindV1.Stop, "t0", "a.spl:1", DebugPerturbationV1.Stopping, 0).unwrap()
+        expect(probe.session_id).to_equal(session.value)
+        expect(probe.probe_id).to_start_with("probe-" + session.value + "-")
+        val outcome = central_debug_service_v1_record(session, DebugRootOperationV1.Control, DebugPerturbationV1.Cooperative, "x.run", false, false, "boom")
+        expect(outcome.succeeded).to_equal(false)
+        expect(outcome.allowed).to_equal(true)
+        expect(outcome.captured_at_ns).to_equal(-1)
+        expect(outcome.receipt_id).to_start_with("receipt-" + session.value + "-")
+        val denied = central_debug_service_v1_record_denied(session, DebugRootOperationV1.Control, DebugPerturbationV1.Cooperative, "x.attach", "no")
+        expect(denied.allowed).to_equal(false)
+        expect(denied.succeeded).to_equal(false)
+        central_debug_service_v1_close(session).unwrap()
+
+    it "shares one registry between the class owner and the free functions":
+        val before = central_debug_service_v1_session_count()
+        val session = open_one()
+        expect(central_debug_service_v1_session_count()).to_equal(before + 1)
+        val receipt = central_debug_service_v1_authorize(session, DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, "inspect.shared")
+        expect(receipt.allowed).to_equal(true)
+        expect(central_debug_service_v1_receipts(session).filter(\r: r.action == "inspect.shared").len()).to_equal(1)
+        central_debug_service_v1_close(session).unwrap()
+        expect(central_debug_service_v1_session_count()).to_equal(before)
+
+    it "keeps class instances isolated from the central registry":
+        var service = DebugServiceV1.create()
+        val before = central_debug_service_v1_session_count()
+        val session = service.open_session("sha256:private", debug_policy_development_v1()).unwrap()
+        expect(service.session_count()).to_equal(1)
+        expect(central_debug_service_v1_session_count()).to_equal(before)
+        expect(session.value).to_start_with("debug-")

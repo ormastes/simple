@@ -1,0 +1,312 @@
+# @req REQ-001, REQ-013
+# @cover src/compiler/00.common/data/data_schema_resolver_v2.spl 80%
+# @cover src/compiler/00.common/data/data_schema_sdn_v2.spl 80%
+"""
+Shared SPL and SDN data schema resolver V2: explicit views and logical property
+contracts over the frozen V1 name/type resolver. These are structural assertions,
+not evidence of generated accessors, compiler binding, effect purity or storage.
+Execute with an admitted self-hosted runtime; no Rust-seed qualification.
+"""
+use std.spec.*
+use compiler.common.data.data_schema_contracts.*
+use compiler.common.data.data_schema_contracts_v2.*
+use compiler.common.data.data_schema_resolver.{data_schema_resolve_v1}
+use compiler.common.data.data_schema_resolver_v2.*
+use compiler.common.data.data_schema_sdn_v2.*
+
+fn v2_at(line: i64 = 1) -> DataDeclProvenanceV1:
+    data_decl_provenance_v1(DataDeclOriginV1.Spl, "nodes.spl", line, "compiler.ast")
+
+fn v2_views(names: [text]) -> [DataViewDeclV2]:
+    var views: [DataViewDeclV2] = []
+    for name in names:
+        views.push(DataViewDeclV2(tree: "compiler.ast", name: name, provenance: v2_at()))
+    views
+
+fn v2_stored(writable: bool = false) -> DataPropertyContractV2:
+    DataPropertyContractV2(kind: DataPropertyKindV2.Stored, visibility: DataVisibilityV2.Public,
+        visibility_owner: "", writable: writable, mutation_owner: if writable: "compiler.ast" else: "",
+        getter: "", setter: "", forward_attr: "", phase: "core",
+        read_effects: [], write_effects: [], dependencies: [])
+
+fn v2_computed(deps: [text]) -> DataPropertyContractV2:
+    var property = v2_stored()
+    property.kind = DataPropertyKindV2.Computed
+    property.getter = "compiler.ast.project_span"
+    property.dependencies = deps
+    property
+
+fn v2_forward(target: text, writable: bool = false) -> DataPropertyContractV2:
+    var property = v2_stored(writable)
+    property.kind = DataPropertyKindV2.Forwarded
+    property.forward_attr = target
+    property
+
+fn v2_attr(name: text, property: DataPropertyContractV2, view: text = "compiler.ast.Binary", type_path: text = "compiler.SourceSpan") -> DataAttrDeclV2:
+    DataAttrDeclV2(base: data_attr_decl_v1("compiler.ast", view, name, data_type_ref_v1(type_path, []),
+        DataRequirednessV1.Required, "", v2_at()), property: property)
+
+fn v2_resolve_views(decls: [DataAttrDeclV2], views: [DataViewDeclV2]) -> Result<DataSchemaSurfaceV2, [DataSchemaDiagnosticV1]>:
+    data_schema_resolve_v2(data_schema_authority_v1("compiler.ast", ["compiler.ast"]), views, decls, [])
+
+fn v2_resolve(decls: [DataAttrDeclV2]) -> Result<DataSchemaSurfaceV2, [DataSchemaDiagnosticV1]>:
+    v2_resolve_views(decls, v2_views(["compiler.ast.Binary"]))
+
+fn v2_sdn_fixture() -> text:
+    "data_policy:\n" +
+    "    schema: simple.data-policy/v2\n" +
+    "    declarations:\n" +
+    "        binary:\n" +
+    "            tree: compiler.ast\n" +
+    "            view: compiler.ast.Binary\n" +
+    "            attributes:\n" +
+    "                source_span:\n" +
+    "                    type: compiler.SourceSpan\n" +
+    "                    required: true\n" +
+    "                    property:\n" +
+    "                        kind: stored\n" +
+    "                        visibility: public\n" +
+    "                        writable: false\n" +
+    "                        phase: core\n" +
+    "                        read_effects: []\n" +
+    "                        write_effects: []\n"
+
+fn v2_sdn_resolve(source: text) -> Result<DataSchemaSurfaceV2, [DataSchemaDiagnosticV1]>:
+    val input = data_schema_decls_from_sdn_v2(source, "schema.sdn", "compiler.ast")?
+    v2_resolve_views(input.decls, input.views)
+
+describe "Shared SPL and SDN data schema resolver V2":
+    it "retains explicitly declared fieldless views in the semantic identity":
+        step("Declare explicit views and property contracts")
+        val empty = v2_resolve_views([], v2_views([])).unwrap()
+        val fieldless = v2_resolve_views([], v2_views(["compiler.ast.Empty"])).unwrap()
+        expect(fieldless.contract_version).to_equal(2)
+        expect(fieldless.views[0].name).to_equal("compiler.ast.Empty")
+        expect(fieldless.base.attrs.len()).to_equal(0)
+        expect(fieldless.schema_digest == empty.schema_digest).to_equal(false)
+        expect(fieldless.base.schema_digest).to_equal(empty.base.schema_digest)
+
+    it "resolves equivalent SPL and SDN input through one base authority":
+        step("Resolve equivalent SPL and SDN inputs")
+        val spl = v2_resolve([v2_attr("source_span", v2_stored())]).unwrap()
+        val sdn = v2_sdn_resolve(v2_sdn_fixture()).unwrap()
+        expect(sdn.schema_digest).to_equal(spl.schema_digest)
+        expect(sdn.base.attrs[0].type_canonical).to_equal("compiler.SourceSpan")
+        expect(sdn.base.attrs[0].provenances[0].path).to_equal("schema.sdn")
+        expect(sdn.base.attrs[0].provenances[0].line).to_be_greater_than(0)
+
+    it "unions matching dual declarations and retains both provenances":
+        val from_sdn = data_schema_decls_from_sdn_v2(v2_sdn_fixture(), "schema.sdn", "compiler.ast").unwrap()
+        val decls = [v2_attr("source_span", v2_stored())] + from_sdn.decls
+        val both = v2_resolve_views(decls, v2_views(["compiler.ast.Binary"]) + from_sdn.views).unwrap()
+        expect(both.base.attrs[0].provenances.len()).to_equal(2)
+        expect(both.views[0].provenances.len()).to_equal(2)
+        expect(both.schema_digest).to_equal(v2_resolve([decls[0]]).unwrap().schema_digest)
+
+    it "keeps the V1 projection digest and contract unchanged":
+        val decl = v2_attr("source_span", v2_stored())
+        val v1 = data_schema_resolve_v1(data_schema_authority_v1("compiler.ast", ["compiler.ast"]), [decl.base], []).unwrap()
+        val v2 = v2_resolve([decl]).unwrap()
+        expect(v2.base.contract_version).to_equal(1)
+        expect(v2.base.schema_digest).to_equal(v1.schema_digest)
+        expect(v2.schema_digest == v1.schema_digest).to_equal(false)
+
+    it "rejects undeclared views and unauthorized explicit view injection":
+        step("Reject incompatible logical contracts")
+        expect(v2_resolve_views([v2_attr("span", v2_stored())], []).is_err()).to_equal(true)
+        val forged = DataViewDeclV2(tree: "compiler.ast", name: "compiler.ast.Binary",
+            provenance: data_decl_provenance_v1(DataDeclOriginV1.Sdn, "foreign.sdn", 1, "foreign.owner"))
+        val diagnostics = v2_resolve_views([], [forged]).unwrap_err()
+        expect(diagnostics[0].kind == DataSchemaErrorKindV1.UnauthorizedInjection).to_equal(true)
+
+    it "rejects a nominal type conflict rather than replacing one declaration":
+        val left = v2_attr("span", v2_stored())
+        var right = v2_attr("span", v2_stored(), "compiler.ast.Binary", "compiler.RegionId")
+        right.base.provenance = data_decl_provenance_v1(DataDeclOriginV1.Sdn, "other.sdn", 7, "compiler.ast")
+        val diagnostics = v2_resolve([left, right]).unwrap_err()
+        expect(diagnostics[0].kind == DataSchemaErrorKindV1.TypeConflict).to_equal(true)
+        expect(diagnostics[0].message).to_contain("other.sdn:7")
+
+    it "rejects per-view property disagreement with both declaration origins":
+        var other = v2_attr("span", v2_stored(true), "compiler.ast.Unary")
+        other.base.provenance = data_decl_provenance_v1(DataDeclOriginV1.Sdn, "unary.sdn", 9, "compiler.ast")
+        val diagnostics = v2_resolve_views([v2_attr("span", v2_stored()), other],
+            v2_views(["compiler.ast.Binary", "compiler.ast.Unary"])).unwrap_err()
+        expect(diagnostics[0].message).to_contain("nodes.spl:1")
+        expect(diagnostics[0].message).to_contain("unary.sdn:9")
+
+    it "includes visibility restriction owners and phase in the digest":
+        step("Verify canonical identities")
+        var owner = v2_stored()
+        owner.visibility = DataVisibilityV2.Owner
+        owner.visibility_owner = "compiler.ast.Binary"
+        val first = v2_resolve([v2_attr("span", owner)]).unwrap()
+        owner.visibility_owner = "compiler.ast.Unary"
+        val second = v2_resolve([v2_attr("span", owner)]).unwrap()
+        expect(first.schema_digest == second.schema_digest).to_equal(false)
+        owner.phase = "analysis"
+        expect(v2_resolve([v2_attr("span", owner)]).unwrap().schema_digest == second.schema_digest).to_equal(false)
+
+    it "validates public and restricted visibility keys without guessing from provenance":
+        var property = v2_stored()
+        property.visibility_owner = "compiler.ast"
+        expect(v2_resolve([v2_attr("span", property)]).is_err()).to_equal(true)
+        property.visibility_owner = ""
+        property.visibility = DataVisibilityV2.Module
+        expect(v2_resolve([v2_attr("span", property)]).is_err()).to_equal(true)
+        property.visibility_owner = "compiler.ast"
+        expect(v2_resolve([v2_attr("span", property)]).is_ok()).to_equal(true)
+
+    it "requires explicit mutation owners and forbids read-only write facts":
+        var property = v2_stored(true)
+        property.mutation_owner = ""
+        expect(v2_resolve([v2_attr("span", property)]).is_err()).to_equal(true)
+        property = v2_stored()
+        property.write_effects = ["effects.io"]
+        expect(v2_resolve([v2_attr("span", property)]).is_err()).to_equal(true)
+
+    it "normalizes effect order and duplicates while retaining effect changes":
+        var property = v2_stored()
+        property.read_effects = ["effects.io", "effects.alloc", "effects.io"]
+        val first = v2_resolve([v2_attr("span", property)]).unwrap()
+        property.read_effects = ["effects.alloc", "effects.io"]
+        expect(v2_resolve([v2_attr("span", property)]).unwrap().schema_digest).to_equal(first.schema_digest)
+        property.read_effects = []
+        expect(v2_resolve([v2_attr("span", property)]).unwrap().schema_digest == first.schema_digest).to_equal(false)
+
+    it "retains computed getter and setter contracts without executing them":
+        var property = v2_computed(["span"])
+        property.writable = true
+        property.mutation_owner = "compiler.ast"
+        property.setter = "compiler.ast.replace_span"
+        val surface = v2_resolve([v2_attr("span", v2_stored()), v2_attr("derived", property)]).unwrap()
+        expect(surface.properties[0].property.getter).to_equal("compiler.ast.project_span")
+        expect(surface.properties[0].property.setter).to_equal("compiler.ast.replace_span")
+        property.setter = ""
+        expect(v2_resolve([v2_attr("span", v2_stored()), v2_attr("derived", property)]).is_err()).to_equal(true)
+
+    it "rejects stored accessors and computed initializer/default claims":
+        var property = v2_stored()
+        property.getter = "compiler.ast.get_span"
+        expect(v2_resolve([v2_attr("span", property)]).is_err()).to_equal(true)
+        var computed = v2_attr("span", v2_computed([]))
+        computed.base.requiredness = DataRequirednessV1.Defaulted
+        computed.base.default_value = "make_span()"
+        expect(v2_resolve([computed]).is_err()).to_equal(true)
+
+    it "validates forwarding target type, mutability and dependency binding":
+        val valid = v2_resolve([v2_attr("span", v2_stored(true)), v2_attr("alias", v2_forward("span", true))]).unwrap()
+        expect(valid.properties[0].property.dependencies).to_equal(["span"])
+        expect(v2_resolve([v2_attr("span", v2_stored()), v2_attr("alias", v2_forward("span", true))]).is_err()).to_equal(true)
+        expect(v2_resolve([v2_attr("span", v2_stored()),
+            v2_attr("alias", v2_forward("span"), "compiler.ast.Binary", "compiler.RegionId")]).is_err()).to_equal(true)
+        expect(v2_resolve([v2_attr("alias", v2_forward("missing"))]).is_err()).to_equal(true)
+
+    it "rejects dependencies that do not apply to every view":
+        val declarations = [v2_attr("span", v2_stored(), "compiler.ast.Unary"),
+            v2_attr("derived", v2_computed(["span"]))]
+        val diagnostics = v2_resolve_views(declarations,
+            v2_views(["compiler.ast.Binary", "compiler.ast.Unary"])).unwrap_err()
+        expect(diagnostics[0].message).to_contain("does not apply")
+
+    it "rejects direct, indirect and forwarding dependency cycles":
+        expect(v2_resolve([v2_attr("span", v2_computed(["span"]))]).is_err()).to_equal(true)
+        expect(v2_resolve([v2_attr("left", v2_computed(["right"])),
+            v2_attr("right", v2_computed(["left"]))]).is_err()).to_equal(true)
+        expect(v2_resolve([v2_attr("left", v2_forward("right")),
+            v2_attr("right", v2_forward("left"))]).is_err()).to_equal(true)
+
+    it "resolves a reverse canonical dependency chain and rejects its back edge":
+        var declarations: [DataAttrDeclV2] = []
+        var index = 0
+        while index < 95:
+            val name = "n" + (1000 + index).to_string()
+            val next_name = "n" + (1001 + index).to_string()
+            declarations.push(v2_attr(name, v2_computed([next_name])))
+            index = index + 1
+        declarations.push(v2_attr("n1095", v2_stored()))
+        val surface = v2_resolve(declarations).unwrap()
+        expect(surface.properties.len()).to_equal(96)
+        expect(surface.properties[0].property.dependencies).to_equal(["n1001"])
+        declarations[95] = v2_attr("n1095", v2_computed(["n1000"]))
+        val diagnostics = v2_resolve(declarations).unwrap_err()
+        expect(diagnostics[0].message).to_contain("cycle")
+
+    it "bounds SPL arguments, authority owners and implicit forwarding dependencies":
+        var arguments: [text] = []
+        var dependencies: [text] = []
+        var index = 0
+        while index < 257:
+            arguments.push("T")
+            if index < 256:
+                dependencies.push("d" + index.to_string())
+            index = index + 1
+        var decl = v2_attr("span", v2_stored())
+        decl.base.type_ref.args = arguments
+        expect(v2_resolve([decl]).unwrap_err()[0].message).to_contain("argument limit")
+        var forward = v2_forward("target")
+        forward.dependencies = dependencies
+        expect(v2_resolve([v2_attr("alias", forward)]).unwrap_err()[0].message).to_contain("normalized dependency limit")
+        var owners: [text] = []
+        index = 0
+        while index < 4097:
+            owners.push("compiler.ast")
+            index = index + 1
+        val authority = data_schema_authority_v1("compiler.ast", owners)
+        expect(data_schema_resolve_v2(authority, [], [], []).unwrap_err()[0].message).to_contain("input limit")
+
+    it "bounds Unicode default expressions by UTF-8 bytes rather than code points":
+        var expression = "é"
+        for index in 0..15:
+            expression = expression + expression
+        expect(expression.byte_len()).to_equal(65536)
+        var decl = v2_attr("span", v2_stored())
+        decl.base.requiredness = DataRequirednessV1.Defaulted
+        decl.base.default_value = expression
+        expect(v2_resolve([decl]).is_ok()).to_equal(true)
+        decl.base.default_value = expression + "a"
+        expect(v2_resolve([decl]).unwrap_err()[0].message).to_contain("64 KiB")
+
+    it "keeps declaration and view ordering out of semantic identity":
+        val a = v2_attr("a", v2_stored())
+        val b = v2_attr("b", v2_stored())
+        val first = v2_resolve_views([a, b], v2_views(["compiler.ast.Binary", "compiler.ast.Empty"])).unwrap()
+        val second = v2_resolve_views([b, a], v2_views(["compiler.ast.Empty", "compiler.ast.Binary"])).unwrap()
+        expect(first.schema_digest).to_equal(second.schema_digest)
+        expect(first.base.attrs[0].id.ordinal).to_equal(1)
+        expect(first.base.attrs[1].id.ordinal).to_equal(2)
+
+    it "refuses ambiguous flat type and alias spellings instead of merging them":
+        var bad = v2_attr("value", v2_stored(), "compiler.ast.Binary", "compiler.Box")
+        bad.base.type_ref.args = ["A,B"]
+        expect(v2_resolve([bad]).is_err()).to_equal(true)
+        bad.base.type_ref.args = ["A<B>"]
+        expect(v2_resolve([bad]).is_err()).to_equal(true)
+        val aliases = [data_type_alias_v1("Alias", "A,B")]
+        expect(data_schema_resolve_v2(data_schema_authority_v1("compiler.ast", ["compiler.ast"]),
+            v2_views(["compiler.ast.Binary"]), [v2_attr("value", v2_stored())], aliases).is_err()).to_equal(true)
+
+    it "normalizes explicit computed accessor contracts equally from SPL and SDN":
+        val computed = v2_sdn_fixture().replace("kind: stored", "kind: computed\n                        getter: compiler.ast.project_span")
+        val source = v2_resolve([v2_attr("source_span", v2_computed([]))]).unwrap()
+        expect(v2_sdn_resolve(computed).unwrap().schema_digest).to_equal(source.schema_digest)
+        expect(v2_sdn_resolve(computed.replace("getter: compiler.ast.project_span", "getter: 3")).is_err()).to_equal(true)
+
+    it "rejects missing explicit effect lists, unknown keys and unsupported versions":
+        expect(v2_sdn_resolve(v2_sdn_fixture().replace("                        read_effects: []\n", "")).is_err()).to_equal(true)
+        expect(v2_sdn_resolve(v2_sdn_fixture().replace("phase: core", "phase: core\n                        mystery: true")).is_err()).to_equal(true)
+        expect(v2_sdn_resolve(v2_sdn_fixture().replace("simple.data-policy/v2", "simple.data-policy/v1")).is_err()).to_equal(true)
+
+    it "rejects malformed scalar, list and mapping shapes and duplicate keys":
+        val fixture = v2_sdn_fixture()
+        expect(v2_sdn_resolve(fixture.replace("writable: false", "writable: 3")).is_err()).to_equal(true)
+        expect(v2_sdn_resolve(fixture.replace("read_effects: []", "read_effects: [3]")).is_err()).to_equal(true)
+        expect(v2_sdn_resolve(fixture.replace("phase: core", "phase: core\n                        phase: analysis")).is_err()).to_equal(true)
+        expect(v2_sdn_resolve("data_policy: []\n").is_err()).to_equal(true)
+
+    it "accepts an explicit SDN fieldless view and rejects missing attributes":
+        val empty = "data_policy:\n    schema: simple.data-policy/v2\n    declarations:\n        empty:\n            tree: compiler.ast\n            view: compiler.ast.Empty\n            attributes: {}\n"
+        val surface = v2_sdn_resolve(empty).unwrap()
+        expect(surface.views[0].name).to_equal("compiler.ast.Empty")
+        expect(surface.base.attrs.len()).to_equal(0)
+        expect(v2_sdn_resolve(empty.replace("            attributes: {}\n", "")).is_err()).to_equal(true)

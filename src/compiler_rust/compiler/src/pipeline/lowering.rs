@@ -1958,6 +1958,9 @@ mod tests {
                             | Node::ExportUseStmt(_)
                             | Node::StructuredExportStmt(_)
                             | Node::AutoImportStmt(_)
+                            | Node::FriendDecl(_)
+                            | Node::InternalExportDecl(_)
+                            | Node::LayerDecl(_)
                     )
                 })
                 .collect(),
@@ -2009,6 +2012,9 @@ mod tests {
                             | Node::ExportUseStmt(_)
                             | Node::StructuredExportStmt(_)
                             | Node::AutoImportStmt(_)
+                            | Node::FriendDecl(_)
+                            | Node::InternalExportDecl(_)
+                            | Node::LayerDecl(_)
                     )
                 })
                 .collect(),

@@ -1,0 +1,249 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl 43%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_software.spl 11%
+# @tag: unit, engine2d, software-backend, pixels
+#
+# Pixel contracts of the Simple 2D software rasterizer for the shape
+# primitives beyond rect/line/circle: ellipse (filled and outline), filled
+# polygon, polyline, thick rect, thick circle, triangle outline, cubic Bezier
+# and the horizontal / radial gradients. Each case draws on a 32x32 opaque
+# black canvas and reads back pixels whose state follows from the shape's
+# geometry (inside/outside the implicit equation), not from a golden image.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend}
+use std.gpu.engine2d.color.{color_r, color_g, color_b, color_a}
+
+val BLACK: u32 = 0xFF000000u32
+val RED: u32 = 0xFFFF0000u32
+val WHITE: u32 = 0xFFFFFFFFu32
+
+fn _canvas() -> SoftwareBackend:
+    var backend = SoftwareBackend.create()
+    backend.init(32, 32)
+    backend
+
+fn _at(pixels: [u32], x: i32, y: i32) -> u32:
+    pixels[y * 32 + x]
+
+fn _count(pixels: [u32], color: u32) -> i32:
+    var n = 0
+    for p in pixels:
+        if p == color:
+            n = n + 1
+    n
+
+describe "Software backend shape pixels":
+
+    context "filled ellipse":
+
+        it "fills points inside the ellipse equation and leaves points outside":
+            var b = _canvas()
+            b.draw_ellipse_filled(16, 16, 10, 5, RED)
+            val px = b.read_pixels()
+            expect(_at(px, 16, 16)).to_equal(RED)
+            expect(_at(px, 24, 16)).to_equal(RED)
+            expect(_at(px, 8, 16)).to_equal(RED)
+            expect(_at(px, 16, 20)).to_equal(RED)
+            expect(_at(px, 16, 12)).to_equal(RED)
+            expect(_at(px, 16, 23)).to_equal(BLACK)
+            expect(_at(px, 28, 16)).to_equal(BLACK)
+            expect(_at(px, 25, 21)).to_equal(BLACK)
+            expect(_at(px, 7, 11)).to_equal(BLACK)
+            b.shutdown()
+
+        it "covers about pi*rx*ry pixels":
+            var b = _canvas()
+            b.draw_ellipse_filled(16, 16, 10, 5, RED)
+            val n = _count(b.read_pixels(), RED)
+            expect(n > 140).to_equal(true)
+            expect(n < 185).to_equal(true)
+            b.shutdown()
+
+        it "is mirror-symmetric about its centre column":
+            var b = _canvas()
+            b.draw_ellipse_filled(16, 16, 10, 5, RED)
+            val px = b.read_pixels()
+            var mismatches = 0
+            var y = 0
+            while y < 32:
+                var dx = 1
+                while dx <= 12:
+                    if _at(px, 16 - dx, y) != _at(px, 16 + dx, y):
+                        mismatches = mismatches + 1
+                    dx = dx + 1
+                y = y + 1
+            expect(mismatches).to_equal(0)
+            b.shutdown()
+
+    context "ellipse outline":
+
+        it "paints the four axis extremes and leaves the centre empty":
+            var b = _canvas()
+            b.draw_ellipse(16, 16, 10, 5, RED)
+            val px = b.read_pixels()
+            expect(_at(px, 26, 16)).to_equal(RED)
+            expect(_at(px, 6, 16)).to_equal(RED)
+            expect(_at(px, 16, 21)).to_equal(RED)
+            expect(_at(px, 16, 11)).to_equal(RED)
+            expect(_at(px, 16, 16)).to_equal(BLACK)
+            expect(_at(px, 20, 16)).to_equal(BLACK)
+            b.shutdown()
+
+        it "paints far fewer pixels than the filled ellipse":
+            var b = _canvas()
+            b.draw_ellipse(16, 16, 10, 5, RED)
+            val n = _count(b.read_pixels(), RED)
+            expect(n > 30).to_equal(true)
+            expect(n < 80).to_equal(true)
+            b.shutdown()
+
+    context "filled polygon":
+
+        it "fills a right triangle on the near side of its hypotenuse only":
+            var b = _canvas()
+            var xs: [i32] = [4, 28, 4]
+            var ys: [i32] = [4, 4, 28]
+            b.draw_polygon_filled(xs, ys, 3, RED)
+            val px = b.read_pixels()
+            expect(_at(px, 8, 8)).to_equal(RED)
+            expect(_at(px, 10, 18)).to_equal(RED)
+            expect(_at(px, 20, 6)).to_equal(RED)
+            expect(_at(px, 20, 20)).to_equal(BLACK)
+            expect(_at(px, 26, 26)).to_equal(BLACK)
+            expect(_at(px, 2, 8)).to_equal(BLACK)
+            expect(_at(px, 8, 2)).to_equal(BLACK)
+            b.shutdown()
+
+        it "fills a rectangle given as four points":
+            var b = _canvas()
+            var xs: [i32] = [6, 26, 26, 6]
+            var ys: [i32] = [10, 10, 20, 20]
+            b.draw_polygon_filled(xs, ys, 4, RED)
+            val px = b.read_pixels()
+            expect(_at(px, 16, 15)).to_equal(RED)
+            expect(_at(px, 7, 11)).to_equal(RED)
+            expect(_at(px, 16, 8)).to_equal(BLACK)
+            expect(_at(px, 16, 23)).to_equal(BLACK)
+            expect(_at(px, 3, 15)).to_equal(BLACK)
+            expect(_at(px, 29, 15)).to_equal(BLACK)
+            b.shutdown()
+
+    context "stroked paths":
+
+        it "draws a polyline through each segment and not across the gap":
+            var b = _canvas()
+            var xs: [i32] = [2, 30, 30]
+            var ys: [i32] = [2, 2, 30]
+            b.draw_polyline(xs, ys, 3, RED, 1)
+            val px = b.read_pixels()
+            expect(_at(px, 16, 2)).to_equal(RED)
+            expect(_at(px, 30, 16)).to_equal(RED)
+            expect(_at(px, 16, 16)).to_equal(BLACK)
+            expect(_at(px, 2, 16)).to_equal(BLACK)
+            b.shutdown()
+
+        it "draws a thick rect border and leaves the interior empty":
+            var b = _canvas()
+            b.draw_rect_thick(4, 4, 20, 20, RED, 3)
+            val px = b.read_pixels()
+            expect(_at(px, 4, 14)).to_equal(RED)
+            expect(_at(px, 5, 14)).to_equal(RED)
+            expect(_at(px, 14, 4)).to_equal(RED)
+            expect(_at(px, 14, 5)).to_equal(RED)
+            expect(_at(px, 23, 14)).to_equal(RED)
+            expect(_at(px, 14, 23)).to_equal(RED)
+            expect(_at(px, 14, 14)).to_equal(BLACK)
+            expect(_at(px, 9, 9)).to_equal(BLACK)
+            expect(_at(px, 1, 14)).to_equal(BLACK)
+            expect(_at(px, 28, 14)).to_equal(BLACK)
+            b.shutdown()
+
+        it "draws a thick circle ring and leaves centre and outside empty":
+            var b = _canvas()
+            b.draw_circle_thick(16, 16, 10, RED, 3)
+            val px = b.read_pixels()
+            expect(_at(px, 25, 16)).to_equal(RED)
+            expect(_at(px, 7, 16)).to_equal(RED)
+            expect(_at(px, 16, 25)).to_equal(RED)
+            expect(_at(px, 16, 16)).to_equal(BLACK)
+            expect(_at(px, 20, 16)).to_equal(BLACK)
+            expect(_at(px, 30, 16)).to_equal(BLACK)
+            b.shutdown()
+
+        it "outlines a triangle without filling it":
+            var b = _canvas()
+            b.draw_triangle_outline(4, 4, 28, 4, 16, 28, RED, 1)
+            val px = b.read_pixels()
+            expect(_at(px, 16, 4)).to_equal(RED)
+            expect(_at(px, 10, 16)).to_equal(RED)
+            expect(_at(px, 22, 16)).to_equal(RED)
+            expect(_at(px, 16, 12)).to_equal(BLACK)
+            expect(_at(px, 16, 30)).to_equal(BLACK)
+            b.shutdown()
+
+        it "draws a Bezier with collinear control points as a straight line":
+            var b = _canvas()
+            b.draw_bezier(2, 16, 10, 16, 22, 16, 30, 16, RED, 1)
+            val px = b.read_pixels()
+            expect(_at(px, 2, 16)).to_equal(RED)
+            expect(_at(px, 16, 16)).to_equal(RED)
+            expect(_at(px, 30, 16)).to_equal(RED)
+            expect(_at(px, 16, 12)).to_equal(BLACK)
+            expect(_at(px, 16, 20)).to_equal(BLACK)
+            b.shutdown()
+
+        it "bends a Bezier toward its control points":
+            var b = _canvas()
+            b.draw_bezier(2, 28, 2, 4, 30, 4, 30, 28, RED, 1)
+            val px = b.read_pixels()
+            expect(_at(px, 2, 28)).to_equal(RED)
+            expect(_at(px, 30, 28)).to_equal(RED)
+            expect(_at(px, 16, 10)).to_equal(RED)
+            expect(_at(px, 16, 28)).to_equal(BLACK)
+            expect(_at(px, 16, 2)).to_equal(BLACK)
+            b.shutdown()
+
+    context "gradients":
+
+        it "ramps a horizontal gradient from the left colour to the right colour":
+            var b = _canvas()
+            b.draw_gradient_rect_h(0, 0, 32, 4, BLACK, WHITE)
+            val px = b.read_pixels()
+            expect(color_r(_at(px, 0, 0))).to_equal(0)
+            expect(color_r(_at(px, 31, 0)) > 240).to_equal(true)
+            expect(color_r(_at(px, 16, 0)) > 110).to_equal(true)
+            expect(color_r(_at(px, 16, 0)) < 150).to_equal(true)
+            expect(color_a(_at(px, 16, 0))).to_equal(255)
+            var decreasing = 0
+            var x = 1
+            while x < 32:
+                if color_r(_at(px, x, 2)) < color_r(_at(px, x - 1, 2)):
+                    decreasing = decreasing + 1
+                x = x + 1
+            expect(decreasing).to_equal(0)
+            expect(_at(px, 16, 6)).to_equal(BLACK)
+            b.shutdown()
+
+        it "keeps a horizontal gradient constant down each column":
+            var b = _canvas()
+            b.draw_gradient_rect_h(0, 8, 32, 8, RED, WHITE)
+            val px = b.read_pixels()
+            expect(_at(px, 10, 8)).to_equal(_at(px, 10, 15))
+            expect(color_r(_at(px, 10, 8))).to_equal(255)
+            expect(color_g(_at(px, 0, 8))).to_equal(0)
+            expect(color_g(_at(px, 31, 8)) > 240).to_equal(true)
+            b.shutdown()
+
+        it "fades a radial gradient from the centre colour to the edge colour":
+            var b = _canvas()
+            b.draw_radial_gradient(16, 16, 10, WHITE, BLACK)
+            val px = b.read_pixels()
+            expect(color_r(_at(px, 16, 16)) > 240).to_equal(true)
+            expect(color_r(_at(px, 16, 21)) < color_r(_at(px, 16, 18))).to_equal(true)
+            expect(color_r(_at(px, 16, 24)) < color_r(_at(px, 16, 21))).to_equal(true)
+            expect(color_r(_at(px, 21, 16))).to_equal(color_r(_at(px, 16, 21)))
+            expect(_at(px, 2, 2)).to_equal(BLACK)
+            b.shutdown()

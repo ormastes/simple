@@ -1,3 +1,4 @@
+use test.helpers.compiler_source_parse_owners.{source_parse_implementation_v1}
 # Purpose and audience: executable specification evidence for the owning engineering team.
 # @req REQ-SSPEC-COMPILER
 # research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
@@ -8,7 +9,7 @@
 
 use std.spec.step
 
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
 
@@ -46,7 +47,7 @@ describe "entry-closure physical source deduplication":
     it "keeps colliding bucket keys exact and persistent":
         # @req REQ-SSPEC-COMPILER
         step("keeps colliding bucket keys exact and persistent")
-        val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
+        val loading = rt_file_read_text("src/compiler/80.driver/driver_entry_closure_core.spl") ?? ""
         var buckets = _driver_text_bucket_set_new(1)
         buckets = _driver_text_bucket_set_add(buckets, "std.alpha")
         buckets = _driver_text_bucket_set_add(buckets, "std.alphabet")
@@ -82,7 +83,7 @@ describe "entry-closure physical source deduplication":
         # registers every resolver spelling as a scalar alias on the surface
         # builder; the phase-2 verdict is committed in place (9af7c5c82f7)
         # and the surfaces are frozen with finish_into (250d12421fb).
-        val driver = rt_file_read_text("src/compiler/80.driver/driver_source_pipeline_parsing.spl") ?? ""
+        val driver = source_parse_implementation_v1()
 
         # The call is wrapped across two lines; assert the head only.
         expect(driver).to_contain("val unique_entry_sources = _driver_unique_physical_sources(")
@@ -102,29 +103,27 @@ describe "entry-closure physical source deduplication":
         expect(driver).to_not_contain("entry_modules = entry_modules.set(source.module_name")
         # Parser modules are retained once per physical source, while every
         # resolver spelling remains available through the compact surface map.
-        expect(driver).to_contain("var entry_surface_builder = ModuleSurfaceBuilder.new()")
+        expect(driver).to_contain("var entry_surface_builder = ModuleSurfaceBuilder.new(self.ctx.options.library_mode)")
         expect(driver).to_contain("for source in unique_entry_sources:")
         expect(driver).to_contain("for alias_source in entry_sources:")
         expect(driver).to_contain("if alias_is_poisoned:")
         expect(driver).to_contain("A poisoned\n                    # physical source intentionally has no surface to alias")
         expect(driver).to_contain("entry_surface_builder.add_alias(alias_source)")
-        expect(driver).to_contain("entry_surface_builder.resolve_export_origins()")
-        val origins_at = driver.find("entry_surface_builder.resolve_export_origins()") ?? -1
+        expect(driver).to_not_contain("entry_surface_builder.resolve_export_origins()")
         val finish_at = driver.find("entry_surface_builder.finish_into(entry_surfaces)") ?? -1
         val sources_at = driver.find("            self.ctx.sources = unique_entry_sources") ?? -1
         val surfaces_at = driver.find("            self.ctx.module_surfaces = Some(entry_surfaces)") ?? -1
-        expect(origins_at).to_be_greater_than(-1)
-        expect(finish_at).to_be_greater_than(origins_at)
+        expect(finish_at).to_be_greater_than(-1)
         expect(sources_at).to_be_greater_than(finish_at)
         expect(surfaces_at).to_be_greater_than(sources_at)
         val hir_driver = rt_file_read_text("src/compiler/80.driver/driver_hir_pipeline_lowering.spl") ?? ""
         # 35b22b6aedf: phase 3 reads the retained registry from the direct
         # owner beside the Option and never `.unwrap()`s it (a bare unwrap was
         # rebound by name under the seed's native codegen -> null registry).
-        expect(hir_driver).to_contain("val retained_module_surfaces: ModuleSurfacesByName = if self.ctx.module_surfaces != nil:")
+        expect(hir_driver).to_contain("val retained_module_surfaces: ModuleSurfacesByName = if self.ctx.module_surfaces.is_some():")
         expect(hir_driver).to_contain("            self.streaming_module_surfaces_owner\n        elif self.ctx.sources.len() > 0:")
         expect(hir_driver).to_not_contain("self.ctx.module_surfaces.unwrap()")
-        val retained_at = hir_driver.find("val retained_module_surfaces: ModuleSurfacesByName = if self.ctx.module_surfaces != nil:") ?? -1
+        val retained_at = hir_driver.find("val retained_module_surfaces: ModuleSurfacesByName = if self.ctx.module_surfaces.is_some():") ?? -1
         val fallback_at = hir_driver.find("elif self.ctx.sources.len() > 0:") ?? -1
         expect(retained_at).to_be_greater_than(-1)
         expect(fallback_at).to_be_greater_than(retained_at)
@@ -155,7 +154,7 @@ describe "entry-closure physical source deduplication":
         val unicode_imports = _driver_entry_import_module_paths("é\n# 文\n\tuse std.unicode\n")
         val comment_imports = _driver_entry_import_module_paths("# docs mention \"\"\"\nuse std.comment\nval x = 1 # \"\"\"\nimport std.after_inline\n")
         val doc_comment_close = _driver_entry_import_module_paths("\"\"\"\n# \"\"\"\nuse std.after_doc\n")
-        val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
+        val loading = rt_file_read_text("src/compiler/80.driver/driver_entry_closure_core.spl") ?? ""
 
         expect(imports).to_equal(["std.real", "app.live", "third.party"])
         expect(long_imports).to_equal(["std.tail"])
@@ -166,9 +165,15 @@ describe "entry-closure physical source deduplication":
         # 97ab4f2fdf7 (bound source discovery memory): the scanner walks the
         # content by a forward line_start cursor with a forward-only
         # docstring search instead of splitting it into lines or bytes.
+        # Retargeted 2026-11-12: 65f92308bc3 replaced the char-offset
+        # `content.index_of(<triple-quote>, line_start)` with the byte-space
+        # forward scan `_driver_triple_quote_byte_index_v1` (byte_at, no
+        # byte-array materialization) so the cursor and the docstring search
+        # agree on multi-byte UTF-8 lines.
         expect(loading).to_contain("_driver_entry_import_module_paths_text_fallback")
         expect(loading).to_contain("    var line_start: i64 = 0\n")
-        expect(loading).to_contain("next_triple_quote = content.index_of(\"\\\"\\\"\\\"\", line_start) ?? -1")
+        expect(loading).to_contain("next_triple_quote = _driver_triple_quote_byte_index_v1(content, line_start)")
+        expect(loading).to_contain("if content.byte_at(i) == 34 and content.byte_at(i + 1) == 34 and content.byte_at(i + 2) == 34:")
         expect(loading).to_not_contain("val bytes = content.bytes()")
 
     it "collects named lazy command tools into the CLI entry closure":
@@ -209,7 +214,7 @@ describe "entry-closure physical source deduplication":
 
         expect(inference).to_contain("case Call(callee, args, type_args):\n                self.infer_function_call(callee, args, type_args, span)")
         expect(calls).to_contain("me infer_function_call(callee: HirExpr, args: [HirCallArg], type_args: [HirType], span: Span)")
-        expect(calls).to_contain("self.generate_obligations_for_function_call(func_symbol, type_args, span)")
+        expect(calls).to_contain("self.instantiate_declared_call(function_symbol, type_args, span)")
         expect(inference).to_not_contain("call_type_args")
         expect(calls).to_not_contain("call_type_args")
 
@@ -228,7 +233,7 @@ describe "entry-closure physical source deduplication":
         val env_set_at = driver.find("rt_env_set(\"SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE\", \"1\")") ?? -1
         # 6f1269a70d5 widened the closure gate with admitted-preclosed and
         # group inputs, and full-inventory mode also skips the bulk load.
-        val gate_read_at = driver.find("val nb_entry_closure = admitted_preclosed != nil or explicit_entry_closure or native_group_inputs.len() > 0 or (") ?? -1
+        val gate_read_at = driver.find("val nb_entry_closure = admitted_preclosed.is_some() or explicit_entry_closure or native_group_inputs.len() > 0 or (") ?? -1
         val bulk_gate_at = driver.find("if (has_project_source and needs_bulk_project_sources and\n                not nb_entry_closure and not package_index_routed and\n                not full_inventory_mode):") ?? -1
         val bulk_load_at = driver.find("val bulk_loaded = _driver_collect_sources_via_find(paths)") ?? -1
         expect(walk_done_at).to_be_greater_than(-1)
@@ -254,26 +259,39 @@ describe "entry-closure physical source deduplication":
         expect(compile_end).to_be_greater_than(compile_start)
         val compile_body = driver.substring(compile_start, compile_end)
 
-        val load_call = compile_body.index_of("val (loaded_ctx, load_ok) = self.load_sources_impl(nil)") ?? -1
+        # compile() delegates phases 2-4 to stage_* helpers (each returns
+        # Some(stop) on failure); the phase verdict gates live in the helpers.
+        val load_call = compile_body.index_of("val (loaded_ctx, load_ok) = self.load_sources_impl(native_entry_closure_handoff_take_v1())") ?? -1
         val load_fail = compile_body.index_of("if not load_ok:\n            log_error(\"phase 1 FAILED\")") ?? -1
-        val parse_call = compile_body.index_of("val parse_ok = self.parse_all_committing_impl()") ?? -1
-        val parse_gate = compile_body.index_of("        if not parse_ok:\n") ?? -1
-        val parse_fail = compile_body.index_of("log_error(\"phase 2 FAILED (") ?? -1
-        val hir_call = compile_body.index_of("self.lower_and_check_retained_owner_impl()") ?? -1
-        val hir_fail = compile_body.index_of("log_error(\"phase 3 FAILED\")") ?? -1
-        val phase4_start = compile_body.index_of("phase4:monomorphize:start") ?? -1
+        val parse_stage = compile_body.index_of("match self.stage_parse():\n            case Some(stop): return stop") ?? -1
+        val hir_stage = compile_body.index_of("match self.stage_lower_hir(compile_mode_text):\n            case Some(stop): return stop") ?? -1
+        val analysis_stage = compile_body.index_of("match self.stage_collection_analysis(compile_mode_text):") ?? -1
         expect(load_call).to_be_greater_than(-1)
         expect(load_fail).to_be_greater_than(load_call)
-        expect(parse_call).to_be_greater_than(load_fail)
+        expect(parse_stage).to_be_greater_than(load_fail)
+        expect(hir_stage).to_be_greater_than(parse_stage)
+        expect(analysis_stage).to_be_greater_than(hir_stage)
+        val load_fail_body = compile_body.substring(load_fail)
+        expect(load_fail_body.index_of("return CompileResult.ParseError(self.ctx.errors)") ?? -1).to_be_less_than(load_fail_body.index_of("match self.stage_parse():") ?? -1)
+
+        val parse_start = driver.find("    me stage_parse() -> Option<CompileResult>:") ?? -1
+        expect(parse_start).to_be_greater_than(-1)
+        val parse_stage_body = driver.substring(parse_start)
+        val parse_call = parse_stage_body.index_of("val parse_ok = self.parse_all_committing_impl()") ?? -1
+        val parse_gate = parse_stage_body.index_of("        if not parse_ok:\n") ?? -1
+        val parse_fail = parse_stage_body.index_of("log_error(\"phase 2 FAILED (") ?? -1
+        expect(parse_call).to_be_greater_than(-1)
         expect(parse_gate).to_be_greater_than(parse_call)
         expect(parse_fail).to_be_greater_than(parse_gate)
-        val parse_fail_body = compile_body.substring(parse_fail)
-        expect(parse_fail_body.index_of("return CompileResult.ParseError(self.ctx.errors)") ?? -1).to_be_less_than(parse_fail_body.index_of("self.lower_and_check_retained_owner_impl()") ?? -1)
-        expect(hir_call).to_be_greater_than(parse_fail)
-        expect(hir_fail).to_be_greater_than(hir_call)
-        expect(phase4_start).to_be_greater_than(hir_fail)
-        val load_fail_body = compile_body.substring(load_fail)
-        expect(load_fail_body.index_of("return CompileResult.ParseError(self.ctx.errors)") ?? -1).to_be_less_than(load_fail_body.index_of("val parse_ok = self.parse_all_committing_impl()") ?? -1)
+        expect(parse_stage_body.substring(parse_fail).index_of("return Some(CompileResult.ParseError(self.ctx.errors))") ?? -1).to_be_greater_than(-1)
+
+        # Phase 3: stage_lower_hir fails closed through stage_lower_hir_failure_v1.
+        val hir_stage_body = rt_file_read_text("src/compiler/80.driver/driver_stage_hir_v1.spl") ?? ""
+        val hir_run = driver.index_of("var analyze_ok_effective = self.stage_lower_hir_run_v1()") ?? -1
+        val hir_failure_call = driver.index_of("return Some(self.stage_lower_hir_failure_v1())") ?? -1
+        expect(hir_run).to_be_greater_than(-1)
+        expect(hir_failure_call).to_be_greater_than(hir_run)
+        expect(hir_stage_body).to_contain("log_error(\"phase 3 FAILED\")")
 
         # Phase 1: unresolved import, then empty import, both recorded before
         # the sources commit; the verdict is the post-commit error count.
@@ -288,7 +306,7 @@ describe "entry-closure physical source deduplication":
 
         # Phase 2: a parse error is recorded (never swallowed) and the source
         # is poisoned; the poison budget decides when to stop.
-        val parse_body = rt_file_read_text("src/compiler/80.driver/driver_source_pipeline_parsing.spl") ?? ""
+        val parse_body = source_parse_implementation_v1()
         expect(parse_body).to_contain("if par_had_error_get():")
         expect(parse_body).to_contain("self.ctx.add_error(\n                    driver_parse_error_message(source.path))")
         expect(parse_body).to_contain("poison_ctx.mark_module_poisoned(source.module_name)")
@@ -305,7 +323,7 @@ describe "entry-closure physical source deduplication":
     it "collects only the source roots supplied by its caller":
         # @req REQ-SSPEC-COMPILER
         step("collects only the source roots supplied by its caller")
-        val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
+        val loading = rt_file_read_text("src/compiler/80.driver/driver_entry_closure_core.spl") ?? ""
         val helpers = rt_file_read_text("src/compiler/80.driver/driver_helpers.spl") ?? ""
 
         # 37237cdf1e4 admits the exact requested native entry through the

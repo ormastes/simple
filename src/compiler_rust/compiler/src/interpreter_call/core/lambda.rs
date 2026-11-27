@@ -28,6 +28,11 @@ pub(crate) fn exec_lambda(
         mark_nodes_locals, publish_and_repoint, refresh_live_bound_globals, sync_live_bound_globals,
     };
 
+    // The body's lexical caller for the private-fn call rule is where the
+    // lambda was written, not the frame invoking it.
+    let _closure_origin =
+        crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured_env);
+
     // Diagram tracing for lambda execution
     if diagram_sffi::is_diagram_enabled() {
         diagram_sffi::trace_call("<lambda>");
@@ -43,7 +48,10 @@ pub(crate) fn exec_lambda(
     }
 
     for arg in args {
-        let val = evaluate_expr(&arg.value, call_env, functions, classes, enums, impl_methods)?;
+        let val = {
+            let _arg_expected_guard = crate::interpreter::push_expected_target_type(None);
+            evaluate_expr(&arg.value, call_env, functions, classes, enums, impl_methods)?
+        };
         // Automatically await Promise arguments
         let val = await_value(val)?;
         if let Some(name) = &arg.name {
@@ -70,6 +78,8 @@ pub(crate) fn exec_lambda(
     }
 
     call_env.release_scope();
+    let _lambda_return_guard = crate::interpreter::push_current_fn_return_type(None);
+    let _lambda_expected_guard = crate::interpreter::push_expected_target_type(None);
     let result = if let Expr::DoBlock(nodes) = body {
         mark_nodes_locals(nodes, &mut local_env);
         // Run the block against local_env in place (same statement semantics as the
@@ -85,6 +95,8 @@ pub(crate) fn exec_lambda(
     } else {
         evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)
     };
+    drop(_lambda_expected_guard);
+    drop(_lambda_return_guard);
     local_env.release_scope();
     sync_live_bound_globals(&local_env, call_env);
 

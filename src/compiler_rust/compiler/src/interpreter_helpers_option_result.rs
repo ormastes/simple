@@ -82,6 +82,7 @@ fn apply_lambda_to_value(
         env: captured,
     } = lambda_arg
     {
+        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
         let mut local_env = Env::clone(&captured);
         if let Some(param) = params.first() {
             local_env.insert(param.clone(), val.clone());
@@ -221,6 +222,7 @@ pub(crate) fn eval_option_or_else(
         env: captured,
     } = func_arg
     {
+        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
         let mut local_env = Env::clone(&captured);
         return evaluate_expr(
             &body,
@@ -259,6 +261,7 @@ pub(crate) fn eval_option_filter(
                 env: captured,
             } = func_arg
             {
+                let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                 let mut local_env = Env::clone(&captured);
                 if let Some(param) = params.first() {
                     local_env.insert(param.clone(), val.as_ref().clone());
@@ -372,6 +375,7 @@ pub(crate) fn eval_result_or_else(
             env: captured,
         } = func_arg
         {
+            let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
             let mut local_env = Env::clone(&captured);
             if let Some(param) = params.first() {
                 local_env.insert(param.clone(), err_val.as_ref().clone());

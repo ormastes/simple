@@ -10,31 +10,20 @@ fn is_dict_entry_marker(items: &[Value]) -> bool {
     items.len() == 3 && matches!(&items[0], Value::Symbol(s) if s == DICT_ENTRY_MARKER)
 }
 
-/// Canonical dict iteration order: **sorted by the internal key string**.
+/// The single iteration-order helper for `Value::Dict` / `Value::FrozenDict`.
 ///
-/// `Value::Dict` is backed by `std::collections::HashMap`, whose `RandomState`
-/// hasher is seeded per PROCESS. Iterating it directly therefore produced a
-/// DIFFERENT key order on every run of the same binary over the same input --
-/// `{"a":1,"b":2,"c":3,"d":4}.keys()` yielded 15 distinct orderings across 20
-/// runs. That made any spec asserting key order inherently flaky (green
-/// locally, red in CI, with no code change).
+/// **Contract: `Dict` iterates in INSERTION order on every engine** (owner
+/// decision 2026-11-06, `doc/07_guide/language/dict_iteration_order.md`). A new
+/// key is appended; replacing a value keeps the key's position; removing a key
+/// (`shift_remove`) drops it, and re-adding appends it at the end.
 ///
 /// Every order-visible dict boundary -- `keys()`, `values()`, `entries()` /
 /// `items()`, `for (k, v) in dict`, and dict `to_display_string` /
-/// `to_debug_string` -- MUST route through this function so they agree with
-/// each other. Sorting one of them alone would desync `keys()[i]` from
-/// `values()[i]`.
-///
-/// Sorted (rather than insertion) order is the contract because it is a pure
-/// function of key content, so it can be reproduced identically by every
-/// backend without sharing a container: the interpreter's `HashMap`, the JIT,
-/// and the compiled runtime's open-addressing `RuntimeDict` (which is
-/// FNV-bucket ordered and cannot preserve insertion order without being
-/// rewritten). See `doc/07_guide/language/dict_iteration_order.md`.
-pub fn dict_entries_sorted(map: &HashMap<String, Value>) -> Vec<(&String, &Value)> {
-    let mut entries: Vec<(&String, &Value)> = map.iter().collect();
-    entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-    entries
+/// `to_debug_string` -- routes through this function so they agree with each
+/// other and with the compiled runtime's `RuntimeDict` (insertion stamps,
+/// `runtime/src/value/dict.rs`) and the C runtime's `RtCoreDict`.
+pub fn dict_entries_ordered(map: &DictMap) -> Vec<(&String, &Value)> {
+    map.iter().collect()
 }
 
 /// Whether a rendered float came out looking like a plain integer (`1`, `-3`,
@@ -109,6 +98,14 @@ impl Value {
             Value::Object { fields, .. } if fields.len() == 1 && fields.contains_key("value") => {
                 fields.get("value").unwrap().as_int()
             }
+            // Only `unit`/numeric-`newtype` record classes unwrap; an ordinary class
+            // with a lone `value` field (and methods) must not silently become an int.
+            Value::ClassInstance(inst)
+                if inst.with_fields(|f| f.len() == 1 && f.contains_key("value"))
+                    && crate::interpreter_unit::is_record_unit_class(inst.class()) =>
+            {
+                inst.field("value").unwrap().as_int()
+            }
             Value::Str(_) => {
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)
@@ -129,6 +126,7 @@ impl Value {
             }
             Value::Nil => Ok(0),
             other => {
+                report_conversion_failure("int", other);
                 // Name the enum/variant so the error is attributable without a
                 // backtrace (bug native_build_enum_to_int_mismatch_after_hir_2026-09-01).
                 let actual_type: String = match other {
@@ -182,6 +180,7 @@ impl Value {
             Value::Nil => Ok(0.0),
             other => {
                 let actual_type = self.type_name();
+                report_conversion_failure("float", other);
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)
                     .with_help(format!("expected float type, got {}", actual_type));
@@ -260,6 +259,14 @@ impl Value {
                 let parts: Vec<String> = items.iter().map(u8::to_string).collect();
                 format!("[{}]", parts.join(","))
             }
+            // A dict used as a key: canonical, order-INDEPENDENT form (sorted
+            // entries), since `==` on dicts ignores insertion order.
+            Value::Dict(map) | Value::FrozenDict(map) => {
+                let mut parts: Vec<String> =
+                    map.iter().map(|(k, v)| format!("{}:{}", k, v.to_key_string())).collect();
+                parts.sort();
+                format!("{{{}}}", parts.join(","))
+            }
             other => format!("{other:?}"),
         }
     }
@@ -267,9 +274,9 @@ impl Value {
     /// Whether `to_key_string()` on this value is a type-preserving round
     /// trip, i.e. the interpreter's `Dict` (a `HashMap<String, Value>`
     /// keyed by `to_key_string()`) never needs extra bookkeeping to hand
-    /// the original key back on iteration. True for the scalar-ish types
-    /// the interpreter's dict representation already handled correctly;
-    /// false for composite types (struct/enum/tuple/array) whose
+    /// the original key back on iteration. True for text-like keys, which
+    /// read back unchanged from the string key;
+    /// false for numbers, bools and composites (struct/enum/tuple/array) whose
     /// `to_key_string()` is a canonical-but-lossy serialization.
     ///
     /// See `dict_struct_key_iteration_single_entry_2026-06-13`: iterating a
@@ -279,23 +286,19 @@ impl Value {
     /// `wrap_dict_entry`/`unwrap_dict_entry`/`dict_entry_key_for_iteration`
     /// close that gap for non-scalar keys only, so scalar-keyed dict
     /// behavior (int/text/bool/float/nil) is completely unchanged.
-    pub fn dict_key_is_scalar(&self) -> bool {
+    pub fn dict_key_round_trips(&self) -> bool {
         match self {
-            Value::Int(_)
-            | Value::UInt { .. }
-            | Value::Float(_)
-            | Value::Float32(_)
-            | Value::Bool(_)
-            | Value::Str(_)
-            | Value::Symbol(_)
-            | Value::Nil => true,
-            Value::Unit { value, .. } => value.dict_key_is_scalar(),
-            Value::Unique(u) => u.inner().dict_key_is_scalar(),
-            Value::Shared(s) => s.inner().dict_key_is_scalar(),
-            Value::Weak(w) => w.upgrade_inner().unwrap_or(Value::Nil).dict_key_is_scalar(),
-            Value::Handle(h) => h.resolve_inner().unwrap_or(Value::Nil).dict_key_is_scalar(),
-            Value::Borrow(b) => b.inner().dict_key_is_scalar(),
-            Value::BorrowMut(b) => b.inner().dict_key_is_scalar(),
+            // Numbers and bools are NOT self-describing: `to_key_string` flattens
+            // `7` to "7", and handing that back from `.keys()` gave a text that
+            // printed as 7 but compared unequal to the i64 7.
+            Value::Str(_) | Value::Symbol(_) | Value::Nil => true,
+            Value::Unit { value, .. } => value.dict_key_round_trips(),
+            Value::Unique(u) => u.inner().dict_key_round_trips(),
+            Value::Shared(s) => s.inner().dict_key_round_trips(),
+            Value::Weak(w) => w.upgrade_inner().unwrap_or(Value::Nil).dict_key_round_trips(),
+            Value::Handle(h) => h.resolve_inner().unwrap_or(Value::Nil).dict_key_round_trips(),
+            Value::Borrow(b) => b.inner().dict_key_round_trips(),
+            Value::BorrowMut(b) => b.inner().dict_key_round_trips(),
             _ => false,
         }
     }
@@ -309,7 +312,7 @@ impl Value {
     /// double-underscore reserved name, mirroring this codebase's existing
     /// `__setitem__`/`__getitem__` convention for internal dunder names.
     pub fn wrap_dict_entry(key: &Value, value: Value) -> Value {
-        if key.dict_key_is_scalar() {
+        if key.dict_key_round_trips() {
             value
         } else {
             Value::Tuple(vec![Value::Symbol(DICT_ENTRY_MARKER.to_string()), key.clone(), value])
@@ -318,10 +321,10 @@ impl Value {
 
     /// Inverse of `wrap_dict_entry` for call sites that already know the
     /// key they looked up with (`get`, `contains`, `set`, ...).
-    pub fn unwrap_dict_entry(key: &Value, stored: Value) -> Value {
-        if key.dict_key_is_scalar() {
-            return stored;
-        }
+    ///
+    /// Decided by the stored entry, not by `key`: the map is keyed by
+    /// `to_key_string`, so `d["7"]` finds the entry `d[7] = v` stored wrapped.
+    pub fn unwrap_dict_entry(_key: &Value, stored: Value) -> Value {
         match stored {
             Value::Tuple(ref items) if is_dict_entry_marker(items) => items[2].clone(),
             other => other,
@@ -336,6 +339,31 @@ impl Value {
         match stored {
             Value::Tuple(items) if is_dict_entry_marker(items) => items[1].clone(),
             _ => Value::text(string_key.to_string()),
+        }
+    }
+
+    /// Store `value` under the same key as `stored`, keeping its key wrapper.
+    pub fn rewrap_dict_entry(stored: &Value, value: Value) -> Value {
+        match stored {
+            Value::Tuple(items) if is_dict_entry_marker(items) => Value::wrap_dict_entry(&items[1], value),
+            _ => value,
+        }
+    }
+
+    /// The value slot inside a stored dict entry, for writing through it in place.
+    pub fn dict_entry_value_mut(stored: &mut Value) -> &mut Value {
+        if matches!(stored, Value::Tuple(items) if is_dict_entry_marker(items)) {
+            let Value::Tuple(items) = stored else { unreachable!() };
+            return &mut items[2];
+        }
+        stored
+    }
+
+    /// The value slot inside a stored dict entry, without copying it.
+    pub fn dict_entry_value_ref(stored: &Value) -> &Value {
+        match stored {
+            Value::Tuple(items) if is_dict_entry_marker(items) => &items[2],
+            other => other,
         }
     }
 
@@ -471,16 +499,16 @@ impl Value {
             // Sorted-by-key canonical order: printing a dict must be a stable
             // function of its contents, not of the per-process hash seed.
             Value::Dict(map) => {
-                let parts: Vec<String> = dict_entries_sorted(map)
+                let parts: Vec<String> = dict_entries_ordered(map)
                     .into_iter()
-                    .map(|(k, v)| format!("{}: {}", k, v.to_display_string()))
+                    .map(|(k, v)| format!("{}: {}", k, Value::dict_entry_value_ref(v).to_display_string()))
                     .collect();
                 format!("{{{}}}", parts.join(", "))
             }
             Value::FrozenDict(map) => {
-                let parts: Vec<String> = dict_entries_sorted(map)
+                let parts: Vec<String> = dict_entries_ordered(map)
                     .into_iter()
-                    .map(|(k, v)| format!("{}: {}", k, v.to_display_string()))
+                    .map(|(k, v)| format!("{}: {}", k, Value::dict_entry_value_ref(v).to_display_string()))
                     .collect();
                 format!("{{{}}}", parts.join(", "))
             }
@@ -510,7 +538,7 @@ impl Value {
             Value::Object { class, fields } => {
                 let parts: Vec<String> = fields
                     .iter()
-                    .map(|(k, v)| format!("{}: {}", k, v.to_display_string()))
+                    .map(|(k, v)| format!("{}: {}", k, Value::dict_entry_value_ref(v).to_display_string()))
                     .collect();
                 format!("{}({})", class, parts.join(", "))
             }
@@ -518,7 +546,7 @@ impl Value {
                 let fields = instance.fields_snapshot();
                 let parts: Vec<String> = fields
                     .iter()
-                    .map(|(k, v)| format!("{}: {}", k, v.to_display_string()))
+                    .map(|(k, v)| format!("{}: {}", k, Value::dict_entry_value_ref(v).to_display_string()))
                     .collect();
                 format!("{}({})", instance.class(), parts.join(", "))
             }
@@ -572,7 +600,7 @@ impl Value {
             Value::Object { class, fields } => {
                 let parts: Vec<String> = fields
                     .iter()
-                    .map(|(k, v)| format!("{}: {}", k, v.to_debug_string()))
+                    .map(|(k, v)| format!("{}: {}", k, Value::dict_entry_value_ref(v).to_debug_string()))
                     .collect();
                 format!("{}({})", class, parts.join(", "))
             }
@@ -595,9 +623,9 @@ impl Value {
                 format!("[{}]", parts.join(", "))
             }
             Value::Dict(map) => {
-                let parts: Vec<String> = dict_entries_sorted(map)
+                let parts: Vec<String> = dict_entries_ordered(map)
                     .into_iter()
-                    .map(|(k, v)| format!("{}: {}", k, v.to_debug_string()))
+                    .map(|(k, v)| format!("{}: {}", k, Value::dict_entry_value_ref(v).to_debug_string()))
                     .collect();
                 format!("{{{}}}", parts.join(", "))
             }
@@ -760,7 +788,12 @@ impl Value {
             "unit" | "Unit" => matches!(self, Value::Unit { .. }),
             // Check for object class name, enum name, or unit suffix
             _ => {
-                if let Value::Object { class, .. } = self {
+                // Reference classes are `Value::ClassInstance`, not `Value::Object`;
+                // matching only `Object` made every class-typed overload candidate
+                // fail scoring, so a bare call fell through to the last-registered
+                // same-named function of another module
+                // (seed_interp_cross_module_free_fn_collision_2026_11_06).
+                if let Some(class) = self.aggregate_class() {
                     class == type_name
                 } else if let Value::Enum { enum_name, .. } = self {
                     enum_name == type_name
@@ -966,16 +999,32 @@ mod dict_composite_key_tests {
     }
 
     #[test]
-    fn wrap_dict_entry_is_a_noop_for_scalar_keys() {
-        // Scalar keys (int/text/bool/float/nil/symbol) must be stored
-        // bit-for-bit unchanged -- wrap_dict_entry must NOT wrap them in a
-        // marker tuple, so scalar-keyed dict behavior is untouched by this
-        // fix (per the fix's own stated scope).
+    fn typed_scalar_keys_round_trip_through_iteration() {
         for key in [
             Value::Int(42),
-            Value::text("k"),
+            Value::UInt { value: 42, width: 8 },
             Value::Bool(true),
             Value::Float(1.5),
+        ] {
+            let stored = Value::wrap_dict_entry(&key, Value::text("v"));
+            assert_eq!(Value::dict_entry_key_for_iteration(&stored, &key.to_key_string()), key);
+            assert_eq!(Value::dict_entry_value_for_iteration(&stored), Value::text("v"));
+            assert_eq!(Value::unwrap_dict_entry(&key, stored.clone()), Value::text("v"));
+            // The map is keyed by text, so a text probe reaches the same entry.
+            assert_eq!(
+                Value::unwrap_dict_entry(&Value::text(key.to_key_string()), stored),
+                Value::text("v")
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_dict_entry_is_a_noop_for_self_describing_keys() {
+        // Text-like keys read back unchanged from the map's own string key, so
+        // they are stored bit-for-bit -- no marker tuple.
+        for key in [
+            Value::text("k"),
+            Value::Symbol("k".to_string()),
             Value::Nil,
         ] {
             let value = Value::text("v");
@@ -986,6 +1035,77 @@ mod dict_composite_key_tests {
             );
         }
     }
+}
+
+#[cfg(test)]
+mod dict_insertion_order_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn keys_of(map: &DictMap) -> Vec<String> {
+        dict_entries_ordered(map).into_iter().map(|(k, _)| k.clone()).collect()
+    }
+
+    #[test]
+    fn entries_iterate_in_insertion_order_not_sorted_order() {
+        let mut map = DictMap::new();
+        for (k, v) in [("b", 1), ("a", 2), ("10", 3), ("9", 4)] {
+            map.insert(k.to_string(), Value::Int(v));
+        }
+        assert_eq!(keys_of(&map), vec!["b", "a", "10", "9"]);
+        assert_eq!(Value::Dict(Arc::new(map)).to_display_string(), "{b: 1, a: 2, 10: 3, 9: 4}");
+    }
+
+    #[test]
+    fn replace_keeps_position_and_shift_remove_then_readd_appends() {
+        let mut map = DictMap::new();
+        for (k, v) in [("b", 1), ("a", 2), ("c", 3)] {
+            map.insert(k.to_string(), Value::Int(v));
+        }
+        map.insert("a".to_string(), Value::Int(20));
+        assert_eq!(keys_of(&map), vec!["b", "a", "c"]);
+        map.shift_remove("b");
+        map.insert("b".to_string(), Value::Int(5));
+        assert_eq!(keys_of(&map), vec!["a", "c", "b"]);
+    }
+}
+
+#[cfg(test)]
+mod dict_key_string_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn dict_key_string_ignores_insertion_order() {
+        let mut ab = DictMap::new();
+        ab.insert("a".to_string(), Value::Int(1));
+        ab.insert("b".to_string(), Value::Int(2));
+        let mut ba = DictMap::new();
+        ba.insert("b".to_string(), Value::Int(2));
+        ba.insert("a".to_string(), Value::Int(1));
+        assert_eq!(Value::Dict(Arc::new(ab)).to_key_string(), Value::Dict(Arc::new(ba)).to_key_string());
+    }
+}
+
+/// Attribution for a failed scalar conversion (`cannot convert <ty> to int|float`).
+/// The bare error names neither the value nor the interpreted frame, so a
+/// native-build failure after a clean HIR could not be located
+/// (doc/08_tracking/bug/native_build_enum_to_int_mismatch_after_hir_2026-09-01.md).
+/// Error path only; gated so default output is unchanged. The interpreted call
+/// stack is populated under the same gate (`DEBUG_CALL_STACK`).
+fn report_conversion_failure(target: &str, value: &Value) {
+    if !crate::interpreter::field_access_debug_enabled() {
+        return;
+    }
+    let stack = crate::interpreter::debug_call_stack_snapshot();
+    let start = stack.len().saturating_sub(12);
+    eprintln!(
+        "[conversion-error] target={} value_type={} value={} stack={}",
+        target,
+        value.type_name(),
+        value.to_debug_string().chars().take(500).collect::<String>(),
+        stack[start..].join(" -> ")
+    );
 }
 
 #[cfg(test)]

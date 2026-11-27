@@ -1,0 +1,720 @@
+# Constrained units: `unit Port: u16 where 1 <= self <= 65535` and the range
+# sugar `unit Port: u16 in 1..=65535` (also `lo..hi`, `lo..`, `..=hi`).
+#
+# Both forms lower to ONE `where` predicate over `self` (the range form is
+# rewritten by `unit_range_predicate`), registered through the existing
+# refinement machinery (`refinement_type_register` in types.spl) and remembered
+# here per unit name so the parser (literal rejection), the core interpreter
+# (`raw as Port`, `Port(raw)`, `70000_pt`) and the SFFI facade scanner share a
+# single constraint system.
+#
+# `unit_constraint_eval` is a small predicate evaluator over text: numbers,
+# `self`, `true`/`false`, `+ - * / %`, unary `-`, parentheses, comparison
+# chains (`1 <= self <= 65535`), `and` / `or` / `not`. It returns 1 (holds),
+# 0 (violated) or -1 (predicate shape not supported -> a declaration error,
+# never a silent pass).
+
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+extern fn rt_array_free<T>(array: [T])
+
+var unit_constraint_initialized: bool = false
+var unit_constraint_names: [text] = []
+var unit_constraint_predicates: [text] = []
+var unit_constraint_ref_tags: [i64] = []
+var unit_constraint_min_texts: [text] = []
+var unit_constraint_max_texts: [text] = []
+# Declaring file of each row: unit declarations are per file, so two files may
+# each declare the same unit name with their own bounds.
+var unit_constraint_owners: [text] = []
+
+pub struct UnitConstraintPoolSnapshot:
+    initialized: bool
+    names: [text]
+    predicates: [text]
+    ref_tags: [i64]
+    min_texts: [text]
+    max_texts: [text]
+    owners: [text]
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_pool_reset():
+    unit_constraint_names = []
+    unit_constraint_predicates = []
+    unit_constraint_ref_tags = []
+    unit_constraint_min_texts = []
+    unit_constraint_max_texts = []
+    unit_constraint_owners = []
+    unit_constraint_initialized = true
+
+pub fn unit_constraint_pool_save() -> UnitConstraintPoolSnapshot:
+    if not unit_constraint_initialized:
+        return UnitConstraintPoolSnapshot(initialized: false, names: [], predicates: [], ref_tags: [], min_texts: [], max_texts: [], owners: [])
+    UnitConstraintPoolSnapshot(
+        initialized: true,
+        names: unit_constraint_names,
+        predicates: unit_constraint_predicates,
+        ref_tags: unit_constraint_ref_tags,
+        min_texts: unit_constraint_min_texts,
+        max_texts: unit_constraint_max_texts,
+        owners: unit_constraint_owners
+    )
+
+pub fn unit_constraint_pool_restore(snap: UnitConstraintPoolSnapshot):
+    if not snap.initialized:
+        unit_constraint_initialized = false
+        return
+    unit_constraint_names = snap.names
+    unit_constraint_predicates = snap.predicates
+    unit_constraint_ref_tags = snap.ref_tags
+    unit_constraint_min_texts = snap.min_texts
+    unit_constraint_max_texts = snap.max_texts
+    unit_constraint_owners = snap.owners
+    unit_constraint_initialized = true
+
+fn _unit_constraint_promote_text(root: [[text]]) -> bool:
+    val promoted = rt_transient_heap_promote(root)
+    rt_array_free(root)
+    promoted
+
+fn _unit_constraint_promote_i64(root: [[i64]]) -> bool:
+    val promoted = rt_transient_heap_promote(root)
+    rt_array_free(root)
+    promoted
+
+# @allow(primitive_api) frontend unit pool API: transient owner promotion returns status bool like sibling registries
+pub fn unit_constraint_promote_transient_owner() -> bool:
+    if not unit_constraint_initialized:
+        return true
+    var promoted = true
+    promoted = _unit_constraint_promote_text([unit_constraint_names]) and promoted
+    promoted = _unit_constraint_promote_text([unit_constraint_predicates]) and promoted
+    promoted = _unit_constraint_promote_i64([unit_constraint_ref_tags]) and promoted
+    promoted = _unit_constraint_promote_text([unit_constraint_min_texts]) and promoted
+    promoted = _unit_constraint_promote_text([unit_constraint_max_texts]) and promoted
+    promoted = _unit_constraint_promote_text([unit_constraint_owners]) and promoted
+    promoted
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+# Lookup prefers the row of the file being processed, else the latest row.
+pub fn unit_constraint_find(name: text) -> i64:
+    val own = unit_constraint_find_owned(unit_constraint_conflict_owner, name)
+    if own >= 0:
+        return own
+    if not unit_constraint_initialized:
+        return -1
+    var i = unit_constraint_names.len() - 1
+    while i >= 0:
+        if unit_constraint_names[i] == name:
+            return i
+        i = i - 1
+    -1
+
+fn unit_constraint_find_owned(owner: text, name: text) -> i64:
+    if not unit_constraint_initialized:
+        return -1
+    var i = 0
+    while i < unit_constraint_names.len():
+        if unit_constraint_names[i] == name and unit_constraint_owners[i] == owner:
+            return i
+        i = i + 1
+    -1
+
+# Same-name re-declarations whose bounds differ, queued for the driver to
+# report (it drains them as warnings). Re-registering identical bounds is silent.
+# Each message carries the source path of the module being parsed when it was
+# queued, so a module's typecheck drains only its own conflicts.
+var unit_constraint_conflicts: [text] = []
+var unit_constraint_conflict_owners: [text] = []
+var unit_constraint_conflict_owner: text = ""
+
+# The frontend names the module it is about to parse; later conflicts belong to it.
+pub fn unit_constraint_set_conflict_owner(path: text):
+    unit_constraint_conflict_owner = path
+
+fn unit_constraint_bounds_differ(row: i64, predicate: text, min_text: text, max_text: text) -> bool:
+    val old_min = unit_constraint_min_texts[row]
+    val old_max = unit_constraint_max_texts[row]
+    if old_min != "" or old_max != "" or min_text != "" or max_text != "":
+        return old_min != min_text or old_max != max_text
+    unit_constraint_predicates[row] != predicate
+
+fn unit_constraint_bounds_text(min_text: text, max_text: text, predicate: text) -> text:
+    if min_text == "" and max_text == "": return "`" + predicate + "`"
+    "[" + min_text + ", " + max_text + "]"
+
+# Take (and clear) every queued SPL-UNIT-006 conflict message.
+pub fn unit_constraint_drain_conflicts() -> [text]:
+    val out = unit_constraint_conflicts
+    unit_constraint_conflicts = []
+    unit_constraint_conflict_owners = []
+    out
+
+# Take only the conflicts queued while `owner` was being parsed; the rest stay
+# queued for their own module.
+pub fn unit_constraint_drain_conflicts_for(owner: text) -> [text]:
+    var out: [text] = []
+    var keep: [text] = []
+    var keep_owners: [text] = []
+    var i = 0
+    while i < unit_constraint_conflicts.len():
+        if unit_constraint_conflict_owners[i] == owner:
+            out.push(unit_constraint_conflicts[i])
+        else:
+            keep.push(unit_constraint_conflicts[i])
+            keep_owners.push(unit_constraint_conflict_owners[i])
+        i = i + 1
+    unit_constraint_conflicts = keep
+    unit_constraint_conflict_owners = keep_owners
+    out
+
+# Queued conflicts of `owner`, left in the queue. The parse cache stores these
+# with the entry so a cache hit (which skips the parser) can replay them.
+pub fn unit_constraint_conflicts_for(owner: text) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < unit_constraint_conflicts.len():
+        if unit_constraint_conflict_owners[i] == owner:
+            out.push(unit_constraint_conflicts[i])
+        i = i + 1
+    out
+
+# Re-queue conflicts restored from a parse-cache entry under `owner`.
+pub fn unit_constraint_requeue_conflicts(owner: text, messages: [text]):
+    for m in messages:
+        unit_constraint_conflicts.push(m)
+        unit_constraint_conflict_owners.push(owner)
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_register(name: text, predicate: text, ref_tag: i64, min_text: text, max_text: text) -> i64:
+    unit_constraint_register_owned(unit_constraint_conflict_owner, name, predicate, ref_tag, min_text, max_text)
+
+# A re-declaration is a conflict only inside the same file; another file's
+# same-name unit gets its own row.
+fn unit_constraint_register_owned(owner: text, name: text, predicate: text, ref_tag: i64, min_text: text, max_text: text) -> i64:
+    if not unit_constraint_initialized:
+        unit_constraint_pool_reset()
+    val existing = unit_constraint_find_owned(owner, name)
+    if existing >= 0:
+        if unit_constraint_bounds_differ(existing, predicate, min_text, max_text):
+            unit_constraint_conflicts.push("SPL-UNIT-006: unit `" + name + "` is declared again with different bounds (" + unit_constraint_bounds_text(unit_constraint_min_texts[existing], unit_constraint_max_texts[existing], unit_constraint_predicates[existing]) + " vs " + unit_constraint_bounds_text(min_text, max_text, predicate) + "); the later declaration wins")
+            unit_constraint_conflict_owners.push(owner)
+        unit_constraint_predicates[existing] = predicate
+        unit_constraint_ref_tags[existing] = ref_tag
+        unit_constraint_min_texts[existing] = min_text
+        unit_constraint_max_texts[existing] = max_text
+        return existing
+    val idx = unit_constraint_names.len()
+    unit_constraint_names.push(name)
+    unit_constraint_predicates.push(predicate)
+    unit_constraint_ref_tags.push(ref_tag)
+    unit_constraint_min_texts.push(min_text)
+    unit_constraint_max_texts.push(max_text)
+    unit_constraint_owners.push(owner)
+    idx
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_count() -> i64:
+    if not unit_constraint_initialized:
+        return 0
+    unit_constraint_names.len()
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_predicate(name: text) -> text:
+    val idx = unit_constraint_find(name)
+    if idx < 0: return ""
+    unit_constraint_predicates[idx]
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_ref_tag(name: text) -> i64:
+    val idx = unit_constraint_find(name)
+    if idx < 0: return -1
+    unit_constraint_ref_tags[idx]
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_min_text(name: text) -> text:
+    val idx = unit_constraint_find(name)
+    if idx < 0: return ""
+    unit_constraint_min_texts[idx]
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_max_text(name: text) -> text:
+    val idx = unit_constraint_find(name)
+    if idx < 0: return ""
+    unit_constraint_max_texts[idx]
+
+# Range sugar -> `where` predicate. `inclusive` is `..=`; an empty bound is
+# open on that side. Both bounds empty yields "" (the caller reports it).
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_range_predicate(lo: text, hi: text, inclusive: bool) -> text:
+    val hi_op = if inclusive: "<=" else: "<"
+    if lo != "" and hi != "":
+        return lo + " <= self and self " + hi_op + " " + hi
+    if lo != "":
+        return lo + " <= self"
+    if hi != "":
+        return "self " + hi_op + " " + hi
+    ""
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_violation_message(unit_name: text, value_text: text, predicate: text) -> text:
+    "SPL-UNIT-005: value " + value_text + " violates the constraint of unit `" + unit_name + "` (`" + predicate + "`)"
+
+# ---------------------------------------------------------------------------
+# Predicate evaluator
+# ---------------------------------------------------------------------------
+
+var uc_toks: [text] = []
+var uc_pos: i64 = 0
+var uc_err: bool = false
+var uc_bounds_empty: bool = false
+var uc_self: f64 = 0.0
+
+fn uc_is_digit(c: text) -> bool:
+    c >= "0" and c <= "9"
+
+fn uc_is_ident_char(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_" or uc_is_digit(c)
+
+# Digit value of `c` (0-9, a-f, A-F), or -1.
+fn uc_radix_digit(c: text) -> i64:
+    if uc_is_digit(c): return int(c) as i64
+    if c >= "a" and c <= "f": return ("abcdef".index_of(c) ?? -1) + 10
+    if c >= "A" and c <= "F": return ("ABCDEF".index_of(c) ?? -1) + 10
+    -1
+
+# Radix of the numeric literal starting at `i` in `t`: 16/2/8 for a
+# `0x`/`0b`/`0o` prefix, else 10.
+fn uc_radix_at(t: text, i: i64) -> i64:
+    if i + 1 >= t.len() or t[i:i+1] != "0":
+        return 10
+    val p = t[i+1:i+2]
+    if p == "x" or p == "X": return 16
+    if p == "b" or p == "B": return 2
+    if p == "o" or p == "O": return 8
+    10
+
+fn uc_tokenize(src: text) -> bool:
+    uc_toks = []
+    var i = 0
+    val n = src.len()
+    while i < n:
+        val c = src[i:i+1]
+        if c == " " or c == "\t":
+            i = i + 1
+            continue
+        if uc_is_digit(c) or (c == "." and i + 1 < n and uc_is_digit(src[i+1:i+2])):
+            var j = i
+            if uc_radix_at(src, i) != 10:
+                j = i + 2
+                while j < n and (uc_radix_digit(src[j:j+1]) >= 0 or src[j:j+1] == "_"):
+                    j = j + 1
+                uc_toks.push(src[i:j])
+                i = j
+                continue
+            while j < n and (uc_is_digit(src[j:j+1]) or src[j:j+1] == "." or src[j:j+1] == "_"):
+                j = j + 1
+            uc_toks.push(src[i:j])
+            i = j
+            continue
+        if uc_is_ident_char(c):
+            var j = i
+            while j < n and uc_is_ident_char(src[j:j+1]):
+                j = j + 1
+            uc_toks.push(src[i:j])
+            i = j
+            continue
+        val two = if i + 1 < n: src[i:i+2] else: ""
+        if two == "<=" or two == ">=" or two == "==" or two == "!=":
+            uc_toks.push(two)
+            i = i + 2
+            continue
+        if c == "<" or c == ">" or c == "+" or c == "-" or c == "*" or c == "/" or c == "%" or c == "(" or c == ")":
+            uc_toks.push(c)
+            i = i + 1
+            continue
+        return false
+    true
+
+fn uc_peek() -> text:
+    if uc_pos < uc_toks.len(): return uc_toks[uc_pos]
+    ""
+
+fn uc_next() -> text:
+    val t = uc_peek()
+    uc_pos = uc_pos + 1
+    t
+
+# Numeric literal text -> f64 (digits, optional fraction, `_` separators).
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_parse_number(t: text) -> f64:
+    var sign = 1.0
+    var i = 0
+    if t.len() > 0 and t[0:1] == "-":
+        sign = -1.0
+        i = 1
+    val radix = uc_radix_at(t, i)
+    if radix != 10:
+        var rv = 0.0
+        i = i + 2
+        while i < t.len():
+            val rc = t[i:i+1]
+            i = i + 1
+            if rc == "_":
+                continue
+            val rd = uc_radix_digit(rc)
+            if rd < 0 or rd >= radix:
+                uc_err = true
+                return 0.0
+            rv = rv * (radix * 1.0) + rd * 1.0
+        return sign * rv
+    var whole = 0.0
+    var frac = 0.0
+    var scale = 1.0
+    var in_frac = false
+    while i < t.len():
+        val c = t[i:i+1]
+        if c == "_":
+            i = i + 1
+            continue
+        if c == ".":
+            in_frac = true
+            i = i + 1
+            continue
+        if not uc_is_digit(c):
+            uc_err = true
+            return 0.0
+        val d = (int(c)) * 1.0
+        if in_frac:
+            scale = scale / 10.0
+            frac = frac + d * scale
+        else:
+            whole = whole * 10.0 + d
+        i = i + 1
+    sign * (whole + frac)
+
+fn uc_primary() -> f64:
+    val t = uc_next()
+    if t == "(":
+        val v = uc_or()
+        if uc_next() != ")":
+            uc_err = true
+        return v
+    if t == "self": return uc_self
+    if t == "true": return 1.0
+    if t == "false": return 0.0
+    if t == "":
+        uc_err = true
+        return 0.0
+    if uc_is_digit(t[0:1]) or t[0:1] == ".":
+        return unit_constraint_parse_number(t)
+    uc_err = true
+    0.0
+
+fn uc_unary() -> f64:
+    if uc_peek() == "-":
+        uc_next()
+        return 0.0 - uc_unary()
+    uc_primary()
+
+fn uc_mul() -> f64:
+    var left = uc_unary()
+    while uc_peek() == "*" or uc_peek() == "/" or uc_peek() == "%":
+        val op = uc_next()
+        val right = uc_unary()
+        if op == "*":
+            left = left * right
+        elif op == "/":
+            if right == 0.0:
+                uc_err = true
+                return 0.0
+            left = left / right
+        else:
+            if right == 0.0:
+                uc_err = true
+                return 0.0
+            val q = (left / right) as i64
+            left = left - (q * 1.0) * right
+    left
+
+fn uc_add() -> f64:
+    var left = uc_mul()
+    while uc_peek() == "+" or uc_peek() == "-":
+        val op = uc_next()
+        val right = uc_mul()
+        if op == "+":
+            left = left + right
+        else:
+            left = left - right
+    left
+
+fn uc_is_cmp(t: text) -> bool:
+    t == "<" or t == "<=" or t == ">" or t == ">=" or t == "==" or t == "!="
+
+fn uc_cmp_holds(op: text, l: f64, r: f64) -> bool:
+    if op == "<": return l < r
+    if op == "<=": return l <= r
+    if op == ">": return l > r
+    if op == ">=": return l >= r
+    if op == "==": return l == r
+    l != r
+
+# Comparison chain: `a <= self <= b` holds when every adjacent pair holds.
+fn uc_cmp() -> f64:
+    var left = uc_add()
+    if not uc_is_cmp(uc_peek()):
+        return left
+    var holds = true
+    while uc_is_cmp(uc_peek()):
+        val op = uc_next()
+        val right = uc_add()
+        if not uc_cmp_holds(op, left, right):
+            holds = false
+        left = right
+    if holds: 1.0 else: 0.0
+
+fn uc_not() -> f64:
+    if uc_peek() == "not":
+        uc_next()
+        val v = uc_not()
+        return if v != 0.0: 0.0 else: 1.0
+    uc_cmp()
+
+fn uc_and() -> f64:
+    var left = uc_not()
+    while uc_peek() == "and":
+        uc_next()
+        val right = uc_not()
+        left = if left != 0.0 and right != 0.0: 1.0 else: 0.0
+    left
+
+fn uc_or() -> f64:
+    var left = uc_and()
+    while uc_peek() == "or":
+        uc_next()
+        val right = uc_and()
+        left = if left != 0.0 or right != 0.0: 1.0 else: 0.0
+    left
+
+# 1 = predicate holds for `self_value`, 0 = violated, -1 = unsupported shape.
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_eval(predicate: text, self_value: f64) -> i64:
+    val trimmed = predicate.trim()
+    if trimmed == "": return -1
+    if not uc_tokenize(trimmed): return -1
+    uc_pos = 0
+    uc_err = false
+    uc_self = self_value
+    val v = uc_or()
+    if uc_err or uc_pos != uc_toks.len(): return -1
+    if v != 0.0: 1 else: 0
+
+# Same, with the value given as literal text (`70000`, `-1`, `2.5`).
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_eval_literal(predicate: text, literal: text) -> i64:
+    uc_err = false
+    val v = unit_constraint_parse_number(literal.trim())
+    if uc_err: return -1
+    unit_constraint_eval(predicate, v)
+
+export UnitConstraintPoolSnapshot, unit_constraint_pool_save, unit_constraint_pool_restore, unit_constraint_promote_transient_owner
+export unit_constraint_pool_reset, unit_constraint_find, unit_constraint_register, unit_constraint_count
+export unit_constraint_predicate, unit_constraint_ref_tag, unit_constraint_min_text, unit_constraint_max_text
+export unit_range_predicate, unit_constraint_violation_message
+export unit_constraint_eval, unit_constraint_eval_literal, unit_constraint_parse_number
+
+# ---------------------------------------------------------------------------
+# Integer bounds of a `where` predicate (native range check)
+# ---------------------------------------------------------------------------
+
+# Integer literal token -> value; `uc_err` is set for anything else.
+fn uc_bound_int(t: text) -> i64:
+    var neg = false
+    var i = 0
+    if t.len() > 0 and t[0:1] == "-":
+        neg = true
+        i = 1
+    if i >= t.len():
+        uc_err = true
+        return 0
+    val radix = uc_radix_at(t, i)
+    if radix != 10:
+        i = i + 2
+    var v: i64 = 0
+    while i < t.len():
+        val c = t[i:i+1]
+        if c == "_":
+            i = i + 1
+            continue
+        val digit = uc_radix_digit(c)
+        if digit < 0 or digit >= radix:
+            uc_err = true
+            return 0
+        if v > (9223372036854775807 - digit) / radix:
+            uc_err = true
+            return 0
+        v = v * radix + digit
+        i = i + 1
+    if neg:
+        return 0 - v
+    v
+
+# 64-bit word of a `0x`/`0b`/`0o` bound text (`_` allowed), wrapping into
+# two's complement so a u64 bound above i64::MAX keeps its bit pattern.
+# Returns false in `ok[0]` for any other text (decimal is the caller's job).
+# @allow(primitive_api) frontend unit pool API: raw bound text -> raw i64 word, matching unit_constraint_min_text/max_text
+pub fn unit_radix_bound_bits(t: text, ok: [bool]) -> i64:
+    ok[0] = false
+    val radix = uc_radix_at(t, 0)
+    if radix == 10 or t.len() <= 2:
+        return 0
+    val shift = if radix == 16: 4 else if radix == 8: 3 else: 1
+    var v: i64 = 0
+    var i = 2
+    while i < t.len():
+        val c = t[i:i+1]
+        i = i + 1
+        if c == "_":
+            continue
+        val digit = uc_radix_digit(c)
+        if digit < 0 or digit >= radix:
+            return 0
+        v = (v << shift) | digit
+    ok[0] = true
+    v
+
+# Fold one `self op n` / `n op self` comparison into acc = [has_lo, lo, has_hi, hi].
+fn uc_apply_bound(op: text, self_left: bool, n: i64, acc: [i64]):
+    var lo_n: i64 = n
+    var hi_n: i64 = n
+    var set_lo = false
+    var set_hi = false
+    var o = op
+    if not self_left:
+        # `n op self` mirrors to `self op' n`.
+        if op == "<=":
+            o = ">="
+        elif op == "<":
+            o = ">"
+        elif op == ">=":
+            o = "<="
+        elif op == ">":
+            o = "<"
+    if o == ">=":
+        set_lo = true
+    elif o == ">":
+        set_lo = true
+        if n == 9223372036854775807:
+            uc_err = true
+            return
+        lo_n = n + 1
+    elif o == "<=":
+        set_hi = true
+    elif o == "<":
+        set_hi = true
+        if n == 0 - 9223372036854775807 - 1:
+            uc_err = true
+            return
+        hi_n = n - 1
+    elif o == "==":
+        set_lo = true
+        set_hi = true
+    if set_lo and (acc[0] == 0 or lo_n > acc[1]):
+        acc[0] = 1
+        acc[1] = lo_n
+    if set_hi and (acc[2] == 0 or hi_n < acc[3]):
+        acc[2] = 1
+        acc[3] = hi_n
+
+fn uc_fold_clause(items: [text], ops: [text], acc: [i64]):
+    if items.len() < 2 or items.len() != ops.len() + 1:
+        return
+    var k = 0
+    while k < ops.len():
+        val a = items[k]
+        val b = items[k + 1]
+        uc_err = false
+        if a == "self" and b != "self":
+            val n = uc_bound_int(b)
+            if not uc_err:
+                uc_apply_bound(ops[k], true, n, acc)
+        elif b == "self" and a != "self":
+            val n = uc_bound_int(a)
+            if not uc_err:
+                uc_apply_bound(ops[k], false, n, acc)
+        k = k + 1
+
+# Inclusive integer bounds implied by a `where` predicate made of `and`-joined
+# comparison chains between `self` and integer literals. Returns [min, max]
+# texts ("" = open). Any other shape (`or`, `not`, parentheses, arithmetic,
+# floats) yields no bounds for that clause: the interpreter still evaluates the
+# full predicate; only the native compare-and-panic is limited to ranges.
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_where_bounds(pred: text) -> [text]:
+    uc_bounds_empty = false
+    if not uc_tokenize(pred):
+        return ["", ""]
+    val toks = uc_toks
+    for t in toks:
+        if t == "or" or t == "not" or t == "(" or t == ")":
+            return ["", ""]
+    var acc: [i64] = [0, 0, 0, 0]
+    var items: [text] = []
+    var ops: [text] = []
+    var clause_ok = true
+    var idx = 0
+    while idx <= toks.len():
+        val t = if idx < toks.len(): toks[idx] else: "and"
+        if t == "and":
+            if clause_ok:
+                uc_fold_clause(items, ops, acc)
+            items = []
+            ops = []
+            clause_ok = true
+        elif t == "<" or t == ">" or t == "<=" or t == ">=" or t == "==":
+            ops.push(t)
+        elif t == "-" and idx + 1 < toks.len() and uc_is_digit(toks[idx + 1][0:1]):
+            items.push("-" + toks[idx + 1])
+            idx = idx + 1
+        elif t == "self" or uc_is_digit(t[0:1]):
+            items.push(t)
+        else:
+            clause_ok = false
+        idx = idx + 1
+    if acc[0] != 0 and acc[2] != 0 and acc[1] > acc[3]:
+        uc_bounds_empty = true
+    val lo = if acc[0] != 0: acc[1].to_text() else: ""
+    val hi = if acc[2] != 0: acc[3].to_text() else: ""
+    [lo, hi]
+
+# True when the last `unit_where_bounds` call folded to an empty range
+# (lo > hi), e.g. `self > 5 and self < 3`: no value can satisfy the unit.
+# @allow(primitive_api) frontend unit pool API: predicate flag over raw bound texts, matching unit_where_bounds
+pub fn unit_where_bounds_empty() -> bool:
+    uc_bounds_empty
+
+# True when both inclusive integer bound texts are present and lo > hi.
+# @allow(primitive_api) frontend unit pool API: raw inclusive bound texts, matching unit_where_bounds
+pub fn unit_bound_texts_empty(lo: text, hi: text) -> bool:
+    if lo == "" or hi == "":
+        return false
+    uc_err = false
+    val lo_n = uc_bound_int(lo)
+    val lo_bad = uc_err
+    val hi_n = uc_bound_int(hi)
+    if lo_bad or uc_err:
+        uc_err = false
+        return false
+    lo_n > hi_n
+
+# Re-registers rows captured by `unit_constraint_pool_save` into the live pool
+# (a same-named row is overwritten). Used after a pool restore so constraints
+# the just-parsed file declared stay visible to MIR lowering.
+pub fn unit_constraint_pool_merge(parsed: UnitConstraintPoolSnapshot):
+    if not parsed.initialized:
+        return
+    var i = 0
+    while i < parsed.names.len():
+        unit_constraint_register_owned(parsed.owners[i], parsed.names[i], parsed.predicates[i], parsed.ref_tags[i], parsed.min_texts[i], parsed.max_texts[i])
+        i = i + 1
+
+export unit_constraint_pool_merge

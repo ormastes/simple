@@ -1,0 +1,21 @@
+use std.database.sql.types.{DbValue, DbRow, DbError}
+use std.database.sql.connection.{Database}
+
+describe "Transaction parameterized entries":
+    it "binds values instead of splicing SQL text":
+        var db = Database.memory()?
+        db.exec("CREATE TABLE tp (id INTEGER, val TEXT)", [])?
+        var tx = db.begin()?
+        val evil = "x'); DROP TABLE tp; --"
+        tx.execute_params("INSERT INTO tp (id, val) VALUES (?, ?)", [DbValue.Integer(value: 1), DbValue.Text(value: evil)])?
+        val rows = tx.query_params("SELECT val FROM tp WHERE id = ?", [DbValue.Integer(value: 1)])?
+        expect(rows.len()).to_equal(1)
+        tx.commit()?
+        val after = db.query("SELECT id FROM tp", [])?
+        expect(after.len()).to_equal(1)
+
+    it "refuses after commit":
+        var db = Database.memory()?
+        var tx = db.begin()?
+        tx.commit()?
+        expect(tx.execute_params("SELECT 1", []).is_err()).to_equal(true)

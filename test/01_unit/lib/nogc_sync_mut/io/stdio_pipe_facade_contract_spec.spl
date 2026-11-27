@@ -1,0 +1,69 @@
+"""
+# Stdio & Pipe SFFI Facade Contract Prevention Spec
+
+Prevention coverage for `nativeall_stdio_facade_exports_missing_2026-11-07`:
+1. Exercises interpreter-backed `std.nogc_sync_mut.io.pipe` (`Stdin`, `Stdout`,
+   `Stderr`, `stdout_flush`, `stderr_flush`) and `std.nogc_sync_mut.sffi.diag`
+   (`stdout_flush`) exports at runtime without hanging or errors.
+2. Verifies that the native-only stdio/terminal externs (`rt_stdin_read`,
+   `rt_stdin_read_all`, `rt_term_write`, `rt_term_flush`, `rt_stdout_write`,
+   `rt_stderr_write`) declared in `pipe.spl` / `diag.spl` / `host.spl` stay
+   registered in `runtime_symbols.rs` and covered by the native link test suite.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use std.nogc_sync_mut.io.pipe.{
+    Stdin,
+    Stdout,
+    Stderr,
+    stdout_flush,
+    stderr_flush
+}
+use std.nogc_sync_mut.sffi.diag.{
+    stdout_flush as diag_stdout_flush
+}
+
+describe "stdio pipe and terminal facade exports":
+    """Verifies interpreter-backed pipe/diag exports and native stdio SFFI contracts."""
+
+    it "constructs Stdin, Stdout, Stderr and flushes streams cleanly":
+        val out = Stdout.new()
+        val err = Stderr.new()
+        val inp = Stdin.new()
+        expect(out.flush().is_ok()).to_equal(true)
+        expect(err.flush().is_ok()).to_equal(true)
+        val zero = inp.read_exact(0)
+        expect(zero.is_ok()).to_equal(true)
+        expect(zero.unwrap().len()).to_equal(0)
+        stdout_flush()
+        stderr_flush()
+        diag_stdout_flush()
+
+    it "keeps all stdio and terminal SFFI facade signatures aligned with runtime symbols":
+        val pipe_src = file_read("src/lib/nogc_sync_mut/io/pipe.spl")
+        expect(pipe_src).to_contain("extern fn rt_stdin_read(size: i64) -> [u8]")
+        expect(pipe_src).to_contain("extern fn rt_stdin_read_all() -> [u8]")
+        expect(pipe_src).to_contain("extern fn rt_stdout_write(data: [u8]) -> i64")
+        expect(pipe_src).to_contain("extern fn rt_term_write(data: text) -> i64")
+        expect(pipe_src).to_contain("extern fn rt_term_flush() -> i32")
+
+        val diag_src = file_read("src/lib/nogc_sync_mut/sffi/diag.spl")
+        expect(diag_src).to_contain("extern fn rt_stdout_flush()")
+        expect(diag_src).to_contain("extern fn rt_stdout_write(data: [u8]) -> i64")
+        expect(diag_src).to_contain("extern fn rt_stderr_flush()")
+
+        val syms = file_read("src/compiler_rust/common/src/runtime_symbols.rs")
+        expect(syms).to_contain("\"rt_stdin_read\"")
+        expect(syms).to_contain("\"rt_stdin_read_all\"")
+        expect(syms).to_contain("\"rt_term_write\"")
+        expect(syms).to_contain("\"rt_term_flush\"")
+        expect(syms).to_contain("\"rt_stdout_write\"")
+        expect(syms).to_contain("\"rt_stdout_flush\"")
+        expect(syms).to_contain("\"rt_stderr_write\"")
+        expect(syms).to_contain("\"rt_stderr_flush\"")
+
+        val jit_tests = file_read("src/compiler_rust/driver/tests/jit_extern_native_link_tests.rs")
+        expect(jit_tests).to_contain("rt_term_write")
+        expect(jit_tests).to_contain("rt_stdin_read_all")
+        expect(jit_tests).to_contain("native_only_externs_return_the_runtime_values")

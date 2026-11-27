@@ -1,0 +1,164 @@
+# @req REQ-WDS-007
+# Explicit primary terminal/stdin container creation; SOURCE-ONLY NOT_RUN.
+use std.spec.*
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_codec_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_scope_v2.windows_docker_scoped_create_v2
+use std.nogc_async_mut.container.providers.windows.docker_runtime_v1.WindowsDockerRuntimeProviderV1
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.*
+
+fn terminal_request_v4(tty: bool = true, stdin: bool = true) -> WindowsDockerRequestV1:
+    var request = windows_adapter_native_request_fixture_v2()
+    request.terminal_tty = tty
+    request.stdin_open = stdin
+    request
+
+fn terminal_create_response_v4(request: WindowsDockerRequestV1) -> WindowsDockerScriptedResultV1:
+    val command = windows_docker_scoped_create_v2(windows_adapter_policy_fixture_v2(), request, windows_adapter_scope_fixture_v2()).unwrap()
+    WindowsDockerScriptedResultV1(operation: "create", program: command.program, args: command.args,
+        stdout: windows_adapter_native_id_fixture_v2() + "\n", stderr: "", exit_code: 0)
+
+fn terminal_inspect_response_v4(request: WindowsDockerRequestV1, actual: text, phase: text = "created") -> WindowsDockerScriptedResultV1:
+    var observed = windows_adapter_inspect_fixture_v2(phase)
+    val policy = windows_adapter_policy_fixture_v2()
+    val previous = windows_docker_request_digest_v1(policy, windows_adapter_native_request_fixture_v2()).unwrap()
+    val digest = windows_docker_request_digest_v1(policy, request).unwrap()
+    observed.args[5] = observed.args[5] + WINDOWS_DOCKER_TERMINAL_FORMAT_V4
+    observed.stdout = observed.stdout.trim().replace(previous, digest) + "|" + actual + "\n"
+    observed
+
+fn terminal_provider_v4(request: WindowsDockerRequestV1, tail: [WindowsDockerScriptedResultV1]) -> WindowsDockerRuntimeProviderV1:
+    var provider = WindowsDockerRuntimeProviderV1.scripted(windows_adapter_policy_fixture_v2(), tail)
+    expect(provider.bind_managed_scope_v2(windows_adapter_scope_fixture_v2()).unwrap()).to_equal(true)
+    expect(provider.set_scripted_admission_clock_v1(1000).unwrap()).to_equal(true)
+    val digest = windows_docker_request_digest_v1(windows_adapter_policy_fixture_v2(), request).unwrap()
+    val deadline = container_effect_deadline_v1(digest, request.operation_id, ["create", "start"], 2000).unwrap()
+    expect(provider.set_launch_deadline_v1(deadline).unwrap()).to_equal(true)
+    provider
+
+fn terminal_creation_script_v4(request: WindowsDockerRequestV1, actual: text) -> [WindowsDockerScriptedResultV1]:
+    [windows_adapter_engine_fixture_v2(), windows_adapter_image_fixture_v2(), windows_adapter_engine_fixture_v2(),
+        windows_adapter_image_fixture_v2(), terminal_create_response_v4(request), windows_adapter_engine_fixture_v2(),
+        terminal_inspect_response_v4(request, actual)]
+
+describe "Windows explicit primary TTY and stdin request version four":
+    it "keeps false defaults on old schema branches and binds independent typed flags in version four":
+        val policy = windows_adapter_policy_fixture_v2()
+        val original = windows_adapter_native_request_fixture_v2()
+        val old_bytes = windows_docker_request_encode_v1(policy, original).unwrap()
+        expect(old_bytes.contains("version: 2")).to_equal(true)
+        expect(old_bytes.contains("terminalTty")).to_equal(false)
+        expect(old_bytes.contains("stdinOpen")).to_equal(false)
+        expect(windows_docker_create_command_v1(policy, original).unwrap().args.contains("--tty")).to_equal(false)
+        expect(windows_docker_create_command_v1(policy, original).unwrap().args.contains("--interactive")).to_equal(false)
+        val base_digest = windows_docker_request_digest_v1(policy, original).unwrap()
+        val tty_digest = windows_docker_request_digest_v1(policy, terminal_request_v4(true, false)).unwrap()
+        val stdin_digest = windows_docker_request_digest_v1(policy, terminal_request_v4(false, true)).unwrap()
+        val both_digest = windows_docker_request_digest_v1(policy, terminal_request_v4()).unwrap()
+        expect(base_digest == tty_digest).to_equal(false)
+        expect(tty_digest == stdin_digest).to_equal(false)
+        expect(stdin_digest == both_digest).to_equal(false)
+        for request in [terminal_request_v4(true, false), terminal_request_v4(false, true), terminal_request_v4()]:
+            val bytes = windows_docker_request_encode_v1(policy, request).unwrap()
+            expect(bytes.contains("version: 4")).to_equal(true)
+            val decoded = windows_docker_request_decode_v1(policy, bytes).unwrap()
+            expect(decoded.terminal_tty).to_equal(request.terminal_tty)
+            expect(decoded.stdin_open).to_equal(request.stdin_open)
+            expect(windows_docker_request_encode_v1(policy, decoded).unwrap()).to_equal(bytes)
+            val command = windows_docker_create_command_v1(policy, request).unwrap()
+            expect(command.args.contains("--tty")).to_equal(request.terminal_tty)
+            expect(command.args.contains("--interactive")).to_equal(request.stdin_open)
+
+    it "preserves version one/three records when flags remain false and accepts version four with mounts":
+        var policy = windows_adapter_policy_fixture_v2()
+        var request = windows_adapter_native_request_fixture_v2()
+        request.working_directory = ""
+        val v1 = windows_docker_request_encode_v1(policy, request).unwrap()
+        expect(v1.contains("version: 1")).to_equal(true)
+        expect(v1.contains("terminalTty")).to_equal(false)
+        policy.workspace_root = "C:\\protected-workspaces"
+        request.working_directory = "C:\\work"
+        request.mounts = [WindowsDockerMountV1(host_root: "C:\\protected-workspaces\\attempt-a", guest_root: "C:\\work", read_only: false)]
+        val v3 = windows_docker_request_encode_v1(policy, request).unwrap()
+        expect(v3.contains("version: 3")).to_equal(true)
+        expect(v3.contains("stdinOpen")).to_equal(false)
+        request.terminal_tty = true
+        val v4 = windows_docker_request_encode_v1(policy, request).unwrap()
+        expect(v4.contains("version: 4")).to_equal(true)
+        expect(windows_docker_request_decode_v1(policy, v4).unwrap().mounts[0].host_root).to_equal(request.mounts[0].host_root)
+
+    it "rejects flag duplicates, missing/type errors, downgrade and semantic digest mutation":
+        val policy = windows_adapter_policy_fixture_v2()
+        val source = windows_docker_request_encode_v1(policy, terminal_request_v4()).unwrap()
+        for malformed in [source.replace("stdinOpen: true", "stdinOpen: true, stdinOpen: false"),
+                source.replace("terminalTty: true", "terminalTty: \"true\""),
+                source.replace("stdinOpen: true, ", ""), source.replace("version: 4", "version: 2"),
+                source.replace("stdinOpen: true", "stdinOpen: false")]:
+            expect(malformed == source).to_equal(false)
+            expect(windows_docker_request_decode_v1(policy, malformed).is_err()).to_equal(true)
+        val unrequested = source.replace("stdinOpen: true", "stdinOpen: false").replace("terminalTty: true", "terminalTty: false")
+        expect(windows_docker_request_decode_v1(policy, unrequested).is_err()).to_equal(true)
+
+describe "Windows actual primary terminal inspection and exact recovery":
+    it "creates each requested flag combination and confirms actual Tty/OpenStdin/StdinOnce/AttachStdin":
+        for flags in [(true, true, "true|true|true|true"), (true, false, "true|false|false|false"), (false, true, "false|true|true|true")]:
+            val request = terminal_request_v4(flags.0, flags.1)
+            val id = windows_adapter_native_id_fixture_v2()
+            val script = terminal_creation_script_v4(request, flags.2) + [windows_adapter_engine_fixture_v2(),
+                terminal_inspect_response_v4(request, flags.2), windows_adapter_response_fixture_v2("start", ["start", id], id + "\n"),
+                windows_adapter_engine_fixture_v2(), terminal_inspect_response_v4(request, flags.2, "running")]
+            var provider = terminal_provider_v4(request, script)
+            expect(provider.prepare_pod(request).status).to_equal("ok")
+            val result = provider.create(request)
+            expect(result.status).to_equal("ok")
+            expect(result.state.identity.native_id).to_equal(id)
+            expect(provider.consumed_script_count()).to_equal(7)
+            expect(provider.start(request).state.phase).to_equal("running")
+            expect(provider.consumed_script_count()).to_equal(12)
+
+    it "keeps a returned create candidate unknown on actual flag mismatch, then recovers only matching terminal metadata":
+        val request = terminal_request_v4()
+        for wrong in ["false|true|true|true", "true|false|false|false", "true|true|false|true", "true|true|true|false"]:
+            val tail = terminal_creation_script_v4(request, wrong) + [windows_adapter_engine_fixture_v2(),
+                windows_adapter_image_fixture_v2(), terminal_inspect_response_v4(request, "true|true|true|true")]
+            var provider = terminal_provider_v4(request, tail)
+            expect(provider.prepare_pod(request).status).to_equal("ok")
+            val failed = provider.create(request)
+            expect(failed.status).to_equal("blocked")
+            expect(failed.reason).to_equal("docker-inspect-terminal-binding-mismatch")
+            val candidate = provider.intent(request).unwrap()
+            expect(candidate.native_id).to_equal(windows_adapter_native_id_fixture_v2())
+            expect(candidate.phase).to_equal("unknown")
+            expect(provider.consumed_script_count()).to_equal(7)
+            val recovered = provider.recover(request, candidate)
+            expect(recovered.status).to_equal("ok")
+            expect(recovered.state.phase).to_equal("created")
+            expect(provider.consumed_script_count()).to_equal(10)
+
+    it "refuses a mutated retained TTY request before any recovery or second create command":
+        val request = terminal_request_v4()
+        var provider = terminal_provider_v4(request, terminal_creation_script_v4(request, "true|true|true|true"))
+        expect(provider.prepare_pod(request).status).to_equal("ok")
+        expect(provider.create(request).status).to_equal("ok")
+        val intent = provider.intent(request).unwrap()
+        var changed = request
+        changed.stdin_open = false
+        expect(provider.recover(changed, intent).status).to_equal("blocked")
+        expect(provider.consumed_script_count()).to_equal(7)
+        expect(provider.create(request).status).to_equal("blocked")
+        expect(provider.consumed_script_count()).to_equal(7)
+
+
+    it "refuses changed actual terminal metadata at the start guard before any native start":
+        val request = terminal_request_v4()
+        val script = terminal_creation_script_v4(request, "true|true|true|true") + [windows_adapter_engine_fixture_v2(),
+            terminal_inspect_response_v4(request, "false|true|true|true")]
+        var provider = terminal_provider_v4(request, script)
+        expect(provider.prepare_pod(request).status).to_equal("ok")
+        expect(provider.create(request).status).to_equal("ok")
+        val started = provider.start(request)
+        expect(started.status).to_equal("blocked")
+        expect(started.reason).to_equal("docker-inspect-terminal-binding-mismatch")
+        expect(provider.intent(request).unwrap().phase).to_equal("created")
+        expect(provider.consumed_script_count()).to_equal(9)

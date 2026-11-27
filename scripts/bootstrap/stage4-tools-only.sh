@@ -2,6 +2,20 @@
 # Validate one approved Stage-4 tool journal and atomically publish its output.
 set -eu
 
+if [ "$#" -eq 0 ] && [ -t 0 ] && [ "${CI:-}" != "true" ] && [ "${SIMPLE_NONINTERACTIVE:-0}" != "1" ]; then
+  cat >&2 <<'EOF_DEPRECATED'
+DEPRECATED: Do not use scripts/bootstrap/stage4-tools-only.sh interactively without arguments.
+Use 'scripts/bootstrap/build-phase3-phase4.sh' (or 'scripts/bootstrap/build-phase3-phase4.bat' on Windows; default --win-config=mingw):
+  Default / phased shard build: sh scripts/bootstrap/build-phase3-phase4.sh --phase=p3 --compile-mode=shard
+  File-based parallel build:    sh scripts/bootstrap/build-phase3-phase4.sh --phase=p3 --compile-mode=file
+  Phase 4 (release + xray):     sh scripts/bootstrap/build-phase3-phase4.sh --phase=p4
+  Windows (mingw default):      scripts\bootstrap\build-phase3-phase4.bat --win-config=mingw --phase=p3
+EOF_DEPRECATED
+  printf 'Press Enter to return...' >&2
+  if read -r _; then :; fi
+  return 0 2>/dev/null || exit 0
+fi
+
 die() {
   echo "stage4-tools-only: $*" >&2
   exit 1

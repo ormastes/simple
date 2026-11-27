@@ -1,0 +1,70 @@
+# AUTHORED_NOT_RUN. Exact DATA wire fixtures, no native/recovery owner forged.
+# @req REQ-BROKER-RECOVERY-READ-002
+use std.spec.{describe, it, expect, step}
+use std.common.build_manager.group_process_stream_reap_v3.*
+use std.common.build_manager.group_process_stream_protocol_v2.*
+use std.common.build_manager.group_process_stream_profile_v3.*
+use std.common.build_manager.grouped_execution_contract.GroupedActionLeaseV1
+use std.common.crypto.sha256.sha256_text
+
+fn recovery_data_launch_v3() -> GroupProcessStreamLaunchV2:
+    val request = GroupProcessStreamRequestV2(program: "/opt/helper", producer_digest: "a".repeat(64),
+        args: ["--output"], environment: [], directory: "/work", inputs: [], timeout_ms: 5000,
+        broker_program: "/opt/broker", broker_digest: "b".repeat(64),
+        child_argv_digest: group_process_child_argv_digest_v2("/opt/helper", ["--output"]), launch_deadline_unix_ms: 1)
+    GroupProcessStreamLaunchV2(root: "/work/owner", worker_id: "worker_1", generation: 7,
+        snapshot_digest: "d".repeat(64), cache_identity: "e".repeat(64), memory_limit_bytes: 1048576,
+        request: request, delegated_cgroup_path: "/sys/fs/cgroup/service", transport_generation: 34)
+
+fn recovery_data_lease_v3() -> GroupedActionLeaseV1:
+    GroupedActionLeaseV1(group_id: "group_1", action_id: "action_1", worker_id: "worker_1", generation: 7,
+        lease_id: "lease_1", snapshot_digest: "d".repeat(64), cache_identity: "e".repeat(64))
+
+fn recovery_data_prefix_v3(launch: GroupProcessStreamLaunchV2) -> text:
+    # Independent literal wire framing, not the extracted builder.
+    "SIMPLE-GROUP-STREAM-REAP-2\ngroup_1\naction_1\nworker_1\n7\nlease_1\n" + "d".repeat(64) + "\n" +
+        "e".repeat(64) + "\n" + "f".repeat(64) + "\n34\n" + launch.request.child_argv_digest + "\n" +
+        "a".repeat(64) + "\n" + "b".repeat(64) + "\n"
+
+describe "Exact extracted legacy stream reap encoding":
+    it "preserves unprofiled byte framing and newline-percent escaping without asserting proof":
+        step("These raw DATA fragments are deliberately not a native cleanup receipt")
+        val launch = recovery_data_launch_v3()
+        val actual = group_process_stream_reap_bytes_v3(launch, "f".repeat(64), recovery_data_lease_v3(), "terminal\n", "memory%\n", "ignored-unprofiled").unwrap()
+        expect(actual).to_equal(recovery_data_prefix_v3(launch) + "terminal\nmemory%25%0A\n")
+        expect(group_process_stream_launch_validate_profiled_v3(launch)).to_equal("")
+        # Expired positive launch time is still canonical historical DATA;
+        # the recovery view never invents a fresh grant or deadline.
+        expect(launch.request.launch_deadline_unix_ms).to_equal(1)
+
+    it "preserves exact profiled template and resource suffix bytes":
+        step("Keep the existing REAP-3 suffix and immutable template hash")
+        var launch = recovery_data_launch_v3()
+        launch.profile_v3 = Some(GroupProcessStreamProfileV3(helper_cpu: GroupProcessCpuQuotaV3(25, 2500, 100000),
+            broker: GroupProcessBrokerBudgetV3("/sys/fs/cgroup/service/broker", 11, 22, 3, "c".repeat(64),
+                250000, 1000000, 250, 67108864, 134217728), child_image_mode: "trusted-local-admin-image-fd-v1"))
+        val template = group_process_stream_template_encode_v3(launch).unwrap()
+        val prefix = recovery_data_prefix_v3(launch).replace("REAP-2", "REAP-3")
+        val actual = group_process_stream_reap_bytes_v3(launch, "f".repeat(64), recovery_data_lease_v3(), "terminal\n", "memory\n", "resources\n").unwrap()
+        expect(actual).to_equal(prefix + "terminal\nmemory%0A\n" + sha256_text(template) + "\nresources%0A\n")
+
+    it "refuses each mismatched immutable lease field before legacy IO or recovery acceptance":
+        step("Use the same production guard now called by both legacy and owned recovery")
+        val launch = recovery_data_launch_v3()
+        val original = recovery_data_lease_v3()
+        expect(group_process_stream_reap_lease_validate_v3(launch, original).is_ok()).to_equal(true)
+        var changed = original
+        changed.generation = 8
+        expect(group_process_stream_reap_lease_validate_v3(launch, changed).is_err()).to_equal(true)
+        changed = original
+        changed.worker_id = "worker_2"
+        expect(group_process_stream_reap_lease_validate_v3(launch, changed).is_err()).to_equal(true)
+        changed = original
+        changed.snapshot_digest = "0".repeat(64)
+        expect(group_process_stream_reap_lease_validate_v3(launch, changed).is_err()).to_equal(true)
+        changed = original
+        changed.cache_identity = "0".repeat(64)
+        expect(group_process_stream_reap_lease_validate_v3(launch, changed).is_err()).to_equal(true)
+        changed = original
+        changed.lease_id = ""
+        expect(group_process_stream_reap_bytes_v3(launch, "f".repeat(64), changed, "", "", "").is_err()).to_equal(true)

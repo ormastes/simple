@@ -4,6 +4,7 @@
 use std.spec.{describe, it, expect, fail, step}
 use std.env.{env_get}
 use std.io.{file_exists}
+use std.nogc_sync_mut.sffi.host.{heap_alloc_count, heap_array_capacity_bytes}
 use common.ui.builder.{button, panel}
 use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU}
 use common.ui.theme_render_snapshot.{ThemeRenderSnapshot}
@@ -59,7 +60,15 @@ fn _expect_retained_storage(command_count: i32):
     val storage = WidgetDrawIrStorage.new()
     val snapshot = theme_package_render_snapshot("")
     expect(_widget_producer_command_count(storage, root, snapshot)).to_equal(command_count)
-    expect(_widget_producer_command_count(storage, root, snapshot)).to_equal(command_count)
+    val alloc_before = heap_alloc_count()
+    val capacity_before = heap_array_capacity_bytes()
+    val emitted = _widget_producer_command_count(storage, root, snapshot)
+    val alloc_delta = heap_alloc_count() - alloc_before
+    val capacity_delta = heap_array_capacity_bytes() - capacity_before
+    expect(emitted).to_equal(command_count)
+    # These are process-local runtime observations, not modeled per-command counts.
+    # Retain signed capacity deltas; unrelated reclamation can lower live capacity.
+    print("draw_ir_producer_allocations commands={command_count} allocation_delta={alloc_delta} array_capacity_delta_bytes={capacity_delta}")
     # Arrays expose neither backing-buffer identity nor capacity at this layer.
     # These counters prove the second frame returned the retained composition.
     expect(storage.build_count).to_equal(1)
@@ -81,11 +90,19 @@ fn _max_rss_receipt(command_count: i32) -> BenchResult:
     ])
 
 fn expect_producer_allocation_budget():
-    # The current runtime exposes no allocation counter to this producer tier.
-    # Do not replace this explicit gap with a synthetic command/allocation count.
-    val allocation_metric = "unavailable:no-runtime-allocation-counter"
-    expect(allocation_metric).to_equal(
-        "unavailable:no-runtime-allocation-counter")
+    # Exercise actual collection allocation before accepting either counter.
+    # A missing/default-zero provider must not produce an allocation receipt.
+    val alloc_before = heap_alloc_count()
+    val capacity_before = heap_array_capacity_bytes()
+    var probe = [11, 12, 13, 14]
+    probe.push(15)
+    val alloc_after = heap_alloc_count()
+    val capacity_after = heap_array_capacity_bytes()
+    expect(probe.len()).to_equal(5)
+    expect(probe[0]).to_equal(11)
+    expect(probe[4]).to_equal(15)
+    expect(alloc_after).to_be_greater_than(alloc_before)
+    expect(capacity_after).to_be_greater_than(capacity_before)
 
 fn _expect_producer_storage_receipt(command_count: i32):
     _expect_retained_storage(command_count)
@@ -105,7 +122,7 @@ fn _expect_producer_storage_receipt(command_count: i32):
     bench_emit([warm, rss], report_path, table_path)
     expect(file_exists(report_path)).to_equal(true)
     expect(file_exists(table_path)).to_equal(true)
-    print("draw_ir_producer_receipt commands={command_count} frame_ns={warm.value} max_rss_kb={rss.value} retained_storage=true allocation=unavailable:no-runtime-allocation-counter")
+    print("draw_ir_producer_receipt commands={command_count} frame_ns={warm.value} max_rss_kb={rss.value} retained_storage=true allocation=runtime-counter-delta")
 
 describe "Draw IR producer storage receipt (AC-6)":
 

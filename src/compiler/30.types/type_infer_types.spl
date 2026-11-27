@@ -45,12 +45,12 @@ struct HmPendingBoundCall:
 
 type MutableSymbolsMap = {i64: bool}
 
-fn empty_subst_map() -> SubstitutionMap:
+pub fn empty_subst_map() -> SubstitutionMap:
     """Create empty substitution map."""
     var result: SubstitutionMap = {}
     result
 
-fn empty_type_env() -> TypeEnvironment:
+pub fn empty_type_env() -> TypeEnvironment:
     """Create empty type environment."""
     var result: TypeEnvironment = {}
     result
@@ -115,11 +115,21 @@ impl Substitution:
                 else:
                     ty
             case Function(params, ret, effects):
+                # A `Throws(T)` effect carries a type: resolve it like a
+                # parameter (instantiate_type already does), else a variable
+                # bound only through a thrown type stays unresolved
+                # (generics plan packet E2, F05).
+                var new_effects: [Effect] = []
+                for effect in effects:
+                    val applied_kind = match effect.kind:
+                        case Throws(thrown): EffectKind.Throws(self.apply(thrown))
+                        case _: effect.kind
+                    new_effects = new_effects.push(Effect(kind: applied_kind, span: effect.span))
                 var new_params: [HirType] = []
                 for p in params:
                     new_params = new_params.push(self.apply(p))
                 HirType(
-                    kind: HirTypeKind.Function(new_params, self.apply(ret), effects),
+                    kind: HirTypeKind.Function(new_params, self.apply(ret), new_effects),
                     span: ty.span
                 )
             case Tuple(elements):
@@ -127,6 +137,22 @@ impl Substitution:
                 for e in elements:
                     new_elements = new_elements.push(self.apply(e))
                 HirType(kind: HirTypeKind.Tuple(new_elements), span: ty.span)
+            case Union(members):
+                var new_members: [HirType] = []
+                for m in members:
+                    new_members = new_members.push(self.apply(m))
+                HirType(kind: HirTypeKind.Union(new_members), span: ty.span)
+            case Isolated(inner):
+                HirType(kind: HirTypeKind.Isolated(self.apply(inner)), span: ty.span)
+            case Projection(base, assoc_name):
+                HirType(kind: HirTypeKind.Projection(self.apply(base), assoc_name), span: ty.span)
+            case TypeParam(name, bounds):
+                # The binder itself is not a variable, but its bounds are
+                # ordinary types that may mention one.
+                var new_bounds: [HirType] = []
+                for b in bounds:
+                    new_bounds = new_bounds.push(self.apply(b))
+                HirType(kind: HirTypeKind.TypeParam(name, new_bounds), span: ty.span)
             case Array(element, size):
                 HirType(kind: HirTypeKind.Array(self.apply(element), size), span: ty.span)
             case Slice(element):
@@ -242,6 +268,10 @@ struct HmInferContext:
     mutable_symbols: MutableSymbolsMap
     # Current function's accumulated effects (Phase 4: Async-from-Sync checking)
     current_function_effects: [Effect]
+    # False once inference met a construct it could not classify (the row then
+    # carries Unknown markers): consumers must not read the row as a complete
+    # effect proof. Reset to true wherever current_function_effects is reset.
+    current_function_effects_complete: bool
     # Declared return type of the function whose body is being inferred.
     # nil when the signature has no annotation or no function is active.
     # Used by infer_return_expr to reject optional (T?) payloads in
@@ -251,14 +281,30 @@ struct HmInferContext:
     # Name of the function whose body is being inferred (diagnostics only).
     current_fn_name: text
     # Declared symbol names / kinds ("struct", "class", "enum", "type") by raw
-    # symbol id, filled by _register_module_symbols. Used only to RENDER
-    # diagnostics such as E-TYPE-NIL-COMPARE; never consulted for typing.
+    # symbol id, filled by _register_module_symbols. Used to RENDER
+    # diagnostics such as E-TYPE-NIL-COMPARE and, since the unit operator gate
+    # (inference_expr_ops.spl), to map a Named operand to its UnitDecl row;
+    # it never changes a non-unit type's inference.
     symbol_names: Dict<i64, text>
+    # Symbol ids that are declared fn definitions (not params/locals): only a
+    # direct call to one of these may be read as a proven effect row.
+    declared_fn_symbols: Dict<i64, bool>
     symbol_kinds: Dict<i64, text>
     # Trailing/defaulted for existing constructor compatibility.
-    function_bound_context: FunctionBoundContext? = nil
+    function_bound_context: FunctionBoundContext? = None
     pending_bound_calls: [HmPendingBoundCall] = []
-    current_function_symbol: SymbolId? = nil
+    current_function_symbol: SymbolId? = None
+    # Free type-variable ids of the module-level env, computed once per
+    # infer_module so top-level generalize_all does not rescan the whole env
+    # for every function (that rescan made inference quadratic in fn count).
+    module_env_vars: Dict<i64, bool> = {}
+    module_env_vars_ready: bool = false
+    # Undo log of env writes (name, previous scheme, whether it existed) so a
+    # function can restore its entry env by unwinding instead of copying the
+    # whole env per function.
+    env_trail_names: [text] = []
+    env_trail_prev: [TypeScheme] = []
+    env_trail_had: [bool] = []
 
 
 # ============================================================================
@@ -291,7 +337,7 @@ impl InferMode:
         """Get expected type if in check mode."""
         match self:
             case Check(ty): Some(ty)
-            case _: nil
+            case _: None
 
 # ============================================================================
 # Exports

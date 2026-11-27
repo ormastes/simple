@@ -1,0 +1,91 @@
+#!/bin/sh
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-provisional-cache-test.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+source_root="$tmp/source"
+output_root="$tmp/output"
+mkdir -p "$source_root/src/runtime" "$source_root/src/app/bootstrap_builder" \
+  "$source_root/src/compiler" "$source_root/src/lib" "$source_root/src/os" \
+  "$source_root/src/package_ownership" "$source_root/src/plugins" "$source_root/src/compositions" \
+  "$source_root/examples/10_tooling" "$source_root/scripts/bootstrap" "$source_root/scripts/check/lib" \
+  "$source_root/test/03_system/app/bootstrap_builder/feature" "$source_root/test/fixtures/bootstrap_builder"
+mkdir -p "$tmp/bin"
+cat >"$tmp/bin/df" <<'DF'
+#!/bin/sh
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nfixture 100000000 0 90000000 0%% /\n'
+DF
+chmod +x "$tmp/bin/df"
+printf 'fn main():\n    0\n' >"$source_root/src/app/bootstrap_builder/native_group_provisional_main.spl"
+printf 'runtime input\n' >"$source_root/src/runtime/runtime.spl"
+printf 'diagnostic hello\n' >"$tmp/hello.receipt"
+cat >"$tmp/fake-simple" <<'FAKE'
+#!/bin/sh
+set -eu
+[ "$1" = native-build ]
+printf 'launch\n' >>"$PROVISIONAL_LAUNCH_COUNT"
+shift
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --output ]; then shift; output=$1; fi
+  shift
+done
+for key in HOME SIMPLE_CACHE SIMPLE_CACHE_DIR SIMPLE_CACHE_PROJECT SIMPLE_CACHE_SCOPE SIMPLE_USER_STORAGE_ROOT SIMPLE_WORKTREE_STORAGE_ROOT SIMPLE_FRONTEND_CACHE_DIR SIMPLE_FRONTEND_CACHE SIMPLE_HIR_CACHE_DIR SIMPLE_HIR_CACHE SIMPLE_HIR_CACHE_FAILED_DIAGNOSTIC_DIR SIMPLE_NATIVE_BUILD_CACHE_DIR TMPDIR TEMP TMP; do
+  eval "value=\${$key-}"
+  printf '%s=%s\n' "$key" "$value"
+done >"$PROVISIONAL_CACHE_CAPTURE"
+env | sort >"$PROVISIONAL_NESTED_CAPTURE"
+printf 'fake immutable image\n' >"$output"
+FAKE
+chmod +x "$tmp/fake-simple"
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+bootstrap_stage3_source_snapshot "$tmp/source.snapshot" "$source_root"
+source_digest=$(sha256sum "$tmp/source.snapshot" | awk '{print $1}')
+hello_digest=$(sha256sum "$tmp/hello.receipt" | awk '{print $1}')
+producer_digest=$(sha256sum "$tmp/fake-simple" | awk '{print $1}')
+printf '#!/bin/sh\nexit 0\n' >"$tmp/fake-clang"
+printf '#!/bin/sh\nexit 0\n' >"$tmp/fake-lld"
+chmod +x "$tmp/fake-clang" "$tmp/fake-lld"
+clang="$tmp/fake-clang"
+lld="$tmp/fake-lld"
+clang_digest=$(sha256sum "$clang" | awk '{print $1}')
+lld_digest=$(sha256sum "$lld" | awk '{print $1}')
+PROVISIONAL_LAUNCH_COUNT="$tmp/launch-count"
+run_helper() {
+env PATH="$tmp/bin:$PATH" SIMPLE_CACHE=/home/hostile/.cache/simple SIMPLE_CACHE_DIR=/home/hostile/cache-dir SIMPLE_CACHE_PROJECT=hostile-project SIMPLE_CACHE_SCOPE=hostile-scope SIMPLE_USER_STORAGE_ROOT=/home/hostile/storage SIMPLE_WORKTREE_STORAGE_ROOT=/home/hostile/worktree SIMPLE_FRONTEND_CACHE_DIR=/home/hostile/frontend SIMPLE_FRONTEND_CACHE_SCOPE=hostile-frontend SIMPLE_FRONTEND_CACHE=0 SIMPLE_HIR_CACHE_DIR=/home/hostile/hir SIMPLE_HIR_CACHE=0 SIMPLE_HIR_CACHE_FAILED_DIAGNOSTIC_DIR=/home/hostile/hir-fail SIMPLE_NATIVE_BUILD_CACHE_DIR=/home/hostile/native SIMPLE_HIR_SHARD=hostile SIMPLE_NATIVE_BUILD_FORCE_WORKER=1 SIMPLE_SHARED_PARSE_CAS_ROOT=/home/hostile/shared-parse TMPDIR=/home/hostile/tmp TEMP=/home/hostile/temp TMP=/home/hostile/tm PROVISIONAL_CACHE_CAPTURE="$tmp/compiler.env" PROVISIONAL_NESTED_CAPTURE="$tmp/nested.env" PROVISIONAL_LAUNCH_COUNT="$PROVISIONAL_LAUNCH_COUNT" sh "$repo/scripts/bootstrap/prepare-provisional-manager-images.shs" \
+  --mode=authority --producer="$tmp/fake-simple" --producer-digest="$producer_digest" \
+  --source-root="$source_root" --source-snapshot="$tmp/source.snapshot" --source-snapshot-digest="$source_digest" \
+  --hello-receipt="$tmp/hello.receipt" --hello-receipt-digest="$hello_digest" --output-root="$output_root" \
+  --target=aarch64-unknown-linux-gnu --runtime-path="$source_root/src/runtime" \
+  --memory-bytes=67108864 --reserve-bytes=67108864 --threads=1 --timeout-seconds=60 \
+  --memory-policy=enforce --compiler-tool="$clang" --compiler-tool-digest="$clang_digest" \
+  --linker-tool="$lld" --linker-tool-digest="$lld_digest"
+}
+run_helper
+for key in SIMPLE_CACHE SIMPLE_CACHE_DIR SIMPLE_USER_STORAGE_ROOT SIMPLE_WORKTREE_STORAGE_ROOT SIMPLE_FRONTEND_CACHE_DIR SIMPLE_HIR_CACHE_DIR SIMPLE_HIR_CACHE_FAILED_DIAGNOSTIC_DIR SIMPLE_NATIVE_BUILD_CACHE_DIR TMPDIR TEMP TMP; do
+  value=$(sed -n "s/^$key=//p" "$tmp/compiler.env")
+  case "$value" in "$output_root"/*) ;; *) printf 'cache isolation failed: %s escaped: %s\n' "$key" "$value" >&2; exit 1 ;; esac
+done
+grep -Fq "SIMPLE_CACHE_PROJECT=provisional-provisional-authority" "$tmp/compiler.env"
+grep -Fq "SIMPLE_CACHE_SCOPE=provisional-provisional-authority" "$tmp/compiler.env"
+grep -Fq 'SIMPLE_FRONTEND_CACHE=1' "$tmp/compiler.env"
+grep -Fq 'SIMPLE_HIR_CACHE=1' "$tmp/compiler.env"
+grep -Fq "SIMPLE_HIR_CACHE_DIR=$output_root/" "$tmp/nested.env"
+grep -Fq "SIMPLE_CACHE=$output_root/" "$tmp/nested.env"
+grep -Fq "SIMPLE_USER_STORAGE_ROOT=$output_root/" "$tmp/nested.env"
+if grep -Eq '^SIMPLE_HIR_SHARD=|^SIMPLE_NATIVE_BUILD_FORCE_WORKER=|^SIMPLE_SHARED_PARSE_CAS_ROOT=|^SIMPLE_WORKTREE_STORAGE_ROOT=/home/hostile' "$tmp/nested.env"; then
+  printf '%s\n' 'ambient worker selector escaped into compiler child' >&2
+  exit 1
+fi
+grep -Fq "HOME=${HOME:-}" "$tmp/compiler.env"
+grep -Fq 'diagnostic_only=1' "$output_root/image-receipts/provisional-authority.env"
+grep -Fq "cache_environment_digest=" "$output_root/image-receipts/provisional-authority.env"
+printf 'stale receipt\n' >"$output_root/image-receipts/provisional-authority.env"
+if run_helper >/dev/null 2>&1; then
+  printf '%s\n' 'stale image receipt was accepted' >&2
+  exit 1
+fi
+[ "$(wc -l <"$PROVISIONAL_LAUNCH_COUNT")" -eq 1 ]
+grep -Fxq 'stale receipt' "$output_root/image-receipts/provisional-authority.env"
+printf '%s\n' 'provisional manager cache isolation: PASS'

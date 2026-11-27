@@ -1,0 +1,193 @@
+#!/bin/sh
+# Unit contract test for Stage 3 platform/CPU link policy, native_host_match gate,
+# unified cross-platform build-phase3-phase4.sh / .bat (--compile-mode=shard|file,
+# --win-config=mingw|msvc, --path-check, --menu), and deprecated old P3 script notices.
+
+set -eu
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+POLICY_SH="$REPO_ROOT/scripts/bootstrap/stage3-native-host-link-policy.shs"
+POLICY_SDN="$REPO_ROOT/scripts/bootstrap/stage3-native-host-link-policy.sdn"
+UNIFIED_SH="$REPO_ROOT/scripts/bootstrap/build-phase3-phase4.sh"
+UNIFIED_BAT="$REPO_ROOT/scripts/bootstrap/build-phase3-phase4.bat"
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+assert_contains() {
+  haystack=$1
+  needle=$2
+  label=$3
+  printf '%s\n' "$haystack" | grep -Fq -- "$needle" || fail "$label (missing '$needle')"
+}
+
+assert_not_contains() {
+  haystack=$1
+  needle=$2
+  label=$3
+  if printf '%s\n' "$haystack" | grep -Fq -- "$needle"; then
+    fail "$label (unexpected '$needle')"
+  fi
+}
+
+# 1. Protected Bootstrap Script header banners
+for f in "$POLICY_SH" "$UNIFIED_SH" "$UNIFIED_BAT"; do
+  [ -f "$f" ] || fail "missing $f"
+  grep -Fq "PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER" "$f" || \
+    fail "$f missing protected bootstrap banner"
+  grep -Fq "Guarded by: scripts/check/fast-verify-bootstrap-scripts.shs" "$f" || \
+    fail "$f missing fast-verify guard reference"
+done
+[ -f "$POLICY_SDN" ] || fail "missing $POLICY_SDN"
+
+# 2. Native host match PASS across simulated platforms & CPUs
+out=$(STAGE3_HOST_UNAME_S=Darwin STAGE3_HOST_UNAME_M=arm64 sh "$POLICY_SH" --check --target aarch64-apple-darwin)
+assert_contains "$out" "native_host_match=true" "Darwin/arm64 host match"
+assert_contains "$out" "archive=libsimple-primitive-darwin-aarch64.a" "Darwin/arm64 static primitive archive"
+
+out=$(STAGE3_HOST_UNAME_S=Darwin STAGE3_HOST_UNAME_M=x86_64 sh "$POLICY_SH" --check --target x86_64-apple-darwin)
+assert_contains "$out" "archive=libsimple-primitive-darwin-x86_64.a" "Darwin/x86_64 static primitive archive"
+
+out=$(STAGE3_HOST_UNAME_S=Linux STAGE3_HOST_UNAME_M=x86_64 sh "$POLICY_SH" --check --target x86_64-unknown-linux-gnu)
+assert_contains "$out" "archive=libsimple-primitive-linux-x86_64.a" "Linux/x86_64 static primitive archive"
+
+out=$(STAGE3_HOST_UNAME_S=FreeBSD STAGE3_HOST_UNAME_M=aarch64 sh "$POLICY_SH" --check --target aarch64-unknown-freebsd)
+assert_contains "$out" "archive=libsimple-primitive-freebsd-aarch64.a" "FreeBSD/aarch64 static primitive archive"
+
+# 3. Native host mismatch FAIL (cross-CPU or cross-OS)
+for bad_target in x86_64-apple-darwin riscv64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
+  rc=0
+  err=$(STAGE3_HOST_UNAME_S=Darwin STAGE3_HOST_UNAME_M=arm64 sh "$POLICY_SH" --check --target "$bad_target" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "expected mismatch failure for $bad_target on Darwin/arm64"
+  assert_contains "$err" "STAGE3-E-NATIVE-HOST-MISMATCH" "mismatch error tag for $bad_target"
+  assert_contains "$err" "native_host_match=false" "mismatch tag status for $bad_target"
+done
+
+# 4. Default shard compile mode vs optional file compile mode + source roots without src/plugins
+env_shard=$(STAGE3_HOST_UNAME_S=Darwin STAGE3_HOST_UNAME_M=arm64 sh "$POLICY_SH" --print-env --target aarch64-apple-darwin)
+assert_contains "$env_shard" 'export SIMPLE_FILE_WORKERS="0"' "default shard mode SIMPLE_FILE_WORKERS=0"
+assert_contains "$env_shard" 'export SIMPLE_HIR_SHARDING="1"' "default shard mode HIR sharding"
+assert_contains "$env_shard" 'export SIMPLE_MIR_SHARDING="1"' "default shard mode MIR sharding"
+assert_contains "$env_shard" 'export SIMPLE_NATIVE_LIBRARY_UNITS="1"' "dynlib units enabled"
+assert_contains "$env_shard" 'export SIMPLE_STAGE3_LIB_DYNLIB="1"' "stage3 dynlib enabled"
+assert_contains "$env_shard" 'export SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS="0"' "no extra dynlibs built"
+assert_contains "$env_shard" 'export SIMPLE_STAGE3_ALLOW_EXISTING_DYNLIBS="1"' "existing dynlibs allowed"
+assert_contains "$env_shard" '--source src/compiler --source src/app --source src/lib' "canonical Stage 3 sources"
+assert_not_contains "$env_shard" "src/plugins" "Stage 3 omits src/plugins"
+
+# Verify sourced file-mode unsets HIR/MIR sharding and sets SIMPLE_FILE_WORKERS=1
+file_probe=$(
+  STAGE3_HOST_UNAME_S=Linux STAGE3_HOST_UNAME_M=x86_64
+  export STAGE3_HOST_UNAME_S STAGE3_HOST_UNAME_M
+  SIMPLE_HIR_SHARDING=1 SIMPLE_MIR_SHARDING=1 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1
+  export SIMPLE_HIR_SHARDING SIMPLE_MIR_SHARDING SIMPLE_BOOTSTRAP_WHOLE_PROGRAM
+  . "$POLICY_SH"
+  stage3_apply_native_host_link_policy "x86_64-unknown-linux-gnu" "file"
+  printf 'fw=%s|hir=%s|mir=%s|wp=%s|arch=%s\n' \
+    "${SIMPLE_FILE_WORKERS:-}" "${SIMPLE_HIR_SHARDING-UNSET}" "${SIMPLE_MIR_SHARDING-UNSET}" \
+    "${SIMPLE_BOOTSTRAP_WHOLE_PROGRAM-UNSET}" "${SIMPLE_STAGE3_STATIC_PRIMITIVE_ARCHIVE:-}"
+)
+assert_contains "$file_probe" "fw=1|hir=UNSET|mir=UNSET|wp=UNSET|arch=libsimple-primitive-linux-x86_64.a" "sourced file mode env"
+
+# 5. Unified build-phase3-phase4.sh --dry-run across modes & Windows configs
+dry_shard=$(STAGE3_HOST_UNAME_S=Darwin STAGE3_HOST_UNAME_M=arm64 sh "$UNIFIED_SH" --dry-run --phase=p3)
+assert_contains "$dry_shard" "COMPILE_MODE=shard" "unified default shard mode"
+assert_contains "$dry_shard" 'export SIMPLE_FILE_WORKERS="0"' "dry-run shard SIMPLE_FILE_WORKERS=0"
+assert_not_contains "$dry_shard" "src/plugins" "dry-run p3 omits src/plugins"
+
+dry_file=$(STAGE3_HOST_UNAME_S=Darwin STAGE3_HOST_UNAME_M=arm64 sh "$UNIFIED_SH" --dry-run --phase=p3 --compile-mode=file)
+assert_contains "$dry_file" "COMPILE_MODE=file" "unified file mode option"
+assert_contains "$dry_file" 'export SIMPLE_FILE_WORKERS="1"' "dry-run file SIMPLE_FILE_WORKERS=1"
+
+dry_p4=$(STAGE3_HOST_UNAME_S=Darwin STAGE3_HOST_UNAME_M=arm64 sh "$UNIFIED_SH" --dry-run --phase=p4)
+assert_contains "$dry_p4" "CMD_P4_RELEASE:" "P4 release command"
+assert_contains "$dry_p4" "--profile=prod --release --strip" "P4 release flags"
+assert_contains "$dry_p4" "CMD_P4_DEBUG_XRAY:" "P4 debug+xray command"
+assert_contains "$dry_p4" "--profile=dev --debug --no-strip --xray" "P4 xray flags"
+
+dry_win_mingw=$(sh "$UNIFIED_SH" --dry-run --simulate-host=windows-x86_64 --phase=p3)
+assert_contains "$dry_win_mingw" "WIN_CONFIG=mingw" "Windows default mingw config"
+assert_contains "$dry_win_mingw" "TARGET=x86_64-pc-windows-gnu" "Windows mingw target"
+assert_contains "$dry_win_mingw" 'export SIMPLE_WINDOWS_ABI="gnu"' "Windows mingw ABI"
+
+dry_win_msvc=$(sh "$UNIFIED_SH" --dry-run --simulate-host=windows-x86_64 --win-config=msvc --phase=p3)
+assert_contains "$dry_win_msvc" "WIN_CONFIG=msvc" "Windows msvc config"
+assert_contains "$dry_win_msvc" "TARGET=x86_64-pc-windows-msvc" "Windows msvc target"
+assert_contains "$dry_win_msvc" 'export SIMPLE_WINDOWS_ABI="msvc"' "Windows msvc ABI"
+assert_contains "$dry_win_msvc" 'export CL="/TC"' "Windows msvc CL=/TC"
+assert_contains "$dry_win_msvc" 'export MSYS2_ENV_CONV_EXCL="CL="' "Windows msvc MSYS2_ENV_CONV_EXCL"
+
+# Windows .bat /msvc and /mingw slash-form forwarding (--path-check and --dry-run)
+pc_win_slash_msvc=$(sh "$UNIFIED_SH" --simulate-host=windows-x86_64 /msvc --path-check)
+assert_contains "$pc_win_slash_msvc" "|platform=windows|cpu=x86_64|win_config=msvc|" "Windows /msvc slash flag --path-check"
+assert_contains "$pc_win_slash_msvc" "PATH_SUMMARY|script=build-phase3-phase4.sh|platform=windows|cpu=x86_64|target=x86_64-pc-windows-msvc|" "Windows /msvc slash target summary"
+
+dry_win_slash_msvc=$(sh "$UNIFIED_SH" --simulate-host=windows-x86_64 /msvc --dry-run)
+assert_contains "$dry_win_slash_msvc" "WIN_CONFIG=msvc" "Windows /msvc slash flag --dry-run"
+assert_contains "$dry_win_slash_msvc" "TARGET=x86_64-pc-windows-msvc" "Windows /msvc slash target --dry-run"
+assert_contains "$dry_win_slash_msvc" 'export CL="/TC"' "Windows /msvc slash CL=/TC --dry-run"
+
+# Live SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS and SIMPLE_STAGE3_ALLOW_EXISTING_DYNLIBS + --backend-plugin checks
+env_extra=$(STAGE3_HOST_UNAME_S=Darwin STAGE3_HOST_UNAME_M=arm64 SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS=1 \
+  sh "$POLICY_SH" --print-env --target aarch64-apple-darwin)
+assert_contains "$env_extra" 'export SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS="1"' "override SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS=1"
+assert_contains "$env_extra" '--source src/plugins' "extra dynlibs includes src/plugins"
+
+dry_extra=$(STAGE3_HOST_UNAME_S=Darwin STAGE3_HOST_UNAME_M=arm64 SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS=1 \
+  sh "$UNIFIED_SH" --dry-run --phase=p3 --backend-plugin=/tmp/mock-backend.dylib)
+assert_contains "$dry_extra" '--source src/plugins' "dry-run p3 with SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS=1 includes src/plugins"
+assert_contains "$dry_extra" '--backend-plugin /tmp/mock-backend.dylib' "dry-run forwards --backend-plugin"
+
+plug_rc=0
+plug_err=$(STAGE3_HOST_UNAME_S=Darwin STAGE3_HOST_UNAME_M=arm64 SIMPLE_STAGE3_ALLOW_EXISTING_DYNLIBS=0 \
+  sh "$UNIFIED_SH" --dry-run --phase=p3 --backend-plugin=/tmp/mock-backend.dylib 2>&1) || plug_rc=$?
+[ "$plug_rc" -eq 2 ] || fail "expected exit 2 when SIMPLE_STAGE3_ALLOW_EXISTING_DYNLIBS=0 with --backend-plugin (got $plug_rc)"
+assert_contains "$plug_err" "STAGE3-E-DYNLIB-LOAD-DISABLED: SIMPLE_STAGE3_ALLOW_EXISTING_DYNLIBS=0 forbids --backend-plugin" "dynlib load disabled error message"
+
+# 6. --path-check alive verification across platforms & phases (PATH_ACTION + PATH_SUMMARY)
+pc_all=$(sh "$UNIFIED_SH" --path-check --simulate-host=linux-x86_64 --phase=all)
+assert_contains "$pc_all" "PATH_ACTION|script=build-phase3-phase4.sh|platform=linux|cpu=x86_64|win_config=n/a|phase=init|step=native-host-match-check|compile_mode=shard|link_mode=dynlib|xray=0|release=0|status=ALIVE" "path-check init"
+assert_contains "$pc_all" "phase=p3a|step=compile-bootstrap-stage3|compile_mode=shard|link_mode=dynlib|xray=0|release=0|status=ALIVE" "path-check p3a"
+assert_contains "$pc_all" "phase=p3b|step=compile-bootstrap-stage3-selfhost|compile_mode=shard|link_mode=dynlib|xray=0|release=0|status=ALIVE" "path-check p3b"
+assert_contains "$pc_all" "phase=p4|step=cli-release|compile_mode=shard|link_mode=dynlib|xray=0|release=1|status=ALIVE" "path-check p4 release"
+assert_contains "$pc_all" "phase=p4|step=cli-debug-xray|compile_mode=shard|link_mode=dynlib|xray=1|release=0|status=ALIVE" "path-check p4 xray"
+assert_contains "$pc_all" "PATH_SUMMARY|script=build-phase3-phase4.sh|platform=linux|cpu=x86_64|target=x86_64-unknown-linux-gnu|actions=14|status=PASS" "path-check summary linux"
+
+for sos_cpu in x86_64 aarch64 riscv64; do
+  pc_simpleos=$(sh "$UNIFIED_SH" --path-check --simulate-host="simpleos-${sos_cpu}" --phase=p3a --compile-mode=file)
+  assert_contains "$pc_simpleos" "platform=simpleos|cpu=${sos_cpu}|win_config=n/a|phase=p3a|step=compile-bootstrap-stage3|compile_mode=file|link_mode=dynlib|xray=0|release=0|status=ALIVE" "path-check simpleos-${sos_cpu}"
+  assert_contains "$pc_simpleos" "PATH_SUMMARY|script=build-phase3-phase4.sh|platform=simpleos|cpu=${sos_cpu}|" "path-check summary simpleos-${sos_cpu}"
+
+  pol_pc=$(sh "$POLICY_SH" --path-check --simulate-host="simpleos-${sos_cpu}")
+  assert_contains "$pol_pc" "PATH_ACTION|script=stage3-native-host-link-policy.shs|platform=simpleos|cpu=${sos_cpu}|win_config=n/a|phase=p3|step=native-host-match|compile_mode=shard|link_mode=dynlib|xray=0|release=0|status=ALIVE" "policy path-check simpleos-${sos_cpu}"
+  assert_contains "$pol_pc" "PATH_SUMMARY|script=stage3-native-host-link-policy.shs|platform=simpleos|cpu=${sos_cpu}|" "policy path-check summary simpleos-${sos_cpu}"
+  assert_contains "$pol_pc" "|actions=4|status=PASS" "policy path-check actions=4"
+done
+
+# 7. Interactive Phased Menu exit (0)
+menu_out=$(printf '0\n' | STAGE3_HOST_UNAME_S=Darwin STAGE3_HOST_UNAME_M=arm64 sh "$UNIFIED_SH" --menu)
+assert_contains "$menu_out" "Simple Self-Hosted Phased Build (Phase 3 / Phase 4)" "menu title"
+assert_contains "$menu_out" "[native_host_match=PASS]" "menu native_host_match status"
+
+# 8. Windows .bat wrapper content check
+bat_text=$(cat "$UNIFIED_BAT")
+assert_contains "$bat_text" 'set "WIN_CFG=mingw"' "bat defaults to mingw"
+assert_contains "$bat_text" 'set "MSYS2_ARG_CONV_EXCL=/msvc;/mingw;--win-config=;CL="' "bat disables MSYS2 slash arg conversion"
+assert_contains "$bat_text" 'build-phase3-phase4.sh" --win-config=%WIN_CFG% %*' "bat delegates to shared .sh script"
+
+# 9. Deprecated old P3 scripts print phased shard/file commands and return 0
+for old_script in \
+  "$REPO_ROOT/scripts/bootstrap/p3-entry-groups.shs" \
+  "$REPO_ROOT/scripts/bootstrap/p3-selfbuild-stage3.shs" \
+  "$REPO_ROOT/scripts/bootstrap/p3-manual-link-stage3.shs" \
+  "$REPO_ROOT/scripts/bootstrap/p3-smoke-stage3.shs" \
+  "$REPO_ROOT/scripts/bootstrap/p3-targeted-stage2-build.shs"; do
+  dep_out=$(sh "$old_script" </dev/null 2>&1)
+  assert_contains "$dep_out" "DEPRECATED: Do not use" "deprecation notice for $old_script"
+  assert_contains "$dep_out" "build-phase3-phase4.sh --phase=p3 --compile-mode=shard" "shard command hint in $old_script"
+  assert_contains "$dep_out" "build-phase3-phase4.sh --phase=p3 --compile-mode=file" "file command hint in $old_script"
+done
+
+echo "PASS: stage3_native_host_link_policy_test.shs (all checks green)"

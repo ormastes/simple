@@ -150,3 +150,19 @@ is operational, not a script edit:
 
 ## Files
 - `/home/ormastes/dev/pub/simple/scripts/check/check-tree-size-push.shs` (read-only, not modified)
+
+## Re-checked 2026-11-09 (never-touched-p3 lane) — blocked on the Linux btrfs host
+
+The script was since rewritten: `inspect_commit()` now takes ONE
+`git ls-tree -r -t -z` listing per commit (`check-tree-size-push.shs:237`)
+instead of two, which halves the scratch writes this record identified, but
+the root cause here is the host filesystem (btrfs metadata chunk 98.97% full,
+1 MiB unallocated), not the script. It cannot be reproduced on the Windows
+host this lane runs on (NTFS). Closing needs a run on the original Linux host
+after `btrfs balance` + orphaned `/tmp/tmp.*` cleanup, recording the scan-phase
+wall time.
+
+Separate observation (not this root cause): on Windows (Git Bash, NTFS) the
+guard's mandatory selftest alone did not finish inside `timeout 900`
+(`ERROR — the script stopped without reaching a verdict`), far above the
+push-tier < 20 s target — fork cost of the per-fixture git repos on Windows.

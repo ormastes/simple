@@ -1,0 +1,137 @@
+# Explicit-state CoreMux connection authority. Secure nonces/time are supplied
+# by the server owner; constructing these records is not endpoint admission.
+use std.common.contracts.mux.core_v1.{MuxHandleV1, MuxErrorV1, MuxErrorKindV1, MuxCommitStateV1}
+use std.common.contracts.mux.observation_v1.{MuxLeaseTermsV1}
+use std.common.contracts.mux.request_validation_v1.{mux_validate_lease_terms_v1}
+use std.common.string_core.{text_to_bytes}
+
+pub struct CoreMuxLease:
+    token: text
+    client_identity: text
+    deadline_ms: i64
+    retired: bool
+    retain_until_ms: i64
+
+pub struct CoreMuxLeases:
+    owner_id: text
+    owner_generation: u64
+    service_epoch: u64
+    next_serial: u64
+    last_now_ms: i64
+    max_live: i64
+    max_retained: i64
+    terms: MuxLeaseTermsV1
+    entries: [CoreMuxLease]
+
+pub struct CoreMuxLeaseAdmission:
+    leases: CoreMuxLeases
+    handle: MuxHandleV1
+
+pub struct CoreMuxLeaseSweep:
+    leases: CoreMuxLeases
+    retired_tokens: [text]
+    forgotten_tokens: [text]
+
+fn failure(kind: MuxErrorKindV1, detail: text) -> MuxErrorV1:
+    return MuxErrorV1(kind: kind, detail: detail, request_id: 0,
+        commit_state: MuxCommitStateV1.NotApplied, observed_revision: nil, affected: [], cleanup_pending: false)
+
+pub fn core_mux_nonce_valid(nonce: text) -> bool:
+    if nonce.len() != 32: return false
+    for ch in nonce:
+        if not "0123456789abcdef".contains(ch): return false
+    return true
+
+pub fn core_mux_leases_new(owner_id: text, generation: u64, epoch: u64,
+    terms: MuxLeaseTermsV1, max_live: i64 = 4, max_retained: i64 = 16) -> Result<CoreMuxLeases, MuxErrorV1>:
+    mux_validate_lease_terms_v1(terms)?
+    if not core_mux_nonce_valid(owner_id) or generation == 0 or epoch == 0:
+        return Err(failure(MuxErrorKindV1.InvalidRequest, "owner incarnation invalid"))
+    if max_live < 1 or max_live > 4 or max_retained < max_live or max_retained > 16:
+        return Err(failure(MuxErrorKindV1.InvalidRequest, "lease capacity invalid"))
+    return Ok(CoreMuxLeases(owner_id: owner_id, owner_generation: generation, service_epoch: epoch,
+        next_serial: 1, last_now_ms: 0, max_live: max_live, max_retained: max_retained, terms: terms, entries: []))
+
+fn rebuild(st: CoreMuxLeases, entries: [CoreMuxLease], serial: u64, now_ms: i64) -> CoreMuxLeases:
+    return CoreMuxLeases(owner_id: st.owner_id, owner_generation: st.owner_generation, service_epoch: st.service_epoch,
+        next_serial: serial, last_now_ms: now_ms, max_live: st.max_live, max_retained: st.max_retained, terms: st.terms, entries: entries)
+
+fn valid_clock(st: CoreMuxLeases, now_ms: i64) -> bool:
+    return now_ms >= 0 and now_ms >= st.last_now_ms and now_ms <= 9223372036854775807 - st.terms.retained_receipt_ms - st.terms.lifetime_ms
+
+# Run before dispatch. Expiry starts retention at the actual deadline, never
+# at a delayed observation, and cannot be undone by reconnect/heartbeat.
+pub fn core_mux_lease_sweep(st: CoreMuxLeases, now_ms: i64) -> Result<CoreMuxLeaseSweep, MuxErrorV1>:
+    if not valid_clock(st, now_ms): return Err(failure(MuxErrorKindV1.Unavailable, "lease monotonic clock invalid"))
+    var entries: [CoreMuxLease] = []
+    var retired: [text] = []
+    var forgotten: [text] = []
+    for prior in st.entries:
+        var item = prior
+        if not item.retired and now_ms >= item.deadline_ms:
+            item = CoreMuxLease(token: item.token, client_identity: item.client_identity, deadline_ms: item.deadline_ms,
+                retired: true, retain_until_ms: item.deadline_ms + st.terms.retained_receipt_ms)
+            retired.push(item.token)
+        if item.retired and now_ms >= item.retain_until_ms: forgotten.push(item.token)
+        else: entries.push(item)
+    return Ok(CoreMuxLeaseSweep(leases: rebuild(st, entries, st.next_serial, now_ms), retired_tokens: retired, forgotten_tokens: forgotten))
+
+pub fn core_mux_lease_index(st: CoreMuxLeases, handle: MuxHandleV1, now_ms: i64, receipt_only: bool = false) -> Result<int, MuxErrorV1>:
+    if not valid_clock(st, now_ms): return Err(failure(MuxErrorKindV1.Unavailable, "lease monotonic clock invalid"))
+    if handle.owner_id != st.owner_id or handle.owner_generation != st.owner_generation:
+        return Err(failure(MuxErrorKindV1.PermissionDenied, "owner incarnation mismatch"))
+    var i = 0
+    while i < st.entries.len():
+        val item = st.entries[i]
+        if item.token == handle.lease_id:
+            if not item.retired and now_ms < item.deadline_ms: return Ok(i)
+            val until = if item.retired: item.retain_until_ms else: item.deadline_ms + st.terms.retained_receipt_ms
+            if receipt_only and now_ms < until: return Ok(i)
+            return Err(failure(MuxErrorKindV1.Unavailable, "lease expired or revoked"))
+        i = i + 1
+    return Err(failure(MuxErrorKindV1.PermissionDenied, "lease authority unknown"))
+
+pub fn core_mux_lease_admit(st: CoreMuxLeases, client: text, nonce: text, now_ms: i64) -> Result<CoreMuxLeaseAdmission, MuxErrorV1>:
+    if not valid_clock(st, now_ms): return Err(failure(MuxErrorKindV1.Unavailable, "lease monotonic clock invalid"))
+    if client == "" or text_to_bytes(client).len() > 256 or not core_mux_nonce_valid(nonce):
+        return Err(failure(MuxErrorKindV1.InvalidRequest, "lease identity invalid"))
+    for scalar in client:
+        if scalar < " " or (scalar >= "\u{7f}" and scalar <= "\u{9f}"):
+            return Err(failure(MuxErrorKindV1.InvalidRequest, "lease identity invalid"))
+    if st.next_serial == 0 or st.next_serial == 18446744073709551615u64:
+        return Err(failure(MuxErrorKindV1.Unavailable, "lease serial exhausted"))
+    var live = 0
+    for item in st.entries:
+        if not item.retired and now_ms < item.deadline_ms: live = live + 1
+    if live >= st.max_live or st.entries.len() >= st.max_retained:
+        return Err(failure(MuxErrorKindV1.Busy, "lease capacity reached; reconcile or wait for retention expiry"))
+    val token = st.owner_id + ":" + st.next_serial.to_text() + ":" + nonce
+    var entries = st.entries
+    entries.push(CoreMuxLease(token: token, client_identity: client, deadline_ms: now_ms + st.terms.lifetime_ms,
+        retired: false, retain_until_ms: 0))
+    return Ok(CoreMuxLeaseAdmission(leases: rebuild(st, entries, st.next_serial + 1, now_ms),
+        handle: MuxHandleV1(owner_id: st.owner_id, owner_generation: st.owner_generation, lease_id: token)))
+
+# Only successful normal query/poll invokes this, rechecking completion time.
+# RequestStatus and all failed calls must not enter this function.
+pub fn core_mux_lease_renew(st: CoreMuxLeases, handle: MuxHandleV1, now_ms: i64) -> Result<CoreMuxLeases, MuxErrorV1>:
+    val found = core_mux_lease_index(st, handle, now_ms)
+    if found.is_err(): return Err(found.unwrap_err())
+    var entries = st.entries
+    val old = entries[found.unwrap()]
+    entries[found.unwrap()] = CoreMuxLease(token: old.token, client_identity: old.client_identity,
+        deadline_ms: now_ms + st.terms.lifetime_ms, retired: false, retain_until_ms: 0)
+    return Ok(rebuild(st, entries, st.next_serial, now_ms))
+
+# Native attachment release is a separate checked owner operation. This pure
+# token transition cannot claim that any background child or client was closed.
+pub fn core_mux_lease_revoke(st: CoreMuxLeases, handle: MuxHandleV1, now_ms: i64) -> Result<CoreMuxLeases, MuxErrorV1>:
+    val found = core_mux_lease_index(st, handle, now_ms, true)
+    if found.is_err(): return Err(found.unwrap_err())
+    var entries = st.entries
+    val old = entries[found.unwrap()]
+    if old.retired: return Ok(rebuild(st, entries, st.next_serial, now_ms))
+    val retired_at = if now_ms < old.deadline_ms: now_ms else: old.deadline_ms
+    entries[found.unwrap()] = CoreMuxLease(token: old.token, client_identity: old.client_identity, deadline_ms: old.deadline_ms,
+        retired: true, retain_until_ms: retired_at + st.terms.retained_receipt_ms)
+    return Ok(rebuild(st, entries, st.next_serial, now_ms))

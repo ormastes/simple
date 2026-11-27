@@ -1,11 +1,14 @@
 # Browser jail: seccomp is a deny-list and in-process browsers are unjailed
-## Open 2026-09-16 — needs owner triage
+## RESOLVED 2026-11-03 (fixlane, see bottom section); header re-verified 2026-11-25
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - **Date**: 2026-08-15
-- **Status**: OPEN (tracked; out of scope of the 2026-08-15 engine-gate change)
+- **Status**: RESOLVED (2026-11-03 fixlane: all three problems fixed in code,
+  evidence below; re-verified by source inspection 2026-11-25. Residual:
+  sandboxed rendering is opt-in via `SIMPLE_BROWSER_SANDBOX=1`, and the Linux
+  seccomp/Landlock self-check has not been run on a Linux host by this lane)
 - **Area**: runtime (C), app/browser, os/hosted
 - **Research**: `doc/01_research/app/browser/browser_sandbox_model_research_2026-08-15.md`
 
@@ -43,3 +46,74 @@ Engine-level capability gate: untrusted page script
 `src/lib/{gc_async_mut,nogc_sync_mut}/js/engine/interpreter_native.spl`,
 spec `test/01_unit/lib/js/js_native_confinement_spec.spl`.
 
+**Revalidated 2026-11-02: still plausible because OPEN (tracked; out of scope of the 2026-08-15 engine-gate change); no merged fix commit with a passing regression is cited in this doc.**
+
+## Update 2026-11-03 (fixlane): all three problems are fixed in code; row was stale
+
+Evidence on release/1.0.0 (symbol/commit checked, not assumed):
+1. seccomp deny-list -> allow-list: `browser_renderer_apply_seccomp` (`src/runtime/runtime_process.c`, ~2886) ends in `SECCOMP_RET_KILL_PROCESS` (arch mismatch also KILL); the only `SECCOMP_RET_ALLOW` rows are the per-syscall allow entries and the startup pre-filter. The old deny-list filter at ~1932 belongs to the separate dynlib/`unshare`-denying profile, not the renderer.
+2. namespaces: `ae5a67a6ad0` "jail the browser renderer in user/net/IPC namespaces" -> `browser_renderer_enter_namespaces()` runs before landlock and seccomp in `browser_renderer_preinit`; posture published via `rt_browser_renderer_namespaces_active()`. uid drop is not applicable (user namespace maps to an unprivileged overflow identity).
+3. in-process browsers: `e15384f4571` (fail-closed capability probe) + `34ec570cb22` ("Closes problem 3 ... in code": `sandbox_render.spl` broker -> jailed worker -> Draw IR -> software raster; `render_adapter.spl` takes that route whenever a sandbox is requested; `main.spl` refuses `SIMPLE_BROWSER_SANDBOX=1` rather than rendering unjailed) + `0ffdcdd958f` (one jailed-render session).
+Re-run 2026-11-03 on Windows host: `browser_sandbox_routing_spec.spl` 5/5, `browser_sandbox_status_spec.spl` 3/3 PASS. The Linux seccomp/landlock self-check (`sh scripts/check/check-browser-renderer-sandbox-seccomp.shs`) exits `ERROR — nothing was checked` here (non-Linux) and is NOT claimed.
+Honest residual (not part of the three listed problems): sandboxed rendering is opt-in (`SIMPLE_BROWSER_SANDBOX=1`), not the default, and `src/os/apps/*browser*` were not audited here.
+VERIFY on Linux with a kernel that has seccomp+Landlock: `sh scripts/check/check-browser-renderer-sandbox-seccomp.shs` (expect PASS verdict), `bin/simple test test/01_unit/app/browser/browser_sandbox_routing_spec.spl`, and `SIMPLE_BROWSER_SANDBOX=1 bin/simple run src/app/browser/main.spl --sandbox-status` (expect jailed).
+
+## Verification note (2026-11-25, release/1.0.0 bug-sweep lane)
+
+Header was stale ("OPEN ... needs owner triage") relative to the 2026-11-03
+fixlane update below; corrected above. All cited evidence re-confirmed present
+on `origin/release/1.0.0` (`0819b116ecb`) by source inspection:
+
+1. **seccomp allow-list**: `browser_renderer_apply_seccomp`
+   (`src/runtime/runtime_process.c:3608`) ends in `SECCOMP_RET_KILL_PROCESS`
+   defaults (`:3619`, `:3625`, `:3761`); `SECCOMP_RET_ALLOW` appears only on
+   per-syscall allow entries.
+2. **Namespaces**: `browser_renderer_enter_namespaces()`
+   (`runtime_process.c:3442`) and the posture probe
+   `rt_browser_renderer_namespaces_active()` (`:3513`) are present; commit
+   `ae5a67a6ad0` ("jail the browser renderer in user/net/IPC namespaces") is
+   in history.
+3. **In-process browsers**: `sandbox_render.spl`, `sandbox_routing.spl`, and
+   `sandbox_status.spl` exist under `src/app/browser/`; `main.spl:47`/`:132`
+   carry the honest gate that refuses `SIMPLE_BROWSER_SANDBOX=1` rather than
+   rendering unjailed; commits `e15384f4571`, `34ec570cb22`, `0ffdcdd958f`
+   are in history.
+
+Execution re-verification is environment-blocked at this HEAD: the pinned
+`bin/simple.exe` (Rust seed v1.0.0-rc.1) rejects the tree-wide
+`@representation_boundary` decorator added by `cfd89933699`; the failure is
+in the test runner itself (`src/app/test_runner_new/test_runner_client.spl:9`),
+so no spec can run via `bin/simple.exe test`, and a direct `run` of
+`browser_sandbox_routing_spec.spl` fails the same way. The 2026-11-03
+Windows re-run of `browser_sandbox_routing_spec.spl` (5/5) and
+`browser_sandbox_status_spec.spl` (3/3) recorded below therefore stands as
+the most recent executable evidence; this lane adds source inspection only.
+The Linux seccomp/Landlock self-check
+(`sh scripts/check/check-browser-renderer-sandbox-seccomp.shs`) was NOT run
+here (Windows host; it exits "nothing was checked" off-Linux) and is not
+claimed.
+
+## Verification note (2026-11-26, Linux x86_64 lane 3)
+
+Verified on `origin/release/1.0.0` (Linux x86_64):
+
+1. `src/runtime/test/rt_browser_renderer_seccomp_allowlist_selfcheck.c`: added
+   `proc_close_inherited_fds_except(-1)` in the forked child before
+   `RLIMIT_NOFILE=4` (matching `rt_browser_renderer_spawn_sandboxed`), fixing a
+   false `SKIP` (`EMFILE` in `landlock_create_ruleset`) when parent harnesses
+   hold extra inherited fds >= 3 open.
+2. `sh scripts/check/check-browser-renderer-sandbox-seccomp.shs`: `PASS` — 10
+   check(s) verified (`rt_browser_renderer_seccomp_allowlist_selfcheck: PASS`,
+   `rt_browser_renderer_namespace_selfcheck: PASS` with
+   `sandbox_namespaces=unavailable`,
+   `rt_browser_renderer_startup_failure_selfcheck: PASS`,
+   `rt_browser_renderer_preinit_entry_selfcheck: PASS`).
+3. `test/01_unit/app/browser/browser_sandbox_routing_spec.spl`: 5/5 PASS;
+   `test/01_unit/app/browser/browser_sandbox_status_spec.spl`: 3/3 PASS
+   (`bootstrap/simple --mode=interpreter`).
+4. `browser_sandbox_status_line(browser_sandbox_status())` under
+   `SIMPLE_BROWSER_SANDBOX=1` prints `browser sandbox: refused — sandbox requested
+   but unavailable (worker-executable-not-configured); refusing to render
+   unjailed` (note: running `src/app/browser/main.spl` directly via the Rust
+   seed hits pre-existing `SPL-UNIT-002: Count Add <scalar>` in seed HIR
+   lowering). Status updated to `fixed`.

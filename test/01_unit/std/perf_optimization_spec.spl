@@ -95,6 +95,10 @@ fn spawn_thread_with_args(data1: Any, data2: Any, closure: fn(Any, Any) -> Any) 
 # Test Group 1: rt_thread_spawn_isolated - Closure Execution
 # ============================================================================
 
+fn spawn2(data1: Any, data2: Any, closure: fn(Any, Any) -> Any) -> ThreadHandle:
+    val handle = rt_thread_spawn_isolated2(closure=closure, data1=data1, data2=data2)
+    return ThreadHandle(_handle: handle)
+
 describe "rt_thread_spawn_isolated - Closure Execution":
     # @manual scenario evidence
     # ## Closure Execution (was stub)
@@ -162,7 +166,16 @@ describe "rt_thread_spawn_isolated - Closure Execution":
             h.join()
 
     context "thread is done after synchronous execution":
+        it "reports done once joined":
+            # Spawn runs on a real OS thread, so is_done() right after spawn
+            # is a race; after join() the worker has finished.
+            val handle = spawn_thread(\: 42)
+            handle.join()
+            expect handle.is_done()
+
         it "reports done immediately for PureStd":
+            # @req REQ-SSPEC-UNIT
+            step("reports done immediately for PureStd")
             val handle = spawn_thread(\: 42)
             expect handle.is_done()
             handle.join()
@@ -247,7 +260,7 @@ describe "rt_thread_spawn_isolated_with_args - Explicit-arg Closure":
             var total = 0
             for i in 0..5:
                 val handle = spawn_thread_with_args(i, i + 1) \a, b: a * b
-                total = total + handle.join()
+                total = total + (handle.join() ?? 0)
             # 0*1 + 1*2 + 2*3 + 3*4 + 4*5 = 0+2+6+12+20 = 40
             expect total == 40
 
@@ -304,6 +317,15 @@ describe "Concurrent Backend Configuration":
             expect result == 5
             rt_set_concurrent_backend("pure_std")
 
+        it "spawn_isolated2 works in native mode":
+            # @req REQ-SSPEC-UNIT
+            step("spawn_isolated2 works in native mode")
+            rt_set_concurrent_backend("native")
+            val handle = spawn2(10, 5) \a, b: a - b
+            val result = handle.join()
+            expect result == 5
+            rt_set_concurrent_backend("pure_std")
+
     context "round-trip backend switch":
         it "works after pure_std to native to pure_std":
             rt_set_concurrent_backend("native")
@@ -347,7 +369,7 @@ describe "Integration - Threads + Channels + Backend":
             for _ in 0..5:
                 val v = ch.try_recv()
                 if v != nil:
-                    sum = sum + v
+                    sum = sum + (v ?? 0)
 
             expect sum == 100
             ch.close()
@@ -431,6 +453,16 @@ describe "Stress Tests":
             var total = 0
             for i in 0..50:
                 val h = spawn_thread_with_args(i, 1) \a, b: a + b
+                total = total + (h.join() ?? 0)
+            # Sum of (i+1) for i in 0..50 = 0+1+1+2+1+3+...+1+50 = sum(1..51) = 1275
+            expect total == 1275
+
+        it "spawns 50 two-arg threads":
+            # @req REQ-SSPEC-UNIT
+            step("spawns 50 two-arg threads")
+            var total = 0
+            for i in 0..50:
+                val h = spawn2(i, 1) \a, b: a + b
                 total = total + h.join()
             # Sum of (i+1) for i in 0..50 = 0+1+1+2+1+3+...+1+50 = sum(1..51) = 1275
             expect total == 1275
@@ -443,7 +475,7 @@ describe "Stress Tests":
 
             var sum = 0
             for _ in 0..100:
-                sum = sum + ch.try_recv()
+                sum = sum + (ch.try_recv() ?? 0)
 
             expect sum == 4950
             ch.close()

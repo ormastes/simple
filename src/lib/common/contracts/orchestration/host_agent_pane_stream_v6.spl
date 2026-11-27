@@ -1,0 +1,184 @@
+# Authenticated pane exchange. These frames name existing signed Host authority
+# and carry bounded output; decoding them never grants a lease.
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.contracts.orchestration.host_service_operation_v6.host_service_hex_shape_v6
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+val HOST_AGENT_PANE_PAYLOAD_MAX_V6: i64 = 131072
+val HOST_AGENT_PANE_RECEIPT_MAX_V6: i64 = 141312
+val HOST_AGENT_PANE_READ_BYTES_MAX_V6: i64 = 24585
+
+# reason: epoch/read_id are the signed SDN wire record's i64 epoch/readId fields
+@allow(primitive_api)
+pub struct HostAgentPaneStreamRequestV6:
+    binding_uid: text
+    attach_digest: text
+    epoch: i64
+    read_id: i64
+
+# reason: epoch/read_id are the signed SDN wire record's i64 epoch/readId fields
+@allow(primitive_api)
+pub struct HostAgentPaneStreamReceiptV6:
+    operation_id: text
+    binding_uid: text
+    attach_digest: text
+    epoch: i64
+    read_id: i64
+    payload: text
+    payload_digest: text
+
+fn pane_fields_v6(source: text, max_bytes: i64, depth: i64, nodes: i64) -> Result<Dict<text, SdnValue>, text>:
+    if source.byte_len() < 1 or source.byte_len() > max_bytes: return Err("host-agent-pane-stream-size")
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: max_bytes, max_depth: depth,
+        max_nodes: nodes, max_rows: 0, max_cells: 0, max_columns: 10))
+    if parsed.is_err(): return Err("host-agent-pane-stream-syntax")
+    match parsed.unwrap().value:
+        case SdnValue.Dict(fields): Ok(fields)
+        case _: Err("host-agent-pane-stream-object")
+
+fn pane_text_v6(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    if not fields.contains_key(name): return Err("host-agent-pane-stream-field:" + name)
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-agent-pane-stream-field:" + name)
+
+fn pane_int_v6(fields: Dict<text, SdnValue>, name: text) -> Result<i64, text>:
+    if not fields.contains_key(name): return Err("host-agent-pane-stream-field:" + name)
+    match fields[name]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("host-agent-pane-stream-field:" + name)
+
+# reason: admission predicate checking the wire epoch/readId shape for a pane sub-action
+@allow(primitive_api)
+pub fn host_agent_pane_stream_request_matches_v6(sub: text, request: HostAgentPaneStreamRequestV6) -> bool:
+    if sub == "agent-pane-claim": return request.epoch == 0 and request.read_id == 0
+    sub == "agent-pane-read" and request.epoch >= 0 and request.read_id > 0
+
+pub fn host_agent_pane_stream_request_encode_v6(request: HostAgentPaneStreamRequestV6) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("host-agent-pane-stream-request"),
+        "version": SdnValue.Int(6), "bindingUid": SdnValue.String(request.binding_uid),
+        "attachDigest": SdnValue.String(request.attach_digest), "epoch": SdnValue.Int(request.epoch),
+        "readId": SdnValue.Int(request.read_id)}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+pub fn host_agent_pane_stream_request_decode_v6(source: text) -> Result<HostAgentPaneStreamRequestV6, text>:
+    val fields = pane_fields_v6(source, 4096, 2, 20)?
+    val request = HostAgentPaneStreamRequestV6(pane_text_v6(fields, "bindingUid")?,
+        pane_text_v6(fields, "attachDigest")?, pane_int_v6(fields, "epoch")?, pane_int_v6(fields, "readId")?)
+    if not builder_identifier_valid_v1(request.binding_uid) or not host_service_hex_shape_v6(request.attach_digest, 64):
+        return Err("host-agent-pane-stream-identity")
+    if not host_agent_pane_stream_request_matches_v6("agent-pane-claim", request) and
+            not host_agent_pane_stream_request_matches_v6("agent-pane-read", request):
+        return Err("host-agent-pane-stream-cursor")
+    if host_agent_pane_stream_request_encode_v6(request) != source: return Err("host-agent-pane-stream-noncanonical")
+    Ok(request)
+
+fn pane_read_payload_v6(fields: Dict<text, SdnValue>) -> Result<bool, text>:
+    if fields.len() != 4 or not fields.contains_key("eof") or not fields.contains_key("chunks"):
+        return Err("host-agent-pane-stream-read-fields")
+    val eof = match fields["eof"]:
+        case SdnValue.Bool(value): value
+        case _: return Err("host-agent-pane-stream-read-eof")
+    val chunks = match fields["chunks"]:
+        case SdnValue.Array(items): items
+        case _: return Err("host-agent-pane-stream-read-chunks")
+    if chunks.len() == 0: return Ok(true)
+    if eof or chunks.len() != 1: return Err("host-agent-pane-stream-read-chunks")
+    val chunk = match chunks[0]:
+        case SdnValue.Dict(value): value
+        case _: return Err("host-agent-pane-stream-read-chunk")
+    if chunk.len() != 2 or pane_text_v6(chunk, "stream")? != "stdout" or not chunk.contains_key("bytes"):
+        return Err("host-agent-pane-stream-read-chunk")
+    val bytes = match chunk["bytes"]:
+        case SdnValue.Array(value): value
+        case _: return Err("host-agent-pane-stream-read-bytes")
+    if bytes.len() > HOST_AGENT_PANE_READ_BYTES_MAX_V6: return Err("host-agent-pane-stream-read-bytes")
+    for item in bytes:
+        match item:
+            case SdnValue.Int(value):
+                if value < 0 or value > 255: return Err("host-agent-pane-stream-read-byte")
+            case _: return Err("host-agent-pane-stream-read-byte")
+    Ok(true)
+
+fn pane_payload_check_v6(receipt: HostAgentPaneStreamReceiptV6) -> Result<bool, text>:
+    val fields = pane_fields_v6(receipt.payload, HOST_AGENT_PANE_PAYLOAD_MAX_V6, 5,
+        HOST_AGENT_PANE_READ_BYTES_MAX_V6 + 24)?
+    if pane_int_v6(fields, "version")? != 4 or sdn_encode_canonical(SdnValue.Dict(fields)) != receipt.payload:
+        return Err("host-agent-pane-stream-payload")
+    val kind = pane_text_v6(fields, "kind")?
+    if receipt.read_id == 0:
+        if kind != "host-agent-pane-lease" or fields.len() != 4 or
+                pane_text_v6(fields, "operationId")? != receipt.operation_id or pane_int_v6(fields, "epoch")? != receipt.epoch:
+            return Err("host-agent-pane-stream-lease")
+        return Ok(true)
+    if kind != "host-agent-pane-read": return Err("host-agent-pane-stream-payload-kind")
+    pane_read_payload_v6(fields)
+
+pub fn host_agent_pane_stream_receipt_encode_v6(receipt: HostAgentPaneStreamReceiptV6) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("host-agent-pane-stream-receipt"),
+        "version": SdnValue.Int(6), "operationId": SdnValue.String(receipt.operation_id),
+        "bindingUid": SdnValue.String(receipt.binding_uid), "attachDigest": SdnValue.String(receipt.attach_digest),
+        "epoch": SdnValue.Int(receipt.epoch), "readId": SdnValue.Int(receipt.read_id),
+        "payload": SdnValue.String(receipt.payload), "payloadSha256": SdnValue.String(receipt.payload_digest)}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+pub fn host_agent_pane_stream_receipt_decode_v6(source: text) -> Result<HostAgentPaneStreamReceiptV6, text>:
+    val fields = pane_fields_v6(source, HOST_AGENT_PANE_RECEIPT_MAX_V6, 2, 24)?
+    val receipt = HostAgentPaneStreamReceiptV6(pane_text_v6(fields, "operationId")?,
+        pane_text_v6(fields, "bindingUid")?, pane_text_v6(fields, "attachDigest")?,
+        pane_int_v6(fields, "epoch")?, pane_int_v6(fields, "readId")?,
+        pane_text_v6(fields, "payload")?, pane_text_v6(fields, "payloadSha256")?)
+    if not builder_identifier_valid_v1(receipt.operation_id) or not builder_identifier_valid_v1(receipt.binding_uid) or
+            not host_service_hex_shape_v6(receipt.attach_digest, 64) or receipt.epoch < 0 or receipt.read_id < 0:
+        return Err("host-agent-pane-stream-receipt-identity")
+    if sha256_text(receipt.payload) != receipt.payload_digest: return Err("host-agent-pane-stream-receipt-digest")
+    val checked = pane_payload_check_v6(receipt)?
+    if host_agent_pane_stream_receipt_encode_v6(receipt) != source: return Err("host-agent-pane-stream-noncanonical")
+    Ok(receipt)
+
+# reason: binding predicate comparing a decoded receipt with the request it answers
+@allow(primitive_api)
+pub fn host_agent_pane_stream_receipt_matches_v6(operation_id: text, request: HostAgentPaneStreamRequestV6,
+        receipt: HostAgentPaneStreamReceiptV6) -> bool:
+    receipt.operation_id == operation_id and receipt.binding_uid == request.binding_uid and
+        receipt.attach_digest == request.attach_digest and receipt.read_id == request.read_id and
+        (request.read_id == 0 or receipt.epoch == request.epoch)
+
+# Names the vacant logical target that the signed attach must bind. This uses
+# the native Host identity/epoch, independently of the V6 listener identity.
+# reason: service_epoch is the signed SDN wire record's i64 serviceEpoch field
+@allow(primitive_api)
+pub struct HostAgentPaneTargetReceiptV6:
+    operation_id: text
+    invoke_digest: text
+    service_incarnation: text
+    service_epoch: i64
+    session_id: text
+    window_id: text
+    pane_id: text
+
+pub fn host_agent_pane_target_receipt_encode_v6(receipt: HostAgentPaneTargetReceiptV6) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("host-agent-pane-target-receipt"),
+        "version": SdnValue.Int(6), "operationId": SdnValue.String(receipt.operation_id),
+        "invokeDigest": SdnValue.String(receipt.invoke_digest), "serviceIncarnation": SdnValue.String(receipt.service_incarnation),
+        "serviceEpoch": SdnValue.Int(receipt.service_epoch), "sessionId": SdnValue.String(receipt.session_id),
+        "windowId": SdnValue.String(receipt.window_id), "paneId": SdnValue.String(receipt.pane_id)}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+pub fn host_agent_pane_target_receipt_decode_v6(source: text) -> Result<HostAgentPaneTargetReceiptV6, text>:
+    val fields = pane_fields_v6(source, 4096, 2, 24)?
+    val receipt = HostAgentPaneTargetReceiptV6(pane_text_v6(fields, "operationId")?,
+        pane_text_v6(fields, "invokeDigest")?, pane_text_v6(fields, "serviceIncarnation")?,
+        pane_int_v6(fields, "serviceEpoch")?, pane_text_v6(fields, "sessionId")?,
+        pane_text_v6(fields, "windowId")?, pane_text_v6(fields, "paneId")?)
+    if not host_service_hex_shape_v6(receipt.invoke_digest, 64) or
+            not host_service_hex_shape_v6(receipt.service_incarnation, 32) or receipt.service_epoch < 1:
+        return Err("host-agent-pane-target-fence")
+    for identity in [receipt.operation_id, receipt.session_id, receipt.window_id, receipt.pane_id]:
+        if not builder_identifier_valid_v1(identity): return Err("host-agent-pane-target-identity")
+    if host_agent_pane_target_receipt_encode_v6(receipt) != source: return Err("host-agent-pane-target-noncanonical")
+    Ok(receipt)

@@ -5,6 +5,10 @@ Date: 2026-07-07
 Production-quality features of the shipped `src/app/llm_caret` path. Pure-Simple;
 UI on the Simple TUI stdlib (`std.tui`).
 
+The [local controller client](llm_caret_orchestrator_client.md) submits and
+inspects retained intent through an explicitly selected compiled controller.
+Its receipts remain metadata evidence, not agent execution or authorization.
+
 ## Caret suite (`cs`)
 
 `cs` starts the **caret suite**: the read-only view of a multi-agent caret

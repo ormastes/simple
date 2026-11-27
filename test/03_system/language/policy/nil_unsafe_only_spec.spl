@@ -1,0 +1,57 @@
+# Requirement: language policy "nil only in unsafe" (lint NIL-UNSAFE-001; semantic checker for case None)
+"""
+# `nil` is accepted only inside `unsafe:`
+
+Outside `unsafe:` a `nil` literal is diagnosed (NIL-UNSAFE-001, warning) and the
+author is pointed at `None`. `case None` against a non-Option scalar is diagnosed
+by the semantic checker. Extends test/01_unit/compiler/lint/nil_outside_unsafe_rule_spec.spl
+and frontend_diag/option_nil_pattern_non_option_scrutinee_spec.spl at system level.
+
+| Scenario | Status |
+|----------|--------|
+| nil outside unsafe flagged | passing |
+| nil inside unsafe accepted | passing |
+| None in safe code accepted | passing |
+| `case None` on i64 diagnosed | passing |
+| `case nil` on i64 has named E-TYPE-NIL-COMPARE | passing |
+| `case None` on Option accepted (checker false-positive today) | in-development |
+| `case None` on i64 has a NAMED code | in-development |
+| semantic checker (not only lint) flags nil outside unsafe | in-development |
+"""
+# @tag: system, language, policy, diag
+
+use std.spec.*
+use compiler.tools.lint.static_rules.{LintParamsV1, LintUnit, StaticLintFinding, run_static_lint_rule_table}
+use compiler.tools.lint.rules.nil_outside_unsafe_rule.{nil_outside_unsafe_lint_rule}
+use compiler.tools.lint.semantic_check.{simple_semantic_check_source}
+
+fn nil_findings(src: text) -> [StaticLintFinding]:
+    val run = run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("policy.spl", src), [nil_outside_unsafe_lint_rule()])
+    run.findings
+
+fn check_diags(src: text) -> [text]:
+    simple_semantic_check_source(src, "policy.spl").diagnostics
+
+describe "nil only inside unsafe":
+    it "flags nil outside unsafe with a pointer to None":
+        val found = nil_findings("fn f() -> i64?:\n    val x: i64? = nil\n    x\n")
+        expect(found.len()).to_equal(1)
+        expect(found[0].code).to_equal("NIL-UNSAFE-001")
+        expect(found[0].hint).to_contain("None")
+
+    it "accepts nil inside an unsafe block":
+        expect(nil_findings("fn f() -> i64?:\n    unsafe:\n        val x: i64? = nil\n    None\n").len()).to_equal(0)
+
+    it "accepts None in safe code":
+        expect(nil_findings("fn f() -> i64?:\n    None\n").len()).to_equal(0)
+
+describe "case None on a non-Option scalar":
+    it "diagnoses case None over an i64 scrutinee":
+        val ds = check_diags("fn f(n: i64) -> i64:\n    match n:\n        case None: 1\n        case _: 0\n")
+        expect(ds.len()).to_equal(1)
+        expect(ds[0]).to_contain("Optional")
+
+    it "gives the nil spelling a NAMED E-TYPE-NIL-COMPARE diagnostic":
+        val ds = check_diags("fn f(n: i64) -> i64:\n    match n:\n        case nil: 1\n        case _: 0\n")
+        expect(ds.len()).to_equal(1)
+        expect(ds[0]).to_contain("E-TYPE-NIL-COMPARE")

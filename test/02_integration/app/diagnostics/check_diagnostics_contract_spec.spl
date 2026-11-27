@@ -7,45 +7,66 @@ user-facing output.
 """
 
 use std.spec
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_exists, secure_temp_dir}
+use std.io_runtime.{dir_remove}
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.types.{json_to_string}
 
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+var TEMP_ROOT: text = ""
 
-val PARSE_FIXTURE_PATH = "/tmp/simple_check_diagnostics_contract_parse.spl"
-val WARNING_FIXTURE_PATH = "/tmp/simple_check_diagnostics_contract_warning.spl"
-val MISSING_FIXTURE_PATH = "/tmp/simple_check_diagnostics_contract_missing.spl"
-val TYPE_FIXTURE_PATH = "/tmp/simple_check_diagnostics_contract_type.spl"
-val RETURN_FIXTURE_PATH = "/tmp/simple_check_diagnostics_contract_return.spl"
-val SIMPLE_BIN = "bin/release/x86_64-unknown-linux-gnu/simple"
+fn get_temp_path(name: text) -> text:
+    if TEMP_ROOT == "":
+        val temp_dir = get_temp_dir()
+        val result = secure_temp_dir(temp_dir, "simple-check-diagnostics-").unwrap()
+        TEMP_ROOT = result
+    TEMP_ROOT + "/" + name
+
+# Runs the repo's check entry point using the simple binary
+fn run_check(args: [text]) -> (text, text, i64):
+    var full_args: [text] = []
+    full_args.push("run")
+    full_args.push("./src/app/check/main.spl")
+    for a in args:
+        full_args.push(a)
+
+    # Windows checkouts ship bin/simple.exe; POSIX ships bin/simple.
+    val binary = if file_exists("./bin/simple.exe"): "./bin/simple.exe" else: "./bin/simple"
+    process_run(binary, full_args)
 
 fn seed_invalid_source():
     val source = "fn main():\n    val x =\n"
-    expect(rt_file_write_text(PARSE_FIXTURE_PATH, source)).to_equal(true)
+    val path = get_temp_path("parse.spl")
+    expect(file_write(path, source)).to_equal(true)
 
 fn seed_unresolved_import_source():
     val source = "use definitely.missing.module\nfn main():\n    val x = 1\n"
-    expect(rt_file_write_text(WARNING_FIXTURE_PATH, source)).to_equal(true)
+    val path = get_temp_path("warning.spl")
+    expect(file_write(path, source)).to_equal(true)
 
 fn seed_type_mismatch_source():
     val source = "fn main():\n    val x: i64 = \"text\"\n"
-    expect(rt_file_write_text(TYPE_FIXTURE_PATH, source)).to_equal(true)
+    val path = get_temp_path("type.spl")
+    expect(file_write(path, source)).to_equal(true)
 
 fn seed_return_mismatch_source():
     val source = "fn value() -> bool:\n    return 1\n"
-    expect(rt_file_write_text(RETURN_FIXTURE_PATH, source)).to_equal(true)
+    val path = get_temp_path("return.spl")
+    expect(file_write(path, source)).to_equal(true)
 
-fn remove_missing_fixture():
-    if rt_file_exists(MISSING_FIXTURE_PATH):
-        rt_file_delete(MISSING_FIXTURE_PATH)
-    expect(rt_file_exists(MISSING_FIXTURE_PATH)).to_equal(false)
+fn cleanup_temps():
+    if TEMP_ROOT != "":
+        if dir_remove(TEMP_ROOT, true):
+            TEMP_ROOT = ""
 
 describe "`simple check` diagnostics":
     it "prints stable parse code and help in text output":
         seed_invalid_source()
 
-        val (stdout, stderr, code) = rt_process_run(SIMPLE_BIN, ["check", PARSE_FIXTURE_PATH])
+        val path = get_temp_path("parse.spl")
+        val (stdout, stderr, code) = run_check([path])
         val combined = stdout + stderr
 
         expect(code).to_equal(1)
@@ -58,11 +79,12 @@ describe "`simple check` diagnostics":
     it "serializes stable parse code and help in JSON output":
         seed_invalid_source()
 
-        val (stdout, stderr, code) = rt_process_run(SIMPLE_BIN, ["check", "--json", PARSE_FIXTURE_PATH])
+        val path = get_temp_path("parse.spl")
+        val (stdout, stderr, code) = run_check(["--json", path])
         val combined = stdout + stderr
 
         expect(code).to_equal(1)
-        expect(combined).to_contain("\"status\": \"error\"")
+        expect(combined).to_contain("\"status\":\"error\"")
         expect(combined).to_contain("\"code\": \"E0002\"")
         expect(combined).to_contain("\"message\": \"unexpected token\"")
         expect(combined).to_contain("\"expected\": \"expression\"")
@@ -72,7 +94,8 @@ describe "`simple check` diagnostics":
     it "prints stable type mismatch code and help in text output":
         seed_type_mismatch_source()
 
-        val (stdout, stderr, code) = rt_process_run(SIMPLE_BIN, ["check", TYPE_FIXTURE_PATH])
+        val path = get_temp_path("type.spl")
+        val (stdout, stderr, code) = run_check([path])
         val combined = stdout + stderr
 
         expect(code).to_equal(1)
@@ -85,11 +108,12 @@ describe "`simple check` diagnostics":
     it "serializes stable type mismatch code and help in JSON output":
         seed_type_mismatch_source()
 
-        val (stdout, stderr, code) = rt_process_run(SIMPLE_BIN, ["check", "--json", TYPE_FIXTURE_PATH])
+        val path = get_temp_path("type.spl")
+        val (stdout, stderr, code) = run_check(["--json", path])
         val combined = stdout + stderr
 
         expect(code).to_equal(1)
-        expect(combined).to_contain("\"status\": \"error\"")
+        expect(combined).to_contain("\"status\":\"error\"")
         expect(combined).to_contain("\"severity\": \"error\"")
         expect(combined).to_contain("\"code\": \"E1003\"")
         expect(combined).to_contain("\"message\": \"type mismatch: expected i64, found text\"")
@@ -100,7 +124,8 @@ describe "`simple check` diagnostics":
     it "prints stable return type mismatch code and help in text output":
         seed_return_mismatch_source()
 
-        val (stdout, stderr, code) = rt_process_run(SIMPLE_BIN, ["check", RETURN_FIXTURE_PATH])
+        val path = get_temp_path("return.spl")
+        val (stdout, stderr, code) = run_check([path])
         val combined = stdout + stderr
 
         expect(code).to_equal(1)
@@ -113,11 +138,12 @@ describe "`simple check` diagnostics":
     it "serializes stable return type mismatch code and help in JSON output":
         seed_return_mismatch_source()
 
-        val (stdout, stderr, code) = rt_process_run(SIMPLE_BIN, ["check", "--json", RETURN_FIXTURE_PATH])
+        val path = get_temp_path("return.spl")
+        val (stdout, stderr, code) = run_check(["--json", path])
         val combined = stdout + stderr
 
         expect(code).to_equal(1)
-        expect(combined).to_contain("\"status\": \"error\"")
+        expect(combined).to_contain("\"status\":\"error\"")
         expect(combined).to_contain("\"severity\": \"error\"")
         expect(combined).to_contain("\"code\": \"E1003\"")
         expect(combined).to_contain("\"message\": \"type mismatch: expected bool, found i64\"")
@@ -128,7 +154,8 @@ describe "`simple check` diagnostics":
     it "prints stable warning code and help in text output":
         seed_unresolved_import_source()
 
-        val (stdout, stderr, code) = rt_process_run(SIMPLE_BIN, ["check", WARNING_FIXTURE_PATH])
+        val path = get_temp_path("warning.spl")
+        val (stdout, stderr, code) = run_check([path])
         val combined = stdout + stderr
 
         expect(code).to_equal(0)
@@ -141,20 +168,20 @@ describe "`simple check` diagnostics":
     it "serializes warning status and help in JSON output":
         seed_unresolved_import_source()
 
-        val (stdout, stderr, code) = rt_process_run(SIMPLE_BIN, ["check", "--json", WARNING_FIXTURE_PATH])
+        val path = get_temp_path("warning.spl")
+        val (stdout, stderr, code) = run_check(["--json", path])
         val combined = stdout + stderr
 
         expect(code).to_equal(0)
-        expect(combined).to_contain("\"status\": \"warning\"")
+        expect(combined).to_contain("\"status\":\"warning\"")
         expect(combined).to_contain("\"severity\": \"warning\"")
         expect(combined).to_contain("\"code\": \"W0410\"")
         expect(combined).to_contain("\"unresolved import 'definitely.missing.module'")
         expect(combined).to_contain("\"check the module path or add the source root with --source-root\"")
 
     it "prints stable file read code and help in text output":
-        remove_missing_fixture()
-
-        val (stdout, stderr, code) = rt_process_run(SIMPLE_BIN, ["check", MISSING_FIXTURE_PATH])
+        val missing_path = get_temp_path("missing.spl")
+        val (stdout, stderr, code) = run_check([missing_path])
         val combined = stdout + stderr
 
         expect(code).to_equal(1)
@@ -163,14 +190,44 @@ describe "`simple check` diagnostics":
         expect(combined).to_contain("= help: check that the path exists and is readable")
 
     it "serializes stable file read code and help in JSON output":
-        remove_missing_fixture()
-
-        val (stdout, stderr, code) = rt_process_run(SIMPLE_BIN, ["check", "--json", MISSING_FIXTURE_PATH])
+        val missing_path = get_temp_path("missing-json.spl")
+        val (stdout, stderr, code) = run_check(["--json", missing_path])
         val combined = stdout + stderr
 
         expect(code).to_equal(1)
-        expect(combined).to_contain("\"status\": \"error\"")
+        expect(combined).to_contain("\"status\":\"error\"")
         expect(combined).to_contain("\"severity\": \"error\"")
         expect(combined).to_contain("\"code\": \"E0001\"")
         expect(combined).to_contain("\"cannot read file")
         expect(combined).to_contain("\"check that the path exists and is readable\"")
+
+    it "emits valid parseable JSON lines for paths with spaces and backslashes":
+        val path = get_temp_path("escaped path.spl")
+        expect(file_write(path, "fn main():\n    val x: i64 = \"quoted\\\"value\"\n")).to_equal(true)
+
+        val (stdout, stderr, code) = run_check(["--json", path])
+        expect(code).to_equal(1)
+
+        var diag_line = ""
+        var summary_line = ""
+        for raw_line in (stdout + "\n" + stderr).split("\n"):
+            val trimmed = raw_line.trim()
+            if trimmed.starts_with(r"{") and trimmed.contains("\"type\": \"check-diagnostic\""):
+                diag_line = trimmed
+            elif trimmed.starts_with(r"{") and trimmed.contains("\"command\":\"check\""):
+                summary_line = trimmed
+
+        expect(diag_line == "").to_equal(false)
+        expect(summary_line == "").to_equal(false)
+
+        val diag_obj = json_parse(diag_line)
+        expect(json_to_string(json_object_get(diag_obj, "type")) ?? "").to_equal("check-diagnostic")
+        expect(json_to_string(json_object_get(diag_obj, "code")) ?? "").to_equal("E1003")
+        expect(json_to_string(json_object_get(diag_obj, "file")) ?? "").to_equal(path)
+
+        val summary_obj = json_parse(summary_line)
+        expect(json_to_string(json_object_get(summary_obj, "command")) ?? "").to_equal("check")
+        expect(json_to_string(json_object_get(summary_obj, "status")) ?? "").to_equal("error")
+
+    after_each():
+        cleanup_temps()

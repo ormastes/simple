@@ -154,3 +154,31 @@ prior zero-copy baseline; reject steady-state throughput or memory regression.
 Also fault-inject the production CAS and reset-ack provider (not only the pure
 transition helpers) to prove competing acquisition, partial descriptor rollback,
 late completion quarantine, and non-acknowledged reset fail closed.
+
+## 2026-11-03: preserve the VirtIO sector unit during initialization
+
+Both `VirtioBlkDriver.init_ok` and `virtio_blk_arm_init` negotiated only the
+FLUSH feature, then read the optional `blk_size` configuration field and
+assigned it to `sector_size`. A nonzero 4096-byte hint made owned reads reject
+the device's sector size and made 512-byte writes fail the exact-sector check.
+Increasing the payload instead exceeded the bounded 1024-byte DMA scratch
+slot. This prevented the existing FAT32 durable-write path from operating.
+
+The two initialization routes now retain 512-byte transfer sectors and do not
+read the unnegotiated hint. The
+[VirtIO 1.2 block-device configuration contract](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html)
+defines `blk_size` as an optional I/O hint; protocol sector units remain 512
+bytes. Existing write/FLUSH completion and recovery checks remain necessary.
+
+The focused durability-boundary spec records a structural regression for both
+initialization routes. It is not a substitute for executing initialization
+against device MMIO or for proving persistent storage. With an admitted ARM64
+runtime, the required device fixture must expose capacity in 512-byte units,
+offer FLUSH, set the unnegotiated `blk_size` field to 4096, and initialize through
+each route. Assert `sector_size == 512`, no read of configuration offset 276,
+exact 512-byte write/read parity at two adjacent LBAs, rejection of partial
+sectors, and successful negotiated FLUSH. Repeat with `blk_size` 0 and 512,
+and require FLUSH rejection when that feature is absent. A second QEMU process
+must then read the acknowledged data from the same disk image before making
+any durability acceptance claim. None of those target executions was run by
+this source-repair lane; the bug remains open pending its full acceptance.

@@ -7,7 +7,11 @@ use app.cli.query_sanitize.{sanitize_path}
 use app.cli.query_helpers.{_extract_flag}
 use app.cli.query_error_codes.{query_extract_error_code}
 use app.cli.query_rich_common.{_DIAG_COLLECT_MODE, _DIAG_COLLECTED, _diag_emit_or_collect, _find_in_line_from, _parse_error_location, query_split_structured_error, query_file_read_rich, query_file_exists, query_dir_list, query_process_run, query_json_escape, query_emit_mcp_diagnostics_wrapper}
-use app.cli.query_lint.{_emit_lint_if_readable, _emit_source_lint_diagnostics, _collect_lint_diagnostics_json}
+use app.cli.query_lint.{_emit_lint_if_readable, _emit_source_lint_diagnostics, _qlint_collect_lint_diagnostics_json}
+use std.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use std.common.diagnostics.severity.{Severity}
+use std.common.diagnostics.span.{Span}
+use std.common.diagnostics.diagnostic_batch.{DiagnosticBatchV1, BatchStatus, diagnostic_stable_id}
 
 fn query_check(file: text, cmd_args: [text]) -> i64:
     val format = _extract_flag(cmd_args, "--format", "text")
@@ -66,7 +70,7 @@ fn query_workspace_diagnostics(dir_path: text, cmd_args: [text]) -> i64:
 
     # Collect all .spl files recursively
     var spl_files: [text] = []
-    _collect_spl_files(clean_dir, spl_files)
+    _qdiag_collect_spl_files(clean_dir, spl_files)
 
     if spl_files.len() == 0:
         if format == "json":
@@ -140,7 +144,7 @@ fn query_workspace_diagnostics(dir_path: text, cmd_args: [text]) -> i64:
         return 1
     0
 
-fn _collect_spl_files(dir: text, files: [text]):
+fn _qdiag_collect_spl_files(dir: text, files: [text]):
     """Recursively collect all .spl files in a directory."""
     val entries = query_dir_list(dir)
     for entry in entries:
@@ -151,7 +155,7 @@ fn _collect_spl_files(dir: text, files: [text]):
             files.push(full_path)
         # Recurse into subdirectories (heuristic: no extension = directory)
         elif not entry.contains("."):
-            _collect_spl_files(full_path, files)
+            _qdiag_collect_spl_files(full_path, files)
 
 fn _find_simple_binary() -> text:
     if query_file_exists("bin/release/linux-x86_64/simple"):
@@ -197,7 +201,7 @@ fn _strip_ansi(s: text) -> text:
         parts.push(s.substring(0, first_escape))
     var i = first_escape
     var span_start = first_escape
-    while i < s.len():
+    while i < s.byte_len():
         if s.byte_at(i) == 27:
             if i > span_start:
                 parts.push(s.substring(span_start, i))
@@ -205,26 +209,26 @@ fn _strip_ansi(s: text) -> text:
             # Well-formed SGR: ESC '[' digit/semicolon params 'm'. A malformed
             # escape (a non-param byte right after '[') consumes the rest of the
             # string, so "prefix\033[unterminated" strips to "prefix".
-            if i < s.len() and s.byte_at(i) == 91:
+            if i < s.byte_len() and s.byte_at(i) == 91:
                 i = i + 1
-                if i < s.len() and s.byte_at(i) != 109 and
+                if i < s.byte_len() and s.byte_at(i) != 109 and
                         not ((s.byte_at(i) >= 48 and s.byte_at(i) <= 57) or
                              s.byte_at(i) == 59):
                     return parts.join("")
-                while i < s.len() and s.byte_at(i) != 109:
+                while i < s.byte_len() and s.byte_at(i) != 109:
                     i = i + 1
-                if i == s.len():
+                if i == s.byte_len():
                     return parts.join("")
             else:
-                while i < s.len() and s.byte_at(i) != 109:
+                while i < s.byte_len() and s.byte_at(i) != 109:
                     i = i + 1
-                if i == s.len():
+                if i == s.byte_len():
                     return parts.join("")
             i = i + 1
             span_start = i
             continue
         i = i + 1
-    if span_start < s.len():
+    if span_start < s.byte_len():
         parts.push(s.substring(span_start))
     parts.join("")
 
@@ -235,7 +239,7 @@ fn _count_check_output_diagnostics(file: text, check_stdout: text, check_stderr:
 fn _check_output_line_end(value: text, line_start: i64) -> i64:
     """Return the next newline byte or value.len() from a validated start."""
     var i = line_start
-    while i < value.len() and value.byte_at(i) != 10:
+    while i < value.byte_len() and value.byte_at(i) != 10:
         i = i + 1
     i
 
@@ -289,7 +293,7 @@ fn _extract_query_check_diagnostics(check_json: text) -> [text]:
     var in_string = false
     var escaped = false
     var i = object_start
-    while i < check_json.len():
+    while i < check_json.byte_len():
         val ch = check_json.byte_at(i)
         if in_string:
             if escaped:
@@ -325,8 +329,8 @@ fn _find_query_diagnostics_key(s: text, key: text) -> i64:
     # Both lengths and byte_at indices use byte offsets. Unlike the generic
     # substring search this remains allocation-free and valid when arbitrary
     # Unicode precedes the compact ASCII key.
-    val key_len = key.len()
-    val source_len = s.len()
+    val key_len = key.byte_len()
+    val source_len = s.byte_len()
     if key_len == 0:
         return 0
     var i = 0
@@ -348,7 +352,7 @@ fn _find_matching_json_array_end(s: text, start: i64) -> i64:
     var i = start
     var in_string = false
     var escaped = false
-    while i < s.len():
+    while i < s.byte_len():
         val ch = s.byte_at(i)
         if in_string:
             if escaped:
@@ -371,7 +375,7 @@ fn _find_matching_json_array_end(s: text, start: i64) -> i64:
     -1
 
 fn _split_top_level_json_objects(s: text) -> [text]:
-    _split_top_level_json_objects_range(s, 0, s.len())
+    _split_top_level_json_objects_range(s, 0, s.byte_len())
 
 fn _split_top_level_json_objects_range(
     s: text, range_start: i64, range_end: i64
@@ -406,31 +410,98 @@ fn _split_top_level_json_objects_range(
         i = i + 1
     result
 
-fn _parse_check_output_line_json(file: text, line: text) -> text:
+# --- Typed query API (REQ-DIAG-005) ---
+# One `file:line:col: [severity:] message` line of compiler output -> one
+# DiagnosticV1. This is the single decoding path: the legacy JSON line, the
+# LSP batch and the MCP wrapper all render from the same typed value, so a
+# defect carries one code and one primary span on every surface.
+pub fn query_check_line_to_diagnostic_v1(file: text, line: text) -> DiagnosticV1?:
     val trimmed = line.trim()
     if trimmed == "":
-        return ""
+        return None
     val prefix = file + ":"
     if not trimmed.starts_with(prefix):
-        return ""
+        return None
     val parsed = _parse_error_location(trimmed.substring(prefix.len()))
     val line_num = parsed.0
     val col_num = parsed.1
     var msg = parsed.2
-    var severity = 1
+    var severity = Severity.Error
     if msg.starts_with("warning"):
-        severity = 2
+        severity = Severity.Warning
         msg = _strip_diag_severity_prefix(msg, "warning")
     elif msg.starts_with("info"):
-        severity = 3
+        severity = Severity.Info
         msg = _strip_diag_severity_prefix(msg, "info")
     elif msg.starts_with("hint"):
-        severity = 4
+        severity = Severity.Help
         msg = _strip_diag_severity_prefix(msg, "hint")
     elif msg.starts_with("error"):
         msg = _strip_diag_severity_prefix(msg, "error")
     val code = _extract_error_code(msg, "ParseError")
-    "{\"severity\":{severity},\"code\":{_json_text(code)},\"message\":{_json_text(msg)},\"line\":{line_num},\"col\":{col_num},\"end_line\":{line_num},\"end_col\":{col_num},\"tags\":[],\"source\":\"simple\"}"
+    val span = Span(start: 0, end: 0, line: line_num, col: col_num, file: file, length: 0)
+    Some(DiagnosticV1.new(severity, code, msg).with_file(file).with_span(span))
+
+# Numeric LSP severity (1 error .. 4 hint) for the legacy line JSON.
+fn _diagnostic_v1_lsp_severity(d: DiagnosticV1) -> i64:
+    match d.severity:
+        Severity.Error: 1
+        Severity.Warning: 2
+        Severity.Info: 3
+        Severity.Note: 3
+        Severity.Help: 4
+
+# Legacy flat line JSON (consumed by the LSP `_parse_json_diagnostic` and the
+# MCP wrapper). Rendered FROM the typed value, never built in parallel.
+pub fn query_diagnostic_v1_line_json(d: DiagnosticV1) -> text:
+    var line_num = 0
+    var col_num = 0
+    if d.span.is_some():
+        val s = d.span.unwrap()
+        line_num = s.line
+        col_num = s.col
+    val severity = _diagnostic_v1_lsp_severity(d)
+    "{\"severity\":{severity},\"code\":{_json_text(d.code)},\"message\":{_json_text(d.message)},\"line\":{line_num},\"col\":{col_num},\"end_line\":{line_num},\"end_col\":{col_num},\"tags\":[],\"source\":\"simple\"}"
+
+# Every diagnostic in normalized `check` output, typed, in output order.
+pub fn query_check_output_diagnostics_v1(file: text, clean_output: text) -> [DiagnosticV1]:
+    var out: [DiagnosticV1] = []
+    for raw in clean_output.split("\n"):
+        val d = query_check_line_to_diagnostic_v1(file, raw)
+        if d.is_some():
+            out.push(d.unwrap())
+    out
+
+# The whole `check` run as one DiagnosticBatchV1. Status is derived from the
+# evidence, never from the exit code alone:
+#   exit 0, no errors      -> Complete
+#   errors present         -> PartialRecovery (the compiler kept going)
+#   exit != 0, no evidence -> InternalError (a failure with zero diagnostics is
+#                             reported as such, never as a clean batch)
+pub fn query_check_batch_v1(file: text, clean_output: text, check_code: i64, document_version: i64, source_hash: text) -> DiagnosticBatchV1:
+    var batch = DiagnosticBatchV1.new("simple-check", file, "", document_version, source_hash, 0)
+    var errors = 0
+    var occurrence = 0
+    for d in query_check_output_diagnostics_v1(file, clean_output):
+        var node_identity = "0:0"
+        if d.span.is_some():
+            val s = d.span.unwrap()
+            node_identity = "{s.line}:{s.col}"
+        batch = batch.push(diagnostic_stable_id(d.code, file, node_identity, occurrence), d)
+        occurrence = occurrence + 1
+        if _diagnostic_v1_lsp_severity(d) == 1:
+            errors = errors + 1
+    if errors > 0:
+        return batch.with_status(BatchStatus.PartialRecovery, "check reported {errors} error(s)")
+    if check_code != 0:
+        return batch.with_status(BatchStatus.InternalError, "check exited {check_code} without a located diagnostic")
+    batch
+
+fn _parse_check_output_line_json(file: text, line: text) -> text:
+    val d = query_check_line_to_diagnostic_v1(file, line)
+    if d.is_none():
+        return ""
+    query_diagnostic_v1_line_json(d.unwrap())
 
 fn _strip_diag_severity_prefix(msg: text, severity_word: text) -> text:
     var rest = msg.substring(severity_word.len()).trim()

@@ -1,0 +1,34 @@
+# Exact legacy stream reap bytes, extracted from collect_reap_v2.
+# Pure DATA encoding only: no file read/publication, custody or cleanup grant.
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_stream_template_digest_v3}
+use std.common.build_manager.grouped_execution_contract.GroupedActionLeaseV1
+use std.common.build_manager.codec.builder_wire_line_v1
+
+pub fn group_process_stream_reap_lease_validate_v3(launch: GroupProcessStreamLaunchV2,
+        lease: GroupedActionLeaseV1) -> Result<(), text>:
+    if (lease.worker_id != launch.worker_id or lease.generation != launch.generation or
+            lease.snapshot_digest != launch.snapshot_digest or lease.cache_identity != launch.cache_identity):
+        return Err("stream reap lease differs from admitted broker request")
+    if lease.group_id == "" or lease.action_id == "" or lease.lease_id == "":
+        return Err("stream reap lease is incomplete")
+    Ok(())
+
+pub fn group_process_stream_reap_bytes_v3(launch: GroupProcessStreamLaunchV2, identity: text,
+        lease: GroupedActionLeaseV1, terminal: text, memory: text, resources: text) -> Result<text, text>:
+    group_process_stream_reap_lease_validate_v3(launch, lease)?
+    var retained = "SIMPLE-GROUP-STREAM-REAP-2\n"
+    match launch.profile_v3:
+        case Some(_profile): retained = "SIMPLE-GROUP-STREAM-REAP-3\n"
+        case None: pass
+    for field in [lease.group_id, lease.action_id, lease.worker_id, str(lease.generation),
+            lease.lease_id, lease.snapshot_digest, lease.cache_identity, identity,
+            str(launch.transport_generation), launch.request.child_argv_digest,
+            launch.request.producer_digest, launch.request.broker_digest]:
+        retained = retained + builder_wire_line_v1(field)
+    retained = retained + terminal + builder_wire_line_v1(memory)
+    match launch.profile_v3:
+        case Some(_profile):
+            val template_digest = group_process_stream_template_digest_v3(launch)?
+            retained = retained + builder_wire_line_v1(template_digest) + builder_wire_line_v1(resources)
+        case None: pass
+    Ok(retained)

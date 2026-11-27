@@ -1,0 +1,493 @@
+# MC/DC module coverage for compiler/library source files exercised by specs.
+#
+# Pure-Simple tool (no Python/JS). Three steps, all SDN-backed:
+#
+#   instrument  copy + instrument source files into a shadow tree
+#               build/coverage/mcdc/<run>/src/<de-numbered module path>
+#               and write decisions.sdn / conditions.sdn / files.sdn
+#   run         run specs with SIMPLE_LIB=<shadow>/src so `use compiler.*`
+#               resolves to the instrumented copies; the probe appends
+#               evaluation vectors to <run>/records/<pid>-<micros>.sdn
+#   report      per-file table (decisions, conditions, CD %, MC/DC %) plus
+#               per-decision uncovered conditions with file:line
+#
+# Usage (from the repo root, via scripts/check/cert/mcdc_module_coverage.shs
+# or `<simple> run scripts/check/cert/mcdc_module_coverage.spl ...`):
+#   instrument --run <name> [--out build/coverage/mcdc] [--list <file>] <src/...spl>...
+#   run        --run <name> [--out DIR] [--bin <simple>] [--mode interpreter] <spec>...
+#   report     --run <name> [--out DIR] [--format text|sdn|json] [--no-uncovered] [--file <substr>]
+#
+# Design: doc/05_design/generics_coverage_mcdc.md
+
+# Facade choice: `file_read`/`file_write`/`list_dir` have several co-compiled
+# definitions with differing signatures and the seed's cross-module dispatch
+# may bind the wrong copy (see io_runtime.spl "Do NOT forward these through
+# file_read"). Only `file_read_result` and `file_write_exact` (one definition
+# each) are used for file content; records live in ONE file so no directory
+# listing is needed.
+use std.io_runtime.{get_args, file_read_result, file_write_exact, file_exists, dir_create_all, env_set_process, env_get_opt, process_run, cwd, exit}
+use std.nogc_sync_mut.mcdc.module_decisions.*
+use std.nogc_sync_mut.mcdc.module_analyzer.*
+use std.nogc_sync_mut.mcdc.module_records.*
+use std.nogc_sync_mut.mcdc.module_probe.{MCDC_MOD_RECORDS_FILE, MCDC_MOD_RECORDS_HEADER}
+
+val DEFAULT_OUT: text = "build/coverage/mcdc"
+
+fn read_text(path: text) -> text:
+    match file_read_result(path):
+        case Ok(content): content
+        case Err(e):
+            print "mcdc: read failed for " + path + ": " + e
+            ""
+
+fn usage():
+    print "usage: mcdc_module_coverage <instrument|run|report|restore> --run <name> [options] <args...>"
+    print "  instrument --run NAME [--out DIR] [--list FILE] <src/...spl>..."
+    print "  run        --run NAME [--out DIR] [--bin SIMPLE] [--mode interpreter] [--in-place] <spec.spl|dir>..."
+    print "             default: SIMPLE_LIB=<shadow> (self-hosted loader); --in-place: swap instrumented"
+    print "             copies into the real src paths for the run and restore them afterwards"
+    print "             (required on the Rust bootstrap seed, whose loader ignores SIMPLE_LIB)"
+    print "  report     --run NAME [--out DIR] [--format text|sdn|json] [--no-uncovered] [--file SUBSTR]"
+    print "  restore    --run NAME [--out DIR]      put originals back after an interrupted --in-place run"
+
+fn normalize_path(p: text) -> text:
+    var s = p.replace("\\", "/")
+    while s.starts_with("./"):
+        s = s.slice(2, s.len())
+    s
+
+fn dirname(p: text) -> text:
+    var i = p.len() - 1
+    while i >= 0 and p.byte_at(i) != 47:
+        i = i - 1
+    if i <= 0: return ""
+    p.slice(0, i)
+
+fn write_file_mkdir(path: text, content: text) -> bool:
+    val d = dirname(path)
+    if d != "":
+        dir_create_all(d)
+    file_write_exact(path, content)
+
+fn abs_path(p: text) -> text:
+    val s = normalize_path(p)
+    if s.starts_with("/") or (s.len() > 1 and s.byte_at(1) == 58): return s
+    normalize_path(cwd()) + "/" + s
+
+fn pad_right(s: text, w: i64) -> text:
+    var out = s
+    while out.len() < w:
+        out = out + " "
+    out
+
+fn pad_left(s: text, w: i64) -> text:
+    var out = s
+    while out.len() < w:
+        out = " " + out
+    out
+
+fn fmt1(f: f64) -> text:
+    val t = (f * 10.0 + 0.5) as i64
+    (t / 10).to_text() + "." + (t % 10).to_text()
+
+fn json_quote(s: text) -> text:
+    var out = "\""
+    var i = 0
+    while i < s.len():
+        val c = s.byte_at(i)
+        if c == 92: out = out + "\\\\"
+        elif c == 34: out = out + "\\\""
+        elif c == 10: out = out + "\\n"
+        elif c == 13: out = out + "\\r"
+        elif c == 9: out = out + "\\t"
+        else: out = out + s.slice(i, i + 1)
+        i = i + 1
+    out + "\""
+
+# --- option parsing ----------------------------------------------------------
+
+struct Opts:
+    run: text
+    out: text
+    bin: text
+    mode: text
+    format: text
+    list: text
+    file_filter: text
+    uncovered: bool
+    in_place: bool
+    positional: [text]
+
+fn parse_opts(args: [text]) -> Opts:
+    var o = Opts(run: "", out: DEFAULT_OUT, bin: "", mode: "interpreter", format: "text", list: "", file_filter: "", uncovered: true, in_place: false, positional: [])
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        val has_next = i + 1 < args.len()
+        if a == "--run" and has_next:
+            o.run = args[i + 1]
+            i = i + 2
+        elif a == "--out" and has_next:
+            o.out = args[i + 1]
+            i = i + 2
+        elif a == "--bin" and has_next:
+            o.bin = args[i + 1]
+            i = i + 2
+        elif a == "--mode" and has_next:
+            o.mode = args[i + 1]
+            i = i + 2
+        elif a == "--format" and has_next:
+            o.format = args[i + 1]
+            i = i + 2
+        elif a == "--list" and has_next:
+            o.list = args[i + 1]
+            i = i + 2
+        elif a == "--file" and has_next:
+            o.file_filter = args[i + 1]
+            i = i + 2
+        elif a == "--no-uncovered":
+            o.uncovered = false
+            i = i + 1
+        elif a == "--in-place":
+            o.in_place = true
+            i = i + 1
+        elif a == "--":
+            i = i + 1
+        else:
+            o.positional.push(a)
+            i = i + 1
+    o
+
+fn run_dir(o: Opts) -> text:
+    normalize_path(o.out) + "/" + o.run
+
+# --- instrument ----------------------------------------------------------------
+
+fn cmd_instrument(o: Opts) -> i64:
+    var files: [text] = o.positional
+    if o.list != "":
+        val listed = read_text(o.list)
+        for raw in listed.split("\n"):
+            val p = raw.trim()
+            if p != "" and not p.starts_with("#"):
+                files.push(p)
+    if files.len() == 0:
+        print "mcdc instrument: no source files given"
+        return 2
+    val root = run_dir(o)
+    val shadow_root = root + "/src"
+    dir_create_all(shadow_root)
+    dir_create_all(root + "/records")
+    var all_decisions: [McdcDecisionInfo] = []
+    var files_rows: [text] = [mcdc_files_header()]
+    var skipped_rows: [text] = ["|note|"]
+    var next_id = 0
+    var total_conditions = 0
+    var failed = 0
+    for raw in files:
+        val rel = normalize_path(raw)
+        if not file_exists(rel):
+            print "mcdc instrument: missing " + rel
+            failed = failed + 1
+        else:
+            val content = read_text(rel)
+            if content == "":
+                print "mcdc instrument: " + rel + " read back empty"
+                failed = failed + 1
+            val res = mcdc_instrument_source(content, rel, next_id)
+            next_id = res.next_id
+            var conds = 0
+            for d in res.decisions:
+                all_decisions.push(d)
+                conds = conds + d.conditions.len()
+            total_conditions = total_conditions + conds
+            val shadows = mcdc_shadow_rel_paths(rel)
+            if shadows.len() == 0:
+                print "mcdc instrument: " + rel + " is not under src/; skipped"
+                failed = failed + 1
+            else:
+                for s in shadows:
+                    if not write_file_mkdir(shadow_root + "/" + s, res.source):
+                        print "mcdc instrument: cannot write " + shadow_root + "/" + s
+                        failed = failed + 1
+                files_rows.push(mcdc_files_encode_row(rel, shadows[0], res.decisions.len(), conds))
+                print pad_right(rel, 64) + " decisions=" + pad_left(res.decisions.len().to_text(), 4) + " conditions=" + pad_left(conds.to_text(), 4) + " skipped=" + res.skipped.len().to_text() + " use_line=" + res.use_line.to_text()
+            for s in res.skipped:
+                skipped_rows.push(mcdc_sdn_quote(s))
+    file_write_exact(root + "/decisions.sdn", mcdc_manifest_encode(all_decisions))
+    file_write_exact(root + "/conditions.sdn", mcdc_conditions_encode(all_decisions))
+    file_write_exact(root + "/files.sdn", files_rows.join("\n") + "\n")
+    file_write_exact(root + "/skipped.sdn", skipped_rows.join("\n") + "\n")
+    print "total: files=" + files.len().to_text() + " decisions=" + all_decisions.len().to_text() + " conditions=" + total_conditions.to_text() + " skipped=" + (skipped_rows.len() - 1).to_text()
+    print "shadow: " + shadow_root + "  (set SIMPLE_LIB to this directory)"
+    print "manifest: " + root + "/decisions.sdn"
+    if failed > 0: return 1
+    0
+
+# --- in-place swap (seed fallback) -------------------------------------------------
+
+struct RunFile:
+    file: text
+    shadow: text
+
+fn run_files(root: text) -> [RunFile]:
+    var out: [RunFile] = []
+    for raw in read_text(root + "/files.sdn").split("\n"):
+        val line = raw.trim()
+        if line != "" and not line.starts_with("|"):
+            val cells = mcdc_sdn_split_row(line)
+            if cells.len() >= 2:
+                out.push(RunFile(file: cells[0], shadow: cells[1]))
+    out
+
+# Replace each instrumented source at its REAL path, keeping the original
+# under <run>/backup/<path>. Returns the number of files swapped.
+fn ensure_backup(root: text, file: text) -> bool:
+    val backup = root + "/backup/" + file
+    if file_exists(backup): return true
+    val original = read_text(file)
+    if original == "":
+        print "mcdc in-place: cannot read original " + file + "; skipped"
+        return false
+    if not write_file_mkdir(backup, original):
+        print "mcdc in-place: cannot write backup " + backup + "; skipped"
+        return false
+    true
+
+fn swap_in_one(root: text, f: RunFile) -> bool:
+    if not ensure_backup(root, f.file): return false
+    val instrumented = read_text(root + "/src/" + f.shadow)
+    if instrumented == "":
+        print "mcdc in-place: cannot read instrumented copy for " + f.file + "; skipped"
+        return false
+    if file_write_exact(f.file, instrumented): return true
+    print "mcdc in-place: cannot write " + f.file
+    false
+
+fn swap_in(root: text, files: [RunFile]) -> i64:
+    var n = 0
+    for f in files:
+        if swap_in_one(root, f): n = n + 1
+    n
+
+fn swap_out_one(root: text, f: RunFile) -> bool:
+    val backup = root + "/backup/" + f.file
+    if not file_exists(backup): return false
+    val original = read_text(backup)
+    if original == "":
+        print "mcdc in-place: backup unreadable for " + f.file + " (left as is)"
+        return false
+    if file_write_exact(f.file, original) and read_text(f.file) == original: return true
+    print "mcdc in-place: RESTORE FAILED for " + f.file + " — copy " + backup + " back by hand"
+    false
+
+# Put originals back from <run>/backup. Returns the number restored and
+# verified byte-identical.
+fn swap_out(root: text, files: [RunFile]) -> i64:
+    var n = 0
+    for f in files:
+        if swap_out_one(root, f): n = n + 1
+    n
+
+fn cmd_restore(o: Opts) -> i64:
+    val root = run_dir(o)
+    val files = run_files(root)
+    val n = swap_out(root, files)
+    print "mcdc restore: " + n.to_text() + " of " + files.len().to_text() + " file(s) restored from " + root + "/backup"
+    if n == files.len(): 0 else: 1
+
+# --- run ------------------------------------------------------------------------
+
+fn cmd_run(o: Opts) -> i64:
+    val root = run_dir(o)
+    if not file_exists(root + "/decisions.sdn"):
+        print "mcdc run: no manifest at " + root + "/decisions.sdn (run `instrument` first)"
+        return 2
+    if o.positional.len() == 0:
+        print "mcdc run: no spec paths given"
+        return 2
+    var bin = o.bin
+    if bin == "":
+        bin = env_get_opt("SIMPLE_BIN") ?? "bin/simple"
+    val shadow = abs_path(root + "/src")
+    val records = abs_path(root + "/records")
+    dir_create_all(records)
+    val records_file = records + "/" + MCDC_MOD_RECORDS_FILE
+    if not file_exists(records_file):
+        file_write_exact(records_file, MCDC_MOD_RECORDS_HEADER + "\n")
+    val rows_before = mcdc_records_decode(read_text(records_file)).len()
+    val files = run_files(root)
+    var swapped = 0
+    if o.in_place:
+        swapped = swap_in(root, files)
+        print "mcdc run: IN-PLACE mode — " + swapped.to_text() + " of " + files.len().to_text() + " source file(s) temporarily replaced; originals in " + root + "/backup (use `restore --run " + o.run + "` if this run is interrupted)"
+    else:
+        env_set_process("SIMPLE_LIB", shadow)
+        print "mcdc run: SIMPLE_LIB=" + shadow
+    env_set_process("SIMPLE_MCDC_RECORDS", records)
+    var args: [text] = ["test"]
+    for p in o.positional:
+        args.push(p)
+    args.push("--no-cache")
+    args.push("--mode=" + o.mode)
+    print "mcdc run: SIMPLE_MCDC_RECORDS=" + records
+    print "mcdc run: " + bin + " " + args.join(" ")
+    val (stdout, stderr, code) = process_run(bin, args)
+    if o.in_place:
+        val restored = swap_out(root, files)
+        print "mcdc run: in-place restore " + restored.to_text() + " of " + files.len().to_text() + " file(s)"
+    val lines = stdout.split("\n")
+    val start = if lines.len() > 80: lines.len() - 80 else: 0
+    var i = start
+    while i < lines.len():
+        print lines[i]
+        i = i + 1
+    if stderr.trim() != "":
+        val elines = stderr.split("\n")
+        val estart = if elines.len() > 40: elines.len() - 40 else: 0
+        var k = estart
+        while k < elines.len():
+            print "[stderr] " + elines[k]
+            k = k + 1
+    val rows_after = mcdc_records_decode(read_text(records_file)).len()
+    print "mcdc run: exit=" + code.to_text() + " new vectors=" + (rows_after - rows_before).to_text() + " total vectors=" + rows_after.to_text() + " (" + records_file + ")"
+    if rows_after == rows_before:
+        print "mcdc run: WARNING no records were written (instrumented modules not loaded, or specs did not reach them)"
+    code
+
+# --- report ---------------------------------------------------------------------
+
+fn cmd_report(o: Opts) -> i64:
+    val root = run_dir(o)
+    if not file_exists(root + "/decisions.sdn"):
+        print "mcdc report: no manifest at " + root + "/decisions.sdn"
+        return 2
+    val decisions = mcdc_manifest_decode(read_text(root + "/decisions.sdn"), read_text(root + "/conditions.sdn"))
+    val records = mcdc_records_decode(read_text(root + "/records/" + MCDC_MOD_RECORDS_FILE))
+    var files: [text] = []
+    for d in decisions:
+        if not files.contains(d.file) and (o.file_filter == "" or d.file.contains(o.file_filter)):
+            files.push(d.file)
+    var summaries: [McdcFileSummary] = []
+    var all_covs: [McdcDecisionCoverage] = []
+    for f in files:
+        var covs: [McdcDecisionCoverage] = []
+        for d in decisions:
+            if d.file == f:
+                val cov = mcdc_analyze_decision(d, records)
+                covs.push(cov)
+                all_covs.push(cov)
+        summaries.push(mcdc_summarize_file(f, covs))
+    var td = 0
+    var tc = 0
+    var tdb = 0
+    var tcb = 0
+    var tcm = 0
+    for s in summaries:
+        td = td + s.decisions
+        tc = tc + s.conditions
+        tdb = tdb + s.decisions_both
+        tcb = tcb + s.conditions_both
+        tcm = tcm + s.conditions_mcdc
+    val total = mcdc_summarize_file("TOTAL", all_covs)
+    if o.format == "sdn":
+        print "|file, decisions, conditions, decisions_both, conditions_both, conditions_mcdc, cd_percent, mcdc_percent|"
+        for s in summaries:
+            print mcdc_sdn_quote(s.file) + ", " + s.decisions.to_text() + ", " + s.conditions.to_text() + ", " + s.decisions_both.to_text() + ", " + s.conditions_both.to_text() + ", " + s.conditions_mcdc.to_text() + ", " + fmt1(s.cd_percent) + ", " + fmt1(s.mcdc_percent)
+        print mcdc_sdn_quote("TOTAL") + ", " + td.to_text() + ", " + tc.to_text() + ", " + tdb.to_text() + ", " + tcb.to_text() + ", " + tcm.to_text() + ", " + fmt1(total.cd_percent) + ", " + fmt1(total.mcdc_percent)
+        if o.uncovered:
+            print ""
+            print "|file, line, decision, condition, kind, expr, reason|"
+            for c in all_covs:
+                val reasons = mcdc_uncovered_reasons(c)
+                if reasons.len() > 0:
+                    for r in reasons:
+                        print mcdc_sdn_quote(c.file) + ", " + c.line.to_text() + ", " + c.id.to_text() + ", " + mcdc_sdn_quote(c.kind) + ", " + mcdc_sdn_quote(c.expr) + ", " + mcdc_sdn_quote(r)
+        return 0
+    if o.format == "json":
+        # explicit interoperability export (SDN is the default format)
+        val lb = r"{"
+        val rb = r"}"
+        var out = lb + "\"files\": ["
+        var first = true
+        for s in summaries:
+            if not first: out = out + ", "
+            first = false
+            out = out + lb + "\"file\": " + json_quote(s.file) + ", \"decisions\": " + s.decisions.to_text() + ", \"conditions\": " + s.conditions.to_text() + ", \"cd_percent\": " + fmt1(s.cd_percent) + ", \"mcdc_percent\": " + fmt1(s.mcdc_percent) + rb
+        out = out + "], \"total\": " + lb + "\"decisions\": " + td.to_text() + ", \"conditions\": " + tc.to_text() + ", \"cd_percent\": " + fmt1(total.cd_percent) + ", \"mcdc_percent\": " + fmt1(total.mcdc_percent) + rb
+        if o.uncovered:
+            out = out + ", \"uncovered\": ["
+            var firstu = true
+            for c in all_covs:
+                for r in mcdc_uncovered_reasons(c):
+                    if not firstu: out = out + ", "
+                    firstu = false
+                    out = out + lb + "\"file\": " + json_quote(c.file) + ", \"line\": " + c.line.to_text() + ", \"decision\": " + c.id.to_text() + ", \"expr\": " + json_quote(c.expr) + ", \"reason\": " + json_quote(r) + rb
+            out = out + "]"
+        print out + rb
+        return 0
+    print "MC/DC module coverage: run=" + o.run + " records=" + records.len().to_text() + " vectors"
+    print pad_right("file", 66) + pad_left("dec", 5) + pad_left("cond", 6) + pad_left("CD%", 8) + pad_left("MC/DC%", 9)
+    for s in summaries:
+        print pad_right(s.file, 66) + pad_left(s.decisions.to_text(), 5) + pad_left(s.conditions.to_text(), 6) + pad_left(fmt1(s.cd_percent), 8) + pad_left(fmt1(s.mcdc_percent), 9)
+    print pad_right("TOTAL", 66) + pad_left(td.to_text(), 5) + pad_left(tc.to_text(), 6) + pad_left(fmt1(total.cd_percent), 8) + pad_left(fmt1(total.mcdc_percent), 9)
+    if o.uncovered:
+        print ""
+        print "Uncovered (file:line [kind] expression / condition: reason):"
+        var any = false
+        for c in all_covs:
+            val reasons = mcdc_uncovered_reasons(c)
+            if reasons.len() > 0:
+                any = true
+                print c.file + ":" + c.line.to_text() + " [" + c.kind + "] " + c.expr
+                for r in reasons:
+                    print "    " + r
+        if not any:
+            print "    (none)"
+    0
+
+fn tail_from(args: [text], from: i64) -> [text]:
+    var out: [text] = []
+    var i = from
+    while i < args.len():
+        out.push(args[i])
+        i = i + 1
+    out
+
+fn main_args(args: [text]) -> [text]:
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if a == "instrument" or a == "run" or a == "report" or a == "restore" or a == "--help" or a == "-h":
+            return tail_from(args, i)
+        i = i + 1
+    []
+
+# Deliberately NOT named `main`: the runtime auto-invokes a `main` entry in a
+# context where the seed's text-session byte-buffer allocation fails
+# ("file text input allocation failed"), while top-level script statements
+# read files normally. Running as top-level script code sidesteps that.
+fn mcdc_cli_main() -> i64:
+    val args = main_args(get_args())
+    if args.len() == 0 or args[0] == "--help" or args[0] == "-h":
+        usage()
+        return 2
+    val cmd = args[0]
+    val o = parse_opts(tail_from(args, 1))
+    if o.run == "":
+        print "mcdc " + cmd + ": --run <name> is required"
+        usage()
+        return 2
+    if cmd == "instrument":
+        return cmd_instrument(o)
+    if cmd == "run":
+        return cmd_run(o)
+    if cmd == "report":
+        return cmd_report(o)
+    if cmd == "restore":
+        return cmd_restore(o)
+    usage()
+    2
+
+val mcdc_cli_exit_code = mcdc_cli_main()
+exit(mcdc_cli_exit_code)

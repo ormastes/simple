@@ -108,3 +108,15 @@ base `a6450c9d6f5`:
 ```
 
 Still zero. WONTFIX closure stands.
+
+## Re-check 2026-11-25 (lane p3-bab, worktree wt-p3-bab, release/1.0.0)
+
+Reopen-condition grep re-run on the release/1.0.0 tree:
+
+```
+grep -rnE "(fn\s*\(|\|[a-z_, ]*\|)\s*->" --include=*.spl src | wc -l
+0
+```
+
+Still zero lambdas in owned source declaring a return type. The WONTFIX
+closure stands.

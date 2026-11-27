@@ -1,7 +1,7 @@
 # Stage 2 receiver probe intermittently reports `compiler.common.module_path_naming` as NOT_RUN
 
 - **Filed:** 2026-09-14
-- **Status:** OPEN — 2 failures in 3 runs, across two different trees
+- **Status:** OPEN — 2 failures in 3 runs, across two different trees (2026-11-11 lane boot18: attribution defect FIXED and verified on seed; underlying transient stays OPEN, not reproducible in this lane — see addendum)
 - **Severity:** blocks a bootstrap lane non-deterministically
 
 ## Symptom
@@ -134,3 +134,36 @@ later look), the most likely named invariant is `source-identity-empty` or
 when `native_compile` began. Whoever hits this next: paste the
 `[native-compile-failed]` line into this record. It will confirm or refute that
 in one run.
+
+
+## 2026-11-11 addendum (lane boot18, work/p3-boot18-20261111) — attribution FIXED; transient stays OPEN
+
+Triage of the base+flake pair (together with
+`stage2_receiver_probe_module_path_naming_not_run_flake_2026-09-14.md`). The
+2026-09-14 attribution defect recorded in this doc is FIXED and verified; the
+underlying transient is NOT reproducible in this lane and stays OPEN, so the
+Status line above remains OPEN.
+
+Verified on the tracked seed `46fe8f6b6def` (`SIMPLE_LIB=src`, `--mode=interpreter
+--no-cache`):
+- `test/01_unit/compiler/driver/native_attempted_unit_outcome_recorded_spec.spl`
+  **4/4 GREEN** — the attempted-unit ledger (`module_units_attempted`,
+  `driver_native_attempted_unit_failure_detail_v1`) is present in
+  `driver_aot_native_output.spl:833,2626-2885`; NOT_RUN is now reserved for
+  `attempted < scheduled`, and an attempted unit that fails the capsule
+  invariant is recorded FAILED naming the invariant (`capsule-identity-empty`,
+  `native-capsule-source-mutated`, `native-capsule-receipt-invalid`, fsync
+  variants) instead of the false "never started (build ended first)".
+- `test/01_unit/compiler/driver/native_capsule_source_identity_survives_eviction_spec.spl`
+  **7/7 GREEN** — the frozen capsule identity is the phase-1 recorded identity,
+  not a re-hash of already-evicted content (the site-10 root cause).
+
+Why the transient still stays OPEN: the site-10 identity fix predates these
+failures (site 10 = 2026-09-12; this record = 2026-09-14), so it did not
+prevent them. This doc's own prediction for a recurrence —
+`source-identity-empty` / `source-identity-mismatch` on `uncached_names[0]`, the
+unit that was `current` when `native_compile` began — has no in-lane repro (the
+doc: "no repro smaller than the lane itself"; end-to-end is the ~90 min Stage-2
+trust-root lane, outside this triage lane's budget/grant). Next owner with a
+live failure: paste the `[native-compile-failed]` line here; the named invariant
+will confirm or refute the prediction in one run. Do not relax the probe.

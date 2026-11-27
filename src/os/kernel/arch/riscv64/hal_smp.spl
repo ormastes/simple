@@ -24,7 +24,8 @@
 
 use os.kernel.arch.riscv64.sbi.{sbi_hart_start, SBI_SUCCESS}
 use os.kernel.boot.dtb_parser.{DtbDeviceInfo}
-use std.nogc_async_mut_noalloc.baremetal.riscv.{sbi_probe_then_send_ipi}
+use std.nogc_async_mut_noalloc.baremetal.riscv.sbi.{sbi_probe_then_send_ipi}
+use os.kernel.boot.riscv_noalloc_dtb_capability.{riscv_noalloc_dtb_logical_valid, riscv_noalloc_dtb_hart_id}
 
 # ============================================================================
 # Constants
@@ -112,6 +113,25 @@ fn hal_smp_get_pending_ipi(target: u32) -> u32:
     """Return the pending IPI vector for target hart."""
     HAL_SMP_PENDING_IPI[target]
 
+fn hal_smp_ipi_window(hart_id: u64) -> (u64, u64):
+    """SBI IPI addressing for a physical hart: (hart_mask, hart_mask_base).
+
+    One SBI mask word covers 64 harts, so sparse hart IDs above 63 land in the
+    window whose base is the hart ID rounded down to a multiple of 64.
+    """
+    val base = (hart_id / 64u64) * 64u64
+    (1u64 << (hart_id - base), base)
+
+fn hal_smp_hsm_target(logical: u32) -> (bool, u64):
+    """Physical hart ID the SBI HSM start call must target for a logical hart.
+
+    Returns (false, 0) when the DTB capability has no such logical hart, so the
+    caller can keep the logical-equals-physical fallback.
+    """
+    if not riscv_noalloc_dtb_logical_valid(logical):
+        return (false, 0u64)
+    (true, riscv_noalloc_dtb_hart_id(logical))
+
 # ============================================================================
 # Mock SBI carrier for test seams
 # ============================================================================
@@ -147,17 +167,15 @@ fn hal_smp_ipi_send_with_mock(mock: SbiMockSmp, target: u32, vector: u32):
     """Simulate hal_smp_ipi_send: write vector to PENDING_IPI[target] and record call."""
     if target < MAX_HARTS:
         HAL_SMP_PENDING_IPI[target] = vector
-    val hart_mask = 1u64 << target as u64
-    mock.ipi_calls.push((target as u64, hart_mask))
+    val window = hal_smp_ipi_window(target as u64)
+    mock.ipi_calls.push(window)
 
 fn hal_smp_ipi_broadcast_with_mock(mock: SbiMockSmp, vector: u32):
-    """Simulate hal_smp_ipi_broadcast: send IPI to all harts except self (hart 0)."""
-    val self_id = 0u32
+    """Simulate hal_smp_ipi_broadcast: record one (hart_mask, hart_mask_base) per SBI window."""
+    val plan = hal_smp_ipi_broadcast_plan(vector)
     var i: u32 = 0u32
-    val count = HAL_SMP_CPU_COUNT_STATE
-    while i < count:
-        if i != self_id:
-            hal_smp_ipi_send_with_mock(mock, i, vector)
+    while i < plan.1:
+        mock.ipi_calls.push(plan.0[i])
         i = i + 1u32
 
 # ============================================================================
@@ -168,26 +186,78 @@ fn hal_smp_cpu_start(ap_id: u32, entry: u64, stack: u64, arg: u64) -> bool:
     """Start AP hart via SBI HSM. Populates boot args slot before calling SBI."""
     if ap_id < MAX_HARTS:
         HAL_SMP_BOOT_ARGS[ap_id] = ApBootArgs(stack: stack, arg: arg)
-    val ret = sbi_hart_start(ap_id as u64, entry, ap_id as u64)
+    val target = hal_smp_hsm_target(ap_id)
+    val hart = if target.0: target.1 else: ap_id as u64
+    val ret = sbi_hart_start(hart, entry, ap_id as u64)
     ret.error == SBI_SUCCESS
 
 fn hal_smp_ipi_send(target: u32, vector: u32):
     """Send IPI to target hart: write vector to PENDING_IPI slot then call sbi_probe_then_send_ipi."""
     if target < MAX_HARTS:
         HAL_SMP_PENDING_IPI[target] = vector
-    val hart_mask = 1u64 << target as u64
-    sbi_probe_then_send_ipi(hart_mask, 0u64)
+    val phys = hal_smp_hsm_target(target)
+    val hart = if phys.0: phys.1 else: target as u64
+    val window = hal_smp_ipi_window(hart)
+    sbi_probe_then_send_ipi(window.0, window.1)
+
+fn hal_smp_ipi_windows(harts: [u64; 8], count: u32, self_phys: u64) -> ([(u64, u64); 8], u32):
+    """Distinct (hart_mask, hart_mask_base) SBI windows over harts[0..count) minus self_phys.
+
+    Fixed-capacity result (MAX_HARTS windows) plus the used length: IPI paths
+    must not heap-allocate. count is clamped to MAX_HARTS.
+    """
+    var out: [(u64, u64); 8] = [(0u64, 0u64); 8]
+    var used: u32 = 0u32
+    val n = if count > MAX_HARTS: MAX_HARTS else: count
+    var k: u32 = 0u32
+    while k < n:
+        if harts[k] != self_phys:
+            val base = hal_smp_ipi_window(harts[k]).1
+            var seen = false
+            var j: u32 = 0u32
+            while j < k:
+                if harts[j] != self_phys and hal_smp_ipi_window(harts[j]).1 == base: seen = true
+                j = j + 1u32
+            if not seen:
+                var mask: u64 = 0u64
+                var m: u32 = 0u32
+                while m < n:
+                    if harts[m] != self_phys:
+                        val w = hal_smp_ipi_window(harts[m])
+                        if w.1 == base: mask = mask | w.0
+                    m = m + 1u32
+                out[used] = (mask, base)
+                used = used + 1u32
+        k = k + 1u32
+    (out, used)
+
+fn hal_smp_ipi_broadcast_plan(vector: u32) -> ([(u64, u64); 8], u32):
+    """Write PENDING_IPI for every non-self hart and return the SBI windows to signal.
+
+    Self is the boot hart's PHYSICAL id (logical 0 in the DTB capability, which
+    also holds in the fallback), so a sparse or non-zero boot hart is never
+    targeted even when the capability fell back to one hart.
+    """
+    val self_phys = riscv_noalloc_dtb_hart_id(0u32)
+    val count = if HAL_SMP_CPU_COUNT_STATE > MAX_HARTS: MAX_HARTS else: HAL_SMP_CPU_COUNT_STATE
+    var phys: [u64; 8] = [0u64; 8]
+    var i: u32 = 0u32
+    while i < count:
+        val target = hal_smp_hsm_target(i)
+        val hart = if target.0: target.1 else: i as u64
+        phys[i] = hart
+        if hart != self_phys: HAL_SMP_PENDING_IPI[i] = vector
+        i = i + 1u32
+    hal_smp_ipi_windows(phys, count, self_phys)
 
 fn hal_smp_ipi_broadcast(vector: u32):
-    """Broadcast IPI to all non-self harts (self = hart 0) via sbi_probe_then_send_ipi."""
-    val self_id = 0u32
-    val count = HAL_SMP_CPU_COUNT_STATE
+    """Broadcast IPI to all non-self harts, one SBI call per 64-hart window.
+
+    Uses the same physical-hart window addressing as hal_smp_ipi_send, so sparse
+    DTB hart IDs (including IDs above 63) are targeted correctly.
+    """
+    val plan = hal_smp_ipi_broadcast_plan(vector)
     var i: u32 = 0u32
-    var mask: u64 = 0u64
-    while i < count:
-        if i != self_id:
-            HAL_SMP_PENDING_IPI[i] = vector
-            mask = mask | (1u64 << i as u64)
+    while i < plan.1:
+        sbi_probe_then_send_ipi(plan.0[i].0, plan.0[i].1)
         i = i + 1u32
-    if mask != 0u64:
-        sbi_probe_then_send_ipi(mask, 0u64)

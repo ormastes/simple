@@ -86,3 +86,22 @@ Current fallback text is:
 Functional status remains PASS for the embedded example render contract, but the
 JIT/native proof remains open under this bug until the imported render block
 type is available to HIR lowering.
+
+## Re-verification 2026-11-25 (lane p3-bah, worktree D:\wt-p3-bah, release/1.0.0 @fcd95d41d60)
+
+Independent re-run of the closure evidence on Windows x86_64 with the
+tracked `bin/simple.exe`:
+
+```
+$ SIMPLE_TIMEOUT_SECONDS=180 SIMPLE_LIB=src bin/simple.exe run examples/10_tooling/ide/simple_ide_render.spl
+target=pure_simple
+has_editor_source=true
+has_markdown_language=true        (exit=0)
+```
+
+`grep -c "JIT compilation failed"` on the full output: 0 — no JIT
+fallback line of any kind (the 2026-05-30 `cannot use self in static
+method` and the later `Unknown type: RenderBlock` fallback texts are both
+absent). Closure stands. Note for Windows runners: the seed binary's
+built-in 10s example timeout fires on the first cold run; set
+`SIMPLE_TIMEOUT_SECONDS` above ~60 for this example.

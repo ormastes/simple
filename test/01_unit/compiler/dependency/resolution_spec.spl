@@ -1,7 +1,60 @@
-describe "Resolution":
-    it "skipped":
-        val pending_reason = "pre-existing test failures - functions/imports not available"
-        expect(pending_reason.len()).to_be_greater_than(0)
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/00.common/dependency/resolution.spl
+# Authored owner assertions; execution is UNRUN until a qualified producer runs
+# this spec. The commented migration catalog below is not executable evidence.
+use std.spec.{describe, it, expect, step}
+use compiler.common.dependency.resolution.{Segment, ModPath, FileKind,
+    ResolutionResult, FileSystem, to_file_path, to_dir_path, resolve}
+
+fn resolution_spec_nested_path() -> ModPath:
+    ModPath(segments: [Segment(name: "alpha"), Segment(name: "beta")])
+
+fn resolution_spec_result_label(result: ResolutionResult) -> text:
+    match result:
+        case ResolutionResult.Unique(kind, path):
+            match kind:
+                case FileKind.File: "file:" + path
+                case FileKind.Directory: "directory:" + path
+        case ResolutionResult.Ambiguous(file_path, dir_path):
+            "ambiguous:" + file_path + "|" + dir_path
+        case ResolutionResult.NotFound: "not-found"
+
+describe "Module resolution agrees with the Lean path model":
+    it "reads a segment's declared name field":
+        step("Read the Segment name field")
+        val segment = Segment(name: "alpha")
+        expect(segment.name).to_equal("alpha")
+
+    it "builds distinct nested file and initializer paths":
+        step("Build both nested module path forms")
+        val path = resolution_spec_nested_path()
+        expect(to_file_path("src", path)).to_equal("src/alpha/beta.spl")
+        expect(to_dir_path("src", path)).to_equal("src/alpha/beta/__init__.spl")
+
+    it "resolves an existing file to its file kind and exact path":
+        step("Resolve a file-only filesystem")
+        val fs = FileSystem(files: ["src/alpha/beta.spl"])
+        val result = resolve(fs, "src", resolution_spec_nested_path())
+        expect(resolution_spec_result_label(result)).to_equal("file:src/alpha/beta.spl")
+
+    it "resolves an existing initializer to its directory kind and exact path":
+        step("Resolve an initializer-only filesystem")
+        val fs = FileSystem(files: ["src/alpha/beta/__init__.spl"])
+        val result = resolve(fs, "src", resolution_spec_nested_path())
+        expect(resolution_spec_result_label(result)).to_equal("directory:src/alpha/beta/__init__.spl")
+
+    it "reports both exact paths when both module forms exist":
+        step("Resolve a filesystem containing both module forms")
+        val fs = FileSystem(files: ["src/alpha/beta.spl", "src/alpha/beta/__init__.spl"])
+        val result = resolve(fs, "src", resolution_spec_nested_path())
+        expect(resolution_spec_result_label(result)).to_equal(
+            "ambiguous:src/alpha/beta.spl|src/alpha/beta/__init__.spl")
+
+    it "rejects a bare directory and the former double-extension path":
+        step("Resolve a filesystem containing neither valid module form")
+        val fs = FileSystem(files: ["src/alpha/beta", "src/alpha/beta/__init__.spl.spl", "src/alpha/other.spl"])
+        val result = resolve(fs, "src", resolution_spec_nested_path())
+        expect(resolution_spec_result_label(result)).to_equal("not-found")
 
 # # Feature: Module Resolution
 # # Category: Dependency Tracker

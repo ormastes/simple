@@ -239,6 +239,41 @@ fn test_bytes_u8_set_fast_path() {
 }
 
 #[test]
+fn checked_word_getters_decode_boxed_and_preserve_packed_bits() {
+    let signed_wide = rt_array_new(2);
+    for value in [i64::MIN, i64::MAX] {
+        let boxed_value = RuntimeValue::from_int(value);
+        assert_eq!(boxed_value.as_heap_i64(), Some(value));
+        assert!(rt_array_push(signed_wide, boxed_value));
+    }
+    for (index, value) in [i64::MIN, i64::MAX].into_iter().enumerate() {
+        assert_eq!(rt_typed_words_u32_at(signed_wide, index as i64), value & 0xFFFF_FFFF);
+        assert_eq!(rt_typed_words_u64_at(signed_wide, index as i64), value);
+    }
+    rt_array_free(signed_wide);
+    let boxed = rt_array_new(6);
+    let packed = rt_array_new_with_cap_u64(6);
+    let values = [0u64, 8, 9, 0xFF00_0000, 0x8000_0000_0000_0000, u64::MAX];
+    for value in values {
+        assert!(rt_array_push(boxed, RuntimeValue::from_u64(value)));
+        assert!(rt_typed_words_u64_push(packed, value as i64));
+    }
+    for array in [boxed, packed] {
+        for (index, expected) in values.into_iter().enumerate() {
+            assert_eq!(rt_typed_words_u32_at(array, index as i64), (expected & 0xFFFF_FFFF) as i64);
+            assert_eq!(rt_typed_words_u64_at(array, index as i64) as u64, expected);
+        }
+        assert_eq!(rt_typed_words_u32_at(array, -1), 0xFFFF_FFFF);
+        assert_eq!(rt_typed_words_u64_at(array, -1) as u64, u64::MAX);
+        for index in [-7, 6] {
+            assert_eq!(rt_typed_words_u32_at(array, index), 0);
+            assert_eq!(rt_typed_words_u64_at(array, index), 0);
+        }
+        rt_array_free(array);
+    }
+}
+
+#[test]
 fn test_typed_words_u32_fast_path() {
     let array = rt_array_new(3);
 
@@ -346,6 +381,23 @@ fn test_any_to_int_decodes_tagged_values() {
     let bytes = rt_byte_array_new(1);
     assert!(rt_typed_bytes_u8_push(bytes, 0xCB));
     assert_eq!(super::rt_any_to_int(rt_array_get(bytes, 0)), 203);
+}
+
+/// `v as <int>` on an erased value: one-code-point text is its CODE POINT
+/// (the cast contract), not the `.to_i64()` parse; other legs match
+/// `rt_any_to_int`.
+#[test]
+fn test_any_cast_int_text_is_code_point() {
+    let digit = unsafe { super::rt_string_new(b"6".as_ptr(), 1) };
+    assert_eq!(super::rt_any_cast_int(digit), 54);
+    assert_eq!(super::rt_any_to_int(digit), 6);
+    let accent = unsafe { super::rt_string_new("é".as_ptr(), 2) };
+    assert_eq!(super::rt_any_cast_int(accent), 233);
+    let text = unsafe { super::rt_string_new(b"42".as_ptr(), 2) };
+    assert_eq!(super::rt_any_cast_int(text), 42);
+    assert_eq!(super::rt_any_cast_int(RuntimeValue::from_int(-7)), -7);
+    assert_eq!(super::rt_any_cast_int(RuntimeValue::from_bool(true)), 1);
+    assert_eq!(super::rt_any_cast_int(RuntimeValue::from_float(2.9)), 2);
 }
 
 #[test]
@@ -2551,6 +2603,389 @@ fn transient_heap_promotion_keeps_scope_owned_heap_root_and_raw_payload() {
     super::rt_array_free(field);
 }
 
+#[test]
+fn transient_heap_promotion_walks_unowned_root_with_owned_children() {
+    // Stage-2 reverse_reference_module_publish_v1 SEGV (2026-10-23): the
+    // seal re-wraps the batch in a fresh `Some(..)` while the scope is paused
+    // (untracked, so not scope-owned); its payload array IS scope-owned and
+    // must survive scope end.
+    assert!(super::rt_transient_array_scope_begin());
+    let owned_child = super::rt_array_new(1);
+    assert!(super::rt_array_push(owned_child, RuntimeValue::from_int(7)));
+    assert!(super::rt_transient_array_scope_pause());
+    let unowned_root = crate::value::objects::rt_enum_new(1, 0, owned_child);
+    assert!(super::rt_transient_heap_promote(unowned_root));
+    assert!(super::rt_transient_array_scope_end());
+
+    assert_eq!(crate::value::objects::rt_enum_discriminant(unowned_root), 0);
+    assert_eq!(super::rt_array_len(owned_child), 1);
+    super::rt_array_free(owned_child);
+}
+
+// BSM P0 (build_session_memory_model_v1.md §6): scope compaction is deferred
+// to scope end. Each case runs on both the indexed path and the forced
+// ambiguous-index fallback (the one that used to `retain` per promote).
+fn bsm_p0_promote_then_end_frees_only_unpromoted(ambiguous: bool) {
+    assert!(super::rt_transient_array_scope_begin());
+    let kept = super::rt_array_new(1);
+    let kept_child = super::rt_array_new(1);
+    assert!(super::rt_array_push(kept, kept_child));
+    let dropped = super::rt_array_new(1);
+    let dropped_child = super::rt_array_new(1);
+    assert!(super::rt_array_push(dropped, dropped_child));
+    if ambiguous {
+        super::transient_scope_force_index_ambiguous();
+    }
+    assert!(super::rt_transient_array_scope_pause());
+    assert!(super::rt_transient_heap_promote(kept));
+    // Double promote is idempotent.
+    assert!(super::rt_transient_heap_promote(kept));
+    assert!(super::rt_transient_array_scope_end());
+
+    assert_eq!(super::rt_array_len(kept), 1);
+    assert_eq!(super::rt_array_len(kept_child), 0);
+    assert_eq!(super::rt_array_len(dropped), -1);
+    assert_eq!(super::rt_array_len(dropped_child), -1);
+    super::rt_array_free(kept_child);
+    super::rt_array_free(kept);
+}
+
+#[test]
+fn bsm_p0_promote_then_end_frees_only_unpromoted_indexed() {
+    bsm_p0_promote_then_end_frees_only_unpromoted(false);
+}
+
+#[test]
+fn bsm_p0_promote_then_end_frees_only_unpromoted_ambiguous() {
+    bsm_p0_promote_then_end_frees_only_unpromoted(true);
+}
+
+#[test]
+fn bsm_p0_ambiguous_unowned_root_keeps_owned_children() {
+    assert!(super::rt_transient_array_scope_begin());
+    let owned_child = super::rt_array_new(1);
+    assert!(super::rt_array_push(owned_child, RuntimeValue::from_int(7)));
+    super::transient_scope_force_index_ambiguous();
+    assert!(super::rt_transient_array_scope_pause());
+    let unowned_root = crate::value::objects::rt_enum_new(1, 0, owned_child);
+    assert!(super::rt_transient_heap_promote(unowned_root));
+    assert!(super::rt_transient_heap_promote(unowned_root));
+    assert!(super::rt_transient_array_scope_end());
+    assert_eq!(crate::value::objects::rt_enum_discriminant(unowned_root), 0);
+    assert_eq!(super::rt_array_len(owned_child), 1);
+    super::rt_array_free(owned_child);
+}
+
+/// The `bootstrap_hir_modules_promote_last` pattern
+/// (src/compiler/20.hir/hir_lowering/_Items/lowering_helpers.spl): per module,
+/// one transient scope builds 7 rows (each an array of 50 small arrays); after
+/// pause each row is appended to its persistent outer array, then the row AND
+/// all 7 outer arrays are promoted. N from `BSM_BENCH_N` (default 200 to keep
+/// the debug suite bounded; the PR measurement uses 2000 in release).
+#[test]
+fn bsm_p0_promote_last_pattern_benchmark() {
+    let n: usize = std::env::var("BSM_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+    let outers: Vec<RuntimeValue> = (0..7).map(|_| super::rt_array_new(0)).collect();
+    let started = std::time::Instant::now();
+    for _ in 0..n {
+        assert!(super::rt_transient_array_scope_begin());
+        let rows: Vec<RuntimeValue> = (0..7)
+            .map(|_| {
+                let row = super::rt_array_new(50);
+                for k in 0..50 {
+                    let leaf = super::rt_array_new(1);
+                    assert!(super::rt_array_push(leaf, RuntimeValue::from_int(k)));
+                    assert!(super::rt_array_push(row, leaf));
+                }
+                row
+            })
+            .collect();
+        assert!(super::rt_transient_array_scope_pause());
+        for (outer, row) in outers.iter().zip(rows.iter()) {
+            assert!(super::rt_array_push(*outer, *row));
+            assert!(super::rt_transient_heap_promote(*row));
+        }
+        for outer in &outers {
+            assert!(super::rt_transient_heap_promote(*outer));
+        }
+        assert!(super::rt_transient_array_scope_end());
+    }
+    let elapsed = started.elapsed();
+    eprintln!("bsm-bench: pattern=promote_last n={} wall_ms={}", n, elapsed.as_millis());
+    bsm_p0_check_outers(&outers, n);
+}
+
+fn bsm_p0_check_outers(outers: &[RuntimeValue], n: usize) {
+    for outer in outers {
+        assert_eq!(super::rt_array_len(*outer), n as i64);
+        let last = super::rt_array_get(*outer, n as i64 - 1);
+        assert_eq!(super::rt_array_len(last), 50);
+    }
+}
+
+/// The path the deferred compaction targets: ONE scope tracking N rows of 50
+/// small arrays, ambiguous index, N separate promotes. Before BSM P0 every
+/// promote ran `objects.retain` over all ~51*N tracked objects (O(N^2)).
+#[test]
+fn bsm_p0_ambiguous_many_promotes_benchmark() {
+    let n: usize = std::env::var("BSM_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+    assert!(super::rt_transient_array_scope_begin());
+    let rows: Vec<RuntimeValue> = (0..n)
+        .map(|_| {
+            let row = super::rt_array_new(50);
+            for k in 0..50 {
+                let leaf = super::rt_array_new(1);
+                assert!(super::rt_array_push(leaf, RuntimeValue::from_int(k)));
+                assert!(super::rt_array_push(row, leaf));
+            }
+            row
+        })
+        .collect();
+    // A real header-address collision (free + same-size reuse inside the
+    // running scope) makes the index ambiguous for the rest of the scope.
+    let mut collided = false;
+    for _ in 0..64 {
+        let freed = super::rt_array_new(1);
+        let addr = freed.as_heap_ptr();
+        super::rt_array_free(freed);
+        let reused = super::rt_array_new(1);
+        if reused.as_heap_ptr() == addr {
+            collided = true;
+            break;
+        }
+    }
+    if !collided {
+        super::transient_scope_force_index_ambiguous();
+    }
+    assert!(super::rt_transient_array_scope_pause());
+    let started = std::time::Instant::now();
+    for row in rows.iter().step_by(2) {
+        assert!(super::rt_transient_heap_promote(*row));
+    }
+    assert!(super::rt_transient_array_scope_end());
+    let elapsed = started.elapsed();
+    eprintln!("bsm-bench: pattern=ambiguous_many_promotes n={} wall_ms={}", n, elapsed.as_millis());
+    for (i, row) in rows.iter().enumerate() {
+        assert_eq!(super::rt_array_len(*row), if i % 2 == 0 { 50 } else { -1 });
+    }
+}
+
+// BSM P1: build session heap (T1) twin of src/runtime/test/rt_session_heap_selfcheck.c.
+fn bsm_p1_row(width: i64) -> RuntimeValue {
+    let row = super::rt_array_new(width as u64);
+    for k in 0..width {
+        let leaf = super::rt_array_new(1);
+        assert!(super::rt_array_push(leaf, RuntimeValue::from_int(k)));
+        assert!(super::rt_array_push(row, leaf));
+    }
+    row
+}
+
+fn bsm_p1_live(value: RuntimeValue) -> bool {
+    crate::value::heap::is_registered_heap_ptr(value.as_heap_ptr())
+}
+
+#[test]
+fn bsm_p1_session_outside_module_freed_at_end() {
+    let s = super::rt_session_heap_begin();
+    assert!(s != 0 && super::rt_session_heap_id() == s);
+    let row = bsm_p1_row(4);
+    assert!(super::session_heap_owns(row));
+    let leaf = super::rt_array_get(row, 0);
+    assert!(super::rt_session_heap_end(s));
+    assert!(!bsm_p1_live(row) && !bsm_p1_live(leaf));
+    assert_eq!(super::rt_session_heap_id(), 0);
+    let again = super::rt_session_heap_begin();
+    assert!(again != 0 && again != s);
+    assert!(super::rt_session_heap_end(again));
+}
+
+/// Session retirement preserves unrelated roots and refuses every live-scope
+/// case before allocator reclamation. The archive-linked C fixture separately
+/// checks the actual glibc call and resident-page experiment.
+#[test]
+fn bsm_p1_session_reclaim_preserves_unrelated_roots_and_refuses_active_scope() {
+    let survivor = super::rt_array_new(4);
+    let value = RuntimeValue::from_int(123);
+    assert!(super::rt_array_push(survivor, value));
+    assert!(!super::rt_session_heap_end(0));
+    let session = super::rt_session_heap_begin();
+    assert_ne!(session, 0);
+    assert_eq!(super::rt_session_heap_begin(), 0);
+    assert!(!super::rt_session_heap_end(session.wrapping_add(1)));
+    assert!(super::rt_transient_array_scope_begin());
+    assert!(!super::rt_session_heap_end(session));
+    assert!(super::rt_transient_array_scope_pause());
+    assert!(!super::rt_session_heap_end(session));
+    assert!(super::rt_transient_array_scope_end());
+    let owned = bsm_p1_row(8);
+    assert!(super::session_heap_owns(owned));
+    assert!(super::rt_session_heap_end(session));
+    assert!(!bsm_p1_live(owned));
+    assert_eq!(super::rt_session_heap_id(), 0);
+    assert!(!super::rt_session_heap_end(session));
+    assert!(bsm_p1_live(survivor));
+    assert_eq!(super::rt_array_get(survivor, 0), value);
+    let next = super::rt_session_heap_begin();
+    assert_ne!(next, 0);
+    assert_ne!(next, session);
+    assert!(!super::rt_session_heap_end(session));
+    assert!(super::rt_session_heap_end(next));
+    assert_eq!(super::rt_array_get(survivor, 0), value);
+    super::rt_array_free(survivor);
+}
+
+/// BSM P1 x P4: an rc root leaves the session; session end must not free it.
+#[test]
+fn bsm_p1_rc_shared_row_survives_session_end() {
+    let s = super::rt_session_heap_begin();
+    assert!(s != 0);
+    let row = bsm_p1_row(3);
+    let leaf = super::rt_array_get(row, 0);
+    assert!(super::session_heap_owns(row) && super::session_heap_owns(leaf));
+    assert!(crate::value::rt_rc_share(row));
+    assert!(!super::session_heap_owns(row) && !super::session_heap_owns(leaf));
+    assert!(super::rt_session_heap_end(s));
+    assert!(bsm_p1_live(row) && bsm_p1_live(leaf), "rc root and its owned graph outlive the session");
+    assert_eq!(crate::value::rt_rc_count(row), 1);
+    assert!(crate::value::rt_rc_release(row));
+    assert!(!bsm_p1_live(row) && !bsm_p1_live(leaf));
+}
+
+#[test]
+fn bsm_p1_module_scope_inside_session() {
+    let s = super::rt_session_heap_begin();
+    assert!(super::rt_transient_array_scope_begin());
+    let kept = bsm_p1_row(3);
+    let dropped = bsm_p1_row(3);
+    assert!(!super::session_heap_owns(kept));
+    assert!(super::rt_transient_array_scope_pause());
+    let paused = super::rt_array_new(1);
+    assert!(super::session_heap_owns(paused), "paused-module allocation goes to the session");
+    assert!(super::rt_transient_heap_adopt(kept));
+    assert!(super::rt_transient_heap_adopt(kept), "adopt is idempotent");
+    assert!(super::session_heap_owns(kept));
+    assert!(super::rt_transient_array_scope_end());
+    assert!(!bsm_p1_live(dropped));
+    assert!(bsm_p1_live(kept) && bsm_p1_live(paused));
+    assert_eq!(super::rt_array_len(kept), 3);
+    let kept_leaf = super::rt_array_get(kept, 0);
+    assert!(super::rt_session_heap_end(s));
+    assert!(!bsm_p1_live(kept) && !bsm_p1_live(kept_leaf) && !bsm_p1_live(paused));
+}
+
+/// (c) adopt prunes (I2) and the outer array grows under the session (I3).
+/// N from `BSM_BENCH_N` (default 200); the PR measures 2000 in release.
+#[test]
+fn bsm_p1_adopt_prunes_at_session_nodes() {
+    let n: usize = std::env::var("BSM_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+    let s = super::rt_session_heap_begin();
+    let outer = super::rt_array_new(0);
+    assert!(super::session_heap_owns(outer));
+    let mut max_outer_visits = 0;
+    let mut row_visits = 0;
+    let started = std::time::Instant::now();
+    for _ in 0..n {
+        assert!(super::rt_transient_array_scope_begin());
+        let row = bsm_p1_row(50);
+        assert!(super::rt_transient_array_scope_pause());
+        assert!(super::rt_transient_heap_adopt(row)); // adopt BEFORE publish (I1)
+        row_visits = super::session_adopt_visits_debug();
+        assert!(super::rt_session_alloc_begin());
+        assert!(super::rt_array_push(outer, row));
+        assert!(super::rt_session_alloc_end());
+        assert!(super::session_heap_owns(outer) && super::session_heap_owns(row));
+        assert!(super::rt_transient_heap_adopt(outer));
+        max_outer_visits = max_outer_visits.max(super::session_adopt_visits_debug());
+        assert!(super::rt_transient_array_scope_end());
+    }
+    let elapsed = started.elapsed();
+    eprintln!(
+        "bsm-bench: pattern=session_adopt n={} wall_ms={} max_outer_visits={} row_visits={}",
+        n,
+        elapsed.as_millis(),
+        max_outer_visits,
+        row_visits
+    );
+    assert_eq!(row_visits, 51);
+    assert_eq!(max_outer_visits, 1);
+    assert_eq!(super::rt_array_len(outer), n as i64);
+    let first = super::rt_array_get(outer, 0);
+    assert!(super::rt_session_heap_end(s));
+    assert!(!bsm_p1_live(outer) && !bsm_p1_live(first));
+}
+
+/// Baseline for `bsm_p1_adopt_prunes_at_session_nodes`: the same rows and ONE
+/// outer array, published the legacy way (no session, promote row + outer).
+#[test]
+fn bsm_p1_legacy_promote_one_outer_benchmark() {
+    let n: usize = std::env::var("BSM_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+    let outer = super::rt_array_new(0);
+    let started = std::time::Instant::now();
+    for _ in 0..n {
+        assert!(super::rt_transient_array_scope_begin());
+        let row = bsm_p1_row(50);
+        assert!(super::rt_transient_array_scope_pause());
+        assert!(super::rt_array_push(outer, row));
+        assert!(super::rt_transient_heap_promote(row));
+        assert!(super::rt_transient_heap_promote(outer));
+        assert!(super::rt_transient_array_scope_end());
+    }
+    eprintln!("bsm-bench: pattern=legacy_promote_one_outer n={} wall_ms={}", n, started.elapsed().as_millis());
+    assert_eq!(super::rt_array_len(outer), n as i64);
+}
+
+#[test]
+fn bsm_p1_promote_without_session_unchanged() {
+    assert_eq!(super::rt_session_heap_id(), 0);
+    assert!(super::rt_transient_array_scope_begin());
+    let row = bsm_p1_row(2);
+    assert!(super::rt_transient_array_scope_pause());
+    assert!(super::rt_transient_heap_promote(row));
+    assert!(super::rt_transient_array_scope_end());
+    assert_eq!(super::rt_array_len(row), 2);
+    assert!(!super::session_heap_owns(row));
+}
+
+#[test]
+fn bsm_p1_promote_with_session_moves_to_session() {
+    let s = super::rt_session_heap_begin();
+    assert!(super::rt_transient_array_scope_begin());
+    let child = bsm_p1_row(1);
+    assert!(super::rt_transient_array_scope_pause());
+    // Unowned root holding a module-owned child: promote keeps the FULL walk.
+    let root = crate::value::objects::rt_enum_new(1, 0, child);
+    assert!(super::rt_transient_heap_promote(root));
+    assert!(super::rt_transient_array_scope_end());
+    assert!(bsm_p1_live(child) && super::session_heap_owns(child));
+    assert!(super::rt_session_heap_end(s));
+    assert!(!bsm_p1_live(child));
+}
+
+#[test]
+fn bsm_p1_refusals() {
+    assert!(!super::rt_session_heap_end(0));
+    assert!(!super::rt_session_alloc_begin());
+    assert!(!super::rt_session_alloc_end());
+    assert!(!super::rt_transient_heap_adopt(RuntimeValue::from_int(1)));
+    let s = super::rt_session_heap_begin();
+    assert!(s != 0);
+    assert_eq!(super::rt_session_heap_begin(), 0);
+    assert!(!super::rt_session_heap_end(s + 1));
+    assert!(!super::rt_session_alloc_end());
+    assert!(!super::rt_transient_heap_adopt(RuntimeValue::from_int(1)));
+    assert!(super::rt_transient_array_scope_begin());
+    assert!(!super::rt_transient_heap_adopt(RuntimeValue::from_int(1)));
+    assert!(!super::rt_session_heap_end(s));
+    assert!(super::rt_transient_array_scope_end());
+    let foreign = std::thread::spawn(move || super::rt_session_heap_end(s)).join().unwrap();
+    assert!(!foreign, "a foreign thread cannot end this thread's session");
+    assert!(super::rt_session_heap_end(s));
+    assert!(super::rt_transient_array_scope_begin());
+    assert_eq!(super::rt_session_heap_begin(), 0);
+    assert!(super::rt_transient_array_scope_end());
+}
+
 /// `rt_find` is the receiver-polymorphic `find` the type-blind dispatch tables
 /// now emit. Two things have to hold at once and they pull in opposite
 /// directions, which is why they are asserted together:
@@ -3374,5 +3809,316 @@ mod typed_i64_lane_tests {
         assert!(super::super::rt_array_get(a, 4).is_nil(), "push nil");
         assert_eq!(rt_typed_words_i64_at(a, 0), WIDE);
         crate::value::collections::reset_user_threads_started_for_test();
+    }
+}
+
+#[test]
+fn test_array_insert_in_place() {
+    use super::rt_array_insert;
+    let array = rt_array_new(0);
+    rt_array_push(array, RuntimeValue::from_int(1));
+    rt_array_push(array, RuntimeValue::from_int(3));
+    assert!(rt_array_insert(array, 1, RuntimeValue::from_int(2)));
+    assert!(rt_array_insert(array, 0, RuntimeValue::from_int(0)));
+    assert!(rt_array_insert(array, 4, RuntimeValue::from_int(4)));
+    assert_eq!(rt_array_len(array), 5);
+    for i in 0..5 {
+        assert_eq!(rt_array_get(array, i).as_int(), i);
+    }
+    assert!(!rt_array_insert(array, 6, RuntimeValue::from_int(9)));
+    assert!(!rt_array_insert(array, -1, RuntimeValue::from_int(9)));
+    assert_eq!(rt_array_len(array), 5);
+    assert!(!rt_array_insert(RuntimeValue::NIL, 0, RuntimeValue::from_int(9)));
+}
+
+/// Large module scratch retirement must preserve the surrounding session and
+/// promoted values; allocator trimming must never replace ownership checks.
+#[test]
+fn module_scope_large_reclaim_preserves_session_and_promoted_roots() {
+    let unrelated = super::rt_array_new(4);
+    assert!(super::rt_array_push(unrelated, RuntimeValue::from_int(91)));
+    let session = super::rt_session_heap_begin();
+    assert_ne!(session, 0);
+    let session_root = bsm_p1_row(8);
+    assert!(super::rt_transient_array_scope_begin());
+    let promoted = bsm_p1_row(16);
+    for _ in 0..4096 { let _ = super::rt_array_new(1024); }
+    assert!(super::rt_transient_array_scope_pause());
+    assert!(super::rt_transient_heap_promote(promoted));
+    assert!(super::rt_transient_array_scope_end());
+    assert!(!super::rt_transient_array_scope_end());
+    assert_eq!(super::rt_session_heap_id(), session);
+    assert!(bsm_p1_live(session_root));
+    assert!(bsm_p1_live(promoted));
+    assert_eq!(super::rt_array_get(unrelated, 0), RuntimeValue::from_int(91));
+    assert!(super::rt_session_heap_end(session));
+    assert!(!bsm_p1_live(session_root));
+    assert!(!bsm_p1_live(promoted));
+    assert!(bsm_p1_live(unrelated));
+    super::rt_array_free(unrelated);
+}
+
+// ADR-005: `s[i]` index policy shared with the interpreter.
+#[test]
+fn string_index_checked_matches_interpreter_policy() {
+    use crate::value::collections::string_index_checked;
+    let s = rt_string_new("72é".as_ptr(), "72é".len() as u64);
+    let text_of = |v: RuntimeValue| {
+        let n = rt_string_len(v) as usize;
+        let p = rt_string_data(v);
+        String::from_utf8(unsafe { std::slice::from_raw_parts(p, n) }.to_vec()).unwrap()
+    };
+    assert_eq!(text_of(string_index_checked(s, 0).unwrap()), "7");
+    assert_eq!(text_of(string_index_checked(s, 2).unwrap()), "é");
+    assert_eq!(text_of(string_index_checked(s, -1).unwrap()), "é");
+    assert_eq!(text_of(string_index_checked(s, -3).unwrap()), "7");
+    // Out of range in code points, even though index 3 < byte length 4.
+    assert!(string_index_checked(s, 3).is_none());
+    assert!(string_index_checked(s, 99).is_none());
+    assert!(string_index_checked(s, -4).is_none());
+    let empty = rt_string_new("".as_ptr(), 0);
+    assert!(string_index_checked(empty, 0).is_none());
+    // ASCII fast path (memoized flag): same answers as the code-point walk.
+    let ascii = rt_string_new("abc".as_ptr(), 3);
+    assert_eq!(text_of(string_index_checked(ascii, 0).unwrap()), "a");
+    assert_eq!(text_of(string_index_checked(ascii, 2).unwrap()), "c");
+    assert_eq!(text_of(string_index_checked(ascii, -1).unwrap()), "c");
+    assert_eq!(text_of(string_index_checked(ascii, -3).unwrap()), "a");
+    assert!(string_index_checked(ascii, 3).is_none());
+    assert!(string_index_checked(ascii, -4).is_none());
+}
+
+// ADR-005: `to_digit` on a one-char text is Some(digit) or None, never 0.
+#[test]
+fn string_to_digit_is_option_not_silent_zero() {
+    use crate::value::collections::rt_string_to_digit;
+    let opt = |s: &str| rt_string_to_digit(rt_string_new(s.as_ptr(), s.len() as u64));
+    let payload = |v: RuntimeValue| {
+        let e = v.as_heap_ptr() as *const crate::value::objects::RuntimeEnum;
+        unsafe { ((*e).discriminant, (*e).payload) }
+    };
+    let none = payload(crate::value::objects::rt_option_none()).0;
+    let (d7, p7) = payload(opt("7"));
+    assert_ne!(d7, none);
+    assert_eq!(p7.as_int(), 7);
+    assert_eq!(payload(opt("0")).1.as_int(), 0);
+    assert_ne!(payload(opt("0")).0, none);
+    for bad in ["a", "", "72", "é"] {
+        assert_eq!(payload(opt(bad)).0, none, "{bad:?}");
+    }
+}
+
+fn split_limit_parts(s: &str, sep: &str, limit: i64) -> Vec<String> {
+    let result = collections::rt_string_split_limit(text_value(s), text_value(sep), limit);
+    (0..rt_array_len(result)).map(|i| text_at(result, i)).collect()
+}
+
+/// `text.split(sep, limit)` on the JIT: at most `limit` parts, remainder kept,
+/// `limit <= 0` unbounded. An empty separator splits on codepoints, matching
+/// the interpreter's bounded arm (interpreter_method/string.rs "split"). Before
+/// the fix the empty-separator arm sliced single BYTES and aborted the process
+/// ("not a char boundary" inside an `extern "C"` fn) on any multibyte text.
+/// doc/08_tracking/bug/text_split_limit_ignored_2026-07-20.md
+#[test]
+fn test_string_split_limit_matches_interpreter_bounded_split() {
+    assert_eq!(split_limit_parts("a:b:c", ":", 2), ["a", "b:c"]);
+    assert_eq!(split_limit_parts("a:b:c", ":", 1), ["a:b:c"]);
+    assert_eq!(split_limit_parts("a:b:c", ":", 10), ["a", "b", "c"]);
+    assert_eq!(split_limit_parts("a:b:c", ":", 0), ["a", "b", "c"]);
+    assert_eq!(split_limit_parts("a:b:c", ":", -1), ["a", "b", "c"]);
+    assert_eq!(split_limit_parts("abc", ":", 2), ["abc"]);
+    assert_eq!(split_limit_parts("é✓x✓y", "✓", 2), ["é", "x✓y"]);
+    assert_eq!(split_limit_parts("abc", "", 2), ["a", "bc"]);
+    assert_eq!(split_limit_parts("abc", "", 10), ["a", "b", "c", ""]);
+    assert_eq!(split_limit_parts("é✓日", "", 2), ["é", "✓日"]);
+    assert_eq!(split_limit_parts("é✓日", "", 3), ["é", "✓", "日"]);
+    assert_eq!(split_limit_parts("é✓日", "", 1), ["é✓日"]);
+}
+
+
+/// Duplicate tracking must retain O(1) indexed ownership during graph adoption,
+/// including a second adoption and an address removed before scope completion.
+#[test]
+fn bsm_p1_adopt_ambiguous_index_preserves_ownership() {
+    let session = super::rt_session_heap_begin();
+    assert_ne!(session, 0);
+    assert!(super::rt_transient_array_scope_begin());
+    let root = super::rt_array_new(0);
+    let discarded = super::rt_array_new(0);
+    let freed = super::rt_array_new(0);
+    super::rt_array_free(freed);
+    assert!(!bsm_p1_live(freed));
+    let n: usize = std::env::var("BSM_ADOPT_AMBIGUOUS_N")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(256);
+    for i in 0..n {
+        let child = super::rt_array_new(0);
+        assert!(super::rt_array_push(child, RuntimeValue::from_int(i as i64)));
+        // Real duplicate entries trigger the exact production ambiguous case.
+        super::track_transient_heap(child);
+        assert!(super::rt_array_push(root, child));
+    }
+    super::track_transient_heap(root);
+    assert!(super::rt_transient_array_scope_pause());
+    let started = std::time::Instant::now();
+    assert!(super::rt_transient_heap_adopt(root));
+    eprintln!("bsm-bench: pattern=ambiguous_adopt n={} wall_us={}", n, started.elapsed().as_micros());
+    assert!(super::session_heap_owns(root));
+    assert!(super::rt_transient_heap_adopt(root));
+    assert_eq!(super::session_adopt_visits_debug(), 1, "already adopted root must prune");
+    assert!(!super::session_heap_owns(discarded));
+    assert!(super::rt_transient_array_scope_end());
+    assert!(!bsm_p1_live(discarded));
+    assert_eq!(super::rt_array_len(root), n as i64);
+    for i in 0..n {
+        let child = super::rt_array_get(root, i as i64);
+        assert!(super::session_heap_owns(child));
+        assert_eq!(super::rt_array_get(child, 0).as_int(), i as i64);
+    }
+    let first = super::rt_array_get(root, 0);
+    assert!(super::rt_session_heap_end(session));
+    assert!(!bsm_p1_live(root) && !bsm_p1_live(first));
+}
+
+// seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27: a byte-packed
+// `[u8]` reaching a `[i64]` / `[u64]` / `[u32]` typed reader (an untyped
+// caller the static check cannot see) must read the stored byte, as
+// rt_array_get and the interpreter do -- not word slots of the byte buffer.
+#[test]
+fn test_typed_words_readers_decode_byte_packed_arrays() {
+    let bytes = rt_byte_array_new(4);
+    for b in [1, 255, 128, 7] {
+        assert!(rt_typed_bytes_u8_push(bytes, b));
+    }
+    assert_ne!(rt_array_is_byte_packed(bytes), 0);
+    for (i, want) in [1i64, 255, 128, 7].into_iter().enumerate() {
+        assert_eq!(collections::rt_typed_words_i64_at(bytes, i as i64), want, "i64 at {i}");
+        assert_eq!(rt_typed_words_u64_at(bytes, i as i64), want, "u64 at {i}");
+        assert_eq!(rt_typed_words_u32_at(bytes, i as i64), want, "u32 at {i}");
+    }
+    assert_eq!(collections::rt_typed_words_i64_at(bytes, -1), 7);
+    assert_eq!(collections::rt_typed_words_i64_at(bytes, 4), 0);
+}
+
+// The hoisted / bound-proved readers: `_unchecked` sees the header flag, and
+// the `_data_at` readers see bit 0 of the MIR-tagged loop pointer.
+#[test]
+fn test_typed_words_hoisted_readers_decode_byte_packed_arrays() {
+    let bytes = rt_byte_array_new(4);
+    for b in [1, 255, 128, 7] {
+        assert!(rt_typed_bytes_u8_push(bytes, b));
+    }
+    let tagged = rt_array_data_ptr(bytes) | 1;
+    let header = bytes.to_raw() as i64;
+    for (i, want) in [1i64, 255, 128, 7].into_iter().enumerate() {
+        let i = i as i64;
+        assert_eq!(
+            collections::rt_typed_words_u32_unchecked(bytes, i),
+            want,
+            "u32 unchecked {i}"
+        );
+        assert_eq!(
+            collections::rt_typed_words_u64_unchecked(bytes, i),
+            want,
+            "u64 unchecked {i}"
+        );
+        assert_eq!(
+            collections::rt_typed_words_u32_data_at(tagged, i),
+            want,
+            "u32 data_at {i}"
+        );
+        assert_eq!(
+            collections::rt_typed_words_u64_data_at(tagged, i),
+            want,
+            "u64 data_at {i}"
+        );
+        assert_eq!(
+            collections::rt_typed_words_u64_raw_data_at(tagged, i),
+            want,
+            "u64 raw {i}"
+        );
+        assert_eq!(
+            collections::rt_typed_words_u64_data_at_checked(header, tagged, i),
+            want,
+            "checked {i}"
+        );
+    }
+}
+
+// A typed word write into a byte-packed `[u8]` is a runtime error (owner
+// decision): it used to overrun the byte buffer (u32/u64 set) or drop the
+// value silently. Each writer runs in a child process, which must exit like the C lane's spl_panic.
+const TYPED_WORDS_TRAP_ENV: &str = "SIMPLE_TEST_TYPED_WORDS_TRAP_OP";
+const WORD_WRITE_PANIC_LINE: &str =
+    "PANIC: typed word write: a [u8] array cannot be written through a word-typed array parameter ([i64]/[u64]/[u32])";
+
+#[test]
+fn typed_words_byte_write_trap_child() {
+    let Ok(op) = std::env::var(TYPED_WORDS_TRAP_ENV) else {
+        return;
+    };
+    let bytes = rt_byte_array_new(16);
+    for b in 0..16 {
+        assert!(rt_typed_bytes_u8_push(bytes, b));
+    }
+    match op.as_str() {
+        "u32_set" => drop(rt_typed_words_u32_set(bytes, 1, 77)),
+        "u64_set" => drop(rt_typed_words_u64_set(bytes, 1, 77)),
+        "i64_set" => drop(collections::rt_typed_words_i64_set(bytes, 1, 77)),
+        "u32_push" => drop(collections::rt_typed_words_u32_push(bytes, 77)),
+        "u64_push" => drop(collections::rt_typed_words_u64_push(bytes, 77)),
+        "i64_push" => drop(collections::rt_typed_words_i64_push(bytes, 77)),
+        "u64_push_known_at" => drop(collections::rt_typed_words_u64_push_known_at(bytes, 2, 77)),
+        "u32_push_known_at" => drop(collections::rt_typed_words_u32_push_known_at(bytes, 2, 77)),
+        "u32_push_known_data_at" => drop(collections::rt_typed_words_u32_push_known_data_at(
+            bytes.as_heap_ptr() as i64,
+            rt_array_data_ptr(bytes),
+            2,
+            77,
+        )),
+        "u64_push_known_data_at" => drop(collections::rt_typed_words_u64_push_known_data_at(
+            bytes.as_heap_ptr() as i64,
+            rt_array_data_ptr(bytes),
+            2,
+            77,
+        )),
+        other => panic!("unknown op {other}"),
+    }
+    println!("NO-TRAP {op}");
+}
+
+#[test]
+fn test_typed_words_writers_trap_on_byte_packed_arrays() {
+    let exe = std::env::current_exe().expect("test binary");
+    for op in [
+        "u32_set",
+        "u64_set",
+        "i64_set",
+        "u32_push",
+        "u64_push",
+        "i64_push",
+        "u64_push_known_at",
+        "u32_push_known_at",
+        "u32_push_known_data_at",
+        "u64_push_known_data_at",
+    ] {
+        let out = std::process::Command::new(&exe)
+            .args([
+                "--exact",
+                "value::collections::tests::typed_words_byte_write_trap_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(TYPED_WORDS_TRAP_ENV, op)
+            .output()
+            .expect("spawn child");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!stdout.contains("NO-TRAP"), "{op}: write returned: {stdout}");
+        // Same report and status as the C lane's spl_panic (runtime.c).
+        assert_eq!(out.status.code(), Some(1), "{op}: status {:?}: {stderr}", out.status);
+        assert!(
+            stderr.lines().any(|line| line == WORD_WRITE_PANIC_LINE),
+            "{op}: {stderr}"
+        );
     }
 }

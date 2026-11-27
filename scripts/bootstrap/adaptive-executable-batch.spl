@@ -1,0 +1,304 @@
+# Run only below the canonical 20-job owner and Windows CFEC collector.
+#
+# Pure-Simple port of adaptive-executable-batch.py. Usage:
+#   bin/simple run scripts/bootstrap/adaptive-executable-batch.spl --packet DIR [--preflight]
+# Decisions live in lib/executable_batch_policy.spl (admission, outcome, identity,
+# ownership) and lib/executable_batch_driver.spl (decoding, settlement); this file
+# is only the I/O loop. Available commit comes from lib/executable_batch_probe.spl
+# (PowerShell CIM). Children start through lib/executable-batch-launch.shs because
+# no Simple spawn API sets cwd and redirects logs at once.
+# See doc/07_guide/tooling/bootstrap_executable_batch.md.
+
+use std.common.json.value.{JsonValue, json_parse_value, json_value_field, json_value_items, json_value_keys, json_value_object_from, json_value_pretty, json_value_as_bool}
+use std.nogc_sync_mut.io_runtime.{get_args, exit, file_exists, file_hash_sha256_or_empty, file_write, file_rename, getpid, time_now_unix_micros, thread_sleep, env_get}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use std.nogc_sync_mut.io.dir_ops.{is_dir}
+use std.nogc_sync_mut.io.process_ops.{process_run, process_is_running, process_wait}
+use std.nogc_sync_mut.sffi.process_environment_capture.{process_environment_spawn_native_v1}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use scripts.bootstrap.lib.executable_batch_policy.{BatchConfig, SavedSuccess, EnvPair, may_start, identity, reusable_success, preflight_invocation, validate_owned_ancestry}
+use scripts.bootstrap.lib.executable_batch_probe.{available_commit_bytes}
+use scripts.bootstrap.lib.executable_batch_driver.{jtext, jint, batch_config_of, policy_target_of, preflight_request_of, owner_config_of, owner_launch_of, owner_reservation_of, owner_request_of, process_rows_of, has_sanity_exit, parse_env_receipt, settle_child, blocks_admission, final_state, exit_code_for, first_unleased, preflight_manifest_error, is_leaf_name, iso_utc_from_unix_micros, closed_row, skipped_row, dir_of, strip_bom}
+
+# Spawn mode 1: copy the host environment block and overlay the request entries
+# (mode 2 is rejected with EINVAL by the Windows runtime).
+val WINDOWS_ENV_MODE = 1
+
+struct Running:
+    pid: i64
+    target: JsonValue
+
+fn die(message: text):
+    print("error: {message}")
+    exit(1)
+
+fn sha(path: text) -> text:
+    file_hash_sha256_or_empty(path)
+
+fn load(path: text) -> JsonValue:
+    if not file_exists(path):
+        die("cannot read {path}")
+    val parsed = json_parse_value(strip_bom(file_read_text(path)))
+    if parsed.is_err():
+        die("invalid JSON in {path}")
+    parsed.unwrap()
+
+# Atomic publish: write a sibling .tmp, then rename over the target.
+fn write_json(path: text, value: JsonValue):
+    val tmp = path + ".tmp"
+    if not file_write(tmp, json_value_pretty(value) + "\n"):
+        die("cannot write {tmp}")
+    if not file_rename(tmp, path):
+        die("cannot replace {path}")
+
+fn shell_program() -> text:
+    val configured = env_get("SIMPLE_BOOTSTRAP_BASH")
+    if configured.len() > 0:
+        return configured
+    "sh"
+
+fn launcher_path() -> text:
+    dir_of(path_absolute(get_args()[0])) + "/lib/executable-batch-launch.shs"
+
+fn env_lines(pairs: [EnvPair]) -> [text]:
+    var out: [text] = []
+    for p in pairs:
+        out.push(p.key + "=" + p.value)
+    out
+
+# Launcher argv: CWD STDOUT STDERR COMMAND... ("-" "-" inherits the driver streams).
+fn launch_args(cwd: text, out_log: text, err_log: text, command: [text]) -> [text]:
+    var args: [text] = [launcher_path(), cwd, out_log, err_log]
+    for c in command:
+        args.push(c)
+    args
+
+fn check_request(t: JsonValue) -> JsonValue:
+    val q = jtext(t, "request")
+    if sha(q) != jtext(t, "request_sha256"):
+        die("Child request changed")
+    val r = load(q)
+    if jint(r, "threads") != 1:
+        die("Child request must bind threads=1")
+    val files = json_value_field(r, "files")
+    for leaf in json_value_keys(files):
+        if not is_leaf_name(leaf) or sha(dir_of(q) + "/" + leaf) != jtext(files, leaf):
+            die("Child input changed")
+    r
+
+fn preflight(config: JsonValue, targets: [JsonValue]):
+    val problem = preflight_manifest_error(config, targets)
+    if problem.len() > 0:
+        die(problem)
+    for t in targets:
+        val checked = check_request(t)
+    # The first target's shared producer/source/Hello authority preflight covers common pins.
+    # Each child repeats its own full authority check immediately before execution.
+    val first = preflight_invocation(preflight_request_of(check_request(targets[0])), [])
+    val pid = process_environment_spawn_native_v1(shell_program(), launch_args(first.cwd, "-", "-", first.command), env_lines(first.environment), WINDOWS_ENV_MODE)
+    if pid <= 0:
+        die("cannot start preflight command")
+    val code = process_wait(pid, 0)
+    if code != 0:
+        die("preflight command exited {code}")
+
+fn arg_value(args: [text], flag: text) -> text:
+    var i = 1
+    while i < args.len():
+        if args[i] == flag and i + 1 < args.len():
+            return args[i + 1]
+        if args[i].starts_with(flag + "="):
+            return args[i].substring(flag.len() + 1, args[i].len())
+        i = i + 1
+    ""
+
+fn publish(packet: text, rows: [JsonValue], running: [Running], observations: [i64], pending: i64, state_name: text, max_executables: i64, has_free: bool, free: i64):
+    var current: [JsonValue] = []
+    for r in running:
+        current.push(json_value_object_from([("pid", JsonValue.Int(r.pid)), ("entry", JsonValue.Str(jtext(r.target, "entry"))), ("backend", JsonValue.Str(jtext(r.target, "backend")))]))
+    var peaks: [JsonValue] = []
+    for o in observations:
+        peaks.push(JsonValue.Int(o))
+    var fields: [(text, JsonValue)] = [("state", JsonValue.Str(state_name)), ("aggregate_jobs", JsonValue.Int(20)), ("max_executables", JsonValue.Int(max_executables)), ("rows", JsonValue.Array(rows)), ("current", JsonValue.Array(current)), ("observed_task_peak_bytes", JsonValue.Array(peaks)), ("scope", JsonValue.Str("compile+link tasks; not isolated linker measurements")), ("no_kill_on_memory_pressure", JsonValue.Bool(true))]
+    if has_free:
+        fields.push(("available_commit_bytes", JsonValue.Int(free)))
+    fields.push(("pending", JsonValue.Int(pending)))
+    write_json(packet + "/batch-state.json", json_value_object_from(fields))
+
+fn saved_success_of(saved: JsonValue) -> SavedSuccess:
+    SavedSuccess(identity: jtext(saved, "identity"), binary_sha256: jtext(saved, "binary_sha256"), binary_linked: (json_value_as_bool(json_value_field(saved, "binary_linked")) ?? false), sanity_pass: (json_value_as_bool(json_value_field(saved, "sanity_pass")) ?? false), closure: jtext(saved, "closure"))
+
+fn run_batch(packet: text, config: JsonValue, targets: [JsonValue]):
+    val launch = load(jtext(config, "owner_launch_receipt"))
+    val reservation = load(jtext(launch, "reservation"))
+    val observer = json_value_field(config, "process_observer")
+    if sha(jtext(observer, "path")) != jtext(observer, "sha256"):
+        die("Process observer changed")
+    val owner_pid = jint(launch, "owner_pid")
+    val (observed, observer_err, observer_code) = process_run(jtext(config, "powershell"), ["-NoProfile", "-NonInteractive", "-File", jtext(observer, "path"), "-BatchProcessId", "{getpid()}", "-OwnerProcessId", "{owner_pid}"])
+    if observer_code != 0:
+        die("process observer failed: {observer_err.trim()}")
+    val rows_json = json_parse_value(observed)
+    if rows_json.is_err():
+        die("process observer output is not JSON")
+    val batch_pid = getpid()
+    val runner = path_absolute(get_args()[0])
+    val violation = validate_owned_ancestry(owner_config_of(config), owner_launch_of(launch), owner_reservation_of(reservation), owner_request_of(load(jtext(launch, "request"))), process_rows_of(rows_json.unwrap()), batch_pid, runner, packet, sha)
+    if violation.len() > 0:
+        die(violation)
+    if file_exists(packet + "/batch-state.json"):
+        die("Fresh parent run required; explicit closed-receipt resume only")
+    val cfg = batch_config_of(config)
+    var rows: [JsonValue] = []
+    var observations: [i64] = []
+    var pending: [JsonValue] = targets
+    var running: [Running] = []
+    var state_name = "RUNNING"
+    var blocked = false
+    var has_free = false
+    var free = 0
+    while pending.len() > 0 or running.len() > 0:
+        var still: [Running] = []
+        var seen = 0
+        for item in running:
+            seen = seen + 1
+            if process_is_running(item.pid):
+                still.push(item)
+                continue
+            val t = item.target
+            val code = process_wait(item.pid, 1)
+            val tp = jtext(t, "packet")
+            var result = JsonValue.Null
+            if file_exists(tp + "/results.json"):
+                result = load(tp + "/results.json")
+            var receipts: [[EnvPair]] = []
+            if file_exists(tp + "/artifact/compile.rss.env"):
+                receipts.push(parse_env_receipt(file_read_text(tp + "/artifact/compile.rss.env")))
+            if has_sanity_exit(result):
+                if file_exists(tp + "/artifact/run.rss.env"):
+                    receipts.push(parse_env_receipt(file_read_text(tp + "/artifact/run.rss.env")))
+                else:
+                    receipts.push([])
+            val settled = settle_child(code, result, receipts, file_exists(jtext(t, "cache_lease")))
+            if settled.is_err():
+                die(settled.unwrap_err())
+            val s = settled.unwrap()
+            rows.push(closed_row(jtext(t, "entry"), jtext(t, "backend"), identity(policy_target_of(t)), tp, code, s.closure, result))
+            if blocks_admission(s):
+                blocked = true
+                state_name = s.state
+            if s.observed_bytes > 0:
+                observations.push(s.observed_bytes)
+            publish(packet, rows, live_after(still, running, seen), observations, pending.len(), state_name, cfg.max_executables, has_free, free)
+        running = still
+        if blocked:
+            if running.len() == 0:
+                break
+            thread_sleep(2000)
+            continue
+        val probe = available_commit_bytes()
+        if probe.is_err():
+            # Unknown memory never admits work: stop admitting and drain.
+            blocked = true
+            state_name = "BLOCKED_COMMIT_PROBE_FAILED"
+            print("error: {probe.unwrap_err()}")
+            publish(packet, rows, running, observations, pending.len(), state_name, cfg.max_executables, has_free, free)
+            continue
+        free = probe.unwrap()
+        has_free = true
+        while pending.len() > 0 and may_start(running.len(), observations, free, cfg):
+            var leased: [bool] = []
+            for p in pending:
+                leased.push(file_exists(jtext(p, "cache_lease")))
+            val index = first_unleased(leased)
+            if index < 0:
+                state_name = "WAITING_CACHE_LEASE"
+                break
+            val t = pending[index]
+            var rest: [JsonValue] = []
+            var k = 0
+            while k < pending.len():
+                if k != index:
+                    rest.push(pending[k])
+                k = k + 1
+            pending = rest
+            val tp = jtext(t, "packet")
+            val request = check_request(t)
+            val prior = json_value_field(t, "reuse_success")
+            if json_value_keys(prior).len() > 0:
+                val proof = jtext(prior, "receipt")
+                if sha(proof) != jtext(prior, "receipt_sha256"):
+                    die("reuse_success receipt changed")
+                val saved = load(proof)
+                val binary = jtext(prior, "binary")
+                if file_exists(binary) and reusable_success(saved_success_of(saved), policy_target_of(t), sha(binary)):
+                    rows.push(skipped_row(jtext(t, "entry"), jtext(t, "backend"), identity(policy_target_of(t))))
+                    publish(packet, rows, running, observations, pending.len(), state_name, cfg.max_executables, has_free, free)
+                    continue
+            if is_dir(tp + "/artifact") or file_exists(tp + "/artifact"):
+                die("Fresh output required; cache lives separately")
+            # One parent CFEC Job contains these children and all nested native/RSS helpers.
+            val pid = process_environment_spawn_native_v1(shell_program(), launch_args(jtext(request, "cwd"), tp + "/task.stdout.log", tp + "/task.stderr.log", jtexts_of(request, "command")), env_lines(preflight_request_of(request).environment), WINDOWS_ENV_MODE)
+            if pid <= 0:
+                die("cannot start child for {jtext(t, "entry")}")
+            running.push(Running(pid: pid, target: t))
+            write_json(tp + "/child-start.json", json_value_object_from([("pid", JsonValue.Int(pid)), ("parent_batch_pid", JsonValue.Int(batch_pid)), ("utc", JsonValue.Str(iso_utc_from_unix_micros(time_now_unix_micros()))), ("requested_jobs", JsonValue.Int(1)), ("aggregate_reservation_jobs", JsonValue.Int(20))]))
+            state_name = "RUNNING"
+            publish(packet, rows, running, observations, pending.len(), state_name, cfg.max_executables, has_free, free)
+            val reprobe = available_commit_bytes()
+            if reprobe.is_err():
+                blocked = true
+                state_name = "BLOCKED_COMMIT_PROBE_FAILED"
+                print("error: {reprobe.unwrap_err()}")
+                break
+            free = reprobe.unwrap()
+        if blocked:
+            publish(packet, rows, running, observations, pending.len(), state_name, cfg.max_executables, has_free, free)
+            continue
+        if running.len() == 0 and pending.len() > 0:
+            state_name = "WAITING_MEMORY_OR_CACHE"
+            publish(packet, rows, running, observations, pending.len(), state_name, cfg.max_executables, has_free, free)
+        if running.len() > 0 or pending.len() > 0:
+            thread_sleep(2000)
+    publish(packet, rows, running, observations, pending.len(), final_state(blocked), cfg.max_executables, has_free, free)
+    exit(exit_code_for(blocked))
+
+# Children still running: kept so far plus those not yet inspected this sweep.
+fn live_after(kept: [Running], all: [Running], inspected: i64) -> [Running]:
+    var out: [Running] = []
+    for k in kept:
+        out.push(k)
+    var i = inspected
+    while i < all.len():
+        out.push(all[i])
+        i = i + 1
+    out
+
+fn jtexts_of(v: JsonValue, key: text) -> [text]:
+    var out: [text] = []
+    for item in json_value_items(json_value_field(v, key)):
+        match item:
+            case JsonValue.Str(s): out.push(s)
+            case _: out.push("")
+    out
+
+fn main():
+    val args = get_args()
+    val packet_arg = arg_value(args, "--packet")
+    if packet_arg.len() == 0:
+        print("usage: adaptive-executable-batch.spl --packet DIR [--preflight]")
+        exit(2)
+    var only_preflight = false
+    for a in args:
+        if a == "--preflight":
+            only_preflight = true
+    val packet = path_absolute(packet_arg)
+    val config = load(packet + "/config.json")
+    val targets = json_value_items(json_value_field(load(packet + "/tasks.json"), "targets"))
+    preflight(config, targets)
+    if only_preflight:
+        print("batch preflight passed")
+        exit(0)
+    run_batch(packet, config, targets)
+
+main()

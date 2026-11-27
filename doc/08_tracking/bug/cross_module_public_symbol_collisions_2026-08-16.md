@@ -1,6 +1,6 @@
 # Cross-module public symbol collisions (bootstrap warnings, wrong-dispatch risk)
 
-Status: OPEN (P3)
+Status: LIVE (triaged 2026-11-11, lane boot23; residual rename/unify rows confirmed at tip)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 Date: 2026-08-16. Source: bootstrap log `compiler_cross_module_private_symbol_collision` warnings.
@@ -154,3 +154,235 @@ separate `_has` defect tracked in
 `private_helper_name_collision_across_modules_has_2026-08-17.md`; it is quoted
 here only to show this change introduced no new failure, and it is **not** a
 pass for anything on this record.
+
+## Re-verification 2026-11-09 (reassign-p3-A, executed on Windows seed `bin/simple.exe`)
+
+`bin/simple test test/01_unit/app/build/private_helper_name_collision_spec.spl`
+on origin/release/1.0.0: 24 distinct differing-signature `public function`
+rows. Of the original filing only `shell` (3 defs: ProcessResult x2 vs app
+tuple), `compile_native` and `dir_remove_all` remain; the rest of the table
+is gone. New rows (not in the original filing) include `env_get`(5),
+`dir_list`, `join_path`, `detect_arch`, `atomic_bool_new`, `format_hex`, ...
+plus a 78-name SAME-signature warning.
+
+Fixed in this pass (warning lines for both rows absent after the change):
+- `compile_native` (app source-file driver) -> `compile_native_source`
+  (`src/app/compile/native.spl`, export in `__init__.spl`, lazy import in
+  `_CliCompile/compile_opt_and_driver.spl`).
+- `dir_remove_all` in `src/app/io/dir_ops.spl` now `-> bool` like std; its
+  `== 0` caller (`dir_remove`) updated. A bool fallback hit made
+  `dir_remove_all(p) == 0` false on success.
+Pin: `test/01_unit/app/build/cross_module_public_symbol_collision_rows_spec.spl`
+(red 0/2 on base, green 2/2).
+
+Still open: `shell` (app tuple API, many callers) and the new rows above.
+
+
+## 2026-11-11 addendum (lane intne1, batch p3-intne1-20261111) — verdict: LIVE (left open)
+
+Fresh executed probe on release/1.0.0 tip (worktree simple-p3-intne1-20261111,
+HEAD 79d5af6723f6), same vehicle as the 2026-11-09 pass:
+
+```
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe $PWD/bin/simple.exe test \
+    test/01_unit/app/build/private_helper_name_collision_spec.spl \
+    --mode=interpreter --no-cache 2>&1 | grep compiler_cross_module_private_symbol_collision
+```
+
+- 24 distinct `public function` collision names; **zero class-collision warnings**.
+  `shell` is now 3 defs / 2 differing signatures (`(text)->ProcessResult` x2 lib +
+  `(text)->Tuple([text,text,i64])` app mirror) — down from 5 defs / 3 signatures.
+  Of the original 13-row filing table only `shell` remains; the other twelve were
+  renamed or unified (`compile_native` and `dir_remove_all` by the 2026-11-09 pass,
+  the rest earlier). New rows not in the original filing include `env_get` (5 defs),
+  `dir_list` (4), `join_path` (3), `detect_arch` (3), `atomic_bool_new`,
+  `atomic_i64_new`, `format_hex`, `crc32_update`/`crc32_finalize`, `bytes_to_*`,
+  `hir_owned_artifact_*`, etc.
+- Material hazard change: every warning now carries "call sites resolve by the
+  caller's import path, else by exact arg-type match (mangled `$dupN` variants), and
+  a call that neither selects is a compile error (owner decision 2026-11-09, **no
+  last-definition fallback**)". The silent wrong-dispatch hazard in this row's
+  header (JIT last-definition fallback; interpreter class members by NAME across
+  modules) is retired — the residual is warning noise plus rename/unify work.
+- The vehicle spec itself still reports `Results: 3 total, 0 passed, 3 failed`; that
+  is the separate `_has` defect
+  (`private_helper_name_collision_across_modules_has_2026-08-17.md`), quoted only
+  as the warning emitter.
+
+Status: OPEN (P3) — still real, minor; rename/unify of the ~24 residual rows
+remains. Lane evidence: `build/review/intne1-collision-probe.log`.
+
+## 2026-11-11 addendum (lane boot23) — LIVE re-confirmed; header flip OPEN -> LIVE
+
+intne1's same-day executed probe (batch p3-intne1-20261111, HEAD
+`79d5af6723f6`) is the freshest evidence; boot23 re-verified FRESH by source
+spot-check at this lane's base (`41935a5f61860`):
+
+- The `shell` collision pair survives: `pub fn shell(command: text) ->
+  ProcessResult` at `src/lib/nogc_sync_mut/io/process_ops.spl:2913` and the
+  app tuple mirror `fn shell(command: text) -> (text, text, i64)` at
+  `src/app/io/file_shell.spl:10` — matching intne1's "3 defs / 2 differing
+  signatures" residual.
+- The silent wrong-dispatch hazard this record's header warned about (JIT
+  last-definition fallback; interpreter class members by NAME across modules)
+  is retired by owner decision 2026-11-09 (no last-definition fallback;
+  unselected calls are compile errors), per intne1's addendum.
+
+Disposition: **LIVE**, still real, minor — the residual rename/unify program
+(~24 rows per intne1's executed probe: `shell`, `env_get`, `dir_list`,
+`join_path`, `detect_arch`, `atomic_bool_new`, `format_hex`, `crc32_*`,
+`bytes_to_*`, `hir_owned_artifact_*`, ...) remains. The vehicle spec's
+`3 total, 0 passed, 3 failed` is the separate `_has` defect
+(`private_helper_name_collision_across_modules_has_2026-08-17.md`), quoted
+only as the warning emitter. No in-lane rename attempted: exported-API renames
+need coordinated caller migration across `src/lib`/`src/app` tiers, beyond a
+P3 lane's blast radius. Owner: compiler-lib symbol-hygiene program.
+
+## 2026-11-25 addendum (lane p3-collisions) — slice rows `read_file`/`write_file`/`last_index_of`/`detect_platform`/`dir_remove_all` confirmed DEAD by execution; no rename needed
+
+A P3 lane was dispatched to rename one of the surviving rows from the
+2026-08-17 table (`read_file`/`write_file`/`last_index_of`, else
+`detect_platform` or `dir_remove_all`), on the strength of the 2026-08-17
+"STILL live" re-verification. Executed probe at release/1.0.0 tip shows all
+five rows are already gone; **no code change was made** (renaming a
+non-colliding symbol would be churn, and the only surviving `dir_remove_all`
+co-compilation is the identical-signature per-tier mirror class this record
+already defers).
+
+Binary identity: no deployed binary could parse tip source (the newest
+snapshot anywhere, `bin/simple.exe` mtime 2026-10-05, fails with
+`parse: in src/lib/common/types.spl: Unexpected token: expected As, found
+Newline` on the `unit ByteSize: i64` syntax that landed 2026-11-17), so the
+seed was rebuilt from the probed commit itself: worktree HEAD
+`271db41d1b0315e4508011d426bc600ea4abb3ea` (2026-11-25),
+`cargo build --release --bin simple -p simple-driver`
+(toolchain nightly-2026-09-15, x86_64-pc-windows-gnullvm, llvm-mingw
+20260922 UCRT clang + lld per `bootstrap-from-scratch.sh`'s Windows GNU
+tool authority), 55294464 bytes. Probe:
+
+```
+$ SIMPLE_LIB=src timeout 1200 ./bin/simple test \
+    test/01_unit/app/build/private_helper_name_collision_spec.spl \
+    --mode=interpreter 2>&1 | grep compiler_cross_module_private_symbol_collision
+```
+
+Result: **29 differing-signature rows** (20 `public function`, 9
+`private helper`), and NOT ONE of them is a slice row. Quoted verbatim, the
+full public-function set at tip:
+
+```
+bytes_to_u16_le, bytes_to_u32_le, collection_plan_unproven_facts,
+crc32_finalize, crc32_update, detect_arch, elf_write_object, env_get (5 defs),
+factorial, fnv1a_hash_i64, format_binary, format_hex, gzip_decompress,
+hir_owned_artifact_load_blob_v1, hir_owned_artifact_store_blob_v1,
+read_u32_le, resolve, shell (3 defs), strtab_add, symbol_name
+```
+
+plus private helpers `_fact_key_v1`, `_fail`, `_field`, `_field_is`,
+`_read_v1`, `_sffi_enum_discriminant`, `_sffi_enum_payload`, `_skip_ws`,
+`_sorted_unique_v1`, and three SAME-signature summary warnings (128, 367 and
+73 names). Disposition of each dispatched row, per the compiler's own output:
+
+- `read_file`, `write_file`, `last_index_of` — **no warning of either kind**
+  (differing- or same-signature). The 2026-08-17 "surviving duplicate pair"
+  no longer co-compiles; the std canonical definitions
+  (`src/lib/nogc_sync_mut/io_runtime.spl:231` `pub fn read_file(path: text)
+  -> text`, `:281` `pub fn write_file(path: text, content: text) -> bool`,
+  `src/lib/text.spl:74` `fn last_index_of(s: text, needle: text) -> i64`)
+  stand alone in the closure. A second `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1`
+  run confirms none of the three names appears even in the same-signature
+  per-symbol owner list.
+- `detect_platform` — **no warning of either kind**. The `()->u8` side was
+  renamed `detect_platform_id` (2026-08-17); the remaining `()->text`
+  mirrors do not co-compile with a differing signature in this closure.
+  (`detect_arch` — a different symbol — IS live, `()->text` vs `()->u8`,
+  3 defs; it was never in this record's filing table.)
+- `dir_remove_all` — the filing row `(text)->bool` vs `(text)->i32` is
+  **gone** (the 2026-11-09 pass unified `src/app/io/dir_ops.spl` to `bool`).
+  What remains is a SAME-signature warning, quoted verbatim:
+  ``public function `dir_remove_all` has 4 co-compiled definitions across 4
+  modules with the SAME signature ((text)->bool)`` in
+  `src/app/io/dir_ops.spl`, `src/lib/nogc_sync_mut/io/dir_ops.spl`,
+  `src/lib/nogc_sync_mut/io_runtime.spl`,
+  `src/lib/nogc_sync_mut/sffi/io.spl` — the intentional per-tier mirror
+  class this record defers, not a wrong-dispatch signature hazard.
+
+Side observation, not this record's row: the vehicle spec itself now reports
+`Results: 3 total, 3 passed, 0 failed` at tip (previously `3 total, 0
+passed, 3 failed` from the separate `_has` defect
+`private_helper_name_collision_across_modules_has_2026-08-17.md`), i.e. that
+defect's symptom no longer reproduces under this probe.
+
+Status: OPEN (P3) — unchanged. The residual differing-signature program is
+the 29 rows quoted above (`shell` still the named highest-risk of the
+original filing); the slice dispatched on 2026-11-25 required no rename
+because its rows were already resolved by earlier passes.
+
+### 2026-11-25 corroboration (lane p3-collisions, second probe) — same verdict on the TRACKED self-hosted binary; corrects the binary-identity note above
+
+The addendum above was probed with a locally rebuilt Rust seed because its
+lane believed no deployed binary could parse tip source. That belief is
+wrong for this worktree: the tracked, git-checked-in self-hosted binary
+`bin/simple.exe` (**38403072 bytes**, mtime 2026-11-25 18:11, from `git
+checkout` at branch base `271db41d1b0`) parses and runs tip source fine.
+Independent re-probe, same vehicle spec, same worktree:
+
+```
+$ SIMPLE_LIB=src timeout 1500 bin/simple.exe test \
+    test/01_unit/app/build/private_helper_name_collision_spec.spl \
+    --mode=interpreter 2>&1 | grep -E "compiler_cross_module_private_symbol_collision|Results:"
+```
+
+Result: identical verdict to the addendum above. The complete
+differing-signature `public function` row set emitted by the compiler is:
+
+```
+bytes_to_u16_le, bytes_to_u32_le, collection_plan_unproven_facts,
+crc32_finalize, crc32_update, detect_arch, elf_write_object, env_get (5 defs),
+factorial, fnv1a_hash_i64, format_binary, format_hex, gzip_decompress,
+hir_owned_artifact_load_blob_v1, hir_owned_artifact_store_blob_v1,
+read_u32_le, resolve, shell (3 defs), strtab_add, symbol_name
+```
+
+plus 10 `private helper` rows (`_fact_key_v1`, `_fail`, `_field`,
+`_field_is`, `_read_v1`, `_sffi_enum_discriminant`, `_sffi_enum_payload`,
+`_skip_ws`, `_sorted_unique_v1` — 9 distinct names, one with 7 defs) and
+three collapsed SAME-signature summary warnings (73, 367, 128 names).
+**None of `read_file`, `write_file`, `last_index_of` appears in any
+differing-signature row.** A second run with
+`SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1` expanded the collapsed lists into
+568 per-symbol SAME-signature warnings; `grep -cE "\bread_file\b"` /
+`\bwrite_file\b` / `\blast_index_of\b` over that output is **0, 0, 0** —
+the three names collide in neither mode. `io_runtime.spl` (owner of the
+canonical `pub fn read_file`/`pub fn write_file`) IS inside this spec's
+closure — it co-compiles and warns on `cwd`, `dir_create`, `dir_create_all`,
+`dir_exists`, `dir_remove` (quoted owners:
+`src\lib\nogc_sync_mut\io_runtime.spl` + peers) — so the absence of
+`read_file`/`write_file` rows is a real absence of duplicates, not a
+missing-module artifact.
+
+Static cross-check at the same commit:
+
+```
+$ grep -rn "fn last_index_of" src --include=*.spl
+src/lib/common/text_advanced.spl:1191:fn last_index_of_func(...)   # different name
+src/lib/text.spl:74:fn last_index_of(s: text, needle: text) -> i64:  # sole definition
+$ grep -rnE "fn (read_file|write_file)\([^)]*String" src --include=*.spl
+(none)   # the (String)->Result<String,String> side of the 2026-08-17 row no longer exists
+$ grep -rnE "pub fn (read_file|write_file)\b" src/lib --include=*.spl
+src/lib/nogc_sync_mut/io_runtime.spl:231:pub fn read_file(path: text) -> text:
+src/lib/nogc_sync_mut/io_runtime.spl:281:pub fn write_file(path: text, content: text) -> bool:
+```
+
+Vehicle spec result at this probe: `Results: 3 total, 3 passed, 0 failed`
+(twice) — the separate `_has` defect
+(`private_helper_name_collision_across_modules_has_2026-08-17.md`) no longer
+reproduces here either.
+
+Verdict for this slice, on executed evidence from the deployed tracked
+binary: `read_file`, `write_file`, `last_index_of` are **already resolved**
+by earlier passes — no rename, no caller migration, no code change in this
+lane. Overall record stays **OPEN (P3)**: `shell` (3 defs,
+`(text)->ProcessResult` vs `(text)->Tuple([text, text, i64])`, quoted
+verbatim from this run) and the other 19 differing-signature public rows
+listed above remain live.

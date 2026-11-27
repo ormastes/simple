@@ -1,0 +1,119 @@
+# AUTHORED_NOT_RUN. Public accounting values only; not installed custody or a
+# machine writer. No synthetic row is used as positive native admission proof.
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.*
+use std.nogc_sync_mut.database.wal.{WalEntry, WalEntryType}
+
+fn fresh_epoch_record_fixture_v1() -> MachineFreshEpochRecordV1:
+    MachineFreshEpochRecordV1(authority_id: "machine_1", physical_host_id: "host_1",
+        native_machine_id: "linux-machine-id-v1:1234", epoch_id: "installed_epoch_1", epoch_generation: 7,
+        profile_digest: "a".repeat(64), machine_policy_digest: "b".repeat(64), process_identity_digest: "c".repeat(64),
+        principal_id: "linux:uid:20001", service_uid: 20001, service_gid: 20001, manager_unique_name: ":1.23",
+        partition_identity_digest: "d".repeat(64), store_identity_digest: "e".repeat(64),
+        provider_policy_digest: "f".repeat(64), provider_identity_digest: "1".repeat(64),
+        capacity_cpu_millis: 8000, capacity_memory_bytes: 8192,
+        observed_cpu_millis: 4000, observed_memory_bytes: 4096,
+        reserved_cpu_millis: 500, reserved_memory_bytes: 512,
+        outside_cpu_millis: 4000, outside_memory_bytes: 4096,
+        usable_cpu_millis: 3500, usable_memory_bytes: 3584)
+
+fn fresh_epoch_replayed_rows_v1(record: MachineFreshEpochRecordV1) -> [WalEntry]:
+    val pending = machine_fresh_epoch_entries_v1(record, 1000).unwrap()
+    var result: [WalEntry] = []
+    for index in 0..pending.len():
+        val row = pending[index]
+        result.push(WalEntry(index + 1, row.entry_type, row.table_name, row.row_key, row.data, row.timestamp))
+    result
+
+describe "Fresh epoch canonical accounting has no authority constructors":
+    it "charges outside, overhead and usable partition through the existing subtract-before-sum ledger":
+        step("Record the observed partition as reserved overhead plus usable capacity")
+        val record = fresh_epoch_record_fixture_v1()
+        val available = machine_fresh_epoch_capacity_v1(record).unwrap()
+        val rows = fresh_epoch_replayed_rows_v1(record)
+        val replayed = machine_fresh_epoch_replay_v1(rows, record)
+        expect(available.cpu_millis).to_equal(0)
+        expect(available.memory_bytes).to_equal(0)
+        expect(available.exclusive_devices.len()).to_equal(0)
+        expect(rows.len()).to_equal(4)
+        expect(rows[0].table_name).to_equal("machine-container-scope-v1")
+        expect(rows[0].row_key).to_equal("fresh-epoch")
+        expect(rows[1].data).to_contain("uncertain")
+        expect(rows[2].data).to_contain("uncertain")
+        expect(rows[3].data).to_contain("uncertain")
+        expect(replayed.is_ok()).to_equal(true)
+        expect(replayed.unwrap()).to_equal(true)
+
+    it "rejects oversized outside obligations and altered partition subdivisions without overflowing sums":
+        step("Keep conservative outside obligations charged when the epoch is otherwise valid")
+        var outside = fresh_epoch_record_fixture_v1()
+        outside.outside_memory_bytes = 9223372036854775807
+        val rejected_outside = machine_fresh_epoch_record_validate_v1(outside)
+        expect(rejected_outside.is_err()).to_equal(true)
+        expect(rejected_outside.unwrap_err()).to_equal("machine-fresh-epoch-record-outside-capacity")
+        var usable = fresh_epoch_record_fixture_v1()
+        usable.usable_cpu_millis = usable.usable_cpu_millis + 1
+        val rejected_usable = machine_fresh_epoch_record_validate_v1(usable)
+        expect(rejected_usable.is_err()).to_equal(true)
+        expect(rejected_usable.unwrap_err()).to_equal("machine-fresh-epoch-record-partition-subdivision")
+        var overhead = fresh_epoch_record_fixture_v1()
+        overhead.reserved_memory_bytes = 0
+        val rejected_overhead = machine_fresh_epoch_record_validate_v1(overhead)
+        expect(rejected_overhead.is_err()).to_equal(true)
+        expect(rejected_overhead.unwrap_err()).to_equal("machine-fresh-epoch-record-overhead")
+
+    it "retains stable installation binding while historical incarnation diagnostics differ":
+        step("Keep registry generation, old process and manager observations historical")
+        val original = fresh_epoch_record_fixture_v1()
+        var later = original
+        later.epoch_generation = 8
+        later.process_identity_digest = "2".repeat(64)
+        later.manager_unique_name = ":1.99"
+        val old_binding = machine_fresh_epoch_stable_v1(original).unwrap()
+        val later_binding = machine_fresh_epoch_stable_v1(later).unwrap()
+        val old_bytes = machine_fresh_epoch_record_bytes_v1(original).unwrap()
+        val later_bytes = machine_fresh_epoch_record_bytes_v1(later).unwrap()
+        expect(later_binding).to_equal(old_binding)
+        expect(later_bytes == old_bytes).to_equal(false)
+        later.store_identity_digest = "3".repeat(64)
+        val changed_binding = machine_fresh_epoch_stable_v1(later).unwrap()
+        expect(changed_binding == old_binding).to_equal(false)
+
+    it "strictly decodes the original canonical record and refuses changed or unknown history":
+        step("Decode exact canonical bytes without minting an admission or a writer")
+        val record = fresh_epoch_record_fixture_v1()
+        val bytes = machine_fresh_epoch_record_bytes_v1(record).unwrap()
+        val decoded = machine_fresh_epoch_record_decode_v1(bytes).unwrap()
+        expect(decoded).to_equal(record)
+        expect(machine_fresh_epoch_record_decode_v1(bytes + "\n").is_err()).to_equal(true)
+        var rows = fresh_epoch_replayed_rows_v1(record)
+        val original = rows[2]
+        rows[2] = WalEntry(original.sequence, original.entry_type, original.table_name,
+            original.row_key, original.data, original.timestamp + 1)
+        val changed = machine_fresh_epoch_replay_v1(rows, record)
+        expect(changed.is_err()).to_equal(true)
+        expect(changed.unwrap_err()).to_equal("machine-fresh-epoch-record-history")
+        val truncated = machine_fresh_epoch_replay_v1(rows[0:2], record)
+        expect(truncated.is_err()).to_equal(true)
+        expect(truncated.unwrap_err()).to_equal("machine-fresh-epoch-record-count")
+
+    it "records one creator intent and updates the existing charged overhead without a second budget pool":
+        step("Keep the already charged provider overhead uncertain before any native attempt")
+        val record = fresh_epoch_record_fixture_v1()
+        val template = "modeled-validated-template-data"
+        val pending = machine_fresh_epoch_creator_entries_v1(record, template, 2000, 1000).unwrap()
+        var rows: [WalEntry] = []
+        for index in 0..pending.len():
+            val row = pending[index]
+            rows.push(WalEntry(index + 5, row.entry_type, row.table_name, row.row_key, row.data, row.timestamp))
+        val replayed = machine_fresh_epoch_creator_replay_v1(rows, record, template, 2000, 1000)
+        expect(rows.len()).to_equal(2)
+        expect(rows[0].entry_type).to_equal(WalEntryType.Insert)
+        expect(rows[0].data).to_contain("unknown")
+        expect(rows[1].entry_type).to_equal(WalEntryType.Update)
+        expect(rows[1].row_key).to_start_with("overhead-")
+        expect(rows[1].data).to_contain("uncertain")
+        expect(replayed.is_ok()).to_equal(true)
+        val substituted = machine_fresh_epoch_creator_replay_v1(rows, record, "other-template-data", 2000, 1000)
+        expect(substituted.is_err()).to_equal(true)
+        expect(substituted.unwrap_err()).to_equal("machine-fresh-epoch-creator-record-history")

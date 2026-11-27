@@ -1,0 +1,41 @@
+use app.test_runner_new.sdn_worker_args.{parse_private_sdn_worker_args}
+
+fn public_alias(args: [text]) -> bool:
+    match parse_private_sdn_worker_args(args, false):
+        case Ok(value):
+            value.public_sdn_requested and not value.worker and value.result_path == "" and
+                value.forwarded_args.len() == 2 and value.forwarded_args[0] == "fixture.spl" and value.forwarded_args[1] == "--no-db"
+        case Err(_): false
+
+fn rejected(args: [text], authorized: bool) -> bool:
+    match parse_private_sdn_worker_args(args, authorized):
+        case Ok(_): false
+        case Err(_): true
+
+fn main() -> i64:
+    if not public_alias(["test", "fixture.spl", "--format=sdn", "--no-db"]):
+        print "FAIL equals SDN flag bypasses public transport"
+        return 1
+    if not public_alias(["fixture.spl", "--format", "sdn", "--no-db"]) or not public_alias(["fixture.spl", "--sdn", "--no-db"]):
+        print "FAIL SDN alias parity"
+        return 1
+    for alias in ["--sdn", "--format=sdn"]:
+        if not rejected(["--test-sdn-worker", "--test-sdn-result=/tmp/result.sdn", alias], true):
+            print "FAIL private/public SDN mixing: {alias}"
+            return 1
+    if not rejected(["--test-sdn-worker", "--test-sdn-result=/tmp/result.sdn", "--format", "sdn"], true):
+        print "FAIL split private/public SDN mixing"
+        return 1
+    if not rejected(["--test-sdn-worker", "--test-sdn-result=/tmp/result.sdn"], false):
+        print "FAIL unauthorized worker"
+        return 1
+    match parse_private_sdn_worker_args(["--test-sdn-worker", "--test-sdn-result=/tmp/result.sdn", "fixture.spl"], true):
+        case Ok(value):
+            if not value.worker or value.public_sdn_requested or value.forwarded_args.len() != 1:
+                print "FAIL authorized private worker contract"
+                return 1
+        case Err(_):
+            print "FAIL authorized worker rejected"
+            return 1
+    print "SDN_ARGS_REGRESSION PASS aliases worker-mixing and authorization"
+    0

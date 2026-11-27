@@ -7,9 +7,9 @@
 # reversible). Only use over TLS (HTTPS). Never use over plain HTTP.
 #
 # Public API:
-#   http_basic_encode(user: list, password: list) -> list
-#   http_basic_parse(authorization_header: list) -> tuple  # (user, password) or nil
-#   http_basic_ct_verify(user: list, password: list, expected_user: list, expected_pw: list) -> bool
+#   http_basic_encode(user: [u8], password: [u8]) -> [u8]
+#   http_basic_parse(authorization_header: [u8]) -> tuple  # (user, password) or nil
+#   http_basic_ct_verify(user: [u8], password: [u8], expected_user: [u8], expected_pw: [u8]) -> bool
 
 mod crypto.types
 
@@ -25,13 +25,13 @@ use std.common.crypto.constant_time.{black_box}
 # Uses XOR-accumulate so the loop cannot be short-circuited by the optimizer.
 # Wraps the accumulator through rt_black_box at the end.
 # reason: positional http auth basic API
-fn _ct_bytes_equal(a: list, b: list) -> bool:
+fn _ct_bytes_equal(a: [u8], b: [u8]) -> bool:
     if a.len() != b.len():
         return false
     var diff = 0
     var i = 0
     while i < a.len():
-        diff = diff | (a.get(i) ^ b.get(i))
+        diff = diff | ((a[i] as i64) ^ (b[i] as i64))
         i = i + 1
     # black_box (wraps rt_black_box) prevents the optimizer from turning the
     # XOR loop into an early-exit branch. The cast via == 0 does the final
@@ -55,21 +55,21 @@ fn _b64_char(idx: i64) -> text:
     _char_at(_b64_alphabet(), idx)
 
 # Encode raw bytes to Base64 text (RFC 4648, with '=' padding)
-fn _encode_base64_bytes(bytes: list) -> text:
+fn _encode_base64_bytes(bytes: [u8]) -> text:
     var result = ""
     val len = bytes.len()
     var i = 0
     while i < len:
-        val b1 = bytes.get(i)
+        val b1 = bytes[i] as i64
         var b2 = 0
         var b3 = 0
         var has_b2 = false
         var has_b3 = false
         if i + 1 < len:
-            b2 = bytes.get(i + 1)
+            b2 = bytes[i + 1] as i64
             has_b2 = true
         if i + 2 < len:
-            b3 = bytes.get(i + 2)
+            b3 = bytes[i + 2] as i64
             has_b3 = true
 
         val idx1 = (b1 >> 2) & 0x3f
@@ -107,14 +107,14 @@ fn _b64_val(c: text) -> i64:
     -1
 
 # Decode Base64 text to raw byte list. Returns nil on invalid input.
-fn _decode_base64_bytes(encoded: text) -> list?:
+fn _decode_base64_bytes(encoded: text) -> [u8]?:
     val len = encoded.length()
     if len == 0:
         return []
     # Length must be multiple of 4
     if len % 4 != 0:
-        return nil
-    var result = []
+        return None
+    var result: [u8] = []
     var i = 0
     while i < len:
         val c1 = encoded.substring(i, i + 1)
@@ -125,23 +125,23 @@ fn _decode_base64_bytes(encoded: text) -> list?:
         val v1 = _b64_val(c1)
         val v2 = _b64_val(c2)
         if v1 < 0 or v2 < 0:
-            return nil
+            return None
 
         val byte1 = ((v1 << 2) | (v2 >> 4)) & 0xff
-        result.push(byte1)
+        result.push(byte1.to_u8())
 
         if c3 != "=":
             val v3 = _b64_val(c3)
             if v3 < 0:
-                return nil
+                return None
             val byte2 = ((v2 << 4) | (v3 >> 2)) & 0xff
-            result.push(byte2)
+            result.push(byte2.to_u8())
             if c4 != "=":
                 val v4 = _b64_val(c4)
                 if v4 < 0:
-                    return nil
+                    return None
                 val byte3 = (((v3 & 0x03) << 6) | v4) & 0xff
-                result.push(byte3)
+                result.push(byte3.to_u8())
 
         i = i + 4
     result
@@ -154,17 +154,17 @@ fn _decode_base64_bytes(encoded: text) -> list?:
 # user and password are byte lists (typically UTF-8 or ASCII).
 # Returns the full Authorization header value as a byte list.
 # reason: positional http auth basic API
-fn http_basic_encode(user: list, password: list) -> list:
+fn http_basic_encode(user: [u8], password: [u8]) -> [u8]:
     # Build user:password byte list
-    var creds = []
+    var creds: [u8] = []
     var i = 0
     while i < user.len():
-        creds.push(user.get(i))
+        creds.push(user[i])
         i = i + 1
-    creds.push(0x3a)  # ':' = 0x3a
+    creds.push((0x3a).to_u8())  # ':' = 0x3a
     i = 0
     while i < password.len():
-        creds.push(password.get(i))
+        creds.push(password[i])
         i = i + 1
 
     val b64 = _encode_base64_bytes(creds)
@@ -174,23 +174,23 @@ fn http_basic_encode(user: list, password: list) -> list:
 # Parse HTTP Basic Authorization header value.
 # authorization_header: byte list of the Authorization header value
 #   e.g. bytes of "Basic dXNlcjpwYXNz"
-# Returns tuple (user_bytes: list, password_bytes: list) on success, or nil on failure.
+# Returns tuple (user_bytes: [u8], password_bytes: [u8]) on success, or nil on failure.
 # reason: positional http auth basic API
-fn http_basic_parse(authorization_header: list) -> tuple?:
+fn http_basic_parse(authorization_header: [u8]) -> tuple?:
     val header_text = crypto_bytes_to_text(authorization_header)
     if not header_text.starts_with("Basic "):
-        return nil
+        return None
 
-    val encoded = header_text.substring(6, header_text.length())
+    val encoded = header_text.substring(6, header_text.byte_len())
     val decoded = _decode_base64_bytes(encoded)
     if decoded == nil:
-        return nil
+        return None
 
     # Find ':' separator (first occurrence)
     var colon_pos = -1
     var i = 0
     while i < decoded.len():
-        if decoded.get(i) == 0x3a:  # ':'
+        if (decoded[i] as i64) == 0x3a:  # ':'
             colon_pos = i
             return _split_at(decoded, colon_pos)
         i = i + 1
@@ -198,16 +198,16 @@ fn http_basic_parse(authorization_header: list) -> tuple?:
     nil
 
 # Internal: split byte list at position pos, return (left, right) as tuple
-fn _split_at(bytes: list, pos: i64) -> tuple:
-    var left = []
+fn _split_at(bytes: [u8], pos: i64) -> tuple:
+    var left: [u8] = []
     var i = 0
     while i < pos:
-        left.push(bytes.get(i))
+        left.push(bytes[i])
         i = i + 1
-    var right = []
+    var right: [u8] = []
     i = pos + 1
     while i < bytes.len():
-        right.push(bytes.get(i))
+        right.push(bytes[i])
         i = i + 1
     (left, right)
 
@@ -215,7 +215,7 @@ fn _split_at(bytes: list, pos: i64) -> tuple:
 # Returns true iff both user and password match using constant-time compare.
 # Resistant to timing attacks on password equality.
 # reason: positional http auth basic API
-fn http_basic_ct_verify(user: list, password: list, expected_user: list, expected_pw: list) -> bool:
+fn http_basic_ct_verify(user: [u8], password: [u8], expected_user: [u8], expected_pw: [u8]) -> bool:
     val user_ok = _ct_bytes_equal(user, expected_user)
     val pw_ok = _ct_bytes_equal(password, expected_pw)
     # Combine without short-circuit: both branches always execute

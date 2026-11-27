@@ -9,9 +9,168 @@
 //! - Relative: Compute relative path
 //! - Separator: Get platform-specific path separator
 
-use crate::value::collections::rt_string_new;
+use crate::value::collections::{rt_string_new, RuntimeString};
+use crate::value::heap::{with_typed_ptr, HeapObjectType};
 use crate::value::RuntimeValue;
 use std::path::Path;
+
+// Copy the selected counted-byte suffix while the managed string is guarded.
+// No pointer into the input survives this function or crosses result allocation.
+fn copy_path_component(path: RuntimeValue, extension: bool) -> Option<Vec<u8>> {
+    with_typed_ptr::<RuntimeString, _>(path, HeapObjectType::String, |ptr| unsafe {
+        let len = usize::try_from((*ptr).len).ok()?;
+        if len > isize::MAX as usize {
+            return None;
+        }
+        let bytes = (*ptr).as_bytes();
+        std::str::from_utf8(bytes).ok()?;
+        let mut end = len;
+        while end > 0 && bytes[end - 1] == b'/' {
+            end -= 1;
+        }
+        let mut start = end;
+        while start > 0 && bytes[start - 1] != b'/' {
+            start -= 1;
+        }
+        if extension {
+            let basename_start = start;
+            let mut dot = end;
+            while dot > basename_start && bytes[dot - 1] != b'.' {
+                dot -= 1;
+            }
+            start = if dot == basename_start
+                || (dot == basename_start + 1 && bytes[basename_start] == b'.')
+            {
+                end
+            } else {
+                dot
+            };
+        }
+        let mut owned = Vec::new();
+        owned.try_reserve_exact(end - start).ok()?;
+        owned.extend_from_slice(&bytes[start..end]);
+        Some(owned)
+    })?
+}
+
+fn managed_path_component(path: RuntimeValue, extension: bool) -> RuntimeValue {
+    match copy_path_component(path, extension) {
+        Some(bytes) => rt_string_new(bytes.as_ptr(), bytes.len() as u64),
+        None => rt_string_new(b"".as_ptr(), 0),
+    }
+}
+
+/// Return the final counted path component, trimming trailing forward slashes.
+/// Backslashes and embedded NUL bytes are ordinary bytes on every platform.
+#[no_mangle]
+pub extern "C" fn rt_path_filename(path: RuntimeValue) -> RuntimeValue {
+    managed_path_component(path, false)
+}
+
+/// Return the final component's extension without its dot, or empty text.
+/// A leading dot alone does not begin an extension; only '/' separates paths.
+#[no_mangle]
+pub extern "C" fn rt_path_extension(path: RuntimeValue) -> RuntimeValue {
+    managed_path_component(path, true)
+}
+
+/// Normalize a path lexically (no filesystem access): converts `\` to `/`,
+/// collapses duplicate separators, removes `.` segments, folds `..` against
+/// preceding non-`..` segments, and preserves a Windows drive prefix (`C:`).
+/// Mirrors `src/runtime/runtime_core_io_exports.c::rt_path_normalize`.
+pub fn normalize_lexical_path(input: &str) -> String {
+    if input.is_empty() {
+        return ".".to_string();
+    }
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        out.push(bytes[0] as char);
+        out.push(':');
+        i = 2;
+    }
+
+    let mut rooted = false;
+    if i < bytes.len() && (bytes[i] == b'/' || bytes[i] == b'\\') {
+        out.push('/');
+        rooted = true;
+        while i < bytes.len() && (bytes[i] == b'/' || bytes[i] == b'\\') {
+            i += 1;
+        }
+    }
+    let body_start = out.len();
+
+    while i < bytes.len() {
+        let seg_start = i;
+        while i < bytes.len() && bytes[i] != b'/' && bytes[i] != b'\\' {
+            i += 1;
+        }
+        let seg = &input[seg_start..i];
+        while i < bytes.len() && (bytes[i] == b'/' || bytes[i] == b'\\') {
+            i += 1;
+        }
+
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            if out.len() > body_start {
+                let tail = &out[body_start..];
+                let trimmed = tail.strip_suffix('/').unwrap_or(tail);
+                let prev_seg = trimmed.rsplit('/').next().unwrap_or("");
+                if prev_seg != ".." {
+                    let pop_start = out.len() - tail.len()
+                        + trimmed.rfind('/').map_or(0, |pos| pos + 1);
+                    out.truncate(pop_start);
+                    if out.len() > body_start && out.ends_with('/') {
+                        out.pop();
+                    }
+                    continue;
+                }
+            } else if rooted {
+                continue;
+            }
+        }
+        if out.len() > body_start && !out.ends_with('/') {
+            out.push('/');
+        }
+        out.push_str(seg);
+    }
+
+    if out.len() > body_start && out.ends_with('/') {
+        out.pop();
+    }
+    if out.is_empty() {
+        ".".to_string()
+    } else {
+        out
+    }
+}
+
+/// Lexical path normalization SFFI export taking a boxed `RuntimeValue` text
+/// and returning a new `RuntimeValue` text.
+#[no_mangle]
+pub extern "C" fn rt_path_normalize(path: RuntimeValue) -> RuntimeValue {
+    let normalized = with_typed_ptr::<RuntimeString, _>(path, HeapObjectType::String, |ptr| unsafe {
+        let len = usize::try_from((*ptr).len).ok()?;
+        if len > isize::MAX as usize {
+            return None;
+        }
+        let s = std::str::from_utf8((*ptr).as_bytes()).ok()?;
+        Some(normalize_lexical_path(s))
+    })
+    .flatten();
+    match normalized {
+        Some(s) => rt_string_new(s.as_ptr(), s.len() as u64),
+        None => rt_string_new(b"".as_ptr(), 0),
+    }
+}
+
+#[cfg(test)]
+#[path = "path_component_tests.rs"]
+mod path_component_tests;
 
 /// Helper function for path operations that return strings
 /// Handles null checks, UTF-8 conversion, and result wrapping
@@ -87,7 +246,7 @@ pub unsafe extern "C" fn rt_path_ext(path_ptr: *const u8, path_len: u64) -> Runt
 /// separator. Built from the separator's code point because backslash
 /// literals do not survive this repository's tooling reliably.
 #[cfg(windows)]
-fn strip_verbatim_prefix(path: String) -> String {
+pub(crate) fn strip_verbatim_prefix(path: String) -> String {
     let sep = char::from(92u8);
     let verbatim: String = [sep, sep, '?', sep].iter().collect();
     let unc: String = format!("{}UNC{}", verbatim, sep);
@@ -105,12 +264,15 @@ fn strip_verbatim_prefix(path: String) -> String {
 }
 
 #[cfg(not(windows))]
-fn strip_verbatim_prefix(path: String) -> String {
+pub(crate) fn strip_verbatim_prefix(path: String) -> String {
     path
 }
 
-/// Convert path to absolute path
-/// Returns the canonicalized absolute path
+/// Convert path to absolute path.
+/// Returns the canonicalized path when it exists, otherwise the path joined
+/// onto the cwd. Returns `RuntimeValue::NIL` when the path is relative, does
+/// not exist, and the cwd cannot be read (never the relative input). Simple
+/// declares it `-> text?`.
 #[no_mangle]
 pub unsafe extern "C" fn rt_path_absolute(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
     if path_ptr.is_null() {
@@ -130,21 +292,45 @@ pub unsafe extern "C" fn rt_path_absolute(path_ptr: *const u8, path_len: u64) ->
     let absolute = if let Ok(canonical) = path.canonicalize() {
         strip_verbatim_prefix(canonical.to_str().unwrap_or(path_str).to_string())
     } else {
-        // Fallback: join with current directory
-        match std::env::current_dir() {
-            Ok(cwd) => {
-                let abs_path = if path.is_absolute() {
-                    path.to_path_buf()
-                } else {
-                    cwd.join(path)
-                };
-                abs_path.to_str().unwrap_or(path_str).to_string()
-            }
-            Err(_) => path_str.to_string(),
+        match absolute_against_cwd(path, std::env::current_dir) {
+            Some(abs_path) => abs_path.to_str().unwrap_or(path_str).to_string(),
+            None => return RuntimeValue::NIL,
         }
     };
 
     rt_string_new(absolute.as_ptr(), absolute.len() as u64)
+}
+
+/// Make `p` absolute without touching the filesystem. `cwd` is only called for
+/// a relative path; its failure yields `None` (never the relative input).
+pub(crate) fn absolute_against_cwd(
+    p: &Path,
+    cwd: impl FnOnce() -> std::io::Result<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    if p.is_absolute() {
+        return Some(p.to_path_buf());
+    }
+    cwd().ok().map(|dir| dir.join(p))
+}
+
+#[cfg(test)]
+mod rt_path_absolute_tests {
+    use super::*;
+
+    #[test]
+    fn path_absolute_cwd_failure_is_none() {
+        let got = absolute_against_cwd(Path::new("rel/child.spl"), || {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "cwd gone"))
+        });
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn path_absolute_missing_path_is_absolute_text() {
+        let raw = b"no_such_dir_xyz/child.spl";
+        let v = unsafe { rt_path_absolute(raw.as_ptr(), raw.len() as u64) };
+        assert!(v != RuntimeValue::NIL, "missing path with a live cwd must not be nil");
+    }
 }
 
 /// Get platform-specific path separator
@@ -646,6 +832,27 @@ mod verbatim_prefix_tests {
             missing.starts_with(existing.trim_end_matches(sep)),
             "shapes disagree: existing={existing} missing={missing}"
         );
+    }
+
+    #[test]
+    fn rt_path_normalize_lexical_cases() {
+        let norm = |s: &str| {
+            let bytes = s.as_bytes();
+            let input = crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64);
+            let out = super::rt_path_normalize(input);
+            let len = unsafe { crate::value::collections::rt_string_len(out) };
+            let ptr = unsafe { crate::value::collections::rt_string_data(out) };
+            let slice = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+            std::str::from_utf8(slice).unwrap().to_string()
+        };
+        assert_eq!(norm(""), ".");
+        assert_eq!(norm("a/./b/../c"), "a/c");
+        assert_eq!(norm("/../../a"), "/a");
+        assert_eq!(norm("../a/b"), "../a/b");
+        assert_eq!(norm(r"\\server\share\x"), "/server/share/x");
+        assert_eq!(norm(r"C:\a\b\.."), "C:/a");
+        assert_eq!(norm(r"C:\"), "C:/");
+        assert_eq!(norm("a/b/"), "a/b");
     }
 }
 

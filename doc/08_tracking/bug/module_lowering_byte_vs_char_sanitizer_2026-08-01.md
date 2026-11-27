@@ -35,3 +35,20 @@ See `doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-
 - Confirm the sanitized name change does not alter stage4 module-collision
   behavior (the loop's stated purpose).
 - Owner: unassigned. Blocked-on: a native build to verify `.chars()`.
+
+## Closed stale (2026-11-03)
+The `mod_path` sanitizer loop (`_san_i`) no longer exists in
+`src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl` on release/1.0.0;
+`grep _san_i` finds 0 hits. The only remaining char-indexed loop,
+`hir_pkg_segment_is_tier`, bounds on `rt_string_len` and tests ASCII digits,
+which is byte-consistent.
+
+## Verified 2026-11-25 — stale closure confirmed on release/1.0.0
+
+2026-11-25 re-verification (work/p3-baq-20261125): `grep _san_i
+src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl` returns 0 hits —
+the byte-vs-char sanitizer loop is gone. `hir_pkg_segment_is_tier`
+(module_lowering.spl:95) is the only remaining indexed loop; it bounds on
+`rt_string_len(seg)` and accepts only ASCII digit codes 48-57, so any
+non-ASCII segment fails the digit test at its first character and returns
+false — no spurious trailing `_` path remains. Closure stands.

@@ -15,13 +15,30 @@
 # For MCP integration, see: std.nogc_async_mut.mcp.bugdb_resource
 
 use nogc_async_mut.database.core.{SdnDatabase, SdnTable, SdnRow, StringInterner}
+use std.io_runtime.{is_dir, dir_create_all}
+use std.nogc_sync_mut.io.dir_ops.{dir_list}
 use nogc_async_mut.database.query
+use std.convert (try_parse_int)
 use nogc_async_mut.database.checker.{DbIssue, check_duplicate_ids, check_valid_column,
     check_empty_required, check_file_refs, check_enum_values, check_orphan_refs}
+use std.common.database.bug_tokens.{
+    BugTokenCategory, BugTokenCount, BugTokenReading,
+    BugTokenProvider, BugTokenSource, BugKnowledgeLink, BugTokenUsage,
+    bug_token_usage_columns, bug_token_category_to_string,
+    bug_token_category_for_path, bug_token_reading_text,
+    bug_token_total, bug_token_reading_known
+}
 # Removed 'use app.io' - it shadows core.spl's local function declarations
 # and causes scope resolution failures in bootstrap runtime
 
 # Exports
+export use std.common.database.bug_tokens.{
+    BugTokenCategory, BugTokenCount, BugTokenReading,
+    BugTokenProvider, BugTokenSource, BugKnowledgeLink, BugTokenUsage,
+    bug_token_usage_columns, bug_token_category_to_string,
+    bug_token_category_for_path, bug_token_reading_text,
+    bug_token_total, bug_token_reading_known
+}
 
 # ============================================================================
 # Enums
@@ -74,6 +91,8 @@ struct BugStats:
     important: i64
     health: text  # "good" | "attention" | "critical"
 
+# Completion token receipts live in std.common.database.bug_tokens (re-exported above).
+
 # ============================================================================
 # BugDatabase
 # ============================================================================
@@ -81,13 +100,157 @@ struct BugStats:
 # Helper functions for creating Bug Databases
 
 fn load_bug_database(path: text) -> BugDatabase?:
-    val db = SdnDatabase.load(path)?
-    Some(BugDatabase(db: db))
+    match load_bug_database_checked(path):
+        case Ok(db): Some(db)
+        case Err(_reason): None
+
+# Load the legacy file and, in shard mode, merge every shard. Fail-CLOSED:
+# an unreadable/stale-sealed shard, a row whose id is not the shard's file
+# stem, or a column mismatch rejects the whole database with the reason.
+fn load_bug_database_checked(path: text) -> Result<BugDatabase, text>:
+    val db_opt = SdnDatabase.load(path)
+    val db = match db_opt:
+        case Some(value): value
+        case None: return Err("cannot load {path} (missing, empty, corrupt or stale #sdn-crc32 seal)")
+    val shard_dir = bug_shard_dir(path)
+    if not is_dir(shard_dir):
+        return Ok(bug_database_from_sdn(db))
+    val merge_error = _bug_merge_shards(db, shard_dir)
+    if merge_error != "":
+        return Err(merge_error)
+    Ok(BugDatabase(db: db, shard_dir: shard_dir, shard_baseline: _bug_shard_contents(db, shard_dir)))
+
+# Wrap an in-memory SdnDatabase in single-file mode (fixtures, snapshots).
+pub fn bug_database_from_sdn(db: SdnDatabase) -> BugDatabase:
+    BugDatabase(db: db, shard_dir: "", shard_baseline: {})
+
+# ============================================================================
+# Per-bug shards — doc/05_design/infra/tracking/bug_db_shards.md
+# ============================================================================
+# `<legacy dir>/db/<bug_id>.sdn` holds every row of ONE bug across all bug
+# tables, sealed with its own `#sdn-crc32:` header. The legacy single file is
+# frozen (never rewritten); a shard REPLACES the legacy rows of its bug id.
+# Shard mode is on iff the `db/` directory exists next to the legacy file.
+
+fn bug_shard_tables() -> [text]:
+    ["bugs_active", "bugs", "bug_descriptions", "bug_investigation_logs",
+     "bug_fix_strategies", "bug_difficulty", "bug_fix_claims", "bug_scope",
+     "bug_token_usage"]
+
+fn bug_shard_dir(path: text) -> text:
+    val parts = path.replace("\\", "/").split("/")
+    if parts.len() <= 1:
+        return "db"
+    var dir_parts: [text] = []
+    var i = 0
+    while i < parts.len() - 1:
+        dir_parts.push(parts[i])
+        i = i + 1
+    dir_parts.join("/") + "/db"
+
+fn bug_shard_path(shard_dir: text, id: text) -> text:
+    shard_dir + "/" + id + ".sdn"
+
+fn _bug_row_id(row: SdnRow) -> text:
+    match row.get("id"):
+        case Some(value): value
+        case None: row.get("bug_id") ?? ""
+
+fn _bug_basename(entry: text) -> text:
+    val parts = entry.replace("\\", "/").split("/")
+    parts[parts.len() - 1]
+
+# Drop every row of `id` from every bug table of `db`.
+fn _bug_remove_rows(db: SdnDatabase, id: text):
+    for name in bug_shard_tables():
+        if not db.tables.contains_key(name):
+            continue
+        var table: SdnTable = db.tables[name]
+        var kept: [SdnRow] = []
+        var dropped = false
+        for row in table.rows:
+            if _bug_row_id(row) == id:
+                dropped = true
+            else:
+                kept.push(row)
+        if dropped:
+            table.rows = kept
+            table.rebuild_index()
+            db.tables[name] = table
+
+# Merge every shard into `db`, shards in C-sorted filename order so the merged
+# view (and every report generated from it) is deterministic. Returns "" on
+# success, else the reason (fail-closed).
+fn _bug_merge_shards(db: SdnDatabase, shard_dir: text) -> text:
+    var names: [text] = []
+    for entry in dir_list(shard_dir):
+        val base = _bug_basename(entry)
+        if base.ends_with(".sdn"):
+            names.push(base)
+    names.sort()
+    for name in names:
+        val id = name.slice(0, name.byte_len() - 4)
+        val shard_opt = SdnDatabase.load(bug_shard_path(shard_dir, id))
+        val shard = match shard_opt:
+            case Some(value): value
+            case None: return "bug shard {name}: unreadable, corrupt or stale #sdn-crc32 seal"
+        for (tname, t) in shard.tables:
+            val typed: SdnTable = t
+            if not bug_shard_tables().contains(tname):
+                return "bug shard {name}: unknown table {tname}"
+            for row in typed.rows:
+                val rid = _bug_row_id(row)
+                if rid != id:
+                    return "bug shard {name}: row id '{rid}' does not match the shard id (duplicate or misplaced bug row)"
+        _bug_remove_rows(db, id)
+        for (tname, t) in shard.tables:
+            val typed: SdnTable = t
+            var target: SdnTable = if db.tables.contains_key(tname): db.tables[tname] else: SdnTable.new(tname, typed.columns)
+            if target.columns != typed.columns:
+                return "bug shard {name}: columns of {tname} differ from the legacy table"
+            for row in typed.rows:
+                target.add_row(row)
+            target.rebuild_index()
+            db.tables[tname] = target
+    ""
+
+# One in-memory shard database per bug id (one pass over all tables).
+fn _bug_shard_dbs(db: SdnDatabase, shard_dir: text) -> Dict<text, SdnDatabase>:
+    var per_id: Dict<text, SdnDatabase> = {}
+    var order: [text] = []
+    for name in bug_shard_tables():
+        if not db.tables.contains_key(name):
+            continue
+        val table: SdnTable = db.tables[name]
+        # valid_rows(): a soft-deleted row (valid=false, left behind when a bug
+        # moves between bugs_active and bugs) is a single-file artefact; the
+        # shard carries only the live rows of its bug.
+        for row in table.valid_rows():
+            val id = _bug_row_id(row)
+            if id == "":
+                continue
+            if not per_id.contains_key(id):
+                per_id[id] = SdnDatabase.new(bug_shard_path(shard_dir, id))
+                order.push(id)
+            var shard: SdnDatabase = per_id[id]
+            var target: SdnTable = if shard.tables.contains_key(name): shard.tables[name] else: SdnTable.new(name, table.columns)
+            target.add_row(row)
+            shard.tables[name] = target
+            per_id[id] = shard
+    per_id
+
+# Canonical shard payload per bug id — the comparison key for "changed since load".
+fn _bug_shard_contents(db: SdnDatabase, shard_dir: text) -> Dict<text, text>:
+    var out: Dict<text, text> = {}
+    for (id, shard) in _bug_shard_dbs(db, shard_dir):
+        val typed: SdnDatabase = shard
+        out[id] = typed.serialized_content()
+    out
 
 fn create_bug_database(path: text) -> BugDatabase:
     val db = SdnDatabase.new(path)
 
-    val bug_columns = [
+    val bug_columns: [text] = [
         "id",
         "severity",
         "status",
@@ -131,10 +294,14 @@ fn create_bug_database(path: text) -> BugDatabase:
     ])
     db.set_table("bug_investigation_logs", log_table)
 
-    BugDatabase(db: db)
+    db.set_table("bug_token_usage", SdnTable.new("bug_token_usage", bug_token_usage_columns()))
+
+    bug_database_from_sdn(db)
 
 class BugDatabase:
     db: SdnDatabase
+    shard_dir: text                    # "" => single-file mode
+    shard_baseline: Dict<text, text>   # bug id -> sealed shard payload at load
 
     fn available_bug_tables() -> [text]:
         var tables: [text] = []
@@ -147,7 +314,7 @@ class BugDatabase:
         tables
 
     fn is_split_table_db() -> bool:
-        self.db.get_table("bugs_active").?
+        self.db.get_table("bugs_active").is_some()
 
     fn target_table_name(status: BugStatus) -> text:
         if status == BugStatus.Open or status == BugStatus.Investigating or status == BugStatus.Confirmed:
@@ -237,6 +404,169 @@ class BugDatabase:
         # Put table back into database
         self.db.set_table(table_name, table)
 
+
+    # Append one durable investigation line without rewriting the bug row.
+    # Identical content for this bug is a successful no-op (safe retry).
+    # The line-oriented SDN codec cannot preserve quotes, line breaks or
+    # surrounding whitespace; reject those inputs instead of losing content.
+    # Call save() explicitly after successful appends.
+    me add_investigation_log(id: text, content: text) -> bool:
+        if self.find_bug_table_name(id) == "":
+            return false
+        if content == "" or content.trim() != content:
+            return false
+        if content.contains("\n") or content.contains("\r") or content.contains('"'):
+            return false
+
+        val table_name = "bug_investigation_logs"
+        var table: SdnTable = SdnTable.new(table_name, ["bug_id", "line_num", "content"])
+        match self.db.get_table(table_name):
+            case Some(existing): table = existing
+            case None: pass
+        if table.columns != ["bug_id", "line_num", "content"]:
+            return false
+
+        var next_line: i64 = 0
+        var numbering_exhausted = false
+        var already_recorded = false
+        var seen: [i64] = []
+        for row in table.rows:
+            if (row.get("bug_id") ?? "") != id:
+                continue
+            val parsed = try_parse_int(row.get("line_num") ?? "")
+            if parsed.is_none():
+                return false
+            val line_num: i64 = parsed ?? -1
+            if line_num < 0:
+                return false
+            if seen.contains(line_num):
+                return false
+            seen.push(line_num)
+            # Never compute an unrepresentable successor. Exhaustion blocks
+            # new content, but an identical existing note remains retryable.
+            if line_num == 1152921504606846975:
+                numbering_exhausted = true
+            elif line_num >= next_line:
+                next_line = line_num + 1
+            if (row.get("content") ?? "") == content:
+                already_recorded = true
+
+        if already_recorded:
+            return true
+        if numbering_exhausted:
+            return false
+        val row = SdnRow.empty()
+        row.set("bug_id", id)
+        row.set("line_num", "{next_line}")
+        row.set("content", content)
+        if not table.add_row(row):
+            return false
+        self.db.set_table(table_name, table)
+        true
+
+    # True when a still-valid row of `id` is Closed. update_bug leaves the
+    # superseded row behind as valid=false, and get_bug can return that stale
+    # row, so closedness is read from the valid rows only.
+    fn has_valid_closed_row(id: text) -> bool:
+        for table_name in self.available_bug_tables():
+            val table = match self.db.get_table(table_name):
+                case Some(value): value
+                case None: continue
+            for row in table.rows:
+                if (row.get("id") ?? "") != id or (row.get("valid") ?? "true").lower() == "false":
+                    continue
+                if parse_status(row.get("status") ?? "Open") == BugStatus.Closed:
+                    return true
+        false
+
+    # Cohort of an existing bug; None when the id is unknown.
+    fn token_category_for_bug(id: text) -> BugTokenCategory?:
+        match self.get_bug(id):
+            case Some(bug): Some(bug_token_category_for_path(bug.file))
+            case None: None
+
+    # Mean total_tokens over receipts of OTHER Closed bugs in `category`.
+    # Ok(Unavailable) when there is no such receipt; Err when a stored total
+    # is malformed or the sum overflows i64.
+    fn comparable_token_average(category: BugTokenCategory, exclude_id: text) -> Result<BugTokenReading, text>:
+        val table = match self.db.get_table("bug_token_usage"):
+            case Some(value): value
+            case None: return Ok(BugTokenReading.Unavailable)
+        val category_text = bug_token_category_to_string(category)
+        var sum: i64 = 0
+        var count: i64 = 0
+        for row in table.rows:
+            val bug_id = row.get("bug_id") ?? ""
+            if (row.get("category") ?? "") != category_text or bug_id == exclude_id:
+                continue
+            val raw = row.get("total_tokens") ?? ""
+            if raw == "unavailable":
+                continue
+            val value: i64 = match raw.parse_i64():
+                case Some(parsed): parsed
+                case None: return Err("bug_token_usage row of {bug_id}: malformed total_tokens '{raw}'")
+            if value < 0:
+                return Err("bug_token_usage row of {bug_id}: negative total_tokens '{raw}'")
+            if not self.has_valid_closed_row(bug_id):
+                continue
+            if sum > 9223372036854775807 - value:
+                return Err("bug_token_usage cohort {category_text}: total overflows")
+            sum = sum + value
+            count = count + 1
+        if count == 0:
+            return Ok(BugTokenReading.Unavailable)
+        Ok(BugTokenReading.Count(BugTokenCount(value: sum / count)))
+
+    # Append one structured completion receipt for an existing bug. Readings
+    # must be all known or all unavailable; a partial receipt needs a
+    # knowledge link. Text fields follow the single-line field contract.
+    # Call save() explicitly after a successful append.
+    me add_token_usage(id: text, usage: BugTokenUsage) -> bool:
+        if self.find_bug_table_name(id) == "":
+            return false
+        val knowledge_text = match usage.knowledge:
+            case Some(link): link.path
+            case None: "none"
+        if usage.knowledge.? and knowledge_text == "none":
+            return false
+        for field in [usage.provider.value, usage.source.value, knowledge_text, usage.recorded_at]:
+            if field == "" or not _bug_append_field_safe(field):
+                return false
+        val readings: [BugTokenReading] = [usage.input, usage.output, usage.cache_read, usage.cache_create]
+        var known = 0
+        for reading in readings:
+            if bug_token_reading_known(reading):
+                known = known + 1
+        if known != 0 and known != readings.len() and not usage.knowledge.?:
+            return false
+        val total = match bug_token_total(readings):
+            case Ok(value): value
+            case Err(_reason): return false
+
+        val table_name = "bug_token_usage"
+        var table: SdnTable = SdnTable.new(table_name, bug_token_usage_columns())
+        match self.db.get_table(table_name):
+            case Some(existing): table = existing
+            case None: pass
+        if table.columns != bug_token_usage_columns():
+            return false
+        val row = SdnRow.empty()
+        row.set("bug_id", id)
+        row.set("category", bug_token_category_to_string(usage.category))
+        row.set("provider", usage.provider.value)
+        row.set("input_tokens", bug_token_reading_text(usage.input))
+        row.set("output_tokens", bug_token_reading_text(usage.output))
+        row.set("cache_read_tokens", bug_token_reading_text(usage.cache_read))
+        row.set("cache_create_tokens", bug_token_reading_text(usage.cache_create))
+        row.set("total_tokens", bug_token_reading_text(total))
+        row.set("source", usage.source.value)
+        row.set("knowledge", knowledge_text)
+        row.set("recorded_at", usage.recorded_at)
+        if not table.add_row(row):
+            return false
+        self.db.set_table(table_name, table)
+        true
+
     # Get bug by ID
     fn get_bug(id: text) -> Bug?:
         # Cycle-172: bind the lookup key once -- the bare param read at the
@@ -306,7 +636,7 @@ class BugDatabase:
         val table = match table_opt:
             case Some(value): value
             case None: return []
-        var lines = []
+        var lines: [text] = []
 
         for row in table.rows:
             if (row.get("bug_id") ?? "") == bug_id:
@@ -326,7 +656,7 @@ class BugDatabase:
 
     # Get all bugs
     fn all_bugs() -> [Bug]:
-        var result = []
+        var result: [Bug] = []
         for table_name in self.available_bug_tables():
             val table_opt = self.db.get_table(table_name)
             if not table_opt.?:
@@ -386,8 +716,7 @@ class BugDatabase:
             return false
 
         val target_table_name = self.target_table_name(bug.status)
-        # @workaround bug=optional_try_nominal_owner_missing_2026_10_21 reason=Keep the declared table owner until rebuilt Try metadata recovery is qualified
-        var current_table: SdnTable = self.db.get_table_mut(current_table_name)?
+        var current_table = self.db.get_table_mut(current_table_name)?
 
         if current_table_name == target_table_name:
             val updated = current_table.update_row(id, self.bug_to_row_for_table(bug, current_table))
@@ -428,9 +757,47 @@ class BugDatabase:
         )
         self.update_bug(id, resolved)
 
-    # Save to disk
+    # Save to disk. Single-file mode rewrites the file; shard mode leaves the
+    # legacy file frozen and publishes one sealed shard per bug whose rows
+    # changed since load, so parallel branches editing different bugs never
+    # touch the same file. A bug deleted in memory gets a tombstone shard
+    # (strings table only), which the loader reads as "no rows for this id".
     me save() -> bool:
-        self.db.save()
+        if self.shard_dir == "":
+            return self.db.save()
+        if not dir_create_all(self.shard_dir):
+            return false
+        val shards = _bug_shard_dbs(self.db, self.shard_dir)
+        var touched: [text] = []
+        for (id, shard) in shards:
+            val typed: SdnDatabase = shard
+            val before: text = self.shard_baseline.get(id) ?? ""
+            if before != typed.serialized_content():
+                touched.push(id)
+        for (id, _before) in self.shard_baseline:
+            if not shards.contains_key(id):
+                touched.push(id)
+        for id in touched:
+            # SdnDatabase.save() seals the shard with its .csm sidecar exactly
+            # like the legacy file (config/check/sdn_seal_policy.sdn lists db/*.sdn).
+            var shard: SdnDatabase = if shards.contains_key(id): shards[id] else: SdnDatabase.new(bug_shard_path(self.shard_dir, id))
+            if not shard.save():
+                return false
+            self.shard_baseline[id] = shard.serialized_content()
+        self.db.modified = false
+        true
+
+    # Bug ids whose shard would be (re)written by save(); empty in single-file mode.
+    fn pending_shard_ids() -> [text]:
+        if self.shard_dir == "":
+            return []
+        val current = _bug_shard_contents(self.db, self.shard_dir)
+        var touched: [text] = []
+        for (id, content) in current:
+            if (self.shard_baseline.get(id) ?? "") != content:
+                touched.push(id)
+        touched
+
 
     # Statistics
     fn stats() -> BugStats:
@@ -521,10 +888,10 @@ class BugDatabase:
             ))
             return issues
 
-        val valid_severities = ["P0", "P1", "P2", "P3", "Important"]
-        val valid_statuses = [
+        val valid_severities: [text] = ["P0", "P1", "P2", "P3", "Important"]
+        val valid_statuses: [text] = [
             "open", "investigating", "confirmed", "fixed", "closed", "wontfix",
-            "documented_limitation", "documented", "invalid", "cannot_reproduce",
+            "documented_limitation", "documented", "invalid", "cannot_reproduce", "fixing",
             "Open", "Investigating", "Confirmed", "Fixed", "Closed", "Wontfix"
         ]
         var seen_ids: Dict<text, text> = {}
@@ -677,6 +1044,7 @@ fn parse_status(s: text) -> BugStatus:
         "": BugStatus.Open
         "open": BugStatus.Open
         "investigating": BugStatus.Investigating
+        "fixing": BugStatus.Investigating
         "confirmed": BugStatus.Confirmed
         "fixed": BugStatus.Fixed
         "closed": BugStatus.Closed
@@ -710,3 +1078,7 @@ fn bug_to_row(bug: Bug) -> SdnRow:
     val valid_str = if bug.valid: "true" else: "false"
     row.set("valid", valid_str)
     row
+
+# One physical line is the admitted field contract of the legacy table writer.
+fn _bug_append_field_safe(value: text) -> bool:
+    value == value.trim() and not value.contains("\n") and not value.contains("\r") and not value.contains("\0") and not value.contains("\"")

@@ -1,0 +1,98 @@
+# Codec tests only: no transport, authentication or native evidence.
+use std.spec.{describe, it, expect}
+use std.common.contracts.container.endpoint_frame_v1.{
+    EndpointFrameV1, endpoint_frame_encode_v1, endpoint_frame_decode_v1,
+    endpoint_frame_target_payload_v1, endpoint_frame_target_fields_v1,
+    endpoint_frame_hello_payload_v1, endpoint_frame_hello_fields_v1,
+    endpoint_frame_u32_payload_v1, endpoint_frame_u16_payload_v1,
+    endpoint_frame_window_credit_v1, endpoint_frame_reason_v1,
+    ENDPOINT_FRAME_HELLO_V1, ENDPOINT_FRAME_OPEN_V1, ENDPOINT_FRAME_DATA_V1,
+    ENDPOINT_FRAME_WINDOW_V1, ENDPOINT_FRAME_RESET_V1, ENDPOINT_FRAME_PING_V1,
+    ENDPOINT_FRAME_PROTOCOL_TCP_V1, ENDPOINT_FRAME_MAX_PAYLOAD_V1}
+
+fn _ef_repeat(byte: u8, count: i64) -> [u8]:
+    var result: [u8] = []
+    for _index in 0..count:
+        result.push(byte)
+    result
+
+describe "endpoint-frame-v1 codec":
+    it "encodes the exact little-endian header and round-trips DATA":
+        val frame = EndpointFrameV1(kind: ENDPOINT_FRAME_DATA_V1, channel: 258, sequence: 3, payload: [9, 8])
+        val bytes = endpoint_frame_encode_v1(frame).unwrap()
+        val expected: [u8] = [1, 5, 2, 1, 0, 0, 3, 0, 0, 0, 2, 0, 0, 0, 9, 8]
+        expect(bytes).to_equal(expected)
+        val decoded = endpoint_frame_decode_v1(bytes).unwrap()
+        expect(decoded.kind).to_equal(ENDPOINT_FRAME_DATA_V1)
+        expect(decoded.channel).to_equal(258)
+        expect(decoded.sequence).to_equal(3)
+        expect(decoded.payload).to_equal([9, 8])
+
+    it "round-trips OPEN target and HELLO admission fields":
+        val open_payload = endpoint_frame_target_payload_v1(ENDPOINT_FRAME_PROTOCOL_TCP_V1, 8080,
+            "api.tools.test").unwrap()
+        val open = endpoint_frame_decode_v1(endpoint_frame_encode_v1(EndpointFrameV1(
+            kind: ENDPOINT_FRAME_OPEN_V1, channel: 1, sequence: 1, payload: open_payload)).unwrap()).unwrap()
+        val target = endpoint_frame_target_fields_v1(open).unwrap()
+        expect(target.port).to_equal(8080)
+        expect(target.target).to_equal("api.tools.test")
+        val hello_payload = endpoint_frame_hello_payload_v1(_ef_repeat(7, 32), "adm-1").unwrap()
+        val hello = endpoint_frame_decode_v1(endpoint_frame_encode_v1(EndpointFrameV1(
+            kind: ENDPOINT_FRAME_HELLO_V1, channel: 0, sequence: 1, payload: hello_payload)).unwrap()).unwrap()
+        expect(endpoint_frame_hello_fields_v1(hello).unwrap().admission_ref).to_equal("adm-1")
+
+    it "rejects invalid UTF-8 in HELLO admission and OPEN target fields":
+        var hello_payload: [u8] = [1]
+        for byte in _ef_repeat(7, 32):
+            hello_payload.push(byte)
+        hello_payload.push(255)
+        val hello = EndpointFrameV1(kind: ENDPOINT_FRAME_HELLO_V1, channel: 0, sequence: 1, payload: hello_payload)
+        expect(endpoint_frame_hello_fields_v1(hello).unwrap_err()).to_equal("endpoint-frame-hello-admission-invalid")
+        var open_payload = endpoint_frame_target_payload_v1(ENDPOINT_FRAME_PROTOCOL_TCP_V1, 8080, "a").unwrap()
+        open_payload[open_payload.len() - 1] = 255
+        val open = EndpointFrameV1(kind: ENDPOINT_FRAME_OPEN_V1, channel: 1, sequence: 1, payload: open_payload)
+        expect(endpoint_frame_target_fields_v1(open).unwrap_err()).to_equal("endpoint-frame-target-invalid")
+
+    it "rejects truncation, trailing bytes, bad version and oversize payloads":
+        val bytes = endpoint_frame_encode_v1(EndpointFrameV1(kind: ENDPOINT_FRAME_PING_V1, channel: 0,
+            sequence: 1, payload: [])).unwrap()
+        expect(endpoint_frame_decode_v1(bytes).is_ok()).to_equal(true)
+        expect(endpoint_frame_decode_v1([1, 12, 0]).is_err()).to_equal(true)
+        var trailing = bytes
+        trailing.push(0)
+        expect(endpoint_frame_decode_v1(trailing).is_err()).to_equal(true)
+        var wrong_version = bytes
+        wrong_version[0] = 2
+        expect(endpoint_frame_decode_v1(wrong_version).is_err()).to_equal(true)
+        val huge = EndpointFrameV1(kind: ENDPOINT_FRAME_DATA_V1, channel: 1, sequence: 1,
+            payload: _ef_repeat(1, ENDPOINT_FRAME_MAX_PAYLOAD_V1 + 1))
+        expect(endpoint_frame_encode_v1(huge).is_err()).to_equal(true)
+
+    it "enforces control-versus-stream channels and per-kind shapes":
+        expect(endpoint_frame_encode_v1(EndpointFrameV1(kind: ENDPOINT_FRAME_PING_V1, channel: 1,
+            sequence: 1, payload: [])).is_err()).to_equal(true)
+        expect(endpoint_frame_encode_v1(EndpointFrameV1(kind: ENDPOINT_FRAME_DATA_V1, channel: 0,
+            sequence: 1, payload: [1])).is_err()).to_equal(true)
+        expect(endpoint_frame_encode_v1(EndpointFrameV1(kind: ENDPOINT_FRAME_WINDOW_V1, channel: 1,
+            sequence: 1, payload: endpoint_frame_u32_payload_v1(0).unwrap())).is_err()).to_equal(true)
+        expect(endpoint_frame_encode_v1(EndpointFrameV1(kind: ENDPOINT_FRAME_DATA_V1, channel: 1,
+            sequence: 0, payload: [1])).is_err()).to_equal(true)
+        val window = EndpointFrameV1(kind: ENDPOINT_FRAME_WINDOW_V1, channel: 1, sequence: 2,
+            payload: endpoint_frame_u32_payload_v1(70000).unwrap())
+        expect(endpoint_frame_window_credit_v1(window).unwrap()).to_equal(70000)
+        val reset = EndpointFrameV1(kind: ENDPOINT_FRAME_RESET_V1, channel: 1, sequence: 3,
+            payload: endpoint_frame_u16_payload_v1(513).unwrap())
+        expect(endpoint_frame_reason_v1(reset).unwrap()).to_equal(513)
+        expect(endpoint_frame_target_payload_v1(ENDPOINT_FRAME_PROTOCOL_TCP_V1, 0, "x.test").is_err()).to_equal(true)
+        expect(endpoint_frame_target_payload_v1(ENDPOINT_FRAME_PROTOCOL_TCP_V1, 80, "bad name").is_err()).to_equal(true)
+
+    it "refuses out-of-range u16 and u32 payload values instead of truncating them":
+        # milestone_0059 item 6: masking turned 65536 into reason 0 and 4294967296 into a zero window.
+        val max16: [u8] = [255, 255]
+        val max32: [u8] = [255, 255, 255, 255]
+        expect(endpoint_frame_u16_payload_v1(65535).unwrap()).to_equal(max16)
+        expect(endpoint_frame_u32_payload_v1(4294967295).unwrap()).to_equal(max32)
+        for value in [-1, 65536, 70000]:
+            expect(endpoint_frame_u16_payload_v1(value).unwrap_err()).to_equal("endpoint-frame-u16-out-of-range")
+        for value in [-1, 4294967296, 4294967297]:
+            expect(endpoint_frame_u32_payload_v1(value).unwrap_err()).to_equal("endpoint-frame-u32-out-of-range")

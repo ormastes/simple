@@ -1,0 +1,78 @@
+"""
+Closure capture policy (owner ruling 2026-09-27, .claude/rules/language.md):
+closures capture enclosing LOCALS by value and are read-only. A `seen.push(x)`
+on a captured local array is silently dropped and an assignment is a compile
+error. The supported pattern for accumulating from a callback is a
+module-level `var`, which these cases pin for `each`, `text_each`, a plain
+fn taking a callback, and a nested callback.
+
+Re-scope of bug deprecated_removed_spec_closure_capture_mutation_not_visible_2026_11_10.
+"""
+
+use std.iterable.{each}
+use std.text.{each as text_each}
+
+var seen_ints: [i64] = []
+var seen_chars: [text] = []
+var counter: i64 = 0
+
+fn call_it(f: fn() -> void):
+    f()
+
+fn call_with(x: i64, f: fn(i64) -> void):
+    f(x)
+
+describe "closure capture: module-level var accumulates from callbacks":
+    it "each pushes into a module-level array":
+        seen_ints = []
+        each([1, 2, 3], \n:
+            seen_ints.push(n)
+        )
+        expect(seen_ints.len()).to_equal(3)
+
+    it "text_each pushes into a module-level text array":
+        seen_chars = []
+        text_each("abc", \c:
+            seen_chars.push(c.to_string())
+        )
+        expect(seen_chars.len()).to_equal(3)
+
+    it "plain fn callback pushes into a module-level array":
+        seen_ints = []
+        call_with(7, \n:
+            seen_ints.push(n)
+        )
+        expect(seen_ints).to_equal([7])
+
+    it "callback assigns a module-level scalar":
+        counter = 0
+        call_it(\:
+            counter = counter + 5
+        )
+        expect(counter).to_equal(5)
+
+    it "nested callback accumulates into a module-level scalar":
+        counter = 0
+        call_it(\:
+            call_with(3, \n:
+                counter = counter + n
+            )
+        )
+        expect(counter).to_equal(3)
+
+    it "callback in a loop accumulates into a module-level array":
+        seen_ints = []
+        var i = 0
+        while i < 3:
+            call_with(i, \n:
+                seen_ints.push(n * 2)
+            )
+            i = i + 1
+        expect(seen_ints).to_equal([0, 2, 4])
+
+    it "a captured local array is a by-value snapshot (policy pin)":
+        var local_seen: [i64] = []
+        each([1, 2, 3], \n:
+            local_seen.push(n)
+        )
+        expect(local_seen.len()).to_equal(0)

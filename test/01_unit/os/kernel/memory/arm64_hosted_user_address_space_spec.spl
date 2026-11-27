@@ -1,0 +1,54 @@
+"""
+# Hosted arm64 user address space
+
+Kernel specs run hosted on an arm64 Mac must reach the same user
+address-space owner the freestanding arm64 kernel uses. The kernel externs
+`rt_arm64_user_as_create` / `rt_arm64_user_as_map_page` have a pure-Simple
+hosted model, frames come from real host pages, and the bulk phys copy is
+element-wise under that model. Bug record:
+doc/08_tracking/bug/managed_workload_launch_specs_x86_64_only_on_arm64_host_2026-11-15.md
+"""
+use os.kernel.arch.mod.{get_arch}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.memory.user_address_space.{
+    create_user_address_space as user_as_create, map_user_page_in as user_as_map,
+    alloc_user_page_frame as user_as_frame
+}
+use os.kernel.memory.vmm_address_space.{vmm_copy_bytes_to_phys}
+use os.kernel.boot.mmio.{mmio_read8}
+use os.kernel.scheduler.scheduler_types.{_address_space_can_map}
+use os.kernel.types.memory_types.{VirtAddr, PhysAddr, VmFlags}
+use os.kernel.types.task_types.{AddressSpace}
+
+describe "hosted arm64 user address space":
+    it "hands out distinct mappable roots instead of the VMM sentinel":
+        if get_arch() == Architecture.Arm64:
+            val a = user_as_create()
+            val b = user_as_create()
+            assert_true(_address_space_can_map(a))
+            assert_true(_address_space_can_map(b))
+            assert_not_equal(a.phys_root, b.phys_root)
+            assert_equal(a.phys_root & 4095u64, 0u64)
+
+    it "maps pages only into roots it issued, page aligned":
+        if get_arch() == Architecture.Arm64:
+            val space = user_as_create()
+            val flags = VmFlags.user_rw()
+            assert_true(user_as_map(space, VirtAddr(addr: 0x400000u64), PhysAddr(addr: 0x2000u64), flags))
+            assert_false(user_as_map(space, VirtAddr(addr: 0x400001u64), PhysAddr(addr: 0x2000u64), flags))
+            val foreign = AddressSpace(phys_root: 0x5000u64, id: 99u64)
+            assert_false(user_as_map(foreign, VirtAddr(addr: 0x400000u64), PhysAddr(addr: 0x2000u64), flags))
+
+    it "backs frames with writable host pages that receive copied bytes":
+        if get_arch() == Architecture.Arm64:
+            val _space = user_as_create()
+            val frame = user_as_frame()
+            assert_true(frame.?)
+            val phys = frame.unwrap().pfn * 4096u64
+            var bytes: [u8] = []
+            var i = 0
+            while i < 256:
+                bytes.push((i % 251) as u8)
+                i = i + 1
+            vmm_copy_bytes_to_phys(phys, bytes, 0u64, 256u64)
+            assert_equal(mmio_read8(phys + 200u64) as i64, 200)

@@ -1,0 +1,54 @@
+# Output-follow leaf construction. Native owner/transport authority stays with
+# the canonical daemon; this module neither reads output nor adopts bare PIDs.
+use std.common.contracts.container.runtime_v1.{RuntimeCommandV1, RuntimeIdentityV1}
+use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2,
+    ContainerStreamPolicyV2, ContainerOutputResourcesV2, container_output_identity_digest_v2}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2,
+    GroupProcessStreamRequestV2, group_process_child_argv_digest_v2,
+    group_process_stream_template_encode_v3}
+use std.common.build_manager.group_process_stream_profile_v3.{GroupProcessStreamProfileV3,
+    group_process_cpu_quota_v3}
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_identifier_valid_v1}
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{LinuxOciEnginePolicyV1,
+    LinuxOciEngineObservationV1, linux_oci_engine_route_v1}
+
+pub fn linux_oci_output_command_v2(policy: LinuxOciEnginePolicyV1,
+        expected: RuntimeIdentityV1) -> Result<RuntimeCommandV1, text>:
+    if expected.engine != "podman" or not builder_digest_valid_v1(expected.native_id):
+        return Err("output-full-podman-native-identity-required")
+    val arguments = linux_oci_engine_route_v1(policy,
+        ["attach", "--no-stdin", "--sig-proxy=false", expected.native_id])?
+    if arguments.len() >= 64: return Err("output-argv-bound")
+    Ok(RuntimeCommandV1(operation: "output-follow", program: policy.executable_path, args: arguments))
+
+pub fn linux_oci_output_launch_template_v2(policy: ContainerStreamPolicyV2,
+        identity: ContainerOutputIdentityV2, resources: ContainerOutputResourcesV2,
+        expected: RuntimeIdentityV1, generation: i64, engine_policy: LinuxOciEnginePolicyV1,
+        observed: LinuxOciEngineObservationV1) -> Result<GroupProcessStreamLaunchV2, text>:
+    if not builder_identifier_valid_v1(identity.operation_id): return Err("output-helper-operation-invalid")
+    if identity.parent_operation_id != expected.operation_id: return Err("output-parent-operation-mismatch")
+    if generation != expected.provider_generation: return Err("output-provider-generation-mismatch")
+    if policy.child_image_mode != "trusted-local-admin-image-fd-v1":
+        return Err("output-engine-image-mode-unsupported")
+    val command = linux_oci_output_command_v2(engine_policy, expected)?
+    if observed.executable_path != command.program or not builder_digest_valid_v1(observed.executable_digest):
+        return Err("output-observed-engine-image-mismatch")
+    val identity_digest = container_output_identity_digest_v2(identity)?
+    val root = policy.root + "/output-" + identity_digest
+    val profile = GroupProcessStreamProfileV3(helper_cpu: group_process_cpu_quota_v3(resources.cpu_millis)?,
+        broker: policy.broker_budget, child_image_mode: policy.child_image_mode)
+    val request = GroupProcessStreamRequestV2(program: command.program,
+        producer_digest: observed.executable_digest, args: command.args,
+        environment: policy.environment, directory: policy.directory, inputs: [],
+        timeout_ms: policy.timeout_ms, broker_program: policy.broker_program,
+        broker_digest: policy.broker_digest,
+        child_argv_digest: group_process_child_argv_digest_v2(command.program, command.args),
+        launch_deadline_unix_ms: 0)
+    val launch = GroupProcessStreamLaunchV2(root: root, worker_id: identity.operation_id,
+        generation: generation, snapshot_digest: policy.snapshot_digest,
+        cache_identity: policy.cache_identity, memory_limit_bytes: resources.memory_bytes,
+        request: request, delegated_cgroup_path: policy.delegated_cgroup_path,
+        memory_policy: policy.memory_policy, transport_generation: 0, profile_v3: Some(profile))
+    # Use the owner serializer; only admission fills deadline/transport fields.
+    val canonical = group_process_stream_template_encode_v3(launch)?
+    Ok(launch)

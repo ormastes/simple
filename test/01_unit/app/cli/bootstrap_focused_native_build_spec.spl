@@ -1,4 +1,5 @@
 use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
 use app.cli.bootstrap_focused_native_build.{
     focused_native_build_error,
     focused_native_build_sources,
@@ -8,13 +9,20 @@ use app.cli.bootstrap_focused_native_build.{
     focused_native_build_cache_dir,
     focused_native_build_effective_sources,
     focused_native_build_effective_cache_dir,
+    focused_native_build_profile_cache_dir_v1,
+    focused_native_build_profile_receipt_namespace_v1,
+    focused_native_build_receipt_dir_from_env_v1,
+    focused_native_build_receipt_path_v1,
+    focused_native_build_target_profile_v1,
     focused_native_build_backend,
+    focused_native_build_backend_plugin,
     focused_native_build_strip,
+    focused_native_build_opt_level,
     focused_native_build_exact_capsule_entry_allowed,
 }
 
 describe "focused bootstrap native-build plan":
-    it "accepts at most five explicit source roots":
+    it "accepts six ordered source roots and rejects seven":
         val five = [
             "simple", "native-build",
             "--source", "src/compiler",
@@ -35,7 +43,13 @@ describe "focused bootstrap native-build plan":
         expect(focused_native_build_effective_sources(five, true).len()).to_equal(0)
 
         val six = five + ["--source", "examples/09_embedded/simple_os"]
-        expect(focused_native_build_error(six)).to_contain("at most five --source roots")
+        expect(focused_native_build_error(six)).to_equal("")
+        val six_sources = focused_native_build_sources(six)
+        expect(six_sources.len()).to_equal(6)
+        expect(six_sources[0]).to_equal("src/compiler")
+        expect(six_sources[5]).to_equal("examples/09_embedded/simple_os")
+        val seven = six + ["--source=seventh-root"]
+        expect(focused_native_build_error(seven)).to_contain("at most six --source roots")
 
     it "preserves explicit target and linker-script ownership":
         val args = [
@@ -78,3 +92,166 @@ describe "focused bootstrap native-build plan":
         expect(focused_native_build_strip([], true)).to_equal(true)
         expect(focused_native_build_strip([], false)).to_equal(false)
         expect(focused_native_build_strip(["--strip"], false)).to_equal(true)
+        expect(focused_native_build_strip(["--no-strip"], true)).to_equal(false)
+        expect(focused_native_build_strip(["--debug"], true)).to_equal(false)
+        expect(focused_native_build_strip(["-g"], true)).to_equal(false)
+        expect(focused_native_build_strip(["--xray"], true)).to_equal(false)
+        expect(focused_native_build_strip(["--profile=dev"], true)).to_equal(false)
+
+    it "decouples phase4 dev and prod profiles while keeping phase3 dev-only":
+        val p4_default = focused_native_build_target_profile_v1(["--managed-build-phase=phase4"], false).unwrap()
+        expect(p4_default.release).to_equal(true)
+        expect(p4_default.profile).to_equal("prod")
+        expect(p4_default.managed_build_phase).to_equal("phase4")
+
+        val p4_prod = focused_native_build_target_profile_v1(["--managed-build-phase=phase4", "--profile=prod", "--release"]).unwrap()
+        expect(p4_prod.release).to_equal(true)
+        expect(p4_prod.profile).to_equal("prod")
+        expect(p4_prod.managed_build_phase).to_equal("phase4")
+
+        val p4_dev = focused_native_build_target_profile_v1(["--managed-build-phase=phase4", "--profile=dev"]).unwrap()
+        expect(p4_dev.release).to_equal(false)
+        expect(p4_dev.profile).to_equal("dev")
+        expect(p4_dev.managed_build_phase).to_equal("phase4")
+
+        val p3_dev = focused_native_build_target_profile_v1(["--managed-build-phase=phase3"]).unwrap()
+        expect(p3_dev.release).to_equal(false)
+        expect(p3_dev.profile).to_equal("dev")
+        expect(p3_dev.managed_build_phase).to_equal("phase3")
+
+        val p3_prod = focused_native_build_target_profile_v1(["--managed-build-phase=phase3", "--profile=prod"])
+        expect(p3_prod.is_err()).to_equal(true)
+        expect(p3_prod.unwrap_err()).to_start_with("TARGET-PROFILE-E-CONFLICT")
+
+        val p3_release = focused_native_build_target_profile_v1(["--managed-build-phase=phase3", "--release"])
+        expect(p3_release.is_err()).to_equal(true)
+        expect(p3_release.unwrap_err()).to_start_with("TARGET-PROFILE-E-CONFLICT")
+
+        val p4_dev_release = focused_native_build_target_profile_v1(["--managed-build-phase=phase4", "--profile=dev", "--release"])
+        expect(p4_dev_release.is_err()).to_equal(true)
+        expect(p4_dev_release.unwrap_err()).to_start_with("TARGET-PROFILE-E-CONFLICT")
+
+    it "isolates phase4 dev and phase4 prod cache and receipt namespaces":
+        val p4_prod = focused_native_build_target_profile_v1(["--managed-build-phase=phase4", "--profile=prod"]).unwrap()
+        val p4_dev = focused_native_build_target_profile_v1(["--managed-build-phase=phase4", "--profile=dev"]).unwrap()
+        val p3_dev = focused_native_build_target_profile_v1(["--managed-build-phase=phase3"]).unwrap()
+
+        val prod_cache = focused_native_build_profile_cache_dir_v1([], "", p4_prod)
+        val dev_cache = focused_native_build_profile_cache_dir_v1([], "", p4_dev)
+        val dev_xray_cache = focused_native_build_profile_cache_dir_v1(["--xray"], "", p4_dev)
+        val p3_cache = focused_native_build_profile_cache_dir_v1([], "", p3_dev)
+        expect(prod_cache).to_equal("build/native_cache/phase4-prod")
+        expect(dev_cache).to_equal("build/native_cache/phase4-dev")
+        expect(dev_xray_cache).to_equal("build/native_cache/phase4-dev-xray")
+        expect(p3_cache).to_equal("build/native_cache/phase3-dev")
+        expect(prod_cache == dev_cache).to_equal(false)
+        expect(dev_cache == dev_xray_cache).to_equal(false)
+
+        val inherited_prod = focused_native_build_profile_cache_dir_v1([], "build/shared-cache", p4_prod)
+        val inherited_dev = focused_native_build_profile_cache_dir_v1([], "build/shared-cache", p4_dev)
+        val unmanaged_prod = focused_native_build_target_profile_v1(["--release"]).unwrap()
+        val unmanaged_dev = focused_native_build_target_profile_v1(["--debug"]).unwrap()
+        expect(focused_native_build_profile_cache_dir_v1(["--release"], "build/shared-cache", unmanaged_prod)).to_equal("build/shared-cache/prod")
+        expect(focused_native_build_profile_cache_dir_v1(["--debug"], "build/shared-cache", unmanaged_dev)).to_equal("build/shared-cache/dev")
+        expect(focused_native_build_profile_cache_dir_v1(["--debug", "--xray"], "build/shared-cache", unmanaged_dev)).to_equal("build/shared-cache/dev-xray")
+        expect(inherited_prod).to_equal("build/shared-cache/phase4-prod")
+        expect(inherited_dev).to_equal("build/shared-cache/phase4-dev")
+        expect(inherited_prod == inherited_dev).to_equal(false)
+
+        val prod_receipt = focused_native_build_profile_receipt_namespace_v1(p4_prod)
+        val dev_receipt = focused_native_build_profile_receipt_namespace_v1(p4_dev)
+        val dev_xray_receipt = focused_native_build_profile_receipt_namespace_v1(p4_dev, "", true)
+        expect(prod_receipt).to_equal("build/native_receipts/phase4-prod")
+        expect(dev_receipt).to_equal("build/native_receipts/phase4-dev")
+        expect(dev_xray_receipt).to_equal("build/native_receipts/phase4-dev-xray")
+        expect(prod_receipt == dev_receipt).to_equal(false)
+        expect(dev_receipt == dev_xray_receipt).to_equal(false)
+
+        expect(focused_native_build_error([
+            "simple", "native-build", "--entry", "a.spl", "--output", "b",
+            "--mode", "one-binary", "--xray", "--xray-startup-consumer", "--target=aarch64-apple-darwin"
+        ])).to_contain("Linux ELF targets only")
+
+        val shared_prod_receipt = focused_native_build_profile_receipt_namespace_v1(p4_prod, "build/shared-cache")
+        val shared_dev_receipt = focused_native_build_profile_receipt_namespace_v1(p4_dev, "build/shared-cache")
+        expect(shared_prod_receipt).to_equal("build/shared-cache/receipts/phase4-prod")
+        expect(shared_dev_receipt).to_equal("build/shared-cache/receipts/phase4-dev")
+        expect(shared_prod_receipt == shared_dev_receipt).to_equal(false)
+
+        expect(focused_native_build_receipt_dir_from_env_v1(
+            "build/custom-receipts/phase4-dev", p4_prod, "build/shared-cache")).to_equal(
+            "build/custom-receipts/phase4-dev")
+        expect(focused_native_build_receipt_dir_from_env_v1(
+            "", p4_dev, "build/shared-cache")).to_equal(
+            "build/shared-cache/receipts/phase4-dev")
+        expect(focused_native_build_receipt_path_v1(
+            "build/out/simple", "build/custom-receipts/phase4-dev", p4_dev)).to_equal(
+            "build/custom-receipts/phase4-dev/simple.focused-receipt.sdn")
+        expect(focused_native_build_receipt_path_v1(
+            "build/out/simple", "", p4_prod)).to_equal(
+            "build/native_receipts/phase4-prod/simple.focused-receipt.sdn")
+
+        val cache_dev_receipt = focused_native_build_profile_receipt_namespace_v1(p4_dev, dev_cache)
+        expect(cache_dev_receipt).to_equal("build/native_cache/phase4-dev/receipts")
+        expect(focused_native_build_profile_receipt_namespace_v1(p4_prod, prod_receipt)).to_equal(prod_receipt)
+        expect(focused_native_build_profile_receipt_namespace_v1(p4_dev, dev_receipt)).to_equal(dev_receipt)
+        expect(focused_native_build_profile_receipt_namespace_v1(p4_dev, shared_dev_receipt)).to_equal(shared_dev_receipt)
+        expect(focused_native_build_profile_receipt_namespace_v1(p4_dev, cache_dev_receipt)).to_equal(cache_dev_receipt)
+
+        expect(focused_native_build_receipt_dir_from_env_v1(
+            "build/explicit-caller-receipts", p4_dev, dev_cache)).to_equal(
+            "build/explicit-caller-receipts")
+        val focused_src = file_read("src/app/cli/bootstrap_focused_native_build.spl")
+        expect(focused_src).to_contain("val effective_receipt_dir = focused_native_build_receipt_dir_from_env_v1(")
+
+    it "validates --backend-plugin options fail-closed and extracts provider paths":
+        """Accept split and inline --backend-plugin flags on focused native-build while rejecting missing or whitespace-only values."""
+        val split_args = [
+            "simple", "native-build",
+            "--entry", "src/app/cli/main.spl",
+            "--backend", "c",
+            "--backend-plugin", "build/plugins/backend_c.dll",
+            "--output", "build/focused-simple"
+        ]
+        val inline_args = [
+            "simple", "native-build",
+            "--entry", "src/app/cli/main.spl",
+            "--backend=c",
+            "--backend-plugin=build/plugins/backend_c.so",
+            "--output", "build/focused-simple"
+        ]
+        expect(focused_native_build_error(split_args)).to_equal("")
+        expect(focused_native_build_backend_plugin(split_args)).to_equal("build/plugins/backend_c.dll")
+        expect(focused_native_build_error(inline_args)).to_equal("")
+        expect(focused_native_build_backend_plugin(inline_args)).to_equal("build/plugins/backend_c.so")
+
+        expect(focused_native_build_error([
+            "simple", "native-build", "--entry", "a.spl", "--output", "b", "--backend-plugin"
+        ])).to_contain("--backend-plugin requires a non-empty path")
+        expect(focused_native_build_error([
+            "simple", "native-build", "--entry", "a.spl", "--output", "b", "--backend-plugin", "--strip"
+        ])).to_contain("--backend-plugin requires a non-empty path")
+        expect(focused_native_build_error([
+            "simple", "native-build", "--entry", "a.spl", "--output", "b", "--backend-plugin="
+        ])).to_contain("--backend-plugin requires a non-empty path")
+        expect(focused_native_build_error([
+            "simple", "native-build", "--entry", "a.spl", "--output", "b", "--backend-plugin=   "
+        ])).to_contain("--backend-plugin requires a non-empty path")
+
+    it "unsets SIMPLE_MIR_SHARD_COUNT by default for p3-entry-groups entry object":
+        """Default P3G_ENTRY_MIR_SHARDS to 0 so --emit-entry-object strips SIMPLE_MIR_SHARD_COUNT unless explicitly >= 1."""
+        val p3_script = file_read("scripts/bootstrap/p3-entry-groups.shs")
+        expect(p3_script).to_contain("entry_mir_shards=${{P3G_ENTRY_MIR_SHARDS:-0}}")
+        expect(p3_script.contains("P3G_ENTRY_MIR_SHARDS:-1")).to_equal(false)
+        expect(p3_script).to_contain("if [ \"$entry_mir_shards\" -ge 1 ]; then")
+        expect(p3_script).to_contain("Remove-Item Env:SIMPLE_MIR_SHARD_COUNT -EA SilentlyContinue")
+
+    it "parses numeric and speed aliases for --opt-level and caps cranelift default at O2":
+        expect(focused_native_build_opt_level(["--opt-level", "0"])).to_equal(0)
+        expect(focused_native_build_opt_level(["--opt-level=1"])).to_equal(1)
+        expect(focused_native_build_opt_level(["--opt-level", "2"])).to_equal(2)
+        expect(focused_native_build_opt_level(["--opt-level=speed"])).to_equal(2)
+        expect(focused_native_build_opt_level(["--opt-level", "aggressive"])).to_equal(3)
+        val focused_src = file_read("src/app/cli/bootstrap_focused_native_build.spl")
+        expect(focused_src).to_contain("elif backend == \"cranelift\":")
+

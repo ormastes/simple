@@ -3,43 +3,232 @@
 # Wraps the C runtime volatile access functions.
 # These guarantee reads/writes are not optimized away by the compiler.
 
-extern fn rt_mmio_read_u64(addr: u64) -> u64
-extern fn rt_mmio_write_u64(addr: u64, value: u64)
-extern fn rt_mmio_read_u32(addr: u64) -> u32
-extern fn rt_mmio_write_u32(addr: u64, value: u32)
-extern fn rt_mmio_read_u16(addr: u64) -> u16
-extern fn rt_mmio_write_u16(addr: u64, value: u16)
-extern fn rt_mmio_read_u8(addr: u64) -> u8
-extern fn rt_mmio_write_u8(addr: u64, value: u8)
+use os.kernel.boot.mmio_hardware.{
+    hardware_mmio_read64, hardware_mmio_write64,
+    hardware_mmio_read32, hardware_mmio_write32,
+    hardware_mmio_read16, hardware_mmio_write16,
+    hardware_mmio_read8, hardware_mmio_write8
+}
+
+var _mmio_test_mode: bool = false
+
+# ---------------------------------------------------------------------------
+# Test-mode MMIO backing store: open-addressed hash tables, one per width.
+#
+# The previous append-only journal (parallel growable `_mmio_test_addrN` /
+# `_mmio_test_valueN` arrays + backwards last-write-wins scan) made every read
+# and every write O(journal length): `.push()` clones the whole backing array
+# per call under this codegen (doc-tracked defect
+# `reference_seed_array_push_clones_no_fast_path`) and the scan re-walked the
+# journal per read. The kernel PMM/VMM specs perform hundreds of thousands of
+# MMIO ops, so journaling alone blew the 300s child budget even after the
+# mmio_hardware name-collision crash was fixed (2026-11-12,
+# work/fix-pmm-crash-20261112).
+#
+# Observable semantics preserved exactly: per-address last-write-wins, reads
+# of never-written addresses return 0, and `mmio_reset_for_test()` returns the
+# store to the all-empty state. Slots store `addr + 1` so physical address 0
+# (a real test address — the PMM bitmap covers frame 0) stays representable
+# and 0 marks EMPTY. A slot is live only while its generation equals the
+# current epoch, so resetting bumps one counter instead of zeroing megabytes
+# of fixed arrays (the zeroing loop itself would dominate spec runtime).
+# Load stays far below half full in every kernel spec: on a full table the
+# read path returns 0 and the write path drops the write (documented here;
+# it cannot occur at these address counts).
+# ---------------------------------------------------------------------------
+
+val _MMIO_HT_SIZE: u64 = 131072        # 2^17 slots per width
+val _MMIO_HT_MASK: u64 = 131071
+
+var _mmio_epoch: u64 = 1
+
+var _mmio_ht8_addr: [u64; 131072] = [0; 131072]
+var _mmio_ht8_gen: [u64; 131072] = [0; 131072]
+var _mmio_ht8_val: [u8; 131072] = [0; 131072]
+var _mmio_ht16_addr: [u64; 131072] = [0; 131072]
+var _mmio_ht16_gen: [u64; 131072] = [0; 131072]
+var _mmio_ht16_val: [u16; 131072] = [0; 131072]
+var _mmio_ht32_addr: [u64; 131072] = [0; 131072]
+var _mmio_ht32_gen: [u64; 131072] = [0; 131072]
+var _mmio_ht32_val: [u32; 131072] = [0; 131072]
+var _mmio_ht64_addr: [u64; 131072] = [0; 131072]
+var _mmio_ht64_gen: [u64; 131072] = [0; 131072]
+var _mmio_ht64_val: [u64; 131072] = [0; 131072]
+
+fn _mmio_ht_slot(addr: u64) -> u64:
+    # Page-aligned addresses share their low 12 bits; XOR the page number with
+    # the in-page offset so both byte-dense bitmap regions and per-page table
+    # slots spread across the table. Linear probing absorbs the rest.
+    ((addr >> 12) ^ (addr & 4095u64)) & _MMIO_HT_MASK
+
+fn _mmio_test_read8(addr: u64) -> u8:
+    var i = _mmio_ht_slot(addr)
+    var probes: u64 = 0
+    while _mmio_ht8_gen[i] == _mmio_epoch and _mmio_ht8_addr[i] != addr + 1:
+        i = (i + 1) & _MMIO_HT_MASK
+        probes = probes + 1
+        if probes >= _MMIO_HT_SIZE:
+            return 0
+    if _mmio_ht8_gen[i] != _mmio_epoch:
+        return 0
+    _mmio_ht8_val[i]
+
+fn _mmio_test_write8(addr: u64, value: u8):
+    var i = _mmio_ht_slot(addr)
+    var probes: u64 = 0
+    while _mmio_ht8_gen[i] == _mmio_epoch and _mmio_ht8_addr[i] != addr + 1:
+        i = (i + 1) & _MMIO_HT_MASK
+        probes = probes + 1
+        if probes >= _MMIO_HT_SIZE:
+            return
+    _mmio_ht8_addr[i] = addr + 1
+    _mmio_ht8_val[i] = value
+    _mmio_ht8_gen[i] = _mmio_epoch
+
+fn _mmio_test_read16(addr: u64) -> u16:
+    var i = _mmio_ht_slot(addr)
+    var probes: u64 = 0
+    while _mmio_ht16_gen[i] == _mmio_epoch and _mmio_ht16_addr[i] != addr + 1:
+        i = (i + 1) & _MMIO_HT_MASK
+        probes = probes + 1
+        if probes >= _MMIO_HT_SIZE:
+            return 0
+    if _mmio_ht16_gen[i] != _mmio_epoch:
+        return 0
+    _mmio_ht16_val[i]
+
+fn _mmio_test_write16(addr: u64, value: u16):
+    var i = _mmio_ht_slot(addr)
+    var probes: u64 = 0
+    while _mmio_ht16_gen[i] == _mmio_epoch and _mmio_ht16_addr[i] != addr + 1:
+        i = (i + 1) & _MMIO_HT_MASK
+        probes = probes + 1
+        if probes >= _MMIO_HT_SIZE:
+            return
+    _mmio_ht16_addr[i] = addr + 1
+    _mmio_ht16_val[i] = value
+    _mmio_ht16_gen[i] = _mmio_epoch
+
+fn _mmio_test_read32(addr: u64) -> u32:
+    var i = _mmio_ht_slot(addr)
+    var probes: u64 = 0
+    while _mmio_ht32_gen[i] == _mmio_epoch and _mmio_ht32_addr[i] != addr + 1:
+        i = (i + 1) & _MMIO_HT_MASK
+        probes = probes + 1
+        if probes >= _MMIO_HT_SIZE:
+            return 0
+    if _mmio_ht32_gen[i] != _mmio_epoch:
+        return 0
+    _mmio_ht32_val[i]
+
+fn _mmio_test_write32(addr: u64, value: u32):
+    var i = _mmio_ht_slot(addr)
+    var probes: u64 = 0
+    while _mmio_ht32_gen[i] == _mmio_epoch and _mmio_ht32_addr[i] != addr + 1:
+        i = (i + 1) & _MMIO_HT_MASK
+        probes = probes + 1
+        if probes >= _MMIO_HT_SIZE:
+            return
+    _mmio_ht32_addr[i] = addr + 1
+    _mmio_ht32_val[i] = value
+    _mmio_ht32_gen[i] = _mmio_epoch
+
+fn _mmio_test_read64(addr: u64) -> u64:
+    var i = _mmio_ht_slot(addr)
+    var probes: u64 = 0
+    while _mmio_ht64_gen[i] == _mmio_epoch and _mmio_ht64_addr[i] != addr + 1:
+        i = (i + 1) & _MMIO_HT_MASK
+        probes = probes + 1
+        if probes >= _MMIO_HT_SIZE:
+            return 0
+    if _mmio_ht64_gen[i] != _mmio_epoch:
+        return 0
+    _mmio_ht64_val[i]
+
+fn _mmio_test_write64(addr: u64, value: u64):
+    var i = _mmio_ht_slot(addr)
+    var probes: u64 = 0
+    while _mmio_ht64_gen[i] == _mmio_epoch and _mmio_ht64_addr[i] != addr + 1:
+        i = (i + 1) & _MMIO_HT_MASK
+        probes = probes + 1
+        if probes >= _MMIO_HT_SIZE:
+            return
+    _mmio_ht64_addr[i] = addr + 1
+    _mmio_ht64_val[i] = value
+    _mmio_ht64_gen[i] = _mmio_epoch
+
+fn mmio_reset_for_test():
+    _mmio_test_mode = true
+    _mmio_epoch = _mmio_epoch + 1
+
+fn mmio_test_mode_enabled() -> bool:
+    _mmio_test_mode
+
+fn mmio_disable_test_mode():
+    """Pin the MMIO layer to the real-hardware path.
+
+    Freestanding native builds skip module-level initializers, so the
+    `var _mmio_test_mode: bool = false` default above never executes and the flag
+    reads garbage (often non-zero = true) out of un-zeroed .bss. That routes every
+    `mmio_read*/write*` through the empty test table, so they return nil/0 — which
+    silently breaks the ring-3 ELF-magic checks that read the resident blob via
+    `mmio_read*`. Boot entries must call this once, before any MMIO, to force the
+    flag off deterministically.
+    """
+    _mmio_test_mode = false
 
 fn mmio_read64(addr: u64) -> u64:
     """Read 64-bit value from memory-mapped register."""
-    rt_mmio_read_u64(addr)
+    if _mmio_test_mode:
+        return _mmio_test_read64(addr)
+    hardware_mmio_read64(addr)
 
 fn mmio_write64(addr: u64, value: u64):
     """Write 64-bit value to memory-mapped register."""
-    rt_mmio_write_u64(addr, value)
+    if _mmio_test_mode:
+        _mmio_test_write64(addr, value)
+        return
+    hardware_mmio_write64(addr, value)
 
 fn mmio_read32(addr: u64) -> u32:
     """Read 32-bit value from memory-mapped register."""
-    rt_mmio_read_u32(addr)
+    if _mmio_test_mode:
+        return _mmio_test_read32(addr)
+    hardware_mmio_read32(addr)
 
 fn mmio_write32(addr: u64, value: u32):
     """Write 32-bit value to memory-mapped register."""
-    rt_mmio_write_u32(addr, value)
+    if _mmio_test_mode:
+        _mmio_test_write32(addr, value)
+        return
+    hardware_mmio_write32(addr, value)
 
 fn mmio_read16(addr: u64) -> u16:
     """Read 16-bit value from memory-mapped register."""
-    rt_mmio_read_u16(addr)
+    if _mmio_test_mode:
+        return _mmio_test_read16(addr)
+    hardware_mmio_read16(addr)
 
 fn mmio_write16(addr: u64, value: u16):
     """Write 16-bit value to memory-mapped register."""
-    rt_mmio_write_u16(addr, value)
+    if _mmio_test_mode:
+        _mmio_test_write16(addr, value)
+        return
+    hardware_mmio_write16(addr, value)
 
 fn mmio_read8(addr: u64) -> u8:
     """Read 8-bit value from memory-mapped register."""
-    rt_mmio_read_u8(addr)
+    if _mmio_test_mode:
+        return _mmio_test_read8(addr)
+    hardware_mmio_read8(addr)
 
 fn mmio_write8(addr: u64, value: u8):
     """Write 8-bit value to memory-mapped register."""
-    rt_mmio_write_u8(addr, value)
+    if _mmio_test_mode:
+        _mmio_test_write8(addr, value)
+        return
+    hardware_mmio_write8(addr, value)
+
+export mmio_reset_for_test, mmio_test_mode_enabled, mmio_disable_test_mode
+export mmio_read64, mmio_write64, mmio_read32, mmio_write32
+export mmio_read16, mmio_write16, mmio_read8, mmio_write8

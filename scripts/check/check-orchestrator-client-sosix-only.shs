@@ -1,0 +1,94 @@
+#!/bin/sh
+# The caret orchestrator client must be pure Simple and reach the host ONLY
+# through SoSix aliases (std.nogc_sync_mut.sosix.* / std.nogc_async_mut.sosix.*).
+#
+# Fails on any raw host route in the client files: extern/@rt/rt_* calls, SFFI
+# providers, the app IO facade (app.io.*) or the io provider owners
+# (std.nogc_sync_mut.io.*, std.io_runtime, std.*.io_runtime) — those are what the
+# SoSix aliases wrap. Pure std.common.* and host_path predicates are allowed.
+# Record: doc/08_tracking/bug/orchestrator_client_host_access_bypassed_sosix_2026-11-22.md
+#
+# usage: check-orchestrator-client-sosix-only.shs [--selftest] [repo_root]
+# Verdict is the last stdout line: PASS (0) / FAIL (1) / ERROR (2).
+# 0 files scanned is ERROR, never PASS.
+
+CLIENT_FILES="src/app/llm_caret/orchestrator_client.spl
+src/app/llm_caret/orchestrator_execution_client_v2.spl"
+
+RAW_PATTERN='^[[:space:]]*(use|export use|import)[[:space:]]+(app\.io\.|std\.nogc_sync_mut\.io\.|std\.(nogc_sync_mut\.)?io_runtime|std\.(nogc_sync_mut\.)?sffi\.|std\.nogc_sync_mut\.package_sffi)|extern[[:space:]]+fn|@rt\b|(^|[^A-Za-z0-9_.])rt_[a-z0-9_]+[[:space:]]*\('
+
+# scan_root <root> -> prints offenders "file:line:text"; sets SCANNED count via stdout tail "#scanned <n>"
+scan_root() {
+    root=$1
+    n=0
+    for rel in $CLIENT_FILES; do
+        f="$root/$rel"
+        if [ ! -f "$f" ]; then
+            echo "missing:$rel"
+            continue
+        fi
+        n=$((n + 1))
+        grep -nE -- "$RAW_PATTERN" "$f" | grep -vE '^[0-9]+:[[:space:]]*#' | sed "s|^|$rel:|"
+    done
+    echo "#scanned $n"
+}
+
+verdict() {
+    out=$1
+    scanned=$(printf '%s\n' "$out" | sed -n 's/^#scanned //p')
+    offenders=$(printf '%s\n' "$out" | grep -v '^#scanned ' | grep -v '^$')
+    if [ -z "$scanned" ] || [ "$scanned" -eq 0 ]; then
+        echo "ERROR — nothing was checked"
+        return 2
+    fi
+    if [ -n "$offenders" ]; then
+        printf '%s\n' "$offenders"
+        echo "FAIL — $(printf '%s\n' "$offenders" | wc -l | tr -d ' ') raw host route(s) in $scanned orchestrator client file(s)"
+        return 1
+    fi
+    echo "PASS — $scanned orchestrator client file(s) checked, host access via SoSix only"
+    return 0
+}
+
+selftest() {
+    tmp=$(mktemp -d) || { echo "ERROR — selftest mktemp failed"; return 2; }
+    mkdir -p "$tmp/clean/src/app/llm_caret" "$tmp/dirty/src/app/llm_caret" "$tmp/empty"
+    for rel in $CLIENT_FILES; do
+        printf '%s\n' 'use std.nogc_sync_mut.sosix.process.{sosix_process_run_bounded}' \
+            '# app.io.mod used to be imported here' 'fn f(): sosix_process_run_bounded("/x", [], 1, 1)' > "$tmp/clean/$rel"
+        printf '%s\n' 'use app.io.mod.{process_run_bounded}' 'fn g(): rt_process_run("/x")' > "$tmp/dirty/$rel"
+    done
+    rc=0
+    verdict "$(scan_root "$tmp/clean")" > /dev/null; [ $? -eq 0 ] || { echo "selftest: clean fixture did not PASS"; rc=2; }
+    verdict "$(scan_root "$tmp/dirty")" > /dev/null; [ $? -eq 1 ] || { echo "selftest: dirty fixture did not FAIL"; rc=2; }
+    verdict "$(scan_root "$tmp/empty")" > /dev/null; [ $? -eq 2 ] || { echo "selftest: empty fixture did not ERROR"; rc=2; }
+    rm -rf "$tmp"
+    return $rc
+}
+
+only_selftest=0
+root=""
+for a in "$@"; do
+    case "$a" in
+        --selftest) only_selftest=1 ;;
+        *) root=$a ;;
+    esac
+done
+
+selftest
+st=$?
+if [ $st -ne 0 ]; then
+    echo "ERROR — selftest failed"
+    exit 2
+fi
+if [ $only_selftest -eq 1 ]; then
+    echo "PASS — selftest (3 fixtures)"
+    exit 0
+fi
+[ -n "$root" ] || root=$(git rev-parse --show-toplevel 2>/dev/null)
+if [ -z "$root" ] || [ ! -d "$root/src" ]; then
+    echo "ERROR — nothing was checked (repo root not found)"
+    exit 2
+fi
+verdict "$(scan_root "$root")"
+exit $?

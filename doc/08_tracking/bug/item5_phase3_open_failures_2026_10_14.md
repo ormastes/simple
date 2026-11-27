@@ -34,6 +34,51 @@ P1: Native object collection exceeds diagnostic memory reserve.
 
 SymbolTable87 passed MIR then exited143 at shared4GiB RAM-plus-swap reserve;69 private LLVM objects retained. Aggregate process RSS exceeded28GiB in some successful cohorts; shared-memory contribution is unisolated. No memory-leak cause or performance qualification claimed. Owned temporary swap is diagnostic only.
 
+**Re-scoped 2026-11-05 (code-read root cause, no heavy run — host memory guard).**
+The growth is not an LLVM-object leak:
+
+- `llvm_lib_backend.spl:126-139` disposes target machine, builder, module,
+  context and memory buffer per module; no native LLVM handle outlives a module.
+- The object bytes are copied into the Simple heap (`rt_bytes_from_raw`) and
+  every MIR module stays in that heap after `evict_mir_modules`: the native
+  runtime has no collector (probe P0, `rt_driver_eviction_reclaim_selfcheck.c`:
+  0 of 2001 allocations reclaimed; cited at `native_staged_codegen.spl:29-34`
+  and `driver_types.spl:1381`). Process RSS is therefore monotone in modules
+  processed — retention by design of the runtime, not a missed dispose.
+- The `retained_objs=` field of `SIMPLE_PHASE_RSS=1` is set from
+  `ctx.mir_modules.len() + 1` (`driver_pipeline_lowering.spl:1598`): it counts
+  resident MIR modules, not LLVM objects, and cannot show reclaimed bytes.
+
+Next step (precise): the memory fix is process-level MIR sharding
+(`SIMPLE_MIR_SHARDING`, `driver_build/native_mir_shard.spl`) so each worker
+exits after its shard; qualify by one sharded SymbolTable87 cohort with
+`SIMPLE_PHASE_RSS=1` on a redeployed compiler when >= 40 GB commit is free,
+comparing per-worker `peak_kib` against the unsharded 28 GiB aggregate. A
+runtime-side reclaim (real free on eviction) is the alternative owner.
+
+**Update 2026-11-05 (p1w-item5, code-read; no heavy run).** Runtime-side reclaim
+was attempted and stopped before any code edit:
+
+- MIR: a MirModule is a class instance, i.e. an untagged, unregistered,
+  header-less `rt_alloc` block. `rt_dict_free_deep` frees only keys + dict
+  header (probe P2), and its key/name strings are aliased by HIR/AST/
+  SymbolTable/`_bootstrap_mir_functions` (probe P3). `rt_rc_release`
+  (`runtime_native.c:9849`) frees every reachable tag-0 node, which includes
+  those permanent aliased strings, and runs under the global
+  `rt_core_heap_lifecycle_acquire` spin lock (`runtime_native.c:1687`). Fix
+  owner is either a runtime header/tag for class instances (codegen change)
+  or process-level MIR sharding (`SIMPLE_MIR_SHARDING`).
+- Object bytes (re-scoped option 1: write the LLVM memory buffer straight to
+  the `.o` path, CodegenOutput carries the path): the `[u8]` copied by
+  `rt_bytes_from_raw` (`llvm_lib_backend.spl:139`) is shared by
+  `CodegenOutput`, `backend_plugin/builtin_adapter.spl:107`,
+  `backend_plugin/session_authority_v2.spl:462/491`,
+  `driver_aot_native_output.spl:4503`, `driver_aot_smf_output.spl:207/211`
+  (`smf_part_objects`) and the cache-publication digests. The contract change
+  is feasible but its RSS bound can only be measured on a redeployed native
+  compiler (the seed does not run this runtime path), which exceeds the lane
+  limit; deferred to a lane that can redeploy.
+
 Owner/source: `doc/08_tracking/bug/item5_phase3_open_failures_2026_10_14.md`.
 
 ## item5_native_build_threads_ineffective_2026_10_14
@@ -51,6 +96,8 @@ P2: Backend AOT diagnostics discard structured error details.
 Retained AOT message renders CompileFailed as opaque enum address. Actual backend messages identify missing static-data support. Private36945ca diagnostic patch retains typed CompileError fields and explicit authority variants; patch is unbuilt and unlanded.
 
 Owner/source: `src/compiler/70.backend/backend_plugin/session_authority_v2.spl`.
+
+Status 2026-11-04: FIXED (closed stale). c69d0dbc09f added `backend_session_authority_error_text_v2`, which renders variant and payload (`CompileFailed: {detail}`); the AOT result/compile/use rejection messages at session_authority_v2.spl:719,732,740,771 use it. The `CompileFailed` payload is the backend `error.to_text()` text. No enum-address rendering remains.
 
 ## explicit_generic_interpolation_transport_2026_10_14
 
@@ -73,3 +120,71 @@ Owner/source: `doc/08_tracking/bug/bare_enum_pattern_binding_in_compiler_2026_10
 Retained receipts are under build/review: item5-functionfield-cache-resume-object-20261014, item5-functionfield-mir-crash-parent-gdb-20261014, item5-four-failed-llvm-collection-20261014.md, and item5-parallel-blockid-object-b061-20261014/object-aot-inventory.json. All objects stay bound to their own closure, producer, runtime and backend. Preserve failed receipts; use exact required object sets for manual links.
 
 Fix the observed MIR crash owner, qualify each changed object, build the full compiler, and execute Hello using that compiler. Native Simple DB/HTTP scalar-versus-AVX512 correctness/performance, CUDA and other provider/device qualification, small-executable targets, and full tooling/CI acceptance remain outstanding. Restore normal admission gates before promotion or publication.
+
+**Revalidated 2026-11-02: still plausible because OPEN. The user authorized landing focused fixes with these bugs recorded, then manual object repairs and follow-up landings. This is not ful; no merged fix commit with a passing regression is cited in this doc.**
+
+**Revalidated 2026-11-02: still plausible because OPEN. The user authorized landing focused fixes with these bugs recorded, then manual object repairs and follow-up landings. This is not ful; no merged fix commit with a passing regression is cited in this doc.**
+
+**Revalidated 2026-11-02: still plausible because OPEN. The user authorized landing focused fixes with these bugs recorded, then manual object repairs and follow-up landings. This is not ful; no merged fix commit with a passing regression is cited in this doc.**
+
+**Fix 2026-11-03 (item5_phase3_early_mir_crash):** `relocate_provider_default` (src/compiler/50.mir/_MirLowering/provider_metadata.spl) passed the nested `expr.type_` straight to `relocate_provider_type`; on the stage-native lane nested struct operands lose their declared HirType (the same family annotated everywhere else in this file), matching the SIGSEGV in relocate_provider_type+244 via register_provider_class -> relocate_provider_default. Now uses an annotated local copy. Static guard spec: test/01_unit/compiler/50.mir/provider_default_type_operand_guard_spec.spl. Verification pending (needs stage3 native phase3 closure): rerun the frozen 381-module closure; MIR must pass module 0/381 without exit 139. Sibling unannotated `X.type_` operands exist at declaration_providers_v1.spl:719,789,803,860,965, native_trait_registration.spl:193,257,271, declaration_default_bindings_v1.spl:295, declaration_enum_metadata_v1.spl:173 (not changed; annotate if the crash persists).
+
+## Closed 2026-11-04
+
+`item5_cranelift_module_data_support_2026_10_14` closed: imported globals are bound through `cranelift_import_global_accessor_v1` and non-scalar statics get a handle slot with a guarded module initializer (`declare_module_statics` / `cranelift_static_init_supported` in `cranelift_codegen_adapter.spl`; landed in a1d66e52206, d2f4ca104ae). Imported non-public statics are deliberately rejected. Mixed LLVM/Cranelift runtime initialization remains unqualified and is not tracked by this row.
+
+## 2026-11-05 narrow fix (r-item5)
+
+Retention (Simple side): `NativeStagedCodegenStateV1.smf_part_objects: {text: [u8]}`
+(`driver_build/native_staged_codegen.spl:74`) held every emitted module's
+object bytes until `collect_smf_bytes` (`driver_aot_smf_output.spl:211`,
+`driver_aot_pipeline.spl:883`) — resident bytes = sum over all modules.
+
+Fix (option 1, object bytes -> file direct): new single-owner
+`driver_build/smf_object_spool_v1.spl`. `smf_object_spool_put_v1` writes the
+object to `build/smf_object_spool/p<pid>/<injective-stem>.o` and keeps only
+path + size; `live_bytes` counts bytes held in memory (rises by one object
+during a put, back to 0 when it lands); `peak_live_bytes`/`spooled_bytes`
+prove the reclaim. Assembly reads back in sorted key order (byte-identical to
+`smf_parts_assemble_objects_v1`), fails closed on any write/read/size error,
+and the spool is released (own files deleted) after assembly and after a
+shard worker writes its parts. Value transitions with one owner per process:
+no locks, no shared counter. Peak during final SMF assembly is still one
+whole SMF blob (inherent to the single-blob format).
+
+Specs (seed `bin/simple.exe run`):
+- `test/01_unit/compiler/driver/smf_object_spool_spec.spl` — 7/7 OK. Before
+  (dict): 8x64 B retained 512 B; after (spool): live 0, peak 64. Stress: 200
+  synthetic modules x 256 B (fake-emit harness, no llc), live 0 after every
+  put, peak 256, spooled 51200, assembly 51200 B, release -> 0 parts.
+- regressions OK: `smf_staged_parts_spec` 6/6, `native_staged_codegen_spec`
+  9/9, `native_mir_shard_spec` 12/12.
+
+Option 2 (refcounted MIR eviction) not implemented: the blocker recorded above
+stands — MirModule instances carry no runtime header/tag, and their name/key
+strings are aliased by HIR/AST/SymbolTable, so a release-at-0 side table would
+free strings it does not own. Needs a class-instance tag (codegen) first.
+
+Unverified: stage3 RSS on SymbolTable87 (no redeploy in this lane); the
+LLVM-side retention (`llvm_lib_backend.spl:139` `rt_bytes_from_raw` copy) in the
+pure native path is already dropped after `write_elf_bytes_to_file`.
+
+## 2026-11-06 re-scope (p1-item5): fix-implemented-verification-pending
+
+`item5_native_object_resource_growth_2026_10_14` premise is outdated. Both
+bounded routes named above are landed in source on release/1.0.0:
+
+- object bytes spool to disk (`ef16b141c4a`, `smf_object_spool_spec` 7/7);
+- the default native-build route is process-isolated: the per-file worker
+  pool (`native_build_main.spl` ~1413) and the ad-hoc MIR-shard default
+  (`native_build_main.spl:1268`) run each file/shard in a worker that exits,
+  returning its heap to the OS. The monolithic in-process retention described
+  in this bug now occurs only with `SIMPLE_MIR_SHARDING=0` or
+  `SIMPLE_BOOTSTRAP=1` (managed stages drive their own shards).
+
+The no-collector runtime retention itself is unchanged and is by design until
+class instances carry a runtime tag (separate feature). Remaining open item is
+qualification only: per-worker `peak_kib` (`SIMPLE_PHASE_RSS=1`) on a
+redeployed stage3. Attempted on `s3_fable52.exe` with the s3sanity c01 case:
+the harness cap killed the tree at 14 s (free_disk 5.4 GB), so no RSS number
+is claimed.

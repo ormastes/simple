@@ -1,0 +1,36 @@
+use std.spec.*
+use compiler.common.source_root_resolution.{SourceRootResolutionV1}
+use compiler.driver.driver_source_loading.{_driver_resolve_source_root_entry_import_v1}
+
+# BUG-UI-PROVIDER-ROOT-ROUTING-20261012: dotted UI providers live in physical
+# sibling dirs (app/ui.render/...), not nested ui/render/. A declared-root
+# closure must select the provider file, never alias to app/ui/__init__.spl.
+# Fixture providers use names absent from the ambient checkout, because the
+# resolver intentionally defers to the checkout for spellings it already owns.
+
+val ROOT = "test/fixtures/compiler/ui_provider_routing/root"
+val EMPTY = "test/fixtures/compiler/ui_provider_routing/root/empty"
+
+fn selected_path(result: SourceRootResolutionV1) -> text:
+    match result:
+        case SourceRootResolutionV1.Found(path): path
+        case SourceRootResolutionV1.Missing: "MISSING"
+        case SourceRootResolutionV1.Ambiguous(_): "AMBIGUOUS"
+
+describe "declared-root closure routes canonical dotted UI providers":
+    it "selects the dotted provider file, not the ancestor ui facade":
+        expect(selected_path(_driver_resolve_source_root_entry_import_v1(
+            "app.ui.render.zz_fixture_only", [ROOT]))).to_equal(
+            ROOT + "/app/ui.render/zz_fixture_only.spl")
+        expect(selected_path(_driver_resolve_source_root_entry_import_v1(
+            "app.ui.tui.zz_fixture_only", [ROOT]))).to_equal(
+            ROOT + "/app/ui.tui/zz_fixture_only.spl")
+
+    it "selects the provider when the declared root is the app dir":
+        expect(selected_path(_driver_resolve_source_root_entry_import_v1(
+            "app.ui.render.zz_fixture_only", [ROOT + "/app"]))).to_equal(
+            ROOT + "/app/ui.render/zz_fixture_only.spl")
+
+    it "does not restore a provider from an omitted root":
+        expect(selected_path(_driver_resolve_source_root_entry_import_v1(
+            "app.ui.render.zz_fixture_only", [EMPTY]))).to_equal("MISSING")

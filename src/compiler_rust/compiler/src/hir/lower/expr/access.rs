@@ -45,6 +45,62 @@ impl Lowerer {
         Ok(())
     }
 
+    pub(super) fn try_lower_enum_variant_access(
+        &mut self,
+        recv_name: &str,
+        field: &str,
+    ) -> LowerResult<Option<HirExpr>> {
+        let Some(type_id) = self.module.types.lookup(recv_name) else {
+            return Ok(None);
+        };
+        let Some(HirType::Enum { name: _, variants, .. }) = self.module.types.get(type_id) else {
+            return Ok(None);
+        };
+        let is_placeholder = variants.is_empty();
+        for (variant_name, _variant_fields) in variants {
+            if variant_name == field {
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
+                    ty: type_id,
+                }));
+            }
+        }
+        if is_placeholder {
+            if let Some(ref defs) = self.global_enum_defs.clone() {
+                if let Some(variant_summary) = defs.get(recv_name) {
+                    if variant_summary.iter().any(|(vname, _)| vname == field) {
+                        let variants = self.resolve_global_enum_variants(variant_summary);
+                        let global_type_id = self.module.types.update_named(
+                            recv_name.to_string(),
+                            HirType::Enum {
+                                name: recv_name.to_string(),
+                                variants,
+                                generic_params: vec![],
+                                is_generic_template: false,
+                                type_bindings: std::collections::HashMap::new(),
+                            },
+                        );
+                        self.globals.insert(recv_name.to_string(), global_type_id);
+                        return Ok(Some(HirExpr {
+                            kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
+                            ty: global_type_id,
+                        }));
+                    }
+                }
+            }
+        }
+        if self.lenient_types {
+            return Ok(Some(HirExpr {
+                kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
+                ty: type_id,
+            }));
+        }
+        Err(LowerError::Unsupported(format!(
+            "enum '{}' has no variant named '{}'",
+            recv_name, field
+        )))
+    }
+
     /// Lower a field access expression to HIR
     ///
     /// Handles:
@@ -58,72 +114,41 @@ impl Lowerer {
         field: &str,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        let receiver_base = match receiver {
+            Expr::GenericInst { expr, .. } => expr.as_ref(),
+            other => other,
+        };
         // Check for thread_group.id and thread_group.size before lowering receiver
-        if let Expr::Identifier(recv_name) = receiver {
+        if let Expr::Identifier(recv_name) = receiver_base {
             if recv_name == "thread_group" {
                 return self.lower_thread_group_field(field);
             }
 
-            // Check if receiver is an enum type - handle as enum variant access
-            if let Some(type_id) = self.module.types.lookup(recv_name) {
-                if let Some(HirType::Enum { name: _, variants, .. }) = self.module.types.get(type_id) {
-                    let is_placeholder = variants.is_empty();
-                    // Check if field is a valid variant name
-                    for (variant_name, variant_fields) in variants {
-                        if variant_name == field {
-                            // This is an enum variant with no payload (or with payload to be filled later)
-                            if variant_fields.is_none() {
-                                // Unit variant - return enum value
-                                return Ok(HirExpr {
-                                    kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
-                                    ty: type_id,
-                                });
-                            } else {
-                                // Variant with fields - return constructor reference
-                                // This will be called later with arguments
-                                return Ok(HirExpr {
-                                    kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
-                                    ty: type_id,
-                                });
-                            }
-                        }
-                    }
-                    if is_placeholder {
-                        if let Some(ref defs) = self.global_enum_defs.clone() {
-                            if let Some(variant_summary) = defs.get(recv_name) {
-                                if variant_summary.iter().any(|(vname, _)| vname == field) {
-                                    let variants = self.resolve_global_enum_variants(variant_summary);
-                                    let global_type_id = self.module.types.update_named(
-                                        recv_name.to_string(),
-                                        HirType::Enum {
-                                            name: recv_name.to_string(),
-                                            variants,
-                                            generic_params: vec![],
-                                            is_generic_template: false,
-                                            type_bindings: std::collections::HashMap::new(),
-                                        },
-                                    );
-                                    self.globals.insert(recv_name.to_string(), global_type_id);
-                                    return Ok(HirExpr {
-                                        kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
-                                        ty: global_type_id,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    // Variant not found
-                    if self.lenient_types {
-                        return Ok(HirExpr {
-                            kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
-                            ty: type_id,
-                        });
-                    }
-                    return Err(LowerError::Unsupported(format!(
-                        "enum '{}' has no variant named '{}'",
-                        recv_name, field
-                    )));
+            // Flattened (JIT) unit: `ns.CONST` through a whole-module import.
+            // The receiver used to lower to an unrelated value and the dynamic
+            // field read returned garbage with no diagnostic.
+            // doc/08_tracking/bug/jit_module_namespace_member_access_unresolved_2026-11-13.md
+            if ctx.lookup(recv_name).is_none() {
+                if let Some((symbol, ty)) = self
+                    .resolve_flatten_namespace_global(recv_name, field)
+                    .and_then(|symbol| Some((symbol.clone(), self.globals.get(&symbol).copied()?)))
+                {
+                    return Ok(HirExpr {
+                        kind: HirExprKind::Global(symbol),
+                        ty,
+                    });
                 }
+            }
+
+            // Same-named flattened enum: name the declaration the current
+            // owner sees (flatten_struct_owner.rs). `lookup` below is already
+            // owner-scoped; the emitted `Enum::Variant` global must carry the
+            // same owner-exact name, or MIR resolves the variant against the
+            // other module's enum.
+            let scoped_recv_name = self.module.types.scoped_name(recv_name).to_string();
+            let recv_name = &scoped_recv_name;
+            if let Some(enum_expr) = self.try_lower_enum_variant_access(recv_name, field)? {
+                return Ok(enum_expr);
             }
 
             // Class 1 fallback: when the receiver identifier names an enum
@@ -173,6 +198,24 @@ impl Lowerer {
                     return Ok(expr);
                 }
             }
+        } else if let Expr::FieldAccess {
+            receiver: inner_recv,
+            field: inner_field,
+        } = receiver_base
+        {
+            if let Expr::Identifier(ns) = inner_recv.as_ref() {
+                if ctx.lookup(ns).is_none() {
+                    if let Some((type_name, _)) = self.resolve_flatten_namespace_type(ns, inner_field) {
+                        self.gate_private_namespace_ref(ns, inner_field);
+                        if let Some(enum_expr) = self.try_lower_enum_variant_access(&type_name, field)? {
+                            return Ok(enum_expr);
+                        }
+                        if let Some(expr) = self.try_lower_static_member_value_with_sugar(&type_name, field, ctx)? {
+                            return Ok(expr);
+                        }
+                    }
+                }
+            }
         }
 
         // `module.Enum.Variant`: the receiver is itself a path segment
@@ -195,6 +238,12 @@ impl Lowerer {
         // binding annotation recorded by statement lowering before asking the
         // generic field resolver, which would otherwise diagnose `i64.ok`.
         if let Some(projected) = self.try_lower_annotated_result_projection(receiver, &lowered_receiver, field, ctx) {
+            return Ok(projected);
+        }
+        // `.ok` / `.err` on a typed Result projects the Result itself. It must
+        // run before the Ok-payload projection below, which would otherwise
+        // look `.ok` up on the payload (`i64.ok` for `Result<i64, text>`).
+        if let Some(projected) = self.try_lower_result_projection(&lowered_receiver, field) {
             return Ok(projected);
         }
         // Flow analysis may permit `.0` on Option<Tuple>/Result<Tuple>, but
@@ -233,10 +282,18 @@ impl Lowerer {
         if self.should_treat_unresolved_field_as_static_variant(receiver, &recv_hir, field) {
             if let Expr::Identifier(recv_name) = receiver {
                 return Ok(HirExpr {
-                    kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
+                    kind: HirExprKind::Global(format!("{}::{}", self.module.types.scoped_name(recv_name), field)),
                     ty: TypeId::ANY,
                 });
             }
+        }
+
+        // Erased record unit: `.value` on the scalar is the identity.
+        if field == "value"
+            && !self.record_unit_scalars.is_empty()
+            && Self::is_scalar_type(self.module.types.get(recv_hir.ty))
+        {
+            return Ok(*recv_hir);
         }
 
         // Check for SIMD neighbor access
@@ -383,6 +440,30 @@ impl Lowerer {
                     }
                 }
 
+                // Getter forwarding: `obj.name` with no field `name` reads
+                // `obj.get_name()` then `obj.is_name()` — the same order as the
+                // interpreter (interpreter/expr/calls.rs). The bare no-paren
+                // `obj.name()` case is the has_known_method path below.
+                for prefix in ["get_", "is_"].into_iter().filter(|_| !field.starts_with('_')) {
+                    let getter = format!("{prefix}{field}");
+                    if candidate_struct_names
+                        .iter()
+                        .any(|name| self.has_known_method_for_struct_name(name, &getter))
+                    {
+                        // Re-lower as a real `receiver.getter()` call so the
+                        // method's declared return type is kept; a hand-built
+                        // Dynamic call typed ANY rendered `t.celsius` as a
+                        // garbage f64 and `t.hot` as nil in the JIT.
+                        let call = Expr::MethodCall {
+                            receiver: Box::new(receiver.clone()),
+                            method: getter,
+                            args: vec![],
+                            generic_args: vec![],
+                        };
+                        return self.lower_expr(&call, ctx);
+                    }
+                }
+
                 // Class 2 fallback: when the receiver's type is ANY (e.g.
                 // from a call expression like `shell(...)` whose return type
                 // wasn't propagated) and no candidate struct names could be
@@ -494,6 +575,7 @@ impl Lowerer {
                         method: field.to_string(),
                         args: vec![],
                         dispatch: DispatchMode::Dynamic,
+                        generic_args: vec![],
                     },
                     ty: TypeId::ANY, // Method return type is unknown at this point
                 })
@@ -509,6 +591,8 @@ impl Lowerer {
     /// match — never a lenient guess — so it stays side-effect free for
     /// non-enum receivers and cannot hijack ordinary field accesses.
     fn try_lower_qualified_enum_variant(&mut self, enum_name: &str, field: &str) -> Option<HirExpr> {
+        let scoped_enum_name = self.module.types.scoped_name(enum_name).to_string();
+        let enum_name = scoped_enum_name.as_str();
         // Enum registered in the local type registry.
         if let Some(type_id) = self.module.types.lookup(enum_name) {
             if let Some(HirType::Enum { variants, .. }) = self.module.types.get(type_id) {
@@ -700,6 +784,27 @@ impl Lowerer {
         })
     }
 
+    /// Setter forwarding for `receiver.field = value`: when the receiver's
+    /// struct has no field `field` but defines `set_<field>`, the assignment
+    /// is the call `receiver.set_<field>(value)` (interpreter twin:
+    /// interpreter/node_exec.rs `forward_field_setter`). Returns None when the
+    /// target is a real field or no setter is known, leaving the normal
+    /// store path (and its fail-closed field diagnostics) untouched.
+    pub(crate) fn setter_forward_name(&mut self, receiver: &Expr, field: &str, ctx: &FunctionContext) -> Option<String> {
+        if field.starts_with('_') {
+            return None;
+        }
+        let struct_name = self.try_resolve_receiver_struct_name_from_expr(receiver, ctx)?;
+        if self.try_resolve_field_type_by_name(&struct_name, field).is_some()
+            || self.try_resolve_global_field_type_by_name(&struct_name, field).is_some()
+        {
+            return None;
+        }
+        let setter = format!("set_{field}");
+        self.has_known_method_for_struct_name(&struct_name, &setter)
+            .then_some(setter)
+    }
+
     pub(crate) fn try_resolve_receiver_struct_name_from_expr(
         &mut self,
         receiver: &Expr,
@@ -850,7 +955,9 @@ impl Lowerer {
     }
 
     fn build_result_projection(&self, recv_hir: &HirExpr, variant: &str, payload_ty: TypeId) -> HirExpr {
-        let expected_disc = self.enum_variant_discriminant(variant);
+        // `.ok`/`.err` projection: the receiver's own owner, else the builtin
+        // Result (#6953).
+        let expected_disc = self.owner_variant_discriminant(recv_hir.ty, Some("Result"), variant, "hir result projection");
         let subject_for_check = recv_hir.clone();
         let subject_for_payload = recv_hir.clone();
         HirExpr {
@@ -904,18 +1011,6 @@ impl Lowerer {
         }
     }
 
-    fn enum_variant_discriminant(&self, variant: &str) -> i64 {
-        // Step (d), 2026-08-02: delegate to the SINGLE authoritative definition
-        // in the runtime crate. This value is a RUNTIME ABI, not a
-        // compiler-internal convention: `rt_option_some`/`rt_option_none`
-        // (runtime/src/value/objects.rs) build Option values with it, the
-        // bytecode compiler emits it into the instruction stream, and the
-        // interpreter SFFI reads it back. A second copy here that drifted by
-        // one character would desynchronize compiled code from the runtime
-        // silently. See
-        // doc/08_tracking/bug/enum_bare_name_collision_registry_2026-08-01.md.
-        simple_runtime::value::hash_variant_discriminant(variant) as i64
-    }
 
     /// Lower thread_group field access to GPU intrinsics
     ///
@@ -1024,7 +1119,21 @@ impl Lowerer {
         index: usize,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
-        let recv_hir = Box::new(self.lower_expr(receiver, ctx)?);
+        let lowered_receiver = self.lower_expr(receiver, ctx)?;
+        // `.0`/`.1` on a `(A, B)?` local read after a nil check: the value may
+        // be the boxed `Some` enum, so project the payload first (same as the
+        // FieldAccess path); raw payloads pass through unchanged.
+        let recv_hir = Box::new(if let Some(inner) = self.optional_struct_inner_type(lowered_receiver.ty) {
+            HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_unwrap_or_self".to_string(),
+                    args: vec![lowered_receiver],
+                },
+                ty: inner,
+            }
+        } else {
+            lowered_receiver
+        });
         // Per-INDEX element type. `get_index_element_type` has no index and
         // returned one type for every position (element 0's type / ANY),
         // which mis-typed every field of a HETEROGENEOUS tuple past index 0:

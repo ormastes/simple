@@ -7,10 +7,12 @@
 # `lsp_query_inproc`/`cache_contract`) is NOT imported at module scope here:
 # `--help`/`--version` never call a tool handler, so eagerly importing it would
 # pay for the whole closure on every startup. Each dispatch site below carries
-# its own function-local `use .tools.{...}` (same shape as
-# `app/mcp/bootstrap/main_lazy_v2.spl`'s `dispatch_*` functions) so the handler
-# tree loads only when a message actually routes to it.
-use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, jsonrpc_result, jsonrpc_error, has_method, extract_id, read_stdin_message, write_stdout_message}
+# its own function-local `use app.simple_lsp_mcp.tools.{...}` (absolute path:
+# the seed resolver resolves function-local RELATIVE `use .tools.{...}`
+# against the ENTRY file's package, not this module's — see #8546-era
+# native_handler_owner_binding_spec E1034; absolute keeps the lazy shape)
+use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, jsonrpc_result, jsonrpc_error, lsp_query_path, query_visibility_path, saml_cli_path, read_stdin_message, write_stdout_message}
+use app.protocol.mcp_request_envelope.{mcp_parse_request_envelope_v1}
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.minimal_runtime_ops.{get_args, report_error}
 
@@ -76,7 +78,7 @@ fn simple_lsp_mcp_get_args() -> [text]:
     while i < all_args.len():
         if found:
             args.push(all_args[i])
-        elif all_args[i] == "simple-lsp-mcp" or all_args[i] == "simple_lsp_mcp" or all_args[i] == "simple_lsp_mcp_server" or all_args[i].ends_with("/simple_lsp_mcp_server"):
+        elif all_args[i] == "simple-lsp-mcp" or all_args[i] == "simple_lsp_mcp" or all_args[i] == "simple_lsp_mcp_server" or all_args[i].ends_with("/simple_lsp_mcp_server") or all_args[i].ends_with("\\simple_lsp_mcp_server") or all_args[i].ends_with("/simple_lsp_mcp_server.exe") or all_args[i].ends_with("\\simple_lsp_mcp_server.exe"):
             found = true
         i = i + 1
     if found:
@@ -85,7 +87,7 @@ fn simple_lsp_mcp_get_args() -> [text]:
     var start_idx = 0
     i = 0
     while i < all_args.len():
-        if all_args[i].ends_with("/app/simple_lsp_mcp/main.spl") or all_args[i] == "src/app/simple_lsp_mcp/main.spl":
+        if all_args[i].ends_with("/app/simple_lsp_mcp/main.spl") or all_args[i].ends_with("\\app\\simple_lsp_mcp\\main.spl") or all_args[i] == "src/app/simple_lsp_mcp/main.spl":
             start_idx = i + 1
         i = i + 1
     i = start_idx
@@ -137,15 +139,40 @@ fn make_position_requester_schema() -> text:
     schema = schema + RB()
     schema
 
+fn make_workspace_symbols_schema() -> text:
+    val props = LB() + jp("query", jo2(jp("type", js("string")), jp("description", js("Case-insensitive name filter; may be empty when feature or layer is given")))) + "," + visibility_prop_json() + "," + feature_layer_props_json() + "," + jp("root", jo2(jp("type", js("string")), jp("description", js("Directory bounding the walk, default src")))) + RB()
+    var schema = LB()
+    schema = schema + jp("type", js("object"))
+    schema = schema + "," + jp("properties", props)
+    schema = schema + "," + jp("required", SB_L() + SB_R())
+    schema = schema + RB()
+    schema
+
 # File schema plus optional `requester` — lsp_symbols (file required) and
 # lsp_visibility (file optional: defaults to the requester's own file).
+fn visibility_prop_json() -> text:
+    jp("visibility", jo2(jp("type", js("string")), jp("description", js("MDSOC+ reveal level: public (default inside an __init__.spl boundary), feature_private, layer_private, all. Each level adds one class; a hidden count is reported in-band with the exact reveal handle."))))
+
+fn feature_layer_props_json() -> text:
+    jp("feature", jo2(jp("type", js("string")), jp("description", js("Feature capsule id or directory: keep only this feature (across all its layers)")))) + "," +
+        jp("layer", jo2(jp("type", js("string")), jp("description", js("Layer directory name such as 10.core or 35.semantics: keep only this layer (across all features)"))))
+
 fn make_file_requester_schema(file_required: bool) -> text:
-    val props = jo2(jp("file", jo2(jp("type", js("string")), jp("description", js("Path to the source file whose symbols are classified")))), requester_prop_json())
+    val props = LB() + jp("file", jo2(jp("type", js("string")), jp("description", js("Path to the source file whose symbols are classified")))) + "," + requester_prop_json() + "," + visibility_prop_json() + "," + feature_layer_props_json() + RB()
     val req = if file_required: SB_L() + js("file") + SB_R() else: SB_L() + SB_R()
     var schema = LB()
     schema = schema + jp("type", js("object"))
     schema = schema + "," + jp("properties", props)
     schema = schema + "," + jp("required", req)
+    schema = schema + RB()
+    schema
+
+fn make_set_visibility_schema() -> text:
+    val props = LB() + visibility_prop_json() + "," + feature_layer_props_json() + RB()
+    var schema = LB()
+    schema = schema + jp("type", js("object"))
+    schema = schema + "," + jp("properties", props)
+    schema = schema + "," + jp("required", SB_L() + js("visibility") + SB_R())
     schema = schema + RB()
     schema
 
@@ -162,7 +189,7 @@ fn make_saml_analyze_schema() -> text:
     schema
 
 fn handle_position_tool(subcmd: text, is_visibility: bool, a: text) -> text:
-    use .tools.{arg_field, arg_int_field, run_lsp_query, run_visibility_query}
+    use app.simple_lsp_mcp.tools.{arg_field, arg_int_field, run_lsp_query, run_visibility_query}
     val file = arg_field(a, "file")
     val line0 = arg_int_field(a, "line")
     val char0 = arg_int_field(a, "character")
@@ -188,8 +215,10 @@ fn lsp_tools_list_result(id: text) -> text:
     var tools_json = lsp_tool_json("lsp_definition", "Find where a symbol is defined in a Simple source file.", pos_schema)
     tools_json = tools_json + "," + lsp_tool_json("lsp_references", "Find symbol references in Simple source.", pos_schema)
     tools_json = tools_json + "," + lsp_tool_json("lsp_hover", "Get hover information for a symbol in Simple source, with MDSOC visibility relative to the requester location.", make_position_requester_schema())
-    tools_json = tools_json + "," + lsp_tool_json("lsp_symbols", "List symbols in a Simple source file with MDSOC layer (simpleVisibility) and feature (featureVisibility) classification relative to the requester location.", make_file_requester_schema(true))
+    tools_json = tools_json + "," + lsp_tool_json("lsp_symbols", "Public-view symbols of a Simple source file (MDSOC+): default visibility=public inside an __init__.spl boundary; hidden symbols are summarized in-band in a trailing entry named `⋯ N hidden (...) — reveal: ...` with the exact `visibility` value to pass. Classes: public, feature_private, layer_private, module_private.", make_file_requester_schema(true))
+    tools_json = tools_json + "," + lsp_tool_json("lsp_workspace_symbols", "MDSOC+ workspace public view: by `feature` (one capsule across its layers), by `layer` (one layer across features) or by `query`; same `visibility` reveal levels and in-band hidden summary as lsp_symbols. `root` bounds the walk (default src).", make_workspace_symbols_schema())
     tools_json = tools_json + "," + lsp_tool_json("lsp_visibility", "MDSOC two-set view for a requester location: layerPublic and featurePublic symbols of `file` (default: the requester's file), each with symbol/kind/module|feature/why.", make_file_requester_schema(false))
+    tools_json = tools_json + "," + lsp_tool_json("simple_set_visibility", "Set the session MDSOC+ view for lsp_symbols/lsp_workspace_symbols: public (default), feature_private, layer_private, all, with optional feature/layer scope. A private view auto-reverts to public after 3 requests (SIMPLE_VISIBILITY_AUTO_REVERT) or on visibility=public; every symbol result states its view in content[1]. A per-request visibility on a symbol tool serves one request and does not change the session.", make_set_visibility_schema())
     tools_json = tools_json + "," + lsp_tool_json("lsp_diagnostics", "Run lightweight diagnostics via simple check.", file_schema)
     tools_json = tools_json + "," + lsp_tool_json("lsp_completion", "Get code completions at a position in a Simple source file.", pos_schema)
     tools_json = tools_json + "," + lsp_tool_json("lsp_type_at", "Get the inferred type of a symbol at a position.", pos_schema)
@@ -197,6 +226,8 @@ fn lsp_tools_list_result(id: text) -> text:
     tools_json = tools_json + "," + lsp_tool_json("lsp_implementation", "Go to implementation of a trait or interface.", pos_schema)
     tools_json = tools_json + "," + lsp_tool_json("lsp_document_highlight", "Highlight all occurrences of a symbol in the same file.", pos_schema)
     tools_json = tools_json + "," + lsp_tool_json("lsp_type_definition", "Navigate to the type definition of a symbol.", pos_schema)
+    tools_json = tools_json + "," + lsp_tool_json("lsp_incoming_calls", "Callers of the function at a position (one `caller|file|def_line|site_line|site_col|resolution` edge per line; textual hits are labelled heuristic, never exact).", pos_schema)
+    tools_json = tools_json + "," + lsp_tool_json("lsp_outgoing_calls", "Callees invoked by the function at a position (same edge format and resolution labels as lsp_incoming_calls).", pos_schema)
     tools_json = tools_json + "," + lsp_tool_json("saml_analyze", "Analyze a SAML (.saml) module: per-function schema reach, prompt binding, evidence state, and warnings. Returns the shared analysis report text. Optional spec_dir folds in spec-derived external coverage.", make_saml_analyze_schema())
     jsonrpc_result(id, jo1(jp("tools", SB_L() + tools_json + SB_R())))
 
@@ -220,59 +251,63 @@ fn lsp_initialize_result(id: text) -> text:
 # so the heavy handler tree (and, through it, lsp_query_inproc/cache_contract)
 # loads only when a message actually routes to that branch.
 fn dispatch_tools_call(id: text, msg: text) -> text:
-    use .tools.{handle_tool_call}
+    use app.simple_lsp_mcp.tools.{handle_tool_call}
     handle_tool_call(id, msg)
 
 fn dispatch_resources_list(id: text) -> text:
-    use .tools.{handle_resources_list}
+    use app.simple_lsp_mcp.tools.{handle_resources_list}
     handle_resources_list(id)
 
 fn dispatch_resource_templates_list(id: text) -> text:
-    use .tools.{handle_resource_templates_list}
+    use app.simple_lsp_mcp.tools.{handle_resource_templates_list}
     handle_resource_templates_list(id)
 
 fn dispatch_resource_read(id: text, msg: text) -> text:
-    use .tools.{handle_resource_read}
+    use app.simple_lsp_mcp.tools.{handle_resource_read}
     handle_resource_read(id, msg)
 
 fn dispatch_prompts_list(id: text) -> text:
-    use .tools.{handle_prompts_list}
+    use app.simple_lsp_mcp.tools.{handle_prompts_list}
     handle_prompts_list(id)
 
 fn dispatch_roots_list(id: text) -> text:
-    use .tools.{handle_roots_list}
+    use app.simple_lsp_mcp.tools.{handle_roots_list}
     handle_roots_list(id)
 
 fn dispatch_logging_set_level(id: text, msg: text) -> text:
-    use .tools.{handle_logging_set_level}
+    use app.simple_lsp_mcp.tools.{handle_logging_set_level}
     handle_logging_set_level(id, msg)
 
-fn lsp_handle_message(msg: text) -> text:
-    val id = extract_id(msg)
-    if has_method(msg, "initialize"):
+pub fn lsp_handle_message(msg: text) -> text:
+    val envelope = mcp_parse_request_envelope_v1(msg)
+    if not envelope.valid:
+        val reason = if envelope.error_code == -32700: "Parse error" else: "Invalid Request"
+        return jsonrpc_error(envelope.request_id_raw, envelope.error_code, reason)
+    # Notifications have no correlation ID and must never produce a reply.
+    if not envelope.has_id:
+        return ""
+    val id = envelope.request_id_raw
+    val method = envelope.method
+    if method == "initialize":
         return lsp_initialize_result(id)
-    if has_method(msg, "notifications/initialized"):
-        return ""
-    if has_method(msg, "tools/list"):
+    if method == "tools/list":
         return lsp_tools_list_result(id)
-    if has_method(msg, "tools/call"):
+    if method == "tools/call":
         return dispatch_tools_call(id, msg)
-    if has_method(msg, "resources/list"):
+    if method == "resources/list":
         return dispatch_resources_list(id)
-    if has_method(msg, "resources/templates/list"):
+    if method == "resources/templates/list":
         return dispatch_resource_templates_list(id)
-    if has_method(msg, "resources/read"):
+    if method == "resources/read":
         return dispatch_resource_read(id, msg)
-    if has_method(msg, "prompts/list"):
+    if method == "prompts/list":
         return dispatch_prompts_list(id)
-    if has_method(msg, "roots/list"):
+    if method == "roots/list":
         return dispatch_roots_list(id)
-    if has_method(msg, "logging/setLevel"):
+    if method == "logging/setLevel":
         return dispatch_logging_set_level(id, msg)
-    if has_method(msg, "ping"):
+    if method == "ping":
         return jsonrpc_result(id, LB() + RB())
-    if msg.contains(Q() + "method" + Q() + ":" + Q() + "notifications/"):
-        return ""
     jsonrpc_error(id, -32601, "Method not found")
 
 fn lsp_serve_stdio():
@@ -288,6 +323,17 @@ fn lsp_serve_stdio():
 
 fn main() -> i64:
     val raw_args = simple_lsp_mcp_get_args()
+    # These workers accept the same script-marker argv as the Simple CLI.
+    if raw_args.len() > 0:
+        if raw_args[0] == query_visibility_path():
+            use app.cli.query_visibility.{query_visibility_main}
+            return query_visibility_main()
+        if raw_args[0] == lsp_query_path():
+            use std.nogc_sync_mut.lsp.lsp_query.{lsp_query_main}
+            return lsp_query_main()
+        if raw_args[0] == saml_cli_path() and raw_args.len() > 1 and raw_args[1] == "analyze":
+            use app.saml.main.{saml_cli_run}
+            return saml_cli_run(raw_args[1:])
     val log_opts = parse_log_options(raw_args)
     if not log_opts.valid:
         report_error("simple-lsp-mcp", log_opts.error)
@@ -315,7 +361,7 @@ fn main() -> i64:
                 return 1
         if arg == "--version" or arg == "-v":
             if log_opts.log_mode == "json":
-                print "{\"command\":\"simple-lsp-mcp\",\"status\":\"version\",\"version\":\"{SERVER_VERSION}\"}"
+                print "{\"command\":\"simple-lsp-mcp\",\"status\":\"version\",\"version\":\"" + SERVER_VERSION + "\"}"
             else:
                 print "{SERVER_NAME} {SERVER_VERSION}"
             return 0

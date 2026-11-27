@@ -1,0 +1,49 @@
+# Logical endpoint address arithmetic and SCMAC code registry.
+#
+# @req SC-MAC-008 SC-MAC-017
+#
+# **Requirements:** doc/05_design/simple_container_macos_seatbelt.md §3.1
+# **Plan:** doc/05_design/simple_container_macos_seatbelt.md §20 P1
+# **Design:** doc/05_design/simple_container_macos_seatbelt.md §11.7, §13.5, §18.2
+# **Research:** N/A
+#
+# ## Overview
+#
+# A logical CIDR allocates broker addresses only. Parsing is exact: four
+# canonical octets, a prefix in 8..30, and no host bits. The SCMAC code list
+# is the single owner of the §18.2 codes and must not repeat a code.
+use std.common.contracts.container.endpoint_policy_v1.*
+use std.common.contracts.container.sandbox_capability_v1.{scmac_codes_v1}
+
+fn cidr_reason(s: text) -> text:
+    match logical_cidr_parse_v1(s):
+        case Ok(c): "ok:" + logical_cidr_text_v1(c) + ":" + logical_cidr_size_v1(c).to_text()
+        case Err(e): e
+
+describe "Logical endpoint CIDR":
+
+    it "parses canonical prefixes and sizes them without overflow":
+        expect(cidr_reason("10.73.0.0/24")).to_equal("ok:10.73.0.0/24:256")
+        expect(cidr_reason("255.255.255.252/30")).to_equal("ok:255.255.255.252/30:4")
+        expect(cidr_reason("10.0.0.0/8")).to_equal("ok:10.0.0.0/8:16777216")
+
+    it "refuses non-canonical or out-of-range spellings":
+        expect(cidr_reason("10.73.0.1/24")).to_equal("cidr-host-bits-set")
+        expect(cidr_reason("10.73.0.0/31")).to_equal("cidr-prefix-range")
+        expect(cidr_reason("10.73.0.0/7")).to_equal("cidr-prefix-range")
+        expect(cidr_reason("10.73.0.256/30")).to_equal("cidr-octet")
+        expect(cidr_reason("10.073.0.0/24")).to_equal("cidr-octet")
+        expect(cidr_reason("10.73.0/24")).to_equal("cidr-shape")
+        expect(cidr_reason("10.73.0.0")).to_equal("cidr-shape")
+
+describe "SCMAC diagnostic code registry":
+
+    it "lists each §18.2 code once":
+        val codes = scmac_codes_v1()
+        var seen: [text] = []
+        for c in codes:
+            expect(seen.contains(c)).to_equal(false)
+            expect(c.starts_with("SCMAC-")).to_equal(true)
+            seen.push(c)
+        expect(codes.len()).to_equal(16)
+        expect(codes).to_contain("SCMAC-NET-001")

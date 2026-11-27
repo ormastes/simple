@@ -1,0 +1,81 @@
+# AUTHORED_UNRUN. Real temporary filesystem operations store synthetic metadata
+# only; no Host admission, helper lease, native stream or cleanup is fabricated.
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.sosix.test_process.sosix_test_temp_dir
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io_runtime.dir_remove
+use os.apps.smux.runtime_binding_request_v3.{SmuxRuntimeBindRequestV3, smux_runtime_bind_request_digest_v3}
+use os.apps.smux.runtime_binding_reply_v3.SmuxRuntimeBindingReplyV3
+use os.apps.smux.runtime_binding_store_v3.{smux_binding_request_store_v3, smux_binding_request_load_v3,
+    smux_binding_plan_store_v3, smux_binding_plan_load_v3, smux_binding_receipt_store_v3, smux_binding_receipt_load_v3}
+
+fn store_request_fixture_v3() -> SmuxRuntimeBindRequestV3:
+    SmuxRuntimeBindRequestV3(binding_uid: "bind-a", workload_operation_id: "workload-a",
+        helper_operation_id: "helper-a", parent_budget_digest: "a".repeat(64), service_incarnation: "b".repeat(32),
+        session_id: "s", window_id: "w", pane_id: "p", expected_epoch: 1u64,
+        expected_revision: 1u64, expected_child_incarnation: 0u64)
+
+fn store_plan_fixture_v3(request: SmuxRuntimeBindRequestV3) -> SmuxRuntimeBindingReplyV3:
+    SmuxRuntimeBindingReplyV3(binding_uid: request.binding_uid, service_incarnation: request.service_incarnation,
+        binding_digest: smux_runtime_bind_request_digest_v3(request).unwrap(),
+        workload_operation_id: request.workload_operation_id, helper_operation_id: request.helper_operation_id,
+        request_digest: "c".repeat(64), status: "planned", code: "planned", committed: false,
+        stream_owned: false, cleanup_retained: false, host_release_pending: false)
+
+describe "immutable smux binding artifact storage":
+    it "retains identical request and plan bytes and refuses changed replay under one UID":
+        step("Create a real private temporary root and preserve the first immutable request and plan")
+        val root = secure_temp_dir(sosix_test_temp_dir(), "smux-binding-store").unwrap()
+        val request = store_request_fixture_v3()
+        val plan = store_plan_fixture_v3(request)
+        val first = smux_binding_plan_store_v3(root, request, plan)
+        val repeated = smux_binding_plan_store_v3(root, request, plan)
+        var changed = request
+        changed.expected_revision = 2u64
+        val conflict = smux_binding_request_store_v3(root, changed)
+        val replay = smux_binding_plan_load_v3(root, changed)
+        val retained = smux_binding_request_load_v3(root, request.binding_uid)
+        var changed_plan = plan
+        changed_plan.request_digest = "d".repeat(64)
+        val plan_conflict = smux_binding_plan_store_v3(root, request, changed_plan)
+        val retained_plan = smux_binding_plan_load_v3(root, request)
+        val removed = dir_remove(root, true)
+        expect(first.is_ok()).to_equal(true)
+        expect(repeated.is_ok()).to_equal(true)
+        expect(conflict.is_err()).to_equal(true)
+        expect(replay.is_err()).to_equal(true)
+        expect(retained.unwrap().expected_revision).to_equal(1u64)
+        expect(plan_conflict.is_err()).to_equal(true)
+        expect(retained_plan.unwrap().request_digest).to_equal(plan.request_digest)
+        expect(removed).to_equal(true)
+
+    it "retains the first receipt and rejects changed receipts or foreign plan digests":
+        step("Publish real receipt bytes once without treating stored metadata as current runtime facts")
+        val root = secure_temp_dir(sosix_test_temp_dir(), "smux-binding-receipt").unwrap()
+        val request = store_request_fixture_v3()
+        val plan = store_plan_fixture_v3(request)
+        val planned = smux_binding_plan_store_v3(root, request, plan)
+        val absent = smux_binding_receipt_load_v3(root, request)
+        var receipt = plan
+        receipt.status = "cleanup-required"
+        receipt.code = "retained-test-metadata"
+        receipt.cleanup_retained = true
+        receipt.host_release_pending = true
+        val first = smux_binding_receipt_store_v3(root, request, receipt)
+        val repeated = smux_binding_receipt_store_v3(root, request, receipt)
+        var changed = receipt
+        changed.code = "different-first-receipt"
+        val conflict = smux_binding_receipt_store_v3(root, request, changed)
+        changed = receipt
+        changed.request_digest = "d".repeat(64)
+        val foreign = smux_binding_receipt_store_v3(root, request, changed)
+        val retained = smux_binding_receipt_load_v3(root, request)
+        val removed = dir_remove(root, true)
+        expect(planned.is_ok()).to_equal(true)
+        expect(absent.unwrap() == nil).to_equal(true)
+        expect(first.is_ok()).to_equal(true)
+        expect(repeated.is_ok()).to_equal(true)
+        expect(conflict.is_err()).to_equal(true)
+        expect(foreign.is_err()).to_equal(true)
+        expect(retained.unwrap().unwrap().code).to_equal(receipt.code)
+        expect(removed).to_equal(true)

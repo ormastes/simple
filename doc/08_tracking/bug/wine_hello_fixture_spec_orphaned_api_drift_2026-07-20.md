@@ -100,3 +100,37 @@ Either:
 
 - `test/01_unit/lib_standalone/common/.spipe_matchers_wine_hello_fixture_spec.spl` (sole affected spec in this shard)
 
+
+## Verification 2026-11-25 — RESOLVED (2-arg API restored; spec expectations hold)
+
+The "4 imported symbols do not exist" root cause no longer holds at
+release/1.0.0 (`64dfa6d980f`). The 2-arg surface this spec was written against
+is back in source:
+
+- `wine_hello_exe_probe(data, gates)` — `src/lib/common/wine_hello_exe.spl:46`
+- `wine_hello_exe_can_execute(data, gates)` — line 123
+- `WineHelloExeProbeResult` again carries `stdout_handle` and `bytes_written`
+  — lines 36-37
+- `wine_hello_fixture_verified_gates()` —
+  `src/lib/common/wine_hello_fixture.spl:108`
+
+Executed against the pinned seed (`bin/simple.exe` v1.0.0-rc.1, Windows) via
+`bin/simple.exe run` with the spec's exact calls:
+
+```
+status=executed
+stdout=Hello from SimpleOS Wine\n
+stdout_handle=-11
+bytes_written=25
+exit_code=0
+can_execute=true
+```
+
+Every assertion of the original spec body holds. The orphaned
+`test/01_unit/lib_standalone/common/.spipe_matchers_wine_hello_fixture_spec.spl`
+path no longer exists (the whole `lib_standalone` tree is gone); the
+maintained spec is `test/01_unit/lib/common/wine_hello_fixture_spec.spl`,
+which carries the same six assertions. Running it through
+`bin/simple.exe test` is environment-blocked at HEAD (seed rejects
+`@representation_boundary`); the probe above covers the same calls and
+values. **Status: CLOSED — stale; fixed by the API restoration.**

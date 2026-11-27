@@ -24,7 +24,7 @@ use std.common.encoding.utf8.{text_truncate_bytes}
 use app.office.gui.{SheetGuiSession, SheetGuiView, session_new, sheet_gui_view_with_selection, office_gui_sheet_session_pixels, office_gui_non_background_pixel_count, office_gui_frame_width, office_gui_frame_height, run_gui_live_step, SlideGuiSession, SlideGuiView, slide_session_new, slide_session_view, slide_gui_step, office_gui_slide_pixels}
 use app.office.slides.slide.{Slide}
 
-extern fn rt_stdin_read_line() -> text
+extern fn rt_stdin_read_line() -> text?
 
 struct EditorStep:
     sheet: Sheet
@@ -41,7 +41,7 @@ fn sheet_grid_text(sheet: Sheet) -> text:
     val parts = range_str.split(":")
     val start = parse_cell_ref(parts[0])
     val end_ref = parse_cell_ref(parts[1])
-    if start == nil or end_ref == nil:
+    if start.is_none() or end_ref.is_none():
         return "(empty sheet)"
     # column widths
     var widths: [i32] = []
@@ -132,7 +132,7 @@ fn editor_apply(sheet: Sheet, line: text) -> EditorStep:
         return _step(sheet, sheet_grid_text(sheet), false)
     if cmd == "get" and parts.len() >= 2:
         val ref_str = parts[1].upper()
-        if parse_cell_ref(ref_str) == nil:
+        if parse_cell_ref(ref_str).is_none():
             return _step(sheet, "error: invalid ref {parts[1]}", false)
         return _step(sheet, "{ref_str} = {cell_display_text(sheet.get_cell(ref_str))}", false)
     if cmd == "del" and parts.len() >= 2:
@@ -142,7 +142,7 @@ fn editor_apply(sheet: Sheet, line: text) -> EditorStep:
         return _step(sh, "deleted {parts[1].upper()}", false)
     if cmd == "set" and parts.len() >= 3:
         val ref_str = parts[1].upper()
-        if parse_cell_ref(ref_str) == nil:
+        if parse_cell_ref(ref_str).is_none():
             return _step(sheet, "error: invalid ref {parts[1]}", false)
         val value = parts[2:].join(" ")
         var sh = sheet
@@ -186,7 +186,12 @@ fn run_sheet_editor_mode(in_path: text, screen: bool) -> i32:
         print "Simple Calc — editing {in_path} (type 'help' for commands)"
     var quit = false
     while not quit:
-        val line = rt_stdin_read_line() ?? ""
+        val line_opt = rt_stdin_read_line()
+        if line_opt == nil:
+            # absent: stdin reached end of input; leave the loop like `quit`.
+            quit = true
+            continue
+        val line = line_opt.unwrap()
         val step = editor_apply(sheet, line)
         sheet = step.sheet
         quit = step.quit

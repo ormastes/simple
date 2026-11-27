@@ -1,0 +1,150 @@
+use std.spec.{describe, it, expect}
+use std.common.string_core.{char_from_code}
+use std.nogc_sync_mut.io_runtime.{read_file_text}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val _LB: text = char_from_code(123)
+val _RB: text = char_from_code(125)
+
+fn _lower_closure(target_idx: i64, names: [text], paths: [text], srcs: [text]) -> (text, SymbolTable):
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var asts: [Module] = []
+    var i = 0
+    while i < names.len():
+        val ast = parse_full_frontend(srcs[i], paths[i], names[i], log)
+        modules[names[i]] = ast
+        asts.push(ast)
+        sources.push(SourceFile(path: paths[i], content: srcs[i], module_name: names[i]))
+        i = i + 1
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var deps: [HirModule] = []
+    var target_hir: HirModule? = None
+    var errs: [text] = []
+    i = 0
+    while i < names.len():
+        var hl = hirlowering_for_module(paths[i], surfaces)
+        val hm = hl.lower_module(asts[i])
+        if i == target_idx:
+            target_hir = Some(hm)
+            for e in hl.errors:
+                errs.push("HIR:" + e.message)
+        else:
+            deps.push(hm)
+        i = i + 1
+    val th = target_hir.unwrap()
+    var mir_lowering = MirLowering.new(th.symbols)
+    var prescan: Dict<text, HirModule> = {}
+    i = 0
+    while i < deps.len():
+        prescan["dep_{i}"] = deps[i]
+        mir_lowering.prescan_module_struct_names(prescan, "dep_{i}")
+        i = i + 1
+    prescan["target"] = th
+    mir_lowering.prescan_module_struct_names(prescan, "target")
+    val _mir = mir_lowering.lower_module(th, deps)
+    for e in mir_lowering.errors:
+        if e.fatal:
+            errs.push("MIR_FATAL:" + e.message)
+        else:
+            errs.push("MIR_WARN:" + e.message)
+    (errs.join(" | "), th.symbols)
+
+describe "WA-S6 HIR+MIR regression pins for retired workarounds":
+    it "Bug 1: lowers cross-module if/match/else route and for-in loops without annotation":
+        val p1_route = "pub struct DirtyMod:\n    module_id: text\npub struct ArchiveAdm:\n    package_identity: text\npub struct PackageIndexRouteV1:\n    valid: bool\n    dirty_modules: [DirtyMod]\n    archive_admissions: [ArchiveAdm]\npub fn current_route() -> PackageIndexRouteV1:\n    PackageIndexRouteV1(valid: true, dirty_modules: [], archive_admissions: [])\npub fn warm_route(flag: bool) -> Result<PackageIndexRouteV1, text>:\n    if not flag: return Err(\"bad\")\n    Ok(current_route())\n"
+        val p1_driver = "use lib.route." + _LB + "current_route, warm_route" + _RB + "\npub fn load(flag: bool, group_len: i64) -> (i64, bool):\n    val route = if group_len > 0:\n        match warm_route(flag):\n            case Ok(value): value\n            case Err(_): return (0, false)\n    else:\n        current_route()\n    if not route.valid: return (0, false)\n    var count = 0\n    for dirty in route.dirty_modules:\n        count = count + dirty.module_id.len()\n    for adm in route.archive_admissions:\n        count = count + adm.package_identity.len()\n    (count, true)\n"
+        val (errs, _) = _lower_closure(1, ["lib.route", "compiler.driver_p1"], ["lib/route.spl", "compiler/driver_p1.spl"], [p1_route, p1_driver])
+        expect(errs).to_equal("")
+
+    it "Bug 2: lowers generic fn value argument keep<T> -> keep_with(k, value, share_val)":
+        val p2_lib = "pub struct Kept:\n    all_ok: bool\n    session_active: bool\nfn share_val<T>(value: T) -> bool:\n    true\npub fn keep_with<T>(k: Kept, value: T, share: fn(T) -> bool) -> Kept:\n    if k.session_active:\n        val ok = share(value)\n        k.all_ok = k.all_ok and ok\n    k\npub fn keep<T>(k: Kept, value: T) -> Kept:\n    keep_with(k, value, share_val)\n"
+        val p2_app = "use lib.sess." + _LB + "Kept, keep" + _RB + "\npub struct Item:\n    name: text\npub fn run_it() -> bool:\n    var k = Kept(all_ok: true, session_active: true)\n    k = keep(k, Item(name: \"a\"))\n    k = keep(k, \"hello\")\n    k = keep(k, [1, 2])\n    k.all_ok\n"
+        val (lib_errs, _) = _lower_closure(0, ["lib.sess", "app.main"], ["lib/sess.spl", "app/main.spl"], [p2_lib, p2_app])
+        expect(lib_errs).to_equal("")
+        val (app_errs, _) = _lower_closure(1, ["lib.sess", "app.main"], ["lib/sess.spl", "app/main.spl"], [p2_lib, p2_app])
+        expect(app_errs).to_equal("")
+
+    it "Bug 3: lowers TldrTableV1.deref pattern with real std.async.future and poll":
+        val poll_src = read_file_text("src/lib/nogc_async_mut/async/poll.spl") ?? ""
+        val fut_src = read_file_text("src/lib/nogc_async_mut/async/future.spl") ?? ""
+        val io_types_src = "pub enum IoErrorKind:\n    TimedOut\n    Other\npub struct IoError:\n    kind: IoErrorKind\n    message: text\n    source: text?\n"
+        val time_ops_src = "pub fn current_time_ms() -> i64:\n    0\n"
+        val p3_tldr = "use lib.nogc_async_mut.async.future." + _LB + "Future" + _RB + "\nuse lib.nogc_async_mut.async.poll." + _LB + "Poll" + _RB + "\npub struct Handle:\n    module_key: text\npub class Tbl:\n    entries: Dict<text, text>\n    requested: Dict<text, bool>\n    fill_queue: [text]\n    me deref(h: Handle) -> Future<text?>:\n        if self.entries.contains_key(h.module_key):\n            return Future.from_value(Some(self.entries[h.module_key]))\n        if not self.requested.contains_key(h.module_key):\n            self.requested[h.module_key] = true\n            self.fill_queue.push(h.module_key)\n        Future.pending()\npub fn check_deref(t: Tbl, h: Handle) -> text:\n    val state: Poll<text?> = t.deref(h).poll()\n    match state:\n        case Poll.Ready(value):\n            match value:\n                case Some(v): v\n                case None: \"none\"\n        case Poll.Pending: \"pending\"\n"
+        val (errs, _) = _lower_closure(4,
+            ["lib.common.io.types", "lib.nogc_sync_mut.io.time_ops", "lib.nogc_async_mut.async.poll", "lib.nogc_async_mut.async.future", "compiler.tldr_p3"],
+            ["src/lib/common/io/types.spl", "src/lib/nogc_sync_mut/io/time_ops.spl", "src/lib/nogc_async_mut/async/poll.spl", "src/lib/nogc_async_mut/async/future.spl", "compiler/tldr_p3.spl"],
+            [io_types_src, time_ops_src, poll_src, fut_src, p3_tldr])
+        expect(errs).to_equal("")
+
+    it "Bug 5: lowers actual host_identity_profile_template_v2.spl via pub use re-export without E-RTI-004":
+        val p_abi = "pub struct HostIdentityStorePublicationV1:\n    leaf: text\npub fn host_identity_leaf_valid_v1(leaf: text) -> bool:\n    leaf != \"\"\n"
+        val p_types = read_file_text("src/lib/nogc_sync_mut/io/host_identity_ssh_projection_types_v1.spl") ?? ""
+        val p_store = "use std.nogc_sync_mut.io.host_identity_ssh_projection_types_v1.HostIdentitySshPathsV1\npub class HostIdentityStoreV1:\n    root: text\npub class HostIdentitySshProjectionV1:\n    root: text\npub struct HostIdentitySshProjectionTurnV1:\n    owner: Option<HostIdentitySshProjectionV1>\npub struct HostIdentitySshProjectionCloseTurnV1:\n    owner: Option<HostIdentitySshProjectionV1>\npub fn host_identity_store_projection_begin_v1(s: HostIdentityStoreV1, a: text, b: text) -> HostIdentitySshProjectionTurnV1:\n    HostIdentitySshProjectionTurnV1(owner: None)\npub fn host_identity_store_projection_step_v1(o: HostIdentitySshProjectionV1, s: HostIdentityStoreV1, c: bool = false) -> HostIdentitySshProjectionTurnV1:\n    HostIdentitySshProjectionTurnV1(owner: None)\npub fn host_identity_store_projection_paths_v1(o: HostIdentitySshProjectionV1, s: HostIdentityStoreV1) -> Result<HostIdentitySshPathsV1, text>:\n    Ok(HostIdentitySshPathsV1(identity_path: \"a\", known_hosts_path: \"b\"))\npub fn host_identity_store_projection_close_v1(o: HostIdentitySshProjectionV1) -> HostIdentitySshProjectionCloseTurnV1:\n    HostIdentitySshProjectionCloseTurnV1(owner: None)\n"
+        val p_proj = read_file_text("src/lib/nogc_sync_mut/io/host_identity_ssh_projection_v1.spl") ?? ""
+        val p_gw = "pub struct LocalGatewayHeaderV1:\n    response: bool\n    request_id: text\n    action: text\n    operation_id: text\n    exit_code: i64\n    payload_bytes: i64\n    handoff_metadata: text\n"
+        val p_ssh_types = read_file_text("src/app/orchestrator/server_ssh_types_v1.spl") ?? ""
+        val p_ssh_prof = "export use app.orchestrator.server_ssh_types_v1." + _LB + "ServerSshProfileV1" + _RB + "\npub fn server_ssh_profile_decode_v1(source: text) -> Result<ServerSshProfileV1, text>:\n    Err(\"stub\")\npub fn server_ssh_profile_validate_v1(profile: ServerSshProfileV1) -> Result<(), text>:\n    Ok(())\npub fn server_ssh_path_valid_v1(path: text) -> bool:\n    path != \"\"\n"
+        val p_srv_ctx = "pub fn server_name_valid_v1(name: text) -> bool:\n    name != \"\"\n"
+        val p_sdn_val = "pub enum SdnValue:\n    String(v: text)\n    Int(v: i64)\n    Dict(d: Dict<text, SdnValue>)\n"
+        val p_sdn_st = "pub struct SdnStrictLimitsV1:\n    max_source_bytes: i64\n    max_depth: i64\n    max_nodes: i64\n    max_rows: i64\n    max_cells: i64\n    max_columns: i64\n"
+        val p_sdn_s1 = "use std.common.sdn.value.SdnValue\nexport use std.common.sdn.strict_types_v1." + _LB + "SdnStrictLimitsV1" + _RB + "\npub struct SdnStrictParsedV1:\n    value: SdnValue\npub fn sdn_parse_strict_v1(s: text, lim: SdnStrictLimitsV1) -> Result<SdnStrictParsedV1, text>:\n    Err(\"stub\")\n"
+        val p_txt = "pub fn boxed_text_bytes_checked(s: text) -> Result<[u8], text>:\n    Ok([])\npub fn utf8_bytes_valid(b: [u8]) -> bool:\n    true\n"
+        val p_stdin = "pub class StdinCommandOwnerV1:\n    id: i64\npub fn stdin_command_store_root_valid_v1(r: text) -> bool:\n    r != \"\"\npub fn stdin_command_digest_valid_v1(d: text) -> bool:\n    d != \"\"\n"
+        val p_real_tmpl = read_file_text("src/app/orchestrator/host_identity_profile_template_v2.spl") ?? ""
+        expect(p_real_tmpl.contains("host_identity_ssh_projection_v1.HostIdentitySshPathsV1")).to_equal(true)
+        val (errs, syms) = _lower_closure(13,
+            [
+                "std.nogc_sync_mut.daemon_sdk.local_gateway_protocol_v1",
+                "std.nogc_sync_mut.io.host_identity_store_abi_v1",
+                "std.nogc_sync_mut.io.host_identity_ssh_projection_types_v1",
+                "std.nogc_sync_mut.io.host_identity_store_v1",
+                "std.nogc_sync_mut.io.host_identity_ssh_projection_v1",
+                "app.orchestrator.server_ssh_types_v1",
+                "app.orchestrator.server_ssh_profile_v1",
+                "std.common.config_core.server_context_types_v1",
+                "std.common.sdn.value",
+                "std.common.sdn.strict_types_v1",
+                "std.common.sdn.strict_v1",
+                "std.common.text_bytes",
+                "std.nogc_sync_mut.io.stdin_command_v1",
+                "app.orchestrator.host_identity_profile_template_v2"
+            ],
+            [
+                "src/lib/nogc_sync_mut/daemon_sdk/local_gateway_protocol_v1.spl",
+                "src/lib/nogc_sync_mut/io/host_identity_store_abi_v1.spl",
+                "src/lib/nogc_sync_mut/io/host_identity_ssh_projection_types_v1.spl",
+                "src/lib/nogc_sync_mut/io/host_identity_store_v1.spl",
+                "src/lib/nogc_sync_mut/io/host_identity_ssh_projection_v1.spl",
+                "src/app/orchestrator/server_ssh_types_v1.spl",
+                "src/app/orchestrator/server_ssh_profile_v1.spl",
+                "src/lib/common/config_core/server_context_types_v1.spl",
+                "src/lib/common/sdn/value.spl",
+                "src/lib/common/sdn/strict_types_v1.spl",
+                "src/lib/common/sdn/strict_v1.spl",
+                "src/lib/common/text_bytes.spl",
+                "src/lib/nogc_sync_mut/io/stdin_command_v1.spl",
+                "src/app/orchestrator/host_identity_profile_template_v2.spl"
+            ],
+            [
+                p_gw, p_abi, p_types, p_store, p_proj, p_ssh_types, p_ssh_prof,
+                p_srv_ctx, p_sdn_val, p_sdn_st, p_sdn_s1, p_txt, p_stdin, p_real_tmpl
+            ])
+        expect(errs.contains("E-RTI-004")).to_equal(false)
+        expect(errs).to_equal("")
+        var found_owner = ""
+        for sym in syms.symbols.values():
+            if sym.name == "HostIdentitySshPathsV1" and sym.kind == SymbolKind.Struct:
+                found_owner = sym.defining_module ?? ""
+        expect(found_owner).to_equal("std.nogc_sync_mut.io.host_identity_ssh_projection_types_v1")

@@ -39,5 +39,9 @@ int8_t rt_struct_receiver_valid(RuntimeValue receiver,
                                 RuntimeValue byte_offset,
                                 RuntimeValue access_width);
 RuntimeValue rt_unwrap_or_trap(RuntimeValue value);
+RuntimeValue rt_enum_check_variant(RuntimeValue value,
+                                   RuntimeValue expected_enum_id,
+                                   RuntimeValue expected_discriminant);
+RuntimeValue rt_is_present(RuntimeValue value);
 
 #endif

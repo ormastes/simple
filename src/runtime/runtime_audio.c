@@ -120,6 +120,15 @@ static int64_t audio_engine_store(void) {
     return 0;
 }
 
+static int64_t audio_slots_live_count_unlocked(const rt_audio_slot* slots) {
+    int64_t count = 0;
+    size_t i;
+    for (i = 0; i < RT_AUDIO_SLOT_COUNT; ++i) {
+        if (slots[i].live) count += 1;
+    }
+    return count;
+}
+
 static int64_t audio_engine_live_count_unlocked(void) {
     int64_t count = 0;
     size_t i;
@@ -688,11 +697,7 @@ void rt_audio_set_sound_max_distance(int64_t playback_handle, double distance) {
 
 int64_t rt_audio_live_source_count(void) {
     RT_AUDIO_LOCK();
-    int64_t count = 0;
-    size_t i;
-    for (i = 0; i < RT_AUDIO_SLOT_COUNT; ++i) {
-        if (g_source_slots[i].live) count += 1;
-    }
+    int64_t count = audio_slots_live_count_unlocked(g_source_slots);
     RT_AUDIO_UNLOCK();
     return count;
 }
@@ -707,11 +712,7 @@ int64_t rt_audio_live_device_count(void) {
 int64_t rt_audio_live_playback_count(void) {
     RT_AUDIO_LOCK();
     audio_reap_finished();
-    int64_t count = 0;
-    size_t i;
-    for (i = 0; i < RT_AUDIO_SLOT_COUNT; ++i) {
-        if (g_playback_slots[i].live) count += 1;
-    }
+    int64_t count = audio_slots_live_count_unlocked(g_playback_slots);
     RT_AUDIO_UNLOCK();
     return count;
 }

@@ -24,7 +24,7 @@ val MAX_HEADER_COUNT: i32 = 100
 val MAX_HEADER_LINE: i32 = 8192
 
 # Maximum body size (bytes) accepted via Content-Length.  10 MiB default.
-val MAX_BODY_SIZE: i32 = 10485760
+pub val MAX_BODY_SIZE: i32 = 10485760
 
 # =============================================================================
 # Content-Length parsing
@@ -176,7 +176,7 @@ fn extract_route_params(pattern: text, path: text) -> [(text, text)]:
         val pp = pattern_parts[i]
         val rp = path_parts[i]
         if pp.starts_with(":"):
-            val param_name = pp.slice(1, pp.len())
+            val param_name = pp.slice(1, pp.byte_len())
             params.push((param_name, rp))
         i = i + 1
     return params
@@ -225,6 +225,7 @@ fn hex_chunk_size(s: text) -> i32:
 
 use std.common.string_core.{text_to_bytes}
 use std.common.simd_scan.{simd_find_byte}
+use std.common.types.{Count, ByteSize}
 
 # _crlf_from finds the next "\r\n" at or after `from`. The shared byte finder
 # screens complete SIMD chunks and retains the exact scalar tail/boundary
@@ -304,20 +305,23 @@ fn decode_chunked_bounded(encoded: text, max_body: i32) -> (text, text):
         val size = hex_chunk_size(size_line.trim())
         if size < 0:
             return ("400 Malformed chunked body: bad chunk size", "")
-        rest = rest.slice(nl + 2, rest.len())
+        rest = rest.slice(nl + 2, rest.byte_len())
         if size == 0:
             return ("", body)
+        # Refuse an oversize chunk before materialising it (no transient overshoot).
+        if max_body < 0 or size > max_body - body.len():
+            return ("413 Chunked body too large: {body.len() + size} bytes", "")
         if rest.len() < size:
             return ("400 Malformed chunked body: truncated chunk", "")
         body = body + rest.slice(0, size)
         if body.len() > max_body:
             return ("413 Chunked body too large: {body.len()} bytes", "")
-        rest = rest.slice(size, rest.len())
+        rest = rest.slice(size, rest.byte_len())
         if rest.len() < 2:
             return ("400 Malformed chunked body: missing chunk terminator", "")
         if rest.slice(0, 2) != "\r\n":
             return ("400 Malformed chunked body: missing chunk terminator", "")
-        rest = rest.slice(2, rest.len())
+        rest = rest.slice(2, rest.byte_len())
     ("", body)
 
 # =============================================================================
@@ -448,27 +452,30 @@ fn http_parse_error_message(err: HttpParseError) -> text:
             "null byte in request path"
 
 fn check_request_line(line: text, limits: HttpLimits) -> HttpParseError?:
-    if line.length() > limits.max_request_line_bytes:
-        return Some(HttpParseError.RequestLineTooLong(line.length(), limits.max_request_line_bytes))
+    val line_bytes = line.byte_len()
+    if line_bytes > limits.max_request_line_bytes:
+        return Some(HttpParseError.RequestLineTooLong(line_bytes, limits.max_request_line_bytes))
     val parts = line.split(" ")
     if parts.length() < 3:
         return Some(HttpParseError.MalformedRequestLine(line))
-    nil
+    None
 
-fn check_header_count(count: i64, limits: HttpLimits) -> HttpParseError?:
-    if count > limits.max_header_count:
-        return Some(HttpParseError.TooManyHeaders(count, limits.max_header_count))
+fn check_header_count(count: Count, limits: HttpLimits) -> HttpParseError?:
+    # Fail closed: a negative count or a negative (sentinel) limit admits nothing.
+    if count.value < 0 or limits.max_header_count < 0 or count.value > limits.max_header_count:
+        return Some(HttpParseError.TooManyHeaders(count.value, limits.max_header_count))
     nil
 
 fn check_header_size(name: text, value: text, limits: HttpLimits) -> HttpParseError?:
-    val total = name.length() + value.length() + 2
+    val total = name.byte_len() + value.byte_len() + 2
     if total > limits.max_header_size_bytes:
         return Some(HttpParseError.HeaderTooLarge(name, total, limits.max_header_size_bytes))
-    nil
+    None
 
-fn check_body_size(size: i64, limits: HttpLimits) -> HttpParseError?:
-    if size > limits.max_body_bytes:
-        return Some(HttpParseError.BodyTooLarge(size, limits.max_body_bytes))
+fn check_body_size(size: ByteSize, limits: HttpLimits) -> HttpParseError?:
+    # Fail closed: a negative size or a negative (sentinel) limit admits nothing.
+    if size.value < 0 or limits.max_body_bytes < 0 or size.value > limits.max_body_bytes:
+        return Some(HttpParseError.BodyTooLarge(size.value, limits.max_body_bytes))
     nil
 
 # ============================================================================
@@ -538,8 +545,161 @@ fn validate_static_path(path: text) -> Result<text, text>:
         return Err("path traversal or injection rejected")
     Ok(normalize_path(path))
 
+# =============================================================================
+# Header field-name token grammar and HTTP/1 authority policy
+# =============================================================================
+
+# RFC 9110 tchar set: ALPHA / DIGIT / "!#$%&'*+-.^_`|~". Anything else
+# (whitespace, controls, delimiters, non-ASCII) is not a token byte.
+val _TOKEN_PUNCT: text = "!#$%&'*+-.^_`|~"
+
+fn _is_alnum_char(c: text) -> bool:
+    val letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    c.len() == 1 and letters.contains(c)
+
+# header_field_name_is_token reports whether name is a non-empty RFC 9110
+# token, i.e. a legal header field-name.
+fn header_field_name_is_token(name: text) -> bool:
+    val n = name.len()
+    if n == 0:
+        return false
+    var i = 0
+    while i < n:
+        val c = name.char_at(i)
+        if not (_is_alnum_char(c) or _TOKEN_PUNCT.contains(c)):
+            return false
+        i = i + 1
+    true
+
+fn _all_digits(s: text) -> bool:
+    val n = s.len()
+    var i = 0
+    while i < n:
+        val c = s.char_at(i)
+        if not ("0123456789".contains(c)):
+            return false
+        i = i + 1
+    true
+
+fn _port_valid(port: text) -> bool:
+    if port.len() == 0:
+        return true
+    if port.len() > 5 or not _all_digits(port):
+        return false
+    port.to_i64() <= 65535
+
+fn _ipv6_literal_valid(inner: text) -> bool:
+    if inner.len() < 2 or inner.contains(":::"):
+        return false
+    var colons = 0
+    var i = 0
+    val n = inner.len()
+    while i < n:
+        val c = inner.char_at(i)
+        if c == ":":
+            colons = colons + 1
+        elif not ("0123456789abcdefABCDEF.".contains(c)):
+            return false
+        i = i + 1
+    colons >= 2
+
+fn _reg_name_valid(host: text) -> bool:
+    if host.len() == 0:
+        return false
+    val n = host.len()
+    var i = 0
+    while i < n:
+        val c = host.char_at(i)
+        if not (_is_alnum_char(c) or "-._~%!$&'()*+,;=".contains(c)):
+            return false
+        i = i + 1
+    true
+
+# http_authority_valid checks the bounded `host [":" port]` grammar used for
+# Host and absolute-form authorities: no userinfo, no whitespace, balanced
+# IPv6 brackets, numeric port <= 65535.
+fn http_authority_valid(authority: text) -> bool:
+    if authority.len() == 0:
+        return false
+    if authority.starts_with("["):
+        val close = _char_pos(authority, "]")
+        if close < 0:
+            return false
+        if not _ipv6_literal_valid(authority.slice(1, close)):
+            return false
+        val rest = authority.slice(close + 1, authority.byte_len())
+        if rest.len() == 0:
+            return true
+        if not rest.starts_with(":"):
+            return false
+        return _port_valid(rest.slice(1, rest.byte_len()))
+    val colon = _char_pos(authority, ":")
+    if colon < 0:
+        return _reg_name_valid(authority)
+    if not _reg_name_valid(authority.slice(0, colon)):
+        return false
+    _port_valid(authority.slice(colon + 1, authority.byte_len()))
+
+fn _absolute_form_scheme_end(target: text) -> i64:
+    # Index of "://" when target starts with a URI scheme, else -1.
+    val n = target.len()
+    var i = 0
+    while i < n:
+        val c = target.char_at(i)
+        if c == ":":
+            if i > 0 and target.slice(i, n).starts_with("://"):
+                return i
+            return -1
+        if not (_is_alnum_char(c) or c == "+" or c == "-" or c == "."):
+            return -1
+        i = i + 1
+    -1
+
+# request_authority_error is the shared pre-dispatch authority policy. It
+# returns "" when acceptable, else a "400 ..." reason. HTTP/1.1 requires
+# exactly one valid Host; HTTP/1.0 keeps it optional. An absolute-form
+# request-target must carry a valid http(s) authority that agrees
+# (case-insensitively) with Host.
+fn request_authority_error(headers: [(text, text)], version: text, target: text) -> text:
+    var host_count = 0
+    var host_value = ""
+    for h in headers:
+        if h.0.to_lower() == "host":
+            host_count = host_count + 1
+            host_value = h.1.trim()
+    if host_count > 1:
+        return "400 Multiple Host headers"
+    if host_count == 0 and version == "HTTP/1.1":
+        return "400 Missing Host header"
+    if host_count == 1 and not http_authority_valid(host_value):
+        return "400 Invalid Host header"
+    val scheme_end = _absolute_form_scheme_end(target)
+    if scheme_end < 0:
+        return ""
+    val scheme = target.slice(0, scheme_end).to_lower()
+    val after = target.slice(scheme_end + 3, target.byte_len())
+    var end = after.len()
+    var i = 0
+    while i < after.len():
+        val c = after.char_at(i)
+        if c == "/" or c == "?" or c == "#":
+            end = i
+            break
+        i = i + 1
+    val authority = after.slice(0, end)
+    if authority.len() == 0:
+        return "400 Empty absolute-form authority"
+    if not http_authority_valid(authority):
+        return "400 Invalid absolute-form authority"
+    if scheme != "http" and scheme != "https":
+        return "400 Absolute-form scheme does not match Host"
+    if host_count == 1 and authority.to_lower() != host_value.to_lower():
+        return "400 Absolute-form authority does not match Host"
+    ""
+
 export MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE
 export content_length_from_text, body_decision, path_is_safe
+export header_field_name_is_token, http_authority_valid, request_authority_error
 export hex_chunk_size, decode_chunked_bounded, chunked_body_end_scan
 export match_route_pattern, extract_route_params
 export HttpLimits, http_limits_default

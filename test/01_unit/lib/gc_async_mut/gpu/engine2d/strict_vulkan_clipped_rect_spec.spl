@@ -1,0 +1,215 @@
+# @tag: unit, draw_ir, engine2d, vulkan
+"""
+# Strict Vulkan clipped plain rectangles
+
+REQ-2D-002: a plain (non-affine) DrawIR rectangle that carries a surface
+`clip_rect` paints only the pixels inside both the rectangle and the clip.
+The strict Vulkan lane executes it with the rect kernel's scissor push
+constants; the CPU engine and the pinned corpus case 06 oracle are the
+references. Corpus case 06 is checked at its full 640x480 resolution.
+Tracks Blocker 10 in
+doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md.
+"""
+
+use std.spec
+use std.fs.{read_file}
+use std.common.ui.draw_ir.{
+    DRAW_IR_BACKEND_GPU,
+    DrawIrCommand,
+    DrawIrComposition,
+    draw_ir_batch,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_fractional_rect,
+    draw_ir_rect,
+    draw_ir_rect_bounds,
+    draw_ir_rect_clipped,
+    draw_ir_text_styled_clipped
+}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    engine2d_draw_ir_adv_composition,
+    engine2d_draw_ir_adv_strict_vulkan_primitives_with_images,
+    engine2d_draw_ir_adv_strict_vulkan_submit_with_images
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.browser_engine.web_opaque_box_qualification.{
+    web_corpus_case06_gpu_scene_from_html}
+use common.renderdoc.corpus_case06_oracle.{
+    CORPUS_CASE06_SOURCE_PATH, CORPUS_CASE06_WIDTH, CORPUS_CASE06_HEIGHT,
+    corpus_case06_expected_rgba}
+
+val CLIP_BG: u32 = 0xff0000ffu32
+val CLIP_FG: u32 = 0xffff0000u32
+val CLIP_AFTER: u32 = 0xff00ff00u32
+val CASE06_CYAN: u32 = 0xff00aaffu32
+
+fn _clipped_scene() -> DrawIrComposition:
+    # 8x6 surface: clear, a rect clipped on all four sides, then an unclipped
+    # rect that lies outside the clip (proves the clip is restored after use).
+    val batch = draw_ir_batch(
+        "clipped-rect", DRAW_IR_BACKEND_GPU,
+        draw_ir_embedding_config("surface", "scene", 0, 0, 8, 6, 0, 1000, false),
+        [draw_ir_rect("clear", 0, 0, 8, 6, CLIP_BG),
+         draw_ir_rect_clipped("clipped", 1, 1, 6, 4, CLIP_FG,
+            draw_ir_rect_bounds(2, 2, 3, 2)),
+         draw_ir_rect("after", 6, 4, 2, 2, CLIP_AFTER)])
+    draw_ir_composition("clipped-rect", "scene", DRAW_IR_BACKEND_GPU, [batch])
+
+fn _expected_clipped_pixels() -> [u32]:
+    val b = CLIP_BG
+    val f = CLIP_FG
+    val a = CLIP_AFTER
+    [b, b, b, b, b, b, b, b,
+     b, b, b, b, b, b, b, b,
+     b, b, f, f, f, b, b, b,
+     b, b, f, f, f, b, b, b,
+     b, b, b, b, b, b, a, a,
+     b, b, b, b, b, b, a, a]
+
+fn _one_batch(name: text, commands: [DrawIrCommand]) -> DrawIrComposition:
+    val batch = draw_ir_batch(
+        name, DRAW_IR_BACKEND_GPU,
+        draw_ir_embedding_config("surface", "scene", 0, 0, 8, 6, 0, 1000, false),
+        commands)
+    draw_ir_composition(name, "scene", DRAW_IR_BACKEND_GPU, [batch])
+
+fn _argb_to_rgba(pixels: [u32]) -> [i64]:
+    var rgba: [i64] = []
+    for p in pixels:
+        rgba.push(((p >> 16) & 0xFFu32).to_i64())
+        rgba.push(((p >> 8) & 0xFFu32).to_i64())
+        rgba.push((p & 0xFFu32).to_i64())
+        rgba.push(((p >> 24) & 0xFFu32).to_i64())
+    rgba
+
+describe "strict Vulkan clipped plain rectangles":
+    it "admits a clipped plain rect and paints only inside the clip":
+        # @req REQ-2D-002
+        val created = Engine2D.create_with_backend_strict(8, 6, "vulkan")
+        if not created.is_ok():
+            fail("blocked: strict Vulkan device required for clipped rect evidence")
+        val engine = created.unwrap()
+
+        val result = engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(
+            engine, _clipped_scene(), [])
+
+        expect(result.fallback_reason).to_equal("")
+        expect(result.fallback_required).to_equal(false)
+        expect(result.readback_source).to_equal("device_readback")
+        expect(result.rendered_command_count).to_equal(3)
+        expect(result.pixels).to_equal(_expected_clipped_pixels())
+        engine.shutdown()
+
+    it "matches the CPU engine for the same clipped scene":
+        # @req REQ-2D-002
+        val created = Engine2D.create_with_backend_strict(8, 6, "vulkan")
+        if not created.is_ok():
+            fail("blocked: strict Vulkan device required for clipped rect evidence")
+        val vk = created.unwrap()
+        val device = engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(
+            vk, _clipped_scene(), [])
+        var cpu = Engine2D.create_with_backend(8, 6, "cpu")
+        val reference = engine2d_draw_ir_adv_composition(cpu, _clipped_scene(), false)
+
+        expect(reference.pixels).to_equal(_expected_clipped_pixels())
+        expect(device.pixels).to_equal(reference.pixels)
+        vk.shutdown()
+        cpu.shutdown()
+
+    it "clips a fractional rect with the same scissor":
+        # @req REQ-2D-002
+        val created = Engine2D.create_with_backend_strict(8, 6, "vulkan")
+        if not created.is_ok():
+            fail("blocked: strict Vulkan device required for clipped rect evidence")
+        val engine = created.unwrap()
+        var fractional = draw_ir_fractional_rect("frac", 0.6, 0.6, 6.8, 4.8, CLIP_FG)
+        fractional.clip_rect = draw_ir_rect_bounds(2, 2, 3, 2)
+        val composition = _one_batch("clipped-fractional",
+            [draw_ir_rect("clear", 0, 0, 8, 6, CLIP_BG), fractional,
+             draw_ir_rect("after", 6, 4, 2, 2, CLIP_AFTER)])
+
+        val result = engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(
+            engine, composition, [])
+
+        expect(result.fallback_required).to_equal(false)
+        expect(result.pixels).to_equal(_expected_clipped_pixels())
+        engine.shutdown()
+
+    it "still rejects a clipped first (clear) command":
+        # @req REQ-2D-002
+        val created = Engine2D.create_with_backend_strict(8, 6, "vulkan")
+        if not created.is_ok():
+            fail("blocked: strict Vulkan device required for preflight evidence")
+        val engine = created.unwrap()
+        val composition = _one_batch("clipped-clear",
+            [draw_ir_rect_clipped("clear", 0, 0, 8, 6, CLIP_BG,
+                draw_ir_rect_bounds(1, 1, 4, 4))])
+
+        val result = engine2d_draw_ir_adv_strict_vulkan_submit_with_images(
+            engine, composition, [])
+
+        expect(result.fallback_required).to_equal(true)
+        expect(result.fallback_reason).to_equal(
+            "strict-vulkan-command-preflight-required")
+        expect(result.device_submit_count).to_equal(0)
+        result.engine.shutdown()
+
+    it "still rejects a negative clip and a clipped text command":
+        # @req REQ-2D-002
+        val created = Engine2D.create_with_backend_strict(8, 6, "vulkan")
+        if not created.is_ok():
+            fail("blocked: strict Vulkan device required for preflight evidence")
+        val engine = created.unwrap()
+        val negative = _one_batch("negative-clip",
+            [draw_ir_rect("clear", 0, 0, 8, 6, CLIP_BG),
+             draw_ir_rect_clipped("neg", 1, 1, 4, 4, CLIP_FG,
+                draw_ir_rect_bounds(1, 1, -1, 2))])
+        val rejected = engine2d_draw_ir_adv_strict_vulkan_submit_with_images(
+            engine, negative, [])
+        expect(rejected.fallback_reason).to_equal(
+            "strict-vulkan-command-preflight-required")
+        val text_scene = _one_batch("clipped-text",
+            [draw_ir_rect("clear", 0, 0, 8, 6, CLIP_BG),
+             draw_ir_text_styled_clipped("t", 1, 1, "x", CLIP_FG, [],
+                draw_ir_rect_bounds(1, 1, 4, 4))])
+        val rejected_text = engine2d_draw_ir_adv_strict_vulkan_submit_with_images(
+            rejected.engine, text_scene, [])
+        expect(rejected_text.fallback_reason).to_equal(
+            "strict-vulkan-command-preflight-required")
+        rejected_text.engine.shutdown()
+
+    it "renders corpus case 06 at full 640x480 equal to the CPU engine and the oracle":
+        # @req REQ-2D-002
+        val web = match web_corpus_case06_gpu_scene_from_html(
+            read_file(CORPUS_CASE06_SOURCE_PATH)):
+            case Ok(value): value
+            case Err(reason):
+                fail("case 06 Web admission failed: {reason}")
+                return
+        val created = Engine2D.create_with_backend_strict(
+            CORPUS_CASE06_WIDTH, CORPUS_CASE06_HEIGHT, "vulkan")
+        if not created.is_ok():
+            fail("blocked: strict Vulkan device required for case 06 evidence")
+        val vk = created.unwrap()
+
+        val device = engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(
+            vk, web.gpu_draw_ir, [])
+
+        expect(device.fallback_reason).to_equal("")
+        expect(device.fallback_required).to_equal(false)
+        expect(device.readback_source).to_equal("device_readback")
+        expect(device.pixels.len()).to_equal(640 * 480)
+        # One pixel inside the clip first: a channel-order error and a clip
+        # error then fail differently.
+        if device.pixels.len() == 640 * 480:
+            expect(device.pixels[100 * 640 + 120]).to_equal(CASE06_CYAN)
+            expect(device.pixels[150 * 640 + 120]).to_equal(0xffffffffu32)
+        var cpu = Engine2D.create_with_backend(
+            CORPUS_CASE06_WIDTH, CORPUS_CASE06_HEIGHT, "cpu")
+        val reference = engine2d_draw_ir_adv_composition(cpu, web.gpu_draw_ir, false)
+        expect(device.pixels).to_equal(reference.pixels)
+        match corpus_case06_expected_rgba():
+            case Ok(expected): expect(_argb_to_rgba(device.pixels)).to_equal(expected)
+            case Err(reason): fail("case 06 oracle unavailable: {reason}")
+        vk.shutdown()
+        cpu.shutdown()

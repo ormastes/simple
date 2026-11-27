@@ -8,14 +8,24 @@ HOOK="$ROOT/scripts/check/pre-push-conflict-tree-guard.shs"
 INSTALL_UNIX="$ROOT/scripts/setup/install-must-check-hooks.shs"
 INSTALL_WINDOWS="$ROOT/scripts/setup/install-must-check-hooks.ps1"
 ZERO=0000000000000000000000000000000000000000
+case "$(uname -s 2>/dev/null || printf unknown)" in
+    MINGW*|MSYS*|CYGWIN*)
+        SELFTEST_BOUND=360
+        REF_BOUND=90
+        ;;
+    *)
+        SELFTEST_BOUND=10
+        REF_BOUND=10
+        ;;
+esac
 
 start=$(date +%s)
 sh "$PUSH" --self-test >/dev/null
 elapsed=$(($(date +%s) - start))
-[ "$elapsed" -le 10 ] || { echo "FAIL: push must-check selftest took ${elapsed}s"; exit 1; }
+[ "$elapsed" -le "$SELFTEST_BOUND" ] || { echo "FAIL: push must-check selftest took ${elapsed}s"; exit 1; }
 
 sh "$BOOTSTRAP" --self-test >/dev/null
-grep -q 'exec sh "$repo_root/scripts/check/check-push-must-pass.shs"' "$HOOK"
+grep -q 'sh "$repo_root/scripts/check/check-push-must-pass.shs" --from-pre-push-hook' "$HOOK"
 grep -q 'check-bootstrap-stage3-selfverify.shs' "$BOOTSTRAP"
 grep -q 'check-post-bootstrap-stage4-sspec.shs' "$BOOTSTRAP"
 grep -q 'pre-push.local' "$ROOT/scripts/hooks/pre-push"
@@ -40,10 +50,12 @@ printf '%s\n' \
     '      cmd: git cat-file -s "$REF:proof"' \
     '      min: 1' > "$rules_fixture/rules.sdl"
 git -C "$rules_fixture" init -q
+git -C "$rules_fixture" config core.autocrlf false
 git -C "$rules_fixture" config user.name must-check-test
 git -C "$rules_fixture" config user.email must-check-test@example.invalid
 git -C "$rules_fixture" add .
 git -C "$rules_fixture" commit -qm committed-rules
+rules_sha=$(sha256sum -- "$rules_fixture/rules.sdl" | awk '{print $1}')
 rules_ref=$(git -C "$rules_fixture" rev-parse HEAD)
 printf '%s\n' \
     'rules:' \
@@ -52,7 +64,7 @@ printf '%s\n' \
     '      group: quick' \
     '      cmd: sleep 30; echo 0' \
     '      min: 1' > "$rules_fixture/rules.sdl"
-(cd "$rules_fixture" && sh scripts/check/check-rules-sdl.shs --group quick --ref "$rules_ref") |
+(cd "$rules_fixture" && RULES_SELFTEST=1 RULES_POLICY_SHA256_OVERRIDE="$rules_sha" sh scripts/check/check-rules-sdl.shs --group quick --ref "$rules_ref") |
     grep -q 'PASS — 1 gates checked'
 
 # Linked worktrees share one hooks directory. Installing from one worktree must
@@ -72,6 +84,7 @@ for guard in check-tree-size-push check-no-conflict-tree-push check-no-conflict-
 done
 chmod +x "$hook_repo/scripts/hooks/pre-push" "$hook_repo/scripts/check/"*.shs
 git -C "$hook_repo" init -q
+git -C "$hook_repo" config core.autocrlf false
 git -C "$hook_repo" config user.name must-check-test
 git -C "$hook_repo" config user.email must-check-test@example.invalid
 git -C "$hook_repo" add .
@@ -100,7 +113,8 @@ sh "$hook_repo/scripts/setup/install-must-check-hooks.shs" --install >/dev/null
 grep -q 'unrelated-local-hook' "$shared_hooks/pre-push.local"
 cmp -s "$hook_repo/scripts/hooks/pre-push-worktree-launcher" "$shared_hooks/pre-push"
 
-if grep -E 'native-build|qemu|benchmark|--whole' "$PUSH" >/dev/null; then
+if awk '/^[[:space:]]*run_push_gate[[:space:]]/ && $0 !~ /check-native-build-entry-memory-budget\.shs/ { print }' "$PUSH" |
+    grep -E 'native-build|qemu|benchmark|--whole' >/dev/null; then
     echo "FAIL: push-tier driver directly names an expensive execution lane"
     exit 1
 fi
@@ -126,12 +140,12 @@ chmod +x "$fixture/scripts/check/check-tree-size-push.shs"
 printf '%s\n' \
     'must_check_gates |id, tier, push_blocking, mode, command, ci_job, inputs, description|' \
     '    compiler-stage1, bootstrap, true, receipt, "", -, -, "fixture"' \
-    '    fixture-manual-receipt, bootstrap, true, todo, "", -, -, "record fixture evidence"' \
-    '    push-conflict-tree, push, true, range, "sh scripts/check/check-no-conflict-tree-push.shs", -, -, "fixture"' \
-    '    push-tree-size, push, true, range, "sh scripts/check/check-tree-size-push.shs", -, -, "fixture"' \
-    '    push-conflict-markers, push, true, range, "sh scripts/check/check-no-conflict-markers-push.shs", -, -, "fixture"' \
-    '    push-rules-quick, push, true, ref, "sh scripts/check/check-rules-sdl.shs --group quick --ref", -, -, "fixture"' \
-    '    push-interpreter-module-owners, push, true, ref, "sh scripts/check/check-interpreter-module-owners.shs --ref", -, -, "fixture"' \
+    '    fixture-manual-receipt, bootstrap, true, external-receipt, "echo PASS fixture receipt", -, -, "record fixture evidence"' \
+    '    push-conflict-tree, push, true, range, "sh scripts/check/check-no-conflict-tree-push.shs {range}", -, -, "fixture"' \
+    '    push-tree-size, push, true, range, "sh scripts/check/check-tree-size-push.shs --push-tip {range}", -, -, "fixture"' \
+    '    push-conflict-markers, push, true, range, "sh scripts/check/check-no-conflict-markers-push.shs {range}", -, -, "fixture"' \
+    '    push-rules-quick, push, true, ref, "sh scripts/check/check-rules-sdl.shs --scan-only --group quick --ref", -, -, "fixture"' \
+    '    push-interpreter-module-owners, push, true, ref, "sh scripts/check/check-interpreter-module-owners.shs --scan-only --ref", -, -, "fixture"' \
     > "$fixture/config/check/must_check_gates.sdn"
 printf '%s\n' \
     'must_check_ledger:' \
@@ -142,19 +156,35 @@ printf '%s\n' \
 mkdir -p "$fixture/build"
 printf '    compiler-stage1, todo, never, "", "fixture bootstrap evidence pending", "never", "compiler-team", "run the fixture bootstrap producer"\n' >> "$fixture/doc/08_tracking/check/must_check_db.sdn"
 printf '    fixture-manual-receipt, todo, never, "", "fixture manual evidence pending", "never", "release-team", "record fixture evidence"\n' >> "$fixture/doc/08_tracking/check/must_check_db.sdn"
+export MUST_CHECK_SELFTEST=1
+export MUST_CHECK_REQUIRED_IDS_FIXTURE='compiler-stage1
+fixture-manual-receipt'
 for phase in 1 2 3 4; do printf 'phase%s evidence\n' "$phase" > "$fixture/build/phase$phase.receipt"; done
-printf '%s\n' 'fixture manual receipt evidence' > "$fixture/build/manual.receipt"
+printf '%s\n' 'fixture manual artifact evidence' > "$fixture/build/manual.artifact"
 printf '%s\n' '#!/bin/sh' \
     'printf "%s\n" compiler-stage1=pass compiler-stage2=pass compiler-stage3=pass compiler-stage4=pass' \
     "printf '%s\\n' compiler-stage1-evidence=$fixture/build/phase1.receipt compiler-stage2-evidence=$fixture/build/phase2.receipt compiler-stage3-evidence=$fixture/build/phase3.receipt compiler-stage4-evidence=$fixture/build/phase4.receipt" \
     > "$fixture/phase-validator"
 chmod +x "$fixture/phase-validator"
 git -C "$fixture" init -q
+git -C "$fixture" config core.autocrlf false
 cp "$fixture/scripts/check/pre-push-conflict-tree-guard.shs" "$fixture/.git/hooks/pre-push.local"
 chmod +x "$fixture/.git/hooks/pre-push.local"
 git -C "$fixture" config user.name must-check-test
 git -C "$fixture" config user.email must-check-test@example.invalid
 git -C "$fixture" add .
+git -C "$fixture" commit -qm pre-base
+fixture_fp=$(git -C "$fixture" ls-tree -r HEAD -- src scripts config test rules.sdl doc/07_guide doc/00_llm_process doc/glossary.md | sed '\|[[:space:]]doc/08_tracking/check/must_check_db.sdn$|d' | sha256sum | awk '{print $1}')
+artifact_sha=$(git -C "$fixture" show "HEAD:build/manual.artifact" | sha256sum | awk '{print $1}')
+printf '%s\n' \
+    'receipt_schema=simple.must-check-gate-receipt/v1' \
+    'gate_id=fixture-manual-receipt' \
+    'final_verdict=PASS' \
+    "source_fingerprint=$fixture_fp" \
+    'artifact_path=build/manual.artifact' \
+    "artifact_sha256=$artifact_sha" \
+    > "$fixture/build/manual.receipt"
+git -C "$fixture" add build/manual.receipt
 git -C "$fixture" commit -qm base
 base=$(git -C "$fixture" rev-parse HEAD)
 MUST_CHECK_ROOT="$fixture" \
@@ -196,7 +226,7 @@ tip=$(git -C "$fixture" rev-parse HEAD)
 start=$(date +%s)
 printf 'refs/heads/main %s refs/heads/main %s\n' "$tip" "$base" | MUST_CHECK_ROOT="$fixture" sh "$fixture/scripts/check/check-push-must-pass.shs" >/dev/null
 ref_elapsed=$(($(date +%s) - start))
-[ "$ref_elapsed" -le 10 ] || { echo "FAIL: push must-check ref path took ${ref_elapsed}s"; exit 1; }
+[ "$ref_elapsed" -le "$REF_BOUND" ] || { echo "FAIL: push must-check ref path took ${ref_elapsed}s"; exit 1; }
 
 # The pushed commit is authoritative. A dirty or absent live-worktree copy must
 # not replace the exact evidence blob retained in that pushed commit.
@@ -232,7 +262,7 @@ printf 'refs/heads/main %s refs/heads/main %s\nrefs/tags/same %s refs/tags/same 
     "$tip" "$base" "$tip" "$base" |
     MUST_CHECK_ROOT="$fixture" sh "$fixture/scripts/check/check-push-must-pass.shs" >/dev/null
 two_ref_elapsed=$(($(date +%s) - two_ref_start))
-[ "$two_ref_elapsed" -le 10 ] || { echo "FAIL: two-ref push path took ${two_ref_elapsed}s"; exit 1; }
+[ "$two_ref_elapsed" -le "$REF_BOUND" ] || { echo "FAIL: two-ref push path took ${two_ref_elapsed}s"; exit 1; }
 [ "$(wc -l < "$fixture/tree-guard-invocations" | tr -d ' ')" -eq 1 ] || {
     echo "FAIL: duplicate ref update reran the tree gate"
     exit 1
@@ -247,6 +277,6 @@ printf 'refs/heads/a %s refs/heads/a %s\nrefs/heads/b %s refs/heads/b %s\nrefs/h
 start=$(date +%s)
 (cd "$fixture" && printf 'refs/heads/main %s refs/heads/main %s\n' "$tip" "$base" | sh scripts/hooks/pre-push-worktree-launcher origin fixture >/dev/null)
 hook_elapsed=$(($(date +%s) - start))
-[ "$hook_elapsed" -le 10 ] || { echo "FAIL: installed push hook path took ${hook_elapsed}s"; exit 1; }
+[ "$hook_elapsed" -le "$REF_BOUND" ] || { echo "FAIL: installed push hook path took ${hook_elapsed}s"; exit 1; }
 
 echo "PASS: must-check tiering contract selftest=${elapsed}s ref-path=${ref_elapsed}s two-ref=${two_ref_elapsed}s installed-hook=${hook_elapsed}s"

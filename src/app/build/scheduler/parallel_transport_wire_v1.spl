@@ -12,6 +12,7 @@ use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
 use std.nogc_sync_mut.composition.native_build_argv_v1.{
     native_build_argv_encode_v1, native_build_argv_decode_bounded_v1}
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use app.build.host_path_policy.{build_host_abs_path_valid_v1, build_host_paths_overlap_v1, build_host_path_normalize_v1}
 
 val PARALLEL_TRANSPORT_WIRE_MAX_BYTES_V1: i64 = 1048576
 # Three fixed metadata files plus up to 128 declared action outputs.
@@ -73,11 +74,13 @@ fn _token_valid_v1(value: text) -> bool:
     true
 
 fn _path_valid_v1(path: text, absolute: bool) -> bool:
-    if path.len() > 4096 or path.starts_with("/") != absolute or
+    if absolute:
+        return build_host_abs_path_valid_v1(path, true, true, 4096, 128)
+    if path.len() > 4096 or path.starts_with("/") or
        path.ends_with("/") or path.contains("//") or path.contains("\0"):
         return false
     val parts = path.split("/")
-    var i: i64 = if absolute: 1 else: 0
+    var i: i64 = 0
     if i >= parts.len(): return false
     while i < parts.len():
         if not _token_valid_v1(parts[i]): return false
@@ -109,9 +112,9 @@ fn _append_v1(items: [text], key: text, value: text,
 
 fn _field_v1(item: text, key: text, bound: i64) -> Option<text>:
     val prefix = key + "="
-    if not item.starts_with(prefix): return nil
+    if not item.starts_with(prefix): return None
     val value = item[prefix.len():]
-    if not _scalar_valid_v1(value, bound): return nil
+    if not _scalar_valid_v1(value, bound): return None
     Some(value)
 
 fn _node_values_v1(node: DistributedBuildNodeV1) -> [text]:
@@ -145,12 +148,12 @@ fn parallel_transport_approved_node_digest_v1(
     sha256_u8_hex(native_build_argv_encode_v1(_node_values_v1(node)))
 
 fn _node_from_values_v1(v: [text]) -> DistributedBuildNodeV1?:
-    if v.len() != 28: return nil
+    if v.len() != 28: return None
     val ssh_port = _number_v1(v[3], 65535)
     val sftp_port = _number_v1(v[15], 65535)
     val timeout_ms = _number_v1(v[11], 1000000000)
     if ssh_port <= 0 or sftp_port <= 0 or timeout_ms <= 0:
-        return nil
+        return None
     val ssh = TrustedSshNodeV1(v[0], v[1], v[2], ssh_port,
         v[4], v[5], v[6], v[7], v[8], v[9])
     val sftp_ssh = TrustedSshNodeV1(v[12], v[13], v[14], sftp_port,
@@ -161,8 +164,8 @@ fn _node_from_values_v1(v: [text]) -> DistributedBuildNodeV1?:
         v[25], v[26], v[27]))
 
 fn _handoff_valid_v1(h: ParallelTransportHandoffV1) -> bool:
-    if not h.valid or h.approved_node == nil or h.input_batch == nil or
-       h.control_batch == nil or not scheduler_action_digest_valid_v1(h.nonce) or
+    if not h.valid or h.approved_node.is_none() or h.input_batch.is_none() or
+       h.control_batch.is_none() or not scheduler_action_digest_valid_v1(h.nonce) or
        not scheduler_action_digest_valid_v1(h.request_digest) or
        not scheduler_action_digest_valid_v1(h.approved_node_digest) or
        h.request_wire == "" or h.request_wire.bytes().len() > 262144 or
@@ -178,10 +181,10 @@ fn _handoff_valid_v1(h: ParallelTransportHandoffV1) -> bool:
     val node = h.approved_node.unwrap()
     if h.approved_node_digest !=
        parallel_transport_approved_node_digest_v1(node) or
-       _node_from_values_v1(_node_values_v1(node)) == nil:
+       _node_from_values_v1(_node_values_v1(node)).is_none():
         return false
     val request = parse_build_worker_request_v1(h.request_wire)
-    if request == nil or
+    if request.is_none() or
        encode_build_worker_request_v1(request.unwrap()) != h.request_wire or
        request.unwrap().attempt.worker_id != node.ssh.node.worker_id:
         return false
@@ -192,9 +195,7 @@ fn _handoff_valid_v1(h: ParallelTransportHandoffV1) -> bool:
     input.byte_count > 0 and control.byte_count > 0 and
     input.relative_path == "inputs.batch" and
     control.relative_path == "control.batch" and
-    h.prepared_root != h.result_root and
-    not h.prepared_root.starts_with(h.result_root + "/") and
-    not h.result_root.starts_with(h.prepared_root + "/")
+    not build_host_paths_overlap_v1(h.prepared_root, h.result_root)
 
 fn encode_parallel_transport_handoff_v1(
         handoff: ParallelTransportHandoffV1) -> [u8]:
@@ -258,7 +259,7 @@ fn parse_parallel_transport_handoff_v1(bytes: [u8]) ->
     while i < keys.len():
         val field = _field_v1(items[i], keys[i],
             if i == 2: 262144 else: 4096)
-        if field == nil: return _handoff_reject_v1("handoff-field-invalid")
+        if field.is_none(): return _handoff_reject_v1("handoff-field-invalid")
         values.push(field.unwrap())
         i = i + 1
     if values[0] != _HANDOFF_ID_V1:
@@ -268,13 +269,13 @@ fn parse_parallel_transport_handoff_v1(bytes: [u8]) ->
     i = 0
     while i < node_keys.len():
         val field = _field_v1(items[9 + i], node_keys[i], 4096)
-        if field == nil: return _handoff_reject_v1("handoff-node-invalid")
+        if field.is_none(): return _handoff_reject_v1("handoff-node-invalid")
         node_values.push(field.unwrap())
         i = i + 1
     val node = _node_from_values_v1(node_values)
-    if node == nil: return _handoff_reject_v1("handoff-node-invalid")
+    if node.is_none(): return _handoff_reject_v1("handoff-node-invalid")
     val node_digest = _field_v1(items[37], "node.digest", 64)
-    if node_digest == nil:
+    if node_digest.is_none():
         return _handoff_reject_v1("handoff-node-digest-invalid")
     val batch_keys = ["input.path", "input.bytes", "input.sha256",
         "control.path", "control.bytes", "control.sha256"]
@@ -282,7 +283,7 @@ fn parse_parallel_transport_handoff_v1(bytes: [u8]) ->
     i = 0
     while i < batch_keys.len():
         val field = _field_v1(items[38 + i], batch_keys[i], 4096)
-        if field == nil: return _handoff_reject_v1("handoff-batch-invalid")
+        if field.is_none(): return _handoff_reject_v1("handoff-batch-invalid")
         batch_values.push(field.unwrap())
         i = i + 1
     val deadline = _number_v1(values[6], 1000000000000000)
@@ -379,7 +380,7 @@ fn parse_parallel_transport_observation_v1(bytes: [u8]) ->
     while i < keys.len():
         val field = _field_v1(items[i], keys[i],
             if i == 6: 262144 else: 4096)
-        if field == nil:
+        if field.is_none():
             return _observation_reject_v1("observation-field-invalid")
         values.push(field.unwrap())
         i = i + 1
@@ -395,7 +396,7 @@ fn parse_parallel_transport_observation_v1(bytes: [u8]) ->
         val path = _field_v1(items[8 + i * 3], prefix + "path", 4096)
         val size = _field_v1(items[9 + i * 3], prefix + "bytes", 19)
         val digest = _field_v1(items[10 + i * 3], prefix + "sha256", 64)
-        if path == nil or size == nil or digest == nil:
+        if path.is_none() or size.is_none() or digest.is_none():
             return _observation_reject_v1("observation-file-invalid")
         files.push(ParallelTransportFileV1(path.unwrap(),
             _number_v1(size.unwrap(), 1073741824), digest.unwrap()))
@@ -419,7 +420,7 @@ fn check_parallel_transport_observation_binding_v1(
     if observation.status == "FETCHED":
         val request = parse_build_worker_request_v1(handoff.request_wire)
         val result = parse_build_result_v1(observation.worker_result_wire)
-        if request == nil or result == nil:
+        if request.is_none() or result.is_none():
             return false
         val attempt = request.unwrap().attempt
         val claim = result.unwrap()

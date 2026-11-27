@@ -10,6 +10,7 @@ use std.io_runtime.{file_write}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{mkdir_p}
 use std.io_runtime.{time_now_unix_micros}
+use std.nogc_sync_mut.path.{normalize_path}
 
 # ============================================================================
 # Data Structures
@@ -94,26 +95,48 @@ fn manifest_is_fresh_with_ttl(manifest: TestManifest, ttl_micros: i64) -> bool:
 # Coverage Check
 # ============================================================================
 
-# Strip trailing slashes and normalize separators so root/path comparison is
-# textual but separator-safe.
+# Canonicalize roots using the shared path normalizer for `./`, repeated
+# separators, and Windows separators. Keep `..` lexical: collapsing it across
+# a symlink can change which directory the filesystem walk visits. Preserve
+# empty roots: they do not attest coverage.
 fn manifest_normalize_root(raw: text) -> text:
-    var d = raw.replace("\\", "/")
-    while d.ends_with("/") and d.len() > 1:
-        d = d[0:d.len() - 1]
-    d
+    if raw == "":
+        return ""
+    if manifest_has_parent_component(raw):
+        return raw.replace("\\", "/")
+    normalize_path(raw)
+
+fn manifest_has_parent_component(path: text) -> bool:
+    for part in path.replace("\\", "/").split("/"):
+        if part == "..":
+            return true
+    false
+
+fn manifest_path_is_within_root(path: text, root: text) -> bool:
+    if manifest_has_parent_component(path) or manifest_has_parent_component(root):
+        return path == root
+    if path == root:
+        return true
+    if root == "/":
+        return path.starts_with("/")
+    if root == ".":
+        return path != ".." and not path.starts_with("../") and not path.starts_with("/")
+    path.starts_with(root + "/")
 
 # Does this manifest's WALK actually include `base_path`? Freshness alone is not
 # enough: a fresh index built from a narrower root has no entries for anything
 # outside it, and an empty filter result would otherwise read as "no tests".
 fn manifest_covers(manifest: TestManifest, base_path: text) -> bool:
+    if manifest_has_parent_component(base_path):
+        return false
     val target = manifest_normalize_root(base_path)
     for raw_root in manifest.roots:
+        if manifest_has_parent_component(raw_root):
+            continue
         val root = manifest_normalize_root(raw_root)
         if root == "":
             continue
-        if target == root:
-            return true
-        if target.starts_with(root + "/"):
+        if manifest_path_is_within_root(target, root):
             return true
     false
 
@@ -137,7 +160,7 @@ fn manifest_merge_roots(old_roots: [text], new_dirs: [text]) -> [text]:
             continue
         var covered = false
         for m in merged:
-            if o == m or o.starts_with(m + "/"):
+            if manifest_path_is_within_root(o, m):
                 covered = true
         if not covered:
             merged.push(o)

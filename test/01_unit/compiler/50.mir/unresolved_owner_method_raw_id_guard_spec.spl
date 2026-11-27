@@ -1,0 +1,57 @@
+# Purpose and audience: compiler engineers owning native MIR method dispatch.
+# @req REQ-SSPEC-COMPILER
+"""
+# Unresolved-owner method recovery uses idiomatic Option bindings
+
+Regression guard verifying that the frozen-stage2 Option-transport workarounds
+(`stage2_if_val_struct_option_binding_as_int_wide_2026-11-03`,
+`stage2_symbol_display_name_option_transport_2026-11-03`) are removed from
+the unresolved-owner method recovery region and that MIR lowers same-module
+struct/class method calls cleanly.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+
+val source_path = "src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl"
+
+fn recovery_region() -> text:
+    val src = file_read_text(source_path)
+    val start = src.index_of("unresolved-owner-get method=")
+    val stop = src.index_of("unresolved-owner-done method=")
+    if start < 0 or stop <= start:
+        return ""
+    src[start:stop]
+
+val METHOD_CALL_SRC = "struct BoxItem:\n    v: i64\n\n    fn get() -> i64:\n        self.v\n\nfn main() -> i64:\n    val b = BoxItem(v: 7)\n    b.get()\n"
+
+describe "unresolved-owner method recovery":
+    it "finds the recovery region":
+        expect(recovery_region().len() > 0).to_equal(true)
+
+    it "uses idiomatic Option bindings without frozen-stage2 workarounds":
+        val region = recovery_region()
+        expect(region.contains("stage2_symbol_display_name_option_transport_2026-11-03")).to_equal(false)
+        expect(region.contains("stage2_if_val_struct_option_binding_as_int_wide_2026-11-03")).to_equal(false)
+        expect(region.contains("if val unresolved_owner = unresolved_struct_name:")).to_equal(true)
+        expect(region.contains("var final_unresolved_method_id: SymbolId? =")).to_equal(true)
+        expect(region.contains("if val resolved_method_id = final_unresolved_method_id:")).to_equal(true)
+
+    it "lowers same-module struct method calls without MIR errors":
+        val parsed = parse_full_frontend(METHOD_CALL_SRC, "unresolved_owner_check.spl", "unresolved_owner_check", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("unresolved_owner_check.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        mir_lowering.lower_module(hir)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        expect(mir_lowering.errors.len()).to_equal(0)

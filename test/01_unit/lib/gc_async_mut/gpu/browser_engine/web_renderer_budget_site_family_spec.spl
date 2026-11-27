@@ -67,14 +67,35 @@ guards call a function that exists.
 use std.spec.step
 
 use std.spec.*
+use std.common.ui.ui_frame_clock.{FrameClock}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{simple_web_layout_set_budget_clock, simple_web_layout_reset_budget_clock}
 use lib.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
 
     simple_web_layout_render_html_software_result,
     simple_web_layout_software_pixels_presentable,
-    simple_web_layout_software_present_decision}
+    simple_web_layout_software_present_decision, SimpleWebLayoutPixelResult}
 
 val W: i32 = 160
 val H: i32 = 120
+
+# Stepping clock: each read jumps 3 s (> the 2 s per-stage minimum slice), so every
+# budget check sees an expired deadline regardless of host speed or budget_ms.
+class SteppingClock:
+    var t: i64
+
+impl FrameClock for SteppingClock:
+    me now_micros() -> i64:
+        self.t = self.t + 3000000
+        self.t
+
+    me sleep_until(deadline_us: i64):
+        self.t = deadline_us
+
+fn _starved(html: text) -> SimpleWebLayoutPixelResult:
+    simple_web_layout_set_budget_clock(SteppingClock(t: 0))
+    val r = simple_web_layout_render_html_software_result(html, W, H, 1)
+    simple_web_layout_reset_budget_clock()
+    r
 
 # Every node carries its own inline declaration block, so the style cascade is
 # the dominant cost and its guards are the first the render reaches.
@@ -107,7 +128,7 @@ describe "budget site family":
         step("Render a style-heavy page on a 1ms budget")
         # Before the fix this did not merely report the wrong site: it raised
         # error[E1002] `_web_budget_expired` not found and the render died.
-        val starved = simple_web_layout_render_html_software_result(_style_heavy_page(120), W, H, 1)
+        val starved = _starved(_style_heavy_page(120))
         expect(starved.render_degraded).to_equal(true)
         step("The named site is a style site, not a paint site")
         expect(starved.degrade_reason).to_equal("style-cascade")
@@ -116,11 +137,11 @@ describe "budget site family":
         # @req REQ-SSPEC-LIB
         step("names a site from the enumerated family whatever the page")
         step("A starved style-heavy render names a known site")
-        val heavy = simple_web_layout_render_html_software_result(_style_heavy_page(120), W, H, 1)
+        val heavy = _starved(_style_heavy_page(120))
         expect(heavy.degrade_reason == "").to_equal(false)
         expect(_is_known_site(heavy.degrade_reason)).to_equal(true)
         step("A starved small render also names a known site")
-        val small = simple_web_layout_render_html_software_result(SMALL_PAGE, W, H, 1)
+        val small = _starved(SMALL_PAGE)
         expect(small.render_degraded).to_equal(true)
         expect(_is_known_site(small.degrade_reason)).to_equal(true)
 
@@ -128,7 +149,7 @@ describe "budget site family":
         # @req REQ-SSPEC-LIB
         step("refuses to present the exhausted style render and names the decline")
         step("An exhausted render is not presentable")
-        val starved = simple_web_layout_render_html_software_result(_style_heavy_page(120), W, H, 1)
+        val starved = _starved(_style_heavy_page(120))
         expect(simple_web_layout_software_pixels_presentable(starved)).to_equal(false)
         step("The decision string carries the style site as the concrete reason")
         val declined = simple_web_layout_software_present_decision(starved)

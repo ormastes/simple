@@ -17,27 +17,10 @@ use simple_parser::Parser;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     flatten_owner_mangled_name, normalize_path_key, tag_function_module_owner, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
-    FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX,
+    FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_NAMESPACE_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX,
 };
 use crate::stdlib_variant::stdlib_root_candidates_present;
 use crate::CompileError as _;
-
-fn prefer_package_init_for_member_import(resolved: PathBuf, use_stmt: &UseStmt) -> PathBuf {
-    match &use_stmt.target {
-        ImportTarget::Group(_) | ImportTarget::Glob => {
-            if resolved.extension().is_some_and(|ext| ext == "spl")
-                && resolved.file_name().is_none_or(|name| name != "__init__.spl")
-            {
-                let package_init = resolved.with_extension("").join("__init__.spl");
-                if p_exists(&package_init) && p_is_file(&package_init) {
-                    return package_init;
-                }
-            }
-            resolved
-        }
-        _ => resolved,
-    }
-}
 
 fn dotted_dir_from(current: &Path, segment: &str) -> Option<PathBuf> {
     let parent = current.parent()?;
@@ -84,7 +67,7 @@ fn resolve_parts_from_root(root: &Path, parts: &[String], use_stmt: &UseStmt) ->
     }
     resolved.set_extension("spl");
     if p_exists(&resolved) && p_is_file(&resolved) {
-        return Some(prefer_package_init_for_member_import(resolved, use_stmt));
+        return Some(resolved);
     }
 
     if parts.is_empty() {
@@ -110,7 +93,7 @@ fn resolve_parts_from_root(root: &Path, parts: &[String], use_stmt: &UseStmt) ->
     let last = &parts[parts.len() - 1];
     let dotted_file = dotted_resolved.join(format!("{}.spl", last));
     if p_exists(&dotted_file) && p_is_file(&dotted_file) {
-        return Some(prefer_package_init_for_member_import(dotted_file, use_stmt));
+        return Some(dotted_file);
     }
 
     let dotted_init = dotted_resolved.join(last).join("__init__.spl");
@@ -125,7 +108,7 @@ fn resolve_parts_from_root(root: &Path, parts: &[String], use_stmt: &UseStmt) ->
         }
         let nested_file = dotted_dir.join(format!("{}.spl", last));
         if p_exists(&nested_file) && p_is_file(&nested_file) {
-            return Some(prefer_package_init_for_member_import(nested_file, use_stmt));
+            return Some(nested_file);
         }
     }
 
@@ -186,7 +169,24 @@ fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &Us
             let mut file = current.join(part);
             file.set_extension("spl");
             if p_is_file(&file) {
-                return Some(prefer_package_init_for_member_import(file, use_stmt));
+                return Some(file);
+            }
+            // A plain package directory as the LAST segment under a numbered
+            // layer: `compiler.semantics.any_escape` is
+            // `src/compiler/35.semantics/any_escape/__init__.spl`. The
+            // non-last branch below already takes the plain `direct` dir
+            // first, and both sibling resolvers probe this marker for the last
+            // segment (`path_resolution::try_resolve_last_segment`,
+            // `module_resolver::resolve_module_in_dir`); this walk did not,
+            // so such a facade `use` resolved to nothing in the flattening
+            // loader, its `export use` owners were never flattened, and the
+            // JIT declared the re-exported fn as an unresolved import
+            // (`[jit-fallback] unresolved external symbol 'any_escape_check'`,
+            // whole compiler worker dropped to the interpreter). See
+            // doc/08_tracking/bug/jit_pipeline_loader_skips_plain_package_init_under_numbered_layer_2026-10-30.md.
+            let direct_init = current.join(part).join("__init__.spl");
+            if p_is_file(&direct_init) {
+                return Some(direct_init);
             }
             if let Some(alias) = layered_alias_child_dir(&current, part) {
                 let init = alias.join("__init__.spl");
@@ -196,11 +196,11 @@ fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &Us
                 let mut nested_file = alias.join(part);
                 nested_file.set_extension("spl");
                 if p_is_file(&nested_file) {
-                    return Some(prefer_package_init_for_member_import(nested_file, use_stmt));
+                    return Some(nested_file);
                 }
             }
             if let Some(alias_file) = layered_alias_child_file(&current, part) {
-                return Some(prefer_package_init_for_member_import(alias_file, use_stmt));
+                return Some(alias_file);
             }
             for (name, path) in cached_read_dir(&current) {
                 if !p_is_dir(&path) {
@@ -223,7 +223,7 @@ fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &Us
                     let mut nested_file = path.join(part);
                     nested_file.set_extension("spl");
                     if p_is_file(&nested_file) {
-                        return Some(prefer_package_init_for_member_import(nested_file, use_stmt));
+                        return Some(nested_file);
                     }
                 }
             }
@@ -401,6 +401,21 @@ fn resolve_parts_with_search_roots(base: &Path, parts: &[String], use_stmt: &Use
         return Some(mod_resolved);
     }
 
+    // An importer sitting AT the project root (`./probe.spl` importing
+    // `os.crypto.hotp`) must also try its own `src/`: the ancestor climb below
+    // only probes `<parent>/src`, so `<base>/src` was never searched, the import
+    // stayed unflattened, and the JIT de-JITted on an unresolved Simple import.
+    // Bug: os_crypto_jit_unresolved_symbol_rootcause_2026-07-30.
+    let base_src = base.join("src");
+    if p_is_dir(&base_src) {
+        if let Some(resolved) = resolve_parts_from_root(&base_src, parts, use_stmt) {
+            return Some(resolved);
+        }
+        if let Some(resolved) = resolve_numbered_parts_from_root(&base_src, parts, use_stmt) {
+            return Some(resolved);
+        }
+    }
+
     let mut parent_dir = base.to_path_buf();
     for _ in 0..10 {
         if let Some(parent) = parent_dir.parent() {
@@ -412,7 +427,7 @@ fn resolve_parts_with_search_roots(base: &Path, parts: &[String], use_stmt: &Use
             }
             parent_resolved.set_extension("spl");
             if p_exists(&parent_resolved) && p_is_file(&parent_resolved) {
-                return Some(prefer_package_init_for_member_import(parent_resolved, use_stmt));
+                return Some(parent_resolved);
             }
 
             if let Some(parent_resolved) = resolve_parts_from_root(&parent_dir, parts, use_stmt) {
@@ -471,6 +486,7 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
         "src/std/src",
         "src/lib/std/src",
         "lib/std/src",
+        "src/compiler_rust/lib/std/src",
         "rust/lib/std/src",
         "simple/std_lib/src",
         "std_lib/src",
@@ -509,7 +525,7 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
             }
             stdlib_path.set_extension("spl");
             if p_exists(&stdlib_path) && p_is_file(&stdlib_path) {
-                return Some(prefer_package_init_for_member_import(stdlib_path, use_stmt));
+                return Some(stdlib_path);
             }
 
             let mut stdlib_init_path = stdlib_root.clone();
@@ -560,7 +576,7 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
                 }
                 sub_path.set_extension("spl");
                 if p_exists(&sub_path) && p_is_file(&sub_path) {
-                    return Some(prefer_package_init_for_member_import(sub_path, use_stmt));
+                    return Some(sub_path);
                 }
 
                 if let Some(numbered) =
@@ -628,6 +644,10 @@ fn tag_node_function_owners(node: &mut Node, owner: &str) {
         Node::Class(definition) => Some((&mut definition.attributes, definition.span)),
         Node::Enum(definition) => Some((&mut definition.attributes, definition.span)),
         Node::Impl(definition) => Some((&mut definition.attributes, definition.span)),
+        // Externs too: co-compiled modules may declare one runtime symbol with
+        // different return types, and HIR types each call by its own module's
+        // declaration (`Lowerer::flatten_extern_owner_returns`).
+        Node::Extern(definition) => Some((&mut definition.attributes, definition.span)),
         _ => None,
     };
     if let Some((attributes, span)) = declaration {
@@ -682,7 +702,9 @@ fn append_flattened_import_binding_markers(
     module_path: &Path,
     owner_name: &str,
 ) {
-    let Some(source_path) = resolve_use_to_path(use_stmt, module_path.parent().unwrap_or(Path::new("."))) else {
+    let Some((source_path, target_is_symbol)) =
+        resolve_use_to_path_and_kind(use_stmt, module_path.parent().unwrap_or(Path::new(".")))
+    else {
         return;
     };
     let source_name = normalize_path_key(&source_path).to_string_lossy().into_owned();
@@ -707,8 +729,37 @@ fn append_flattened_import_binding_markers(
             }
         }
         ImportTarget::Glob => add_marker("*", "*"),
-        ImportTarget::Single(_) | ImportTarget::Aliased { .. } => {}
+        // `use a.b.x` / `use a.b.x as y`: when `x` is not itself a module file
+        // the statement imports the SYMBOL `x` from module `a.b`, exactly like
+        // `use a.b.{x}`, and must record the same binding. Without it the
+        // importer "neither defines nor imports" `x` for the co-compiled
+        // ambiguity check. A whole-module import (`use a.b`) binds no symbol.
+        ImportTarget::Single(name) if target_is_symbol => add_marker(name, name),
+        ImportTarget::Aliased { name, alias } if target_is_symbol => add_marker(alias, name),
+        // Whole-module import: no symbol, but HIR lowering needs to know that
+        // `ns` in `ns.f()` / `ns.CONST` names this module (the flattened unit
+        // has no other record of it). See
+        // doc/08_tracking/bug/jit_module_namespace_member_access_unresolved_2026-11-13.md
+        ImportTarget::Single(name) | ImportTarget::Aliased { alias: name, .. } => {
+            items.push(Node::Const(ConstStmt {
+                span: use_stmt.span,
+                name: module_namespace_marker_name(owner_name, name, &source_name),
+                ty: None,
+                value: Expr::Nil,
+                visibility: Visibility::Private,
+                attributes: vec![],
+            }));
+        }
     }
+}
+
+fn module_namespace_marker_name(importer: &str, local: &str, source_owner: &str) -> String {
+    format!(
+        "{FLATTEN_MODULE_NAMESPACE_MARKER_PREFIX}{}:{importer}{}:{local}{}:{source_owner}",
+        importer.len(),
+        local.len(),
+        source_owner.len()
+    )
 }
 
 fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
@@ -725,7 +776,9 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
                 items.push(item);
                 continue;
             }
-            if marker.name.starts_with(FLATTEN_IMPORT_BINDING_MARKER_PREFIX) {
+            if marker.name.starts_with(FLATTEN_IMPORT_BINDING_MARKER_PREFIX)
+                || marker.name.starts_with(FLATTEN_MODULE_NAMESPACE_MARKER_PREFIX)
+            {
                 items.push(item);
                 continue;
             }
@@ -749,6 +802,7 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
                         target: export_use.target,
                         is_type_only: false,
                         is_lazy: false,
+                        attributes: export_use.attributes,
                     };
                     append_flattened_import_binding_markers(&mut items, &reexport_as_use, module_path, &owner_name);
                 }
@@ -794,6 +848,27 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
                 items.push(declaration);
                 next_global_already_tagged = false;
             }
+            Node::ModDecl(mut mod_decl) => {
+                // An inline `mod X:` block is a global of its declaring file;
+                // the owner attribute lets the interpreter record it under
+                // that file instead of the entry script.
+                if mod_decl.body.is_some()
+                    && !mod_decl
+                        .attributes
+                        .iter()
+                        .any(|attribute| attribute.name.starts_with(FLATTEN_MODULE_OWNER_ATTR_PREFIX))
+                {
+                    mod_decl.attributes.push(simple_parser::ast::Attribute {
+                        span: mod_decl.span,
+                        name: format!("{FLATTEN_MODULE_OWNER_ATTR_PREFIX}{owner_name}"),
+                        value: None,
+                        args: None,
+                        named_args: None,
+                    });
+                }
+                items.push(Node::ModDecl(mod_decl));
+                next_global_already_tagged = false;
+            }
             other => {
                 if matches!(
                     other,
@@ -803,6 +878,9 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
                         | Node::ExportUseStmt(_)
                         | Node::StructuredExportStmt(_)
                         | Node::AutoImportStmt(_)
+                        | Node::FriendDecl(_)
+                        | Node::InternalExportDecl(_)
+                        | Node::LayerDecl(_)
                 ) {
                     next_global_already_tagged = false;
                 } else {
@@ -853,6 +931,56 @@ fn should_flatten_nested_import(use_stmt: &UseStmt, source: &str) -> bool {
     }
 }
 
+thread_local! {
+    static FLATTEN_PACKAGE_SYMBOL_IMPORTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While alive, an unbraced symbol import into a package aggregator
+/// (`use pkg.sym` where `pkg` resolves to `__init__.spl`) is flattened exactly
+/// like `use pkg.{sym}`. Entered only by the JIT lane, which links nothing it
+/// did not flatten; interpreter lanes resolve `sym` lazily through the module
+/// exports cache and keep doing so. Thread-local, restored on drop.
+pub struct FlattenPackageSymbolImportsScope {
+    previous: bool,
+}
+
+impl FlattenPackageSymbolImportsScope {
+    pub fn enter() -> Self {
+        let previous = FLATTEN_PACKAGE_SYMBOL_IMPORTS.with(|flag| flag.replace(true));
+        Self { previous }
+    }
+}
+
+impl Drop for FlattenPackageSymbolImportsScope {
+    fn drop(&mut self) {
+        let previous = self.previous;
+        FLATTEN_PACKAGE_SYMBOL_IMPORTS.with(|flag| flag.set(previous));
+    }
+}
+
+/// The one flatten decision for every import form (`use`, `pub use`/`export
+/// use`, `common use`, comma multi-use). `pub use a.b.f` used to skip the
+/// module-file arm, so a function reachable only through such a re-export never
+/// reached the JIT unit (caret: `smux_runtime_binding_bind_v3`, "unresolved
+/// external symbol ... cross-module Simple function").
+fn should_flatten_import(use_stmt: &UseStmt, source: &str, resolved: &Path, base: &Path) -> bool {
+    should_flatten_nested_import(use_stmt, source)
+        || single_import_targets_module_file(&use_stmt.target, resolved)
+        || single_import_targets_package_symbol(use_stmt, resolved, base)
+}
+
+/// Under [`FlattenPackageSymbolImportsScope`] only: `use pkg.sym` where `pkg`
+/// is a package `__init__.spl` and `sym` is a SYMBOL of it (not a submodule
+/// file) flattens the package exactly like `use pkg.{sym}` — `Group` imports
+/// already take that path, including the requested-name sibling filter.
+/// A whole-package `use pkg` (`sym` names the package itself) stays lazy.
+fn single_import_targets_package_symbol(use_stmt: &UseStmt, resolved: &Path, base: &Path) -> bool {
+    matches!(use_stmt.target, ImportTarget::Single(_) | ImportTarget::Aliased { .. })
+        && FLATTEN_PACKAGE_SYMBOL_IMPORTS.with(|flag| flag.get())
+        && resolved.file_name().is_some_and(|name| name == "__init__.spl")
+        && resolve_use_to_path_and_kind(use_stmt, base).is_some_and(|(_, target_is_symbol)| target_is_symbol)
+}
+
 /// True when a `Single`/`Aliased` import resolves to a standalone module file,
 /// either by naming the file or one of its symbols. Package aggregators stay
 /// lazy because their requested symbol may belong to a sibling provider.
@@ -869,6 +997,311 @@ fn single_import_targets_module_file(target: &ImportTarget, resolved: &Path) -> 
         && resolved.file_name().is_none_or(|name| name != "__init__.spl")
 }
 
+fn is_simple_ident_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn contains_requested_ident(text: &str, requested_names: &[String]) -> bool {
+    let mut token_start: Option<usize> = None;
+    for (idx, ch) in text.char_indices() {
+        if is_simple_ident_char(ch) {
+            if token_start.is_none() {
+                token_start = Some(idx);
+            }
+        } else if let Some(start) = token_start.take() {
+            let ident = &text[start..idx];
+            if requested_names.iter().any(|req| req == ident) {
+                return true;
+            }
+        }
+    }
+    if let Some(start) = token_start {
+        let ident = &text[start..];
+        if requested_names.iter().any(|req| req == ident) {
+            return true;
+        }
+    }
+    false
+}
+
+fn strip_comment_outside_quotes<'a>(line: &'a str, in_docstring: &mut bool) -> &'a str {
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    while i < bytes.len() {
+        if *in_docstring {
+            if i + 2 < bytes.len() && &bytes[i..i + 3] == b"\"\"\"" {
+                *in_docstring = false;
+                i += 3;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        if in_single {
+            if bytes[i] == b'\\' {
+                escaped = true;
+            } else if bytes[i] == b'\'' {
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double {
+            if bytes[i] == b'\\' {
+                escaped = true;
+            } else if bytes[i] == b'"' {
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+        if i + 2 < bytes.len() && &bytes[i..i + 3] == b"\"\"\"" {
+            *in_docstring = true;
+            i += 3;
+            continue;
+        }
+        match bytes[i] {
+            b'\'' => in_single = true,
+            b'"' => in_double = true,
+            b'#' => return &line[..i],
+            _ => {}
+        }
+        i += 1;
+    }
+    line
+}
+
+fn next_word(s: &str) -> Option<(&str, &str)> {
+    let s = s.trim_start();
+    if s.is_empty() {
+        return None;
+    }
+    let first = s.chars().next()?;
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return None;
+    }
+    let end = s
+        .char_indices()
+        .find(|&(_, ch)| !is_simple_ident_char(ch))
+        .map(|(idx, _)| idx)
+        .unwrap_or(s.len());
+    Some((&s[..end], &s[end..]))
+}
+
+fn skip_balanced_parens(s: &str) -> &str {
+    let trimmed = s.trim_start();
+    let Some(mut rest) = trimmed.strip_prefix('(') else {
+        return s;
+    };
+    let mut depth = 1usize;
+    for (idx, ch) in rest.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    rest = &rest[idx + 1..];
+                    return rest;
+                }
+            }
+            _ => {}
+        }
+    }
+    ""
+}
+
+fn update_reexport_state(segment: &str, brace_depth: &mut i32, requested_names: &[String]) -> (bool, bool) {
+    if segment.contains('*') {
+        return (true, false);
+    }
+    if contains_requested_ident(segment, requested_names) {
+        return (true, false);
+    }
+    for ch in segment.chars() {
+        match ch {
+            '{' => *brace_depth += 1,
+            '}' => *brace_depth -= 1,
+            _ => {}
+        }
+    }
+    let trimmed = segment.trim_end();
+    let continues = *brace_depth > 0 || trimmed.ends_with(',') || trimmed.ends_with('\\');
+    (false, continues)
+}
+
+/// Fast conservative pre-filter for package sibling discovery: matches top-level
+/// definitions and `export`/`pub use` re-exports while ignoring comments,
+/// docstrings, indented members/locals, and plain `use`/`import` statements.
+pub(crate) fn source_might_define_requested_symbol(source: &str, requested_names: &[String]) -> bool {
+    if requested_names.is_empty() {
+        return true;
+    }
+
+    let stripped: std::borrow::Cow<'_, str> = if source.contains("@when") {
+        match crate::pipeline::cfg_strip::strip_os_when_blocks(
+            source,
+            &crate::pipeline::cfg_strip::cfg_target(),
+        ) {
+            Ok(filtered) => std::borrow::Cow::Owned(filtered),
+            Err(_) => std::borrow::Cow::Borrowed(source),
+        }
+    } else {
+        std::borrow::Cow::Borrowed(source)
+    };
+
+    let mut in_docstring = false;
+    let mut in_reexport = false;
+    let mut reexport_brace_depth = 0i32;
+
+    for raw_line in stripped.lines() {
+        let was_in_docstring = in_docstring;
+        let code = strip_comment_outside_quotes(raw_line, &mut in_docstring);
+        if was_in_docstring {
+            continue;
+        }
+        let trimmed = code.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if in_reexport {
+            let (matched, continues) =
+                update_reexport_state(trimmed, &mut reexport_brace_depth, requested_names);
+            if matched {
+                return true;
+            }
+            in_reexport = continues;
+            if !in_reexport {
+                reexport_brace_depth = 0;
+            }
+            continue;
+        }
+
+        // Only column-0 items can define or re-export module-level symbols;
+        // indented lines are class/struct fields, methods, or function locals.
+        if raw_line.starts_with([' ', '\t']) {
+            continue;
+        }
+
+        let mut rest = trimmed;
+        let mut saw_pub = false;
+        let mut saw_export = false;
+        while let Some((word, after)) = next_word(rest) {
+            match word {
+                "pub" => {
+                    saw_pub = true;
+                    rest = skip_balanced_parens(after);
+                }
+                "priv" | "internal" | "static" | "async" | "extern" | "unsafe" | "mut" => {
+                    rest = after;
+                }
+                "export" => {
+                    saw_export = true;
+                    rest = after;
+                    break;
+                }
+                _ => break,
+            }
+        }
+
+        if saw_export {
+            let next = next_word(rest).map(|(w, _)| w);
+            let is_decl = matches!(
+                next,
+                Some(
+                    "fn" | "me"
+                        | "type"
+                        | "alias"
+                        | "class"
+                        | "struct"
+                        | "enum"
+                        | "trait"
+                        | "bitfield"
+                        | "actor"
+                        | "unit"
+                        | "macro"
+                        | "mixin"
+                        | "let"
+                        | "val"
+                        | "var"
+                        | "const"
+                )
+            );
+            if !is_decl {
+                let reexport_rest = if next == Some("use") {
+                    next_word(rest).map(|(_, a)| a).unwrap_or(rest)
+                } else {
+                    rest
+                };
+                reexport_brace_depth = 0;
+                let (matched, continues) =
+                    update_reexport_state(reexport_rest, &mut reexport_brace_depth, requested_names);
+                if matched {
+                    return true;
+                }
+                in_reexport = continues;
+                continue;
+            }
+            // `export fn foo` / `export struct Foo` falls through to declaration check.
+            while let Some((word, after)) = next_word(rest) {
+                if matches!(word, "static" | "async" | "extern" | "unsafe" | "mut") {
+                    rest = after;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        let Some((kw, after_kw)) = next_word(rest) else {
+            continue;
+        };
+        if saw_pub && kw == "use" {
+            reexport_brace_depth = 0;
+            let (matched, continues) =
+                update_reexport_state(after_kw, &mut reexport_brace_depth, requested_names);
+            if matched {
+                return true;
+            }
+            in_reexport = continues;
+            continue;
+        }
+        match kw {
+            "fn" | "me" | "type" | "alias" | "class" | "struct" | "enum" | "trait" | "bitfield"
+            | "actor" | "unit" | "macro" | "mixin" => {
+                if let Some((decl_name, _)) = next_word(after_kw) {
+                    if requested_names.iter().any(|req| req == decl_name) {
+                        return true;
+                    }
+                }
+            }
+            "let" | "val" | "var" | "const" => {
+                let lhs = after_kw.split(['=', ':']).next().unwrap_or(after_kw).trim_start();
+                if lhs.starts_with('(') {
+                    if contains_requested_ident(lhs, requested_names) {
+                        return true;
+                    }
+                } else if let Some((decl_name, _)) = next_word(lhs) {
+                    if requested_names.iter().any(|req| req == decl_name) {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    false
+}
+
 fn file_might_define_requested_symbol(path: &Path, requested_names: &[String]) -> bool {
     if requested_names.is_empty() {
         return true;
@@ -878,34 +1311,7 @@ fn file_might_define_requested_symbol(path: &Path, requested_names: &[String]) -
         return false;
     };
 
-    requested_names.iter().any(|name| {
-        let fn_pat = format!("fn {}(", name);
-        let extern_pat = format!("extern fn {}(", name);
-        let type_pat = format!("type {}", name);
-        let class_pat = format!("class {}", name);
-        let struct_pat = format!("struct {}", name);
-        let enum_pat = format!("enum {}", name);
-        let trait_pat = format!("trait {}", name);
-        let let_pat = format!("let {}", name);
-        let val_pat = format!("val {}", name);
-        let var_pat = format!("var {}", name);
-        let const_pat = format!("const {}", name);
-        let export_pat = format!("export {}", name);
-        let export_comma_pat = format!(", {}", name);
-        source.contains(&fn_pat)
-            || source.contains(&extern_pat)
-            || source.contains(&type_pat)
-            || source.contains(&class_pat)
-            || source.contains(&struct_pat)
-            || source.contains(&enum_pat)
-            || source.contains(&trait_pat)
-            || source.contains(&let_pat)
-            || source.contains(&val_pat)
-            || source.contains(&var_pat)
-            || source.contains(&const_pat)
-            || source.contains(&export_pat)
-            || source.contains(&export_comma_pat)
-    })
+    source_might_define_requested_symbol(&source, requested_names)
 }
 
 fn load_matching_package_siblings(
@@ -1394,6 +1800,12 @@ pub fn check_import_compatibility(
 /// verbatim with the pure-Simple twin in
 /// `src/compiler/10.frontend/core/interpreter/resolve.spl`.
 pub fn reject_captured_local_writes(module: &Module, path: &Path) -> Result<(), CompileError> {
+    simple_parser::nil_outside_unsafe::report_nil_outside_unsafe(path, None);
+    // W-CAPTURE-MUTATION (staged warning): a receiver-mutating call on a
+    // captured local is dropped with the by-value snapshot.
+    for m in simple_parser::capture_write_check::find_captured_local_mutations(module) {
+        eprintln!("{}: {}", crate::display_path::display_path(path), m.message());
+    }
     match simple_parser::capture_write_check::find_captured_local_writes(module).into_iter().next() {
         Some(write) => Err(CompileError::semantic(format!(
             "in {}: {}",
@@ -1456,9 +1868,13 @@ pub fn load_module_with_imports_for_target(
 ) -> Result<Module, CompileError> {
     let mut module = load_module_with_imports_internal(path, visited, None, true, target_arch)?;
     append_root_import_binding_markers(&mut module, path);
-    warn_duplicate_private_signatures(&module);
-    warn_method_arity_collisions(&module);
-    warn_cross_impl_method_collisions(&module);
+    // Advisory collision reports describe the loaded closure. For `lint|fix|fmt`
+    // that closure is the linter itself, not the linted file: stay quiet.
+    if !simple_common::tool_closure_quiet::tool_closure_quiet() {
+        warn_duplicate_private_signatures(&module);
+        warn_method_arity_collisions(&module);
+        warn_cross_impl_method_collisions(&module);
+    }
     Ok(module)
 }
 
@@ -1487,6 +1903,7 @@ fn append_root_import_binding_markers(module: &mut Module, path: &Path) {
                         target: target.clone(),
                         is_type_only: multi_use.is_type_only,
                         is_lazy: false,
+                        attributes: multi_use.attributes.clone(),
                     };
                     append_flattened_import_binding_markers(&mut markers, &temp_use, path, "<entry>");
                 }
@@ -1642,10 +2059,11 @@ fn function_owner_module(f: &FunctionDef) -> &str {
 
 /// Env gate for the same-signature half of the collision diagnostic.
 ///
-/// Default OFF. The same-signature family is far larger than the differing-signature
+/// Default: summary only. The same-signature family is far larger than the differing-signature
 /// family (every module pair that re-declares an identically-typed helper trips it),
 /// so turning it on unconditionally would bury the existing warning under noise on a
-/// full test/bootstrap run. Opt in with `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1`.
+/// full test/bootstrap run. Default is therefore a compact one-line summary
+/// (`render_same_signature_summary`); `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1` lists each symbol.
 fn same_signature_diag_enabled() -> bool {
     use std::sync::OnceLock;
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -1654,6 +2072,33 @@ fn same_signature_diag_enabled() -> bool {
             .map(|v| v != "0" && !v.is_empty())
             .unwrap_or(false)
     })
+}
+
+/// One-line default report for same-signature cross-module collisions.
+///
+/// These are the shape no other tool can detect (one definition silently wins,
+/// no type/arity error), so they must not be silent by default; but the family is
+/// large (hundreds in a full run), so the default is a single compact summary
+/// naming up to `LIMIT` symbols. `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1` prints
+/// the full per-symbol listing with owner modules instead.
+fn render_same_signature_summary(names: &[String]) -> Option<String> {
+    const LIMIT: usize = 12;
+    if names.is_empty() {
+        return None;
+    }
+    let shown: Vec<String> = names.iter().take(LIMIT).map(|n| format!("`{n}`")).collect();
+    let more = names.len().saturating_sub(LIMIT);
+    let tail = if more > 0 { format!(", ... and {more} more") } else { String::new() };
+    Some(format!(
+        "warning: {} function name(s) have co-compiled definitions across modules with the SAME \
+         signature: {}{}; one silently wins and the rest are discarded, so a call may run a \
+         different module's body than the one it imported (set \
+         SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1 for per-symbol owners). \
+         [compiler_cross_module_private_symbol_collision]",
+        names.len(),
+        shown.join(", "),
+        tail,
+    ))
 }
 
 fn warn_duplicate_private_signatures(module: &Module) {
@@ -1698,6 +2143,9 @@ fn warn_duplicate_private_signatures(module: &Module) {
     static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
 
+    // Same-signature collisions found in this module, listed compactly in ONE summary
+    // warning unless `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1` asks for per-symbol detail.
+    let mut samesig_compact: Vec<String> = Vec::new();
     let mut names: Vec<&str> = by_name.keys().copied().collect();
     names.sort();
     for name in names {
@@ -1741,9 +2189,6 @@ fn warn_duplicate_private_signatures(module: &Module) {
             // Warn-only and default-off (see `same_signature_diag_enabled`); this
             // is deliberately NOT promoted to an error here.
             // ------------------------------------------------------------------
-            if !same_signature_diag_enabled() {
-                continue;
-            }
             let mut owners: Vec<&str> = entries.iter().map(|(_, owner)| *owner).collect();
             owners.sort();
             owners.dedup();
@@ -1759,6 +2204,10 @@ fn warn_duplicate_private_signatures(module: &Module) {
                 if !set.insert(key) {
                     continue;
                 }
+            }
+            if !same_signature_diag_enabled() {
+                samesig_compact.push(name.to_string());
+                continue;
             }
             eprintln!(
                 "warning: {} `{}` has {} co-compiled definitions across {} modules with the \
@@ -1788,16 +2237,20 @@ fn warn_duplicate_private_signatures(module: &Module) {
         }
         eprintln!(
             "warning: {} `{}` has {} co-compiled definitions with {} differing \
-             signatures ({}); JIT call sites resolve by exact arg-type match (mangled `$dupN` \
-             variants), falling back to the last definition when types are ambiguous — a \
-             fallback hit may still dispatch to the wrong one. Rename the conflicting helper(s) \
-             to a unique name. [compiler_cross_module_private_symbol_collision]",
+             signatures ({}); call sites resolve by the caller's import path, else by exact \
+             arg-type match (mangled `$dupN` variants), and a call that neither selects is a \
+             compile error (owner decision 2026-11-09, no last-definition fallback). Rename the \
+             conflicting helper(s) to a unique name. [compiler_cross_module_private_symbol_collision]",
             kind,
             name,
             sigs.len(),
             distinct.len(),
             distinct.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" vs "),
         );
+    }
+
+    if let Some(summary) = render_same_signature_summary(&samesig_compact) {
+        eprintln!("{summary}");
     }
 
     // Class-name collisions. Unlike functions there is no signature to compare —
@@ -2092,6 +2545,7 @@ pub fn collect_direct_imported_module_paths(path: &Path) -> Result<Vec<PathBuf>,
                     target: export_use.target,
                     is_type_only: false,
                     is_lazy: false,
+                    attributes: export_use.attributes,
                 };
                 collect_use_stmt_direct_paths(&temp_use, base_dir, &mut collected)?;
             }
@@ -2143,6 +2597,7 @@ fn collect_imported_module_paths_internal(
                     target: export_use.target,
                     is_type_only: false,
                     is_lazy: false,
+                    attributes: export_use.attributes,
                 };
                 collect_use_stmt_paths(&temp_use, base_dir, visited, collected)?;
             }
@@ -2365,6 +2820,7 @@ fn load_module_with_imports_internal(
     }
 
     let mut source = read_module_source_text_cached(&path)?;
+    let raw_source = (target_arch == simple_common::target::TargetArch::host()).then(|| source.clone());
 
     // Bootstrap leniency: older sources use optional `text?` types which the
     // current parser treats as a bare identifier. During early bootstrap we
@@ -2397,7 +2853,16 @@ fn load_module_with_imports_internal(
     let mut module = parser
         .parse()
         .map_err(|e| CompileError::Parse(format!("in {}: {e}", crate::display_path::display_path(&path))))?;
+    // Hand this parse to the cross-lane cache so HIR import loading does not
+    // parse the same file again (375 second parses on the web renderer).
+    if let Some(raw) = raw_source {
+        crate::interpreter::shared_source_seed(&path, raw, &source, &module);
+    }
     crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns(&mut module, target_arch);
+    // Private fn names must be known before any importer's flattened top-level
+    // initializer runs, and to the JIT lane, which never runs the interpreter
+    // loader at all.
+    crate::interpreter::interpreter_module::register_module_private_fns(&path, &module.items);
 
     // Closures capture enclosing locals by value and are read-only
     // (.claude/rules/language.md:22, owner ruling 2026-09-27): a nested fn or
@@ -2418,6 +2883,7 @@ fn load_module_with_imports_internal(
             target: ImportTarget::Glob,
             is_type_only: false,
             is_lazy: false,
+            attributes: vec![],
         });
         module.items.insert(0, shell_import);
     }
@@ -2430,9 +2896,11 @@ fn load_module_with_imports_internal(
     for item in module.items {
         if let Node::UseStmt(use_stmt) = &item {
             if let Some(resolved) = resolve_use_to_path(use_stmt, path.parent().unwrap_or(Path::new("."))) {
+                // The JIT lane never runs the interpreter loader, so apply its
+                // unprovided braced-use rule here (same message / strict outcome).
+                crate::interpreter::interpreter_module::check_unprovided_use_in_resolved_module(use_stmt, &path, &resolved)?;
                 if flatten_imports {
-                    let flatten_this_import = should_flatten_nested_import(use_stmt, &source)
-                        || single_import_targets_module_file(&use_stmt.target, &resolved);
+                    let flatten_this_import = should_flatten_import(use_stmt, &source, &resolved, path.parent().unwrap_or(Path::new(".")));
                     let mut imported = load_module_with_imports_internal(
                         &resolved,
                         visited,
@@ -2489,10 +2957,11 @@ fn load_module_with_imports_internal(
                 target: export_use.target.clone(),
                 is_type_only: false,
                 is_lazy: false,
+                attributes: export_use.attributes.clone(),
             };
             if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
-                    let flatten_this_import = should_flatten_nested_import(&temp_use, &source);
+                    let flatten_this_import = should_flatten_import(&temp_use, &source, &resolved, path.parent().unwrap_or(Path::new(".")));
                     let mut imported = load_module_with_imports_internal(
                         &resolved,
                         visited,
@@ -2540,10 +3009,11 @@ fn load_module_with_imports_internal(
                 target: common_use.target.clone(),
                 is_type_only: false,
                 is_lazy: false,
+                attributes: vec![],
             };
             if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
-                    let flatten_this_import = should_flatten_nested_import(&temp_use, &source);
+                    let flatten_this_import = should_flatten_import(&temp_use, &source, &resolved, path.parent().unwrap_or(Path::new(".")));
                     let mut imported = load_module_with_imports_internal(
                         &resolved,
                         visited,
@@ -2593,10 +3063,11 @@ fn load_module_with_imports_internal(
                     target: target.clone(),
                     is_type_only: multi_use.is_type_only,
                     is_lazy: false,
+                    attributes: multi_use.attributes.clone(),
                 };
                 if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                     if flatten_imports {
-                        let flatten_this_import = should_flatten_nested_import(&temp_use, &source);
+                        let flatten_this_import = should_flatten_import(&temp_use, &source, &resolved, path.parent().unwrap_or(Path::new(".")));
                         let mut imported = load_module_with_imports_internal(
                             &resolved,
                             visited,
@@ -2668,7 +3139,7 @@ fn load_module_with_imports_internal(
 type ResolveUseKey = (PathBuf, Vec<String>, String);
 
 thread_local! {
-    static RESOLVE_USE_CACHE: RefCell<Option<HashMap<ResolveUseKey, Option<PathBuf>>>> = const { RefCell::new(None) };
+    static RESOLVE_USE_CACHE: RefCell<Option<HashMap<ResolveUseKey, Option<(PathBuf, bool)>>>> = const { RefCell::new(None) };
     static RESOLVE_USE_CACHE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -2698,16 +3169,23 @@ impl Drop for ResolveUseCacheScope {
 }
 
 fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
+    resolve_use_to_path_and_kind(use_stmt, base).map(|(path, _)| path)
+}
+
+/// `resolve_use_to_path` plus whether a `Single`/`Aliased` target names a
+/// SYMBOL of the resolved module (`use a.b.x`, `x` declared in `a/b.spl`)
+/// rather than a module file (`use a.b`). Always `false` for `Group`/`Glob`.
+fn resolve_use_to_path_and_kind(use_stmt: &UseStmt, base: &Path) -> Option<(PathBuf, bool)> {
     let segments = &use_stmt.path.segments;
     let deprecated_ffi = segments.iter().filter(|s| s.as_str() != "crate" && s.as_str() != "self" && s.as_str() != ".").take(2).map(|s| s.as_str()).eq(["std", "ffi"]);
     if deprecated_ffi {
-        return resolve_use_to_path_uncached(use_stmt, base);
+        return resolve_use_to_path_and_kind_uncached(use_stmt, base);
     }
     let key: ResolveUseKey = (base.to_path_buf(), segments.clone(), format!("{:?}", use_stmt.target));
     if let Some(hit) = RESOLVE_USE_CACHE.with(|cache| cache.borrow().as_ref().and_then(|map| map.get(&key).cloned())) {
         return hit;
     }
-    let resolved = resolve_use_to_path_uncached(use_stmt, base);
+    let resolved = resolve_use_to_path_and_kind_uncached(use_stmt, base);
     RESOLVE_USE_CACHE.with(|cache| {
         if let Some(map) = cache.borrow_mut().as_mut() {
             map.insert(key, resolved.clone());
@@ -2716,7 +3194,12 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
     resolved
 }
 
+#[cfg(test)]
 fn resolve_use_to_path_uncached(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
+    resolve_use_to_path_and_kind_uncached(use_stmt, base).map(|(path, _)| path)
+}
+
+fn resolve_use_to_path_and_kind_uncached(use_stmt: &UseStmt, base: &Path) -> Option<(PathBuf, bool)> {
     let mut parts: Vec<String> = use_stmt
         .path
         .segments
@@ -2794,21 +3277,26 @@ fn resolve_use_to_path_uncached(use_stmt: &UseStmt, base: &Path) -> Option<PathB
         // root to resolve against at all. The interpreter already falls back to
         // the cwd's project root for exactly this (interpreter_module/
         // path_resolution.rs); mirror it so `compile` and `run` agree.
-        if project_root_ancestor(base).is_none() {
-            if let Some(cwd_root) = std::env::current_dir().ok().and_then(|cwd| project_root_ancestor(&cwd)) {
-                return resolve_parts_from_project_root(&cwd_root, parts, use_stmt);
+        if let Some(root) = project_root_ancestor(base) {
+            if let Some(resolved) = resolve_parts_from_project_root(&root, parts, use_stmt) {
+                return Some(resolved);
             }
+        } else if let Some(cwd_root) = std::env::current_dir().ok().and_then(|cwd| project_root_ancestor(&cwd)) {
+            return resolve_parts_from_project_root(&cwd_root, parts, use_stmt);
         }
         None
     };
 
     if let Some(resolved) = resolve_parts(&parts) {
-        return Some(resolved);
+        return Some((resolved, false));
     }
 
     if matches!(use_stmt.target, ImportTarget::Single(_) | ImportTarget::Aliased { .. }) {
+        // The target is not a module file: it names a symbol of the module the
+        // remaining path resolves to (if any path remains).
         parts.pop();
-        return resolve_parts(&parts);
+        let target_is_symbol = !parts.is_empty();
+        return resolve_parts(&parts).map(|resolved| (resolved, target_is_symbol));
     }
 
     None
@@ -2903,6 +3391,197 @@ mod tests {
         );
     }
 
+    /// Regression for
+    /// doc/08_tracking/bug/jit_pipeline_loader_skips_plain_package_init_under_numbered_layer_2026-10-30.md:
+    /// a facade `__init__.spl` whose LAST path segment is a plain package dir
+    /// under a numbered layer dir (`src/35.sem/pkg_a/__init__.spl`, the shape
+    /// of `src/compiler/35.semantics/any_escape/__init__.spl`) must resolve in
+    /// the flattening loader so the fn it re-exports from its owner submodule
+    /// is a `Node::Function` of the flattened unit. Before the fix
+    /// `resolve_use_to_path` returned `None` for `use sem.pkg_a.{facade_f}`
+    /// (only `<dir>/pkg_a.spl`, layered aliases and `NN.pkg_a/` were probed),
+    /// nothing was flattened, and the JIT reported
+    /// `unresolved external symbol 'facade_f'`.
+    #[test]
+    fn numbered_layer_plain_package_init_resolves_and_flattens_facade_reexport() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        let pkg = src.join("35.sem").join("pkg_a");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(pkg.join("__init__.spl"), "export use sem.pkg_a.inner.{facade_f}\n").unwrap();
+        fs::write(
+            pkg.join("inner.spl"),
+            "pub fn facade_f(x: i64) -> i64:\n    x * 2 + 1\n\nexport facade_f\n",
+        )
+        .unwrap();
+        let entry = src.join("main.spl");
+        fs::write(&entry, "use sem.pkg_a.{facade_f}\n\nfn main():\n    print(\"{facade_f(20)}\")\n").unwrap();
+        clear_module_source_text_cache();
+
+        let use_stmt = UseStmt {
+            span: Span::new(0, 0, 1, 1),
+            path: ModulePath::new(vec!["sem".to_string(), "pkg_a".to_string()]),
+            target: ImportTarget::Group(vec![ImportTarget::Single("facade_f".to_string())]),
+            is_type_only: false,
+            is_lazy: false,
+            attributes: vec![],
+        };
+        let resolved = resolve_use_to_path(&use_stmt, &src).expect("facade import must resolve to a path");
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            pkg.join("__init__.spl").canonicalize().unwrap(),
+            "the plain package marker under the numbered layer is the facade"
+        );
+
+        let module = load_module_with_imports(&entry, &mut HashSet::new()).unwrap();
+        let has_fn = module
+            .items
+            .iter()
+            .any(|item| matches!(item, Node::Function(f) if f.name == "facade_f"));
+        assert!(
+            has_fn,
+            "the re-exported owner fn must be flattened into the entry unit; items: {:?}",
+            module
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    Node::Function(f) => Some(f.name.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// `use pkg.sym` (unbraced) where `pkg` is a package `__init__.spl` that
+    /// only RE-EXPORTS `sym` must flatten like `use pkg.{sym}` on the JIT lane.
+    /// The package aggregator used to stay lazy for every `Single` import, so
+    /// the JIT unit carried the import binding but no `sym` body and refused
+    /// with `unresolved external symbol` (`use std.spec.step`, 10.8k specs).
+    /// Interpreter lanes keep the lazy load (they resolve `sym` through the
+    /// exports cache, and flattening costs them warnings and RSS), and a
+    /// whole-package `use pkg` stays lazy everywhere.
+    /// See doc/08_tracking/bug/seed_jit_spec_entry_demoted_by_entry_reparse_2026-11-14.md.
+    #[test]
+    fn unbraced_package_symbol_import_flattens_reexport_only_under_jit_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        let pkg = src.join("35.sem").join("pkg_c");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(pkg.join("__init__.spl"), "export use sem.pkg_c.inner.{facade_g}\n").unwrap();
+        fs::write(
+            pkg.join("inner.spl"),
+            "pub fn facade_g(x: i64) -> i64:\n    x * 3\n\nexport facade_g\n",
+        )
+        .unwrap();
+        let entry = src.join("main.spl");
+        fs::write(&entry, "use sem.pkg_c.facade_g\n\nfn main():\n    print(\"{facade_g(2)}\")\n").unwrap();
+        let whole = src.join("whole.spl");
+        fs::write(&whole, "use sem.pkg_c\n\nfn main():\n    print(\"x\")\n").unwrap();
+        let has_facade = |module: &Module| {
+            module
+                .items
+                .iter()
+                .any(|item| matches!(item, Node::Function(f) if f.name == "facade_g"))
+        };
+        clear_module_source_text_cache();
+
+        let lazy = load_module_with_imports(&entry, &mut HashSet::new()).unwrap();
+        assert!(!has_facade(&lazy), "outside the JIT scope the package stays lazy");
+
+        let _scope = FlattenPackageSymbolImportsScope::enter();
+        let jit = load_module_with_imports(&entry, &mut HashSet::new()).unwrap();
+        assert!(has_facade(&jit), "under the JIT scope `use pkg.sym` must flatten the re-exported body");
+        let whole_pkg = load_module_with_imports(&whole, &mut HashSet::new()).unwrap();
+        assert!(!has_facade(&whole_pkg), "a whole-package `use pkg` stays lazy even under the JIT scope");
+        let aliased = src.join("aliased.spl");
+        fs::write(&aliased, "use sem.pkg_c.facade_g as g3\n\nfn main():\n    print(\"{g3(2)}\")\n").unwrap();
+        let aliased_jit = load_module_with_imports(&aliased, &mut HashSet::new()).unwrap();
+        assert!(has_facade(&aliased_jit), "`use pkg.sym as alias` flattens like `use pkg.{{sym as alias}}`");
+    }
+
+    /// Ordering pin for the fix above: a same-named `<pkg>.spl` file next to a
+    /// `<pkg>/__init__.spl` directory still wins for a `Single` import (the
+    /// file check runs first; only lookups that returned `None` before may
+    /// now return the package marker).
+    #[test]
+    fn numbered_layer_same_named_file_still_outranks_plain_package_init() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        let layer = src.join("35.sem");
+        fs::create_dir_all(layer.join("pkg_b")).unwrap();
+        fs::write(layer.join("pkg_b.spl"), "pub fn from_file() -> i64:\n    1\n").unwrap();
+        fs::write(layer.join("pkg_b").join("__init__.spl"), "pub fn from_init() -> i64:\n    2\n").unwrap();
+        clear_module_source_text_cache();
+
+        let use_stmt = UseStmt {
+            span: Span::new(0, 0, 1, 1),
+            path: ModulePath::new(vec!["sem".to_string(), "pkg_b".to_string()]),
+            target: ImportTarget::Single("pkg_b".to_string()),
+            is_type_only: false,
+            is_lazy: false,
+            attributes: vec![],
+        };
+        let resolved = resolve_use_to_path(&use_stmt, &src).expect("import must resolve");
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            layer.join("pkg_b.spl").canonicalize().unwrap(),
+            "same-named file keeps winning over the package marker"
+        );
+    }
+
+    /// `use a.b.x` (unbraced, `x` a symbol of module `a.b`) must record the same
+    /// import binding as `use a.b.{x}`; a whole-module `use a.b` records none.
+    #[test]
+    fn unbraced_single_symbol_use_emits_import_binding_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let consumer_path = temp.path().join("unbraced_consumer_mod.spl");
+        let leaf_path = temp.path().join("unbraced_leaf_mod.spl");
+        let pkg_leaf_path = temp.path().join("unbraced_pkg_dir").join("unbraced_inner_mod.spl");
+        fs::create_dir_all(pkg_leaf_path.parent().unwrap()).unwrap();
+        let leaf_src = "fn unbraced_helper_fn() -> i64:\n    1\n\nstruct UnbracedType:\n    v: i64\n";
+        fs::write(&leaf_path, leaf_src).unwrap();
+        fs::write(&pkg_leaf_path, "fn inner_fn() -> i64:\n    2\n").unwrap();
+        clear_module_source_text_cache();
+
+        let source = "use unbraced_leaf_mod.unbraced_helper_fn\n\
+                      use unbraced_leaf_mod.unbraced_helper_fn as unbraced_alias_fn\n\
+                      use unbraced_leaf_mod.UnbracedType\n\
+                      use unbraced_leaf_mod\n\
+                      use unbraced_pkg_dir.unbraced_inner_mod\n\
+                      use unbraced_pkg_dir.unbraced_inner_mod as unbraced_inner_alias\n";
+        let module = Parser::new(source).parse().expect("consumer must parse");
+        let use_count = module.items.iter().filter(|item| matches!(item, Node::UseStmt(_))).count();
+        assert_eq!(use_count, 6, "every line must parse as a use statement");
+
+        let flattened = strip_flattened_import_nodes(module, &consumer_path);
+        let importer = normalize_path_key(&consumer_path).to_string_lossy().into_owned();
+        let leaf = normalize_path_key(&leaf_path).to_string_lossy().into_owned();
+        let markers: Vec<String> = flattened
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Node::Const(marker) if marker.name.starts_with(FLATTEN_IMPORT_BINDING_MARKER_PREFIX) => {
+                    Some(marker.name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+
+        let mut expected = vec![
+            import_binding_marker_name(&importer, "unbraced_helper_fn", &leaf, "unbraced_helper_fn"),
+            import_binding_marker_name(&importer, "unbraced_alias_fn", &leaf, "unbraced_helper_fn"),
+            import_binding_marker_name(&importer, "UnbracedType", &leaf, "UnbracedType"),
+            // A bare `use m` parses as a glob of `m` (pre-existing behaviour).
+            import_binding_marker_name(&importer, "*", &leaf, "*"),
+        ];
+        expected.sort();
+        let mut actual = markers.clone();
+        actual.sort();
+        // Exactly the three symbol imports plus the bare-module glob; the
+        // whole-module imports `use pkg.m` / `use pkg.m as a` bind no symbol.
+        assert_eq!(actual, expected);
+    }
+
     #[test]
     fn flattened_export_use_emits_global_binding_markers_for_reexport_facades() {
         let temp = tempfile::tempdir().unwrap();
@@ -2924,16 +3603,19 @@ mod tests {
                             alias: "aliased_value".to_string(),
                         },
                     ]),
+                    attributes: vec![],
                 }),
                 Node::ExportUseStmt(ExportUseStmt {
                     span,
                     path: ModulePath::new(vec!["leaf".to_string()]),
                     target: ImportTarget::Glob,
+                    attributes: vec![],
                 }),
                 Node::ExportUseStmt(ExportUseStmt {
                     span,
                     path: ModulePath::new(vec![]),
                     target: ImportTarget::Single("bare_value".to_string()),
+                    attributes: vec![],
                 }),
             ],
         };
@@ -3121,6 +3803,7 @@ mod tests {
             target,
             is_type_only: false,
             is_lazy: false,
+            attributes: vec![],
         }
     }
 
@@ -3165,6 +3848,32 @@ mod tests {
         assert_eq!(resolve_parts_from_project_root(&project, &std_parts, &std_import), None);
     }
 
+    /// Bug os_crypto_jit_unresolved_symbol_rootcause_2026-07-30: an importer at
+    /// the project root (`proj/probe.spl` with `use os.crypto.hotp.{f}`) must
+    /// resolve `proj/src/os/crypto/hotp.spl`; the ancestor climb only probes
+    /// `<parent>/src`, so the importer's own `src/` used to be skipped.
+    #[test]
+    fn root_level_importer_resolves_from_own_src() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("proj");
+        let hotp = project.join("src/os/crypto/hotp.spl");
+        fs::create_dir_all(hotp.parent().unwrap()).unwrap();
+        fs::write(&hotp, "fn hotp_f() -> i64:\n    42\n").unwrap();
+        let parts: Vec<String> = ["os", "crypto", "hotp"].iter().map(|s| s.to_string()).collect();
+        let import = use_stmt(
+            &["os", "crypto", "hotp"],
+            ImportTarget::Group(vec![ImportTarget::Single("hotp_f".to_string())]),
+        );
+        assert_eq!(resolve_parts_with_search_roots(&project, &parts, &import), Some(hotp));
+        // Sibling shape: a nested importer still resolves via the ancestor climb.
+        let nested = project.join("test/zz");
+        fs::create_dir_all(&nested).unwrap();
+        assert_eq!(
+            resolve_parts_with_search_roots(&nested, &parts, &import),
+            Some(project.join("src/os/crypto/hotp.spl"))
+        );
+    }
+
     /// `use lib.common.env_access.model.{...}` (109 sites in src/) names the
     /// same stdlib root as `std.`; the loader used to keep the `lib` segment
     /// and probe `src/lib/lib/common/...`, so the import silently vanished.
@@ -3206,11 +3915,13 @@ mod tests {
         let relative_module = Path::new("src/lib/common/probe.spl");
         let runtime_module = runtime_root.join(relative_module);
         let seed_module = seed_root.join(relative_module);
+        let runtime_marker = "# runtime cwd worktree marker\n";
+        let seed_marker = "# seed build worktree marker\n";
         fs::create_dir_all(runtime_module.parent().unwrap()).unwrap();
         fs::create_dir_all(seed_module.parent().unwrap()).unwrap();
         fs::create_dir_all(&seed_manifest).unwrap();
-        fs::write(&runtime_module, "# runtime worktree\n").unwrap();
-        fs::write(&seed_module, "# seed build worktree\n").unwrap();
+        fs::write(&runtime_module, runtime_marker).unwrap();
+        fs::write(&seed_module, seed_marker).unwrap();
 
         let parts = ["std".to_string(), "probe".to_string()];
         let import = use_stmt(&["std", "probe"], ImportTarget::Glob);
@@ -3223,6 +3934,27 @@ mod tests {
         let resolved = resolve_from_stdlib_fallbacks(runtime_root, &seed_manifest, &parts, &import).unwrap();
 
         assert_eq!(resolved, runtime_module);
+        assert_eq!(fs::read_to_string(resolved).unwrap(), runtime_marker);
+    }
+
+    #[test]
+    fn stdlib_fallback_uses_seed_build_worktree_when_runtime_worktree_lacks_module() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_root = temp.path().join("runtime-worktree");
+        let seed_manifest = temp.path().join("seed-worktree/src/compiler_rust/compiler");
+        let seed_module = temp.path().join("seed-worktree/src/lib/common/probe.spl");
+        let seed_marker = "# seed build worktree fallback marker\n";
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::create_dir_all(seed_module.parent().unwrap()).unwrap();
+        fs::create_dir_all(&seed_manifest).unwrap();
+        fs::write(&seed_module, seed_marker).unwrap();
+
+        let parts = ["std".to_string(), "probe".to_string()];
+        let import = use_stmt(&["std", "probe"], ImportTarget::Glob);
+        let resolved = resolve_from_stdlib_fallbacks(runtime_root, &seed_manifest, &parts, &import).unwrap();
+
+        assert_eq!(resolved.canonicalize().unwrap(), seed_module.canonicalize().unwrap());
+        assert_eq!(fs::read_to_string(resolved).unwrap(), seed_marker);
     }
 
     #[test]
@@ -4033,6 +4765,96 @@ impl Wrapper:
             } else if path.extension().and_then(|e| e.to_str()) == Some("spl") {
                 out.push(path);
             }
+        }
+    }
+
+    #[test]
+    fn same_signature_summary_is_default_visible_compact_and_tagged() {
+        assert!(super::render_same_signature_summary(&[]).is_none());
+        let two = vec!["_shared_helper".to_string(), "shared_public".to_string()];
+        let s = super::render_same_signature_summary(&two).unwrap();
+        assert!(s.contains("`_shared_helper`") && s.contains("`shared_public`"));
+        assert!(s.contains("[compiler_cross_module_private_symbol_collision]"));
+        let many: Vec<String> = (0..40).map(|i| format!("f{i}")).collect();
+        let s = super::render_same_signature_summary(&many).unwrap();
+        assert!(s.contains("40 function name(s)") && s.contains("and 28 more"));
+        assert!(!s.contains("`f20`"), "summary must stay compact");
+    }
+
+    #[test]
+    fn source_might_define_requested_symbol_ignores_use_imports_locals_and_comments() {
+        let posix_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../lib/nogc_sync_mut/io/stdin_command_posix_v1.spl");
+        let posix_source = fs::read_to_string(&posix_path).expect("read stdin_command_posix_v1.spl");
+
+        for unrelated in [
+            "file_hash_sha256",
+            "file_size_raw",
+            "file_is_regular_no_follow",
+            "OwnedProcessLease",
+            "owner",
+            "result",
+            "stdout",
+            "stderr",
+            "error",
+            "lease",
+        ] {
+            assert!(
+                !super::source_might_define_requested_symbol(&posix_source, &[unrelated.to_string()]),
+                "stdin_command_posix_v1.spl must not falsely match `{unrelated}`"
+            );
+        }
+
+        for defined in [
+            "StdinCommandPlatformOwnerV1",
+            "StdinCommandPlatformTurnV1",
+            "stdin_command_platform_file_no_follow_v1",
+        ] {
+            assert!(
+                super::source_might_define_requested_symbol(&posix_source, &[defined.to_string()]),
+                "stdin_command_posix_v1.spl should match its top-level `{defined}`"
+            );
+        }
+    }
+
+    #[test]
+    fn source_might_define_requested_symbol_matches_reexports_and_top_level_decls() {
+        let sample = r#"
+# fn commented_out():
+"""
+struct InsideDocstring:
+    x: i64
+"""
+use std.other.{imported_a,
+    imported_b}
+pub use std.reexported.{
+    ReexportAlpha,
+    ReexportBeta
+}
+export exported_gamma,
+    exported_delta
+val top_val_prefix_only = 1
+pub fn top_fn(arg: i64):
+    val local_only = 2
+"#;
+        for absent in ["commented_out", "InsideDocstring", "imported_a", "imported_b", "top_val", "local_only", "arg"] {
+            assert!(
+                !super::source_might_define_requested_symbol(sample, &[absent.to_string()]),
+                "must not match `{absent}`"
+            );
+        }
+        for present in [
+            "ReexportAlpha",
+            "ReexportBeta",
+            "exported_gamma",
+            "exported_delta",
+            "top_val_prefix_only",
+            "top_fn",
+        ] {
+            assert!(
+                super::source_might_define_requested_symbol(sample, &[present.to_string()]),
+                "must match `{present}`"
+            );
         }
     }
 }

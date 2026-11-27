@@ -77,17 +77,18 @@ fn primitive_http_kind(value: text) -> RoomKind:
     if value == "task": return RoomKind.Task
     RoomKind.Channel
 
-fn primitive_http_messages(messages: [RoomMessage], store: PureSqlMessagingStore) -> text:
+fn primitive_http_messages(messages: [RoomMessage], store: PureSqlMessagingStore) -> Result<text, text>:
     var items: [text] = []
     for message in messages:
         var tags: [text] = []
-        for receipt in store.receipts(message.message_id.value):
+        val receipts = store.receipts(message.message_id.value)?
+        for receipt in receipts:
             tags.push("\"" + primitive_http_escape(receipt_tag(receipt)) + "\"")
         items.push("{\"message_id\":\"" + primitive_http_escape(message.message_id.value) +
             "\",\"room_seq\":" + message.room_seq.to_text() + ",\"sender_identity_id\":\"" +
             primitive_http_escape(message.sender_identity_id.value) + "\",\"body\":\"" +
             primitive_http_escape(message.body) + "\",\"receipt_tags\":[" + tags.join(",") + "]}")
-    "{\"messages\":[" + items.join(",") + "]}"
+    Ok("{\"messages\":[" + items.join(",") + "]}")
 
 class PrimitiveMessagingApplication:
     runtime: MessagingRuntime
@@ -96,17 +97,33 @@ class PrimitiveMessagingApplication:
     pending_email_token: text
     pending_email: text
 
-    static fn memory() -> PrimitiveMessagingApplication:
-        val runtime = MessagingRuntime.memory()
-        PrimitiveMessagingApplication(runtime: runtime,
-            enrollment: EnrollmentService.restore(runtime.store.invites(), runtime.store.accounts()),
-            enrollment_secret: "test-enrollment-secret", pending_email_token: "", pending_email: "")
+    static fn memory() -> Result<PrimitiveMessagingApplication, text>:
+        val runtime = match MessagingRuntime.memory():
+            case Ok(opened): opened
+            case Err(reason): return Err(reason)
+        val invites = match runtime.store.invites():
+            case Ok(found): found
+            case Err(reason): return Err(reason)
+        val accounts = match runtime.store.accounts():
+            case Ok(found): found
+            case Err(reason): return Err(reason)
+        Ok(PrimitiveMessagingApplication(runtime: runtime,
+            enrollment: EnrollmentService.restore(invites, accounts),
+            enrollment_secret: "test-enrollment-secret", pending_email_token: "", pending_email: ""))
 
-    static fn open(path: text) -> PrimitiveMessagingApplication:
-        val runtime = MessagingRuntime.open(path)
-        PrimitiveMessagingApplication(runtime: runtime,
-            enrollment: EnrollmentService.restore(runtime.store.invites(), runtime.store.accounts()),
-            enrollment_secret: "", pending_email_token: "", pending_email: "")
+    static fn open(path: text) -> Result<PrimitiveMessagingApplication, text>:
+        val runtime = match MessagingRuntime.open(path):
+            case Ok(opened): opened
+            case Err(reason): return Err(reason)
+        val invites = match runtime.store.invites():
+            case Ok(found): found
+            case Err(reason): return Err(reason)
+        val accounts = match runtime.store.accounts():
+            case Ok(found): found
+            case Err(reason): return Err(reason)
+        Ok(PrimitiveMessagingApplication(runtime: runtime,
+            enrollment: EnrollmentService.restore(invites, accounts),
+            enrollment_secret: "", pending_email_token: "", pending_email: ""))
 
     me configure_enrollment_secret(secret: text):
         self.enrollment_secret = secret
@@ -171,9 +188,13 @@ class PrimitiveMessagingApplication:
             return accepted_response("room", room_id)
 
         if route.operation == "room_get":
-            val room = self.runtime.store.room(route.resource_id)
+            val room = match self.runtime.store.room(route.resource_id):
+                case Ok(found): found
+                case Err(reason): return error_response(500, reason, route.resource_id)
             if room.room_id.value == "": return error_response(404, "room_not_found", route.resource_id)
-            val visible = self.runtime.read_messages(route.resource_id, request.principal.identity_id, 0, 1)
+            val visible = match self.runtime.read_messages(route.resource_id, request.principal.identity_id, 0, 1):
+                case Ok(found): found
+                case Err(reason): return error_response(500, reason, route.resource_id)
             if room.visibility != "public" and visible.len() == 0:
                 var member = false
                 for membership in self.runtime.memberships:
@@ -186,7 +207,10 @@ class PrimitiveMessagingApplication:
 
         if route.operation == "room_list":
             var items: [text] = []
-            for room in self.runtime.store.rooms():
+            val stored_rooms = match self.runtime.store.rooms():
+                case Ok(found): found
+                case Err(reason): return error_response(500, reason, "room_list")
+            for room in stored_rooms:
                 if room.workspace_id.value == request.principal.workspace_id:
                     var visible = room.visibility == "public"
                     for membership in self.runtime.memberships:
@@ -227,16 +251,26 @@ class PrimitiveMessagingApplication:
         if route.operation == "message_history":
             val after = primitive_http_query_i64(request.path, "after_seq", 0)
             val limit = primitive_http_query_i64(request.path, "limit", 50)
-            return json_response(200, primitive_http_messages(self.runtime.read_messages(route.resource_id,
-                request.principal.identity_id, after, limit), self.runtime.store))
+            val history = match self.runtime.read_messages(route.resource_id,
+                    request.principal.identity_id, after, limit):
+                case Ok(found): found
+                case Err(reason): return error_response(500, reason, route.resource_id)
+            val rendered = match primitive_http_messages(history, self.runtime.store):
+                case Ok(found): found
+                case Err(reason): return error_response(500, reason, route.resource_id)
+            return json_response(200, rendered)
 
         if route.operation == "room_events":
             val after = primitive_http_query_i64(request.path, "after_seq", 0)
-            val messages = self.runtime.read_messages(route.resource_id, request.principal.identity_id, after, 200)
+            val messages = match self.runtime.read_messages(route.resource_id, request.principal.identity_id, after, 200):
+                case Ok(found): found
+                case Err(reason): return error_response(500, reason, route.resource_id)
             var events: [text] = []
             for message in messages:
-                events.push("id: " + message.room_seq.to_text() + "\nevent: message\ndata: " +
-                    primitive_http_messages([message], self.runtime.store) + "\n")
+                val rendered = match primitive_http_messages([message], self.runtime.store):
+                    case Ok(found): found
+                    case Err(reason): return error_response(500, reason, route.resource_id)
+                events.push("id: " + message.room_seq.to_text() + "\nevent: message\ndata: " + rendered + "\n")
             return ApiResponse(status: 200, content_type: "text/event-stream", body: events.join("\n") + "\n")
 
         if route.operation == "cursor_advance":

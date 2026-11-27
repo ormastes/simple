@@ -51,3 +51,22 @@ exercised parses cleanly today on the deployed binary. If the "compiled
 checker" referenced here is a distinct Stage 4 tool with its own parser
 path (not `bin/simple test`), re-open with that tool's own repro command.
 
+
+## Verification note 2026-11-25 (work/p2w1-aj-20261125, Windows host)
+
+Closure (2026-09-13, not-reproducible) re-confirmed by source inspection on
+`origin/release/1.0.0` (21e831c0a9b):
+
+- `src/lib/nogc_async_mut_noalloc/baremetal/riscv/cmo.spl` still contains zero
+  `asm volatile` occurrences — the original repro file/line remains gone.
+- The indented `asm volatile:` grammar remains live elsewhere (19 files under
+  `src/lib` alone), so the 2026-09-13 PASS on `riscv32_startup_spec.spl`
+  (which parses multiple such blocks) is the load-bearing evidence.
+
+Re-run attempted on this host:
+`SIMPLE_LIB=src bin/simple.exe test test/01_unit/baremetal/riscv32_startup_spec.spl --mode=interpreter`
+fails before reaching the spec with
+`error: semantic: src/app/test_runner_new/test_runner_client.spl:9:1: unknown decorator '@representation_boundary'`
+— the known release/1.0.0 source/binary inconsistency (pinned Rust seed
+predates the 940-annotation commit cfd89933699). This is an environment limit,
+not a regression of the closure; no new evidence contradicts CLOSED.

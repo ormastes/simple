@@ -3,6 +3,7 @@
 # Host-side only.
 
 use std.debug.remote.backend_generic (RemoteGenericBackend)
+use std.common.format.{format_hex}
 
 class OpenOcdProbe:
     """OpenOCD JTAG probe via TCL socket interface."""
@@ -43,7 +44,7 @@ class OpenOcdProbe:
         if not self.connected:
             return result
         val word_count = (len + 3) / 4
-        val cmd = "mdw 0x{addr} {word_count}"
+        val cmd = "mdw 0x{format_hex(addr.to_i64())} {word_count}"
         val response = openocd_tcl_query(self.host, self.port, cmd)
         result = parse_mdw_response(response, len)
         result
@@ -56,7 +57,7 @@ class OpenOcdProbe:
         while offset < data.length():
             val byte_val = data[offset]
             val target_addr = addr + offset.to_u64()
-            val cmd = "mwb 0x{target_addr} 0x{byte_val}"
+            val cmd = "mwb 0x{format_hex(target_addr.to_i64())} 0x{format_hex(byte_val.to_i64())}"
             openocd_tcl_send(self.host, self.port, cmd)
             offset = offset + 1
         true
@@ -73,7 +74,7 @@ class OpenOcdProbe:
         """Write a named register via 'reg <name> <value>'."""
         if not self.connected:
             return false
-        val cmd = "reg {name} 0x{value}"
+        val cmd = "reg {name} 0x{format_hex(value.to_i64())}"
         openocd_tcl_send(self.host, self.port, cmd)
 
     fn read_all_registers() -> [u64]:
@@ -150,11 +151,60 @@ fn openocd_tcl_query(host: text, port: i32, cmd: text) -> text:
     rt_tcp_send(tcl_fd, cmd)
     rt_tcp_recv(tcl_fd)
 
+fn _hex_nibble(c: text) -> i64:
+    """Value of one hex digit, or -1."""
+    var i: i64 = 0
+    for d in "0123456789abcdefABCDEF":
+        if d.to_string() == c:
+            return if i < 16: i else: i - 6
+        i = i + 1
+    -1
+
+fn _hex_token_value(token: text) -> i64:
+    """Parse a hex token with optional 0x prefix; -1 if it is not hex."""
+    var s = token.trim()
+    if s.starts_with("0x") or s.starts_with("0X"):
+        s = s.slice(2, s.byte_len())
+    if s.byte_len() == 0:
+        return -1
+    var v: i64 = 0
+    for ch in s:
+        val n = _hex_nibble(ch.to_string())
+        if n < 0:
+            return -1
+        v = v * 16 + n
+    v
+
 fn parse_mdw_response(response: text, len: i32) -> [u8]:
-    """Parse OpenOCD 'mdw' response into byte array."""
+    """Parse OpenOCD 'mdw' output ("0xADDR: w0 w1 ...", one or more lines)
+    into little-endian bytes, truncated to len. Stops at the first non-hex
+    word, so a malformed reply yields a short result rather than zeros."""
     var result: [u8] = []
+    for line in response.split("\n"):
+        val parts = line.split(":")
+        if parts.len() < 2:
+            continue
+        for tok in parts[1].split(" "):
+            if tok.trim() == "":
+                continue
+            val w = _hex_token_value(tok)
+            if w < 0:
+                return result
+            var b = 0
+            while b < 4 and result.len() < len:
+                result.push(((w >> (b * 8)) & 255) as u8)
+                b = b + 1
     result
 
+# ponytail: an unparseable reg reply still maps to 0 because the JtagProbe
+# read_register contract returns a bare u64; upgrade to Result when the probe
+# trait grows error returns.
 fn parse_reg_response(response: text) -> u64:
-    """Parse OpenOCD 'reg' response into value."""
-    0u64
+    """Parse OpenOCD 'reg' output ("pc (/32): 0x08000124") into its value."""
+    val parts = response.split(":")
+    if parts.len() < 2:
+        return 0u64
+    val v = _hex_token_value(parts[parts.len() - 1])
+    if v < 0:
+        return 0u64
+    v.to_u64()

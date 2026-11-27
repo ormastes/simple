@@ -1,3 +1,4 @@
+use compiler.frontend.core._AstExpr.nodes.{expr_owner_len, expr_owner_tag}
 use compiler.core.parser.{parser_lexical_scope_enter, parser_lexical_scope_leave, parser_lexical_bind_value, parser_lexical_has_new_value}
 use compiler.core.ast.{expr_get_str}
 # Primary parsing: parse_primary_expr (literals, identifiers, keywords).
@@ -24,7 +25,7 @@ use compiler.core.tokens.{TOK_KW_ASM}
 use compiler.core.tokens.{TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_AMPERSAND, TOK_NOT, TOK_CARET}
 use compiler.core.tokens.{TOK_EQ, TOK_LT, TOK_GEQ}
 use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
-use compiler.core.tokens.{TOK_LBRACE, TOK_RBRACE}
+use compiler.core.tokens.{TOK_LBRACE, TOK_RBRACE, TOK_SET_LIT_START}
 use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_PIPE}
 use compiler.core.tokens.{TOK_ASSIGN}
 use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF, TOK_ERROR}
@@ -38,25 +39,28 @@ use compiler.core.tokens.{TOK_KW_FOR, TOK_KW_IF, TOK_KW_IN}
 use compiler.core.tokens.{TOK_IDENT, TOK_UNDERSCORE}
 use compiler.core.ast.{expr_int_lit, expr_float_lit, expr_raw_string_lit}
 use compiler.core.ast.{expr_bool_lit, expr_nil_lit, expr_custom_block}
-use compiler.frontend.core._AstExpr.nodes.{expr_ident, expr_string_lit, expr_call_named}
+use compiler.frontend.core._AstExpr.nodes.{expr_ident, expr_string_lit, expr_call_named, expr_owner_str_set}
 use compiler.core.ast.{expr_unary, expr_call, expr_array_lit, expr_array_repeat, expr_method_call, expr_lambda}
 use compiler.core.ast.{expr_block, expr_tuple}
 use compiler.core.ast.{expr_return_expr, expr_break_expr, expr_continue_expr}
 use compiler.core.ast.{expr_unit, expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_todo_call, expr_pass_do_nothing, expr_pass_dn}
 use compiler.core.ast.{expr_dict_lit}
+use compiler.core.ast.{macro_fact_use_push}
 # D1 arrow lambda: a parenthesised element list is a PARAMETER list only when
 # every element is a bare identifier, which needs the arena tag directly.
-use compiler.core.ast_expr.{EXPR_IDENT, expr_tag}
-use compiler.core.ast.{expr_suffixed_int, expr_suffixed_float, expr_suffixed_bool, expr_suffixed_string}
+use compiler.core.ast_expr.{EXPR_IDENT}
+use compiler.core.ast.{expr_binary}
+use compiler.core.ast.{expr_suffixed_int,expr_suffixed_float, expr_suffixed_bool, expr_suffixed_string}
+use compiler.frontend.core._ParserPrimary.unit_literal_check.{parser_unit_literal_suffix_check}
 use compiler.core.ast.{expr_await, expr_yield, expr_spawn, expr_do_block, expr_atom, expr_new_alloc}
 use compiler.core.ast.{expr_list_comp, expr_dict_comp}
 use compiler.core.ast.{expr_asm, expr_asm_operands, expr_asm_match, expr_asm_assert}
-use compiler.core.ast.{asm_arm_new, asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_asm_text}
+use compiler.core.ast.{asm_arm_new}
 use compiler.core.ast.{module_get_path}
 use compiler.frontend.core.lexer.{lex_cur_suffix_get}
 use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice, lex_token_start_get, lex_token_end_get, lex_cur_no_interp_get}
 use compiler.frontend.core.lexer.{lex_enable_forced_indentation, lex_disable_forced_indentation, lex_pop_indent}
-use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
+use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get}
 use compiler.core.types.{flat_span_new}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_skip_newlines}
 use compiler.core.parser.{parser_guarded_int_text}
@@ -92,24 +96,25 @@ fn parser_is_canonical_custom_block_kind(kind: text) -> bool:
 # remain literal text, while a non-empty balanced interpolation region makes
 # the suffixed form unsupported (and therefore an explicit parse error).
 fn parser_path_literal_has_interpolation(value: text) -> bool:
+    val n = value.byte_len()
     var i: i64 = 0
-    while i < value.len():
-        val ch = value[i:i + 1]
-        val next = if i + 1 < value.len() then value[i + 1:i + 2] else ""
-        if ch == "{" and next == "{":
+    while i < n:
+        val ch = value.byte_at(i)
+        val next = if i + 1 < n then value.byte_at(i + 1) else -1
+        if ch == 123 and next == 123:
             i = i + 2
             continue
-        if ch == "{" and next == "}":
+        if ch == 123 and next == 125:
             i = i + 2
             continue
-        if ch == "{":
+        if ch == 123:
             var depth: i64 = 1
             var j: i64 = i + 1
-            while j < value.len():
-                val inner = value[j:j + 1]
-                if inner == "{":
+            while j < n:
+                val inner = value.byte_at(j)
+                if inner == 123:
                     depth = depth + 1
-                elif inner == "}":
+                elif inner == 125:
                     depth = depth - 1
                     if depth == 0:
                         return true
@@ -199,13 +204,13 @@ fn parse_fn_lambda_after_kw() -> i64:
     expr_lambda(fn_param_names, fn_lam_stmts, 0)
 
 fn unsuffixed_decimal_needs_u64_word(int_text: text) -> bool:
-    if int_text.len() >= 2 and int_text.byte_at(0) == 48:
+    if int_text.byte_len() >= 2 and int_text.byte_at(0) == 48:
         val prefix = int_text.byte_at(1)
         if prefix == 120 or prefix == 88 or prefix == 98 or prefix == 66 or prefix == 111 or prefix == 79:
             return false
     var digits = 0
     var i = 0
-    while i < int_text.len():
+    while i < int_text.byte_len():
         if int_text.byte_at(i) != 95:
             digits = digits + 1
         i = i + 1
@@ -215,14 +220,14 @@ fn unsuffixed_decimal_needs_u64_word(int_text: text) -> bool:
 # 0x/0b/0o prefixes. Shared by plain (kind 1) and suffixed (kind 7) ints
 # (suffixed hex like 0x10000000u64 previously hit the decimal-only path).
 fn parse_int_literal_text(int_text: text) -> i64:
-    if int_text.len() > 2:
-        val prefix = int_text[0:2]
+    if int_text.byte_len() > 2:
+        val prefix = int_text.substring(0, 2)
         if prefix == "0x":
             # Hex literal: parse digit by digit. int(hc) cannot be used for
             # letters: int("a") numeric-parses and errors ("cannot parse 'a'
             # as i64"), which broke const-eval of any hex literal with an
             # a-f digit (e.g. kernel 0xc... constants).
-            val hex_digits = int_text[2:]
+            val hex_digits = int_text.substring(2)
             var hex_val = 0
             var hi = 0
             while hi < hex_digits.len():
@@ -241,7 +246,7 @@ fn parse_int_literal_text(int_text: text) -> i64:
             return hex_val
         if prefix == "0b":
             # Binary literal: parse digit by digit
-            val bin_digits = int_text[2:]
+            val bin_digits = int_text.substring(2)
             var bin_val = 0
             var bi = 0
             while bi < bin_digits.len():
@@ -254,20 +259,29 @@ fn parse_int_literal_text(int_text: text) -> i64:
             return bin_val
         if prefix == "0o":
             # Octal literal: parse digit by digit
-            val oct_digits = int_text[2:]
+            val oct_digits = int_text.substring(2)
             var oct_val = 0
             var oi = 0
             while oi < oct_digits.len():
                 val oc = oct_digits[oi:oi+1]
-                if oc != "_":
-                    oct_val = oct_val * 8 + int(oc)
+                # Map the digit explicitly, never int(oc): native lowers
+                # int(text) to rt_string_to_int_any (strtoll), which reads
+                # past the end of a non-NUL-terminated slice view, so
+                # int("600"[0:1]) gave 600 and 0o600 became 38400
+                # (bug phase2_octal_permission_mode_lowering_2026_10_27).
+                val oct_table = "01234567"
+                var ok = 0
+                while ok < 8:
+                    if oct_table[ok:ok+1] == oc:
+                        oct_val = oct_val * 8 + ok
+                    ok = ok + 1
                 oi = oi + 1
             return oct_val
     # Decimal -- strip _ separators then parse
     var stripped: text = ""
     var si = 0
     while si < int_text.len():
-        val sc = int_text[si:si+1]
+        val sc = int_text.substring(si, si+1)
         if sc != "_":
             stripped = stripped + sc
         si = si + 1
@@ -276,7 +290,7 @@ fn parse_int_literal_text(int_text: text) -> i64:
         int_val = parser_guarded_int_text(stripped)
     int_val
 
-fn parse_primary_expr() -> i64:
+pub fn parse_primary_expr() -> i64:
     if parser_primary_trace_line_enabled():
         eprint("[parser-primary] start kind={par_kind_get()} text={par_text_get()} line={par_line_get()} col={par_col_get()}")
     # @annotation(...) -- compile-time introspection built-ins
@@ -393,6 +407,7 @@ fn parse_primary_expr() -> i64:
                 return expr_asm("", 0)
             parser_advance()
             var asm_lines: [text] = []
+            var collector = asm_operand_collector_new()
             while true:
                 parser_skip_newlines()
                 if par_kind_get() == 182:
@@ -404,6 +419,9 @@ fn parse_primary_expr() -> i64:
                     asm_lines.push(par_text_get())
                     parser_advance()
                     continue
+                if par_kind_get() == 6 or par_kind_get() == TOK_KW_IN:
+                    collector.parse_next_directive(true)
+                    continue
                 parser_error("expected string literal in asm block")
                 while true:
                     val is_nl = par_kind_get() == 180
@@ -412,6 +430,8 @@ fn parse_primary_expr() -> i64:
                     if is_nl or is_ded or is_eof:
                         break
                     parser_advance()
+            if collector.values.len() > 0 or collector.clobbers.len() > 0:
+                return expr_asm_operands(asm_lines.join("\n"), collector.values, collector.names, collector.kinds, collector.locations, collector.outputs, collector.clobbers, 0)
             return expr_asm(asm_lines.join("\n"), 0)
 
         if par_kind_get() == 142:
@@ -450,6 +470,7 @@ fn parse_primary_expr() -> i64:
         val suf_name = lex_cur_suffix_get()
         parser_advance()
         parser_validate_unit_suffix(suf_name)
+        parser_unit_literal_suffix_check(suf_text, suf_name)
         val value = if parser_unsigned_integer_suffix(suf_name):
             parse_unsigned_int_literal_text(suf_text, suf_name)
         else:
@@ -462,6 +483,14 @@ fn parse_primary_expr() -> i64:
         parser_advance()
         parser_validate_unit_suffix(suf_name)
         return expr_suffixed_float(suf_text, suf_name, 0)
+
+    # ADR-005 char literal (kind 9, only under SIMPLE_CHAR_LITERAL_LEXER=1).
+    # A char is a one-scalar text today; emit the same raw-string node the
+    # legacy `'x'` form produced so HIR/typing/eval are unchanged.
+    if par_kind_get() == 9:
+        val char_text = par_text_get()
+        parser_advance()
+        return expr_raw_string_lit(char_text, 0)
 
     if par_kind_get() == 3:
         val str_text = par_text_get()
@@ -507,6 +536,17 @@ fn parse_primary_expr() -> i64:
         if par_kind_get() == TOK_IDENT and par_text_get() == "_path":
             parser_error("_path suffix must be adjacent to its string literal")
             parser_advance()
+        if str_suffix == "path":
+            if is_triple:
+                parser_error("_path does not support triple-quoted strings")
+                if no_interp:
+                    return expr_raw_string_lit(str_text, 0)
+                return expr_string_lit(str_text, 0)
+            if not no_interp and parser_path_literal_has_interpolation(lex_source_slice(str_start, str_end)):
+                parser_error("_path does not support interpolated strings")
+                return expr_string_lit(str_text, 0)
+            return expr_call_named(
+                expr_ident("Path", 0), [expr_string_lit(str_text, 0)], ["path"], 0)
         if str_suffix != "":
             return expr_suffixed_string(str_text, str_suffix, 0)
         if no_interp:
@@ -542,7 +582,7 @@ fn parse_primary_expr() -> i64:
         if parser_primary_trace_line_enabled():
             eprint("[parser-primary] ident:start name={id_name}")
         val custom_block_adjacent = parser_is_canonical_custom_block_kind(id_name) and
-            lex_source_char_at(lex_token_end_get()) == "{"
+            lex_source_char_at(lex_token_end_get()) == "{{"
         # Capture the identifier's own token span BEFORE advancing. The node
         # used to be allocated with span id 0, which is not "no span" but the
         # FIRST span registered for the file (a module-level `extern fn` /
@@ -553,10 +593,18 @@ fn parse_primary_expr() -> i64:
         val id_end = lex_token_end_get()
         val id_line = par_line_get()
         val id_col = par_col_get()
+        # `name!(args)` macro invocation: record the fact (raw args source) and
+        # drop the `!` so the ordinary postfix call parser takes `(args)`.
+        val id_is_macro_call = lex_source_char_at(id_end) == "!" and
+            id_end + 1 < lex_source_len() and lex_source_char_at(id_end + 1) == "("
+        val id_macro_args = if id_is_macro_call: _macro_call_args_source(id_end + 1) else: ""
         parser_advance()
+        if id_is_macro_call and par_kind_get() == 57:
+            macro_fact_use_push(id_name, id_macro_args, id_line, id_col)
+            parser_advance()
         if custom_block_adjacent:
             if par_kind_get() != TOK_LBRACE:
-                parser_error("expected { after custom block kind")
+                parser_error("expected {{ after custom block kind")
                 return expr_nil_lit(0)
             val raw_payload = parse_raw_braced_payload(id_name)
             return expr_custom_block(id_name, raw_payload, 0)
@@ -583,6 +631,15 @@ fn parse_primary_expr() -> i64:
         parser_advance()
         val future_expr = parse_expr()
         return expr_await(future_expr, 0)
+
+    # `async <expr>` in value position (constructor argument, plan section 3.1
+    # ASY-02) is the library-level producer binding `async_init(<expr>)`, the
+    # form the required-init verifier already recognizes. A declaration-level
+    # `async fn` never reaches this primary parser.
+    if par_kind_get() == TOK_KW_ASYNC:
+        parser_advance()
+        val async_producer = parse_expr()
+        return expr_call(expr_ident("async_init", 0), [async_producer], 0)
 
     if par_kind_get() == 37:
         parser_advance()
@@ -645,6 +702,10 @@ fn parse_primary_expr() -> i64:
 
     if par_kind_get() == 197:
         parser_advance()
+        val spawn_next_kind = par_kind_get()
+        val spawn_can_start_arg = spawn_next_kind == TOK_PLUS or spawn_next_kind == TOK_MINUS or spawn_next_kind == TOK_STAR or spawn_next_kind == TOK_AMPERSAND
+        if (g33_kw_ident_follow(spawn_next_kind) and not spawn_can_start_arg) or spawn_next_kind == TOK_EOF or spawn_next_kind == TOK_RBRACE or spawn_next_kind == TOK_RBRACKET or spawn_next_kind == TOK_SEMICOLON:
+            return expr_ident("spawn", 0)
         val call_expr = parse_expr()
         return expr_spawn(call_expr, 0)
 
@@ -655,7 +716,8 @@ fn parse_primary_expr() -> i64:
         return expr_do_block(do_body, 0)
 
     if par_kind_get() == 205:
-        # ce NAME: block as expression -- returns last value like do:
+        # Preserve builder identity without rejecting shared parser consumers.
+        # The rich bridge decides whether it can lower this computation owner.
         parser_advance()
         if par_kind_get() != 6:
             return expr_ident("ce", 0)
@@ -663,7 +725,9 @@ fn parse_primary_expr() -> i64:
         parser_expect(6)
         parser_expect(161)
         val ce_body = parse_block()
-        return expr_do_block(ce_body, 0)
+        val ce_expr = expr_do_block(ce_body, 0)
+        expr_owner_str_set(ce_expr, ce_builder_name)
+        return ce_expr
 
     if par_kind_get() == 193:
         val atom_name = par_text_get()
@@ -708,7 +772,7 @@ fn parse_primary_expr() -> i64:
             if par_kind_get() == 168:
                 var tup_all_idents = true
                 for te in tup_elems:
-                    if te < 0 or te >= expr_tag.len() or expr_tag[te] != EXPR_IDENT:
+                    if te < 0 or te >= expr_owner_len() or expr_owner_tag(te) != EXPR_IDENT:
                         tup_all_idents = false
                 if tup_all_idents:
                     parser_advance()
@@ -720,10 +784,24 @@ fn parse_primary_expr() -> i64:
                     parser_lexical_scope_leave()
                     return expr_lambda(tup_elems, multi_body, 0)
             return expr_tuple(tup_elems, 0)
+        val rparen_line = par_line_get()
+        val rparen_col = par_col_get()
         parser_expect(141)
+        # `(expr)_sfx`: unit suffix glued to a group (seed parity,
+        # collections.rs apply_paren_unit_suffix) -> `expr * 1_sfx`.
+        # Bug: paren_expr_unit_suffix_parsed_as_call_2026-11-16.
+        if par_kind_get() == 6 and par_line_get() == rparen_line and par_col_get() == rparen_col + 1:
+            val glued = par_text_get()
+            val g1 = if glued.len() > 1: glued[1:2] else: ""
+            val g1_alpha = (g1 >= "a" and g1 <= "z") or (g1 >= "A" and g1 <= "Z")
+            if glued.starts_with("_") and g1_alpha:
+                parser_advance()
+                val unit_sfx = glued[1:]
+                parser_validate_unit_suffix(unit_sfx)
+                return expr_binary(62, inner, expr_suffixed_int(1, unit_sfx, 0), 0)
         # D1: single-parameter arrow lambda — `(x) => expr`.
         if par_kind_get() == 168:
-            if inner >= 0 and inner < expr_tag.len() and expr_tag[inner] == EXPR_IDENT:
+            if inner >= 0 and inner < expr_owner_len() and expr_owner_tag(inner) == EXPR_IDENT:
                 parser_advance()
                 var one_params: [i64] = []
                 one_params.push(inner)
@@ -1021,6 +1099,27 @@ fn parse_primary_expr() -> i64:
         parser_advance()
         return expr_ident("_", 0)
 
+    # `s{a, b, c}` set literal. Lowered at parse time to the existing Set
+    # construction `Set.from([a, b, c])` — identical shape to the Rust seed's
+    # parse_set_literal, so no new flat tag / HIR / MIR path is needed
+    # (bug set_literal_s_brace_unparsed_2026-09-06, owner decision 2026-11-09).
+    if par_kind_get() == TOK_SET_LIT_START:
+        parser_advance()
+        var set_elems: [i64] = []
+        while true:
+            parser_skip_newlines()
+            if par_kind_get() == TOK_RBRACE:
+                break
+            set_elems.push(parse_expr())
+            parser_skip_newlines()
+            if par_kind_get() == TOK_COMMA:
+                parser_advance()
+                continue
+            break
+        parser_expect(TOK_RBRACE)
+        val set_receiver = expr_ident("Set", 0)
+        return expr_method_call(set_receiver, "from", [expr_array_lit(set_elems, 0)], 0)
+
     # Dict literal, dict comprehension, or empty {}
     if par_kind_get() == 142:
         parser_advance()
@@ -1198,3 +1297,28 @@ fn parse_primary_expr() -> i64:
 # ===== Asm Match/Assert Parsing =====
 
 export parse_primary_expr
+
+# Raw source between the parens of a `name!(...)` call, starting at the `(`
+# offset. String literals are skipped so a `)` inside one does not close.
+fn _macro_call_args_source(open_pos: i64) -> text:
+    val n = lex_source_len()
+    var depth = 0
+    var pos = open_pos
+    var quote = ""
+    while pos < n:
+        val ch = lex_source_char_at(pos)
+        if quote != "":
+            if ch == "\\":
+                pos = pos + 2
+                continue
+            if ch == quote: quote = ""
+        elif ch == "\"" or ch == "'":
+            quote = ch
+        elif ch == "(" or ch == "[" or ch == "{{":
+            depth = depth + 1
+        elif ch == ")" or ch == "]" or ch == "}":
+            depth = depth - 1
+            if depth == 0:
+                return lex_source_slice(open_pos + 1, pos)
+        pos = pos + 1
+    ""

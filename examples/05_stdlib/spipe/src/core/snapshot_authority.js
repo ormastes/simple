@@ -3,8 +3,8 @@
  * publishes and opens immutable, verified views only.  URI, ProjectionPort,
  * MCP and receipt issuance are separate downstream concerns.
  */
-import { createHash } from "node:crypto";
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { canonicalJson, freezeDeep } from "../storage/canonical.js";
 import { isWorkspaceRegistryV1 } from "../workspace/registry.js";
@@ -33,10 +33,11 @@ function exactKeys(value, keys, label) {
 function clone(value) { return JSON.parse(canonicalJson(value)); }
 function atomicWrite(path, bytes) {
   mkdirSync(dirname(path), { recursive: true });
-  const temporary = `${path}.tmp-${process.pid}-${Date.now()}`;
+  const temporary = `${path}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
   let fd;
   try { fd = openSync(temporary, "wx", 0o600); writeFileSync(fd, bytes, "utf8"); fsyncSync(fd); }
-  finally { if (fd !== undefined) closeSync(fd); }
+  catch (error) { if (fd !== undefined) { try { closeSync(fd); } catch { /* original error wins */ } fd = undefined; } try { unlinkSync(temporary); } catch { /* temp may be gone */ } throw error; }
+  closeSync(fd);
   renameSync(temporary, path);
   fsyncDirectory(dirname(path));
 }

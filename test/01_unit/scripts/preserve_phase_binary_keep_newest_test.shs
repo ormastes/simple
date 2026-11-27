@@ -1,0 +1,22 @@
+#!/bin/sh
+# preserve-phase-binary.shs keeps at most PHASE_SNAPSHOT_KEEP snapshots per
+# phase (pinned ones excepted) after writing a new one.
+set -u
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+fx=$(mktemp -d) || { echo "ERROR — nothing was checked: mktemp failed"; exit 2; }
+trap 'chmod -R u+w "$fx" 2>/dev/null; rm -rf "$fx"' EXIT
+root="$fx/snap"; mkdir -p "$root"
+for d in phase1_100 phase1_200 phase1_300 phase1_050 phase1_100_phase2_150; do
+  mkdir -p "$root/$d"; printf 'L\n' > "$root/$d/LINEAGE"; printf 'x\n' > "$root/$d/simple"
+done
+touch "$root/phase1_050/PINNED.t"
+printf "#!/bin/sh
+" > "$fx/simple"; chmod +x "$fx/simple"
+PHASE_SNAPSHOT_ROOT="$root" PHASE_SNAPSHOT_KEEP=2 sh "$repo/scripts/bootstrap/preserve-phase-binary.shs" "$fx/simple" phase1 >/dev/null 2>&1 ||
+  { echo "FAIL — preserve-phase-binary.shs failed"; exit 1; }
+n=$(ls -1d "$root"/phase1_[0-9]* | grep -vc _phase2_ | tr -d ' ')
+[ -d "$root/phase1_050" ] || { echo "FAIL — pinned snapshot evicted"; exit 1; }
+[ -d "$root/phase1_100_phase2_150" ] || { echo "FAIL — phase2 snapshot evicted by phase1 retention"; exit 1; }
+[ ! -e "$root/phase1_100" ] && [ ! -e "$root/phase1_200" ] || { echo "FAIL — old snapshots kept ($n dirs)"; exit 1; }
+[ "$n" -eq 3 ] || { echo "FAIL — expected 2 newest + 1 pinned, found $n"; exit 1; }
+echo "PASS — 5 snapshots checked, 2 newest + pinned kept"

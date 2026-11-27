@@ -1,0 +1,41 @@
+# Purpose and audience: regression evidence for the interpreter team.
+# @req REQ-SSPEC-COMPILER
+#
+# BUG (2026-07-29): a module `var` array that is push+reassigned in the same
+# function that defines a nested closure over it read STALE after the closure
+# wrote through it. Module globals must be resolved live, never snapshotted.
+# doc/08_tracking/bug/promise_new_push_reassign_same_scope_as_nested_closure_2026-07-29.md
+
+use std.spec
+use std.spec.step
+
+var _reg_nested: [i64] = []
+
+fn make_nested(executor) -> i64:
+    val idx = _reg_nested.len()
+    _reg_nested = _reg_nested.push(0)
+
+    fn setv(v):
+        _reg_nested[idx] = v
+
+    executor(setv)
+    _reg_nested[idx]
+
+describe "module array push+reassign with nested closure":
+    # @manual scenario evidence
+    it "sees the write made through the nested closure":
+        # @req REQ-SSPEC-COMPILER
+        step("sees the write made through the nested closure")
+        val got = make_nested(\s: s(42))
+        expect(got).to_equal(42)
+
+    it "keeps the whole module array live across two constructions":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps the whole module array live across two constructions")
+        val before = _reg_nested.len()
+        val a = make_nested(\s: s(7))
+        val b = make_nested(\s: s(9))
+        expect(a).to_equal(7)
+        expect(b).to_equal(9)
+        expect(_reg_nested.len()).to_equal(before + 2)
+        expect(_reg_nested[before]).to_equal(7)

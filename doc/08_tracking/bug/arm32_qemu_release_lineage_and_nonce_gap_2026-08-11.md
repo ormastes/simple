@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-11  
-**Status:** OPEN  
+**Status:** BLOCKED 2026-11-11 (lane p3-ne20, confirming lane ne1 same-day) — no qemu-system-arm on this host; grant re-recorded verbatim below
 **Acceptance criteria:** AC-4 through AC-7, AC-14
 
 ## Diagnostic result
@@ -47,3 +47,49 @@ bundle.
 - Owner: ARM32 SimpleOS execution lane
 - Final reviewer: independent normal/highest-capability reviewer
 
+
+## 2026-11-11 addendum — P3 traverse lane ne1 verdict: BLOCKED (OPEN)
+
+No newer ARM32 evidence found at the `origin/release/1.0.0` tip: no
+nonce-correlated 2026-09+ ARM32 transcript/receipt in `doc/09_report/` or
+`doc/08_tracking/evidence/`, and the bug_db row remains `open`
+(triage-20261027-v4: validity=valid, action=keep_open). The two provenance
+gaps named in this doc therefore stand: the 2026-08-11 transcript predates
+per-run nonce correlation, and its kernel was cross-built from the Rust seed
+lineage, not an admitted pure-Simple Stage 4 compiler.
+
+This Windows lane host has no `qemu-system-arm`, so the unblock condition
+cannot be executed here. Exact grant command (Linux/QEMU host, admitted
+pure-Simple Stage 4 CLI selected as the build compiler):
+
+```sh
+sh scripts/check/check-arm32-qemu-real-exec-markers.shs   # expects: SIMPLEOS_FS_EXEC_OK arch=arm32 nonce=<run-nonce>
+```
+
+Retain compiler, kernel, image, QEMU, argv, nonce, transcript, and exit
+hashes per this doc's unblock condition. Status stays OPEN. Lane evidence:
+`build/review/p3fix-ne1-20261111.sdn` row 4.
+
+## Triage 2026-11-11 (lane p3-ne20) — verdict: BLOCKED (confirms lane ne1 same-day)
+
+Lane ne1 triaged this row BLOCKED earlier today on this same base
+(origin/release/1.0.0); this lane re-verified their factual claims fresh
+instead of resting on their addendum: `which qemu-system-arm` → not found on
+this Windows lane host, so the unblock condition cannot execute here;
+bug_db.sdn row 3269 still records `P3, open` (triage-20261027-v4:
+validity=valid, action=keep_open, row 6093). No newer nonce-correlated ARM32
+evidence is claimed by either lane. Per campaign convention the grant is
+re-recorded verbatim for the ARM32 SimpleOS execution lane (Linux/QEMU host,
+admitted pure-Simple Stage 4 CLI as build compiler):
+
+```sh
+sh scripts/check/check-arm32-qemu-real-exec-markers.shs   # expects: SIMPLEOS_FS_EXEC_OK arch=arm32 nonce=<run-nonce>
+```
+
+Retain compiler, kernel, image, QEMU, argv, nonce, transcript, and exit
+hashes per this doc's unblock condition. Lane evidence:
+`build/review/p3fix-ne20-20261111.sdn`.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**BLOCKED (confirmed)** — No qemu-system-arm on this Windows lane host (ne1/ne20 both measured `which qemu-system-arm` empty); no newer nonce-correlated ARM32 transcript exists on this tip. Grant to the ARM32 SimpleOS execution lane stands; no change.

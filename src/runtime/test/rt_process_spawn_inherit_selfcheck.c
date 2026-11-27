@@ -12,7 +12,9 @@
 #include <windows.h>
 
 /* Other exports from runtime_process.c remain in this standalone link. Any
- * unexpected route through them must fail rather than act as a test stub. */
+ * unexpected route through them must fail rather than act as a test stub.
+ * Under the c-runtime test kind the core-C archive supplies the real owners. */
+#ifndef SIMPLE_TEST_CORE_RUNTIME
 SplArray* rt_array_new(int64_t cap) { (void)cap; abort(); }
 int64_t rt_array_len(SplArray* array) { (void)array; abort(); }
 int64_t rt_array_get(SplArray* array, int64_t idx) { (void)array; (void)idx; abort(); }
@@ -20,6 +22,7 @@ int8_t rt_array_push(SplArray* array, int64_t value) { (void)array; (void)value;
 int64_t rt_string_new(const uint8_t* bytes, uint64_t len) { (void)bytes; (void)len; abort(); }
 const uint8_t* rt_string_data(int64_t string) { (void)string; abort(); }
 int64_t rt_value_int(int64_t value) { (void)value; abort(); }
+#endif
 
 static bool fixture_path(wchar_t* path, size_t capacity) {
     DWORD length = GetModuleFileNameW(NULL, path, (DWORD)capacity);
@@ -55,6 +58,14 @@ static int child_mode(void) {
 
 int main(int argc, char** argv) {
     if (argc > 1 && strcmp(argv[1], "--child") == 0) return child_mode();
+    wchar_t staged[32768];
+    if (!fixture_path(staged, sizeof(staged) / sizeof(staged[0])) ||
+        GetFileAttributesW(staged) == INVALID_FILE_ATTRIBUTES) {
+        /* Exit 64 = needs its owning harness; never counted as a pass. */
+        fputs("rt_process_spawn_inherit_selfcheck: stage rt_process_spawn_inherit_selfcheck.cmd "
+              "as simple_mcp_server.cmd beside the executable\n", stderr);
+        return 64;
+    }
     SECURITY_ATTRIBUTES security = {sizeof(security), NULL, TRUE};
     HANDLE sentinel = CreateEventW(&security, TRUE, FALSE, NULL);
     if (!sentinel) return 1;

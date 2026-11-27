@@ -5,24 +5,22 @@ typedef unsigned long long spl_u64;
 typedef unsigned int spl_u32;
 typedef unsigned char spl_u8;
 
+#ifndef rt_byte_array_new_len
 extern spl_i64 rt_byte_array_new_len(spl_i64 len_value);
+#endif
+#ifndef rt_array_len
 extern spl_i64 rt_array_len(spl_i64 array_value);
+#endif
+#ifndef rt_array_get
 extern spl_i64 rt_array_get(spl_i64 collection, spl_i64 index_value);
+#endif
+#ifndef rt_array_data_ptr
 extern spl_i64 rt_array_data_ptr(spl_i64 collection);
+#endif
 
 #define AES256_GCM_MAX_INPUT 4096ULL
 
-static spl_i64 rt_int(spl_i64 value) {
-    return value << 3;
-}
-
-static spl_i64 rt_index_arg(spl_i64 value) {
-    return value >> 3;
-}
-
-static spl_i64 rt_empty_bytes(void) {
-    return rt_byte_array_new_len(rt_int(0));
-}
+#include "rv64_crypto_array_abi.h"
 
 static int rt_copy_bytes_in(spl_i64 array_value, spl_u8 *out, spl_u64 cap, spl_u64 *len_out) {
     spl_u64 len = (spl_u64)rt_array_len(array_value);
@@ -30,7 +28,7 @@ static int rt_copy_bytes_in(spl_i64 array_value, spl_u8 *out, spl_u64 cap, spl_u
         return 0;
     }
     for (spl_u64 i = 0ULL; i < len; i = i + 1ULL) {
-        spl_i64 value = rt_array_get(array_value, rt_int((spl_i64)i));
+        spl_i64 value = rt_crypto_array_get(array_value, (spl_i64)i);
         out[i] = (spl_u8)((spl_u64)rt_index_arg(value) & 0xffULL);
     }
     *len_out = len;
@@ -38,7 +36,7 @@ static int rt_copy_bytes_in(spl_i64 array_value, spl_u8 *out, spl_u64 cap, spl_u
 }
 
 static spl_i64 rt_copy_bytes_out(const spl_u8 *in, spl_u64 len) {
-    spl_i64 out = rt_byte_array_new_len(rt_int((spl_i64)len));
+    spl_i64 out = rt_crypto_byte_array_new_len((spl_i64)len);
     spl_i64 *data = (spl_i64 *)(spl_u64)rt_array_data_ptr(out);
     if (!data) {
         return rt_empty_bytes();

@@ -10,16 +10,21 @@ use std.database.test_extended.{
     TestDatabaseExtended,
     load_test_database_extended,
     load_with_migration,
-    RunRecord,
-    TestInfo,
-    TimingSummary
+    TestInfo, RunRecord, TimingSummary,
+    TestRunCount, TestRunAgeHours, TestRunKeepCount, TestStageMs, TestDurationMs,
+    TestAnomalyWarning, TestTimingOutcome, TestStatusCounts, TestDbSaveOutcome,
+    TestByteCount, TestProcessCount, TestSignalNumber, TestExitCode,
+    TestSourceRevision, TestBaselineEligibility
 }
 use std.test_runner.test_db_types.{TestStatus, status_to_str}
 use std.common.perf.execution_metrics.{ResourceUsage, resource_evidence_quality_name, termination_cause_name}
 use std.test_runner.test_db_core.{parse_rfc3339_to_micros}
 use std.nogc_sync_mut.test_runner.test_db_record.{TestDbFileRow}
 use std.common.traceability.case_events.{decode_trace_case_events}
+use std.nogc_sync_mut.test_runner.trace_digests.{trace_events_with_digests}
 use std.common.traceability.run_plan.{TraceRunPlan}
+use std.common.traceability.test_query.{TestQuery, TestQueryPage, TestQueryRow, TestQueryError, TestQueryErrorKind, TestRunId, TestPlannedCaseId, TestPlannedCaseIdentity, TestCasePath, TestCaseName, TestCaseKey, TestScopedQuery, project_run_case_rows, paginate_test_query_rows, scoped_test_query_identity, test_path_in_levels, TestLevelMatch}
+use std.common.traceability.model.{trace_sorted_ids}
 use std.common.traceability.run_request.{TraceRunRequest, validate_trace_run_request, materialize_trace_run_plan}
 use std.common.traceability.run_request_codec.{encode_trace_run_request}
 use std.common.traceability.sspec_inventory.{TraceSspecPlannedRequest}
@@ -29,6 +34,10 @@ use std.nogc_sync_mut.io.time_ops.{timestamp_year, timestamp_month, timestamp_da
 # ============================================================================
 # Compatibility Wrapper
 # ============================================================================
+
+pub enum TraceRunPrepState:
+    Prepared
+    Unprepared
 
 class RunnerTestDb:
     db: TestDatabaseExtended
@@ -72,7 +81,7 @@ class RunnerTestDb:
         var owner = RunnerTestDb.resume_trace_run(run_id)?
         match owner.db.get_trace_sspec_metadata(run_id)?:
             case Some(_): Ok(owner)
-            case nil: Err("persisted trace SSpec metadata is missing")
+            case None: Err("persisted trace SSpec metadata is missing")
 
     # The owner allocates the run identity; callers supply only frozen intent.
     # A returned plan means save succeeded, not that evidence is qualified.
@@ -113,12 +122,12 @@ class RunnerTestDb:
                 self._trace_prepare_failed = true
                 Err("trace intent was not durably prepared: " + reason)
 
-    fn trace_run_is_prepared(run_id: text) -> bool:
+    fn trace_run_prep_state(run_id: text) -> TraceRunPrepState:
         if self._trace_prepare_failed or run_id == "" or self.current_run_id != run_id or self._trace_prepared_run_id != run_id:
-            return false
+            return TraceRunPrepState.Unprepared
         match self.db.validate_trace_run_active(run_id):
-            case Ok(_): true
-            case Err(_): false
+            case Ok(_): TraceRunPrepState.Prepared
+            case Err(_): TraceRunPrepState.Unprepared
 
     # Resume attaches only freshly loaded persisted intent. It cannot attach
     # unsaved in-memory rows and does not grant a concurrent writer lease.
@@ -130,12 +139,15 @@ class RunnerTestDb:
                 owner.current_run_id = run_id
                 owner._trace_prepared_run_id = run_id
                 Ok(owner)
-            case nil:
+            case None:
                 Err("persisted trace run intent is missing")
 
     # Load from default path with auto-migration
     static fn load() -> Result<RunnerTestDb, text>:
-        val base = "doc/08_tracking/test/test_db"
+        RunnerTestDb.load_at("doc/08_tracking/test/test_db")
+
+    # Load from an explicit base path (no `.sdn` suffix); `load()` uses the default.
+    static fn load_at(base: text) -> Result<RunnerTestDb, text>:
         val db_opt = load_with_migration(path: base)
         match db_opt:
             Some(db):
@@ -153,7 +165,7 @@ class RunnerTestDb:
         if self._trace_prepare_failed:
             return Err("trace preparation failed; discard and reload this database owner")
         val success = self.db.save()
-        if success:
+        if success == TestDbSaveOutcome.Saved:
             Ok(())
         else:
             Err("Failed to save database")
@@ -168,7 +180,7 @@ class RunnerTestDb:
         val events = decode_trace_case_events(events_sdn)?
         if events.len() == 0:
             return Err("trace events cannot be an empty execution claim")
-        self.db.record_trace_case_events(run_id, test_file, events)
+        self.db.record_trace_case_events(run_id, test_file, trace_events_with_digests(events, test_file))
 
     # Update test result (custom API)
     me update_test_result(
@@ -177,7 +189,7 @@ class RunnerTestDb:
         suite_name: text,
         category: text,            # Ignored in unified implementation (derived from path)
         status: TestStatus,
-        duration_ms: f64,
+        duration_ms: TestDurationMs,
         cohort_id: text = ""
     ):
         # Convert TestStatus enum to string
@@ -197,16 +209,20 @@ class RunnerTestDb:
             cohort_id: cohort_id
         )
 
-    # Start run tracking
-    me start_run() -> text:
+    # Start run tracking. `source` is the commit the run executes against, when
+    # trustworthy (current_test_source_revision); None records no source claim.
+    me start_run(source: TestSourceRevision? = None) -> text:
         if self._trace_prepare_failed or self._trace_prepared_run_id != "":
             return ""
-        val run_id = self.db.start_run()
+        val run_id = self.db.start_run(source)
         self.current_run_id = run_id
         run_id
 
+    fn run_source_revision(run_id: text) -> TestSourceRevision?:
+        self.db.run_source_revision(run_id)
+
     # Complete run
-    me complete_run(run_id: text, test_count: i64, passed: i64, failed: i64, timed_out: i64):
+    me complete_run(run_id: text, test_count: TestRunCount, passed: TestRunCount, failed: TestRunCount, timed_out: TestRunCount):
         self.db.complete_run(run_id: run_id, test_count: test_count, passed: passed, failed: failed, timed_out: timed_out)
 
     me record_resource_run(
@@ -214,20 +230,20 @@ class RunnerTestDb:
         test_path: text,
         resource_class: text,
         cohort_id: text,
-        compile_ms: i64,
-        execution_ms: i64,
+        compile_ms: TestStageMs,
+        execution_ms: TestStageMs,
         usage: ResourceUsage,
         budget_status: text,
         anomaly_status: text
     ):
         self.db.record_resource_run(
             run_id, test_path, resource_class, cohort_id, compile_ms, execution_ms,
-            usage.wall_ms, usage.user_cpu_ms, usage.system_cpu_ms,
-            usage.peak_tree_charge_bytes, usage.peak_direct_child_rss_bytes,
-            usage.io_read_bytes, usage.io_write_bytes, usage.pids_peak,
+            TestStageMs(value: usage.wall_ms.value), TestStageMs(value: usage.user_cpu_ms.value), TestStageMs(value: usage.system_cpu_ms.value),
+            TestByteCount(value: usage.peak_tree_charge_bytes.value), TestByteCount(value: usage.peak_direct_child_rss_bytes.value),
+            TestByteCount(value: usage.io_read_bytes.value), TestByteCount(value: usage.io_write_bytes.value), TestProcessCount(value: usage.pids_peak.value),
             resource_evidence_quality_name(usage.evidence_quality),
-            termination_cause_name(usage.termination), usage.signal,
-            usage.exit_code, budget_status, anomaly_status
+            termination_cause_name(usage.termination), TestSignalNumber(value: usage.signal.value),
+            TestExitCode(value: usage.exit_code.value), budget_status, anomaly_status
         )
 
     # Same row as record_resource_run, from a flattened TestDbFileRow
@@ -235,22 +251,117 @@ class RunnerTestDb:
     # already rendered to their canonical names.
     me record_resource_row(run_id: text, row: TestDbFileRow):
         self.db.record_resource_run(
-            run_id, row.path, row.resource_class, row.cohort_id, row.compile_ms, row.execution_ms,
-            row.wall_ms, row.user_cpu_ms, row.system_cpu_ms,
-            row.peak_tree_charge_bytes, row.peak_direct_child_rss_bytes,
-            row.io_read_bytes, row.io_write_bytes, row.pids_peak,
-            row.evidence_quality, row.termination, row.signal,
-            row.exit_code, row.budget_status, row.anomaly_status
+            run_id, row.path, row.resource_class, row.cohort_id, TestStageMs(value: row.compile_ms.value), TestStageMs(value: row.execution_ms.value),
+            TestStageMs(value: row.wall_ms.value), TestStageMs(value: row.user_cpu_ms.value), TestStageMs(value: row.system_cpu_ms.value),
+            TestByteCount(value: row.peak_tree_charge_bytes.value), TestByteCount(value: row.peak_direct_child_rss_bytes.value),
+            TestByteCount(value: row.io_read_bytes.value), TestByteCount(value: row.io_write_bytes.value), TestProcessCount(value: row.pids_peak.value),
+            row.evidence_quality, row.termination, TestSignalNumber(value: row.signal.value),
+            TestExitCode(value: row.exit_code.value), row.budget_status, row.anomaly_status
         )
 
     # Cleanup stale runs
-    me cleanup_stale_runs(max_age_hours: i64):
+    me cleanup_stale_runs(max_age_hours: TestRunAgeHours):
         val _deleted = self.db.cleanup_stale_runs(max_age_hours)
         # Custom API returns void, unified returns count - discard result
         ()
 
+    fn select_query_run_ids(requested_run: TestRunId?) -> Result<[text], TestQueryError>:
+        var run_ids: [text] = []
+        val known = self.db.list_runs("")
+        match requested_run:
+            case Some(requested):
+                var found = false
+                for run in known:
+                    if run.run_id == requested.value:
+                        found = true
+                if not found:
+                    return Err(TestQueryError(kind: TestQueryErrorKind.UnknownRun, detail: "run not found: " + requested.value))
+                run_ids.push(requested.value)
+            case None:
+                for run in known:
+                    run_ids.push(run.run_id)
+        Ok(run_ids)
+
+    fn run_plan_for_query(run_id: text) -> Result<TraceRunPlan?, TestQueryError>:
+        match self.db.get_trace_run_plan(run_id):
+            case Ok(found): Ok(found)
+            case Err(reason): Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: reason))
+
+    fn planned_identity_for(plan: TraceRunPlan?, key: TestCaseKey) -> TestPlannedCaseIdentity:
+        var planned = TestPlannedCaseIdentity.Missing
+        match plan:
+            case Some(frozen):
+                for item in frozen.cases:
+                    if item.test_path == key.path.value and item.case_name == key.name.value:
+                        planned = TestPlannedCaseIdentity.Recorded(id: TestPlannedCaseId(value: item.case_id))
+            case None: pass
+        planned
+
+    # Read-only typed attempt rows for one exact case. Never mutates or saves;
+    # an unreadable trace table is a typed error, never an empty success.
+    fn query_case_attempts(query: TestQuery) -> Result<TestQueryPage, TestQueryError>:
+        val run_ids = self.select_query_run_ids(query.run_id)?
+        var rows: [TestQueryRow] = []
+        for run_id in run_ids:
+            val events = match self.db.get_trace_case_events(run_id, query.case_key.path.value):
+                case Ok(items): items
+                case Err(reason): return Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: reason))
+            if events.len() == 0:
+                continue
+            val plan = self.run_plan_for_query(run_id)?
+            val planned = self.planned_identity_for(plan, query.case_key)
+            for row in project_run_case_rows(query.case_key, TestRunId(value: run_id), planned, events):
+                rows.push(row)
+        paginate_test_query_rows(rows, query)
+
+    # Spec paths the TestDB knows for a scoped query: every planned case path of
+    # the selected runs, sorted and unique. A requirement scope is resolved
+    # against these (the test tree is far too large to scan for headers).
+    fn scope_candidate_paths(requested_run: TestRunId?) -> Result<[TestCasePath], TestQueryError>:
+        var seen: Dict<text, bool> = {}
+        var paths: [text] = []
+        for run_id in self.select_query_run_ids(requested_run)?:
+            val plan = self.run_plan_for_query(run_id)?
+            match plan:
+                case Some(frozen):
+                    for item in frozen.cases:
+                        if not seen.contains_key(item.test_path):
+                            seen[item.test_path] = true
+                            paths.push(item.test_path)
+                case None: pass
+        var out: [TestCasePath] = []
+        for path in trace_sorted_ids(paths):
+            out.push(TestCasePath(value: path))
+        Ok(out)
+
+    # Read-only rows for every case recorded under the resolved spec paths,
+    # narrowed by level. Cases keep (path, first-seen) order; attempts of a case
+    # stay separate. Reuses the exact-query projection and paginator.
+    fn query_scoped_attempts(scoped: TestScopedQuery, paths: [TestCasePath]) -> Result<TestQueryPage, TestQueryError>:
+        val run_ids = self.select_query_run_ids(scoped.run_id)?
+        var rows: [TestQueryRow] = []
+        for run_id in run_ids:
+            val plan = self.run_plan_for_query(run_id)?
+            # One decode of the trace table per run, grouped by path.
+            val by_path = match self.db.get_trace_case_events_by_path(run_id):
+                case Ok(grouped): grouped
+                case Err(reason): return Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: reason))
+            for path in paths:
+                if test_path_in_levels(path, scoped.levels) == TestLevelMatch.Outside:
+                    continue
+                val events = by_path.get(path.value) ?? []
+                var names: [text] = []
+                for event in events:
+                    if not names.contains(event.case_name):
+                        names.push(event.case_name)
+                for name in names:
+                    val key = TestCaseKey(path: path, name: TestCaseName(value: name))
+                    for row in project_run_case_rows(key, TestRunId(value: run_id), self.planned_identity_for(plan, key), events):
+                        rows.push(row)
+        paginate_test_query_rows(rows, scoped_test_query_identity(scoped))
+
     # Prune old runs
-    me prune_runs(keep_count: i64):
+    me prune_runs(keep_count: TestRunKeepCount):
         val _deleted = self.db.prune_runs(keep_count)
         # Custom API returns void, unified returns count - discard result
         ()
@@ -270,32 +381,32 @@ class RunnerTestDb:
     fn timing_summary_for_test(test_path: text) -> TimingSummary?:
         match self.db.get_test_id(test_path, "spec", test_path):
             case Some(test_id): self.db.get_timing_summary(test_id)
-            case nil: nil
+            case None: nil
 
-    me promote_timing_baseline(test_path: text, cohort_id: text) -> bool:
+    me promote_timing_baseline(test_path: text, cohort_id: text) -> TestTimingOutcome:
         match self.db.get_test_id(test_path, "spec", test_path):
             case Some(test_id): self.db.promote_timing_baseline(test_id, cohort_id)
-            case nil: false
+            case None: TestTimingOutcome.Refused
 
-    fn prior_anomaly_warning(test_path: text, cohort_id: text) -> bool:
+    fn prior_anomaly_warning(test_path: text, cohort_id: text) -> TestAnomalyWarning:
         self.db.prior_anomaly_warning(test_path, cohort_id)
 
-    me record_timing_observation(test_path: text, cohort_id: text, duration_ms: f64) -> bool:
+    me record_timing_observation(test_path: text, cohort_id: text, duration_ms: TestDurationMs) -> TestTimingOutcome:
         val test_id = match self.db.get_test_id(test_path, "spec", test_path):
             case Some(value): value
-            case nil: return false
+            case None: return TestTimingOutcome.Refused
         val run_id = self.start_run()
-        self.db.add_timing_run(test_id, duration_ms, run_id, cohort_id)
+        self.db.add_timing_run(test_id, duration_ms, run_id, cohort_id, TestBaselineEligibility.Eligible)
         self.db.update_timing(test_id, duration_ms)
-        self.complete_run(run_id, 0, 0, 0, 0)
-        true
+        self.complete_run(run_id, TestRunCount(value: 0), TestRunCount(value: 0), TestRunCount(value: 0), TestRunCount(value: 0))
+        TestTimingOutcome.Applied
 
     # Get tests by status
     fn tests_by_status(status: text) -> [TestInfo]:
         self.db.tests_by_status(status)
 
     # Get test counts (total, passed, failed, skipped)
-    fn test_count_by_status() -> (i64, i64, i64, i64):
+    fn test_count_by_status() -> TestStatusCounts:
         self.db.test_count_by_status()
 
     # Get flaky test names
@@ -344,5 +455,5 @@ fn pad_zero(num: i64, width: i64) -> text:
 fn load_test_db_compat() -> Result<RunnerTestDb, text>:
     RunnerTestDb.load()
 
-export RunnerTestDb, load_test_db_compat
+export RunnerTestDb, TraceRunPrepState, load_test_db_compat
 export use std.test_runner.test_db_core.{parse_rfc3339_to_micros}

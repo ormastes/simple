@@ -1,0 +1,99 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+# SIMILAR-PROBLEM DETECTION spec — tuple destructuring ASSIGNMENT sinks.
+#
+# doc/08_tracking/bug/jit_tuple_get_returns_raw_tagged_word_to_i64_sink_2026-08-17.md
+# was fixed (ee815637f72) for the constant-index tuple `.get()` path only. The
+# other consumer of `rt_tuple_get` — the `(c, d) = t` destructuring-assignment
+# lowering in lowering_stmt.rs — kept storing the raw tagged RuntimeValue into
+# the sink: under JIT, `val t = (10, 20)` / `(c, d) = t` read back
+# `c=80 d=160` (v << 3), while the interpreter computed 10 20. 2026-11-11
+# seedfix addendum: fix + this pin (same unbox tail as `.get()`, plus a
+# GlobalStore arm for global sinks, whose dynamic-value "address" silently
+# dropped the store under JIT).
+#
+# WHY A SUBPROCESS. Spec bodies run on the tree-walk INTERPRETER, which is
+# correct for every case below. Only a subprocess under SIMPLE_EXECUTION_MODE=jit
+# can go red. Every oracle inside the probe is an ABSOLUTE literal, never
+# "the two engines agree" — that would pass while both engines are wrong alike.
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_tuple_destructuring_assign_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "tuple destructuring assignment decodes tagged words into typed sinks":
+    # @manual scenario evidence
+    it "runs the destructuring probe to completion under the interpreter (control arm)":
+        # @req REQ-SSPEC-UNIT
+        step("runs the destructuring probe to completion under the interpreter (control arm)")
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("A truncated run is not evidence — the probe must reach its end marker")
+        expect(interp).to_contain("TUPLE_DESTRUCTURING_ASSIGN PROBE: DONE")
+
+        step("The interpreter is the control arm and must be clean")
+        expect(interp.contains("FAIL ")).to_equal(false)
+
+    it "destructures tuple elements into typed sinks on the JIT without raw tagged words":
+        # @req REQ-SSPEC-UNIT
+        step("destructures tuple elements into typed sinks on the JIT without raw tagged words")
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("TUPLE_DESTRUCTURING_ASSIGN PROBE: DONE")
+
+        step("The exact routed repro — (c, d) = t into i64 locals, then into a typed parameter")
+        expect(jit).to_contain("PASS da_i64_0")
+        expect(jit).to_contain("PASS da_i64_1")
+        expect(jit).to_contain("PASS da_i64_param")
+
+        step("Neighbouring paths the fix must not disturb — val-destructure, whole-tuple assign, index read")
+        expect(jit).to_contain("PASS da_val_destructure_0")
+        expect(jit).to_contain("PASS da_whole_tuple_0")
+        expect(jit).to_contain("PASS da_index_read_1")
+
+        step("Mixed and labeled tuples resolve per-position element types")
+        expect(jit).to_contain("PASS da_mixed_i64_1")
+        expect(jit).to_contain("PASS da_mixed_text_0")
+        expect(jit).to_contain("PASS da_labeled_read_0")
+        expect(jit).to_contain("PASS da_labeled_read_1")
+
+        step("Narrow widths take the unbox + UnitNarrow tail")
+        expect(jit).to_contain("PASS da_i8_0")
+        expect(jit).to_contain("PASS da_i8_1")
+        expect(jit).to_contain("PASS da_i32_0")
+        expect(jit).to_contain("PASS da_i32_1")
+
+        step("u64 takes the separately-tagged wide-word unbox")
+        expect(jit).to_contain("PASS da_u64_0")
+        expect(jit).to_contain("PASS da_u64_1")
+
+        step("bool and f64 sinks unbox through their own channels")
+        expect(jit).to_contain("PASS da_bool_int_0")
+        expect(jit).to_contain("PASS da_bool_1")
+        expect(jit).to_contain("PASS da_f64_0")
+        expect(jit).to_contain("PASS da_f64_1")
+
+        step("Global sinks store through GlobalStore, not a dynamic-value pseudo-address")
+        expect(jit).to_contain("PASS da_global_i64_0")
+        expect(jit).to_contain("PASS da_global_i64_1")
+
+        step("No row may fail on the JIT arm")
+        expect(jit.contains("FAIL ")).to_equal(false)

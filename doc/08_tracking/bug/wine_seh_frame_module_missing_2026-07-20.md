@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** Open
+**Status:** Open → FIXED 2026-11-13 (lane p3-misc-b)
 **Category:** GENUINE-BUG (missing implementation, not a stale rename)
 **Discovered:** 2026-07-20 (whole-suite triage campaign, shard meas_01u_03)
 
@@ -87,3 +87,34 @@ project rules — do not delete without explicit sign-off).
 
 - `test/01_unit/lib/common/wine_seh_frame_spec.spl` (sole affected spec in this shard)
 
+
+---
+
+## Resolution 2026-11-13 (lane p3-misc-b)
+
+Implemented the missing module `src/lib/common/wine_seh_frame.spl` (modeled
+planner, same style as the sibling `wine_vm_adapter.spl`):
+
+- `WineSehFrame` class + `wine_seh_frame_new(process_id, thread_id, frame_addr,
+  handler_addr, stack_low, stack_high)`. The 5th/6th ctor args are the stack
+  range LOW and HIGH ends (Windows stacks grow down); the file's original
+  guess of base/limit ordering was wrong — the call sites pass low first
+  (`0x700000, 0x710000` must contain frame `0x701000`).
+- `WineSehDispatchResult` (`ok/status/handler_address/frame_count/evidence/error`)
+  + `wine_seh_dispatch_fault(fault, frames, image_base, image_size)`:
+  1. policy gate first — anything but `deliver-seh` → `seh-policy:<policy>`,
+     `frame_count=0`, evidence `seh-dispatch-blocked` + `no-seh-handler-executed`;
+  2. frame-chain gate — no frames → `seh-frame-chain-missing`; no frame both
+     belonging to the faulting thread and inside `[stack_low, stack_high)` →
+     `seh-frame-chain-invalid`;
+  3. handler-mapping gate — first matching frame's handler outside
+     `[image_base, image_base+image_size)` → `seh-handler-unmapped`,
+     evidence gains `seh-frame-chain-present` + `seh-dispatch-blocked`;
+  4. otherwise planned → `seh-dispatch-planned`, evidence
+     `seh-frame-chain-present` + `seh-handler-mapped` + `no-seh-handler-executed`.
+
+Before: `test/01_unit/lib/common/wine_seh_frame_spec.spl` failed at module
+resolution (`Cannot resolve module: common.wine_seh_frame`), 0/3.
+After: 3/3 GREEN (`declared>=3 executed=3 passed=3 failed=0`, exit 0), seed
+`bin/simple.exe` on release/1.0.0 tip. Canary
+`test/02_integration/app/context_log_modes_spec.spl` stays 4/4.

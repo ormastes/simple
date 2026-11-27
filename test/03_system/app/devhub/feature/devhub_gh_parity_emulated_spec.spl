@@ -1,0 +1,289 @@
+"""
+## Purpose and audience
+Near-system parity scenarios for DevHub maintainers: one gh-shaped command runs
+through the production CLI (`devhub gh ...`) against GitHub and against Bitbucket,
+each reaching a scripted emulator over a real loopback socket. A backend that
+drifts from the gh interface fails here even when its own unit specs pass.
+## Operator workflow
+From the repo root:
+`SIMPLE_BINARY=<simple> SIMPLE_EXECUTION_MODE=interpret <simple> run test/03_system/app/devhub/feature/devhub_gh_parity_emulated_spec.spl`
+then read the `SPEC FILE VERDICT:` line. Exit status alone is not a verdict.
+## Compatibility and limitations
+GitHub runs the real `gh` binary, aimed at the emulator through `GH_HOST=github.localhost`
+and `HTTP_PROXY`, and skips nothing if `gh` is missing: it fails. Responses are `emulated`
+or `documented` synthetic data, never captured (see `test/fixtures/devhub/emulated/index.sdn`).
+gh's own GraphQL query text belongs to gh, so scenarios pin only its operation name.
+Unsupported behavior: Bitbucket `pr close` and DevHub GitHub `pr close` are refusals,
+asserted by name and listed in the interface survey.
+## Verification guidance and troubleshooting
+The emulator asserts method, target, auth and body. A client defect shows as
+`MISMATCH` text in the assertion message; the raw log is the `EMU_LOG` file.
+"""
+# Lifecycle: doc/01_research/app/devhub/service_interface_survey_2026-10-31.md ;
+# doc/03_plan/app/tools/devhub_multi_target_gateway_plan.md ;
+# doc/04_architecture/app/tools/devhub_multi_target_gateway.md ;
+# doc/05_design/app/devhub/devhub_overview.md
+# @manual_section: git-hosting-gh-parity
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{env_set}
+use std.common.json.value.{json_value_len, json_value_at}
+use test.fixtures.devhub.emulated.emu_harness.{emu_start, emu_base, emu_row, emu_load, emu_problems, emu_stop, emu_refused_after_stop, emu_request_times_ms, emu_home, emu_real_gh_env, emu_devhub, emu_json, emu_field, DevhubRun}
+
+val BB_AUTH = "Authorization=Bearer syn-bb-token"
+val GH_AUTH = "Authorization=token syn-gh-token"
+val JSON_CT = "Content-Type: application/json"
+val BB_PR7 = "/repositories/acme/widgets/pullrequests/7"
+val BB_PR404 = "/repositories/acme/widgets/pullrequests/404"
+val GH_VIEW = "has:PullRequestByNumber ;; \"pr_number\":7"
+val GH_REPO_ARGS = ["--repo", "github.localhost/acme/widgets"]
+val VIEW_FIELDS = "number,title,state,url,headRefName,baseRefName"
+
+fn setup_git_backends() -> text:
+    """Start the emulator once, and write synthetic config naming it."""
+    val addr = emu_start("git")
+    val home = emu_home("bitbucket:\n    url: {emu_base()}\n    deployment: cloud\n", "bitbucket:\n    token: syn-bb-token\n")
+    emu_real_gh_env(home)
+    val _w = env_set("BB_WORKSPACE", "acme")
+    val _r = env_set("BB_REPO", "widgets")
+    addr
+
+fn gh_cmd(backend: text, args: [text]) -> DevhubRun:
+    """The one user-facing command form; only --backend (and gh's host pin) differs."""
+    val pin = if backend == "github": GH_REPO_ARGS else: []
+    emu_devhub(["gh"] + args + pin + ["--backend", backend])
+
+fn view_rows(backend: text, status: i64, fixture: text, mode: text = "-") -> [text]:
+    if backend == "github":
+        return [emu_row("POST", "/graphql", GH_AUTH, GH_VIEW, status, JSON_CT, fixture, mode)]
+    [emu_row("GET", BB_PR7, BB_AUTH, "none", status, JSON_CT, fixture, mode)]
+
+fn assert_view_failure(backend: text, status: i64, fixture: text, wanted: text, requests: i64, mode: text = "-"):
+    """Shared adverse body: the command must fail, say why, and print no PR."""
+    val gen_id = emu_load(view_rows(backend, status, fixture, mode))
+    val result = gh_cmd(backend, ["pr", "view", "7", "--json", VIEW_FIELDS])
+    expect(result.combined()).to_contain(wanted)
+    expect(result.rc == 0).to_equal(false)
+    expect(result.out.contains("Add widget cache")).to_equal(false)
+    expect(emu_problems(gen_id, requests)).to_equal("")
+
+fn assert_view_ok(backend: text, fixture: text):
+    """Both backends must yield the same gh-shaped document."""
+    val gen_id = emu_load(view_rows(backend, 200, fixture))
+    val result = gh_cmd(backend, ["pr", "view", "7", "--json", VIEW_FIELDS])
+    expect(emu_problems(gen_id, 1)).to_equal("")
+    expect(result.rc).to_equal(0)
+    val doc = emu_json(result.out)
+    expect(emu_field(doc, "number")).to_equal("7")
+    expect(emu_field(doc, "title")).to_equal("Add widget cache")
+    expect(emu_field(doc, "state")).to_equal("OPEN")
+    expect(emu_field(doc, "url")).to_equal("https://git.example.test/acme/widgets/pull/7")
+    expect(emu_field(doc, "headRefName")).to_equal("work/widget-cache")
+    expect(emu_field(doc, "baseRefName")).to_equal("main")
+
+fn list_rows(backend: text, pages: [text]) -> [text]:
+    var rows: [text] = []
+    for page in pages:
+        if backend == "github":
+            rows = rows + [emu_row("POST", "/graphql", GH_AUTH, "has:PullRequestList", 200, JSON_CT, "@github/graphql_pr_list_{page}.json")]
+        else:
+            val target = if page == "page2": "/repositories/acme/widgets/pullrequests?state=OPEN&pagelen=30&page=2" else: "/repositories/acme/widgets/pullrequests?state=OPEN&pagelen=30"
+            rows = rows + [emu_row("GET", target, BB_AUTH, "none", 200, JSON_CT, "@bitbucket/pr_list_{page}.json")]
+    rows
+
+fn assert_list_numbers(backend: text, pages: [text], wanted: [text]):
+    """Shared listing body: pagination is followed to its end, in server order."""
+    val gen_id = emu_load(list_rows(backend, pages))
+    val result = gh_cmd(backend, ["pr", "list", "--json", "number,title,state"])
+    expect(emu_problems(gen_id, pages.len())).to_equal("")
+    expect(result.rc).to_equal(0)
+    val doc = emu_json(result.out)
+    expect(json_value_len(doc)).to_equal(wanted.len())
+    var i = 0
+    while i < wanted.len():
+        expect(emu_field(json_value_at(doc, i), "number")).to_equal(wanted[i])
+        i = i + 1
+
+describe "devhub gh over an emulated git host":
+    it "starts the emulator on a real loopback socket":
+        # @req REQ-DEVHUB-EMU-GIT-001
+        step("Start the emulator process and write synthetic config")
+        # @capture(protocol): the emulator's event log, one line per request
+        expect(setup_git_backends()).to_contain("127.0.0.1:")
+
+    it "views a pull request with gh fields on github":
+        # @req REQ-DEVHUB-EMU-GIT-002
+        step("View PR 7 through real gh and check the gh-shaped document")
+        # @capture(protocol): POST /graphql request and response
+        assert_view_ok("github", "@github/graphql_pr_view.json")
+
+    it "views a pull request with the same gh fields on bitbucket":
+        # @req REQ-DEVHUB-EMU-GIT-002
+        step("View PR 7 through the Bitbucket adapter and check the same document")
+        # @capture(protocol): GET pullrequests/7 request and response
+        assert_view_ok("bitbucket", "@bitbucket/pr_view.json")
+
+    it "follows pagination to its end on github":
+        # @req REQ-DEVHUB-EMU-GIT-003
+        step("List PRs across two GraphQL pages")
+        # @capture(protocol): two POST /graphql requests
+        assert_list_numbers("github", ["page1", "page2"], ["9", "8", "7"])
+
+    it "follows pagination to its end on bitbucket":
+        # @req REQ-DEVHUB-EMU-GIT-003
+        step("List PRs across two REST pages through the next link")
+        # @capture(protocol): two GET pullrequests requests
+        assert_list_numbers("bitbucket", ["page1", "page2"], ["9", "8", "7"])
+
+    it "returns an empty list without error on github":
+        # @req REQ-DEVHUB-EMU-GIT-004
+        step("List PRs where the server has none")
+        # @capture(protocol): one POST /graphql request
+        assert_list_numbers("github", ["empty"], [])
+
+    it "returns an empty list without error on bitbucket":
+        # @req REQ-DEVHUB-EMU-GIT-004
+        step("List PRs where the server has none")
+        # @capture(protocol): one GET pullrequests request
+        assert_list_numbers("bitbucket", ["empty"], [])
+
+    it "reports an error for 401 on github":
+        # @req REQ-DEVHUB-EMU-GIT-005
+        step("Answer 401 and check the failure names the status")
+        # @capture(protocol): the refused request
+        assert_view_failure("github", 401, "@github/error_401.json", "gh is not authenticated", 1)
+
+    it "reports an error for 401 on bitbucket":
+        # @req REQ-DEVHUB-EMU-GIT-005
+        step("Answer 401 and check the failure is typed as an auth block")
+        # @capture(protocol): the refused request
+        assert_view_failure("bitbucket", 401, "@bitbucket/error_401.json", "blocked-auth", 1)
+
+    it "reports an error for 403 on github":
+        # @req REQ-DEVHUB-EMU-GIT-006
+        step("Answer 403 and check the failure names the status")
+        # @capture(protocol): the refused request
+        assert_view_failure("github", 403, "@github/error_403.json", "403", 1)
+
+    it "reports an error for 403 on bitbucket":
+        # @req REQ-DEVHUB-EMU-GIT-006
+        step("Answer 403 and check the failure is typed as an auth block")
+        # @capture(protocol): the refused request
+        assert_view_failure("bitbucket", 403, "@bitbucket/error_403.json", "blocked-auth", 1)
+
+    it "reports an error for a missing pull request on github":
+        # @req REQ-DEVHUB-EMU-GIT-007
+        step("Answer GraphQL NOT_FOUND for PR 7")
+        # @capture(protocol): the refused request
+        assert_view_failure("github", 200, "@github/graphql_pr_not_found.json", "Could not resolve", 1)
+
+    it "reports an error for a missing pull request on bitbucket":
+        # @req REQ-DEVHUB-EMU-GIT-007
+        step("Answer 404 for PR 7")
+        # @capture(protocol): the refused request
+        assert_view_failure("bitbucket", 404, "@bitbucket/error_404.json", "not found (HTTP 404)", 1)
+
+    it "reports an error for a 500 on github":
+        # @req REQ-DEVHUB-EMU-GIT-008
+        step("Answer 500 and check the failure surfaces")
+        # @capture(protocol): the failed request
+        assert_view_failure("github", 500, "server exploded", "HTTP 500", 1)
+
+    it "reports an error for a 500 on bitbucket":
+        # @req REQ-DEVHUB-EMU-GIT-008
+        step("Answer 500 and check the failure surfaces")
+        # @capture(protocol): the failed request
+        assert_view_failure("bitbucket", 500, "server exploded", "HTTP 500", 1)
+
+    it "rejects a malformed JSON body on github":
+        # @req REQ-DEVHUB-EMU-GIT-009
+        step("Answer 200 with broken JSON")
+        # @capture(protocol): the malformed response
+        assert_view_failure("github", 200, "\{\"data\":", "gh error", 1)
+
+    it "rejects a malformed JSON body on bitbucket":
+        # @req REQ-DEVHUB-EMU-GIT-009
+        step("Answer 200 with broken JSON")
+        # @capture(protocol): the malformed response
+        assert_view_failure("bitbucket", 200, "\{\"id\":", "invalid JSON", 1)
+
+    it "rejects a truncated body on github":
+        # @req REQ-DEVHUB-EMU-GIT-010
+        step("Close the socket before Content-Length bytes arrive")
+        # @capture(protocol): the truncated response
+        assert_view_failure("github", 200, "@github/graphql_pr_view.json", "gh error", 1, "truncate")
+
+    it "rejects a truncated body on bitbucket":
+        # @req REQ-DEVHUB-EMU-GIT-010
+        step("Close the socket before Content-Length bytes arrive")
+        # @capture(protocol): the truncated response
+        assert_view_failure("bitbucket", 200, "@bitbucket/pr_view.json", "network_error", 1, "truncate")
+
+    it "refuses pr close by name on bitbucket with no request sent":
+        # @req REQ-DEVHUB-EMU-GIT-011
+        step("Ask for a verb the Bitbucket adapter lacks")
+        val gen_id = emu_load([])
+        # @capture(terminal): the typed refusal
+        val result = gh_cmd("bitbucket", ["pr", "close", "7"])
+        expect(result.combined()).to_contain("not supported on the bitbucket backend")
+        expect(result.rc).to_equal(1)
+        expect(emu_problems(gen_id, 0)).to_equal("")
+
+    it "refuses pr close by name on github though gh has the verb":
+        # @req REQ-DEVHUB-EMU-GIT-011
+        step("Ask for a verb gh has and devhub gh does not pass through")
+        val gen_id = emu_load([])
+        # @capture(terminal): the typed refusal, a listed gap against the gh interface
+        val result = gh_cmd("github", ["pr", "close", "7"])
+        expect(result.combined()).to_contain("unknown github pr command: close")
+        expect(result.rc).to_equal(1)
+        expect(emu_problems(gen_id, 0)).to_equal("")
+
+    it "names the status of a 503 on bitbucket":
+        # @req REQ-DEVHUB-EMU-GIT-008
+        step("Answer 503, a neighbour of the 500 that once lost its status")
+        # @capture(protocol): the failed request
+        assert_view_failure("bitbucket", 503, "upstream down", "HTTP 503", 1)
+
+    it "surfaces 429 and retries on gh's rate-limit wording on github":
+        # @req REQ-DEVHUB-EMU-GIT-013
+        step("Answer 429 three times with Retry-After and count the attempts")
+        val row = emu_row("POST", "/graphql", GH_AUTH, GH_VIEW, 429, JSON_CT + " ;; Retry-After: 1", "@github/error_429.json")
+        val gen_id = emu_load([row, row, row])
+        # @capture(protocol): three requests with their server receipt times
+        val result = gh_cmd("github", ["pr", "view", "7", "--json", VIEW_FIELDS])
+        expect(result.rc == 0).to_equal(false)
+        expect(result.combined().lower()).to_contain("rate limit")
+        expect(emu_problems(gen_id, 3)).to_equal("")
+        val times = emu_request_times_ms(gen_id)
+        expect(times[1] - times[0] >= 1000).to_equal(true)
+
+    it "surfaces 429 once on bitbucket because it has no retry loop":
+        # @req REQ-DEVHUB-EMU-GIT-013
+        step("Answer 429 and check the typed failure and the single attempt")
+        val gen_id = emu_load(view_rows("bitbucket", 429, "@bitbucket/error_429.json"))
+        # @capture(protocol): the single request, a listed gap against gh's retry
+        val result = gh_cmd("bitbucket", ["pr", "view", "7", "--json", VIEW_FIELDS])
+        expect(result.rc == 0).to_equal(false)
+        expect(result.combined()).to_contain("rate limited (HTTP 429)")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+
+    it "creates a pull request with title, body and branches on bitbucket":
+        # @req REQ-DEVHUB-EMU-GIT-014
+        step("Create a PR and check the request body carries every gh flag")
+        val want = "has:\"title\": \"Add widget cache\" ;; \"description\": \"Synthetic body\" ;; \"source\": {\"branch\": {\"name\": \"work/widget-cache\" ;; \"destination\": {\"branch\": {\"name\": \"main\""
+        val gen_id = emu_load([emu_row("POST", "/repositories/acme/widgets/pullrequests", BB_AUTH + " ;; Content-Type=application/json", want, 201, JSON_CT, "@bitbucket/pr_view.json")])
+        # @capture(protocol): POST pullrequests with its JSON body
+        val result = gh_cmd("bitbucket", ["pr", "create", "--title", "Add widget cache", "--body", "Synthetic body", "--head", "work/widget-cache", "--base", "main"])
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(result.rc).to_equal(0)
+        expect(result.combined()).to_contain("https://git.example.test/acme/widgets/pull/7")
+
+    it "stops the emulator and leaves no process listening":
+        # @req REQ-DEVHUB-EMU-GIT-012
+        step("Shut the emulator down and prove nothing accepts")
+        val addr = emu_base()[7:]
+        # @capture(protocol): the emulator's final SHUTDOWN log line
+        expect(emu_stop()).to_equal(true)
+        expect(emu_refused_after_stop(addr)).to_equal(true)

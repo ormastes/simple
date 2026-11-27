@@ -1,0 +1,28 @@
+#!/bin/sh
+# Verify the native public/private SDN argument regression.
+set -eu
+if [ "$#" -ne 2 ] || [ "$1" != --binary ] || [ ! -x "$2" ]; then
+    echo "usage: $0 --binary <native-sdn-args-regression>" >&2
+    exit 2
+fi
+binary=$2
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-sdn-args.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=1048576
+export SIMPLE_PROCESS_TREE_RSS_RECEIPT=$work/process.rss.env
+set +e
+sh "$repo/scripts/bootstrap/run-process-group-timeout.shs" 30 2 "$binary" > "$work/stdout" 2> "$work/stderr"
+sdn_args_rc=$?
+set -e
+cat "$work/stdout"
+if [ "$sdn_args_rc" -ne 0 ]; then
+    cat "$work/stderr" >&2
+    echo "FAIL native SDN arguments: executable exit=$sdn_args_rc" >&2
+    exit 1
+fi
+if grep '^FAIL ' "$work/stdout" >/dev/null || ! grep -Fx 'SDN_ARGS_REGRESSION PASS aliases worker-mixing and authorization' "$work/stdout" >/dev/null; then
+    echo "FAIL native SDN arguments: missing complete regression summary" >&2
+    exit 1
+fi
+echo "PASS native SDN arguments: aliases, worker mixing and authorization"

@@ -1,0 +1,54 @@
+"""
+Regression spec: module-level `val DEFAULT_TIMEOUT_MS` must lower to its
+declared constant value rather than a hardcoded 7200000 override.
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering.MirLowering
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+
+fn lower_default_timeout_ints(source: text) -> [i64]:
+    val path = "module_val_default_timeout_ms.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    expect(lowering.errors.len()).to_equal(0)
+    var seen: [i64] = []
+    var found = false
+    for func in mir.functions.values():
+        if func.name == "read_timeout" or func.name.ends_with(".read_timeout"):
+            found = true
+            for block in func.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Const(_, MirConstValue.Int(value), _):
+                            seen.push(value)
+                        case _:
+                            pass
+    expect(found).to_equal(true)
+    seen
+
+describe "module val DEFAULT_TIMEOUT_MS MIR lowering":
+    it "lowers unannotated 21600000 module val without hardcoded 7200000 override":
+        val seen = lower_default_timeout_ints(
+            "val DEFAULT_TIMEOUT_MS = 21600000\nfn read_timeout() -> i64:\n    DEFAULT_TIMEOUT_MS\n"
+        )
+        expect(seen.contains(21600000)).to_equal(true)
+        expect(seen.contains(7200000)).to_equal(false)
+
+    it "lowers unannotated 5000 module val without hardcoded 7200000 override":
+        val seen = lower_default_timeout_ints(
+            "val DEFAULT_TIMEOUT_MS = 5000\nfn read_timeout() -> i64:\n    DEFAULT_TIMEOUT_MS\n"
+        )
+        expect(seen.contains(5000)).to_equal(true)
+        expect(seen.contains(7200000)).to_equal(false)

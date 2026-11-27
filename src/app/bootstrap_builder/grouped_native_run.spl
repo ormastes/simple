@@ -2,7 +2,7 @@
 # only a reaped broker tree, exact manifest, and verified files enter the ledger.
 use std.common.build_manager.grouped_native_contract.{NativeGroupRunV1, NativeGroupManifestV1, NativeGroupMemberV1, NativeModuleResultV1, NativeGroupResultV1, NativeGroupResourceV1, native_group_run_encode_v1, native_group_run_decode_v1, native_group_run_validate_v1, native_group_manifest_encode_v1, native_group_manifest_identity_v1, native_group_smf_loader_receipt_v1, native_group_scc_set_id_v1, native_group_result_decode_v1, native_group_result_encode_v1, native_group_result_validate_against_manifest_v1, native_module_result_decode_v1}
 use std.common.build_manager.grouped_native_worker_request.{NativeGroupWorkerRequestV1, native_group_worker_request_encode_v1}
-use compiler.driver.driver_build.native_group_warm_route.{NativeGroupWarmRouteV1, native_group_warm_route_publish_retry_v1, native_group_warm_route_read_v1}
+use compiler.driver.driver_build.native_group_warm_route.{native_group_warm_route_publish_retry_v1, native_group_warm_route_read_v1}
 use std.common.build_manager.grouped_native_process_policy.{NativeGroupActiveChargeV1,
     native_group_process_budget_v1, native_group_disk_required_v1,
     native_group_disk_budget_v1, native_group_observed_charge_v1}
@@ -74,6 +74,15 @@ fn native_group_cache_identity_v1(run: NativeGroupRunV1) -> text:
     sha256_text(run.phase + "\n" + run.backend + "\n" + run.producer_digest + "\n" +
         run.variant_digest + "\n" + run.index_digest + "\n" + run.inventory_digest +
         "\n" + run.state_root + "\n" + run.output_root)
+
+fn native_group_cache_root_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV1) -> text:
+    # Stable across attempts AND generations of one group under one admitted identity:
+    # retries reuse content-keyed per-file objects; any change to producer, variant,
+    # index, inventory, state_root or output_root yields a different directory, so a
+    # stale object can never be served across identities. 16 hex chars keep the path
+    # short for Windows MAX_PATH.
+    run.state_root + "/groups/" + sha256_text(manifest.group_id) + "/cache-" +
+        sha256_text(native_group_cache_identity_v1(run))[0:16]
 
 fn native_group_lease_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV1) -> GroupedActionLeaseV1:
     val digest = native_group_manifest_identity_v1(manifest)
@@ -154,7 +163,7 @@ fn native_group_restore_v1(input: NativeGroupRunV1) -> Result<NativeGroupRunV1, 
     if not native_group_base_match_v1(input, ledger): return Err("native group ledger differs from supplied manifest")
     Ok(ledger)
 
-fn native_group_environment_v1(run: NativeGroupRunV1, root: text,
+fn native_group_environment_v1(run: NativeGroupRunV1, root: text, cache_root: text,
         resource: NativeGroupResourceV1) -> [text]:
     val private_keys = ["SIMPLE_NATIVE_BUILD_CACHE_DIR", "SIMPLE_RT_OBJ_CACHE_DIR",
         "SIMPLE_HIR_CACHE_DIR", "SIMPLE_FRONTEND_CACHE_DIR", "SIMPLE_NO_STUB_FALLBACK",
@@ -172,9 +181,12 @@ fn native_group_environment_v1(run: NativeGroupRunV1, root: text,
             environment = environment.push(assignment)
     for key in private_keys:
         var value = root + "/private/" + key
+        if key == "SIMPLE_NATIVE_BUILD_CACHE_DIR" or key == "SIMPLE_RT_OBJ_CACHE_DIR" or
+                key == "SIMPLE_HIR_CACHE_DIR" or key == "SIMPLE_FRONTEND_CACHE_DIR":
+            value = cache_root + "/" + key
         if key == "SIMPLE_NO_STUB_FALLBACK" or key == "SIMPLE_COMPILER_PHASE_PROFILE":
             value = "1"
-        if key == "SIMPLE_CACHE": value = root + "/cache"
+        if key == "SIMPLE_CACHE": value = cache_root + "/cache"
         if key == "SIMPLE_PACKAGE_INDEX_READ_ROOT": value = run.index_read_root
         if key == "SIMPLE_COMPILER_PHASE_PROFILE_FILE": value = root + "/compiler.phase.log"
         if key == "SIMPLE_NATIVE_GROUP_MEASURED_THREAD_BYTES":
@@ -195,7 +207,7 @@ fn native_group_source_bytes_v1(run: NativeGroupRunV1, manifest: NativeGroupMani
     var bytes: i64 = 0
     for member in manifest.members:
         val path = run.source_root + "/" + member.source_path
-        if not file_is_regular_no_follow(path) or file_hash_sha256(path) != member.source_digest:
+        if not file_is_regular_no_follow(path) or _grouped_native_run_sha_mismatch(path, member.source_digest):
             return Err("frozen group source differs: " + member.source_path)
         val size = file_size(path)
         if size < 0 or size > 1073741824: return Err("group source size outside bound")
@@ -214,12 +226,12 @@ fn native_group_pins_v1(run: NativeGroupRunV1) -> text:
         run.scv_receipt_digest]
     for i in 0..paths.len():
         if not file_is_regular_no_follow(paths[i]) or
-                file_hash_sha256(paths[i]) != digests[i]:
+                _grouped_native_run_sha_mismatch(paths[i], digests[i]):
             return "admitted native input differs: " + paths[i]
     val index_path = run.index_read_root + "/package-module-index-v1/" +
         run.index_digest + ".index"
     if not file_is_regular_no_follow(index_path) or
-            file_hash_sha256(index_path) != run.index_digest:
+            _grouped_native_run_sha_mismatch(index_path, run.index_digest):
         return "admitted immutable package index differs"
     ""
 
@@ -270,8 +282,9 @@ fn native_group_warm_environment_v1(run: NativeGroupRunV1) -> text:
 fn native_group_request_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV1) -> Result<GroupProcessRequestV1, text>:
     val resource = native_group_resource_for_v1(run, manifest)?
     val root = native_group_attempt_root_v1(run, manifest)
+    val cache_root = native_group_cache_root_v1(run, manifest)
     if not file_is_regular_no_follow(manifest.group_route_path) or
-            file_hash_sha256(manifest.group_route_path) != manifest.group_route_digest:
+            _grouped_native_run_sha_mismatch(manifest.group_route_path, manifest.group_route_digest):
         return Err("group warm route differs from pinned digest")
     val group_payload = native_group_manifest_encode_v1(manifest)
     if group_payload == "" or not native_group_install_v1(root, root + "/group.manifest.sdn", group_payload):
@@ -280,7 +293,7 @@ fn native_group_request_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV
         root + "/group.manifest.sdn", sha256_text(group_payload), root + "/result.sdn",
         run.source_root, run.source_root + "/" + manifest.members[0].source_path,
         run.index_read_root, run.run_id, run.output_root,
-        run.backend, run.max_threads, run.target, run.lifetime_ms)
+        run.backend, run.max_threads, run.target, run.lifetime_ms, cache_root)
     val worker_payload = native_group_worker_request_encode_v1(worker_request)
     if worker_payload == "" or not native_group_install_v1(root, root + "/worker.request.sdn", worker_payload):
         return Err("cannot install group worker request")
@@ -299,11 +312,13 @@ fn native_group_request_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV
     for member in manifest.members:
         inputs = inputs.push(GroupProcessInputV1(run.source_root + "/" + member.source_path, member.source_digest))
     for key in ["SIMPLE_NATIVE_BUILD_CACHE_DIR", "SIMPLE_RT_OBJ_CACHE_DIR",
-            "SIMPLE_HIR_CACHE_DIR", "SIMPLE_FRONTEND_CACHE_DIR", "TEMP", "TMP", "TMPDIR"]:
+            "SIMPLE_HIR_CACHE_DIR", "SIMPLE_FRONTEND_CACHE_DIR"]:
+        if not dir_create(cache_root + "/" + key, true): return Err("cannot create private compiler cache")
+    for key in ["TEMP", "TMP", "TMPDIR"]:
         if not dir_create(root + "/private/" + key, true): return Err("cannot create private compiler cache")
-    if not dir_create(root + "/cache/native", true): return Err("cannot create private grouped compiler cache")
+    if not dir_create(cache_root + "/cache/native", true): return Err("cannot create private grouped compiler cache")
     Ok(GroupProcessRequestV1(run.worker_program, run.worker_digest,
-        ["--group-root", root], native_group_environment_v1(run, root, resource), root, inputs,
+        ["--group-root", root], native_group_environment_v1(run, root, cache_root, resource), root, inputs,
         root + "/worker.stdout.log", root + "/worker.stderr.log", run.lifetime_ms,
         run.broker_program, run.broker_digest))
 
@@ -362,7 +377,7 @@ fn native_group_smf_receipt_valid_v1(run: NativeGroupRunV1,
     val receipt = native_group_attempt_root_v1(run, manifest) +
         "/qualification/" + sha256_text(row.module_id) + ".sdn"
     if not file_is_regular_no_follow(receipt) or
-            file_hash_sha256(receipt) != row.diagnostic_digest:
+            _grouped_native_run_sha_mismatch(receipt, row.diagnostic_digest):
         return false
     match file_read_regular_no_follow_bounded(receipt, 4096):
         Ok(payload): payload == expected
@@ -375,7 +390,7 @@ fn native_group_files_valid_v1(run: NativeGroupRunV1, manifest: NativeGroupManif
     for row in result.modules:
         if row.status == "OK":
             val path = native_group_output_path_v1(run, manifest, row.output_path)
-            if not file_is_regular_no_follow(path) or file_hash_sha256(path) != row.output_digest:
+            if not file_is_regular_no_follow(path) or _grouped_native_run_sha_mismatch(path, row.output_digest):
                 return "group output digest differs: " + row.module_id
             if row.output_kind == "SMF":
                 if not native_group_smf_receipt_valid_v1(run, manifest, row):
@@ -480,10 +495,10 @@ fn native_group_result_for_v1(run: NativeGroupRunV1, manifest: NativeGroupManife
     nil
 
 fn native_group_latest_manifest_v1(run: NativeGroupRunV1, group_id: text) -> NativeGroupManifestV1?:
-    var selected: NativeGroupManifestV1? = nil
+    var selected: NativeGroupManifestV1? = None
     for manifest in run.manifests:
         if manifest.group_id == group_id:
-            if selected == nil or manifest.attempt > selected!.attempt: selected = Some(manifest)
+            if selected.is_none() or manifest.attempt > selected!.attempt: selected = Some(manifest)
     selected
 
 fn native_group_latest_rows_v1(run: NativeGroupRunV1) -> NativeGroupLatestV1:
@@ -491,7 +506,7 @@ fn native_group_latest_rows_v1(run: NativeGroupRunV1) -> NativeGroupLatestV1:
     var attempts: {text: NativeGroupManifestV1} = {}
     for manifest in run.manifests:
         val result = native_group_result_for_v1(run, manifest)
-        if result != nil:
+        if result.is_some():
             for row in result!.modules:
                 rows[row.module_id] = row
                 attempts[row.module_id] = manifest
@@ -642,10 +657,14 @@ fn native_group_check_compiler_evidence_v1(run: NativeGroupRunV1,
         if not file_is_regular_no_follow(root + "/" + name):
             return Err("compiler observation log is not regular")
     val payload = file_read_regular_no_follow_bounded(path, 2048)?
+    val stdout_digest = file_hash_sha256(root + "/compiler.stdout.log")
+    val stderr_digest = file_hash_sha256(root + "/compiler.stderr.log")
+    if stdout_digest.is_none() or stderr_digest.is_none():
+        return Err("cannot hash compiler observation log")
     val _evidence = build_runner_process_evidence_bind_v1(payload,
         native_group_manifest_identity_v1(manifest),
-        file_hash_sha256(root + "/compiler.stdout.log"),
-        file_hash_sha256(root + "/compiler.stderr.log"), code, true)?
+        stdout_digest.unwrap(),
+        stderr_digest.unwrap(), code, true)?
     Ok(true)
 
 fn native_group_run_attempt_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV1,
@@ -656,9 +675,7 @@ fn native_group_run_attempt_v1(run: NativeGroupRunV1, manifest: NativeGroupManif
     val recovering = prepared.recovering
     val (code, peak, timed_out) = native_group_reap_v1(next, manifest, request, recovering)?
     val _compiler_evidence = native_group_check_compiler_evidence_v1(next, manifest, code)?
-    # Keep the declared Ok record owner while the admitted producer predates that fix.
-    # @workaround bug=native-result-ok-record-inference-20261018 recover=71b46ad19d27b08fba3758b58ccb00e631aef303
-    val result: NativeGroupResultV1 = native_group_recover_result_v1(next, manifest, code, peak, timed_out)?
+    val result = native_group_recover_result_v1(next, manifest, code, peak, timed_out)?
     var all_ok = true
     for row in result.modules:
         if row.status != "OK": all_ok = false
@@ -723,7 +740,7 @@ fn native_group_scc_payload_v1(run: NativeGroupRunV1, scc: text,
         val attempt = latest.attempts[member.module_id]
         val path = native_group_output_path_v1(run, attempt, row.output_path)
         if not file_is_regular_no_follow(path) or
-                file_hash_sha256(path) != row.output_digest:
+                _grouped_native_run_sha_mismatch(path, row.output_digest):
             return Err("SCC member output differs: " + member.module_id)
         if row.output_kind == "SMF":
             if not native_group_smf_receipt_valid_v1(run, attempt, row):
@@ -745,7 +762,7 @@ fn native_group_promote_scc_v1(run: NativeGroupRunV1, scc: text,
         val target = run.output_root + "/" + row.output_path
         if file_exists(target):
             if not file_is_regular_no_follow(target) or
-                    file_hash_sha256(target) != row.output_digest:
+                    _grouped_native_run_sha_mismatch(target, row.output_digest):
                 return Err("existing promoted output differs: " + row.output_path)
         else:
             val temporary = run.output_root + "/.native-staging/" +
@@ -754,10 +771,10 @@ fn native_group_promote_scc_v1(run: NativeGroupRunV1, scc: text,
                     not dir_create(native_group_parent_v1(target), true) or
                     not file_copy(source, temporary):
                 return Err("cannot stage SCC output: " + row.output_path)
-            if file_hash_sha256(temporary) != row.output_digest or
+            if _grouped_native_run_sha_mismatch(temporary, row.output_digest) or
                     not file_rename(temporary, target):
                 return Err("cannot atomically install SCC output: " + row.output_path)
-        if file_hash_sha256(target) != row.output_digest:
+        if _grouped_native_run_sha_mismatch(target, row.output_digest):
             return Err("promoted SCC output digest differs")
     if not native_group_write_v1(marker, payload): return Err("cannot commit complete SCC")
     Ok(true)
@@ -806,9 +823,7 @@ fn native_group_promote_initial_group_v1(run: NativeGroupRunV1,
 
 fn native_group_dependencies_ready_v1(run: NativeGroupRunV1,
         manifest: NativeGroupManifestV1) -> Result<bool, text>:
-    # Keep the declared Ok record owner while the admitted producer predates that fix.
-    # @workaround bug=native-result-ok-record-inference-20261018 recover=71b46ad19d27b08fba3758b58ccb00e631aef303
-    val route: NativeGroupWarmRouteV1 = native_group_warm_route_read_v1(manifest.group_route_path,
+    val route = native_group_warm_route_read_v1(manifest.group_route_path,
         manifest.group_route_digest)?
     if route.group_id != manifest.group_id or route.attempt != manifest.attempt or
             route.producer_digest != manifest.producer_digest or
@@ -839,7 +854,7 @@ fn native_group_dependencies_ready_v1(run: NativeGroupRunV1,
             checked_sccs[dependency.scc_id] = true
         val path = run.output_root + "/" + dependency.smf_path
         if not file_exists(path): return Ok(false)
-        if not file_is_regular_no_follow(path) or file_hash_sha256(path) != row.output_digest:
+        if not file_is_regular_no_follow(path) or _grouped_native_run_sha_mismatch(path, row.output_digest):
             return Err("promoted dependency SMF differs")
     Ok(true)
 
@@ -860,7 +875,7 @@ fn native_group_promotions_valid_v1(run: NativeGroupRunV1) -> bool:
             val row = latest.rows[member.module_id]
             val target = run.output_root + "/" + row.output_path
             if not file_is_regular_no_follow(target) or
-                    file_hash_sha256(target) != row.output_digest:
+                    _grouped_native_run_sha_mismatch(target, row.output_digest):
                 return false
     true
 
@@ -972,9 +987,9 @@ fn native_group_prestart_wave_v1(run: NativeGroupRunV1,
     var index = first_index
     while index < initial_groups.len() and started.len() < host_cpus:
         val manifest_opt = native_group_latest_manifest_v1(next, initial_groups[index])
-        if manifest_opt == nil: return Err("prestart group manifest missing")
+        if manifest_opt.is_none(): return Err("prestart group manifest missing")
         val manifest = manifest_opt!
-        if manifest.attempt != 1 or native_group_result_for_v1(next, manifest) != nil or
+        if manifest.attempt != 1 or native_group_result_for_v1(next, manifest).is_some() or
                 file_exists(native_group_attempt_root_v1(next, manifest) + "/broker.claim"):
             break
         val ready = native_group_dependencies_ready_v1(next, manifest)?
@@ -1079,12 +1094,12 @@ fn native_group_cancel_uncommitted_v1(run: NativeGroupRunV1,
     var errors = ""
     for index in first_index..initial_groups.len():
         val manifest_opt = native_group_latest_manifest_v1(run, initial_groups[index])
-        if manifest_opt == nil:
+        if manifest_opt.is_none():
             errors = errors + "; uncommitted group manifest missing during cleanup"
             continue
         val manifest = manifest_opt!
         val root = native_group_attempt_root_v1(run, manifest)
-        if native_group_result_for_v1(run, manifest) != nil or
+        if native_group_result_for_v1(run, manifest).is_some() or
                 not file_exists(root + "/broker.claim"):
             continue
         val request_result = native_group_request_v1(run, manifest)
@@ -1150,7 +1165,7 @@ fn native_group_run_locked_v1(input: NativeGroupRunV1,
         Err(reason): return NativeGroupedRunOutcomeV1(2, reason, input.inventory_count, 0)
     for manifest in run.manifests:
         val prior = native_group_result_for_v1(run, manifest)
-        if prior != nil:
+        if prior.is_some():
             match native_group_check_receipt_v1(run, manifest, prior!):
                 Ok(_): pass
                 Err(reason): return NativeGroupedRunOutcomeV1(2,
@@ -1161,11 +1176,11 @@ fn native_group_run_locked_v1(input: NativeGroupRunV1,
         if manifest.attempt == 1: initial_groups = initial_groups.push(manifest.group_id)
     for group_index in 0..initial_groups.len():
         val group_id = initial_groups[group_index]
-        var initial_manifest: NativeGroupManifestV1? = nil
+        var initial_manifest: NativeGroupManifestV1? = None
         for candidate in input.manifests:
             if candidate.group_id == group_id and candidate.attempt == 1:
                 initial_manifest = Some(candidate)
-        if initial_manifest == nil:
+        if initial_manifest.is_none():
             return NativeGroupedRunOutcomeV1(2,
                 "initial native group manifest missing", run.inventory_count,
                 native_group_accounted_v1(run))
@@ -1175,10 +1190,10 @@ fn native_group_run_locked_v1(input: NativeGroupRunV1,
                 return native_group_fail_with_cleanup_v1(run, initial_groups,
                     group_index, reason)
         var active = native_group_latest_manifest_v1(run, group_id)
-        while active != nil:
+        while active.is_some():
             val manifest = active!
             var result = native_group_result_for_v1(run, manifest)
-            if result == nil:
+            if result.is_none():
                 val ready = match native_group_dependencies_ready_v1(run, manifest):
                     Ok(value): value
                     Err(reason):
@@ -1197,7 +1212,7 @@ fn native_group_run_locked_v1(input: NativeGroupRunV1,
                     Err(reason):
                         return native_group_fail_with_cleanup_v1(run, initial_groups,
                             group_index, reason)
-            if result == nil: break
+            if result.is_none(): break
             val retry = match native_group_retry_v1(run, manifest, result!):
                 Ok(value): value
                 Err(reason):
@@ -1275,7 +1290,7 @@ fn native_group_verify_locked_v1(input: NativeGroupRunV1) -> NativeGroupedRunOut
         native_group_accounted_v1(run))
     for manifest in run.manifests:
         val result = native_group_result_for_v1(run, manifest)
-        if result == nil:
+        if result.is_none():
             return NativeGroupedRunOutcomeV1(1, "group attempt lacks result", run.inventory_count,
                 native_group_accounted_v1(run))
         match native_group_check_receipt_v1(run, manifest, result!):
@@ -1309,3 +1324,10 @@ export native_group_run_v1, native_group_verify_v1, native_group_completion_json
 export native_group_normalize_crashed_sccs_v1
 export native_group_demote_unqualified_smf_v1
 export native_group_blocked_payload_v1, native_group_blocked_marker_matches_v1
+export native_group_attempt_root_v1, native_group_cache_root_v1, native_group_environment_v1
+
+# Absent digest (missing/unreadable file) is a mismatch, never "".
+fn _grouped_native_run_sha_mismatch(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual != expected
+    true

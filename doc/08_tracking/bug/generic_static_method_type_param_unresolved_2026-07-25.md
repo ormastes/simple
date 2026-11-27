@@ -63,3 +63,39 @@ correct and the defect recorded here.
 (`bin/simple test` prints "this Rust-built Simple binary is a bootstrap seed
 only"), so a fix in the pure-Simple semantic analyser cannot be verified
 without a full bootstrap redeploy.
+
+---
+
+## Resolved 2026-11-25 — static resolves on both engines; pending spec un-pended
+
+**Status: RESOLVED (stale defect).** The limitation no longer reproduces at
+release/1.0.0 HEAD with the pinned seed v1.0.0-rc.1 (Windows x86_64).
+
+Probe evidence (`build/p2w2-af-probes/gen_static_probe.spl`, mirrors the
+original probe in this file):
+
+- default engine: `zeros ok` / `from_data ok`
+- `SIMPLE_EXECUTION_MODE=interpret`: `zeros ok` / `from_data ok`
+- i64 element inference (`PureTensor.from_data([1, 2, 3], [3])`) also resolves.
+- The previously-broken production call sites
+  `src/lib/gc_async_mut/pure/demo.spl:25,32,33` now execute — demo.spl
+  "Test 1: Tensor Operations" prints `✅ Tensor creation and addition: true`
+  (demo.spl still fails later at line 40 with an UNRELATED
+  `variable 'bias' not found` semantic error — separate defect, not this bug).
+
+Changes made in this pass:
+
+- `src/lib/gc_async_mut/pure/test/tensor_spec.spl` — the explicitly pending
+  `it "PureTensor.from_data"` example is un-pended and now asserts real
+  behavior (`shape`, `numel()`, `get([1,1])`). The exact assertion body was
+  verified green under BOTH engines via
+  `build/p2w2-af-probes/gen_static_spec_body.spl` (`SPEC BODY PASS` ×2). The
+  stale "static form is genuinely broken" NOTE in the Creation block was
+  updated. Full-spec run via `bin/simple test` is environment-blocked on this
+  host (pinned seed rejects `@representation_boundary` repo-wide at HEAD), so
+  spec-level verification is by mirrored run-mode probe, stated as the limit.
+- `src/lib/gc_async_mut/pure/tensor.spl` — the "Factory Functions (Workaround
+  for interpreter limitation)" header comment was stale (claimed the
+  interpreter does not support static methods on generic types); rewritten to
+  record that the limitation is resolved and the factories remain supported
+  API. No code changed; the library signature was never narrowed.

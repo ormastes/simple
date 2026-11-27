@@ -46,3 +46,37 @@ token. Several other words have the same problem (`gen`, `val`, `unit`,
 `pass_out`, `kernel`, `trace`) — a general "soft keyword in non-directive
 position" pass would cover the family.
 
+
+## Triage 2026-11-25 — root cause pinpointed; still OPEN (seed-parser-only gap)
+
+Reproduced on the current deployed binary (`bin/simple.exe`, Rust seed
+v1.0.0-rc.1, build-commit `1343b77bbaa`, Windows): the minimal
+`struct Pattern: / bytes: [u8] / skip: [i64]` probe still fails with
+`parse: Unexpected token: expected identifier, found Skip at line 3, column 5`
+(both JIT and interpreter lanes — the error is at parse time, before engine
+selection).
+
+Precise root cause, confirmed by source inspection this session:
+
+- The Rust seed parser's general-purpose `expect_identifier()`
+  (`src/compiler_rust/parser/src/parser_helpers.rs:952`) accepts dozens of
+  soft keywords as identifiers (`val`, `gen`, `kernel`, `pass`, `unit`,
+  ...) but has **no `TokenKind::Skip` arm**, so it falls into the
+  `_ =>` unexpected-token error. Struct field names route through it via
+  `parse_field()` (`src/compiler_rust/parser/src/types_def/mod.rs:436`).
+- The sibling helpers `expect_method_name()`/path-identifier helper in the
+  same file DO accept `TokenKind::Skip => "skip"` (lines ~1221 and ~1473),
+  which is why `skip` works as a method/path name but not as a field name.
+- The pure-Simple frontend is NOT affected: `skip` does not appear in its
+  keyword table (`src/compiler/10.frontend/core/tokens.spl`,
+  `keyword_lookup`), so it lexes as a plain identifier there — same split as
+  the already-fixed `case` soft-keyword bug
+  (`case_is_reserved_outside_match_2026-08-04.md`).
+
+The bounded fix is one arm in the seed's `expect_identifier()`
+(`TokenKind::Skip => "skip".to_string(),`), mirroring the `case` fix. It is
+NOT landed here because this lane forbids cargo/Rust builds, so a seed parser
+change could not be compiled or verified, and a spec pinning the behavior
+would fail under the currently deployed (pre-fix) binary. Left OPEN with the
+root cause now exact; whoever next rebuilds the seed can land the one-line
+arm plus a `case_soft_keyword_spec.spl`-style spec in the same change.

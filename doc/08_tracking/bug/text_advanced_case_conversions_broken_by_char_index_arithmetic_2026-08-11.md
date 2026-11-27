@@ -141,3 +141,10 @@ Caveat recorded separately: running that spec through `bin/simple test`
 produced **1897 lines of warnings, zero pass/fail lines, exit 0** — the specs
 do not currently prove anything on their own. Filed as
 `test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md`.
+
+## Fixed (2026-11-03, ADR-005 family sweep)
+The case conversions at lines 178-213 already use `char_from_code(char_code(ch) ± 32)`
+on release/1.0.0. The remaining `ch[0]` sites (`_is_uppercase_char` and
+`_is_lowercase_char`) are converted to `char_code(ch)` range checks, so they no
+longer depend on what `text[i]` yields (ADR-005). Specs pass:
+text_advanced_case_conversion_spec 4/4 and case_class_generalization 5/5.

@@ -17,6 +17,10 @@
 # for that incident class (a stale seed rejecting current stdlib annotations).
 
 use std.spec.step
+use std.io_runtime.{env_get, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.fs.host_path.{host_path_canonical}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_file_write_text(path: text, contents: text) -> i64
@@ -26,18 +30,24 @@ extern fn rt_mkdir_p(path: text) -> bool
 fn checker_binary() -> text:
     if rt_file_exists("bin/simple.exe"):
         return "bin/simple.exe"
-    return "bin/simple"
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    val configured = env_get("SIMPLE_BINARY") ?? ""
+    if configured != "" and rt_file_exists(configured):
+        return configured
+    "bin/simple"
 
 describe "simple check on a minimal valid file":
     # @manual scenario evidence
     it "exits 0 and reports all checks passed, without dying on its own stdlib":
         # @req REQ-SSPEC-APP
         step("run `simple check` on a three-line hello world")
-        val work = "build/sspec_check_contract"
-        val _m = rt_mkdir_p(work)
+        val parent = host_path_canonical(get_temp_dir())
+        val work = secure_temp_dir(parent, "sspec_check_contract").unwrap()
         val entry = work + "/clean_hello.spl"
         val _w = rt_file_write_text(entry, "fn main():\n    print(\"hello\")\nmain()\n")
         val (out, err, code) = rt_process_run_timeout(checker_binary(), ["check", entry], 300000)
+        val _cleanup = dir_remove_all(work)
         val combined = "{out}{err}"
         # Evidence line: makes a failure attributable from the runner log alone.
         print "check-clean evidence: code={code} outlen={out.len()} errlen={err.len()} out={out} err={err}"
@@ -48,4 +58,4 @@ describe "simple check on a minimal valid file":
         expect(combined.contains("unknown decorator")).to_equal(false)
         # The contract: a valid file passes, and the checker says so.
         expect(code).to_equal(0)
-        expect(combined.contains("All checks passed")).to_equal(true)
+        expect(combined.contains("Semantic check passed") or combined.contains("All checks passed")).to_equal(true)

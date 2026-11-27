@@ -1,0 +1,60 @@
+"""
+## Purpose and audience
+Purpose: Pin that an `<h1>` nested in sectioning content keeps the plain `h1`
+UA style (2em, 0.67em block margins). Chrome's `html.css` used to carry
+`:is(article, aside, nav, section) h1 { font-size: 1.5em; margin-block:
+0.83em }` and deeper levels; that block was removed from the HTML UA stylesheet
+and from Chrome. This spec exists because the rule is easy to "restore" from an
+old reference browser: Chromium 131 still applies it (`<section><h1>` 24px),
+Chrome 159 does not (32px).
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome for Testing 159.0.8154.6 headless, `--dump-dom` of
+getBoundingClientRect / getComputedStyle, page
+`*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}`):
+
+| fixture                              | font-size | margin-top | h  |
+|--------------------------------------|-----------|------------|----|
+| `<div><h1>` (no sectioning)          | 32px      | 21.44px    | 48 |
+| `<section><h1>`                      | 32px      | 21.44px    | 48 |
+| `<article><section><h1>`             | 32px      | 21.44px    | 48 |
+| `<section><h2>`                      | 24px      | 19.92px    | 36 |
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-UA-SECTIONING-H1-001 — an h1 inside sectioning content keeps the plain h1 UA size and margins.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 2000
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}</style></head><body>"
+
+fn probe(inner: text, id: text, name: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        HEAD + inner + "</body></html>", VW, VH, id, name)
+
+describe "an h1 inside sectioning content keeps the plain h1 UA style":
+    it "AC-1: an h1 outside sectioning content is 2em (48 px line box)":
+        step("Chrome 159: <div><h1> is 32px, one 48 px line box")
+        expect(probe("<div><h1 id=\"a\">x</h1></div>", "a", "h")).to_equal("48")
+
+    it "AC-2: <section><h1> is still 2em — a 48 px line box":
+        step("Chrome 159: font-size 32px, h 48 (Chromium 131 said 24px / 36)")
+        expect(probe("<section><h1 id=\"b\">x</h1></section>", "b", "h")).to_equal("48")
+
+    it "AC-3: its block margin is the plain h1 0.67em (21.44 -> 21 px)":
+        step("Chrome 159: the 21.44 px top margin collapses through the section, so the h1 starts at y=21.44")
+        expect(probe("<section><h1 id=\"b\">x</h1></section>", "b", "y")).to_equal("21")
+
+    it "AC-4: two sectioning levels change nothing":
+        step("Chrome 159: <article><section><h1> is 32px, h 48")
+        expect(probe("<article><section><h1 id=\"c\">x</h1></section></article>", "c", "h")).to_equal("48")
+
+    it "AC-5: <section><h2> is the plain h2 (36 px line box)":
+        step("Chrome 159: <section><h2> is 24px, h 36")
+        expect(probe("<section><h2 id=\"d\">x</h2></section>", "d", "h")).to_equal("36")

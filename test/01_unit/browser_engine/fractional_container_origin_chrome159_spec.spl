@@ -1,0 +1,77 @@
+"""
+## Purpose and audience
+Purpose: Pin that a block or flex container carries the sub-pixel part of its
+own start y into its children and returns the sub-pixel part of its auto
+height, like Chrome's LayoutUnit (1/64 px). Before, a container's own y was
+rounded before its children started (children restarted the block cursor at
+0) and its auto height dropped the residual, so a fractional margin above a
+group of blocks put every box below it one row low (html catalog page: the
+flex `<article><header>` is 97.52 px tall and starts at 120.81, everything
+below sat one row low).
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159, 900x2000, `body{margin:0}`, `.w{width:400px}`,
+getBoundingClientRect via --headless --dump-dom, 2026-11-17). Painted rows
+are y = round(top) and h = round(top + height) - round(top):
+
+| id    | Chrome top | Chrome h | painted y,h |
+|-------|-----------|----------|-------------|
+| top   | 0         | 10       | 0,10        |
+| a     | 10.5      | 40.5     | 11,40       |
+| b     | 10.5      | 20       | 11,20       |
+| p     | 31        | 20       | 31,20       |
+| s     | 51        | 5        | 51,5        |
+| h     | 74.71875  | 30       | 75,30       |
+| c,d,q | 123.4375  | 20       | 123,20      |
+| e     | 159.4375  | 5        | 159,5       |
+| fx    | 164.4375  | 97.4375  | 164,98      |
+| fh    | 199.15625 | 28       | 199,28      |
+| after | 261.875   | 5        | 262,5       |
+
+Base (whole-px container origin and height): a 11,41 / p 32 / s 52 / c 124 /
+e 160 / fx 165 / fh 200 / after 263.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-CONTAINER-FRACTIONAL-ORIGIN-001 — containers carry a start fraction down and an auto-height fraction up.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val PAGE: text = "<html><head><style>body{{margin:0}} .w{{width:400px}} h3{{line-height:30px}} p{{line-height:20px}}</style></head><body><div class=w>" +
+    "<div id=top style=\"height:10px\"></div><div id=a style=\"margin-top:0.5px\"><div id=b style=\"height:20px\"></div><p id=p style=\"margin:0.5px 0 0\">x</p></div><div id=s style=\"height:5px\"></div>" +
+    "<h3 id=h>T</h3><div id=c><div id=d><p id=q>x</p></div></div><div id=e style=\"height:5px\"></div>" +
+    "<div id=fx style=\"display:flex;padding:16px 0\"><h3 id=fh style=\"margin:18.72px 0;line-height:28px\">F</h3></div><div id=after style=\"height:5px\"></div>" +
+    "</div></body></html>"
+
+fn _yh(id: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "y") + "," +
+        simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "h")
+
+describe "container fractional origin":
+    it "AC-1: nested block under a fractional margin keeps the carried start":
+        step("Chrome 159: a 10.5, b 10.5, p 31.0 (whole-px origin gave 32)")
+        expect(_yh("a")).to_equal("11,40")
+        expect(_yh("b")).to_equal("11,20")
+        expect(_yh("p")).to_equal("31,20")
+
+    it "AC-2: a sibling after the nested group is not one row low":
+        step("Chrome 159: s 51 (base 52), h 74.72 -> 75")
+        expect(_yh("s")).to_equal("51,5")
+        expect(_yh("h")).to_equal("75,30")
+
+    it "AC-3: wrappers of a fractional start carry it down":
+        step("Chrome 159: c d q 123.4375 -> 123 (base 124), e 159.4375 -> 159")
+        expect(_yh("c")).to_equal("123,20")
+        expect(_yh("d")).to_equal("123,20")
+        expect(_yh("q")).to_equal("123,20")
+        expect(_yh("e")).to_equal("159,5")
+
+    it "AC-4: flex header with fractional item margins and a sibling after it":
+        step("Chrome 159: fx 164.44 + 97.4375 = 261.875 (base 165 + 98 = 263)")
+        expect(_yh("fx")).to_equal("164,98")
+        expect(_yh("fh")).to_equal("199,28")
+        expect(_yh("after")).to_equal("262,5")

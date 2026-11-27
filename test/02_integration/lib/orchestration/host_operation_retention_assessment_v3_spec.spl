@@ -1,0 +1,168 @@
+# @req DAE-05-H DAE-05-N
+# NOT_RUN. Real owned journal/payload files; scripted Container fixture remains
+# unused. These observations do not qualify runtime admission, expiry or GC.
+use std.spec.{describe, it, expect, fail}
+use std.spec.step
+use std.common.contracts.distributed_operation_assessment_v3.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.HostReservationStateV1
+use std.common.task_runner.distributed_operation_journal_v2.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_operation_retention_assessment_v3.*
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.*
+use std.nogc_sync_mut.orchestration.host_local_command_v1.host_local_status_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use test.fixtures.orchestration.host_parent_budget_fixture_v1.*
+use test.fixtures.orchestration.host_helper_fixture_v1.host_helper_clock_v1
+use test.fixtures.orchestration.host_local_resolver_fixture_v2.host_local_resolver_consumed_fixture_v2
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.verification_fixture
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io_runtime.dir_remove
+
+fn retention_owned_fixture_v3() -> HostParentBudgetFixtureV1:
+    var fixture = host_parent_budget_fixture_v1()
+    val previous = fixture.local.capacity
+    assert(host_capacity_owner_close_v1(previous).unwrap())
+    match host_capacity_owner_open_owned_v2(previous.journal.root, previous.ledger.capacity,
+            "d".repeat(64), previous.journal.maximum_events, true):
+        case HostCapacityOpenV2.Ready(owner): fixture.local.capacity = owner
+        case HostCapacityOpenV2.Rejected(reason): fail(reason)
+        case HostCapacityOpenV2.CleanupRequired(cleanup, reason):
+            val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+            assert(closed.closed and closed.cleanup.is_none() and closed.error == "")
+            fail(reason)
+    fixture
+
+fn retention_fixture_close_v3(fixture: HostParentBudgetFixtureV1):
+    val closed = distributed_operation_journal_close_owned_v2(fixture.local.capacity.journal)
+    assert(closed.closed and closed.cleanup.is_none() and closed.error == "" and closed.health_pending_id == 0)
+    assert(dir_remove(fixture.local.root, true))
+    assert(dir_remove(fixture.provider_root, true))
+
+fn retention_fields_v3(source: text) -> Dict<text, SdnValue>:
+    val document = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 8192,
+        max_depth: 4, max_nodes: 128, max_rows: 0, max_cells: 0, max_columns: 24)).unwrap()
+    document.value.as_dict().unwrap()
+
+describe "Consumed bounded Host retention diagnostics":
+    it "reads only canonical referenced payloads under the actual journal owner":
+        step("Open the actual owned Host journal")
+        val fixture = retention_owned_fixture_v3()
+        val journal = fixture.local.capacity.journal
+        val operation = fixture.record.parent_binding.host_operation
+        val before = journal.sequence
+        step("Capture bounded owner-derived reservation evidence")
+        val snapshot = distributed_operation_journal_assessment_v3(journal,
+            DistributedOperationAssessmentRequestV3([operation.id])).unwrap()
+        expect(snapshot.revision).to_equal(journal.revision)
+        expect(snapshot.sequence).to_equal(before)
+        expect(snapshot.operations[operation.id].envelope).to_equal(journal.operations[operation.id].envelope)
+        expect(snapshot.records.len()).to_equal(1)
+        expect(snapshot.records[0].relative).to_equal("reservation-payloads/" + operation.payload_digest + ".sdn")
+        expect(snapshot.records[0].payload).to_equal(host_reservation_encode_intent_v1(fixture.record.parent_binding.host_intent).unwrap())
+        expect(host_local_resolver_consumed_fixture_v2(fixture.local.container)).to_equal(0)
+        expect(fixture.local.capacity.journal.sequence).to_equal(before)
+        retention_fixture_close_v3(fixture)
+
+    it "rejects invalid ID requests without poisoning and cannot select a lease as a file path":
+        val fixture = retention_owned_fixture_v3()
+        val owner = fixture.local.capacity.journal
+        val id = fixture.record.parent_binding.host_operation.id
+        expect(distributed_operation_journal_assessment_v3(owner,
+            DistributedOperationAssessmentRequestV3([id, id])).unwrap_err()).to_equal("OPERATION_ASSESSMENT_ID_ORDER_INVALID")
+        expect(distributed_operation_journal_assessment_v3(owner,
+            DistributedOperationAssessmentRequestV3(["a", "b", "c", "d", "e"])).unwrap_err()).to_equal("OPERATION_ASSESSMENT_ID_LIMIT")
+        expect(distributed_operation_journal_assessment_v3(owner,
+            DistributedOperationAssessmentRequestV3(["../parent.lease"])).unwrap_err()).to_equal("OPERATION_ASSESSMENT_ID_INVALID")
+        expect(distributed_operation_journal_assessment_v3(owner,
+            DistributedOperationAssessmentRequestV3(["parent.lease"])).unwrap_err()).to_equal("OPERATION_ASSESSMENT_ID_INVALID")
+        val absent = distributed_operation_journal_assessment_v3(owner,
+            DistributedOperationAssessmentRequestV3(["parent-lease"])).unwrap()
+        expect(absent.records.len()).to_equal(0)
+        expect(absent.missing_operation_ids).to_equal(["parent-lease"])
+        val healthy = distributed_operation_journal_assessment_v3(owner,
+            DistributedOperationAssessmentRequestV3([id])).unwrap()
+        expect(healthy.records.len()).to_equal(1)
+        retention_fixture_close_v3(fixture)
+
+    it "quarantines an actual authoritative payload fault across byte restoration":
+        val fixture = retention_owned_fixture_v3()
+        val owner = fixture.local.capacity.journal
+        val operation = fixture.record.parent_binding.host_operation
+        val path = owner.root + "/reservation-payloads/" + operation.payload_digest + ".sdn"
+        val original = file_read_regular_no_follow_bounded(path, 65536).unwrap()
+        assert(file_atomic_write(path, "damaged retained reservation\n"))
+        expect(distributed_operation_journal_assessment_v3(owner,
+            DistributedOperationAssessmentRequestV3([operation.id])).unwrap_err()).to_equal("OPERATION_ASSESSMENT_REFERENCED_PAYLOAD_CHANGED")
+        assert(file_atomic_write(path, original))
+        val denied = distributed_operation_journal_lookup_v2(owner, operation.id)
+        expect(denied.unwrap_err()).to_start_with("OPERATION_JOURNAL_QUARANTINED:")
+        expect(denied.unwrap_err()).to_end_with(operation.payload_digest)
+        retention_fixture_close_v3(fixture)
+
+    it "consumes the assessment from the existing host-status service without provider effects":
+        step("Read the existing Host status service")
+        val fixture = retention_owned_fixture_v3()
+        val before = fixture.local.capacity.journal.sequence
+        val turn = host_service_domain_turn_v2(HostServiceDomainV2(fixture.local), HostServiceRequestV2("host-status", "", ""))
+        expect(turn.exit_code).to_equal(0)
+        val fields = retention_fields_v3(turn.response)
+        expect(fields["kind"]).to_equal(SdnValue.String("host-local-status"))
+        val diagnostic = fields["retentionAssessment"].as_dict().unwrap()
+        expect(diagnostic["state"]).to_equal(SdnValue.String("Incomplete"))
+        expect(diagnostic["examinedReservations"]).to_equal(SdnValue.Int(1))
+        expect(diagnostic["totalReservations"]).to_equal(SdnValue.Int(1))
+        expect(diagnostic["omittedReservations"]).to_equal(SdnValue.Int(0))
+        expect(diagnostic["samplePinnedReservations"]).to_equal(SdnValue.Int(1))
+        expect(diagnostic["validatedReservationPayloads"]).to_equal(SdnValue.Int(1))
+        expect(turn.owner.local.capacity.journal.sequence).to_equal(before)
+        expect(host_local_resolver_consumed_fixture_v2(turn.owner.local.container)).to_equal(0)
+        expect(diagnostic.contains_key("operationId")).to_equal(false)
+        expect(diagnostic.contains_key("operations")).to_equal(false)
+        expect(diagnostic.contains_key("records")).to_equal(false)
+        retention_fixture_close_v3(fixture)
+
+    it "samples deterministically and exposes omitted reservations as incomplete":
+        var fixture = retention_owned_fixture_v3()
+        val parent = fixture.record.parent_binding.host_operation
+        var grant = verification_fixture().signed.grant
+        grant.operations = ["host_reservation_v1"]
+        for suffix in ["-d", "-a", "-c", "-b"]:
+            var intent = fixture.record.parent_binding.host_intent
+            intent.fence.revision = fixture.local.capacity.ledger.revision
+            intent.reservation.id = "reservation" + suffix
+            intent.reservation.operation_id = parent.id + suffix
+            intent.reservation.nonce = "diagnostic" + suffix
+            intent.reservation.cpu_millis = 100
+            intent.reservation.memory_bytes = 32
+            intent.reservation.state = HostReservationStateV1.Prepared
+            intent = host_reservation_bind_intent_v1(intent).unwrap()
+            var operation = parent
+            operation.id = intent.reservation.operation_id
+            operation.payload_digest = intent.reservation.payload_digest
+            operation.memory_bytes = 32
+            fixture.local.capacity = host_capacity_owner_prepare_v1(fixture.local.capacity,
+                intent, operation, grant, host_helper_clock_v1()).unwrap()
+        expect(host_retention_sample_ids_v3(fixture.local.capacity)).to_equal(
+            [parent.id, parent.id + "-a", parent.id + "-b", parent.id + "-c"])
+        val fields = retention_fields_v3(host_local_status_v1(fixture.local).unwrap())
+        val diagnostic = fields["retentionAssessment"].as_dict().unwrap()
+        expect(diagnostic["state"]).to_equal(SdnValue.String("Incomplete"))
+        expect(diagnostic["examinedReservations"]).to_equal(SdnValue.Int(4))
+        expect(diagnostic["totalReservations"]).to_equal(SdnValue.Int(5))
+        expect(diagnostic["omittedReservations"]).to_equal(SdnValue.Int(1))
+        expect(diagnostic["validatedReservationPayloads"]).to_equal(SdnValue.Int(4))
+        expect(host_local_resolver_consumed_fixture_v2(fixture.local.container)).to_equal(0)
+        retention_fixture_close_v3(fixture)
+
+    it "preserves compatibility-only status with explicit unavailable owned assessment":
+        val fixture = host_parent_budget_fixture_v1()
+        val fields = retention_fields_v3(host_local_status_v1(fixture.local).unwrap())
+        val diagnostic = fields["retentionAssessment"].as_dict().unwrap()
+        expect(diagnostic["state"]).to_equal(SdnValue.String("Incomplete"))
+        expect(diagnostic["examinedReservations"]).to_equal(SdnValue.Int(0))
+        expect(diagnostic["omittedReservations"]).to_equal(fields["retainedReservations"])
+        expect(host_local_resolver_consumed_fixture_v2(fixture.local.container)).to_equal(0)
+        host_parent_budget_fixture_close_v1(fixture)

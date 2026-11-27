@@ -1,5 +1,49 @@
 # Optional Try receiver declared-owner input workaround
 
+## 2026-11-03 permanent owner-propagation source candidate
+
+Status: **RESOLVED (2026-11-25)**. Root MIR fix landed in PR #6304 (`efbd310e067`, `optional_try_nominal_owner_spec.spl`) and `array.take` landed in PR #5106 (`6f22badafed`); reverted the `: SdnTable` workaround annotation and tag in `src/lib/nogc_async_mut/database/bug.spl`.
+
+Current source still had the actual root gap: `lower_try_expr` decoded Optional
+payload bits but returned a nominal payload without its HIR declaration or
+`struct_value_syms` owner. The already shipped Result `?` decoder restores both.
+The candidate reuses that decoder for Optional Named payloads after the existing
+physical decode. It adds no table copy, boxing, or getter reevaluation and does
+not alter the Optional None branch. The base expression is lowered once; if its
+Optional return becomes known only during imported-method lowering, that
+remembered declaration is used as the fallback. Existing static Optional types
+retain precedence.
+
+Regressions authored in this candidate:
+
+- `test/01_unit/compiler/mir/optional_try_nominal_owner_spec.spl` drives the real
+  MIR Try lowering and checks retained class/struct declaration and owner.
+- `test/fixtures/compiler/database_optional_receiver_unannotated_probe.spl`
+  restores the original C2 unannotated real SdnDatabase/SdnTable receiver, with
+  update/delete, missing table/key, class aliases and save/reload values/flags.
+  Its temp parent uses the environment facade for Windows TEMP/TMP.
+- `test/fixtures/compiler/native_optional_try_owner/main.spl` calls an effectful
+  imported getter exactly once for Some and once for None, preserves an alias,
+  and prevents a local same-name class from replacing the provider owner.
+
+Required qualification: use a genuinely rebuilt pure-Simple producer containing
+this compiler repair, private caches and outputs, and the actual linked runtime.
+Run the MIR spec with the full self-hosted test CLI, then compile and execute
+both native fixtures with LLVM and Cranelift. The database fixture must exit 0;
+the imported fixture must exit 0 and print `OPTIONAL_TRY_OWNER_PASS`. The original
+`src/lib/nogc_async_mut/database/bug.spl` input additionally requires the separate
+native array.take/query-prefix prerequisite below. Preserve producer/source,
+backend/provider and cache identities and actual object/executable/exit/output
+receipts. An old producer, structural checks, or authored scenarios cannot
+qualify this source candidate. The historical pinned producer below remains
+failure/workaround evidence, not a repaired compiler.
+
+Claims/provider usage: session `codex-optional-try-owner-20261103`; token usage,
+comparable cohort average and ratio are unavailable, not zero. This recovery
+does not resolve the bug, remove the library workaround, or claim native parity.
+
+## Historical workaround evidence
+
 Source-only companion for checkpoint74 database groupD. Runtime/compiler/native
 qualification **UNRUN**. This does not report producer645 or the failed source
 compiled successfully. No compiler operator or runtime carrier is changed.
@@ -46,3 +90,7 @@ actual-owner fixture and actual database source, including mutation/aliasing
 and persistence. Keep the regression. Native array.take parity is separately
 OPEN under native_array_take_method_missing_2026_10_21; this annotation does
 not implement it or change its removal conditions.
+
+## Canonical database reconciliation — 2026-11-03
+
+FIX IMPLEMENTED, VERIFICATION PENDING; source repair PR #6304 MERGED at efbd310e067829ba67386a5f246c400b08b744a8. Optional Try nominal-owner propagation received source safety review, but MIR regression, effectful single-evaluation/alias probes, both native backends, original unannotated database input and required core/MCP smokes are UNRUN. TEST_BLOCKED: qualified self-hosted runtime unavailable. Keep the historical library annotation until producer-qualified verification; no closure or Phase2/Phase3 qualification. Main status fix-implemented-verification-pending records the merged implementation, not a runtime PASS. Source owner session codex-optional-try-owner-20261103; original claim start is unknown in the current remote ledger.

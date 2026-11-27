@@ -182,11 +182,24 @@ AWKEOF
             return ""
         }
 
-        function scan_file(path,    line, m, imp, targets, n, i, t) {
+        function scan_file(path,    line, m, imp, targets, n, i, t, skip) {
             if (path in scanned) return
             scanned[path] = 1
             full = root_dir "/" path
+            skip = 0
             while ((getline line < full) > 0) {
+                # A block guarded by a feature tag ALONE (`@when(feature = "x"):`)
+                # is absent from the default build: no SIMPLE_FEATURES tag is on
+                # by default (cfg_feature_enabled). Its imports are not part of
+                # the default closure, up to its `@else:` or matching `@end`.
+                # Mixed guards (`os = ... or feature = ...`) are still scanned.
+                if (skip > 0) {
+                    if (line ~ /^[[:space:]]*@when[[:space:]]*\(/) skip++
+                    else if (line ~ /^[[:space:]]*@end[[:space:]]*$/) skip--
+                    else if (skip == 1 && line ~ /^[[:space:]]*@else[[:space:]]*:/) skip = 0
+                    continue
+                }
+                if (line ~ /^[[:space:]]*@when[[:space:]]*\([[:space:]]*feature[[:space:]]*=[[:space:]]*"[^"]*"[[:space:]]*\)[[:space:]]*:[[:space:]]*$/) { skip = 1; continue }
                 if (line ~ /^[[:space:]]*(pub[[:space:]]+|export[[:space:]]+)?use[[:space:]]+std\.[A-Za-z0-9_.]+/) {
                     imp = line
                     sub(/^[[:space:]]*(pub[[:space:]]+|export[[:space:]]+)?use[[:space:]]+std\./, "", imp)
@@ -237,6 +250,22 @@ AWKEOF
     reached_count=$(wc -l < "$reached" | tr -d ' ')
     [ "$reached_count" -gt 0 ] || { echo "ERROR — nothing was checked (BFS reached 0 files)"; exit 2; }
     host_count=$(awk -F '|' '$1 == "HOST"' "$reached" | wc -l | tr -d ' ')
+
+    # DHR OFF-01 (doc/03_plan/app/debug/dhr_debug_spy_replay_recovery_plan_2026-11-17.md):
+    # optional recorder/replay/crash/remote-debug/DAP providers must never be
+    # reachable from the compiler kernel, CORE-classified or not, so the
+    # feature stays absent from the default closure. Contract modules under
+    # src/lib/common/** are allowed; only the stateful provider trees are not.
+    optional_hits=$temp_dir/optional_hits
+    awk -F '|' '{ print $2 }' "$reached" \
+        | grep -E '^src/lib/(nogc_sync_mut|nogc_async_mut|nogc_async_mut_noalloc|gc_sync_mut|gc_async_mut)/(replay|trace|crash|spy|debug/remote|dap)/' \
+        > "$optional_hits" || true
+    if [ -s "$optional_hits" ]; then
+        echo "FAIL DHR-OFF-01 optional debug/replay provider reached from the compiler kernel:"
+        sed 's/^/  /' "$optional_hits"
+        echo "FAIL — $reached_count reached, $(wc -l < "$optional_hits" | tr -d ' ') optional provider file(s) in the kernel closure"
+        exit 1
+    fi
 
     # Baseline and comparison MUST use the SAME set. Until 2026-09-24 the
     # baseline was written from ALL reached files (CORE+HOST) but compared
@@ -364,11 +393,31 @@ run_selftest() {
     printf '%s\n' "$out" | grep -q 'src/lib/database/query.spl' || { echo "self-test: stale WARN did not name the file: $out"; return 1; }
     printf '%s\n' "$out" | grep -qE '^PASS — 1 reached, 0 outside CORE, 0 new, 0 unresolved import\(s\) \(baseline 1\)$' || { echo "self-test: stale-baseline overall verdict wrong (must still PASS pre-OD-4): $out"; return 1; }
 
+    # --- DHR OFF-01: reaching an optional replay provider FAILs and names it,
+    # even though the baseline would otherwise only see an ordinary HOST file. ---
+    mkdir -p "$fixture/src/lib/nogc_sync_mut/replay"
+    printf 'fn rec() -> i64:\n    4\n' > "$fixture/src/lib/nogc_sync_mut/replay/recorder.spl"
+    printf 'use std.nogc_sync_mut.replay.recorder.{rec}\n' >> "$fixture/src/compiler/10.frontend/entry.spl"
+    out=$(run_check "$fixture" "$fixture/core.sdn" "$fixture/kernel.sdn" 2>&1) && { echo "self-test: optional replay provider in kernel closure went undetected"; return 1; }
+    printf '%s\n' "$out" | grep -q 'DHR-OFF-01' || { echo "self-test: DHR-OFF-01 not reported: $out"; return 1; }
+    printf '%s\n' "$out" | grep -q 'src/lib/nogc_sync_mut/replay/recorder.spl' || { echo "self-test: DHR-OFF-01 did not name the provider: $out"; return 1; }
+    reset_fixture
+
+    # --- DHR OFF-01: the same provider behind a feature-only `@when` guard is
+    # absent from the default build, so it stays out of the closure; the code
+    # after the block is still scanned. ---
+    printf '%s\n' '@when(feature = "dhr"):' 'use std.nogc_sync_mut.replay.recorder.{rec}' '@end' 'use std.common.util.{util}' >> "$fixture/src/compiler/10.frontend/entry.spl"
+    out=$(run_check "$fixture" "$fixture/core.sdn" "$fixture/kernel.sdn" 2>&1) || { echo "self-test: feature-gated provider import was counted in the default closure: $out"; return 1; }
+    printf '%s\n' "$out" | grep -q 'DHR-OFF-01' && { echo "self-test: feature-gated provider reported as DHR-OFF-01: $out"; return 1; }
+    printf '%s\n' "$out" | grep -qE '^PASS — 1 reached' || { echo "self-test: code after the feature block was not scanned: $out"; return 1; }
+    rm -rf "$fixture/src/lib/nogc_sync_mut"
+    reset_fixture
+
     # --- empty tree must not vacuously pass ---
     rm -f "$fixture/src/compiler/10.frontend/entry.spl"
     if run_check "$fixture" "$fixture/core.sdn" "$fixture/kernel.sdn" >/dev/null 2>&1; then echo "self-test: empty fixture unexpectedly passed"; return 1; fi
 
-    echo "core-lib closure self-test OK (6 fixtures)"
+    echo "core-lib closure self-test OK (8 fixtures)"
 }
 
 # The selftest runs fatally before EVERY scan, not only under --selftest --

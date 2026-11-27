@@ -1,0 +1,87 @@
+# AUTHORED/NOT_RUN. Pure processing fixtures confer no native authority.
+use std.spec.*
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.*
+use std.nogc_async_mut.container.providers.linux.containment_profile_v1.*
+use std.nogc_async_mut.container.providers.linux.installed_containment_policy_v1.*
+use std.nogc_async_mut.container.providers.linux.containment_observer_v1.*
+use std.nogc_sync_mut.io.process_ops.ProcessResult
+
+use test.fixtures.orchestration.containment_provider_fixture_v1.*
+
+describe "configured containment observation foundation":
+    it "roundtrips exact embedded policies and rejects mismatch and noncanonical wrappers":
+        val installed = containment_installed_fixture_v1()
+        val source = linux_oci_installed_containment_policy_encode_v1(installed).unwrap()
+        expect(linux_oci_installed_containment_policy_decode_v1(source).unwrap()).to_equal(installed)
+        for changed in [source + "\n", source.replace("version: 1", "version: 2"),
+                source.replace("version: 1", "extra: true, version: 1"), source.replace("version: 1", "version: 1, version: 1")]:
+            expect(changed == source).to_equal(false)
+            expect(linux_oci_installed_containment_policy_decode_v1(changed).is_err()).to_equal(true)
+        var basename = installed
+        basename.profile.runtime_name = "crun"
+        expect(linux_oci_containment_profile_encode_v1(basename.profile).is_ok()).to_equal(true)
+        expect(linux_oci_installed_containment_policy_encode_v1(basename).is_err()).to_equal(true)
+        var wrong = installed
+        wrong.profile.cli_policy_digest = "c".repeat(64)
+        expect(linux_oci_installed_containment_policy_encode_v1(wrong).is_err()).to_equal(true)
+
+    it "routes exact global profile flags and preserves literal arguments":
+        expect(linux_oci_containment_route_v1(containment_installed_fixture_v1(), ["inspect", "literal ; $x"]).unwrap()).to_equal(
+            ["--remote=false", "--root", "/home/test/storage", "--runroot", "/run/user/1000/storage",
+                "--storage-driver", "overlay", "--storage-opt=", "--runtime", "/usr/bin/crun",
+                "--cgroup-manager", "systemd", "inspect", "literal ; $x"])
+        expect(linux_oci_containment_route_v1(containment_installed_fixture_v1(), ["bad\0"]).is_err()).to_equal(true)
+
+    it "correlates one bounded capture and retains separate CLI and configured identities":
+        val observed = linux_oci_containment_capture_observation_v1(containment_installed_fixture_v1(),
+            containment_capture_fixture_v1(), "a".repeat(64), "b".repeat(64)).unwrap()
+        expect(observed.runtime_program).to_equal("/usr/bin/crun")
+        expect(observed.runtime_version).to_equal("crun version 1.17\nfeatures: +SYSTEMD")
+        expect(observed.identity_digest).to_equal(linux_oci_containment_identity_digest_v1(observed))
+        expect(observed.identity_digest == observed.cli_observation.identity_digest).to_equal(false)
+        var changed = observed
+        changed.runtime_version = "other"
+        expect(linux_oci_containment_identity_digest_v1(changed) == observed.identity_digest).to_equal(false)
+
+    it "rejects runtime store version and manager drift":
+        val original = containment_capture_fixture_v1()
+        for pair in [("/usr/bin/crun", "/usr/bin/runc"), ("crun\"", "runc\""),
+                ("systemd", "cgroupfs"), ("v2", "v1"), ("5.2.5", "5.3.0"), ("/home/test/storage", "/other")]:
+            var result = original
+            result.stdout = result.stdout.replace(pair.0, pair.1)
+            expect(result.stdout == original.stdout).to_equal(false)
+            expect(linux_oci_containment_capture_observation_v1(containment_installed_fixture_v1(), result,
+                "a".repeat(64), "b".repeat(64)).is_err()).to_equal(true)
+        expect(linux_oci_containment_capture_observation_v1(containment_installed_fixture_v1(), original,
+            "a".repeat(64), "c".repeat(64)).is_err()).to_equal(true)
+
+    it "rejects saturated failed and malformed capture before observation publication":
+        for kind in ["output", "stderr", "exit", "trailing", "duplicate", "type"]:
+            var result = containment_capture_fixture_v1()
+            if kind == "output": result.limit_exceeded = true
+            if kind == "stderr": result.stderr = "x".repeat(65537)
+            if kind == "exit": result.exit_code = 125
+            if kind == "trailing": result.stdout = result.stdout + "{}"
+            if kind == "duplicate": result.stdout = result.stdout.replace("\"cgroupVersion\":\"v2\"", "\"cgroupVersion\":\"v2\",\"cgroupVersion\":\"v2\"")
+            if kind == "type": result.stdout = result.stdout.replace("\"cgroupVersion\":\"v2\"", "\"cgroupVersion\":2")
+            expect(linux_oci_containment_capture_observation_v1(containment_installed_fixture_v1(), result,
+                "a".repeat(64), "b".repeat(64)).is_err()).to_equal(true)
+
+    it "matches only structurally intact configured observation data":
+        val installed = containment_installed_fixture_v1()
+        val observed = linux_oci_containment_capture_observation_v1(installed,
+            containment_capture_fixture_v1(), "a".repeat(64), "b".repeat(64)).unwrap()
+        expect(linux_oci_containment_observation_match_v1(installed, observed).unwrap()).to_equal(true)
+        for kind in ["profile", "runtime", "program", "name", "manager", "cgroups", "version", "identity", "cli"]:
+            var changed = observed
+            if kind == "profile": changed.profile_digest = "c".repeat(64)
+            if kind == "runtime": changed.runtime_digest = "c".repeat(64)
+            if kind == "program": changed.runtime_program = "/usr/bin/runc"
+            if kind == "name": changed.runtime_name = "runc"
+            if kind == "manager": changed.cgroup_manager = "cgroupfs"
+            if kind == "cgroups": changed.cgroup_version = "v1"
+            if kind == "version": changed.runtime_version = ""
+            if kind == "identity": changed.identity_digest = "c".repeat(64)
+            if kind == "cli": changed.cli_observation.identity_digest = "c".repeat(64)
+            expect(changed == observed).to_equal(false)
+            expect(linux_oci_containment_observation_match_v1(installed, changed).is_err()).to_equal(true)

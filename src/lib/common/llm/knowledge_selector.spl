@@ -1,0 +1,138 @@
+"""Deterministic feature-plus-layer knowledge routing for SPipe implementation."""
+
+struct KnowledgeFeatureRoute:
+    feature_id: text
+    group_id: text
+    group_path: text
+    expert_path: text
+
+struct KnowledgeLayerRoute:
+    prefix: text
+    group_id: text
+    group_path: text
+    expert_path: text
+    architecture_profile: text
+
+struct KnowledgePathSelection:
+    source_path: text
+    matched_prefix: text
+    layer_group_id: text
+    architecture_profile: text
+
+struct KnowledgeSelection:
+    valid: bool
+    reason: text
+    registry_version: text
+    feature_id: text
+    architecture_profile: text
+    knowledge_paths: [text]
+    path_selections: [KnowledgePathSelection]
+
+fn _knowledge_path_matches(path: text, prefix: text) -> bool:
+    path == prefix or path.starts_with(if prefix.ends_with("/"): prefix else: prefix + "/")
+
+fn _knowledge_insert_sorted_unique(values: [text], value: text):
+    var i: i64 = 0
+    while i < values.len():
+        if values[i] == value:
+            return
+        i = i + 1
+    values.push(value)
+    i = values.len().to_i64() - 1
+    while i > 0 and values[i] < values[i - 1]:
+        val left = i - 1
+        val previous = values[left]
+        values[left] = values[i]
+        values[i] = previous
+        i = i - 1
+
+fn _knowledge_reject(version: text, feature_id: text, reason: text) -> KnowledgeSelection:
+    KnowledgeSelection(valid: false, reason: reason, registry_version: version,
+        feature_id: feature_id, architecture_profile: "unresolved",
+        knowledge_paths: [], path_selections: [])
+
+fn select_implementation_knowledge(registry_version: text, feature_id: text,
+        source_paths: [text], feature_routes: [KnowledgeFeatureRoute],
+        layer_routes: [KnowledgeLayerRoute]) -> KnowledgeSelection:
+    var feature_count: i64 = 0
+    var selected_feature = KnowledgeFeatureRoute(feature_id: "", group_id: "", group_path: "", expert_path: "")
+    for candidate in feature_routes:
+        if candidate.feature_id == feature_id:
+            selected_feature = candidate
+            feature_count = feature_count + 1
+    # @decision KS_FEATURE_COUNT_ZERO
+    if feature_count == 0:
+        return _knowledge_reject(registry_version, feature_id, "feature-route-missing")
+    # @decision KS_FEATURE_COUNT_MULTI
+    if feature_count > 1:
+        return _knowledge_reject(registry_version, feature_id, "feature-route-ambiguous")
+    # @decision KS_SOURCE_EMPTY
+    if source_paths.len() == 0:
+        return _knowledge_reject(registry_version, feature_id, "source-paths-empty")
+
+    var knowledge_paths: [text] = []
+    _knowledge_insert_sorted_unique(knowledge_paths, selected_feature.group_path)
+    _knowledge_insert_sorted_unique(knowledge_paths, selected_feature.expert_path)
+    var selected_paths: [KnowledgePathSelection] = []
+    var selection_profile = "mdsoc_plus"
+
+    for source_path in source_paths:
+        var best_length: i64 = -1
+        var best_count: i64 = 0
+        var best = KnowledgeLayerRoute(prefix: "", group_id: "", group_path: "",
+            expert_path: "", architecture_profile: "")
+        for route in layer_routes:
+            if _knowledge_path_matches(source_path, route.prefix):
+                val prefix_length = route.prefix.len().to_i64()
+                if prefix_length > best_length:
+                    best = route
+                    best_length = prefix_length
+                    best_count = 1
+                elif prefix_length == best_length and route.group_id != best.group_id:
+                    best_count = best_count + 1
+        # @decision KS_BEST_MISSING
+        if best_length < 0:
+            return _knowledge_reject(registry_version, feature_id,
+                "layer-route-missing:" + source_path)
+        # @decision KS_BEST_AMBIG
+        if best_count > 1:
+            return _knowledge_reject(registry_version, feature_id,
+                "layer-route-ambiguous:" + source_path)
+        # Kernel and drivers are a hard safety override, independent of registry order.
+        # @decision KS_FORCE_MDSOC
+        val forced_mdsoc_only = _knowledge_path_matches(source_path, "src/os/kernel") or
+            _knowledge_path_matches(source_path, "src/os/drivers")
+        val profile = if forced_mdsoc_only: "mdsoc_only" else: best.architecture_profile
+        # @decision KS_UNSAFE_PROFILE
+        if forced_mdsoc_only and best.architecture_profile != "mdsoc_only":
+            return _knowledge_reject(registry_version, feature_id,
+                "mdsoc-only-route-required:" + source_path)
+        if profile == "mdsoc_only":
+            selection_profile = "mdsoc_only"
+        _knowledge_insert_sorted_unique(knowledge_paths, best.group_path)
+        # @decision KS_EXPERT_PRESENT
+        if best.expert_path != "":
+            _knowledge_insert_sorted_unique(knowledge_paths, best.expert_path)
+        selected_paths.push(KnowledgePathSelection(source_path: source_path,
+            matched_prefix: best.prefix, layer_group_id: best.group_id,
+            architecture_profile: profile))
+
+    KnowledgeSelection(valid: true, reason: "ok", registry_version: registry_version,
+        feature_id: feature_id, architecture_profile: selection_profile,
+        knowledge_paths: knowledge_paths, path_selections: selected_paths)
+
+fn knowledge_selection_receipt(selection: KnowledgeSelection) -> text:
+    var out = "registry_version=" + selection.registry_version + "\n" +
+        "feature_id=" + selection.feature_id + "\n" +
+        "valid=" + selection.valid.to_text() + "\n" +
+        "reason=" + selection.reason + "\n" +
+        "architecture_profile=" + selection.architecture_profile + "\n"
+    for path in selection.knowledge_paths:
+        out = out + "knowledge_path=" + path + "\n"
+    for route in selection.path_selections:
+        out = out + "source_path=" + route.source_path + "|prefix=" + route.matched_prefix +
+            "|layer_group=" + route.layer_group_id + "|architecture=" + route.architecture_profile + "\n"
+    out
+
+export KnowledgeFeatureRoute, KnowledgeLayerRoute, KnowledgePathSelection, KnowledgeSelection
+export select_implementation_knowledge, knowledge_selection_receipt

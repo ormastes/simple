@@ -26,6 +26,8 @@ use compiler.driver.cache.action_key.{canon_str, canon_nat, canon_field, canon_s
 use std.io_runtime.{dir_create_all}
 use std.env.platform.{get_cache_location}
 use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
 
 @unsafe(reason: "raw CAS file write status ABI", capabilities: [ffi])
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -43,31 +45,37 @@ extern fn rt_time_now_unix_micros() -> i64
 # One direct call per helper after inlining. These helpers make the raw
 # ownership/status boundary lexical without adding cache-path allocation,
 # retries, lookups, locks, or dispatch.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in cas_file_write_text_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn cas_file_write_text_raw(path: text, content: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_file_write_text(path, content)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in cas_file_exists_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn cas_file_exists_raw(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_file_exists(path)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in cas_file_delete_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn cas_file_delete_raw(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_file_delete(path)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in cas_file_move_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn cas_file_move_raw(old_path: text, new_path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_file_move(old_path, new_path)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in cas_process_id_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn cas_process_id_raw() -> i64:
     unsafe(capabilities: [ffi]):
         rt_getpid()
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in cas_time_now_unix_micros_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn cas_time_now_unix_micros_raw() -> i64:
     unsafe(capabilities: [ffi]):
@@ -109,10 +117,10 @@ fn cas_version_text() -> text:
     "{CAS_SCHEMA_VERSION}"
 
 fn cas_blob_path(root: text, digest: text) -> text:
-    "{root}/cas/sha256/{digest.substring(0, 2)}/{digest.substring(2, digest.len())}"
+    "{root}/cas/sha256/{digest.substring(0, 2)}/{digest.substring(2, digest.byte_len())}"
 
 fn cas_action_path(root: text, digest: text) -> text:
-    "{root}/actions/sha256/{digest.substring(0, 2)}/{digest.substring(2, digest.len())}"
+    "{root}/actions/sha256/{digest.substring(0, 2)}/{digest.substring(2, digest.byte_len())}"
 
 fn cas_parent_dir(path: text) -> text:
     val slash = path.last_index_of("/")
@@ -174,13 +182,26 @@ fn cas_put(root: text, content: text) -> text:
 fn cas_get(root: text, digest: text) -> text?:
     val path = cas_blob_path(root, digest)
     if not cas_file_exists_raw(path):
-        return nil
+        return None
     if val content = file_read_nullable(path):
         if sha256_text(content) != digest:
             cas_quarantine(root, path)
-            return nil
+            return None
         return Some(content)
-    nil
+    None
+
+# Additive bounded reader for retained metadata. The trusted caller chooses
+# the cache root; only a validated digest chooses a blob within that owner.
+# Do not quarantine here: a refusal leaves the existing cache untouched.
+fn cas_get_bounded_v1(root: text, digest: text, max_bytes: i64) -> text?:
+    if root == "" or not sha256_lower_hex_valid(digest) or
+            max_bytes < 1 or max_bytes > 8388608:
+        return None
+    match file_read_regular_no_follow_bounded(cas_blob_path(root, digest), max_bytes):
+        case Err(_): None
+        case Ok(content):
+            if sha256_text(content) != digest: return None
+            Some(content)
 
 # Stamp-fast existence check (no verification — strict path is cas_get).
 fn cas_has(root: text, digest: text) -> bool:
@@ -208,9 +229,9 @@ fn action_manifest_serialize(manifest: ActionManifest) -> text:
 fn action_manifest_parse(content: text) -> ActionManifest?:
     val lines = content.split("\n")
     if lines.len() < 2:
-        return nil
+        return None
     if lines[0] != CAS_MANIFEST_HEADER:
-        return nil
+        return None
     var artifacts: [text] = []
     var i = 2
     while i < lines.len():
@@ -241,18 +262,18 @@ fn action_put(root: text, action_digest: text, manifest: ActionManifest) -> bool
 fn action_get(root: text, action_digest: text) -> ActionManifest?:
     val path = cas_action_path(root, action_digest)
     if not cas_file_exists_raw(path):
-        return nil
+        return None
     val content = file_read_nullable(path) ?? ""
     val parsed = action_manifest_parse(content)
     match parsed:
         case Some(manifest):
             if manifest.action_digest != action_digest:
                 cas_quarantine(root, path)
-                return nil
+                return None
             return manifest
-        case nil:
+        case None:
             cas_quarantine(root, path)
-            return nil
+            return None
 
 # ============================================================================
 # Result manifests (C1 — closure-checked publish over ActionManifest)
@@ -284,9 +305,9 @@ fn result_manifest_serialize(m: ResultManifest) -> text:
 fn result_manifest_parse(content: text) -> ResultManifest?:
     val lines = content.split("\n")
     if lines.len() < 6:
-        return nil
+        return None
     if lines[0] != RESULT_MANIFEST_HEADER:
-        return nil
+        return None
     var artifacts: [text] = []
     var i = 6
     while i < lines.len():
@@ -334,21 +355,21 @@ fn result_manifest_put(root: text, action_digest: text, m: ResultManifest) -> bo
 fn result_manifest_get(root: text, action_digest: text) -> ResultManifest?:
     val path = cas_action_path(root, action_digest)
     if not cas_file_exists_raw(path):
-        return nil
+        return None
     val content = file_read_nullable(path) ?? ""
     val parsed = result_manifest_parse(content)
     match parsed:
         case Some(manifest):
             if manifest.action_digest != action_digest:
                 cas_quarantine(root, path)
-                return nil
+                return None
             return manifest
-        case nil:
+        case None:
             cas_quarantine(root, path)
-            return nil
+            return None
 
 export ActionManifest, ResultManifest
-export cas_root, cas_open, cas_put, cas_get, cas_has, cas_quarantine
+export cas_root, cas_open, cas_put, cas_get, cas_get_bounded_v1, cas_has, cas_quarantine
 export cas_blob_path, cas_action_path, cas_parent_dir
 export action_manifest_serialize, action_manifest_parse, action_put, action_get
 export result_manifest_encode, result_manifest_serialize, result_manifest_parse

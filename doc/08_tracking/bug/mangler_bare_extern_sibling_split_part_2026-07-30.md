@@ -1,4 +1,18 @@
 # Bug: Rust seed mangler emits bare extern for free function shared across sibling split-part modules re-exported through a facade
+
+## Triage 2026-11-25 (lane p2w3-aa)
+
+The "Open 2026-09-16 — needs owner triage" header above is stale bookkeeping;
+the operative status is the 2026-11-05 section at the bottom:
+fix-implemented-verification-pending in the Rust seed
+(`native_project/mangle.rs`, underscore gate removed, 12/12
+`mangle_symbol_tests` pass on a test-only seed build). The applied
+source-level workarounds (direct imports incl. the `{_find_substr}` import in
+`arithmetic_checks.spl`) are present in the tree. Remaining step — end-to-end
+stage4 native link after a seed redeploy — is Rust-seed/bootstrap-only and
+out of scope for a pure-Simple bug lane. Left OPEN as re-scoped; no change
+made.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
@@ -189,3 +203,19 @@ many `__init__.spl`-style package facades in the repo and most link fine, so a
 blanket rewrite would be unjustified churn. Not swept in this pass; left for a
 future targeted investigation if it recurs at the link stage.
 
+
+## Status 2026-11-05 — fix-implemented-verification-pending
+
+Root cause: `resolve_ambiguous_private_call_in_module` (`native_project/mangle.rs`)
+picks, for a name defined several times in the closure (how a facade-crossing
+sibling helper reaches the mangler: no use_map entry), the definition sharing the
+longest module prefix with the caller. It was gated on `name.starts_with('_')`,
+so public helpers (e.g. `run_test_api_server_with_inject`) fell through to a bare
+extern. Gate removed; ties / zero shared prefix stay unresolved (never guessed).
+
+Tests (`mangle_symbol_tests.rs`): sibling private + public helper resolve to the
+split-part sibling; unique sibling resolves via suffix index; no-closer-sibling
+and tied siblings are not guessed. Test-only seed build, `cargo test -p
+simple-compiler --lib symbol_tests`: before fix 11 pass / 1 FAIL (public helper),
+after 12 pass. End-to-end needs a seed redeploy: drop the `{_find_substr}` direct
+import in `arithmetic_checks.spl` and run the stage4 native link.

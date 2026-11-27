@@ -31,6 +31,29 @@
 # here in reverse: a union would make every Rust-only symbol look dual-lane and
 # the guard would ratchet nothing.
 #
+# RUST LANE SCOPE (widened 2026-11-09, closes
+# doc/08_tracking/bug/rt_dual_ratchet_scan_scope_omits_native_all_2026-09-06.md).
+# The Rust lane is src/compiler_rust/runtime/src PLUS the two sibling provider
+# crates src/compiler_rust/native_all/src and src/compiler_rust/native_loader/src.
+# Before this widening the guard could not see rt_* definitions there at all:
+# a symbol whose only Rust implementation lived in a provider crate was either
+# misclassified (rt_phase_profile_record reported c-only, rt_hostname reported
+# c-only) or invisible (a NEW provider-only rt_* pushed no FAIL at all), and a
+# provider move out of runtime/src produced a phantom STALE row
+# (rt_mem_snapshot_record, PR #271). The widening is a deliberate, reviewed
+# baseline update, not a regeneration: two rows that are genuinely dual under
+# the widened scope (rt_hostname, rt_phase_profile_record) were removed and
+# eleven pre-existing provider-only symbols were admitted with per-symbol
+# justification in the baseline's 2026-11-09 annotation.
+#
+# WHAT COUNTS IN EACH LANE (2026-11-13). Only symbols that can be a cross-lane
+# runtime ABI name. C: non-`static` definitions outside src/runtime/test.
+# Rust: `pub fn`, any `extern "ABI" fn`, any #[no_mangle]/#[export_name] fn.
+# A private or `pub(...)` Rust fn and a bare `fn` import inside an `extern`
+# block are not Rust-lane symbols, exactly as a `static` C helper is not a
+# C-lane symbol. Before this, a private Rust fn made a same-named C primitive
+# read as dual, and one named like a `static` C helper read as rust-only debt.
+#
 # Baseline: scripts/check/rt_dual_implementation_baseline.txt, lines
 #   <symbol>\t<c-only|rust-only>
 #
@@ -54,6 +77,18 @@
 # the frozen comparison above applies unchanged (bootstrap, CI, standalone).
 #   PASS — <n> symbol(s) checked against <m> single-lane at base <sha>, 0 new (...)   exit 0
 #   FAIL — ... <k> new (...)                                                         exit 1
+#
+# DESIGNED C-ONLY ALLOWLIST (since 2026-10-31). A short, EXACT list of rt_*
+# symbols that are single-lane BY DESIGN, not debt: OS primitives whose one
+# implementation is deliberately C (designed_c_only_allowlist below). Each
+# line names one symbol and the reason/approver; there are no wildcards or
+# prefixes. Listed symbols are removed from the tip's single-lane set BEFORE
+# either comparison (frozen or --baseline-rev), so they are neither "new" nor
+# baseline rows. Exactness is enforced both ways: an unlisted new single-lane
+# symbol still FAILs (selftest fixture 10), and a listed symbol that is no
+# longer c-only at the tip (gained a Rust lane, renamed, deleted) FAILs as a
+# STALE allowlist entry. Adding a row is a policy decision: it needs the repo
+# owner's approval, named in the row's reason.
 #
 # Deliberate-update path: --generate-baseline. For REVIEWED updates only, exactly
 # like the divergence and unbacked-extern baselines. Do not "fix" a FAIL with it
@@ -97,8 +132,14 @@ extract_lanes() {
     : > "$el_out/c_syms.txt"
     : > "$el_out/rust_syms.txt"
 
-    # C lane: `rt_NAME(...) {` definitions in owned C sources. Vendored runtime
-    # source is excluded per CLAUDE.md's Owned-Code Scope.
+    # C lane: `rt_NAME(...) {` definitions in owned C sources and headers.
+    # Header implementation units are part of the same source lane at BASE
+    # and HEAD; adding a .c platform fallback to one is not a new primitive.
+    # Prototypes still do not count. Third-party sources/headers are excluded
+    # per CLAUDE.md's Owned-Code Scope, not admitted through this widening.
+    # src/runtime/test (selfcheck, oracle and harness programs, each its own
+    # executable) is skipped too, since 2026-11-13: a definition that exists
+    # only in a test driver is not a runtime primitive.
     if [ -d "$el_root/src/runtime" ]; then
         # Lexical definitions, not physical lines. Do not evaluate #if/TEST
         # conditions: this remains a source census, not a preprocessed build.
@@ -110,8 +151,11 @@ my %symbols;
 my $limit = 16 * 1024 * 1024;
 find({ no_chdir => 1, wanted => sub {
     if (-d $_ && /(?:^|\/)vendor$/) { $File::Find::prune = 1; return; }
-    return unless /\.c$/ && -f $_;
+    # Selfcheck/oracle/harness programs: test drivers, not runtime sources.
+    if (-d $_ && $_ eq "$ARGV[0]/test") { $File::Find::prune = 1; return; }
+    return unless /\.(?:c|h)$/ && -f $_;
     my $path = $_;
+    return if grep { $path eq "$ARGV[0]/$_" } qw(miniaudio.h stb_image.h stb_truetype.h);
     open my $fh, '<', $path or die "C extractor open $path: $!\n";
     my $source = '';
     while (length($source) <= $limit) {
@@ -139,16 +183,56 @@ find({ no_chdir => 1, wanted => sub {
         @tokens <= 1_000_000 or die "C extractor token limit: $path\n";
     }
     my $statement = 0;
+    # Names this file declares `static` (prototype or definition): internal
+    # linkage is sticky, so a later definition without the keyword is still
+    # file-private. Per file, never global — the same name defined non-static
+    # in another file is a real runtime symbol and still counts.
+    my %file_static;
     for (my $i = 0; $i < @tokens; ++$i) {
         my $t = $tokens[$i];
         if ($t =~ /^rt_[A-Za-z0-9_]+$/ && $i > $statement
                 && ($tokens[$i + 1] // '') eq '(') {
             my @prefix = @tokens[$statement .. $i - 1];
+            # Semicolon-less macro invocations (`RT_BINOP(name, x + y)`) end no
+            # statement, so they pile up in front of the next declaration and
+            # their `,`/operator tokens would reject it. Drop leading
+            # `IDENT ( balanced )` groups while declaration tokens remain
+            # after them. Attribute groups and control keywords stay: the
+            # first is declaration syntax, the second must keep rejecting
+            # `if (x) rt_call(y)`. A group with nothing after it stays too, so
+            # a macro-spelled return type still qualifies.
+            for (;;) {
+                last unless @prefix >= 3 && ($prefix[1] // '') eq '('
+                    && $prefix[0] =~ /^[A-Za-z_][A-Za-z0-9_]*$/
+                    && $prefix[0] !~ /^(?:__attribute__|__declspec|_Alignas|alignas|return|if|else|while|for|switch|case|sizeof|do)$/;
+                my $k = 1;
+                my $depth = 0;
+                do {
+                    $depth++ if $prefix[$k] eq '(';
+                    $depth-- if $prefix[$k] eq ')';
+                    ++$k;
+                } while ($k < @prefix && $depth > 0);
+                last if $depth != 0 || $k >= @prefix;
+                splice(@prefix, 0, $k);
+            }
+            # File-private helpers are not cross-lane runtime ABI, whatever
+            # their prefix: `static`, `static inline`, attributes before or
+            # between. Only depth-0 tokens count, so an attribute argument
+            # cannot spell the keyword.
             # A function needs a declaration prefix. Calls/prototypes cannot
             # qualify merely because they occur near a brace. Do not track
             # global brace depth: mutually exclusive #if openings need not
             # balance until preprocessing, which this census does not do.
-            if (!grep { /^(?:=|,|return|if|else|while|for|switch|case|sizeof|\?|:|\+|-|\.|->)$/ } @prefix) {
+            my $declaration = !grep { /^(?:=|,|return|if|else|while|for|switch|case|sizeof|\?|:|\+|-|\.|->)$/ } @prefix;
+            if ($declaration) {
+                my $depth0 = 0;
+                for my $p (@prefix) {
+                    $depth0++ if $p eq '(';
+                    $depth0-- if $p eq ')';
+                    $file_static{$t} = 1 if $p eq 'static' && $depth0 == 0;
+                }
+            }
+            if ($declaration && !$file_static{$t}) {
                 my $j = $i + 1;
                 my $parens = 0;
                 do {
@@ -180,14 +264,115 @@ PERL
         [ $? -eq 0 ] || return 1
     fi
 
-    # Rust lane: `fn rt_*` definitions. Test modules are excluded by path; a
-    # #[cfg(test)] helper is not a runtime primitive.
+    # Rust lane: the legacy `fn rt_*` census minus two kinds of function item.
+    # (1) Items carrying their own #[test]: test entrypoints are not runtime
+    #     primitives.
+    # (2) Non-exported items (since 2026-11-13, the Rust mirror of the C lane's
+    #     `static` rule): a `fn` with no visibility or with `pub(...)`, no
+    #     `extern` ABI and no #[no_mangle]/#[export_name] is a crate-private
+    #     helper, and a bare `fn` inside an `extern` block is an import
+    #     declaration of the other lane's symbol. What still counts: `pub fn`,
+    #     any `extern "ABI" fn` (exported, or registered by address in a
+    #     provider table) and any #[no_mangle]/#[export_name] fn.
+    # Both verdicts are per occurrence, never subtraction by symbol name: the
+    # same name exported elsewhere still counts.
+    # Scope (2026-11-09): runtime/src plus the native_all/native_loader provider
+    # crates — see the RUST LANE SCOPE header section.
     if [ -d "$el_root/src/compiler_rust/runtime/src" ]; then
-        find "$el_root/src/compiler_rust/runtime/src" -name '*.rs' \
+        find "$el_root/src/compiler_rust/runtime/src" \
+            "$el_root/src/compiler_rust/native_all/src" \
+            "$el_root/src/compiler_rust/native_loader/src" \
+            -name '*.rs' \
             -not -path '*/vendor/*' -not -name 'tests.rs' -print0 2>/dev/null \
-            | xargs -0 grep -hoE '\bfn[[:space:]]+rt_[A-Za-z0-9_]+' 2>/dev/null \
-            | grep -oE 'rt_[A-Za-z0-9_]+' \
-            | sort -u > "$el_out/rust_syms.txt"
+            > "$el_out/rust_files.txt"
+        perl - "$el_out/rust_files.txt" > "$el_out/rust_syms.txt" <<'PERL'
+use strict;
+use warnings;
+my %symbols;
+open my $paths, '<', $ARGV[0] or die "Rust extractor file list: $!\n";
+local $/ = "\0";
+while (my $path = <$paths>) {
+    chomp $path;
+    open my $fh, '<', $path or die "Rust extractor open $path: $!\n";
+    my $source = do { local $/; <$fh> } // '';
+    close $fh or die "Rust extractor close $path: $!\n";
+    my @tokens;
+    pos($source) = 0;
+    while (pos($source) < length($source)) {
+        next if $source =~ /\G\s+/gc;
+        next if $source =~ m{\G//[^\n]*}gc;
+        if (substr($source, pos($source), 2) eq '/*') {
+            my $depth = 1;
+            pos($source) += 2;
+            while ($depth && pos($source) < length($source)) {
+                if ($source =~ m{\G/\*}gc) { ++$depth; }
+                elsif ($source =~ m{\G\*/}gc) { --$depth; }
+                else { pos($source)++; }
+            }
+            next;
+        }
+        my $start = pos($source);
+        if ($source =~ /\G(?:br|cr|r)(\#*)"/gc) {
+            my $end = index($source, '"' . $1, pos($source));
+            pos($source) = $end < 0 ? length($source) : $end + 1 + length($1);
+            push @tokens, ['literal', $start];
+            next;
+        }
+        if ($source =~ /\G(?:b|c)?"(?:\\.|[^"\\])*"/gcs
+                || $source =~ /\G(?:b)?'(?:\\.|[^'\\])'/gcs) {
+            push @tokens, ['literal', $start];
+            next;
+        }
+        $source =~ /\G([A-Za-z_][A-Za-z0-9_]*|.)/gcs or die "Rust extractor token failure: $path\n";
+        push @tokens, [$1, $start];
+    }
+    # Per-occurrence verdict for each `fn` token: 1 = not a Rust-lane symbol.
+    my %not_runtime;
+    my $test_attribute = 0;
+    my ($exported, $abi, $vis) = (0, 0, '');
+    for (my $i = 0; $i < @tokens; ++$i) {
+        my $t = $tokens[$i][0];
+        if ($t eq '#' && $i + 1 < @tokens && $tokens[$i + 1][0] eq '[') {
+            my $first = $i + 2;
+            my $depth = 1;
+            $i += 2;
+            while ($i < @tokens && $depth) {
+                ++$depth if $tokens[$i][0] eq '[';
+                --$depth if $tokens[$i][0] eq ']';
+                $exported = 1 if $depth && $tokens[$i][0] =~ /^(?:no_mangle|export_name)$/;
+                ++$i if $depth;
+            }
+            $test_attribute = 1 if !$depth && $i == $first + 1 && $tokens[$first][0] eq 'test';
+            next;
+        }
+        if ($t eq 'fn') {
+            $not_runtime{$tokens[$i][1]} = 1
+                if $test_attribute || !($exported || $abi || $vis eq 'pub');
+            ($test_attribute, $exported, $abi, $vis) = (0, 0, 0, '');
+            next;
+        }
+        if ($t eq 'pub' && $i + 1 < @tokens && $tokens[$i + 1][0] eq '(') {
+            $vis = 'restricted';
+            ++$i until $i + 1 >= @tokens || $tokens[$i][0] eq ')';
+            next;
+        }
+        if ($t eq 'pub') { $vis = 'pub'; next; }
+        if ($t eq 'extern') { $abi = 1; next; }
+        next if $t =~ /^(?:unsafe|async|const|default|literal)$/;
+        ($test_attribute, $exported, $abi, $vis) = (0, 0, 0, '');
+    }
+    # Keep the old candidate population, including its lexical error bar (a
+    # `fn rt_*` spelled in a comment or string has no token and still counts).
+    # Tokens above only decide whether this particular fn is a test entry or
+    # a non-exported item.
+    pos($source) = 0;
+    while ($source =~ /\bfn[^\S\n]+(rt_[A-Za-z0-9_]+)/g) {
+        $symbols{$1} = 1 unless $not_runtime{$-[0]};
+    }
+}
+print "$_\n" for sort keys %symbols;
+PERL
+        [ $? -eq 0 ] || return 1
     fi
 }
 
@@ -202,6 +387,132 @@ single_lane() {
             for (s in r) if (!(s in c)) printf "%s\trust-only\n", s
         }
     ' "$sl_dir/c_syms.txt" "$sl_dir/rust_syms.txt" | sort
+}
+
+# Designed C-only allowlist: "<symbol>\t<reason>". Exact names only.
+designed_c_only_allowlist() {
+    _r='OS process-tree primitive; C-only by design, approved by repo owner 2026-10-31'
+    printf '%s\t%s\n' \
+        rt_child_set_pdeathsig "$_r" \
+        rt_proc_start_time "$_r" \
+        rt_process_kill_session "$_r" \
+        rt_process_kill_tree "$_r" \
+        rt_process_session_is_running "$_r" \
+        rt_process_session_wait "$_r" \
+        rt_process_spawn_session "$_r" \
+        rt_process_spawn_session_value "$_r" \
+        rt_process_tree_support "$_r"
+    _pipe_r='Canonical OS piped-process registry leaf; C-only by design; root reviewed under user-authorized source landing 2026-11-07'
+    printf '%s\t%s\n' \
+        rt_process_spawn_piped_generation_v1 "$_pipe_r" \
+        rt_process_piped_pid_for_generation_v1 "$_pipe_r" \
+        rt_process_read_stdout_ref_v1 "$_pipe_r" \
+        rt_process_stdout_state_ref_v1 "$_pipe_r" \
+        rt_process_validate_piped_ref_v1 "$_pipe_r" \
+        rt_process_write_stdin_some_ref_v1 "$_pipe_r" \
+        rt_process_is_piped_alive_ref_v1 "$_pipe_r" \
+        rt_process_close_piped_ref_v1 "$_pipe_r"
+    _stream_r='Existing OS pipe registry and pinned group-broker descriptor handoff; C-only by design; root-reviewed native boundary under user-authorized implementation 2026-11-07'
+    printf '%s\t%s\n' \
+        rt_process_stream_reserve_v2 "$_stream_r" \
+        rt_process_stream_bind_v2 "$_stream_r" \
+        rt_process_stream_abandon_unlaunched_v2 "$_stream_r" \
+        rt_process_stream_claim_launch_v2 "$_stream_r" \
+        rt_process_stream_launch_not_started_v2 "$_stream_r" \
+        rt_process_stream_publish_broker_v2 "$_stream_r" \
+        rt_process_stream_pid_v2 "$_stream_r" \
+        rt_process_stream_retire_v2 "$_stream_r" \
+        rt_process_read_stdout_owned_v2 "$_stream_r" \
+        rt_process_stdout_state_owned_v2 "$_stream_r" \
+        rt_process_validate_piped_owned_v2 "$_stream_r" \
+        rt_process_write_stdin_some_owned_v2 "$_stream_r" \
+        rt_linux_group_stream_admit_v2 "$_stream_r" \
+        rt_linux_group_launch_stream_broker_v2 "$_stream_r" \
+        rt_linux_group_start_stream_v2 "$_stream_r" \
+        rt_linux_group_collected_stream_v2 "$_stream_r" \
+        rt_linux_group_stream_recover_lease_v2 "$_stream_r" \
+        rt_linux_group_stream_no_child_scope_v2 "$_stream_r" \
+        rt_linux_group_stream_collect_no_child_v2 "$_stream_r" \
+        rt_linux_group_stream_release_inherited_v2 "$_stream_r"
+    _profile_r='Existing Linux cgroup owner CPU admission, placement and image policy boundary; C-only by design; root-reviewed native boundary under user-authorized implementation 2026-11-07'
+    printf '%s\t%s\n' \
+        rt_linux_group_stream_admit_profiled_v3 "$_profile_r" \
+        rt_linux_group_stream_verify_broker_profiled_v3 "$_profile_r" \
+        rt_linux_group_parent_acquire_profiled_at_v3 "$_profile_r" \
+        rt_linux_group_launch_stream_broker_profiled_v3 "$_profile_r" \
+        rt_linux_group_start_stream_profiled_v3 "$_profile_r"
+    _local_unix_r='Canonical OS local Unix connection registry, peer credentials and descriptor disposal leaf; C-only by design; root reviewed under user-authorized implementation 2026-11-07'
+    printf '%s\t%s\n' \
+        rt_local_unix_connect_v1 "$_local_unix_r" \
+        rt_local_unix_read_v1 "$_local_unix_r" \
+        rt_local_unix_write_some_v1 "$_local_unix_r" \
+        rt_local_unix_write_some_admitted_v1 "$_local_unix_r" \
+        rt_local_unix_close_v1 "$_local_unix_r"
+    _submission_r='Existing reserved OS process owner submission-admission boundary; C-only by design; root-reviewed under user-authorized implementation 2026-11-07'
+    printf '%s\t%s\n' \
+        rt_process_observation_v5_reserved_start_admitted_value "$_submission_r"
+    _deferred_r='Canonical existing reserved process owner ptrace/deferred-launch OS lifecycle; C-only by design; root reviewed under user-authorized implementation 2026-11-07'
+    printf '%s\t%s\n' \
+        rt_process_observation_v6_reserved_start_deferred_admitted_value "$_deferred_r" \
+        rt_process_observation_v6_reserved_poll_launch_value "$_deferred_r"
+    _input_r='Canonical existing CoreC s_procs registry/write gate and OS SIGPIPE ownership; C-only by design; root reviewed under user-authorized input barrier implementation 2026-11-08'
+    printf '%s\t%s\n' \
+        rt_process_input_enable_v1 "$_input_r" \
+        rt_process_input_install_v1 "$_input_r" \
+        rt_process_input_revoke_v1 "$_input_r" \
+        rt_process_input_state_v1 "$_input_r" \
+        rt_process_input_write_some_v1 "$_input_r"
+    _credential_r='Opaque retained private-credential OS owner, Linux descriptor/pathwalk/kernel no-replace lifecycle; exact C-owned leaf approved by repo owner 2026-11-07; design doc/05_design/smux_retained_private_credential_v1.md'
+    printf '%s\t%s\n' \
+        rt_retained_private_credential_open_v1 "$_credential_r" \
+        rt_retained_private_credential_state_v1 "$_credential_r" \
+        rt_retained_private_credential_error_v1 "$_credential_r" \
+        rt_retained_private_credential_read_v1 "$_credential_r" \
+        rt_retained_private_credential_publish_v1 "$_credential_r" \
+        rt_retained_private_credential_close_v1 "$_credential_r"
+    _gateway_r='Existing owned Unix socket and descriptor-only pipe registries; peer credentials, SCM_RIGHTS and exact FD lifecycle OS leaves; root-reviewed source classification under user-authorized implementation 2026-11-07'
+    printf '%s\t%s\n' \
+        rt_local_unix_listen_v1 "$_gateway_r" \
+        rt_local_unix_accept_v1 "$_gateway_r" \
+        rt_local_unix_poll_v1 "$_gateway_r" \
+        rt_local_unix_read_now_v1 "$_gateway_r" \
+        rt_local_unix_write_some_now_v1 "$_gateway_r" \
+        rt_local_unix_listener_close_v1 "$_gateway_r" \
+        rt_local_unix_peer_v1 "$_gateway_r" \
+        rt_local_unix_shutdown_write_v1 "$_gateway_r" \
+        rt_local_unix_claim_request_v1 "$_gateway_r" \
+        rt_local_unix_stage_stdout_v1 "$_gateway_r" \
+        rt_local_unix_read_handoff_now_v1 "$_gateway_r" \
+        rt_local_unix_adopt_byte_endpoint_v1 "$_gateway_r" \
+        rt_local_unix_handoff_state_v1 "$_gateway_r" \
+        rt_process_validate_byte_endpoint_v1 "$_gateway_r" \
+        rt_process_byte_endpoint_state_v1 "$_gateway_r" \
+        rt_process_read_byte_endpoint_v1 "$_gateway_r" \
+        rt_process_close_byte_endpoint_v1 "$_gateway_r"
+    _windows_owner_reason='Windows retained OS ownership primitive; C-only by design; repo owner approved reviewed pending landings 2026-11-15; see doc/05_design/windows_native_export_admission_20261114.md'
+    printf '%s\t%s\n' \
+        rt_windows_journal_open_v1 "$_windows_owner_reason" \
+        rt_windows_journal_live_v1 "$_windows_owner_reason" \
+        rt_windows_journal_read_v1 "$_windows_owner_reason" \
+        rt_windows_journal_publish_v1 "$_windows_owner_reason" \
+        rt_windows_journal_replace_v1 "$_windows_owner_reason" \
+        rt_windows_journal_compare_replace_v1 "$_windows_owner_reason" \
+        rt_windows_journal_consumption_claim_v1 "$_windows_owner_reason" \
+        rt_windows_journal_close_v1 "$_windows_owner_reason" \
+        rt_windows_private_stage_discard_v2 "$_windows_owner_reason"
+}
+
+# apply_allowlist <single-lane file> <allowlist file> <out file> <stale file>
+# Removes exactly the lines "<sym>\tc-only" for each allowlisted sym. Writes to
+# <stale file> every allowlisted sym that is NOT c-only in the input. A
+# rust-only symbol with an allowlisted name is NOT removed.
+apply_allowlist() {
+    awk -F'\t' '
+        FILENAME == ARGV[1] { if ($1 != "") allow[$1] = 1; next }
+        { if (($1 in allow) && $2 == "c-only") { seen[$1] = 1; next } print }
+        END { for (a in allow) if (!(a in seen)) print a > "/dev/stderr" }
+    ' "$2" "$1" > "$3" 2> "$4"
+    sort -o "$4" "$4"
 }
 
 # ---------------------------------------------------------------------------
@@ -219,7 +530,12 @@ selftest() {
 
     mkfixture() {
         mf="$st_dir/$1"
-        mkdir -p "$mf/src/runtime" "$mf/src/compiler_rust/runtime/src"
+        mkdir -p "$mf/src/runtime" "$mf/src/compiler_rust/runtime/src" \
+            "$mf/src/compiler_rust/native_all/src" "$mf/src/compiler_rust/native_loader/src"
+        # git does not track empty dirs, and --rev archives name the provider
+        # crates explicitly since the 2026-11-09 scope widening.
+        : > "$mf/src/compiler_rust/native_all/src/.gitkeep"
+        : > "$mf/src/compiler_rust/native_loader/src/.gitkeep"
         printf 'int64_t rt_shared(int64_t a) { return a; }\nint64_t rt_conly(void) { return 1; }\n' \
             > "$mf/src/runtime/r.c"
         printf 'pub extern "C" fn rt_shared(a: i64) -> i64 { a }\npub fn rt_ronly() -> i64 { 2 }\n' \
@@ -353,6 +669,198 @@ C
     fi
     st_n=$((st_n + 2))
 
+    # Internal linkage is not runtime ABI: a `static` rt_* definition must not
+    # be extracted, in any spelling, and the decision is per occurrence — the
+    # same name defined non-static in another file still counts.
+    mkdir -p "$st_dir/stat/src/runtime" "$st_dir/statout"
+    cat > "$st_dir/stat/src/runtime/statics.c" <<'C'
+static int rt_static_plain(void) { return 1; }
+static inline int64_t rt_static_inline(int64_t a) { return a; }
+__attribute__((unused))
+static int
+rt_static_attr_before(void)
+{ return 2; }
+static __attribute__((always_inline)) inline int rt_static_attr_between(void) { return 3; }
+static int rt_static_forward(void);
+int rt_static_forward(void) { return 4; }
+static int rt_static_here_extern_there(void) { return 5; }
+int rt_extern_sibling(void) { return rt_static_plain(); }
+C
+    printf 'int rt_static_here_extern_there(void) { return 6; }\n' \
+        > "$st_dir/stat/src/runtime/other.c"
+    if ! extract_lanes "$st_dir/stat" "$st_dir/statout"; then
+        echo 'selftest: FAILED static C extraction'; rm -rf "$st_dir"; return 1
+    fi
+    printf '%s\n' rt_extern_sibling rt_static_here_extern_there > "$st_dir/statexpected"
+    if ! cmp -s "$st_dir/statexpected" "$st_dir/statout/c_syms.txt"; then
+        echo 'selftest: FAILED static rt_* definitions extracted as runtime ABI'
+        cat "$st_dir/statout/c_syms.txt"; rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    # A definition directly after semicolon-less macro invocations must be
+    # seen: the invocations' `,`/operator tokens are not its declaration.
+    mkdir -p "$st_dir/mac/src/runtime" "$st_dir/macout"
+    cat > "$st_dir/mac/src/runtime/macros.c" <<'C'
+#define RT_BINOP(NAME, EXPR) int64_t NAME(int64_t x, int64_t y) { return (EXPR); }
+RT_BINOP(rt_pasted_add, x + y)
+RT_BINOP(rt_pasted_sub, x - y)
+
+int64_t rt_after_macro(int64_t a, int64_t b) {
+    return a ? b : 0;
+}
+RT_BINOP(rt_pasted_mul, x * y)
+static int64_t rt_static_after_macro(void) { return 0; }
+RT_BINOP(rt_pasted_or, x | y)
+RT_EXPORT(int64_t) rt_macro_return_type(void) { return 1; }
+void caller(void) {
+    if (ready(1, 2)) rt_call_after_group(3);
+    x = wrap(1, 2) + rt_operand_call(4);
+}
+C
+    if ! extract_lanes "$st_dir/mac" "$st_dir/macout"; then
+        echo 'selftest: FAILED macro C extraction'; rm -rf "$st_dir"; return 1
+    fi
+    printf '%s\n' rt_after_macro rt_macro_return_type > "$st_dir/macexpected"
+    if ! cmp -s "$st_dir/macexpected" "$st_dir/macout/c_syms.txt"; then
+        echo 'selftest: FAILED definition after semicolon-less macro invocations'
+        cat "$st_dir/macout/c_syms.txt"; rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    # Rust test exclusion belongs to one function occurrence. Keep adjacent
+    # exported items and the existing candidate error bar.
+    mkfixture rust_attributes
+    cat >> "$st_dir/rust_attributes/src/compiler_rust/runtime/src/lib.rs" <<'RUST'
+#[allow(dead_code)]
+#[test]
+#[ignore]
+fn rt_test_entry() {}
+#[test] pub(crate) fn rt_inline_test_entry() {}
+#[test]
+fn ordinary_test() {}
+pub fn rt_after_test() {}
+pub fn rt_real_unpaired() {}
+RUST
+    mkdir -p "$st_dir/rust_attributes_out"
+    extract_lanes "$st_dir/rust_attributes" "$st_dir/rust_attributes_out" || { rm -rf "$st_dir"; return 1; }
+    printf '%s\n' rt_after_test rt_real_unpaired rt_ronly rt_shared > "$st_dir/rust_attributes_expected"
+    if ! cmp -s "$st_dir/rust_attributes_expected" "$st_dir/rust_attributes_out/rust_syms.txt"; then
+        echo 'selftest: FAILED Rust own test attributes/adjacent exported functions'
+        rm -rf "$st_dir"; return 1
+    fi
+    single_lane "$st_dir/rust_attributes_out" > "$st_dir/rust_attributes_out/sl.txt"
+    st_new=$(comm -23 "$st_dir/rust_attributes_out/sl.txt" "$st_dir/base_ok.txt")
+    if [ "$st_new" != "$(printf 'rt_after_test\trust-only\nrt_real_unpaired\trust-only')" ]; then
+        echo "selftest: FAILED real unpaired Rust functions escaped comparison, got [$st_new]"
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    mkfixture rust_attribute_leak
+    cat >> "$st_dir/rust_attribute_leak/src/compiler_rust/runtime/src/lib.rs" <<'RUST'
+// #[test]
+pub fn rt_after_line_comment() {}
+/* nested /* #[test] */ comment */
+pub fn rt_after_block_comment() {}
+const ATTRIBUTE_TEXT: &str = "#[test]";
+pub fn rt_after_string() {}
+const RAW_ATTRIBUTE_TEXT: &str = r#"#[test]"#;
+pub fn rt_after_raw_string() {}
+#[allow(dead_code)]
+pub fn rt_after_other_attribute() {}
+// fn rt_legacy_comment() {}
+const LEGACY_TEXT: &str = "fn rt_legacy_string() {}";
+pub fn
+rt_legacy_multiline_not_counted() {}
+RUST
+    mkdir -p "$st_dir/rust_attribute_leak_out"
+    extract_lanes "$st_dir/rust_attribute_leak" "$st_dir/rust_attribute_leak_out" || { rm -rf "$st_dir"; return 1; }
+    printf '%s\n' rt_after_block_comment rt_after_line_comment rt_after_other_attribute \
+        rt_after_raw_string rt_after_string rt_legacy_comment rt_legacy_string rt_ronly rt_shared \
+        > "$st_dir/rust_attribute_leak_expected"
+    if ! cmp -s "$st_dir/rust_attribute_leak_expected" "$st_dir/rust_attribute_leak_out/rust_syms.txt"; then
+        echo 'selftest: FAILED Rust attribute leak or changed legacy non-test extraction'
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    mkfixture rust_same_name
+    cat >> "$st_dir/rust_same_name/src/compiler_rust/runtime/src/lib.rs" <<'RUST'
+mod runtime_owner { pub fn rt_same_name() {} }
+mod test_owner { #[test] fn rt_same_name() {} }
+RUST
+    mkdir -p "$st_dir/rust_same_name_out"
+    extract_lanes "$st_dir/rust_same_name" "$st_dir/rust_same_name_out" || { rm -rf "$st_dir"; return 1; }
+    printf '%s\n' rt_ronly rt_same_name rt_shared > "$st_dir/rust_same_name_expected"
+    if ! cmp -s "$st_dir/rust_same_name_expected" "$st_dir/rust_same_name_out/rust_syms.txt"; then
+        echo 'selftest: FAILED test-name subtraction hid same-name real Rust primitive'
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    # Rust visibility: a private or restricted-visibility `fn rt_*` is a crate
+    # helper, and a bare `fn` in an `extern` block is an import of the C
+    # symbol. Neither is a Rust-lane implementation, so the same name defined
+    # in C stays c-only. Exported or registered spellings still count.
+    mkfixture rust_visibility
+    printf 'int64_t rt_private_helper(void) { return 1; }\nint64_t rt_foreign_import(int64_t a) { return a; }\n' \
+        >> "$st_dir/rust_visibility/src/runtime/r.c"
+    cat >> "$st_dir/rust_visibility/src/compiler_rust/runtime/src/lib.rs" <<'RUST'
+fn rt_private_helper() {}
+pub(crate) fn rt_crate_helper() {}
+pub(super) unsafe fn rt_super_helper() {}
+#[allow(dead_code)]
+const fn rt_private_const_helper() {}
+unsafe extern "C" { fn rt_foreign_import(a: i64) -> i64; }
+pub extern "C" fn rt_exported_abi() {}
+#[no_mangle]
+extern "C" fn rt_no_mangle_private() {}
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn rt_unsafe_no_mangle() {}
+#[export_name = "rt_export_name_private"]
+fn rt_export_name_private() {}
+extern "C" fn rt_registered_callback() {}
+pub fn rt_public_api() {}
+RUST
+    mkdir -p "$st_dir/rust_visibility_out"
+    extract_lanes "$st_dir/rust_visibility" "$st_dir/rust_visibility_out" || { rm -rf "$st_dir"; return 1; }
+    printf '%s\n' rt_export_name_private rt_exported_abi rt_no_mangle_private rt_public_api \
+        rt_registered_callback rt_ronly rt_shared rt_unsafe_no_mangle \
+        > "$st_dir/rust_visibility_expected"
+    if ! cmp -s "$st_dir/rust_visibility_expected" "$st_dir/rust_visibility_out/rust_syms.txt"; then
+        echo 'selftest: FAILED private/restricted Rust fn extracted, or exported Rust fn missed, got:'
+        tr '\n' ' ' < "$st_dir/rust_visibility_out/rust_syms.txt"; echo
+        rm -rf "$st_dir"; return 1
+    fi
+    single_lane "$st_dir/rust_visibility_out" > "$st_dir/rust_visibility_out/sl.txt"
+    st_got=$(grep -c -e "^rt_private_helper	c-only\$" -e "^rt_foreign_import	c-only\$" \
+        "$st_dir/rust_visibility_out/sl.txt")
+    if [ "$st_got" -ne 2 ]; then
+        echo 'selftest: FAILED a private Rust fn or extern-block import made a C symbol look dual'
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    # Selfcheck and oracle programs under src/runtime/test are test drivers,
+    # not runtime sources: a definition there is not a C-lane primitive. Only
+    # that top-level directory is skipped.
+    mkfixture c_test_dir
+    mkdir -p "$st_dir/c_test_dir/src/runtime/test" "$st_dir/c_test_dir/src/runtime/hosted/test" \
+        "$st_dir/c_test_dir_out"
+    printf 'int rt_selfcheck_only(void) { return 1; }\nint64_t rt_ronly(void) { return 2; }\n' \
+        > "$st_dir/c_test_dir/src/runtime/test/rt_x_selfcheck.c"
+    printf 'int rt_nested_test_dir(void) { return 3; }\n' \
+        > "$st_dir/c_test_dir/src/runtime/hosted/test/n.c"
+    extract_lanes "$st_dir/c_test_dir" "$st_dir/c_test_dir_out" || { rm -rf "$st_dir"; return 1; }
+    printf '%s\n' rt_conly rt_nested_test_dir rt_shared > "$st_dir/c_test_dir_expected"
+    if ! cmp -s "$st_dir/c_test_dir_expected" "$st_dir/c_test_dir_out/c_syms.txt"; then
+        echo 'selftest: FAILED src/runtime/test definition extracted as a C-lane primitive, got:'
+        tr '\n' ' ' < "$st_dir/c_test_dir_out/c_syms.txt"; echo
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
     # Fixture 7: --rev must read the COMMITTED tree and the COMMITTED baseline,
     # never the working checkout. This replays the 2026-09-06 incident directly:
     # a chain-merge was pushed with --no-verify because the hook reported a
@@ -442,6 +950,194 @@ C
     esac
     st_n=$((st_n + 1))
 
+    # Fixture 9: a STALE PR branch must be judged against its merge-base, not
+    # against the base branch's current tip. main gains the C twin of rt_ronly
+    # after the branch point; the branch never touches it. Comparing the branch
+    # tip with main's tip used to report rt_ronly as "1 new" (the branch merely
+    # lacks main's fix) -- the CI failure on PR #4440/#4470 (2026-10-25).
+    mkfixture f9
+    ( cd "$st_dir/f9" \
+      && git init -q . \
+      && git config user.email selftest@example.com \
+      && git config user.name selftest ) >/dev/null 2>&1
+    mkdir -p "$st_dir/f9/scripts/check"
+    printf 'rt_conly\tc-only\nrt_ronly\trust-only\n' \
+        > "$st_dir/f9/scripts/check/rt_dual_implementation_baseline.txt"
+    ( cd "$st_dir/f9" && git add -A && git commit -q -m base && git branch -q stale ) >/dev/null 2>&1
+    printf 'int64_t rt_ronly(void) { return 2; }\n' >> "$st_dir/f9/src/runtime/r.c"
+    ( cd "$st_dir/f9" && git add -A && git commit -q -m main-fix ) >/dev/null 2>&1
+    st_main=$(cd "$st_dir/f9" && git rev-parse HEAD)
+    ( cd "$st_dir/f9" && git checkout -q stale \
+      && printf 'x\n' > notes.txt && git add -A && git commit -q -m unrelated ) >/dev/null 2>&1
+    st_out=$(RT_DUAL_RATCHET_SELFTEST_CHILD=1 RT_DUAL_CENSUS_DIR=none sh "$SELF" \
+        --root "$st_dir/f9" --rev HEAD --baseline-rev "$st_main" 2>&1 | tail -1)
+    case "$st_out" in
+        "PASS — 2 symbol(s) checked against 2 single-lane at base"*"0 new"*) ;;
+        *) echo "selftest: FAILED — stale branch blamed for the base tip's fix, got [$st_out]"
+           rm -rf "$st_dir"; return 1 ;;
+    esac
+    st_n=$((st_n + 1))
+
+    # Fixture 10: the designed C-only allowlist is EXACT. apply_allowlist drops
+    # only "<listed>\tc-only"; a rust-only symbol of a listed name stays, an
+    # unlisted c-only stays, and a listed name absent as c-only is stale.
+    printf 'rt_listed_os\tc-only\nrt_listed_rust\trust-only\nrt_unlisted_os\tc-only\n' > "$st_dir/a10_in.txt"
+    printf 'rt_listed_os\treason\nrt_listed_rust\treason\nrt_listed_gone\treason\n' > "$st_dir/a10_allow.txt"
+    apply_allowlist "$st_dir/a10_in.txt" "$st_dir/a10_allow.txt" "$st_dir/a10_out.txt" "$st_dir/a10_stale.txt"
+    if [ "$(cat "$st_dir/a10_out.txt")" != "$(printf 'rt_listed_rust\trust-only\nrt_unlisted_os\tc-only')" ] \
+       || [ "$(cat "$st_dir/a10_stale.txt")" != "$(printf 'rt_listed_gone\nrt_listed_rust')" ]; then
+        echo "selftest: FAILED — allowlist not exact, out [$(cat "$st_dir/a10_out.txt")] stale [$(cat "$st_dir/a10_stale.txt")]"
+        rm -rf "$st_dir"; return 1
+    fi
+    # End to end in --baseline-rev (CI admission) mode: a commit adding one
+    # LISTED and one UNLISTED c-only symbol must still FAIL on the unlisted one
+    # alone; dropping the unlisted one PASSes; a listed symbol that is not in
+    # the tree FAILs as stale.
+    mkfixture f10
+    ( cd "$st_dir/f10" \
+      && git init -q . \
+      && git config user.email selftest@example.com \
+      && git config user.name selftest ) >/dev/null 2>&1
+    mkdir -p "$st_dir/f10/scripts/check"
+    printf 'rt_conly\tc-only\nrt_ronly\trust-only\n' \
+        > "$st_dir/f10/scripts/check/rt_dual_implementation_baseline.txt"
+    ( cd "$st_dir/f10" && git add -A && git commit -q -m base ) >/dev/null 2>&1
+    printf 'int64_t rt_designed_os_prim(void) { return 1; }\nint64_t rt_unlisted_new_c_only(void) { return 2; }\n' \
+        >> "$st_dir/f10/src/runtime/r.c"
+    ( cd "$st_dir/f10" && git add -A && git commit -q -m adds-two ) >/dev/null 2>&1
+    printf 'rt_designed_os_prim\tfixture reason\n' > "$st_dir/a10_e2e.txt"
+    st_out=$(RT_DUAL_RATCHET_SELFTEST_CHILD=1 RT_DUAL_CENSUS_DIR=none RT_DUAL_ALLOWLIST_FILE="$st_dir/a10_e2e.txt" sh "$SELF" \
+        --root "$st_dir/f10" --rev HEAD --baseline-rev HEAD~1 2>&1)
+    case "$(printf '%s\n' "$st_out" | tail -1)" in
+        "FAIL — 3 symbol(s) checked against 2 single-lane at base HEAD~1, 1 new"*) ;;
+        *) echo "selftest: FAILED — unlisted new c-only symbol not caught under the allowlist, got [$st_out]"
+           rm -rf "$st_dir"; return 1 ;;
+    esac
+    case "$st_out" in
+        *"  rt_unlisted_new_c_only"*) ;;
+        *) echo "selftest: FAILED — the FAIL did not name the unlisted symbol, got [$st_out]"
+           rm -rf "$st_dir"; return 1 ;;
+    esac
+    printf 'int64_t rt_conly(void) { return 1; }\nint64_t rt_shared(int64_t a) { return a; }\nint64_t rt_designed_os_prim(void) { return 1; }\n' \
+        > "$st_dir/f10/src/runtime/r.c"
+    ( cd "$st_dir/f10" && git add -A && git commit -q -m drop-unlisted ) >/dev/null 2>&1
+    st_out=$(RT_DUAL_RATCHET_SELFTEST_CHILD=1 RT_DUAL_CENSUS_DIR=none RT_DUAL_ALLOWLIST_FILE="$st_dir/a10_e2e.txt" sh "$SELF" \
+        --root "$st_dir/f10" --rev HEAD --baseline-rev HEAD~2 2>&1 | tail -1)
+    case "$st_out" in
+        "PASS — 2 symbol(s) checked against 2 single-lane at base HEAD~2, 0 new"*) ;;
+        *) echo "selftest: FAILED — listed designed c-only symbol not honoured, got [$st_out]"
+           rm -rf "$st_dir"; return 1 ;;
+    esac
+    printf 'rt_designed_os_prim\tfixture reason\nrt_not_in_tree\tfixture reason\n' > "$st_dir/a10_stale_list.txt"
+    st_out=$(RT_DUAL_RATCHET_SELFTEST_CHILD=1 RT_DUAL_CENSUS_DIR=none RT_DUAL_ALLOWLIST_FILE="$st_dir/a10_stale_list.txt" sh "$SELF" \
+        --root "$st_dir/f10" --rev HEAD --baseline-rev HEAD~2 2>&1 | tail -1)
+    case "$st_out" in
+        "FAIL — designed C-only allowlist does not describe the tree (1 stale)") ;;
+        *) echo "selftest: FAILED — stale allowlist entry not caught, got [$st_out]"
+           rm -rf "$st_dir"; return 1 ;;
+    esac
+    st_n=$((st_n + 1))
+
+    # Fixture 11: the Rust lane scope covers the native_all/native_loader
+    # provider crates (widened 2026-11-09). An rt_* defined ONLY in a provider
+    # crate must reach rust_syms.txt via the real extractor — the scope hole
+    # filed as rt_dual_ratchet_scan_scope_omits_native_all_2026-09-06.md
+    # silently missed exactly this shape of violation.
+    mkfixture f11
+    mkdir -p "$st_dir/f11/src/compiler_rust/native_all/src" \
+        "$st_dir/f11/src/compiler_rust/native_loader/src"
+    printf '#[no_mangle]\npub extern "C" fn rt_provider_crate_only() -> i64 { 3 }\n' \
+        > "$st_dir/f11/src/compiler_rust/native_all/src/provider.rs"
+    printf 'pub fn rt_loader_crate_only() -> i64 { 4 }\n' \
+        > "$st_dir/f11/src/compiler_rust/native_loader/src/loader.rs"
+    mkdir -p "$st_dir/w11"
+    extract_lanes "$st_dir/f11" "$st_dir/w11" || { rm -rf "$st_dir"; return 1; }
+    if ! grep -qx 'rt_provider_crate_only' "$st_dir/w11/rust_syms.txt" \
+       || ! grep -qx 'rt_loader_crate_only' "$st_dir/w11/rust_syms.txt"; then
+        echo "selftest: FAILED — provider-crate rt_* invisible to the Rust lane, got [$(cat "$st_dir/w11/rust_syms.txt")]"
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    # Owned headers may carry real definitions, not just declarations. Keep
+    # prototypes, calls, comments and third-party runtime headers excluded.
+    mkfixture header_definitions
+    mkdir -p "$st_dir/header_definitions/src/runtime/vendor"
+    cat > "$st_dir/header_definitions/src/runtime/owned_impl.h" <<'C'
+#if defined(__linux__)
+int64_t
+rt_header_existing(void)
+{ return 3; }
+#endif
+int64_t rt_header_prototype_only(void);
+/* int64_t rt_header_comment(void) { return 0; } */
+static inline int helper(void) { return rt_header_call_only(); }
+C
+    for third_party in miniaudio.h stb_image.h stb_truetype.h vendor/third_party.h; do
+        printf 'int64_t rt_third_party(void) { return 0; }\n' \
+            > "$st_dir/header_definitions/src/runtime/$third_party"
+    done
+    mkdir -p "$st_dir/header_definitions_out"
+    extract_lanes "$st_dir/header_definitions" "$st_dir/header_definitions_out" \
+        || { rm -rf "$st_dir"; return 1; }
+    printf '%s\n' rt_conly rt_header_existing rt_shared > "$st_dir/header_expected"
+    if ! cmp -s "$st_dir/header_expected" "$st_dir/header_definitions_out/c_syms.txt"; then
+        echo 'selftest: FAILED owned header definitions/prototypes/third-party exclusion'
+        cat "$st_dir/header_definitions_out/c_syms.txt"
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    # Real committed-content delta scans must recognize the same owned header
+    # definition at BASE and HEAD. A new platform fallback is not a new API.
+    mkfixture header_delta
+    ( cd "$st_dir/header_delta" && git init -q . \
+      && git config user.email selftest@example.com && git config user.name selftest ) >/dev/null 2>&1
+    mkdir -p "$st_dir/header_delta/scripts/check"
+    cp "$st_dir/base_ok.txt" "$st_dir/header_delta/scripts/check/rt_dual_implementation_baseline.txt"
+    printf '#if defined(__linux__)\nint64_t rt_header_existing(void) { return 3; }\n#endif\n' \
+        > "$st_dir/header_delta/src/runtime/owned_impl.h"
+    printf 'int64_t rt_header_prototype_only(void);\n' \
+        > "$st_dir/header_delta/src/runtime/owned_api.h"
+    ( cd "$st_dir/header_delta" && git add -A && git commit -q -m header-base ) >/dev/null 2>&1
+    st_header_base=$(cd "$st_dir/header_delta" && git rev-parse HEAD)
+    printf '#if !defined(__linux__)\nint64_t rt_header_existing(void) { return 3; }\n#endif\n' \
+        > "$st_dir/header_delta/src/runtime/fallback.c"
+    ( cd "$st_dir/header_delta" && git add -A && git commit -q -m platform-fallback ) >/dev/null 2>&1
+    st_out=$(RT_DUAL_RATCHET_SELFTEST_CHILD=1 RT_DUAL_CENSUS_DIR=none sh "$SELF" \
+        --root "$st_dir/header_delta" --rev HEAD --baseline-rev "$st_header_base" 2>&1)
+    st_rc=$?
+    if [ "$st_rc" -ne 0 ] || ! printf '%s\n' "$st_out" | tail -1 | grep -q '^PASS .* 0 new '; then
+        echo "selftest: FAILED existing header definition classified NEW after platform fallback: $st_out"
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    # A BASE header prototype must not mask a genuinely new implementation.
+    printf 'int64_t rt_header_prototype_only(void) { return 4; }\n' \
+        > "$st_dir/header_delta/src/runtime/prototype_became_definition.c"
+    ( cd "$st_dir/header_delta" && git add -A && git commit -q -m implement-prototype ) >/dev/null 2>&1
+    st_out=$(RT_DUAL_RATCHET_SELFTEST_CHILD=1 RT_DUAL_CENSUS_DIR=none sh "$SELF" \
+        --root "$st_dir/header_delta" --rev HEAD --baseline-rev HEAD~1 2>&1)
+    st_rc=$?
+    if [ "$st_rc" -ne 1 ] || ! printf '%s\n' "$st_out" | grep -qx '  rt_header_prototype_only'; then
+        echo "selftest: FAILED header prototype concealed new single-lane definition: $st_out"
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    printf 'int64_t rt_unpaired_new_c(void) { return 5; }\n' \
+        > "$st_dir/header_delta/src/runtime/new.c"
+    ( cd "$st_dir/header_delta" && git add -A && git commit -q -m new-unpaired-c ) >/dev/null 2>&1
+    st_out=$(RT_DUAL_RATCHET_SELFTEST_CHILD=1 RT_DUAL_CENSUS_DIR=none sh "$SELF" \
+        --root "$st_dir/header_delta" --rev HEAD --baseline-rev HEAD~1 2>&1)
+    st_rc=$?
+    if [ "$st_rc" -ne 1 ] || ! printf '%s\n' "$st_out" | grep -qx '  rt_unpaired_new_c'; then
+        echo "selftest: FAILED new unpaired C definition escaped ratchet: $st_out"
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
     rm -rf "$st_dir"
     echo "selftest: $st_n fixture(s) passed"
     return 0
@@ -453,8 +1149,20 @@ if [ "${RT_DUAL_RATCHET_SELFTEST_CHILD:-0}" = 1 ]; then
     # which is the point of the fixture.
     RC=0
 else
-    selftest
-    RC=$?
+    _st_cache_dir="${TMPDIR:-/tmp}"
+    _st_hash=""
+    if [ "$SELFTEST_ONLY" -eq 0 ] && command -v sha256sum >/dev/null 2>&1; then
+        _st_hash=$(sha256sum "$SELF" 2>/dev/null | awk '{print $1}')
+    fi
+    if [ -n "$_st_hash" ] && [ -f "$_st_cache_dir/.rt-dual-ratchet-selftest.$_st_hash" ]; then
+        RC=0
+    else
+        selftest
+        RC=$?
+        if [ "$RC" -eq 0 ] && [ -n "$_st_hash" ]; then
+            : > "$_st_cache_dir/.rt-dual-ratchet-selftest.$_st_hash" 2>/dev/null || true
+        fi
+    fi
 fi
 if [ $RC -ne 0 ]; then
     echo "ERROR — nothing was checked (selftest failed)"
@@ -498,6 +1206,7 @@ if [ -n "$REV" ]; then
     # checkout that predates a baseline update) would silently decide the
     # result for content it does not describe.
     ( cd "$ROOT" && git archive "$REV" -- src/runtime src/compiler_rust/runtime \
+        src/compiler_rust/native_all src/compiler_rust/native_loader \
         scripts/check/rt_dual_implementation_baseline.txt ) 2>/dev/null \
         | tar -x -C "$WORK/rev" 2>/dev/null
     RC=$?
@@ -527,7 +1236,26 @@ if ! extract_lanes "$SCAN_ROOT" "$WORK"; then
     echo 'ERROR — nothing was checked (C extraction failed)'
     exit 2
 fi
-single_lane "$WORK" > "$WORK/current.txt"
+single_lane "$WORK" > "$WORK/current.raw.txt"
+if [ "${RT_DUAL_RATCHET_SELFTEST_CHILD:-0}" = 1 ]; then
+    # Selftest fixtures scan tiny synthetic trees: the production allowlist
+    # would be all-stale there. A child uses only the fixture's own list.
+    if [ -n "${RT_DUAL_ALLOWLIST_FILE:-}" ]; then
+        cp "$RT_DUAL_ALLOWLIST_FILE" "$WORK/allowlist.txt"
+    else
+        : > "$WORK/allowlist.txt"
+    fi
+else
+    designed_c_only_allowlist > "$WORK/allowlist.txt"
+fi
+apply_allowlist "$WORK/current.raw.txt" "$WORK/allowlist.txt" "$WORK/current.txt" "$WORK/allow_stale.txt"
+if [ -s "$WORK/allow_stale.txt" ]; then
+    echo "STALE designed-C-only allowlist entries (no longer c-only at the scanned tree —"
+    echo "delete the row from designed_c_only_allowlist):"
+    sed 's/^/  /' "$WORK/allow_stale.txt"
+    echo "FAIL — designed C-only allowlist does not describe the tree ($(wc -l < "$WORK/allow_stale.txt" | tr -d ' ') stale)"
+    exit 1
+fi
 
 CUR_N=$(wc -l < "$WORK/current.txt" | tr -d ' ')
 if [ "$CUR_N" -eq 0 ]; then
@@ -580,6 +1308,23 @@ fi
 # lanes keep running the frozen comparison, so main's own debt stays visible
 # there instead of being paid by whichever pusher arrives first.
 if [ -n "$BASELINE_REV" ]; then
+    # Judge the change against the MERGE-BASE of --rev and --baseline-rev, not
+    # the base branch tip. CI passes github.event.pull_request.base.sha, which
+    # is the base branch's CURRENT tip; a PR branched before a fix landed on
+    # base then "adds" every symbol base has since made dual (PR #4440 vs
+    # #4442, PR #4470 vs #4469, 2026-10-25). The merge-base is the tree the PR
+    # actually changed. A shallow clone without the merge-base keeps the given
+    # base (noted), which is the previous behaviour.
+    if [ -n "$REV" ]; then
+        _mb=$(cd "$ROOT" && git merge-base "$REV" "$BASELINE_REV" 2>/dev/null)
+        _given=$(cd "$ROOT" && git rev-parse --verify -q "$BASELINE_REV^{commit}" 2>/dev/null)
+        if [ -n "$_mb" ] && [ -n "$_given" ] && [ "$_mb" != "$_given" ]; then
+            echo "note: base $BASELINE_REV is not an ancestor of $REV; judging against merge-base $_mb" >&2
+            BASELINE_REV=$_mb
+        elif [ -z "$_mb" ]; then
+            echo "note: no merge-base of $REV and $BASELINE_REV in this clone; using $BASELINE_REV as given" >&2
+        fi
+    fi
     # Content-keyed census cache for the base (positive proof, not a path
     # filter): the single-lane set is a pure function of the two runtime
     # trees, so it is stored under the sha of their tree ids plus this
@@ -594,18 +1339,40 @@ if [ -n "$BASELINE_REV" ]; then
     }
     CENSUS_DIR=${RT_DUAL_CENSUS_DIR:-$(_census_base_dir)/.rt-dual-census}
     CENSUS_KEY=""
+    TIP_CENSUS_KEY=""
     if [ "$CENSUS_DIR" != none ]; then
-        CENSUS_KEY=$( {
-            ( cd "$ROOT" && git rev-parse "$BASELINE_REV:src/runtime" "$BASELINE_REV:src/compiler_rust/runtime" )
-            sha256sum "$SELF" 2>/dev/null
-        } 2>/dev/null | sha256sum | awk '{print $1}')
+        if _base_trees=$( cd "$ROOT" && git rev-parse "$BASELINE_REV:src/runtime" "$BASELINE_REV:src/compiler_rust/runtime" \
+                "$BASELINE_REV:src/compiler_rust/native_all" "$BASELINE_REV:src/compiler_rust/native_loader" 2>/dev/null ); then
+            CENSUS_KEY=$( {
+                printf '%s\n' "$_base_trees"
+                sha256sum "$SELF" 2>/dev/null
+            } | sha256sum | awk '{print $1}')
+        fi
+        if [ -n "$REV" ]; then
+            if _tip_trees=$( cd "$ROOT" && git rev-parse "$REV:src/runtime" "$REV:src/compiler_rust/runtime" \
+                    "$REV:src/compiler_rust/native_all" "$REV:src/compiler_rust/native_loader" 2>/dev/null ); then
+                TIP_CENSUS_KEY=$( {
+                    printf '%s\n' "$_tip_trees"
+                    sha256sum "$SELF" 2>/dev/null
+                } | sha256sum | awk '{print $1}')
+            fi
+        fi
     fi
-    if [ -n "$CENSUS_KEY" ] && [ -s "$CENSUS_DIR/$CENSUS_KEY" ]; then
+    if [ -n "$CENSUS_KEY" ] && [ "$TIP_CENSUS_KEY" = "$CENSUS_KEY" ] && [ -s "$WORK/current.raw.txt" ]; then
+        cp "$WORK/current.raw.txt" "$WORK/base.txt"
+        if [ ! -s "$CENSUS_DIR/$CENSUS_KEY" ] && mkdir -p "$CENSUS_DIR" 2>/dev/null; then
+            cp "$WORK/base.txt" "$CENSUS_DIR/$CENSUS_KEY.tmp.$$" 2>/dev/null &&
+                mv -f "$CENSUS_DIR/$CENSUS_KEY.tmp.$$" "$CENSUS_DIR/$CENSUS_KEY" 2>/dev/null ||
+                rm -f "$CENSUS_DIR/$CENSUS_KEY.tmp.$$"
+        fi
+        echo "note: base $BASELINE_REV runtime trees match $REV; reusing tip single-lane census" >&2
+    elif [ -n "$CENSUS_KEY" ] && [ -s "$CENSUS_DIR/$CENSUS_KEY" ]; then
         cp "$CENSUS_DIR/$CENSUS_KEY" "$WORK/base.txt"
         echo "note: base census for $BASELINE_REV read from the content-keyed cache" >&2
     else
         mkdir -p "$WORK/base"
-        ( cd "$ROOT" && git archive "$BASELINE_REV" -- src/runtime src/compiler_rust/runtime ) 2>/dev/null \
+        ( cd "$ROOT" && git archive "$BASELINE_REV" -- src/runtime src/compiler_rust/runtime \
+            src/compiler_rust/native_all src/compiler_rust/native_loader ) 2>/dev/null \
             | tar -x -C "$WORK/base" 2>/dev/null
         RC=$?
         if [ $RC -ne 0 ] || [ ! -d "$WORK/base/src" ]; then

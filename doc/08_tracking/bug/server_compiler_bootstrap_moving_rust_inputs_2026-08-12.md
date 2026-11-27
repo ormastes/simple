@@ -1,7 +1,7 @@
 # Server compiler bootstrap blocked by moving Rust inputs
 
 Date: 2026-08-12  
-Status: OPEN; source fixes retained, compiler publication not admitted
+Status: fix-implemented-verification-pending (PR #7925 pins bootstrap to a git-archive snapshot so Rust inputs cannot move mid-run; selftest covers live-tree mutation; full bootstrap from snapshot not yet verified)
 
 The strict native web and PostgreSQL-mimic server gates require an admitted
 pure-Simple compiler. Three bounded bootstrap cycles were attempted against
@@ -25,3 +25,7 @@ retry. Logs, progress rows, and cache are retained under
 Recovery requires a fresh scoped session after `src/compiler_rust/**` is stable:
 reuse the retained output/cache, run one full bootstrap, require Stage2/Stage3
 sanity and deployment receipts, then run the strict web and DB native gates.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded triage in the body: the moving-Rust-inputs bootstrap blocker stands as filed; resolution belongs to the sanctioned bootstrap lane. No in-lane change.

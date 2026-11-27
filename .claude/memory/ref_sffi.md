@@ -55,7 +55,7 @@ in this tree = ABI arity/type, not crypto. Loader admission is planned, not buil
 - `FfiManifest`/`validate_library` (`src/lib/nogc_sync_mut/ffi/ffi_signature.spl`)
   is implemented + tested but has **zero production callers** — every `dlopen`
   path admits providers unchecked.
-- Unbacked extern ⇒ **silently returns nil**. 1,501 / 3,959 symbols (37.9%) are
+- Unbacked extern ⇒ **silently returns nil (runtime-level; safe Simple code sees None)**. 1,501 / 3,959 symbols (37.9%) are
   neither backed nor `@unsafe`-tagged.
 - Authority for backing: `sh scripts/check/extern-backing-census.shs` (`nm` on
   real link artifacts). Never text-grep for a definition.

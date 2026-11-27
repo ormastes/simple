@@ -1,6 +1,8 @@
 # Shared seed rebuilt 2026-08-18 10:12 breaks ALL instance-method dispatch — receiver types as `object`
 
-- **Status:** OPEN — affects every lane using the shared seed binary
+- **Status:** SUPERSEDED 2026-11-11 (lane p3-comp11) — the 2026-08-18 10:12 Linux
+  seed binary is superseded; the defect does not reproduce on the tracked seed
+  at build 46fe8f6b6def. See the dated addendum at the end of this record.
 - **Date:** 2026-08-18
 - **Severity:** **Critical.** A 14-line hello-world class fails. Any spec or
   program that calls an instance method on a class value is broken.
@@ -109,3 +111,35 @@ Also unestablished: whether the earlier binary was *correct* and the new one
 regressed, versus the new one exposing a latent defect. The hello-world case
 makes the former overwhelmingly likely — instance-method dispatch on a class is
 not an edge case — but it is not proven here.
+
+## Addendum 2026-11-11 (lane p3-comp11, worktree simple-p3-comp11-20261111, base 41935a5f61860)
+
+Verdict: SUPERSEDED. The failing binary (`size=59645008 mtime=2026-08-18
+10:12:23`, an ad-hoc Linux rebuild by another lane) no longer exists in the
+lineage; every lane now runs a receipt-gated tracked seed
+(`bin/simple.exe`, build commit `46fe8f6b6def`, 2026-11-10,
+"fix(seed): flat Option encoding for array get/at + flat Some pattern arm").
+
+Fresh verification on the tracked seed (seed-smoke:
+`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test <spec>
+--mode=interpreter --no-cache`):
+
+1. The doc's minimal reproducer above, verbatim
+   (`build/review/comp11-probes/row1_instance_dispatch_repro.spl`):
+   `outcome=OK declared>=1 executed=1 passed=1 failed=0` — static constructor
+   plus instance-method dispatch both work; no
+   `method 'greet' not found on type 'object'`.
+2. The original acceptance spec
+   `test/01_unit/lib/nogc_sync_mut/web_framework/auth_token_strict_base64url_spec.spl`
+   (the 5/9 -> 9/9 contradiction that opened this record):
+   `outcome=OK declared>=9 executed=9 passed=9 failed=0` — exactly the
+   "before 10:12" recorded state.
+
+This matches the 2026-11-09 bug_db note on this row ("premise stale: the
+record's reproducer spec passes 1/1 on the current seed; the 08-18 Linux
+binary is superseded"), which this lane re-verified by rerunning both probes
+rather than trusting the note.
+
+Residual (not this row): the record's Consequence 2 — pass/fail results are
+not comparable across a seed swap — stands as process guidance; CLAUDE.md's
+binary-identity discipline covers it. No source change was needed or taken.

@@ -1,0 +1,180 @@
+# Blink Flex Layout — CSS Flexbox Level 1 subset engine.
+#
+# Provides: FlexDirection, JustifyContent, AlignItems, FlexItem, FlexContainer,
+#           flex_item_new, flex_container_row, flex_container_column, layout_flex.
+
+enum FlexDirection:
+    Row
+    Column
+    RowReverse
+    ColumnReverse
+
+enum JustifyContent:
+    FlexStart
+    FlexEnd
+    Center
+    SpaceBetween
+    SpaceAround
+    SpaceEvenly
+
+enum AlignItems:
+    FlexStart
+    FlexEnd
+    Center
+    Stretch
+    Baseline
+
+class FlexItem:
+    intrinsic_main_size: f64
+    intrinsic_cross_size: f64
+    flex_grow: f64
+    flex_shrink: f64
+    main_pos: f64
+    main_size: f64
+    cross_pos: f64
+    cross_size: f64
+
+class FlexContainer:
+    direction: FlexDirection
+    main_size: f64
+    cross_size: f64
+    justify: JustifyContent
+    align: AlignItems
+
+fn flex_item_new(main_size: f64, cross_size: f64) -> FlexItem:
+    FlexItem(
+        intrinsic_main_size: main_size,
+        intrinsic_cross_size: cross_size,
+        flex_grow: 0.0,
+        flex_shrink: 1.0,
+        main_pos: 0.0,
+        main_size: main_size,
+        cross_pos: 0.0,
+        cross_size: cross_size
+    )
+
+fn flex_container_row(main_size: f64, cross_size: f64) -> FlexContainer:
+    FlexContainer(
+        direction: FlexDirection.Row,
+        main_size: main_size,
+        cross_size: cross_size,
+        justify: JustifyContent.FlexStart,
+        align: AlignItems.FlexStart
+    )
+
+fn flex_container_column(main_size: f64, cross_size: f64) -> FlexContainer:
+    FlexContainer(
+        direction: FlexDirection.Column,
+        main_size: main_size,
+        cross_size: cross_size,
+        justify: JustifyContent.FlexStart,
+        align: AlignItems.FlexStart
+    )
+
+fn layout_flex(container: FlexContainer, items: [FlexItem]) -> [FlexItem]:
+    val n = items.len()
+    if n == 0:
+        return []
+
+    var total_base = 0.0
+    var total_grow = 0.0
+    var total_weighted_shrink = 0.0
+    var i: i64 = 0
+    while i < n:
+        val it = items[i]
+        total_base = total_base + it.intrinsic_main_size
+        total_grow = total_grow + it.flex_grow
+        val w = it.flex_shrink * it.intrinsic_main_size
+        if w > 0.0:
+            total_weighted_shrink = total_weighted_shrink + w
+        i = i + 1
+
+    val free_space = container.main_size - total_base
+    var resolved_mains: [f64] = []
+    var total_used = 0.0
+    i = 0
+    while i < n:
+        val it = items[i]
+        var msz = it.intrinsic_main_size
+        if free_space > 0.0 and total_grow > 0.0:
+            msz = it.intrinsic_main_size + free_space * (it.flex_grow / total_grow)
+        elif free_space < 0.0 and total_weighted_shrink > 0.0:
+            val overflow = 0.0 - free_space
+            val shrink_weight = it.flex_shrink * it.intrinsic_main_size
+            val delta = overflow * (shrink_weight / total_weighted_shrink)
+            msz = it.intrinsic_main_size - delta
+            if msz < 0.0:
+                msz = 0.0
+        resolved_mains.push(msz)
+        total_used = total_used + msz
+        i = i + 1
+
+    val remaining = container.main_size - total_used
+    var cursor = 0.0
+    var gap = 0.0
+    match container.justify:
+        case FlexStart:
+            cursor = 0.0
+            gap = 0.0
+        case FlexEnd:
+            cursor = remaining
+            gap = 0.0
+        case Center:
+            cursor = remaining / 2.0
+            gap = 0.0
+        case SpaceBetween:
+            cursor = 0.0
+            if n > 1 and remaining > 0.0:
+                gap = remaining / ((n - 1) as f64)
+        case SpaceAround:
+            if remaining > 0.0:
+                gap = remaining / (n as f64)
+                cursor = gap / 2.0
+        case SpaceEvenly:
+            if remaining > 0.0:
+                gap = remaining / ((n + 1) as f64)
+                cursor = gap
+
+    val is_reverse = container.direction == FlexDirection.RowReverse or container.direction == FlexDirection.ColumnReverse
+
+    var result: [FlexItem] = []
+    i = 0
+    while i < n:
+        val src = items[i]
+        val msz = resolved_mains[i]
+        val mpos = if is_reverse: container.main_size - cursor - msz else: cursor
+        cursor = cursor + msz + gap
+
+        var csz = src.intrinsic_cross_size
+        var cpos = 0.0
+        match container.align:
+            case FlexStart:
+                cpos = 0.0
+            case FlexEnd:
+                cpos = container.cross_size - csz
+            case Center:
+                cpos = (container.cross_size - csz) / 2.0
+            case Stretch:
+                cpos = 0.0
+                csz = container.cross_size
+            case Baseline:
+                cpos = 0.0
+
+        result.push(FlexItem(
+            intrinsic_main_size: src.intrinsic_main_size,
+            intrinsic_cross_size: src.intrinsic_cross_size,
+            flex_grow: src.flex_grow,
+            flex_shrink: src.flex_shrink,
+            main_pos: mpos,
+            main_size: msz,
+            cross_pos: cpos,
+            cross_size: csz
+        ))
+        i = i + 1
+
+    result
+
+export FlexDirection, JustifyContent, AlignItems
+export FlexItem, FlexContainer
+export flex_item_new, flex_container_row, flex_container_column
+export layout_flex

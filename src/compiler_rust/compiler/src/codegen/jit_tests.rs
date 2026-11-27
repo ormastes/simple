@@ -563,7 +563,7 @@ fn test_jit_f64_call_result_print() {
 // Root cause: on Windows, `dlsym_resolves` unconditionally returned `true`
 // ("Conservative on Windows: assume resolvable"), so `jit_import_resolves`
 // could never say a directly-called `Linkage::Import` was unresolvable and
-// `first_unresolved_import_called` never fired on that platform. A call to a
+// `unresolved_imports_called` never fired on that platform. A call to a
 // cross-module Simple function symbol that cranelift-jit itself cannot
 // resolve (no registered runtime symbol, no process/CRT export — exactly the
 // shape of an `app.*`-module function call, or a function reached only
@@ -621,4 +621,91 @@ fn caller() -> i64:
         "an extern call that would NULL-jump at finalize time must be refused here, \
          not silently accepted and left to SIGSEGV on first call"
     );
+}
+
+#[test]
+fn test_jit_unresolved_cross_module_simple_fn_error_names_the_cause() {
+    // jit_silent_interpreter_fallback_on_unresolved_extern: a call to a Simple
+    // function defined in ANOTHER module (e.g. `crypto_text_to_bytes`) is an
+    // undeclared import in the per-module JIT. The refusal must say so
+    // explicitly (not just "unresolved external symbol"), so the
+    // whole-module interpreter demotion is diagnosable from the message alone.
+    simple_runtime::register_static_runtime_symbols();
+    let source = r#"
+@unsafe(reason: "test unresolved cross-module fn", capabilities: [ffi])
+extern fn simple_seed_xmodule_fn_zzqq(x: i64) -> i64
+
+fn caller() -> i64:
+    simple_seed_xmodule_fn_zzqq(1)
+"#;
+    let mut parser = Parser::new(source);
+    let ast = parser.parse().expect("parse fixture");
+    let hir_module = hir::lower(&ast).expect("HIR lower fixture");
+    let mir_module = lower_to_mir(&hir_module).expect("MIR lower fixture");
+
+    let mut jit = JitCompiler::new_static().expect("create static JIT");
+    let err = format!("{:?}", jit.compile_module(&mir_module).expect_err("must refuse"));
+    assert!(
+        err.contains("cross-module Simple function"),
+        "error must classify a non-runtime unresolved import as a cross-module \
+         Simple function limitation, got: {err}"
+    );
+    assert!(
+        super::unresolved_import_kind("rt_some_runtime_fn").contains("runtime extern"),
+        "rt_* names are runtime externs"
+    );
+}
+
+#[test]
+fn test_jit_import_resolves_agrees_with_seed_symbol_table_and_registers_bounded_bytes() {
+    simple_runtime::register_static_runtime_symbols();
+    let provider = static_provider();
+    let table = super::seed_jit_runtime_symbol_table(provider.as_ref());
+
+    assert!(
+        table
+            .iter()
+            .any(|&(name, ptr)| name == "rt_process_run_bounded_bytes" && !ptr.is_null()),
+        "rt_process_run_bounded_bytes must be registered in seed_jit_runtime_symbol_table"
+    );
+    assert!(
+        super::jit_import_resolves(provider.as_ref(), "rt_process_run_bounded_bytes"),
+        "rt_process_run_bounded_bytes must resolve for JIT"
+    );
+    // An elf_utils symbol absent from RUNTIME_SYMBOL_NAMES is bound by
+    // with_provider's elf_utils lookup fn, so it resolves without dlsym; a name
+    // that nothing defines still does not.
+    assert!(
+        super::jit_import_resolves_without_dlsym(provider.as_ref(), "rt_cranelift_new_module"),
+        "elf_utils-only symbol must resolve through with_provider's lookup fn"
+    );
+    if !super::dlsym_resolves("rt_definitely_not_a_runtime_symbol_jitsyms") {
+        assert!(
+            !super::jit_import_resolves(provider.as_ref(), "rt_definitely_not_a_runtime_symbol_jitsyms"),
+            "an undefined symbol must not claim JIT resolvability"
+        );
+    }
+}
+
+#[test]
+fn test_jit_calls_rt_process_run_bounded_bytes_without_null_jump() {
+    simple_runtime::register_static_runtime_symbols();
+    let source = r#"
+@unsafe(reason: "test rt_process_run_bounded_bytes JIT registration", capabilities: [ffi])
+extern fn rt_process_run_bounded_bytes(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ([u8], [u8], i64)
+
+fn caller() -> i64:
+    val res = rt_process_run_bounded_bytes("nonexistent_cmd", [], -1, 65536)
+    res.2
+"#;
+    let mut parser = Parser::new(source);
+    let ast = parser.parse().expect("parse bounded_bytes fixture");
+    let hir_module = hir::lower(&ast).expect("HIR lower bounded_bytes fixture");
+    let mir_module = lower_to_mir(&hir_module).expect("MIR lower bounded_bytes fixture");
+
+    let mut jit = JitCompiler::new_static().expect("create static JIT");
+    jit.compile_module(&mir_module)
+        .expect("compile bounded_bytes caller in JIT");
+    let status = unsafe { jit.call_i64_void("caller").expect("execute caller in JIT") };
+    assert_eq!(status, -1, "negative timeout_ms must return early with exit code -1");
 }

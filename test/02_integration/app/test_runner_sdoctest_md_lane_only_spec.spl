@@ -1,0 +1,62 @@
+# @req REQ-TESTRUNNER-PHASE2-4KINDS
+# @cover src/app/test_runner_new/test_runner_main.spl 1%
+"""
+# An .md target runs only the markdown doctest lane
+
+**Feature IDs:** #test-runner-phase2
+**Category:** Tooling
+
+## Overview
+
+`simple test --sdoctest green.md` runs the Markdown fences and nothing else.
+The comment-doctest lane (`--spl-doctest`) applies only to `.spl` targets; it
+used to also run on the `.md`, find no blocks and fail the whole run with
+exit 1. Both the session-daemon lane and `--no-session-daemon` must exit 0
+and never print the SPL Doctest lane for an .md target.
+Bug: doc/08_tracking/bug/sdoctest_md_target_also_runs_spl_doctest_lane_exit1_2026-10-30.md
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.test_runner.test_executor_parsing.{_tp_get_temp_dir}
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY")
+    if b != "":
+        return b
+    "bin/simple"
+
+fn write_green_md() -> text:
+    val root = secure_temp_dir(_tp_get_temp_dir(), "md-lane-").unwrap().replace("\\", "/")
+    val path = root + "/green.md"
+    file_write(path, "# tiny\n\n```simple\nexpect(6 * 7).to_equal(42)\n```\n")
+    path
+
+fn run_test(args: [text]) -> (text, i64):
+    val (out, err, code) = process_run_bounded(real_binary(), ["test", "--no-db"] + args, 300000, 4194304)
+    (out + err, code)
+
+describe "simple test on an .md target":
+    # @capture(exec)
+    it "passes --sdoctest green.md with exit 0 on both lanes":
+        val md = write_green_md()
+        step("Run --sdoctest green.md through the session lane")
+        val (report, code) = run_test(["--sdoctest", md])
+        expect(code).to_equal(0)
+        expect(report).to_contain("1 passed")
+        step("Run --sdoctest green.md through --no-session-daemon")
+        val (single, single_code) = run_test(["--no-session-daemon", "--sdoctest", md])
+        expect(single_code).to_equal(0)
+        expect(single).to_contain("1 passed")
+
+    # @capture(exec)
+    it "never prints the SPL Doctest lane for an .md target":
+        val md = write_green_md()
+        for args in [["--sdoctest", md], [md], ["--spl-doctest", md], ["--no-session-daemon", "--spl-doctest", md]]:
+            step("Run simple test {args.join(\" \")}")
+            val (report, code) = run_test(args)
+            expect(code).to_equal(0)
+            assert_false(report.contains("SPL Doctest"))
+            assert_false(report.contains("no doctest blocks found"))

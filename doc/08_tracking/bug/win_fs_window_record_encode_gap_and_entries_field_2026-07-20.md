@@ -1,5 +1,5 @@
 # `lib.common.win_fs.window_record`: missing `window_record_encode` + internal `WindowRecord.entries` field mismatch
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-25 — both findings fixed in tree (see verification note at end)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -76,3 +76,26 @@ what the contract is supposed to be; fixing this means implementing/wiring
 `window_record_encode` and correcting the `winfs_shim_host.spl` publish
 path, not editing the tests.
 
+
+## Verification 2026-11-25 (release/1.0.0) — both findings fixed, closing
+
+Code inspection on the current tree:
+
+- **Finding 1 (missing `window_record_encode`):** FIXED.
+  `src/lib/common/win_fs/window_record.spl:84` now defines
+  `fn window_record_encode(rec: WindowRecord) -> [u8]` (its own comment cites
+  this bug doc), and the SPM client imports and calls it
+  (`src/app/simple_process_manager/wm_spm_client.spl:21,160`).
+- **Finding 2 (`WindowRecord.entries` mismatch):** FIXED. The publish path no
+  longer conflates the types: `WinFsShimHost.publish_record(rec: WindowRecord)`
+  converts through `encode_record(rec)` (`fs_encoder.spl:65`, returns
+  `FsTree`), and `_write_tree(tree: FsTree)` is the only place `.entries` is
+  read (`winfs_shim_host.spl:55-67`) — on an `FsTree`, which genuinely has
+  `entries: [FsEntry]` (`fs_encoder.spl:29-33`).
+
+Execution evidence not obtainable on this host: the pinned `bin/simple.exe`
+seed rejects `@representation_boundary` repo-wide at this HEAD (fails in
+`src/app/test_runner_new/test_runner_client.spl:9` before any spec loads), so
+`spm_service_spec.spl` / `winfs_shim_host_spec.spl` could not be re-run; the
+closure rests on the source-level evidence above. No code change in this
+pass; ledger status only.

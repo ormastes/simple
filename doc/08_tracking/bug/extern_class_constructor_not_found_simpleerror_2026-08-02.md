@@ -164,3 +164,23 @@ all. Two shapes are possible and the tree does not say which is intended:
    real construction path and the 16 consumers need re-pointing at it.
 
 Do not close by deleting the imports: all 16 are live uses.
+
+## Verification 2026-11-25 — closure re-confirmed (STALE, stays closed)
+
+- Source: `src/lib/common/error.spl` declares plain `class SimpleError:` (no
+  `extern`), and its docstring now documents why `extern` must not be
+  restored. The duplicate declaration at `src/lib/common/error/error.spl`
+  remains absent, matching the 2026-09-13 correction.
+- Behavior: this entry's own repro, run with the pinned worktree binary
+  (`bin/simple.exe`, Rust seed v1.0.0-rc.1, Windows 11 / Git Bash):
+
+```
+SIMPLE_EXECUTION_MODE=interpreter bin/simple.exe run <repro>.spl
+msg=boom code=0
+```
+
+  The constructor resolves and the program exits 0 — the reported
+  `E1002: function `SimpleError` not found` no longer occurs on this lane.
+- The general defect noted under "Left open elsewhere" (`extern class`
+  registers no constructor for any type, in the seed) is unchanged and still
+  owned by the seed lane; this entry stays closed for `SimpleError` itself.

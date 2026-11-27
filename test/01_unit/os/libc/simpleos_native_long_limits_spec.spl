@@ -1,0 +1,44 @@
+# Compile the interoperability fixture with the actual target C ABI.
+# @cover src/os/libc/include/limits.h
+# SIMPLE_LIBC_CC may select an explicit cross-capable Clang installation.
+use std.spec.*
+use std.io_runtime.{env_get, dir_create_all, process_run, file_read_bytes}
+
+fn limits_compile(name: text, flags: [text], elf_class: i64):
+    val directory = "build/verify/native-long-limits-spec"
+    expect(dir_create_all(directory)).to_equal(true)
+    val output = "{directory}/{name}.o"
+    val compiler = env_get("SIMPLE_LIBC_CC") ?? "clang"
+    var args = ["-std=c11", "-ffreestanding", "-nostdlib",
+        "-Werror=constant-conversion", "-Werror=overflow",
+        "-I", "src/os/libc/include", "-c",
+        "test/fixtures/libc/native_long_limits.c", "-o", output]
+    for flag in flags: args.push(flag)
+    val (stdout, stderr, code) = process_run(compiler, args)
+    expect(code).to_equal(0)
+    val bytes = file_read_bytes(output)
+    expect(bytes.len()).to_be_greater_than(5)
+    expect(bytes[0] as i64).to_equal(127)
+    expect(bytes[1] as i64).to_equal(69)
+    expect(bytes[2] as i64).to_equal(76)
+    expect(bytes[3] as i64).to_equal(70)
+    expect(bytes[4] as i64).to_equal(elf_class)
+
+describe "SimpleOS native-long C ABI bounds":
+    it "compiles correctly typed i686 limits":
+        limits_compile("i686", ["--target=i686-unknown-none-elf"], 1)
+
+    it "compiles correctly typed ARM32 limits":
+        limits_compile("arm32", ["--target=armv7a-none-eabi", "-marm", "-mfloat-abi=soft"], 1)
+
+    it "compiles correctly typed RV32 limits":
+        limits_compile("rv32", ["--target=riscv32-unknown-elf", "-march=rv32imac", "-mabi=ilp32"], 1)
+
+    it "preserves x86_64 LP64 limits":
+        limits_compile("x86_64", ["--target=x86_64-unknown-none-elf"], 2)
+
+    it "preserves AArch64 LP64 limits":
+        limits_compile("arm64", ["--target=aarch64-unknown-none-elf"], 2)
+
+    it "preserves RV64 LP64 limits":
+        limits_compile("rv64", ["--target=riscv64-unknown-elf", "-march=rv64gc", "-mabi=lp64d"], 2)

@@ -1,3 +1,4 @@
+# @timeout_secs 900 (each scenario starts its own smux owner process on Windows)
 # @cover src/app/llm_caret/agent_tmux.spl 80%
 # @cover src/app/llm_caret/agent_runtime.spl 80%
 # @tag: system, llm_caret, tmux, agent_tmux, embed
@@ -15,7 +16,8 @@ against the server's pane list.
 
 use std.spec.{describe, it, expect, step, pending}
 use app.io.mod.{process_run, dir_create_all, dir_remove_all, file_write, cwd, current_time_ms, sleep_ms}
-use app.llm_caret.agent_workspace.{agent_workspace, tmux_available,
+use std.nogc_async_mut.sosix.{sosix_platform}
+use app.llm_caret.agent_workspace.{AgentWorkspace, agent_workspace, workspace_available, pane_pid_lines,
     session_alive, session_kill, list_panes, agent_attach, agent_detach}
 use app.llm_caret.agent_runtime.{AgentProcess, AgentTeamProcess, summarize_agent_team}
 use app.llm_caret.agent_tmux.{AgentProcessUsage, build_agent_tmux_embed, render_agent_tmux_tui}
@@ -40,20 +42,23 @@ struct RealPane:
     window: text
     pid: i64
 
-# Ask the tmux server for every pane's window name and pid. `#{...}` inside a
-# literal is string interpolation, so the format is built by concatenation.
-fn _real_panes(socket: text, session: text) -> [RealPane]:
-    val fmt = "#" + "{" + "window_name" + "}" + " " + "#" + "{" + "pane_pid" + "}"
-    val (out, _e, _c) = process_run("tmux", ["-L", socket, "list-panes", "-s", "-t", session, "-F", fmt])
+# Every pane's window name and pid, as the pane backend (tmux server or smux)
+# itself reports them.
+fn _real_panes(ws: AgentWorkspace) -> [RealPane]:
     var panes: [RealPane] = []
-    for line in out.split("\n"):
+    for line in pane_pid_lines(ws):
         val parts = line.trim().split(" ")
         if parts.len() < 2:
             continue
         panes = panes + [RealPane(window: parts[0], pid: int(parts[1]) ?? 0)]
     panes
 
+# Real OS process identity: `kill -0` on POSIX; on Windows a smux pane pid is a
+# Win32 pid (not an msys one), so ask the OS process table.
 fn _pid_alive(pid: i64) -> bool:
+    if sosix_platform() == "windows":
+        val (out, _e, _c) = process_run("tasklist", ["/FI", "PID eq " + pid.to_text(), "/NH", "/FO", "CSV"])
+        return out.contains("," + "\"" + pid.to_text() + "\"")
     val (_o, _e, code) = process_run("kill", ["-0", pid.to_text()])
     code == 0
 
@@ -75,8 +80,8 @@ fn _count_rows(tui: text) -> i64:
 
 describe "LLM Caret embedded tmux view parity with real panes":
     it "renders exactly one pane row per real agent pane with the pid tmux reports":
-        if not tmux_available():
-            pending("BLOCKED: tmux not installed on this host")
+        if not workspace_available():
+            pending("BLOCKED: neither tmux nor smux available on this host")
             return
         val root = _scratch("team")
         dir_remove_all(root)
@@ -91,9 +96,9 @@ describe "LLM Caret embedded tmux view parity with real panes":
         expect(session_alive(ws)).to_be(true)
         expect(list_panes(ws).len()).to_equal(AGENTS.len() + 1)
 
-        step("Read the agent panes' pids back from the tmux server (window 0 is the session's bootstrap shell, not an agent)")
+        step("Read the agent panes pids back from the pane backend (window 0 is the session's bootstrap shell, not an agent)")
         var agent_panes: [RealPane] = []
-        for pane in _real_panes(ws.socket, ws.session):
+        for pane in _real_panes(ws):
             for agent in AGENTS:
                 if pane.window == agent:
                     agent_panes = agent_panes + [pane]

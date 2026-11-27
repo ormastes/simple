@@ -7,6 +7,16 @@ Collect failures across independent entries and test shards using bounded lanes.
 cache preservation, and bug evidence. This is agent workflow guidance; it does
 not change runner behavior.
 
+**Cranelift/LLVM AOT: module input fails the module, not the worker
+(2026-11-15).** A MIR construct these two AOT translators cannot lower is that
+module's compile error: Cranelift records through `cl_module_codegen_error`,
+LLVM through `MirToLlvm.codegen_error` (Unknown call origin:
+`llvm_callable_uses_local_symbols`). A panic kills the Stage 3 worker and
+seals its whole ~186-module claim CRASH. Not covered: the native isel, C,
+wasm, lua, opencl and llvm_lib backends still panic on an Unknown origin
+through the shared MIR helper. Pins: `cranelift_aot_module_codegen_error_spec`,
+`llvm_aot_module_codegen_error_spec`.
+
 ## What this is
 Compilation of Simple source code to native binaries: the `bin/simple native-build` pipeline, encompassing closure discovery, native codegen, C FFI linkage, symbol resolution, and runtime library integration for host platforms.
 
@@ -34,6 +44,37 @@ Specs: `test/01_unit/compiler/80.driver/driver_native_build_spec.spl`.
 - **Seed-lane cache identity quirk:** pre-stage4 seed binaries have an uncacheable
   identity (cache validation fails on seed-compiled artifacts; rebuild after
   stage4 redeploy)
+- **Unadmitted compiler identity is stable (2026-11-24):** with `SIMPLE_ABI_POLICY` /
+  `SIMPLE_ABI_ADMISSION_RECEIPT` unset, `native_build_compiler_identity()` used to
+  return `uncacheable-abi-admission-…-<pid>-<micros>` — one object scope (`s<hex>`)
+  and witness config per PROCESS, so no per-file batch or re-run ever hit. It is now
+  `native_build_unadmitted_producer_identity` (exe hash + sources + runtime + ABI
+  epoch, admission `unadmitted-v1`), granted only when BOTH variables are unset and
+  the hashed binary's sha256 equals that of `/proc/self/exe`
+  (`native_build_unadmitted_identity_decision_v1`). A half-made claim, a stale
+  `SIMPLE_BINARY`, a host without `/proc/self/exe`, or a named but unreadable/rejected
+  receipt is still per-process.
+- **Object cache not keyed on the cwd source trees in linked workers (2026-11-24):**
+  the scope directory and the module witness config use
+  `native_build_object_producer_identity(debug_info)`. The tree fingerprints stay by
+  default. They are replaced by `embedded+worktree:<sha256(cwd)>` only in a process
+  that took the CLI dispatch into the linked worker entry
+  (`native_build_declare_linked_worker_entry_v1`), with the hashed executable equal
+  to the running image and no debug info; then editing a file under `src/lib` or
+  `src/compiler` keeps the `s<hex>` scope and the per-module witness decides each
+  hit. In-process builds (managed bootstrap stages), debug-info builds, the MIR
+  resume ledger run key, the pre-lowering cache and no-op admission stay tree-bound:
+  an edit rejects the ledger and every module is lowered again; only codegen is
+  reused. Analysis and open gaps:
+  `doc/08_tracking/bug/native_cache_whole_source_tree_in_producer_identity_2026-11-24.md`.
+- **Repeated imports and `-o` (2026-11-24, unexecuted):** a module that names one
+  import on several `use` lines got witness `…-witness-v1-invalid`
+  (`ambiguous-resolution-fact`; 112 modules in one evidence cache) and never hit.
+  `native_module_cache_witness_v1` now folds a repeat once when its resolution
+  digest equals the first one; a differing repeat is still invalid. The `-o` path
+  reached the object scope through `SIMPLE_NATIVE_NOOP_FINAL_OUTPUT` in the module
+  environment digest; the module projection now drops it (the no-op request keeps
+  it). Record: `doc/08_tracking/bug/native_cache_duplicate_import_witness_and_output_scope_2026-11-24.md`.
 - **Zero-hash never accepted:** compile-options mismatch triggers plain cache miss →
   rebuild (not a silent fallback)
 
@@ -78,6 +119,18 @@ SIMPLE_RUNTIME_PATH="path/to/seed/target" bin/simple native-build ...
 ```
 Hosted link backfills `rt_*` externs from `libsimple_native_all.a` only if the env var
 points to correct seed target.
+
+**Clang-only C driver (2026-11-13).** The hosted link used to fall back to bare `cc`
+(`native_linking.spl`) and `find_c_compiler()` to `/usr/bin/gcc` / `/usr/bin/cc`; on a
+Debian-family host that is gcc-13 and the link output shows `collect2` — the tell that
+GCC drove the link. Both are gone: `runtime_compiler.spl` selects `clang`, `clang-23`..
+`clang-16` only, probes `SIMPLE_CC` (`command -v`, `readlink -f`, `--version` via the
+invoked name) and REFUSES a GCC driver with `[cc-detect] REFUSED ...` naming the rule
+and the fix (`. scripts/setup/llvm-toolchain-env.shs` or `SIMPLE_CC=clang-23`). The
+pure-Simple finder honours `SIMPLE_CC` + PATH, the seed honours `CC`; the bootstrap
+exports `SIMPLE_CC=$CC` so both agree there. The Linux hosted cross lane
+(`aarch64-linux-gnu-gcc`, `riscv64-linux-gnu-gcc`) is the one remaining GCC use —
+`doc/08_tracking/bug/hosted_native_link_gcc_fallback_clang_only_policy_2026-11-13.md`.
 
 ## Trait receivers and unresolved method calls (2026-10-20)
 - `class X with Trait:` is a trait implementation (HirImpl + vtable +
@@ -141,6 +194,25 @@ link hosted. Precedent for doing it in both: `rt_text_cmp_any`.
   store-side stability gate plus the checksum carry the admission.
 - Record: `doc/08_tracking/bug/phase4_hir_adoption_reported_cached0_and_parse_shards_unpartitioned_2026-10-19.md`.
 
+## Frontend shard admission estimates (2026-10-25)
+
+- Exec admission defaults are the measured 2937-module peaks
+  (`SHARD_PARSE_WORKER_KB_V1` 3,800,000 KiB, `SHARD_HIR_WORKER_KB_V1`
+  6,700,000 KiB, `src/app/cli/shard_mem_clamp.spl`); the old 1650000/3000000
+  were about half the measured worker peaks.
+- Bootstrap lanes are unaffected: they still export
+  `SIMPLE_PARSE_SHARD_WORKER_KB=1650000 SIMPLE_HIR_SHARD_WORKER_KB=3000000`
+  (`scripts/check/lib/bootstrap-stage3/command-snapshot.shs:301`), and the env
+  var wins over the default. Moving them needs the per-job MiB pricing in
+  `tree-rss-policy.shs` and the inherited-override check in
+  `product-frontend-policy.shs` to move together (open follow-up).
+- Record: `doc/08_tracking/bug/stage2_compiler_tests_frontend_shard_rss_2026-10-25.md`.
+- (2026-11-15) Host key `worker_mem_mib` is a MIR SHARD figure: it prices only
+  the MIR shard mode. Per-file pool HIR/MIR prices take the per-file default
+  (scaled to host); `SIMPLE_{HIR,MIR}_SHARD_WORKER_KB` still win everywhere
+  (`file_worker_pool_phase_price_kb_v1`). Record:
+  `doc/08_tracking/bug/phase3_per_file_pool_refused_26gib_worker_price_windows_2026-11-15.md`.
+
 ## Stage 4 live projection is in-process on Linux (2026-10-20)
 
 `stage4_live_runtime_requests` (`native_project/linker.rs`) no longer runs
@@ -152,6 +224,92 @@ graph instead. On the kept 2793-input set it equals lld's undefined set
 exactly (782). Trap: a mold-linked binary still lists dead-code UND entries
 in `.symtab`, so check `nm -D -u`, not `nm -u`. Bug:
 `doc/08_tracking/bug/stage4_live_projection_mold_ignores_gc_sections_2026-10-20.md`.
+
+## Phase 3 manual continuation traps (2026-10-25)
+
+Recipe: [Phase 3 manual continuation](../../../07_guide/tooling/bootstrap_failure_collection.md#phase-3-manual-continuation-recipe-measured-2026-10-25).
+Miscompile catalog: [Stage 2 native miscompile classes](../../../07_guide/compiler/robustness/stage2_native_miscompile_classes.md).
+
+- Never edit a worktree during its build: bootstrap snapshots source, and a
+  mid-run cherry-pick aborts admission.
+- `--source src/os` is required on the Phase 3 native-build argv since
+  `3dc4d69a57c`.
+- Memory: runs 27b-d used 20 MIR workers under the 110G cap and ended rc=143 (27d
+  with free memory near 7G); run 27e used 16 and finished. Observed
+  worker `rss_max` 6.5-7.8 GiB in the mon27 logs; see
+  `stage2_compiler_tests_frontend_shard_rss_2026-10-25.md` for shard RSS.
+- Phase-1 failure reasons print AFTER the `[ERROR] phase 1 FAILED` line; read
+  below it, not above.
+- Stage 3 built from `bootstrap_main.spl` is the bootstrap CLI only
+  (`compile`/`native-build`). A release needs a full-CLI Phase 3 link.
+- Release producer selection follows the
+  [phase ladder policy](../../../07_guide/infra/toolchain/phase_ladder_ci.md#release-producer-selection):
+  use the highest known-success actual phase binary, skip already-proven lower
+  phases, and use the exact Phase 3 compiler to rebuild Phase 3 (P3 -> P3) when
+  it qualifies. Then build the Phase 4 full CLI and run its required tests.
+  Bind evidence to producer/source/tool/runtime digests and Hello compile plus
+  output execution receipts; phase labels and banners are insufficient. Keep
+  producers immutable, use private outputs/cache with default cache behavior,
+  LLVM/LLD and 24 build jobs for P3 -> P3 and Phase 4 native builds; preserve
+  worker limits in receipt-bound stage resumes. See the release qualification
+  guide for bounded explicit fallback and partial prerelease/beta platform
+  qualification.
+- With < 30 go-to-end failures, compile the missing modules by hand and link
+  with trap stubs; the in-process bypass (positional `native-build`, no
+  `--entry`/`--source`) skips the worker child.
+- `bootstrap_main` crashed while printing any error on run-27e (int-boxed
+  text; read it with gdb `x/s ($x0>>3)`). Not reproduced on run-21 S2 (parse,
+  HIR, MIR, link, import errors all print). Glued lines (`...false[mir-shard]`)
+  are a Stage 2 eprint build defect, not current source. Per-class status:
+  `doc/08_tracking/bug/p3_compile_error_reporting_catalog_2026-11-13.md`.
+- A crashed ledger-pool worker now prints ` signal=SIGABRT(6)` and the module
+  it died in (per-pid ICE breadcrumbs; the pool claims the ICE run on the
+  bootstrap route). Producers older than `ea3369d688d` print only `exit=-134`.
+
+## MIR shard + go-to-end: objectless is not PASS (2026-10-25)
+
+In a MIR shard child, "no codegen outcome and no object" is both the
+objectless-facade route and a go-to-end MIR failure (excluded from
+`ctx.mir_modules`). Run-27e published 8 failed modules as PASS and counted
+`failed_modules=3`. `native_mir_shard_module_passed_v1` now refuses any
+module the child's go-to-end ledger excluded. Every MIR go-to-end failure
+writes an ICE receipt row (phase `mir_lower`). The coordinator prints
+`[mir-shard] failed module: <STATE> <name>`. Trap: a child whose ONLY claim
+fails returns false from `lower_to_mir` and was always counted, so a repro
+needs the bad module plus at least one good module in the same child. Bug:
+`doc/08_tracking/bug/mir_shard_go_to_end_failure_published_as_pass_2026-10-25.md`.
+
+## HIR pool entries must be readable by MIR workers (2026-11-14)
+
+- A HIR shard worker builds surfaces from `module_surface_skeleton_v1`; MIR
+  shard workers and the final worker build them from the full source. Both fold
+  every frozen surface into `hir_cache_closure_digest`, so ONE module whose
+  skeleton surface differs from its full-parse surface moves all keys: the pool
+  stores N entries, every consumer reports `phase=hir ... cached=0` and lowers
+  the closure again (run 31: 1664 modules, 20.2 min in the MIR worker).
+- Signature: `<cache>/hir/` holds two `.parser-v4.hir` files per module, and
+  the consumer's `[hir-cache-store] rate attempts=` climbs during `phase=hir`.
+  The pool's closure digest is line 1 of `hir/queue-<pid>-0/inventory`.
+- Four surface facts come from a function BODY: implicit-static promotion of
+  `fn new|create|default|from_*` (body text never mentions `self`), contract
+  clauses, a body-level `extern fn` (a MODULE declaration) and the await points
+  of an `async fn` (generated state enum / poll function). The skeleton keeps
+  such a body VERBATIM; it never re-implements a parser rule and never changes
+  the stub text (`tldr_frozen_span_projection_v1` matches `pass_do_nothing`
+  exactly). Any new body-derived fact gets the same treatment; pin it in
+  `test/01_unit/compiler/80.driver/hir_worker_closure_digest_parity_spec.spl`
+  (surface equality) and `module_surface_skeleton_scanner_spec.spl` (text).
+- Stored skeletons (`.tldr` `surface` section, `.surface` sidecar) are read only
+  on the streaming-surface route (`worker_surface_text_v1`). Their headers were
+  NOT bumped with the 2026-11-14 skeleton change (coverage rule on the two
+  owning modules), so that route still serves old-format skeletons.
+- A new implicitly-static method name in `method_name_is_implicitly_static`
+  must be added to `_skel_implicit_static_name_v1`; the parity spec's name
+  walk goes red otherwise.
+- To find the module: each `.tldr` companion stores the skeleton (`surface`)
+  and the full-parse digest (`surface-digest`); parse the skeleton and compare
+  `module_surface_canonical_digest_v1`.
+- Record: `doc/08_tracking/bug/hir_pool_entries_unreadable_skeleton_drops_body_derived_facts_2026-11-14.md`.
 
 ## Update Rule
 After native-build defects, closure-discovery changes, or cache logic shifts, refresh
@@ -189,3 +347,62 @@ an admitted full CLI can run test/maintenance/docgen. Do not use the known-bad
 `release/` artifact or any Rust seed to turn `TEST_BLOCKED` into PASS. This
 criterion does not authenticate arbitrarily renamed binaries and does not
 admit Stage 4, build the render carrier, or prove 8K execution.
+
+## Default build mode (2026-11-04)
+
+- Default build mode (user policy 2026-11-04): unset `SIMPLE_FILE_WORKERS` resolves to `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"` (`native_file_worker_v1.spl`): file-based src → obj, one process per file (parse → HIR → MIR → obj), then link. Supersedes the 2026-10-26 opt-in. Opt-outs are per invocation only: `SIMPLE_FILE_WORKERS=0` (two-pass shard route), `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` (whole-program route), `SIMPLE_MIR_SHARDING=0`. Never flip a shared default (config, script-global env, constant) to suit one build; pass the option at the call site with a why-comment. Gap: per-package library archives are not yet the default link input. Runtime proof pending a stage3 binary: `sh scripts/check/check-per-file-overlap-receipt.shs <receipt dir>`. See `doc/07_guide/tooling/bootstrap_options.md` § Default build mode.
+
+## Single-file `compile` is an AOT input (2026-11-14)
+
+`cli_compile_pure_simple` sets `cli_mode_text` through
+`cli_compile_pure_simple_mode_text(output_format)`: `"aot"` for native output
+on every backend and host. Without it `driver_pipeline_lowering.spl`
+(`native_entry_closure_mir`) stubs the positional source to an empty MIR
+module and the library exports only `simple_empty_module_<name>` with rc=0.
+Spec: `test/03_system/native/pure_simple_compile_library_functions_spec.spl`
+(compiles, dlopens and calls). Record:
+`doc/08_tracking/bug/xray_llvm_simple_compiled_module_emits_zero_functions_2026-11-13.md`.
+
+## HIR residency is import replicas, not bodies (2026-11-14)
+
+Run 32 full CLI (3145 modules, one process, cold): 1.46 MB per module before
+HIR, +5.9 MB per module in HIR, 23.2 GiB at MIR start. By encoded field count
+(31-entry sample of the HIR cache) a module's HIR is 33 % imported symbol
+rows, 30 % `imported_layouts` field copies, 15.5 % its own functions, 8 %
+symbol indexes, 7 % locals. Body stripping (`SIMPLE_MIR_SHARD_INTERFACE_HIR`)
+therefore saves little. `imported_layouts` rows are identity-only since
+`imported_layout_row_v1.spl` (the lint reads key membership); do not put field
+payload back without a reader. A cache-hit decode un-shares spans and types,
+so warm residency follows encoded size. Traps: `rt_heap_live_bytes` counts
+object headers only; the seed refuses `hc_enc_*` on decoded modules, so
+attribute by walking the cache with `hc_dec_*` and `FlatPoolReader.pos`.
+Design: `doc/05_design/compiler/perf/hir_import_replica_residency_v1.md`.
+
+## Per-file unit child TLDR root (2026-11-15)
+
+A unit child (`SIMPLE_FILE_WORKER_UNIT=1`) parses only its pick and resolves imports through TLDR summaries. Its root comes from `SIMPLE_FRONTEND_CACHE_DIR`; when that is unset (no `--cache-dir`), it falls back to `SIMPLE_UNIT_TLDR_ROOT`, which `run_unit` sets to `<hir_queue>/frontend`. If the root is empty, the child fails closed with `FILE-UNIT-E-NO-TLDR-ROOT`; it never falls back to the whole closure. Spec: `test/01_unit/compiler/driver/native_file_unit_frontend_root_spec.spl`. Bug: `windows_phase3_baseline_zero_objects_two_pass_forced_2026-11-15`.
+
+## Per-file unit order index (2026-11-15, default OFF)
+
+Each unit child used to run `worker_admitted_edges_v1` over the whole inventory, one import resolution per source, just to get the deps-first pick order. That order is the same for every unit of a build. With `SIMPLE_UNIT_ORDER_INDEX=1`, the first unit publishes the graph to `<hir_queue>/unit_order.idx` (pid temp file, then atomic rename). Its header records the inventory count and the sha256 of the path list. Later units decode the index, so they do zero resolutions. A missing, stale or garbled index falls back to the full walk. When the switch is off, behaviour is the same as before. Code: `src/compiler/80.driver/driver_unit_order_index_v1.spl`. Cost probe: `worker_admitted_sources_scanned_v1`. Spec: `test/01_unit/compiler/driver/unit_order_index_spec.spl`. Still O(closure), and not addressed yet:
+
+Phase 1 skip-fresh (follow-up to #9479): with `SIMPLE_UNIT_ORDER_SKIP_FRESH=1` (off by default; it is ignored unless `SIMPLE_UNIT_ORDER_INDEX=1` is also set), a unit child reads the previous `unit_order.idx` before the index is republished. Index rows now carry an optional third column, the sha256 of the source content. A source is dropped from the pick order only when the header magic, count and path digest all match, its row hash equals the current content hash, and its HIR ledger terminal `<queue>/<sha256(path)>.terminal` is a `PASS` for that path marked `CACHE_STORED`. Any mismatch, a missing artifact or a garbled file rebuilds the source (fail closed). A changed stamp alone does not invalidate the per-file rows. Spec: `test/01_unit/compiler/driver/unit_order_skip_fresh_spec.spl`.
+- phase 1 reads every source;
+- line 271's advice scan runs over all contents;
+- `worker_unit_pick_v1` stats a `.pick`/`.claim` file for each entry that is already taken.
+
+## Tuple-returning runtime externs (2026-11-15)
+
+A stdlib `extern fn` call is FOREIGN origin; MIR reads a tuple result with raw `GetField` loads, but the process-run/cpuid owners return a registered SplArray. Both AOT backends route those calls to the raw-block `*_tuple` facades through ONE table, `runtime_tuple_result_facade(name, word_count)` in `src/compiler/50.mir/text_extern_abi.spl` (runtime and foreign origin; source origin keeps its callee). A new tuple-returning extern must be added there or to the named unrouted list in `test/01_unit/compiler/backend/runtime_tuple_result_facade_census_spec.spl`. Oracle fixture: `test/fixtures/native_process_run_tuple_abi/main.spl`. Record: `doc/08_tracking/bug/native_tuple_returning_externs_without_facade_2026-11-15.md`.
+
+## SMF half of `--mode dynload`: never fold byte arrays per module (2026-11-18)
+
+`out = bytes_concat_copy_v1(out, part)` inside a per-module loop re-copies the whole prefix into a fresh array each time, and the native runtime never reclaims the superseded array, so N modules retain about N/2 copies of the image. That killed a fully linked Phase 3 at 52 G in `phase=smf_package`; a 397-module closure reproduces it under a 12 G cap in 11 s. Assemble with one `out` and `out.push(byte)` (`smf_object_spool_assemble_v1`, `smf_parts_assemble_manifests_v1`, `serialize_smf_dependencies`). The staged binary is renamed only after the driver returns Success, so an OOM in the SMF half loses the linked output. Sum the running totals of the `.smfpart` sizes to predict the old cost. Record: `doc/08_tracking/bug/smf_package_quadratic_assembly_oom_2026-11-18.md`.
+
+## Cache scope retention never runs in a build's children (2026-11-24)
+
+`_compile_to_native_with_backend_session` removes `cache/s<32hex>` scope directories idle for 6 hours (`disk_bound_keep_newest_dirs`, idle = newest mtime of the scope dir and its direct children). It ran in every shard worker batch and in the link child, so a build longer than 6 hours deleted its own early objects and failed at link with `MIR shard module object missing`. Retention is now gated by `native_cache_scope_eviction_role_allowed_v1` (false under any shard/worker/unit/link role env), and every ledger row naming an object refreshes that scope's `.last-use` marker (`disk_bound_mark_dir_used`). When adding a new child role env, add it to that predicate. Bug: `doc/08_tracking/bug/native_cache_scope_evicted_during_long_build_2026-11-24.md`.
+
+## Cache scope retention at coordinator start (2026-11-24 follow-up)
+
+With the gate above, no process of a sharded or coordinator-lane build pruned scopes. The top-level coordinator now runs the pass once, after build-start memory admission and before any prepass, resume adoption or worker spawn: `native_build_cache_scope_retention_at_start_v1` (`src/app/cli/native_build_main.spl`; called from `run_native_build_worker_inner` and bootstrap's `_bootstrap_admit_native_build_memory_v1`). Gate: `native_cache_scope_start_retention_due_v1` (role env, grouped/export child, role flag in argv, inherited `SIMPLE_NATIVE_CACHE_SCOPE_RETENTION_DONE`). It first refreshes `.last-use` for scopes named by the `mir-run-latest` ledger. It runs only for an explicit `--cache-dir`; default and `planner-`/`collection-` cache directories are not pruned by sharded builds. No live-build marker exists, so concurrent long builds should use separate `--cache-dir` directories. Limits: `doc/08_tracking/bug/native_cache_scope_evicted_during_long_build_2026-11-24.md`.

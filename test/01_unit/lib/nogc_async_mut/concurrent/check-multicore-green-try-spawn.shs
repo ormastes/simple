@@ -1,0 +1,36 @@
+#!/bin/sh
+# Run with an admitted self-hosted runtime; never substitute the Rust seed.
+set -u
+ROOT=$(git rev-parse --show-toplevel) || exit 2
+RUNTIME=${1:-}
+case "$RUNTIME" in
+    */bin/release/*/simple|*/bin/release/*/simple.exe) ;;
+    *) echo 'TEST_BLOCKED: pass the canonical bin/release/<triple>/simple runtime' >&2; exit 2 ;;
+esac
+[ -x "$RUNTIME" ] || { echo 'TEST_BLOCKED: self-hosted runtime is absent' >&2; exit 2; }
+cd "$ROOT" || exit 2
+mkdir -p build/test-artifacts || exit 2
+EVIDENCE=$(mktemp -d "$ROOT/build/test-artifacts/multicore-green-try-spawn.XXXXXX") || exit 2
+SPEC=test/01_unit/lib/nogc_async_mut/concurrent/multicore_green_try_spawn_contract_spec.spl
+JOIN=test/01_unit/lib/nogc_async_mut/concurrent/multicore_green_rejected_join.spl
+status=0
+SIMPLE_LIB=src "$RUNTIME" test "$SPEC" --mode=interpreter >"$EVIDENCE/spec.log" 2>&1
+spec_rc=$?
+if [ "$spec_rc" -ne 0 ]; then
+    echo "FAIL: submission contract rc=$spec_rc; $EVIDENCE/spec.log" >&2
+    status=1
+fi
+SIMPLE_LIB=src "$RUNTIME" run "$JOIN" >"$EVIDENCE/rejected-join.log" 2>&1
+join_rc=$?
+if [ "$join_rc" -eq 0 ] ||
+   ! grep -Fq 'REJECTED_JOIN_ENTERED' "$EVIDENCE/rejected-join.log" ||
+   ! grep -Fq 'cannot join a rejected multicore green task' "$EVIDENCE/rejected-join.log" ||
+   grep -Fq 'REJECTED_JOIN_RETURNED' "$EVIDENCE/rejected-join.log"; then
+    echo "FAIL: rejected join did not reach the required panic; $EVIDENCE/rejected-join.log" >&2
+    status=1
+fi
+echo "evidence=$EVIDENCE spec_rc=$spec_rc rejected_join_rc=$join_rc"
+if [ "$status" -eq 0 ]; then
+    echo 'PASS: submission states and rejected-join panic'
+fi
+exit "$status"

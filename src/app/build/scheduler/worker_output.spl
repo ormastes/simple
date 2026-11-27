@@ -3,14 +3,15 @@
 # files and diagnostic bytes before considering a candidate for publication.
 # The caller must separately retain verified files in immutable storage.
 use app.io.mod.{file_is_regular_no_follow, file_size_raw, file_hash_sha256}
+use app.build.host_path_policy.{build_host_abs_path_valid_v1}
 use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
 use compiler.common.build_contract.{ActionSpec, AttemptSpec,
     action_spec_digest_v1}
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use std.common.crypto.sha256.{sha256_text}
 
-val BUILD_OUTPUT_MANIFEST_MAX_BYTES_V1: i64 = 65536
-val BUILD_OUTPUT_MAX_FILES_V1: i64 = 128
+pub val BUILD_OUTPUT_MANIFEST_MAX_BYTES_V1: i64 = 65536
+pub val BUILD_OUTPUT_MAX_FILES_V1: i64 = 128
 val BUILD_OUTPUT_MAX_TOTAL_BYTES_V1: i64 = 1073741824
 val BUILD_OUTPUT_MAX_DIAGNOSTIC_BYTES_V1: i64 = 1048576
 
@@ -26,11 +27,7 @@ fn _output_reject_v1(reason: text) -> BuildOutputObservationV1:
     BuildOutputObservationV1(false, reason, "", "", "", 0)
 
 fn _output_root_valid_v1(root: text) -> bool:
-    root.starts_with("/") and root.len() > 1 and root.len() <= 4096 and
-        not root.ends_with("/") and not root.contains("//") and
-        not root.contains("\n") and not root.contains("\r") and
-        not root.split("/").contains(".") and
-        not root.split("/").contains("..")
+    build_host_abs_path_valid_v1(root, false, false, 4096, 4096)
 
 fn _output_wire_path_v1(path: text) -> bool:
     path != "" and path.len() <= 1024 and not path.contains("|") and
@@ -82,7 +79,10 @@ fn observe_build_outputs_v1(action: ActionSpec, attempt: AttemptSpec,
         val size = file_size_raw(path)
         if size <= 0 or size > BUILD_OUTPUT_MAX_TOTAL_BYTES_V1 - total:
             return _output_reject_v1("output-size-invalid")
-        val digest = file_hash_sha256(path)
+        val digest_opt = file_hash_sha256(path)
+        if digest_opt.is_none():
+            return _output_reject_v1("output-hash-unavailable")
+        val digest = digest_opt.unwrap()
         if not scheduler_action_digest_valid_v1(digest):
             return _output_reject_v1("output-hash-unavailable")
         wire = wire + logical_path + "|" + size.to_text() + "|" + digest + "\n"

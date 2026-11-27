@@ -1,5 +1,23 @@
 # JIT Method-Dispatch Worklist — remaining gaps after 2026-07-29 sweeps
-## Open 2026-09-16 — needs owner triage
+
+## Closed as fix target 2026-11-25 (release/1.0.0, worktree wt-p3-baf) — SUPERSEDED per the 2026-11-11 section below
+
+The "Open 2026-09-16 — needs owner triage" banner under the title was a stale
+normalization-pass header: the 2026-11-11 section at the bottom of this file
+already records the worklist's actionable scope (the CLEAN-LOWERING batches)
+as fully landed and verified. Re-confirmed cheaply on the tracked
+`bin/simple.exe` (interpreter) with a throwaway probe spec covering
+`text.appended`/`prepended`/`take`/`substr`/`char_count`/`sorted` and
+`array.sort_desc` (return-value form): **4/4 passed**, matching the 2026-11-11
+differential-probe result. One probe-authoring note: `sort_desc` must be
+checked via its returned array (the interpreter does not mutate the receiver
+in place — consistent with this file's own verifier note about `fill`).
+
+The remaining NEEDS-CODEGEN / NEEDS-F64-BOX / NEEDS-RUNTIME classes stay
+tracked below as backlog for scoped follow-up lanes; they were never the
+"ready now" scope of this worklist.
+
+## Open 2026-09-16 — needs owner triage (superseded; see banner above)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -126,3 +144,43 @@ grep + existing dispatch-arm shapes in
   freshly-built seed (JIT==interp, [jit-addr]) before landing — the worklist was
   inferred from grep, not run.
 
+
+## 2026-11-11 — SUPERSEDED at tip (lane seedB, worktree simple-p3-seedB-20261111, base 79d5af6723f6)
+
+The worklist's actionable scope — the CLEAN-LOWERING batches ("ready to
+implement now") — is fully landed and verified live on the tracked seed
+`bin/simple.exe` (2026-11-11); no re-fix needed.
+
+**Verified JIT == interpreter (differential probes, default/jit/interpret):**
+
+- Array batch: `sort_desc`, `zip` → probe R=11111 includes both (plus
+  `appended`/`prepended`/`take`).
+- Text batch: `appended`, `prepended`, `take`, `substr`, `char_count`,
+  `sorted` → probe T=255 (all eight arms incl. former NEEDS-RUNTIME
+  `capitalize`/`repeat`/`pad_start`/`is_numeric`, which gained runtime
+  symbols `rt_string_substr`/`rt_string_char_count`/etc.).
+- NEEDS-CODEGEN spot checks: `parse_int`/`parse_float` Option-wrapping under
+  `??` → probe C=3 (JIT == interp).
+
+**Landed wiring (all pre-existing at this base):** dispatch arms in
+`compiler/src/mir/lower/lowering_expr_method.rs` (`sort_desc` :1313,
+`take`/`skip`/`drop` :894, `appended`/`prepended` :1016, `zip` :1362,
+`substring` :1510) and `compiler/src/codegen/instr/calls.rs`
+(`substr`→`rt_string_substr[_from]` :4536, `char_count`→
+`rt_string_char_count` :4500), with HIR result types in
+`compiler/src/hir/lower/expr/mod.rs` :2047-2062. The verifier-note
+reclassifications hold: `fill` was correctly NOT wired (mutates in place;
+would need a non-mutating `rt_array_filled`), and `substr` took the
+char-aware-runtime-symbol route rather than a naive substring alias (its
+second argument is a LENGTH, not an end index — an alias would have
+miscompiled multi-character extractions).
+
+**Disposition:** SUPERSEDED as a fix target. The remaining classes
+(NEEDS-CODEGEN receiver-mutation/return-plumbing items, NEEDS-RUNTIME
+methods without backing symbols, the F64-BOX item) were never the
+"ready now" scope and stay tracked in this doc as a backlog for scoped
+follow-up lanes.
+
+## JIT Verification (2026-11-26, BF-3)
+
+- `cargo test -p simple-compiler -j 2 --test jit_text_and_worklist_parity`: `bug5_dispatch_worklist_clean_lowering_methods_in_jit` passed via `lower_to_mir_jit` + `JitCompiler::new_static()`, verifying `[3, 1, 2].sort_desc()` (non-mutating), `sorted()`, `[1, 2].zip([10, 20, 30])`, `take(2)` / clamped `take(-1)`, `skip(1)`, `drop(1)`, `appended`, `prepended`, `substr(1, 3)`, `substring(1, 4)`, and `char_count()`.

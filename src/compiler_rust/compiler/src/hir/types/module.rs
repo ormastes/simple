@@ -16,6 +16,10 @@ pub struct HirMethodSignature {
     pub param_types: Vec<TypeId>,
     /// Return type
     pub return_type: TypeId,
+    /// Method-level generic parameters (e.g. `["C"]`).
+    pub generic_params: Vec<String>,
+    /// Trait bounds for method-level generic parameters.
+    pub generic_bounds: Vec<HirGenericBound>,
 }
 
 /// Trait information for static polymorphism support
@@ -52,6 +56,18 @@ impl HirTraitInfo {
 
     /// Add a method and assign its vtable slot
     pub fn add_method(&mut self, name: String, param_types: Vec<TypeId>, return_type: TypeId) {
+        self.add_generic_method(name, param_types, return_type, Vec::new(), Vec::new());
+    }
+
+    /// Add a generic method with preserved type-parameter bounds and assign its vtable slot.
+    pub fn add_generic_method(
+        &mut self,
+        name: String,
+        param_types: Vec<TypeId>,
+        return_type: TypeId,
+        generic_params: Vec<String>,
+        generic_bounds: Vec<HirGenericBound>,
+    ) {
         let slot = self.vtable_size;
         self.methods.insert(
             name.clone(),
@@ -60,6 +76,8 @@ impl HirTraitInfo {
                 vtable_slot: slot,
                 param_types,
                 return_type,
+                generic_params,
+                generic_bounds,
             },
         );
         self.vtable_size += 1;
@@ -257,6 +275,21 @@ pub struct HirModule {
     /// These are globals that hold function pointers and need special handling
     /// in the codegen to initialize with the function's import address.
     pub extern_fn_names: HashSet<String>,
+    /// Declared parameter types of extern function declarations, keyed by
+    /// extern name. Externs are not `HirFunction`s, so without this table the
+    /// MIR call lowering cannot see their parameter types and skips argument
+    /// coercion: a raw i64 literal at an `Any` parameter reached the runtime
+    /// untagged, where its low bits were misread as a value tag (rejected,
+    /// re-floated, or re-specced). Registering the declared types lets the
+    /// normal param-slot coercion box raw scalars exactly as it does for
+    /// ordinary functions, matching the interpreter, which always hands
+    /// externs tagged `Value`s.
+    pub extern_param_types: HashMap<String, Vec<TypeId>>,
+    /// Extern declarations tagged `@abi("system")` (Rust `extern "system"`
+    /// semantics): name -> (declared param types, return type). The LLVM
+    /// backend declares these with their real signature and `stdcall` only on
+    /// Windows x86 (32-bit); everywhere else the entry is ignored.
+    pub extern_system_abi: HashMap<String, (Vec<TypeId>, TypeId)>,
     /// Function names imported via `use` statements.
     /// These should NOT become global variables in MIR — they are only used
     /// for type resolution during HIR lowering.
@@ -321,6 +354,8 @@ impl HirModule {
             domain_blocks: Vec::new(),
             impls: Vec::new(),
             extern_fn_names: HashSet::new(),
+            extern_param_types: HashMap::new(),
+            extern_system_abi: HashMap::new(),
             imported_function_names: HashSet::new(),
             type_bindings_log: Vec::new(),
             type_value_kinds: HashMap::new(),
@@ -333,6 +368,32 @@ impl HirModule {
     /// `Some(true)` = `struct` (value semantics), `Some(false)` = `class`/actor
     /// (identity semantics). Callers MUST make `None` a no-op: see the field
     /// doc on `type_value_kinds` for why absence is not "value type".
+    /// Record an extern's signature when it carries `@abi("system")`.
+    /// Called from every site that fills `extern_param_types`.
+    pub fn record_extern_system_abi(
+        &mut self,
+        name: &str,
+        attributes: &[simple_parser::ast::Attribute],
+        params: &[TypeId],
+        ret: TypeId,
+    ) {
+        use simple_parser::ast::{Expr, FStringPart};
+        let is_system = attributes.iter().any(|a| {
+            a.name == "abi"
+                && a.args.as_ref().is_some_and(|args| match args.first() {
+                    Some(Expr::String(s)) | Some(Expr::Identifier(s)) => s == "system",
+                    Some(Expr::FString { parts, .. }) => {
+                        matches!(parts.as_slice(), [FStringPart::Literal(s)] if s == "system")
+                    }
+                    _ => false,
+                })
+        });
+        if is_system {
+            self.extern_system_abi
+                .insert(name.to_string(), (params.to_vec(), ret));
+        }
+    }
+
     pub fn type_is_value_kind(&self, name: &str) -> Option<bool> {
         self.type_value_kinds.get(name).copied()
     }

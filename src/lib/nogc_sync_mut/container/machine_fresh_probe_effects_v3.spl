@@ -1,0 +1,98 @@
+# Actual same-writer probe actions. Only the original sealed transfer supplies
+# real storage/successor/lifecycle; no raw capture ref or new writer is exposed.
+use std.nogc_sync_mut.container.machine_fresh_workload_lifecycle_v2.*
+use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.*
+use std.nogc_sync_mut.container.machine_fresh_workload_effects_v3.workload_publish_v3
+use std.nogc_sync_mut.container.machine_fresh_probe_record_v3.*
+use std.nogc_sync_mut.container.machine_fresh_probe_custody_v3.*
+use std.nogc_sync_mut.io.machine_storage_owner_v1.MachineStorageOwnerV1
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.LinuxFreshEpochSuccessorCustodyV1
+use std.nogc_sync_mut.io.linux_fresh_workload_probe_launch_v3.*
+use std.nogc_sync_mut.io.profiled_combined_capture_v1.*
+use std.common.contracts.container.linux_fresh_workload_probe_v3.*
+use std.common.contracts.container.linux_fresh_workload_v2.LinuxFreshWorkloadActionV2
+use std.common.contracts.distributed_operation_state_v2.distributed_operation_transition_v2
+use std.common.build_manager.group_process_stream_protocol_v2.group_process_stream_template_encode_v3
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+use std.nogc_sync_mut.io.dir_entry_ops.dir_create_private_exclusive_v1
+
+pub(package) fn machine_fresh_probe_begin_v3(storage: MachineStorageOwnerV1,
+        custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2,
+        generation: i64, action: LinuxFreshWorkloadProbeActionV3) -> Result<(), text>:
+    val unlocked = state.workflow_legacy_idle_v3()?
+    val record = state.record_v2()?
+    val selected = state.probe_custody_v3()?
+    val command = LinuxFreshWorkloadProbeCommandV3(workload: machine_fresh_workload_command_v2(record,
+        LinuxFreshWorkloadActionV2.Inspect, state.native_id_v2()?)?, action: action)
+    val name = if action == LinuxFreshWorkloadProbeActionV3.Wait: "probe-wait" else: "probe-logs"
+    var template = state.template_v2()?
+    template.root = template.root + "-" + name
+    # milestone_0021 3.4 step 4: create-or-adopt-empty before the bind, action_begin_v2 and the publish (pre-row Err).
+    dir_create_private_exclusive_v1(template.root)?
+    state.record_helper_dir_v3(template.root)?
+    var launch = linux_fresh_workload_probe_bind_v3(custody, command, template)?
+    val valid = linux_fresh_workload_probe_validate_v3(custody, command, launch)?
+    val wire = group_process_stream_template_encode_v3(launch)?
+    val now = time_sample_unix_micros_or_failure() / 1000
+    if now <= 0 or now > 9223372036854775807 - command.workload.timeout_ms: return Err("machine-probe-clock")
+    val expiry = now + command.workload.timeout_ms
+    val states = state.action_begin_v2(name, generation)?
+    val captured = selected.begin_v3(name, launch)?
+    state.capture_probe_v3(captured)
+    var rows = machine_fresh_probe_action_entries_v3(record, states[states.len() - 2], command.workload.native_id, wire, now)?
+    rows = rows + machine_fresh_probe_action_entries_v3(record, states[states.len() - 1], command.workload.native_id, wire, now)?
+    val published = workload_publish_v3(storage, state, rows)?
+    val final_native = linux_fresh_workload_probe_validate_v3(custody, command, launch)?
+    val wall = time_sample_unix_micros_or_failure() / 1000
+    if wall <= 0 or wall >= expiry: return Err("machine-probe-original-launch-expired")
+    val consumed = state.consume_action_v2()?
+    launch.request.launch_deadline_unix_ms = expiry
+    # Native spawn is INSIDE the opaque capture producer. No copied raw ref can
+    # race this complete transcript, and no legacy/unprofiled fallback exists.
+    val actual = profiled_combined_capture_start_v1(launch, 65536)
+    state.capture_probe_v3(captured.capture_v3(actual))
+    if actual.error != "":
+        val retained = state.unknown_v2(actual.error)?
+        return Err(actual.error)
+    Ok(())
+
+fn machine_fresh_probe_step_inner_v3(storage: MachineStorageOwnerV1,
+        state: MachineFreshWorkloadLifecycleV2, action: LinuxFreshWorkloadProbeActionV3, cancel: bool) -> Result<bool, text>:
+    val prior = state.probe_custody_v3()?
+    val name = if action == LinuxFreshWorkloadProbeActionV3.Wait: "probe-wait" else: "probe-logs"
+    if prior.name_v3() != name: return Err("machine-probe-continuation-action-mismatch")
+    if prior.published_phase_v3(): return Ok(true)
+    val actual = prior.step_v3(cancel)
+    # Publish actual returned custody before inspecting pending/error/evidence.
+    state.capture_probe_v3(actual)
+    if actual.diagnostic_v3() != "":
+        val retained = state.unknown_v2(actual.diagnostic_v3())?
+        if not actual.retained_v3():
+            val positive = state.retire_helper_v2()?
+        return Err(actual.diagnostic_v3())
+    if actual.retained_v3(): return Ok(false)
+    val result = actual.result_v3()?
+    if actual.name_v3() == "probe-wait":
+        val payload_exit = machine_fresh_probe_wait_output_v3(result.0)?
+    val launch = actual.launch_result_v3()
+    val captured = state.probe_result_captured_v3(result.0, result.1, launch.0, launch.1)?
+    val executing = state.action_state_v2(actual.name_v3())?
+    val completed = distributed_operation_transition_v2(executing, "completed", sha256_text(str(result.1) + "\n" + result.0))?
+    val rows = machine_fresh_probe_action_entries_v3(state.record_v2()?, completed, state.native_id_v2()?, result.0,
+        time_sample_unix_micros_or_failure() / 1000)?
+    val published = workload_publish_v3(storage, state, rows)?
+    val tracked = state.complete_v2(completed, state.native_id_v2()?)?
+    state.capture_probe_v3(actual.published_v3()?)
+    Ok(true)
+
+pub(package) fn machine_fresh_probe_step_v3(storage: MachineStorageOwnerV1,
+        state: MachineFreshWorkloadLifecycleV2, action: LinuxFreshWorkloadProbeActionV3, cancel: bool) -> Result<bool, text>:
+    val prior = state.probe_custody_v3()?
+    val name = if action == LinuxFreshWorkloadProbeActionV3.Wait: "probe-wait" else: "probe-logs"
+    if prior.name_v3() != name: return Err("machine-probe-continuation-action-mismatch")
+    val result = machine_fresh_probe_step_inner_v3(storage, state, action, cancel)
+    if result.is_err():
+        val retained = state.unknown_v2(result.unwrap_err())?
+        return Err(state.diagnostic_v2()?)
+    result

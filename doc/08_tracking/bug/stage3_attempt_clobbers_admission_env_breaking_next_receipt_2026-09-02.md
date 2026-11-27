@@ -93,3 +93,4 @@ confirmed to be the trust-root branch of `bootstrap-from-scratch.sh:2864-2890`.
 (The workaround above never depended on this claim, but the claim is now established
 rather than assumed.)
 
+**Revalidated 2026-11-02: still plausible because the report title (Every Stage-3 attempt clobbers `admission.env`) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

@@ -37,3 +37,254 @@ fn conditional_empty_array_does_not_retype_populated_or_unrelated_aggregates() {
         assert!(matches!(module.types.get(items.ty), Some(HirType::Array { element, .. }) if *element == expected), "{expression}");
     }
 }
+
+#[test]
+fn multiline_if_elif_empty_array_never_narrows_struct_or_any_elements_to_i32() {
+    // Repro for seed_native_build_lint_entry_hir_i32_code_field_2026-11-20:
+    // `entry_and_fixes.spl` wrote a multiline `if not run_opt_me:\n    []\nelif ...`
+    // whose `then_branch` parsed as `Expr::DoBlock([Expression(Array([]))])` and
+    // whose `elif` arm could resolve to either `[OptionMeCallWarning]` or `ANY`
+    // across modules. Before the fix, `[]` kept its `[i32]` default and `warning.code`
+    // failed with `Cannot infer field type: struct 'i32' field 'code'`.
+    let typed_source = concat!(
+        "struct OptionMeCallWarning:\n",
+        "    code: text\n",
+        "fn make_warnings() -> [OptionMeCallWarning]:\n",
+        "    []\n",
+        "fn probe_typed(run_opt_me: bool, cached_ok: bool, cached: [OptionMeCallWarning]) -> text:\n",
+        "    val option_me_warnings = if not run_opt_me:\n",
+        "        []\n",
+        "    elif cached_ok:\n",
+        "        cached\n",
+        "    else:\n",
+        "        make_warnings()\n",
+        "    for warning in option_me_warnings:\n",
+        "        return warning.code\n",
+        "    \"\"\n",
+    );
+    let typed_mod = parse_and_lower(typed_source).expect("multiline typed if/elif empty array must lower");
+    let typed_fn = typed_mod.functions.iter().find(|f| f.name == "probe_typed").unwrap();
+    let warning_local = typed_fn.locals.iter().find(|l| l.name == "warning").unwrap();
+    assert!(
+        matches!(typed_mod.types.get(warning_local.ty), Some(HirType::Struct { name, .. }) if name == "OptionMeCallWarning"),
+        "expected OptionMeCallWarning element, got {:?}",
+        typed_mod.types.get(warning_local.ty)
+    );
+
+    // Dynamic `ANY` sibling in `elif` (cross-module field whose type erased to ANY).
+    let dynamic_source = concat!(
+        "struct OptionMeCallWarning:\n",
+        "    code: text\n",
+        "extern fn dynamic_cached() -> Any\n",
+        "fn make_warnings() -> [OptionMeCallWarning]:\n",
+        "    []\n",
+        "fn probe_dynamic(run_opt_me: bool, cached_ok: bool) -> text:\n",
+        "    val option_me_warnings = if not run_opt_me:\n",
+        "        []\n",
+        "    elif cached_ok:\n",
+        "        dynamic_cached()\n",
+        "    else:\n",
+        "        make_warnings()\n",
+        "    for warning in option_me_warnings:\n",
+        "        return warning.code\n",
+        "    \"\"\n",
+    );
+    let dyn_mod = parse_and_lower(dynamic_source).expect("multiline ANY-sibling if/elif empty array must lower");
+    let dyn_fn = dyn_mod.functions.iter().find(|f| f.name == "probe_dynamic").unwrap();
+    let dyn_warning = dyn_fn.locals.iter().find(|l| l.name == "warning").unwrap();
+    assert_ne!(dyn_warning.ty, TypeId::I32, "loop element must never degrade to i32");
+}
+
+#[test]
+fn multi_branch_and_nested_if_empty_arrays_propagate_sibling_element_to_all_leaves() {
+    // Shape 1: `if c1: bytes elif c2: [] else: []` where `bytes: [u8]`.
+    // Both trailing `[]` leaves and the inner `If` must retype to `u8` so MIR
+    // emits `rt_byte_array_new` instead of generic `[i32; 0]` `rt_array_new`.
+    let trailing_source = concat!(
+        "fn probe_bytes(c1: bool, c2: bool, bytes: [u8]) -> [u8]:\n",
+        "    val out = if c1: bytes elif c2: [] else: []\n",
+        "    out\n",
+    );
+    let trailing_mod = parse_and_lower(trailing_source).expect("trailing elif/else empty u8 arrays must lower");
+    let trailing_fn = trailing_mod.functions.iter().find(|f| f.name == "probe_bytes").unwrap();
+    let out_local = trailing_fn.locals.iter().find(|l| l.name == "out").unwrap();
+    assert!(
+        matches!(trailing_mod.types.get(out_local.ty), Some(HirType::Array { element, size: None }) if *element == TypeId::U8),
+        "expected [u8] local, got {:?}",
+        trailing_mod.types.get(out_local.ty)
+    );
+    let HirStmt::Let { value: Some(outer_if), .. } = &trailing_fn.body[0] else {
+        panic!("expected out initializer");
+    };
+    let HirExprKind::If {
+        else_branch: Some(inner_if),
+        ..
+    } = &outer_if.kind
+    else {
+        panic!("expected outer If");
+    };
+    assert!(
+        matches!(trailing_mod.types.get(inner_if.ty), Some(HirType::Array { element, .. }) if *element == TypeId::U8),
+        "expected inner If to retype to u8 array, got {:?}",
+        trailing_mod.types.get(inner_if.ty)
+    );
+    let HirExprKind::If {
+        then_branch: inner_then,
+        else_branch: Some(inner_else),
+        ..
+    } = &inner_if.kind
+    else {
+        panic!("expected inner If");
+    };
+    for leaf in [inner_then, inner_else] {
+        assert!(
+            matches!(
+                trailing_mod.types.get(leaf.ty),
+                Some(HirType::Array {
+                    element,
+                    size: Some(0)
+                }) if *element == TypeId::U8
+            ),
+            "expected [u8; 0] leaf, got {:?}",
+            trailing_mod.types.get(leaf.ty)
+        );
+    }
+
+    // Shape 2: `if c1: (if c2: [] else: []) else: make_warnings()`.
+    let leading_source = concat!(
+        "struct OptionMeCallWarning:\n",
+        "    code: text\n",
+        "fn make_warnings() -> [OptionMeCallWarning]:\n",
+        "    []\n",
+        "fn probe_leading(c1: bool, c2: bool) -> text:\n",
+        "    val warnings = if c1: (if c2: [] else: []) else: make_warnings()\n",
+        "    for warning in warnings:\n",
+        "        return warning.code\n",
+        "    \"\"\n",
+    );
+    let leading_mod = parse_and_lower(leading_source).expect("nested leading empty-array If must lower");
+    let leading_fn = leading_mod.functions.iter().find(|f| f.name == "probe_leading").unwrap();
+    let warning_local = leading_fn.locals.iter().find(|l| l.name == "warning").unwrap();
+    assert!(
+        matches!(leading_mod.types.get(warning_local.ty), Some(HirType::Struct { name, .. }) if name == "OptionMeCallWarning"),
+        "expected OptionMeCallWarning loop element, got {:?}",
+        leading_mod.types.get(warning_local.ty)
+    );
+}
+
+const TAG_CLASSES: &str = concat!(
+    "class Tag:\n    n: text\n    fn label() -> text?:\n        Some(self.n)\n    fn entries() -> Dict<text, Tag>?:\n        None\n",
+    "class Other:\n    n: text\n    fn label() -> text?:\n        Some(self.n)\n",
+    "fn other_label(o: Other) -> text:\n    o.label() ?? \"\"\n",
+);
+
+fn local_ty(module: &crate::hir::HirModule, func: &str, local: &str) -> Option<HirType> {
+    let function = module.functions.iter().find(|f| f.name == func).unwrap();
+    let l = function.locals.iter().find(|l| l.name == local).unwrap();
+    module.types.get(l.ty).cloned()
+}
+
+#[test]
+fn nested_tail_match_arm_keeps_payload_type_for_dict_index_receiver() {
+    // A `match` that is the sole body of an outer match arm is a tail match
+    // STATEMENT; it used to type the arm block NIL/ANY, so `files` lost its
+    // `Dict<text, Tag>` type and `files[k].label()` reached codegen as a bare
+    // method call with 2+ candidates (CODEGEN-AMBIGUOUS-METHOD).
+    let source = format!(
+        "{TAG_CLASSES}fn pick(outer: Tag?, key: text) -> text:\n    val files = match outer:\n        case Some(a):\n            match a.entries():\n                case Some(entries): entries\n                case None: return \"x\"\n        case None: return \"y\"\n    files[key].label() ?? \"\"\n"
+    );
+    let module = parse_and_lower(&source).unwrap();
+    let Some(HirType::Dict { key, value }) = local_ty(&module, "pick", "files") else {
+        panic!("files must keep its Dict type, got {:?}", local_ty(&module, "pick", "files"));
+    };
+    assert_eq!(key, TypeId::STRING);
+    assert!(matches!(module.types.get(value), Some(HirType::Struct { name, .. }) if name == "Tag"), "{:?}", module.types.get(value));
+}
+
+#[test]
+fn nested_match_empty_dict_arm_does_not_beat_concrete_sibling_dict() {
+    // `{}` default type is not evidence: the concrete outer sibling must win.
+    let source = format!(
+        "{TAG_CLASSES}enum K:\n    A\n    B\nfn pick(d: Dict<text, Tag>, a: i64?, k: K) -> text:\n    val files = match a:\n        case Some(x):\n            match k:\n                case K.A: {{}}\n                case K.B: d\n        case None: d\n    files[\"k\"].label() ?? \"\"\n"
+    );
+    let module = parse_and_lower(&source).unwrap();
+    let Some(HirType::Dict { key, value }) = local_ty(&module, "pick", "files") else {
+        panic!("files must be the sibling Dict, got {:?}", local_ty(&module, "pick", "files"));
+    };
+    assert_eq!(key, TypeId::STRING);
+    assert!(matches!(module.types.get(value), Some(HirType::Struct { name, .. }) if name == "Tag"));
+}
+
+#[test]
+fn match_empty_array_arm_does_not_beat_concrete_sibling_array() {
+    // Nested, nested-if and flat shapes: `[]` (default [i32]) must not win the
+    // join over a `[f64]` sibling (silent wrong value: 1.75 vs 1006847761.25).
+    for body in [
+        "    val r = match a:\n        case Some(x):\n            match k:\n                case K.A: []\n                case K.B: return -1.0\n        case None: xs\n",
+        "    val r = match a:\n        case Some(x):\n            if c:\n                []\n            else:\n                return -1.0\n        case None: xs\n",
+        "    val r = match k:\n        case K.A: []\n        case K.B: xs\n",
+    ] {
+        let source = format!(
+            "enum K:\n    A\n    B\nfn h(xs: [f64], a: i64?, k: K, c: bool) -> f64:\n{body}    if r.len() > 0: r[0] + 0.25 else: -2.0\n"
+        );
+        let module = parse_and_lower(&source).unwrap();
+        let Some(HirType::Array { element, .. }) = local_ty(&module, "h", "r") else {
+            panic!("r must be an array for {body}");
+        };
+        assert_eq!(element, TypeId::F64, "{body}");
+    }
+}
+
+#[test]
+fn if_join_weak_empty_match_arm_does_not_beat_concrete_sibling() {
+    // The IF join must apply the same weak-empty rule as the match join when a
+    // branch is a (now typed) tail match whose value arms are only `[]`/`{}`.
+    let k = "enum K:\n    A\n    B\n    C\n";
+    for (body, want_array) in [
+        ("    val r = if c:\n        match k:\n            case K.A: []\n            case K.B: return -7.0\n            case K.C: []\n    else:\n        xs\n", true),
+        ("    val r = if n == 0:\n        match k:\n            case K.A: []\n            case K.B: return -7.0\n            case K.C: []\n    elif n == 1:\n        []\n    else:\n        xs\n", true),
+        ("    val r = if c:\n        []\n    else:\n        xs\n", true),
+    ] {
+        let source = format!("{k}fn h(xs: [f64], c: bool, n: i64, k: K) -> f64:\n{body}    if r.len() > 0: r[0] + 0.25 else: -2.0\n");
+        let module = parse_and_lower(&source).unwrap();
+        let Some(HirType::Array { element, .. }) = local_ty(&module, "h", "r") else { panic!("r must be an array for {body}") };
+        assert_eq!(element, TypeId::F64, "{body}");
+        assert!(want_array);
+    }
+}
+
+#[test]
+fn if_join_weak_empty_dict_match_arm_does_not_beat_concrete_sibling_dict() {
+    let source = format!(
+        "{TAG_CLASSES}enum K:\n    A\n    B\n    C\nfn pick(d: Dict<text, Tag>, c: bool, k: K) -> text:\n    val files = if c:\n        match k:\n            case K.A: {{}}\n            case K.B: return \"r\"\n            case K.C: {{}}\n    else:\n        d\n    files[\"k\"].label() ?? \"\"\n"
+    );
+    let module = parse_and_lower(&source).unwrap();
+    let Some(HirType::Dict { key, value }) = local_ty(&module, "pick", "files") else {
+        panic!("files must be the sibling Dict, got {:?}", local_ty(&module, "pick", "files"));
+    };
+    assert_eq!(key, TypeId::STRING);
+    assert!(matches!(module.types.get(value), Some(HirType::Struct { name, .. }) if name == "Tag"));
+}
+
+#[test]
+fn weak_empty_rule_ignores_ill_kinded_and_explicit_repeat_siblings() {
+    // `[]` vs a Dict sibling is ill-kinded: the join must keep the `[]` side
+    // (seed m behaviour) rather than adopt the Dict type.
+    let k = "enum K:\n    A\n    B\n";
+    let source = format!("{k}fn k3(d: Dict<text, i64>, kk: K) -> i64:\n    val r = match kk:\n        case K.A: []\n        case _: d\n    0\n");
+    let module = parse_and_lower(&source).unwrap();
+    assert!(matches!(local_ty(&module, "k3", "r"), Some(HirType::Array { .. })), "{:?}", local_ty(&module, "k3", "r"));
+
+    // `[0; 0]` is an explicit typed repeat (lowers to an empty HIR array): it
+    // keeps its own [i64] type in match arms, if/else and indented do-blocks.
+    for body in [
+        "    var r = match kk:\n        case K.A: [0; 0]\n        case _: xs\n",
+        "    var r = if c:\n        [0; 0]\n    else:\n        xs\n",
+        "    var r = if c: [0; 0] else: xs\n",
+    ] {
+        let source = format!("{k}fn rr(xs: [f64], kk: K, c: bool) -> i64:\n{body}    0\n");
+        let module = parse_and_lower(&source).unwrap();
+        let Some(HirType::Array { element, .. }) = local_ty(&module, "rr", "r") else { panic!("r must be an array for {body}") };
+        assert_eq!(element, TypeId::I64, "{body}");
+    }
+}

@@ -1,7 +1,7 @@
 # Parser rejects multi-line continuation of a bare reassignment RHS (`x =\n expr`), while `val x =\n expr` is accepted
 
 - **ID:** parser_bare_reassignment_multiline_continuation_2026-07-25
-- **Status:** OPEN (filed, not fixed)
+- **Status:** FIXED (2026-11-11 lane compiler5: bare reassignment RHS continuation parses on the fresh seed — see addendum below)
 - **Severity:** low-medium (forces a formatting workaround; asymmetric grammar)
 - **Found via:** `web × headless` showcase-matrix cell — `examples/06_io/ui/web_render_file_gui.spl`
   failed to parse, blocking the web showcase's child process.
@@ -84,3 +84,27 @@ Either fix it, or document the reassignment case explicitly in
 `.claude/rules/language.md` alongside the boolean note — the current state,
 where only half the limitation is written down, is what let this reach a
 showcase cell.
+
+## Addendum 2026-11-11 — lane compiler5 (P3 batch-5 triage): FIXED
+
+The declaration-vs-reassignment asymmetry is gone. Verified on the fresh seed
+(build-commit 46fe8f6b6def, `SIMPLE_LIB=src`, `--mode=interpreter --no-cache`):
+
+- This doc's exact repro parses and executes correctly — `x =\n y + 1`
+  followed by `x` returns 3.
+- The same-continuation family the doc asked a fixer to check also parses:
+  compound assignment continuation (`x +=\n 4`) and an unparenthesized
+  multi-line condition (`if x == 5 and\n x > 0:`); the extended probe returns 15.
+- Fix shape in the Rust parser: the bare-assignment RHS goes through the same
+  `parse_optional_assignment_with_suspend` continuation machinery as var
+  declarations (`src/compiler_rust/parser/src/stmt_parsing/var_decl.rs:416`).
+  Landed via merge `9e7e7a526edb` (PR #7597, 2026-11-07), which is an ancestor of
+  the seed build commit 46fe8f6b6def.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt)
+
+Concurs with lane compiler5's FIXED verdict; independently reproduced the
+extended probe on the tracked seed (@ 46fe8f6b6def): `x =\n y + 1` bare
+reassignment continuation, `x +=\n 5` compound continuation, and an
+unparenthesized multi-line `and` condition all parse and execute (probe prints
+`z=15 x=8`, matching compiler5's recorded 15). No in-lane change.

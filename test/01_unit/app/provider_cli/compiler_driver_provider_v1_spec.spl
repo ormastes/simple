@@ -1,0 +1,99 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# Bug: doc/08_tracking/bug/compiler_driver_v1_bootstrap_activation_blocked_on_callable_loader_2026-08-14.md
+# The provider artifact entry's pure cores, exercised in-process with the real
+# driver: this is the "test provider" success path. Loading the same entry out
+# of a built shared artifact is the remaining native verification.
+
+use std.spec.step
+
+use std.spec.*
+use app.provider_cli.compiler_driver_provider_v1.{
+    compiler_driver_provider_query_bytes_v1, compiler_driver_provider_compile_bytes_v1
+}
+use os.smf.provider_query_wire.{encode_provider_query_request_v1, decode_provider_query_result_v1}
+use std.nogc_sync_mut.composition.provider_contract.{
+    SimpleProviderQueryV1, SIMPLE_PROVIDER_OK, SIMPLE_PROVIDER_INTERFACE_UNKNOWN,
+    SIMPLE_PROVIDER_DESCRIPTOR_TOO_SHORT, simple_provider_digest_to_hex_v1
+}
+use compiler.driver.driver_provider_contract_v1.{
+    SIMPLE_COMPILER_DRIVER_V1_INTERFACE, SIMPLE_COMPILER_DRIVER_V1_ABI_DIGEST
+}
+use compiler.driver.driver_provider_compile_wire_v1.*
+use std.nogc_sync_mut.io_runtime.{file_exists, file_size, remove_file_if_exists, dir_create}
+
+fn query_request(interface_id: u64, major: u32) -> [u8]:
+    encode_provider_query_request_v1(SimpleProviderQueryV1(
+        descriptor_size: 44, interface_id: interface_id, minimum_major: major,
+        minimum_minor: 0, host_abi: 1, target_offset: 0, target_length: 0,
+        requested_capability_bits: 0)).bytes
+
+fn smf_request(source: text, output: text) -> DriverCompileRequestV1:
+    DriverCompileRequestV1(
+        format_code: DRIVER_COMPILE_FORMAT_SMF_V1, opt_level: 0, has_opt_level: false,
+        release: false, low_memory: false, no_borrow_check: false,
+        source: source, output: output, backend: "auto", native_target: "",
+        backend_plugin_path: "", cli_mode_text: "aot")
+
+describe "CompilerDriverV1 provider artifact entry":
+    it "answers the compiler-driver interface query over packed bytes":
+        # @req REQ-SSPEC-COMPILER
+        step("answers the compiler-driver interface query over packed bytes")
+        val result = decode_provider_query_result_v1(
+            compiler_driver_provider_query_bytes_v1(query_request(SIMPLE_COMPILER_DRIVER_V1_INTERFACE, 1)))
+        expect(result.ok).to_equal(true)
+        expect(result.value.status).to_equal(SIMPLE_PROVIDER_OK)
+        expect(result.value.provided_major).to_equal(1)
+        expect(simple_provider_digest_to_hex_v1(result.value.abi_digest)).to_equal(SIMPLE_COMPILER_DRIVER_V1_ABI_DIGEST)
+
+    it "refuses unknown interfaces and short query requests":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses unknown interfaces and short query requests")
+        val unknown = decode_provider_query_result_v1(compiler_driver_provider_query_bytes_v1(query_request(99, 1)))
+        expect(unknown.value.status).to_equal(SIMPLE_PROVIDER_INTERFACE_UNKNOWN)
+        val short = decode_provider_query_result_v1(compiler_driver_provider_query_bytes_v1([1, 2, 3]))
+        expect(short.value.status).to_equal(SIMPLE_PROVIDER_DESCRIPTOR_TOO_SHORT)
+
+    it "reports a malformed compile request as a failed result, never success":
+        # @req REQ-SSPEC-COMPILER
+        step("reports a malformed compile request as a failed result, never success")
+        val decoded = decode_driver_compile_result_v1(compiler_driver_provider_compile_bytes_v1([0, 1, 2]))
+        expect(decoded.ok).to_equal(true)
+        expect(decoded.value.compile_status).to_equal(DRIVER_COMPILE_STATUS_FAILED_V1)
+        expect(decoded.value.diagnostics.len()).to_equal(1)
+        expect(decoded.value.diagnostics[0].contains("compile-request-too-short")).to_equal(true)
+
+    it "runs the real driver for a compile request and reports diagnostics on failure":
+        # @req REQ-SSPEC-COMPILER
+        step("runs the real driver for a compile request and reports diagnostics on failure")
+        val request = smf_request("test/cert/tool_qual/negative/08_missing_colon_parse_error.spl",
+            "build/test/compiler_driver_provider_v1/missing_colon.smf")
+        val decoded = decode_driver_compile_result_v1(
+            compiler_driver_provider_compile_bytes_v1(encode_driver_compile_request_v1(request)))
+        expect(decoded.ok).to_equal(true)
+        expect(decoded.value.compile_status).to_equal(DRIVER_COMPILE_STATUS_FAILED_V1)
+        expect(decoded.value.diagnostics.len()).to_be_greater_than(0)
+
+    it "drives a hello world through the real driver to the backend stage":
+        # @req REQ-SSPEC-COMPILER
+        step("drives a hello world through the real driver to the backend stage")
+        # The SMF package step needs a native backend (llc or a linked
+        # cranelift). On a host without one the driver reports exactly that
+        # through the wire; on a host with one the artifact must exist. Either
+        # way the request reached the backend: no front-end diagnostic and no
+        # silent success are accepted.
+        val dir = "build/test/compiler_driver_provider_v1"
+        dir_create(dir, true)
+        val output = dir + "/hello.smf"
+        remove_file_if_exists(output)
+        val decoded = decode_driver_compile_result_v1(compiler_driver_provider_compile_bytes_v1(
+            encode_driver_compile_request_v1(smf_request("test/01_unit/app/provider_cli/fixtures/provider_hello.spl", output))))
+        expect(decoded.ok).to_equal(true)
+        if decoded.value.compile_status == DRIVER_COMPILE_STATUS_OK_V1:
+            expect(decoded.value.diagnostics.len()).to_equal(0)
+            expect(file_exists(output)).to_equal(true)
+            expect(file_size(output)).to_be_greater_than(300)
+        else:
+            expect(decoded.value.diagnostics.len()).to_equal(1)
+            expect(decoded.value.diagnostics[0]).to_contain("Compile error in backend")
+            expect(file_exists(output)).to_equal(false)

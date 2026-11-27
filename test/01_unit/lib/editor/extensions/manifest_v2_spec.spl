@@ -1,0 +1,131 @@
+# Extension manifest SDN decode — additive schema "simple.ide.extension/2".
+#
+# Covers: v2 view containers/views/panels/status items, v1 compatibility,
+# unknown version / v2-section-in-v1 / unknown section diagnostics,
+# container reference + duplicate id validation, host activate/deactivate.
+
+use std.spec
+use std.editor.extensions.manifest.*
+use std.editor.extensions.manifest_sdn.*
+use std.editor.extensions.host.{ExtensionHost}
+
+fn v2_header(schema: text) -> text:
+    "extension:\n" +
+    "  schema: " + schema + "\n" +
+    "  id: caret.workbench\n" +
+    "  version: 1.0.0\n" +
+    "  host: builtin\n"
+
+fn v2_body() -> text:
+    "contributes:\n" +
+    '  view_containers: [{id: "caret.agents", title: "Agents", location: "activitybar", order: 3}]' + "\n" +
+    '  views: [{id: "caret.agent_roster", kind: "tree", container: "caret.agents", provider: "caret.session_roster"}, {id: "caret.agent_details", kind: "inspector", container: "caret.agents", provider: "caret.selected_details"}]' + "\n" +
+    '  panels: [{id: "caret.trace", kind: "trace", default_dock: "bottom"}]' + "\n" +
+    '  status_items: [{id: "caret.approvals", priority: 7}]' + "\n"
+
+fn issue_mentions(load: ExtensionManifestLoad, needle: text) -> bool:
+    var found = false
+    for issue in load.issues:
+        if issue.path.contains(needle) or issue.message.contains(needle):
+            found = true
+    found
+
+describe "extension manifest v2 (simple.ide.extension/2)":
+
+    it "decodes one container, two views, a panel and a status item":
+        # @req REQ-CARET-EXT-001
+        step("decode a v2 manifest")
+        val load = extension_manifest_decode(v2_header("simple.ide.extension/2") + v2_body())
+        expect(load.issues.len()).to_equal(0)
+        val m = load.manifest
+        expect(m.schema_version).to_equal("simple.ide.extension/2")
+        expect(m.contributes_view_containers.len()).to_equal(1)
+        expect(m.contributes_view_containers[0].id).to_equal("caret.agents")
+        expect(m.contributes_view_containers[0].title).to_equal("Agents")
+        expect(m.contributes_view_containers[0].location).to_equal("activitybar")
+        expect(m.contributes_view_containers[0].order).to_equal(3)
+        expect(m.contributes_views.len()).to_equal(2)
+        expect(m.contributes_views[1].id).to_equal("caret.agent_details")
+        expect(m.contributes_views[1].kind).to_equal("inspector")
+        expect(m.contributes_views[1].container).to_equal("caret.agents")
+        expect(m.contributes_views[1].provider).to_equal("caret.selected_details")
+        expect(m.contributes_panels.len()).to_equal(1)
+        expect(m.contributes_panels[0].default_dock).to_equal("bottom")
+        expect(m.contributes_status_items.len()).to_equal(1)
+        expect(m.contributes_status_items[0].priority).to_equal(7)
+
+    it "decodes a v1 manifest with empty v2 sections":
+        # @req REQ-CARET-EXT-002
+        step("decode the v1 fixture")
+        val source = v2_header("simple.ide.extension/1") +
+            "contributes:\n" +
+            '  commands: [{id: "caret.run", title: "Run", category: "Caret"}]' + "\n"
+        val load = extension_manifest_decode(source)
+        expect(load.issues.len()).to_equal(0)
+        expect(load.manifest.schema_version).to_equal("simple.ide.extension/1")
+        expect(load.manifest.contributes_commands.len()).to_equal(1)
+        expect(load.manifest.contributes_commands[0].title).to_equal("Run")
+        expect(load.manifest.contributes_view_containers.len()).to_equal(0)
+        expect(load.manifest.contributes_views.len()).to_equal(0)
+        expect(load.manifest.contributes_panels.len()).to_equal(0)
+        expect(load.manifest.contributes_status_items.len()).to_equal(0)
+
+    it "rejects an unknown schema version naming it":
+        # @req REQ-CARET-EXT-002
+        step("decode schema /3")
+        val load = extension_manifest_decode(v2_header("simple.ide.extension/3"))
+        expect(issue_mentions(load, "simple.ide.extension/3")).to_equal(true)
+
+    it "rejects a v2-only section inside a v1 manifest":
+        # @req REQ-CARET-EXT-002
+        step("decode v1 with views")
+        val load = extension_manifest_decode(v2_header("simple.ide.extension/1") + v2_body())
+        expect(issue_mentions(load, "contributes.views")).to_equal(true)
+        expect(load.manifest.contributes_views.len()).to_equal(0)
+
+    it "rejects an unknown contribution section":
+        # @req REQ-CARET-EXT-002
+        step("decode v2 with timeline_providers")
+        val source = v2_header("simple.ide.extension/2") +
+            "contributes:\n" +
+            '  timeline_providers: [{id: "x"}]' + "\n"
+        val load = extension_manifest_decode(source)
+        expect(issue_mentions(load, "timeline_providers")).to_equal(true)
+
+    it "rejects a view whose container is not declared":
+        # @req REQ-CARET-EXT-001
+        step("decode view with undeclared container")
+        val source = v2_header("simple.ide.extension/2") +
+            "contributes:\n" +
+            '  views: [{id: "v1", kind: "tree", container: "nope", provider: "p"}]' + "\n"
+        val load = extension_manifest_decode(source)
+        expect(issue_mentions(load, "nope")).to_equal(true)
+        expect(load.manifest.contributes_views.len()).to_equal(0)
+
+    it "rejects a duplicate view id":
+        # @req REQ-CARET-EXT-001
+        step("decode duplicate view ids")
+        val source = v2_header("simple.ide.extension/2") +
+            "contributes:\n" +
+            '  view_containers: [{id: "c", title: "C", location: "sidebar"}]' + "\n" +
+            '  views: [{id: "v", kind: "tree", container: "c", provider: "p"}, {id: "v", kind: "tree", container: "c", provider: "q"}]' + "\n"
+        val load = extension_manifest_decode(source)
+        expect(issue_mentions(load, "duplicate view id 'v'")).to_equal(true)
+        expect(load.manifest.contributes_views.len()).to_equal(1)
+        expect(load.manifest.contributes_views[0].provider).to_equal("p")
+
+    it "registers contributions on activate and removes them on deactivate":
+        # @req REQ-CARET-EXT-004
+        step("index and activate the extension")
+        val m = extension_manifest_decode(v2_header("simple.ide.extension/2") + v2_body()).manifest
+        var host = ExtensionHost.new()
+        host.register_manifest(m, "ext/caret.workbench")
+        host.activate(m.name)
+        expect(host.view_registered("caret.agent_roster")).to_equal(true)
+        expect(host.panel_registered("caret.trace")).to_equal(true)
+        expect(host.status_item_registered("caret.approvals")).to_equal(true)
+        step("deactivate")
+        host.deactivate(m.name)
+        expect(host.view_registered("caret.agent_roster")).to_equal(false)
+        expect(host.panel_registered("caret.trace")).to_equal(false)
+        expect(host.status_item_registered("caret.approvals")).to_equal(false)

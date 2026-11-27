@@ -212,3 +212,38 @@ describe "parse_pem — edge cases":
         val blocks = parse_pem(pem)
         expect(blocks.len()).to_equal(1)
         expect(blocks[0].label).to_equal("TEST")
+
+# Exact RFC 4648 section 10 vectors exercise all padding lengths.
+fn _decode_body(body: text) -> [u8]:
+    val blocks = parse_pem("-----BEGIN TEST-----" + body + "-----END TEST-----")
+    blocks[0].der_bytes
+
+describe "PEM base64 byte scan regression":
+    it "decodes RFC 4648 exact bytes":
+        expect(_decode_body("")).to_equal([])
+        expect(_decode_body("Zg==")).to_equal([102u8])
+        expect(_decode_body("Zm8=")).to_equal([102u8, 111u8])
+        expect(_decode_body("Zm9v")).to_equal([102u8, 111u8, 111u8])
+        expect(_decode_body("Zm9vYg==")).to_equal([102u8, 111u8, 111u8, 98u8])
+        expect(_decode_body("Zm9vYmE=")).to_equal([102u8, 111u8, 111u8, 98u8, 97u8])
+        expect(_decode_body("Zm9vYmFy")).to_equal([102u8, 111u8, 111u8, 98u8, 97u8, 114u8])
+
+    it "ignores whitespace punctuation and Unicode noise":
+        expect(_decode_body(" Z!m\t9é\rv\n")).to_equal([102u8, 111u8, 111u8])
+
+    it "preserves incomplete quartet and post-padding behavior":
+        expect(_decode_body("Zm9vZ")).to_equal([102u8, 111u8, 111u8])
+        expect(_decode_body("Zg==Zm8=")).to_equal([102u8, 102u8, 111u8])
+        expect(_decode_body("AA=A")).to_equal([0u8, 0u8])
+
+    it "decodes both non-alphanumeric alphabet entries":
+        expect(_decode_body("+///")).to_equal([251u8, 255u8, 255u8])
+
+    it "keeps exact bytes in adjacent certificate and key APIs":
+        val pem = "-----BEGIN CERTIFICATE-----Zg==-----END CERTIFICATE----------BEGIN PRIVATE KEY-----Zm8=-----END PRIVATE KEY-----"
+        val certs = parse_pem_certs(pem)
+        expect(certs.len()).to_equal(1)
+        expect(certs[0].der_bytes).to_equal([102u8])
+        val key = parse_pem_key(pem)
+        expect(key.label).to_equal("PRIVATE KEY")
+        expect(key.der_bytes).to_equal([102u8, 111u8])

@@ -167,17 +167,31 @@ fn handle_run_management(args: [text]) -> i64:
 # MEMORY DEBUG: report free memory
 # =========================================================================
 
-fn report_free_mem(label: text):
-    val avail_line = file_read("/proc/meminfo") ?? ""
-    val lines = avail_line.split("\n")
+extern fn rt_host_memory_headroom_bytes_v1() -> i64
+
+# Pure formatter: Linux MemAvailable line when /proc/meminfo has one, else the
+# host headroom (Windows: min(free phys, free commit) via rt_host_memory_headroom_bytes_v1),
+# else an "unavailable" note. Never an error: this is a debug report.
+fn free_mem_report_line(label: text, meminfo: text, headroom_bytes: i64) -> text:
+    val lines = meminfo.split("\n")
     var i = 0
     while i < lines.len():
         val line = lines[i]
         if line.starts_with("MemAvailable"):
-            print "[MEM] {label}: {line}"
-            return
+            return "[MEM] {label}: {line}"
         i = i + 1
-    print "[MEM] {label}: (could not read /proc/meminfo)"
+    if headroom_bytes > 0:
+        val mb = headroom_bytes / 1048576
+        return "[MEM] {label}: headroom {mb} MB"
+    "[MEM] {label}: (memory info unavailable)"
+
+fn report_free_mem(label: text):
+    val meminfo = file_read("/proc/meminfo") ?? ""
+    var headroom: i64 = 0
+    if meminfo == "":
+        unsafe(capabilities: [ffi]):
+            headroom = rt_host_memory_headroom_bytes_v1()
+    print free_mem_report_line(label, meminfo, headroom)
 
 # =========================================================================
 # Exports

@@ -54,3 +54,19 @@ alone because the same API call yields inconsistent results in different test co
 
 1. Interpreter: ensure `-> T?` impl-method returns are not wrapped in `Option::Some`.
 2. Matcher: `to_be_nil()` should treat `Option::None` as nil (see also the nil-matcher bug).
+
+---
+
+## Verification note 2026-11-25 (release/1.0.0 ledger pass)
+
+Closure re-confirmed by code inspection: impl methods still declare `-> T?`
+(`src/lib/tooling/ds_utils.spl:21,30,68,76,122,130,139,145`) and the
+free-function `-> any` workaround with its `ponytail:` rationale is intact
+(`ds_utils.spl:183,192`). The measured 2026-09-13 evidence above (bare values
+under both `interpret` and `jit`) stands. Runtime re-verification of the named
+spec is environment-blocked on this host: the pinned seed v1.0.0-rc.1 rejects
+`@representation_boundary` (cfd89933699), so `bin/simple.exe test` fails
+repo-wide at HEAD before reaching any spec. The 2026-09-13 note's caveat that
+`bin/simple test` was non-functional on Windows still applies; closure rests
+on the `bin/simple run` A/B evidence recorded above. Status: **CLOSED**
+(unchanged).

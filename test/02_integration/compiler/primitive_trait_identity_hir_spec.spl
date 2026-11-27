@@ -1,0 +1,91 @@
+# @req REQ-PRIMITIVE-TRAIT-IDENTITY
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode}
+use compiler.hir.primitive_method_identity.{hir_primitive_owner_name}
+
+val P1_TRAIT_FIXTURE = "test/fixtures/compiler/primitive_trait_identity/provider.spl"
+
+fn p1_trait_dispatch_check(module: HirModule):
+    var primitive_impls = 0
+    var marker_ids: [i64] = []
+    var default_ids: [i64] = []
+    var static_ids: [i64] = []
+    for implementation in module.impls:
+        if not implementation.has_trait_: continue
+        val owner = hir_primitive_owner_name(implementation.type_.kind)
+        if owner == "": continue
+        primitive_impls = primitive_impls + 1
+        expect(implementation.methods.contains_key("mark")).to_equal(true)
+        expect(implementation.methods.contains_key("inherited")).to_equal(true)
+        val marker = implementation.methods["mark"]
+        val inherited = implementation.methods["inherited"]
+        expect(marker_ids.contains(marker.id)).to_equal(false)
+        expect(default_ids.contains(inherited.id)).to_equal(false)
+        marker_ids.push(marker.id)
+        default_ids.push(inherited.id)
+        expect(module.functions.contains_key(marker)).to_equal(true)
+        expect(module.functions.contains_key(inherited)).to_equal(true)
+        val marker_function: HirFunction = module.functions[marker]
+        val inherited_function: HirFunction = module.functions[inherited]
+        expect(marker_function.params.len()).to_equal(1)
+        expect(inherited_function.params.len()).to_equal(1)
+        expect(hir_primitive_owner_name(marker_function.params[0].type_.kind)).to_equal(owner)
+        expect(hir_primitive_owner_name(inherited_function.params[0].type_.kind)).to_equal(owner)
+        val marker_symbol = module.symbols.get_symbol_raw(marker.id).unwrap()
+        val marker_signature = marker_symbol.type_.unwrap()
+        var signature_self = "missing"
+        var signature_arity = -1
+        match marker_signature.kind:
+            case HirTypeKind.Function(params, _, _):
+                signature_arity = params.len()
+                if params.len() > 0: signature_self = hir_primitive_owner_name(params[0].kind)
+            case _: ()
+        expect(signature_arity).to_equal(1)
+        expect(signature_self).to_equal(owner)
+        if implementation.methods.contains_key("zero"):
+            val zero = implementation.methods["zero"]
+            expect(static_ids.contains(zero.id)).to_equal(false)
+            static_ids.push(zero.id)
+            val zero_function: HirFunction = module.functions[zero]
+            expect(zero_function.params.len()).to_equal(0)
+            val zero_signature = module.symbols.get_symbol_raw(zero.id).unwrap().type_.unwrap()
+            var static_arity = -1
+            match zero_signature.kind:
+                case HirTypeKind.Function(params, _, _): static_arity = params.len()
+                case _: ()
+            expect(static_arity).to_equal(0)
+    expect(primitive_impls).to_equal(5)
+    expect(marker_ids.len()).to_equal(5)
+    expect(default_ids.len()).to_equal(5)
+    expect(static_ids.len()).to_equal(4)
+    var free_controls = 0
+    for function in module.functions.values():
+        if function.name == "free_control":
+            free_controls = free_controls + 1
+            expect(function.params.len()).to_equal(1)
+            expect(hir_primitive_owner_name(function.params[0].type_.kind)).to_equal("i64")
+    expect(free_controls).to_equal(1)
+
+describe "primitive trait method identities survive HIR lowering and cache transport":
+    it "retains same-name bodies, explicit self once, defaults and static signatures":
+        step("Parse and lower primitive and alias implementations plus a second i32 trait")
+        val source = file_read(P1_TRAIT_FIXTURE)
+        expect(source).to_contain("impl Other for i32")
+        val parsed = parse_full_frontend(source, P1_TRAIT_FIXTURE, P1_TRAIT_FIXTURE, Logger(level: 0))
+        var lowering = HirLowering.with_filename(P1_TRAIT_FIXTURE)
+        val module = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        p1_trait_dispatch_check(module)
+        step("Round-trip the real HIR codec without losing primitive implementation identity")
+        val encoded = hir_module_encode(module)
+        val decoded = hir_module_decode(encoded)
+        expect(decoded.?).to_equal(true)
+        p1_trait_dispatch_check(decoded.unwrap())

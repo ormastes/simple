@@ -97,7 +97,7 @@ pub(crate) fn dynamic_module_initializer_name(module_path: &str) -> String {
     name
 }
 
-fn try_const_eval(expr: &Expr) -> Option<i64> {
+pub(crate) fn try_const_eval(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Integer(val) => Some(*val),
         // RuntimeValue nil is the tagged sentinel 0x3. Recording it here keeps
@@ -461,6 +461,7 @@ impl Lowerer {
     fn register_declarations_from_node(&mut self, item: &Node) -> LowerResult<()> {
         match item {
             Node::Struct(s) => {
+                self.register_unit_shape(&s.name, Some(&s.fields), &s.methods);
                 let struct_type_id = self.register_struct(s)?;
                 // Register struct constructor in globals so it can be used as a value
                 self.globals.insert(s.name.clone(), struct_type_id);
@@ -473,6 +474,11 @@ impl Lowerer {
                 }
             }
             Node::Function(f) => {
+                if let Some(extern_sym) = super::ast_extern_runtime_target(f) {
+                    self.extern_fn_names.insert(extern_sym);
+                    self.extern_fn_names.insert(f.name.clone());
+                }
+                self.register_unit_sig(f.name.clone(), f);
                 let ret_ty = self.resolve_type_opt(&f.return_type)?;
                 // Same symbol `lower_function` emits the body under, so a
                 // cross-module same-named function keeps its own return type.
@@ -492,6 +498,10 @@ impl Lowerer {
                     let fn_ty = self.module.types.register(HirType::Function { params, ret: ret_ty });
                     self.declared_function_value_types.insert(f.name.clone(), fn_ty);
                 }
+                self.register_generic_identity_param(&symbol, f);
+                if owner.is_none() {
+                    self.register_generic_identity_param(&f.name, f);
+                }
                 // Track pure functions for CTR-030-032
                 if f.is_pure() {
                     self.pure_functions.insert(symbol.clone());
@@ -507,6 +517,7 @@ impl Lowerer {
                 }
             }
             Node::Class(c) => {
+                self.register_unit_shape(&c.name, Some(&c.fields), &c.methods);
                 let class_type_id = self.register_class(c)?;
                 // Register class constructor in globals so it can be used as a value
                 self.globals.insert(c.name.clone(), class_type_id);
@@ -566,12 +577,8 @@ impl Lowerer {
                 self.register_mixin(m)?;
             }
             Node::Impl(impl_block) => {
-                let type_name = match &impl_block.target_type {
-                    simple_parser::ast::Type::Simple(name) => Some(name.clone()),
-                    simple_parser::ast::Type::Generic { name, .. } => Some(name.clone()),
-                    _ => None,
-                };
-                if let Some(type_name) = type_name {
+                if let Some(type_name) = Self::impl_target_type_name(&impl_block.target_type) {
+                    self.register_unit_shape(&type_name, None, &impl_block.methods);
                     for method in &impl_block.methods {
                         let ret_ty = self.resolve_type_opt(&method.return_type).unwrap_or(TypeId::ANY);
                         let qualified = format!("{}.{}", type_name, method.name);
@@ -587,6 +594,9 @@ impl Lowerer {
             }
             Node::TypeAlias(ta) => {
                 self.register_type_alias(ta)?;
+            }
+            Node::Unit(u) => {
+                self.register_record_unit_scalar(u);
             }
             Node::ClassAlias(ca) => {
                 // Register class/struct/enum alias mapping
@@ -674,6 +684,11 @@ impl Lowerer {
                 // Register extern function in globals so it can be called
                 let ret_ty = self.resolve_type_opt(&e.return_type)?;
                 self.globals.insert(e.name.clone(), ret_ty);
+                let owner = Self::flatten_owner_of(e.attributes.iter().map(|a| a.name.as_str()));
+                self.flatten_extern_owner_returns
+                    .entry(e.name.clone())
+                    .or_default()
+                    .push((owner, ret_ty));
                 // Calls consult the callable return-type table before falling
                 // back to the ABI-sized value type. Preserve the declaration's
                 // semantic return type just as imported externs do.
@@ -681,6 +696,19 @@ impl Lowerer {
                 self.local_globals.insert(e.name.clone());
                 // Track as extern function for codegen (BSS slot initialization)
                 self.extern_fn_names.insert(e.name.clone());
+                // Record the declared parameter types so MIR call lowering can
+                // coerce arguments into the extern's slots (raw scalar -> Any
+                // boxing). Without this the coercion pass sees an empty
+                // signature and raw literals cross the extern boundary
+                // untagged. See `HirModule::extern_param_types`.
+                let param_types = e
+                    .params
+                    .iter()
+                    .map(|p| self.resolve_type_opt(&p.ty))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.module
+                    .record_extern_system_abi(&e.name, &e.attributes, &param_types, ret_ty);
+                self.module.extern_param_types.insert(e.name.clone(), param_types);
             }
             Node::ExternClass(ec) => {
                 // Register extern class type
@@ -1436,6 +1464,158 @@ impl Lowerer {
     /// so omitted trailing arguments can be filled at call sites (`lower_call`).
     /// Captured here (from the AST) because the HIR function *type* carries only
     /// parameter TypeIds, not the default exprs.
+    /// Declared defaults of `params` as a call site may lower them. A default
+    /// that is a bare name of a `const` bound to a scalar literal -- declared
+    /// by the callee's module `owner`, or imported by it (re-exports and globs
+    /// followed) -- is replaced by that literal, so an omitting call fills the
+    /// slot with the value the CALLEE's scope gives the name; the caller's
+    /// scope is never consulted. Every other default is kept verbatim and
+    /// stays subject to `is_fillable_default`.
+    fn call_site_defaults(&self, owner: Option<&str>, params: &[simple_parser::ast::Parameter]) -> Vec<Option<simple_parser::ast::Expr>> {
+        use simple_parser::ast::Expr;
+        params
+            .iter()
+            .map(|param| match &param.default {
+                Some(Expr::Identifier(name))
+                    if name != "None"
+                        // A sibling parameter or a function of that name
+                        // shadows any const; not a constant default.
+                        && !params.iter().any(|other| other.name == *name)
+                        && !self.flatten_fn_owners.contains_key(name) =>
+                {
+                    match self.literal_const_in_scope(owner, name, 0) {
+                        Ok(Some(literal)) => Some(literal),
+                        _ => param.default.clone(),
+                    }
+                }
+                default => default.clone(),
+            })
+            .collect()
+    }
+
+    /// Literal of the `const` that `name` denotes inside module `owner`:
+    /// `Ok(Some)` when it resolves to exactly one scalar-literal const,
+    /// `Ok(None)` when `owner` neither declares nor imports the name, and
+    /// `Err(())` (fail closed) when the name is a non-literal or duplicated
+    /// global, two glob sources provide it, or the import chain loops or
+    /// exceeds the hop budget.
+    fn literal_const_in_scope(
+        &self,
+        owner: Option<&str>,
+        name: &str,
+        hops: usize,
+    ) -> Result<Option<simple_parser::ast::Expr>, ()> {
+        if hops > 8 {
+            return Err(());
+        }
+        if let Some(declared) = self.flatten_const_literals.get(&(owner.map(str::to_string), name.to_string())) {
+            return declared.clone().map(Some).ok_or(());
+        }
+        let importer = owner.unwrap_or("<entry>");
+        if let Some((source_owner, source_name)) =
+            self.flatten_owner_import_bindings.get(importer).and_then(|bindings| bindings.get(name))
+        {
+            if Some(source_owner.as_str()) == owner {
+                return Err(());
+            }
+            return self.literal_const_in_scope(Some(source_owner), source_name, hops + 1);
+        }
+        let mut found = None;
+        for glob_owner in self.flatten_owner_glob_sources.get(importer).into_iter().flatten() {
+            if Some(glob_owner.as_str()) == owner {
+                continue;
+            }
+            if let Some(literal) = self.literal_const_in_scope(Some(glob_owner), name, hops + 1)? {
+                if found.is_some() {
+                    return Err(());
+                }
+                found = Some(literal);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Declared callback parameter types of every `fn(...)`-typed user
+    /// parameter of the methods of `owner`; `generics` are the type-parameter
+    /// names in scope on the owner (the method's own are added per method).
+    fn record_method_callback_param_types(
+        &mut self,
+        owner: &str,
+        generics: &[String],
+        methods: &[simple_parser::ast::FunctionDef],
+    ) {
+        use simple_parser::ast::Type;
+        for method in methods {
+            let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
+                &method.params[1..]
+            } else {
+                &method.params[..]
+            };
+            if !user_params.iter().any(|p| matches!(p.ty, Some(Type::Function { .. }))) {
+                continue;
+            }
+            let erased = |name: &String| generics.contains(name) || method.generic_params.contains(name);
+            let callbacks = user_params
+                .iter()
+                .map(|p| match &p.ty {
+                    Some(Type::Function { params, .. }) => Some(
+                        params
+                            .iter()
+                            .map(|ty| match ty {
+                                Type::Simple(name) if erased(name) => None,
+                                other => Some(other.clone()),
+                            })
+                            .collect(),
+                    ),
+                    _ => None,
+                })
+                .collect();
+            self.method_callback_param_types
+                .insert(format!("{}.{}", owner, method.name), callbacks);
+        }
+    }
+
+    /// `Kind` / `Kind?` -> `Some("Kind")`; every other shape -> `None`.
+    pub(crate) fn simple_param_type_name(ty: Option<&simple_parser::ast::Type>) -> Option<String> {
+        use simple_parser::ast::Type;
+        match ty? {
+            Type::Simple(name) => Some(name.clone()),
+            Type::Optional(inner) => match inner.as_ref() {
+                Type::Simple(name) => Some(name.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Record `Owner.method` declared parameter type names (`self` already
+    /// excluded by the caller); variadic methods get an empty row.
+    pub(crate) fn record_method_param_type_names(
+        &mut self,
+        owner: &str,
+        method: &str,
+        user_params: &[simple_parser::ast::Parameter],
+        is_static: bool,
+    ) {
+        let row = if user_params.iter().any(|p| p.variadic) {
+            Vec::new()
+        } else {
+            user_params.iter().map(|p| Self::simple_param_type_name(p.ty.as_ref())).collect()
+        };
+        // Same-named owners from different modules can meet in a flattened
+        // unit: a disagreeing second row makes the entry empty (unchecked)
+        // instead of last-write-wins.
+        let key = format!("{owner}.{method}");
+        if is_static {
+            self.static_method_names.insert(key.clone());
+        }
+        let row = match self.method_param_type_names.get(&key) {
+            Some(existing) if *existing != row => Vec::new(),
+            _ => row,
+        };
+        self.method_param_type_names.insert(key, row);
+    }
+
     fn collect_fn_param_defaults(&mut self, ast_module: &Module) {
         for item in &ast_module.items {
             if let Node::Function(f) = item {
@@ -1443,51 +1623,89 @@ impl Lowerer {
                 let symbol = self.flatten_emitted_symbol(owner.as_deref(), &f.name);
                 // An all-None vector is authoritative too: a declaration with
                 // no defaults must not borrow an imported namesake's defaults.
+                self.fn_param_names
+                    .insert(symbol.clone(), if f.params.iter().any(|p| p.variadic) { Vec::new() } else { f.params.iter().map(|p| p.name.clone()).collect() });
                 self.fn_param_defaults
-                    .insert(symbol, f.params.iter().map(|p| p.default.clone()).collect());
+                    .insert(symbol.clone(), self.call_site_defaults(owner.as_deref(), &f.params));
+                self.fn_param_default_owners
+                    .insert(symbol.clone(), owner.clone());
+                // Bool-admission slots: which declared parameters are exactly
+                // `bool`. Parallel to `fn_param_names` (same keying rules,
+                // including the empty-for-variadic rule — a variadic call
+                // keeps the runtime contract on both lanes); consumed by
+                // `lower_call`'s static bool-argument admission.
+                self.fn_param_type_names.insert(
+                    symbol.clone(),
+                    if f.params.iter().any(|p| p.variadic) {
+                        Vec::new()
+                    } else {
+                        f.params.iter().map(|p| Self::simple_param_type_name(p.ty.as_ref())).collect()
+                    },
+                );
+                self.fn_param_bool.insert(
+                    symbol,
+                    if f.params.iter().any(|p| p.variadic) {
+                        Vec::new()
+                    } else {
+                        f.params
+                            .iter()
+                            .map(|p| {
+                                matches!(
+                                    p.ty.as_ref(),
+                                    Some(simple_parser::ast::Type::Simple(n)) if n == "bool"
+                                )
+                            })
+                            .collect()
+                    },
+                );
             }
             if let Node::Impl(impl_block) = item {
-                let owner = match &impl_block.target_type {
-                    simple_parser::ast::Type::Simple(name) => Some(name),
-                    simple_parser::ast::Type::Generic { name, .. } => Some(name),
-                    _ => None,
-                };
-                if let Some(owner) = owner {
+                if let Some(owner) = Self::impl_target_type_name(&impl_block.target_type) {
+                    let owner = owner.as_str();
+                    self.record_method_callback_param_types(owner, &impl_block.generic_params, &impl_block.methods);
+                    let module_owner = Self::flatten_owner_of(impl_block.attributes.iter().map(|a| a.name.as_str()));
                     for method in &impl_block.methods {
                         let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
                             &method.params[1..]
                         } else { &method.params[..] };
+                        self.record_method_param_type_names(owner, &method.name, user_params, method.is_static);
                         if user_params.iter().any(|p| p.default.is_some()) {
                             self.fn_param_defaults.insert(
                                 format!("{}.{}", owner, method.name),
-                                user_params.iter().map(|p| p.default.clone()).collect(),
+                                self.call_site_defaults(module_owner.as_deref(), user_params),
                             );
                         }
                     }
                 }
             }
             if let Node::Class(class) = item {
+                self.record_method_callback_param_types(&class.name, &class.generic_params, &class.methods);
+                let module_owner = Self::flatten_owner_of(class.attributes.iter().map(|a| a.name.as_str()));
                 for method in &class.methods {
                     let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
                         &method.params[1..]
                     } else { &method.params[..] };
+                    self.record_method_param_type_names(&class.name, &method.name, user_params, method.is_static);
                     if user_params.iter().any(|p| p.default.is_some()) {
                         self.fn_param_defaults.insert(
                             format!("{}.{}", class.name, method.name),
-                            user_params.iter().map(|p| p.default.clone()).collect(),
+                            self.call_site_defaults(module_owner.as_deref(), user_params),
                         );
                     }
                 }
             }
             if let Node::Struct(struct_) = item {
+                self.record_method_callback_param_types(&struct_.name, &struct_.generic_params, &struct_.methods);
+                let module_owner = Self::flatten_owner_of(struct_.attributes.iter().map(|a| a.name.as_str()));
                 for method in &struct_.methods {
                     let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
                         &method.params[1..]
                     } else { &method.params[..] };
+                    self.record_method_param_type_names(&struct_.name, &method.name, user_params, method.is_static);
                     if user_params.iter().any(|p| p.default.is_some()) {
                         self.fn_param_defaults.insert(
                             format!("{}.{}", struct_.name, method.name),
-                            user_params.iter().map(|p| p.default.clone()).collect(),
+                            self.call_site_defaults(module_owner.as_deref(), user_params),
                         );
                     }
                 }
@@ -1523,6 +1741,31 @@ impl Lowerer {
             if let Node::Function(f) = item {
                 self.own_declared_function_names.insert(f.name.clone());
             }
+            if let Node::Struct(s) = item {
+                self.own_declared_type_names.insert(s.name.clone());
+            }
+            if let Node::Class(c) = item {
+                self.own_declared_type_names.insert(c.name.clone());
+            }
+            if let Node::UseStmt(use_stmt) = item {
+                Self::collect_imported_target_names(&use_stmt.target, &mut self.own_imported_names);
+            }
+        }
+    }
+
+    fn collect_imported_target_names(target: &simple_parser::ast::ImportTarget, out: &mut std::collections::HashSet<String>) {
+        use simple_parser::ast::ImportTarget;
+        match target {
+            ImportTarget::Single(name) => {
+                out.insert(name.clone());
+            }
+            ImportTarget::Aliased { alias, .. } => {
+                out.insert(alias.clone());
+            }
+            ImportTarget::Group(items) => items.iter().for_each(|t| Self::collect_imported_target_names(t, out)),
+            ImportTarget::Glob => {
+                out.insert("*".to_string());
+            }
         }
     }
 
@@ -1545,6 +1788,7 @@ impl Lowerer {
         let qualified = super::flatten_struct_owner::module_with_owner_qualified_structs(
             ast_module,
             &self.flatten_owner_import_bindings,
+            &self.flatten_owner_glob_sources,
         )
         .map_err(|alias| {
             LowerError::Unsupported(format!(
@@ -1590,11 +1834,116 @@ impl Lowerer {
     /// The part names deliberately do NOT start with `__module_init_`: every
     /// init-root scan (codegen `find_dynamic_init_func_ids`, the native linker's
     /// constructor scan) must still see only the root, or a part would run twice.
+    /// Give an unannotated module global whose initializer is a method-call
+    /// chain (`var G = Manager.create(..).unwrap()`) the struct/class type the
+    /// initializer evaluates to. Global registration runs before any signature
+    /// is known and typed such a global ANY; a later `G.telemetry()` then had
+    /// no receiver type and was dispatched by bare method name, which codegen
+    /// refuses when two types declare it (`[CODEGEN-AMBIGUOUS-METHOD]`).
+    ///
+    /// Runs after declarations are registered and before any body is lowered.
+    /// Only a struct/class result is adopted: its value is a heap word in an
+    /// ANY slot and in a typed slot alike, so the global's representation and
+    /// its initializer are unchanged. A scalar result keeps ANY (the slot
+    /// stays tagged).
+    fn refine_module_global_types(&mut self, ast_module: &Module) {
+        for item in &ast_module.items {
+            let Node::Let(l) = item else { continue };
+            let (Some(name), Some(value)) = (extract_pattern_name(&l.pattern), l.value.as_ref()) else {
+                continue;
+            };
+            if l.ty.is_some()
+                || extract_pattern_type(&l.pattern).is_some()
+                || self.globals.get(&name) != Some(&TypeId::ANY)
+                || !matches!(value, Expr::MethodCall { .. })
+            {
+                continue;
+            }
+            let Some(declared) = Self::static_call_chain_result_type(ast_module, value) else {
+                continue;
+            };
+            // A name declared by several flattened modules needs the global's
+            // owner to pick the declaration; this pass has none, so leave such
+            // a global ANY rather than bind another module's type.
+            let mut named = Vec::new();
+            Self::collect_type_names(&declared, &mut named);
+            Self::collect_static_receiver_names(value, &mut named);
+            if named.iter().any(|n| self.flatten_struct_owners.contains_key(n)) {
+                continue;
+            }
+            let Ok(ty) = self.resolve_type(&declared) else { continue };
+            if matches!(self.module.types.get(ty), Some(HirType::Struct { .. })) {
+                self.globals.insert(name, ty);
+            }
+        }
+    }
+
+    fn collect_type_names(ty: &ast::Type, out: &mut Vec<String>) {
+        match ty {
+            ast::Type::Simple(name) => out.push(name.clone()),
+            ast::Type::Generic { name, args } => {
+                out.push(name.clone());
+                args.iter().for_each(|arg| Self::collect_type_names(arg, out));
+            }
+            ast::Type::Optional(inner) => Self::collect_type_names(inner, out),
+            _ => {}
+        }
+    }
+
+    fn collect_static_receiver_names(expr: &Expr, out: &mut Vec<String>) {
+        if let Expr::MethodCall { receiver, .. } = expr {
+            match receiver.as_ref() {
+                Expr::Identifier(name) => out.push(name.clone()),
+                inner => Self::collect_static_receiver_names(inner, out),
+            }
+        }
+    }
+
+    /// Declared result type of `Type.method(..)`, optionally followed by
+    /// `.unwrap()` / `.expect(..)` (then the `T` of a declared `Result<T, E>`,
+    /// `Option<T>` or `T?`), read from the declaration in this unit. `None`
+    /// for any other shape or when the method is not declared here.
+    fn static_call_chain_result_type(ast_module: &Module, expr: &Expr) -> Option<ast::Type> {
+        use ast::Type;
+        let Expr::MethodCall { receiver, method, .. } = expr else {
+            return None;
+        };
+        if matches!(method.as_str(), "unwrap" | "expect") {
+            return match Self::static_call_chain_result_type(ast_module, receiver)? {
+                Type::Generic { name, args } if matches!(name.as_str(), "Result" | "Option") => args.into_iter().next(),
+                Type::Optional(inner) => Some(*inner),
+                _ => None,
+            };
+        }
+        let Expr::Identifier(type_name) = receiver.as_ref() else {
+            return None;
+        };
+        let declared = |methods: &[ast::FunctionDef]| {
+            methods.iter().find(|m| &m.name == method).and_then(|m| m.return_type.clone())
+        };
+        ast_module.items.iter().find_map(|item| match item {
+            Node::Class(c) if &c.name == type_name => declared(&c.methods),
+            Node::Struct(s) if &s.name == type_name => declared(&s.methods),
+            Node::Impl(i) if matches!(&i.target_type, Type::Simple(n) if n == type_name) => declared(&i.methods),
+            _ => None,
+        })
+    }
+
     fn lower_dynamic_module_init(&mut self, ast_module: &Module) -> LowerResult<()> {
         let mut chunks: Vec<(FunctionContext, Vec<HirStmt>)> = Vec::new();
         let mut dyn_ctx = FunctionContext::new(TypeId::VOID);
         let mut dyn_body: Vec<HirStmt> = Vec::new();
+        // Flatten owner of the global declared by the current item: the owner
+        // marker const immediately preceding it (same rule as
+        // `flatten_global_owner::declaration_owners`).
+        let mut marked_owner: Option<String> = None;
         for item in &ast_module.items {
+            let declaring_owner = marked_owner.take();
+            if let Node::Const(c) = item {
+                if let Some(owner) = c.name.strip_prefix(crate::interpreter::FLATTEN_GLOBAL_OWNER_MARKER_PREFIX) {
+                    marked_owner = Some(owner.to_string());
+                }
+            }
             let (name, value): (String, &Expr) = match item {
                 Node::Let(l) => match (extract_pattern_name(&l.pattern), l.value.as_ref()) {
                     (Some(n), Some(v)) => (n, v),
@@ -1615,12 +1964,31 @@ impl Lowerer {
                 || self.global_init_functions.contains_key(&name)
                 || self.global_init_structs.contains_key(&name);
             if has_static_init {
+                // `val G = imported_fn` is stored as a static fn slot and its
+                // initializer is never lowered: judge the reference here, as
+                // module-level code of the declaring module.
+                if let Expr::Identifier(target) = value {
+                    if self.global_init_functions.contains_key(&name) {
+                        let owner = self.flatten_global_symbol_owners.get(&name).cloned().flatten().or(declaring_owner);
+                        let previous = std::mem::replace(&mut self.current_function_owner, owner);
+                        let previous_name = self.current_function_name.take();
+                        self.gate_private_fn_ref(target);
+                        self.current_function_name = previous_name;
+                        self.current_function_owner = previous;
+                    }
+                }
                 continue;
             }
             let global_ty = *self.globals.get(&name).unwrap_or(&TypeId::ANY);
             // Resolve the initializer's own references through the owner
-            // of the global it initializes (flattened same-name globals).
-            let initializer_owner = self.flatten_global_symbol_owners.get(&name).cloned().flatten();
+            // of the global it initializes. `flatten_global_symbol_owners`
+            // only knows COLLIDING (renamed) globals; every other imported
+            // module's global is owned by its marker. Leaving that `None`
+            // lowered `val c = imported_fn(0)` as if the entry file wrote it,
+            // so the importer's own `use` was ignored ("<entry file> neither
+            // defines nor imports it").
+            let initializer_owner =
+                self.flatten_global_symbol_owners.get(&name).cloned().flatten().or(declaring_owner);
             let previous_owner = std::mem::replace(&mut self.current_function_owner, initializer_owner);
             let previous_type_scope = self.enter_flatten_struct_scope();
             let hir_val = self.lower_expr(value, &mut dyn_ctx);
@@ -1707,6 +2075,8 @@ impl Lowerer {
             is_ghost: false,
             is_sync: true,
             has_suspension: false,
+            generic_params: Vec::new(),
+            generic_bounds: Vec::new(),
         }
     }
 
@@ -1728,8 +2098,11 @@ impl Lowerer {
         // See `nested_def_hoist.rs` for the rules and rationale.
         let hoisted = super::nested_def_hoist::module_with_hoisted_defs(ast_module);
         let ast_module: &Module = hoisted.as_ref().unwrap_or(ast_module);
+        super::validation::validate_trait_impl_arity(ast_module)?;
+        super::validation::validate_no_duplicate_impl_methods(ast_module)?;
         // Same-named globals of different flattened modules get owner-exact
         // symbols before any registration (see `flatten_global_owner.rs`).
+        self.flatten_const_literals = super::flatten_global_owner::const_literal_census(&ast_module.items);
         let qualified = self.qualify_flattened_globals(ast_module);
         let ast_module: &Module = qualified.as_ref().unwrap_or(ast_module);
 
@@ -1929,6 +2302,9 @@ impl Lowerer {
                 | Node::StructuredExportStmt(_)
                 | Node::AutoImportStmt(_)
                 | Node::RequiresCapabilities(_)
+                | Node::FriendDecl(_)
+                | Node::InternalExportDecl(_)
+                | Node::LayerDecl(_)
                 | Node::CompoundUnit(_)
                 | Node::HandlePool(_)
                 | Node::AopAdvice(_)
@@ -2009,12 +2385,9 @@ impl Lowerer {
                     }
                 }
                 Node::Impl(impl_block) => {
-                    let type_name = match &impl_block.target_type {
-                        simple_parser::ast::Type::Simple(name) => Some(name.clone()),
-                        simple_parser::ast::Type::Generic { name, .. } => Some(name.clone()),
-                        _ => None,
-                    };
+                    let type_name = Self::impl_target_type_name(&impl_block.target_type);
                     if let Some(type_name) = type_name {
+                        let saved_scope = self.enter_impl_signature_scope(impl_block, &type_name);
                         let impl_method_names: std::collections::HashSet<&str> =
                             impl_block.methods.iter().map(|m| m.name.as_str()).collect();
                         for method in &impl_block.methods {
@@ -2027,15 +2400,13 @@ impl Lowerer {
                         // trait default methods, so calls to them resolve their real
                         // return type instead of falling back to ANY.
                         if let Some(ref trait_name) = impl_block.trait_name {
-                            if let Some(trait_def) =
-                                select_impl_trait(
-                                    &ast_module.items,
-                                    trait_name,
-                                    &impl_method_names,
-                                    methods_owner(&impl_block.methods).as_deref(),
-                                    &self.flatten_owner_import_bindings,
-                                )
-                            {
+                            let imported_trait_def = self.select_impl_trait_or_imported(
+                                &ast_module.items,
+                                trait_name,
+                                &impl_method_names,
+                                &impl_block.methods,
+                            );
+                            if let Some((trait_def, _)) = imported_trait_def {
                                 for default_method in &trait_def.methods {
                                     if default_method.is_abstract
                                         || impl_method_names.contains(default_method.name.as_str())
@@ -2050,11 +2421,14 @@ impl Lowerer {
                                 }
                             }
                         }
+                        self.restore_impl_signature_scope(saved_scope);
                     }
                 }
                 _ => {}
             }
         }
+
+        self.refine_module_global_types(ast_module);
 
         // Second pass: lower function bodies and class/struct methods
         for item in &ast_module.items {
@@ -2065,10 +2439,7 @@ impl Lowerer {
                 }
                 Node::Class(c) => {
                     // Lower class methods with type invariant injection
-                    for method in &c.methods {
-                        let hir_func = self.lower_function(method, Some(&c.name))?;
-                        self.module.functions.push(hir_func);
-                    }
+                    self.lower_methods_with_generics(&c.methods, Some(&c.name), &c.generic_params)?;
 
                     // Lower mixin methods applied to this class
                     for mixin_ref in &c.mixins {
@@ -2094,10 +2465,7 @@ impl Lowerer {
                 }
                 Node::Struct(s) => {
                     // Lower struct methods with type invariant injection
-                    for method in &s.methods {
-                        let hir_func = self.lower_function(method, Some(&s.name))?;
-                        self.module.functions.push(hir_func);
-                    }
+                    self.lower_methods_with_generics(&s.methods, Some(&s.name), &s.generic_params)?;
                     // `struct Name(Trait):` (parser-synthesised `implements`
                     // attribute): record the trait impl exactly as an
                     // `impl Trait for Name` block would, so the struct gets a
@@ -2177,10 +2545,7 @@ impl Lowerer {
                     }
                 }
                 Node::Enum(e) => {
-                    for method in &e.methods {
-                        let hir_func = self.lower_function(method, Some(&e.name))?;
-                        self.module.functions.push(hir_func);
-                    }
+                    self.lower_methods_with_generics(&e.methods, Some(&e.name), &e.generic_params)?;
                 }
                 Node::Actor(a) => {
                     // Lower actor methods (actors are lowered like classes)
@@ -2190,76 +2555,7 @@ impl Lowerer {
                     }
                 }
                 Node::Impl(impl_block) => {
-                    // Lower impl block methods
-                    // Extract the type name from the impl block's target
-                    let type_name = match &impl_block.target_type {
-                        simple_parser::ast::Type::Simple(name) => Some(name.clone()),
-                        simple_parser::ast::Type::Generic { name, .. } => Some(name.clone()),
-                        _ => None,
-                    };
-
-                    if let Some(ref type_name) = type_name {
-                        for method in &impl_block.methods {
-                            let method = method_with_impl_driver_attrs(method, &impl_block.attributes);
-                            let hir_func = self.lower_function(&method, Some(type_name))?;
-                            self.module.functions.push(hir_func);
-                        }
-
-                        // Record trait impl metadata for vtable emission
-                        if let Some(ref trait_name) = impl_block.trait_name {
-                            let type_id = self
-                                .resolve_type(&simple_parser::ast::Type::Simple(type_name.clone()))
-                                .unwrap_or(TypeId::ANY);
-                            let mut methods_map = HashMap::new();
-                            let impl_method_names: std::collections::HashSet<&str> =
-                                impl_block.methods.iter().map(|m| m.name.as_str()).collect();
-                            for method in &impl_block.methods {
-                                let fn_name = format!("{}.{}", type_name, method.name);
-                                methods_map.insert(method.name.clone(), fn_name);
-                            }
-
-                            // Merge in trait default method bodies for methods the impl
-                            // doesn't override. Without this, the vtable slot list built
-                            // from `methods_map` silently omits the default method and the
-                            // per-slot function-pointer array ends up short, so calling the
-                            // inherited default through a vtable slot reads out-of-bounds
-                            // memory as a function pointer (crash) instead of dispatching to
-                            // the default body. Each default is lowered fresh per-impl so
-                            // `self` resolves against this impl's concrete type.
-                            if let Some(trait_def) =
-                                select_impl_trait(
-                                    &ast_module.items,
-                                    trait_name,
-                                    &impl_method_names,
-                                    methods_owner(&impl_block.methods).as_deref(),
-                                    &self.flatten_owner_import_bindings,
-                                )
-                            {
-                                for default_method in &trait_def.methods {
-                                    if default_method.is_abstract
-                                        || impl_method_names.contains(default_method.name.as_str())
-                                    {
-                                        continue;
-                                    }
-                                    let default_method =
-                                        method_with_impl_driver_attrs(default_method, &impl_block.attributes);
-                                    let hir_func = self.lower_function(&default_method, Some(type_name))?;
-                                    self.module.functions.push(hir_func);
-
-                                    let fn_name = format!("{}.{}", type_name, default_method.name);
-                                    methods_map.insert(default_method.name.clone(), fn_name);
-                                }
-                            }
-
-                            self.module.impls.push(crate::hir::HirImpl {
-                                type_id,
-                                trait_id: None, // trait TypeId resolution deferred
-                                trait_name: impl_block.trait_name.clone(),
-                                type_name: type_name.clone(),
-                                methods: methods_map,
-                            });
-                        }
-                    }
+                    self.lower_impl_block(impl_block, &ast_module.items, true)?;
                 }
                 _ => {}
             }
@@ -2310,11 +2606,6 @@ impl Lowerer {
                     use_stmt.is_lazy,
                 );
                 self.module.imports.push(import);
-
-                // NEW: Load types from imported module into globals symbol table
-                // This enables compile-time type checking for imports
-                // Errors are silently ignored for backward compatibility
-                let _ = self.load_imported_types(&use_stmt.path, &use_stmt.target);
             }
         }
 
@@ -2364,6 +2655,7 @@ impl Lowerer {
         // Absence keeps codegen's existing builtin inference available; ANY
         // placeholders are not authoritative result-type declarations.
         self.method_return_types.retain(|_, ty| *ty != TypeId::ANY);
+        super::super::lenient_global_diag::record_batch_for_link_diagnostics(&self.lenient_globals);
         Ok((self.module, self.method_return_types))
     }
 
@@ -2372,8 +2664,11 @@ impl Lowerer {
         // Hoist nested type definitions to module scope (see `lower_module`).
         let hoisted = super::nested_def_hoist::module_with_hoisted_defs(ast_module);
         let ast_module: &Module = hoisted.as_ref().unwrap_or(ast_module);
+        super::validation::validate_trait_impl_arity(ast_module)?;
+        super::validation::validate_no_duplicate_impl_methods(ast_module)?;
         // Same-named globals of different flattened modules get owner-exact
         // symbols before any registration (see `flatten_global_owner.rs`).
+        self.flatten_const_literals = super::flatten_global_owner::const_literal_census(&ast_module.items);
         let qualified = self.qualify_flattened_globals(ast_module);
         let ast_module: &Module = qualified.as_ref().unwrap_or(ast_module);
 
@@ -2495,6 +2790,8 @@ impl Lowerer {
             self.register_declarations_from_node(item)?;
         }
 
+        self.refine_module_global_types(ast_module);
+
         // Second pass: lower function bodies
         for item in &ast_module.items {
             match item {
@@ -2503,10 +2800,7 @@ impl Lowerer {
                     self.module.functions.push(hir_func);
                 }
                 Node::Class(c) => {
-                    for method in &c.methods {
-                        let hir_func = self.lower_function(method, Some(&c.name))?;
-                        self.module.functions.push(hir_func);
-                    }
+                    self.lower_methods_with_generics(&c.methods, Some(&c.name), &c.generic_params)?;
                     for mixin_ref in &c.mixins {
                         if let Some(mixin_decl) = ast_module.items.iter().find_map(|item| {
                             if let Node::Mixin(m) = item {
@@ -2527,16 +2821,10 @@ impl Lowerer {
                     }
                 }
                 Node::Struct(s) => {
-                    for method in &s.methods {
-                        let hir_func = self.lower_function(method, Some(&s.name))?;
-                        self.module.functions.push(hir_func);
-                    }
+                    self.lower_methods_with_generics(&s.methods, Some(&s.name), &s.generic_params)?;
                 }
                 Node::Enum(e) => {
-                    for method in &e.methods {
-                        let hir_func = self.lower_function(method, Some(&e.name))?;
-                        self.module.functions.push(hir_func);
-                    }
+                    self.lower_methods_with_generics(&e.methods, Some(&e.name), &e.generic_params)?;
                 }
                 Node::Actor(a) => {
                     // Lower actor methods (actors are lowered like classes)
@@ -2546,20 +2834,7 @@ impl Lowerer {
                     }
                 }
                 Node::Impl(impl_block) => {
-                    // Lower impl block methods (second pass)
-                    let type_name = match &impl_block.target_type {
-                        simple_parser::ast::Type::Simple(name) => Some(name.clone()),
-                        simple_parser::ast::Type::Generic { name, .. } => Some(name.clone()),
-                        _ => None,
-                    };
-
-                    if let Some(type_name) = type_name {
-                        for method in &impl_block.methods {
-                            let method = method_with_impl_driver_attrs(method, &impl_block.attributes);
-                            let hir_func = self.lower_function(&method, Some(&type_name))?;
-                            self.module.functions.push(hir_func);
-                        }
-                    }
+                    self.lower_impl_block(impl_block, &ast_module.items, false)?;
                 }
                 _ => {}
             }
@@ -2587,7 +2862,6 @@ impl Lowerer {
                     use_stmt.is_lazy,
                 );
                 self.module.imports.push(import);
-                let _ = self.load_imported_types(&use_stmt.path, &use_stmt.target);
             }
         }
 
@@ -2669,6 +2943,7 @@ impl Lowerer {
             super::super::LoweringOutput::with_lifetime(module, warnings, lifetime_lean4, lifetime_violations);
         // Carry out the attribution index for names that `lenient_types`
         // lowered to globals, so a link-time undefined symbol is traceable.
+        super::super::lenient_global_diag::record_batch_for_link_diagnostics(&self.lenient_globals);
         output.lenient_globals = self.lenient_globals.clone();
         // Carry out the import cycles the loader walked. These are reported,
         // not rejected: the loader has always tolerated cycles and failing here
@@ -2785,6 +3060,203 @@ fn select_impl_trait<'a>(
         }
     }
     select_impl_trait_by_overlap(&candidates, impl_method_names)
+}
+
+impl Lowerer {
+    fn collect_type_generic_names(&self, ty: &simple_parser::ast::Type, out: &mut Vec<String>) {
+        use simple_parser::ast::Type;
+        match ty {
+            Type::Simple(name) => {
+                let is_concrete_type = matches!(
+                    name.as_str(),
+                    "i8" | "i16"
+                        | "i32"
+                        | "i64"
+                        | "u8"
+                        | "u16"
+                        | "u32"
+                        | "u64"
+                        | "f32"
+                        | "f64"
+                        | "bool"
+                        | "text"
+                        | "str"
+                        | "char"
+                        | "void"
+                        | "unit"
+                        | "nil"
+                        | "Any"
+                        | "Self"
+                ) || self.module.types.lookup(name).is_some();
+                if !is_concrete_type
+                    && !name.chars().all(|ch| ch.is_ascii_digit())
+                    && !out.contains(name)
+                {
+                    out.push(name.clone());
+                }
+            }
+            Type::Generic { args, .. } => {
+                for arg in args {
+                    self.collect_type_generic_names(arg, out);
+                }
+            }
+            Type::Array { element, .. } | Type::Simd { element, .. } | Type::Optional(element) => {
+                self.collect_type_generic_names(element, out);
+            }
+            Type::Tuple(elems) | Type::Union(elems) => {
+                for elem in elems {
+                    self.collect_type_generic_names(elem, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(in crate::hir::lower) fn collect_impl_generic_params(
+        &self,
+        impl_block: &simple_parser::ast::ImplBlock,
+        type_name: &str,
+    ) -> Vec<String> {
+        let mut params = impl_block.generic_params.clone();
+        if let Some(crate::hir::HirType::Struct { generic_params, .. }) =
+            self.module.types.lookup(type_name).and_then(|id| self.module.types.get(id))
+        {
+            for gp in generic_params {
+                if !params.contains(gp) {
+                    params.push(gp.clone());
+                }
+            }
+        }
+        match &impl_block.target_type {
+            simple_parser::ast::Type::Generic { args, .. } => {
+                for arg in args {
+                    self.collect_type_generic_names(arg, &mut params);
+                }
+            }
+            simple_parser::ast::Type::Array { element, .. } => {
+                self.collect_type_generic_names(element, &mut params);
+            }
+            _ => {}
+        }
+        for ttp in &impl_block.trait_type_params {
+            self.collect_type_generic_names(ttp, &mut params);
+        }
+        params
+    }
+
+    fn select_impl_trait_or_imported<'a>(
+        &self,
+        items: &'a [simple_parser::ast::Node],
+        trait_name: &str,
+        impl_method_names: &std::collections::HashSet<&str>,
+        methods: &[simple_parser::ast::FunctionDef],
+    ) -> Option<(simple_parser::ast::TraitDef, Option<std::path::PathBuf>)> {
+        if let Some(local_trait) = select_impl_trait(
+            items,
+            trait_name,
+            impl_method_names,
+            methods_owner(methods).as_deref(),
+            &self.flatten_owner_import_bindings,
+        ) {
+            return Some((local_trait.clone(), None));
+        }
+        if methods_owner(methods).is_none()
+            && !items
+                .iter()
+                .any(|item| matches!(item, simple_parser::ast::Node::Trait(t) if t.name == trait_name))
+        {
+            if let Some(decl) = self.trait_declaration_for_current_owner(trait_name) {
+                return Some((decl.declaration.clone(), Some(decl.source_file.clone())));
+            }
+        }
+        None
+    }
+
+    fn lower_methods_with_generics(
+        &mut self,
+        methods: &[simple_parser::ast::FunctionDef],
+        owner_name: Option<&str>,
+        generics: &[String],
+    ) -> LowerResult<()> {
+        let prev = std::mem::replace(&mut self.active_impl_generic_params, generics.to_vec());
+        let res = (|| -> LowerResult<()> {
+            for method in methods {
+                let hir_func = self.lower_function(method, owner_name)?;
+                self.module.functions.push(hir_func);
+            }
+            Ok(())
+        })();
+        self.active_impl_generic_params = prev;
+        res
+    }
+
+    fn lower_impl_block(
+        &mut self,
+        impl_block: &simple_parser::ast::ImplBlock,
+        items: &[simple_parser::ast::Node],
+        record_hir_impl: bool,
+    ) -> LowerResult<()> {
+        let Some(ref type_name) = Self::impl_target_type_name(&impl_block.target_type) else {
+            return Ok(());
+        };
+        let saved_scope = self.enter_impl_signature_scope(impl_block, type_name);
+        let res = (|| -> LowerResult<()> {
+            for method in &impl_block.methods {
+                let method = method_with_impl_driver_attrs(method, &impl_block.attributes);
+                let hir_func = self.lower_function(&method, Some(type_name))?;
+                self.module.functions.push(hir_func);
+            }
+
+            if let Some(ref trait_name) = impl_block.trait_name {
+                let type_id = self
+                    .resolve_type(&simple_parser::ast::Type::Simple(type_name.clone()))
+                    .unwrap_or(TypeId::ANY);
+                let mut methods_map = HashMap::new();
+                let impl_method_names: std::collections::HashSet<&str> =
+                    impl_block.methods.iter().map(|m| m.name.as_str()).collect();
+                for method in &impl_block.methods {
+                    let fn_name = format!("{}.{}", type_name, method.name);
+                    methods_map.insert(method.name.clone(), fn_name);
+                }
+
+                if let Some((trait_def, imported_source)) =
+                    self.select_impl_trait_or_imported(items, trait_name, &impl_method_names, &impl_block.methods)
+                {
+                    for default_method in &trait_def.methods {
+                        if default_method.is_abstract || impl_method_names.contains(default_method.name.as_str()) {
+                            continue;
+                        }
+                        let default_method =
+                            method_with_impl_driver_attrs(default_method, &impl_block.attributes);
+                        let previous_file = self.current_file.clone();
+                        if let Some(ref source_file) = imported_source {
+                            self.current_file = Some(source_file.clone());
+                        }
+                        let lowered = self.lower_function(&default_method, Some(type_name));
+                        self.current_file = previous_file;
+                        let hir_func = lowered?;
+                        self.module.functions.push(hir_func);
+
+                        let fn_name = format!("{}.{}", type_name, default_method.name);
+                        methods_map.insert(default_method.name.clone(), fn_name);
+                    }
+                }
+
+                if record_hir_impl {
+                    self.module.impls.push(crate::hir::HirImpl {
+                        type_id,
+                        trait_id: None,
+                        trait_name: impl_block.trait_name.clone(),
+                        type_name: type_name.clone(),
+                        methods: methods_map,
+                    });
+                }
+            }
+            Ok(())
+        })();
+        self.restore_impl_signature_scope(saved_scope);
+        res
+    }
 }
 
 /// Owning module of a flattened impl/struct/trait, read from the owner tag the
@@ -2940,12 +3412,9 @@ fn implicit_struct_trait_methods<'a>(
     for item in items {
         let Node::Impl(implementation) = item else { continue };
         if implementation.trait_name.is_some() { continue; }
-        let target = match &implementation.target_type {
-            ast::Type::Simple(name) | ast::Type::Generic { name, .. } => name,
-            _ => continue,
-        };
+        let Some(target) = Lowerer::impl_target_type_name(&implementation.target_type) else { continue };
         let impl_owner = declaration_owner(&implementation.attributes, &implementation.methods);
-        let imported = impl_owner.as_ref().and_then(|o| bindings.get(o)).and_then(|b| b.get(target));
+        let imported = impl_owner.as_ref().and_then(|o| bindings.get(o)).and_then(|b| b.get(&target));
         let matches = if let Some((source_owner, source_name)) = imported {
             owner.as_ref() == Some(source_owner) && structure.name == *source_name
         } else {

@@ -27,7 +27,7 @@ use common.ui.window_scene.{
     BackgroundSpec, SharedWmScene, SharedWmWindow, shared_wm_background_color
 }
 use common.ui.render_opt.damage_plan.{
-    DAMAGE_PLAN_FULL, DAMAGE_FALLBACK_INVALID
+    DAMAGE_PLAN_FULL, DAMAGE_PLAN_LOCAL, DAMAGE_FALLBACK_INVALID
 }
 use os.compositor.engine2d_wm_frame_executor.{
     Engine2dWmFrameExecutor, engine2d_wm_background_key
@@ -144,6 +144,38 @@ describe "retained old/new damage plan semantics":
             first, engine2d_wm_background_key(first), 2, 7, "09:42")
         expect(plan.mode).to_equal(DAMAGE_PLAN_FULL)
         expect(plan.planned_pixels).to_equal(W * H)
+
+    it "replays only the old and new clock boxes when the clock rects are known":
+        # @req REQ-SSPEC-UNIT
+        step("A clock-only tick with recorded old/new clock boxes plans LOCAL damage over both boxes")
+        var executor = _executor()
+        val bg = shared_wm_background_color(0xff101010u32)
+        val first = _scene(10, 10, bg)
+        executor.record_successful_scene(
+            first, engine2d_wm_background_key(first), 1, 7, "09:41", [204, 214, 36, 28])
+        val plan = executor.retained_scene_damage_plan(
+            first, engine2d_wm_background_key(first), 1, 7, "09:42", [204, 214, 40, 28])
+        expect(plan.mode).to_equal(DAMAGE_PLAN_LOCAL)
+        expect(plan.planned_pixels).to_be_less_than(W * H / 4)
+        var covers_clock = false
+        var i: i64 = 0
+        while i + 3 < plan.rects.len():
+            if plan.rects[i] <= 204 and plan.rects[i + 1] <= 214 and plan.rects[i] + plan.rects[i + 2] >= 244 and plan.rects[i + 1] + plan.rects[i + 3] >= 242:
+                covers_clock = true
+            i = i + 4
+        assert_true(covers_clock)
+
+    it "still fails closed on a clock change when the new clock box is unknown":
+        # @req REQ-SSPEC-UNIT
+        step("Recorded old box but no new box: full plan")
+        var executor = _executor()
+        val bg = shared_wm_background_color(0xff101010u32)
+        val first = _scene(10, 10, bg)
+        executor.record_successful_scene(
+            first, engine2d_wm_background_key(first), 1, 7, "09:41", [204, 214, 36, 28])
+        val plan = executor.retained_scene_damage_plan(
+            first, engine2d_wm_background_key(first), 1, 7, "09:42")
+        expect(plan.mode).to_equal(DAMAGE_PLAN_FULL)
 
     it "fails closed to full when the background identity changes":
         # @req REQ-SSPEC-UNIT

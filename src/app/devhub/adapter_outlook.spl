@@ -17,7 +17,7 @@
 # Throttling: respect Retry-After on HTTP 429; exponential backoff with
 #             max 3 retries.
 
-use std.nogc_sync_mut.http_client.{
+use std.http_client.{
     create_request,
     request_add_header,
     request_set_body,
@@ -25,19 +25,18 @@ use std.nogc_sync_mut.http_client.{
     response_get_status_code,
     response_get_body,
     response_get_header,
-    http_get,
-    http_post,
     http_delete,
 }
-use std.nogc_sync_mut.http_client.types.{
+use std.http_client.types.{
     METHOD_GET,
     METHOD_POST,
     METHOD_PATCH,
     url_encode,
 }
-use std.nogc_sync_mut.sffi.system.{sleep_secs}
-use std.nogc_sync_mut.oauth2.{oauth2_get_token, oauth2_parse_retry_after}
-use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_field, json_value_has, json_value_len, json_value_at, json_value_serialize}
+use std.sffi.system.{sleep_secs}
+use std.oauth2.{oauth2_get_token, oauth2_parse_retry_after}
+use app.devhub.outlook_pagination.{outlook_page_error, outlook_page_response_error}
+use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_field, json_value_has, json_value_len, json_value_at, json_value_serialize, json_value_as_text}
 use std.common.text_advanced.{escape_json}
 
 
@@ -168,7 +167,7 @@ fn _outlook_send(req: (text, text, list, text)) -> (i64, text, list, text):
 
 fn _outlook_get(client: OutlookClient, url: text) -> (i64, text):
     """GET an absolute URL, returning (status, body)."""
-    var req = http_get(url)
+    var req = create_request(METHOD_GET, url)
     req = _outlook_attach_auth(req, client)
     val resp = _outlook_send(req)
     (response_get_status_code(resp), response_get_body(resp))
@@ -176,7 +175,7 @@ fn _outlook_get(client: OutlookClient, url: text) -> (i64, text):
 
 fn _outlook_post(client: OutlookClient, url: text, payload: text) -> (i64, text):
     """POST an absolute URL with a JSON payload."""
-    var req = http_post(url, payload)
+    var req = request_set_body(create_request(METHOD_POST, url), payload)
     req = _outlook_attach_auth(req, client)
     val resp = _outlook_send(req)
     (response_get_status_code(resp), response_get_body(resp))
@@ -197,12 +196,7 @@ fn _outlook_patch(client: OutlookClient, url: text, payload: text) -> (i64, text
 # ============================================================================
 
 fn _ojson_str(obj: JsonValue, key: text) -> text:
-    if not json_value_has(obj, key):
-        return ""
-    val s = json_value_serialize(json_value_field(obj, key))
-    if s.starts_with("\"") and s.ends_with("\"") and s.len() >= 2:
-        return s[1:s.len() - 1]
-    s
+    json_value_as_text(json_value_field(obj, key)) ?? ""
 
 
 fn _ojson_int(obj: JsonValue, key: text) -> i64:
@@ -270,16 +264,24 @@ fn outlook_list_folders(client: OutlookClient) -> (bool, [OutlookFolder], text):
     var folders: [OutlookFolder] = []
     var first_body = ""
 
+    var visited: [text] = []
     while url != "":
+        val page_error = outlook_page_error(client.base_url, url, visited)
+        if page_error != "":
+            return (false, folders, page_error)
+        visited.push(url)
         val (status, body) = _outlook_get(client, url)
         if first_body == "":
             first_body = body
         if status < 200 or status >= 300:
             return (false, folders, body)
         val parsed_opt = json_value_parse_opt(body)
-        if parsed_opt == nil:
+        if parsed_opt.is_none():
             return (false, folders, "invalid JSON response")
         val parsed = parsed_opt.unwrap()
+        val response_error = outlook_page_response_error(parsed)
+        if response_error != "":
+            return (false, folders, response_error)
         val arr = json_value_field(parsed, "value")
         if json_value_has(parsed, "value"):
             val n = json_value_len(arr)
@@ -288,12 +290,7 @@ fn outlook_list_folders(client: OutlookClient) -> (bool, [OutlookFolder], text):
                 folders = folders + [_parse_folder(json_value_at(arr, i))]
                 i = i + 1
         # @odata.nextLink is an absolute URL — use as-is.
-        if json_value_has(parsed, "@odata.nextLink"):
-            url = json_value_serialize(json_value_field(parsed, "@odata.nextLink"))
-            if url.starts_with("\"") and url.ends_with("\"") and url.len() >= 2:
-                url = url[1:url.len() - 1]
-        else:
-            url = ""
+        url = _ojson_str(parsed, "@odata.nextLink")
 
     (true, folders, first_body)
 
@@ -318,16 +315,24 @@ fn outlook_list_messages(client: OutlookClient, folder_id: text, filter: text, t
     var messages: [OutlookMessage] = []
     var first_body = ""
 
+    var visited: [text] = []
     while url != "":
+        val page_error = outlook_page_error(client.base_url, url, visited)
+        if page_error != "":
+            return (false, messages, page_error)
+        visited.push(url)
         val (status, body) = _outlook_get(client, url)
         if first_body == "":
             first_body = body
         if status < 200 or status >= 300:
             return (false, messages, body)
         val parsed_opt = json_value_parse_opt(body)
-        if parsed_opt == nil:
+        if parsed_opt.is_none():
             return (false, messages, "invalid JSON response")
         val parsed = parsed_opt.unwrap()
+        val response_error = outlook_page_response_error(parsed)
+        if response_error != "":
+            return (false, messages, response_error)
         val arr = json_value_field(parsed, "value")
         if json_value_has(parsed, "value"):
             val n = json_value_len(arr)
@@ -335,12 +340,7 @@ fn outlook_list_messages(client: OutlookClient, folder_id: text, filter: text, t
             while i < n:
                 messages = messages + [_parse_message(json_value_at(arr, i))]
                 i = i + 1
-        if json_value_has(parsed, "@odata.nextLink"):
-            url = json_value_serialize(json_value_field(parsed, "@odata.nextLink"))
-            if url.starts_with("\"") and url.ends_with("\"") and url.len() >= 2:
-                url = url[1:url.len() - 1]
-        else:
-            url = ""
+        url = _ojson_str(parsed, "@odata.nextLink")
 
     (true, messages, first_body)
 
@@ -365,7 +365,7 @@ fn outlook_get_message(client: OutlookClient, msg_id: text, expand_attachments: 
         return (false, empty, body)
 
     val parsed_opt = json_value_parse_opt(body)
-    if parsed_opt == nil:
+    if parsed_opt.is_none():
         return (false, empty, "invalid JSON response")
 
     (true, _parse_message(parsed_opt.unwrap()), body)
@@ -402,7 +402,7 @@ fn outlook_get_attachment_value(client: OutlookClient, msg_id: text, att_id: tex
     instead.
     """
     val url = _outlook_user_path(client, "/messages/{url_encode(msg_id)}/attachments/{url_encode(att_id)}/$value")
-    var req = http_get(url)
+    var req = create_request(METHOD_GET, url)
     req = _outlook_attach_auth(req, client)
     val resp = _outlook_send(req)
     val status = response_get_status_code(resp)

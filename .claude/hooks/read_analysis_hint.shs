@@ -29,6 +29,7 @@ ctx_decide() {
 }
 
 if [ "${1:-}" = "--selftest" ]; then
+    CTX_HINTS_FORCE=1; export CTX_HINTS_FORCE
     fail=0
     big=$(mktemp) || exit 1
     i=0; while [ "$i" -lt 300 ]; do echo "line $i"; i=$((i+1)); done > "$big"
@@ -40,13 +41,28 @@ if [ "${1:-}" = "--selftest" ]; then
     [ -z "$out" ] || { echo "selftest FAIL: missing file must be silent"; fail=1; }
     out=$(ctx_decide "" 0)
     [ -z "$out" ] || { echo "selftest FAIL: empty path must be silent"; fail=1; }
+    # Wire format: a Windows path arrives JSON-escaped (C:\\dev\\x). It must
+    # decode to C:\dev\x and then resolve for [ -f ]. Only meaningful where
+    # cygpath exists (Git Bash / MSYS / Cygwin).
+    if command -v cygpath >/dev/null 2>&1; then
+        wpath=$(cygpath -w "$big")
+        HOOK_INPUT=$(printf '{"tool_input":{"file_path":"%s"}}' "$(printf '%s' "$wpath" | sed 's/\\/\\\\/g')")
+        p=$(ctx_json_str file_path)
+        [ "$p" = "$wpath" ] || { echo "selftest FAIL: windows path not decoded: $p"; fail=1; }
+        ctx_posix_path "$p"; out=$(ctx_decide "$CTX_PATH" 0)
+        case "$out" in *'"additionalContext"'*) ;; *) echo "selftest FAIL: windows path read not hinted"; fail=1 ;; esac
+    fi
+    # Without a launchable simple-mcp the hint would be misleading: silent.
+    out=$(CTX_HINTS_FORCE= CLAUDE_PROJECT_DIR="$(dirname "$big")/no-such-project" ctx_decide "$big" 0)
+    [ -z "$out" ] || { echo "selftest FAIL: hint emitted without simple-mcp launcher"; fail=1; }
     rm -f "$big"
-    [ "$fail" -eq 0 ] && echo "PASS — read_analysis_hint selftest: 1 hinted, 3 silent"
+    [ "$fail" -eq 0 ] && echo "PASS — read_analysis_hint selftest: 1 hinted (+windows path), 4 silent"
     exit "$fail"
 fi
 
 ctx_read_input || exit 0
 path=$(ctx_json_str file_path) || exit 0
+ctx_posix_path "$path"; path=$CTX_PATH
 windowed=0
 case "$HOOK_INPUT" in *'"offset"'*|*'"limit"'*) windowed=1 ;; esac
 ctx_decide "$path" "$windowed"

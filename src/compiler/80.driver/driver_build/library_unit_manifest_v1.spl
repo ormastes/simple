@@ -1,0 +1,132 @@
+# Library unit manifest (typed simple.sdn record for the source inventory).
+#
+# Pure: the caller supplies manifest text. Name/type/dependencies come from
+# the shared `library_unit_decl_parse_v1`; this adds `project.version` and the
+# `project.sources` include/exclude globs consumed by
+# `source_inventory_resolve_unit_v1`. Every missing or malformed field fails
+# closed with a `<dir>/simple.sdn: ...` message.
+#
+#   project:
+#     sources:
+#       include: [glob, ...]   # required when `sources:` is present
+#       exclude: [glob, ...]   # optional
+#
+# No `sources:` block means every `.spl` under the unit directory.
+
+use std.common.sdn.parser (parse)
+use std.common.sdn.value.{SdnValue}
+use compiler.driver.driver_build.library_unit_plan_v1.{library_unit_decl_parse_v1, library_unit_path_normalize_v1}
+
+pub struct LibraryUnitManifestV1:
+    name: text
+    version: text
+    kind: text
+    dir: text
+    deps: [text]
+    includes: [text]   # unit-relative globs
+    excludes: [text]
+
+fn _manifest_glob_list_v1(where: text, node: SdnValue, field: text) -> Result<[text], text>:
+    val items = match node.as_array():
+        case Some(xs): xs
+        case None: return Err("{where}: project.sources.{field} is not a list")
+    var out: [text] = []
+    for item in items:
+        val g = item.as_str() ?? ""
+        if g == "":
+            return Err("{where}: project.sources.{field} has a non-text or empty entry")
+        if g.starts_with("/") or g.starts_with("\\") or (g.len() > 1 and g[1:2] == ":") or g == ".." or g.starts_with("../") or g.contains("/../"):
+            return Err("{where}: source glob '{g}' must be unit-relative")
+        out.push(g)
+    Ok(out)
+
+pub fn library_unit_manifest_parse_v1(manifest_dir: text, content: text) -> Result<LibraryUnitManifestV1, text>:
+    val decl = match library_unit_decl_parse_v1(manifest_dir, content):
+        case Ok(d): d
+        case Err(e): return Err(e)
+    val where = "{manifest_dir}/simple.sdn"
+    val root = match parse(content):
+        case Ok(v): v
+        case Err(e): return Err("{where}: {e}")
+    val version = match root.get_path("project.version"):
+        case Some(v):
+            match v.as_i64():
+                case Some(i): "{i}"
+                case None: v.as_str() ?? ""
+        case None: ""
+    if version == "":
+        return Err("{where}: project.version is missing")
+    var includes: [text] = ["**/*.spl"]
+    var excludes: [text] = []
+    match root.get_path("project.sources"):
+        case Some(src):
+            includes = match src.get("include"):
+                case Some(node):
+                    match _manifest_glob_list_v1(where, node, "include"):
+                        case Ok(xs): xs
+                        case Err(e): return Err(e)
+                case None: return Err("{where}: project.sources.include is missing")
+            if includes.len() == 0:
+                return Err("{where}: project.sources.include is empty")
+            match src.get("exclude"):
+                case Some(node):
+                    excludes = match _manifest_glob_list_v1(where, node, "exclude"):
+                        case Ok(xs): xs
+                        case Err(e): return Err(e)
+                case None:
+                    pass
+        case None:
+            pass
+    Ok(LibraryUnitManifestV1(name: decl.name, version: version, kind: decl.kind,
+        dir: decl.dir, deps: decl.deps, includes: includes, excludes: excludes))
+
+fn _manifest_closure_cycle_v1(path: [text], dep: text) -> text:
+    var pos = 0
+    var i = 0
+    while i < path.len():
+        if path[i] == dep:
+            pos = i
+        i = i + 1
+    val cycle = path[pos:]
+    cycle.join(" -> ") + " -> " + dep
+
+# Recursively walk `project.dependencies` from `root_dir`. `load` returns the
+# content of `<dir>/simple.sdn` for a normalised unit dir ("" = absent). Result
+# is every reachable unit, dependencies before dependents, each exactly once.
+# Fail closed: a missing or malformed manifest, or a dependency cycle (named by
+# its path), is an Err. Pure: all I/O lives in the caller's `load`.
+pub fn library_unit_manifest_closure_v1(root_dir: text, load: fn(text) -> text) -> Result<[LibraryUnitManifestV1], text>:
+    val root = library_unit_path_normalize_v1(base_dir: root_dir, rel: ".")
+    var manifests: {text: LibraryUnitManifestV1} = {}
+    var state: {text: i64} = {}
+    var out: [LibraryUnitManifestV1] = []
+    var path: [text] = [root]
+    var next_dep: [i64] = [0]
+    while path.len() > 0:
+        val top = path[path.len() - 1]
+        if not manifests.contains_key(top):
+            val content = load(top)
+            if content == "":
+                return Err("{top}/simple.sdn: missing manifest")
+            val parsed = match library_unit_manifest_parse_v1(top, content):
+                case Ok(m): m
+                case Err(e): return Err(e)
+            manifests[top] = parsed
+            state[top] = 1
+        val m = manifests[top]
+        val i = next_dep[next_dep.len() - 1]
+        if i >= m.deps.len():
+            state[top] = 2
+            out.push(m)
+            path.pop()
+            next_dep.pop()
+        else:
+            next_dep[next_dep.len() - 1] = i + 1
+            val dep = m.deps[i]
+            val st = state.get(dep) ?? 0
+            if st == 1:
+                return Err("{dep}/simple.sdn: dependency cycle {_manifest_closure_cycle_v1(path, dep)}")
+            if st == 0:
+                path.push(dep)
+                next_dep.push(0)
+    Ok(out)

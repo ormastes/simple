@@ -1,5 +1,24 @@
 # T16 — blend-span kernels are unreachable as a native ABI symbol: three divergent implementations, only two complete
 
+## Verification 2026-11-25 (worktree wt-p2w6-ah, release/1.0.0 HEAD f3fb8f24dc9)
+
+- **measured (source inspection)** — all three registration layers are present
+  at this HEAD:
+  - `src/compiler_rust/runtime/src/value/engine2d_simd_ops.rs:227,266` —
+    `pub extern "C" fn rt_engine2d_simd_blend_span_u32` and
+    `..._blend_const_span_u32` both defined (native-ABI provider).
+  - `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:2411` —
+    both names in the `Array(U32)` return-type OR-chain.
+  - `src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl:227-228`
+    — both `declare ptr @rt_engine2d_simd_blend_(const_)span_u32(...)` lines,
+    plus `defined_func_names` entries at :460-461 (the file has since gone
+    beyond the span-family-only precedent this doc recorded).
+- **limitation** — the `nm`/cargo evidence from 2026-08-07 was not re-run: no
+  Rust builds allowed in this lane, and `bin/simple.exe test` is blocked
+  repo-wide at this HEAD by the seed's `@representation_boundary` rejection.
+  The residual self-hosted-LLVM-build verification gap noted below remains
+  open (Stage 3 bootstrap), unchanged.
+
 **Filed:** 2026-08-07 · **Severity:** high (perf-plan unit blocked; native ABI gap)
 **Source unit:** `doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md` T16
 ("Verify the blend-span C symbols are linked and bit-exact")

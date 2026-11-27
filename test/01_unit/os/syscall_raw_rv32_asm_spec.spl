@@ -1,0 +1,44 @@
+# @cover src/os/userlib/syscall_raw.spl 80%
+"""
+## Purpose and audience
+For SimpleOS riscv32 bring-up: the brace form `asm volatile { ... in(reg) x }`
+is parsed as raw text with no operands (parser `parse_asm_braced` sets
+`constraints: []`), so the riscv32 `syscall` reached LLVM as
+`mv a7, {id}` / `in(reg) id32` and failed with "unknown operand". The
+parenthesized form lowers named operands to register constraints.
+## Operator workflow
+`bin/simple test test/01_unit/os/syscall_raw_rv32_asm_spec.spl`
+## Compatibility and limitations
+Static source-contract check; the kernel link gate exercises the real lowering.
+## Verification guidance and troubleshooting
+A failure means the riscv32 block regressed to the brace form or lost a
+register clobber that keeps LLVM from allocating an input into a0-a4/a7.
+"""
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn rv32_block() -> text:
+    val src = rt_file_read_text("src/os/userlib/syscall_raw.spl") ?? ""
+    val start = src.index_of("@cfg(riscv32)\nfn syscall(")
+    if start < 0:
+        return ""
+    src.substring(start, src.len())
+
+describe "riscv32 raw syscall inline asm":
+    it "uses the operand-lowering parenthesized asm form":
+        val blk = rv32_block()
+        expect(blk.len() > 0).to_equal(true)
+        expect(blk.index_of("asm volatile {")).to_equal(-1)  # oracle: -1 = absent; brace form drops operands
+        expect(blk).to_contain("asm volatile(")
+        expect(blk).to_contain("id = in(reg) id32")
+        expect(blk).to_contain("out = out(reg) result32")
+
+    it "clobbers every argument register the template writes":
+        val blk = rv32_block()
+        expect(blk).to_contain("clobber(\"a0\")")
+        expect(blk).to_contain("clobber(\"a1\")")
+        expect(blk).to_contain("clobber(\"a2\")")
+        expect(blk).to_contain("clobber(\"a3\")")
+        expect(blk).to_contain("clobber(\"a4\")")
+        expect(blk).to_contain("clobber(\"a7\")")
+        expect(blk).to_contain("clobber(\"memory\")")

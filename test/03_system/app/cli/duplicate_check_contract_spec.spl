@@ -27,9 +27,12 @@ fn stage_fixture(scratch_dir: text, fixture_dir: text) -> i64:
     val result = shell("rm -rf {scratch_dir} && mkdir -p {scratch_dir} && cp {fixture_dir}/*.spl {scratch_dir}/")
     result.exit_code
 
-fn run_duplicate_check(simple: text, scratch_dir: text) -> ProcessResult:
-    val cmd = "timeout 60 {simple} run src/compiler/90.tools/duplicate_check/main.spl -- {scratch_dir} --mode token --min-tokens 10 --min-lines 5 --max-allowed 0"
+fn run_duplicate_check_args(simple: text, scratch_dir: text, args: text) -> ProcessResult:
+    val cmd = "timeout 60 {simple} run src/compiler/90.tools/duplicate_check/main.spl -- {scratch_dir} {args}"
     shell(cmd)
+
+fn run_duplicate_check(simple: text, scratch_dir: text) -> ProcessResult:
+    run_duplicate_check_args(simple, scratch_dir, "--mode token --min-tokens 10 --min-lines 5 --max-allowed 0")
 
 describe "duplicate-check CLI contract":
     it "detects the duplicated pair in a scratch copy of dup_pair (nonzero exit)":
@@ -61,3 +64,22 @@ describe "duplicate-check CLI contract":
 
         expect(result.exit_code).to_equal(0)
         expect(result.stdout).to_contain("Found 0 duplicate groups")
+
+    it "rejects invalid mode and format values before scanning":
+        # @req REQ-SSPEC-SYSTEM
+        step("rejects invalid mode and format values before scanning")
+        val simple = simple_binary()
+        val scratch_dir = "/tmp/duplicate_check_contract_invalid_enum"
+        expect(stage_fixture(scratch_dir, "test/fixtures/duplication/clean_pair")).to_equal(0)
+
+        val invalid_args = [
+            "--mode tokne --format json",
+            "--mode=tokne --format=json",
+            "--mode token --format yaml",
+            "--mode=token --format=yaml"
+        ]
+        for args in invalid_args:
+            val result = run_duplicate_check_args(simple, scratch_dir, args)
+            assert_not_equal(result.exit_code, 124)
+            expect(result.exit_code).to_equal(2)
+            expect(result.stdout).to_contain("Usage: simple duplicate-check")

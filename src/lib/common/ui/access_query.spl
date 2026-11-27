@@ -1,4 +1,5 @@
 use common.text_advanced.{escape_json}
+use common.types.{Count, Millis}
 use common.ui.access_types.{
     UiAccessNode,
     UiAccessProp,
@@ -13,12 +14,12 @@ use common.ui.access_types.{
 # =========================================================================
 # Node matching
 # =========================================================================
-#
-# Text matching is case-insensitive and searches the node's own text plus the
-# identity fields and the human-facing props a widget carries its label in
-# ("label", "value", "content", "placeholder", "title", "text"). A session-built
-# button stores "OK" in props.label, not in text_value, so an identity-only
-# matcher would never find it.
+# Text matching is case-insensitive and searches the node's VALUE (text_value),
+# the identity fields, and the human-facing props a widget carries its NAME in
+# ("label", "value", "content", "placeholder", "title", "text"). text_value
+# holds only a value; a button's "OK" lives in props.label (its name), so the
+# prop scan is what finds it. A node matches if ANY field matches (boolean OR),
+# so a value that also appears as a prop is never counted twice.
 
 fn _access_ci_contains(haystack: text, needle: text) -> bool:
     if needle == "":
@@ -59,10 +60,10 @@ fn _access_node_matches_query(node: UiAccessNode, surface_id: text, kind: text, 
         return false
     true
 
-fn ui_access_find_nodes(snapshot: UiAccessSnapshot, surface_id: text, kind: text, text_query: text, limit: i32) -> [UiAccessNode]:
+pub fn ui_access_find_nodes(snapshot: UiAccessSnapshot, surface_id: text, kind: text, text_query: text, limit: Count) -> [UiAccessNode]:
     ui_access_find_nodes_filtered(snapshot, surface_id, kind, text_query, false, limit)
 
-fn ui_access_find_nodes_filtered(snapshot: UiAccessSnapshot, surface_id: text, kind: text, text_query: text, focused_only: bool, limit: i32) -> [UiAccessNode]:
+pub fn ui_access_find_nodes_filtered(snapshot: UiAccessSnapshot, surface_id: text, kind: text, text_query: text, focused_only: bool, limit: Count) -> [UiAccessNode]:
     val node_count = snapshot.nodes.len()
     if node_count == 0:
         return []
@@ -72,12 +73,12 @@ fn ui_access_find_nodes_filtered(snapshot: UiAccessSnapshot, surface_id: text, k
         val node = snapshot.nodes[read_idx]
         if _access_node_matches_query(node, surface_id, kind, text_query, focused_only):
             out = out.push(node)
-            if limit > 0 and out.len() >= limit:
+            if limit.value > 0 and out.len() >= limit.value:
                 return out
         read_idx = read_idx + 1
     out
 
-fn ui_access_find_node(snapshot: UiAccessSnapshot, canonical_id: text) -> UiAccessNode?:
+pub fn ui_access_find_node(snapshot: UiAccessSnapshot, canonical_id: text) -> UiAccessNode?:
     var i = 0
     while i < snapshot.nodes.len():
         val node = snapshot.nodes[i]
@@ -139,9 +140,10 @@ fn ui_access_query(snapshot: UiAccessSnapshot, surface_id: text, canonical_id: t
         return _access_query_failed(error, limit)
 
     if canonical_id != "":
-        val node = ui_access_find_node(snapshot, canonical_id)
-        if node == nil:
+        val found = ui_access_find_node(snapshot, canonical_id)
+        if not found.?:
             return _access_query_failed("canonical node {canonical_id} not found", limit)
+        val node = found!
         if not _access_node_matches_query(node, surface_id, kind, text_query, focused_only):
             return UiAccessQueryResult(
                 ok: true,
@@ -186,7 +188,7 @@ fn ui_access_query(snapshot: UiAccessSnapshot, surface_id: text, canonical_id: t
         limit: limit
     )
 
-fn ui_access_query_result(nodes: [UiAccessNode]) -> UiAccessQueryResult:
+pub fn ui_access_query_result(nodes: [UiAccessNode]) -> UiAccessQueryResult:
     """Wrap an already-selected node list as a query result (no cap applied)."""
     val node_count = nodes.len()
     UiAccessQueryResult(
@@ -200,7 +202,7 @@ fn ui_access_query_result(nodes: [UiAccessNode]) -> UiAccessQueryResult:
         limit: 0
     )
 
-fn ui_access_query_to_json(result: UiAccessQueryResult) -> text:
+pub fn ui_access_query_to_json(result: UiAccessQueryResult) -> text:
     var parts: [text] = [
         "{",
         _access_json_pair("ok", _access_json_bool(result.ok)), ",",
@@ -214,9 +216,9 @@ fn ui_access_query_to_json(result: UiAccessQueryResult) -> text:
     ]
     parts.join("")
 
-fn ui_access_query_snapshot_to_json(snapshot: UiAccessSnapshot, surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: bool, limit: i32) -> text:
+pub fn ui_access_query_snapshot_to_json(snapshot: UiAccessSnapshot, surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: bool, limit: Count) -> text:
     """Run a declarative query and serialize the result."""
-    ui_access_query_to_json(ui_access_query(snapshot, surface_id, canonical_id, kind, text_query, focused_only, limit))
+    ui_access_query_to_json(ui_access_query(snapshot, surface_id, canonical_id, kind, text_query, focused_only, limit.value.to_i32()))
 
 # =========================================================================
 # Declarative ensure layer
@@ -352,13 +354,13 @@ fn _access_ensure(result: UiAccessQueryResult, expectation: text, expected_value
         elapsed_ms: elapsed_ms
     )
 
-fn ui_access_ensure_result(snapshot: UiAccessSnapshot, surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: bool, limit: i32, expectation: text, expected_value: text) -> UiAccessEnsureResult:
+pub fn ui_access_ensure_result(snapshot: UiAccessSnapshot, surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: bool, limit: Count, expectation: text, expected_value: text) -> UiAccessEnsureResult:
     """Evaluate a declarative expectation over a bounded canonical query."""
-    _access_ensure(ui_access_query(snapshot, surface_id, canonical_id, kind, text_query, focused_only, limit), expectation, expected_value, 0)
+    _access_ensure(ui_access_query(snapshot, surface_id, canonical_id, kind, text_query, focused_only, limit.value.to_i32()), expectation, expected_value, 0)
 
-fn ui_access_ensure_to_json(snapshot: UiAccessSnapshot, surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: bool, limit: i32, expectation: text, expected_value: text, elapsed_ms: i64) -> text:
+pub fn ui_access_ensure_to_json(snapshot: UiAccessSnapshot, surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: bool, limit: Count, expectation: text, expected_value: text, elapsed_ms: Millis) -> text:
     """Evaluate an expectation and serialize the verdict."""
-    val result = _access_ensure(ui_access_query(snapshot, surface_id, canonical_id, kind, text_query, focused_only, limit), expectation, expected_value, elapsed_ms)
+    val result = _access_ensure(ui_access_query(snapshot, surface_id, canonical_id, kind, text_query, focused_only, limit.value.to_i32()), expectation, expected_value, elapsed_ms.value)
     ui_access_ensure_result_to_json(result)
 
 fn ui_access_ensure_result_to_json(result: UiAccessEnsureResult) -> text:
@@ -381,7 +383,7 @@ fn ui_access_ensure_result_to_json(result: UiAccessEnsureResult) -> text:
 # Values and actions
 # =========================================================================
 
-fn ui_access_node_value(node: UiAccessNode) -> text:
+pub fn ui_access_node_value(node: UiAccessNode) -> text:
     if node.text_value != "":
         return node.text_value
     var i = 0
@@ -392,13 +394,30 @@ fn ui_access_node_value(node: UiAccessNode) -> text:
         i = i + 1
     ""
 
-fn ui_access_supports_value(node: UiAccessNode) -> bool:
+pub fn ui_access_supports_value(node: UiAccessNode) -> bool:
     node.kind == "input" or node.kind == "textfield" or node.kind == "textarea" or node.text_value != ""
 
-fn ui_access_value_to_json(snapshot: UiAccessSnapshot, canonical_id: text) -> text:
+fn _access_node_prop(node: UiAccessNode, key: text) -> text:
+    var i = 0
+    while i < node.props.len():
+        if node.props[i].key == key:
+            return node.props[i].value
+        i = i + 1
+    ""
+
+pub fn ui_access_node_name(node: UiAccessNode) -> text:
+    """Accessible name: label/title/alt/placeholder/content by widget kind, else the value."""
+    val keys = if node.kind == "panel": ["title"] else: if node.kind == "image": ["alt"] else: if node.kind == "textfield": ["placeholder", "label"] else: ["label", "content"]
+    for key in keys:
+        val v = _access_node_prop(node, key)
+        if v != "":
+            return v
+    node.text_value
+
+pub fn ui_access_value_to_json(snapshot: UiAccessSnapshot, canonical_id: text) -> text:
     """Serialize the typed value of one canonical node."""
-    val node = ui_access_find_node(snapshot, canonical_id)
-    if node == nil:
+    val found = ui_access_find_node(snapshot, canonical_id)
+    if not found.?:
         var missing: [text] = [
             "{",
             _access_json_pair("canonical_id", _access_json_str(canonical_id)), ",",
@@ -407,6 +426,7 @@ fn ui_access_value_to_json(snapshot: UiAccessSnapshot, canonical_id: text) -> te
             "}"
         ]
         return missing.join("")
+    val node = found!
     var parts: [text] = [
         "{",
         _access_json_pair("canonical_id", _access_json_str(node.canonical_id)), ",",
@@ -419,7 +439,7 @@ fn ui_access_value_to_json(snapshot: UiAccessSnapshot, canonical_id: text) -> te
     ]
     parts.join("")
 
-fn ui_access_node_action_name(node: UiAccessNode, requested: text) -> text:
+pub fn ui_access_node_action_name(node: UiAccessNode, requested: text) -> text:
     """Resolve the dispatchable action name for an already-resolved node."""
     val wanted = if requested == "": "click" else: requested
     var i = 0
@@ -430,14 +450,13 @@ fn ui_access_node_action_name(node: UiAccessNode, requested: text) -> text:
     val verb = if wanted == "invoke" or wanted == "press" or wanted == "activate": "click" else: wanted
     "{verb}_{node.widget_id}"
 
-fn ui_access_resolve_action_name(snapshot: UiAccessSnapshot, canonical_id: text, requested: text) -> text:
+pub fn ui_access_resolve_action_name(snapshot: UiAccessSnapshot, canonical_id: text, requested: text) -> text:
     """Resolve the dispatchable action name for a canonical node reference.
 
     An action the node declares is kept verbatim; anything else becomes a
     widget-targeted `{verb}_{widget_id}`, with the invoke/press aliases folded
     onto `click`."""
-    val node = ui_access_find_node(snapshot, canonical_id)
-    if node != nil:
+    if val node = ui_access_find_node(snapshot, canonical_id):
         return ui_access_node_action_name(node, requested)
     val wanted = if requested == "": "click" else: requested
     val verb = if wanted == "invoke" or wanted == "press" or wanted == "activate": "click" else: wanted
@@ -450,10 +469,10 @@ fn ui_access_resolve_action_name(snapshot: UiAccessSnapshot, canonical_id: text,
 # Snapshot serialization
 # =========================================================================
 
-fn ui_access_snapshot_to_text(snapshot: UiAccessSnapshot) -> text:
+pub fn ui_access_snapshot_to_text(snapshot: UiAccessSnapshot) -> text:
     "UiAccessSnapshot surfaces={snapshot.surfaces.len()} nodes={snapshot.nodes.len()} active={snapshot.active_surface}"
 
-fn ui_access_snapshot_to_json(snapshot: UiAccessSnapshot) -> text:
+pub fn ui_access_snapshot_to_json(snapshot: UiAccessSnapshot) -> text:
     var parts: [text] = [
         "{",
         _access_json_pair("protocol_version", "{snapshot.protocol_version}"), ",",
@@ -467,7 +486,7 @@ fn ui_access_snapshot_to_json(snapshot: UiAccessSnapshot) -> text:
     ]
     parts.join("")
 
-fn ui_access_surface_to_json(surface: UiAccessSurface) -> text:
+pub fn ui_access_surface_to_json(surface: UiAccessSurface) -> text:
     var parts: [text] = [
         "{",
         _access_json_pair("surface_id", _access_json_str(surface.surface_id)), ",",
@@ -480,13 +499,14 @@ fn ui_access_surface_to_json(surface: UiAccessSurface) -> text:
     ]
     parts.join("")
 
-fn ui_access_surface_scope_to_json(snapshot: UiAccessSnapshot, surface_id: text) -> text:
+pub fn ui_access_surface_scope_to_json(snapshot: UiAccessSnapshot, surface_id: text) -> text:
     """Serialize one surface together with the nodes it owns.
 
     Returns "{}" when the surface is not present in the snapshot."""
-    val surface = ui_access_find_surface(snapshot, surface_id)
-    if surface == nil:
+    val found = ui_access_find_surface(snapshot, surface_id)
+    if not found.?:
         return "{}"
+    val surface = found!
     var owned: [UiAccessNode] = []
     var i = 0
     while i < snapshot.nodes.len():
@@ -507,7 +527,7 @@ fn ui_access_surface_scope_to_json(snapshot: UiAccessSnapshot, surface_id: text)
     ]
     parts.join("")
 
-fn ui_access_events_to_json(events: [UiAccessEvent]) -> text:
+pub fn ui_access_events_to_json(events: [UiAccessEvent]) -> text:
     val event_count = events.len()
     if event_count == 0:
         return "[]"
@@ -559,7 +579,7 @@ fn _access_node_to_json(node: UiAccessNode) -> text:
     ]
     parts.join("")
 
-fn ui_access_node_to_json(node: UiAccessNode) -> text:
+pub fn ui_access_node_to_json(node: UiAccessNode) -> text:
     """Serialize ONE access node with the shared snapshot node encoding.
 
     Exposed so an app that streams its snapshot in chunks (Calc's access host)

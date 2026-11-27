@@ -1,18 +1,20 @@
 # graphics_2d_showcase_gui.spl — native window entry for the Engine2D gallery.
 # Also supports WM-client mode when SIMPLE_WM_APP_MODE=client is set.
+# Uses std.io.window_winit via graphics_2d_showcase for standalone native windows.
 
 # NOTE: sibling-relative import (not examples.ui.graphics_2d_showcase): the seed
 # resolver only matches dot-form numbered dirs (NN.name), so the examples.ui.*
 # path fails at module load under src/compiler_rust/target/bootstrap/simple
 # ("Cannot resolve module: examples.ui.graphics_2d_showcase"). The sibling form
 # resolves file-relative and works in both lanes.
-use graphics_2d_showcase.{run_graphics_2d_showcase}
+use graphics_2d_showcase.{run_graphics_2d_showcase, showcase_selected_backend}
 use std.gpu.engine2d.engine.{Engine2D}
 use std.io_runtime.{env_get, file_exists, file_read, getpid, file_write}
 use std.common.image.ppm_decode.{encode_ppm_p6}
 use std.nogc_sync_mut.sffi.io.{file_write_bytes}
 use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
-use common.ui.wm_app_process_contract.{WM_APP_MODE_ENV, WM_BRIDGE_FILE_ENV, WM_FRAME_FILE_ENV, WM_EVENT_FILE_ENV, WM_FRAME_SEQ_FILE_ENV, WM_CLIENT_HOLD_ENV, wm_app_mode_is_client, wm_graphics_2d_showcase_bridge_request_sized, wm_fs_bridge_encode, wm_graphics_2d_showcase_event_path, wm_graphics_2d_showcase_frame_seq_path}
+use std.diag.{dbg_stage, dbg_deadline, dbg_deadline_clear, dbg_event_hop, dbg_events_on, dbg_provenance}
+use common.ui.wm_app_process_contract.{WmFsAppBridgeRequest, WmFsAppEvent, WmFsFrameReceipt, WM_APP_MODE_ENV, WM_BRIDGE_FILE_ENV, WM_FRAME_FILE_ENV, WM_EVENT_FILE_ENV, WM_FRAME_SEQ_FILE_ENV, WM_CLIENT_HOLD_ENV, wm_app_mode_is_client, wm_graphics_2d_showcase_bridge_request_sized, graphics_2d_showcase_window_title, wm_fs_bridge_encode, wm_graphics_2d_showcase_event_path, wm_graphics_2d_showcase_frame_seq_path, wm_fs_app_event_seq_path, wm_fs_app_event_decode, wm_fs_frame_checksum, wm_fs_frame_receipt, wm_fs_frame_receipt_encode, wm_fs_frame_receipt_path}
 
 # Design-space reference dimensions. The gallery below is authored in this
 # 800x600 coordinate space and scaled up to the resolved render resolution.
@@ -42,6 +44,7 @@ val PURPLE: u32 = 0xFFA855F7u32
 val SHOWCASE_RESOLUTION_ENV: text = "SHOWCASE_RESOLUTION"
 val SHOWCASE_DPI_ENV: text = "SHOWCASE_DPI"
 val SHOWCASE_DRY_RUN_ENV: text = "SHOWCASE_DRY_RUN"
+val SHOWCASE_BACKEND_ENV: text = "SIMPLE_GUI_BACKEND"
 
 class ShowcaseSize:
     width: i32
@@ -224,6 +227,42 @@ fn wm_draw_showcase(mut e: Engine2D, rw: i32, rh: i32, dpi: i32) -> Engine2D:
     e.draw_engine(sx(38, rw), sy(495, rh), child)
     e.draw_engine_opacity(sx(138, rw), sy(495, rh), child, 450)
     child.shutdown()
+    # Enhanced crisp card: AA 5-point star, concentric circles, and TrueType SFNT text.
+    e.draw_rounded_rect(sx(242, rw), sy(462, rh), sx(334, rw), sy(108, rh), sx(12, rw), 0xFF0F172Au32)
+    e.draw_rounded_rect_outline(sx(242, rw), sy(462, rh), sx(334, rw), sy(108, rh), sx(12, rw), CYAN, sd(2, rw, dpi))
+    val star_cx = sx(286, rw)
+    val star_cy = sy(518, rh)
+    val star_r_out = sx(28, rw)
+    val star_r_in = sx(12, rw)
+    val star_xs = [
+        star_cx,
+        star_cx + (star_r_in * 59) / 100,
+        star_cx + (star_r_out * 95) / 100,
+        star_cx + (star_r_in * 95) / 100,
+        star_cx + (star_r_out * 59) / 100,
+        star_cx,
+        star_cx - (star_r_out * 59) / 100,
+        star_cx - (star_r_in * 95) / 100,
+        star_cx - (star_r_out * 95) / 100,
+        star_cx - (star_r_in * 59) / 100
+    ]
+    val star_ys = [
+        star_cy - star_r_out,
+        star_cy - (star_r_in * 81) / 100,
+        star_cy - (star_r_out * 31) / 100,
+        star_cy + (star_r_in * 31) / 100,
+        star_cy + (star_r_out * 81) / 100,
+        star_cy + star_r_in,
+        star_cy + (star_r_out * 81) / 100,
+        star_cy + (star_r_in * 31) / 100,
+        star_cy - (star_r_out * 31) / 100,
+        star_cy - (star_r_in * 81) / 100
+    ]
+    e.draw_polygon_filled(star_xs, star_ys, 10, AMBER)
+    e.draw_circle_filled(sx(352, rw), sy(518, rh), sx(24, rw), 0xFF14B8A6u32)
+    e.draw_circle_thick(sx(352, rw), sy(518, rh), sx(14, rw), WHITE, sd(3, rw, dpi))
+    e.draw_text_sfnt_baseline_aa(sx(394, rw), sy(508, rh), "SFNT VECTOR", WHITE, sd(18, rw, dpi) as f64, "")
+    e.draw_text_sfnt_baseline_aa(sx(394, rw), sy(542, rh), "HEFILTB AO80", CYAN, sd(14, rw, dpi) as f64, "assets/fonts/google-fonts/ofl/bungee/Bungee-Regular.ttf")
     e
 
 # Same SHOWCASE_PPM_SCALE contract as widget_showcase_gui.showcase_ppm_scale():
@@ -238,7 +277,116 @@ fn wm_frame_scale() -> i32:
         return 2
     1
 
+class WmGraphicsInputReceipt:
+    last_event_seq: i64
+    pointer_move_count: i64
+    drag_move_count: i64
+    pointer_down_count: i64
+    pointer_up_count: i64
+    saw_pointer_move: bool
+    saw_drag_move: bool
+    saw_pointer_down: bool
+    saw_pointer_up: bool
+
+fn wm_input_receipt_default() -> WmGraphicsInputReceipt:
+    WmGraphicsInputReceipt(
+        last_event_seq: 0,
+        pointer_move_count: 0,
+        drag_move_count: 0,
+        pointer_down_count: 0,
+        pointer_up_count: 0,
+        saw_pointer_move: false,
+        saw_drag_move: false,
+        saw_pointer_down: false,
+        saw_pointer_up: false
+    )
+
+fn wm_input_receipt_complete(receipt: WmGraphicsInputReceipt) -> bool:
+    receipt.saw_pointer_move and receipt.saw_drag_move and
+        receipt.saw_pointer_down and receipt.saw_pointer_up
+
+fn wm_apply_input_event(receipt: WmGraphicsInputReceipt, ev: WmFsAppEvent) -> WmGraphicsInputReceipt:
+    var pointer_move_count = receipt.pointer_move_count
+    var drag_move_count = receipt.drag_move_count
+    var pointer_down_count = receipt.pointer_down_count
+    var pointer_up_count = receipt.pointer_up_count
+    var saw_pointer_move = receipt.saw_pointer_move
+    var saw_drag_move = receipt.saw_drag_move
+    var saw_pointer_down = receipt.saw_pointer_down
+    var saw_pointer_up = receipt.saw_pointer_up
+    if ev.kind == "move":
+        pointer_move_count = pointer_move_count + 1
+        saw_pointer_move = true
+        if ev.pressed and saw_pointer_down:
+            drag_move_count = drag_move_count + 1
+            saw_drag_move = true
+    elif ev.kind == "down" and ev.button == 0 and ev.pressed:
+        pointer_down_count = pointer_down_count + 1
+        saw_pointer_down = true
+    elif ev.kind == "up" and ev.button == 0 and not ev.pressed:
+        pointer_up_count = pointer_up_count + 1
+        if saw_pointer_down:
+            saw_pointer_up = true
+    WmGraphicsInputReceipt(
+        last_event_seq: ev.seq,
+        pointer_move_count: pointer_move_count,
+        drag_move_count: drag_move_count,
+        pointer_down_count: pointer_down_count,
+        pointer_up_count: pointer_up_count,
+        saw_pointer_move: saw_pointer_move,
+        saw_drag_move: saw_drag_move,
+        saw_pointer_down: saw_pointer_down,
+        saw_pointer_up: saw_pointer_up
+    )
+
+fn wm_consume_next_input_event(event_path: text, receipt: WmGraphicsInputReceipt) -> (WmGraphicsInputReceipt, bool):
+    if event_path == "":
+        return (receipt, false)
+    val next_seq = receipt.last_event_seq + 1
+    val next_path = wm_fs_app_event_seq_path(event_path, next_seq)
+    if not file_exists(next_path):
+        return (receipt, false)
+    if dbg_events_on():
+        dbg_event_hop("wm-{next_seq}", "child_event_file_read", "path={next_path}")
+    val ev = wm_fs_app_event_decode(file_read(next_path))
+    if ev.seq != next_seq:
+        if dbg_events_on():
+            dbg_event_hop("wm-{next_seq}", "child_event_decode_rejected", "decoded_seq={ev.seq} kind={ev.kind}")
+        return (receipt, false)
+    if dbg_events_on():
+        dbg_event_hop("wm-{next_seq}", "child_event_apply", "kind={ev.kind} button={ev.button} pressed={ev.pressed} x={ev.x} y={ev.y}")
+    (wm_apply_input_event(receipt, ev), true)
+
+fn wm_draw_input_receipt(mut engine: Engine2D, rw: i32, rh: i32, dpi: i32, receipt: WmGraphicsInputReceipt) -> Engine2D:
+    val complete = wm_input_receipt_complete(receipt)
+    val panel_color = if complete: GREEN else: PANEL
+    engine.draw_rect_filled(sx(594, rw), sy(448, rh), sx(188, rw), sy(129, rh), panel_color)
+    engine.draw_rect(sx(594, rw), sy(448, rh), sx(188, rw), sy(129, rh), CYAN)
+    if complete:
+        engine.draw_text(sx(625, rw), sy(495, rh), "INPUT OK", WHITE, sd(14, rw, dpi))
+    else:
+        val pointer_state = if receipt.saw_pointer_move and receipt.saw_pointer_down and receipt.saw_pointer_up: "POINTER OK" else: "POINTER ..."
+        val drag_state = if receipt.saw_drag_move: "DRAG OK" else: "DRAG ..."
+        engine.draw_text(sx(604, rw), sy(470, rh), pointer_state, WHITE, sd(10, rw, dpi))
+        engine.draw_text(sx(604, rw), sy(520, rh), drag_state, WHITE, sd(10, rw, dpi))
+    engine
+
+fn wm_publish_client_frame(pixels: [u32], frame_path: text, receipt_path: text, seq_path: text, receipt: WmFsFrameReceipt, frame_w: i32, frame_h: i32) -> bool:
+    if pixels.len() != frame_w * frame_h:
+        return false
+    if receipt.pixel_count != pixels.len() or receipt.checksum != wm_fs_frame_checksum(pixels):
+        return false
+    val bytes = encode_ppm_p6(frame_w.to_u32(), frame_h.to_u32(), pixels)
+    if bytes.len() == 0 or not file_write_bytes(frame_path, bytes):
+        return false
+    if not file_write(receipt_path, wm_fs_frame_receipt_encode(receipt)):
+        return false
+    # Sequence is the commit marker after both mutable payloads are complete.
+    file_write(seq_path, receipt.frame_seq.to_text())
+
 fn run_wm_client_graphics_2d() -> i64:
+    dbg_stage("wm_child", "launch_start")
+    dbg_deadline("wm-child-first-frame", 300000)
     val size = resolve_showcase_dimensions()
     val render_w = size.width
     val render_h = size.height
@@ -255,6 +403,7 @@ fn run_wm_client_graphics_2d() -> i64:
     val frame_path = env_get(WM_FRAME_FILE_ENV) ?? ""
     if bridge_path == "" or frame_path == "":
         print "[wm-graphics-2d-client] error=missing-bridge-env"
+        dbg_stage("wm_child", "bridge_env_missing")
         return 2
 
     # Bridge FIRST, frame second: the host's bridge wait must not sit behind
@@ -264,13 +413,54 @@ fn run_wm_client_graphics_2d() -> i64:
     val frame_scale = wm_frame_scale()
     val frame_w = render_w / frame_scale
     val frame_h = render_h / frame_scale
+    val configured_gui_backend = (env_get(SHOWCASE_BACKEND_ENV) ?? "").trim()
+    val configured_2d_backend = (env_get("SIMPLE_2D_BACKEND") ?? "").trim()
+    val configured_backend = if configured_gui_backend != "": configured_gui_backend else: configured_2d_backend
+    val requested_backend = if configured_backend == "": "cpu_simd" else: configured_backend
     val pid = getpid()
-    val req = wm_graphics_2d_showcase_bridge_request_sized(pid, frame_path, frame_w + 8, frame_h + 32)
+    val base_req = wm_graphics_2d_showcase_bridge_request_sized(
+        pid,
+        frame_path,
+        frame_w + 8,
+        frame_h + 32
+    )
+    val req = WmFsAppBridgeRequest(
+        kind: base_req.kind,
+        source_path: base_req.source_path,
+        app_id: base_req.app_id,
+        title: graphics_2d_showcase_window_title(requested_backend),
+        pid: base_req.pid,
+        window_w: base_req.window_w,
+        window_h: base_req.window_h,
+        content: base_req.content,
+        frame_path: base_req.frame_path,
+        event_path: base_req.event_path,
+        frame_seq_path: base_req.frame_seq_path
+    )
     if not file_write(bridge_path, wm_fs_bridge_encode(req)):
         print "[wm-graphics-2d-client] error=bridge-write-failed path={bridge_path}"
+        dbg_stage("wm_child", "bridge_write_failed")
         return 1
+    dbg_stage("wm_child", "bridge_write_done")
 
-    var engine = Engine2D.create_offscreen(frame_w, frame_h)
+    dbg_stage("wm_child", "backend_create_start")
+    val requested_engine = Engine2D.create_requested_backend(frame_w, frame_h, requested_backend)
+    var engine = match requested_engine:
+        Ok(value): value
+        Err(reason):
+            print "[wm-graphics-2d-client] error=backend-unavailable requested_backend={requested_backend} reason={reason}"
+            dbg_stage("wm_child", "backend_create_failed")
+            return 3
+    val actual_backend = engine.backend_name()
+    dbg_stage("wm_child", "backend_create_done")
+    if actual_backend != requested_backend:
+        print "[wm-graphics-2d-client] error=backend-mismatch requested_backend={requested_backend} actual_backend={actual_backend}"
+        engine.shutdown()
+        return 3
+    if not dbg_provenance(requested_backend, actual_backend, "wm_graphics_2d_backend"):
+        engine.shutdown()
+        return 3
+    dbg_stage("wm_child", "showcase_draw_start")
     engine = wm_draw_showcase(engine, frame_w, frame_h, dpi)
     var receipt = wm_input_receipt_default()
     engine = wm_draw_input_receipt(engine, frame_w, frame_h, dpi, receipt)
@@ -289,29 +479,27 @@ fn run_wm_client_graphics_2d() -> i64:
     val initial_device_identity = initial_readback.device_identity
     dbg_stage("wm_child", "device_readback_done")
     engine.present()
-    # read_pixels_with_source() performs the real backend readback (the
-    # standalone showcase uses it); the bare read_pixels() returns a blank
-    # buffer here, producing an all-zero PPM frame.
-    val pixels = engine.read_pixels_with_source().pixels
-
-    if pixels.len() != frame_w * frame_h:
-        print "[wm-graphics-2d-client] error=render-failed pixels={pixels.len()}"
+    dbg_stage("wm_child", "present_done")
+    if requested_backend == "vulkan" and (initial_readback_source != "device_readback" or initial_backend_handle <= 0 or initial_device_identity <= 0):
+        print "[wm-graphics-2d-client] error=non-device-vulkan-readback source={initial_readback_source} backend_handle={initial_backend_handle} device_identity={initial_device_identity}"
+        engine.shutdown()
+        return 4
+    if requested_backend == "vulkan" and not dbg_provenance("device_readback", initial_readback_source, "wm_graphics_2d_vulkan_initial_readback"):
+        engine.shutdown()
+        return 4
+    val initial_frame_receipt = wm_fs_frame_receipt(
+        0, frame_seq, actual_backend, initial_readback_source,
+        initial_backend_handle, initial_device_identity, initial_pixels.len(),
+        wm_fs_frame_checksum(initial_pixels)
+    )
+    if not wm_publish_client_frame(initial_pixels, frame_path, frame_receipt_path, seq_path, initial_frame_receipt, frame_w, frame_h):
+        print "[wm-graphics-2d-client] error=initial-frame-write-failed path={frame_path}"
         engine.shutdown()
         return 1
+    dbg_stage("wm_child", "first_frame_write_done")
+    dbg_deadline_clear("wm-child-first-frame")
 
-    val bytes = encode_ppm_p6(frame_w.to_u32(), frame_h.to_u32(), pixels)
-    if bytes.len() == 0 or not file_write_bytes(frame_path, bytes):
-        print "[wm-graphics-2d-client] error=frame-write-failed path={frame_path}"
-        engine.shutdown()
-        return 1
-
-    val seq_path = wm_graphics_2d_showcase_frame_seq_path(frame_path)
-    if not file_write(seq_path, "1"):
-        print "[wm-graphics-2d-client] error=seq-write-failed path={seq_path}"
-        engine.shutdown()
-        return 1
-
-    print "[wm-graphics-2d-client] source=graphics_2d_showcase_gui.spl pid={pid} bridge={bridge_path} frame={frame_path}"
+    print "[wm-graphics-2d-client] source=graphics_2d_showcase_gui.spl pid={pid} bridge={bridge_path} frame={frame_path} receipt={frame_receipt_path} event={event_path} event_seq=0 frame_seq={frame_seq} requested_backend={requested_backend} actual_backend={actual_backend} readback_source={initial_readback_source} backend_handle={initial_backend_handle} device_identity={initial_device_identity} pixel_count={initial_frame_receipt.pixel_count} checksum={initial_frame_receipt.checksum}"
 
     if (env_get(WM_CLIENT_HOLD_ENV) ?? "") == "1":
         var ticks: i64 = 0
@@ -356,4 +544,4 @@ fn run_wm_client_graphics_2d() -> i64:
 fn main() -> i64:
     if wm_app_mode_is_client(env_get(WM_APP_MODE_ENV) ?? ""):
         return run_wm_client_graphics_2d()
-    run_graphics_2d_showcase(true, "software")
+    run_graphics_2d_showcase(true, showcase_selected_backend())

@@ -1,0 +1,245 @@
+use std.spec.{describe, it, expect, assert_true, expect_not}
+use std.io.{file_read}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+fn shared_ring_lib_src() -> text:
+    [
+        "pub enum RingErr:",
+        "    Empty",
+        "    Bad",
+        "pub struct RingTok:",
+        "    id: i64",
+        "pub struct RingSub<Op>:",
+        "    token: RingTok",
+        "    task_key: u64",
+        "pub struct RingCpl<Cpl>:",
+        "    token: RingTok",
+        "    task_key: u64",
+        "    payload: Cpl",
+        "pub class Ring<Op, Cpl>:",
+        "    owner: u64",
+        "    me take_sub() -> Result<RingSub<Op>?, RingErr>:",
+        "        Ok(None)",
+        "    me take_cpl(owner: u64) -> Result<RingCpl<Cpl>?, RingErr>:",
+        "        Ok(Some(RingCpl(token: RingTok(id: 1), task_key: 7u64, payload: 0)))",
+        "pub enum TaskPollResult<T>:",
+        "    Ready(T)",
+        "    Pending(RingTok)",
+        "pub class AsyncSubscriptionI64:",
+        "    fn poll() -> TaskPollResult<Result<i64, RingErr>>:",
+        "        TaskPollResult.Ready(Ok(1))",
+        "pub class AsyncRefI64:",
+        "    fn subscribe() -> Result<AsyncSubscriptionI64, RingErr>:",
+        "        Ok(AsyncSubscriptionI64())"
+    ].join("\n") + "\n"
+
+fn bug1_app_src() -> text:
+    [
+        "use lib.ring.{RingErr, RingTok, TaskPollResult, AsyncSubscriptionI64, AsyncRefI64}",
+        "",
+        "fn check_sub_typed(subscription: AsyncSubscriptionI64) -> Result<bool, RingErr>:",
+        "    match subscription.poll():",
+        "        case TaskPollResult.Ready(_):",
+        "            return Ok(false)",
+        "        case TaskPollResult.Pending(token):",
+        "            if token.id < 0:",
+        "                return Err(RingErr.Bad)",
+        "    Ok(true)",
+        "",
+        "fn check_sub_unannotated(async_ref: AsyncRefI64) -> Result<bool, RingErr>:",
+        "    val subscription = match async_ref.subscribe():",
+        "        case Err(err): return Err(err)",
+        "        case Ok(value): value",
+        "    match subscription.poll():",
+        "        case TaskPollResult.Ready(_):",
+        "            return Ok(false)",
+        "        case TaskPollResult.Pending(token):",
+        "            if token.id < 0:",
+        "                return Err(RingErr.Bad)",
+        "    match subscription.poll():",
+        "        case TaskPollResult.Ready(_):",
+        "            return Ok(false)",
+        "        case TaskPollResult.Pending(_):",
+        "            ()",
+        "    Ok(true)"
+    ].join("\n") + "\n"
+
+fn bug2_app_src() -> text:
+    [
+        "use lib.ring.{RingErr, RingTok}",
+        "",
+        "fn check_opt(slot: RingTok?) -> Result<i64, RingErr>:",
+        "    val tok = match slot:",
+        "        case Some(value): value",
+        "        case None: return Err(RingErr.Empty)",
+        "    Ok(tok.id)"
+    ].join("\n") + "\n"
+
+fn bug3_app_src() -> text:
+    [
+        "use lib.ring.{Ring, RingErr, RingCpl}",
+        "",
+        "class Bridge:",
+        "    ring: Ring<i64, i64>",
+        "    pending_completion: RingCpl<i64>?",
+        "    owner_id: u64",
+        "    me drain() -> Result<i64, RingErr>:",
+        "        val completion = if val retained = self.pending_completion:",
+        "            retained",
+        "        else:",
+        "            val taken_cpl = self.ring.take_cpl(self.owner_id)",
+        "            match taken_cpl:",
+        "                case Err(e): return Err(e)",
+        "                case Ok(Some(v)):",
+        "                    self.pending_completion = Some(v)",
+        "                    v",
+        "                case Ok(_): return Ok(0)",
+        "        if completion.task_key != 7u64:",
+        "            return Err(RingErr.Bad)",
+        "        Ok(completion.token.id)"
+    ].join("\n") + "\n"
+
+fn bug4_cont_if_src() -> text:
+    [
+        "fn kind_label(code: i64) -> text:",
+        "    val label = if code == 1: \"added\"",
+        "        elif code == 2: \"modified\"",
+        "        else: \"deleted\"",
+        "    label"
+    ].join("\n") + "\n"
+
+fn bug5_env_wrapper_src() -> text:
+    [
+        "fn env_get_nullable_stub(key: text) -> text?:",
+        "    if key == \"EMPTY\":",
+        "        return None",
+        "    Some(\"ok\")",
+        "",
+        "fn env_get_local(key: text) -> text:",
+        "    env_get_nullable_stub(key) ?? \"\""
+    ].join("\n") + "\n"
+
+fn probe_with_shared_ring(label: text, app_src: text) -> text:
+    val lib_src = shared_ring_lib_src()
+    val log = Logger(level: 0)
+    val lib_ast = parse_full_frontend(lib_src, "lib/ring.spl", "lib.ring", log)
+    val app_ast = parse_full_frontend(app_src, "app/bridge.spl", "app.bridge", log)
+    var modules: Dict<text, ParserModule> = {}
+    modules["lib.ring"] = lib_ast
+    modules["app.bridge"] = app_ast
+    val sources = [
+        SourceFile(path: "lib/ring.spl", content: lib_src, module_name: "lib.ring"),
+        SourceFile(path: "app/bridge.spl", content: app_src, module_name: "app.bridge")
+    ]
+    val surfaces = match module_surfaces_from_modules(modules, sources):
+        case Ok(value): value
+        case Err(err): return "SURFACE_ERR=" + err
+    var lib_hl = hirlowering_for_module("lib.ring", surfaces)
+    var app_hl = hirlowering_for_module("app.bridge", surfaces)
+    val lib_hir = lib_hl.lower_module(lib_ast)
+    val app_hir = app_hl.lower_module(app_ast)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["lib.ring"] = lib_hir
+    prescan_mods["app.bridge"] = app_hir
+    var ml = MirLowering.new(app_hir.symbols)
+    ml.prescan_module_struct_names(prescan_mods, "lib.ring")
+    ml.prescan_module_struct_names(prescan_mods, "app.bridge")
+    val mir = ml.lower_module(app_hir, [lib_hir, app_hir])
+    var tr = MirToLlvm.create("wa_s1." + label, CodegenTarget.X86_64, None)
+    val ir = tr.translate_module(mir)
+    val llvm_void = if ir.contains("(void ") or ir.contains(", void "): 1 else: 0
+    var detail = ""
+    for e in lib_hl.errors:
+        detail = detail + " | LIB_HIR: " + e.message
+    for e in app_hl.errors:
+        detail = detail + " | APP_HIR: " + e.message
+    for e in ml.errors:
+        detail = detail + " | MIR: " + e.message
+    for e in tr.codegen_errors:
+        detail = detail + " | LLVM: " + e
+    "hir=" + "{lib_hl.errors.len() + app_hl.errors.len()}" + " mir=" + "{ml.errors.len()}" + " llvm=" + "{tr.codegen_errors.len()}" + " void=" + "{llvm_void}" + detail
+
+describe "WA Src Lane 1 workaround audit and retirement":
+    """Verify retired and kept @workaround sites owned by WA-S1 across 80.driver."""
+    it "retires hir_generic_enum_self_match_2026-10-23 in file_fiber_tldr_bridge_v1 and lowers direct match":
+        val probe = probe_with_shared_ring(label: "bug1_direct_match", app_src: bug1_app_src())
+        expect(probe).to_equal("hir=0 mir=0 llvm=0 void=0")
+
+        val bridge_src = file_read("src/compiler/80.driver/driver_build/file_fiber_tldr_bridge_v1.spl")
+        expect_not(bridge_src.contains("hir_generic_enum_self_match_2026-10-23"))
+        expect_not(bridge_src.contains("val polled:"))
+        expect_not(bridge_src.contains("val repolled:"))
+        expect(bridge_src.split("match subscription.poll():").len() - 1).to_equal(2)
+
+        val log = Logger(level: 0)
+        val parsed = parse_full_frontend(
+            bridge_src,
+            "src/compiler/80.driver/driver_build/file_fiber_tldr_bridge_v1.spl",
+            "compiler.driver.driver_build.file_fiber_tldr_bridge_v1",
+            log
+        )
+        assert_true(parsed.classes.contains_key("FileFiberTldrBridgeV1"))
+        assert_true(parsed.enums.contains_key("FileFiberTldrBridgeErrorV1"))
+
+        val bug_doc = file_read("doc/08_tracking/bug/hir_generic_enum_self_match_2026-10-23.md")
+        expect(bug_doc).to_contain("WA-S1 retirement 2026-11-26")
+
+    it "retires seed_case_nil_pattern_eq_2026-11-02 tag in bridge while keeping source-pinned incremental sites":
+        val probe = probe_with_shared_ring(label: "bug2_case_none", app_src: bug2_app_src())
+        expect(probe).to_equal("hir=0 mir=0 llvm=0 void=0")
+
+        val bridge_src = file_read("src/compiler/80.driver/driver_build/file_fiber_tldr_bridge_v1.spl")
+        expect_not(bridge_src.contains("seed_case_nil_pattern_eq_2026-11-02"))
+        expect(bridge_src).to_contain("case None: return Err(FileFiberTldrBridgeErrorV1.Busy)")
+
+        val inc_src = file_read("src/compiler/80.driver/driver_build/incremental.spl")
+        expect(inc_src).to_contain("# @workaround bug=seed_case_nil_pattern_eq_2026-11-02")
+
+        val bindings = file_read("src/verification/cache_protocol/source_bindings.txt")
+        expect(bindings).to_contain("incremental_digest_tag_v1")
+        expect(bindings).to_contain("incremental_digest_untag_v1")
+
+        val bug_doc = file_read("doc/08_tracking/bug/seed_case_nil_pattern_eq_2026-11-02.md")
+        expect(bug_doc).to_contain("WA-S1 partial retirement 2026-11-26")
+
+    it "keeps phase2_llvm_if_val_match_value_void_2026-11-16 guard for frozen Phase 2 bootstrap":
+        val probe = probe_with_shared_ring(label: "bug3_if_val_match", app_src: bug3_app_src())
+        expect(probe).to_equal("hir=0 mir=0 llvm=0 void=0")
+
+        val bridge_src = file_read("src/compiler/80.driver/driver_build/file_fiber_tldr_bridge_v1.spl")
+        expect(bridge_src).to_contain("# @workaround bug=phase2_llvm_if_val_match_value_void_2026-11-16")
+        expect(bridge_src).to_contain("var completion_slot: RingCompletion<i64>? = self.pending_completion")
+
+    it "keeps deferred stage2_ifexpr_continuation_else_parse_2026_11_01 in incremental.spl":
+        val log = Logger(level: 0)
+        val parsed = parse_full_frontend(bug4_cont_if_src(), "test/cont_if.spl", "test.cont_if", log)
+        assert_true(parsed.functions.contains_key("kind_label"))
+
+        val inc_src = file_read("src/compiler/80.driver/driver_build/incremental.spl")
+        expect(inc_src).to_contain("# @workaround bug=stage2_ifexpr_continuation_else_parse_2026_11_01")
+        expect(inc_src).to_contain("var recorded_hash = \"\"")
+
+    it "keeps stage2_inline_env_get_boxed_extern_abi_2026-11-03 wrapper in driver_bootstrap.spl":
+        val probe = probe_with_shared_ring(label: "bug5_env_wrapper", app_src: bug5_env_wrapper_src())
+        expect(probe).to_equal("hir=0 mir=0 llvm=0 void=0")
+
+        val boot_src = file_read("src/compiler/80.driver/driver_bootstrap.spl")
+        expect(boot_src).to_contain("# @workaround bug=stage2_inline_env_get_boxed_extern_abi_2026-11-03")
+        expect(boot_src).to_contain("env_get_nullable(key) ?? \"\"")
+
+    it "keeps stage2_split_impl_modules_missing_from_entry_closure_2026-08-22 guard in driver_unit_tldr_imports_v1.spl":
+        val unit_src = file_read("src/compiler/80.driver/driver_unit_tldr_imports_v1.spl")
+        expect(unit_src).to_contain("# @workaround bug=stage2_split_impl_modules_missing_from_entry_closure_2026-08-22")
+        expect(unit_src).to_contain("if env_get(\"SIMPLE_UNIT_TLDR_STAGE_HIR\") != \"1\":")
+        expect(unit_src).to_contain("\"stage-lower-hir-gap:split-impl-provider-unverified\"")

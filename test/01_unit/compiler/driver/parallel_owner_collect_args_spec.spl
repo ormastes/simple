@@ -1,0 +1,44 @@
+# @cover src/compiler/80.driver/driver_build/parallel.spl
+# stage2 workaround: Option<fn> unwrap + _N placeholder closure miscompile (sweep 2026-11-04)
+# The owner-collect callback must receive the exact (path, output) strings,
+# and a builder with no callback must skip collection.
+
+use std.spec
+use compiler.driver.driver_build.parallel.{ParallelBuilder, ParallelBuildConfig}
+
+fn echo_args(path: text, output: text) -> text:
+    "collected[{path}|{output}]"
+
+fn compile_obj(path: text) -> Result<text, text>:
+    Ok("obj:{path}")
+
+fn cfg() -> ParallelBuildConfig:
+    ParallelBuildConfig(num_threads: 1, parallel_threshold: 4,
+        deterministic: true, verbose: false)
+
+describe "ParallelBuilder owner-collect callback arguments":
+    it "passes the exact (path, output) strings to the callback":
+        var b = ParallelBuilder.create(cfg())
+        b.add_unit("unit_a", [])
+        b.set_owner_collect(echo_args)
+        val r = b.build(compile_obj)
+        expect(r.success).to_be_false()
+        expect(r.errors.len()).to_equal(1)
+        val err = r.errors[0].1
+        expect(err).to_equal("collected[unit_a|obj:unit_a]")
+
+    it "passes the exact strings through an explicit closure":
+        var b = ParallelBuilder.create(cfg())
+        b.add_unit("unit_b", [])
+        b.set_owner_collect(fn(p: text, o: text): "closure[{p}|{o}]")
+        val r = b.build(compile_obj)
+        expect(r.errors.len()).to_equal(1)
+        expect(r.errors[0].1).to_equal("closure[unit_b|obj:unit_b]")
+
+    it "skips collection when no callback is set":
+        var b = ParallelBuilder.create(cfg())
+        b.add_unit("unit_c", [])
+        val r = b.build(compile_obj)
+        expect(r.success).to_be_true()
+        expect(r.errors.len()).to_equal(0)
+        expect(r.stats.completed).to_equal(1)

@@ -31,3 +31,10 @@ Seven new scenarios in `test/01_unit/compiler/hir/hir_codec_required_functions_s
 One separate scenario in `test/01_unit/app/compiler_schema/hir_required_function_codec_generation_spec.spl` calls the actual `CodecUniverse.load` and `emit_codec_file`, requires the refusal and guarded-insertion output, and compares the entire generated text to the checked-in codec. It is authored but unexecuted; hand alignment is not claimed as generator execution.
 
 Pending: execute the new scenarios and existing codec/cache suites under an admitted producer; regenerate with the real generator and verify exact generated-file freshness; run normal cache-enabled p2_add/admission. The underlying erased-read or initial-store defect remains separate and unresolved. This fix prevents persisted nil declarations from being treated as complete HIR; it does not synthesize missing bodies.
+
+## Verification 2026-11-07 (seed release100-7a0e6fe516f, macOS aarch64)
+- `test/01_unit/app/compiler_schema/hir_required_function_codec_generation_spec.spl`: 1/1 PASS (generator emits required-function arms).
+- `test/01_unit/compiler/hir/hir_codec_required_functions_spec.spl`: ERROR, 0 examples run. The module fails to load with
+  `semantic: Cannot resolve module: std.common.config.Logger`, which is an import-resolution defect in the spec's closure
+  and not a codec failure. The codec round-trip half stays unverified until that import resolves.
+Status unchanged: partially verified.

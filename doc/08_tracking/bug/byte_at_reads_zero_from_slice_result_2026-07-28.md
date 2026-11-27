@@ -61,3 +61,8 @@ Root-cause the interaction between `slice`'s returned array representation and
 element-read shred), A/B it against the JIT and native engines, then drop the
 copy loop above.
 
+
+## Resolved-disappeared (2026-11-03)
+The bug no longer reproduces on seed bin/simple.exe: the regression spec
+test/01_unit/language/byte_at_slice_result_spec.spl passes 1/1
+(`byte_at(slice(block, 6, 11), i)` reads 0, 3, 104, 50).

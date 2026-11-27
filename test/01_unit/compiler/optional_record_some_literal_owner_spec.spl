@@ -1,0 +1,152 @@
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir_types.{LocalId}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_metadata.*
+use compiler.mir._MirLoweringExpr.optional_record_owner.*
+
+# mir_optional_record_some_literal_arm_owner_2026-11-07: a `Some(Record(..))`
+# arm must carry its record owner so it joins with call arms of the same
+# record, while a different record still clears the joined owner.
+
+class SomeLiteralFixture:
+    lowering: MirLowering
+    seed_id: i64
+    twin_id: i64
+    point_id: i64
+    point_key: text
+
+fn some_literal_fixture() -> SomeLiteralFixture:
+    val source = "pub class Seed:\n    value: i64\npub class Twin:\n    value: i64\npub struct Point:\n    x: i64\n"
+    val ast = parse_full_frontend(source, "app/optional/provider.spl", "app.optional.provider", Logger(level: 0))
+    var hir = HirLowering.with_filename("app/optional/provider.spl")
+    val provider = hir.lower_module(ast)
+    expect(hir.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(provider.symbols)
+    var modules: Dict<text, HirModule> = {}
+    modules["provider"] = provider
+    lowering.prescan_module_struct_names(modules, "provider")
+    var seed_id = -1
+    var twin_id = -1
+    for record in provider.classes.values():
+        if record.name == "Seed" or record.name == "Twin":
+            val relocated = lowering.relocate_provider_type_symbol(record.symbol, provider.symbols)
+            expect(relocated.id).to_be_greater_than(-1)
+            lowering.register_composite_field_metadata("app.optional.provider." + record.name, record.fields, provider.symbols, false)
+            if record.name == "Seed": seed_id = relocated.id
+            else: twin_id = relocated.id
+    var point_id = -1
+    var point_key = ""
+    for record in provider.structs.values():
+        if record.name == "Point":
+            val relocated = lowering.relocate_provider_type_symbol(record.symbol, provider.symbols)
+            expect(relocated.id).to_be_greater_than(-1)
+            point_id = relocated.id
+            # The callable-return registrar's key for a struct:
+            # composite_layout_key, folded by remember_optional_record_owner.
+            val declaration: HirSymbol = lowering.symbols.symbols[relocated.id]
+            point_key = lowering.declared_struct_layout_key(lowering.composite_layout_key(declaration))
+    expect(lowering.errors.len()).to_equal(0)
+    expect(seed_id).to_be_greater_than(-1)
+    expect(twin_id).to_be_greater_than(-1)
+    expect(point_id).to_be_greater_than(-1)
+    SomeLiteralFixture(lowering: lowering, seed_id: seed_id, twin_id: twin_id, point_id: point_id, point_key: point_key)
+
+fn named(id: i64) -> HirType:
+    HirType(kind: HirTypeKind.Named(SymbolId(id: id), []), span: Span.empty())
+
+fn has_unique_layout_error(lowering: MirLowering) -> bool:
+    for error in lowering.errors:
+        if error.fatal and error.message.contains("no unique provider layout snapshot"):
+            return true
+    false
+
+describe "Optional record Some literal arms join with same-owner call arms":
+    it "records the class and struct keys a callable return registers":
+        val fixture = some_literal_fixture()
+        var lowering = fixture.lowering
+        lowering.remember_some_record_payload_owner(2, named(fixture.seed_id))
+        lowering.remember_some_record_payload_owner(3, named(fixture.point_id))
+        expect(lowering.optional_record_literal_owners.get(2) ?? "<absent>").to_equal("app.optional.provider.Seed")
+        expect(fixture.point_key.ends_with("Point")).to_be(true)
+        expect(lowering.optional_record_literal_owners.get(3) ?? "<absent>").to_equal(fixture.point_key)
+
+    it "does not establish an owner by itself":
+        val fixture = some_literal_fixture()
+        var lowering = fixture.lowering
+        lowering.remember_some_record_payload_owner(2, named(fixture.seed_id))
+        lowering.remember_some_record_payload_owner(3, named(fixture.seed_id))
+        lowering.option_none_locals[4] = true
+        expect(lowering.optional_record_owners.contains(2)).to_be(false)
+        lowering.join_optional_record_owners([LocalId(id: 2), LocalId(id: 3), LocalId(id: 4)], 99)
+        lowering.join_optional_record_owners([LocalId(id: 2), LocalId(id: 5)], 98)
+        expect(lowering.optional_record_owners.contains(99)).to_be(false)
+        expect(lowering.optional_record_owners.contains(98)).to_be(false)
+
+    it "joins a Some literal arm with same-owner call arms in either order":
+        val fixture = some_literal_fixture()
+        var lowering = fixture.lowering
+        lowering.optional_record_owners[1] = "app.optional.provider.Seed"
+        lowering.optional_record_owners[3] = "app.optional.provider.Seed"
+        lowering.remember_some_record_payload_owner(2, named(fixture.seed_id))
+        lowering.option_none_locals[4] = true
+        lowering.join_optional_record_owners([LocalId(id: 1), LocalId(id: 2), LocalId(id: 3), LocalId(id: 4)], 99)
+        lowering.join_optional_record_owners([LocalId(id: 4), LocalId(id: 2), LocalId(id: 1)], 98)
+        expect(lowering.optional_record_owners.get(99) ?? "<absent>").to_equal("app.optional.provider.Seed")
+        expect(lowering.optional_record_owners.get(98) ?? "<absent>").to_equal("app.optional.provider.Seed")
+        val resolved = lowering.checked_optional_record_type(99, Span.empty())
+        expect(lowering.errors.len()).to_equal(0)
+        match resolved.kind:
+            case HirTypeKind.Named(symbol, _): expect(symbol.id).to_equal(fixture.seed_id)
+            case _: fail("joined Some literal arm did not resolve to its provider")
+
+    it "still rejects a Some literal of a different record":
+        val fixture = some_literal_fixture()
+        var lowering = fixture.lowering
+        lowering.optional_record_owners[1] = "app.optional.provider.Seed"
+        lowering.remember_some_record_payload_owner(2, named(fixture.twin_id))
+        lowering.join_optional_record_owners([LocalId(id: 1), LocalId(id: 2)], 99)
+        lowering.join_optional_record_owners([LocalId(id: 2), LocalId(id: 1)], 98)
+        expect(lowering.optional_record_owners.get(99) ?? "<absent>").to_equal("")
+        expect(lowering.optional_record_owners.get(98) ?? "<absent>").to_equal("")
+        val resolved = lowering.checked_optional_record_type(99, Span.empty())
+        expect(resolved.kind).to_equal(HirTypeKind.Error)
+        expect(has_unique_layout_error(lowering)).to_be(true)
+
+    it "keeps an untracked non-literal arm fail-closed":
+        val fixture = some_literal_fixture()
+        var lowering = fixture.lowering
+        lowering.optional_record_owners[1] = "app.optional.provider.Seed"
+        lowering.remember_some_record_payload_owner(2, named(fixture.seed_id))
+        lowering.join_optional_record_owners([LocalId(id: 1), LocalId(id: 2), LocalId(id: 3)], 99)
+        expect(lowering.optional_record_owners.get(99) ?? "<absent>").to_equal("")
+
+    it "records nothing for generic, scalar, or unknown payloads":
+        val fixture = some_literal_fixture()
+        var lowering = fixture.lowering
+        lowering.remember_some_record_payload_owner(5, HirType(kind: HirTypeKind.Named(SymbolId(id: fixture.seed_id), [HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())]), span: Span.empty()))
+        lowering.remember_some_record_payload_owner(6, HirType(kind: HirTypeKind.Int(64, true), span: Span.empty()))
+        lowering.remember_some_record_payload_owner(7, named(-1))
+        lowering.remember_some_record_payload_owner(8, named(987654321))
+        expect(lowering.optional_record_literal_owners.len()).to_equal(0)
+        expect(lowering.optional_record_owners.len()).to_equal(0)
+
+    it "drops a stale witness when the binding is reassigned or invalidated":
+        val fixture = some_literal_fixture()
+        var lowering = fixture.lowering
+        lowering.optional_record_owners[1] = "app.optional.provider.Seed"
+        lowering.remember_some_record_payload_owner(2, named(fixture.seed_id))
+        lowering.copy_optional_record_owner(7, 2)
+        lowering.join_optional_record_owners([LocalId(id: 1), LocalId(id: 2)], 99)
+        expect(lowering.optional_record_owners.get(99) ?? "<absent>").to_equal("")
+        lowering.remember_some_record_payload_owner(3, named(fixture.seed_id))
+        lowering.invalidate_optional_record_owner(3)
+        lowering.join_optional_record_owners([LocalId(id: 1), LocalId(id: 3)], 98)
+        expect(lowering.optional_record_owners.get(98) ?? "<absent>").to_equal("")

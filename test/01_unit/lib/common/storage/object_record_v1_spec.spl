@@ -1,0 +1,141 @@
+# ObjectRecordV1: versioned immutable-object record with digest aliases.
+# Encode/decode roundtrip, strict fail-closed decode (format_version 0
+# sentinel), and the object_record_v1_valid truth table.
+# Design: doc/05_design/platform/container/simple_container_improvement.md
+use std.spec.{describe, it, expect}
+use std.common.storage.object_record_v1.{OBJECT_RECORD_V1_VERSION, DigestAliasV1,
+    ObjectRecordV1, ObjectFormatVersionV1, ObjectLogicalLengthV1, ObjectGenerationV1,
+    object_record_v1_encode, object_record_v1_decode, object_record_v1_valid}
+
+val HELLO_XXH3_128 = "b5e9c1ad071b3e7fc779cfaa5e523818"
+val HELLO_SHA256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+
+fn _sample_record() -> ObjectRecordV1:
+    ObjectRecordV1(format_version: ObjectFormatVersionV1(OBJECT_RECORD_V1_VERSION),
+        object_key: "xxh3-128_" + HELLO_XXH3_128, logical_length: ObjectLogicalLengthV1(5),
+        generation: ObjectGenerationV1(0),
+        aliases: [
+            DigestAliasV1(algorithm: "xxh3-128", algorithm_profile: "", digest_hex: HELLO_XXH3_128),
+            DigestAliasV1(algorithm: "sha256", algorithm_profile: "", digest_hex: HELLO_SHA256)])
+
+describe "object_record_v1 encode/decode roundtrip":
+    it "roundtrips a record with multiple aliases":
+        val record = _sample_record()
+        val encoded = object_record_v1_encode(record)
+        val decoded = object_record_v1_decode(encoded)
+        expect(decoded.format_version.value).to_equal(OBJECT_RECORD_V1_VERSION)
+        expect(decoded.object_key).to_equal("xxh3-128_" + HELLO_XXH3_128)
+        expect(decoded.logical_length.value).to_equal(5)
+        expect(decoded.generation.value).to_equal(0)
+        expect(decoded.aliases.len()).to_equal(2)
+        expect(decoded.aliases[0].algorithm).to_equal("xxh3-128")
+        expect(decoded.aliases[0].algorithm_profile).to_equal("")
+        expect(decoded.aliases[0].digest_hex).to_equal(HELLO_XXH3_128)
+        expect(decoded.aliases[1].algorithm).to_equal("sha256")
+        expect(decoded.aliases[1].digest_hex).to_equal(HELLO_SHA256)
+
+    it "emits canonical SDN that re-encodes byte-identically":
+        val encoded = object_record_v1_encode(_sample_record())
+        expect(encoded).to_start_with("format_version: 1\n")
+        expect(encoded).to_contain("alias_count: 2\n")
+        expect(encoded).to_contain("alias.1.algorithm: \"sha256\"\n")
+        val reencoded = object_record_v1_encode(object_record_v1_decode(encoded))
+        expect(reencoded).to_equal(encoded)
+
+    it "roundtrips a collision-disambiguated object key":
+        val record = ObjectRecordV1(format_version: ObjectFormatVersionV1(1),
+            object_key: "xxh3-128_" + HELLO_XXH3_128 + "_c1", logical_length: ObjectLogicalLengthV1(9),
+            generation: ObjectGenerationV1(2),
+            aliases: [DigestAliasV1(algorithm: "xxh3-128",
+                algorithm_profile: "gxhash-4.0.0-scalar", digest_hex: HELLO_XXH3_128)])
+        val decoded = object_record_v1_decode(object_record_v1_encode(record))
+        expect(decoded.format_version.value).to_equal(1)
+        expect(decoded.object_key).to_equal("xxh3-128_" + HELLO_XXH3_128 + "_c1")
+        expect(decoded.generation.value).to_equal(2)
+        expect(decoded.aliases[0].algorithm_profile).to_equal("gxhash-4.0.0-scalar")
+
+describe "object_record_v1 strict decode failures":
+    it "rejects an unknown format version with the invalid sentinel":
+        val encoded = object_record_v1_encode(_sample_record())
+        val tampered = encoded.replace("format_version: 1\n", "format_version: 2\n")
+        val decoded = object_record_v1_decode(tampered)
+        expect(decoded.format_version.value).to_equal(0)
+        expect(decoded.object_key).to_equal("")
+        expect(decoded.aliases.len()).to_equal(0)
+
+    it "rejects non-canonical integers with the invalid sentinel":
+        val encoded = object_record_v1_encode(_sample_record())
+        expect(object_record_v1_decode(encoded.replace("generation: 0\n", "generation: 00\n")).format_version.value).to_equal(0)
+        expect(object_record_v1_decode(encoded.replace("logical_length: 5\n", "logical_length: 05\n")).format_version.value).to_equal(0)
+        expect(object_record_v1_decode(encoded.replace("format_version: 1\n", "format_version: 01\n")).format_version.value).to_equal(0)
+        expect(object_record_v1_decode(encoded).format_version.value).to_equal(1)
+
+    it "rejects a missing field with the invalid sentinel":
+        val encoded = object_record_v1_encode(_sample_record())
+        val tampered = encoded.replace("generation: 0\n", "")
+        expect(object_record_v1_decode(tampered).format_version.value).to_equal(0)
+
+    it "rejects a malformed alias digest with the invalid sentinel":
+        val record = ObjectRecordV1(format_version: ObjectFormatVersionV1(1),
+            object_key: "xxh3-128_" + HELLO_XXH3_128, logical_length: ObjectLogicalLengthV1(5),
+            generation: ObjectGenerationV1(0),
+            aliases: [DigestAliasV1(algorithm: "xxh3-128", algorithm_profile: "",
+                digest_hex: "not-hex")])
+        expect(object_record_v1_decode(object_record_v1_encode(record)).format_version.value).to_equal(0)
+
+    it "rejects an alias count that disagrees with the alias fields":
+        val encoded = object_record_v1_encode(_sample_record())
+        val tampered = encoded.replace("alias_count: 2\n", "alias_count: 3\n")
+        expect(object_record_v1_decode(tampered).format_version.value).to_equal(0)
+
+    it "rejects garbage and truncated input with the invalid sentinel":
+        expect(object_record_v1_decode("not a record").format_version.value).to_equal(0)
+        expect(object_record_v1_decode("").format_version.value).to_equal(0)
+        val encoded = object_record_v1_encode(_sample_record())
+        expect(object_record_v1_decode(encoded.substring(0, 20)).format_version.value).to_equal(0)
+
+describe "object_record_v1_valid truth table":
+    it "accepts a well-formed record":
+        expect(object_record_v1_valid(_sample_record()).value).to_equal(true)
+
+    it "rejects a zero format version":
+        var record = _sample_record()
+        record.format_version = ObjectFormatVersionV1(0)
+        expect(object_record_v1_valid(record).value).to_equal(false)
+
+    it "rejects malformed object keys":
+        var record = _sample_record()
+        record.object_key = "bad key"
+        expect(object_record_v1_valid(record).value).to_equal(false)
+        record.object_key = "xxh3-128"
+        expect(object_record_v1_valid(record).value).to_equal(false)
+        record.object_key = "xxh3-128_" + HELLO_XXH3_128 + "_c0"
+        expect(object_record_v1_valid(record).value).to_equal(false)
+        record.object_key = "xxh3-128_" + HELLO_XXH3_128 + "_c65"
+        expect(object_record_v1_valid(record).value).to_equal(false)
+        record.object_key = "xxh3-128_" + HELLO_XXH3_128 + "_c01"
+        expect(object_record_v1_valid(record).value).to_equal(false)
+
+    it "rejects negative lengths and generations":
+        var record = _sample_record()
+        record.logical_length = ObjectLogicalLengthV1(-1)
+        expect(object_record_v1_valid(record).value).to_equal(false)
+        record = _sample_record()
+        record.generation = ObjectGenerationV1(-1)
+        expect(object_record_v1_valid(record).value).to_equal(false)
+
+    it "rejects an empty alias list":
+        var record = _sample_record()
+        record.aliases = []
+        expect(object_record_v1_valid(record).value).to_equal(false)
+
+    it "rejects malformed alias fields":
+        var record = _sample_record()
+        record.aliases[0].algorithm = "XXH3"
+        expect(object_record_v1_valid(record).value).to_equal(false)
+        record = _sample_record()
+        record.aliases[0].digest_hex = "abc"
+        expect(object_record_v1_valid(record).value).to_equal(false)
+        record = _sample_record()
+        record.aliases[1].digest_hex = "2CF24DBA5FB0A30E26E83B2AC5B9E29E1B161E5C1FA7425E73043362938B9824"
+        expect(object_record_v1_valid(record).value).to_equal(false)

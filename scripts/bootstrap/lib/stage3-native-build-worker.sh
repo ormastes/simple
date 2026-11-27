@@ -4,8 +4,10 @@ set -eu
 # Internal worker for resume-stage3-from-admitted.sh.  The launcher runs this
 # file in a dedicated systemd user-service cgroup so every descendant remains
 # kernel-owned even after double-fork/reparenting.
+# The private ABI is a fixed 32-field control prefix followed by its resolved
+# RSS mode, versioned source-policy marker and non-empty source-policy tail.
 worker_arg_count=$#
-[ "$#" -eq 28 ] || [ "$#" -eq 30 ] || [ "$#" -eq 31 ] || { echo 'stage3 worker: invalid argument count' >&2; exit 64; }
+[ "$#" -ge 36 ] || { echo 'stage3 worker: invalid argument count' >&2; exit 64; }
 transcript=$1 root=$2 log=$3 worker_home=$4 worker_tmp=$5 worker_path=$6
 admitted=$7 platform=$8 backend=$9
 shift 9
@@ -19,18 +21,58 @@ abi_policy=$8 abi_receipt=$9 abi_receipt_sha=${10}
 compiler_ceiling_env=${11:-}
 compiler_cap=${12:-}
 
-# The new positional value is the controller authority, including across a
-# systemd manager that drops or supplies stale ambient environment. Legacy
-# 28/30-argument callers retain only the historical host-platform default.
-if [ "$worker_arg_count" -eq 31 ]; then
-  observation_budget_ms=${13}
-else
-  observation_host=$(uname -s) || { echo 'stage3 worker: cannot identify observation host' >&2; exit 64; }
-  case "$observation_host" in FreeBSD) observation_budget_ms=5000 ;; *) observation_budget_ms=1000 ;; esac
-  [ "${SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS-$observation_budget_ms}" = "$observation_budget_ms" ] || {
-    echo 'stage3 worker: unrecorded observation budget' >&2; exit 64;
-  }
+# This positional value is the controller authority, including across a
+# systemd manager that drops or supplies stale ambient environment.
+observation_budget_ms=${13}
+# Lowering lane is explicit in the versioned worker protocol. Per-file src->obj is the
+# default: SIMPLE_BOOTSTRAP is passed EMPTY so the compiler never takes the
+# SIMPLE_BOOTSTRAP=1 whole-program bootstrap_fixed shortcut, whose HIR shard
+# identity and cross-module import resolution do not serve the per-module
+# lane. "whole-program" restores SIMPLE_BOOTSTRAP=1 plus
+# SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1.
+# A per-file lane may carry ":fw=0|1", ":gte=0|1" and ":msc=<1..128>" items,
+# forwarded in that order as SIMPLE_FILE_WORKERS, SIMPLE_NATIVE_GO_TO_END and
+# SIMPLE_MIR_SHARD_COUNT (systemd does not
+# inherit, and the compiler runs under env -i).
+bootstrap_flag=1 whole_program_env= per_file_env=
+if [ "$worker_arg_count" -ge 34 ]; then
+  case "${14}" in
+    per-file|per-file:*)
+      bootstrap_flag= lane_rest=${14#per-file}
+      while [ -n "$lane_rest" ]; do
+        lane_rest=${lane_rest#:} lane_item=${lane_rest%%:*}
+        lane_rest=${lane_rest#"$lane_item"}
+        case "$lane_item" in
+          fw=0|fw=1) per_file_env="$per_file_env SIMPLE_FILE_WORKERS=${lane_item#fw=}" ;;
+          gte=0|gte=1) per_file_env="$per_file_env SIMPLE_NATIVE_GO_TO_END=${lane_item#gte=}" ;;
+          msc=[1-9]|msc=[1-9][0-9]|msc=1[01][0-9]|msc=12[0-8])
+            per_file_env="$per_file_env SIMPLE_MIR_SHARD_COUNT=${lane_item#msc=}" ;;
+          *) echo "stage3 worker: invalid lowering lane" >&2; exit 64 ;;
+        esac
+      done ;;
+    whole-program) whole_program_env=SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 ;;
+    *) echo "stage3 worker: invalid lowering lane" >&2; exit 64 ;;
+  esac
 fi
+# The service manager may supply stale ambient mode state. The parent has
+# already resolved and validated this control value; transport it explicitly
+# so the nested command-snapshot watchdog sees the same mode as the outer one.
+case "${15-}" in
+  enforce|monitor) SIMPLE_BOOTSTRAP_RSS_CAP_MODE=${15} ;;
+  *) echo 'stage3 worker: invalid typed RSS cap mode' >&2; exit 64 ;;
+esac
+export SIMPLE_BOOTSTRAP_RSS_CAP_MODE
+# Stage 3 recovery has authenticated the source policy before reaching this
+# private worker. Keep the policy as argv throughout transport; validate it
+# with the shared parser and reject legacy calls without the versioned tail.
+[ "${16-}" = --stage3-source-policy-v1 ] || {
+  echo 'stage3 worker: missing versioned source policy' >&2; exit 64;
+}
+shift 16
+. "$root/scripts/bootstrap/lib/stage3-source-policy.shs"
+bootstrap_stage3_source_policy transfer "$@" >/dev/null || {
+  echo 'stage3 worker: invalid versioned source policy' >&2; exit 64;
+}
 case "$observation_budget_ms" in
   ''|0*|*[!0-9]*) echo 'stage3 worker: invalid observation budget' >&2; exit 64 ;;
 esac
@@ -49,12 +91,56 @@ export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 
 # This optional transport is separate from the admitted parent's historical
 # transcript. It belongs only to this newly hashed compiler invocation.
+# Without a ceiling the launcher may still transport a cap within the default
+# hard ceiling (derived from the Stage 3 memory admission); the transcript
+# owner re-validates it against that ceiling before the watchdog starts.
+# A derived cap arrives as CAP:SOURCE:BOUND; the attribution is published to
+# the owner (SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE/_BOUND) so the receipt
+# does not record a code default as an explicit-env pair the operator hand-set.
+# A bare CAP is the operator's own pair and keeps that attribution.
+compiler_cap_source= compiler_cap_bound=
+case "$compiler_cap" in
+  *:*:*)
+    compiler_cap_source=${compiler_cap#*:}
+    compiler_cap_bound=${compiler_cap_source#*:}
+    compiler_cap_source=${compiler_cap_source%%:*}
+    compiler_cap=${compiler_cap%%:*}
+    for compiler_cap_label in "$compiler_cap_source" "$compiler_cap_bound"; do
+      case "$compiler_cap_label" in ''|[!a-z]*|*[!a-z-]*|*:*) compiler_cap_label=invalid ;; esac
+      [ "$compiler_cap_label" != invalid ] && [ "${#compiler_cap_label}" -le 32 ] || {
+        echo 'stage3 worker: invalid transported compiler RSS cap attribution' >&2; exit 64;
+      }
+    done ;;
+  *:*) echo 'stage3 worker: invalid transported compiler RSS cap attribution' >&2; exit 64 ;;
+esac
 case "$compiler_ceiling_env" in
   '')
-    [ -z "$compiler_cap" ] && [ "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB+x}" != x ] || {
+    [ "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB+x}" != x ] || {
       echo 'stage3 worker: unrecorded ambient compiler RSS ceiling' >&2; exit 64;
-    } ;;
+    }
+    if [ -n "$compiler_cap" ]; then
+      bootstrap_stage3_compiler_ceiling_valid "$compiler_cap" || {
+        echo 'stage3 worker: invalid transported compiler RSS cap' >&2; exit 64;
+      }
+      [ "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB-$compiler_cap}" = "$compiler_cap" ] || {
+        echo 'stage3 worker: conflicting compiler RSS cap' >&2; exit 64;
+      }
+      SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$compiler_cap
+      export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+      if [ -n "$compiler_cap_source" ]; then
+        [ "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE-$compiler_cap_source}" = "$compiler_cap_source" ] &&
+          [ "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND-$compiler_cap_bound}" = "$compiler_cap_bound" ] || {
+          echo 'stage3 worker: conflicting compiler RSS cap attribution' >&2; exit 64;
+        }
+        SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=$compiler_cap_source
+        SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=$compiler_cap_bound
+        export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND
+      fi
+    fi ;;
   SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=*)
+    [ -z "$compiler_cap_source" ] || {
+      echo 'stage3 worker: attributed cap under an explicit compiler RSS ceiling' >&2; exit 64;
+    }
     compiler_ceiling=${compiler_ceiling_env#*=}
     bootstrap_stage3_compiler_ceiling_valid "$compiler_ceiling" &&
       bootstrap_stage3_compiler_ceiling_valid "$compiler_cap" &&
@@ -81,6 +167,7 @@ stage3_abi_transfer_error() {
 abi_producer_sha=$(bootstrap_stage3_hash_file "$admitted") || stage3_abi_transfer_error
 [ "${#abi_receipt_sha}" -eq 64 ] && [ "${#abi_producer_sha}" -eq 64 ] || stage3_abi_transfer_error
 case "$abi_receipt_sha$abi_producer_sha" in *[!0-9a-f]*) stage3_abi_transfer_error ;; esac
+bootstrap_stage3_verify_requalification_commit "$abi_receipt" || stage3_abi_transfer_error
 [ "$abi_policy" = v1 ] && bootstrap_stage3_normalized_absolute "$abi_receipt" &&
   [ -f "$abi_receipt" ] && [ ! -L "$abi_receipt" ] &&
   [ "$(bootstrap_stage3_hash_file "$abi_receipt")" = "$abi_receipt_sha" ] &&
@@ -118,14 +205,45 @@ case "$platform" in
 esac
 timeout_args=
 [ -z "$timeout_seconds" ] || timeout_args="--timeout $timeout_seconds"
+stage3_streaming_surfaces=0
+mir_interface_hir_env=
+mir_shard_count_env=
+if [ "${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" = 1 ]; then
+  stage3_streaming_surfaces=1
+  mir_interface_hir_env="SIMPLE_MIR_SHARD_INTERFACE_HIR=1"
+  # Per-file lanes already carry one shard-count row. Duplicate names make
+  # the transcript writer fail closed before the compiler can start.
+  if [ -n "$whole_program_env" ]; then
+    mir_shard_count_env="SIMPLE_MIR_SHARD_COUNT=${SIMPLE_MIR_SHARD_COUNT:-8}"
+  fi
+fi
+file_worker_batch_env=
+if [ -n "${SIMPLE_FILE_WORKER_BATCH:-}" ]; then
+  file_worker_batch_env="SIMPLE_FILE_WORKER_BATCH=${SIMPLE_FILE_WORKER_BATCH}"
+fi
+# W24/W27 Windows shard-worker workaround: the launcher forwards these two
+# explicitly (empty = unset). Re-validated here so the transcribed invocation
+# carries exactly the words the args hash recorded; unset keeps the pinned argv.
+mir_sharding_env= frontend_cache=1
+case "${SIMPLE_MIR_SHARDING:-}" in
+  '') ;;
+  0|1) mir_sharding_env="SIMPLE_MIR_SHARDING=$SIMPLE_MIR_SHARDING" ;;
+  *) echo 'stage3 worker: SIMPLE_MIR_SHARDING must be unset, 0 or 1' >&2; exit 64 ;;
+esac
+case "${SIMPLE_FRONTEND_CACHE:-}" in
+  '') ;;
+  0|1) frontend_cache=$SIMPLE_FRONTEND_CACHE ;;
+  *) echo 'stage3 worker: SIMPLE_FRONTEND_CACHE must be unset, 0 or 1' >&2; exit 64 ;;
+esac
 bootstrap_stage3_run_transcribed "$transcript" "$root" "$log" \
   "$worker_home" "$worker_tmp" "$worker_path" RUST_LOG=error LIBRARY_PATH= \
-  SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent SIMPLE_BOOTSTRAP=1 \
+  SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent SIMPLE_BOOTSTRAP="${bootstrap_flag}" ${whole_program_env} ${per_file_env} \
   SIMPLE_ABI_POLICY="$abi_policy" SIMPLE_ABI_ADMISSION_RECEIPT="$abi_receipt" \
-  SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_STAGE3_STREAMING_SURFACES=0 \
+  SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_STAGE3_STREAMING_SURFACES="$stage3_streaming_surfaces" \
+  ${mir_interface_hir_env} ${mir_shard_count_env} ${file_worker_batch_env} ${mir_sharding_env} \
   SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE="$requested_route" \
   SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE="$fallback_route" \
-  SIMPLE_FRONTEND_CACHE=1 SIMPLE_FRONTEND_CACHE_DIR="$cache/frontend" \
+  SIMPLE_FRONTEND_CACHE="$frontend_cache" SIMPLE_FRONTEND_CACHE_DIR="$cache/frontend" \
   SIMPLE_HIR_CACHE=1 SIMPLE_HIR_CACHE_DIR="$cache/hir" \
   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 \
   SIMPLE_NATIVE_ARENA_DECLS=1 SIMPLE_NO_STUB_FALLBACK=1 \
@@ -141,4 +259,4 @@ bootstrap_stage3_run_transcribed "$transcript" "$root" "$log" \
   ${diagnostic_env} ${compiler_ceiling_env:+"$compiler_ceiling_env"} -- "$admitted" native-build --target "$platform" \
   --backend "$backend" --runtime-bundle core-c-bootstrap --threads "$threads" \
   ${timeout_args} --cache-dir "$cache" --mode dynload --runtime-path "$runtime" \
-  -o "$candidate" src/app/cli/bootstrap_main.spl
+  -o "$candidate" "$@" src/app/cli/bootstrap_main.spl

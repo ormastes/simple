@@ -11,9 +11,23 @@
 
 use compiler.hir.hir_types.{HirType, SymbolId, HirModule}
 use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirConst, HirStaticAssert, HirStmt, HirStmtKind, HirBlock, HirFunction, HirCallArg, HirBinOp, HirUnaryOp}
+use compiler.hir.hir_definitions.{HirIfArm}
 use compiler.common.diagnostics.span.{Span}
 use std.common.string_core.{str_to_lower}
 use std.nogc_sync_mut.io_runtime.{env_get}
+
+# Environment variables compile-time evaluation may read. Every name here
+# MUST also be in NATIVE_BUILD_SEMANTIC_ENVIRONMENT_FIELDS_V1
+# (80.driver/cache/native_build_environment_identity.spl) so a change to
+# its value changes the live object key (live_object_key.sdn gap
+# ctfe_env_reads, closed). Any other name is rejected: an unrecorded
+# CTFE input would let a stale object be reused.
+pub val CTFE_ENV_INPUTS_V1: [text] = [
+    "BOOTSTRAP_MINIMAL",
+    "BOOTSTRAP_NO_C",
+    "BOOTSTRAP_NO_EVAL",
+    "BOOTSTRAP_NO_GPU"
+]
 
 @always_inline
 fn _sys_env_bool_from_text(raw_value: text) -> bool:
@@ -387,7 +401,7 @@ impl ConstEvaluator:
         val name = match sym:
             case Some(value):
                 value.name
-            case nil:
+            case None:
                 return Err(ConstEvalError.UndefinedVariable("<unknown>", span))
 
         # Check local variables first (function parameters)
@@ -412,7 +426,7 @@ impl ConstEvaluator:
         match sym:
             case Some(_):
                 self.eval_var(symbol, span)
-            case nil:
+            case None:
                 self.eval_var_name(name, span)
 
     me eval_var_name(name: text, span: Span) -> Result<EvaluatedConstValue, ConstEvalError>:
@@ -445,7 +459,7 @@ impl ConstEvaluator:
                             case _:
                                 # Try user-defined const function
                                 return self.eval_const_fn_call(sym, args, span)
-                    case nil:
+                    case None:
                         pass
             case HirExprKind.NamedVar(sym, name):
                 val builtin_result = self.eval_builtin(name, args, span)
@@ -568,6 +582,8 @@ impl ConstEvaluator:
                 val key = self.eval(args[0].value)?
                 match key:
                     case EvaluatedConstValue.String(env_name):
+                        if not CTFE_ENV_INPUTS_V1.contains(env_name):
+                            return Err(ConstEvalError.NotConstant("sys_env_bool(\"{env_name}\"): not a declared CTFE env input (CTFE_ENV_INPUTS_V1)", span))
                         val value = env_get(env_name)
                         Ok(EvaluatedConstValue.Bool(_sys_env_bool_from_text(value)))
                     case _:
@@ -587,7 +603,7 @@ impl ConstEvaluator:
                 match else_:
                     case Some(block):
                         self.eval_block(block)
-                    case nil:
+                    case None:
                         Ok(EvaluatedConstValue.Unit)
             case _:
                 val cond_text = const_value_to_text(cond_val)
@@ -607,7 +623,7 @@ impl ConstEvaluator:
                     return Err(ConstEvalError.TypeError("bool", cond_text, span))
         match else_:
             case Some(block): self.eval_block(block)
-            case nil: Ok(EvaluatedConstValue.Unit)
+            case None: Ok(EvaluatedConstValue.Unit)
 
     # Evaluate block (returns last expression)
     me eval_block(block: HirBlock) -> Result<EvaluatedConstValue, ConstEvalError>:
@@ -624,7 +640,7 @@ impl ConstEvaluator:
                             val name = symbol_value.name
                             val value = self.eval(init)?
                             self.locals[name] = value
-                        case nil:
+                        case None:
                             pass
                     result = EvaluatedConstValue.Unit
                 case _:
@@ -633,7 +649,7 @@ impl ConstEvaluator:
         match block.value:
             case Some(value):
                 result = self.eval(value)?
-            case nil:
+            case None:
                 pass
         Ok(result)
 

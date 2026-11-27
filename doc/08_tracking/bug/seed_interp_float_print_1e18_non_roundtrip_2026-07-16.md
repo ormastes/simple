@@ -2,7 +2,8 @@
 
 - **Date:** 2026-07-16
 - **Component:** Rust seed interpreter float formatting (`bin/simple run`)
-- **Status:** OPEN (seed-side; not fixable from pure-Simple source)
+- **Status:** RESOLVED 2026-11-25 — the pinned v1.0.0-rc.1 seed now prints the
+  round-tripping value; see verification note below. (Was: OPEN, seed-side.)
 - **Found by:** native-build correctness campaign, parity case `float_edges`
   in `scripts/check/check-native-seed-parity.shs`
 
@@ -39,3 +40,26 @@ shortest-round-trip.
 `-0.0NaN0.000000000000000001`) in `check-native-seed-parity.shs` on 2026-07-16.
 Fix belongs in the seed's f64-to-string (shortest round-trip, e.g. Ryu/`{}`
 formatting) when the seed is next rebuilt.
+
+## Verification 2026-11-25 (release/1.0.0, Windows host, work/p2w5-aa lane)
+
+The exact repro from this doc, run on release/1.0.0 HEAD (4bc2c986375) with
+the pinned tracked binary `bin/simple.exe` (Simple v1.0.0-rc.1 Rust seed):
+
+```text
+$ SIMPLE_LIB=src bin/simple.exe run probe_float.spl
+-0.0
+NaN
+0.000000000000000001
+rc=0
+```
+
+The seed now prints `0.000000000000000001` for `1e-18` — the positional,
+round-tripping form this doc identified as correct — matching the
+NATIVE-AUTHORITATIVE expectation `-0.0NaN0.000000000000000001` recorded in
+`scripts/check/check-native-seed-parity.shs` (`run_native_authoritative_case
+float_edges`). The seed-side f64 formatting defect is fixed in the rc.1 seed.
+The harness's `float_edges` case remains classified NATIVE-AUTHORITATIVE;
+re-running that harness needs a native-build comparison and was not attempted
+on this host, but the seed half of the pair is verified correct directly.
+Closing as STALE (fixed by a seed rebuild that has since landed).

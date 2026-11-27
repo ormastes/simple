@@ -15,7 +15,7 @@ extern fn rt_actor_try_send(target: i64, message: i64) -> i64
 @unsafe(reason: "raw actor receive value/status ABI", capabilities: [ffi])
 extern fn rt_actor_recv() -> i64
 @unsafe(reason: "raw scheduler yield status ABI", capabilities: [ffi])
-extern fn rt_thread_yield() -> i64
+extern fn rt_thread_yield()
 
 @always_inline
 fn _mir_interp_actor_spawn_raw(handler: i64) -> i64:
@@ -33,13 +33,29 @@ fn _mir_interp_actor_recv_raw() -> i64:
         rt_actor_recv()
 
 @always_inline
-fn _mir_interp_thread_yield_raw() -> i64:
+fn _mir_interp_thread_yield_raw():
     unsafe(capabilities: [ffi]):
         rt_thread_yield()
 
 # ============================================================================
 # Async Runtime Support
 # ============================================================================
+
+fn mir_interp_runtime_arity_v1(name: text) -> i64:
+    """Exact supported runtime ABI arity; -1 means no interpreter owner."""
+    match name:
+        case "rt_array_new": 1
+        case "rt_array_push": 2
+        case "rt_array_len": 1
+        case "rt_array_get": 2
+        case "rt_array_set": 3
+        case "__simple_runtime_create_promise": 1
+        case "__simple_runtime_await": 1
+        case "__simple_runtime_spawn": 1
+        case "__simple_runtime_send": 2
+        case "__simple_runtime_receive": 1
+        case "__simple_runtime_yield": 1
+        case _: -1
 
 fn mir_interp_call_runtime_fn(name: text, args: [i64]) -> i64:
     """Call a runtime function by name, mirroring LLVM backend."""
@@ -55,7 +71,10 @@ fn mir_interp_call_runtime_fn(name: text, args: [i64]) -> i64:
         case "__simple_runtime_receive":
             _mir_interp_actor_recv_raw()
         case "__simple_runtime_yield":
+            # yield has no result; 0 is the unit word, as the LLVM backend's
+            # void runtime call.
             _mir_interp_thread_yield_raw()
+            0
         case _:
             # Lane C8: every caller passes one of the literal names above, so
             # this is reachable only by a new name with no arm. Was a silent 0.
@@ -85,5 +104,5 @@ fn _extract_func_name(op: MirOperand) -> text?:
         case Const(value, type_):
             match value:
                 case Str(name): Some(name)
-                case _: nil
-        case _: nil
+                case _: None
+        case _: None

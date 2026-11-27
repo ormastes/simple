@@ -1,0 +1,147 @@
+# System test: `devhub messenger` read verbs over stores that must NOT be readable:
+# one flipped byte, a file cut mid-page, a plaintext SQLite file declared sqlcipher4,
+# and a missing file. Damaged copies are made from the checked-in dense fixture with
+# pure-Simple file I/O under build/. Runs through the interpreter, or the native
+# binary when DEVHUB_NATIVE_BIN is set. Passphrase is public synthetic data.
+# @manual_section: messenger-read-verbs-damaged-store
+
+"""
+## Purpose and audience
+Purpose: when the encrypted store has been modified, cut short or is not encrypted at
+all, the read verbs stop with a configuration error (exit code 2) and print a short
+reason. They never print rows decoded from the damaged file, never print the
+passphrase, and never crash.
+Audience: DevHub release reviewers and security reviewers.
+
+## How the damage is made
+- flipped: byte 100 of the last page (page 9) is XORed with 0x01. Every page carries an
+  HMAC-SHA512 tag over its ciphertext, so one changed bit must fail authentication.
+- cut: the first 20,000 bytes are kept (four pages and part of the fifth).
+- plaintext: the checked-in unencrypted messenger_plain.sqlite is declared sqlcipher4.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use test.support.devhub_messenger_dense.*
+use test.support.devhub_messenger_cli.*
+
+val DS_DIR: text = "build/ds/"
+val DS_FLIP_AT: i64 = 8 * 4096 + 100
+val DS_CUT_AT: i64 = 20000
+
+fn flipped_copy(source: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < source.len():
+        if i == DS_FLIP_AT:
+            out.push(source[i] ^ 1u8)
+        else:
+            out.push(source[i])
+        i = i + 1
+    out
+
+fn cut_copy(source: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < DS_CUT_AT and i < source.len():
+        out.push(source[i])
+        i = i + 1
+    out
+
+fn differing_bytes(a: [u8], b: [u8]) -> i64:
+    var count = 0
+    var i = 0
+    while i < a.len() and i < b.len():
+        if a[i] != b[i]:
+            count = count + 1
+        i = i + 1
+    count
+
+# One read verb against the store at `db_rel`, with its own HOME.
+fn run_against(home: text, db_rel: text, verb_args: [text]) -> (text, text, i64):
+    val _home = cli_prepare_home_for(DS_DIR + home, db_rel)
+    cli_devhub(["messenger"] + verb_args + ["--target", "dense", "--json"])
+
+val ds_truth = dense_truth()
+val ds_pass = truth_passphrase(ds_truth)
+val ds_secret = dense_set_secret(ds_pass)
+val ds_dir_ready = dir_create_all(DS_DIR)
+val ds_source = dense_file_bytes(DENSE_BASE)
+val ds_flip_bytes = flipped_copy(ds_source)
+val ds_flip_written = file_write_bytes(DS_DIR + "flipped.sqlcipher4", ds_flip_bytes)
+val ds_cut_written = file_write_bytes(DS_DIR + "cut.sqlcipher4", cut_copy(ds_source))
+
+# Rows and secrets that must never appear in the output of a refused read.
+val DS_LEAKS: [text] = [ds_pass, "fresh general", "other room", "tie-first", "other-room-only", "filler-", "general", "random", "SQLite format"]
+# The interpreter prints compiler warnings on stderr (they mention e.g. /dev/urandom),
+# so stderr is checked for the secret and for strings only a stored row could hold.
+val DS_STDERR_LEAKS: [text] = [ds_pass, "fresh general", "other room", "tie-first", "other-room-only", "filler-"]
+
+fn prints_nothing_stored(run: (text, text, i64)) -> bool:
+    leaks_none(run.0, DS_LEAKS) and leaks_none(run.1, DS_STDERR_LEAKS)
+
+val ds_flip_msgs = run_against("flip", DS_DIR + "flipped.sqlcipher4", ["messages", "--room", "2"])
+val ds_flip_rooms = run_against("flip", DS_DIR + "flipped.sqlcipher4", ["rooms"])
+val ds_cut_rooms = run_against("cut", DS_DIR + "cut.sqlcipher4", ["rooms"])
+val ds_plain_rooms = run_against("plain", dense_path("messenger_plain.sqlite"), ["rooms"])
+val ds_missing_rooms = run_against("missing", DS_DIR + "no_such_store.sqlcipher4", ["rooms"])
+val ds_control_rooms = run_against("control", dense_path(DENSE_BASE), ["rooms"])
+
+describe "the undamaged store is readable in this same setup":
+    it "returns the ground-truth rooms, so the refusals below come from the damage":
+        # @req REQ-MSGR-READVERB-020
+        step("Run `rooms` against the checked-in fixture with the same passphrase")
+        expect(ds_control_rooms.2).to_equal(0)
+        expect(ds_control_rooms.0.contains(tf(ds_truth, "rooms_payload"))).to_equal(true)
+
+describe "one flipped byte in the encrypted store":
+    it "differs from the fixture in exactly one byte of the last page":
+        # @req REQ-MSGR-READVERB-021
+        step("Compare the damaged copy with the checked-in fixture")
+        expect(ds_source.len()).to_equal(36864)
+        expect(ds_flip_written).to_equal(true)
+        expect(ds_flip_bytes.len()).to_equal(36864)
+        expect(differing_bytes(ds_source, ds_flip_bytes)).to_equal(1)
+
+    it "refuses history with an authentication failure instead of rows":
+        # @req REQ-MSGR-READVERB-022
+        step("Run `messages --room 2` against the copy with the flipped byte")
+        expect(ds_flip_msgs.2).to_equal(2)
+        step("The error names authentication; no row text and no passphrase is printed")
+        expect(ds_flip_msgs.0.contains("authentication-failed")).to_equal(true)
+        expect(ds_flip_msgs.0.contains("\"status\":\"error\"")).to_equal(true)
+        expect(prints_nothing_stored(ds_flip_msgs)).to_equal(true)
+
+    it "refuses the room list too, although the room rows sit on undamaged pages":
+        # @req REQ-MSGR-READVERB-023
+        step("Run `rooms` against the same copy")
+        expect(ds_flip_rooms.2).to_equal(2)
+        expect(ds_flip_rooms.0.contains("authentication-failed")).to_equal(true)
+        expect(prints_nothing_stored(ds_flip_rooms)).to_equal(true)
+
+describe "a store cut short in the middle of a page":
+    it "refuses to read with a corrupt-source error and prints no rows":
+        # @req REQ-MSGR-READVERB-024
+        step("Run `rooms` against the first 20,000 bytes of the fixture")
+        expect(ds_cut_written).to_equal(true)
+        expect(ds_cut_rooms.2).to_equal(2)
+        expect(ds_cut_rooms.0.contains("corrupt-source")).to_equal(true)
+        expect(prints_nothing_stored(ds_cut_rooms)).to_equal(true)
+
+describe "a plaintext SQLite file declared as sqlcipher4":
+    it "refuses to read it and prints none of its plaintext rows":
+        # @req REQ-MSGR-READVERB-025
+        step("Run `rooms` with the unencrypted fixture as the sqlcipher4 store")
+        expect(ds_plain_rooms.2).to_equal(2)
+        expect(ds_plain_rooms.0.contains("corrupt-source")).to_equal(true)
+        expect(prints_nothing_stored(ds_plain_rooms)).to_equal(true)
+
+describe "a store file that is not there":
+    it "reports the source as unavailable without a crash or a path dump":
+        # @req REQ-MSGR-READVERB-026
+        step("Run `rooms` with a path that does not exist")
+        expect(ds_missing_rooms.2).to_equal(2)
+        expect(ds_missing_rooms.0.contains("source-unavailable")).to_equal(true)
+        expect(prints_nothing_stored(ds_missing_rooms)).to_equal(true)

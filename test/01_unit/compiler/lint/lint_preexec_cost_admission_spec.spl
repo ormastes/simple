@@ -1,0 +1,225 @@
+"""
+## Purpose and audience
+Executable specification for pre-execution lint rule cost admission, execution
+ledger counters, flag/attribute/manifest precedence under `--fast` (`NormalBuild`),
+and AST parse bypass when zero AST-dependent rules are admitted (`ED-T01`,
+`ED-T02`, `ED-T03`).
+Audience: compiler and tooling engineers maintaining lint cost profiles.
+"""
+# @cover src/compiler/90.tools/lint/_LintMain/rule_cost_tier.spl
+# @cover src/compiler/90.tools/lint/_LintMain/config_and_model.spl
+# @cover src/compiler/90.tools/lint/_LintMain/lint_checks.spl
+# @cover src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl
+# @cover src/compiler/90.tools/lint/static_rules.spl
+# @cover src/compiler/90.tools/fix/rules/registry.spl
+# @req REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.io_runtime.{file_write, file_delete, dir_create_all, getpid, time_now_unix_micros}
+use compiler.tools.lint.main.{
+    Linter, LintConfig, LintLevel, LintProfile, LintCliPolicy,
+    lint_cli_source, run_lint_source_with_linter_policy, resolve_lint_config
+}
+use compiler.tools.lint._LintMain.rule_cost_tier.{
+    LintCostTier, LintTierProfile,
+    lint_apply_fast_profile, lint_tier_admits, lint_rule_cost_tier,
+    lint_rule_admitted_for_config,
+    lint_reset_invocation_counts_v1, lint_rule_invocation_count_v1,
+    lint_rule_cost_skip_count_v1, lint_executed_rule_ids_v1,
+    lint_cost_skipped_rule_ids_v1, lint_ast_parse_count_v1,
+    lint_ast_parse_skipped_count_v1
+}
+use compiler.tools.lint.static_rules.{
+    LintParamsV1, LintUnit, static_lint_rule_table, run_admitted_static_lint_rule_table
+}
+use compiler.tools.fix.producer.{fix_unit_from_source}
+use compiler.tools.fix.rules.registry.{run_admitted_registry_producers}
+
+val MIXED_COST_FIXTURE = "# TODO: fix formatting\npub fn toggle_flag(active: bool) -> bool:\n    var d: Dict<text, [i64]> = {{}}\n    d[\"k\"].push(1)\n    active\n"
+
+fn allow_only_param_tag(rule_id: text) -> bool:
+    rule_id == "param_tag"
+
+fn allow_only_newunit_fix(code: text) -> bool:
+    code == "SPL-UNIT-001"
+
+# @manual_section: lint_preexec_cost_admission
+describe "Pre-execution lint cost admission and invocation ledger (ED-T01..ED-T03)":
+    """Verifies pre-execution cost gating across static, EasyFix, line, and AST producers."""
+
+    context "ED-T01: tier admission, producer classification, and pre-execution gating":
+        """Checks pure tier predicates, producer ID mappings, and zero Medium/High invocations in NormalBuild."""
+
+        it "defaults LintConfig to DefaultLint and switches to NormalBuild on lint_apply_fast_profile":
+            """Verifies tier_profile transitions from DefaultLint to NormalBuild."""
+            var cfg = LintConfig.new()
+            expect(cfg.tier_profile == LintTierProfile.DefaultLint).to_be(true)
+            expect(lint_tier_admits(LintTierProfile.DefaultLint, LintCostTier.Low)).to_be(true)
+            expect(lint_tier_admits(LintTierProfile.DefaultLint, LintCostTier.Medium)).to_be(true)
+            expect(lint_tier_admits(LintTierProfile.DefaultLint, LintCostTier.High)).to_be(true)
+
+            lint_apply_fast_profile(cfg)
+            expect(cfg.tier_profile == LintTierProfile.NormalBuild).to_be(true)
+            expect(lint_tier_admits(LintTierProfile.NormalBuild, LintCostTier.Low)).to_be(true)
+            expect(lint_tier_admits(LintTierProfile.NormalBuild, LintCostTier.Medium)).to_be(false)
+            expect(lint_tier_admits(LintTierProfile.NormalBuild, LintCostTier.High)).to_be(false)
+
+        it "maps static rules and EasyFix producer IDs to accurate Low/Medium/High cost tiers":
+            """Verifies canonical rules, EasyFix IDs, and static rule IDs resolve to their true cost tiers."""
+            expect(lint_rule_cost_tier("todo_format") == LintCostTier.Low).to_be(true)
+            expect(lint_rule_cost_tier("L:print_in_test_spec") == LintCostTier.Low).to_be(true)
+            expect(lint_rule_cost_tier("L:bare_bool") == LintCostTier.Low).to_be(true)
+            expect(lint_rule_cost_tier("W-STR-BRACE-001") == LintCostTier.Low).to_be(true)
+            expect(lint_rule_cost_tier("SPL-UNIT-001") == LintCostTier.Low).to_be(true)
+
+            expect(lint_rule_cost_tier("L:unnamed_duplicate_typed_args") == LintCostTier.Medium).to_be(true)
+            expect(lint_rule_cost_tier("L:init_boundary_violation") == LintCostTier.Medium).to_be(true)
+            expect(lint_rule_cost_tier("L:bypass_with_code_files") == LintCostTier.Medium).to_be(true)
+            expect(lint_rule_cost_tier("os_freestanding") == LintCostTier.Medium).to_be(true)
+            expect(lint_rule_cost_tier("param_object") == LintCostTier.Medium).to_be(true)
+
+            expect(lint_rule_cost_tier("cow_alias_hotpath") == LintCostTier.High).to_be(true)
+            expect(lint_rule_cost_tier("nogc_ownership") == LintCostTier.High).to_be(true)
+            expect(lint_rule_cost_tier("L:resource_leak") == LintCostTier.High).to_be(true)
+            expect(lint_rule_cost_tier("L:non_exhaustive_match") == LintCostTier.High).to_be(true)
+            expect(lint_rule_cost_tier("SPL-BOUND-002") == LintCostTier.High).to_be(true)
+
+        it "gates static_rules and EasyFix registry producers via allow_fn before execution":
+            """Verifies run_admitted_static_lint_rule_table and run_admitted_registry_producers invoke only admitted rows."""
+            val unit_src = "newunit Meters: i64 as m\npub fn pair_sum(a: i64, b: i64) -> i64:\n    val s = table.slot_of(a).unwrap_or(0)\n    a + b + s\n"
+            val static_run = run_admitted_static_lint_rule_table(
+                LintParamsV1.defaults(),
+                LintUnit("src/lib/nogc_sync_mut/demo.spl", unit_src),
+                static_lint_rule_table(),
+                allow_only_param_tag)
+            expect(static_run.errors.len()).to_equal(0)
+            val static_codes = [f.code for f in static_run.findings]
+            expect(static_codes).to_contain("PTAG001")
+            expect(static_codes.contains("W-MC-DEF-001")).to_be(false)
+
+            val fix_unit = fix_unit_from_source("src/lib/demo.spl", unit_src)
+            val fixes = run_admitted_registry_producers(fix_unit, allow_only_newunit_fix)
+            expect(fixes.len()).to_equal(1)
+            expect(fixes[0].id).to_start_with("SPL-UNIT-001:")
+
+        it "executes Medium and High rules under DefaultLint and skips them pre-execution under NormalBuild":
+            """Proves NormalBuild records zero invocations for Medium/High producers while preserving Low findings."""
+            lint_reset_invocation_counts_v1()
+            val full_linter = Linter.new(false)
+            val full_results = lint_cli_source(full_linter, "/tmp/preexec_default.spl", MIXED_COST_FIXTURE)
+            val full_codes = [r.lint.code for r in full_results]
+            expect(full_codes).to_contain("COLL019")
+            expect(full_codes).to_contain("T001")
+            expect(lint_rule_invocation_count_v1("collection_performance")).to_be_greater_than(0)
+            expect(lint_rule_invocation_count_v1("cow_alias_hotpath")).to_be_greater_than(0)
+            expect(lint_rule_invocation_count_v1("L:resource_leak")).to_be_greater_than(0)
+
+            lint_reset_invocation_counts_v1()
+            val fast_linter = Linter.new(false)
+            lint_apply_fast_profile(fast_linter.config)
+            val fast_results = lint_cli_source(fast_linter, "/tmp/preexec_fast.spl", MIXED_COST_FIXTURE)
+            val fast_codes = [r.lint.code for r in fast_results]
+            expect(fast_codes).to_contain("T001")
+            expect(fast_codes).to_contain("bare_bool")
+            expect(fast_codes.contains("COLL019")).to_be(false)
+
+            expect(lint_rule_invocation_count_v1("collection_performance")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("cow_alias_hotpath")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("nogc_ownership")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("L:resource_leak")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("L:unnamed_duplicate_typed_args")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("L:non_exhaustive_match")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("SPL-BOUND-002")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("visibility_boundary")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("option_me_call")).to_equal(0)
+            expect(lint_executed_rule_ids_v1()).to_contain("todo_format")
+            expect(lint_cost_skipped_rule_ids_v1()).to_contain("collection_performance")
+            expect(lint_cost_skipped_rule_ids_v1()).to_contain("cow_alias_hotpath")
+            expect(lint_rule_cost_skip_count_v1("collection_performance")).to_be_greater_than(0)
+
+    context "ED-T02: NormalBuild ceiling precedence over CLI flags, source attributes, and child simple.sdn":
+        """Ensures --warn-all, --deny-all, @warn/@deny attributes, and child manifests cannot re-enable Medium/High execution."""
+
+        it "enforces zero Medium/High invocations when --fast is combined with --warn-all and --deny-all":
+            """Proves CLI escalation flags after --fast do not invoke Medium/High rules."""
+            lint_reset_invocation_counts_v1()
+            val policy = LintCliPolicy.from_args(["--fast", "--warn-all", "--deny-all", "--wm-lane", "--gpu-2d-perf", "--profile=critical"])
+            val linter = Linter.new(false)
+            val rc = run_lint_source_with_linter_policy(linter, "/tmp/preexec_flags.spl", policy, MIXED_COST_FIXTURE)
+            expect(rc).to_equal(1)
+            expect(lint_rule_invocation_count_v1("collection_performance")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("resource_leak")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("L:resource_leak")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("wm_lane_boundary")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("gpu_2d_perf")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("cow_alias_hotpath")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("todo_format")).to_be_greater_than(0)
+
+        it "enforces zero Medium/High invocations when source @warn/@deny/@lint_profile attributes are present":
+            """Proves file-header @warn/@deny/@lint_profile attributes cannot bypass the NormalBuild cost ceiling."""
+            val attr_src = "@lint_profile(critical)\n@deny(collection_performance, resource_leak, cow_alias_hotpath, unnamed_duplicate_typed_args)\n@warn(wm_lane_boundary, gpu_2d_perf)\n" + MIXED_COST_FIXTURE
+            lint_reset_invocation_counts_v1()
+            val linter = Linter.new(false)
+            lint_apply_fast_profile(linter.config)
+            val resolved = resolve_lint_config(linter.config, "/tmp/preexec_attrs.spl", attr_src)
+            expect(resolved.tier_profile == LintTierProfile.NormalBuild).to_be(true)
+            expect(lint_rule_admitted_for_config(resolved, "collection_performance")).to_be(false)
+            expect(lint_rule_admitted_for_config(resolved, "resource_leak")).to_be(false)
+
+            val results = lint_cli_source(linter, "/tmp/preexec_attrs.spl", attr_src)
+            val codes = [r.lint.code for r in results]
+            expect(codes.contains("COLL019")).to_be(false)
+            expect(lint_rule_invocation_count_v1("collection_performance")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("L:resource_leak")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("L:unnamed_duplicate_typed_args")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("wm_lane_boundary")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("gpu_2d_perf")).to_equal(0)
+
+        it "enforces zero Medium/High invocations when a child simple.sdn promotes Medium/High rules":
+            """Proves child manifest overrides inherit the NormalBuild tier ceiling."""
+            val tmp_dir = "/tmp/preexec_child_sdn_{getpid()}_{time_now_unix_micros()}"
+            dir_create_all(tmp_dir)
+            val sdn_path = "{tmp_dir}/simple.sdn"
+            val target_path = "{tmp_dir}/mod_a.spl"
+            file_write(sdn_path, "lints:\n  profile: critical\n  collection_performance: deny\n  resource_leak: deny\n  unnamed_duplicate_typed_args: deny\n")
+
+            lint_reset_invocation_counts_v1()
+            val linter = Linter.new(false)
+            lint_apply_fast_profile(linter.config)
+            val results = lint_cli_source(linter, target_path, MIXED_COST_FIXTURE)
+            file_delete(sdn_path)
+
+            val codes = [r.lint.code for r in results]
+            expect(codes.contains("COLL019")).to_be(false)
+            expect(lint_rule_invocation_count_v1("collection_performance")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("L:resource_leak")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("L:unnamed_duplicate_typed_args")).to_equal(0)
+
+    context "ED-T03: AST parse bypass when zero AST-dependent rules are admitted":
+        """Verifies AST parsing runs when AST rules are admitted and is skipped completely when none are admitted."""
+
+        it "parses the AST when an AST-dependent Low rule is admitted and skips AST parsing when all AST rules are unadmitted":
+            """Proves lint_cli_source skips parse_module_silent_checked when zero AST rules are admitted."""
+            lint_reset_invocation_counts_v1()
+            val ast_linter = Linter.new(false)
+            lint_apply_fast_profile(ast_linter.config)
+            val ast_results = lint_cli_source(ast_linter, "/tmp/preexec_with_ast.spl", MIXED_COST_FIXTURE)
+            expect(ast_results.len()).to_be_greater_than(0)
+            expect(lint_ast_parse_count_v1()).to_equal(1)
+            expect(lint_ast_parse_skipped_count_v1()).to_equal(0)
+
+            lint_reset_invocation_counts_v1()
+            val text_only_linter = Linter.new(false)
+            lint_apply_fast_profile(text_only_linter.config)
+            text_only_linter.config.set_level("too_many_arguments", LintLevel.Allow)
+            text_only_linter.config.set_level("stub_impl", LintLevel.Allow)
+            text_only_linter.config.set_level("required_comment", LintLevel.Allow)
+            text_only_linter.config.set_level("primitive_api", LintLevel.Allow)
+            val text_results = lint_cli_source(text_only_linter, "/tmp/preexec_no_ast.spl", MIXED_COST_FIXTURE)
+            val text_codes = [r.lint.code for r in text_results]
+            expect(text_codes).to_contain("T001")
+            expect(text_codes).to_contain("bare_bool")
+            expect(lint_ast_parse_count_v1()).to_equal(0)
+            expect(lint_ast_parse_skipped_count_v1()).to_equal(1)
+            expect(lint_rule_invocation_count_v1("too_many_arguments")).to_equal(0)
+            expect(lint_rule_invocation_count_v1("collection_performance")).to_equal(0)

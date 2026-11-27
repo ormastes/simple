@@ -1,0 +1,385 @@
+# Compositional Caller Cost Propagation & Incremental Invalidation (V1)
+#
+# Propagates parameterized function cost summaries across call graphs in
+# bottom-up topological order, handles recursive SCCs via bounded iterative
+# Tarjan cycle detection (C14), deduplicates pass-through warning cascades
+# (C07), and invalidates reverse dependencies only when exported cost/effect
+# digests change (I04).
+
+use compiler.semantics.perf.perf_analysis_contracts_v1.{
+    PerfResourceDimension, BoundRelation, BoundRegime, AnalysisResultStatus,
+    BoundOrigin, CostExprV1, BoundEvidenceV1, ProvenanceEdgeV1,
+    FunctionCostSummaryV1, PerfFindingRecordV1
+}
+use compiler.semantics.perf.cost_domain_v1.{render_cost_expr_with_params_v1}
+use compiler.semantics.perf.cost_summary_v1.{
+    PerfCallArgBindingV1, PerfCallbackBindingV1, PerfBodyNodeV1,
+    PerfFunctionModelV1, PerfSummarizerConfigV1,
+    substitute_cost_expr_for_call_v1, cost_summary_exported_digest_v1,
+    summarize_function_model_v1
+}
+
+struct CallGraphPropagationResultV1:
+    summaries: Dict<text, FunctionCostSummaryV1>
+    exported_digests: Dict<text, text>
+    findings: [PerfFindingRecordV1]
+    recursive_sccs: [[text]]
+    evaluation_order: [text]
+
+struct IncrementalPropagationResultV1:
+    snapshot: CallGraphPropagationResultV1
+    recomputed_ids: [text]
+    reused_ids: [text]
+    invalidated_caller_ids: [text]
+
+struct TarjanFrameV1:
+    node_id: text
+    edge_idx: i64
+
+struct SccGroupV1:
+    members: [text]
+    is_recursive: bool
+
+pub fn substitute_callee_cost_expr_v1(
+    callee_expr: CostExprV1,
+    callee_summary: FunctionCostSummaryV1,
+    arg_bindings: [PerfCallArgBindingV1],
+    callback_bindings: [PerfCallbackBindingV1]
+) -> CostExprV1:
+    substitute_cost_expr_for_call_v1(callee_expr, callee_summary, arg_bindings, callback_bindings)
+
+# reason: collects direct callee function_id strings from a PerfBodyNodeV1 iteratively
+@allow(primitive_api)
+pub fn collect_direct_callees_v1(body: PerfBodyNodeV1) -> [text]:
+    var work: [PerfBodyNodeV1] = [body]
+    var callees: [text] = []
+    while work.len() > 0:
+        val curr = work.pop()
+        match curr:
+            case PerfBodyNodeV1.CalleeCall(callee_id, _, _, _, _, _):
+                if callee_id != "" and not callees.contains(callee_id):
+                    callees.push(callee_id)
+            case PerfBodyNodeV1.Seq(children, _):
+                var idx = children.len() - 1
+                while idx >= 0:
+                    work.push(children[idx])
+                    idx = idx - 1
+            case PerfBodyNodeV1.Branch(_, then_n, else_n, _):
+                work.push(else_n)
+                work.push(then_n)
+            case PerfBodyNodeV1.LoopRegion(_, inner, _):
+                work.push(inner)
+            case _:
+                pass_do_nothing
+    callees
+
+fn _compute_tarjan_sccs(models: [PerfFunctionModelV1]) -> [SccGroupV1]:
+    var known: Dict<text, bool> = {}
+    var adj: Dict<text, [text]> = {}
+    for m in models:
+        known[m.function_id] = true
+    for m in models:
+        val raw_callees = collect_direct_callees_v1(m.body)
+        var filtered: [text] = []
+        for c in raw_callees:
+            if known.contains_key(c):
+                filtered.push(c)
+        adj[m.function_id] = filtered
+
+    var index_map: Dict<text, i64> = {}
+    var lowlink_map: Dict<text, i64> = {}
+    var on_stack: Dict<text, bool> = {}
+    var scc_stack: [text] = []
+    var next_index = 0
+    var groups: [SccGroupV1] = []
+
+    for m in models:
+        val start_id = m.function_id
+        if index_map.contains_key(start_id):
+            continue
+        var frames: [TarjanFrameV1] = [TarjanFrameV1(node_id: start_id, edge_idx: 0)]
+        index_map[start_id] = next_index
+        lowlink_map[start_id] = next_index
+        next_index = next_index + 1
+        scc_stack.push(start_id)
+        on_stack[start_id] = true
+
+        while frames.len() > 0:
+            val top = frames.pop()
+            val u = top.node_id
+            val edges = adj[u]
+            if top.edge_idx < edges.len():
+                val v = edges[top.edge_idx]
+                frames.push(TarjanFrameV1(node_id: u, edge_idx: top.edge_idx + 1))
+                if not index_map.contains_key(v):
+                    index_map[v] = next_index
+                    lowlink_map[v] = next_index
+                    next_index = next_index + 1
+                    scc_stack.push(v)
+                    on_stack[v] = true
+                    frames.push(TarjanFrameV1(node_id: v, edge_idx: 0))
+                elif on_stack.contains_key(v) and on_stack[v]:
+                    if index_map[v] < lowlink_map[u]:
+                        lowlink_map[u] = index_map[v]
+            else:
+                if lowlink_map[u] == index_map[u]:
+                    var members: [text] = []
+                    while scc_stack.len() > 0:
+                        val w = scc_stack.pop()
+                        on_stack[w] = false
+                        members.push(w)
+                        if w == u:
+                            break
+                    var is_rec = members.len() > 1
+                    if members.len() == 1:
+                        val only = members[0]
+                        if adj[only].contains(only):
+                            is_rec = true
+                    groups.push(SccGroupV1(members: members, is_recursive: is_rec))
+                if frames.len() > 0:
+                    val parent = frames[frames.len() - 1].node_id
+                    if lowlink_map[u] < lowlink_map[parent]:
+                        lowlink_map[parent] = lowlink_map[u]
+    groups
+
+# reason: returns recursive strongly connected component groups of function_id strings (C14)
+@allow(primitive_api)
+pub fn detect_call_graph_sccs_v1(models: [PerfFunctionModelV1]) -> [[text]]:
+    val groups = _compute_tarjan_sccs(models)
+    var rec: [[text]] = []
+    for g in groups:
+        if g.is_recursive:
+            rec.push(g.members)
+    rec
+
+fn _build_recursive_scc_summary(
+    model: PerfFunctionModelV1,
+    scc_members: [text],
+    config: PerfSummarizerConfigV1
+) -> (FunctionCostSummaryV1, PerfFindingRecordV1):
+    val unk_expr = CostExprV1.UnknownTerm("recursive_scc")
+    val rendered = render_cost_expr_with_params_v1(unk_expr, model.size_parameters, model.size_relations)
+    val root_prov = model.function_id + ":scc_root"
+    val prov_edge = ProvenanceEdgeV1(
+        node_id: root_prov,
+        role: "recursive_scc",
+        file: model.file,
+        span: model.primary_span,
+        summary_line: "recursive cycle [" + scc_members.join(" -> ") + "]",
+        child_ids: []
+    )
+    val work_bound = BoundEvidenceV1(
+        resource: PerfResourceDimension.Work,
+        expression: unk_expr,
+        rendered_expression: rendered,
+        relation: BoundRelation.UpperBound,
+        regime: BoundRegime.WorstCase,
+        model_id: config.model_version,
+        assumptions: ["recursive_scc_unbounded_in_v1"],
+        status: AnalysisResultStatus.Unknown,
+        origin: BoundOrigin.Inferred,
+        provenance_id: root_prov
+    )
+    var summary = FunctionCostSummaryV1(
+        function_id: model.function_id,
+        function_symbol_id: model.function_symbol_id,
+        semantic_revision: model.semantic_revision,
+        size_parameters: model.size_parameters,
+        size_relations: model.size_relations,
+        resource_bounds: [work_bound],
+        output_cardinality: CostExprV1.UnknownTerm("recursive_scc"),
+        callback_cost_parameters: model.callback_cost_parameters,
+        effects_summary_id: model.effects_summary_id,
+        assumptions: ["recursive_scc_unbounded_in_v1"],
+        unresolved_terms: ["recursive_scc"],
+        dependency_summary_hashes: [],
+        implementation_digest: "",
+        provenance_root: root_prov,
+        provenance_nodes: [prov_edge],
+        analyzer_version: config.analyzer_version,
+        model_version: config.model_version,
+        configuration_fingerprint: config.configuration_fingerprint
+    )
+    val dig = cost_summary_exported_digest_v1(summary)
+    summary.implementation_digest = dig
+    val finding = PerfFindingRecordV1(
+        rule_code: "PERF-ANALYSIS-001",
+        stable_occurrence_id: model.function_id + ":PERF-ANALYSIS-001:recursive_scc",
+        function_id: model.function_id,
+        file: model.file,
+        primary_span: model.primary_span,
+        related_locations: [prov_edge],
+        message: "Unsupported recursive strongly connected component [" + scc_members.join(", ") + "]; reporting explicit unknown bound",
+        evidence: Some(work_bound),
+        tier: config.tier,
+        semantic_fingerprint: dig,
+        fix_candidates: []
+    )
+    (summary, finding)
+
+pub fn propagate_call_graph_v1(
+    models: [PerfFunctionModelV1],
+    config: PerfSummarizerConfigV1
+) -> CallGraphPropagationResultV1:
+    var model_map: Dict<text, PerfFunctionModelV1> = {}
+    for m in models:
+        model_map[m.function_id] = m
+
+    val groups = _compute_tarjan_sccs(models)
+    var summaries: Dict<text, FunctionCostSummaryV1> = {}
+    var exported_digests: Dict<text, text> = {}
+    var findings: [PerfFindingRecordV1] = []
+    var recursive_sccs: [[text]] = []
+    var eval_order: [text] = []
+
+    for g in groups:
+        if g.is_recursive:
+            recursive_sccs.push(g.members)
+            for fn_id in g.members:
+                val m = model_map[fn_id]
+                val pair = _build_recursive_scc_summary(m, g.members, config)
+                val sum = pair.0
+                val fnd = pair.1
+                summaries[fn_id] = sum
+                exported_digests[fn_id] = sum.implementation_digest
+                findings.push(fnd)
+                eval_order.push(fn_id)
+        else:
+            val fn_id = g.members[0]
+            val m = model_map[fn_id]
+            val res = summarize_function_model_v1(m, summaries, config)
+            summaries[fn_id] = res.summary
+            exported_digests[fn_id] = res.summary.implementation_digest
+            for f in res.findings:
+                findings.push(f)
+            eval_order.push(fn_id)
+
+    CallGraphPropagationResultV1(
+        summaries: summaries,
+        exported_digests: exported_digests,
+        findings: findings,
+        recursive_sccs: recursive_sccs,
+        evaluation_order: eval_order
+    )
+
+# reason: edited_function_ids names the functions modified in the current incremental snapshot (I04)
+@allow(primitive_api)
+pub fn propagate_incremental_update_v1(
+    previous: CallGraphPropagationResultV1,
+    all_models: [PerfFunctionModelV1],
+    edited_function_ids: [text],
+    config: PerfSummarizerConfigV1
+) -> IncrementalPropagationResultV1:
+    var model_map: Dict<text, PerfFunctionModelV1> = {}
+    var reverse_callers: Dict<text, [text]> = {}
+    for m in all_models:
+        model_map[m.function_id] = m
+        reverse_callers[m.function_id] = []
+
+    for m in all_models:
+        val callees = collect_direct_callees_v1(m.body)
+        for c in callees:
+            if reverse_callers.contains_key(c):
+                var rlist = reverse_callers[c]
+                if not rlist.contains(m.function_id):
+                    rlist.push(m.function_id)
+                reverse_callers[c] = rlist
+
+    var dirty: Dict<text, bool> = {}
+    for eid in edited_function_ids:
+        dirty[eid] = true
+    for m in all_models:
+        if not previous.summaries.contains_key(m.function_id):
+            dirty[m.function_id] = true
+
+    val groups = _compute_tarjan_sccs(all_models)
+    var summaries: Dict<text, FunctionCostSummaryV1> = {}
+    var exported_digests: Dict<text, text> = {}
+    var findings: [PerfFindingRecordV1] = []
+    var recursive_sccs: [[text]] = []
+    var eval_order: [text] = []
+    var recomputed_ids: [text] = []
+    var reused_ids: [text] = []
+    var invalidated_caller_ids: [text] = []
+
+    for g in groups:
+        if g.is_recursive:
+            recursive_sccs.push(g.members)
+            var group_dirty = false
+            for fn_id in g.members:
+                if dirty.contains_key(fn_id) and dirty[fn_id]:
+                    group_dirty = true
+            for fn_id in g.members:
+                eval_order.push(fn_id)
+                if group_dirty or not previous.summaries.contains_key(fn_id):
+                    val m = model_map[fn_id]
+                    val pair = _build_recursive_scc_summary(m, g.members, config)
+                    val sum = pair.0
+                    val fnd = pair.1
+                    summaries[fn_id] = sum
+                    exported_digests[fn_id] = sum.implementation_digest
+                    findings.push(fnd)
+                    recomputed_ids.push(fn_id)
+                    val prev_dig = if previous.exported_digests.contains_key(fn_id):
+                        previous.exported_digests[fn_id]
+                    else:
+                        ""
+                    if prev_dig != sum.implementation_digest:
+                        for caller_id in reverse_callers[fn_id]:
+                            dirty[caller_id] = true
+                            if not edited_function_ids.contains(caller_id) and not invalidated_caller_ids.contains(caller_id):
+                                invalidated_caller_ids.push(caller_id)
+                else:
+                    summaries[fn_id] = previous.summaries[fn_id]
+                    exported_digests[fn_id] = previous.exported_digests[fn_id]
+                    for pf in previous.findings:
+                        if pf.function_id == fn_id:
+                            findings.push(pf)
+                    reused_ids.push(fn_id)
+        else:
+            val fn_id = g.members[0]
+            eval_order.push(fn_id)
+            if (dirty.contains_key(fn_id) and dirty[fn_id]) or not previous.summaries.contains_key(fn_id):
+                val m = model_map[fn_id]
+                val res = summarize_function_model_v1(m, summaries, config)
+                val new_dig = res.summary.implementation_digest
+                summaries[fn_id] = res.summary
+                exported_digests[fn_id] = new_dig
+                for f in res.findings:
+                    findings.push(f)
+                recomputed_ids.push(fn_id)
+                val prev_dig = if previous.exported_digests.contains_key(fn_id):
+                    previous.exported_digests[fn_id]
+                else:
+                    ""
+                if prev_dig != new_dig:
+                    for caller_id in reverse_callers[fn_id]:
+                        dirty[caller_id] = true
+                        if not edited_function_ids.contains(caller_id) and not invalidated_caller_ids.contains(caller_id):
+                            invalidated_caller_ids.push(caller_id)
+            else:
+                summaries[fn_id] = previous.summaries[fn_id]
+                exported_digests[fn_id] = previous.exported_digests[fn_id]
+                for pf in previous.findings:
+                    if pf.function_id == fn_id:
+                        findings.push(pf)
+                reused_ids.push(fn_id)
+
+    val next_snapshot = CallGraphPropagationResultV1(
+        summaries: summaries,
+        exported_digests: exported_digests,
+        findings: findings,
+        recursive_sccs: recursive_sccs,
+        evaluation_order: eval_order
+    )
+    IncrementalPropagationResultV1(
+        snapshot: next_snapshot,
+        recomputed_ids: recomputed_ids,
+        reused_ids: reused_ids,
+        invalidated_caller_ids: invalidated_caller_ids
+    )
+
+export CallGraphPropagationResultV1, IncrementalPropagationResultV1
+export substitute_callee_cost_expr_v1, collect_direct_callees_v1
+export detect_call_graph_sccs_v1, propagate_call_graph_v1
+export propagate_incremental_update_v1

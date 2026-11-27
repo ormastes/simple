@@ -21,9 +21,14 @@ use compiler.borrow.borrow_check.borrow_graph.*
 use compiler.borrow.borrow_check.nll.*
 use compiler.borrow.borrow_check.nll.{NLLError}  # explicit: enum payload owner must name the payload type (hir-payload-origin-unresolved)
 use compiler.mir.mir_data.*
-use compiler.mir.mir_instruction_support.{MirTerminator, MirOperandKind, MirOperand}
-use compiler.mir.mir_types.{LocalId, BlockId, MirType, MirTypeKind, MirSignature, MirLocal, MirConstValue}  # explicit: a glob is not an import-origin for surface projection
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_instruction_support.{MirTerminator, MirOperandKind, MirOperand, MirCallOrigin, BlockId}
+use compiler.mir.mir_types.{LocalId, MirType, MirTypeKind, MirSignature, MirLocal, MirConstValue}  # explicit: a glob is not an import-origin for surface projection
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.common.diagnostics.span.{Span}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
 
 # ============================================================================
 # Borrow Check Result
@@ -136,6 +141,8 @@ class BorrowChecker:
 
         # Create and run NLL checker
         var nll = NLLChecker.create(cfg)
+        nll.loans_possible = mir_body_has_loan_sources_v1(func)
+        nll.fast_skip_zero_moves = true
         self.short_call_contracts = func.short_call_contracts
         self.nogc_strict = func.nogc_strict
 
@@ -149,6 +156,9 @@ class BorrowChecker:
             if local.short_borrow:
                 val kind = if local.short_mutable: BorrowKind.Mutable else: BorrowKind.Shared
                 nll.record_short_parameter(local.id.id, kind, local.short_boundary)
+
+        # Retirement is limited to fully scanned straight-line reference facts.
+        nll.borrow_graph.reference_retirement_safe = func.blocks.len() == 1
 
         # Analyze borrows in the function
         self.analyze_mir_borrows(func, nll)
@@ -275,7 +285,7 @@ class BorrowChecker:
                     val typed_unwind: BlockId = unwind.unwrap()
                     typed_unwind.id
                 else:
-                    nil
+                    None
                 Terminator.Call(target, unwind_id)
             case MirTerminator.Unreachable:
                 Terminator.Unreachable
@@ -312,6 +322,17 @@ class BorrowChecker:
 
     me analyze_instruction(inst: MirInst, nll: NLLChecker, point: i64):
         """Analyze a single MIR instruction for borrows."""
+        # Retirement is limited to fully scanned straight-line reference facts.
+        # A value-returning call can return an alias; unknown/aggregate operations
+        # can retain one. Neither permits guessed reference lifetime shortening.
+        match inst.kind:
+            case Ref(_, _, _) | Copy(_, _) | Move(_, _) | Drop(_) | Const(_, _, _):
+                pass
+            case Call(dest, _, _):
+                if dest.?:
+                    nll.borrow_graph.reference_retirement_safe = false
+            case _:
+                nll.borrow_graph.reference_retirement_safe = false
         match inst.kind:
             case Ref(dest, borrow_kind, place):
                 # This creates a borrow
@@ -333,6 +354,7 @@ class BorrowChecker:
                 nll.record_use(point, Place.local(src_local.id))
                 val dest_local: LocalId = dest
                 nll.record_assign(point, Place.local(dest_local.id))
+                nll.borrow_graph.note_reference_alias(dest_local.id, src_local.id)
                 nll.record_loan_copy(point, Place.local(src_local.id), Place.local(dest_local.id))
 
             case Move(dest, src):
@@ -341,6 +363,7 @@ class BorrowChecker:
                 nll.record_move(point, Place.local(src_local.id))
                 val dest_local: LocalId = dest
                 nll.record_assign(point, Place.local(dest_local.id))
+                nll.borrow_graph.note_reference_alias(dest_local.id, src_local.id)
                 nll.record_loan_copy(point, Place.local(src_local.id), Place.local(dest_local.id))
 
             case TransferOut(dest, source, _, mode, _, _):
@@ -416,16 +439,16 @@ class BorrowChecker:
                 for arg in args:
                     self.record_operand_use(arg, nll, point)
                 if self.is_direct_named_call_v1(func):
-                    self.record_short_call_contract(func, args, nll, point)
+                    self.record_direct_call_contract_v1(func, args, nll, point)
                 else:
-                    self.record_indirect_call_contract_v1(func, args, nil, nll, point)
+                    self.record_indirect_call_contract_v1(func, args, None, nll, point)
                 # A non-unit call (re)initializes its destination, which kills
                 # any moved-out state on that local, exactly as Copy/Const do.
                 if val dest_local = dest:
                     nll.record_assign(point, Place.local(dest_local.id))
                     # MIR lacks a return-loan summary. Conservatively retain
                     # argument provenance until typed call summaries reach MIR.
-                    self.record_call_result_loans(args, dest_local, nll, point)
+                    self.record_call_result_loans(args, dest_local, nll, point, self.is_direct_named_call_v1(func))
 
             case MirInstKind.BinOp(dest, _, left, right) | MirInstKind.CheckedBinOp(dest, _, left, right):
                 self.record_operand_use(left, nll, point)
@@ -625,13 +648,13 @@ class BorrowChecker:
                 for arg in args:
                     self.record_operand_use(arg, nll, point)
                 if self.is_direct_named_call_v1(func):
-                    self.record_short_call_contract(func, args, nll, point)
+                    self.record_direct_call_contract_v1(func, args, nll, point)
                 else:
-                    self.record_indirect_call_contract_v1(func, args, nil, nll, point)
-                if unwind == nil:
+                    self.record_indirect_call_contract_v1(func, args, None, nll, point)
+                if unwind.is_none():
                     if val dest_local = dest:
                         nll.record_assign(point, Place.local(dest_local.id))
-                        self.record_call_result_loans(args, dest_local, nll, point)
+                        self.record_call_result_loans(args, dest_local, nll, point, self.is_direct_named_call_v1(func))
                 else:
                     # A terminator event executes on BOTH successor edges.
                     # Neither normal nor unwind-only outputs can be revived
@@ -639,7 +662,7 @@ class BorrowChecker:
                     # edge events exist, reject rather than invent a refill.
                     if self.nogc_strict:
                         nll.errors = nll.errors.push(NLLError(message: "ownership MIR adapter requires edge-specific call result definitions for unwinding calls", has_primary_span: true, primary_span: point, secondary_spans: [], has_help: false, help: ""))
-                if unwind_payload_dest != nil or unwind_type_tag_dest != nil:
+                if unwind_payload_dest.is_some() or unwind_type_tag_dest.is_some():
                     # Exception values can retain arbitrary call inputs.
                     for arg in args:
                         self.record_operand_loan_escape(arg, "may escape in an exception payload", nll, point)
@@ -658,7 +681,29 @@ class BorrowChecker:
             case MirTerminator.Abort(_):
                 pass_do_nothing("carries only a diagnostic message, no MIR operand")
 
-    me record_call_result_loans(args: [MirOperand], destination: LocalId, nll: NLLChecker, point: i64):
+    # Legacy (non-`@no_gc(strict)`) modules never receive checked call
+    # contracts: `publish_short_call_contracts` fills the map only for strict
+    # modules, and the driver's param-effect admission skips inference for
+    # them ("Legacy modules retain their existing policy"). Demanding a checked
+    # contract there rejected every `f(&mut x)`, even a plain local callee.
+    # Strict modules keep the full check. Indirect calls are unaffected: they
+    # stay conservative outside strict mode by explicit design.
+    # doc/08_tracking/bug/legacy_direct_call_short_contract_unsatisfiable_2026-10-24.md
+    me record_direct_call_contract_v1(callee: MirOperand, args: [MirOperand], nll: NLLChecker, point: i64):
+        # Legacy local calls retain their policy, but a declared extern (or a
+        # target without declaration authority) cannot assume that a borrow is
+        # released when the call returns. This covers Call and CallTerminator.
+        if self.nogc_strict or callee.call_origin == MirCallOrigin.Foreign or callee.call_origin == MirCallOrigin.Unknown:
+            self.record_short_call_contract(callee, args, nll, point)
+
+    me record_call_result_loans(args: [MirOperand], destination: LocalId, nll: NLLChecker, point: i64, direct: bool = false):
+        # Same legacy policy for result provenance: an unknown-layout result
+        # (class 2, e.g. `Result<(), Enum>` or a struct) of a direct legacy
+        # call does not inherit argument loans. Explicitly reference-bearing
+        # results (class 1) and short-marked destinations still do.
+        if direct and not self.nogc_strict and self.local_declarations.contains_key(destination.id):
+            val legacy_declaration: MirLocal = self.local_declarations[destination.id]
+            if not legacy_declaration.short_borrow and mir_type_loan_payload_class(legacy_declaration.type_) == 2: return
         if not self.result_retains_loans(destination, nll, point): return
         var sources: [Place] = []
         for argument in args:
@@ -672,10 +717,14 @@ class BorrowChecker:
 
     me record_short_call_contract(callee: MirOperand, args: [MirOperand], nll: NLLChecker, point: i64):
         var effects: [text] = []
-        match callee.kind:
-            case MirOperandKind.Const(MirConstValue.Str(name), _):
-                effects = short_call_effects_at(self.short_call_contracts, name)
-            case _: pass
+        # Published short summaries prove local Simple bodies only. Foreign,
+        # generated-runtime and unknown callees may share their spelling, but
+        # that never transfers a local declaration's non-retaining proof.
+        if callee.call_origin == MirCallOrigin.Source:
+            match callee.kind:
+                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                    effects = short_call_effects_at(self.short_call_contracts, name)
+                case _: pass
         # Positional summaries are authoritative only at their checked arity.
         # A stale row must not bless a prefix of a different call signature.
         if effects.len() != args.len(): effects = []
@@ -714,7 +763,7 @@ class BorrowChecker:
         # Scalar ABI metadata must not suppress existing alias checks.
         self.record_short_call_contract(callee, args, nll, point)
         var resolved_signature = signature
-        if resolved_signature == nil:
+        if resolved_signature.is_none():
             match callee.kind:
                 case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
                     if self.local_declarations.contains_key(local.id):
@@ -832,21 +881,96 @@ fn check_mir_function(func: MirBody) -> BorrowCheckResult:
     var checker = BorrowChecker.create()
     checker.check_function(func)
 
-fn check_mir_module(module: MirModule) -> [NLLError]:
-    """Check all functions in a MIR module."""
+# Resolve a function-relative MIR point to its instruction span, using the
+# exact numbering of analyze_mir_borrows (every instruction, then the block
+# terminator, in body block order). Terminators carry no span: fall back to
+# the function span so the diagnostic still names a real source line.
+fn nll_error_with_source_v1(err: NLLError, body: MirBody, function_name: text, function_span: Span) -> NLLError:
+    var located = err
+    located.function_name = function_name
+    var line = function_span.line
+    var col = function_span.col
+    if err.has_primary_span:
+        var cursor = 0
+        var found = false
+        for block in body.blocks:
+            for inst in block.instructions:
+                if not found and cursor == err.primary_span:
+                    found = true
+                    if val inst_span = inst.span:
+                        if inst_span.line > 0:
+                            line = inst_span.line
+                            col = inst_span.col
+                cursor = cursor + 1
+            cursor = cursor + 1
+    located.source_line = line
+    located.source_col = col
+    located
+
+fn mir_body_has_loan_sources_v1(func: MirBody) -> bool:
+    """True when the function can create any loan (a short_borrow parameter or a Ref instruction)."""
+    for local in func.locals:
+        if local.short_borrow:
+            return true
+    for mir_block in func.blocks:
+        for inst in mir_block.instructions:
+            match inst.kind:
+                case Ref(_, _, _):
+                    return true
+                case _:
+                    pass
+    false
+
+fn check_mir_function_unscoped_v1(mir_fn: MirFunction) -> [NLLError]:
+    val body = MirBody.from_function(mir_fn)
+    val entry_block: BlockId = mir_fn.entry_block
     var checker = BorrowChecker.create()
+    match checker.check_function(body, entry_block.id):
+        case Errors(errors):
+            var located_errors: [NLLError] = []
+            for err in errors:
+                located_errors = located_errors.push(nll_error_with_source_v1(err, body, mir_fn.name, mir_fn.span))
+            return located_errors
+        case _:
+            return []
+
+fn check_mir_function_scoped_into_v1(mir_fn: MirFunction, all_errors: [NLLError]) -> [NLLError]:
+    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+        var out = all_errors
+        for err in check_mir_function_unscoped_v1(mir_fn):
+            out = out.push(err)
+        return out
+    val scoped_errors = check_mir_function_unscoped_v1(mir_fn)
+    if scoped_errors.len() == 0:
+        val _ended = transient_scope_end()
+        return all_errors
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(scoped_errors)
+    val ended = transient_scope_end()
+    if paused and owned and ended:
+        var out = all_errors
+        for err in scoped_errors:
+            out = out.push(err)
+        return out
+    var fallback = all_errors
+    for err in check_mir_function_unscoped_v1(mir_fn):
+        fallback = fallback.push(err)
+    fallback
+
+pub fn check_mir_module(module: MirModule) -> [NLLError]:
+    """Check all functions in a MIR module, scoping transient scratch per MirFunction."""
     var all_errors: [NLLError] = []
 
-    for symbol in module.functions.keys():
-        val mir_fn = module.functions[symbol]
-        val body = MirBody.from_function(mir_fn)
-        val entry_block: BlockId = mir_fn.entry_block
-        match checker.check_function(body, entry_block.id):
-            case Errors(errors):
-                for err in errors:
-                    all_errors = all_errors.push(err)
-            case _:
-                pass
+    # Index with the keys() element itself: a `for symbol in ...keys()` binding
+    # of a SymbolId is a native struct COPY under the frozen Phase 2 pin, and
+    # struct dict keys hash by address in the C runtime, so the lookup missed
+    # and MirBody.from_function read a nil MirFunction (0xC0000005).
+    val function_keys: [SymbolId] = module.functions.keys()
+    var function_i = 0
+    while function_i < function_keys.len():
+        val mir_fn: MirFunction = module.functions[function_keys[function_i]]
+        function_i = function_i + 1
+        all_errors = check_mir_function_scoped_into_v1(mir_fn, all_errors)
 
     all_errors
 

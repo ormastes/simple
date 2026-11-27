@@ -1,0 +1,54 @@
+"""
+## Purpose and audience
+Purpose: Prove a build unit's include/exclude globs resolve deterministically
+against a frozen scanned path list, feeding source_inventory_receipt_v1.
+Audience: build and driver engineers maintaining library-unit planning.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Pure functions over an already-scanned path list; no filesystem walking.
+Glob syntax: `*` one segment chars, `**` any segments, `?` one char.
+Plan: doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md (section 4).
+"""
+# @req: REQ-BUILD-SRC-001
+
+use std.spec.*
+use std.spec.step
+use compiler.driver.driver_build.source_inventory_glob_v1.{
+    source_inventory_glob_match_v1, source_inventory_resolve_unit_v1}
+
+# @manual_section: source_inventory_glob
+describe "source_inventory glob resolution":
+    """Globs resolve against a frozen path list into a sorted file set."""
+
+    it "matches star within one segment only":
+        # @req: REQ-BUILD-SRC-001
+        step("Match single-star patterns")
+        expect(source_inventory_glob_match_v1("src/*.spl", "src/a.spl")).to_equal(true)
+        expect(source_inventory_glob_match_v1("src/*.spl", "src/x/a.spl")).to_equal(false)
+        expect(source_inventory_glob_match_v1("src/a?.spl", "src/ab.spl")).to_equal(true)
+        expect(source_inventory_glob_match_v1("src/a?.spl", "src/a.spl")).to_equal(false)
+
+    it "matches double-star across segments":
+        # @req: REQ-BUILD-SRC-001
+        step("Match double-star patterns")
+        expect(source_inventory_glob_match_v1("src/**/*.spl", "src/a.spl")).to_equal(true)
+        expect(source_inventory_glob_match_v1("src/**/*.spl", "src/x/y/a.spl")).to_equal(true)
+        expect(source_inventory_glob_match_v1("src/**/*.spl", "lib/a.spl")).to_equal(false)
+        expect(source_inventory_glob_match_v1("src/**", "src/x/y.txt")).to_equal(true)
+
+    it "resolves includes minus excludes, sorted and de-duplicated":
+        # @req: REQ-BUILD-SRC-001
+        step("Resolve a unit over a scanned list")
+        val scanned = ["src/b.spl", "src/a.spl", "src/gen/g.spl", "src/a.spl", "doc/x.md"]
+        val got = source_inventory_resolve_unit_v1(["src/**/*.spl"], ["src/gen/**"], scanned)
+        expect(got.len()).to_equal(2)
+        expect(got[0]).to_equal("src/a.spl")
+        expect(got[1]).to_equal("src/b.spl")
+
+    it "is independent of scan order":
+        # @req: REQ-BUILD-SRC-001
+        step("Resolve two permutations")
+        val a = source_inventory_resolve_unit_v1(["**/*.spl"], [], ["z.spl", "a.spl", "m/b.spl"])
+        val b = source_inventory_resolve_unit_v1(["**/*.spl"], [], ["m/b.spl", "z.spl", "a.spl"])
+        expect(a.join(",")).to_equal(b.join(","))

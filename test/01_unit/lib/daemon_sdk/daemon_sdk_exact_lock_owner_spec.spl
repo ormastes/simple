@@ -1,0 +1,99 @@
+# @req DLOCK-01 DLOCK-02 DLOCK-03 DLOCK-04
+# Real filesystem contracts. NOT_RUN until an admitted SSpec runtime is available.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.daemon_sdk.lock.{
+    try_acquire_daemon_lock_owned, release_daemon_lock_owned,
+    try_acquire_daemon_lock, release_daemon_lock
+}
+use std.nogc_sync_mut.daemon_sdk.daemon.{daemon_runner_start}
+use std.nogc_sync_mut.daemon_sdk.types.{daemon_config_new}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_lock, file_unlock, file_atomic_write}
+use std.nogc_sync_mut.io_runtime.{dir_remove}
+use std.io_runtime.{file_exists, read_file_text}
+
+fn exact_lock_root() -> text:
+    secure_temp_dir("build", "daemon-exact-owner").unwrap()
+
+describe "daemon SDK exact acquisition ownership":
+    it "rejects a stale same-PID receipt after reacquisition":
+        val root = exact_lock_root()
+        val path = root + "/owner.lock"
+        val first = try_acquire_daemon_lock_owned(path)
+        expect(first.acquired).to_equal(true)
+        expect(release_daemon_lock_owned(first)).to_equal(true)
+        val second = try_acquire_daemon_lock_owned(path)
+        expect(second.acquired).to_equal(true)
+        expect(second.pid).to_equal(first.pid)
+        expect(second.record == first.record).to_equal(false)
+        expect(release_daemon_lock_owned(first)).to_equal(false)
+        expect(read_file_text(path)).to_equal(second.record)
+        expect(release_daemon_lock_owned(second)).to_equal(true)
+        expect(release_daemon_lock_owned(second)).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "makes legacy PID release refuse an owned-generation record":
+        val root = exact_lock_root()
+        val path = root + "/owner.lock"
+        val receipt = try_acquire_daemon_lock_owned(path)
+        expect(receipt.acquired).to_equal(true)
+        expect(release_daemon_lock(receipt.pid, path)).to_equal(false)
+        expect(read_file_text(path)).to_equal(receipt.record)
+        expect(try_acquire_daemon_lock(path)).to_equal(-1)
+        expect(try_acquire_daemon_lock_owned(path).acquired).to_equal(false)
+        expect(release_daemon_lock_owned(receipt)).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "preserves legacy acquisition and release":
+        val root = exact_lock_root()
+        val path = root + "/legacy.lock"
+        val pid = try_acquire_daemon_lock(path)
+        expect(pid > 0).to_equal(true)
+        expect(release_daemon_lock(pid + 1, path)).to_equal(false)
+        expect(release_daemon_lock(pid, path)).to_equal(true)
+        expect(release_daemon_lock(pid, path)).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "refuses all mutations while the stable guard is held":
+        val root = exact_lock_root()
+        val path = root + "/owner.lock"
+        val receipt = try_acquire_daemon_lock_owned(path)
+        expect(receipt.acquired).to_equal(true)
+        val guard = file_lock(path + ".break", 0)
+        expect(guard >= 0).to_equal(true)
+        expect(release_daemon_lock_owned(receipt)).to_equal(false)
+        expect(release_daemon_lock(receipt.pid, path)).to_equal(false)
+        expect(try_acquire_daemon_lock_owned(path).acquired).to_equal(false)
+        expect(try_acquire_daemon_lock(path)).to_equal(-1)
+        expect(read_file_text(path)).to_equal(receipt.record)
+        expect(file_unlock(guard)).to_equal(true)
+        expect(release_daemon_lock_owned(receipt)).to_equal(true)
+        expect(file_exists(path + ".break")).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "does not let repeated old shutdown delete the new runner in this PID":
+        val root = exact_lock_root()
+        val config = daemon_config_new(root + "/owner.lock", root + "/requests", root + "/responses")
+        var first = daemon_runner_start(config)
+        expect(first.is_running()).to_equal(true)
+        first.shutdown()
+        first.shutdown()
+        var second = daemon_runner_start(config)
+        expect(second.is_running()).to_equal(true)
+        val second_record = read_file_text(config.lock_path)
+        first.shutdown()
+        expect(read_file_text(config.lock_path)).to_equal(second_record)
+        expect(second.is_running()).to_equal(true)
+        second.shutdown()
+        expect(file_exists(config.lock_path)).to_equal(false)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "retains an in-flight partial record and rejects a failed receipt":
+        val root = exact_lock_root()
+        val path = root + "/partial.lock"
+        expect(file_atomic_write(path, "")).to_equal(true)
+        val denied = try_acquire_daemon_lock_owned(path)
+        expect(denied.acquired).to_equal(false)
+        expect(release_daemon_lock_owned(denied)).to_equal(false)
+        expect(file_exists(path)).to_equal(true)
+        expect(read_file_text(path)).to_equal("")
+        expect(dir_remove(root, true)).to_equal(true)

@@ -1,0 +1,75 @@
+"""
+## Purpose and audience
+Verify the shared build scheduler keeps its private execution indexes coherent
+through ordinary transitions, cache admission, and journal recovery.
+## Operator workflow
+Run this unit spec with the repository test runner.
+## Compatibility and limitations
+Derived cursor and host counts are private in-memory metadata, not journal fields.
+"""
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{BuildTaskV1, BuildHostV1, BuildRunV1,
+    BuildResultV1, BuildInputV1, builder_task_identity_v1}
+use std.common.task_runner.scheduler.{task_runner_start, task_runner_dispatch,
+    task_runner_reap, task_runner_accept, task_runner_resume,
+    task_runner_encode_v1, task_runner_decode_v1, task_runner_host_slots}
+
+fn task_fixture() -> BuildTaskV1:
+    BuildTaskV1(id: "compile", attempt: 1, phase: "unit",
+        producer_digest: sha256_text("producer"), source_digest: sha256_text("source"),
+        toolchain_digest: sha256_text("toolchain"), dependencies: [],
+        program: "compiler", args: [], inputs: [], outputs: ["out.bin"],
+        cache_key: sha256_text("cache"), timeout_ms: 1000,
+        memory_limit_bytes: 1, links: [])
+
+fn run_fixture() -> BuildRunV1:
+    BuildRunV1(tasks: [task_fixture()], hosts: [BuildHostV1(id: "local",
+        transport: "local", endpoint: "", workspace: ".", worker_program: "worker",
+        worker_digest: sha256_text("worker"), slots: 1)], keep_going: true,
+        max_attempts: 1)
+
+fn success_result() -> BuildResultV1:
+    val task = task_fixture()
+    BuildResultV1(task_id: task.id, attempt: task.attempt,
+        identity_digest: builder_task_identity_v1(task), host_id: "local",
+        status: "OK", exit_code: 0,
+        outputs: [BuildInputV1(path: "out.bin", digest: sha256_text("output"))],
+        cache_hits: -1, cache_misses: -1, cache_stores: -1)
+
+describe "shared build scheduler execution index":
+    it "keeps dispatch, reap, and accepted completion indexed incrementally":
+        var state = task_runner_start(run_fixture())
+        expect(state.error).to_equal("")
+        expect(state.execution_indexed).to_equal(true)
+        expect(state.execution_next_pending).to_equal(0)
+        state = task_runner_dispatch(state, 0, "local")
+        expect(state.error).to_equal("")
+        expect(state.execution_next_pending).to_equal(1)
+        expect(task_runner_host_slots(state, "local")).to_equal(0)
+        state = task_runner_reap(state, "compile", 1)
+        expect(state.execution_host_active["local"]).to_equal(1)
+        state = task_runner_accept(state, success_result(),
+            [BuildInputV1(path: "out.bin", digest: sha256_text("output"))])
+        expect(state.error).to_equal("")
+        expect(state.statuses).to_equal(["SUCCEEDED"])
+        expect(state.execution_host_active["local"] ?? 0).to_equal(0)
+
+    it "accepts validated cached outputs without acquiring a host reservation":
+        var state = task_runner_start(run_fixture())
+        state = task_runner_resume(state, success_result(),
+            [BuildInputV1(path: "out.bin", digest: sha256_text("output"))])
+        expect(state.error).to_equal("")
+        expect(state.statuses).to_equal(["SUCCEEDED"])
+        expect(state.host_ids).to_equal(["local"])
+        expect(state.execution_host_active["local"] ?? 0).to_equal(0)
+        expect(state.execution_next_pending).to_equal(1)
+
+    it "restores a running journal entry with its reservation and cursor":
+        var state = task_runner_dispatch(task_runner_start(run_fixture()), 0, "local")
+        val restored = task_runner_decode_v1(run_fixture(), task_runner_encode_v1(state)).unwrap()
+        expect(restored.statuses).to_equal(["RUNNING"])
+        expect(restored.execution_indexed).to_equal(true)
+        expect(restored.execution_next_pending).to_equal(1)
+        expect(restored.execution_host_active["local"]).to_equal(1)
+        expect(task_runner_host_slots(restored, "local")).to_equal(0)

@@ -32,12 +32,12 @@
 #   reopens, and it never renumbers or adds rows.
 #
 # RESEAL
-#   bug_db.sdn is CRC-32/ISO-HDLC-stamped (`#sdn-crc32:<n>` header row, see
+#   bug_db.sdn is sealed by a `.csm` sidecar (X.<algo>_<hex>.csm, see
 #   reseal-sdn-crc32.shs) and a body edited by hand without resealing makes
 #   the WHOLE db load as nil. todo_db.sdn carries no such header (checked
 #   2026-09-12: first line is `todos |...|`, not `#sdn-crc32:`) -- this tool
 #   detects that at runtime rather than assuming it, and reseals only a db
-#   whose first line actually matches `#sdn-crc32:*`.
+#   that carries a .csm sidecar (or a deprecated legacy header).
 #
 # Verdict is ALWAYS the last line of stdout:
 #   PASS  — <n> row(s) checked, <k> changed     exit 0
@@ -58,6 +58,25 @@ set -u
 SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 SELFDIR=$(dirname "$SELF")
 RESEAL_TOOL="$SELFDIR/reseal-sdn-crc32.shs"
+. "$SELFDIR/sdn-seal-lib.shs"
+
+# "sealed" when the db carries a .csm sidecar or a legacy #sdn-crc32 header.
+db_seal_kind() {
+    if [ -n "$(csm_fs_tags "$1")" ]; then echo sealed; return; fi
+    case "$(head -1 "$1")" in '#sdn-crc32:'*) echo sealed ;; *) echo plain ;; esac
+}
+
+# Sharded bug DB: <legacy> -> path to read. When <dir>/db/ exists the merged
+# view (legacy + shards) is materialised into a temp file; otherwise <legacy>.
+merged_bugdb() {
+    if [ -d "$(dirname "$1")/db" ]; then
+        _mb=$(mktemp) || return 1
+        sh "$SELFDIR/bug-db-shard.shs" merged "$1" > "$_mb" || return 1
+        echo "$_mb"
+    else
+        echo "$1"
+    fi
+}
 
 # --------------------------------------------------------------- bug: rows
 # db -> "lineno\tid\tstatus" for every row of the bugs / bugs_active tables
@@ -183,6 +202,7 @@ todo_rows() {
 compute_bug_changes() {
     _root="$1"
     _bugdb="$_root/doc/08_tracking/bug/bug_db.sdn"
+    _bugdb=$(merged_bugdb "$_bugdb")   # sharded bug DB: read the merged view
     _bugdir="$_root/doc/08_tracking/bug"
     _clstmp=$(mktemp) || return 1
     doc_classes "$_bugdir" "$_bugdb" > "$_clstmp"
@@ -305,6 +325,12 @@ run_sync() {
     _bugdb="$_root/doc/08_tracking/bug/bug_db.sdn"
     _tododb="$_root/doc/08_tracking/todo/todo_db.sdn"
     [ -f "$_bugdb" ] && [ -f "$_tododb" ] || { echo "ERROR — nothing was checked"; return 2; }
+    # Sharded bug DB (doc/05_design/infra/tracking/bug_db_shards.md): work on
+    # the merged view; the legacy file is frozen, changed bugs become shards.
+    _bugdb_legacy="$_bugdb"
+    _bugdb=$(merged_bugdb "$_bugdb_legacy")
+    _bugdb_before=""
+    if [ "$_bugdb" != "$_bugdb_legacy" ]; then _bugdb_before=$(mktemp); cp "$_bugdb" "$_bugdb_before"; fi
 
     _bugout=$(compute_bug_changes "$_root")
     _todoout=$(compute_todo_changes "$_root")
@@ -334,6 +360,11 @@ run_sync() {
     # apply
     if [ "$_bug_change_n" -gt 0 ]; then
         apply_changes_to_db "$_bugdb" 3 "$_bug_changes" || { echo "FAIL — could not write $_bugdb"; return 1; }
+        if [ -n "$_bugdb_before" ]; then
+            for _sid in $(sh "$SELFDIR/bug-db-shard.shs" changed "$_bugdb_before" "$_bugdb"); do
+                sh "$SELFDIR/bug-db-shard.shs" write "$_sid" "$_bugdb" "$_bugdb_legacy" >/dev/null || { echo "FAIL — could not write shard $_sid"; return 1; }
+            done
+        fi
     fi
     if [ "$_todo_change_n" -gt 0 ]; then
         apply_changes_to_db "$_tododb" 10 "$_todo_changes" || { echo "FAIL — could not write $_tododb"; return 1; }
@@ -360,10 +391,9 @@ run_sync() {
     fi
 
     # reseal only what is actually CRC-stamped
-    if [ "$_bug_change_n" -gt 0 ]; then
-        _hdr=$(head -1 "$_bugdb")
-        case "$_hdr" in
-            '#sdn-crc32:'*)
+    if [ "$_bug_change_n" -gt 0 ] && [ -z "$_bugdb_before" ]; then
+        case "$(db_seal_kind "$_bugdb")" in
+            sealed)
                 _rout=$(sh "$RESEAL_TOOL" "$_bugdb")
                 _rverdict=$(printf '%s\n' "$_rout" | tail -1)
                 case "$_rverdict" in
@@ -374,9 +404,8 @@ run_sync() {
         esac
     fi
     if [ "$_todo_change_n" -gt 0 ]; then
-        _hdr=$(head -1 "$_tododb")
-        case "$_hdr" in
-            '#sdn-crc32:'*)
+        case "$(db_seal_kind "$_tododb")" in
+            sealed)
                 _rout=$(sh "$RESEAL_TOOL" "$_tododb")
                 _rverdict=$(printf '%s\n' "$_rout" | tail -1)
                 case "$_rverdict" in
@@ -393,6 +422,7 @@ run_sync() {
 
 # ------------------------------------------------------------------ selftest
 selftest() {
+    SDN_SEAL_ALGO=crc32; export SDN_SEAL_ALGO   # fixtures need no external hasher
     _t=$(mktemp -d) || { echo "selftest: mktemp failed"; return 1; }
     _fails=0
 
@@ -502,10 +532,11 @@ EOF
     _idcount=$(printf '%s\n' "$_newtodorows" | grep -c '.')
     [ "$_idcount" -eq 4 ] || { echo "selftest FAIL: todo row count changed to $_idcount"; _fails=$((_fails + 1)); }
 
-    # reseal: bug_db.sdn header must now match its recomputed crc32; todo_db.sdn stays unstamped
-    _hdr=$(head -1 "$_t/doc/08_tracking/bug/bug_db.sdn")
-    _body_crc=$(tail -n +2 "$_t/doc/08_tracking/bug/bug_db.sdn" | gzip -c -n | tail -c 8 | od -An -tu4 | awk '{print $1; exit}')
-    [ "$_hdr" = "#sdn-crc32:$_body_crc" ] || { echo "selftest FAIL: bug_db.sdn not resealed (hdr=$_hdr want #sdn-crc32:$_body_crc)"; _fails=$((_fails + 1)); }
+    # reseal: bug_db.sdn must now verify against its .csm sidecar and carry no header; todo_db.sdn stays unstamped
+    _bdb="$_t/doc/08_tracking/bug/bug_db.sdn"
+    _bst=$(csm_state "$_bdb" $(csm_fs_tags "$_bdb"))
+    case "$_bst" in "OK "*) ;; *) echo "selftest FAIL: bug_db.sdn not resealed ($_bst)"; _fails=$((_fails + 1)) ;; esac
+    case "$(head -1 "$_bdb")" in "#sdn-crc32:"*) echo "selftest FAIL: bug_db.sdn still carries the legacy header"; _fails=$((_fails + 1)) ;; esac
     _thdr=$(head -1 "$_t/doc/08_tracking/todo/todo_db.sdn")
     [ "$_thdr" = "todos |id, keyword, area, priority, description, file, line, issue, blocked, status, valid|" ] || { echo "selftest FAIL: todo_db.sdn header touched: $_thdr"; _fails=$((_fails + 1)); }
 

@@ -73,3 +73,29 @@ without triggering visibility lowering. Until then, wire arena lints only on the
 - [[r2_primitive_check_draft]] / `doc/03_plan/compiler/reliable_mode/reliable_mode_plan.md` (R2 —
   resolved text-based; this bug no longer blocks it)
 - `src/app/cli/query_lint.spl` → `_run_ast_lint_passes` (the still-dead arena-AST suite this bug blocks)
+
+## Verification note (2026-11-25, release/1.0.0) — crash no longer reproduces
+
+Drove the exact failure shape from interpreted app code at release/1.0.0
+HEAD (dfbd7c9d765) with the pinned binary on Windows
+(`SIMPLE_LIB=src bin/simple.exe run <probe>`): a probe importing
+`compiler.core.parser.{parse_module_silent_checked}` and
+`compiler.core.ast.{module_get_decls, decl_tag, decl_get_visibility_text}`
+parsed `fn f(x: i64) -> f64:\n    1.0\n` and walked the decl arena.
+
+Result: `PARSE_FAILED=false`, `DECL_COUNT=1`,
+`DECL tag=1 vis=decl_get_visibility_text(...)` returns `private` —
+no `HIR lowering error: Unknown variable: decl_get_visibility_text while
+lowering convert_decl_visibility`, no `array index out of bounds: index
+is 0 but length is 0`. The 2026-09-13 triage blocker (`query_lint.spl`
+not parsing under the seed) is also gone: `query_lint.spl` now imports
+and calls `parse_module_silent_checked` (:722) with `module_get_decls()`
+(:731), and both the parse and the arena accessors work from interpreted
+code, so the arena/lint path can be driven from this host.
+
+The interpreter-path crash this entry tracks does not reproduce with the
+pinned v1.0.0-rc.1 seed against the current tree. The status header
+("open — reproduced across 3 wiring approaches") is stale.
+
+**Status:** resolved (crash signature verified absent at tip via direct
+interpreted parse_module + arena-access probe).

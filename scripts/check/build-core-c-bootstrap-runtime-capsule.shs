@@ -129,6 +129,8 @@ record_check() {
 SOURCE_FILES="
 runtime_native.c
 runtime_file_view.c
+runtime_disk_headroom.c
+runtime_memory_headroom.c
 runtime_backend_plugin.c
 runtime_contracts.c
 runtime_coverage_core.c
@@ -138,7 +140,9 @@ runtime_legacy_core.c
 runtime_fork.c
 runtime_memtrack.c
 runtime_process.c
+runtime_process_tree.c
 runtime_process_owned.c
+runtime_socket_nonblock.c
 runtime_core_host_services.c
 runtime_memory.c
 runtime_font.c
@@ -153,10 +157,14 @@ runtime_shared_parse_cell_private.h
 runtime_fork.h
 runtime_memtrack.h
 runtime_simd_dispatch.h
+runtime_local_unix_v1.h
+runtime_local_unix_transfer_v1.h
+runtime_local_unix_bridge_v1.h
 runtime_thread.h
 runtime_memory_guard.h
 runtime_startup_args.h
 runtime_linux_group_owner_impl.h
+runtime_linux_cgroup_events_private.h
 platform/platform.h
 platform/windows_command_line_private.h
 "
@@ -248,11 +256,18 @@ for declared_input in $SOURCE_FILES $HEADER_FILES; do
     printf '%s\n' "$RUNTIME_DIR/$declared_input" >>"$LOCAL_INPUTS_FILE"
 done
 printf '%s\n' "$RUNTIME_DIR/test/rt_string_free_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
+printf '%s\n' "$RUNTIME_DIR/test/rt_string_byte_at_owner_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
+printf '%s\n' "$RUNTIME_DIR/test/rt_rc_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/runtime_coverage_core_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/rt_transient_heap_scope_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/rt_transient_promote_share_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
+printf '%s\n' "$RUNTIME_DIR/test/rt_transient_scope_object_cap_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
+printf '%s\n' "$RUNTIME_DIR/test/rt_enum_unit_variant_scope_singleton_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/rt_transient_heap_thread_affinity_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
+printf '%s\n' "$RUNTIME_DIR/test/rt_session_heap_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/rt_pool_closure_retain_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
+printf '%s
+' "$RUNTIME_DIR/test/rt_value_char_tag_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/rt_mem_guard_native_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/rt_mem_guard_stale_slot_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/rt_heap_ref_wellformed_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
@@ -307,9 +322,17 @@ REPEAT_ARCHIVE_SHA256=$(hash_file "$REPEAT_ARCHIVE")
 [ "$ARCHIVE_SHA256" = "$REPEAT_ARCHIVE_SHA256" ] ||
     die "repeat-build-archive-mismatch"
 record_check
+# Defined before the receipt below records it (set -u).
+SELF_CHECK_LIBS="-lm -lpthread"
+[ "$PLATFORM" != "Linux" ] || SELF_CHECK_LIBS="$SELF_CHECK_LIBS -ldl"
 {
     echo "repeated_build_equal=true"
     echo "archive_sha256=$ARCHIVE_SHA256"
+    # Recorded dependency order consumed by the provider host link gate. The
+    # manifest digest pins this contract together with the runtime archive.
+    echo "provider_host_link_contract=core-c-provider-host-link-v1"
+    echo "provider_host_link_libraries=$SELF_CHECK_LIBS"
+    echo "provider_host_export_policy=required-symbols-only"
     echo "repeat_archive_sha256=$REPEAT_ARCHIVE_SHA256"
 } >"$TMP_DIR/repeated-build.receipt"
 
@@ -406,6 +429,8 @@ assert_single_provider() {
     record_check
 }
 assert_single_provider rt_string_free runtime_native.o
+assert_single_provider rt_host_disk_headroom_bytes_v1 runtime_disk_headroom.o
+assert_single_provider rt_host_memory_headroom_bytes_v1 runtime_memory_headroom.o
 assert_single_provider simple_contract_check runtime_contracts.o
 assert_single_provider simple_contract_check_msg runtime_contracts.o
 
@@ -456,8 +481,6 @@ done
 
 SELF_CHECK_BIN="$TMP_DIR/rt_string_free_selfcheck"
 SELF_CHECK_LOG="$TMP_DIR/rt_string_free_selfcheck.out"
-SELF_CHECK_LIBS="-lm -lpthread"
-[ "$PLATFORM" != "Linux" ] || SELF_CHECK_LIBS="$SELF_CHECK_LIBS -ldl"
 # shellcheck disable=SC2086
 "$CC_PATH" -std=gnu11 -O1 \
     "$RUNTIME_DIR/test/rt_string_free_selfcheck.c" \
@@ -468,6 +491,20 @@ SELF_CHECK_LIBS="-lm -lpthread"
     die "rt-string-free-selfcheck-failed"
 grep -q '^SELFCHECK PASSED (0 failures)$' "$SELF_CHECK_LOG" ||
     die "rt-string-free-selfcheck-receipt-missing"
+record_check
+
+RC_SELF_CHECK_BIN="$TMP_DIR/rt_rc_selfcheck"
+RC_SELF_CHECK_LOG="$TMP_DIR/rt_rc_selfcheck.out"
+# shellcheck disable=SC2086
+"$CC_PATH" -std=gnu11 -O1 \
+    "$RUNTIME_DIR/test/rt_rc_selfcheck.c" \
+    "$ARCHIVE" $SELF_CHECK_LIBS -o "$RC_SELF_CHECK_BIN" \
+    >"$TMP_DIR/rt_rc_selfcheck.link.out" 2>&1 ||
+    die "rt-rc-selfcheck-link-failed"
+"$RC_SELF_CHECK_BIN" >"$RC_SELF_CHECK_LOG" 2>&1 ||
+    die "rt-rc-selfcheck-failed"
+grep -q '^SELFCHECK PASSED (0 failures)$' "$RC_SELF_CHECK_LOG" ||
+    die "rt-rc-selfcheck-receipt-missing"
 record_check
 
 THREAD_AFFINITY_SELF_CHECK_BIN="$TMP_DIR/rt_transient_heap_thread_affinity_selfcheck"
@@ -482,6 +519,34 @@ THREAD_AFFINITY_SELF_CHECK_LOG="$TMP_DIR/rt_transient_heap_thread_affinity_selfc
     die "rt-transient-heap-thread-affinity-selfcheck-failed"
 grep -q '^SELFCHECK PASSED (0 failures)$' "$THREAD_AFFINITY_SELF_CHECK_LOG" ||
     die "rt-transient-heap-thread-affinity-selfcheck-receipt-missing"
+record_check
+
+SESSION_HEAP_SELF_CHECK_BIN="$TMP_DIR/rt_session_heap_selfcheck"
+SESSION_HEAP_SELF_CHECK_LOG="$TMP_DIR/rt_session_heap_selfcheck.out"
+# shellcheck disable=SC2086
+"$CC_PATH" -std=gnu11 -O1 \
+    "$RUNTIME_DIR/test/rt_session_heap_selfcheck.c" \
+    "$ARCHIVE" $SELF_CHECK_LIBS -o "$SESSION_HEAP_SELF_CHECK_BIN" \
+    >"$TMP_DIR/rt_session_heap_selfcheck.link.out" 2>&1 ||
+    die "rt-session-heap-selfcheck-link-failed"
+"$SESSION_HEAP_SELF_CHECK_BIN" >"$SESSION_HEAP_SELF_CHECK_LOG" 2>&1 ||
+    die "rt-session-heap-selfcheck-failed"
+grep -q '^SELFCHECK PASSED (0 failures)$' "$SESSION_HEAP_SELF_CHECK_LOG" ||
+    die "rt-session-heap-selfcheck-receipt-missing"
+record_check
+
+CHAR_TAG_SELF_CHECK_BIN="$TMP_DIR/rt_value_char_tag_selfcheck"
+CHAR_TAG_SELF_CHECK_LOG="$TMP_DIR/rt_value_char_tag_selfcheck.out"
+# shellcheck disable=SC2086
+"$CC_PATH" -std=gnu11 -O1 \
+    "$RUNTIME_DIR/test/rt_value_char_tag_selfcheck.c" \
+    "$ARCHIVE" $SELF_CHECK_LIBS -o "$CHAR_TAG_SELF_CHECK_BIN" \
+    >"$TMP_DIR/rt_value_char_tag_selfcheck.link.out" 2>&1 ||
+    die "rt-value-char-tag-selfcheck-link-failed"
+"$CHAR_TAG_SELF_CHECK_BIN" >"$CHAR_TAG_SELF_CHECK_LOG" 2>&1 ||
+    die "rt-value-char-tag-selfcheck-failed"
+grep -q '^SELFCHECK PASSED (0 failures)$' "$CHAR_TAG_SELF_CHECK_LOG" ||
+    die "rt-value-char-tag-selfcheck-receipt-missing"
 record_check
 
 POOL_CLOSURE_SELF_CHECK_BIN="$TMP_DIR/rt_pool_closure_retain_selfcheck"
@@ -540,6 +605,73 @@ PROMOTE_SHARE_SELF_CHECK_LOG="$TMP_DIR/rt_transient_promote_share_selfcheck.out"
     die "rt-transient-promote-share-selfcheck-failed"
 grep -q '^SELFCHECK PASSED (0 failures)$' "$PROMOTE_SHARE_SELF_CHECK_LOG" ||
     die "rt-transient-promote-share-selfcheck-receipt-missing"
+record_check
+
+# Lock-free sharded heap-registry reads under concurrent writers. The probe
+# #includes runtime_native.c, so it links standalone (no archive) with dead
+# code stripped, like check-allocation-registry-churn.shs.
+REGISTRY_LOCKFREE_SELF_CHECK_BIN="$TMP_DIR/rt_immortal_registry_lockfree_read_selfcheck"
+REGISTRY_LOCKFREE_SELF_CHECK_LOG="$TMP_DIR/rt_immortal_registry_lockfree_read_selfcheck.out"
+REGISTRY_LOCKFREE_STRIP="-Wl,--gc-sections"
+[ "$PLATFORM" != "Darwin" ] || REGISTRY_LOCKFREE_STRIP="-Wl,-dead_strip"
+# shellcheck disable=SC2086
+"$CC_PATH" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+    "$RUNTIME_DIR/test/rt_immortal_registry_lockfree_read_selfcheck.c" \
+    $REGISTRY_LOCKFREE_STRIP $SELF_CHECK_LIBS -o "$REGISTRY_LOCKFREE_SELF_CHECK_BIN" \
+    >"$TMP_DIR/rt_immortal_registry_lockfree_read_selfcheck.link.out" 2>&1 ||
+    die "rt-immortal-registry-lockfree-read-selfcheck-link-failed"
+"$REGISTRY_LOCKFREE_SELF_CHECK_BIN" >"$REGISTRY_LOCKFREE_SELF_CHECK_LOG" 2>&1 ||
+    die "rt-immortal-registry-lockfree-read-selfcheck-failed"
+grep -q '^PASS: lock-free registry reads' "$REGISTRY_LOCKFREE_SELF_CHECK_LOG" ||
+    die "rt-immortal-registry-lockfree-read-selfcheck-receipt-missing"
+record_check
+
+# Counted text data borrows retain their authoritative length for byte_at.
+# This probe includes the C owner directly, like the registry check above.
+BYTE_AT_OWNER_SELF_CHECK_BIN="$TMP_DIR/rt_string_byte_at_owner_selfcheck"
+BYTE_AT_OWNER_SELF_CHECK_LOG="$TMP_DIR/rt_string_byte_at_owner_selfcheck.out"
+# shellcheck disable=SC2086
+"$CC_PATH" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+    "$RUNTIME_DIR/test/rt_string_byte_at_owner_selfcheck.c" \
+    $REGISTRY_LOCKFREE_STRIP $SELF_CHECK_LIBS -o "$BYTE_AT_OWNER_SELF_CHECK_BIN" \
+    >"$TMP_DIR/rt_string_byte_at_owner_selfcheck.link.out" 2>&1 ||
+    die "rt-string-byte-at-owner-selfcheck-link-failed"
+"$BYTE_AT_OWNER_SELF_CHECK_BIN" >"$BYTE_AT_OWNER_SELF_CHECK_LOG" 2>&1 ||
+    die "rt-string-byte-at-owner-selfcheck-failed"
+grep -q '^PASS rt_string_byte_at counted owner,' "$BYTE_AT_OWNER_SELF_CHECK_LOG" ||
+    die "rt-string-byte-at-owner-selfcheck-receipt-missing"
+record_check
+
+# One transient scope may track any number of objects (Rust-twin parity); the
+# advisory warning fires once per scope. Same standalone #include build as the
+# lock-free probe above; the probe lowers the threshold itself, so it runs in
+# milliseconds. doc/08_tracking/bug/stage3_transient_scope_object_cap_panic_2026-11-20.md
+SCOPE_CAP_SELF_CHECK_BIN="$TMP_DIR/rt_transient_scope_object_cap_selfcheck"
+SCOPE_CAP_SELF_CHECK_LOG="$TMP_DIR/rt_transient_scope_object_cap_selfcheck.out"
+# shellcheck disable=SC2086
+"$CC_PATH" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+    "$RUNTIME_DIR/test/rt_transient_scope_object_cap_selfcheck.c" \
+    $REGISTRY_LOCKFREE_STRIP $SELF_CHECK_LIBS -o "$SCOPE_CAP_SELF_CHECK_BIN" \
+    >"$TMP_DIR/rt_transient_scope_object_cap_selfcheck.link.out" 2>&1 ||
+    die "rt-transient-scope-object-cap-selfcheck-link-failed"
+"$SCOPE_CAP_SELF_CHECK_BIN" >"$SCOPE_CAP_SELF_CHECK_LOG" 2>&1 ||
+    die "rt-transient-scope-object-cap-selfcheck-failed"
+grep -q '^rt_transient_scope_object_cap_selfcheck: PASS ' "$SCOPE_CAP_SELF_CHECK_LOG" ||
+    die "rt-transient-scope-object-cap-selfcheck-receipt-missing"
+record_check
+
+ENUM_UNIT_SINGLETON_SELF_CHECK_BIN="$TMP_DIR/rt_enum_unit_variant_scope_singleton_selfcheck"
+ENUM_UNIT_SINGLETON_SELF_CHECK_LOG="$TMP_DIR/rt_enum_unit_variant_scope_singleton_selfcheck.out"
+# shellcheck disable=SC2086
+"$CC_PATH" -std=gnu11 -O1 \
+    "$RUNTIME_DIR/test/rt_enum_unit_variant_scope_singleton_selfcheck.c" \
+    "$ARCHIVE" $SELF_CHECK_LIBS -o "$ENUM_UNIT_SINGLETON_SELF_CHECK_BIN" \
+    >"$TMP_DIR/rt_enum_unit_variant_scope_singleton_selfcheck.link.out" 2>&1 ||
+    die "rt-enum-unit-variant-scope-singleton-selfcheck-link-failed"
+"$ENUM_UNIT_SINGLETON_SELF_CHECK_BIN" >"$ENUM_UNIT_SINGLETON_SELF_CHECK_LOG" 2>&1 ||
+    die "rt-enum-unit-variant-scope-singleton-selfcheck-failed"
+grep -q '^SELFCHECK PASSED (0 failures)$' "$ENUM_UNIT_SINGLETON_SELF_CHECK_LOG" ||
+    die "rt-enum-unit-variant-scope-singleton-selfcheck-receipt-missing"
 record_check
 
 MEM_GUARD_SELF_CHECK_BIN="$TMP_DIR/rt_mem_guard_native_selfcheck"
@@ -615,7 +747,9 @@ record_check
 # A run that reached here having executed fewer checks than the capsule
 # declares is a vacuous pass, not a pass. The floor is raised whenever a
 # check is added; it is never lowered to make a run green.
-CHECKS_EXPECTED=67
+# 75 = 23 symbol checks + 5 single-provider + 10 argv symbols x 3 + 17
+# selfcheck stages (ARGV_PROVIDER_SYMBOLS grew to 10 without a floor raise).
+CHECKS_EXPECTED=75
 [ "$CHECKS_RUN" = "$CHECKS_EXPECTED" ] ||
     die "checks-executed-below-floor:$CHECKS_RUN/$CHECKS_EXPECTED"
 
@@ -673,8 +807,16 @@ MANIFEST="$TMP_DIR/capsule.manifest"
     echo "rt_transient_heap_scope_selfcheck=pass"
     echo "rt_transient_heap_scope_selfcheck_output_sha256=$(hash_file "$TRANSIENT_SELF_CHECK_LOG")"
     echo "rt_transient_promote_share_selfcheck=pass"
+    echo "rt_immortal_registry_lockfree_read_selfcheck=pass"
+    echo "rt_transient_scope_object_cap_selfcheck=pass"
+    echo "rt_transient_scope_object_cap_selfcheck_output_sha256=$(hash_file "$SCOPE_CAP_SELF_CHECK_LOG")"
+    echo "rt_enum_unit_variant_scope_singleton_selfcheck=pass"
     echo "rt_transient_heap_thread_affinity_selfcheck=pass"
     echo "rt_transient_heap_thread_affinity_selfcheck_output_sha256=$(hash_file "$THREAD_AFFINITY_SELF_CHECK_LOG")"
+    echo "rt_session_heap_selfcheck=pass"
+    echo "rt_session_heap_selfcheck_output_sha256=$(hash_file "$SESSION_HEAP_SELF_CHECK_LOG")"
+    echo "rt_value_char_tag_selfcheck=pass"
+    echo "rt_value_char_tag_selfcheck_output_sha256=$(hash_file "$CHAR_TAG_SELF_CHECK_LOG")"
     echo "rt_pool_closure_retain_selfcheck=pass"
     echo "rt_pool_closure_retain_selfcheck_output_sha256=$(hash_file "$POOL_CLOSURE_SELF_CHECK_LOG")"
     echo "rt_heap_ref_wellformed_selfcheck=pass"

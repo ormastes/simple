@@ -2,6 +2,7 @@
 
 - **Date:** 2026-07-27
 - **Status:** open — owner ruling 2026-09-27: staged migration (error for new code first, then convert existing sites in batches, then hard error). Plan: `doc/03_plan/compiler/type_system/option_pattern_non_option_scrutinee_migration_2026-09-27.md`; todo 339. The class spec carries `@tag:in-development` until stage 3.
+- **Update 2026-11-03 (fix-implemented-verification-pending):** the self-hosted checker (`infer_option_pattern`, `src/compiler/30.types/type_infer/inference_control.spl:611`) ALREADY rejects `Some(..)` on a concrete non-Option scrutinee (scalar, Result) as an error, stricter than the requested warning, so it is not downgraded. Pinned end to end by `test/01_unit/compiler/lint/frontend_diag/option_pattern_non_option_scrutinee_spec.spl` (3/3 pass). Remaining: the Rust seed/interpreter still accept it (staged plan above), and the `case nil`/`None` forms on a scalar are not named (generic `type mismatch` / `unsupported expression kind: Block`, span 0:0). Repro: `bin/simple.exe test test/01_unit/compiler/lint/frontend_diag/option_pattern_non_option_scrutinee_spec.spl`.
 - **Severity:** high (silent wrong answers; type error degraded into bad data; engines disagree)
 - **Found by:** lane OPTNIL, reproduced independently by the coordinator
 - **Reconstructed:** the lane's original doc was clobbered off disk by a parallel
@@ -975,3 +976,76 @@ unchanged, named HIR types cannot yet distinguish a user enum from a struct for
 exhaustive pattern-shape rejection, and no admitted Stage 2/3 artifact and
 receipt were available for native/interpreter proof. Keep `bug_db.sdn` at
 `P1, open` until those gaps and admitted cross-engine evidence are resolved.
+
+**Revalidated 2026-11-02: still plausible because open — owner ruling 2026-09-27: staged migration (error for new code first, then convert existing sites in batches, then hard error). Plan:; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 (lane p01-c): why no pure-Simple runtime fix in `eval_calls.spl` is possible
+
+Triage pointed at `eval_calls.spl` as a pure-Simple fix. Re-checked at
+`origin/release/1.0.0` `0cf067f2871`; the premise does not hold, so no code
+change was made and the row stays `open` (stage 1 of the staged plan).
+
+- The pure-Simple interpreter uses the FLAT Option encoding. The Option/Result
+  accessors live in `_EvalOps/call_method_eval.spl` (`eval_option_result_method`,
+  `option_result_tag`), not `eval_calls.spl`. `option_result_tag` documents it:
+  "Flat form: nil is None, and any other raw word is its own Some payload."
+  At runtime a bare `i64` `6` and `Some(6)` are the same word, so a runtime
+  check cannot reject `n.unwrap_or(-99)` or `case Some(v)` on `n` without also
+  rejecting every legitimate flat `Option<i64>`. The defect is only decidable
+  from the STATIC type, i.e. in the type checker (plan stage 1, "mirror the check
+  in the pure-Simple type checker") plus the seed's
+  `option_pattern_shape_diag.rs`.
+- The class spec `option_on_non_option_scrutinee_class_spec.spl` is
+  `@tag:in-development`; its probes need a rejecting compile step, which no
+  runtime-side edit can provide, and verifying a pure-Simple type-checker change
+  needs a full-CLI self-hosted binary (none deployed; `bin/simple.exe` is the seed).
+- Next step is unchanged: stage 0 measurement (`SIMPLE_DIAG_OPTION_PATTERN_SHAPE=1`
+  full build) -> baseline -> ratchet gate. Do not attempt a runtime special-case.
+
+## 2026-11-03 - `case nil` now named; seed warns on Result (fix-implemented-verification-pending)
+
+See the same-dated section of
+`option_pattern_against_result_value_matches_nothing_2026-09-19.md`: `case nil`
+over a non-Option scrutinee is a named `[E-TYPE-NIL-COMPARE]` error in the
+self-hosted checker, and the seed interpreter warns when Option arms meet a
+`Result` value. Remaining: bare `case None:` over scalars; scalar (non-Result)
+scrutinees in the seed stay env-gated (`SIMPLE_DIAG_OPTION_PATTERN_SHAPE=1`).
+
+## 2026-11-26 - Semantic checker loop & HIR-warning gates fixed (`work/bf-1-compiler-hir-sem-20261126`)
+
+Fixed three remaining gaps in the pure-Simple semantic checker (`30.types/**`,
+`90.tools/**`):
+
+1. **`simple_semantic_check_source` (`src/compiler/90.tools/lint/semantic_check.spl`):**
+   `HirLowering.warning(...)` messages (`"HIR lowering warning ..."`, such as
+   `W-MATCH-NONE-SCALAR`) were pushed into `diagnostics`, causing
+   `if diagnostics.len() == 0:` to skip `HmInferContext` and emit `"HIR lowering
+   failed..."` on warnings. Warnings now go into `warnings`, allowing
+   `HmInferContext` to run and report `[E-TYPE-NIL-COMPARE]` on `case nil` over
+   scalars (`option_nil_pattern_non_option_scrutinee_spec.spl`: 2/3 -> 3/3 pass;
+   `case_none_scalar_spec.spl`: 8/8 pass).
+2. **Loop expressions in HM inference (`src/compiler/30.types/type_infer/inference_expr.spl`):**
+   Added `While`, `Loop`, `For`, `Break`, `Continue` handling in
+   `_infer_expr_synth` so `while val Some(w) = n:` reaches `infer_option_pattern`
+   (`error[SPL-PAT-001]`) instead of aborting on
+   `unsupported expression kind: HirExprKind::While(...)`.
+3. **Non-optional composite method receivers (`src/compiler/30.types/type_infer/inference_expr_calls.spl`):**
+   Extended `never_optional` for `unwrap`/`unwrap_or`/`expect`/`is_some`/`is_none`
+   to `Unit`, `Tuple`, `Array`, `Slice`, `Dict`, `Function`, plus `is_some`/`is_none`
+   on `Result`.
+
+Regression tests added & passing (`SIMPLE_LIB=src`, `--mode=interpreter`):
+- `test/01_unit/compiler/type_infer/option_while_val_and_receiver_regression_spec.spl`: 6/6 pass
+- `test/01_unit/compiler/lint/frontend_diag/option_nil_pattern_non_option_scrutinee_spec.spl`: 3/3 pass
+- `test/01_unit/compiler/lint/frontend_diag/option_pattern_non_option_scrutinee_spec.spl`: 3/3 pass
+- `test/01_unit/compiler/type_infer/option_method_receiver_spec.spl`: 2/2 pass
+- `test/01_unit/compiler/type_infer/option_pattern_scrutinee_spec.spl`: 6/6 pass
+
+Pre-existing out-of-scope remainders (Rust seed / `20.hir` / `80.driver`
+untouched by `BF-1` file ownership):
+- `test/01_unit/compiler/interpreter/option_on_non_option_scrutinee_class_spec.spl`
+  still fails 3/4 on raw `simple run` (the frozen Rust seed does not enforce the
+  semantic-check gate on bare `run`).
+- `test/03_system/language/policy/option_if_while_bind_staged_spec.spl`
+  (`@tag:in-development`) passes 2/3 (`while val` passes; static `if val v = o`
+  on `i64?` still receives `E-TYPE-NIL-COMPARE` from `20.hir` desugaring).

@@ -1,5 +1,133 @@
 # Completion plan for the seven requested items, by host
 
+## 2026-10-27 item 3/7 shared-interface refinement
+
+The user requested consistent typed DataFrame optimization, switchable
+containers, lockless maps, async references and resource/index factories.
+The [shared capability contract](../04_architecture/compiler/collection_backend_capabilities.md)
+and [TDD matrix](sys_test/collection_backend_capabilities.md) now govern their
+intersection. This updates planning only; all existing host/evidence states
+remain unchanged. Existing selected requirements are retained.
+
+- Item 3 may choose a qualified index backend and column layout independently
+  of its logical query operation. Typed columns, missing values, duplicate/order
+  rules, callbacks and ownership must remain equivalent to reference execution.
+- Item 7's Auto/Linear/Hash/Ordered tags and `.sprof` observations do not imply
+  lockless progress. The common capability description distinguishes algorithm,
+  backend, measurement, constructor selection and supported live transitions.
+- Static-only, profiling-disabled/unavailable and unsupported-switch states
+  must be visible through the same interface/explain record. No new annotation
+  is claimed implemented. An explicit strict requirement fails if unavailable;
+  advisory Auto may retain Original with a reason.
+- Native DashMap/legacy map and active legacy capture use locks. They cannot
+  silently back the strict map/resource profile. Native and future pure-Simple
+  implementations share conformance tests while qualifying providers separately.
+- ResourceFactory/AsyncRef and IndexRefFactory reuse the
+  [async architecture](../04_architecture/language/async_infrastructure.md)
+  owners. No duplicate scheduler, generic pointer factory, or second cache
+  authority is introduced. Existing defaults and S1 → S2 → S3 remain binding.
+
+This refinement adds CBC-01–12 to item 3 AC02/03/06–11 and item 7 AC01–08;
+implementation starts with real failing tests, then minimal changes and focused
+green evidence. Neither source inspection nor a planned scenario closes a gate.
+
+## 2026-10-25 reconciliation against `release/1.0.0` (PRs #4498-#4604)
+
+Reconciled at `origin/release/1.0.0` @ `73c4aef632a` (merge of #4600). This
+section records what landed per item today and the cross-plan decisions; it
+does not certify any host cell. The cache/per-file plan set that items 1, 2, 5
+and 6 share is indexed, with every conflict resolved to one current answer, in
+[`compiler/cache/cache_perfile_plan_index_2026-10-25.md`](compiler/cache/cache_perfile_plan_index_2026-10-25.md).
+Each item's own plan/design/guide/wiki refresh lands in its own
+"[seven-plan item N docs]" PR; this umbrella only links them. P-G2 #4600 (TLDR
+specialization list + `.rr` producers) merged as `73c4aef632a` while this was
+written; the one open follow-up is the AOP match-shard driver wiring #4401.
+
+| Item | Landed today (release/1.0.0) | State |
+|---|---|---|
+| 1. Parser sharing / platform / dynload | `ParseContext` stage 1 per-owner snapshots (#4505 #4512-#4516 #4518 #4519 #4521 #4522 #4523 #4526 #4527 #4529 #4530 #4532-#4535 #4538-#4541 #4548 #4604) and stage 2 accessor indirection for parser/stmt/expr/decl (#4544 #4550 #4553 #4555 #4558 #4560 #4561 #4568); `--parse-fibers=i/n` child lane (#4508); `.spab` packed parse cache default (#4582 #4589, equality spec #4503). Stages 3-4 (context-owned storage, true in-process parallel parse) open. No dynload or SimpleOS-release landing in this range | IN_PROGRESS (parser sharing); dynload/release TODO |
+| 2. SCV + jj + GitHub | Only #4574 (inventory events keep NUL-carrying text whole). Cost tracing #4492 and reader-scratch #4497 open. Cache-manager tier decision for SCV consumers: index §2 row 1 | TODO (unchanged) |
+| 3. Typed DataFrame collections | nothing in range | TODO (unchanged) |
+| 4. mold-based MDSOC++ linker | linker-adjacent only: mswsock default lib (#4507), COMDAT instance dedup for non-LLVM backends (#4603) | TODO (unchanged) |
+| 5. Kernel/extension aspects, binary size | AOP pointcut-affected invalidation plan (#4511, `incremental_rebuild_plan_v1`); directory match-shard driver wiring #4401 still open. Provider/size work: none in range | IN_PROGRESS per 2026-10-11 note; cache part partial |
+| 6. Compile optimization | per-module lowering default, whole-program behind `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` (#4525 #4547); objects streamed during MIR, batch 8 (#4566); HIR admission linear (#4557), validation blob removed (#4562), admission paths normalised once (#4552); cache scope published before shard spawn, HIR cache decoupled from `SIMPLE_FRONTEND_CACHE=0` (#4565); Stage 2 cache content-keyed (#4559); file-worker claim loop, with latest user override setting `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"` on 2026-10-26; explicit `SIMPLE_FILE_WORKERS=1` opts in; P-A..P-H and generic cache packages tracked in `compiler/cache/cache_perfile_plan_index_2026-10-25.md`. Native overlap qualification remains pending | IN_PROGRESS (Windows native lane); no default-lane overlap receipt yet |
+| 7. Profile-switchable containers | `CollectionFeedbackState` snapshot only (#4535, parse-side state move) | TODO (unchanged) |
+
+Cross-item decisions taken today (details and evidence in the index §2):
+persisted cache tiers are packed AST + TLDR, generic instances per concrete key,
+AOP weave bodies, objects, lib/bin — HIR stays in memory and there is no
+general MIR cache; `.spab` is the default parse-cache format with `.fpc` as the
+opt-out fallback; by the latest 2026-10-26 override, unset `SIMPLE_FILE_WORKERS` leaves the
+barrier-free `--file-worker` lane off, with explicit `SIMPLE_FILE_WORKERS=1` as
+the opt-in;
+mono is module-scoped always inside the file-worker lane and global outside it;
+shards, file workers and `--parse-fibers` children coexist, and in-process
+fibers wait on `ParseContext` stages 3-4; single-flight futures replace locks
+and leases (removal list still open). Item PRs whose docs still say otherwise
+carry a "Superseded (2026-10-25)" note at the stale section (index §3).
+
+Host matrix: no cell moves to VERIFIED. Today's Windows measurements
+(`true_per_file_pipeline_v1.md` §1) came from a frozen stage2 that predates
+every fix above, and the seed cannot interpret the current stdlib on Windows,
+so Windows native evidence for item 6 is "landed + unit specs", not a host run.
+Items 1 and 6 Windows-native cells become IN_PROGRESS (owners claimed, PRs
+landed); every other cell is unchanged.
+
+### Progress 2026-10-25 (evening)
+
+PR states verified with `gh pr view` against base `release/1.0.0`.
+
+**Per-file packages merged:** P-A #4588 `e0efb59638f`, P-B #4597 `7ec523277de`,
+P-C #4589 `d1ee8738d60`, P-D #4603 `cbe361c2497`, P-E #4594 `9314979e6e6`,
+P-F #4592 `1c6ccfb61c4`, P-G1 #4591 `3383735e8cb`, P-G2 #4600 `73c4aef632a`,
+P-G3 #4598 `220b35b4b35`, P-G4 #4625 `7ec28192eb0`, P-G5 #4628 `963f32429a3`,
+P-G5b #4653 `5de3687be0b`, P-G6 #4672 `03e6d90af24`, P-H #4683 `bf4c14a31e1`
+(stage3 and plain native-build go through the file-worker pool, fail-closed).
+E-MONO-040 fails closed for imported generics: #4651 `6c257d14918`.
+
+**Open:** P-G7 #4696 (instance object producer + link wiring) is OPEN; approved by lead
+reviewer (comment), pending merge. Merge release_phase3 into
+release/1.0.0: #4704 OPEN.
+
+**Latest user override, 2026-10-26:** unset `SIMPLE_FILE_WORKERS` leaves the
+per-file worker pool off; explicit `SIMPLE_FILE_WORKERS=1` opts in. Native
+qualification remains pending: build Stage 3 from these sources, self-rebuild
+through the explicitly selected lane, and retain an overlap receipt from
+`scripts/check/check-per-file-overlap-receipt.shs`.
+
+**Stage evidence (in progress, not a retained measurement):** stage2 built cold
+from `d72188e68ec` (1534 modules, 0 failed, mswsock workaround dropped). The
+stage3 whole-program run is in progress with 0 MIR errors (was 3211); it is
+single-threaded and CPU-bound.
+
+**Other landings:** #4610 stale lock reclaim / orphan reaping `52ecd8b7725`;
+#4622 Mach-O as conditional build tag `a269ecaecba`; #4623 pre-push gate clear
+error for missing gate script `fc894af98af`; #4633 host-scaled tree RSS cap
+`ae3c1307476`; #4682 llvm-mingw drive-letter admission `784ac5aa304`; seed
+externs #4608 `57a129fb2b9` and #4688 `5bd6f027abb`; spec fixes #4636
+`1cfdf5876ca`, #4635 `33bfd461fbb`, #4638 `4f5e0d91b88`. Also merged since the
+morning: memory #4698 `574b8bb6e70` and #4705 `31bafe03f9e` (HIR / per-module MIR
+eviction), perf #4693 `35fe920618d` (sha256 accelerator), MIR #4706
+`a853ac75861`, stage2 #4684 `dd7cede08a3` and #4697 `7c1e83a584b`.
+
+**Still failing / under investigation:** HIR cache selfcheck (239/1495 hits);
+seed JIT fallback on `native_build_main`.
+
+**Evening update (16:06).**
+
+- Landing: the second lander force-landed after local gates (CI queued over 50
+  minutes): #4693 `35fe920618d`, #4684 `dd7cede08a3`, #4697 `7c1e83a584b`,
+  #4686 `14c1428c6c9`, #4698 `574b8bb6e70`, #4705 `31bafe03f9e`, #4706
+  `a853ac75861`, #4685 `73929c8bdc1`; P-H #4683 `bf4c14a31e1`.
+- Open: P-G7 #4696 (approved by lead reviewer comment), #4704 release_phase3
+  merge, #4708 batch MIR eviction.
+- Phase 3 at 16:06: the stage3 whole-program run is in staged codegen (batch
+  about 121 of about 187), 0 MIR errors, 28.8 GB RSS, single thread. Next: lld
+  link, sanity, MCP / caret / devhub, stage3 self-rebuild from the latest
+  release with P-H, then the per-file proof run (80 jobs) and the default flip.
+- Investigating: closure walk not following `use os.*` imports (selected 1 vs
+  5); `--parse-fibers` children exit 1; HIR cache selfcheck still failing
+  despite #4504 (239/1495 hits); seed JIT fallback; linker memory (21 GB).
 ## Item 5 continuation and variation direction — 2026-10-11
 
 The user resumed Item 5 on release and selected the integrated SIMD/GPU/SOSIX variation proposal for its plan/design. This supersedes the historical stop instruction below for Item 5 only; it does not change other items or certify any host cell.
@@ -76,12 +204,12 @@ already exists. This is not a claim that each feature is unimplemented.
 
 | Item | Windows native | Linux/WSL | Linux native | macOS | FreeBSD | SimpleOS guest/target |
 |---|---|---|---|---|---|---|
-| 1. Platform unification, parser, dynload, release | TODO | TODO | TODO | TODO | TODO | TODO |
+| 1. Platform unification, parser, dynload, release | IN_PROGRESS (parser sharing, 2026-10-25) | TODO | TODO | TODO | TODO | TODO |
 | 2. SCV + jj + GitHub textual databases | TODO | TODO | TODO | TODO | TODO | TODO: scope admission |
 | 3. Typed DataFrame collections and optimizer | TODO | TODO | TODO | TODO | TODO | TODO |
 | 4. mold-based MDSOC++ linker | TODO | TODO | TODO | TODO | TODO | TODO |
 | 5. Kernel/extension aspects and binary size | TODO | TODO | TODO | TODO | TODO | TODO |
-| 6. Compile optimization | TODO | TODO | TODO | TODO | TODO | TODO |
+| 6. Compile optimization | IN_PROGRESS (2026-10-25, no host run) | TODO | TODO | TODO | TODO | TODO |
 | 7. Profile-based switchable container algorithms | TODO | TODO | TODO | TODO | TODO | TODO |
 
 For additional hosts, create all seven child tasks when that host enters the
@@ -97,6 +225,13 @@ Related references:
 [runtime unification](../01_research/runtime/sosix_unification/simple_sosix_runtime_unification_design_plan_2026-09-05.md),
 [dynload architecture](../04_architecture/compiler/environment_optimized_dynamic_libraries.md),
 [dynload plan](compiler/environment_optimized_dynamic_libraries.md).
+
+2026-10-25: shared parser ownership is being made re-entrant through
+[`parse_context_per_context_state.md`](../05_design/compiler/frontend/parse_context_per_context_state.md)
+(stages 1-2 landed, see the reconciliation table; stages 3-4 open) — the
+prerequisite for in-process parallel parsing shared by the compiler, LSP, lint
+and the test runner. The packed `.spab` parse cache (default since #4582) is the
+shared AST artifact those consumers map; LSP/lint are not wired to it yet.
 
 - Locate the canonical umbrella document and map every retained requirement to
   implementation, tests, and host capability; retain its title/path in evidence.
@@ -123,6 +258,12 @@ and [isolated development/evidence report](evidence/seven_plans/item2_dev_execut
 Research/design and a bounded Git history-readback candidate are updated. Full
 acceptance remains incomplete: no executed self-hosted RED/GREEN evidence, 153
 broad fail-fast scenarios, and open durable/host/provider/performance gates.
+
+2026-10-25 (cache part): SCV's change-preview and reverse-reference consumers
+read the same `.rr` / TLDR projections the compiler publishes; the `.rr`
+producers landed as P-G2 (#4600, `73c4aef632a`), and the persisted-tier decision SCV must
+follow (no general MIR tier, packed AST + TLDR as the shared artifacts) is
+index §2 row 1. No SCV acceptance landed in #4498-#4604.
 
 - Finish schema validation, stable record identity, deterministic serialization,
   indexing/query behavior, and transactional local updates.
@@ -194,6 +335,13 @@ are authored but not runtime-verified; host certification cells remain TODO.
 Related references: [optional provider size architecture](../04_architecture/compiler/perf/runtime_optional_provider_binary_size_optimization.md),
 [executable size architecture](../04_architecture/compiler/optimization/executable_size_reduction.md).
 
+2026-10-25 (cache part): static-aspect incremental rebuild is planned as the
+"aspect-affected pointcut set" rule (`incremental_rebuild_plan_v1`, #4511) over
+directory match shards per
+[`generic_aop_macro_semantic_cache_plan_2026-10-24.md`](compiler/cache/generic_aop_macro_semantic_cache_plan_2026-10-24.md) §5;
+the forward-weave driver wiring (#4401) is still open, so AOP weave bodies are a
+declared cache tier (index §2 row 1) without a landed producer.
+
 - Identify the canonical kernel/extension aspect requirements and map mandatory
   core functionality versus optional providers and their dependency closures.
 - Complete aspect selection, optional-provider packaging/loading, ABI checks,
@@ -211,6 +359,18 @@ and the retained size budgets pass without correctness regressions.
 ## 6. Simple compile optimization: final research, architecture, implementation plan
 
 Related reference: [persistent package/module index](../04_architecture/compiler/perf/persistent_package_module_index_compile_optimization.md).
+
+2026-10-25: execution authority is
+[`compiler/phase3_incremental_build_completion_2026-10-13.md`](compiler/phase3_incremental_build_completion_2026-10-13.md);
+design authority is
+[`src_based_tldr_build_v1.md`](../05_design/compiler/incremental_build/src_based_tldr_build_v1.md)
+with [`true_per_file_pipeline_v1.md`](../05_design/compiler/incremental_build/true_per_file_pipeline_v1.md)
+as its per-file execution contract; the full plan set and conflict table is
+[`compiler/cache/cache_perfile_plan_index_2026-10-25.md`](compiler/cache/cache_perfile_plan_index_2026-10-25.md).
+Landed packages are listed in the reconciliation table above. The "clean /
+warm / no-op / single-module-edit" baselines required below still do not exist
+on a stage2 built from these sources; `scripts/check/check-per-file-overlap-receipt.shs`
+(P-F #4592) is the acceptance proof for "no phase barrier" once that stage2 runs.
 
 - Locate the canonical final plan and build a requirement-to-stage inventory;
   the related index document is not a substitute for the full requested scope.
@@ -312,3 +472,8 @@ when a relevant change invalidates its evidence or a required gate demands it.
 After three fix/verify cycles, report the remaining blocker and stop that lane.
 Never mark missing host evidence as a pass. The seven-item program is complete
 only when every required host/item cell is DONE or has an accepted scope exclusion.
+
+The latest default-off landing is user-directed and unverified by a new runtime
+run. It supersedes PR #4865's earlier default enablement without changing that
+historical landing or any retained native evidence. Whole-program precedence
+and all remaining acceptance gates are unchanged.

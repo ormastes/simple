@@ -1,0 +1,302 @@
+# ObjectRecordV1 — versioned immutable-object record with digest aliases.
+# SDN by default: strict line-based `key: value` subset, canonical field order
+# on encode; decode is fail-closed (invalid input -> format_version 0 sentinel).
+# Design: doc/05_design/platform/container/simple_container_improvement.md
+
+pub const OBJECT_RECORD_V1_VERSION = 1
+
+unit ObjectFormatVersionV1: i64
+unit ObjectLogicalLengthV1: i64
+unit ObjectGenerationV1: i64
+unit ObjectRecordValidV1: bool
+export ObjectFormatVersionV1, ObjectLogicalLengthV1, ObjectGenerationV1, ObjectRecordValidV1
+
+fn _orv1_max_record_bytes() -> i64:
+    65536
+
+fn _orv1_max_aliases() -> i64:
+    64
+
+pub struct DigestAliasV1:
+    algorithm: text
+    algorithm_profile: text
+    digest_hex: text
+
+pub struct ObjectRecordV1:
+    format_version: ObjectFormatVersionV1
+    object_key: text
+    logical_length: ObjectLogicalLengthV1
+    generation: ObjectGenerationV1
+    aliases: [DigestAliasV1]
+
+fn _orv1_invalid() -> ObjectRecordV1:
+    ObjectRecordV1(format_version: ObjectFormatVersionV1(0), object_key: "", logical_length: ObjectLogicalLengthV1(0), generation: ObjectGenerationV1(0), aliases: [])
+
+fn _orv1_is_digit_byte(b: i64) -> bool:
+    b >= 48 and b <= 57
+
+fn _orv1_is_hex_byte(b: i64) -> bool:
+    _orv1_is_digit_byte(b) or (b >= 97 and b <= 102)
+
+fn _orv1_is_algo_byte(b: i64) -> bool:
+    _orv1_is_digit_byte(b) or (b >= 97 and b <= 122) or b == 45
+
+fn _orv1_is_key_byte(b: i64) -> bool:
+    _orv1_is_algo_byte(b) or b == 95 or b == 46
+
+fn _orv1_is_field_name_byte(b: i64) -> bool:
+    _orv1_is_digit_byte(b) or (b >= 97 and b <= 122) or b == 95 or b == 46
+
+fn _orv1_hex_valid(value: text) -> bool:
+    val bs = value.bytes()
+    if bs.len() < 16 or bs.len() > 128 or bs.len() % 2 != 0:
+        return false
+    for b in bs:
+        if not _orv1_is_hex_byte(b):
+            return false
+    true
+
+fn _orv1_algo_valid(value: text) -> bool:
+    val bs = value.bytes()
+    if bs.len() < 1 or bs.len() > 64:
+        return false
+    for b in bs:
+        if not _orv1_is_algo_byte(b):
+            return false
+    true
+
+fn _orv1_profile_valid(value: text) -> bool:
+    val bs = value.bytes()
+    if bs.len() > 256:
+        return false
+    for b in bs:
+        if b < 32 or b > 126:
+            return false
+    true
+
+fn _orv1_parse_nonneg_int(value: text) -> i64:
+    val bs = value.bytes()
+    if bs.len() == 0 or bs.len() > 18:
+        return -1
+    for b in bs:
+        if not _orv1_is_digit_byte(b):
+            return -1
+    # Canonical decimal: no leading zero except "0" itself.
+    if bs.len() > 1 and bs[0] == 48:
+        return -1
+    val parsed = value.to_i64() ?? -1
+    if parsed < 0:
+        return -1
+    parsed
+
+# Structural object key: `<algorithm>_<hex>` with an optional `_c<n>`
+# disambiguation suffix (n in 1..=64). Charset is validated before any
+# substring so byte/char indexing cannot diverge on hostile input.
+fn _orv1_object_key_valid(key: text) -> bool:
+    val bs: [u8] = key.bytes()
+    val key_bytes = key.byte_len()
+    if key_bytes < 3 or key_bytes > 256:
+        return false
+    for b in bs:
+        if not _orv1_is_key_byte(b):
+            return false
+    var sep: i64 = -1
+    var i: i64 = 0
+    while i < key_bytes:
+        if bs[i] == 95:
+            sep = i
+            break
+        i = i + 1
+    if sep <= 0 or sep >= key_bytes - 1:
+        return false
+    if not _orv1_algo_valid(key.substring(0, sep)):
+        return false
+    val rest = key.substring(sep + 1, key_bytes)
+    val rbs: [u8] = rest.bytes()
+    val rest_bytes = rest.byte_len()
+    var hex_end = rest_bytes
+    var k: i64 = 0
+    while k < rest_bytes:
+        if rbs[k] == 95:
+            hex_end = k
+            break
+        k = k + 1
+    if not _orv1_hex_valid(rest.substring(0, hex_end)):
+        return false
+    if hex_end == rest_bytes:
+        return true
+    val suffix = rest.substring(hex_end, rest_bytes)
+    if not suffix.starts_with("_c"):
+        return false
+    val n = _orv1_parse_nonneg_int(suffix.substring(2, suffix.byte_len()))
+    n >= 1 and n <= _orv1_max_aliases()
+
+fn _orv1_escape(value: text) -> text:
+    var out = value.replace("\\", "\\\\")
+    out = out.replace("\"", "\\\"")
+    out = out.replace("\n", "\\n")
+    out = out.replace("\t", "\\t")
+    out = out.replace("\r", "\\r")
+    out
+
+fn _orv1_quote(value: text) -> text:
+    "\"" + _orv1_escape(value) + "\""
+
+fn _orv1_unquote(value: text) -> Result<text, text>:
+    if value.byte_len() < 2:
+        return Err("unquoted-value")
+    if not value.starts_with("\"") or not value.ends_with("\""):
+        return Err("unquoted-value")
+    val inner = value.substring(1, value.byte_len() - 1)
+    val inner_bytes = inner.byte_len()
+    var out = ""
+    var index: i64 = 0
+    while index < inner_bytes:
+        val ch = inner.substring(index, index + 1)
+        if ch == "\\":
+            if index + 2 > inner_bytes:
+                return Err("malformed-escape")
+            val code = inner.substring(index + 1, index + 2)
+            if code == "\"":
+                out = out + "\""
+            elif code == "\\":
+                out = out + "\\"
+            elif code == "n":
+                out = out + "\n"
+            elif code == "t":
+                out = out + "\t"
+            elif code == "r":
+                out = out + "\r"
+            else:
+                return Err("malformed-escape")
+            index = index + 2
+        else:
+            if ch == "\"":
+                return Err("unescaped-value")
+            out = out + ch
+            index = index + 1
+    Ok(out)
+
+fn _orv1_find_colon(line: text) -> i64:
+    var index: i64 = 0
+    val line_bytes = line.byte_len()
+    while index < line_bytes:
+        if line.substring(index, index + 1) == ":":
+            return index
+        index = index + 1
+    -1
+
+fn _orv1_field_name_valid(key: text) -> bool:
+    val bs = key.bytes()
+    if bs.len() < 1 or bs.len() > 64:
+        return false
+    for b in bs:
+        if not _orv1_is_field_name_byte(b):
+            return false
+    true
+
+fn _orv1_field_string(fields: Dict<text, text>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key):
+        return Err("missing-field:{key}")
+    _orv1_unquote(fields[key])
+
+fn _orv1_field_int(fields: Dict<text, text>, key: text) -> Result<i64, text>:
+    if not fields.contains_key(key):
+        return Err("missing-field:{key}")
+    val parsed = _orv1_parse_nonneg_int(fields[key])
+    if parsed < 0:
+        return Err("invalid-integer:{key}")
+    Ok(parsed)
+
+pub fn object_record_v1_encode(record: ObjectRecordV1) -> text:
+    var out = "format_version: {record.format_version.value}\n"
+    out = out + "object_key: {_orv1_quote(record.object_key)}\n"
+    out = out + "logical_length: {record.logical_length.value}\n"
+    out = out + "generation: {record.generation.value}\n"
+    out = out + "alias_count: {record.aliases.len()}\n"
+    var i: i64 = 0
+    while i < record.aliases.len():
+        val alias = record.aliases[i]
+        out = out + "alias.{i}.algorithm: {_orv1_quote(alias.algorithm)}\n"
+        out = out + "alias.{i}.algorithm_profile: {_orv1_quote(alias.algorithm_profile)}\n"
+        out = out + "alias.{i}.digest_hex: {_orv1_quote(alias.digest_hex)}\n"
+        i = i + 1
+    out
+
+fn _orv1_decode_fields(fields: Dict<text, text>) -> Result<ObjectRecordV1, text>:
+    val version = _orv1_field_int(fields, "format_version")?
+    if version != OBJECT_RECORD_V1_VERSION:
+        return Err("unsupported-version")
+    val alias_count = _orv1_field_int(fields, "alias_count")?
+    if alias_count < 1 or alias_count > _orv1_max_aliases():
+        return Err("alias-count-out-of-bounds")
+    if fields.len() != 5 + alias_count * 3:
+        return Err("unexpected-fields")
+    val object_key = _orv1_field_string(fields, "object_key")?
+    val logical_length = _orv1_field_int(fields, "logical_length")?
+    val generation = _orv1_field_int(fields, "generation")?
+    var aliases: [DigestAliasV1] = []
+    var i: i64 = 0
+    while i < alias_count:
+        val algorithm = _orv1_field_string(fields, "alias.{i}.algorithm")?
+        val profile = _orv1_field_string(fields, "alias.{i}.algorithm_profile")?
+        val digest_hex = _orv1_field_string(fields, "alias.{i}.digest_hex")?
+        aliases.push(DigestAliasV1(algorithm: algorithm, algorithm_profile: profile, digest_hex: digest_hex))
+        i = i + 1
+    Ok(ObjectRecordV1(format_version: ObjectFormatVersionV1(version), object_key: object_key,
+        logical_length: ObjectLogicalLengthV1(logical_length), generation: ObjectGenerationV1(generation), aliases: aliases))
+
+pub fn object_record_v1_decode(source: text) -> ObjectRecordV1:
+    if source.byte_len() > _orv1_max_record_bytes():
+        return _orv1_invalid()
+    val lines = source.split("\n")
+    var fields: Dict<text, text> = {}
+    for i in 0..lines.len():
+        val line = lines[i]
+        if line == "":
+            if i == lines.len() - 1:
+                continue
+            return _orv1_invalid()
+        val colon = _orv1_find_colon(line)
+        if colon <= 0:
+            return _orv1_invalid()
+        val key = line.substring(0, colon)
+        if not _orv1_field_name_valid(key):
+            return _orv1_invalid()
+        if fields.contains_key(key):
+            return _orv1_invalid()
+        val rest = line.substring(colon + 1, line.byte_len())
+        if not rest.starts_with(" "):
+            return _orv1_invalid()
+        fields[key] = rest.substring(1, rest.byte_len())
+    val decoded = match _orv1_decode_fields(fields):
+        case Ok(record): record
+        case Err(_): _orv1_invalid()
+    if decoded.format_version.value == 0:
+        return _orv1_invalid()
+    if not object_record_v1_valid(decoded).value:
+        return _orv1_invalid()
+    decoded
+
+pub fn object_record_v1_valid(record: ObjectRecordV1) -> ObjectRecordValidV1:
+    ObjectRecordValidV1(_orv1_record_ok(record))
+
+fn _orv1_record_ok(record: ObjectRecordV1) -> bool:
+    if record.format_version.value != OBJECT_RECORD_V1_VERSION:
+        return false
+    if not _orv1_object_key_valid(record.object_key):
+        return false
+    if record.logical_length.value < 0:
+        return false
+    if record.generation.value < 0:
+        return false
+    if record.aliases.len() < 1 or record.aliases.len() > _orv1_max_aliases():
+        return false
+    for alias in record.aliases:
+        if not _orv1_algo_valid(alias.algorithm):
+            return false
+        if not _orv1_profile_valid(alias.algorithm_profile):
+            return false
+        if not _orv1_hex_valid(alias.digest_hex):
+            return false
+    true

@@ -7,8 +7,10 @@ evidence found in the body. This is bookkeeping, not verification.
 **Filed:** 2026-09-06 (lane C, found by the dual_fs effect-comparison harness)
 **Severity:** high — a write returns `false` and creates nothing, in a code
 path that carries explicit repair logic for exactly that case.
-**Status:** OPEN. Not repaired here: the fix changes stdlib dispatch that other
-lanes call.
+**Status:** FIXED (verified 2026-11-11, lane rt3) — co-compiled
+same-signature dispatch is now import-aware (owner decision 2026-11-09), so
+`use std.io_runtime.{file_write}` resolves to `io_runtime`'s retry-having
+definition. See the 2026-11-11 addendum at the end.
 
 ## Symptom
 
@@ -133,3 +135,39 @@ parent-directory retry in pure Simple and is measured performing it
 absent parent), which is why the pure provider is currently the *more* correct
 of the two twins.
 
+
+---
+
+## 2026-11-11 — Lane rt3 triage verdict: FIXED
+
+**Fixing change:** the co-compiled duplicate-dispatch owner decision of
+2026-11-09 (emitted in the current seed's
+`compiler_cross_module_private_symbol_collision` warnings) made call sites
+resolve by the **caller's import path** first. For identical-signature
+duplicates this means `use std.io_runtime.{file_write}` now selects
+`io_runtime.spl`'s body (which creates the missing parent directory and
+retries), while importing a retryless twin selects that twin's body. The
+retryless colliding definitions (`database/atomic.spl`, `database/core.spl`,
+`io/file_ops.spl`, `sffi/io.spl`, `nogc_async_mut/io/mod_stub.spl`,
+`gc_async_mut/pure/runtime.spl`, `mcp/main_lazy_json.spl`) still exist — they
+were not renamed (fix direction #1) — but they no longer hijack an unrelated
+import.
+
+**Verification (seed-smoke, seed build 46fe8f6b6def, interpreter):**
+- Doc repro (`use std.io_runtime.{file_write, file_exists}`, write into
+  `build/scratch/rt3_bug3_absent/` — parent absent): `wrote=true exists=true`,
+  directory created (was `false exists=false`).
+- Discriminating control, same co-compiled closure
+  (`use std.nogc_sync_mut.io.file_ops.{file_write}`, parent absent):
+  `wrote=false exists=false`, directory NOT created — proving dispatch follows
+  the import path, not an arbitrary winner, even though both programs
+  co-compile three identical-signature `file_write` definitions
+  (`io/file_ops.spl`, `io_runtime.spl`, `sffi/io.spl`).
+- `test/01_unit/lib/nogc_sync_mut/io/file_write_direct_import_spec.spl` 1/1 PASS.
+- `test/01_unit/lib/nogc_sync_mut/io/file_write_reexport_dispatch_spec.spl` 2/2 PASS.
+
+**Residual (hardening, not the reported defect):** the identical-signature
+collisions still trigger compiler warnings (~45 symbols, including
+`file_write`); fix directions #1 (rename twins) and #2 (make identical
+signatures a hard error) remain available hardening, but the silent-wrong-body
+symptom this bug tracked cannot recur while dispatch is import-aware.

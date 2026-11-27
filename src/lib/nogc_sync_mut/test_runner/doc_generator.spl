@@ -30,7 +30,11 @@ fn generate_test_result_md(db: RunnerTestDb) -> text:
     lines.push("")
 
     # Summary - use query API
-    val (total_tests, passed, failed, skipped) = db.test_count_by_status()
+    val counts = db.test_count_by_status()
+    val total_tests = counts.total.value
+    val passed = counts.passed.value
+    val failed = counts.failed.value
+    val skipped = counts.skipped.value
     val pending = db.tests_by_status("pending").len()
     # In-development tests are EXPECTED to fail and are SKIPPED by
     # whole-suite runs. They get their own row unconditionally — a category
@@ -45,6 +49,8 @@ fn generate_test_result_md(db: RunnerTestDb) -> text:
     # Feature-gated: `# @tag:requires-<feature>` with that build feature OFF.
     # NOT RUN, so never passed and not a host-unavailable skip either.
     val feature_gated = db.tests_by_status("feature_gated").len()
+    # Blocked: environment missing (BLOCKED: / precondition:). Never passed.
+    val blocked = db.tests_by_status("blocked").len()
 
     lines.push("## Summary")
     lines.push("")
@@ -56,6 +62,7 @@ fn generate_test_result_md(db: RunnerTestDb) -> text:
     lines.push("| Skipped (host-unavailable) | {skipped} |")
     lines.push("| In Development | {in_development} |")
     lines.push("| Feature-gated (build feature off) | {feature_gated} |")
+    lines.push("| Blocked (environment missing) | {blocked} |")
     # Tagged and PASSED — ready to promote. Tagged and UNLOADABLE — a spec
     # DEFECT that fails the run. Both are printed only when non-zero, but
     # neither is ever folded into the in-development count above: doing so
@@ -71,7 +78,7 @@ fn generate_test_result_md(db: RunnerTestDb) -> text:
     # Totals must reconcile: passed + failed + skipped + in-development +
     # pending + other == total. A silent remainder means a status exists
     # that this report does not name.
-    val accounted = passed + failed + skipped + pending + in_development + unexpected_passes + feature_gated
+    val accounted = passed + failed + skipped + pending + in_development + unexpected_passes + feature_gated + blocked
     if total_tests > accounted:
         lines.push("| Other | {total_tests - accounted} |")
         lines.push("")
@@ -134,7 +141,7 @@ fn generate_test_result_md(db: RunnerTestDb) -> text:
         var i = recent_runs.len() - 1
         while i >= 0 and count < 10:
             val r = recent_runs[i]
-            lines.push("| {r.run_id} | {r.status} | {r.test_count} | {r.passed} | {r.failed} | {r.timed_out} |")
+            lines.push("| {r.run_id} | {r.status} | {r.test_count.value} | {r.passed.value} | {r.failed.value} | {r.timed_out.value} |")
             count = count + 1
             i = i - 1
         lines.push("")
@@ -147,14 +154,14 @@ fn generate_test_result_md(db: RunnerTestDb) -> text:
         lines.push("| Test | Status | Runs | Mean (ms) | p50 (ms) |")
         lines.push("|------|--------|------|-----------|----------|")
         for t in all_tests:
-            if t.total_runs > 0:
-                val mean_str = "{t.mean_duration}"
-                val p50_str = "{t.p50_duration}"
-                lines.push("| {t.test_name} | {t.status} | {t.total_runs} | {mean_str} | {p50_str} |")
+            if t.total_runs.value > 0:
+                val mean_str = "{t.mean_duration.value}"
+                val p50_str = "{t.p50_duration.value}"
+                lines.push("| {t.test_name} | {t.status} | {t.total_runs.value} | {mean_str} | {p50_str} |")
         lines.push("")
 
     # Slowest tests (p50 > 1000ms)
-    var slow_tests = all_tests.filter(_.p50_duration > 1000.0)
+    var slow_tests = all_tests.filter(_.p50_duration.value > 1000.0)
     if slow_tests.len() > 0:
         lines.push("## Slowest Tests (p50 > 1s)")
         lines.push("")
@@ -164,9 +171,9 @@ fn generate_test_result_md(db: RunnerTestDb) -> text:
         for t in slow_tests:
             if slow_count >= 20:
                 break
-            val p50_str = "{t.p50_duration}"
-            val mean_str = "{t.mean_duration}"
-            lines.push("| {t.test_name} | {p50_str} | {mean_str} | {t.total_runs} |")
+            val p50_str = "{t.p50_duration.value}"
+            val mean_str = "{t.mean_duration.value}"
+            lines.push("| {t.test_name} | {p50_str} | {mean_str} | {t.total_runs.value} |")
             slow_count = slow_count + 1
         lines.push("")
 

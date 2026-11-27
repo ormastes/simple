@@ -290,6 +290,7 @@ pub(crate) fn visit_ast_nodes(nodes: &[simple_parser::ast::Node], visitor: &mut 
                 visit_expr(value, visitor);
                 visit_expr(count, visitor);
             }
+            Expr::GenericInst { expr, .. } => visit_expr(expr, visitor),
             Expr::Dict(items) => {
                 for (key, value) in items {
                     visit_expr(key, visitor);
@@ -980,6 +981,8 @@ impl NativeProjectBuilder {
                     let mut facade_providers = explicit_providers.clone();
                     let mut extern_weak_providers = explicit_providers.clone();
                     let mut glob_forwarders = Vec::new();
+                    let mut parsed_siblings: Vec<(PathBuf, simple_parser::ast::Module)> =
+                        Vec::with_capacity(siblings.len());
                     for sibling in siblings {
                         let mut sibling_source = match std::fs::read_to_string(&sibling) {
                             Ok(source) => source,
@@ -1001,6 +1004,7 @@ impl NativeProjectBuilder {
                         strip_inactive_cfg_arch_fns(&mut sibling_module, target_arch);
                         let (explicit, definitions, facades, extern_weak, forwards_glob) =
                             provided_export_names(&sibling_module.items, &requested);
+                        parsed_siblings.push((sibling.clone(), sibling_module));
                         if forwards_glob {
                             glob_forwarders.push(sibling.clone());
                         }
@@ -1074,38 +1078,53 @@ impl NativeProjectBuilder {
                             }
                         }
                     }
-                }
-            }
 
-            // Bare exports in a package facade identify symbols but not their
-            // owning sibling module. Queue only siblings that define one of
-            // those symbols so unrelated files do not enter the closure.
-            let bare_export_names = bare_export_names(&module.items);
-            if canonical.file_name().and_then(|name| name.to_str()) == Some("__init__.spl")
-                && !bare_export_names.is_empty()
-            {
-                if let Some(parent) = canonical.parent() {
-                    if let Ok(entries) = std::fs::read_dir(parent) {
-                        for entry in entries.flatten() {
-                            let sibling = entry.path();
-                            if sibling.extension().and_then(|ext| ext.to_str()) == Some("spl")
-                                && !same_file_path(&sibling, &canonical)
-                            {
-                                let Ok(sibling_source) = std::fs::read_to_string(&sibling) else {
-                                    continue;
-                                };
-                                let sibling_source = preprocess_discovery_os_branches(
-                                    &sibling_source, &sibling, &crate::pipeline::cfg_strip::cfg_target(),
-                                )?;
-                                let mut sibling_parser = simple_parser::Parser::new(&sibling_source);
-                                let Ok(sibling_module) = sibling_parser.parse() else {
-                                    continue;
-                                };
-                                if bare_export_names.iter().any(|name| {
-                                    defines_top_level_name(&sibling_module.items, name)
-                                        || reexports_top_level_name(&sibling_module.items, name)
-                                }) {
-                                    found_deps.insert(safe_canonicalize(&sibling));
+                    // Bare exports in a package facade identify symbols but not their
+                    // owning sibling module. Reuse the sibling ASTs parsed above so
+                    // facades with both explicit and bare exports never parse siblings twice.
+                    let bare_export_names = bare_export_names(&module.items);
+                    if !bare_export_names.is_empty() {
+                        for (sibling, sibling_module) in &parsed_siblings {
+                            if bare_export_names.iter().any(|name| {
+                                defines_top_level_name(&sibling_module.items, name)
+                                    || reexports_top_level_name(&sibling_module.items, name)
+                            }) {
+                                found_deps.insert(safe_canonicalize(sibling));
+                            }
+                        }
+                    }
+                }
+            } else {
+                let bare_export_names = bare_export_names(&module.items);
+                if canonical.file_name().and_then(|name| name.to_str()) == Some("__init__.spl")
+                    && !bare_export_names.is_empty()
+                {
+                    if let Some(parent) = canonical.parent() {
+                        if let Ok(entries) = std::fs::read_dir(parent) {
+                            for entry in entries.flatten() {
+                                let sibling = entry.path();
+                                if sibling.extension().and_then(|ext| ext.to_str()) == Some("spl")
+                                    && !same_file_path(&sibling, &canonical)
+                                {
+                                    let Ok(sibling_source) = std::fs::read_to_string(&sibling) else {
+                                        continue;
+                                    };
+                                    let sibling_source = preprocess_discovery_os_branches(
+                                        &sibling_source, &sibling, &crate::pipeline::cfg_strip::cfg_target(),
+                                    )?;
+                                    let sibling_source =
+                                        crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&sibling_source, target_arch);
+                                    let mut sibling_parser = simple_parser::Parser::new(&sibling_source);
+                                    let Ok(mut sibling_module) = sibling_parser.parse() else {
+                                        continue;
+                                    };
+                                    strip_inactive_cfg_arch_fns(&mut sibling_module, target_arch);
+                                    if bare_export_names.iter().any(|name| {
+                                        defines_top_level_name(&sibling_module.items, name)
+                                            || reexports_top_level_name(&sibling_module.items, name)
+                                    }) {
+                                        found_deps.insert(safe_canonicalize(&sibling));
+                                    }
                                 }
                             }
                         }
@@ -1478,4 +1497,246 @@ pub(crate) fn extract_reachable_module_paths(
         _ => {}
     });
     deps
+}
+
+#[cfg(test)]
+mod cfg_use_discovery_tests {
+    use super::*;
+    use simple_common::target::TargetArch;
+
+    #[test]
+    fn cfg_gated_top_level_use_excludes_other_arch_dependencies_from_closure() {
+        let project_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let project_root = safe_canonicalize(&project_root);
+        let src_root = project_root.join("src");
+        let vmm_path = src_root.join("os/kernel/memory/vmm.spl");
+        let console_path = src_root.join("os/kernel/arch_adapt/console_byte.spl");
+
+        let deps_for = |file: &Path, arch: TargetArch| -> Vec<String> {
+            let raw = std::fs::read_to_string(file).expect("read source");
+            let filtered = crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&raw, arch);
+            let mut module = simple_parser::Parser::new(&filtered).parse().expect("parse source");
+            strip_inactive_cfg_arch_fns(&mut module, arch);
+            let mut resolvers = vec![crate::module_resolver::ModuleResolver::new(
+                project_root.clone(),
+                src_root.clone(),
+            )];
+            extract_reachable_module_paths(&module, file, &mut resolvers, std::slice::from_ref(&src_root), &project_root)
+                .into_iter()
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .collect()
+        };
+
+        // On AArch64, vmm.spl must NOT pull os/kernel/hal/paging.spl (which pulls riscv_tlb -> riscv64/cpu).
+        let vmm_arm64 = deps_for(&vmm_path, TargetArch::Aarch64);
+        assert!(
+            !vmm_arm64.iter().any(|p| p.contains("hal/paging") || p.contains("riscv")),
+            "aarch64 vmm closure leaked riscv/paging dep: {vmm_arm64:?}"
+        );
+        // On Riscv64, vmm.spl MUST pull os/kernel/hal/paging.spl.
+        let vmm_rv64 = deps_for(&vmm_path, TargetArch::Riscv64);
+        assert!(
+            vmm_rv64.iter().any(|p| p.ends_with("os/kernel/hal/paging.spl")),
+            "riscv64 vmm closure missed hal/paging.spl: {vmm_rv64:?}"
+        );
+
+        // On Riscv64, console_byte.spl must NOT pull x86 com1_common or arm pl011_common.
+        let console_rv64 = deps_for(&console_path, TargetArch::Riscv64);
+        assert!(
+            !console_rv64.iter().any(|p| p.contains("/x86/") || p.contains("/arm/")),
+            "riscv64 console_byte closure leaked x86/arm dep: {console_rv64:?}"
+        );
+        assert!(
+            console_rv64.iter().any(|p| p.contains("arch/riscv64/console.spl")),
+            "riscv64 console_byte closure missed riscv64 console: {console_rv64:?}"
+        );
+    }
+
+    #[test]
+    fn lint_entry_closure_lowers_entry_and_fixes_without_i32_code_field_error() {
+        use crate::pipeline::native_project::compiler::native_hir_resolver_roots;
+        use crate::pipeline::native_project::imports::{build_import_map, build_use_map_from_ast};
+        use crate::pipeline::native_project::{NativeBuildConfig, NativeProjectBuilder};
+        use std::collections::{HashMap, HashSet};
+        use std::sync::Arc;
+
+        let project_root = safe_canonicalize(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+        let entry = project_root.join("src/app/cli/lint_entry.spl");
+        let target_file = safe_canonicalize(&project_root.join("src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl"));
+        let mut cfg = NativeBuildConfig::default();
+        cfg.entry_closure = true;
+        let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("build/test_lint_entry"))
+            .source_dir(project_root.join("src/compositions/kernel_llvm_cranelift"))
+            .source_dir(project_root.join("src"))
+            .entry_file(entry.clone())
+            .config(cfg);
+
+        let file_sources = builder
+            .discover_reachable_files_with_sources(&safe_canonicalize(&entry))
+            .expect("discover lint_entry closure");
+        let result = build_import_map(&file_sources, &builder.source_dirs, &builder.source_root);
+
+        let (_, source) = file_sources
+            .iter()
+            .find(|(p, _)| safe_canonicalize(p) == target_file)
+            .expect("entry_and_fixes.spl must be in lint_entry closure");
+        let filtered = crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(source, super::super::effective_target().arch);
+        let mut ast = simple_parser::Parser::new(&filtered).parse().expect("parse entry_and_fixes.spl");
+        strip_inactive_cfg_arch_fns(&mut ast, super::super::effective_target().arch);
+
+        let all_mangled = Arc::new(result.all_mangled);
+        let re_exports = Arc::new(result.re_exports);
+        let struct_defs = Arc::new(result.struct_defs);
+        let struct_field_defaults = Arc::new(result.struct_field_defaults);
+        let unique_struct_owners = Arc::new(result.unique_struct_owners);
+        let struct_module_owners = Arc::new(result.struct_module_owners);
+        let duplicate_struct_defs = Arc::new(result.duplicate_struct_defs);
+        let enum_defs = Arc::new(result.enum_defs);
+        let duplicate_enum_names = Arc::new(result.duplicate_enum_names);
+        let fn_return_types = Arc::new(result.fn_return_types);
+        let method_param_defaults = Arc::new(result.method_param_defaults);
+
+        let mut field_indices: HashMap<String, HashSet<usize>> = HashMap::new();
+        for fields in struct_defs.values() {
+            for (idx, (fname, _)) in fields.iter().enumerate() {
+                field_indices.entry(fname.clone()).or_default().insert(idx);
+            }
+        }
+        let ambiguous: Arc<HashSet<String>> = Arc::new(
+            field_indices
+                .into_iter()
+                .filter_map(|(name, indices)| if indices.len() > 1 { Some(name) } else { None })
+                .collect(),
+        );
+
+        let make_lowerer = |module_ast: &simple_parser::ast::Module| {
+            let use_map = build_use_map_from_ast(module_ast, &all_mangled, &re_exports);
+            let resolver_roots = native_hir_resolver_roots(&project_root, &builder.source_dirs);
+            let resolver = crate::module_resolver::ModuleResolver::new(project_root.clone(), builder.source_root.clone())
+                .with_extra_source_roots(resolver_roots);
+            let mut lowerer = crate::hir::Lowerer::with_module_resolver(resolver, target_file.clone());
+            lowerer.set_strict_mode(false);
+            lowerer.set_lenient_types(true);
+            lowerer.set_global_struct_defs(Arc::clone(&struct_defs));
+            lowerer.set_global_struct_field_defaults(Arc::clone(&struct_field_defaults));
+            lowerer.set_unique_global_struct_owners(Arc::clone(&unique_struct_owners));
+            lowerer.set_struct_module_owners(Arc::clone(&struct_module_owners));
+            lowerer.set_duplicate_global_struct_defs(Arc::clone(&duplicate_struct_defs));
+            lowerer.set_ambiguous_field_names(Arc::clone(&ambiguous));
+            lowerer.set_global_fn_return_types(Arc::clone(&fn_return_types));
+            lowerer.set_global_method_param_defaults(Arc::clone(&method_param_defaults));
+            lowerer.set_qualified_import_functions(Arc::new(use_map));
+            lowerer.set_global_enum_defs(Arc::clone(&enum_defs));
+            lowerer.set_merged_global_enum_names(Arc::clone(&duplicate_enum_names));
+            lowerer.register_global_enums();
+            lowerer
+        };
+
+        let mut lowerer = make_lowerer(&ast);
+        if let Err(err) = lowerer.lower_module_with_return_types(&ast) {
+            let mut failing_fns = Vec::new();
+            for (idx, item) in ast.items.iter().enumerate() {
+                if let simple_parser::ast::Node::Function(func) = item {
+                    let mut sub_ast = ast.clone();
+                    sub_ast.items = ast
+                        .items
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, n)| *i == idx || !matches!(n, simple_parser::ast::Node::Function(_)))
+                        .map(|(_, n)| n.clone())
+                        .collect();
+                    let mut sub_lowerer = make_lowerer(&sub_ast);
+                    if let Err(sub_err) = sub_lowerer.lower_module_with_return_types(&sub_ast) {
+                        failing_fns.push(format!("{} (line {}): {}", func.name, func.span.line, sub_err));
+                    }
+                }
+            }
+            panic!("entry_and_fixes.spl HIR lowering failed: {err}\nfailing functions: {failing_fns:#?}");
+        }
+    }
+
+    #[test]
+    fn cfg_gated_use_inside_nested_containers_and_expr_blocks_strips_before_discovery_visit() {
+        let source = concat!(
+            "trait HalOps:\n",
+            "    fn probe():\n",
+            "        @cfg(riscv64)\n",
+            "        use os.kernel.arch.riscv64.trap\n",
+            "        @cfg(x86_64)\n",
+            "        use os.kernel.arch.x86_64.idt\n",
+            "        ()\n",
+            "mixin PagingHelper:\n",
+            "    fn map_page():\n",
+            "        @cfg(riscv64)\n",
+            "        use os.kernel.arch.riscv64.sv39\n",
+            "        ()\n",
+            "actor Worker:\n",
+            "    fn step():\n",
+            "        @cfg(riscv64)\n",
+            "        use os.kernel.arch.riscv64.timer\n",
+            "        ()\n",
+            "struct MyType:\n",
+            "    x: i64\n",
+            "extend MyType:\n",
+            "    fn helper() -> i64:\n",
+            "        @cfg(riscv64)\n",
+            "        use os.kernel.arch.riscv64.sbi\n",
+            "        0\n",
+            "fn run_blocks() -> i64:\n",
+            "    defer:\n",
+            "        @cfg(riscv64)\n",
+            "        use os.kernel.arch.riscv64.defer_mod\n",
+            "        0\n",
+            "    val v = unsafe:\n",
+            "        @cfg(riscv64)\n",
+            "        use os.kernel.arch.riscv64.unsafe_mod\n",
+            "        @cfg(x86_64)\n",
+            "        use os.kernel.arch.x86_64.unsafe_mod\n",
+            "        1\n",
+            "    val w = do:\n",
+            "        @cfg(riscv64)\n",
+            "        use os.kernel.arch.riscv64.do_mod\n",
+            "        2\n",
+            "    v + w\n",
+        );
+
+        let collect_discovered_uses = |arch: simple_common::target::TargetArch| -> Vec<String> {
+            let filtered = crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(source, arch);
+            let mut module = simple_parser::Parser::new(&filtered)
+                .parse()
+                .expect("parse nested containers with @cfg use");
+            strip_inactive_cfg_arch_fns(&mut module, arch);
+            let mut found = Vec::new();
+            super::visit_ast_nodes(&module.items, &mut |node| {
+                if let simple_parser::ast::Node::UseStmt(u) = node {
+                    let mut segs = u.path.segments.clone();
+                    if let simple_parser::ast::ImportTarget::Single(last) = &u.target {
+                        segs.push(last.clone());
+                    }
+                    found.push(segs.join("."));
+                }
+            });
+            found
+        };
+
+        assert_eq!(
+            collect_discovered_uses(simple_common::target::TargetArch::X86_64),
+            vec![
+                "os.kernel.arch.x86_64.idt".to_string(),
+                "os.kernel.arch.x86_64.unsafe_mod".to_string(),
+            ]
+        );
+        assert_eq!(
+            collect_discovered_uses(simple_common::target::TargetArch::Riscv64),
+            vec![
+                "os.kernel.arch.riscv64.trap".to_string(),
+                "os.kernel.arch.riscv64.sv39".to_string(),
+                "os.kernel.arch.riscv64.timer".to_string(),
+                "os.kernel.arch.riscv64.sbi".to_string(),
+                "os.kernel.arch.riscv64.defer_mod".to_string(),
+                "os.kernel.arch.riscv64.unsafe_mod".to_string(),
+                "os.kernel.arch.riscv64.do_mod".to_string(),
+            ]
+        );
+    }
 }

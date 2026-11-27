@@ -36,11 +36,44 @@
 # single canonical home. Delete this mirror and restore the `use` import once
 # cross-module plain calls link in the per-module lane.
 
+fn _module_path_naming_char_index_of_byte(value: text, byte_index: i64) -> i64:
+    # `substring` is character-indexed while this scan walks bytes: count the
+    # UTF-8 lead bytes before byte_index (continuation bytes are 10xxxxxx).
+    # One multibyte char before "/src/" shifted every slice by one
+    # ("rc/app/cli/main.spl", stage2_module_path_naming fixture, 2026-11-12).
+    var chars = 0
+    var b = 0
+    while b < byte_index:
+        val byte = value.byte_at(b)
+        if byte < 128 or byte >= 192:
+            chars = chars + 1
+        b = b + 1
+    chars
+
+fn _module_path_naming_suffix_after(value: text, needle: text) -> text:
+    # `needle` is "/src/"-shaped; the suffix must start with it minus the
+    # leading "/". `substring` units differ by lane (pure-Simple native and the
+    # seed interpreter slice bytes, the seed JIT/native lane slices characters;
+    # bug substring_units_differ_by_execution_lane_2026-11-12), so slice at the
+    # byte index, verify against the needle, and fall back to the character
+    # index. "" means the needle is absent.
+    val byte_index = _module_path_naming_text_index_of(value, needle)
+    if byte_index < 0:
+        return ""
+    val expected = needle.substring(1)
+    val by_bytes = value.substring(byte_index + 1)
+    if by_bytes.starts_with(expected):
+        return by_bytes
+    val by_chars = value.substring(_module_path_naming_char_index_of_byte(value, byte_index) + 1)
+    if by_chars.starts_with(expected):
+        return by_chars
+    ""
+
 fn _module_path_naming_text_index_of(value: text, needle: text) -> i64:
     if needle == "":
         return 0
-    val value_len = value.len()
-    val needle_len = needle.len()
+    val value_len = value.byte_len()
+    val needle_len = needle.byte_len()
     if needle_len > value_len:
         return -1
     var start = 0
@@ -95,7 +128,7 @@ fn _module_path_naming_strip_numbered_dirs(path: text) -> text:
     while part_index < parts.len():
         val part = parts[part_index]
         var prefix_len = 0
-        val part_len = part.len()
+        val part_len = part.byte_len()
         while part_index + 1 < parts.len() and prefix_len < part_len and prefix_len < 3:
             val code = part.char_code_at(prefix_len)
             if code < 48 or code > 57:
@@ -155,12 +188,12 @@ fn module_source_relative_path(path: text) -> text:
         mod_path = mod_path.substring(3)
     if mod_path.starts_with("./"):
         mod_path = mod_path.substring(2)
-    val absolute_src = _module_path_naming_text_index_of(mod_path, "/src/")
-    if absolute_src >= 0:
-        return mod_path.substring(absolute_src + 1)
-    val absolute_examples = _module_path_naming_text_index_of(mod_path, "/examples/")
-    if absolute_examples >= 0:
-        return mod_path.substring(absolute_examples + 1)
+    val after_src = _module_path_naming_suffix_after(mod_path, "/src/")
+    if after_src != "":
+        return after_src
+    val after_examples = _module_path_naming_suffix_after(mod_path, "/examples/")
+    if after_examples != "":
+        return after_examples
     mod_path
 
 fn module_relative_name_from_path(path: text, relative_name: text) -> text:
@@ -206,9 +239,9 @@ fn module_logical_name_from_path(path: text) -> text:
     # Stage 2 native currently miscompiles deletion replacement and can turn
     # the entire path into "". These are suffixes, so slice them explicitly.
     if mod_path.ends_with(".spl"):
-        mod_path = mod_path.substring(0, mod_path.len() - 4)
+        mod_path = mod_path.substring(0, mod_path.byte_len() - 4)
     elif mod_path.ends_with(".sdn"):
-        mod_path = mod_path.substring(0, mod_path.len() - 4)
+        mod_path = mod_path.substring(0, mod_path.byte_len() - 4)
     mod_path = _module_path_naming_strip_numbered_dirs(mod_path)
     var portable = ""
     # WORKAROUND: `for ch in <text>` yields a corrupted loop element in the
@@ -217,7 +250,7 @@ fn module_logical_name_from_path(path: text) -> text:
     # stage4 collision. Explicit char_code_at indexing decodes correctly
     # (see doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md).
     var _san_i = 0
-    val _san_n = mod_path.len()
+    val _san_n = mod_path.byte_len()
     while _san_i < _san_n:
         val _san_code = mod_path.char_code_at(_san_i)
         val keep = (_san_code >= 97 and _san_code <= 122) or (_san_code >= 65 and _san_code <= 90) or (_san_code >= 48 and _san_code <= 57) or _san_code == 95 or _san_code == 46 or _san_code == 47

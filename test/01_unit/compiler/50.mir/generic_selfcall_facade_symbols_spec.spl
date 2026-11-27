@@ -1,0 +1,145 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# waf-5 (B5): generic-class self-call bodies + facade-path method symbols
+
+Bugs: doc/08_tracking/bug/stage2_generic_selfcall_bodies_missing_2026-11-02.md
+(WA-BC-1 SimpleRing<i64,i64>, WA-BC-2 Future.poll) and the facade-path
+mangling of `SdnBackendImpl.process_module`.
+
+Lowers fixtures through pure-Simple HIR+MIR in-process (seed-hosted) and
+checks at symbol-name level that every MIR call target naming a method of
+the fixture classes has a MIR function with a body in the lowered module
+(or, for the facade case, equals the definer's emitted symbol).
+"""
+
+# @tag: unit, compiler, mir, generics, stage2
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lines(xs: [text]) -> text:
+    xs.join("\n") + "\n"
+
+fn lower_all(names: [text], srcs: [text]) -> [MirModule]:
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var asts: [Module] = []
+    var i = 0
+    while i < names.len():
+        val path = names[i].replace(".", "/") + ".spl"
+        val ast = parse_full_frontend(srcs[i], path, names[i], log)
+        modules[names[i]] = ast
+        sources.push(SourceFile(path: path, content: srcs[i], module_name: names[i]))
+        asts.push(ast)
+        i = i + 1
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hirs: [HirModule] = []
+    i = 0
+    while i < names.len():
+        var hl = hirlowering_for_module(names[i].replace(".", "/") + ".spl", surfaces)
+        hirs.push(hl.lower_module(asts[i]))
+        for e in hl.errors:
+            print "hir[" + names[i] + "]: " + e.message
+        i = i + 1
+    var pre: Dict<text, HirModule> = {}
+    i = 0
+    while i < names.len():
+        pre["m" + i.to_text()] = hirs[i]
+        i = i + 1
+    var out: [MirModule] = []
+    i = 0
+    while i < names.len():
+        var ml = MirLowering.new(hirs[i].symbols)
+        var j = 0
+        while j < names.len():
+            ml.prescan_module_struct_names(pre, "m" + j.to_text())
+            j = j + 1
+        out.push(ml.lower_module(hirs[i], hirs))
+        for e in ml.errors:
+            print "mir[" + names[i] + "]: " + e.message
+        i = i + 1
+    out
+
+fn defined_names(mods: [MirModule]) -> [text]:
+    var names: [text] = []
+    for m in mods:
+        for f in mir_module_functions_sorted(m):
+            if f.blocks.len() > 0:
+                names.push(f.name)
+    names
+
+fn call_targets(mods: [MirModule]) -> [text]:
+    var targets: [text] = []
+    for m in mods:
+        for f in mir_module_functions_sorted(m):
+            for b in f.blocks:
+                for inst in b.instructions:
+                    match inst.kind:
+                        case Call(_, func, _):
+                            match func.kind:
+                                case Const(value, _):
+                                    match value:
+                                        case Str(s):
+                                            targets.push(s)
+                                        case _:
+                                            pass
+                                case _:
+                                    pass
+                        case _:
+                            pass
+    targets
+
+fn missing_bodies(mods: [MirModule], marker: text) -> text:
+    """Call targets containing `marker` that have no defined MIR body."""
+    val defs = defined_names(mods)
+    print "defined: " + defs.join(", ")
+    var missing = ""
+    for t in call_targets(mods):
+        if t.contains(marker):
+            print "target: " + t
+            if not defs.contains(t):
+                missing = missing + t + ";"
+    print "missing: [" + missing + "]"
+    missing
+
+val RING_SRC = lines(["class Ring<K, V>:", "    head: i64", "    count: i64", "    static fn create(n: i64) -> Ring<K, V>:", "        Ring(head: n, count: 0)", "    fn _advance(by: i64) -> i64:", "        self.head + by", "    fn _slot(i: i64) -> i64:", "        self._advance(i) + 1", "    me push(k: K, v: V) -> i64:", "        self.count = self.count + 1", "        self._slot(self.count)", "", "fn main() -> i64:", "    var r = Ring<i64, i64>.create(3)", "    r.push(1, 2)"])
+
+val FUT_SRC = lines(["enum Poll<T>:", "    Ready(value: T)", "    Pending", "", "class Future<T>:", "    state: Poll<T>", "    static fn from_value(v: T) -> Future<T>:", "        Future(state: Poll.Ready(v))", "    fn poll() -> Poll<T>:", "        self.state", "", "class Writer:", "    pending: Future<i64>", "    fn close() -> Poll<i64>:", "        self.pending.poll()"])
+
+describe "B5 generic-class self-call bodies (WA-BC-1/2)":
+    it "every Ring method referenced from a Ring<i64,i64> instantiation has a body":
+        val mods = lower_all(["app.ring"], [RING_SRC])
+        expect(missing_bodies(mods, "Ring")).to_equal("")
+
+    it "Future.poll called through a Future<i64> field has a body":
+        val mods = lower_all(["app.fut"], [FUT_SRC])
+        expect(missing_bodies(mods, "poll")).to_equal("")
+
+val SDN_DEF = lines(["class SdnBackendImpl:", "    n: i64", "    static fn create() -> SdnBackendImpl:", "        SdnBackendImpl(n: 1)", "    fn process_module(x: i64) -> i64:", "        self.n + x"])
+val SDN_FACADE = lines(['use compiler.backend.backend.sdn.{SdnBackendImpl}', "export SdnBackendImpl"])
+val SDN_USER = lines(['use compiler.backend.sdn.{SdnBackendImpl}', "", "fn run() -> i64:", "    val b = SdnBackendImpl.create()", "    b.process_module(2)"])
+
+describe "B5 facade-path method mangling (SdnBackendImpl)":
+    it "a facade-imported impl method call targets the definer's symbol":
+        print "facade: start"
+        val mods = lower_all(["compiler.backend.backend.sdn", "compiler.backend.sdn", "compiler.driver.driver"], [SDN_DEF, SDN_FACADE, SDN_USER])
+        expect(missing_bodies(mods, "process_module")).to_equal("")
+        expect(missing_bodies(mods, "create")).to_equal("")
+
+    it "a facade-imported impl method call targets the definer's symbol (app paths)":
+        val facade = lines(['use app.defs.sdn.{SdnBackendImpl}', "export SdnBackendImpl"])
+        val user = lines(['use app.facade.{SdnBackendImpl}', "", "fn run() -> i64:", "    val b = SdnBackendImpl.create()", "    b.process_module(2)"])
+        val mods = lower_all(["app.defs.sdn", "app.facade", "app.user"], [SDN_DEF, facade, user])
+        expect(missing_bodies(mods, "process_module")).to_equal("")
+        expect(missing_bodies(mods, "create")).to_equal("")

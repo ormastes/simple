@@ -1,0 +1,127 @@
+"""
+## Purpose and audience
+Purpose: Pin that the CPU layout execution port carries the per-line text
+insets through its line boxes and back. The port used to read
+`LayoutResult.first_line_dx` raw; when a float-shortened run needed an inset
+on more than line 0 the port either lost it or (with a packed encoding) put
+line 0 tens of thousands of pixels left of its box. The port now uses the one
+decode the painters use (`text_line_box_dx` / `text_line_box_w`) through
+`browser_cpu_line_box`, and `browser_cpu_line_insets_from_boxes` recovers
+both inset forms.
+Audience: browser-engine layout-manager and paint maintainers.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-CPU-PORT-LINE-BOXES-001 — line boxes emitted by the CPU execution port round-trip the mid-line and float-shortened text insets.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/gpu_web/layout/cpu_execution_port.spl 1%
+use std.spec.*
+use std.common.structural.layout.{LayoutBox, LayoutLineBox, layout_box, layout_line_box}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    HNode, LayoutResult, layout_selected, parse_html, build_child_index,
+    extract_css_vw, compute_styles, text_line_box_dx, text_line_box_w
+}
+use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.cpu_execution_port.{
+    BrowserCpuLineInsets, browser_cpu_line_box, browser_cpu_line_insets_from_boxes
+}
+
+val W: i32 = 400
+val H: i32 = 300
+val LH: i64 = 24
+val STYLE: text = "<style>body{margin:0;font:16px/24px sans-serif}</style>"
+val FLOATED: text = STYLE + "<div id=\"w\" style=\"width:200px\"><div style=\"float:left;width:60px;height:30px\"></div>mmmmmmmm nnnnnnnnnnnn oooooooooooo pppppppppppp</div>"
+val MIDLINE: text = STYLE + "<p id=\"w\" style=\"width:300px;margin:0\"><b>Bold</b> some long text that wraps onto a second line here and then more</p>"
+
+fn full_layout(html: text) -> LayoutResult:
+    val nodes = parse_html(html)
+    val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, extract_css_vw(html, W, false), child_index, false, true)
+    layout_selected(nodes, styles, child_index, [1], W, H, LayoutResult(bx: [], by: [], bw: [], bh: [], wrap_starts: [], wrap_ends: [], intrinsic_widths: [], height: 0)).layout
+
+# Index of the first `#text` node whose text contains `needle`.
+fn text_node(html: text, needle: text) -> i32:
+    val nodes = parse_html(html)
+    var i = 0
+    while i < nodes.len():
+        if nodes[i].tag == "#text" and nodes[i].text_trimmed.contains(needle):
+            return i as i32
+        i = i + 1
+    -1
+
+# The line boxes the port emits for node `index`.
+fn port_lines(layout: LayoutResult, index: i32) -> [LayoutLineBox]:
+    val id = (index + 1) as i64
+    val box = layout_box(id, layout.bx[index] as i64, layout.by[index] as i64, layout.bw[index] as i64, layout.bh[index] as i64)
+    var lines: [LayoutLineBox] = []
+    var k: i64 = 0
+    while k < layout.wrap_starts[index].len():
+        lines.push(layout_line_box(id, k, browser_cpu_line_box(layout, id, k, box, LH), layout.wrap_starts[index][k] as i64, layout.wrap_ends[index][k] as i64))
+        k = k + 1
+    lines
+
+# Number of lines whose (dx, width) differ after the round trip.
+fn round_trip_differences(html: text, needle: text) -> i32:
+    val layout = full_layout(html)
+    val index = text_node(html, needle)
+    val lines = port_lines(layout, index)
+    val insets = browser_cpu_line_insets_from_boxes(layout.bx.len() as i32, layout.bx, layout.bw, lines)
+    var differences = 0
+    var k = 0
+    while k < lines.len():
+        val dx_in = text_line_box_dx(layout.first_line_dx, layout.line_boxes, index, k)
+        val dx_out = text_line_box_dx(insets.first_line_dx, insets.line_boxes, index, k)
+        val w_in = text_line_box_w(layout.first_line_dx, layout.line_boxes, index, k, layout.bw[index])
+        val w_out = text_line_box_w(insets.first_line_dx, insets.line_boxes, index, k, layout.bw[index])
+        if dx_in != dx_out or w_in != w_out:
+            differences = differences + 1
+        k = k + 1
+    differences
+
+describe "the CPU execution port carries per-line text insets":
+    it "AC-1: a float-shortened run emits line boxes inside its box, inset on the shortened lines only":
+        step("200 px block, 60x30 left float, four one-word lines: lines 0-1 start 60 px in and are 140 wide, lines 2-3 span the box")
+        val layout = full_layout(FLOATED)
+        val index = text_node(FLOATED, "mmmmmmmm")
+        val lines = port_lines(layout, index)
+        expect(lines.len()).to_equal(4)
+        expect(lines[0].box.x).to_equal(60)
+        expect(lines[0].box.width).to_equal(140)
+        expect(lines[1].box.x).to_equal(60)
+        expect(lines[1].box.width).to_equal(140)
+        expect(lines[2].box.x).to_equal(0)
+        expect(lines[2].box.width).to_equal(200)
+        expect(lines[3].box.x).to_equal(0)
+        expect(lines[3].box.y - lines[0].box.y).to_equal(72)
+
+    it "AC-2: the float-shortened insets survive the round trip through line boxes":
+        step("reconstruct must give back the same (dx, width) for every line")
+        expect(round_trip_differences(FLOATED, "mmmmmmmm")).to_equal(0)
+        val layout = full_layout(FLOATED)
+        val index = text_node(FLOATED, "mmmmmmmm")
+        val insets = browser_cpu_line_insets_from_boxes(layout.bx.len() as i32, layout.bx, layout.bw, port_lines(layout, index))
+        expect(text_line_box_dx(insets.first_line_dx, insets.line_boxes, index, 1)).to_equal(60)
+        expect(text_line_box_dx(insets.first_line_dx, insets.line_boxes, index, 2)).to_equal(0)
+        expect(insets.first_line_dx.len()).to_equal(0)
+
+    it "AC-3: a mid-line run still round-trips as a first-line inset":
+        step("`<b>Bold</b> text…`: only line 0 is inset; reconstruct recovers it as first_line_dx, not as line boxes")
+        expect(round_trip_differences(MIDLINE, "some long text")).to_equal(0)
+        val layout = full_layout(MIDLINE)
+        val index = text_node(MIDLINE, "some long text")
+        val lines = port_lines(layout, index)
+        expect(lines[0].box.x).to_be_greater_than(layout.bx[index] as i64)
+        expect(lines[1].box.x).to_equal(layout.bx[index] as i64)
+        val insets = browser_cpu_line_insets_from_boxes(layout.bx.len() as i32, layout.bx, layout.bw, lines)
+        expect(insets.line_boxes.len()).to_equal(0)
+        expect(text_line_box_dx(insets.first_line_dx, insets.line_boxes, index, 0)).to_be_greater_than(0)
+
+    it "AC-4: control — a plain wrapped run needs neither table":
+        step("no float, no inline sibling: every line box is the node box, both tables stay empty")
+        val plain = STYLE + "<div style=\"width:200px\">mmmmmmmm nnnnnnnnnnnn oooooooooooo</div>"
+        val layout = full_layout(plain)
+        val index = text_node(plain, "mmmmmmmm")
+        val lines = port_lines(layout, index)
+        val insets = browser_cpu_line_insets_from_boxes(layout.bx.len() as i32, layout.bx, layout.bw, lines)
+        expect(lines[0].box.x).to_equal(0)
+        expect(insets.first_line_dx.len()).to_equal(0)
+        expect(insets.line_boxes.len()).to_equal(0)

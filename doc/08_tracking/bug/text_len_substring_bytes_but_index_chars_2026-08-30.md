@@ -80,3 +80,9 @@ existing code across the tree. This needs an owner's decision.
 `redact.spl` should be made safe on its own (bound its scans by the same unit
 it indexes in) so that a subprocess's non-ASCII stderr cannot crash caret,
 independently of how the language question is settled.
+
+## Resolved-duplicate (2026-11-03)
+This is folded into ADR-005 (doc/04_architecture/adr/ADR-005-text-index-yields-char.md):
+`len()` moves to code points, held until phase 3, and `byte_len()` /
+`char_count()` are the explicit forms. Tracked by
+`text_len_codepoint_switch_2026-11-03`.

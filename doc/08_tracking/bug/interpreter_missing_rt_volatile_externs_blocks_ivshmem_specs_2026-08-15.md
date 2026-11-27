@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-15
-**Status:** OPEN
+**Status:** SUPERSEDED (2026-11-11, lane int9) — fixed on origin/release/1.0.0 by `9e7e7a526edb` (PR #7597); see addenda below
 **Severity:** P3 — coverage/testability gap: host-gpu ivshmem code paths
 cannot be exercised by any spec on the tree-walk interpreter
 
@@ -30,3 +30,59 @@ Register interpreter handlers for the rt_volatile_* family (plain loads/
 stores suffice for hosted mock regions), then extend the executor spec's
 host-gpu waves.
 
+
+## Addendum 2026-11-11 (lane interp6) — SUPERSEDED
+
+**Verdict: SUPERSEDED — fixed on origin/release/1.0.0.**
+
+The tree-walk interpreter now registers the complete volatile family:
+handlers live in `src/compiler_rust/compiler/src/interpreter_extern/memory.rs`
+(`rt_volatile_read_u{8,16,32,64}`, `rt_volatile_write_u{8,16,32,64}` plus
+`rt_memory_barrier` / `rt_load_barrier` / `rt_store_barrier`) and are wired
+into the interpreter extern table at
+`src/compiler_rust/compiler/src/interpreter_extern/mod.rs:2167-2181`, in a
+block whose comment cites this bug doc.
+
+Fixing commit: `9e7e7a526edb43ab29171d920449367e5fd48127` (2026-11-07,
+squash-merge of PR #7597) — the pickaxe
+`git log -S 'insert_simple!("rt_volatile_read_u8"'` names it as the commit
+that introduced the registration, and `git show` confirms the mod.rs hunk.
+
+**Seed-smoke verification (refreshed seed, build-commit 0791c2b7f4a7):**
+scratch probe `build/p3fix-interp6/rt_volatile_seed_smoke_spec.spl` (build/,
+gitignored, never committed) round-trips u8/u16/u32/u64 volatile writes and
+reads plus all three barriers over an `rt_alloc`'d region:
+
+```
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe $PWD/bin/simple.exe test \
+  build/p3fix-interp6/rt_volatile_seed_smoke_spec.spl --mode=interpreter --no-cache
+SPEC FILE VERDICT ... outcome=OK declared>=1 executed=1 passed=1 failed=0
+Results: 1 total, 1 passed, 0 failed
+```
+
+Before the fix every one of those calls aborted with
+`semantic: unknown extern function`; they now resolve and round-trip.
+
+Residual (not this bug): the executor spec docstring at
+`test/01_unit/os/compositor/wm_frame_executor_branch_coverage_spec.spl:28-32`
+still lists the host-gpu ivshmem lanes as a headless ceiling and the spec's
+host-gpu waves have not been extended — the "Unblock" follow-up work. That is
+a spec-extension task; the interpreter extern gap itself is closed.
+
+
+## Addendum 2026-11-11 (lane int9) — header flip; int9-firsthand seed-smoke confirms interp6 verdict
+
+Header Status flipped OPEN -> SUPERSEDED. Absorber unchanged:
+`9e7e7a526edb43ab29171d920449367e5fd48127` (2026-11-07, squash-merge of
+PR #7597), handlers in
+`src/compiler_rust/compiler/src/interpreter_extern/memory.rs`, wired at
+`src/compiler_rust/compiler/src/interpreter_extern/mod.rs:2167-2181`
+(ancestor of HEAD `9f3df4c125ad`; confirmed in tree).
+
+int9 re-verified on this lane's own tracked seed (`bin/simple.exe`,
+build-commit `46fe8f6b6def`, `--mode=interpreter --no-cache`), scratch spec
+`build/p3fix-int9/int9_seed_smoke_spec.spl` (build/, gitignored): u8/u16/u32/u64
+volatile write+read round-trips plus `rt_memory_barrier` / `rt_load_barrier` /
+`rt_store_barrier` over an `rt_byte_array_new` buffer addressed via
+`rt_array_data_ptr` — 4/4 examples PASS (volatile example green; the other
+three examples cover rows flipped in the sibling bug docs listed there).

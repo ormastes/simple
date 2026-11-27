@@ -57,3 +57,11 @@ pub(crate) fn rt_math_binary(method: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+
+/// Integer predicate methods (`is_even`, `is_odd`, `is_zero`, `is_positive`,
+/// `is_negative`) lowered inline by `codegen/instr/methods.rs`; mirrors the
+/// interpreter's `handle_int_methods`. Shared with HIR so the BOOL return-type
+/// stamp and the codegen arm cannot drift apart.
+pub(crate) fn is_int_predicate(method: &str) -> bool {
+    matches!(method, "is_even" | "is_odd" | "is_zero" | "is_positive" | "is_negative")
+}

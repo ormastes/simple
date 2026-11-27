@@ -1,0 +1,113 @@
+# Cycle-free settlement evidence. No capacity owner, helper lease, handle or ACK
+# decoder. Persisted data is re-correlated with actual canonical broker proof.
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.*
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.container.stream_v2.{container_output_plan_digest_v2}
+use std.common.build_manager.group_process_stream_protocol_v2.{group_process_stream_template_digest_v3, group_process_stream_launch_encode_profiled_v3, group_process_stream_launch_decode_profiled_v3}
+use std.common.build_manager.grouped_execution_contract.{GroupedActionLeaseV1}
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_owner_validate_v2, group_process_stream_recover_v2, group_process_stream_cleanup_proof_v2, group_process_stream_collect_reap_v2}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_exists}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub fn host_helper_stream_native_match_v1(context: HostHelperStreamContextV1,
+        native: GroupProcessStreamOwnerV2) -> Result<(), text>:
+    val invalid = group_process_stream_owner_validate_v2(native)
+    if invalid != "": return Err(invalid)
+    val template = context.consumed.output_plan.launch_template
+    if (group_process_stream_template_digest_v3(native.launch)? != group_process_stream_template_digest_v3(template)? or
+            native.launch.request.launch_deadline_unix_ms != context.consumed.deadline_unix_ms or
+            native.launch.transport_generation <= 0 or native.launch.worker_id != context.request.operation.id or
+            native.launch.generation != context.request.plan.scope.provider_generation):
+        return Err("helper-stream-native-template-mismatch")
+    Ok(())
+
+pub fn host_helper_stream_native_store_v1(root: text, operation: OperationEnvelopeV2,
+        native: GroupProcessStreamOwnerV2) -> Result<(), text>:
+    val context = host_helper_stream_context_v1(root, operation)?
+    host_helper_stream_native_store_context_v1(root, operation, context, native)
+
+fn host_helper_stream_native_store_context_v1(root: text, operation: OperationEnvelopeV2,
+        context: HostHelperStreamContextV1, native: GroupProcessStreamOwnerV2) -> Result<(), text>:
+    host_helper_stream_native_match_v1(context, native)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-helper-stream-native"),
+        "operationDigest": SdnValue.String(context.consumed.operation_digest),
+        "consumptionDigest": SdnValue.String(sha256_text(host_helper_stream_consumed_encode_v1(context.consumed)?)),
+        "identityDigest": SdnValue.String(native.identity_digest),
+        "launch": SdnValue.String(group_process_stream_launch_encode_profiled_v3(native.launch))}
+    host_helper_stream_publish_v1(root, operation.id, "native", sdn_encode_canonical(SdnValue.Dict(fields)) + "\n", false)
+
+pub fn host_helper_stream_native_load_v1(root: text, operation: OperationEnvelopeV2) -> Result<GroupProcessStreamOwnerV2, text>:
+    host_helper_stream_native_load_context_v1(root, operation, host_helper_stream_context_v1(root, operation)?)
+
+pub fn host_helper_stream_native_load_context_v1(root: text, operation: OperationEnvelopeV2,
+        context: HostHelperStreamContextV1) -> Result<GroupProcessStreamOwnerV2, text>:
+    val path = host_helper_stream_path_v1(root, operation.id, "native")
+    val source = file_read_regular_no_follow_bounded(path, 8388608)?
+    val fields = host_helper_stream_fields_v1(source, "host-helper-stream-native",
+        ["version", "kind", "operationDigest", "consumptionDigest", "identityDigest", "launch"])?
+    if (host_helper_stream_text_v1(fields, "operationDigest")? != context.consumed.operation_digest or
+            host_helper_stream_text_v1(fields, "consumptionDigest")? != sha256_text(host_helper_stream_consumed_encode_v1(context.consumed)?)):
+        return Err("helper-stream-native-consumption-mismatch")
+    val launch_bytes = host_helper_stream_text_v1(fields, "launch")?
+    val launch = group_process_stream_launch_decode_profiled_v3(launch_bytes)?
+    val native = group_process_stream_recover_v2(launch.root, host_helper_stream_text_v1(fields, "identityDigest")?)?
+    if group_process_stream_launch_encode_profiled_v3(native.launch) != launch_bytes:
+        return Err("helper-stream-native-retained-launch-mismatch")
+    host_helper_stream_native_match_v1(context, native)?
+    Ok(native)
+
+# Explicit metadata recovery only. The read-only evidence validator never
+# repairs archives. Exclusive publication refuses dangling/partial entries.
+pub fn host_helper_stream_native_recover_v1(root: text, operation: OperationEnvelopeV2) -> Result<GroupProcessStreamOwnerV2, text>:
+    val context = host_helper_stream_context_v1(root, operation)?
+    val path = host_helper_stream_path_v1(root, operation.id, "native")
+    if file_exists(path): return host_helper_stream_native_load_context_v1(root, operation, context)
+    val claimed_root = context.consumed.output_plan.launch_template.root
+    val identity = file_read_regular_no_follow_bounded(claimed_root + "/broker.claim", 128)?
+    val native = group_process_stream_recover_v2(claimed_root, identity)?
+    host_helper_stream_native_match_v1(context, native)?
+    host_helper_stream_native_store_context_v1(root, operation, context, native)?
+    host_helper_stream_native_load_context_v1(root, operation, context)
+
+pub fn host_helper_stream_grouped_lease_v1(context: HostHelperStreamContextV1,
+        native: GroupProcessStreamOwnerV2) -> Result<GroupedActionLeaseV1, text>:
+    host_helper_stream_native_match_v1(context, native)?
+    # This constructor is reachable only with actual canonical cleanup proof.
+    val proof = group_process_stream_cleanup_proof_v2(native)?
+    if proof == "": return Err("helper-stream-cleanup-proof-empty")
+    val template = context.consumed.output_plan.launch_template
+    Ok(GroupedActionLeaseV1(group_id: context.request.plan.parent_operation_id,
+        action_id: context.request.operation.id, worker_id: context.request.operation.id,
+        generation: context.request.plan.scope.provider_generation,
+        lease_id: context.admission.receipt.receipt_digest,
+        snapshot_digest: template.snapshot_digest, cache_identity: template.cache_identity, completed: true))
+
+# Returns the exact prospective outcome only after validating an already stored
+# canonical reap. It does not create missing reap evidence or retire native FDs.
+pub fn host_helper_settlement_expected_v1(root: text, operation: OperationEnvelopeV2) -> Result<text, text>:
+    val context = host_helper_stream_context_v1(root, operation)?
+    val native = host_helper_stream_native_load_context_v1(root, operation, context)?
+    host_helper_settlement_expected_context_v1(root, operation, context, native)
+
+pub fn host_helper_settlement_expected_context_v1(root: text, operation: OperationEnvelopeV2,
+        context: HostHelperStreamContextV1, native: GroupProcessStreamOwnerV2) -> Result<text, text>:
+    val lease = host_helper_stream_grouped_lease_v1(context, native)?
+    val stored = file_read_regular_no_follow_bounded(native.launch.root + "/tree-reaped.sdn", 16384)?
+    val reap = group_process_stream_collect_reap_v2(native, lease)?
+    if sha256_text(stored) != reap.tree_receipt_digest: return Err("helper-stream-reap-digest-mismatch")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-helper-stream-settlement"),
+        "operationId": SdnValue.String(operation.id), "operationDigest": SdnValue.String(sha256_text(distributed_encode_operation_v2(operation)?)),
+        "requestDigest": SdnValue.String(container_output_plan_digest_v2(context.consumed.output_plan)?),
+        "preparedReceiptDigest": SdnValue.String(context.consumed.prepared_receipt_digest),
+        "consumptionDigest": SdnValue.String(sha256_text(host_helper_stream_consumed_encode_v1(context.consumed)?)),
+        "nativeIdentityDigest": SdnValue.String(native.identity_digest), "treeReceiptDigest": SdnValue.String(reap.tree_receipt_digest)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn host_helper_settlement_evidence_v1(root: text, original_operation: OperationEnvelopeV2) -> Result<text, text>:
+    val expected = host_helper_settlement_expected_v1(root, original_operation)?
+    val actual = file_read_regular_no_follow_bounded(host_helper_stream_path_v1(root, original_operation.id, "settlement"), 8388608)?
+    if actual != expected: return Err("helper-stream-settlement-retained-mismatch")
+    Ok(expected)

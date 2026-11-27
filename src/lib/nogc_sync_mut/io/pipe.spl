@@ -45,7 +45,7 @@ err.write_text("error: something failed\\n")?
 
 use std.io.traits.{Read, Write}
 use std.io.types.{IoError, IoErrorKind}
-use std.nogc_sync_mut.io.byte_append.{io_append_chunk}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 
 # ============================================================================
 # Stdin - Standard Input
@@ -77,8 +77,9 @@ class Stdin with Read:
         while remaining > 0:
             val chunk = rt_stdin_read(remaining)
             if chunk.len() == 0:
-                return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "stdin: unexpected eof", source: nil))
-            val _copied = io_append_chunk(buf, chunk)
+                return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "stdin: unexpected eof", source: None))
+            for b in chunk:
+                buf.push(b)
             remaining = remaining - chunk.len()
         Ok(buf)
 
@@ -90,13 +91,15 @@ class Stdin with Read:
     fn read_text() -> Result<text, IoError>:
         """Read all stdin as text."""
         val data = self.read_all()?
-        Ok(bytes_to_text(data))
+        match bytes_to_text_checked(data):
+            case Ok(t): Ok(t)
+            case Err(_): Err(IoError(kind: IoErrorKind.InvalidData, message: "stdin: invalid UTF-8", source: None))
 
     fn read_line() -> Result<text, IoError>:
         """Read a single line from stdin."""
         val line = rt_stdin_read_line()
         if line == nil:
-            return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "stdin: eof", source: nil))
+            return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "stdin: eof", source: None))
         Ok(line)
 
 # ============================================================================
@@ -158,8 +161,10 @@ class Stderr with Write:
 
     fn write(data: [u8]) -> Result<i64, IoError>:
         """Write bytes to stderr."""
-        val written = rt_stderr_write(data)
-        Ok(written)
+        # The rt_stderr_write declaration has no result (the interpreter
+        # handler returns nil), so report the length handed to it.
+        rt_stderr_write(data)
+        Ok(data.len())
 
     fn write_all(data: [u8]) -> Result<(), IoError>:
         """Write all bytes to stderr."""
@@ -185,11 +190,10 @@ extern fn rt_stdin_read_all() -> [u8]
 extern fn rt_stdin_read_line() -> text?
 extern fn rt_stdout_write(data: [u8]) -> i64
 extern fn rt_stdout_flush()
-extern fn rt_stderr_write(data: [u8]) -> i64
+extern fn rt_stderr_write(data: [u8])
 extern fn rt_stderr_flush()
 extern fn rt_term_write(data: text) -> i64
 extern fn rt_term_flush() -> i32
-use std.common.string_core.{bytes_to_text}
 use std.common.string_core.{text_to_bytes}
 
 # Bare flush wrappers so other product/lib files stop declaring their own

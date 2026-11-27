@@ -1,0 +1,315 @@
+# Windows advapi32 security boundary for the contained-identity lane (Win64).
+# Pointer and HANDLE slots are i64, DWORD/BOOL are u32/i32, exactly as the seed
+# registers them. Heap and pointer helpers come from windows_process_owner_abi.
+# Only 64-bit targets are declared: the TOKEN/ACL layouts below are 64-bit
+# layouts, so a 32-bit build refuses at the callers (sec_is_win64_v1), never
+# mis-reads memory.
+use std.nogc_sync_mut.io.windows_process_owner_abi.{windows_abi_get_process_heap, windows_abi_heap_alloc, windows_abi_heap_free, windows_abi_read_ptr, windows_abi_write_ptr, windows_abi_pointer_bits}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{CloseHandle, WaitForSingleObject, GetExitCodeProcess, TerminateProcess}
+use std.nogc_sync_mut.io.windows_process_text.windows_process_wide_linear_v1
+use std.common.char_from_code_pure.{char_from_code}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32, volatile_write_u8, volatile_write_u16, volatile_write_u32}
+
+@abi("system")
+@unsafe(reason: "Win64 pseudo handle of the calling process", capabilities: [ffi])
+extern fn GetCurrentProcess() -> i64
+@abi("system")
+@unsafe(reason: "Win64 primary token of the calling process", capabilities: [ffi, raw_ptr])
+extern fn OpenProcessToken(process: i64, access: u32, token_out: i64) -> i32
+@abi("system")
+@unsafe(reason: "Win64 bounded token query into an owned buffer", capabilities: [ffi, raw_ptr])
+extern fn GetTokenInformation(token: i64, kind: i32, buffer: i64, length: u32, returned: i64) -> i32
+@abi("system")
+@unsafe(reason: "Win64 integrity level and default DACL of an owned token", capabilities: [ffi, raw_ptr])
+extern fn SetTokenInformation(token: i64, kind: i32, buffer: i64, length: u32) -> i32
+@abi("system")
+@unsafe(reason: "Win64 restricted copy of the caller own token", capabilities: [ffi, raw_ptr])
+extern fn CreateRestrictedToken(existing: i64, flags: u32, disable_count: u32, disable: i64, delete_count: u32, delete: i64, restrict_count: u32, restrict: i64, new_token: i64) -> i32
+@abi("system")
+@unsafe(reason: "Win64 SID text to owned SID", capabilities: [ffi, raw_ptr])
+extern fn ConvertStringSidToSidW(text_sid: i64, sid_out: i64) -> i32
+@abi("system")
+@unsafe(reason: "Win64 SID comparison", capabilities: [ffi, raw_ptr])
+extern fn EqualSid(left: i64, right: i64) -> i32
+@abi("system")
+@unsafe(reason: "Win64 SID byte length", capabilities: [ffi, raw_ptr])
+extern fn GetLengthSid(sid: i64) -> u32
+@abi("system")
+@unsafe(reason: "Win64 SID to owned SDDL text", capabilities: [ffi, raw_ptr])
+extern fn ConvertSidToStringSidW(sid: i64, text_out: i64) -> i32
+@abi("system")
+@unsafe(reason: "Win64 release of an OS-allocated security object", capabilities: [ffi, raw_ptr])
+extern fn LocalFree(allocation: i64) -> i64
+@abi("system")
+@unsafe(reason: "Win64 merge of explicit access entries into an ACL", capabilities: [ffi, raw_ptr])
+extern fn SetEntriesInAclW(count: u32, entries: i64, old_acl: i64, new_acl: i64) -> u32
+@abi("system")
+@unsafe(reason: "Win64 read of an object DACL", capabilities: [ffi, raw_ptr])
+extern fn GetNamedSecurityInfoW(name: i64, kind: i32, info: u32, owner: i64, group: i64, dacl: i64, sacl: i64, descriptor: i64) -> u32
+@abi("system")
+@unsafe(reason: "Win64 DACL and mandatory label write on an owned directory", capabilities: [ffi, raw_ptr])
+extern fn SetNamedSecurityInfoW(name: i64, kind: i32, info: u32, owner: i64, group: i64, dacl: i64, sacl: i64) -> u32
+@abi("system")
+@unsafe(reason: "Win64 child creation under an owned restricted token", capabilities: [ffi, raw_ptr])
+extern fn CreateProcessAsUserW(token: i64, application: i64, command_line: i64, process_security: i64, thread_security: i64, inherit_handles: i32, flags: u32, environment: i64, directory: i64, startup_info: i64, process_info: i64) -> i32
+
+pub const SEC_LOW_INTEGRITY_RID_V1 = 4096
+
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_is_win64_v1() -> bool:
+    windows_abi_pointer_bits() == 64
+
+# Zero-filled allocation; 0 on failure.
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_alloc_v1(size: i64) -> i64:
+    windows_abi_heap_alloc(windows_abi_get_process_heap(), size)
+
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_free_v1(allocation: i64):
+    if allocation != 0:
+        val _r = windows_abi_heap_free(windows_abi_get_process_heap(), allocation)
+
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_local_free_v1(allocation: i64):
+    if allocation != 0:
+        val _r = LocalFree(allocation)
+
+# True only when a live handle was closed; a stale or zero handle answers false.
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_close_handle_v1(handle: i64) -> bool:
+    if handle <= 0: return false
+    CloseHandle(handle) != 0
+
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_read_ptr_v1(addr: i64) -> i64:
+    windows_abi_read_ptr(addr)
+
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_write_ptr_v1(addr: i64, value: i64):
+    windows_abi_write_ptr(addr, value)
+
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_u8_v1(addr: i64) -> i64:
+    volatile_read_u8(addr)
+
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_u16_v1(addr: i64) -> i64:
+    volatile_read_u16(addr)
+
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_u32_v1(addr: i64) -> i64:
+    volatile_read_u32(addr)
+
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_put_u8_v1(addr: i64, value: i64):
+    volatile_write_u8(addr, value)
+
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_put_u16_v1(addr: i64, value: i64):
+    volatile_write_u16(addr, value)
+
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_put_u32_v1(addr: i64, value: i64):
+    volatile_write_u32(addr, value)
+
+# Owned UTF-16 copy of text (caller sec_free_v1); 0 on failure.
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_wide_v1(value: text) -> i64:
+    windows_process_wide_linear_v1(windows_abi_get_process_heap(), value)
+
+# Owned SID for an SDDL SID string (caller sec_local_free_v1); 0 on failure.
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_sid_from_text_v1(sid_text: text) -> i64:
+    val wide = sec_wide_v1(sid_text)
+    if wide == 0: return 0
+    val slot = sec_alloc_v1(8)
+    if slot == 0:
+        sec_free_v1(wide)
+        return 0
+    var sid = 0
+    if ConvertStringSidToSidW(wide, slot) != 0:
+        sid = windows_abi_read_ptr(slot)
+    sec_free_v1(slot)
+    sec_free_v1(wide)
+    sid
+
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_sid_len_v1(sid: i64) -> i64:
+    GetLengthSid(sid) as i64
+
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_sid_equal_v1(left: i64, right: i64) -> bool:
+    EqualSid(left, right) != 0
+
+# Calling-process token with duplicate/query/assign-primary/adjust-default; 0 on failure.
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_open_process_token_v1() -> i64:
+    val slot = sec_alloc_v1(8)
+    if slot == 0: return 0
+    var token = 0
+    if OpenProcessToken(GetCurrentProcess(), 0x8Bu32, slot) != 0:
+        token = windows_abi_read_ptr(slot)
+    sec_free_v1(slot)
+    token
+
+# Owned buffer holding GetTokenInformation(kind); 0 on failure (caller sec_free_v1).
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_token_info_v1(token: i64, kind: i64) -> i64:
+    val ret = sec_alloc_v1(8)
+    if ret == 0: return 0
+    val probe = GetTokenInformation(token, kind as i32, 0, 0u32, ret)
+    val need = volatile_read_u32(ret)
+    if probe != 0 or need <= 0 or need > 65536:
+        sec_free_v1(ret)
+        return 0
+    val buffer = sec_alloc_v1(need)
+    if buffer == 0:
+        sec_free_v1(ret)
+        return 0
+    if GetTokenInformation(token, kind as i32, buffer, need as u32, ret) == 0:
+        sec_free_v1(buffer)
+        sec_free_v1(ret)
+        return 0
+    sec_free_v1(ret)
+    buffer
+
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_set_token_info_v1(token: i64, kind: i64, buffer: i64, length: i64) -> bool:
+    SetTokenInformation(token, kind as i32, buffer, length as u32) != 0
+
+# restrict = array of SID_AND_ATTRIBUTES (16 bytes each); returns the new primary token or 0.
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_create_restricted_v1(token: i64, restrict_count: i64, restrict: i64) -> i64:
+    val slot = sec_alloc_v1(8)
+    if slot == 0: return 0
+    var result = 0
+    if CreateRestrictedToken(token, 1u32, 0u32, 0, 0u32, 0, restrict_count as u32, restrict, slot) != 0:
+        result = windows_abi_read_ptr(slot)
+    sec_free_v1(slot)
+    result
+
+# Merge access entries (EXPLICIT_ACCESS_W, 48 bytes each) into old_acl; result freed by sec_local_free_v1.
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_set_entries_v1(count: i64, entries: i64, old_acl: i64) -> i64:
+    val slot = sec_alloc_v1(8)
+    if slot == 0: return 0
+    var acl = 0
+    if SetEntriesInAclW(count as u32, entries, old_acl, slot) == 0:
+        acl = windows_abi_read_ptr(slot)
+    sec_free_v1(slot)
+    acl
+
+# Reads the DACL of a path. Returns the security descriptor (sec_local_free_v1) and writes the
+# DACL pointer (it lives inside the descriptor) to dacl_out; 0 on failure.
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_get_dacl_v1(path: text, dacl_out: i64) -> i64:
+    val wide = sec_wide_v1(path)
+    if wide == 0: return 0
+    val sd_slot = sec_alloc_v1(8)
+    if sd_slot == 0:
+        sec_free_v1(wide)
+        return 0
+    var sd = 0
+    if GetNamedSecurityInfoW(wide, 1, 4u32, 0, 0, dacl_out, 0, sd_slot) == 0:
+        sd = windows_abi_read_ptr(sd_slot)
+    sec_free_v1(sd_slot)
+    sec_free_v1(wide)
+    sd
+
+# DACL (0x4) and mandatory label (0x10) written together.
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_set_dacl_label_v1(path: text, dacl: i64, sacl: i64) -> bool:
+    val wide = sec_wide_v1(path)
+    if wide == 0: return false
+    val status = SetNamedSecurityInfoW(wide, 1, 0x14u32, 0, 0, dacl, sacl)
+    sec_free_v1(wide)
+    status == 0
+
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_set_dacl_v1(path: text, dacl: i64) -> bool:
+    val wide = sec_wide_v1(path)
+    if wide == 0: return false
+    val status = SetNamedSecurityInfoW(wide, 1, 4u32, 0, 0, dacl, 0)
+    sec_free_v1(wide)
+    status == 0
+
+# Runs command_line as the token in directory, waits, returns the exit code, -1 when it could
+# not start, -2 on timeout (the child is terminated). No job, no handle list: smoke and canary use.
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_run_as_token_v1(token: i64, command_line: text, directory: text, wait_ms: i64) -> i64:
+    val cmd = sec_wide_v1(command_line)
+    val dir = sec_wide_v1(directory)
+    val si = sec_alloc_v1(104)
+    val pi = sec_alloc_v1(24)
+    var code = -1
+    if cmd != 0 and dir != 0 and si != 0 and pi != 0:
+        volatile_write_u32(si, 104)
+        if CreateProcessAsUserW(token, 0, cmd, 0, 0, 0, 0x08000000u32, 0, dir, si, pi) != 0:
+            val process = windows_abi_read_ptr(pi)
+            val thread = windows_abi_read_ptr(pi + 8)
+            val waited = WaitForSingleObject(process, wait_ms as u32)
+            if waited == 0:
+                val out = sec_alloc_v1(8)
+                if out != 0:
+                    if GetExitCodeProcess(process, out) != 0:
+                        code = volatile_read_u32(out)
+                    sec_free_v1(out)
+            else:
+                code = -2
+                val _t = TerminateProcess(process, 1u32)
+            val _a = sec_close_handle_v1(thread)
+            val _b = sec_close_handle_v1(process)
+    sec_free_v1(pi)
+    sec_free_v1(si)
+    sec_free_v1(dir)
+    sec_free_v1(cmd)
+    code
+
+# Fills EXPLICIT_ACCESS_W slot `index` (48 bytes) in `entries`: GRANT of `mask` to `sid`.
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_access_entry_v1(entries: i64, index: i64, mask: i64, inheritance: i64, sid: i64):
+    val slot = entries + index * 48
+    volatile_write_u32(slot, mask)
+    volatile_write_u32(slot + 4, 1)
+    volatile_write_u32(slot + 8, inheritance)
+    volatile_write_u32(slot + 28, 0)
+    windows_abi_write_ptr(slot + 40, sid)
+
+# Integrity RID of the mandatory label on a path (first label ACE of the SACL); -1 when none.
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_label_rid_v1(path: text) -> i64:
+    val wide = sec_wide_v1(path)
+    if wide == 0: return -1
+    val slots = sec_alloc_v1(16)
+    if slots == 0:
+        sec_free_v1(wide)
+        return -1
+    var rid = -1
+    if GetNamedSecurityInfoW(wide, 1, 0x10u32, 0, 0, 0, slots, slots + 8) == 0:
+        val sacl = windows_abi_read_ptr(slots)
+        if sacl != 0 and volatile_read_u16(sacl + 4) >= 1 and volatile_read_u8(sacl + 8) == 0x11:
+            val sid = sacl + 16
+            val subs = volatile_read_u8(sid + 1)
+            if subs >= 1: rid = volatile_read_u32(sid + 8 + (subs - 1) * 4)
+        sec_local_free_v1(windows_abi_read_ptr(slots + 8))
+    sec_free_v1(slots)
+    sec_free_v1(wide)
+    rid
+
+# SDDL text of a SID ("" on failure). Only ASCII SID text is expected.
+@allow(primitive_api)  # reason: Win64 ABI shim, raw pointer and handle slots have no domain type
+pub fn sec_sid_text_v1(sid: i64) -> text:
+    val slot = sec_alloc_v1(8)
+    if slot == 0: return ""
+    var out = ""
+    if ConvertSidToStringSidW(sid, slot) != 0:
+        val wide = windows_abi_read_ptr(slot)
+        var index = 0
+        while index < 256:
+            val unit = volatile_read_u16(wide + index * 2)
+            if unit == 0 or unit > 127: break
+            out = out + char_from_code(unit)
+            index = index + 1
+        sec_local_free_v1(wide)
+    sec_free_v1(slot)
+    out

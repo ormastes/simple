@@ -1,6 +1,31 @@
 # `native-build` MIR lowering fails to resolve `FileHandle` instance methods for `rt_io_file_roundtrip` — new blocker after the `File` symbol ordering/collision fix
 
-Status: OPEN (P2)
+## Closure 2026-11-25 (p2w3-al lane) — header corrected; whole chain resolved or split
+
+The "Status: OPEN (P2)" header below was misleading. This doc's two failure
+halves are both disposed:
+
+1. The `undefined variable: h`/`c`/`n` half is RESOLVED in this doc's own
+   2026-08-09b section (seed-interpreter bare-enum-to-Option coercion bug;
+   fixed at the `.spl` call site in
+   `src/compiler/20.hir/hir_lowering/expressions.spl` with explicit
+   `Some(...)` wrappers).
+2. The remaining `unresolved method call` half was split into
+   `doc/08_tracking/bug/native_build_instance_method_dispatch_unresolved_after_match_bind_2026-08-09.md`,
+   which is itself RESOLVED for its stated scope (verified 2026-11-25 by lane
+   p2w3-aa, by source inspection of the three `struct_value_syms`
+   arm-merge copy sites in
+   `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`), with
+   its cross-module remainder in
+   `doc/08_tracking/bug/native_build_cross_module_result_payload_struct_name_collision_2026-08-09.md`
+   (Status: RESOLVED for the tracked payload-struct-name collision).
+
+Doc-only closure: no code change in this lane. The 18-minute closure-source
+native-build re-run was not repeated here (out of time budget on this shared
+Windows host; the fix evidence in the sections below and in the follow-up
+docs stands). CLOSED.
+
+Status: CLOSED (2026-11-25) — see the closure note above. (Was: OPEN (P2))
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Summary

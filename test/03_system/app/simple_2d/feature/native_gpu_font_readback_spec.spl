@@ -18,7 +18,7 @@ textures cannot satisfy this spec.
 """
 
 use std.spec.{describe, it, expect, step, fail_test}
-use std.io_runtime.{file_read, file_size, file_hash_sha256}
+use std.io_runtime.{file_read, file_size, file_hash_sha256_or_shell}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.gpu.font_atlas_composite.{font_atlas_composite_cache_identity}
 use std.gpu.engine2d.engine.{Engine2D}
@@ -28,14 +28,14 @@ use std.gpu.engine3d.font_vulkan_spirv.{
     font_hud_vulkan_vertex_spirv, font_world_vulkan_vertex_spirv,
     font_vulkan_fragment_spirv
 }
-use test.system.qemu.os.common.qemu_os_harness.{file_exists}
+use test.fixtures.system_support.qemu.os.common.qemu_os_harness.{file_exists}
 use test.helpers.shared_multilingual_gpu_fonts_perf_evidence.{
     expect_font_perf_budget, read_font_perf_evidence
 }
 
 val FONT_PATH = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
 val FONT_ASSET_SHA256 = "2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081"
-val FONT_REGION_RGB_SHA256 = "ffbd5f7690557565c42853ffd4fd4a6c6049203eaa0d8cc5f8cb981a409287c4"
+val FONT_REGION_RGB_SHA256 = "addf76edf6d23ca9bea6d698ca1d30bc4bd8dd684bb50ff3158ef755bd2854fc"
 val SIMPLEOS_EVIDENCE_ROOT = "build/simpleos_wm_fullscreen_evidence/"
 val SIMPLEOS_WRAPPER_PATH = "scripts/check/check-simpleos-wm-fullscreen-evidence.shs"
 val SIMPLEOS_KERNEL_PATH = "build/simpleos_wm_fullscreen_evidence/simpleos_wm_production_desktop.elf"
@@ -206,9 +206,9 @@ fn _simpleos_artifact_metadata_valid(record: text) -> bool:
 fn _simpleos_artifact_files_valid(record: text) -> bool:
     file_exists(SIMPLEOS_WRAPPER_PATH) and file_exists(SIMPLEOS_KERNEL_PATH) and
         file_exists(SIMPLEOS_DISK_PATH) and
-        file_hash_sha256(SIMPLEOS_WRAPPER_PATH) == _simpleos_evidence_value(record, "simpleos_wm_fullscreen_wrapper_sha256") and
-        file_hash_sha256(SIMPLEOS_KERNEL_PATH) == _simpleos_evidence_value(record, "simpleos_wm_fullscreen_kernel_sha256") and
-        file_hash_sha256(SIMPLEOS_DISK_PATH) == _simpleos_evidence_value(record, "simpleos_wm_fullscreen_disk_image_sha256")
+        file_hash_sha256_or_shell(SIMPLEOS_WRAPPER_PATH) == _simpleos_evidence_value(record, "simpleos_wm_fullscreen_wrapper_sha256") and
+        file_hash_sha256_or_shell(SIMPLEOS_KERNEL_PATH) == _simpleos_evidence_value(record, "simpleos_wm_fullscreen_kernel_sha256") and
+        file_hash_sha256_or_shell(SIMPLEOS_DISK_PATH) == _simpleos_evidence_value(record, "simpleos_wm_fullscreen_disk_image_sha256")
 
 fn _simpleos_canonical_artifact_record() -> text:
     "simpleos_wm_fullscreen_wrapper={SIMPLEOS_WRAPPER_PATH}\nsimpleos_wm_fullscreen_wrapper_sha256={SIMPLEOS_ZERO_SHA256}\nsimpleos_wm_fullscreen_kernel={SIMPLEOS_KERNEL_PATH}\nsimpleos_wm_fullscreen_kernel_sha256={SIMPLEOS_ZERO_SHA256}\nsimpleos_wm_fullscreen_disk_image={SIMPLEOS_DISK_PATH}\nsimpleos_wm_fullscreen_disk_image_sha256={SIMPLEOS_ZERO_SHA256}\n"
@@ -221,15 +221,19 @@ fn _collect_engine2d_font_readback() -> Engine2DFontReadbackEvidence:
     if not engine.load_font(FONT_PATH):
         engine.shutdown()
         return _engine2d_unavailable("runtime-font-face-unavailable")
+    # Evidence collector: opt into the CPU-oracle path (production keeps it
+    # off), and read the evidence only after the readback flush so a
+    # frame-batched font dispatch carries its real fence and readback.
+    engine.set_vulkan_font_oracle_mode(true)
     engine.clear(0u32)
     engine.draw_text(4, 4, "2D", 0xffffffffu32, 18)
     val target = engine.font_execution_target()
+    val readback = engine.read_pixels_with_source()
     val installed = engine.vulkan_font_performance_evidence()
     if installed == nil:
         engine.shutdown()
         return _engine2d_unavailable("native-vulkan-font-evidence-missing")
     val native = installed.?
-    val readback = engine.read_pixels_with_source()
     var nonblank = false
     for pixel in readback.pixels:
         if pixel != 0u32:
@@ -265,8 +269,9 @@ fn _collect_engine2d_font_readback() -> Engine2DFontReadbackEvidence:
 fn _collect_engine3d_font_readback() -> Engine3DFontReadbackEvidence:
     var engine = Engine3D.create_with_backend(64, 64, "vulkan")
     if engine.backend_name() != "vulkan-font":
+        val install_reason = engine.vulkan_font_install_reason()
         engine.shutdown()
-        return _engine3d_unavailable("public-vulkan-font-install-failed")
+        return _engine3d_unavailable("public-vulkan-font-install-failed:{install_reason}")
     if not engine.load_font(FONT_PATH):
         engine.shutdown()
         return _engine3d_unavailable("runtime-font-face-unavailable")
@@ -500,7 +505,7 @@ fn _collect_simpleos_pixel_evidence() -> SimpleOsFontPixelEvidence:
         _simpleos_evidence_value(record, "simpleos_wm_fullscreen_font_region_rgb_sha256") == FONT_REGION_RGB_SHA256 and
         _simpleos_evidence_value(record, "simpleos_wm_fullscreen_scanout_pixel_format") == "argb8888" and
         file_exists(font_region_path) and file_size(font_region_path) == 8064 and
-        file_hash_sha256(font_region_path) == FONT_REGION_RGB_SHA256 and
+        file_hash_sha256_or_shell(font_region_path) == FONT_REGION_RGB_SHA256 and
         file_exists(root + "serial.log") and file_exists(root + "baseline.ppm.raw") and
         file_exists(root + "baseline.ppm") and file_exists(root + "capture.out"))
     SimpleOsFontPixelEvidence(

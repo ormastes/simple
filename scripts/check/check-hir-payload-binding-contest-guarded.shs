@@ -4,18 +4,23 @@
 # Fail-closed guard for the Stage 3 blocker
 #   `enum payload dependency <X> resolved to non-type binding <Y> (kind `const`)`
 #
-# `claim_materialized_payload_binding`
-# (src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl) reaches an
-# existing symbol via `symbols.lookup_or_invalid(local_name)` and then a
-# chained class-field `Dict<i64, HirSymbol>` bracket read. Both hops have
-# known failure modes, and when either fires the fetched record shares NO NAME
-# with the payload spelling being claimed (Stage 3: payload `TokenKind`,
-# fetched `asm_arm_backend`, kind `const`). Contesting ownership against such
-# a record is unsound by construction, so BOTH contests -- the non-type one and
-# the identity one -- must be gated on positive name agreement
-# (`hir_payload_binding_names_agree`).
+# 2026-11 refactor: `claim_materialized_payload_binding` MOVED from
+# src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl to
+# src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl
+# (struct method, "me" receiver). The `hir_payload_binding_names_agree`
+# predicate was replaced by `hir_payload_terminal_identity` triple
+# comparison -- the triple (defining_module, name, terminal_kind) is built
+# from the FETCHED symbol's own name, so positive name agreement is inherent
+# in the identity contest (`if existing != wanted:`). A non-type existing
+# symbol no longer silently loses a gated contest: it is the hard error this
+# guard historically protected against becoming mis-reported, now with a
+# SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE=1 probe to separate resolver defects from
+# native-codegen Dict bracket-read defects. The register_imported_type_methods
+# re-entrancy breaker (list-based, has failed open as a Dict) moved with it.
 #
-# This guard fails if either contest can fire ungated.
+# This guard fails if the identity contest can fire without name agreement,
+# if a non-type binding silently contests, or if the re-entrancy breaker's
+# list-based shape is lost.
 #
 # Verdict is the LAST line of stdout:
 #   PASS  — <n> ... checked                       exit 0
@@ -30,7 +35,7 @@
 set -u
 
 REPO_ROOT=${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
-TARGET_REL="src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl"
+TARGET_REL="src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl"
 
 # scan_file <path>
 # Prints one finding per line to stdout; sets nothing else.
@@ -39,36 +44,42 @@ scan_file() {
     _f=$1
     [ -f "$_f" ] || return 1
 
-    # 1. The predicate must exist and be a positive (allowlist) test.
-    if ! grep -q '^fn hir_payload_binding_names_agree(' "$_f"; then
-        echo "missing predicate hir_payload_binding_names_agree"
+    # 1. The claim method must exist (post-2026-11: struct method in
+    #    module_reexport_materialization.spl).
+    if ! grep -q 'me claim_materialized_payload_binding(' "$_f"; then
+        echo "missing claim method claim_materialized_payload_binding"
     fi
 
-    # 2. The non-type contest must not fire ungated.
-    if grep -q '^ *if not hir_payload_kind_is_type(existing_kind):' "$_f"; then
-        echo "ungated non-type contest: 'if not hir_payload_kind_is_type(existing_kind):'"
+    # 2. The wanted identity must be the full origin triple.
+    if ! grep -q 'val wanted = hir_payload_terminal_identity(origin.module_name, origin.item_name, origin.item_kind)' "$_f"; then
+        echo "wanted identity not derived from origin triple"
     fi
 
-    # 3. The contestable flag must be computed from the predicate.
-    if ! grep -q 'val contestable = hir_payload_binding_names_agree(' "$_f"; then
-        echo "contestable flag not derived from hir_payload_binding_names_agree"
+    # 3. Name-agreement successor: the existing identity must be built from
+    #    the FETCHED symbol's own name (positive name agreement is what makes
+    #    the identity contest sound).
+    if ! grep -q 'hir_payload_terminal_identity(existing_owner, symbol.name, existing_kind)' "$_f"; then
+        echo "name agreement dropped from existing identity"
     fi
 
-    # 4. Both contests must be gated on it.
-    if ! grep -q 'if contestable and not hir_payload_kind_is_type(existing_kind):' "$_f"; then
-        echo "non-type contest not gated on contestable"
-    fi
-    if ! grep -q 'if contestable and existing != wanted:' "$_f"; then
-        echo "identity contest not gated on contestable"
+    # 4. The identity contest itself must be present.
+    if ! grep -q 'if existing != wanted:' "$_f"; then
+        echo "identity contest missing"
     fi
 
-    # 5. The kind predicate must stay a positive enumeration, never the
+    # 5. A non-type existing symbol must hard-error with the Stage 3 blocker
+    #    message (optionally trace-probed), never silently contest or win.
+    if ! grep -q 'resolved to non-type binding' "$_f"; then
+        echo "non-type binding does not hard-error (silent contest)"
+    fi
+
+    # 6. The kind predicate must stay a positive enumeration, never the
     #    emptiness test that never fired (513cbb7b4).
     if grep -q 'if existing_kind == "":' "$_f"; then
         echo "emptiness test 'existing_kind == \"\"' reintroduced (never fires)"
     fi
 
-    # 6. The re-entrancy breaker for the SIGSEGV must stay, and stay a list.
+    # 7. The re-entrancy breaker for the SIGSEGV must stay, and stay a list.
     if ! grep -q 'if self.imported_type_methods_in_progress_has(reentry_key):' "$_f"; then
         echo "register_imported_type_methods re-entrancy breaker removed"
     fi
@@ -86,16 +97,18 @@ selftest() {
     _fail=0
     _n=0
 
-    # Fixture A: the APPLIED arm — must produce zero findings.
+    # Fixture A: the APPLIED arm (post-2026-11 shape) — must produce zero findings.
     cat > "$_tmp/applied.spl" <<'EOF'
-fn hir_payload_binding_names_agree(local_name: text, origin_item_name: text, symbol_name: text) -> bool:
-    symbol_name == local_name or symbol_name == origin_item_name
-                val contestable = hir_payload_binding_names_agree(local_name, origin.item_name, symbol.name)
-                if contestable and not hir_payload_kind_is_type(existing_kind):
+    me claim_materialized_payload_binding(local_name: text, origin: HirMaterializedPayloadOrigin, import_span: Span) -> bool:
+        val wanted = hir_payload_terminal_identity(origin.module_name, origin.item_name, origin.item_kind)
+            val existing = hir_payload_terminal_identity(existing_owner, symbol.name, existing_kind)
+                if existing != wanted:
                     return false
-                if contestable and existing != wanted:
+                if not hir_payload_kind_is_type(existing_kind):
+                    self.error("enum payload dependency `{local_name}` resolved to non-type binding `{symbol.name}` (kind `{existing_kind}`) in `{existing_owner}`; expected the type `{wanted}`", import_span)
                     return false
         if self.imported_type_methods_in_progress_has(reentry_key):
+            return
 EOF
     _out=$(scan_file "$_tmp/applied.spl"); _rc=$?
     _n=$((_n + 1))
@@ -104,13 +117,17 @@ EOF
         _fail=1
     fi
 
-    # Fixture B: the REVERTED arm (pre-fix shape) — the control that MUST fail.
+    # Fixture B: the REVERTED arm (non-type silently contests) — MUST fail.
     cat > "$_tmp/reverted.spl" <<'EOF'
-                if not hir_payload_kind_is_type(existing_kind):
-                    return false
+    me claim_materialized_payload_binding(local_name: text, origin: HirMaterializedPayloadOrigin, import_span: Span) -> bool:
+        val wanted = hir_payload_terminal_identity(origin.module_name, origin.item_name, origin.item_kind)
+            val existing = hir_payload_terminal_identity(existing_owner, symbol.name, existing_kind)
                 if existing != wanted:
                     return false
+                if not hir_payload_kind_is_type(existing_kind):
+                    return false
         if self.imported_type_methods_in_progress_has(reentry_key):
+            return
 EOF
     _out=$(scan_file "$_tmp/reverted.spl"); _rc=$?
     _n=$((_n + 1))
@@ -119,18 +136,21 @@ EOF
         _fail=1
     else
         case "$_out" in
-            *"ungated non-type contest"*) : ;;
-            *) echo "selftest: reverted fixture findings did not name the ungated contest: $_out"; _fail=1 ;;
+            *"non-type binding does not hard-error"*) : ;;
+            *) echo "selftest: reverted fixture findings did not name the silent contest: $_out"; _fail=1 ;;
         esac
     fi
 
     # Fixture C: breaker removed — must be caught.
     cat > "$_tmp/nobreaker.spl" <<'EOF'
-fn hir_payload_binding_names_agree(local_name: text, origin_item_name: text, symbol_name: text) -> bool:
-    symbol_name == local_name or symbol_name == origin_item_name
-                val contestable = hir_payload_binding_names_agree(local_name, origin.item_name, symbol.name)
-                if contestable and not hir_payload_kind_is_type(existing_kind):
-                if contestable and existing != wanted:
+    me claim_materialized_payload_binding(local_name: text, origin: HirMaterializedPayloadOrigin, import_span: Span) -> bool:
+        val wanted = hir_payload_terminal_identity(origin.module_name, origin.item_name, origin.item_kind)
+            val existing = hir_payload_terminal_identity(existing_owner, symbol.name, existing_kind)
+                if existing != wanted:
+                    return false
+                if not hir_payload_kind_is_type(existing_kind):
+                    self.error("enum payload dependency `{local_name}` resolved to non-type binding `{symbol.name}` (kind `{existing_kind}`) in `{existing_owner}`; expected the type `{wanted}`", import_span)
+                    return false
 EOF
     _out=$(scan_file "$_tmp/nobreaker.spl"); _n=$((_n + 1))
     case "$_out" in
@@ -140,13 +160,17 @@ EOF
 
     # Fixture D: Dict-based breaker — must be caught.
     cat > "$_tmp/dictbreaker.spl" <<'EOF'
-fn hir_payload_binding_names_agree(local_name: text, origin_item_name: text, symbol_name: text) -> bool:
-    symbol_name == local_name or symbol_name == origin_item_name
-                val contestable = hir_payload_binding_names_agree(local_name, origin.item_name, symbol.name)
-                if contestable and not hir_payload_kind_is_type(existing_kind):
-                if contestable and existing != wanted:
+    me claim_materialized_payload_binding(local_name: text, origin: HirMaterializedPayloadOrigin, import_span: Span) -> bool:
+        val wanted = hir_payload_terminal_identity(origin.module_name, origin.item_name, origin.item_kind)
+            val existing = hir_payload_terminal_identity(existing_owner, symbol.name, existing_kind)
+                if existing != wanted:
+                    return false
+                if not hir_payload_kind_is_type(existing_kind):
+                    self.error("enum payload dependency `{local_name}` resolved to non-type binding `{symbol.name}` (kind `{existing_kind}`) in `{existing_owner}`; expected the type `{wanted}`", import_span)
+                    return false
         if self.imported_type_methods_in_progress_has(reentry_key):
-    imported_type_methods_in_progress: {text: bool}
+            return
+        imported_type_methods_in_progress: {text: bool}
 EOF
     _out=$(scan_file "$_tmp/dictbreaker.spl"); _n=$((_n + 1))
     case "$_out" in

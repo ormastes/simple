@@ -1,0 +1,31 @@
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+val MODULE = "aggr_probe"
+val CLASS_SRC = "class Snap:\n    n: i64\n\nclass Pkg:\n    snapshot: Snap\n    name: text\n\nfn load_pkg(k: i64) -> Pkg:\n    val s = Snap(n: k)\n    val pkg = Pkg(snapshot: s, name: \"x\")\n    pkg\n\nfn load_default() -> Pkg:\n    load_pkg(7)\n\nfn main() -> i64:\n    val p = load_default()\n    p.snapshot.n\n"
+val OPT_SRC = "class Snap:\n    n: i64\n\nfn maybe(k: i64) -> Snap?:\n    if k < 0:\n        return nil\n    val s = Snap(n: k)\n    Some(s)\n\nfn main() -> i64:\n    if val s = maybe(2):\n        return s.n\n    0\n"
+
+fn ir_of(src: text) -> text:
+    val file = "testdata/aggr_probe.spl"
+    var hl = HirLowering.with_filename(file)
+    val m: HirModule = hl.lower_module(parse_full_frontend(src, file, MODULE, Logger(level: 0)))
+    var lowering = MirLowering.new_for_target(m.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(m)
+    MirToLlvm.create(MODULE, CodegenTarget.X86_64, nil).translate_module(mir)
+
+describe "probe":
+    it "dumps":
+        print "=====CLASS"
+        print ir_of(CLASS_SRC)
+        print "=====OPT"
+        print ir_of(OPT_SRC)
+        expect(1).to_equal(1)

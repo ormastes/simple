@@ -499,8 +499,16 @@ pub fn detect_common_mistake_lookahead(
         }
     }
 
-    // Check for 'namespace' (C++)
-    if current.lexeme == "namespace" && matches!(current.kind, TokenKind::Identifier { .. }) {
+    // Check for 'namespace' (C++). A bare identifier named `namespace` is
+    // valid Simple code (`val namespace = ...`, `ns.namespace.len()`), so only
+    // flag the C++ mistake when a namespace NAME follows — the `namespace
+    // math {}` shape. Positive lookahead, same principle as the `new` rule
+    // above; without it every legitimate `namespace` identifier is a hard
+    // Error-level parse failure (src/app/build/targets/action_identity.spl).
+    if current.lexeme == "namespace"
+        && matches!(current.kind, TokenKind::Identifier { .. })
+        && next.is_some_and(|token| matches!(token.kind, TokenKind::Identifier { .. }))
+    {
         return Some(CommonMistake::CppNamespace);
     }
 

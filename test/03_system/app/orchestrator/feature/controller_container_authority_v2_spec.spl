@@ -1,0 +1,182 @@
+# @req ORCH-02 HOST-02
+# Actual SDK authorization/correlation functions; no fake host/provider callable.
+# Constructed status/projection/observation data is not native validation proof.
+# Synthetic clock100 is INTERNAL only; actual app uses native Unix-ms time.
+use test.fixtures.orchestrator_acceptance.controller_container_authority_v2.*
+use test.fixtures.orchestrator_acceptance.controller_container_dispatch_v2.controller_container_wire_field_v2
+use std.nogc_sync_mut.orchestration.controller_dispatch_authority_v2.*
+use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v2.*
+use std.nogc_sync_mut.orchestration.controller_dispatch_objects_v2.*
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.host_execution_observation_encode_v2
+use std.common.contracts.orchestration.controller_execution_reply_v2.controller_execution_reply_decode_v2
+use std.common.contracts.orchestration.controller_dispatch_request_v2.controller_dispatch_request_encode_v2
+use std.common.contracts.orchestration.assignment_v1.controller_assignment_bytes_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.string_core.str_len
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io_runtime.dir_remove
+
+describe "actual controller V2 proof and host correlation admission gates":
+    it "verifies four actual SDK signed actions under separate scoped issuer and approver keys":
+        step("verifies four actual SDK signed actions under separate scoped issuer and approver keys")
+        for backend in ["linux-podman", "windows-docker-process"]:
+            val fixture = controller_container_authority_fixture_v2(backend)
+            val result = controller_dispatch_authorize_v2(fixture.context, fixture.packet, 100).unwrap()
+            expect(result.assignment.id).to_equal("assignment-renewed")
+            expect(result.execution.id).to_equal("execution-renewed")
+            expect(fixture.context.policy.snapshot.keys.len()).to_equal(4)
+            expect(fixture.context.policy.snapshot.keys["grant-issuer/controller-issuer"].public_key == fixture.context.policy.snapshot.keys["human-approver/controller-approver"].public_key).to_equal(false)
+            expect(fixture.context.policy.snapshot.keys["grant-issuer/host-issuer"].public_key == fixture.context.policy.snapshot.keys["human-approver/host-approver"].public_key).to_equal(false)
+
+    it "refuses each forged pair cross action reuse expiry and revoked host authority":
+        step("refuses each forged pair cross action reuse expiry and revoked host authority")
+        val fixture = controller_container_authority_fixture_v2("linux-podman")
+        var request = fixture.packet
+        request.assignment_signed.signature = controller_container_forge_v2(request.assignment_signed.signature)
+        expect(controller_dispatch_authorize_v2(fixture.context, request, 100).is_err()).to_equal(true)
+        request = fixture.packet
+        request.execution_signed.signature = controller_container_forge_v2(request.execution_signed.signature)
+        expect(controller_dispatch_authorize_v2(fixture.context, request, 100).is_err()).to_equal(true)
+        request = fixture.packet
+        request.prepare_signed.signature = controller_container_forge_v2(request.prepare_signed.signature)
+        expect(controller_dispatch_authorize_v2(fixture.context, request, 100).is_err()).to_equal(true)
+        request = fixture.packet
+        request.host_execution_signed.signature = controller_container_forge_v2(request.host_execution_signed.signature)
+        expect(controller_dispatch_authorize_v2(fixture.context, request, 100).is_err()).to_equal(true)
+        request = fixture.packet
+        request.assignment_approval.signature = controller_container_forge_v2(request.assignment_approval.signature)
+        expect(controller_dispatch_authorize_v2(fixture.context, request, 100).is_err()).to_equal(true)
+        request = fixture.packet
+        request.execution_approval.signature = controller_container_forge_v2(request.execution_approval.signature)
+        expect(controller_dispatch_authorize_v2(fixture.context, request, 100).is_err()).to_equal(true)
+        request = fixture.packet
+        request.prepare_approval.signature = controller_container_forge_v2(request.prepare_approval.signature)
+        expect(controller_dispatch_authorize_v2(fixture.context, request, 100).is_err()).to_equal(true)
+        request = fixture.packet
+        request.host_execution_approval.signature = controller_container_forge_v2(request.host_execution_approval.signature)
+        expect(controller_dispatch_authorize_v2(fixture.context, request, 100).is_err()).to_equal(true)
+        request = fixture.packet
+        request.host_execution_signed = request.prepare_signed
+        request.host_execution_approval = request.prepare_approval
+        expect(controller_dispatch_authorize_v2(fixture.context, request, 100).is_err()).to_equal(true)
+        expect(controller_dispatch_authorize_v2(fixture.context, fixture.packet, 1100).unwrap_err()).to_equal("APPROVAL_EXPIRED")
+        expect(controller_dispatch_authorize_v2(fixture.context, fixture.packet, 0).is_err()).to_equal(true)
+        var context = fixture.context
+        var key = context.policy.snapshot.keys["grant-issuer/host-issuer"]
+        key.revoked = true
+        context.policy.snapshot.keys["grant-issuer/host-issuer"] = key
+        expect(controller_dispatch_authorize_v2(context, fixture.packet, 100).unwrap_err()).to_equal("AUTHORITY_KEY_REVOKED")
+
+    it "correlates actual host status schema without conflating alias native identity or provider pin":
+        step("correlates actual host status schema without conflating alias native identity or provider pin")
+        for backend in ["linux-podman", "windows-docker-process"]:
+            val fixture = controller_container_authority_fixture_v2(backend)
+            expect(controller_dispatch_host_status_v2(fixture.context, fixture.packet, fixture.status).unwrap()).to_equal(true)
+            expect(controller_dispatch_host_status_v2(fixture.context, fixture.packet, controller_container_wire_field_v2(fixture.status, "physicalHostId", SdnValue.String("other-alias"))).is_err()).to_equal(true)
+            expect(controller_dispatch_host_status_v2(fixture.context, fixture.packet, controller_container_wire_field_v2(fixture.status, "nativeMachineId", SdnValue.String("other-native-machine"))).is_err()).to_equal(true)
+            expect(controller_dispatch_host_status_v2(fixture.context, fixture.packet, controller_container_wire_field_v2(fixture.status, "fenceId", SdnValue.String("e".repeat(64)))).is_err()).to_equal(true)
+            expect(controller_dispatch_host_status_v2(fixture.context, fixture.packet, controller_container_wire_field_v2(fixture.status, "providerIdentityDigest", SdnValue.String("e".repeat(64)))).is_err()).to_equal(true)
+            expect(controller_dispatch_host_status_v2(fixture.context, fixture.packet, controller_container_wire_field_v2(fixture.status, "enrollmentBindingDigest", SdnValue.String("e".repeat(64)))).is_err()).to_equal(true)
+            expect(controller_dispatch_host_status_v2(fixture.context, fixture.packet, controller_container_wire_field_v2(fixture.status, "cpuMillis", SdnValue.String("8000"))).is_err()).to_equal(true)
+            expect(controller_dispatch_host_status_v2(fixture.context, fixture.packet, controller_container_wire_field_v2(fixture.status, "retainedReservations", SdnValue.Int(-1))).is_err()).to_equal(true)
+            expect(controller_dispatch_host_status_v2(fixture.context, fixture.packet, controller_container_wire_field_v2(fixture.status, "availableMemoryBytes", SdnValue.Int(16001))).is_err()).to_equal(true)
+
+    it "checks exact backend resource and timeout projection without mistaking proof verification for semantics":
+        step("checks exact backend resource and timeout projection without mistaking proof verification for semantics")
+        val fixture = controller_container_authority_fixture_v2("linux-podman")
+        expect(controller_dispatch_validation_match_v2(fixture.packet, fixture.validation).unwrap()).to_equal(true)
+        for change in [controller_container_wire_field_v2(fixture.validation, "backend", SdnValue.String("windows-docker-process")),
+                controller_container_wire_field_v2(fixture.validation, "cpuMillis", SdnValue.Int(2001)),
+                controller_container_wire_field_v2(fixture.validation, "memoryBytes", SdnValue.Int(4001)),
+                controller_container_wire_field_v2(fixture.validation, "timeoutMs", SdnValue.Int(101)),
+                controller_container_wire_field_v2(fixture.validation, "timeoutMs", SdnValue.Int(0)),
+                controller_container_wire_field_v2(fixture.validation, "hasDevices", SdnValue.Bool(true)),
+                controller_container_wire_field_v2(fixture.validation, "executionAuthorized", SdnValue.Bool(true)),
+                controller_container_wire_field_v2(fixture.validation, "hasWorkspace", SdnValue.String("false"))]:
+            expect(controller_dispatch_validation_match_v2(fixture.packet, change).is_err()).to_equal(true)
+        var opaque = fixture.packet
+        opaque.execution.request_bytes = "opaque invalid backend body"
+        # This API verifies FOUR REAL signed action tickets, not provider bytes.
+        expect(controller_dispatch_authorize_v2(fixture.context, opaque, 100).is_ok()).to_equal(true)
+        expect(controller_dispatch_same_input_v2(fixture.packet, opaque).unwrap()).to_equal(false)
+        # Actual core must obtain actual host-validate failure before admission.
+        # No fake host validation callable is supplied by this test.
+
+    it "formats prepared and correlated observed replies with completion explicitly false":
+        step("formats prepared and correlated observed replies with completion explicitly false")
+        val fixture = controller_container_authority_fixture_v2("linux-podman")
+        val prepared = controller_dispatch_response_v2(fixture.context, fixture.packet, fixture.prepared, false).unwrap()
+        val prepared_reply = controller_execution_reply_decode_v2(prepared).unwrap()
+        expect(prepared_reply.status).to_equal("host-prepared")
+        expect(prepared_reply.host_response).to_equal(fixture.prepared)
+        val source = host_execution_observation_encode_v2(fixture.observation).unwrap()
+        val observed = controller_dispatch_response_v2(fixture.context, fixture.packet, source, true).unwrap()
+        val observed_reply = controller_execution_reply_decode_v2(observed).unwrap()
+        expect(observed_reply.status).to_equal("runtime-observed")
+        expect(observed_reply.observation_digest).to_equal(sha256_text(source))
+        expect(observed_reply.request_uid).to_equal(fixture.packet.binding.workload_uid)
+        expect(observed_reply.host_operation_id).to_equal(fixture.packet.binding.host_operation.id)
+        expect(controller_execution_reply_decode_v2(controller_container_wire_field_v2(observed, "completionObserved", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(controller_dispatch_response_v2(fixture.context, fixture.packet, controller_container_wire_field_v2(fixture.prepared, "state", SdnValue.String("executing")), false).is_err()).to_equal(true)
+
+    it "requires full native identity and exact new execution proof while allowing correlated read only replay":
+        step("requires full native identity and exact new execution proof while allowing correlated read only replay")
+        val fixture = controller_container_authority_fixture_v2("linux-podman")
+        expect(controller_dispatch_observation_match_v2(fixture.context, fixture.packet, fixture.observation, true).unwrap()).to_equal(true)
+        var observation = fixture.observation
+        observation.runtime.native_id = ""
+        expect(controller_dispatch_observation_match_v2(fixture.context, fixture.packet, observation, true).is_err()).to_equal(true)
+        observation = fixture.observation
+        observation.runtime.native_id = "c".repeat(63)
+        expect(controller_dispatch_observation_match_v2(fixture.context, fixture.packet, observation, true).is_err()).to_equal(true)
+        observation = fixture.observation
+        observation.operation_digest = "e".repeat(64)
+        expect(controller_dispatch_observation_match_v2(fixture.context, fixture.packet, observation, true).is_err()).to_equal(true)
+        observation = fixture.observation
+        observation.runtime.engine = "docker"
+        expect(controller_dispatch_observation_match_v2(fixture.context, fixture.packet, observation, true).is_err()).to_equal(true)
+        observation = fixture.observation
+        observation.provider_identity_digest = "e".repeat(64)
+        expect(controller_dispatch_observation_match_v2(fixture.context, fixture.packet, observation, true).is_err()).to_equal(true)
+        observation = fixture.observation
+        observation.grant_id = "prior-execution-grant"
+        expect(controller_dispatch_observation_match_v2(fixture.context, fixture.packet, observation, true).is_err()).to_equal(true)
+        expect(controller_dispatch_observation_match_v2(fixture.context, fixture.packet, observation, false).unwrap()).to_equal(true)
+        # Read-only correlation is NOT another execution grant or readiness.
+
+    it "retains exact real packet bytes and never treats replay input equality as current proof authority":
+        step("retains exact real packet bytes and never treats replay input equality as current proof authority")
+        val fixture = controller_container_authority_fixture_v2("linux-podman")
+        expect(controller_dispatch_authorize_v2(fixture.context, fixture.packet, 100).is_ok()).to_equal(true)
+        val root = secure_temp_dir("/tmp", "controller-v2-packet-").unwrap()
+        expect(controller_dispatch_packet_retain_v2(root, fixture.packet).unwrap()).to_equal(true)
+        val digest = sha256_text(controller_assignment_bytes_v1(fixture.packet.binding).unwrap())
+        val original_bytes = controller_dispatch_request_encode_v2(fixture.packet).unwrap()
+        expect(file_read_regular_no_follow_bounded(root + "/dispatch-packets/" + digest + ".sdn", 2097152).unwrap()).to_equal(original_bytes)
+        expect(controller_dispatch_same_input_v2(controller_dispatch_packet_load_v2(root, digest).unwrap(), fixture.packet).unwrap()).to_equal(true)
+        var forged = fixture.packet
+        forged.execution_approval.signature = controller_container_forge_v2(forged.execution_approval.signature)
+        expect(controller_dispatch_same_input_v2(fixture.packet, forged).unwrap()).to_equal(true)
+        expect(controller_dispatch_authorize_v2(fixture.context, forged, 100).is_err()).to_equal(true)
+        var changed = fixture.packet
+        changed.execution.request_bytes = changed.execution.request_bytes + "changed"
+        expect(controller_dispatch_same_input_v2(fixture.packet, changed).unwrap()).to_equal(false)
+        expect(controller_dispatch_packet_retain_v2(root, changed).is_err()).to_equal(true)
+        expect(file_read_regular_no_follow_bounded(root + "/dispatch-packets/" + digest + ".sdn", 2097152).unwrap()).to_equal(original_bytes)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "refuses malformed noncanonical oversized and authorization claiming host messages":
+        step("refuses malformed noncanonical oversized and authorization claiming host messages")
+        val fixture = controller_container_authority_fixture_v2("linux-podman")
+        expect(controller_dispatch_host_status_v2(fixture.context, fixture.packet, fixture.status + "\n").is_err()).to_equal(true)
+        expect(controller_dispatch_host_status_v2(fixture.context, fixture.packet, controller_container_wire_field_v2(fixture.status, "authenticated", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(controller_dispatch_validation_match_v2(fixture.packet, fixture.validation + "\n").is_err()).to_equal(true)
+        expect(controller_dispatch_validation_match_v2(fixture.packet, controller_container_wire_field_v2(fixture.validation, "version", SdnValue.String("2"))).is_err()).to_equal(true)
+        expect(controller_dispatch_validation_match_v2(fixture.packet, controller_container_wire_field_v2(fixture.validation, "authenticated", SdnValue.Bool(true))).is_err()).to_equal(true)
+        val head = fixture.status.slice(0, fixture.status.len() - 2)
+        expect(controller_dispatch_host_status_v2(fixture.context, fixture.packet, head + ", version: 2" + "}\n").is_err()).to_equal(true)
+        val oversized = "é".repeat(2049)
+        expect(str_len(oversized)).to_equal(4098)
+        expect(controller_dispatch_host_status_v2(fixture.context, fixture.packet, oversized).is_err()).to_equal(true)
+        expect(controller_dispatch_validation_match_v2(fixture.packet, oversized).is_err()).to_equal(true)

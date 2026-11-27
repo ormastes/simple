@@ -1,0 +1,83 @@
+"""Compat ModuleLoader must roll back partial executable mappings on load failure.
+
+Bug: compat_loader_partial_exec_mapping_rollback_2026-08-25.
+Budget: 0 leaked executable mappings, 0 leaked bytes, 0 provisional global
+symbols after a forced mid-load failure (relocation to an unresolved symbol,
+which fails after the code mapping was allocated and published).
+"""
+
+use compiler.driver.smf_writer.{build_smf_with_relocations, SmfBuildOptions, Target}
+use compiler.loader.*
+use compiler.loader.smf_mmap_native.{native_exec_memory_count, native_exec_memory_total}
+use std.io_runtime.{file_read_bytes}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+fn run_sh(command: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", command])
+
+fn cleanup_tmpdir(tmpdir: text):
+    _ = run_sh("rm -rf '{tmpdir}' >/dev/null 2>&1 || true")
+
+fn read_loader_source() -> text:
+    rt_file_read_text("src/compiler/99.loader/module_loader_compat.spl")
+
+describe "Compat loader partial-mapping rollback":
+    it "leaks 0 mappings, 0 bytes and 0 global symbols when relocation fails mid-load":
+        val (tmp_stdout, _e, _c) = run_sh("d=$(mktemp -d) && (cygpath -m \"$d\" 2>/dev/null || printf \"%s\n\" \"$d\")")
+        val tmpdir = tmp_stdout.trim()
+        if tmpdir == "":
+            fail("failed to create a temporary directory")
+        val src_path = "{tmpdir}/rb_fixture.c"
+        val obj_path = "{tmpdir}/rb_fixture.o"
+        val smf_path = "{tmpdir}/rb_fixture.smf"
+        val source = "extern long external_value;\nlong main(void) { return (long)&external_value; }\n"
+        expect(rt_file_write_text(src_path, source)).to_equal(true)
+        val (so, se, sc) = run_sh("clang --target=x86_64-unknown-linux-gnu -c -O0 -fno-pic -fno-pie -o '{obj_path}' '{src_path}' 2>&1")
+        if sc != 0:
+            cleanup_tmpdir(tmpdir)
+            fail("clang failed: {so}{se}")
+        val object_bytes = file_read_bytes(obj_path).unwrap()
+        val smf_bytes = build_smf_with_relocations(object_bytes, SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu()))
+        expect(rt_file_write_bytes(smf_path, smf_bytes)).to_equal(true)
+
+        val maps_before = native_exec_memory_count()
+        val bytes_before = native_exec_memory_total()
+        var loader = ModuleLoader.with_defaults()
+        val syms_before = loader.stats().symbol_count
+
+        # Unresolved `external_value` => load must fail AFTER main was mapped.
+        var failed = false
+        var failure_message = ""
+        val result = loader.load(smf_path)
+        match result:
+            case LoadResult.Error(message):
+                failed = true
+                failure_message = message
+            case _:
+                failed = false
+        cleanup_tmpdir(tmpdir)
+        expect(failed).to_equal(true)
+        expect(failure_message.contains("Unresolved")).to_equal(true)
+
+        # Budget: 0 leaked.
+        expect(native_exec_memory_count() - maps_before).to_equal(0)
+        expect(native_exec_memory_total() - bytes_before).to_equal(0)
+        expect(loader.stats().symbol_count - syms_before).to_equal(0)
+        expect(loader.is_loaded(smf_path)).to_equal(false)
+
+    it "has no raw error return between first mapping allocation and global publish":
+        val src = read_loader_source()
+        val start_marker = "native_alloc_exec_memory(code.len() as i64)"
+        val end_marker = "val m = LoadedModule(path: path, reader: \"\", symbols: symbols"
+        val a = src.index_of(start_marker) ?? -1
+        val b = src.index_of(end_marker, a) ?? -1
+        expect(a).to_be_greater_than(0)
+        expect(b).to_be_greater_than(a)
+        val region = src[a:b]
+        # Every failure in the allocation region must go through the rollback helper.
+        expect(region.contains("return LoadResult.Error(")).to_equal(false)
+        expect(region.contains("_compat_load_fail(")).to_equal(true)

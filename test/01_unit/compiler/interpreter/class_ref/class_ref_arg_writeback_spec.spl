@@ -1,0 +1,78 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# design: doc/05_design/compiler/interpreter/class_instance_reference_storage_2026-11-03.md
+# Tracks: engine_divergence_mutation_class_spec shapes obj_mut_field_nonmut_class,
+# nested_receiver_class, nested_mut_obj_nonmut_class (lost under the reference
+# carrier until 2026-11-06).
+
+# Argument write-back through `class` reference chains. A `class` argument is
+# a shared handle: a `mut` class parameter's mutation must survive a sibling
+# non-`mut` `obj.field` snapshot in either argument order, and a container or
+# struct argument read through a class chain (`o.h.items`, `o.h.cfg`) must
+# write back into the shared cell. `struct` values keep value semantics.
+
+struct Cfg:
+    items: [i64]
+
+class Inner:
+    cfg: Cfg
+    items: [i64]
+
+class Outer:
+    h: Inner
+
+class Box:
+    items: [i64]
+
+fn push_cfg(c: Cfg):
+    c.items.push(1)
+
+fn push_mut(mut items: [i64]):
+    items.push(1)
+
+fn push_mut_cfg(mut c: Cfg):
+    c.items.push(1)
+
+fn fwd(mut b: Box, items: [i64]):
+    b.items.push(1)
+
+fn rev(items: [i64], mut b: Box):
+    b.items.push(1)
+
+fn mk_outer() -> Outer:
+    Outer(h: Inner(cfg: Cfg(items: [9]), items: [9]))
+
+describe "class argument write-back":
+    it "mut class param survives a later non-mut field snapshot":
+        val x = Box(items: [9])
+        fwd(x, x.items)
+        expect(x.items.len()).to_equal(2)
+
+    it "mut class param survives an earlier non-mut field snapshot":
+        val x = Box(items: [9])
+        rev(x.items, x)
+        expect(x.items.len()).to_equal(2)
+
+    it "mut array read through a class chain writes back":
+        val o = mk_outer()
+        push_mut(o.h.items)
+        expect(o.h.items.len()).to_equal(2)
+
+    it "chain write-back is visible through an alias of the inner class":
+        val o = mk_outer()
+        val alias = o.h
+        push_mut(o.h.items)
+        expect(alias.items.len()).to_equal(2)
+
+    it "struct read through a class chain merges its containers back":
+        val o = mk_outer()
+        push_cfg(o.h.cfg)
+        expect(o.h.cfg.items.len()).to_equal(2)
+        push_mut_cfg(o.h.cfg)
+        expect(o.h.cfg.items.len()).to_equal(3)
+
+    it "a struct bound out of a class field is still a copy":
+        val o = mk_outer()
+        var c = o.h.cfg
+        c.items = [1, 2, 3, 4]
+        expect(o.h.cfg.items.len()).to_equal(1)

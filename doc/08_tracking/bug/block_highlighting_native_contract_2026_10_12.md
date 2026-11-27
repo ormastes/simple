@@ -33,3 +33,6 @@ Existing lexical policies outside this repair (underscore boundary and trailing 
 ## Final integration decision
 
 The PR preserves df6494f18a keyword/helper/optional implementation exactly. Its production diff is only the canonical hex predicate import/call and escaped-text newline/backslash comparisons. Final source base bed1ef92dd336f08c04005ee4536f08b6313f216; combined owner SHA c7b0ceed957a5034826ff76cd0b51dda05f2801aa0d02b8c8ca43a9ec53a0fc2. The frozen native-qualified f05 owner remains in cycle3-owner.spl and the immutable diagnostic projection. No fourth narrow compile, green-case repeat, or combined-owner PASS claim. The next causally required full producer build must qualify this integrated source before this draft can become ready.
+
+## 2026-11-05 compiler-defects sweep (winboot-rel100 lane)
+Integrated repair 292a92705a9 "fix(blocks): use escaped text and canonical hex predicate" is an ancestor of tip 816655ee5cb: highlighting.spl imports std.common.binary_inspect.is_hex_digit and uses double-quoted escaped newline/backslash (no raw comparisons, no @workaround tags). Host check: test/01_unit/compiler/blocks/highlighting_native_contract_spec.spl 7/7 PASS on the seed interpreter. The doc's "final latest-source integration UNEXECUTED" gap is now host-closed; producer-integration qualification still pending.

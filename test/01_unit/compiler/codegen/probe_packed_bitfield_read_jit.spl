@@ -24,6 +24,12 @@ struct Bytes:
     mid: u32:8
     hi: u32:16
 
+@packed
+struct Mixed:
+    lo: u32:4
+    mid: u32:12
+    hi: u32:16
+
 struct Plain:
     q: u32
 
@@ -37,6 +43,7 @@ fn check(name: text, got: text, want: text):
         print "FAIL " + name + " got=" + got + " want=" + want
 
 fn main() -> i64:
+    print "PACKED BITFIELD PROBE START"
     var r = Reg(0)
     r.ready = 1
     r.readonly = 1
@@ -47,6 +54,26 @@ fn main() -> i64:
     check("bitfield_bit0_is_1", "{r.ready}", "1")
     check("bitfield_bit1_is_1", "{r.readonly}", "1")
     check("bitfield_wide_is_0", "{r.reserved}", "0")
+
+    # Erased reads (string interpolation re-reads the raw word through the
+    # value-tag decoder) and typed reads of the same three fields, named for
+    # packed_bitfield_field_read_jit_spec.spl.
+    check("status_erased_ready", "{r.ready}", "1")
+    check("status_erased_readonly", "{r.readonly}", "1")
+    check("status_erased_reserved", "{r.reserved}", "0")
+    val t_ready: u32 = r.ready
+    val t_readonly: u32 = r.readonly
+    val t_reserved: u32 = r.reserved
+    check("status_typed_ready", "{t_ready}", "1")
+    check("status_typed_readonly", "{t_readonly}", "1")
+    check("status_typed_reserved", "{t_reserved}", "0")
+
+    # A zero-valued field is the case that accidentally survived the original
+    # defect (raw 0 decodes as a tagged zero); it must stay correct.
+    var z = Reg(0)
+    check("status_zero_erased_ready", "{z.ready}", "0")
+    val z_ready: u32 = z.ready
+    check("status_zero_typed_ready", "{z_ready}", "0")
 
     var b = Bytes(0)
     b.lo = 5
@@ -75,8 +102,30 @@ fn main() -> i64:
     val via_local: u32 = r.ready
     check("bitfield_via_local_is_1", "{via_local}", "1")
 
+    # Widths 4/12/16 at offsets 0/4/16. Payloads chosen so their low 3 bits
+    # alias distinct tag decodings (9 -> nil, 2730 -> float, 43981 -> 0x5
+    # special), so a raw-vs-tagged confusion cannot coincidentally agree.
+    var m = Mixed(0)
+    m.lo = 9
+    m.mid = 2730
+    m.hi = 43981
+    check("mixed_erased_lo", "{m.lo}", "9")
+    check("mixed_erased_mid", "{m.mid}", "2730")
+    check("mixed_erased_hi", "{m.hi}", "43981")
+    val m_lo: u32 = m.lo
+    val m_mid: u32 = m.mid
+    val m_hi: u32 = m.hi
+    check("mixed_typed_lo", "{m_lo}", "9")
+    check("mixed_typed_mid", "{m_mid}", "2730")
+    check("mixed_typed_hi", "{m_hi}", "43981")
+
+    # A field read must survive arithmetic, not only printing.
+    check("mixed_arith", "{m.lo + m.mid}", "2739")
+
     if failures == 0:
         print "PACKED_BITFIELD_READ PROBE: ALL PASS"
+        print "PACKED BITFIELD PROBE: ALL PASS"
     else:
         print "PACKED_BITFIELD_READ PROBE: FAILURES"
+        print "PACKED BITFIELD PROBE: FAILURES"
     0

@@ -84,9 +84,18 @@
 #   - No CPU affinity pinning
 
 # --- SFFI declarations ---
+# Worker ABI is explicit, never guessed from the closure word: these unsuffixed
+# entries take the closure as a tagged Simple value (runtime kind
+# RT_WORKER_CLOSURE_VALUE = 2). TAG_INT (record << 3) selects raw i64 worker
+# args, TAG_HEAP (record | 1) RuntimeValue args; any other tag is rejected.
+# Runtime-level callers holding a machine address use
+# rt_thread_spawn_isolated{,_with_args}_kind(RT_WORKER_CLOSURE_ADDRESS = 1, ..).
 extern fn rt_thread_spawn_isolated<F, D>(closure: F, data: D) -> i64
 extern fn rt_thread_spawn_isolated_with_args<F, A, B>(closure: F, data1: A, data2: B) -> i64
-extern fn rt_thread_join(handle: i64) -> i64
+# The runtime hands back the worker's tagged RuntimeValue word (int v is
+# v << 3, nil is NIL). Declared optional so native codegen decodes that word
+# like rt_channel_recv; a raw `-> i64` leaked the tag (1 came back as 8).
+extern fn rt_thread_join(handle: i64) -> i64?
 extern fn rt_thread_is_done(handle: i64) -> i64
 extern fn rt_thread_id(handle: i64) -> i64
 extern fn rt_thread_free(handle: i64)
@@ -103,7 +112,7 @@ extern fn rt_thread_yield()
 
 class ThreadHandle:
     handle: i64  # Rust thread handle ID (opaque)
-    joined: bool  # join() consumed the handle; further joins return nil
+    joined: bool  # join() or free() consumed the handle; further joins return nil
 
     # Blocks until thread completes and returns its result value.
     # Thread handle is consumed - cannot call join() twice; a repeat call
@@ -115,7 +124,7 @@ class ThreadHandle:
     # @tag:api
     me fn join() -> i64?:
         if self.joined:
-            return nil
+            return None
         self.joined = true
         # rt_thread_join keeps the handle alive on both owners (C and Rust
         # executor.rs); release it here so a join never leaks a handle slot.
@@ -139,11 +148,14 @@ class ThreadHandle:
     # Thread continues running but result is discarded.
     # Call this if you don't need the thread's return value.
     # @tag:api
-    fn free():
+    me fn free():
         # join() already released the handle; freeing it again could release
         # a slot the runtime has since reused for another thread.
         if self.joined:
             return
+        # free() detaches the worker and discards its result, so a later
+        # join() returns nil instead of reading a released handle.
+        self.joined = true
         rt_thread_free(self.handle)
 
 # --- API ---
@@ -153,7 +165,8 @@ class ThreadHandle:
 # Returns ThreadHandle for joining or freeing the thread.
 # @tag:api
 fn thread_spawn(closure: () -> i64) -> ThreadHandle:
-    val handle = rt_thread_spawn_isolated(closure, nil)
+    val data: i64? = None
+    val handle = rt_thread_spawn_isolated(closure, data)
     ThreadHandle(handle: handle, joined: false)
 
 # Spawns a thread with explicit immutable worker arguments.
@@ -185,7 +198,8 @@ fn thread_available_parallelism() -> i64:
 # Other threads continue executing during sleep.
 # Minimum sleep duration is OS-dependent (typically 1ms).
 # @tag:api
-fn thread_sleep(millis: i64):
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in thread_sleep", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn thread_sleep(millis: i64):
     unsafe(capabilities: [ffi]):
         rt_thread_sleep(millis)
 
@@ -193,5 +207,5 @@ fn thread_sleep(millis: i64):
 # Useful in spin loops to reduce CPU usage.
 # Thread may be rescheduled immediately by OS.
 # @tag:api
-fn thread_yield():
+pub fn thread_yield():
     rt_thread_yield()

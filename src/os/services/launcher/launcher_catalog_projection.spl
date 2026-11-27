@@ -11,7 +11,8 @@ use os.services.launcher.launcher_registry.{
 use os.services.launcher.launcher_association_registry.{
     launcher_reset_association_projection_v1,
     launcher_validate_association_projection_v1,
-    launcher_commit_association_projection_v1
+    launcher_commit_association_projection_v1,
+    launcher_associations_authoritative_v1
 }
 
 var composition_owned_name_v1: [text; 32] = [""; 32]
@@ -44,6 +45,16 @@ fn _composition_name_owned_v1(name: text) -> bool:
             return true
         i = i + 1
     false
+
+@allow(primitive_api)  # reason: internal launcher service boolean predicate matching launcher_registry API
+pub fn launcher_is_composition_owned_name_v1(name: text) -> bool:
+    """Return whether `name` belongs to the active SCI composition catalog."""
+    _composition_name_owned_v1(name)
+
+@allow(primitive_api)  # reason: internal launcher service boolean predicate matching launcher_registry API
+pub fn launcher_is_composition_projection_active_v1() -> bool:
+    """Return whether an SCI composition catalog projection is currently active."""
+    composition_projection_active_v1
 
 fn _composition_index_by_id_v1(app_id: text) -> i64:
     var i: u64 = 0
@@ -127,9 +138,53 @@ pub fn launcher_replace_composition_catalog_v1(
             return "SCI_LAUNCHER_DUPLICATE_NAME"
         name_index = name_index + 1
 
-    # Snapshot lifecycle by stable SCI id before replacing metadata. On the
-    # first projection, an exact legacy path is a one-way compatibility import;
-    # every unclaimed built-in is retired so SCI becomes the sole catalog.
+    # Snapshot built-in (non-SCI-owned) slots + lifecycle by stable SCI id BEFORE
+    # mutating any registry array so validation/capacity errors never partially mutate.
+    var builtin_slots: [i64; 32] = [-1; 32]
+    var builtin_count: i64 = 0
+    var scan: u64 = 0
+    while scan < app_count:
+        val candidate_name = app_name[scan]
+        if not _composition_name_owned_v1(candidate_name):
+            if _catalog_name_in_list_v1(names, names.len(), candidate_name):
+                return "SCI_LAUNCHER_DUPLICATE_NAME"
+            builtin_slots[builtin_count.to_u64()] = scan.to_i64()
+            builtin_count = builtin_count + 1
+        scan = scan + 1
+
+    if (builtin_count.to_u64() + names.len().to_u64()) > MAX_APPS:
+        return "SCI_LAUNCHER_CAPACITY"
+
+    var b_name: [text; 32] = [""; 32]
+    var b_path: [text; 32] = [""; 32]
+    var b_icon: [text; 32] = [""; 32]
+    var b_key: [u32; 32] = [0; 32]
+    var b_mod: [u32; 32] = [0; 32]
+    var b_pid: [u64; 32] = [0; 32]
+    var b_state: [text; 32] = ["idle"; 32]
+    var b_window_count: [u64; 32] = [0; 32]
+    var b_exit_code: [i32; 32] = [0; 32]
+    var b_launch_count: [u64; 32] = [0; 32]
+    var b_last_pid: [u64; 32] = [0; 32]
+    var b_headless: [bool; 32] = [false; 32]
+    var bi = 0
+    while bi < builtin_count:
+        val old_b = builtin_slots[bi.to_u64()].to_u64()
+        val dst = bi.to_u64()
+        b_name[dst] = app_name[old_b]
+        b_path[dst] = app_path[old_b]
+        b_icon[dst] = app_icon[old_b]
+        b_key[dst] = app_shortcut_key[old_b]
+        b_mod[dst] = app_shortcut_mod[old_b]
+        b_pid[dst] = app_pid[old_b]
+        b_state[dst] = app_launch_state[old_b]
+        b_window_count[dst] = app_window_count[old_b]
+        b_exit_code[dst] = app_exit_code[old_b]
+        b_launch_count[dst] = app_launch_count[old_b]
+        b_last_pid[dst] = app_last_pid[old_b]
+        b_headless[dst] = app_is_headless[old_b]
+        bi = bi + 1
+
     var old_slots: [i64; 32] = [-1; 32]
     var next_pid: [u64; 32] = [0; 32]
     var next_state: [text; 32] = ["idle"; 32]
@@ -145,10 +200,6 @@ pub fn launcher_replace_composition_catalog_v1(
             val owned = _composition_index_by_id_v1(ids[capture_index])
             if owned >= 0:
                 slot = _app_index_by_name(composition_owned_name_v1[owned.to_u64()])
-        else:
-            slot = _app_index_by_path(paths[capture_index])
-            if slot >= 0 and _old_slot_claimed_v1(old_slots, capture_index, slot):
-                slot = -1
         old_slots[capture_index.to_u64()] = slot
         if slot >= 0:
             val old_slot = slot.to_u64()
@@ -161,25 +212,45 @@ pub fn launcher_replace_composition_catalog_v1(
             next_headless[capture_index.to_u64()] = app_is_headless[old_slot]
         capture_index = capture_index + 1
 
+    var write_b = 0
+    while write_b < builtin_count:
+        val slot = write_b.to_u64()
+        app_name[slot] = b_name[slot]
+        app_path[slot] = b_path[slot]
+        app_icon[slot] = b_icon[slot]
+        app_shortcut_key[slot] = b_key[slot]
+        app_shortcut_mod[slot] = b_mod[slot]
+        app_pid[slot] = b_pid[slot]
+        app_launch_state[slot] = b_state[slot]
+        app_window_count[slot] = b_window_count[slot]
+        app_exit_code[slot] = b_exit_code[slot]
+        app_launch_count[slot] = b_launch_count[slot]
+        app_last_pid[slot] = b_last_pid[slot]
+        app_is_headless[slot] = b_headless[slot]
+        app_active[slot] = true
+        write_b = write_b + 1
+
     var commit_index = 0
     while commit_index < names.len():
-        val slot = commit_index.to_u64()
+        val slot = (builtin_count + commit_index).to_u64()
+        val src = commit_index.to_u64()
         app_name[slot] = names[commit_index]
         app_path[slot] = paths[commit_index]
         app_icon[slot] = icons[commit_index]
         app_shortcut_key[slot] = shortcut_keys[commit_index]
         app_shortcut_mod[slot] = shortcut_modifiers[commit_index]
-        app_pid[slot] = next_pid[slot]
-        app_launch_state[slot] = next_state[slot]
-        app_window_count[slot] = next_window_count[slot]
-        app_exit_code[slot] = next_exit_code[slot]
-        app_launch_count[slot] = next_launch_count[slot]
-        app_last_pid[slot] = next_last_pid[slot]
-        app_is_headless[slot] = next_headless[slot]
+        app_pid[slot] = next_pid[src]
+        app_launch_state[slot] = next_state[src]
+        app_window_count[slot] = next_window_count[src]
+        app_exit_code[slot] = next_exit_code[src]
+        app_launch_count[slot] = next_launch_count[src]
+        app_last_pid[slot] = next_last_pid[src]
+        app_is_headless[slot] = next_headless[src]
         app_active[slot] = true
         commit_index = commit_index + 1
 
-    var clear_slot = names.len().to_u64()
+    val total_count = (builtin_count + names.len()).to_u64()
+    var clear_slot = total_count
     while clear_slot < MAX_APPS:
         app_name[clear_slot] = ""
         app_path[clear_slot] = ""
@@ -195,26 +266,35 @@ pub fn launcher_replace_composition_catalog_v1(
         app_is_headless[clear_slot] = false
         app_active[clear_slot] = false
         clear_slot = clear_slot + 1
-    app_count = names.len().to_u64()
+    app_count = total_count
 
     var process_index: u64 = 0
     while process_index < MAX_PROCESSES:
         if process_active[process_index] and process_app_index[process_index] >= 0:
             val previous_slot = process_app_index[process_index]
             var replacement: i64 = -1
+            var matched_sci = -1
             var next_index = 0
             while next_index < names.len():
                 if old_slots[next_index.to_u64()] == previous_slot:
-                    replacement = next_index
+                    replacement = builtin_count + next_index
+                    matched_sci = next_index
                 next_index = next_index + 1
+            if replacement < 0:
+                var bi_idx = 0
+                while bi_idx < builtin_count:
+                    if builtin_slots[bi_idx.to_u64()] == previous_slot:
+                        replacement = bi_idx
+                    bi_idx = bi_idx + 1
             process_app_index[process_index] = replacement
             if replacement < 0:
                 process_app_id[process_index] = ""
-            else:
-                process_app_id[process_index] = ids[replacement]
+            elif matched_sci >= 0:
+                process_app_id[process_index] = ids[matched_sci]
         process_index = process_index + 1
 
-    launcher_commit_association_projection_v1(association_keys, association_paths)
+    if association_keys.len() > 0 or launcher_associations_authoritative_v1():
+        launcher_commit_association_projection_v1(association_keys, association_paths)
     var clear_index: u64 = 0
     while clear_index < MAX_APPS:
         composition_owned_name_v1[clear_index] = ""

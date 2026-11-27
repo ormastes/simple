@@ -1,0 +1,128 @@
+"""Structured Wine Proton runtime evidence and staged launch gate.
+
+Evidence is five token strings (Steam runtime, pressure-vessel container,
+graphics translation, Steam integration, sync primitive). The gate escalates
+Steam Runtime -> container -> Vulkan/DXVK/VKD3D-Proton -> Steamworks bridge,
+reporting the first missing token as `missing-<token>`.
+"""
+
+use common.wine_proton_gate.{wine_proton_fixture_features, wine_proton_required_features}
+use common.wine_substrate.{wine_substrate_full_wine_gate}
+
+struct WineProtonRuntimeEvidence:
+    runtime_tokens: text
+    container_tokens: text
+    graphics_tokens: text
+    integration_tokens: text
+    sync_tokens: text
+
+pub fn wine_proton_runtime_evidence_new(runtime: text, container: text, graphics: text, integration: text, sync: text) -> WineProtonRuntimeEvidence:
+    WineProtonRuntimeEvidence(
+        runtime_tokens: runtime,
+        container_tokens: container,
+        graphics_tokens: graphics,
+        integration_tokens: integration,
+        sync_tokens: sync
+    )
+
+fn _has_token(tokens: text, token: text) -> bool:
+    for part in tokens.split(" "):
+        if part == token:
+            return true
+    return false
+
+fn _first_missing(tokens: text, required: [text]) -> text:
+    for token in required:
+        if not _has_token(tokens, token):
+            return token
+    return ""
+
+fn _runtime_stage_gate(tokens: text) -> text:
+    if not _has_token(tokens, "steam-runtime"):
+        return "missing-steam-runtime"
+    if not _has_token(tokens, "abi-x86_64"):
+        return "missing-abi-x86_64"
+    if not _has_token(tokens, "soldier") and not _has_token(tokens, "sniper") and not _has_token(tokens, "scout"):
+        return "missing-steam-linux-runtime-generation"
+    return ""
+
+fn _stage_gate(tokens: text, required: [text]) -> text:
+    val missing = _first_missing(tokens, required)
+    if missing != "":
+        return "missing-" + missing
+    return ""
+
+pub fn wine_proton_runtime_gate(evidence: WineProtonRuntimeEvidence) -> text:
+    val runtime_state = _runtime_stage_gate(evidence.runtime_tokens)
+    if runtime_state != "":
+        return runtime_state
+    val container_state = _stage_gate(evidence.container_tokens, [
+        "pressure-vessel-container",
+        "container-rootfs",
+        "container-rootfs-nvfs",
+        "namespace-pid",
+        "namespace-fs",
+        "namespace-ipc",
+        "namespace-net",
+        "namespace-capability"
+    ])
+    if container_state != "":
+        return container_state
+    val graphics_state = _stage_gate(evidence.graphics_tokens, [
+        "vulkan-loader",
+        "vulkan-device",
+        "dxvk",
+        "vkd3d-proton",
+        "shader-cache"
+    ])
+    if graphics_state != "":
+        return graphics_state
+    val integration_state = _stage_gate(evidence.integration_tokens, [
+        "proton-launcher",
+        "steamworks-bridge",
+        "controller-input"
+    ])
+    if integration_state != "":
+        return integration_state
+    val sync_state = _stage_gate(evidence.sync_tokens, ["esync-or-fsync"])
+    if sync_state != "":
+        return sync_state
+    return "ready"
+
+pub fn wine_proton_fixture_runtime_evidence() -> WineProtonRuntimeEvidence:
+    wine_proton_runtime_evidence_new(
+        "steam-runtime abi-x86_64 soldier",
+        "pressure-vessel-container container-rootfs container-rootfs-nvfs namespace-pid namespace-fs namespace-ipc namespace-net namespace-capability",
+        "vulkan-loader vulkan-device dxvk vkd3d-proton shader-cache",
+        "proton-launcher steamworks-bridge controller-input",
+        "esync-or-fsync"
+    )
+
+fn _feature_backed_by_evidence(feature: text, evidence: WineProtonRuntimeEvidence) -> bool:
+    if feature == "steam-runtime":
+        return _has_token(evidence.runtime_tokens, "steam-runtime")
+    if feature == "pressure-vessel-container":
+        return _has_token(evidence.container_tokens, "pressure-vessel-container")
+    if feature == "wine-full":
+        # Proton bundles a full Wine; the launcher token is its evidence.
+        return _has_token(evidence.integration_tokens, "proton-launcher")
+    if _has_token(evidence.graphics_tokens, feature):
+        return true
+    if _has_token(evidence.integration_tokens, feature):
+        return true
+    return _has_token(evidence.sync_tokens, feature)
+
+pub fn wine_proton_runtime_feature_evidence(evidence: WineProtonRuntimeEvidence) -> text:
+    var out = ""
+    for feature in wine_proton_required_features():
+        if _feature_backed_by_evidence(feature, evidence):
+            if out != "":
+                out = out + " "
+            out = out + feature
+    return out
+
+pub fn wine_proton_runtime_readiness_gate(wine_gates: text, evidence: WineProtonRuntimeEvidence) -> text:
+    val wine_state = wine_substrate_full_wine_gate(wine_gates)
+    if wine_state != "ready":
+        return "blocked-wine-" + wine_state
+    return wine_proton_runtime_gate(evidence)

@@ -1,0 +1,66 @@
+# Purpose and audience: executable specification evidence that the SSH daemon
+# can bind a real host TCP listener through the hosted runtime facade
+# (rt_io_tcp_*) under interpreter mode on a hosted OS -- not only on the
+# baremetal rv64 boot TCP runtime (rt_boot_tcp_*).
+# @req REQ-SSPEC-OS
+# bug: doc/08_tracking/bug/ssh_daemon_baremetal_only_and_duplication_2026-08-05.md
+
+use std.spec
+use std.spipe.*
+use os.apps.sshd.ssh_auth.{SshUserDb}
+use os.apps.sshd.sshd.{SshDaemon, SshdCredentialProvider}
+use os.apps.sshd.ssh_packet.{ssh_put_text, ssh_put_string}
+use os.crypto.ed25519.{ed25519_keypair_from_seed}
+
+fn seed32() -> [u8]:
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+     16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+
+fn authorized_key() -> [u8]:
+    val public_key = ed25519_keypair_from_seed(seed32()).1
+    var blob: [u8] = []
+    blob = ssh_put_text(blob, "ssh-ed25519")
+    ssh_put_string(blob, public_key)
+
+fn hosted_daemon() -> SshDaemon:
+    # bind_and_ready() does not consult the credential provider (only start()
+    # does), so pin a valid host identity directly and stay off the provider
+    # path.
+    var daemon = SshDaemon.new(0)
+    daemon.host_private_key = seed32()
+    daemon.host_public_key = seed32()
+    daemon.credential_provider_configured = true
+    daemon
+
+describe "SSHD hosted listener bind":
+    it "binds a real host TCP listener via the hosted runtime facade":
+        # @req REQ-SSPEC-OS
+        step("bind through the hosted rt_io_tcp_* runtime, not the baremetal boot runtime")
+        var daemon = hosted_daemon()
+        match daemon.bind_and_ready():
+            Ok(_):
+                expect(true).to_equal(true)
+            Err(message):
+                expect("bind_and_ready failed on host: {message}").to_equal("")
+        expect(daemon.listen_fd >= 0).to_equal(true)
+        expect(daemon.running).to_equal(true)
+        daemon.stop()
+        expect(daemon.listen_fd == -1).to_equal(true)
+        expect(daemon.running).to_equal(false)
+
+    it "bind is repeatable after stop on the hosted runtime":
+        # @req REQ-SSPEC-OS
+        step("stop closes the hosted listener and a second bind succeeds")
+        var daemon = hosted_daemon()
+        match daemon.bind_and_ready():
+            Ok(_):
+                expect(true).to_equal(true)
+            Err(message):
+                expect("first bind failed on host: {message}").to_equal("")
+        daemon.stop()
+        match daemon.bind_and_ready():
+            Ok(_):
+                expect(true).to_equal(true)
+            Err(message):
+                expect("second bind failed on host: {message}").to_equal("")
+        daemon.stop()

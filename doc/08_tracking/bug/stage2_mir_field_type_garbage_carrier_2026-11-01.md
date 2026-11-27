@@ -1,0 +1,76 @@
+# Frozen stage2 reports garbage HirType carriers for two struct fields during phase-3 MIR
+
+- **ID:** stage2_mir_field_type_garbage_carrier_2026-11-01
+- **Priority:** P2 (warning only today; P1 if stage3 smoke shows the fields miscompiled)
+- **Status:** closed (2026-11-09, not-a-defect)
+- **Owner area:** `src/compiler/50.mir` MirLowering transient-scope ownership (unassigned; same family as `mir_transient_scope_unpromoted_rti_av_2026-11-01.md`, fixed in source by #5753)
+- **Found by:** phase-3 runs 13/14c, frozen stage2 `C:/dev/p3new/stage2.exe` (source ef0681fc0e1), release tip 5fad50cca24
+
+## Symptom
+
+```
+[mir-field-type] struct=BackendError field=span actual=2589120870
+[mir-field-type] struct=CompiledUnit field=entry_point actual=2589120870
+```
+
+`actual` is not a valid HirType kind tag. It reads like a freed or reused carrier
+slot, which is the same signature #5753 fixed for rti/rti_last_error/extern ABIs/
+erased-callback bindings.
+
+## Why it persists after #5753
+
+The lines are printed by the frozen stage2 while it lowers the current source. #5753
+fixes `promote_transient_owner` in the source, so the fix only takes effect in a
+compiler built from that source (stage3). Stage2 itself keeps the bug. The open
+question is whether some other MirLowering-owned table still escapes
+`promote_transient_owner` at HEAD.
+
+## Risk
+
+If codegen lays out `BackendError.span` or `CompiledUnit.entry_point` with the wrong
+type, the stage3 binary will misbehave on backend error reporting and entry-point
+selection.
+
+## Checks
+
+1. Stage3 smoke (`scripts/bootstrap/p3-smoke-stage3.shs`) must exercise entry-point
+   selection (hello compile+run) and one backend error path.
+2. Self-build with stage3. If these lines disappear, the stage2-only explanation is
+   confirmed. If they remain, audit the MirLowering tables not covered by #5753.
+
+## Removal condition
+
+Close when a stage3 self-build prints no `[mir-field-type] ... actual=<non-kind>` lines.
+
+## Resolution (2026-11-09, bootp2)
+
+Reproduced on post-#5753 `stage2_new4.exe` (`compile src/compiler/70.backend/backend_types.spl --format=smf`):
+both lines still print with the same value. They are not garbage: `rt_enum_discriminant`
+returns DefaultHasher(variant name) truncated to u32 (see the comment beside the
+`[bootstrap-type-registration]` probe), so `2589120870` is a stable variant hash, identical for
+the two `Optional` fields (`Span?`, `text?`), and `lower_type` records no error for either field
+(no `[bootstrap-type-registration]` line). The print was an unconditional debug probe left by
+2cb67158ac0 (`fix: preserve flat optional type tags`); it is removed. Closed as not-a-defect.
+
+## Triage 2026-11-11 (p3fix lane boot24)
+
+**Verdict: closed stands (not-a-defect); stale tracker row flagged for the
+sync-db lane.** The 2026-11-09 bootp2 resolution (value is a stable
+`rt_enum_discriminant` variant-name hash for the two `Optional` fields, not
+a freed carrier; probe removed) re-verified FRESH at tip 6233df4b9f9ea: the
+`[mir-field-type]` probe string no longer exists anywhere in `src/compiler/`
+(ripgrep, zero hits), so no debug print can re-fire from current source.
+The bug_db.sdn row for this ID still reads `open` at this tip — a
+never-flipped prior-lane tracker row, left for the mechanical sync-db lane
+per boot22/boot23 precedent (doc-header flips only in p3fix lanes).
+
+## 2026-11-26 (`BF-8` Host Regression Verification)
+
+- Shard `doc/08_tracking/bug/db/stage2_mir_field_type_garbage_carrier_2026-11-01.sdn` already holds
+  `status = closed` (`not-a-defect`); `bug_db.sdn` left untouched per shard policy.
+- Added executable regression spec
+  `test/01_unit/compiler/held_verify/mir_optional_field_and_august_audit_spec.spl` (`4/4` pass):
+  lowers structs with `span: TinySpan?` and `entry_point: text?` through HIR -> MIR ->
+  `mir_verify_module` (0 fatal findings) -> `MirToLlvm.create(...).translate_module(mir)` (0 errors),
+  verifies `src/compiler/70.backend/backend_types.spl` retains `span: Span?` / `entry_point: text?`,
+  and confirms 0 `[mir-field-type]` debug probe strings in `src/compiler/50.mir/`.

@@ -1,5 +1,5 @@
 # BUG: LLM Caret compiled carrier cannot be produced within bounded build time
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-04 — re-scoped to latency/tokenizer and closed as fixed; residual link defect tracked separately
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -7,7 +7,7 @@ evidence found in the body. This is bookkeeping, not verification.
 - **ID:** `llm_caret_compiled_carrier_build_latency`
 - **Severity:** P1 (blocks production compiled database/plugin carriers)
 - **Found:** 2026-08-02
-- Status: OPEN (P2)
+- Status: CLOSED 2026-11-04 (see "2026-11-04 re-scope" section; residual bare-builtin-symbol link defect moved to `llm_caret_native_entry_closure_bare_builtin_method_symbols_2026-11-04.md`)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Owner:** Codex LLM Caret messaging integration lane (2026-08-09)
 
@@ -123,3 +123,28 @@ and caused a nil-receiver crash (exit 132, Task #145). Owner-module free
 façades now replace open/startup/query/close plus map/join rendering. Their
 closure contract test exits 0; the three-cycle guard prevented another compile.
 
+
+## 2026-11-04 re-scope (claim sonnet-imw)
+
+The ORIGINAL symptom -- native entry-closure build not finishing inside the 120 s
+watchdog -- is CLOSED. Evidence in this file: 2026-08-09 section (six-module
+tokenizer probe 2.6-2.7 s, PASS `native_sql_tokenizer_substring`) and the
+2026-08-09 root-cause section (ANY/STRING integer casts routed through
+`rt_value_as_int` in both native backends), after which the 95-module database
+carrier compile "reached its final link" (i.e. it no longer times out).
+
+What is still unresolved is a DIFFERENT defect: the final link fails on bare
+built-in method symbols (`len`, `trim`, `starts_with`, `unwrap_err`, ...). That is
+now tracked in
+`llm_caret_native_entry_closure_bare_builtin_method_symbols_2026-11-04.md`
+(row `llm_caret_native_entry_closure_bare_builtin_method_symbols_2026-11-04`).
+This row is re-scoped to the latency/tokenizer part and closed as fixed.
+
+## Header correction 2026-11-25 (fleet agent, worktree wt-p2w3-aj)
+
+The status header still read "OPEN (P2) / needs owner triage" although the
+2026-11-04 re-scope section above already closed this row as fixed (original
+latency/tokenizer symptom) and moved the residual bare-builtin-method-symbol
+link defect to its own record. Header updated to match; no re-run of the
+120 s native-build gate was performed (heavy native build, not bounded for
+this lane) — closure rests on the in-body 2026-08-09 and 2026-11-04 evidence.

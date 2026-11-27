@@ -1,0 +1,60 @@
+# @req: stage2_matrix_full_cli_build_exceeds_40g_2026_10_19 - process-global build datasets stay count-bounded.
+"""
+## Purpose and audience
+Purpose: budget spec for the whole-program datasets that live outside a
+BuildSession. (1) The mir_data `_bootstrap_fn_*` registries accumulate across
+modules by design, so their retained entry count must track DISTINCT names, not
+modules x registrations; re-registering the same callee from every module must
+not grow them, and the session-end reset must return the count to 0. (2) The
+digest-keyed HIR cache side tables must stay under HIR_CACHE_SIDE_TABLE_MAX_ENTRIES_V1
+however many distinct closures a long-lived process sees.
+Budgets: 600 modules x 10 shared names -> <= 40 entries (4 registries x 10);
+40000 distinct closure digests -> each side table <= 16384.
+Audience: compiler memory maintainers.
+"""
+# @tag: unit, compiler, memory
+
+use std.spec.*
+use compiler.driver.session.build_session.{build_session_end_reset_globals_v1}
+use compiler.mir.mir_data.{bootstrap_fn_ret_shape_register, bootstrap_fn_ret_ok_shape_register,
+    bootstrap_fn_ret_err_shape_register, bootstrap_fn_ret_opt_shape_register,
+    bootstrap_fn_registries_entry_count_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_closure_digest_from_rows,
+    hir_cache_side_table_counts_v1, HIR_CACHE_SIDE_TABLE_MAX_ENTRIES_V1}
+
+describe "whole-program build dataset retention budget":
+    it "mir_data registries do not grow with module count for shared callees":
+        build_session_end_reset_globals_v1()
+        var m = 0
+        while m < 600:
+            var f = 0
+            while f < 10:
+                bootstrap_fn_ret_shape_register("shared_fn_{f}", "text")
+                bootstrap_fn_ret_ok_shape_register("shared_fn_{f}", "i64")
+                bootstrap_fn_ret_err_shape_register("shared_fn_{f}", "text")
+                bootstrap_fn_ret_opt_shape_register("shared_fn_{f}", "i64")
+                f = f + 1
+            m = m + 1
+        val retained = bootstrap_fn_registries_entry_count_v1()
+        expect(retained > 0).to_equal(true)
+        expect(retained <= 40).to_equal(true)
+        build_session_end_reset_globals_v1()
+        expect(bootstrap_fn_registries_entry_count_v1()).to_equal(0)
+
+    it "counts every registry so a leak in any of them is visible":
+        build_session_end_reset_globals_v1()
+        bootstrap_fn_ret_ok_shape_register("only_ok", "i64")
+        bootstrap_fn_ret_err_shape_register("only_err", "text")
+        bootstrap_fn_ret_opt_shape_register("only_opt", "i64")
+        expect(bootstrap_fn_registries_entry_count_v1()).to_equal(3)
+        build_session_end_reset_globals_v1()
+
+    it "digest-keyed HIR cache side tables stay under the count bound":
+        var i = 0
+        while i < 40000:
+            val d = hir_cache_closure_digest_from_rows(["row-{i}"], ["N"])
+            expect(d != "").to_equal(true)
+            i = i + 1
+        val counts = hir_cache_side_table_counts_v1()
+        expect(counts[0] <= HIR_CACHE_SIDE_TABLE_MAX_ENTRIES_V1).to_equal(true)
+        expect(counts[1] <= HIR_CACHE_SIDE_TABLE_MAX_ENTRIES_V1).to_equal(true)

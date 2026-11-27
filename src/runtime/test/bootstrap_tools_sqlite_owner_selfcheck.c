@@ -1,5 +1,8 @@
 /* Link the real SQLite provider against the admitted Rust runtime owner.
  * This test never interprets a runtime string's header as the C layout. */
+#if defined(SIMPLE_TEST_CORE_RUNTIME)
+#error "links runtime_sqlite.c over external libsqlite3, which the core-C runtime never links (todo 285 owner decision)"
+#endif
 #include "runtime.h"
 #include <stdint.h>
 #include <stdio.h>

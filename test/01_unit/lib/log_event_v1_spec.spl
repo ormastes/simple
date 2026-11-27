@@ -1,0 +1,226 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# Vertical slice (plan D20 / section 18.1): one typed application event
+# through the REAL facade entrypoint `std.log.log_event_v1` under ERASED,
+# DYNAMIC_READY-OFF, activate -> collector, policy update, disable + drain.
+# Acceptance: OBS-001, OBS-002, OBS-003, OBS-004, OBS-013, OBS-022 (slice
+# scope). Plan: doc/03_plan/compiler/aspect_dynload/optimized_observability_aspects_2026-10-28.md
+
+use std.spec.step
+use std.spec.{describe, it, assert_true, assert_false, assert_eq, assert_contains}
+use std.log.{
+    LogEventV1, LogEventRecordV1, log_event_v1, log_event_reset_v1,
+    log_event_collector_init_v1, log_event_collector_resident_v1,
+    log_event_collector_pending_v1, log_event_collector_dropped_v1,
+    log_event_site_register_v1, log_event_site_lookup_v1, log_event_site_state_v1,
+    log_event_site_activate_v1, log_event_policy_update_v1, log_event_site_disable_v1,
+    log_event_site_kind_min_v1, log_event_site_emitted_v1,
+    log_event_drain_v1, log_event_generation_v1, log_event_catalog_lookups_v1,
+    LOG_SITE_ERASED, LOG_SITE_DYNAMIC_READY, LOG_SITE_STATIC_ON,
+    LOG_SITE_STATE_RESIDENT_OFF, LOG_SITE_STATE_ACTIVE, LOG_SITE_STATE_DRAINING,
+    LOG_EVENT_RECORD_VERSION
+}
+
+# The payload is a closure so the spec can PROVE it was never evaluated: the
+# counter only moves when the facade actually runs it.
+var _payload_calls: i64 = 0
+var _payload_kind: i64 = 1
+
+fn counting_payload() -> LogEventV1:
+    _payload_calls = _payload_calls + 1
+    LogEventV1(kind: _payload_kind, a: 10, b: 20)
+
+fn fresh():
+    log_event_reset_v1()
+    _payload_calls = 0
+    _payload_kind = 1
+
+fn ok_i64(r: Result<i64, text>) -> i64:
+    match r:
+        case Ok(v):
+            v
+        case Err(e):
+            print "unexpected Err: {e}"
+            -1
+
+fn err_text(r: Result<i64, text>) -> text:
+    match r:
+        case Ok(_):
+            ""
+        case Err(e):
+            e
+
+describe "typed log event: build contracts", fn():
+    # @manual scenario evidence
+
+    it "OBS-001: an ERASED site cannot be enabled and never evaluates its payload", fn():
+        # @req REQ-SSPEC-UNIT
+        step("ERASED site")
+        fresh()
+        _ = log_event_collector_init_v1(8)
+        val site = ok_i64(log_event_site_register_v1("app.erased", LOG_SITE_ERASED))
+        assert_contains(err_text(log_event_site_activate_v1(site)), "ERASED")
+        assert_contains(err_text(log_event_policy_update_v1(site, 1)), "ERASED")
+        assert_false(log_event_v1(site, counting_payload))
+        assert_false(log_event_v1(site, counting_payload))
+        assert_eq(_payload_calls, 0)
+        assert_eq(log_event_collector_pending_v1(), 0)
+        assert_eq(log_event_site_emitted_v1(site), 0)
+
+    it "OBS-002: a DYNAMIC_READY site that is prepared but OFF captures nothing", fn():
+        # @req REQ-SSPEC-UNIT
+        step("prepared/OFF site")
+        fresh()
+        _ = log_event_collector_init_v1(8)
+        val site = ok_i64(log_event_site_register_v1("app.ready", LOG_SITE_DYNAMIC_READY))
+        assert_eq(log_event_site_state_v1(site), LOG_SITE_STATE_RESIDENT_OFF)
+        assert_false(log_event_v1(site, counting_payload))
+        assert_eq(_payload_calls, 0)
+        assert_eq(log_event_collector_pending_v1(), 0)
+
+    it "D4: activation without a resident collector is an explicit unavailable, never a covert load", fn():
+        # @req REQ-SSPEC-UNIT
+        step("resident-only acquisition")
+        fresh()
+        val site = ok_i64(log_event_site_register_v1("app.ready", LOG_SITE_DYNAMIC_READY))
+        assert_contains(err_text(log_event_site_activate_v1(site)), "unavailable")
+        assert_false(log_event_collector_resident_v1())
+        assert_eq(log_event_site_state_v1(site), LOG_SITE_STATE_RESIDENT_OFF)
+
+    it "STATIC_ON collects from registration and refuses disable", fn():
+        # @req REQ-SSPEC-UNIT
+        step("STATIC_ON site")
+        fresh()
+        _ = log_event_collector_init_v1(8)
+        val site = ok_i64(log_event_site_register_v1("app.always", LOG_SITE_STATIC_ON))
+        assert_eq(log_event_site_state_v1(site), LOG_SITE_STATE_ACTIVE)
+        assert_true(log_event_v1(site, counting_payload))
+        assert_eq(_payload_calls, 1)
+        assert_contains(err_text(log_event_site_disable_v1(site)), "STATIC_ON")
+
+describe "typed log event: activate, policy, disable, drain", fn():
+    # @manual scenario evidence
+
+    it "OBS-003: activate routes a typed record to the resident collector through the facade", fn():
+        # @req REQ-SSPEC-UNIT
+        step("activate -> collector")
+        fresh()
+        _ = log_event_collector_init_v1(8)
+        val site = ok_i64(log_event_site_register_v1("app.ready", LOG_SITE_DYNAMIC_READY))
+        val gen = ok_i64(log_event_site_activate_v1(site))
+        assert_eq(log_event_site_state_v1(site), LOG_SITE_STATE_ACTIVE)
+        assert_true(log_event_v1(site, counting_payload))
+        assert_eq(_payload_calls, 1)
+        assert_eq(log_event_collector_pending_v1(), 1)
+        val records = log_event_drain_v1(16)
+        assert_eq(records.len(), 1)
+        assert_eq(records[0].version, LOG_EVENT_RECORD_VERSION)
+        assert_eq(records[0].generation, gen)
+        assert_eq(records[0].site_id, site)
+        assert_eq(records[0].kind, 1)
+        assert_eq(records[0].a, 10)
+        assert_eq(records[0].b, 20)
+        assert_eq(log_event_collector_pending_v1(), 0)
+        # Re-activating an active site is a no-op, not a new generation.
+        assert_eq(ok_i64(log_event_site_activate_v1(site)), gen)
+
+    it "OBS-004: a disabled site never traverses the name-keyed catalog", fn():
+        # @req REQ-SSPEC-UNIT
+        step("disabled hot path touches no catalog")
+        fresh()
+        _ = log_event_collector_init_v1(8)
+        val site = ok_i64(log_event_site_register_v1("app.ready", LOG_SITE_DYNAMIC_READY))
+        val looked = log_event_site_lookup_v1("app.ready")
+        assert_eq(looked ?? -1, site)
+        val lookups_before = log_event_catalog_lookups_v1()
+        assert_eq(lookups_before, 1)
+        var i = 0
+        while i < 50:
+            assert_false(log_event_v1(site, counting_payload))
+            i = i + 1
+        assert_eq(log_event_catalog_lookups_v1(), lookups_before)
+        assert_eq(_payload_calls, 0)
+        # Active emits do not consult the catalog either.
+        _ = log_event_site_activate_v1(site)
+        assert_true(log_event_v1(site, counting_payload))
+        assert_eq(log_event_catalog_lookups_v1(), lookups_before)
+
+    it "OBS-013: a refused policy update keeps the previous policy; an accepted one bumps the generation", fn():
+        # @req REQ-SSPEC-UNIT
+        step("policy update")
+        fresh()
+        _ = log_event_collector_init_v1(8)
+        val site = ok_i64(log_event_site_register_v1("app.ready", LOG_SITE_DYNAMIC_READY))
+        val g1 = ok_i64(log_event_site_activate_v1(site))
+        assert_contains(err_text(log_event_policy_update_v1(site, -1)), "kept")
+        assert_eq(log_event_site_kind_min_v1(site), 0)
+        assert_eq(log_event_generation_v1(), g1)
+        val g2 = ok_i64(log_event_policy_update_v1(site, 5))
+        assert_eq(g2, g1 + 1)
+        assert_eq(log_event_site_kind_min_v1(site), 5)
+        # Runtime predicate: kind below the threshold is evaluated, then dropped.
+        _payload_kind = 3
+        assert_false(log_event_v1(site, counting_payload))
+        assert_eq(_payload_calls, 1)
+        assert_eq(log_event_collector_pending_v1(), 0)
+        _payload_kind = 7
+        assert_true(log_event_v1(site, counting_payload))
+        assert_eq(log_event_collector_pending_v1(), 1)
+
+    it "OBS-022: records queued under an old generation stay decodable after replacement", fn():
+        # @req REQ-SSPEC-UNIT
+        step("generation replacement")
+        fresh()
+        _ = log_event_collector_init_v1(8)
+        val site = ok_i64(log_event_site_register_v1("app.ready", LOG_SITE_DYNAMIC_READY))
+        val g1 = ok_i64(log_event_site_activate_v1(site))
+        assert_true(log_event_v1(site, counting_payload))
+        val g2 = ok_i64(log_event_policy_update_v1(site, 1))
+        assert_true(log_event_v1(site, counting_payload))
+        val records = log_event_drain_v1(16)
+        assert_eq(records.len(), 2)
+        assert_eq(records[0].generation, g1)
+        assert_eq(records[1].generation, g2)
+        assert_eq(records[0].version, LOG_EVENT_RECORD_VERSION)
+        assert_eq(records[1].version, LOG_EVENT_RECORD_VERSION)
+        assert_true(records[1].seq > records[0].seq)
+
+    it "disable drains rather than cuts, settles to resident/off, and is not an unload", fn():
+        # @req REQ-SSPEC-UNIT
+        step("disable + drain")
+        fresh()
+        _ = log_event_collector_init_v1(8)
+        val site = ok_i64(log_event_site_register_v1("app.ready", LOG_SITE_DYNAMIC_READY))
+        _ = log_event_site_activate_v1(site)
+        assert_true(log_event_v1(site, counting_payload))
+        assert_true(log_event_v1(site, counting_payload))
+        assert_eq(ok_i64(log_event_site_disable_v1(site)), log_event_generation_v1())
+        assert_eq(log_event_site_state_v1(site), LOG_SITE_STATE_DRAINING)
+        # Mask dropped at once: no new capture, payload not evaluated.
+        assert_false(log_event_v1(site, counting_payload))
+        assert_eq(_payload_calls, 2)
+        assert_contains(err_text(log_event_site_activate_v1(site)), "draining")
+        val records = log_event_drain_v1(1)
+        assert_eq(records.len(), 1)
+        assert_eq(log_event_site_state_v1(site), LOG_SITE_STATE_DRAINING)
+        assert_eq(log_event_drain_v1(16).len(), 1)
+        assert_eq(log_event_site_state_v1(site), LOG_SITE_STATE_RESIDENT_OFF)
+        # Still resident and registered: activation works again.
+        assert_true(ok_i64(log_event_site_activate_v1(site)) > 0)
+        assert_true(log_event_v1(site, counting_payload))
+
+    it "the collector is bounded and counts what it drops", fn():
+        # @req REQ-SSPEC-UNIT
+        step("bounded collector")
+        fresh()
+        _ = log_event_collector_init_v1(2)
+        val site = ok_i64(log_event_site_register_v1("app.ready", LOG_SITE_DYNAMIC_READY))
+        _ = log_event_site_activate_v1(site)
+        assert_true(log_event_v1(site, counting_payload))
+        assert_true(log_event_v1(site, counting_payload))
+        assert_false(log_event_v1(site, counting_payload))
+        assert_eq(log_event_collector_pending_v1(), 2)
+        assert_eq(log_event_collector_dropped_v1(), 1)
+        assert_eq(log_event_site_emitted_v1(site), 2)
+        assert_contains(err_text(log_event_collector_init_v1(4)), "already resident")

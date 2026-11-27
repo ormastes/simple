@@ -92,9 +92,9 @@ struct CliArgs:
         var args = CliArgs(
             mode: default_mode,
             input_files: [],
-            output_file: nil,
+            output_file: None,
             optimize: false,
-            opt_level: nil,
+            opt_level: None,
             debug_info: true,
             verbose: false,
             log_level: 4,
@@ -120,7 +120,7 @@ struct CliArgs:
         opts.verbose = self.verbose
         opts.log_level = self.log_level
         opts.profile = self.profile
-        opts.release = self.optimize or self.profile == "prod"
+        opts.release = self.profile == "prod"
         # Map `--target` to the codegen backend. wasm32/wasm select the pure-Simple
         # WASM backend (driver dispatches on backend == "wasm"/"wasm32"); any other
         # non-empty target is passed through as the backend name (c/cuda/opencl/vhdl).
@@ -146,14 +146,14 @@ class ArgParser:
 
     me next() -> text?:
         if self.pos >= self.args.len():
-            return nil
+            return None
         val arg = self.args[self.pos]
         self.pos = self.pos + 1
         Some(arg)
 
     me peek() -> text?:
         if self.pos >= self.args.len():
-            return nil
+            return None
         Some(self.args[self.pos])
 
     me parse() -> Result<CliArgs, text>:
@@ -163,7 +163,7 @@ class ArgParser:
             val next_arg = self.next()
             if not next_arg.?:
                 break
-            val arg = next_arg
+            val arg = next_arg.unwrap()
 
             if arg == "--":
                 # End of options marker - rest are positional args
@@ -171,7 +171,7 @@ class ArgParser:
                     val next_file = self.next()
                     if not next_file.?:
                         break
-                    val file = next_file
+                    val file = next_file.unwrap()
                     var files = result.input_files
                     files.push(file)
                     result.input_files = files
@@ -201,7 +201,7 @@ class ArgParser:
         Ok(result)
 
     me parse_long_option(arg: text, mut result: CliArgs) -> Result<CliArgs, text>:
-        val opt = arg.slice(2, arg.len())
+        val opt = arg.slice(2, arg.byte_len())
 
         # Options with values (--option=value or --option value)
         if opt.contains("="):
@@ -267,37 +267,36 @@ class ArgParser:
         val value = self.next()
         if not value.?:
             return Err("Option --{opt} requires a value")
-        val option_value = value
+        val option_value = value.unwrap()
 
         self.apply_option(opt, option_value, result)
 
     fn apply_option(name: text, value: text, mut result: CliArgs) -> Result<CliArgs, text>:
         match name:
             case "mode" | "m":
-                val mode = CompileMode.from_text(value)
-                if not mode.?:
+                if val mode = CompileMode.from_text(value):
+                    result.mode = mode
+                else:
                     return Err("Unknown mode: {value}")
-                result.mode = mode
 
             case "output" | "o":
                 result.output_file = Some(value)
 
             case "log-level" | "l":
-                val level = value.parse_int()
-                if not level.?:
+                if val lv = value.parse_int():
+                    result.log_level = lv
+                else:
                     return Err("Invalid log level: {value}")
-                result.log_level = level
 
             case "opt-level":
-                val level = value.parse_int()
-                if not level.?:
+                if val lv = value.parse_int():
+                    if lv < 0 or lv > 3:
+                        return Err("Optimization level must be 0-3, got: {value}")
+                    result.opt_level = Some(lv)
+                    if lv > 0:
+                        result.optimize = true
+                else:
                     return Err("Invalid optimization level: {value}")
-                val lv = level
-                if lv < 0 or lv > 3:
-                    return Err("Optimization level must be 0-3, got: {value}")
-                result.opt_level = Some(lv)
-                if lv > 0:
-                    result.optimize = true
 
             case "profile" | "p":
                 result.profile = value
@@ -308,7 +307,7 @@ class ArgParser:
         Ok(result)
 
     me parse_short_option(arg: text, mut result: CliArgs) -> Result<CliArgs, text>:
-        val opts = arg.slice(1, arg.len())
+        val opts = arg.slice(1, arg.byte_len())
         var i = 0
         while i < opts.len():
             val c = opts.char_at(i)
@@ -336,36 +335,36 @@ class ArgParser:
                 case 'o':
                     # -o requires a value (rest of arg or next arg)
                     if i + 1 < opts.len():
-                        result.output_file = Some(opts.slice(i + 1, opts.len()))
+                        result.output_file = Some(opts.slice(i + 1, opts.byte_len()))
                         return Ok(result)
                     else:
                         match self.next():
                             case Some(v):
                                 result.output_file = Some(v)
                                 return Ok(result)
-                            case nil:
+                            case None:
                                 return Err("Option -o requires a value")
                 case 'm':
                     # -m requires a value
                     val value = self.next()
                     if not value.?:
                         return Err("Option -m requires a value")
-                    val mode_text = value
-                    val mode = CompileMode.from_text(mode_text)
-                    if not mode.?:
+                    val mode_text = value.unwrap()
+                    if val mode = CompileMode.from_text(mode_text):
+                        result.mode = mode
+                    else:
                         return Err("Unknown mode: {mode_text}")
-                    result.mode = mode
                     return Ok(result)
                 case 'l':
                     # -l requires a value
                     val value = self.next()
                     if not value.?:
                         return Err("Option -l requires a value")
-                    val level_text = value
-                    val level = level_text.parse_int()
-                    if not level.?:
+                    val level_text = value.unwrap()
+                    if val lv = level_text.parse_int():
+                        result.log_level = lv
+                    else:
                         return Err("Invalid log level")
-                    result.log_level = level
                     return Ok(result)
                 case _:
                     return Err("Unknown option: -{c}")
@@ -501,9 +500,9 @@ fn main() -> i32:
         elif arg == "--O3":
             cli_args.apply_legacy_opt_level(3)
         elif arg.starts_with("--opt-level="):
-            val level_str = arg.slice(12, arg.len())
+            val level_str = arg.slice(12, arg.byte_len())
             val parsed = level_str.parse_int()
-            if parsed == nil:
+            if parsed.is_none():
                 print "Error: Invalid optimization level: {level_str}"
                 return 1
             val level = parsed ?? 0
@@ -518,7 +517,7 @@ fn main() -> i32:
             val level_str = args[idx]
             idx = idx + 1
             val parsed = level_str.parse_int()
-            if parsed == nil:
+            if parsed.is_none():
                 print "Error: Invalid optimization level: {level_str}"
                 return 1
             val level = parsed ?? 0
@@ -533,7 +532,7 @@ fn main() -> i32:
         elif arg == "-v" or arg == "--verbose":
             cli_args.verbose = true
         elif arg.starts_with("--mode="):
-            val text = arg.slice(7, arg.len())
+            val text = arg.slice(7, arg.byte_len())
             val m = CompileMode.from_text(text)
             if val parsed_mode = m:
                 requested_mode_text = _canonical_compile_mode_text(text)
@@ -555,7 +554,7 @@ fn main() -> i32:
                 print "Error: Unknown mode: {text}"
                 return 1
         elif arg.starts_with("--profile="):
-            cli_args.profile = arg.slice(10, arg.len())
+            cli_args.profile = arg.slice(10, arg.byte_len())
         elif arg == "-p":
             if idx >= args.len():
                 print "Error: -p requires a value"
@@ -563,7 +562,7 @@ fn main() -> i32:
             cli_args.profile = args[idx]
             idx = idx + 1
         elif arg.starts_with("--output="):
-            cli_args.output_file = Some(arg.slice(9, arg.len()))
+            cli_args.output_file = Some(arg.slice(9, arg.byte_len()))
         elif arg == "-o":
             if idx >= args.len():
                 print "Error: -o requires a value"
@@ -571,7 +570,7 @@ fn main() -> i32:
             cli_args.output_file = Some(args[idx])
             idx = idx + 1
         elif arg.starts_with("--log-level="):
-            val level_text = arg.slice(12, arg.len())
+            val level_text = arg.slice(12, arg.byte_len())
             val parsed_level = level_text.parse_int()
             if val level = parsed_level:
                 cli_args.log_level = level
@@ -590,7 +589,7 @@ fn main() -> i32:
             cli_args.target = args[idx]
             idx = idx + 1
         elif arg.starts_with("--target="):
-            cli_args.target = arg.slice(9, arg.len())
+            cli_args.target = arg.slice(9, arg.byte_len())
         elif arg.starts_with("-"):
             print "Error: unknown option {arg}"
             return 1

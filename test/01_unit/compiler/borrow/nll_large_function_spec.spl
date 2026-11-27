@@ -1,0 +1,223 @@
+"""REQ-ACBOR-001: loan liveness scales to large functions under the default budget.
+
+A 700-block straight chain (1400 CFG points) carries a reference from the
+first block to the last. The old round-robin, reverse-postorder liveness
+moved that fact one block per round and charged per-point list sizes, about
+2,000,000 work units: `loan liveness work budget exhausted` with the default
+budget. The worklist solver needs one block transfer per block here.
+Bug: doc/08_tracking/bug/borrow_loan_work_budget_exhausted_2026-10-24.md
+"""
+use std.spec
+use compiler.borrow.borrow_check.nll.{BasicBlock, ControlFlowGraph, NLLChecker}
+use compiler.borrow.borrow_check.borrow_graph.{Place, BorrowKind}
+
+fn large_block(id: i64, statements: [i64], terminal: i64, successors: [i64]) -> BasicBlock:
+    var block = BasicBlock.create(id)
+    block.statements = statements
+    block.terminator_point = terminal
+    block.successors = successors
+    block
+
+# Block k owns statement point 2k and terminator point 2k+1. With
+# `loop_back`, the last block also jumps back to block 1.
+fn large_chain(count: i64, loop_back: bool) -> ControlFlowGraph:
+    var cfg = ControlFlowGraph.create()
+    var k = 0
+    while k < count:
+        var succs: [i64] = []
+        if k + 1 < count: succs = [k + 1]
+        elif loop_back: succs = [1]
+        cfg.add_block(large_block(k, [2 * k], 2 * k + 1, succs))
+        k = k + 1
+    cfg
+
+fn large_errors(checker: NLLChecker) -> text:
+    var joined = ""
+    for msg in checker.format_errors(): joined = "{joined}{msg};"
+    joined
+
+describe "NLL loan liveness on a large function":
+    it "accepts shared loans whose reference is live across 700 blocks":
+        var checker = NLLChecker.create(large_chain(700, false))
+        checker.record_borrow(0, Place.local(0), BorrowKind.Shared, 10)
+        checker.record_borrow(700, Place.local(0), BorrowKind.Shared, 11)
+        checker.record_use(1398, Place.local(10))
+        checker.record_use(1398, Place.local(11))
+        val ok = checker.check()
+        expect(large_errors(checker)).to_equal("")
+        expect(ok).to_equal(true)
+
+    it "still rejects a conflicting loan while the long-lived reference is live":
+        var checker = NLLChecker.create(large_chain(700, false))
+        checker.record_borrow(0, Place.local(0), BorrowKind.Mutable, 10)
+        checker.record_borrow(700, Place.local(0), BorrowKind.Mutable, 11)
+        checker.record_use(1398, Place.local(10))
+        expect(checker.check()).to_equal(false)
+        expect(large_errors(checker).contains("work budget")).to_equal(false)
+        expect(large_errors(checker).contains("also borrowed as mutable")).to_equal(true)
+
+    it "accepts the conflict-free shape when the first reference dies early":
+        var checker = NLLChecker.create(large_chain(700, false))
+        checker.record_borrow(0, Place.local(0), BorrowKind.Mutable, 10)
+        checker.record_use(2, Place.local(10))
+        checker.record_borrow(700, Place.local(0), BorrowKind.Mutable, 11)
+        checker.record_use(1398, Place.local(11))
+        val ok = checker.check()
+        expect(large_errors(checker)).to_equal("")
+        expect(ok).to_equal(true)
+
+    it "carries liveness around a 700-block loop backedge":
+        var checker = NLLChecker.create(large_chain(700, true))
+        checker.record_borrow(0, Place.local(0), BorrowKind.Mutable, 10)
+        checker.record_use(2, Place.local(10))
+        checker.record_borrow(1398, Place.local(0), BorrowKind.Mutable, 11)
+        expect(checker.check()).to_equal(false)
+        expect(large_errors(checker).contains("work budget")).to_equal(false)
+
+# One straight-line block: statements 0..2*half-1, terminator 2*half. Temp
+# 1000+i is defined at point i and used at point 2*half-1-i, so `half` temps
+# are live across the middle of the block. Materializing a live set before
+# and after every point cost O(points x live) time and memory here; the
+# per-local event index answers each loan liveness query directly.
+fn straight_line(half: i64) -> ControlFlowGraph:
+    var cfg = ControlFlowGraph.create()
+    var statements: [i64] = []
+    var p = 0
+    while p < 2 * half:
+        statements = statements.push(p)
+        p = p + 1
+    cfg.add_block(large_block(0, statements, 2 * half, []))
+    cfg
+
+fn wide_live_temps(checker: NLLChecker, half: i64) -> NLLChecker:
+    var c = checker
+    var i = 0
+    while i < half:
+        c.record_assign(i, Place.local(1000 + i))
+        c.record_use(2 * half - 1 - i, Place.local(1000 + i))
+        i = i + 1
+    c
+
+describe "NLL loan liveness inside one large straight-line block":
+    it "accepts shared loans live across a 3000-point block with 1500 live temps":
+        var checker = wide_live_temps(NLLChecker.create(straight_line(1500)), 1500)
+        checker.record_borrow(0, Place.local(0), BorrowKind.Shared, 10)
+        checker.record_borrow(1500, Place.local(0), BorrowKind.Shared, 11)
+        checker.record_use(2999, Place.local(10))
+        checker.record_use(2999, Place.local(11))
+        val ok = checker.check()
+        expect(large_errors(checker)).to_equal("")
+        expect(ok).to_equal(true)
+
+    it "rejects a conflicting mutable loan while the first reference is live":
+        var checker = wide_live_temps(NLLChecker.create(straight_line(1500)), 1500)
+        checker.record_borrow(0, Place.local(0), BorrowKind.Mutable, 10)
+        checker.record_borrow(1500, Place.local(0), BorrowKind.Mutable, 11)
+        checker.record_use(2999, Place.local(10))
+        expect(checker.check()).to_equal(false)
+        expect(large_errors(checker).contains("work budget")).to_equal(false)
+        expect(large_errors(checker).contains("also borrowed as mutable")).to_equal(true)
+
+    it "accepts the second mutable loan once the first reference died mid-block":
+        var checker = wide_live_temps(NLLChecker.create(straight_line(1500)), 1500)
+        checker.record_borrow(0, Place.local(0), BorrowKind.Mutable, 10)
+        checker.record_use(700, Place.local(10))
+        checker.record_borrow(1500, Place.local(0), BorrowKind.Mutable, 11)
+        checker.record_use(2999, Place.local(11))
+        val ok = checker.check()
+        expect(large_errors(checker)).to_equal("")
+        expect(ok).to_equal(true)
+
+    it "keeps a reference live into a point that both uses and redefines it":
+        var checker = wide_live_temps(NLLChecker.create(straight_line(1500)), 1500)
+        checker.record_borrow(0, Place.local(0), BorrowKind.Mutable, 10)
+        checker.record_use(1499, Place.local(10))
+        checker.record_borrow(1499, Place.local(0), BorrowKind.Mutable, 10)
+        expect(checker.check()).to_equal(false)
+        expect(large_errors(checker).contains("also borrowed as mutable")).to_equal(true)
+
+# Diamond 0 -> {1, 2} -> 3; block k owns statement 2k and terminator 2k+1.
+# A sibling-block use of a reference is a LATER position in the per-local
+# event index (or an earlier one, depending on block order), so the
+# block-boundary guard must ignore it and fall back to the block's live_out.
+fn diamond() -> ControlFlowGraph:
+    var cfg = ControlFlowGraph.create()
+    cfg.add_block(large_block(0, [0], 1, [1, 2]))
+    cfg.add_block(large_block(1, [2], 3, [3]))
+    cfg.add_block(large_block(2, [4], 5, [3]))
+    cfg.add_block(large_block(3, [6], 7, []))
+    cfg
+
+# Fan 0 -> {1, 2, 3} -> 4, same point numbering. Blocks are positioned in
+# breadth-first order, so from middle sibling 2 a use in sibling 1 sits
+# before the query and a use in sibling 3 sits after it, outside block 2.
+fn fan3() -> ControlFlowGraph:
+    var cfg = ControlFlowGraph.create()
+    cfg.add_block(large_block(0, [0], 1, [1, 2, 3]))
+    cfg.add_block(large_block(1, [2], 3, [4]))
+    cfg.add_block(large_block(2, [4], 5, [4]))
+    cfg.add_block(large_block(3, [6], 7, [4]))
+    cfg.add_block(large_block(4, [8], 9, []))
+    cfg
+
+describe "NLL loan liveness across sibling blocks":
+    it "ignores a later sibling-block use when the reference is dead in this block":
+        var checker = NLLChecker.create(diamond())
+        checker.record_borrow(0, Place.local(0), BorrowKind.Mutable, 10)
+        checker.record_borrow(2, Place.local(0), BorrowKind.Mutable, 11)
+        checker.record_use(4, Place.local(10))
+        val ok = checker.check()
+        expect(large_errors(checker)).to_equal("")
+        expect(ok).to_equal(true)
+
+    it "ignores earlier and later sibling-block uses when the reference is dead in this block":
+        # In block 2 the first event at/after the query is the use at point 6
+        # in block 3, past block 2's end: only the block-boundary guard stops
+        # it from being read as a live use.
+        var checker = NLLChecker.create(fan3())
+        checker.record_borrow(0, Place.local(0), BorrowKind.Mutable, 10)
+        checker.record_use(2, Place.local(10))
+        checker.record_use(6, Place.local(10))
+        checker.record_borrow(4, Place.local(0), BorrowKind.Mutable, 11)
+        val ok = checker.check()
+        expect(large_errors(checker)).to_equal("")
+        expect(ok).to_equal(true)
+
+    it "uses live_out when the join block keeps the reference alive":
+        var checker = NLLChecker.create(diamond())
+        checker.record_borrow(0, Place.local(0), BorrowKind.Mutable, 10)
+        checker.record_borrow(2, Place.local(0), BorrowKind.Mutable, 11)
+        checker.record_use(4, Place.local(10))
+        checker.record_use(6, Place.local(10))
+        expect(checker.check()).to_equal(false)
+        expect(large_errors(checker).contains("also borrowed as mutable")).to_equal(true)
+
+# One reference used at every one of 2000 statement points: each liveness
+# query reads `local_events[local] ?? []` for a 2000-event list, which must
+# stay a binary search over a shared array, not a per-query copy. These
+# cases check verdicts on that shape only; they do not measure cost.
+fn hot_local_uses(checker: NLLChecker, count: i64) -> NLLChecker:
+    var c = checker
+    var p = 1
+    while p < count:
+        c.record_use(p, Place.local(10))
+        p = p + 1
+    c
+
+describe "NLL loan liveness for one heavily used local":
+    it "accepts shared loans for a reference used at every one of 2000 points":
+        var checker = hot_local_uses(NLLChecker.create(straight_line(1000)), 2000)
+        checker.record_borrow(0, Place.local(0), BorrowKind.Shared, 10)
+        checker.record_borrow(1000, Place.local(0), BorrowKind.Shared, 11)
+        checker.record_use(1999, Place.local(11))
+        val ok = checker.check()
+        expect(large_errors(checker)).to_equal("")
+        expect(ok).to_equal(true)
+
+    it "still rejects a mutable loan inside the hot reference's live range":
+        var checker = hot_local_uses(NLLChecker.create(straight_line(1000)), 2000)
+        checker.record_borrow(0, Place.local(0), BorrowKind.Mutable, 10)
+        checker.record_borrow(1000, Place.local(0), BorrowKind.Mutable, 11)
+        expect(checker.check()).to_equal(false)
+        expect(large_errors(checker).contains("work budget")).to_equal(false)
+        expect(large_errors(checker).contains("also borrowed as mutable")).to_equal(true)

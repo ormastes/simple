@@ -1,0 +1,168 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/net/h2_frame.spl 75%
+# @tag: unit, browser_engine, net, http2
+#
+# HTTP/2 frame codec (RFC 7540 section 4.1): the 9-octet frame header layout,
+# the frame-type registry of section 6, the flag bits and the error-code names
+# of section 7. Expected octets are written out from the RFC layout
+# (24-bit length, 8-bit type, 8-bit flags, R + 31-bit stream id), not read
+# back from the encoder. Payload/ids stay below 128 so every octet is ASCII.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.net.h2_frame.{
+    H2Frame, H2FrameType,
+    frame_type_to_id, id_to_frame_type, frame_type_name,
+    has_flag, set_flag, encode_frame, decode_frame,
+    encode_window_update, encode_goaway, encode_rst_stream, encode_ping,
+    error_code_name, decode_byte, decode_uint16, decode_uint32, int_to_hex
+}
+
+describe "HTTP/2 frame codec":
+
+    context "frame type registry":
+
+        it "maps every type to its RFC 7540 id":
+            expect(frame_type_to_id(H2FrameType.Data)).to_equal(0)
+            expect(frame_type_to_id(H2FrameType.Headers)).to_equal(1)
+            expect(frame_type_to_id(H2FrameType.Priority)).to_equal(2)
+            expect(frame_type_to_id(H2FrameType.RstStream)).to_equal(3)
+            expect(frame_type_to_id(H2FrameType.Settings)).to_equal(4)
+            expect(frame_type_to_id(H2FrameType.PushPromise)).to_equal(5)
+            expect(frame_type_to_id(H2FrameType.Ping)).to_equal(6)
+            expect(frame_type_to_id(H2FrameType.GoAway)).to_equal(7)
+            expect(frame_type_to_id(H2FrameType.WindowUpdate)).to_equal(8)
+            expect(frame_type_to_id(H2FrameType.Continuation)).to_equal(9)
+
+        it "maps ids back to names":
+            expect(frame_type_name(id_to_frame_type(0).unwrap())).to_equal("DATA")
+            expect(frame_type_name(id_to_frame_type(3).unwrap())).to_equal("RST_STREAM")
+            expect(frame_type_name(id_to_frame_type(5).unwrap())).to_equal("PUSH_PROMISE")
+            expect(frame_type_name(id_to_frame_type(7).unwrap())).to_equal("GOAWAY")
+            expect(frame_type_name(id_to_frame_type(8).unwrap())).to_equal("WINDOW_UPDATE")
+            expect(frame_type_name(id_to_frame_type(9).unwrap())).to_equal("CONTINUATION")
+
+        it "rejects an id outside the registry":
+            expect(id_to_frame_type(10).is_err()).to_equal(true)
+            expect(id_to_frame_type(-1).is_err()).to_equal(true)
+
+    context "flags":
+
+        it "tests single bits":
+            expect(has_flag(5, 1)).to_equal(true)
+            expect(has_flag(5, 4)).to_equal(true)
+            expect(has_flag(5, 8)).to_equal(false)
+            expect(has_flag(0x20, 0x20)).to_equal(true)
+
+        it "sets a bit once":
+            expect(set_flag(1, 4)).to_equal(5)
+            expect(set_flag(5, 4)).to_equal(5)
+
+        it "exposes the flag predicates on a frame":
+            val f = H2Frame.create(H2FrameType.Headers, 5, 1, "")
+            expect(f.is_end_stream()).to_equal(true)
+            expect(f.is_end_headers()).to_equal(true)
+            val g = H2Frame.create(H2FrameType.Headers, 4, 1, "")
+            expect(g.is_end_stream()).to_equal(false)
+            expect(g.is_end_headers()).to_equal(true)
+            expect(H2Frame.create(H2FrameType.Settings, 1, 0, "").is_ack()).to_equal(true)
+
+    context "frame header layout":
+
+        it "writes length, type, flags and stream id into nine octets":
+            val wire = encode_frame(H2Frame.create(H2FrameType.Headers, 5, 3, "abc"))
+            expect(wire.len()).to_equal(12)
+            expect(decode_byte(wire, 0)).to_equal(0)
+            expect(decode_byte(wire, 1)).to_equal(0)
+            expect(decode_byte(wire, 2)).to_equal(3)
+            expect(decode_byte(wire, 3)).to_equal(1)
+            expect(decode_byte(wire, 4)).to_equal(5)
+            expect(decode_uint32(wire, 5)).to_equal(3)
+            expect(wire.slice(9, 12)).to_equal("abc")
+
+        it "spreads a multi-octet stream id big-endian":
+            val wire = encode_frame(H2Frame.create(H2FrameType.Data, 0, 0x01020304, ""))
+            expect(wire.len()).to_equal(9)
+            expect(decode_byte(wire, 5)).to_equal(1)
+            expect(decode_byte(wire, 6)).to_equal(2)
+            expect(decode_byte(wire, 7)).to_equal(3)
+            expect(decode_byte(wire, 8)).to_equal(4)
+
+        it "round-trips a frame through decode":
+            val wire = encode_frame(H2Frame.create(H2FrameType.Data, 1, 7, "hello"))
+            val back = decode_frame(wire).unwrap()
+            expect(back.length).to_equal(5)
+            expect(frame_type_name(back.frame_type)).to_equal("DATA")
+            expect(back.flags).to_equal(1)
+            expect(back.stream_id).to_equal(7)
+            expect(back.payload).to_equal("hello")
+
+        it "ignores octets after the declared payload length":
+            val wire = encode_frame(H2Frame.create(H2FrameType.Data, 0, 1, "ab")) + "TRAILING"
+            expect(decode_frame(wire).unwrap().payload).to_equal("ab")
+
+        it "decodes an empty payload":
+            val back = decode_frame(encode_frame(H2Frame.create(H2FrameType.Settings, 1, 0, ""))).unwrap()
+            expect(back.length).to_equal(0)
+            expect(back.payload).to_equal("")
+            expect(back.is_ack()).to_equal(true)
+
+        it "rejects a header shorter than nine octets":
+            expect(decode_frame("12345678").is_err()).to_equal(true)
+
+        it "rejects a truncated payload":
+            val wire = encode_frame(H2Frame.create(H2FrameType.Data, 0, 1, "hello"))
+            expect(decode_frame(wire.slice(0, 11)).is_err()).to_equal(true)
+
+        it "describes a frame for diagnostics":
+            val f = H2Frame.create(H2FrameType.Headers, 37, 5, "abcd")
+            expect(f.description()).to_equal("HEADERS frame: stream=5, length=4, flags=0x25")
+
+    context "control payloads":
+
+        it "encodes a WINDOW_UPDATE increment as four octets":
+            val p = encode_window_update(0x00010203)
+            expect(p.len()).to_equal(4)
+            expect(decode_uint32(p, 0)).to_equal(0x00010203)
+
+        it "encodes GOAWAY as last-stream-id then error code":
+            val p = encode_goaway(5, 2)
+            expect(p.len()).to_equal(8)
+            expect(decode_uint32(p, 0)).to_equal(5)
+            expect(decode_uint32(p, 4)).to_equal(2)
+
+        it "encodes RST_STREAM as a four-octet error code":
+            val p = encode_rst_stream(8)
+            expect(p.len()).to_equal(4)
+            expect(decode_uint32(p, 0)).to_equal(8)
+
+        it "pads and truncates PING opaque data to eight octets":
+            expect(encode_ping("abc").len()).to_equal(8)
+            expect(decode_byte(encode_ping("abc"), 2)).to_equal(99)
+            expect(decode_byte(encode_ping("abc"), 3)).to_equal(0)
+            expect(encode_ping("0123456789")).to_equal("01234567")
+
+    context "numeric helpers":
+
+        it "reads big-endian 16-bit values and zero past the end":
+            expect(decode_uint16("AB", 0)).to_equal(16706)
+            expect(decode_byte("AB", 2)).to_equal(0)
+            expect(decode_byte("AB", -1)).to_equal(0)
+
+        it "formats lower-case hex without a prefix":
+            expect(int_to_hex(0)).to_equal("0")
+            expect(int_to_hex(255)).to_equal("ff")
+            expect(int_to_hex(4096)).to_equal("1000")
+
+    context "error code names":
+
+        it "names the RFC 7540 section 7 codes":
+            expect(error_code_name(0)).to_equal("NO_ERROR")
+            expect(error_code_name(1)).to_equal("PROTOCOL_ERROR")
+            expect(error_code_name(3)).to_equal("FLOW_CONTROL_ERROR")
+            expect(error_code_name(8)).to_equal("CANCEL")
+            expect(error_code_name(11)).to_equal("ENHANCE_YOUR_CALM")
+            expect(error_code_name(13)).to_equal("HTTP_1_1_REQUIRED")
+
+        it "labels an unassigned code":
+            expect(error_code_name(99)).to_equal("UNKNOWN(99)")

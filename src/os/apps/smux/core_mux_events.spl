@@ -1,0 +1,161 @@
+# Per-lease event retention, not a service registry or native observation owner.
+# Callers authenticate/revoke leases and serialize preflight/effects/publication.
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.observation_v1.*
+use std.common.contracts.mux.validation_v1.{mux_validate_handle_v1}
+use std.common.contracts.mux.wire_validation_v1.{mux_wire_validate_events_v1}
+use std.common.contracts.mux.wire_values_05_v1.{mux_wire_size_mux_event_v1}
+use std.common.contracts.mux.wire_values_06_v1.{mux_wire_size_mux_event_batch_v1}
+
+pub struct CoreMuxEventJournalV1:
+    handle: MuxHandleV1
+    last_cursor: u64
+    discarded_through: u64
+    events: [MuxEventV1]
+    max_events: i64
+    max_bytes: i64
+
+val EVENT_CURSOR_MAX: u64 = 18446744073709551615u64
+
+fn event_error(kind: MuxErrorKindV1, detail: text) -> MuxErrorV1:
+    return MuxErrorV1(kind: kind, detail: detail, request_id: 0,
+        commit_state: MuxCommitStateV1.NotApplied, observed_revision: nil,
+        affected: [], cleanup_pending: false)
+
+fn event_batch(handle: MuxHandleV1, start: u64, finish: u64, events: [MuxEventV1], lost: bool) -> MuxEventBatchV1:
+    return MuxEventBatchV1(owner_id: handle.owner_id, owner_generation: handle.owner_generation,
+        from_cursor: start, to_cursor: finish, events: events, reconciliation_required: lost)
+
+fn batch_size(batch: MuxEventBatchV1) -> Result<i64, MuxErrorV1>:
+    val sized = mux_wire_size_mux_event_batch_v1(batch)
+    if sized.is_err(): return Err(event_error(MuxErrorKindV1.InvalidRequest, "event batch encoding invalid"))
+    return Ok(sized.unwrap())
+
+# Canonical array sizing charges two separator bytes per element. The existing
+# codec uses fixed conservative u64/bool charges, so base overhead is cursor-
+# independent. No caller supplies a byte charge or untrusted cached total.
+fn event_charge(event: MuxEventV1) -> Result<i64, MuxErrorV1>:
+    val sized = mux_wire_size_mux_event_v1(event)
+    if sized.is_err(): return Err(event_error(MuxErrorKindV1.InvalidRequest, "event encoding invalid"))
+    return Ok(sized.unwrap() + 2)
+
+fn journal_check(st: CoreMuxEventJournalV1, handle: MuxHandleV1) -> Result<bool, MuxErrorV1>:
+    if st.handle.owner_id != handle.owner_id or st.handle.owner_generation != handle.owner_generation or st.handle.lease_id != handle.lease_id:
+        return Err(event_error(MuxErrorKindV1.PermissionDenied, "event journal lease differs"))
+    mux_validate_handle_v1(handle)?
+    if st.max_events < 1 or st.max_events > 1024 or st.max_bytes < 256 or st.max_bytes > 1048576:
+        return Err(event_error(MuxErrorKindV1.InvalidRequest, "event retention limits invalid"))
+    if st.discarded_through > st.last_cursor or st.events.len() > st.max_events:
+        return Err(event_error(MuxErrorKindV1.InvalidRequest, "event retention state invalid"))
+    var previous = st.discarded_through
+    for event in st.events:
+        if previous == EVENT_CURSOR_MAX or event.cursor != previous + 1:
+            return Err(event_error(MuxErrorKindV1.InvalidRequest, "event retention cursor gap"))
+        previous = event.cursor
+    if previous != st.last_cursor:
+        return Err(event_error(MuxErrorKindV1.InvalidRequest, "event retention tail invalid"))
+    val batch = event_batch(handle, st.discarded_through, st.last_cursor, st.events, false)
+    if mux_wire_validate_events_v1(batch).is_err():
+        return Err(event_error(MuxErrorKindV1.InvalidRequest, "event retention value invalid"))
+    if batch_size(batch)? > st.max_bytes:
+        return Err(event_error(MuxErrorKindV1.InvalidRequest, "event retention exceeds byte budget"))
+    return Ok(true)
+
+pub fn core_mux_events_new_v1(handle: MuxHandleV1, max_events: i64, max_bytes: i64) -> Result<CoreMuxEventJournalV1, MuxErrorV1>:
+    """Bind empty bounded retention to a caller-authenticated exact lease handle."""
+    val st = CoreMuxEventJournalV1(handle: handle, last_cursor: 0, discarded_through: 0,
+        events: [], max_events: max_events, max_bytes: max_bytes)
+    journal_check(st, handle)?
+    return Ok(st)
+
+pub fn core_mux_events_can_advance_v1(st: CoreMuxEventJournalV1, handle: MuxHandleV1, count: i64) -> Result<bool, MuxErrorV1>:
+    """Check all planned serial advances before owner effects; this reserves nothing."""
+    journal_check(st, handle)?
+    if count < 0 or count > 1024:
+        return Err(event_error(MuxErrorKindV1.InvalidRequest, "event advance count invalid"))
+    if (count as u64) > EVENT_CURSOR_MAX - st.last_cursor:
+        return Err(event_error(MuxErrorKindV1.Unavailable, "event cursor exhausted"))
+    return Ok(true)
+
+pub fn core_mux_events_append_v1(st: CoreMuxEventJournalV1, handle: MuxHandleV1,
+    causal_request_id: u64?, observed_revision: u64, kind: MuxEventKindV1) -> Result<CoreMuxEventJournalV1, MuxErrorV1>:
+    """Retain an actual owner-supplied observation, or explicitly record retention loss."""
+    core_mux_events_can_advance_v1(st, handle, 1)?
+    val cursor = st.last_cursor + 1
+    val event = MuxEventV1(cursor: cursor, causal_request_id: causal_request_id,
+        observed_revision: observed_revision, kind: kind)
+    val singleton = [event]
+    if singleton.len() != 1:
+        return Err(event_error(MuxErrorKindV1.Unavailable, "event singleton allocation failed"))
+    val single = event_batch(handle, st.last_cursor, cursor, singleton, false)
+    if mux_wire_validate_events_v1(single).is_err():
+        return Err(event_error(MuxErrorKindV1.InvalidRequest, "event observation invalid"))
+    val single_bytes = batch_size(single)?
+    if single_bytes > st.max_bytes:
+        # Valid observation was not retained. Advance the explicit loss floor;
+        # old poll cursors require snapshot reconciliation, never a fake event.
+        return Ok(CoreMuxEventJournalV1(handle: handle, last_cursor: cursor,
+            discarded_through: cursor, events: [], max_events: st.max_events, max_bytes: st.max_bytes))
+    # Own the appended array even when a configured array implementation aliases
+    # copied storage. Never mutate the caller's retained journal value.
+    var retained: [MuxEventV1] = []
+    for previous in st.events:
+        val before_count = retained.len()
+        retained.push(previous)
+        if retained.len() != before_count + 1:
+            return Err(event_error(MuxErrorKindV1.Unavailable, "event retention copy failed"))
+    retained.push(event)
+    if retained.len() != st.events.len() + 1:
+        return Err(event_error(MuxErrorKindV1.Unavailable, "event retention append failed"))
+    var bytes = batch_size(event_batch(handle, 0, 0, [], false))?
+    for item in retained: bytes = bytes + event_charge(item)?
+    var first: i64 = 0
+    var lost = st.discarded_through
+    while retained.len() - first > st.max_events or bytes > st.max_bytes:
+        bytes = bytes - event_charge(retained[first])?
+        lost = retained[first].cursor
+        first = first + 1
+    val tail = retained[first:]
+    if tail.len() != retained.len() - first:
+        return Err(event_error(MuxErrorKindV1.Unavailable, "event retention slice failed"))
+    val next = CoreMuxEventJournalV1(handle: handle, last_cursor: cursor,
+        discarded_through: lost, events: tail, max_events: st.max_events, max_bytes: st.max_bytes)
+    if journal_check(next, handle).is_err():
+        return Err(event_error(MuxErrorKindV1.Unavailable, "event retention construction failed"))
+    return Ok(next)
+
+pub fn core_mux_events_poll_v1(st: CoreMuxEventJournalV1, handle: MuxHandleV1,
+    after_cursor: u64, limits: MuxEventLimitsV1) -> Result<MuxEventBatchV1, MuxErrorV1>:
+    """Read bounded retained events without polling children, renewing or consuming state."""
+    journal_check(st, handle)?
+    if after_cursor > st.last_cursor:
+        return Err(event_error(MuxErrorKindV1.InvalidRequest, "event cursor is in the future"))
+    if limits.max_events < 1 or limits.max_events > 1024 or limits.max_bytes < 1 or limits.max_bytes > 1048576:
+        return Err(event_error(MuxErrorKindV1.InvalidRequest, "event poll limits invalid"))
+    val lost = after_cursor < st.discarded_through
+    var finish = if lost: st.discarded_through else: after_cursor
+    var selected: [MuxEventV1] = []
+    var bytes = batch_size(event_batch(handle, after_cursor, finish, [], lost))?
+    if bytes > limits.max_bytes:
+        return Err(event_error(MuxErrorKindV1.Busy, "event reply overhead exceeds budget"))
+    for event in st.events:
+        if event.cursor > after_cursor:
+            if selected.len() >= limits.max_events: break
+            val charge = event_charge(event)?
+            if charge > limits.max_bytes - bytes:
+                if selected.len() == 0:
+                    return Err(event_error(MuxErrorKindV1.Busy, "next event exceeds reply budget"))
+                break
+            val before_count = selected.len()
+            selected.push(event)
+            if selected.len() != before_count + 1:
+                return Err(event_error(MuxErrorKindV1.Unavailable, "event reply allocation failed"))
+            bytes = bytes + charge
+            finish = event.cursor
+    val batch = event_batch(handle, after_cursor, finish, selected, lost)
+    if batch.events.len() != selected.len() or mux_wire_validate_events_v1(batch).is_err():
+        return Err(event_error(MuxErrorKindV1.Unavailable, "event reply construction failed"))
+    # Recheck through the canonical whole-batch seam, guarding codec evolution.
+    if batch_size(batch)? > limits.max_bytes:
+        return Err(event_error(MuxErrorKindV1.Busy, "event reply exceeds budget"))
+    return Ok(batch)

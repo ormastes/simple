@@ -1,0 +1,45 @@
+# `match opt: Some(x)` on a module-level `T?` holding a class must bind the
+# shared instance, not a snapshot: a `me` call through `x` is visible via every
+# other handle. Regression: pattern_matches bound the Object view of a
+# ClassInstance, detaching the singleton returned by get_runtime().
+use std.spec.*
+
+struct Entry:
+    a: i64
+
+class Runtime:
+    entries: Dict<i64, Entry>
+    ready: [i64]
+
+impl Runtime:
+    static fn new() -> Runtime:
+        Runtime(entries: {}, ready: [])
+
+    me add():
+        self.entries.insert(1, Entry(a: 1))
+
+    fn count() -> i64:
+        var n = 0
+        for key in self.entries.keys():
+            n = n + 1
+        n
+
+var global_runtime: Runtime? = nil
+
+fn get_runtime() -> Runtime:
+    match global_runtime:
+        Some(runtime):
+            runtime
+        nil:
+            val runtime = Runtime.new()
+            global_runtime = Some(runtime)
+            runtime
+
+describe "class bound through Some(x) pattern":
+    it "keeps mutation made via a second singleton handle":
+        val first = get_runtime()
+        val second = get_runtime()
+        second.add()
+        expect(second.count()).to_equal(1)
+        expect(first.count()).to_equal(1)
+        expect(get_runtime().count()).to_equal(1)

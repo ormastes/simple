@@ -1,0 +1,186 @@
+"""
+## Purpose and audience
+
+Executable contract for `std.common.diagnostics.source_position`: the shared
+byte-offset <-> 0-based UTF-16 line/character map that every LSP/MCP producer
+(Simple, CMM, Markdown) must route through instead of assuming one byte is one
+code unit. Traces REQ-DIAG-003 (exact ranges). Audience: the P2-P5 diagnostics
+lanes and anyone touching an LSP position conversion.
+
+Scenarios build the line-start table once per snapshot, then round-trip
+offsets through CJK, Hangul, emoji (surrogate pairs), combining marks, tabs,
+CRLF, lone CR, EOF, zero-width and multi-line spans, and reject ambiguous
+positions (continuation bytes, split surrogates, past-end characters).
+"""
+# @cover src/lib/common/diagnostics/source_position.spl
+
+use std.spec
+use std.common.string_core.{char_from_code}
+use std.common.diagnostics.source_position.{
+    LineStartTable, Utf16Position, byte_to_position, position_to_byte, span_to_range
+}
+
+# Unwrap helpers so a None path fails on a sentinel rather than crashing.
+fn pos_line(p: Utf16Position?) -> i64:
+    match p:
+        Some(v): v.line
+        None: -1
+
+fn pos_char(p: Utf16Position?) -> i64:
+    match p:
+        Some(v): v.character
+        None: -1
+
+# @manual_section: source_position
+describe "source_position byte <-> UTF-16":
+    it "counts ASCII and tabs as one code unit each on line 0":
+        # @req REQ-DIAG-003
+        val src = "ab\tc"
+        val table = LineStartTable.build(src)
+        # @capture(value): position of the byte after the tab
+        step("Convert the byte offset of 'c' to a UTF-16 position")
+        val p = byte_to_position(src, table, 3)
+        expect(pos_line(p)).to_equal(0)  # oracle: single-line input
+        expect(pos_char(p)).to_equal(3)  # oracle: a, b, tab = 3 code units
+        step("Convert the position back to the same byte offset")
+        expect(position_to_byte(src, table, Utf16Position(line: 0, character: 3)) ?? -1).to_equal(3)  # oracle: round trip
+
+    it "maps 3-byte CJK and Hangul scalars to one code unit each":
+        # @req REQ-DIAG-003
+        val src = "中한x"
+        val table = LineStartTable.build(src)
+        # @capture(value): character index of 'x' after two 3-byte scalars
+        step("Convert the byte offset of 'x' (byte 6) to UTF-16")
+        val p = byte_to_position(src, table, 6)
+        expect(pos_char(p)).to_equal(2)  # oracle: 中 and 한 are one UTF-16 unit each
+        step("Round-trip the UTF-16 position back to byte 6")
+        expect(position_to_byte(src, table, Utf16Position(line: 0, character: 2)) ?? -1).to_equal(6)  # oracle: 3 + 3 bytes
+
+    it "maps an astral emoji to a surrogate pair and rejects a split surrogate":
+        # @req REQ-DIAG-003
+        val src = "a😀b"
+        val table = LineStartTable.build(src)
+        # @capture(value): UTF-16 index of 'b' after a 4-byte scalar
+        step("Convert the byte offset of 'b' (byte 5) to UTF-16")
+        val p = byte_to_position(src, table, 5)
+        expect(pos_char(p)).to_equal(3)  # oracle: a (1) + emoji surrogate pair (2)
+        step("Round-trip character 3 back to byte 5")
+        expect(position_to_byte(src, table, Utf16Position(line: 0, character: 3)) ?? -1).to_equal(5)  # oracle: 1 + 4 bytes
+        step("Reject character 2, which falls between the two surrogates")
+        val split = position_to_byte(src, table, Utf16Position(line: 0, character: 2))
+        expect(split.?).to_equal(false)
+
+    it "treats a combining mark as its own code unit":
+        # @req REQ-DIAG-003
+        val src = "e" + char_from_code(769) + "x"
+        val table = LineStartTable.build(src)
+        # @capture(value): character index of 'x' after e + U+0301 (2 bytes)
+        step("Convert the byte offset of 'x' (byte 3) to UTF-16")
+        val p = byte_to_position(src, table, 3)
+        expect(pos_char(p)).to_equal(2)  # oracle: e and U+0301 are separate code units
+        step("Round-trip back to byte 3")
+        expect(position_to_byte(src, table, Utf16Position(line: 0, character: 2)) ?? -1).to_equal(3)  # oracle: 1 + 2 bytes
+
+    it "starts a new line after CRLF and keeps the CR on the previous line":
+        # @req REQ-DIAG-003
+        val src = "ab\r\ncd"
+        val table = LineStartTable.build(src)
+        # @capture(value): line count and the line of each byte around the terminator
+        step("Build the line-start table once for the snapshot")
+        expect(table.line_count()).to_equal(2)  # oracle: one CRLF terminator
+        expect(table.line_start(1)).to_equal(4)  # oracle: 'c' follows the 2-byte CRLF
+        step("Classify the CR, the LF and the first byte of line 1")
+        expect(table.line_of_byte(2)).to_equal(0)  # oracle: CR belongs to line 0
+        expect(table.line_of_byte(3)).to_equal(0)  # oracle: LF belongs to line 0
+        expect(pos_line(byte_to_position(src, table, 4))).to_equal(1)  # oracle: 'c' opens line 1
+        expect(pos_char(byte_to_position(src, table, 4))).to_equal(0)  # oracle: first character of line 1
+        step("Map the end-of-line position of line 0 to the byte before the CR")
+        expect(position_to_byte(src, table, Utf16Position(line: 0, character: 2)) ?? -1).to_equal(2)  # oracle: 'ab' is 2 bytes
+
+    it "treats a lone CR as a line terminator":
+        # @req REQ-DIAG-003
+        val src = "a\rb"
+        val table = LineStartTable.build(src)
+        # @capture(value): line of 'b' after a bare CR
+        step("Convert the byte offset of 'b' to a UTF-16 position")
+        expect(pos_line(byte_to_position(src, table, 2))).to_equal(1)  # oracle: LSP counts \r as a terminator
+        expect(table.line_count()).to_equal(2)  # oracle: a | b
+
+    it "maps EOF to the end of the last line and rejects offsets past EOF":
+        # @req REQ-DIAG-003
+        val src = "ab\ncd"
+        val table = LineStartTable.build(src)
+        # @capture(value): position of byte_len and the None for byte_len + 1
+        step("Convert the EOF offset (byte 5)")
+        val eof = byte_to_position(src, table, 5)
+        expect(pos_line(eof)).to_equal(1)  # oracle: last line
+        expect(pos_char(eof)).to_equal(2)  # oracle: after 'cd'
+        step("Round-trip EOF back to byte 5")
+        expect(position_to_byte(src, table, Utf16Position(line: 1, character: 2)) ?? -1).to_equal(5)  # oracle: total byte length
+        step("Reject one past EOF, a character past the line end and a line past the table")
+        expect(byte_to_position(src, table, 6).?).to_equal(false)
+        expect(position_to_byte(src, table, Utf16Position(line: 1, character: 3)).?).to_equal(false)
+        expect(position_to_byte(src, table, Utf16Position(line: 2, character: 0)).?).to_equal(false)
+
+    it "rejects a byte offset inside a multi-byte scalar":
+        # @req REQ-DIAG-003
+        val src = "中x"
+        val table = LineStartTable.build(src)
+        # @capture(value): None for a continuation byte, Some for the scalar start
+        step("Convert byte 1, a UTF-8 continuation byte")
+        expect(byte_to_position(src, table, 1).?).to_equal(false)
+        step("Convert byte 0, the scalar start")
+        expect(pos_char(byte_to_position(src, table, 0))).to_equal(0)  # oracle: first character
+
+    it "converts zero-width and multi-line spans to valid ranges":
+        # @req REQ-DIAG-003
+        val src = "ab\ncd\nef"
+        val table = LineStartTable.build(src)
+        # @capture(value): range endpoints for a zero-width and a three-line span
+        step("Convert the zero-width span 4..4")
+        val zero = span_to_range(src, table, 4, 4)
+        match zero:
+            Some(r):
+                expect(r.start.line).to_equal(r.end.line)
+                expect(r.start.character).to_equal(r.end.character)
+                expect(r.start.line).to_equal(1)  # oracle: byte 4 is 'd' on line 1
+            None:
+                expect(false).to_equal(true)
+        step("Convert the multi-line span 1..7")
+        val multi = span_to_range(src, table, 1, 7)
+        match multi:
+            Some(r):
+                expect(r.start.line).to_equal(0)  # oracle: 'b'
+                expect(r.start.character).to_equal(1)  # oracle: after 'a'
+                expect(r.end.line).to_equal(2)  # oracle: 'f'
+                expect(r.end.character).to_equal(1)  # oracle: after 'e'
+            None:
+                expect(false).to_equal(true)
+        step("Reject an inverted span")
+        expect(span_to_range(src, table, 7, 1).?).to_equal(false)
+
+    it "round-trips every scalar boundary of a mixed multi-line text":
+        # @req REQ-DIAG-003
+        val src = "a中\r\n😀" + char_from_code(769) + "\tb\n한"
+        val table = LineStartTable.build(src)
+        var boundaries = 0
+        var round_trips = 0
+        var offset = 0
+        # @capture(table): boundary offsets vs successful round trips
+        step("Walk every byte offset, converting each scalar boundary there and back")
+        while offset <= src.byte_len():
+            val p = byte_to_position(src, table, offset)
+            match p:
+                Some(v):
+                    boundaries = boundaries + 1
+                    if (position_to_byte(src, table, v) ?? -1) == offset:
+                        round_trips = round_trips + 1
+                None:
+                    boundaries = boundaries
+            offset = offset + 1
+        expect(boundaries).to_equal(11)  # oracle: 10 scalars + EOF (CR and LF count as scalars)
+        expect(round_trips).to_equal(10)  # oracle: only the LF of the CRLF collapses onto the CR's EOL position
+        step("Confirm the LF inside the CRLF maps to the end-of-line position, not a new line")
+        val lf = byte_to_position(src, table, 5)
+        expect(pos_line(lf)).to_equal(0)  # oracle: a, 中, CR, LF are all line 0
+        expect(pos_char(lf)).to_equal(2)  # oracle: EOL after 'a中'

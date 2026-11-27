@@ -1,0 +1,112 @@
+# Source-authored actual-owner scenarios; no runtime execution claimed.
+use std.spec.*
+use compiler.driver.driver.{CompilerDriver, compiler_driver_observe_frozen_owner_prerequisites_v1,
+    compiler_driver_diagnose_frozen_semantic_prerequisites_v1}
+use compiler.driver.semantic_prerequisite_types_v1.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use std.common.string_core.{text_to_bytes}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use compiler.common.cache_contract.three_payload_execution_v3.{three_payload_compiled_execution_available_v3}
+use compiler.semantics.semantic_scope_issuers_v2.{semantic_scope_issuer_gateway_install_available_v2}
+
+fn owner_prerequisite_request_v1(source: text) -> FrozenSemanticPrerequisiteRequestV1:
+    FrozenSemanticPrerequisiteRequestV1(source_bytes: text_to_bytes(source), source_path: "src/owned.spl",
+        module_name: "owned", expected_source_sha256: sha256_text(source), target_triple: "x86_64-unknown-linux-gnu",
+        limits: FrozenSemanticPrerequisiteLimitsV1(max_source_bytes: 65536, max_functions: 64,
+            max_ast_nodes: 4096, max_depth: 32))
+
+describe "Private source-owned declaration prerequisite lifecycle":
+    it "covers actual declarations then rejects foreign mutated and retired handles before scratch closes":
+        step("setup")
+        val request = owner_prerequisite_request_v1("fn answer() -> i64:\n    42\n")
+        val driver = CompilerDriver.create(driver_core_compile_options_default())
+        step("exercise")
+        val result = compiler_driver_observe_frozen_owner_prerequisites_v1(driver, request)
+        step("assert")
+        expect(result.diagnostic.status).to_equal("diagnosed")
+        expect(result.diagnostic.observations[0].integer_literal).to_equal(42)
+        expect(result.owner_observation.declaration_count).to_equal(1)
+        expect(result.owner_observation.declaration_handles_issued).to_equal(1)
+        expect(result.owner_observation.declaration_consumptions).to_equal(1)
+        expect(result.owner_observation.foreign_handle_refusals).to_equal(1)
+        expect(result.owner_observation.mutated_owner_refusals).to_equal(1)
+        expect(result.owner_observation.retired_handle_refusals).to_equal(1)
+        expect(result.owner_observation.active_handles_after_retirement).to_equal(0)
+        expect(result.owner_observation.semantic_authorized).to_equal(false)
+        expect(result.owner_observation.full_artifact_authorized).to_equal(false)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+
+    it "produces real HM annotations and calls the portable verifier without creating an attempt lease":
+        step("exercise")
+        val result = compiler_driver_observe_frozen_owner_prerequisites_v1(
+            CompilerDriver.create(driver_core_compile_options_default()),
+            owner_prerequisite_request_v1("fn answer() -> i64:\n    42\n"))
+        step("assert")
+        expect(result.diagnostic.hm_checked_functions).to_equal(1)
+        expect(result.diagnostic.errors.len()).to_equal(0)
+        expect(result.owner_observation.hm_annotated_functions).to_equal(1)
+        expect(result.owner_observation.hm_annotated_expressions).to_equal(1)
+        expect(result.owner_observation.body_verifier_calls).to_equal(1)
+        expect(result.owner_observation.body_verifier_status).to_equal("facts-only")
+        expect(result.owner_observation.body_verifier_detail).to_equal("live-attempt-pin-body-lease-required")
+        expect(result.owner_observation.body_handles_issued).to_equal(0)
+        expect(three_payload_compiled_execution_available_v3()).to_equal(false)
+        expect(semantic_scope_issuer_gateway_install_available_v2()).to_equal(false)
+
+    it "requires actual portable verifier success for a valid typed bool fixture":
+        step("exercise")
+        val result = compiler_driver_observe_frozen_owner_prerequisites_v1(
+            CompilerDriver.create(driver_core_compile_options_default()),
+            owner_prerequisite_request_v1("fn yes() -> bool:\n    true\n"))
+        step("assert")
+        expect(result.diagnostic.status).to_equal("diagnosed")
+        expect(result.owner_observation.hm_annotated_functions).to_equal(1)
+        expect(result.owner_observation.body_verifier_calls).to_equal(1)
+        expect(result.owner_observation.body_verifier_status).to_equal("facts-only")
+        expect(result.owner_observation.body_verifier_detail).to_equal("live-attempt-pin-body-lease-required")
+        expect(result.owner_observation.body_handles_issued).to_equal(0)
+
+    it "counts a two-function finite universe from actual coverage and survives a later source transaction":
+        step("setup")
+        val driver = CompilerDriver.create(driver_core_compile_options_default())
+        val two = owner_prerequisite_request_v1("fn first() -> i64:\n    17\n\nfn second() -> bool:\n    true\n")
+        step("exercise")
+        val first = compiler_driver_observe_frozen_owner_prerequisites_v1(driver, two)
+        val next = compiler_driver_observe_frozen_owner_prerequisites_v1(driver,
+            owner_prerequisite_request_v1("fn later() -> i64:\n    99\n"))
+        step("assert")
+        expect(first.owner_observation.declaration_count).to_equal(2)
+        expect(first.diagnostic.observations[0].function_name).to_equal("first")
+        expect(first.diagnostic.observations[1].function_name).to_equal("second")
+        expect(next.owner_observation.declaration_count).to_equal(1)
+        expect(next.diagnostic.observations[0].integer_literal).to_equal(99)
+        expect(first.owner_observation.active_handles_after_retirement).to_equal(0)
+        expect(next.owner_observation.active_handles_after_retirement).to_equal(0)
+
+    it "cannot issue any declaration or body handle from a type error or unsupported universe":
+        step("setup")
+        for source in ["fn wrong() -> i64:\n    true\n", "use outside\nfn answer() -> i64:\n    42\n",
+                "fn answer(x: i64 = 1) -> i64:\n    42\n", "@inline\nfn answer() -> i64:\n    42\n"]:
+            step("exercise")
+            val result = compiler_driver_observe_frozen_owner_prerequisites_v1(
+                CompilerDriver.create(driver_core_compile_options_default()), owner_prerequisite_request_v1(source))
+            step("assert")
+            expect(result.diagnostic.status == "diagnosed").to_equal(false)
+            expect(result.owner_observation.declaration_handles_issued).to_equal(0)
+            expect(result.owner_observation.declaration_consumptions).to_equal(0)
+            expect(result.owner_observation.body_verifier_calls).to_equal(0)
+            expect(result.owner_observation.body_handles_issued).to_equal(0)
+            expect(transient_array_scope_state_v1()).to_equal(0)
+
+    it "keeps the existing Step A diagnostic entry free of owner completion consumption":
+        step("setup")
+        val request = owner_prerequisite_request_v1("fn answer() -> i64:\n    42\n")
+        step("exercise")
+        val result = compiler_driver_diagnose_frozen_semantic_prerequisites_v1(
+            CompilerDriver.create(driver_core_compile_options_default()), request)
+        step("assert")
+        expect(result.status).to_equal("diagnosed")
+        expect(result.observations[0].integer_literal).to_equal(42)
+        expect(result.semantic_authorized).to_equal(false)
+        expect(result.full_artifact_authorized).to_equal(false)

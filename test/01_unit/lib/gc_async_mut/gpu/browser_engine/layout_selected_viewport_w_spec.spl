@@ -1,0 +1,96 @@
+# layout_selected viewport width (fix-forward for #6764)
+#
+# #6764 threaded `viewport_w` through layout()/layout_with_style(), but the
+# contain:layout island path inside `layout_selected` passed a `viewport_w`
+# that is not in scope (its parameter is `width`). This spec drives that
+# island path with a position:fixed box and pins the call-site arity of the
+# spec callers that #6764 missed.
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    HNode, LayoutResult, layout_selected,
+    parse_html, build_child_index, extract_css_vw, compute_styles}
+
+val WIDTH: i32 = 400
+val VIEWPORT_H: i32 = 600
+
+fn empty_retained() -> LayoutResult:
+    LayoutResult(bx: [], by: [], bw: [], bh: [], wrap_starts: [], wrap_ends: [], intrinsic_widths: [], height: 0)
+
+fn sid(nodes: [HNode], target_id: text) -> i64:
+    var i = 0
+    while i < nodes.len():
+        if nodes[i].id_attr == target_id:
+            return (i + 1) as i64
+        i = i + 1
+    -1
+
+fn island_html(a_text: text) -> text:
+    "<div id=\"root\"><div id=\"c\" style=\"width:200px;height:80px;overflow:hidden\" contain=\"layout\"><div id=\"a\">" + a_text + "</div><div id=\"f\" style=\"position:fixed;right:1px;bottom:2px;width:10px;height:20px\">F</div></div><div id=\"sibling\">S</div></div>"
+
+fn fn_body(src: text, header: text) -> text:
+    val start = src.index_of(header) ?? -1
+    if start < 0:
+        return ""
+    val rest = src.substring(start + header.len(), src.len())
+    val next = rest.index_of("\nfn ") ?? rest.len()
+    rest.substring(0, next)
+
+describe "layout_selected passes the viewport width on the island path":
+    # @manual scenario evidence
+
+    it "island relayout anchors a position:fixed box to the viewport (right/bottom)":
+        # @req REQ-SSPEC-UNIT
+        step("island relayout anchors a position:fixed box to the viewport")
+        val html1 = island_html("Short")
+        val nodes1 = parse_html(html1)
+        val ci1 = build_child_index(nodes1)
+        val st1 = compute_styles(nodes1, extract_css_vw(html1, WIDTH, false), ci1, false, true)
+        val retained = layout_selected(nodes1, st1, ci1, [1], WIDTH, VIEWPORT_H, empty_retained()).layout
+
+        val html2 = island_html("Longer text in A that wraps differently")
+        val nodes2 = parse_html(html2)
+        val ci2 = build_child_index(nodes2)
+        val st2 = compute_styles(nodes2, extract_css_vw(html2, WIDTH, false), ci2, false, true)
+        val id_a = sid(nodes2, "a")
+        val fi = (sid(nodes2, "f") - 1) as i32
+        expect(fi >= 0).to_equal(true)
+        val r = layout_selected(nodes2, st2, ci2, [id_a], WIDTH, VIEWPORT_H, retained)
+        expect(r.fault).to_equal("")
+        expect(r.layout.bx[fi]).to_equal(WIDTH - r.layout.bw[fi] - 1)
+        expect(r.layout.by[fi]).to_equal(VIEWPORT_H - r.layout.bh[fi] - 2)
+
+    it "full-recompute branch anchors the same box identically":
+        # @req REQ-SSPEC-UNIT
+        step("full-recompute branch anchors the same box identically")
+        val html = island_html("Short")
+        val nodes = parse_html(html)
+        val ci = build_child_index(nodes)
+        val st = compute_styles(nodes, extract_css_vw(html, WIDTH, false), ci, false, true)
+        val fi = (sid(nodes, "f") - 1) as i32
+        val r = layout_selected(nodes, st, ci, [1], WIDTH, VIEWPORT_H, empty_retained())
+        expect(r.layout.bx[fi]).to_equal(WIDTH - r.layout.bw[fi] - 1)
+        expect(r.layout.by[fi]).to_equal(VIEWPORT_H - r.layout.bh[fi] - 2)
+
+describe "source pins: #6764 viewport_w arity":
+    # @manual scenario evidence
+
+    it "layout_selected body has no bare viewport_w token":
+        # @req REQ-SSPEC-UNIT
+        step("layout_selected body has no bare viewport_w token")
+        val src = file_read("src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl")
+        val body = fn_body(src, "fn layout_selected(")
+        expect(body.len() > 0).to_equal(true)
+        expect(body.contains("viewport_w")).to_equal(false)
+
+    it "spec layout() callers pass the 16-argument shape":
+        # @req REQ-SSPEC-UNIT
+        step("spec layout() callers pass the 16-argument shape")
+        val c = file_read("test/01_unit/browser_engine/simple_web_width_centering_spec.spl")
+        expect(c.contains("0, 0, 0, 800, 800, 600,")).to_equal(true)
+        expect(c.contains("0, 0, 0, 800, 600,")).to_equal(false)
+        val p = file_read("test/01_unit/lib/gc_async_mut/gpu/browser_engine/containment_paint_contain_wired_spec.spl")
+        expect(p.contains("0, 0, 0, WIDTH, WIDTH, HEIGHT,")).to_equal(true)
+        expect(p.contains("0, 0, 0, WIDTH, HEIGHT,")).to_equal(false)

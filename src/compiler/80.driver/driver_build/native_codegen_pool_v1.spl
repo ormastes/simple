@@ -1,0 +1,797 @@
+# Process-parallel native codegen pool (native-build step 5).
+#
+# Plan: doc/03_plan/compiler/native_codegen/step5_real_parallelism_plan_2026-09-04.md (P2)
+# Bug:  doc/08_tracking/bug/native_build_step5_serial_threads_ignored_2026-09-04.md
+#
+# The native runtime has no GC and in-process "threads" run inline under the
+# interpreter, so the parallelism here is PROCESSES. The parent translates each
+# uncached module's MIR to an LLVM IR file serially (MIR has no decoder, so IR
+# text is the wire format) and N llc child processes turn those files into
+# objects concurrently. Each child exits when its object is written, returning
+# its memory to the OS. Translation and llc are pipelined: the parent reaps and
+# spawns children between translations, so the first object appears as soon as
+# the first module's llc finishes -- never later than the serial lane.
+#
+# Determinism: the IR comes from the serial lane's own prelude in the same
+# module order and llc runs the serial lane's own argv
+# (backend_helpers.llvm_module_ir_to_path_v1 / llvm_module_llc_argv_v1), so a
+# pooled object is byte-identical to the serial object. Outcomes are recorded
+# per input index; completion order never reaches the caller.
+#
+# Ownership (P0 race rules):
+#   * claim:   every job is claimed in the shared ledger
+#              (driver_hir_recovery.hir_shard_recovery_claim: lock + exclusive
+#              claim record) by exactly one worker slot BEFORE its child is
+#              spawned. A claim that is already held is a hard refusal: the job
+#              fails closed (serial fallback), it is never run twice.
+#   * publish: the terminal record and the SDN receipt are published by
+#              temp-file + rename (file_atomic_write), never a torn write.
+#   * failure: a job that fails in the pool is not an error; the caller
+#              compiles that module through the serial lane, which produces
+#              the full diagnostic.
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_exists, file_read, file_size_raw, file_delete}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, host_os}
+use std.nogc_sync_mut.host_limits.{host_limit_i64, host_limit_mem_reserve_free_kib}
+use std.nogc_sync_mut.sffi.process_memory.{host_commit_avail_kib, host_physmem_total_kib}
+use compiler.backend.llvm_diagnostic_admission.{llvm_llc_error_diagnostic}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal}
+use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_count_of_v1}
+use compiler.driver.driver_build.native_codegen_rss_sffi.{native_codegen_self_rss_kib_sffi_v1}
+use compiler.driver.driver_build.build_outcome.{
+    build_outcome_abnormal_exit_label_v1,
+    build_outcome_tail_lines_v1,
+    build_outcome_diagnostics_dir_v1,
+    build_outcome_write_diag_artifact_v1}
+
+extern fn rt_process_spawn_async_value(cmd: text, args: [text]) -> i64
+extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
+extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_time_now_monotonic_ms() -> i64
+# Session-owned trees (runtime_process_tree.c): the child is a session leader,
+# so a timeout reaches every descendant, not just the shell. 0 = supported.
+extern fn rt_process_tree_support() -> i64
+extern fn rt_process_spawn_session_value(cmd: text, args: [text]) -> i64
+extern fn rt_process_session_wait(pid: i64, timeout_ms: i64) -> i64
+extern fn rt_process_session_is_running(pid: i64) -> i64
+extern fn rt_process_kill_tree(pid: i64) -> i64
+extern fn rt_host_memory_headroom_bytes_v1() -> i64
+
+# "0" disables the pool (serial lane, concurrency=1).
+pub const NATIVE_CODEGEN_POOL_ENV_V1: text = "SIMPLE_NATIVE_CODEGEN_POOL"
+# Per-worker memory estimate override (KiB).
+pub const NATIVE_CODEGEN_WORKER_KIB_ENV_V1: text = "SIMPLE_NATIVE_CODEGEN_WORKER_KIB"
+# Default per-llc-child estimate: 512 MiB (524,288 KiB). In-process MIR->IR
+# translation stays serial in the parent inside a per-module transient scope;
+# each llc/clang child holds only one module's IR and object output (~64-320 MiB
+# peak RSS across compiler modules) and exits immediately.
+pub const NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1: i64 = 524288
+# Built-in default of the RAM/commit a standalone pool leaves free (24 GiB),
+# same floor as the shard pool. Live value: native_codegen_commit_floor_kib_v1().
+pub const NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1: i64 = 25165824
+# Inside an already-admitted shard tree (SIMPLE_MIR_SHARD / file-worker unit),
+# the coordinator already reserved host headroom before spawning the shards and
+# live headroom already excludes resident shard RSS; keep a 12.5% RAM anti-OOM
+# margin clamped to [2 GiB, 8 GiB] (strictly above earlyoom's 10% trigger)
+# instead of double-counting a second 24 GiB whole-host floor.
+pub const NATIVE_CODEGEN_SHARD_MIN_FLOOR_KIB_V1: i64 = 2097152
+pub const NATIVE_CODEGEN_SHARD_MAX_FLOOR_KIB_V1: i64 = 8388608
+# With neither a declared budget nor a measurable headroom, never admit-all.
+pub const NATIVE_CODEGEN_UNKNOWN_MEMORY_CAP_V1: i64 = 4
+# Per-job wall clock cap (ms); a child past it is killed and the module
+# falls back to the serial lane. SIMPLE_NATIVE_CODEGEN_JOB_TIMEOUT_MS overrides.
+pub const NATIVE_CODEGEN_JOB_TIMEOUT_ENV_V1: text = "SIMPLE_NATIVE_CODEGEN_JOB_TIMEOUT_MS"
+pub const NATIVE_CODEGEN_JOB_TIMEOUT_MS_DEFAULT_V1: i64 = 1800000
+# Blocking-wait caps (ms) once only children remain. The parent blocks on the
+# child with the earliest deadline; the cap bounds how late a sibling that
+# exited first is reaped: short while queued jobs wait for a slot, long when
+# nothing is queued.
+pub const NATIVE_CODEGEN_WAIT_CAP_QUEUED_MS_V1: i64 = 10
+pub const NATIVE_CODEGEN_WAIT_CAP_IDLE_MS_V1: i64 = 1000
+# "Exit status not collected yet" (rt_process_wait answers >= 0, -1 or -2).
+const NATIVE_CODEGEN_CODE_PENDING_V1: i64 = -3
+
+pub const NATIVE_CODEGEN_JOB_QUEUED_V1: i64 = 0
+pub const NATIVE_CODEGEN_JOB_RUNNING_V1: i64 = 1
+pub const NATIVE_CODEGEN_JOB_PASS_V1: i64 = 2
+pub const NATIVE_CODEGEN_JOB_FAILED_V1: i64 = 3
+pub const NATIVE_CODEGEN_JOB_SKIPPED_V1: i64 = 4
+
+# Worker count from cores, per-shard net tree budget (after subtracting this
+# process's resident RSS), live host headroom minus the commit floor, and any
+# enclosing cgroup `memory.max - memory.current` spare, divided across concurrent
+# peer shard processes. Every known bound can only lower N; the result is >= 1
+# whenever there is a job (1 = serial).
+# reason: worker-count admission arithmetic over KiB memory bounds and core counts
+@allow(primitive_api)
+pub fn native_codegen_pool_workers_v1(host_cpus: i64, requested: i64, jobs: i64,
+        budget_kib: i64, headroom_kib: i64, estimate_kib: i64,
+        floor_kib: i64 = 25165824,
+        resident_kib: i64 = 0, peer_shards: i64 = 1,
+        cgroup_spare_kib: i64 = -1) -> i64:
+    if jobs <= 0:
+        return 0
+    val peers = if peer_shards > 1: peer_shards else: 1
+    val cpu_cap = if requested > 0 and host_cpus > 0:
+        if requested < host_cpus: requested else: host_cpus
+    elif requested > 0:
+        requested
+    else:
+        host_cpus
+    var n = if cpu_cap > 0: cpu_cap / peers else: 1
+    if n < 1:
+        n = 1
+    if n > jobs:
+        n = jobs
+    val est = if estimate_kib > 0: estimate_kib else: NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1
+    var known = false
+    if budget_kib > 0:
+        known = true
+        val shard_budget = budget_kib / peers
+        val net_budget = if resident_kib > 0: shard_budget - resident_kib else: shard_budget
+        val by_budget = if net_budget > 0: net_budget / est else: 0
+        if by_budget < n:
+            n = by_budget
+    if headroom_kib > 0:
+        known = true
+        val spare = headroom_kib - floor_kib
+        val shard_spare = if spare > 0: spare / peers else: 0
+        val by_commit = if shard_spare > 0: shard_spare / est else: 0
+        if by_commit < n:
+            n = by_commit
+    if cgroup_spare_kib >= 0:
+        known = true
+        val shard_cgroup = cgroup_spare_kib / peers
+        val by_cgroup = if shard_cgroup > 0: shard_cgroup / est else: 0
+        if by_cgroup < n:
+            n = by_cgroup
+    if not known and n > NATIVE_CODEGEN_UNKNOWN_MEMORY_CAP_V1:
+        n = NATIVE_CODEGEN_UNKNOWN_MEMORY_CAP_V1
+    if n < 1: 1 else: n
+
+# Commit floor (KiB): explicit SIMPLE_BUILD_MEMORY_RESERVE_BYTES, else host
+# config mem_reserve_free_mib, else min(24 GiB, installed RAM / 4) when total
+# RAM is known (same host-scaled reserve as shard_tree_headroom_kib_for_v1).
+# reason: KiB reserve calculation for standalone and shard-child admission
+@allow(primitive_api)
+pub fn native_codegen_commit_floor_for_v1(reserve_bytes_field: text, host_reserve_kib: i64, total_kib: i64 = 0) -> i64:
+    val bytes = native_codegen_kib_field_v1(reserve_bytes_field)
+    if bytes > 0:
+        val kib = bytes / 1024
+        if kib > 0: return kib
+    if host_reserve_kib > 0: return host_reserve_kib
+    if total_kib <= 0: return NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1
+    val quarter = total_kib / 4
+    if quarter <= 0 or quarter >= NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1: NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1 else: quarter
+
+# Commit floor (KiB) inside an already-admitted shard worker: explicit
+# overrides still win; otherwise reserve clamp(total_kib / 8, 2 GiB, 8 GiB) so
+# the shard coordinator's 24 GiB whole-host floor is not double-counted while
+# keeping >10% host RAM free above earlyoom/OS pressure.
+# reason: KiB reserve calculation for already-admitted shard children
+@allow(primitive_api)
+pub fn native_codegen_shard_commit_floor_for_v1(reserve_bytes_field: text, host_reserve_kib: i64, total_kib: i64 = 0) -> i64:
+    val bytes = native_codegen_kib_field_v1(reserve_bytes_field)
+    if bytes > 0:
+        val kib = bytes / 1024
+        if kib > 0: return kib
+    if host_reserve_kib > 0: return host_reserve_kib
+    if total_kib <= 0: return NATIVE_CODEGEN_SHARD_MAX_FLOOR_KIB_V1
+    val eighth = total_kib / 8
+    if eighth < NATIVE_CODEGEN_SHARD_MIN_FLOOR_KIB_V1:
+        return NATIVE_CODEGEN_SHARD_MIN_FLOOR_KIB_V1
+    if eighth > NATIVE_CODEGEN_SHARD_MAX_FLOOR_KIB_V1:
+        return NATIVE_CODEGEN_SHARD_MAX_FLOOR_KIB_V1
+    eighth
+
+# reason: live KiB reserve query for standalone or shard-child context
+@allow(primitive_api)
+@allow(bare_bool)
+pub fn native_codegen_commit_floor_kib_for_context_v1(in_shard_tree: bool) -> i64:
+    val field = env_get_nullable("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? ""
+    val host_kib = host_limit_mem_reserve_free_kib(0)
+    val explicit = native_codegen_kib_field_v1(field) >= 1024 or host_kib > 0
+    val total = if explicit: 0 else: host_physmem_total_kib()
+    if in_shard_tree:
+        return native_codegen_shard_commit_floor_for_v1(field, host_kib, total)
+    native_codegen_commit_floor_for_v1(field, host_kib, total)
+
+# reason: standalone live KiB commit reserve query
+@allow(primitive_api)
+pub fn native_codegen_commit_floor_kib_v1() -> i64:
+    native_codegen_commit_floor_kib_for_context_v1(false)
+
+fn _native_codegen_peer_count_field_v1(raw: text) -> i64:
+    val trimmed = raw.trim()
+    if trimmed == "":
+        return 0
+    if trimmed.contains("/"):
+        return native_mir_shard_count_of_v1(trimmed)
+    native_codegen_kib_field_v1(trimmed)
+
+# Concurrent peer shard processes sharing the host/tree budget alongside this
+# process (1 = standalone). Prefers explicit live file-worker pool size
+# (`SIMPLE_NATIVE_FILE_WORKERS`, or `SIMPLE_HIR_SHARD` fallback for unit children)
+# over `--mir-shard=0/<batches>` total batch counts, and bounds by active CPU /
+# `--threads` slots so queued shards are never double-counted as live.
+# reason: shard peer count calculation over env fields and thread caps
+@allow(primitive_api)
+pub fn native_codegen_live_peer_shards_v1(shard_spec: text, file_worker_unit: text,
+        file_workers_field: text, host_cpus: i64, requested: i64) -> i64:
+    val slot_cap = if requested > 0 and host_cpus > 0:
+        if requested < host_cpus: requested else: host_cpus
+    elif requested > 0:
+        requested
+    else:
+        host_cpus
+    val live_workers = _native_codegen_peer_count_field_v1(file_workers_field)
+    if live_workers > 0:
+        if slot_cap > 0 and slot_cap < live_workers:
+            return slot_cap
+        return live_workers
+    val shard_count = native_mir_shard_count_of_v1(shard_spec)
+    if shard_count > 1:
+        if slot_cap > 0 and slot_cap < shard_count:
+            return slot_cap
+        return shard_count
+    val _ = file_worker_unit
+    1
+
+# Current process RSS in KiB (0 when unavailable).
+# reason: process RSS scalar probe in KiB
+@allow(primitive_api)
+pub fn native_codegen_process_rss_kib_v1() -> i64:
+    native_codegen_self_rss_kib_sffi_v1()
+
+fn _native_codegen_cgroup_chain_dirs_v1(rel_path: text) -> [text]:
+    if rel_path == "" or not rel_path.starts_with("/"):
+        return []
+    var dirs: [text] = []
+    var cur = rel_path
+    while cur.byte_len() > 1 and cur.ends_with("/"):
+        cur = cur.substring(0, cur.byte_len() - 1)
+    var done = false
+    while not done:
+        dirs.push(if cur == "/": "" else: cur)
+        if cur == "/":
+            done = true
+        else:
+            val slash = cur.rfind("/")
+            cur = if slash <= 0: "/" else: cur.substring(0, slash)
+    dirs
+
+fn _native_codegen_cgroup_v1_has_memory_v1(controllers: text) -> bool:
+    for item in controllers.split(","):
+        if item.trim() == "memory":
+            return true
+    false
+
+# Enclosing cgroup spare KiB (`memory.max - memory.current` for v2 and
+# `memory.limit_in_bytes - memory.usage_in_bytes` for v1) across the ancestor
+# chain; -1 when uncapped or absent, 0 when resident usage is at/above the cap.
+# reason: pure cgroup KiB spare calculation for tests and live admission
+@allow(primitive_api)
+pub fn native_codegen_cgroup_spare_kib_from_probe_v1(cgroup_table: text, files: {text: text}) -> i64:
+    var v2_rel = ""
+    var v1_rel = ""
+    for line in cgroup_table.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("0::"):
+            v2_rel = trimmed.substring(3, trimmed.byte_len()).trim()
+        else:
+            val parts = trimmed.split(":")
+            if parts.len() == 3 and _native_codegen_cgroup_v1_has_memory_v1(parts[1]):
+                v1_rel = parts[2].trim()
+    var best_spare_kib: i64 = -1
+    for dir in _native_codegen_cgroup_chain_dirs_v1(v2_rel):
+        val max_path = "/sys/fs/cgroup" + dir + "/memory.max"
+        val cur_path = "/sys/fs/cgroup" + dir + "/memory.current"
+        val max_raw = (files[max_path] ?? "").trim()
+        val cur_raw = (files[cur_path] ?? "").trim()
+        if max_raw != "" and max_raw != "max" and cur_raw != "":
+            val max_bytes = native_codegen_kib_field_v1(max_raw)
+            val cur_bytes = cur_raw.to_i64() ?? -1
+            if max_bytes > 0 and max_bytes < 4611686018427387904 and cur_bytes >= 0:
+                val spare_kib = if max_bytes > cur_bytes: (max_bytes - cur_bytes) / 1024 else: 0
+                if best_spare_kib < 0 or spare_kib < best_spare_kib:
+                    best_spare_kib = spare_kib
+    for dir in _native_codegen_cgroup_chain_dirs_v1(v1_rel):
+        val lim_path = "/sys/fs/cgroup/memory" + dir + "/memory.limit_in_bytes"
+        val use_path = "/sys/fs/cgroup/memory" + dir + "/memory.usage_in_bytes"
+        val lim_raw = (files[lim_path] ?? "").trim()
+        val use_raw = (files[use_path] ?? "").trim()
+        if lim_raw != "" and use_raw != "":
+            val lim_bytes = native_codegen_kib_field_v1(lim_raw)
+            val use_bytes = use_raw.to_i64() ?? -1
+            if lim_bytes > 0 and lim_bytes < 4611686018427387904 and use_bytes >= 0:
+                val spare_kib = if lim_bytes > use_bytes: (lim_bytes - use_bytes) / 1024 else: 0
+                if best_spare_kib < 0 or spare_kib < best_spare_kib:
+                    best_spare_kib = spare_kib
+    best_spare_kib
+
+# Live cgroup spare KiB (-1 when no cgroup cap applies).
+# reason: cgroup spare memory probe in KiB
+@allow(primitive_api)
+pub fn native_codegen_cgroup_spare_kib_v1() -> i64:
+    if not file_exists("/proc/self/cgroup"):
+        return -1
+    val table = file_read("/proc/self/cgroup")
+    if table == "":
+        return -1
+    var files: {text: text} = {}
+    for line in table.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("0::"):
+            val rel = trimmed.substring(3, trimmed.byte_len()).trim()
+            for dir in _native_codegen_cgroup_chain_dirs_v1(rel):
+                val max_p = "/sys/fs/cgroup" + dir + "/memory.max"
+                val cur_p = "/sys/fs/cgroup" + dir + "/memory.current"
+                if file_exists(max_p): files[max_p] = file_read(max_p)
+                if file_exists(cur_p): files[cur_p] = file_read(cur_p)
+        else:
+            val parts = trimmed.split(":")
+            if parts.len() == 3 and _native_codegen_cgroup_v1_has_memory_v1(parts[1]):
+                for dir in _native_codegen_cgroup_chain_dirs_v1(parts[2].trim()):
+                    val lim_p = "/sys/fs/cgroup/memory" + dir + "/memory.limit_in_bytes"
+                    val use_p = "/sys/fs/cgroup/memory" + dir + "/memory.usage_in_bytes"
+                    if file_exists(lim_p): files[lim_p] = file_read(lim_p)
+                    if file_exists(use_p): files[use_p] = file_read(use_p)
+    native_codegen_cgroup_spare_kib_from_probe_v1(table, files)
+
+# Human-readable diagnostic summary of all admission inputs.
+# reason: diagnostic text formatter over admission KiB and worker scalars
+@allow(primitive_api)
+pub fn native_codegen_admission_summary_v1(host_cpus: i64, budget_kib: i64,
+        resident_kib: i64, headroom_kib: i64, cgroup_spare_kib: i64,
+        floor_kib: i64, estimate_kib: i64, peer_shards: i64) -> text:
+    "cpus={host_cpus} budget_kib={budget_kib} resident_kib={resident_kib} headroom_kib={headroom_kib} cgroup_spare_kib={cgroup_spare_kib} floor_kib={floor_kib} worker_kib={estimate_kib} peer_shards={peer_shards}"
+
+# Default cores for the pool: host config max_threads bounds the detected
+# count (it can only lower it); absent = detected.
+pub fn native_codegen_host_cpus_for_v1(detected: i64, max_threads: i64) -> i64:
+    if max_threads > 0 and (detected <= 0 or max_threads < detected): max_threads else: detected
+
+# Per-llc-child estimate (KiB): explicit SIMPLE_NATIVE_CODEGEN_WORKER_KIB, else
+# host worker_mem_mib when it is ABOVE the 512 MiB default (a host hint may only
+# make admission more conservative, same rule as shard_worker_budget_kb), else 512 MiB.
+pub fn native_codegen_worker_estimate_for_v1(env_kib: i64, host_worker_mib: i64) -> i64:
+    if env_kib > 0: return env_kib
+    val host_kib = if host_worker_mib > 0 and host_worker_mib < 9007199254740991: host_worker_mib * 1024 else: 0
+    if host_kib > NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1: host_kib else: NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1
+
+pub fn native_codegen_kib_field_v1(raw: text) -> i64:
+    val parsed = raw.trim().to_i64() ?? 0
+    if parsed > 0: parsed else: 0
+
+# MemAvailable from a /proc/meminfo body (KiB), 0 when absent.
+pub fn native_codegen_meminfo_available_kib_v1(meminfo: text) -> i64:
+    for line in meminfo.split("\n"):
+        if line.starts_with("MemAvailable:"):
+            val rest = line.substring(13, line.byte_len()).trim()
+            val space = rest.index_of(" ")
+            val digits = if space > 0: rest.substring(0, space) else: rest
+            return native_codegen_kib_field_v1(digits)
+    0
+
+# Live RAM/commit headroom in KiB; 0 = unknown. Windows answers through the
+# runtime (min of free physical and free commit); elsewhere /proc/meminfo.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in native_codegen_headroom_kib_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn native_codegen_headroom_kib_v1() -> i64:
+    var bytes: i64 = 0
+    unsafe(capabilities: [ffi]):
+        bytes = rt_host_memory_headroom_bytes_v1()
+    if bytes > 0:
+        return bytes / 1024
+    if file_exists("/proc/meminfo"):
+        return native_codegen_meminfo_available_kib_v1(file_read("/proc/meminfo"))
+    val commit_kib = host_commit_avail_kib()
+    if commit_kib > 0:
+        return commit_kib
+    0
+
+pub fn native_codegen_job_ir_path_v1(stage_root: text, index: i64) -> text:
+    "{stage_root}/job-{index}.ll"
+
+pub fn native_codegen_job_object_path_v1(stage_root: text, index: i64) -> text:
+    "{stage_root}/job-{index}.o"
+
+pub fn native_codegen_job_log_path_v1(stage_root: text, index: i64) -> text:
+    "{stage_root}/job-{index}.log"
+
+# The serial lane runs llc as one shell command line ("{llc} {argv joined} 2>&1",
+# backend_shell_tuple). The pool runs the same line through the same shell,
+# with its output redirected to the job log for diagnostic admission.
+pub fn native_codegen_shell_cmd_v1() -> text:
+    if host_os() == "windows": "cmd.exe" else: "/bin/sh"
+
+pub fn native_codegen_command_line_v1(tool: text, argv: [text], log_path: text) -> text:
+    # Quote a tool path with spaces (e.g. C:/Program Files/...): cmd.exe /c keeps
+    # a single leading quoted executable, /bin/sh unquotes it.
+    val cmd = if tool.contains(" "): "\"{tool}\"" else: tool
+    "{cmd} " + argv.join(" ") + " > {log_path} 2>&1"
+
+pub fn native_codegen_shell_args_v1(tool: text, argv: [text], log_path: text) -> [text]:
+    val line = native_codegen_command_line_v1(tool, argv, log_path)
+    if host_os() == "windows": ["/c", line] else: ["-c", line]
+
+# Child ownership. With a session owner (Linux/macOS/FreeBSD) every job's
+# shell is spawned as a session leader, so the timeout kill reaches the llc
+# under it and anything llc started. Without one (Windows) the shell is a
+# plain child and the timeout kills its tree by PID (taskkill /T), found by
+# the job's unique log path on the shell's command line -- the HANDLE/PID a
+# plain spawn returns differs per engine, the command line does not.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in native_codegen_session_owned_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn native_codegen_session_owned_v1() -> bool:
+    var support: i64 = -1
+    unsafe(capabilities: [ffi]):
+        support = rt_process_tree_support()
+    support == 0
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in native_codegen_child_spawn_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn native_codegen_child_spawn_v1(session: bool, shell_cmd: text, args: [text]) -> i64:
+    var pid: i64 = -1
+    unsafe(capabilities: [ffi]):
+        pid = if session: rt_process_spawn_session_value(shell_cmd, args) else: rt_process_spawn_async_value(shell_cmd, args)
+    pid
+
+# Non-blocking: exit code, -1 on error, -2 while running. ONE reaping call:
+# a second wait after a reap would see ECHILD and lose the status.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in native_codegen_child_probe_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn native_codegen_child_probe_v1(session: bool, pid: i64) -> i64:
+    var code: i64 = -2
+    unsafe(capabilities: [ffi]):
+        if session:
+            if rt_process_session_is_running(pid) != 1:
+                code = rt_process_session_wait(pid, 0)
+        else:
+            code = rt_process_wait(pid, 1)
+    code
+
+# Blocks up to timeout_ms (>= 1) for this child: exit code, -1, or -2.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in native_codegen_child_wait_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn native_codegen_child_wait_v1(session: bool, pid: i64, timeout_ms: i64) -> i64:
+    val bounded = if timeout_ms < 1: 1 else: timeout_ms
+    var code: i64 = -2
+    unsafe(capabilities: [ffi]):
+        code = if session: rt_process_session_wait(pid, bounded) else: rt_process_wait(pid, bounded)
+    code
+
+# PowerShell program that kills (taskkill /F /T) every cmd.exe whose command
+# line carries `marker`, and with it the whole tree under that shell.
+pub fn native_codegen_windows_tree_kill_script_v1(marker: text) -> text:
+    val quoted = marker.replace("'", "''")
+    "$m = '" + quoted + "'; Get-CimInstance Win32_Process | Where-Object " +
+        "{ $_.Name -eq 'cmd.exe' -and $_.CommandLine -and $_.CommandLine.Contains($m) } | " +
+        "ForEach-Object { taskkill.exe /F /T /PID $_.ProcessId | Out-Null }"
+
+# Kill the job's whole tree and reap its shell. The exit status is not
+# meaningful after a kill; the caller records the job as timed out.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in native_codegen_child_kill_tree_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn native_codegen_child_kill_tree_v1(session: bool, pid: i64, log_path: text) -> i64:
+    var code: i64 = -1
+    if session:
+        unsafe(capabilities: [ffi]):
+            val rc = rt_process_kill_tree(pid)
+            # RT_PTREE_SWEEP_FAILED_AFTER_REAP (-100002): the leader is already
+            # reaped and its pid may be recycled -- never signal it again.
+            if rc != 0 and rc != -100002:
+                # Not reaped by the owner: fall back to the leader alone.
+                val _killed = rt_process_kill(pid)
+                code = rt_process_session_wait(pid, 5000)
+        return code
+    if host_os() == "windows":
+        unsafe(capabilities: [ffi]):
+            val killer = rt_process_spawn_async_value("powershell.exe",
+                ["-NoProfile", "-NonInteractive", "-Command",
+                    native_codegen_windows_tree_kill_script_v1(log_path)])
+            if killer > 0:
+                val _kill_rc = rt_process_wait(killer, 60000)
+            code = rt_process_wait(pid, 5000)
+            if code == -2:
+                # The tree kill missed the shell: terminate it directly. That
+                # releases the handle, so it is not waited on again.
+                val _killed = rt_process_kill(pid)
+                code = -1
+        return code
+    unsafe(capabilities: [ffi]):
+        val _killed = rt_process_kill(pid)
+        code = rt_process_wait(pid, 5000)
+    code
+
+pub fn native_codegen_receipt_path_v1(ledger: text, module_name: text) -> text:
+    "{ledger}/{sha256_text(module_name)}.codegen-receipt.sdn"
+
+fn native_codegen_sdn_escape_v1(value: text) -> text:
+    value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+
+pub fn native_codegen_receipt_encode_v1(module_name: text, worker: i64, status: text,
+        exit_code: i64, object_bytes: i64, start_ms: i64, done_ms: i64) -> text:
+    "native_codegen_receipt_v1:\n" +
+        "  module: \"{native_codegen_sdn_escape_v1(module_name)}\"\n" +
+        "  worker: {worker}\n" +
+        "  status: \"{status}\"\n" +
+        "  exit_code: {exit_code}\n" +
+        "  object_bytes: {object_bytes}\n" +
+        "  start_ms: {start_ms}\n" +
+        "  done_ms: {done_ms}\n"
+
+# Extended receipt encoder preserving the 7-argument contract while recording
+# abnormal-exit classification, durable diagnostics path, and stderr tail.
+# reason: receipt encoding accepts worker slot, exit code, object bytes, and millisecond timestamps
+@allow(primitive_api)
+pub fn native_codegen_receipt_encode_with_diag_v1(module_name: text, worker: i64, status: text,
+        exit_code: i64, object_bytes: i64, start_ms: i64, done_ms: i64,
+        abort_label: text, stderr_diag_path: text, stderr_excerpt: text) -> text:
+    var base = native_codegen_receipt_encode_v1(
+        module_name, worker, status, exit_code, object_bytes, start_ms, done_ms)
+    if abort_label != "":
+        base = base + "  abort_label: \"{native_codegen_sdn_escape_v1(abort_label)}\"\n"
+    if stderr_diag_path != "":
+        base = base + "  stderr_diag_path: \"{native_codegen_sdn_escape_v1(stderr_diag_path)}\"\n"
+    if stderr_excerpt != "":
+        base = base + "  stderr_excerpt: \"{native_codegen_sdn_escape_v1(stderr_excerpt)}\"\n"
+    base
+
+pub fn native_codegen_diagnostics_dir_v1(stage_root: text, ledger: text) -> text:
+    var clean_stage = stage_root.trim()
+    while clean_stage.byte_len() > 1 and (clean_stage.ends_with("/") or clean_stage.ends_with("\\")):
+        clean_stage = clean_stage.substring(0, clean_stage.byte_len() - 1)
+    var clean_ledger = ledger.trim()
+    while clean_ledger.byte_len() > 1 and (clean_ledger.ends_with("/") or clean_ledger.ends_with("\\")):
+        clean_ledger = clean_ledger.substring(0, clean_ledger.byte_len() - 1)
+    val inside_stage = clean_ledger != "" and clean_stage != "" and
+        (clean_ledger == clean_stage or
+         clean_ledger.starts_with(clean_stage + "/") or
+         clean_ledger.starts_with(clean_stage + "\\"))
+    val effective_root = if clean_ledger != "" and not inside_stage: clean_ledger else: ""
+    build_outcome_diagnostics_dir_v1(effective_root)
+
+# reason: exit status and timeout flag mapped to human-readable codegen abort label
+@allow(primitive_api)
+pub fn native_codegen_abnormal_exit_label_v1(code: i64, timed_out: bool) -> text:
+    build_outcome_abnormal_exit_label_v1(code, timed_out)
+
+# Persist stderr + module attribution outside `stage_root` before `stage_root` is
+# removed on pool completion, so abnormal codegen worker exits leave diagnostics.
+# reason: worker slot, exit status, timeout flag, and emitted object size characterize abort
+@allow(primitive_api)
+pub fn native_codegen_capture_abnormal_stderr_v1(stage_root: text, ledger: text,
+        module_name: text, slot: i64, code: i64, timed_out: bool,
+        object_bytes: i64, log_text: text, diagnostic: text) -> text:
+    val diag_dir = native_codegen_diagnostics_dir_v1(stage_root, ledger)
+    var detail = "object_bytes={object_bytes}"
+    if diagnostic != "":
+        detail = detail + " {diagnostic}"
+    build_outcome_write_diag_artifact_v1(
+        diag_dir, "codegen-abort", module_name, "codegen-w{slot}",
+        code, timed_out, detail, log_text)
+
+# Atomic receipt publication (temp + rename). False when the write or its
+# read-back verification fails.
+pub fn native_codegen_receipt_publish_v1(ledger: text, module_name: text, body: text) -> bool:
+    val path = native_codegen_receipt_path_v1(ledger, module_name)
+    if not file_atomic_write(path, body):
+        return false
+    file_read(path) == body
+
+pub fn native_codegen_worker_owner_v1(slot: i64) -> text:
+    "codegen-w{slot}"
+
+pub struct NativeCodegenPoolResultV1:
+    # Per input index: staged object path on PASS, "" otherwise.
+    objects: [text]
+    # Per input index: NATIVE_CODEGEN_JOB_* terminal state.
+    states: [i64]
+    workers: i64
+    peak_live: i64
+    passed: i64
+    failed: i64
+    skipped: i64
+    first_object_ms: i64
+    wall_ms: i64
+    # Blocking waits the parent made while only children remained (each one
+    # is a single wakeup, bounded by NATIVE_CODEGEN_WAIT_CAP_*_MS_V1).
+    idle_wakeups: i64
+    # Jobs killed at the per-job timeout (whole tree).
+    timed_out: i64
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in native_codegen_now_ms_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn native_codegen_now_ms_v1() -> i64:
+    var now: i64 = 0
+    unsafe(capabilities: [ffi]):
+        now = rt_time_now_monotonic_ms()
+    now
+
+# Run one job per `names` entry (ledger key = module name) on at most
+# `workers` concurrent `tool` children.
+#
+# `emit_fn(index, ir_path, obj_path)` runs IN THIS PROCESS, in index order, and
+# returns the child argv for that job, or [] to skip it (translation refused or
+# failed; the caller compiles it serially). Between emissions the pool reaps
+# finished children and starts queued ones, so translation overlaps codegen.
+pub fn native_codegen_pool_run_v1(tool: text, names: [text], workers: i64,
+        stage_root: text, ledger: text,
+        emit_fn: fn(i64, text, text) -> [text]) -> NativeCodegenPoolResultV1:
+    val started = native_codegen_now_ms_v1()
+    val count = names.len()
+    var argvs: [[text]] = []
+    var objects: [text] = []
+    var states: [i64] = []
+    var pids: [i64] = []
+    var slots: [i64] = []
+    var starts: [i64] = []
+    val empty_argv: [text] = []
+    var index: i64 = 0
+    while index < count:
+        argvs.push(empty_argv)
+        objects.push("")
+        states.push(NATIVE_CODEGEN_JOB_SKIPPED_V1)
+        pids.push(0)
+        slots.push(-1)
+        starts.push(0)
+        index = index + 1
+    val max_workers = if workers > 0: workers else: 1
+    var slot_busy: [bool] = []
+    var slot_index: i64 = 0
+    while slot_index < max_workers:
+        slot_busy.push(false)
+        slot_index = slot_index + 1
+    var live: i64 = 0
+    var peak_live: i64 = 0
+    var first_object_ms: i64 = -1
+    var next_spawn: i64 = 0
+    var emitted: i64 = 0
+    var passed: i64 = 0
+    var failed: i64 = 0
+    val session = native_codegen_session_owned_v1()
+    val shell_cmd = native_codegen_shell_cmd_v1()
+    val timeout_field = native_codegen_kib_field_v1(env_get_nullable(NATIVE_CODEGEN_JOB_TIMEOUT_ENV_V1) ?? "")
+    val job_timeout_ms = if timeout_field > 0: timeout_field else: NATIVE_CODEGEN_JOB_TIMEOUT_MS_DEFAULT_V1
+    # Per job: exit status collected by a blocking wait, not yet recorded.
+    var codes: [i64] = []
+    index = 0
+    while index < count:
+        codes.push(NATIVE_CODEGEN_CODE_PENDING_V1)
+        index = index + 1
+    var idle_wakeups: i64 = 0
+    var timed_out_jobs: i64 = 0
+    while emitted < count or live > 0 or next_spawn < emitted:
+        # 1. Reap every finished child (non-blocking), kill expired trees.
+        var reaped_any = false
+        var job: i64 = 0
+        while job < emitted:
+            if states[job] == NATIVE_CODEGEN_JOB_RUNNING_V1:
+                val pid = pids[job]
+                val log_path = native_codegen_job_log_path_v1(stage_root, job)
+                var code = codes[job]
+                if code == NATIVE_CODEGEN_CODE_PENDING_V1:
+                    code = native_codegen_child_probe_v1(session, pid)
+                var timed_out = false
+                if code == -2 and native_codegen_now_ms_v1() - starts[job] >= job_timeout_ms:
+                    code = native_codegen_child_kill_tree_v1(session, pid, log_path)
+                    timed_out = true
+                    timed_out_jobs = timed_out_jobs + 1
+                if code != -2 or timed_out:
+                    val obj = native_codegen_job_object_path_v1(stage_root, job)
+                    val size = if file_exists(obj): file_size_raw(obj) else: -1
+                    val log_text = if file_exists(log_path): file_read(log_path) else: ""
+                    # Same admission as the serial compile_ir_to_object: an
+                    # llc `error:` record refuses even an exit-0 object.
+                    val diagnostic = llvm_llc_error_diagnostic(code, log_text, "", tool,
+                        native_codegen_job_ir_path_v1(stage_root, job))
+                    val ok = not timed_out and code == 0 and size > 0 and diagnostic == ""
+                    if (env_get_nullable("SIMPLE_KEEP_LLVM_IR") ?? "") != "1":
+                        val _ir_dropped = file_delete(native_codegen_job_ir_path_v1(stage_root, job))
+                    val slot = slots[job]
+                    val owner = native_codegen_worker_owner_v1(slot)
+                    val done_ms = native_codegen_now_ms_v1()
+                    val terminal_ok = hir_shard_recovery_terminal(ledger, owner,
+                        names[job], if ok: "PASS" else: "FAILED", false)
+                    var abort_label = ""
+                    var diag_path = ""
+                    var stderr_excerpt = ""
+                    if not ok:
+                        abort_label = native_codegen_abnormal_exit_label_v1(code, timed_out)
+                        diag_path = native_codegen_capture_abnormal_stderr_v1(
+                            stage_root, ledger, names[job], slot, code, timed_out, size,
+                            log_text, diagnostic)
+                        stderr_excerpt = build_outcome_tail_lines_v1(log_text, 12)
+                        eprint("[codegen-pool] abnormal-exit module={names[job]} worker={slot} {abort_label} object_bytes={size} diag={diag_path}\n")
+                        if stderr_excerpt != "":
+                            val compact_tail = stderr_excerpt.replace("\n", " | ")
+                            eprint("[codegen-pool] stderr-tail ({names[job]}): {compact_tail}\n")
+                    val receipt_body = if ok:
+                        native_codegen_receipt_encode_v1(names[job], slot,
+                            "PASS", code, size,
+                            starts[job] - started, done_ms - started)
+                    else:
+                        native_codegen_receipt_encode_with_diag_v1(names[job], slot,
+                            "FAILED", code, size,
+                            starts[job] - started, done_ms - started,
+                            abort_label, diag_path, stderr_excerpt)
+                    val receipt_ok = native_codegen_receipt_publish_v1(ledger,
+                        names[job], receipt_body)
+                    if ok and terminal_ok and receipt_ok:
+                        states[job] = NATIVE_CODEGEN_JOB_PASS_V1
+                        objects[job] = obj
+                        passed = passed + 1
+                        if first_object_ms < 0:
+                            first_object_ms = done_ms - started
+                    else:
+                        states[job] = NATIVE_CODEGEN_JOB_FAILED_V1
+                        failed = failed + 1
+                    codes[job] = code
+                    slot_busy[slot] = false
+                    live = live - 1
+                    reaped_any = true
+            job = job + 1
+        # 2. Fill free slots from the queue, in index order.
+        while live < max_workers and next_spawn < emitted:
+            if states[next_spawn] == NATIVE_CODEGEN_JOB_QUEUED_V1:
+                var slot: i64 = 0
+                while slot < max_workers and slot_busy[slot]:
+                    slot = slot + 1
+                val owner = native_codegen_worker_owner_v1(slot)
+                val claim = hir_shard_recovery_claim(ledger, owner,
+                    names[next_spawn], sha256_text(argvs[next_spawn].join("\n")))
+                var pid: i64 = -1
+                if claim == 1:
+                    pid = native_codegen_child_spawn_v1(session, shell_cmd,
+                        native_codegen_shell_args_v1(tool, argvs[next_spawn],
+                            native_codegen_job_log_path_v1(stage_root, next_spawn)))
+                if pid > 0:
+                    pids[next_spawn] = pid
+                    slots[next_spawn] = slot
+                    starts[next_spawn] = native_codegen_now_ms_v1()
+                    states[next_spawn] = NATIVE_CODEGEN_JOB_RUNNING_V1
+                    slot_busy[slot] = true
+                    live = live + 1
+                    if live > peak_live:
+                        peak_live = live
+                else:
+                    # Claimed by someone else (P0 invariant breach) or the spawn
+                    # failed: fail closed to the serial lane, never run twice.
+                    if claim == 1:
+                        val _sealed = hir_shard_recovery_terminal(ledger, owner,
+                            names[next_spawn], "FAILED", false)
+                    states[next_spawn] = NATIVE_CODEGEN_JOB_FAILED_V1
+                    failed = failed + 1
+            next_spawn = next_spawn + 1
+        # 3. Translate the next module in process while children run.
+        if emitted < count:
+            val ir_path = native_codegen_job_ir_path_v1(stage_root, emitted)
+            val obj_path = native_codegen_job_object_path_v1(stage_root, emitted)
+            val argv = emit_fn(emitted, ir_path, obj_path)
+            if argv.len() > 0:
+                argvs[emitted] = argv
+                states[emitted] = NATIVE_CODEGEN_JOB_QUEUED_V1
+            emitted = emitted + 1
+        elif not reaped_any and live > 0:
+            # Only children left: block on the uncollected child with the
+            # earliest deadline (one wakeup per exit, cap, or deadline).
+            var target: i64 = -1
+            job = 0
+            while job < emitted:
+                if states[job] == NATIVE_CODEGEN_JOB_RUNNING_V1 and codes[job] == NATIVE_CODEGEN_CODE_PENDING_V1:
+                    if target < 0 or starts[job] < starts[target]:
+                        target = job
+                job = job + 1
+            if target >= 0:
+                val cap = if next_spawn < emitted: NATIVE_CODEGEN_WAIT_CAP_QUEUED_MS_V1 else: NATIVE_CODEGEN_WAIT_CAP_IDLE_MS_V1
+                val remaining = starts[target] + job_timeout_ms - native_codegen_now_ms_v1()
+                val wait_ms = if remaining < cap: remaining else: cap
+                val code = native_codegen_child_wait_v1(session, pids[target], wait_ms)
+                if code != -2:
+                    codes[target] = code
+                idle_wakeups = idle_wakeups + 1
+    var skipped: i64 = 0
+    for state in states:
+        if state == NATIVE_CODEGEN_JOB_SKIPPED_V1:
+            skipped = skipped + 1
+    NativeCodegenPoolResultV1(objects: objects, states: states, workers: max_workers,
+        peak_live: peak_live, passed: passed, failed: failed, skipped: skipped,
+        first_object_ms: first_object_ms,
+        wall_ms: native_codegen_now_ms_v1() - started,
+        idle_wakeups: idle_wakeups, timed_out: timed_out_jobs)

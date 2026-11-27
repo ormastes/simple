@@ -12,11 +12,12 @@ use compiler.backend.linker.smf_reader_memory.*
 
 use compiler.backend.linker.obj_taker.{SmfSymbol, SymbolType, SymbolBinding}
 use compiler.backend.linker.smf_enums.{Platform, Arch, CompressionType}
-use compiler.backend.linker.smf_header.{SMF_HEADER_SIZE}
+use compiler.backend.linker.smf_header.{SMF_HEADER_SIZE, SMF_PACKED_HEADER_SIZE, SMF_SEED_HEADER_SIZE, SMF_VERSION_MINOR, smf_header_field_shift, smf_header_size_at, smf_header_trailer_offset}
+use compiler.backend.linker.name_text.{linker_name_text}
 
-# SMF v1.1 uses the canonical 128-byte packed header layout. Files may store
-# that header either at file offset 0 or as a trailer at EOF-128.
-val SMF_READER_HEADER_SIZE: i64 = SMF_HEADER_SIZE
+# Header copy size: the legacy packed layout (128) is the larger of the two
+# layouts; a 96-byte v1.3/seed header is zero-padded to this extent on copy.
+val SMF_READER_HEADER_SIZE: i64 = SMF_PACKED_HEADER_SIZE
 # Existing GTPL section wire type emitted by driver.smf_writer. The general
 # linker SectionType enum does not yet include template sections.
 val SMF_TEMPLATE_CODE_SECTION_TYPE: i32 = 12
@@ -90,7 +91,7 @@ impl SmfReaderMemory:
     """
     static fn from_data(data: [u8]) -> Result<SmfReaderMemory, text>:
         # Validate minimum size against the canonical 128-byte SMF v1.1 header.
-        if data.len() < SMF_READER_HEADER_SIZE:
+        if data.len() < SMF_SEED_HEADER_SIZE:
             return Err("SMF data too small: {data.len()} bytes")
 
         # v1.1 SMF writes the header as a trailer at EOF-128. Keep offset-0
@@ -263,7 +264,7 @@ impl SmfReaderMemory:
         # CompressionType.from_u8 maps unknown bytes to None_; consult the
         # canonical header's raw byte so unknown formats never become plain.
         val header_offset = self.header.header_offset
-        if header_offset < 0 or header_offset > self.data.len() - SMF_READER_HEADER_SIZE:
+        if header_offset < 0 or header_offset > self.data.len() - smf_header_size_at(self.data, header_offset):
             return Err("SMF header out of bounds")
         if self.data[header_offset + 12] != 0u8:
             return Err("Compressed SMF section extraction is unsupported")
@@ -378,7 +379,7 @@ impl SmfReaderMemory:
                     if sec_size % reloc_entry_size != 0:
                         return Err("Reloc section has a partial entry")
                     val (major, minor) = self.header.version
-                    if major != 1 or (minor != 1 and minor != 2):
+                    if major != 1 or minor < 1 or minor > SMF_VERSION_MINOR:
                         return Err("Reloc section has unsupported SMF version")
                     val entry_count = sec_size / reloc_entry_size
                     var j = 0
@@ -391,10 +392,20 @@ impl SmfReaderMemory:
                         if minor == 1:
                             if source_low != 0 or source_high != 0 or marker != 0:
                                 return Err("v1.1 Reloc reserved bytes are nonzero")
-                        else:
+                        elif minor == 2:
                             if marker != 0xA2:
                                 return Err("v1.2 Reloc source marker is invalid")
                             source_section = source_low | (source_high << 8)
+                        else:
+                            # v1.3+: the header flag SMF_FLAG_SOURCE_RELOCS (0x80)
+                            # selects the entry form, so a corrupted marker is
+                            # still rejected rather than read as the plain form.
+                            if (self.data[self.header.header_offset + 8] as i64) & 0x80 != 0:
+                                if marker != 0xA2:
+                                    return Err("v1.3 Reloc source marker is invalid")
+                                source_section = source_low | (source_high << 8)
+                            elif source_low != 0 or source_high != 0 or marker != 0:
+                                return Err("v1.3 Reloc reserved bytes are nonzero")
                         if source_section >= section_count:
                             return Err("Reloc source section index is invalid")
                         val source_entry = self.sections_offset + source_section * section_entry_size
@@ -441,7 +452,10 @@ struct SmfRelocEntry:
 
 """Parse SMF header from byte array.
 
-Byte layout matches the Rust #[repr(C)] SmfHeader (128 bytes).
+Offsets below are the LEGACY packed 128-byte layout (v1.0-v1.2). The v1.3
+default and the Rust seed's repr(C) layout are 96 bytes with every field from
+20 on shifted by +4 (see compiler.backend.linker.smf_header); `seed_shift`
+below applies that shift.
 repr(C) inserts 4 bytes of padding between section_count (u32) and
 section_table_offset (u64) to satisfy u64's 8-byte alignment requirement.
 
@@ -476,20 +490,28 @@ section_table_offset (u64) to satisfy u64's 8-byte alignment requirement.
   Total: 128 bytes
 """
 fn parse_header_from_bytes(data: [u8]) -> Result<SmfMemoryHeader, text>:
-    if data.len() < SMF_READER_HEADER_SIZE:
+    if data.len() < SMF_SEED_HEADER_SIZE:
         return Err("Not enough data for header")
 
     val header_offset = find_smf_header_offset(data)?
+    # A packed header is 128 bytes; a Rust seed repr(C) header is 96 (trailer at EOF-96).
+    if smf_header_size_at(data, header_offset) > data.len() - header_offset:
+        return Err("Not enough data for header")
 
     # Extract header bytes
     var header_bytes: [u8] = []
     var i = 0
     while i < SMF_READER_HEADER_SIZE:
+        # Zero-pad past EOF: a seed trailer has only 96 bytes and no reserved area.
+        if header_offset + i >= data.len():
+            header_bytes.push(0)
+            i = i + 1
+            continue
         header_bytes.push(data[header_offset + i])
         i = i + 1
 
     # Parse magic (bytes 0-3)
-    val magic = [header_bytes[0], header_bytes[1], header_bytes[2], header_bytes[3]]
+    val magic: [u8] = [header_bytes[0], header_bytes[1], header_bytes[2], header_bytes[3]]
 
     # Validate magic
     val valid_magic = magic[0] == 83 and magic[1] == 77 and magic[2] == 70 and magic[3] == 0
@@ -522,25 +544,27 @@ fn parse_header_from_bytes(data: [u8]) -> Result<SmfMemoryHeader, text>:
 
     # Parse section count (bytes 16-19, little endian u32)
     val section_count = bytes_to_u32(header_bytes, 16)
+    # Rust seed files carry the repr(C) layout: fields from 20 on sit 4 bytes later.
+    val seed_shift = smf_header_field_shift(data, header_offset)
 
     # Parse section table offset (bytes 20-27, little endian u64)
-    val section_table_offset = bytes_to_u64(header_bytes, 20)
+    val section_table_offset = bytes_to_u64(header_bytes, 20 + seed_shift)
 
     # Parse symbol table offset (bytes 28-35, little endian u64)
-    val symbol_table_offset = bytes_to_u64(header_bytes, 28)
+    val symbol_table_offset = bytes_to_u64(header_bytes, 28 + seed_shift)
 
     # Parse symbol count (bytes 36-39, little endian u32)
-    val symbol_count = bytes_to_u32(header_bytes, 36)
+    val symbol_count = bytes_to_u32(header_bytes, 36 + seed_shift)
 
     # Parse exported count (bytes 40-43, little endian u32)
-    val exported_count = bytes_to_u32(header_bytes, 40)
+    val exported_count = bytes_to_u32(header_bytes, 40 + seed_shift)
 
     # Parse entry point (bytes 44-51, little endian u64)
-    val entry_point = bytes_to_u64(header_bytes, 44)
+    val entry_point = bytes_to_u64(header_bytes, 44 + seed_shift)
 
     # Parse stub metadata (bytes 52-59)
-    val stub_size = bytes_to_u32(header_bytes, 52) as i64
-    val smf_data_offset = bytes_to_u32(header_bytes, 56) as i64
+    val stub_size = bytes_to_u32(header_bytes, 52 + seed_shift) as i64
+    val smf_data_offset = bytes_to_u32(header_bytes, 56 + seed_shift) as i64
     val section_table_file_offset = smf_checked_payload_offset(
         data.len(),
         section_table_offset as i64,
@@ -575,16 +599,16 @@ fn parse_header_from_bytes(data: [u8]) -> Result<SmfMemoryHeader, text>:
 
 """Find the SMF header location.
 
-SMF files may store the canonical 128-byte header at file offset 0 or as a
-trailer at EOF-128. Check offset 0 first to preserve legacy leading-header
-files, then fall back to the trailer location.
+A leading header at offset 0 (legacy files, archive slices) wins; otherwise the
+trailer, located with the shared precedence in `smf_header_trailer_offset`
+(v1.3 at EOF-96, legacy packed at EOF-128, Rust-seed 1.1 at EOF-96).
 """
 fn find_smf_header_offset(data: [u8]) -> Result<i64, text>:
     if has_smf_magic_at(data, 0):
         return Ok(0)
-    val trailer_offset = data.len() - SMF_READER_HEADER_SIZE
-    if has_smf_magic_at(data, trailer_offset):
-        return Ok(trailer_offset)
+    val trailer = smf_header_trailer_offset(data)
+    if trailer >= 0:
+        return Ok(trailer)
     Err("Invalid SMF magic: expected 'SMF\\0'")
 
 """Check for SMF magic at an absolute file offset."""
@@ -603,7 +627,7 @@ fn smf_payload_offset_value(offset: i64, smf_data_offset: i64) -> i64:
         offset
 
 """Convert an offset using parsed header metadata."""
-fn smf_payload_file_offset(header: SmfMemoryHeader, offset: i64) -> i64:
+pub fn smf_payload_file_offset(header: SmfMemoryHeader, offset: i64) -> i64:
     smf_payload_offset_value(offset, header.smf_data_offset)
 
 fn smf_checked_payload_offset(size: i64, offset: i64, base: i64) -> Result<i64, text>:
@@ -681,17 +705,17 @@ fn locate_string_table(data: [u8], header: SmfMemoryHeader) -> Result<(i64, i64)
 `abs_offset` is the absolute byte offset inside `data` where the name starts.
 `stop_at` is an exclusive upper bound (typically the string-table end).
 """
-fn read_string_at(data: [u8], abs_offset: i64, stop_at: i64) -> text:
+fn read_string_at(data: [u8], abs_offset: i64, stop_at: i64) -> Result<text, text>:
     var name_bytes: [u8] = []
     var pos = abs_offset
     val limit = if stop_at < data.len(): stop_at else: data.len()
     while pos < limit:
         val byte = data[pos]
         if byte == 0:
-            return rt_bytes_to_text(name_bytes)
+            return linker_name_text(name_bytes, "SMF symbol name at offset {abs_offset}")
         name_bytes.push(byte)
         pos = pos + 1
-    rt_bytes_to_text(name_bytes)
+    linker_name_text(name_bytes, "SMF symbol name at offset {abs_offset}")
 
 """Parse the symbol dict using raw data + string-table bounds (no copy)."""
 fn parse_symbol_table_inplace(
@@ -722,7 +746,9 @@ fn parse_symbol_table_inplace(
         val tpl_offset = bytes_to_u64(data, entry_off + 48)
 
         val abs_name_offset = str_off + (name_offset as i64)
-        val name = read_string_at(data, abs_name_offset, str_end)
+        val name: text = match read_string_at(data, abs_name_offset, str_end):
+            case Ok(v): v
+            case Err(e): return Err(e)
 
         val section_idx = smf_decode_symbol_section_index_v1(
             data, entry_off, header.section_count, sym_type)?
@@ -774,7 +800,9 @@ fn parse_symbol_table_ordered_inplace(
         val tpl_offset = bytes_to_u64(data, entry_off + 48)
 
         val abs_name_offset = str_off + (name_offset as i64)
-        val name = read_string_at(data, abs_name_offset, str_end)
+        val name: text = match read_string_at(data, abs_name_offset, str_end):
+            case Ok(v): v
+            case Err(e): return Err(e)
 
         val section_idx = smf_decode_symbol_section_index_v1(
             data, entry_off, header.section_count, sym_type)?

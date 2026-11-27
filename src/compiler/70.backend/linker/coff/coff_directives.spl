@@ -3,6 +3,7 @@
 # forms of the directives we own fail closed rather than being partly applied.
 
 use compiler.backend.linker.coff.coff_object.{CoffObject, COFF_SECTION_LNK_INFO}
+use compiler.backend.linker.name_text.{linker_name_text}
 
 struct CoffAlternateName:
     weak_name: text
@@ -57,12 +58,12 @@ fn _coff_export_same(left: CoffExportDirective,
         left.data == right.data and left.private_export == right.private_export
 
 fn _coff_export_ordinal(value: text) -> Result<i64, text>:
-    if value.len() < 2 or value[0:1] != "@":
+    if value.byte_len() < 2 or value.substring(0, 1) != "@":
         return Err("COFF /EXPORT ordinal must use @number")
     var ordinal: i64 = 0
     var index: i64 = 1
-    while index < value.len():
-        val ch = value[index:index + 1]
+    while index < value.byte_len():
+        val ch = value.substring(index, index + 1)
         if ch < "0" or ch > "9":
             return Err("COFF /EXPORT ordinal must be decimal")
         ordinal = ordinal * 10 + (value.byte_at(index) - 48)
@@ -192,9 +193,12 @@ fn coff_collect_directives(objects: [CoffObject]) -> Result<CoffDirectives, text
             if section.name != ".drectve": continue
             if (section.characteristics & COFF_SECTION_LNK_INFO) == 0:
                 return Err("COFF .drectve section is missing LNK_INFO")
-            var content = ""
+            var non_zero: [u8] = []
             for byte in section.data:
-                if byte != 0: content = content + text.from_char_code(byte)
+                if byte != 0: non_zero = non_zero.push(byte)
+            val content: text = match linker_name_text(non_zero, "COFF .drectve section"):
+                case Ok(v): v
+                case Err(e): return Err(e)
             val parsed = coff_parse_directives(content)?
             for value in parsed.default_libraries:
                 defaults = _coff_directive_add_unique(defaults, value)
@@ -235,7 +239,7 @@ fn _coff_library_key(name: text) -> text:
     var key = name.trim().lower().replace("\\", "/")
     val parts = key.split("/")
     if parts.len() > 0: key = parts[parts.len() - 1]
-    if key.ends_with(".lib"): key = key.substring(0, key.len() - 4)
+    if key.ends_with(".lib"): key = key.substring(0, key.byte_len() - 4)
     key
 
 fn coff_effective_default_libraries(directives: CoffDirectives) -> [text]:

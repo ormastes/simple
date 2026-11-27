@@ -1,0 +1,121 @@
+# Seed: a value-position `match` with no matching arm silently yields nil/0
+
+Status: OPEN. Severity: P2. Found 2026-11-02 by lane pattern-lowering-audit.
+Checked against current policy/design: nil is allowed only inside `unsafe`,
+Any only inside `unsafe`, and generics are erased. Runtime exhaustiveness
+behaviour is set by `SIMPLE_SAFETY_PROFILE` (doc/07_guide/language/strictness_tiers.md).
+
+## Same class as the case-nil fix
+The `case nil:` lowering to `rt_string_eq(subject, nil)` (fix owned by the
+s2-rebuild lane) did real damage only because a failed match falls through
+silently. The arm never matched, the match yielded nil, and the caller used
+that nil (the stage2_next worker AV). If fall-through failed closed, that bug
+would have stopped loudly at the match.
+
+## Evidence (seed, run with worktree bin/simple.exe = Rust seed)
+```
+fn pick(s: text) -> i64:
+    match s:
+        case "a": 1
+        case "b": 2
+pick("z")        # prints 0, rc=0, no diagnostic
+ipick(5)         # int subject, arms -1 / i64::MAX, prints 0
+```
+Literal kinds checked and correct on the seed: text, negative int, i64 max,
+None/Some on `text?`.
+
+Source: src/compiler_rust/compiler/src/hir/lower/expr/control.rs
+`lower_match_arms`: when `arms.is_empty()` it returns `HirExprKind::Nil`.
+
+## Pure-Simple compiler status
+- Partial enum matches with no default already lower to rt_panic+Abort
+  (match_enum_fallthrough_silent_2026-08-01, fixed 2026-09-19).
+- Scalar/text/tuple if-chain value matches still yield a `Const(Int(0))`
+  placeholder (switch_operators_calls.spl cascade tail) and are tracked by
+  if_chain_match_no_arm_matched_is_silent_2026-10-10 (OPEN).
+
+## Other seed literal-equality suspects (code reading, not confirmed)
+- control.rs `lower_pattern_condition` Pattern::Literal: picks `rt_string_eq`
+  when EITHER side is text/char. So a text-typed subject with a non-text
+  literal (nil was the observed case) gets text equality. The general fix is
+  to choose equality from the literal kind first (nil -> rt_is_none) and use
+  text equality only when the literal is a text/char literal.
+- control.rs `subpattern_condition` Pattern::Literal (payload slot, ANY):
+  a nested `nil` literal lowers to `BinOp::Eq(slot, nil)`, not `rt_is_none`,
+  so a boxed-None payload may not match. Under current policy `case nil` is
+  non-compliant outside unsafe anyway; the target is `case None`.
+
+## Proposed rule (not in the current spec)
+A value-position `match` that finds no arm MUST fail closed:
+rt_panic("non-exhaustive match: no arm matched") followed by an abort, on
+every lane, whatever SIMPLE_SAFETY_PROFILE is set to. A statement match keeps
+no-op semantics unless the critical profile is set. The strictness-tiers
+guide currently specifies only interpreter diagnostics (warn by default,
+error under critical), so this needs a spec change before it becomes compiler
+behaviour. Do not change the seed first: bootstrap sources may depend on the
+fall-through.
+
+## Blast radius (git grep, src/**/*.spl excluding compiler_rust, 2026-11-02)
+case nil: 1605 | case None: 691 | case true/false: 2/2 | negative int
+literal arms: 13 | float literal arms: 2 | char-literal arms: 16 |
+text or-pattern arms: 339 | `== nil`: 5339 | `!= nil`: 2601 |
+`== None`: 15 | `!= None`: 4
+
+## Fixed (2026-11-03)
+
+`lower_match_arms` (`src/compiler_rust/compiler/src/hir/lower/expr/control.rs`) now ends a
+value-position match chain with `rt_panic("invalid pattern: match expression exhausted ...")`
+instead of `Nil`, matching the interpreter, which already failed closed. A match used as an
+expression statement (`Node::Expression`, value discarded) keeps the silent fall-through
+(`lower_match_with(.., exhaust_panic=false)`), so self-hosted code relying on it is unaffected.
+An implicit tail-expression match is indistinguishable from a statement one in HIR and also
+stays silent.
+
+Tests: `test_value_match_without_wildcard_fails_closed`,
+`test_value_match_with_wildcard_has_no_exhaustion_panic`,
+`test_statement_match_without_wildcard_stays_silent` in
+`hir/lower/tests/control_flow_tests.rs` (56/56 pass). Status: verification pending a JIT run of
+`pick(4)` on a seed built from this change.
+
+## Verification — 2026-11-05
+
+The 2026-11-03 fix is verified executable at current release/1.0.0 source:
+
+- cargo test -p simple-compiler --lib: test_value_match_without_wildcard_fails_closed,
+  test_value_match_with_wildcard_has_no_exhaustion_panic,
+  test_statement_match_without_wildcard_stays_silent — 3/3 PASS.
+- Behavioral JIT run on a current-source seed build (bootstrap cargo target,
+  built 2026-11-05): `val r = match s: case "a": 1; case "b": 2` with s="z"
+  now emits "invalid pattern: match expression exhausted without matching
+  any pattern" and aborts (exit 134) — fail closed, matching the
+  interpreter, instead of silently yielding 0.
+- Scope note: the fix deliberately keeps the SILENT fall-through for an
+  implicit tail-expression match (`fn pick(s): match s: ...` as the whole
+  body — the doc's original repro shape still prints 0, rc=0) because a tail
+  match is indistinguishable from a statement match in HIR, and bootstrap
+  sources may depend on the fall-through. Extending fail-closed to implicit
+  tails remains tied to the proposed-rule spec change recorded above.
+
+Remaining acceptance: the full proposed rule (fail-closed on every lane
+regardless of SIMPLE_SAFETY_PROFILE, including implicit tails) still needs
+the strictness-tiers spec change before it becomes compiler behaviour.
+
+## Fix (2026-11-13) — implicit tail match of a non-void function fails closed
+
+Owner direction: the proposed rule above is the spec; the interpreter already fails
+closed for every exhausted `match` expression (`interpreter/expr/control.rs`). The
+seed now treats the implicit tail of a function with a declared non-void return
+(`fn pick(s: text) -> i64: match s: ...`) as value position:
+`module_lowering/function.rs` records the address of the body's last AST node when
+it is a `match` (`Node::Match` or `Node::Expression(Expr::Match)`), and
+`stmt_lowering.rs` lowers exactly that node with the exhaustion panic — for the
+`Node::Match` form by setting the empty final `else` of the arm chain to
+`rt_panic("invalid pattern: match expression exhausted without matching any pattern")`
+typed as the declared return (so tail-merge typing and implicit-return validation
+are unchanged). Unchanged: matches with an unguarded `case _`, statement matches
+that are not the tail, and functions without a declared return type or with
+`-> void`. Rust tests: `test_tail_match_without_wildcard_fails_closed`,
+`test_tail_match_with_wildcard_or_void_has_no_exhaustion_panic`
+(`hir/lower/tests/control_flow_tests.rs`). Needs a seed rebuild to verify, and —
+because seed-compiled bootstrap code that relied on a silent tail fall-through
+will now abort — a bootstrap Stage 1/2 run before landing.

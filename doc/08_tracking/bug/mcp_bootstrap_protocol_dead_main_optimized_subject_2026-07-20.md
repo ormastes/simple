@@ -71,3 +71,60 @@ A maintainer familiar with the MCP bootstrap consolidation should either:
 
 Affected: `test/feature/lib/mcp/bootstrap_protocol_test.spl` only.
 
+## Resolution 2026-11-25 — FIXED (Option A: repoint at the live stdio entry point)
+
+**Option chosen: A.** The spec keeps its unique subprocess-level JSON-RPC
+coverage (real server process, framed requests on stdin, framed responses on
+stdout); `working_check.spl` / `integration_spec.spl` are in-process and do
+not replace that surface, so retiring the spec (Option B) would have dropped
+coverage.
+
+**Findings during the fix (branch `release/1.0.0` state):**
+
+- The spec had already been repointed from the dead
+  `src/app/mcp/bootstrap/main_optimized.spl` to the live stdio entry point
+  `src/app/mcp/main.spl` (both copies: `test/feature/lib/mcp/` and
+  `test/03_system/feature/lib/mcp/`). `src/app/mcp/bootstrap/` also exists
+  again in this branch, so the literal dead-subject condition no longer held.
+- The spec was still RED on a Windows host for two harness-drift reasons,
+  verified by replaying the inner command by hand:
+  1. `file_write("/tmp/mcp_test_input.txt", ...)` is a native call and wrote
+     `C:\tmp\mcp_test_input.txt`, while `shell()` resolves to MSYS `sh` on
+     Windows, whose `< /tmp/mcp_test_input.txt` reads the MSYS temp dir —
+     `sh: line 1: /tmp/mcp_test_input.txt: No such file or directory`,
+     exit 1, empty stdout. (On Linux both views agree, which is why the
+     original failure there was only the dead subject.)
+  2. Even with the file reachable, `2>&1` merged compiler-runner stderr
+     diagnostics (`[engine-demotion] ... Module error: unresolved external
+     symbol ...`, JIT fallback) into the asserted output, tripping the
+     `output.contains("error: ") == false` check without any server error.
+
+**Fix applied to both spec copies** (no assertion weakened):
+
+- Requests are fed via a stdin heredoc inside the single `shell()` call —
+  the write and the read now always share one shell's path view; the `/tmp`
+  temp file is gone entirely.
+- The server binary is the tracked per-OS entry point: `bin/simple.exe` on
+  Windows, `bin/simple` elsewhere (forward slashes are correct because
+  `shell()` resolves to a POSIX sh on Windows whenever one is installed).
+- Streams are asserted separately: stdout must contain all three
+  `"id":"N","result"` responses, `protocolVersion`, `capabilities`, `tools`,
+  and no `error: ` line; stderr must contain no `[error]` (the server's own
+  `_mcp_error` marker — this keeps the stderr error coverage the old `2>&1`
+  merge provided, without failing on compiler-runner noise).
+
+**Evidence** (`SIMPLE_LIB=src bin/simple.exe test <spec> --mode=interpreter`,
+self-hosted tracked binary, worktree root):
+
+- BEFORE: `outcome=ERROR declared>=1 executed=1 passed=0 failed=1` —
+  `expected 1 to equal 0` (exit code) plus all seven content checks false.
+- Manual replay of the live server (`bin/simple.exe run src/app/mcp/main.spl`
+  with the spec's framed input): exit 0, `"id":"1","result"` with
+  `protocolVersion`, `"id":"2","result"` with the tools array,
+  `"id":"3","result"` with the `simple_status` content — the protocol surface
+  the spec checks is genuinely answered by the current server.
+- AFTER: both copies
+  `outcome=OK declared>=1 executed=1 passed=1 failed=0`.
+
+Files changed: `test/feature/lib/mcp/bootstrap_protocol_test.spl`,
+`test/03_system/feature/lib/mcp/bootstrap_protocol_test.spl`.

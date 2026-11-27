@@ -62,3 +62,16 @@ handles; conversely the incumbent breaks plain-nil-return + `??` (prints "nil"
 instead of the default), which the candidate handles. Root-cause in progress in
 the stage4 deploy arc (see memory project_stage4_macos_deploy_ladder_2026-07-25).
 
+
+## Triage 2026-11-25 (worktree work/p2w2-ah-20261125, Windows host) — STILL OPEN
+
+- All three defects are platform-parity bugs of the compiled interpreter on
+  **aarch64-apple-darwin**; they are not reproducible or verifiable from this
+  Windows host, which has neither a macOS lane nor a qualified self-hosted
+  CLI (and `bin/simple.exe test` is additionally blocked repo-wide at
+  release/1.0.0 HEAD by `unknown decorator '@representation_boundary'`).
+- The repro kit (`scripts/check/cert/redeploy_gate/fixtures/` struct-copy
+  fixture and the session scratchpad probes) is tied to the macOS redeploy
+  gate; the fix belongs to the interpreter-lane parity work on that platform.
+- Status stays OPEN pending owner triage on the macOS lane. No code change
+  attempted; nothing in this entry is actionable from a Windows P2 lane.

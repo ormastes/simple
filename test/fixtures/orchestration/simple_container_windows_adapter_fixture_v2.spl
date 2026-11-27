@@ -1,0 +1,145 @@
+# Actual scripted Windows leaf owner through the real portable Container API.
+# Synthetic script facts only: this never qualifies Windows/Docker/native effects.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.effect_deadline_v1.*
+use std.common.contracts.container.service_v2.*
+use std.common.contracts.container.runtime_v1.*
+use std.nogc_async_mut.container.api_v2.*
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_codec_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_scope_v2.*
+use std.nogc_async_mut.container.providers.windows.docker_runtime_v1.WindowsDockerRuntimeProviderV1
+use std.nogc_async_mut.container.providers.windows.simple_container_adapter_v2.*
+use test.fixtures.container.simple_container_api_fixture_v2.simple_container_scripted_windows_fixture_v2
+
+pub fn windows_adapter_scope_fixture_v2() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "host-a", service_scope_id: "service-a", boot_id: "",
+        provider_generation: 4, native_machine_id: "windows-machine-guid-v1:12345678-9abc-4def-8012-3456789abcde",
+        continuity_mode: "service-incarnation-v1",
+        continuity_id: "windows-service-incarnation-v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+
+pub fn windows_adapter_policy_fixture_v2() -> WindowsDockerPolicyV1:
+    WindowsDockerPolicyV1(docker_executable: "C:\\Program Files\\Docker\\docker.exe",
+        endpoint: "npipe:////./pipe/docker_engine", engine_id: "engine-a",
+        node_boot_id: container_scope_fence_id_v2(windows_adapter_scope_fixture_v2()).unwrap(), provider_generation: 4,
+        expected_kernel_version: "10.0.20348.2402", image_os_version: "10.0.20348.2402",
+        expected_image_id: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        timeout_ms: 5000, max_output_bytes: 8192, system_root: "C:\\Windows", temp_directory: "C:\\Temp")
+
+pub fn windows_adapter_native_request_fixture_v2() -> WindowsDockerRequestV1:
+    WindowsDockerRequestV1(pod_uid: "workload-a", attempt: 2, operation_id: "operation-a",
+        image: "mcr.microsoft.com/windows/servercore@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        command: ["C:\\work\\fixture.exe"], args: [], cpu_count: 2, memory_limit_bytes: 536870912,
+        network: "none", working_directory: "C:\\work")
+
+pub fn windows_adapter_request_fixture_v2() -> ContainerExecutionRequestV2:
+    val scope = windows_adapter_scope_fixture_v2()
+    val policy = windows_adapter_policy_fixture_v2()
+    val request = windows_adapter_native_request_fixture_v2()
+    val digest = windows_docker_request_digest_v1(policy, request).unwrap()
+    ContainerExecutionRequestV2(plan: ContainerExecutionPlanV2(backend: "windows-docker-process",
+        workload_uid: request.pod_uid, attempt: request.attempt, operation_id: request.operation_id,
+        request_digest: digest, physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id,
+        boot_id: "", provider_generation: scope.provider_generation, native_machine_id: scope.native_machine_id,
+        continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id),
+        request_bytes: windows_docker_request_encode_v1(policy, request).unwrap())
+
+pub fn windows_adapter_deadline_fixture_v2() -> ContainerEffectDeadlineV1:
+    val request = windows_adapter_request_fixture_v2()
+    container_effect_deadline_v1(request.plan.request_digest, request.plan.operation_id, ["create", "start"], 2000).unwrap()
+
+pub fn windows_adapter_native_id_fixture_v2() -> text:
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+pub fn windows_adapter_response_fixture_v2(operation: text, args: [text], output: text,
+        exit_code: i64 = 0) -> WindowsDockerScriptedResultV1:
+    val policy = windows_adapter_policy_fixture_v2()
+    WindowsDockerScriptedResultV1(operation: operation, program: policy.docker_executable,
+        args: ["--host", policy.endpoint] + args, stdout: output, stderr: "", exit_code: exit_code)
+
+pub fn windows_adapter_engine_fixture_v2(failed: bool = false) -> WindowsDockerScriptedResultV1:
+    windows_adapter_response_fixture_v2("engine-info", ["info", "--format", WINDOWS_DOCKER_INFO_FORMAT_V1],
+        if failed: "" else: "windows|engine-a|10.0.20348.2402\n", if failed: 1 else: 0)
+
+pub fn windows_adapter_image_fixture_v2() -> WindowsDockerScriptedResultV1:
+    val policy = windows_adapter_policy_fixture_v2()
+    val request = windows_adapter_native_request_fixture_v2()
+    windows_adapter_response_fixture_v2("image-inspect", ["image", "inspect", "--format", WINDOWS_DOCKER_IMAGE_FORMAT_V1, request.image],
+        "windows|" + policy.expected_image_id + "|" + policy.image_os_version + "\n" + request.image + "\n")
+
+pub fn windows_adapter_inspect_fixture_v2(phase: text) -> WindowsDockerScriptedResultV1:
+    val scope = windows_adapter_scope_fixture_v2()
+    val policy = windows_adapter_policy_fixture_v2()
+    val request = windows_adapter_native_request_fixture_v2()
+    val fields = [windows_adapter_native_id_fixture_v2(), policy.expected_image_id, request.image,
+        "process", "ContainerUser", "none", "2", "536870912", WINDOWS_DOCKER_ENGINE_V1,
+        request.pod_uid, request.attempt.to_text(), request.operation_id, "", "4",
+        windows_docker_request_digest_v1(policy, request).unwrap(), phase, if phase == "exited": "17" else: "0"] +
+        windows_docker_scope_values_v2(scope).unwrap() + [request.working_directory, "0", ""]
+    var output = ""
+    for index in 0..fields.len():
+        if index > 0: output = output + "|"
+        output = output + fields[index]
+    windows_adapter_response_fixture_v2("inspect", ["container", "inspect", "--format",
+        WINDOWS_DOCKER_SCOPED_INSPECT_FORMAT_V2 + "|{{{{.Config.WorkingDir}}}}" + WINDOWS_DOCKER_MOUNTS_FORMAT_V3,
+        windows_adapter_native_id_fixture_v2()], output + "\n")
+
+pub fn windows_adapter_failed_create_script_v2() -> [WindowsDockerScriptedResultV1]:
+    val command = windows_docker_scoped_create_v2(windows_adapter_policy_fixture_v2(),
+        windows_adapter_native_request_fixture_v2(), windows_adapter_scope_fixture_v2()).unwrap()
+    val created = WindowsDockerScriptedResultV1(operation: "create", program: command.program,
+        args: command.args, stdout: windows_adapter_native_id_fixture_v2() + "\n", stderr: "", exit_code: 0)
+    [windows_adapter_engine_fixture_v2(), windows_adapter_image_fixture_v2(),
+        windows_adapter_engine_fixture_v2(), windows_adapter_image_fixture_v2(), created,
+        windows_adapter_engine_fixture_v2(true)]
+
+pub fn windows_adapter_recovery_lifecycle_script_v2() -> [WindowsDockerScriptedResultV1]:
+    val id = windows_adapter_native_id_fixture_v2()
+    windows_adapter_failed_create_script_v2() + [
+        windows_adapter_engine_fixture_v2(), windows_adapter_image_fixture_v2(), windows_adapter_inspect_fixture_v2("created"),
+        windows_adapter_engine_fixture_v2(), windows_adapter_inspect_fixture_v2("created"),
+        windows_adapter_response_fixture_v2("start", ["start", id], id + "\n"),
+        windows_adapter_engine_fixture_v2(), windows_adapter_inspect_fixture_v2("running"),
+        windows_adapter_engine_fixture_v2(), windows_adapter_inspect_fixture_v2("running"),
+        windows_adapter_response_fixture_v2("stop", ["stop", "--time", "10", id], id + "\n"),
+        windows_adapter_engine_fixture_v2(), windows_adapter_inspect_fixture_v2("exited"),
+        windows_adapter_engine_fixture_v2(), windows_adapter_inspect_fixture_v2("exited"),
+        windows_adapter_response_fixture_v2("destroy", ["rm", id], id + "\n"),
+        windows_adapter_engine_fixture_v2(),
+        windows_adapter_response_fixture_v2("verify-absence", ["container", "ls", "--all", "--no-trunc", "--filter", "id=" + id, "--format", "{{{{.ID}}}}"], "")]
+
+pub fn windows_adapter_observation_fixture_v2() -> ContainerHostObservationV2:
+    val scope = windows_adapter_scope_fixture_v2()
+    var observed = ContainerHostObservationV2(backend: "windows-docker-process", native_machine_id: scope.native_machine_id,
+        native_boot_id: "", provider_identity_digest: "", execution_os: "windows", architecture: "x86_64",
+        continuity_assurance: "machine-boot-counter-v1", boot_observation: "7")
+    observed.provider_identity_digest = windows_scripted_service_fixture_pin_v2(scope, windows_adapter_policy_fixture_v2(), observed).unwrap()
+    observed
+
+pub fn windows_adapter_owner_fixture_v2(script: [WindowsDockerScriptedResultV1],
+        samples: [WindowsServiceInventorySampleV2]) -> SimpleContainerOwnerV2:
+    var provider = WindowsDockerRuntimeProviderV1.scripted(windows_adapter_policy_fixture_v2(), script)
+    assert(provider.set_scripted_admission_clock_v1(1000).is_ok())
+    val adapter = WindowsSimpleContainerAdapterV2.scripted_service_fixture_v2(windows_adapter_scope_fixture_v2(),
+        provider, windows_adapter_observation_fixture_v2(), samples, 5000).unwrap()
+    simple_container_scripted_windows_fixture_v2(windows_adapter_scope_fixture_v2(), adapter)
+
+pub fn windows_adapter_consumed_fixture_v2(owner: SimpleContainerOwnerV2) -> i64:
+    match owner:
+        case SimpleContainerOwnerV2.Windows(_, adapter): adapter.provider.consumed_script_count()
+        case SimpleContainerOwnerV2.Linux(_, _): -1
+
+pub fn windows_adapter_inventory_fixture_v2() -> ContainerServiceInventoryEntryV2:
+    var old = windows_adapter_scope_fixture_v2()
+    old.continuity_id = "windows-service-incarnation-v1:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    ContainerServiceInventoryEntryV2(scope: old, runtime: RuntimeIdentityV1(pod_uid: "old-workload", attempt: 1,
+        provider_generation: 4, operation_id: "old-operation", engine: "docker",
+        native_id: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        node_boot_id: container_scope_fence_id_v2(old).unwrap()), request_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        cpu_millis: 2000, memory_bytes: 536870912)
+
+pub fn windows_adapter_admission_fixture_v2(entries: [ContainerServiceInventoryEntryV2], revision: i64 = 0) -> ContainerServiceAdmissionV2:
+    ContainerServiceAdmissionV2(scope_fence_id: container_scope_fence_id_v2(windows_adapter_scope_fixture_v2()).unwrap(),
+        inventory_digest: container_service_inventory_digest_v2("windows-docker-process", windows_adapter_scope_fixture_v2(), entries).unwrap(),
+        host_journal_commit_digest: if revision == 0: "" else: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        host_journal_revision: revision, durability_profile: "process-crash-v1")

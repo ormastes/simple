@@ -1,0 +1,46 @@
+"""
+## Purpose and audience
+Purpose: Pin that clipping a blurred box shadow to the frame changes no pixel
+on the cpu_simd lane. A shadow whose blur is wide for its box has no fully
+covered column; when its region is also cut by the frame's right edge, the
+zone clamps in `emu_draw_shadow_rect` used to leave an interior run past the
+row end, so every row read the next row's pixels and the last row read past
+the region (index out of bounds).
+Audience: Engine2D maintainers of the CPU shadow painter.
+"""
+
+"""
+Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(shadow zone clamp).
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+# A 60x40 white box at (12,12) on #1e1e2e with `box-shadow: 0 28px 76px`: the
+# shadow region runs past the right and bottom edges of a 100x70 frame and
+# fits inside a 200x200 frame.
+fn sc_page() -> text:
+    "<!DOCTYPE html><html><body style='margin:0;background:#1e1e2e'><div style='margin:12px;width:60px;height:40px;background:#fff;box-shadow:0 28px 76px rgba(0,68,160,0.16)'></div></body></html>"
+
+fn sc_mismatches(small: [u32], big: [u32]) -> i32:
+    if small.len() != 100 * 70 or big.len() != 200 * 200:
+        return -1
+    var bad = 0
+    var y = 0
+    # cpu-lane-loop-ok: test comparison over a 100x70 frame; bound 7000 pixels
+    while y < 70:
+        var x = 0
+        while x < 100:
+            if small[y * 100 + x] != big[y * 200 + x]:
+                bad = bad + 1
+            x = x + 1
+        y = y + 1
+    bad
+
+describe "box shadow clipped by the frame (cpu_simd)":
+    it "paints the same pixels whether or not the frame cuts the shadow":
+        val small = simple_web_layout_render_html_pixels_engine2d_at_device_scale(sc_page(), 100, 70, 1, "cpu_simd")
+        val big = simple_web_layout_render_html_pixels_engine2d_at_device_scale(sc_page(), 200, 200, 1, "cpu_simd")
+        expect(sc_mismatches(small, big)).to_equal(0)

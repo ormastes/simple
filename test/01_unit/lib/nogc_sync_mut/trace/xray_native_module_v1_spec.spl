@@ -1,0 +1,53 @@
+# @cover src/lib/nogc_sync_mut/trace/xray_native_module_v1.spl
+# @req REQ-XRAY-PR5B-MODULE-REGISTRATION
+"""
+# XRay PR5b — locating a loaded module's `.simple_xray_map`
+
+The parsers the control plane uses to find a module in this process: one
+`/proc/self/maps` row and the AArch64 BL that ties a sled to the resident
+trampoline. The full path (dlopen, section table, PREL64 text base, manifest
+admission, in-process patching) is exercised end to end by
+`scripts/check/check-xray-native-inprocess-e2e.shs`.
+"""
+use std.spec.*
+use std.nogc_sync_mut.trace.xray_native_module_v1.*
+
+describe "XRay native loaded-module discovery":
+    it "parses a /proc/self/maps row with its path and permissions":
+        val row = xray_proc_maps_line_v1("ffff8a3c0000-ffff8a3d1000 r-xp 00010000 103:02 4211 /tmp/x/libprog.so").unwrap()
+        expect(row.start).to_equal(0xFFFF8A3C0000)
+        expect(row.end).to_equal(0xFFFF8A3D1000)
+        expect(row.readable).to_equal(true)
+        expect(row.writable).to_equal(false)
+        expect(row.executable).to_equal(true)
+        expect(row.offset).to_equal(0x10000)
+        expect(row.path).to_equal("/tmp/x/libprog.so")
+        val anon = xray_proc_maps_line_v1("ffff8a3c0000-ffff8a3d1000 rw-p 00000000 00:00 0").unwrap()
+        expect(anon.path).to_equal("")
+        expect(anon.writable).to_equal(true)
+
+    it "rejects a malformed or inverted row":
+        expect(xray_proc_maps_line_v1("").is_none()).to_equal(true)
+        expect(xray_proc_maps_line_v1("zz-10 r-xp 0 0:0 0").is_none()).to_equal(true)
+        expect(xray_proc_maps_line_v1("2000-1000 r-xp 00000000 00:00 0").is_none()).to_equal(true)
+
+    it "decodes the sled BL to the trampoline, forward and backward":
+        expect(xray_a64_bl_target_v1(0x107C4, 0x9400001C)).to_equal(Some(0x10834))
+        expect(xray_a64_bl_target_v1(0x2000, 0x97FFFFFF)).to_equal(Some(0x1FFC))
+        expect(xray_a64_bl_target_v1(0x2000, 0xD503201F)).to_equal(None)
+
+    it "decodes the x86-64 sled CALL rel32 to the trampoline, forward and backward (PR6)":
+        # CALL opcode at 0x1000: target = 0x1000 + 5 + signed rel32
+        expect(xray_x86_call_target_v1(0x1000, [0xE8, 0x10, 0x00, 0x00, 0x00])).to_equal(Some(0x1015))
+        expect(xray_x86_call_target_v1(0x1000, [0xE8, 0xFB, 0xFF, 0xFF, 0xFF])).to_equal(Some(0x1000))
+        expect(xray_x86_call_target_v1(0x1000, [0x90, 0x10, 0x00, 0x00, 0x00])).to_equal(None)
+
+    it "derives the per-ISA sled shape and manifest identity from the map ISA (PR6)":
+        val x86 = xray_native_isa_profile_v1(1).unwrap()
+        expect(x86.sled_bytes).to_equal(13)
+        expect(x86.target).to_equal("x86_64-unknown-linux-gnu")
+        expect(x86.abi_profile).to_equal("simple-x86_64-sysv-sled-v1")
+        val a64 = xray_native_isa_profile_v1(2).unwrap()
+        expect(a64.sled_bytes).to_equal(32)
+        expect(a64.abi_profile).to_equal(XRAY_NATIVE_ABI_PROFILE_V1)
+        expect(xray_native_isa_profile_v1(3).is_none()).to_equal(true)

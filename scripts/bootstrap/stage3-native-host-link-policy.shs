@@ -1,0 +1,430 @@
+#!/bin/sh
+# ==============================================================================
+# PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER
+# Guarded by: scripts/check/fast-verify-bootstrap-scripts.shs
+# ==============================================================================
+# Stage 3 platform/CPU static-primitive + dyn-lib unit link policy & native_host_match check.
+# Sourceable POSIX sh helper AND standalone CLI (--check / --print-env / --print-sources).
+
+stage3_policy_locate_sdn() {
+  if [ -n "${STAGE3_POLICY_SDN:-}" ] && [ -f "${STAGE3_POLICY_SDN}" ]; then
+    printf '%s\n' "${STAGE3_POLICY_SDN}"
+    return 0
+  fi
+  if [ -n "${STAGE3_POLICY_ROOT:-}" ] && [ -f "${STAGE3_POLICY_ROOT}/scripts/bootstrap/stage3-native-host-link-policy.sdn" ]; then
+    printf '%s\n' "${STAGE3_POLICY_ROOT}/scripts/bootstrap/stage3-native-host-link-policy.sdn"
+    return 0
+  fi
+  stage3_pol_dir=""
+  if [ -n "${BASH_SOURCE:-}" ]; then
+    stage3_pol_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE}")" 2>/dev/null && pwd -P) || stage3_pol_dir=""
+  fi
+  if [ -z "$stage3_pol_dir" ]; then
+    stage3_pol_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || stage3_pol_dir=""
+  fi
+  if [ -n "$stage3_pol_dir" ] && [ -f "$stage3_pol_dir/stage3-native-host-link-policy.sdn" ]; then
+    printf '%s\n' "$stage3_pol_dir/stage3-native-host-link-policy.sdn"
+    return 0
+  fi
+  if [ -f "scripts/bootstrap/stage3-native-host-link-policy.sdn" ]; then
+    printf '%s\n' "$(pwd -P)/scripts/bootstrap/stage3-native-host-link-policy.sdn"
+    return 0
+  fi
+  return 1
+}
+
+stage3_detect_native_host() {
+  if [ -n "${STAGE3_SIMULATE_HOST:-}" ]; then
+    stage3_sim_plat="${STAGE3_SIMULATE_HOST%-*}"
+    stage3_sim_cpu="${STAGE3_SIMULATE_HOST##*-}"
+    case "$stage3_sim_plat" in
+      macos|darwin|Darwin) STAGE3_HOST_PLATFORM="darwin" ;;
+      linux|Linux) STAGE3_HOST_PLATFORM="linux" ;;
+      freebsd|FreeBSD) STAGE3_HOST_PLATFORM="freebsd" ;;
+      windows|Windows|mingw|msvc) STAGE3_HOST_PLATFORM="windows" ;;
+      simpleos|SimpleOS) STAGE3_HOST_PLATFORM="simpleos" ;;
+      *) STAGE3_HOST_PLATFORM="$stage3_sim_plat" ;;
+    esac
+    case "$stage3_sim_cpu" in
+      arm64|aarch64|ARM64) STAGE3_HOST_CPU="aarch64" ;;
+      x86_64|amd64|AMD64) STAGE3_HOST_CPU="x86_64" ;;
+      riscv64*) STAGE3_HOST_CPU="riscv64" ;;
+      *) STAGE3_HOST_CPU="$stage3_sim_cpu" ;;
+    esac
+    STAGE3_HOST_TAG="${STAGE3_HOST_PLATFORM}-${STAGE3_HOST_CPU}"
+    return 0
+  fi
+
+  stage3_raw_os="${STAGE3_HOST_UNAME_S:-$(uname -s 2>/dev/null || echo unknown)}"
+  stage3_raw_cpu="${STAGE3_HOST_UNAME_M:-$(uname -m 2>/dev/null || echo unknown)}"
+
+  case "$stage3_raw_os" in
+    Darwin|darwin|macos) STAGE3_HOST_PLATFORM="darwin" ;;
+    Linux|linux) STAGE3_HOST_PLATFORM="linux" ;;
+    FreeBSD|freebsd) STAGE3_HOST_PLATFORM="freebsd" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT|windows*) STAGE3_HOST_PLATFORM="windows" ;;
+    SimpleOS|simpleos*) STAGE3_HOST_PLATFORM="simpleos" ;;
+    *) STAGE3_HOST_PLATFORM="unknown" ;;
+  esac
+
+  case "$stage3_raw_cpu" in
+    arm64|aarch64|ARM64) STAGE3_HOST_CPU="aarch64" ;;
+    x86_64|amd64|AMD64) STAGE3_HOST_CPU="x86_64" ;;
+    riscv64*) STAGE3_HOST_CPU="riscv64" ;;
+    *) STAGE3_HOST_CPU="$stage3_raw_cpu" ;;
+  esac
+
+  STAGE3_HOST_TAG="${STAGE3_HOST_PLATFORM}-${STAGE3_HOST_CPU}"
+}
+
+stage3_default_target_for_host() {
+  stage3_def_plat=$1
+  stage3_def_cpu=$2
+  stage3_def_wincfg=${3:-mingw}
+  case "$stage3_def_plat" in
+    darwin) printf '%s-apple-darwin\n' "$stage3_def_cpu" ;;
+    linux)
+      case "$stage3_def_cpu" in
+        riscv64) printf 'riscv64gc-unknown-linux-gnu\n' ;;
+        *) printf '%s-unknown-linux-gnu\n' "$stage3_def_cpu" ;;
+      esac
+      ;;
+    freebsd) printf '%s-unknown-freebsd\n' "$stage3_def_cpu" ;;
+    windows)
+      case "$stage3_def_wincfg" in
+        msvc) printf '%s-pc-windows-msvc\n' "$stage3_def_cpu" ;;
+        *) printf '%s-pc-windows-gnu\n' "$stage3_def_cpu" ;;
+      esac
+      ;;
+    simpleos)
+      case "$stage3_def_cpu" in
+        riscv64) printf 'riscv64gc-unknown-simpleos\n' ;;
+        *) printf '%s-unknown-simpleos\n' "$stage3_def_cpu" ;;
+      esac
+      ;;
+    *) printf '%s-unknown-%s\n' "$stage3_def_cpu" "$stage3_def_plat" ;;
+  esac
+}
+
+stage3_parse_target_triple() {
+  stage3_in_target=$1
+  case "$stage3_in_target" in
+    aarch64-*|arm64-*|*-aarch64) STAGE3_TARGET_CPU="aarch64" ;;
+    x86_64-*|amd64-*|*-x86_64) STAGE3_TARGET_CPU="x86_64" ;;
+    riscv64*-*|*-riscv64*) STAGE3_TARGET_CPU="riscv64" ;;
+    *) STAGE3_TARGET_CPU="${stage3_in_target%%-*}" ;;
+  esac
+
+  case "$stage3_in_target" in
+    *-apple-darwin*|darwin-*|macos-*) STAGE3_TARGET_PLATFORM="darwin" ;;
+    *-linux-*|*-unknown-linux*|linux-*) STAGE3_TARGET_PLATFORM="linux" ;;
+    *-freebsd*|freebsd-*) STAGE3_TARGET_PLATFORM="freebsd" ;;
+    *-windows-*|*-w64-mingw32*|windows-*) STAGE3_TARGET_PLATFORM="windows" ;;
+    *-simpleos*|simpleos-*) STAGE3_TARGET_PLATFORM="simpleos" ;;
+    *) STAGE3_TARGET_PLATFORM="unknown" ;;
+  esac
+
+  STAGE3_TARGET_TAG="${STAGE3_TARGET_PLATFORM}-${STAGE3_TARGET_CPU}"
+}
+
+stage3_query_sdn_profile() {
+  stage3_sdn_file=$1
+  stage3_want_id=$2
+  awk -v want="$stage3_want_id" '
+    function unq(s) {
+      sub(/^[[:space:]]+/, "", s)
+      sub(/[[:space:]]+$/, "", s)
+      if (s ~ /^".*"$/) {
+        s = substr(s, 2, length(s) - 2)
+      }
+      return s
+    }
+    /^[[:space:]]*schema:/ { sub(/^[^:]*:/, ""); schema = unq($0) }
+    /^[[:space:]]*native_host_match_tag:/ { sub(/^[^:]*:/, ""); tag_name = unq($0) }
+    /^[[:space:]]*native_host_match_required:/ { sub(/^[^:]*:/, ""); tag_req = unq($0) }
+    /^[[:space:]]*-[[:space:]]*id:/ {
+      sub(/^[^:]*:/, "")
+      cur_id = unq($0)
+      in_want = (cur_id == want) ? 1 : 0
+      if (in_want) found = 1
+      next
+    }
+    in_want && /^[[:space:]]*native_host_match:/ { sub(/^[^:]*:/, ""); nhm = unq($0) }
+    in_want && /^[[:space:]]*static_primitive_archive:/ { sub(/^[^:]*:/, ""); archive = unq($0) }
+    in_want && /^[[:space:]]*runtime_bundle:/ { sub(/^[^:]*:/, ""); bundle = unq($0) }
+    in_want && /^[[:space:]]*k1_composition:/ { sub(/^[^:]*:/, ""); k1 = unq($0) }
+    in_want && /^[[:space:]]*host_only_composition:/ { sub(/^[^:]*:/, ""); hcomp = unq($0) }
+    in_want && /^[[:space:]]*static_minimal_primitives:/ { sub(/^[^:]*:/, ""); min_prim = unq($0) }
+    END {
+      printf "schema=%s\ntag_name=%s\ntag_req=%s\nfound=%d\nnative_host_match=%s\narchive=%s\nbundle=%s\nk1=%s\nhcomp=%s\nmin_prim=%s\n",
+        schema, tag_name, tag_req, found + 0, nhm, archive, bundle, k1, hcomp, min_prim
+    }
+  ' "$stage3_sdn_file"
+}
+
+stage3_check_native_host_match() {
+  stage3_req_target=${1:-}
+  stage3_req_wincfg=${2:-mingw}
+  stage3_sdn=$(stage3_policy_locate_sdn) || {
+    echo "STAGE3-E-POLICY-MISSING: cannot locate stage3-native-host-link-policy.sdn" >&2
+    return 1
+  }
+
+  stage3_detect_native_host
+  if [ -z "$stage3_req_target" ]; then
+    STAGE3_RESOLVED_TARGET=$(stage3_default_target_for_host "$STAGE3_HOST_PLATFORM" "$STAGE3_HOST_CPU" "$stage3_req_wincfg")
+  else
+    STAGE3_RESOLVED_TARGET="$stage3_req_target"
+  fi
+  stage3_parse_target_triple "$STAGE3_RESOLVED_TARGET"
+
+  stage3_q=$(stage3_query_sdn_profile "$stage3_sdn" "$STAGE3_TARGET_TAG") || return 1
+  stage3_q_val() {
+    printf '%s\n' "$stage3_q" | awk -F= -v k="$1" '$1==k { print substr($0, length(k)+2); exit }'
+  }
+
+  stage3_schema=$(stage3_q_val schema)
+  stage3_tag_name=$(stage3_q_val tag_name)
+  stage3_tag_req=$(stage3_q_val tag_req)
+  stage3_found=$(stage3_q_val found)
+  stage3_nhm=$(stage3_q_val native_host_match)
+  STAGE3_POLICY_ARCHIVE=$(stage3_q_val archive)
+  STAGE3_POLICY_RUNTIME_BUNDLE=$(stage3_q_val bundle)
+  STAGE3_POLICY_K1_ROOT=$(stage3_q_val k1)
+  STAGE3_POLICY_HOST_COMP_ROOT=$(stage3_q_val hcomp)
+  STAGE3_POLICY_MIN_PRIM=$(stage3_q_val min_prim)
+
+  if [ "$stage3_schema" != "simple-stage3-native-host-link-policy-v1" ] || [ "$stage3_tag_name" != "native_host_match" ] || [ "$stage3_tag_req" != "true" ]; then
+    echo "STAGE3-E-POLICY-SCHEMA: invalid stage3-native-host-link-policy.sdn header ($stage3_sdn)" >&2
+    return 1
+  fi
+
+  if [ "$stage3_found" != "1" ] || [ "$stage3_nhm" != "true" ] || [ "$STAGE3_TARGET_TAG" != "$STAGE3_HOST_TAG" ]; then
+    echo "STAGE3-E-NATIVE-HOST-MISMATCH: target $STAGE3_RESOLVED_TARGET does not match native host $STAGE3_HOST_TAG (tag native_host_match=false)" >&2
+    return 1
+  fi
+
+  STAGE3_POLICY_SOURCE_ARGS="--source $STAGE3_POLICY_K1_ROOT --source $STAGE3_POLICY_HOST_COMP_ROOT --source src/compiler --source src/app --source src/lib"
+  if [ "${SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS:-0}" = "1" ]; then
+    STAGE3_POLICY_SOURCE_ARGS="$STAGE3_POLICY_SOURCE_ARGS --source src/plugins"
+  fi
+  return 0
+}
+
+stage3_apply_native_host_link_policy() {
+  stage3_app_target=${1:-}
+  stage3_app_compile_mode=${2:-shard}
+  stage3_app_win_cfg=${3:-mingw}
+  stage3_app_link_mode=${4:-dynlib}
+
+  stage3_check_native_host_match "$stage3_app_target" "$stage3_app_win_cfg" || return 1
+
+  SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS="${SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS:-0}"
+  case "$SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS" in
+    0|1) ;;
+    *)
+      echo "STAGE3-E-EXTRA-DYNLIBS: invalid SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS='$SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS' (expected 0 or 1)" >&2
+      return 1
+      ;;
+  esac
+  SIMPLE_STAGE3_ALLOW_EXISTING_DYNLIBS="${SIMPLE_STAGE3_ALLOW_EXISTING_DYNLIBS:-1}"
+  case "$SIMPLE_STAGE3_ALLOW_EXISTING_DYNLIBS" in
+    0|1) ;;
+    *)
+      echo "STAGE3-E-ALLOW-DYNLIBS: invalid SIMPLE_STAGE3_ALLOW_EXISTING_DYNLIBS='$SIMPLE_STAGE3_ALLOW_EXISTING_DYNLIBS' (expected 0 or 1)" >&2
+      return 1
+      ;;
+  esac
+
+  export SIMPLE_BOOTSTRAP_STAGE3="1"
+  export SIMPLE_STAGE3_HOST_TAG="$STAGE3_HOST_TAG"
+  export SIMPLE_STAGE3_NATIVE_HOST_MATCH="1"
+  export SIMPLE_STAGE3_STATIC_PRIMITIVE_ARCHIVE="$STAGE3_POLICY_ARCHIVE"
+  export SIMPLE_STAGE3_MINIMAL_STATIC_PRIMITIVES="1"
+  export SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS
+  export SIMPLE_STAGE3_ALLOW_EXISTING_DYNLIBS
+
+  case "$stage3_app_compile_mode" in
+    shard|phase)
+      STAGE3_RESOLVED_COMPILE_MODE="shard"
+      export SIMPLE_FILE_WORKERS="0"
+      export SIMPLE_HIR_SHARDING="1"
+      export SIMPLE_MIR_SHARDING="1"
+      if unset SIMPLE_BOOTSTRAP_WHOLE_PROGRAM 2>/dev/null; then :; fi
+      ;;
+    file)
+      STAGE3_RESOLVED_COMPILE_MODE="file"
+      export SIMPLE_FILE_WORKERS="1"
+      if unset SIMPLE_HIR_SHARDING SIMPLE_MIR_SHARDING SIMPLE_BOOTSTRAP_WHOLE_PROGRAM 2>/dev/null; then :; fi
+      ;;
+    *)
+      echo "STAGE3-E-COMPILE-MODE: invalid compile mode '$stage3_app_compile_mode' (expected shard, phase, or file)" >&2
+      return 1
+      ;;
+  esac
+
+  case "$stage3_app_link_mode" in
+    dynlib)
+      export SIMPLE_NATIVE_LIBRARY_UNITS="1"
+      export SIMPLE_STAGE3_LIB_DYNLIB="1"
+      ;;
+    one-binary|static)
+      export SIMPLE_NATIVE_LIBRARY_UNITS="1"
+      export SIMPLE_STAGE3_LIB_DYNLIB="0"
+      ;;
+    *)
+      echo "STAGE3-E-LINK-MODE: invalid link mode '$stage3_app_link_mode' (expected dynlib or one-binary)" >&2
+      return 1
+      ;;
+  esac
+
+  if [ "$STAGE3_HOST_PLATFORM" = "windows" ]; then
+    case "$stage3_app_win_cfg" in
+      msvc)
+        export SIMPLE_WINDOWS_ABI="msvc"
+        export SIMPLE_LINKER_FLAVOR="msvc"
+        ;;
+      mingw|gnu|"")
+        export SIMPLE_WINDOWS_ABI="gnu"
+        export SIMPLE_LINKER_FLAVOR="gnu"
+        ;;
+      *)
+        echo "STAGE3-E-WIN-CONFIG: invalid Windows config '$stage3_app_win_cfg' (expected mingw or msvc)" >&2
+        return 1
+        ;;
+    esac
+  fi
+
+  export STAGE3_RESOLVED_TARGET
+  export STAGE3_RESOLVED_COMPILE_MODE
+  export STAGE3_POLICY_SOURCE_ARGS
+  return 0
+}
+
+stage3_print_policy_env() {
+  stage3_pr_target=${1:-}
+  stage3_pr_compile_mode=${2:-shard}
+  stage3_pr_win_cfg=${3:-mingw}
+  stage3_pr_link_mode=${4:-dynlib}
+
+  stage3_apply_native_host_link_policy "$stage3_pr_target" "$stage3_pr_compile_mode" "$stage3_pr_win_cfg" "$stage3_pr_link_mode" || return 1
+
+  printf 'export SIMPLE_BOOTSTRAP_STAGE3="1"\n'
+  printf 'export SIMPLE_STAGE3_HOST_TAG="%s"\n' "$SIMPLE_STAGE3_HOST_TAG"
+  printf 'export SIMPLE_STAGE3_NATIVE_HOST_MATCH="1"\n'
+  printf 'export SIMPLE_STAGE3_STATIC_PRIMITIVE_ARCHIVE="%s"\n' "$SIMPLE_STAGE3_STATIC_PRIMITIVE_ARCHIVE"
+  printf 'export SIMPLE_STAGE3_MINIMAL_STATIC_PRIMITIVES="1"\n'
+  if [ "$STAGE3_RESOLVED_COMPILE_MODE" = "file" ]; then
+    printf 'unset SIMPLE_HIR_SHARDING SIMPLE_MIR_SHARDING SIMPLE_BOOTSTRAP_WHOLE_PROGRAM\n'
+    printf 'export SIMPLE_FILE_WORKERS="1"\n'
+  else
+    printf 'unset SIMPLE_BOOTSTRAP_WHOLE_PROGRAM\n'
+    printf 'export SIMPLE_FILE_WORKERS="0"\n'
+    printf 'export SIMPLE_HIR_SHARDING="1"\n'
+    printf 'export SIMPLE_MIR_SHARDING="1"\n'
+  fi
+  printf 'export SIMPLE_NATIVE_LIBRARY_UNITS="%s"\n' "$SIMPLE_NATIVE_LIBRARY_UNITS"
+  printf 'export SIMPLE_STAGE3_LIB_DYNLIB="%s"\n' "$SIMPLE_STAGE3_LIB_DYNLIB"
+  printf 'export SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS="%s"\n' "$SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS"
+  printf 'export SIMPLE_STAGE3_ALLOW_EXISTING_DYNLIBS="%s"\n' "$SIMPLE_STAGE3_ALLOW_EXISTING_DYNLIBS"
+  if [ "$STAGE3_HOST_PLATFORM" = "windows" ]; then
+    printf 'export SIMPLE_WINDOWS_ABI="%s"\n' "$SIMPLE_WINDOWS_ABI"
+    printf 'export SIMPLE_LINKER_FLAVOR="%s"\n' "$SIMPLE_LINKER_FLAVOR"
+  fi
+  printf 'export STAGE3_RESOLVED_TARGET="%s"\n' "$STAGE3_RESOLVED_TARGET"
+  printf 'export STAGE3_RESOLVED_COMPILE_MODE="%s"\n' "$STAGE3_RESOLVED_COMPILE_MODE"
+  printf 'export STAGE3_POLICY_SOURCE_ARGS="%s"\n' "$STAGE3_POLICY_SOURCE_ARGS"
+}
+
+stage3_run_path_check() {
+  stage3_pc_target=${1:-}
+  stage3_pc_compile_mode=${2:-shard}
+  stage3_pc_win_cfg=${3:-mingw}
+  stage3_pc_link_mode=${4:-dynlib}
+
+  stage3_apply_native_host_link_policy "$stage3_pc_target" "$stage3_pc_compile_mode" "$stage3_pc_win_cfg" "$stage3_pc_link_mode" || return 1
+
+  stage3_pc_windisp="n/a"
+  if [ "$STAGE3_HOST_PLATFORM" = "windows" ]; then
+    stage3_pc_windisp="$stage3_pc_win_cfg"
+  fi
+
+  for stage3_pc_step in policy-schema native-host-match primitive-archive dynlib-units; do
+    printf 'PATH_ACTION|script=stage3-native-host-link-policy.shs|platform=%s|cpu=%s|win_config=%s|phase=p3|step=%s|compile_mode=%s|link_mode=%s|xray=0|release=0|status=ALIVE\n' \
+      "$STAGE3_HOST_PLATFORM" "$STAGE3_HOST_CPU" "$stage3_pc_windisp" "$stage3_pc_step" "$STAGE3_RESOLVED_COMPILE_MODE" "$stage3_pc_link_mode"
+  done
+  printf 'PATH_SUMMARY|script=stage3-native-host-link-policy.shs|platform=%s|cpu=%s|target=%s|actions=4|status=PASS\n' \
+    "$STAGE3_HOST_PLATFORM" "$STAGE3_HOST_CPU" "$STAGE3_RESOLVED_TARGET"
+  return 0
+}
+
+stage3_policy_cli_main() {
+  stage3_cli_action="check"
+  stage3_cli_target=""
+  stage3_cli_compile_mode="shard"
+  stage3_cli_win_cfg="mingw"
+  stage3_cli_link_mode="dynlib"
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --check) stage3_cli_action="check"; shift ;;
+      --print-env) stage3_cli_action="print-env"; shift ;;
+      --print-sources) stage3_cli_action="print-sources"; shift ;;
+      --path-check) stage3_cli_action="path-check"; shift ;;
+      --target)
+        [ "$#" -ge 2 ] || return 2
+        stage3_cli_target=$2; shift 2 ;;
+      --target=*) stage3_cli_target=${1#*=}; shift ;;
+      --compile-mode|--p3-compile-mode)
+        [ "$#" -ge 2 ] || return 2
+        stage3_cli_compile_mode=$2; shift 2 ;;
+      --compile-mode=*|--p3-compile-mode=*) stage3_cli_compile_mode=${1#*=}; shift ;;
+      --win-config)
+        [ "$#" -ge 2 ] || return 2
+        stage3_cli_win_cfg=$2; shift 2 ;;
+      --win-config=*) stage3_cli_win_cfg=${1#*=}; shift ;;
+      --link-mode)
+        [ "$#" -ge 2 ] || return 2
+        stage3_cli_link_mode=$2; shift 2 ;;
+      --link-mode=*) stage3_cli_link_mode=${1#*=}; shift ;;
+      --simulate-host)
+        [ "$#" -ge 2 ] || return 2
+        STAGE3_SIMULATE_HOST=$2; export STAGE3_SIMULATE_HOST; shift 2 ;;
+      --simulate-host=*)
+        STAGE3_SIMULATE_HOST=${1#*=}; export STAGE3_SIMULATE_HOST; shift ;;
+      --help|-h)
+        echo "usage: stage3-native-host-link-policy.shs [--check|--print-env|--print-sources] [--target TRIPLE] [--compile-mode shard|file] [--win-config mingw|msvc] [--link-mode dynlib|one-binary] [--simulate-host PLAT-CPU]"
+        return 0
+        ;;
+      *)
+        echo "STAGE3-E-ARG: unknown option '$1'" >&2
+        return 2
+        ;;
+    esac
+  done
+
+  case "$stage3_cli_action" in
+    check)
+      stage3_check_native_host_match "$stage3_cli_target" "$stage3_cli_win_cfg" || return 1
+      printf 'PASS: native_host_match=true host=%s target=%s archive=%s\n' \
+        "$STAGE3_HOST_TAG" "$STAGE3_RESOLVED_TARGET" "$STAGE3_POLICY_ARCHIVE"
+      ;;
+    print-env)
+      stage3_print_policy_env "$stage3_cli_target" "$stage3_cli_compile_mode" "$stage3_cli_win_cfg" "$stage3_cli_link_mode"
+      ;;
+    print-sources)
+      stage3_check_native_host_match "$stage3_cli_target" "$stage3_cli_win_cfg" || return 1
+      printf '%s\n' "$STAGE3_POLICY_SOURCE_ARGS"
+      ;;
+    path-check)
+      stage3_run_path_check "$stage3_cli_target" "$stage3_cli_compile_mode" "$stage3_cli_win_cfg" "$stage3_cli_link_mode"
+      ;;
+  esac
+}
+
+case "${0##*/}" in
+  stage3-native-host-link-policy.shs)
+    stage3_policy_cli_main "$@"
+    exit $?
+    ;;
+esac

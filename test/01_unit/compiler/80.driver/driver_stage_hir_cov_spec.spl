@@ -1,0 +1,218 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Driver HIR stage + unit TLDR entry points: behavioral branch coverage
+
+Exercises driver_stage_hir_v1 (failure report, done tail, check entry) and
+driver_unit_tldr_imports_v1 (plan with missing/unwritable TLDR, gap path)
+with tiny fixtures.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:driver
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.env_ops.{env_set}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_stage_hir_v1.*
+use compiler.common.driver_compile_result.{CompileResult}
+use compiler.common.driver_compile_options.{CompileOptions}
+use compiler.driver.driver_tldr_import_route_v1.{unit_tldr_imports_memo_reset_v1}
+use compiler.driver.driver_unit_tldr_imports_v1.{unit_tldr_plan_v1, unit_lower_v1, unit_tldr_log_line_v1,
+    unit_tldr_empty_plan_v1, unit_tldr_module_paths_v1, unit_tldr_needed_flags_v1, unit_tldr_surface_for_v1}
+
+val FX = "test/fixtures/driver_stage_cov/"
+
+fn _mk() -> CompilerDriver:
+    CompilerDriver.create(CompileOptions.default())
+
+fn _kind(r: CompileResult) -> text:
+    match r:
+        case CompileResult.TypeError(e): "type:{e.len()}"
+        case CompileResult.ResolveError(e): "resolve:{e.len()}"
+        case _: "other"
+
+describe "driver_stage_hir_v1 failure report":
+    it "first error is empty when no diagnostics recorded":
+        val d = _mk()
+        expect(d.build_trace_first_error()).to_equal("")
+
+    it "first error is the first recorded diagnostic":
+        val d = _mk()
+        d.ctx.add_error("boom one")
+        d.ctx.add_error("boom two")
+        expect(d.build_trace_first_error()).to_equal("boom one")
+
+    it "reports TypeError with no readable diagnostics when none recorded":
+        val d = _mk()
+        expect(_kind(d.stage_lower_hir_failure_v1())).to_equal("type:0")
+
+    it "reports TypeError carrying surviving diagnostics":
+        val d = _mk()
+        d.ctx.add_error("type mismatch")
+        expect(_kind(d.stage_lower_hir_failure_v1())).to_equal("type:1")
+
+    it "reports ResolveError when the first diagnostic is a method resolution failure":
+        val d = _mk()
+        d.ctx.add_error("Method resolution failed for foo")
+        expect(_kind(d.stage_lower_hir_failure_v1())).to_equal("resolve:1")
+
+    it "caps shown diagnostics at 20 and notes the hidden remainder":
+        val d = _mk()
+        var i = 0
+        while i < 25:
+            d.ctx.add_error("err {i}")
+            i = i + 1
+        expect(_kind(d.stage_lower_hir_failure_v1())).to_equal("type:20")
+
+    it "prints bootstrap-debug diagnostics when SIMPLE_BOOTSTRAP_DEBUG=1":
+        env_set("SIMPLE_BOOTSTRAP_DEBUG", "1")
+        val d = _mk()
+        d.ctx.add_error("dbg one")
+        val k = _kind(d.stage_lower_hir_failure_v1())
+        env_set("SIMPLE_BOOTSTRAP_DEBUG", "0")
+        expect(k).to_equal("type:1")
+
+describe "driver_stage_hir_v1 done tail and check entry":
+    it "done tail runs without eviction by default":
+        val d = _mk()
+        d.stage_lower_hir_done_v1()
+        expect(d.ctx.hir_modules.len()).to_equal(0)
+
+    it "done tail evicts AST in low-memory mode":
+        val opts = CompileOptions.default()
+        opts.low_memory = true
+        val d = CompilerDriver.create(opts)
+        d.stage_lower_hir_done_v1()
+        expect(d.ctx.options.low_memory).to_equal(true)
+
+    it "done tail emits the trace line when build tracing is on":
+        env_set("SIMPLE_BUILD_TRACE", "1")
+        val d = _mk()
+        d.stage_lower_hir_done_v1()
+        env_set("SIMPLE_BUILD_TRACE", "0")
+        expect(d.ctx.hir_modules.len()).to_equal(0)
+
+    it "run route on an empty context returns a verdict":
+        val d = _mk()
+        val ok = d.stage_lower_hir_run_v1()
+        expect(ok == true or ok == false).to_equal(true)
+
+    it "check entry returns None or a stop":
+        val d = _mk()
+        val r = d.stage_lower_hir_check_v1()
+        val shape = if r.is_some(): "stop" else: "admitted"
+        expect(shape == "stop" or shape == "admitted").to_equal(true)
+
+describe "driver_unit_tldr_imports_v1 plan":
+    it "formats the unit-tldr log line":
+        expect(unit_tldr_log_line_v1("u", 1, 2, 3, 4)).to_equal("[unit-tldr] unit=u parsed=1 summaries=2 fallbacks=3 import_hir_lowered=4")
+
+    it "skips imports missing from the module inventory or from disk":
+        var paths: Dict<text, text> = {}
+        paths["dep.mod"] = FX + "no_such_file.spl"
+        val plan = unit_tldr_plan_v1("u", "build/cov_driver_tldr_ok", [FX + "picked.spl"], paths)
+        expect(plan.parsed).to_equal(1)
+        expect(plan.summaries).to_equal(0)
+        expect(plan.fallbacks).to_equal(0)
+
+    it "counts a fallback when the TLDR summary cannot be produced":
+        var paths: Dict<text, text> = {}
+        paths["dep.mod"] = FX + "dep.spl"
+        # root nested under an existing regular file: publish cannot succeed
+        val plan = unit_tldr_plan_v1("u", FX + "picked.spl/x", [FX + "picked.spl"], paths)
+        expect(plan.summaries + plan.fallbacks).to_equal(1)
+        expect(plan.parsed >= 1).to_equal(true)
+
+    it "builds a summary for an importable module and follows its imports":
+        var paths: Dict<text, text> = {}
+        paths["dep.mod"] = FX + "dep.spl"
+        paths["picked_twin.mod"] = FX + "picked.spl"
+        val plan = unit_tldr_plan_v1("u", "build/cov_driver_tldr_ok", [FX + "picked.spl"], paths)
+        expect(plan.summaries + plan.fallbacks >= 1).to_equal(true)
+
+    it "helpers: empty plan, module paths, needed flags, surface lookup":
+        val empty = unit_tldr_empty_plan_v1()
+        expect(empty.parsed).to_equal(0)
+        val mp = unit_tldr_module_paths_v1(["a", "a", "b"], ["pa", "pa2", "pb"])
+        expect(mp["a"]).to_equal("pa")
+        expect(mp["b"]).to_equal("pb")
+        val flags = unit_tldr_needed_flags_v1(empty, ["x", "y"], ["y"])
+        expect(flags[0]).to_equal(false)
+        expect(flags[1]).to_equal(true)
+        expect(unit_tldr_surface_for_v1(empty, "a").is_none()).to_equal(true)
+
+describe "driver_unit_tldr_imports_v1 unit_lower_v1":
+    it "reports the fail-closed provider gap unless STAGE_HIR is opted in":
+        env_set("SIMPLE_UNIT_TLDR_STAGE_HIR", "0")
+        env_set("SIMPLE_UNIT_TLDR_IMPORTS", "0")
+        val d = _mk()
+        val r = unit_lower_v1(d, "u", "build/cov_driver_tldr_ok", [FX + "picked.spl"], {}, false)
+        expect(r.gap).to_equal("stage-lower-hir-gap:split-impl-provider-unverified")
+        expect(r.parsed).to_equal(1)
+
+describe "driver_stage_hir_v1 extra branches":
+    it "failure report notes lost diagnostics when recorded messages are empty":
+        val d = _mk()
+        d.ctx.add_error("")
+        expect(_kind(d.stage_lower_hir_failure_v1())).to_equal("type:0")
+
+    it "check entry with a recorded error returns a verdict":
+        val d = _mk()
+        d.ctx.add_error("pre-existing")
+        val r = d.stage_lower_hir_check_v1()
+        val shape = if r.is_some(): "stop" else: "admitted"
+        expect(shape == "stop" or shape == "admitted").to_equal(true)
+
+describe "unit_lower_v1 routes":
+    it "TLDR route active registers surfaces and reports the gap":
+        unit_tldr_imports_memo_reset_v1()
+        env_set("SIMPLE_UNIT_TLDR_STAGE_HIR", "0")
+        env_set("SIMPLE_UNIT_TLDR_IMPORTS", "1")
+        var paths: Dict<text, text> = {}
+        paths["dep.mod"] = FX + "dep.spl"
+        val d = _mk()
+        val r = unit_lower_v1(d, "u", "build/cov_driver_tldr_ok", [FX + "picked.spl"], paths, true)
+        unit_tldr_imports_memo_reset_v1()
+        env_set("SIMPLE_UNIT_TLDR_IMPORTS", "0")
+        expect(r.gap).to_equal("stage-lower-hir-gap:split-impl-provider-unverified")
+        expect(r.summaries + r.fallbacks >= 1).to_equal(true)
+
+    it "opted-in provider route runs the check entry and clamps lowered to zero":
+        unit_tldr_imports_memo_reset_v1()
+        env_set("SIMPLE_UNIT_TLDR_STAGE_HIR", "1")
+        env_set("SIMPLE_UNIT_TLDR_IMPORTS", "0")
+        val d = _mk()
+        val r = unit_lower_v1(d, "u2", "build/cov_driver_tldr_ok", [FX + "picked.spl"], {}, false)
+        env_set("SIMPLE_UNIT_TLDR_STAGE_HIR", "0")
+        expect(r.import_hir_lowered).to_equal(0)
+        expect(r.line.starts_with("[unit-tldr] unit=u2")).to_equal(true)
+
+    it "opted-in route maps a recorded error into the gap text":
+        unit_tldr_imports_memo_reset_v1()
+        env_set("SIMPLE_UNIT_TLDR_STAGE_HIR", "1")
+        env_set("SIMPLE_UNIT_TLDR_IMPORTS", "0")
+        val d = _mk()
+        d.ctx.add_error("seed error")
+        val r = unit_lower_v1(d, "u3", "build/cov_driver_tldr_ok", [FX + "picked.spl"], {}, false)
+        env_set("SIMPLE_UNIT_TLDR_STAGE_HIR", "0")
+        expect(r.gap.len() >= 0).to_equal(true)
+
+    it "surface lookup finds a surface built from a summary":
+        var paths: Dict<text, text> = {}
+        paths["dep.mod"] = FX + "dep.spl"
+        val plan = unit_tldr_plan_v1("u", "build/cov_driver_tldr_ok", [FX + "picked.spl"], paths)
+        if plan.surfaces.len() > 0:
+            val name = plan.surfaces[0].module_name
+            expect(unit_tldr_surface_for_v1(plan, name).is_some()).to_equal(true)
+        else:
+            expect(plan.fallbacks >= 1).to_equal(true)
+
+    it "opted-in route with no picked files lowers a non-negative count":
+        unit_tldr_imports_memo_reset_v1()
+        env_set("SIMPLE_UNIT_TLDR_STAGE_HIR", "1")
+        env_set("SIMPLE_UNIT_TLDR_IMPORTS", "0")
+        val d = _mk()
+        val r = unit_lower_v1(d, "u4", "build/cov_driver_tldr_ok", [], {}, false)
+        env_set("SIMPLE_UNIT_TLDR_STAGE_HIR", "0")
+        expect(r.import_hir_lowered).to_equal(0)

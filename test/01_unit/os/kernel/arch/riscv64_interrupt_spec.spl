@@ -2,11 +2,20 @@ use std.spec
 use os.kernel.arch.riscv64.interrupt.{Rv64Interrupt, rv64_install_trap_runtime, rv64_runtime_installed, rv64_read_trap_log, rv64_dispatch_installed_trap, rv64_dispatch_trap_frame_ptr}
 use os.kernel.arch.riscv64.trap_runtime.{Rv64TrapRuntime}
 use os.kernel.arch.riscv64.trap_model.{create_rv64_user_context, RV64_CAUSE_ECALL_FROM_U}
+use os.kernel.arch.riscv64.cpu.{read_tp}
+use os.kernel.arch.riscv_topology_identity.{riscv_publish_boot_hart_identity_v1}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
 
 describe "rv64 interrupt runtime bridge":
+    it "publishes the boot hart identity fixture":
+        # The trap bridge refuses to alias its globals from an unresolved
+        # hart.  Real RV64 boot entries seal this snapshot from the observed
+        # boot hart before trap state is reachable; publish the same way here
+        # so the specs exercise the owner-hart path under the interpreter.
+        expect(riscv_publish_boot_hart_identity_v1(read_tp())).to_equal(true)
+
     it "reports missing runtime until installed":
         expect(rv64_runtime_installed()).to_equal(false)
 
@@ -85,3 +94,17 @@ describe "rv64 interrupt runtime bridge":
         val entries = rv64_read_trap_log(0, 0, 4)
         expect(entries.len()).to_be_greater_than(0)
         expect(entries[entries.len() - 1].message).to_contain("trap frame pointer is null")
+
+    it "updates a trap frame in place through the pointer bridge":
+        # @req: REQ-TEST-ARCH_RISCV64_INTERRUPT-001
+        step("Verify: updates a trap frame in place through the pointer bridge")
+        rv64_install_trap_runtime(Scheduler.new(), IpcManager.new(), KernelLog.new(8))
+
+        var ctx = create_rv64_user_context(0x400000, 0x410000, 0)
+        ctx.a7 = 4
+        ctx.scause = RV64_CAUSE_ECALL_FROM_U
+
+        val rc = rv64_dispatch_trap_frame_ptr(&ctx as u64)
+        expect(rc).to_equal(0)  # oracle: expected value pinned by spec
+        expect(ctx.a0).to_equal(0)  # oracle: expected value pinned by spec
+        expect(ctx.sepc).to_equal(0x400004)  # oracle: expected value pinned by spec

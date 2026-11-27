@@ -124,10 +124,9 @@ sub windows_mapping {
     return ($1, $pgid);
 }
 
-sub windows_identity {
-    my ($pid) = @_;
-    my ($winpid, $pgid) = windows_mapping($pid);
-    return unless defined($winpid);
+sub windows_native_identity {
+    my ($winpid) = @_;
+    return unless defined($winpid) && $winpid =~ /\A[1-9][0-9]*\z/;
     require Cwd;
     require File::Basename;
     my $observer = Cwd::abs_path(File::Basename::dirname(__FILE__) .
@@ -169,11 +168,19 @@ sub windows_identity {
         waitpid($child, 0);
     }
     return unless $ok && $row =~ /\Awindows:\Q$winpid\E:([1-9][0-9]*)\r?\n\z/;
-    my $birth = $1;
+    return "windows:$winpid:$1";
+}
+
+sub windows_identity {
+    my ($pid) = @_;
+    my ($winpid, $pgid) = windows_mapping($pid);
+    return unless defined($winpid);
+    my $identity = windows_native_identity($winpid);
+    return unless defined($identity);
     my ($winpid_two, $pgid_two) = windows_mapping($pid);
     return unless defined($winpid_two) && $winpid eq $winpid_two &&
         $pgid eq $pgid_two;
-    return (unpack('H*', "windows:$winpid:$birth"), $pgid);
+    return (unpack('H*', $identity), $pgid);
 }
 
 sub process_snapshot {
@@ -424,8 +431,25 @@ if ($command eq 'owner-snapshot') {
 if ($command eq 'claim-state') {
     @ARGV == 3 or fail_usage();
     my ($pid, $expected_start, $pgid) = @ARGV;
-    $pid =~ /\A[1-9][0-9]*\z/ && $expected_start =~ /\A[0-9a-f]+\z/ &&
+    $pid =~ /\A[1-9][0-9]*\z/ && $expected_start =~ /\A(?:[0-9a-f]{2})+\z/ &&
         $pgid =~ /\A[1-9][0-9]*\z/ or exit 2;
+    # POSIX pid/pgid numbers are private to each MSYS/Cygwin runtime. A
+    # foreign live owner can be absent from our /proc and kill(0) namespace.
+    # Native birth identity is shared by Windows, so consult the claim's
+    # native PID before allowing any local absence/recycled-group inference.
+    my $expected_identity = pack('H*', $expected_start);
+    if ($expected_identity =~ /\Awindows/) {
+        my $verdict = 'unknown';
+        if (($^O eq 'cygwin' || $^O eq 'msys') &&
+            $expected_identity =~ /\Awindows:([1-9][0-9]*):[1-9][0-9]*\z/) {
+            my $observed = windows_native_identity($1);
+            $verdict = 'live' if defined($observed) && $observed eq $expected_identity;
+        }
+        # Missing/reused/unreadable native owners do not establish that a
+        # foreign group has no surviving children. Such claims stay held.
+        print "$verdict\n";
+        exit 0;
+    }
     my ($actual_start) = process_snapshot($pid);
     if (defined($actual_start)) {
         if ($actual_start eq $expected_start) {

@@ -1,0 +1,251 @@
+# Pure endpoint-network decision tests (design 11.7, 11.8, 11.11). No sockets,
+# no broker transport and no native macOS evidence: a pass here never
+# qualifies the `endpoint-v1` data plane.
+use std.spec.{describe, it, expect}
+use std.nogc_async_mut.container.network.endpoint_identity_v1.{
+    EndpointNetworkIdV1, EndpointPrincipalV1, endpoint_network_id_v1,
+    endpoint_logical_address_parse_v1, endpoint_logical_address_text_v1}
+use std.nogc_async_mut.container.network.ipam_v1.{EndpointIpamV1}
+use std.nogc_async_mut.container.network.service_registry_v1.{EndpointServiceRegistryV1}
+use std.nogc_async_mut.container.network.route_authorization_v1.{
+    EndpointAclRuleV1, EndpointNetworkPolicyV1, EndpointAuthorityV1}
+use std.nogc_async_mut.container.network.endpoint_broker_v1.{
+    endpoint_network_profile_admit_v1, endpoint_broker_capability_v1}
+
+fn _er_net(name: text, generation: i64) -> EndpointNetworkIdV1:
+    endpoint_network_id_v1("acme", "ci", name, generation).unwrap()
+
+fn _er_principal(network: EndpointNetworkIdV1, pod: text, attempt: i64) -> EndpointPrincipalV1:
+    EndpointPrincipalV1(network: network, pod_uid: pod, attempt: attempt,
+        provider_generation: 1, node_boot_id: "boot")
+
+fn _er_rule(id: text, direction: text, source: text, target: text, service: text,
+        mode: text) -> EndpointAclRuleV1:
+    EndpointAclRuleV1(rule_id: id, direction: direction, source_network: source, source_pod: "*",
+        target_network: target, target_service: service, port: 8080, protocol: "tcp", on_revoke: mode)
+
+fn _er_policy(revision: i64, mode: text) -> EndpointNetworkPolicyV1:
+    EndpointNetworkPolicyV1(revision: revision, rules: [
+        _er_rule("a-out", "egress", "acme/ci/net-a", "acme/ci/net-a", "api.tools.test", mode),
+        _er_rule("a-in", "ingress", "acme/ci/net-a", "acme/ci/net-a", "api.tools.test", mode),
+        _er_rule("b-out", "egress", "acme/ci/net-b", "acme/ci/net-b", "api.tools.test", mode),
+        _er_rule("b-in", "ingress", "acme/ci/net-b", "acme/ci/net-b", "api.tools.test", mode)])
+
+describe "endpoint logical IPAM":
+    it "allocates idempotently without scanning and reports exhaustion":
+        val net = _er_net("net-a", 1)
+        var ipam = EndpointIpamV1.create(net, "10.73.0.0", 30).unwrap()
+        val first = ipam.allocate(_er_principal(net, "p1", 1)).unwrap()
+        expect(endpoint_logical_address_text_v1(first)).to_equal("10.73.0.1")
+        expect(ipam.allocate(_er_principal(net, "p1", 1)).unwrap()).to_equal(first)
+        val second = ipam.allocate(_er_principal(net, "p2", 1)).unwrap()
+        expect(endpoint_logical_address_text_v1(second)).to_equal("10.73.0.2")
+        val exhausted = ipam.allocate(_er_principal(net, "p3", 1))
+        expect(exhausted.is_err()).to_equal(true)
+        expect(exhausted.unwrap_err().starts_with("endpoint-ipam-exhausted: network=acme/ci/net-a#1")).to_equal(true)
+        expect(exhausted.unwrap_err().contains("usable=2 allocated=2")).to_equal(true)
+
+    it "quarantines released addresses until retirement is confirmed":
+        val net = _er_net("net-a", 1)
+        var ipam = EndpointIpamV1.create(net, "10.73.0.0", 30).unwrap()
+        val p1 = _er_principal(net, "p1", 1)
+        val address = ipam.allocate(p1).unwrap()
+        val _second = ipam.allocate(_er_principal(net, "p2", 1)).unwrap()
+        expect(ipam.release(_er_principal(net, "p2", 1), address).is_err()).to_equal(true)
+        expect(ipam.release(p1, address).is_ok()).to_equal(true)
+        expect(ipam.allocate(_er_principal(net, "p3", 1)).is_err()).to_equal(true)
+        expect(ipam.confirm_retired(address).is_ok()).to_equal(true)
+        expect(ipam.allocate(_er_principal(net, "p3", 1)).unwrap()).to_equal(address)
+
+    it "rejects another network generation and non-canonical ranges":
+        var ipam = EndpointIpamV1.create(_er_net("net-a", 2), "10.73.0.0", 24).unwrap()
+        expect(ipam.allocate(_er_principal(_er_net("net-a", 1), "p1", 1)).is_err()).to_equal(true)
+        expect(ipam.allocate(_er_principal(_er_net("net-b", 2), "p1", 1)).is_err()).to_equal(true)
+        expect(EndpointIpamV1.create(_er_net("net-a", 1), "10.73.0.1", 24).is_err()).to_equal(true)
+        expect(EndpointIpamV1.create(_er_net("net-a", 1), "10.073.0.0", 24).is_err()).to_equal(true)
+        expect(EndpointIpamV1.create(_er_net("net-a", 1), "10.0.0.0", 8).is_err()).to_equal(true)
+        expect(endpoint_logical_address_parse_v1("0x7f.0.0.1").is_err()).to_equal(true)
+
+describe "endpoint scoped registry and authorize_route":
+    it "keeps two services on virtual port 8080 isolated by network":
+        val net_a = _er_net("net-a", 1)
+        val net_b = _er_net("net-b", 1)
+        var ipam_a = EndpointIpamV1.create(net_a, "10.73.0.0", 24).unwrap()
+        var ipam_b = EndpointIpamV1.create(net_b, "10.73.0.0", 24).unwrap()
+        var registry = EndpointServiceRegistryV1.create("test").unwrap()
+        expect(registry.admit_network(net_a).is_ok()).to_equal(true)
+        expect(registry.admit_network(net_b).is_ok()).to_equal(true)
+        val server_a = _er_principal(net_a, "server-a", 1)
+        val server_b = _er_principal(net_b, "server-b", 1)
+        val addr_a = ipam_a.allocate(server_a).unwrap()
+        val addr_b = ipam_b.allocate(server_b).unwrap()
+        # Same logical address AND same virtual port in two networks.
+        expect(addr_a).to_equal(addr_b)
+        val lease_a = registry.register(ipam_a, server_a, "api.tools.test", addr_a, 8080, "tcp", 1).unwrap()
+        val lease_b = registry.register(ipam_b, server_b, "api.tools.test", addr_b, 8080, "tcp", 1).unwrap()
+        expect(lease_a.lease_id == lease_b.lease_id).to_equal(false)
+        val found_a = registry.resolve(net_a, "api.tools.test").unwrap()
+        expect(found_a.len()).to_equal(1)
+        expect(found_a[0].owner.pod_uid).to_equal("server-a")
+        expect(registry.resolve(net_b, "api.tools.test").unwrap()[0].owner.pod_uid).to_equal("server-b")
+        val authority = EndpointAuthorityV1.create(_er_policy(1, "revoke-existing")).unwrap()
+        val client_a = _er_principal(net_a, "client-a", 1)
+        val route = authority.authorize_route(registry, client_a, lease_a, 8080, "tcp").unwrap()
+        expect(route.lease.owner.pod_uid).to_equal("server-a")
+        expect(route.egress_rule_id).to_equal("a-out")
+        expect(route.ingress_rule_id).to_equal("a-in")
+
+    it "denies cross-network routes without explicit policy and by default":
+        val net_a = _er_net("net-a", 1)
+        val net_b = _er_net("net-b", 1)
+        var ipam_b = EndpointIpamV1.create(net_b, "10.74.0.0", 24).unwrap()
+        var registry = EndpointServiceRegistryV1.create("test").unwrap()
+        val _a = registry.admit_network(net_a)
+        val _b = registry.admit_network(net_b)
+        val server_b = _er_principal(net_b, "server-b", 1)
+        val lease_b = registry.register(ipam_b, server_b, "api.tools.test",
+            ipam_b.allocate(server_b).unwrap(), 8080, "tcp", 1).unwrap()
+        val client_a = _er_principal(net_a, "client-a", 1)
+        val authority = EndpointAuthorityV1.create(_er_policy(1, "revoke-existing")).unwrap()
+        val denied = authority.authorize_route(registry, client_a, lease_b, 8080, "tcp")
+        expect(denied.unwrap_err()).to_equal("endpoint-route-cross-network-denied")
+        val empty = EndpointAuthorityV1.create(EndpointNetworkPolicyV1(revision: 1, rules: [])).unwrap()
+        expect(empty.authorize_route(registry, _er_principal(net_b, "client-b", 1), lease_b, 8080,
+            "tcp").unwrap_err()).to_equal("endpoint-route-egress-denied")
+        val cross = EndpointAuthorityV1.create(EndpointNetworkPolicyV1(revision: 1, rules: [
+            _er_rule("x-out", "egress", "acme/ci/net-a", "acme/ci/net-b", "api.tools.test", "revoke-existing"),
+            _er_rule("x-in", "ingress", "acme/ci/net-a", "acme/ci/net-b", "api.tools.test", "revoke-existing")])).unwrap()
+        expect(cross.authorize_route(registry, client_a, lease_b, 8080, "tcp").is_ok()).to_equal(true)
+        expect(cross.authorize_route(registry, client_a, lease_b, 9090, "tcp").is_err()).to_equal(true)
+        expect(cross.authorize_route(registry, client_a, lease_b, 8080, "udp").is_err()).to_equal(true)
+
+    it "rejects stale network generations and stale registrations":
+        val net_1 = _er_net("net-a", 1)
+        val net_2 = _er_net("net-a", 2)
+        var ipam_1 = EndpointIpamV1.create(net_1, "10.73.0.0", 24).unwrap()
+        var registry = EndpointServiceRegistryV1.create("test").unwrap()
+        val _n1 = registry.admit_network(net_1)
+        val newer = _er_principal(net_1, "server", 2)
+        val older = _er_principal(net_1, "server", 1)
+        val newer_addr = ipam_1.allocate(newer).unwrap()
+        val lease = registry.register(ipam_1, newer, "api.tools.test", newer_addr, 8080, "tcp", 1).unwrap()
+        # A stale incarnation cannot replace the newer attempt's endpoint, even
+        # when it presents an address-ownership view that names it.
+        var stale_view = EndpointIpamV1.create(net_1, "10.73.0.0", 24).unwrap()
+        expect(stale_view.allocate(older).unwrap()).to_equal(newer_addr)
+        expect(registry.register(stale_view, older, "api.tools.test", newer_addr, 8080, "tcp",
+            1).unwrap_err()).to_equal("endpoint-registry-stale-registration")
+        expect(registry.lease_active(lease)).to_equal(true)
+        expect(registry.register(ipam_1, older, "api.tools.test", newer_addr, 8080, "tcp",
+            1).unwrap_err()).to_equal("endpoint-registry-address-not-owned")
+        # An unrelated workload cannot take the address it does not own either.
+        expect(registry.register(ipam_1, _er_principal(net_1, "intruder", 9), "api.tools.test",
+            newer_addr, 8080, "tcp", 1).is_err()).to_equal(true)
+        val client = _er_principal(net_1, "client", 1)
+        val authority = EndpointAuthorityV1.create(_er_policy(1, "revoke-existing")).unwrap()
+        expect(authority.authorize_route(registry, client, lease, 8080, "tcp").is_ok()).to_equal(true)
+        expect(registry.admit_network(net_2).is_ok()).to_equal(true)
+        expect(registry.admit_network(net_1).unwrap_err()).to_equal("endpoint-registry-stale-network-generation")
+        expect(authority.authorize_route(registry, client, lease, 8080, "tcp").unwrap_err()).to_equal(
+            "endpoint-route-stale-source-generation")
+        expect(authority.authorize_route(registry, _er_principal(net_2, "client", 1), lease, 8080,
+            "tcp").unwrap_err()).to_equal("endpoint-route-stale-target-generation")
+        expect(registry.resolve(net_1, "api.tools.test").is_err()).to_equal(true)
+
+    it "lets a newer incarnation supersede and never resurrects the old lease":
+        val net = _er_net("net-a", 1)
+        var ipam = EndpointIpamV1.create(net, "10.73.0.0", 24).unwrap()
+        var registry = EndpointServiceRegistryV1.create("test").unwrap()
+        val _n = registry.admit_network(net)
+        val old_owner = EndpointPrincipalV1(network: net, pod_uid: "server", attempt: 1,
+            provider_generation: 1, node_boot_id: "boot")
+        val new_owner = EndpointPrincipalV1(network: net, pod_uid: "server", attempt: 1,
+            provider_generation: 2, node_boot_id: "boot")
+        val address = ipam.allocate(old_owner).unwrap()
+        val old_lease = registry.register(ipam, old_owner, "api.tools.test", address, 8080, "tcp", 1).unwrap()
+        val _released = ipam.release(old_owner, address)
+        val _retired = ipam.confirm_retired(address)
+        expect(ipam.allocate(new_owner).unwrap()).to_equal(address)
+        val new_lease = registry.register(ipam, new_owner, "api.tools.test", address, 8080, "tcp", 1).unwrap()
+        expect(new_lease.lease_generation > old_lease.lease_generation).to_equal(true)
+        expect(registry.lease_active(old_lease)).to_equal(false)
+        expect(registry.lease_active(new_lease)).to_equal(true)
+        val authority = EndpointAuthorityV1.create(_er_policy(1, "revoke-existing")).unwrap()
+        val client = _er_principal(net, "client", 1)
+        expect(authority.authorize_route(registry, client, old_lease, 8080, "tcp").unwrap_err()).to_equal(
+            "endpoint-route-target-not-active")
+        expect(registry.register(ipam, old_owner, "api.tools.test", address, 8080, "tcp",
+            1).is_err()).to_equal(true)
+
+    it "resolves only private names in scope with no public fallback":
+        val net = _er_net("net-a", 1)
+        var registry = EndpointServiceRegistryV1.create("test").unwrap()
+        val _n = registry.admit_network(net)
+        expect(registry.resolve(net, "example.com").unwrap_err()).to_equal("endpoint-resolve-not-private-name")
+        expect(registry.resolve(net, "missing.tools.test").unwrap_err()).to_equal("endpoint-resolve-not-found")
+        expect(registry.resolve(net, "test").is_err()).to_equal(true)
+        expect(registry.resolve(net, "Upper.test").is_err()).to_equal(true)
+        expect(registry.resolve(_er_net("net-z", 1), "api.tools.test").is_err()).to_equal(true)
+
+    it "drains unregistered endpoints before retirement":
+        val net = _er_net("net-a", 1)
+        var ipam = EndpointIpamV1.create(net, "10.73.0.0", 24).unwrap()
+        var registry = EndpointServiceRegistryV1.create("test").unwrap()
+        val _n = registry.admit_network(net)
+        val server = _er_principal(net, "server", 1)
+        val lease = registry.register(ipam, server, "api.tools.test", ipam.allocate(server).unwrap(),
+            8080, "tcp", 1).unwrap()
+        expect(registry.retire(lease.lease_id).is_err()).to_equal(true)
+        expect(registry.unregister(_er_principal(net, "other", 1), lease.lease_id).is_err()).to_equal(true)
+        expect(registry.unregister(server, lease.lease_id).is_ok()).to_equal(true)
+        expect(registry.lease_state(lease.lease_id).unwrap()).to_equal("draining")
+        expect(registry.resolve(net, "api.tools.test").is_err()).to_equal(true)
+        expect(registry.retire(lease.lease_id).is_ok()).to_equal(true)
+        expect(registry.lease_state(lease.lease_id).unwrap()).to_equal("retired")
+
+describe "endpoint policy revisions and revocation":
+    it "revokes or retains existing routes by rule mode and stops revoked principals":
+        val net = _er_net("net-a", 1)
+        var ipam = EndpointIpamV1.create(net, "10.73.0.0", 24).unwrap()
+        var registry = EndpointServiceRegistryV1.create("test").unwrap()
+        val _n = registry.admit_network(net)
+        val server = _er_principal(net, "server", 1)
+        val lease = registry.register(ipam, server, "api.tools.test", ipam.allocate(server).unwrap(),
+            8080, "tcp", 1).unwrap()
+        val client = _er_principal(net, "client", 1)
+        var strict = EndpointAuthorityV1.create(_er_policy(1, "revoke-existing")).unwrap()
+        val route = strict.authorize_route(registry, client, lease, 8080, "tcp").unwrap()
+        val empty = EndpointNetworkPolicyV1(revision: 2, rules: [])
+        expect(strict.commit_policy(EndpointNetworkPolicyV1(revision: 1, rules: []), [route]).is_err()).to_equal(true)
+        val commit = strict.commit_policy(empty, [route]).unwrap()
+        expect(commit.revoke.len()).to_equal(1)
+        expect(commit.retained.len()).to_equal(0)
+        expect(strict.revision()).to_equal(2)
+        expect(strict.authorize_route(registry, client, lease, 8080, "tcp").is_err()).to_equal(true)
+        var lenient = EndpointAuthorityV1.create(_er_policy(1, "new-connections-only")).unwrap()
+        val kept = lenient.authorize_route(registry, client, lease, 8080, "tcp").unwrap()
+        val lenient_commit = lenient.commit_policy(empty, [kept]).unwrap()
+        expect(lenient_commit.revoke.len()).to_equal(0)
+        expect(lenient_commit.retained.len()).to_equal(1)
+        var stop = EndpointAuthorityV1.create(_er_policy(1, "revoke-existing")).unwrap()
+        val live = stop.authorize_route(registry, client, lease, 8080, "tcp").unwrap()
+        expect(stop.revoke_principal(server, [live]).len()).to_equal(1)
+        expect(stop.authorize_route(registry, client, lease, 8080, "tcp").unwrap_err()).to_equal(
+            "endpoint-route-target-revoked")
+
+    it "rejects malformed policies":
+        val bad_wildcard = EndpointNetworkPolicyV1(revision: 1, rules: [
+            _er_rule("r", "egress", "*", "acme/ci/net-a", "*", "revoke-existing")])
+        expect(EndpointAuthorityV1.create(bad_wildcard).is_err()).to_equal(true)
+        val duplicate = EndpointNetworkPolicyV1(revision: 1, rules: [
+            _er_rule("r", "egress", "acme/ci/net-a", "acme/ci/net-a", "*", "revoke-existing"),
+            _er_rule("r", "ingress", "acme/ci/net-a", "acme/ci/net-a", "*", "revoke-existing")])
+        expect(EndpointAuthorityV1.create(duplicate).is_err()).to_equal(true)
+        expect(EndpointAuthorityV1.create(EndpointNetworkPolicyV1(revision: 0, rules: [])).is_err()).to_equal(true)
+
+describe "endpoint broker admission fails closed":
+    it "rejects pod-ip-v1 and blocks endpoint-v1 until the data plane is qualified":
+        expect(endpoint_network_profile_admit_v1("pod-ip-v1").unwrap_err()).to_equal("endpoint-pod-ip-v1-unsupported")
+        expect(endpoint_network_profile_admit_v1("endpoint-v1").unwrap_err()).to_equal(
+            "endpoint-broker-data-plane-unqualified")
+        expect(endpoint_broker_capability_v1().data_plane_qualified).to_equal(false)

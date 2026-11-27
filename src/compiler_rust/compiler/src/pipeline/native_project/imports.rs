@@ -8,6 +8,7 @@ use crate::codegen::common_backend::{enum_runtime_module_name_from_path, module_
 use super::{safe_canonicalize, source_root_for_file};
 
 /// Import map build result.
+#[derive(Default)]
 pub(crate) struct ImportMapResult {
     /// raw name -> mangled name (unique entries get direct mapping, ambiguous pick first)
     pub map: std::collections::HashMap<String, String>,
@@ -35,6 +36,11 @@ pub(crate) struct ImportMapResult {
     /// order).  This is the source of truth for cross-module layouts: a bare
     /// type name is not a nominal identity.
     pub struct_defs: std::collections::HashMap<String, Vec<(String, simple_parser::Type)>>,
+    /// Declared field `= default` expressions keyed by the same canonical
+    /// `module_prefix__Type` owner as `struct_defs` (first definition wins,
+    /// mirroring `record_struct_fields`). The HIR lowerer fills an omitted
+    /// constructor field from here when the type is not in its local registry.
+    pub struct_field_defaults: std::collections::HashMap<String, std::collections::HashMap<String, simple_parser::ast::Expr>>,
     /// Compatibility index for a bare type name that has exactly one owner in
     /// the compilation closure.  Colliding names are deliberately absent.
     pub unique_struct_owners: std::collections::HashMap<String, String>,
@@ -56,6 +62,9 @@ pub(crate) struct ImportMapResult {
     /// `expr/access.rs::lower_field_access` returned None and the
     /// enum-variant early-return fell through to the field-access fallback.
     pub enum_defs: std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>,
+    /// Bare enum names declared by more than one module. Their `enum_defs`
+    /// entry is a merged variant union, never one owner's order (#6953).
+    pub duplicate_enum_names: std::collections::HashSet<String>,
     /// Mangled enum owner (`module__Enum`) to stable dotted runtime identity.
     pub enum_runtime_names: std::collections::HashMap<String, String>,
     /// First project-wide stable-ID collision, if any.
@@ -179,6 +188,10 @@ fn is_builtin_receiver_type(type_part: &str) -> bool {
     matches!(
         type_part,
         "Array" | "Slice" | "Dict" | "Map" | "Set" | "List" | "Tuple" | "Range" | "text" | "String" | "str"
+            // Canonical numeric owners emitted by MIR builtin_type_name.
+            // HIR resolves aliases (int/float) to these primitive TypeIds.
+            // Dropping u8 from u8.to_i64 used to bind VfsFileSize.to_i64.
+            | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64"
     )
 }
 
@@ -200,13 +213,24 @@ pub(crate) fn resolve_name_variants(
         if let Some(resolved) = use_map.get(&dotted).or_else(|| import_map.get(&dotted)) {
             return Some(resolved.clone());
         }
-        let lower_joined = format!("{}_{}", type_part.to_lowercase(), method_part);
-        if let Some(resolved) = use_map.get(&lower_joined).or_else(|| import_map.get(&lower_joined)) {
-            return Some(resolved.clone());
-        }
-        let lower_no_sep = format!("{}{}", type_part.to_lowercase(), method_part.to_lowercase());
-        if let Some(resolved) = import_map.get(&lower_no_sep) {
-            return Some(resolved.clone());
+        // Lowercase-joined spellings (`str_slice`, `strslice`) are the
+        // constructor/factory convention for USER types. For a BUILTIN
+        // receiver they must never rebind: the method is a builtin operation
+        // and a same-spelled user free function hijacks every call in the
+        // closure. Measured: `str.slice` bound to
+        // `compiler.frontend.core.types.str_slice` (code-point `s[a:b]`) and
+        // every text `.slice(a, b)` in the stage-2 compiler closure cut at
+        // code-point instead of byte offsets (00.common manifest parsed
+        // "ect:" for "project:"; stage2_test_runner_libunit_project_name_missing_2026-11-27).
+        if !is_builtin_receiver_type(type_part) {
+            let lower_joined = format!("{}_{}", type_part.to_lowercase(), method_part);
+            if let Some(resolved) = use_map.get(&lower_joined).or_else(|| import_map.get(&lower_joined)) {
+                return Some(resolved.clone());
+            }
+            let lower_no_sep = format!("{}{}", type_part.to_lowercase(), method_part.to_lowercase());
+            if let Some(resolved) = import_map.get(&lower_no_sep) {
+                return Some(resolved.clone());
+            }
         }
     }
     if let Some(pos) = name.find('.') {
@@ -222,9 +246,14 @@ pub(crate) fn resolve_name_variants(
                 return Some(resolved.clone());
             }
         }
-        let lower_joined = format!("{}_{}", type_part.to_lowercase(), method_part);
-        if let Some(resolved) = use_map.get(&lower_joined).or_else(|| import_map.get(&lower_joined)) {
-            return Some(resolved.clone());
+        // Same builtin-receiver guard as the `__` branch above: `str.slice`
+        // must not rebind to a user free function `str_slice` through the
+        // lowercase-joined spelling (stage2_test_runner_libunit_project_name_missing_2026-11-27).
+        if !is_builtin_receiver_type(type_part) {
+            let lower_joined = format!("{}_{}", type_part.to_lowercase(), method_part);
+            if let Some(resolved) = use_map.get(&lower_joined).or_else(|| import_map.get(&lower_joined)) {
+                return Some(resolved.clone());
+            }
         }
         // Last-resort bare-method lookup: DISCARDS the type qualifier and matches
         // on the method name alone. For a BUILTIN receiver that is never right --
@@ -274,8 +303,22 @@ pub(crate) fn resolve_name_variants(
 }
 
 pub(crate) fn suffix_of(name: &str) -> Option<&str> {
-    if let Some((_, suffix)) = name.rsplit_once("__") {
-        Some(suffix)
+    if let Some(pos) = name.rfind("__") {
+        // The module/name separator is the FIRST `__` of the trailing
+        // underscore run: `mod___u64` is `mod` + `__` + `_u64`. Splitting at
+        // the last `__` indexed a private `_u64` helper as `u64`, and
+        // `resolve_by_suffix("to_u64")` -> ("to", "u64") then bound every
+        // erased-receiver `.to_u64()` to that helper (Stage 2 SIGSEGV in
+        // xxh3 via elf_artifact_gate::_u64, 2026-11-04).
+        let bytes = name.as_bytes();
+        let mut start = pos;
+        while start > 0 && bytes[start - 1] == b'_' {
+            start -= 1;
+        }
+        if start == 0 {
+            return Some(&name[pos + 2..]);
+        }
+        Some(&name[start + 2..])
     } else if let Some((_, suffix)) = name.rsplit_once('.') {
         Some(suffix)
     } else {
@@ -354,6 +397,7 @@ pub(crate) fn build_import_map(
     let mut raw_to_mangled: HashMap<String, Vec<String>> = HashMap::new();
     let mut struct_defs: HashMap<String, Vec<(String, simple_parser::Type)>> = HashMap::new();
     let mut unique_struct_owners: HashMap<String, String> = HashMap::new();
+    let mut struct_field_defaults: HashMap<String, HashMap<String, simple_parser::ast::Expr>> = HashMap::new();
     let mut struct_module_owners: HashMap<PathBuf, String> = HashMap::new();
     let mut duplicate_struct_defs: HashMap<String, Vec<Vec<(String, simple_parser::Type)>>> = HashMap::new();
     let mut enum_defs: HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>> = HashMap::new();
@@ -381,9 +425,115 @@ pub(crate) fn build_import_map(
     let mut mangled_method_defaults: std::collections::HashMap<String, Vec<Option<simple_parser::ast::Expr>>> = HashMap::new();
     let mut interface_param_defaults: std::collections::HashMap<String, Vec<Option<simple_parser::ast::Expr>>> = HashMap::new();
 
-    // Parse each physical module once, in parallel. Both collection passes
-    // below walk `parsed` in `file_sources` order, so every first-wins /
-    // push-order merge rule is exactly what the per-pass serial parse gave.
+    // Parse and summarize each physical module once in parallel so the worker
+    // immediately drops function bodies and AST blocks before returning. The
+    // merge loop below walks `summaries` in `unique_files` order, preserving
+    // every first-wins / push-order merge rule identically to the old walk.
+    #[derive(Default)]
+    struct ExportMetadata {
+        path: PathBuf,
+        root: PathBuf,
+        prefix: String,
+        public_imports: Vec<(Vec<String>, simple_parser::ast::ImportTarget, bool)>,
+        explicit_targets: Vec<simple_parser::ast::ImportTarget>,
+        bare_exports: Vec<String>,
+    }
+
+    struct CallableSummary {
+        raw: String,
+        bare: String,
+        mangled: String,
+        arity: usize,
+        defaults: Option<Vec<Option<simple_parser::ast::Expr>>>,
+        return_type: Option<simple_parser::Type>,
+    }
+
+    enum ItemSummary {
+        Function {
+            name: String,
+            mangled: String,
+            arity: usize,
+            interface_defaults: Option<(String, Vec<Option<simple_parser::ast::Expr>>)>,
+            return_type: Option<simple_parser::Type>,
+        },
+        Class {
+            name: String,
+            type_mangled: String,
+            fields: Vec<(String, simple_parser::Type)>,
+            field_defaults: Vec<(String, simple_parser::ast::Expr)>,
+            mixins: Vec<String>,
+            own_methods: HashSet<String>,
+            methods: Vec<CallableSummary>,
+        },
+        Extern {
+            name: String,
+        },
+        ExternClass {
+            methods: Vec<(String, String, String, usize)>,
+        },
+        Data {
+            name: String,
+            mangled: String,
+        },
+        Struct {
+            name: String,
+            type_mangled: String,
+            implements_trait: Option<String>,
+            fields: Vec<(String, simple_parser::Type)>,
+            field_defaults: Vec<(String, simple_parser::ast::Expr)>,
+            methods: Vec<CallableSummary>,
+        },
+        Enum {
+            name: String,
+            type_mangled: String,
+            runtime_name: String,
+            runtime_id: u32,
+            variants: Vec<(String, Option<Vec<simple_parser::Type>>)>,
+            methods: Vec<CallableSummary>,
+            named_variant_fields: Vec<(String, Vec<(String, simple_parser::Type)>)>,
+        },
+        Mixin {
+            name: String,
+        },
+        Trait {
+            name: String,
+            method_names: Vec<String>,
+            abstract_methods: HashSet<String>,
+            concrete_methods: Vec<CallableSummary>,
+        },
+        Impl {
+            type_name: String,
+            trait_name: Option<String>,
+            methods: Vec<CallableSummary>,
+        },
+        Extend {
+            methods: Vec<CallableSummary>,
+        },
+    }
+
+    struct ModuleSummary {
+        prefix: String,
+        items: Vec<ItemSummary>,
+        export_metadata: Option<ExportMetadata>,
+    }
+
+    fn extract_callable_defaults(f: &simple_parser::ast::FunctionDef) -> Option<Vec<Option<simple_parser::ast::Expr>>> {
+        let user_params = if f.params.first().is_some_and(|p| p.name == "self") {
+            &f.params[1..]
+        } else {
+            &f.params[..]
+        };
+        if user_params.iter().any(|p| p.default.is_some()) {
+            Some(user_params.iter().map(|p| p.default.clone()).collect())
+        } else {
+            None
+        }
+    }
+
+    fn extract_callable_return_type(f: &simple_parser::ast::FunctionDef) -> Option<simple_parser::Type> {
+        f.return_type.clone()
+    }
+
     let target_arch = super::effective_target().arch;
     let mut seen_canonical = HashSet::new();
     let unique_files: Vec<(&PathBuf, &String, PathBuf)> = file_sources
@@ -395,196 +545,217 @@ pub(crate) fn build_import_map(
                 .then_some((path, source, canonical_path))
         })
         .collect();
-    let parsed: Vec<Option<simple_parser::ast::Module>> = unique_files
+    let summaries: Vec<ModuleSummary> = unique_files
         .par_iter()
-        .map(|(_, source, _)| {
+        .map(|(path, source, canonical_path)| {
+            let per_file_root = source_root_for_file(path, source_dirs, fallback_root);
+            let prefix = module_prefix_from_path(path, &per_file_root);
+            let runtime_module_name = enum_runtime_module_name_from_path(path, fallback_root);
             let filtered_source = crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(source, target_arch);
             let mut parser = simple_parser::Parser::new(&filtered_source);
-            parser.parse().ok().map(|mut ast| {
+            let ast = parser.parse().ok().map(|mut ast| {
                 // Keep the arity/return-type map consistent with the codegen unit:
                 // drop wrong-arch `@cfg` function variants so a non-target variant
                 // does not seed these maps (bug
                 // x64_freestanding_cfg_multivariant_misdispatch).
                 super::discovery::strip_inactive_cfg_arch_fns(&mut ast, target_arch);
                 ast
-            })
-        })
-        .collect();
+            });
+            let Some(ast) = ast else {
+                return ModuleSummary {
+                    prefix,
+                    items: Vec::new(),
+                    export_metadata: None,
+                };
+            };
 
-    for ((path, _, canonical_path), ast) in unique_files.iter().zip(&parsed) {
-        let per_file_root = source_root_for_file(path, source_dirs, fallback_root);
-        let prefix = module_prefix_from_path(path, &per_file_root);
-        // `path` is the exact declaration identity used by the resolver in
-        // normal builds; retain its canonical spelling too for callers that
-        // canonicalize before handing it to the HIR lowerer.
-        struct_module_owners.insert((*path).clone(), prefix.clone());
-        struct_module_owners.insert(canonical_path.clone(), prefix.clone());
-        let runtime_module_name = enum_runtime_module_name_from_path(path, fallback_root);
-        if let Some(ast) = ast {
+            let mut items = Vec::new();
+            let mut item_metadata = ExportMetadata {
+                path: canonical_path.clone(),
+                root: per_file_root,
+                prefix: prefix.clone(),
+                ..Default::default()
+            };
+            let mut internal_imports = Vec::new();
+
             for item in &ast.items {
                 match item {
+                    simple_parser::ast::Node::UseStmt(u) => {
+                        internal_imports.push((u.path.segments.clone(), u.target.clone()));
+                    }
+                    simple_parser::ast::Node::MultiUse(mu) => {
+                        for (path, target) in &mu.imports {
+                            internal_imports.push((path.segments.clone(), target.clone()));
+                        }
+                    }
+                    simple_parser::ast::Node::ExportUseStmt(export) => {
+                        if export.path.segments.is_empty() {
+                            collect_target_names(&export.target, &mut item_metadata.bare_exports);
+                        } else {
+                            item_metadata.public_imports.push((
+                                export.path.segments.clone(),
+                                export.target.clone(),
+                                false,
+                            ));
+                            item_metadata.explicit_targets.push(export.target.clone());
+                        }
+                    }
                     simple_parser::ast::Node::Function(f) => {
-                        if f.params.iter().any(|p| p.default.is_some()) {
-                            interface_param_defaults.insert(
+                        let interface_defaults = if f.params.iter().any(|p| p.default.is_some()) {
+                            Some((
                                 format!("{}__{}", prefix, f.name),
                                 f.params.iter().map(|p| p.default.clone()).collect(),
-                            );
-                        }
-                        if !f.body.statements.is_empty() {
-                            let mangled = format!("{}__{}", prefix, f.name);
-                            fn_arities.insert(mangled.clone(), f.params.len());
-                            raw_to_mangled.entry(f.name.clone()).or_default().push(mangled.clone());
-                            // Preserve every declared return type. The lowerer
-                            // discards types it cannot resolve, and the collision
-                            // handling below removes ambiguous bare function names.
-                            let captured = f.return_type.clone();
-                            if let Some(cap) = captured {
-                                // The owner-mangled symbol remains unambiguous even when
-                                // conflicting bare-name return metadata must be discarded.
-                                fn_return_types.insert(mangled, cap.clone());
-                                match fn_return_types.entry(f.name.clone()) {
-                                    std::collections::hash_map::Entry::Occupied(mut e) => {
-                                        if e.get() != &cap {
-                                            // Conflicting return types for the same bare
-                                            // name: mark ambiguous (dropped before return).
-                                            e.insert(simple_parser::Type::Simple(String::new()));
-                                        }
-                                    }
-                                    std::collections::hash_map::Entry::Vacant(e) => {
-                                        e.insert(cap);
-                                    }
-                                }
-                            }
+                            ))
+                        } else {
+                            None
+                        };
+                        let abi_override = crate::hir::lower::module_lowering::ast_function_abi_override(f);
+                        if matches!(
+                            abi_override,
+                            Some(crate::hir::lower::module_lowering::AstFnAbiOverride::ExternRuntime(_))
+                        ) || !f.body.statements.is_empty()
+                        {
+                            let mangled = match abi_override {
+                                Some(crate::hir::lower::module_lowering::AstFnAbiOverride::ExternRuntime(sym))
+                                | Some(crate::hir::lower::module_lowering::AstFnAbiOverride::Export(sym)) => sym,
+                                None => format!("{}__{}", prefix, f.name),
+                            };
+                            items.push(ItemSummary::Function {
+                                name: f.name.clone(),
+                                mangled,
+                                arity: f.params.len(),
+                                interface_defaults,
+                                return_type: f.return_type.clone(),
+                            });
+                        } else if let Some((k, v)) = interface_defaults {
+                            items.push(ItemSummary::Function {
+                                name: String::new(),
+                                mangled: String::new(),
+                                arity: 0,
+                                interface_defaults: Some((k, v)),
+                                return_type: None,
+                            });
                         }
                     }
                     simple_parser::ast::Node::Class(c) => {
-                        // Register the bare type name so cross-module imports of the
-                        // class type resolve to the defining module's mangled symbol
-                        // (e.g. "VfsManager" → "services__vfs__vfs__VfsManager").
-                        // Without this, declare_globals falls back to mangle_name() which
-                        // uses the *importing* file's prefix, producing wrong references.
                         let type_mangled = format!("{}__{}", prefix, c.name);
-                        raw_to_mangled
-                            .entry(c.name.clone())
-                            .or_default()
-                            .push(type_mangled.clone());
-                        // Class type globals are data objects (type descriptors / vtable anchors),
-                        // not function symbols — mark them so declare_globals uses the data path.
-                        data_exports.insert(type_mangled);
-                        if !c.fields.is_empty() {
-                            let fields: Vec<(String, simple_parser::Type)> =
-                                c.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
-                            record_struct_fields(
-                                &mut struct_defs,
-                                &mut unique_struct_owners,
-                                &mut duplicate_struct_defs,
-                                &prefix,
-                                &c.name,
-                                fields,
-                            );
-                        }
+                        let fields: Vec<(String, simple_parser::Type)> =
+                            c.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
+                        let field_defaults: Vec<(String, simple_parser::ast::Expr)> = if fields.is_empty() {
+                            Vec::new()
+                        } else {
+                            c.fields
+                                .iter()
+                                .filter_map(|f| f.default.as_ref().map(|d| (f.name.clone(), d.clone())))
+                                .collect()
+                        };
                         let own_methods: HashSet<String> = c.methods.iter().map(|m| m.name.clone()).collect();
-                        for mixin_ref in &c.mixins {
-                            pending_class_with.push((prefix.clone(), c.name.clone(), mixin_ref.name.clone(), own_methods.clone()));
-                        }
-                        for m in &c.methods {
-                            if !m.body.statements.is_empty() {
-                                let raw = format!("{}.{}", c.name, m.name);
-                                let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, c.name, m.name));
-                                fn_arities.insert(mangled.clone(), method_arity(m));
-                                record_method_defaults(&mut mangled_method_defaults, &mangled, m);
-                                raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
-                                raw_to_mangled.entry(raw.clone()).or_default().push(mangled);
-                                record_method_return_type(&mut fn_return_types, raw, m);
-                            }
-                        }
+                        let mixins: Vec<String> = c.mixins.iter().map(|mr| mr.name.clone()).collect();
+                        let methods = c
+                            .methods
+                            .iter()
+                            .filter(|m| !m.body.statements.is_empty())
+                            .map(|m| CallableSummary {
+                                raw: format!("{}.{}", c.name, m.name),
+                                bare: m.name.clone(),
+                                mangled: sanitize_mangled(format!("{}__{}.{}", prefix, c.name, m.name)),
+                                arity: method_arity(m),
+                                defaults: extract_callable_defaults(m),
+                                return_type: extract_callable_return_type(m),
+                            })
+                            .collect();
+                        items.push(ItemSummary::Class {
+                            name: c.name.clone(),
+                            type_mangled,
+                            fields,
+                            field_defaults,
+                            mixins,
+                            own_methods,
+                            methods,
+                        });
                     }
                     simple_parser::ast::Node::Extern(e) => {
-                        let mangled = e.name.clone();
-                        raw_to_mangled.entry(e.name.clone()).or_default().push(mangled);
+                        items.push(ItemSummary::Extern { name: e.name.clone() });
                     }
                     simple_parser::ast::Node::ExternClass(ec) => {
-                        for m in &ec.methods {
-                            let raw = format!("{}.{}", ec.name, m.name);
-                            let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, ec.name, m.name));
-                            let arity = m.params.len()
-                                + usize::from(!matches!(m.kind, simple_parser::ast::ExternMethodKind::Static));
-                            fn_arities.insert(mangled.clone(), arity);
-                            raw_to_mangled.entry(raw.clone()).or_default().push(mangled.clone());
-                            raw_to_mangled.entry(m.name.clone()).or_default().push(mangled);
-                        }
+                        let methods = ec
+                            .methods
+                            .iter()
+                            .map(|m| {
+                                let raw = format!("{}.{}", ec.name, m.name);
+                                let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, ec.name, m.name));
+                                let arity = m.params.len()
+                                    + usize::from(!matches!(m.kind, simple_parser::ast::ExternMethodKind::Static));
+                                (raw, m.name.clone(), mangled, arity)
+                            })
+                            .collect();
+                        items.push(ItemSummary::ExternClass { methods });
                     }
                     simple_parser::ast::Node::Let(l) => {
                         if let Some(name) = extract_let_name(&l.pattern) {
                             let mangled = format!("{}__{}", prefix, name);
-                            raw_to_mangled.entry(name).or_default().push(mangled.clone());
-                            // Module-level `var`/`val` (via `let`) is data, not a function.
-                            data_exports.insert(mangled);
+                            items.push(ItemSummary::Data { name, mangled });
                         }
                     }
                     simple_parser::ast::Node::Const(c) => {
                         let mangled = format!("{}__{}", prefix, c.name);
-                        raw_to_mangled.entry(c.name.clone()).or_default().push(mangled.clone());
-                        // Module-level `const`/`val` is data, not a function.
-                        data_exports.insert(mangled);
+                        items.push(ItemSummary::Data {
+                            name: c.name.clone(),
+                            mangled,
+                        });
                     }
                     simple_parser::ast::Node::Static(s) => {
                         let mangled = format!("{}__{}", prefix, s.name);
-                        raw_to_mangled.entry(s.name.clone()).or_default().push(mangled.clone());
-                        // Module-level `static` is data, not a function.
-                        data_exports.insert(mangled);
+                        items.push(ItemSummary::Data {
+                            name: s.name.clone(),
+                            mangled,
+                        });
                     }
                     simple_parser::ast::Node::Struct(s) => {
-                        // HIR synthesizes a real implementation for `struct S(T):`.
-                        // Its constructor therefore has the same vtable header as
-                        // an explicit impl. Include it in the project layout
-                        // inventory used by field accesses and value copies too.
-                        if let Some(trait_name) = s.attributes.iter()
+                        let implements_trait = s
+                            .attributes
+                            .iter()
                             .find(|attribute| attribute.name == "implements")
                             .and_then(|attribute| attribute.args.as_ref())
                             .and_then(|arguments| arguments.first())
                             .and_then(|argument| match argument {
-                                simple_parser::ast::Expr::Identifier(name) => Some(name),
+                                simple_parser::ast::Expr::Identifier(name) => Some(name.clone()),
                                 _ => None,
-                            })
-                        {
-                            pending_vtable_impls.push((prefix.clone(), s.name.clone(), trait_name.clone()));
-                        }
-                        // Register the bare struct type name so cross-module imports
-                        // resolve to the defining module's symbol, not the importer's.
+                            });
                         let type_mangled = format!("{}__{}", prefix, s.name);
-                        raw_to_mangled
-                            .entry(s.name.clone())
-                            .or_default()
-                            .push(type_mangled.clone());
-                        data_exports.insert(type_mangled);
-                        if !s.fields.is_empty() {
-                            let fields: Vec<(String, simple_parser::Type)> =
-                                s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
-                            record_struct_fields(
-                                &mut struct_defs,
-                                &mut unique_struct_owners,
-                                &mut duplicate_struct_defs,
-                                &prefix,
-                                &s.name,
-                                fields,
-                            );
-                        }
-                        for m in &s.methods {
-                            if !m.body.statements.is_empty() {
-                                let raw = format!("{}.{}", s.name, m.name);
-                                let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, s.name, m.name));
-                                fn_arities.insert(mangled.clone(), method_arity(m));
-                                record_method_defaults(&mut mangled_method_defaults, &mangled, m);
-                                raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
-                                raw_to_mangled.entry(raw.clone()).or_default().push(mangled);
-                                record_method_return_type(&mut fn_return_types, raw, m);
-                            }
-                        }
+                        let fields: Vec<(String, simple_parser::Type)> =
+                            s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
+                        let field_defaults: Vec<(String, simple_parser::ast::Expr)> = if fields.is_empty() {
+                            Vec::new()
+                        } else {
+                            s.fields
+                                .iter()
+                                .filter_map(|f| f.default.as_ref().map(|d| (f.name.clone(), d.clone())))
+                                .collect()
+                        };
+                        let methods = s
+                            .methods
+                            .iter()
+                            .filter(|m| !m.body.statements.is_empty())
+                            .map(|m| CallableSummary {
+                                raw: format!("{}.{}", s.name, m.name),
+                                bare: m.name.clone(),
+                                mangled: sanitize_mangled(format!("{}__{}.{}", prefix, s.name, m.name)),
+                                arity: method_arity(m),
+                                defaults: extract_callable_defaults(m),
+                                return_type: extract_callable_return_type(m),
+                            })
+                            .collect();
+                        items.push(ItemSummary::Struct {
+                            name: s.name.clone(),
+                            type_mangled,
+                            implements_trait,
+                            fields,
+                            field_defaults,
+                            methods,
+                        });
                     }
                     simple_parser::ast::Node::Enum(e) => {
-                        // Register the bare enum type name so cross-module imports
-                        // resolve to the defining module's symbol, not the importer's.
                         let type_mangled = format!("{}__{}", prefix, e.name);
                         let runtime_name = if runtime_module_name.is_empty() {
                             e.name.clone()
@@ -592,27 +763,7 @@ pub(crate) fn build_import_map(
                             format!("{}.{}", runtime_module_name, e.name)
                         };
                         let runtime_id = crate::codegen::shared::enum_runtime_type_id(&runtime_name);
-                        if let Some(existing) = enum_runtime_id_names.get(&runtime_id) {
-                            if existing != &runtime_name && enum_runtime_collision.is_none() {
-                                enum_runtime_collision = Some(format!(
-                                    "enum runtime ID collision: '{}' and '{}'",
-                                    existing, runtime_name
-                                ));
-                            }
-                        } else {
-                            enum_runtime_id_names.insert(runtime_id, runtime_name.clone());
-                        }
-                        enum_runtime_names.insert(type_mangled.clone(), runtime_name);
-                        raw_to_mangled
-                            .entry(e.name.clone())
-                            .or_default()
-                            .push(type_mangled.clone());
-                        data_exports.insert(type_mangled);
-                        // W15-H: harvest enum payload types into the global
-                        // enum-defs sidecar so the lowerer can eagerly seed
-                        // `module.types.name_to_id` and `self.globals` with
-                        // the real enum TypeId for cross-module receivers.
-                        let mut variant_summary: Vec<(String, Option<Vec<simple_parser::Type>>)> = e
+                        let variants: Vec<(String, Option<Vec<simple_parser::Type>>)> = e
                             .variants
                             .iter()
                             .map(|v| {
@@ -623,51 +774,20 @@ pub(crate) fn build_import_map(
                                 (v.name.clone(), payload)
                             })
                             .collect();
-                        if enum_defs.contains_key(&e.name) {
-                            duplicate_enum_defs.insert(e.name.clone());
-                        }
-                        let entry = enum_defs.entry(e.name.clone()).or_default();
-                        if duplicate_enum_defs.contains(&e.name) {
-                            let erase_payload = |payload: &mut Option<Vec<simple_parser::Type>>| {
-                                if let Some(fields) = payload {
-                                    for field in fields {
-                                        *field = simple_parser::Type::Simple("Any".to_string());
-                                    }
-                                }
-                            };
-                            for (_, payload) in entry.iter_mut() {
-                                erase_payload(payload);
-                            }
-                            for (_, payload) in variant_summary.iter_mut() {
-                                erase_payload(payload);
-                            }
-                        }
-                        for (variant_name, variant_payload) in variant_summary {
-                            if let Some((_, existing_payload)) =
-                                entry.iter_mut().find(|(name, _)| name == &variant_name)
-                            {
-                                let conflicting_payload_len = match (&*existing_payload, &variant_payload) {
-                                    (None, None) => None,
-                                    (Some(left), Some(right)) => Some(left.len().max(right.len())),
-                                    (Some(fields), None) | (None, Some(fields)) => Some(fields.len().max(1)),
-                                };
-                                if let Some(len) = conflicting_payload_len {
-                                    *existing_payload = Some(vec![simple_parser::Type::Simple("Any".to_string()); len]);
-                                }
-                            } else {
-                                entry.push((variant_name, variant_payload));
-                            }
-                        }
-                        for m in &e.methods {
-                            if !m.body.statements.is_empty() {
-                                let raw = format!("{}.{}", e.name, m.name);
-                                let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, e.name, m.name));
-                                fn_arities.insert(mangled.clone(), method_arity(m));
-                                record_method_defaults(&mut mangled_method_defaults, &mangled, m);
-                                raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
-                                raw_to_mangled.entry(raw).or_default().push(mangled);
-                            }
-                        }
+                        let methods = e
+                            .methods
+                            .iter()
+                            .filter(|m| !m.body.statements.is_empty())
+                            .map(|m| CallableSummary {
+                                raw: format!("{}.{}", e.name, m.name),
+                                bare: m.name.clone(),
+                                mangled: sanitize_mangled(format!("{}__{}.{}", prefix, e.name, m.name)),
+                                arity: method_arity(m),
+                                defaults: extract_callable_defaults(m),
+                                return_type: None,
+                            })
+                            .collect();
+                        let mut named_variant_fields = Vec::new();
                         for v in &e.variants {
                             if let Some(ref fields) = v.fields {
                                 let named: Vec<(String, simple_parser::Type)> = fields
@@ -675,84 +795,401 @@ pub(crate) fn build_import_map(
                                     .filter_map(|f| f.name.as_ref().map(|n| (n.clone(), f.ty.clone())))
                                     .collect();
                                 if !named.is_empty() {
-                                    record_struct_fields(
-                                        &mut struct_defs,
-                                        &mut unique_struct_owners,
-                                        &mut duplicate_struct_defs,
-                                        &prefix,
-                                        &v.name,
-                                        named,
-                                    );
+                                    named_variant_fields.push((v.name.clone(), named));
                                 }
                             }
                         }
+                        items.push(ItemSummary::Enum {
+                            name: e.name.clone(),
+                            type_mangled,
+                            runtime_name,
+                            runtime_id,
+                            variants,
+                            methods,
+                            named_variant_fields,
+                        });
                     }
                     simple_parser::ast::Node::Mixin(m) => {
-                        mixin_def_names.insert(m.name.clone());
+                        items.push(ItemSummary::Mixin { name: m.name.clone() });
                     }
                     simple_parser::ast::Node::Trait(t) => {
-                        trait_def_names.insert(t.name.clone());
-                        trait_method_names.extend(t.methods.iter().map(|m| m.name.clone()));
-                        trait_abstract_methods.entry(t.name.clone()).or_default().push(
-                            t.methods.iter().filter(|m| m.is_abstract).map(|m| m.name.clone()).collect(),
-                        );
-                        for m in &t.methods {
-                            if has_concrete_body(&m.body) {
-                                let raw = format!("{}.{}", t.name, m.name);
-                                let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, t.name, m.name));
-                                fn_arities.insert(mangled.clone(), method_arity(m));
-                                record_method_defaults(&mut mangled_method_defaults, &mangled, m);
-                                raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
-                                raw_to_mangled.entry(raw).or_default().push(mangled);
-                            }
-                        }
+                        let method_names = t.methods.iter().map(|m| m.name.clone()).collect();
+                        let abstract_methods = t
+                            .methods
+                            .iter()
+                            .filter(|m| m.is_abstract)
+                            .map(|m| m.name.clone())
+                            .collect();
+                        let concrete_methods = t
+                            .methods
+                            .iter()
+                            .filter(|m| has_concrete_body(&m.body))
+                            .map(|m| CallableSummary {
+                                raw: format!("{}.{}", t.name, m.name),
+                                bare: m.name.clone(),
+                                mangled: sanitize_mangled(format!("{}__{}.{}", prefix, t.name, m.name)),
+                                arity: method_arity(m),
+                                defaults: extract_callable_defaults(m),
+                                return_type: None,
+                            })
+                            .collect();
+                        items.push(ItemSummary::Trait {
+                            name: t.name.clone(),
+                            method_names,
+                            abstract_methods,
+                            concrete_methods,
+                        });
                     }
                     simple_parser::ast::Node::Impl(imp) => {
-                        let type_name = match &imp.target_type {
-                            simple_parser::ast::Type::Simple(n) => Some(n.as_str()),
-                            simple_parser::ast::Type::Generic { name, .. } => Some(name.as_str()),
-                            _ => None,
-                        };
-                        if let Some(type_name) = type_name {
-                            if let Some(trait_name) = &imp.trait_name {
-                                let implementations = trait_impls.entry(trait_name.clone()).or_default();
-                                if !implementations.iter().any(|candidate| candidate == type_name) {
-                                    implementations.push(type_name.to_string());
-                                }
-                                pending_vtable_impls.push((prefix.clone(), type_name.to_string(), trait_name.clone()));
-                            }
-                            for m in &imp.methods {
-                                if !m.body.statements.is_empty() {
-                                    let raw = format!("{}.{}", type_name, m.name);
-                                    let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, type_name, m.name));
-                                    fn_arities.insert(mangled.clone(), method_arity(m));
-                                record_method_defaults(&mut mangled_method_defaults, &mangled, m);
-                                    raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
-                                    raw_to_mangled.entry(raw.clone()).or_default().push(mangled);
-                                    record_method_return_type(&mut fn_return_types, raw, m);
-                                }
-                            }
+                        if let Some(type_name) = crate::hir::lower::Lowerer::impl_target_type_name(&imp.target_type) {
+                            let methods = imp
+                                .methods
+                                .iter()
+                                .filter(|m| !m.body.statements.is_empty())
+                                .map(|m| CallableSummary {
+                                    raw: format!("{}.{}", type_name, m.name),
+                                    bare: m.name.clone(),
+                                    mangled: sanitize_mangled(format!("{}__{}.{}", prefix, type_name, m.name)),
+                                    arity: method_arity(m),
+                                    defaults: extract_callable_defaults(m),
+                                    return_type: extract_callable_return_type(m),
+                                })
+                                .collect();
+                            items.push(ItemSummary::Impl {
+                                type_name,
+                                trait_name: imp.trait_name.clone(),
+                                methods,
+                            });
                         }
                     }
                     simple_parser::ast::Node::Extend(ext) => {
-                        for m in &ext.methods {
-                            if !m.body.statements.is_empty() {
-                                let raw = format!("{}.{}", ext.target_type, m.name);
-                                let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, ext.target_type, m.name));
-                                fn_arities.insert(mangled.clone(), method_arity(m));
-                                record_method_defaults(&mut mangled_method_defaults, &mangled, m);
-                                raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
-                                raw_to_mangled.entry(raw.clone()).or_default().push(mangled);
-                                record_method_return_type(&mut fn_return_types, raw, m);
-                            }
-                        }
+                        let methods = ext
+                            .methods
+                            .iter()
+                            .filter(|m| !m.body.statements.is_empty())
+                            .map(|m| CallableSummary {
+                                raw: format!("{}.{}", ext.target_type, m.name),
+                                bare: m.name.clone(),
+                                mangled: sanitize_mangled(format!("{}__{}.{}", prefix, ext.target_type, m.name)),
+                                arity: method_arity(m),
+                                defaults: extract_callable_defaults(m),
+                                return_type: extract_callable_return_type(m),
+                            })
+                            .collect();
+                        items.push(ItemSummary::Extend { methods });
                     }
                     _ => {}
                 }
             }
+
+            item_metadata.bare_exports.sort();
+            item_metadata.bare_exports.dedup();
+            for (segments, target) in internal_imports {
+                if item_metadata
+                    .bare_exports
+                    .iter()
+                    .any(|name| import_target_exports_name(&target, name))
+                    || matches!(target, simple_parser::ast::ImportTarget::Glob)
+                        && !item_metadata.bare_exports.is_empty()
+                {
+                    item_metadata.public_imports.push((segments, target, true));
+                }
+            }
+
+            ModuleSummary {
+                prefix,
+                items,
+                export_metadata: Some(item_metadata),
+            }
+        })
+        .collect();
+
+    let mut metadata = Vec::new();
+    let merge_return_type =
+        |fn_return_types: &mut HashMap<String, simple_parser::Type>, key: String, cap: Option<simple_parser::Type>| {
+            if let Some(cap) = cap {
+                match fn_return_types.entry(key) {
+                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                        if e.get() != &cap {
+                            e.insert(simple_parser::Type::Simple(String::new()));
+                        }
+                    }
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(cap);
+                    }
+                }
+            }
+        };
+    let merge_callables = |callables: Vec<CallableSummary>,
+                           fn_arities: &mut HashMap<String, usize>,
+                           mangled_method_defaults: &mut HashMap<String, Vec<Option<simple_parser::ast::Expr>>>,
+                           raw_to_mangled: &mut HashMap<String, Vec<String>>,
+                           fn_return_types: &mut HashMap<String, simple_parser::Type>| {
+        for c in callables {
+            fn_arities.insert(c.mangled.clone(), c.arity);
+            if let Some(defaults) = c.defaults {
+                mangled_method_defaults.insert(c.mangled.clone(), defaults);
+            }
+            raw_to_mangled.entry(c.bare).or_default().push(c.mangled.clone());
+            raw_to_mangled.entry(c.raw.clone()).or_default().push(c.mangled);
+            merge_return_type(fn_return_types, c.raw, c.return_type);
+        }
+    };
+
+    for ((path, _, canonical_path), summary) in unique_files.iter().zip(summaries) {
+        let prefix = summary.prefix;
+        // `path` is the exact declaration identity used by the resolver in
+        // normal builds; retain its canonical spelling too for callers that
+        // canonicalize before handing it to the HIR lowerer.
+        struct_module_owners.insert((*path).clone(), prefix.clone());
+        struct_module_owners.insert(canonical_path.clone(), prefix.clone());
+
+        for item in summary.items {
+            match item {
+                ItemSummary::Function {
+                    name,
+                    mangled,
+                    arity,
+                    interface_defaults,
+                    return_type,
+                } => {
+                    if let Some((key, defaults)) = interface_defaults {
+                        interface_param_defaults.insert(key, defaults);
+                    }
+                    if !mangled.is_empty() {
+                        fn_arities.insert(mangled.clone(), arity);
+                        raw_to_mangled.entry(name.clone()).or_default().push(mangled.clone());
+                        if let Some(cap) = return_type {
+                            fn_return_types.insert(mangled, cap.clone());
+                            merge_return_type(&mut fn_return_types, name, Some(cap));
+                        }
+                    }
+                }
+                ItemSummary::Class {
+                    name,
+                    type_mangled,
+                    fields,
+                    field_defaults,
+                    mixins,
+                    own_methods,
+                    methods,
+                } => {
+                    raw_to_mangled.entry(name.clone()).or_default().push(type_mangled.clone());
+                    data_exports.insert(type_mangled);
+                    if !fields.is_empty() {
+                        record_struct_fields(
+                            &mut struct_defs,
+                            &mut unique_struct_owners,
+                            &mut duplicate_struct_defs,
+                            &prefix,
+                            &name,
+                            fields,
+                        );
+                        if !field_defaults.is_empty() {
+                            let canonical_owner = format!("{prefix}__{name}");
+                            if !struct_field_defaults.contains_key(&canonical_owner) {
+                                let defaults: std::collections::HashMap<String, simple_parser::ast::Expr> =
+                                    field_defaults.into_iter().collect();
+                                struct_field_defaults.insert(canonical_owner, defaults);
+                            }
+                        }
+                    }
+                    for mixin_name in mixins {
+                        pending_class_with.push((prefix.clone(), name.clone(), mixin_name, own_methods.clone()));
+                    }
+                    merge_callables(
+                        methods,
+                        &mut fn_arities,
+                        &mut mangled_method_defaults,
+                        &mut raw_to_mangled,
+                        &mut fn_return_types,
+                    );
+                }
+                ItemSummary::Extern { name } => {
+                    raw_to_mangled.entry(name.clone()).or_default().push(name);
+                }
+                ItemSummary::ExternClass { methods } => {
+                    for (raw, bare, mangled, arity) in methods {
+                        fn_arities.insert(mangled.clone(), arity);
+                        raw_to_mangled.entry(raw).or_default().push(mangled.clone());
+                        raw_to_mangled.entry(bare).or_default().push(mangled);
+                    }
+                }
+                ItemSummary::Data { name, mangled } => {
+                    raw_to_mangled.entry(name).or_default().push(mangled.clone());
+                    data_exports.insert(mangled);
+                }
+                ItemSummary::Struct {
+                    name,
+                    type_mangled,
+                    implements_trait,
+                    fields,
+                    field_defaults,
+                    methods,
+                } => {
+                    if let Some(trait_name) = implements_trait {
+                        pending_vtable_impls.push((prefix.clone(), name.clone(), trait_name));
+                    }
+                    raw_to_mangled.entry(name.clone()).or_default().push(type_mangled.clone());
+                    data_exports.insert(type_mangled);
+                    if !fields.is_empty() {
+                        record_struct_fields(
+                            &mut struct_defs,
+                            &mut unique_struct_owners,
+                            &mut duplicate_struct_defs,
+                            &prefix,
+                            &name,
+                            fields,
+                        );
+                        if !field_defaults.is_empty() {
+                            let canonical_owner = format!("{prefix}__{name}");
+                            if !struct_field_defaults.contains_key(&canonical_owner) {
+                                let defaults: std::collections::HashMap<String, simple_parser::ast::Expr> =
+                                    field_defaults.into_iter().collect();
+                                struct_field_defaults.insert(canonical_owner, defaults);
+                            }
+                        }
+                    }
+                    merge_callables(
+                        methods,
+                        &mut fn_arities,
+                        &mut mangled_method_defaults,
+                        &mut raw_to_mangled,
+                        &mut fn_return_types,
+                    );
+                }
+                ItemSummary::Enum {
+                    name,
+                    type_mangled,
+                    runtime_name,
+                    runtime_id,
+                    mut variants,
+                    methods,
+                    named_variant_fields,
+                } => {
+                    if let Some(existing) = enum_runtime_id_names.get(&runtime_id) {
+                        if existing != &runtime_name && enum_runtime_collision.is_none() {
+                            enum_runtime_collision = Some(format!(
+                                "enum runtime ID collision: '{}' and '{}'",
+                                existing, runtime_name
+                            ));
+                        }
+                    } else {
+                        enum_runtime_id_names.insert(runtime_id, runtime_name.clone());
+                    }
+                    enum_runtime_names.insert(type_mangled.clone(), runtime_name);
+                    raw_to_mangled.entry(name.clone()).or_default().push(type_mangled.clone());
+                    data_exports.insert(type_mangled);
+                    if enum_defs.contains_key(&name) {
+                        duplicate_enum_defs.insert(name.clone());
+                    }
+                    let entry = enum_defs.entry(name.clone()).or_default();
+                    if duplicate_enum_defs.contains(&name) {
+                        let erase_payload = |payload: &mut Option<Vec<simple_parser::Type>>| {
+                            if let Some(fields) = payload {
+                                for field in fields {
+                                    *field = simple_parser::Type::Simple("Any".to_string());
+                                }
+                            }
+                        };
+                        for (_, payload) in entry.iter_mut() {
+                            erase_payload(payload);
+                        }
+                        for (_, payload) in variants.iter_mut() {
+                            erase_payload(payload);
+                        }
+                    }
+                    for (variant_name, variant_payload) in variants {
+                        if let Some((_, existing_payload)) = entry.iter_mut().find(|(vn, _)| vn == &variant_name) {
+                            let conflicting_payload_len = match (&*existing_payload, &variant_payload) {
+                                (None, None) => None,
+                                (Some(left), Some(right)) => Some(left.len().max(right.len())),
+                                (Some(fields), None) | (None, Some(fields)) => Some(fields.len().max(1)),
+                            };
+                            if let Some(len) = conflicting_payload_len {
+                                *existing_payload = Some(vec![simple_parser::Type::Simple("Any".to_string()); len]);
+                            }
+                        } else {
+                            entry.push((variant_name, variant_payload));
+                        }
+                    }
+                    for c in methods {
+                        fn_arities.insert(c.mangled.clone(), c.arity);
+                        if let Some(defaults) = c.defaults {
+                            mangled_method_defaults.entry(c.mangled.clone()).or_insert(defaults);
+                        }
+                        raw_to_mangled.entry(c.bare).or_default().push(c.mangled.clone());
+                        raw_to_mangled.entry(c.raw).or_default().push(c.mangled);
+                    }
+                    for (vname, named) in named_variant_fields {
+                        record_struct_fields(
+                            &mut struct_defs,
+                            &mut unique_struct_owners,
+                            &mut duplicate_struct_defs,
+                            &prefix,
+                            &vname,
+                            named,
+                        );
+                    }
+                }
+                ItemSummary::Mixin { name } => {
+                    mixin_def_names.insert(name);
+                }
+                ItemSummary::Trait {
+                    name,
+                    method_names,
+                    abstract_methods,
+                    concrete_methods,
+                } => {
+                    trait_def_names.insert(name.clone());
+                    trait_method_names.extend(method_names);
+                    trait_abstract_methods.entry(name).or_default().push(abstract_methods);
+                    for c in concrete_methods {
+                        fn_arities.insert(c.mangled.clone(), c.arity);
+                        if let Some(defaults) = c.defaults {
+                            mangled_method_defaults.entry(c.mangled.clone()).or_insert(defaults);
+                        }
+                        raw_to_mangled.entry(c.bare).or_default().push(c.mangled.clone());
+                        raw_to_mangled.entry(c.raw).or_default().push(c.mangled);
+                    }
+                }
+                ItemSummary::Impl {
+                    type_name,
+                    trait_name,
+                    methods,
+                } => {
+                    if let Some(trait_name) = trait_name {
+                        let implementations = trait_impls.entry(trait_name.clone()).or_default();
+                        if !implementations.iter().any(|candidate| candidate == &type_name) {
+                            implementations.push(type_name.clone());
+                        }
+                        pending_vtable_impls.push((prefix.clone(), type_name, trait_name));
+                    }
+                    merge_callables(
+                        methods,
+                        &mut fn_arities,
+                        &mut mangled_method_defaults,
+                        &mut raw_to_mangled,
+                        &mut fn_return_types,
+                    );
+                }
+                ItemSummary::Extend { methods } => {
+                    merge_callables(
+                        methods,
+                        &mut fn_arities,
+                        &mut mangled_method_defaults,
+                        &mut raw_to_mangled,
+                        &mut fn_return_types,
+                    );
+                }
+            }
+        }
+        if let Some(item_metadata) = summary.export_metadata {
+            metadata.push(item_metadata);
         }
     }
 
+    // Resolve `map` and `ambiguous` before dropping unused temporaries.
     let mut map = std::collections::HashMap::new();
     let mut ambiguous = std::collections::HashSet::new();
     for (raw, mangled_list) in &raw_to_mangled {
@@ -788,73 +1225,6 @@ pub(crate) fn build_import_map(
                     .unwrap_or(&mangled_list[0]);
                 map.insert(raw.clone(), preferred.clone());
             }
-        }
-    }
-
-    // Build a deterministic re-export index. Package `__init__.spl` facades
-    // use their parent directory as the public module key and select an exact
-    // sibling owner; candidate order is never a resolution rule.
-    #[derive(Default)]
-    struct ExportMetadata {
-        path: PathBuf,
-        root: PathBuf,
-        prefix: String,
-        public_imports: Vec<(Vec<String>, simple_parser::ast::ImportTarget, bool)>,
-        explicit_targets: Vec<simple_parser::ast::ImportTarget>,
-        bare_exports: Vec<String>,
-    }
-
-    let mut metadata = Vec::new();
-    for ((path, _, canonical_path), ast) in unique_files.iter().zip(&parsed) {
-        let per_file_root = source_root_for_file(path, source_dirs, fallback_root);
-        let prefix = module_prefix_from_path(path, &per_file_root);
-        if let Some(ast) = ast {
-            let mut item_metadata = ExportMetadata {
-                path: canonical_path.clone(),
-                root: per_file_root,
-                prefix,
-                ..Default::default()
-            };
-            let mut internal_imports = Vec::new();
-            for item in &ast.items {
-                match item {
-                    simple_parser::ast::Node::UseStmt(u) => {
-                        internal_imports.push((u.path.segments.clone(), u.target.clone()));
-                    }
-                    simple_parser::ast::Node::MultiUse(mu) => {
-                        for (path, target) in &mu.imports {
-                            internal_imports.push((path.segments.clone(), target.clone()));
-                        }
-                    }
-                    simple_parser::ast::Node::ExportUseStmt(export) => {
-                        if export.path.segments.is_empty() {
-                            collect_target_names(&export.target, &mut item_metadata.bare_exports);
-                        } else {
-                            item_metadata.public_imports.push((
-                                export.path.segments.clone(),
-                                export.target.clone(),
-                                false,
-                            ));
-                            item_metadata.explicit_targets.push(export.target.clone());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            item_metadata.bare_exports.sort();
-            item_metadata.bare_exports.dedup();
-            for (segments, target) in internal_imports {
-                if item_metadata
-                    .bare_exports
-                    .iter()
-                    .any(|name| import_target_exports_name(&target, name))
-                    || matches!(target, simple_parser::ast::ImportTarget::Glob)
-                        && !item_metadata.bare_exports.is_empty()
-                {
-                    item_metadata.public_imports.push((segments, target, true));
-                }
-            }
-            metadata.push(item_metadata);
         }
     }
     metadata.sort_by(|a, b| a.path.cmp(&b.path));
@@ -1135,6 +1505,7 @@ pub(crate) fn build_import_map(
     // A bare payload owner that has multiple definitions is not safe to
     // resolve through the global name table. Erase the whole field, including
     // nested wrappers, so discovery order cannot invent an owner.
+    let duplicate_enum_names = duplicate_enum_defs.clone();
     let mut ambiguous_type_owners = duplicate_enum_defs;
     ambiguous_type_owners.extend(duplicate_struct_defs.keys().cloned());
     for variants in enum_defs.values_mut() {
@@ -1170,10 +1541,12 @@ pub(crate) fn build_import_map(
         vtable_type_owners,
         vtable_symbols,
         struct_defs,
+        struct_field_defaults,
         unique_struct_owners,
         struct_module_owners,
         duplicate_struct_defs,
         enum_defs,
+        duplicate_enum_names,
         enum_runtime_names,
         enum_runtime_collision,
         data_exports,
@@ -1217,6 +1590,26 @@ fn type_mentions_ambiguous_owner(ty: &simple_parser::Type, ambiguous: &std::coll
         }
         Type::TypeBinding { value, .. } => type_mentions_ambiguous_owner(value, ambiguous),
         Type::SelfType | Type::ConstKeySet { .. } | Type::DependentKeys { .. } => false,
+    }
+}
+
+/// Record a type's declared field `= default` expressions under the same
+/// canonical owner key `record_struct_fields` uses (first definition wins).
+fn record_struct_field_defaults<'a>(
+    struct_field_defaults: &mut std::collections::HashMap<String, std::collections::HashMap<String, simple_parser::ast::Expr>>,
+    module_prefix: &str,
+    name: &str,
+    fields: impl Iterator<Item = (&'a String, &'a Option<simple_parser::ast::Expr>)>,
+) {
+    let owner = format!("{}__{}", module_prefix, name);
+    if struct_field_defaults.contains_key(&owner) {
+        return;
+    }
+    let defaults: std::collections::HashMap<String, simple_parser::ast::Expr> = fields
+        .filter_map(|(field_name, default)| default.as_ref().map(|d| (field_name.clone(), d.clone())))
+        .collect();
+    if !defaults.is_empty() {
+        struct_field_defaults.insert(owner, defaults);
     }
 }
 
@@ -1264,6 +1657,7 @@ pub(crate) fn build_use_map_from_ast(
     re_exports: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
 ) -> std::collections::HashMap<String, String> {
     let mut use_map = std::collections::HashMap::new();
+    let mut scan = UseMapScan::default();
 
     super::discovery::visit_ast_nodes(&ast.items, &mut |item| match item {
         simple_parser::ast::Node::UseStmt(use_stmt) => {
@@ -1273,6 +1667,7 @@ pub(crate) fn build_use_map_from_ast(
                 all_mangled,
                 re_exports,
                 &mut use_map,
+                &mut scan,
             );
         }
         simple_parser::ast::Node::ExportUseStmt(export_use) => {
@@ -1282,11 +1677,12 @@ pub(crate) fn build_use_map_from_ast(
                 all_mangled,
                 re_exports,
                 &mut use_map,
+                &mut scan,
             );
         }
         simple_parser::ast::Node::MultiUse(multi_use) => {
             for (path, target) in &multi_use.imports {
-                collect_use_imports(&path.segments, target, all_mangled, re_exports, &mut use_map);
+                collect_use_imports(&path.segments, target, all_mangled, re_exports, &mut use_map, &mut scan);
             }
         }
         _ => {}
@@ -1301,6 +1697,7 @@ fn collect_use_imports(
     all_mangled: &std::collections::HashMap<String, Vec<String>>,
     re_exports: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
     use_map: &mut std::collections::HashMap<String, String>,
+    scan: &mut UseMapScan,
 ) {
     let segments: Vec<&str> = path_segments
         .iter()
@@ -1318,8 +1715,9 @@ fn collect_use_imports(
             // of exposing the ambiguous bare `env_get` name.
             let mut module_segments = segments.clone();
             module_segments.push(name.as_str());
-            for raw_name in all_mangled.keys().filter(|raw_name| !raw_name.contains('.')) {
-                if let Some(mangled) = resolve_import_name_strict(raw_name, &module_segments, all_mangled, re_exports) {
+            let module_scope = StrictImportScope::new(&module_segments, re_exports);
+            for raw_name in scan.module_keys(&module_scope, name, all_mangled) {
+                if let Some(mangled) = module_scope.resolve(&raw_name, all_mangled) {
                     use_map.insert(format!("{name}.{raw_name}"), mangled);
                 }
             }
@@ -1337,7 +1735,15 @@ fn collect_use_imports(
             // all_mangled, so the prefix loop above misses it.  Walk all bare (non-dotted)
             // names and use resolve_import_name_strict with the current use-path segments
             // to find ones that uniquely belong to this module.
-            for (raw_name, candidates) in all_mangled.iter() {
+            // Every Single item of one `use a.b.{x, y}` group shares these segments and
+            // the scan only fills absent keys, so a repeat pass is a no-op.
+            let use_scope = StrictImportScope::new(&segments, re_exports);
+            let bare_names = if scan.bare_scanned.insert(use_scope.joined.clone()) {
+                Some(all_mangled)
+            } else {
+                None
+            };
+            for (raw_name, candidates) in bare_names.into_iter().flatten() {
                 // Skip dotted names (already handled above) and names already resolved.
                 if raw_name.contains('.') || use_map.contains_key(raw_name) {
                     continue;
@@ -1347,7 +1753,7 @@ fn collect_use_imports(
                 if candidates.len() <= 1 {
                     continue;
                 }
-                if let Some(mangled) = resolve_import_name_strict(raw_name, &segments, all_mangled, re_exports) {
+                if let Some(mangled) = use_scope.resolve(raw_name, all_mangled) {
                     use_map.insert(raw_name.clone(), mangled);
                 }
             }
@@ -1356,15 +1762,29 @@ fn collect_use_imports(
             if let Some(mangled) = resolve_import_name(name, &segments, all_mangled, re_exports) {
                 use_map.insert(alias.clone(), mangled);
             }
+            // Whole-module alias (`use std.game2d as g`): key the module's
+            // free functions as `g.<fn>` so `g.run(...)` resolves exactly as
+            // `game2d.run(...)` does in the Single arm, instead of failing
+            // lowering with `Unknown variable: g` (whole-module de-JIT).
+            // doc/08_tracking/bug/jit_lowering_module_alias_and_panic_2026-07-02.md
+            let mut module_segments = segments.clone();
+            module_segments.push(name.as_str());
+            let module_scope = StrictImportScope::new(&module_segments, re_exports);
+            for raw_name in scan.module_keys(&module_scope, name, all_mangled) {
+                if let Some(mangled) = module_scope.resolve(&raw_name, all_mangled) {
+                    use_map.insert(format!("{alias}.{raw_name}"), mangled);
+                }
+            }
         }
         simple_parser::ast::ImportTarget::Group(items) => {
             for item in items {
-                collect_use_imports(path_segments, item, all_mangled, re_exports, use_map);
+                collect_use_imports(path_segments, item, all_mangled, re_exports, use_map, scan);
             }
         }
         simple_parser::ast::ImportTarget::Glob => {
+            let glob_scope = StrictImportScope::new(&segments, re_exports);
             for raw_name in all_mangled.keys().filter(|name| !name.starts_with('_')) {
-                if let Some(mangled) = resolve_import_name_strict(raw_name, &segments, all_mangled, re_exports) {
+                if let Some(mangled) = glob_scope.resolve(raw_name, all_mangled) {
                     use_map.insert(raw_name.clone(), mangled);
                 }
             }
@@ -1386,35 +1806,147 @@ fn resolve_import_name(
     (candidates.len() == 1).then(|| candidates[0].clone())
 }
 
+/// `resolve_import_name_strict` with every per-`use_segments` lookup hoisted
+/// out. `collect_use_imports` resolves each whole-table key of `all_mangled`
+/// against one use path; recomputing the joins, the re-export map lookups and
+/// the five family `format!`s per key made a single `use` cost O(table) heavy
+/// allocations, so files with many `use` lines spent minutes in `pre_hir` on
+/// the full-CLI closure (bug seed_native_build_per_file_compile_minutes_windows).
+#[derive(Default)]
+struct UseMapScan {
+    /// Joined use paths whose bare multi-candidate scan already ran.
+    bare_scanned: std::collections::HashSet<String>,
+    /// Lazily built: normalised mangled part -> bare `all_mangled` keys with
+    /// an owner containing that part (the same split `mangled_matches_use_path`
+    /// uses). A module-only import `use a.m` can only own keys listed under `m`.
+    part_index: Option<std::collections::HashMap<String, Vec<String>>>,
+}
+
+impl UseMapScan {
+    /// Bare keys `scope.resolve` can map for module import `name`: owners that
+    /// carry `name` as a part, plus re-export entries. Falls back to every bare
+    /// key when `name` could be split or produced by owner normalisation.
+    fn module_keys(
+        &mut self,
+        scope: &StrictImportScope<'_, '_>,
+        name: &str,
+        all_mangled: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Vec<String> {
+        let bare = |key: &&String| !key.contains('.');
+        // A segment with a leading/trailing `_` (`impl_`, `mod_`, a parent ending
+        // in `_dot`) fuses with the `__` separator, so splitting an owner yields
+        // `impl` / `_m` rather than `impl_` / `m`. Parts are indexed and looked up
+        // with edge underscores trimmed; that only widens the candidate keys, and
+        // `scope.resolve` still decides each one.
+        let lookup = name.trim_matches('_');
+        if lookup.is_empty() || name.contains("__") || name.contains('.') || name.contains("dot") {
+            return all_mangled.keys().filter(bare).cloned().collect();
+        }
+        let index = self.part_index.get_or_insert_with(|| {
+            let mut index: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+            for (raw_name, owners) in all_mangled.iter().filter(|(key, _)| bare(key)) {
+                let mut parts = std::collections::HashSet::new();
+                for owner in owners {
+                    let normalized = owner.replace("_dot_", "__").replace('.', "__");
+                    parts.extend(normalized.split("__").map(|part| part.trim_matches('_').to_string()));
+                }
+                for part in parts {
+                    index.entry(part).or_default().push(raw_name.clone());
+                }
+            }
+            index
+        });
+        let mut keys: std::collections::BTreeSet<String> = index.get(lookup).into_iter().flatten().cloned().collect();
+        for re_export in scope.direct.iter().chain(scope.stripped.iter()).chain(scope.families.iter()) {
+            keys.extend(re_export.keys().filter(|key| all_mangled.contains_key(*key) && bare(key)).cloned());
+        }
+        keys.into_iter().collect()
+    }
+}
+
+struct StrictImportScope<'s, 'r> {
+    segments: &'s [&'s str],
+    joined: String,
+    direct: Option<&'r std::collections::HashMap<String, String>>,
+    stripped: Option<&'r std::collections::HashMap<String, String>>,
+    families: Vec<&'r std::collections::HashMap<String, String>>,
+    /// Every owner-matching route needs the last use segment as a mangled
+    /// part. When it has no `_`, the normalisation in `mangled_matches_use_path`
+    /// cannot synthesise it, so a candidate lacking it as a substring is a miss.
+    required_part: Option<&'s str>,
+}
+
+impl<'s, 'r> StrictImportScope<'s, 'r> {
+    fn new(
+        segments: &'s [&'s str],
+        re_exports: &'r std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    ) -> Self {
+        let joined = segments.join("__");
+        let direct = re_exports.get(&joined);
+        let stripped = if segments.len() > 1 {
+            re_exports.get(&segments[1..].join("__"))
+        } else {
+            None
+        };
+        let families = match segments.split_first() {
+            Some((root, rest)) if *root == "lib" && !rest.is_empty() => {
+                let rest = rest.join("__");
+                FAMILY_ROOTS
+                    .iter()
+                    .filter_map(|family| re_exports.get(&format!("lib__{family}__{rest}")))
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        Self {
+            segments,
+            joined,
+            direct,
+            stripped,
+            families,
+            required_part: segments.last().copied().filter(|last| !last.is_empty() && !last.contains('_')),
+        }
+    }
+
+    fn resolve(&self, func_name: &str, all_mangled: &std::collections::HashMap<String, Vec<String>>) -> Option<String> {
+        if let Some(hit) = self.direct.and_then(|m| m.get(func_name)) {
+            return Some(hit.clone());
+        }
+        if let Some(hit) = self.stripped.and_then(|m| m.get(func_name)) {
+            return Some(hit.clone());
+        }
+        let mut owners = self.families.iter().filter_map(|m| m.get(func_name));
+        if let Some(first) = owners.next() {
+            if owners.all(|owner| owner == first) {
+                return Some(first.clone());
+            }
+        }
+        let candidates = all_mangled.get(func_name)?;
+        if let Some(part) = self.required_part {
+            if !candidates.iter().any(|candidate| candidate.contains(part)) {
+                return None;
+            }
+        }
+        let matching = matching_import_owners_joined(func_name, self.segments, &self.joined, candidates);
+        (matching.len() == 1).then(|| matching[0].clone())
+    }
+}
+
+const FAMILY_ROOTS: [&str; 5] = [
+    "common",
+    "nogc_sync_mut",
+    "nogc_async_mut",
+    "gc_async_mut",
+    "nogc_async_mut_noalloc",
+];
+
 fn resolve_import_name_strict(
     func_name: &str,
     use_segments: &[&str],
     all_mangled: &std::collections::HashMap<String, Vec<String>>,
     re_exports: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
 ) -> Option<String> {
-    let expected_prefix = use_segments.join("__");
-    if let Some(module_re_exports) = re_exports.get(&expected_prefix) {
-        if let Some(actual_mangled) = module_re_exports.get(func_name) {
-            return Some(actual_mangled.clone());
-        }
-    }
-
-    if use_segments.len() > 1 {
-        let stripped_prefix = use_segments[1..].join("__");
-        if let Some(module_re_exports) = re_exports.get(&stripped_prefix) {
-            if let Some(actual_mangled) = module_re_exports.get(func_name) {
-                return Some(actual_mangled.clone());
-            }
-        }
-    }
-
-    let candidates = all_mangled.get(func_name)?;
-    let matching = matching_import_owners(func_name, use_segments, candidates);
-    if matching.len() == 1 {
-        return Some(matching[0].clone());
-    }
-
-    None
+    StrictImportScope::new(use_segments, re_exports).resolve(func_name, all_mangled)
 }
 
 fn collect_target_names(target: &simple_parser::ast::ImportTarget, names: &mut Vec<String>) {
@@ -1483,8 +2015,18 @@ fn matching_import_owners<'a>(
     use_segments: &[&str],
     candidates: &'a [String],
 ) -> Vec<&'a String> {
+    matching_import_owners_joined(func_name, use_segments, &use_segments.join("__"), candidates)
+}
+
+/// `matching_import_owners` with `use_segments.join("__")` supplied by the caller.
+fn matching_import_owners_joined<'a>(
+    func_name: &str,
+    use_segments: &[&str],
+    joined: &str,
+    candidates: &'a [String],
+) -> Vec<&'a String> {
     if !use_segments.is_empty() {
-        let exact_name = format!("{}__{}", use_segments.join("__"), func_name);
+        let exact_name = format!("{joined}__{func_name}");
         if let Some(exact) = candidates.iter().find(|candidate| *candidate == &exact_name) {
             return vec![exact];
         }
@@ -1536,5 +2078,82 @@ fn extract_let_name(pattern: &simple_parser::Pattern) -> Option<String> {
         simple_parser::Pattern::MutIdentifier(n) => Some(n.clone()),
         simple_parser::Pattern::Typed { pattern: inner, .. } => extract_let_name(inner),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod numeric_receiver_resolution_tests {
+    use super::resolve_name_variants;
+    use std::collections::HashMap;
+
+    #[test]
+    fn numeric_receiver_does_not_bind_bare_custom_conversion() {
+        let empty = HashMap::new();
+        let colliding = HashMap::from([(
+            "to_i64".to_string(),
+            "services__vfs__vfs_boot_init__VfsFileSize.to_i64".to_string(),
+        )]);
+        for owner in ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64"] {
+            let call = format!("{owner}.to_i64");
+            assert_eq!(resolve_name_variants(&call, &empty, &colliding), None, "import map: {call}");
+            assert_eq!(resolve_name_variants(&call, &colliding, &empty), None, "use map: {call}");
+        }
+    }
+
+    #[test]
+    fn exact_numeric_receiver_import_remains_resolvable() {
+        let owned = "core__numeric__u8.to_i64".to_string();
+        let import = HashMap::from([("u8__to_i64".to_string(), owned.clone())]);
+        assert_eq!(resolve_name_variants("u8.to_i64", &HashMap::new(), &import), Some(owned));
+    }
+
+    #[test]
+    fn custom_receiver_keeps_its_authored_bare_import() {
+        let owned = "services__vfs__vfs_boot_init__VfsFileSize.to_i64".to_string();
+        let import = HashMap::from([("to_i64".to_string(), owned.clone())]);
+        assert_eq!(resolve_name_variants("VfsFileSize.to_i64", &HashMap::new(), &import), Some(owned));
+    }
+
+    #[test]
+    fn collection_receiver_still_rejects_bare_import() {
+        let import = HashMap::from([("is_empty".to_string(), "unrelated__Sp.is_empty".to_string())]);
+        assert_eq!(resolve_name_variants("Array.is_empty", &HashMap::new(), &import), None);
+    }
+
+    #[test]
+    fn builtin_receiver_does_not_bind_lowercase_joined_free_function() {
+        // stage2_test_runner_libunit_project_name_missing_2026-11-27: the
+        // closure exports `compiler.frontend.core.types.str_slice`, so the
+        // lowercase-joined lookup rebound EVERY text `.slice(a, b)` to it;
+        // its code-point `s[a:b]` shifted byte-offset cuts past non-ASCII
+        // text and the 00.common manifest parsed "ect:" for "project:".
+        let hijack = HashMap::from([(
+            "str_slice".to_string(),
+            "compiler__frontend__core__types__str_slice".to_string(),
+        )]);
+        assert_eq!(resolve_name_variants("str.slice", &HashMap::new(), &hijack), None);
+        assert_eq!(resolve_name_variants("str.slice", &hijack, &HashMap::new()), None);
+        for owner in ["text", "String", "str", "Array", "Dict", "i64", "u8"] {
+            let lower_joined = format!("{}_slice", owner.to_lowercase());
+            let colliding = HashMap::from([(lower_joined, "unrelated__helper".to_string())]);
+            let call = format!("{owner}.slice");
+            assert_eq!(resolve_name_variants(&call, &HashMap::new(), &colliding), None, "import map: {call}");
+            assert_eq!(resolve_name_variants(&call, &colliding, &HashMap::new()), None, "use map: {call}");
+        }
+    }
+
+    #[test]
+    fn builtin_receiver_does_not_bind_lowercase_no_sep_free_function() {
+        let colliding = HashMap::from([("strslice".to_string(), "unrelated__helper".to_string())]);
+        assert_eq!(resolve_name_variants("str.slice", &HashMap::new(), &colliding), None);
+    }
+
+    #[test]
+    fn user_type_keeps_lowercase_joined_factory_resolution() {
+        // The constructor/factory convention the lookup exists for:
+        // `TreeSitter.create` -> free function `treesitter_create`.
+        let owned = "bindings__treesitter__treesitter_create".to_string();
+        let import = HashMap::from([("treesitter_create".to_string(), owned.clone())]);
+        assert_eq!(resolve_name_variants("TreeSitter.create", &HashMap::new(), &import), Some(owned));
     }
 }

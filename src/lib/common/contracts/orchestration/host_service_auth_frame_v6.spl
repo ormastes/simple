@@ -1,0 +1,153 @@
+# Pure frame schema/codec only. A correctly shaped tag is NOT verified here.
+# Native ready/key custody, transport framing and authentication stay owners.
+use std.common.contracts.orchestration.host_service_operation_v6.host_service_hex_shape_v6
+use std.common.contracts.orchestration.host_service_auth_v6.{HostServiceAuthContextV6,
+    host_service_auth_context_validate_v6, host_service_auth_transcript_v6}
+use std.common.base_encoding.base64.{base64url_encode, base64url_decode_strict}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.{sdn_encode_canonical, sdn_encoded_text_size_v1}
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub const HOST_SERVICE_AUTH_FRAME_LINE_PREFIX_V6 = "host-service-auth-v6 "
+pub const HOST_SERVICE_AUTH_FRAME_HANDSHAKE_MAX_V6: i64 = 4096
+pub const HOST_SERVICE_AUTH_FRAME_REPLY_MAX_V6: i64 = 1048576
+pub const HOST_SERVICE_AUTH_FRAME_REQUEST_MAX_V6: i64 = 2097152
+
+pub struct HostServiceAuthFrameV6:
+    role: text
+    service_incarnation: text
+    client_nonce: text
+    server_nonce: text
+    command_digest: text
+    payload: text
+    tag: text
+
+fn host_service_auth_frame_limit_v6(role: text) -> Result<i64, text>:
+    if role == "hello" or role == "challenge": return Ok(HOST_SERVICE_AUTH_FRAME_HANDSHAKE_MAX_V6)
+    if role == "request": return Ok(HOST_SERVICE_AUTH_FRAME_REQUEST_MAX_V6)
+    if role == "reply": return Ok(HOST_SERVICE_AUTH_FRAME_REPLY_MAX_V6)
+    Err("host-auth-frame-role-unsupported")
+
+fn host_service_auth_frame_size_v6(frame: HostServiceAuthFrameV6) -> i64:
+    val keys = ["version", "kind", "role", "serviceIncarnation", "clientNonce", "serverNonce", "commandDigest", "payload", "tag"]
+    var total: i64 = 3 + 2 * 9 + 2 * 8 + 1
+    for key in keys: total = total + key.byte_len()
+    total = total + sdn_encoded_text_size_v1("host-service-auth-frame")
+    for value in [frame.role, frame.service_incarnation, frame.client_nonce, frame.server_nonce, frame.command_digest, frame.payload, frame.tag]:
+        total = total + sdn_encoded_text_size_v1(value)
+    total
+
+fn host_service_auth_frame_context_v6(frame: HostServiceAuthFrameV6) -> HostServiceAuthContextV6:
+    HostServiceAuthContextV6(service_incarnation: frame.service_incarnation, client_nonce: frame.client_nonce,
+        server_nonce: frame.server_nonce, command_digest: frame.command_digest)
+
+pub fn host_service_auth_frame_validate_v6(frame: HostServiceAuthFrameV6) -> Result<bool, text>:
+    val maximum = host_service_auth_frame_limit_v6(frame.role)?
+    if frame.payload.byte_len() > maximum: return Err("host-auth-frame-payload-size")
+    if frame.role == "hello":
+        if (not host_service_hex_shape_v6(frame.service_incarnation, 32) or
+                not host_service_hex_shape_v6(frame.client_nonce, 64) or
+                not host_service_hex_shape_v6(frame.command_digest, 64)):
+            return Err("host-auth-frame-hello-context-shape")
+        if frame.server_nonce != "" or frame.payload != "" or frame.tag != "": return Err("host-auth-frame-hello-fields")
+    else:
+        val valid = host_service_auth_context_validate_v6(host_service_auth_frame_context_v6(frame))?
+        if not host_service_hex_shape_v6(frame.tag, 64): return Err("host-auth-frame-tag-shape")
+        if frame.role == "challenge" and frame.payload != "": return Err("host-auth-frame-challenge-payload")
+        if frame.role == "reply" and frame.payload == "": return Err("host-auth-frame-reply-payload-required")
+    # Exact inclusive SDN size is checked before escaping/allocating the frame.
+    if host_service_auth_frame_size_v6(frame) > maximum: return Err("host-auth-frame-encoded-size")
+    if frame.role != "hello":
+        # Reuse all role/body and canonical request/context checks; no MAC
+        # generation/comparison or native authority is duplicated by the codec.
+        val transcript = host_service_auth_transcript_v6(frame.role, host_service_auth_frame_context_v6(frame), frame.payload)?
+    Ok(true)
+
+pub fn host_service_auth_frame_encode_v6(frame: HostServiceAuthFrameV6) -> Result<text, text>:
+    val valid = host_service_auth_frame_validate_v6(frame)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(6), "kind": SdnValue.String("host-service-auth-frame"),
+        "role": SdnValue.String(frame.role), "serviceIncarnation": SdnValue.String(frame.service_incarnation),
+        "clientNonce": SdnValue.String(frame.client_nonce), "serverNonce": SdnValue.String(frame.server_nonce),
+        "commandDigest": SdnValue.String(frame.command_digest), "payload": SdnValue.String(frame.payload), "tag": SdnValue.String(frame.tag)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if source.byte_len() > host_service_auth_frame_limit_v6(frame.role)?: return Err("host-auth-frame-encoded-size")
+    Ok(source)
+
+fn host_service_auth_frame_text_v6(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key): return Err("host-auth-frame-field-missing:" + key)
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-auth-frame-field-type:" + key)
+
+pub fn host_service_auth_frame_decode_v6(source: text) -> Result<HostServiceAuthFrameV6, text>:
+    if source.byte_len() < 1 or source.byte_len() > HOST_SERVICE_AUTH_FRAME_REQUEST_MAX_V6:
+        return Err("host-auth-frame-source-size")
+    val limits = SdnStrictLimitsV1(max_source_bytes: HOST_SERVICE_AUTH_FRAME_REQUEST_MAX_V6,
+        max_depth: 2, max_nodes: 24, max_rows: 0, max_cells: 0, max_columns: 9)
+    val document = match sdn_parse_strict_v1(source, limits):
+        case Ok(value): value
+        case Err(issue): return Err("host-auth-frame-sdn:" + issue.code)
+    val fields = match document.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("host-auth-frame-object-required")
+    val known = ["version", "kind", "role", "serviceIncarnation", "clientNonce", "serverNonce", "commandDigest", "payload", "tag"]
+    if fields.len() != 9: return Err("host-auth-frame-field-count")
+    for key in fields.keys():
+        if not known.contains(key): return Err("host-auth-frame-field-unknown:" + key)
+    if not fields.contains_key("version"): return Err("host-auth-frame-version")
+    match fields["version"]:
+        case SdnValue.Int(value):
+            if value != 6: return Err("host-auth-frame-version")
+        case _: return Err("host-auth-frame-version")
+    if host_service_auth_frame_text_v6(fields, "kind")? != "host-service-auth-frame": return Err("host-auth-frame-kind")
+    val frame = HostServiceAuthFrameV6(role: host_service_auth_frame_text_v6(fields, "role")?,
+        service_incarnation: host_service_auth_frame_text_v6(fields, "serviceIncarnation")?,
+        client_nonce: host_service_auth_frame_text_v6(fields, "clientNonce")?,
+        server_nonce: host_service_auth_frame_text_v6(fields, "serverNonce")?,
+        command_digest: host_service_auth_frame_text_v6(fields, "commandDigest")?,
+        payload: host_service_auth_frame_text_v6(fields, "payload")?, tag: host_service_auth_frame_text_v6(fields, "tag")?)
+    if source.byte_len() > host_service_auth_frame_limit_v6(frame.role)?: return Err("host-auth-frame-role-source-size")
+    if host_service_auth_frame_encode_v6(frame)? != source: return Err("host-auth-frame-noncanonical")
+    Ok(frame)
+
+fn host_service_auth_frame_base64_size_v6(bytes: i64) -> i64:
+    val groups = bytes / 3
+    val tail = bytes % 3
+    groups * 4 + (if tail == 0: 0 elif tail == 1: 2 else: 3)
+
+pub fn host_service_auth_frame_line_encode_v6(frame: HostServiceAuthFrameV6) -> Result<text, text>:
+    val source = host_service_auth_frame_encode_v6(frame)?
+    val expected = HOST_SERVICE_AUTH_FRAME_LINE_PREFIX_V6.byte_len() + host_service_auth_frame_base64_size_v6(source.byte_len()) + 1
+    val maximum = HOST_SERVICE_AUTH_FRAME_LINE_PREFIX_V6.byte_len() + host_service_auth_frame_base64_size_v6(host_service_auth_frame_limit_v6(frame.role)?) + 1
+    if expected > maximum: return Err("host-auth-frame-line-size")
+    val line = HOST_SERVICE_AUTH_FRAME_LINE_PREFIX_V6 + base64url_encode(source) + "\n"
+    if line.byte_len() != expected: return Err("host-auth-frame-line-encoding-size")
+    Ok(line)
+
+pub fn host_service_auth_frame_line_decode_v6(line: text) -> Result<HostServiceAuthFrameV6, text>:
+    val prefix_bytes = HOST_SERVICE_AUTH_FRAME_LINE_PREFIX_V6.byte_len()
+    val maximum = prefix_bytes + host_service_auth_frame_base64_size_v6(HOST_SERVICE_AUTH_FRAME_REQUEST_MAX_V6) + 1
+    if line.byte_len() <= prefix_bytes + 1 or line.byte_len() > maximum: return Err("host-auth-frame-line-size")
+    if not line.starts_with(HOST_SERVICE_AUTH_FRAME_LINE_PREFIX_V6) or not line.ends_with("\n"):
+        return Err("host-auth-frame-line-envelope")
+    # Bound first, then require ASCII alphabet before byte-position slicing.
+    # This also rejects CRLF, embedded newlines, spaces, padding and UTF-8 junk.
+    for index in prefix_bytes..line.byte_len() - 1:
+        val code = line.byte_at(index)
+        if not ((code >= 65 and code <= 90) or (code >= 97 and code <= 122) or
+                (code >= 48 and code <= 57) or code == 45 or code == 95):
+            return Err("host-auth-frame-line-alphabet")
+    val encoded = line.substring(prefix_bytes, line.byte_len() - 1)
+    val source = match base64url_decode_strict(encoded):
+        case Ok(value): value
+        case Err(_issue): return Err("host-auth-frame-line-base64url")
+    # Existing strict decode rejects alphabet/length. Re-encoding additionally
+    # rejects nonzero unused tail bits and lossy invalid UTF-8 decoding.
+    if base64url_encode(source) != encoded: return Err("host-auth-frame-line-base64url-noncanonical")
+    host_service_auth_frame_decode_v6(source)
+
+export HostServiceAuthFrameV6, HOST_SERVICE_AUTH_FRAME_LINE_PREFIX_V6
+export HOST_SERVICE_AUTH_FRAME_HANDSHAKE_MAX_V6, HOST_SERVICE_AUTH_FRAME_REPLY_MAX_V6, HOST_SERVICE_AUTH_FRAME_REQUEST_MAX_V6
+export host_service_auth_frame_validate_v6, host_service_auth_frame_encode_v6, host_service_auth_frame_decode_v6
+export host_service_auth_frame_line_encode_v6, host_service_auth_frame_line_decode_v6

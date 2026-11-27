@@ -1,0 +1,61 @@
+"""
+# Named Type Registry Placeholder Isolation Prevention Specification
+
+Prevention tests for bug 4536 (`bare_name_registry_collision_trigger_conditions_2026-07-30`).
+Verifies per-module bare-name type isolation: declared definitions in distinct modules
+allocate distinct `type_id` entries, `named_type_find` prefers the active module's
+entry, and empty forward-reference placeholders are adopted safely without cross-module
+field corruption across `named_type_update`.
+"""
+
+use std.spec.*
+use compiler.core.ast.{ast_reset}
+use compiler.core.types.{
+    reset_all_pools, named_type_register, named_type_find, named_type_fields,
+    named_type_name, named_type_update, named_type_set_current_module,
+    TYPE_I64, TYPE_TEXT
+}
+
+describe "named_type_registry placeholder and module isolation (bug 4536)":
+    """Checks forward placeholder adoption, collision separation, and lookup precedence."""
+
+    it "adopts an empty placeholder across modules without overwriting a later collision":
+        ast_reset()
+        reset_all_pools()
+
+        named_type_set_current_module("pkg/alpha.spl")
+        val placeholder_id = named_type_register("SharedName", [], [])
+
+        named_type_set_current_module("pkg/beta.spl")
+        val adopted_id = named_type_register("SharedName", ["code"], [TYPE_I64])
+        expect(adopted_id).to_equal(placeholder_id)
+        expect(named_type_name(adopted_id)).to_equal("SharedName")
+        expect(named_type_fields(adopted_id).len()).to_equal(1)
+        expect(named_type_fields(adopted_id)[0]).to_equal("code")
+
+        named_type_set_current_module("pkg/gamma.spl")
+        val third_id = named_type_register("SharedName", ["label", "tag"], [TYPE_TEXT, TYPE_I64])
+        expect(third_id != adopted_id).to_equal(true)
+        expect(named_type_fields(adopted_id).len()).to_equal(1)
+        expect(named_type_fields(third_id).len()).to_equal(2)
+
+    it "prefers the current module declaration in named_type_find and keeps updates isolated":
+        ast_reset()
+        reset_all_pools()
+
+        named_type_set_current_module("svc/left.spl")
+        val left_id = named_type_register("Payload", ["left_v"], [TYPE_I64])
+
+        named_type_set_current_module("svc/right.spl")
+        val right_id = named_type_register("Payload", ["right_v"], [TYPE_TEXT])
+        expect(left_id != right_id).to_equal(true)
+
+        named_type_set_current_module("svc/left.spl")
+        expect(named_type_find("Payload")).to_equal(left_id)
+        named_type_update(left_id, ["left_v", "extra"], [TYPE_I64, TYPE_I64])
+
+        named_type_set_current_module("svc/right.spl")
+        expect(named_type_find("Payload")).to_equal(right_id)
+        expect(named_type_fields(right_id).len()).to_equal(1)
+        expect(named_type_fields(right_id)[0]).to_equal("right_v")
+        expect(named_type_fields(left_id).len()).to_equal(2)

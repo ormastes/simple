@@ -13,7 +13,9 @@ pub extern "C" fn rt_value_u64(bits: i64) -> RuntimeValue {
 }
 #[no_mangle]
 pub extern "C" fn rt_value_as_u64(v: RuntimeValue) -> i64 {
-    v.as_heap_u64().unwrap_or_else(|| v.as_int() as u64) as i64
+    v.as_heap_u64()
+        .or_else(|| v.as_heap_i64().map(|value| value as u64))
+        .unwrap_or_else(|| v.as_int() as u64) as i64
 }
 #[no_mangle]
 pub extern "C" fn rt_value_float(f: f64) -> RuntimeValue {
@@ -143,7 +145,7 @@ pub extern "C" fn rt_value_is_nil(v: RuntimeValue) -> bool {
 }
 #[no_mangle]
 pub extern "C" fn rt_value_is_int(v: RuntimeValue) -> bool {
-    v.is_int() || v.as_heap_u64().is_some()
+    v.is_int() || v.as_heap_i64().is_some() || v.as_heap_u64().is_some()
 }
 #[no_mangle]
 pub extern "C" fn rt_value_is_float(v: RuntimeValue) -> bool {
@@ -201,6 +203,11 @@ mod u64_boundary_tests {
             assert_eq!(value_hash(left), value_hash(right));
             assert_eq!(rt_value_compare(left, right), 0);
             assert_eq!(left.truthy(), bits != 0);
+        }
+        for bits in [1i64 << 62, i64::MIN] {
+            let signed_wide = RuntimeValue::from_int(bits);
+            assert!(signed_wide.as_heap_i64().is_some());
+            assert_eq!(unbox_abi(signed_wide) as u64, bits as u64);
         }
 
         let unsigned_minus_one = rt_value_u64(-1);
@@ -288,5 +295,19 @@ mod raw_i64_guard_tests {
             stderr.contains("refusing to truncate a non-float heap-boxed"),
             "expected the loud rt_value_raw_i64 guard message on stderr, got: {stderr}"
         );
+    }
+
+    #[test]
+    fn value_is_int_recognizes_inline_wide_signed_and_unsigned_ints() {
+        use super::rt_value_is_int;
+        assert!(rt_value_is_int(RuntimeValue::from_int(0)));
+        assert!(rt_value_is_int(RuntimeValue::from_int(1 << 60)));
+        assert!(rt_value_is_int(RuntimeValue::from_int(-(1 << 60) - 1)));
+        assert!(rt_value_is_int(RuntimeValue::from_int(i64::MAX)));
+        assert!(rt_value_is_int(RuntimeValue::from_int(i64::MIN)));
+        assert!(rt_value_is_int(RuntimeValue::from_u64(u64::MAX)));
+        assert!(!rt_value_is_int(RuntimeValue::from_float(1.5)));
+        assert!(!rt_value_is_int(RuntimeValue::from_bool(true)));
+        assert!(!rt_value_is_int(RuntimeValue::NIL));
     }
 }

@@ -1,0 +1,178 @@
+# @req ORCH-02 HOST-02
+# Common value/wire coverage only; runtime qualification NOT_RUN.
+# Pure V2 wire assertions. Opaque bodies grant no runtime authority.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+
+fn execution_plan_fixture_v2(backend: text) -> ContainerExecutionPlanV2:
+    ContainerExecutionPlanV2(backend: backend, workload_uid: "workload", attempt: 1,
+        operation_id: "operation", request_digest: "a".repeat(64), physical_host_id: "machine",
+        service_scope_id: "service", boot_id: "boot", provider_generation: 7, native_machine_id: "machine-native",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot")
+
+fn execution_wire_field_v2(source: text, key: text, value: SdnValue) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    var fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+describe "portable Linux Podman and Windows Docker execution values":
+    it "preserves both exact backends and hashes every canonical plan field":
+        step("Preserves both exact backends and hashes every canonical plan field")
+        for backend in ["linux-podman", "windows-docker-process"]:
+            val plan = execution_plan_fixture_v2(backend)
+            val bytes = container_execution_plan_bytes_v2(plan).unwrap()
+            val decoded = container_execution_plan_decode_v2(bytes).unwrap()
+            expect(container_execution_plan_bytes_v2(decoded).unwrap() == bytes).to_equal(true)
+            expect(decoded.backend == backend).to_equal(true)
+            expect(decoded.operation_id == plan.operation_id).to_equal(true)
+            expect(decoded.provider_generation == 7).to_equal(true)
+            expect(container_execution_plan_digest_v2(plan).unwrap() == sha256_text(bytes)).to_equal(true)
+        val linux = execution_plan_fixture_v2("linux-podman")
+        val windows = execution_plan_fixture_v2("windows-docker-process")
+        expect(container_execution_plan_digest_v2(linux).unwrap() != container_execution_plan_digest_v2(windows).unwrap()).to_equal(true)
+
+    it "rejects unsupported backend incomplete identity nonpositive generation and malformed digest":
+        step("Rejects unsupported backend incomplete identity nonpositive generation and malformed digest")
+        var plan = execution_plan_fixture_v2("docker")
+        expect(container_execution_plan_bytes_v2(plan).is_err()).to_equal(true)
+        plan = execution_plan_fixture_v2("linux-podman")
+        plan.operation_id = ""
+        expect(container_execution_plan_bytes_v2(plan).is_err()).to_equal(true)
+        plan = execution_plan_fixture_v2("linux-podman")
+        plan.boot_id = ""
+        expect(container_execution_plan_bytes_v2(plan).is_err()).to_equal(true)
+        plan = execution_plan_fixture_v2("linux-podman")
+        plan.service_scope_id = "x".repeat(1048576)
+        expect(container_execution_plan_bytes_v2(plan).is_err()).to_equal(true)
+        plan = execution_plan_fixture_v2("linux-podman")
+        plan.attempt = 0
+        expect(container_execution_plan_bytes_v2(plan).is_err()).to_equal(true)
+        plan = execution_plan_fixture_v2("linux-podman")
+        plan.provider_generation = 0
+        expect(container_execution_plan_bytes_v2(plan).is_err()).to_equal(true)
+        plan = execution_plan_fixture_v2("linux-podman")
+        plan.request_digest = "a".repeat(63)
+        expect(container_execution_plan_bytes_v2(plan).is_err()).to_equal(true)
+
+    it "rejects unknown duplicate typed and noncanonical plan wire data":
+        step("Rejects unknown duplicate typed and noncanonical plan wire data")
+        val wire = container_execution_plan_bytes_v2(execution_plan_fixture_v2("linux-podman")).unwrap()
+        expect(container_execution_plan_decode_v2(execution_wire_field_v2(wire, "authenticated", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(container_execution_plan_decode_v2(execution_wire_field_v2(wire, "attempt", SdnValue.String("1"))).is_err()).to_equal(true)
+        expect(container_execution_plan_decode_v2(wire + "\n").is_err()).to_equal(true)
+        val head = wire.slice(0, wire.len() - 2)
+        expect(container_execution_plan_decode_v2(head + ", version: 2" + "}\n").is_err()).to_equal(true)
+        expect(container_execution_plan_decode_v2("é".repeat(8193)).is_err()).to_equal(true)
+
+    it "round trips canonical opaque request data without treating it as a provider request":
+        step("Round trips canonical opaque request data without treating it as a provider request")
+        for backend in ["linux-podman", "windows-docker-process"]:
+            val request = ContainerExecutionRequestV2(plan: execution_plan_fixture_v2(backend), request_bytes: "opaque unvalidated body")
+            val wire = container_execution_request_encode_v2(request).unwrap()
+            val decoded = container_execution_request_decode_v2(wire).unwrap()
+            expect(decoded.plan.backend == backend).to_equal(true)
+            expect(decoded.request_bytes == request.request_bytes).to_equal(true)
+            expect(container_execution_request_encode_v2(decoded).unwrap() == wire).to_equal(true)
+
+    it "rejects ambiguous wrong kind missing or nontext request fields":
+        step("Rejects ambiguous wrong kind missing or nontext request fields")
+        val request = ContainerExecutionRequestV2(plan: execution_plan_fixture_v2("linux-podman"), request_bytes: "opaque")
+        val wire = container_execution_request_encode_v2(request).unwrap()
+        expect(container_execution_request_decode_v2(execution_wire_field_v2(wire, "receipt", SdnValue.String("forged"))).is_err()).to_equal(true)
+        expect(container_execution_request_decode_v2(execution_wire_field_v2(wire, "requestBytes", SdnValue.Int(1))).is_err()).to_equal(true)
+        expect(container_execution_request_decode_v2(execution_wire_field_v2(wire, "kind", SdnValue.String("container-execution-plan"))).is_err()).to_equal(true)
+        expect(container_execution_request_decode_v2(execution_wire_field_v2(wire, "plan", SdnValue.String("changed"))).is_err()).to_equal(true)
+        val head = wire.slice(0, wire.len() - 2)
+        expect(container_execution_request_decode_v2(head + ", version: 2" + "}\n").is_err()).to_equal(true)
+        expect(container_execution_request_decode_v2("{kind: container-execution-request, version: 2}\n").is_err()).to_equal(true)
+        expect(container_execution_request_decode_v2(wire + "\n").is_err()).to_equal(true)
+
+    it "retains changed scope identity in a different digest without asserting runtime continuity":
+        step("Retains changed scope identity in a different digest without asserting runtime continuity")
+        val plan = execution_plan_fixture_v2("linux-podman")
+        var changed = plan
+        changed.boot_id = "other-boot"
+        changed.continuity_id = "other-boot"
+        expect(container_execution_plan_digest_v2(plan).unwrap() != container_execution_plan_digest_v2(changed).unwrap()).to_equal(true)
+        changed = plan
+        changed.operation_id = "other-operation"
+        expect(container_execution_plan_digest_v2(plan).unwrap() != container_execution_plan_digest_v2(changed).unwrap()).to_equal(true)
+        changed = plan
+        changed.request_digest = "b".repeat(64)
+        expect(container_execution_plan_digest_v2(plan).unwrap() != container_execution_plan_digest_v2(changed).unwrap()).to_equal(true)
+
+    it "bounds UTF8 request bytes and nested escaping without truncating payloads":
+        step("Bounds UTF8 request bytes and nested escaping without truncating payloads")
+        var request = ContainerExecutionRequestV2(plan: execution_plan_fixture_v2("linux-podman"), request_bytes: "")
+        expect(container_execution_request_encode_v2(request).unwrap_err() == "container-execution-body-size").to_equal(true)
+        request.request_bytes = "é".repeat(524288)
+        expect(str_len(request.request_bytes) == 1048576).to_equal(true)
+        expect(container_execution_request_encode_v2(request).is_ok()).to_equal(true)
+        request.request_bytes = "é".repeat(524289)
+        expect(container_execution_request_encode_v2(request).unwrap_err() == "container-execution-body-size").to_equal(true)
+        request.request_bytes = "\"".repeat(1048576)
+        expect(container_execution_request_encode_v2(request).unwrap_err() == "container-execution-request-too-large").to_equal(true)
+        expect(container_execution_request_decode_v2("é".repeat(1048577)).unwrap_err() == "container-execution-request-too-large").to_equal(true)
+        request.request_bytes = "opaque"
+        val wire = container_execution_request_encode_v2(request).unwrap()
+        expect(container_execution_request_decode_v2(execution_wire_field_v2(wire, "requestBytes", SdnValue.String("x".repeat(1048577)))).unwrap_err() == "container-execution-body-size").to_equal(true)
+
+    it "binds alias native identity and honest service continuity without inventing boot proof":
+        step("Encode a separate service incarnation and hash every scope fence field")
+        var plan = execution_plan_fixture_v2("windows-docker-process")
+        plan.continuity_mode = "service-incarnation-v1"
+        plan.continuity_id = "windows-service-incarnation-v1:abcd"
+        plan.native_machine_id = "windows-machine-guid-v1:00112233-4455"
+        plan.boot_id = ""
+        val bytes = container_execution_plan_bytes_v2(plan).unwrap()
+        val restored = container_execution_plan_decode_v2(bytes).unwrap()
+        expect(restored.boot_id == "").to_equal(true)
+        expect(restored.continuity_id == "windows-service-incarnation-v1:abcd").to_equal(true)
+        var invalid = plan
+        invalid.native_machine_id = "native machine"
+        expect(container_execution_plan_bytes_v2(invalid).is_err()).to_equal(true)
+        invalid = plan
+        invalid.native_machine_id = "native/path"
+        expect(container_execution_plan_bytes_v2(invalid).is_err()).to_equal(true)
+        invalid = plan
+        invalid.continuity_id = "owner\nnonce"
+        expect(container_execution_plan_bytes_v2(invalid).is_err()).to_equal(true)
+        invalid = plan
+        invalid.continuity_id = "owner/path"
+        expect(container_execution_plan_bytes_v2(invalid).is_err()).to_equal(true)
+        invalid = plan
+        invalid.native_machine_id = "x".repeat(257)
+        expect(container_execution_plan_bytes_v2(invalid).is_err()).to_equal(true)
+        var scope = ContainerHostScopeV2(physical_host_id: "authorized-alias", service_scope_id: "service", boot_id: "",
+            provider_generation: 7, native_machine_id: "actual-machine", continuity_mode: "service-incarnation-v1", continuity_id: "persisted-owner-nonce")
+        val scope_bytes = container_host_scope_bytes_v2(scope).unwrap()
+        val decoded_scope = container_host_scope_decode_v2(scope_bytes).unwrap()
+        expect(decoded_scope.native_machine_id == "actual-machine").to_equal(true)
+        expect(decoded_scope.physical_host_id == "authorized-alias").to_equal(true)
+        expect(container_host_scope_decode_v2(scope_bytes + "\n").is_err()).to_equal(true)
+        val fence = container_scope_fence_id_v2(scope).unwrap()
+        var changed = scope
+        changed.physical_host_id = "other-alias"
+        expect(container_scope_fence_id_v2(changed).unwrap() != fence).to_equal(true)
+        changed = scope
+        changed.native_machine_id = "other-machine"
+        expect(container_scope_fence_id_v2(changed).unwrap() != fence).to_equal(true)
+        changed = scope
+        changed.continuity_id = "other-owner-nonce"
+        expect(container_scope_fence_id_v2(changed).unwrap() != fence).to_equal(true)
+        changed = scope
+        changed.provider_generation = 8
+        expect(container_scope_fence_id_v2(changed).unwrap() != fence).to_equal(true)
+        changed = scope
+        changed.service_scope_id = "other-service"
+        expect(container_scope_fence_id_v2(changed).unwrap() != fence).to_equal(true)
+        plan.boot_id = "invented-os-boot"
+        expect(container_execution_plan_bytes_v2(plan).is_err()).to_equal(true)
+        plan = execution_plan_fixture_v2("linux-podman")
+        plan.continuity_id = "different-from-observed-boot"
+        expect(container_execution_plan_bytes_v2(plan).is_err()).to_equal(true)

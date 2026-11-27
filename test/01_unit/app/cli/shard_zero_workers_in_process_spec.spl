@@ -1,0 +1,53 @@
+# @cover src/app/cli/shard_mem_clamp.spl
+# @cover src/app/cli/native_build_shard_admission.spl
+# Purpose: pin the planner decision "zero affordable shard workers means the
+# coordinator lowers in process" with the exact figures from the release/1.0.0
+# Windows lane Stage 2 sanity (stage2-mir-retention-build, raw rc=124,
+# 2026-11-14). That log ended on `[shard] threads=0`, which read like a pool
+# waiting for workers that never start. It is not: a 0 count disables the pool
+# (native_build_main.spl `if hir_shard_count > 0:`), so the final worker lowers
+# HIR/MIR in process. The same attempt's p2_add probe printed the identical
+# threads=0 line and succeeded; the timeout was the 180s probe budget over a
+# ~125-136s hello-world build on a memory-pressured host.
+use std.spec
+use app.cli.shard_mem_clamp.{shard_effective_tree_budget_kb_v1, shard_pool_workers_v1,
+    shard_threads_parent_cap_for}
+use app.cli.native_build_shard_admission.{native_build_shard_count_for_closure_v1,
+    native_build_small_closure_max_v1}
+
+# Lane figures: free 26227780 kB, 24 GiB reserve, no declared budget, no cap.
+val LANE_FREE_KIB: i64 = 26227780
+val LANE_RESERVE_KIB: i64 = 25165824
+val LANE_WORKER_KIB: i64 = 3000000
+val LANE_PARENT_PEAK_KIB: i64 = 2171444
+
+describe "zero affordable shard workers":
+    it "clamps the lane's effective tree budget below one worker estimate":
+        val effective = shard_effective_tree_budget_kb_v1(0, 0, LANE_FREE_KIB, LANE_RESERVE_KIB)
+        expect(effective).to_equal(1061956)
+        expect(shard_pool_workers_v1(effective, LANE_WORKER_KIB)).to_equal(0)
+
+    it "admits no worker when free memory is at or under the reserve":
+        expect(shard_effective_tree_budget_kb_v1(0, 0, LANE_RESERVE_KIB, LANE_RESERVE_KIB)).to_equal(0)
+        expect(shard_pool_workers_v1(0, LANE_WORKER_KIB)).to_equal(0)
+
+    it "keeps a 0 count disabled through the closure clamp (pool never started)":
+        val small_max = native_build_small_closure_max_v1("")
+        expect(native_build_shard_count_for_closure_v1(0, 1, small_max)).to_equal(0)
+        expect(native_build_shard_count_for_closure_v1(0, -1, small_max)).to_equal(0)
+        expect(native_build_shard_count_for_closure_v1(0, 500, small_max)).to_equal(0)
+
+    it "runs a one-file hello world in process even when a worker is affordable":
+        val small_max = native_build_small_closure_max_v1("")
+        expect(native_build_shard_count_for_closure_v1(1, 1, small_max)).to_equal(0)
+        expect(native_build_shard_count_for_closure_v1(8, 1, small_max)).to_equal(0)
+
+    it "still fans out when workers are affordable on a large closure":
+        val small_max = native_build_small_closure_max_v1("")
+        expect(native_build_shard_count_for_closure_v1(8, 500, small_max)).to_equal(8)
+        val effective = shard_effective_tree_budget_kb_v1(0, 0, 49000000, LANE_RESERVE_KIB)
+        expect(shard_pool_workers_v1(effective, LANE_WORKER_KIB)).to_equal(7)
+
+    it "returns 0, never a negative or waiting count, when the parent reserve fills the tree":
+        expect(shard_threads_parent_cap_for(1, LANE_WORKER_KIB, 0, 1000000, false,
+            LANE_PARENT_PEAK_KIB)).to_equal(0)

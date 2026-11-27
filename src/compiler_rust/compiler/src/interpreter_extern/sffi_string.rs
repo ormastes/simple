@@ -36,10 +36,21 @@ thread_local! {
 // String Creation
 // ============================================================================
 
-/// Create new string from text
+/// Create new string.
+///
+/// Two call forms are accepted:
+/// - `rt_string_new(text)`: interpreter-only legacy form, returns the raw
+///   runtime string handle as an `Int`.
+/// - `rt_string_new(bytes: i64, len: i64) -> text`: the runtime ABI form
+///   (`rt_string_new(const uint8_t*, uint64_t)` in both the Rust and C
+///   runtimes). The `len` bytes at `bytes` are copied into a `text` value,
+///   matching the `-> text` extern declarations in the stdlib.
 pub fn rt_string_new_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let text = match args.first() {
-        Some(Value::Str(s)) => s.as_str(),
+    if let [Value::Int(addr), Value::Int(len)] = args {
+        return rt_string_new_from_bytes(*addr, *len);
+    }
+    let text = match args {
+        [Value::Str(s)] => s.as_str(),
         _ => {
             return Err(CompileError::semantic_with_context(
                 "rt_string_new expects text argument".to_string(),
@@ -51,6 +62,27 @@ pub fn rt_string_new_fn(args: &[Value]) -> Result<Value, CompileError> {
     let bytes = text.as_bytes();
     let rv = rt_string_new(bytes.as_ptr(), bytes.len() as u64);
     Ok(Value::Int(rv.to_raw() as i64))
+}
+
+/// ABI form of `rt_string_new`: copy `len` bytes at `addr` into a `text`.
+/// A null pointer is accepted only with a zero length, mirroring the
+/// runtime's `rt_string_new(NULL, 0)` empty-string form.
+fn rt_string_new_from_bytes(addr: i64, len: i64) -> Result<Value, CompileError> {
+    if len < 0 {
+        return Err(CompileError::runtime("rt_string_new requires a nonnegative length"));
+    }
+    if len == 0 {
+        return Ok(Value::text(String::new()));
+    }
+    if addr <= 0 {
+        return Err(CompileError::runtime(
+            "rt_string_new requires a nonnull address for a nonzero length",
+        ));
+    }
+    // SAFETY: the caller passes (addr, len) from an `unsafe(capabilities: [ffi])`
+    // block, the same contract the native runtime's rt_string_new relies on.
+    let bytes = unsafe { std::slice::from_raw_parts(addr as usize as *const u8, len as usize) };
+    Ok(Value::text(String::from_utf8_lossy(bytes).into_owned()))
 }
 
 // ============================================================================
@@ -177,6 +209,8 @@ pub fn rt_string_ends_with_fn(args: &[Value]) -> Result<Value, CompileError> {
 /// returns -1.
 pub fn rt_string_rfind_fn(args: &[Value]) -> Result<Value, CompileError> {
     let (s, needle) = extern_string_pair(args, "rt_string_rfind")?;
+    // BYTE offset (owner decision 2026-11-07, ADR-005 "Staging"): the find
+    // family is byte-based, like `byte_at`/`substring`.
     if needle.is_empty() {
         return Ok(Value::Int(s.len() as i64));
     }
@@ -219,6 +253,7 @@ pub fn rt_string_find_fn(args: &[Value]) -> Result<Value, CompileError> {
     if needle.is_empty() {
         return Ok(Value::Int(0));
     }
+    // BYTE offset, mirroring the runtimes' `rt_string_find`.
     let found = subject.windows(needle.len()).position(|window| window == needle);
     Ok(Value::Int(found.map_or(-1, |offset| offset as i64)))
 }
@@ -422,6 +457,15 @@ pub fn rt_string_eq_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(a == b))
 }
 
+/// Representation-aware text equality with the native runtime's `i64` 0/1
+/// return ABI. MIR calls this only when both operands are statically `text`.
+pub fn rt_text_eq_any_fn(args: &[Value]) -> Result<Value, CompileError> {
+    match rt_string_eq_fn(args)? {
+        Value::Bool(equal) => Ok(Value::Int(i64::from(equal))),
+        _ => unreachable!("rt_string_eq_fn always returns Bool"),
+    }
+}
+
 // ============================================================================
 // Incremental String Builder
 // (bug rt_string_concat_quadratic_2026-06-12: O(1) amortized push)
@@ -445,12 +489,20 @@ pub fn rt_string_builder_push_fn(args: &[Value]) -> Result<Value, CompileError> 
         })?
         .as_int()?;
 
-    // The .spl call site passes `s: text`, so it arrives as a Value::Str.
-    let text = match args.get(1) {
-        Some(Value::Str(s)) => s.as_str(),
-        _ => {
+    // The .spl call site passes `s: text`. Interpreter text is `Value::Str`,
+    // `Value::Symbol`, or `Value::StrBytes` (non-UTF-8 fragments, e.g. byte
+    // slices of file content); the compiled lane treats all three as raw text
+    // bytes, so the builder must accept every one of them.
+    let bytes: &[u8] = match args.get(1) {
+        Some(Value::Str(s)) => s.as_str().as_bytes(),
+        Some(Value::Symbol(s)) => s.as_bytes(),
+        Some(Value::StrBytes(b)) => b.as_slice(),
+        other => {
             return Err(CompileError::semantic_with_context(
-                "rt_string_builder_push expects text argument".to_string(),
+                format!(
+                    "rt_string_builder_push expects text argument, got {}",
+                    other.map(|v| v.type_name()).unwrap_or("nothing")
+                ),
                 ErrorContext::new().with_code(codes::TYPE_MISMATCH),
             ))
         }
@@ -459,7 +511,6 @@ pub fn rt_string_builder_push_fn(args: &[Value]) -> Result<Value, CompileError> 
     // Materialize the text for the runtime ABI, then release that temporary
     // immediately. `rt_string_builder_push` copies its input into its own
     // geometric buffer and does not retain the RuntimeValue.
-    let bytes = text.as_bytes();
     let rv = rt_string_new(bytes.as_ptr(), bytes.len() as u64);
     let status = unsafe { rt_string_builder_push(handle, rv) };
     let _ = rt_string_free(rv);
@@ -504,17 +555,14 @@ pub fn rt_string_builder_finish_fn(args: &[Value]) -> Result<Value, CompileError
         ));
     }
     let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
-    let text = match std::str::from_utf8(bytes) {
-        Ok(text) => text.to_owned(),
-        Err(_) => {
-            rt_string_free(rv);
-            return Err(CompileError::runtime(
-                "E-SFFI-011: string-builder finish returned invalid UTF-8",
-            ));
-        }
+    // Raw text bytes that are not UTF-8 on their own (a pushed `StrBytes`
+    // fragment) stay `StrBytes`, matching the compiled lane's byte text.
+    let result = match std::str::from_utf8(bytes) {
+        Ok(text) => Value::text(text.to_owned()),
+        Err(_) => Value::StrBytes(std::sync::Arc::new(bytes.to_vec())),
     };
     rt_string_free(rv);
-    Ok(Value::text(text))
+    Ok(result)
 }
 
 /// Return the current accumulated length of the builder (i64).
@@ -580,6 +628,26 @@ mod tests {
     }
 
     #[test]
+    fn string_new_accepts_runtime_abi_pointer_length_form() {
+        let bytes = b"hello world";
+        let addr = bytes.as_ptr() as usize as i64;
+        assert_eq!(
+            rt_string_new_fn(&[Value::Int(addr), Value::Int(5)]).unwrap(),
+            Value::text("hello")
+        );
+        assert_eq!(
+            rt_string_new_fn(&[Value::Int(addr + 6), Value::Int(5)]).unwrap(),
+            Value::text("world")
+        );
+        assert_eq!(rt_string_new_fn(&[Value::Int(0), Value::Int(0)]).unwrap(), Value::text(""));
+        assert!(rt_string_new_fn(&[Value::Int(0), Value::Int(3)]).is_err());
+        assert!(rt_string_new_fn(&[Value::Int(addr), Value::Int(-1)]).is_err());
+        // Legacy text form still returns a runtime handle.
+        assert!(matches!(rt_string_new_fn(&[Value::text("a")]).unwrap(), Value::Int(_)));
+        assert!(rt_string_new_fn(&[Value::Int(7)]).is_err());
+    }
+
+    #[test]
     fn builder_push_reclaims_its_temporary_runtime_string() {
         let handle = rt_string_builder_new_fn(&[]).unwrap();
         let before = rt_heap_registry_count();
@@ -588,6 +656,44 @@ mod tests {
             Value::Int(1),
         );
         assert_eq!(rt_heap_registry_count(), before, "push must not retain its ABI temporary");
+        rt_string_builder_free_fn(&[handle]).unwrap();
+    }
+
+    #[test]
+    fn builder_push_accepts_every_interpreter_text_variant() {
+        let handle = rt_string_builder_new_fn(&[]).unwrap();
+        for part in [
+            Value::text("a".to_string()),
+            Value::Symbol("b".to_string()),
+            Value::StrBytes(std::sync::Arc::new(b"c".to_vec())),
+        ] {
+            assert_eq!(rt_string_builder_push_fn(&[handle.clone(), part]).unwrap(), Value::Int(1));
+        }
+        assert_eq!(rt_string_builder_finish_fn(&[handle]).unwrap(), Value::text("abc"));
+    }
+
+    #[test]
+    fn builder_keeps_non_utf8_fragments_as_byte_text() {
+        let handle = rt_string_builder_new_fn(&[]).unwrap();
+        let lead = Value::StrBytes(std::sync::Arc::new(vec![0xC3]));
+        rt_string_builder_push_fn(&[handle.clone(), lead]).unwrap();
+        assert_eq!(
+            rt_string_builder_finish_fn(&[handle]).unwrap(),
+            Value::StrBytes(std::sync::Arc::new(vec![0xC3]))
+        );
+        let rejoined = rt_string_builder_new_fn(&[]).unwrap();
+        for byte in [0xC3u8, 0xA9] {
+            let part = Value::StrBytes(std::sync::Arc::new(vec![byte]));
+            rt_string_builder_push_fn(&[rejoined.clone(), part]).unwrap();
+        }
+        assert_eq!(rt_string_builder_finish_fn(&[rejoined]).unwrap(), Value::text("é"));
+    }
+
+    #[test]
+    fn builder_push_still_rejects_non_text() {
+        let handle = rt_string_builder_new_fn(&[]).unwrap();
+        let err = rt_string_builder_push_fn(&[handle.clone(), Value::Int(3)]).unwrap_err();
+        assert!(format!("{err:?}").contains("expects text argument"));
         rt_string_builder_free_fn(&[handle]).unwrap();
     }
 
@@ -649,6 +755,28 @@ mod tests {
         assert_eq!(
             rt_string_eq_fn(&[handle, Value::text("beta".to_string())]).unwrap(),
             Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn text_eq_any_matches_native_integer_abi_for_tagged_and_handles() {
+        assert_eq!(
+            rt_text_eq_any_fn(&[Value::text("same".to_string()), Value::text("same".to_string())]).unwrap(),
+            Value::Int(1)
+        );
+        assert_eq!(
+            rt_text_eq_any_fn(&[Value::text("same".to_string()), Value::text("different".to_string())]).unwrap(),
+            Value::Int(0)
+        );
+
+        let handle = rt_string_new_fn(&[Value::text("same".to_string())]).unwrap();
+        assert_eq!(
+            rt_text_eq_any_fn(&[Value::text("same".to_string()), handle]).unwrap(),
+            Value::Int(1)
+        );
+        assert_eq!(
+            rt_text_eq_any_fn(&[Value::text("a\0x".to_string()), Value::text("a\0y".to_string())]).unwrap(),
+            Value::Int(0)
         );
     }
 

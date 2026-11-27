@@ -47,15 +47,14 @@ pub fn ssh_encrypted_packet_frame_allowed(packet: [u8]) -> bool:
 
 # Pull in helpers and split impl blocks
 use os.apps.sshd.ssh_session_helpers.{RECV_BUF_SIZE, PlainPacketHeader, _SshTextField, ssh_session_u8_at, _slice_range, _zeroed_32_bytes, _copy_bytes_stable, _copy_prefix_stable, _publickey_only_auth_failure_payload, _build_plain_packet_header, _zero_padding_bytes, _copy_range_stable, _push_u32_be_stable, _build_channel_open_confirmation_stable, _build_channel_success_stable, _build_channel_failure_stable, _build_channel_eof_stable, _build_channel_close_stable, _build_channel_exit_status_stable, _read_u32_stable, _read_text_field_fast, _parse_kexinit_fast, _is_ssh_userauth_service_request, _text_equals_bytes, _payload_text_field_equals_bytes, _payload_field_is_ssh_connection, _payload_field_is_none, _payload_field_is_password, _payload_field_is_publickey, _bytes_to_hex, _ed25519_public_key_from_seed, ssh_validate_kex_payload, ssh_validate_kex_ecdh_init_payload, ssh_validate_newkeys_payload}
-export use os.apps.sshd.ssh_session_kex.*
+export use os.apps.sshd.ssh_session_kex.{rt_tls13_x25519_public_key, rt_tls13_x25519_shared_secret, rt_tls13_sha256, rt_ssh_curve25519_exchange_hash, rt_boot_tcp_send_kex_reply_ed25519, rt_boot_tcp_send_newkeys_fixed, serial_println, rt_thread_sleep, log_raw_println}
 export use os.apps.sshd.ssh_session_auth.*
-export use os.apps.sshd.ssh_session_channel.*
+export use os.apps.sshd.ssh_session_channel.{rt_string_from_byte_array, rt_bytes_u8_at, rt_bytes_concat, ssh_channel_request_is_sftp, ssh_sftp_principal_admitted, simpleos_fat32_stream_open, simpleos_fat32_stream_read_at, simpleos_fat32_path_read_buffer_addr, mmio_read8}
 export use os.apps.sshd.ssh_session_lifecycle.*
 
 extern fn rt_ed25519_keypair_pk(seed: [u8]) -> [u8]
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
-extern fn rt_thread_sleep(ms: i64) -> i64
-extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
+extern fn rt_thread_sleep(ms: i64)
 extern fn rt_bytes_concat(a: [u8], b: [u8]) -> [u8]
 extern fn rt_bytes_slice(arr: [u8], start: i64, length: i64) -> [u8]
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
@@ -74,47 +73,47 @@ val SSH_EXIT_REMOTE_WINDOW_EXHAUSTED: u32 = 125u32
 fn _live_openssh_client_version_bytes() -> [u8]:
     serial_println("[sshd-session] version builder start")
     var out: [u8] = []
-    out = rt_push_byte(out, 0x53)
-    out = rt_push_byte(out, 0x53)
-    out = rt_push_byte(out, 0x48)
-    out = rt_push_byte(out, 0x2d)
-    out = rt_push_byte(out, 0x32)
-    out = rt_push_byte(out, 0x2e)
-    out = rt_push_byte(out, 0x30)
-    out = rt_push_byte(out, 0x2d)
-    out = rt_push_byte(out, 0x4f)
-    out = rt_push_byte(out, 0x70)
-    out = rt_push_byte(out, 0x65)
-    out = rt_push_byte(out, 0x6e)
-    out = rt_push_byte(out, 0x53)
-    out = rt_push_byte(out, 0x53)
-    out = rt_push_byte(out, 0x48)
-    out = rt_push_byte(out, 0x5f)
-    out = rt_push_byte(out, 0x39)
-    out = rt_push_byte(out, 0x2e)
-    out = rt_push_byte(out, 0x36)
-    out = rt_push_byte(out, 0x70)
-    out = rt_push_byte(out, 0x31)
-    out = rt_push_byte(out, 0x20)
-    out = rt_push_byte(out, 0x55)
-    out = rt_push_byte(out, 0x62)
-    out = rt_push_byte(out, 0x75)
-    out = rt_push_byte(out, 0x6e)
-    out = rt_push_byte(out, 0x74)
-    out = rt_push_byte(out, 0x75)
-    out = rt_push_byte(out, 0x2d)
-    out = rt_push_byte(out, 0x33)
-    out = rt_push_byte(out, 0x75)
-    out = rt_push_byte(out, 0x62)
-    out = rt_push_byte(out, 0x75)
-    out = rt_push_byte(out, 0x6e)
-    out = rt_push_byte(out, 0x74)
-    out = rt_push_byte(out, 0x75)
-    out = rt_push_byte(out, 0x31)
-    out = rt_push_byte(out, 0x33)
-    out = rt_push_byte(out, 0x2e)
-    out = rt_push_byte(out, 0x31)
-    out = rt_push_byte(out, 0x36)
+    out.push(0x53u8)
+    out.push(0x53u8)
+    out.push(0x48u8)
+    out.push(0x2du8)
+    out.push(0x32u8)
+    out.push(0x2eu8)
+    out.push(0x30u8)
+    out.push(0x2du8)
+    out.push(0x4fu8)
+    out.push(0x70u8)
+    out.push(0x65u8)
+    out.push(0x6eu8)
+    out.push(0x53u8)
+    out.push(0x53u8)
+    out.push(0x48u8)
+    out.push(0x5fu8)
+    out.push(0x39u8)
+    out.push(0x2eu8)
+    out.push(0x36u8)
+    out.push(0x70u8)
+    out.push(0x31u8)
+    out.push(0x20u8)
+    out.push(0x55u8)
+    out.push(0x62u8)
+    out.push(0x75u8)
+    out.push(0x6eu8)
+    out.push(0x74u8)
+    out.push(0x75u8)
+    out.push(0x2du8)
+    out.push(0x33u8)
+    out.push(0x75u8)
+    out.push(0x62u8)
+    out.push(0x75u8)
+    out.push(0x6eu8)
+    out.push(0x74u8)
+    out.push(0x75u8)
+    out.push(0x31u8)
+    out.push(0x33u8)
+    out.push(0x2eu8)
+    out.push(0x31u8)
+    out.push(0x36u8)
     serial_println("[sshd-session] version builder done")
     out
 
@@ -584,14 +583,23 @@ impl SshSession:
                 self.send_seq = (self.send_seq + 1) & 0xFFFFFFFF
                 return
             val header = _build_plain_packet_header(payload.len(), 8)
-            var packet = _copy_bytes_stable(header.header)
+            # Assemble the wire frame with the in-place packed `.push`
+            # intrinsic, not per-byte `rt_push_byte` reassignment: the extern
+            # form recopied the growing prefix on every byte (O(len^2) per
+            # packet) and carries the documented extern-return BYTE_PACKED
+            # hazard (see _copy_bytes_stable in ssh_session_helpers).
+            var packet: [u8] = []
             var i: u64 = 0
+            while i < header.header.len():
+                packet.push(header.header[i])
+                i = i + 1
+            i = 0
             while i < payload.len():
-                packet = rt_push_byte(packet, ssh_session_u8_at(payload, i).to_i64())
+                packet.push(ssh_session_u8_at(payload, i))
                 i = i + 1
             i = 0
             while i < header.padding_len:
-                packet = rt_push_byte(packet, 0)
+                packet.push(0)
                 i = i + 1
             self.raw_send(packet)
         self.send_seq = (self.send_seq + 1) & 0xFFFFFFFF

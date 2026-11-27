@@ -57,3 +57,19 @@ takes `pres_decls`, which for most nodes is empty — a length check before the
 call would skip a ~176-field unpack/repack for every node with no presentational
 attributes. That one IS small, but it was not measured separately here, so the
 saving is unquantified and it is not claimed.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded triage: the per-node declaration re-parse (86% of the cold document pipeline) remains a live perf defect in the style cascade; a semantics-preserving parse-cache fix did not converge inside the per-bug timebox in this lane. No in-lane change.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Fresh source read: the cheap partial this record left for the next lane is
+ALREADY in tree — `simple_web_html_layout_renderer_core.spl:559-563` guards the
+presentational `apply_decls` with `if pres_decls.len() > 0`, so nodes with no
+presentational attributes skip the ~176-field unpack/repack. The (decl text,
+inherited base) memo that would remove the dominant per-node re-parse remains
+open per this record's own safety analysis (a wrong memo silently mis-styles);
+not attempted. No in-lane change.

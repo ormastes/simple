@@ -219,3 +219,14 @@ records a second defect behind it (MIR cannot lower a deref lvalue at all).
   :150 and the `var input_compositor` at :149 and reading `input_byte` 30 lines
   before its `val`. Both lines deleted; the loop body already assigns `action`
   from the real `val input_byte = serial_read_byte()` below.
+
+## Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105) — clobber parse defect fixed at tip, re-verified
+
+`sh scripts/os/build-simpleos-riscv64-wm-kernel.shs` on
+`origin/release/1.0.0` @ `bc3e9b48cb4` no longer fails at
+`cpu.spl:150:21`; it parses the whole display/WM closure and now stops at
+link with `undefined symbol: _riscv_uart_put_raw` (referenced from
+`os.kernel.arch.riscv64.noalloc_pmm_runtime` UART/PMM initialization). The
+`clobber("memory")` parse defect filed here is confirmed fixed; the WM lane
+remains blocked by successor defects (the earlier `interrupt.spl:349` successor
+record and this link gap). Status: FIXED for the defect filed in this record.

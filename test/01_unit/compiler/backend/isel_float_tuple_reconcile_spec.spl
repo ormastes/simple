@@ -1,0 +1,140 @@
+"""Behavioral tests for x86_64 native ISel scalar float constants and tuple/struct field reconciliation (#5145)."""
+
+use std.spec.*
+use compiler.mir.mir_data.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.backend.common.isel_context.{new_isel_context}
+use compiler.backend.native.isel_x86_64.{
+    x64_lower_const, isel_module,
+    x64_reconcile_store_field_value, x64_reconcile_load_field_value
+}
+use compiler.backend.native.mach_inst.{
+    X86_RAX, X86_RBX, X86_XMM0, X86_XMM1,
+    X86_OP_MOV_REG_IMM, X86_OP_MOV_MEM_REG, X86_OP_MOV_REG_MEM,
+    X86_OP_MOVQ_XMM_GPR, X86_OP_MOVQ_GPR_XMM,
+    X86_OP_MOVSD_REG_MEM, X86_OP_MOVSD_MEM_REG,
+    X86_OP_MOVSS_REG_MEM, X86_OP_MOVSS_MEM_REG,
+    physical_reg, op_phys, op_mem, new_mach_inst, mach_reg_is_x86_xmm
+}
+use compiler.backend.native.encode_x86_64.{new_encode_context, encode_inst, encode_module}
+use compiler.backend.native.regalloc.{regalloc_module}
+use std.common.binary_io.{f64_to_bits}
+use std.common.math.ieee754_bits.{math_f64_round_to_f32_bits}
+
+fn float_tuple_module() -> MirModule:
+    val f64_t = MirType(kind: MirTypeKind.F64)
+    val f32_t = MirType(kind: MirTypeKind.F32)
+    val i64_t = MirType(kind: MirTypeKind.I64)
+    val ptr_t = MirType.ptr(i64_t, false)
+    val sig = MirSignature(params: [], return_type: i64_t, is_variadic: false)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_t, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("f64_val"), type_: f64_t, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 2), name: Some("f32_val"), type_: f32_t, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 3), name: Some("tuple_ptr"), type_: ptr_t, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 4), name: Some("loaded_f64"), type_: f64_t, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Float(1.5), f64_t), span: None),
+            MirInst(kind: MirInstKind.Const(LocalId(id: 2), MirConstValue.FloatLexeme("2.25"), f32_t), span: None),
+            MirInst(
+                kind: MirInstKind.Aggregate(
+                    LocalId(id: 3),
+                    AggregateKind.Tuple,
+                    [
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))
+                    ]
+                ),
+                span: None
+            ),
+            MirInst(kind: MirInstKind.SetField(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))), 0, MirOperand(kind: MirOperandKind.Const(MirConstValue.Float(3.5), f64_t))), span: None),
+            MirInst(kind: MirInstKind.GetField(LocalId(id: 4), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))), 0), span: None),
+            MirInst(kind: MirInstKind.Copy(LocalId(id: 0), LocalId(id: 4)), span: None)
+        ],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: "float_tuple_reconcile",
+        signature: sig,
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: None,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: "float_tuple_reconcile", functions: functions, statics: {}, constants: {}, types: {})
+
+describe "x86_64 native ISel scalar float constant and tuple field reconciliation":
+    it "lowers Float and FloatLexeme constants to IEEE-754 bits instead of zero":
+        val ctx = new_isel_context()
+        val f64_t = MirType(kind: MirTypeKind.F64)
+        val f32_t = MirType(kind: MirTypeKind.F32)
+        val low_f64 = x64_lower_const(ctx, MirConstValue.Float(1.5), f64_t)
+        val low_lex = x64_lower_const(ctx, MirConstValue.FloatLexeme("2.25"), f32_t)
+        expect(low_f64.insts.len()).to_equal(1)
+        expect(low_f64.insts[0].opcode).to_equal(X86_OP_MOV_REG_IMM)
+        expect(low_f64.insts[0].operands[1].kind).to_equal(OperandKind.Imm(f64_to_bits(1.5) as i64))
+        expect(low_lex.insts.len()).to_equal(1)
+        expect(low_lex.insts[0].opcode).to_equal(X86_OP_MOV_REG_IMM)
+        expect(low_lex.insts[0].operands[1].kind).to_equal(OperandKind.Imm(math_f64_round_to_f32_bits(2.25)))
+
+    it "preserves float constant bits across Aggregate, SetField, GetField, regalloc, and encode":
+        val mir_mod = float_tuple_module()
+        val mach_mod = isel_module(mir_mod)
+        expect(mach_mod.functions.len()).to_equal(1)
+        var mov_imms: [i64] = []
+        for block in mach_mod.functions[0].blocks:
+            for inst in block.insts:
+                if inst.opcode == X86_OP_MOV_REG_IMM and inst.operands.len() == 2:
+                    match inst.operands[1].kind:
+                        case Imm(v): mov_imms.push(v)
+                        case _: ()
+        expect(mov_imms.contains(f64_to_bits(1.5) as i64)).to_equal(true)
+        expect(mov_imms.contains(math_f64_round_to_f32_bits(2.25))).to_equal(true)
+        expect(mov_imms.contains(f64_to_bits(3.5) as i64)).to_equal(true)
+        val alloc_mod = regalloc_module(mach_mod)
+        val encoded = encode_module(alloc_mod)
+        expect(encoded.len()).to_equal(1)
+        expect(encoded[0].code.len() > 0).to_equal(true)
+
+    it "reconciles XMM vs GPR field transfers and encodes MOVQ/MOVSD/MOVSS cleanly":
+        val ctx = new_isel_context()
+        val mem = op_mem(physical_reg(X86_RBX), 8)
+        val xmm0 = op_phys(X86_XMM0)
+        val xmm1 = op_phys(X86_XMM1)
+        expect(mach_reg_is_x86_xmm(physical_reg(X86_XMM0))).to_equal(true)
+        expect(mach_reg_is_x86_xmm(physical_reg(X86_RAX))).to_equal(false)
+
+        val st64 = x64_reconcile_store_field_value(ctx, mem, xmm0, 64)
+        val st32 = x64_reconcile_store_field_value(ctx, mem, xmm0, 32)
+        val ld64 = x64_reconcile_load_field_value(ctx, xmm1, mem, 64)
+        val ld32 = x64_reconcile_load_field_value(ctx, xmm1, mem, 32)
+        val ld_gpr = x64_reconcile_load_field_value(ctx, op_phys(X86_RAX), mem, 64)
+        expect(st64.insts[0].opcode).to_equal(X86_OP_MOVSD_MEM_REG)
+        expect(st32.insts[0].opcode).to_equal(X86_OP_MOVSS_MEM_REG)
+        expect(ld64.insts[0].opcode).to_equal(X86_OP_MOVSD_REG_MEM)
+        expect(ld32.insts[0].opcode).to_equal(X86_OP_MOVSS_REG_MEM)
+        expect(ld_gpr.insts[0].opcode).to_equal(X86_OP_MOV_REG_MEM)
+
+        var ectx = new_encode_context()
+        ectx = encode_inst(ectx, new_mach_inst(X86_OP_MOVQ_XMM_GPR, [xmm0, op_phys(X86_RAX)]))
+        ectx = encode_inst(ectx, new_mach_inst(X86_OP_MOVQ_GPR_XMM, [op_phys(X86_RAX), xmm0]))
+        ectx = encode_inst(ectx, st64.insts[0])
+        ectx = encode_inst(ectx, ld64.insts[0])
+        ectx = encode_inst(ectx, st32.insts[0])
+        ectx = encode_inst(ectx, ld32.insts[0])
+        expect(ectx.code[0]).to_equal(0x66)
+        expect(ectx.code[2]).to_equal(0x0f)
+        expect(ectx.code[3]).to_equal(0x6e)
+        expect(ectx.code.len() > 20).to_equal(true)

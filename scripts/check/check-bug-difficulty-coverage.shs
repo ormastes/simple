@@ -1,0 +1,100 @@
+#!/bin/sh
+# check-bug-difficulty-coverage.shs
+#
+# Verifies that all non-closed bugs have at least one bug_difficulty row.
+# Non-closed status: open, investigating, fix-implemented-verification-pending
+# and any status that doesn't start with "closed", "fixed", "invalid", or "resolved-".
+#
+# Exit codes:
+#   0 = all non-closed bugs have difficulty rows
+#   1 = one or more non-closed bugs missing difficulty rows
+#   2 = error (file not found, parse error, nothing checked)
+
+set -u
+
+_db="doc/08_tracking/bug/bug_db.sdn"
+
+# Verify file exists
+if [ ! -f "$_db" ]; then
+    echo "ERROR — nothing was checked: $_db not found"
+    exit 2
+fi
+
+# Extract all non-closed bug IDs from both tables
+if ! _non_closed=$(
+    awk -F',' '
+    /^bugs_active \|/ || /^bugs \|/ {
+        in_table = 1
+        next
+    }
+    /^\w+ \|/ {
+        in_table = 0
+        next
+    }
+    in_table && NF >= 3 {
+        # Fields: id, severity, status, ...
+        status = $3
+        gsub(/^[[:space:]]+/, "", status)
+        gsub(/[[:space:]]+$/, "", status)
+
+        # Check if status is closed/fixed/invalid/resolved-*
+        if (status !~ /^(closed|fixed|invalid|resolved-)/) {
+            id = $1
+            gsub(/^[[:space:]]+/, "", id)
+            print id
+        }
+    }
+    ' "$_db" | sort -u
+); then
+    echo "ERROR — nothing was checked: could not parse $_db bug tables"
+    exit 2
+fi
+
+# Extract all bug IDs that have difficulty rows
+if ! _with_difficulty=$(
+    awk -F',' '
+    /^bug_difficulty \|/ {
+        in_table = 1
+        next
+    }
+    /^\w+ \|/ {
+        in_table = 0
+        next
+    }
+    in_table && NF >= 5 {
+        id = $1
+        gsub(/^[[:space:]]+/, "", id)
+        print id
+    }
+    ' "$_db" | sort -u
+); then
+    echo "ERROR — nothing was checked: could not parse $_db bug_difficulty table"
+    exit 2
+fi
+
+# A parse that finds zero non-closed bugs means the scan was vacuous.
+if [ -z "$_non_closed" ]; then
+    echo "ERROR — nothing was checked: no non-closed bug rows parsed from $_db"
+    exit 2
+fi
+
+# Find non-closed bugs without difficulty rows
+_missing=$(
+    echo "$_non_closed" | while read _id; do
+        if ! echo "$_with_difficulty" | grep -q "^$_id$"; then
+            echo "$_id"
+        fi
+    done
+)
+
+# Report; the verdict is always the last stdout line.
+_nc_count=$(printf '%s\n' "$_non_closed" | sed '/^$/d' | wc -l | tr -d ' ')
+if [ -z "$_missing" ]; then
+    echo "PASS — all $_nc_count non-closed bugs have difficulty rows"
+    exit 0
+else
+    _miss_count=$(printf '%s\n' "$_missing" | sed '/^$/d' | wc -l | tr -d ' ')
+    printf '%s\n' "$_missing" | sed 's/^/  /'
+    echo "FAIL — $_miss_count of $_nc_count non-closed bugs missing difficulty rows (listed above)"
+    exit 1
+fi

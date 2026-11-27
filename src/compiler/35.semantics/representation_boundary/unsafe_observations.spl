@@ -6,6 +6,8 @@ use compiler.hir.generated.hir_visitor.{HirWalkNode, walk_hir_block, walk_hir_ex
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.diagnostics.diagnostic.{Diagnostic}
+use std.env.{env_get}
+use std.nogc_sync_mut.io.process_ops.{eprint}
 
 struct RepresentationUnsafeObservationV1:
     owner_name: text
@@ -13,6 +15,7 @@ struct RepresentationUnsafeObservationV1:
     strictness: AssuranceStrictness
     diagnostics: [Diagnostic]
     visited_functions: Dict<i64, bool>
+    trace: bool
 
 fn representation_observe_unsafe_v1(node: HirWalkNode,
         state: RepresentationUnsafeObservationV1) -> RepresentationUnsafeObservationV1:
@@ -43,6 +46,8 @@ fn representation_observe_function_v1(function: HirFunction,
         out.visited_functions[function.symbol.id] = true
     out.owner_name = function.name
     out.owner_span = function.span
+    if out.trace:
+        eprint("[hir-pass-scope] trace walk owner={function.name} symbol={function.symbol.id}")
     out = walk_hir_block<RepresentationUnsafeObservationV1>(function.body, out, representation_observe_unsafe_v1)
     for parameter in function.params:
         out = walk_hir_param<RepresentationUnsafeObservationV1>(parameter, out, representation_observe_unsafe_v1)
@@ -52,11 +57,12 @@ pub fn representation_missing_manifest_observations_v1(module: HirModule,
         strictness: AssuranceStrictness) -> [Diagnostic]:
     var annotated: Dict<i64, bool> = {}
     for declaration in module.representation_declarations:
-        if declaration.local_symbol_id >= 0 and (declaration.manifest != nil or
+        if declaration.local_symbol_id >= 0 and (declaration.manifest.is_some() or
                 declaration.requires_manifest or declaration.region_capabilities.len() > 0):
             annotated[declaration.local_symbol_id] = true
     var state = RepresentationUnsafeObservationV1(owner_name: "", owner_span: Span.empty(),
-        strictness: strictness, diagnostics: [], visited_functions: {})
+        strictness: strictness, diagnostics: [], visited_functions: {},
+        trace: (env_get("SIMPLE_HIR_SEMANTIC_PASS_TRACE") ?? "") == "1")
     # Each owning HIR tree is walked once, including nested expression forms
     # through the existing exhaustive visitor. No source reparse or I/O.
     for function in module.functions.values():

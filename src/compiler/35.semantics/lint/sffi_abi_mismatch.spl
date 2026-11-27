@@ -1,0 +1,77 @@
+# SPL-SFFI-ABI-001 & SPL-SFFI-RANGE-001: SFFI preflight ABI & constrained-return
+# lint checks backed by sffi_preflight_facts_v1.
+
+use compiler.semantics.lint.lint_text.{code_line_snapshot, lint_is_vendor_path}
+use compiler.semantics.lint.sffi_preflight_facts_v1.{
+    extract_sffi_preflight_report_with_imports_v1
+}
+
+pub struct SffiAbiFinding:
+    code: text
+    message: text
+    line_num: i64
+
+fn _sam_strip_decl_abi(line: text) -> [text]:
+    if not line.starts_with("@c_abi(\""):
+        return []
+    val close = line.find("\")")
+    if close < 8:
+        return []
+    val inner = line.substring(8, close)
+    if inner.contains(":") or inner.contains("\""):
+        return []
+    [inner, line.substring(close + 2, line.byte_len()).trim()]
+
+fn _sam_is_alias_line(t: text) -> bool:
+    t.starts_with("@c_abi(") and t.ends_with(")") and _sam_strip_decl_abi(t).len() == 0
+
+# reason: Lint pass entrypoint takes raw source text and file path from compiler driver
+@allow(primitive_api)
+pub fn sffi_abi_deprecation_notes(source: text, file_path: text) -> [SffiAbiFinding]:
+    var notes: [SffiAbiFinding] = []
+    if lint_is_vendor_path(file_path):
+        return notes
+    val lines = code_line_snapshot(source).lines
+    var i = 0
+    while i < lines.len():
+        if _sam_is_alias_line(lines[i].trimmed):
+            notes.push(SffiAbiFinding(
+                code: "SPL-SFFI-ABI-001",
+                message: "deprecated `@c_abi(Unit: \"ctype\")` form: declare the C type on the unit, e.g. `@c_abi(\"int32_t\") unit Fd: i32 as fd`",
+                line_num: lines[i].line_num
+            ))
+        i = i + 1
+    notes
+
+# reason: Lint pass entrypoint takes raw source text, file path, target triple, and imported module map
+@allow(primitive_api)
+pub fn check_sffi_abi_mismatch_with_imports(
+    source: text,
+    file_path: text,
+    triple: text,
+    imported_sources: {text: text},
+    strict_imports: bool
+) -> [SffiAbiFinding]:
+    var findings: [SffiAbiFinding] = []
+    if lint_is_vendor_path(file_path):
+        return findings
+    val report = extract_sffi_preflight_report_with_imports_v1(
+        source, file_path, triple, imported_sources, strict_imports
+    )
+    var i = 0
+    while i < report.findings.len():
+        val f = report.findings[i]
+        if f.code == "SPL-SFFI-ABI-001" or f.code == "SPL-SFFI-RANGE-001":
+            findings.push(SffiAbiFinding(
+                code: f.code,
+                message: f.message,
+                line_num: f.line_num
+            ))
+        i = i + 1
+    findings
+
+# reason: Lint pass entrypoint takes raw source text, file path, and target triple from rule runner
+@allow(primitive_api)
+pub fn check_sffi_abi_mismatch(source: text, file_path: text, triple: text) -> [SffiAbiFinding]:
+    val empty_imports: {text: text} = {}
+    check_sffi_abi_mismatch_with_imports(source, file_path, triple, empty_imports, false)

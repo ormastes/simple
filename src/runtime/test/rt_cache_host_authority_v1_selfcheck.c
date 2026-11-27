@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_cache_host_authority_v1_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 /* Selfcheck for src/runtime/runtime_cache_host_authority_v1.c.
  *
  * Build and run (it links the provider directly; it is in no runtime list):
@@ -414,3 +419,5 @@ int main(void) {
 #endif
     return 0;
 }
+
+#endif /* !_WIN32 */

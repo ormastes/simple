@@ -1,0 +1,58 @@
+# @cover src/app/devhub/gui.spl
+# @cover src/app/devhub/gui_server.spl
+# devhub — browser GUI page, status JSON, option parsing and port guard.
+use std.spec.*
+use std.spec.step
+use app.devhub.gui.{devhub_gui_html, devhub_gui_status_json}
+use app.devhub.gui_server.{devhub_gui_options, run_devhub_gui, _devhub_gui_status_text}
+
+describe "devhub GUI page":
+    it "should serve a complete HTML document titled DevHub":
+        val html = devhub_gui_html()
+        expect(html.starts_with("<!DOCTYPE html>")).to_equal(true)
+        expect(html).to_contain("<title>DevHub</title>")
+        expect(html.ends_with("</html>")).to_equal(true)
+
+    it "should offer a card for each of the six facades":
+        val html = devhub_gui_html()
+        expect(html.split("class=\"card\"").len()).to_equal(7)
+        expect(html).to_contain("devhub tasks list --state open")
+        expect(html).to_contain("devhub storage ls minio/")
+        expect(html).to_contain("devhub email inbox --unread")
+
+describe "devhub GUI status":
+    it "should report ready with six commands as exact JSON":
+        expect(devhub_gui_status_json()).to_equal("{\"app\":\"devhub\",\"status\":\"ready\",\"surface\":\"gui\",\"commands\":6}")
+
+describe "devhub GUI options":
+    it "should default to port 8765 in the Electron shell":
+        val o = devhub_gui_options([])
+        expect(o.0).to_equal(8765)
+        expect(o.1).to_equal("electron")
+
+    it "should switch to the browser shell with --browser":
+        expect(devhub_gui_options(["--browser"]).1).to_equal("browser")
+
+    it "should read the port from --port N, -p N and --port=N":
+        expect(devhub_gui_options(["--port", "9000"]).0).to_equal(9000)
+        expect(devhub_gui_options(["-p", "9001"]).0).to_equal(9001)
+        expect(devhub_gui_options(["--port=9002"]).0).to_equal(9002)
+
+    it "should turn a non-numeric port into 0":
+        expect(devhub_gui_options(["--port", "abc"]).0).to_equal(0)
+
+describe "devhub GUI launch guard":
+    it "should refuse a privileged port with exit code 2":
+        expect(run_devhub_gui(["--port", "80"])).to_equal(2)
+
+    it "should refuse a port above 65535 with exit code 2":
+        expect(run_devhub_gui(["--port=70000"])).to_equal(2)
+
+    it "should refuse a non-numeric port with exit code 2":
+        expect(run_devhub_gui(["--port", "x"])).to_equal(2)
+
+    it "should name the HTTP status text for known and unknown codes":
+        expect(_devhub_gui_status_text(200)).to_equal("OK")
+        expect(_devhub_gui_status_text(404)).to_equal("Not Found")
+        expect(_devhub_gui_status_text(500)).to_equal("Internal Server Error")
+        expect(_devhub_gui_status_text(418)).to_equal("Bad Request")

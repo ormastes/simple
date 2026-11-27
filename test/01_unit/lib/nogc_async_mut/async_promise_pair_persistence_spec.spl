@@ -1,0 +1,37 @@
+# Production-owner detector for the historical anonymous-tuple Promise failure.
+# TEST_BLOCKED until executed with an admitted self-hosted test runtime.
+use std.spec
+use std.spec.step
+use std.nogc_async_mut.async.promise.{Promise}
+use std.nogc_async_mut.async.poll.{poll_unwrap}
+
+describe "Production promise pair persistence":
+    it "keeps repeated polling ready after completing a destructured pair":
+        step("Complete the production promise obtained from its anonymous tuple")
+        val (future, promise) = Promise<i64>.new()
+        expect(future.is_ready()).to_equal(false)
+        expect(promise.complete(33)).to_equal(true)
+        expect(future.is_ready()).to_equal(true)
+        expect(poll_unwrap(future.poll())).to_equal(33)
+        expect(future.is_ready()).to_equal(true)
+        expect(poll_unwrap(future.poll())).to_equal(33)
+
+    it "keeps separate destructured pairs independent":
+        step("Complete one pair while another remains pending")
+        val (first, first_promise) = Promise<i64>.new()
+        val (second, second_promise) = Promise<i64>.new()
+        expect(first_promise.complete(17)).to_equal(true)
+        expect(poll_unwrap(first.poll())).to_equal(17)
+        expect(second.is_ready()).to_equal(false)
+        expect(second_promise.complete(29)).to_equal(true)
+        expect(poll_unwrap(second.poll())).to_equal(29)
+        expect(poll_unwrap(first.poll())).to_equal(17)
+
+    it "preserves the original payload after rejecting a second completion":
+        step("Reject replacement without changing repeated production polls")
+        val (future, promise) = Promise<i64>.new()
+        expect(promise.complete(41)).to_equal(true)
+        expect(promise.complete(99)).to_equal(false)
+        expect(promise.is_completed()).to_equal(true)
+        expect(poll_unwrap(future.poll())).to_equal(41)
+        expect(poll_unwrap(future.poll())).to_equal(41)

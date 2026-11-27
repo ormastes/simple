@@ -68,11 +68,14 @@ pub mod coverage;
 pub mod cache_daemon_host_authority_v1;
 pub mod cache_daemon_process_v1;
 pub mod cache_host_authority_v1;
+pub mod fork_shared_heap_v1;
 pub mod cuda_runtime;
 pub mod process_observation_v4_twins;
+pub mod process_tree_observation_v1;
 pub mod debug;
 pub mod directx_submission_twins;
 pub mod executor;
+pub mod cpu_topology;
 pub mod fiber_identity;
 pub mod gemm_runtime;
 pub mod gpu_provider_twins;
@@ -80,6 +83,7 @@ pub mod webgpu_backfill_twins;
 pub mod gui_html_session_twins;
 pub mod host_gpu_lane;
 pub mod memory;
+pub mod child_peak_rss;
 pub mod mem_snapshot;
 #[cfg(feature = "monoio-net")]
 pub mod monoio_runtime;
@@ -100,6 +104,8 @@ pub mod monoio_executor;
 pub mod monoio_waker;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
+pub mod vulkan_create_device_retry;
+pub mod vulkan_async_protocol;
 pub mod vulkan_graphics_runtime;
 pub mod metal_graphics_runtime;
 pub mod x86_simd_probe;
@@ -148,7 +154,7 @@ pub mod security_runtime;
 /// stage 1 of the mid-codepoint-slice rollout and is DEFAULT OFF.
 pub mod text_slice_audit;
 pub mod value;
-mod file_view;
+pub mod file_view;
 mod fd_stat_v1;
 
 // Keep a small set of dynamic-loader exports alive only when static runtime
@@ -172,6 +178,10 @@ static SIMPLE_KEEP_RT_RAW_I64_TO_STRING: extern "C" fn(i64) -> RuntimeValue = va
 #[cfg(feature = "runtime-symbol-table")]
 #[used]
 static SIMPLE_KEEP_RT_OPT_I64_TO_STRING: extern "C" fn(i64) -> RuntimeValue = value::rt_opt_i64_to_string;
+#[used]
+static SIMPLE_KEEP_RT_I64_TO_HEX: extern "C" fn(i64) -> RuntimeValue = value::rt_i64_to_hex;
+#[used]
+static SIMPLE_KEEP_RT_OPT_VALUE_TO_STRING: extern "C" fn(RuntimeValue) -> RuntimeValue = value::rt_opt_value_to_string;
 #[cfg(feature = "runtime-symbol-table")]
 #[used]
 static SIMPLE_KEEP_RT_OPT_BOOL_TO_STRING: extern "C" fn(i64) -> RuntimeValue = value::rt_opt_bool_to_string;
@@ -207,6 +217,7 @@ unsafe extern "C" {
     pub fn rt_pool_blocked_count() -> i64;
     pub fn rt_pool_state_create_v1(capacity: i64) -> i64;
     pub fn rt_pool_state_try_submit_i64_v1(state: i64, entry: i64, input: i64) -> i64;
+    pub fn rt_pool_state_try_submit_i64_kind_v1(state: i64, kind: i64, entry: i64, input: i64) -> i64;
     pub fn rt_pool_task_status_i64_v1(handle: i64) -> i64;
     pub fn rt_pool_task_join_i64_v1(handle: i64) -> i64;
     pub fn rt_pool_task_release_i64_v1(handle: i64) -> i64;
@@ -244,6 +255,10 @@ static SIMPLE_KEEP_RT_POOL_STATE_CREATE: unsafe extern "C" fn(i64) -> i64 = rt_p
 #[used]
 static SIMPLE_KEEP_RT_POOL_STATE_TRY_SUBMIT_I64: unsafe extern "C" fn(i64, i64, i64) -> i64 =
     rt_pool_state_try_submit_i64_v1;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_POOL_STATE_TRY_SUBMIT_I64_KIND: unsafe extern "C" fn(i64, i64, i64, i64) -> i64 =
+    rt_pool_state_try_submit_i64_kind_v1;
 #[cfg(feature = "runtime-symbol-table")]
 #[used]
 static SIMPLE_KEEP_RT_POOL_TASK_STATUS_I64: unsafe extern "C" fn(i64) -> i64 = rt_pool_task_status_i64_v1;
@@ -467,6 +482,20 @@ fn runtime_symbol_table_contains_bootstrap_directory_provider() {
 
 #[cfg(all(test, feature = "runtime-symbol-table"))]
 #[test]
+fn runtime_symbol_table_contains_scope_read_provider() {
+    for name in [
+        "rt_dict_scope_read_bound_v1",
+        "rt_dict_scope_read_owner_v1",
+        "rt_dict_scope_read_epoch_v1",
+        "rt_dict_scope_read_meta_v1",
+        "rt_dict_scope_read_slot_v1",
+    ] {
+        assert_eq!(RUNTIME_SYMBOL_ENTRIES.iter().filter(|entry| entry.name == name && !entry.ptr.is_null()).count(), 1, "{name}");
+    }
+}
+
+#[cfg(all(test, feature = "runtime-symbol-table"))]
+#[test]
 fn runtime_symbol_table_contains_processing_wire_helpers() {
     for name in [
         "rt_write_u32s_to_raw_checksum",
@@ -530,6 +559,7 @@ fn runtime_symbol_table_excludes_disabled_tls_providers() {
         "rt_tls_server_create_from_der",
         "rt_tls_server_read_checked",
         "rt_tls_server_shutdown",
+        "rt_tls_server_upgrade_tcp",
         "rt_tls_server_write",
         "rt_tls_server_write_bytes",
     ];
@@ -632,6 +662,9 @@ fn runtime_symbol_table_file_lock_contracts_resolve_exact_providers() {
     for (name, expected) in [
         ("rt_file_lock", value::sffi::file_io::rt_file_lock as *const u8),
         ("rt_file_unlock", value::sffi::file_io::rt_file_unlock as *const u8),
+        ("rt_file_lock_owned_acquire_v2", value::sffi::file_lock_owned_v2::rt_file_lock_owned_acquire_v2 as *const u8),
+        ("rt_file_lock_owned_state_v2", value::sffi::file_lock_owned_v2::rt_file_lock_owned_state_v2 as *const u8),
+        ("rt_file_lock_owned_release_v2", value::sffi::file_lock_owned_v2::rt_file_lock_owned_release_v2 as *const u8),
     ] {
         let actual = RUNTIME_SYMBOL_ENTRIES
             .iter()
@@ -724,6 +757,26 @@ pub extern "C" fn rt_load_barrier() {
 pub extern "C" fn rt_store_barrier() {
     std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
 }
+
+// CPU control-register / TLB primitives, implemented as host no-ops.
+//
+// These three are real instructions in the C runtimes (`runtime_native.c`,
+// baremetal `runtime_minimal.c`) used by native/freestanding kernel builds.
+// Under the interpreter there is no CR3 or TLB to touch: the kernel-memory
+// integration specs (test/02_integration/os/) run PMM/VMM flows on the host
+// and previously died here with "extern is declared in Simple but backed by
+// no implementation". `rt_read_cr3` returns 0 — the current address space on
+// the host is a fiction the specs never assert against.
+#[no_mangle]
+pub extern "C" fn rt_read_cr3() -> i64 {
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn rt_write_cr3(_value: i64) {}
+
+#[no_mangle]
+pub extern "C" fn rt_invlpg(_addr: i64) {}
 
 /// Optimization barrier for constant-time code -- returns its argument.
 ///
@@ -979,6 +1032,11 @@ pub use value::{
     rt_dict_new,
     rt_dict_set,
     rt_dict_set_i64_raw,
+    rt_dict_scope_read_bound_v1,
+    rt_dict_scope_read_owner_v1,
+    rt_dict_scope_read_epoch_v1,
+    rt_dict_scope_read_meta_v1,
+    rt_dict_scope_read_slot_v1,
     // Enum operations
     rt_enum_check_discriminant,
     rt_enum_check_variant,
@@ -986,6 +1044,7 @@ pub use value::{
     rt_enum_discriminant,
     rt_enum_id,
     rt_enum_new,
+    rt_enum_register_name,
     rt_enum_payload,
     rt_free,
     // Memory operations (raw pointer)
@@ -1022,8 +1081,10 @@ pub use value::{
     rt_typed_words_i64_at,
     rt_typed_words_i64_push,
     rt_typed_words_i64_set,
+    rt_typed_words_byte_write_trap,
     rt_for_iterable,
     rt_index_get,
+    rt_get,
     rt_index_set,
     // Object operations
     rt_object_class_id,
@@ -1047,6 +1108,7 @@ pub use value::{
     rt_shared_ref_count,
     rt_shared_release,
     rt_slice,
+    rt_slice_text_bytes,
     // String operations
     rt_any_add,
     rt_tagged_add,
@@ -1107,6 +1169,8 @@ pub use value::sffi::rt_provider_query_v1_call;
 pub use value::rt_raw_u64_to_string;
 pub use value::rt_raw_i64_to_string;
 pub use value::rt_opt_i64_to_string;
+pub use value::rt_i64_to_hex;
+pub use value::rt_opt_value_to_string;
 pub use value::rt_opt_bool_to_string;
 pub use value::rt_opt_f64_to_string;
 
@@ -1118,7 +1182,7 @@ pub use value::{
     native_tcp_shutdown, native_tcp_write, rt_io_tcp_accept, rt_io_tcp_accept_timeout, rt_io_tcp_bind, rt_io_tcp_close,
     rt_browser_http_job_cancel, rt_browser_http_job_free, rt_browser_http_job_poll, rt_browser_http_job_start,
     rt_browser_http_job_start_public_limited, rt_browser_http_job_take_error, rt_browser_http_job_take_response,
-    rt_dns_lookup, rt_io_tcp_connect, rt_io_tcp_connect_timeout, rt_io_tcp_drain_line, rt_io_tcp_flush,
+    rt_dns_lookup, rt_dns_lookup_timeout_ms, rt_io_tcp_connect, rt_io_tcp_connect_timeout, rt_io_tcp_drain_line, rt_io_tcp_flush,
     rt_io_tcp_local_addr, rt_io_tcp_peer_addr, rt_io_tcp_read, rt_io_tcp_read_exact, rt_io_tcp_read_exact_len,
     rt_io_tcp_read_line, rt_io_tcp_set_nodelay, rt_io_tcp_set_read_timeout, rt_io_tcp_set_write_timeout,
     rt_io_tcp_shutdown, rt_io_tcp_write, rt_io_tcp_write_text, rt_io_tcp_write_text_read_exact_len, rt_io_udp_bind,
@@ -1134,7 +1198,7 @@ pub use value::{
     rt_tls_client_write, rt_tls_client_write_timeout, rt_tls_get_cipher_suite, rt_tls_get_negotiated_alpn,
     rt_tls_get_protocol_version, rt_tls_is_handshake_complete, rt_tls_server_accept, rt_tls_server_close_connection,
     rt_tls_server_create, rt_tls_server_create_from_der, rt_tls_server_read_checked, rt_tls_server_shutdown,
-    rt_tls_server_write, rt_tls_server_write_bytes,
+    rt_tls_server_upgrade_tcp, rt_tls_server_write, rt_tls_server_write_bytes,
 };
 
 // Re-export contract violation types and SFFI functions (CTR-050-054)
@@ -1274,6 +1338,8 @@ pub use parallel::{
     // Atomic operations
     rt_par_atomic_add_i64,
     rt_par_atomic_cmpxchg_i64,
+    rt_par_atomic_i64_is_lock_free,
+    rt_par_atomic_load_i64,
     rt_par_atomic_max_i64,
     rt_par_atomic_min_i64,
     rt_par_atomic_sub_i64,

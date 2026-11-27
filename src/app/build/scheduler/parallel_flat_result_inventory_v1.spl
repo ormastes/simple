@@ -1,5 +1,8 @@
 # Child-side flat output inventory. A parent must still verify pinned bytes.
 use app.io.mod.{file_is_regular_no_follow, process_run_bounded}
+use app.build.host_path_policy.{build_host_abs_path_valid_v1, build_host_path_normalize_v1}
+use std.io_runtime.{platform_name}
+use std.nogc_sync_mut.io.process_ops.{_resolve_posix_tool}
 
 val PARALLEL_FLAT_INVENTORY_MAX_FILES_V1: i64 = 131
 val PARALLEL_FLAT_INVENTORY_CAPTURE_BYTES_V1: i64 = 1048576
@@ -24,15 +27,7 @@ fn _flat_inventory_token_v1(value: text) -> bool:
     true
 
 fn _flat_inventory_root_v1(root: text) -> bool:
-    if not root.starts_with("/") or root.len() < 2 or root.len() > 4096 or
-       root.ends_with("/") or root.contains("//"):
-        return false
-    val parts = root.split("/")
-    var index: i64 = 1
-    while index < parts.len():
-        if not _flat_inventory_token_v1(parts[index]): return false
-        index = index + 1
-    true
+    build_host_abs_path_valid_v1(root, true, true, 4096, 128)
 
 fn check_parallel_flat_result_inventory_v1(outputs_root: text,
         expected_names: [text]) -> ParallelFlatResultInventoryV1:
@@ -41,15 +36,21 @@ fn check_parallel_flat_result_inventory_v1(outputs_root: text,
        expected_names.len() == 0 or
        expected_names.len() > PARALLEL_FLAT_INVENTORY_MAX_FILES_V1:
         return _flat_inventory_reject_v1("inventory-arguments-invalid")
+    val norm_root = build_host_path_normalize_v1(outputs_root)
     var expected_paths: [text] = []
     for name in expected_names:
         if not _flat_inventory_token_v1(name) or
-           expected_paths.contains(outputs_root + "/" + name):
+           expected_paths.contains(norm_root + "/" + name):
             return _flat_inventory_reject_v1("inventory-name-invalid")
-        expected_paths.push(outputs_root + "/" + name)
-    if not file_is_regular_no_follow("/usr/bin/find"):
+        expected_paths.push(norm_root + "/" + name)
+    val find_bin = if ["linux", "macos", "freebsd"].contains(platform_name()):
+        "/usr/bin/find"
+    else:
+        val (resolved_find, _find_args) = _resolve_posix_tool("/usr/bin/find", [])
+        resolved_find
+    if not file_is_regular_no_follow(find_bin):
         return _flat_inventory_reject_v1("find-unavailable")
-    val (stdout, stderr, code) = process_run_bounded("/usr/bin/find",
+    val (stdout, stderr, code) = process_run_bounded(find_bin,
         ["-P", outputs_root, "-print"], 15000,
         PARALLEL_FLAT_INVENTORY_CAPTURE_BYTES_V1)
     if code != 0 or stderr != "" or stdout == "" or
@@ -62,8 +63,9 @@ fn check_parallel_flat_result_inventory_v1(outputs_root: text,
         return _flat_inventory_reject_v1("inventory-count-mismatch")
     var root_count: i64 = 0
     var seen: [text] = []
-    for path in lines:
-        if path == outputs_root:
+    for raw_path in lines:
+        val path = build_host_path_normalize_v1(raw_path)
+        if path == norm_root:
             root_count = root_count + 1
         elif expected_paths.contains(path) and not seen.contains(path):
             seen.push(path)

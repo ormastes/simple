@@ -1,9 +1,14 @@
 # `RuntimeValue::from_int` still truncates to 61 bits at HEAD — the fix landed, was reverted, and only its readers and specs came back
 
 - **Filed:** 2026-08-17
-- **Status:** PARTIALLY FIXED 2026-08-17 — runtime choke point + JIT green
-  (`boxed_int_wide_roundtrip` 3/3, rc 0); LLVM backend and MIR interpreter still
-  TRUNCATING. See the note at the end. Do not close.
+- **Status:** LIVE (triaged 2026-11-11, lanes p3-interp11/int10/int11) — PARTIALLY
+  FIXED. Runtime choke point + JIT still green on the fresh seed 46fe8f6b6def;
+  the LLVM backend (`codegen/llvm/emitter.rs` `build_left_shift(int_v, three,
+  "box_shl")`, ~line 2030) and MIR interpreter (`mir_interpreter.rs:774`
+  `self.get(value) << 3`) paths still truncate in the seed Rust codegen
+  (source-confirmed 2026-11-11 by int10 and int11) and are BLOCKED for this
+  lane (no cargo/rustc permitted). Do not close. Owner: seed-fix lane with
+  cargo grant. See the 2026-11-11 addenda at the end.
 - **Severity:** High, and mis-recorded as fixed. This defect has been declared
   resolved at least four times.
 - **Component:** `src/compiler_rust/runtime/src/value/core.rs`,
@@ -233,3 +238,81 @@ already records as STILL TRUNCATING. No regression relative to the isolated buil
 
 **Status: still PARTIALLY FIXED — runtime + JIT green on the DEPLOYED seed; LLVM
 backend and MIR interpreter still open.**
+
+
+## 2026-11-11 — P3 interp11 triage: criteria 1-2 re-verified green on fresh seed 46fe8f6b6def; criteria 3-4 still open (BLOCKED for this lane)
+
+Seed-smoke probe (`build/review/interp11_wide_int_probe.spl`) on the fresh
+Windows seed, 2026-11-11, both engines:
+
+```
+VAR60=1152921504606846976|ARR60=1152921504606846976|ARR62=4611686018427387904
+```
+
+`2^60` (inline boundary) and `2^62` (heap-boxed wide value) both round-trip
+exactly, identically under `SIMPLE_EXECUTION_MODE=interpret` and under JIT
+(`bin/simple run`, env unset). So the runtime choke point (`core.rs`
+`fits_inline_int`/`from_wide_int`) and the Cranelift JIT delegation remain
+fixed on the current seed.
+
+**Still truncating (source-confirmed at HEAD, not executed here):**
+- LLVM backend: `src/compiler_rust/compiler/src/codegen/llvm/emitter.rs:2030`
+  still emits `build_left_shift(int_v, three, "box_shl")` and never calls
+  `rt_value_int` — criterion 3 unmet.
+- MIR interpreter: `src/compiler_rust/compiler/src/codegen/mir_interpreter.rs:774`
+  still does `self.set(dest, self.get(value) << 3)` in `emit_box_int` —
+  criterion 4 unmet.
+
+The pure-Simple side has already moved to the runtime call
+(`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:2474-2491` emits
+`rt_value_int_wide`); the open residual is the seed Rust codegen only.
+
+**Blocked**: fixing/verifying criteria 3-4 requires editing
+`src/compiler_rust/compiler/src/codegen/**` and rebuilding the seed with
+cargo, plus LLVM AOT verification — and this lane is forbidden cargo/rustc and
+entry-closure native builds, and `native-build` on this Windows host is a
+known-live hang lane. Grant needed: a cargo-enabled lane to change the LLVM
+emitter to call `rt_value_int`/`rt_value_int_wide`, and give the MIR
+interpreter a heap (or document unreachability with evidence), then verify via
+`boxed_int_wide_roundtrip` (expect 3/3 rc 0) and the LLVM path
+independently. Do not close this row until criteria 3-4 land.
+
+## Addendum 2026-11-11 (lane int10) — LIVE concurrence; Status stays OPEN
+
+int10 re-read this record and lane interp11's same-day 2026-11-11 addendum at
+base `1771ca481337` and concurs with its judgment: criteria 1-2 (runtime
+choke point + Cranelift JIT delegation) stand verified green on this lane's
+own tracked seed (`bin/simple.exe` build-commit `46fe8f6b6def`, the identical
+binary interp11 probed); criteria 3-4 (LLVM backend `emitter.rs:2030`
+`build_left_shift(int_v, three, "box_shl")`; MIR interpreter
+`mir_interpreter.rs:774` `self.set(dest, self.get(value) << 3)`) are
+seed-Rust-codegen paths requiring cargo/rustc + LLVM AOT verification, which
+this lane is likewise forbidden (same grant class interp11 recorded verbatim
+above). No re-run of the wide-int probe: same seed, same day, green check
+(no-identical-rerun rule). Owner: seed-fix lane with cargo grant.
+
+## Addendum 2026-11-11 (lane int11) — header flipped LIVE; criteria 3-4 source re-checked
+
+Sweep flip. interp11's same-day addendum (criteria 1-2 re-verified green on
+the fresh seed; criteria 3-4 BLOCKED, no cargo/rustc) plus int10's LIVE
+concurrence recorded the verified disposition; the header still read OPEN.
+int11 quick re-verify at base `84f5076db138` (one source check per criterion,
+no re-runs): the two seed-Rust truncation sites named by interp11 are
+unchanged — `src/compiler_rust/compiler/src/codegen/llvm/emitter.rs`
+`build_left_shift(int_v, three, "box_shl")` at ~line 2030 and
+`src/compiler_rust/compiler/src/codegen/mir_interpreter.rs:774`
+`self.set(dest, self.get(value) << 3)`. Criteria 3-4 therefore remain LIVE,
+owned by the seed-fix lane with the cargo grant interp11 recorded verbatim
+above. Header flipped to LIVE.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+Not pursued in this lane: LIVE as of 2026-11-11 triage (source-confirmed); fix is seed Rust (RuntimeValue::from_int) plus re-landing its readers. Owner: seed lane.
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with interp11/int10/int11: criteria 1-2 (runtime choke point `fits_inline_int`/`from_wide_int` + Cranelift JIT delegation) stand verified green on the tracked seed; criteria 3-4 remain LIVE at this base by source re-check — `src/compiler_rust/compiler/src/codegen/llvm/emitter.rs` still emits `build_left_shift(int_v, three, "box_shl")` (~line 2030) and never calls `rt_value_int`/`rt_value_int_wide`, and `src/compiler_rust/compiler/src/codegen/mir_interpreter.rs:774` still does `self.set(dest, self.get(value) << 3)` in `emit_box_int`. This lane holds the cargo grant, but the exit criteria demand an LLVM AOT verification pass, and `native-build` on this Windows host is a documented live-hang lane — landing an unverifiable value-representation change plus a MIR-interpreter heap, with this fix's own revert history (criterion 5), exceeds a safe P3 box. Recorded for the seed lane with the precise remaining sites. No in-lane change. Owner: seed-fix lane with an LLVM-AOT-capable host.

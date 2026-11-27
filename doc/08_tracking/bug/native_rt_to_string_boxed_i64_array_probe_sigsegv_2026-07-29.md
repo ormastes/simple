@@ -1,8 +1,23 @@
 # Native `rt_to_string` boxed-integer array probe SIGSEGV
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-25 — RESOLVED; the 2026-09-16 "Open — needs owner triage" header was stale (the body's Status section already recorded the fix as resolved and verified)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+
+## 2026-11-25 verification (work/p2w4-ae-20261125, origin/release/1.0.0 HEAD ef6a94f8a03)
+
+The fix described below is present in the tree at release/1.0.0 HEAD, verified
+by code inspection: `rt_to_string` (`src/runtime/runtime_native.c:5135`)
+probes aggregates via `rt_core_as_registered_array` (`runtime_native.c:5146`),
+the exact-registry-membership helper defined at `runtime_native.c:3151`, and
+the regression selfcheck `src/runtime/test/rt_to_string_registry_selfcheck.c`
+exists. Runtime execution was not re-run: the pinned seed
+(`bin/simple.exe`, Rust v1.0.0-rc.1) cannot run any spec at this HEAD
+(repo-wide `unknown decorator '@representation_boundary'` from cfd89933699),
+and rebuilding the C runtime/native docgen is out of lane scope. The
+2026-09-16 normalization pass missed the body's own Status/Fix/Evidence
+sections when it stamped the header "Open"; the Status section's
+"Resolved and verified" record stands. Header corrected; closing.
 
 ## Status
 

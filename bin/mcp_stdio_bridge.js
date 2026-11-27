@@ -25,6 +25,33 @@ const child = spawn(childCmd, childArgs, {
   stdio: ['pipe', 'pipe', 'pipe'],
 });
 
+// This bridge owns only this direct child. Never signal by name or enumerate PIDs.
+let stopping = false;
+let childExited = false;
+let failureCode = null;
+let terminateTimer;
+let killTimer;
+
+function stopOwnedChild(code = null) {
+  if (code !== null) failureCode = code;
+  if (stopping) return;
+  stopping = true;
+  process.stdin.pause();
+  child.stdin.end();
+  terminateTimer = setTimeout(() => {
+    if (childExited) return;
+    child.kill('SIGTERM');
+    killTimer = setTimeout(() => {
+      if (!childExited) child.kill('SIGKILL');
+    }, 1000);
+  }, 1000);
+}
+
+function clearShutdownTimers() {
+  clearTimeout(terminateTimer);
+  clearTimeout(killTimer);
+}
+
 function log(line) {
   fs.appendFileSync(logPath, `${new Date().toISOString()} ${line}\n`);
 }
@@ -39,6 +66,7 @@ function emit(body) {
 }
 
 function forwardMessage(body) {
+  if (stopping || childExited) return;
   child.stdin.write(body.trimEnd() + '\n');
 }
 
@@ -112,15 +140,36 @@ process.stdin.on('data', chunk => {
   inBuf = Buffer.concat([inBuf, chunk]);
   parseInput();
 });
-process.stdin.on('end', () => child.stdin.end());
+process.stdin.on('end', () => stopOwnedChild());
+process.stdin.on('error', () => stopOwnedChild(1));
+process.stdout.on('error', () => stopOwnedChild(1));
+process.on('SIGTERM', () => stopOwnedChild(143));
+process.on('SIGINT', () => stopOwnedChild(130));
+child.stdin.on('error', () => stopOwnedChild(1));
 
 child.stdout.on('data', chunk => {
   childBuf += chunk.toString('utf8');
   parseChild();
 });
 child.stderr.on('data', chunk => log(`child-stderr ${chunk.toString('utf8').trim()}`));
-child.on('error', err => log(`child-error ${err.message}`));
-child.on('exit', code => {
+child.on('error', err => {
+  log(`child-error ${err.message}`);
+  stopOwnedChild(1);
+});
+child.on('exit', () => {
+  childExited = true;
+  clearShutdownTimers();
+});
+// close also follows spawn failure (which need not emit exit), and waits for pipes.
+child.on('close', code => {
+  childExited = true;
+  clearShutdownTimers();
+  process.stdin.destroy();
   if (childBuf.trim() !== '') parseChild();
-  process.exit(code === null ? 1 : code);
+  const exitCode = failureCode ?? (code === null ? 1 : code);
+  if (process.stdout.destroyed) {
+    process.exit(exitCode);
+  } else {
+    process.stdout.write('', () => process.exit(exitCode));
+  }
 });

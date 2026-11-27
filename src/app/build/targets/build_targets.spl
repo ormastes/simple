@@ -14,6 +14,9 @@
 #         depends: compiler
 #
 # `depends:` accepts a comma-separated inline list or indented child lines.
+# Optional `cpu_tier:` (a tier from config/build/cpu_tiers.sdn) and `triple:`
+# (arch-vendor-os[-env]); absent = host/baseline. A target with a triple is
+# never default-selected.
 #
 # Validation is fail-closed: every rejection is a distinct named error and
 # nothing is silently defaulted. Error codes (stable, one per line):
@@ -24,12 +27,15 @@
 #     target-error: invalid-kind: <name>: <kind>
 #     target-error: missing-field: <name>: <field>
 #     target-error: dependency-cycle: a -> b -> a
+#     target-error: unknown-cpu-tier: <name>: <tier>
+#     target-error: malformed-triple: <name>: <triple>
 #     target-error: parse: <detail>
 #
 # This module is self-contained on purpose: it does not read or import the
 # driver-side target graph owned by another lane.
 
-use std.io_runtime.{file_exists, file_read}
+use std.io_runtime.{file_exists, file_read, host_arch}
+use compiler.common.backend_plugin.model.{BACKEND_PLUGIN_ABI_VERSION_V1, BackendCapability}
 
 struct BuildTarget:
     name: text
@@ -37,10 +43,19 @@ struct BuildTarget:
     entry: text
     output: text
     deps: [text]
+    cpu_tier: text
+    triple: text
+
+struct BuildGroup:
+    name: text
+    is_default: bool
+    members: [text]
 
 struct TargetSet:
     targets: [BuildTarget]
     errors: [text]
+    groups: [BuildGroup]
+    includes: [text]
 
 fn _strip_comment(line: text) -> text:
     """Drop a trailing `#` comment. Target files carry no `#` in paths."""
@@ -74,16 +89,28 @@ fn is_valid_kind(kind: text) -> bool:
     """Supported independently publishable target kinds."""
     kind == "binary" or kind == "library" or kind == "shared" or kind == "test"
 
-fn parse_targets_text(src: text) -> TargetSet:
+pub fn parse_targets_text(src: text) -> TargetSet:
     """Parse the targets declarations out of a build.sdn/targets.sdn body.
 
     Pure text -> TargetSet. Does not touch the filesystem; entry-existence and
     dep-name/cycle validation happen in `validate_targets`. Non-`target`
     top-level sections are ignored so this can share a build.sdn with other
-    sections."""
+    sections.
+
+    Also parses two top-level directives: `include: <path>` (recorded, resolved
+    by `load_targets_file`) and `group <name>:` blocks with `default:` and
+    `members:` (inline list or indented child lines)."""
     var targets: [BuildTarget] = []
     var errors: [text] = []
+    var groups: [BuildGroup] = []
+    var includes: [text] = []
     val lines = src.split("\n")
+
+    var in_group = false
+    var grp_name = ""
+    var grp_default = false
+    var grp_members: [text] = []
+    var members_block = false
 
     var in_target = false
     var cur_name = ""
@@ -91,6 +118,8 @@ fn parse_targets_text(src: text) -> TargetSet:
     var cur_entry = ""
     var cur_output = ""
     var cur_deps: [text] = []
+    var cur_tier = ""
+    var cur_triple = ""
     var deps_block = false
 
     var i = 0
@@ -111,9 +140,33 @@ fn parse_targets_text(src: text) -> TargetSet:
 
         if indent == 0:
             if in_target:
-                targets.push(BuildTarget(cur_name, cur_kind, cur_entry, cur_output, cur_deps))
+                targets.push(BuildTarget(cur_name, cur_kind, cur_entry, cur_output, cur_deps, cur_tier, cur_triple))
                 in_target = false
+            if in_group:
+                groups.push(BuildGroup(grp_name, grp_default, grp_members))
+                in_group = false
             deps_block = false
+            members_block = false
+            if stripped.starts_with("include:"):
+                val inc = stripped[8:].trim()
+                if inc.len() == 0:
+                    errors.push("target-error: parse: empty include at line " + (i + 1).to_text())
+                else:
+                    includes.push(inc)
+                i = i + 1
+                continue
+            if stripped.starts_with("group "):
+                val ghead = stripped[6:].trim()
+                if not ghead.ends_with(":") or ghead.len() < 2:
+                    errors.push("target-error: parse: bad group header at line " + (i + 1).to_text())
+                    i = i + 1
+                    continue
+                in_group = true
+                grp_name = ghead[0:ghead.len() - 1].trim()
+                grp_default = false
+                grp_members = []
+                i = i + 1
+                continue
             if stripped.starts_with("target "):
                 val head = stripped[7:].trim()
                 if not head.ends_with(":"):
@@ -134,6 +187,39 @@ fn parse_targets_text(src: text) -> TargetSet:
                 cur_entry = ""
                 cur_output = ""
                 cur_deps = []
+                cur_tier = ""
+                cur_triple = ""
+            i = i + 1
+            continue
+
+        if in_group:
+            if members_block and not stripped.contains(":"):
+                grp_members.push(stripped)
+                i = i + 1
+                continue
+            if not stripped.contains(":"):
+                errors.push("target-error: parse: expected 'key: value' at line " + (i + 1).to_text())
+                i = i + 1
+                continue
+            val gkey = stripped.split(":")[0].trim()
+            val gval = stripped[gkey.len() + 1:].trim()
+            members_block = false
+            if gkey == "default":
+                if gval == "true":
+                    grp_default = true
+                elif gval == "false":
+                    grp_default = false
+                else:
+                    errors.push("target-error: parse: group " + grp_name + " default must be true or false")
+            elif gkey == "members":
+                val ms = _split_list(gval)
+                var m = 0
+                while m < ms.len():
+                    grp_members.push(ms[m])
+                    m = m + 1
+                members_block = ms.len() == 0
+            else:
+                errors.push("target-error: parse: unknown key '" + gkey + "' in group " + grp_name)
             i = i + 1
             continue
 
@@ -165,6 +251,10 @@ fn parse_targets_text(src: text) -> TargetSet:
             cur_kind = value
         elif key == "entry":
             cur_entry = value
+        elif key == "cpu_tier":
+            cur_tier = value
+        elif key == "triple":
+            cur_triple = value
         elif key == "output":
             cur_output = value
         elif key == "depends" or key == "deps":
@@ -178,9 +268,9 @@ fn parse_targets_text(src: text) -> TargetSet:
             errors.push("target-error: parse: unknown key '" + key + "' in target " + cur_name)
         i = i + 1
 
-    TargetSet(targets, errors)
+    TargetSet(targets, errors, groups, includes)
 
-fn find_target(ts: TargetSet, name: text) -> i64:
+pub fn find_target(ts: TargetSet, name: text) -> i64:
     """Index of `name` in the target list, or -1."""
     var i = 0
     while i < ts.targets.len():
@@ -242,7 +332,97 @@ fn find_cycle(ts: TargetSet) -> text:
         start = start + 1
     ""
 
-fn validate_targets(ts: TargetSet, repo_root: text) -> [text]:
+fn _triple_part_ok(p: text) -> bool:
+    if p.len() == 0:
+        return false
+    var i = 0
+    while i < p.len():
+        val c = p[i:i + 1]
+        val ok = (c >= "a" and c <= "z") or (c >= "0" and c <= "9") or c == "_" or c == "."
+        if not ok:
+            return false
+        i = i + 1
+    true
+
+@allow(primitive_api)  # config-text boundary: triple string read from targets.sdn
+pub fn is_well_formed_triple(t: text) -> bool:
+    """`arch-vendor-os[-env]`: 3 or 4 non-empty lowercase `[a-z0-9_.]` parts."""
+    val parts = t.split("-")
+    if parts.len() < 3 or parts.len() > 4:
+        return false
+    var i = 0
+    while i < parts.len():
+        if not _triple_part_ok(parts[i]):
+            return false
+        i = i + 1
+    true
+
+fn _bracket_items(value: text, open: text, close: text) -> [text]:
+    var v = value.trim()
+    if v.starts_with(open):
+        v = v[1:]
+    if v.ends_with(close):
+        v = v[0:v.len() - 1]
+    _split_list(v)
+
+fn _declared_cpu_tiers(repo_root: text) -> [text]:
+    """Every tier name declared in config/build/cpu_tiers.sdn: `levels`,
+    `default_tiers` and alias keys, each as `<arch>|<tier>` (arch from the
+    enclosing `- arch:` entry). Empty when the file is missing."""
+    var out: [text] = []
+    val path = repo_root + "/config/build/cpu_tiers.sdn"
+    if not file_exists(path):
+        return out
+    val lines = file_read(path).split("\n")
+    var arch = ""
+    var i = 0
+    while i < lines.len():
+        val s = _strip_comment(lines[i]).trim()
+        var items: [text] = []
+        if s.starts_with("- arch:"):
+            arch = s[7:].trim()
+        elif s.starts_with("levels:"):
+            items = _bracket_items(s[7:], "[", "]")
+        elif s.starts_with("default_tiers:"):
+            items = _bracket_items(s[14:], "[", "]")
+        elif s.starts_with("aliases:"):
+            val pairs = _bracket_items(s[8:], "{", "}")
+            var p = 0
+            while p < pairs.len():
+                items.push(pairs[p].split(":")[0].trim())
+                p = p + 1
+        var k = 0
+        while k < items.len():
+            val key = arch + "|" + items[k]
+            if not out.contains(key):
+                out.push(key)
+            k = k + 1
+        i = i + 1
+    out
+
+fn _tier_declared(tiers: [text], tier: text) -> bool:
+    var i = 0
+    while i < tiers.len():
+        if tiers[i].ends_with("|" + tier):
+            return true
+        i = i + 1
+    false
+
+pub fn tier_arch_of_triple(triple: text) -> text:
+    """Arch name used by cpu_tiers.sdn for a triple's arch component."""
+    val a = triple.split("-")[0]
+    if a.starts_with("riscv64"):
+        return "riscv64"
+    if a == "arm64":
+        return "aarch64"
+    if a == "amd64":
+        return "x86_64"
+    a
+
+pub fn validate_targets(ts: TargetSet, repo_root: text) -> [text]:
+    validate_targets_for_arch(ts, repo_root, host_arch())
+
+pub fn validate_targets_for_arch(ts: TargetSet, repo_root: text, host: text) -> [text]:
     """Full fail-closed validation. Returns every error found (never throws).
 
     Checks, each a distinct named error: parse errors carried in from the
@@ -254,9 +434,23 @@ fn validate_targets(ts: TargetSet, repo_root: text) -> [text]:
         errors.push(ts.errors[e])
         e = e + 1
 
+    var tiers: [text] = []
+    var tiers_loaded = false
     var i = 0
     while i < ts.targets.len():
         val t = ts.targets[i]
+        if t.cpu_tier.len() > 0:
+            if not tiers_loaded:
+                tiers = _declared_cpu_tiers(repo_root)
+                tiers_loaded = true
+            if not _tier_declared(tiers, t.cpu_tier):
+                errors.push("target-error: unknown-cpu-tier: " + t.name + ": " + t.cpu_tier)
+            else:
+                val arch = if t.triple.len() > 0: tier_arch_of_triple(t.triple) else: host
+                if not tiers.contains(arch + "|" + t.cpu_tier):
+                    errors.push("target-error: cpu-tier-arch-mismatch: " + t.name + ": " + t.cpu_tier + " (" + arch + ")")
+        if t.triple.len() > 0 and not is_well_formed_triple(t.triple):
+            errors.push("target-error: malformed-triple: " + t.name + ": " + t.triple)
         var j = 0
         while j < i:
             if ts.targets[j].name == t.name:
@@ -283,17 +477,235 @@ fn validate_targets(ts: TargetSet, repo_root: text) -> [text]:
             d = d + 1
         i = i + 1
 
+    var g = 0
+    while g < ts.groups.len():
+        val grp = ts.groups[g]
+        var h = 0
+        while h < g:
+            if ts.groups[h].name == grp.name:
+                errors.push("target-error: duplicate-group: " + grp.name)
+            h = h + 1
+        var m = 0
+        while m < grp.members.len():
+            if find_target(ts, grp.members[m]) < 0:
+                errors.push("target-error: unknown-group-member: " + grp.name + " -> " + grp.members[m])
+            m = m + 1
+        g = g + 1
+
     val cycle = find_cycle(ts)
     if cycle.len() > 0:
         errors.push("target-error: dependency-cycle: " + cycle)
     errors
 
-fn load_targets_file(path: text, repo_root: text) -> TargetSet:
-    """Read and parse a targets file. A missing file yields a parse error, not
-    an empty default — absence must never look like 'no targets declared'."""
+pub fn group_targets(ts: TargetSet, group: text) -> [text]:
+    """Member target names of every group named `group` (empty if none)."""
+    var out: [text] = []
+    var g = 0
+    while g < ts.groups.len():
+        if ts.groups[g].name == group:
+            var m = 0
+            while m < ts.groups[g].members.len():
+                out.push(ts.groups[g].members[m])
+                m = m + 1
+        g = g + 1
+    out
+
+pub fn default_group_targets(ts: TargetSet) -> [text]:
+    """Targets a default build selects: members of `default: true` groups.
+
+    A file that declares no group keeps the pre-group meaning: every target.
+    A target with an explicit `triple:` (cross) or `cpu_tier:` (tier artifact) is
+    opt-in and never selected: a default build is the host baseline only."""
+    var out: [text] = []
+    if ts.groups.len() == 0:
+        var i = 0
+        while i < ts.targets.len():
+            if ts.targets[i].triple.len() == 0 and ts.targets[i].cpu_tier.len() == 0:
+                out.push(ts.targets[i].name)
+            i = i + 1
+        return out
+    var g = 0
+    while g < ts.groups.len():
+        if ts.groups[g].is_default:
+            var m = 0
+            while m < ts.groups[g].members.len():
+                val idx = find_target(ts, ts.groups[g].members[m])
+                if idx < 0 or (ts.targets[idx].triple.len() == 0 and ts.targets[idx].cpu_tier.len() == 0):
+                    out.push(ts.groups[g].members[m])
+                m = m + 1
+        g = g + 1
+    out
+
+# --- Opt-in backend group provider admission (plan §6) ---------------------
+#
+# An opt-in backend group (config/build/backends_*.sdn) is selected only when a
+# provider descriptor is presented and admitted. This is a gate, not a claim
+# that any backend provider is production-ready. Default selection
+# (`default_group_targets`) never consults it, so the host build is unaffected.
+
+# ABI version and capability vocabulary come from the compiler-side V1 backend
+# plugin contract (70.backend/backend_plugin/admission.spl uses the same model),
+# so both admission paths accept/refuse the same ABI and capability names.
+pub val BACKEND_PROVIDER_ABI_VERSION: i64 = BACKEND_PLUGIN_ABI_VERSION_V1
+
+pub struct BackendProviderDescriptor:
+    group: text
+    abi_version: i64
+    host_triple: text
+    capabilities: [text]
+
+pub fn backend_provider_capability_names() -> [text]:
+    [
+        BackendCapability.JitExecute.name(), BackendCapability.ObjectEmit.name(),
+        BackendCapability.DebugInfo.name(), BackendCapability.Optimization.name(),
+        BackendCapability.CrossTarget.name(), BackendCapability.IncrementalCompilation.name()
+    ]
+
+fn _unknown_capability(caps: [text]) -> text:
+    val known = backend_provider_capability_names()
+    for c in caps:
+        if not known.contains(c):
+            return c
+    ""
+
+fn _unknown_capability_refusal(group: text, cap: text) -> text:
+    "SPL-PROVIDER-ABI-001: backend-admission: unknown-capability: " + group + ": " + cap
+
+pub fn admit_backend_provider(d: BackendProviderDescriptor, host_triple: text, required_caps: [text]) -> text:
+    """Empty text = admitted; otherwise the first stable refusal code."""
+    if d.abi_version != BACKEND_PROVIDER_ABI_VERSION:
+        return "SPL-PROVIDER-ABI-001: backend-admission: abi-mismatch: " + d.group + ": " + d.abi_version.to_string() + " != " + BACKEND_PROVIDER_ABI_VERSION.to_string()
+    if d.host_triple != host_triple:
+        return "SPL-PROVIDER-ABI-001: backend-admission: triple-mismatch: " + d.group + ": " + d.host_triple + " != " + host_triple
+    val bad_decl = _unknown_capability(d.capabilities)
+    if bad_decl.len() > 0:
+        return _unknown_capability_refusal(d.group, bad_decl)
+    val bad_req = _unknown_capability(required_caps)
+    if bad_req.len() > 0:
+        return _unknown_capability_refusal(d.group, bad_req)
+    var i = 0
+    while i < required_caps.len():
+        var found = false
+        var j = 0
+        while j < d.capabilities.len():
+            if d.capabilities[j] == required_caps[i]:
+                found = true
+            j = j + 1
+        if not found:
+            return "SPL-PROVIDER-ABI-001: backend-admission: missing-capability: " + d.group + ": " + required_caps[i]
+        i = i + 1
+    ""
+
+pub fn select_backend_group(ts: TargetSet, group: text, d: BackendProviderDescriptor, host_triple: text, required_caps: [text]) -> [text]:
+    """Members of an opt-in backend group, or empty when the descriptor is for
+    another group or is refused by `admit_backend_provider`."""
+    var none: [text] = []
+    if d.group != group:
+        return none
+    if admit_backend_provider(d, host_triple, required_caps).len() > 0:
+        return none
+    group_targets(ts, group)
+
+pub fn normalize_include_path(p: text) -> text:
+    """Use `/` on every host so one config reads the same everywhere."""
+    p.replace("\\", "/")
+
+fn _dir_of(path: text) -> text:
+    val p = normalize_include_path(path)
+    var i = p.len() - 1
+    while i >= 0:
+        if p[i:i + 1] == "/":
+            return p[0:i]
+        i = i - 1
+    "."
+
+fn _canonical_path(p: text) -> text:
+    """Collapse `.` and `..` segments so one file always has one spelling."""
+    val n = normalize_include_path(p)
+    val absolute = n.starts_with("/")
+    val parts = n.split("/")
+    var out: [text] = []
+    var i = 0
+    while i < parts.len():
+        val s = parts[i]
+        if s == "" or s == ".":
+            i = i + 1
+            continue
+        if s == ".." and out.len() > 0 and out[out.len() - 1] != "..":
+            out.pop()
+        else:
+            out.push(s)
+        i = i + 1
+    var r = ""
+    var j = 0
+    while j < out.len():
+        r = if j == 0: out[j] else: r + "/" + out[j]
+        j = j + 1
+    if absolute: "/" + r else: r
+
+fn _resolve_include(including: text, inc: text) -> text:
+    val n = normalize_include_path(inc)
+    if n.starts_with("/") or (n.len() > 1 and n[1:2] == ":"):
+        return _canonical_path(n)
+    _canonical_path(_dir_of(including) + "/" + n)
+
+pub fn load_targets_file(path: text, repo_root: text) -> TargetSet:
+    """Read and parse a targets file, following `include:` directives.
+
+    A missing file yields a parse error, not an empty default — absence must
+    never look like 'no targets declared'. Includes resolve relative to the
+    including file; a cycle or a missing include is a named error."""
+    var targets: [BuildTarget] = []
+    var errors: [text] = []
+    var groups: [BuildGroup] = []
+    var includes: [text] = []
     if not file_exists(path):
-        var errs: [text] = []
-        errs.push("target-error: parse: targets file not found: " + path)
-        var none: [BuildTarget] = []
-        return TargetSet(none, errs)
-    parse_targets_text(file_read(path))
+        errors.push("target-error: parse: targets file not found: " + path)
+        return TargetSet(targets, errors, groups, includes)
+
+    # Iterative walk (arrays are value types; no recursive accumulator).
+    # Each stack entry carries its include chain for cycle reporting.
+    var stack_path: [text] = []
+    var stack_chain: [text] = []
+    # Include-once: a file reached twice by a diamond is parsed once.
+    var visited: [text] = []
+    stack_path.push(_canonical_path(path))
+    stack_chain.push("")
+    while stack_path.len() > 0:
+        val cur = stack_path[stack_path.len() - 1]
+        val chain = stack_chain[stack_chain.len() - 1]
+        stack_path.pop()
+        stack_chain.pop()
+        if visited.contains(cur):
+            continue
+        visited.push(cur)
+        val ts = parse_targets_text(file_read(cur))
+        var k = 0
+        while k < ts.targets.len():
+            targets.push(ts.targets[k])
+            k = k + 1
+        k = 0
+        while k < ts.errors.len():
+            errors.push(ts.errors[k])
+            k = k + 1
+        k = 0
+        while k < ts.groups.len():
+            groups.push(ts.groups[k])
+            k = k + 1
+        val here = if chain.len() == 0: cur else: chain + " -> " + cur
+        k = 0
+        while k < ts.includes.len():
+            val child = _resolve_include(cur, ts.includes[k])
+            if here.split(" -> ").contains(child):
+                errors.push("target-error: include-cycle: " + here + " -> " + child)
+            elif visited.contains(child):
+                k = k + 1
+                continue
+            elif not file_exists(child):
+                errors.push("target-error: include-missing: " + cur + ": " + ts.includes[k])
+            else:
+                includes.push(child)
+                stack_path.push(child)
+                stack_chain.push(here)
+            k = k + 1
+    TargetSet(targets, errors, groups, includes)

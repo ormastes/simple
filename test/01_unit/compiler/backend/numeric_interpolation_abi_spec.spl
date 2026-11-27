@@ -7,7 +7,7 @@
 # research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
 # Numeric interpolation ABI regression: scalar text renderers return tagged
-# i64 handles; rt_interp_cstr is the single bridge to raw char*. This test
+# i64 handles consumed directly by tagged concat; counted segments preserve NUL. This test
 # interprets the Pure-Simple frontend/MIR/LLVM owners and inspects emitted IR.
 # A rebuilt self-hosted binary is still required for native executable proof;
 # numeric_interpolation_abi_contract.shs guards the exact source ABI split.
@@ -49,28 +49,59 @@ fn call_result_ssa(call_line: text) -> text:
     val assignment = call_line.find(" = call ")
     if assignment < 0:
         return ""
-    call_line.substring(0, assignment)
+    val assigned = call_line.substring(0, assignment)
+    assigned.trim()
 
-fn renderer_cstr_strcat_flow(llvm: text, renderer: text) -> bool:
-    """Prove the ABI pipeline: tagged i64 renderer -> rt_interp_cstr -> rt_strcat.
+fn renderer_tagged_concat_flow(llvm: text, renderer: text) -> bool:
+    """Follow actual renderer SSA through the ABI bitcast into tagged concat.
 
-    Looking only for declarations cannot catch an alias that gives the renderer
-    result Opaque(str) and bypasses the raw-pointer bridge. Follow the emitted
-    SSA names instead, for every scalar renderer family.
+    inttoptr keeps the tagged word; rt_interp_cstr would unwrap and lose length.
+    Declarations alone cannot prove which result the concat consumes.
     """
     val renderer_call = find_call_line(llvm, renderer + "(")
     val renderer_ssa = call_result_ssa(renderer_call)
     if renderer_ssa == "":
         return false
-    val cstr_call = find_call_line_using(llvm, "rt_interp_cstr(", "i64 " + renderer_ssa)
-    val cstr_ssa = call_result_ssa(cstr_call)
-    if cstr_ssa == "":
+    if find_call_line_using(llvm, "rt_interp_cstr(", "i64 " + renderer_ssa) != "":
         return false
-    find_call_line_using(llvm, "rt_strcat(", "ptr " + cstr_ssa) != ""
+    for line in llvm.split("\n"):
+        if line.contains(" = inttoptr i64 " + renderer_ssa + " to ptr"):
+            val assignment = line.find(" = ")
+            val assigned = line.substring(0, assignment)
+            val pointer_ssa = assigned.trim()
+            if find_call_line_using(llvm, "rt_strcat_tagged(", "ptr " + pointer_ssa) != "":
+                return true
+    false
+
+fn named_fixture_function_body(llvm: text, function_name: text) -> text:
+    var collecting = false
+    var body = ""
+    for line in llvm.split("\n"):
+        if not collecting:
+            if line.starts_with("define ") and (line.contains("@" + function_name + "(") or line.contains("." + function_name + "(")):
+                collecting = true
+        else:
+            if line.trim() == "}":
+                return body
+            body = body + line + "\n"
+    # Missing/malformed definitions cannot satisfy the constructor assertions.
+    ""
+
+fn counted_segment_flow(llvm: text, byte_count: i64) -> bool:
+    # Follow the actual MIR integer constant into the constructor length slot.
+    for line in llvm.split("\n"):
+        if line.contains(" = add i64 " + byte_count.to_string() + ", 0  ; const int"):
+            val assignment = line.find(" = ")
+            val assigned = line.substring(0, assignment)
+            val length_ssa = assigned.trim()
+            if find_call_line_using(llvm, "rt_string_new(", "i64 " + length_ssa + ")") != "":
+                return true
+    false
 
 fn compile_numeric_interpolation_fixture() -> text:
     val source = "fn generic_numeric_line<T>(value: T) -> text:\n    \"generic={value}\"\n\nfn numeric_extremes(minimum: i64, maximum: i64) -> text:\n    \"min={minimum};max={maximum}\"\n\nfn renderer_family(b: bool, f: f64, u: u64, i: i64) -> text:\n    \"b={b};f={f};u={u};i={i}\"\n\nfn diagnostic(path: text, count: i64) -> text:\n    \"phase2:surface:file:start path={path} heap_registry={count}\"\n"
-    val ast = parse_full_frontend(source, "numeric_interpolation_abi_fixture.spl", "numeric_interpolation_abi_fixture.spl", Logger(level: 0))
+    val counted_source = "fn unicode_segment(tail: text) -> text:\n    \"hé{tail}\"\n\nfn nul_segment(tail: text) -> text:\n    \"a\\0{tail}\"\n"
+    val ast = parse_full_frontend(source + counted_source, "numeric_interpolation_abi_fixture.spl", "numeric_interpolation_abi_fixture.spl", Logger(level: 0))
     var hir_lowering = HirLowering.with_filename("numeric_interpolation_abi_fixture.spl")
     val hir = hir_lowering.lower_module(ast)
     var mir_lowering = MirLowering.new(hir.symbols)
@@ -109,16 +140,25 @@ describe "numeric interpolation tagged-handle ABI":
         expect(raw_text_return_call()).to_equal("plain")
         expect(tagged_text_consumer_call()).to_equal("count=42")
 
-    it "preserves every scalar renderer signature and SSA bridge into raw concatenation":
+    it "preserves every scalar renderer signature and tagged word into counted concatenation":
         # @req REQ-SSPEC-COMPILER
-        step("preserves every scalar renderer signature and SSA bridge into raw concatenation")
+        step("preserves every scalar renderer signature and tagged word into counted concatenation")
         val llvm = compile_numeric_interpolation_fixture()
         assert_true(not llvm.starts_with("MIR_LOWERING_ERRORS:"), "fixture failed to lower to MIR: " + llvm)
         expect(llvm).to_contain("declare i64 @rt_raw_i64_to_string(i64)")
         expect(llvm).to_contain("declare i64 @rt_raw_u64_to_string(i64)")
         expect(llvm).to_contain("declare i64 @rt_raw_bool_to_string(i64)")
         expect(llvm).to_contain("declare i64 @rt_raw_f64_to_string(double)")
-        expect(llvm).to_contain("declare ptr @rt_interp_cstr(i64)")
+        expect(llvm).to_contain("declare ptr @rt_strcat_tagged(ptr, ptr)")
+        expect(find_call_line(llvm, "rt_string_new(")).to_contain("= call i64 @rt_string_new(ptr ")
+        expect(find_call_line(llvm, "rt_strcat(")).to_equal("")
+        # The prefix hé is three UTF-8 bytes; a\0 is two counted bytes.
+        val unicode_body = named_fixture_function_body(llvm, "unicode_segment")
+        val nul_body = named_fixture_function_body(llvm, "nul_segment")
+        expect(unicode_body != "").to_equal(true)
+        expect(nul_body != "").to_equal(true)
+        expect(counted_segment_flow(unicode_body, 3)).to_equal(true)
+        expect(counted_segment_flow(nul_body, 2)).to_equal(true)
 
         val i64_call = find_call_line(llvm, "rt_raw_i64_to_string(")
         val u64_call = find_call_line(llvm, "rt_raw_u64_to_string(")
@@ -129,10 +169,10 @@ describe "numeric interpolation tagged-handle ABI":
         expect(bool_call).to_contain("= call i64 @rt_raw_bool_to_string(i64 ")
         expect(f64_call).to_contain("= call i64 @rt_raw_f64_to_string(double ")
 
-        assert_true(renderer_cstr_strcat_flow(llvm, "rt_raw_i64_to_string"), "i64 renderer must flow through rt_interp_cstr into rt_strcat")
-        assert_true(renderer_cstr_strcat_flow(llvm, "rt_raw_u64_to_string"), "u64 renderer must flow through rt_interp_cstr into rt_strcat")
-        assert_true(renderer_cstr_strcat_flow(llvm, "rt_raw_bool_to_string"), "bool renderer must flow through rt_interp_cstr into rt_strcat")
-        assert_true(renderer_cstr_strcat_flow(llvm, "rt_raw_f64_to_string"), "f64 renderer must flow through rt_interp_cstr into rt_strcat")
+        assert_true(renderer_tagged_concat_flow(llvm, "rt_raw_i64_to_string"), "i64 renderer must retain its tagged word into rt_strcat_tagged")
+        assert_true(renderer_tagged_concat_flow(llvm, "rt_raw_u64_to_string"), "u64 renderer must retain its tagged word into rt_strcat_tagged")
+        assert_true(renderer_tagged_concat_flow(llvm, "rt_raw_bool_to_string"), "bool renderer must retain its tagged word into rt_strcat_tagged")
+        assert_true(renderer_tagged_concat_flow(llvm, "rt_raw_f64_to_string"), "f64 renderer must retain its tagged word into rt_strcat_tagged")
 
     it "survives two parser reset cycles after a large numeric diagnostic line":
         # @req REQ-SSPEC-COMPILER

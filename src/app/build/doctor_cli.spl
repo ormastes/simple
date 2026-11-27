@@ -1,0 +1,206 @@
+# `simple build doctor --source-ownership [--robust] [<lib dir>...]` — check that
+# every `.spl` under each library dir is owned by exactly one unit
+# (SPL-BUILD-SRC-001, plan section 4.2/7). Each dir expands through the unit registry (units_cli, simple.sdn dependency closure); a dir without simple.sdn is one default-glob unit. A unit's owned set is
+# the scan resolved through `<dir>/simple.sdn` include/exclude globs, its scanned
+# set is every `.spl` under it. Paths are reported as `<dir>/<relative path>`.
+# Severity comes from config/policy/diagnostic_policy.sdn (warn by default,
+# deny with --robust). Exit 0 clean/warn-only, 1 error findings, 2 usage/nothing checked.
+
+use app.io.mod.{is_dir, file_exists, file_read}
+use std.nogc_sync_mut.fs.text_io.{file_read_text}
+use compiler.common.diagnostics.diagnostic_rule_policy.{
+    DiagnosticRuleLevel, PolicyResolveContext, load_diagnostic_policy_text, diagnostic_policy_default_path
+}
+use compiler.driver.driver_build.source_inventory_v1.{
+    SourceInventoryUnitV1, SourceInventoryFileV1, SourceInventoryFindingV1, source_inventory_ownership_check_v1
+}
+use compiler.driver.driver_build.source_inventory_scan_v1.{source_inventory_scan_v1, source_inventory_scan_resolve_v1}
+use compiler.driver.driver_build.library_unit_manifest_v1.{LibraryUnitManifestV1}
+use app.build.units_cli.{build_units_registry}
+use compiler.driver.driver_build.library_unit_role_v1.{library_unit_roles_parse_v1, library_unit_role_check_v1}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros, timestamp_year, timestamp_month, timestamp_day}
+
+@allow(primitive_api)  # CLI boundary: severity is the policy level name ("warn"/"deny")
+pub fn doctor_source_ownership_report(units: [SourceInventoryUnitV1], scanned: [text], severity: text) -> text:
+    if scanned.len() == 0:
+        return "ERROR — nothing was checked (no source files scanned)\n"
+    val findings = source_inventory_ownership_check_v1(units, scanned)
+    val label = if severity == "deny": "error" else: "warning"
+    var out = ""
+    for f in findings:
+        out = out + "{label}[{f.code}] {f.path}: {f.message}\n"
+    if findings.len() == 0:
+        return out + "PASS — {scanned.len()} checked, 0 findings\n"
+    if severity == "deny":
+        return out + "FAIL — {scanned.len()} checked, {findings.len()} error finding(s)\n"
+    out + "PASS — {scanned.len()} checked, {findings.len()} warning(s)\n"
+
+@allow(primitive_api)  # CLI boundary: severity is the policy level name ("warn"/"deny")
+pub fn doctor_source_ownership_exit(units: [SourceInventoryUnitV1], scanned: [text], severity: text) -> i64:
+    if scanned.len() == 0:
+        return 2
+    if severity == "deny" and source_inventory_ownership_check_v1(units, scanned).len() > 0:
+        return 1
+    0
+
+@allow(primitive_api)  # CLI boundary: findings are rendered messages, severity is the policy level name
+pub fn doctor_roles_report(findings: [text], checked: i64, severity: text) -> text:
+    if checked == 0:
+        return "ERROR — nothing was checked (no unit manifest read)\n"
+    val label = if severity == "deny": "error" else: "warning"
+    var out = ""
+    for f in findings:
+        out = out + "{label}[SPL-BUILD-ROLE-001] {f}\n"
+    if findings.len() == 0:
+        return out + "PASS — {checked} unit(s) checked, 0 findings\n"
+    if severity == "deny":
+        return out + "FAIL — {checked} unit(s) checked, {findings.len()} error finding(s)\n"
+    out + "PASS — {checked} unit(s) checked, {findings.len()} warning(s)\n"
+
+@allow(primitive_api)  # CLI boundary: severity is the policy level name ("warn"/"deny")
+pub fn doctor_roles_exit(findings: [text], checked: i64, severity: text) -> i64:
+    if checked == 0:
+        return 2
+    if severity == "deny" and findings.len() > 0:
+        return 1
+    0
+
+fn _doctor_today() -> text:
+    val micros = time_now_unix_micros()
+    "{timestamp_year(micros)}-{timestamp_month(micros):02}-{timestamp_day(micros):02}"
+
+# Every unit reachable from the given root dirs, dependencies first, each once
+# (a unit reached from two roots or as a diamond is listed a single time).
+# With `glob_missing`, a root dir with no simple.sdn is not in the registry and
+# stays a single default-glob unit instead of being an error.
+@allow(primitive_api)  # CLI boundary: root dir texts in, registry or error text out
+fn _doctor_registry(dirs: [text], glob_missing: bool) -> Result<[LibraryUnitManifestV1], text>:
+    var out: [LibraryUnitManifestV1] = []
+    var seen: {text: bool} = {}
+    for dir in dirs:
+        if glob_missing and not file_exists(dir + "/simple.sdn"):
+            if not seen.contains_key(dir):
+                seen[dir] = true
+                out.push(LibraryUnitManifestV1(name: dir, version: "", kind: "library", dir: dir,
+                    deps: [], includes: ["**/*.spl"], excludes: []))
+            continue
+        val units = match build_units_registry(dir):
+            case Ok(us): us
+            case Err(e): return Err(e)
+        for u in units:
+            if not seen.contains_key(u.dir):
+                seen[u.dir] = true
+                out.push(u)
+    Ok(out)
+
+pub struct DoctorOwnershipScanV1:
+    units: [SourceInventoryUnitV1]
+    scanned: [text]
+
+# Source-ownership inputs, one inventory unit per registry unit.
+@allow(primitive_api)  # CLI boundary: root dir texts in, scan or error text out
+pub fn doctor_ownership_scan(dirs: [text]) -> Result<DoctorOwnershipScanV1, text>:
+    val manifests = match _doctor_registry(dirs, true):
+        case Ok(ms): ms
+        case Err(e): return Err(e)
+    var units: [SourceInventoryUnitV1] = []
+    var scanned: [text] = []
+    for m in manifests:
+        val prefix = if m.dir == ".": "" else: m.dir + "/"
+        var files: [SourceInventoryFileV1] = []
+        for p in source_inventory_scan_resolve_v1(m.dir, m.includes, m.excludes):
+            files.push(SourceInventoryFileV1(path: prefix + p, digest: ""))
+        units.push(SourceInventoryUnitV1(name: m.name, files: files))
+        for p in source_inventory_scan_v1(m.dir):
+            scanned.push(prefix + p)
+    Ok(DoctorOwnershipScanV1(units: units, scanned: scanned))
+
+fn _doctor_run_roles(dirs: [text], robust: bool, today: text) -> i64:
+    var findings: [text] = []
+    var checked = 0
+    val units = match _doctor_registry(dirs, false):
+        case Ok(us): us
+        case Err(e):
+            print("build-doctor-error: {e}")
+            return 2
+    for u in units:
+        match library_unit_roles_parse_v1(u.dir, file_read(u.dir + "/simple.sdn") ?? ""):
+            case Ok(roles):
+                checked = checked + 1
+                for m in library_unit_role_check_v1(roles, today):
+                    findings.push("{u.dir}: {m}")
+            case Err(e):
+                print("build-doctor-error: {e}")
+                return 2
+    val severity = _doctor_severity("SPL-BUILD-ROLE-001", robust)
+    print(doctor_roles_report(findings, checked, severity))
+    doctor_roles_exit(findings, checked, severity)
+
+fn _doctor_severity(rule: text, robust: bool) -> text:
+    val loaded = load_diagnostic_policy_text(file_read_text(diagnostic_policy_default_path()))
+    val profile = if robust: "robust" else: "default"
+    match loaded:
+        case Ok(s):
+            val r = s.resolve(rule, PolicyResolveContext.new(profile, "2026.11", ""), DiagnosticRuleLevel.Warn)
+            if r.level.name() == "deny": "deny" else: "warn"
+        case Err(_):
+            if robust: "deny" else: "warn"
+
+fn _doctor_strip(dir: text) -> text:
+    var d = dir.replace("\\", "/")
+    while d.len() > 1 and d.ends_with("/"):
+        d = d[0:d.len() - 1]
+    d
+
+@allow(primitive_api)  # CLI argv boundary: argv in, process exit code out
+pub fn run_build_doctor(args: [text]) -> i64:
+    val usage = "usage: simple build doctor (--source-ownership | --roles [--today YYYY-MM-DD]) [--robust] [<lib dir>...]"
+    var source_ownership = false
+    var roles = false
+    var today = ""
+    var robust = false
+    var dirs: [text] = []
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if a == "--source-ownership":
+            source_ownership = true
+        elif a == "--roles":
+            roles = true
+        elif a == "--today":
+            if i + 1 >= args.len():
+                print(usage)
+                return 2
+            today = args[i + 1]
+            i = i + 1
+        elif a == "--robust":
+            robust = true
+        elif a.starts_with("-"):
+            print(usage)
+            return 2
+        else:
+            dirs.push(_doctor_strip(a))
+        i = i + 1
+    if source_ownership == roles:
+        print(usage)
+        return 2
+    if dirs.len() == 0:
+        dirs.push(".")
+    if roles:
+        for d in dirs:
+            if not is_dir(d):
+                print("build-doctor-error: not a directory: {d}")
+                return 2
+        return _doctor_run_roles(dirs, robust, if today == "": _doctor_today() else: today)
+    for dir in dirs:
+        if not is_dir(dir):
+            print("build-doctor-error: not a directory: {dir}")
+            return 2
+    val scan = match doctor_ownership_scan(dirs):
+        case Ok(s): s
+        case Err(e):
+            print("build-doctor-error: {e}")
+            return 2
+    val severity = _doctor_severity("SPL-BUILD-SRC-001", robust)
+    print(doctor_source_ownership_report(scan.units, scan.scanned, severity))
+    doctor_source_ownership_exit(scan.units, scan.scanned, severity)

@@ -7,14 +7,18 @@
 #
 # Usage:
 #   bin/simple run examples/06_io/ui/web_render_page_ppm.spl <page.html> [out.ppm] [W] [H]
-# Env: PAGE_W / PAGE_H override the resolution.
+# Env: PAGE_W / PAGE_H override the resolution (CSS px). PAGE_DEVICE_SCALE=k
+# (integer, default 1) lays out in WxH CSS px and paints a (W*k)x(H*k) frame
+# with text re-rasterized at k x -- the >=300-dpi Chrome-parity lane uses k=4
+# against `--force-device-scale-factor=4`. k=1 keeps the original call path.
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     simple_web_render_html_to_pixels_with_engine2d_backend,
     simple_web_resolved_engine2d_backend_name_with_reason}
 use common.image.ppm_decode.{encode_ppm_p6}
 use std.sffi.cli.{cli_get_args}
-use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{web_draw_ir_route_stage_line}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{web_draw_ir_route_stage_line,
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{vulkan_timing_table, vulkan_font_mirror_line}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{web_presenter_engine_cache_create_attempt_count, web_presenter_engine_cache_reuse_count}
 use std.nogc_sync_mut.sffi.io.{file_write_bytes}
@@ -70,7 +74,14 @@ fn main() -> i64:
     if not file_exists(hp):
         print "HTML file not found: {hp}"
         return 1
-    val (W, H) = size_from_args_or_env(cli_get_args())
+    val (css_w, css_h) = size_from_args_or_env(cli_get_args())
+    val k = int_env("PAGE_DEVICE_SCALE", 1)
+    if k < 1:
+        print "error: PAGE_DEVICE_SCALE must be an integer >= 1, got {k}"
+        return 1
+    # W/H are the DEVICE-px frame; layout stays in css_w x css_h.
+    val W = css_w * k
+    val H = css_h * k
     val op = arg_with_suffix(".ppm", "/tmp/simple-web-capture/vanillastyle_page.ppm")
     val requested = requested_backend()
     val (reported, fallback_reason) = simple_web_resolved_engine2d_backend_name_with_reason(W, H, requested)
@@ -81,8 +92,14 @@ fn main() -> i64:
         return 1
 
     val html = read_file(hp)
-    print "rendering {hp} at {W}x{H} via pure-Simple web lane (backend_requested={requested} backend_reported={reported} size={W}x{H})..."
-    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, W, H, requested)
+    print "rendering {hp} at {W}x{H} via pure-Simple web lane (backend_requested={requested} backend_reported={reported} size={W}x{H} css={css_w}x{css_h} device_scale={k})..."
+    # k=1 keeps the original entry so the 1x ratchet stays byte-stable. k>1
+    # passes the backend resolved at device px (the public at_device_scale
+    # wrapper hardcodes "auto", which would defeat SIMPLE_2D_BACKEND_STRICT).
+    val pixels = if k == 1: simple_web_render_html_to_pixels_with_engine2d_backend(html, W, H, requested) else: simple_web_layout_render_html_pixels_engine2d_at_device_scale(html, css_w, css_h, k, reported)
+    if k > 1 and pixels.len() == 0:
+        print "error: device_scale={k} render returned 0 px (skipped commands, e.g. the stroke-width>1 linear-stroke gap)"
+        return 1
     if pixels.len() < W * H:
         print "render produced too few pixels: {pixels.len()} < {W*H}"
         return 1

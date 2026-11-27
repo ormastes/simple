@@ -1,0 +1,40 @@
+# Actual native closure publication; the capacity reader imports only the
+# separate protected-record validator, never this effect-bearing terminal port.
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_read_required_v3, distributed_operation_journal_publish_v3}
+use std.common.contracts.container.primary_connection_consumption_v2.{ContainerPrimaryConnectionConsumptionV2,
+    container_primary_connection_consumption_bytes_v2}
+use std.common.contracts.container.primary_connection_evidence_v2.container_primary_connection_closed_decode_v2
+use std.nogc_async_mut.container.terminal_session_v2.ContainerOwnedTerminalSessionV2
+use std.nogc_async_mut.container.terminal_primary_v2.{container_primary_terminal_view_v2,
+    container_primary_connection_closed_bytes_v2}
+use std.nogc_sync_mut.orchestration.host_primary_connection_receipt_v2.{HostPrimaryConnectionSettlementFactsV2,
+    host_primary_connection_expected_facts_v2, host_primary_connection_settlement_bytes_v2,
+    host_primary_connection_completion_evidence_v2}
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.common.crypto.sha256.sha256_text
+
+pub fn host_primary_connection_publish_closed_v2(journal: DistributedOperationJournalV2,
+        record: ContainerPrimaryConnectionConsumptionV2, session: ContainerOwnedTerminalSessionV2) -> Result<HostPrimaryConnectionSettlementFactsV2, text>:
+    val operation = record.admission.operation
+    val state = daemon_operation_exact_v2(journal, operation)?
+    if state.state != "executing" and state.state != "completed": return Err("connection-settlement-operation-state")
+    val key = sha256_text(operation.id) + ".sdn"
+    val consumed = container_primary_connection_consumption_bytes_v2(record)?
+    if distributed_operation_journal_read_required_v3(journal, "primary-connection-consumed/" + key, 8388608)? != consumed:
+        return Err("connection-settlement-consumption-mismatch")
+    val view = container_primary_terminal_view_v2(session)?
+    if view.request_digest != record.plan.request_digest or view.identity.operation_id != operation.id:
+        return Err("connection-settlement-native-owner-mismatch")
+    # The common port rechecks the exact native slot/generation closed/no-pending.
+    val bytes = container_primary_connection_closed_bytes_v2(session)?
+    val closed = container_primary_connection_closed_decode_v2(bytes)?
+    if closed.identity_digest != view.fingerprint: return Err("connection-settlement-native-identity")
+    val published = distributed_operation_journal_publish_v3(journal, "primary-connection-closed/" + key, bytes)?
+    if distributed_operation_journal_read_required_v3(journal, "primary-connection-closed/" + key, 4096)? != bytes:
+        return Err("connection-settlement-closed-retained-mismatch")
+    val facts = host_primary_connection_expected_facts_v2(journal, operation)?
+    val outcome = host_primary_connection_settlement_bytes_v2(facts)?
+    val stored = distributed_operation_journal_publish_v3(journal, "primary-connection-settlement/" + key, outcome)?
+    val checked = host_primary_connection_completion_evidence_v2(journal, operation)?
+    Ok(facts)

@@ -90,6 +90,11 @@ impl<'a> super::Lexer<'a> {
                     self.advance();
                     match self.process_escape(true) {
                         EscapeResult::Char(c) => current_literal.push(c),
+                        // Not an escape: keep the backslash (pure-Simple contract).
+                        EscapeResult::KeepBoth(c) => {
+                            current_literal.push('\\');
+                            current_literal.push(c);
+                        }
                         EscapeResult::Error(msg) => return TokenKind::Error(msg),
                         EscapeResult::Unterminated => return TokenKind::Error("Unterminated i18n string".to_string()),
                     }
@@ -203,6 +208,11 @@ impl<'a> super::Lexer<'a> {
                     self.advance();
                     match self.process_escape(true) {
                         EscapeResult::Char(c) => current_literal.push(c),
+                        // Not an escape: keep the backslash (pure-Simple contract).
+                        EscapeResult::KeepBoth(c) => {
+                            current_literal.push('\\');
+                            current_literal.push(c);
+                        }
                         EscapeResult::Error(msg) => return TokenKind::Error(msg),
                         EscapeResult::Unterminated => {
                             return TokenKind::Error("Unterminated triple-quoted i18n string".to_string())

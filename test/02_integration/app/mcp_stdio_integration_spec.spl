@@ -4,11 +4,12 @@
 
 use std.spec
 use std.common.spec.scenario_helpers.{capture_api_protocol_fields, capture_exec_detailed}
-use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive, file_write}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.nogc_sync_mut.env.platform.{get_temp_dir, is_windows}
-use std.env.variables.{env_get}
+use std.env.variables.{env_get, env_get_or}
+use app.io.mod.{shell}
 
 fn mcp_msg(body: text) -> text:
     "Content-Length: " + body.len().to_string() + "\r\n\r\n" + body
@@ -16,8 +17,14 @@ fn mcp_msg(body: text) -> text:
 fn mcp_jsonl(body: text) -> text:
     body + "\n"
 
+fn mcp_ping_body(id_raw: text) -> text:
+    "{" + "\"jsonrpc\":\"2.0\",\"id\":" + id_raw + ",\"method\":\"ping\"" + "}"
+
+fn mcp_ping_reply(id_raw: text) -> text:
+    "{" + "\"jsonrpc\":\"2.0\",\"id\":" + id_raw + ",\"result\":" + "{" + "}" + "}" + "\n"
+
 fn init_request(id: text) -> text:
-    val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
+    val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"" + "}" + "}" + "}"
     mcp_msg(body)
 
 fn initialized_notification() -> text:
@@ -50,16 +57,40 @@ fn parse_nonnegative_i64(value: text) -> i64:
         elif ch == "9": digit = 9
         if digit < 0:
             return -1
+        if n > 922337203685477580 or (n == 922337203685477580 and digit > 7):
+            return -1
         n = n * 10 + digit
         i = i + 1
     n
 
 fn has_valid_content_length_frames(output: text) -> bool:
-    val parts = output.split("Content-Length:")
-    parts.len() >= 3 and not output.contains("Content-Length: 2305843009213693951")
+    var remaining = output
+    var frame_count = 0
+    while remaining != "":
+        if not remaining.starts_with("Content-Length: "):
+            return false
+        val header_end = remaining.index_of("\r\n\r\n") ?? -1
+        if header_end < 0:
+            return false
+        val header = remaining.slice(0, header_end)
+        val body_length = parse_nonnegative_i64(header.replace("Content-Length:", "").trim())
+        val body_start = header_end + 4
+        if body_length < 2 or body_length > remaining.len() - body_start:
+            return false
+        val body_end = body_start + body_length
+        val body = remaining.slice(body_start, body_end)
+        if not body.starts_with("{") or not body.ends_with("}"):
+            return false
+        remaining = remaining.slice(body_end, remaining.len())
+        frame_count = frame_count + 1
+    frame_count == 2
 
 # Keep shell metacharacters inside a single pathname argument. Windows cmd
-# expands percent variables even inside quotes, so those paths fail closed.
+# expands percent variables even inside quotes, so those paths fail closed;
+# cmd also runs the bare executable only (a quoted program name fails through
+# the argv spawn layer) and cannot quote a redirect target after `<`, so any
+# space-bearing path fails closed instead of silently mis-parsing. The real
+# call sites use secure_temp_dir scopes, whose paths carry no spaces.
 fn mcp_stdin_command(server: text, input_path: text, windows: bool) -> Result<text, text>:
     if server.len() <= 0 or input_path.len() <= 0:
         return Err("MCP executable and input paths must be nonempty")
@@ -68,7 +99,14 @@ fn mcp_stdin_command(server: text, input_path: text, windows: bool) -> Result<te
     if windows:
         if server.contains("\"") or server.contains("%") or input_path.contains("\"") or input_path.contains("%"):
             return Err("MCP Windows paths contain unsupported command expansion")
-        return Ok("\"\"" + server + "\" < \"" + input_path + "\"\"")
+        # cmd parses '/' as a switch separator: hand it native separators.
+        val server_native = server.replace("/", "\\")
+        val input_native = input_path.replace("/", "\\")
+        if server_native.contains(" "):
+            return Err("MCP Windows server path contains spaces; cmd runs the bare executable only")
+        if input_native.contains(" "):
+            return Err("MCP Windows input path contains spaces; cmd cannot quote a redirect target")
+        return Ok(server_native + " < " + input_native)
     val quoted_server = "'" + server.replace("'", "'\"'\"'") + "'"
     val quoted_input = "'" + input_path.replace("'", "'\"'\"'") + "'"
     Ok("exec " + quoted_server + " < " + quoted_input)
@@ -77,20 +115,27 @@ fn send_mcp(messages: text) -> text:
     val scope = match secure_temp_dir(get_temp_dir(), "simple-mcp-stdio-"):
         Ok(path): path
         Err(reason): return "error: MCP temporary scope: " + reason
-    val input_path = scope + "/input.txt"
+    val windows = is_windows()
+    # cmd parses '/' as a switch separator, so Windows runs hand the shell
+    # native separator paths; POSIX keeps forward slashes.
+    val input_path = if windows: (scope + "/input.txt").replace("/", "\\") else: scope + "/input.txt"
     if not file_create_exclusive(input_path, messages):
         val removed = dir_remove_all(scope)
         return "error: MCP input creation failed; cleanup=" + removed.to_string()
-    # Qualification supplies the actual receipt-bound native MCP executable.
-    val server = env_get("SIMPLE_MCP_TEST_BINARY") ?? "bin/simple_mcp_server"
-    val windows = is_windows()
+    # Qualification supplies the actual receipt-bound native MCP executable;
+    # without it, fall back to the setup-generated host wrapper (.cmd on
+    # Windows, extensionless shell wrapper elsewhere). env_get answers ""
+       # for unset variables, so the default needs env_get_or, not `??`.
+    val default_server = if windows: "bin/simple_mcp_server.cmd" else: "bin/simple_mcp_server"
+    val server_raw = env_get_or("SIMPLE_MCP_TEST_BINARY", default_server)
+    val server = if windows: server_raw.replace("/", "\\") else: server_raw
     val command = match mcp_stdin_command(server, input_path, windows):
         Ok(value): value
         Err(reason):
             val removed = dir_remove_all(scope)
             return "error: " + reason + "; cleanup=" + removed.to_string()
     val shell = if windows: env_get("ComSpec") ?? "cmd.exe" else: "/bin/sh"
-    val args = if windows: ["/d", "/v:off", "/s", "/c", command] else: ["-c", command]
+    val args = if windows: ["/d", "/c", command] else: ["-c", command]
     val (stdout, stderr, status) = process_run_bounded(shell, args, 120000, 16777216)
     val removed = dir_remove_all(scope)
     if status != 0 or not removed:
@@ -98,11 +143,67 @@ fn send_mcp(messages: text) -> text:
     stdout
 
 describe "MCP Protocol Runtime":
-    it "quotes Windows stdin paths with spaces and command metacharacters":
-        val command = match mcp_stdin_command("C:/Program Files/MCP & Tools/server.exe", "C:/private scope/input.txt", true):
+    it "detects JSONL and framed transport independently for consecutive messages":
+        step("Send JSONL, framed, then JSONL pings on one native stdin stream")
+        val jsonl_first = mcp_ping_reply("61")
+        val framed_body = "{" + "\"jsonrpc\":\"2.0\",\"id\":62,\"result\":" + "{" + "}" + "}"
+        val jsonl_last = mcp_ping_reply("63")
+        val input = mcp_jsonl(mcp_ping_body("61")) + mcp_msg(mcp_ping_body("62")) + mcp_jsonl(mcp_ping_body("63"))
+        expect(send_mcp(input)).to_equal(jsonl_first + mcp_msg(framed_body) + jsonl_last)
+
+    it "checks complete frame boundaries instead of counting header strings":
+        step("Reject truncated lengths, invalid lengths and trailing bytes in captured server output")
+        val body = "{" + "}"
+        val valid = mcp_msg(body) + mcp_msg(body)
+        expect(has_valid_content_length_frames(valid)).to_equal(true)
+        expect(has_valid_content_length_frames("Content-Length: 1\r\n\r\n" + body + mcp_msg(body))).to_equal(false)
+        expect(has_valid_content_length_frames("Content-Length: -1\r\n\r\n" + body + mcp_msg(body))).to_equal(false)
+        expect(has_valid_content_length_frames("Content-Length: 999\r\n\r\n" + body + mcp_msg(body))).to_equal(false)
+        expect(has_valid_content_length_frames("Content-Length: 18446744073709551618\r\n\r\n" + body + mcp_msg(body))).to_equal(false)
+        expect(has_valid_content_length_frames(valid + "unexpected stdout")).to_equal(false)
+
+    it "rejects non-object JSONL roots and still handles the following request":
+        step("Send an invalid JSON value followed by a correlated ping over real stdin")
+        val invalid_roots = ["[]", "null", "true", "7", "\"text\""]
+        val invalid_reply = "{" + "\"jsonrpc\":\"2.0\",\"id\":null,\"error\":" + "{" + "\"code\":-32600,\"message\":\"Invalid Request\"" + "}" + "}" + "\n"
+        for invalid_root in invalid_roots:
+            val output = send_mcp(mcp_jsonl(invalid_root) + mcp_jsonl(mcp_ping_body("43")))
+            expect(output).to_equal(invalid_reply + mcp_ping_reply("43"))
+
+    it "does not answer no-ID requests or promote nested IDs into request IDs":
+        step("Send two notifications followed by one correlated ping")
+        val no_id = "{" + "\"jsonrpc\":\"2.0\",\"method\":\"ping\"" + "}"
+        val nested = "{" + "\"jsonrpc\":\"2.0\",\"method\":\"initialize\",\"params\":" + "{" + "\"clientInfo\":" + "{" + "\"id\":\"nested-client\"" + "}" + "}" + "}"
+        val output = send_mcp(mcp_jsonl(no_id) + mcp_jsonl(nested) + mcp_jsonl(mcp_ping_body("37")))
+        expect(output).to_equal(mcp_ping_reply("37"))
+
+    it "does not dispatch a nested method instead of the root method":
+        step("Put a known method inside params of an unknown root request")
+        val params = "{" + "\"method\":\"ping\",\"id\":99" + "}"
+        val output = send_mcp(generic_request("root-method", "not/a/method", params))
+        expect(output.contains("\"id\":\"root-method\"")).to_equal(true)
+        expect(output.contains("\"code\":-32601")).to_equal(true)
+        expect(output.contains("\"result\":")).to_equal(false)
+
+    it "rejects an explicit null ID without inventing initialize ID one":
+        step("Send an invalid null-ID MCP request")
+        val request = "{" + "\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"initialize\"" + "}"
+        val output = send_mcp(mcp_jsonl(request))
+        expect(output.contains("\"id\":null")).to_equal(true)
+        expect(output.contains("\"code\":-32600")).to_equal(true)
+        expect(output.contains("\"id\":\"1\"")).to_equal(false)
+        expect(output.contains("\"result\":")).to_equal(false)
+
+    it "decodes escaped protocol key and method spellings":
+        step("Resolve JSON Unicode escapes before selecting the ping handler")
+        val request = "{" + "\"jsonrpc\":\"2.0\",\"id\":41,\"me\\u0074hod\":\"pi\\u006eg\"" + "}"
+        expect(send_mcp(mcp_jsonl(request))).to_equal(mcp_ping_reply("41"))
+
+    it "builds the Windows stdin command with native separators":
+        val command = match mcp_stdin_command("bin/simple_mcp_server.cmd", "C:/temp-scope/input.txt", true):
             Ok(value): value
             Err(reason): reason
-        expect(command).to_equal("\"\"C:/Program Files/MCP & Tools/server.exe\" < \"C:/private scope/input.txt\"\"")
+        expect(command).to_equal("bin\\simple_mcp_server.cmd < C:\\temp-scope\\input.txt")
 
     it "rejects Windows variable expansion and injected command delimiters":
         val expansion_rejected = match mcp_stdin_command("C:/%MCP%/server.exe", "C:/input.txt", true):
@@ -111,8 +212,16 @@ describe "MCP Protocol Runtime":
         val newline_rejected = match mcp_stdin_command("C:/server.exe\nwhoami", "C:/input.txt", true):
             Ok(value): false
             Err(reason): reason.contains("line breaks")
+        val spaced_input_rejected = match mcp_stdin_command("C:/server.exe", "C:/private scope/input.txt", true):
+            Ok(value): false
+            Err(reason): reason.contains("spaces")
+        val spaced_server_rejected = match mcp_stdin_command("C:/Program Files/MCP/server.exe", "C:/input.txt", true):
+            Ok(value): false
+            Err(reason): reason.contains("spaces")
         expect(expansion_rejected).to_equal(true)
         expect(newline_rejected).to_equal(true)
+        expect(spaced_input_rejected).to_equal(true)
+        expect(spaced_server_rejected).to_equal(true)
 
     it "quotes apostrophes in POSIX stdin paths":
         val command = match mcp_stdin_command("/private/MCP's/server", "/private/input.txt", false):
@@ -129,7 +238,7 @@ describe "MCP Protocol Runtime":
         expect(single_output.contains("\"simple-mcp-full\"")).to_equal(true)
         expect(single_output.contains("\"error\":")).to_equal(false)
 
-        val init = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
+        val init = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"" + "}" + "}" + "}"
         val initialized = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}"
         val req = "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/list\",\"params\":{}}"
         val input = mcp_msg(init) + mcp_msg(initialized) + mcp_msg(req)
@@ -149,9 +258,131 @@ describe "MCP Protocol Runtime":
         expect(jsonl_output.contains("\"name\":\"debug_create_session\"")).to_equal(true)
         expect(jsonl_output.contains("\"error\":")).to_equal(false)
 
-        val unknown_req = "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"no_such_tool\",\"arguments\":{}}}"
+        val unknown_req = "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"no_such_tool\",\"arguments\":{" + "}" + "}" + "}"
         val unknown_input = mcp_jsonl(init) + mcp_jsonl("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}") + mcp_jsonl(unknown_req)
         val unknown_output = send_mcp(unknown_input)
         expect(unknown_output.contains("\"isError\":true")).to_equal(true)
         expect(unknown_output.contains("Unknown tool")).to_equal(true)
         expect(unknown_output.contains("\"error\":")).to_equal(false)
+
+    # @manual: folded
+    # @prev("advertises and dispatches the safe shared editor MCP subset")
+    # @capture(api)
+    it "reads editor MCP arguments only from params.arguments":
+        # @step: Operator prepares a scoped-argument editor note
+        # @capture(api)
+        # Host-portable note scope (no raw /tmp writes).
+        val scope = match secure_temp_dir(get_temp_dir(), "simple-mcp-editor-"):
+            Ok(dir): dir.replace("\\", "/")
+            Err(reason):
+                expect("secure_temp_dir: " + reason).to_equal("")
+                ""
+        val path = scope + "/simple_mcp_editor_scoped_arg_note.md"
+        expect(file_write(path, "# Scoped Argument\n\nfrom arguments\n")).to_equal(true)
+        # @step: Operator verifies editor.open_file reads params.arguments.path
+        # @capture(api)
+        val init = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"" + "}" + "}" + "}"
+        val open_req = "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"editor.open_file\",\"path\":\"/tmp/wrong_top_level.md\",\"arguments\":{\"path\":\"" + path + "\"" + "}" + "}" + "}"
+        val read_req = "{\"jsonrpc\":\"2.0\",\"id\":\"3\",\"method\":\"tools/call\",\"params\":{\"name\":\"editor.read_buffer\",\"arguments\":{" + "}" + "}" + "}"
+        val input = mcp_jsonl(init) + mcp_jsonl("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}") + mcp_jsonl(open_req) + mcp_jsonl(read_req)
+        val output = send_mcp(input)
+        expect(output.contains("opened " + path)).to_equal(true)
+        expect(output.contains("from arguments")).to_equal(true)
+        expect(output.contains("wrong_top_level")).to_equal(false)
+        expect(output.contains("\"error\":")).to_equal(false)
+        val _removed = dir_remove_all(scope)
+
+    # @prev("survives initialize followed by tools/list on the same server process")
+    # @capture(api)
+    it "advertises and dispatches the safe shared editor MCP subset":
+        # @step: Operator prepares an editor note
+        # @capture(api)
+        # Host-portable note scope (no raw /tmp writes).
+        val scope = match secure_temp_dir(get_temp_dir(), "simple-mcp-editor-"):
+            Ok(dir): dir.replace("\\", "/")
+            Err(reason):
+                expect("secure_temp_dir: " + reason).to_equal("")
+                ""
+        val path = scope + "/simple_mcp_editor_note.md"
+        expect(file_write(path, "# MCP Note\n\nhello editor\n")).to_equal(true)
+        # @step: Operator opens and reads the note through the safe editor tools
+        # @capture(api)
+        val init = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"" + "}" + "}" + "}"
+        val list_req = "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/list\",\"params\":{}}"
+        val open_req = "{\"jsonrpc\":\"2.0\",\"id\":\"3\",\"method\":\"tools/call\",\"params\":{\"name\":\"editor.open_file\",\"arguments\":{\"path\":\"" + path + "\"" + "}" + "}" + "}"
+        val read_req = "{\"jsonrpc\":\"2.0\",\"id\":\"4\",\"method\":\"tools/call\",\"params\":{\"name\":\"editor.read_buffer\",\"arguments\":{" + "}" + "}" + "}"
+        val files_req = "{\"jsonrpc\":\"2.0\",\"id\":\"5\",\"method\":\"tools/call\",\"params\":{\"name\":\"editor.list_open_files\",\"arguments\":{" + "}" + "}" + "}"
+        val input = mcp_jsonl(init) + mcp_jsonl("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}") + mcp_jsonl(list_req) + mcp_jsonl(open_req) + mcp_jsonl(read_req) + mcp_jsonl(files_req)
+        val output = send_mcp(input)
+        expect(output.contains("\"name\":\"editor.open_file\"")).to_equal(true)
+        expect(output.contains("\"name\":\"editor.read_buffer\"")).to_equal(true)
+        expect(output.contains("\"name\":\"editor.list_open_files\"")).to_equal(true)
+        expect(output.contains("\"name\":\"editor.edit\"")).to_equal(false)
+        expect(output.contains("\"name\":\"editor.search\"")).to_equal(false)
+        expect(output.contains("\"name\":\"editor.diagnostics\"")).to_equal(false)
+        expect(output.contains("opened " + path)).to_equal(true)
+        expect(output.contains("hello editor")).to_equal(true)
+        expect(output.contains(path)).to_equal(true)
+        expect(output.contains("\"error\":")).to_equal(false)
+        val _removed_editor = dir_remove_all(scope)
+
+    # @prev("accepts a single Content-Length framed initialize request")
+    # @capture(protocol)
+    it "returns tool-level isError for unknown tool":
+        # @step: Operator calls an unknown tool to verify tool-level errors
+        # @capture(protocol)
+        val init = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"" + "}" + "}" + "}"
+        val req = "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"no_such_tool\",\"arguments\":{" + "}" + "}" + "}"
+        val input = mcp_jsonl(init) + mcp_jsonl("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}") + mcp_jsonl(req)
+        val output = send_mcp(input)
+        expect(output.contains("\"isError\":true")).to_equal(true)
+        expect(output.contains("Unknown tool")).to_equal(true)
+        expect(output.contains("\"error\":")).to_equal(false)
+
+    # @prev("accepts a single Content-Length framed initialize request")
+    # @capture(protocol)
+    it "survives initialize followed by tools/list on the same server process":
+        # @step: Operator sends the initialized notification and lists tools
+        # @capture(protocol)
+        val init = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"" + "}" + "}" + "}"
+        val req = "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/list\",\"params\":{}}"
+        val input = mcp_jsonl(init) + mcp_jsonl("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}") + mcp_jsonl(req)
+        val output = send_mcp(input)
+        val exec_evidence = capture_exec_detailed(
+            "MCP stdio tools/list execution",
+            "bin/simple_mcp_server",
+            "stdio JSON-RPC over stdin",
+            "initialize, initialized, tools/list",
+            "initialize result and tools/list result",
+            "stderr redirected during protocol smoke",
+            0
+        )
+        val protocol_evidence = capture_api_protocol_fields(
+            "MCP tools/list protocol exchange",
+            "JSON-RPC",
+            "stdio:tools/list",
+            ["jsonrpc", "method", "id"],
+            ["2.0", "tools/list", "2"],
+            ["transport"],
+            ["stdio"],
+            ["protocolVersion", "result.tools", "error"],
+            ["2025-06-18", "present", "absent"]
+        )
+        expect(exec_evidence.body.contains("input: initialize, initialized, tools/list")).to_equal(true)
+        expect(protocol_evidence.body.contains("params: jsonrpc=2.0; method=tools/list; id=2")).to_equal(true)
+        expect(protocol_evidence.body.contains("response fields: protocolVersion=2025-06-18; result.tools=present; error=absent")).to_equal(true)
+        expect(output.contains("\"protocolVersion\":\"2025-06-18\"")).to_equal(true)
+        expect(output.contains("\"result\":{\"tools\":[")).to_equal(true)
+        expect(output.contains("\"name\":\"debug_create_session\"")).to_equal(true)
+        expect(output.contains("\"error\":")).to_equal(false)
+
+    # @inline
+    # @capture(protocol)
+    it "accepts a single Content-Length framed initialize request":
+        # @step: Operator sends a Content-Length framed initialize request
+        # @capture(protocol)
+        val input = init_request("1")
+        val output = send_mcp(input)
+        expect(output.contains("\"protocolVersion\":\"2025-06-18\"")).to_equal(true)
+        expect(output.contains("\"serverInfo\":{\"name\":\"simple-mcp-full\"")).to_equal(true)
+        expect(output.contains("\"error\":")).to_equal(false)

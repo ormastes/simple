@@ -1,6 +1,8 @@
 # A glob-imported PRIVATE fn lowers to an unmangled extern instead of failing to resolve
 
-- **Status:** OPEN (2026-09-13). Worked around at the call site, NOT fixed.
+## Open 2026-11-11 — LIVE (interpreter leg re-confirmed permissive), keep OPEN (lane ne10; see addendum)
+
+- **Status:** OPEN (2026-09-13; re-confirmed LIVE 2026-11-11 lane ne10). Worked around at the call site, NOT fixed.
 - **Layer:** Rust seed, name resolution -> MIR/LLVM lowering.
 
 ## Shape
@@ -49,3 +51,86 @@ unresolved name, so the next module to depend on a glob-imported private helper
 will fail the same way at the same late stage.
 
 Refs: doc/08_tracking/bug/stage2_link_undefined_cpu_probe_and_surface_symbols_2026-09-13.md
+
+---
+
+## 2026-11-11 addendum — lane ne10 (P3 traverse, batch ne10)
+
+**Verdict: LIVE — keep OPEN.** The expected compile-time unresolved-name error still does not
+happen; the glob-imported private name resolves permissively on the current seed.
+
+- **Seed:** tracked `bin/simple.exe` build-commit `46fe8f6b6def` (contains
+  `6d15331f91eb`, verified `git merge-base --is-ancestor`). All runs seed-smoke
+  (`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe ... --mode=interpreter --no-cache`).
+- **Related but narrower fix already landed:** `6d15331f91eb` (2026-11-09)
+  `fix(seed-interp): error on cross-directory call of a private fn (glob/no-import leak)` gates
+  the *bare-name leak* leg — its spec
+  `test/01_unit/compiler/95.interp/interpreter/private_fn_call_visibility_spec.spl` passes 3/3
+  on this seed.
+- **This bug's leg is NOT covered by it.** A two-module same-directory glob repro
+  (`use app.ma.*` + `use app.mb.*`, both defining private `fn _helper(x: i64) -> i64`, importer
+  calls `_helper(1)`) still runs, exit 0, printing the resolved result (`R=2`) — only a
+  `compiler_cross_module_private_symbol_collision` warning is emitted. A single-module
+  cross-directory glob repro (`use app.sub.lib.*` calling its private `_helper`) also still runs,
+  exit 0. In both shapes the private name resolves through the glob import binding itself, which
+  the `6d15331f91eb` call-time gate does not reject.
+- **Native-lowering leg (unmangled extern at link):** not re-provable on this lane — the Windows
+  native-build hang is a known live defect, never retried. Grant command:
+  `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe ./bin/simple.exe native-build --source src
+  --entry build/p3ne10-probes/row7fix/app/main.spl --output build/p3ne10-probes/row7fix/app/main`
+  (minimal repro entry as described above; run on a host where native-build does not hang, and
+  confirm the link either resolves per-module-mangled or fails at compile time, never an
+  unmangled `_sffi_*` reference).
+- **The call-site workaround in this doc remains in place** (`method_calls_literals.spl` defines
+  `_sffi_enum_discriminant` locally), so the original Stage-2 link is not blocked by this row
+  today; the seed behavior this record is about is unchanged.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne10: LIVE, kept OPEN. The 6d15331f91eb call-time gate
+covers the bare-name leak leg (its spec passes 3/3 on this lane's binary too),
+but the glob-binding resolution leg still resolves private names permissively
+(same-directory and cross-directory globs both run, exit 0, warning only).
+Remaining fix is in the seed frontend's import-binding path; the native
+unmangled-extern leg is unprovable on this host (native-build hang). No
+in-lane change.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred) — interpreter leg analyzed, not changed; rationale below.**
+
+Source analysis at this base (seed `bdd.rs`/`module_loader.rs`/`interpreter_call/mod.rs`):
+
+- The 2026-11-09 call-time gate `6d15331f91eb`
+  (`check_private_call_visibility` in
+  `src/compiler_rust/compiler/src/interpreter_module/module_loader.rs`)
+  deliberately keeps a **same-directory compatibility exception**
+  (`owner_path.parent() == cur_path.parent()` → allow), documented in two
+  places as the compatibility mode for sibling-file private access. This
+  bug's same-directory glob repro (`use app.ma.*` + `use app.mb.*` calling a
+  private `_helper`) resolves through exactly that exception — the gate fires
+  only for cross-directory callers, which is why the repro still prints
+  `R=2` with only a `compiler_cross_module_private_symbol_collision`
+  warning.
+- The other half of the mechanism is by design in
+  `interpreter_module/module_loader.rs` ("Use-list name checking" section):
+  `load_and_merge_module` deliberately registers the WHOLE module surface
+  for every import form, including glob — the comment states that narrowing
+  the registered surface "would change symbol resolution repo-wide and must
+  be staged separately". A glob import therefore binds private names into
+  the flat registry, and the private-use-name check
+  (`check_private_use_names`) only covers braced `use m.{name}` lists, not
+  glob.
+- **Not fixed in this lane:** closing the gap means either (a) removing or
+  re-scoping the documented same-directory exception, or (b) staging a
+  registration-surface narrowing for glob imports. Both change symbol
+  resolution repo-wide; the same-directory private-access pattern is used
+  across the tree and only the cross-directory half is baselined
+  (`scripts/check/private_import_baseline.txt`). A batch lane flipping this
+  would surface an unbounded quantity of new errors in unrelated packages.
+  The native-lowering leg (unmangled extern at link) additionally remains
+  unprovable on this Windows lane (known native-build hang).
+  Owner: seed name-resolution lane, staged with a baseline extension.

@@ -55,24 +55,26 @@ typedef int64_t RuntimeValue;
 #define IS_NIL(v)      ((v) == (RuntimeValue)TAG_SPECIAL)
 
 #define NIL_VALUE      ((RuntimeValue)TAG_SPECIAL)
-#define TRUE_VALUE     ENCODE_INT(1)
-#define FALSE_VALUE    ENCODE_INT(0)
 
 /* The values CODEGEN actually produces and consumes for a Simple `bool`.
  *
- * These are TAG_SPECIAL payloads, not encoded ints, so they are NOT the same as
- * TRUE_VALUE (8) / FALSE_VALUE (0) above -- see
- * doc/08_tracking/bug/baremetal_bool_macros_disagree_with_codegen_tags_2026-09-01.md,
- * which tracks that older pair's disagreement with codegen as its own defect.
- * These two are added, and the older pair deliberately left alone, so that
- * fixing the tagged-bool decode does not silently change every existing
- * TRUE_VALUE / FALSE_VALUE call site as a side effect.
- *
  * Source of truth: src/compiler_rust/compiler/src/codegen/llvm/instructions.rs
  * (`tagged_bool_const`: true = 11, false = 19). Pinned by
- * scripts/check/check-baremetal-tagged-bool-decode.shs. */
+ * scripts/check/check-baremetal-tagged-bool-decode.shs.
+ *
+ * Fix for
+ * doc/08_tracking/bug/baremetal_bool_macros_disagree_with_codegen_tags_2026-09-01.md:
+ * TRUE_VALUE/FALSE_VALUE used to be ENCODE_INT(1)/ENCODE_INT(0) (8/0), which no
+ * tag-aware consumer recognises as a bool. They now alias the codegen tags.
+ * Every arch TU that redefines this pair carries its own _Static_assert guard
+ * so a future divergence fails the build instead of silently relinking the old
+ * encoding. */
 #define TAGGED_BOOL_TRUE   ((RuntimeValue)11)
 #define TAGGED_BOOL_FALSE  ((RuntimeValue)19)
+#define TRUE_VALUE     TAGGED_BOOL_TRUE
+#define FALSE_VALUE    TAGGED_BOOL_FALSE
+_Static_assert(TRUE_VALUE == 11, "TRUE_VALUE must match codegen tagged true (11)");
+_Static_assert(FALSE_VALUE == 19, "FALSE_VALUE must match codegen tagged false (19)");
 
 /* ===================================================================
  * Heap object types

@@ -1,4 +1,43 @@
 # `test/system/code_quality` specs import three modules/types that exist nowhere in the tree
+## RESOLVED 2026-11-25 — all three specs green on the pinned seed
+
+**Resolution 2026-11-25 (work/p2w1-af-20261125, release/1.0.0 @ 38265c7f249,
+Windows, pinned Rust seed v1.0.0-rc.1 `bin/simple.exe`):** the 2026-11-03
+production repair (below) is verified by execution, and one remaining spec-side
+defect it could not see (TEST_BLOCKED) is fixed in this change.
+
+BEFORE (this host, this binary):
+- `deprecated_removed_spec.spl` — 13/13 PASS (the 2026-11-03 HashSet/HashMap
+  repoint works).
+- `allow_suppressions_spec.spl` — 5/5 PASS (same).
+- `iter_deprecated_spec.spl` — **5/9, 4 failed**. Root cause was spec-side,
+  not the new `std.common.iterable` module (whose `each`/`each_with_index`
+  correctly invoke their callbacks): the 2026-11-03 spec revision collected
+  results by mutating `var`s captured by the callback closures, but closures
+  capture enclosing locals **by value** (the compiler emits W-CAPTURE-MUTATION
+  for exactly these lines), so every collected value was silently dropped.
+  After that was repaired, a second seed-evaluator limit surfaced: method
+  calls and string interpolation on a closure *parameter* (e.g.
+  `"{v}:{i}"`, `n.to_string()`) evaluate to `""` inside the callback under the
+  test evaluator, though the same code is correct under `run`.
+
+Fix (spec-only, `test/system/code_quality/iter_deprecated_spec.spl`):
+collection now goes through module-level accumulator `var`s (the
+compiler-sanctioned workaround named by the W-CAPTURE-MUTATION diagnostic),
+reset per example; callbacks push only the raw parameter, and all string
+building happens outside the callback. **No assertion or expected value was
+changed** — the same order/sum/index/duplicate contracts are checked.
+
+AFTER:
+- `SIMPLE_LIB=src bin/simple.exe test test/system/code_quality/iter_deprecated_spec.spl
+  --mode=interpreter` -> **9 total, 9 passed, 0 failed**.
+
+(Run required a local, reverted strip of `@representation_boundary` decorator
+lines — release/1.0.0 HEAD is source/binary inconsistent with the pinned seed;
+no production source was changed by this verification.) Status: **RESOLVED**.
+
+The 2026-09-16 "needs owner triage" banner below is stale bookkeeping.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
@@ -123,3 +162,28 @@ STILL-OPEN. `ls src/lib/common/iterable.spl src/lib/common/set_utils.spl` ->
 both "No such file or directory". `test/system/code_quality/deprecated_removed_spec.spl`
 is still present and still imports them. The specs remain unloadable.
 
+
+## 2026-11-03 — production imports repaired; behavioral verification pending
+
+The release source still contained the reported nonexistent set-utils and
+iterable imports. The canaries now explicitly import the existing production
+`HashSet` and `HashMap` types. Set assertions exercise their actual supported
+membership, intersection, difference, and symmetric-difference methods; no
+membership oracle was removed. The narrative no longer calls supported
+`HashSet.contains` a removed method.
+
+Added `std.common.iterable` with generic ordered array callback traversal and
+zero-based `(value, index)` traversal. These are implemented loops, consumed
+by the existing canaries, rather than an unused module or a test-local fake.
+Text callbacks continue through `std.text.each` under an explicit alias.
+Array tests retain callback order, empty input, sums, and direct iteration,
+and additionally assert exact value/index pairs, empty indexed callbacks,
+and duplicate values at distinct indices. Empty arrays use the real `[i64]`
+type rather than an unimported `List<Int>` spelling.
+
+STATUS: TEST_BLOCKED. No qualified self-hosted runtime is available on this
+host; the tracked Rust seed was not used for test/check/run. Required resume:
+run all three code-quality specs, compiler/lib/MCP/LSP checks, MCP integration,
+and runtime/native MCP smoke with a qualified producer. Static diff checks
+cannot substitute for those behavioral gates. This record remains open until
+verified and merged.

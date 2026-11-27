@@ -7,7 +7,6 @@ use warnings;
 use POSIX qw(setsid setpgid WNOHANG);
 use Time::HiRes qw(sleep alarm clock_gettime CLOCK_MONOTONIC);
 
-# @workaround bug=bootstrap_watchdog_wall_clock_budget_2026_10_11 gh=#3136
 # Elapsed budgets must not follow civil-clock steps; require a monotonic host clock.
 sub monotonic_time { return clock_gettime(CLOCK_MONOTONIC); }
 # Only startup validation may die directly, before any helper/workload exists.
@@ -17,16 +16,37 @@ use File::Basename qw(dirname);
 use File::Temp qw(tempdir);
 use File::Path qw(make_path remove_tree);
 use Config;
-use Fcntl qw(O_RDONLY O_NOFOLLOW F_SETFD);
+use Fcntl qw(O_RDONLY O_WRONLY O_CREAT O_EXCL O_NOFOLLOW F_SETFD);
 use Digest::SHA;
 use IPC::Open2 qw(open2);
-use Errno qw(ESRCH ENOENT EINTR);
+use Errno qw(ESRCH ENOENT EINTR EEXIST);
 
 # EPIPE must be a caught observation failure even during pre-workload admission.
 my $workload_sigpipe = $SIG{PIPE} // 'DEFAULT';
 $SIG{PIPE} = 'IGNORE';
 
-my %opt = ( 'max-rss-kib' => 5859375, 'interval-ms' => 100,
+# This private entrypoint exercises the same identity publication helper used
+# below. Requiring both the explicit mode and exact arguments prevents this
+# diagnostic path from falling through into workload dispatch.
+if (@ARGV && $ARGV[0] eq '--test-identity-publication') {
+    ($ENV{SIMPLE_RSS_WATCHDOG_TEST_MODE} // '') eq '1'
+        or die "rss-guard: private identity test mode is disabled\n";
+    shift @ARGV;
+    @ARGV == 5 or die "rss-guard: invalid private identity test arguments\n";
+    my ($identity_file, $identity, $barrier_dir, $label, $mode) = @ARGV;
+    $mode =~ /\A(?:race|corrupt|truncated|missing)\z/
+        or die "rss-guard: invalid private identity test mode\n";
+    my $hook;
+    if ($mode eq 'race') {
+        $hook = sub { wait_for_identity_test_barrier($barrier_dir, $label) };
+    }
+    my $force_failure = $mode eq 'missing' ? 1 : 0;
+    publish_compiler_identity_memo($identity_file, $identity, $hook, $force_failure);
+    exit 0;
+}
+
+my %opt = ( 'max-phys-footprint-kib' => ($ENV{SIMPLE_BOOTSTRAP_PROCESS_TREE_PHYS_FOOTPRINT_CAP_KIB} // 0),
+            'max-rss-kib' => 5859375, 'interval-ms' => 100,
             'timeout-seconds' => 0, 'term-grace-seconds' => 1, 'session-mode' => 'new',
             'rss-cap-mode' => ($ENV{SIMPLE_BOOTSTRAP_RSS_CAP_MODE} // 'enforce'),
             'budget-scope' => 'compiler', 'scope-group' => 0,
@@ -34,13 +54,19 @@ my %opt = ( 'max-rss-kib' => 5859375, 'interval-ms' => 100,
 my %explicit;
 while (@ARGV && $ARGV[0] ne '--') {
     my $arg = shift @ARGV;
-    $arg =~ /^--(max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode|rss-cap-mode|budget-scope|aggregate-workers|compiler-jobs|compiler-ceiling-kib|cap-source|cap-bound|scope-group|observation-failure-mode|independent-cgroup)=(.+)$/
+    $arg =~ /^--(max-phys-footprint-kib|max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode|rss-cap-mode|budget-scope|aggregate-workers|compiler-jobs|compiler-ceiling-kib|cap-source|cap-bound|scope-group|observation-failure-mode|independent-cgroup)=(.+)$/
         or die "rss-guard: invalid option\n";
     my ($key, $value) = ($1, $2);
     $explicit{$key}++ and die "rss-guard: duplicate $key\n";
     $opt{$key} = $value;
 }
 @ARGV > 1 && shift(@ARGV) eq '--' or die "rss-guard: missing command\n";
+$opt{'max-phys-footprint-kib'} =~ /\A[0-9]{1,16}\z/ &&
+    $opt{'max-phys-footprint-kib'} <= 1099511627776
+    or die "rss-guard: invalid physical footprint cap\n";
+!$opt{'max-phys-footprint-kib'} || $^O eq 'darwin'
+    or die "rss-guard: physical footprint cap requires Darwin libproc\n";
+
 $opt{'session-mode'} =~ /\A(?:new|inherit)\z/ or die "rss-guard: invalid session mode\n";
 $opt{'rss-cap-mode'} =~ /\A(?:enforce|monitor)\z/ or die "rss-guard: invalid RSS cap mode\n";
 $opt{'scope-group'} =~ /\A[01]\z/ or die "rss-guard: invalid scope-group\n";
@@ -72,7 +98,19 @@ for my $key (qw(max-rss-kib interval-ms timeout-seconds term-grace-seconds)) {
 # full cli closure build (1500+ SCV modules) exceeded 24 GiB; widening to
 # 48 GiB to measure the true single-build plateau before final evidence-based
 # tightening. Keep in sync with tree-rss-policy.shs.
-my $compiler_ceiling_kib = 50331648;
+# Seventh widening 2026-11-15: release/1.0.0 MSVC receipt-authorized full run
+# (corridor tip 189dabae8e3) killed at the 48 GiB ceiling with the tree
+# plateaued at peak_rss_kib=51551038 (50.34 GiB, MIR 1832/3148) -- measured
+# plateau, not a leak; 64 GiB Hyper-V balloon host under-reports free memory,
+# so ~1.7 GiB headroom is real. 52 GiB admits the plateau. Evidence:
+# doc/08_tracking/bug/rss_static_ceiling_52gib_request_2026-11-14.md.
+# Keep in sync with tree-rss-policy.shs.
+# Eighth widening 2026-11-15: 52 GiB rung brackets the measured 50.34 GiB
+# plateau (recorded at MIR 1832/3148, before codegen). Codegen historically
+# adds the final peak growth; the host is single-tenant (system ~11 GiB,
+# balloon releases on demand), so 56 GiB is the next evidence-based rung.
+# Keep in sync with tree-rss-policy.shs.
+my $compiler_ceiling_kib = 58720256;
 my $worker_target_kib = 976562;
 my $budget_ceiling_kib = $compiler_ceiling_kib;
 $opt{'budget-scope'} =~ /\A(?:compiler|aggregate-tests)\z/
@@ -266,6 +304,7 @@ my $leader = 0;
 my %known;
 my %groups;
 my $identity_lost = 0;
+my ($peak_phys_footprint, $peak_single_phys_footprint, $phys_footprint_samples) = (undef, undef, 0);
 my ($peak, $samples, $child_status, $interrupted);
 $peak = $samples = $interrupted = 0;
 my $started = checked_monotonic_startup_time();
@@ -299,7 +338,7 @@ sub resolve_observation_budget_ms {
 my $observation_budget_ms = resolve_observation_budget_ms(
     $^O, $ENV{SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS});
 my ($sample_duration_max_ms, $sample_overruns, $sample_budget_exceeded) = (0, 0, 0);
-my ($observer_path, $observer_fd, $observer_sha, $observer_source_sha);
+my ($observer_path, $observer_fd, $observer_sha, $observer_source_sha, $observer_policy_sha);
 my ($observer_read, $observer_write, $observer_pid);
 my $observer_buffer = '';
 my ($observer_starts, $observer_errors, $observer_last_pid) = (0, 0, 0);
@@ -310,6 +349,12 @@ my ($observer_starts, $observer_errors, $observer_last_pid) = (0, 0, 0);
 # the summed working set of the job's members, and kill-on-limit terminates the
 # whole job. Native MSWin32 perl has no MSYS path/fork layer and fails closed.
 my $windows = $^O =~ /\A(?:msys|cygwin|MSWin32)\z/ ? 1 : 0;
+# MSYS/Cygwin File::Basename uses POSIX separators, even when native Windows
+# callers supplied __FILE__ with backslashes. Normalize only on Windows:
+# backslashes remain valid literal filename characters on POSIX hosts.
+my $watchdog_source_file = __FILE__;
+$watchdog_source_file =~ s{\\}{/}g if $windows;
+my $watchdog_source_dir = dirname($watchdog_source_file);
 my $freebsd = $^O eq 'freebsd';
 my ($reaper_read, $reaper_write, $reaper_buffer, $reaper_payload) = (undef, undef, '', 0);
 my ($reaper_identity, $reaper_cross_session) = ('', 0);
@@ -473,9 +518,12 @@ sub start_observer {
 
 sub install_observer {
     return unless $^O eq 'darwin';
-    my $source = abs_path(dirname(__FILE__) . '/macos-process-observer.c');
+    my $source = abs_path($watchdog_source_dir . '/macos-process-observer.c');
     open(my $fh, '<', $source) or die "cannot read process observer source";
     $observer_source_sha = hash_handle($fh);
+    my $policy = abs_path($watchdog_source_dir . '/macos-observer-denial-policy.h');
+    open(my $policy_fh, '<', $policy) or die "cannot read process observer denial policy";
+    $observer_policy_sha = hash_handle($policy_fh);
     $observer_path = dirname($session_helper) . '/macos-process-observer';
     my $compiler = $ENV{CC} || 'cc';
     my $builder = fork();
@@ -495,7 +543,10 @@ sub install_observer {
         sleep 0.02;
     }
     hash_handle($fh) eq $observer_source_sha or die "process observer source changed during compilation";
+    hash_handle($policy_fh) eq $observer_policy_sha
+        or die "process observer denial policy changed during compilation";
     close($fh);
+    close($policy_fh);
     chmod(0500, $observer_path) == 1 or die "cannot protect process observer";
     sysopen($observer_fd, $observer_path, O_RDONLY | O_NOFOLLOW) or die "cannot pin process observer";
     -f $observer_fd or die "process observer is not a regular file";
@@ -560,13 +611,23 @@ sub native_snapshot {
     }
     $complete && %all or die "incomplete process metadata";
     for my $pid ($metadata_only ? () : members(\%all)) {
-        print {$observer_write} "R $pid $all{$pid}{identity}\n" or die "process observer write failed";
+        my $request = $opt{'max-phys-footprint-kib'} ? 'F' : 'R';
+        print {$observer_write} "$request $pid $all{$pid}{identity}\n" or die "process observer write failed";
         my $line = observer_line();
         detail_eof($pid, \%all) unless defined($line);
         if ($line eq "R $pid gone\n") { $all{$pid}{zombie} = 1; next }
-        $line =~ /\AR $pid ([0-9]+) ([1-9][0-9]*)\n\z/ or die "malformed process detail";
-        $all{$pid}{rss} = 0+$1;
-        my $sid = 0+$2;
+        my ($rss, $sid);
+        if ($opt{'max-phys-footprint-kib'}) {
+            $line =~ /\AR $pid ([0-9]+) ([1-9][0-9]*) ([0-9]+)\n\z/
+                or die "malformed process footprint detail";
+            ($rss, $sid) = (0+$1, 0+$2);
+            $3 <= 1099511627776 or die "invalid process footprint size";
+            $all{$pid}{phys_footprint} = 0+$3;
+        } else {
+            $line =~ /\AR $pid ([0-9]+) ([1-9][0-9]*)\n\z/ or die "malformed process detail";
+            ($rss, $sid) = (0+$1, 0+$2);
+        }
+        $all{$pid}{rss} = $rss;
         ++$session_checks;
         $session_root_confirmed = 1 if $pid == $leader && $sid == $session_id;
         $unexpected_sid{$pid} = $sid if $sid != $session_id &&
@@ -627,12 +688,16 @@ sub install_session_helper {
     } else {
         $has_id && $has_exec or die "incomplete inherited session contract";
     }
-    my $source = abs_path(dirname(__FILE__) . '/../bootstrap/bootstrap-session-exec.c');
+    my $source = abs_path($watchdog_source_dir . '/../bootstrap/bootstrap-session-exec.c');
     defined($source) or die "missing session helper source";
     open(my $source_fh, '<', $source) or die "cannot read session helper source";
     $helper_source_sha = hash_handle($source_fh);
-    my $directory = defined($opt{receipt}) ?
-        tempdir('simple-rss-session-XXXXXXXX', DIR => dirname($opt{receipt}), CLEANUP => 0) :
+    # File::Basename under MSYS/Cygwin otherwise treats a native receipt's
+    # backslashes as filename characters and puts session files in cwd.
+    my $receipt_path = $opt{receipt};
+    $receipt_path =~ s{\\}{/}g if $windows && defined($receipt_path);
+    my $directory = defined($receipt_path) ?
+        tempdir('simple-rss-session-XXXXXXXX', DIR => dirname($receipt_path), CLEANUP => 0) :
         tempdir('simple-rss-session-XXXXXXXX', TMPDIR => 1, CLEANUP => 0);
     $directory = abs_path($directory);
     $session_dir = $directory;
@@ -739,7 +804,7 @@ sub windows_compile_flags {
     return ($compiler, 'cl', '-nologo', '-O2', '-fuse-ld=lld', @defines)
         if ($name // '') =~ /\Aclang-cl(?:\.exe)?\z/i;
     return ($compiler, 'gnu', '-O2', '-fuse-ld=lld', @defines)
-        if ($name // '') =~ /\Aclang(?:-[0-9]+)?(?:\.exe)?\z/i;
+        if ($name // '') =~ /\A(?:[A-Za-z0-9_]+-w64-mingw32-)?clang(?:-[0-9]+)?(?:\.exe)?\z/i;
     die "Windows session helper requires clang-cl or clang (CC=$compiler; cl/gcc are not permitted)";
 }
 
@@ -755,6 +820,97 @@ sub windows_target_compile_flags {
     die "unsupported Windows session helper compiler target: $target";
 }
 
+# Publish a queried compiler identity without replacing a concurrent winner.
+# A same-directory hard link is atomic and fails if the destination exists on
+# both Windows and POSIX; rename is unsuitable because POSIX rename replaces.
+sub publish_compiler_identity_memo {
+    my ($identity_file, $identity, $before_publish, $force_publish_failure) = @_;
+    defined($identity) && $identity =~ /clang/i
+        or die "compiler identity publication rejected non-clang payload\n";
+    my ($memo, $temporary);
+    my $created = 0;
+    for my $attempt (0 .. 99) {
+        $temporary = "$identity_file.new.$$.$attempt";
+        if (sysopen($memo, $temporary, O_WRONLY | O_CREAT | O_EXCL, 0600)) { $created = 1; last }
+        next if $!{EEXIST};
+        die "cannot create compiler identity temporary $temporary: $!\n";
+    }
+    $created or die "cannot allocate unique compiler identity temporary for $identity_file\n";
+    binmode($memo, ':raw') or do {
+        my $error = "$!";
+        close($memo);
+        unlink($temporary);
+        die "cannot set compiler identity temporary raw mode $temporary: $error\n";
+    };
+    my $wrote = print {$memo} $identity;
+    my $write_error = "$!";
+    my $closed = close($memo);
+    my $close_error = "$!";
+    if (!$wrote || !$closed) {
+        unlink($temporary) or die "cannot clean compiler identity temporary $temporary after write/close failure: $!\n";
+        !$wrote and die "cannot write compiler identity temporary $temporary: $write_error\n";
+        die "cannot close compiler identity temporary $temporary: $close_error\n";
+    }
+
+    $before_publish->() if $before_publish;
+    my $published = $force_publish_failure ? 0 : link($temporary, $identity_file);
+    my $publish_error = $force_publish_failure ? 'injected publication failure' : "$!";
+    if (!$published) {
+        my $winner_matches = 0;
+        my $target_state = 'destination is absent';
+        my @target = lstat($identity_file);
+        if (@target) {
+            $target_state = 'destination is not a regular non-symlink file';
+            if (-f $identity_file && !-l $identity_file) {
+                if (sysopen(my $winner, $identity_file, O_RDONLY | O_NOFOLLOW)) {
+                    if (binmode($winner, ':raw')) {
+                        my @winner_stat = stat($winner);
+                        if (@winner_stat && -f $winner && $winner_stat[7] == length($identity)) {
+                            local $/;
+                            my $winner_identity = <$winner>;
+                            my $winner_closed = close($winner);
+                            $winner_matches = $winner_closed && defined($winner_identity) &&
+                                $winner_identity eq $identity && $winner_identity =~ /clang/i;
+                            $target_state = $winner_matches ? '' : 'destination bytes differ from queried identity';
+                        } else {
+                            close($winner);
+                            $target_state = 'destination size or file type differs from queried identity';
+                        }
+                    } else {
+                        close($winner);
+                        $target_state = "cannot read destination in raw mode: $!";
+                    }
+                } else {
+                    $target_state = "cannot open destination for identity readback: $!";
+                }
+            }
+        }
+        if ($winner_matches) {
+            unlink($temporary) or die "cannot clean losing compiler identity temporary $temporary: $!\n";
+            return 1;
+        }
+        my $cleanup_error = unlink($temporary) ? '' : "; cannot clean own temporary: $!";
+        die "cannot publish compiler identity $identity_file: $publish_error; $target_state$cleanup_error\n";
+    }
+    unlink($temporary) or die "cannot remove published compiler identity temporary $temporary: $!\n";
+    return 1;
+}
+
+sub wait_for_identity_test_barrier {
+    my ($barrier_dir, $label) = @_;
+    $label =~ /\A[A-Za-z0-9_-]+\z/ or die "invalid private identity test barrier label\n";
+    my $ready = "$barrier_dir/$label.ready";
+    sysopen(my $marker, $ready, O_WRONLY | O_CREAT | O_EXCL, 0600)
+        or die "cannot create private identity test barrier marker $ready: $!\n";
+    print {$marker} "ready\n" or die "cannot write private identity test barrier marker $ready: $!\n";
+    close($marker) or die "cannot close private identity test barrier marker $ready: $!\n";
+    for (1 .. 3000) {
+        return 1 if -f "$barrier_dir/go";
+        sleep(0.01);
+    }
+    die "timed out waiting for private identity test barrier\n";
+}
+
 # Build once, reuse on every guard start. The cache key covers everything that
 # determines the binary: source sha, compiler identity (--version, which also
 # names the target), compiler path, flags (including the baked-in shell path)
@@ -764,14 +920,18 @@ sub install_cached_windows_helper {
     my ($source, $source_fh) = @_;
     my ($compiler, $style, @flags) = windows_compile_flags();
     my $cache = $ENV{SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE} ||
-        abs_path(dirname(__FILE__) . '/../..') . '/.simple/storage/cache/bootstrap-session-helper';
+        abs_path($watchdog_source_dir . '/../..') . '/.simple/storage/cache/bootstrap-session-helper';
     $cache =~ m{\A/} or die "session helper cache must be POSIX-absolute";
-    # The native Job supervisor starts an MSYS shell for the workload. Preserve
-    # this path across the preceding MSYS-to-native launch so an inherited
-    # guard does not receive D:/... and publish a non-POSIX helper path.
-    if (exists $ENV{SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE}) {
+    # The native Job supervisor starts an MSYS shell for the workload. These
+    # shell-owned paths must survive the preceding MSYS-to-native launch:
+    # nested guards require a POSIX helper cache, and bootstrap authority
+    # checks require the external output allowlist in canonical POSIX form.
+    # Keep other variables/argv subject to normal native path conversion.
+    for my $variable (qw(SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE
+                         SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT)) {
+        next unless exists $ENV{$variable};
         my $excluded = $ENV{MSYS2_ENV_CONV_EXCL} // '';
-        my $name = 'SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE=';
+        my $name = "$variable=";
         $ENV{MSYS2_ENV_CONV_EXCL} = length($excluded) ? "$excluded;$name" : $name
             unless ";$excluded;" =~ /;\Q$name\E;/;
     }
@@ -792,9 +952,7 @@ sub install_cached_windows_helper {
         $identity = <$version> // '';
         close($version) or die "compiler identity query failed";
         $identity =~ /clang/i or die "compiler identity is not clang: $identity";
-        open(my $memo, '>', "$identity_file.new.$$") or die "cannot record compiler identity";
-        print {$memo} $identity;
-        close($memo) && rename("$identity_file.new.$$", $identity_file) or die "cannot record compiler identity";
+        publish_compiler_identity_memo($identity_file, $identity);
     }
     push @flags, windows_target_compile_flags($style, $identity);
     my $key = Digest::SHA::sha256_hex(join("\0", 'simple-session-helper-cache-v1', $helper_source_sha,
@@ -902,7 +1060,11 @@ sub windows_job_workload {
         "sample_duration_total_us=$result{sample_duration_total_us}\n" .
         "root_exit_raw=" . ($result{root_exit_raw} // '') . "\n" .
         "abnormal_exit_ntstatus=" . ($result{abnormal_exit_ntstatus} // '') . "\n" .
-        "timeout_signal=job-terminate\n";
+        # W21 (2026-11-22): every Windows stop terminates the Job the same
+        # way, but only a timeout is a timeout. An RSS-cap kill used to read
+        # timeout_signal=job-terminate as well and was diagnosed as a hang.
+        "termination=job-terminate\n" .
+        "timeout_signal=" . ($result{status} eq 'timeout' ? 'job-terminate' : 'none') . "\n";
     my $code = $result{status} eq 'interrupted' && $interrupted ? $interrupted : $result{exit_status};
     return ($result{status}, $code, $result{quiescent});
 }
@@ -1381,8 +1543,41 @@ sub quiesce {
     return 0;
 }
 
+# Same selected live members as RSS; sequential observations share the bounded
+# sample window, not an atomic snapshot. Peak is max of CURRENT tree sums.
+sub observe_phys_footprint {
+    my ($all, @live) = @_;
+    return 0 unless $opt{'max-phys-footprint-kib'};
+    my $sum = 0;
+    for my $pid (@live) {
+        defined($all->{$pid}{phys_footprint})
+            or die "missing live process footprint";
+        my $current = $all->{$pid}{phys_footprint};
+        $sum += $current;
+        $peak_single_phys_footprint = $current
+            if !defined($peak_single_phys_footprint) || $current > $peak_single_phys_footprint;
+    }
+    ++$phys_footprint_samples;
+    $peak_phys_footprint = $sum
+        if !defined($peak_phys_footprint) || $sum > $peak_phys_footprint;
+    return $sum >= $opt{'max-phys-footprint-kib'};
+}
+
+sub phys_footprint_receipt {
+    return "phys_footprint_cap_enforced=0\nphys_footprint_metric=disabled\n"
+        unless $opt{'max-phys-footprint-kib'};
+    return "phys_footprint_cap_enforced=1\nmax_phys_footprint_kib=$opt{'max-phys-footprint-kib'}\n" .
+        "peak_phys_footprint_kib=" . (defined($peak_phys_footprint) ? $peak_phys_footprint : 'unavailable') . "\n" .
+        "peak_single_phys_footprint_kib=" . (defined($peak_single_phys_footprint) ? $peak_single_phys_footprint : 'unavailable') . "\n" .
+        "phys_footprint_samples=$phys_footprint_samples\n" .
+        "phys_footprint_metric=darwin_ri_phys_footprint_current_tree_sum\n" .
+        "phys_footprint_sample_semantics=sequential_current_values_within_bounded_observation_window\n";
+}
+
 sub receipt {
-    my ($status, $code, $quiet) = @_;
+    my ($status, $code, $quiet, $primary_status, $primary_code) = @_;
+    $primary_status //= $status;
+    $primary_code //= $code;
     if ($freebsd) {
         $extra_receipt .= "reaper_pid=$leader\nreaper_birth=$reaper_identity\n" .
             "payload_pid=$reaper_payload\ncross_session_owned_peak=$reaper_cross_session\n" .
@@ -1390,7 +1585,9 @@ sub receipt {
             "reaper_owner_wait_status=$reaper_owner_wait_status\n";
     }
     my $body = "status=$status\nexit_status=$code\nroot_pid=$leader\n" .
+        "primary_status=$primary_status\nprimary_exit_status=$primary_code\n" .
         "max_rss_kib=$opt{'max-rss-kib'}\npeak_rss_kib=$peak\nsamples=$samples\n" .
+        phys_footprint_receipt() .
         "budget_scope=$opt{'budget-scope'}\nbudget_ceiling_kib=$budget_ceiling_kib\n" .
         "aggregate_workers=" . ($opt{'aggregate-workers'} // 0) . "\n" .
         "compiler_jobs=$compiler_jobs\nhost_total_kib=$host_total_kib\n" .
@@ -1410,6 +1607,7 @@ sub receipt {
         "observer_backend=$observer_backend\nobserver_path=" . ($observer_path // '') . "\n" .
         "observer_sha256=" . ($observer_sha // '') . "\n" .
         "observer_source_sha256=" . ($observer_source_sha // '') . "\n" .
+        "observer_policy_header_sha256=" . ($observer_policy_sha // '') . "\n" .
         "observer_starts=$observer_starts\nobserver_errors=$observer_errors\n" .
         "observer_restarts=" . ($observer_starts ? $observer_starts - 1 : 0) . "\n" .
         "observer_last_pid=$observer_last_pid\n" .
@@ -1429,6 +1627,17 @@ sub receipt {
         "session_helper_integrity=" . ($helper_failed ? 'failed' : $helper_installed ? 'verified' : 'unverified') . "\n" .
         "unexpected_session_pids=" . join(',', sort {$a <=> $b} keys %unexpected_sid) . "\n" . $extra_receipt;
     print STDERR $body if $code == 88 || $code == 89 || $code == 90;
+    # W21 (2026-11-22): one explicit verdict line after the ~100-line body, so
+    # a cap kill is never read as an anonymous job-terminate / exit 88.
+    # Consumers grep '^rss-guard: (rss|phys-footprint)-cap-exceeded cap_kib='.
+    if ($status eq 'rss-cap-exceeded' || $status eq 'phys-footprint-cap-exceeded') {
+        my ($cap_kib, $peak_kib) = $status eq 'rss-cap-exceeded'
+            ? ($opt{'max-rss-kib'}, $peak)
+            : ($opt{'max-phys-footprint-kib'}, $peak_phys_footprint // 'unavailable');
+        print STDERR "rss-guard: $status cap_kib=$cap_kib peak_kib=$peak_kib " .
+            "(process tree killed by the enforced RSS cap, not a timeout; " .
+            "cap_source=$opt{'cap-source'} cap_bound=$opt{'cap-bound'})\n";
+    }
     if (defined $opt{receipt}) {
         my $tmp = "$opt{receipt}.tmp.$$";
         open(my $fh, '>', $tmp) or die "rss-guard: cannot write receipt\n";
@@ -1530,9 +1739,12 @@ while (1) {
     my @live = members($all);
     my $rss = 0; $rss += $all->{$_}{rss} for @live;
     $peak = $rss if $rss > $peak;
+    my $footprint_breach = eval { observe_phys_footprint($all, @live) };
+    if ($@) { ($status, $code) = ('phys-footprint-measurement-failed', 89); last }
     if ($opt{'rss-cap-mode'} eq 'enforce' && $rss >= $opt{'max-rss-kib'}) {
         ($status, $code) = ('rss-cap-exceeded', 88); last;
     }
+    if ($footprint_breach) { ($status, $code) = ('phys-footprint-cap-exceeded', 88); last }
     my $controller_lost = getppid() != $controller_pid;
     if (!$released && $controller_lost) {
         $interrupted = 143;
@@ -1572,6 +1784,9 @@ while (1) {
     sleep($remaining) if $remaining > 0;
 }
 close $gate_write unless $released || $freebsd;
+# Cleanup may fail closed after an RSS breach or timeout. Preserve the cause
+# that triggered cleanup so its final containment verdict cannot erase it.
+my ($primary_status, $primary_code) = $status eq 'complete' ? () : ($status, $code);
 if ($code == 124 || $interrupted) {
     # Preserve the timeout wrapper's TERM/grace contract for artifact flushing.
     # RSS breaches use immediate STOP/KILL because allocations must stop.
@@ -1586,7 +1801,10 @@ if ($code == 124 || $interrupted) {
         last unless @live;
         my $rss = 0; $rss += $all->{$_}{rss} for @live;
         $peak = $rss if $rss > $peak;
+        my $footprint_breach = eval { observe_phys_footprint($all, @live) };
+        if ($@) { ($status, $code) = ('phys-footprint-measurement-failed', 89); last }
         if ($opt{'rss-cap-mode'} eq 'enforce' && $rss >= $opt{'max-rss-kib'}) { ($status, $code) = ('rss-cap-exceeded', 88); last }
+        if ($footprint_breach) { ($status, $code) = ('phys-footprint-cap-exceeded', 88); last }
         sleep 0.02;
     }
 }
@@ -1595,6 +1813,7 @@ stop_observer();
 for (1..100) { reap(); last if defined $child_status; sleep 0.02 }
 if ($status eq 'complete' && defined $child_status) {
     $code = ($child_status & 127) ? 128 + ($child_status & 127) : $child_status >> 8;
+    ($primary_status, $primary_code) = ($status, $code);
 }
 $quiet = 0 unless defined $child_status;
 if (!$quiet && $code != 89) { ($status, $code) = ('rss-containment-unverified', 89) }
@@ -1604,5 +1823,5 @@ if ($opt{'observation-failure-mode'} eq 'diagnostic') {
     elsif ($independent_oom_kills && !$code) { ($status, $code) = ('independent-memory-oom', 137) }
     elsif ($status eq 'complete' && $sample_budget_exceeded) { $status = 'diagnostic-incomplete' }
 }
-receipt($status, $code, $quiet);
+receipt($status, $code, $quiet, $primary_status, $primary_code);
 exit $code;

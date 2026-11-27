@@ -32,3 +32,5 @@ avoids new per-expression allocations/scans. Measured RSS and elapsed-time
 regressions remain UNRUN; compare parser-heavy repeated/distinct annotation
 fixtures and the direct native repro under both backends after bootstrap
 finishes. No sub-0.1s compile performance claim is made.
+
+**Revalidated 2026-11-02: still plausible because FIX AUTHORED, native validation pending. This repairs the parser defect; no merged fix commit with a passing regression is cited in this doc.**

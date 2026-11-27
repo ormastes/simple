@@ -1,11 +1,39 @@
 # Persistent native-build cache has no GC and a key that has rendered corrupt
-## Open 2026-09-16 — needs owner triage
+
+## Verified closed 2026-11-25 (p2w3-af lane, release/1.0.0 @ 1457ddaa176)
+
+Header was stale ("Open 2026-09-16 — needs owner triage") while the body
+already carried the 2026-11-18 Wave C5 STORAGE resolution; header corrected.
+Code-inspection spot-check at HEAD confirms the resolution's components all
+landed (in evolved form):
+
+- Scope-dir eviction: `driver_aot_native_output.spl:2633-2654` bounds scope
+  dirs via `native_cache_sweep_with_lease` with
+  `disk_bound_cap_bytes("SIMPLE_NATIVE_CACHE_SCOPES_KEEP", 6)`, gated by
+  `native_cache_scope_eviction_role_allowed_v1` so shard/worker children
+  never evict (a refinement beyond the resolution text).
+- `disk_bound_keep_newest_prefix_dirs` exists
+  (`src/lib/nogc_sync_mut/io/disk_bound.spl:210`) and is wired into
+  `native_build_parse_closure_owner.spl:145` for `closure-request-*`
+  sweeping (keep 8, min_age 3600s).
+- Stale `build_cache.sdn` row pruning is present in
+  `src/compiler/80.driver/driver_build/incremental.spl` (missing-output
+  entries dropped; `incremental_file_exists` gates at :1582 et al.).
+- Regression spec `test/01_unit/lib/nogc_sync_mut/io/disk_bound_spec.spl`
+  exists in-tree. Spec-mode execution is environment-blocked repo-wide at
+  this HEAD (`unknown decorator '@representation_boundary'` on the pinned
+  seed), so verification here is by code inspection, not a spec re-run.
+
+Status: **RESOLVED (2026-11-18 Wave C5 STORAGE)** — unchanged, now
+header-accurate.
+
+## Open 2026-09-16 — needs owner triage (superseded by the 2026-11-18 resolution below; kept for history)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - **ID**: native_build_cache_scope_key_renders_corrupt_persistent_cache_2026-08-08
-- Status: OPEN (P2)
+- Status: RESOLVED (2026-11-18 Wave C5 STORAGE)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity**: HIGH (guaranteed unbounded disk leak on a 95%-full disk; plausible silent wrong-binary path in the stage-3 lane)
 - **Found by**: adversarial review of `5b569e96986d` ("stop wiping stage2/stage3 native-build cache every run")
@@ -339,4 +367,18 @@ design change (retention policy, LRU vs size cap, concurrency against the live
 bootstrap writing into `build/bootstrap/native_cache/<lane>/`), not a bug fix,
 and this lane was instructed not to touch `build/bootstrap/**`.
 Not proven: actual disk consumption was not measured this session.
+
+## Resolution 2026-11-18 (Wave C5 `STORAGE`) — prefix directory eviction & stale `build_cache.sdn` row pruning
+
+Closed the remaining persistent-cache unbounded growth vectors in driver/CLI storage owners:
+
+1. **Scope directory eviction (already landed in `driver_aot_native_output.spl:2187-2189`)**:
+   `disk_bound_keep_newest_dirs` bounds `s<32hex>` scope directories (`SIMPLE_NATIVE_CACHE_SCOPES_KEEP`, default 6, `min_age_s = 21600`) and sweeps legacy `scope-*` directories while preserving active concurrent lanes.
+2. **Variable-length `closure-request-*` directory eviction (`src/lib/nogc_sync_mut/io/disk_bound.spl`, `src/app/cli/native_build_parse_closure_owner.spl`)**:
+   - Added `disk_bound_keep_newest_prefix_dirs(parent, prefix, keep, min_age_s)` to bound variable-length `<prefix><suffix>` directories containing no `/` or `\` while respecting `min_age_s` so concurrent builds are untouched.
+   - `native_build_parse_closure_write_v1` sweeps `frontend_cache_dir` via `disk_bound_keep_newest_prefix_dirs(frontend_cache_dir, "closure-request-", 8, 3600)` on publication, cleans up freshly created `request_root` directories on failed publication, and exposes `native_build_parse_closure_retire_request_v1` to delete `request_root` once `selection.v1` has been consumed unless `SIMPLE_KEEP_CLOSURE_REQUEST == "1"`.
+3. **Stale `build_cache.sdn` row pruning (`src/compiler/80.driver/driver_build/incremental.spl`)**:
+   - `BuildCache.load` and `BuildCache.save` (`build_cache_persist`, prior to entering the transient serialization scope and reverse-reference receipt generation) prune cached entries whose non-empty `outputs` list references any missing artifact on disk (`not incremental_file_exists(out)`), bounding `build_cache.sdn` to live objects while preserving empty-output source-only dependency rows.
+4. **Verification**:
+   - Covered in `test/01_unit/lib/nogc_sync_mut/io/disk_bound_spec.spl` (`closure-request-*` prefix eviction, `min_age_s` concurrency protection, `SIMPLE_KEEP_CLOSURE_REQUEST` retirement gate, and save/load stale `BuildCache` row pruning).
 

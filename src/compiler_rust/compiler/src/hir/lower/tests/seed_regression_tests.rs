@@ -161,6 +161,19 @@ fn stage2_map_placeholder_uses_collection_element_owner() {
     );
 }
 
+#[test]
+fn result_map_placeholder_uses_ok_payload_owner() {
+    let source = "struct Decoy:\n    filler: i64\n    roots: [i64]\n\nstruct StorageRootResolution:\n    roots: text\n\nenum Result<T, E>:\n    Ok(T)\n    Err(E)\n\nfn inspect() -> Result<StorageRootResolution, text>:\n    Result.Ok(StorageRootResolution(roots: \"ok\"))\n\nfn probe():\n    inspect().map(_.roots)\n";
+    let module = parse_and_lower(source).expect("Result.map(_.roots) must lower");
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    let body = format!("{:?}", function.body);
+    assert!(body.contains("field_index: 0"), "StorageRootResolution.roots is slot zero: {body}");
+    assert!(
+        !body.contains("field_index: 1"),
+        "Decoy.roots must not supply a slot: {body}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // jit_is_some_is_none_method_dispatch_gap_2026-08-17 (silent-wrong-value shape)
 //
@@ -851,4 +864,277 @@ fn ambiguous_wildcard_variant_owner_picks_smallest_name_deterministically() {
          pick the smallest-named owner (AlphaKind), not a random HashMap-order \
          first-match"
     );
+}
+
+/// Regression: `text?` force-unwrap must keep the STRING type.
+///
+/// Incident 2026-11-07 (`stage2_new3_native_build_worker_av_c01_2026-11-07`):
+/// `incremental_fingerprint_digest_valid_v1(digest_opt: text?)` did
+/// `val digest = digest_opt.unwrap()` and then `digest.byte_at(index)`. The
+/// unwrap result was typed ANY, so MIR could not route `byte_at` to
+/// `rt_string_byte_at` and left a name-dispatched method call that the LLVM
+/// suffix-match fallback bound to the unrelated
+/// `StrictSdnReaderV1.byte_at(offset)` (same leaf, same arity). The rebuilt
+/// stage2 then AV'd (0xC0000005, read at 0x48) inside that method on every
+/// native-build, before compiling a single module.
+#[test]
+fn stage2_text_optional_unwrap_keeps_string_type_for_byte_at() {
+    let source = concat!(
+        "class Decoy:\n    bytes: [u8]\n\n    fn byte_at(offset: i64) -> i64:\n        self.bytes[offset].to_i64()\n\n",
+        "fn digest_valid(digest_opt: text?) -> bool:\n",
+        "    if digest_opt == nil: return false\n",
+        "    val digest = digest_opt.unwrap()\n",
+        "    if digest.len() != 64: return false\n",
+        "    for index in 0..64:\n",
+        "        val byte = digest.byte_at(index) as i64\n",
+        "        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)):\n",
+        "            return false\n",
+        "    true\n",
+    );
+    let module = parse_and_lower(source).expect("text? unwrap lowering");
+    let function = module.functions.iter().find(|f| f.name == "digest_valid").unwrap();
+    let digest = function
+        .locals
+        .iter()
+        .find(|local| local.name == "digest")
+        .expect("`digest` local");
+    assert_eq!(
+        digest.ty,
+        TypeId::STRING,
+        "`text?`.unwrap() must be typed STRING, got {:?}",
+        module.types.get(digest.ty)
+    );
+    let body = format!("{:?}", function.body);
+    assert!(
+        !body.contains("method: \"unwrap\""),
+        "unwrap on a nullable text must lower to a builtin, not a name-dispatched method: {body}"
+    );
+}
+
+#[test]
+fn local_named_vec_index_assignment_lowers_to_index_not_vec_literal() {
+    // Bug: local_named_vec_makes_index_assignment_a_vec_literal_lvalue_2026-09-05
+    // The parser reads `vec[...]` as a SIMD VecLiteral without scope
+    // knowledge, so `vec[i] = x` on a local named `vec` reached MIR as a
+    // VecLiteral lvalue ("complex lvalue"). The bound local must win.
+    let source = concat!(
+        "fn probe() -> f64:\n",
+        "    var vec: [f64] = []\n",
+        "    var i = 0\n",
+        "    while i < 4:\n",
+        "        vec.push(0.0)\n",
+        "        i = i + 1\n",
+        "    vec[0] = 1.0\n",
+        "    1.0\n",
+    );
+    let module = parse_and_lower(source).expect("vec-local index assignment lowers");
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    let assigns_index = function.body.iter().any(|stmt| match stmt {
+        HirStmt::Assign { target, .. } => matches!(target.kind, HirExprKind::Index { .. }),
+        _ => false,
+    });
+    assert!(
+        assigns_index,
+        "vec[0] = 1.0 on a bound local must lower to an Index assignment: {:?}",
+        function.body
+    );
+    assert!(
+        !function.body.iter().any(|stmt| match stmt {
+            HirStmt::Assign { target, .. } => matches!(target.kind, HirExprKind::VecLiteral(_)),
+            _ => false,
+        }),
+        "no VecLiteral lvalue may survive: {:?}",
+        function.body
+    );
+}
+
+#[test]
+fn vec_literal_assignment_target_without_local_stays_rejected() {
+    // Without a bound `vec` the rewrite must not mint an index: the shape
+    // stays a compile error (UnknownVariable at HIR), never an Index.
+    let source = "fn probe():\n    vec[0] = 1.0\n";
+    let result = parse_and_lower(source);
+    assert!(
+        result.is_err(),
+        "unbound vec[...] assignment must stay rejected, got {:?}",
+        result.map(|m| format!("{:?}", m.functions.iter().map(|f| &f.name).collect::<Vec<_>>()))
+    );
+}
+
+#[test]
+fn imported_generic_visitor_walk_hir_expr_infers_struct_return_without_type_annotation() {
+    use simple_parser::Parser;
+    use crate::module_resolver::ModuleResolver;
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().expect("tempdir");
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(src.join("compiler/hir/generated")).unwrap();
+    std::fs::write(
+        src.join("compiler/hir/generated/hir_visitor.spl"),
+        concat!(
+            "struct HirExpr:\n    line: i64\n\n",
+            "struct HirWalkNode:\n    line: i64\n\n",
+            "fn walk_hir_expr<C>(node: HirExpr, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:\n    ctx\n",
+        ),
+    )
+    .unwrap();
+    let entry_source = concat!(
+        "use compiler.hir.generated.hir_visitor.{HirExpr, HirWalkNode, walk_hir_expr, walk_hir_expr as walk_aliased}\n\n",
+        "struct MatchSiteScan:\n    sites: [i64]\n\n",
+        "fn collect_match_site(node: HirWalkNode, acc: MatchSiteScan) -> MatchSiteScan:\n    acc\n\n",
+        "fn walk_expr(e: HirExpr, acc: [i64]) -> [i64]:\n",
+        "    val start = MatchSiteScan(sites: acc)\n",
+        "    val done = walk_hir_expr(e, start, collect_match_site)\n",
+        "    val done_aliased = walk_aliased(e, start, collect_match_site)\n",
+        "    val done_explicit = walk_hir_expr<MatchSiteScan>(e, start, collect_match_site)\n",
+        "    val direct_len = walk_hir_expr(e, start, collect_match_site).sites.len()\n",
+        "    if done_aliased.sites.len() == done_explicit.sites.len() and direct_len >= 0:\n",
+        "        return done.sites\n",
+        "    done.sites\n",
+    );
+    let main_path = src.join("main.spl");
+    std::fs::write(&main_path, entry_source).unwrap();
+    let ast = Parser::new(entry_source).parse().expect("parse");
+    let resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+    let hir = Lowerer::with_module_resolver(resolver, main_path)
+        .lower_module(&ast)
+        .expect("imported generic visitor call must infer MatchSiteScan without annotation");
+    let walk_expr = hir.functions.iter().find(|f| f.name == "walk_expr").unwrap();
+    for local_name in ["done", "done_aliased", "done_explicit"] {
+        let local = walk_expr.locals.iter().find(|l| l.name == local_name).unwrap();
+        assert_eq!(
+            hir.types.get_type_name(local.ty),
+            Some("MatchSiteScan"),
+            "local {local_name} must inherit MatchSiteScan instead of ANY"
+        );
+    }
+    crate::mir::lower_to_mir(&hir).expect("MIR lowering must succeed for inferred MatchSiteScan return");
+}
+
+#[test]
+fn flattened_generic_identity_return_isolates_colliding_symbols_and_infers_struct() {
+    use simple_parser::ast::{Attribute, ConstStmt, Expr, Node, Visibility};
+    use simple_parser::token::Span;
+    use simple_parser::Parser;
+
+    let binding_marker = |importer: &str, local: &str, source_owner: &str, source_name: &str| -> Node {
+        Node::Const(ConstStmt {
+            span: Span::new(0, 0, 0, 0),
+            name: format!(
+                "{}{}:{importer}{}:{local}{}:{source_owner}{}:{source_name}",
+                crate::interpreter::FLATTEN_IMPORT_BINDING_MARKER_PREFIX,
+                importer.len(),
+                local.len(),
+                source_owner.len(),
+                source_name.len()
+            ),
+            ty: None,
+            value: Expr::Nil,
+            visibility: Visibility::Private,
+            attributes: vec![],
+        })
+    };
+
+    let tag_items = |source: &str, owner: &str| -> Vec<Node> {
+        let parsed = Parser::new(source).parse().expect("parse");
+        parsed
+            .items
+            .into_iter()
+            .map(|mut item| {
+                let make_attr = |span| Attribute {
+                    span,
+                    name: format!("{}{owner}", crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX),
+                    value: None,
+                    args: None,
+                    named_args: None,
+                };
+                match &mut item {
+                    Node::Function(f) => crate::interpreter::tag_function_module_owner(f, owner),
+                    Node::Struct(s) => s.attributes.push(make_attr(s.span)),
+                    Node::Class(c) => c.attributes.push(make_attr(c.span)),
+                    _ => {}
+                }
+                item
+            })
+            .collect()
+    };
+
+    let mut nodes = tag_items(
+        "struct MatchSiteScan:\n    sites: [i64]\n\nfn walk_hir_expr<C>(ctx: C) -> C:\n    ctx\n",
+        "visitor_mod.spl",
+    );
+    nodes.extend(tag_items(
+        "fn walk_hir_expr(x: i64) -> i64:\n    x + 1\n\nfn collide_caller() -> i64:\n    walk_hir_expr(41)\n",
+        "plain_mod.spl",
+    ));
+    let mut entry = Parser::new(
+        "fn walk_expr(acc: [i64]) -> [i64]:\n    val start = MatchSiteScan(sites: acc)\n    val done = walk_hir_expr(start)\n    done.sites\n",
+    )
+    .parse()
+    .expect("parse entry");
+    entry
+        .items
+        .push(binding_marker("<entry>", "MatchSiteScan", "visitor_mod.spl", "MatchSiteScan"));
+    entry
+        .items
+        .push(binding_marker("<entry>", "walk_hir_expr", "visitor_mod.spl", "walk_hir_expr"));
+    entry.items.extend(nodes);
+
+    let hir = crate::hir::lower(&entry).expect("flattened colliding generic identity");
+    let walk_expr = hir.functions.iter().find(|f| f.name == "walk_expr").unwrap();
+    let done_local = walk_expr.locals.iter().find(|l| l.name == "done").unwrap();
+    assert_eq!(hir.types.get_type_name(done_local.ty), Some("MatchSiteScan"));
+}
+
+/// Bug `seed_jit_extern_return_type_last_wins_2026-11-27`: two co-compiled
+/// modules declare the same runtime extern with different return types. Each
+/// call must be typed by its own module's declaration; before the fix the LAST
+/// registered declaration typed every call, so the frontend's `text` payload
+/// read was typed `i64`, int-boxed, and crashed `rt_text_eq_any`.
+#[test]
+fn flattened_extern_return_type_follows_calling_module_declaration() {
+    use simple_parser::ast::{Attribute, Node};
+    use simple_parser::Parser;
+    let tag_items = |source: &str, owner: &str| -> Vec<Node> {
+        let parsed = Parser::new(source).parse().expect("parse");
+        parsed
+            .items
+            .into_iter()
+            .map(|mut item| {
+                let make_attr = |span| Attribute {
+                    span,
+                    name: format!("{}{owner}", crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX),
+                    value: None,
+                    args: None,
+                    named_args: None,
+                };
+                match &mut item {
+                    Node::Function(f) => crate::interpreter::tag_function_module_owner(f, owner),
+                    Node::Extern(e) => e.attributes.push(make_attr(e.span)),
+                    _ => {}
+                }
+                item
+            })
+            .collect()
+    };
+
+    let mut entry = Parser::new("fn main() -> i64:\n    0\n").parse().expect("parse entry");
+    entry.items.extend(tag_items(
+        "extern fn rt_word_get(t: i64, i: i64) -> text\n\nfn text_reader(t: i64) -> text:\n    val s = rt_word_get(t, 0)\n    s\n",
+        "frontend_mod.spl",
+    ));
+    // Loaded LAST: under last-wins it would type the frontend's call too.
+    entry.items.extend(tag_items(
+        "extern fn rt_word_get(t: i64, i: i64) -> i64\n\nfn word_reader(t: i64) -> i64:\n    val w = rt_word_get(t, 0)\n    w\n",
+        "enum_wire_mod.spl",
+    ));
+
+    let hir = crate::hir::lower(&entry).expect("flattened conflicting extern declarations");
+    let local_ty = |func: &str, local: &str| {
+        let f = hir.functions.iter().find(|f| f.name == func).unwrap();
+        f.locals.iter().find(|l| l.name == local).unwrap().ty
+    };
+    assert_eq!(local_ty("text_reader", "s"), TypeId::STRING);
+    assert_eq!(local_ty("word_reader", "w"), TypeId::I64);
 }

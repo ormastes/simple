@@ -1,0 +1,143 @@
+# Source-only NOT_RUN. No ready-reader, native transport or secret owner.
+use std.common.contracts.orchestration.host_service_auth_frame_v6.*
+use std.common.contracts.orchestration.host_service_operation_v6.*
+use std.common.contracts.orchestration.host_service_auth_v6.*
+use std.common.crypto.sha256.sha256_text
+use std.common.base_encoding.base64.base64url_encode
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+fn frame_operation_fixture_v6() -> HostServiceOperationRequestV6:
+    val payload = "version: 1\nkind: workload\n"
+    HostServiceOperationRequestV6(action: "execute", service_incarnation: "c".repeat(32), operation_id: "operation",
+        scope_digest: "a".repeat(64), request_digest: host_service_operation_request_digest_v6("operation", payload).unwrap(), payload: payload)
+
+fn frame_context_fixture_v6() -> HostServiceAuthContextV6:
+    val operation = frame_operation_fixture_v6()
+    HostServiceAuthContextV6(service_incarnation: operation.service_incarnation, client_nonce: "a".repeat(64),
+        server_nonce: "b".repeat(64), command_digest: host_service_operation_command_digest_v6(operation).unwrap())
+
+fn frame_fixture_v6(role: text, reply: text = "version: 6\nstatus: observed\n") -> HostServiceAuthFrameV6:
+    val context = frame_context_fixture_v6()
+    val payload = if role == "request": host_service_operation_encode_v6(frame_operation_fixture_v6()).unwrap()
+        elif role == "reply": reply
+        else: ""
+    val tag = if role == "hello": "" else: host_service_auth_tag_v6("1a".repeat(32), role, context, payload).unwrap()
+    HostServiceAuthFrameV6(role: role, service_incarnation: context.service_incarnation, client_nonce: context.client_nonce,
+        server_nonce: if role == "hello": "" else: context.server_nonce,
+        command_digest: context.command_digest, payload: payload, tag: tag)
+
+fn frame_fields_fixture_v6(source: text) -> Dict<text, SdnValue>:
+    val limits = SdnStrictLimitsV1(max_source_bytes: 2097152, max_depth: 2, max_nodes: 24,
+        max_rows: 0, max_cells: 0, max_columns: 9)
+    match sdn_parse_strict_v1(source, limits).unwrap().value:
+        case SdnValue.Dict(fields): fields
+        case _: fail("expected authentication frame object")
+
+describe "strict V6 authentication frame and line codecs":
+    it "round trips every role through the exact nine field canonical codec and strict line envelope":
+        step("Keep frame bytes canonical with a fixed prefix unpadded base64url and one LF")
+        for role in ["hello", "challenge", "request", "reply"]:
+            val frame = frame_fixture_v6(role)
+            val source = host_service_auth_frame_encode_v6(frame).unwrap()
+            expect(frame_fields_fixture_v6(source).len()).to_equal(9)
+            expect(host_service_auth_frame_decode_v6(source).unwrap().role).to_equal(role)
+            val line = host_service_auth_frame_line_encode_v6(frame).unwrap()
+            expect(line).to_equal("host-service-auth-v6 " + base64url_encode(source) + "\n")
+            val decoded = host_service_auth_frame_line_decode_v6(line).unwrap()
+            expect(host_service_auth_frame_encode_v6(decoded).unwrap()).to_equal(source)
+
+    it "keeps hello and challenge empty fields and requires a nonempty reply":
+        step("Refuse fields that belong to another exchange phase")
+        var frame = frame_fixture_v6("hello")
+        frame.server_nonce = "b".repeat(64)
+        expect(host_service_auth_frame_validate_v6(frame).unwrap_err()).to_equal("host-auth-frame-hello-fields")
+        frame = frame_fixture_v6("hello")
+        frame.tag = "a".repeat(64)
+        expect(host_service_auth_frame_validate_v6(frame).unwrap_err()).to_equal("host-auth-frame-hello-fields")
+        frame = frame_fixture_v6("hello")
+        frame.payload = "unexpected"
+        expect(host_service_auth_frame_validate_v6(frame).unwrap_err()).to_equal("host-auth-frame-hello-fields")
+        frame = frame_fixture_v6("challenge")
+        frame.payload = "unexpected"
+        expect(host_service_auth_frame_validate_v6(frame).unwrap_err()).to_equal("host-auth-frame-challenge-payload")
+        frame = frame_fixture_v6("reply")
+        frame.payload = ""
+        expect(host_service_auth_frame_validate_v6(frame).unwrap_err()).to_equal("host-auth-frame-reply-payload-required")
+
+    it "rejects unknown duplicate missing mistyped and noncanonical frame fields":
+        step("Apply strict SDN and exact version kind and field names without coercion")
+        val canonical = host_service_auth_frame_encode_v6(frame_fixture_v6("challenge")).unwrap()
+        var fields = frame_fields_fixture_v6(canonical)
+        fields["authenticated"] = SdnValue.Bool(true)
+        expect(host_service_auth_frame_decode_v6(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n").is_err()).to_equal(true)
+        expect(host_service_auth_frame_decode_v6("version: 6\nversion: 6\n").unwrap_err()).to_start_with("host-auth-frame-sdn:")
+        fields = frame_fields_fixture_v6(canonical)
+        fields["version"] = SdnValue.String("6")
+        expect(host_service_auth_frame_decode_v6(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n").is_err()).to_equal(true)
+        var missing: Dict<text, SdnValue> = {}
+        for key in fields.keys():
+            if key != "payload": missing[key] = fields[key]
+        expect(host_service_auth_frame_decode_v6(sdn_encode_canonical(SdnValue.Dict(missing)) + "\n").is_err()).to_equal(true)
+        expect(host_service_auth_frame_decode_v6(canonical + "\n").unwrap_err()).to_equal("host-auth-frame-noncanonical")
+
+    it "rejects noncanonical operation bodies command digest mismatches and wrong incarnations":
+        step("Reuse the shared operation and transcript boundaries for request frames")
+        var frame = frame_fixture_v6("request")
+        frame.command_digest = "d".repeat(64)
+        expect(host_service_auth_frame_validate_v6(frame).unwrap_err()).to_equal("host-auth-request-command-mismatch")
+        frame = frame_fixture_v6("request")
+        frame.service_incarnation = "d".repeat(32)
+        expect(host_service_auth_frame_validate_v6(frame).unwrap_err()).to_equal("host-auth-request-incarnation-mismatch")
+        frame = frame_fixture_v6("request")
+        frame.payload = frame.payload + "\n"
+        frame.command_digest = sha256_text(frame.payload)
+        expect(host_service_auth_frame_validate_v6(frame).is_err()).to_equal(true)
+
+    it "bounds the entire escaped frame including metadata rather than only the inner body":
+        step("Reject an allowed raw reply body whose escaped envelope exceeds the role cap")
+        val within = frame_fixture_v6("reply", "x".repeat(1047000))
+        expect(host_service_auth_frame_encode_v6(within).unwrap().byte_len() <= 1048576).to_equal(true)
+        val expanded = frame_fixture_v6("reply", "\\".repeat(524288))
+        expect(expanded.payload.byte_len()).to_equal(524288)
+        expect(host_service_auth_frame_encode_v6(expanded).unwrap_err()).to_equal("host-auth-frame-encoded-size")
+        expect(host_service_auth_frame_decode_v6("x".repeat(2097153)).unwrap_err()).to_equal("host-auth-frame-source-size")
+        var fields = frame_fields_fixture_v6(host_service_auth_frame_encode_v6(frame_fixture_v6("challenge")).unwrap())
+        val oversized_handshake = sdn_encode_canonical(SdnValue.Dict(fields)) + " ".repeat(4096) + "\n"
+        expect(host_service_auth_frame_decode_v6(oversized_handshake).unwrap_err()).to_equal("host-auth-frame-role-source-size")
+
+    it "rejects invalid line alphabet padding line breaks prefix and oversized encoded input before decode":
+        step("Use separately bounded single-line input and strict unpadded base64url")
+        val line = host_service_auth_frame_line_encode_v6(frame_fixture_v6("hello")).unwrap()
+        expect(host_service_auth_frame_line_decode_v6("wrong-prefix " + line).is_err()).to_equal(true)
+        val encoded = base64url_encode(host_service_auth_frame_encode_v6(frame_fixture_v6("hello")).unwrap())
+        expect(host_service_auth_frame_line_decode_v6("host-service-auth-v6 " + encoded + "=\n").unwrap_err()).to_equal("host-auth-frame-line-alphabet")
+        expect(host_service_auth_frame_line_decode_v6("host-service-auth-v6 " + encoded + "\r\n").unwrap_err()).to_equal("host-auth-frame-line-alphabet")
+        expect(host_service_auth_frame_line_decode_v6("host-service-auth-v6 " + encoded + " \n").unwrap_err()).to_equal("host-auth-frame-line-alphabet")
+        expect(host_service_auth_frame_line_decode_v6(line + "\n").unwrap_err()).to_equal("host-auth-frame-line-alphabet")
+        expect(host_service_auth_frame_line_decode_v6("host-service-auth-v6 " + "a".repeat(2796204) + "\n").unwrap_err()).to_equal("host-auth-frame-line-size")
+        expect(host_service_auth_frame_line_decode_v6("host-service-auth-v6 é\n").unwrap_err()).to_equal("host-auth-frame-line-alphabet")
+
+    it "rejects nonzero unused base64 tail bits and lossy invalid UTF-8 aliases":
+        step("Re-encode decoded text so permissive tail bits or UTF-8 replacement cannot alias frame bytes")
+        # YQ is canonical for 'a'; YR has nonzero unused bits and decodes to the
+        # same byte in an alphabet/length-only decoder. It must fail earlier
+        # than SDN frame parsing through the canonical base64 recheck.
+        expect(host_service_auth_frame_line_decode_v6("host-service-auth-v6 YR\n").unwrap_err()).to_equal("host-auth-frame-line-base64url-noncanonical")
+        # _w encodes invalid UTF-8 byte 0xff; existing text decode replacement
+        # must not turn it into accepted authenticated text.
+        expect(host_service_auth_frame_line_decode_v6("host-service-auth-v6 _w\n").unwrap_err()).to_equal("host-auth-frame-line-base64url-noncanonical")
+
+    it "preserves exact Unicode reply bytes without treating schema validation as MAC verification":
+        step("Leave secret verification in the existing shared MAC helper and native owner")
+        val original = frame_fixture_v6("reply", "é\nreply: exact\n")
+        val decoded = host_service_auth_frame_line_decode_v6(host_service_auth_frame_line_encode_v6(original).unwrap()).unwrap()
+        expect(decoded.payload).to_equal(original.payload)
+        val context = frame_context_fixture_v6()
+        expect(host_service_auth_verify_v6("1a".repeat(32), decoded.role, context, decoded.payload, decoded.tag).unwrap()).to_equal(true)
+        var forged = original
+        forged.tag = "0".repeat(64)
+        expect(host_service_auth_frame_validate_v6(forged).unwrap()).to_equal(true)
+        expect(host_service_auth_verify_v6("1a".repeat(32), forged.role, context, forged.payload, forged.tag).unwrap()).to_equal(false)

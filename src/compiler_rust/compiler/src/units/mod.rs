@@ -12,6 +12,7 @@
 //! Composition-only; no inheritance.
 
 pub mod registry;
+pub mod scope;
 
 pub use registry::{
     convert, dimensions_match, ensure_loaded, lookup, lookup_by_dimensions, populate_thread_local_state, UnitEntry,

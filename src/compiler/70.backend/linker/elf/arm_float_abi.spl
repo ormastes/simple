@@ -1,0 +1,144 @@
+# Shared ARM EABI attribute parsing and float-ABI policy.
+use compiler.backend.linker.elf_parser.{ElfObject}
+use compiler.backend.linker.elf.byte_buffers.{elf_u8_read_le, elf_i64_from_u8}
+
+val SHT_ARM_ATTRIBUTES: i64 = 0x70000003
+val EF_ARM_ABI_FLOAT_SOFT: i64 = 0x200
+val EF_ARM_ABI_FLOAT_HARD: i64 = 0x400
+val TAG_ABI_VFP_ARGS: i64 = 28
+
+fn elf_uleb_at(b: [u8], at: i64, end: i64) -> [i64]:
+    """[value, next offset]; next = -1 on truncation."""
+    var v: i64 = 0
+    var shift: i64 = 0
+    var p = at
+    while p < end:
+        val c = b[p] as i64
+        v = v | ((c & 0x7f) << shift)
+        p = p + 1
+        if c & 0x80 == 0: return [v, p]
+        shift = shift + 7
+        if shift > 56: return [0, -1]
+    [0, -1]
+
+fn elf_arm_aeabi_tag(raw: [u8], start: i64, size: i64, wanted: i64) -> i64:
+    """One numeric AEABI tag from .ARM.attributes, or -1 if absent.
+    Layout: 'A', then vendor subsections (u32 len, NTBS vendor); "aeabi"
+    holds Tag_File (1) with u32 len followed by ULEB tag/value pairs where
+    tags 4, 5, 67 and odd tags >= 65 carry NTBS and 32 carries ULEB + NTBS."""
+    val end = start + size
+    if start < 0 or size < 1 or start >= raw.len() or end > raw.len() or (raw[start] as i64) != 0x41: return -1
+    var p = start + 1
+    while p + 4 <= end:
+        val sub_len = elf_u8_read_le(raw, p, 4)
+        val sub_end = p + sub_len
+        if sub_len < 5 or sub_end > end: return -1
+        var q = p + 4
+        val vendor_start = q
+        while q < sub_end and (raw[q] as i64) != 0: q = q + 1
+        val is_aeabi = q - vendor_start == 5 and (raw[vendor_start] as i64) == 0x61 and
+            (raw[vendor_start + 1] as i64) == 0x65 and (raw[vendor_start + 2] as i64) == 0x61 and
+            (raw[vendor_start + 3] as i64) == 0x62 and (raw[vendor_start + 4] as i64) == 0x69
+        q = q + 1
+        while is_aeabi and q + 5 <= sub_end:
+            val file_tag = raw[q] as i64
+            val tag_len = elf_u8_read_le(raw, q + 1, 4)
+            val tag_end = q + tag_len
+            if tag_len < 5 or tag_end > sub_end: return -1
+            var t = q + 5
+            while file_tag == 1 and t < tag_end:
+                val tag = elf_uleb_at(raw, t, tag_end)
+                if tag[1] < 0: return -1
+                t = tag[1]
+                if tag[0] == 4 or tag[0] == 5 or tag[0] == 67 or (tag[0] >= 65 and tag[0] % 2 == 1):
+                    while t < tag_end and (raw[t] as i64) != 0: t = t + 1
+                    t = t + 1
+                else if tag[0] == 32:
+                    val v = elf_uleb_at(raw, t, tag_end)
+                    if v[1] < 0: return -1
+                    t = v[1]
+                    while t < tag_end and (raw[t] as i64) != 0: t = t + 1
+                    t = t + 1
+                else:
+                    val v = elf_uleb_at(raw, t, tag_end)
+                    if v[1] < 0: return -1
+                    if tag[0] == wanted: return v[0]
+                    t = v[1]
+            q = tag_end
+        p = sub_end
+    -1
+
+fn elf_arm_vfp_args(raw: [u8], start: i64, size: i64) -> i64:
+    elf_arm_aeabi_tag(raw, start, size, TAG_ABI_VFP_ARGS)
+
+fn elf_arm_first_attributes(objects: [ElfObject]) -> [i64]:
+    """ld.lld keeps the first input .ARM.attributes section verbatim (no merge)."""
+    for obj in objects:
+        var si: i64 = 0
+        while si < obj.sections.len():
+            val sec = obj.sections[si]
+            if sec.sh_type == SHT_ARM_ATTRIBUTES and sec.sh_size > 0:
+                # sections[si].sh_addr is the FILE offset (elf_parser convention)
+                return elf_i64_from_u8(obj.raw[sec.sh_addr:sec.sh_addr + sec.sh_size])
+            si = si + 1
+    []
+
+fn elf_arm_float_flags(objects: [ElfObject]) -> i64:
+    """ld.lld's float-ABI e_flags bit: HARD when an input declares
+    Tag_ABI_VFP_args = 1 (VFP registers), otherwise SOFT."""
+    for obj in objects:
+        var si: i64 = 0
+        while si < obj.sections.len():
+            val sec = obj.sections[si]
+            if sec.sh_type == SHT_ARM_ATTRIBUTES:
+                # sections[si].sh_addr is the FILE offset (elf_parser convention)
+                if elf_arm_vfp_args(obj.raw, sec.sh_addr, sec.sh_size) == 1:
+                    return EF_ARM_ABI_FLOAT_HARD
+            si = si + 1
+    EF_ARM_ABI_FLOAT_SOFT
+
+
+fn elf_arm_float_flags_checked(objects: [ElfObject]) -> Result<i64, text>:
+    """Resolve executable float flags and reject conflicting calling conventions.
+    ET_REL e_flags alone does not distinguish softfp from hardfp: compilers
+    record that convention in Tag_ABI_VFP_args instead."""
+    var convention: i64 = -1
+    for obj in objects:
+        if obj.raw.len() < 52 or obj.raw[4] != 1 or obj.raw[5] != 1:
+            return Err("ARM float ABI requires little-endian ELF32")
+        val flags = elf_u8_read_le(obj.raw, 36, 4) & 0x600
+        if flags == 0x600: return Err("ARM object declares both soft and hard float ABI flags")
+        var abi: i64 = -1
+        var base_abi = false
+        for section in obj.sections:
+            if section.sh_type == SHT_ARM_ATTRIBUTES:
+                val tag = elf_arm_vfp_args(obj.raw, section.sh_addr, section.sh_size)
+                # Missing Tag_ABI_VFP_args defaults to base AAPCS for C ABI
+                # declarations, but architecture-only assembly is neutral.
+                for abi_tag in [14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 29, 30, 31]:
+                    if elf_arm_aeabi_tag(obj.raw, section.sh_addr, section.sh_size, abi_tag) >= 0:
+                        base_abi = true
+                if tag == 2 or tag > 3:
+                    return Err("ARM object has unsupported Tag_ABI_VFP_args {tag}")
+                if tag >= 0:
+                    if abi >= 0 and abi != tag:
+                        return Err("ARM object has conflicting Tag_ABI_VFP_args")
+                    abi = tag
+        # Tag value 3 explicitly declares compatibility with either convention.
+        if abi == 3 and flags == 0: continue
+        if abi < 0:
+            if flags == EF_ARM_ABI_FLOAT_HARD: abi = 1
+            elif flags == EF_ARM_ABI_FLOAT_SOFT or base_abi: abi = 0
+            else: continue
+        if abi == 3: abi = if flags == EF_ARM_ABI_FLOAT_HARD: 1 else: 0
+        val selected = if abi == 1: EF_ARM_ABI_FLOAT_HARD else: EF_ARM_ABI_FLOAT_SOFT
+        if flags != 0 and flags != selected:
+            return Err("ARM object float e_flags conflicts with Tag_ABI_VFP_args")
+        if convention >= 0 and convention != selected:
+            return Err("ARM objects have incompatible floating-point ABI")
+        convention = selected
+    Ok(if convention < 0: EF_ARM_ABI_FLOAT_SOFT else: convention)
+
+export elf_arm_float_flags_checked
+export SHT_ARM_ATTRIBUTES, EF_ARM_ABI_FLOAT_SOFT, EF_ARM_ABI_FLOAT_HARD
+export elf_arm_vfp_args, elf_arm_first_attributes, elf_arm_float_flags

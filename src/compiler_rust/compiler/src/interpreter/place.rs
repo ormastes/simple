@@ -10,7 +10,7 @@
 //! unsupported place spelled two different ways.
 //!
 //! A place here is an environment-rooted variable plus an arbitrary chain of
-//! field / index projections. `resolve_place` turns an lvalue expression into
+//! field / index / unwrap projections. `resolve_place` turns an lvalue expression into
 //! that path, `write_place` performs the write-through, and both the assignment
 //! statement path and the mutating-method receiver path route through them.
 //!
@@ -28,15 +28,15 @@
 //! `None` and callers keep their previous copy behavior.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use simple_parser::ast::{ClassDef, Expr, FunctionDef};
 
 use super::core_types::{Enums, ImplMethods};
 use super::expr::evaluate_expr;
 use super::interpreter_state::MODULE_GLOBALS;
-use crate::error::CompileError;
-use crate::value::{Env, Value};
+use crate::error::{codes, CompileError, ErrorContext};
+use crate::value::{Env, SpecialEnumKind, SpecialEnumType, Value};
 
 /// One projection step along an lvalue path.
 #[derive(Debug, Clone)]
@@ -45,6 +45,8 @@ pub(crate) enum Projection {
     Field(String),
     /// `[expr]` — the index/key already evaluated to a value.
     Index(Value),
+    /// `!` — preserve the writable payload of Some/Ok, or a direct nullable value.
+    Unwrap,
 }
 
 /// A resolved lvalue: a variable slot in `env` plus the projections that lead
@@ -55,6 +57,24 @@ pub(crate) struct Place {
     pub root: String,
     /// Projections applied to the root, outermost first.
     pub projections: Vec<Projection>,
+}
+
+/// Frame key recording that parameter `name` is a borrow. Holds the
+/// `Value::BorrowMut` it was bound from, or `Nil` for a bare argument to a
+/// parameter declared `&mut T`. The NUL keeps it out of the user's namespace.
+pub(crate) fn borrow_param_marker(name: &str) -> String {
+    format!("\0borrow:{name}")
+}
+
+/// True when `expr` is an lvalue with an index in it, whose re-evaluation could
+/// run user code or see a changed variable.
+pub(crate) fn place_has_index(expr: &Expr) -> bool {
+    match expr {
+        Expr::Index { .. } => true,
+        Expr::FieldAccess { receiver, .. } => place_has_index(receiver),
+        Expr::ForceUnwrap(inner) => place_has_index(inner),
+        _ => false,
+    }
 }
 
 /// Resolve `expr` to a place, or `None` when it is not one.
@@ -106,15 +126,140 @@ pub(crate) fn resolve_place(
                 None => Ok(None),
             }
         }
-        // `m!.n = 44`: `!` on an optional class/struct is the identity on the
-        // value (it only narrows `T?` to `T`), so the unwrapped object is the
-        // SAME place as the wrapped one and must be writable through. Without
-        // this arm the interpreter rejected the shape with
-        // `field assignment target is not a place` while the JIT accepted it —
-        // an engine divergence.
-        // Bug: doc/08_tracking/bug/jit_optional_class_unwrap_field_access_segv_2026-08-20.md
-        Expr::ForceUnwrap(inner) => resolve_place(inner, env, functions, classes, enums, impl_methods),
+        // An implicit nullable object is its own place, but explicit Some/Ok
+        // has a payload slot. Keep the unwrap in the path so both forms write
+        // through the same storage that expression evaluation reads.
+        Expr::ForceUnwrap(inner) => {
+            match resolve_place(inner, env, functions, classes, enums, impl_methods)? {
+                Some(mut place) => {
+                    place.projections.push(Projection::Unwrap);
+                    Ok(Some(place))
+                }
+                None => Ok(None),
+            }
+        }
         _ => Ok(None),
+    }
+}
+
+const CALL_ROOT_BINDING: &str = "\u{0}place_call_root";
+
+/// Refuse a write through a call-result root (bound by [`bind_call_root`])
+/// when it would land in a copy and be lost. This engine's arrays, dicts,
+/// byte arrays and structs are copy-on-write `Arc` values; pure-Simple and the
+/// seed JIT treat them as shared handles and write through. If any container
+/// on the path from the bound root to the written slot is still held elsewhere
+/// (refcount > 1; the bound root itself counts only its own binding), the
+/// write cannot reach that storage here, so it is refused rather than dropped.
+/// A path through a `ClassInstance` stops the walk: the instance is shared and
+/// the write lands in it. Places not rooted at a call result pass untouched.
+/// Bug: doc/08_tracking/bug/seed_interp_call_root_shared_write_dropped_2026-11-07.md
+pub(crate) fn refuse_shared_call_root(env: &Env, place: &Place) -> Result<(), CompileError> {
+    if place.root != CALL_ROOT_BINDING {
+        return Ok(());
+    }
+    let Some(mut slot) = env.get(&place.root) else {
+        return Ok(());
+    };
+    for projection in &place.projections {
+        let shared = match slot {
+            Value::Array(a) => Arc::strong_count(a) > 1,
+            Value::Dict(d) => Arc::strong_count(d) > 1,
+            Value::ByteArray(b) => Arc::strong_count(b) > 1,
+            Value::Object { fields, .. } => Arc::strong_count(fields) > 1,
+            Value::ClassInstance(_) => return Ok(()),
+            _ => false,
+        };
+        if shared {
+            let ctx = ErrorContext::new().with_code(codes::INVALID_ASSIGNMENT).with_help(
+                "assign through the place that owns the storage instead (pure-Simple and the seed JIT \
+                 write through; this interpreter's containers are copy-on-write values); see \
+                 doc/08_tracking/bug/seed_interp_call_root_shared_write_dropped_2026-11-07.md",
+            );
+            return Err(CompileError::semantic_with_context(
+                "invalid assignment: call-result place root reaches storage that is still shared; \
+                 the seed interpreter cannot write through it and refuses rather than drop the write",
+                ctx,
+            ));
+        }
+        match step_ref(slot, projection) {
+            Some(next) => slot = next,
+            None => return Ok(()),
+        }
+    }
+    Ok(())
+}
+
+/// A call-result root bound by [`bind_call_root`]: the hidden binding name and
+/// whatever that name held before, restored by [`unbind_call_root`].
+pub(crate) struct CallRootBinding {
+    name: String,
+    saved: Option<Value>,
+}
+
+/// For a projection place rooted at a call result (`get()[i()]`,
+/// `make().items[k]`), evaluate the call once, bind the value to a hidden
+/// local and return the place rewritten onto that local. `resolve_place` then
+/// evaluates the index subexpressions after the root, which is the owner
+/// contract of 2026-11-06: RHS first, then the root, then indices outer to
+/// inner, each once. Returns `None` when the root is not a call; such places
+/// keep their existing handling. Writers call [`refuse_shared_call_root`] on
+/// the resolved place before writing.
+/// Bug: doc/08_tracking/bug/seed_interp_call_root_place_order_2026-11-06.md
+pub(crate) fn bind_call_root(
+    expr: &Expr,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<(Expr, CallRootBinding)>, CompileError> {
+    fn root_of(expr: &Expr) -> &Expr {
+        match expr {
+            Expr::FieldAccess { receiver, .. } | Expr::Index { receiver, .. } => root_of(receiver),
+            Expr::ForceUnwrap(inner) => root_of(inner),
+            other => other,
+        }
+    }
+    fn replace_root(expr: &Expr, name: &str) -> Expr {
+        match expr {
+            Expr::FieldAccess { receiver, field } => Expr::FieldAccess {
+                receiver: Box::new(replace_root(receiver, name)),
+                field: field.clone(),
+            },
+            Expr::Index { receiver, index } => Expr::Index {
+                receiver: Box::new(replace_root(receiver, name)),
+                index: index.clone(),
+            },
+            Expr::ForceUnwrap(inner) => Expr::ForceUnwrap(Box::new(replace_root(inner, name))),
+            _ => Expr::Identifier(name.to_string()),
+        }
+    }
+    if !matches!(expr, Expr::FieldAccess { .. } | Expr::Index { .. }) {
+        return Ok(None);
+    }
+    let root = root_of(expr);
+    if !matches!(root, Expr::Call { .. } | Expr::MethodCall { .. }) {
+        return Ok(None);
+    }
+    let root_value = evaluate_expr(root, env, functions, classes, enums, impl_methods)?;
+    // NUL-prefixed: no Simple program can spell (and so clobber) this binding.
+    let name = CALL_ROOT_BINDING.to_string();
+    let saved = env.get(&name).cloned();
+    env.insert(name.clone(), root_value);
+    let rewritten = replace_root(expr, &name);
+    Ok(Some((rewritten, CallRootBinding { name, saved })))
+}
+
+/// Restore the hidden binding that [`bind_call_root`] replaced.
+pub(crate) fn unbind_call_root(env: &mut Env, binding: CallRootBinding) {
+    match binding.saved {
+        Some(value) => {
+            env.insert(binding.name, value);
+        }
+        None => {
+            env.remove(&binding.name);
+        }
     }
 }
 
@@ -140,10 +285,54 @@ fn value_as_u8(value: &Value) -> Option<u8> {
     }
 }
 
+/// Borrow exactly the value that the expression-level force unwrap reads.
+/// Canonical None/Err and nil have no writable payload; user enums and direct
+/// nullable values retain their identity. Never clone a payload for a write.
+fn unwrap_place_ref(slot: &Value) -> Option<&Value> {
+    match slot {
+        Value::Nil => None,
+        Value::Enum { enum_name, variant, payload }
+            if SpecialEnumType::from_name(enum_name).is_some() =>
+        {
+            match SpecialEnumKind::from_names(enum_name, variant) {
+                Some(SpecialEnumKind::OptionSome | SpecialEnumKind::ResultOk) => payload.as_deref(),
+                _ => None,
+            }
+        }
+        other => Some(other),
+    }
+}
+
+fn unwrap_place_mut(slot: &mut Value) -> Option<&mut Value> {
+    // Classify first, then take the one mutable borrow we return: returning
+    // `payload` from one arm and `slot` itself from another in a single match
+    // is rejected by the borrow checker (E0505, NLL problem case #3).
+    let projects_payload = match &*slot {
+        Value::Nil => return None,
+        Value::Enum { enum_name, variant, .. } if SpecialEnumType::from_name(enum_name).is_some() => {
+            match SpecialEnumKind::from_names(enum_name, variant) {
+                Some(SpecialEnumKind::OptionSome | SpecialEnumKind::ResultOk) => true,
+                _ => return None,
+            }
+        }
+        _ => false,
+    };
+    if !projects_payload {
+        return Some(slot);
+    }
+    match slot {
+        Value::Enum { payload, .. } => payload.as_deref_mut(),
+        _ => None,
+    }
+}
+
 /// Take one projection step, yielding a mutable reference to the projected
 /// storage. `Arc::make_mut` keeps copy-on-write semantics: unique containers
 /// mutate in place, shared ones deep-copy first.
 fn step_mut<'a>(slot: &'a mut Value, projection: &Projection) -> Option<&'a mut Value> {
+    if matches!(projection, Projection::Unwrap) {
+        return unwrap_place_mut(slot);
+    }
     match (slot, projection) {
         (Value::Object { fields, .. }, Projection::Field(name)) => Arc::make_mut(fields).get_mut(name),
         (Value::Dict(entries), Projection::Field(name)) => crate::interpreter::module_dict_make_mut(entries).get_mut(name),
@@ -160,17 +349,47 @@ fn step_mut<'a>(slot: &'a mut Value, projection: &Projection) -> Option<&'a mut 
             items.get_mut(idx)
         }
         (Value::Dict(entries), Projection::Index(key)) => {
-            // Composite dict keys are stored wrapped by `Value::wrap_dict_entry`
-            // (a marker tuple). Projecting through that wrapper is not modelled
-            // here, so only scalar keys are treated as places.
-            if !key.dict_key_is_scalar() {
-                return None;
-            }
+            // Non-text keys are stored wrapped by `Value::wrap_dict_entry`; the
+            // place is the value slot inside that wrapper.
             let key_string = key.to_key_string();
-            crate::interpreter::module_dict_make_mut(entries).get_mut(&key_string)
+            crate::interpreter::module_dict_make_mut(entries)
+                .get_mut(&key_string)
+                .map(Value::dict_entry_value_mut)
         }
-        _ => None,
+        (other, _) => {
+            classinstance_tripwire("place::step_mut", other);
+            None
+        }
     }
+}
+
+/// Diagnostic tripwire (class-value-identity bug, step 1 of its plan): report
+/// to stderr, once per site, when a `Value::ClassInstance` reaches a
+/// `Value::Object`-only wildcard arm. Enabled by
+/// `SIMPLE_INTERP_CLASSINSTANCE_TRIPWIRE=1`, read once; a single bool load when off.
+pub(crate) fn classinstance_tripwire(site: &'static str, value: &Value) {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    static SEEN: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    let enabled = *ENABLED.get_or_init(|| std::env::var("SIMPLE_INTERP_CLASSINSTANCE_TRIPWIRE").as_deref() == Ok("1"));
+    tripwire_report(enabled, &SEEN, site, value);
+}
+
+/// Returns true when a report was emitted (enabled, a ClassInstance, first hit for `site`).
+fn tripwire_report(enabled: bool, seen: &Mutex<Vec<&'static str>>, site: &'static str, value: &Value) -> bool {
+    if !enabled {
+        return false;
+    }
+    let Value::ClassInstance(instance) = value else {
+        return false;
+    };
+    let mut seen = seen.lock().unwrap();
+    if seen.contains(&site) {
+        return false;
+    }
+    seen.push(site);
+    eprintln!("[classinstance-tripwire] ClassInstance `{}` reached Value::Object wildcard at {}", instance.class(), site);
+    true
 }
 
 /// Walk every projection, returning a mutable reference to the final storage.
@@ -182,12 +401,68 @@ fn project_mut<'a>(root: &'a mut Value, projections: &[Projection]) -> Option<&'
     Some(slot)
 }
 
+/// Merge container-handle mutations from a callee parameter back into the
+/// storage `projections` designate, starting from a clone of the place's
+/// ROOT value (the caller's binding). Only the leaf merge runs the
+/// shared-container carry (see `merge_shared_collection_fields`); scalar
+/// fields keep value semantics. Returns true when the root changed.
+pub(crate) fn merge_place_containers(root: &mut Value, projections: &[Projection], binding: &Value) -> bool {
+    let Some(leaf) = project_mut(root, projections) else {
+        return false;
+    };
+    crate::interpreter::interpreter_call::merge_shared_collection_fields(leaf, binding)
+}
+
+/// Write `value` at the end of `projections`, starting from `slot`.
+///
+/// The COW hops (`Object`, `Array`, `Dict`, tuples) are `step_mut` +
+/// `store_last`, unchanged. A `Value::ClassInstance` hop is the reference
+/// carrier (`SIMPLE_INTERP_CLASS_REF=1`): its field lives behind an `RwLock`,
+/// so no `&mut Value` can be handed down the path. The field value is moved out
+/// (`replace_field`), the nested write runs with NO lock held, and the value
+/// is put back. Holding the write lock across the recursion instead would
+/// deadlock on any path that revisits the same instance (`a.self_ref.v = 1`,
+/// `a.items[0].v = 1` with `items[0] == a`), which cyclic class graphs do.
+/// A nested `ClassInstance` is shared through its Arc, so the write lands in
+/// the shared cell and the put-back stores the same Arc; a nested COW
+/// container is uniquely held while moved out, so `Arc::make_mut` mutates it
+/// in place rather than deep-copying.
+fn write_through(slot: &mut Value, projections: &[Projection], value: Value) -> bool {
+    let Some((head, rest)) = projections.split_first() else {
+        return false;
+    };
+    if rest.is_empty() {
+        return store_last(slot, head, value);
+    }
+    if let (Value::ClassInstance(instance), Projection::Field(name)) = (&*slot, head) {
+        let Some(mut inner) = instance.replace_field(name, Value::Nil) else {
+            return false;
+        };
+        let written = write_through(&mut inner, rest, value);
+        instance.replace_field(name, inner);
+        return written;
+    }
+    match step_mut(slot, head) {
+        Some(next) => write_through(next, rest, value),
+        None => false,
+    }
+}
+
 /// Store `value` at the final projection of `container`.
 ///
 /// The last step is an *insert*, not a navigation: assigning a field that does
 /// not exist yet creates it, matching what the existing one- and two-level
 /// field-assignment paths do with `HashMap::insert`.
 fn store_last(container: &mut Value, projection: &Projection, value: Value) -> bool {
+    if matches!(projection, Projection::Unwrap) {
+        return match unwrap_place_mut(container) {
+            Some(payload) => {
+                *payload = value;
+                true
+            }
+            None => false,
+        };
+    }
     match (container, projection) {
         (Value::Object { fields, .. }, Projection::Field(name)) => {
             Arc::make_mut(fields).insert(name.clone(), value);
@@ -233,13 +508,21 @@ fn store_last(container: &mut Value, projection: &Projection, value: Value) -> b
             None => false,
         },
         (Value::Dict(entries), Projection::Index(key)) => {
-            if !key.dict_key_is_scalar() {
-                return false;
-            }
-            crate::interpreter::module_dict_make_mut(entries).insert(key.to_key_string(), value);
+            crate::interpreter::module_dict_make_mut(entries)
+                .insert(key.to_key_string(), Value::wrap_dict_entry(key, value));
             true
         }
-        _ => false,
+        // Reference carrier: the write lands in the shared cell, so every
+        // holder of the instance (`val e = d["k"]`, the dict entry, a list
+        // element) observes it — the JIT's class semantics.
+        (Value::ClassInstance(instance), Projection::Field(name)) => {
+            instance.set_field(name.clone(), value);
+            true
+        }
+        (other, _) => {
+            classinstance_tripwire("place::store_last", other);
+            false
+        }
     }
 }
 
@@ -251,19 +534,16 @@ fn store_last(container: &mut Value, projection: &Projection, value: Value) -> b
 /// place after all" and fall back to their previous behavior rather than
 /// erroring, so this never turns a previously-working program into a failure.
 pub(crate) fn write_place(env: &mut Env, place: &Place, value: Value) -> bool {
-    let Some((last, parents)) = place.projections.split_last() else {
+    if place.projections.is_empty() {
         // No projections: a bare variable write.
         env.insert(place.root.clone(), value);
         sync_module_global(env, &place.root);
         return true;
-    };
+    }
     let Some(root_slot) = env.get_mut(&place.root) else {
         return false;
     };
-    let Some(container) = project_mut(root_slot, parents) else {
-        return false;
-    };
-    if !store_last(container, last, value) {
+    if !write_through(root_slot, &place.projections, value) {
         return false;
     }
     sync_module_global(env, &place.root);
@@ -272,7 +552,7 @@ pub(crate) fn write_place(env: &mut Env, place: &Place, value: Value) -> bool {
 
 /// Mirror a mutated root back into MODULE_GLOBALS when it is a module-level
 /// binding, matching what the identifier and two-level paths already do.
-fn sync_module_global(env: &mut Env, root: &str) {
+pub(crate) fn sync_module_global(env: &mut Env, root: &str) {
     // A global with owner provenance publishes to its defining owner's store,
     // which is what reads resolve through. The flat map's entry under this
     // bare name may be an unrelated module's, so an import never writes it.
@@ -318,12 +598,10 @@ fn sync_module_global(env: &mut Env, root: &str) {
 /// in that shape.
 pub(crate) fn updated_root(env: &Env, place: &Place, value: Value) -> Option<Value> {
     let mut root = env.get(&place.root)?.clone();
-    let (last, parents) = place.projections.split_last()?;
-    let container = project_mut(&mut root, parents)?;
-    if !store_last(container, last, value) {
+    if place.projections.is_empty() {
         return None;
     }
-    Some(root)
+    write_through(&mut root, &place.projections, value).then_some(root)
 }
 
 /// Borrow the storage the place designates, **without** touching ownership.
@@ -352,8 +630,51 @@ pub(crate) fn place_slot_mut<'a>(env: &'a mut Env, place: &Place) -> Option<&'a 
     project_mut(root_slot, &place.projections)
 }
 
+/// Before writing through a place that user code (an RHS or an index) has
+/// just run against, reload a module-global root from MODULE_GLOBALS, which is
+/// authoritative for non-local bindings, so a write cannot publish a stale
+/// env snapshot over the user code's update.
+pub(crate) fn refresh_module_global_root(env: &mut Env, root: &str) {
+    if env.is_local(root) {
+        return;
+    }
+    // A global with owner provenance reads through its owner's store, the
+    // same store `sync_module_global` publishes to.
+    if let Some((owner, source_name)) = env.global_binding(root) {
+        if let Some(current) = super::interpreter_state::owned_global(&owner, &source_name) {
+            env.insert(root.to_string(), current);
+        }
+        return;
+    }
+    if let Some(current) = MODULE_GLOBALS.with(|cell| cell.borrow().get(root).cloned()) {
+        env.insert(root.to_string(), current);
+    }
+}
+
+/// Owned read of the value the place designates. Unlike `place_slot_ref` it
+/// also reads packed array elements and `ClassInstance` fields (neither has a
+/// `&Value` to lend). Used by `place op= rhs`, which needs the old value once.
+pub(crate) fn place_read(env: &Env, place: &Place) -> Option<Value> {
+    let mut current = env.get(&place.root)?.clone();
+    for projection in &place.projections {
+        current = match (&current, projection) {
+            (Value::ClassInstance(instance), Projection::Field(name)) => instance.field(name)?,
+            (Value::Array(items), Projection::Index(index)) => items.get_value(normalize_index(items.len(), index)?)?,
+            (Value::ByteArray(bytes), Projection::Index(index)) => {
+                let idx = normalize_index(bytes.len(), index)?;
+                Value::UInt { value: u64::from(bytes[idx]), width: 8 }
+            }
+            _ => step_ref(&current, projection)?.clone(),
+        };
+    }
+    Some(current)
+}
+
 /// Read-only counterpart of `step_mut`.
-fn step_ref<'a>(slot: &'a Value, projection: &Projection) -> Option<&'a Value> {
+pub(crate) fn step_ref<'a>(slot: &'a Value, projection: &Projection) -> Option<&'a Value> {
+    if matches!(projection, Projection::Unwrap) {
+        return unwrap_place_ref(slot);
+    }
     match (slot, projection) {
         (Value::Object { fields, .. }, Projection::Field(name)) => fields.get(name),
         (Value::Dict(entries), Projection::Field(name)) => entries.get(name),
@@ -368,10 +689,7 @@ fn step_ref<'a>(slot: &'a Value, projection: &Projection) -> Option<&'a Value> {
         (Value::FixedSizeArray { data, .. }, Projection::Index(index)) => data.get(normalize_index(data.len(), index)?),
         (Value::Tuple(items), Projection::Index(index)) => items.get(normalize_index(items.len(), index)?),
         (Value::Dict(entries), Projection::Index(key)) => {
-            if !key.dict_key_is_scalar() {
-                return None;
-            }
-            entries.get(&key.to_key_string())
+            entries.get(&key.to_key_string()).map(Value::dict_entry_value_ref)
         }
         _ => None,
     }
@@ -384,22 +702,40 @@ fn step_ref<'a>(slot: &'a Value, projection: &Projection) -> Option<&'a Value> {
 /// Deliberately read-only: it must not promote the root out of the shared
 /// environment base just to answer a question.
 pub(crate) fn place_is_live(env: &Env, place: &Place) -> bool {
-    let Some(mut slot) = env.get(&place.root) else {
+    let Some(slot) = env.get(&place.root) else {
         return false;
     };
     // The final projection is an insert target, so it need not exist yet; every
     // intermediate hop must.
-    let Some((_, parents)) = place.projections.split_last() else {
+    if place.projections.is_empty() {
+        return true;
+    }
+    projections_live(slot, &place.projections)
+}
+
+/// Walk `projections` from `slot`. A `Value::ClassInstance` hop keeps its
+/// fields behind a lock, so no reference can be borrowed through it; the field
+/// is read (an Arc-handle clone) and the walk continues on the owned value.
+/// Without this, `self.store.items.push(x)` (a class field holding a class)
+/// was never a live place and the mutation hit a throwaway copy.
+fn projections_live(slot: &Value, projections: &[Projection]) -> bool {
+    let Some((head, rest)) = projections.split_first() else {
         return true;
     };
-    for projection in parents {
-        match step_ref(slot, projection) {
-            Some(next) => slot = next,
-            None => return false,
-        }
+    if rest.is_empty() {
+        // The leaf must exist for a receiver read to make sense.
+        return step_exists(slot, head);
     }
-    // The leaf must exist for a receiver read to make sense.
-    step_exists(slot, place.projections.last().expect("checked non-empty"))
+    if let (Value::ClassInstance(instance), Projection::Field(name)) = (slot, head) {
+        return match instance.field(name) {
+            Some(next) => projections_live(&next, rest),
+            None => false,
+        };
+    }
+    match step_ref(slot, head) {
+        Some(next) => projections_live(next, rest),
+        None => false,
+    }
 }
 
 /// Whether `projection` names an existing slot of `slot` -- `step_ref(..).is_some()`
@@ -409,7 +745,83 @@ fn step_exists(slot: &Value, projection: &Projection) -> bool {
         (Value::Array(items), Projection::Index(index)) if items.is_packed() => {
             normalize_index(items.len(), index).is_some()
         }
+        // The reference carrier's fields sit behind a lock, so there is no
+        // reference to hand out; existence is answered by a read.
+        (Value::ClassInstance(instance), Projection::Field(name)) => instance.field(name).is_some(),
         _ => step_ref(slot, projection).is_some(),
+    }
+}
+
+/// One step from a match subject (or an argument root) to the storage an arm
+/// payload binding aliases inside it. `Payload` exists only for enum subjects
+/// (`case Ram(d)` binds `d` to the variant payload).
+#[derive(Debug, Clone)]
+pub(crate) enum SubjectStep {
+    /// Enum variant payload.
+    Payload,
+    /// Struct/class field by name.
+    Field(String),
+    /// Array/tuple element by literal index.
+    Index(i64),
+}
+
+/// Merge container-handle mutations from an arm payload binding back into the
+/// subject storage it aliases, following `steps` from `slot`. The leaf merge
+/// is `merge_shared_collection_fields`: only shared containers (array/dict/
+/// bytearray handles, including ones nested inside payload structs) are
+/// carried back, so value semantics for scalar fields are preserved exactly.
+/// Returns true when `slot` changed.
+pub(crate) fn merge_subject_step(slot: &mut Value, steps: &[SubjectStep], binding: &Value) -> bool {
+    let Some((head, rest)) = steps.split_first() else {
+        return crate::interpreter::interpreter_call::merge_shared_collection_fields(slot, binding);
+    };
+    match (slot, head) {
+        (Value::Enum { payload: Some(payload), .. }, SubjectStep::Payload) => {
+            merge_subject_step(&mut **payload, rest, binding)
+        }
+        (Value::Object { fields, .. }, SubjectStep::Field(name)) => {
+            if !fields.contains_key(name) {
+                return false;
+            }
+            let field = Arc::make_mut(fields).get_mut(name).expect("field presence checked");
+            merge_subject_step(field, rest, binding)
+        }
+        // Reference-semantics class on the path: merge into the shared cell.
+        // The child is cloned out (not borrowed under the write lock) so a
+        // self-referencing chain cannot deadlock; a class child is a handle
+        // to its own cell and needs no store-back.
+        (Value::ClassInstance(instance), SubjectStep::Field(name)) => {
+            let Some(mut child) = instance.field(name) else {
+                return false;
+            };
+            if !merge_subject_step(&mut child, rest, binding) {
+                return false;
+            }
+            if !matches!(child, Value::ClassInstance(_)) {
+                instance.set_field(name.clone(), child);
+            }
+            true
+        }
+        (Value::Array(items), SubjectStep::Index(index)) => {
+            let Some(idx) = normalize_index(items.len(), &Value::Int(*index)) else {
+                return false;
+            };
+            let elem = match Arc::get_mut(items).and_then(|data| data.get_mut(idx)) {
+                Some(elem) => elem,
+                None => Arc::make_mut(items).get_mut(idx).expect("index in bounds"),
+            };
+            merge_subject_step(elem, rest, binding)
+        }
+        (Value::Tuple(items), SubjectStep::Index(index)) => {
+            let Ok(idx) = usize::try_from(*index) else {
+                return false;
+            };
+            let Some(elem) = items.get_mut(idx) else {
+                return false;
+            };
+            merge_subject_step(elem, rest, binding)
+        }
+        _ => false,
     }
 }
 
@@ -423,6 +835,128 @@ mod tests {
             fields: Arc::new(fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect()),
         }
     }
+
+    fn p1_enum_opt_wrapped(owner: &str, variant: &str, payload: Option<Value>) -> Value {
+        Value::Enum {
+            enum_name: owner.into(),
+            variant: variant.into(),
+            payload: payload.map(Box::new),
+        }
+    }
+
+    #[test]
+    fn forceunwrap_place_keeps_option_and_result_wrappers_and_cow_aliases() {
+        for (owner, variant) in [("Option", "Some"), ("Result", "Ok")] {
+            let wrapped = p1_enum_opt_wrapped(owner, variant,
+                Some(object("Cell", vec![("n", Value::Int(5))])));
+            let mut env = Env::new();
+            env.insert("item".into(), wrapped.clone());
+            env.insert("alias".into(), wrapped);
+            let place = Place { root: "item".into(),
+                projections: vec![Projection::Unwrap, Projection::Field("n".into())] };
+            assert!(place_is_live(&env, &place));
+            assert_eq!(place_read(&env, &place), Some(Value::Int(5)));
+            assert!(write_place(&mut env, &place, Value::Int(7)));
+            assert_eq!(place_read(&env, &place), Some(Value::Int(7)));
+            let alias = Place { root: "alias".into(), projections: place.projections.clone() };
+            assert_eq!(place_read(&env, &alias), Some(Value::Int(5)));
+            assert!(matches!(env.get("item"), Some(Value::Enum { enum_name, variant: actual, .. })
+                if enum_name == owner && actual == variant));
+        }
+    }
+
+    #[test]
+    fn forceunwrap_place_rejects_absent_and_malformed_special_values_without_writes() {
+        for original in [Value::Nil,
+            p1_enum_opt_wrapped("Option", "None", None),
+            p1_enum_opt_wrapped("Option", "Some", None),
+            p1_enum_opt_wrapped("Result", "Err", Some(Value::Int(5))),
+            p1_enum_opt_wrapped("Result", "Ok", None),
+            p1_enum_opt_wrapped("Option", "Bad", Some(Value::Int(5))),
+        ] {
+            let mut env = Env::new();
+            env.insert("item".into(), original.clone());
+            let place = Place { root: "item".into(), projections: vec![Projection::Unwrap] };
+            assert!(!place_is_live(&env, &place));
+            assert_eq!(place_read(&env, &place), None);
+            assert!(!write_place(&mut env, &place, Value::Int(7)));
+            let field = Place { root: "item".into(),
+                projections: vec![Projection::Unwrap, Projection::Field("n".into())] };
+            assert!(!write_place(&mut env, &field, Value::Int(7)));
+            assert_eq!(env.get("item"), Some(&original));
+        }
+    }
+
+    #[test]
+    fn forceunwrap_place_is_identity_for_direct_values_and_user_enums() {
+        for original in [Value::Int(5),
+            p1_enum_opt_wrapped("UserOption", "Some", Some(Value::Int(5))),
+            object("Cell", vec![("n", Value::Int(5))]),
+        ] {
+            assert!(std::ptr::eq(unwrap_place_ref(&original).unwrap(), &original));
+            let mut copy = original;
+            *unwrap_place_mut(&mut copy).unwrap() = Value::Int(7);
+            assert_eq!(copy, Value::Int(7));
+        }
+    }
+
+    #[test]
+    fn forceunwrap_place_nested_payload_replacement_preserves_outer_wrappers() {
+        let mut env = Env::new();
+        env.insert("item".into(), p1_enum_opt_wrapped("Option", "Some",
+            Some(p1_enum_opt_wrapped("Result", "Ok", Some(Value::Int(5))))));
+        let place = Place { root: "item".into(),
+            projections: vec![Projection::Unwrap, Projection::Unwrap] };
+        assert!(write_place(&mut env, &place, Value::Int(7)));
+        assert_eq!(env.get("item"), Some(&p1_enum_opt_wrapped("Option", "Some",
+            Some(p1_enum_opt_wrapped("Result", "Ok", Some(Value::Int(7)))))));
+    }
+
+    #[test]
+    fn forceunwrap_place_preserves_shared_class_identity() {
+        use crate::value::ClassInstance;
+        let instance = Arc::new(ClassInstance::new("Cell".into(),
+            [("n".into(), Value::Int(5))].into_iter().collect()));
+        let mut env = Env::new();
+        env.insert("item".into(), p1_enum_opt_wrapped("Option", "Some",
+            Some(Value::ClassInstance(instance.clone()))));
+        let place = Place { root: "item".into(),
+            projections: vec![Projection::Unwrap, Projection::Field("n".into())] };
+        assert!(write_place(&mut env, &place, Value::Int(7)));
+        assert_eq!(instance.field("n"), Some(Value::Int(7)));
+    }
+
+    #[test]
+    fn forceunwrap_place_resolver_keeps_unwrap_and_index_observation() {
+        let mut env = Env::new();
+        env.insert("item".into(), p1_enum_opt_wrapped("Option", "Some", Some(Value::Int(5))));
+        let expr = Expr::ForceUnwrap(Box::new(Expr::Identifier("item".into())));
+        let place = resolve_place(&expr, &mut env, &mut HashMap::new(), &mut HashMap::new(),
+            &Default::default(), &Default::default()).unwrap().unwrap();
+        assert!(matches!(place.projections.as_slice(), [Projection::Unwrap]));
+        let indexed = Expr::ForceUnwrap(Box::new(Expr::Index {
+            receiver: Box::new(Expr::Identifier("items".into())),
+            index: Box::new(Expr::Identifier("index".into())),
+        }));
+        assert!(place_has_index(&indexed));
+        assert!(!place_has_index(&expr));
+        let missing = Expr::ForceUnwrap(Box::new(Expr::Identifier("missing".into())));
+        assert!(resolve_place(&missing, &mut env, &mut HashMap::new(), &mut HashMap::new(),
+            &Default::default(), &Default::default()).unwrap().is_none());
+    }
+
+    #[test]
+    fn classinstance_tripwire_fires_once_per_site_only_when_enabled() {
+        use crate::value::ClassInstance;
+        let ci = Value::ClassInstance(Arc::new(ClassInstance::new("Inner".to_string(), HashMap::new())));
+        let seen = Mutex::new(Vec::new());
+        assert!(!tripwire_report(false, &seen, "t::site", &ci), "off: silent");
+        assert!(!tripwire_report(true, &seen, "t::site", &Value::Int(1)), "non-ClassInstance: silent");
+        assert!(tripwire_report(true, &seen, "t::site", &ci), "first hit reports");
+        assert!(!tripwire_report(true, &seen, "t::site", &ci), "once per site");
+        assert!(tripwire_report(true, &seen, "t::other", &ci), "new site reports");
+    }
+
 
     fn read(env: &Env, root: &str, path: &[&str]) -> Value {
         let mut current = env.get(root).unwrap().clone();
@@ -511,6 +1045,89 @@ mod tests {
                 other => panic!("not an object: {:?}", other),
             },
             other => panic!("not an array: {:?}", other),
+        }
+    }
+
+    fn class_instance(class: &str, fields: Vec<(&str, Value)>) -> (Arc<crate::value::ClassInstance>, Value) {
+        let inst = Arc::new(crate::value::ClassInstance::new(
+            class.to_string(),
+            fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        ));
+        (Arc::clone(&inst), Value::ClassInstance(inst))
+    }
+
+    /// `d["k"].v = 2` on the reference carrier: the write lands in the SHARED
+    /// cell, so a binding taken earlier (`val e = d["k"]`) sees it too.
+    /// Bug: interp_dict_class_value_index_mutation_loss_2026-11-03.
+    #[test]
+    fn write_through_dict_value_class_instance_is_shared() {
+        let (inst, value) = class_instance("Inner", vec![("v", Value::Int(0))]);
+        let dict: crate::value::DictMap = [("k".to_string(), value)].into_iter().collect();
+        let mut env = Env::new();
+        env.insert("d".into(), Value::Dict(Arc::new(dict)));
+
+        let place = Place {
+            root: "d".into(),
+            projections: vec![Projection::Index(Value::text("k")), Projection::Field("v".into())],
+        };
+        assert!(place_is_live(&env, &place), "an existing class field is a live leaf");
+        assert!(write_place(&mut env, &place, Value::Int(2)));
+        assert_eq!(inst.field("v"), Some(Value::Int(2)), "the earlier holder observes the write");
+        match env.get("d").unwrap() {
+            Value::Dict(entries) => match entries.get("k").unwrap() {
+                Value::ClassInstance(stored) => assert!(Arc::ptr_eq(stored, &inst), "entry identity kept"),
+                other => panic!("not a class instance: {:?}", other),
+            },
+            other => panic!("not a dict: {:?}", other),
+        }
+    }
+
+    /// A ClassInstance as an INTERMEDIATE hop (`o.d["k"].v = 2`, `o.items[0].n = 9`):
+    /// the COW container inside it is written in place, not deep-copied.
+    #[test]
+    fn write_through_class_instance_hop_into_cow_container() {
+        let elem = object("Elem", vec![("n", Value::Int(1))]);
+        let (inst, holder) = class_instance("Holder", vec![("items", Value::array(vec![elem]))]);
+        let mut env = Env::new();
+        env.insert("h".into(), holder);
+
+        let place = Place {
+            root: "h".into(),
+            projections: vec![
+                Projection::Field("items".into()),
+                Projection::Index(Value::Int(0)),
+                Projection::Field("n".into()),
+            ],
+        };
+        assert!(write_place(&mut env, &place, Value::Int(99)));
+        match inst.field("items") {
+            Some(Value::Array(values)) => match &values[0] {
+                Value::Object { fields, .. } => assert_eq!(fields.get("n").unwrap().clone(), Value::Int(99)),
+                other => panic!("not an object: {:?}", other),
+            },
+            other => panic!("not an array: {:?}", other),
+        }
+    }
+
+    /// A path that revisits the same instance (`a.me.v = 7` with `a.me == a`)
+    /// must complete instead of deadlocking on the instance's own lock.
+    #[test]
+    fn write_through_cyclic_class_instance_does_not_deadlock() {
+        let (inst, value) = class_instance("Node", vec![("v", Value::Int(0)), ("me", Value::Nil)]);
+        inst.set_field("me".into(), Value::ClassInstance(Arc::clone(&inst)));
+        let mut env = Env::new();
+        env.insert("a".into(), value);
+
+        let place = Place {
+            root: "a".into(),
+            projections: vec![Projection::Field("me".into()), Projection::Field("v".into())],
+        };
+        // Holding `a`'s write lock across the nested hop would block here forever.
+        assert!(write_place(&mut env, &place, Value::Int(7)));
+        assert_eq!(inst.field("v"), Some(Value::Int(7)));
+        match inst.field("me") {
+            Some(Value::ClassInstance(me)) => assert!(Arc::ptr_eq(&me, &inst), "self link restored"),
+            other => panic!("self link lost: {:?}", other),
         }
     }
 

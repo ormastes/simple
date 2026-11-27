@@ -9,42 +9,18 @@ use crate::mir::VReg;
 
 use super::super::types_util::type_id_to_cranelift;
 use super::helpers::{
+    string_cp_len_ref, tuple_len_ref,
     adapted_call, call_runtime_1, call_runtime_2, call_runtime_2_void, call_runtime_3, create_string_constant,
-    get_vreg_or_default, indirect_call_with_result, inline_runtime_len_value,
+    float_to_int_saturating, get_vreg_or_default, indirect_call_with_result, inline_runtime_len_value,
 };
 use super::{InstrContext, InstrResult};
 
 fn resolve_unique_module_qualified_func<M: Module>(ctx: &InstrContext<'_, M>, name: &str) -> Option<FuncId> {
-    let sanitized = name.replace('.', "_dot_");
-    let tail = sanitized.rsplit("__").next().unwrap_or(sanitized.as_str());
-    let suffix = format!("__{}", tail);
-    let mut ids: Vec<FuncId> = Vec::new();
-    for (candidate, id) in ctx.func_ids.iter() {
-        // Suffix match must respect the mangling boundary: a private helper
-        // `_index_of` mangles to `<module>___index_of`, which ends_with
-        // "__index_of" and used to false-positive-match method `index_of`
-        // dynamic dispatch (SIGSEGV: test_config `.index_of` bound to
-        // devhub__cmd_storage___index_of). Require the candidate's own tail
-        // (after its LAST `__`) to equal the probed tail exactly.
-        //
-        // A flatten-owner identity (`__spl_flat_<owner>__Type.method`, one of
-        // two same-named structs of a flattened unit) is not a module
-        // qualifier: the bare `Type.method` is the OTHER owner's body, so it
-        // must never win by suffix over that exact name.
-        if candidate
-            .strip_suffix(&suffix)
-            .is_some_and(|prefix| !prefix.is_empty() && !prefix.ends_with('_'))
-            && !candidate.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX)
-            && !ids.contains(id)
-        {
-            ids.push(*id);
-        }
-    }
-    if ids.len() == 1 {
-        ids.first().copied()
-    } else {
-        None
-    }
+    // The suffix rule (mangling boundary, flatten-owner exclusion, uniqueness
+    // over distinct ids) lives with the index that answers it in O(bucket)
+    // instead of a scan over every declared function per probe:
+    // `codegen::func_id_table::FuncIdTable::resolve_unique_module_qualified`.
+    ctx.func_ids.resolve_unique_module_qualified(name)
 }
 
 fn resolve_unique_module_qualified_import<M: Module>(ctx: &InstrContext<'_, M>, name: &str) -> Option<String> {
@@ -92,6 +68,15 @@ fn erased_receiver_should_fall_through_ambiguous_method(receiver_ty: Option<Type
 fn erased_receiver_bind_diag_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("SIMPLE_DEBUG_ERASED_RECEIVER_BIND").is_ok())
+}
+
+/// Optional/Result helper methods that are lowered to tag-dispatching runtime
+/// helpers and must never be rebound to a same-named user method by name alone.
+pub(crate) fn is_enum_helper_method_name(method: &str) -> bool {
+    matches!(
+        method,
+        "unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"
+    )
 }
 
 fn report_erased_receiver_bind(
@@ -157,6 +142,156 @@ fn unique_unqualified_rebind<'a>(hits: &[&'a str], lookup_name: &str, source: &s
             None
         }
     }
+}
+
+const TEXT_HASH_OWNERS: [&str; 4] = ["text", "str", "String", "string"];
+
+fn is_declared_text_hash_key(key: &str) -> bool {
+    TEXT_HASH_OWNERS
+        .iter()
+        .any(|owner| qualified_method_owner_matches(owner, key, "hash"))
+}
+
+fn text_hash_ambiguous_error(func_name: &str, candidates: &[String]) -> String {
+    format!(
+        "[CODEGEN-AMBIGUOUS-METHOD] in '{}' qualified text hash has {} candidates: [{}] — refusing to pick an arbitrary target.",
+        func_name,
+        candidates.len(),
+        candidates.join(", ")
+    )
+}
+
+fn text_hash_func_arity_matches<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    key: &str,
+    id: FuncId,
+    wanted: usize,
+) -> bool {
+    crate::codegen::xlate_view::func_decl_linkage_params(&*ctx.module, id).1 == wanted
+        && ctx.fn_arities.get(key).is_none_or(|&arity| arity == wanted)
+}
+
+fn resolve_declared_text_hash_func_id<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    arg_count: usize,
+) -> Result<Option<FuncId>, String> {
+    let wanted = arg_count + 1;
+    let mut use_targets: Vec<String> = Vec::new();
+    for (raw, mangled) in ctx.use_map.iter() {
+        if !(is_declared_text_hash_key(raw) || is_declared_text_hash_key(mangled)) {
+            continue;
+        }
+        if ctx.fn_arities.get(mangled.as_str()).is_some_and(|&arity| arity != wanted) {
+            continue;
+        }
+        let mangled_sanitized = mangled.replace('.', "_dot_");
+        if let Some(id) = ctx
+            .func_ids
+            .get(mangled.as_str())
+            .or_else(|| ctx.func_ids.get(&mangled_sanitized))
+            .copied()
+        {
+            if crate::codegen::xlate_view::func_decl_linkage_params(&*ctx.module, id).1 != wanted {
+                continue;
+            }
+        }
+        if !use_targets.iter().any(|seen| seen == mangled) {
+            use_targets.push(mangled.clone());
+        }
+    }
+    if use_targets.len() > 1 {
+        use_targets.sort();
+        return Err(text_hash_ambiguous_error(&ctx.func.name, &use_targets));
+    }
+    if let Some(mangled) = use_targets.first() {
+        let mangled_sanitized = mangled.replace('.', "_dot_");
+        let id = ctx
+            .func_ids
+            .get(mangled.as_str())
+            .or_else(|| ctx.func_ids.get(&mangled_sanitized))
+            .copied();
+        return Ok(id.filter(|&fid| text_hash_func_arity_matches(ctx, mangled, fid, wanted)));
+    }
+
+    let mut matching: Vec<(String, FuncId)> = Vec::new();
+    for (cand_name, &cand_id) in ctx.func_ids.iter_method_suffix("hash") {
+        if !is_declared_text_hash_key(cand_name) {
+            continue;
+        }
+        if !text_hash_func_arity_matches(ctx, cand_name, cand_id, wanted) {
+            continue;
+        }
+        if !matching.iter().any(|(_, seen)| *seen == cand_id) {
+            matching.push((cand_name.clone(), cand_id));
+        }
+    }
+    if matching.len() > 1 {
+        let mut names: Vec<String> = matching.into_iter().map(|(k, _)| k).collect();
+        names.sort();
+        return Err(text_hash_ambiguous_error(&ctx.func.name, &names));
+    }
+    Ok(matching.first().map(|(_, id)| *id))
+}
+
+fn resolve_declared_text_hash_import<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    arg_count: usize,
+) -> Result<Option<String>, String> {
+    let wanted = arg_count + 1;
+    let collect_from = |map: &std::collections::HashMap<String, String>| -> Vec<String> {
+        let mut hits: Vec<String> = Vec::new();
+        for (raw, mangled) in map.iter() {
+            // Only match qualified text/str/String/string `.hash` / `_dot_hash`
+            // entries — never bare or `{owner}_hash` free functions.
+            if !(is_declared_text_hash_key(raw) || is_declared_text_hash_key(mangled)) {
+                continue;
+            }
+            if ctx.fn_arities.get(mangled.as_str()).is_some_and(|&arity| arity != wanted) {
+                continue;
+            }
+            let mangled_sanitized = mangled.replace('.', "_dot_");
+            if let Some(id) = ctx
+                .func_ids
+                .get(mangled.as_str())
+                .or_else(|| ctx.func_ids.get(&mangled_sanitized))
+                .copied()
+            {
+                if crate::codegen::xlate_view::func_decl_linkage_params(&*ctx.module, id).1 != wanted {
+                    continue;
+                }
+            }
+            if !hits.iter().any(|seen| seen == mangled) {
+                hits.push(mangled.clone());
+            }
+        }
+        hits.sort();
+        hits
+    };
+
+    let use_hits = collect_from(ctx.use_map);
+    if use_hits.len() > 1 {
+        return Err(text_hash_ambiguous_error(&ctx.func.name, &use_hits));
+    }
+    if let Some(mangled) = use_hits.first() {
+        return Ok(Some(mangled.clone()));
+    }
+
+    let mut ambiguous_keys: Vec<String> = TEXT_HASH_OWNERS
+        .iter()
+        .flat_map(|owner| [format!("{owner}.hash"), format!("{owner}_dot_hash")])
+        .filter(|key| ctx.ambiguous_names.contains(key))
+        .collect();
+    ambiguous_keys.sort();
+    ambiguous_keys.dedup();
+    if !ambiguous_keys.is_empty() {
+        return Err(text_hash_ambiguous_error(&ctx.func.name, &ambiguous_keys));
+    }
+
+    let import_hits = collect_from(ctx.import_map);
+    if import_hits.len() > 1 {
+        return Err(text_hash_ambiguous_error(&ctx.func.name, &import_hits));
+    }
+    Ok(import_hits.first().cloned())
 }
 
 pub(crate) fn strip_erased_receiver_qualifier(lookup_name: &str) -> &str {
@@ -322,6 +457,19 @@ pub(crate) fn is_bare_builtin_collection_method(method: &str, arg_count: usize) 
             // only, so a user `lower(x)` still resolves normally; a typed
             // receiver arrives qualified and never takes this gate.
             | ("lower" | "upper", 0)
+            // Array/list element join (`parts.join(sep)` -> `rt_string_join`).
+            // Same erased-receiver theft class: `found.sort().join(",")` in
+            // `compiler.frontend.core.unit_scope` had its receiver erased to
+            // `ANY` by `rt_sort` and bound by single-candidate name-suffix scan
+            // to `CacheSingleFlightV1.join(self, key, request_id)` in Stage 2
+            // on aarch64-apple-darwin, corrupting unit-scope strings and
+            // crashing Stage 2 workers with SIGSEGV (2026-11-17). Matches the
+            // LLVM backend guard in `pipeline/native_project/mangle.rs` (`"join"
+            // | "Array.join"`). Arity 1 only so 0-arg `Thread.join()` and
+            // multi-arg `CacheSingleFlightV1.join`/`DataFrame.join` still
+            // resolve normally; typed `Path.join` arrives qualified as
+            // `"Path.join"` and is excluded by `!lookup_name.contains('.')`.
+            | ("join", 1)
     )
 }
 
@@ -709,6 +857,67 @@ fn emit_aggregate_block_copy<M: Module>(
     let src_is_heap = builder.ins().icmp(IntCC::Equal, src_tag, one);
     let src_nonnull = builder.ins().icmp(IntCC::NotEqual, src_ptr, zero);
     let src_is_valid = builder.ins().band(src_is_heap, src_nonnull);
+    // ---- producer diagnostic, codegen-time env gate -----------------------
+    // The word loop below trusts the heap tag. That is sound for a word whose
+    // tag is NOT 1 (`load_ptr` falls back to `new_ptr`, a live allocation of
+    // exactly `alloc_bytes`), so the SIGSEGV recorded in
+    // doc/08_tracking/bug/cranelift_cmov_memory_operand_unconditional_load_2026-10-23.md
+    // can only come from a word that IS tagged 1 and nonzero while its upper
+    // bits are not an address (measured: 0xf198715900000000). Narrowing
+    // `src_is_valid` to exclude it is NOT a fix and must not be retried: the
+    // tail of this function returns `src_tagged` unchanged when invalid, so a
+    // narrowed predicate turns a crash into a silent alias (`var b = a;
+    // b.x = 1` mutating `a`) — that is why PR #4239 was withdrawn.
+    //
+    // The word is an `Option` representation: `src/app/compiler_schema/codec_gen.spl`
+    // identifies it as an inline `Some` box, `hash("Some") << 32 | 1`, stored
+    // into a NON-optional node field (`HirType.span` is declared `span: Span`).
+    // `0xf1987159` was the pre-2026-11 HASHED `Some` discriminant; the seed now
+    // uses the positional `Some=0` (`hash_variant_discriminant`), so a word
+    // carrying it is a stale-convention producer.
+    //
+    // What makes it UNDETECTABLE here is a numeric collision: `OPTION_ENUM_ID`
+    // is 1 (`runtime/src/value/objects.rs:363`) and so is `RT_VALUE_TAG_HEAP`,
+    // so an `Option` passes the handle test above regardless of variant -- and
+    // so does any enum whose id has low 3 bits 1. The fix belongs at whichever
+    // construction site still boxes, or in the representation; not here, where
+    // rejecting the word would silently alias (PR #4239, withdrawn P0).
+    //
+    // This probe stays to name the enclosing type of the NEXT instance without
+    // another 50-minute bootstrap: when SIMPLE_AGGREGATE_COPY_DIAG
+    // is set at COMPILE time, emit a pre-load probe that prints the enclosing
+    // type before the existing fault. Unset — every release build, every
+    // bootstrap stage — emits nothing at all, so the default artifact is
+    // byte-identical and this cannot regress a lane.
+    if std::env::var_os("SIMPLE_AGGREGATE_COPY_DIAG").is_some() {
+        let addr_limit = builder.ins().iconst(types::I64, 1i64 << 48);
+        let non_address = builder
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, src_ptr, addr_limit);
+        let report = builder.ins().band(src_is_valid, non_address);
+        let diag_block = builder.create_block();
+        let cont_block = builder.create_block();
+        builder.ins().brif(report, diag_block, &[], cont_block, &[]);
+
+        builder.switch_to_block(diag_block);
+        builder.seal_block(diag_block);
+        let msg = format!(
+            "aggregate-copy diagnostic: source word is tagged heap (low bits 1, nonzero) \
+             but is not a canonical address; enclosing type `{}`, block {} byte(s), {} deep field(s) \
+             — the next load will fault",
+            type_name.unwrap_or("<unnamed>"),
+            byte_size,
+            deep_fields.len()
+        );
+        if let Ok((msg_ptr, msg_len)) = create_string_constant(ctx, builder, &msg) {
+            call_runtime_2_void(ctx, builder, "rt_eprintln_str", msg_ptr, msg_len);
+        }
+        builder.ins().jump(cont_block, &[]);
+
+        builder.switch_to_block(cont_block);
+        builder.seal_block(cont_block);
+    }
+    // ---- end producer diagnostic ------------------------------------------
     let load_ptr = builder.ins().select(src_is_valid, src_ptr, new_ptr);
 
     for w in 0..words {
@@ -909,7 +1118,15 @@ pub(crate) fn compile_method_call_static<M: Module>(
             _
         ))
     );
-    let prefer_builtin_first = lookup_name.contains('.') && allow_qualified_builtin;
+    // primitive_receiver_trait_impl_dispatch_2026-08-07 Defect A:
+    // Qualified `<text|str|String|string>.hash` must check user/trait
+    // `impl ... for text` in func_ids/use_map/import_map before falling back
+    // to `rt_hash_text` at the end of `compile_method_call_static`.
+    let is_qualified_text_hash = matches!(
+        lookup_name.rsplit_once('.'),
+        Some(("text" | "str" | "String" | "string", "hash"))
+    );
+    let prefer_builtin_first = lookup_name.contains('.') && allow_qualified_builtin && !is_qualified_text_hash;
 
     // Only run builtin lowering first for qualified builtin scalar/string
     // receivers like `i64.to_float`. For bare names like `bitmap.get(...)`,
@@ -963,7 +1180,16 @@ pub(crate) fn compile_method_call_static<M: Module>(
     // Candidates of an ambiguous bare method on an erased receiver, kept so
     // the vtable-identity type switch below can dispatch them at runtime.
     let mut vtable_switch_candidates: Option<Vec<(String, FuncId)>> = None;
-    let func_id = resolve_unique_module_qualified_func(ctx, lookup_name)
+    let func_id = if is_qualified_text_hash {
+        match resolve_declared_text_hash_func_id(ctx, args.len()) {
+            Ok(id) => id,
+            Err(error) => {
+                method_resolution_error = Some(error);
+                None
+            }
+        }
+    } else {
+        resolve_unique_module_qualified_func(ctx, lookup_name)
         .or_else(|| resolve_unique_module_qualified_func(ctx, &sanitized_name))
         .or_else(|| ctx
         .func_ids
@@ -1008,15 +1234,12 @@ pub(crate) fn compile_method_call_static<M: Module>(
             if !lookup_name.contains('.') && method_part == "has" {
                 return None;
             }
-            // Same policy for bare `len`/`length` (see the rt_len routing
-            // above): never bind by name-suffix to an arbitrary linked
-            // `Type_dot_len`.
-            if !lookup_name.contains('.') && (method_part == "len" || method_part == "length") {
+            // Same policy for bare `len`/`length`/`join` (see the rt_len /
+            // rt_string_join routing above): never bind by name-suffix to an
+            // arbitrary linked `Type_dot_len` or `Type_dot_join`.
+            if !lookup_name.contains('.') && (method_part == "len" || method_part == "length" || method_part == "join") {
                 return None;
             }
-
-            let dot_suffix = format!(".{}", method_part);
-            let underscore_suffix = format!("_dot_{}", method_part);
 
             // If we have a type qualifier (e.g., "VirtioGpuDriver.init_from_grant"),
             // prefer functions whose full path contains the type name
@@ -1047,8 +1270,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
             let current_fn_tail_sanitized = format!("__{}", current_fn_sanitized);
             let candidates: Vec<_> = ctx
                 .func_ids
-                .iter()
-                .filter(|(k, _)| k.ends_with(&dot_suffix) || k.ends_with(&underscore_suffix))
+                .iter_method_suffix(method_part)
                 .filter(|(k, _)| {
                     let ks = k.as_str();
                     ks != current_fn_name
@@ -1065,7 +1287,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
             // candidate DOES fit, so a call no candidate fits keeps today's path.
             let candidates: Vec<_> = if candidates.len() > 1 {
                 let wanted = args.len() + 1;
-                let fits = |id: &FuncId| ctx.module.declarations().get_function_decl(*id).signature.params.len() == wanted;
+                let fits = |id: &FuncId| crate::codegen::xlate_view::func_decl_linkage_params(&*ctx.module, *id).1 == wanted;
                 if candidates.iter().any(|(_, id)| fits(id)) {
                     candidates.into_iter().filter(|(_, id)| fits(id)).collect()
                 } else {
@@ -1146,6 +1368,24 @@ pub(crate) fn compile_method_call_static<M: Module>(
             // dual-registration for local-call resolution). When all surviving
             // candidates point to the same FuncId, treat as one.
             // See doc/05_design/compiler_rfc_ufcs.md.
+            // A BARE Optional/Result helper (`x.unwrap()` with no receiver
+            // type in the lookup name) must never be bound by name-suffix to
+            // a user method of the same name, whatever the candidate count.
+            // This refusal used to sit below the same-FuncId and
+            // single-candidate binds, so it only fired for >1 DISTINCT
+            // targets; a lone `Poll.unwrap` (registered under its raw and
+            // mangled keys, i.e. 2 candidates / 1 FuncId) slipped through
+            // and every `[u8]?` / `text?` `.unwrap()` in a closure that links
+            // `Poll` called `Poll.unwrap` on an Optional receiver -- e.g.
+            // `file_read_regular_no_follow_bounded_bytes` returned an empty
+            // array under the JIT driver (hello-world native-build:
+            // SCV-E-ADMISSION untracked-membership-publish-failed).
+            // Returning None routes the call to the cross-module path, which
+            // refuses the same family (`enum_helper`) and lowers it to the
+            // tag-dispatching runtime helper.
+            if type_qualifier.is_none() && is_enum_helper_method_name(method_part) {
+                return None;
+            }
             let unique_ids: std::collections::HashSet<_> =
                 candidates.iter().map(|(_, id)| **id).collect();
             if type_qualifier.is_none() && candidates.len() > 1 && unique_ids.len() == 1 {
@@ -1158,15 +1398,6 @@ pub(crate) fn compile_method_call_static<M: Module>(
                     candidates.len(),
                 );
                 return Some(*candidates[0].1);
-            }
-            if type_qualifier.is_none()
-                && candidates.len() > 1
-                && matches!(
-                    method_part,
-                    "unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"
-                )
-            {
-                return None;
             }
             if type_qualifier.is_none() && candidates.len() > 1 {
                 if erased_receiver_should_fall_through_ambiguous_method(receiver_ty, method_part) {
@@ -1212,7 +1443,8 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 );
             }
             picked.map(|(_, v)| **v)
-        });
+        })
+    };
 
     if let Some(error) = method_resolution_error {
         if let Some(cands) = vtable_switch_candidates.take() {
@@ -1249,186 +1481,150 @@ pub(crate) fn compile_method_call_static<M: Module>(
             }
         }
     } else {
-        // Cross-module method: resolve via use_map → import_map
-        // First try exact match, then check for "TypeName.method" qualified
-        // entries in use_map (prefers imported types over alphabetical import_map)
-        let mut resolved_name = ctx.use_map.get(func_name).map(|s| s.as_str());
-        // The Optional/Result helpers must never be suffix-rebound to a user
-        // method of the same name -- same defect as the bare import_map
-        // fallback below already refuses, but reached through the two qualified
-        // scans instead. macOS Stage 2 linker blocker 2026-09-13: a bare
-        // `unwrap` on a `text?` bound to the only `.unwrap` in the import maps
-        // (`Poll.unwrap`), which returns 0 for a text receiver. The LLVM twin
-        // is `pipeline/native_project/mangle.rs`'s `is_enum_helper_method`;
-        // fixing one backend and not the other is how this family recurs.
-        // Keyed on the METHOD SEGMENT, not the whole lookup name: a QUALIFIED
-        // `MirStaticInit.unwrap` / `T.unwrap` skipped this predicate entirely
-        // (it is not literally "unwrap"), so all four scans below still ran and
-        // the bare last-resort one bound it to the only `.unwrap` in the import
-        // maps. That is the second route behind the 208 residual
-        // `bl Poll.unwrap` sites measured on the run-17 Stage 2 candidate
-        // (2026-09-13); the LLVM twin is `mangle.rs`'s
-        // `enum_helper_owner_matches`. The exact `use_map.get(func_name)`
-        // lookup above still runs, so a genuine qualified `Poll.unwrap`
-        // resolves.
-        let enum_helper_method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
-        let enum_helper = matches!(
-            enum_helper_method,
-            "unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"
-        );
-        // The BUILTIN collection/text idioms must never be suffix-rebound here
-        // either. `compile_method_call_static`'s first-choice path already
-        // refuses this (the bare `has` / `len` / `length` early-returns at the
-        // `func_ids` suffix scan, and the `bare_builtin_collection` gate that
-        // routes a bare erased-receiver idiom to its tag-dispatching runtime
-        // call) -- but ONLY on the branch where a `func_id` was found. This
-        // `else` branch, reached for a cross-module call, had no such refusal,
-        // so the three unqualified scans below bound a bare `len` to whatever
-        // lone `Type.len` happened to be linked into the closure.
-        //
-        // Measured 2026-09-13 (native-interp differential census, class
-        // `crash`): `most_common_char("hello")` in
-        // `src/lib/common/text_advanced.spl` does `if freqs.len() == 0`, whose
-        // receiver is an erased array. With `common.string_builder` anywhere in
-        // the entry closure the scan below bound it to
-        // `StringBuilder.len` -> `StringBuilder.to_text`, which loads field 0 of
-        // a null receiver: SEGV at `StringBuilder_dot_to_text+16`, `ldr x28,[x8]`
-        // with x8 = 0. Same family and same remedy as the `enum_helper` refusal
-        // directly above, and as the `starts_with` / `slice` / `has` incidents
-        // recorded on `is_bare_builtin_collection_method`.
-        //
-        // Scope: BARE names only (`!lookup_name.contains('.')`). A receiver whose
-        // static type is known arrives qualified as "Type.method" and still
-        // resolves to its real method, so a genuine cross-module
-        // `StringBuilder.len` is untouched. When nothing binds, the builtin
-        // fallback lowers the call to `rt_len` / `rt_contains`, which
-        // tag-dispatch safely on any value -- the same policy the in-module
-        // path already applies.
-        let erasure_stripped = strip_erased_receiver_qualifier(lookup_name);
-        let bare_builtin_collision = !erasure_stripped.contains('.')
-            && is_bare_builtin_collection_method(erasure_stripped, args.len());
-        // One predicate for all the unqualified rebinding scans below: either
-        // family is a name whose qualifier must not be discarded.
-        let no_rebind = enum_helper || bare_builtin_collision;
-        // Once a scan proves ambiguity, a lossy bare-name map must not undo
-        // that refusal later in this resolution chain.
+        let resolved_storage: Option<String>;
+        let mut type_prefixed_storage;
+        let mut dunder_storage;
+        let suffix_resolved_storage;
+        let mut resolved_name: Option<&str>;
         let mut ambiguous_unqualified = false;
-        // Check use_map for "TypeName.func_name" entries (from imported impl methods)
-        //
-        // AMBIGUITY IS REFUSAL, NOT A COIN FLIP (2026-09-13). These scans used
-        // to take the FIRST `raw` ending in `.<method>` and `break`. `use_map`
-        // and `import_map` are HashMaps, so "first" is iteration order — an
-        // arbitrary, closure-dependent pick among every same-named method in
-        // the link closure. `src/lib/common/bytes/ints.spl` defines `store` /
-        // `to_span` on SIX sibling structs; every call to any of them bound to
-        // one arbitrary survivor, the other five bodies were never referenced
-        // and so never emitted, and `U16le.of(x).store(buf)` silently wrote 4
-        // bytes instead of 2. Binding only when the whole scan agrees on ONE
-        // target keeps every unambiguous cross-module rebind these scans exist
-        // for, and turns the ambiguous case into a named diagnostic instead of
-        // a silent miscompile.
-        // doc/08_tracking/bug/native_cross_module_same_name_methods_collapse_to_one_impl_2026-09-13.md
-        if resolved_name.is_none() && !no_rebind {
-            let method_suffix = format!(".{}", func_name);
-            let mut hits: Vec<&str> = Vec::new();
-            for (raw, mangled) in ctx.use_map.iter() {
-                if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 && !hits.contains(&mangled.as_str())
-                {
-                    hits.push(mangled.as_str());
+        if is_qualified_text_hash {
+            resolved_storage = match resolve_declared_text_hash_import(ctx, args.len()) {
+                Ok(mapped) => mapped,
+                Err(error) => {
+                    eprintln!("{error}");
+                    return Err(error);
                 }
-            }
-            ambiguous_unqualified |= hits.len() > 1;
-            resolved_name = unique_unqualified_rebind(&hits, lookup_name, "use_map");
-        }
-        // Also check import_map for qualified entries where type is imported
-        if resolved_name.is_none() && !no_rebind {
-            let method_suffix = format!(".{}", lookup_name);
-            let mut hits: Vec<&str> = Vec::new();
-            for (raw, mangled) in ctx.import_map.iter() {
-                if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 {
-                    let type_part = &raw[..raw.len() - method_suffix.len()];
-                    if ctx.use_map.contains_key(type_part) && !hits.contains(&mangled.as_str()) {
+            };
+            resolved_name = resolved_storage.as_deref();
+        } else {
+            // Cross-module method: resolve via use_map → import_map
+            // First try exact match, then check for "TypeName.method" qualified
+            // entries in use_map (prefers imported types over alphabetical import_map)
+            resolved_name = ctx.use_map.get(func_name).map(|s| s.as_str());
+            // The Optional/Result helpers must never be suffix-rebound to a user
+            // method of the same name -- same defect as the bare import_map
+            // fallback below already refuses, but reached through the two qualified
+            // scans instead. macOS Stage 2 linker blocker 2026-09-13: a bare
+            // `unwrap` on a `text?` bound to the only `.unwrap` in the import maps
+            // (`Poll.unwrap`), which returns 0 for a text receiver. The LLVM twin
+            // is `pipeline/native_project/mangle.rs`'s `is_enum_helper_method`;
+            // fixing one backend and not the other is how this family recurs.
+            // Keyed on the METHOD SEGMENT, not the whole lookup name: a QUALIFIED
+            // `MirStaticInit.unwrap` / `T.unwrap` skipped this predicate entirely
+            // (it is not literally "unwrap"), so all four scans below still ran and
+            // the bare last-resort one bound it to the only `.unwrap` in the import
+            // maps. That is the second route behind the 208 residual
+            // `bl Poll.unwrap` sites measured on the run-17 Stage 2 candidate
+            // (2026-09-13); the LLVM twin is `mangle.rs`'s
+            // `enum_helper_owner_matches`. The exact `use_map.get(func_name)`
+            // lookup above still runs, so a genuine qualified `Poll.unwrap`
+            // resolves.
+            let enum_helper_method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
+            let enum_helper = is_enum_helper_method_name(enum_helper_method);
+            let erasure_stripped = strip_erased_receiver_qualifier(lookup_name);
+            let bare_builtin_collision = !erasure_stripped.contains('.')
+                && is_bare_builtin_collection_method(erasure_stripped, args.len());
+            // One predicate for all the unqualified rebinding scans below: either
+            // family is a name whose qualifier must not be discarded.
+            let no_rebind = enum_helper || bare_builtin_collision;
+            // Check use_map for "TypeName.func_name" entries (from imported impl methods)
+            if resolved_name.is_none() && !no_rebind {
+                let method_suffix = format!(".{}", func_name);
+                let mut hits: Vec<&str> = Vec::new();
+                for (raw, mangled) in ctx.use_map.iter() {
+                    if raw.ends_with(&method_suffix)
+                        && raw.len() > lookup_name.len() + 1
+                        && !hits.contains(&mangled.as_str())
+                    {
                         hits.push(mangled.as_str());
                     }
                 }
+                ambiguous_unqualified |= hits.len() > 1;
+                resolved_name = unique_unqualified_rebind(&hits, lookup_name, "use_map");
             }
-            ambiguous_unqualified |= hits.len() > 1;
-            resolved_name = unique_unqualified_rebind(&hits, lookup_name, "import_map");
-        }
-        // Final fallback: import_map bare name (may pick wrong overload)
-        if resolved_name.is_none() && !no_rebind {
-            if !ambiguous_unqualified {
-                resolved_name = ctx.import_map.get(lookup_name).map(|s| s.as_str());
-            }
-        }
-
-        // If not found and func_name contains '.', try additional name variants.
-        // Prefer qualified/type-specific spellings before the bare method name.
-        let mut type_prefixed_storage;
-        let mut dunder_storage;
-        if resolved_name.is_none() {
-            if let Some(dot_pos) = lookup_name.rfind('.') {
-                let type_name = &lookup_name[..dot_pos];
-                let method = &lookup_name[dot_pos + 1..];
-
-                // Try: Type__method (double underscore variant)
-                dunder_storage = format!("{}__{}", type_name, method);
-                resolved_name = ctx
-                    .use_map
-                    .get(&dunder_storage)
-                    .or_else(|| ctx.import_map.get(&dunder_storage))
-                    .map(|s| s.as_str());
-
-                // Try: Type_dot_method (sanitized dot variant, used in cross-compiled targets)
-                if resolved_name.is_none() {
-                    let dot_storage = format!("{}_dot_{}", type_name, method);
-                    resolved_name = ctx
-                        .use_map
-                        .get(&dot_storage)
-                        .or_else(|| ctx.import_map.get(&dot_storage))
-                        .map(|s| s.as_str());
-                    // dot_storage is consumed by the resolved_name reference above
+            // Also check import_map for qualified entries where type is imported
+            if resolved_name.is_none() && !no_rebind {
+                let method_suffix = format!(".{}", lookup_name);
+                let mut hits: Vec<&str> = Vec::new();
+                for (raw, mangled) in ctx.import_map.iter() {
+                    if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 {
+                        let type_part = &raw[..raw.len() - method_suffix.len()];
+                        if ctx.use_map.contains_key(type_part) && !hits.contains(&mangled.as_str()) {
+                            hits.push(mangled.as_str());
+                        }
+                    }
                 }
-
-                // Try: lowercase_type_method (Simple convention)
-                if resolved_name.is_none() {
-                    type_prefixed_storage = format!("{}_{}", type_name.to_lowercase(), method);
-                    resolved_name = ctx
-                        .use_map
-                        .get(&type_prefixed_storage)
-                        .or_else(|| ctx.import_map.get(&type_prefixed_storage))
-                        .map(|s| s.as_str());
-                }
-
-                // Never discard an unresolved receiver qualifier: a trait
-                // Read.read_all cannot select a concrete ShbReader.read_all.
+                ambiguous_unqualified |= hits.len() > 1;
+                resolved_name = unique_unqualified_rebind(&hits, lookup_name, "import_map");
             }
-        }
-
-        // Try: TypeName__method → typename_method (factory/constructor convention)
-        // e.g., TreeSitter__new → treesitter_new
-        if resolved_name.is_none() {
-            if let Some((type_part, method_part)) = func_name.split_once("__") {
-                if type_part.chars().next().is_some_and(|c| c.is_uppercase()) {
-                    type_prefixed_storage = format!("{}_{}", type_part.to_lowercase(), method_part);
-                    resolved_name = ctx
-                        .use_map
-                        .get(&type_prefixed_storage)
-                        .or_else(|| ctx.import_map.get(&type_prefixed_storage))
-                        .map(|s| s.as_str());
+            // Final fallback: import_map bare name (may pick wrong overload)
+            if resolved_name.is_none() && !no_rebind {
+                if !ambiguous_unqualified {
+                    resolved_name = ctx.import_map.get(lookup_name).map(|s| s.as_str());
                 }
             }
-        }
 
-        let suffix_resolved_storage;
-        if resolved_name.is_none() && !ambiguous_unqualified {
-            suffix_resolved_storage = resolve_unique_module_qualified_import(ctx, lookup_name);
-            resolved_name = suffix_resolved_storage.as_deref();
-        }
+            // If not found and func_name contains '.', try additional name variants.
+            // Prefer qualified/type-specific spellings before the bare method name.
+            if resolved_name.is_none() {
+                if let Some(dot_pos) = lookup_name.rfind('.') {
+                    let type_name = &lookup_name[..dot_pos];
+                    let method = &lookup_name[dot_pos + 1..];
 
-        // The same bare-name recursion guard must cover cross-module aliases.
-        // Delegating self.inner.read_all() is not recursion on self.
-        resolved_name = resolved_name.filter(|name| !ambiguous_unqualified && !is_self(name));
+                    // Try: Type__method (double underscore variant)
+                    dunder_storage = format!("{}__{}", type_name, method);
+                    resolved_name = ctx
+                        .use_map
+                        .get(&dunder_storage)
+                        .or_else(|| ctx.import_map.get(&dunder_storage))
+                        .map(|s| s.as_str());
+
+                    // Try: Type_dot_method (sanitized dot variant, used in cross-compiled targets)
+                    if resolved_name.is_none() {
+                        let dot_storage = format!("{}_dot_{}", type_name, method);
+                        resolved_name = ctx
+                            .use_map
+                            .get(&dot_storage)
+                            .or_else(|| ctx.import_map.get(&dot_storage))
+                            .map(|s| s.as_str());
+                    }
+
+                    // Try: lowercase_type_method (Simple convention)
+                    if resolved_name.is_none() {
+                        type_prefixed_storage = format!("{}_{}", type_name.to_lowercase(), method);
+                        resolved_name = ctx
+                            .use_map
+                            .get(&type_prefixed_storage)
+                            .or_else(|| ctx.import_map.get(&type_prefixed_storage))
+                            .map(|s| s.as_str());
+                    }
+                }
+            }
+
+            // Try: TypeName__method → typename_method (factory/constructor convention)
+            // e.g., TreeSitter__new → treesitter_new
+            if resolved_name.is_none() {
+                if let Some((type_part, method_part)) = func_name.split_once("__") {
+                    if type_part.chars().next().is_some_and(|c| c.is_uppercase()) {
+                        type_prefixed_storage = format!("{}_{}", type_part.to_lowercase(), method_part);
+                        resolved_name = ctx
+                            .use_map
+                            .get(&type_prefixed_storage)
+                            .or_else(|| ctx.import_map.get(&type_prefixed_storage))
+                            .map(|s| s.as_str());
+                    }
+                }
+            }
+
+            if resolved_name.is_none() && !ambiguous_unqualified {
+                suffix_resolved_storage = resolve_unique_module_qualified_import(ctx, lookup_name);
+                resolved_name = suffix_resolved_storage.as_deref();
+            }
+
+            // The same bare-name recursion guard must cover cross-module aliases.
+            // Delegating self.inner.read_all() is not recursion on self.
+            resolved_name = resolved_name.filter(|name| !ambiguous_unqualified && !is_self(name));
+        }
 
         // The cross-module branch binds by NAME ALONE, exactly like the
         // `func_ids` suffix scan on the other branch — but until 2026-09-13 only
@@ -1541,6 +1737,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn qualified_receiver_matches_complete_owner_not_trait_substring() {
@@ -1866,6 +2063,516 @@ mod tests {
         assert!(calls.contains("\"first\" => Some(\"rt_array_first\")"));
         assert!(closures.contains("\"filter\" => \"rt_array_filter\""));
     }
+
+    #[test]
+    fn erased_join_uses_builtin_dispatch() {
+        assert!(is_bare_builtin_collection_method("join", 1));
+        assert!(!is_bare_builtin_collection_method("join", 0));
+        assert!(!is_bare_builtin_collection_method("join", 2));
+        assert_eq!(builtin_method_result_type("join", None), Some(TypeId::STRING));
+    }
+
+    #[test]
+    fn qualified_text_hash_prefers_declared_trait_impl_over_rt_hash_text() {
+        use crate::codegen::JitCompiler;
+        use crate::mir::{BlockId, LocalKind, MirFunction, MirInst, MirLocal, MirModule, Terminator};
+
+        let mut text_hash_impl = MirFunction::new(
+            "text.hash".to_string(),
+            TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        text_hash_impl.new_vreg();
+        text_hash_impl.params.push(MirLocal {
+            name: "self".to_string(),
+            ty: TypeId::STRING,
+            kind: LocalKind::Parameter,
+            is_ghost: false,
+        });
+        let sentinel = text_hash_impl.new_vreg();
+        let impl_block = text_hash_impl.block_mut(BlockId(0)).unwrap();
+        impl_block.instructions.push(MirInst::ConstInt {
+            dest: sentinel,
+            value: 4242,
+        });
+        impl_block.terminator = Terminator::Return(Some(sentinel));
+
+        let make_caller = |fn_name: &str, method_name: &str| {
+            let mut caller = MirFunction::new(
+                fn_name.to_string(),
+                TypeId::I64,
+                simple_parser::ast::Visibility::Public,
+            );
+            let recv = caller.new_vreg();
+            let result = caller.new_vreg();
+            let block = caller.block_mut(BlockId(0)).unwrap();
+            block.instructions.push(MirInst::ConstString {
+                dest: recv,
+                value: "hello".to_string(),
+            });
+            block.instructions.push(MirInst::MethodCallStatic {
+                dest: Some(result),
+                receiver: recv,
+                func_name: method_name.to_string(),
+                args: Vec::new(),
+            });
+            block.terminator = Terminator::Return(Some(result));
+            caller
+        };
+
+        let mut module = MirModule::new();
+        module.functions.push(text_hash_impl);
+        module.functions.push(make_caller("text_caller", "text.hash"));
+        module.functions.push(make_caller("str_caller", "str.hash"));
+
+        let mut jit = JitCompiler::new_static().expect("static Cranelift JIT");
+        jit.compile_module(&module).expect("module must JIT-compile");
+        unsafe {
+            assert_eq!(jit.call_i64_void("text_caller").expect("text_caller"), 4242);
+            assert_eq!(jit.call_i64_void("str_caller").expect("str_caller"), 4242);
+        }
+    }
+
+    #[test]
+    fn qualified_text_hash_falls_back_to_rt_hash_text_when_no_impl_declared() {
+        use crate::codegen::JitCompiler;
+        use crate::mir::{BlockId, MirFunction, MirInst, MirModule, Terminator};
+
+        let make_caller = |fn_name: &str, method_name: &str| {
+            let mut caller = MirFunction::new(
+                fn_name.to_string(),
+                TypeId::I64,
+                simple_parser::ast::Visibility::Public,
+            );
+            let recv = caller.new_vreg();
+            let result = caller.new_vreg();
+            let block = caller.block_mut(BlockId(0)).unwrap();
+            block.instructions.push(MirInst::ConstString {
+                dest: recv,
+                value: "hello".to_string(),
+            });
+            block.instructions.push(MirInst::MethodCallStatic {
+                dest: Some(result),
+                receiver: recv,
+                func_name: method_name.to_string(),
+                args: Vec::new(),
+            });
+            block.terminator = Terminator::Return(Some(result));
+            caller
+        };
+
+        let mut module = MirModule::new();
+        module.functions.push(make_caller("text_fallback", "text.hash"));
+        module.functions.push(make_caller("str_fallback", "str.hash"));
+
+        let mut jit = JitCompiler::new_static().expect("static Cranelift JIT");
+        jit.compile_module(&module).expect("module must JIT-compile");
+        unsafe {
+            assert_eq!(
+                jit.call_i64_void("text_fallback").expect("text_fallback"),
+                -6615550055289275125i64
+            );
+            assert_eq!(
+                jit.call_i64_void("str_fallback").expect("str_fallback"),
+                -6615550055289275125i64
+            );
+        }
+    }
+
+    fn with_text_hash_test_ctx<R>(
+        use_map: HashMap<String, String>,
+        import_map: HashMap<String, String>,
+        fn_arities: HashMap<String, usize>,
+        ambiguous_names: std::collections::HashSet<String>,
+        f: impl FnOnce(&mut InstrContext<'_, cranelift_jit::JITModule>) -> R,
+    ) -> R {
+        // Same ISA settings as JitCompiler: JITBuilder::new defaults to
+        // is_pic=true, whose PLT path cranelift-jit implements only on x86_64
+        // ("PLT is currently only supported on x86_64" on aarch64).
+        let settings = crate::codegen::common_backend::BackendSettings::jit();
+        let (_flags, isa) = crate::codegen::common_backend::create_isa_and_flags(&settings).expect("jit isa");
+        let jit_builder = cranelift_jit::JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut jit_mod = cranelift_jit::JITModule::new(jit_builder);
+        let rt_funcs = HashMap::new();
+        let mut ctx = InstrContext::new_for_test(&mut jit_mod, &rt_funcs);
+        let use_map_ref: &'static HashMap<String, String> = Box::leak(Box::new(use_map));
+        let import_map_ref: &'static std::sync::Arc<HashMap<String, String>> =
+            Box::leak(Box::new(std::sync::Arc::new(import_map)));
+        let fn_arities_ref: &'static std::sync::Arc<HashMap<String, usize>> =
+            Box::leak(Box::new(std::sync::Arc::new(fn_arities)));
+        let ambiguous_ref: &'static std::sync::Arc<std::collections::HashSet<String>> =
+            Box::leak(Box::new(std::sync::Arc::new(ambiguous_names)));
+        ctx.use_map = use_map_ref;
+        ctx.import_map = import_map_ref;
+        ctx.fn_arities = fn_arities_ref;
+        ctx.ambiguous_names = ambiguous_ref;
+        f(&mut ctx)
+    }
+
+    fn declare_dummy_fn(ctx: &mut InstrContext<'_, cranelift_jit::JITModule>, name: &str, param_count: usize) -> FuncId {
+        let call_conv = ctx.module.isa().default_call_conv();
+        let mut sig = Signature::new(call_conv);
+        for _ in 0..param_count {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+        sig.returns.push(AbiParam::new(types::I64));
+        let id = ctx
+            .module
+            .declare_function(name, Linkage::Import, &sig)
+            .expect("declare dummy fn");
+        ctx.func_ids.insert(name.to_string(), id);
+        id
+    }
+
+    #[test]
+    fn qualified_text_hash_does_not_hijack_free_text_hash_function() {
+        use crate::codegen::JitCompiler;
+        use crate::mir::{BlockId, MirFunction, MirInst, MirLocal, MirModule, Terminator};
+
+        with_text_hash_test_ctx(
+            HashMap::from([("text_hash".to_string(), "mod_a__text_hash".to_string())]),
+            HashMap::from([
+                ("text_hash".to_string(), "mod_a__text_hash".to_string()),
+                ("string_hash".to_string(), "mod_b__string_hash".to_string()),
+                ("text__hash".to_string(), "mod_c__text__hash".to_string()),
+            ]),
+            HashMap::new(),
+            std::collections::HashSet::new(),
+            |ctx| {
+                declare_dummy_fn(ctx, "text_hash", 1);
+                declare_dummy_fn(ctx, "mod_a__text_hash", 1);
+                assert_eq!(resolve_declared_text_hash_func_id(ctx, 0), Ok(None));
+                assert_eq!(resolve_declared_text_hash_import(ctx, 0), Ok(None));
+            },
+        );
+
+        let mut free_fn = MirFunction::new(
+            "text_hash".to_string(),
+            TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        let free_param = free_fn.new_vreg();
+        free_fn.params.push(MirLocal {
+            name: "s".to_string(),
+            ty: TypeId::STRING,
+            kind: crate::mir::LocalKind::Parameter,
+            is_ghost: false,
+        });
+        let sentinel = free_fn.new_vreg();
+        let free_block = free_fn.block_mut(BlockId(0)).unwrap();
+        let _ = free_param;
+        free_block.instructions.push(MirInst::ConstInt {
+            dest: sentinel,
+            value: 424242,
+        });
+        free_block.terminator = Terminator::Return(Some(sentinel));
+
+        let make_caller = |fn_name: &str, method_name: &str| {
+            let mut caller = MirFunction::new(
+                fn_name.to_string(),
+                TypeId::I64,
+                simple_parser::ast::Visibility::Public,
+            );
+            let recv = caller.new_vreg();
+            let result = caller.new_vreg();
+            let block = caller.block_mut(BlockId(0)).unwrap();
+            block.instructions.push(MirInst::ConstString {
+                dest: recv,
+                value: "hello".to_string(),
+            });
+            block.instructions.push(MirInst::MethodCallStatic {
+                dest: Some(result),
+                receiver: recv,
+                func_name: method_name.to_string(),
+                args: Vec::new(),
+            });
+            block.terminator = Terminator::Return(Some(result));
+            caller
+        };
+
+        let mut module = MirModule::new();
+        module.functions.push(free_fn);
+        module.functions.push(make_caller("call_text", "text.hash"));
+        module.functions.push(make_caller("call_str", "str.hash"));
+
+        let mut jit = JitCompiler::new_static().expect("static Cranelift JIT");
+        jit.compile_module(&module).expect("module must JIT-compile");
+        unsafe {
+            assert_eq!(
+                jit.call_i64_void("call_text").expect("call_text"),
+                -6615550055289275125i64
+            );
+            assert_eq!(
+                jit.call_i64_void("call_str").expect("call_str"),
+                -6615550055289275125i64
+            );
+        }
+    }
+
+    #[test]
+    fn qualified_text_hash_rejects_wrong_arity_impl() {
+        use crate::codegen::JitCompiler;
+        use crate::mir::{BlockId, MirFunction, MirInst, MirLocal, MirModule, Terminator};
+
+        with_text_hash_test_ctx(
+            HashMap::new(),
+            HashMap::from([("text.hash".to_string(), "mod_a__text_dot_hash".to_string())]),
+            HashMap::from([("mod_a__text_dot_hash".to_string(), 2)]),
+            std::collections::HashSet::new(),
+            |ctx| {
+                let id = declare_dummy_fn(ctx, "mod_a__text_dot_hash", 2);
+                assert_eq!(resolve_declared_text_hash_func_id(ctx, 0), Ok(None));
+                assert_eq!(resolve_declared_text_hash_func_id(ctx, 1), Ok(Some(id)));
+                assert_eq!(resolve_declared_text_hash_import(ctx, 0), Ok(None));
+                assert_eq!(
+                    resolve_declared_text_hash_import(ctx, 1),
+                    Ok(Some("mod_a__text_dot_hash".to_string()))
+                );
+            },
+        );
+
+        let mut two_arg_impl = MirFunction::new(
+            "text.hash".to_string(),
+            TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        two_arg_impl.new_vreg();
+        two_arg_impl.new_vreg();
+        two_arg_impl.params.push(MirLocal {
+            name: "self".to_string(),
+            ty: TypeId::STRING,
+            kind: crate::mir::LocalKind::Parameter,
+            is_ghost: false,
+        });
+        two_arg_impl.params.push(MirLocal {
+            name: "seed".to_string(),
+            ty: TypeId::I64,
+            kind: crate::mir::LocalKind::Parameter,
+            is_ghost: false,
+        });
+        let sentinel = two_arg_impl.new_vreg();
+        let impl_block = two_arg_impl.block_mut(BlockId(0)).unwrap();
+        impl_block.instructions.push(MirInst::ConstInt {
+            dest: sentinel,
+            value: 999999,
+        });
+        impl_block.terminator = Terminator::Return(Some(sentinel));
+
+        let mut caller = MirFunction::new(
+            "zero_arg_caller".to_string(),
+            TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        let recv = caller.new_vreg();
+        let result = caller.new_vreg();
+        let block = caller.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstString {
+            dest: recv,
+            value: "hello".to_string(),
+        });
+        block.instructions.push(MirInst::MethodCallStatic {
+            dest: Some(result),
+            receiver: recv,
+            func_name: "str.hash".to_string(),
+            args: Vec::new(),
+        });
+        block.terminator = Terminator::Return(Some(result));
+
+        let mut module = MirModule::new();
+        module.functions.push(two_arg_impl);
+        module.functions.push(caller);
+
+        let mut jit = JitCompiler::new_static().expect("static Cranelift JIT");
+        jit.compile_module(&module).expect("module must JIT-compile");
+        unsafe {
+            assert_eq!(
+                jit.call_i64_void("zero_arg_caller").expect("zero_arg_caller"),
+                -6615550055289275125i64
+            );
+        }
+    }
+
+    #[test]
+    fn qualified_text_hash_rejects_multi_module_ambiguity() {
+        use crate::codegen::JitCompiler;
+        use crate::mir::{BlockId, MirFunction, MirInst, MirLocal, MirModule, Terminator};
+
+        with_text_hash_test_ctx(
+            HashMap::new(),
+            HashMap::from([
+                ("text.hash".to_string(), "mod_a__text_dot_hash".to_string()),
+                ("String.hash".to_string(), "mod_b__String_dot_hash".to_string()),
+            ]),
+            HashMap::new(),
+            std::collections::HashSet::new(),
+            |ctx| {
+                declare_dummy_fn(ctx, "mod_a__text_dot_hash", 1);
+                declare_dummy_fn(ctx, "mod_b__String_dot_hash", 1);
+                let func_err = resolve_declared_text_hash_func_id(ctx, 0).expect_err("func_ids ambiguity");
+                assert!(func_err.contains("[CODEGEN-AMBIGUOUS-METHOD]"));
+                let import_err = resolve_declared_text_hash_import(ctx, 0).expect_err("import_map ambiguity");
+                assert!(import_err.contains("[CODEGEN-AMBIGUOUS-METHOD]"));
+            },
+        );
+
+        with_text_hash_test_ctx(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            std::collections::HashSet::from(["text.hash".to_string()]),
+            |ctx| {
+                let err = resolve_declared_text_hash_import(ctx, 0).expect_err("ambiguous_names must fail closed");
+                assert!(err.contains("[CODEGEN-AMBIGUOUS-METHOD]"));
+            },
+        );
+
+        with_text_hash_test_ctx(
+            HashMap::from([("text.hash".to_string(), "mod_a__text_dot_hash".to_string())]),
+            HashMap::new(),
+            HashMap::new(),
+            std::collections::HashSet::from(["text.hash".to_string()]),
+            |ctx| {
+                assert_eq!(
+                    resolve_declared_text_hash_import(ctx, 0),
+                    Ok(Some("mod_a__text_dot_hash".to_string()))
+                );
+            },
+        );
+
+        with_text_hash_test_ctx(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            std::collections::HashSet::from(["hash".to_string()]),
+            |ctx| {
+                assert_eq!(resolve_declared_text_hash_import(ctx, 0), Ok(None));
+            },
+        );
+
+        let make_impl = |name: &str, ret: i64| {
+            let mut f = MirFunction::new(
+                name.to_string(),
+                TypeId::I64,
+                simple_parser::ast::Visibility::Public,
+            );
+            f.new_vreg();
+            f.params.push(MirLocal {
+                name: "self".to_string(),
+                ty: TypeId::STRING,
+                kind: crate::mir::LocalKind::Parameter,
+                is_ghost: false,
+            });
+            let v = f.new_vreg();
+            let b = f.block_mut(BlockId(0)).unwrap();
+            b.instructions.push(MirInst::ConstInt { dest: v, value: ret });
+            b.terminator = Terminator::Return(Some(v));
+            f
+        };
+        let mut caller = MirFunction::new(
+            "ambiguous_caller".to_string(),
+            TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        let recv = caller.new_vreg();
+        let result = caller.new_vreg();
+        let block = caller.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstString {
+            dest: recv,
+            value: "hello".to_string(),
+        });
+        block.instructions.push(MirInst::MethodCallStatic {
+            dest: Some(result),
+            receiver: recv,
+            func_name: "str.hash".to_string(),
+            args: Vec::new(),
+        });
+        block.terminator = Terminator::Return(Some(result));
+
+        let mut module = MirModule::new();
+        module.functions.push(make_impl("mod_a__text_dot_hash", 111));
+        module.functions.push(make_impl("mod_b__String_dot_hash", 222));
+        module.functions.push(caller);
+
+        let mut jit = JitCompiler::new_static().expect("static Cranelift JIT");
+        assert!(jit.compile_module(&module).is_err());
+    }
+
+    #[test]
+    fn qualified_text_hash_supports_str_and_string_owners_consistently() {
+        use crate::codegen::JitCompiler;
+        use crate::mir::{BlockId, MirFunction, MirInst, MirLocal, MirModule, Terminator};
+
+        with_text_hash_test_ctx(
+            HashMap::new(),
+            HashMap::from([("str.hash".to_string(), "mod_s__str_dot_hash".to_string())]),
+            HashMap::new(),
+            std::collections::HashSet::new(),
+            |ctx| {
+                assert_eq!(
+                    resolve_declared_text_hash_import(ctx, 0),
+                    Ok(Some("mod_s__str_dot_hash".to_string()))
+                );
+            },
+        );
+
+        let mut string_impl = MirFunction::new(
+            "String.hash".to_string(),
+            TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        string_impl.new_vreg();
+        string_impl.params.push(MirLocal {
+            name: "self".to_string(),
+            ty: TypeId::STRING,
+            kind: crate::mir::LocalKind::Parameter,
+            is_ghost: false,
+        });
+        let sentinel = string_impl.new_vreg();
+        let impl_block = string_impl.block_mut(BlockId(0)).unwrap();
+        impl_block.instructions.push(MirInst::ConstInt {
+            dest: sentinel,
+            value: 777001,
+        });
+        impl_block.terminator = Terminator::Return(Some(sentinel));
+
+        let make_caller = |fn_name: &str, method_name: &str| {
+            let mut caller = MirFunction::new(
+                fn_name.to_string(),
+                TypeId::I64,
+                simple_parser::ast::Visibility::Public,
+            );
+            let recv = caller.new_vreg();
+            let result = caller.new_vreg();
+            let block = caller.block_mut(BlockId(0)).unwrap();
+            block.instructions.push(MirInst::ConstString {
+                dest: recv,
+                value: "hello".to_string(),
+            });
+            block.instructions.push(MirInst::MethodCallStatic {
+                dest: Some(result),
+                receiver: recv,
+                func_name: method_name.to_string(),
+                args: Vec::new(),
+            });
+            block.terminator = Terminator::Return(Some(result));
+            caller
+        };
+
+        let mut module = MirModule::new();
+        module.functions.push(string_impl);
+        module.functions.push(make_caller("c_text", "text.hash"));
+        module.functions.push(make_caller("c_str", "str.hash"));
+        module.functions.push(make_caller("c_upper", "String.hash"));
+        module.functions.push(make_caller("c_lower", "string.hash"));
+
+        let mut jit = JitCompiler::new_static().expect("static Cranelift JIT");
+        jit.compile_module(&module).expect("module must JIT-compile");
+        unsafe {
+            for name in ["c_text", "c_str", "c_upper", "c_lower"] {
+                assert_eq!(jit.call_i64_void(name).expect(name), 777001);
+            }
+        }
+    }
 }
 
 /// `true` for the integer code-point-to-character builtin, in either the bare
@@ -1915,6 +2622,12 @@ fn builtin_method_result_type(method: &str, receiver_ty: Option<TypeId>) -> Opti
         "len" | "length" | "char_code_at" | "index_of" | "find_index" => Some(TypeId::I64),
         // Predicates are bool on every receiver.
         "is_empty" | "contains" | "starts_with" | "ends_with" => Some(TypeId::BOOL),
+        // Numeric predicates (`compile_scalar_parity_method`) yield an i8 flag.
+        m if crate::codegen::scalar_float_methods::is_int_predicate(m)
+            || matches!(m, "is_nan" | "is_finite" | "is_infinite") =>
+        {
+            Some(TypeId::BOOL)
+        }
         // Text-in/text-out on a TEXT RECEIVER AND ON NO OTHER RECEIVER. There
         // is no array/dict `trim` or `to_upper`, so classifying these without
         // knowing the receiver type cannot mis-type any other receiver — and
@@ -1925,7 +2638,7 @@ fn builtin_method_result_type(method: &str, receiver_ty: Option<TypeId>) -> Opti
         // HEAP POINTER as a "successful" integer.
         // doc/08_tracking/bug/seed_jit_string_to_i64_float_tagged_silent_wrong_2026-07-28.md
         "trim" | "trim_start" | "trim_end" | "to_upper" | "to_uppercase" | "to_lower" | "to_lowercase" | "char_at"
-        | "replace" => Some(TypeId::STRING),
+        | "replace" | "join" => Some(TypeId::STRING),
         // `slice`/`substring`/`concat` are shared with array receivers, where
         // the result is an array, not text — so they stay receiver-gated. A
         // wrong entry here could make a previously-correct call worse.
@@ -1936,7 +2649,7 @@ fn builtin_method_result_type(method: &str, receiver_ty: Option<TypeId>) -> Opti
                 None
             }
         }
-        _ => None,
+        m => super::methods::numeric_cast_target(m),
     }
 }
 
@@ -1954,12 +2667,54 @@ fn try_compile_builtin_method_call<M: Module>(
     // A BARE (unqualified) name is only emitted for an erased receiver, whose
     // value is a tagged RuntimeValue (see compile_method_call_static).
     let erased_receiver = !method.contains('.');
-    // Extract plain method name from qualified name (e.g., "text.len" -> "len")
+    // primitive_receiver_trait_impl_dispatch_2026-08-07 Defect A: a qualified
+    // `<numeric|bool>.hash` call must reach the user's `impl Hash for <T>`;
+    // the name-keyed `hash => rt_hash_text` builtin below would pass the raw
+    // scalar as a text pointer (silent 0) and shadow the impl.
+    if let Some((qual, "hash")) = method.rsplit_once('.') {
+        if matches!(
+            qual,
+            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" | "bool"
+        ) {
+            return Ok(None);
+        }
+    }
+    // Integer predicates / sign / pow and float classification on a typed
+    // (qualified) numeric receiver: same inline lowering as
+    // `compile_builtin_method`. An erased (bare) receiver is a tagged
+    // RuntimeValue and keeps the dynamic route.
+    // doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md
+    if let Some((qual, plain)) = method.rsplit_once('.') {
+        if matches!(
+            qual,
+            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64"
+        ) {
+            if let Some((val, _ty)) =
+                super::methods::compile_scalar_parity_method(ctx, builder, qual, plain, receiver_val, args)?
+            {
+                return Ok(Some(val));
+            }
+        }
+    }
+    // Integer max/min/clamp/abs on a QUALIFIED integer receiver (`i64.max`,
+    // `u32.clamp`, ...). A bare name means an erased tagged receiver — skip.
+    if let Some((qual, m @ ("max" | "min" | "clamp" | "abs"))) = method.rsplit_once('.') {
+        if matches!(qual, "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64") {
+            let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
+            if let Some(v) =
+                super::methods::emit_int_min_max(builder, m, receiver_val, &arg_vals, qual.starts_with('u'))
+            {
+                return Ok(Some(v));
+            }
+        }
+    }
+    // Extract qualifier + plain method name from qualified name (e.g., "text.len" -> "len")
+    let receiver_qual = method.rsplit_once('.').map(|(q, _)| q);
     let method = method.rsplit('.').next().unwrap_or(method);
 
     // Handle slice specially since it has optional parameters
     if method == "slice" || method == "substring" {
-        let Some(&slice_id) = ctx.runtime_funcs.get("rt_slice") else {
+        let Some(&slice_id) = ctx.runtime_funcs.get("rt_slice_text_bytes") else {
             return Ok(None);
         };
         let slice_ref = ctx.module.declare_func_in_func(slice_id, builder.func);
@@ -1975,8 +2730,9 @@ fn try_compile_builtin_method_call<M: Module>(
         let end = if args.len() > 1 {
             get_vreg_or_default(ctx, builder, &args[1])
         } else {
-            // Default to collection length
-            inline_runtime_len_value(builder, receiver_val, ctx.baremetal, ctx.fam_arrays)
+            // Open end: the runtime clamps to the receiver's own length, in its
+            // own unit (BYTES for text here, elements for an array).
+            builder.ins().iconst(types::I64, i64::MAX)
         };
 
         // step argument (optional, defaults to 1)
@@ -1992,7 +2748,9 @@ fn try_compile_builtin_method_call<M: Module>(
 
     // is_empty: compile as rt_len(receiver) == 0
     if method == "is_empty" {
-        let len_val = inline_runtime_len_value(builder, receiver_val, ctx.baremetal, ctx.fam_arrays);
+        let cp_len = string_cp_len_ref(ctx, builder);
+        let tuple_len = tuple_len_ref(ctx, builder);
+        let len_val = inline_runtime_len_value(builder, receiver_val, ctx.baremetal, ctx.fam_arrays, cp_len, tuple_len);
         let zero = builder.ins().iconst(types::I64, 0);
         let result = builder
             .ins()
@@ -2003,226 +2761,16 @@ fn try_compile_builtin_method_call<M: Module>(
     // Numeric type conversion methods must produce a real native cast so later
     // boxing preserves the intended width and signedness.
     //
-    // The cast names are matched EXACTLY. This guard used to be a prefix test
-    // (`starts_with("to_u") || starts_with("to_i") || starts_with("to_f")`),
-    // which also captured every non-cast method sharing those three prefixes --
-    // `to_upper`, `to_uppercase`, `to_include`, `to_index`, `to_int_or`,
-    // `to_utf8`, `to_iterable`, `to_id`, `to_import`, `to_unix_timestamp`,
-    // `to_feature_string` -- and then dropped them on the match's wildcard arm,
-    // which returned the receiver UNCHANGED. Every such call was therefore a
-    // silent no-op under the JIT that still exited 0: `"hello".to_upper()`
-    // evaluated to `"hello"` where the interpreter correctly returned `"HELLO"`.
-    // Names that are not numeric casts must fall through to the normal
-    // builtin/user-method resolution below, where e.g. `to_upper` is already
-    // mapped to `rt_string_to_upper`.
-    let numeric_cast_target = match method {
-        "to_u8" => Some(TypeId::U8),
-        "to_u16" => Some(TypeId::U16),
-        "to_u32" => Some(TypeId::U32),
-        "to_u64" => Some(TypeId::U64),
-        "to_i8" => Some(TypeId::I8),
-        "to_i16" => Some(TypeId::I16),
-        "to_i32" => Some(TypeId::I32),
-        "to_i64" | "to_int" => Some(TypeId::I64),
-        "to_f32" => Some(TypeId::F32),
-        "to_f64" | "to_float" => Some(TypeId::F64),
-        _ => None,
-    };
-    if let Some(to_ty) = numeric_cast_target {
-        let from_ty = ctx.vreg_types.get(&receiver).copied().unwrap_or(TypeId::I64);
-
-        let to_is_int = matches!(
-            to_ty,
-            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
-        );
-        if from_ty == TypeId::STRING && to_is_int {
-            let func_id = if let Some(&fid) = ctx.runtime_funcs.get("rt_string_to_int") {
-                fid
-            } else {
-                let mut sig = cranelift_codegen::ir::Signature::new(ctx.module.isa().default_call_conv());
-                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-                sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-                let fid = ctx
-                    .module
-                    .declare_function("rt_string_to_int", cranelift_module::Linkage::Import, &sig)
-                    .map_err(|e| e.to_string())?;
-                ctx.func_ids.insert("rt_string_to_int".to_string(), fid);
-                fid
-            };
-            let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-            let call = adapted_call(builder, func_ref, &[receiver_val]);
-            let parsed = builder.inst_results(call)[0];
-            let converted = match to_ty {
-                TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, parsed),
-                TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, parsed),
-                TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, parsed),
-                TypeId::U64 | TypeId::I64 => parsed,
-                _ => parsed,
-            };
-            return Ok(Some(converted));
-        }
-
-        // Erased receiver (`list` element, `[Any]` slot): the value is TAGGED,
-        // and HIR types every integer cast on an ANY receiver as its RAW
-        // target type (hir/lower/expr/mod.rs). `rt_to_int_dynamic`'s verbatim
-        // non-text answer is `n << 3`, and the narrow casts reduced that tagged
-        // word. Decode it (text still parses), then narrow. Under the JIT the
-        // inflate decoder's `data[byte_pos].to_i64()` read every byte 8x too
-        // large and `symbol.to_u8()` pushed the low byte of the tag word.
-        let recv_ty_known = ctx.vreg_types.get(&receiver).copied();
-        if erased_receiver && to_is_int && matches!(recv_ty_known, None | Some(TypeId::ANY)) {
-            let decoded = call_runtime_1(ctx, builder, "rt_any_to_int", receiver_val);
-            let converted = match to_ty {
-                TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, decoded),
-                TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, decoded),
-                TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, decoded),
-                _ => decoded,
-            };
-            return Ok(Some(converted));
-        }
-
-        // `??` can leave a text handle typed as Pointer<text> in MIR.
-        // Dispatch opaque receivers by runtime type before an i64 call.
-        if matches!(method, "to_i64" | "to_int") && super::int_cast_needs_runtime_dispatch(from_ty) {
-            return Ok(Some(call_runtime_1(ctx, builder, "rt_to_int_dynamic", receiver_val)));
-        }
-
-        // Mirrors the STRING->int branch just above: without this, a STRING
-        // receiver falls into the generic from/to conversion below, which
-        // assumes `receiver_val` is already a raw numeric register and emits
-        // `fcvt_from_uint` on the STRING'S TAGGED POINTER — reinterpreting a
-        // heap address as an integer-to-float conversion instead of parsing
-        // the string. `rt_string_to_float` returns a heap-boxed RuntimeValue
-        // (like `rt_value_float`), so unbox it via `rt_value_as_float` to get
-        // a genuine raw f64 register, matching how `rt_string_to_int` above
-        // already returns a raw native i64. See float print bug (lane
-        // FLOATBOX, 2026-07-29): `s.to_float()` printed/arithmetic'd a
-        // pointer-derived garbage float that changed between runs.
-        if from_ty == TypeId::STRING && matches!(to_ty, TypeId::F32 | TypeId::F64) {
-            let func_id = if let Some(&fid) = ctx.runtime_funcs.get("rt_string_to_float") {
-                fid
-            } else {
-                let mut sig = cranelift_codegen::ir::Signature::new(ctx.module.isa().default_call_conv());
-                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-                sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-                let fid = ctx
-                    .module
-                    .declare_function("rt_string_to_float", cranelift_module::Linkage::Import, &sig)
-                    .map_err(|e| e.to_string())?;
-                ctx.func_ids.insert("rt_string_to_float".to_string(), fid);
-                fid
-            };
-            let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-            let call = adapted_call(builder, func_ref, &[receiver_val]);
-            let boxed = builder.inst_results(call)[0];
-            let unbox_func_id = if let Some(&fid) = ctx.runtime_funcs.get("rt_value_as_float") {
-                fid
-            } else {
-                let mut sig = cranelift_codegen::ir::Signature::new(ctx.module.isa().default_call_conv());
-                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-                sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::F64));
-                let fid = ctx
-                    .module
-                    .declare_function("rt_value_as_float", cranelift_module::Linkage::Import, &sig)
-                    .map_err(|e| e.to_string())?;
-                ctx.func_ids.insert("rt_value_as_float".to_string(), fid);
-                fid
-            };
-            let unbox_func_ref = ctx.module.declare_func_in_func(unbox_func_id, builder.func);
-            let unbox_call = adapted_call(builder, unbox_func_ref, &[boxed]);
-            let raw_f64 = builder.inst_results(unbox_call)[0];
-            let converted = if to_ty == TypeId::F32 {
-                builder.ins().fdemote(types::F32, raw_f64)
-            } else {
-                raw_f64
-            };
-            return Ok(Some(converted));
-        }
-
-        let converted = if from_ty == to_ty {
-            receiver_val
-        } else {
-            let src_ty = builder.func.dfg.value_type(receiver_val);
-            let from_signed = matches!(from_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
-            // Defensive: MIR's `from_ty` is sometimes wrong when an
-            // expression chain returned a float but the result vreg kept its
-            // declared int type (e.g. `(a.to_f32() * opacity).to_u32()` in
-            // browser_engine `_apply_opacity`, where `a.to_f32() * opacity`
-            // is f32 at runtime but vreg_types still records the surrounding
-            // u32). Without this branch we'd dispatch a bare `ireduce.i32`
-            // on an f32 value and the verifier rejects it. Honor the
-            // cranelift value type so float→int casts always go through
-            // `fcvt_to_{sint,uint}`.
-            let actual_is_float = src_ty == types::F32 || src_ty == types::F64;
-            let to_is_int = matches!(
-                to_ty,
-                TypeId::I8
-                    | TypeId::I16
-                    | TypeId::I32
-                    | TypeId::I64
-                    | TypeId::U8
-                    | TypeId::U16
-                    | TypeId::U32
-                    | TypeId::U64
-            );
-            if actual_is_float && to_is_int {
-                let to_signed = matches!(to_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
-                let widened = if to_signed {
-                    builder.ins().fcvt_to_sint(types::I64, receiver_val)
-                } else {
-                    builder.ins().fcvt_to_uint(types::I64, receiver_val)
-                };
-                match to_ty {
-                    TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, widened),
-                    TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, widened),
-                    TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, widened),
-                    _ => widened, // I64/U64
-                }
-            } else if actual_is_float && matches!(to_ty, TypeId::F32 | TypeId::F64) {
-                // Float→float: promote/demote between F32 and F64.
-                if src_ty == types::F32 && to_ty == TypeId::F64 {
-                    builder.ins().fpromote(types::F64, receiver_val)
-                } else if src_ty == types::F64 && to_ty == TypeId::F32 {
-                    builder.ins().fdemote(types::F32, receiver_val)
-                } else {
-                    receiver_val
-                }
-            } else {
-                match to_ty {
-                    TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, receiver_val),
-                    TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, receiver_val),
-                    TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, receiver_val),
-                    TypeId::U64 | TypeId::I64 => match src_ty {
-                        types::I8 | types::I16 | types::I32 => {
-                            if from_signed {
-                                builder.ins().sextend(types::I64, receiver_val)
-                            } else {
-                                builder.ins().uextend(types::I64, receiver_val)
-                            }
-                        }
-                        _ => receiver_val,
-                    },
-                    TypeId::F32 | TypeId::F64 => {
-                        let float_val = if from_signed {
-                            builder.ins().fcvt_from_sint(types::F64, receiver_val)
-                        } else {
-                            builder.ins().fcvt_from_uint(types::F64, receiver_val)
-                        };
-                        if to_ty == TypeId::F32 {
-                            builder.ins().fdemote(types::F32, float_val)
-                        } else {
-                            float_val
-                        }
-                    }
-                    _ => receiver_val,
-                }
-            }
-        };
+    // The cast names are matched EXACTLY in `methods::numeric_cast_target` so
+    // non-cast `to_*` names (`to_upper`, `to_utf8`, etc.) fall through below.
+    if let Some((converted, _to_ty)) =
+        super::methods::compile_numeric_cast_method(ctx, builder, receiver, receiver_val, method, erased_receiver)?
+    {
         return Ok(Some(converted));
     }
 
     // FR-COMPILER-012: scalar float intrinsics via MethodCallStatic path
-    if (crate::codegen::scalar_float_methods::is_native_unary(method) && !matches!(method, "trunc" | "round")) {
+    if crate::codegen::scalar_float_methods::is_native_unary(method) && !matches!(method, "trunc" | "round") {
         let src_ty = builder.func.dfg.value_type(receiver_val);
         let is_float = src_ty == types::F32 || src_ty == types::F64;
         if is_float {
@@ -2323,7 +2871,7 @@ fn try_compile_builtin_method_call<M: Module>(
         "at" => "rt_at",
         "char_code_at" => "rt_string_char_code_at",
         "byte_at" => "rt_string_byte_at",
-        "hash" => "rt_hash_text",
+        "hash" if args.is_empty() => "rt_hash_text",
         // Array methods.
         //
         // Receiver-polymorphic (see calls.rs): the array-only helpers fail
@@ -2340,6 +2888,9 @@ fn try_compile_builtin_method_call<M: Module>(
         // returns the count written). Array-only name; no other receiver
         // type defines it.
         "write_span" => "rt_array_write_span",
+        // Bulk in-place volatile fill (`arr.fill_span(dst_off, count, value)`):
+        // same array-only, raw-count contract as write_span.
+        "fill_span" => "rt_array_fill_span",
         // Generic collection methods (work on String, Array, Tuple, Dict)
         "len" | "length" => "rt_len",
         // Result/Option methods.
@@ -2381,6 +2932,35 @@ fn try_compile_builtin_method_call<M: Module>(
         // below already threads through unmodified.
         // See doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
         "unwrap_or" => "rt_unwrap_or_value",
+        // `opt.or(other)` / `opt.ok_or(err)` (interpreter_method/special/
+        // types.rs): `Some` keeps the receiver / wraps its payload in `Ok`,
+        // `None` yields `other` / `Err(err)`. Both sides are built eagerly and
+        // chosen with `select` on `rt_is_some`. Before these arms the JIT
+        // raised "Function 'Option.or' not found".
+        // doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md
+        "or" | "ok_or" if args.len() == 1 => {
+            let needed: &[&str] = if method == "or" {
+                &["rt_is_some"]
+            } else {
+                &["rt_is_some", "rt_enum_payload", "rt_enum_new"]
+            };
+            if needed.iter().any(|name| !ctx.runtime_funcs.contains_key(*name)) {
+                return Ok(None);
+            }
+            let other = get_vreg_or_default(ctx, builder, &args[0]);
+            let present = call_runtime_1(ctx, builder, "rt_is_some", receiver_val);
+            if method == "or" {
+                return Ok(Some(builder.ins().select(present, receiver_val, other)));
+            }
+            let disc = |name: &str| simple_runtime::value::hash_variant_discriminant(name) as i64;
+            let payload = call_runtime_1(ctx, builder, "rt_enum_payload", receiver_val);
+            let enum_id = builder.ins().iconst(types::I32, 0);
+            let ok_disc = builder.ins().iconst(types::I32, disc("Ok"));
+            let err_disc = builder.ins().iconst(types::I32, disc("Err"));
+            let ok_val = call_runtime_3(ctx, builder, "rt_enum_new", enum_id, ok_disc, payload);
+            let err_val = call_runtime_3(ctx, builder, "rt_enum_new", enum_id, err_disc, other);
+            return Ok(Some(builder.ins().select(present, ok_val, err_val)));
+        }
         // `.expect(msg)` — same Ok/Some-payload-or-trap semantics as
         // `.unwrap()` (see the comment above), but traps with the CALLER'S
         // message via the dedicated `rt_expect_or_trap(receiver, msg)`
@@ -2449,13 +3029,9 @@ fn try_compile_builtin_method_call<M: Module>(
         }
         "is_ok" | "is_err" => {
             let check_variant = if method == "is_ok" { "Ok" } else { "Err" };
-            let disc = {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut hasher = DefaultHasher::new();
-                check_variant.hash(&mut hasher);
-                (hasher.finish() & 0xFFFFFFFF) as i64
-            };
+            // Untyped receiver: MIR already lowered typed (incl. user-enum)
+            // receivers with the owner's index, so this is builtin Result (#6953).
+            let disc = crate::hir::builtin_owner_discriminant("Result", check_variant).unwrap_or(0);
             let Some(&check_id) = ctx.runtime_funcs.get("rt_enum_check_variant") else {
                 return Ok(None);
             };
@@ -2518,7 +3094,8 @@ fn try_compile_builtin_method_call<M: Module>(
         "merge" => {
             if args.len() == 1 {
                 let other_val = get_vreg_or_default(ctx, builder, &args[0]);
-                let count = inline_runtime_len_value(builder, other_val, ctx.baremetal, ctx.fam_arrays);
+                // Array receiver only: the byte/element load is the right unit.
+                let count = inline_runtime_len_value(builder, other_val, ctx.baremetal, ctx.fam_arrays, None, None);
                 if let Some(&func_id) = ctx.runtime_funcs.get("rt_array_extend_i64") {
                     let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
                     adapted_call(builder, func_ref, &[receiver_val, other_val, count]);
@@ -2526,6 +3103,20 @@ fn try_compile_builtin_method_call<M: Module>(
                 }
             }
             return Ok(None);
+        }
+        // `[T].reserve(additional)` — capacity hint; contents and `len` are
+        // untouched and the array header never moves. Compiled as a NO-OP in
+        // this JIT table: reserve is an optimization hint with no observable
+        // effect, so no runtime call is emitted (the real grower
+        // `rt_array_reserve` exists in the runtime for the static-linked
+        // lanes; see codegen/runtime_sffi.rs and elf_utils.rs). Before this
+        // arm, the call fell through to cross-module suffix resolution,
+        // linked the unresolvable name "Array.reserve", and the runtime
+        // aborted with "Function 'Array.reserve' not found" (exit 70) —
+        // doc/08_tracking/bug/compiler_seed_missing_array_reserve_2026-11-12.md.
+        "reserve" => {
+            let _additional = args.first().map(|a| get_vreg_or_default(ctx, builder, a));
+            return Ok(Some(receiver_val));
         }
         "map" => {
             // Receiver-polymorphic, exactly like `at` and `index_of` below.
@@ -2572,6 +3163,11 @@ fn try_compile_builtin_method_call<M: Module>(
         "find" => "rt_find",
         "any" => "rt_array_any",
         "all" => "rt_array_all",
+        // `arr.reduce(init, f)` / `arr.fold(init, f)`: `(init, func)` order,
+        // combiner called as `(acc, item)` -- pinned to the interpreter by
+        // `rt_array_reduce` (runtime/src/value/collections.rs). Previously
+        // only the LLVM backend dispatched it ("Function 'Array.reduce' not found").
+        "reduce" | "fold" if args.len() == 2 => "rt_array_reduce",
         // `rt_array_enumerate` has always existed in the runtime but had no
         // dispatch arm, so `arr.enumerate()` raised "Function 'Array.enumerate'
         // not found" and still exited 0. It returns (index, item) tuples,
@@ -2582,8 +3178,19 @@ fn try_compile_builtin_method_call<M: Module>(
         // (interpreter_method/string.rs: `"trim" | "trimmed" | "strip"`).
         "trim" | "trimmed" | "strip" => "rt_string_trim",
         // `trim_left`/`trim_right`: interpreter aliases of trim_start/trim_end.
+        "trim_start" | "trim_left" if args.len() == 1 => "rt_string_trim_start_matches",
         "trim_start" | "trim_left" => "rt_string_trim_start",
+        "trim_end" | "trim_right" if args.len() == 1 => "rt_string_trim_end_matches",
         "trim_end" | "trim_right" => "rt_string_trim_end",
+        // `split` is arity-aware, same as `substr` below: with a limit
+        // argument the interpreter consumes it via bounded `splitn` semantics
+        // (interpreter_helpers/method_dispatch.rs "split"), which the runtime
+        // mirrors in `rt_string_split_limit`. Mapping a two-arg call straight
+        // to `rt_string_split` dropped the limit on the floor (the extra arg
+        // was passed but never read), so `"a:b:c".split(":", 2)` returned the
+        // full 3-element split under the JIT while the interpreter honored
+        // the bound. See doc/08_tracking/bug/text_split_limit_ignored_2026-07-20.md.
+        "split" if args.len() == 2 => "rt_string_split_limit",
         "split" => "rt_string_split",
         "bytes" => "rt_string_bytes",
         "chars" => "rt_string_chars",
@@ -2599,6 +3206,8 @@ fn try_compile_builtin_method_call<M: Module>(
         "is_whitespace" => "rt_string_is_whitespace",
         // See calls.rs: text methods that had no runtime definition at all.
         "char_count" => "rt_string_char_count",
+        "to_digit" => "rt_string_to_digit",
+        "byte_len" => "rt_string_len",
         "capitalize" => "rt_string_capitalize",
         "swapcase" => "rt_string_swapcase",
         "title" | "titlecase" => "rt_string_title",
@@ -2642,7 +3251,7 @@ fn try_compile_builtin_method_call<M: Module>(
         "rfind" | "last_index_of" => "rt_string_rfind",
         "to_string" | "to_text" | "str" => "rt_to_string",
         // Dict/collection methods
-        "get" => "rt_index_get",
+        "get" => "rt_get",
         // Receiver-dispatched. This table is keyed on the METHOD NAME ALONE and
         // carries no receiver type, so mapping `remove` straight to
         // `rt_dict_remove` made EVERY array `.remove(i)` a silent no-op that
@@ -2672,11 +3281,34 @@ fn try_compile_builtin_method_call<M: Module>(
         // rt_contains tag-dispatches on the receiver at runtime (Array/Dict/
         // String; anything else yields 0), so it is safe for untyped receivers.
         "contains_key" | "has_key" | "has" => "rt_contains",
+        "ptr"
+            if args.is_empty()
+                && (matches!(receiver_qual, Some("text" | "String" | "str" | "string"))
+                    || (receiver_qual.is_none()
+                        && ctx.vreg_types.get(&receiver).copied() == Some(crate::hir::TypeId::STRING))) =>
+        {
+            "rt_string_data"
+        }
+        "ptr" | "data_ptr"
+            if args.is_empty()
+                && matches!(receiver_qual, Some("Array" | "Slice" | "List" | "Tuple" | "array")) =>
+        {
+            "rt_array_data_ptr"
+        }
         _ => return Ok(None),
     };
 
     if runtime_func == "rt_len" {
-        return Ok(Some(inline_runtime_len_value(builder, receiver_val, ctx.baremetal, ctx.fam_arrays)));
+        let cp_len = string_cp_len_ref(ctx, builder);
+        let tuple_len = tuple_len_ref(ctx, builder);
+        return Ok(Some(inline_runtime_len_value(
+            builder,
+            receiver_val,
+            ctx.baremetal,
+            ctx.fam_arrays,
+            cp_len,
+            tuple_len,
+        )));
     }
 
     // Check if runtime function exists; declare on-demand if missing
@@ -2697,7 +3329,7 @@ fn try_compile_builtin_method_call<M: Module>(
                 // The raw name may already identify a local function body.
                 // Keep that mapping for its later definition; this call still
                 // uses the runtime import's own FuncId.
-                ctx.func_ids.entry(runtime_func.to_string()).or_insert(fid);
+                ctx.func_ids.or_insert(runtime_func.to_string(), fid);
                 fid
             }
             Err(_) => return Ok(None),
@@ -2743,7 +3375,7 @@ fn try_compile_builtin_method_call<M: Module>(
     // doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
     let box_dict_key = matches!(
         runtime_func,
-        "rt_index_get" | "rt_dict_remove" | "rt_collection_remove" | "rt_contains" | "rt_unwrap_or_value"
+        "rt_index_get" | "rt_get" | "rt_dict_remove" | "rt_collection_remove" | "rt_contains" | "rt_unwrap_or_value"
     );
     let key_is_int = matches!(
         ctx.vreg_types.get(args.first().unwrap_or(&receiver)).copied(),
@@ -2758,6 +3390,25 @@ fn try_compile_builtin_method_call<M: Module>(
             super::methods::wrap_value(ctx, builder, *arg, raw)
         } else if box_dict_key && arg_i == 0 && key_is_int {
             builder.ins().ishl_imm(raw, 3)
+        } else if runtime_func == "rt_unwrap_or_value"
+            && arg_i == 0
+            && (matches!(builder.func.dfg.value_type(raw), types::F32 | types::F64)
+                || matches!(ctx.vreg_types.get(arg).copied(), Some(TypeId::F32 | TypeId::F64)))
+        {
+            // A float default arrives as a raw f64 (or its i64 bit pattern).
+            // Passed unboxed, the absent case handed those raw bits back and the
+            // caller decoded them as a tagged int: `-1.0` (0xBFF0..) printed as
+            // `-577023702256844800` (== bits >> 3). Box it as a float.
+            // See doc/08_tracking/bug/jit_unwrap_or_on_absent_optional_ignores_default_2026-08-17.md.
+            let vt = builder.func.dfg.value_type(raw);
+            let f = if vt == types::F32 {
+                builder.ins().fpromote(types::F64, raw)
+            } else if vt == types::I64 {
+                builder.ins().bitcast(types::F64, MemFlags::new(), raw)
+            } else {
+                raw
+            };
+            call_runtime_1(ctx, builder, "rt_value_float", f)
         } else {
             raw
         };
@@ -2794,7 +3445,10 @@ fn try_compile_builtin_method_call<M: Module>(
     // `reverse` or `sort` METHOD to them any more — both now route to the
     // copying `rt_reverse` / `rt_sort`, which must yield their RETURN value,
     // not the receiver.
-    let in_place_mutating_no_push = matches!(runtime_func, "rt_array_clear" | "rt_array_reverse" | "rt_array_sort");
+    let in_place_mutating_no_push = matches!(
+        runtime_func,
+        "rt_array_clear" | "rt_array_reserve" | "rt_array_reverse" | "rt_array_sort"
+    );
 
     if runtime_func == "rt_array_push" {
         // rt_array_push returns bool (success/failure), NOT a new array pointer.
@@ -2814,7 +3468,7 @@ fn try_compile_builtin_method_call<M: Module>(
         Ok(Some(receiver_val))
     } else if results.is_empty() {
         Ok(Some(builder.ins().iconst(types::I64, 0)))
-    } else if runtime_func == "rt_array_write_span" {
+    } else if runtime_func == "rt_array_write_span" || runtime_func == "rt_array_fill_span" {
         // The runtimes return the RAW i64 count (C twin, pure-Simple lowering and
         // the seed runtime agree); `write_span` is typed `Any` here, so the
         // result is consumed as a tagged value. Tag it: `(v << 3) | INT(0)`,
@@ -2879,6 +3533,9 @@ pub(crate) fn compile_method_call_virtual<M: Module>(
     // as `self` below; methods untag internally on field access.
     let tag_mask = builder.ins().iconst(types::I64, !0x7i64);
     let recv_obj = builder.ins().band(recv_ptr, tag_mask);
+    if crate::codegen::xlate_view::is_jit_module::<M>() {
+        emit_jit_vtable_receiver_guard(ctx, builder, recv_obj, vtable_slot);
+    }
     let vtable_ptr = builder.ins().load(types::I64, MemFlags::new(), recv_obj, 0);
     let slot_offset = (vtable_slot as i32) * 8;
     let method_ptr = builder.ins().load(types::I64, MemFlags::new(), vtable_ptr, slot_offset);
@@ -2900,6 +3557,74 @@ pub(crate) fn compile_method_call_virtual<M: Module>(
     }
 
     indirect_call_with_result(ctx, builder, sig_ref, method_ptr, &call_args, dest);
+}
+
+/// JIT-only receiver guard for `MethodCallVirtual`.
+///
+/// Only a class that declares a trait carries a vtable word at offset 0
+/// (`compile_struct_init`). A duck-conforming class (same methods, no `with`)
+/// starts with field 0, and a NIL receiver masks to address 0. Jumping through
+/// either one SIGSEGVs (bug
+/// jit_vtable_call_on_structural_conformer_sigsegv_2026-11-13). Under
+/// `JITModule` the unit is the whole program, so every vtable an object can
+/// carry is a local data object in `vtable_data_ids`. Compare the receiver's
+/// word against that set, and on a miss abort through `rt_method_not_found`
+/// (exit 70) instead of calling field data. The guard is not emitted for AOT:
+/// there, vtables can live in other objects and the local set is incomplete.
+/// On a hit the builder is left in the continuation block.
+fn emit_jit_vtable_receiver_guard<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    recv_obj: cranelift_codegen::ir::Value,
+    vtable_slot: usize,
+) {
+    let mut vtables: Vec<cranelift_module::DataId> = ctx.vtable_data_ids.values().copied().collect();
+    vtables.sort_unstable();
+    vtables.dedup();
+
+    let ok = builder.create_block();
+    let miss = builder.create_block();
+    let probe = builder.create_block();
+    let nonnull = builder.ins().icmp_imm(IntCC::NotEqual, recv_obj, 0);
+    builder.ins().brif(nonnull, probe, &[], miss, &[]);
+
+    builder.switch_to_block(probe);
+    builder.seal_block(probe);
+    let word = builder.ins().load(types::I64, MemFlags::new(), recv_obj, 0);
+    for data_id in vtables {
+        let global = ctx.module.declare_data_in_func(data_id, builder.func);
+        let expected = builder.ins().global_value(types::I64, global);
+        let hit = builder.ins().icmp(IntCC::Equal, word, expected);
+        let next = builder.create_block();
+        builder.ins().brif(hit, ok, &[], next, &[]);
+        builder.switch_to_block(next);
+        builder.seal_block(next);
+    }
+    builder.ins().jump(miss, &[]);
+
+    builder.switch_to_block(miss);
+    builder.seal_block(miss);
+    let type_bytes: &[u8] = b"<receiver without a trait vtable>";
+    let method_text = format!("vtable slot {} in {}", vtable_slot, ctx.func.name);
+    let not_found = ctx.runtime_funcs.get("rt_method_not_found").copied();
+    let type_data = super::helpers::declare_named_bytes(ctx, type_bytes);
+    let method_data = super::helpers::declare_named_bytes(ctx, method_text.as_bytes());
+    if let (Some(not_found_id), Ok(type_data), Ok(method_data)) = (not_found, type_data, method_data) {
+        let type_global = ctx.module.declare_data_in_func(type_data, builder.func);
+        let type_ptr = builder.ins().global_value(types::I64, type_global);
+        let type_len = builder.ins().iconst(types::I64, type_bytes.len() as i64);
+        let method_global = ctx.module.declare_data_in_func(method_data, builder.func);
+        let method_ptr = builder.ins().global_value(types::I64, method_global);
+        let method_len = builder.ins().iconst(types::I64, method_text.len() as i64);
+        let not_found_ref = ctx.module.declare_func_in_func(not_found_id, builder.func);
+        adapted_call(builder, not_found_ref, &[type_ptr, type_len, method_ptr, method_len]);
+    }
+    // rt_method_not_found exits; without it, a trap is still a clean stop
+    // compared with jumping through field data.
+    builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(13));
+
+    builder.switch_to_block(ok);
+    builder.seal_block(ok);
 }
 
 /// Owner struct name of a `Type_dot_method` / `Type.method` candidate key

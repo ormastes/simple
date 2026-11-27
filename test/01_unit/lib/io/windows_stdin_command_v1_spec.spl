@@ -1,0 +1,101 @@
+# AUTHORED_NOT_RUN. Production pure request/prefix/path reducers only.
+# No manufactured native process, pin, pipe or cleanup success is asserted.
+# @req REQ-WINDOWS-STDIN-001 REQ-WINDOWS-STDIN-002 REQ-WINDOWS-STDIN-003
+use std.spec.*
+use std.nogc_sync_mut.io.windows_stdin_command_contract_v1.*
+use std.nogc_sync_mut.io.windows_stdin_executable_pin_v1.{windows_stdin_parent_paths_v1,
+    windows_stdin_native_parent_paths_v1, windows_stdin_file_id_equal_v1}
+
+fn stdin_request() -> WindowsStdinCommandRequestV1:
+    WindowsStdinCommandRequestV1(program: "C:/Windows/System32/OpenSSH/ssh.exe", expected_digest: "a".repeat(64),
+        args: ["-T", "server.example", "/usr/bin/simple gateway-stdio-v1"], environment: ["SystemRoot=C:/Windows"],
+        directory: "C:/Windows/System32/OpenSSH", input: [65u8, 0u8, 66u8], timeout_ms: 120000,
+        max_stdout_bytes: 8396816, max_stderr_bytes: 16384, expires_at_unix_ms: 300000)
+
+describe "Bounded pinned Windows stdin command contracts":
+    it "freezes argument environment and binary input arrays independently of caller mutation":
+        step("Use the same bounded deep freeze helper invoked by production begin")
+        var original = stdin_request()
+        val frozen = windows_stdin_command_freeze_v1(original)
+        original.args[0] = "changed"
+        original.environment[0] = "SystemRoot=D:/Changed"
+        original.input[0] = 99u8
+        expect(frozen.args[0]).to_equal("-T")
+        expect(frozen.environment[0]).to_equal("SystemRoot=C:/Windows")
+        expect(frozen.input).to_equal([65u8, 0u8, 66u8])
+
+    it "uses a native volume anchor and includes every selected SUBST suffix ancestor":
+        step("Reject mutable DOS and remote volume spellings in the pure native-anchor contract")
+        val root = windows_stdin_native_anchor_v1("\\Device\\HarddiskVolume42\\Selected\\Root").unwrap()
+        expect(root).to_equal("\\\\?\\GLOBALROOT\\Device\\HarddiskVolume42\\Selected\\Root\\")
+        expect(windows_stdin_native_anchor_v1("\\Device\\Mup\\remote\\share").is_err()).to_equal(true)
+        expect(windows_stdin_native_anchor_v1("\\Device\\HarddiskVolumeShadowCopy1\\").is_err()).to_equal(true)
+        expect(windows_stdin_native_anchor_v1("C:\\").is_err()).to_equal(true)
+        expect(windows_stdin_native_parent_paths_v1(root + "Tools\\ssh.exe", root)).to_equal([
+            "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume42\\",
+            "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume42\\Selected",
+            "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume42\\Selected\\Root",
+            "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume42\\Selected\\Root\\Tools"])
+        expect(windows_stdin_file_id_equal_v1([1, 2, 3], [1, 2, 3])).to_equal(true)
+        expect(windows_stdin_file_id_equal_v1([1, 2, 3], [9, 2, 3])).to_equal(false)
+        expect(windows_stdin_file_id_equal_v1([1, 2, 3], [1, 2, 4])).to_equal(false)
+        expect(windows_stdin_file_id_equal_v1([1, 2], [1, 2])).to_equal(false)
+    it "accepts the complete gateway frame and independent capture limits without truncation":
+        step("Admit the actual maximum gateway request byte count")
+        var request = stdin_request()
+        request.input = [0u8; 2105360]
+        expect(windows_stdin_command_validate_v1(request).is_ok()).to_equal(true)
+        request.input = [0u8; 2105361]
+        expect(windows_stdin_command_validate_v1(request).unwrap_err()).to_equal("windows-stdin-command-bound")
+        request = stdin_request()
+        request.max_stderr_bytes = 0
+        expect(windows_stdin_command_validate_v1(request).unwrap_err()).to_equal("windows-stdin-command-bound")
+
+    it "rejects implicit executable search and Windows namespace aliases":
+        step("Reject unsafe path shapes before any native pin or process admission")
+        expect(windows_stdin_absolute_path_v1("C:/Windows/System32/OpenSSH/ssh.exe")).to_equal(true)
+        expect(windows_stdin_absolute_path_v1("C:/")).to_equal(true)
+        var root_cwd = stdin_request()
+        root_cwd.directory = "C:/"
+        expect(windows_stdin_command_validate_v1(root_cwd).is_ok()).to_equal(true)
+        for path in ["ssh.exe", "\\\\server\\share\\ssh.exe", "\\\\?\\C:\\ssh.exe", "C:/tmp/../ssh.exe",
+                "C:/tmp/ssh.exe:payload", "C:/tmp./ssh.exe", "C:/tmp /ssh.exe", "C:/NUL/ssh.exe", "C:/COM1.exe"]:
+            expect(windows_stdin_absolute_path_v1(path)).to_equal(false)
+
+    it "requires an exact lowercase SHA256 executable identity":
+        step("Reject absent malformed and noncanonical executable digests")
+        for digest in ["", "a".repeat(63), "A".repeat(64), "z".repeat(64)]:
+            var request = stdin_request()
+            request.expected_digest = digest
+            expect(windows_stdin_command_validate_v1(request).unwrap_err()).to_equal("windows-stdin-executable-digest")
+
+    it "counts only a positive completed prefix within the exact submitted range":
+        step("Model known partial completion without equating queued bytes with delivery")
+        expect(windows_stdin_completed_prefix_v1(0, 2, 4, 8).unwrap()).to_equal(2)
+        expect(windows_stdin_completed_prefix_v1(2, 4, 4, 8).unwrap()).to_equal(6)
+        expect(windows_stdin_completed_prefix_v1(6, 2, 2, 8).unwrap()).to_equal(8)
+        expect(windows_stdin_completed_prefix_v1(0, 0, 4, 8).is_err()).to_equal(true)
+        expect(windows_stdin_completed_prefix_v1(0, 5, 4, 8).is_err()).to_equal(true)
+        expect(windows_stdin_completed_prefix_v1(7, 1, 2, 8).is_err()).to_equal(true)
+        expect(windows_stdin_completed_prefix_v1(0, 1, 4097, 8192).is_err()).to_equal(true)
+
+    it "retains overlapped storage on pending invalid-handle and unknown failures":
+        step("Discharge only recognized terminal IO failure results")
+        for error in [995, 109, 232, 233]:
+            expect(windows_stdin_io_failure_complete_v1(error)).to_equal(true)
+        for error in [996, 997, 6, 87, 9999]:
+            expect(windows_stdin_io_failure_complete_v1(error)).to_equal(false)
+
+    it "retains the complete deduplicated ancestor chain for image and working directory":
+        step("Include the volume root and every parent of the exact executable path")
+        expect(windows_stdin_parent_paths_v1("C:/Tools/OpenSSH/ssh.exe", "C:/Tools")).to_equal(
+            ["C:\\", "C:\\Tools", "C:\\Tools\\OpenSSH"])
+        expect(windows_stdin_parent_paths_v1("C:/Tools/ssh.exe", "D:/Work")).to_equal(
+            ["C:\\", "C:\\Tools", "D:\\", "D:\\Work"])
+
+    it "quotes argv independently of binary stdin and never inserts request bytes into the command line":
+        step("Keep framed input out of executable arguments")
+        val request = stdin_request()
+        expect(windows_stdin_command_line_v1(request).unwrap()).to_equal(
+            "\"C:/Windows/System32/OpenSSH/ssh.exe\" \"-T\" \"server.example\" \"/usr/bin/simple gateway-stdio-v1\"")
+        expect(request.input).to_equal([65u8, 0u8, 66u8])

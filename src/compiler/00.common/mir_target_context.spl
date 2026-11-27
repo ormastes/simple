@@ -5,12 +5,35 @@ struct MirTargetContext:
     os: text
     abi: text
     backend: text
+    # Build profile: "debug" or "release" (driver sets from CompileOptions.release).
+    build_profile: text = "debug"
+    # Retained ARM sub-arch or canonical x86 generation (i686); "" otherwise.
+    subarch: text = ""
+    # Canonical CPU tier text (tier_text form, e.g. "x86-64-v3+avx512vnni"); "" = baseline.
+    # HIR stays target-neutral; MIR/backend pick the tier from this (cpu_tier_multibuild.md).
+    cpu_tier: text = ""
     version: i64
     collection_policy: text = "moderate"
     collection_memory_budget_bytes: i64 = -1
     collection_opt_level: i64 = 0
     collection_trace_active: bool = false
     collection_target_admitted: bool = false
+
+
+# Canonical identity payload for every retained target-context input. Consumers
+# add their versioned domain; changing this field order/framing requires a new
+# payload version and new consumer domains. This does not normalize or admit a
+# target. Length framing preserves delimiter-bearing values without ambiguity.
+pub fn mir_target_context_identity_payload_v1(t: MirTargetContext) -> text:
+    val fields: [text] = [t.arch, t.os, t.abi, t.backend, t.version.to_string(),
+        t.build_profile, t.subarch, t.cpu_tier, t.collection_policy,
+        t.collection_memory_budget_bytes.to_string(), t.collection_opt_level.to_string(),
+        if t.collection_trace_active: "1" else: "0",
+        if t.collection_target_admitted: "1" else: "0"]
+    var framed: [text] = []
+    for field in fields:
+        framed.push(field.len().to_string() + ":" + field)
+    framed.join("|")
 
 fn mir_collection_target_is_supported(target: MirTargetContext) -> bool:
     if not target.collection_target_admitted or target.backend != "llvm":
@@ -34,16 +57,51 @@ fn mir_collection_target_admitted(target: text, host_arch: text, host_os: text, 
         val os = mir_target_context_normalize_os(host_os)
         return ((arch == "x86_64" or arch == "aarch64") and
             (os == "linux" or os == "windows" or os == "macos" or os == "freebsd"))
-    # Exact recognized shapes, never substring OS/ABI matching. Other targets
-    # remain valid inputs to existing backends but cannot authorize this plan.
-    for arch in ["x86_64", "amd64", "x64", "aarch64", "arm64"]:
-        for suffix in ["linux-gnu", "unknown-linux-gnu", "linux-musl", "unknown-linux-musl",
-            "pc-windows-msvc", "unknown-windows-msvc", "windows-msvc",
-            "pc-windows-gnu", "w64-windows-gnu", "apple-darwin", "apple-macos",
-            "unknown-freebsd", "freebsd"]:
+    # Parsing an explicit tuple does not widen collection's supported set.
+    # The validator is pure: it must not call context construction/admission.
+    val suffix = _mir_target_context_explicit_suffix(target)
+    if suffix.is_err():
+        return false
+    val arch = mir_target_context_normalize_arch(target.split("-")[0])
+    if arch != "x86_64" and arch != "aarch64":
+        return false
+    ["linux-gnu", "unknown-linux-gnu", "linux-musl", "unknown-linux-musl",
+        "pc-windows-msvc", "unknown-windows-msvc", "windows-msvc",
+        "pc-windows-gnu", "w64-windows-gnu", "apple-darwin", "apple-macos",
+        "unknown-freebsd", "freebsd"].contains(suffix.unwrap())
+
+# Conservative explicit tuple vocabulary. This validates representable context
+# inputs, not backend capability, semantic portability or cache admission.
+# Keep unrepresented ISA-bearing spellings out. Canonical i686 retains its
+# generation in subarch; other x86 generations remain outside this vocabulary.
+fn _mir_target_context_explicit_suffix(target: text) -> Result<text, text>:
+    if mir_target_context_uses_host(target):
+        return Err("explicit_target_required: resolve native at the compile request boundary")
+    val arch = target.split("-")[0]
+    if not ["x86_64", "amd64", "x64", "x86", "i686",
+        "aarch64", "arm64", "arm", "armv6", "armv7", "armv7a", "armv7m", "armv7em",
+        "thumbv6m", "thumbv7m", "thumbv7em", "riscv32", "rv32", "riscv64", "rv64"].contains(arch):
+        return Err("unsupported_explicit_arch: architecture is unknown or loses target detail")
+    for suffix in ["linux-gnu", "unknown-linux-gnu", "linux-musl", "unknown-linux-musl",
+        "pc-windows-msvc", "unknown-windows-msvc", "windows-msvc", "windows-gnu",
+        "pc-windows-gnu", "w64-windows-gnu", "w64-mingw32", "apple-darwin", "apple-macos",
+        "unknown-freebsd", "freebsd", "unknown-simpleos", "simpleos", "unknown-none-elf"]:
+        if target == arch + "-" + suffix:
+            return Ok(suffix)
+    if arch == "i686" and target == "i686-unknown-none":
+        return Ok("unknown-none")
+    val normalized_arch = mir_target_context_normalize_arch(arch)
+    if normalized_arch == "arm":
+        for suffix in ["linux-gnueabihf", "unknown-linux-gnueabihf", "none-eabi", "none-eabihf"]:
             if target == arch + "-" + suffix:
-                return true
-    false
+                return Ok(suffix)
+    if normalized_arch == "riscv32":
+        for suffix in ["unknown-linux-ilp32", "unknown-linux-ilp32d"]:
+            if target == arch + "-" + suffix:
+                return Ok(suffix)
+    if normalized_arch == "riscv64" and target == arch + "-unknown-linux-lp64d":
+        return Ok("unknown-linux-lp64d")
+    Err("unsupported_explicit_target: unknown or incompatible OS/ABI tuple")
 
 fn mir_target_context_normalize_arch(value: text) -> text:
     val arch = value.trim().lower()
@@ -134,6 +192,20 @@ fn mir_target_context_backend_from(value: text) -> text:
         return backend
     "llvm"
 
+# Strict preparation entrypoint for future target-bound readers. Legacy callers
+# keep mir_target_context_from and its host/auto compatibility behavior.
+# Callers still own target capabilities, semantic witnesses and artifact identity.
+fn mir_target_context_from_explicit(target_triple: text, backend: text, version: i64) -> Result<MirTargetContext, text>:
+    val target = target_triple.trim().lower()
+    val suffix = _mir_target_context_explicit_suffix(target)
+    if suffix.is_err():
+        return Err(suffix.unwrap_err())
+    val explicit_backend = backend.trim().lower()
+    if not ["llvm", "llvm-lib", "llvmlib", "cranelift", "native", "c", "cuda", "hip",
+        "opencl", "vhdl", "irtc", "lua"].contains(explicit_backend):
+        return Err("explicit_backend_required: unknown or unresolved backend")
+    Ok(mir_target_context_from(target, "", "", explicit_backend, version))
+
 fn mir_target_context_from(
     target_triple: text,
     host_arch: text,
@@ -149,11 +221,15 @@ fn mir_target_context_from(
     else:
         mir_target_context_normalize_arch(target.split("-")[0])
     val os = mir_target_context_os_from(target, host_os)
+    val first = target.split("-")[0]
+    val sub_src = if mir_target_context_uses_host(target): host_arch.trim().lower() else: first
+    val subarch = if sub_src.starts_with("armv") or sub_src.starts_with("thumbv") or sub_src == "i686": sub_src else: ""
     MirTargetContext(
         arch: arch,
         os: os,
         abi: mir_target_context_abi_from(target, os),
         backend: mir_target_context_backend_from(backend),
         version: version,
+        subarch: subarch,
         collection_target_admitted: mir_collection_target_admitted(target, host_arch, host_os, backend.trim().lower())
     )

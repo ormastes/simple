@@ -1,0 +1,75 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Builder append behavior + scaling (bug c_runtime_string_concat_quadratic_2026-08-22)
+
+The MIR string-builder rewrite replaces `s = s + x` in a loop with the
+`rt_string_builder_new/push/finish` externs that `RtStringBuilder` wraps.
+These specs pin that the rewrite target produces exactly the text the
+concat loop produces (including a non-empty prior value), and that it
+scales linearly at the bug's N = 10k / 40k / 160k (the C-runtime concat
+measured 0.003 s / 0.033 s / 1.046 s -- quadratic).
+"""
+
+# @tag: unit, compiler, mir_opt, perf
+
+use std.spec
+use std.spec.step
+use std.common.string_builder.{RtStringBuilder}
+use std.nogc_sync_mut.io.time_ops.{time_now_micros}
+
+fn concat_loop(prefix: text, n: i64) -> text:
+    var s = prefix
+    var i = 0
+    while i < n:
+        s = s + "{i % 10}"
+        i = i + 1
+    s
+
+# The exact sequence the MIR rewrite emits: new, push(prior s), push per
+# append, finish.
+fn builder_loop(prefix: text, n: i64) -> text:
+    var sb = RtStringBuilder.new()
+    sb.push(prefix)
+    var i = 0
+    while i < n:
+        sb.push("{i % 10}")
+        i = i + 1
+    sb.finish()
+
+fn builder_micros(n: i64) -> i64:
+    val t0 = time_now_micros()
+    val out = builder_loop("", n)
+    val t1 = time_now_micros()
+    if out.len() != n:
+        return -1
+    t1 - t0
+
+describe "builder rewrite target is observably equal to the concat loop":
+    it "matches the concat loop for an empty prior value":
+        # @req REQ-COMP-MIROPT-SBOPT-004
+        # @capture(statistics): equality for n=0,1,257
+        step("Verify: builder text equals concat text")
+        expect(builder_loop("", 0)).to_equal(concat_loop("", 0))  # oracle: zero iterations -> prior value
+        expect(builder_loop("", 1)).to_equal(concat_loop("", 1))  # oracle: single append
+        expect(builder_loop("", 257)).to_equal(concat_loop("", 257))  # oracle: many appends
+
+    it "keeps a non-empty prior value at the front":
+        # @req REQ-COMP-MIROPT-SBOPT-004
+        # @capture(statistics): equality with a prefix
+        step("Verify: the preheader push of the prior value is preserved")
+        expect(builder_loop("head:", 12)).to_equal(concat_loop("head:", 12))  # oracle: prefix kept
+
+describe "builder append scales linearly at the bug's N":
+    it "160k appends cost well under 16x the 10k cost":
+        # @req REQ-COMP-MIROPT-SBOPT-005
+        # @capture(statistics): microseconds at N=10k/40k/160k
+        step("Verify: builder appends at 10k/40k/160k are linear, not quadratic")
+        val t10 = builder_micros(10000)
+        val t40 = builder_micros(40000)
+        val t160 = builder_micros(160000)
+        print "builder appends: 10k={t10}us 40k={t40}us 160k={t160}us"
+        expect(t10 >= 0 and t40 >= 0 and t160 >= 0).to_equal(true)  # oracle: lengths were exact
+        # Quadratic would be 256x from 10k to 160k (the C concat measured ~350x).
+        # Linear is 16x; allow 4x headroom for timer noise and a shared host.
+        val floor = if t10 > 0: t10 else: 1
+        expect(t160 < floor * 64).to_equal(true)  # oracle: far below the quadratic 256x

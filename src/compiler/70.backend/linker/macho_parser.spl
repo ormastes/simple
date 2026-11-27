@@ -1,8 +1,11 @@
 # Mach-O 64-bit Parser
 # Full Mach-O parser: segments, sections, symbols, relocations, string tables.
 # Uses BinaryReader ([u8]) and builds on macho_inspect for header/load-command parsing.
+# Convert unsigned wire fields to the i64 model explicitly before address
+# arithmetic: a retained u32 relocation offset would truncate a 64-bit VM base.
 
 use std.binary_io.{BinaryReader, ByteOrder}
+use compiler.backend.linker.name_text.{linker_name_text}
 use compiler.backend.linker.macho_inspect.{
     MachOHeader, MachOLoadCommand, MachOInspector,
     macho_inspect, macho_detect_byte_order, macho_find_load_command,
@@ -87,50 +90,51 @@ fn _hex_digit(v: i64) -> text:
     if v == 14: return "e"
     return "f"
 
-fn _read_fixed_string(data: [u8], offset: i64, max_len: i64) -> text:
-    var result = ""
-    var i = 0
-    while i < max_len:
-        val idx = offset + i
-        if idx >= data.len():
-            break
-        val b = data[idx]
-        if b == 0:
-            break
-        result = result + text.from_char_code(b)
-        i = i + 1
-    result
+fn _read_fixed_string(data: [u8], offset: i64, max_len: i64) -> Result<text, text>:
+    if offset < 0 or offset >= data.len() or max_len <= 0: return Ok("")
+    val available = data.len() - offset
+    val count = if max_len < available: max_len else: available
+    var end = offset
+    while end < offset + count and data[end] != 0:
+        end = end + 1
+    # Names are byte strings, not independently encoded Unicode code points.
+    # Decode once, preserving UTF-8 and avoiding per-byte text allocations.
+    linker_name_text(data[offset:end], "Mach-O name at file offset {offset}")
 
 # ============================================================================
 # Segment + Section Parsing
 # ============================================================================
 
-fn macho_parse_segment(data: [u8], lc: MachOLoadCommand, order: ByteOrder) -> MachOSegment:
+fn macho_parse_segment(data: [u8], lc: MachOLoadCommand, order: ByteOrder) -> Result<MachOSegment, text>:
     var reader = BinaryReader.new(data)
     val base = lc.offset + 8
 
     reader.skip(base)
 
-    val segname = _read_fixed_string(data, base, 16)
+    val segname: text = match _read_fixed_string(data, base, 16):
+        case Ok(v): v
+        case Err(e): return Err(e)
     reader.skip(16)
-    val vmaddr = reader.read_u64(order) ?? 0
-    val vmsize = reader.read_u64(order) ?? 0
-    val fileoff = reader.read_u64(order) ?? 0
-    val filesize = reader.read_u64(order) ?? 0
-    val maxprot = reader.read_u32(order) ?? 0
-    val initprot = reader.read_u32(order) ?? 0
-    val nsects = reader.read_u32(order) ?? 0
-    val seg_flags = reader.read_u32(order) ?? 0
+    val vmaddr = (reader.read_u64(order) ?? 0) as i64
+    val vmsize = (reader.read_u64(order) ?? 0) as i64
+    val fileoff = (reader.read_u64(order) ?? 0) as i64
+    val filesize = (reader.read_u64(order) ?? 0) as i64
+    val maxprot = (reader.read_u32(order) ?? 0) as i64
+    val initprot = (reader.read_u32(order) ?? 0) as i64
+    val nsects = (reader.read_u32(order) ?? 0) as i64
+    val seg_flags = (reader.read_u32(order) ?? 0) as i64
 
     var sections: [MachOSectionInfo] = []
     var s = 0
     while s < nsects:
         val sec_base = base + SEGMENT_CMD_SIZE - 8 + (s * SECTION_64_SIZE)
-        val sec = _parse_section_64(data, sec_base, order)
-        sections = sections.push(sec)
+        val sec: MachOSectionInfo = match _parse_section_64(data, sec_base, order):
+            case Ok(v): v
+            case Err(e): return Err(e)
+        sections.push(sec)
         s = s + 1
 
-    MachOSegment(
+    Ok(MachOSegment(
         segname: segname,
         vmaddr: vmaddr,
         vmsize: vmsize,
@@ -141,24 +145,28 @@ fn macho_parse_segment(data: [u8], lc: MachOLoadCommand, order: ByteOrder) -> Ma
         nsects: nsects,
         flags: seg_flags,
         sections: sections,
-    )
+    ))
 
-fn _parse_section_64(data: [u8], offset: i64, order: ByteOrder) -> MachOSectionInfo:
-    val sectname = _read_fixed_string(data, offset, 16)
-    val segname = _read_fixed_string(data, offset + 16, 16)
+fn _parse_section_64(data: [u8], offset: i64, order: ByteOrder) -> Result<MachOSectionInfo, text>:
+    val sectname: text = match _read_fixed_string(data, offset, 16):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    val segname: text = match _read_fixed_string(data, offset + 16, 16):
+        case Ok(v): v
+        case Err(e): return Err(e)
 
     var reader = BinaryReader.new(data)
     reader.skip(offset + 32)
 
-    val addr = reader.read_u64(order) ?? 0
-    val size = reader.read_u64(order) ?? 0
-    val sec_offset = reader.read_u32(order) ?? 0
-    val align_val = reader.read_u32(order) ?? 0
-    val reloff = reader.read_u32(order) ?? 0
-    val nreloc = reader.read_u32(order) ?? 0
-    val flags = reader.read_u32(order) ?? 0
+    val addr = (reader.read_u64(order) ?? 0) as i64
+    val size = (reader.read_u64(order) ?? 0) as i64
+    val sec_offset = (reader.read_u32(order) ?? 0) as i64
+    val align_val = (reader.read_u32(order) ?? 0) as i64
+    val reloff = (reader.read_u32(order) ?? 0) as i64
+    val nreloc = (reader.read_u32(order) ?? 0) as i64
+    val flags = (reader.read_u32(order) ?? 0) as i64
 
-    MachOSectionInfo(
+    Ok(MachOSectionInfo(
         sectname: sectname,
         segname: segname,
         addr: addr,
@@ -168,16 +176,16 @@ fn _parse_section_64(data: [u8], offset: i64, order: ByteOrder) -> MachOSectionI
         reloff: reloff,
         nreloc: nreloc,
         flags: flags,
-    )
+    ))
 
 # ============================================================================
 # Symbol Table Parsing
 # ============================================================================
 
-fn macho_parse_symbols(data: [u8], inspector: MachOInspector) -> [MachOSymbolEntry]:
+fn macho_parse_symbols(data: [u8], inspector: MachOInspector) -> Result<[MachOSymbolEntry], text>:
     val symtab_lc = macho_find_load_command(inspector, LC_SYMTAB)
-    if symtab_lc.? == false:
-        return []
+    if symtab_lc.is_none():
+        return Ok([])
 
     val lc = symtab_lc!
     val order = inspector.byte_order
@@ -185,27 +193,41 @@ fn macho_parse_symbols(data: [u8], inspector: MachOInspector) -> [MachOSymbolEnt
     var reader = BinaryReader.new(data)
     reader.skip(lc.offset + 8)
 
-    val symoff = reader.read_u32(order) ?? 0
-    val nsyms = reader.read_u32(order) ?? 0
-    val stroff = reader.read_u32(order) ?? 0
-    val strsize = reader.read_u32(order) ?? 0
+    val symoff = (reader.read_u32(order) ?? 0) as i64
+    val nsyms = (reader.read_u32(order) ?? 0) as i64
+    val stroff = (reader.read_u32(order) ?? 0) as i64
+    val strsize = (reader.read_u32(order) ?? 0) as i64
 
     var symbols: [MachOSymbolEntry] = []
+    val little = order == ByteOrder.LittleEndian
     var i = 0
     while i < nsyms:
         val entry_off = symoff + (i * NLIST_64_SIZE)
-        var sym_reader = BinaryReader.new(data)
-        sym_reader.skip(entry_off)
+        var n_strx: i64 = 0
+        var n_type: i64 = 0
+        var n_sect: i64 = 0
+        var n_desc: i64 = 0
+        var n_value: i64 = 0
+        if little and entry_off >= 0 and entry_off + 16 <= data.len():
+            n_strx = (data[entry_off] as i64) | ((data[entry_off + 1] as i64) << 8) | ((data[entry_off + 2] as i64) << 16) | ((data[entry_off + 3] as i64) << 24)
+            n_type = data[entry_off + 4] as i64
+            n_sect = data[entry_off + 5] as i64
+            n_desc = (data[entry_off + 6] as i64) | ((data[entry_off + 7] as i64) << 8)
+            n_value = (data[entry_off + 8] as i64) | ((data[entry_off + 9] as i64) << 8) | ((data[entry_off + 10] as i64) << 16) | ((data[entry_off + 11] as i64) << 24) | ((data[entry_off + 12] as i64) << 32) | ((data[entry_off + 13] as i64) << 40) | ((data[entry_off + 14] as i64) << 48) | ((data[entry_off + 15] as i64) << 56)
+        else:
+            var sym_reader = BinaryReader.new(data)
+            sym_reader.skip(entry_off)
+            n_strx = (sym_reader.read_u32(order) ?? 0) as i64
+            n_type = (sym_reader.read_u8() ?? 0) as i64
+            n_sect = (sym_reader.read_u8() ?? 0) as i64
+            n_desc = (sym_reader.read_u16(order) ?? 0) as i64
+            n_value = (sym_reader.read_u64(order) ?? 0) as i64
 
-        val n_strx = sym_reader.read_u32(order) ?? 0
-        val n_type = sym_reader.read_u8() ?? 0
-        val n_sect = sym_reader.read_u8() ?? 0
-        val n_desc = sym_reader.read_u16(order) ?? 0
-        val n_value = sym_reader.read_u64(order) ?? 0
+        val name: text = match _read_strtab_entry(data, stroff, n_strx):
+            case Ok(v): v
+            case Err(e): return Err("Mach-O symbol {i}: {e}")
 
-        val name = _read_strtab_entry(data, stroff, n_strx)
-
-        symbols = symbols.push(MachOSymbolEntry(
+        symbols.push(MachOSymbolEntry(
             name: name,
             n_type: n_type,
             n_sect: n_sect,
@@ -214,21 +236,13 @@ fn macho_parse_symbols(data: [u8], inspector: MachOInspector) -> [MachOSymbolEnt
         ))
         i = i + 1
 
-    symbols
+    Ok(symbols)
 
-fn _read_strtab_entry(data: [u8], stroff: i64, index: i64) -> text:
+fn _read_strtab_entry(data: [u8], stroff: i64, index: i64) -> Result<text, text>:
+    if stroff < 0 or stroff > data.len() or index < 0 or index >= data.len() - stroff:
+        return Ok("")
     val start = stroff + index
-    if start >= data.len():
-        return ""
-    var result = ""
-    var pos = start
-    while pos < data.len():
-        val b = data[pos]
-        if b == 0:
-            break
-        result = result + text.from_char_code(b)
-        pos = pos + 1
-    result
+    _read_fixed_string(data, start, data.len() - start)
 
 # ============================================================================
 # Relocation Parsing
@@ -239,14 +253,20 @@ fn macho_parse_relocations(data: [u8], section: MachOSectionInfo, order: ByteOrd
         return []
 
     var relocs: [MachORelocationEntry] = []
+    val little = order == ByteOrder.LittleEndian
     var i = 0
     while i < section.nreloc:
         val base = section.reloff + (i * 8)
-        var reader = BinaryReader.new(data)
-        reader.skip(base)
-
-        val r_address = reader.read_u32(order) ?? 0
-        val r_info = reader.read_u32(order) ?? 0
+        var r_address: i64 = 0
+        var r_info: i64 = 0
+        if little and base >= 0 and base + 8 <= data.len():
+            r_address = (data[base] as i64) | ((data[base + 1] as i64) << 8) | ((data[base + 2] as i64) << 16) | ((data[base + 3] as i64) << 24)
+            r_info = (data[base + 4] as i64) | ((data[base + 5] as i64) << 8) | ((data[base + 6] as i64) << 16) | ((data[base + 7] as i64) << 24)
+        else:
+            var reader = BinaryReader.new(data)
+            reader.skip(base)
+            r_address = (reader.read_u32(order) ?? 0) as i64
+            r_info = (reader.read_u32(order) ?? 0) as i64
 
         val r_symbolnum = r_info & 0x00ffffff
         val r_pcrel = ((r_info >> 24) & 1) != 0
@@ -254,7 +274,7 @@ fn macho_parse_relocations(data: [u8], section: MachOSectionInfo, order: ByteOrd
         val r_extern = ((r_info >> 27) & 1) != 0
         val r_type = (r_info >> 28) & 0xf
 
-        relocs = relocs.push(MachORelocationEntry(
+        relocs.push(MachORelocationEntry(
             r_address: r_address,
             r_symbolnum: r_symbolnum,
             r_pcrel: r_pcrel,
@@ -272,13 +292,13 @@ fn macho_parse_relocations(data: [u8], section: MachOSectionInfo, order: ByteOrd
 
 fn macho_parse_uuid(data: [u8], inspector: MachOInspector) -> MachOUuid?:
     val uuid_lc = macho_find_load_command(inspector, LC_UUID)
-    if uuid_lc.? == false:
-        return nil
+    if uuid_lc.is_none():
+        return None
 
     val lc = uuid_lc!
     val uuid_offset = lc.offset + 8
     if uuid_offset + 16 > data.len():
-        return nil
+        return None
 
     var uuid_bytes: [u8] = []
     var i = 0
@@ -317,10 +337,14 @@ fn macho_parse_object(data: [u8]) -> Result<MachOObject, text>:
     var segments: [MachOSegment] = []
     for lc in inspector.load_commands:
         if lc.cmd == LC_SEGMENT_64:
-            val seg = macho_parse_segment(data, lc, order)
-            segments = segments.push(seg)
+            val seg: MachOSegment = match macho_parse_segment(data, lc, order):
+                case Ok(v): v
+                case Err(e): return Err(e)
+            segments.push(seg)
 
-    val symbols = macho_parse_symbols(data, inspector)
+    val symbols: [MachOSymbolEntry] = match macho_parse_symbols(data, inspector):
+        case Ok(v): v
+        case Err(e): return Err(e)
     val uuid = macho_parse_uuid(data, inspector)
 
     Ok(MachOObject(
@@ -341,13 +365,13 @@ fn macho_find_section(obj: MachOObject, segname: text, sectname: text) -> MachOS
         for sec in seg.sections:
             if sec.segname == segname and sec.sectname == sectname:
                 return sec
-    return nil
+    return None
 
 fn macho_find_segment(obj: MachOObject, segname: text) -> MachOSegment?:
     for seg in obj.segments:
         if seg.segname == segname:
             return seg
-    return nil
+    return None
 
 fn macho_defined_symbols(obj: MachOObject) -> [MachOSymbolEntry]:
     var result: [MachOSymbolEntry] = []

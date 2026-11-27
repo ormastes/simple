@@ -1,0 +1,156 @@
+# Regression spec: SCV `scv_compile_snapshot_retain_newest_v2` legacy v1 sweep,
+# `.build-retention-v1.sdn` managed-store boundary + untracked legacy cleanup,
+# and bounded `source-inventory/generations/` retention with >200B payloads and
+# `min_age_s` grace protection.
+# @cover src/lib/scv/compile_snapshot_retention_v1.spl
+# @cover src/lib/scv/compile_source_inventory.spl
+
+use std.spec.*
+use std.scv.compile_snapshot.{
+    scv_compile_snapshot_provenance_v1, scv_compile_snapshot_provenance_v2,
+    scv_compile_snapshot_receipt_v1, scv_compile_snapshot_gc_v1,
+    scv_compile_snapshot_retain_newest_v2, scv_compile_snapshot_lease_acquire_v1,
+    scv_compile_snapshot_lease_release_v1
+}
+use std.scv.build_retention_v1.{
+    BuildRetentionNodeV1, BuildRetentionPinV1, BuildRetentionStateV1,
+    build_retention_sdn_v1
+}
+use std.scv.compile_source_inventory.{
+    CompileSourceInventoryV1, compile_source_inventory_apply_event_v1,
+    compile_source_inventory_git_event_v1, compile_source_inventory_publish_reasoned_v1,
+    compile_source_inventory_prune_generations_v1
+}
+use app.io.mod.{dir_create}
+use app.io.file_ops.{path_absolute}
+use std.io_runtime.{file_read}
+use std.nogc_sync_mut.io_runtime.{dir_exists, dir_list_or_empty, dir_remove, file_exists, file_write, getpid}
+
+val REV_V1_PINNED: text = "scv-revision-v1-0000000000000000000000000000000000000000000000000000000000000011"
+val REV_V1_TRACKED: text = "scv-revision-v1-0000000000000000000000000000000000000000000000000000000000000022"
+val REV_V1_UNTRACKED: text = "scv-revision-v1-0000000000000000000000000000000000000000000000000000000000000029"
+val REV_V2_OLD: text = "scv-revision-v2-0000000000000000000000000000000000000000000000000000000000000033"
+val REV_V2_KEEP: text = "scv-revision-v2-0000000000000000000000000000000000000000000000000000000000000044"
+
+fn write_v1_snapshot(cache: text, rev: text, used_epoch: i64):
+    expect(dir_create(cache + "/snapshots/" + rev, true)).to_equal(true)
+    val prov = scv_compile_snapshot_provenance_v1(rev, "c", "t", "d", 1)
+    file_write(cache + "/snapshots/" + rev + "/SCV_COMPILE_SNAPSHOT", prov)
+    file_write(cache + "/receipts/" + rev + ".receipt", scv_compile_snapshot_receipt_v1(prov, rev))
+    file_write(cache + "/receipts/" + rev + ".used", "{used_epoch}")
+
+fn write_v2_snapshot(cache: text, rev: text, used_epoch: i64):
+    expect(dir_create(cache + "/snapshots/" + rev, true)).to_equal(true)
+    val prov = scv_compile_snapshot_provenance_v2(rev, "c", "t", "d", 1)
+    file_write(cache + "/snapshots/" + rev + "/SCV_COMPILE_SNAPSHOT", prov)
+    val expected = scv_compile_snapshot_receipt_v1(prov, rev)
+    file_write(cache + "/snapshots/" + rev + "/SCV_COMPILE_RECEIPT", expected)
+    file_write(cache + "/receipts/" + rev + ".used", "{used_epoch}")
+
+describe "SCV snapshot v2 legacy sweep, managed-store boundary, and inventory generation GC":
+    it "sweeps aged v2 and legacy v1 snapshots in unmanaged stores while honouring live leases and min_age_s":
+        val cache = path_absolute("build/test-artifacts/scv-v2-unmanaged-{getpid()}").replace("\\", "/")
+        dir_remove(cache, true)
+        expect(dir_create(cache + "/receipts", true)).to_equal(true)
+        write_v1_snapshot(cache, REV_V1_PINNED, 100)
+        write_v1_snapshot(cache, REV_V1_UNTRACKED, 100)
+        write_v2_snapshot(cache, REV_V2_OLD, 100)
+        write_v2_snapshot(cache, REV_V2_KEEP, 9999999999)
+
+        scv_compile_snapshot_lease_acquire_v1(cache, REV_V1_PINNED)
+        val removed = scv_compile_snapshot_retain_newest_v2(cache, REV_V2_KEEP, 1, 60)
+        expect(removed).to_equal(2)
+        expect(dir_exists(cache + "/snapshots/" + REV_V1_PINNED)).to_equal(true)
+        expect(dir_exists(cache + "/snapshots/" + REV_V1_UNTRACKED)).to_equal(false)
+        expect(dir_exists(cache + "/snapshots/" + REV_V2_OLD)).to_equal(false)
+        expect(dir_exists(cache + "/snapshots/" + REV_V2_KEEP)).to_equal(true)
+        scv_compile_snapshot_lease_release_v1(cache, REV_V1_PINNED)
+        dir_remove(cache, true)
+
+    it "preserves all .build-retention-v1.sdn tracked nodes and refuses unmanaged gc on managed stores":
+        val cache = path_absolute("build/test-artifacts/scv-v2-managed-{getpid()}").replace("\\", "/")
+        dir_remove(cache, true)
+        expect(dir_create(cache + "/receipts", true)).to_equal(true)
+        write_v1_snapshot(cache, REV_V1_PINNED, 100)
+        write_v1_snapshot(cache, REV_V1_TRACKED, 100)
+        write_v1_snapshot(cache, REV_V1_UNTRACKED, 100)
+        write_v2_snapshot(cache, REV_V2_KEEP, 9999999999)
+
+        val state = BuildRetentionStateV1(
+            generation: 1,
+            nodes: [
+                BuildRetentionNodeV1(namespace: "snapshot", id: REV_V1_PINNED, dependencies: [],
+                    authoritative: false, rebuildable: true, bytes: 1024, last_used: 100),
+                BuildRetentionNodeV1(namespace: "snapshot", id: REV_V1_TRACKED, dependencies: [],
+                    authoritative: false, rebuildable: true, bytes: 1024, last_used: 100)
+            ],
+            pins: [BuildRetentionPinV1(ref: "active_builds/lane1", root: "snapshot/" + REV_V1_PINNED)],
+            leases: [])
+        file_write(cache + "/.build-retention-v1.sdn", build_retention_sdn_v1(state))
+
+        # Unmanaged GC refuses completely when .build-retention-v1.sdn is present
+        expect(scv_compile_snapshot_gc_v1(cache, [], 10)).to_equal(0)
+        expect(dir_exists(cache + "/snapshots/" + REV_V1_PINNED)).to_equal(true)
+        expect(dir_exists(cache + "/snapshots/" + REV_V1_TRACKED)).to_equal(true)
+
+        # retain_newest_v2 never deletes tracked SDN nodes (pinned or unpinned)
+        val _swept = scv_compile_snapshot_retain_newest_v2(cache, REV_V2_KEEP, 1, 60)
+        expect(dir_exists(cache + "/snapshots/" + REV_V1_PINNED)).to_equal(true)
+        expect(dir_exists(cache + "/snapshots/" + REV_V1_TRACKED)).to_equal(true)
+
+        # Corrupt SDN fails closed
+        file_write(cache + "/.build-retention-v1.sdn", "corrupt-sdn-payload")
+        write_v1_snapshot(cache, REV_V1_UNTRACKED, 100)
+        expect(scv_compile_snapshot_retain_newest_v2(cache, REV_V2_KEEP, 1, 60)).to_equal(0)
+        expect(dir_exists(cache + "/snapshots/" + REV_V1_UNTRACKED)).to_equal(true)
+        dir_remove(cache, true)
+
+    it "protects young .inventory blobs under min_age_s and retains exact generations 4..6 + CURRENT on >200B files":
+        val base_dir = "build/test-artifacts/scv-inv-gen-cap-{getpid()}"
+        val cache_root = base_dir + "/build/scv"
+        dir_remove(base_dir, true)
+        var digests: [text] = []
+        var inv = CompileSourceInventoryV1(1, 0, [
+            compile_source_inventory_apply_event_v1(
+                CompileSourceInventoryV1(1, 0, []),
+                compile_source_inventory_git_event_v1("create", "src/seed_a.spl", "fn seed_a() -> i64:\n    1\n")).inventory!.entries[0],
+            compile_source_inventory_apply_event_v1(
+                CompileSourceInventoryV1(1, 0, []),
+                compile_source_inventory_git_event_v1("create", "src/seed_b.spl", "fn seed_b() -> i64:\n    2\n")).inventory!.entries[0]
+        ])
+        var gen = 0
+        while gen < 8:
+            inv = compile_source_inventory_apply_event_v1(
+                CompileSourceInventoryV1(1, gen, inv.entries),
+                compile_source_inventory_git_event_v1("create", "src/module_long_path_{gen}.spl", "fn g_{gen}() -> i64:\n    {gen}\n")).inventory!
+            # apply_event_v1 increments generation to gen + 1
+            val (digest, reason) = compile_source_inventory_publish_reasoned_v1(cache_root, inv)
+            expect(reason).to_equal("ok")
+            val gen_file = cache_root + "/source-inventory/generations/" + digest + ".inventory"
+            expect(file_read(gen_file).byte_len()).to_be_greater_than(200)
+            digests.push(digest)
+            gen = gen + 1
+
+        # Default publish min_age_s (600s) protects fresh unreferenced generations
+        var before_blobs: [text] = []
+        for entry in dir_list_or_empty(cache_root + "/source-inventory/generations"):
+            if entry.ends_with(".inventory"):
+                before_blobs.push(entry)
+        expect(before_blobs.len()).to_equal(8)
+
+        # Explicit min_age_s = 0 prunes generations 0..3 and retains generations 4..6 + CURRENT (7)
+        val current_digest = digests[7]
+        val pruned = compile_source_inventory_prune_generations_v1(cache_root, current_digest, 3, 0)
+        expect(pruned).to_equal(4)
+        var kept_blobs: [text] = []
+        for entry in dir_list_or_empty(cache_root + "/source-inventory/generations"):
+            if entry.ends_with(".inventory"):
+                kept_blobs.push(entry)
+        expect(kept_blobs.len()).to_equal(4)
+        expect(file_exists(cache_root + "/source-inventory/generations/" + digests[0] + ".inventory")).to_equal(false)
+        expect(file_exists(cache_root + "/source-inventory/generations/" + digests[3] + ".inventory")).to_equal(false)
+        expect(file_exists(cache_root + "/source-inventory/generations/" + digests[4] + ".inventory")).to_equal(true)
+        expect(file_exists(cache_root + "/source-inventory/generations/" + digests[5] + ".inventory")).to_equal(true)
+        expect(file_exists(cache_root + "/source-inventory/generations/" + digests[6] + ".inventory")).to_equal(true)
+        expect(file_exists(cache_root + "/source-inventory/generations/" + digests[7] + ".inventory")).to_equal(true)
+        dir_remove(base_dir, true)

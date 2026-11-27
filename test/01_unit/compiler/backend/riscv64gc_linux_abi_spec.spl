@@ -1,0 +1,48 @@
+import std.spec
+
+use compiler.backend.{CodegenTarget}
+use compiler.backend.llvm_target.{LlvmTargetConfig, llvm_explicit_codegen_target}
+use compiler.backend.llvm_backend_tools.{llvm_llc_object_argv_v1}
+use compiler.backend.backend.backend_types.{OptimizationLevel}
+
+# Regression: the backend session pins cpu "generic" (target_context_v2), and a
+# cpu override used to drop RISC-V features and ABI. llc then emitted soft-float
+# lp64 objects without RVC (e_flags 0x0), which ld.lld refused to link against
+# lp64d Scrt1.o for riscv64gc-unknown-linux-gnu.
+describe "riscv64gc-unknown-linux-gnu LLVM ABI":
+    it "maps the riscv64gc triple to the Riscv64 codegen target":
+        step("Verify: riscv64gc triple selects Riscv64")
+        expect(llvm_explicit_codegen_target("riscv64gc-unknown-linux-gnu").unwrap() == CodegenTarget.Riscv64).to_equal(true)
+
+    it "keeps lp64d and +f,+d,+c under a generic CPU override (portable numeric)":
+        step("Verify: generic CPU override keeps RV64GC features and LP64D")
+        val config = LlvmTargetConfig.for_target_portable_numeric_with_mode(
+            CodegenTarget.Riscv64, Some("generic"), false)
+        expect(config.cpu).to_equal("generic")
+        expect(config.abi ?? "").to_equal("lp64d")
+        expect(config.features.contains("+f")).to_equal(true)
+        expect(config.features.contains("+d")).to_equal(true)
+        expect(config.features.contains("+c")).to_equal(true)
+
+    it "keeps lp64d and +f,+d,+c under a generic CPU override (legacy config)":
+        step("Verify: legacy constructor keeps RV64GC features and LP64D")
+        val config = LlvmTargetConfig.for_target_with_mode(
+            CodegenTarget.Riscv64, Some("generic"), bare_metal: false)
+        expect(config.abi ?? "").to_equal("lp64d")
+        expect(config.to_feature_string()).to_equal("+m,+a,+f,+d,+c")
+
+    it "passes -target-abi=lp64d and -mattr to llc":
+        step("Verify: llc argv carries the RV64GC/LP64D contract")
+        val config = LlvmTargetConfig.for_target_portable_numeric_with_mode(
+            CodegenTarget.Riscv64, Some("generic"), false)
+        val argv = llvm_llc_object_argv_v1(config, OptimizationLevel.Standard,
+            false, false, "out.o", "in.ll")
+        expect(argv.contains("-target-abi=lp64d")).to_equal(true)
+        expect(argv.contains("-mattr=+m,+a,+f,+d,+c")).to_equal(true)
+
+    it "leaves the bare-metal RV64 soft-float contract unchanged":
+        step("Verify: bare-metal override stays lp64 without FP")
+        val config = LlvmTargetConfig.for_target_portable_numeric_with_mode(
+            CodegenTarget.Riscv64, Some("generic"), true)
+        expect(config.abi ?? "").to_equal("lp64")
+        expect(config.features.contains("+d")).to_equal(false)

@@ -1,0 +1,161 @@
+"""
+## Purpose and audience
+Purpose: Pin that a run staged with LAYOUT-resolved advances
+(`FontRenderer.prepare_text_with_advances`) puts every glyph origin
+(`quad.dst_x - bearing_x`) exactly on the prefix sum of those advances.
+
+`measure_text_advances` snaps a FRACTIONAL cumulative pen (round 12), but the
+staged quads come from the per-glyph INTEGER advance pen. The re-layout shift
+was computed against the fractional array, so the two pens' rounding error
+leaked into the quads and accumulated along the run: measured +4 px by the
+last glyph of the catalog `overview` h1. The CPU Engine2D lane clips a
+resolved-advance run to its laid-out width, so the drift showed as the last
+glyph cut in half ("one pag|e", "inline cod|"); Vulkan, which does not clip,
+drew the whole run 4 px wider than Chromium.
+Audience: text-layout / Engine2D font maintainers.
+
+Chrome oracle (Chromium 131 headless, Range.getBoundingClientRect, Linux
+Liberation Sans / DejaVu Sans Mono):
+
+| run                                         | face / size              | width  |
+|---------------------------------------------|--------------------------|--------|
+| `Common HTML and CSS in one page` (h1)      | Liberation Sans Bold 24  | 422.25 |
+| `inline code` (`<code>`)                    | DejaVu Sans Mono 13      | 105.97 |
+"""
+
+"""
+Traceability: REQ-TEXT-LAYOUT-ADVANCE-STAGING-001 — staged glyph origins follow the producer's advances exactly.
+"""
+# @tag: unit, text_layout, font, engine2d
+# @cover src/lib/nogc_sync_mut/text_layout/font_renderer.spl 1%
+use std.spec.*
+use std.nogc_sync_mut.sffi.io.{file_exists}
+use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer, font_render_config_default_for_size}
+
+val SANS_BOLD = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
+val MONO = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+val BUNDLED_SANS = "assets/fonts/google-fonts/ofl/nunito/Nunito[wght].ttf"
+val BUNDLED_MONO = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
+
+fn resolve_face(preferred: text, fallback: text) -> text:
+    if file_exists(preferred):
+        return preferred
+    fallback
+
+# Largest |glyph origin - advance prefix sum| over the staged run.
+fn max_origin_drift(path: text, s: text, size: i32) -> i32:
+    var r = FontRenderer.new()
+    assert_true(r.try_load_runtime_ttf(path))
+    val adv = r.measure_text_advances(s, size)
+    var pens: [i32] = []
+    var pen = 0
+    for a in adv:
+        pens.push(pen)
+        pen = pen + a
+    val batch = r.prepare_text_with_advances(s, adv, 0xff000000u32, size)
+    var worst = 0
+    for q in batch.quads:
+        val origin = q.dst_x - r.get_glyph(q.codepoint, size).bearing_x
+        var d = origin - pens[q.byte_offset]
+        if d < 0:
+            d = -d
+        if d > worst:
+            worst = d
+    worst
+
+fn run_width(path: text, s: text, size: i32) -> i32:
+    var r = FontRenderer.new()
+    assert_true(r.try_load_runtime_ttf(path))
+    var total = 0
+    for a in r.measure_text_advances(s, size):
+        total = total + a
+    total
+
+describe "a run staged with resolved advances":
+    if file_exists(SANS_BOLD):
+        it "AC-1: the h1 run measures Chrome's 422 px":
+            step("Chrome: 422.25 px")
+            expect(run_width(SANS_BOLD, "Common HTML and CSS in one page", 24)).to_equal(422)
+    else:
+        skip("AC-1: the h1 run measures Chrome's 422 px", "Liberation/DejaVu Linux fonts absent on this host")
+
+    it "AC-2: every h1 glyph origin sits on the advance prefix sum":
+        val face = resolve_face(SANS_BOLD, BUNDLED_SANS)
+        step("before the fix the last glyph drifted +4 px past its advance pen")
+        expect(max_origin_drift(face, "Common HTML and CSS in one page", 24)).to_equal(0)
+
+    it "AC-3: every monospace glyph origin sits on the advance prefix sum":
+        val face = resolve_face(MONO, BUNDLED_MONO)
+        step("before the fix 'inline code' drifted +2 px by its final 'e'")
+        expect(max_origin_drift(face, "inline code", 13)).to_equal(0)
+
+val SANS = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val LCD_RUN = "Hamburgefonstiv"
+
+# Stages LCD_RUN at 16 px with LCD glyphs on. `eager` reads every glyph through
+# the public `get_glyph` first, so each phase-0 cell is rastered before the
+# run is staged (what staging itself did before cells were deferred).
+fn lcd_staged(eager: bool) -> FontRenderer:
+    val face = resolve_face(SANS, BUNDLED_SANS)
+    var r = FontRenderer.new()
+    assert_true(r.try_load_runtime_ttf(face))
+    r.set_lcd_text(true)
+    if eager:
+        for cp in LCD_RUN.bytes():
+            r.get_glyph(cp as i32, 16)
+    val adv = r.measure_text_advances(LCD_RUN, 16)
+    r.stage_text_with_advances_configured(LCD_RUN, adv, 0xff000000u32, font_render_config_default_for_size(16))
+    r
+
+# One staged quad as text: where it is drawn and every pixel of its atlas cell.
+fn lcd_quad_text(r: FontRenderer, i: i64) -> text:
+    val q = r.staged_quads[i]
+    var cell = "{q.codepoint}@{q.dst_x},{q.dst_y} {q.width}x{q.height}:"
+    var row = 0
+    while row < q.height:
+        var col = 0
+        while col < q.width:
+            cell = cell + " {r.atlas_pixels[(q.atlas_y + row) * 1024 + q.atlas_x + col]}"
+            col = col + 1
+        row = row + 1
+    cell
+
+describe "an LCD run staged with resolved advances":
+    it "AC-4: the atlas holds only the cells the run draws":
+        val r = lcd_staged(false)
+        expect(r.staged_valid).to_equal(true)
+        expect(r.staged_quads.len()).to_equal(15)
+        step("every quad has an atlas cell, and some are quarter-phase cells")
+        var drawn: [i32] = []
+        var phase_cells = 0
+        var unresolved = 0
+        for q in r.staged_quads:
+            if q.atlas_x < 0:
+                unresolved = unresolved + 1
+            val at = q.atlas_y * 1024 + q.atlas_x
+            if not drawn.contains(at):
+                drawn.push(at)
+        for gi in r.atlas_glyph_indices:
+            if gi < -1:
+                phase_cells = phase_cells + 1
+        expect(unresolved).to_equal(0)
+        expect(phase_cells).to_be_greater_than(0)
+        step("before deferral each phased glyph also left its undrawn phase-0 cell")
+        expect(r.atlas_glyph_indices.len()).to_equal(drawn.len())
+
+    it "AC-5: a deferred run draws the same pixels as an eagerly rastered one":
+        val deferred = lcd_staged(false)
+        val eager = lcd_staged(true)
+        expect(deferred.staged_quads.len()).to_equal(eager.staged_quads.len())
+        var i: i64 = 0
+        while i < deferred.staged_quads.len():
+            expect(lcd_quad_text(deferred, i)).to_equal(lcd_quad_text(eager, i))
+            i = i + 1
+
+    it "AC-6: a glyph read after a deferred run has its pixels":
+        var r = lcd_staged(false)
+        for cp in LCD_RUN.bytes():
+            val g = r.get_glyph(cp as i32, 16)
+            expect(g.lcd_frame_only).to_equal(false)
+            expect(g.pixels.len()).to_equal(g.width.to_i64() * g.height.to_i64())
+            expect(g.lcd_pixels.len()).to_equal(g.width.to_i64() * g.height.to_i64() * 3)

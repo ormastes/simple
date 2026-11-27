@@ -1,0 +1,168 @@
+# Pure, bounded shared-server configuration. No environment, filesystem,
+# credential retrieval, DNS resolution or transport effects occur here.
+
+pub struct ServerRecordV1:
+    name: text
+    transport: text
+    host: text
+    port: i64
+    container_host: text
+    auth_ref: text
+    tls_ref: text
+    remote_executable: text
+
+pub struct ServerContextV1:
+    name: text
+    shared_server: text
+    consumer_refs: Dict<text, text>
+
+pub struct ServerConfigV1:
+    current_context: text
+    servers: [ServerRecordV1]
+    contexts: [ServerContextV1]
+
+pub struct ResolvedServerV1:
+    record: ServerRecordV1
+    consumer: text
+    context: text
+    # explicit_server | context_consumer | context_shared
+    source: text
+
+pub fn server_consumer_valid_v1(consumer: text) -> bool:
+    ["simple", "orchestrator", "caret", "agent"].contains(consumer)
+
+fn server_ascii_alnum_v1(code: i64) -> bool:
+    (code >= 48 and code <= 57) or (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+
+pub fn server_name_valid_v1(name: text) -> bool:
+    if name.byte_len() < 1 or name.byte_len() > 64: return false
+    if not server_ascii_alnum_v1(name.byte_at(0)): return false
+    for code in name.bytes():
+        if not (server_ascii_alnum_v1(code as i64) or code == 45 or code == 46 or code == 95):
+            return false
+    true
+
+# Numeric-only hosts must be canonical dotted IPv4, never DNS fallback for
+# malformed IPs such as 127.1, 0127.0.0.1, or an integer address.
+pub fn server_ipv4_valid_v1(host: text) -> bool:
+    val parts = host.split(".")
+    if parts.len() != 4: return false
+    for part in parts:
+        if part.byte_len() < 1 or part.byte_len() > 3: return false
+        if part.byte_len() > 1 and part.byte_at(0) == 48: return false
+        var number: i64 = 0
+        for digit in part.bytes():
+            if digit < 48 or digit > 57: return false
+            number = number * 10 + (digit as i64) - 48
+        if number > 255: return false
+    true
+
+fn server_numeric_host_spelling_v1(host: text) -> bool:
+    for part in host.split("."):
+        var start = 0
+        if part.starts_with("0x") or part.starts_with("0X"): start = 2
+        if start == part.byte_len(): return false
+        var index = start
+        while index < part.byte_len():
+            val code = part.byte_at(index)
+            val digit = code >= 48 and code <= 57
+            val hex = start == 2 and ((code >= 65 and code <= 70) or (code >= 97 and code <= 102))
+            if not digit and not hex: return false
+            index = index + 1
+    true
+
+pub fn server_host_validate_v1(host: text) -> Result<bool, text>:
+    if host.byte_len() < 1 or host.byte_len() > 253: return Err("server-host-invalid")
+    if host.contains(":"): return Err("server-host-ipv6-unsupported")
+    if server_numeric_host_spelling_v1(host):
+        if not server_ipv4_valid_v1(host): return Err("server-host-ipv4-invalid")
+        return Ok(true)
+    for label in host.split("."):
+        val size = label.byte_len()
+        if size < 1 or size > 63: return Err("server-host-dns-invalid")
+        if label.byte_at(0) == 45 or label.byte_at(size - 1) == 45:
+            return Err("server-host-dns-invalid")
+        for code in label.bytes():
+            if not (server_ascii_alnum_v1(code as i64) or code == 45):
+                return Err("server-host-dns-invalid")
+    Ok(true)
+
+# Secret and trust values are opaque references. Inline credentials, URL
+# user-info, query strings, shell syntax and empty/traversing segments fail.
+fn server_reference_valid_v1(value: text, scheme: text) -> bool:
+    if value.byte_len() > 256 or not value.starts_with(scheme): return false
+    val suffix = value.substring(scheme.byte_len(), value.byte_len())
+    if suffix == "": return false
+    for part in suffix.split("/"):
+        if not server_name_valid_v1(part) or part == "." or part == "..": return false
+    true
+
+fn server_executable_valid_v1(value: text) -> bool:
+    if value.byte_len() < 2 or value.byte_len() > 256 or not value.starts_with("/"):
+        return false
+    val suffix = value.substring(1, value.byte_len())
+    for part in suffix.split("/"):
+        if part == "" or part == "." or part == "..": return false
+        for code in part.bytes():
+            if not (server_ascii_alnum_v1(code as i64) or code == 45 or code == 46 or code == 95):
+                return false
+    true
+
+pub fn server_record_validate_v1(record: ServerRecordV1) -> Result<bool, text>:
+    if not server_name_valid_v1(record.name): return Err("server-name-invalid")
+    if record.transport == "local":
+        if (record.host != "" or record.port != 0 or record.container_host != "" or
+                record.auth_ref != "" or record.tls_ref != "" or record.remote_executable != ""):
+            return Err("server-local-fields-forbidden")
+        return Ok(true)
+    if record.transport != "ssh" and record.transport != "https":
+        return Err("server-transport-invalid")
+    server_host_validate_v1(record.host)?
+    if record.container_host != "": server_host_validate_v1(record.container_host)?
+    if record.port < 1 or record.port > 65535: return Err("server-port-invalid")
+    if not server_reference_valid_v1(record.tls_ref, "trust://"):
+        return Err("server-trust-reference-required")
+    if record.transport == "ssh":
+        if not server_reference_valid_v1(record.auth_ref, "secret://"):
+            return Err("server-auth-reference-required")
+        if not server_executable_valid_v1(record.remote_executable):
+            return Err("server-remote-executable-invalid")
+    else:
+        if record.auth_ref != "" and not server_reference_valid_v1(record.auth_ref, "secret://"):
+            return Err("server-auth-reference-invalid")
+        if record.remote_executable != "": return Err("server-https-executable-forbidden")
+    Ok(true)
+
+pub fn server_config_validate_v1(config: ServerConfigV1) -> Result<bool, text>:
+    if config.servers.len() < 1 or config.servers.len() > 16: return Err("server-record-limit")
+    if config.contexts.len() < 1 or config.contexts.len() > 16: return Err("server-context-limit")
+    var names: Dict<text, bool> = {}
+    for record in config.servers:
+        server_record_validate_v1(record)?
+        if names.contains_key(record.name): return Err("server-name-duplicate")
+        names[record.name] = true
+    var contexts: Dict<text, bool> = {}
+    for context in config.contexts:
+        if not server_name_valid_v1(context.name): return Err("server-context-name-invalid")
+        if contexts.contains_key(context.name): return Err("server-context-name-duplicate")
+        contexts[context.name] = true
+        if not names.contains_key(context.shared_server): return Err("server-context-shared-reference-missing")
+        for consumer in context.consumer_refs.keys():
+            if not server_consumer_valid_v1(consumer): return Err("server-consumer-invalid")
+            if not names.contains_key(context.consumer_refs[consumer]): return Err("server-context-consumer-reference-missing")
+    if not contexts.contains_key(config.current_context): return Err("server-current-context-missing")
+    Ok(true)
+
+# Used ONLY by an IO owner that has established that configuration is absent.
+# An empty or malformed document must go through decode and fail.
+pub fn default_server_config_v1() -> ServerConfigV1:
+    val refs: Dict<text, text> = {}
+    val local = ServerRecordV1(name: "local", transport: "local", host: "", port: 0,
+        container_host: "", auth_ref: "", tls_ref: "", remote_executable: "")
+    val context = ServerContextV1(name: "local", shared_server: "local", consumer_refs: refs)
+    ServerConfigV1(current_context: "local", servers: [local], contexts: [context])
+
+export ServerRecordV1, ServerContextV1, ServerConfigV1, ResolvedServerV1
+export server_consumer_valid_v1, server_name_valid_v1, server_ipv4_valid_v1
+export server_host_validate_v1, server_record_validate_v1, server_config_validate_v1
+export default_server_config_v1

@@ -60,6 +60,7 @@ impl std::fmt::Debug for RuntimeValue {
                 match payload {
                     tags::SPECIAL_NIL => write!(f, "RuntimeValue::Nil"),
                     tags::SPECIAL_TRUE => write!(f, "RuntimeValue::Bool(true)"),
+                    _ if self.is_char() => write!(f, "RuntimeValue::Char({:?})", self.as_char().unwrap_or(char::REPLACEMENT_CHARACTER)),
                     tags::SPECIAL_FALSE => write!(f, "RuntimeValue::Bool(false)"),
                     _ => write!(f, "RuntimeValue::Symbol({})", payload),
                 }
@@ -501,6 +502,40 @@ impl RuntimeValue {
     }
 
     // =========================================================================
+    // Char operations (ADR-005)
+    // =========================================================================
+
+    /// Create a char value from a Unicode scalar value. Returns None for a
+    /// surrogate or a value above U+10FFFF.
+    #[inline]
+    pub fn from_char_code(code: u32) -> Option<Self> {
+        char::from_u32(code).map(|c| Self::from_char(c))
+    }
+
+    /// Create a char value.
+    #[inline]
+    pub const fn from_char(c: char) -> Self {
+        Self::from_special(tags::SPECIAL_CHAR_BASE | (c as u64))
+    }
+
+    /// Check if this is a char value.
+    #[inline]
+    pub const fn is_char(self) -> bool {
+        self.tag() == tags::TAG_SPECIAL
+            && (self.payload() & !tags::SPECIAL_CHAR_MASK) == tags::SPECIAL_CHAR_BASE
+    }
+
+    /// The char, if this is a char value.
+    #[inline]
+    pub fn as_char(self) -> Option<char> {
+        if self.is_char() {
+            char::from_u32((self.payload() & tags::SPECIAL_CHAR_MASK) as u32)
+        } else {
+            None
+        }
+    }
+
+    // =========================================================================
     // Heap pointer operations
     // =========================================================================
 
@@ -574,6 +609,11 @@ impl RuntimeValue {
     /// Check if this value is "truthy" (non-zero, non-nil, non-empty)
     #[inline]
     pub fn truthy(self) -> bool {
+        // ADR-005: a char has no truthiness (type error). Fail closed rather than
+        // silently returning false.
+        if self.is_char() {
+            panic!("truthiness of a char is a type error; compare explicitly");
+        }
         // Heap-boxed floats carry TAG_HEAP; a boxed 0.0 must be falsy, not
         // "truthy because the pointer exists".
         if self.is_float() {
@@ -612,14 +652,106 @@ impl RuntimeValue {
     /// Prepare one input for an isolated OS thread.
     ///
     /// Inline values are copied. Explicit synchronized channel handles may be
-    /// shared. Every other heap graph fails closed until a real typed graph
-    /// clone, frozen handle, or owned-region move is available. `Option`
-    /// preserves the distinction between a valid NIL input and rejection.
+    /// shared. Immutable heap leaves (strings, boxed numeric scalars) and
+    /// acyclic object/enum graphs are deep-copied so the child owns an
+    /// independent copy — the parent may free or mutate its original without
+    /// affecting the child. Mutable containers (arrays, dicts, ...) and other
+    /// heap graphs still fail closed until a real typed graph clone, frozen
+    /// handle, or owned-region move is available. `Option` preserves the
+    /// distinction between a valid NIL input and rejection.
     pub fn clone_for_isolated_thread(self) -> Option<Self> {
+        self.clone_for_isolated_thread_depth(0)
+    }
+
+    /// Depth-bounded worker for [`Self::clone_for_isolated_thread`]: object
+    /// graphs may contain reference cycles, and an unbounded recursive copy
+    /// would overflow the stack. The bound is generous for real configs and
+    /// far below any stack danger; exceeding it fails the spawn closed.
+    fn clone_for_isolated_thread_depth(self, depth: u32) -> Option<Self> {
+        const MAX_ISOLATED_CLONE_DEPTH: u32 = 64;
+        if depth > MAX_ISOLATED_CLONE_DEPTH {
+            return None;
+        }
         match self.tag() {
             tags::TAG_INT | tags::TAG_FLOAT | tags::TAG_SPECIAL => Some(self),
             tags::TAG_HEAP => match super::heap::registered_heap_type(self) {
                 Some(HeapObjectType::Channel) => Some(self),
+                // Immutable leaves: copy the bytes/value into a fresh heap
+                // object so the child's copy outlives the parent's original.
+                Some(HeapObjectType::String) => {
+                    super::heap::with_typed_ptr::<super::collections::RuntimeString, _>(
+                        self,
+                        HeapObjectType::String,
+                        |ptr| unsafe {
+                            let bytes = (*ptr).as_bytes();
+                            super::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+                        },
+                    )
+                }
+                Some(HeapObjectType::Float) => super::heap::with_typed_ptr::<super::heap::HeapFloat, _>(
+                    self,
+                    HeapObjectType::Float,
+                    |ptr| unsafe { RuntimeValue::from_float((*ptr).value) },
+                ),
+                Some(HeapObjectType::UInt) => super::heap::with_typed_ptr::<super::heap::HeapUInt, _>(
+                    self,
+                    HeapObjectType::UInt,
+                    |ptr| unsafe { RuntimeValue::from_u64((*ptr).value) },
+                ),
+                Some(HeapObjectType::Int) => super::heap::with_typed_ptr::<super::heap::HeapInt, _>(
+                    self,
+                    HeapObjectType::Int,
+                    |ptr| unsafe { RuntimeValue::from_int((*ptr).value) },
+                ),
+                // Class/struct instances: a fresh object with the same class
+                // identity and every field independently cloned. A field that
+                // cannot be cloned (mutable container, cycle past the depth
+                // bound) rejects the whole spawn, exactly like before.
+                Some(HeapObjectType::Object) => {
+                    let (class_id, field_count, fields) =
+                        super::heap::with_typed_ptr::<super::objects::RuntimeObject, _>(
+                            self,
+                            HeapObjectType::Object,
+                            |ptr| unsafe {
+                                (
+                                    (*ptr).class_id,
+                                    (*ptr).field_count,
+                                    (*ptr).fields().to_vec(),
+                                )
+                            },
+                        )?;
+                    let copy = super::objects::rt_object_new(class_id, field_count);
+                    if !copy.is_heap() {
+                        return None;
+                    }
+                    for (index, field) in fields.into_iter().enumerate() {
+                        let Some(cloned_field) = field.clone_for_isolated_thread_depth(depth + 1)
+                        else {
+                            return None;
+                        };
+                        if !super::objects::rt_object_field_set(copy, index as u32, cloned_field) {
+                            return None;
+                        }
+                    }
+                    Some(copy)
+                }
+                // Enum values: same enum identity, payload cloned recursively.
+                Some(HeapObjectType::Enum) => {
+                    let (enum_id, discriminant, payload) =
+                        super::heap::with_typed_ptr::<super::objects::RuntimeEnum, _>(
+                            self,
+                            HeapObjectType::Enum,
+                            |ptr| unsafe {
+                                ((*ptr).enum_id, (*ptr).discriminant, (*ptr).payload)
+                            },
+                        )?;
+                    let cloned_payload = payload.clone_for_isolated_thread_depth(depth + 1)?;
+                    Some(super::objects::rt_enum_new(
+                        enum_id,
+                        discriminant,
+                        cloned_payload,
+                    ))
+                }
                 _ => None,
             },
             _ => None,
@@ -640,6 +772,7 @@ impl RuntimeValue {
                 match payload {
                     tags::SPECIAL_NIL => "nil",
                     tags::SPECIAL_TRUE | tags::SPECIAL_FALSE => "bool",
+                    _ if self.is_char() => "char",
                     _ => "symbol",
                 }
             }
@@ -698,6 +831,7 @@ impl RuntimeValue {
                 match payload {
                     tags::SPECIAL_NIL => ValueKind::Nil,
                     tags::SPECIAL_TRUE | tags::SPECIAL_FALSE => ValueKind::Bool,
+                    _ if self.is_char() => ValueKind::Char,
                     _ => ValueKind::Symbol,
                 }
             }

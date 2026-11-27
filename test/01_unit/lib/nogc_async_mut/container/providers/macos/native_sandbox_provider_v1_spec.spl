@@ -1,0 +1,127 @@
+"""MacOS native sandbox provider: serialization, provisioning, framing, fail-closed lifecycle."""
+
+use std.spec.{describe, it, expect}
+use std.common.contracts.container.runtime_v1.{
+    RuntimeIdentityV1, RUNTIME_PHASE_PREPARED, RUNTIME_STATUS_REJECTED,
+    RUNTIME_STATUS_BLOCKED}
+use std.nogc_async_mut.container.providers.macos.native_sandbox_provider_v1.{
+    MacOsNativeSandboxProviderV1, MACOS_NATIVE_SANDBOX_ENGINE_V1}
+use std.nogc_async_mut.container.providers.macos.worker_protocol_v1.{
+    MacWorkerSessionV1, mac_worker_encode_request_v1, MAC_WORKER_SUBMIT_V1}
+
+fn _identity(pod_uid: text) -> RuntimeIdentityV1:
+    RuntimeIdentityV1(pod_uid: pod_uid, attempt: 1, provider_generation: 1,
+        operation_id: "op-1", engine: MACOS_NATIVE_SANDBOX_ENGINE_V1,
+        native_id: "", node_boot_id: "boot-1")
+
+fn _key() -> [u8]:
+    var key: [u8] = []
+    var i = 0
+    while i < 32:
+        key.push(i.to_u8())
+        i = i + 1
+    key
+
+fn _nonce() -> [u8]:
+    var nonce: [u8] = []
+    var i = 0
+    while i < 32:
+        nonce.push((255 - i).to_u8())
+        i = i + 1
+    nonce
+
+fn _push_le32(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out.push(((value >> 16) & 0xFF).to_u8())
+    out.push(((value >> 24) & 0xFF).to_u8())
+    out
+
+# Thin little-endian 64-bit arm64 MH_EXECUTE with one LC_BUILD_VERSION
+# platform command, matching executable_preflight_v1's admitted subset.
+fn _image() -> [u8]:
+    var image: [u8] = []
+    image = _push_le32(image, 0xfeedfacf)
+    image = _push_le32(image, 0x0100000c)
+    image = _push_le32(image, 0)
+    image = _push_le32(image, 2)
+    image = _push_le32(image, 1)
+    image = _push_le32(image, 24)
+    image = _push_le32(image, 0)
+    image = _push_le32(image, 0)
+    image = _push_le32(image, 0x32)
+    image = _push_le32(image, 24)
+    image = _push_le32(image, 1)
+    image = _push_le32(image, 0)
+    image = _push_le32(image, 0)
+    image = _push_le32(image, 0)
+    image
+
+describe "macos native sandbox provider":
+    it "prepares in the blocked prepared state under the sandbox engine identity":
+        val provider = MacOsNativeSandboxProviderV1.prepare(_identity("pod-1"))
+        expect(provider.state_for().phase).to_equal(RUNTIME_PHASE_PREPARED)
+        expect(provider.state_for().identity.engine).to_equal(
+            MACOS_NATIVE_SANDBOX_ENGINE_V1)
+
+    it "rejects requests for wrong host or isolation class":
+        val provider = MacOsNativeSandboxProviderV1.prepare(_identity("pod-1"))
+        val rejected = provider.admission.validate_request("linux", "linux",
+            "native-container", "x86_64", _image())
+        expect(rejected.status).to_equal(RUNTIME_STATUS_REJECTED)
+
+    it "admits the request shape but stays blocked without a sandbox owner":
+        val provider = MacOsNativeSandboxProviderV1.prepare(_identity("pod-1"))
+        val admitted = provider.admission.validate_request("macos", "macos",
+            "native-sandbox", "arm64", _image())
+        expect(admitted.status).to_equal(RUNTIME_STATUS_BLOCKED)
+        expect(admitted.reason).to_equal("macos-native-signed-sandbox-owner-required")
+
+    it "provisions exactly one worker session and stays blocked":
+        val provider = MacOsNativeSandboxProviderV1.prepare(_identity("pod-1"))
+        val first = provider.provision_worker_v1(_key(), _nonce())
+        expect(first.status).to_equal(RUNTIME_STATUS_BLOCKED)
+        val second = provider.provision_worker_v1(_key(), _nonce())
+        expect(second.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(second.reason).to_equal("macos-native-owner-already-provisioned")
+
+    it "rejects provisioning with malformed key material":
+        val provider = MacOsNativeSandboxProviderV1.prepare(_identity("pod-1"))
+        val short_key: [u8] = [1.to_u8()]
+        val result = provider.provision_worker_v1(short_key, _nonce())
+        expect(result.status).to_equal(RUNTIME_STATUS_REJECTED)
+
+    it "refuses command framing before provisioning":
+        val provider = MacOsNativeSandboxProviderV1.prepare(_identity("pod-1"))
+        val submit = provider.command_v1(MAC_WORKER_SUBMIT_V1, _image())
+        expect(submit.operation.status).to_equal(RUNTIME_STATUS_BLOCKED)
+        expect(submit.frame.len()).to_equal(0)
+
+    it "frames an authenticated submit command without advancing the oracle":
+        val provider = MacOsNativeSandboxProviderV1.prepare(_identity("pod-1"))
+        _ = provider.provision_worker_v1(_key(), _nonce())
+        val submit = provider.command_v1(MAC_WORKER_SUBMIT_V1, _image())
+        expect(submit.operation.status).to_equal(RUNTIME_STATUS_BLOCKED)
+        expect(submit.operation.reason).to_equal("macos-native-awaiting-worker-receipt")
+        expect(submit.frame.len()).to_equal(74 + _image().len())
+        expect(provider.state_for().phase).to_equal(RUNTIME_PHASE_PREPARED)
+
+    it "binds frames to the exact attempt identity across sessions":
+        val frame_a = mac_worker_encode_request_v1(_identity("pod-a"), _key(),
+            _nonce(), MAC_WORKER_SUBMIT_V1, 1, _image())
+        expect(frame_a.is_ok()).to_equal(true)
+        val session_b = MacWorkerSessionV1.provision(_identity("pod-b"), _key(),
+            _nonce())
+        expect(session_b.is_ok()).to_equal(true)
+        val received = session_b.unwrap().receive(frame_a.unwrap())
+        expect(received.is_ok()).to_equal(false)
+
+    it "close drops the session and stays blocked for future commands":
+        val provider = MacOsNativeSandboxProviderV1.prepare(_identity("pod-1"))
+        _ = provider.provision_worker_v1(_key(), _nonce())
+        val closed = provider.close_v1()
+        expect(closed.status).to_equal(RUNTIME_STATUS_BLOCKED)
+        val submit = provider.command_v1(MAC_WORKER_SUBMIT_V1, _image())
+        expect(submit.operation.status).to_equal(RUNTIME_STATUS_BLOCKED)
+        expect(submit.frame.len()).to_equal(0)

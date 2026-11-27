@@ -1,10 +1,9 @@
 # macOS bootstrap blocked at origin/main: seed compile break + Linux-only Stage-3 authority lib (2026-09-06)
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-11 — SUPERSEDED (lane boot10): bootstrap-tooling scope fixed per landed commits verified as ancestors; residuals are host-limited/other-lane. See addendum
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+See "Re-triage 2026-11-04" at the end for evidence.
 
-**Status:** partially FIXED (3 fixes in this change); the remaining `/proc` coupling is documented below.
+**Status:** CLOSED 2026-11-11 (SUPERSEDED for bootstrap-tooling scope, lane boot10; host-limited residuals remain, see 2026-11-11 addendum)
 **Host:** aarch64-apple-darwin, macOS 25.5.0. **Base:** `1bd13da6125`.
 
 ## Symptom
@@ -685,3 +684,354 @@ platform gets wrong. Untouched here.
 | Stage 4 link gate 6 | open (runtime capsule symbol strength) |
 | native f64 correctness | **broken** — blocks deployment on its own |
 
+
+## Re-triage 2026-11-04 (release/1.0.0 `fb18c371767`, aarch64-apple-darwin M4)
+
+Source-level re-check only; the bootstrap was NOT re-run by this triage (a
+separate lane owns it).
+
+**Resolved, with evidence:**
+- Seed compile (defect 1): `src/compiler_rust/runtime/src/cache_host_authority_v1.rs:196-206`
+  now uses `st_mtime_nsec`/`st_ctime_nsec` in every arm; no `st_mtimespec`
+  remains. The bootstrap lane on this host built the Rust seed and a Stage-2
+  binary from it (`/private/tmp/lane1-out/s2b/stage2/aarch64-apple-darwin/simple`,
+  log `/private/tmp/lane1-out/s2b.log`, 2026-11-04T05:41Z).
+- Stage-2 authority (defects 2-3): `authority.shs` gates its `/proc` reads on
+  `[ -r /proc/self/stat ]` / `[ -r /proc/$$/stat ]` (e.g. :2897, :3325) and
+  `manifest-verify.shs:645-676` falls back to `/dev/fd/N` for fd *writes* and a
+  non-procfs pid read.
+- That lane's Stage-2 sanity failure is NOT this bug: the frontend smoke was
+  refused by the host memory reserve (`10615 MiB ... below the 12288 MiB reserve`,
+  s2b.log:55), not by procfs or a SEGV.
+
+**Still OPEN (unchanged design gap):** Stage-3/4 manifest verification remains
+descriptor-pinned through procfs. `manifest-verify.shs` still has 24 `/proc`
+references (e.g. :733-755 bound map via `/proc/<pid>/fd/7|9`, :877-930 manifest
+re-open via `/proc/<pid>/fd/8` compared with GNU `stat -Lc '%d %i %f %s'`), and
+`authority.shs:264-332` (directory-magic-link snapshot) requires
+`/proc/[pid]/fd/N`. Across the directory: authority 18, memory-admission 10,
+self-test 8, manifest-write 7, sanity 5, command-snapshot 5. These paths fail
+closed on macOS/BSD. The file's own comment (:645-650) records why a `/dev/fd`
+substitution is wrong for READ views (dup-not-reopen semantics defeat the
+re-open-and-compare proof), so this was deliberately not patched here: it needs
+an owner decision on the non-procfs pinning mechanism (e.g. `fstat` of the
+held fd via a helper vs. `F_GETPATH` on Darwin). BSD: FreeBSD without
+`linprocfs` has the identical gap.
+
+## 2026-11-04 (later): Option 1 implemented — portable open-fd identity helper
+
+Owner decision: Option 1 (compare the OPEN fd's identity against a fresh stat of
+the path). Implemented in `scripts/check/lib/bootstrap-stage3/manifest-verify.shs`:
+
+- `bootstrap_stage3_fd_identity N` — `dev ino mode_hex size` of an fd this shell
+  holds. Linux: unchanged GNU `stat -Lc '%d %i %f %s' /proc/<pid>/fd/N`; the three
+  Linux manifest re-open sites (old `:877`, `:891`, `:915`) now call it with the
+  byte-identical command, so the `[ "$3" = 8100 ]` raw-mode check and all Linux
+  strength are unchanged.
+- `bootstrap_stage3_fd_stamp N` + `bootstrap_stage3_fd_matches_path N PATH STAMP` —
+  stamp (`dev ino mode size mtime_ns ctime_ns`) taken right after `exec N<path`,
+  later compared against BOTH a fresh fstat of the fd and a no-follow lstat of the
+  path. 0 = same unchanged file; 1 = renamed over / removed / modified after open;
+  2 = cannot determine (unknown OS, missing tool, closed fd) — never a pass.
+- Non-procfs backend is `fstat(2)` on the inherited fd via the tool-authority-pinned
+  python3 the portable lane already requires. NOT `stat -L /dev/fd/N`: measured on
+  this Darwin 25 host it reports the fdesc device (`1820675567`) for `st_dev`
+  instead of the file's (`16777232`); on FreeBSD `/dev/fd/N` for N>2 exists only
+  with `fdescfs` mounted. fstat has neither dependency, so Darwin and FreeBSD/
+  NetBSD/OpenBSD/DragonFly share one arm; any other OS returns 2 (fail closed).
+- Wired into the portable (non-procfs) lane: the bound map (fd 9) and the manifest
+  (fd 8) are stamped at open and re-checked after the positioned-read seal
+  (`portable-authority-{map,manifest}-fd-{stamp,identity}`).
+- Fixtures: `sh scripts/check/check-bootstrap-fd-identity.shs --selftest` —
+  `PASS — 14 fixture(s) checked on Darwin arm` (same file PASS; rename-over FAIL;
+  same-size in-place modify FAIL; removed FAIL; missing stat/python tool ERROR;
+  closed/malformed fd and empty stamp ERROR).
+
+**What Stage 3 on macOS/BSD still needs (NOT solved by an fd-identity helper):**
+1. Capsule mode: `manifest-verify.shs` refuses `BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE=1`
+   without procfs (`portable-descriptor-capsule-not-supported`), and
+   `bootstrap-stage3-provenance-verifier.sh:~198` sets it for the
+   Stage-2-parent-trust-root entry — i.e. the fresh Stage-2 -> Stage-3 route.
+2. Cross-process descriptor transport: the perl shared runner hands every input to
+   the verifier as `/proc/<pid>/fd/N` (validated by `expr` in manifest-write,
+   sanity, command-snapshot, provenance-verifier), and `authority.shs:264-332`
+   reads descriptors owned by ANOTHER pid plus `/proc/<owner>/stat` field 20 for
+   owner liveness. A child cannot address a parent's fd without procfs; this needs
+   an inherit-the-fd protocol redesign, not an identity helper.
+3. Pre-existing, unrelated, observed on this host while testing: the provenance
+   self-test stops at `bootstrap_stage3_seed_inputs_fingerprint` (empty ABI
+   policy), and `check-bootstrap-portability.shs` fails its process-lock fixture;
+   both fail identically without this change.
+
+## 2026-11-04 (inheritfd): inherited-descriptor protocol on the VERIFIER side
+
+Status: **fix-implemented for the verifier; producer side still OPEN** (Stage 3
+on macOS/BSD remains blocked — see "Still open" below).
+
+Implemented in `scripts/check/lib/bootstrap-stage3/authority.shs`:
+
+- New descriptor spelling `fd:N` = "descriptor N inherited into the validating
+  process". `bootstrap_stage3_inherited_fd_verify` checks `dev ino mode` by
+  `fstat(2)` on the inherited fd and hashes by `pread(2)` from offset 0 (immune
+  to the offset shared with the parent); a size/mtime/ctime change during the
+  hash is a mismatch; directories are identity-only. No procfs, no `/dev/fd`.
+- `bootstrap_stage3_validate_descriptor_map` accepts the map itself as `fd:N`
+  and per-role `fd:N` entries. The `/proc/<owner>/fd/N` path is byte-for-byte
+  unchanged, so Linux keeps its strength; `fd:N` on Linux uses the same
+  fstat/pread proof held by the verifier itself (equal or stronger).
+- Owner liveness: `bootstrap_stage3_owner_matches PID STAMP`. Linux = the same
+  `/proc/<pid>/stat` field-20 comparison. Darwin/BSD = `kill -0` plus the
+  launch stamp from `ps -o lstart=` (epoch seconds). Residual window: pid
+  reuse inside the owner's own start second (1 s resolution); content is still
+  pinned by the inherited fd. Unknown OS → exit 2, never a pass.
+- Fixtures: `sh scripts/check/check-bootstrap-fd-identity.shs --selftest` →
+  `PASS — 33 fixture(s) checked on Darwin arm` (inherited child match;
+  shared-offset; wrong sha/ino FAIL; rename-over FAIL via path check while the
+  fd still pins the inode; same-size modify-after-open FAIL; dir identity;
+  not-inherited ERROR; unknown OS ERROR; owner live/dead/reused; end-to-end
+  map validation in a child with map + inputs on inherited fds, plus reused
+  owner / bad payload digest / bad external sha FAIL).
+  `check-bootstrap-positioned-authority.py`: 36 tests OK before and after.
+
+**Still open (why Stage 3 is not yet runnable on macOS):**
+1. Producer: `bootstrap-stage3-shared-runner.pl` still writes
+   `/proc/<pid>/fd/N` descriptors (:1158, :1175) and `proc_start_ticks`
+   (:1402). It must write `fd:N`, clear FD_CLOEXEC on those handles before
+   exec (perl sets CLOEXEC above `$^F`), and record
+   `bootstrap_stage3_process_start_stamp` as the owner stamp. Note
+   `$F_DUPFD_CLOEXEC = 1030` (:16) is the Linux value (Darwin: 67).
+2. The runner also depends on Linux-only primitives with no Darwin equivalent:
+   exec through `/proc/self/fd/N` (no `fexecve`), O_TMPFILE +
+   `linkat` via `/proc/self/fd` (`link_anonymous_final` :447), and opening
+   leaves through a directory descriptor path (`/proc/self/fd/N/leaf`).
+3. Capsule mode stays refused without procfs
+   (`portable-descriptor-capsule-not-supported`, manifest-write/verify) because
+   ~15 capsule sites (sanity.shs:27, manifest-write :44/:57/:142/:339,
+   manifest-verify :1852-1934, authority capsule sites) address
+   `/proc/<pid>/fd/<dir>/<leaf>`; lifting the refusal before the producer
+   writes `fd:N` would be a capability-free pass, so it remains fail-closed.
+4. Pre-existing, not touched: `check-bootstrap-portability.shs` process-lock
+   fixture ("TERM successor acquired while worker survived") and the
+   provenance self-test empty seed ABI policy — neither blocks the fixtures here.
+
+Stage-3 command once an admitted Stage 2 exists (it will still stop at the
+producer gap above until item 1 lands):
+`sh scripts/bootstrap/resume-stage3-from-admitted.sh <admitted-stage2-output-dir>`
+(e.g. `/private/tmp/boot2-out/s2`).
+
+## 2026-11-04 (runnerport): premise correction — the perl shared runner is not on the macOS route
+
+Status: **no code change; the "producer side" items above do not gate macOS Stage 3.**
+Source-traced at `b77b1631b9a` (release/1.0.0); no Stage 3 run was attempted.
+
+- `scripts/check/lib/bootstrap-stage3-shared-runner.pl` is reached only through
+  `bootstrap_stage3_run_evidenced` (`scripts/check/lib/bootstrap-stage3/runner.shs:4`),
+  which refuses any other platform: `[ "$BSTAGE3_RUN_ARCHITECTURE" = x86_64-unknown-linux-gnu ] || return 64`
+  (`runner.shs:40`) and requires `BSTAGE3_RUN_SYSTEMD_RUN`/`SYSTEMCTL`/`CGROUP_ROOT`.
+  The runner itself validates a systemd unit plan with `exit_type=cgroup` and an
+  active-cgroup receipt (`shared-runner.pl:658-847`), and its directory walks use
+  Linux `syscall` numbers (`:19-20`, dies "unsupported syscall architecture" elsewhere).
+- Its only caller is `bootstrap-stage23-coordinator.pl:568`, which no script under
+  `scripts/` or `src/` invokes (only `test/01_unit/scripts/bootstrap_stage3_*runner*_test.shs`).
+  That lane is a Linux-x86_64 systemd lane on every OS, not a macOS path.
+- The macOS Stage 3 route is `scripts/bootstrap/resume-stage3-from-admitted.sh`
+  Darwin branch (`:1057-1083`): `process-tree-rss-watchdog.pl` -> 
+  `scripts/bootstrap/lib/stage3-native-build-worker.sh` (its only `/proc` use,
+  `:134`, is inside `*-linux-*`), then in-process `bootstrap_stage3_write_manifest`
+  + `bootstrap_stage3_verify_manifest` (`:1401-1404`). It never sources the perl
+  runner and never sets `BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE=1` (only
+  `bootstrap-stage3-provenance-verifier.sh:198,356` do, and that verifier is
+  referenced only by the runner/runner.shs lane).
+- Therefore porting the runner's `/proc/<pid>/fd/N`, `proc_start_ticks`,
+  O_TMPFILE+linkat and `/proc/self/fd` exec to Darwin would not unblock anything:
+  it would still stop at systemd/cgroup validation and at `runner.shs:40`. A port is
+  only meaningful together with a Darwin containment backend for that lane, which is
+  an owner design decision (no systemd/cgroup on Darwin/BSD), not a bug fix.
+- The capsule refusal (`portable-descriptor-capsule-not-supported`) stays fail-closed;
+  nothing on the macOS route reaches it.
+
+What actually gates macOS Stage 3 today: an admitted Stage 2 (lane1 runs on this host
+were built but refused by the 12288 MiB sanity memory reserve,
+`/private/tmp/lanes/stage_artifacts.txt`), then the non-capsule manifest
+write/verify on Darwin, which is so far verified only by fixtures, not a real run.
+
+Stage-3 resume command once an admitted Stage 2 exists:
+`sh scripts/bootstrap/resume-stage3-from-admitted.sh <admitted-stage2-output-dir>`
+(e.g. `/private/tmp/boot2-out/s2`).
+
+## Re-triage 2026-11-07: owner decision already implemented; residual is the descriptor capsule
+
+Owner decision (2026-11-07): pin descriptors by fstat dev+inode identity,
+keeping re-open-and-compare. Checked on release/1.0.0 `5392e57a49a`: that
+mechanism has been in the tree since 2026-11-04. The 2026-11-04 re-triage above
+was written before it landed, so its claim that `:877-930` is GNU-stat-only is
+stale.
+
+- `f6c03cbc837` and `62f9fed02aa` added `bootstrap_stage3_fd_identity`,
+  `bootstrap_stage3_fd_stamp` and `bootstrap_stage3_fd_matches_path` in
+  `scripts/check/lib/bootstrap-stage3/manifest-verify.shs`. On Linux these use
+  procfs plus GNU `stat -Lc`. On Darwin and the BSDs they use `fstat(2)` on the
+  held fd and `lstat(2)` on the path. They do not use `stat -L /dev/fd/N`,
+  because on Darwin that reports the fdesc device as st_dev (measured; see the
+  comment at `:686`).
+- Without procfs, `verify_manifest_impl` takes the portable arm for the bound
+  map (fd 9) and the manifest (fd 8): open, stamp, read, then
+  `fd_matches_path`.
+- Selftest `sh scripts/check/check-bootstrap-fd-identity.shs`:
+  `PASS — 33 fixture(s) checked on Darwin arm`. It includes these negative
+  cases: renamed-over, modified-after-open, path-removed, inherited-renamed-over,
+  closed-fd and missing-tool.
+
+**Still OPEN (the real residual):** with `BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE=1`,
+the portable arm refuses with `portable-descriptor-capsule-not-supported`.
+Three places set it unconditionally:
+`bootstrap-stage3-shared-runner.pl:1184` and
+`bootstrap-stage3-provenance-verifier.sh:198,356`. The Perl runner hands every
+helper over as `/proc/<parent_pid>/fd/N` and pins the owner with
+`proc_start_ticks`. Porting it means redesigning the capsule protocol:
+pass held fds plus fstat stamps instead of procfd paths, and stamp the owner
+without `/proc/<pid>/stat`. That is a separate task. A blanket swap of
+`/proc` for `/dev/fd` is not acceptable here.
+
+Not part of this gap: the path-shape validators (`expr ... '/proc/...'`) in
+sanity, command-snapshot and manifest-write already reject unmatched shapes.
+`/proc/meminfo`, `/proc/loadavg` and the PSS reads are memory and load metrics,
+not identity checks. The `self-test.shs:606-640` fixtures run on Linux only.
+
+## Capsule port scoping 2026-11-07: the requested fd-number handoff covers only part of it
+
+Requested change: replace the `/proc/<pid>/fd/N` handoff in
+`scripts/check/lib/bootstrap-stage3-shared-runner.pl` with an inherited fd
+number plus a dev+inode identity check. Sorting the runner's procfd
+dependencies into classes shows that this change covers only classes A and F:
+
+| class | runner sites | portable? |
+|---|---|---|
+| A. descriptor handoff to consumers | `:1158`, `:1175`, `:1505`, `:1509` | yes: fd number plus `fd_stamp`, checked by `fd_matches_path` |
+| B. owner identity `proc_start_ticks` | `:1096`, `:1170`, `:1402-1414` (dies with no procfs) | needs a non-procfs start-time source (`ps -o lstart` / sysctl KERN_PROC) |
+| C. openat-style traversal through `/proc/self/fd/N/<part>` | `:115-139`, `:184-301`, `:338-342`, `:418`, `:451`; coordinator `:90` | **no**: core Perl has no `openat` or `O_PATH`, and this is the TOCTOU-free directory walk |
+| D. exec authority (`payload_exec`/`runner_exec` must be procfd) | `:826-827` | **no**: Darwin has no `fexecve` or exec-by-fd |
+| E. reserved-fd probes | `:1713-1797` | partly: `/dev/fd/N` works for existence checks but not for stat identity |
+| F. consumer path-shape validators | sanity, command-snapshot, manifest-write, authority (`:411`, `:491`, `:4225`, `:4416`) | yes: add an fd-number form alongside the procfd form |
+
+If only A, B, E and F were ported, the runner would still die at the C/D
+sites on Darwin. Changing C/D to path-based walks or exec would remove the
+TOCTOU guarantee, which the rule against capability-removing workarounds
+forbids. A faithful port needs native helpers first: an
+`openat`/`fstatat` walker and an exec-by-held-fd strategy (a Simple/C SFFI
+helper or a small pinned C tool). That is a design and implementation task in
+its own right. Until it lands, the capsule lane still fails closed on macOS
+and BSD, which is the safe failure mode. This bug stays open.
+
+## Triage 2026-11-10 (p3-boot2 lane)
+
+SUPERSEDED for this record's bootstrap-tooling scope, with residuals that
+belong to other lanes (details below). Verified on work/p3-boot2-20261110
+(base origin/release/1.0.0), one cycle, source + gate evidence only (a macOS
+host is not reachable from this Windows lane and no macOS run is claimed):
+
+- macOS seed-compile / C-runtime / authority-publish defects (1-4) and the
+  Stage-2/Stage-4 build gates: fixed per this doc's own re-triangies
+  (2026-11-04, 2026-11-07), which stand unmodified on this branch.
+- Capsule-port classes C/D (fd-relative walk, exec-by-held-fd): the
+  2026-11-07 "Capsule port scoping" section demanded native helpers first;
+  owner decision (10) shipped them as `2e12cd1f450f` (2026-11-09) — pinned
+  C helper `src/runtime/tools/stage3_fdwalk.c` (openat/O_NOFOLLOW walk,
+  fexecve-style held-fd exec) wired into the shared stage3 runner.
+  Gate: `sh scripts/check/check-stage3-fdwalk-helper.shs` ->
+  `PASS — 1 check(s) executed, 0 failed [syntax-only: behaviour not run on
+  MINGW64_NT-10.0-26300]` (behaviour checks are POSIX-host-only by design).
+- Capsule mode without procfs still refuses fail-closed
+  (`portable-descriptor-capsule-not-supported`,
+  manifest-write.shs:134, manifest-verify.shs:799) — the deliberate safe
+  state this doc endorses until the producer/protocol redesign is complete.
+
+Residuals owned elsewhere (not this lane, not re-litigated):
+- `serialize_mir_function` Stage-2 SEGV (blocker B) and native f64
+  correctness: compiler/runtime lanes (src/compiler, src/runtime).
+- Stage-4 gate 6 runtime-capsule Mach-O symbol strength: link-architecture
+  owner lane.
+- End-to-end macOS Stage-3 run: needs a macOS host; the doc's own re-triage
+  states "a separate lane owns it".
+
+---
+
+## Triage 2026-11-10 (P3 compiler-seed lane, work/p3-seed-20261110)
+
+Verdict: **STALE-BLOCKED (host-limited + owner design decision)**. Verified in
+this worktree (base `origin/release/1.0.0`, 1504212d788b): the three landed
+fixes are present — defect 1's Apple stat field names exist at
+`src/compiler_rust/runtime/src/cache_host_authority_v1.rs:196-206`
+(`st_mtime_nsec`/`st_ctime_nsec` arms); defects 2-4 live in
+`scripts/check/lib/bootstrap-stage3/` and `src/runtime/`, outside this lane's
+edit scope but reviewed as landed. The remaining Stage-3/4 manifest-verification
+`/proc` coupling is, per this doc's own "Still OPEN" section, a deliberate
+descriptor-pinning security property whose macOS port (`/dev/fd/N` semantics
+differ) "needs a design decision rather than a substitution" — not a P3 code
+fix, and unverifiable from a Windows host. No change made.
+
+## Triage 2026-11-11 (lane boot10)
+
+SUPERSEDED for this record's bootstrap-tooling scope, with the same
+host-limited residuals the 2026-11-10 triage assigned to other lanes.
+Verified on work/p3-boot10-20261111 (base origin/release/1.0.0), one cycle,
+source + gate evidence only — a macOS host is not reachable from this Windows
+lane and no macOS run is claimed:
+
+- Defect 1 (seed E0609): `src/compiler_rust/runtime/src/cache_host_authority_v1.rs:196-206`
+  uses `st_mtime_nsec`/`st_ctime_nsec` in every arm including the
+  `cfg(any(target_os = "macos", target_os = "ios"))` one; the fixing commits
+  `72b11296929` / `2cf4bb13366` / `478f4b1b093` are ancestors of this branch.
+- Defects 2-3 (GNU-only `stat -Lc`, unconditional `/proc/self/stat`):
+  `scripts/check/lib/bootstrap-stage3/authority.shs` gates its procfs reads
+  (`if [ -r /proc/self/stat ]` at :353, :3059) and uses the repo
+  `stat -c ... || stat -f ...` fallback idiom (e.g. :773-774, :3578-3580).
+- Owner decision (2026-11-07) implemented: `bootstrap_stage3_fd_identity` /
+  `bootstrap_stage3_fd_stamp` / `bootstrap_stage3_fd_matches_path` in
+  `scripts/check/lib/bootstrap-stage3/manifest-verify.shs:692+` (landed
+  `f6c03cbc837` + `62f9fed02aa`, both ancestors); capsule-port native helpers
+  shipped as `2e12cd1f450f` — `src/runtime/tools/stage3_fdwalk.c` present
+  (20031 bytes).
+
+Honest host-limit note: the end-to-end macOS Stage-3 run
+(`sh scripts/bootstrap/resume-stage3-from-admitted.sh <admitted-stage2-output-dir>`
+on aarch64-apple-darwin with the ≥12288 MiB sanity memory reserve) remains
+unverifiable from this Windows host; that grant belongs to the macOS-owning
+lane per this doc's own re-triage ("a separate lane owns it"). Residuals
+unchanged and owned elsewhere: `serialize_mir_function` Stage-2 SEGV and
+native f64 correctness (compiler/runtime lanes), Stage-4 gate 6 Mach-O
+capsule symbol strength (link-architecture lane). No code change this lane.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**CLOSED/SUPERSEDED (confirmed)** — boot10 verified fixing commits 72b11296929/2cf4bb13366/478f4b1b093 + f6c03cbc837/62f9fed02aa ancestors and the portable-stat/procfs idioms live. End-to-end macOS Stage-3 run remains a macOS-host grant.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**CLOSED/SUPERSEDED (confirmed)** — All six cited fix commits verified ancestors of this base (`72b11296929` `2cf4bb13366` `478f4b1b093` `f6c03cbc837` `62f9fed02aa` `2e12cd1f450f`); `src/runtime/tools/stage3_fdwalk.c` present (20031 bytes). End-to-end macOS Stage-3 run remains a macOS-host grant.
+
+---
+
+## 2026-11-26 macOS arm64 audit & verification addendum (`work/fix-macos-stage3-authority-20261126`)
+
+Audited all six files in scope on Darwin arm64 (`Darwin 25.5.0`, Apple Silicon):
+- `src/compiler_rust/runtime/src/cache_host_authority_v1.rs`: `#[cfg(any(target_os = "macos", target_os = "ios"))]` uses `st_mtime_nsec`/`st_ctime_nsec` (`stat_nsec_equal`), `errno()` uses `*libc::__error()`, and non-Linux publish/quarantine paths are guarded. No remaining macOS defect.
+- `scripts/check/lib/bootstrap-stage3/authority.shs`: found and fixed two remaining macOS portability defects:
+  1. `bootstrap_stage3_git_budget_ms` used bare `nproc 2>/dev/null || echo 1` (absent on stock macOS `/usr/bin:/bin`, falling back to `1` CPU instead of host CPU count); updated to `getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 1` matching `bootstrap_stage3_hash_worker_count`.
+  2. `bootstrap_stage3_hash_path_list`, `bootstrap_stage3_directory_snapshot`, and `bootstrap_stage3_git_state` used `wc -l <file` with `${var# }` or raw output, leaving leading spaces on BSD/macOS `wc -l`; normalized via `tr -d ' '`.
+- `scripts/check/lib/bootstrap-stage3/manifest-verify.shs`: verified procfs-guarded `bootstrap_stage3_own_pid`, `bootstrap_stage3_phase_status_path` (`/dev/fd/N`), `bootstrap_stage3_fd_identity` / `bootstrap_stage3_fd_stamp` / `bootstrap_stage3_fd_matches_path`, `directory-snapshot` parity with `authority.shs`, and fail-closed `portable-descriptor-capsule-not-supported` refusal live on Darwin.
+- `src/runtime/tools/stage3_fdwalk.c`: compiled with `cc -std=c11 -Wall -Wextra -Werror -O1` with 0 warnings; `--selftest` (26/26), `walk --dir-fd`, symlink (`68`), missing (`66`), bad-component (`65`), held-fd `exec` (`/bin/sh`), and unlinked-fd rejection (`71`) all pass live on Darwin.
+- `scripts/bootstrap/bootstrap-from-scratch.sh` & `scripts/bootstrap/resume-stage3-from-admitted.sh`: audited `stat`, `readlink`, `date`, `vm_stat`, `sysctl`, `pgrep`, `df -Pk`, `shasum`, and Darwin RSS watchdog / `darwin-pinned` capture branches; no remaining macOS portability breaks found.
+
+Live verification commands executed (2026-11-26, Darwin arm64):
+- `sh scripts/check/check-bootstrap-fd-identity.shs` -> `PASS — 33 fixture(s) checked on Darwin arm`
+- `sh scripts/check/check-stage3-fdwalk-helper.shs` -> `PASS — 13 check(s) executed, 0 failed`
+- `sh test/01_unit/scripts/candidate_frontend_darwin_capture_test.shs` -> `PASS: macOS frontend capture and bounded receipt integration`
+- `sh test/01_unit/scripts/bootstrap_stage3_darwin_rss_cap_contract_test.shs` -> `PASS: Darwin Stage 3 RSS watchdog honors cap and inherited session`
+- `sh test/01_unit/scripts/bootstrap_stage3_darwin_nested_watchdog_test.shs` -> `PASS: Darwin watchdog standalone/inherited sessions, monitor, partial rejection, exit propagation`
+- `sh test/01_unit/scripts/macos_stage3_authority_portability_contract_test.shs` -> `PASS: macOS Stage-3 authority, manifest-verify, and stage3_fdwalk portability verified`
+
+Not run in this session (memory guard: concurrent ~14 GiB LLVM build on 24 GiB host; other-lane compiler/link residuals documented above): `cargo build`, `native-build`, and end-to-end `bootstrap-from-scratch.sh --full-bootstrap --deploy` / `resume-stage3-from-admitted.sh`. Bug DB status transitioned from `open` to `fix-implemented-verification-pending` (`doc/08_tracking/bug/bug_db.sdn` + shard).

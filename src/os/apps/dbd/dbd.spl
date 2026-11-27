@@ -211,10 +211,9 @@ class DbdLiveClientSessionV1:
     me send_text(sock_fd: i64, message: text) -> DbdTlsSendStatusV1:
         if not self.budget.admit_response(message.len()):
             return DbdTlsSendStatusV1.BudgetRejected
-        val record = self.tls.seal_application(
-            text_to_bytes(message))
-        if record.len() == 0:
-            return DbdTlsSendStatusV1.TransportFailed
+        val record = match self.tls.seal_application_checked(text_to_bytes(message)):
+            case Ok(data): data
+            case Err(message): return DbdTlsSendStatusV1.TransportFailed
         if not _dbd_send_all(sock_fd, record):
             return DbdTlsSendStatusV1.TransportFailed
         DbdTlsSendStatusV1.Sent
@@ -358,7 +357,7 @@ impl DbdServer:
         persistence instead of the vfs-log journal below) once that lands —
         do not block on it until then.
         """
-        val resolved = g_mount_table.resolve_driver(DBD_LOG_PATH)
+        val resolved = g_mount_table.unwrap().resolve_driver(DBD_LOG_PATH)
         if resolved.is_err():
             self.dbfs_adapter = DbdDbfsAdapter.detached("dbfs-root-driver-unavailable")
             _dbd_log("[dbd] DBFS blocked reason=" + self.dbfs_adapter.blocker())
@@ -847,7 +846,7 @@ impl DbdServer:
                     var draining = true
                     while draining:
                         match live.commands.take_next():
-                            case nil:
+                            case None:
                                 draining = false
                             case Some(owned_command):
                                 if owned_command.auth_command:

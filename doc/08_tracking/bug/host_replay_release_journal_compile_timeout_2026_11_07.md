@@ -1,0 +1,5 @@
+# Host replay diagnostic build exceeded its 240-second bound
+
+The new real-journal host replay fixture was compiled once with unadmitted pure-Simple producer `afae09d224390a57d675a128a052626c3aa665c032481928332ebdc2859d7350`, one native worker and isolated caches. The source closure contained 99 modules, including `lib.common.task_runner.index` through the unchanged release journal. MIR reported 99 passed and zero failed. Native compilation had 90 uncached modules when the process-group timeout ended with exit 124. No executable or runtime verdict exists.
+
+Evidence: `/home/yoon/dev/simple-host-execution-20261107/build/host-execution/native/build.log`, `build.exit` and `source.sha256`. The source hashes remained unchanged after termination; no build child remained in the owned process group. One attempt, no identical retry. This is a bounded performance limitation, not an attributed compiler correctness defect. Future qualification requires a reviewed smaller journal dependency closure or independently qualified toolchain/cache continuation and a fresh resource allocation. Existing TCP and nested-SDN exhausted causes were not rerun.

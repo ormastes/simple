@@ -1,0 +1,98 @@
+"""
+# Native `--entry-closure`: a `T?` record receiver reads the record, not its Option box
+
+**Category:** Codegen / MIR optional receivers
+**Bug:** doc/08_tracking/bug/mir_optional_record_receiver_reads_option_box_2026-10-25.md
+
+MIR has no flow typing. After `if v == nil: return`, `v` still has type
+`Optional(T)`, and a `-> T?` producer hands it the canonical Option box. The
+field read, the nested field read and the field store all used the box as
+the record, so `v.k` returned the box header word. The fix unwraps a
+`T?` record receiver through rt_unwrap_or_self (what `if val` uses) before
+the field access. It is a no-op on a raw record word, so it is sound on both
+lanes, and it accepts no new programs.
+
+Measured red on Stage 2 p2shard-17 (2026-10-25); see the bug record.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+# No `{...}` interpolation in the embedded source: the spec's own lexer would
+# resolve it.
+val OPT_RECEIVER_SOURCE: text = ("struct Inner:\n" +
+    "    w: i64\n" +
+    "    x: i64\n" +
+    "\n" +
+    "struct Pt:\n" +
+    "    a: i64\n" +
+    "    k: i64\n" +
+    "    inner: Inner\n" +
+    "\n" +
+    "fn find_pt(xs: [Pt], want: i64) -> Pt?:\n" +
+    "    for p in xs:\n" +
+    "        if p.k == want:\n" +
+    "            return p\n" +
+    "    nil\n" +
+    "\n" +
+    "fn k_narrow(t: Pt?) -> i64:\n" +
+    "    val found = t\n" +
+    "    if found == nil:\n" +
+    "        return -1\n" +
+    "    found.k\n" +
+    "\n" +
+    "fn x_nested(t: Pt?) -> i64:\n" +
+    "    if t == nil:\n" +
+    "        return -1\n" +
+    "    t.inner.x\n" +
+    "\n" +
+    "fn k_store(t: Pt?) -> i64:\n" +
+    "    var found = t\n" +
+    "    if found == nil:\n" +
+    "        return -1\n" +
+    "    found.k = 42\n" +
+    "    found.k\n" +
+    "\n" +
+    "fn main() -> i64:\n" +
+    "    val xs = [Pt(a: 1, k: 7, inner: Inner(w: 7, x: 70)), Pt(a: 2, k: 9, inner: Inner(w: 9, x: 90))]\n" +
+    "    print(\"BEGIN\")\n" +
+    "    print(k_narrow(find_pt(xs, 9)))\n" +
+    "    print(k_narrow(find_pt(xs, 5)))\n" +
+    "    print(x_nested(find_pt(xs, 9)))\n" +
+    "    print(x_nested(find_pt(xs, 5)))\n" +
+    "    print(k_store(find_pt(xs, 9)))\n" +
+    "    print(\"END\")\n" +
+    "    0\n")
+
+fn native_build_and_run_opt_receiver() -> text:
+    val dir = "build/test-artifacts/native_optional_record_receiver_unwrap"
+    val src = dir + "/opt_receiver_repro.spl"
+    val bin_out = dir + "/opt_receiver_repro.bin"
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    process_run("sh", ["-c", "mkdir -p " + dir + " && rm -f " + bin_out])
+    file_write(src, OPT_RECEIVER_SOURCE)
+    val build_cmd = ("SIMPLE_BOOTSTRAP=1 nice -n 19 " + bin +
+        " native-build --source " + dir + " --entry " + src +
+        " --entry-closure -o " + bin_out + " >/dev/null 2>&1; " +
+        "test -x " + bin_out + " && ./" + bin_out + " 2>&1 || echo BUILD-FAILED")
+    val out = process_run("sh", ["-c", build_cmd])
+    out.0
+
+describe "a nil-checked T? record receiver reads the record (native)":
+
+    it "reads, nests and stores fields through the payload, not the Option box":
+        # One example = one native-build; spec globals do not persist.
+        step("Build the fixture once and run it")
+        val out = native_build_and_run_opt_receiver()
+
+        step("Refuse to pass on a build or run that produced nothing")
+        expect(out.contains("BUILD-FAILED")).to_equal(false)
+        expect(out).to_contain("BEGIN")
+        expect(out).to_contain("END")
+
+        step("field read after `== nil`: hit 9, miss -1")
+        step("nested field read `t.inner.x`: hit 90, miss -1")
+        step("field store then read through the narrowed local: 42")
+        expect(out).to_contain("BEGIN\n9\n-1\n90\n-1\n42\nEND")

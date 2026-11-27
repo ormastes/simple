@@ -1,0 +1,94 @@
+"""
+## Purpose and audience
+Purpose: Pin the corner pixels of a 1 device px rounded border against Chrome
+159 at device scale 1. Blink strokes the border box's rrect inset by half the
+width, and Skia draws a stroke at most 1 device px wide as an anti-aliased
+hairline (SkScan_Antihair: the corner conic split into quads, each quad into
+lines, each line spread over two pixel rows). Blink also shrinks the
+background half a border width inside an opaque border (bleed avoidance), so
+a filled button's background does not reach the corner's outer pixels.
+This engine classified every corner pixel in or out at its centre (an
+aliased staircase), and filled the background to the border box edge.
+Audience: Engine2D Draw IR border and background painters.
+
+Chrome oracle (Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=1`, window
+400x300). `.b{padding:8px;border:1px solid #94a3b8;border-radius:5px}`: a
+60x14 `div.b` at (10,10), and a `button.b` (background #4f46e5) at (10,115).
+Device (r,g,b), tolerance 8 per channel.
+
+| box | row | columns = Chrome rgb |
+|-----|-----|----------------------|
+| div top-left | 10 | 12=(238,240,244) 13=(187,196,209) 14=(158,171,190) |
+| div top-left | 11 | 11=(236,239,242) 12=(162,175,193) 13=(229,233,237) |
+| button top-left | 115 | 12=(238,240,244) 13=(169,178,207) 14=(150,163,189) |
+| button top-left | 116 | 11=(222,223,240) 12=(144,156,191) 13=(94,91,218) |
+
+Base (0ddeaad747c): div row 10 12=(255,255,255) 13=(148,163,184); button row
+115 12=(193,190,246), row 116 11=(148,163,184) 13=(79,70,229).
+"""
+
+"""
+Traceability: REQ-WEB-FORM-CHROME-PAINT-001 — a 1 device px rounded border's corners are an anti-aliased hairline, and the background sits half a border width inside it.
+"""
+# @tag: unit, browser_engine, form_controls, border, chrome159
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+val PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}} .b{{padding:8px;border:1px solid #94a3b8;border-radius:5px}} div.b{{width:60px;height:14px;margin:10px}} input,button{{margin:10px}}</style></head><body><div class=\"b\"></div><input class=\"b\" value=\"\"><br><button class=\"b\" style=\"background:#4f46e5;color:#fff\">Go</button></body></html>"
+
+fn _rgb(p: u32) -> [i32]:
+    [((p >> 16u32) & 0xFFu32) as i32, ((p >> 8u32) & 0xFFu32) as i32, (p & 0xFFu32) as i32]
+
+# "col=(r,g,b)" per column: Chrome's value when every channel is within 8,
+# else ours.
+fn _row_text(px: [u32], y: i32, cols: [i32], chrome: [[i32]]) -> text:
+    var s = ""
+    var i = 0
+    while i < cols.len():
+        val got = _rgb(px[y * CSS_W + cols[i]])
+        var close = true
+        var ch = 0
+        while ch < 3:
+            val d = got[ch] - chrome[i][ch]
+            if d > 8 or d < -8:
+                close = false
+            ch = ch + 1
+        val shown = if close: chrome[i] else: got
+        s = s + "{cols[i]}=({shown[0]},{shown[1]},{shown[2]}) "
+        i = i + 1
+    s
+
+fn _want_text(cols: [i32], chrome: [[i32]]) -> text:
+    var s = ""
+    var i = 0
+    while i < cols.len():
+        s = s + "{cols[i]}=({chrome[i][0]},{chrome[i][1]},{chrome[i][2]}) "
+        i = i + 1
+    s
+
+fn _render() -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 1, "cpu_simd")
+
+describe "A 1px rounded border's corner (Chrome 159, 1x)":
+    it "AC-1: a div's corner is an anti-aliased hairline":
+        val px = _render()
+        val c0: [i32] = [12, 13, 14]
+        val w0: [[i32]] = [[238, 240, 244], [187, 196, 209], [158, 171, 190]]
+        expect(_row_text(px, 10, c0, w0)).to_equal(_want_text(c0, w0))
+        val c1: [i32] = [11, 12, 13]
+        val w1: [[i32]] = [[236, 239, 242], [162, 175, 193], [229, 233, 237]]
+        expect(_row_text(px, 11, c1, w1)).to_equal(_want_text(c1, w1))
+
+    it "AC-2: a filled button's background stays inside the hairline":
+        val px = _render()
+        val c0: [i32] = [12, 13, 14]
+        val w0: [[i32]] = [[238, 240, 244], [169, 178, 207], [150, 163, 189]]
+        expect(_row_text(px, 115, c0, w0)).to_equal(_want_text(c0, w0))
+        val c1: [i32] = [11, 12, 13]
+        val w1: [[i32]] = [[222, 223, 240], [144, 156, 191], [94, 91, 218]]
+        expect(_row_text(px, 116, c1, w1)).to_equal(_want_text(c1, w1))

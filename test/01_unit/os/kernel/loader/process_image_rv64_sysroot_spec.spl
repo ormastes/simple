@@ -1,0 +1,47 @@
+"""
+## Purpose and audience
+G1 of doc/08_tracking/bug/simpleos_user_elf_boot_blocked_aarch64_riscv64_2026-11-19.md:
+a sysroot-linked riscv64 C hello (base 0x100000000), linked by ld.lld and by the
+pure-Simple linker, must build a riscv64 user image whose PT_LOADs sit at the
+linked U addresses and whose initial sp lies inside the Sv39 user stack.
+Fixtures: test/fixtures/os/simpleos_user/ (hello.c, built by
+C:/dev/wt/xc-wsl-scripts/ssos-launch_user.sh and scripts/os/simpleos_user_link_internal.spl).
+"""
+# @req: REQ-TEST-RV64_SYSROOT_USER_IMAGE-001
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read_bytes}
+use os.kernel.loader.process_image.{build_user_process_image}
+use os.kernel.arch.arch_context.{Architecture}
+
+
+# The stack top comes from `_native_default_stack_top`, chosen by the BUILD cfg
+# (RV64_USER_STACK_TOP = 0x4000000000 = the Sv39 lower-half limit in the riscv64
+# kernel; the host value under hosted tests), so only its relation to the image
+# is asserted here; the in-guest rung proves the Sv39 placement.
+fn check_image(fixture: text):
+    val bytes = file_read_bytes(fixture)
+    val image = build_user_process_image("/bin/hello", bytes, Architecture.Riscv64, [], [])
+    expect(image.is_ok()).to_equal(true)
+    val built = image.unwrap()
+    expect(built.entry).to_equal(0x100000000)  # oracle: llvm-readelf e_entry
+    expect(built.segment_count >= 3).to_equal(true)  # oracle: RX, R, RW PT_LOADs
+    var lowest: u64 = 0xFFFFFFFFFFFFFFFFu64
+    var highest: u64 = 0
+    for seg in built.segments:
+        if seg.mem_size > 0:
+            if seg.virt_addr < lowest: lowest = seg.virt_addr
+            if seg.virt_addr + seg.mem_size > highest: highest = seg.virt_addr + seg.mem_size
+    expect(lowest).to_equal(0x100000000)  # oracle: first PT_LOAD vaddr
+    expect(highest <= built.stack_top - built.stack_size).to_equal(true)
+    expect(built.initial_sp < built.stack_top).to_equal(true)
+    expect(built.initial_sp >= built.stack_top - built.stack_size).to_equal(true)
+    expect(built.initial_sp % 16).to_equal(0)  # oracle: RISC-V psABI sp alignment
+
+describe "riscv64 sysroot user image":
+    it "maps the ld.lld hello at 0x100000000 with an in-range user stack":
+        # @req: REQ-TEST-RV64_SYSROOT_USER_IMAGE-001
+        check_image("test/fixtures/os/simpleos_user/hello_rv64.lld.elf")
+
+    it "maps the pure-Simple-linked hello at 0x100000000 with an in-range user stack":
+        # @req: REQ-TEST-RV64_SYSROOT_USER_IMAGE-001
+        check_image("test/fixtures/os/simpleos_user/hello_rv64.int.elf")

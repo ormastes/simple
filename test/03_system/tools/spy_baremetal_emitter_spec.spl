@@ -1,0 +1,127 @@
+# @cover src/lib/nogc_async_mut_noalloc/spy/bm_spy_emitter.spl
+# @session:mutating
+# @arch:riscv32
+use std.spec
+use std.spy.bm_spy_emitter.{bm_spy_init, bm_spy_emit, bm_spy_pop, bm_spy_last_function_id, bm_spy_last_timestamp, bm_spy_last_lost, bm_spy_count, bm_spy_capacity, bm_spy_lost_total, bm_spy_complete}
+use std.replay.bm_replay_core.{bm_ring_init, bm_ring_push, bm_ring_count, bm_ring_pop_kind}
+use std.common.trace.observer_contract_v1.{TraceEventKindV1, trace_event_kind_code_v1}
+
+fn code(kind: TraceEventKindV1) -> i64:
+    trace_event_kind_code_v1(kind) as i64
+
+fn fill_to_capacity():
+    var i = 0
+    while i < bm_spy_capacity():
+        bm_spy_emit(code(TraceEventKindV1.Entry), i + 1, i)
+        i = i + 1
+
+describe "bm_spy before init":
+    it "emit before init buffers nothing and is counted as loss":
+        expect(bm_spy_emit(code(TraceEventKindV1.Entry), 1, 10)).to_equal(false)
+        expect(bm_spy_count()).to_equal(0)
+        expect(bm_spy_lost_total()).to_equal(1)
+        expect(bm_spy_complete()).to_equal(false)
+
+describe "bm_spy emit and pop":
+    it "init resets counts and loss":
+        bm_spy_init()
+        expect(bm_spy_count()).to_equal(0)
+        expect(bm_spy_lost_total()).to_equal(0)
+        expect(bm_spy_complete()).to_equal(true)
+
+    it "pop returns the observer kind code with that record's fields":
+        bm_spy_init()
+        expect(bm_spy_emit(code(TraceEventKindV1.Entry), 7, 100)).to_equal(true)
+        expect(bm_spy_emit(code(TraceEventKindV1.Exit), 7, 150)).to_equal(true)
+        expect(bm_spy_pop()).to_equal(code(TraceEventKindV1.Entry))
+        expect(bm_spy_last_function_id()).to_equal(7)
+        expect(bm_spy_last_timestamp()).to_equal(100)
+        expect(bm_spy_pop()).to_equal(code(TraceEventKindV1.Exit))
+        expect(bm_spy_last_timestamp()).to_equal(150)
+        expect(bm_spy_pop()).to_equal(0)
+
+    it "accepts tail exits":
+        bm_spy_init()
+        expect(bm_spy_emit(code(TraceEventKindV1.TailExit), 3, 5)).to_equal(true)
+        expect(bm_spy_pop()).to_equal(code(TraceEventKindV1.TailExit))
+
+describe "bm_spy bounded operation and disclosed loss":
+    it "a full ring drops the new event and keeps the buffered prefix":
+        bm_spy_init()
+        fill_to_capacity()
+        expect(bm_spy_emit(code(TraceEventKindV1.Exit), 999, 999)).to_equal(false)
+        expect(bm_spy_count()).to_equal(bm_spy_capacity())
+        expect(bm_spy_lost_total()).to_equal(1)
+        expect(bm_spy_complete()).to_equal(false)
+        expect(bm_spy_pop()).to_equal(code(TraceEventKindV1.Entry))
+        expect(bm_spy_last_function_id()).to_equal(1)
+
+    it "drain reports the drop as one Loss record after the buffered events":
+        bm_spy_init()
+        fill_to_capacity()
+        bm_spy_emit(code(TraceEventKindV1.Exit), 999, 999)
+        bm_spy_emit(code(TraceEventKindV1.Exit), 998, 998)
+        bm_spy_emit(code(TraceEventKindV1.Exit), 997, 997)
+        var edges = 0
+        var k = bm_spy_pop()
+        while k == code(TraceEventKindV1.Entry):
+            edges = edges + 1
+            k = bm_spy_pop()
+        expect(edges).to_equal(bm_spy_capacity())
+        expect(k).to_equal(code(TraceEventKindV1.Loss))
+        expect(bm_spy_last_lost()).to_equal(3)
+        expect(bm_spy_pop()).to_equal(0)
+        expect(bm_spy_lost_total()).to_equal(3)
+
+    it "the next accepted event is preceded by a Loss record at the gap":
+        bm_spy_init()
+        fill_to_capacity()
+        bm_spy_emit(code(TraceEventKindV1.Exit), 999, 999)
+        bm_spy_emit(code(TraceEventKindV1.Exit), 998, 998)
+        bm_spy_pop()
+        bm_spy_pop()
+        expect(bm_spy_emit(code(TraceEventKindV1.Exit), 50, 500)).to_equal(true)
+        var last_entry = 0
+        var k = bm_spy_pop()
+        while k == code(TraceEventKindV1.Entry):
+            last_entry = bm_spy_last_function_id()
+            k = bm_spy_pop()
+        expect(last_entry).to_equal(bm_spy_capacity())
+        expect(k).to_equal(code(TraceEventKindV1.Loss))
+        expect(bm_spy_last_lost()).to_equal(2)
+        expect(bm_spy_last_timestamp()).to_equal(500)
+        expect(bm_spy_pop()).to_equal(code(TraceEventKindV1.Exit))
+        expect(bm_spy_last_function_id()).to_equal(50)
+        expect(bm_spy_pop()).to_equal(0)
+
+    it "with one free slot the Loss record takes it and the event is counted lost":
+        bm_spy_init()
+        fill_to_capacity()
+        bm_spy_emit(code(TraceEventKindV1.Exit), 999, 999)
+        bm_spy_pop()
+        expect(bm_spy_emit(code(TraceEventKindV1.Exit), 50, 500)).to_equal(false)
+        expect(bm_spy_count()).to_equal(bm_spy_capacity())
+        expect(bm_spy_lost_total()).to_equal(2)
+
+describe "bm_spy event family is separate from replay":
+    it "refuses Loss and non-observer kind codes from callers":
+        bm_spy_init()
+        expect(bm_spy_emit(code(TraceEventKindV1.Loss), 1, 1)).to_equal(false)
+        expect(bm_spy_emit(code(TraceEventKindV1.Transition), 1, 1)).to_equal(false)
+        expect(bm_spy_emit(42, 1, 1)).to_equal(false)
+        expect(bm_spy_emit(0, 1, 1)).to_equal(false)
+        expect(bm_spy_count()).to_equal(0)
+        expect(bm_spy_lost_total()).to_equal(0)
+
+    it "spy and replay rings never see each other's records":
+        bm_spy_init()
+        bm_ring_init()
+        bm_ring_push(1, 10, 11, 12)
+        expect(bm_spy_count()).to_equal(0)
+        expect(bm_spy_pop()).to_equal(0)
+        bm_spy_emit(code(TraceEventKindV1.Entry), 5, 20)
+        expect(bm_ring_count()).to_equal(1)
+        expect(bm_ring_pop_kind()).to_equal(1)
+        expect(bm_ring_pop_kind()).to_equal(0)
+        expect(bm_spy_pop()).to_equal(code(TraceEventKindV1.Entry))
+        expect(bm_spy_last_function_id()).to_equal(5)

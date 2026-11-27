@@ -1,0 +1,52 @@
+#!/bin/sh
+# Pins bug simpleos_freestanding_nil_array_init_optimizer_guard_fold (residual risk):
+# src/os/libc/simpleos_simple_runtime.c must define __simple_call_module_inits
+# WEAK, so the native linker's strong aggregator (linker.rs generate_init_caller)
+# wins instead of duplicate-symbol-failing the freestanding link or, when the stub
+# wins, silently skipping every module-global initializer.
+#
+# For x86_64 and aarch64: compile the stub file freestanding, relocatable-link it
+# with a strong aggregator object, and require (a) link success and (b) the
+# aggregator's body is the surviving definition.
+# Verdict (last stdout line): PASS — <n> target(s) checked / FAIL — ... (exit 1)
+# / ERROR — nothing was checked (exit 2).
+set -u
+root=$(cd "$(dirname "$0")/../.." && pwd)
+src="$root/src/os/libc/simpleos_simple_runtime.c"
+CC_BIN=${CC:-clang}
+command -v "$CC_BIN" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (no compiler: $CC_BIN)"; exit 2; }
+LLD=ld.lld
+command -v "$LLD" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (no ld.lld on PATH)"; exit 2; }
+NM=llvm-nm
+command -v "$NM" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (no llvm-nm on PATH)"; exit 2; }
+[ -f "$src" ] || { echo "ERROR — nothing was checked (missing $src)"; exit 2; }
+tmp=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp)"; exit 2; }
+trap 'rm -rf "$tmp"' EXIT
+printf 'long simpleos_module_init_probe_marker;\nvoid __simple_call_module_inits(void){ simpleos_module_init_probe_marker = 7; }\n' > "$tmp/agg.c"
+checked=0
+fails=""
+for tgt in x86_64-unknown-none-elf aarch64-unknown-none-elf; do
+    "$CC_BIN" --target=$tgt -ffreestanding -c "$tmp/agg.c" -o "$tmp/agg-$tgt.o" 2>"$tmp/cc.err"
+    rc=$?
+    [ $rc -eq 0 ] || { echo "ERROR — nothing was checked (aggregator compile failed for $tgt)"; exit 2; }
+    "$CC_BIN" --target=$tgt -ffreestanding -nostdlib -I"$root/src/os/libc" -I"$root/src/os/libc/include" \
+        -c "$src" -o "$tmp/rt-$tgt.o" 2>"$tmp/cc.err"
+    rc=$?
+    [ $rc -eq 0 ] || { echo "ERROR — nothing was checked (stub compile failed for $tgt: $(head -1 "$tmp/cc.err"))"; exit 2; }
+    "$LLD" -flavor gnu -r "$tmp/agg-$tgt.o" "$tmp/rt-$tgt.o" -o "$tmp/out-$tgt.o" 2>"$tmp/ld.err"
+    rc=$?
+    checked=$((checked + 1))
+    if [ $rc -ne 0 ]; then
+        fails="$fails $tgt(link: $(head -1 "$tmp/ld.err"))"
+        continue
+    fi
+    binding=$("$NM" "$tmp/rt-$tgt.o" | grep ' __simple_call_module_inits$' | awk '{print $2}')
+    [ "$binding" = "W" ] || fails="$fails $tgt(stub binding '$binding', want W)"
+done
+[ $checked -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+if [ -n "$fails" ]; then
+    echo "FAIL — $checked target(s) checked:$fails"
+    exit 1
+fi
+echo "PASS — $checked target(s) checked, weak module-init stub yields to the strong aggregator"
+exit 0

@@ -1,0 +1,67 @@
+"""
+Source intent survives the real frontend, HIR owner and generated HIR codec.
+The schema rejects earlier frames that conflate omitted and explicit privacy.
+This authored regression has not been runtime qualified by source review.
+"""
+use std.spec.*
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, HIR_CODEC_VERSION}
+
+fn intent_codec_module() -> HirModule:
+    val path = "intent_codec.spl"
+    val module = parse_and_build_module("fn local() -> i64:\n    1\npri fn hidden() -> i64:\n    2\npub fn visible() -> i64:\n    3\n", path)
+    val lowering = HirLowering.with_filename(path)
+    lowering.lower_module(module)
+
+describe "source declaration intent in HIR cache":
+    it "retains omitted, explicit private and ordinary public separately":
+        step("Lower actual declarations and round-trip the generated codec")
+        val original = intent_codec_module()
+        val local = original.symbols.lookup_or_invalid("local")
+        expect(local.is_valid()).to_equal(true)
+        original.symbols.rebind_local_type("local", local)
+        val version = original.symbols.lookup_binding_v1("local").version
+        expect(version).to_be_greater_than(1)
+        original.symbols.bind_local_type_if_free("removed_alias", local)
+        original.symbols.unbind_local_type("removed_alias")
+        val wire = hir_module_encode(original)
+        expect(wire != "").to_equal(true)
+        val restored = hir_module_decode(wire)
+        expect(restored.?).to_equal(true)
+        val module = restored.unwrap()
+        expect(module.symbols.lookup_binding_v1("local").version).to_equal(version)
+        expect(module.symbols.binding_version_v1(0, "removed_alias")).to_equal(2)
+        expect(module.symbols.lookup_binding_v1("removed_alias").symbol_id).to_equal(-1)
+        val expected = {"local": "omitted", "hidden": "pri", "visible": "public"}
+        var retained = 0
+        for raw_id in module.symbols.symbols.keys():
+            val symbol = module.symbols.symbols[raw_id]
+            if expected.contains_key(symbol.name):
+                expect(symbol.declaration_modifier_v1).to_equal(expected[symbol.name])
+                expect(symbol.declaration_projection_key_v1).to_equal("function:" + symbol.name)
+                expect(symbol.declaration_source_path_v1.ends_with("/intent_codec.spl")).to_equal(true)
+                expect(symbol.declaration_owner_v1).to_equal("intent_codec")
+                retained = retained + 1
+        expect(retained).to_equal(3)
+        expect(hir_module_encode(module)).to_equal(wire)
+
+    it "rejects each predecessor layout missing part of the combined authority":
+        val wire = hir_module_encode(intent_codec_module())
+        expect(wire != "").to_equal(true)
+        for header in ["spl-hircodec-v19-aspect-owner", "spl-hircodec-v20-aspect-owner-declaration-intent", "spl-hircodec-v19-declared-call-params"]:
+            val previous = wire.replace(HIR_CODEC_VERSION, header)
+            expect(previous != wire).to_equal(true)
+            expect(hir_module_decode(previous).?).to_equal(false)
+
+    it "rejects a consumer chosen HIR owner for another parsed source":
+        step("Lower valid source facts under an unrelated module filename")
+        val module = parse_and_build_module("pri fn hidden() -> i64:\n    1\n", "original.spl")
+        val lowering = HirLowering.with_filename("other.spl")
+        val lowered = lowering.lower_module(module)
+        expect(lowering.errors.len()).to_be_greater_than(0)
+        expect(lowering.errors[0].message).to_contain("source declaration facts do not belong")

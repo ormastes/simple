@@ -1,7 +1,14 @@
 # Windows: MCP native build reaches HIR entry, then aborts — MIR error count still unobtainable
 
 - **Filed:** 2026-09-01
-- **Status:** OPEN (blocked on another agent's HIR-entry defect — NOT owned here)
+- **Status:** BLOCKED 2026-11-11 (lane p3-comp9; first triaged BLOCKED by lane boot16
+  same day) — verification requires the ~28-min entry-closure native build of
+  `src/app/mcp/main.spl`, forbidden in-lane; boot16 grant intact (re-recorded below).
+  Notably the separately-owned HIR-entry blocker is now FIXED
+  (`hir_register_imported_symbol_inner_self_bound_to_bool_2026-09-01`, comp7
+  2026-11-11; `mcp_native_build_hir_entry_env_get_nil_len_fatal_2026-09-01`), so the
+  granted run has a real chance of reaching MIR lowering and the first measurable
+  MIR error count. Header flipped from "OPEN".
 - **HEAD:** `da0122d819b` (detached), 18866 dirty paths in a shared worktree
 - **Seed:** `src/compiler_rust/target/release/simple.exe`,
   md5 `286f66b8615dce0e0da788f0550c4008` (carries the COFF `.refptr` ->
@@ -98,3 +105,88 @@ that the child command succeeds standalone.
    run and the error count becomes measurable for the first time.
 2. Independently, fix the Windows worker-wrapper spawn so `native-build` is
    usable without hand-assembling the worker invocation.
+
+## Round-10 verdict note (2026-11-06)
+Verdict: verification-pending. The repro takes ~28 min; the HIR-entry error (undefined field symbols on bool) is separately owned and was not re-run here. Command: the SIMPLE_NATIVE_BUILD_WORKER=1 native_build_worker.spl invocation from the Reproduction section, using D:/dev/wt/seed/simple.exe.
+
+
+---
+
+## Triage addendum 2026-11-11 (lane boot16)
+
+**Verdict: BLOCKED** (root cause not owned here; verification requires a
+forbidden entry-closure native build).
+
+Unblock condition #1 — the HIR-entry defect
+(`error: semantic: undefined field 'symbols': cannot access field on value of
+type 'bool'`) — is explicitly owned by another agent and NOT owned in this
+lane. Unblock condition #2 (the Windows worker-wrapper spawn,
+`code -1`) is tracked separately in
+`coverage_native_build_worker_abnormal_exit_2026-08-31.md` (OPEN).
+
+The reproduction is an entry-closure native build, which is forbidden in this
+lane ("only entry-closure native builds are forbidden"), and takes ~28 min. No
+new run was attempted; this lane adds no runtime evidence.
+
+Exact grant command to settle this row (sanctioned native-build lane, Windows
+host, fresh worktree on origin/release/1.0.0):
+
+    S=src/compiler_rust/target/release/simple.exe
+    SIMPLE_NATIVE_BUILD_WORKER=1 SIMPLE_EXECUTION_MODE=interpret SIMPLE_BINARY=$PWD/$S \
+      $S run src/app/cli/native_build_worker.spl \
+      --source src/compiler --source src/app --source src/lib \
+      --entry-closure --entry src/app/mcp/main.spl \
+      --threads 1 --cache-dir build/mcp_probe_cache \
+      --output build/mcp_probe_server.exe
+
+Success = the build gets PAST HIR entry into MIR lowering and emits a real MIR
+error count (superseding the last unobtainable figure of 133). Do not report the
+`[bootstrap-error-count] ... point=entry count=0` line as the MIR count — that
+is an entry-point count, not the MIR count.
+
+## Triage addendum 2026-11-11 (lane comp9) — BLOCKED confirmed, boot16 grant intact
+
+**Verdict: BLOCKED — confirms boot16 same-day triage; not re-litigated.** Same infra
+wall: the acceptance criterion (get PAST HIR entry into MIR lowering and emit a real
+MIR error count superseding the unobtainable 133) requires running the ~28-minute
+entry-closure native build of `src/app/mcp/main.spl` — an entry-closure native build,
+forbidden in this lane under the campaign routing, and beyond the ~10-min spec cap.
+No new run attempted; no runtime evidence added.
+
+Grant integrity re-verified at lane base 77be2266752d:
+
+- boot16 verdict commit aecc800aaff7 IS an ancestor of the base; its grant text is
+  present verbatim above.
+- Unblock condition #1 progress since boot16 (context only, not verification): the
+  separately-owned HIR-entry defect
+  `undefined field 'symbols': cannot access field on value of type 'bool'` is FIXED —
+  `doc/08_tracking/bug/hir_register_imported_symbol_inner_self_bound_to_bool_2026-09-01.md`
+  header "FIXED 2026-11-11 (lane p3fix-comp7-20261111)" and
+  `doc/08_tracking/bug/mcp_native_build_hir_entry_env_get_nil_len_fatal_2026-09-01.md`
+  header "FIXED (628ac26d38d)". If those fixes hold under the entry-closure build,
+  the granted run should clear HIR entry and produce the first real MIR error count.
+- Unblock condition #2 (Windows worker-wrapper spawn `code -1`) remains OPEN in
+  `coverage_native_build_worker_abnormal_exit_2026-08-31.md`; the grant command
+  bypasses the wrapper (direct worker invocation), so it does not block the run.
+
+Verbatim grant (from boot16 addendum, re-recorded intact, sanctioned native-build
+lane, Windows host, fresh worktree on origin/release/1.0.0):
+
+    S=src/compiler_rust/target/release/simple.exe
+    SIMPLE_NATIVE_BUILD_WORKER=1 SIMPLE_EXECUTION_MODE=interpret SIMPLE_BINARY=$PWD/$S \
+      $S run src/app/cli/native_build_worker.spl \
+      --source src/compiler --source src/app --source src/lib \
+      --entry-closure --entry src/app/mcp/main.spl \
+      --threads 1 --cache-dir build/mcp_probe_cache \
+      --output build/mcp_probe_server.exe
+
+Success = the build gets PAST HIR entry into MIR lowering and emits a real MIR
+error count (superseding the last unobtainable figure of 133). Do not report the
+`[bootstrap-error-count] ... point=entry count=0` line as the MIR count — that
+is an entry-point count, not the MIR count.
+
+Disposition: BLOCKED. Header flipped OPEN → BLOCKED 2026-11-11 (lane p3-comp9).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lanes boot16/p3-comp9: BLOCKED — the verbatim grant (sanctioned native-build run) is re-recorded intact in the boot16 addendum; the Windows native-build path cannot be exercised in this lane. No in-lane change.

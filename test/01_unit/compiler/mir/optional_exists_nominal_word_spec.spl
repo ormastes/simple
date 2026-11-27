@@ -1,0 +1,84 @@
+use std.spec
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable, HirSymbol, SymbolKind, ScopeId}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.mir.mir.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir.mir_json.{serialize_mir_function}
+
+fn nominal_exists_probe(runtime_source: bool, kind: SymbolKind) -> (i64, bool, i64, i64, text):
+    val span = Span.empty()
+    val owner = SymbolId(id: 77)
+    val record = HirType(kind: HirTypeKind.Named(owner, []), span: span)
+    val optional = HirType(kind: HirTypeKind.Optional(record), span: span)
+    var symbols = SymbolTable.new()
+    symbols.register_preserved_symbol(HirSymbol(id: owner, name: "Record",
+        kind: kind, type_: nil, scope: ScopeId(id: 0), span: span,
+        visibility: Visibility.Public, is_public: true, is_mutable: false,
+        defining_module: Some("provider")))
+    var lowering = MirLowering.new(symbols)
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 90), "probe", MirSignature(params: [],
+        return_type: MirType.unit(), is_variadic: false), span)
+    val base = builder.new_temp(MirType.i64())
+    lowering.builder = builder
+    lowering.bind_local(20, base)
+    lowering.remember_local_hir_type(base.id, optional, 0, 0)
+    if runtime_source:
+        lowering.mark_runtime_value_local(base.id)
+    else:
+        lowering.option_value_locals[base.id] = true
+    val operand = HirExpr(kind: HirExprKind.Var(SymbolId(id: 20)),
+        has_type_: true, type_: optional, span: span)
+    val expression = HirExpr(kind: HirExprKind.ExistsCheck(operand),
+        has_type_: true, type_: optional, span: span)
+    val result = lowering.lower_expr(expression)
+    var is_word = false
+    if val actual_type = lowering.local_mir_type_of(result):
+        match actual_type.kind:
+            case MirTypeKind.I64: is_word = true
+            case _: ()
+    var retained_owner = -1
+    if val actual_owner = lowering.find_local_hir_type(result.id):
+        match actual_owner.kind:
+            case HirTypeKind.Named(symbol, _): retained_owner = symbol.id
+            case _: ()
+    builder = lowering.builder
+    val function = builder.end_function()
+    var word_nil_constants = 0
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Const(dest, MirConstValue.Int(3), type_):
+                    if dest.id == result.id:
+                        match type_.kind:
+                            case MirTypeKind.I64: word_nil_constants = word_nil_constants + 1
+                            case _: ()
+                case _: ()
+    (lowering.errors.len(), is_word, retained_owner, word_nil_constants, serialize_mir_function(function))
+
+describe "nominal optional existence uses a word carrier":
+    it "keeps canonical record payload and nil on the same I64 merge slot":
+        val result = nominal_exists_probe(false, SymbolKind.Struct)
+        expect(result.0).to_equal(0)
+        expect(result.1).to_equal(true)
+        expect(result.2).to_equal(77)
+        expect(result.3).to_equal(1)
+        expect(result.4).to_contain("rt_unwrap_or_self")
+        expect(result.4.contains("rt_value_as_int_wide")).to_equal(false)
+    it "preserves runtime-backed record handles instead of integer-unboxing them":
+        val result = nominal_exists_probe(true, SymbolKind.Struct)
+        expect(result.0).to_equal(0)
+        expect(result.1).to_equal(true)
+        expect(result.2).to_equal(77)
+        expect(result.3).to_equal(1)
+        expect(result.4).to_contain("rt_unwrap_or_self")
+        expect(result.4.contains("rt_value_as_int_wide")).to_equal(false)
+    it "keeps class owner authority on runtime-backed existence results":
+        val result = nominal_exists_probe(true, SymbolKind.Class)
+        expect(result.0).to_equal(0)
+        expect(result.1).to_equal(true)
+        expect(result.2).to_equal(77)
+        expect(result.3).to_equal(1)
+        expect(result.4.contains("rt_value_as_int_wide")).to_equal(false)

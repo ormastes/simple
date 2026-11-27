@@ -1,0 +1,274 @@
+# @gc — module uses GC runtime
+#
+# llama_forward_gpu — the LLaMA-2 forward pass of llama_forward.spl through the
+# backend-neutral compute interface (compute_backend.spl): slang -> pure LLM
+# runner -> compute_* -> ROCm | CPU. No provider function is
+# called here. Weights are uploaded once as raw F32 bytes; the hidden state and the
+# per-layer K/V rows stay on the device. Per token only the id goes in (a row
+# lookup index) and a single i32 (argmax) comes back. Every intermediate device
+# buffer of a step is freed before the step returns, so a long generation does
+# not grow device memory. Greedy generation uses the same prefix-reuse rule as
+# kv_cache.spl (kv_reuse_len) and counts `positions_evaluated`.
+#
+# Error paths do not free the step's live intermediates: a failed HIP call
+# means the device is unusable and the caller drops the whole model.
+
+use std.gc_async_mut.slang.model_executor.pure.compute_backend.{ComputeOps, DeviceTensor, ComputeKind, compute_upload_f32_bytes, compute_free, compute_matvec, compute_rmsnorm, compute_add, compute_mul, compute_silu, compute_rope, compute_kv_write, compute_row, compute_attention, compute_argmax, compute_alloc}
+use std.gc_async_mut.slang.model_executor.pure.llama_forward.{LlamaConfig, llama_config_from_json}
+use std.gc_async_mut.slang.model_executor.pure.weights.{PureF32Range, pure_weights_f32_ranges}
+use std.gc_async_mut.slang.model_executor.pure.kv_cache.{kv_reuse_len}
+use std.io_runtime.{file_read_bytes}
+use std.gc_async_mut.slang.host.slang_host.{host_file_exists, host_file_read}
+
+pub struct GpuLayer:
+    attn_norm: DeviceTensor
+    wq: DeviceTensor
+    wk: DeviceTensor
+    wv: DeviceTensor
+    wo: DeviceTensor
+    ffn_norm: DeviceTensor
+    w_gate: DeviceTensor
+    w_up: DeviceTensor
+    w_down: DeviceTensor
+
+@allow(primitive_api)  # reason: tied is a yes/no checkpoint-layout flag
+pub struct GpuLlama:
+    config: LlamaConfig
+    embed: DeviceTensor
+    layers: [GpuLayer]
+    final_norm: DeviceTensor
+    lm_head: DeviceTensor
+    tied: bool
+
+pub struct GpuKvRows:
+    keys: [DeviceTensor]
+    values: [DeviceTensor]
+
+@allow(primitive_api)  # reason: token ids, positions and counts are model-vocabulary integers
+pub struct GpuKvSession:
+    kv: GpuKvRows
+    cached_ids: [i64]
+    hidden: DeviceTensor
+    positions_evaluated: i64
+
+@allow(primitive_api)  # reason: token ids, positions and counts are model-vocabulary integers
+pub struct GpuGenResult:
+    session: GpuKvSession
+    generated: [i64]
+    reused_positions: i64
+
+# Device tensors created so far by a load that may still fail: on Err they are
+# freed, so a load that runs out of device memory half-way (the likeliest real
+# failure) does not strand the weights already uploaded.
+class GpuUploadLog:
+    ts: [DeviceTensor]
+
+fn _gpu_release(ops: ComputeOps, log: GpuUploadLog):
+    for t in log.ts:
+        compute_free(ops, t)
+    log.ts = []
+
+fn _gpu_logged(log: GpuUploadLog, r: Result<DeviceTensor, text>) -> Result<DeviceTensor, text>:
+    val t = r?
+    log.ts = log.ts + [t]
+    Ok(t)
+
+fn _gpu_upload(ops: ComputeOps, bytes: [u8], ranges: [PureF32Range], name: text, log: GpuUploadLog) -> Result<DeviceTensor, text>:
+    for r in ranges:
+        if r.name == name:
+            return _gpu_logged(log, compute_upload_f32_bytes(ops, bytes, r.offset, r.shape))
+    Err("missing F32 tensor {name}")
+
+fn _gpu_has(ranges: [PureF32Range], name: text) -> bool:
+    for r in ranges:
+        if r.name == name:
+            return true
+    false
+
+# Load config.json + model.safetensors (F32) from a HF model directory onto the device.
+pub fn gpu_llama_load(ops: ComputeOps, model_dir: text) -> Result<GpuLlama, text>:
+    val cfg_path = model_dir + "/config.json"
+    if not host_file_exists(cfg_path):
+        return Err("config.json not found in {model_dir}")
+    val cfg = llama_config_from_json(host_file_read(cfg_path))?
+    val st_path = model_dir + "/model.safetensors"
+    if not host_file_exists(st_path):
+        return Err("weights file not found: {st_path}")
+    val bytes = file_read_bytes(st_path)
+    val ranges = pure_weights_f32_ranges(bytes)?
+    val log = GpuUploadLog(ts: [])
+    val r = _gpu_llama_upload(ops, cfg, bytes, ranges, log)
+    if r.is_err():
+        _gpu_release(ops, log)
+    r
+
+fn _gpu_llama_upload(ops: ComputeOps, cfg: LlamaConfig, bytes: [u8], ranges: [PureF32Range], log: GpuUploadLog) -> Result<GpuLlama, text>:
+    var layers: [GpuLayer] = []
+    var l: i64 = 0
+    while l < cfg.n_layers:
+        val p = "model.layers.{l}."
+        layers.push(GpuLayer(
+            attn_norm: _gpu_upload(ops, bytes, ranges, p + "input_layernorm.weight", log)?,
+            wq: _gpu_upload(ops, bytes, ranges, p + "self_attn.q_proj.weight", log)?,
+            wk: _gpu_upload(ops, bytes, ranges, p + "self_attn.k_proj.weight", log)?,
+            wv: _gpu_upload(ops, bytes, ranges, p + "self_attn.v_proj.weight", log)?,
+            wo: _gpu_upload(ops, bytes, ranges, p + "self_attn.o_proj.weight", log)?,
+            ffn_norm: _gpu_upload(ops, bytes, ranges, p + "post_attention_layernorm.weight", log)?,
+            w_gate: _gpu_upload(ops, bytes, ranges, p + "mlp.gate_proj.weight", log)?,
+            w_up: _gpu_upload(ops, bytes, ranges, p + "mlp.up_proj.weight", log)?,
+            w_down: _gpu_upload(ops, bytes, ranges, p + "mlp.down_proj.weight", log)?
+        ))
+        l = l + 1
+    # Tied checkpoints may store only one of embed_tokens / lm_head.
+    val has_embed = _gpu_has(ranges, "model.embed_tokens.weight")
+    val has_head = _gpu_has(ranges, "lm_head.weight")
+    if not has_embed and not has_head:
+        return Err("missing embedding / lm_head tensor")
+    val embed_name = if has_embed: "model.embed_tokens.weight" else: "lm_head.weight"
+    val embed = _gpu_upload(ops, bytes, ranges, embed_name, log)?
+    val tied = not has_embed or not has_head
+    val head = if tied: embed else: _gpu_upload(ops, bytes, ranges, "lm_head.weight", log)?
+    val final_norm = _gpu_upload(ops, bytes, ranges, "model.norm.weight", log)?
+    Ok(GpuLlama(config: cfg, embed: embed, layers: layers, final_norm: final_norm, lm_head: head, tied: tied))
+
+fn _gpu_free_all(ops: ComputeOps, ts: [DeviceTensor]) -> Result<i64, text>:
+    for t in ts:
+        compute_free(ops, t)?
+    Ok(0)
+
+@allow(primitive_api)  # reason: status/index result mirrors the provider call (0 on success, or an argmax index)
+pub fn gpu_llama_free(ops: ComputeOps, m: GpuLlama) -> Result<i64, text>:
+    for ly in m.layers:
+        _gpu_free_all(ops, [ly.attn_norm, ly.wq, ly.wk, ly.wv, ly.wo, ly.ffn_norm, ly.w_gate, ly.w_up, ly.w_down])?
+    _gpu_free_all(ops, [m.embed, m.final_norm])?
+    if not m.tied:
+        compute_free(ops, m.lm_head)?
+    Ok(0)
+
+# Device K/V capacity in positions (attention keeps scores in shared memory: <= 1024).
+fn _gpu_capacity(m: GpuLlama) -> i64:
+    if m.config.max_pos < 1024:
+        return m.config.max_pos
+    1024
+
+# Placeholder for "no hidden state yet" (n == 0; Cpu tensors have ptr 0 too).
+fn _gpu_no_hidden() -> DeviceTensor:
+    DeviceTensor(kind: ComputeKind.Cpu, ptr: 0, n: 0, shape: [0], host: [], vkbuf: None)
+
+pub fn gpu_kv_session_new(ops: ComputeOps, m: GpuLlama) -> Result<GpuKvSession, text>:
+    val log = GpuUploadLog(ts: [])
+    val r = _gpu_kv_alloc(ops, m, log)
+    if r.is_err():
+        _gpu_release(ops, log)
+    r
+
+fn _gpu_kv_alloc(ops: ComputeOps, m: GpuLlama, log: GpuUploadLog) -> Result<GpuKvSession, text>:
+    val cap = _gpu_capacity(m)
+    var keys: [DeviceTensor] = []
+    var values: [DeviceTensor] = []
+    var l: i64 = 0
+    while l < m.config.n_layers:
+        keys.push(_gpu_logged(log, compute_alloc(ops, [cap, m.config.dim]))?)
+        values.push(_gpu_logged(log, compute_alloc(ops, [cap, m.config.dim]))?)
+        l = l + 1
+    Ok(GpuKvSession(kv: GpuKvRows(keys: keys, values: values), cached_ids: [], hidden: _gpu_no_hidden(), positions_evaluated: 0))
+
+@allow(primitive_api)  # reason: status/index result mirrors the provider call (0 on success, or an argmax index)
+pub fn gpu_kv_session_free(ops: ComputeOps, s: GpuKvSession) -> Result<i64, text>:
+    _gpu_free_all(ops, s.kv.keys)?
+    _gpu_free_all(ops, s.kv.values)?
+    if s.hidden.n != 0:
+        compute_free(ops, s.hidden)?
+    Ok(0)
+
+pub struct GpuStepOut:
+    hidden: DeviceTensor
+    kv: GpuKvRows
+
+# Evaluate `token` at `pos` (K/V rows [0, pos) already filled). Returns the final
+# residual stream as a new tensor and the K/V buffers with row `pos` written
+# (compute_kv_write returns the buffer to keep: same handle on GPU).
+@allow(primitive_api)  # reason: token ids, positions and counts are model-vocabulary integers
+pub fn llama_step_gpu(ops: ComputeOps, m: GpuLlama, kv: GpuKvRows, token: i64, pos: i64) -> Result<GpuStepOut, text>:
+    val cfg = m.config
+    var keys = kv.keys
+    var values = kv.values
+    var x = compute_row(ops, m.embed, token)?
+    var l: i64 = 0
+    while l < cfg.n_layers:
+        val ly = m.layers[l]
+        val xn = compute_rmsnorm(ops, x, ly.attn_norm, cfg.eps)?
+        val q0 = compute_matvec(ops, ly.wq, xn)?
+        val k0 = compute_matvec(ops, ly.wk, xn)?
+        val v = compute_matvec(ops, ly.wv, xn)?
+        val q = compute_rope(ops, q0, pos, cfg.n_heads, cfg.head_dim, cfg.rope_theta)?
+        val k = compute_rope(ops, k0, pos, cfg.n_heads, cfg.head_dim, cfg.rope_theta)?
+        keys[l] = compute_kv_write(ops, keys[l], pos, k)?
+        values[l] = compute_kv_write(ops, values[l], pos, v)?
+        val att = compute_attention(ops, q, keys[l], values[l], pos + 1, cfg.n_heads, cfg.head_dim)?
+        val o = compute_matvec(ops, ly.wo, att)?
+        val x1 = compute_add(ops, x, o)?
+        _gpu_free_all(ops, [xn, q0, k0, v, q, k, att, o, x])?
+        val hn = compute_rmsnorm(ops, x1, ly.ffn_norm, cfg.eps)?
+        val g = compute_matvec(ops, ly.w_gate, hn)?
+        val u = compute_matvec(ops, ly.w_up, hn)?
+        val sg = compute_silu(ops, g)?
+        val ff = compute_mul(ops, sg, u)?
+        val d = compute_matvec(ops, ly.w_down, ff)?
+        val x2 = compute_add(ops, x1, d)?
+        _gpu_free_all(ops, [hn, g, u, sg, ff, d, x1])?
+        x = x2
+        l = l + 1
+    Ok(GpuStepOut(hidden: x, kv: GpuKvRows(keys: keys, values: values)))
+
+# Device logits [vocab] for a hidden state (caller frees).
+pub fn llama_logits_gpu(ops: ComputeOps, m: GpuLlama, hidden: DeviceTensor) -> Result<DeviceTensor, text>:
+    val hn = compute_rmsnorm(ops, hidden, m.final_norm, m.config.eps)?
+    val logits = compute_matvec(ops, m.lm_head, hn)?
+    compute_free(ops, hn)?
+    Ok(logits)
+
+@allow(primitive_api)  # reason: token ids, positions and counts are model-vocabulary integers
+pub fn llama_greedy_token_gpu(ops: ComputeOps, m: GpuLlama, hidden: DeviceTensor) -> Result<i64, text>:
+    val logits = llama_logits_gpu(ops, m, hidden)?
+    val id = compute_argmax(ops, logits)?
+    compute_free(ops, logits)?
+    Ok(id)
+
+# Evaluate ids[reuse..] on top of the cached rows [0, reuse).
+fn _gpu_extend(ops: ComputeOps, m: GpuLlama, s: GpuKvSession, ids: [i64], reuse: i64) -> Result<GpuKvSession, text>:
+    var hidden = s.hidden
+    var kv = s.kv
+    var evaluated = s.positions_evaluated
+    var pos = reuse
+    while pos < ids.len():
+        val out = llama_step_gpu(ops, m, kv, ids[pos], pos)?
+        if hidden.n != 0:
+            compute_free(ops, hidden)?
+        hidden = out.hidden
+        kv = out.kv
+        evaluated = evaluated + 1
+        pos = pos + 1
+    Ok(GpuKvSession(kv: kv, cached_ids: ids, hidden: hidden, positions_evaluated: evaluated))
+
+# Greedy generation with the device cache. Stops at EOS or after n_new tokens.
+@allow(primitive_api)  # reason: token ids, positions and counts are model-vocabulary integers
+pub fn gpu_generate_greedy(ops: ComputeOps, m: GpuLlama, session: GpuKvSession, prompt_ids: [i64], n_new: i64) -> Result<GpuGenResult, text>:
+    if prompt_ids.len() == 0:
+        return Err("gpu_generate_greedy: empty prompt")
+    val cap = _gpu_capacity(m)
+    if prompt_ids.len() > cap:
+        return Err("gpu_generate_greedy: prompt longer than the KV capacity {cap}")
+    val reuse = kv_reuse_len(session.cached_ids, prompt_ids)
+    var s = _gpu_extend(ops, m, session, prompt_ids, reuse)?
+    var ids = prompt_ids
+    var generated: [i64] = []
+    while generated.len() < n_new and ids.len() < cap:
+        val next = llama_greedy_token_gpu(ops, m, s.hidden)?
+        generated.push(next)
+        if next == m.config.eos_id:
+            break
+        ids.push(next)
+        if generated.len() < n_new and ids.len() < cap:
+            s = _gpu_extend(ops, m, s, ids, ids.len() - 1)?
+    Ok(GpuGenResult(session: s, generated: generated, reused_positions: reuse))

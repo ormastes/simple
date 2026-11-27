@@ -1,0 +1,61 @@
+# Strict preorder cursor contract for lossless storage, independent of queries.
+# A provider blob is not execution evidence: only the provider owner admits it.
+use std.scv.wasm_shim_contract.{scv_wasm_blob_validate}
+
+struct ScvStructuralSpanV1:
+    kind: text
+    field: text
+    start: i64
+    end: i64
+    depth: i64
+    leaf: bool
+
+fn scv_structural_number_v1(value: text) -> Result<i64, text>:
+    val number = value.to_i64() ?? -1
+    if number < 0 or "{number}" != value:
+        return Err("ERROR noncanonical structural number\n")
+    Ok(number)
+
+fn scv_structural_spans_v1(blob: text, size: i64) -> Result<[ScvStructuralSpanV1], text>:
+    """Validate one nonoverlapping host tree; injection trees remain overlays."""
+    if blob.len() > 16777216 or size < 0:
+        return Err("ERROR structural blob bound\n")
+    val error = scv_wasm_blob_validate(blob, size)
+    if error != "": return Err("ERROR structural blob {error}\n")
+    var spans: [ScvStructuralSpanV1] = []
+    var parents: [ScvStructuralSpanV1] = []
+    var cursors: [i64] = []
+    for line in blob.split("\n"):
+        if line == "": continue
+        val parts = line.split("|")
+        if parts.len() != 6 or parts[0].bytes().len() > 1024 or parts[1].bytes().len() > 1024:
+            return Err("ERROR structural fields\n")
+        val span = ScvStructuralSpanV1(kind: parts[0], field: parts[1],
+            start: scv_structural_number_v1(parts[2])?, end: scv_structural_number_v1(parts[3])?,
+            depth: scv_structural_number_v1(parts[5])?, leaf: parts[4] == "1")
+        if span.kind == "ERROR" or span.kind == "MISSING":
+            return Err("ERROR parser error region\n")
+        # The six-field provider has no is_missing bit. Reject ambiguous empty
+        # nodes on nonempty input rather than certifying recovered parses.
+        if span.start == span.end and (size > 0 or span.depth > 0):
+            return Err("ERROR ambiguous zero-width parser node\n")
+        while parents.len() > span.depth:
+            parents.pop()
+            cursors.pop()
+        if span.depth != parents.len():
+            return Err("ERROR structural child of leaf\n")
+        if span.depth > 0:
+            val index = parents.len() - 1
+            val parent = parents[index]
+            if span.start < cursors[index] or span.end > parent.end:
+                return Err("ERROR overlapping or escaping structural span\n")
+            cursors[index] = span.end
+        if not span.leaf:
+            parents.push(span)
+            cursors.push(span.start)
+        spans.push(span)
+        if spans.len() > 65536:
+            return Err("ERROR structural node bound\n")
+    Ok(spans)
+
+export ScvStructuralSpanV1, scv_structural_spans_v1, scv_structural_number_v1

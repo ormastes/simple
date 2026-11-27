@@ -1,4 +1,21 @@
 # `shim_init()` cannot run under the tree-walk interpreter — `_shim_keepalive()`'s function-pointer-to-u64 casts fail at runtime
+
+## Triage 2026-11-25 (P2 sweep lane) — fix implemented, closure blocked on admitted runtime / native build
+
+The 2026-11-10 section below is the current state: the pure-Simple source
+repair (typed module function slot instead of calling `_shim_keepalive()`)
+landed with executable regressions authored, and its own "Required before this
+bug can close" list needs (1) a recovered self-hosted runtime to execute the
+two specs, (2) a native-build of the production-import probe plus the
+strong-symbol gate, and (3) a retention-mechanism control. None of these can
+run in this lane: the pinned `bin/simple.exe` at release/1.0.0 HEAD rejects
+`@representation_boundary` in its own test-runner closure (so no spec
+execution), and native builds / full bootstrap are out of scope for this
+sweep. The stale "Open 2026-09-16 — needs owner triage" banner above predates
+the 2026-11-10 repair; treat the 2026-11-10 "fix implemented, verification
+pending" state as authoritative. Left **OPEN — verification pending**, no
+code change made.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
@@ -118,3 +135,65 @@ scope for this sweep).
 
 Out of lane: needs interpreter support for function-pointer-to-u64 casts, an interpreter semantic gap, not a bounded local fix. No change made.
 
+
+## Update 2026-11-06 (work/fx-os-kernel-20261106)
+
+`syscall_shim_spec.spl` was 72/75. The "-1 where -22/-95/-14 expected" case
+("network shims bound copied buffers and reject unsupported address output")
+is FIXED: `spl_handle_net_accept/send_to/recv_from` ran the descriptor capability
+check first, so malformed arguments on an unauthorised caller returned EPERM (-1).
+New pure `portable_net_args_precheck_v1` (`src/os/kernel/ipc/syscall_net_portable_v1.spl`)
+validates size (EINVAL), unsupported address output (EOPNOTSUPP) and kernel-range
+buffer (EFAULT) before the authority check, matching bind's
+copy-errors-before-authorization policy. No caller memory is read, so authority
+semantics are unchanged. Now 73/75. Still open, seed-interpreter limits, not ABI:
+- "spl_handle_debug_write return type is i64": real `mmio_write8` recursion overflow.
+- "network shims reject null and short sockaddr inputs before MMIO":
+  `user_copyin_bytes` `[0u8; len]` with u64 len ("array repeat count must be an
+  integer, got u64", `src/os/kernel/memory/user_copy.spl:24`).
+
+## 2026-11-10: boot initializer repair; runtime verification pending
+
+The source repair retains `_shim_keepalive` in a typed mutable module function
+slot and assigns that slot from `shim_init`. It no longer calls the helper:
+interpreters can install the function value without evaluating native function
+address arithmetic. The complete native provider-address graph is unchanged.
+A module slot is used rather than an unused local expression that optimization
+could discard. Native retention remains an explicit verification requirement.
+
+Executable regressions:
+
+- Exact boot-entry reproduction:
+  `test/01_unit/os/kernel/abi/syscall_shim_init_spec.spl` initializes the real
+  shim and checks supplied log sizes and getpid behavior. A no-op initializer
+  fails the nondefault log-size checks.
+- Generalization:
+  `test/01_unit/os/kernel/abi/syscall_shim_process_state_spec.spl` now calls
+  `shim_init` instead of directly assigning globals; it checks real spawn state,
+  resetting that state, and ECHILD through the C-ABI wrapper.
+- Native production-import probe:
+  `test/fixtures/os/syscall_shim_init_keepalive/main.spl` initializes twice,
+  checks supplied state, and requires `SHIM_INIT_KEEPALIVE_PASS` on exit 0.
+- `sh scripts/check/check-syscall-shim-keepalive-symbols.shs --artifact <binary>`
+  requires every production keepalive provider to have a strong text definition.
+  Weak C fallbacks, missing providers, and unreadable artifacts cannot pass.
+
+Executed here: the symbol gate's `--selftest` passed five controls using actual
+Clang-generated ELF objects (strong providers, weak fallback, missing provider,
+invalid artifact, missing artifact). This checks the gate, **not** Simple code
+execution or native retention.
+
+Required before this bug can close:
+
+1. Use the recovered self-hosted runtime to execute both specs above, retaining
+   nonzero executed assertion counts and exact producer/source identities.
+2. Native-build the production-import probe with the ordinary optimized
+   `--entry-closure` path, keeping symbols available; run the strong-symbol gate
+   and then run the output with exit 0 and the expected marker.
+3. Check the retention mechanism with an isolated callback-root removal control.
+   If supported exported roots already retain all providers independently,
+   investigate removing the obsolete graph rather than treating the redundant
+   callback as necessary. Do not weaken the provider or boot-behavior checks.
+
+Current state is **fix implemented, verification pending**. No interpreter,
+native-link, QEMU, or board pass is claimed by the symbol-gate controls.

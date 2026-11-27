@@ -1,0 +1,83 @@
+# @req DAE-01 HOST-01
+# NOT_RUN pending repaired self-hosted tooling qualification.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.daemon_sdk.protocol.*
+use std.nogc_sync_mut.daemon_sdk.types.*
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_atomic_write}
+use std.io_runtime.{file_exists, mkdir_p}
+use std.nogc_sync_mut.io_runtime.dir_remove
+
+describe "daemon spool path and read admission":
+    it "rejects unsafe IDs before creating spool directories":
+        val root = secure_temp_dir("build", "daemon-spool-id").unwrap()
+        for bad_id in ["", "../outside", "a/b", "a\\b", "a\nid=other", "a b", "a:b", "é", ".", ".."]:
+            val request = DaemonRequest(id: bad_id, kind: 1, timestamp: 1, fields: {})
+            expect(write_daemon_request(request, root + "/requests")).to_equal("")
+            expect(write_daemon_response(daemon_response_new(bad_id, 0), root + "/responses")).to_equal(false)
+            expect(daemon_request_path_for(bad_id, root)).to_equal("")
+        expect(file_exists(root + "/requests")).to_equal(false)
+        expect(file_exists(root + "/responses")).to_equal(false)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "rejects response content for a different request":
+        val root = secure_temp_dir("build", "daemon-spool-response").unwrap()
+        expect(file_atomic_write(root + "/expected.resp", "request_id=other\nstatus=0\ntimestamp=1\n")).to_equal(true)
+        expect(read_daemon_response("expected", root).request_id).to_equal("")
+        expect(file_exists(root + "/expected.resp")).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "requires request content to match its canonical file path":
+        val root = secure_temp_dir("build", "daemon-spool-path").unwrap()
+        val request = DaemonRequest(id: "expected", kind: 1, timestamp: 1, fields: {})
+        val path = write_daemon_request(request, root)
+        expect(path != "").to_equal(true)
+        expect(read_daemon_requests(root).len()).to_equal(1)
+        expect(file_atomic_write(path, "id=other\nkind=1\ntimestamp=1\n")).to_equal(true)
+        expect(read_daemon_requests(root).len()).to_equal(0)
+        expect(file_exists(path)).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "validates every acknowledgement ID before removing any request":
+        val root = secure_temp_dir("build", "daemon-spool-ack").unwrap()
+        val request = daemon_request_new(1)
+        val path = write_daemon_request(request, root)
+        expect(path != "").to_equal(true)
+        expect(acknowledge_processed_requests(root, [request.id, "../outside"])).to_equal(false)
+        expect(file_exists(path)).to_equal(true)
+        expect(acknowledge_processed_requests(root, [request.id])).to_equal(true)
+        expect(file_exists(path)).to_equal(false)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "refuses oversized request and response files":
+        val root = secure_temp_dir("build", "daemon-spool-limit").unwrap()
+        var payload = "x"
+        var count = 0
+        while count < 20:
+            payload = payload + payload
+            count = count + 1
+        val path = daemon_request_path_for("large", root)
+        expect(file_atomic_write(path, "id=large\nfield.data=" + payload)).to_equal(true)
+        expect(parse_request_file(path).id).to_equal("")
+        expect(file_atomic_write(root + "/large.resp", "request_id=large\nfield.data=" + payload)).to_equal(true)
+        expect(read_daemon_response("large", root).request_id).to_equal("")
+        val request = DaemonRequest(id: "write-large", kind: 1, timestamp: 1, fields: {"data": payload})
+        expect(write_daemon_request(request, root)).to_equal("")
+        expect(file_exists(daemon_request_path_for("write-large", root))).to_equal(false)
+        val response = DaemonResponse(request_id: "write-large", status: 0, timestamp: 1, fields: {"data": payload})
+        expect(write_daemon_response(response, root)).to_equal(false)
+        expect(file_exists(root + "/write-large.resp")).to_equal(false)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "refuses a directory and preserves valid request response round trips":
+        val root = secure_temp_dir("build", "daemon-spool-roundtrip").unwrap()
+        mkdir_p(root + "/not-a-file")
+        expect(parse_request_file(root + "/not-a-file").id).to_equal("")
+        var request = daemon_request_new(7)
+        request.set_field("task", "inspect workspace")
+        val path = write_daemon_request(request, root)
+        val decoded = parse_request_file(path)
+        expect(decoded.id).to_equal(request.id)
+        expect(decoded.get_field("task")).to_equal("inspect workspace")
+        expect(write_daemon_response(daemon_response_new(request.id, 0), root)).to_equal(true)
+        expect(read_daemon_response(request.id, root).request_id).to_equal(request.id)
+        expect(dir_remove(root, true)).to_equal(true)

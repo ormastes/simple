@@ -1,0 +1,62 @@
+"""Job ancestry over task-owned parent_job_id links (agent subtree termination).
+
+See doc/08_tracking/bug/agent_runtime_job_is_ancestor_undefined_2026-11-15.md
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.types.task_types.{
+    TaskId, TaskState, TaskPriority, TaskContext,
+    default_task_schedule, default_task_isolation
+}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.types.arm32_mapping_handle_v1.{scheduler_arm32_mapping_handle_absent_v1}
+use os.kernel.types.riscv32_mapping_handle_v1.{scheduler_riscv32_mapping_handle_absent_v1}
+use os.kernel.types.x86_32_mapping_handle_v1.{scheduler_x86_32_mapping_handle_absent_v1}
+use os.kernel.scheduler.scheduler_types.{TaskControlBlock, default_task_security}
+use os.kernel.scheduler.authority_runtime.{sched_job_is_ancestor}
+
+fn _task(pid: u64, job: u64, parent_job: u64) -> TaskControlBlock:
+    val id = TaskId(id: pid)
+    val context = TaskContext(
+        rax: 0u64, rbx: 0u64, rcx: 0u64, rdx: 0u64,
+        rsi: 0u64, rdi: 0u64, rbp: 0u64, rsp: 0u64,
+        r8: 0u64, r9: 0u64, r10: 0u64, r11: 0u64,
+        r12: 0u64, r13: 0u64, r14: 0u64, r15: 0u64,
+        rip: 0u64, rflags: 0u64, cs: 0u64, ss: 0u64, fpu_state: 0u64)
+    var security = default_task_security(id)
+    security.job_id = job
+    security.parent_job_id = parent_job
+    TaskControlBlock(
+        id: id, name: "job-ancestry", state: TaskState.Ready,
+        priority: TaskPriority.Normal, is_user: true, entry_point: 0u64,
+        context: context, user_context: Some(context),
+        address_space: 0u64, kernel_stack: 0u64, user_stack: 0u64,
+        capabilities: CapabilitySet.empty(), parent: nil,
+        schedule: default_task_schedule(TaskPriority.Normal),
+        isolation: default_task_isolation(0u64), assigned_cpu: 0u32,
+        exit_code: 0, ticks_remaining: 0u64, lifecycle_generation: 1u64,
+        arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1(),
+        riscv32_mapping_handle: scheduler_riscv32_mapping_handle_absent_v1(),
+        x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1(),
+        exec_generation: 0u64, x86_root_generation: 0u64,
+        security: security)
+
+fn _tree() -> [TaskControlBlock?]:
+    # job 1 (root) -> job 2 -> job 3 ; job 4 is a sibling under job 1
+    [Some(_task(1u64, 1u64, 0u64)), Some(_task(2u64, 2u64, 1u64)),
+     Some(_task(3u64, 3u64, 2u64)), Some(_task(4u64, 4u64, 1u64))]
+
+describe "sched_job_is_ancestor":
+    it "accepts direct and transitive ancestors":
+        val tasks = _tree()
+        expect(sched_job_is_ancestor(tasks, 2u64, 3u64)).to_equal(true)
+        expect(sched_job_is_ancestor(tasks, 1u64, 3u64)).to_equal(true)
+    it "rejects self, siblings, descendants and job 0":
+        val tasks = _tree()
+        expect(sched_job_is_ancestor(tasks, 3u64, 3u64)).to_equal(false)
+        expect(sched_job_is_ancestor(tasks, 4u64, 3u64)).to_equal(false)
+        expect(sched_job_is_ancestor(tasks, 3u64, 1u64)).to_equal(false)
+        expect(sched_job_is_ancestor(tasks, 0u64, 3u64)).to_equal(false)
+    it "terminates on a corrupted parent cycle":
+        val tasks: [TaskControlBlock?] = [Some(_task(5u64, 5u64, 6u64)), Some(_task(6u64, 6u64, 5u64))]
+        expect(sched_job_is_ancestor(tasks, 9u64, 5u64)).to_equal(false)

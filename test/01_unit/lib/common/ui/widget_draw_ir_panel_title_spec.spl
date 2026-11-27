@@ -1,0 +1,86 @@
+# Regression: widget_draw_ir_panel_title_not_rendered_2026-08-09.
+# Authored assertions require an admitted self-hosted runtime before PASS.
+use std.spec.*
+use common.ui.builder.{panel, button}
+use common.ui.layout.{compute_layout, compute_pixel_layout, find_rect_index}
+use common.ui.widget_draw_ir.{widget_tree_to_draw_ir_cpu}
+use common.ui.widget_hit.{widget_hit_test}
+use common.ui.draw_ir_v2_to_v3.{draw_ir_v2_to_v3}
+use app.ui_showcase.hosts.scene_raster.{raster_scene_argb}
+
+describe "Pixel panel titles and client geometry":
+    it "emits a glyph-bearing title above its child and keeps title clicks off the child":
+        val root = panel("title-root", "Panel title", [button("title-child", "Body", "activate")])
+        val rects = compute_pixel_layout(root, 0, 0, 160, 80)
+        val child = rects[find_rect_index(rects, "title-child")]
+        expect(child.y).to_equal(19)
+        expect(child.h).to_equal(60)
+        val composition = widget_tree_to_draw_ir_cpu(root, 160, 80)
+        var title_count = 0
+        for batch in composition.batches:
+            for command in batch.commands:
+                if command.component_id == "title-root-title":
+                    title_count = title_count + 1
+                    expect(command.glyph_run.valid).to_equal(true)
+                    expect(command.glyph_run.glyph_ids.len()).to_be_greater_than(0)
+                    expect(command.y >= 1).to_equal(true)
+                    expect(command.y + command.height <= child.y).to_equal(true)
+        expect(title_count).to_equal(1)
+        val title_hit = widget_hit_test(root, 160, 80, 8, 8)
+        val child_hit = widget_hit_test(root, 160, 80, 8, 20)
+        expect(title_hit.id).to_equal("title-root")
+        expect(child_hit.id).to_equal("title-child")
+
+    it "preserves terminal geometry and untitled pixel containers":
+        val titled = panel("terminal-root", "Title", [button("terminal-child", "Body", "activate")])
+        val terminal = compute_layout(titled, 0, 0, 160, 80)
+        expect(terminal[find_rect_index(terminal, "terminal-child")].y).to_equal(1)
+        val plain = panel("plain-root", "", [button("plain-child", "Body", "activate")])
+        val pixels = compute_pixel_layout(plain, 0, 0, 160, 80)
+        expect(pixels[find_rect_index(pixels, "plain-child")].y).to_equal(1)
+        expect(pixels[find_rect_index(pixels, "plain-child")].h).to_equal(78)
+        var title_count = 0
+        val plain_draw = widget_tree_to_draw_ir_cpu(plain, 160, 80)
+        for batch in plain_draw.batches:
+            for command in batch.commands:
+                if command.component_id == "plain-root-title":
+                    title_count = title_count + 1
+        expect(title_count).to_equal(0)
+
+    it "reserves each nested title once and scales the title band once":
+        val nested = panel("nested-root", "Outer", [panel("nested-inner", "Inner", [button("nested-child", "Body", "activate")])])
+        val normal = compute_pixel_layout(nested, 0, 0, 160, 100)
+        expect(normal[find_rect_index(normal, "nested-child")].y).to_equal(38)
+        val scaled = compute_pixel_layout(nested, 0, 0, 160, 100, 2000)
+        expect(scaled[find_rect_index(scaled, "nested-child")].y).to_equal(74)
+
+    it "does not emit a title or child outside a panel shorter than the title band":
+        val root = panel("short-root", "Title", [button("short-child", "Body", "activate")])
+        val rects = compute_pixel_layout(root, 0, 0, 160, 12)
+        expect(find_rect_index(rects, "short-child")).to_equal(-1)
+        var title_count = 0
+        val short_draw = widget_tree_to_draw_ir_cpu(root, 160, 12)
+        for batch in short_draw.batches:
+            for command in batch.commands:
+                if command.component_id == "short-root-title":
+                    title_count = title_count + 1
+        expect(title_count).to_equal(0)
+
+    it "rasterizes title glyphs into pixels in the reserved title band":
+        val titled = panel("raster-title", "ABC", [])
+        val plain = panel("raster-plain", "", [])
+        val title_draw = widget_tree_to_draw_ir_cpu(titled, 80, 40)
+        val plain_draw = widget_tree_to_draw_ir_cpu(plain, 80, 40)
+        val title_scene = draw_ir_v2_to_v3(title_draw)
+        val plain_scene = draw_ir_v2_to_v3(plain_draw)
+        val title_pixels = raster_scene_argb(title_scene, 80, 40)
+        val plain_pixels = raster_scene_argb(plain_scene, 80, 40)
+        expect(title_pixels.len()).to_equal(3200)
+        expect(plain_pixels.len()).to_equal(3200)
+        var different = 0
+        var index = 80
+        while index < 80 * 19:
+            if title_pixels[index] != plain_pixels[index]:
+                different = different + 1
+            index = index + 1
+        expect(different).to_be_greater_than(0)

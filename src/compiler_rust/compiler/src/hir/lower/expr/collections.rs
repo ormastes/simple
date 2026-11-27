@@ -230,6 +230,10 @@ impl Lowerer {
     ) -> LowerResult<HirExpr> {
         use crate::hir::lower::error::LowerError;
 
+        for (field, value) in fields {
+            self.check_unit_field_init(name, field, value, ctx)?;
+        }
+
         // Resolve struct type (handle "Self" keyword)
         let struct_ty = if name == "Self" {
             if let Some(class_ty) = self.current_class_type {
@@ -589,6 +593,49 @@ impl Lowerer {
             (None, _) => Vec::new(),
         };
 
+        // Cross-module `= default` fallback (bug
+        // native_struct_field_default_dropped_on_reexport_2026-10-25): a type
+        // reached only through the global layout map (e.g. `use pkg.*` where
+        // `pkg` re-exports the declaring module) is never `register_struct`ed
+        // here, so `struct_field_defaults` has no entry and every omitted
+        // field got the nil tag `3`. Borrow the declaring module's defaults,
+        // but only when that owner's layout is exactly `declared`, so a
+        // same-named type elsewhere can never lend its defaults.
+        let global_defaults: Option<std::collections::HashMap<String, Expr>> = if self.struct_field_defaults.contains_key(bare_name) {
+            None
+        } else {
+            self.global_struct_key_for_name(name).and_then(|owner| {
+                let layout_matches = self
+                    .global_struct_defs
+                    .as_ref()
+                    .and_then(|defs| defs.get(&owner))
+                    .is_some_and(|fields| {
+                        fields.len() == declared.len() && fields.iter().zip(declared.iter()).all(|((f, _), d)| f == d)
+                    });
+                if !layout_matches {
+                    return None;
+                }
+                self.global_struct_field_defaults
+                    .as_ref()
+                    .and_then(|all| all.get(&owner))
+                    .cloned()
+            })
+        };
+
+        // Field TypeIds trusted for the enum-slot admission check: only a
+        // struct declared in this same file whose registry layout is exactly
+        // `declared` (same soundness gate as the unknown-field check above).
+        let trusted_field_types: Option<Vec<TypeId>> = match &registry_fields {
+            Some(rf)
+                if declared_here
+                    && rf.len() == declared.len()
+                    && rf.iter().zip(declared.iter()).all(|((f, _), d)| f == d) =>
+            {
+                Some(rf.iter().map(|(_, t)| *t).collect())
+            }
+            _ => None,
+        };
+
         let mut pos_iter = positional.into_iter();
         let mut out = Vec::with_capacity(declared.len());
         for (field_index, field_name) in declared.iter().enumerate() {
@@ -600,10 +647,16 @@ impl Lowerer {
                 .get(bare_name)
                 .and_then(|m| m.get(field_name.as_str()))
                 .cloned();
-            if let Some(expr) = named.get(field_name.as_str()) {
-                out.push(self.lower_expr(expr, ctx)?);
-            } else if let Some(expr) = pos_iter.next() {
-                out.push(self.lower_expr(expr, ctx)?);
+            let provided_expr = match named.get(field_name.as_str()) {
+                Some(expr) => Some(*expr),
+                None => pos_iter.next(),
+            };
+            if let Some(expr) = provided_expr {
+                let value = self.lower_expr(expr, ctx)?;
+                if let Some(field_ty) = trusted_field_types.as_ref().and_then(|t| t.get(field_index)) {
+                    self.reject_callable_for_enum_slot(*field_ty, &value, &format!("field `{name}.{field_name}`"))?;
+                }
+                out.push(value);
             } else if let Some(binding) = &spread_binding {
                 // Unlisted slot, spread present: copy field `field_index` out
                 // of the once-evaluated base. Deliberately ABOVE the declared
@@ -629,6 +682,17 @@ impl Lowerer {
                 // under the JIT against `n=0 m=7` in the interpreter.
                 // A field with NO declared default still gets `Nil`, unchanged.
                 out.push(self.lower_expr(&default_expr, ctx)?);
+            } else if let Some(default_expr) = global_defaults
+                .as_ref()
+                .and_then(|m| m.get(field_name.as_str()))
+                .filter(|e| is_scope_free_default(e))
+            {
+                // Lowered in the CONSTRUCTING module's scope, so only defaults
+                // that name nothing (literals, `nil`, empty `[]`/`{}`) are
+                // borrowed: a `= Inner()` / `= SOME_CONST` default may not be
+                // visible here and would fail codegen. Those keep the nil
+                // placeholder (open gap, see the bug doc).
+                out.push(self.lower_expr(default_expr, ctx)?);
             } else {
                 out.push(HirExpr {
                     kind: HirExprKind::Nil,
@@ -782,5 +846,28 @@ impl Lowerer {
             },
             ty: result_ty,
         })
+    }
+}
+
+/// A field `= default` that references no name, so it lowers identically in
+/// any module: literals (incl. interpolation-free strings), `nil`, unary minus on a numeric literal, and EMPTY
+/// array/dict literals (each construction still allocates a fresh container).
+fn is_scope_free_default(expr: &Expr) -> bool {
+    match expr {
+        Expr::Integer(_)
+        | Expr::Float(_)
+        | Expr::TypedInteger(..)
+        | Expr::TypedFloat(..)
+        | Expr::String(_)
+        | Expr::Bool(_)
+        | Expr::Nil => true,
+        Expr::FString { parts, .. } => parts.iter().all(|p| matches!(p, simple_parser::ast::FStringPart::Literal(_))),
+        Expr::Unary { operand, .. } => matches!(
+            operand.as_ref(),
+            Expr::Integer(_) | Expr::Float(_) | Expr::TypedInteger(..) | Expr::TypedFloat(..)
+        ),
+        Expr::Array(items) => items.is_empty(),
+        Expr::Dict(entries) => entries.is_empty(),
+        _ => false,
     }
 }

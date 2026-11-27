@@ -454,7 +454,13 @@ pub fn rt_transient_heap_promote(args: &[Value]) -> Result<Value, CompileError> 
         Value::UInt { value, .. } => {
             simple_runtime::value::rt_transient_heap_promote(simple_runtime::value::RuntimeValue::from_raw(*value))
         }
-        Value::Nil => false,
+        // A nil optional owns no transient heap state: promotion is a no-op
+        // success, exactly as in the C and Rust runtimes
+        // (value/collections.rs rt_transient_heap_promote). Returning false
+        // here made every seed retained parse of a file without an
+        // @representation block panic "transient retained parser ownership
+        // failed (declaration=false)".
+        Value::Nil => true,
         // Interpreter composites are Arc/owned Rust values, not allocations in
         // the runtime transient scope, so they are already retained. The
         // protocol still matches the C and Rust runtimes: promotion succeeds
@@ -471,7 +477,9 @@ pub fn rt_transient_heap_promote_share_begin(args: &[Value]) -> Result<Value, Co
             "rt_transient_heap_promote_share_begin requires 0 arguments",
         ));
     }
-    Ok(Value::Bool(simple_runtime::value::rt_transient_heap_promote_share_begin()))
+    Ok(Value::Bool(
+        simple_runtime::value::rt_transient_heap_promote_share_begin(),
+    ))
 }
 
 pub fn rt_transient_heap_promote_share_end(args: &[Value]) -> Result<Value, CompileError> {
@@ -483,6 +491,72 @@ pub fn rt_transient_heap_promote_share_end(args: &[Value]) -> Result<Value, Comp
     Ok(Value::Bool(simple_runtime::value::rt_transient_heap_promote_share_end()))
 }
 
+fn require_no_args(name: &str, args: &[Value]) -> Result<(), CompileError> {
+    if args.is_empty() {
+        Ok(())
+    } else {
+        Err(CompileError::runtime(format!("{} requires 0 arguments", name)))
+    }
+}
+
+/// Build session heap (BSM T1, runtime value/collections.rs).
+pub fn rt_session_heap_begin(args: &[Value]) -> Result<Value, CompileError> {
+    require_no_args("rt_session_heap_begin", args)?;
+    Ok(Value::Int(simple_runtime::value::rt_session_heap_begin() as i64))
+}
+
+pub fn rt_session_heap_end(args: &[Value]) -> Result<Value, CompileError> {
+    let session = match args {
+        [Value::Int(id)] => u32::try_from(*id).ok(),
+        [Value::UInt { value, .. }] => u32::try_from(*value).ok(),
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_session_heap_end requires 1 argument (session id)",
+            ))
+        }
+    };
+    Ok(Value::Bool(
+        session.is_some_and(|id| simple_runtime::value::rt_session_heap_end(id)),
+    ))
+}
+
+pub fn rt_session_alloc_begin(args: &[Value]) -> Result<Value, CompileError> {
+    require_no_args("rt_session_alloc_begin", args)?;
+    Ok(Value::Bool(simple_runtime::value::rt_session_alloc_begin()))
+}
+
+pub fn rt_session_alloc_end(args: &[Value]) -> Result<Value, CompileError> {
+    require_no_args("rt_session_alloc_end", args)?;
+    Ok(Value::Bool(simple_runtime::value::rt_session_alloc_end()))
+}
+
+pub fn rt_session_heap_id(args: &[Value]) -> Result<Value, CompileError> {
+    require_no_args("rt_session_heap_id", args)?;
+    Ok(Value::Int(simple_runtime::value::rt_session_heap_id() as i64))
+}
+
+/// Same carrier rules as `rt_transient_heap_promote`: raw handles adopt in the
+/// runtime; nil is a no-op success; interpreter composites own no runtime
+/// transient state, so they succeed exactly when adoption is possible at all.
+pub fn rt_transient_heap_adopt(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_transient_heap_adopt requires 1 argument (value)",
+        ));
+    }
+    let adopted = match &args[0] {
+        Value::Int(raw) => {
+            simple_runtime::value::rt_transient_heap_adopt(simple_runtime::value::RuntimeValue::from_raw(*raw as u64))
+        }
+        Value::UInt { value, .. } => {
+            simple_runtime::value::rt_transient_heap_adopt(simple_runtime::value::RuntimeValue::from_raw(*value))
+        }
+        Value::Nil => true,
+        _ => simple_runtime::value::rt_session_heap_id() != 0 && simple_runtime::value::transient_heap_scope_paused(),
+    };
+    Ok(Value::Bool(adopted))
+}
+
 /// Observe this thread's transient parser-array scope without mutating it:
 /// 0 = no scope, 1 = active, 2 = paused (the Rust runtime's own state).
 pub fn rt_transient_array_scope_state_v1(args: &[Value]) -> Result<Value, CompileError> {
@@ -492,6 +566,24 @@ pub fn rt_transient_array_scope_state_v1(args: &[Value]) -> Result<Value, Compil
         ));
     }
     Ok(Value::Int(simple_runtime::value::rt_transient_array_scope_state_v1()))
+}
+
+pub fn rt_transient_array_scope_identity_v1(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_transient_array_scope_identity_v1 requires 0 arguments",
+        ));
+    }
+    Ok(Value::Int(simple_runtime::value::rt_transient_array_scope_identity_v1()))
+}
+
+pub fn rt_allocation_owner_identity_v1(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_allocation_owner_identity_v1 requires 0 arguments",
+        ));
+    }
+    Ok(Value::Int(simple_runtime::value::rt_allocation_owner_identity_v1()))
 }
 
 pub fn rt_transient_array_scope_end(args: &[Value]) -> Result<Value, CompileError> {
@@ -1137,14 +1229,74 @@ pub fn rt_mprotect(args: &[Value]) -> Result<Value, CompileError> {
     if addr <= 0 || length <= 0 || (prot & write_exec) == write_exec {
         return Ok(Value::Int(-1));
     }
-    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    #[cfg(not(any(
+        target_arch = "x86",
+        target_arch = "x86_64",
+        target_os = "macos",
+        all(target_os = "linux", target_arch = "aarch64")
+    )))]
     if (prot & i64::from(libc::PROT_EXEC)) != 0 {
-        // No verified cross-platform cache-sync primitive exists in this lane.
+        // No verified cache-sync primitive is wired for this host in this lane.
         // Fail before granting execute permission on non-coherent targets.
         return Ok(Value::Int(-1));
     }
+    // aarch64 Linux: the cache maintenance below reads the range (DC CVAU needs
+    // read permission at EL0), so execute-only would SIGSEGV instead of
+    // failing closed. Refuse it.
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    if (prot & i64::from(libc::PROT_EXEC)) != 0 && (prot & i64::from(libc::PROT_READ)) == 0 {
+        return Ok(Value::Int(-1));
+    }
     let result = unsafe { libc::mprotect(addr as usize as *mut libc::c_void, length as usize, prot as i32) };
+    // aarch64 Linux: same contract as runtime_legacy_core.c rt_mprotect
+    // (__builtin___clear_cache after an execute grant). On a sync failure the
+    // range is made inaccessible and -1 returned: fail closed, never RX over
+    // stale instructions.
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    if result == 0 && (prot & i64::from(libc::PROT_EXEC)) != 0 {
+        if !aarch64_sync_instruction_cache(addr as usize, length as usize) {
+            unsafe { libc::mprotect(addr as usize as *mut libc::c_void, length as usize, libc::PROT_NONE) };
+            return Ok(Value::Int(-1));
+        }
+    }
+    // Mirror runtime unix_common.h rt_mprotect: an execute grant must be
+    // followed by an instruction-cache sync on non-coherent targets (Apple
+    // Silicon). macOS exports `sys_icache_invalidate` from libSystem.
+    #[cfg(all(target_os = "macos", not(any(target_arch = "x86", target_arch = "x86_64"))))]
+    if result == 0 && (prot & i64::from(libc::PROT_EXEC)) != 0 {
+        extern "C" {
+            fn sys_icache_invalidate(start: *mut libc::c_void, len: libc::size_t);
+        }
+        unsafe { sys_icache_invalidate(addr as usize as *mut libc::c_void, length as usize) };
+    }
     Ok(Value::Int(i64::from(result)))
+}
+
+/// AArch64 user-mode I-cache maintenance for `[start, start + len)`:
+/// DC CVAU per D-line, DSB ISH, IC IVAU per I-line, DSB ISH, ISB. Line sizes
+/// come from CTR_EL0 (readable at EL0 on Linux). Returns false on overflow.
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+fn aarch64_sync_instruction_cache(start: usize, len: usize) -> bool {
+    let Some(end) = start.checked_add(len) else {
+        return false;
+    };
+    let ctr: u64;
+    unsafe { core::arch::asm!("mrs {0}, ctr_el0", out(reg) ctr, options(nomem, nostack)) };
+    let dline = 4usize << ((ctr >> 16) & 0xF);
+    let iline = 4usize << (ctr & 0xF);
+    let mut addr = start & !(dline - 1);
+    while addr < end {
+        unsafe { core::arch::asm!("dc cvau, {0}", in(reg) addr, options(nostack)) };
+        addr += dline;
+    }
+    unsafe { core::arch::asm!("dsb ish", options(nostack)) };
+    let mut addr = start & !(iline - 1);
+    while addr < end {
+        unsafe { core::arch::asm!("ic ivau, {0}", in(reg) addr, options(nostack)) };
+        addr += iline;
+    }
+    unsafe { core::arch::asm!("dsb ish", "isb", options(nostack)) };
+    true
 }
 
 /// Windows `rt_mprotect`: POSIX `PROT_*` bits (1 read, 2 write, 4 exec) mapped
@@ -1156,8 +1308,7 @@ pub fn rt_mprotect(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_mprotect(args: &[Value]) -> Result<Value, CompileError> {
     use windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache;
     use windows_sys::Win32::System::Memory::{
-        VirtualProtect, PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE,
-        PAGE_WRITECOPY,
+        VirtualProtect, PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
     };
 
     if args.len() != 3 {
@@ -1462,6 +1613,43 @@ mod ptr_read_u8_tests {
         );
     }
 
+    /// Regression: on Apple Silicon the interpreter refused every execute
+    /// grant (no cache-sync primitive was wired), so the loader's RW->RX
+    /// transition failed and no SMF/JIT symbol could be mapped on macOS arm64.
+    /// Same regression on aarch64 Linux (XRay in-process patching): the seed
+    /// refused PROT_EXEC there too; it now syncs the I-cache like the C runtime.
+    #[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn arm64_mprotect_grants_rx_and_executes() {
+        let rw = rt_mmap_raw(&[
+            Value::Int(0),
+            Value::Int(4096),
+            Value::Int((libc::PROT_READ | libc::PROT_WRITE) as i64),
+            Value::Int((libc::MAP_PRIVATE | libc::MAP_ANON) as i64),
+            Value::Int(-1),
+            Value::Int(0),
+        ])
+        .unwrap()
+        .as_int()
+        .unwrap();
+        assert_ne!(rw, -1);
+        // movz w0, #42 ; ret
+        let code: [u8; 8] = [0x40, 0x05, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6];
+        unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), rw as usize as *mut u8, code.len()) };
+        let rx = (libc::PROT_READ | libc::PROT_EXEC) as i64;
+        let status = rt_mprotect(&[Value::Int(rw), Value::Int(4096), Value::Int(rx)]).unwrap();
+        assert_eq!(status, Value::Int(0));
+        let f: extern "C" fn() -> i32 = unsafe { std::mem::transmute(rw as usize) };
+        assert_eq!(f(), 42);
+        let write_exec = (libc::PROT_WRITE | libc::PROT_EXEC) as i64;
+        let refused = rt_mprotect(&[Value::Int(rw), Value::Int(4096), Value::Int(write_exec)]).unwrap();
+        assert_eq!(refused, Value::Int(-1), "W^X must still be refused");
+        assert_eq!(
+            rt_munmap_raw(&[Value::Int(rw), Value::Int(4096)]).unwrap(),
+            Value::Int(0)
+        );
+    }
+
     /// Regression: the Windows seed had no `rt_mprotect` ("unavailable on this
     /// host"), so the module loader's W^X transitions failed and
     /// module_loader_relocation_spec could not load any SMF on Windows.
@@ -1685,6 +1873,34 @@ pub fn rt_load_barrier(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_store_barrier(args: &[Value]) -> Result<Value, CompileError> {
     memory_barrier(args, std::sync::atomic::Ordering::Release, "rt_store_barrier")
+}
+
+/// Interpreter no-op counterparts of the native CPU control-register and TLB
+/// primitives (`rt_read_cr3` / `rt_write_cr3` / `rt_invlpg` in
+/// `runtime_native.c` and baremetal `runtime_minimal.c`). The host
+/// interpreter has no CR3 or TLB: reads return 0 and the mutating calls do
+/// nothing, which is exactly what the kernel-memory integration specs
+/// (test/02_integration/os/) need to exercise VMM flows end to end
+/// (2026-11-12, work/fix-pmm-crash-20261112).
+pub fn rt_read_cr3(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime("rt_read_cr3 requires 0 arguments"));
+    }
+    Ok(Value::Int(0))
+}
+
+pub fn rt_write_cr3(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_write_cr3 requires 1 argument (value)"));
+    }
+    Ok(Value::Nil)
+}
+
+pub fn rt_invlpg(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_invlpg requires 1 argument (addr)"));
+    }
+    Ok(Value::Nil)
 }
 
 /// Volatile read/write family mirroring the native runtime's
@@ -1929,7 +2145,9 @@ pub fn rt_array_bytes_basis_len(args: &[Value]) -> Result<Value, CompileError> {
 /// while the caller retains the array value, as the native contract requires.
 pub fn rt_array_bytes_basis_ptr(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
-        return Err(CompileError::runtime("rt_array_bytes_basis_ptr requires 1 argument (array)"));
+        return Err(CompileError::runtime(
+            "rt_array_bytes_basis_ptr requires 1 argument (array)",
+        ));
     }
     rt_array_data_ptr(args)
 }
@@ -1938,23 +2156,32 @@ pub fn rt_array_bytes_basis_ptr(args: &[Value]) -> Result<Value, CompileError> {
 /// count of either native representation, or -22 (matching the runtimes'
 /// `-EINVAL`) when the value is not an array, holds a non-int element, or
 /// holds an element outside `0..=255`.
+/// A boxed `[u8]` element is either a plain `Value::Int` or the width-tagged
+/// `Value::UInt` an untyped `[1u8, 2u8]` literal produces; both must lie in
+/// `0..=255`. Rejecting `UInt` made every write of such a literal fail.
+fn is_byte_element(item: &Value) -> bool {
+    match item {
+        Value::Int(byte) => (0..=255).contains(byte),
+        Value::UInt { value, .. } => *value <= 255,
+        _ => false,
+    }
+}
+
 fn byte_array_validate_len(arg: &Value) -> i64 {
     match arg {
         Value::ByteArray(v) | Value::FrozenByteArray(v) => v.len() as i64,
         Value::Array(items) | Value::FrozenArray(items) => {
             for item in items.iter() {
-                match item {
-                    Value::Int(byte) if (0..=255).contains(byte) => {}
-                    _ => return -22,
+                if !is_byte_element(item) {
+                    return -22;
                 }
             }
             items.len() as i64
         }
         Value::FixedSizeArray { data, .. } => {
             for item in data.iter() {
-                match item {
-                    Value::Int(byte) if (0..=255).contains(byte) => {}
-                    _ => return -22,
+                if !is_byte_element(item) {
+                    return -22;
                 }
             }
             data.len() as i64
@@ -1981,9 +2208,9 @@ pub fn rt_array_bytes_validate(args: &[Value]) -> Result<Value, CompileError> {
 /// caller-owned packed storage whose pointer `rt_array_bytes_basis_ptr`
 /// handed out (a real in-process buffer hosted), returning the length.
 pub fn rt_array_bytes_copy_checked(args: &[Value]) -> Result<Value, CompileError> {
-    let source = args
-        .first()
-        .ok_or_else(|| CompileError::runtime("rt_array_bytes_copy_checked requires 3 arguments (array, out, capacity)"))?;
+    let source = args.first().ok_or_else(|| {
+        CompileError::runtime("rt_array_bytes_copy_checked requires 3 arguments (array, out, capacity)")
+    })?;
     let out = args
         .get(1)
         .and_then(|value| value.as_int().ok())
@@ -2298,6 +2525,15 @@ mod tests {
         let fixed = Value::fixed_size_array(2, vec![Value::Int(7), Value::Int(8)]).unwrap();
         assert_eq!(rt_array_bytes_validate(&[fixed]).unwrap(), Value::Int(2));
 
+        let suffixed = Value::array(vec![
+            Value::UInt { value: 0x53, width: 8 },
+            Value::UInt { value: 0, width: 8 },
+        ]);
+        assert_eq!(rt_array_bytes_validate(&[suffixed]).unwrap(), Value::Int(2));
+
+        let wide = Value::array(vec![Value::UInt { value: 256, width: 16 }]);
+        assert_eq!(rt_array_bytes_validate(&[wide]).unwrap(), Value::Int(-22));
+
         let out_of_range = Value::array(vec![Value::Int(256)]);
         assert_eq!(rt_array_bytes_validate(&[out_of_range]).unwrap(), Value::Int(-22));
 
@@ -2327,12 +2563,8 @@ mod tests {
         .unwrap();
         assert_eq!(short_capacity, Value::Int(-22), "capacity < length refuses");
 
-        let null_out = rt_array_bytes_copy_checked(&[
-            Value::byte_array(vec![1]),
-            Value::Int(0),
-            Value::Int(1),
-        ])
-        .unwrap();
+        let null_out =
+            rt_array_bytes_copy_checked(&[Value::byte_array(vec![1]), Value::Int(0), Value::Int(1)]).unwrap();
         assert_eq!(null_out, Value::Int(-22), "NULL destination with len > 0 refuses");
 
         let invalid_source = rt_array_bytes_copy_checked(&[
@@ -2354,7 +2586,11 @@ mod tests {
         assert_eq!(promote(&composite), Value::Bool(false), "scope open but not paused");
         assert_eq!(rt_transient_array_scope_pause(&[]).unwrap(), Value::Bool(true));
         assert_eq!(promote(&composite), Value::Bool(true), "paused scope");
-        assert_eq!(promote(&Value::Nil), Value::Bool(false), "nil never promotes");
+        assert_eq!(
+            promote(&Value::Nil),
+            Value::Bool(true),
+            "nil owns nothing: no-op success, as in the runtimes"
+        );
         assert_eq!(rt_transient_array_scope_end(&[]).unwrap(), Value::Bool(true));
         assert_eq!(promote(&composite), Value::Bool(false), "scope ended");
     }
@@ -2457,15 +2693,34 @@ mod tests {
         assert!(matches!(rt_transient_array_scope_pause(&[]), Ok(Value::Bool(true))));
         assert!(matches!(rt_transient_heap_promote(&[graph]), Ok(Value::Bool(true))));
         assert!(matches!(rt_transient_array_scope_end(&[]), Ok(Value::Bool(true))));
+        // Integer carriers go straight to the runtime twin, which (since the
+        // 2026-10-22 scalar exemption in value/collections.rs) treats a
+        // non-heap scalar as a no-op success, outside any scope too.
         assert!(matches!(
             rt_transient_heap_promote(&[Value::Int(0)]),
-            Ok(Value::Bool(false))
+            Ok(Value::Bool(true))
         ));
         assert!(matches!(
             rt_transient_heap_promote(&[Value::UInt { value: 0, width: 64 }]),
-            Ok(Value::Bool(false))
+            Ok(Value::Bool(true))
         ));
         assert!(rt_transient_heap_promote(&[]).is_err());
+    }
+
+    #[test]
+    fn transient_heap_promote_nil_is_noop_success_in_any_scope_state() {
+        // Mirrors value/collections.rs: nil owns no transient state.
+        assert!(matches!(
+            rt_transient_heap_promote(&[Value::Nil]),
+            Ok(Value::Bool(true))
+        ));
+        assert!(matches!(rt_transient_array_scope_begin(&[]), Ok(Value::Bool(true))));
+        assert!(matches!(rt_transient_array_scope_pause(&[]), Ok(Value::Bool(true))));
+        assert!(matches!(
+            rt_transient_heap_promote(&[Value::Nil]),
+            Ok(Value::Bool(true))
+        ));
+        assert!(matches!(rt_transient_array_scope_end(&[]), Ok(Value::Bool(true))));
     }
 
     #[test]
@@ -2777,4 +3032,52 @@ mod tests {
         rt_volatile_write_u32(&[Value::Int(address), Value::Int(0x7654_3210)]).unwrap();
         assert_eq!(value, 0x7654_3210);
     }
+}
+
+/// Raw runtime handle carried by an interpreter value, or None for interpreter
+/// composites (Arc/owned Rust values that the runtime rc table never owns).
+fn rc_runtime_handle(name: &str, args: &[Value]) -> Result<Option<simple_runtime::value::RuntimeValue>, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(format!("{name} requires 1 argument (value)")));
+    }
+    Ok(match &args[0] {
+        Value::Int(raw) => Some(simple_runtime::value::RuntimeValue::from_raw(*raw as u64)),
+        Value::UInt { value, .. } => Some(simple_runtime::value::RuntimeValue::from_raw(*value)),
+        _ => None,
+    })
+}
+
+/// Object-graph refcount (BSM P4): interpreter composites are not rc roots,
+/// so share/retain/release answer false and count/graph_bytes answer -1.
+pub fn rt_rc_share(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = rc_runtime_handle("rt_rc_share", args)?;
+    Ok(Value::Bool(
+        handle.is_some_and(|v| simple_runtime::value::rt_rc_share(v)),
+    ))
+}
+
+pub fn rt_rc_retain(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = rc_runtime_handle("rt_rc_retain", args)?;
+    Ok(Value::Bool(
+        handle.is_some_and(|v| simple_runtime::value::rt_rc_retain(v)),
+    ))
+}
+
+pub fn rt_rc_release(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = rc_runtime_handle("rt_rc_release", args)?;
+    Ok(Value::Bool(
+        handle.is_some_and(|v| simple_runtime::value::rt_rc_release(v)),
+    ))
+}
+
+pub fn rt_rc_count(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = rc_runtime_handle("rt_rc_count", args)?;
+    Ok(Value::Int(handle.map_or(-1, |v| simple_runtime::value::rt_rc_count(v))))
+}
+
+pub fn rt_heap_graph_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = rc_runtime_handle("rt_heap_graph_bytes", args)?;
+    Ok(Value::Int(
+        handle.map_or(-1, |v| simple_runtime::value::rt_heap_graph_bytes(v)),
+    ))
 }

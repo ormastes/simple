@@ -1,0 +1,122 @@
+# Real bounded staging under original source-owned anchors. No Git or launch here.
+use std.nogc_sync_mut.io.retained_file.RetainedDirectoryOwnerV1
+use std.common.contracts.container.agent_workspace_manifest_v1.{AgentWorkspaceManifestV1, AgentWorkspaceFileV1}
+use std.common.crypto.sha256.sha256_u8_hex
+use std.common.text_bytes.text_to_utf8_bytes
+
+pub struct LinuxAgentWorkspaceCreationV1:
+    relative_path: text
+    kind: text
+    parent_identity: [u8]
+    identity: [u8]
+
+pub struct LinuxAgentWorkspaceStageResultV1:
+    creations: [LinuxAgentWorkspaceCreationV1]
+    error: text
+
+fn stage_fail_v1(result: LinuxAgentWorkspaceStageResultV1, reason: text) -> LinuxAgentWorkspaceStageResultV1:
+    LinuxAgentWorkspaceStageResultV1(creations: result.creations,
+        error: if result.error == "": reason else: result.error)
+
+fn stage_record_v1(result: LinuxAgentWorkspaceStageResultV1, parent: RetainedDirectoryOwnerV1,
+        identity: [u8], path: text, kind: text) -> LinuxAgentWorkspaceStageResultV1:
+    val parent_identity = parent.stage_identity_v1()
+    if parent_identity.is_err(): return stage_fail_v1(result, parent_identity.unwrap_err())
+    val entry = LinuxAgentWorkspaceCreationV1(relative_path: path, kind: kind,
+        parent_identity: parent_identity.unwrap(), identity: identity)
+    LinuxAgentWorkspaceStageResultV1(creations: result.creations + [entry], error: result.error)
+
+fn stage_directory_v1(prior: LinuxAgentWorkspaceStageResultV1, parent: RetainedDirectoryOwnerV1,
+        name: text, path: text, create: bool) -> (RetainedDirectoryOwnerV1?, LinuxAgentWorkspaceStageResultV1):
+    var result = prior
+    if result.error != "": return (nil, result)
+    val opened = parent.stage_directory_v1(name, create)
+    if opened.is_err(): return (nil, stage_fail_v1(result, opened.unwrap_err()))
+    val child = opened.unwrap()
+    if create:
+        val identity = child.stage_identity_v1()
+        if identity.is_err(): result = stage_fail_v1(result, identity.unwrap_err())
+        else: result = stage_record_v1(result, parent, identity.unwrap(), path, "directory")
+    (Some(child), result)
+
+fn stage_copy_v1(prior: LinuxAgentWorkspaceStageResultV1, assets: RetainedDirectoryOwnerV1,
+        objects: RetainedDirectoryOwnerV1, manifest: AgentWorkspaceManifestV1) -> LinuxAgentWorkspaceStageResultV1:
+    var result = prior
+    var created: [text] = []
+    for entry in manifest.files:
+        if result.error != "": break
+        val opened = assets.open_file(entry.source_name, 1048576u64)
+        if opened.is_err():
+            result = stage_fail_v1(result, opened.unwrap_err())
+            break
+        var source = opened.unwrap()
+        val observed = source.read_stage_input_v1(entry.size_bytes)
+        if not source.close(): result = stage_fail_v1(result, "agent-stage-source-close-consumed-error")
+        if observed.is_err():
+            result = stage_fail_v1(result, observed.unwrap_err())
+            break
+        val bytes = observed.unwrap()
+        if bytes.len() != entry.size_bytes or sha256_u8_hex(bytes) != entry.digest:
+            result = stage_fail_v1(result, "agent-stage-source-digest")
+            break
+        val parts = entry.relative_path.split("/")
+        val prefix = parts[2]
+        val prefix_path = manifest.attempt_leaf + "/repo/objects/" + prefix
+        val (opened_directory, directory_result) = stage_directory_v1(result, objects, prefix, prefix_path, not created.contains(prefix))
+        result = directory_result
+        if opened_directory == nil: break
+        var directory = opened_directory.unwrap()
+        created.push(prefix)
+        if result.error == "":
+            val written = directory.stage_file_identified_v1(parts[3], bytes)
+            if written.is_err(): result = stage_fail_v1(result, written.unwrap_err())
+            else: result = stage_record_v1(result, directory, written.unwrap(), manifest.attempt_leaf + "/" + entry.relative_path, "file")
+        if not directory.close(): result = stage_fail_v1(result, "agent-stage-object-directory-close-consumed-error")
+
+    result
+
+pub fn linux_agent_workspace_creation_plan_v1(manifest: AgentWorkspaceManifestV1) -> [text]:
+    val leaf = manifest.attempt_leaf
+    var paths = [leaf, leaf + "/repo", leaf + "/repo/objects"]
+    for entry in manifest.files:
+        val parts = entry.relative_path.split("/")
+        val prefix = leaf + "/repo/objects/" + parts[2]
+        if not paths.contains(prefix): paths.push(prefix)
+        paths.push(leaf + "/" + entry.relative_path)
+    for name in ["home", "xdg-config", "xdg-state", "cache", "tmp", "worktree"]:
+        paths.push(leaf + "/" + name)
+    paths.push("invocation.sdn")
+    paths
+
+pub fn linux_agent_workspace_stage_bytes_v1(root: RetainedDirectoryOwnerV1,
+        assets: RetainedDirectoryOwnerV1, manifest: AgentWorkspaceManifestV1,
+        invocation_bytes: text) -> LinuxAgentWorkspaceStageResultV1:
+    var result = LinuxAgentWorkspaceStageResultV1(creations: [], error: "")
+    val (opened, attempt_result) = stage_directory_v1(result, root, manifest.attempt_leaf, manifest.attempt_leaf, true)
+    result = attempt_result
+    if opened == nil: return result
+    var attempt = opened.unwrap()
+    val (opened_repo, repo_result) = stage_directory_v1(result, attempt, "repo", manifest.attempt_leaf + "/repo", true)
+    result = repo_result
+    if opened_repo != nil:
+        var repo = opened_repo.unwrap()
+        val (opened_objects, objects_result) = stage_directory_v1(result, repo, "objects", manifest.attempt_leaf + "/repo/objects", true)
+        result = objects_result
+        if opened_objects != nil:
+            var objects = opened_objects.unwrap()
+            result = stage_copy_v1(result, assets, objects, manifest)
+            if not objects.close(): result = stage_fail_v1(result, "agent-stage-objects-close-consumed-error")
+        if not repo.close(): result = stage_fail_v1(result, "agent-stage-repo-close-consumed-error")
+    for name in ["home", "xdg-config", "xdg-state", "cache", "tmp", "worktree"]:
+        val (opened_child, child_result) = stage_directory_v1(result, attempt, name, manifest.attempt_leaf + "/" + name, true)
+        result = child_result
+        if opened_child != nil:
+            var child = opened_child.unwrap()
+            if not child.close(): result = stage_fail_v1(result, "agent-stage-private-directory-close-consumed-error")
+    if not attempt.close(): result = stage_fail_v1(result, "agent-stage-attempt-close-consumed-error")
+    if result.error == "":
+        # Last exclusive publication. Partial staging has no usable task marker.
+        val published = root.stage_file_identified_v1("invocation.sdn", text_to_utf8_bytes(invocation_bytes))
+        if published.is_err(): result = stage_fail_v1(result, published.unwrap_err())
+        else: result = stage_record_v1(result, root, published.unwrap(), "invocation.sdn", "file")
+    result

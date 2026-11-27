@@ -119,3 +119,15 @@ The exact missing wiring is now present:
 Path drift note: the claimed file `src/app/jupyter_kernel/main.spl` was never
 the subject of this record — the packaging pipeline lives under
 `tools/jupyter/labextension/`. Verdict: ALREADY-FIXED / closeable.
+
+## 2026-11-25 verification (p3-bap lane, Windows worktree)
+
+Source inspection at `origin/release/1.0.0` (47d6c5eddd5) confirms the
+packaging pipeline is in-tree: `tools/jupyter/labextension/pyproject.toml`
+present with `requires = ["hatchling>=1.5.0", "jupyterlab>=4.0.0,<5",
+"hatch-jupyter-builder>=0.5"]` (line 14) and
+`dependencies = ["hatch-jupyter-builder>=0.5"]` for the build hook (line 41);
+`install.json` present; `package.json:51` has `@jupyterlab/builder ^4.0.0`.
+Entry stays FIXED/resolved. Limit unchanged from the 2026-08-17 passes: no
+`jupyter labextension build`/JupyterLab instance was launched, so this closes
+the packaging defect only, not an end-to-end extension load.

@@ -1,0 +1,85 @@
+"""
+Readline typed-input latency budget (bug smux_pane_readline_typed_input_per_char_latency_2026-11-12).
+
+Text typed into an interactive readline shell (`sh -i`) in a smux PTY pane
+used to echo at ~0.25 s per character. Budget: a 200 character command typed
+into `sh -i` must echo its output within 5 s.
+"""
+use std.spec
+use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_list_windows,
+    smux_list_panes, smux_resize, smux_pane_spawn_pty, smux_pane_close_pty,
+    smux_send_command, smux_capture_history}
+use os.apps.smux.input_queue.{pane_input_paced_len}
+use std.common.text_bytes.{boxed_text_bytes_checked}
+use std.nogc_sync_mut.io.{thread_sleep_ms}
+use std.io_runtime.{time_now_unix_micros}
+use std.nogc_async_mut.sosix.{sosix_platform}
+
+fn _shell() -> text:
+    if sosix_platform() == "windows": return "\"C:/Program Files/Git/usr/bin/sh.exe\" -i"
+    return "/bin/sh -i"
+
+fn _secs(t0: i64) -> f64:
+    return (time_now_unix_micros() - t0) as f64 / 1000000.0
+
+fn _chars(n: i64) -> text:
+    var w = ""
+    while w.len() < n:
+        w = w + "R"
+    return w
+
+describe "smux PTY readline typed input latency":
+    it "echoes 200 characters typed into sh -i within 5 s":
+        # @req BUG-smux_pane_readline_typed_input_per_char_latency_2026-11-12
+        step("spawn sh -i in a 250 col pane and wait for the prompt")
+        smux_reset_for_test()
+        val s = smux_create_session("rl")
+        val w = smux_list_windows(s.id)[0]
+        val p = smux_list_panes(s.id, w.id)[0]
+        val _r = smux_resize(s.id, w.id, p.id, 250, 24)
+        expect(smux_pane_spawn_pty(s.id, w.id, p.id, _shell()).is_ok()).to_equal(true)
+        var warm = 0
+        while warm < 40:
+            thread_sleep_ms(50)
+            val _c = smux_capture_history(s.id, w.id, p.id, 20, true)
+            warm = warm + 1
+        step("type a 200 character command and time its output")
+        val body = _chars(186)
+        val cmd = "echo " + body + "_$((1+1))"
+        expect(cmd.len() >= 200).to_equal(true)
+        val t0 = time_now_unix_micros()
+        expect(smux_send_command(s.id, w.id, p.id, cmd).is_ok()).to_equal(true)
+        var seen = false
+        while not seen and _secs(t0) < 90.0:
+            val cap = smux_capture_history(s.id, w.id, p.id, 5, true)
+            if cap.is_ok() and cap.unwrap().content.contains(body + "_2"):
+                seen = true
+            else:
+                thread_sleep_ms(5)
+        val elapsed = _secs(t0)
+        print "readline typed200 seconds=" + elapsed.to_string()
+        val _cp = smux_pane_close_pty(s.id, w.id, p.id)
+        expect(seen).to_equal(true)
+        expect(elapsed < 5.0).to_equal(true)
+
+fn _b(t: text) -> [u8]:
+    boxed_text_bytes_checked(t).unwrap()
+
+describe "paced PTY chunk length":
+    it "caps plain text at the chunk limit":
+        # @req BUG-smux_pane_readline_typed_input_per_char_latency_2026-11-12
+        step("ten ASCII bytes, limit 4")
+        expect(pane_input_paced_len(_b("abcdefghij"), 4)).to_equal(4)
+        expect(pane_input_paced_len(_b("ab"), 4)).to_equal(2)
+
+    it "never ends a chunk inside an escape sequence":
+        step("CSI arrow key straddling the limit is sent whole")
+        expect(pane_input_paced_len(_b("ab\x1b[1;5D!"), 4)).to_equal(8)
+        step("a bracketed paste opener longer than the limit is sent whole")
+        expect(pane_input_paced_len(_b("\x1b[200~xyz"), 4)).to_equal(6)
+        step("SS3 key")
+        expect(pane_input_paced_len(_b("abc\x1bOA"), 4)).to_equal(6)
+
+    it "never splits a UTF-8 scalar":
+        step("three-byte scalar straddling the limit")
+        expect(pane_input_paced_len(_b("abc\u{20AC}d"), 4)).to_equal(6)

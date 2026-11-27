@@ -1,0 +1,41 @@
+#!/bin/sh
+# Production composition policy over genuine LLVM archive census fixtures.
+# No compiler invocation, archive creation, target execution or SDK admission.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$ROOT/scripts/check/lib/simpleos-elf32-builtins-composition.shs"
+fixture=$ROOT/test/fixtures/os/simpleos_elf32_builtins
+mkdir -p "$ROOT/build/verify"
+out=$(mktemp -d "$ROOT/build/verify/arm-rsub-policy.XXXXXX")
+checks=0; status=failed
+trap 'rc=$?; printf "schema: arm-rsub-composition-policy-test-v1\nstatus: %s\nchecks: %s\nexit_status: %s\ncompilation: none\nadmission: none\n" "$status" "$checks" "$rc" > "$out/result.sdn"' 0
+accept() { label=$1; shift; "$@" > "$out/$label.stdout" 2> "$out/$label.stderr" || { echo "FAIL: $label; evidence=$out"; exit 1; }; checks=$((checks+1)); }
+reject() { label=$1; shift; if "$@" > "$out/$label.stdout" 2> "$out/$label.stderr"; then echo "FAIL: accepted $label; evidence=$out"; exit 1; fi; checks=$((checks+1)); }
+accept actual-raw-owner-pairs simpleos_arm_rsub_exclusions "$fixture/arm32-raw-defined-symbols.txt"
+printf 'aeabi_drsub.c.obj\naeabi_frsub.c.obj\n' > "$out/expected-exclusions.txt"
+cmp -s "$out/expected-exclusions.txt" "$out/actual-raw-owner-pairs.stdout" || exit 1
+# Preserve complete actual ELF symbol blocks; remove only the proven C owners.
+awk 'NR==FNR {excluded[$0]=1;next} /^File: / {member=$0;sub(/^.*\(/,"",member);sub(/\)$/,"",member);skip=(member in excluded)} !skip {print}' \
+    "$out/actual-raw-owner-pairs.stdout" "$fixture/arm32-rsub-members.readobj.txt" > "$out/retained-symbols.readobj.txt"
+accept retained-assembly-global-functions simpleos_arm_rsub_callable_check "$out/retained-symbols.readobj.txt"
+reject uncomposed-duplicate-global-functions simpleos_arm_rsub_callable_check "$fixture/arm32-rsub-members.readobj.txt"
+cp "$fixture/arm32-raw-defined-symbols.txt" "$out/unknown-duplicate.txt"
+printf 'libclang_rt.builtins-arm32.a[unexpected.obj]: __aeabi_dadd T 0 4\n' >> "$out/unknown-duplicate.txt"
+reject unknown-strong-duplicate simpleos_arm_rsub_exclusions "$out/unknown-duplicate.txt"
+cp "$fixture/arm32-raw-defined-symbols.txt" "$out/extra-wrapper-export.txt"
+printf 'libclang_rt.builtins-arm32.a[aeabi_drsub.c.obj]: __unique_api T 0 4\n' >> "$out/extra-wrapper-export.txt"
+reject wrapper-unique-export-loss simpleos_arm_rsub_exclusions "$out/extra-wrapper-export.txt"
+sed 's/aeabi_drsub.c.obj/renamed_drsub.c.obj/g' "$fixture/arm32-raw-defined-symbols.txt" > "$out/renamed-wrapper.txt"
+reject unexpected-wrapper-identity simpleos_arm_rsub_exclusions "$out/renamed-wrapper.txt"
+sed '/\[adddf3.S.obj\]: __aeabi_drsub /d' "$fixture/arm32-raw-defined-symbols.txt" > "$out/missing-provider.txt"
+reject missing-retained-assembly-owner simpleos_arm_rsub_exclusions "$out/missing-provider.txt"
+sed 's/\(\[adddf3.S.obj\]: __aeabi_drsub \)T /\1W /' "$fixture/arm32-raw-defined-symbols.txt" > "$out/weak-provider.txt"
+reject weak-retained-provider simpleos_arm_rsub_exclusions "$out/weak-provider.txt"
+sed 's/Type: Function/Type: Object/g' "$out/retained-symbols.readobj.txt" > "$out/not-functions.readobj.txt"
+reject noncallable-global-symbols simpleos_arm_rsub_callable_check "$out/not-functions.readobj.txt"
+sed 's/(adddf3.S.obj)/(other.S.obj)/g' "$out/retained-symbols.readobj.txt" > "$out/wrong-owner.readobj.txt"
+reject callable-wrong-owner simpleos_arm_rsub_callable_check "$out/wrong-owner.readobj.txt"
+sed 's/Name: __aeabi_drsub /Name: __missing_drsub /' "$out/retained-symbols.readobj.txt" > "$out/missing-callable.readobj.txt"
+reject missing-callable-global simpleos_arm_rsub_callable_check "$out/missing-callable.readobj.txt"
+status=passed
+echo "PASS: $checks real-fixture composition checks; no compilation; evidence=$out"

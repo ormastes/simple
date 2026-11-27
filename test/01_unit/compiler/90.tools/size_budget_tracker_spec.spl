@@ -1,0 +1,91 @@
+# @cover src/compiler/90.tools/size/size_budget_tracker.spl 80%
+# @req REQ-TOOLS-SIZE-BUDGET-001
+"""
+## Binary Size Budget Tracker Specification
+
+Covers `SizeBudget` percentage/status thresholds, `StripConfig` reduction
+profiles, `SizeComparison` regression flags, and `SizeTrackingReport`
+8-slot capacity and summary accounting in `compiler.tools.size.size_budget_tracker`.
+"""
+
+use std.spec.{describe, it, expect, step}
+use compiler.tools.size.size_budget_tracker.{
+    SizeBudget,
+    StripConfig,
+    SizeComparison,
+    SizeTrackingReport
+}
+
+describe "SizeBudget thresholds and formatting":
+    it "guards zero budget and computes pass, warning, and fail statuses":
+        step("Check pass at threshold, warning strictly above warning_pct, fail above budget")
+        val zero_budget = SizeBudget.create("empty", 0, 80)
+        expect(zero_budget.usage_pct()).to_equal(0)
+
+        val base = SizeBudget.create("simple", 1000, 80)
+        val pass_case = base.record(800)
+        expect(pass_case.status()).to_equal("pass")
+        expect(pass_case.usage_pct()).to_equal(80)
+
+        val warn_case = base.record(850)
+        expect(warn_case.status()).to_equal("warning")
+        expect(warn_case.summary()).to_contain("[warning]")
+
+        val fail_case = base.record(1001)
+        expect(fail_case.status()).to_equal("fail")
+        expect(fail_case.summary()).to_contain("1001/1000 bytes")
+
+describe "StripConfig estimation":
+    it "estimates size reduction across release, debug_release, and none profiles":
+        step("Compare StripConfig reduction percentages and summaries")
+        val rel = StripConfig.release()
+        val dbg = StripConfig.debug_release()
+        val raw = StripConfig.none()
+        expect(rel.estimated_reduction_pct()).to_equal(60)
+        expect(dbg.estimated_reduction_pct()).to_equal(30)
+        expect(raw.estimated_reduction_pct()).to_equal(0)
+        expect(dbg.summary()).to_contain("keep_dwarf=true")
+        expect(rel.summary()).to_contain("~60% reduction")
+
+describe "SizeComparison delta and regression checks":
+    it "tracks positive reductions, zero baseline, and regressions":
+        step("Evaluate SizeComparison reductions and negative regression delta")
+        val shrunk = SizeComparison.create("runtime", 1000, 750)
+        expect(shrunk.reduction_bytes()).to_equal(250)
+        expect(shrunk.reduction_pct()).to_equal(25)
+        expect(shrunk.is_regression()).to_be(false)
+
+        val zero_base = SizeComparison.create("stub", 0, 0)
+        expect(zero_base.reduction_pct()).to_equal(0)
+
+        val regressed = SizeComparison.create("compiler", 1000, 1200)
+        expect(regressed.reduction_bytes()).to_equal(-200)
+        expect(regressed.is_regression()).to_be(true)
+        expect(regressed.summary()).to_contain("[REGRESSION]")
+
+describe "SizeTrackingReport capacity and aggregates":
+    it "enforces 8-entry maximum capacity and aggregates total reduction":
+        step("Fill all 8 report slots cleanly and verify the 9th entry fails closed")
+        var report = SizeTrackingReport.create("release-check")
+        expect(report.add_entry("b0", 1000, 800)).to_be(true)
+        expect(report.add_entry("b1", 1000, 900)).to_be(true)
+        expect(report.add_entry("b2", 500, 400)).to_be(true)
+        expect(report.add_entry("b3", 500, 450)).to_be(true)
+        expect(report.add_entry("b4", 200, 180)).to_be(true)
+        expect(report.add_entry("b5", 200, 170)).to_be(true)
+        expect(report.add_entry("b6", 300, 250)).to_be(true)
+        expect(report.add_entry("b7", 300, 250)).to_be(true)
+        expect(report.add_entry("b8", 100, 90)).to_be(false)
+        expect(report.entry_count).to_equal(8)
+        expect(report.has_regression()).to_be(false)
+        expect(report.total_before).to_equal(4000)
+        expect(report.total_after).to_equal(3400)
+        expect(report.total_reduction_pct()).to_equal(15)
+
+    it "flags any individual regressed entry in multi-entry report summaries":
+        step("Record one shrinking entry and one growing entry")
+        var report = SizeTrackingReport.create("nightly")
+        expect(report.add_entry("core", 1000, 800)).to_be(true)
+        expect(report.add_entry("plugin", 100, 150)).to_be(true)
+        expect(report.has_regression()).to_be(true)
+        expect(report.summary()).to_contain("[HAS REGRESSION]")

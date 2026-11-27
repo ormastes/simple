@@ -1,0 +1,59 @@
+# Real authorized executor, common Container owner and host journal; only native
+# engine commands/host metadata are scripted fixture data, not platform evidence.
+use std.spec.{expect, fail}
+use test.fixtures.orchestration.host_local_resolver_fixture_v2.host_local_resolver_fixture_v2
+use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
+use std.nogc_async_mut.container.api_v2.SimpleContainerOwnerV2
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.{ScriptedCommandResultV1, build_wait_command}
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.linux_oci_engine_route_v1
+
+pub fn host_terminal_wait_fixture_v2(mode: text = "success", exit_code: i64 = 17) -> HostLocalRootV1:
+    var local = host_local_resolver_fixture_v2("resolver-success")
+    match local.container:
+        case SimpleContainerOwnerV2.Linux(scope, original):
+            var adapter = original
+            var provider = adapter.provider
+            expect(provider.scripted_cursor).to_equal(3)
+            val policy = provider.engine_policy.unwrap()
+            val command = build_wait_command(provider.engine, provider.state_dir, "1".repeat(64)).1
+            val wait = ScriptedCommandResultV1(operation: "wait", program: policy.executable_path,
+                args: linux_oci_engine_route_v1(policy, command.args).unwrap(),
+                stdout: if mode == "malformed": "not-an-exit\n" else: str(exit_code) + "\n",
+                stderr: if mode == "wait-failed": "scripted native wait failure" else: "fixture wait diagnostic\n",
+                exit_code: if mode == "wait-failed": 125 else: 0)
+            # Preserve the already-consumed create/start/inspect and the next
+            # resolver's actual recover/inspect. Only append the native wait.
+            provider.scripted_results = provider.scripted_results[0:5].push(wait)
+            adapter.provider = provider
+            local.container = SimpleContainerOwnerV2.Linux(scope, adapter)
+        case _: fail("terminal wait fixture requires its existing Linux adapter")
+    local
+
+pub fn host_terminal_wait_consumed_fixture_v2(owner: SimpleContainerOwnerV2) -> i64:
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, adapter): adapter.provider.scripted_cursor
+        case _: fail("terminal wait fixture requires Linux adapter")
+
+pub fn host_terminal_wait_phase_fixture_v2(owner: SimpleContainerOwnerV2) -> text:
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, adapter): adapter.provider.states[0].phase
+        case _: fail("terminal wait fixture requires Linux adapter")
+
+# Explicit fixture state, NOT a destroy command or cleanup receipt. No scripted
+# native command remains, so any attempted recover/inspect/wait cannot succeed.
+pub fn host_terminal_wait_unavailable_fixture_v2(local: HostLocalRootV1) -> HostLocalRootV1:
+    var changed = local
+    match changed.container:
+        case SimpleContainerOwnerV2.Linux(scope, original):
+            var adapter = original
+            var provider = adapter.provider
+            for i in 0..provider.states.len():
+                var state = provider.states[i]
+                state.phase = "destroyed"
+                provider.states[i] = state
+            provider.scripted_results = []
+            provider.scripted_cursor = 0
+            adapter.provider = provider
+            changed.container = SimpleContainerOwnerV2.Linux(scope, adapter)
+        case _: fail("terminal wait fixture requires Linux adapter")
+    changed

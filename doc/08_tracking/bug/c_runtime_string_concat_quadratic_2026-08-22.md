@@ -8,7 +8,7 @@ evidence found in the body. This is bookkeeping, not verification.
 **Area:** `src/runtime/runtime_native.c:2794-2830` (`rt_string_concat`); pure
 tree-walk `src/compiler/10.frontend/core/interpreter/ops.spl:49` (delegates to
 host `+`)
-**Status:** OPEN (filed from the pure-lane audit of the seed's 2026-08-22
+**Status:** SUPERSEDED (filed from the pure-lane audit of the seed's 2026-08-22
 memory fixes; not fixed here because the sound fix changes the `RtCoreString`
 ABI)
 **Seed counterpart:** `Arc::try_unwrap` in-place append for `s = s + x` /
@@ -156,3 +156,155 @@ ownership proof is an aliasing bug, which is strictly worse than quadratic.
 No regression gate was added, because no fix landed — a gate here would pin
 nothing.
 
+## 2026-11-09 re-verification on `origin/release/1.0.0` 7f5215f074f (still OPEN, no runtime patch)
+
+Third-lane re-measurement, same interposition method as 2026-08-24, against
+`runtime_native.c` compiled FRESH from `origin/release/1.0.0` (`gcc -O2`,
+aarch64, probe links the real `rt_string_concat`; scratch tool, not committed):
+
+| N single-char appends | wall | malloc'd bytes | mallocs |
+|---|---|---|---|
+| 50,000 | 0.394 s | 1,250,875,000 | 50,000 |
+| 100,000 | 1.469 s | 5,001,750,000 | 100,000 |
+
+2x N → 3.73x wall and exactly 4.00x malloc'd bytes: still quadratic, byte
+counts still match `sum(sizeof(RtCoreString)+len+1)` exactly (one fresh
+`malloc` + two `memcpy` per call, no capacity). The ownership contract was
+also re-verified empirically this run: after `s = s + "b"`, a second holder
+`val t = s` still observes the OLD bytes (`t` == "a"), so any in-place append
+would be a live aliasing bug, exactly as the 2026-08-22/24 design stops
+concluded. The `reserved` word remains fully occupied
+(`SHARED|TRANSIENT|SESSION|ASCII` = 1|2|4|8), so the stale option-1 capacity
+encoding has even less room than before.
+
+Call-site audit at this commit: `rt_string_concat` has exactly four inbound
+sites — `rt_any_add`, `rt_tagged_add`, `rt_push` (`+=` receiver), and the
+definition itself. There is **no runtime-internal concat-in-a-loop site**, so
+the "switch internal loop sites onto `RtStringBuilder`" fallback fixes nothing
+either; the builder stays reachable only from `rt_to_string` formatting and
+`std.common.string_builder`.
+
+**Conclusion:** a correct fix remains a compiler/MIR lowering feature (option 1
+with a last-use/escape check emitting `rt_string_append_owned`, or option 2
+builder-loop lowering), not a runtime bug fix. Per this lane's mandate, no
+risky runtime hack was landed. Side observation (unrelated, not fixed here):
+`scripts/check/check-runtime-concat-nul.shs` does not actually run at this
+commit — its compile step fails at link (`undefined symbol: spl_panic`,
+referenced from `rt_core_concat_bytes_v1`; `spl_panic` lives in `runtime.c`,
+which the script does not link). The failure IS fail-closed (direct
+`sh scripts/check/check-runtime-concat-nul.shs` exits 1, measured 2026-11-09),
+so the check is RED rather than silently green — but as wired it tests
+nothing until the link line gains `runtime.c` or a stub.
+
+
+## 2026-11-07 — owner decision: diagnose + builder (part A+B landed, C pending)
+
+- **Builder that already exists (A):** `std.common.string_builder`
+  (`src/lib/common/string_builder.spl`): `StringBuilder` (parts array,
+  `push`/`push_line`/`to_text`/`build`), free constructors `string_builder()` /
+  `string_builder_from(s)`, and `RtStringBuilder` backed by the runtime
+  `rt_string_builder_new/push/len/finish/free` externs
+  (`src/compiler_rust/runtime/src/value/string_builder.rs`, `src/runtime/runtime.h`).
+- **Diagnostic (B):** lint `COLL006` (`src/compiler/35.semantics/lint/collection_patterns.spl`)
+  fires on `s = s + x`, `s = x + s` and `s += x` inside a loop when `s` is plain
+  text. Severity is `WARN`, escalated to `ERROR` under the robust/critical/verified
+  safety profiles (`coll006_severity_for_profile`, same rung as
+  `E-MIR-EMPTY-ARRAY-ELEM`); `simple lint` prints `error[COLL006]` then. It never
+  fires on a builder/buffer target (explicit non-text type or a builder/buffer
+  constructor initializer). Fixed a false negative on the way: statement-level
+  `s = s + x` (STMT_ASSIGN stores target/value separately) never matched.
+  Specs: `test/01_unit/app/lint_spec.spl` "COLL006 scope and robust escalation".
+- **Optimization (C):** implemented in `src/compiler/60.mir_opt/mir_opt/string_builder_opt.spl`
+  (it replaces the earlier dead stub). The pass matches the lowered pair `tmp = rt_strcat_tagged(s, x); s = tmp`,
+  which is what both `s = s + x` and `s += x` lower to (`lower_compound_combine`). It rewrites that pair to
+  `sb = rt_string_builder_new(); push(sb, s)` in the preheader, `push(sb, x)` in the loop and
+  `s = rt_string_builder_finish(sb)` at every exit. It applies only when all of these hold:
+  `s` is a str-typed local referenced in the loop only by the concat pair; the temp is private;
+  there is a dedicated preheader; the exits have only loop predecessors; and no
+  return/throw/call-terminator leaves the loop. Unknown instruction kinds count as uses.
+  The pass is **opt-in** (`SIMPLE_MIR_STRING_BUILDER_OPT=1`) until native verification.
+  Specs: `test/01_unit/compiler/60.mir_opt/string_builder_opt_spec.spl` (MIR shape, 10 cases) and
+  `string_builder_append_behavior_spec.spl` (equality with the concat loop, and builder scaling
+  at N=10k/40k/160k measured 110.9 ms / 399 ms / 1,798 ms on the seed interpreter, i.e. linear).
+  Status: **fix-implemented-verification-pending**. Still to do: a native-lane run with the opt-in flag,
+  then default-on.
+
+## 2026-11-10 status — P3 runtime-lane triage (worktree simple-p3-rt-20261110)
+
+**Verdict: SUPERSEDED for the `src/runtime` lane — the runtime side is a
+recorded, thrice-confirmed design stop, and the owner fix lives compiler-side.**
+The 2026-08-22 / 2026-08-24 / 2026-11-09 design stops (the last including the
+empirical aliasing proof that after `s = s + "b"` a second holder `val t = s`
+still observes the old bytes) stand: any runtime-only in-place append is a live
+aliasing bug, strictly worse than quadratic. Verified present at base
+1504212d788b: the owner fix is the opt-in MIR string-builder optimization
+(`src/compiler/60.mir_opt/mir_opt/string_builder_opt.spl`, gated on
+`SIMPLE_MIR_STRING_BUILDER_OPT=1` pending native verification), landed
+2026-11-07 per the entry above. `src/runtime` intentionally unchanged.
+
+Side observation (`scripts/check/check-runtime-concat-nul.shs` "tests
+nothing"): **already fixed for the Linux lane** by `cc77b18719a6` (2026-11-09,
+sound-verdict-oracle pass — the probe now owns a `spl_panic` stub and the
+script is verdict-conforming). On this Windows host the check is RED at the
+link step (fail-closed, verdict-conforming, but still tests nothing here).
+This session attempted a Windows-lane harness repair and stopped per budget
+after 3 of 6 cycles; both files were reverted to origin, byte-identical:
+
+1. `-ldl` is passed unconditionally → `lld: unable to find library -ldl`
+   (no libdl on UCRT; also broken on Darwin).
+2. With `-ldl` made Linux-only: `lld` then reports 19 undefined symbols —
+   on PE/COFF, `lld-link --gc-sections` keeps every defined symbol as a gc
+   root, so `runtime_native.c`'s full graph must resolve (the only
+   constructor is the `_WIN32`-gated binary-stdio ctor at
+   `runtime_native.c:4006`, so this is not constructor-rooted; it is the
+   COFF exported-symbol root rule). Missing: `spl_print`/`spl_println`/
+   `spl_str_*`/`spl_strdup` family, `spl_f64_to_bits`, `rt_simd_has_*`,
+   `rt_getcwd`, `rt_sleep_ms_native`, `rt_text_slice_audit_*`,
+   `WinHttpCrackUrl`.
+3. Linking the designed core-C bridge set (`runtime_legacy_core.c`,
+   `runtime_simd_utf8.c`, `runtime_simd_dispatch.c` + `-lwinhttp`, mirroring
+   the capsule composition) reduced failures to a single duplicate
+   `spl_panic` (probe stub vs `runtime_legacy_core.c:471`) — but the closure
+   then grew again (`WSAPoll`/`accept`/`bind` Winsock family via `-lws2_32`,
+   `rt_process_run_*`, `rt_open_fd` from `runtime_process.c`). A complete
+   fix needs the capsule-grade provider closure (≈19 sources) plus
+   cross-platform verification this host cannot run; landing it unverified
+   would risk the Linux lane the previous fix already proved.
+
+Follow-up for the owning lane: either run the capsule-grade closure on
+Linux/Darwin CI, or scope the probe's runtime surface (compile
+`runtime_native.c` with a `-ffunction-sections` + hidden-symbol COFF link).
+Labels: windows-lane-compile attempt; host-limited completion.
+
+## 2026-11-11 status — P3 rt2 lane triage (worktree simple-p3-rt2-20261111)
+
+**Verdict: SUPERSEDED-by-prior-lane** — spot-check corroborates the
+2026-11-10 p3-rt addendum: the runtime-side thrice-confirmed design stop
+stands (any runtime-only in-place append is a live aliasing bug, strictly
+worse than quadratic), and the owner fix lives compiler-side. No deep
+triage redone.
+
+Spot-check at this lane's base (790b54f7c4fc):
+
+- `src/compiler/60.mir_opt/mir_opt/string_builder_opt.spl` present, still
+  opt-in (`SIMPLE_MIR_STRING_BUILDER_OPT` gate at :351, "until verified on
+  native" comment at :30); `COLL006` lint owner
+  (`src/compiler/35.semantics/lint/collection_patterns.spl`) and both
+  pinning specs (`string_builder_opt_spec.spl`,
+  `string_builder_append_behavior_spec.spl`) in tree.
+- `src/runtime/runtime_native.c` `rt_string_concat` intentionally untouched
+  (runtime owns no fix here, by recorded decision).
+- seed-smoke (refreshed seed 0791c2b7f4a7): `bin/simple.exe test
+  test/01_unit/compiler/60.mir_opt/string_builder_append_behavior_spec.spl
+  --mode=interpreter --no-cache` → 3 total, 3 passed, 0 failed (~10 s) —
+  builder/concat behavioral equality and linear scaling hold on the seed.
+
+Carried side observation (from prior addendum, out of scope here):
+`scripts/check/check-runtime-concat-nul.shs` is fail-closed RED on this
+Windows host (link step: PE/COFF gc-root rule pulls the full
+`runtime_native.c` closure); a capsule-grade provider-closure repair or a
+scoped-probe harness is left for the owning lane. No change made.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; defect is SUPERSEDED per the record header
+(purelane audit). Disposition accepted as-recorded.

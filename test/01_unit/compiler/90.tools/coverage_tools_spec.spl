@@ -1,0 +1,83 @@
+# @cover src/compiler/90.tools/coverage.spl 80%
+# @req REQ-TOOLS-COVERAGE-001
+"""
+## Compiler Coverage Collector & Stats Specification
+
+Covers `CoverageStats` ratio calculation (including zero-denominator guards)
+and `CoverageCollector` line deduplication, call-frequency counting, file
+enumeration, clear semantics, and SDN export in `compiler.tools.coverage`.
+"""
+
+use std.spec.{describe, it, expect, step}
+use compiler.tools.coverage.{CoverageStats, CoverageCollector}
+
+describe "CoverageStats coverage ratios":
+    it "returns zero rates when totals are empty":
+        step("Verify CoverageStats.empty divides safely at zero totals")
+        val empty = CoverageStats.empty()
+        expect(empty.lines_hit).to_equal(0)
+        expect(empty.line_coverage()).to_equal(0.0)
+        expect(empty.branch_coverage()).to_equal(0.0)
+        expect(empty.function_coverage()).to_equal(0.0)
+
+    it "computes line, branch, and function coverage ratios accurately":
+        step("Construct populated CoverageStats and check fractional ratios")
+        val stats = CoverageStats(
+            lines_hit: 3, lines_total: 4,
+            branches_hit: 1, branches_total: 2,
+            functions_hit: 2, functions_total: 8
+        )
+        expect(stats.line_coverage()).to_equal(0.75)
+        expect(stats.branch_coverage()).to_equal(0.5)
+        expect(stats.function_coverage()).to_equal(0.25)
+
+describe "CoverageCollector tracking and serialization":
+    it "deduplicates repeated line hits per file and aggregates stats":
+        step("Record duplicate and distinct line hits across two source files")
+        var cov = CoverageCollector.create()
+        cov.record_line("src/a.spl", 10)
+        cov.record_line("src/a.spl", 10)
+        cov.record_line("src/a.spl", 20)
+        cov.record_line("src/b.spl", 5)
+
+        val files = cov.executed_files()
+        expect(files.len()).to_equal(2)
+        expect(cov.stats().lines_hit).to_equal(3)
+        expect(cov.stats().lines_total).to_equal(3)
+
+    it "counts function call frequencies and checks execution predicate":
+        step("Record single and repeated function invocations")
+        var cov = CoverageCollector.create()
+        expect(cov.was_function_called("parse_mod")).to_be(false)
+        cov.record_function_call("parse_mod")
+        cov.record_function_call("parse_mod")
+        cov.record_function_call("lower_hir")
+
+        expect(cov.was_function_called("parse_mod")).to_be(true)
+        expect(cov.was_function_called("lower_hir")).to_be(true)
+        expect(cov.stats().functions_hit).to_equal(2)
+        expect(cov.stats().functions_total).to_equal(2)
+
+    it "resets all line and call records cleanly on clear":
+        step("Populate collector then clear and verify empty state")
+        var cov = CoverageCollector.create()
+        cov.record_line("src/c.spl", 42)
+        cov.record_function_call("emit")
+        cov.clear()
+
+        expect(cov.executed_files().len()).to_equal(0)
+        expect(cov.was_function_called("emit")).to_be(false)
+        expect(cov.stats().lines_hit).to_equal(0)
+        expect(cov.stats().functions_total).to_equal(0)
+
+    it "formats recorded coverage hits as SDN text":
+        step("Serialize line and function hits via to_sdn")
+        var cov = CoverageCollector.create()
+        cov.record_line("src/mod.spl", 1)
+        cov.record_line("src/mod.spl", 2)
+        cov.record_function_call("check_fn")
+
+        val sdn = cov.to_sdn()
+        expect(sdn).to_start_with("coverage:")
+        expect(sdn).to_contain("src/mod.spl: 2 lines hit")
+        expect(sdn).to_contain("check_fn: 1 calls")

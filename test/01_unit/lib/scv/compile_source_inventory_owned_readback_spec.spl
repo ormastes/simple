@@ -1,0 +1,81 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory.*
+use std.nogc_sync_mut.io_runtime.{dir_create, dir_remove, file_write}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end}
+
+extern fn rt_getpid() -> i64
+
+fn owned_readback_event() -> CompileSourceEventV1:
+    compile_source_inventory_git_event_v1("create", "src/owned_readback.spl", "fn answer() -> i64: 42")
+
+describe "same-publication inventory owner readback":
+    it "returns the published owner with all entry facets and generation intact":
+        val root = "build/test-artifacts/scv-owned-readback-{rt_getpid()}/build/scv"
+        dir_remove(root, true)
+        val event = owned_readback_event()
+        val accepted = compile_source_inventory_apply_git_events_v1(root, [event])
+        val decoded = compile_source_inventory_read_current_v1(root)
+        dir_remove(root, true)
+        expect(accepted.valid).to_equal(true)
+        expect(decoded.valid).to_equal(true)
+        expect(accepted.digest).to_equal(decoded.digest)
+        expect(accepted.inventory!.generation).to_equal(1)
+        expect(accepted.inventory!.entries.len()).to_equal(1)
+        val row = accepted.inventory!.entries[0]
+        expect(row.source_identity).to_equal(event.source_identity)
+        expect(row.content_digest).to_equal(event.content_digest)
+        expect(row.semantic_digest).to_equal(event.semantic_digest)
+        expect(row.export_digest).to_equal(event.export_digest)
+        expect(row.initializer_digest).to_equal(event.initializer_digest)
+        expect(row.provider_digest).to_equal(event.provider_digest)
+        expect(row.byte_count).to_equal(event.byte_count)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+
+    it "leaves an active or paused caller scratch scope under its caller's ownership":
+        for expected_state in [1, 2]:
+            val root = "build/test-artifacts/scv-owned-scope-{expected_state}-{rt_getpid()}/build/scv"
+            dir_remove(root, true)
+            val event = owned_readback_event()
+            val began = transient_scope_begin()
+            val paused = if expected_state == 2: transient_scope_pause() else: true
+            val result = compile_source_inventory_apply_git_events_v1(root, [event])
+            val valid = result.valid
+            val observed_state = transient_array_scope_state_v1()
+            val ended = transient_scope_end()
+            dir_remove(root, true)
+            expect(began).to_equal(true)
+            expect(paused).to_equal(true)
+            expect(valid).to_equal(true)
+            expect(observed_state).to_equal(expected_state)
+            expect(ended).to_equal(true)
+            expect(transient_array_scope_state_v1()).to_equal(0)
+
+    it "keeps the generation and digest when repeated content is unchanged":
+        val root = "build/test-artifacts/scv-owned-noop-{rt_getpid()}/build/scv"
+        dir_remove(root, true)
+        val event = owned_readback_event()
+        val first = compile_source_inventory_apply_git_events_v1(root, [event])
+        val second = compile_source_inventory_apply_git_events_v1(root, [event])
+        dir_remove(root, true)
+        expect(first.valid).to_equal(true)
+        expect(second.valid).to_equal(true)
+        expect(second.digest).to_equal(first.digest)
+        expect(second.inventory!.generation).to_equal(first.inventory!.generation)
+        expect(second.inventory!.entries[0].content_digest).to_equal(event.content_digest)
+
+    it "rejects corrupt existing generation bytes instead of trusting its local owner":
+        val root = "build/test-artifacts/scv-owned-corrupt-{rt_getpid()}/build/scv"
+        dir_remove(root, true)
+        val event = owned_readback_event()
+        val inventory = compile_source_inventory_initial_events_v1([event]).unwrap()
+        val digest = sha256_text(compile_source_inventory_encode_v1(inventory))
+        val made = dir_create("{root}/source-inventory/generations", true)
+        val written = file_write("{root}/source-inventory/generations/{digest}.inventory", "corrupt")
+        val rejected = compile_source_inventory_apply_git_events_v1(root, [event])
+        dir_remove(root, true)
+        expect(made).to_equal(true)
+        expect(written).to_equal(true)
+        expect(rejected.valid).to_equal(false)
+        expect(rejected.reason).to_contain("inventory-publication-readback-invalid:inventory-generation-invalid")

@@ -123,6 +123,7 @@ int64_t rt_free_deep(int64_t value) {
     return 0;
 }
 
+#define RT_OWNED_EXTERNAL_PIN 1 /* This harness stubs the executable pin. */
 #include "../runtime_process_owned.c"
 
 static SplArray* args_of(const int64_t* values, int64_t count) {

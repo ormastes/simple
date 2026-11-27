@@ -4,7 +4,6 @@ use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, H
 use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u16, volatile_read_u32, volatile_read_u64, volatile_write_u16, volatile_write_u32}
 use std.nogc_sync_mut.io.windows_console_codec.{WindowsConsoleDecoderV1, WindowsConsoleKeyV1, windows_console_decode_key_v1, windows_console_raw_input_mode_v1, windows_console_vt_output_mode_v1, windows_console_utf16_units_v1}
 use std.nogc_sync_mut.io.windows_clipboard_owner.{windows_clipboard_write_v1, windows_clipboard_cleanup_v1}
-use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 
 struct WindowsConsoleStateV1:
     heap: i64
@@ -34,14 +33,14 @@ fn _windows_console_live_v1(handle: i64) -> bool:
 # UTF16 output4096..135167. Owner serializes every access.
 @unsafe(reason: "copies validated Unicode into bounded retained UTF16 console storage", capabilities: [ffi, raw_ptr])
 fn _windows_console_write_v1(state: WindowsConsoleStateV1, value: text) -> bool:
-    if state.output == 0 or value.len() > 65536: return false
+    if state.output == 0 or value.byte_len() > 65536: return false
     val units = windows_console_utf16_units_v1(value)
     if units < 0: return false
     if units == 0: return true
     var ordinal = 0
     var byte_offset = 0
     var unit_offset = 0
-    while byte_offset < value.len():
+    while byte_offset < value.byte_len():
         val scalar = value.char_code_at(ordinal)
         if scalar < 65536:
             volatile_write_u16(state.arena + 4096 + unit_offset * 2, scalar)
@@ -164,17 +163,17 @@ pub fn windows_console_open_v1() -> Result<i64, text>:
         return Err(error)
     Ok(index + 1)
 
-fn _windows_console_take_v1(state: WindowsConsoleStateV1, max_bytes: i64) -> (WindowsConsoleStateV1, Result<text, text>):
+fn _windows_console_take_v1(state: WindowsConsoleStateV1, max_bytes: i64) -> (WindowsConsoleStateV1, Result<[u8], text>):
     var next = state
-    if next.keys.len() == 0: return (next, Ok(""))
+    if next.keys.len() == 0: return (next, Ok([]))
     var output: [u8] = [0u8; max_bytes]
     var length = 0
     var consumed = 0
     for index in 0..next.keys.len():
         var key = next.keys[index]
-        while key.repeat > 0 and length + key.value.len() <= max_bytes:
+        while key.repeat > 0 and length + key.value.byte_len() <= max_bytes:
             for offset in 0..key.value.len(): output[length + offset] = key.value.byte_at(offset) as u8
-            length = length + key.value.len()
+            length = length + key.value.byte_len()
             key.repeat = key.repeat - 1
         next.keys[index] = key
         if key.repeat > 0: break
@@ -185,10 +184,11 @@ fn _windows_console_take_v1(state: WindowsConsoleStateV1, max_bytes: i64) -> (Wi
         next.keys = retained
     var complete: [u8] = [0u8; length]
     for index in 0..length: complete[index] = output[index]
-    (next, validated_utf8_bytes_to_text_linear(complete))
+    # Whole key values only, so a bounded read never splits a scalar.
+    (next, Ok(complete))
 
 @unsafe(reason: "reads only already counted records using the single exclusive console consumer", capabilities: [ffi, raw_ptr])
-pub fn windows_console_read_v1(handle: i64, max_bytes: i64) -> Result<text, text>:
+pub fn windows_console_read_v1(handle: i64, max_bytes: i64) -> Result<[u8], text>:
     if not _windows_console_live_v1(handle): return Err("invalid or closed console lease")
     if max_bytes <= 0 or max_bytes > 65536: return Err("console read bound must be 1..65536 bytes")
     var state = _windows_console_slots_v1[handle - 1]
@@ -228,7 +228,7 @@ pub fn windows_console_size_v1(handle: i64) -> Result<[i64], text>:
 
 pub fn windows_console_write_v1(handle: i64, value: text) -> Result<bool, text>:
     if not _windows_console_live_v1(handle): return Err("invalid or closed console lease")
-    if value.len() > 65536: return Err("console write exceeds 65536-byte bound")
+    if value.byte_len() > 65536: return Err("console write exceeds 65536-byte bound")
     if not _windows_console_write_v1(_windows_console_slots_v1[handle - 1], value):
         return Err("console output failed; a prefix may have been written")
     Ok(true)

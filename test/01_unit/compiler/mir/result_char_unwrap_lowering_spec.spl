@@ -1,0 +1,20 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+# Bug: BUG-NATIVE-RESULT-CHAR-UNWRAP-20261017
+# Native `Result<char, text>.unwrap()` hit the fatal
+# "unsupported Result unwrap payload type" because lower_result_unwrap_core
+# had no Char arm. A char payload is a raw scalar word (enum_payload_value's
+# default arm passes it through, same as the Ok/Err match binding), so the
+# arm types the result as MirTypeKind.Char. Structural: MIR lowering is only
+# reachable from a built compiler, not from the seed spec runner.
+
+describe "MIR Result<char, E>.unwrap lowering":
+    it "lower_result_unwrap_core admits a Char payload":
+        val src = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl") ?? ""
+        val core = src.find("me lower_result_unwrap_core(") ?? -1
+        expect(core >= 0).to_equal(true)
+        val body = src[core:core + 9000]
+        expect(body).to_contain("case HirTypeKind.Char:")
+        expect(body).to_contain("result_type = MirType(kind: MirTypeKind.Char)")

@@ -5,6 +5,13 @@ Use this guide when writing SSpec scenario manuals whose generated
 scenarios are executable `.spl` specs. SPipe is the related runner/docgen
 process around those specs, not a separate `.spipe` scenario format.
 
+For standards/PDF-derived scenarios, follow
+[Specification sources to executed evidence](sspec_typed_evidence.md#specification-sources-to-executed-evidence):
+pin the source revision, preserve clause/page and oracle provenance, trace
+requirements into actual production API assertions, and distinguish authored
+source, observed RED/GREEN, measured coverage and generated documentation.
+An authored manual or successful docgen run does not establish scenario execution.
+
 ## Principle
 
 Executable tests are the source of truth, but the generated document is a
@@ -17,7 +24,11 @@ Use `step("...")` for the manual action text. Keep reusable setup in hidden
 inline scenarios and include it into the visible scenario where the reader
 needs to see it:
 
-```simple
+The following is a shape sketch, not an executable acceptance test. Bind its
+session/actions and `actual_panel_title` to real application state before use;
+unimplemented helpers must fail explicitly, never silently succeed.
+
+```text
 use std.spec.*
 
 describe "Dashboard actions":
@@ -29,7 +40,7 @@ describe "Dashboard actions":
     it "operator reviews dashboard actions":
         # @include("operator has an authenticated session")
         step("Open the actions panel")
-        expect("actions").to_equal("actions")
+        expect(actual_panel_title).to_equal("Actions")
 ```
 
 Generated manuals should show this shape first:
@@ -40,7 +51,7 @@ Generated manuals should show this shape first:
 1. Open the sign-in page
 2. Submit valid credentials
 3. Open the actions panel
-   - Expected: "actions" equals `actions`
+   - Expected: the observed panel title equals `Actions`
 
 <details>
 <summary>Executable SSpec</summary>
@@ -49,7 +60,7 @@ Generated manuals should show this shape first:
 step("Open the sign-in page")
 step("Submit valid credentials")
 step("Open the actions panel")
-expect("actions").to_equal("actions")
+expect(actual_panel_title).to_equal("Actions")
 ```
 </details>
 ````

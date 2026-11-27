@@ -1,0 +1,102 @@
+"""
+## Purpose and audience
+Purpose: pin where text FOLLOWING an inline element lands on the same line,
+against Chrome 159. A mid-line `#text` run that starts with a collapsible
+space (` tail `, ` c `) had that space charged twice: once to the inline pen
+before the run and again inside the run's box width, so every inline item
+after it sat ~4-5 px late (`A <b>B</b> c <b>D</b>`: `D` at 49, Chrome 44).
+A run whose box also held an edge space (`Lead `) dropped the exact pen
+error, so the next run lost its sub-pixel origin too.
+Audience: browser-engine inline layout maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless, `--hide-scrollbars
+--force-device-scale-factor=1 --window-size=400,300`, host default
+sans-serif 16px; band 4 at 13.3333px). Five 300 px blocks, line-height
+20 px, one line each. Text node rects (`Range.getBoundingClientRect`):
+
+| band | markup | rects of the runs after the elements |
+|------|--------|--------------------------------------|
+| 0 | `A <b>B</b> c <b>D</b> e <i>F</i> g.` | ` c ` 25.797..42.688, ` e ` 54.250..72.047, ` g.` 81.828..99.625 |
+| 1 | `Lead <span>span</span> tail <b>bold</b> end.` | ` tail ` 74.750..104.094, ` end.` 137.859..173.453 |
+| 2 | `Lead <b>bold</b> tail text.` | ` tail text.` 73.813..133.391 |
+| 3 | `Some <a>link</a> and <em>emph</em> done.` | |
+| 4 | band 1 at 13.3333px | |
+
+`TP_CHROME` holds, per band, (probe x, first ink column at or after it)
+pairs and the line's last ink column, read from the Chrome screenshot
+(ink = every channel < 160). A probe sits in the gap before a word that
+follows an element-then-run pair.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-INLINE-TAIL-PEN-001 -- a mid-line text run's lead space is charged to the pen once; text and elements after it land where Chrome 159 puts them.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_resolved_engine2d_backend}
+
+val TP_W: i32 = 400
+val TP_H: i32 = 300
+val TP_PAGE: text = "<!DOCTYPE html><html><body style=\"margin:0;background:#fff;color:#000;font:16px sans-serif\"><div style=\"width:300px;line-height:20px\">A <b>B</b> c <b>D</b> e <i>F</i> g.</div><div style=\"width:300px;line-height:20px\">Lead <span>span</span> tail <b>bold</b> end.</div><div style=\"width:300px;line-height:20px\">Lead <b>bold</b> tail text.</div><div style=\"width:300px;line-height:20px\">Some <a>link</a> and <em>emph</em> done.</div><div style=\"width:300px;line-height:20px;font-size:13.3333px\">Lead <span>span</span> tail <b>bold</b> end.</div></body></html>"
+# Per band: probe0, ink0, probe1, ink1 (-1, -1 = none), line ink end.
+val TP_CHROME: [i32] = [
+    38, 44, 84, 87, 97,
+    100, 105, 138, 143, 171,
+    74, 79, -1, -1, 131,
+    100, 106, 146, 151, 188,
+    84, 88, 115, 119, 142
+]
+
+fn tp_dark_col(px: [u32], x: i32, y0: i32) -> bool:
+    var y = y0
+    while y < y0 + 20:
+        val p = px[y * TP_W + x]
+        if ((p >> 16) & 255u32) < 160u32 and ((p >> 8) & 255u32) < 160u32 and (p & 255u32) < 160u32:
+            return true
+        y = y + 1
+    false
+
+fn tp_first_ink_from(px: [u32], x0: i32, y0: i32) -> i32:
+    var x = x0
+    while x < TP_W:
+        if tp_dark_col(px, x, y0):
+            return x
+        x = x + 1
+    -1
+
+fn tp_last_ink(px: [u32], y0: i32) -> i32:
+    var x = TP_W - 1
+    while x >= 0:
+        if tp_dark_col(px, x, y0):
+            return x
+        x = x - 1
+    -1
+
+fn tp_check(want: i32, got: i32, label: text) -> i32:
+    val d = got - want
+    if d > 1 or d < -1:
+        print "{label}: {got}, Chrome {want}"
+        return 1
+    0
+
+fn tp_mismatches(px: [u32]) -> i32:
+    if px.len() != TP_W * TP_H:
+        return 99
+    var bad = 0
+    var band = 0
+    while band * 5 < TP_CHROME.len():
+        val y0 = band * 20
+        var k = 0
+        while k < 2:
+            val probe = TP_CHROME[band * 5 + k * 2]
+            if probe >= 0:
+                bad = bad + tp_check(TP_CHROME[band * 5 + k * 2 + 1], tp_first_ink_from(px, probe, y0), "band {band} ink from {probe}")
+            k = k + 1
+        bad = bad + tp_check(TP_CHROME[band * 5 + 4], tp_last_ink(px, y0), "band {band} line end")
+        band = band + 1
+    bad
+
+describe "text after an inline element lands like Chrome 159":
+    it "AC-1: a mid-line run's lead space moves the pen once (cpu_simd)":
+        step("runs with a leading space after b / span / i / a / em, at 16px and 13.3333px")
+        expect(tp_mismatches(simple_web_render_html_to_pixels_with_resolved_engine2d_backend(TP_PAGE, TP_W, TP_H, "cpu_simd"))).to_equal(0)

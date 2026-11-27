@@ -1,0 +1,167 @@
+# @cover src/app/slang_server/main.spl 80%
+# @cover src/lib/gc_async_mut/slang/entrypoints/openai/api_server.spl 80%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# design: doc/00_llm_process/feature_expert/slang_local_inference/skill.md
+
+"""
+## Purpose and audience
+Purpose: prove that slang's OpenAI-compatible HTTP server, the surface the
+`slang` provider of caret talks to, serves real completions over a real socket.
+The spec starts `src/app/slang_server/main.spl` as a child process (through the
+process owner in `std.nogc_sync_mut.io.process_ops`), then speaks HTTP/1.1 to it
+over loopback from Simple code (`TcpStream`).
+Audience: maintainers of `src/app/slang_server/` and the OpenAI entrypoints.
+
+## What is checked
+- GET /v1/models returns an OpenAI list envelope containing the served model;
+- POST /v1/chat/completions returns an OpenAI chat.completion body with
+  non-empty assistant content and usage counts that are real (> 0);
+- a second request with a different prompt gets its own answer;
+- an unknown model returns an OpenAI-style error envelope (404, model_not_found);
+- the server child is terminated at the end of the spec.
+
+## Compatibility and limitations
+Runs only with SLANG_LIVE=1, SIMPLE_BINARY naming the runner, SLANG_MODEL_ROOT
+naming the model root and a built ggml shim (SLANG_GGML_LIB). The model id comes
+from CARET_SLANG_MODEL, default `Qwen2.5-1.5B-Instruct-Q4_K_M`. Windows only
+for the child launch (`process_spawn_redirected`). A missing prerequisite is a
+skip that names it. Server stdout/stderr go to build/probe/slang_http_server_live.*.
+"""
+
+use std.spec.{describe, it, expect, step, skip, fail}
+use std.io_runtime.{env_get, is_dir, file_exists, thread_sleep, time_now_monotonic_ms}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{json_int_field}
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.nogc_sync_mut.io.process_ops.{process_spawn_redirected, process_kill_tree, process_is_running}
+
+val DEFAULT_MODEL = "Qwen2.5-1.5B-Instruct-Q4_K_M"
+val PORT = 47721
+val ADDR = "127.0.0.1:47721"
+val OUT_PATH = "build/probe/slang_http_server_live.out"
+val ERR_PATH = "build/probe/slang_http_server_live.err"
+val START_TIMEOUT_S = 240
+
+struct Probe:
+    status: i64
+    body: text
+
+fn _model() -> text:
+    val m = env_get("CARET_SLANG_MODEL") ?? ""
+    if m == "":
+        return DEFAULT_MODEL
+    m
+
+fn _root() -> text:
+    env_get("SLANG_MODEL_ROOT") ?? ""
+
+fn _missing() -> text:
+    if (env_get("SLANG_LIVE") ?? "") != "1":
+        return "SLANG_LIVE=1 not set"
+    val bin = env_get("SIMPLE_BINARY") ?? ""
+    if bin == "" or not file_exists(bin):
+        return "SIMPLE_BINARY unset or missing: '" + bin + "'"
+    if _root() == "" or not is_dir(_root() + "/" + _model()):
+        return "model '" + _model() + "' not under SLANG_MODEL_ROOT '" + _root() + "'"
+    if (env_get("SLANG_GGML_LIB") ?? "") == "":
+        return "SLANG_GGML_LIB unset (build/sffi/slang_ggml.dll)"
+    ""
+
+# One HTTP/1.1 exchange over a fresh loopback connection; status -1 = transport failure.
+fn _http(method: text, path: text, body: text) -> Probe:
+    val conn = TcpStream.connect(ADDR)
+    if conn.is_err():
+        return Probe(status: -1, body: "connect failed")
+    var stream = conn.unwrap()
+    val req = method + " " + path + " HTTP/1.1\r\nHost: " + ADDR + "\r\nContent-Type: application/json\r\nContent-Length: " +
+        body.len().to_text() + "\r\nConnection: close\r\n\r\n" + body
+    if stream.write_text(req).is_err():
+        val _w = stream.close()
+        return Probe(status: -1, body: "write failed")
+    val read = stream.read_text()
+    val _c = stream.close()
+    if read.is_err():
+        return Probe(status: -1, body: "read failed")
+    val raw = read.unwrap()
+    val split = raw.index_of("\r\n\r\n")
+    if split < 0:
+        return Probe(status: -1, body: raw)
+    val first_sp = raw.index_of(" ")
+    var status: i64 = -1
+    if first_sp > 0:
+        status = raw.slice(first_sp + 1, first_sp + 4).to_i64()
+    Probe(status: status, body: raw.slice(split + 4, raw.len()))
+
+fn _chat(model: text, prompt: text) -> Probe:
+    val body = "{\"model\":\"" + model + "\",\"max_tokens\":24,\"messages\":[{\"role\":\"user\",\"content\":\"" + prompt + "\"}]}"
+    _http("POST", "/v1/chat/completions", body)
+
+# Poll GET /v1/models until the child answers, or it dies, or the deadline passes.
+fn _wait_ready(pid: i64) -> bool:
+    val deadline = time_now_monotonic_ms() + START_TIMEOUT_S * 1000
+    while time_now_monotonic_ms() < deadline:
+        if not process_is_running(pid):
+            return false
+        val p = _http("GET", "/v1/models", "")
+        if p.status == 200:
+            return true
+        thread_sleep(2000)
+    false
+
+describe "slang OpenAI server serves a real model over loopback HTTP":
+
+    it "lists the model, answers two different prompts, and rejects an unknown model":
+        val gate = _missing()
+        if gate != "":
+            skip("lists the model, answers two different prompts, and rejects an unknown model", gate)
+        else:
+            step("Start src/app/slang_server/main.spl as a child on " + ADDR)
+            val args = ["run", "src/app/slang_server/main.spl", "--", "--plaintext-development",
+                "--models=" + _root(), "--model=" + _model(), "--port=" + PORT.to_text(), "--n-ctx=2048"]
+            val t0 = time_now_monotonic_ms()
+            val pid = process_spawn_redirected(env_get("SIMPLE_BINARY") ?? "", args, OUT_PATH, ERR_PATH, 0, 1048576)
+            if pid < 0:
+                fail("could not start slang_server child (pid " + pid.to_text() + ")")
+            val ready = _wait_ready(pid)
+            print "SLANG_HTTP_LIVE ready=" + ready.to_text() + " startup_ms=" + (time_now_monotonic_ms() - t0).to_text()
+            if not ready:
+                val _k = process_kill_tree(pid)
+                fail("server not ready; see " + OUT_PATH + " and " + ERR_PATH)
+
+            step("GET /v1/models lists the served model")
+            val models = _http("GET", "/v1/models", "")
+            print "SLANG_HTTP_LIVE models_status=" + models.status.to_text()
+            expect(models.status).to_equal(200)
+            expect(models.body).to_contain("\"object\":\"list\"")
+            expect(models.body).to_contain(_model())
+
+            step("POST /v1/chat/completions returns an OpenAI chat.completion")
+            val t1 = time_now_monotonic_ms()
+            val a = _chat(_model(), "Say exactly: hello")
+            val t2 = time_now_monotonic_ms()
+            print "SLANG_HTTP_LIVE first_ms=" + (t2 - t1).to_text() + " status=" + a.status.to_text() + " body=" + a.body
+            expect(a.status).to_equal(200)
+            expect(a.body).to_contain("\"object\":\"chat.completion\"")
+            expect(a.body).to_contain("\"role\":\"assistant\"")
+            expect(json_int_field(a.body, "prompt_tokens", -1) > 0).to_equal(true)
+            expect(json_int_field(a.body, "completion_tokens", -1) > 0).to_equal(true)
+            expect(json_int_field(a.body, "total_tokens", -1) > 0).to_equal(true)
+            expect(a.body.contains("\"content\":\"\"")).to_equal(false)
+
+            step("A second request with a different prompt gets an independent answer")
+            val b = _chat(_model(), "What is the capital of France? Answer in one word.")
+            print "SLANG_HTTP_LIVE second_ms=" + (time_now_monotonic_ms() - t2).to_text() + " status=" + b.status.to_text() + " body=" + b.body
+            expect(b.status).to_equal(200)
+            expect(b.body).to_contain("Paris")
+            expect(b.body == a.body).to_equal(false)
+
+            step("An unknown model returns an OpenAI-style error")
+            val bad = _chat("no-such-model-9f2", "hello")
+            print "SLANG_HTTP_LIVE unknown_status=" + bad.status.to_text() + " body=" + bad.body
+            expect(bad.status).to_equal(404)
+            expect(bad.body).to_contain("\"error\"")
+            expect(bad.body).to_contain("model_not_found")
+
+            step("Shut the server child down")
+            val killed = process_kill_tree(pid)
+            expect(killed).to_equal(true)
+            expect(process_is_running(pid)).to_equal(false)

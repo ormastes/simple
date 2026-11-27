@@ -1,0 +1,54 @@
+# @req REQ-WJS-005 REQ-WJS-009
+# Native Windows fixture requirement: unnested process, one processor group.
+# NOT_RUN. This file exercises the owner, not source-text predicates.
+use std.spec.*
+use std.common.process.windows_job_stream_v2.*
+use std.nogc_sync_mut.io.windows_managed_stream_owner_v2.*
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+
+@when(os="windows"):
+use std.nogc_sync_mut.io.windows_pty_owner.windows_pty_cleanup_proof_v1
+describe "Windows managed RAW rejected launch retains native cleanup":
+    it "returns the exact cleanup lease for a missing pinned image and collects only confirmed absence":
+        step("Require the declared native host topology, then attempt a deliberately absent producer fixture")
+        val host = windows_managed_stream_host_observe_v2().unwrap()
+        val clock = time_sample_unix_micros_or_failure()
+        expect(clock > 0).to_equal(true)
+        val request = WindowsManagedStreamRequestV2(
+            program: "C:\\SimpleQualification\\absent-managed-stream-producer.exe",
+            producer_digest: "0000000000000000000000000000000000000000000000000000000000000000",
+            args: [], environment: [], directory: "C:\\SimpleQualification",
+            cpu_millis: host.cpu_quantum_millis, memory_bytes: 67108864,
+            timeout_ms: 10000, launch_expires_at_unix_ms: clock / 1000 + 10000,
+            mode: "raw", rows: 0, cols: 0)
+        val lease = match windows_managed_stream_admit_v2(request):
+            case WindowsManagedStreamAdmissionV2.CleanupRequired(value, reason):
+                expect(reason.len() > 0).to_equal(true)
+                value
+            case _: fail("expected retained failed native producer admission")
+        step("Observe no attempted child and reject a forged generation without consuming the real owner")
+        val observed = windows_managed_stream_poll_v2(lease).unwrap()
+        expect(observed.leader_reaped).to_equal(true)
+        expect(observed.job_empty).to_equal(true)
+        expect(observed.closed).to_equal(false)
+        val forged = WindowsManagedStreamLeaseV2(slot: lease.slot, generation: lease.generation + 1)
+        expect(windows_managed_stream_collect_v2(forged).is_err()).to_equal(true)
+        val collected = windows_managed_stream_collect_v2(lease).unwrap()
+        expect(collected.closed).to_equal(true)
+        expect(collected.pending_io).to_equal(false)
+        expect(windows_pty_cleanup_proof_v1(lease.slot)).to_equal(false)
+        expect(windows_managed_stream_write_some_bytes_v2(lease, [1u8]).is_err()).to_equal(true)
+
+    it "rejects interactive mode before obtaining any launch lease":
+        val host = windows_managed_stream_host_observe_v2().unwrap()
+        val request = WindowsManagedStreamRequestV2(program: "C:\\SimpleQualification\\fixture.exe",
+            producer_digest: "0000000000000000000000000000000000000000000000000000000000000000",
+            args: [], environment: [], directory: "C:\\SimpleQualification",
+            cpu_millis: host.cpu_quantum_millis, memory_bytes: 67108864,
+            timeout_ms: 10000, launch_expires_at_unix_ms: 1,
+            mode: "tty", rows: 24, cols: 80)
+        match windows_managed_stream_admit_v2(request):
+            case WindowsManagedStreamAdmissionV2.Rejected(reason):
+                expect(reason).to_equal("windows-managed-stream-raw-only-no-terminal")
+            case _: fail("RAW owner must not create an unbudgeted ConPTY")
+@end

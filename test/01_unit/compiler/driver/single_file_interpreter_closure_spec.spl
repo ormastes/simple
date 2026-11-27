@@ -1,0 +1,33 @@
+"""
+## Purpose and audience
+Purpose: Prevent single-file `--mode=interpreter` runs from falling back to whole-tree `_driver_collect_sources` even when `SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1` is active.
+Audience: Compiler driver engineers maintaining source pipeline loading and lazy interpreter execution.
+"""
+# @cover src/compiler/80.driver/driver_source_pipeline_loading.spl
+# @req REQ-COMPFIX-9B
+
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn read_driver_source(path: text) -> text:
+    match rt_file_read_text(path):
+        case Some(content): content
+        case None: ""
+
+describe "Single-file interpreter closure routing":
+    it "keeps single-file CompileMode.Interpret on explicit closure even with preclosed env set":
+        step("Verify driver_source_pipeline_loading.spl computes interpret_entry_closure and routes through _driver_collect_explicit_compiler_source")
+        val source = read_driver_source("src/compiler/80.driver/driver_source_pipeline_loading.spl")
+
+        expect(source).to_contain("val interpret_entry_closure = interpret_single_entry != \"\"")
+        expect(source).to_contain("explicit_entry_closure or interpret_entry_closure or")
+        expect(source).to_contain("input_path == interpret_single_entry or")
+        expect(source).to_contain("if explicit_entry_closure or interpret_entry_closure or native_group_inputs.len() > 0:")
+        expect(source).to_contain("_driver_collect_explicit_compiler_source(input_path)")
+
+    it "keeps bulk src/ directory scanning disabled in Interpret mode":
+        step("Verify Interpret mode never triggers whole-src bulk collection")
+        val source = read_driver_source("src/compiler/80.driver/driver_source_pipeline_loading.spl")
+
+        expect(source).to_contain("val needs_bulk_project_sources = compile_mode != CompileMode.Check and compile_mode != CompileMode.Interpret")

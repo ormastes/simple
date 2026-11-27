@@ -1,0 +1,259 @@
+# File-worker incremental rebuild (P-E), pure half (I/O in
+# native_file_worker_incremental_io_v1.spl): wires incremental_rebuild_plan_v1 and
+# incremental_link_decision_v1 into the file-worker pool
+# (native_build_main.spl run_file_worker_pool_v1).
+#
+# Coordinator, before the pool: read the previous run's manifest, recompute
+# each module's source digest and TLDR interface digest
+# (driver_native_source_interface_text), and run the planner. Modules the plan
+# does not recompile, whose cached object still hashes to the recorded digest,
+# are written to a reuse file (SIMPLE_FILE_WORKER_REUSE). A MIR child that
+# claims such a module publishes the cached object as its PASS instead of
+# lowering it, so only changed / interface-affected modules are rebuilt.
+#
+# Coordinator, after the pool: hash every ledger object against the manifest
+# and decide the link. Every object unchanged + cached output present => the
+# cached output is placed at -o and the link is skipped.
+#
+# Fails closed (rebuild, relink) on: no manifest, a module without a recorded
+# deps record (imports unknown), a non-file module key, a missing or altered
+# cached object, a missing cached output. Known gap: the coordinator has no AOP
+# directory facts, so the pointcut change list is empty here (the planner's
+# pointcut path is exercised by its own spec).
+#
+# Cache identity: the cache directory and the manifest header both carry the
+# producer (native_build_cache_scope_key: compiler/runtime/bundle/lane, plus a
+# digest of the native-build arguments: backend, opt level, target). Known
+# limitation: two CONCURRENT builds with the same producer and the same -o
+# share one directory and can race on obj/, pending and output.
+
+use compiler.driver.cache.incremental_rebuild_plan_v1.{IncrementalModuleV1, PointcutDirChangeV1,
+    IncrementalObjectV1, incremental_rebuild_plan_v1}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.macro_forward_candidate_contract_v1.{MacroForwardCandidateV1,
+    MACRO_FORWARD_CANDIDATE_MAX_HEX_BYTES_V1,
+    macro_forward_candidate_unknown_v1, macro_forward_candidate_digest_v1}
+
+pub const FILE_WORKER_INC_MANIFEST_MAX_BYTES_V2: i64 = 128 * 1024 * 1024
+pub const FILE_WORKER_INC_MANIFEST_MAX_MACRO_HEX_BYTES_V2: i64 = 64 * 1024 * 1024
+pub const FILE_WORKER_INC_MANIFEST_MAX_ROW_BYTES_V2: i64 = 20 * 1024 * 1024
+
+pub const FILE_WORKER_INC_DIR_ENV_V1: text = "SIMPLE_FILE_WORKER_INC_DIR"
+pub const FILE_WORKER_LINK_PLACED_ENV_V1: text = "SIMPLE_FILE_WORKER_LINK_PLACED"
+pub const FILE_WORKER_INC_PRODUCER_ENV_V1: text = "SIMPLE_FILE_WORKER_INC_PRODUCER"
+pub const FILE_WORKER_INC_MANIFEST_VERSION_V1: text = "file-worker-incremental-v1"
+pub const FILE_WORKER_INC_MANIFEST_VERSION_V2: text = "file-worker-incremental-v2"
+
+pub struct FileWorkerIncRowV1:
+    path: text
+    source_digest: text
+    iface_digest: text
+    imports_known: bool
+    imports: [text]
+    object_digest: text
+    cached_object: text     # "" = objectless module
+    functions: i64
+    statics: i64
+    capsule: text
+    macro_candidate: MacroForwardCandidateV1
+
+pub struct FileWorkerIncSelectionV1:
+    reuse: [FileWorkerIncRowV1]
+    rebuild: [text]
+
+# ---------------------------------------------------------------- manifest --
+
+fn _row_ok_v1(r: FileWorkerIncRowV1) -> bool:
+    if r.path == "" or r.path.contains("\t") or r.path.contains("\n"):
+        return false
+    for i in r.imports:
+        if i.contains(",") or i.contains("\t") or i.contains("\n"):
+            return false
+    not r.object_digest.contains("\t") and not r.object_digest.contains("\n") and
+        not r.cached_object.contains("\t") and not r.cached_object.contains("\n") and
+        not r.capsule.contains("\t") and not r.capsule.contains("\n") and
+        _macro_candidate_ok_v1(r.path, r.source_digest, r.macro_candidate)
+
+fn _hex_field_ok_v1(value: text) -> bool:
+    if value.len() % 2 != 0: return false
+    for ch in value.chars():
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn _macro_candidate_ok_v1(path: text, source_digest: text,
+        candidate: MacroForwardCandidateV1) -> bool:
+    if not candidate.known:
+        return not candidate.complete and candidate.source_digest == "" and candidate.definitions_hex == "" and
+            candidate.uses_hex == "" and candidate.digest == ""
+    candidate.source_digest != "" and candidate.source_digest == source_digest and
+        candidate.definitions_hex != "" and candidate.uses_hex != "" and
+        candidate.definitions_hex.len() + candidate.uses_hex.len() <= MACRO_FORWARD_CANDIDATE_MAX_HEX_BYTES_V1 and
+        _hex_field_ok_v1(candidate.definitions_hex) and _hex_field_ok_v1(candidate.uses_hex) and
+        candidate.digest == macro_forward_candidate_digest_v1(path, candidate.source_digest,
+            candidate.complete, candidate.definitions_hex, candidate.uses_hex)
+
+# Header line = version + "\t" + producer identity (compiler/runtime/lane cache
+# scope + native-build options). A manifest from another producer is foreign.
+pub fn file_worker_inc_manifest_encode_v1(rows: [FileWorkerIncRowV1], output_digest: text,
+        producer: text) -> text:
+    var parts: [text] = [FILE_WORKER_INC_MANIFEST_VERSION_V1 + "\t" + producer + "\n" + output_digest + "\n"]
+    for r in rows:
+        if not _row_ok_v1(r):
+            continue
+        val imports = if r.imports_known: "+" + r.imports.join(",") else: "?"
+        parts.push("{r.path}\t{r.source_digest}\t{r.iface_digest}\t{imports}\t{r.object_digest}\t{r.cached_object}\t{r.functions}\t{r.statics}\t{r.capsule}\n")
+    parts.join("")
+
+# V2 transports parser-produced macro tables as hex-framed candidates. Their
+# source binding is not a witness for the MIR object generation; prepare uses
+# them only to preserve explicit Unknown and to widen invalidation safely.
+pub fn file_worker_inc_manifest_encode_v2(rows: [FileWorkerIncRowV1], output_digest: text,
+        producer: text, selected_scope_digest: text, inventory_digest: text) -> text:
+    var parts: [text] = [FILE_WORKER_INC_MANIFEST_VERSION_V2 + "\t" + producer + "\n" +
+        output_digest + "\n" + selected_scope_digest + "\n" + inventory_digest + "\n{rows.len()}\n"]
+    var seen: Dict<text, bool> = {}
+    var macro_bytes = 0
+    for r in rows:
+        if not _row_ok_v1(r):
+            return ""
+        if seen.contains_key(r.path): return ""
+        seen[r.path] = true
+        val imports = if r.imports_known: "+" + r.imports.join(",") else: "?"
+        val candidate = r.macro_candidate
+        macro_bytes = macro_bytes + candidate.definitions_hex.len() + candidate.uses_hex.len()
+        if macro_bytes > FILE_WORKER_INC_MANIFEST_MAX_MACRO_HEX_BYTES_V2: return ""
+        val macro_known = if candidate.known: "1" else: "0"
+        val macro_complete = if candidate.complete: "1" else: "0"
+        parts.push("{r.path}\t{r.source_digest}\t{r.iface_digest}\t{imports}\t{r.object_digest}\t{r.cached_object}\t{r.functions}\t{r.statics}\t{r.capsule}\t{macro_known}\t{macro_complete}\t{candidate.source_digest}\t{candidate.definitions_hex}\t{candidate.uses_hex}\t{candidate.digest}\n")
+    val out = parts.join("")
+    if out.len() > FILE_WORKER_INC_MANIFEST_MAX_BYTES_V2: return ""
+    out
+
+# (rows, output_digest); a malformed manifest, or one written by a different
+# producer (or with an empty producer), yields no rows.
+pub fn file_worker_inc_manifest_parse_v1(content: text, producer: text) -> ([FileWorkerIncRowV1], text):
+    if producer == "" or content.len() > FILE_WORKER_INC_MANIFEST_MAX_BYTES_V2:
+        return ([], "")
+    val lines = content.split("\n")
+    var rows: [FileWorkerIncRowV1] = []
+    if lines.len() < 2:
+        return (rows, "")
+    val v1 = lines[0] == FILE_WORKER_INC_MANIFEST_VERSION_V1 + "\t" + producer
+    val v2 = lines[0] == FILE_WORKER_INC_MANIFEST_VERSION_V2 + "\t" + producer
+    if not v1 and not v2: return (rows, "")
+    if v2 and lines.len() < 5: return ([], "")
+    var i = 2
+    if v2: i = 5
+    var macro_bytes = 0
+    var seen_paths: Dict<text, bool> = {}
+    while i < lines.len():
+        val line = lines[i]
+        i = i + 1
+        if line == "":
+            continue
+        if v2 and line.len() > FILE_WORKER_INC_MANIFEST_MAX_ROW_BYTES_V2:
+            return ([], "")
+        val f = line.split("\t")
+        if (v1 and f.len() != 9) or (v2 and f.len() != 15):
+            return ([], "")
+        if v2 and ((f[9] != "0" and f[9] != "1") or (f[10] != "0" and f[10] != "1")):
+            return ([], "")
+        val known = f[3].starts_with("+")
+        var imports: [text] = []
+        if known and f[3].len() > 1:
+            for part in f[3].substring(1).split(","):
+                if part != "":
+                    imports = imports.push(part)
+        val macro_candidate = if v2:
+            MacroForwardCandidateV1(known: f[9] == "1", complete: f[10] == "1",
+                source_digest: f[11], definitions_hex: f[12], uses_hex: f[13], digest: f[14])
+        else: macro_forward_candidate_unknown_v1()
+        val row = FileWorkerIncRowV1(path: f[0], source_digest: f[1], iface_digest: f[2],
+            imports_known: known, imports: imports, object_digest: f[4], cached_object: f[5],
+            functions: f[6].to_i64() ?? 0, statics: f[7].to_i64() ?? 0, capsule: f[8],
+            macro_candidate: macro_candidate)
+        if not _row_ok_v1(row): return ([], "")
+        if seen_paths.contains_key(row.path): return ([], "")
+        seen_paths[row.path] = true
+        macro_bytes = macro_bytes + row.macro_candidate.definitions_hex.len() +
+            row.macro_candidate.uses_hex.len()
+        if v2 and macro_bytes > FILE_WORKER_INC_MANIFEST_MAX_MACRO_HEX_BYTES_V2: return ([], "")
+        rows = rows.push(row)
+    if v2:
+        val expected_rows = lines[4].to_i64() ?? -1
+        if expected_rows < 0 or expected_rows != rows.len(): return ([], "")
+    (rows, lines[1])
+
+pub fn file_worker_inc_manifest_selected_scope_digest_v2(content: text, producer: text) -> text:
+    if content.len() > FILE_WORKER_INC_MANIFEST_MAX_BYTES_V2: return ""
+    val lines = content.split("\n")
+    if producer == "" or lines.len() < 5 or
+            lines[0] != FILE_WORKER_INC_MANIFEST_VERSION_V2 + "\t" + producer:
+        return ""
+    lines[2]
+
+pub fn file_worker_inc_manifest_inventory_digest_v2(content: text, producer: text) -> text:
+    if content.len() > FILE_WORKER_INC_MANIFEST_MAX_BYTES_V2: return ""
+    val lines = content.split("\n")
+    if producer == "" or lines.len() < 5 or
+            lines[0] != FILE_WORKER_INC_MANIFEST_VERSION_V2 + "\t" + producer:
+        return ""
+    lines[3]
+
+# --------------------------------------------------------------- selection --
+
+# Pure core. `new_source` / `new_iface` map module path -> digest for the
+# current tree ("" or absent = unknown). Returns the rows whose cached object
+# may be reused and the paths the plan recompiles.
+pub fn file_worker_inc_select_v1(prev: [FileWorkerIncRowV1], new_source: Dict<text, text>,
+        new_iface: Dict<text, text>, pointcuts: [PointcutDirChangeV1]) -> FileWorkerIncSelectionV1:
+    var modules: [IncrementalModuleV1] = []
+    for r in prev:
+        val ns = if new_source.contains_key(r.path): new_source[r.path] else: ""
+        val ni = if new_iface.contains_key(r.path): new_iface[r.path] else: ""
+        # Unknown imports cannot prove interface stability: treat as new.
+        val old_source = if r.imports_known: r.source_digest else: ""
+        modules = modules.push(IncrementalModuleV1(path: r.path, old_source_digest: old_source,
+            new_source_digest: ns, imports: r.imports, old_iface_digest: r.iface_digest,
+            new_iface_digest: ni))
+    val plan = incremental_rebuild_plan_v1(modules, pointcuts)
+    var reuse: [FileWorkerIncRowV1] = []
+    for r in prev:
+        if not plan.recompile.contains(r.path):
+            reuse = reuse.push(r)
+    FileWorkerIncSelectionV1(reuse: reuse, rebuild: plan.recompile)
+
+# Link inputs for incremental_link_decision_v1: every current object against
+# its previous digest (absent = new), plus every previous module no longer in
+# the closure as removed (new digest ""), so a removal always relinks.
+pub fn file_worker_inc_link_objects_v1(prev: [FileWorkerIncRowV1],
+        current: [FileWorkerIncRowV1]) -> [IncrementalObjectV1]:
+    var old: Dict<text, text> = {}
+    for r in prev:
+        old[r.path] = r.object_digest
+    var seen: [text] = []
+    var out: [IncrementalObjectV1] = []
+    for c in current:
+        seen = seen.push(c.path)
+        val before = if old.contains_key(c.path): old[c.path] else: ""
+        out = out.push(IncrementalObjectV1(path: c.path, old_object_digest: before,
+            new_object_digest: c.object_digest))
+    for r in prev:
+        if not seen.contains(r.path):
+            out = out.push(IncrementalObjectV1(path: r.path, old_object_digest: r.object_digest,
+                new_object_digest: ""))
+    out
+
+pub fn file_worker_inc_receipt_line_v1(reused: i64, rebuilt: i64, relinked: bool) -> text:
+    val link = if relinked: "relinked" else: "reused"
+    "[file-workers] {reused} reused / {rebuilt} rebuilt / link={link}"
+
+export FileWorkerIncRowV1, FileWorkerIncSelectionV1
+export FILE_WORKER_INC_DIR_ENV_V1, FILE_WORKER_LINK_PLACED_ENV_V1, FILE_WORKER_INC_PRODUCER_ENV_V1, FILE_WORKER_INC_MANIFEST_VERSION_V1, FILE_WORKER_INC_MANIFEST_VERSION_V2
+export FILE_WORKER_INC_MANIFEST_MAX_BYTES_V2, FILE_WORKER_INC_MANIFEST_MAX_MACRO_HEX_BYTES_V2,
+    FILE_WORKER_INC_MANIFEST_MAX_ROW_BYTES_V2
+export file_worker_inc_manifest_encode_v1, file_worker_inc_manifest_encode_v2, file_worker_inc_manifest_parse_v1
+export file_worker_inc_manifest_selected_scope_digest_v2
+export file_worker_inc_manifest_inventory_digest_v2
+export file_worker_inc_select_v1, file_worker_inc_receipt_line_v1, file_worker_inc_link_objects_v1

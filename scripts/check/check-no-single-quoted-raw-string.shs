@@ -1,0 +1,210 @@
+#!/bin/sh
+# check-no-single-quoted-raw-string.shs — ratchet: no NEW single-quoted raw
+# strings ('...' holding 2+ Unicode scalars) in src/**/*.spl.
+#
+# WHY: ADR-005 (doc/04_architecture/adr/ADR-005-text-index-yields-char.md,
+# decision 2026-11-03) makes single quotes mean ONLY a `char` literal: exactly
+# one Unicode scalar (U+0000..U+10FFFF minus surrogates, 1-4 UTF-8 bytes) or one
+# escape ('\n', '\'', '\u{1F600}'). Raw text is r"..." / r"""...""". Until the
+# lexer switch lands (after the stage3 self-build passes) the tree still holds
+# thousands of legacy '...' raw strings, being rewritten in per-directory
+# batches; this guard stops NEW ones from appearing.
+#
+# STATUS: ADVISORY now (push_blocking=false in config/check/must_check_gates.sdn).
+# It becomes BLOCKING after the lexer switch lands, and a hard compile ERROR
+# once Windows, macOS and Linux all have a working self-hosted Simple binary
+# (the promotion trigger for every staged warning, see ADR-005).
+#
+# SCALARS, NOT BYTES: the body is decoded; every non-continuation UTF-8 byte
+# counts one scalar and each escape counts one. 'é' (U+00E9), '한', '😀' are
+# one char (allowed). Decomposed e + U+0301 and a ZWJ emoji sequence are 2+
+# scalars, so they are text and are flagged. Empty '' is not flagged.
+#
+# MODES (verdict is the last stdout line; exit 0 PASS / 1 FAIL / 2 ERROR):
+#   check-no-single-quoted-raw-string.shs [<BASE>..<NEW>]   delta (default
+#       origin/release/1.0.0..HEAD): for every src/**/*.spl added or modified
+#       in the range (committed blobs, not the working tree), the site count at
+#       NEW must not exceed the count at the merge-base. 0 in-scope files is
+#       an explicit PASS (stated in the verdict).
+#   check-no-single-quoted-raw-string.shs --tree [--root DIR]   whole-tree
+#       census compared against scripts/check/no_single_quoted_raw_string_baseline.txt
+#       (single integer; FAIL if the census exceeds it). 0 files scanned = ERROR.
+#   check-no-single-quoted-raw-string.shs --selftest           fixtures only.
+# The selftest is fatal and runs before every scan.
+#
+# LIMITS (text scanner, not the lexer): skips # comments, "..." (with
+# escapes), r"..." and """...""" (multi-line). It does NOT parse {expr}
+# inside "..." interpolation, so a '..' inside an interpolation hole is not
+# seen. A lone 'label with no closing quote on the line is ignored. A renamed
+# file counts as added (all its sites are "new"). vendor trees are excluded.
+set -u
+
+T=""
+cleanup() { [ -n "$T" ] && rm -rf "$T"; }
+trap cleanup EXIT INT TERM
+T=$(mktemp -d 2>/dev/null) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+
+cat > "$T/scan.awk" <<'EOA'
+BEGIN { for (i = 128; i < 192; i++) cont[sprintf("%c", i)] = 1; Q = sprintf("%c", 39); D = "\""; tri = 0 }
+FNR == 1 { tri = 0 }
+{
+  line = $0
+  if (!tri && index(line, Q) == 0 && index(line, D D D) == 0) next
+  n = length(line); i = 1
+  while (i <= n) {
+    c = substr(line, i, 1)
+    if (tri) { if (substr(line, i, 3) == D D D) { tri = 0; i += 3 } else i++; continue }
+    if (c == "#") break
+    if (c == D) {
+      if (substr(line, i, 3) == D D D) { tri = 1; i += 3; continue }
+      raw = (i > 1 && substr(line, i - 1, 1) == "r" && (i < 3 || substr(line, i - 2, 1) !~ /[A-Za-z0-9_]/))
+      i++
+      while (i <= n) {
+        d = substr(line, i, 1)
+        if (d == "\\" && !raw) { i += 2; continue }
+        if (d == D) break
+        i++
+      }
+      i++; continue
+    }
+    if (c == Q) {
+      j = i + 1; cnt = 0; closed = 0
+      while (j <= n) {
+        d = substr(line, j, 1)
+        if (d == "\\") {
+          cnt++; nx = substr(line, j + 1, 1)
+          if (nx == "u" && substr(line, j + 2, 1) == "{") { k = index(substr(line, j + 2), "}"); j += (k > 0 ? k + 2 : 2) }
+          else if (nx == "x") j += 4
+          else j += 2
+          continue
+        }
+        if (d == Q) { closed = 1; break }
+        if (!(d in cont)) cnt++
+        j++
+      }
+      if (closed) { if (cnt >= 2) print FILENAME ":" FNR ": " line; i = j + 1 } else i++
+      continue
+    }
+    i++
+  }
+}
+EOA
+
+# scan_file <file>: prints one line per site.
+scan_file() { LC_ALL=C awk -f "$T/scan.awk" "$1"; }
+count_file() { scan_file "$1" | wc -l | tr -d ' '; }
+
+in_scope() {
+    case "$1" in
+        src/compiler_rust/vendor/*|src/runtime/vendor/*|*/vendor/*) return 1 ;;
+        src/*.spl) return 0 ;;
+    esac
+    return 1
+}
+
+# run_delta <repo> <BASE..NEW>
+run_delta() {
+    _repo=$1; _rng=$2
+    _b=${_rng%%..*}; _n=${_rng#*..}
+    _mb=$(git -C "$_repo" merge-base "$_b" "$_n" 2>/dev/null) || { echo "ERROR — nothing was checked (cannot resolve $_rng)"; return 2; }
+    _ncommits=$(git -C "$_repo" rev-list --count "$_mb..$_n" 2>/dev/null || echo 0)
+    [ "$_ncommits" -gt 0 ] || { echo "ERROR — nothing was checked (range $_rng has 0 commits)"; return 2; }
+    _files=$(git -C "$_repo" diff --name-only --no-renames --diff-filter=AM "$_mb" "$_n" 2>/dev/null)
+    _nf=0; _bad=""; _newsites=0
+    for _f in $_files; do
+        in_scope "$_f" || continue
+        _nf=$((_nf + 1))
+        git -C "$_repo" show "$_n:$_f" > "$T/new.spl" 2>/dev/null || continue
+        git -C "$_repo" show "$_mb:$_f" > "$T/old.spl" 2>/dev/null || : > "$T/old.spl"
+        _cn=$(count_file "$T/new.spl"); _co=$(count_file "$T/old.spl")
+        if [ "$_cn" -gt "$_co" ]; then _bad="$_bad $_f($_co->$_cn)"; _newsites=$((_newsites + _cn - _co)); fi
+    done
+    if [ -n "$_bad" ]; then
+        echo "FAIL — $_nf file(s) checked in $_rng, $_newsites new single-quoted raw string(s) (use r\"...\"; single quotes are char-only, ADR-005):$_bad"
+        return 1
+    fi
+    echo "PASS — $_nf in-scope file(s) checked in $_rng, 0 new single-quoted raw strings"
+    return 0
+}
+
+run_tree() {
+    _root=$1; _base_file="$(dirname "$0")/no_single_quoted_raw_string_baseline.txt"
+    [ -d "$_root/src" ] || { echo "ERROR — nothing was checked (no src/ under $_root)"; return 2; }
+    _nf=0; _tot=0
+    find "$_root/src" -name '*.spl' -not -path '*/vendor/*' > "$T/all.txt"
+    _nf=$(wc -l < "$T/all.txt" | tr -d ' ')
+    : > "$T/hits.txt"
+    xargs -n 400 env LC_ALL=C awk -f "$T/scan.awk" < "$T/all.txt" >> "$T/hits.txt"
+    _tot=$(wc -l < "$T/hits.txt" | tr -d ' ')
+    [ "$_nf" -gt 0 ] || { echo "ERROR — nothing was checked (0 .spl files)"; return 2; }
+    [ -f "$_base_file" ] || { echo "ERROR — nothing was checked (baseline $_base_file missing)"; return 2; }
+    _bl=$(tr -d ' \r\n' < "$_base_file")
+    if [ "$_tot" -gt "$_bl" ]; then echo "FAIL — $_nf file(s) scanned, $_tot single-quoted raw string(s) exceeds baseline $_bl"; return 1; fi
+    echo "PASS — $_nf file(s) scanned, $_tot single-quoted raw string(s) (baseline $_bl)"
+    return 0
+}
+
+# Fixture content is written through printf with octal escapes so this file
+# stays free of tricky quoting.
+selftest() {
+    _d="$T/st"; mkdir -p "$_d"; _fail=0; _nfix=0
+    # expect <name> <expected-count> <printf-format>
+    expect() {
+        _nfix=$((_nfix + 1))
+        printf "$3" > "$_d/f.spl"
+        _got=$(count_file "$_d/f.spl")
+        if [ "$_got" != "$2" ]; then echo "selftest FAIL: $1 expected $2 got $_got" >&2; _fail=1; fi
+    }
+    # Q is the apostrophe, written as \047 in printf formats.
+    expect ascii-char 0 'val a = \047x\047\n'
+    expect 2-byte-char 0 'val a = \047\303\251\047\n'
+    expect 3-byte-char 0 'val a = \047\355\225\234\047\n'
+    expect 4-byte-char 0 'val a = \047\360\237\230\200\047\n'
+    expect escapes 0 'val a = [\047\\n\047, \047\\\047\047, \047\\u{1F600}\047, \047\\x41\047, \047\\\\\047]\n'
+    expect two-ascii 1 'val a = \047ab\047\n'
+    expect regex 1 'val a = \047[a-z]+\\d{2,3}\047\n'
+    expect decomposed-e 1 'val a = \047e\314\201\047\n'
+    expect zwj-emoji 1 'val a = \047\360\237\221\251\342\200\215\360\237\222\273\047\n'
+    expect inside-dq 0 'val a = "it\047s \047ab\047 here"\n'
+    expect comment 0 'val a = 1  # \047ab\047 and \047cd\047\n'
+    expect r-string 0 'val a = r"x \047ab\047 y"\n'
+    expect label 0 'break \047loop\n'
+    expect empty 0 'val a = \047\047\n'
+    expect triple-then-site 1 'val a = """\nhas \047ab\047 inside\n"""\nval b = \047cd\047\n'
+    # delta fixtures on a throwaway repo
+    _r="$T/repo"; mkdir -p "$_r/src/app"
+    ( cd "$_r" && git init -q . && git config user.email t@t && git config user.name t ) >/dev/null 2>&1
+    printf 'val a = \047ab\047\n' > "$_r/src/app/m.spl"
+    ( cd "$_r" && git add . && git commit -q -m base ) >/dev/null 2>&1 || { echo "selftest FAIL: fixture repo" >&2; _fail=1; }
+    _base=$(git -C "$_r" rev-parse HEAD 2>/dev/null)
+    printf 'val a = \047ab\047\nval b = \047cd\047\n' > "$_r/src/app/m.spl"
+    ( cd "$_r" && git commit -q -am more ) >/dev/null 2>&1
+    run_delta "$_r" "$_base..HEAD" >/dev/null 2>&1; _rc=$?
+    _nfix=$((_nfix + 1)); [ "$_rc" -eq 1 ] || { echo "selftest FAIL: delta add must FAIL (rc=$_rc)" >&2; _fail=1; }
+    printf 'val a = "ab"\nval b = \047c\047\n' > "$_r/src/app/m.spl"
+    ( cd "$_r" && git commit -q -am fewer ) >/dev/null 2>&1
+    run_delta "$_r" "$_base..HEAD" >/dev/null 2>&1; _rc=$?
+    _nfix=$((_nfix + 1)); [ "$_rc" -eq 0 ] || { echo "selftest FAIL: delta shrink must PASS (rc=$_rc)" >&2; _fail=1; }
+    run_delta "$_r" "HEAD..HEAD" >/dev/null 2>&1; _rc=$?
+    _nfix=$((_nfix + 1)); [ "$_rc" -eq 2 ] || { echo "selftest FAIL: empty range must ERROR (rc=$_rc)" >&2; _fail=1; }
+    [ "$_fail" -eq 0 ] || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+    SELFTEST_N=$_nfix
+}
+
+MODE=delta; RANGE="origin/release/1.0.0..HEAD"; ROOT=.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) MODE=selftest ;;
+        --tree) MODE=tree ;;
+        --root) shift; ROOT=${1:-.} ;;
+        *..*) RANGE=$1 ;;
+        *) echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
+    esac
+    shift
+done
+
+SELFTEST_N=0
+selftest
+[ "$MODE" = selftest ] && { echo "PASS — selftest: $SELFTEST_N fixture(s) checked"; exit 0; }
+if [ "$MODE" = tree ]; then run_tree "$ROOT"; exit $?; fi
+run_delta "$(pwd)" "$RANGE"; exit $?

@@ -15,6 +15,20 @@ use std.nogc_sync_mut.src.collections.adaptive_text_set.{
     adaptive_set_workload_profile_matches
 }
 
+# Typed-param identities (callable-return-loss workaround, same shape as
+# simple_ring.spl's _as_*_result_v1): the mono-specialized
+# `self.hash_entries.entries()` / `self.storage_entries()` calls carry no
+# computed type, so a plain annotated binding loses its annotation and the
+# for-in sees an I64 placeholder iterable. The typed parameter types the
+# argument expression. FREE fns, not methods: a method on the generic struct
+# is itself a mono-specialized generic-method call and loses the type the
+# same way (measured: method wrapper still fails, f4-boot probe).
+fn as_entry_pairs_v1<K, V>(pairs: [(K, V)]) -> [(K, V)]:
+    pairs
+
+fn as_entries_v1<K, V>(entries: [OrderedMapEntry<K, V>]) -> [OrderedMapEntry<K, V>]:
+    entries
+
 struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
     profile: AdaptiveSetProfile
     attribute: AdaptiveSetAttribute
@@ -38,12 +52,24 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
     ordered_key_rejected: bool
     live_hash_lookups: i64
     live_high_collision_lookups: i64
+    # The trace observer switch (data_observation_profiling_enabled_v1). Off:
+    # get/contains_key/put/remove run no counter, no lookup- or collision-
+    # driven switch and no capture note; the representation is the pinned
+    # (attribute) or plan-applied (apply_workload_profile) one, with the size
+    # limit still honoured because size is state, not an observation.
+    profiling: bool
 
     static fn new() -> AdaptiveMap<K, V>:
         AdaptiveMap.with_profile(adaptive_set_default_profile())
 
     static fn with_profile(profile: AdaptiveSetProfile) -> AdaptiveMap<K, V>:
         AdaptiveMap.with_site_and_target(profile, "", "")
+
+    static fn with_profiling(profile: AdaptiveSetProfile, enabled: bool) -> AdaptiveMap<K, V>:
+        """Construct with the trace host's initial switch (XrayDataProfilingV1.initial)."""
+        var map: AdaptiveMap<K, V> = AdaptiveMap.with_profile(profile)
+        map.profiling = enabled
+        map
 
     static fn with_site_and_target(
         profile: AdaptiveSetProfile, site_id: text, target_profile_id: text
@@ -52,7 +78,7 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             profile: adaptive_set_normalize_profile(profile),
             attribute: AdaptiveSetAttribute.Auto,
             algorithm: AdaptiveSetAlgorithm.Linear,
-            linear_entries: [], hash_entries: Map.with_capacity(1),
+            linear_entries: [], hash_entries: Map.new(),
             ordered_entries: OrderedMap.new(), fallback_order_entries: [],
             site_id: site_id, target_profile_id: target_profile_id,
             size: 0, observed_peak_size: 0, observed_lookups: 0,
@@ -62,7 +88,8 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             prefer_ordered_from_profile: false,
             prefer_ordered_from_live: false,
             ordered_key_rejected: false,
-            live_hash_lookups: 0, live_high_collision_lookups: 0
+            live_hash_lookups: 0, live_high_collision_lookups: 0,
+            profiling: true
         )
         if site_id != "":
             collection_capture_note_size(site_id, target_profile_id, 0)
@@ -141,6 +168,13 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
         """Equality checks in the most recent lookup when it used linear storage."""
         self.last_linear_lookup_comparisons
 
+    fn profiling_enabled() -> bool:
+        self.profiling
+
+    me set_profiling(enabled: bool):
+        """Runtime switch shared with the trace observer; see the field note."""
+        self.profiling = enabled
+
     fn observation() -> AdaptiveSetObservation:
         AdaptiveSetObservation(
             site_id: self.site_id, target_profile_id: self.target_profile_id,
@@ -169,18 +203,8 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
         nil
 
     fn hash_lookup_observed(key: K) -> (V?, bool, i64, i64):
-        """Inspect the active Map bucket once and count every examined entry."""
-        val hash = self.hash_entries.hash_key(key)
-        val bucket_index = self.hash_entries.bucket_for(hash)
-        val bucket = self.hash_entries.buckets[bucket_index]
-        var probes = 0
-        var collisions = 0
-        for entry in bucket:
-            probes = probes + 1
-            if entry.hash == hash and entry.key == key:
-                return (Some(entry.value), true, probes, collisions)
-            collisions = collisions + 1
-        (nil, false, probes + 1, collisions)
+        """Inspect the active Map probe chain once and count every examined entry."""
+        self.hash_entries.get_observed(key)
 
     fn storage_has_key(key: K) -> bool:
         match self.algorithm:
@@ -198,7 +222,8 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             case AdaptiveSetAlgorithm.Ordered: return self.ordered_entries.entries()
             case AdaptiveSetAlgorithm.Hash:
                 var result: [OrderedMapEntry<K, V>] = []
-                for pair in self.hash_entries.entries():
+                val pairs = as_entry_pairs_v1(self.hash_entries.entries())
+                for pair in pairs:
                     result.push(OrderedMapEntry(key: pair[0], value: pair[1]))
                 return result
         []
@@ -213,7 +238,7 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             for entry in self.fallback_order_entries:
                 keys.push(entry.key)
             return keys
-        val entries = self.storage_entries()
+        val entries = as_entries_v1(self.storage_entries())
         for entry in entries:
             if not ordered_key_native_usable(entry.key):
                 # Native order cannot compare this key. Keep iteration usable
@@ -250,7 +275,7 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             for entry in self.fallback_order_entries:
                 ordered_fallback.push(entry)
             return ordered_fallback
-        val entries = self.storage_entries()
+        val entries = as_entries_v1(self.storage_entries())
         for entry in entries:
             if not ordered_key_native_usable(entry.key):
                 return entries
@@ -259,13 +284,23 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             sorted.put(entry.key, entry.value)
         sorted.entries()
 
+    fn frozen_lookup() -> AdaptiveMapFrozenLookup<K, V>:
+        """Read-only snapshot for shared readers; it never promotes or migrates (COL-09).
+        Copies the map: take it once per snapshot, not per read."""
+        AdaptiveMapFrozenLookup(source: self)
+
     me get(key: K) -> V?:
+        if not self.profiling:
+            # Zero-overhead path: one bool, the ordered-key soundness guard,
+            # and the lookup in the selected representation. No counter.
+            self.guard_ordered_key(key)
+            return self.storage_get(key)
         self.observed_lookups = self.observed_lookups + 1
         self.lookups_since_switch = self.lookups_since_switch + 1
         self.promote_if_useful()
         self.guard_ordered_key(key)
         self.last_linear_lookup_comparisons = 0
-        var found: V? = nil
+        var found: V? = None
         var was_found = false
         if self.algorithm == AdaptiveSetAlgorithm.Linear:
             for entry in self.linear_entries:
@@ -288,7 +323,7 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             found = self.storage_get(key)
             # A present key may carry an optional nil payload. The return
             # type alone cannot distinguish it from a missing key.
-            was_found = if found == nil: self.storage_has_key(key) else: true
+            was_found = if found.is_none(): self.storage_has_key(key) else: true
         if not was_found:
             self.observed_misses = self.observed_misses + 1
         else:
@@ -298,6 +333,9 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
         found
 
     me contains_key(key: K) -> bool:
+        if not self.profiling:
+            self.guard_ordered_key(key)
+            return self.storage_has_key(key)
         self.observed_lookups = self.observed_lookups + 1
         self.lookups_since_switch = self.lookups_since_switch + 1
         self.promote_if_useful()
@@ -389,7 +427,8 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             self.fallback_order_entries = order
             if replaced_unsupported_key and key_has_native_order:
                 var unsupported_remains = false
-                for entry in self.storage_entries():
+                val entries = as_entries_v1(self.storage_entries())
+                for entry in entries:
                     if not ordered_key_native_usable(entry.key):
                         unsupported_remains = true
                         break
@@ -399,17 +438,17 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             if self.fallback_order_entries.len() > 0 or not key_has_native_order:
                 self.fallback_order_entries.push(OrderedMapEntry(key: key, value: value))
             self.size = self.size + 1
-            if self.size > self.observed_peak_size:
+            if self.profiling and self.size > self.observed_peak_size:
                 self.observed_peak_size = self.size
             self.promote_if_useful()
-            if self.site_id != "":
+            if self.profiling and self.site_id != "":
                 collection_capture_note_size(self.site_id, self.target_profile_id, self.size)
         inserted
 
     me remove(key: K) -> V?:
         self.guard_ordered_key(key)
         if not self.storage_has_key(key):
-            return nil
+            return None
         val previous = self.storage_get(key)
         var removed_unsupported_key = false
         if self.fallback_order_entries.len() > 0:
@@ -418,7 +457,8 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
                     removed_unsupported_key = not ordered_key_native_usable(current.key)
                     break
         elif self.ordered_key_rejected:
-            for entry in self.storage_entries():
+            val entries = as_entries_v1(self.storage_entries())
+            for entry in entries:
                 if entry.key == key:
                     removed_unsupported_key = not ordered_key_native_usable(entry.key)
                     break
@@ -440,7 +480,8 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
         self.size = self.size - 1
         var unsupported_remains = false
         if removed_unsupported_key:
-            for entry in self.storage_entries():
+            val entries = as_entries_v1(self.storage_entries())
+            for entry in entries:
                 if not ordered_key_native_usable(entry.key):
                     unsupported_remains = true
                     break
@@ -463,13 +504,13 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
         if not self.ordered_key_rejected and self.attribute == AdaptiveSetAttribute.Auto and
                 (self.prefer_ordered_from_profile or self.prefer_ordered_from_live):
             self.promote_if_useful()
-        if self.site_id != "":
+        if self.profiling and self.site_id != "":
             collection_capture_note_size(self.site_id, self.target_profile_id, self.size)
         previous
 
     me clear():
         self.linear_entries = []
-        self.hash_entries = Map.with_capacity(1)
+        self.hash_entries = Map.new()
         self.ordered_entries = OrderedMap.new()
         self.fallback_order_entries = []
         self.size = 0
@@ -571,8 +612,10 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
                 self.lookups_since_switch < self.profile.lookup_promotion_count and
                 not self.prefer_hash_from_profile:
             return
-        var rebuilt: Map<K, V> = Map.new()
-        for entry in self.storage_entries():
+        val target_cap = if self.size * 2 > 16: (self.size * 2) as i32 else: 16
+        var rebuilt: Map<K, V> = Map.with_capacity(target_cap)
+        val rebuilt_entries = as_entries_v1(self.storage_entries())
+        for entry in rebuilt_entries:
             rebuilt.insert(entry.key, entry.value)
         self.hash_entries = rebuilt
         self.linear_entries = []
@@ -587,7 +630,7 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             return
         if self.attribute == AdaptiveSetAttribute.Auto and self.ordered_key_rejected:
             return
-        val entries = self.storage_entries()
+        val entries = as_entries_v1(self.storage_entries())
         for entry in entries:
             if not ordered_key_native_usable(entry.key):
                 if self.attribute == AdaptiveSetAttribute.Auto:
@@ -599,7 +642,7 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             rebuilt.put(entry.key, entry.value)
         self.ordered_entries = rebuilt
         self.linear_entries = []
-        self.hash_entries = Map.with_capacity(1)
+        self.hash_entries = Map.new()
         self.algorithm = AdaptiveSetAlgorithm.Ordered
         self.lookups_since_switch = 0
         self.live_hash_lookups = 0
@@ -627,11 +670,41 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
         if self.algorithm == AdaptiveSetAlgorithm.Linear:
             return
         self.linear_entries = self.storage_entries()
-        self.hash_entries = Map.with_capacity(1)
+        self.hash_entries = Map.new()
         self.ordered_entries = OrderedMap.new()
         self.algorithm = AdaptiveSetAlgorithm.Linear
         self.lookups_since_switch = 0
         self.live_hash_lookups = 0
         self.live_high_collision_lookups = 0
 
+struct AdaptiveMapFrozenLookup<K, V> where K: Hash + Eq + Ord:
+    """Read-only snapshot of one AdaptiveMap value (a struct copy: later owner
+    writes are not visible). It exposes no `me` method, so a holder cannot
+    promote, migrate or count; reads are not profile-captured. Taking the view
+    copies the map, so take it once per snapshot, never per read."""
+    source: AdaptiveMap<K, V>
+
+    fn get(key: K) -> V?:
+        """The stored value; use contains_key to tell a present None from absence."""
+        if not self.ordered_probe_usable(key):
+            return None
+        self.source.storage_get(key)
+
+    fn contains_key(key: K) -> bool:
+        if not self.ordered_probe_usable(key):
+            return false
+        self.source.storage_has_key(key)
+
+    fn ordered_probe_usable(key: K) -> bool:
+        # Ordered storage only holds keys with native order, so a probe without
+        # one is absent. The owner path demotes (auto) or panics (pin); a frozen read does neither.
+        self.source.algorithm != AdaptiveSetAlgorithm.Ordered or ordered_key_native_usable(key)
+
+    fn len() -> i64:
+        self.source.len()
+
+    fn selected_algorithm() -> AdaptiveSetAlgorithm:
+        self.source.algorithm
+
 export AdaptiveMap
+export AdaptiveMapFrozenLookup

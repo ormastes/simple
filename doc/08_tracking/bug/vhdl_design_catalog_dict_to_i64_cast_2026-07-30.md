@@ -2,8 +2,11 @@
 
 - **Date:** 2026-07-30
 - **Lane:** VHDL1 (mission-critical hardening campaign)
-- **Status:** Root cause fixed for the cast defect. A second, separate, pre-existing bug was
-  uncovered underneath it and is left OPEN (see "Follow-on defect" below) — not fixed here.
+- **Status:** RESOLVED. Root cause fixed for the cast defect; the follow-on defect
+  ("Follow-on defect" below) was FIXED 2026-11-07 and re-verified 2026-11-07. The 4
+  remaining spec failures are separate, unrelated defects (listed in the 2026-11-07
+  sections). 2026-11-25 ledger re-check: fixes confirmed present in tree (see
+  "Ledger re-verification 2026-11-25" at the end).
 
 ## Background / attribution
 
@@ -293,3 +296,78 @@ specific fix (the `test/unit/` mirror of `llvm_lib_backend_spec.spl` doesn't con
 Working copy matched `origin/main` for every file read or touched in this lane (`git fetch origin
 main && git --no-optional-locks diff --stat origin/main -- <files>` was empty both before and after
 for the target `.spl` file and this bug doc) — no divergence encountered.
+
+## Follow-on defect — FIXED 2026-11-07
+
+The file moved to `src/plugins/backend_vhdl/vhdl/vhdl_design_catalog.spl`. Two
+defects sat under the cast fix; both are fixed in pure Simple.
+
+1. **Direct MIR hardware metadata dropped** — `vhdl_catalog_function` (`:270`)
+   rebuilt every `MirFunction` with `has_vhdl_metadata: false`. The spec settles
+   the open design question: `"rebases module-local symbols…"` calls
+   `vhdl_build_design_catalog` (no HIR, no sidecar rows) and asserts
+   `hardware_entity_count == 2`, which a sidecar-only design can never produce.
+   The rebase now keeps the input `has_vhdl_metadata`/`vhdl_metadata`; a matching
+   sidecar row still overrides it. The "is generic" rejection moved out of the
+   sidecar-match branch so it covers direct MIR hardware entries too (new spec
+   case `rejects a generic direct MIR hardware entry before VHDL emission`).
+2. **`rt_dict_contains` is blind to non-text keys under the interpreter** — the
+   file's `_sffi_dict_contains<K>` / `rt_dict_contains` shims (32 call sites)
+   go through `rt_dict_contains_fn`
+   (`src/compiler_rust/compiler/src/interpreter_extern/sffi_dict.rs:124`), which
+   only matches `key_value.as_text_str()`. Probe: `Dict<i64,bool>` with key `5`
+   -> `rt_dict_contains=false`, `.contains_key=true`. So every i64/SymbolId
+   membership test (`reachable`, `rebase`, `types`, ...) answered false and
+   reachable functions were pruned (`hardware_entity_count` 0, `nil.blocks`,
+   `nil.has_vhdl_metadata`). All call sites now use `Dict.contains_key`, which the
+   file already used elsewhere on the native path; the dead extern + shim were
+   deleted. The seed-side `rt_dict_contains_fn` text-only matching is left as-is
+   (seed is bootstrap-only).
+
+Evidence (Rust seed `/home/yoon/dev/seed-try-target/release/simple`, interpreter):
+before `21 total, 6 passed, 15 failed`; with the 2 new cases and no fix
+`23 total, 6 passed, 17 failed` (both new cases red: "found no @hardware entry");
+after `23 total, 19 passed, 4 failed`.
+
+Remaining 4 failures are separate defects, not this bug:
+- `MirStatic` has no field `is_rt_struct_alloc_registered` (x2) — spec built
+  against a field that does not exist in `src/compiler/50.mir` (also expected by
+  `llvm_struct_receiver_guard_spec.spl`).
+- `fails closed when an explicit port-map entity does not resolve` — `Ok(nil)`
+  from `vhdl_catalog_resolve_target` hits `_sffi_enum_payload<T>(...) -> i64`,
+  whose non-optional return contract forbids nil.
+- `selects the VHDL root only from explicit compile inputs` — source-text
+  assertion against the AOT output registration facade (spec drift).
+
+## Re-verification 2026-11-07 (release/1.0.0 @ 0e56cc6bade)
+
+Re-run on current release with the Rust seed
+(`/home/yoon/dev/seed-try-target/release/simple`, sha256 `87693d9e927f9bd5...`):
+
+```
+SPEC FILE VERDICT: test/01_unit/compiler/backend/vhdl_design_catalog_spec.spl outcome=ERROR declared>=23 executed=23 passed=19 failed=4 skipped=0 dropped=0
+```
+
+No `cannot cast dict to i64`, no `found no @hardware entry`, no
+`nil.has_vhdl_metadata`: this bug (cast defect + follow-on) stays fixed. The
+4 failures are exactly the 4 separate defects listed above (`MirStatic`
+`is_rt_struct_alloc_registered` x2, `_sffi_enum_payload` nil contract,
+AOT-facade source-text drift). No code change.
+
+## Ledger re-verification 2026-11-25 (release/1.0.0)
+
+Code-inspection re-check that both fixes are still present in the current tree
+(file now at `src/plugins/backend_vhdl/vhdl/vhdl_design_catalog.spl`):
+
+- No `as i64` cast and no `rt_dict_get_i64_raw`/`rt_dict_set_i64_raw` extern
+  anywhere in the file (grep: zero hits) — the cast defect stays fixed.
+- `vhdl_catalog_function` (`:296`) now preserves the input flags:
+  `has_vhdl_metadata: func.has_vhdl_metadata, vhdl_metadata: func.vhdl_metadata`.
+- Membership tests use `Dict.contains_key` throughout (`:163` `rebase`, `:344`
+  `types`, `:678` `modules`, ...); no `rt_dict_contains` shim remains.
+
+Execution remains environment-blocked on this host: the pinned
+`bin/simple.exe` seed rejects `@representation_boundary` repo-wide at this
+HEAD (fails in `src/app/test_runner_new/test_runner_client.spl:9` before any
+spec loads), so the 2026-11-07 interpreter re-run above stands as the latest
+execution evidence. No code change in this pass; ledger status only.

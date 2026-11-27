@@ -16,8 +16,14 @@ use common.ui.render_opt.damage_plan.{
     DamagePlanPolicy, build_damage_plan, DAMAGE_PLAN_NONE
 }
 use std.gc_async_mut.ui.gui_content_renderer.{
-    GuiRetainedRenderSession, gui_content_frame_clear_color
+    GuiRetainedRenderSession, gui_content_frame_clear_color,
+    gui_session_content_frame
 }
+
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    engine2d_draw_ir_adv_fresh_device_composition_with_images
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 
 describe "GUI content renderer theme seed":
     # @manual scenario evidence
@@ -73,3 +79,47 @@ describe "GUI content renderer theme seed":
         expect(idle.readback.pixels).to_equal(first.readback.pixels)
         expect(session.draw_ir_submission_revision).to_equal(first_revision)
         retained.shutdown()
+
+    # Bug gui_retained_render_session_cpu_seed_preflight_rejected_2026-11-13:
+    # the label box is laid out from font metrics, so it is wider than a narrow
+    # window. The retained seed must paint it clipped to the target exactly
+    # like the one-shot content frame does, not reject the whole window.
+    it "seeds a label wider than its target identically to the one-shot frame":
+        val tree = build_tree(column("root", [label("message", "ready")]))
+        var probe = UISession.new(tree)
+        val composition = probe.submit_widget_draw_ir(32, 16, "cpu")
+        var overflowing = 0
+        for batch in composition.batches:
+            for command in batch.commands:
+                if command.kind == "text" and command.x + command.width > 32:
+                    overflowing = overflowing + 1
+        expect(overflowing).to_equal(1)
+
+        var one_shot_session = UISession.new(tree)
+        val one_shot = gui_session_content_frame(
+            one_shot_session, "w", "", 0, 0, 32, 16, 1, 1, [])
+        expect(one_shot.pixels.len()).to_equal(32 * 16)
+
+        var session = UISession.new(tree)
+        var retained = GuiRetainedRenderSession.create(32, 16, "cpu")
+        expect(retained.seed(session)).to_equal(true)
+        var pyramid = DirtyTilePyramid.create(32, 16, [8], [8])
+        pyramid.begin_frame()
+        val plan = build_damage_plan(
+            pyramid, 0, DamagePlanPolicy.create(8, 60))
+        val evidence = retained.render_damage(session, plan, true)
+        expect(evidence.readback.source).to_equal("cpu_mirror")
+        expect(evidence.readback.pixels).to_equal(one_shot.pixels)
+        retained.shutdown()
+
+    it "keeps the fresh-device composition lane strict for unbounded text":
+        val tree = build_tree(column("root", [label("message", "ready")]))
+        var session = UISession.new(tree)
+        val composition = session.submit_widget_draw_ir(32, 16, "cpu")
+        var engine = Engine2D.create_with_backend(32, 16, "cpu")
+        val result = engine2d_draw_ir_adv_fresh_device_composition_with_images(
+            engine, composition, [])
+        expect(result.readback_source).to_equal("preflight_rejected")
+        expect(result.fallback_reason).to_contain(
+            "fresh-device-command-preflight-required")
+        engine.shutdown()

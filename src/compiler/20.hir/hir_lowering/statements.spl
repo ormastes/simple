@@ -1,5 +1,5 @@
-use compiler.hir.hir_lowering.concat_copy_v1.{hir_stmt_concat_copy_v1}
-use compiler.hir.hir_lowering.binding_types.{hir_binding_type_or_infer}
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.hir.hir_lowering.binding_types.{hir_binding_type_or_infer, hir_binding_direct_call_return_kind, hir_binding_method_call_return_kind, hir_binding_transparent_kind, hir_binding_try_payload, hir_binding_index_element, hir_const_type_settled, hir_binding_tuple_elements}
 # HIR Lowering - Statement Lowering
 #
 # This module handles lowering of statements from AST to HIR.
@@ -11,13 +11,16 @@ use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{StmtKind, Expr}  # explicit: a glob is not an import-origin for surface projection
 use compiler.common.diagnostics.span.{Span}
-use compiler.hir.hir_lowering.types.{HirLowering, hir_type_kind_disc}
+use compiler.hir.hir_lowering.types.{HirLowering, hir_type_kind_disc, hir_type_env_get, is_read_only_handle_name}
 use compiler.hir.hir_lowering.expressions.*
 use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_disc, _hir_expr_symbol_or_invalid}
+use compiler.hir.exhaustiveness.char_condition.{cc_message, cc_env_name, cc_mode_resolve, cc_is_char_type}
+use compiler.hir.exhaustiveness.char_int_context.{ci_message, ci_env_name, ci_mode_resolve, ci_is_int_conversion_method}
+use compiler.hir.hir_operators.{HirBinOp}
 
-extern fn rt_enum_payload(value: StmtKind) -> Expr
+extern fn rt_enum_payload(value: StmtKind) -> Expr?
 extern fn rt_enum_discriminant(value: StmtKind) -> i64
-extern fn rt_env_get(key: text) -> text
+extern fn rt_env_get(key: text) -> text?
 
 fn hir_stmt_kind_disc(k: StmtKind) -> i64:
     rt_enum_discriminant(k)
@@ -43,21 +46,50 @@ fn _ast_tuple_lit_elements(e: Expr) -> [Expr]:
                 return []
     []
 
+fn binding_type_is_unknown(type_: HirType) -> bool:
+    match type_.kind:
+        case HirTypeKind.Error: true
+        case _: false
+
+fn binding_join_arm_conflicts(left: HirType, right: HirType) -> bool:
+    if binding_type_is_unknown(left) or binding_type_is_unknown(right):
+        return false
+    not hir_types_equal(left, right)
+
 impl HirLowering:
+    # Check the unprojected source: Some(Result) is optional, while a Result
+    # itself is not a presence carrier. Keep the existing kind-only transport.
+    me validate_presence_binding(kind: HirExprKind, bind_optional_payload: bool, explicit_presence: bool, span: Span):
+        if not bind_optional_payload or explicit_presence:
+            return
+        var source_kind = kind
+        match kind:
+            case HirExprKind.ExistsCheck(base): source_kind = base.kind
+            case _: ()
+        val source_type = self.binding_kind_type(source_kind, span)
+        match source_type.kind:
+            case HirTypeKind.Result(_, _):
+                self.error("cannot bind a Result with bare if val/while val; use match Ok/Err or Result.ok.?", span)
+            case _: ()
+
     # Early pattern validation runs before inference. Retain only an existing
     # semantic type, including a variable's declared type; never invent an
     # owner from the spelling of a later match alternative. Return a raw type
     # with Error as the unknown sentinel, avoiding optional aggregate transport.
     me binding_source_type(source: HirExpr, bind_optional_payload: bool = false) -> HirType:
         var resolved: HirType = HirType(kind: HirTypeKind.Error, span: source.span)
-        if source.has_type_ and source.type_ != nil:
-            resolved = source.type_ ?? HirType(kind: HirTypeKind.Error, span: source.span)
+        if source.has_type_:
+            resolved = source.type_
         else:
-            val symbol = _hir_expr_symbol_or_invalid(source.kind)
-            if symbol.is_valid():
-                if val definition = self.symbols.get_symbol_raw(symbol.id):
-                    if definition.type_ != nil:
-                        resolved = definition.type_ ?? HirType(kind: HirTypeKind.Error, span: source.span)
+            # `if val x = e` desugars to `val x = e.?` with bind_optional_payload:
+            # the binder's type comes from `e` (then projected below). This is
+            # how `if val c = self.inner as Close` reaches the Cast arm.
+            var binding_kind = source.kind
+            if bind_optional_payload:
+                match source.kind:
+                    case HirExprKind.ExistsCheck(present_base): binding_kind = present_base.kind
+                    case _: ()
+            resolved = self.binding_kind_type(binding_kind, source.span)
         # Attribute and symbol lookup must share the same optional projection.
         # Unwrap exactly once so nested optionals retain their inner optional.
         if bind_optional_payload:
@@ -65,6 +97,420 @@ impl HirLowering:
                 case HirTypeKind.Optional(payload): return payload
                 case _: ()
         resolved
+
+    # Kind-only type transport for an untyped binding initializer. `expr?`
+    # binds the Ok/Some payload of its operand's type: without it
+    # `val found = which(n)?` (which -> Result<text?, E>) stayed untyped and
+    # `if val p = found` bound a unit slot (E-BACKEND-LLVM-CONST-TYPE,
+    # sosix_spawn_checked).
+    fn binding_kind_type(raw_kind: HirExprKind, span: Span) -> HirType:
+        val unknown = HirType(kind: HirTypeKind.Error, span: span)
+        val source_kind = hir_binding_transparent_kind(raw_kind)
+        match source_kind:
+            case HirExprKind.Try(operand):
+                return hir_binding_try_payload(self.binding_kind_type(operand.kind, span)) ?? unknown
+            # `xs[i]` is typed by the base's declared element type. Index
+            # lowering attaches one only when the lowered base is already
+            # typed; a parameter / module-global base is a bare symbol, so
+            # `val b = blks[i]` stayed untyped and `b.count + n` /
+            # `s.idx.has(k)` lost their owner (bootstrap run 15:
+            # similarity_grouping.spl:84, dynsmf_owned_v2.spl:749).
+            # A range index (`xs[a..b]`) is a sub-array, not an element:
+            # leave it unknown rather than settle a wrong element type.
+            case HirExprKind.Index(index_base, index_value):
+                match index_value.kind:
+                    case HirExprKind.Range(_, _, _, _): return unknown
+                    case _: ()
+                return hir_binding_index_element(self.binding_kind_type(index_base.kind, span)) ?? unknown
+            # `e as T` is typed `T` (a trait-to-trait downcast yields `T?` only
+            # under the `if val x = e as T` consumer, whose payload is `T`).
+            # Untyped, `if val c = self.inner as Close` bound a unit slot
+            # (E-BACKEND-LLVM-CONST-TYPE, nogc_sync_mut.io.buffer close/is_open).
+            case HirExprKind.Cast(_, target):
+                if hir_const_type_settled(target): return target
+                return unknown
+            # An `if` with an else branch whose branch tails join to a fully
+            # known Result is typed by that join. Untyped, `val r = if c:
+            # Ok(x) else: Err(y)` made a later bare `case Ok(..)` ambiguous
+            # whenever another enum declared `Ok` (bug
+            # hir_if_expr_result_subject_untyped_2026-11-07). A join with an
+            # unknown arm, or of non-Result values, keeps the old untyped
+            # result, so no Error arm reaches type inference or MIR.
+            case HirExprKind.If(_, _, _) | HirExprKind.IfChain(_, _):
+                val joined: HirType = self.binding_branch_join(source_kind, span)
+                if self.binding_joined_result(joined) and hir_const_type_settled(joined):
+                    return joined
+                return unknown
+            case HirExprKind.MatchCase(_, _):
+                val joined_match: HirType = self.binding_branch_join(source_kind, span)
+                if not binding_type_is_unknown(joined_match) and hir_const_type_settled(joined_match):
+                    return joined_match
+                return unknown
+            case HirExprKind.Field(field_base, field_name, _):
+                if field_name == "ok" or field_name == "err":
+                    val base_ty = self.binding_kind_type(field_base.kind, span)
+                    match base_ty.kind:
+                        case HirTypeKind.Result(ok_ty, err_ty):
+                            val chosen: HirType = if field_name == "ok": ok_ty else: err_ty
+                            if hir_const_type_settled(chosen):
+                                return HirType(kind: HirTypeKind.Optional(chosen), span: span)
+                        case _: ()
+                val settled_field = self.binding_field_type(field_base.kind, field_name, span)
+                if hir_const_type_settled(settled_field):
+                    return settled_field
+                return unknown
+            case _: ()
+        val symbol = _hir_expr_symbol_or_invalid(source_kind)
+        if symbol.is_valid():
+            if val definition = self.symbols.get_symbol_raw(symbol.id):
+                if definition.type_.is_some():
+                    return definition.type_ ?? unknown
+            return unknown
+        if val declared_return = hir_binding_direct_call_return_kind(source_kind, self.symbols):
+            return declared_return
+        if val instantiated_direct = self.instantiated_direct_call_return_kind(source_kind):
+            return instantiated_direct
+        if val instantiated_return = self.instantiated_method_call_return_kind(source_kind):
+            return instantiated_return
+        if val method_return = hir_binding_method_call_return_kind(source_kind, self.symbols):
+            return method_return
+        unknown
+
+    # Branch-tail / payload type for the `if` join (`type_` is read only when
+    # `has_type_` is true):
+    # - a builtin `Ok(v)` / `Err(e)` call (symbol tagged by the
+    #   unresolved-builtin fallback in expression_support; a user function
+    #   named Ok/Err is not tagged) is a Result with the other arm unknown;
+    # - a string / bool literal has its literal type (numeric literals stay
+    #   unknown: their width comes from context);
+    # - a nested `if` is the join of its own branches;
+    # - anything else is ordinary binding transport, then `declared`.
+    fn binding_block_value_type(tail_kind: HirExprKind, declared: HirType, span: Span) -> HirType:
+        val unknown = HirType(kind: HirTypeKind.Error, span: span)
+        match tail_kind:
+            case HirExprKind.Call(callee, args, _):
+                if args.len() == 1:
+                    val ctor_symbol = _hir_expr_symbol_or_invalid(callee.kind)
+                    if ctor_symbol.is_valid():
+                        if val ctor = self.symbols.get_symbol_raw(ctor_symbol.id):
+                            val tag = ctor.builtin_method_tag
+                            if tag == BUILTIN_METHOD_RESULT_OK or tag == BUILTIN_METHOD_RESULT_ERR:
+                                val arg: HirCallArg = args[0]
+                                var arg_declared: HirType = unknown
+                                if arg.value.has_type_:
+                                    arg_declared = arg.value.type_
+                                val payload: HirType = self.binding_block_value_type(arg.value.kind, arg_declared, span)
+                                if tag == BUILTIN_METHOD_RESULT_OK:
+                                    return HirType(kind: HirTypeKind.Result(payload, unknown), span: span)
+                                return HirType(kind: HirTypeKind.Result(unknown, payload), span: span)
+            case HirExprKind.StringLit(_, _):
+                return HirType(kind: HirTypeKind.Str, span: span)
+            case HirExprKind.BoolLit(_):
+                return HirType(kind: HirTypeKind.Bool, span: span)
+            case HirExprKind.If(_, _, _) | HirExprKind.IfChain(_, _) | HirExprKind.MatchCase(_, _):
+                return self.binding_branch_join(tail_kind, span)
+            case HirExprKind.Field(field_base, field_name, _):
+                val field_type: HirType = self.binding_field_type(field_base.kind, field_name, span)
+                if not binding_type_is_unknown(field_type): return field_type
+            case _: ()
+        val transported: HirType = self.binding_kind_type(tail_kind, span)
+        if binding_type_is_unknown(transported):
+            return declared
+        transported
+
+    # Declared type of `base.field` when `base` is a binding typed
+    # Named(struct). Only the module-qualified `module.Name` key of
+    # struct_field_types_by_name is read: it is written from declarations and
+    # imports only, while the bare-name key is also rewritten from
+    # construction-site array literals (try_register_local_struct_type maps a
+    # `[]` argument to `[i64]`), which would hand back a wrong but settled type.
+    fn binding_field_type(base_kind: HirExprKind, field_name: text, span: Span) -> HirType:
+        val unknown = HirType(kind: HirTypeKind.Error, span: span)
+        var owner_raw: i64 = -1
+        val base_type: HirType = self.binding_kind_type(base_kind, span)
+        match base_type.kind:
+            case HirTypeKind.Named(owner_id, _): owner_raw = owner_id.id
+            case _: ()
+        if owner_raw < 0:
+            # A local built by a struct constructor call records only the
+            # struct NAME (local_struct_types); resolve it to its declaration.
+            val base_symbol = _hir_expr_symbol_or_invalid(base_kind)
+            if base_symbol.is_valid() and self.local_struct_types.has(base_symbol.id):
+                val struct_symbol = self.symbols.lookup_or_invalid(self.local_struct_types[base_symbol.id])
+                if struct_symbol.is_valid(): owner_raw = struct_symbol.id
+        if owner_raw < 0:
+            return unknown
+        if val owner = self.symbols.get_symbol_raw(owner_raw):
+            if owner.kind != SymbolKind.Struct and owner.kind != SymbolKind.Class:
+                return unknown
+            if val owner_module = owner.defining_module:
+                val canonical_name: text = owner_module + "." + owner.name
+                if self.struct_field_types_by_name.has(canonical_name):
+                    val canonical_fields = self.struct_field_types_by_name[canonical_name]
+                    if canonical_fields.has(field_name): return canonical_fields[field_name]
+        unknown
+
+    # Settled element type `T` of an array/slice receiver `xs` (a typed
+    # binding or a declared field such as `self.items`), Error otherwise.
+    # Types the binders of `for (i, x) in xs.enumerate()` and the parameter
+    # of `xs.filter(\x: ...)` (enumerate_tuple_element_typed_unit_native_2026-11-13):
+    # untyped, they lowered as unit slots and llc rejected `rt_native_eq(void ...)`.
+    # Kind in (frozen-stage2 by-value HirExpr hazard, see binding_kind_type).
+    fn binding_receiver_element_type(receiver_kind: HirExprKind, span: Span) -> HirType:
+        val unknown = HirType(kind: HirTypeKind.Error, span: span)
+        var receiver_type: HirType = self.binding_kind_type(receiver_kind, span)
+        if binding_type_is_unknown(receiver_type):
+            match receiver_kind:
+                case HirExprKind.Field(field_base, field_name, _):
+                    receiver_type = self.binding_field_type(field_base.kind, field_name, span)
+                case _: ()
+        match receiver_type.kind:
+            case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
+                val array_element: HirType = element
+                if hir_const_type_settled(array_element): return array_element
+            case _: ()
+        unknown
+
+    # Element hint for a one-parameter lambda passed to an element-wise
+    # builtin array method (`xs.filter(\x: ...)`); Error when the method is
+    # not element-wise or the receiver element is unknown.
+    fn lambda_element_hint_for_method(receiver_kind: HirExprKind, method: text, span: Span) -> HirType:
+        if method == "filter" or method == "map" or method == "any" or method == "all" or
+                method == "find" or method == "find_index" or method == "position" or
+                method == "each" or method == "for_each" or method == "flat_map" or
+                method == "filter_map" or method == "take_while" or method == "skip_while" or
+                method == "drop_while" or method == "count" or method == "partition":
+            return self.binding_receiver_element_type(receiver_kind, span)
+        HirType(kind: HirTypeKind.Error, span: span)
+
+    # Stage the hint for an argument that is a lambda literal; any other
+    # argument clears it so a nested lambda never inherits it.
+    me stage_lambda_param_hint(arg_value: Expr, hint: HirType):
+        val arg_kind_t: ExprKind = arg_value.kind
+        match arg_kind_t:
+            case ExprKind.Lambda(_, _):
+                self.lambda_param_hint = hint
+            case _:
+                self.lambda_param_hint = HirType(kind: HirTypeKind.Error, span: arg_value.span)
+
+    fn binding_expr_diverges(expr_kind: HirExprKind) -> bool:
+        val bare_kind = hir_binding_transparent_kind(expr_kind)
+        match bare_kind:
+            case HirExprKind.Return(_) | HirExprKind.Break(_, _) | HirExprKind.Continue(_) | HirExprKind.Throw(_): true
+            case HirExprKind.Block(inner_block): self.binding_block_diverges(inner_block)
+            case _: false
+
+    fn binding_block_diverges(block: HirBlock) -> bool:
+        if block.has:
+            return self.binding_expr_diverges(block.value.kind)
+        if block.stmts.len() == 0:
+            return false
+        val last_stmt: HirStmt = block.stmts[block.stmts.len() - 1]
+        match last_stmt.kind:
+            case HirStmtKind.Expr(last_expr):
+                return self.binding_expr_diverges(last_expr.kind)
+            case _: false
+
+    # Join of every branch tail of an `if` / `if-elif` with an else branch
+    # or non-diverging `match` arms (unknown when there is no else or a
+    # non-diverging branch has no value).
+    fn binding_branch_join(if_kind: HirExprKind, span: Span) -> HirType:
+        val unknown = HirType(kind: HirTypeKind.Error, span: span)
+        match if_kind:
+            case HirExprKind.MatchCase(_, arms):
+                if arms.len() == 0:
+                    return unknown
+                var has_value_arm = false
+                var joined_match: HirType = unknown
+                for arm_raw in arms:
+                    val arm: HirMatchArm = arm_raw
+                    val arm_body: HirBlock = arm.body
+                    if self.binding_block_diverges(arm_body):
+                        continue
+                    if not arm_body.has:
+                        return unknown
+                    var arm_declared: HirType = unknown
+                    if arm_body.value.has_type_:
+                        arm_declared = arm_body.value.type_
+                    val arm_type: HirType = self.binding_block_value_type(arm_body.value.kind, arm_declared, span)
+                    if binding_type_is_unknown(arm_type):
+                        return unknown
+                    if not has_value_arm:
+                        joined_match = arm_type
+                        has_value_arm = true
+                    else:
+                        joined_match = self.binding_join_type(arm_type, joined_match, span)
+                        if binding_type_is_unknown(joined_match):
+                            return unknown
+                if has_value_arm:
+                    return joined_match
+                return unknown
+            case HirExprKind.If(_, then_, else_):
+                val else_opt: HirBlock? = else_
+                if val else_block = else_opt:
+                    if not then_.has or not else_block.has:
+                        return unknown
+                    var then_declared: HirType = unknown
+                    if then_.value.has_type_:
+                        then_declared = then_.value.type_
+                    var else_declared: HirType = unknown
+                    if else_block.value.has_type_:
+                        else_declared = else_block.value.type_
+                    return self.binding_join_type(self.binding_block_value_type(then_.value.kind, then_declared, span), self.binding_block_value_type(else_block.value.kind, else_declared, span), span)
+            case HirExprKind.IfChain(arms, chain_else):
+                val chain_else_opt: HirBlock? = chain_else
+                if val chain_else_block = chain_else_opt:
+                    if not chain_else_block.has:
+                        return unknown
+                    var chain_else_declared: HirType = unknown
+                    if chain_else_block.value.has_type_:
+                        chain_else_declared = chain_else_block.value.type_
+                    var joined: HirType = self.binding_block_value_type(chain_else_block.value.kind, chain_else_declared, span)
+                    for arm in arms:
+                        val arm_value: HirIfArm = arm
+                        if not arm_value.then_.has:
+                            return unknown
+                        var arm_declared: HirType = unknown
+                        if arm_value.then_.value.has_type_:
+                            arm_declared = arm_value.then_.value.type_
+                        joined = self.binding_join_type(self.binding_block_value_type(arm_value.then_.value.kind, arm_declared, span), joined, span)
+                    return joined
+            case _: ()
+        unknown
+
+    fn binding_joined_result(joined: HirType) -> bool:
+        match joined.kind:
+            case HirTypeKind.Result(_, _): true
+            case _: false
+
+    # Join of two branch types. Two Result shapes join arm by arm (an unknown
+    # arm takes the other side; otherwise the arms must be the same type);
+    # other types join only when identical. Anything else stays unknown so
+    # consumers fail closed instead of picking one branch's type.
+    fn binding_join_type(left: HirType, right: HirType, span: Span) -> HirType:
+        val unknown = HirType(kind: HirTypeKind.Error, span: span)
+        match left.kind:
+            case HirTypeKind.Result(left_ok, left_err):
+                match right.kind:
+                    case HirTypeKind.Result(right_ok, right_err):
+                        if binding_join_arm_conflicts(left_ok, right_ok) or binding_join_arm_conflicts(left_err, right_err):
+                            return unknown
+                        val ok_arm = if binding_type_is_unknown(left_ok): right_ok else: left_ok
+                        val err_arm = if binding_type_is_unknown(left_err): right_err else: left_err
+                        return HirType(kind: HirTypeKind.Result(ok_arm, err_arm), span: span)
+                    case _: ()
+            case _: ()
+        # One unresolved arm (native stage2 can leave a branch tail untyped,
+        # bug stage2_if_expr_result_join_untyped_match_payload_2026-11-07)
+        # adopts the other arm only when that arm is a fully settled Result.
+        if binding_type_is_unknown(left) and self.binding_joined_result(right) and hir_const_type_settled(right):
+            return right
+        if binding_type_is_unknown(right) and self.binding_joined_result(left) and hir_const_type_settled(left):
+            return left
+        # Non-Result branches join only when both are known and identical.
+        if not binding_type_is_unknown(left) and not binding_type_is_unknown(right) and hir_types_equal(left, right):
+            return left
+        unknown
+
+    me check_char_condition(cond: HirExpr):
+        """W-CHAR-CONDITION: a char used where a condition is expected (ADR-005).
+        Diagnostic only; mode via SIMPLE_CHAR_CONDITION (warn | error)."""
+        if not cc_is_char_type(self.binding_payload_type(cond)):
+            return
+        val mode = cc_mode_resolve(hir_type_env_get(cc_env_name()) ?? "", hir_type_env_get("SIMPLE_SAFETY_PROFILE") ?? "")
+        val msg = cc_message(mode, cond.span.line, cond.span.col)
+        # Some statement forms (while) are lowered more than once; report each site once.
+        for seen in self.diagnostic_messages:
+            if seen.contains(msg):
+                return
+        for err in self.errors:
+            if err.message == msg:
+                return
+        if mode == "error":
+            self.error(msg, cond.span)
+        else:
+            self.warning(msg, cond.span)
+
+    me check_char_int_binary(op: HirBinOp, left: HirExpr, right: HirExpr, span: Span):
+        """W-CHAR-INT-CONTEXT: a char operand of integer arithmetic (ADR-005).
+        Diagnostic only; mode via SIMPLE_CHAR_INT_CONTEXT (warn | error)."""
+        val op_name = match op:
+            case HirBinOp.Add: "+"
+            case HirBinOp.Sub: "-"
+            case HirBinOp.Mul: "*"
+            case HirBinOp.Div: "/"
+            case HirBinOp.Mod: "%"
+            case _: ""
+        if op_name == "":
+            return
+        val left_char = self.char_int_operand_is_char(left)
+        val right_char = self.char_int_operand_is_char(right)
+        if not left_char and not right_char:
+            return
+        # `+` is also text concatenation: flag it only against a known integer
+        # (char-vs-text is the separate ADR-005 comparison/concat row).
+        if op_name == "+":
+            val other_is_int = if left_char: self.char_int_operand_is_int(right) else: self.char_int_operand_is_int(left)
+            if not other_is_int:
+                return
+        self.report_char_int_context(op_name, span)
+
+    me check_char_int_method(receiver: HirExpr, method: text, span: Span):
+        """W-CHAR-INT-CONTEXT: an integer-parse conversion on a char receiver
+        (`s[i].to_i64()`, the silent-zero family of ADR-005)."""
+        if not ci_is_int_conversion_method(method):
+            return
+        if not self.char_int_operand_is_char(receiver):
+            return
+        self.report_char_int_context(method, span)
+
+    me report_char_int_context(what: text, span: Span):
+        val mode = ci_mode_resolve(hir_type_env_get(ci_env_name()) ?? "", hir_type_env_get("SIMPLE_SAFETY_PROFILE") ?? "")
+        val msg = ci_message(mode, span.line, span.col, what)
+        # Some forms are lowered more than once; report each site once.
+        for seen in self.diagnostic_messages:
+            if seen.contains(msg):
+                return
+        for err in self.errors:
+            if err.message == msg:
+                return
+        if mode == "error":
+            self.error(msg, span)
+        else:
+            self.warning(msg, span)
+
+    me char_int_operand_is_char(e: HirExpr) -> bool:
+        if cc_is_char_type(self.binding_payload_type(e)):
+            return true
+        # `s[i]` on text yields a char (ADR-005 item 1). The lowerer attaches
+        # no element type to a text index (hir_binding_index_element keeps
+        # the held codegen switch out of binding types), so resolve the base
+        # here, kind-only. A range index `s[a..b]` is text, not a char.
+        match e.kind:
+            case HirExprKind.Index(index_base, index_value):
+                match index_value.kind:
+                    case HirExprKind.Range(_, _, _, _): return false
+                    case _: ()
+                match self.binding_kind_type(index_base.kind, e.span).kind:
+                    case HirTypeKind.Str: return true
+                    case _: return false
+            case _: ()
+        false
+
+    me char_int_operand_is_int(e: HirExpr) -> bool:
+        match self.binding_payload_type(e).kind:
+            case HirTypeKind.Int(_, _): return true
+            case _: ()
+        match e.kind:
+            case HirExprKind.IntLit(_, _): return true
+            # `h * 31 + s[i]`: an arithmetic subterm is integer-valued.
+            case HirExprKind.Binary(inner_op, inner_left, inner_right):
+                match inner_op:
+                    case HirBinOp.Sub | HirBinOp.Mul | HirBinOp.Div | HirBinOp.Mod: return true
+                    case HirBinOp.Add: return self.char_int_operand_is_int(inner_left) or self.char_int_operand_is_int(inner_right)
+                    case _: return false
+            case _: ()
+        false
 
     me binding_payload_type(source: HirExpr, bind_optional_payload: bool = false) -> HirType:
         # Resolve once with the same projection used for symbol registration.
@@ -79,6 +525,52 @@ impl HirLowering:
 
     # A discard is an assignment target, never a variable read. Keep this
     # shared by structured statements and the flat parser's expression form.
+    # E_IMMUTABLE_WRITE (IMM-01): a write whose place roots at a symbol declared
+    # `Immutable<T>` (field / index chain, transitively). A plain rebinding of
+    # the symbol itself is not a write through the view and stays a separate rule.
+    me flag_immutable_view_write(lhs: HirExpr, span: Span):
+        if self.immutable_view_symbols.len() == 0:
+            return
+        var cursor = lhs
+        var through_member = false
+        var steps = 0
+        while steps < 64:
+            steps = steps + 1
+            match cursor.kind:
+                case HirExprKind.Field(fbase, _, _):
+                    cursor = fbase
+                    through_member = true
+                case HirExprKind.Index(ibase, _):
+                    cursor = ibase
+                    through_member = true
+                case HirExprKind.NamedVar(rsym, rname):
+                    if through_member and self.immutable_view_symbols.contains_key(rsym.id):
+                        val handle = self.immutable_view_symbols[rsym.id]
+                        self.error("E_IMMUTABLE_WRITE: cannot write through read-only view `{rname}: {handle}<T>`; write via a mutable alias of the object instead", span)
+                    return
+                case HirExprKind.Var(rsym2):
+                    if through_member and self.immutable_view_symbols.contains_key(rsym2.id):
+                        self.error("E_IMMUTABLE_WRITE: cannot write through a read-only `{self.immutable_view_symbols[rsym2.id]}<T>` handle; write via a mutable alias of the object instead", span)
+                    return
+                case _:
+                    return
+
+    # E_FROZEN_ALIAS (IMM-04): a `var` initialised directly from a pinned
+    # `RevisionImmutable<T>` / `FrozenImmutable<T>` handle would be a mutable
+    # alias of content that must not change. A live `Immutable<T>` may be
+    # aliased (other writers are allowed by contract); a `val` alias stays read-only.
+    me flag_frozen_alias(init: HirExpr, span: Span):
+        if self.immutable_view_symbols.len() == 0:
+            return
+        match init.kind:
+            case HirExprKind.NamedVar(asym, aname):
+                if self.immutable_view_symbols.contains_key(asym.id):
+                    val handle = self.immutable_view_symbols[asym.id]
+                    if handle != "Immutable":
+                        self.error("E_FROZEN_ALIAS: cannot bind a mutable alias to `{aname}: {handle}<T>`; copy it into a fresh value instead", span)
+            case _:
+                return
+
     me lower_hir_assignment_kind(target: Expr, op: AssignOp?, value: Expr, span: Span) -> HirStmtKind:
         val discard = match target.kind:
             case ExprKind.Ident(name): name == "_"
@@ -86,7 +578,7 @@ impl HirLowering:
         if discard:
             if op.?:
                 self.error("discard assignment does not support a compound operator", span)
-                return HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, type_: nil, span: span))
+                return HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span))
             # Lower exactly once. A unit block retains the RHS effects but
             # cannot accidentally promote a final discard to a value tail.
             val rhs = self.lower_hir_expr(value)
@@ -98,7 +590,26 @@ impl HirLowering:
             return HirStmtKind.Expr(HirExpr(kind: HirExprKind.Block(discard_block),
                 has_type_: true, type_: unit_type, span: span))
         val hir_op: HirAssignOp? = self.lower_hir_assign_op_opt(op)
+        # Setter forwarding (REQ-SELFHOST-ACCESSOR-003): `recv.x = v` with no
+        # real field `x` becomes `recv.set_x(v)`. Only a pure receiver path
+        # (`a` or `a.b.c`) is probed, so re-lowering it for the ordinary path is
+        # side-effect free.
+        # Discriminant-gated: see the SEED PATTERN HAZARD note in expression_core.
+        if hir_expr_kind_disc(target.kind) == hir_expr_kind_disc(ExprKind.Field(target, "")):
+            match target.kind:
+                case ExprKind.Field(acc_base, acc_name):
+                    val acc_base_e: Expr = acc_base
+                    if accessor_pure_receiver_path(acc_base_e):
+                        val acc_hir_base = self.lower_hir_expr(acc_base_e)
+                        val acc_rhs = self.lower_hir_expr(value)
+                        if val acc_call = self.lower_accessor_write(acc_hir_base, acc_name, acc_rhs, hir_op, span):
+                            return acc_call
+                        val acc_lhs = self.lower_hir_expr(target)
+                        self.flag_immutable_view_write(acc_lhs, span)
+                        return HirStmtKind.Assign(acc_lhs, hir_op, acc_rhs)
+                case _: ()
         val lhs = self.lower_hir_expr(target)
+        self.flag_immutable_view_write(lhs, span)
         val rhs = self.lower_hir_expr(value)
         # Preserve the optional operator through the declared optional slot:
         # absence means a plain write; presence means a compound assignment.
@@ -167,7 +678,14 @@ impl HirLowering:
                             # seen) is globally valid for the struct name.
                             if self.struct_field_order_by_name.has(callee_name):
                                 val field_order: [text] = self.struct_field_order_by_name[callee_name]
-                                var known_fields = self.struct_field_types_by_name[callee_name]
+                                # Copy, never mutate in place: the declaration
+                                # registers ONE dict under both the bare and the
+                                # module-qualified key, and the qualified key must
+                                # keep the declared types (binding_field_type).
+                                var known_fields: Dict<text, HirType> = {}
+                                val declared_fields = self.struct_field_types_by_name[callee_name]
+                                for declared_name in declared_fields.keys():
+                                    known_fields[declared_name] = declared_fields[declared_name]
                                 var arg_i = 0
                                 while arg_i < call_args.len() and arg_i < field_order.len():
                                     val field_name_at_i = field_order[arg_i]
@@ -195,23 +713,18 @@ impl HirLowering:
                 for raw_elem in elements:
                     # ANY-transport hazard sweep round 3: annotated rebind.
                     val elem: Expr = raw_elem
-                    val elem_hir_type = match elem.kind:
-                        case ExprKind.IntLit(_):
-                            Some(HirType(kind: HirTypeKind.Int(64, true), span: elem.span))
-                        case ExprKind.FloatLit(_):
-                            Some(HirType(kind: HirTypeKind.Float(64), span: elem.span))
-                        case ExprKind.FloatLexeme(_):
-                            Some(HirType(kind: HirTypeKind.Float(64), span: elem.span))
-                        case ExprKind.StringLit(_, _):
-                            Some(HirType(kind: HirTypeKind.Str, span: elem.span))
-                        case ExprKind.BoolLit(_):
-                            Some(HirType(kind: HirTypeKind.Bool, span: elem.span))
-                        case _:
-                            nil
-                    if val known_elem_type = elem_hir_type:
-                        elem_types = elem_types.push(known_elem_type)
-                    else:
-                        elem_types = elem_types.push(HirType(kind: HirTypeKind.Int(64, true), span: elem.span))
+                    # Native AV (field_tuple_element_type+0x160, s3_fable50): an
+                    # untyped `Some(HirType)/nil` match + `if val` was typed i64
+                    # and pushed the pointer via rt_value_int_wide. Typed kind,
+                    # direct push; the fallback was Int(64) on both paths anyway.
+                    val elem_kind: HirTypeKind = match elem.kind:
+                        case ExprKind.IntLit(_): HirTypeKind.Int(64, true)
+                        case ExprKind.FloatLit(_): HirTypeKind.Float(64)
+                        case ExprKind.FloatLexeme(_): HirTypeKind.Float(64)
+                        case ExprKind.StringLit(_, _): HirTypeKind.Str
+                        case ExprKind.BoolLit(_): HirTypeKind.Bool
+                        case _: HirTypeKind.Int(64, true)
+                    elem_types = elem_types.push(HirType(kind: elem_kind, span: elem.span))
                 self.local_tuple_types[sym.id] = elem_types
             case _: ()
 
@@ -241,7 +754,7 @@ impl HirLowering:
                             if not range_resolves:
                                 val range_start = self.lower_hir_expr(range_args[0].value)
                                 val range_end = self.lower_hir_expr(range_args[1].value)
-                                return HirExpr(kind: HirExprKind.Range(range_start, range_end, false, None), has_type_: false, type_: nil, span: iter.span)
+                                return HirExpr(kind: HirExprKind.Range(range_start, range_end, false, None), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: iter.span), span: iter.span)
                     case _:
                         pass
             case _:
@@ -255,7 +768,7 @@ impl HirLowering:
         if op.?:
             self.lower_hir_assign_op(op.unwrap())
         else:
-            nil
+            None
 
     me lower_hir_with_items(items: [WithItem]) -> [HirWithItem]:
         var result: [HirWithItem] = []
@@ -266,9 +779,10 @@ impl HirLowering:
                 val symbol = self.symbols.define(item.target ?? "", SymbolKind.Variable, nil, item.span, Visibility.Private, false, nil)
                 Some(symbol)
             else:
-                nil
+                None
             val hir_item = HirWithItem(
                 context_expr: hir_context,
+                has_target: item.has_target,
                 target: hir_target,
                 span: item.span
             )
@@ -331,7 +845,7 @@ impl HirLowering:
                 if elements.len() != names.len():
                     # Ordinary lowering errors are fatal by default.
                     self.error("tuple destructure arity mismatch for `val (" + inner + ")`: " + names.len().to_text() + " name(s) on the left vs " + elements.len().to_text() + " value(s) on the right", span)
-                    [HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, has_type_: false, type_: nil, span: span)), span: span)]
+                    [HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)), span: span)]
                 else:
                     var result: [HirStmt] = []
                     var i = 0
@@ -340,6 +854,7 @@ impl HirLowering:
                         val hir_init = self.lower_hir_expr(elements[i])
                         val binding_type = self.binding_payload_type(hir_init)
                         val symbol = self.symbols.define(nm, SymbolKind.Variable, binding_type, span, Visibility.Private, false, nil)
+                        self.local_annotation_provenance[symbol.id] = false
                         result = result.push(HirStmt(kind: HirStmtKind.Let(symbol, binding_type, hir_init), span: span))
                         i = i + 1
                     result
@@ -365,7 +880,7 @@ impl HirLowering:
                 if elements.len() != names.len():
                     # Ordinary lowering errors are fatal by default.
                     self.error("tuple destructure arity mismatch for `var (" + inner + ")`: " + names.len().to_text() + " name(s) on the left vs " + elements.len().to_text() + " value(s) on the right", span)
-                    [HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, has_type_: false, type_: nil, span: span)), span: span)]
+                    [HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)), span: span)]
                 else:
                     var result: [HirStmt] = []
                     var i = 0
@@ -374,6 +889,7 @@ impl HirLowering:
                         val hir_init = self.lower_hir_expr(elements[i])
                         val binding_type = self.binding_payload_type(hir_init)
                         val symbol = self.symbols.define(nm, SymbolKind.Variable, binding_type, span, Visibility.Private, true, nil)
+                        self.local_annotation_provenance[symbol.id] = false
                         result = result.push(HirStmt(kind: HirStmtKind.Let(symbol, binding_type, hir_init), span: span))
                         i = i + 1
                     result
@@ -456,13 +972,20 @@ impl HirLowering:
             case _: nil
         if val ta_bs = ta_base_sym:
             if self.local_tuple_types.has(ta_bs.id):
-                for ta_elem_type in self.local_tuple_types[ta_bs.id]:
+                # Native: class-field dict bracket read of an array value is
+                # unsafe (dict_native_pitfalls.md); read via get (cf. #7170).
+                val ta_found: [HirType] = self.local_tuple_types.get(ta_bs.id) ?? []
+                for ta_elem_type in ta_found:
                     ta_elem_types = ta_elem_types.push(ta_elem_type)
         if ta_elem_types.len() == 0:
             val ta_callee_name: text = self.td_init_callee_name(hir_value)
             if ta_callee_name != "" and self.fn_tuple_returns.has(ta_callee_name):
                 for ta_return_type in self.fn_tuple_returns[ta_callee_name]:
                     ta_elem_types = ta_elem_types.push(ta_return_type)
+        if ta_elem_types.len() == 0:
+            # `(a, b) = f()?`: see lower_tuple_destructure's same fallback.
+            val ta_typed = hir_binding_tuple_elements(value_type, span)
+            if ta_typed.len() == targets.len(): ta_elem_types = ta_typed
         var i = 0
         while i < targets.len():
             # A bare `_` target discards its element, matching the `pname != "_"`
@@ -472,15 +995,15 @@ impl HirLowering:
                 case ExprKind.Ident(ta_nm): ta_nm == "_"
                 case _: false
             if not ta_is_hole:
-                val ta_idx_type: HirType? = if i < ta_elem_types.len(): ta_elem_types[i] else: nil
+                val ta_idx_type: HirType = if i < ta_elem_types.len(): ta_elem_types[i] else: HirType(kind: HirTypeKind.Unit, span: span)
                 val ta_idx_expr = HirExpr(kind: HirExprKind.Index(
-                    HirExpr(kind: HirExprKind.Var(tmp_sym), has_type_: false, type_: nil, span: span),
-                    HirExpr(kind: HirExprKind.IntLit(i, None), has_type_: false, type_: nil, span: span)
+                    HirExpr(kind: HirExprKind.Var(tmp_sym), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span),
+                    HirExpr(kind: HirExprKind.IntLit(i, None), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
                 ), has_type_: i < ta_elem_types.len(), type_: ta_idx_type, span: span)
                 stmts = stmts.push(HirStmt(kind: HirStmtKind.Assign(
                     self.lower_hir_expr(targets[i]), None, ta_idx_expr), span: span))
             i = i + 1
-        HirStmt(kind: HirStmtKind.Block(HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: span), span: span)), span: span)
+        HirStmt(kind: HirStmtKind.Block(HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span), span: span)), span: span)
 
     me lower_tuple_destructure(name: text, hir_init: HirExpr, is_mut: bool, span: Span) -> HirStmt:
         val inner = name.slice(1, name.len() - 1)
@@ -494,9 +1017,12 @@ impl HirLowering:
             case HirExprKind.Var(td_sym): td_sym
             case HirExprKind.NamedVar(td_sym2, _): td_sym2
             case _: nil
-        if val td_bs = td_base_sym:
+        if td_base_sym.?:
+            val td_bs = td_base_sym ?? SymbolId(id: -1)
             if self.local_tuple_types.has(td_bs.id):
-                for td_elem_type in self.local_tuple_types[td_bs.id]:
+                # Native-safe get read (see ta_found above).
+                val td_found: [HirType] = self.local_tuple_types.get(td_bs.id) ?? []
+                for td_elem_type in td_found:
                     td_elem_types = td_elem_types.push(td_elem_type)
         # Call init: `val (a, b, c) = f(...)` where f's declared return type
         # is a tuple. Without this, every destructured element's Let has a
@@ -518,20 +1044,29 @@ impl HirLowering:
             if td_callee_name != "" and self.fn_tuple_returns.has(td_callee_name):
                 for td_return_type in self.fn_tuple_returns[td_callee_name]:
                     td_elem_types = td_elem_types.push(td_return_type)
+        # Any other typed initializer (`f()?`, `r.unwrap()`, a field): the temp
+        # already carries the resolved tuple type. Without this every name of
+        # `val (n, note) = f()?` was Infer, so `if val s = note` on a `text?`
+        # slot never decoded the payload (printed the raw word natively) and
+        # `note.unwrap()` was an unresolved method call.
+        if td_elem_types.len() == 0:
+            val td_typed = hir_binding_tuple_elements(value_type, span)
+            if td_typed.len() == parts.len(): td_elem_types = td_typed
         var i = 0
         while i < parts.len():
             val pname = parts[i]
             if pname != "_":
-                val td_idx_type: HirType? = if i < td_elem_types.len(): td_elem_types[i] else: nil
+                val td_idx_type: HirType = if i < td_elem_types.len(): td_elem_types[i] else: HirType(kind: HirTypeKind.Unit, span: span)
                 val idx_expr = HirExpr(kind: HirExprKind.Index(
-                    HirExpr(kind: HirExprKind.Var(tmp_sym), has_type_: false, type_: nil, span: span),
-                    HirExpr(kind: HirExprKind.IntLit(i, None), has_type_: false, type_: nil, span: span)
+                    HirExpr(kind: HirExprKind.Var(tmp_sym), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span),
+                    HirExpr(kind: HirExprKind.IntLit(i, None), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
                 ), has_type_: i < td_elem_types.len(), type_: td_idx_type, span: span)
                 val binding_type = self.binding_payload_type(idx_expr)
                 val psym = self.symbols.define(pname, SymbolKind.Variable, binding_type, span, Visibility.Private, is_mut, nil)
+                self.local_annotation_provenance[psym.id] = false
                 stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(psym, binding_type, idx_expr), span: span))
             i = i + 1
-        HirStmt(kind: HirStmtKind.Block(HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: span), span: span)), span: span)
+        HirStmt(kind: HirStmtKind.Block(HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span), span: span)), span: span)
 
     me lower_hir_stmt(s: Stmt) -> HirStmt:
         # DIRECT typed field read, NOT `match s: case Stmt(k, _): k` — the
@@ -579,8 +1114,15 @@ impl HirLowering:
             # Decide from the AST kind, not the lowered nullable HirType slot.
             val v_ast_type: Type = v_type ?? Type(kind: TypeKind.Infer, span: s.span)
             val v_has_annotation = hir_type_kind_disc(v_ast_type.kind) != hir_type_kind_disc(TypeKind.Infer)
-            val v_hir_type = if v_has_annotation:
+            # Lowered once; the bare copy feeds the non-optional Let.type_ payload
+            # (an `if ..: v_hir_type` arm there is `HirType?` and is rejected by
+            # the MIR enum payload check). The Error placeholder is never read.
+            val v_annotated_hir_type: HirType = if v_has_annotation:
                 self.lower_type(v_ast_type)
+            else:
+                HirType(kind: HirTypeKind.Error, span: s.span)
+            val v_hir_type = if v_has_annotation:
+                v_annotated_hir_type
             else:
                 nil
             # `HirStmtKind.Let.type_` is a PLAIN NULLABLE, not an Option box
@@ -602,7 +1144,8 @@ impl HirLowering:
             # stolen by Poll.unwrap and returns raw 0, `??` corrupts it too.
             # Removing the box removes the extraction, so there is nothing to corrupt.
             val v_lowered_init = self.lower_hir_expr(v_init)
-            val v_hir_init = self.retain_attributed_collection_type(v_lowered_init, v_hir_type)
+            val v_hir_init = if v_has_annotation: self.retain_attributed_collection_type(v_lowered_init, v_hir_type) else: v_lowered_init
+            self.validate_presence_binding(v_hir_init.kind, s.bind_optional_payload, s.binding_explicit_presence, s.span)
             var v_sym_type = v_hir_type
             if not v_has_annotation:
                 val inferred = self.binding_source_type(v_hir_init, s.bind_optional_payload)
@@ -610,10 +1153,14 @@ impl HirLowering:
                     case HirTypeKind.Error: ()
                     case _: v_sym_type = inferred
             val v_symbol = self.symbols.define(v_name, SymbolKind.Variable, v_sym_type, s.span, Visibility.Private, false, nil)
+            self.local_annotation_provenance[v_symbol.id] = v_has_annotation
+            if v_has_annotation and is_read_only_handle_name(parser_type_kind_named_name(v_ast_type.kind)):
+                self.immutable_view_symbols[v_symbol.id] = parser_type_kind_named_name(v_ast_type.kind)
+            self.mark_optional_call_init(v_symbol.id, v_init, v_has_annotation, s.bind_optional_payload, v_sym_type)
             self.try_register_local_struct_type(v_symbol, v_init)
             self.try_register_local_tuple_type(v_symbol, v_init)
             val v_binding_type: HirType = if v_has_annotation:
-                v_hir_type
+                v_annotated_hir_type
             else:
                 self.binding_payload_type(v_hir_init, s.bind_optional_payload)
             return HirStmt(kind: HirStmtKind.Let(v_symbol, v_binding_type, v_hir_init), span: s.span)
@@ -637,28 +1184,48 @@ impl HirLowering:
             # Decide from the AST kind, not the lowered nullable HirType slot.
             val vr_ast_type: Type = vr_type ?? Type(kind: TypeKind.Infer, span: s.span)
             val vr_has_annotation = hir_type_kind_disc(vr_ast_type.kind) != hir_type_kind_disc(TypeKind.Infer)
-            val vr_hir_type = if vr_has_annotation:
+            # Lowered once; the bare copy feeds the non-optional Let.type_
+            # payload (same shape as the `val` path above): an
+            # `if ..: vr_hir_type` arm is `HirType?` and is rejected by the
+            # MIR enum payload check. The Error placeholder is never read.
+            val vr_annotated_hir_type: HirType = if vr_has_annotation:
                 self.lower_type(vr_ast_type)
+            else:
+                HirType(kind: HirTypeKind.Error, span: s.span)
+            val vr_hir_type = if vr_has_annotation:
+                vr_annotated_hir_type
             else:
                 nil
             # Same field migration as the `val` path above; see the note there.
-            var vr_sym_type = if vr_has_annotation: Some(vr_hir_type) else: nil
+            # vr_hir_type is already `HirType?`; `Some(vr_hir_type)` here built
+            # Some(Some(HirType)) on native and define()'s one `??` read the inner box.
+            var vr_sym_type = vr_hir_type
             val vr_lowered_init = if vr_init.?:
                 self.lower_hir_expr(vr_init ?? sk_dummy)
             else:
-                HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: s.span)
-            val vr_hir_init = self.retain_attributed_collection_type(vr_lowered_init, vr_hir_type)
+                # No initializer: is_uninit_marker tells this synthesized NilLit
+                # apart from a source-written `nil`; see interp_is_uninit_marker_init.
+                HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span, is_uninit_marker: true)
+            val vr_hir_init = if vr_has_annotation: self.retain_attributed_collection_type(vr_lowered_init, vr_hir_type) else: vr_lowered_init
+            self.validate_presence_binding(vr_hir_init.kind, s.bind_optional_payload, s.binding_explicit_presence, s.span)
             if not vr_has_annotation:
                 val inferred = self.binding_source_type(vr_hir_init, s.bind_optional_payload)
                 match inferred.kind:
                     case HirTypeKind.Error: ()
                     case _: vr_sym_type = inferred
             val vr_symbol = self.symbols.define(vr_name, SymbolKind.Variable, vr_sym_type, s.span, Visibility.Private, true, nil)
-            if val vr_init_present = vr_init:
+            self.local_annotation_provenance[vr_symbol.id] = vr_has_annotation
+            if vr_has_annotation and is_read_only_handle_name(parser_type_kind_named_name(vr_ast_type.kind)):
+                self.immutable_view_symbols[vr_symbol.id] = parser_type_kind_named_name(vr_ast_type.kind)
+            if not is_read_only_handle_name(parser_type_kind_named_name(vr_ast_type.kind)):
+                self.flag_frozen_alias(vr_hir_init, s.span)
+            if vr_init.?:
+                val vr_init_present = vr_init ?? sk_dummy
+                self.mark_optional_call_init(vr_symbol.id, vr_init_present, vr_has_annotation, s.bind_optional_payload, vr_sym_type)
                 self.try_register_local_struct_type(vr_symbol, vr_init_present)
                 self.try_register_local_tuple_type(vr_symbol, vr_init_present)
             val vr_binding_type: HirType = if vr_has_annotation:
-                vr_hir_type
+                vr_annotated_hir_type
             else:
                 self.binding_payload_type(vr_hir_init, s.bind_optional_payload)
             return HirStmt(kind: HirStmtKind.Let(vr_symbol, vr_binding_type, vr_hir_init), span: s.span)
@@ -678,12 +1245,12 @@ impl HirLowering:
             # LLVM backend emitted `ret i64 0`, i.e. EVERY user function that
             # used an explicit `return` returned 0 in native-build output. Bind
             # with `if val`, the repo idiom for nullables.
-            var rt_hir: HirExpr? = nil
+            var rt_hir: HirExpr? = None
             if val rt_val_e = rt_val:
                 rt_hir = self.lower_hir_expr(rt_val_e)
             if (rt_env_get("SIMPLE_MIR_RET_TRACE") ?? "") == "1":
                 print "[hir-ret-fast] ast_nil={rt_val == nil} hir_nil={rt_hir == nil}"
-            return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Return(rt_hir), has_type_: false, type_: nil, span: s.span)), span: s.span)
+            return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Return(rt_hir), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span)), span: s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Assign(sk_dummy, None, sk_dummy)):
             val as_target: Expr = match stmt_kind_value:
                 case StmtKind.Assign(atarget, _, _):
@@ -730,7 +1297,7 @@ impl HirLowering:
                 # which can turn a declared value return into NilLit and let
                 # native code fabricate an ABI default.
                 self.error("expression statement payload is malformed", s.span)
-                return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, has_type_: false, type_: nil, span: s.span)), span: s.span)
+                return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span)), span: s.span)
             # The flat parser emits `target = value` as an EXPRESSION
             # statement (expr_assign), never StmtKind.Assign. Route it
             # into HirStmtKind.Assign so MIR's assignment lowering
@@ -750,13 +1317,36 @@ impl HirLowering:
                         assign_target, assign_op, assign_value, s.span), span: s.span)
                 case _:
                     return HirStmt(kind: HirStmtKind.Expr(self.lower_hir_expr(expr_t)), span: s.span)
+        val dummy_tl_cfg = TargetLaterConfig(lane: TargetLane.Host, max_packet: None, call: sk_dummy, span: s.span)
+        val dummy_tl_blk = Block(stmts: [], span: s.span)
+        if sk_disc == hir_stmt_kind_disc(StmtKind.TargetLater(dummy_tl_cfg, dummy_tl_blk)):
+            var tl_ok = false
+            var tl_cfg = dummy_tl_cfg
+            var tl_blk = dummy_tl_blk
+            match stmt_kind_value:
+                case StmtKind.TargetLater(cfg, blk):
+                    tl_cfg = cfg
+                    tl_blk = blk
+                    tl_ok = true
+                case _:
+                    pass
+            if tl_ok:
+                return HirStmt(kind: self.lower_hir_target_later_kind(tl_cfg, tl_blk, s.span), span: s.span)
 
         val kind: HirStmtKind = match stmt_kind_value:
             case StmtKind.Val(name, type_, init):
                 val ast_type: Type = type_ ?? Type(kind: TypeKind.Infer, span: s.span)
                 val has_annotation = hir_type_kind_disc(ast_type.kind) != hir_type_kind_disc(TypeKind.Infer)
-                val hir_type = if has_annotation:
+                # Lowered once; the bare copy feeds the non-optional
+                # Let.type_ payload (an `if ..: hir_type` arm is `HirType?`
+                # and is rejected by the MIR enum payload check). The Error
+                # placeholder is never read.
+                val annotated_hir_type: HirType = if has_annotation:
                     self.lower_type(ast_type)
+                else:
+                    HirType(kind: HirTypeKind.Error, span: s.span)
+                val hir_type = if has_annotation:
+                    annotated_hir_type
                 else:
                     nil
                 # `HirStmtKind.Let.type_` is a PLAIN NULLABLE, not an Option box
@@ -771,7 +1361,8 @@ impl HirLowering:
                 # get_symbol_type wrapper at hir_symbol_table_methods.spl:467) and is
                 # deliberately NOT migrated here, so it keeps receiving the boxed form.
                 val lowered_init = self.lower_hir_expr(init)
-                val hir_init = self.retain_attributed_collection_type(lowered_init, hir_type)
+                val hir_init = if has_annotation: self.retain_attributed_collection_type(lowered_init, hir_type) else: lowered_init
+                self.validate_presence_binding(hir_init.kind, s.bind_optional_payload, s.binding_explicit_presence, s.span)
                 var sym_type = hir_type
                 if not has_annotation:
                     val inferred = self.binding_source_type(hir_init, s.bind_optional_payload)
@@ -779,8 +1370,10 @@ impl HirLowering:
                         case HirTypeKind.Error: ()
                         case _: sym_type = inferred
                 val symbol = self.symbols.define(name, SymbolKind.Variable, sym_type, s.span, Visibility.Private, false, nil)
+                self.local_annotation_provenance[symbol.id] = has_annotation
+                self.mark_optional_call_init(symbol.id, init, has_annotation, s.bind_optional_payload, sym_type)
                 val binding_type: HirType = if has_annotation:
-                    hir_type
+                    annotated_hir_type
                 else:
                     self.binding_payload_type(hir_init, s.bind_optional_payload)
                 HirStmtKind.Let(symbol, binding_type, hir_init)
@@ -788,8 +1381,16 @@ impl HirLowering:
             case StmtKind.Var(name, type_, init):
                 val ast_type: Type = type_ ?? Type(kind: TypeKind.Infer, span: s.span)
                 val has_annotation = hir_type_kind_disc(ast_type.kind) != hir_type_kind_disc(TypeKind.Infer)
-                val hir_type = if has_annotation:
+                # Lowered once; the bare copy feeds the non-optional
+                # Let.type_ payload (an `if ..: hir_type` arm is `HirType?`
+                # and is rejected by the MIR enum payload check). The Error
+                # placeholder is never read.
+                val annotated_hir_type: HirType = if has_annotation:
                     self.lower_type(ast_type)
+                else:
+                    HirType(kind: HirTypeKind.Error, span: s.span)
+                val hir_type = if has_annotation:
+                    annotated_hir_type
                 else:
                     nil
                 # `HirStmtKind.Let.type_` is a PLAIN NULLABLE, not an Option box
@@ -804,19 +1405,24 @@ impl HirLowering:
                 # get_symbol_type wrapper at hir_symbol_table_methods.spl:467) and is
                 # deliberately NOT migrated here, so it keeps receiving the boxed form.
                 var sym_type = hir_type
-                val lowered_init = if init.?:
-                    self.lower_hir_expr(init ?? Expr(kind: ExprKind.NilLit, span: s.span))
+                val lowered_init = if val init_expr = init:
+                    self.lower_hir_expr(init_expr)
                 else:
-                    HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: s.span)
-                val hir_init = self.retain_attributed_collection_type(lowered_init, hir_type)
+                    # No initializer: is_uninit_marker marks the synthesized NilLit (see above).
+                    HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span, is_uninit_marker: true)
+                val hir_init = if has_annotation: self.retain_attributed_collection_type(lowered_init, hir_type) else: lowered_init
+                self.validate_presence_binding(hir_init.kind, s.bind_optional_payload, s.binding_explicit_presence, s.span)
                 if not has_annotation:
                     val inferred = self.binding_source_type(hir_init, s.bind_optional_payload)
                     match inferred.kind:
                         case HirTypeKind.Error: ()
                         case _: sym_type = inferred
                 val symbol = self.symbols.define(name, SymbolKind.Variable, sym_type, s.span, Visibility.Private, true, nil)
+                self.local_annotation_provenance[symbol.id] = has_annotation
+                if val init_present = init:
+                    self.mark_optional_call_init(symbol.id, init_present, has_annotation, s.bind_optional_payload, sym_type)
                 val binding_type: HirType = if has_annotation:
-                    hir_type
+                    annotated_hir_type
                 else:
                     self.binding_payload_type(hir_init, s.bind_optional_payload)
                 HirStmtKind.Let(symbol, binding_type, hir_init)
@@ -841,27 +1447,53 @@ impl HirLowering:
                 # prepend one `Let name = __elem[i]` per destructured name to
                 # the (already-lowered) loop body so they're in scope for
                 # every statement in it.
-                val for_is_tuple = var_.len() >= 2 and var_.slice(0, 1) == "(" and var_.slice(var_.len() - 1, var_.len()) == ")"
+                val for_is_tuple = var_.len() >= 2 and var_.slice(0, 1) == "(" and var_.slice(var_.byte_len() - 1, var_.byte_len()) == ")"
                 val hir_body_kind = if for_is_tuple:
                     val for_inner = var_.slice(1, var_.len() - 1)
                     val for_parts = for_inner.split(",")
                     val for_elem_sym = self.symbols.define("__for_tuple_elem", SymbolKind.Variable, nil, s.span, Visibility.Private, false, nil)
+                    # Dictionary iteration yields (K, V) pairs: retain the
+                    # declared key/value types for the two binders instead of
+                    # letting them erase (dict_nominal_tuple_binders_any_bootstrap_2026_10_21).
+                    # Only an already-declared Dict iterable is used; nothing is
+                    # guessed from field names.
+                    var for_dict_key: HirType? = None
+                    var for_dict_val: HirType? = None
+                    if for_parts.len() == 2:
+                        val for_iter_type = self.binding_source_type(hir_iter)
+                        match for_iter_type.kind:
+                            case HirTypeKind.Dict(dict_key_t, dict_val_t):
+                                for_dict_key = dict_key_t
+                                for_dict_val = dict_val_t
+                            case _: ()
+                        # `xs.enumerate()` over a settled `[T]` yields
+                        # `(i64, T)` (enumerate_tuple_element_typed_unit_native_2026-11-13).
+                        match hir_iter.kind:
+                            case HirExprKind.MethodCall(enum_receiver, enum_method, enum_args, _):
+                                if enum_method == "enumerate" and enum_args.len() == 0:
+                                    val enum_element: HirType = self.binding_receiver_element_type(enum_receiver.kind, s.span)
+                                    if not binding_type_is_unknown(enum_element):
+                                        for_dict_key = HirType(kind: HirTypeKind.Int(64, true), span: s.span)
+                                        for_dict_val = enum_element
+                            case _: ()
                     var for_prefix: [HirStmt] = []
                     var for_pi = 0
                     while for_pi < for_parts.len():
                         val for_pname = for_parts[for_pi]
                         if for_pname != "_":
                             val for_idx_expr = HirExpr(kind: HirExprKind.Index(
-                                HirExpr(kind: HirExprKind.Var(for_elem_sym), has_type_: false, type_: nil, span: s.span),
-                                HirExpr(kind: HirExprKind.IntLit(for_pi, None), has_type_: false, type_: nil, span: s.span)
-                            ), has_type_: false, type_: nil, span: s.span)
-                            val for_psym = self.symbols.define(for_pname, SymbolKind.Variable, nil, s.span, Visibility.Private, false, nil)
-                            for_prefix = for_prefix.push(HirStmt(kind: HirStmtKind.Let(for_psym, self.binding_payload_type(for_idx_expr), for_idx_expr), span: s.span))
+                                HirExpr(kind: HirExprKind.Var(for_elem_sym), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span),
+                                HirExpr(kind: HirExprKind.IntLit(for_pi, None), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span)
+                            ), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span)
+                            val for_declared: HirType? = if for_pi == 0: for_dict_key else: for_dict_val
+                            val for_psym = self.symbols.define(for_pname, SymbolKind.Variable, for_declared, s.span, Visibility.Private, false, nil)
+                            self.local_annotation_provenance[for_psym.id] = false
+                            val for_let_type: HirType = if val declared = for_declared: declared else: self.binding_payload_type(for_idx_expr)
+                            for_prefix = for_prefix.push(HirStmt(kind: HirStmtKind.Let(for_psym, for_let_type, for_idx_expr), span: s.span))
                         for_pi = for_pi + 1
                     val for_hir_body_raw = self.lower_hir_block(body)
                     val for_hir_body = HirBlock(
-                        # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-                        stmts: hir_stmt_concat_copy_v1(for_prefix, for_hir_body_raw.stmts),
+                        stmts: for_prefix.concat(for_hir_body_raw.stmts),
                         has: for_hir_body_raw.has,
                         value: for_hir_body_raw.value,
                         span: for_hir_body_raw.span
@@ -869,7 +1501,7 @@ impl HirLowering:
                     HirExprKind.For(for_elem_sym, hir_iter, for_hir_body, None)
                 else:
                     val iterable_type = self.binding_source_type(hir_iter)
-                    var element_type: HirType? = nil
+                    var element_type: HirType? = None
                     match iterable_type.kind:
                         case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
                             element_type = element
@@ -882,18 +1514,19 @@ impl HirLowering:
                 # Desugar to loop
                 HirStmtKind.Expr(HirExpr(
                     kind: hir_body_kind,
-                    has_type_: false, type_: nil,
+                    has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span),
                     span: s.span
                 ))
 
             case StmtKind.While(cond, body):
                 self.loop_depth = self.loop_depth + 1
                 val hir_cond = self.lower_hir_expr(cond)
+                self.check_char_condition(hir_cond)
                 val hir_body = self.lower_hir_block(body)
                 self.loop_depth = self.loop_depth - 1
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.While(hir_cond, hir_body, None),
-                    has_type_: false, type_: nil,
+                    has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span),
                     span: s.span
                 ))
 
@@ -903,7 +1536,7 @@ impl HirLowering:
                 self.loop_depth = self.loop_depth - 1
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Loop(hir_body, None),
-                    has_type_: false, type_: nil,
+                    has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span),
                     span: s.span
                 ))
 
@@ -916,21 +1549,23 @@ impl HirLowering:
                     print "[hir-ret] StmtKind.Return ast_nil={value == nil} hir_nil={return_value == nil}"
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Return(return_value),
-                    has_type_: false, type_: nil,
+                    has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span),
                     span: s.span
                 ))
 
             case StmtKind.Break(label):
+                # HIR Break.label is `text` ("" = unlabeled); the AST label is `text?`.
+                val break_label: text = label ?? ""
                 HirStmtKind.Expr(HirExpr(
-                    kind: HirExprKind.Break(label, None),
-                    has_type_: false, type_: nil,
+                    kind: HirExprKind.Break(break_label, None),
+                    has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span),
                     span: s.span
                 ))
 
             case StmtKind.Continue(label):
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Continue(label),
-                    has_type_: false, type_: nil,
+                    has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span),
                     span: s.span
                 ))
 
@@ -938,14 +1573,14 @@ impl HirLowering:
                 val yield_value: HirExpr? = Some(self.lower_hir_expr(value))
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Yield(yield_value),
-                    has_type_: false, type_: nil,
+                    has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span),
                     span: s.span
                 ))
 
             case StmtKind.Throw(value):
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Throw(self.lower_hir_expr(value)),
-                    has_type_: false, type_: nil,
+                    has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span),
                     span: s.span
                 ))
 
@@ -958,16 +1593,62 @@ impl HirLowering:
 
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.With(hir_items, hir_body),
-                    has_type_: false, type_: nil,
+                    has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span),
                     span: s.span
                 ))
+
+            case StmtKind.TargetLater(config, body):
+                self.lower_hir_target_later_kind(config, body, s.span)
 
             case _:
                 self.error("unsupported statement kind", s.span)
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Error,
-                    has_type_: false, type_: nil,
+                    has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span),
                     span: s.span
                 ))
 
         HirStmt(kind: kind, span: s.span)
+
+    me lower_hir_target_later_kind(config: TargetLaterConfig, body_block: Block, span: Span) -> HirStmtKind:
+        """Lower frontend `StmtKind.TargetLater` into canonical `HirExprKind.HostGpuLane`."""
+        var lane_code: i64 = 1
+        match config.lane:
+            case TargetLane.Gpu:
+                lane_code = 2
+            case TargetLane.Host:
+                lane_code = 1
+        var payload_size: i64 = 0
+        if val mp = config.max_packet:
+            if mp > 0:
+                payload_size = mp
+        if payload_size == 0:
+            payload_size = self.lower_host_gpu_lane_payload(config.call)
+        val marker = if self.symbols.lookup_or_invalid("target").is_valid():
+            self.lower_hir_expr(config.call)
+        else:
+            HirExpr(
+                kind: HirExprKind.UnitLit,
+                has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span),
+                span: span
+            )
+        val body = self.lower_hir_block(body_block)
+        HirStmtKind.Expr(HirExpr(
+            kind: HirExprKind.HostGpuLane(lane_code, payload_size, marker, body),
+            has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span),
+            span: span
+        ))
+
+
+# True for an identifier or a field chain over one (`a`, `a.b`, `a.b.c`): a
+# receiver whose lowering has no side effects, so it may be lowered twice.
+fn accessor_pure_receiver_path(e: Expr) -> bool:
+    if hir_expr_kind_disc(e.kind) == hir_expr_kind_disc(ExprKind.Ident("")):
+        return true
+    if hir_expr_kind_disc(e.kind) == hir_expr_kind_disc(ExprKind.Field(e, "")):
+        match e.kind:
+            case ExprKind.Field(inner, _):
+                val inner_e: Expr = inner
+                return accessor_pure_receiver_path(inner_e)
+            case _: ()
+    false

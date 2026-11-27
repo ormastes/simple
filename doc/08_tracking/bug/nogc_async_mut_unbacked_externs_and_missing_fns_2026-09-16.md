@@ -3,6 +3,29 @@
 Date: 2026-09-16
 Status: OPEN
 
+## 2026-11-03 partial repair: non-inline multicore submission
+
+The missing `multicore_green_try_spawn` facade is implemented using the existing
+runtime pool submission boundary. It submits once, never calls the closure on
+rejection, and returns a rejected handle with no native task and no inline
+completion. `ran_inline_fallback()` now requires an actual inline completion;
+joining a rejected handle fails explicitly instead of inventing a zero result.
+Ordinary `multicore_green_spawn` keeps its existing inline fallback behavior.
+
+The focused contract spec covers rejected and inline handle states and actual
+runtime submission. A typed submitter boundary shared by production and tests
+allows zero/negative rejection and positive acceptance to be injected. A
+side-effecting task and submit-call counts detect forbidden inline execution
+and repeated submission. A separate rejected-join process fixture must reach
+its entry marker, fail with the intended panic, and never print its post-join
+marker; `check-multicore-green-try-spawn.shs` collects both results.
+Execution is **TEST_BLOCKED**: the canonical
+`bin/release/<triple>/simple` self-hosted runtime is absent; `bin/simple.exe` is
+the Rust seed and is not an authorized verification substitute. Authored tests
+are not a PASS. Provider rejection and accepted task execution still require
+self-hosted runtime evidence. The other missing modules/functions and ArcBox
+provider obligations below remain open; this umbrella bug is not resolved.
+
 ## Observed
 
 Worklist specs fail on symbols with no implementation anywhere in `src/lib`
@@ -70,3 +93,46 @@ The existing typed single-threaded `upgrade_rc()` repair does not qualify Arc.
 No new Arc API, fabricated extern, hardcoded failure, Rust/C implementation,
 build, or test execution was introduced in this follow-up. This lane is frozen
 pending the provider implementation; authored Rc tests remain unexecuted.
+
+## Canonical database reconciliation — 2026-11-03
+
+OPEN umbrella; partial source candidate PR #6292 MERGED at 9f8f65dd6376e9e53c4f137fab450dc531496f5b. It adds only multicore_green_try_spawn submission/rejected-join handling; other missing functions and ArcBox providers remain unresolved. TEST_BLOCKED: qualified self-hosted runtime unavailable; behavioral submission/rejection/join proof and required core/MCP checks UNRUN. Await producer-qualified verification; no umbrella closure.
+
+## 2026-11-04 enumeration (libbug-async)
+Seed `run` results: tls_record_capability 3/3 pass (fn exists in http_server/types.spl); driver_write_completion 5/5 pass (io/driver.spl); quic_udp_initial 9/9 pass (spec defines `build_unprotected_initial_shape` itself, so that bullet is stale); `rt_fd_pread` is backed in the seed (file_io.rs) and declared in sffi/fs.spl, but sosix/posix_spec 0/3 still fails. multicore_green_try_spawn_contract 5/6: the failure is `variable rt_pool_submit not found` in the seed interpreter (no runtime provider; native-runtime gap, not pure Simple). ArcBox weak-acquire provider remains open (needs Rust/C provider). No pure-Simple function remains missing.
+
+## 2026-11-04 note (libbug-async lane, fresh release seed on Windows)
+
+- `sosix/posix_spec` (0/1): root cause is the Rust interpreter, not lib. `interpreter_extern/file_io.rs` `rt_file_open` returns -1 and `rt_file_close` returns false under `#[cfg(not(unix))]`, so on Windows the interpreter-run spec gets fd -1 (then pread/pwrite -> -EINVAL via `fd_positioned_args`). `simple run` (native splice) opens fine (fd=3), `simple test` does not. Needs a Windows `rt_file_open`/`rt_file_close` in the interpreter extern (the runtime `descriptor.rs` already has them).
+- `multicore_green_try_spawn_contract_spec` (5/6): `multicore_green_try_spawn` passes the extern `rt_pool_submit` as a first-class value; the interpreter reports "variable `rt_pool_submit` not found". Lib-free repro: `C:/tmp_lb/e1.spl` (extern fn passed by name as `fn() -> i64`). Compiler/interpreter-root; the extern is backed (`interpreter_extern/mod.rs:902`).
+
+## 2026-11-04 note
+
+Seed interpreter: a declared extern fn used as a first-class value (e.g. `rt_pool_submit` passed by name in `multicore_green_try_spawn`) now resolves to a callable. `multicore_green_try_spawn_contract_spec` 5/6 -> 6/6. Regression: `test/01_unit/compiler/interpreter/extern_fn_as_value_spec.spl`.
+
+
+## Triage 2026-11-13 (lane p3-async-20261113, base 80a8116e5e2) — all five named specs green on this base; ArcBox item remains
+
+Fresh re-verification with the tracked seed (`bin/simple.exe`, `--timeout 300`)
+on this Windows base — all five specs named in this record now PASS:
+
+- `concurrent/multicore_green_try_spawn_contract_spec.spl` — 6/6
+- `http_server/tls_record_capability_spec.spl` — 3/3
+- `io/driver_write_completion_spec.spl` — 5/5
+- `quic/quic_udp_initial_spec.spl` — 9/9
+- `sosix/posix_spec.spl` — 3/3 (the Windows `rt_file_open`/`rt_file_close`
+  interpreter gap from the 2026-11-04 note is resolved in the current seed:
+  the spec now opens fd=3 and passes position pread/pwrite assertions)
+
+Remaining open item: the ArcBox atomic weak-acquisition provider follow-up
+(2026-10-21) stands unchanged — it requires a native/interpreter provider
+pair with a verified layout/allocator contract (`try_inc_strong` CAS with
+acquire ordering, single-owner handoff, implicit-weak lifetime), i.e.
+`src/compiler_rust/**` work outside a pure-Simple lane. No source change.
+
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113 (worktree lp3-wt, base f790f7f266e = origin/release/1.0.0 tip, seed binary build-commit 46fe8f6b6def))
+
+Re-verified at this base: the sosix and multicore bullets now PASS on the
+current seed — `test/01_unit/lib/nogc_async_mut/sosix/posix_spec.spl` 3/3 and
+`tes

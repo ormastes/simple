@@ -1,6 +1,5 @@
 use std.async.cancellation.{CancellationToken}
 use std.async.future.{Future}
-use std.async.poll.{Poll}
 use std.common.io.file_read_policy.{
     FileReadPolicyV1, FileViewTransportV1,
     file_read_policy_allows_fallback_v1,
@@ -41,6 +40,7 @@ class ReadOnlyFileViewV1:
     address_space_budget: u64
     open: bool
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in read_only_file_view_open_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn read_only_file_view_open_v1(
     snapshot_root: text,
     path: text,
@@ -73,6 +73,7 @@ fn read_only_file_view_open_v1(
         descriptor, identity!, policy, mapping_supported,
         address_space_budget, true))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in read_only_file_view_adopt_descriptor_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn read_only_file_view_adopt_descriptor_v1(
     descriptor: i64,
     snapshot_digest: text,
@@ -108,6 +109,7 @@ fn read_only_file_view_buffer_error_v1(
         BufferedFileViewErrorV1.read_failed:
             ReadOnlyFileViewErrorV1.open_failed
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in read_only_file_view_read_now_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn read_only_file_view_read_now_v1(
     view: &ReadOnlyFileViewV1,
     offset: u64,
@@ -128,12 +130,12 @@ fn read_only_file_view_read_now_v1(
             view.descriptor, view.identity.snapshot_digest)
         if before == nil or not file_view_identity_equal_v1(view.identity, before!):
             return Err(ReadOnlyFileViewErrorV1.identity_changed)
-        var mapped: [u8]? = nil
+        var mapped: [u8]? = None
         unsafe(capabilities: [ffi]):
             mapped = rt_file_view_map_copy_v1(view.descriptor, offset, length)
         if cancellation.is_cancelled():
             return Err(ReadOnlyFileViewErrorV1.cancelled)
-        if mapped != nil and mapped!.len().to_u64() == length:
+        if mapped.is_some() and mapped!.len().to_u64() == length:
             val after = file_view_descriptor_identity_v1(
                 view.descriptor, view.identity.snapshot_digest)
             if after == nil or not file_view_identity_equal_v1(view.identity, after!):
@@ -180,12 +182,9 @@ fn read_only_file_view_read_async_v1(
     length: u64,
     cancellation: CancellationToken
 ) -> Future<Result[FileViewSliceV1, ReadOnlyFileViewErrorV1] >:
-    # @workaround bug=native_future_receiver_typeparam_2026_10_18 recover=97d8cb355ed527ee0a50c440022500c37f026726 reason=Explicit real Future construction retains the concrete Poll and Result payload owners after static-call receiver specialization fails
     val result: Result[FileViewSliceV1, ReadOnlyFileViewErrorV1] = read_only_file_view_read_now_v1(
         view, offset, length, cancellation)
-    val ready: Poll<Result[FileViewSliceV1, ReadOnlyFileViewErrorV1]> = Poll.Ready(result)
-    val future: Future<Result[FileViewSliceV1, ReadOnlyFileViewErrorV1]> = Future<Result[FileViewSliceV1, ReadOnlyFileViewErrorV1]>(state: [], poll_result: ready)
-    future
+    Future.from_value(result)
 
 fn read_only_file_view_read_v1(
     view: &ReadOnlyFileViewV1,
@@ -198,6 +197,7 @@ fn read_only_file_view_read_v1(
     # allocating a task for an already synchronous read.
     read_only_file_view_read_now_v1(view, offset, length, cancellation)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in read_only_file_view_prefetch_async_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn read_only_file_view_prefetch_async_v1(
     view: &ReadOnlyFileViewV1,
     offset: u64,
@@ -205,31 +205,53 @@ fn read_only_file_view_prefetch_async_v1(
     cancellation: CancellationToken
 ) -> Future<Result[(), ReadOnlyFileViewErrorV1] >:
     if not view.open:
-        # @workaround bug=native_future_receiver_typeparam_2026_10_18 recover=97d8cb355ed527ee0a50c440022500c37f026726 reason=Construct the real Future from explicitly typed Result and Poll locals while the generic static factory loses T
         val result: Result[(), ReadOnlyFileViewErrorV1] = Err(ReadOnlyFileViewErrorV1.closed)
-        val ready: Poll<Result[(), ReadOnlyFileViewErrorV1]> = Poll.Ready(result)
-        val future: Future<Result[(), ReadOnlyFileViewErrorV1]> = Future<Result[(), ReadOnlyFileViewErrorV1]>(state: [], poll_result: ready)
-        return future
+        return Future.from_value(result)
     if cancellation.is_cancelled():
-        # @workaround bug=native_future_receiver_typeparam_2026_10_18 recover=97d8cb355ed527ee0a50c440022500c37f026726 reason=Construct the real Future from explicitly typed Result and Poll locals while the generic static factory loses T
         val result: Result[(), ReadOnlyFileViewErrorV1] = Err(ReadOnlyFileViewErrorV1.cancelled)
-        val ready: Poll<Result[(), ReadOnlyFileViewErrorV1]> = Poll.Ready(result)
-        val future: Future<Result[(), ReadOnlyFileViewErrorV1]> = Future<Result[(), ReadOnlyFileViewErrorV1]>(state: [], poll_result: ready)
-        return future
+        return Future.from_value(result)
     if not file_view_range_valid_v1(view.identity.size, offset, length):
-        # @workaround bug=native_future_receiver_typeparam_2026_10_18 recover=97d8cb355ed527ee0a50c440022500c37f026726 reason=Construct the real Future from explicitly typed Result and Poll locals while the generic static factory loses T
         val result: Result[(), ReadOnlyFileViewErrorV1] = Err(ReadOnlyFileViewErrorV1.invalid_range)
-        val ready: Poll<Result[(), ReadOnlyFileViewErrorV1]> = Poll.Ready(result)
-        val future: Future<Result[(), ReadOnlyFileViewErrorV1]> = Future<Result[(), ReadOnlyFileViewErrorV1]>(state: [], poll_result: ready)
-        return future
+        return Future.from_value(result)
     unsafe(capabilities: [ffi]):
         _ = rt_file_view_prefetch_v1(view.descriptor, offset, length)
-    # @workaround bug=native_future_receiver_typeparam_2026_10_18 recover=97d8cb355ed527ee0a50c440022500c37f026726 reason=Construct the real Future from explicitly typed Result and Poll locals while the generic static factory loses T
     val result: Result[(), ReadOnlyFileViewErrorV1] = Ok(())
-    val ready: Poll<Result[(), ReadOnlyFileViewErrorV1]> = Poll.Ready(result)
-    val future: Future<Result[(), ReadOnlyFileViewErrorV1]> = Future<Result[(), ReadOnlyFileViewErrorV1]>(state: [], poll_result: ready)
-    future
+    Future.from_value(result)
 
+# Mutable source-byte admission without a snapshot/content-authority claim.
+# The native owner retains the opened root while traversing each relative
+# component with openat+NOFOLLOW, then owns one exact regular-file descriptor.
+# This operation does not make a multi-file generation atomic or immutable.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in read_only_file_view_read_beneath_bounded_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn read_only_file_view_read_beneath_bounded_v1(root: text, path: text, max_bytes: i64) -> Result<[u8], text>:
+    if max_bytes < 0 or max_bytes > 16777216: return Err("file_view_invalid_limit")
+    var descriptor: i64 = -1
+    unsafe(capabilities: [ffi]):
+        descriptor = rt_file_view_open_beneath_no_follow_v1(root, path)
+    if descriptor == -2: return Err("file_view_path_outside_root")
+    if descriptor == -3: return Err("file_view_symlink_or_non_regular")
+    if descriptor < 0: return Err("file_view_open_failed_or_unsupported")
+    # Empty snapshot identity explicitly means no snapshot binding. Descriptor
+    # metadata is used only to detect replaced/truncated reads, not acceptance.
+    val identity = file_view_descriptor_identity_v1(descriptor, "")
+    if identity == nil:
+        read_only_file_view_close_descriptor_v1(descriptor)
+        return Err("file_view_identity_unavailable")
+    if identity!.size > (max_bytes as u64):
+        read_only_file_view_close_descriptor_v1(descriptor)
+        return Err("file_view_source_limit")
+    val result = file_view_buffered_read_uncancellable_v1(descriptor, identity!, 0u64, identity!.size)
+    var closed = false
+    unsafe(capabilities: [ffi]):
+        closed = rt_file_view_close_v1(descriptor)
+    if not closed: return Err("file_view_close_failed")
+    match result:
+        case Ok(bytes):
+            if bytes.len() > max_bytes: return Err("file_view_source_limit")
+            Ok(bytes)
+        case Err(_): Err("file_view_read_failed_or_identity_changed")
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in read_only_file_view_close_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn read_only_file_view_close_v1(
     view: ReadOnlyFileViewV1
 ) -> Result[(), ReadOnlyFileViewErrorV1]:
@@ -245,6 +267,7 @@ fn read_only_file_view_close_v1(
         return Err(ReadOnlyFileViewErrorV1.open_failed)
     Ok(())
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in read_only_file_view_close_descriptor_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn read_only_file_view_close_descriptor_v1(descriptor: i64):
     unsafe(capabilities: [ffi]):
         _ = rt_file_view_close_v1(descriptor)
@@ -266,3 +289,5 @@ export read_only_file_view_open_v1, read_only_file_view_adopt_descriptor_v1
 export read_only_file_view_read_async_v1
 export read_only_file_view_read_v1, read_only_file_view_prefetch_async_v1
 export read_only_file_view_close_v1
+
+export read_only_file_view_read_beneath_bounded_v1

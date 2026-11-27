@@ -19,21 +19,24 @@
 #   use std.gpu.engine2d.backend_vulkan.{VulkanBackend}
 
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_identity}
-use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a}
+use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a, blend_solid}
 use std.gpu.engine2d.glyph.{glyph_height, glyph_advance, render_text_to_buffer}
 use std.gpu.engine2d.helpers_text.{text_blit_buffer}
 # The bitmap-font atlas lane lives in backend_vulkan_font.spl, which imports this
 # module back — the same mutual pair backend_vulkan_helpers.spl already forms.
 # Importing the provenance constant keeps that dependency explicit and loaded.
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{VULKAN_TEXT_PATH_CPU_RASTER, VULKAN_TEXT_PATH_NOT_DRAWN}
+use std.gc_async_mut.io.mod_stub.{env_get}
 use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
     Engine2dGlassMaterialConfig, ENGINE2D_GLASS_MAX_WORK_PIXELS,
     engine2d_glass_corner_radius
 }
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
-    _pack_clear_pc, _pack_rect_pc, _pack_circle_pc, _pack_line_pc,
+    _pack_clear_pc, _pack_rect_pc, _pack_affine_coverage_pc, _pack_circle_pc, _pack_line_pc,
     _pack_triangle_pc, _pack_gradient_pc, _pack_image_composite_pc,
     _pack_glass_material_pc, _pack_blur_rect_pc, _pack_shadow_rect_pc,
+    _pack_css_group_restore_pc,
+    _pack_gradient_layer_pc,
     vulkan_dispatch_region_kernel_checked,
     _pixels_to_bytes, _bytes_to_pixel_array, _i64, _i32_to_u32, _u32_to_u8,
     _u8_to_u32, _bool_to_i32, vulkan_dispatch_framebuffer_compute_checked,
@@ -43,10 +46,12 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
     vulkan_image_upload_u32_requested, vulkan_image_upload_note,
     vulkan_image_upload_last_mode, vulkan_image_upload_last_reason,
     VK_DISPATCH_COMPLETED_INELIGIBLE, RECT_BATCH_MIN_RECTS,
-    VK_IMAGE_COMPOSITE_COPY, VK_IMAGE_COMPOSITE_SRC_OVER
+    VK_IMAGE_COMPOSITE_COPY, VK_IMAGE_COMPOSITE_SRC_OVER, VK_IMAGE_COMPOSITE_SRC_OVER_SOLID,
+    VK_SPEC_MAX_WORKGROUP_COUNT, vulkan_clear_dispatch_groups_x, vulkan_clear_dispatch_groups_y
 }
 use std.gpu.engine2d.backend_emu.{
-    emu_draw_line, emu_draw_circle, emu_draw_rounded_rect,
+    emu_draw_rect, emu_draw_line, emu_line_host_work_admitted_v1, emu_draw_circle, emu_draw_circle_filled,
+    emu_draw_rounded_rect, emu_draw_triangle_filled, emu_draw_gradient_rect,
     emu_draw_ellipse, emu_draw_ellipse_filled,
     emu_draw_arc, emu_draw_bezier,
     emu_draw_polygon_filled, emu_draw_polyline,
@@ -85,7 +90,6 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
 use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
-use std.nogc_sync_mut.io.time_ops.{time_now_micros}
 
 # ============================================================================
 # Vulkan Availability Check
@@ -222,7 +226,11 @@ class VulkanFontAtlasMirror:
     owner_sequence: i64 = -1
     bytes: [u8]
 
-val VULKAN_FONT_ATLAS_MIRROR_MAX: i32 = 4
+# Parked host mirrors, one per font owner besides the active one. Matches the
+# producer's `FONT_ATLAS_PARK_MAX` (11 parks + 1 active = 12 owners): a mirror
+# evicted while the producer still holds that owner's atlas costs a full
+# 1,048,576-pixel repack on the owner's next run.
+val VULKAN_FONT_ATLAS_MIRROR_MAX: i32 = 11
 
 class VulkanBackend:
     """Vulkan compute shader 2D renderer.
@@ -245,6 +253,7 @@ class VulkanBackend:
     # Shader module handles
     shader_clear: i64
     shader_rect_filled: i64
+    shader_affine_coverage_rect: i64
     shader_rect_outline: i64
     shader_circle_filled: i64
     shader_circle_outline: i64
@@ -256,6 +265,7 @@ class VulkanBackend:
     # Pipeline handles
     pipe_clear: i64
     pipe_rect_filled: i64
+    pipe_affine_coverage_rect: i64
     pipe_rect_outline: i64
     pipe_circle_filled: i64
     pipe_circle_outline: i64
@@ -454,6 +464,7 @@ class VulkanBackend:
     # doc/08_tracking/bug/
     # vulkan_readback_interpreted_unpack_dominates_frame_2026-09-12.md.
     host_mirror_frame_fresh: bool
+    cpu_fallback_host_surface: bool
     last_host_checksum: i64  # checksum of the last host_buf refresh (same algorithm as engine2d_readback_with_identity)
     present_readback_bytes: i64
     present_readback_rect_count: i64
@@ -504,6 +515,16 @@ class VulkanBackend:
     pending_font_descriptors: [i64]
     pending_font_params: [i64]
     pending_font_glyph_count: i64
+    # Completion record of the last flush that carried queued font work, so
+    # Engine2D can promote its saved `queued-packed-font-batch` evidence with
+    # the real fence/wait instead of leaving it at `recorded`.
+    last_font_flush_rc: i64 = 0
+    last_font_flush_glyphs: i64 = 0
+    last_font_flush_fence: i64 = 0
+    last_font_flush_waited: bool = false
+    last_font_flush_fence_destroyed: bool = false
+    last_font_flush_queue_ns: i64 = 0
+    last_font_flush_sync_ns: i64 = 0
     image_descriptor_pool: [i64] # warm frame-reusable image-composite descriptors
     # Host-side coverage atlas for the built-in face, memoised on the SAME
     # identity the device-side generation cache keys on (scale + glyph height).
@@ -526,6 +547,8 @@ class VulkanBackend:
     font_descriptor_pool: [i64] # warm frame-reusable glyph descriptors
     font_params_pool: [i64]     # parallel 52-byte parameter buffers
     font_params_pool_capacity: [i64]
+    font_lcd_veto_keys: [text]  # trimmed quads whose untrimmed rect left the surface: LCD declined (see composite_font_batch)
+    font_lcd_chain_lens: [i64]  # chain length per quad of the batch being composited, empty = no chains (see composite_font_batch)
     font_frame_command_count: i64
     font_frame_submission_count: i64
     font_frame_fence_count: i64
@@ -560,6 +583,7 @@ class VulkanBackend:
             d_framebuffer: 0,
             shader_clear: 0,
             shader_rect_filled: 0,
+            shader_affine_coverage_rect: 0,
             shader_rect_outline: 0,
             shader_circle_filled: 0,
             shader_circle_outline: 0,
@@ -570,6 +594,7 @@ class VulkanBackend:
             shader_blit: 0,
             pipe_clear: 0,
             pipe_rect_filled: 0,
+            pipe_affine_coverage_rect: 0,
             pipe_rect_outline: 0,
             pipe_circle_filled: 0,
             pipe_circle_outline: 0,
@@ -645,6 +670,7 @@ class VulkanBackend:
             readback_frame_bytes: 0,
             readback_frame_rects: 0,
             host_mirror_frame_fresh: false,
+            cpu_fallback_host_surface: false,
             last_host_checksum: 0,
             present_readback_bytes: 0,
             present_readback_rect_count: 0,
@@ -704,6 +730,8 @@ class VulkanBackend:
             font_descriptor_pool: [],
             font_params_pool: [],
             font_params_pool_capacity: [],
+            font_lcd_veto_keys: [],
+            font_lcd_chain_lens: [],
             font_frame_command_count: 0,
             font_frame_submission_count: 0,
             font_frame_fence_count: 0,
@@ -966,6 +994,7 @@ impl RenderBackend for VulkanBackend:
         # Borrow shared pipeline handles from the session
         self.shader_clear         = session.shader_clear
         self.shader_rect_filled   = session.shader_rect_filled
+        self.shader_affine_coverage_rect = session.shader_affine_coverage_rect
         self.shader_rect_outline  = session.shader_rect_outline
         self.shader_circle_filled = session.shader_circle_filled
         self.shader_circle_outline = session.shader_circle_outline
@@ -977,6 +1006,7 @@ impl RenderBackend for VulkanBackend:
 
         self.pipe_clear          = session.pipe_clear
         self.pipe_rect_filled    = session.pipe_rect_filled
+        self.pipe_affine_coverage_rect = session.pipe_affine_coverage_rect
         self.pipe_rect_outline   = session.pipe_rect_outline
         self.pipe_circle_filled  = session.pipe_circle_filled
         self.pipe_circle_outline = session.pipe_circle_outline
@@ -1058,6 +1088,7 @@ impl RenderBackend for VulkanBackend:
         self.image_upload_scratch_fallback_count = 0
         self.cpu_fallback_used = false
         self.cpu_fallback_reason = ""
+        self.cpu_fallback_host_surface = false
         true
 
     me mark_cpu_fallback(reason: text):
@@ -1067,6 +1098,227 @@ impl RenderBackend for VulkanBackend:
             if vulkan_order_trace_enabled():
                 vulkan_order_trace("cpu-fallback-first reason=" + reason)
         self.cpu_fallback_used = true
+
+    me init_cpu_fallback_surface(width: i32, height: i32, reason: text) -> bool:
+        """Initialize a CPU fallback host framebuffer when no Vulkan device is usable."""
+        if width <= 0 or height <= 0:
+            return false
+        val total_i64 = _i64(width) * _i64(height)
+        if total_i64 <= 0 or total_i64 > 2147483647:
+            return false
+        if self.d_framebuffer != 0:
+            vulkan_sffi_free_buffer(self.d_framebuffer)
+            self.d_framebuffer = 0
+        self.owns_session = false
+        self._clear_borrowed_pipeline_handles()
+        self.w = width
+        self.h = height
+        val total = width * height
+        self.host_buf = [0u32; total]
+        self.clip_x = 0
+        self.clip_y = 0
+        self.clip_w = width
+        self.clip_h = height
+        self.clip_enabled = false
+        self.mask_buf = []
+        self.mask_w = 0
+        self.mask_h = 0
+        self.initialized = true
+        self.dirty = false
+        self.completion_unknown = false
+        self.present_damage_rects = []
+        self.present_damage_valid = false
+        self.host_mirror_valid = true
+        self.host_mirror_frame_fresh = true
+        self._clear_frame_damage()
+        self.cpu_fallback_used = false
+        self.cpu_fallback_reason = ""
+        self.cpu_fallback_host_surface = true
+        val fallback_reason = if reason != "": reason else: "vulkan-device-unavailable"
+        self.mark_cpu_fallback(fallback_reason)
+        true
+
+    fn _has_cpu_fallback_host_surface() -> bool:
+        val total = _i64(self.w) * _i64(self.h)
+        (self.initialized and self.cpu_fallback_used and total > 0 and
+            self.host_buf.len().to_i64() == total)
+
+    fn _can_delegate_cpu_fallback_readback() -> bool:
+        (self._has_cpu_fallback_host_surface() and
+            (not self.completion_unknown or self.d_framebuffer <= 0) and
+            (self.d_framebuffer <= 0 or self.host_mirror_frame_fresh))
+
+    me _readback_cpu_fallback_host() -> Engine2DReadback:
+        val total = self.w * self.h
+        var copy: [u32] = [0u32; total]
+        if not vulkan_sffi_copy_u32_into(copy, self.host_buf, total):
+            return engine2d_readback([], "readback_failed")
+        engine2d_readback(copy, "cpu_fallback")
+
+    me _fallback_sync_device_from_host() -> bool:
+        if self.completion_unknown:
+            self.host_mirror_frame_fresh = false
+            return false
+        if not self.cpu_fallback_host_surface and self.d_framebuffer > 0:
+            val total_i64 = _i64(self.w) * _i64(self.h)
+            val upload_bytes = _pixels_to_bytes(self.host_buf, total_i64)
+            if (upload_bytes.len().to_i64() != total_i64 * 4 or
+                    not vulkan_sffi_copy_to_buffer(self.d_framebuffer, upload_bytes, 0)):
+                # Clean device upload failure without completion uncertainty:
+                # keep host_buf as authoritative CPU fallback surface so host
+                # primitives remain intact for readback and present_device().
+                self.cpu_fallback_host_surface = true
+                self.mark_cpu_fallback("host-to-device-upload-failed")
+                self.last_error = "host-to-device-upload-failed: {vulkan_sffi_last_error()}"
+                self.host_mirror_valid = true
+                self.host_mirror_frame_fresh = true
+                self.dirty = false
+                return false
+        self.host_mirror_valid = true
+        self.host_mirror_frame_fresh = true
+        self.dirty = false
+        true
+
+    me _fallback_ensure_host_buf_synced() -> bool:
+        val total_i64 = _i64(self.w) * _i64(self.h)
+        if total_i64 <= 0 or total_i64 > 2147483647:
+            return false
+        if self.completion_unknown:
+            return false
+        val total = self.w * self.h
+        if self.host_buf.len() != total:
+            self.host_buf = [0u32; total]
+        if (self.dirty and self.d_framebuffer > 0 and
+                not self.host_mirror_frame_fresh):
+            if self.pending_compute_count > 0:
+                val pending_rc = self._flush_pending_compute_at("_fallback_ensure_host_buf_synced")
+                if pending_rc < 0:
+                    self.completion_unknown = true
+                    return false
+                if pending_rc == 0:
+                    return false
+            var device_buf: [u32] = [0u32; total]
+            if vulkan_sffi_readback_u32_into(device_buf, self.d_framebuffer, total, 0) < 0:
+                self._mark_readback_length_failed()
+                return false
+            self.host_buf = device_buf
+            self.host_mirror_valid = true
+            self.host_mirror_frame_fresh = true
+            self.dirty = false
+        true
+
+    me _demote_to_cpu_fallback_host(reason: text) -> bool:
+        """Transition a live session onto a synced CPU fallback host surface."""
+        if not self.initialized or self.w <= 0 or self.h <= 0:
+            return false
+        self.mark_cpu_fallback(reason)
+        if self.completion_unknown:
+            return false
+        if not self._fallback_ensure_host_buf_synced():
+            return false
+        if self.completion_unknown:
+            return false
+        val total = _i64(self.w) * _i64(self.h)
+        if total <= 0 or self.host_buf.len().to_i64() != total:
+            return false
+        if self.dirty and self.d_framebuffer > 0 and not self.host_mirror_frame_fresh:
+            return false
+        self.cpu_fallback_host_surface = true
+        self.host_mirror_valid = true
+        self.host_mirror_frame_fresh = true
+        self.dirty = false
+        true
+
+    me _prepare_host_fallback_op(flush_reason: text, fallback_reason: text, mark_on_flush_ok: bool) -> bool:
+        """Prepare a host-emulated draw without discarding earlier demoted pixels."""
+        if self.completion_unknown:
+            return false
+        if self.cpu_fallback_host_surface:
+            if not self._fallback_ensure_host_buf_synced():
+                return false
+            self.mark_cpu_fallback(fallback_reason)
+            return true
+        if not self._flush_for_host_fallback(flush_reason):
+            if not self.completion_unknown and self.initialized and self.d_framebuffer > 0:
+                if self._demote_to_cpu_fallback_host(fallback_reason):
+                    return true
+            return false
+        if mark_on_flush_ok:
+            self.mark_cpu_fallback(fallback_reason)
+        true
+
+    me _fallback_clear_host(color: u32):
+        if self.completion_unknown:
+            return
+        val total_i64 = _i64(self.w) * _i64(self.h)
+        if total_i64 <= 0 or total_i64 > 2147483647:
+            return
+        val total = self.w * self.h
+        if self.host_buf.len() != total:
+            self.host_buf = [0u32; total]
+        var idx = 0
+        while idx < total:
+            self.host_buf[idx] = color
+            idx = idx + 1
+        val _synced = self._fallback_sync_device_from_host()
+        self.note_damage_full()
+
+    me _fallback_fill_rect_host(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if self.completion_unknown:
+            return
+        if w <= 0 or h <= 0 or color_a(color) == 0:
+            return
+        val total_i64 = _i64(self.w) * _i64(self.h)
+        if total_i64 <= 0 or total_i64 > 2147483647:
+            return
+        if not self._fallback_ensure_host_buf_synced():
+            return
+        var start_x = _i64(x)
+        var end_x = _i64(x) + _i64(w)
+        var start_y = _i64(y)
+        var end_y = _i64(y) + _i64(h)
+        val fb_w = _i64(self.w)
+        val fb_h = _i64(self.h)
+        if start_x < 0: start_x = 0
+        if end_x > fb_w: end_x = fb_w
+        if start_y < 0: start_y = 0
+        if end_y > fb_h: end_y = fb_h
+        if self.clip_enabled:
+            val c_start_x = _i64(self.clip_x)
+            val c_end_x = _i64(self.clip_x) + _i64(self.clip_w)
+            val c_start_y = _i64(self.clip_y)
+            val c_end_y = _i64(self.clip_y) + _i64(self.clip_h)
+            if start_x < c_start_x: start_x = c_start_x
+            if end_x > c_end_x: end_x = c_end_x
+            if start_y < c_start_y: start_y = c_start_y
+            if end_y > c_end_y: end_y = c_end_y
+        if end_x <= start_x or end_y <= start_y:
+            return
+        val mask_active = self.mask_buf.len() > 0
+        val opaque = color_a(color) == 255
+        val mask_w64 = _i64(self.mask_w)
+        val mask_h64 = _i64(self.mask_h)
+        val mask_len = self.mask_buf.len().to_i64()
+        var py = start_y
+        while py < end_y:
+            val row_offset = py * fb_w
+            val mask_row_offset = py * mask_w64
+            var px = start_x
+            while px < end_x:
+                var writable = true
+                if mask_active:
+                    if px >= 0 and px < mask_w64 and py >= 0 and py < mask_h64:
+                        val mask_idx = mask_row_offset + px
+                        if mask_idx >= 0 and mask_idx < mask_len:
+                            writable = self.mask_buf[mask_idx] != 0u8
+                if writable:
+                    val idx = row_offset + px
+                    self.host_buf[idx] = if opaque: color else: blend_solid(color, self.host_buf[idx])
+                px = px + 1
+            py = py + 1
+        val _synced = self._fallback_sync_device_from_host()
+        self.hint_damage(_i64(x), _i64(y), _i64(w), _i64(h))
+        self.consume_damage_hint()
 
     me mark_completion_unknown():
         self.completion_unknown = true
@@ -1166,6 +1418,7 @@ impl RenderBackend for VulkanBackend:
         self.font_frame_command_count = 0
         self.font_frame_submission_count = 0
         self.font_frame_fence_count = 0
+        self.cpu_fallback_host_surface = false
         if self.owns_session:
             # Session owns shaders/pipelines — do not destroy them here
             if self.d_framebuffer != 0:
@@ -1190,6 +1443,7 @@ impl RenderBackend for VulkanBackend:
         # Destroy pipelines
         if self.pipe_clear != 0: vulkan_sffi_destroy_pipeline(self.pipe_clear)
         if self.pipe_rect_filled != 0: vulkan_sffi_destroy_pipeline(self.pipe_rect_filled)
+        if self.pipe_affine_coverage_rect != 0: vulkan_sffi_destroy_pipeline(self.pipe_affine_coverage_rect)
         if self.pipe_rect_outline != 0: vulkan_sffi_destroy_pipeline(self.pipe_rect_outline)
         if self.pipe_circle_filled != 0: vulkan_sffi_destroy_pipeline(self.pipe_circle_filled)
         if self.pipe_circle_outline != 0: vulkan_sffi_destroy_pipeline(self.pipe_circle_outline)
@@ -1201,6 +1455,7 @@ impl RenderBackend for VulkanBackend:
         # Destroy shader modules
         if self.shader_clear != 0: vulkan_sffi_destroy_shader(self.shader_clear)
         if self.shader_rect_filled != 0: vulkan_sffi_destroy_shader(self.shader_rect_filled)
+        if self.shader_affine_coverage_rect != 0: vulkan_sffi_destroy_shader(self.shader_affine_coverage_rect)
         if self.shader_rect_outline != 0: vulkan_sffi_destroy_shader(self.shader_rect_outline)
         if self.shader_circle_filled != 0: vulkan_sffi_destroy_shader(self.shader_circle_filled)
         if self.shader_circle_outline != 0: vulkan_sffi_destroy_shader(self.shader_circle_outline)
@@ -1227,11 +1482,22 @@ impl RenderBackend for VulkanBackend:
 
     me clear(color: u32):
         if self.completion_unknown: return
+        if self.w <= 0 or self.h <= 0: return
+        if self.cpu_fallback_host_surface:
+            self._fallback_clear_host(color)
+            return
         val total = _i64(self.w) * _i64(self.h)
-        val workgroups = (total + 255) / 256
+        if total > 4294967295:
+            self.last_error = "clear-surface-exceeds-u32-index"
+            return
+        val gx = vulkan_clear_dispatch_groups_x(total)
+        val gy = vulkan_clear_dispatch_groups_y(total)
+        if gx <= 0 or gy <= 0 or gx > VK_SPEC_MAX_WORKGROUP_COUNT or gy > VK_SPEC_MAX_WORKGROUP_COUNT:
+            self.last_error = "clear-workgroup-count-exceeds-spec"
+            return
         val pc = _pack_clear_pc(color, self.w, self.h)
-        self.hint_damage(0, 0, _i64(self.w), _i64(self.h))
-        val dispatched = self._dispatch_framebuffer_checked(self.pipe_clear, pc, workgroups, 1, 1, "clear-dispatch-failed")
+        self.note_damage_full()
+        val dispatched = self._dispatch_framebuffer_checked(self.pipe_clear, pc, gx, gy, 1, "clear-dispatch-failed")
         if dispatched > 0:
             self.dirty = true
             self.host_mirror_frame_fresh = false
@@ -1239,19 +1505,66 @@ impl RenderBackend for VulkanBackend:
             if dispatched < 0:
                 self.completion_unknown = true
             elif self.initialized and self.d_framebuffer > 0:
-                self.dirty = true
-                self.host_mirror_frame_fresh = false
-                # A dispatch that failed leaves the device surface in an
-                # unknown state; the hinted rect no longer bounds the change.
-                self.note_damage_full()
+                if self.pending_compute_count > 0:
+                    val pending_rc = self._flush_pending_compute_at("clear-host-fallback")
+                    if pending_rc < 0:
+                        self.completion_unknown = true
+                        self.mark_cpu_fallback("clear-dispatch-failed")
+                        return
+                self.mark_cpu_fallback("clear-dispatch-failed")
+                self.cpu_fallback_host_surface = true
+                self._fallback_clear_host(color)
 
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         if self.completion_unknown: return
+        if self.cpu_fallback_host_surface or self.mask_buf.len() > 0:
+            emu_draw_rect(self, x, y, w, h, color)
+            return
         val pc = _pack_rect_pc(x, y, w, h, color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
         self.hint_damage(_i64(x), _i64(y), _i64(w), _i64(h))
-        self._dispatch_framebuffer_checked(self.pipe_rect_outline, pc, gx, gy, 1, "rect-outline-dispatch-failed")
+        val dispatched = self._dispatch_framebuffer_checked(self.pipe_rect_outline, pc, gx, gy, 1, "rect-outline-dispatch-failed")
+        if dispatched > 0:
+            self.dirty = true
+            self.host_mirror_frame_fresh = false
+        else:
+            if dispatched < 0:
+                self.completion_unknown = true
+            elif self.initialized and self.d_framebuffer > 0 and w > 0 and h > 0 and color_a(color) > 0:
+                if self._demote_to_cpu_fallback_host("rect-outline-dispatch-failed"):
+                    emu_draw_rect(self, x, y, w, h, color)
+
+    fn affine_coverage_ready() -> bool:
+        (self.initialized and not self.completion_unknown and
+            not self.cpu_fallback_host_surface and
+            self.d_framebuffer > 0 and self.pipe_affine_coverage_rect > 0 and
+            self.mask_buf.len() == 0)
+
+    me draw_affine_rect_coverage(rx: i32, ry: i32, rw: i32, rh: i32,
+        local_w: f64, local_h: f64, a: f64, b: f64, c: f64, d: f64,
+        tx: f64, ty: f64, color: u32) -> bool:
+        """Paint one opaque affine polygon by device pixel-square coverage."""
+        if (not self.affine_coverage_ready() or rw <= 0 or rh <= 0 or
+            color_a(color) != 255 or self.mask_buf.len() != 0):
+            return false
+        val pc = _pack_affine_coverage_pc(rx, ry, rw, rh, self.w, self.h,
+            color, local_w, local_h, a, b, c, d, tx, ty)
+        self.hint_damage(_i64(rx), _i64(ry), _i64(rw), _i64(rh))
+        val dispatched = self._dispatch_framebuffer_checked(
+            self.pipe_affine_coverage_rect, pc, (_i64(rw) + 15) / 16,
+            (_i64(rh) + 15) / 16, 1, "affine-coverage-dispatch-failed")
+        if dispatched <= 0:
+            if dispatched < 0:
+                self.completion_unknown = true
+            elif self.initialized and self.d_framebuffer > 0:
+                self.dirty = true
+                self.host_mirror_frame_fresh = false
+                self.note_damage_full()
+            return false
+        self.dirty = true
+        self.host_mirror_frame_fresh = false
+        true
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
         # Timed shim: the body is unchanged in `_draw_rect_filled_impl`. Split
@@ -1267,15 +1580,29 @@ impl RenderBackend for VulkanBackend:
     me _draw_rect_filled_impl(x: i32, y: i32, w: i32, h: i32, color: u32):
         if self.completion_unknown: return
         _vk_stat_rect(w, h, color_a(color) < 255, self.mask_buf.len() > 0 and color_a(color) >= 255)
+        if w <= 0 or h <= 0 or color_a(color) == 0:
+            # Zero/negative dimensions and zero-alpha rects paint nothing. Guarding
+            # both axes and alpha upfront avoids allocating pixel arrays or triggering
+            # invalid zero-workgroup GPU dispatches and spurious fallback latches.
+            return
+        if self.clip_enabled and (self.clip_w <= 0 or self.clip_h <= 0):
+            # An empty clip paints nothing. Without this the translucent lane's
+            # native composite declines (clip_reject) and the host fallback
+            # flushes, reads the frame back and latches cpu_fallback_used.
+            return
+        if self.cpu_fallback_host_surface:
+            if _i64(w) * _i64(h) > 2147483647:
+                self.mark_cpu_fallback("rect-size-overflow")
+                return
+            self._fallback_fill_rect_host(x, y, w, h, color)
+            return
         if color_a(color) < 255:
             val pixel_count = _i64(w) * _i64(h)
-            if pixel_count <= 0:
-                return
             if pixel_count > 2147483647:
                 self.mark_cpu_fallback("alpha-rect-size-overflow")
                 return
             val pixels: [u32] = [color; w * h]
-            self.draw_image_blend(x, y, w, h, pixels)
+            self._draw_image_blend_impl(x, y, w, h, pixels, VK_IMAGE_COMPOSITE_SRC_OVER_SOLID)
             return
         if self.mask_buf.len() > 0:
             # The rect compute kernel packs clip state but has no mask plane,
@@ -1283,22 +1610,11 @@ impl RenderBackend for VulkanBackend:
             # stencil mask (observed as vulkan-vs-software mask parity
             # divergence in native_shader_backend_readback_matrix_spec).
             # Route through the host image path, which applies clip AND mask.
-            if w <= 0 or h <= 0:
-                return
             if _i64(w) * _i64(h) > 2147483647:
                 self.mark_cpu_fallback("masked-rect-size-overflow")
                 return
             val masked_pixels: [u32] = [color; w * h]
             self.draw_image(x, y, w, h, masked_pixels)
-            return
-        if w <= 0 or h <= 0:
-            # A zero-area opaque rect paints nothing. The alpha and masked arms
-            # above already return here; this arm did not, and `(0 + 15) / 16`
-            # is 0 workgroups, which the enqueue rejects as invalid. The reject
-            # was then read as a transient bind-chain failure, costing a full
-            # flush (an extra SUBMIT), a futile retry and a CPU-fallback latch.
-            # Measured on css-layout.html: 2 such rects per frame, which is the
-            # entire `submits_per_frame=3` overshoot.
             return
         val pc = _pack_rect_pc(x, y, w, h, color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
         val gx = (_i64(w) + 15) / 16
@@ -1312,11 +1628,8 @@ impl RenderBackend for VulkanBackend:
             if dispatched < 0:
                 self.completion_unknown = true
             elif self.initialized and self.d_framebuffer > 0:
-                self.dirty = true
-                self.host_mirror_frame_fresh = false
-                # A dispatch that failed leaves the device surface in an
-                # unknown state; the hinted rect no longer bounds the change.
-                self.note_damage_full()
+                if self._demote_to_cpu_fallback_host("rect-dispatch-failed"):
+                    self._fallback_fill_rect_host(x, y, w, h, color)
 
     me draw_rect_list_filled(rects: [i32], colors: [u32]):
         """Paint N filled rects with ONE interpreter transit and one dispatch each.
@@ -1347,6 +1660,9 @@ impl RenderBackend for VulkanBackend:
         val count = colors.len().to_i64()
         if count <= 0: return
         if rects.len().to_i64() != count * 4: return
+        if self.cpu_fallback_host_surface:
+            self._draw_rect_list_single(rects, colors, 0, count)
+            return
         if self.mask_buf.len() > 0:
             self._draw_rect_list_single(rects, colors, 0, count)
             return
@@ -1403,6 +1719,20 @@ impl RenderBackend for VulkanBackend:
         val dy = _i64(y2) - _i64(y1)
         val abs_dx = if dx < 0: -dx else: dx
         val abs_dy = if dy < 0: -dy else: dy
+        var steps = if abs_dx > abs_dy: abs_dx else: abs_dy
+        if steps == 0:
+            steps = 1
+        if steps <= 0 or steps > 2147483647:
+            self.mark_cpu_fallback("line-dispatch-size-invalid")
+            return
+        if self.cpu_fallback_host_surface or self.mask_buf.len() > 0:
+            if not emu_line_host_work_admitted_v1(self.w, self.h, x1, y1, x2, y2, thickness):
+                self.mark_cpu_fallback("line-host-work-budget-exceeded")
+                return
+            # Neither the line nor axis-line rectangle kernel has a mask plane,
+            # and host fallback paints through draw_rect_filled cleanly.
+            emu_draw_line(self, x1, y1, x2, y2, color, thickness)
+            return
         # A thickness-1 axis-aligned Bresenham line is exactly one inclusive
         # filled rectangle. Route this dominant GUI/Web border/separator case
         # through the parallel 16x16 rectangle shader; keep diagonal and thick
@@ -1426,16 +1756,13 @@ impl RenderBackend for VulkanBackend:
             else:
                 if rect_dispatched < 0:
                     self.completion_unknown = true
+                elif self.initialized and self.d_framebuffer > 0 and color_a(color) > 0:
+                    if self._demote_to_cpu_fallback_host("axis-line-rect-dispatch-failed"):
+                        emu_draw_line(self, x1, y1, x2, y2, color, thickness)
             return
         # The line kernel owns the ordered Bresenham state and every pixel
         # write in one device invocation.  This is deliberately not a host
         # raster loop and cannot be counted when the dispatch fails.
-        var steps = if abs_dx > abs_dy: abs_dx else: abs_dy
-        if steps == 0:
-            steps = 1
-        if steps <= 0 or steps > 2147483647:
-            self.mark_cpu_fallback("line-dispatch-size-invalid")
-            return
         val pc = _pack_line_pc(
             x1, y1, x2, y2, color, thickness, self.w, self.h,
             self.clip_x, self.clip_y, self.clip_w, self.clip_h,
@@ -1446,8 +1773,11 @@ impl RenderBackend for VulkanBackend:
             self.dirty = true
             self.host_mirror_frame_fresh = false
         else:
-        if dispatched < 0:
-            self.completion_unknown = true
+            if dispatched < 0:
+                self.completion_unknown = true
+            elif self.initialized and self.d_framebuffer > 0 and color_a(color) > 0:
+                if self._demote_to_cpu_fallback_host("line-dispatch-failed"):
+                    emu_draw_line(self, x1, y1, x2, y2, color, thickness)
 
     me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
         if self.completion_unknown: return
@@ -1461,12 +1791,27 @@ impl RenderBackend for VulkanBackend:
 
     me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
         if self.completion_unknown: return
+        if self.cpu_fallback_host_surface or self.mask_buf.len() > 0:
+            if r < 0:
+                self.mark_cpu_fallback("circle-filled-dispatch-failed")
+                return
+            emu_draw_circle_filled(self, cx, cy, r, color)
+            return
         val bw = 2 * r + 1
         val bh = 2 * r + 1
         val gx = (_i64(bw) + 15) / 16
         val gy = (_i64(bh) + 15) / 16
         val pc = _pack_circle_pc(cx, cy, r, color, self.w, self.h, 1, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
-        self._dispatch_framebuffer_checked(self.pipe_circle_filled, pc, gx, gy, 1, "circle-filled-dispatch-failed")
+        val dispatched = self._dispatch_framebuffer_checked(self.pipe_circle_filled, pc, gx, gy, 1, "circle-filled-dispatch-failed")
+        if dispatched > 0:
+            self.dirty = true
+            self.host_mirror_frame_fresh = false
+        else:
+            if dispatched < 0:
+                self.completion_unknown = true
+            elif r >= 0 and self.initialized and self.d_framebuffer > 0 and color_a(color) > 0:
+                if self._demote_to_cpu_fallback_host("circle-filled-dispatch-failed"):
+                    emu_draw_circle_filled(self, cx, cy, r, color)
 
     me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
         if self.completion_unknown: return
@@ -1483,6 +1828,24 @@ impl RenderBackend for VulkanBackend:
 
     me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
         if self.completion_unknown: return
+        if self.cpu_fallback_host_surface or self.mask_buf.len() > 0:
+            var min_x = _i64(x1)
+            var max_x = _i64(x1)
+            var min_y = _i64(y1)
+            var max_y = _i64(y1)
+            if _i64(x2) < min_x: min_x = _i64(x2)
+            if _i64(x3) < min_x: min_x = _i64(x3)
+            if _i64(x2) > max_x: max_x = _i64(x2)
+            if _i64(x3) > max_x: max_x = _i64(x3)
+            if _i64(y2) < min_y: min_y = _i64(y2)
+            if _i64(y3) < min_y: min_y = _i64(y3)
+            if _i64(y2) > max_y: max_y = _i64(y2)
+            if _i64(y3) > max_y: max_y = _i64(y3)
+            if max_x - min_x > 2147483647 or max_y - min_y > 2147483647:
+                self.mark_cpu_fallback("triangle-dispatch-size-invalid")
+                return
+            emu_draw_triangle_filled(self, x1, y1, x2, y2, x3, y3, color)
+            return
         # Compute bounding box of triangle
         var min_x = x1
         if x2 < min_x: min_x = x2
@@ -1502,15 +1865,36 @@ impl RenderBackend for VulkanBackend:
         val gx = (_i64(bw) + 15) / 16
         val gy = (_i64(bh) + 15) / 16
         val pc = _pack_triangle_pc(x1, y1, x2, y2, x3, y3, color, self.w, self.h, min_x, min_y, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
-        self._dispatch_framebuffer_checked(self.pipe_triangle, pc, gx, gy, 1, "triangle-filled-dispatch-failed")
+        val dispatched = self._dispatch_framebuffer_checked(self.pipe_triangle, pc, gx, gy, 1, "triangle-filled-dispatch-failed")
+        if dispatched > 0:
+            self.dirty = true
+            self.host_mirror_frame_fresh = false
+        else:
+            if dispatched < 0:
+                self.completion_unknown = true
+            elif bw > 0 and bh > 0 and self.initialized and self.d_framebuffer > 0 and color_a(color) > 0:
+                if self._demote_to_cpu_fallback_host("triangle-filled-dispatch-failed"):
+                    emu_draw_triangle_filled(self, x1, y1, x2, y2, x3, y3, color)
 
     me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
         if self.completion_unknown: return
+        if self.cpu_fallback_host_surface or self.mask_buf.len() > 0:
+            emu_draw_gradient_rect(self, x, y, w, h, top_color, bottom_color)
+            return
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
         val pc = _pack_gradient_pc(x, y, w, h, top_color, bottom_color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
         self.hint_damage(_i64(x), _i64(y), _i64(w), _i64(h))
-        self._dispatch_framebuffer_checked(self.pipe_gradient, pc, gx, gy, 1, "gradient-rect-dispatch-failed")
+        val dispatched = self._dispatch_framebuffer_checked(self.pipe_gradient, pc, gx, gy, 1, "gradient-rect-dispatch-failed")
+        if dispatched > 0:
+            self.dirty = true
+            self.host_mirror_frame_fresh = false
+        else:
+            if dispatched < 0:
+                self.completion_unknown = true
+            elif w > 0 and h > 0 and self.initialized and self.d_framebuffer > 0:
+                if self._demote_to_cpu_fallback_host("gradient-rect-dispatch-failed"):
+                    emu_draw_gradient_rect(self, x, y, w, h, top_color, bottom_color)
 
     # Bitmap text goes through the font-atlas pipeline whenever that pipeline can
     # reproduce the CPU raster exactly (`_bitmap_text_atlas_path`,
@@ -1579,7 +1963,8 @@ impl RenderBackend for VulkanBackend:
             return 0
         if (dst_w <= 0 or dst_h <= 0 or src_w <= 0 or src_h <= 0 or self.mask_buf.len() > 0 or
             opacity_milli <= 0 or opacity_milli > 1000 or
-            (composite_mode != VK_IMAGE_COMPOSITE_COPY and composite_mode != VK_IMAGE_COMPOSITE_SRC_OVER)):
+            (composite_mode != VK_IMAGE_COMPOSITE_COPY and composite_mode != VK_IMAGE_COMPOSITE_SRC_OVER and
+             composite_mode != VK_IMAGE_COMPOSITE_SRC_OVER_SOLID)):
             vulkan_image_reason_note(VK_IMG_R_ARGS)
             return 0
 
@@ -1781,6 +2166,9 @@ impl RenderBackend for VulkanBackend:
         """Composite only when fenced native Vulkan completion is proven."""
         if self.completion_unknown:
             return false
+        if self.cpu_fallback_host_surface:
+            self.mark_cpu_fallback("checked-image-blend-failed")
+            return false
         val status = self._draw_image_blend_native(x, y, w, h, pixels, opacity_milli)
         if status == 1:
             return true
@@ -1792,28 +2180,36 @@ impl RenderBackend for VulkanBackend:
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         if self.completion_unknown: return
         _vk_stat_image_op(w, h, false)
-        val native_status = self._draw_image_native(x, y, w, h, pixels)
-        if native_status > 0:
-            return
-        if native_status < 0:
-            self.mark_cpu_fallback("image-copy-completion-unknown")
-            self.completion_unknown = true
-            return
-        val pending_status = self._flush_pending_compute_at("draw_image")
-        if pending_status <= 0:
-            if pending_status < 0:
-                self.completion_unknown = true
-            return
-        if self.dirty:
-            val fb_size = _i64(self.w) * _i64(self.h) * 4
-            val fb_bytes = vulkan_sffi_read_buffer_bytes(self.d_framebuffer, fb_size, 0)
-            val refreshed = _bytes_to_pixel_array(fb_bytes, self.w * self.h)
-            if refreshed.len() != self.w * self.h:
-                self._mark_readback_length_failed()
+        if not self.cpu_fallback_host_surface:
+            val native_status = self._draw_image_native(x, y, w, h, pixels)
+            if native_status > 0:
                 return
-            self.host_buf = refreshed
-            self.host_mirror_valid = true
+            if native_status < 0:
+                self.mark_cpu_fallback("image-copy-completion-unknown")
+                self.completion_unknown = true
+                return
+            val pending_status = self._flush_pending_compute_at("draw_image")
+            if pending_status <= 0:
+                if pending_status < 0:
+                    self.completion_unknown = true
+                    return
+                if not (self.initialized and self.d_framebuffer > 0 and self._demote_to_cpu_fallback_host("image-copy-host-fallback")):
+                    return
+            elif self.dirty:
+                val fb_size = _i64(self.w) * _i64(self.h) * 4
+                val fb_bytes = vulkan_sffi_read_buffer_bytes(self.d_framebuffer, fb_size, 0)
+                val refreshed = _bytes_to_pixel_array(fb_bytes, self.w * self.h)
+                if refreshed.len() != self.w * self.h:
+                    self._mark_readback_length_failed()
+                    return
+                self.host_buf = refreshed
+                self.host_mirror_valid = true
+                self.host_mirror_frame_fresh = true
 
+        if not self._fallback_ensure_host_buf_synced():
+            return
+        if self.host_buf.len() != self.w * self.h:
+            return
         self.mark_cpu_fallback("image-copy-host-fallback")
         val clip_end_x = self.clip_x + self.clip_w
         val clip_end_y = self.clip_y + self.clip_h
@@ -1836,10 +2232,17 @@ impl RenderBackend for VulkanBackend:
                     self.host_buf[dy * self.w + dx] = pixels[src_idx]
                 px = px + 1
             py = py + 1
-        val upload_bytes = _pixels_to_bytes(self.host_buf, _i64(self.w) * _i64(self.h))
-        vulkan_sffi_copy_to_buffer(self.d_framebuffer, upload_bytes, 0)
-        self.dirty = false
+        if not self.cpu_fallback_host_surface:
+            val upload_bytes = _pixels_to_bytes(self.host_buf, _i64(self.w) * _i64(self.h))
+            val uploaded = if self.d_framebuffer > 0 and not self.completion_unknown:
+                vulkan_sffi_copy_to_buffer(self.d_framebuffer, upload_bytes, 0)
+            else:
+                false
+            if not uploaded and self.initialized and self.d_framebuffer > 0:
+                self.cpu_fallback_host_surface = true
         self.host_mirror_valid = true
+        self.host_mirror_frame_fresh = true
+        self.dirty = false
 
     me set_clip(x: i32, y: i32, w: i32, h: i32):
         self.clip_x = x
@@ -1953,6 +2356,14 @@ impl RenderBackend for VulkanBackend:
                 self.completion_unknown = true
             self.frame_fallback_reason = "compute-finalize-failed"
             return false
+        if (self.cpu_fallback_host_surface and self.host_mirror_frame_fresh and
+                self.host_buf.len() == self.w * self.h):
+            val total_i64 = _i64(self.w) * _i64(self.h)
+            val upload_bytes = _pixels_to_bytes(self.host_buf, total_i64)
+            if (upload_bytes.len().to_i64() != total_i64 * 4 or
+                    not vulkan_sffi_copy_to_buffer(self.d_framebuffer, upload_bytes, 0)):
+                self.frame_fallback_reason = mode + "-host-upload-failed"
+                return false
         val requested_regions = (
             self.present_damage_valid and self.present_damage_rects.len() > 0)
         val presented = if requested_regions:
@@ -1973,7 +2384,8 @@ impl RenderBackend for VulkanBackend:
             self.presentation_swapchain)
         self.frame_device_to_present_rect_count = vulkan_sffi_last_present_copy_rects(
             self.presentation_swapchain)
-        self.host_mirror_valid = false
+        if not self.cpu_fallback_host_surface:
+            self.host_mirror_valid = false
         self._clear_present_damage()
         if requested_regions and presented <= 2:
             self.frame_full_fallback = true
@@ -2112,17 +2524,26 @@ impl RenderBackend for VulkanBackend:
             # A degenerate footprint paints nothing; leave the union untouched
             # rather than widening it to the whole surface.
             return
-        # Clip to the surface. A rect entirely outside it damages nothing.
+        # Clip to the surface and active clip rect. GPU compute kernels discard
+        # pixels outside the active clip, so intersecting here keeps clipped
+        # full-surface background clears/rects from inflating frame damage.
         var x0 = if hx < 0: 0 else: hx
         var y0 = if hy < 0: 0 else: hy
         var x1 = hx + hw
         var y1 = hy + hh
         if x1 > _i64(self.w): x1 = _i64(self.w)
         if y1 > _i64(self.h): y1 = _i64(self.h)
+        if self.clip_enabled:
+            val cx0 = _i64(self.clip_x)
+            val cy0 = _i64(self.clip_y)
+            val cx1 = cx0 + _i64(self.clip_w)
+            val cy1 = cy0 + _i64(self.clip_h)
+            if cx0 > x0: x0 = cx0
+            if cy0 > y0: y0 = cy0
+            if cx1 < x1: x1 = cx1
+            if cy1 < y1: y1 = cy1
         if x1 <= x0 or y1 <= y0:
             return
-        # An active clip can only SHRINK the painted area, so ignoring it keeps
-        # the union conservative (a superset), which is the safe direction.
         if not self.frame_damage_valid or self.frame_damage_full:
             if self.frame_damage_full:
                 return
@@ -2324,6 +2745,14 @@ impl RenderBackend for VulkanBackend:
             self.last_error = "Vulkan damaged framebuffer readback byte count mismatch"
             return false
 
+        var checksum: i64 = self.last_host_checksum
+        if checksum < 0:
+            checksum = 0
+            var ci: i64 = 0
+            while ci < self.host_buf.len().to_i64():
+                val cpx = (self.host_buf[ci] as i64) & 4294967295
+                checksum = (checksum + cpx) % 2147483647
+                ci += 1
         var source_index: i64 = 0
         var patched: i64 = 0
         i = 0
@@ -2336,12 +2765,19 @@ impl RenderBackend for VulkanBackend:
             while row < rh:
                 var col = 0
                 while col < rw:
-                    self.host_buf[(y + row) * self.w + x + col] = packed_pixels[source_index]
+                    val dst_idx = (y + row) * self.w + x + col
+                    val old_px = self.host_buf[dst_idx]
+                    val new_px = packed_pixels[source_index]
+                    val old_mod = ((old_px as i64) & 4294967295) % 2147483647
+                    val new_mod = ((new_px as i64) & 4294967295) % 2147483647
+                    checksum = (checksum + 2147483647 - old_mod + new_mod) % 2147483647
+                    self.host_buf[dst_idx] = new_px
                     source_index += 1
                     col += 1
                 row += 1
             patched = patched + _i64(rw) * _i64(rh)
             i += 4
+        self.last_host_checksum = checksum
         self.damage_rect_px = expected_pixels
         self.mirror_copy_iterations = patched
         self.present_readback_bytes = expected_pixels * 4
@@ -2352,7 +2788,7 @@ impl RenderBackend for VulkanBackend:
         val trace_present = (env_get("SIMPLE_VK_PRESENT_TRACE") ?? "") == "1"
         var pt0: i64 = 0
         if trace_present:
-            pt0 = time_now_micros()
+            pt0 = default_frame_clock().now_micros()
         self._begin_frame_receipt("host-cache", true, false)
         self.present_readback_bytes = 0
         self.present_readback_rect_count = 0
@@ -2361,11 +2797,28 @@ impl RenderBackend for VulkanBackend:
             return
         val pending_status = self._flush_pending_compute_at("present")
         if trace_present:
-            vulkan_order_trace("present flush_us={time_now_micros() - pt0}")
+            vulkan_order_trace("present flush_us={default_frame_clock().now_micros() - pt0}")
         if pending_status <= 0:
             if pending_status < 0:
                 self.completion_unknown = true
             self.frame_fallback_reason = "compute-finalize-failed"
+            return
+        if (self.cpu_fallback_host_surface and self.host_mirror_valid and
+                self.host_buf.len() == self.w * self.h):
+            if self.d_framebuffer > 0:
+                val total_i64 = _i64(self.w) * _i64(self.h)
+                val upload_bytes = _pixels_to_bytes(self.host_buf, total_i64)
+                if (upload_bytes.len().to_i64() != total_i64 * 4 or
+                        not vulkan_sffi_copy_to_buffer(self.d_framebuffer, upload_bytes, 0)):
+                    self.frame_fallback_reason = "host-surface-device-upload-failed"
+            self.present_readback_bytes = 0
+            self.present_readback_rect_count = 0
+            self.frame_present_mode = "cpu-fallback-host-surface"
+            self.dirty = false
+            self.frame_readback_completed = true
+            self.frame_host_cache_refresh_completed = true
+            self.host_mirror_frame_fresh = true
+            self._clear_present_damage()
             return
         if not self.dirty:
             self.present_noop_count += 1
@@ -2375,7 +2828,7 @@ impl RenderBackend for VulkanBackend:
             return
         var pt1: i64 = 0
         if trace_present:
-            pt1 = time_now_micros()
+            pt1 = default_frame_clock().now_micros()
         if self.host_mirror_frame_fresh and self.host_mirror_valid:
             # A readback already downloaded this frame's surface into host_buf
             # (draw_ir_adv reads pixels BEFORE present, so strict device
@@ -2415,7 +2868,7 @@ impl RenderBackend for VulkanBackend:
                 self.frame_fallback_reason = "full-host-cache-refresh-failed"
                 return
         if trace_present:
-            vulkan_order_trace("present refresh_us={time_now_micros() - pt1}")
+            vulkan_order_trace("present refresh_us={default_frame_clock().now_micros() - pt1}")
         self.dirty = false
         self.frame_readback_completed = true
         self.frame_host_cache_refresh_completed = true
@@ -2449,6 +2902,8 @@ impl RenderBackend for VulkanBackend:
         if vulkan_order_trace_enabled():
             vulkan_order_trace("readback-entry dirty={self.dirty} pending_cmd={self.pending_compute_command} pending_n={self.pending_compute_count} cpu_fallback={self.cpu_fallback_used} completion_unknown={self.completion_unknown} fb={self.d_framebuffer}")
         if self.completion_unknown:
+            if self._can_delegate_cpu_fallback_readback():
+                return self._readback_cpu_fallback_host()
             return engine2d_readback([], "completion_unknown")
         # With frame batching enabled (enable_frame_batching(), used by the
         # "vulkan"/"metal-on-vulkan"/"directx-on-vulkan" Engine2D lanes),
@@ -2463,15 +2918,36 @@ impl RenderBackend for VulkanBackend:
         val pending_status = self._flush_pending_compute_at("read_pixels_with_source")
         if pending_status < 0:
             self.completion_unknown = true
+            if self._can_delegate_cpu_fallback_readback():
+                return self._readback_cpu_fallback_host()
             return engine2d_readback([], "completion_unknown")
         if pending_status == VK_DISPATCH_COMPLETED_INELIGIBLE:
             self.mark_cpu_fallback("readback-batch-cleanup-ineligible")
         # fn contract forbids self mutation: dirty reads fetch straight from the
         # device; present() owns the host_buf cache refresh.
         if self.dirty:
+            if self._can_delegate_cpu_fallback_readback():
+                return self._readback_cpu_fallback_host()
             self.damage_rect_px = 0
             self.mirror_copy_iterations = 0
-            # Damage-scoped route FIRST: when a valid mirror from the previous
+            # Explicit staged present-damage route FIRST (used by damaged DrawIR
+            # composition, which reads pixels BEFORE present()): re-download only
+            # the staged disjoint dirty rects into the seeded host mirror and
+            # record exact transferred bytes/rects for present()'s dedup receipt.
+            if self.present_damage_valid and self.host_mirror_valid:
+                if self._refresh_host_damage():
+                    self.host_mirror_frame_fresh = true
+                    self.readback_frame_bytes = self.present_readback_bytes
+                    self.readback_frame_rects = self.present_readback_rect_count
+                    if self.cpu_fallback_used:
+                        return engine2d_readback(self.host_buf, "cpu_fallback")
+                    return Engine2DReadback(
+                        pixels: self.host_buf, source: "device_readback",
+                        backend_handle: self.d_framebuffer,
+                        device_identity: self.session.device,
+                        pixel_count: self.host_buf.len().to_i64(),
+                        checksum: self.last_host_checksum)
+            # Damage-scoped route NEXT: when a valid mirror from the previous
             # frame survives and this frame's draw calls named a sub-rect, only
             # that rect is re-downloaded. The mirror and the returned pixels
             # share one array here exactly as the full arm below does (F8's
@@ -2509,6 +2985,8 @@ impl RenderBackend for VulkanBackend:
                 checksum = vulkan_sffi_readback_u32_into(
                     pixels, self.d_framebuffer, self.w * self.h, 0)
             if checksum < 0:
+                if self._can_delegate_cpu_fallback_readback():
+                    return self._readback_cpu_fallback_host()
                 return engine2d_readback([], "readback_failed")
             # Seed the host mirror from the download that just happened. Before
             # this, an offscreen frame that read pixels and then presented paid
@@ -2560,10 +3038,10 @@ impl RenderBackend for VulkanBackend:
                 pixel_count: copy.len().to_i64(),
                 checksum: self.last_host_checksum)
 
-    me width() -> i32:
+    fn width() -> i32:
         self.w
 
-    me height() -> i32:
+    fn height() -> i32:
         self.h
 
     me draw_ellipse(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
@@ -2648,22 +3126,46 @@ impl RenderBackend for VulkanBackend:
             return
         if color_a(color) == 0:
             return
-        if not self._flush_for_host_fallback("rect-blend-host-readback"):
+        if self.cpu_fallback_host_surface:
+            self._fallback_fill_rect_host(x, y, w, h, color)
             return
-        emu_draw_rect_blend(self, x, y, w, h, color)
+        if self.mask_buf.len() == 0:
+            # Device solid composite (the alpha<255 lane of draw_rect_filled).
+            # The host path below flushes and reads the WHOLE frame back per
+            # call: forms-media 1x spent ~110 s of 126 s there, 4x did not
+            # finish in 19 min. Masked rects keep it: the native composite
+            # has no mask plane.
+            self.draw_rect_filled(x, y, w, h, color)
+            return
+        if self._prepare_host_fallback_op("rect-blend-host-readback", "rect-blend-host-readback", false):
+            emu_draw_rect_blend(self, x, y, w, h, color)
 
     me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         if not vulkan_timing_enabled():
-            self._draw_image_blend_impl(x, y, w, h, pixels)
+            self._draw_image_blend_impl(x, y, w, h, pixels, VK_IMAGE_COMPOSITE_SRC_OVER)
             return
         val _t = vulkan_timing_now_us()
-        self._draw_image_blend_impl(x, y, w, h, pixels)
+        self._draw_image_blend_impl(x, y, w, h, pixels, VK_IMAGE_COMPOSITE_SRC_OVER)
         vulkan_timing_add(VK_T_IMAGE_BLEND, _t)
 
-    me _draw_image_blend_impl(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+    me _fallback_image_blend_host(x: i32, y: i32, w: i32, h: i32, pixels: [u32], composite_mode: i32):
+        """Composite an image or solid translucent rect on the demoted host surface."""
+        if not self._fallback_ensure_host_buf_synced():
+            return
+        if composite_mode == VK_IMAGE_COMPOSITE_SRC_OVER_SOLID and pixels.len() > 0:
+            self._fallback_fill_rect_host(x, y, w, h, pixels[0])
+        else:
+            emu_draw_image_blend(self, x, y, w, h, pixels)
+
+    me _draw_image_blend_impl(x: i32, y: i32, w: i32, h: i32, pixels: [u32], composite_mode: i32):
+        # composite_mode: VK_IMAGE_COMPOSITE_SRC_OVER (image pixels) or
+        # VK_IMAGE_COMPOSITE_SRC_OVER_SOLID (a translucent solid rect).
         if self.completion_unknown: return
         _vk_stat_image_op(w, h, true)
-        val native_status = self._draw_image_blend_native(x, y, w, h, pixels, 1000)
+        if self.cpu_fallback_host_surface:
+            self._fallback_image_blend_host(x, y, w, h, pixels, composite_mode)
+            return
+        val native_status = self._draw_image_composite_native(x, y, w, h, w, h, pixels, 1000, composite_mode, false)
         if native_status > 0:
             return
         if native_status < 0:
@@ -2671,13 +3173,27 @@ impl RenderBackend for VulkanBackend:
             self.completion_unknown = true
             return
         if not self._flush_for_host_fallback("image-blend-host-readback"):
+            if not self.completion_unknown and self.initialized and self.d_framebuffer > 0:
+                if self._demote_to_cpu_fallback_host("image-blend-host-fallback"):
+                    self._fallback_image_blend_host(x, y, w, h, pixels, composite_mode)
             return
         self.mark_cpu_fallback("image-blend-host-fallback")
+        if self.mask_buf.len() == 0 and self.pipe_blit <= 0 and self.initialized and self.d_framebuffer > 0:
+            if self._demote_to_cpu_fallback_host("image-blend-host-fallback"):
+                self._fallback_image_blend_host(x, y, w, h, pixels, composite_mode)
+                return
+        if composite_mode == VK_IMAGE_COMPOSITE_SRC_OVER_SOLID:
+            emu_draw_rect_blend(self, x, y, w, h, pixels[0])
+            return
         emu_draw_image_blend(self, x, y, w, h, pixels)
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
         if self.completion_unknown: return
         if not _vulkan_scaled_image_args_valid(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels):
+            return
+        if self.cpu_fallback_host_surface:
+            self.mark_cpu_fallback("scaled-image-host-fallback")
+            emu_draw_image_scaled(self, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
             return
         val native_status = self._draw_image_scaled_native(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
         if native_status > 0:
@@ -2693,6 +3209,10 @@ impl RenderBackend for VulkanBackend:
         if self.completion_unknown: return
         if not _vulkan_scaled_image_args_valid(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels):
             return
+        if self.cpu_fallback_host_surface:
+            if self._prepare_host_fallback_op("scaled-image-blend-host-readback", "scaled-image-blend-host-fallback", true):
+                emu_draw_image_scaled_blend(self, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+            return
         val native_status = self._draw_image_scaled_blend_native(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
         if native_status > 0:
             return
@@ -2700,11 +3220,8 @@ impl RenderBackend for VulkanBackend:
             self.mark_cpu_fallback("scaled-image-blend-completion-unknown")
             self.completion_unknown = true
             return
-        if not self._flush_for_host_fallback(
-                "scaled-image-blend-host-readback"):
-            return
-        self.mark_cpu_fallback("scaled-image-blend-host-fallback")
-        emu_draw_image_scaled_blend(self, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+        if self._prepare_host_fallback_op("scaled-image-blend-host-readback", "scaled-image-blend-host-fallback", true):
+            emu_draw_image_scaled_blend(self, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
 
     me draw_triangle_outline(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32, thickness: i32):
         if self.completion_unknown: return
@@ -2727,6 +3244,9 @@ impl RenderBackend for VulkanBackend:
         """
         if self.completion_unknown or not self.initialized or self.d_framebuffer <= 0:
             self.last_error = "glass-device-state-unavailable"
+            return false
+        if self.cpu_fallback_host_surface:
+            self.last_error = "glass-device-host-surface-active"
             return false
         if self.pipe_blit <= 0 or self.session.pipe_glass_material <= 0:
             self.last_error = if self.session.glass_error != "":
@@ -2830,6 +3350,8 @@ impl RenderBackend for VulkanBackend:
         """
         if self.completion_unknown or not self.initialized or self.d_framebuffer <= 0:
             return false
+        if self.cpu_fallback_host_surface:
+            return false
         if self.pipe_blit <= 0 or self.session.pipe_blur_rect <= 0:
             return false
         if self.mask_buf.len() > 0:
@@ -2907,25 +3429,20 @@ impl RenderBackend for VulkanBackend:
         if self.completion_unknown: return
         if self._draw_blur_rect_device(x, y, w, h, radius):
             return
-        if not self._flush_for_host_fallback("blur-host-readback"):
-            return
-        # Reached only when the device kernel declined. Record it: this is a
-        # full-surface readback plus an upload, and it used to happen with
-        # cpu_fallback_count reading 0.
-        self.mark_cpu_fallback("glass-device-unavailable")
-        emu_draw_blur_rect(self, x, y, w, h, radius)
+        if self._prepare_host_fallback_op("blur-host-readback", "glass-device-unavailable", true):
+            emu_draw_blur_rect(self, x, y, w, h, radius)
 
     me _draw_shadow_rect_device(x: i32, y: i32, w: i32, h: i32, offset_x: i32,
                                 offset_y: i32, blur_r: i32, color: u32) -> bool:
         """GPU-resident box shadow: one recorded dispatch, no readback.
 
         `emu_draw_shadow_rect`'s coverage field is SEPARABLE --
-        `cov = ((prof_x[px] * prof_y[py]) / 255 * shadow_a) / 255` -- where each
-        profile is `_emu_box_blur_1d` run three times over a 1-D step, one
-        truncating division per pass per sample. That is why this is NOT three
-        passes of `blur_rect.comp` over a 2-D coverage image: a 2-D box blur
-        divides by (2r+1)^2 per pass and truncates on a different quantity, so
-        it would be a different integer field and break the twin.
+        `cov = ((prof_x[px] * prof_y[py] + 127) / 255 * shadow_a + 127) / 255` -- where each
+        profile is Skia's blurred step (`engine2d_blur_step_profile`, rounded
+        integer box passes). That is why this is NOT three passes of
+        `blur_rect.comp` over a 2-D coverage image: that kernel rounds a
+        different quantity, so it would be a different integer field and break
+        the twin.
 
         Instead the two profiles are built HOST-side by the very same
         `_emu_shadow_profile` the twin calls -- O(mw + mh) work, two 1-D arrays,
@@ -2940,6 +3457,8 @@ impl RenderBackend for VulkanBackend:
         the caller falls through to the host twin and paints identical pixels.
         """
         if self.completion_unknown or not self.initialized or self.d_framebuffer <= 0:
+            return false
+        if self.cpu_fallback_host_surface:
             return false
         if self.pipe_blit <= 0 or self.session.pipe_shadow_rect <= 0:
             return false
@@ -2981,9 +3500,8 @@ impl RenderBackend for VulkanBackend:
 
         # The SAME profile builder the host twin uses, so the coverage field is
         # identical by construction rather than by re-derivation.
-        val br = if blur_r / 2 < 1: 1 else: blur_r / 2
-        val prof_x = _emu_shadow_profile(mw, pad, w, br)
-        val prof_y = _emu_shadow_profile(mh, pad, h, br)
+        val prof_x = _emu_shadow_profile(mw, pad, w, blur_r)
+        val prof_y = _emu_shadow_profile(mh, pad, h, blur_r)
         var profs: [u32] = [0u32; mw + mh]
         var pi = 0
         while pi < mw:  # cpu-lane-loop-ok: 1-D profile, one iteration per column
@@ -3049,6 +3567,60 @@ impl RenderBackend for VulkanBackend:
             return false
         true
 
+    # reason: raw device kernel entry; layer_buf is the framebuffer handle of a shared offscreen VulkanBackend holding w*h straight-alpha words, alpha8 is Skia paint alpha
+    # @allow(primitive_api)
+    me draw_css_group_restore_device(layer_buf: i64, x0: i32, y0: i32, w: i32, h: i32, alpha8: i32) -> bool:
+        """Restore a CSS opacity group layer onto the framebuffer on the device.
+
+        `css_group_restore.comp` is the integer twin of
+        `css_opacity_group_composite_pixel` and reads the layer straight from
+        the offscreen surface's buffer, so neither the layer nor the
+        destination region is read back and nothing is uploaded. The kernel is
+        submitted on its own (fenced) after this frame's recorded work, because
+        the layer buffer belongs to another backend and must never enter this
+        backend's pending-source release list.
+
+        Fail-closed: every `false` return has left the framebuffer untouched,
+        so the caller keeps the host readback restore, which paints the same
+        pixels. A clip or mask is declined (the kernel honours neither).
+        """
+        if self.completion_unknown or not self.initialized or self.d_framebuffer <= 0 or layer_buf <= 0:
+            return false
+        if self.session.pipe_css_group_restore <= 0 or self.cpu_fallback_used or self.cpu_fallback_host_surface:
+            return false
+        if self.mask_buf.len() > 0 or self.clip_enabled:
+            return false
+        if w <= 0 or h <= 0 or alpha8 <= 0 or alpha8 > 255:
+            return false
+        val flushed = self._flush_pending_compute_at("css-group-restore-device")
+        if flushed < 0:
+            self.completion_unknown = true
+            return false
+        if flushed != 1:
+            return false
+        val pc = _pack_css_group_restore_pc(x0, y0, w, h, self.w, self.h, alpha8)
+        val gx = (_i64(w) + 15) / 16
+        val gy = (_i64(h) + 15) / 16
+        val produced = vulkan_dispatch_region_kernel_checked(
+            self.d_framebuffer, self.session.pipe_css_group_restore, layer_buf, pc, gx, gy, 1)
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("css-group-restore-device x={x0} y={y0} w={w} h={h} a={alpha8} rc={produced} fb={self.d_framebuffer}")
+        if produced <= 0:
+            if produced < 0:
+                self.completion_unknown = true
+            return false
+        # Same bookkeeping as `_finish_image_composite`: the written rect is
+        # exactly the group rect.
+        self.dirty = true
+        self.host_mirror_frame_fresh = false
+        self.hint_damage(_i64(x0), _i64(y0), _i64(w), _i64(h))
+        self.consume_damage_hint()
+        self.mark_device_content_changed()
+        if produced == VK_DISPATCH_COMPLETED_INELIGIBLE:
+            self.mark_cpu_fallback("css-group-restore-cleanup-ineligible")
+        vulkan_stat_note_device_css_group_restore()
+        true
+
     me draw_shadow_rect(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
         if self.completion_unknown: return
         if w <= 0 or h <= 0:
@@ -3064,10 +3636,103 @@ impl RenderBackend for VulkanBackend:
         # cpu fallback rather than crossing the boundary silently.
         if self._draw_shadow_rect_device(x, y, w, h, offset_x, offset_y, blur_r, color):
             return
-        if not self._flush_for_host_fallback("shadow-rect-host-readback"):
-            return
-        self.mark_cpu_fallback("shadow-device-unavailable")
-        emu_draw_shadow_rect(self, x, y, w, h, offset_x, offset_y, blur_r, color)
+        if self._prepare_host_fallback_op("shadow-rect-host-readback", "shadow-device-unavailable", true):
+            emu_draw_shadow_rect(self, x, y, w, h, offset_x, offset_y, blur_r, color)
+
+    # reason: raw device kernel entry; rect in device px, mode 0 radial / 1 linear, tables are the packed u32 words from backend_emu radial/linear_gradient_device_tables
+    # @allow(primitive_api)
+    me draw_gradient_layer_device(x0: i32, y0: i32, w: i32, h: i32, mode: i32, tables: [u32]) -> bool:
+        """Evaluate one CSS gradient layer and composite it on the device.
+
+        The host used to evaluate every pixel (`radial_gradient_pixels` /
+        `linear_gradient_pixels`) and upload them for a SRC_OVER image
+        composite. Now only `tables` cross the boundary -- a 4-word header, the
+        1025-entry stop ramp and O(w + h) geometry terms built by
+        `radial_gradient_device_tables` / `linear_gradient_device_tables` --
+        and `gradient_layer.comp` evaluates t with the host's exact integer
+        math, composites with Chrome's layer rule against framebuffer content
+        and writes the result into the binding-1 buffer, which the ordinary
+        image tail copies back (same clip, damage and dirty bookkeeping).
+
+        Fail-closed: every `false` return has left the framebuffer untouched,
+        so the caller keeps the host evaluator, which paints the same t.
+        """
+        if self.completion_unknown or not self.initialized or self.d_framebuffer <= 0:
+            return false
+        if self.cpu_fallback_host_surface:
+            return false
+        if self.pipe_blit <= 0 or self.session.pipe_gradient_layer <= 0:
+            return false
+        if self.mask_buf.len() > 0:
+            return false
+        if w <= 0 or h <= 0 or (mode != 0 and mode != 1):
+            return false
+        val pixel_count = _i64(w) * _i64(h)
+        val axis_words = if mode == 0: _i64(w) + _i64(h) else: 2 * (_i64(w) + _i64(h))
+        val table_words = tables.len().to_i64()
+        if table_words != 4 + 1025 + axis_words:
+            return false
+        val total_words = pixel_count + table_words
+        if pixel_count <= 0 or total_words > 2147483647 or total_words > 9223372036854775807 / 4:
+            return false
+
+        var d_out = self._acquire_image_source(total_words * 4)
+        if d_out <= 0 and self._image_source_pool_is_fully_pending():
+            val retried = self._flush_pending_compute_at("gradient-device-retry")
+            if retried < 0:
+                self.completion_unknown = true
+                return false
+            if retried > 0:
+                d_out = self._acquire_image_source(total_words * 4)
+        if d_out <= 0:
+            return false
+
+        # Tables go to the tail, just past the pixel region the kernel writes:
+        # disjoint, so no barrier.
+        val tab_byte_off = pixel_count * 4
+        var uploaded = vulkan_sffi_copy_to_buffer_u32(d_out, tables, tab_byte_off)
+        if not uploaded:
+            val tab_bytes = _pixels_to_bytes(tables, table_words)
+            uploaded = tab_bytes.len().to_i64() == table_words * 4 and
+                vulkan_sffi_copy_to_buffer(d_out, tab_bytes, tab_byte_off)
+        if not uploaded:
+            self._release_image_source(d_out)
+            return false
+
+        val tab_off = pixel_count as i32
+        val col_off = tab_off + 4 + 1025
+        val row_off = if mode == 0: col_off + w else: col_off + 2 * w
+        val pc = _pack_gradient_layer_pc(x0, y0, w, h, self.w, self.h, mode, tab_off, col_off, row_off)
+        val gx = (_i64(w) + 15) / 16
+        val gy = (_i64(h) + 15) / 16
+        # Same frozen 2-binding descriptor layout as shadow_rect.comp /
+        # blur_rect.comp / _glsl_blit (0 = framebuffer, 1 = source), which is
+        # what lets the warm blit descriptor pool serve this pipeline. Recorded,
+        # not submitted: `rt_vulkan_dispatch` emits a full memory barrier after
+        # every dispatch, so earlier layers in this command buffer are visible.
+        val produced = if self.frame_batching_enabled:
+            self._enqueue_image_composite(
+                self.session.pipe_gradient_layer, d_out, pc, gx, gy, 1)
+        else:
+            vulkan_dispatch_region_kernel_checked(
+                self.d_framebuffer, self.session.pipe_gradient_layer, d_out, pc, gx, gy, 1)
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("gradient-device x={x0} y={y0} w={w} h={h} mode={mode} rc={produced} fb={self.d_framebuffer}")
+        if produced <= 0:
+            if not self.frame_batching_enabled:
+                self._release_image_source(d_out)
+            if produced < 0:
+                self.completion_unknown = true
+            return false
+
+        val composited = self._finish_image_composite(
+            d_out, x0, y0, w, h, w, h, 1000, VK_IMAGE_COMPOSITE_COPY)
+        if composited <= 0:
+            if composited < 0:
+                self.completion_unknown = true
+            return false
+        vulkan_stat_note_device_gradient()
+        true
 
     me draw_image_transform(dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels: [u32]):
         if self.completion_unknown: return
@@ -3075,14 +3740,14 @@ impl RenderBackend for VulkanBackend:
 
     me draw_rect_blend_mode(x: i32, y: i32, w: i32, h: i32, color: u32, mode: i32):
         if self.completion_unknown: return
-        if not self._flush_for_host_fallback("blend-mode-host-readback"):
-            return
-        emu_draw_rect_blend_mode(self, x, y, w, h, color, mode)
+        if self._prepare_host_fallback_op("blend-mode-host-readback", "blend-mode-host-readback", false):
+            emu_draw_rect_blend_mode(self, x, y, w, h, color, mode)
 
 impl Engine2DExtended for VulkanBackend:
     me _clear_borrowed_pipeline_handles():
         self.shader_clear = 0
         self.shader_rect_filled = 0
+        self.shader_affine_coverage_rect = 0
         self.shader_rect_outline = 0
         self.shader_circle_filled = 0
         self.shader_circle_outline = 0
@@ -3093,6 +3758,7 @@ impl Engine2DExtended for VulkanBackend:
         self.shader_blit = 0
         self.pipe_clear = 0
         self.pipe_rect_filled = 0
+        self.pipe_affine_coverage_rect = 0
         self.pipe_rect_outline = 0
         self.pipe_circle_filled = 0
         self.pipe_circle_outline = 0
@@ -3246,6 +3912,8 @@ pub fn vulkan_readback_count() -> i64:
 # correctly by some path".
 var _vk_stat_device_blur_rects: i64 = 0
 var _vk_stat_device_glass_materials: i64 = 0
+var _vk_stat_device_css_group_restores: i64 = 0
+var _vk_stat_device_gradients: i64 = 0
 
 pub fn vulkan_stat_note_device_blur_rect():
     _vk_stat_device_blur_rects = _vk_stat_device_blur_rects + 1
@@ -3259,12 +3927,33 @@ pub fn vulkan_device_blur_rect_count() -> i64:
 pub fn vulkan_device_glass_material_count() -> i64:
     _vk_stat_device_glass_materials
 
+fn vulkan_stat_note_device_css_group_restore():
+    _vk_stat_device_css_group_restores = _vk_stat_device_css_group_restores + 1
+
+# CSS opacity groups restored by css_group_restore.comp (no layer or
+# destination readback, no upload).
+# reason: process-wide device dispatch counter, same shape as the other vulkan_device_*_count stats
+# @allow(primitive_api)
+pub fn vulkan_device_css_group_restore_count() -> i64:
+    _vk_stat_device_css_group_restores
+
+fn vulkan_stat_note_device_gradient():
+    _vk_stat_device_gradients = _vk_stat_device_gradients + 1
+
+# CSS gradient layers evaluated AND composited by gradient_layer.comp (no host
+# gradient pixels were computed or uploaded for them).
+# reason: process-global instrumentation counter read by specs; a plain count of device gradient layers
+# @allow(primitive_api)
+pub fn vulkan_device_gradient_count() -> i64:
+    _vk_stat_device_gradients
+
 pub fn vulkan_device_material_census_line() -> text:
-    "device_blur_rects={_vk_stat_device_blur_rects} device_glass_materials={_vk_stat_device_glass_materials}"
+    "device_blur_rects={_vk_stat_device_blur_rects} device_glass_materials={_vk_stat_device_glass_materials} device_gradients={_vk_stat_device_gradients}"
 
 pub fn vulkan_device_material_census_reset():
     _vk_stat_device_blur_rects = 0
     _vk_stat_device_glass_materials = 0
+    _vk_stat_device_gradients = 0
 
 pub fn vulkan_readback_census_line() -> text:
     "readbacks={_vk_stat_readbacks} readback_pixels={_vk_stat_readback_pixels}"

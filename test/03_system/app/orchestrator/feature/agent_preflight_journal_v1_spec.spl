@@ -1,0 +1,123 @@
+# @req ORCH-02 HOST-02
+# Actual existing controller journal/filesystem; expected association is not probe evidence.
+# Execution NOT_RUN. No scripted journal, provider, reservation or native effects.
+use std.nogc_sync_mut.orchestration.workload_store_v1.*
+use std.nogc_sync_mut.orchestration.agent_preflight_objects_v1.*
+use std.common.contracts.orchestration.agent_preflight_binding_v1.*
+use std.common.contracts.orchestration.workload_fence_v1.controller_workload_create_v1
+use std.common.contracts.container.execution_v2.*
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_lookup_v2
+use std.common.contracts.distributed_control_codec_v2.distributed_decode_operation_v2
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io_runtime.dir_remove
+
+fn preflight_journal_fixture_v1() -> (ControllerWorkloadStoreV1, AgentPreflightBindingV1, text):
+    val source = file_read_regular_no_follow_bounded("test/fixtures/orchestration/caret_agent_session.sdn", 1048576).unwrap()
+    val catalog = file_read_regular_no_follow_bounded("test/fixtures/orchestration/caret_policy_catalog.sdn", 1048576).unwrap()
+    val root = secure_temp_dir("/tmp", "preflight-journal-").unwrap()
+    var owner = controller_workload_store_open_v1(root, "controller", "a".repeat(64), 4096).unwrap()
+    owner = controller_workload_store_submit_agent_v1(owner, "session", source, "caret", "review-simple").unwrap()
+    owner = controller_workload_store_pin_policy_v1(owner, "session", catalog, "caret", "review-simple").unwrap()
+    val policy = controller_workload_store_pinned_policy_v1(owner, "session").unwrap()
+    val plan = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: "probe-child", attempt: 1,
+        operation_id: "probe-operation", request_digest: "b".repeat(64), physical_host_id: "host-alias",
+        service_scope_id: "service", boot_id: "boot", provider_generation: 3, native_machine_id: "machine",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot")
+    val binding = AgentPreflightBindingV1(controller_id: "controller", session_uid: "session",
+        source_digest: policy.source_digest, catalog_digest: policy.catalog_digest, task_digest: "c".repeat(64),
+        image_digest: "d".repeat(64), probe_producer_digest: "e".repeat(64), nonce: "f".repeat(64),
+        preflight: plan, agent_provider: policy.session.agent.provider, executable_path: "/usr/bin/codex",
+        execution_os: policy.runtime.execution_os, architecture: policy.runtime.architecture, selected_user: "1000:1000")
+    (owner, binding, source)
+
+fn preflight_journal_reopen_v1(owner: ControllerWorkloadStoreV1) -> ControllerWorkloadStoreV1:
+    val root = owner.journal.root
+    expect(controller_workload_store_close_v1(owner).unwrap()).to_equal(true)
+    controller_workload_store_open_v1(root, "controller", "b".repeat(64), 4096).unwrap()
+
+fn preflight_journal_cleanup_v1(owner: ControllerWorkloadStoreV1):
+    val root = owner.journal.root
+    expect(controller_workload_store_close_v1(owner).unwrap()).to_equal(true)
+    expect(dir_remove(root, true)).to_equal(true)
+
+describe "preflight association in the existing controller journal":
+    it "retains and replays exact association before generic child creation":
+        step("retains and replays exact association before generic child creation")
+        val fixture = preflight_journal_fixture_v1()
+        val binding = fixture.1
+        var owner = controller_workload_store_preflight_v1(fixture.0, binding).unwrap()
+        expect(owner.rows.contains_key(binding.preflight.workload_uid)).to_equal(false)
+        val id = agent_preflight_operation_id_v1(binding.controller_id, binding.session_uid).unwrap()
+        val record = distributed_operation_journal_lookup_v2(owner.journal, id).unwrap()
+        expect(record.state).to_equal("completed")
+        expect(record.outcome_digest).to_equal(agent_preflight_binding_digest_v1(binding).unwrap())
+        val path = owner.journal.root + "/desired-input-objects/" + record.outcome_digest + ".sdn"
+        expect(file_read_regular_no_follow_bounded(path, 65536).unwrap()).to_equal(agent_preflight_binding_encode_v1(binding).unwrap())
+        owner = preflight_journal_reopen_v1(owner)
+        val replay_record = distributed_operation_journal_lookup_v2(owner.journal, id).unwrap()
+        val retained = agent_preflight_objects_read_v1(owner.journal, distributed_decode_operation_v2(replay_record.envelope).unwrap(), "controller").unwrap()
+        expect(agent_preflight_binding_encode_v1(retained).unwrap()).to_equal(agent_preflight_binding_encode_v1(binding).unwrap())
+        expect(controller_workload_store_preflight_guard_v1(owner, binding.preflight).unwrap()).to_equal(true)
+        var changed_plan = binding.preflight
+        changed_plan.request_digest = "2".repeat(64)
+        expect(controller_workload_store_preflight_guard_v1(owner, changed_plan).unwrap_err()).to_equal("agent-preflight-execution-plan-mismatch")
+        val child = controller_workload_create_v1("controller", 1, binding.preflight.workload_uid, 1,
+            container_execution_plan_digest_v2(binding.preflight).unwrap()).unwrap()
+        owner = controller_workload_store_create_v1(owner, child).unwrap()
+        expect(controller_workload_store_lookup_v1(owner, child.workload_uid).unwrap().plan_digest).to_equal(child.plan_digest)
+        preflight_journal_cleanup_v1(owner)
+
+    it "refuses changed image for one parent and child uid claimed by another parent":
+        step("refuses changed image for one parent and child uid claimed by another parent")
+        val fixture = preflight_journal_fixture_v1()
+        val binding = fixture.1
+        var owner = controller_workload_store_preflight_v1(fixture.0, binding).unwrap()
+        var changed = binding
+        changed.image_digest = "1".repeat(64)
+        expect(controller_workload_store_preflight_v1(owner, changed).is_err()).to_equal(true)
+        val catalog = file_read_regular_no_follow_bounded("test/fixtures/orchestration/caret_policy_catalog.sdn", 1048576).unwrap()
+        owner = controller_workload_store_submit_agent_v1(owner, "other-session", fixture.2, "caret", "review-simple").unwrap()
+        owner = controller_workload_store_pin_policy_v1(owner, "other-session", catalog, "caret", "review-simple").unwrap()
+        changed = binding
+        changed.session_uid = "other-session"
+        expect(controller_workload_store_preflight_v1(owner, changed).unwrap_err()).to_equal("agent-preflight-workload-conflict")
+        owner = preflight_journal_reopen_v1(owner)
+        expect(controller_workload_store_preflight_guard_v1(owner, binding.preflight).unwrap()).to_equal(true)
+        preflight_journal_cleanup_v1(owner)
+
+    it "persists parent cancellation before child exists and refuses later preflight":
+        step("persists parent cancellation before child exists and refuses later preflight")
+        val fixture = preflight_journal_fixture_v1()
+        val binding = fixture.1
+        var owner = controller_workload_store_preflight_v1(fixture.0, binding).unwrap()
+        owner = controller_workload_store_cancel_agent_v1(owner, binding.session_uid, sha256_text(fixture.2)).unwrap()
+        owner = preflight_journal_reopen_v1(owner)
+        expect(controller_workload_store_agent_cancelled_v1(owner, binding.session_uid).unwrap()).to_equal(true)
+        expect(owner.rows.contains_key(binding.preflight.workload_uid)).to_equal(false)
+        expect(controller_workload_store_preflight_guard_v1(owner, binding.preflight).unwrap_err()).to_equal("agent-preflight-parent-cancelled")
+        expect(controller_workload_store_preflight_v1(owner, binding).is_err()).to_equal(true)
+        preflight_journal_cleanup_v1(owner)
+
+    it "persists exact child cancellation request and parent marker after child creation":
+        step("persists exact child cancellation request and parent marker after child creation")
+        val fixture = preflight_journal_fixture_v1()
+        val binding = fixture.1
+        var owner = controller_workload_store_preflight_v1(fixture.0, binding).unwrap()
+        val child = controller_workload_create_v1("controller", 1, binding.preflight.workload_uid, 1,
+            container_execution_plan_digest_v2(binding.preflight).unwrap()).unwrap()
+        owner = controller_workload_store_create_v1(owner, child).unwrap()
+        val unrelated = controller_workload_create_v1("controller", 1, "unrelated", 1, "1".repeat(64)).unwrap()
+        owner = controller_workload_store_create_v1(owner, unrelated).unwrap()
+        owner = controller_workload_store_cancel_agent_v1(owner, binding.session_uid, sha256_text(fixture.2)).unwrap()
+        owner = preflight_journal_reopen_v1(owner)
+        val cancelled = controller_workload_store_lookup_v1(owner, child.workload_uid).unwrap()
+        expect(cancelled.cancellation_requested).to_equal(true)
+        expect(cancelled.revision).to_equal(child.revision + 1)
+        expect(cancelled.plan_digest).to_equal(child.plan_digest)
+        expect(cancelled.assignment_digest).to_equal("")
+        expect(controller_workload_store_lookup_v1(owner, "unrelated").unwrap().cancellation_requested).to_equal(false)
+        expect(controller_workload_store_agent_cancelled_v1(owner, binding.session_uid).unwrap()).to_equal(true)
+        expect(controller_workload_store_preflight_guard_v1(owner, binding.preflight).is_err()).to_equal(true)
+        # Sticky cancellation requests reconciliation, not teardown/reap/release.
+        preflight_journal_cleanup_v1(owner)

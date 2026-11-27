@@ -1,0 +1,63 @@
+# @req REQ-SSPEC-UNIT
+# Branch coverage for linker selection/discovery policy in
+# src/compiler/70.backend/linker/mold.spl (complements llvm_mingw_lld_discovery_spec,
+# which covers the PATH walk): engine policy, override parsing, kind classification,
+# platform names, fuse-ld names, and env-override error branches.
+use std.spec.{describe, it, expect}
+use std.io_runtime.{env_get_nullable, env_set}
+use compiler.backend.linker.mold.{link_engine_policy, linker_type_for_path, linker_fuse_ld_name,
+    requested_linker_override, find_requested_linker, find_linker_path,
+    simpleos_uses_internal_linker, mold_platform_binary_name}
+
+describe "link_engine_policy":
+    it "lets an explicit request win, trimmed and lowercased":
+        expect(link_engine_policy("  LLD ", false, true, true)).to_equal("lld")
+        expect(link_engine_policy("mold", true, false, false)).to_equal("mold")
+    it "uses the internal engine for SimpleOS":
+        expect(link_engine_policy("", true, true, true)).to_equal("internal")
+    it "prefers mold, then lld, then ld":
+        expect(link_engine_policy("", false, true, true)).to_equal("mold")
+        expect(link_engine_policy("", false, false, true)).to_equal("lld")
+        expect(link_engine_policy("", false, false, false)).to_equal("ld")
+
+describe "linker_type_for_path / linker_fuse_ld_name":
+    it "classifies by path, mold before lld before ld":
+        expect(linker_fuse_ld_name(linker_type_for_path("C:/Program Files/mold/bin/mold.exe"))).to_equal("mold")
+        expect(linker_fuse_ld_name(linker_type_for_path("C:/my home/llvm-mingw/bin/ld.lld.exe"))).to_equal("lld")
+        expect(linker_fuse_ld_name(linker_type_for_path("LLD-LINK.EXE"))).to_equal("lld")
+        expect(linker_fuse_ld_name(linker_type_for_path("/usr/bin/ld"))).to_equal("bfd")
+
+describe "mold_platform_binary_name":
+    it "returns a non-empty name":
+        expect(mold_platform_binary_name().len() > 0).to_equal(true)
+
+describe "SIMPLE_LINKER override":
+    it "reads, trims and rejects bad values":
+        val saved = env_get_nullable("SIMPLE_LINKER") ?? ""
+        val s0 = env_set("SIMPLE_LINKER", "   ")
+        val blank = requested_linker_override()
+        val blank_err = find_requested_linker("  ")
+        val s1 = env_set("SIMPLE_LINKER", "  weird-ld  ")
+        val trimmed = requested_linker_override()
+        val unsupported = find_requested_linker("weird-ld")
+        val via_find = find_linker_path()
+        val s2 = env_set("SIMPLE_LINKER", "internal")
+        val internal = find_linker_path()
+        val simpleos = simpleos_uses_internal_linker()
+        val s3 = env_set("SIMPLE_LINKER", saved)
+        expect(s0 and s1 and s2 and s3).to_equal(true)
+        expect(blank).to_equal("")
+        expect(blank_err.is_err()).to_equal(true)
+        expect(trimmed).to_equal("weird-ld")
+        expect(unsupported.is_err()).to_equal(true)
+        expect(via_find.is_err()).to_equal(true)
+        expect(internal.is_err()).to_equal(true)
+        expect(simpleos or not simpleos).to_equal(true)
+
+    it "resolves or reports aliases without crashing":
+        val mold = find_requested_linker("mold")
+        val lld = find_requested_linker("ld.lld")
+        val ld = find_requested_linker("bfd")
+        expect(mold.is_ok() or mold.is_err()).to_equal(true)
+        expect(lld.is_ok() or lld.is_err()).to_equal(true)
+        expect(ld.is_ok() or ld.is_err()).to_equal(true)

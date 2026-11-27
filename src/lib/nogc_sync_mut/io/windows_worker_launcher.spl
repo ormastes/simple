@@ -3,7 +3,7 @@
 # independently owns its compiler JobObject and proves cleanup over its protocol.
 # A token is a nonreused local handle slot, never a PID or a restart identity.
 use std.nogc_sync_mut.io.windows_process_owner.{_windows_process_wide_v1, _windows_process_pin_v1, windows_process_quote_arg_v1, windows_process_path_valid_v1}
-use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, CreateProcessW, CloseHandle, WaitForSingleObject, GetExitCodeProcess, TerminateProcess, GetLastError}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, CreateProcessW, CloseHandle, WaitForSingleObject, GetExitCodeProcess, TerminateProcess, GetLastError, windows_abi_get_process_heap, windows_abi_heap_alloc, windows_abi_heap_free, windows_abi_read_ptr, windows_abi_startupinfo_size, windows_abi_process_info_size, windows_abi_process_info_process_offset, windows_abi_process_info_thread_offset}
 use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u32, volatile_read_u32, volatile_read_u64}
 
 struct WindowsWorkerHandleV1:
@@ -26,16 +26,18 @@ fn windows_worker_spawn_v1(program: text, digest: text, args: [text], directory:
         if arg.contains("\0"): return Err("NUL in worker argument")
         command = command + " " + windows_process_quote_arg_v1(arg)
     if command.len() > 32766: return Err("worker command line exceeds Windows bound")
-    val heap = GetProcessHeap()
+    val heap = windows_abi_get_process_heap()
     if heap == 0: return Err("worker launcher heap unavailable")
     val pin = _windows_process_pin_v1(heap, program, digest)
     if pin == 0: return Err("worker executable pin/digest mismatch")
     val application = _windows_process_wide_v1(heap, program)
     val argv = _windows_process_wide_v1(heap, command)
     val cwd = _windows_process_wide_v1(heap, directory)
-    val startup = HeapAlloc(heap, 8u32, 104u64)
-    val information = HeapAlloc(heap, 8u32, 24u64)
-    val exit_slot = HeapAlloc(heap, 8u32, 8u64)
+    val startup_bytes = windows_abi_startupinfo_size()
+    val info_bytes = windows_abi_process_info_size()
+    val startup = windows_abi_heap_alloc(heap, startup_bytes)
+    val information = windows_abi_heap_alloc(heap, info_bytes)
+    val exit_slot = windows_abi_heap_alloc(heap, 8)
     var error = ""
     val allocations = [application, argv, cwd, startup, information]
     for address in allocations:
@@ -43,22 +45,22 @@ fn windows_worker_spawn_v1(program: text, digest: text, args: [text], directory:
     if exit_slot == 0: error = "worker exit observation allocation failed"
     var process: i64 = 0
     if error == "":
-        volatile_write_u32(startup, 104)
+        volatile_write_u32(startup, startup_bytes)
         # CREATE_NO_WINDOW. Environment is inherited; handles are not inherited.
         # There is no job here: graceful control/recovery belongs to the worker.
         if CreateProcessW(application, argv, 0, 0, 0, 134217728u32, 0, cwd, startup, information) == 0:
             error = "worker CreateProcessW failed: " + str(GetLastError())
         else:
-            process = volatile_read_u64(information)
-            val thread = volatile_read_u64(information + 8)
+            process = windows_abi_read_ptr(information + windows_abi_process_info_process_offset())
+            val thread = windows_abi_read_ptr(information + windows_abi_process_info_thread_offset())
             val _thread_closed = CloseHandle(thread)
     for address in allocations:
         if address != 0:
-            val _freed = HeapFree(heap, 0u32, address)
+            val _freed = windows_abi_heap_free(heap, address)
     if error != "":
         val _closed = CloseHandle(pin)
         if exit_slot != 0:
-            val _freed = HeapFree(heap, 0u32, exit_slot)
+            val _freed = windows_abi_heap_free(heap, exit_slot)
         return Err(error)
     _windows_worker_handles_v1 = _windows_worker_handles_v1.push(WindowsWorkerHandleV1(
         process: process, image_pin: pin, heap: heap, exit_slot: exit_slot, closed: false))

@@ -32,6 +32,8 @@
 #include <unistd.h>
 #endif
 
+#include "runtime_file_lock_owned_v2.c"
+
 #define RT_HOST_FILE_PATH_MAX 4096U
 
 static char* rt_host_file_copy_path(const uint8_t* path_ptr, uint64_t path_len) {
@@ -72,7 +74,7 @@ int rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len) {
 #if defined(_WIN32)
     HANDLE file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                              NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                              NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL); /* BACKUP_SEMANTICS: directory handles for dir fsync */
     free(path);
     if (file == INVALID_HANDLE_VALUE) return 0;
     int ok = FlushFileBuffers(file) != 0;
@@ -105,6 +107,7 @@ int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout
     memset(&overlapped, 0, sizeof(overlapped));
     DWORD flags = LOCKFILE_EXCLUSIVE_LOCK;
     if (timeout_secs <= 0) {
+        flags |= LOCKFILE_FAIL_IMMEDIATELY;
         if (!LockFileEx(file, flags, 0, MAXDWORD, MAXDWORD, &overlapped)) {
             CloseHandle(file);
             return -1;
@@ -129,7 +132,7 @@ int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout
     free(path);
     if (fd < 0) return -1;
     if (timeout_secs <= 0) {
-        if (flock(fd, LOCK_EX) == 0) return fd;
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) return fd;
         close(fd);
         return -1;
     }
@@ -239,7 +242,7 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
     DWORD access = readonly != 0 ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
     DWORD protect = readonly != 0 ? PAGE_READONLY : PAGE_READWRITE;
     DWORD map_access = readonly != 0 ? FILE_MAP_READ : FILE_MAP_WRITE;
-    HANDLE file = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE,
+    HANDLE file = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                               NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     free(path);
     if (file == INVALID_HANDLE_VALUE) return 0;
@@ -261,6 +264,31 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
     close(fd);
     return address == MAP_FAILED ? 0 : (int64_t)(intptr_t)address;
 #endif
+}
+
+int64_t rt_mmap_create(int64_t path_value, int64_t size) {
+    if (size <= 0) return 0;
+    char* path = rt_host_file_copy_tagged_path(path_value);
+    if (!path) return 0;
+#if defined(_WIN32)
+    HANDLE file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    free(path);
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    LARGE_INTEGER want;
+    want.QuadPart = size;
+    BOOL sized = SetFilePointerEx(file, want, NULL, FILE_BEGIN) && SetEndOfFile(file);
+    CloseHandle(file);
+    if (!sized) return 0;
+#else
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    free(path);
+    if (fd < 0) return 0;
+    int sized = ftruncate(fd, (off_t)size) == 0;
+    close(fd);
+    if (!sized) return 0;
+#endif
+    return rt_mmap(path_value, size, 0, 0);
 }
 
 bool rt_munmap(int64_t addr, int64_t size) {

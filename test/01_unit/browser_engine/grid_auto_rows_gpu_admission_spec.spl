@@ -1,0 +1,45 @@
+# Grid rows holding `auto` stay unset, as on base (grid-auto-track lane).
+#
+# `normalized_grid_track_list` keeps `auto` for the CPU column sizing
+# (`grid_explicit_auto_column_sizes`). Rows have no auto sizing, so a row list
+# holding `auto` is not stored, as on base. Otherwise the GPU adapter
+# (`gpu_web/layout/adapter.spl`, `_web_layout_append_tracks`) would read the
+# `auto` token as an unsupported track.
+# Measured 2026-11-27 on base 3543da84e51 and head: every grid carries
+# LAYOUT_GPU_ADMISSION_UNSUPPORTED_TRACK, because `_web_layout_append_tracks`
+# reads "40px".to_i64() as 0 (bug web_gpu_layout_grid_px_tracks_never_admitted_2026-11-27).
+# AC-2 therefore pins parity with a px-rows grid, not admission.
+use std.spec.*
+use std.common.structural.layout.{layout_execution_profile, LAYOUT_GPU_ADMISSION_UNSUPPORTED_TRACK}
+use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.adapter.{web_layout_adapt_cpu_oracle}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir_result}
+
+fn grid_page(rows: text, columns: text) -> text:
+    "<div style=\"display:grid;grid-template-columns:" + columns + ";grid-template-rows:" + rows + "\"><div>a</div><div>b</div></div>"
+
+fn grid_stored(rows: text, columns: text) -> text:
+    val browser = simple_web_layout_render_html_draw_ir_result(grid_page(rows, columns), 320, 240)
+    for st in browser.hit_index.styles:
+        if st.display == "grid":
+            return "cols=" + st.grid_template_columns + ";rows=" + st.grid_template_rows
+    "no-grid"
+
+fn grid_track_flag(rows: text, columns: text) -> i64:
+    val browser = simple_web_layout_render_html_draw_ir_result(grid_page(rows, columns), 320, 240)
+    val execution = layout_execution_profile("serial_cpu", 50, 0, 0, 0, 0, 0, 0, 0)
+    val adapted = web_layout_adapt_cpu_oracle(browser, 1, execution, 4)
+    for node in adapted.snapshot.nodes:
+        if node.semantics.display == "grid":
+            return node.semantics.gpu_admission_flags & LAYOUT_GPU_ADMISSION_UNSUPPORTED_TRACK
+    -1
+
+describe "Grid rows holding auto":
+    it "AC-1: a row list with auto is not stored; columns keep auto":
+        expect(grid_stored("auto 20px", "40px 1fr")).to_equal("cols=40px 1fr;rows=")
+        expect(grid_stored("auto", "40px 1fr")).to_equal("cols=40px 1fr;rows=")
+        expect(grid_stored("repeat(2, auto)", "auto 1fr")).to_equal("cols=auto 1fr;rows=")
+        expect(grid_stored("20px 10px", "40px 1fr")).to_equal("cols=40px 1fr;rows=20px 10px")
+
+    it "AC-2: GPU track admission of an auto-rows grid equals a px-rows grid":
+        expect(grid_track_flag("auto 20px", "40px 1fr")).to_equal(grid_track_flag("20px", "40px 1fr"))
+        expect(grid_track_flag("auto", "1fr 1fr")).to_equal(grid_track_flag("", "1fr 1fr"))

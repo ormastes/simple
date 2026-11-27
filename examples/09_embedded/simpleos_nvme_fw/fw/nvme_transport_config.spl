@@ -13,9 +13,29 @@ invoked from). Design note: doc/05_design/hardware/nvme_host_equivalent_transpor
 """
 
 use std.fs.{file_read_text}
+use std.io_runtime.{cwd, file_exists}
+use std.path.{dirname}
 use nvme_types.*
 
 val PROFILE_SDN: text = "examples/09_embedded/simpleos_nvme_fw/fw/nvme_transport_profiles.sdn"
+
+# Resolve from the repository root, not from the caller's current directory.
+# The last fallback is absolute and is named in the read-failure diagnostic.
+fn transport_profile_sdn_path() -> text:
+    var dir = cwd()
+    var depth: i64 = 0
+    while depth < 40:
+        val candidate = dir + "/" + PROFILE_SDN
+        if file_exists(candidate):
+            return candidate
+        if dir == "/" or dir == "" or dir == ".":
+            break
+        val parent = dirname(dir)
+        if parent == dir:
+            break
+        dir = parent
+        depth = depth + 1
+    cwd() + "/" + PROFILE_SDN
 
 # Backends. `emu` is bound to the in-process device; `board` is DECLARED but
 # UNBOUND — attaching to it fails closed rather than pretending to be hardware.
@@ -93,7 +113,10 @@ when the name is absent or a field is missing/non-numeric — fail closed, never
 a silently-defaulted profile.
 """
 fn transport_profile_load(name: text) -> TransportProfile:
-    val body: text = file_read_text(PROFILE_SDN)
+    val profile_path = transport_profile_sdn_path()
+    val body: text = file_read_text(profile_path)
+    if body.trim() == "":
+        print "ERROR: NVMe transport profile could not be read: {profile_path}"
     val lines = body.split("\n")
     var p: TransportProfile = transport_profile_invalid()
     p.name = name

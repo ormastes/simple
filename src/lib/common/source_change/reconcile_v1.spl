@@ -1,0 +1,102 @@
+# Validated change reconcile: edit events are hints, the byte/content-digest
+# comparison below is the authority. Pure and lockless: no globals, inputs are
+# the previous and current {path -> sha256} maps, output is a fresh batch.
+# Shape validation (contracts_v1) is applied to every result before return.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.source_change.contracts_v1.{SourceChangeBatchV1, SourceEditV1,
+    EditOriginV1, SourceChangeLimitsV1, SourceChangeShapeV1, source_change_batch_shape_v1}
+
+# sha256 of the empty byte string: the payload digest of a removed path.
+val SOURCE_RECONCILE_EMPTY_DIGEST_V1 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+val SOURCE_RECONCILE_ABSENT_V1 = "absent"
+
+pub struct SourceReconcileV1:
+    batch: SourceChangeBatchV1
+    shape: SourceChangeShapeV1
+    added: [text]
+    removed: [text]
+    changed: [text]
+
+# [text].sort() is a no-op under the seed interpreter; heap sort by byte order.
+fn source_reconcile_sift_down_v1(mut values: [text], root_index: i64, heap_len: i64):
+    var root = root_index
+    while true:
+        val left = root * 2 + 1
+        if left >= heap_len:
+            return
+        var largest = root
+        if values[largest] < values[left]:
+            largest = left
+        val right = left + 1
+        if right < heap_len and values[largest] < values[right]:
+            largest = right
+        if largest == root:
+            return
+        val tmp = values[root]
+        values[root] = values[largest]
+        values[largest] = tmp
+        root = largest
+
+fn source_reconcile_sorted_v1(values: [text]) -> [text]:
+    var result = values
+    if result.len() < 2:
+        return result
+    var start = result.len() / 2
+    while start > 0:
+        start = start - 1
+        source_reconcile_sift_down_v1(result, start, result.len())
+    var end = result.len()
+    while end > 1:
+        end = end - 1
+        val tmp = result[0]
+        result[0] = result[end]
+        result[end] = tmp
+        source_reconcile_sift_down_v1(result, 0, end)
+    result
+
+# sha256 over the sorted "path:digest\n" lines. Independent of map order.
+pub fn source_root_digest_v1(digests: Dict<text, text>) -> text:
+    var lines: [text] = []
+    for path in digests.keys():
+        lines.push(path + ":" + digests[path] + "\n")
+    sha256_text(source_reconcile_sorted_v1(lines).join(""))
+
+fn source_reconcile_edit_v1(path: text, old_snapshot: text, new_digest: text,
+        sequence: u64) -> SourceEditV1:
+    SourceEditV1(path: path, old_snapshot: old_snapshot, old_start_byte: 0,
+        old_end_byte: 0, new_bytes_digest: new_digest, new_byte_len: 0,
+        origin: EditOriginV1.Fs, transaction_id: "fs-reconcile-{sequence}")
+
+pub fn source_reconcile_v1(root_identity: text, previous: Dict<text, text>,
+        current: Dict<text, text>, sequence: u64,
+        limits: SourceChangeLimitsV1) -> SourceReconcileV1:
+    var all_paths: [text] = []
+    for path in previous.keys():
+        all_paths.push(path)
+    for path in current.keys():
+        if not previous.contains_key(path):
+            all_paths.push(path)
+    var added: [text] = []
+    var removed: [text] = []
+    var changed: [text] = []
+    var edits: [SourceEditV1] = []
+    for path in source_reconcile_sorted_v1(all_paths):
+        val in_prev = previous.contains_key(path)
+        val in_cur = current.contains_key(path)
+        if in_prev and in_cur:
+            if previous[path] != current[path]:
+                changed.push(path)
+                edits.push(source_reconcile_edit_v1(path, previous[path], current[path], sequence))
+        elif in_cur:
+            added.push(path)
+            edits.push(source_reconcile_edit_v1(path, SOURCE_RECONCILE_ABSENT_V1, current[path], sequence))
+        else:
+            removed.push(path)
+            edits.push(source_reconcile_edit_v1(path, previous[path], SOURCE_RECONCILE_EMPTY_DIGEST_V1, sequence))
+    val batch = SourceChangeBatchV1(schema: 1, root_identity: root_identity,
+        before_root_digest: source_root_digest_v1(previous),
+        after_root_digest: source_root_digest_v1(current),
+        sequence: sequence, edits: edits, complete: true)
+    val shape = source_change_batch_shape_v1(batch, limits)
+    SourceReconcileV1(batch: batch, shape: shape, added: added, removed: removed, changed: changed)

@@ -1,0 +1,40 @@
+# Exact signed inputs DATA. Authority comes only from the actual Host verifier.
+use std.common.contracts.orchestration.agent_workspace_invocation_v1.*
+use std.common.contracts.orchestration.host_execute_request_v2.{HostExecuteRequestV2, host_execute_request_encode_v2, host_execute_request_decode_v2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_authority_codec_v2.{distributed_encode_signed_grant_v2, distributed_decode_signed_grant_v2,
+    distributed_encode_signed_approval_v2, distributed_decode_signed_approval_v2}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct AgentWorkspaceInvocationPacketV1:
+    host: HostExecuteRequestV2
+    manifest: AgentWorkspaceInvocationManifestV1
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+
+pub fn agent_workspace_invocation_packet_encode_v1(packet: AgentWorkspaceInvocationPacketV1) -> Result<text, text>:
+    val manifest = agent_workspace_invocation_manifest_encode_v1(packet.manifest)?
+    val host = host_execute_request_encode_v2(packet.host)?
+    val plan = packet.host.execution.plan
+    if (packet.manifest.operation_id != plan.operation_id or packet.manifest.task_use.session_uid != plan.workload_uid or
+            packet.manifest.task_use.attempt != plan.attempt or packet.manifest.workload_duration_ms != packet.host.operation.duration_ms):
+        return Err("agent-workspace-invocation-host-mismatch")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("agent-workspace-invocation-packet"),
+        "hostExecution": SdnValue.String(host), "manifest": SdnValue.String(manifest),
+        "signedGrant": SdnValue.String(distributed_encode_signed_grant_v2(packet.signed)?),
+        "signedApproval": SdnValue.String(distributed_encode_signed_approval_v2(packet.approval)?)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if bytes.byte_len() > 2097152: return Err("agent-workspace-invocation-packet-size")
+    Ok(bytes)
+
+pub fn agent_workspace_invocation_packet_decode_v1(source: text) -> Result<AgentWorkspaceInvocationPacketV1, text>:
+    val fields = agent_workspace_fields_v1(source, 2097152, ["version", "kind", "hostExecution", "manifest", "signedGrant", "signedApproval"])?
+    if agent_workspace_int_v1(fields, "version")? != 1 or agent_workspace_text_v1(fields, "kind")? != "agent-workspace-invocation-packet":
+        return Err("agent-workspace-invocation-packet-version")
+    val packet = AgentWorkspaceInvocationPacketV1(host: host_execute_request_decode_v2(agent_workspace_text_v1(fields, "hostExecution")?)?,
+        manifest: agent_workspace_invocation_manifest_decode_v1(agent_workspace_text_v1(fields, "manifest")?)?,
+        signed: distributed_decode_signed_grant_v2(agent_workspace_text_v1(fields, "signedGrant")?)?,
+        approval: distributed_decode_signed_approval_v2(agent_workspace_text_v1(fields, "signedApproval")?)?)
+    if agent_workspace_invocation_packet_encode_v1(packet)? != source: return Err("agent-workspace-invocation-packet-noncanonical")
+    Ok(packet)

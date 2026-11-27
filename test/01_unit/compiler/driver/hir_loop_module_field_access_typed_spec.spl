@@ -1,0 +1,46 @@
+use std.spec
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+# bug stage2_var_hir_module_field_access_offset0_2026-11-03: the frozen phase-3
+# stage2 lowered every field access on the reassigned `var hir_module: HirModule`
+# of the streaming/retained HIR loops at offset 0, so the two loops temporarily
+# routed reads/writes through `driver_hir_module_*_v1` typed-parameter helpers.
+# Current release/1.0.0 MIR lowering preserves `struct_value_syms` across
+# `var m: HirModule = nil` / `if/elif/else` initializers and reassignments, so
+# the workaround helpers have been retired and both loops access `hir_module`
+# fields directly.
+fn hir_loop_bodies(src: text) -> text:
+    val start = src.index_of("me lower_and_check_streaming_surfaces_impl")
+    val stop = src.index_of("fn lower_to_hir_impl")
+    if start < 0 or stop <= start:
+        return ""
+    src.substring(start, stop)
+
+describe "HIR loop module field access uses direct HirModule fields (offset0 workaround retired)":
+    it "retires the driver_hir_module_*_v1 workaround helpers and tags":
+        val src = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        expect(src).not_to_contain("@workaround bug=stage2_var_hir_module_field_access_offset0_2026-11-03")
+        expect(src).not_to_contain("fn driver_hir_module_typed_v1(")
+        expect(src).not_to_contain("fn driver_hir_module_path_v1(")
+        expect(src).not_to_contain("fn driver_hir_module_structs_v1(")
+        expect(src).not_to_contain("fn driver_hir_module_symbols_v1(")
+        expect(src).not_to_contain("fn driver_hir_module_functions_v1(")
+
+    it "accesses reassigned var hir_module fields directly inside both HIR loops":
+        val src = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        val loops = hir_loop_bodies(src)
+        expect(loops.len() > 0).to_equal(true)
+        expect(loops).to_contain("hir_module.path")
+        expect(loops).to_contain("hir_module.structs")
+        expect(loops).to_contain("hir_module.symbols")
+        expect(loops).to_contain("hir_module.functions")
+        expect(loops).to_contain("hir_module.representation_declarations")
+
+    it "passes hir_module.symbols directly at both layout projection sites":
+        val src = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        val loops = hir_loop_bodies(src)
+        val expr = "hir_module.symbols"
+        val first = loops.index_of(expr)
+        expect(first >= 0).to_equal(true)
+        val rest = loops.substring(first + expr.len(), loops.len())
+        expect(rest.index_of(expr) >= 0).to_equal(true)

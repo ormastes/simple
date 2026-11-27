@@ -15,6 +15,8 @@
 #   - "//": extended name table (for long filenames)
 # ============================================================================
 
+use compiler.backend.linker.name_text.{linker_name_text}
+
 # Archive magic bytes: "!<arch>\n"
 val AR_MAGIC_0: i64 = 0x21  # '!'
 val AR_MAGIC_1: i64 = 0x3C  # '<'
@@ -104,7 +106,7 @@ Codes outside 32-126 return "?".
 """
 fn ar_byte_to_char(b: i64) -> text:
     # Printable ASCII starts at 32 (space) through 126 (~)
-    val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{{|}}~"
     val idx = b - 32
     if idx >= 0 and idx < ascii_table.len():
         ascii_table[idx:idx + 1]
@@ -129,16 +131,43 @@ fn ar_bytes_to_text_raw(bytes: [u8], offset: i64, max_len: i64) -> text:
 
 """Look up a long name in the extended name table starting at byte offset n."""
 fn ar_lookup_extended_name(name_table: text, n: i64) -> text:
-    var result = ""
+    # Find the terminator, then take one slice: per-character concatenation
+    # was quadratic and, under @no_gc, never released its garbage.
     var i = n
     val tlen = name_table.len()
     while i < tlen:
         val ch = name_table[i:i + 1]
-        if ch == "/" or ch == "\n":
-            return result
-        result = result + ch
+        # "\n" ends MSVC (NUL, mapped to "\n") and GNU entries; "/" only as
+        # GNU's "/\n" pair, so paths such as "dir/x.obj" stay whole.
+        if ch == "\n" or (ch == "/" and name_table[i + 1:i + 2] == "\n"):
+            return name_table[n:i]
         i = i + 1
-    result
+    if n >= tlen: return ""
+    name_table[n:tlen]
+
+"""
+Build the extended name table text for bytes[offset .. offset+size] in one
+pass. MSVC lib.exe terminates entries with NUL rather than GNU's "/\n", so NUL
+becomes "\n" (a lookup terminator); other non-printable bytes become "?" so
+byte offsets stay character offsets.
+"""
+fn ar_name_table_text(bytes: [u8], offset: i64, size: i64) -> text:
+    var clean: [u8] = []
+    var i = offset
+    val end = if offset + size < bytes.len(): offset + size else: bytes.len()
+    while i < end:
+        val b = bytes[i] as i64
+        if b == 0x00:
+            clean.push(0x0A as u8)
+        elif b == 0x0A or (b >= 32 and b <= 126):
+            clean.push(b as u8)
+        else:
+            clean.push(0x3F as u8)
+        i = i + 1
+    # clean is printable ASCII + LF, so the checked decode cannot fail.
+    match linker_name_text(clean, "archive long-name table"):
+        case Ok(v): v
+        case Err(_): ""
 
 """Parse a non-negative decimal integer from a text string."""
 fn ar_parse_decimal_text(s: text) -> i64:
@@ -206,7 +235,7 @@ pub fn ar_parse_name(bytes: [u8], offset: i64, name_table: text?) -> text:
             match name_table:
                 case Some(nt):
                     return ar_lookup_extended_name(nt, ext_offset)
-                case nil:
+                case None:
                     return raw
 
     # Plain name: strip trailing '/' and spaces
@@ -257,7 +286,7 @@ pub fn ar_parse(bytes: [u8]) -> Result<ArReader, text>:
         return Err("Not a valid ar archive: bad magic")
 
     # First pass: locate the "//" extended name table member if present
-    var name_table: text? = nil
+    var name_table: text? = None
     var scan_offset = AR_MAGIC_SIZE
     while scan_offset + AR_HEADER_SIZE <= bytes.len():
         val fmag0 = bytes[scan_offset + AR_FMAG_OFFSET] as i64
@@ -271,14 +300,7 @@ pub fn ar_parse(bytes: [u8]) -> Result<ArReader, text>:
             val data_off = scan_offset + AR_HEADER_SIZE
 
             if raw_name == "//":
-                # Build the extended name table as a text string
-                var ntbl = ""
-                var ni = data_off
-                val ntbl_end = data_off + size
-                while ni < ntbl_end:
-                    ntbl = ntbl + ar_byte_to_char(bytes[ni] as i64)
-                    ni = ni + 1
-                name_table = ntbl
+                name_table = ar_name_table_text(bytes, data_off, size)
 
             # Advance: data + 1-byte padding if size is odd
             var next = data_off + size
@@ -329,7 +351,7 @@ pub fn ar_find_member(reader: ArReader, name: text) -> ArMember?:
     for m in reader.members:
         if m.name == name:
             return m
-    nil
+    None
 
 """List all member names in order."""
 pub fn ar_list_names(reader: ArReader) -> [text]:
@@ -354,7 +376,7 @@ pub fn ar_parse_symbol_index(reader: ArReader) -> ArSymbolIndex?:
         case Some(member):
             val data = ar_member_data(reader, member)
             if data.len() < 4:
-                return nil
+                return None
 
             val count = ar_read_be_u32(data, 0)
             if count <= 0:
@@ -362,7 +384,7 @@ pub fn ar_parse_symbol_index(reader: ArReader) -> ArSymbolIndex?:
 
             val offsets_end = 4 + count * 4
             if data.len() < offsets_end:
-                return nil
+                return None
 
             # Read member offsets
             var offsets: [i64] = []
@@ -392,5 +414,5 @@ pub fn ar_parse_symbol_index(reader: ArReader) -> ArSymbolIndex?:
                 si = si + 1
 
             ArSymbolIndex(symbols: symbols)
-        case nil:
-            nil
+        case None:
+            None

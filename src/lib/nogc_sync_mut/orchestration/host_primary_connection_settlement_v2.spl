@@ -1,0 +1,75 @@
+# Typed connection settlement on the same physical ledger and journal. No
+# GroupProcess tree receipt, Job reap or container exit is manufactured.
+use std.nogc_sync_mut.orchestration.host_windows_local_root_v3.HostWindowsLocalRootV3
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{host_capacity_owner_settle_v1,
+    host_capacity_completion_evidence_owned_v2}
+use std.nogc_sync_mut.orchestration.host_primary_connection_receipt_v2.host_primary_connection_settlement_bytes_v2
+use std.nogc_sync_mut.orchestration.host_primary_connection_publication_v2.host_primary_connection_publish_closed_v2
+use std.common.contracts.container.primary_connection_consumption_v2.ContainerPrimaryConnectionConsumptionV2
+use std.nogc_async_mut.container.terminal_session_v2.ContainerOwnedTerminalSessionV2
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.common.crypto.sha256.sha256_text
+
+pub struct HostPrimaryConnectionSettlementAckV2:
+    operation_id: text
+    request_digest: text
+    prepared_receipt_digest: text
+    native_identity_digest: text
+    connection_receipt_digest: text
+    outcome_digest: text
+    journal_revision: text
+    journal_sequence: i64
+
+pub struct HostPrimaryConnectionSettlementTurnV2:
+    local: HostWindowsLocalRootV3
+    session: ContainerOwnedTerminalSessionV2
+    ack: HostPrimaryConnectionSettlementAckV2?
+    error: text
+
+pub fn host_primary_connection_settle_v2(local: HostWindowsLocalRootV3,
+        record: ContainerPrimaryConnectionConsumptionV2,
+        session: ContainerOwnedTerminalSessionV2) -> HostPrimaryConnectionSettlementTurnV2:
+    var turn = HostPrimaryConnectionSettlementTurnV2(local, session, nil, "")
+    val current = local.current_v3()
+    if current.is_err():
+        turn.error = current.unwrap_err()
+        return turn
+    val facts = host_primary_connection_publish_closed_v2(local.capacity_v3().journal, record, session)
+    if facts.is_err():
+        turn.error = facts.unwrap_err()
+        return turn
+    val encoded = host_primary_connection_settlement_bytes_v2(facts.unwrap())
+    if encoded.is_err():
+        turn.error = encoded.unwrap_err()
+        return turn
+    # Capacity independently reloads the platform-specific protected evidence.
+    # This must be wired before this route can release any charge.
+    val checked = host_capacity_completion_evidence_owned_v2(local.capacity_v3().journal,
+        local.capacity_v3().ledger.capacity, record.admission.operation)
+    if checked.is_err():
+        turn.error = checked.unwrap_err()
+        return turn
+    if checked.unwrap() != encoded.unwrap():
+        turn.error = "connection-settlement-independent-evidence-mismatch"
+        return turn
+    val committed = host_capacity_owner_settle_v1(local.capacity_v3(), record.admission.operation)
+    val retained = turn.local.retain_v3(committed.owner, local.container_v3())
+    if retained.is_err():
+        turn.error = retained.unwrap_err()
+        return turn
+    if not committed.settled:
+        turn.error = committed.error
+        return turn
+    val state = daemon_operation_exact_v2(committed.owner.journal, record.admission.operation)
+    if state.is_err():
+        turn.error = state.unwrap_err()
+        return turn
+    val digest = sha256_text(encoded.unwrap())
+    if state.unwrap().state != "completed" or state.unwrap().outcome_digest != digest:
+        turn.error = "connection-settlement-journal-ack-mismatch"
+        return turn
+    val value = facts.unwrap()
+    turn.ack = Some(HostPrimaryConnectionSettlementAckV2(value.operation_id, value.request_digest,
+        value.prepared_receipt_digest, value.native_identity_digest, value.connection_receipt_digest,
+        digest, committed.owner.journal.revision, committed.owner.journal.sequence))
+    turn

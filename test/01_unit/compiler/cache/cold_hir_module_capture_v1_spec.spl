@@ -23,12 +23,14 @@ fn capture_module() -> HirModule:
     var lowering = HirLowering.with_filename("/frozen/pkg/mod.spl")
     lowering.lower_parser_module_unstub(parsed, false)
 
-fn capture_input() -> DriverColdHirModuleInputV1:
+fn capture_input(module: HirModule) -> DriverColdHirModuleInputV1:
+    # Capture requires module_identity == module.name, and the lowered
+    # module's name is its parser path, not the dotted alias passed to parse.
     val empty = sha256_text("")
     val entry = CompileSourceInventoryEntryV1("pkg/mod.spl", sha256_text(CAPTURE_SOURCE),
         empty, empty, empty, empty, CAPTURE_SOURCE.len())
     val inventory = CompileSourceInventoryV1(1, 1, [entry])
-    DriverColdHirModuleInputV1(module_identity: "pkg.mod", source_root: "/frozen",
+    DriverColdHirModuleInputV1(module_identity: module.name, source_root: "/frozen",
         source_identity: "pkg/mod.spl", source_digest: entry.content_digest,
         source_byte_count: entry.byte_count, snapshot_inventory_digest: compile_source_inventory_digest_v1(inventory),
         inventory_entry: entry, full_inventory: false, artifact_root: "",
@@ -37,7 +39,7 @@ fn capture_input() -> DriverColdHirModuleInputV1:
 describe "actual cold HIR module capture mechanics", tag: ["only-compiled"]:
     it "preserves real retained emission and witness bytes across its own scope":
         val module = capture_module()
-        var input = capture_input()
+        var input = capture_input(module)
         input.full_inventory = true
         input.artifact_root = "build/test/cold-hir-emission-lease-v1"
         expect(dir_create_all(input.artifact_root)).to_equal(true)
@@ -62,7 +64,7 @@ describe "actual cold HIR module capture mechanics", tag: ["only-compiled"]:
 
     it "preserves parent leases and escapes a real owner failure after artifact emission":
         val module = capture_module()
-        var input = capture_input()
+        var input = capture_input(module)
         input.artifact_root = "build/test/cold-hir-emission-owner-refusal-v1"
         expect(dir_create_all(input.artifact_root)).to_equal(true)
         if not transient_scope_begin(): panic("test emission scope unavailable")
@@ -87,7 +89,7 @@ describe "actual cold HIR module capture mechanics", tag: ["only-compiled"]:
 
     it "matches the actual typed ABI consumer after scope closure":
         val module = capture_module()
-        val input = capture_input()
+        val input = capture_input(module)
         val retained = cold_hir_typed_receipt_from_admitted_digest_v1(module, module.name,
             input.source_root, input.source_identity, input.source_digest, input.source_byte_count,
             input.snapshot_inventory_digest, input.inventory_entry)
@@ -102,17 +104,17 @@ describe "actual cold HIR module capture mechanics", tag: ["only-compiled"]:
 
     it "refuses a changed module owner or actual source byte count":
         val module = capture_module()
-        var input = capture_input()
+        var input = capture_input(module)
         input.module_identity = "foreign.mod"
         expect(driver_cold_hir_capture_module_v1(module, input).is_err()).to_equal(true)
-        input = capture_input()
+        input = capture_input(module)
         input.source_byte_count = input.source_byte_count + 1
         expect(driver_cold_hir_capture_module_v1(module, input).is_err()).to_equal(true)
         expect(transient_array_scope_state_v1()).to_equal(0)
 
     it "consumes in an active borrowed lease and preserves occupied or paused callers":
         val module = capture_module()
-        val input = capture_input()
+        val input = capture_input(module)
         expect(driver_cold_hir_capture_module_in_owned_scope_v1(module, input).is_err()).to_equal(true)
         if not transient_scope_begin(): panic("test capture scope unavailable")
         val borrowed_ok = driver_cold_hir_capture_module_in_owned_scope_v1(module, input).is_ok()
@@ -128,7 +130,7 @@ describe "actual cold HIR module capture mechanics", tag: ["only-compiled"]:
 
     it "keeps logical HIR ownership distinct from real immutable artifact identity":
         val module = capture_module()
-        var input = capture_input()
+        var input = capture_input(module)
         input.full_inventory = true
         input.artifact_root = "build/test/cold-hir-module-capture-v1"
         expect(dir_create_all(input.artifact_root)).to_equal(true)

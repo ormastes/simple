@@ -1,0 +1,67 @@
+#!/bin/sh
+# Wrapper behavior only: fixture tools are not VHDL/CPU qualification.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+mkdir -p "$fixture/scripts/fpga" "$fixture/tools" "$fixture/build/vhdl/rv64" \
+    "$fixture/examples/09_embedded/fpga_riscv/rtl"
+cp "$ROOT/scripts/fpga/ghdl_validate_rv64.shs" "$fixture/scripts/fpga/"
+printf 'fixture testbench\n' >"$fixture/examples/09_embedded/fpga_riscv/rtl/tb_rv64_wb_soc_smoke.vhd"
+cat >"$fixture/tools/ghdl" <<'TOOL'
+#!/bin/sh
+printf '%s\n' "$*" >>"$FIXTURE_CALLS"
+case "$FIXTURE_MODE:$1:$*" in
+    analysis:-a:*rv64imac_core_product.vhd*) exit 17 ;;
+    top:-e:*soc_top_rv64*) exit 18 ;;
+    tb_analysis:-a:*tb_rv64_wb_soc_smoke.vhd*) exit 19 ;;
+    tb_elaboration:-e:*tb_rv64_wb_soc_smoke*) exit 20 ;;
+esac
+if [ "$1" = -r ]; then
+    if [ "$FIXTURE_MODE" != missing_marker ]; then
+        printf '%s\n' RV64_UART_TX_ACTIVITY_SEEN RV64_UART_BYTE_SEEN RV64_UART_MARKER_SEEN
+    fi
+    [ "$FIXTURE_MODE" != simulation ] || exit 21
+fi
+TOOL
+chmod +x "$fixture/tools/ghdl"
+run_case() {
+    mode=$1
+    phase=$2
+    expected=$3
+    : >"$fixture/calls"
+    set +e
+    PATH="$fixture/tools:$PATH" FIXTURE_MODE="$mode" FIXTURE_CALLS="$fixture/calls" \
+        sh "$fixture/scripts/fpga/ghdl_validate_rv64.shs" "$phase" >"$fixture/$mode.log" 2>&1
+    status=$?
+    set -e
+    [ "$status" = "$expected" ] || {
+        printf 'FAIL fixture %s: expected exit %s, got %s\n' "$mode" "$expected" "$status"
+        cat "$fixture/$mode.log"
+        exit 1
+    }
+}
+run_case empty --analyze 1
+[ ! -s "$fixture/calls" ]
+modules='rv64imac_core_product rv64imac_core_product_wb clint plic uart16550 ram bootrom wb_interconnect soc_top_rv64 soc_top_rv64_external_ddr wb64_axi_hp_bridge soc_top_rv64_k26_pl'
+for module in $modules; do
+    printf 'fixture module\n' >"$fixture/build/vhdl/rv64/$module.vhd"
+done
+rm "$fixture/build/vhdl/rv64/soc_top_rv64.vhd"
+run_case missing_dut --analyze 1
+[ ! -s "$fixture/calls" ]
+printf 'fixture module\n' >"$fixture/build/vhdl/rv64/soc_top_rv64.vhd"
+run_case analysis --simulate 1
+! grep '^-e ' "$fixture/calls" >/dev/null
+run_case top --elaborate 1
+run_case tb_analysis --simulate 1
+! grep '^-r ' "$fixture/calls" >/dev/null
+run_case tb_elaboration --simulate 1
+! grep '^-r ' "$fixture/calls" >/dev/null
+run_case simulation --simulate 1
+! grep 'Simulation PASSED' "$fixture/simulation.log" >/dev/null
+run_case missing_marker --simulate 1
+run_case success --simulate 0
+grep 'Analysis: 12 passed, 0 failed out of 12 modules' "$fixture/success.log" >/dev/null
+grep 'Simulation PASSED' "$fixture/success.log" >/dev/null
+echo 'PASS — 9 RV64 generated smoke wrapper fixtures (not hardware evidence)'

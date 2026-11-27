@@ -26,11 +26,11 @@ developers must **never** declare `extern fn rt_*` or call `rt_*` directly — u
 | `rt_process_kill(pid)` | `app.io.mod.process_kill(pid)` |
 | `rt_cli_get_args()` | `std.io_runtime.get_args()` |
 | `rt_getpid()` | `std.io_runtime.getpid()` |
-| `rt_dir_list(p)` | `std.io_runtime.dir_list(p)` |
+| `rt_dir_list(p)` | `std.io_runtime.dir_list_or_empty(p)` (or `std.nogc_sync_mut.io.dir_ops.dir_list(p)`) |
 
 ```simple
 # WRONG — app code must not touch rt_* directly
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 val c = rt_file_read_text("x.txt") ?? ""
 
 # RIGHT — use the std alias
@@ -42,6 +42,16 @@ val c = file_read("x.txt")
 given backend (calling a spec-less pointer-returning `rt_*` can even crash — see
 `doc/08_tracking/bug/interp_missing_pointer_extern_nil_deref_sigsegv_2026-06-18.md`).
 The std aliases are stable, documented, and backed by registered intrinsics.
+
+**`std.io_runtime` is an explicit export list, not a whole tier.** A tier-less
+`use std.io_runtime.{...}` resolves to the root facade `src/lib/io_runtime.spl`
+(the resolver tries the direct `lib/` path before any tier), and that facade
+re-exports only the names it lists. Importing an unlisted name — e.g.
+`cpu_count_checked`, `dir_list`, `file_read_text` — is an HIR
+`unresolved name` at native-build. Import such names from their owner module
+instead (`std.nogc_sync_mut.io.sysinfo_ops`, `.io.dir_ops`, `.io.file_ops`).
+Guard: `sh scripts/check/check-io-runtime-facade-imports.shs`
+(record: `doc/08_tracking/bug/io_runtime_facade_unexported_import_hir_unresolved_2026-11-22.md`).
 
 **Enforcement:** the compiler's `raw_rt_access` lint (RAW-RT-001, default *warn*)
 flags any `extern fn rt_*` declared outside the privileged tiers (`src/lib`,
@@ -610,3 +620,4 @@ val sdn_text = note.to_sdn()
 - DB & SQP: `doc/07_guide/apps/database.md`
 - Atomic DB: `src/lib/nogc_sync_mut/db_atomic.spl`
 - Note SDN: `src/compiler/40.mono/note_sdn.spl`
+- Resource helpers, host detection, process runs, thread pool, concurrent containers: `doc/07_guide/lib/stdlib_resource_helpers.md`

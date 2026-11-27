@@ -126,3 +126,22 @@ src/compiler_rust/target/release/simple run <repro.spl>
 Probe scripts used to isolate this (nested-match variant, flat-split variant,
 `to_int()`-alone variant) are not checked into the repo; the minimal repro
 above is sufficient to reproduce.
+
+## Re-verification 2026-11-25 (release/1.0.0, work/p2w3-ac-20261125)
+
+Confirmed the 2026-09-13 closure still holds on the release/1.0.0 pinned seed
+(`bin/simple.exe`, Rust seed v1.0.0-rc.1, 38,403,072 bytes, Windows 11 /
+Git Bash). Ran the minimal repro verbatim under
+`SIMPLE_EXECUTION_MODE=interpreter SIMPLE_LIB=src bin/simple.exe run`:
+
+```
+parts[1]=42
+n=42
+n2 = 42
+```
+
+All three original symptoms remain fixed on the tree-walk lane: `.to_int()`
+on a `.split()`-derived string returns `Some(42)`, and `?? 0` yields `42`.
+Exit 0. The JIT-lane `Some(v)` payload residual tracked in
+`jit_some_pattern_payload_shifted_left_3_2026-09-13.md` is a separate entry
+and was not re-probed here. Status: CLOSED (unchanged).

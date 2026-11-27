@@ -5,7 +5,7 @@
 #
 # MDSOC: feature dimension, shell layer
 
-use os.apps.shell.path_search.{shell_path_search}
+use os.apps.shell.path_search.{shell_path_plan, shell_path_candidates}
 use os.kernel.loader.fs_exec_spawn.{fs_exec_spawn_ring3_with_recipe}
 use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_SHELL}
 
@@ -46,15 +46,11 @@ pub fn shell_exec_as(caller: i64, cmd: text, argv: [text], envp: [text]) -> i64:
     serial_println("[shell-exec] exec:argc={argv.len()}")
     serial_println("[shell-exec] exec:envc={envp.len()}")
 
-    val resolved = shell_path_search(cmd)
-    if resolved == nil:
-        serial_println("[shell-exec] exec:not-found cmd={cmd}")
-        return -1
-
-    val resolved_path = resolved.unwrap()
-    serial_println("[shell-exec] exec:resolved={resolved_path}")
-
-    serial_println("[shell-exec] exec:dispatch=ring3-recipe caller={caller} path={resolved_path}")
-    val pid = fs_exec_spawn_ring3_with_recipe(caller, SPAWN_RECIPE_SHELL, resolved_path, argv, envp)
-    serial_println("[shell-exec] exec:result={pid}")
-    pid
+    val candidates = shell_path_candidates(shell_path_plan("/usr/bin:/sys/apps"), cmd)
+    for candidate in candidates:
+        val pid = fs_exec_spawn_ring3_with_recipe(caller, SPAWN_RECIPE_SHELL, candidate, argv, envp)
+        # Only an ordinary missing file permits PATH continuation. In
+        # particular, authorization and malformed-image failures stop here.
+        if pid != -2: return pid
+    serial_println("[shell-exec] exec:not-found cmd={cmd}")
+    -1

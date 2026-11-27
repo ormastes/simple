@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "runtime_env_owned.h"
 #include <string.h>
 
 typedef struct {
@@ -120,8 +121,7 @@ static void coverage_record(CoverageRow **rows, size_t *count, uint32_t decision
 }
 
 bool rt_coverage_enabled(void) {
-    const char *value = getenv("SIMPLE_COVERAGE");
-    return value && strcmp(value, "1") == 0;
+    return rt_env_flag_is("SIMPLE_COVERAGE", '1');
 }
 
 void rt_coverage_decision_probe(uint32_t decision_id, bool result, const char *file,
@@ -155,6 +155,14 @@ static void coverage_append(char *out, size_t capacity, size_t *offset, const ch
     if (*offset > capacity || length > capacity - *offset) abort();
     memcpy(out + *offset, text, length);
     *offset += length;
+}
+
+static void coverage_append_row_tail(char *out, size_t capacity, size_t *offset, const CoverageRow *row) {
+    *offset += coverage_write_escaped_file(out + *offset, row->file);
+    int written = snprintf(out + *offset, capacity - *offset, ", %u, %u, %llu, %llu\n", row->line, row->column,
+                           (unsigned long long)row->true_count, (unsigned long long)row->false_count);
+    if (written < 0 || (size_t)written >= capacity - *offset) abort();
+    *offset += (size_t)written;
 }
 
 /* Raw producer. `rt_coverage_dump_sdn` itself is DECLARED as a Simple `text`
@@ -206,11 +214,7 @@ char *rt_coverage_dump_sdn_cstr(void) {
         int written = snprintf(out + offset, capacity - offset, "    %u, ", row->decision_id);
         if (written < 0 || (size_t)written >= capacity - offset) abort();
         offset += (size_t)written;
-        offset += coverage_write_escaped_file(out + offset, row->file);
-        written = snprintf(out + offset, capacity - offset, ", %u, %u, %llu, %llu\n", row->line, row->column,
-                           (unsigned long long)row->true_count, (unsigned long long)row->false_count);
-        if (written < 0 || (size_t)written >= capacity - offset) abort();
-        offset += (size_t)written;
+        coverage_append_row_tail(out, capacity, &offset, row);
     }
     coverage_append(out, capacity, &offset, condition_header);
     for (size_t i = 0; i < g_condition_count; ++i) {
@@ -218,11 +222,7 @@ char *rt_coverage_dump_sdn_cstr(void) {
         int written = snprintf(out + offset, capacity - offset, "    %u, %u, ", row->decision_id, row->condition_id);
         if (written < 0 || (size_t)written >= capacity - offset) abort();
         offset += (size_t)written;
-        offset += coverage_write_escaped_file(out + offset, row->file);
-        written = snprintf(out + offset, capacity - offset, ", %u, %u, %llu, %llu\n", row->line, row->column,
-                           (unsigned long long)row->true_count, (unsigned long long)row->false_count);
-        if (written < 0 || (size_t)written >= capacity - offset) abort();
-        offset += (size_t)written;
+        coverage_append_row_tail(out, capacity, &offset, row);
     }
     out[offset] = '\0';
     free(decisions); free(conditions); coverage_unlock();

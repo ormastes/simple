@@ -76,3 +76,29 @@ the interpreter to resolve and execute the native C symbol.
 After that exists, route `fill_span` and `copy_span` through the native
 entrypoints when the host reports a matching SIMD tier, and keep the existing
 Simple loops as fallback/reference paths.
+
+---
+
+## Fleet verification note (2026-11-25, worktree wt-p2w1-ae, branch work/p2w1-ae-20261125)
+
+Re-verified at `origin/release/1.0.0` HEAD (`38265c7f249`) by code inspection:
+the 2026-09-13 MEASURED closure stands.
+
+- Interpreter bridge registrations present:
+  `src/compiler_rust/compiler/src/interpreter_extern/mod.rs:2383-2384`
+  (`rt_engine2d_simd_fill_span_u32`, `rt_engine2d_simd_copy_span_u32`).
+- Simple-side routing present:
+  `src/lib/gc_async_mut/gpu/engine2d/backend_software.spl:22` imports the
+  externs plus `_scalar_fill_row`/`native_pixel_rows_enabled`, and
+  `:1668` routes `fill_span` through `rt_engine2d_simd_fill_span_u32`.
+- Timing probe exists at `src/app/test/engine2d_jit_timing_probe.spl`.
+- Re-execution is environment-blocked on this host: the probe (and anything
+  importing `std` at HEAD) fails with `unknown decorator
+  '@representation_boundary'` under the pinned Rust seed v1.0.0-rc.1 — the
+  known repo-wide source/binary inconsistency, unrelated to this bug. The
+  runnable measurement in the 2026-09-13 closure section (same binary,
+  same host OS) stands as the executed evidence.
+
+No code change needed; doc header "Closed 2026-09-13" is accurate. (The
+"Status: Open." lines further down are the preserved original 2026-05-31
+entry text, superseded by the header closure.)

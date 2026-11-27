@@ -1,0 +1,118 @@
+"""
+## Purpose and audience
+Purpose: Pin every rejection reason of the retained-damage owner path
+(`engine2d_draw_ir_prepare_damage_plan` and
+`engine2d_draw_ir_render_prepared_damage_plan_with_images` in
+`src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl`) that `draw_ir_adv_spec`
+does not reach: missing content identity, malformed / out-of-bounds /
+overlapping damage rects, an embedding that is not safe to retain, an invalid
+plan handed to the renderer, and a plan rendered on a surface of another size.
+Each rejected render must leave the surface untouched and report
+`preflight_rejected` with no pixels.
+Audience: Draw IR retained-frame maintainers.
+"""
+
+"""
+Traceability: REQ-ENGINE2D-DRAW-IR-DAMAGE-PLAN-REJECT-001 — the retained-damage owner refuses every unsafe plan with a named reason and paints nothing.
+"""
+# @cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl 2%
+use std.spec.*
+use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU, DrawIrComposition, draw_ir_batch, draw_ir_composition, draw_ir_embedding_config, draw_ir_rect}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_prepare_damage_plan, engine2d_draw_ir_render_prepared_damage_plan_with_images, engine2d_draw_ir_retained_rejected}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+val BG: u32 = 0xff000000u32
+val RED: u32 = 0xffff0000u32
+
+fn composition_with_opacity(opacity_milli: i32) -> DrawIrComposition:
+    val batch = draw_ir_batch(
+        "dmg", DRAW_IR_BACKEND_CPU,
+        draw_ir_embedding_config("dmg", "dmg", 0, 0, 8, 4, 0, opacity_milli, false),
+        [draw_ir_rect("fill", 0, 0, 8, 4, RED)])
+    draw_ir_composition("dmg", "rev-a", DRAW_IR_BACKEND_CPU, [batch])
+
+fn reason_for(rects: [i64], identity: text) -> text:
+    val plan = engine2d_draw_ir_prepare_damage_plan(composition_with_opacity(1000), rects, 8, 4, identity)
+    if plan.valid:
+        return "valid"
+    plan.rejection_reason
+
+describe "engine2d_draw_ir_prepare_damage_plan rejections":
+    it "requires a content identity":
+        expect(reason_for([0i64, 0i64, 2i64, 2i64], "")).to_equal("prepared-damage-content-identity-required")
+
+    it "rejects malformed, out-of-bounds and overlapping damage rects and accepts disjoint ones":
+        step("not a multiple of four values")
+        expect(reason_for([0i64, 0i64, 2i64], "rev-a")).to_equal("invalid-damage-plan")
+        step("zero size and negative origin")
+        expect(reason_for([0i64, 0i64, 0i64, 2i64], "rev-a")).to_equal("invalid-damage-plan")
+        expect(reason_for([-1i64, 0i64, 2i64, 2i64], "rev-a")).to_equal("invalid-damage-plan")
+        step("extends past the 8x4 surface")
+        expect(reason_for([7i64, 0i64, 2i64, 1i64], "rev-a")).to_equal("invalid-damage-plan")
+        expect(reason_for([0i64, 3i64, 1i64, 2i64], "rev-a")).to_equal("invalid-damage-plan")
+        step("two rects that overlap at (1,1)")
+        expect(reason_for([0i64, 0i64, 2i64, 2i64, 1i64, 1i64, 2i64, 2i64], "rev-a")).to_equal("invalid-damage-plan")
+        step("two rects that only touch are disjoint")
+        expect(reason_for([0i64, 0i64, 2i64, 2i64, 2i64, 0i64, 2i64, 2i64], "rev-a")).to_equal("valid")
+
+    it "refuses to retain a translucent embedding":
+        val plan = engine2d_draw_ir_prepare_damage_plan(
+            composition_with_opacity(500), [0i64, 0i64, 2i64, 2i64], 8, 4, "rev-a")
+        expect(plan.valid).to_equal(false)
+        expect(plan.rejection_reason).to_equal("retained-composition-unsafe-embedding")
+        expect(plan.entries.len()).to_equal(0)
+
+describe "engine2d_draw_ir_render_prepared_damage_plan_with_images rejections":
+    it "passes an invalid plan's reason through and paints nothing":
+        val plan = engine2d_draw_ir_prepare_damage_plan(
+            composition_with_opacity(1000), [0i64, 0i64, 9i64, 1i64], 8, 4, "rev-a")
+        var engine = Engine2D.create_with_backend(8, 4, "cpu")
+        engine.clear(BG)
+        val out = engine2d_draw_ir_render_prepared_damage_plan_with_images(engine, plan, [], "rev-a", true)
+        engine = out.engine
+        expect(out.unsupported_kinds).to_equal("invalid-damage-plan")
+        expect(out.readback.source).to_equal("preflight_rejected")
+        expect(out.readback.pixels.len()).to_equal(0)
+        expect(out.ops_rendered).to_equal(0)
+        expect(engine.read_pixels()[0]).to_equal(BG)
+        engine.shutdown()
+
+    it "rejects a plan prepared for a different surface size":
+        val plan = engine2d_draw_ir_prepare_damage_plan(
+            composition_with_opacity(1000), [0i64, 0i64, 2i64, 2i64], 8, 4, "rev-a")
+        expect(plan.valid).to_equal(true)
+        var engine = Engine2D.create_with_backend(16, 4, "cpu")
+        engine.clear(BG)
+        val out = engine2d_draw_ir_render_prepared_damage_plan_with_images(engine, plan, [], "rev-a", true)
+        engine = out.engine
+        expect(out.unsupported_kinds).to_equal("prepared-damage-stale-dimensions")
+        expect(out.tiles_total).to_equal(0)
+        expect(engine.read_pixels()[0]).to_equal(BG)
+        engine.shutdown()
+
+    it "renders the same valid plan on a matching surface, only inside the damage":
+        val plan = engine2d_draw_ir_prepare_damage_plan(
+            composition_with_opacity(1000), [0i64, 0i64, 2i64, 2i64], 8, 4, "rev-a")
+        var engine = Engine2D.create_with_backend(8, 4, "cpu")
+        engine.clear(BG)
+        val out = engine2d_draw_ir_render_prepared_damage_plan_with_images(engine, plan, [], "rev-a", true)
+        engine = out.engine
+        expect(out.unsupported_kinds).to_equal("none")
+        expect(out.tiles_total).to_equal(1)
+        expect(out.readback.pixels[0]).to_equal(RED)
+        expect(out.readback.pixels[1 + 8]).to_equal(RED)
+        step("outside the 2x2 damage the 8x4 fill is not replayed")
+        expect(out.readback.pixels[2]).to_equal(BG)
+        expect(out.readback.pixels[7 + 3 * 8]).to_equal(BG)
+        engine.shutdown()
+
+describe "engine2d_draw_ir_retained_rejected":
+    it "reports the reason with an empty preflight-rejected readback":
+        var engine = Engine2D.create_with_backend(4, 4, "cpu")
+        val out = engine2d_draw_ir_retained_rejected(engine, "custom-reason")
+        expect(out.unsupported_kinds).to_equal("custom-reason")
+        expect(out.readback.source).to_equal("preflight_rejected")
+        expect(out.readback.pixels.len()).to_equal(0)
+        expect(out.tiles_total).to_equal(0)
+        expect(out.ops_rendered).to_equal(0)
+        engine.shutdown()

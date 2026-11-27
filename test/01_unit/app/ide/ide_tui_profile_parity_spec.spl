@@ -1,0 +1,84 @@
+# IDE --tui --profile parity spec (REQ-CARET-EXT-003, acceptance CU-006).
+#
+# The TUI and GUI shells must resolve a profile name through the same pure
+# activation plan and activate the same extensions. No GUI or TUI is launched;
+# the specs drive the profile seams each shell calls before its event loop.
+
+use std.spec
+use std.spec.step
+use std.editor.core.launch.{editor_launch_parse}
+use std.editor.core.session.{EditSession}
+use app.editor.editor_controller.{EditorController}
+use app.editor.profile_plan.{profile_activation_plan}
+use app.editor.gui_shell.{gui_shell_new, gui_shell_apply_profile}
+use app.editor.tui_shell.{editor_tui_apply_profile}
+use app.ide.main.{run_ide_cli}
+
+fn _ctrl() -> EditorController:
+    var session = EditSession.new()
+    session.open_empty()
+    EditorController.new(session)
+
+describe "ide tui profile parity":
+
+    it "caret plan is narrow and excludes the builtin-app wildcard":
+        # @req REQ-CARET-EXT-003
+        step("resolve caret plan")
+        val plan = profile_activation_plan("caret")
+        expect(plan.ok).to_equal(true)
+        expect(plan.steps.contains("language:simple")).to_equal(true)
+        expect(plan.steps.contains("event:*")).to_equal(false)
+        expect(plan.steps.contains("language:markdown")).to_equal(false)
+
+    it "editor and empty profile keep the original activation":
+        # @req REQ-CARET-EXT-003
+        step("resolve editor plan")
+        val editor = profile_activation_plan("editor")
+        expect(editor.ok).to_equal(true)
+        expect(editor.steps).to_equal(["event:*", "language:simple", "language:markdown"])
+        expect(profile_activation_plan("").steps).to_equal(editor.steps)
+
+    it "unknown profile is an explicit error with no steps":
+        # @req REQ-CARET-EXT-003
+        step("resolve unknown plan")
+        val plan = profile_activation_plan("bogus")
+        expect(plan.ok).to_equal(false)
+        expect(plan.steps.len()).to_equal(0)
+        expect(plan.error).to_contain("bogus")
+
+    it "TUI caret activates exactly what the GUI caret activates":
+        # @req REQ-CARET-EXT-003
+        step("apply caret through both shells")
+        val tui = _ctrl()
+        editor_tui_apply_profile(tui, "caret")
+        var session = EditSession.new()
+        session.open_empty()
+        val gui = gui_shell_new(session)
+        gui_shell_apply_profile(gui, "caret")
+        expect(tui.extension_host.is_active("simple-language")).to_equal(true)
+        expect(tui.extension_host.is_active("markdown-language")).to_equal(false)
+        expect(tui.extension_host.is_active("simple-language")).to_equal(gui.ctrl.extension_host.is_active("simple-language"))
+        expect(tui.extension_host.is_active("markdown-language")).to_equal(gui.ctrl.extension_host.is_active("markdown-language"))
+
+    it "TUI editor profile matches GUI editor activation":
+        # @req REQ-CARET-EXT-003
+        step("apply editor through TUI")
+        val tui = _ctrl()
+        editor_tui_apply_profile(tui, "editor")
+        expect(tui.extension_host.is_active("simple-language")).to_equal(true)
+        expect(tui.extension_host.is_active("markdown-language")).to_equal(true)
+
+    it "argv carries the profile in either order":
+        # @req REQ-CARET-EXT-003
+        step("parse both argv orders")
+        val a = editor_launch_parse(["--tui", "--profile", "caret"])
+        val b = editor_launch_parse(["--profile", "caret", "--tui"])
+        expect(a.profile).to_equal("caret")
+        expect(b.profile).to_equal("caret")
+        expect(a.mode).to_equal("tui")
+        expect(b.mode).to_equal("tui")
+
+    it "ide cli rejects an unknown profile before launching":
+        # @req REQ-CARET-EXT-003
+        step("run ide cli with bogus profile")
+        expect(run_ide_cli(["--tui", "--profile", "bogus"])).to_equal(1)

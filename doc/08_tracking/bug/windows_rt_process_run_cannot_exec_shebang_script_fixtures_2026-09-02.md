@@ -1,7 +1,7 @@
 # Windows: `rt_process_run` cannot execute a shebang script, so every `.shs` CLI fixture returns exit -1
 
 - **Filed:** 2026-09-02
-- **Status:** OPEN
+- **Status:** FIXED (seed/interpreter path verified 2026-11-11, lane work/p3-rt2-20261111; named native-lane residual below)
 - **Lane:** Windows host, LLM Caret suite triage
 - **Impact:** the single dominant cause of RED in the caret suite on Windows
 
@@ -128,3 +128,48 @@ Measured after the change: `process_run_script` on the same fixture returns
 This does not close the record. `rt_process_run` itself is still unable to exec
 a shebang script, so every other caller on Windows remains affected; this is a
 call-site mitigation for the dominant caret-suite bucket, not the root fix.
+
+## 2026-11-07: root fix in the Rust runtime (seed / interpreter lane)
+
+`env_process.rs` gains `script_command(cmd)`, used by every user-command
+spawn site in place of `Command::new(resolve_command_path(cmd))`. On Windows,
+when `cmd` is an existing file whose first bytes are `#!`, it spawns
+`<interpreter> [opts] <cmd> <args...>` (`/usr/bin/env [-S] NAME` collapses to
+`NAME`; `/bin/sh` maps to `sh` via `resolve_command_path`). POSIX is unchanged.
+Tests (`cargo test -p simple-runtime --lib`, CC=clang-cl, Windows host):
+`shebang_argv_*` (3 parser cases), `windows_shebang_script_runs_through_interpreter`
+(plain + env shebang, argv + exit code 7 propagate), and
+`windows_pe_and_bare_names_are_not_rerouted`; env_process suite 33/33 PASS.
+Remaining: the C runtime `rt_process_run_array` (native/self-hosted binaries)
+does not yet re-route shebang scripts (native lane follow-up; the caret call
+sites already use the pure-Simple `process_run_script` shim there).
+
+## 2026-11-11 verification — P3 rt2 lane (worktree simple-p3-rt2-20261111)
+
+**Verdict: FIXED for the filed defect (`rt_process_run` shebang spawn);
+re-verified live on the tracked seed binary (build commit 46fe8f6b6def) at
+base 1f47eda674f1.**
+
+- Root fix confirmed in source: `script_command`
+  (`src/compiler_rust/runtime/src/value/sffi/env_process.rs:117`) is wired
+  into every user-command spawn site (env_process.rs lines 807, 872, 906,
+  1000, 1050, 1447, 1506, 1604, 1753) — the 2026-11-07 root fix is present
+  and complete on the Rust runtime side at this base.
+- Live probe (seed-interpreted, same extern + fixture this doc measured):
+  | invocation | code | stderr |
+  |---|---|---|
+  | `rt_process_run("cmd", ["/c", "echo hello"])` | 0 | — (stdout `hello`) |
+  | `rt_process_run("test/fixtures/llm_caret/mock_claude_cli.shs", ["--version"])` | **65** | `expected json or stream-json output format` |
+  | `rt_process_run("sh", ["<same fixture>", "--version"])` | **65** | same |
+  Row 2 (the doc-era `-1`, empty stdout/stderr signature) now returns 65 —
+  identical to the through-`sh` control. Direct shebang execution works.
+- The pure-Simple call-site shim (`process_run_script` in
+  `src/lib/nogc_async_mut/env/shebang.spl`, caret call sites in
+  `src/app/llm_caret/claude_cli.spl:489,515`) remains as defense-in-depth
+  and now agrees with the runtime path.
+- **Named residual (not this row's defect, no closure claim):** the C
+  runtime `rt_process_run_array` for native/self-hosted binaries still has
+  no shebang re-route (verified: no shebang handling anywhere under
+  `src/runtime/*.c`). Tracked as the native-lane follow-up already scoped
+  in the 2026-11-07 addendum above; every caret-suite caller is covered by
+  the fixed Rust path or the pure-Simple shim.

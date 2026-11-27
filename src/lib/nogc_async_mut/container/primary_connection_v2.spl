@@ -1,0 +1,30 @@
+# Common direct-connection planning surface. No grant, Engine write or native
+# session is minted from these public metadata values.
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_project_v2}
+use std.common.contracts.container.execution_v2.ContainerExecutionRequestV2
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, ContainerOutputResourcesV2}
+use std.common.contracts.container.primary_connection_v2.ContainerPrimaryConnectionPlanV2
+
+pub struct ContainerPrimaryConnectionPlanTurnV2:
+    owner: SimpleContainerOwnerV2
+    plan: ContainerPrimaryConnectionPlanV2?
+    error: text
+
+pub fn simple_container_primary_connection_plan_v2(owner: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+        identity: ContainerOutputIdentityV2, resources: ContainerOutputResourcesV2,
+        installation_digest: text, journal_lease_digest: text, terminal_mode: text, timeout_ms: i64) -> ContainerPrimaryConnectionPlanTurnV2:
+    val projected = simple_container_project_v2(owner, request)
+    if projected.is_err(): return ContainerPrimaryConnectionPlanTurnV2(owner, None, projected.unwrap_err())
+    match owner:
+        case SimpleContainerOwnerV2.Windows(scope, adapter):
+            var retained = adapter
+            val plan = retained.primary_connection_plan_v2(request, expected, identity, resources,
+                installation_digest, journal_lease_digest, terminal_mode, timeout_ms)
+            val updated = SimpleContainerOwnerV2.Windows(scope, retained)
+            match plan:
+                case Ok(value): ContainerPrimaryConnectionPlanTurnV2(updated, Some(value), "")
+                case Err(reason): ContainerPrimaryConnectionPlanTurnV2(updated, None, reason)
+        case _:
+            ContainerPrimaryConnectionPlanTurnV2(owner, None, "container-direct-connection-provider-unsupported")

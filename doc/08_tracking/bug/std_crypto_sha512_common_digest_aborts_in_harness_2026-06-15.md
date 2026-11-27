@@ -1,5 +1,21 @@
 # Bug: `std.crypto` SHA-512 common digest aborts under the spec harness
 
+## Verification 2026-11-25 (worktree wt-p2w6-ah, release/1.0.0 HEAD f3fb8f24dc9)
+
+- **measured** — `sha512.spl` has since been rewritten around
+  `sha512_family_compress`/`sha512_family_absorb`; the buggy `_sha512_core`
+  `padded[pi] = padded[pi] & 255` pattern no longer exists anywhere in the
+  file, and the input array is never copied or mutated (verified by reading
+  the current source).
+- **measured** — live probe (Rust seed `bin/simple.exe run`,
+  `SIMPLE_LIB=src`, Windows): `sha512_text("")` = `cf83e135…a538327af927da3e`
+  and `sha512_text("abc")` = `ddaf35a1…ca49f` — both FIPS 180-4 vectors PASS.
+- **limitation** — `bin/simple.exe test` cannot run any spec at this HEAD:
+  the pinned seed rejects the `@representation_boundary` decorator added by
+  cfd89933699, and the 2026-09-13 regression spec
+  `sha512_nonempty_input_spec.spl` no longer exists in the tree. Closure
+  stands on the probe above plus source inspection.
+
 ## Closed 2026-09-13 — FIXED in `src/lib/common/crypto/sha512.spl` (index-assign on the input array)
 
 ### Regression specs (added 2026-09-13)

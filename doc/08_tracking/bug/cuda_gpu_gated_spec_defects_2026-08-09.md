@@ -9,6 +9,56 @@ whoever tracks test_runner_reports_only_last_failure_per_example_2026-08-04
 (same shape), but reproducing the CUDA-specific findings needs a GPU host.
 Left OPEN.
 
+## Triage 2026-11-11 (p3fix-p2a-20261111 lane) — BLOCKED: needs seed rebuild + CUDA host; partial progress verified
+
+Re-verified at release/1.0.0 tip (worktree @ 79d5af6723f6), source-only (this
+host has no CUDA GPU; the tracked `bin/simple.exe` must not be rebuilt here):
+
+- **Item 3 prerequisites landed.** The runtime dlopen table
+  (`src/compiler_rust/runtime/src/cuda_runtime.rs:210,293`) now carries
+  `cuDeviceGetAttribute`, and the `CudaFns`/`dispatch!` dlopen machinery is
+  NOT feature-gated, so the not-cuda build can dispatch through it — the
+  exact blocker this doc filed ("CudaFns has no cuDeviceGetAttribute entry")
+  is gone. The rerouting itself is NOT done: the compiler shims in
+  `src/compiler_rust/compiler/src/interpreter_extern/gpu.rs` still contain
+  exactly the filed 12 sentinel returns out of 38 total
+  (`#[cfg(not(feature = "cuda"))] { Ok(Value::Int(-3)) }`, e.g.
+  `rt_cuda_device_compute_capability_fn` at :1382-1393), and the runtime's
+  own not-cuda stubs still return 0 (e.g. `rt_cuda_device_compute_capability`
+  :1595) instead of dispatching through dlopen.
+- **Item 4.2 landed.** `scripts/build/build_simple_audio_cuda_sffi.shs` now
+  builds `libsimple_audio_cuda.so` (Linux/macOS/FreeBSD; staged under
+  `build/sffi`, reached via LD_LIBRARY_PATH) — the "no build rule anywhere"
+  state is over. Its header records this bug's date as the reason it exists.
+- **Item 4.4 landed by rewrite.** `src/runtime/sffi/simple_audio_cuda_driver.c`
+  is now a 166-line narrow ABI shim; the paired-i64 `_audio_write_u32s` path
+  that overflowed odd element counts no longer exists — upload/download take
+  explicit byte sizes (`simple_audio_cuda_upload/download`).
+- **Item 4.3 still open** (readback root cause never isolated — needs GPU).
+- Items 1/2 remain fixed per the 2026-08-09 record.
+
+**Verdict: BLOCKED.** The remaining item-3 fix is a two-crate Rust-seed change
+(compiler shims un-gated to call the dlopen-backed runtime externs; runtime
+not-cuda stubs switched from hard 0 to dlopen dispatch) whose verification
+requires rebuilding the Rust seed / self-hosted binary (the tracked
+`bin/simple.exe` is frozen for parallel sessions) and then runtime-proving on
+a CUDA host that the 12 calls return real values, not -3/0. Item 4.3 needs a
+CUDA host outright. Neither is reachable from this bug lane's sanctioned
+runtime (tracked seed binary, no CUDA).
+
+**Grant requested (verbatim):** permission for a future lane to (a) rebuild
+the Rust seed (or self-hosted native equivalent) at a NON-tracked output path
+— e.g. `cargo build --release -p simple-compiler` with a scratch
+`CARGO_TARGET_DIR`, or the sanctioned self-host native build — to verify the
+item-3 rerouting, and (b) run the three `SIMPLE_CUDA_TEST=1` gated specs
+(`gpu_ptx_gen_spec`, `feature/usage/cuda` internal-consistency spec,
+`simple_audio_cuda_q15_env_spec`) on a CUDA GPU host with
+`build_simple_audio_cuda_sffi.shs` deployed, to close item 3 end-to-end and
+isolate item 4.3. The internal-consistency spec's `expected -3 to be greater
+than 0` assertion is the ready-made regression oracle for item 3.
+
+Status stays open. No code change in this lane.
+
 
 Status: OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
@@ -137,3 +187,21 @@ Also spotted while reading (not the cause of any failure, but a real overflow):
 `_audio_write_u32s` writes in i64 pairs, so for an ODD element count it writes
 one 8-byte word past the end of a `count*4` allocation — e.g. 16 bytes into the
 12-byte `host_input` for a 3-sample input.
+
+## Enumeration 2026-11-26 (NVIDIA GB10, aarch64): fixed or split
+
+Run with `SIMPLE_CUDA_TEST=1` on the GB10 (cc 12.1, driver 580.173.02).
+
+| item | state 2026-11-26 | evidence / owner |
+|---|---|---|
+| 0 harness trap | no longer reproduces: one example reports every failing assertion | GPU spec logs in this lane |
+| 1-2 PTX spec | `gpu_ptx_gen_spec` 81/81 after the header expectation followed `PTX_ISA_VERSION` 8.0 | `test/03_system/feature/usage/gpu_ptx_gen_spec.spl` |
+| 3 interpreter shims | `ctx_destroy`, `memcpy_dtod`, `module_load` and `get_error_string` now dispatch through `CudaFns`; compute capability was already done | `test/02_integration/gpu/cuda_interpreter_driver_shims_live_spec.spl`: 4/4 red on the old seed (48 contexts created, 0 destroyed), 5/5 green on the rebuilt seed |
+| 3 f64 compute ops | split: their kernels exist only in the cuda-feature runtime | `cuda_interpreter_f64_compute_ops_sentinel_2026_11_26` |
+| 3 runtime stubs | split: 41 not-cuda `rt_cuda_*` exports in `cuda_runtime.rs` still return constants (owned by the forwarder lane) | `cuda_runtime_not_cuda_stubs_no_dlopen_2026_11_26` |
+| 4.1 sm_52 | fixed earlier | - |
+| 4.2 build rule | exists; it now defaults `CC` to clang, since plain `cc` is gcc here | `scripts/build/build_simple_audio_cuda_sffi.shs` |
+| 4.3 readback | intermittent: 4 of 7 runs pass with exact samples | `simple_audio_cuda_q15_intermittent_device_failure_2026_11_26` |
+| 4.4 overflow | fixed earlier by the shim rewrite | - |
+| new | `CudaSession.init` kept a negative `cuCtxCreate` status (-2) as a valid context; it now returns that status | same live spec, red `status_ok=true ctx=-2 valid=true` |
+| new | `test/feature/usage/gpu_ptx_gen_spec.spl` is a stale duplicate still failing the 12 corrected expectations | `test_feature_gpu_ptx_gen_spec_stale_duplicate_2026_11_26` |

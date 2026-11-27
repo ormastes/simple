@@ -23,6 +23,18 @@ pub(super) fn eval_literal_expr(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
+    if let Expr::TypedInteger(_, NumericSuffix::Unit(unit_name)) | Expr::TypedFloat(_, NumericSuffix::Unit(unit_name)) =
+        expr
+    {
+        let declared = crate::interpreter_unit::unit_suffix_declared_in_file(unit_name);
+        let owner = crate::units::scope::literal_scope_owner();
+        let err = crate::units::scope::with_owner_scope(owner.as_deref(), || {
+            crate::units::scope::unit_suffix_scope_error(unit_name, declared)
+        });
+        if let Some(msg) = err {
+            return Err(CompileError::semantic(msg));
+        }
+    }
     match expr {
         Expr::Integer(value) => Ok(Some(Value::Int(*value))),
         Expr::TypedInteger(value, suffix) => Ok(Some(match suffix {
@@ -121,6 +133,8 @@ pub(super) fn eval_literal_expr(
                 // Execute the literal function body with the string value
                 let mut local_env: Env = Env::new();
                 local_env.insert(lit_fn_info.param_name.clone(), Value::text(s.clone()));
+                let _fn_return_guard = super::super::push_current_fn_return_type(None);
+                let _expected_target_guard = super::super::push_expected_target_type(None);
 
                 match exec_block_fn(
                     &lit_fn_info.body,
@@ -152,6 +166,8 @@ pub(super) fn eval_literal_expr(
                             let param_name = &from_method.params[0].name;
                             local_env.insert(param_name.clone(), Value::text(s.clone()));
                         }
+                        let _fn_return_guard = super::super::push_current_fn_return_type(None);
+                        let _expected_guard = super::super::push_expected_target_type(None);
 
                         match exec_block_fn(
                             &from_method.body,
@@ -298,6 +314,32 @@ pub(super) fn eval_literal_expr(
             // Imported globals can change during a nested call, so refresh only
             // bindings with exact owner provenance at the point of each read.
             if let Some(val) = env.get(name) {
+                // An imported fn referenced by its own name, or by the alias
+                // its import gave it (`use m.{secret as s}`), is a use of it
+                // by this caller. A callback parameter is local, and a module
+                // global holding a fn value is bound under the global's name,
+                // not the fn's: neither is judged.
+                if let Value::Function { def, .. } = val {
+                    if matches!(def.visibility, simple_parser::ast::Visibility::Private)
+                        && !env.is_local(name)
+                        && (def.name == *name
+                            || env.global_binding(name).is_some_and(|(_, source)| source == def.name))
+                    {
+                        // The flattened top-level env binds a bare fn name to
+                        // whichever module registered it last; the calling
+                        // module's own same-named helper is the one it names.
+                        if def.name == *name {
+                            if let Some(own) = crate::interpreter::interpreter_call::caller_own_function(name, def) {
+                                return Ok(Some(Value::Function {
+                                    name: name.clone(),
+                                    def: own,
+                                    captured_env: Arc::new(Env::new()),
+                                }));
+                            }
+                        }
+                        crate::interpreter::interpreter_call::gate_private_call(&def.name, def)?;
+                    }
+                }
                 if !env.is_local(name) && env.is_refreshed_global(name) {
                     if let Some((owner, source_name)) = env.global_binding(name) {
                         if let Some(live) = crate::interpreter::owned_global(&owner, &source_name) {
@@ -340,12 +382,54 @@ pub(super) fn eval_literal_expr(
             }
             // Then check functions for top-level function definitions
             // Return as Value::Function for first-class function usage
-            if let Some(func) = functions.get(name).cloned() {
+            if let Some(func) = crate::interpreter::interpreter_call::caller_bound_function(name, functions) {
+                crate::interpreter::interpreter_call::gate_private_call(&func.name, &func)?;
                 return Ok(Some(Value::Function {
                     name: name.clone(),
                     def: func,
                     captured_env: Arc::new(Env::new()), // Top-level functions don't capture
                 }));
+            }
+            // A declared extern fn used as a first-class value (`f(rt_foo)`):
+            // yield a callable that dispatches through the extern table.
+            if crate::interpreter::EXTERN_FUNCTIONS.with(|cell| cell.borrow().contains(name.as_str())) {
+                let ext_name = name.clone();
+                return Ok(Some(Value::NativeFunction(crate::value::NativeFunction {
+                    name: name.clone(),
+                    func: Arc::new(move |args| {
+                        crate::interpreter::interpreter_extern::call_extern_function_with_values(
+                            &ext_name,
+                            args,
+                            &mut Env::new(),
+                            &mut HashMap::new(),
+                            &mut HashMap::new(),
+                            &HashMap::new(),
+                            &HashMap::new(),
+                        )
+                    }),
+                })));
+            }
+            let bound_generic = crate::interpreter::GENERIC_TYPE_BINDINGS.with(|cell| cell.borrow().get(name).cloned());
+            if let Some(bound_ty) = bound_generic {
+                match crate::interpreter::resolve_generic_type_in_scope(&bound_ty) {
+                    simple_parser::ast::Type::Simple(s) => {
+                        if let Ok(n) = s.parse::<i64>() {
+                            return Ok(Some(Value::Int(n)));
+                        }
+                        if !s.is_empty() && (&s != name || classes.contains_key(&s)) {
+                            return Ok(Some(Value::Constructor { class_name: s }));
+                        }
+                    }
+                    simple_parser::ast::Type::Generic { name: target_name, .. } => {
+                        return Ok(Some(Value::Constructor { class_name: target_name }));
+                    }
+                    simple_parser::ast::Type::Array { size: None, .. } => {
+                        return Ok(Some(Value::Constructor {
+                            class_name: "array".to_string(),
+                        }));
+                    }
+                    _ => {}
+                }
             }
             // Check classes - return as Constructor for constructor polymorphism
             if classes.contains_key(name) {

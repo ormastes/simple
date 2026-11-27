@@ -1,0 +1,40 @@
+# Bug puresql_native_mir_failures_2026_10_25: MIR-level repros (frontend -> HIR -> MIR).
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn mir_errors_of(source: text, tag: text) -> [text]:
+    val filename = "puresql_cause_" + tag + ".spl"
+    val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var out: [text] = []
+    for error in lowering.errors:
+        out.push(error.message)
+    out
+
+val cause1_src = "enum Cell:\n    Null\n    Int(i64)\n    Txt(text)\n\nimpl Cell:\n    fn is_null() -> bool:\n        match self:\n            case Cell.Null: true\n            case _: false\n\nfn make(n: i64) -> Cell:\n    if n == 0:\n        Cell.Null\n    else:\n        Cell.Int(n)\n\nfn probe() -> bool:\n    var arr: [Cell] = []\n    arr.push(make(1))\n    arr[0].is_null()\n"
+
+val cause2_src = "trait Reducer:\n    fn reduce(x: i64) -> i64\n\nclass Doubler:\n    k: i64\n\nimpl Reducer for Doubler:\n    fn reduce(x: i64) -> i64:\n        x * 2\n\nclass Holder:\n    reducer: Reducer?\n\nfn rewrap(h: Holder) -> Reducer?:\n    if val Some(strategy) = h.reducer:\n        Some(strategy)\n    else:\n        nil\n"
+
+val cause3_src = "struct Lit:\n    value: text\n\nstruct Bin:\n    right: Lit?\n\nfn probe(where_expr: Bin?) -> text:\n    if not where_expr.?:\n        return \"\"\n    val expr = where_expr\n    if not expr.right.?:\n        return \"\"\n    val pattern = expr.right.value\n    pattern.slice(1, 2)\n"
+
+describe "pure_sql native MIR causes", tag: ["only-compiled"]:
+    it "cause 1: enum call result pushed to [Enum] then indexed lowers":
+        expect(mir_errors_of(cause1_src, "c1").len()).to_equal(0)
+    it "cause 2: re-wrapping a trait-object payload is identity":
+        expect(mir_errors_of(cause2_src, "c2")).to_equal([])
+    it "cause 2: Some(x) re-wrap from a param Trait? match is identity":
+        val param_src = "trait Reducer:\n    fn reduce(x: i64) -> i64\n\nfn f(r: Reducer?) -> Reducer?:\n    if val Some(s) = r:\n        Some(s)\n    else:\n        nil\n"
+        expect(mir_errors_of(param_src, "c2p")).to_equal([])
+    it "cause 2: bound payload re-wrapped as the function tail is identity":
+        val tail_src = "trait Reducer:\n    fn reduce(x: i64) -> i64\n\nclass Holder:\n    reducer: Reducer?\n\nfn f(h: Holder) -> Reducer?:\n    val s = h.reducer\n    Some(s)\n"
+        expect(mir_errors_of(tail_src, "c2t")).to_equal([])
+    it "cause 3: flow-narrowed two-hop text read keeps its type":
+        expect(mir_errors_of(cause3_src, "c3").len()).to_equal(0)

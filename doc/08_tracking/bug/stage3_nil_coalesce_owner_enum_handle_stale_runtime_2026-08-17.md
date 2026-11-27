@@ -1,8 +1,30 @@
 # Stage 3 trace showed `??` on `text?` yielding `<enum@0x...>` — not reproducible from the current tree
 
-- **Status:** OPEN, but the current-tree source is **exonerated by measurement**.
-  Most likely a **stale linked runtime** in the stage-3 lane, not a source defect.
-- **Not fixed.** Nothing was changed for this record.
+- **Status:** OPEN — **BLOCKED (stage-chain probe), triaged 2026-11-11 (lane boot14).**
+  Current-tree source remains exonerated by measurement; the residual (A) stale-linked-runtime
+  vs (C) downstream-of-stale-id decision needs the stage-3 diagnostic replay (not runnable on
+  this Windows host — known native-build hang on the success path).
+
+## Triage 2026-11-11 (lane boot14) — BLOCKED, kept OPEN
+
+Verdict: **BLOCKED** (stage-chain probe). Nothing to fix in the current source.
+
+Evidence gathered this session (seed-smoke, build-commit `46fe8f6b6def`):
+- Option gate present in-tree: `rt_unwrap_or_self` gates on
+  `rt_enum_id(value) == 1 && rt_enum_discriminant(value) >= 0`
+  (`src/runtime/runtime_native.c:6516`) → candidate (B) stays refuted.
+- Candidate (C)'s root, the stale-id `Dict.clear()` defect
+  (`stage3_dict_clear_no_dict_branch_in_rt_clear_2026-08-17.md`), is **FIXED 2026-08-17
+  (both runtimes)**, guarded by `scripts/check/check-dict-clear-receiver-dispatch.shs`.
+- Nothing was changed for this record.
+
+Exact grant command (non-Windows host) — re-run the stage-3 replay and count the
+`owner=<enum@0x` probe lines to decide (A) vs (C):
+```
+sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage3 --mode=dynload --output=build/bootstrap
+```
+then grep the stage-3 native-build log for `owner=<enum@0x`: vanished ⇒ downstream of the
+stale-id defect (C); survive ⇒ identify the linked runtime archive's provenance (A).
 
 ## The observation (from the stage-3 diagnostic trace, 2026-08-17)
 

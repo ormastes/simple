@@ -1,0 +1,52 @@
+# Exercise the production Windows owner without a test-only spawn implementation.
+use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessRequestV1, windows_process_file_digest_v1, windows_process_start_v1, windows_process_poll_v1, windows_process_collect_v1, windows_process_cancel_v1}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use std.io_runtime.{thread_sleep}
+
+fn main() -> i64:
+    val program = env_get("DEVHUB_PROCESS_PROBE_CHILD_BIN")
+    val root = env_get("DEVHUB_PROCESS_PROBE_DIR")
+    if program == "" or root == "":
+        print "FAIL: explicit native child and private probe root required"
+        return 1
+    val digest = windows_process_file_digest_v1(program)
+    if digest.len() != 64:
+        print "FAIL: production executable digest unavailable"
+        return 1
+    val request = WindowsProcessRequestV1(program: program, producer_digest: digest,
+        args: ["two words", "quote\"value\\"],
+        environment: ["SystemRoot=" + env_get("SystemRoot"), "WINDIR=" + env_get("WINDIR")],
+        directory: root, inputs: [], stdout_path: root + "/child.out",
+        stderr_path: root + "/child.err", timeout_ms: 3000)
+    match windows_process_start_v1(request):
+        case Err(reason):
+            print "FAIL: owned admission: {reason}"
+            return 1
+        case Ok(lease):
+            var attempts = 0
+            while attempts < 500:
+                match windows_process_poll_v1(lease):
+                    case Err(reason):
+                        val cancelled = windows_process_cancel_v1(lease)
+                        print "FAIL: owned observation: {reason}"
+                        return 1
+                    case Ok(status):
+                        if status.terminal:
+                            match windows_process_collect_v1(lease):
+                                case Err(reason):
+                                    print "FAIL: owned collection: {reason}"
+                                    return 1
+                                case Ok(collected):
+                                    print "owned result: leader_reaped={collected.leader_reaped} tree_empty={collected.tree_empty} exit={collected.exit_code} timed_out={collected.timed_out} cancelled={collected.cancelled}"
+                                    assert(collected.leader_reaped and collected.tree_empty)
+                                    assert(collected.exit_code == 7)
+                                    assert(file_read_text(root + "/child.out").contains("PASS native child argv"))
+                                    print "PASS native owned child exit=7 tree_empty=true"
+                                    return 0
+                thread_sleep(10)
+                attempts = attempts + 1
+            val cancelled = windows_process_cancel_v1(lease)
+            val collected = windows_process_collect_v1(lease)
+            print "FAIL: bounded owner observation exhausted"
+            return 1

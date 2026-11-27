@@ -22,7 +22,11 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
     vulkan_font_mirror_continuity, VK_FONT_MIRROR_FULL,
     VK_FONT_MIRROR_INCREMENTAL, VK_FONT_MIRROR_ALREADY_TRUTH
 }
-use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad, FontRenderer, font_atlas_park_key}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad, FontRenderer, font_atlas_park_key, FONT_ATLAS_PARK_MAX}
+use std.nogc_sync_mut.text_layout.font_renderer.{font_render_config_default_for_size}
+use std.io_runtime.{file_exists}
+
+val LCD_SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
 
 # ---------------------------------------------------------------------------
 # Independent re-derivation of the atlas pack (NOT imported from the product).
@@ -514,3 +518,64 @@ describe "vulkan font atlas incremental repack":
         val rederived = font_atlas_park_key(fonts.atlas_font_identity, fonts.atlas_face_generation)
         expect(captured == rederived).to_be(false)
         expect(captured).to_be(font_atlas_park_key("face-A", 1))
+
+    it "PRODUCT one LCD run with phased and phase-0 cells is ONE sequence step":
+        # Measured before the fix: the phase cells of `_lcd_apply_pen_phases`
+        # and the phase-0 cells of `_lcd_resolve_deferred_cells` each stepped
+        # the owner sequence, so the batch read host + 2 and the consumer took
+        # VK_FONT_MIRROR_FULL for every run that added both kinds of cell.
+        if not file_exists(LCD_SANS):
+            skip("no Liberation Sans on this host")
+            return
+        var fonts = FontRenderer.new()
+        expect(fonts.try_load_runtime_ttf(LCD_SANS)).to_be(true)
+        fonts.set_lcd_text(true)
+        val first = "Hamburgefonstiv"
+        fonts.stage_text_with_advances_configured(first, fonts.measure_text_advances(first, 16), 0xff000000u32, font_render_config_default_for_size(16))
+        val host = fonts.staged_atlas_owner_sequence
+        expect(host >= 0).to_be(true)
+        val second = "QUICK WORD xyz"
+        fonts.stage_text_with_advances_configured(second, fonts.measure_text_advances(second, 16), 0xff000000u32, font_render_config_default_for_size(16))
+        val dirty = fonts.staged_dirty_rects.len()
+        expect(dirty > 0).to_be(true)
+        expect(fonts.staged_atlas_owner_sequence).to_be(host + 1)
+        expect(vulkan_font_mirror_continuity(true, "A", "A", true, -1, 9, host, fonts.staged_atlas_owner_sequence, dirty)).to_be(VK_FONT_MIRROR_INCREMENTAL)
+        step("a run that adds no cell does not step at all")
+        fonts.stage_text_with_advances_configured(first, fonts.measure_text_advances(first, 16), 0xff000000u32, font_render_config_default_for_size(16))
+        expect(fonts.staged_dirty_rects.len()).to_be(0)
+        expect(fonts.staged_atlas_owner_sequence).to_be(host + 1)
+
+    it "PRODUCT nine interleaved owners all come back by RESTORE on the second round":
+        # Three families in regular, bold and italic: the page of the bug
+        # record. With 4 parks the first owner was evicted before its turn came
+        # round again, so every return was a wipe and a re-seeded sequence.
+        var fonts = FontRenderer.new()
+        var seqs: [i64] = []
+        var i = 0
+        while i < 9:
+            fonts._switch_font_atlas(1, "face-" + i.to_text())
+            fonts.atlas_pixels = [(0xA0 + i).to_u32(); 16]
+            seqs.push(fonts.atlas_owner_sequence)
+            i = i + 1
+        i = 0
+        while i < 9:
+            fonts._switch_font_atlas(1, "face-" + i.to_text())
+            expect(fonts.atlas_owner_sequence).to_be(seqs[i])
+            expect(fonts.atlas_pixels[0]).to_be((0xA0 + i).to_u32())
+            i = i + 1
+
+    it "PRODUCT the consumer keeps a mirror for every owner the producer parks":
+        expect(VULKAN_FONT_ATLAS_MIRROR_MAX.to_i64() >= FONT_ATLAS_PARK_MAX).to_be(true)
+        var backend = VulkanBackend.create()
+        var i = 0
+        while i < 9:
+            val name = "owner-" + i.to_text()
+            expect(backend._font_mirror_activate(name, true)).to_be(false)
+            backend.font_atlas_host_identity = name
+            backend.font_atlas_host_generation = (i + 1).to_i64()
+            backend.font_atlas_host_bytes = oracle_pack_full(synthetic_atlas(8, 8, (i + 1).to_u32()))
+            i = i + 1
+        i = 0
+        while i < 9:
+            expect(backend._font_mirror_activate("owner-" + i.to_text(), true)).to_be(true)
+            i = i + 1

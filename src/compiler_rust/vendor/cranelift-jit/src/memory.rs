@@ -401,6 +401,118 @@ pub(crate) fn force_veneers() -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// Windows x86_64 per-module arena  (LOCAL PATCH to vendored cranelift-jit)
+//
+// WHY:
+//   x86_64 JIT code reaches its PLT, GOT and colocated callees through signed
+//   32-bit PC-relative fields: `write_plt_entry_bytes` (backend.rs) and the
+//   X86PCRel4 / X86CallPCRel4 / X86GOTPCRel4 / X86CallPLTRel4 arms of
+//   compiled_blob.rs. Upstream `with_size` makes one independent VirtualAlloc per
+//   chunk and nothing keeps those chunks together, so in a process that JITs a
+//   large closure they land more than 2 GiB apart and those relocations panic
+//   with `TryFromIntError(PosOverflow)`.
+//
+// FIX:
+//   Reserve one region (address space only: MEM_RESERVE charges no commit) per
+//   JITModule, sized so any two addresses in it fit an i32 displacement, and
+//   carve the module's code, readonly and writable chunks from it, committing
+//   each chunk as it is handed out. On exhaustion or a failed reservation
+//   allocation falls back to `with_size`, and a far relocation panics as before.
+//   `SIMPLE_JIT_ARENA_STATS=1` prints the high-water mark.
+// ---------------------------------------------------------------------------
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+mod windows_x64_arena {
+    use std::io;
+    use std::ptr;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE};
+
+    /// Minimum chunk handed back to `Memory`, so that many small functions share
+    /// one chunk instead of burning a whole page each.
+    const MIN_CHUNK: usize = 64 * 1024;
+    /// One chunk below 2^31, so the largest difference between two addresses in
+    /// the region is representable in an i32.
+    const ARENA_SIZE: usize = (1 << 31) - MIN_CHUNK;
+
+    static WARNED: AtomicBool = AtomicBool::new(false);
+
+    fn warn_once(msg: &str) {
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            eprintln!("cranelift-jit: {msg}");
+        }
+    }
+
+    pub(crate) struct Arena {
+        base: usize,
+        next: AtomicUsize,
+    }
+
+    impl Arena {
+        pub(crate) fn reserve() -> Option<Arc<Self>> {
+            let p = unsafe { VirtualAlloc(ptr::null_mut(), ARENA_SIZE, MEM_RESERVE, PAGE_NOACCESS) };
+            if p.is_null() {
+                warn_once(&format!(
+                    "could not reserve the JIT module arena ({}); falling back to independent allocations, where a PC-relative relocation may be out of range",
+                    io::Error::last_os_error()
+                ));
+                return None;
+            }
+            Some(Arc::new(Self {
+                base: p as usize,
+                next: AtomicUsize::new(0),
+            }))
+        }
+
+        /// `Ok(None)` means exhausted. Returns the true chunk length; the caller
+        /// must not recompute it. A commit failure is real memory pressure and is
+        /// reported rather than masked by the fallback path.
+        pub(crate) fn alloc(&self, want: usize) -> io::Result<Option<(*mut u8, usize)>> {
+            let len = region::page::ceil(want.max(MIN_CHUNK) as *const ()) as usize;
+            let start = self.next.fetch_add(len, Ordering::Relaxed);
+            if start.checked_add(len).map_or(true, |end| end > ARENA_SIZE) {
+                warn_once(
+                    "JIT module arena exhausted (cap: just under 2 GiB per JIT module); falling back to independent allocations, where a PC-relative relocation may be out of range",
+                );
+                return Ok(None);
+            }
+            let p = unsafe { VirtualAlloc((self.base + start) as *mut _, len, MEM_COMMIT, PAGE_READWRITE) };
+            if p.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Some((p as *mut u8, len)))
+        }
+
+        pub(crate) fn report_stats(&self) {
+            if std::env::var_os("SIMPLE_JIT_ARENA_STATS").map_or(false, |v| v != "0") {
+                eprintln!(
+                    "cranelift-jit: module arena high-water {} KiB, cap {} KiB",
+                    self.next.load(Ordering::Relaxed) / 1024,
+                    ARENA_SIZE / 1024
+                );
+            }
+        }
+    }
+}
+
+/// The per-`JITModule` address-space region its three `Memory`s share. Only
+/// Windows x86_64 has one; elsewhere this carries nothing.
+#[derive(Clone)]
+pub(crate) struct ModuleArena {
+    #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+    region: Option<std::sync::Arc<windows_x64_arena::Arena>>,
+}
+
+impl ModuleArena {
+    pub(crate) fn reserve() -> Self {
+        Self {
+            #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+            region: windows_x64_arena::Arena::reserve(),
+        }
+    }
+}
+
 /// Type of branch protection to apply to executable memory.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum BranchProtection {
@@ -428,6 +540,8 @@ pub(crate) struct Memory {
     arena: Option<usize>,
     #[allow(dead_code)]
     use_arena: bool,
+    #[allow(dead_code)]
+    module_arena: Option<ModuleArena>,
 }
 
 unsafe impl Send for Memory {}
@@ -442,7 +556,15 @@ impl Memory {
             branch_protection,
             arena: None,
             use_arena: false,
+            module_arena: None,
         }
+    }
+
+    /// Carve this `Memory`'s chunks from `arena`, which the module's other
+    /// `Memory`s share. See the `windows_x64_arena` comment block above.
+    pub(crate) fn in_module_arena(mut self, arena: &ModuleArena) -> Self {
+        self.module_arena = Some(arena.clone());
+        self
     }
 
     /// Same as `new`, but for the region that holds executable code: on AArch64
@@ -482,6 +604,16 @@ impl Memory {
                     // warning was already emitted by `alloc_code`.
                     self.use_arena = false;
                 }
+            }
+        }
+        #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+        if let Some(arena) = self.module_arena.as_ref().and_then(|a| a.region.as_ref()) {
+            if let Some((ptr, len)) = arena.alloc(size)? {
+                return Ok(PtrLen {
+                    ptr,
+                    len,
+                    from_arena: true,
+                });
             }
         }
         PtrLen::with_size(size)
@@ -578,6 +710,11 @@ impl Memory {
             aarch64_arena::publish_veneers(idx);
         }
 
+        #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+        if let Some(arena) = self.module_arena.as_ref().and_then(|a| a.region.as_ref()) {
+            arena.report_stats();
+        }
+
         self.already_protected = self.allocations.len();
         Ok(())
     }
@@ -625,5 +762,32 @@ impl Drop for Memory {
         mem::replace(&mut self.allocations, Vec::new())
             .into_iter()
             .for_each(mem::forget);
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64", target_os = "windows"))]
+mod windows_x64_arena_tests {
+    use super::*;
+    use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_RESERVE, PAGE_NOACCESS};
+
+    /// Address-space reservations between chunk allocations push independent
+    /// VirtualAlloc calls more than 2 GiB apart; chunks of one module must not move.
+    #[test]
+    fn module_chunks_stay_in_i32_reach_and_are_writable() {
+        let arena = ModuleArena::reserve();
+        let mut code = Memory::new_code(BranchProtection::None).in_module_arena(&arena);
+        let mut writable = Memory::new(BranchProtection::None).in_module_arena(&arena);
+        let first = code.allocate(16, 16).unwrap() as isize;
+        for _ in 0..8 {
+            let hog = unsafe { VirtualAlloc(ptr::null_mut(), 1 << 30, MEM_RESERVE, PAGE_NOACCESS) };
+            assert!(!hog.is_null());
+            let got = writable.allocate(1 << 20, 8).unwrap();
+            unsafe { got.write(1) };
+            let plt = code.allocate(1 << 20, 16).unwrap();
+            unsafe { plt.write(1) };
+            for p in [got as isize, plt as isize] {
+                assert!(i32::try_from(p - first).is_ok(), "{:#x} vs {first:#x}", p);
+            }
+        }
     }
 }

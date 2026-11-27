@@ -13,7 +13,7 @@ use std.scv.distributed_identity.*
 
 fn db_checkpoint_metadata(initial: DbCheckpointReader, checkpoint: DbDatabaseCheckpoint, key: text) -> Result<(DbCheckpointReader, DbCheckpointMetadata), text>:
     val loaded = db_checkpoint_reader_record(initial, checkpoint.metadata, key)?
-    if loaded.1 == nil: return Err("SCVDB_CHECKPOINT_METADATA_MISSING")
+    if loaded.1.is_none(): return Err("SCVDB_CHECKPOINT_METADATA_MISSING")
     Ok((loaded.0, db_checkpoint_metadata_decode(loaded.1.unwrap())?))
 
 fn db_checkpoint_batch(initial: DbCheckpointReader, checkpoint: DbDatabaseCheckpoint, batch: text) -> Result<(DbCheckpointReader, DbAcceptedBatch?), text>:
@@ -134,7 +134,7 @@ fn db_checkpoint_validate_metadata(initial: DbCheckpointReader, checkpoint: DbDa
                     val found = db_checkpoint_row(reader, checkpoint, entity)?
                     reader = found.0
                     val row = found.1
-                    if row == nil or row.unwrap().kind != db_ref_kind(entity): return Err("SCVDB_CHECKPOINT_DISPOSITION_ROW")
+                    if row.is_none() or row.unwrap().kind != db_ref_kind(entity): return Err("SCVDB_CHECKPOINT_DISPOSITION_ROW")
                     var batch = ""
                     match disposition:
                         Live:
@@ -213,7 +213,7 @@ fn db_checkpoint_preserve_metadata(initial: DbCheckpointReader, previous: DbData
             val found = db_checkpoint_reader_record(reader, next.metadata, record.key)?
             reader = db_checkpoint_reader_work(found.0, record)?
             val retained = found.1
-            if retained == nil: return Err("SCVDB_CHECKPOINT_METADATA_REGRESSION")
+            if retained.is_none(): return Err("SCVDB_CHECKPOINT_METADATA_REGRESSION")
             match db_checkpoint_metadata_decode(record)?:
                 Disposition(entity, disposition):
                     match disposition:
@@ -233,14 +233,14 @@ fn db_checkpoint_validate_reference(initial: DbCheckpointReader, checkpoint: DbD
     val factor = state.rows.len() as u64 + authority.policy.merge.fields.len() as u64 + authority.policy.merge.constraints.len() as u64 + 1u64
     if factor > 30001u64: return Err("SCVDB_CHECKPOINT_WORK_QUOTA")
     reader = db_checkpoint_reader_reserve(reader, 0u64, image.encoded_bytes * factor)?
-    if db_constraint_conflicts(state.rows, authority.policy.merge)?.len() != 0: return Err("SCVDB_CHECKPOINT_CONSTRAINT")
+    if (db_constraint_conflicts(state.rows, authority.policy.merge)?).len() != 0: return Err("SCVDB_CHECKPOINT_CONSTRAINT")
     var targets: [DbReferenceTarget] = []
     for row in state.rows: targets.push(DbReferenceTarget(identity: row.entity, tombstoned: row.tombstoned))
     for row in state.rows:
         if not image.accepted.contains_key(row.revision): return Err("SCVDB_CHECKPOINT_ROW_REVISION")
         for field in row.fields:
             db_rule_accepts_value(db_schema_rule(authority.policy.merge, row.kind, field.name)?, field.value)?
-            if db_reference_errors(field.value, targets, row.tombstoned, 0)?.len() != 0: return Err("SCVDB_CHECKPOINT_REFERENCE_CLOSURE")
+            if (db_reference_errors(field.value, targets, row.tombstoned, 0)?).len() != 0: return Err("SCVDB_CHECKPOINT_REFERENCE_CLOSURE")
     for binding in identity.bindings:
         val row = image.rows.get(binding.identity)
         if row == nil: return Err("SCVDB_CHECKPOINT_ALIAS_ROW")
@@ -248,7 +248,7 @@ fn db_checkpoint_validate_reference(initial: DbCheckpointReader, checkpoint: DbD
     if identity.bindings.len() != state.rows.len(): return Err("SCVDB_CHECKPOINT_ALIAS_COVERAGE")
     for record in image.catalog.records:
         if record.repository != checkpoint.repository or record.epoch != checkpoint.epoch: return Err("SCVDB_CHECKPOINT_CONFLICT_CONTEXT")
-        if record.entity.provisional == nil or record.entity.provisional.unwrap().database_namespace != checkpoint.namespace: return Err("SCVDB_CHECKPOINT_CONFLICT_CONTEXT")
+        if record.entity.provisional.is_none() or record.entity.provisional.unwrap().database_namespace != checkpoint.namespace: return Err("SCVDB_CHECKPOINT_CONFLICT_CONTEXT")
     for receipt in image.catalog.resolutions:
         var reviewer = false
         for key in authority.policy.admission.keys:

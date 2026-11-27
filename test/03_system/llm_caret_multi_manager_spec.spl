@@ -19,22 +19,30 @@ fn backend_request(provider: text, agent_id: text) -> AgentLaunchRequest:
 
 describe "bounded parent-owned multi-Caret manager":
     # @manual scenario evidence
-    it "launches four provider wrappers into four derived terminal panes":
+    it "launches supported provider wrappers into derived panes and rolls back an unsupported batch":
         # @req REQ-SSPEC-SYSTEM
-        step("launches four provider wrappers into four derived terminal panes")
-        step("Build one bounded parent-owned batch")
+        # @req REQ-CARET-LAUNCH-002
+        step("launches supported provider wrappers into derived panes and rolls back an unsupported batch")
+        step("Build one bounded parent-owned batch of the supported Claude and Codex wrappers")
         val requests = [backend_request("claude_cli", "claude"),
-            backend_request("codex", "codex"), backend_request("gemini", "gemini"),
-            backend_request("kimi", "kimi")]
+            backend_request("codex", "codex")]
         val manager = launch_multi_caret_manager("system-team", requests, 4,
-            "/bin/echo", "/bin/echo", "/bin/echo", "/bin/echo", "")
+            "/bin/echo", "/bin/echo", "", "", "")
         expect(manager.status).to_equal("running")
-        expect(manager.team.processes.len()).to_equal(4)
-        expect(manager.terminal_view.session.windows[0].panes.len()).to_equal(4)
+        expect(manager.team.processes.len()).to_equal(2)
+        expect(manager.terminal_view.session.windows[0].panes.len()).to_equal(2)
         step("Poll through the parent and perform one terminal cleanup")
         val polled = poll_multi_caret_manager(manager)
         val stopped = stop_multi_caret_manager(polled)
         expect(stopped.status).to_equal("stopped")
+        step("A batch that adds Gemini and Kimi (no adapter yet) is rolled back with no live child")
+        val mixed = [backend_request("claude_cli", "claude"),
+            backend_request("codex", "codex"), backend_request("gemini", "gemini"),
+            backend_request("kimi", "kimi")]
+        val refused = launch_multi_caret_manager("mixed-team", mixed, 4,
+            "/bin/echo", "/bin/echo", "/bin/echo", "/bin/echo", "")
+        expect(refused.status).to_equal("not_started")
+        expect(refused.reason).to_equal("launch_rolled_back")
 
     it "rejects an over-capacity batch before spawning any process":
         # @req REQ-SSPEC-SYSTEM

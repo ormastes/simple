@@ -1,0 +1,19 @@
+#!/bin/sh
+# Native component gate for both Darwin async-spawn runtime lanes.
+set -eu
+if [ "$(uname -s)" != Darwin ]; then
+    echo "UNSUPPORTED: macOS async-spawn ownership requires Darwin" >&2
+    exit 77
+fi
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+out=$(mktemp -d "${TMPDIR:-/tmp}/simple-macos-spawn.XXXXXX")
+trap 'rm -rf "$out"' EXIT HUP INT TERM
+for unit in runtime_legacy_core runtime; do
+    "${CC:-cc}" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+        -Wl,-dead_strip -I "$root/src/runtime" \
+        "$root/src/runtime/test/rt_process_spawn_async_macos_selfcheck.c" \
+        "$root/src/runtime/$unit.c" -o "$out/$unit"
+    # Each native parent/child fixture enforces its own ten-second alarm.
+    "$out/$unit"
+    echo "PASS: $unit Darwin async-spawn descriptor ownership and neighbors"
+done

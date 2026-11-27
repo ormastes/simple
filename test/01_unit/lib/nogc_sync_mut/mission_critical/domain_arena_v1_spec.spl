@@ -188,6 +188,35 @@ describe "sealed relaxed-allocation domain arena v1":
         expect(arena.validates(first_ref)).to_equal(true)
         expect(arena.validates(second_ref)).to_equal(false)
 
+    it "never republishes bytes staged by a rolled-back generation":
+        val arena = DomainArenaV1.from_sealed_profile(113u64, relaxed_test_profile_v1(16u64))
+        val discarded = arena.checkpoint()
+        var stale_ref = DomainArenaRefV1(
+            arena_id: 0u64, domain_id: 0u32, generation: 0u64,
+            offset_bytes: 0u64, size_bytes: 0u64
+        )
+        match arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL):
+            DomainArenaAllocationV1.Allocated(reference): stale_ref = reference
+            DomainArenaAllocationV1.Exhausted(receipt): expect(false).to_equal(true)
+        expect(arena.write_byte(stale_ref, 3u64, 77u8)).to_equal(true)
+        expect(arena.rollback(discarded)).to_equal(true)
+        val kept = arena.checkpoint()
+        var fresh_ref = DomainArenaRefV1(
+            arena_id: 0u64, domain_id: 0u32, generation: 0u64,
+            offset_bytes: 0u64, size_bytes: 0u64
+        )
+        match arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL):
+            DomainArenaAllocationV1.Allocated(reference): fresh_ref = reference
+            DomainArenaAllocationV1.Exhausted(receipt): expect(false).to_equal(true)
+        # The stale ref names a dead generation and cannot stage into the new one.
+        expect(arena.write_byte(stale_ref, 3u64, 1u8)).to_equal(false)
+        expect(arena.commit(kept)).to_equal(true)
+        if val readback = arena.read_byte(fresh_ref, 3u64):
+            expect(readback).to_equal(0u8)
+        else:
+            expect(false).to_equal(true)
+        expect(arena.read_byte(fresh_ref, 8u64)).to_be_nil()
+
     it "rejects forged subspans, wrong domain/generation, and capacity drift":
         val arena = DomainArenaV1.from_sealed_profile(112u64, relaxed_test_profile_v1(16u64))
         val checkpoint = arena.checkpoint()

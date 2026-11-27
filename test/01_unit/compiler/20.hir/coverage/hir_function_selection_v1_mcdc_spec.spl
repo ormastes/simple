@@ -1,0 +1,164 @@
+# @req REQ-GEN-COV-HIRCALL
+"""
+# MC/DC coverage: hir_function_selection_v1.spl
+
+Target: src/compiler/20.hir/hir_function_selection_v1.spl
+Every compound decision drives each condition to independently flip the
+outcome; every single-condition decision takes both outcomes.
+
+## Decision inventory
+
+| Line | Decision | Conditions | Covering its |
+|------|----------|------------|--------------|
+| 14 | `function_index < functions.len()` | c1 | L14 empty (F first) / L22 its (T) |
+| 22 | `i < indices.len()` | c1 | L22 single (F first) / multi (T) |
+| 25 | `j >= 0` | c1 | L25/27 shift-to-front (F after j = -1) |
+| 27 | `symbol_ids[prev] <= symbol_ids[cur]` | c1 | L27 T (ascending / tie) / F (shift) |
+| 44 | `tps == nil` | c1 | T via unsafe nil (HIRCALL-005); F by every other it |
+| 55 | `module == nil` | c1 | F by the L57 its; T is a documented gap (below) |
+| 57 | `emitted_templates.len() == 0` | c1 | L57 T / F |
+| 69 | `module.functions[symbol] == nil` | c1 | T via unsafe nil slot (HIRCALL-007); F by all L72 its |
+| 71 | `is_generic_function(f) or f.is_generic_template` | c1, c2 | L71 c1 T / c2 T / FF |
+| 72 | `is_template and not unresolved and emitted` | c1, c2, c3 | L72 TTT / c1 F / c2 F / c3 F |
+
+Gap: L55 T. An unsafe nil module reaches `return module`, which the runtime
+rejects ("nil is forbidden by the non-optional return contract of
+`hir_prune_published_templates_v1`"), so the guard cannot return its value
+under the declared `-> HirModule` contract. Bug suspect, see the wave-2 report.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:hir
+# @tag:generics
+# @tag:coverage
+
+use std.spec.*
+use std.spec.step
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{FunctionAttr}
+use compiler.hir.hir_function_selection_v1.{sorted_function_indices,
+    is_generic_function, hir_prune_published_templates_v1}
+
+fn sel_fn(id: i64, name: text, type_params: [HirTypeParam],
+        is_generic_template: bool = false) -> HirFunction:
+    HirFunction(symbol: SymbolId(id: id), name: name,
+        type_params: type_params, params: [],
+        return_type: HirType(kind: HirTypeKind.Unit, span: Span.empty()),
+        body: HirBlock(stmts: [], has: false,
+            value: HirExpr(kind: HirExprKind.NilLit, has_type_: false,
+                type_: nil, span: Span.empty()), span: Span.empty()),
+        effects: [], visibility: Visibility.Public, is_async: false,
+        is_static: false, is_public: true, is_method: false, is_mutable: false,
+        is_const: false, is_extern: false, func_attr: FunctionAttr.default(),
+        has_export_attr: false, export_attr: nil,
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_suspension: false, has_vhdl_metadata: false, vhdl_metadata: nil,
+        has_doc_comment: false, doc_comment: "", span: Span.empty(),
+        is_gpu_kernel: false, gpu_target: "", gpu_backend_order: "",
+        verification_contract: nil, is_generic_template: is_generic_template)
+
+fn sel_tp(id: i64) -> HirTypeParam:
+    HirTypeParam(symbol: SymbolId(id: id), name: "T", bounds: [],
+        has_default: false, default: nil, span: Span.empty())
+
+fn sel_module(functions: [HirFunction]) -> HirModule:
+    var by_symbol: Dict<SymbolId, HirFunction> = {}
+    for function in functions:
+        by_symbol[function.symbol] = function
+    HirModule(name: "sel", path: "sel.spl", imports: [],
+        exports: [], domain_blocks: [], symbols: SymbolTable.new(),
+        functions: by_symbol, gpu_function_targets: {},
+        gpu_function_backend_orders: {}, classes: {}, structs: {}, enums: {},
+        bitfields: {}, traits: {}, impls: [], constants: {}, static_asserts: [],
+        aop_advices: [], di_bindings: [], arch_rules: [], mock_decls: [],
+        types: [], extend_enums: [])
+
+fn has_named(module: HirModule, name: text) -> bool:
+    for symbol in module.functions.keys():
+        if module.functions[symbol] != nil and module.functions[symbol].name == name:
+            return true
+    false
+
+fn prune_keeps(f: HirFunction, emitted: [text], unresolved: [text]) -> bool:
+    val out = hir_prune_published_templates_v1(sel_module([f]), emitted, unresolved)
+    has_named(out, f.name)
+
+describe "MC/DC sorted_function_indices loops":
+    # @req REQ-GEN-COV-HIRCALL-001
+    it "hir_function_selection_v1.spl:14 c1 F first: an empty function list yields no indices":
+        step("Sort zero functions")
+        expect(sorted_function_indices([]).len()).to_equal(0)
+
+    # @req REQ-GEN-COV-HIRCALL-002
+    it "hir_function_selection_v1.spl:22 c1 F first: a single function needs no insertion pass":
+        step("Sort one function")
+        expect(sorted_function_indices([sel_fn(4, "only", [])])).to_equal([0])
+
+    # @req REQ-GEN-COV-HIRCALL-003
+    it "hir_function_selection_v1.spl:27 c1 T: ascending and tied ids keep insertion order":
+        step("Sort ascending ids with a tie")
+        val fs = [sel_fn(1, "a", []), sel_fn(3, "b", []), sel_fn(3, "c", [])]
+        expect(sorted_function_indices(fs)).to_equal([0, 1, 2])
+
+    # @req REQ-GEN-COV-HIRCALL-004
+    it "hir_function_selection_v1.spl:25/27 c1 F: the smallest id shifts past every element until j < 0":
+        step("Sort descending ids so the last element moves to the front")
+        val fs = [sel_fn(9, "a", []), sel_fn(5, "b", []), sel_fn(1, "c", [])]
+        expect(sorted_function_indices(fs)).to_equal([2, 1, 0])
+
+describe "MC/DC nil guards (unsafe nil)":
+    # @req REQ-GEN-COV-HIRCALL-005
+    it "hir_function_selection_v1.spl:44 c1 T: a nil type-parameter list is not generic":
+        step("Classify a function whose type_params list is nil")
+        var f = sel_fn(1, "nil_tps", [])
+        unsafe:
+            val n: [HirTypeParam] = nil
+            f.type_params = n
+        expect(is_generic_function(f)).to_equal(false)
+        expect(is_generic_function(sel_fn(2, "plain", []))).to_equal(false)
+        expect(is_generic_function(sel_fn(3, "gen", [sel_tp(30)]))).to_equal(true)
+
+    # @req REQ-GEN-COV-HIRCALL-007
+    it "hir_function_selection_v1.spl:69 c1 T: a nil function slot is skipped":
+        step("Prune a module whose function dictionary holds a nil value")
+        var m = sel_module([sel_fn(1, "plain", [])])
+        unsafe:
+            val n: HirFunction = nil
+            m.functions[SymbolId(id: 2)] = n
+        val out = hir_prune_published_templates_v1(m, ["plain"], [])
+        expect(has_named(out, "plain")).to_equal(true)
+        expect(out.functions.keys().len()).to_equal(1)
+
+describe "MC/DC hir_prune_published_templates_v1":
+    # @req REQ-GEN-COV-HIRCALL-008
+    it "hir_function_selection_v1.spl:57 c1 T: no emitted templates returns the module untouched":
+        step("Prune with an empty emitted list")
+        expect(prune_keeps(sel_fn(1, "gen", [sel_tp(11)]), [], [])).to_equal(true)
+
+    # @req REQ-GEN-COV-HIRCALL-009
+    it "hir_function_selection_v1.spl:71 c1 T / 72 TTT: an emitted type-param template is removed":
+        step("Prune a generic function that was emitted")
+        expect(prune_keeps(sel_fn(1, "gen", [sel_tp(11)]), ["gen"], [])).to_equal(false)
+
+    # @req REQ-GEN-COV-HIRCALL-010
+    it "hir_function_selection_v1.spl:71 c1 F c2 T: a flagged template without type params is removed":
+        step("Prune an is_generic_template-only function that was emitted")
+        expect(prune_keeps(sel_fn(1, "flagged", [], true), ["flagged"], [])).to_equal(false)
+
+    # @req REQ-GEN-COV-HIRCALL-011
+    it "hir_function_selection_v1.spl:71 FF / 72 c1 F: an emitted non-generic function is kept":
+        step("Prune a plain function whose name was emitted")
+        expect(prune_keeps(sel_fn(1, "plain", []), ["plain"], [])).to_equal(true)
+
+    # @req REQ-GEN-COV-HIRCALL-012
+    it "hir_function_selection_v1.spl:72 c2 F: an unresolved emitted template is kept":
+        step("Prune a generic that is both emitted and unresolved")
+        expect(prune_keeps(sel_fn(1, "gen", [sel_tp(11)]), ["gen"], ["gen"])).to_equal(true)
+
+    # @req REQ-GEN-COV-HIRCALL-013
+    it "hir_function_selection_v1.spl:72 c3 F: a template that was not emitted is kept":
+        step("Prune a generic whose name is absent from the emitted list")
+        expect(prune_keeps(sel_fn(1, "gen", [sel_tp(11)]), ["other"], [])).to_equal(true)

@@ -1,0 +1,50 @@
+# Real child lifecycle regression. Native-build with the candidate runtime owner.
+use app.io.mod.{process_spawn_piped, process_read_stdout_result, process_piped_exit_status_v1, process_close_piped, thread_native_sleep_ms, is_windows_platform}
+use std.cli.cli_util.{get_cli_args}
+
+fn drain_child(child: text, mode: text, expected: i64, expected_size: i64):
+    val pid = process_spawn_piped(child, [mode])
+    assert(pid > 0)
+    # No EOF has been observed: this must be pending, not invented exit0.
+    val pending = process_piped_exit_status_v1(pid).unwrap()
+    assert(pending == nil)
+    var output = ""
+    var eof = false
+    var actual: i64? = nil
+    var tick = 0
+    while tick < 300:
+        if not eof:
+            match process_read_stdout_result(pid):
+                Ok(chunk): output = output + (chunk ?? "")
+                Err(reason):
+                    assert(reason == "process_stdout_eof")
+                    eof = true
+        if eof:
+            actual = process_piped_exit_status_v1(pid).unwrap()
+            if actual != nil: break
+        thread_native_sleep_ms(10)
+        tick = tick + 1
+    assert(eof)
+    assert(actual != nil)
+    assert((actual ?? -1) == expected)
+    assert(output.len() == expected_size)
+    # Repeated observation must retain the actual cached status, not ECHILD=0.
+    assert((process_piped_exit_status_v1(pid).unwrap() ?? -1) == expected)
+    assert(process_close_piped(pid))
+    assert(process_piped_exit_status_v1(pid).is_err())
+
+fn main() -> i32:
+    val args = get_cli_args()
+    assert(args.len() == 1)
+    val child = args[0]
+    drain_child(child, "exit0", 0, 4)
+    drain_child(child, "exit7", 7, 7)
+    drain_child(child, "tail", 0, 200004)
+    drain_child(child, "exit259", if is_windows_platform(): 259 else: 3, 16)
+    val pid = process_spawn_piped(child, ["hang"])
+    assert(pid > 0)
+    thread_native_sleep_ms(30)
+    assert(process_piped_exit_status_v1(pid).unwrap() == nil)
+    assert(process_close_piped(pid))
+    assert(process_piped_exit_status_v1(pid).is_err())
+    0

@@ -1,0 +1,198 @@
+# NOT_RUN: source cases require an admitted Simple producer. No SSH process,
+# network, credential-file access or mocked transport success in this spec.
+use std.spec.{describe, it, expect}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.text_bytes.text_to_utf8_bytes
+use std.common.config_core.server_context_types_v1.ServerRecordV1
+use std.nogc_sync_mut.daemon_sdk.local_gateway_protocol_v1.LocalGatewayHeaderV1
+use app.orchestrator.server_ssh_types_v1.ServerSshProfileV1
+use app.orchestrator.server_ssh_profile_v1.*
+use app.orchestrator.server_ssh_transport_v1.server_ssh_argv_v1
+use app.orchestrator.server_ssh_relay_v1.{server_gateway_frame_encode_v1, server_gateway_response_decode_v1}
+
+fn ssh_record_fixture_v1() -> ServerRecordV1:
+    ServerRecordV1(name: "build", transport: "ssh", host: "build.example.test", port: 2222,
+        container_host: "", auth_ref: "secret://ssh/build", tls_ref: "trust://ssh/build",
+        remote_executable: "/opt/simple/bin/simple")
+
+fn ssh_profile_fixture_v1() -> ServerSshProfileV1:
+    ServerSshProfileV1(auth_ref: "secret://ssh/build", trust_ref: "trust://ssh/build", user: "builder",
+        ssh_executable: "/usr/bin/ssh", identity_path: "/home/builder/.ssh/id_ed25519",
+        known_hosts_path: "/home/builder/.ssh/known_hosts", host_key_alias: "build-pinned")
+
+fn ssh_profile_fields_v1() -> Dict<text, SdnValue>:
+    {"kind": SdnValue.String("server-ssh-profile"), "version": SdnValue.Int(1),
+        "authRef": SdnValue.String("secret://ssh/build"), "trustRef": SdnValue.String("trust://ssh/build"),
+        "user": SdnValue.String("builder"), "sshExecutable": SdnValue.String("/usr/bin/ssh"),
+        "identityPath": SdnValue.String("/home/builder/.ssh/id_ed25519"),
+        "knownHostsPath": SdnValue.String("/home/builder/.ssh/known_hosts"),
+        "hostKeyAlias": SdnValue.String("build-pinned")}
+
+fn ssh_profile_source_v1(fields: Dict<text, SdnValue>) -> text:
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn ssh_response_fixture_v1(payload: text) -> LocalGatewayHeaderV1:
+    LocalGatewayHeaderV1(response: true, request_id: "a".repeat(64), action: "", operation_id: "",
+        exit_code: 17, payload_bytes: text_to_utf8_bytes(payload).len(), handoff_metadata: "")
+
+describe "Authenticated SSH profile and fixed gateway argv":
+    it "decodes bounded strict reference-only SDN":
+        val source = ssh_profile_source_v1(ssh_profile_fields_v1())
+        val profile = server_ssh_profile_decode_v1(source).unwrap()
+        expect(profile.auth_ref).to_equal("secret://ssh/build")
+        expect(profile.trust_ref).to_equal("trust://ssh/build")
+        expect(profile.identity_path).to_equal("/home/builder/.ssh/id_ed25519")
+        expect(profile.host_key_alias).to_equal("build-pinned")
+
+    it "rejects version kind unknown secret contents and wrong typed fields":
+        var fields = ssh_profile_fields_v1()
+        fields["version"] = SdnValue.Int(2)
+        assert(server_ssh_profile_decode_v1(ssh_profile_source_v1(fields)).is_err())
+        fields = ssh_profile_fields_v1()
+        fields["kind"] = SdnValue.String("server-config")
+        assert(server_ssh_profile_decode_v1(ssh_profile_source_v1(fields)).is_err())
+        fields = ssh_profile_fields_v1()
+        fields["privateKey"] = SdnValue.String("inline-key-rejected")
+        assert(server_ssh_profile_decode_v1(ssh_profile_source_v1(fields)).is_err())
+        fields = ssh_profile_fields_v1()
+        fields["user"] = SdnValue.Int(1)
+        assert(server_ssh_profile_decode_v1(ssh_profile_source_v1(fields)).is_err())
+        fields = ssh_profile_fields_v1()
+        fields["authRef"] = SdnValue.String("inline-token")
+        assert(server_ssh_profile_decode_v1(ssh_profile_source_v1(fields)).is_err())
+
+    it "decodes optional executable digest and protected store without changing legacy defaults":
+        val legacy = server_ssh_profile_decode_v1(ssh_profile_source_v1(ssh_profile_fields_v1())).unwrap()
+        expect(legacy.ssh_digest).to_equal("")
+        expect(legacy.store_root).to_equal("")
+        var fields = ssh_profile_fields_v1()
+        fields["sshDigest"] = SdnValue.String("a".repeat(64))
+        fields["storeRoot"] = SdnValue.String("C:/Users/builder/.simple/identity")
+        fields["sshExecutable"] = SdnValue.String("C:/Windows/System32/OpenSSH/ssh.exe")
+        fields["identityPath"] = SdnValue.String("C:/Users/builder/.simple/identity/journal/key.key")
+        fields["knownHostsPath"] = SdnValue.String("C:/Users/builder/.simple/identity/journal/pin.hosts")
+        val profile = server_ssh_profile_decode_v1(ssh_profile_source_v1(fields)).unwrap()
+        expect(profile.ssh_digest).to_equal("a".repeat(64))
+        expect(profile.store_root).to_equal("C:/Users/builder/.simple/identity")
+        fields["sshDigest"] = SdnValue.String("A".repeat(64))
+        assert(server_ssh_profile_decode_v1(ssh_profile_source_v1(fields)).is_err())
+        fields["sshDigest"] = SdnValue.Int(1)
+        assert(server_ssh_profile_decode_v1(ssh_profile_source_v1(fields)).is_err())
+
+    it "rejects missing duplicate trailing and oversized profile data":
+        assert(server_ssh_profile_decode_v1("{}\n").is_err())
+        val source = ssh_profile_source_v1(ssh_profile_fields_v1())
+        val duplicate = source.replace("version: 1", "version: 1, version: 1")
+        assert(duplicate != source)
+        assert(server_ssh_profile_decode_v1(duplicate).is_err())
+        assert(server_ssh_profile_decode_v1(source + "{}\n").is_err())
+        assert(server_ssh_profile_decode_v1("x".repeat(65537)).is_err())
+
+    it "admits only absolute shell-safe nontraversing paths":
+        expect(server_ssh_path_valid_v1("/opt/simple/bin/simple")).to_equal(true)
+        expect(server_ssh_path_valid_v1("C:/Windows/System32/OpenSSH/ssh.exe")).to_equal(true)
+        for path in ["ssh", "/", "/tmp//ssh", "/tmp/../ssh", "/tmp/./ssh", "/tmp/ssh/",
+                "/tmp/ssh;id", "/tmp/ssh x", "/tmp/ssh$(id)", "/tmp/%h", "/tmp/ssh\0x", "/tmp/ssh\nx",
+                "C:relative", "C:/../ssh.exe", "//server/share/ssh.exe", "C:/path/ssh.exe:stream"]:
+            expect(server_ssh_path_valid_v1(path)).to_equal(false)
+
+    it "pins host trust identity and forwarding policy and keeps one fixed remote command":
+        val args = server_ssh_argv_v1(ssh_record_fixture_v1(), ssh_profile_fixture_v1()).unwrap()
+        expect(args[0]).to_equal("-F")
+        expect(args[1]).to_equal("none")
+        for option in ["BatchMode=yes", "StrictHostKeyChecking=yes", "GlobalKnownHostsFile=none",
+                "UpdateHostKeys=no", "IdentityAgent=none", "IdentitiesOnly=yes", "ClearAllForwardings=yes",
+                "ForwardAgent=no", "ForwardX11=no", "HostKeyAlias=build-pinned",
+                "UserKnownHostsFile=/home/builder/.ssh/known_hosts"]:
+            assert(args.contains(option))
+        expect(args[args.len() - 3]).to_equal("--")
+        expect(args[args.len() - 2]).to_equal("build.example.test")
+        expect(args[args.len() - 1]).to_equal("/opt/simple/bin/simple gateway-stdio-v1")
+        assert(not args.contains("-n"))
+        assert(args.contains("2222"))
+        assert(args.contains("/home/builder/.ssh/id_ed25519"))
+
+    it "rejects mismatched exact auth and trust references without effects":
+        var profile = ssh_profile_fixture_v1()
+        profile.auth_ref = "secret://ssh/other"
+        val auth_result = server_ssh_argv_v1(ssh_record_fixture_v1(), profile)
+        val auth_error = match auth_result:
+            case Err(reason): reason
+            case Ok(_): "unexpected-success"
+        expect(auth_error).to_equal("server-ssh-auth-reference-mismatch")
+        profile = ssh_profile_fixture_v1()
+        profile.trust_ref = "trust://ssh/other"
+        val trust_result = server_ssh_argv_v1(ssh_record_fixture_v1(), profile)
+        val trust_error = match trust_result:
+            case Err(reason): reason
+            case Ok(_): "unexpected-success"
+        expect(trust_error).to_equal("server-ssh-trust-reference-mismatch")
+
+    it "rejects option injection from user alias and identity path":
+        var profile = ssh_profile_fixture_v1()
+        profile.user = "-oProxyCommand=id"
+        assert(server_ssh_argv_v1(ssh_record_fixture_v1(), profile).is_err())
+        profile = ssh_profile_fixture_v1()
+        profile.host_key_alias = "build\n@cert-authority *"
+        assert(server_ssh_argv_v1(ssh_record_fixture_v1(), profile).is_err())
+        profile = ssh_profile_fixture_v1()
+        profile.identity_path = "/tmp/key -oProxyCommand=id"
+        assert(server_ssh_argv_v1(ssh_record_fixture_v1(), profile).is_err())
+
+    it "rejects unsafe remote command host and non SSH record":
+        var record = ssh_record_fixture_v1()
+        record.remote_executable = "/bin/simple;id"
+        assert(server_ssh_argv_v1(record, ssh_profile_fixture_v1()).is_err())
+        record = ssh_record_fixture_v1()
+        record.host = "-oProxyCommand=id"
+        assert(server_ssh_argv_v1(record, ssh_profile_fixture_v1()).is_err())
+        record = ssh_record_fixture_v1()
+        record.transport = "https"
+        record.remote_executable = ""
+        assert(server_ssh_argv_v1(record, ssh_profile_fixture_v1()).is_err())
+
+describe "Exact framed SSH response boundary":
+    it "correlates Unicode NUL and nonzero action exit within the response":
+        val payload = "é\0result"
+        val header = ssh_response_fixture_v1(payload)
+        val bytes = server_gateway_frame_encode_v1(header, payload).unwrap()
+        val response = server_gateway_response_decode_v1(bytes, header.request_id).unwrap()
+        expect(response.header.request_id).to_equal(header.request_id)
+        expect(response.header.exit_code).to_equal(17)
+        expect(response.payload).to_equal(payload)
+
+    it "rejects request ID substitution and trailing bytes after exact frame":
+        val header = ssh_response_fixture_v1("")
+        var bytes = server_gateway_frame_encode_v1(header, "").unwrap()
+        assert(server_gateway_response_decode_v1(bytes, "b".repeat(64)).is_err())
+        bytes.push(0)
+        val trailing = server_gateway_response_decode_v1(bytes, header.request_id)
+        val reason = match trailing:
+            case Err(value): value
+            case Ok(_): "unexpected-success"
+        expect(reason).to_equal("gateway-frame-trailing-data")
+
+    it "rejects truncated and malformed prefix bytes and payload count mismatch":
+        assert(server_gateway_response_decode_v1([76, 71], "a".repeat(64)).is_err())
+        val header = ssh_response_fixture_v1("one")
+        assert(server_gateway_frame_encode_v1(header, "twoo").is_err())
+        var bytes = server_gateway_frame_encode_v1(header, "one").unwrap()
+        bytes[0] = 0
+        assert(server_gateway_response_decode_v1(bytes, header.request_id).is_err())
+
+    it "rejects remote handle metadata even when frame and correlation are valid":
+        var header = ssh_response_fixture_v1("")
+        header.handoff_metadata = "local-descriptor-receipt"
+        val bytes = server_gateway_frame_encode_v1(header, "").unwrap()
+        val response = server_gateway_response_decode_v1(bytes, header.request_id)
+        val reason = match response:
+            case Err(value): value
+            case Ok(_): "unexpected-success"
+        expect(reason).to_equal("server-gateway-remote-handoff-forbidden")
+
+    it "rejects a request frame masquerading as a response":
+        val header = LocalGatewayHeaderV1(response: false, request_id: "a".repeat(64), action: "inspect",
+            operation_id: "op-one", exit_code: 0, payload_bytes: 0, handoff_metadata: "")
+        val bytes = server_gateway_frame_encode_v1(header, "").unwrap()
+        assert(server_gateway_response_decode_v1(bytes, header.request_id).is_err())

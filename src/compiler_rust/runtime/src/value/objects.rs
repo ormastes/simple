@@ -350,17 +350,144 @@ pub fn closure_pin_stats() -> (i64, i64, i64) {
 // Enum SFFI functions
 // ============================================================================
 
-/// Hash a variant name to get its discriminant, matching the compiler's hashing scheme.
+/// The single seed definition of an enum variant's runtime discriminant.
+///
+/// Builtin `Result`/`Option` variants use the POSITIONAL convention shared with
+/// the pure-Simple compiler and the C runtime (`Ok=0, Err=1`, `Some=0, None=1`),
+/// so values cross the two toolchains without re-encoding. Other variant names
+/// keep a name-derived tag (the seed lowers by name and has no positional index
+/// at every site); it is kept out of the positional slots 0/1 so it can never
+/// alias `Err`/`None`. See
+/// doc/08_tracking/bug/enum_discriminant_convention_split_hashed_seed_vs_positional_pure_simple_2026-08-08.md.
+/// Per-variant-name positional discriminant registry (lockless DashMap).
+///
+/// Pure-Simple and the C runtime use the declaration index as the enum
+/// discriminant. Seed sites that only know a variant name resolve it here:
+/// every registered enum declaring `name` at the same index makes that index
+/// the discriminant. The first answer for a name is pinned so that a later,
+/// conflicting registration can never make construction and match disagree
+/// inside one process; a name declared at different indexes before its first
+/// use is ambiguous and keeps the legacy name-derived tag.
+mod positional_registry {
+    use dashmap::DashMap;
+    use std::sync::OnceLock;
+
+    #[derive(Clone, Copy)]
+    enum Slot {
+        Index(u32),
+        Ambiguous,
+    }
+
+    fn slots() -> &'static DashMap<String, Slot> {
+        static SLOTS: OnceLock<DashMap<String, Slot>> = OnceLock::new();
+        SLOTS.get_or_init(DashMap::new)
+    }
+
+    fn pinned() -> &'static DashMap<String, Slot> {
+        static PINNED: OnceLock<DashMap<String, Slot>> = OnceLock::new();
+        PINNED.get_or_init(DashMap::new)
+    }
+
+    pub fn register<'a>(variants: impl IntoIterator<Item = &'a str>) {
+        for (index, name) in variants.into_iter().enumerate() {
+            let index = index as u32;
+            slots()
+                .entry(name.to_string())
+                .and_modify(|slot| {
+                    if let Slot::Index(existing) = *slot {
+                        if existing != index {
+                            *slot = Slot::Ambiguous;
+                            // A conflict arriving after the name was already
+                            // answered positionally cannot be undone: fail loud
+                            // instead of letting seed and pure-Simple disagree.
+                            if let Some(p) = pinned().get(name) {
+                                if let Slot::Index(pinned_index) = *p {
+                                    eprintln!(
+                                        "simple: enum variant `{name}` declared at index {index} after it was \
+                                         already resolved positionally to {pinned_index}; discriminant is \
+                                         registration-order dependent (see #6953)"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                })
+                .or_insert(Slot::Index(index));
+        }
+    }
+
+    pub fn lookup(name: &str) -> Option<u32> {
+        if let Some(slot) = pinned().get(name) {
+            return match *slot {
+                Slot::Index(index) => Some(index),
+                Slot::Ambiguous => None,
+            };
+        }
+        // Unregistered names are not pinned: the declaration may still arrive.
+        let slot = *slots().get(name)?;
+        let slot = *pinned().entry(name.to_string()).or_insert(slot);
+        match slot {
+            Slot::Index(index) => Some(index),
+            Slot::Ambiguous => None,
+        }
+    }
+}
+
+/// Owner-correct discriminant (#6953): `variant`'s index in ITS OWN enum's
+/// declared variant list, or `None` when that enum does not declare it.
+///
+/// This is a pure function of one declaration, so every compile site, worker
+/// process and cached object agrees on it regardless of which other enums
+/// declare the same variant name or in what order they were registered. Every
+/// compiler site that can resolve the owning enum must use this rather than
+/// the name-only `hash_variant_discriminant`. Builtins agree with the fixed
+/// ABI: `Option` declares `[Some, None]` and `Result` `[Ok, Err]`.
+pub fn declared_variant_discriminant<'a>(
+    declared_variants: impl IntoIterator<Item = &'a str>,
+    variant: &str,
+) -> Option<u32> {
+    declared_variants
+        .into_iter()
+        .position(|name| name == variant)
+        .map(|index| index as u32)
+}
+
+/// Register an enum declaration's variants in declaration order so that
+/// `hash_variant_discriminant` yields the positional (pure-Simple) index.
+pub fn register_enum_variants<'a>(variants: impl IntoIterator<Item = &'a str>) {
+    positional_registry::register(variants);
+}
+
 pub fn hash_variant_discriminant(variant_name: &str) -> u32 {
+    match variant_name {
+        "Ok" | "Some" => return 0,
+        "Err" | "None" => return 1,
+        _ => {}
+    }
+    if let Some(index) = positional_registry::lookup(variant_name) {
+        return index;
+    }
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     variant_name.hash(&mut hasher);
-    (hasher.finish() & 0xFFFFFFFF) as u32
+    let tag = (hasher.finish() & 0xFFFFFFFF) as u32;
+    if tag < 2 {
+        tag + 2
+    } else {
+        tag
+    }
 }
 
 pub(crate) const RESULT_ENUM_ID: u32 = 0;
 pub(crate) const OPTION_ENUM_ID: u32 = 1;
+
+/// Result's runtime enum id: 0 from compiled code, 2 from the C runtime's
+/// `rt_result_ok`/`rt_result_err`. A user enum's declared index is 0/1 for its
+/// first two variants (#6953), so Ok/Err may only be read under these ids.
+fn is_result_enum_id(enum_id: u32) -> bool {
+    enum_id == RESULT_ENUM_ID || enum_id == 2
+}
 
 pub(crate) fn rt_option_none() -> RuntimeValue {
     rt_enum_new(OPTION_ENUM_ID, hash_variant_discriminant("None"), RuntimeValue::NIL)
@@ -368,6 +495,23 @@ pub(crate) fn rt_option_none() -> RuntimeValue {
 
 pub(crate) fn rt_option_some(payload: RuntimeValue) -> RuntimeValue {
     rt_enum_new(OPTION_ENUM_ID, hash_variant_discriminant("Some"), payload)
+}
+
+/// Record `Enum::Variant` display text for compiled (JIT/native) enum values.
+/// Codegen emits this next to each user-enum construction; `name` points at
+/// static module data. First registration wins, so the hot path is one lookup.
+#[no_mangle]
+pub extern "C" fn rt_enum_register_name(enum_id: u32, discriminant: u32, name_ptr: *const u8, name_len: i64, arity: i64) {
+    if name_ptr.is_null() || name_len <= 0 || enum_display_names().contains_key(&(enum_id, discriminant)) {
+        return;
+    }
+    // SAFETY: codegen passes a pointer/length pair into immutable module data.
+    let bytes = unsafe { std::slice::from_raw_parts(name_ptr, name_len as usize) };
+    if let Ok(name) = std::str::from_utf8(bytes) {
+        enum_display_names()
+            .entry((enum_id, discriminant))
+            .or_insert_with(|| (std::sync::Arc::from(name), arity.max(0) as u32));
+    }
 }
 
 /// Allocate a new enum value
@@ -459,11 +603,11 @@ pub extern "C" fn rt_unwrap_or_self(value: RuntimeValue) -> RuntimeValue {
 /// receiver unchanged — see
 /// doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
 ///
-/// `Result` has no reserved enum_id (it is registered like any other
-/// stdlib/user enum), so `Ok`/`Err` are identified the same way
-/// `is_ok`/`is_err` already do in codegen: by discriminant-hash comparison
-/// against the canonical variant names, not by enum_id. A receiver that is
-/// neither Option nor Result (an arbitrary user enum) falls back to the old
+/// `Result` has no single reserved enum_id across the native runtimes, so
+/// `Ok`/`Err` are identified by the canonical discriminant helper rather than
+/// by enum_id. Builtins use positional tags; older custom variants retain
+/// their registered or name-derived tags. A receiver that is neither Option
+/// nor Result (an arbitrary user enum) falls back to the old
 /// "return self" behavior, unchanged from `rt_unwrap_or_self` — widening
 /// unwrap-trap semantics to arbitrary user enums is out of scope here.
 /// Formation probe for heap-typed enum/Option payloads at fail-closed
@@ -519,6 +663,15 @@ pub extern "C" fn rt_heap_ref_registered(value: RuntimeValue) -> i8 {
 
 #[no_mangle]
 pub extern "C" fn rt_unwrap_or_trap(value: RuntimeValue) -> RuntimeValue {
+    // Absent flat-nullable optional (`i64? = nil`, failed `parse_int`): nil IS
+    // None, so it must trap exactly like a boxed None — not propagate as a
+    // present value (doc/08_tracking/bug/unwrap_family_treats_flat_nil_as_present_2026-09-13.md).
+    // Matches the tree-walk interpreter, which already raises
+    // "called unwrap on None" for a runtime flat-nil receiver.
+    if value.is_nil() {
+        eprintln!("error: called unwrap on None");
+        std::process::abort();
+    }
     let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) else {
         // Not a boxed enum — bare/flat-nullable payload convention: return
         // the raw value unchanged (matches `rt_unwrap_or_self`).
@@ -537,12 +690,14 @@ pub extern "C" fn rt_unwrap_or_trap(value: RuntimeValue) -> RuntimeValue {
         return value;
     }
 
-    if discriminant == hash_variant_discriminant("Ok") {
-        return payload;
-    }
-    if discriminant == hash_variant_discriminant("Err") {
-        eprintln!("error: called unwrap on Err");
-        std::process::abort();
+    if is_result_enum_id(enum_id) {
+        if discriminant == hash_variant_discriminant("Ok") {
+            return payload;
+        }
+        if discriminant == hash_variant_discriminant("Err") {
+            eprintln!("error: called unwrap on Err");
+            std::process::abort();
+        }
     }
 
     // Arbitrary user enum: preserve the pre-existing "return self" fallback.
@@ -567,6 +722,10 @@ pub extern "C" fn rt_unwrap_or_trap(value: RuntimeValue) -> RuntimeValue {
 /// `Ok` or `Err`, and remains an opaque present value just like the interpreter.
 #[no_mangle]
 pub extern "C" fn rt_unwrap_or_value(value: RuntimeValue, default: RuntimeValue) -> RuntimeValue {
+    // Absent flat-nullable optional (`i64? = nil`, failed `parse_int`): nil IS None.
+    if value.is_nil() {
+        return default;
+    }
     let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) else {
         // Not a boxed enum — bare/flat-nullable payload convention: return
         // the raw value unchanged (matches `rt_unwrap_or_self`/`rt_unwrap_or_trap`).
@@ -584,7 +743,7 @@ pub extern "C" fn rt_unwrap_or_value(value: RuntimeValue, default: RuntimeValue)
         return value;
     }
 
-    if enum_id == RESULT_ENUM_ID {
+    if is_result_enum_id(enum_id) {
         if discriminant == hash_variant_discriminant("Ok") {
             return payload;
         }
@@ -606,13 +765,6 @@ pub extern "C" fn rt_unwrap_or_value(value: RuntimeValue, default: RuntimeValue)
 /// doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
 #[no_mangle]
 pub extern "C" fn rt_expect_or_trap(value: RuntimeValue, msg: RuntimeValue) -> RuntimeValue {
-    let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) else {
-        // Not a boxed enum — bare/flat-nullable payload convention: return
-        // the raw value unchanged (matches `rt_unwrap_or_trap`).
-        return value;
-    };
-    let (enum_id, discriminant, payload) = unsafe { ((*p).enum_id, (*p).discriminant, (*p).payload) };
-
     let trap = || -> ! {
         let text = super::collections::rt_string_data(msg);
         let len = super::collections::rt_string_len(msg);
@@ -626,6 +778,19 @@ pub extern "C" fn rt_expect_or_trap(value: RuntimeValue, msg: RuntimeValue) -> R
         std::process::abort();
     };
 
+    // Absent flat-nullable optional: nil IS None — trap with the caller's
+    // message, exactly like a boxed None (see `rt_unwrap_or_trap` and
+    // doc/08_tracking/bug/unwrap_family_treats_flat_nil_as_present_2026-09-13.md).
+    if value.is_nil() {
+        trap();
+    }
+    let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) else {
+        // Not a boxed enum — bare/flat-nullable payload convention: return
+        // the raw value unchanged (matches `rt_unwrap_or_trap`).
+        return value;
+    };
+    let (enum_id, discriminant, payload) = unsafe { ((*p).enum_id, (*p).discriminant, (*p).payload) };
+
     if enum_id == OPTION_ENUM_ID {
         if discriminant == hash_variant_discriminant("Some") {
             return payload;
@@ -636,11 +801,13 @@ pub extern "C" fn rt_expect_or_trap(value: RuntimeValue, msg: RuntimeValue) -> R
         return value;
     }
 
-    if discriminant == hash_variant_discriminant("Ok") {
-        return payload;
-    }
-    if discriminant == hash_variant_discriminant("Err") {
-        trap();
+    if is_result_enum_id(enum_id) {
+        if discriminant == hash_variant_discriminant("Ok") {
+            return payload;
+        }
+        if discriminant == hash_variant_discriminant("Err") {
+            trap();
+        }
     }
 
     // Arbitrary user enum: preserve the pre-existing "return self" fallback.
@@ -664,8 +831,14 @@ pub extern "C" fn rt_try_is_absent(value: RuntimeValue, expected_enum_id: i64, e
         {
             return true;
         }
+        // An erased `?` (expected id 0) is a builtin Result's Err only: a user
+        // enum's declared index 1 (#6953) must not return early.
         discriminant as i64 == err_discriminant
-            && (expected_enum_id == 0 || enum_id == 0 || enum_id as i64 == expected_enum_id)
+            && if expected_enum_id == 0 {
+                is_result_enum_id(enum_id)
+            } else {
+                enum_id == 0 || enum_id as i64 == expected_enum_id
+            }
     })
 }
 
@@ -743,6 +916,14 @@ pub extern "C" fn rt_is_present(value: RuntimeValue) -> bool {
     if rt_is_none(value) {
         return false;
     }
+    // `Err(e).?` is absent, exactly as the interpreter's `ExistsCheck` arm
+    // decides (seed_jit_dotq_coalesce_parity_2026-11-06).
+    if let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) {
+        let (enum_id, discriminant) = unsafe { ((*p).enum_id, (*p).discriminant) };
+        if is_result_enum_id(enum_id) && discriminant == hash_variant_discriminant("Err") {
+            return false;
+        }
+    }
     let payload = rt_unwrap_or_self(value);
     if payload.is_nil() {
         return false;
@@ -755,8 +936,7 @@ pub extern "C" fn rt_is_present(value: RuntimeValue) -> bool {
     }
 }
 
-/// Map over an Option value: if Some(x), apply closure to x and return Some(result).
-/// If None/nil, return None.
+/// Map over an Option or Result value, preserving the absent variant.
 /// The closure is a RuntimeValue containing a function pointer (RuntimeClosure).
 #[no_mangle]
 pub extern "C" fn rt_option_map(value: RuntimeValue, closure: RuntimeValue) -> RuntimeValue {
@@ -765,7 +945,20 @@ pub extern "C" fn rt_option_map(value: RuntimeValue, closure: RuntimeValue) -> R
         return value;
     }
 
-    // Extract the payload from Some(x)
+    let mut result_ok = None;
+    if let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) {
+        let (enum_id, discriminant) = unsafe { ((*p).enum_id, (*p).discriminant) };
+        if is_result_enum_id(enum_id) {
+            if discriminant == hash_variant_discriminant("Err") {
+                return value;
+            }
+            if discriminant == hash_variant_discriminant("Ok") {
+                result_ok = Some((enum_id, discriminant));
+            }
+        }
+    }
+
+    // Extract the payload from Some(x) or Ok(x)
     let payload = rt_enum_payload(value);
 
     // Get function pointer from closure
@@ -779,8 +972,10 @@ pub extern "C" fn rt_option_map(value: RuntimeValue, closure: RuntimeValue) -> R
     let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(func_ptr) };
     let result = func(closure, payload);
 
-    // Wrap result in Some
-    rt_option_some(result)
+    match result_ok {
+        Some((enum_id, discriminant)) => rt_enum_new(enum_id, discriminant, result),
+        None => rt_option_some(result),
+    }
 }
 
 // ============================================================================
@@ -1267,3 +1462,30 @@ pub extern "C" fn rt_handle_is_valid(handle: RuntimeValue) -> RuntimeValue {
 #[cfg(test)]
 #[path = "object_tests.rs"]
 mod tests;
+
+// ============================================================================
+// Enum display-name registry (bug dupcheck_enum_interpolation_erased_value)
+// ============================================================================
+
+/// `(enum_id, discriminant)` -> `Enum::Variant` text plus payload arity, used
+/// only to render a `RuntimeEnum` in string interpolation. Lockless
+/// (`DashMap`, entry-or-insert: the first registration wins).
+fn enum_display_names() -> &'static dashmap::DashMap<(u32, u32), (std::sync::Arc<str>, u32)> {
+    static NAMES: std::sync::OnceLock<dashmap::DashMap<(u32, u32), (std::sync::Arc<str>, u32)>> =
+        std::sync::OnceLock::new();
+    NAMES.get_or_init(dashmap::DashMap::new)
+}
+
+/// Record the display name of one enum variant. `arity` is the payload element
+/// count: 0 = unit, 1 = single value, n > 1 = payload boxed as an array.
+pub fn register_enum_display_name(enum_id: u32, discriminant: u32, enum_name: &str, variant: &str, arity: u32) {
+    let simple = enum_name.rsplit(['.', ':']).next().unwrap_or(enum_name);
+    enum_display_names()
+        .entry((enum_id, discriminant))
+        .or_insert_with(|| (std::sync::Arc::from(format!("{simple}::{variant}")), arity));
+}
+
+/// Look up a registered variant: `(Enum::Variant, payload arity)`.
+pub fn enum_display_name(enum_id: u32, discriminant: u32) -> Option<(std::sync::Arc<str>, u32)> {
+    enum_display_names().get(&(enum_id, discriminant)).map(|e| e.value().clone())
+}

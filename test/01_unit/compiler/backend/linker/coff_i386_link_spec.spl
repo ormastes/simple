@@ -1,0 +1,210 @@
+use std.spec.*
+use compiler.backend.linker.coff.coff_link.{CoffLinkRequest, coff_link_i386}
+use compiler.backend.linker.coff.coff_object.{coff_apply_i386_relocation}
+use compiler.backend.linker.coff.coff_import.{
+    CoffImportObject, COFF_IMPORT_CODE, COFF_IMPORT_DATA, COFF_IMPORT_NAME,
+    COFF_IMPORT_NAME_UNDECORATE, COFF_IMPORT_NAME_NOPREFIX, COFF_IMPORT_ORDINAL,
+    coff_parse_short_import}
+use compiler.backend.linker.coff.pe_import_builder.{pe_build_i386_imports}
+
+fn _ci_u16(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push((value & 0xff) as u8)
+    result.push(((value >> 8) & 0xff) as u8)
+
+fn _ci_u32(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push((value & 0xff) as u8)
+    result = result.push(((value >> 8) & 0xff) as u8)
+    result = result.push(((value >> 16) & 0xff) as u8)
+    result.push(((value >> 24) & 0xff) as u8)
+
+fn _ci_name(bytes: [u8], value: text) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < 8:
+        result = result.push((if i < value.len(): value.byte_at(i) else: 0) as u8)
+        i = i + 1
+    result
+
+fn _ci_read_u32(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8) |
+        ((bytes[offset + 2] as i64) << 16) | ((bytes[offset + 3] as i64) << 24)
+
+# One .text section: `ret` + 3 pad bytes + a 4-byte field at offset 4 patched by
+# one relocation of `relocation_type` against `_target` (.text + 2).
+fn _ci_reloc_object(relocation_type: i64) -> [u8]:
+    var bytes: [u8] = []
+    bytes = _ci_u16(bytes, 0x14c)
+    bytes = _ci_u16(bytes, 1)
+    bytes = _ci_u32(bytes, 0)
+    bytes = _ci_u32(bytes, 78)
+    bytes = _ci_u32(bytes, 2)
+    bytes = _ci_u16(bytes, 0)
+    bytes = _ci_u16(bytes, 0)
+    bytes = _ci_name(bytes, ".text")
+    bytes = _ci_u32(bytes, 0)
+    bytes = _ci_u32(bytes, 0)
+    bytes = _ci_u32(bytes, 8)
+    bytes = _ci_u32(bytes, 60)
+    bytes = _ci_u32(bytes, 68)
+    bytes = _ci_u32(bytes, 0)
+    bytes = _ci_u16(bytes, 1)
+    bytes = _ci_u16(bytes, 0)
+    bytes = _ci_u32(bytes, 0x60000020)
+    bytes = _ci_u32(bytes, 0x909090c3)
+    bytes = _ci_u32(bytes, 0)
+    bytes = _ci_u32(bytes, 4)
+    bytes = _ci_u32(bytes, 1)
+    bytes = _ci_u16(bytes, relocation_type)
+    bytes = _ci_name(bytes, "__start")
+    bytes = _ci_u32(bytes, 0)
+    bytes = _ci_u16(bytes, 1)
+    bytes = _ci_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    bytes = _ci_name(bytes, "_target")
+    bytes = _ci_u32(bytes, 2)
+    bytes = _ci_u16(bytes, 1)
+    bytes = _ci_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    _ci_u32(bytes, 4)
+
+fn _ci_link_field(relocation_type: i64) -> (i64, i64, i64):
+    # (patched field, base-relocation directory size, text raw pointer)
+    val image = coff_link_i386(CoffLinkRequest(
+        objects: [_ci_reloc_object(relocation_type)], archives: [],
+        entry: "__start")).unwrap()
+    # PE32 optional header is 0xe0 bytes; data directory 5 is the base relocs.
+    val pe_offset = _ci_read_u32(image, 0x3c)
+    val section_header = pe_offset + 24 + 0xe0
+    val raw_pointer = _ci_read_u32(image, section_header + 20)
+    (_ci_read_u32(image, raw_pointer + 4),
+        _ci_read_u32(image, pe_offset + 24 + 96 + 5 * 8 + 4), raw_pointer)
+
+fn _ci_short_import(machine: i64, symbol: text, dll: text,
+        import_type: i64, name_type: i64) -> [u8]:
+    var bytes: [u8] = []
+    bytes = _ci_u16(bytes, 0)
+    bytes = _ci_u16(bytes, 0xffff)
+    bytes = _ci_u16(bytes, 0)
+    bytes = _ci_u16(bytes, machine)
+    bytes = _ci_u32(bytes, 0)
+    bytes = _ci_u32(bytes, symbol.len() + dll.len() + 2)
+    bytes = _ci_u16(bytes, 3)
+    bytes = _ci_u16(bytes, import_type | (name_type << 2))
+    var i: i64 = 0
+    while i < symbol.len():
+        bytes = bytes.push(symbol.byte_at(i) as u8)
+        i = i + 1
+    bytes = bytes.push(0)
+    i = 0
+    while i < dll.len():
+        bytes = bytes.push(dll.byte_at(i) as u8)
+        i = i + 1
+    bytes.push(0)
+
+fn _ci_import(name: text, dll: text, import_type: i64, name_type: i64) -> CoffImportObject:
+    CoffImportObject(machine: 0x14c, public_name: name,
+        import_name: if name_type == COFF_IMPORT_ORDINAL: "" else: name,
+        dll_name: dll, hint_or_ordinal: 7,
+        import_type: import_type, name_type: name_type)
+
+describe "i386 COFF relocation arithmetic":
+    it "computes DIR32 as an absolute VA":
+        val v = coff_apply_i386_relocation(0x0006, 0x401002, 5, 0x401004, 0x400000)
+        expect(v.success).to_equal(true)
+        expect(v.value).to_equal(0x401007)
+        expect(v.width).to_equal(4)
+
+    it "wraps a negative DIR32 implicit addend modulo 2^32 like lld":
+        val v = coff_apply_i386_relocation(0x0006, 0x401008, 0xfffffffc, 0x401004, 0x400000)
+        expect(v.success).to_equal(true)
+        expect(v.value).to_equal(0x401004)
+        val nb = coff_apply_i386_relocation(0x0007, 0x401008, 0xfffffffc, 0x401004, 0x400000)
+        expect(nb.success).to_equal(true)
+        expect(nb.value).to_equal(0x1004)
+
+    it "computes DIR32NB as an RVA":
+        val v = coff_apply_i386_relocation(0x0007, 0x401002, 0, 0x401004, 0x400000)
+        expect(v.success).to_equal(true)
+        expect(v.value).to_equal(0x1002)
+
+    it "computes REL32 relative to the end of the field":
+        val v = coff_apply_i386_relocation(0x0014, 0x401002, 0, 0x401004, 0x400000)
+        expect(v.success).to_equal(true)
+        expect(v.value).to_equal(-6)
+
+    it "rejects unsupported i386 relocation types":
+        val v = coff_apply_i386_relocation(0x0001, 0x401002, 0, 0x401004, 0x400000)
+        expect(v.success).to_equal(false)
+
+describe "i386 COFF to PE32 link":
+    it "links a raw i386 object into a PE32 image at 0x400000":
+        val image = coff_link_i386(CoffLinkRequest(
+            objects: [_ci_reloc_object(0x0000)], archives: [],
+            entry: "__start")).unwrap()
+        expect(_ci_read_u32(image, 0x3c) > 0).to_equal(true)
+        val pe_offset = _ci_read_u32(image, 0x3c)
+        expect(image[pe_offset + 4] as i64).to_equal(0x4c)
+        expect(image[pe_offset + 5] as i64).to_equal(0x01)
+        expect(image[pe_offset + 24] as i64).to_equal(0x0b)
+        expect(image[pe_offset + 25] as i64).to_equal(0x01)
+        expect(_ci_read_u32(image, pe_offset + 24 + 28)).to_equal(0x400000)
+
+    it "patches DIR32 with an absolute VA and publishes a HIGHLOW base relocation":
+        val r = _ci_link_field(0x0006)
+        expect(r.0).to_equal(0x401002)
+        expect(r.1).to_be_greater_than(0)
+
+    it "patches DIR32NB with an RVA and needs no base relocation":
+        val r = _ci_link_field(0x0007)
+        expect(r.0).to_equal(0x1002)
+        expect(r.1).to_equal(0)
+
+    it "patches REL32 relative to the end of the field":
+        val r = _ci_link_field(0x0014)
+        expect(r.0).to_equal(0xfffffffa)
+        expect(r.1).to_equal(0)
+
+    it "patches SECREL with the offset inside the target section":
+        val r = _ci_link_field(0x000b)
+        expect(r.0).to_equal(2)
+
+    it "patches SECTION with the 1-based output section index":
+        val r = _ci_link_field(0x000a)
+        expect(r.0 & 0xffff).to_equal(1)
+
+describe "i386 short imports":
+    it "decodes a stdcall UNDECORATE import to its bare DLL export name":
+        val parsed = coff_parse_short_import(_ci_short_import(
+            0x14c, "_ExitProcess@4", "KERNEL32.dll", COFF_IMPORT_CODE,
+            COFF_IMPORT_NAME_UNDECORATE)).unwrap()
+        expect(parsed.machine).to_equal(0x14c)
+        expect(parsed.public_name).to_equal("_ExitProcess@4")
+        expect(parsed.import_name).to_equal("ExitProcess")
+        expect(parsed.iat_symbol()).to_equal("__imp__ExitProcess@4")
+
+    it "decodes a cdecl NOPREFIX import by stripping one leading underscore":
+        val parsed = coff_parse_short_import(_ci_short_import(
+            0x14c, "_puts", "msvcrt.dll", COFF_IMPORT_CODE,
+            COFF_IMPORT_NAME_NOPREFIX)).unwrap()
+        expect(parsed.import_name).to_equal("puts")
+
+describe "i386 import builder":
+    it "emits 4-byte IAT slots and absolute-address jump thunks":
+        val image = pe_build_i386_imports([
+            _ci_import("_ExitProcess@4", "KERNEL32.dll", COFF_IMPORT_CODE, COFF_IMPORT_NAME),
+        ], 0x1000, 0x2000, 0x400000).unwrap()
+        expect(image.descriptor_size).to_equal(40)
+        expect(image.iat_size).to_equal(8)
+        expect(image.thunk_data.len()).to_equal(6)
+        expect(image.thunk_data[0] as i64).to_equal(0xff)
+        expect(image.thunk_data[1] as i64).to_equal(0x25)
+        val iat_rva = image.symbol_rvas["__imp__ExitProcess@4"]
+        expect(_ci_read_u32(image.thunk_data, 2)).to_equal(0x400000 + iat_rva)
+        expect(image.symbol_rvas["_ExitProcess@4"]).to_equal(0x1000)
+        expect(image.thunk_fixups).to_equal([0x1002])
+
+    it "encodes ordinal imports with the PE32 0x80000000 marker":
+        val image = pe_build_i386_imports([
+            _ci_import("_ord", "foo.dll", COFF_IMPORT_DATA, COFF_IMPORT_ORDINAL),
+        ], 0x1000, 0x2000, 0x400000).unwrap()
+        expect(_ci_read_u32(image.idata_data, image.iat_offset)).to_equal(0x80000007)

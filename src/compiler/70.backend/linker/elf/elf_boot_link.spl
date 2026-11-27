@@ -37,11 +37,18 @@ use compiler.backend.linker.boot_layout.boot_layout_plan.{
 }
 use compiler.backend.linker.linker_script.{LdTokenKind, ld_tokenize}
 use compiler.backend.linker.elf_parser.{
-    ElfObject, ElfSymbol, elf_parse_object, elf_symbol_binding, elf_symbol_type,
+    ElfObject, ElfSymbol, elf_parse_object, elf_symbol_binding, elf_symbol_type, elf_section_entsize,
     elf_reloc_sym, elf_reloc_type, elf_section_addralign, elf_section_name,
-    SHN_UNDEF, STB_LOCAL, STB_GLOBAL, STB_WEAK, SHT_NOBITS
+    SHN_UNDEF, STB_LOCAL, STB_GLOBAL, STB_WEAK, STT_SECTION, SHT_NOBITS
 }
-use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_AARCH64}
+use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_386, EM_AARCH64, EM_ARM, EM_RISCV}
+use compiler.backend.linker.riscv_reloc.{riscv_is_pcrel_hi, riscv_is_pcrel_lo, riscv_hi_key,
+    riscv_pcrel_lo_value, riscv_pcrel_lo_as_absolute}
+use compiler.backend.linker.elf.riscv_link_support.{elf_riscv_flags_xlen}
+use compiler.backend.linker.elf.boot_target_policy.{boot_target_is_elf32, boot_target_flags,
+    boot_target_validate_reloc, boot_target_validate_image32}
+use compiler.backend.linker.elf.riscv_align.{elf_riscv_align_objects}
+use compiler.backend.linker.elf.byte_buffers.{elf_i64_filled}
 use compiler.backend.linker.sym_resolver.{SymResolution, SymEntry, sym_resolve_objects}
 use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes,
     reloc_patch_width, reloc_patch_range_valid,
@@ -55,12 +62,16 @@ use compiler.backend.linker.elf.tls_relax.{elf_relax_tls, elf_tls_tpoff}
 use compiler.backend.linker.elf.section_gc.{ElfSectionGc, elf_section_gc}
 use compiler.backend.linker.elf.eh_frame_gc.{elf_gc_eh_frames}
 use compiler.backend.linker.elf.elf_exec_writer.{
-    ElfOutSec, ElfExecSegment, ElfExecPlan, elf_write_image,
+    ElfOutSec, ElfExecSegment, ElfExecPlan, elf_write_image, elf_write_image32_bytes,
+    ELF32_EHDR_SIZE, ELF32_PHDR_SIZE,
     ELF_SEG_R, PT_LOAD, PT_NOTE, PT_PHDR, PT_TLS, PT_GNU_STACK, PF_R, PF_W, PF_X,
     SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHF_TLS,
     SHT_PROGBITS_E, SHT_STRTAB_E, SHT_NOBITS_E
 }
 use compiler.backend.linker.elf_writer.{write_zeros, write_u16_le, write_u32_le, write_u64_le}
+use compiler.backend.linker.elf.merge_strings.{
+    ElfMergePlan, elf_merge_section, elf_merge_sections, elf_merge_offset, elf_unmerge_relocated
+}
 use std.string_core.{char_code}
 
 val BOOT_SHN_ABS: i64 = 0xfff1
@@ -112,6 +123,10 @@ struct _BootIn:
     off_of: [i64]      # flat -> offset inside the output section (after layout)
     common_plan: {text: i64} # coalesced COMMON symbol -> plan output section
     common_off: {text: i64}  # coalesced COMMON symbol -> offset in that section
+    pool_of: [i64]     # flat -> SHF_MERGE pool index, -1 for an ordinary section
+    pools: [ElfMergePlan]
+    pool_k: [i64]      # pool -> plan section index
+    pool_off: [i64]    # pool -> offset inside the output section (-1 until placed)
 
 # ============================================================================
 # Small helpers
@@ -123,8 +138,31 @@ fn _bl_machine(target: RelocArch) -> Result<i64, text>:
             Ok(EM_X86_64)
         case AArch64:
             Ok(EM_AARCH64)
+        case Riscv64:
+            Ok(EM_RISCV)
+        case Riscv32:
+            Ok(EM_RISCV)
+        case Arm32:
+            Ok(EM_ARM)
+        case I386:
+            Ok(EM_386)
         case _:
-            Err("elf_boot_link: supports only x86_64 and aarch64 targets")
+            Err("elf_boot_link: unsupported target")
+
+fn _bl_is_i386(target: RelocArch) -> bool:
+    match target:
+        case I386:
+            true
+        case _:
+            false
+
+fn _bl_i386_type_ok(rtype: i64) -> bool:
+    # Non-PIC i386 kernel set: NONE, 32, PC32, PLT32 (a static PLT32 is PC32)
+    # and 16/PC16/8/PC8 for real-mode trampolines. GOT/GOTOFF/GOTPC, TLS, SIZE
+    # and dynamic types fail closed (reloc_scan treats unknown i386 types as
+    # PC-relative, which would link them silently wrong).
+    rtype == 0 or rtype == 1 or rtype == 2 or rtype == 4 or
+        rtype == 20 or rtype == 21 or rtype == 22 or rtype == 23
 
 fn _bl_page(target: RelocArch) -> i64:
     # ld.lld's default max-page-size: 64 KiB on aarch64, 4 KiB on x86_64.
@@ -137,6 +175,15 @@ fn _bl_page(target: RelocArch) -> i64:
 fn _bl_is_a64(target: RelocArch) -> bool:
     match target:
         case AArch64:
+            true
+        case _:
+            false
+
+fn _bl_is_riscv(target: RelocArch) -> bool:
+    match target:
+        case Riscv64:
+            true
+        case Riscv32:
             true
         case _:
             false
@@ -282,8 +329,53 @@ fn _bl_place(objects: [ElfObject], names: [text], plan: BootLayoutPlan,
                 return Err("elf_boot_link: orphan section {elf_section_name(obj, si)} in {names[oi]} is not placed by the script (orphan placement is not modelled)")
             si = si + 1
         oi = oi + 1
+    # SHF_MERGE members pool (per output section, like lld per entsize/flags, and
+    # per alignment for strings) through the shared merge_strings code.
+    var pool_of: [i64] = []
+    for _f in out_of:
+        pool_of = pool_of.push(-1)
+    var pools: [ElfMergePlan] = []
+    var pool_k: [i64] = []
+    var pool_off: [i64] = []
+    var group_pool: {text: i64} = {}
+    var group_live: [[[bool]]] = []
+    oi = 0
+    while oi < objects.len():
+        val obj = objects[oi]
+        var si: i64 = 0
+        while si < obj.sections.len():
+            val flat = base[oi] + si
+            if out_of[flat] >= 0 and obj.sections[si].sh_type != SHT_NOBITS and elf_merge_section(obj, si):
+                val strings = obj.sections[si].sh_flags & 0x20 != 0
+                var al_key: i64 = 0
+                if strings:
+                    al_key = elf_section_addralign(obj, si)
+                val key = "{out_of[flat]}:{obj.sections[si].sh_flags}:{elf_section_entsize(obj, si)}:{al_key}"
+                if not group_pool.has(key):
+                    group_pool[key] = pools.len()
+                    pool_k = pool_k.push(out_of[flat])
+                    pool_off = pool_off.push(-1)
+                    var mask: [[bool]] = []
+                    for o2 in objects:
+                        var row: [bool] = []
+                        for _s2 in o2.sections:
+                            row = row.push(false)
+                        mask = mask.push(row)
+                    group_live = group_live.push(mask)
+                    pools = pools.push(ElfMergePlan(data: [], entries: [], has_sections: false, align: 1,
+                        entsize: 0, strings: false, metadata_compatible: true))
+                val pid = group_pool[key]
+                group_live[pid][oi][si] = true
+                pool_of[flat] = pid
+            si = si + 1
+        oi = oi + 1
+    var pi: i64 = 0
+    while pi < pools.len():
+        pools[pi] = elf_merge_sections(objects, group_live[pi])?
+        pi = pi + 1
     Ok(_BootIn(objects: objects, names: names, base: base, out_of: out_of, op_of: op_of, off_of: off_of,
-        common_plan: {}, common_off: {}))
+        common_plan: {}, common_off: {}, pool_of: pool_of, pools: pools, pool_k: pool_k,
+        pool_off: pool_off))
 
 # ============================================================================
 # Symbols
@@ -339,6 +431,15 @@ fn _bl_gc_symbol_roots(plan: BootLayoutPlan, retained: [text]) -> [text]:
                 if not roots.contains(word): roots = roots.push(word)
     roots
 
+fn _bl_in_off(ins: _BootIn, oi: i64, si: i64, input_offset: i64) -> Result<i64, text>:
+    """Offset inside the output section of byte `input_offset` of input section si;
+    SHF_MERGE members resolve to their pooled copy."""
+    val flat = ins.base[oi] + si
+    val pid = ins.pool_of[flat]
+    if pid < 0:
+        return Ok(ins.off_of[flat] + input_offset)
+    Ok(ins.off_of[flat] + elf_merge_offset(ins.pools[pid], oi, si, input_offset)?)
+
 fn _bl_obj_sym_addr(ins: _BootIn, outs: [_BootOut], plan_to_out: [i64], e: SymEntry) -> Result<i64, text>:
     if e.section_idx == BOOT_SHN_ABS:
         return Ok(e.offset)
@@ -353,7 +454,7 @@ fn _bl_obj_sym_addr(ins: _BootIn, outs: [_BootOut], plan_to_out: [i64], e: SymEn
     val k = ins.out_of[flat]
     if k < 0:
         return Err("elf_boot_link: symbol {e.name} is defined in a discarded or non-allocatable section")
-    Ok(outs[plan_to_out[k]].vma + ins.off_of[flat] + e.offset)
+    Ok(outs[plan_to_out[k]].vma + _bl_in_off(ins, e.obj_idx, e.section_idx, e.offset)?)
 
 # ============================================================================
 # Layout
@@ -391,9 +492,10 @@ fn _bl_ctx_at(ctx: BootEvalCtx, dot: i64) -> BootEvalCtx:
 # reason: layout replays the plan with all link state; positional by design
 fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution,
         defines: [bool], got_size: i64, common_live: {text: bool},
-        gc_sections: bool) -> Result<_BootLayout, text>:
+        gc_sections: bool, ehdr: i64, phdr: i64) -> Result<_BootLayout, text>:
     var ins = ins0
     var off_of = ins0.off_of
+    var pool_off = ins0.pool_off
     var ctx = boot_eval_ctx(0)
     for r in plan.regions:
         ctx = boot_eval_bind(ctx, "ORIGIN({r.name})", r.origin)
@@ -403,7 +505,7 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution,
         region_cur = region_cur.push(r.origin)
     if plan.segments.len() > 0:
         # PHDRS fixes the header count, so SIZEOF_HEADERS is known before layout.
-        ctx = boot_eval_bind(ctx, "SIZEOF_HEADERS", BOOT_EHDR + plan.segments.len() * BOOT_PHDR)
+        ctx = boot_eval_bind(ctx, "SIZEOF_HEADERS", ehdr + plan.segments.len() * phdr)
     # Object symbols the script refers to (bound once their section is placed).
     var wanted: [text] = []
     for s in plan.symbols:
@@ -427,6 +529,7 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution,
     var last_segment = ""
     var prev_region = ""
     var prev_lma_region = ""
+    var got_placed = false
 
     for op in plan.ops:
         if op.kind == BOOT_OP_DOT:
@@ -454,6 +557,15 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution,
             var any_member = false
             var flags: i64 = SHF_ALLOC
             var common_align: i64 = 1
+            # A script `.got` output section holds the synthetic GOT at its start,
+            # as ld.lld places its synthetic .got at `*(.got)`.
+            val got_here = got_size > 0 and not got_placed and sec.name == ".got"
+            if got_here:
+                got_placed = true
+                any_member = true
+                any_prog = true
+                flags = flags | SHF_WRITE
+                align = 8
             for bop in sec.body:
                 if _bl_matches_common(bop):
                     for obj in ins.objects:
@@ -473,6 +585,8 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution,
                 var si: i64 = 0
                 while si < obj.sections.len():
                     if ins.out_of[ins.base[oi] + si] == k:
+                        if got_here:
+                            return Err("elf_boot_link: input section {elf_section_name(obj, si)} cannot share the script .got with the synthetic GOT")
                         any_member = true
                         val sh = obj.sections[si]
                         var al = elf_section_addralign(obj, si)
@@ -526,6 +640,8 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution,
 
             # Body, in order.
             var cur: i64 = 0
+            if got_here:
+                cur = got_size
             var has_sym = false
             var bi: i64 = 0
             while bi < sec.body.len():
@@ -540,10 +656,18 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution,
                         while si < obj.sections.len():
                             val flat = ins.base[oi] + si
                             if ins.out_of[flat] == k and ins.op_of[flat] == bidx:
-                                val al = elf_section_addralign(obj, si)
-                                cur = boot_align_up(addr + cur, al) - addr
-                                off_of[flat] = cur
-                                cur = cur + obj.sections[si].sh_size
+                                val pid = ins.pool_of[flat]
+                                if pid >= 0:
+                                    if pool_off[pid] < 0:
+                                        cur = boot_align_up(addr + cur, ins.pools[pid].align) - addr
+                                        pool_off[pid] = cur
+                                        cur = cur + ins.pools[pid].data.len()
+                                    off_of[flat] = pool_off[pid]
+                                else:
+                                    val al = elf_section_addralign(obj, si)
+                                    cur = boot_align_up(addr + cur, al) - addr
+                                    off_of[flat] = cur
+                                    cur = cur + obj.sections[si].sh_size
                             si = si + 1
                         oi = oi + 1
                     if _bl_matches_common(bop):
@@ -579,7 +703,10 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution,
                         return Err("elf_boot_link: ASSERT failed: {a.message}")
 
             ins = _BootIn(objects: ins.objects, names: ins.names, base: ins.base, out_of: ins.out_of, op_of: ins.op_of,
-                off_of: off_of, common_plan: ins.common_plan, common_off: ins.common_off)
+                off_of: off_of, common_plan: ins.common_plan, common_off: ins.common_off,
+                pool_of: ins.pool_of, pools: ins.pools, pool_k: ins.pool_k, pool_off: pool_off)
+            if got_here and cur != got_size:
+                return Err("elf_boot_link: script .got adds {cur - got_size} byte(s) after the synthetic GOT, which is unsupported")
             # lld drops an output section with no bytes and no symbol assignment.
             if cur == 0 and not has_sym:
                 dot = addr
@@ -613,7 +740,7 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution,
                 (not gc_sections or common_live.has(name)) and
                 not ins.common_plan.has(name):
             return Err("elf_boot_link: common symbol {name} is not placed by *(COMMON)")
-    if got_size > 0:
+    if got_size > 0 and not got_placed:
         val gaddr = boot_align_up(dot, 8)
         outs = outs.push(_BootOut(name: ".got", sh_type: SHT_PROGBITS_E, sh_flags: SHF_ALLOC | SHF_WRITE, align: 8,
             vma: gaddr, lma: gaddr + lma_off, size: got_size, segment: last_segment, plan_idx: -1))
@@ -700,6 +827,15 @@ struct _BootSegs:
     seg_of: [i64]           # per outs: program header index, -1 none
     file_end: i64
 
+fn _bl_is_relro(o: _BootOut) -> bool:
+    """ld.lld isRelroSection, for the sections a static boot image can carry."""
+    if o.sh_flags & SHF_WRITE == 0:
+        return false
+    if o.sh_flags & SHF_TLS != 0:
+        return true
+    o.name == ".got" or o.name == ".init_array" or o.name == ".fini_array" or
+        o.name == ".preinit_array" or o.name.starts_with(".data.rel.ro")
+
 fn _bl_seg_flags(outs: [_BootOut], seg_of: [i64], si: i64) -> i64:
     var f = PF_R
     var i: i64 = 0
@@ -712,7 +848,8 @@ fn _bl_seg_flags(outs: [_BootOut], seg_of: [i64], si: i64) -> i64:
         i = i + 1
     f
 
-fn _bl_segments(plan: BootLayoutPlan, outs: [_BootOut], page: i64, ctx: BootEvalCtx) -> Result<_BootSegs, text>:
+fn _bl_segments(plan: BootLayoutPlan, outs: [_BootOut], page: i64, ctx: BootEvalCtx,
+        ehdr: i64, phdr: i64) -> Result<_BootSegs, text>:
     # 1. section -> program header index
     var seg_of: [i64] = []
     var types: [i64] = []
@@ -738,8 +875,25 @@ fn _bl_segments(plan: BootLayoutPlan, outs: [_BootOut], page: i64, ctx: BootEval
     else:
         # Default: a new PT_LOAD whenever permissions or the lma offset change.
         var prev_key = ""
+        # ld.lld (-z relro, the default) opens a new PT_LOAD at relroEnd: the first
+        # section after the last RELRO one (.got, init/fini arrays, TLS).
+        var relro_end: i64 = -1
+        var oi: i64 = 0
+        while oi < outs.len():
+            if _bl_is_relro(outs[oi]):
+                relro_end = oi + 1
+            oi = oi + 1
+        oi = -1
         for o in outs:
+            oi = oi + 1
+            if oi == relro_end:
+                prev_key = ""
             val key = "{o.sh_flags & (SHF_WRITE | SHF_EXECINSTR)}/{o.lma - o.vma}"
+            # ld.lld gives an empty output section the previous section's flags, so it
+            # never opens a PT_LOAD of its own.
+            if o.size == 0 and types.len() > 0:
+                seg_of = seg_of.push(types.len() - 1)
+                continue
             if key != prev_key:
                 types = types.push(PT_LOAD)
                 fixed_flags = fixed_flags.push(-1)
@@ -765,7 +919,7 @@ fn _bl_segments(plan: BootLayoutPlan, outs: [_BootOut], page: i64, ctx: BootEval
         ti = ti + 1
     val primary_phnum = types.len()
     val phnum = primary_phnum + (if tls_first >= 0: 1 else: 0)
-    val hdr_end = BOOT_EHDR + phnum * BOOT_PHDR
+    val hdr_end = ehdr + phnum * phdr
 
     # 2. file offsets (lld: first section of a load congruent to its VMA mod page)
     var offsets: [i64] = []
@@ -865,10 +1019,10 @@ fn _bl_segments(plan: BootLayoutPlan, outs: [_BootOut], page: i64, ctx: BootEval
         if types[sj] == PT_PHDR:
             if not has_hdr_load:
                 return Err("elf_boot_link: PT_PHDR needs a PT_LOAD with FILEHDR PHDRS")
-            val sz = phnum * BOOT_PHDR
-            segs[sj] = ElfExecSegment(p_type: PT_PHDR, p_flags: PF_R, p_offset: BOOT_EHDR,
-                p_vaddr: hdr_load_vaddr + BOOT_EHDR, p_paddr: hdr_load_paddr + BOOT_EHDR,
-                p_filesz: sz, p_memsz: sz, p_align: 8)
+            val sz = phnum * phdr
+            segs[sj] = ElfExecSegment(p_type: PT_PHDR, p_flags: PF_R, p_offset: ehdr,
+                p_vaddr: hdr_load_vaddr + ehdr, p_paddr: hdr_load_paddr + ehdr,
+                p_filesz: sz, p_memsz: sz, p_align: if ehdr == BOOT_EHDR: 8 else: 4)
         sj = sj + 1
     var pa: i64 = 0
     while pa < segs.len():
@@ -982,6 +1136,10 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
         wraps: [text]) -> Result<ElfBootImage, text>:
     val machine = _bl_machine(target)?
     val a64 = _bl_is_a64(target)
+    val i386 = _bl_is_i386(target)
+    val elf32 = boot_target_is_elf32(target)
+    val hdr_ehdr = if elf32: ELF32_EHDR_SIZE else: BOOT_EHDR
+    val hdr_phdr = if elf32: ELF32_PHDR_SIZE else: BOOT_PHDR
     var parsed: [ElfObject] = []
     var i: i64 = 0
     while i < objects.len():
@@ -989,14 +1147,29 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
         if p.is_err():
             return Err("object {names[i]}: {p.unwrap_err()}")
         val obj = p.unwrap()
+        if obj.raw.len() < hdr_ehdr or obj.raw[4] != (if elf32: 1 else: 2) or obj.raw[5] != 1:
+            return Err("object {names[i]}: target requires matching little-endian ELF class")
         if obj.header.e_type != ET_REL:
             return Err("object {names[i]}: not a relocatable object (e_type {obj.header.e_type})")
         if obj.header.e_machine != machine:
             return Err("object {names[i]}: e_machine {obj.header.e_machine} does not match target {machine}")
-        parsed = parsed.push(elf_wrap_object(obj, wraps))
+        parsed = parsed.push(elf_wrap_object(elf_unmerge_relocated(obj), wraps))
         i = i + 1
 
+    val target_flags = boot_target_flags(parsed, target)?
+    if target == RelocArch.Arm32 or target == RelocArch.Riscv32:
+        for obj in parsed:
+            for relocation in obj.relocations:
+                val valid = boot_target_validate_reloc(target, elf_reloc_type(relocation))?
     parsed = elf_relax_tls(parsed, target)?
+    val rv = _bl_is_riscv(target)
+    val x86 = target == RelocArch.X86_64
+    var riscv_flags: i64 = 0
+    if rv:
+        # Relaxation off (ld.lld --no-relax): R_RISCV_RELAX is ignored and
+        # R_RISCV_ALIGN padding is resolved without shrinking code.
+        riscv_flags = elf_riscv_flags_xlen(parsed, if elf32: 32 else: 64)?
+        parsed = elf_riscv_align_objects(parsed)?
     val res = sym_resolve_objects(parsed)
     if res.errors.len() > 0:
         return Err(res.errors.join("; "))
@@ -1035,12 +1208,14 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
         for r in obj.relocations:
             val t = r.target_section_idx
             if t >= 0 and t < obj.sections.len() and ins0.out_of[ins0.base[oi] + t] >= 0:
+                if i386 and not _bl_i386_type_ok(elf_reloc_type(r)):
+                    return Err("object {names[oi]}: i386 relocation type {elf_reloc_type(r)} is unsupported in boot images (non-PIC kernels use R_386_32/PC32/PLT32/16/PC16/8/PC8 only)")
                 val rc = elf_reloc_class(target, elf_reloc_type(r))
                 val rsym = obj.symbols[elf_reloc_sym(r)]
                 if rsym.name == "_GLOBAL_OFFSET_TABLE_":
                     need_got_base = true
-                if elf_reloc_type(r) == R_X86_64_GOTOFF64 or
-                        elf_reloc_type(r) == R_X86_64_PLTOFF64:
+                if x86 and (elf_reloc_type(r) == R_X86_64_GOTOFF64 or
+                        elf_reloc_type(r) == R_X86_64_PLTOFF64):
                     need_got_base = true
                 if rc == RC_GOT or rc == RC_GOT_RELAX or rc == RC_TLS_IE:
                     val sym = rsym
@@ -1114,11 +1289,17 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
     got_si = si2
     got_tls = tls2
 
-    var got_size = got_keys.len() * 8
+    # ld.lld reserves one RISC-V .got header slot (_DYNAMIC, 0 in a static image).
+    var got_hdr: i64 = 0
+    if rv and (got_keys.len() > 0 or need_got_base):
+        got_hdr = 1
+    var got_size = (got_keys.len() + got_hdr) * 8
     if need_got_base and got_size == 0:
         got_size = 8
+    if elf32 and got_size > 0:
+        return Err("elf_boot_link: ELF32 boot images have no GOT (_GLOBAL_OFFSET_TABLE_ or a GOT relocation needs a PIC link)")
     val lay = _bl_layout(plan, ins0, res, defines, got_size,
-        gc.common_live, gc_sections)?
+        gc.common_live, gc_sections, hdr_ehdr, hdr_phdr)?
     val ins = lay.ins
     val outs = lay.outs
     var script_val: {text: i64} = {}
@@ -1132,21 +1313,41 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
     for o in outs:
         var buf: [i64] = []
         if o.sh_type != SHT_NOBITS_E and o.plan_idx >= 0:
+            if (x86 or i386) and o.sh_flags & SHF_EXECINSTR != 0:
+                # ld.lld fills gaps in executable sections with the target trap byte (int3).
+                buf = elf_i64_filled(o.size, 0xcc)
             oi = 0
             while oi < ins.objects.len():
                 val obj = ins.objects[oi]
                 var s2: i64 = 0
                 while s2 < obj.sections.len():
                     val flat = ins.base[oi] + s2
-                    if ins.out_of[flat] == o.plan_idx and obj.sections[s2].sh_type != SHT_NOBITS:
+                    if ins.out_of[flat] == o.plan_idx and ins.pool_of[flat] < 0 and obj.sections[s2].sh_type != SHT_NOBITS:
                         val sec = obj.sections[s2]
-                        buf = write_zeros(buf, ins.off_of[flat] - buf.len())
+                        # Write at the layout offset: section-index order is not
+                        # offset order (a script can place a lower-index input
+                        # after a higher-index one), so appending misplaces bytes.
+                        val at = ins.off_of[flat]
+                        if buf.len() < at + sec.sh_size:
+                            buf = write_zeros(buf, at + sec.sh_size - buf.len())
                         var bi: i64 = 0
                         while bi < sec.sh_size:
-                            buf = buf.push(obj.raw[sec.sh_addr + bi] as i64)
+                            buf[at + bi] = obj.raw[sec.sh_addr + bi] as i64
                             bi = bi + 1
                     s2 = s2 + 1
                 oi = oi + 1
+            var pj: i64 = 0
+            while pj < ins.pools.len():
+                if ins.pool_k[pj] == o.plan_idx:
+                    val pdata = ins.pools[pj].data
+                    val pat = ins.pool_off[pj]
+                    if buf.len() < pat + pdata.len():
+                        buf = write_zeros(buf, pat + pdata.len() - buf.len())
+                    var pb: i64 = 0
+                    while pb < pdata.len():
+                        buf[pat + pb] = pdata[pb] as i64
+                        pb = pb + 1
+                pj = pj + 1
             buf = write_zeros(buf, o.size - buf.len())
         contents = contents.push(buf)
 
@@ -1176,6 +1377,14 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
 
     # --- relocate ---
     var undef: [text] = []
+    # RISC-V PCREL_LO12 pairing: HI20 sites record S + A - P by riscv_hi_key;
+    # the LO12 relocations are applied after every HI20 has been evaluated.
+    var rv_hi: {text: i64} = {}
+    var lo_out: [i64] = []
+    var lo_place: [i64] = []
+    var lo_type: [i64] = []
+    var lo_key: [text] = []
+    var lo_what: [text] = []
     oi = 0
     while oi < ins.objects.len():
         val obj = ins.objects[oi]
@@ -1204,6 +1413,7 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
             val sym = obj.symbols[sidx]
             var s: i64 = 0
             var z = sym.st_size
+            var merge_a = r.r_addend
             if sidx != 0:
                 if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "":
                     if script_val.has(sym.name):
@@ -1219,6 +1429,11 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
                         if a64 and rc == RC_BRANCH:
                             # ld.lld: a branch to an undefined weak symbol targets the next instruction
                             s = p + 4 - r.r_addend
+                        if rv and (rtype == 16 or rtype == 17 or rtype == 18 or rtype == 19 or
+                                rtype == 44 or rtype == 45 or rtype == 59):
+                            # ld.lld getRISCVUndefinedRelativeWeakVA: BRANCH, JAL, CALL,
+                            # CALL_PLT, RVC_BRANCH, RVC_JUMP and PLT32 target the place.
+                            s = p - r.r_addend
                     else if sym.name == "_GLOBAL_OFFSET_TABLE_" and got_out >= 0:
                         s = got_vma
                     else:
@@ -1232,16 +1447,44 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
                     val sk = ins.out_of[ins.base[oi] + sym.st_shndx]
                     if sk < 0:
                         return Err("object {names[oi]}: relocation refers to a symbol in a discarded section ({elf_section_name(obj, sym.st_shndx)})")
-                    s = outs[lay.plan_to_out[sk]].vma + ins.off_of[ins.base[oi] + sym.st_shndx] + sym.st_value
+                    if ins.pool_of[ins.base[oi] + sym.st_shndx] >= 0:
+                        var mbias: i64 = 0
+                        var moff = sym.st_value
+                        if elf_symbol_type(sym) == STT_SECTION:
+                            # A section symbol plus addend names a byte inside the pool.
+                            if x86 and (rtype == 2 or rtype == 4):
+                                mbias = -4
+                            else if x86 and rtype != 1 and rtype != 10 and rtype != 11:
+                                # Fail closed: other x86_64 PC-relative types (PC64, GOTPCREL*)
+                                # carry an unknown instruction bias into a merge pool.
+                                return Err("object {names[oi]}: x86_64 relocation type {rtype} against a SHF_MERGE section symbol is unsupported")
+                            moff = sym.st_value + r.r_addend - mbias
+                            merge_a = mbias
+                        s = outs[lay.plan_to_out[sk]].vma + _bl_in_off(ins, oi, sym.st_shndx, moff)?
+                    else:
+                        s = outs[lay.plan_to_out[sk]].vma + ins.off_of[ins.base[oi] + sym.st_shndx] + sym.st_value
             if undef.len() > 0:
                 continue
-            var a = r.r_addend
+            if rv and riscv_is_pcrel_lo(rtype):
+                if r.r_addend != 0:
+                    return Err("object {names[oi]}: RISC-V PCREL_LO12 addend must be zero")
+                if sym.st_shndx == SHN_UNDEF or sym.st_shndx >= BOOT_SHN_LORESERVE:
+                    return Err("object {names[oi]}: RISC-V PCREL_LO12 label '{sym.name}' is not a section label")
+                lo_out = lo_out.push(ok)
+                lo_place = lo_place.push(place)
+                lo_type = lo_type.push(rtype)
+                lo_key = lo_key.push(riscv_hi_key(oi, sym.st_shndx, sym.st_value))
+                lo_what = lo_what.push("object {names[oi]}: RISC-V PCREL_LO12 at {p} label '{sym.name}'")
+                continue
+            if rv and (rc == RC_TLS_LE or rc == RC_TLS_IE or rc == RC_TLS_LD or rc == RC_TLS_MOD):
+                return Err("object {names[oi]}: RISC-V TLS relocation type {rtype} is unsupported in boot images")
+            var a = merge_a
             if rc == RC_GOT or rc == RC_GOT_RELAX:
                 var key = "{oi}#{sidx}"
                 if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "":
                     key = sym.name
-                s = got_vma + got_idx[key] * 8
-                if not a64 and (rtype == R_X86_64_GOT32 or
+                s = got_vma + (got_idx[key] + got_hdr) * 8
+                if x86 and (rtype == R_X86_64_GOT32 or
                         rtype == R_X86_64_GOT64 or
                         rtype == R_X86_64_GOTPLT64): s = s - got_vma
                 if a64:
@@ -1251,7 +1494,7 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
                 if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "":
                     key = sym.name
                 key = "tls#" + key
-                s = got_vma + got_idx[key] * 8
+                s = got_vma + (got_idx[key] + got_hdr) * 8
                 if a64:
                     a = 0
                     if rtype == R_AARCH64_TLSIE_MOVW_GOTTPREL_G1 or
@@ -1286,8 +1529,13 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
                     rtype = 1   # R_X86_64_64 applies Z + A.
                 else:
                     rtype = 10  # R_X86_64_32 applies Z + A with width checking.
-            if not a64 and (rtype == R_X86_64_GOTOFF64 or
+            if x86 and (rtype == R_X86_64_GOTOFF64 or
                     rtype == R_X86_64_PLTOFF64): p = got_vma
+            if rv and riscv_is_pcrel_hi(rtype):
+                val hk = riscv_hi_key(oi, t, r.r_offset)
+                if rv_hi.has(hk):
+                    return Err("object {names[oi]}: RISC-V duplicate HI20 relocation at {p}")
+                rv_hi[hk] = riscv_pcrel_lo_value(s, a, p)?
             val applied = reloc_apply(target, contents[ok], place, rtype, s, a, p)
             if not applied.success:
                 return Err("object {names[oi]}: relocation type {rtype} against '{sym.name}' at {p}: {applied.error}")
@@ -1296,10 +1544,25 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
 
     if undef.len() > 0:
         return Err("undefined symbol: " + undef.join("; "))
+    var li: i64 = 0
+    while li < lo_out.len():
+        if not rv_hi.has(lo_key[li]):
+            return Err("{lo_what[li]} has no matching HI20")
+        val lt = riscv_pcrel_lo_as_absolute(lo_type[li])
+        val lv = rv_hi[lo_key[li]]
+        val lo_applied = reloc_apply(target, contents[lo_out[li]], lo_place[li], lt, lv, 0, 0)
+        if not lo_applied.success:
+            return Err("{lo_what[li]}: {lo_applied.error}")
+        contents[lo_out[li]] = reloc_patch_bytes(target, contents[lo_out[li]], lo_place[li], lt, lv, 0, 0)
+        li = li + 1
 
     # --- .got contents (static: the symbol's link-time address) ---
     if got_out >= 0:
         var got: [i64] = []
+        var hi: i64 = 0
+        while hi < got_hdr:
+            got = write_u64_le(got, 0)
+            hi = hi + 1
         var gi: i64 = 0
         while gi < got_keys.len():
             val key = got_keys[gi]
@@ -1314,7 +1577,7 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
                     val gk = ins.out_of[ins.base[goi] + gsym.st_shndx]
                     if gk < 0:
                         return Err("GOT entry refers to a discarded section")
-                    v = outs[lay.plan_to_out[gk]].vma + ins.off_of[ins.base[goi] + gsym.st_shndx] + gsym.st_value
+                    v = outs[lay.plan_to_out[gk]].vma + _bl_in_off(ins, goi, gsym.st_shndx, gsym.st_value)?
             else if script_val.has(key):
                 v = script_val[key]
             else if res.defined.has(key):
@@ -1344,7 +1607,7 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
 
     # --- segments, offsets ---
     val page = _bl_page(target)
-    val sg = _bl_segments(plan, outs, page, lay.ctx)?
+    val sg = _bl_segments(plan, outs, page, lay.ctx, hdr_ehdr, hdr_phdr)?
 
     # --- .symtab: object globals + script symbols ---
     var sym_names: [text] = []
@@ -1376,7 +1639,7 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
             continue
         val ok = lay.plan_to_out[ins.out_of[flat]]
         sym_names = sym_names.push(name)
-        sym_values = sym_values.push(outs[ok].vma + ins.off_of[flat] + e.offset)
+        sym_values = sym_values.push(outs[ok].vma + _bl_in_off(ins, e.obj_idx, e.section_idx, e.offset)?)
         val osym = _bl_obj_symbol(ins.objects[e.obj_idx], name)
         var sym_bind = STB_GLOBAL
         if elf_symbol_binding(osym) == STB_WEAK:
@@ -1393,16 +1656,25 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
             sym_shndx = sym_shndx.push(_bl_section_of(outs, lay.sym_values[i]))
         i = i + 1
     var strtab: [i64] = [0]
-    var symtab: [i64] = write_zeros([], 24)
+    val sym_ent: i64 = if elf32: 16 else: 24
+    var symtab: [i64] = write_zeros([], sym_ent)
     i = 0
     while i < sym_names.len():
         symtab = write_u32_le(symtab, strtab.len())
         strtab = _bl_strtab_add(strtab, sym_names[i])
-        symtab = symtab.push(sym_info[i] & 0xff)
-        symtab = symtab.push(0)
-        symtab = write_u16_le(symtab, sym_shndx[i])
-        symtab = write_u64_le(symtab, sym_values[i])
-        symtab = write_u64_le(symtab, 0)
+        if elf32:
+            # Elf32_Sym: name, value, size, info, other, shndx.
+            symtab = write_u32_le(symtab, sym_values[i] & 0xffffffff)
+            symtab = write_u32_le(symtab, 0)
+            symtab = symtab.push(sym_info[i] & 0xff)
+            symtab = symtab.push(0)
+            symtab = write_u16_le(symtab, sym_shndx[i])
+        else:
+            symtab = symtab.push(sym_info[i] & 0xff)
+            symtab = symtab.push(0)
+            symtab = write_u16_le(symtab, sym_shndx[i])
+            symtab = write_u64_le(symtab, sym_values[i])
+            symtab = write_u64_le(symtab, 0)
         i = i + 1
 
     # --- assemble the exec plan (allocated sections, then .symtab/.strtab) ---
@@ -1421,9 +1693,10 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
         i = i + 1
     var final_end = sg.file_end
     if not strip_output:
-        val symtab_off = boot_align_up(sg.file_end, 8)
-        secs = secs.push(ElfOutSec(name: ".symtab", sh_type: BOOT_SHT_SYMTAB, sh_flags: 0, align: 8,
-            size: symtab.len(), entsize: 24, link: ".strtab", info: 1, seg: ELF_SEG_R))
+        val sym_align: i64 = if elf32: 4 else: 8
+        val symtab_off = boot_align_up(sg.file_end, sym_align)
+        secs = secs.push(ElfOutSec(name: ".symtab", sh_type: BOOT_SHT_SYMTAB, sh_flags: 0, align: sym_align,
+            size: symtab.len(), entsize: sym_ent, link: ".strtab", info: 1, seg: ELF_SEG_R))
         offs = offs.push(symtab_off)
         vaddrs = vaddrs.push(0)
         out_contents = out_contents.push(symtab)
@@ -1437,7 +1710,25 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
 
     val xplan = ElfExecPlan(secs: secs, offsets: offs, vaddrs: vaddrs, segments: sg.segs,
         file_end: final_end)
-    val bytes = elf_write_image(BOOT_ET_EXEC, machine, entry, xplan, out_contents)
+    var bytes: [i64] = []
+    if elf32:
+        val valid_image = boot_target_validate_image32(xplan, entry, sym_values)?
+        var c8: [[u8]] = []
+        for c in out_contents:
+            var b: [u8] = []
+            for v in c: b = b.push(v as u8)
+            c8 = c8.push(b)
+        for v in elf_write_image32_bytes(BOOT_ET_EXEC, machine, target_flags, entry, xplan, c8):
+            bytes = bytes.push(v as i64)
+    else:
+        bytes = elf_write_image(BOOT_ET_EXEC, machine, entry, xplan, out_contents)
+    if rv:
+        # e_flags: the merged RVC / float-ABI flags of the inputs, as ld.lld writes.
+        var fi: i64 = 0
+        while fi < 4:
+            val flags_offset: i64 = if elf32: 36 else: 48
+            bytes[flags_offset + fi] = (riscv_flags >> (fi * 8)) & 0xff
+            fi = fi + 1
 
     var sec_names: [text] = []
     var sec_vmas: [i64] = []

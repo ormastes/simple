@@ -1,0 +1,145 @@
+# Explicitly synthetic decoding cases; no live Docker command is executed.
+use std.spec.*
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2}
+use std.nogc_async_mut.container.providers.windows.docker_inventory_v2.{
+    windows_docker_inventory_ids_decode_v2, windows_docker_inventory_inspect_decode_v2}
+
+fn inventory_test_id_v2(index: i64) -> text:
+    val digits = "0123456789abcdef"
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
+        digits.substring(index / 16, index / 16 + 1) + digits.substring(index % 16, index % 16 + 1)
+
+fn inventory_test_scope_v2(machine: text) -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "host-a", service_scope_id: "scope-a",
+        boot_id: "", provider_generation: 2, native_machine_id: machine,
+        continuity_mode: "service-incarnation-v1",
+        continuity_id: "windows-service-incarnation-v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+
+fn inventory_test_fields_v2() -> [text]:
+    val machine = "windows-machine-guid-v1:12345678-9abc-4def-8012-3456789abcde"
+    val scope = inventory_test_scope_v2(machine)
+    [inventory_test_id_v2(1), "windows-docker-process-v1", "host-a", "scope-a",
+        scope.continuity_id, "workload-a", "1", "operation-a", "2", "",
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "2", "33554432", "running", "present", "service-incarnation-v1",
+        machine, container_scope_fence_id_v2(scope).unwrap()]
+
+fn inventory_test_line_v2(fields: [text]) -> text:
+    var output = ""
+    for index in 0..fields.len():
+        if index > 0: output = output + "|"
+        output = output + fields[index]
+    output
+
+fn inventory_test_rejected_field_v2(index: i64, value: text) -> bool:
+    var fields = inventory_test_fields_v2()
+    fields[index] = value
+    windows_docker_inventory_inspect_decode_v2(inventory_test_id_v2(1), inventory_test_line_v2(fields), 4096).is_err()
+
+describe "Windows Docker synthetic bounded quarantine inventory decoding":
+    it "decodes empty and complete exact-ID lists with ordinary CLI line endings":
+        expect(windows_docker_inventory_ids_decode_v2("", 4096).unwrap().len()).to_equal(0)
+        val ids = windows_docker_inventory_ids_decode_v2(inventory_test_id_v2(1) + "\r\n" + inventory_test_id_v2(2) + "\r\n", 4096).unwrap()
+        expect(ids.len()).to_equal(2)
+        expect(ids[0]).to_equal(inventory_test_id_v2(1))
+        expect(ids[1]).to_equal(inventory_test_id_v2(2))
+
+    it "rejects duplicate, abbreviated, uppercase, blank and oversize ID output":
+        val id = inventory_test_id_v2(1)
+        expect(windows_docker_inventory_ids_decode_v2(id + "\n" + id, 4096).is_err()).to_equal(true)
+        expect(windows_docker_inventory_ids_decode_v2("abcdef", 4096).is_err()).to_equal(true)
+        expect(windows_docker_inventory_ids_decode_v2("A" + id.substring(1, 64), 4096).is_err()).to_equal(true)
+        expect(windows_docker_inventory_ids_decode_v2(id + "\n\n", 4096).is_err()).to_equal(true)
+        expect(windows_docker_inventory_ids_decode_v2(id, 63).is_err()).to_equal(true)
+
+    it "admits 64 exact IDs and fails the whole decode at 65":
+        var output = ""
+        for index in 0..64:
+            output = output + inventory_test_id_v2(index) + "\n"
+        expect(windows_docker_inventory_ids_decode_v2(output, 8192).unwrap().len()).to_equal(64)
+        output = output + inventory_test_id_v2(64) + "\n"
+        expect(windows_docker_inventory_ids_decode_v2(output, 8192).is_err()).to_equal(true)
+
+    it "retains exact identity, separate scopes, service incarnation and resource ceilings":
+        val decoded = windows_docker_inventory_inspect_decode_v2(inventory_test_id_v2(1), inventory_test_line_v2(inventory_test_fields_v2()) + "\n", 4096).unwrap()
+        expect(decoded.1).to_equal("host-a")
+        expect(decoded.2).to_equal("scope-a")
+        expect(decoded.0.native_id).to_equal(inventory_test_id_v2(1))
+        expect(decoded.0.workload_uid).to_equal("workload-a")
+        expect(decoded.0.attempt).to_equal(1)
+        expect(decoded.0.operation_id).to_equal("operation-a")
+        expect(decoded.0.provider_generation).to_equal(2)
+        expect(decoded.0.boot_id).to_equal("")
+        expect(decoded.0.service_incarnation_id).to_equal(inventory_test_fields_v2()[4])
+        expect(decoded.0.native_machine_id).to_equal(inventory_test_fields_v2()[16])
+        expect(decoded.0.scope_fence_id).to_equal(inventory_test_fields_v2()[17])
+        expect(decoded.0.cpu_millis).to_equal(2000)
+        expect(decoded.0.memory_bytes).to_equal(33554432)
+
+    it "rejects mismatched exact IDs and missing or malformed ownership labels":
+        expect(inventory_test_rejected_field_v2(0, inventory_test_id_v2(2))).to_equal(true)
+        expect(inventory_test_rejected_field_v2(1, "another-provider")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(2, "")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(3, "<no value>")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(4, "boot-counter-7")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(5, "")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(7, "operation|injection")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(9, "invented-boot-id")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(10, "sha256:short")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(10, "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(14, "")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(15, "")).to_equal(true)
+
+    it "rejects missing, malformed or mismatched recorded native machine and fence labels":
+        expect(inventory_test_rejected_field_v2(16, "")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(16, "<no value>")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(16, "windows-machine-guid-v1:00000000-0000-0000-0000-000000000000")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(16, "windows-machine-guid-v1:12345678-9ABC-4DEF-8012-3456789ABCDE")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(16, "windows-machine-guid-v1:12345678-9abc-4def-8012-3456789abcdf")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(17, "")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(17, "<no value>")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(17, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(2, "foreign-host")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(3, "foreign-scope")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(8, "3")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(4, "windows-service-incarnation-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).to_equal(true)
+
+    it "preserves the old machine scope when its independently reconstructed fence agrees":
+        val old_machine = "windows-machine-guid-v1:87654321-9abc-4def-8012-3456789abcde"
+        val old_scope = inventory_test_scope_v2(old_machine)
+        var fields = inventory_test_fields_v2()
+        fields[16] = old_machine
+        fields[17] = container_scope_fence_id_v2(old_scope).unwrap()
+        val decoded = windows_docker_inventory_inspect_decode_v2(inventory_test_id_v2(1), inventory_test_line_v2(fields), 4096).unwrap()
+        expect(decoded.0.native_machine_id).to_equal(old_machine)
+        expect(decoded.0.scope_fence_id).to_equal(fields[17])
+        expect(decoded.0.boot_id).to_equal("")
+        expect(decoded.0.cpu_millis).to_equal(2000)
+        expect(decoded.0.memory_bytes).to_equal(33554432)
+
+    it "rejects decimal overflow, noncanonical and absent resource ceilings":
+        expect(inventory_test_rejected_field_v2(6, "01")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(6, "9223372036854775808")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(8, "0")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(11, "0")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(11, "257")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(11, "+1")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(12, "0")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(12, "16777215")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(12, "1099511627777")).to_equal(true)
+        expect(inventory_test_rejected_field_v2(13, "unknown")).to_equal(true)
+
+    it "keeps exited and dead entries resource charged for quarantine":
+        for state in ["exited", "dead"]:
+            var fields = inventory_test_fields_v2()
+            fields[13] = state
+            val entry = windows_docker_inventory_inspect_decode_v2(inventory_test_id_v2(1), inventory_test_line_v2(fields), 4096).unwrap().0
+            expect(entry.state).to_equal(state)
+            expect(entry.cpu_millis).to_equal(2000)
+            expect(entry.memory_bytes).to_equal(33554432)
+
+    it "fails inspection record truncation, extra rows and output overflow":
+        val line = inventory_test_line_v2(inventory_test_fields_v2())
+        expect(windows_docker_inventory_inspect_decode_v2(inventory_test_id_v2(1), "too|few", 4096).is_err()).to_equal(true)
+        expect(windows_docker_inventory_inspect_decode_v2(inventory_test_id_v2(1), line + "\n" + line, 4096).is_err()).to_equal(true)
+        expect(windows_docker_inventory_inspect_decode_v2(inventory_test_id_v2(1), line, 16).is_err()).to_equal(true)

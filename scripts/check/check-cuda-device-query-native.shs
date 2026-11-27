@@ -1,0 +1,146 @@
+#!/bin/sh
+# check-cuda-device-query-native.shs
+#
+# End-to-end proof that a NATIVELY LINKED program can query a CUDA device
+# through the core-C provider forwarders (runtime_dynload.c), and that the
+# core-C lane and the Rust lane (cuda_runtime.rs, the provider itself) agree.
+#
+#   GPU          provider configured            -> init=0, count>=1, a real name
+#                (a host whose provider sees no device exits 2 = ERROR, never FAIL)
+#   NO-PROVIDER  SIMPLE_CUDA_PROVIDER_PATH unset -> Rust non-cuda twin sentinels
+#   NO-DRIVER    provider present, SIMPLE_CUDA_LIB points at a missing file
+#                                                 -> 303 SharedObjectInitFailed
+#
+# Every case must exit 0 (fail cleanly, never crash). The Rust lane is the
+# same queries made by dlopen'ing the provider directly; its lines must equal
+# the native binary's in the GPU and NO-DRIVER cases.
+#
+# Usage: sh scripts/check/check-cuda-device-query-native.shs <probe-bin> <provider.so> [expected-name-substring]
+#   <probe-bin>    native build of src/app/test/cuda_device_query_probe.spl
+#   <provider.so>  build/sffi/libsimple_gpu_cuda.so (scripts/build/build_simple_runtime_sffi.shs)
+# Tracks: native_c_runtime_missing_cuda_provider_forwarders_2026-11-22,
+#         native_link_rt_cuda_init_never_opens_libcuda_2026-11-22
+set -u
+
+probe=${1:-}
+provider=${2:-}
+want_name=${3:-}
+if [ ! -x "$probe" ] || [ ! -f "$provider" ]; then
+    echo "ERROR — nothing was checked (usage: <probe-bin> <provider.so> [name])"
+    exit 2
+fi
+cc_bin=${CC:-clang}
+tmp_base=${TMPDIR:-/tmp}
+work=$(mktemp -d "$tmp_base/cuda-device-query-native.XXXXXX") || {
+    echo "ERROR — nothing was checked (mktemp failed)"
+    exit 2
+}
+cleanup() {
+    case "$work" in
+        "$tmp_base"/cuda-device-query-native.*) rm -rf "${work:?}" ;;
+        *) exit 2 ;;
+    esac
+}
+# EXIT cleans up on every normal path; a signal must also stop the script,
+# not resume it after cleanup removed its work dir.
+trap cleanup EXIT
+trap 'cleanup; exit 2' HUP INT TERM
+
+digest=$(sha256sum "$provider" | cut -d' ' -f1)
+
+run_probe() {
+    "$@" > "$work/out" 2>&1
+    rc=$?
+    grep '^CUDA_DEVICE_QUERY ' "$work/out" | grep -v ' done$'
+    echo "rc=$rc"
+}
+
+gpu=$(SIMPLE_CUDA_PROVIDER_PATH="$provider" SIMPLE_CUDA_PROVIDER_SHA256="$digest" run_probe "$probe")
+noprov=$(unset SIMPLE_CUDA_PROVIDER_PATH SIMPLE_CUDA_PROVIDER_SHA256 SIMPLE_CUDA_PROVIDER_RECEIPT
+    run_probe "$probe")
+nodrv=$(SIMPLE_CUDA_LIB=/nonexistent/libcuda.so.1 SIMPLE_CUDA_PROVIDER_PATH="$provider" \
+    SIMPLE_CUDA_PROVIDER_SHA256="$digest" run_probe "$probe")
+
+cat > "$work/rust_lane.c" <<'EOF'
+#include <dlfcn.h>
+#include <stdint.h>
+#include <stdio.h>
+int main(int argc, char **argv) {
+    void *h = argc == 2 ? dlopen(argv[1], RTLD_NOW | RTLD_LOCAL) : NULL;
+    int64_t (*init)(void), (*count)(void), (*get)(int64_t), (*cap)(int64_t);
+    const char *(*name)(int64_t), *(*err)(int64_t);
+    int64_t i, n, d;
+    if (!h) { printf("CUDA_DEVICE_QUERY dlopen_failed %s\n", dlerror()); return 2; }
+    init = (int64_t (*)(void))dlsym(h, "rt_cuda_init");
+    count = (int64_t (*)(void))dlsym(h, "rt_cuda_device_count");
+    get = (int64_t (*)(int64_t))dlsym(h, "rt_cuda_device_get");
+    cap = (int64_t (*)(int64_t))dlsym(h, "rt_cuda_device_compute_capability");
+    name = (const char *(*)(int64_t))dlsym(h, "rt_cuda_device_name");
+    err = (const char *(*)(int64_t))dlsym(h, "rt_cuda_get_error_string");
+    if (!init || !count || !get || !cap || !name || !err) { printf("dlsym_failed\n"); return 2; }
+    i = init(); n = count(); d = get(0);
+    printf("CUDA_DEVICE_QUERY init=%lld\nCUDA_DEVICE_QUERY count=%lld\n", (long long)i, (long long)n);
+    printf("CUDA_DEVICE_QUERY device=%lld error=%s\n", (long long)d, err(d));
+    printf("CUDA_DEVICE_QUERY name=%s capability=%lld\n", name(d), (long long)cap(d));
+    return 0;
+}
+EOF
+if ! "$cc_bin" -O0 "$work/rust_lane.c" -ldl -o "$work/rust_lane"; then
+    echo "ERROR — nothing was checked (cannot build the Rust-lane harness with $cc_bin)"
+    exit 2
+fi
+rust_gpu=$(run_probe "$work/rust_lane" "$provider")
+# A provider that cannot be dlopen'ed is a broken artifact (e.g. the
+# DF_STATIC_TLS regression), not a host without a GPU: FAIL, never ERROR.
+if printf '%s\n' "$rust_gpu" | grep -q '^CUDA_DEVICE_QUERY dlopen_failed'; then
+    echo "FAIL — provider does not dlopen: $(printf '%s' "$rust_gpu" | sed -n 's/^CUDA_DEVICE_QUERY dlopen_failed //p')"
+    exit 1
+fi
+# No device or no driver on this host is absence of evidence, not a failure:
+# the provider's own Rust lane must see a device before the GPU case means
+# anything.
+rust_gpu_count=$(printf '%s\n' "$rust_gpu" | sed -n 's/^CUDA_DEVICE_QUERY count=//p')
+if [ "$(printf '%s\n' "$rust_gpu" | sed -n 1p)" != "CUDA_DEVICE_QUERY init=0" ] ||
+        [ "${rust_gpu_count:-0}" -lt 1 ] 2>/dev/null; then
+    echo "ERROR — nothing was checked (no CUDA device visible to the provider on this host: $(printf '%s' "$rust_gpu" | tr '\n' ' '))"
+    exit 2
+fi
+rust_nodrv=$(SIMPLE_CUDA_LIB=/nonexistent/libcuda.so.1 run_probe "$work/rust_lane" "$provider")
+
+fail=""
+check() { [ "$1" = "$2" ] || fail="$fail
+$3: expected
+$2
+got
+$1"; }
+
+# No provider: the core-C forwarders return the Rust non-cuda twins' values.
+check "$noprov" "CUDA_DEVICE_QUERY init=3
+CUDA_DEVICE_QUERY count=0
+CUDA_DEVICE_QUERY device=-3 error=CUDA_ERROR_NOT_INITIALIZED
+CUDA_DEVICE_QUERY name=No CUDA capability=0
+rc=0" "no-provider"
+# Provider present, driver absent: init reports 303, the rest fail closed.
+check "$(printf '%s\n' "$nodrv" | sed -n 1,2p)" "CUDA_DEVICE_QUERY init=303
+CUDA_DEVICE_QUERY count=0" "no-driver"
+check "$(printf '%s\n' "$nodrv" | tail -n 1)" "rc=0" "no-driver exit"
+check "$nodrv" "$rust_nodrv" "no-driver lane parity (C vs Rust)"
+# GPU: a real device, and both lanes agree byte for byte.
+check "$(printf '%s\n' "$gpu" | sed -n 1p)" "CUDA_DEVICE_QUERY init=0" "gpu init"
+check "$(printf '%s\n' "$gpu" | tail -n 1)" "rc=0" "gpu exit"
+check "$gpu" "$rust_gpu" "gpu lane parity (C vs Rust)"
+gpu_count=$(printf '%s\n' "$gpu" | sed -n 's/^CUDA_DEVICE_QUERY count=//p')
+[ "${gpu_count:-0}" -ge 1 ] 2>/dev/null || fail="$fail
+gpu: device count '$gpu_count' < 1"
+if [ -n "$want_name" ] && ! printf '%s\n' "$gpu" | grep -q "name=.*$want_name"; then
+    fail="$fail
+gpu: device name does not contain '$want_name'"
+fi
+
+printf 'native gpu:\n%s\nnative no-provider:\n%s\nnative no-driver:\n%s\n' "$gpu" "$noprov" "$nodrv"
+if [ -n "$fail" ]; then
+    echo "FAIL — cuda native device query:$fail"
+    exit 1
+fi
+echo "PASS — 5 runs checked (native gpu/no-provider/no-driver, rust gpu/no-driver), $gpu_count device(s): $(printf '%s\n' "$gpu" | sed -n 's/^CUDA_DEVICE_QUERY name=//p')"
+exit 0

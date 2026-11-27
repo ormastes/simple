@@ -1,7 +1,8 @@
 # `core_intensive_spec.spl` is VACUOUS — it tests local stub classes, not `std.database.core`
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Status: RESOLVED (spec side) — verified 2026-11-25 (fleet lane p2w1-ai); see
+bottom section. The one remaining red example is a separate seed bug tracked
+in `option_some_empty_text_dot_question_false_2026-11-06.md`, not this bug.
 **Found:** 2026-08-04
 
 ## Symptom
@@ -137,3 +138,45 @@ Not repaired here. Un-commenting :5-6 makes the spec depend on
 `std.database.core` and `test.lib.database_fixtures`; whether those resolve is a
 separate question from this lane`s slice, and a failed un-comment would leave
 the file unloadable rather than merely vacuous. Recorded as verified-live.
+
+## Fixed 2026-11-06 (spec side)
+The SdnRow/SdnTable stubs were deleted; the spec now imports the product
+`SdnRow`/`SdnTable`/`StringInterner` from `std.database.core` (row builders use
+`SdnRow.empty()`, `table.columns`). RED 29/32 -> 31/32 on the seed.
+* "duplicate ID prevention" asserted the STUB's dedupe; product `add_row`
+  appends (upsert is `update_row`), so the example now asserts that contract
+  (2 rows, `get_row` finds the first).
+* "handles empty string" remains red for a seed bug, not the spec or lib:
+  see option_some_empty_text_dot_question_false_2026-11-06.md.
+Status: spec fixed; one example blocked on that seed bug.
+
+## 2026-11-06 re-verification (lane fx-ml-db)
+There is no duplicate `SdnTable`: `grep` over `src/lib` finds a single
+definition (`nogc_sync_mut/database/core.spl:216`) and the spec defines no local
+classes. The "`SdnRow.has_column` not found" symptom was the spec-local stub
+(fixed above). Seed run: 31/32; the sole failure is the Some("") `.?` seed bug.
+No library change needed.
+
+## Verification 2026-11-25 (fleet lane p2w1-ai, worktree wt-p2w1-ai, release/1.0.0 HEAD 50adb6f42ce)
+
+The 2026-11-06 "Fixed (spec side)" section above is confirmed against the
+current tree:
+
+- `test/02_integration/compiler/core_intensive_spec.spl:24` now has
+  `use std.database.core (StringInterner, SdnTable, SdnRow)`; the old
+  commented-out imports remain only as a historical comment block, and
+  `grep -c "class StringInterner\|class SdnRow\|class SdnTable"` on the spec
+  returns 0 — the stubs are gone.
+- Runtime evidence that the product module the spec now targets works
+  (Windows host, pinned seed v1.0.0-rc.1, `SIMPLE_LIB=src ... run`): a probe
+  exercising `StringInterner.empty()` + `intern` (stability and distinctness),
+  reverse `get(id)`, forward `get_id(s)`, and `SdnRow.empty()` + `set` /
+  `has_column` (present and absent) / `get` printed `DB_CORE_PROBE_OK`.
+
+Limit: the full 32-example spec run is environment-blocked at HEAD — both
+`bin/simple.exe test` and `run` on the spec abort with
+`unknown decorator '@representation_boundary'` (spec closure pulls in a
+decorated lib file; the pinned seed predates that decorator — the known
+release/1.0.0 source/binary inconsistency, not this bug). The 2026-11-06
+seed run (31/32, sole failure the separately-tracked Some("") `.?` seed bug)
+stands as the last full-spec evidence.

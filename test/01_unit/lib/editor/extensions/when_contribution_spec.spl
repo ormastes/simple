@@ -1,0 +1,79 @@
+"""CU-006: optional `when` on ExtensionView / ExtensionCommand (manifest v2 + host)."""
+# @req REQ-CARET-EXT-003 CU-006
+use std.spec.*
+use std.editor.extensions.host.{ExtensionHost, extension_host_with_builtin_handlers}
+use std.editor.extensions.manifest.{ExtensionManifest, ExtensionView, ExtensionCommand}
+use std.editor.extensions.manifest_sdn.{extension_manifest_decode}
+use app.editor.trace_view_host.{view_host_render}
+
+fn when_sdn() -> text:
+    "extension:\n" +
+    "  schema: simple.ide.extension/2\n" +
+    "  id: when.demo\n" +
+    "  display_name: When Demo\n" +
+    "  version: 1.0.0\n" +
+    "  host: builtin\n" +
+    "activation:\n" +
+    '  events: ["onProfile:when"]' + "\n" +
+    "contributes:\n" +
+    '  commands: [{id: "when.go", title: "Go", category: "Demo", when: "demo.on"}, {id: "when.plain", title: "Plain", category: "Demo"}]' + "\n" +
+    '  view_containers: [{id: "when.box", title: "Box", location: "activitybar", order: 1}]' + "\n" +
+    '  views: [{id: "when.gated", kind: "list", container: "when.box", provider: "p.gated", when: "demo.on"}, {id: "when.always", kind: "list", container: "when.box", provider: "p.always"}]' + "\n"
+
+fn when_host() -> ExtensionHost:
+    val host = extension_host_with_builtin_handlers()
+    val load = extension_manifest_decode(when_sdn())
+    host.register_manifest(load.manifest, "<test>")
+    host.activate("when.demo")
+    host
+
+describe "when on views and commands":
+    it "decodes when on views and commands, empty when absent":
+        # @req CU-006
+        step("decode manifest with when clauses")
+        val load = extension_manifest_decode(when_sdn())
+        expect(load.issues.len()).to_equal(0)
+        expect(load.manifest.contributes_views[0].when).to_equal("demo.on")
+        expect(load.manifest.contributes_views[1].when).to_equal("")
+        expect(load.manifest.contributes_commands[0].when).to_equal("demo.on")
+        expect(load.manifest.contributes_commands[1].when).to_equal("")
+
+    it "a view with a false when is hidden; true or empty is visible":
+        # @req CU-006
+        step("evaluate against host context keys")
+        val host = when_host()
+        host.set_context_keys([])
+        expect(host.visible_view_ids()).to_equal(["when.always"])
+        host.set_context_keys(["demo.on"])
+        expect(host.visible_view_ids()).to_equal(["when.gated", "when.always"])
+
+    it "view_host_render hides a view whose when is false":
+        # @req CU-006
+        step("render gated view with and without the key")
+        val host = when_host()
+        host.set_context_keys([])
+        expect(view_host_render(host, "when.gated", None)).to_equal(["unavailable: view hidden by when clause: when.gated"])
+        host.set_context_keys(["demo.on"])
+        expect(view_host_render(host, "when.gated", None)[0]).to_equal("unavailable: no renderer for provider p.gated")
+
+    it "a command with a false when is disabled in dispatch":
+        # @req CU-006
+        step("command_enabled and dispatch_command")
+        val host = when_host()
+        host.set_context_keys([])
+        expect(host.command_enabled("when.go")).to_equal(false)
+        expect(host.command_enabled("when.plain")).to_equal(true)
+        match host.dispatch_command("when.go", ""):
+            case Ok(_): expect("Ok").to_equal("Err")
+            case Err(e): expect(e).to_equal("command disabled by when clause: when.go")
+        host.set_context_keys(["demo.on"])
+        expect(host.command_enabled("when.go")).to_equal(true)
+
+    it "caret views stay visible with no context keys (no when authored)":
+        # @req CU-006
+        step("caret profile")
+        val host = extension_host_with_builtin_handlers()
+        host.activate_event("onProfile:caret")
+        host.set_context_keys([])
+        expect(host.visible_view_ids().contains("caret.agent_roster")).to_equal(true)
+        expect(host.visible_view_ids().len()).to_equal(5)

@@ -1,6 +1,6 @@
 # `val x = s.slice(0, 2).len()` fails with E3009 while the same chain inline succeeds
 
-Status: OPEN
+Status: FIXED (2026-11-11, lane interp9) — repro passes on deployed seed; see addendum below.
 Found: 2026-08-21, while writing regression tests for
 `doc/08_tracking/bug/native_slice_splits_utf8_three_divergent_policies_2026-08-01.md`.
 
@@ -53,3 +53,26 @@ The receiver type is reported as `str`, and the message says "in nested call
 context", which suggests the method-resolution path used when a call is the
 initializer of a binding differs from the one used inside a condition. The
 site was not located; that is the first step for whoever picks this up.
+
+## 2026-11-11 addendum (lane interp9, work/p3-interp9-20261111) — FIXED, verified on seed
+
+Verdict: FIXED. The nested-call dispatcher in
+`src/compiler_rust/compiler/src/interpreter_helpers/method_dispatch.rs` now
+carries `Value::Str` arms for both halves of the chain: `len`/`length`
+(`Value::Int(s.chars().count())`, the nested temporary-text arm) and
+`slice`/`substring` (byte-indexed, landed as `63c35af09a41` "fix(seed):
+dispatch slice/substring on temporary text in nested calls"). The binding
+initializer and the condition now resolve through the same path.
+
+Verification actually run (seed-smoke, tracked `bin/simple.exe` build-commit
+`46fe8f6b6def`, `SIMPLE_LIB=src`, `--mode=interpreter` and default lane):
+
+- The documented repro compiles and exits rc=0 on BOTH lanes; the bound value
+  is correct (`val a = s.slice(0, 2).len()` yields `a == 2`).
+- bug_db row 3527 already recorded `fixed` (2026-11-06 round 8: "verified
+  already fixed on seed from release (probe)"); this addendum confirms it
+  independently on the current worktree tip (base c8b6d0ebe90e).
+
+The NOTE in `src/compiler_rust/compiler/tests/interpreter_utf8_slice_boundary.rs`
+(workaround marker) can be retired by the Rust-lane owner; no interpreter
+behaviour change remains.

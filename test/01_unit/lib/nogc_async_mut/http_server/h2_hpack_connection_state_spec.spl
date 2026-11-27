@@ -1,11 +1,11 @@
 use std.spec
-use std.common.hpack.encoder.{HpackHeader, hpack_decoder_new}
+use std.common.hpack.encoder.{HpackHeader, hpack_decoder_new, hpack_encoder_new, hpack_encode}
 use std.common.hpack.decoder.{hpack_decode}
 use std.http_server.h2_request_headers.{h2_validate_request_headers}
 use std.http_server.h2_connection.{H2Connection}
 use std.http.h2.h2_frame.{
     H2Frame, H2HeadersFrame, H2ContinuationFrame, H2DataFrame,
-    H2_FLAG_END_HEADERS
+    H2_FLAG_END_HEADERS, H2_FLAG_END_STREAM
 }
 
 fn header(name: text, value: text) -> HpackHeader:
@@ -20,8 +20,18 @@ fn valid_get_headers() -> [HpackHeader]:
         header("accept", "text/plain")
     ]
 
+fn h2_connection_with_headers(id: i64, headers: [HpackHeader]) -> H2Connection:
+    var conn = H2Connection.new(id, "peer", 1)
+    val encoded = hpack_encode(headers, hpack_encoder_new(4096, false)).0
+    conn.dispatch_frame(H2Frame.Headers(H2HeadersFrame(
+        stream_id: 1,
+        flags: H2_FLAG_END_HEADERS | H2_FLAG_END_STREAM,
+        header_block: encoded
+    )))
+    conn
+
 describe "HTTP/2 connection HPACK and request validation":
-    # @manual scenario evidence
+    # @manual show
     it "retains incrementally indexed fields across blocks on one connection":
         # Literal with incremental indexing: x-a: one.
         val block1: [u8] = [0x40, 0x03, 0x78, 0x2d, 0x61, 0x03, 0x6f, 0x6e, 0x65]
@@ -94,21 +104,116 @@ describe "HTTP/2 connection HPACK and request validation":
         ]
         expect(h2_validate_request_headers(invalid_connect).valid).to_equal(false)
 
-    it "requires one unambiguous request authority source":
+    it "allows a matching Host field alongside :authority":
         val host_only = [
             header(":method", "GET"), header(":scheme", "https"),
             header(":path", "/"), header("host", "example.test")
         ]
         expect(h2_validate_request_headers(host_only).valid).to_equal(true)
 
-        val absent_authority = [
-            header(":method", "GET"), header(":scheme", "https"), header(":path", "/")
-        ]
-        expect(h2_validate_request_headers(absent_authority).valid).to_equal(false)
-
         var duplicate_authority = valid_get_headers()
         duplicate_authority.push(header("host", "example.test"))
-        expect(h2_validate_request_headers(duplicate_authority).valid).to_equal(false)
+        expect(h2_validate_request_headers(duplicate_authority).valid).to_equal(true)
+
+    it "canonicalizes matching conflicting and multiple Host fields to :authority":
+        val matching = h2_connection_with_headers(20, [
+            header(":method", "GET"), header(":scheme", "https"),
+            header(":path", "/"), header(":authority", "example.test"),
+            header("x-before", "one"), header("host", "example.test"),
+            header("x-after", "two")
+        ])
+        val matching_requests = matching.take_decoded_requests()
+        expect(matching_requests.len()).to_equal(1)
+        expect(matching_requests[0].0).to_equal(1)
+        expect(matching_requests[0].1.headers).to_equal([
+            ("x-before", "one"), ("x-after", "two"), ("Host", "example.test")
+        ])
+        expect(matching.take_decoded_requests().len()).to_equal(0)
+
+        val conflicting = h2_connection_with_headers(21, [
+            header(":method", "GET"), header(":scheme", "https"),
+            header(":path", "/"), header(":authority", "authority.test"),
+            header("host", "other.test")
+        ])
+        val conflicting_requests = conflicting.take_decoded_requests()
+        expect(conflicting_requests.len()).to_equal(1)
+        expect(conflicting_requests[0].1.headers).to_equal([("Host", "authority.test")])
+
+        val multiple = h2_connection_with_headers(22, [
+            header(":method", "GET"), header(":scheme", "https"),
+            header(":path", "/"), header(":authority", "authority.test"),
+            header("host", "first.test"), header("x-middle", "kept"),
+            header("host", "second.test")
+        ])
+        val multiple_requests = multiple.take_decoded_requests()
+        expect(multiple_requests.len()).to_equal(1)
+        expect(multiple_requests[0].1.headers).to_equal([
+            ("x-middle", "kept"), ("Host", "authority.test")
+        ])
+
+        val authority_only = h2_connection_with_headers(23, [
+            header(":method", "GET"), header(":scheme", "https"),
+            header(":path", "/"), header(":authority", "only.test")
+        ])
+        val authority_only_requests = authority_only.take_decoded_requests()
+        expect(authority_only_requests.len()).to_equal(1)
+        expect(authority_only_requests[0].1.headers).to_equal([("Host", "only.test")])
+
+    it "retains Host without :authority and leaves requests with neither unchanged":
+        val host_only = h2_connection_with_headers(24, [
+            header(":method", "GET"), header(":scheme", "https"),
+            header(":path", "/"), header("host", "host-only.test")
+        ])
+        val host_only_requests = host_only.take_decoded_requests()
+        expect(host_only_requests.len()).to_equal(1)
+        expect(host_only_requests[0].1.headers).to_equal([("host", "host-only.test")])
+
+        val neither = h2_connection_with_headers(25, [
+            header(":method", "GET"), header(":scheme", "https"),
+            header(":path", "/"), header("accept", "text/plain")
+        ])
+        val neither_requests = neither.take_decoded_requests()
+        expect(neither_requests.len()).to_equal(1)
+        expect(neither_requests[0].1.headers).to_equal([("accept", "text/plain")])
+
+    it "preserves OPTIONS star authority and no-authority behavior":
+        val with_authority = h2_connection_with_headers(26, [
+            header(":method", "OPTIONS"), header(":scheme", "https"),
+            header(":path", "*"), header(":authority", "options.test")
+        ])
+        val with_authority_requests = with_authority.take_decoded_requests()
+        expect(with_authority_requests.len()).to_equal(1)
+        expect(with_authority_requests[0].1.path).to_equal("*")
+        expect(with_authority_requests[0].1.headers).to_equal([("Host", "options.test")])
+
+        val without_authority = h2_connection_with_headers(27, [
+            header(":method", "OPTIONS"), header(":scheme", "https"),
+            header(":path", "*"), header("accept", "*/*")
+        ])
+        val without_authority_requests = without_authority.take_decoded_requests()
+        expect(without_authority_requests.len()).to_equal(1)
+        expect(without_authority_requests[0].1.path).to_equal("*")
+        expect(without_authority_requests[0].1.headers).to_equal([("accept", "*/*")])
+
+    it "keeps CONNECT validation controls while canonicalizing valid authority":
+        val valid_connect = h2_connection_with_headers(28, [
+            header(":method", "CONNECT"), header(":authority", "connect.test:443"),
+            header("host", "other.test:443")
+        ])
+        val valid_requests = valid_connect.take_decoded_requests()
+        expect(valid_requests.len()).to_equal(1)
+        expect(valid_requests[0].1.headers).to_equal([("Host", "connect.test:443")])
+
+        val host_only_connect = h2_connection_with_headers(29, [
+            header(":method", "CONNECT"), header("host", "connect.test:443")
+        ])
+        expect(host_only_connect.take_decoded_requests().len()).to_equal(0)
+
+        val connect_with_scheme_path = h2_connection_with_headers(30, [
+            header(":method", "CONNECT"), header(":scheme", "https"),
+            header(":path", "/"), header(":authority", "connect.test:443")
+        ])
+        expect(connect_with_scheme_path.take_decoded_requests().len()).to_equal(0)
 
     it "accepts only matching CONTINUATION frames inside an open envelope":
         var conn = H2Connection.new(10, "peer", 1)

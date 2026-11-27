@@ -1,0 +1,78 @@
+# @req REQ-ASYNC-REF-001
+# Terminal publication is immutable and observable by late subscribers.
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_async_mut.concurrent.lockless_map_i64.{LocklessMapI64}
+use std.nogc_async_mut.async_ring.async_ref.{AsyncRefError, AsyncRefI64, AsyncRefStateI64}
+
+fn terminal_contract_map() -> LocklessMapI64:
+    unsafe(capabilities: [ffi]):
+        match LocklessMapI64.create(4, 4, 4, 4):
+            case Ok(map): map
+            case Err(error): fail("terminal contract map creation failed: {error}")
+
+fn close_terminal_contract_map(map: LocklessMapI64):
+    unsafe(capabilities: [ffi]): map.close_quiescent()
+
+fn expect_terminal_value(reference: AsyncRefI64, expected: i64):
+    unsafe(capabilities: [ffi]):
+        match reference.try_ready():
+            case AsyncRefStateI64.Ready(value): expect(value).to_equal(expected)
+            case state: fail("expected terminal Ready({expected}), got {state}")
+
+describe "AsyncRefI64 terminal contract":
+    it "rejects publication before start and leaves the reference pending":
+        step("Publish one immutable shared outcome")
+        val map = terminal_contract_map()
+        unsafe(capabilities: [ffi]):
+            val reference = map.request(1, 101).unwrap()
+            match reference.complete(7):
+                case Err(AsyncRefError.NotStarted): ()
+                case Err(error): fail("wrong pre-start publication error: {error}")
+                case Ok(_): fail("publication succeeded before the producer started")
+            match reference.try_ready():
+                case AsyncRefStateI64.Pending: ()
+                case state: fail("failed pre-start publication changed state: {state}")
+            expect(reference.try_start()).to_equal(true)
+            expect(reference.complete(7).unwrap()).to_equal(true)
+            expect_terminal_value(reference, 7)
+        close_terminal_contract_map(map)
+
+    it "keeps the first successful publication against later attempts":
+        val map = terminal_contract_map()
+        val maximum = 9223372036854775807i64
+        val minimum = -9223372036854775807i64 - 1i64
+        unsafe(capabilities: [ffi]):
+            val reference = map.request(2, 202).unwrap()
+            expect(reference.try_start()).to_equal(true)
+            expect(reference.complete(maximum).unwrap()).to_equal(true)
+            expect(reference.fail(minimum).unwrap()).to_equal(false)
+            expect(reference.complete(minimum).unwrap()).to_equal(false)
+            expect_terminal_value(reference, maximum)
+        close_terminal_contract_map(map)
+
+    it "keeps the first failed publication and its signed boundary code":
+        val map = terminal_contract_map()
+        val code = -9223372036854775807i64 - 1i64
+        unsafe(capabilities: [ffi]):
+            val reference = map.request(3, 303).unwrap()
+            expect(reference.try_start()).to_equal(true)
+            expect(reference.fail(code).unwrap()).to_equal(true)
+            expect(reference.complete(9223372036854775807i64).unwrap()).to_equal(false)
+            expect(reference.fail(0).unwrap()).to_equal(false)
+            match reference.try_ready():
+                case AsyncRefStateI64.Failed(observed): expect(observed).to_equal(code)
+                case state: fail("first failure was not retained: {state}")
+        close_terminal_contract_map(map)
+
+    it "does not start a producer after a failed result is terminal":
+        val map = terminal_contract_map()
+        unsafe(capabilities: [ffi]):
+            val reference = map.request(4, 404).unwrap()
+            expect(reference.try_start()).to_equal(true)
+            expect(reference.fail(-404).unwrap()).to_equal(true)
+            expect(reference.try_start()).to_equal(false)
+            match reference.try_ready():
+                case AsyncRefStateI64.Failed(code): expect(code).to_equal(-404)
+                case state: fail("producer start changed terminal failure: {state}")
+        close_terminal_contract_map(map)

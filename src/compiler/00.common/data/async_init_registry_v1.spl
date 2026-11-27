@@ -1,0 +1,61 @@
+# Registered async initialization gate (immutable-views plan section 3.3-3.4,
+# phase P3): doc/03_plan/compiler/data/immutable_views_async_init_revisions_2026-11-13.md
+#
+# A pending attribute is a write-once cell keyed `(arena, generation, node,
+# attr)`. The once-only state machine, waiter release, failure propagation and
+# cycle check are the existing `phase_cell_*_v1` cells in
+# node_lifecycle_contracts.spl; this module adds only the checks they lack: a
+# producer/declared type match (E_ASYNC_INIT_TYPE), an epoch fence so a task of
+# a superseded build attempt cannot publish (E_ASYNC_INIT_STALE), and the
+# guarantee that a node with no registered producer owns no slot at all.
+# Values are state-machine transitions returning a new registry (lockless); the
+# runtime binding must agree with these outcomes.
+use compiler.common.data.node_lifecycle_contracts.*
+
+pub struct AsyncInitRegistryV1:
+    cells: PhaseCellTableV1
+    epoch: i64
+
+pub fn async_init_registry_new_v1(epoch: i64) -> AsyncInitRegistryV1:
+    AsyncInitRegistryV1(cells: phase_cell_table_new_v1(), epoch: epoch)
+
+pub fn async_init_key_v1(arena: i64, generation: i64, node: i64, attr: text) -> text:
+    phase_cell_key_v1("{arena}:{generation}", "{node}:{attr}")
+
+# Number of live slots. A registry with no registered producer reports 0, which
+# is the whole per-node cost of the feature for fully synchronous nodes.
+pub fn async_init_slot_count_v1(reg: AsyncInitRegistryV1) -> i64:
+    reg.cells.cells.len()
+
+pub fn async_init_declare_v1(reg: AsyncInitRegistryV1, arena: i64, generation: i64, node: i64, attr: text,
+                             declared_type: text, producer_type: text) -> Result<AsyncInitRegistryV1, text>:
+    if declared_type != producer_type:
+        return Err("E_ASYNC_INIT_TYPE: producer yields `{producer_type}` but attribute `{attr}` is `{declared_type}`")
+    val declared = phase_cell_declare_v1(reg.cells, "{arena}:{generation}", "{node}:{attr}")
+    match declared:
+        case Ok(table): Ok(AsyncInitRegistryV1(cells: table, epoch: reg.epoch))
+        case Err(why): Err("E_ASYNC_INIT_DUPLICATE: " + why)
+
+fn async_init_fence_v1(reg: AsyncInitRegistryV1, key: text, epoch: i64) -> Result<bool, text>:
+    if epoch != reg.epoch:
+        return Err("E_ASYNC_INIT_STALE: '{key}' was completed by build epoch {epoch}, current epoch is {reg.epoch}")
+    Ok(true)
+
+pub fn async_init_publish_v1(reg: AsyncInitRegistryV1, key: text, epoch: i64, value: text) -> Result<(AsyncInitRegistryV1, [text]), text>:
+    async_init_fence_v1(reg, key, epoch)?
+    val settled = phase_cell_publish_v1(reg.cells, key, value)?
+    Ok((AsyncInitRegistryV1(cells: settled.0, epoch: reg.epoch), settled.1))
+
+pub fn async_init_fail_v1(reg: AsyncInitRegistryV1, key: text, epoch: i64, reason: text) -> Result<(AsyncInitRegistryV1, [text]), text>:
+    async_init_fence_v1(reg, key, epoch)?
+    val settled = phase_cell_fail_v1(reg.cells, key, reason)?
+    Ok((AsyncInitRegistryV1(cells: settled.0, epoch: reg.epoch), settled.1))
+
+# Cancellation is a terminal failure with the reason "cancelled"; waiters are
+# released exactly as for any other failure.
+pub fn async_init_cancel_v1(reg: AsyncInitRegistryV1, key: text, epoch: i64) -> Result<(AsyncInitRegistryV1, [text]), text>:
+    async_init_fail_v1(reg, key, epoch, "cancelled")
+
+pub fn async_init_await_v1(reg: AsyncInitRegistryV1, consumer: text, producer: text) -> Result<(AsyncInitRegistryV1, PhaseAwaitOutcomeV1), text>:
+    val waited = phase_cell_await_v1(reg.cells, consumer, producer)?
+    Ok((AsyncInitRegistryV1(cells: waited.0, epoch: reg.epoch), waited.1))

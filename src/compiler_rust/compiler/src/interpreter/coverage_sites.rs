@@ -317,6 +317,7 @@ impl SiteWalker {
             Expr::Tuple(items) | Expr::Array(items) | Expr::VecLiteral(items) => self.exprs(items.iter()),
             Expr::LabeledTuple(fields) => self.exprs(fields.iter().map(|f| &f.value)),
             Expr::ArrayRepeat { value, count } => self.exprs([value.as_ref(), count.as_ref()]),
+            Expr::GenericInst { expr, .. } => self.expr(expr),
             Expr::Dict(pairs) => {
                 for (k, v) in pairs {
                     self.expr(k);

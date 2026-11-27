@@ -66,3 +66,5 @@ live", and that can be tested without any defect at all.
 Found by the bootstrap-critical triage lane while working an unrelated row; the
 W5 file itself was never edited by that lane. Cross-checked here before filing:
 `610ce80229e` exists and is the i64 render fix; `:154` and `:120` read as quoted.
+
+**Revalidated 2026-11-02: still plausible because OPEN — needs the owning lane (W5) to re-base its control; no merged fix commit with a passing regression is cited in this doc.**

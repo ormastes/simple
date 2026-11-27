@@ -1,0 +1,290 @@
+# Multi-File All-or-Nothing Fix Preconditions Specification (ED-T16, ED-T28)
+# @req REQ-DIAG-011
+# @cover src/lib/common/diagnostics/fix_transaction.spl
+# @cover src/lib/nogc_sync_mut/lsp/lsp_handlers.spl
+# @cover src/lib/nogc_sync_mut/lsp/lsp_diag_code_action.spl
+# @cover src/lib/nogc_sync_mut/lsp/lsp_code_action_handler.spl
+"""
+## Purpose and audience
+
+Executable TDD specification for Wave E4 (`WP-03`, `[C11]`, `ED-T16`, `ED-T28`):
+verifies that multi-file fixes parsed from `check --format=json` retain each
+replacement's own target `"file"` and explicit `"preconditions"`, that
+`EditTransaction.expect_document_revision(file, version, source_hash)` validates
+independent per-file `(version, source_hash)` and byte-span preconditions before
+mutating any document (strict all-or-nothing refusal when any second file drifts),
+and that live `codeAction` binds per-client multi-file snapshots and refuses stale
+or drifted secondary files.
+"""
+
+use std.spec
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use std.common.diagnostics.diagnostic_v1.{DiagnosticFixConfidence}
+use std.common.diagnostics.diagnostic_batch.{FixCandidate}
+use std.common.diagnostics.fix_transaction.{ApplyStatus, DocumentSnapshot, EditTransaction}
+use std.common.diagnostics.span.{Span}
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_serialize}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{
+    lsp_document_open_for_client_v1,
+    lsp_document_change_for_client_v1,
+    lsp_document_close_for_client_v1
+}
+use std.nogc_sync_mut.lsp.lsp_diag_action_store.{lsp_diag_action_store_clear_for_client_v1}
+use std.nogc_sync_mut.lsp.lsp_code_action_handler.{lsp_code_action_response_for_client_v1}
+use std.nogc_sync_mut.lsp.lsp_handlers.{
+    lsp_check_json_parse_v1,
+    lsp_diag_record_batch_for_client_v1
+}
+
+fn span_json(start: i64, end: i64, line_no: i64, col_no: i64) -> JsonValue:
+    json_value_object_from([
+        ("start", JsonValue.Int(start)),
+        ("end", JsonValue.Int(end)),
+        ("line", JsonValue.Int(line_no)),
+        ("col", JsonValue.Int(col_no))
+    ])
+
+fn multifile_check_json(file_a: text, file_b: text) -> text:
+    val rep_a = json_value_object_from([
+        ("file", JsonValue.Str("")),
+        ("span", span_json(10, 18, 2, 5)),
+        ("new_text", JsonValue.Str("new_call"))
+    ])
+    val rep_b = json_value_object_from([
+        ("file", JsonValue.Str(file_b)),
+        ("span", span_json(7, 15, 1, 8)),
+        ("new_text", JsonValue.Str("new_call"))
+    ])
+    val pre_a = json_value_object_from([
+        ("file", JsonValue.Str(file_a)),
+        ("span", span_json(10, 18, 2, 5)),
+        ("expected_text", JsonValue.Str("old_call"))
+    ])
+    val pre_b = json_value_object_from([
+        ("file", JsonValue.Str(file_b)),
+        ("span", span_json(7, 15, 1, 8)),
+        ("expected_text", JsonValue.Str("old_call"))
+    ])
+    val fix = json_value_object_from([
+        ("id", JsonValue.Str("fx_rename_pair")),
+        ("title", JsonValue.Str("Rename old_call across caller and callee")),
+        ("description", JsonValue.Str("Synchronize caller and callee symbol spelling")),
+        ("confidence", JsonValue.Str("safe")),
+        ("replacements", JsonValue.Array([rep_a, rep_b])),
+        ("preconditions", JsonValue.Array([pre_a, pre_b]))
+    ])
+    val diag = json_value_object_from([
+        ("severity", JsonValue.Int(1)),
+        ("code", JsonValue.Str("E0425")),
+        ("message", JsonValue.Str("deprecated cross-module symbol old_call")),
+        ("line", JsonValue.Int(2)),
+        ("col", JsonValue.Int(5)),
+        ("fixes", JsonValue.Array([fix]))
+    ])
+    val entry = json_value_object_from([
+        ("file", JsonValue.Str(file_a)),
+        ("diagnostics", JsonValue.Array([diag]))
+    ])
+    json_value_serialize(JsonValue.Array([entry]))
+
+fn code_action_req(uri: text, line_no: i64) -> text:
+    val doc = json_value_object_from([("uri", JsonValue.Str(uri))])
+    val pos = json_value_object_from([("line", JsonValue.Int(line_no)), ("character", JsonValue.Int(4))])
+    val rng = json_value_object_from([("start", pos), ("end", pos)])
+    json_value_serialize(json_value_object_from([("textDocument", doc), ("range", rng)]))
+
+describe "Multi-file fix candidate JSON parsing and all-or-nothing revision preconditions (ED-T16, ED-T28)":
+    """
+    Verifies multi-file JSON fix preservation, per-file EditTransaction revision
+    preconditions, atomic rollback on secondary file drift, and live codeAction wiring.
+    """
+
+    context "when parsing multi-file fixes from check --format=json":
+        """
+        Ensures each replacement and precondition keeps its own file identity.
+        """
+
+        it "preserves each replacement file and precondition instead of clobbering with fix_file":
+            """
+            Empty replacement file falls back to fix_file while explicit secondary file paths stay intact.
+            """
+            step("Parse check JSON containing replacements and preconditions on /w/caller.spl and /w/callee.spl")
+            val batch = lsp_check_json_parse_v1(multifile_check_json("/w/caller.spl", "/w/callee.spl"), "/w/caller.spl", 3)
+            expect(batch.valid).to_equal(true)
+            expect(batch.ids.len()).to_equal(1)
+            val candidates = batch.index.candidates_for(batch.ids[0])
+            expect(candidates.len()).to_equal(1)
+
+            val cand = candidates[0]
+            expect(cand.affected_files()).to_equal(["/w/caller.spl", "/w/callee.spl"])
+            expect(cand.replacements[0].file).to_equal("/w/caller.spl")
+            expect(cand.replacements[1].file).to_equal("/w/callee.spl")
+            expect(cand.preconditions.len()).to_equal(2)
+            expect(cand.preconditions[0].file).to_equal("/w/caller.spl")
+            expect(cand.preconditions[0].expected_text).to_equal("old_call")
+            expect(cand.preconditions[1].file).to_equal("/w/callee.spl")
+            expect(cand.preconditions[1].expected_text).to_equal("old_call")
+
+    context "when applying multi-file candidates through EditTransaction with per-file expectations":
+        """
+        Validates independent (version, source_hash) expectations and strict all-or-nothing refusal.
+        """
+
+        it "applies a two-file fix atomically when both files match independent versions and source hashes":
+            """
+            Two files with different versions (3 vs 11) and different SHA-256 hashes apply together cleanly.
+            """
+            val caller_body = "fn run():\n    old_call()\n"
+            val callee_body = "pub fn old_call():\n    1\n"
+            val caller_hash = sha256_text(caller_body)
+            val callee_hash = sha256_text(callee_body)
+
+            val cand = FixCandidate.new("fx_pair", "Rename old_call", "", DiagnosticFixConfidence.Safe, 3)
+                .with_replacement("/w/caller.spl", Span.new(14, 22, 2, 5), "new_call", "old_call")
+                .with_replacement("/w/callee.spl", Span.new(7, 15, 1, 8), "new_call", "old_call")
+
+            step("Register per-file expected revisions (v3 for caller, v11 for callee) and apply")
+            val tx = EditTransaction.new("/w", caller_hash)
+                .expect_document_revision("/w/caller.spl", 3, caller_hash)
+                .expect_document_revision("/w/callee.spl", 11, callee_hash)
+                .with_document(DocumentSnapshot.new("/w/caller.spl", 3, caller_hash, caller_body))
+                .with_document(DocumentSnapshot.new("/w/callee.spl", 11, callee_hash, callee_body))
+
+            val res = tx.apply(cand)
+            expect(res.status.name()).to_equal("applied")
+            expect(res.changed_files).to_equal(["/w/caller.spl", "/w/callee.spl"])
+            expect(res.text_of("/w/caller.spl")).to_equal("fn run():\n    new_call()\n")
+            expect(res.text_of("/w/callee.spl")).to_equal("pub fn new_call():\n    1\n")
+
+        it "refuses with stale_version and mutates zero files when the second file version drifts":
+            """
+            Version drift in callee.spl (11 -> 12) aborts the entire transaction leaving caller.spl untouched.
+            """
+            val caller_body = "fn run():\n    old_call()\n"
+            val callee_body = "pub fn old_call():\n    2\n"
+            val caller_hash = sha256_text(caller_body)
+            val callee_hash = sha256_text(callee_body)
+
+            val cand = FixCandidate.new("fx_pair", "Rename old_call", "", DiagnosticFixConfidence.Safe, 3)
+                .with_replacement("/w/caller.spl", Span.new(14, 22, 2, 5), "new_call", "old_call")
+                .with_replacement("/w/callee.spl", Span.new(7, 15, 1, 8), "new_call", "old_call")
+
+            step("Advance callee snapshot to version 12 while expectation remains version 11")
+            val tx = EditTransaction.new("/w", caller_hash)
+                .expect_document_revision("/w/caller.spl", 3, caller_hash)
+                .expect_document_revision("/w/callee.spl", 11, callee_hash)
+                .with_document(DocumentSnapshot.new("/w/caller.spl", 3, caller_hash, caller_body))
+                .with_document(DocumentSnapshot.new("/w/callee.spl", 12, callee_hash, callee_body))
+
+            val res = tx.apply(cand)
+            expect(res.status.name()).to_equal("stale_version")
+            expect(res.changed_files.len()).to_equal(0)
+            expect(res.text_of("/w/caller.spl")).to_equal(caller_body)
+            expect(res.text_of("/w/callee.spl")).to_equal(callee_body)
+            expect(res.reason).to_contain("/w/callee.spl")
+
+        it "refuses with stale_hash and mutates zero files when the second file hash drifts":
+            """
+            Source hash drift in callee.spl aborts the entire transaction leaving caller.spl untouched.
+            """
+            val caller_body = "fn run():\n    old_call()\n"
+            val callee_orig = "pub fn old_call():\n    1\n"
+            val callee_drifted = "pub fn old_call():\n    999\n"
+            val caller_hash = sha256_text(caller_body)
+
+            val cand = FixCandidate.new("fx_pair", "Rename old_call", "", DiagnosticFixConfidence.Safe, 3)
+                .with_replacement("/w/caller.spl", Span.new(14, 22, 2, 5), "new_call", "old_call")
+                .with_replacement("/w/callee.spl", Span.new(7, 15, 1, 8), "new_call", "old_call")
+
+            step("Provide drifted callee hash at same version 11")
+            val tx = EditTransaction.new("/w", caller_hash)
+                .expect_document_revision("/w/caller.spl", 3, caller_hash)
+                .expect_document_revision("/w/callee.spl", 11, sha256_text(callee_orig))
+                .with_document(DocumentSnapshot.new("/w/caller.spl", 3, caller_hash, caller_body))
+                .with_document(DocumentSnapshot.new("/w/callee.spl", 11, sha256_text(callee_drifted), callee_drifted))
+
+            val res = tx.apply(cand)
+            expect(res.status.name()).to_equal("stale_hash")
+            expect(res.changed_files.len()).to_equal(0)
+            expect(res.text_of("/w/caller.spl")).to_equal(caller_body)
+            expect(res.text_of("/w/callee.spl")).to_equal(callee_drifted)
+
+        it "refuses with precondition_mismatch or out_of_bounds when the second file span drifts or shrinks":
+            """
+            Byte-span text mismatch and shortened secondary files refuse cleanly without partial edits or panics.
+            """
+            val caller_body = "fn run():\n    old_call()\n"
+            val callee_renamed = "pub fn alt_call():\n    1\n"
+            val callee_short = "fn x()\n"
+            val caller_hash = sha256_text(caller_body)
+            val renamed_hash = sha256_text(callee_renamed)
+            val short_hash = sha256_text(callee_short)
+
+            val cand = FixCandidate.new("fx_pair", "Rename old_call", "", DiagnosticFixConfidence.Safe, 3)
+                .with_replacement("/w/caller.spl", Span.new(14, 22, 2, 5), "new_call", "old_call")
+                .with_replacement("/w/callee.spl", Span.new(7, 15, 1, 8), "new_call", "old_call")
+
+            step("Check precondition_mismatch when callee span holds alt_call instead of old_call")
+            val res_mismatch = EditTransaction.new("/w", caller_hash)
+                .expect_document_revision("/w/caller.spl", 3, caller_hash)
+                .expect_document_revision("/w/callee.spl", 11, renamed_hash)
+                .with_document(DocumentSnapshot.new("/w/caller.spl", 3, caller_hash, caller_body))
+                .with_document(DocumentSnapshot.new("/w/callee.spl", 11, renamed_hash, callee_renamed))
+                .apply(cand)
+            expect(res_mismatch.status.name()).to_equal("precondition_mismatch")
+            expect(res_mismatch.text_of("/w/caller.spl")).to_equal(caller_body)
+
+            step("Check out_of_bounds when callee shortened below replacement/precondition span")
+            val res_oob = EditTransaction.new("/w", caller_hash)
+                .expect_document_revision("/w/caller.spl", 3, caller_hash)
+                .expect_document_revision("/w/callee.spl", 11, short_hash)
+                .with_document(DocumentSnapshot.new("/w/caller.spl", 3, caller_hash, caller_body))
+                .with_document(DocumentSnapshot.new("/w/callee.spl", 11, short_hash, callee_short))
+                .apply(cand)
+            expect(res_oob.status.name()).to_equal("out_of_bounds")
+            expect(res_oob.text_of("/w/caller.spl")).to_equal(caller_body)
+
+    context "when serving live multi-file codeActions across client overlays":
+        """
+        Verifies live codeAction binds per-file revisions for the requesting client and refuses drift.
+        """
+
+        it "emits versioned multi-file documentChanges when current and refuses with -32801 once callee drifts":
+            """
+            Client-m receives edits for both files at v3 and v9, ignores other clients, and refuses once callee moves to v10.
+            """
+            val client = "client-multifile"
+            val other_client = "client-bystander"
+            val uri_a = "file:///w/caller.spl"
+            val uri_b = "file:///w/callee.spl"
+            val src_a = "fn run():\nold_call()\n"
+            val src_b = "pub fn old_call():\n    1\n"
+
+            step("Open caller (v3) and callee (v9) in client-multifile and record multi-file check batch")
+            expect(lsp_document_open_for_client_v1(client, uri_a, 3, src_a)).to_equal(true)
+            expect(lsp_document_open_for_client_v1(client, uri_b, 9, src_b)).to_equal(true)
+            val parsed = lsp_check_json_parse_v1(multifile_check_json("/w/caller.spl", "/w/callee.spl"), "/w/caller.spl", 3)
+            lsp_diag_record_batch_for_client_v1(client, uri_a, parsed)
+
+            step("Unrelated edits in another client must not disturb client-multifile")
+            expect(lsp_document_open_for_client_v1(other_client, uri_b, 99, "pub fn unrelated():\n    0\n")).to_equal(true)
+
+            val ok_json = lsp_code_action_response_for_client_v1(client, "71", code_action_req(uri_a, 1), "")
+            expect(ok_json).to_contain("Rename old_call across caller and callee")
+            expect(ok_json).to_contain("file:///w/caller.spl")
+            expect(ok_json).to_contain("\"version\":3")
+            expect(ok_json).to_contain("file:///w/callee.spl")
+            expect(ok_json).to_contain("\"version\":9")
+
+            step("Advance callee to v10 in client-multifile: codeAction refuses with -32801 and emits zero edits")
+            expect(lsp_document_change_for_client_v1(client, uri_b, 10, "pub fn old_call():\n    2\n")).to_equal(true)
+            val drifted_json = lsp_code_action_response_for_client_v1(client, "72", code_action_req(uri_a, 1), "")
+            expect(drifted_json).to_contain("-32801")
+            expect(drifted_json).to_contain("/w/callee.spl")
+            expect(drifted_json.contains("documentChanges")).to_equal(false)
+
+            lsp_diag_action_store_clear_for_client_v1(client, uri_a)
+            expect(lsp_document_close_for_client_v1(client, uri_a)).to_equal(true)
+            expect(lsp_document_close_for_client_v1(client, uri_b)).to_equal(true)
+            expect(lsp_document_close_for_client_v1(other_client, uri_b)).to_equal(true)

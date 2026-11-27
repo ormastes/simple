@@ -1,0 +1,37 @@
+# Shared strict-SDN field readers for provider request/policy records.
+# Pure data only: decoding grants no runtime, filesystem or engine authority.
+# Extracted from byte-identical copies in the Windows Docker request/policy
+# codecs and the Linux OCI request/engine-policy codecs (design §16.5.6).
+# Backend limits (array maximum and its message) stay with each leaf caller.
+use std.common.contracts.orchestration.resource_v1.{RejectionV1, reject, as_array, as_int, require}
+use std.common.sdn.value.{SdnValue, SdnSpan}
+
+pub fn container_record_text_array_v1(values: [text]) -> SdnValue:
+    var items: [SdnValue] = []
+    for value in values: items.push(SdnValue.String(value))
+    SdnValue.Array(items)
+
+pub fn container_record_string_v1(value: SdnValue, path: text,
+        spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    match value:
+        case SdnValue.String(content): Ok(content)
+        case _: Err(reject("type", path, "expected text", spans))
+
+pub fn container_record_text_v1(fields: Dict<text, SdnValue>, key: text,
+        spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    container_record_string_v1(require(fields, key, "", spans)?, key, spans)
+
+pub fn container_record_integer_v1(fields: Dict<text, SdnValue>, key: text,
+        spans: Dict<text, SdnSpan>) -> Result<i64, RejectionV1>:
+    as_int(require(fields, key, "", spans)?, key, spans)
+
+pub fn container_record_texts_v1(fields: Dict<text, SdnValue>, key: text,
+        spans: Dict<text, SdnSpan>, maximum: i64, limit_message: text) -> Result<[text], RejectionV1>:
+    val values = as_array(require(fields, key, "", spans)?, key, spans)?
+    if values.len() > maximum: return Err(reject("limit", key, limit_message, spans))
+    var strings: [text] = []
+    var index = 0
+    for value in values:
+        strings.push(container_record_string_v1(value, key + "." + index.to_text(), spans)?)
+        index = index + 1
+    Ok(strings)

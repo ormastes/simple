@@ -1,0 +1,44 @@
+# Integration layer, I/O and crypto: an AUTHENTIC database whose SQLite header is
+# unsupported.
+#
+# The variant is encrypted and authenticated correctly with the public key, but
+# the text-encoding header field says UTF-32, which the reader does not support.
+# Every page authenticates and decrypts (nine pages, about 45 s each on the
+# Phase 1 seed), so this file holds a single open and nothing else expensive.
+# Lifecycle: doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md ;
+# doc/03_plan/agent_tasks/devhub_messenger_master.md ;
+# doc/04_architecture/app/devhub/messenger_gateway.md ;
+# doc/05_design/app/devhub/messenger_sdn_and_api.md
+# @manual_section: storage-port-authentic-corruption
+
+"""
+## Purpose and audience
+Purpose: correct authentication is not enough; a database that authenticates but
+carries an unsupported header must be rejected as corrupt, not served.
+Audience: reviewers of the encrypted read path. The passphrase is public
+synthetic test data from dense_ground_truth.json.
+"""
+
+use std.spec.*
+use test.support.devhub_messenger_dense.*
+use std.common.json.value.{JsonValue, json_value_field}
+
+val truth = dense_truth()
+val good = truth_passphrase(truth)
+val _secret_ready = dense_set_secret(good)
+val dn_invalid = port_verdict(dense_path("dense_multipage_invalid_header.sqlcipher4"), "sqlcipher4", DENSE_REF)
+
+describe "authentic but unsupported database":
+    it "rejects an authenticated database whose header declares an unsupported text encoding":
+        # @req REQ-MSGR-DENSE-HEADER-001
+        step("Open the variant authenticated with the public key whose header text encoding is 4")
+        # @capture(protocol_json): storage-port error code and message for the unsupported header
+        expect(verdict_code(dn_invalid)).to_equal("STORAGE_PORT_CORRUPT_SOURCE")
+        expect(leaks_none(dn_invalid, [good, "SQLite format", "tie-first", "fresh general"])).to_equal(true)
+
+    it "leaves the variant byte-identical to the generator's hashlib digest":
+        # @req REQ-MSGR-DENSE-HEADER-002
+        step("Hash the variant after the rejected open and compare with the recorded digest")
+        # @capture(statistics): sha256 of the variant against dense_ground_truth.json
+        val files = json_value_field(truth, "files")
+        expect(dense_file_sha256("dense_multipage_invalid_header.sqlcipher4")).to_equal(tf(json_value_field(files, "dense_multipage_invalid_header.sqlcipher4"), "sha256"))

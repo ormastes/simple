@@ -252,6 +252,23 @@ pub enum MirLowerError {
     CircularDependency(String),
 }
 
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(super) struct SpecializationKey {
+    pub(super) base_name: String,
+    pub(super) type_targets: Vec<(String, TypeId)>,
+    pub(super) const_values: Vec<(String, i64)>,
+    pub(super) local_overrides: Vec<(usize, TypeId)>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct PendingSpecialization {
+    pub(super) spec_name: String,
+    pub(super) base_name: String,
+    pub(super) type_targets: HashMap<String, TypeId>,
+    pub(super) const_values: HashMap<String, i64>,
+    pub(super) local_type_overrides: HashMap<usize, TypeId>,
+}
+
 pub type MirLowerResult<T> = Result<T, MirLowerError>;
 
 /// Lowers HIR to MIR with explicit state tracking
@@ -263,6 +280,12 @@ pub struct MirLowerer<'a> {
     pub(super) refined_types: Option<&'a std::collections::HashMap<String, crate::hir::HirRefinedType>>,
     /// Reference to type registry for looking up unit type constraints
     pub(super) type_registry: Option<&'a crate::hir::TypeRegistry>,
+    /// Set while lowering the operand of a checked `rt_unwrap_or_trap` whose
+    /// operand is a slot-yielding array accessor (`first`/`last`/`pop`/
+    /// `remove`). The accessor then returns the RAW tagged slot so the checked
+    /// helper can test nil before the scalar unbox, which the builtin site
+    /// performs afterwards. Consumed (reset) by the accessor lowering.
+    pub(super) defer_accessor_unbox: bool,
     /// Locals whose DECLARED type is type-erased (unnamed / `Any`) but whose
     /// single reaching definition is a named CLASS type, recomputed per
     /// function by `compute_single_assignment_class_types`.
@@ -298,6 +321,13 @@ pub struct MirLowerer<'a> {
     /// instead of copying it; recomputed per function by
     /// `array_move::compute_array_move_sites`.
     pub(super) array_move_sites: super::array_move::ArrayMoveSites,
+    /// S1 block-end array release (`array_move.rs`): enabled only on the
+    /// in-process JIT lane (`lower_to_mir_jit`); other lanes keep the leak.
+    pub(super) block_array_release: bool,
+    /// Locals of the current function whose `Let` stored a fresh array buffer
+    /// raw into the slot (literal or emitted `rt_array_copy`), with the slot
+    /// type. A release needs this AND `array_move_sites.block_release_locals`.
+    pub(super) block_release_ready: HashMap<usize, TypeId>,
     /// Reference to trait infos for vtable slot resolution (static polymorphism)
     pub(super) trait_infos: Option<&'a std::collections::HashMap<String, crate::hir::HirTraitInfo>>,
     /// Project-wide trait implementations for cross-module vtable dispatch.
@@ -312,6 +342,8 @@ pub struct MirLowerer<'a> {
     pub(super) available_functions: HashSet<String>,
     /// Parameter types for direct function calls whose global expression only carries return type.
     pub(super) function_param_types: HashMap<String, Vec<TypeId>>,
+    /// Imported function names visible in the current module (from `use` declarations).
+    pub(super) imported_function_names: HashSet<String>,
     /// Cross-module private-helper collisions: bare `_name` defined by several
     /// co-compiled files with differing signatures (import flattening merges
     /// them; codegen name maps are last-write-wins → wrong-variant dispatch /
@@ -397,6 +429,25 @@ pub struct MirLowerer<'a> {
     /// layout-aware `rt_typed_words_i64_*` lane (default on; off for freestanding
     /// runtimes that do not define it).
     pub(super) signed_word_lane: bool,
+    /// Parameters of the lambda bodies being lowered: `(local index, type)`,
+    /// innermost last. A lambda parameter's local index is only live inside
+    /// its body and is REUSED by a later local of the enclosing function, so
+    /// the function's local table must not be consulted for it
+    /// (`recover_receiver_type`): `val f = \i: xs[i]` read `f`'s own slot type
+    /// for `i` and indexed with the tagged word.
+    pub(super) lambda_param_types: Vec<(usize, TypeId)>,
+    /// HIR functions indexed by name for generic/const-generic specialization.
+    pub(super) hir_functions_by_name: HashMap<String, HirFunction>,
+    /// Queue of specialized HIR functions discovered while lowering call sites.
+    pub(super) pending_specializations: Vec<PendingSpecialization>,
+    /// Cache of specialization key -> emitted specialized MIR function name.
+    pub(super) specialization_cache: HashMap<SpecializationKey, String>,
+    /// Active type parameter -> concrete TypeId bindings while lowering a specialized body.
+    pub(super) active_type_param_targets: HashMap<String, TypeId>,
+    /// Active const generic parameter -> integer value bindings while lowering a specialized body.
+    pub(super) active_const_generic_values: HashMap<String, i64>,
+    /// Active local/param TypeId overrides (e.g., concrete iter type inside specialized from_iter).
+    pub(super) active_local_type_overrides: HashMap<usize, TypeId>,
 }
 
 impl<'a> MirLowerer<'a> {
@@ -406,11 +457,14 @@ impl<'a> MirLowerer<'a> {
             contract_mode: ContractMode::All,
             refined_types: None,
             type_registry: None,
+            defer_accessor_unbox: false,
             erased_local_class_types: HashMap::new(),
             local_type_name_hints: HashMap::new(),
             local_trait_dispatch: HashMap::new(),
             type_value_kinds: HashMap::new(),
             array_move_sites: Default::default(),
+            block_array_release: false,
+            block_release_ready: HashMap::new(),
             trait_infos: None,
             global_trait_impls: None,
             di_config: None,
@@ -418,6 +472,7 @@ impl<'a> MirLowerer<'a> {
             inject_functions: HashMap::new(),
             available_functions: HashSet::new(),
             function_param_types: HashMap::new(),
+            imported_function_names: HashSet::new(),
             private_dup_overloads: HashMap::new(),
             extern_fn_name_set: HashSet::new(),
             global_types: HashMap::new(),
@@ -446,6 +501,13 @@ impl<'a> MirLowerer<'a> {
             dead_append_array_locals: HashSet::new(),
             array_push_returns_header: false,
             signed_word_lane: true,
+            lambda_param_types: Vec::new(),
+            hir_functions_by_name: HashMap::new(),
+            pending_specializations: Vec::new(),
+            specialization_cache: HashMap::new(),
+            active_type_param_targets: HashMap::new(),
+            active_const_generic_values: HashMap::new(),
+            active_local_type_overrides: HashMap::new(),
         }
     }
 
@@ -456,11 +518,14 @@ impl<'a> MirLowerer<'a> {
             contract_mode,
             refined_types: None,
             type_registry: None,
+            defer_accessor_unbox: false,
             erased_local_class_types: HashMap::new(),
             local_type_name_hints: HashMap::new(),
             local_trait_dispatch: HashMap::new(),
             type_value_kinds: HashMap::new(),
             array_move_sites: Default::default(),
+            block_array_release: false,
+            block_release_ready: HashMap::new(),
             trait_infos: None,
             global_trait_impls: None,
             di_config: None,
@@ -468,6 +533,7 @@ impl<'a> MirLowerer<'a> {
             inject_functions: HashMap::new(),
             available_functions: HashSet::new(),
             function_param_types: HashMap::new(),
+            imported_function_names: HashSet::new(),
             private_dup_overloads: HashMap::new(),
             extern_fn_name_set: HashSet::new(),
             global_types: HashMap::new(),
@@ -489,6 +555,7 @@ impl<'a> MirLowerer<'a> {
             dead_append_array_locals: HashSet::new(),
             array_push_returns_header: false,
             signed_word_lane: true,
+            lambda_param_types: Vec::new(),
             decision_counter: 0,
             condition_counters: HashMap::new(),
             path_counter: 0,
@@ -496,6 +563,12 @@ impl<'a> MirLowerer<'a> {
             last_expr_value: None,
             block_expr_tail: None,
             current_decision_span: None,
+            hir_functions_by_name: HashMap::new(),
+            pending_specializations: Vec::new(),
+            specialization_cache: HashMap::new(),
+            active_type_param_targets: HashMap::new(),
+            active_const_generic_values: HashMap::new(),
+            active_local_type_overrides: HashMap::new(),
         }
     }
 
@@ -522,15 +595,26 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
-    pub(super) fn array_local_for_len_expr(expr: &HirExpr) -> Option<usize> {
+    /// The array local whose `.len()` this expression is. Only an array
+    /// receiver qualifies: the loop preheader hoists `rt_array_data_ptr` from
+    /// it, which a tuple or text local does not have.
+    /// Bug: seed_jit_len_bound_proof_accepts_non_array_receiver_2026-11-27
+    pub(super) fn array_local_for_len_expr(&self, expr: &HirExpr) -> Option<usize> {
         match &expr.kind {
             HirExprKind::MethodCall {
                 receiver, method, args, ..
-            } if args.is_empty() && method == "len" => Self::local_index_for_expr(receiver),
+            } if args.is_empty()
+                && method == "len"
+                && self
+                    .type_registry
+                    .is_some_and(|tr| matches!(tr.get(receiver.ty), Some(crate::hir::HirType::Array { .. }))) =>
+            {
+                Self::local_index_for_expr(receiver)
+            }
             HirExprKind::MethodCall {
                 receiver, method, args, ..
             } if args.is_empty() && matches!(method.as_str(), "to_u64" | "to_i64" | "to_usize") => {
-                Self::array_local_for_len_expr(receiver)
+                self.array_local_for_len_expr(receiver)
             }
             _ => None,
         }
@@ -558,7 +642,7 @@ impl<'a> MirLowerer<'a> {
     pub(super) fn record_len_local_source(&mut self, local_index: usize, value: Option<&HirExpr>) {
         self.len_local_sources.remove(&local_index);
         self.len_local_sources.retain(|_, array_idx| *array_idx != local_index);
-        if let Some(array_local_index) = value.and_then(Self::array_local_for_len_expr) {
+        if let Some(array_local_index) = value.and_then(|v| self.array_local_for_len_expr(v)) {
             self.len_local_sources.insert(local_index, array_local_index);
         }
     }
@@ -1165,6 +1249,12 @@ impl<'a> MirLowerer<'a> {
     /// so push emissions must capture the call result as the post-grow array
     /// value. Defaults to false (canonical hosted bool-return, stable-header
     /// push ABI).
+    /// Enable the S1 block-end `rt_array_free` emission (JIT lane only).
+    pub fn with_block_array_release(mut self, enabled: bool) -> Self {
+        self.block_array_release = enabled;
+        self
+    }
+
     pub fn with_signed_word_lane(mut self, enabled: bool) -> Self {
         self.signed_word_lane = enabled;
         self
@@ -1224,10 +1314,7 @@ impl<'a> MirLowerer<'a> {
                 let object_reg = self.lower_expr(object)?;
                 let field_index = *field_index;
                 let byte_offset = (field_index as u32) * 8;
-                let owner_name = self
-                    .type_registry
-                    .and_then(|registry| registry.get_type_name(object.ty))
-                    .map(str::to_owned);
+                let owner_name = self.field_owner_name(object, object.ty);
                 self.with_func(|func, current_block| {
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::FieldSet {
@@ -1284,6 +1371,50 @@ impl<'a> MirLowerer<'a> {
     /// trap, so DEAD duck-typed sites cost nothing (unit stays JIT) and LIVE
     /// ones fail loudly instead of silently (bug
     /// jit_game2d_backend_method_dispatch_sigsegv_2026-07-02).
+    /// Bare (undotted) owners in the unit that declare `method`, minus `exclude`.
+    pub(super) fn method_owners(&self, method: &str, exclude: Option<&str>) -> Vec<&str> {
+        let suffix = format!(".{method}");
+        let mut owners: Vec<&str> = self
+            .available_functions
+            .iter()
+            .filter_map(|name| name.strip_suffix(suffix.as_str()))
+            .filter(|owner| !owner.contains('.') && Some(*owner) != exclude)
+            .collect();
+        owners.sort_unstable();
+        owners.dedup();
+        owners
+    }
+
+    /// Classes that provide EVERY method `trait_info` declares, whether or not
+    /// they declare the trait. One that merely shares a method name is not one.
+    pub(super) fn structural_trait_conformers(
+        &self,
+        trait_info: &crate::hir::HirTraitInfo,
+        exclude: Option<&str>,
+    ) -> Vec<String> {
+        let Some(first) = trait_info.methods.keys().min() else {
+            return Vec::new();
+        };
+        self.method_owners(first, exclude)
+            .into_iter()
+            .filter(|owner| {
+                trait_info
+                    .methods
+                    .keys()
+                    .all(|required| self.available_functions.contains(&format!("{owner}.{required}")))
+            })
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Whether any type in the unit implements `trait_name` (and so carries
+    /// its vtable).
+    pub(super) fn trait_has_implementation(&self, trait_name: &str) -> bool {
+        self.dependency_graph
+            .get_implementations(trait_name)
+            .is_some_and(|impls| !impls.is_empty())
+    }
+
     pub(super) fn find_trait_for_method_on_receiver(
         &self,
         method_name: &str,
@@ -1564,6 +1695,19 @@ impl<'a> MirLowerer<'a> {
         )
     }
 
+    /// `slot_holds_tagged_value`, plus the generic-enum optional form
+    /// `Option<T>` (an explicit annotation on a local/field/return resolves to
+    /// `HirType::Enum { name: "Option", .. }` rather than the `T?` Pointer
+    /// form). Both hold a BoxInt-tagged payload, so `rt_unwrap_or_self` results
+    /// typed as a raw scalar must be unboxed for either representation.
+    pub(super) fn slot_holds_tagged_optional(&self, ty: TypeId) -> bool {
+        self.slot_holds_tagged_value(ty)
+            || matches!(
+                self.type_registry.and_then(|tr| tr.get(ty)),
+                Some(crate::hir::HirType::Enum { name, .. }) if name.as_str() == "Option"
+            )
+    }
+
     /// Primitive types whose machine representation is a raw (untagged) word.
     pub(super) fn is_raw_scalar_type(ty: TypeId) -> bool {
         matches!(
@@ -1666,6 +1810,45 @@ impl<'a> MirLowerer<'a> {
             return Ok(reg);
         }
         self.unbox_scalar_for_raw_slot(TypeId::BOOL, TypeId::ANY, reg)
+    }
+
+    /// The numeric value of an integer literal (or its negation) — the only
+    /// integer forms `float_slot_from_int_literal` rewrites.
+    fn int_literal_value(expr: &HirExpr) -> Option<i64> {
+        match &expr.kind {
+            HirExprKind::Integer(n) => Some(*n),
+            HirExprKind::Unary {
+                op: crate::hir::UnaryOp::Neg,
+                operand,
+            } => match operand.kind {
+                HirExprKind::Integer(n) => Some(n.wrapping_neg()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// An integer literal flowing into a DECLARED `f32`/`f64` slot (call
+    /// argument, annotated binding, assignment, `return`, function tail,
+    /// struct field) is a float constant. HIR types the literal `i64`, so it
+    /// lowered to `ConstInt 3` and codegen moved those raw bits into the f64
+    /// slot: `fn takef(x: f64) -> f64: x * 2.0` / `takef(3)` printed the
+    /// denormal 3e-323 under `simple run` (the JIT lane). Mirrors the
+    /// pure-Simple MIR fix `lower_int_literal_for_float_slot` (PR #7416).
+    /// Returns `value` unchanged when the slot or the expression does not match.
+    pub(super) fn float_slot_from_int_literal(
+        &mut self,
+        declared_ty: TypeId,
+        value_expr: &HirExpr,
+        value: VReg,
+    ) -> MirLowerResult<VReg> {
+        if !matches!(declared_ty, TypeId::F32 | TypeId::F64) {
+            return Ok(value);
+        }
+        match Self::int_literal_value(value_expr) {
+            Some(n) => self.lower_float_expr(n as f64),
+            None => Ok(value),
+        }
     }
 
     pub(super) fn unbox_scalar_for_raw_slot(
@@ -1796,6 +1979,14 @@ impl<'a> MirLowerer<'a> {
         // Clone the defer stack so we can iterate without borrowing self
         let deferred: Vec<Vec<HirStmt>> = self.state.try_defer_stack()?.clone();
 
+        // Deferred code runs AFTER the scope's value is computed and must not
+        // replace it: the implicit-tail return reads `last_expr_value` after
+        // this call, and lowering a deferred `cleanup()` used to overwrite it,
+        // so `defer f(); r` returned f()'s result (nil -> 0, or a null struct
+        // handle). See doc/08_tracking/bug/
+        // seed_mir_defer_clobbers_implicit_tail_return_2026-11-06.md
+        let tail_value = self.last_expr_value;
+
         // Iterate in reverse (LIFO) order
         for body in deferred.iter().rev() {
             for stmt in body {
@@ -1803,6 +1994,7 @@ impl<'a> MirLowerer<'a> {
             }
         }
 
+        self.last_expr_value = tail_value;
         Ok(())
     }
 
@@ -1842,6 +2034,16 @@ impl<'a> MirLowerer<'a> {
         self.inject_functions.clear();
         self.available_functions.clear();
         self.function_param_types.clear();
+        self.imported_function_names = hir.imported_function_names.iter().cloned().collect();
+        self.hir_functions_by_name.clear();
+        self.pending_specializations.clear();
+        self.specialization_cache.clear();
+        self.active_type_param_targets.clear();
+        self.active_const_generic_values.clear();
+        self.active_local_type_overrides.clear();
+        for func in &hir.functions {
+            self.hir_functions_by_name.insert(func.name.clone(), func.clone());
+        }
         self.global_types = hir.globals.iter().map(|(name, ty)| (name.clone(), *ty)).collect();
         self.function_value_globals = hir.global_init_functions.keys().cloned().collect();
         self.singleton_cache.clear(); // Clear singleton cache for each module
@@ -1881,6 +2083,17 @@ impl<'a> MirLowerer<'a> {
             }
         }
 
+        // Extern declarations are not `hir.functions`, so their parameter
+        // types would be invisible to the call-coercion pass below (raw
+        // scalar -> Any boxing skipped, raw words crossing the extern ABI).
+        // Merge them in, preferring a real function's signature on the rare
+        // name collision. See `HirModule::extern_param_types`.
+        for (name, params) in &hir.extern_param_types {
+            self.function_param_types
+                .entry(name.clone())
+                .or_insert_with(|| params.clone());
+        }
+
         self.local_trait_impls.clear();
         for hir_impl in &hir.impls {
             if let Some(trait_name) = &hir_impl.trait_name {
@@ -1900,6 +2113,71 @@ impl<'a> MirLowerer<'a> {
         self.extern_fn_name_set = hir.extern_fn_names.iter().cloned().collect();
         {
             let mut sigs_by_name: HashMap<&str, Vec<Vec<TypeId>>> = HashMap::new();
+            let mut returns_by_signature: HashMap<(&str, Vec<TypeId>), String> = HashMap::new();
+            // Structural return-type identity key for C1 duplicate detection.
+            // Equivalent aggregate registrations in distinct modules map to the
+            // same key, while dynamic/unknown/generic types return `None` and stay exempt.
+            fn canonical_return_type_key(
+                registry: Option<&crate::hir::TypeRegistry>,
+                ty: TypeId,
+                depth: usize,
+            ) -> Option<String> {
+                if depth > 16 || ty == TypeId::ANY || ty == TypeId::NIL {
+                    return None;
+                }
+                match ty {
+                    TypeId::VOID => return Some("void".to_string()),
+                    TypeId::BOOL => return Some("bool".to_string()),
+                    TypeId::I8 => return Some("i8".to_string()),
+                    TypeId::I16 => return Some("i16".to_string()),
+                    TypeId::I32 => return Some("i32".to_string()),
+                    TypeId::I64 => return Some("i64".to_string()),
+                    TypeId::U8 => return Some("u8".to_string()),
+                    TypeId::U16 => return Some("u16".to_string()),
+                    TypeId::U32 => return Some("u32".to_string()),
+                    TypeId::U64 => return Some("u64".to_string()),
+                    TypeId::F32 => return Some("f32".to_string()),
+                    TypeId::F64 => return Some("f64".to_string()),
+                    TypeId::STRING => return Some("text".to_string()),
+                    TypeId::CHAR => return Some("char".to_string()),
+                    _ => {}
+                }
+                let reg = registry?;
+                match reg.get(ty)? {
+                    crate::hir::HirType::Void => Some("void".to_string()),
+                    crate::hir::HirType::Bool => Some("bool".to_string()),
+                    crate::hir::HirType::String => Some("text".to_string()),
+                    crate::hir::HirType::Char => Some("char".to_string()),
+                    crate::hir::HirType::Nil => None,
+                    crate::hir::HirType::Int { bits, signedness } => {
+                        let prefix = match signedness {
+                            crate::hir::Signedness::Signed => 'i',
+                            crate::hir::Signedness::Unsigned => 'u',
+                        };
+                        Some(format!("{prefix}{bits}"))
+                    }
+                    crate::hir::HirType::Float { bits } => Some(format!("f{bits}")),
+                    crate::hir::HirType::Array { element, .. } => {
+                        let elem = canonical_return_type_key(registry, *element, depth + 1)?;
+                        Some(format!("[{elem}]"))
+                    }
+                    crate::hir::HirType::Tuple(elems) => {
+                        let mut parts = Vec::with_capacity(elems.len());
+                        for &e in elems {
+                            parts.push(canonical_return_type_key(registry, e, depth + 1)?);
+                        }
+                        Some(format!("({})", parts.join(",")))
+                    }
+                    crate::hir::HirType::Pointer { kind, inner, .. } => {
+                        let inner_k = canonical_return_type_key(registry, *inner, depth + 1)?;
+                        Some(format!("{kind:?}*{inner_k}"))
+                    }
+                    crate::hir::HirType::Struct { name, .. } | crate::hir::HirType::Enum { name, .. } => {
+                        Some(format!("nom:{name}"))
+                    }
+                    _ => None,
+                }
+            }
             let mut order: Vec<&str> = Vec::new();
             for func in &hir.functions {
                 // Free functions only — methods are `Type.method`-qualified and
@@ -1915,6 +2193,23 @@ impl<'a> MirLowerer<'a> {
                     continue;
                 }
                 let sig: Vec<TypeId> = func.params.iter().filter(|p| p.name != "self").map(|p| p.ty).collect();
+                // Argument-only dispatch cannot distinguish proven distinct
+                // concrete returns. Dynamic/unknown/generic types stay exempt.
+                if let Some(return_key) = canonical_return_type_key(self.type_registry, func.return_type, 0) {
+                    if let Some(previous_return) =
+                        returns_by_signature.insert((func.name.as_str(), sig.clone()), return_key.clone())
+                    {
+                        if previous_return != return_key {
+                            return Err(MirLowerError::Unsupported(format!(
+                                "ambiguous co-compiled definitions of `{}`: identical parameter types \
+                                 have different return types ({previous_return} vs {return_key}). \
+                                 Rename the definitions to unique names. \
+                                 [compiler_cross_module_private_symbol_collision]",
+                                func.name,
+                            )));
+                        }
+                    }
+                }
                 let entry = sigs_by_name.entry(func.name.as_str()).or_default();
                 if entry.is_empty() {
                     order.push(func.name.as_str());
@@ -1962,6 +2257,7 @@ impl<'a> MirLowerer<'a> {
 
         // Copy extern function names from HIR to MIR
         module.extern_fn_names = hir.extern_fn_names.clone();
+        module.extern_system_abi = hir.extern_system_abi.clone();
 
         // Copy compile-time constant init values from HIR to MIR
         module.global_init_values = hir.global_init_values.clone();
@@ -2021,6 +2317,20 @@ impl<'a> MirLowerer<'a> {
                 *k += 1;
             }
             module.functions.push(mir_func);
+        }
+
+        while let Some(spec) = self.pending_specializations.pop() {
+            if let Some(mut hir_func) = self.hir_functions_by_name.get(&spec.base_name).cloned() {
+                hir_func.name = spec.spec_name;
+                let prev_targets = std::mem::replace(&mut self.active_type_param_targets, spec.type_targets);
+                let prev_consts = std::mem::replace(&mut self.active_const_generic_values, spec.const_values);
+                let prev_locals = std::mem::replace(&mut self.active_local_type_overrides, spec.local_type_overrides);
+                let lowered = self.lower_function(&hir_func);
+                self.active_type_param_targets = prev_targets;
+                self.active_const_generic_values = prev_consts;
+                self.active_local_type_overrides = prev_locals;
+                module.functions.push(lowered?);
+            }
         }
 
         // Apply AOP weaving if there are advice declarations (#1000-1050)
@@ -2210,6 +2520,16 @@ impl<'a> MirLowerer<'a> {
         // recomputed (not accumulated) or one function's locals would be read
         // as another's.
         self.erased_local_class_types = compute_single_assignment_class_types(func, self.type_registry);
+        for (&idx, &ty) in &self.active_local_type_overrides {
+            if ty != TypeId::ANY && ty != TypeId::VOID {
+                self.erased_local_class_types.insert(idx, ty);
+            }
+        }
+        self.block_release_ready.clear();
+        // Keyed by function-scoped local indices: a stale entry would make a
+        // loop pre-header read another function's slot.
+        self.len_local_sources.clear();
+        self.array_capacity_local_sources.clear();
         self.array_move_sites =
             super::array_move::compute_array_move_sites(
                 func,
@@ -2306,6 +2626,10 @@ impl<'a> MirLowerer<'a> {
         for stmt in &func.body {
             self.lower_stmt(stmt, func.contract.as_ref())?;
         }
+
+        // S1: release proven-unique array locals of the body list. The tail
+        // value (never the array itself) is already computed.
+        self.emit_block_array_releases(&func.body)?;
 
         // Emit deferred blocks at end of function body (implicit return path)
         self.emit_deferred_blocks(func.contract.as_ref())?;
@@ -2436,6 +2760,378 @@ fn collect_local_writes(stmts: &[HirStmt], out: &mut Vec<(usize, TypeId)>) {
             }
             _ => {}
         }
+    }
+}
+
+impl<'a> MirLowerer<'a> {
+    pub(super) fn box_value_as_runtime(&mut self, reg: VReg, ty: TypeId) -> MirLowerResult<VReg> {
+        if ty == TypeId::U64 {
+            return self.box_u64_runtime_value(reg);
+        }
+        if ty == TypeId::BOOL {
+            return self.with_func(|func, current_block| {
+                let boxed = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(boxed),
+                    target: CallTarget::from_name("rt_value_bool"),
+                    args: vec![reg],
+                });
+                boxed
+            });
+        }
+        if matches!(ty, TypeId::F32 | TypeId::F64) {
+            return self.with_func(|func, current_block| {
+                let boxed = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::BoxFloat { dest: boxed, value: reg });
+                boxed
+            });
+        }
+        if matches!(
+            ty,
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32
+        ) {
+            return self.with_func(|func, current_block| {
+                let boxed = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::BoxInt { dest: boxed, value: reg });
+                boxed
+            });
+        }
+        Ok(reg)
+    }
+
+    pub(super) fn extract_type_and_const_bindings(
+        &self,
+        ty: TypeId,
+    ) -> (HashMap<String, TypeId>, HashMap<String, i64>) {
+        let mut type_targets = HashMap::new();
+        let mut const_values = HashMap::new();
+        let Some(registry) = self.type_registry else {
+            return (type_targets, const_values);
+        };
+        if let Some(consts) = registry.const_generic_bindings(ty) {
+            for (k, &v) in consts {
+                const_values.insert(k.clone(), v);
+            }
+        }
+        match registry.get(ty) {
+            Some(crate::hir::HirType::Struct { type_bindings, .. }) => {
+                for (k, &v) in type_bindings {
+                    if !const_values.contains_key(k) {
+                        type_targets.insert(k.clone(), v);
+                    }
+                }
+            }
+            Some(crate::hir::HirType::Array { element, size }) => {
+                type_targets.insert("T".to_string(), *element);
+                if let Some(n) = size {
+                    const_values.insert("N".to_string(), *n as i64);
+                }
+            }
+            _ => {}
+        }
+        (type_targets, const_values)
+    }
+
+    pub(super) fn target_type_name_for_type_id(&self, ty: TypeId) -> Option<String> {
+        if let Some(name) = super::lowering_di::builtin_type_name(ty) {
+            return Some(name.to_string());
+        }
+        let registry = self.type_registry?;
+        match registry.get(ty) {
+            Some(crate::hir::HirType::Struct { name, .. })
+            | Some(crate::hir::HirType::Enum { name, .. }) => Some(name.clone()),
+            Some(crate::hir::HirType::Array { .. }) => Some("array".to_string()),
+            Some(crate::hir::HirType::String) => Some("text".to_string()),
+            _ => None,
+        }
+    }
+
+    fn collect_arg_local_overrides(&mut self, base_func: &HirFunction, args: &[HirExpr]) -> HashMap<usize, TypeId> {
+        let mut overrides = HashMap::new();
+        let Some(registry) = self.type_registry else {
+            return overrides;
+        };
+        let mut arg_idx = 0usize;
+        for (local_idx, param) in base_func.params.iter().enumerate() {
+            if param.name == "self" {
+                continue;
+            }
+            let Some(arg) = args.get(arg_idx) else {
+                break;
+            };
+            arg_idx += 1;
+            if param.ty != TypeId::ANY {
+                continue;
+            }
+            let arg_ty = self.recover_receiver_type(arg).unwrap_or(arg.ty);
+            if arg_ty == TypeId::ANY || arg_ty == TypeId::VOID {
+                continue;
+            }
+            if matches!(
+                registry.get(arg_ty),
+                Some(
+                    crate::hir::HirType::Struct { .. }
+                        | crate::hir::HirType::Enum { .. }
+                        | crate::hir::HirType::Array { .. }
+                )
+            ) {
+                overrides.insert(local_idx, arg_ty);
+            }
+        }
+        overrides
+    }
+
+    pub(super) fn queue_specialization(
+        &mut self,
+        base_name: &str,
+        type_targets: HashMap<String, TypeId>,
+        const_values: HashMap<String, i64>,
+        local_type_overrides: HashMap<usize, TypeId>,
+    ) -> String {
+        if type_targets.is_empty() && const_values.is_empty() && local_type_overrides.is_empty() {
+            return base_name.to_string();
+        }
+        let mut sorted_types: Vec<(String, TypeId)> = type_targets.iter().map(|(k, &v)| (k.clone(), v)).collect();
+        sorted_types.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut sorted_consts: Vec<(String, i64)> = const_values.iter().map(|(k, &v)| (k.clone(), v)).collect();
+        sorted_consts.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut sorted_locals: Vec<(usize, TypeId)> =
+            local_type_overrides.iter().map(|(&k, &v)| (k, v)).collect();
+        sorted_locals.sort_by_key(|a| a.0);
+
+        let key = SpecializationKey {
+            base_name: base_name.to_string(),
+            type_targets: sorted_types,
+            const_values: sorted_consts,
+            local_overrides: sorted_locals,
+        };
+        if let Some(existing) = self.specialization_cache.get(&key) {
+            return existing.clone();
+        }
+        let spec_name = format!("{}$__spec_{}", base_name, self.specialization_cache.len());
+        self.specialization_cache.insert(key, spec_name.clone());
+        self.available_functions.insert(spec_name.clone());
+        if let Some(params) = self.function_param_types.get(base_name).cloned() {
+            self.function_param_types.insert(spec_name.clone(), params);
+        }
+        self.pending_specializations.push(PendingSpecialization {
+            spec_name: spec_name.clone(),
+            base_name: base_name.to_string(),
+            type_targets,
+            const_values,
+            local_type_overrides,
+        });
+        spec_name
+    }
+
+    pub(super) fn specialize_named_call(
+        &mut self,
+        base_name: &str,
+        args: &[HirExpr],
+        receiver_or_ret_ty: Option<TypeId>,
+        generic_args: &[TypeId],
+    ) -> String {
+        let Some(base_func) = self.hir_functions_by_name.get(base_name).cloned() else {
+            return base_name.to_string();
+        };
+        let mut candidate_types: HashMap<String, TypeId> = HashMap::new();
+        let mut candidate_consts: HashMap<String, i64> = HashMap::new();
+
+        for (k, &v) in &self.active_type_param_targets {
+            candidate_types.insert(k.clone(), v);
+        }
+        for (k, &v) in &self.active_const_generic_values {
+            candidate_consts.insert(k.clone(), v);
+        }
+        if let Some(ty) = receiver_or_ret_ty {
+            let (ty_map, const_map) = self.extract_type_and_const_bindings(ty);
+            for (k, v) in ty_map {
+                candidate_types.insert(k, v);
+            }
+            for (k, v) in const_map {
+                candidate_consts.insert(k, v);
+            }
+        }
+        if !generic_args.is_empty() {
+            let bound_params: Vec<&str> = base_func
+                .generic_bounds
+                .iter()
+                .map(|b| b.type_param.as_str())
+                .collect();
+            let target_params: Vec<String> = if !bound_params.is_empty() {
+                bound_params.into_iter().map(str::to_string).collect()
+            } else {
+                base_func
+                    .generic_params
+                    .iter()
+                    .filter(|gp| !candidate_types.contains_key(*gp) && !candidate_consts.contains_key(*gp))
+                    .cloned()
+                    .collect()
+            };
+            let fallback_params = if target_params.is_empty() {
+                base_func.generic_params.clone()
+            } else {
+                target_params
+            };
+            for (param, &arg_ty) in fallback_params.iter().zip(generic_args.iter()) {
+                if arg_ty != TypeId::ANY && arg_ty != TypeId::VOID {
+                    candidate_types.insert(param.clone(), arg_ty);
+                }
+            }
+        }
+
+        let allowed: HashSet<&str> = base_func.generic_params.iter().map(String::as_str).collect();
+        let type_targets: HashMap<String, TypeId> = candidate_types
+            .into_iter()
+            .filter(|(k, _)| allowed.contains(k.as_str()))
+            .collect();
+        let const_values: HashMap<String, i64> = candidate_consts
+            .into_iter()
+            .filter(|(k, _)| allowed.contains(k.as_str()))
+            .collect();
+        let local_overrides = if base_func.name.ends_with(".from_iter") || !type_targets.is_empty() {
+            self.collect_arg_local_overrides(&base_func, args)
+        } else {
+            HashMap::new()
+        };
+
+        let should_specialize = !generic_args.is_empty()
+            || !base_func.generic_bounds.is_empty()
+            || !const_values.is_empty()
+            || !local_overrides.is_empty()
+            || (!type_targets.is_empty()
+                && (base_func.name.ends_with(".new")
+                    || base_func.name.ends_with(".from_iter")
+                    || base_func.name.ends_with(".default")));
+
+        if !should_specialize {
+            return base_name.to_string();
+        }
+        self.queue_specialization(base_name, type_targets, const_values, local_overrides)
+    }
+
+    pub(super) fn lower_const_generic_expr(&mut self, name: &str) -> MirLowerResult<VReg> {
+        let value = self.active_const_generic_values.get(name).copied().unwrap_or(0);
+        self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::ConstInt { dest, value });
+            dest
+        })
+    }
+
+    fn emit_default_for_type_id(&mut self, target_ty: TypeId) -> MirLowerResult<VReg> {
+        match target_ty {
+            TypeId::I8
+            | TypeId::I16
+            | TypeId::I32
+            | TypeId::I64
+            | TypeId::U8
+            | TypeId::U16
+            | TypeId::U32
+            | TypeId::U64 => {
+                let raw = self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ConstInt { dest, value: 0 });
+                    dest
+                })?;
+                self.box_value_as_runtime(raw, target_ty)
+            }
+            TypeId::F32 | TypeId::F64 => {
+                let raw = self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ConstFloat { dest, value: 0.0 });
+                    dest
+                })?;
+                self.box_value_as_runtime(raw, target_ty)
+            }
+            TypeId::BOOL => {
+                let raw = self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ConstBool { dest, value: false });
+                    dest
+                })?;
+                self.box_value_as_runtime(raw, target_ty)
+            }
+            TypeId::STRING => self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::ConstString {
+                    dest,
+                    value: String::new(),
+                });
+                dest
+            }),
+            _ => {
+                if let Some(type_name) = self.target_type_name_for_type_id(target_ty) {
+                    let base_default = format!("{type_name}.default");
+                    if self.available_functions.contains(&base_default) {
+                        let callee = self.specialize_named_call(&base_default, &[], Some(target_ty), &[]);
+                        return self.with_func(|func, current_block| {
+                            let dest = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::Call {
+                                dest: Some(dest),
+                                target: CallTarget::from_name(&callee),
+                                args: Vec::new(),
+                            });
+                            dest
+                        });
+                    }
+                }
+                let raw = self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ConstInt { dest, value: 0 });
+                    dest
+                })?;
+                self.box_value_as_runtime(raw, TypeId::I64)
+            }
+        }
+    }
+
+    pub(super) fn lower_type_param_static_call_expr(
+        &mut self,
+        type_param: &str,
+        method: &str,
+        args: &[HirExpr],
+    ) -> MirLowerResult<VReg> {
+        let resolved_target = self.active_type_param_targets.get(type_param).copied();
+        if method == "default" && args.is_empty() {
+            return self.emit_default_for_type_id(resolved_target.unwrap_or(TypeId::I64));
+        }
+
+        let mut arg_regs = Vec::with_capacity(args.len());
+        for arg in args {
+            arg_regs.push(self.lower_expr(arg)?);
+        }
+
+        let base_callee = match resolved_target.and_then(|ty| self.target_type_name_for_type_id(ty)) {
+            Some(type_name) => format!("{type_name}.{method}"),
+            None if method == "from_iter" => "array.from_iter".to_string(),
+            None => method.to_string(),
+        };
+
+        let target_callee = self.specialize_named_call(&base_callee, args, resolved_target, &[]);
+        let params = self.function_param_types.get(&target_callee).cloned().unwrap_or_default();
+        self.coerce_args_for_param_slots(&params, args, &mut arg_regs, false)?;
+
+        self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::Call {
+                dest: Some(dest),
+                target: CallTarget::from_name(&target_callee),
+                args: arg_regs,
+            });
+            dest
+        })
     }
 }
 

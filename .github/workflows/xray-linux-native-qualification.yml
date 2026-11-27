@@ -1,0 +1,178 @@
+name: XRay Linux native observer qualification (experimental)
+
+# Scoped Linux qualification only. This does not change ordinary Windows
+# builds or advertise production Simple observer support.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [release/1.0.0]
+    paths:
+      - .github/workflows/xray-linux-native-qualification.yml
+      - src/runtime/xray/**
+      - src/runtime/runtime_thread.c
+      - src/runtime/runtime_native.c
+      - src/runtime/runtime_memory.c
+      - test/fixtures/xray/**
+      - scripts/check/check-xray-llvm-image-locator.shs
+      - scripts/check/check-xray-llvm-adapter-e2e.shs
+      - scripts/check/check-xray-thread-context-runtime.shs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xray-linux-native-qualification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux-x64-locator:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/check
+            src/runtime/xray
+            test/fixtures/xray
+      - name: Install the explicit Linux LLVM profile
+        run: |
+          set -eu
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang-18 libclang-rt-18-dev lld-18 llvm-18
+      - name: Record actual toolchain and source identities
+        run: |
+          set -eu
+          mkdir -p build/xray-image-locator
+          clang-18 --version > build/xray-image-locator/compiler-version.txt
+          dpkg-query -W clang-18 libclang-rt-18-dev lld-18 llvm-18 > build/xray-image-locator/packages.txt
+          ld.lld-18 --version > build/xray-image-locator/linker-version.txt
+          linker=$(readlink -f "$(command -v ld.lld-18)")
+          compiler=$(readlink -f "$(command -v clang-18)")
+          # LLVM 18 uses the architecture-suffixed Linux resource layout.
+          resource=$(clang-18 -print-resource-dir)
+          archive="$resource/lib/linux/libclang_rt.xray-x86_64.a"
+          test -f "$linker"
+          test -f "$compiler"
+          test -f "$archive"
+          sha256sum "$compiler" "$archive" "$linker" > build/xray-image-locator/toolchain-sha256.txt
+          printf 'schema: xray_linux_locator_qualification_v1\nsource_commit: "%s"\nrunner: "ubuntu-24.04"\narchitecture: "x86_64"\npublic_observer_admission: false\n' "$GITHUB_SHA" > build/xray-image-locator/provenance.sdn
+      - name: Execute the actual registered-image locator fixture
+        env:
+          CLANG: clang-18
+          XRAY_IMAGE_LD: /usr/bin/ld.lld-18
+        run: |
+          set -eu
+          status=0
+          sh scripts/check/check-xray-llvm-image-locator.shs > build/xray-image-locator/execution.log 2>&1 || status=$?
+          cat build/xray-image-locator/execution.log
+          exit "$status"
+      - name: Run actual compiler-rt resident path under enforced limits
+        run: |
+          set -eu
+          mkdir -p build/xray-image-locator/adapter
+          sha256sum src/runtime/xray/xray_llvm_adapter_linux.c src/runtime/xray/xray_resident_admission_v1.h src/runtime/xray/xray_resident_descriptor_v1.h src/runtime/xray/xray_thread_context_v1.h src/runtime/xray/xray_channel_producer_v1.h src/runtime/xray/xray_startup_owned_threads_v1.h test/fixtures/xray/xray_adapter_e2e_main.c test/fixtures/xray/xray_adapter_resident_case.h test/fixtures/xray/xray_adapter_targets.ll scripts/check/check-xray-llvm-adapter-e2e.shs src/runtime/xray/xray_qualification_profile_linux.c src/runtime/xray/xray_qualification_profile_v1.h src/runtime/xray/xray_llvm_image_linux.h > build/xray-image-locator/adapter-sources.sha256
+          status=0
+          sudo systemd-run --unit="xray-adapter-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --wait --pipe --collect \
+            -p Type=exec -p "WorkingDirectory=$GITHUB_WORKSPACE" \
+            -p MemoryMax=2147483648 -p MemorySwapMax=0 \
+            -p RuntimeMaxSec=180 -p TimeoutStopSec=5 -p KillMode=control-group \
+            /bin/sh -c '
+              set -eu
+              out=build/xray-image-locator
+              IFS=: read -r hierarchy controllers group < /proc/self/cgroup
+              test "$hierarchy" = 0
+              test -z "$controllers"
+              test -n "$group"
+              cat "/sys/fs/cgroup$group/memory.max" > "$out/adapter-memory.max"
+              cat "/sys/fs/cgroup$group/memory.swap.max" > "$out/adapter-memory.swap.max"
+              test "$(cat "$out/adapter-memory.max")" = 2147483648
+              test "$(cat "$out/adapter-memory.swap.max")" = 0
+              printf "%s\n" "/usr/bin/clang-18 --target=x86_64-unknown-linux-gnu -std=c11 -O2 -fPIC -Wall -Wextra -Werror -mgeneral-regs-only -c src/runtime/xray/xray_qualification_profile_linux.c -o $out/profile.o" > "$out/profile-compile.command"
+              profile_status=0
+              timeout 30 /usr/bin/clang-18 --target=x86_64-unknown-linux-gnu -std=c11 -O2 -fPIC -Wall -Wextra -Werror -mgeneral-regs-only -c src/runtime/xray/xray_qualification_profile_linux.c -o "$out/profile.o" || profile_status=$?
+              printf "%s\n" "$profile_status" > "$out/profile-compile.status"
+              test "$profile_status" = 0
+              sha256sum "$out/profile.o" > "$out/profile-object.sha256"
+              exec env CLANG=/usr/bin/clang-18 LLVM_OBJDUMP=/usr/bin/llvm-objdump-18 LLVM_READELF=/usr/bin/llvm-readelf-18 LLVM_NM=/usr/bin/llvm-nm-18 XRAY_E2E_LD=/usr/bin/ld.lld-18 XRAY_E2E_TIMEOUT=30 TMPDIR="$(pwd)/$out/adapter" sh scripts/check/check-xray-llvm-adapter-e2e.shs --keep
+            ' > build/xray-image-locator/adapter-execution.log 2>&1 || status=$?
+          cat build/xray-image-locator/adapter-execution.log
+          printf '%s\n' "$status" > build/xray-image-locator/adapter-execution.status
+          exit "$status"
+      - name: Make retained root-service evidence readable
+        if: always()
+        run: |
+          set -eu
+          if test -d build/xray-image-locator; then
+            sudo chown -R "$(id -u):$(id -g)" -- build/xray-image-locator
+          fi
+      - name: Retain native qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: xray-linux-x64-locator-${{ github.sha }}
+          path: build/xray-image-locator/
+          if-no-files-found: warn
+          retention-days: 14
+
+  linux-x64-worker-context:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/check
+            src/runtime
+            test/fixtures/xray
+      - name: Install explicit Linux compiler
+        run: |
+          set -eu
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang-18
+      - name: Record checked source and tool identity
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          mkdir -p build/xray-thread-context-runtime
+          compiler=$(readlink -f "$(command -v clang-18)")
+          sha256sum "$compiler" > build/xray-thread-context-runtime/compiler.sha256
+          dpkg-query -W clang-18 > build/xray-thread-context-runtime/packages.txt
+          printf 'schema: xray_worker_context_ci_v1\nchecked_commit: "%s"\npr_head: "%s"\nsled_patching_qualified: false\npublic_observer_admission: false\n' "$(git rev-parse HEAD)" "$PR_HEAD" > build/xray-thread-context-runtime/provenance.sdn
+      - name: Run real worker and resident callback fixture under enforced limits
+        run: |
+          set -eu
+          status=0
+          sudo systemd-run --unit="xray-worker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --wait --pipe --collect \
+            -p Type=exec -p "WorkingDirectory=$GITHUB_WORKSPACE" \
+            -p MemoryMax=2147483648 -p MemorySwapMax=0 \
+            -p RuntimeMaxSec=180 -p TimeoutStopSec=5 -p KillMode=control-group \
+            /bin/sh -c '
+              set -eu
+              out=build/xray-thread-context-runtime
+              IFS=: read -r hierarchy controllers group < /proc/self/cgroup
+              test "$hierarchy" = 0
+              test -z "$controllers"
+              test -n "$group"
+              cat "/sys/fs/cgroup$group/memory.max" > "$out/memory.max"
+              cat "/sys/fs/cgroup$group/memory.swap.max" > "$out/memory.swap.max"
+              test "$(cat "$out/memory.max")" = 2147483648
+              test "$(cat "$out/memory.swap.max")" = 0
+              exec env CLANG=/usr/bin/clang-18 sh scripts/check/check-xray-thread-context-runtime.shs
+            ' > build/xray-thread-context-runtime/execution.log 2>&1 || status=$?
+          cat build/xray-thread-context-runtime/execution.log
+          printf '%s\n' "$status" > build/xray-thread-context-runtime/execution.status
+          exit "$status"
+      - name: Retain worker qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: xray-linux-x64-worker-context-${{ github.sha }}
+          path: build/xray-thread-context-runtime/
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,0 +1,166 @@
+# REQ-002 REQ-005. Source-only NOT_RUN, including both candidate backends.
+# No native owner is opened and no signing/reservation authority is supplied.
+use app.orchestrator.container_plan_prepare_v1.*
+use std.common.config_core.server_context_types_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.*
+use std.nogc_async_mut.container.providers.linux.request_v1.*
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_codec_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_policy_codec_v1.*
+
+fn plan_prepare_server_fixture_v1(host: text) -> ServerConfigV1:
+    val record = ServerRecordV1(name: "company", transport: "ssh", host: "localhost", port: 22,
+        container_host: host, auth_ref: "secret://container-job/client", tls_ref: "trust://company/shared",
+        remote_executable: "/opt/simple/bin/simple")
+    val refs: Dict<text, text> = {}
+    val context = ServerContextV1(name: "work", shared_server: "company", consumer_refs: refs)
+    ServerConfigV1(current_context: "work", servers: [record], contexts: [context])
+
+fn plan_prepare_scope_fixture_v1() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "physical", service_scope_id: "service",
+        boot_id: "boot", provider_generation: 4, native_machine_id: "native-machine",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot")
+
+fn plan_prepare_windows_policy_fixture_v1() -> WindowsDockerPolicyV1:
+    WindowsDockerPolicyV1(docker_executable: "C:\\Program Files\\Docker\\docker.exe",
+        endpoint: "npipe:////./pipe/docker_engine", engine_id: "engine-a",
+        node_boot_id: container_scope_fence_id_v2(plan_prepare_scope_fixture_v1()).unwrap(),
+        provider_generation: 4, expected_kernel_version: "10.0 20348 (20348.2402.amd64fre)",
+        image_os_version: "10.0.20348.2402", expected_image_id: "sha256:" + "a".repeat(64),
+        timeout_ms: 5000, max_output_bytes: 8192, system_root: "C:\\Windows", temp_directory: "C:\\Temp",
+        network_id: "f".repeat(64), network_name: "simple-nat")
+
+# Exact V1 candidate-context example generated through existing canonical
+# codecs. These are authored candidate values, never installed host facts.
+fn plan_prepare_context_fields_fixture_v1(backend: text) -> Dict<text, SdnValue>:
+    val policy = if backend == "linux-podman":
+        val candidate = LinuxOciEnginePolicyV1(mode: "trusted-local-admin-v1",
+            executable_path: "/usr/bin/podman", expected_uid: 1000,
+            expected_graph_root: "/candidate/graph", expected_run_root: "/candidate/run",
+            expected_storage_driver: "overlay")
+        linux_oci_engine_policy_encode_v1(candidate).unwrap()
+    else:
+        windows_docker_policy_encode_v1(plan_prepare_windows_policy_fixture_v1()).unwrap()
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("container-plan-candidate-context"), "backend": SdnValue.String(backend),
+        "scope": SdnValue.String(container_host_scope_bytes_v2(plan_prepare_scope_fixture_v1()).unwrap()),
+        "providerPolicy": SdnValue.String(policy)}
+    fields
+
+fn plan_prepare_context_fixture_v1(backend: text) -> text:
+    sdn_encode_canonical(SdnValue.Dict(plan_prepare_context_fields_fixture_v1(backend))) + "\n"
+
+fn plan_prepare_native_fixture_v1(backend: text) -> text:
+    if backend == "linux-podman":
+        val native = LinuxOciRequestV1(pod_uid: "job", attempt: 1, operation_id: "launch",
+            image: "simple-image", bundle_path: "", command: ["/opt/simple/bin/simple", "orchestrator"],
+            args: [], timeout_ms: 1000, cpu_limit_millis: 1000, memory_limit_bytes: 1048576,
+            pid_limit: 64, network_policy: "bridge", filesystem_policy: "read-only")
+        return linux_oci_retained_request_encode_v1(native).unwrap()
+    val native = WindowsDockerRequestV1(pod_uid: "job", attempt: 1, operation_id: "launch",
+        image: "mcr.microsoft.com/windows/servercore@sha256:" + "b".repeat(64),
+        command: ["C:\\simple\\simple.exe", "orchestrator"], args: [],
+        cpu_count: 2, memory_limit_bytes: 536870912, network: "f".repeat(64))
+    windows_docker_request_encode_v1(plan_prepare_windows_policy_fixture_v1(), native).unwrap()
+
+fn plan_prepare_reply_fields_v1(source: text) -> Dict<text, SdnValue>:
+    val limits = SdnStrictLimitsV1(max_source_bytes: 4194304, max_depth: 8,
+        max_nodes: 8192, max_rows: 0, max_cells: 0, max_columns: 2048)
+    match sdn_parse_strict_v1(source, limits).unwrap().value:
+        case SdnValue.Dict(fields): fields
+        case _: fail("preparation reply must be an SDN object")
+
+fn plan_prepare_text_field_v1(fields: Dict<text, SdnValue>, key: text) -> text:
+    match fields[key]:
+        case SdnValue.String(value): value
+        case _: fail("preparation reply field must be text: " + key)
+
+describe "actual offline container plan preparation application composition":
+    it "prepares both complete candidate requests and marks signing and admission required":
+        step("Use the production command source path for selected discovery before authority exists")
+        for backend in ["linux-podman", "windows-docker-process"]:
+            val context_source = plan_prepare_context_fixture_v1(backend)
+            val output = orchestrator_container_plan_prepare_source_v1(backend, context_source,
+                plan_prepare_native_fixture_v1(backend), plan_prepare_server_fixture_v1("server.internal"),
+                "orchestrator", "", "").unwrap()
+            val fields = plan_prepare_reply_fields_v1(output)
+            expect(fields["signingRequired"]).to_equal(SdnValue.Bool(true))
+            expect(fields["admissionRequired"]).to_equal(SdnValue.Bool(true))
+            expect(fields["ownerVerified"]).to_equal(SdnValue.Bool(false))
+            expect(fields["executionAuthorized"]).to_equal(SdnValue.Bool(false))
+            val execution_source = plan_prepare_text_field_v1(fields, "execution")
+            val execution = container_execution_request_decode_v2(execution_source).unwrap()
+            expect(container_execution_request_encode_v2(execution).unwrap()).to_equal(execution_source)
+            expect(execution.plan.backend).to_equal(backend)
+            expect(plan_prepare_text_field_v1(fields, "planDigest")).to_equal(container_execution_plan_digest_v2(execution.plan).unwrap())
+            expect(plan_prepare_text_field_v1(fields, "requestDigest")).to_equal(execution.plan.request_digest)
+            expect(plan_prepare_text_field_v1(fields, "candidateContextDigest")).to_equal(sha256_text(context_source))
+            expect(execution.request_bytes.contains("SIMPLE_SERVERS_SDN")).to_equal(true)
+            expect(execution.request_bytes.contains("SIMPLE_SERVER_CLIENT_SCOPE")).to_equal(true)
+            expect(execution.request_bytes.contains("SIMPLE_SERVERS_CONFIG")).to_equal(true)
+
+    it "changes immutable output digests when the selected endpoint changes":
+        step("Pin the selected configuration before later reservation and signature construction")
+        for backend in ["linux-podman", "windows-docker-process"]:
+            val context = plan_prepare_context_fixture_v1(backend)
+            val native = plan_prepare_native_fixture_v1(backend)
+            val first = plan_prepare_reply_fields_v1(orchestrator_container_plan_prepare_source_v1(backend,
+                context, native, plan_prepare_server_fixture_v1("first.internal"), "agent", "", "").unwrap())
+            val second = plan_prepare_reply_fields_v1(orchestrator_container_plan_prepare_source_v1(backend,
+                context, native, plan_prepare_server_fixture_v1("second.internal"), "agent", "", "").unwrap())
+            expect(plan_prepare_text_field_v1(first, "requestDigest") == plan_prepare_text_field_v1(second, "requestDigest")).to_equal(false)
+            expect(plan_prepare_text_field_v1(first, "planDigest") == plan_prepare_text_field_v1(second, "planDigest")).to_equal(false)
+
+    it "rejects context unknown duplicate mistyped and inconsistent backend input":
+        step("Validate the versioned unverified input before preparing any immutable request")
+        var fields = plan_prepare_context_fields_fixture_v1("linux-podman")
+        fields["surprise"] = SdnValue.String("forbidden")
+        expect(container_plan_candidate_decode_v1(sdn_encode_canonical(SdnValue.Dict(fields))).is_err()).to_equal(true)
+        expect(container_plan_candidate_decode_v1("version: 1\nversion: 1\n").is_err()).to_equal(true)
+        fields = plan_prepare_context_fields_fixture_v1("linux-podman")
+        fields["version"] = SdnValue.String("1")
+        expect(container_plan_candidate_decode_v1(sdn_encode_canonical(SdnValue.Dict(fields))).is_err()).to_equal(true)
+        expect(orchestrator_container_plan_prepare_source_v1("windows-docker-process",
+            plan_prepare_context_fixture_v1("linux-podman"), plan_prepare_native_fixture_v1("linux-podman"),
+            plan_prepare_server_fixture_v1("server.internal"), "orchestrator", "", "").is_err()).to_equal(true)
+
+    it "rejects duplicate and unknown embedded policy fields and signed-envelope substitution":
+        step("Strictly decode nested candidate policy and canonical native records without accepting authority packets")
+        var fields = plan_prepare_context_fields_fixture_v1("linux-podman")
+        fields["providerPolicy"] = SdnValue.String("version: 1\nversion: 1\n")
+        expect(container_plan_candidate_decode_v1(sdn_encode_canonical(SdnValue.Dict(fields))).is_err()).to_equal(true)
+        fields = plan_prepare_context_fields_fixture_v1("linux-podman")
+        var policy = plan_prepare_reply_fields_v1(plan_prepare_text_field_v1(fields, "providerPolicy"))
+        policy["unknown"] = SdnValue.Bool(true)
+        fields["providerPolicy"] = SdnValue.String(sdn_encode_canonical(SdnValue.Dict(policy)) + "\n")
+        expect(container_plan_candidate_decode_v1(sdn_encode_canonical(SdnValue.Dict(fields))).is_err()).to_equal(true)
+        fields = plan_prepare_context_fields_fixture_v1("linux-podman")
+        var scope = plan_prepare_reply_fields_v1(plan_prepare_text_field_v1(fields, "scope"))
+        scope["unknown"] = SdnValue.Bool(true)
+        fields["scope"] = SdnValue.String(sdn_encode_canonical(SdnValue.Dict(scope)) + "\n")
+        expect(container_plan_candidate_decode_v1(sdn_encode_canonical(SdnValue.Dict(fields))).is_err()).to_equal(true)
+        var native_fields = plan_prepare_reply_fields_v1(plan_prepare_native_fixture_v1("linux-podman"))
+        native_fields["unknown"] = SdnValue.Bool(true)
+        expect(orchestrator_container_plan_prepare_source_v1("linux-podman",
+            plan_prepare_context_fixture_v1("linux-podman"), sdn_encode_canonical(SdnValue.Dict(native_fields)) + "\n",
+            plan_prepare_server_fixture_v1("server.internal"), "orchestrator", "", "").is_err()).to_equal(true)
+        expect(orchestrator_container_plan_prepare_source_v1("linux-podman",
+            plan_prepare_context_fixture_v1("linux-podman"), "version: 2\nkind: controller-dispatch-request\n",
+            plan_prepare_server_fixture_v1("server.internal"), "orchestrator", "", "").is_err()).to_equal(true)
+
+    it "rejects bad command counts backends paths and selectors before file IO":
+        step("Return explicit command errors without native owner or cleanup acquisition")
+        expect(orchestrator_container_plan_prepare_v1([]).exit_code).to_equal(1)
+        val bad_backend = ["container-plan-prepare", "docker", "/context.sdn", "/native.sdn", "-", "agent", "-", "-"]
+        expect(orchestrator_container_plan_prepare_v1(bad_backend).output.contains("container-plan-backend-unsupported")).to_equal(true)
+        val bad_path = ["container-plan-prepare", "linux-podman", "relative.sdn", "/native.sdn", "-", "agent", "-", "-"]
+        expect(orchestrator_container_plan_prepare_v1(bad_path).output.contains("container-plan-path-invalid")).to_equal(true)
+        val bad_consumer = ["container-plan-prepare", "linux-podman", "/context.sdn", "/native.sdn", "-", "unknown", "-", "-"]
+        expect(orchestrator_container_plan_prepare_v1(bad_consumer).output.contains("container-plan-selector-invalid")).to_equal(true)

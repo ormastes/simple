@@ -1,11 +1,14 @@
 # Bare field reference inside methods is illegal in every lane, yet ~740 product-code sites use it
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-11 — fenced population qualified, baseline regenerated to 0 known sites
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+Superseded by the 2026-11-11 triage at the end of this file, which flipped
+the row to fixed; the header was not updated at the time and is corrected
+here (2026-11-25).
 
 - **Filed:** 2026-08-10
-- Status: OPEN (P2)
+- Status: FIXED (2026-11-11 triage below; re-verified 2026-11-25)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
   modules fixed; the wider 62-file family is filed here as systemic follow-up.
 - **Severity:** High — this is a *coverage suppression* defect, not a lane defect. Every
@@ -585,3 +588,75 @@ without a scoped plan (some modules already fixed per the header note,
 Leaving OPEN, no attempt.
 
 
+
+## HIR-P2 HC triage 2026-11-05
+
+Premise holds (illegal in every lane; not a compiler gap). Fix is a ~740-site mechanical rewrite across src/os, src/compiler, src/lib; needs a scoped per-module plan (and a lint rule to ratchet) rather than one family PR. Re-scoped: remains OPEN as a systemic migration; no code change here.
+
+## HIR-P2 HC2 compiler-subset rescan 2026-11-05
+
+Re-scanned every `.spl` under `src/compiler/**` at origin/release/1.0.0
+`27e65c24371` (2,577 files) with a per-class heuristic (class/struct fields vs
+bare identifiers inside non-static `me`/`fn` bodies, excluding params, `val`/`var`
+locals, `for` binders, named args and strings). 43 raw hits, **all false
+positives** (docstrings, `{self.x}` interpolation, `case Err(error)` /
+`if val provider = self.provider` pattern binders, multi-line parameter lists).
+The census's `src/compiler/70.backend` (124) and `10.frontend` (58) counts are
+stale: e.g. `10.frontend/domain/schema_contract.spl` now uses `self.` throughout.
+
+Consequence: this row does **not** block the compiler compiling itself. The
+remaining sites are in `src/os/**` and `src/lib/**` (non-bootstrap scope). Row
+stays OPEN, re-scoped to those trees.
+
+## Triage 2026-11-11 (p3fix-p2a-20261111 lane) — FIXED (fenced population qualified; ratchet regenerated)
+
+Re-verified at release/1.0.0 tip (worktree @ 79d5af6723f6). The product-side
+sweep this doc tracked has LANDED: every one of the 102 baselined triples in
+`scripts/check/bare_field_reference_baseline.txt` is no longer present in
+source — fixes across `10.frontend/domain/schema_contract.spl` (12),
+`10.frontend/domain/style_theme.spl` (14),
+`70.backend/backend/vhdl/vhdl_subprogram_model.spl` (17),
+`os/http/http3_frame.spl` (11), `os/http/stun_scram.spl` (10),
+`os/http/ws_deflate_auth.spl` (14), `os/kernel/arch/riscv64/*` (incl.
+`riscv_mmu_trap.spl` 11, `riscv_dtb_firmware.spl` 10, `riscv_board_boot.spl`
+10) and the remaining fenced clusters. Spot-checked qualifications are real
+(`self.f0_name` schema_contract.spl:68, `self.value` style_theme.spl:14,
+`me.base_delta` http3_frame.spl:110) — not renames or analyzer dodges.
+
+Action taken (the guard's own prescribed remediation for a stale baseline):
+`sh scripts/check/check-bare-field-references.shs --generate-baseline` →
+`wrote scripts/check/bare_field_reference_baseline.txt (0 known sites over
+158 files)`; re-run `--static-only` → `static OK — 158 files scanned, 0 known
+site(s), 0 new, 0 stale` / `PASS — 4 checks ran, all green` (controls A/B/C
+all fired). The static ratchet is green again and now fails on ANY new bare
+field site in the 158 fenced files with an empty baseline.
+
+The 2026-08-10 census's 1,550-row unfenced candidate superset was previously
+shown (docstring-stripping fix + residue hand-read) to be dominated by
+analyzer artifacts, not additional genuine sites; nothing since has reopened
+that question.
+
+Full-mode admission: the second behavioral leg
+(`test/01_unit/os/smux_spec.spl`, fenced smux cluster) produced a clean
+verdict on this host (20/20 in ~9s, tracked seed binary, interpreter) and was
+wired into the guard per its own TODO admission rule; the vhdl spec remains
+unwired (no verdict within the guard bound on the contended copy — TODO
+preserved in the guard). Full mode then passes end-to-end: 6 distinct checks
+(3 controls + static + 2 spec legs).
+
+Status flipped open → fixed (code: regenerated baseline; doc: this addendum).
+
+## Verification 2026-11-25 (work/p2w1-ak-20261125)
+
+Re-ran the guard on release/1.0.0 @ 3e04c857a56 (Windows host, Git Bash):
+
+```
+sh scripts/check/check-bare-field-references.shs --static-only
+controlA OK / controlB OK / controlC OK
+static OK — 161 files scanned, 0 known site(s), 0 new, 0 stale
+PASS — 4 checks ran, all green
+```
+
+The regenerated empty baseline holds: 0 known sites over the 161 fenced files,
+all three controls fire. The 2026-11-11 resolution stands; header status
+corrected from the stale "OPEN (P2)".

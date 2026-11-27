@@ -1,0 +1,473 @@
+# EasyFix Rules - Single-Primitive Wrapper -> `unit` Suggestion (UNIT-WRAP-001)
+#
+# Opt-in, suggestion-only (Unsafe / Uncertain) rule:
+# Proposes `unit Name: Prim` (or `pub unit Name: Prim`) for a non-generic
+# `class` or `struct` that has:
+#   1. Exactly ONE field, whose type is a bare primitive
+#      (`i8..i64`, `u8..u64`, `f32`, `f64`, `bool`; `text` is exempt), AND
+#   2. No methods, or ONLY trivial accessors (single-expression getter returning
+#      `self.<field>`, or trivial `static fn` constructor forwarding one `Prim`
+#      parameter directly into `Name(<field>: p)` / `Name(p)`), including any
+#      same-file `impl Name:` block. Any `impl Trait for Name:` block or
+#      non-trivial / mutating (`me`) method disqualifies the type.
+#
+# Suggestion-only: every emitted EasyFix has `FixConfidence.Uncertain` and NO
+# replacements, so it never auto-applies under `--safe-only` (or `--fix-all`).
+#
+# Not in the default producer registry (`registry.spl`): opt-in only via
+# `simple fix --rule UNIT-WRAP-001 [--dry-run] <paths>`.
+
+use std.tooling.easy_fix.types.{FixConfidence, EasyFix}
+use compiler.semantics.lint.primitive_types.{is_bare_primitive_name}
+use compiler.tools.fix.rules.impl_.lint_allow.{lines_allow_rule, line_is_allowed}
+
+struct UnitWrapDecl:
+    kind: text         # "class" or "struct"
+    name: text
+    is_pub: bool
+    decl_line: i64     # 0-based
+    decl_col: i64      # 0-based byte column
+    field_name: text
+    field_type: text
+
+fn _uwrap_is_word_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+
+fn _uwrap_is_ident(s: text) -> bool:
+    if s == "":
+        return false
+    val first = s.substring(0, 1)
+    if first >= "0" and first <= "9":
+        return false
+    var i = 0
+    while i < s.byte_len():
+        if not _uwrap_is_word_char(s.substring(i, i + 1)):
+            return false
+        i = i + 1
+    true
+
+fn _uwrap_leading_ident(s: text) -> text:
+    var i = 0
+    while i < s.byte_len() and _uwrap_is_word_char(s.substring(i, i + 1)):
+        i = i + 1
+    s.substring(0, i)
+
+fn _uwrap_indent_of(line: text) -> i64:
+    var n = 0
+    while n < line.byte_len():
+        val ch = line.substring(n, n + 1)
+        if ch != " " and ch != "\t":
+            break
+        n = n + 1
+    n
+
+fn _uwrap_triple_quote_count(line: text) -> i64:
+    var n = 0
+    var start = 0
+    while start < line.byte_len():
+        val at = line.index_of("\"\"\"", start)
+        if at < 0:
+            break
+        n = n + 1
+        start = at + 3
+    n
+
+fn _uwrap_blank_triple_spans(line: text) -> text:
+    var out = ""
+    var inside = false
+    var i = 0
+    while i < line.byte_len():
+        if i + 3 <= line.byte_len() and line.substring(i, i + 3) == "\"\"\"":
+            inside = not inside
+            out = out + "   "
+            i = i + 3
+            continue
+        out = out + (if inside: " " else: line.substring(i, i + 1))
+        i = i + 1
+    out
+
+fn _uwrap_code_of(line: text) -> text:
+    var out = ""
+    var quote = ""
+    var i = 0
+    while i < line.byte_len():
+        val ch = line.substring(i, i + 1)
+        if quote != "":
+            if ch == "\\":
+                out = out + "  "
+                i = i + 2
+                continue
+            if ch == quote:
+                quote = ""
+                out = out + ch
+            else:
+                out = out + " "
+        elif ch == "\"" or ch == "'":
+            quote = ch
+            out = out + ch
+        elif ch == "#":
+            return out
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+fn _uwrap_code_lines(lines: [text]) -> [text]:
+    var out: [text] = []
+    var in_doc = false
+    for line in lines:
+        val quotes = if line.contains("\"\"\""): _uwrap_triple_quote_count(line) else: 0
+        if in_doc:
+            if quotes % 2 == 1:
+                in_doc = false
+            out.push("")
+            continue
+        if quotes % 2 == 1:
+            in_doc = true
+            out.push("")
+            continue
+        val unquoted = if quotes > 0: _uwrap_blank_triple_spans(line) else: line
+        if unquoted.contains("\"") or unquoted.contains("'") or unquoted.contains("#"):
+            out.push(_uwrap_code_of(unquoted))
+        else:
+            out.push(unquoted)
+    out
+
+fn _uwrap_strip_words(t: text, words: [text]) -> text:
+    var s = t
+    var changed = true
+    while changed:
+        changed = false
+        for w in words:
+            if s.starts_with(w):
+                s = s.substring(w.byte_len(), s.byte_len()).trim()
+                changed = true
+    s
+
+# Parse `[pub] (class|struct) Name:` (non-generic). Returns [kind, name, is_pub_str] or [].
+fn _uwrap_type_header(trimmed: text) -> [text]:
+    if not trimmed.ends_with(":"):
+        return []
+    var s = trimmed
+    var is_pub = "false"
+    if s.starts_with("pub "):
+        is_pub = "true"
+        s = s.substring(4, s.byte_len()).trim()
+    elif s.starts_with("export "):
+        is_pub = "true"
+        s = s.substring(7, s.byte_len()).trim()
+    var kind = ""
+    var rest = ""
+    if s.starts_with("class "):
+        kind = "class"
+        rest = s.substring(6, s.byte_len()).trim()
+    elif s.starts_with("struct "):
+        kind = "struct"
+        rest = s.substring(7, s.byte_len()).trim()
+    else:
+        return []
+    # Strip trailing `:` and verify the header is a plain non-generic identifier.
+    val body = rest.substring(0, rest.byte_len() - 1).trim()
+    if not _uwrap_is_ident(body):
+        return []
+    [kind, body, is_pub]
+
+# Parse `impl ...:` header. Returns [mode, target_name] where mode is "inherent" or "trait".
+fn _uwrap_impl_header(trimmed: text) -> [text]:
+    if not trimmed.starts_with("impl ") or not trimmed.ends_with(":"):
+        return []
+    val body = trimmed.substring(5, trimmed.byte_len() - 1).trim()
+    val for_at = body.index_of(" for ", 0)
+    if for_at >= 0:
+        val target = _uwrap_leading_ident(body.substring(for_at + 5, body.byte_len()).trim())
+        if target != "":
+            return ["trait", target]
+        return []
+    val target = _uwrap_leading_ident(body)
+    if target != "":
+        return ["inherent", target]
+    []
+
+fn _uwrap_is_method_header(trimmed: text) -> bool:
+    val s = _uwrap_strip_words(trimmed, ["pub ", "async ", "static "])
+    s.starts_with("fn ") or s.starts_with("me ")
+
+fn _uwrap_parse_field(trimmed: text) -> [text]:
+    val s = _uwrap_strip_words(trimmed, ["pub ", "val ", "var ", "mut "])
+    val colon = s.index_of(":", 0)
+    if colon <= 0:
+        return []
+    val name = s.substring(0, colon).trim()
+    if not _uwrap_is_ident(name):
+        return []
+    var ty = s.substring(colon + 1, s.byte_len())
+    val eq = ty.index_of("=", 0)
+    if eq >= 0:
+        ty = ty.substring(0, eq)
+    ty = ty.trim()
+    if ty == "":
+        return []
+    [name, ty]
+
+fn _uwrap_block_end(code: [text], header_idx: i64) -> i64:
+    val base_indent = _uwrap_indent_of(code[header_idx])
+    var i = header_idx + 1
+    while i < code.len():
+        val t = code[i].trim()
+        if t != "" and _uwrap_indent_of(code[i]) <= base_indent:
+            return i
+        i = i + 1
+    code.len()
+
+fn _uwrap_params_close(t: text, open: i64) -> i64:
+    var depth = 0
+    var i = open
+    while i < t.byte_len():
+        val ch = t.substring(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
+
+fn _uwrap_single_method_stmt(code: [text], method_idx: i64, method_end: i64) -> text:
+    var stmts: [text] = []
+    var i = method_idx + 1
+    while i < method_end:
+        val t = code[i].trim()
+        if t != "" and not t.starts_with("@"):
+            stmts.push(t)
+        i = i + 1
+    if stmts.len() != 1:
+        return ""
+    stmts[0]
+
+fn _uwrap_strip_return(stmt: text) -> text:
+    val t = stmt.trim()
+    if t.starts_with("return "):
+        return t.substring(7, t.byte_len()).trim()
+    t
+
+fn _uwrap_is_trivial_ctor_expr(expr: text, type_name: text, field_name: text, param_name: text) -> bool:
+    if expr == "{type_name}({field_name}: {param_name})":
+        return true
+    if expr == "{type_name}({param_name})":
+        return true
+    if expr == "{type_name} {{ {field_name}: {param_name} }}":
+        return true
+    if expr == type_name + "{{" + field_name + ": " + param_name + "}}":
+        return true
+    # Tolerate spacing variations inside `Name( field : param )`.
+    if not expr.starts_with(type_name):
+        return false
+    val rest = expr.substring(type_name.byte_len(), expr.byte_len()).trim()
+    var inner = ""
+    if rest.starts_with("(") and rest.ends_with(")"):
+        inner = rest.substring(1, rest.byte_len() - 1).trim()
+    elif rest.starts_with("{{") and rest.ends_with("}}"):
+        inner = rest.substring(1, rest.byte_len() - 1).trim()
+    else:
+        return false
+    if inner == param_name:
+        return true
+    val colon = inner.index_of(":", 0)
+    if colon <= 0:
+        return false
+    val lhs = inner.substring(0, colon).trim()
+    val rhs = inner.substring(colon + 1, inner.byte_len()).trim()
+    lhs == field_name and rhs == param_name
+
+# True when a method in `type_name` (or `impl type_name:`) is a trivial getter
+# or a trivial single-arg static constructor for `(field_name: field_type)`.
+fn _uwrap_method_is_trivial(code: [text], method_idx: i64, method_end: i64, type_name: text, field_name: text, field_type: text) -> bool:
+    val header = code[method_idx].trim()
+    if not header.ends_with(":"):
+        return false
+    var s = header
+    if s.starts_with("pub "):
+        s = s.substring(4, s.byte_len()).trim()
+    if s.starts_with("async "):
+        return false
+    var is_static = false
+    if s.starts_with("static "):
+        is_static = true
+        s = s.substring(7, s.byte_len()).trim()
+    # Mutating `me` methods are never trivial value-unit accessors.
+    if not s.starts_with("fn "):
+        return false
+    val open = s.index_of("(", 0)
+    if open < 0:
+        return false
+    val close = _uwrap_params_close(s, open)
+    if close < 0:
+        return false
+    val params_str = s.substring(open + 1, close).trim()
+    val rest = s.substring(close + 1, s.byte_len()).trim()
+    var ret = ""
+    if rest.starts_with("->"):
+        ret = rest.substring(2, rest.byte_len())
+        if ret.ends_with(":"):
+            ret = ret.substring(0, ret.byte_len() - 1)
+        ret = ret.trim()
+    val stmt = _uwrap_single_method_stmt(code, method_idx, method_end)
+    if stmt == "":
+        return false
+    val expr = _uwrap_strip_return(stmt)
+    if not is_static:
+        # Trivial getter: 0 args (or `self` / `self: Type`), returns `field_type` (or omitted), body `self.<field>`.
+        val params_ok = params_str == "" or params_str == "self" or params_str == "self: {type_name}"
+        val ret_ok = ret == "" or ret == field_type
+        return params_ok and ret_ok and expr == "self.{field_name}"
+    # Trivial static constructor: 1 param `(p: field_type)`, returns `type_name` (or omitted).
+    if params_str == "" or params_str.contains(","):
+        return false
+    val colon = params_str.index_of(":", 0)
+    if colon <= 0:
+        return false
+    val pname = params_str.substring(0, colon).trim()
+    var pty = params_str.substring(colon + 1, params_str.byte_len())
+    val eq = pty.index_of("=", 0)
+    if eq >= 0:
+        pty = pty.substring(0, eq)
+    pty = pty.trim()
+    if not _uwrap_is_ident(pname) or pty != field_type:
+        return false
+    val ret_ok = ret == "" or ret == type_name
+    ret_ok and _uwrap_is_trivial_ctor_expr(expr, type_name, field_name, pname)
+
+# Inspect all methods inside `impl Name:` blocks in the same file.
+# Returns false if any `impl Trait for Name:` or non-trivial method exists.
+fn _uwrap_impls_all_trivial(code: [text], type_name: text, field_name: text, field_type: text) -> bool:
+    var i = 0
+    while i < code.len():
+        val t = code[i].trim()
+        if t.starts_with("impl ") and _uwrap_indent_of(code[i]) == 0:
+            val hdr = _uwrap_impl_header(t)
+            if hdr.len() == 2 and hdr[1] == type_name:
+                if hdr[0] == "trait":
+                    return false
+                val end = _uwrap_block_end(code, i)
+                var body_indent = -1
+                var j = i + 1
+                while j < end:
+                    val mt = code[j].trim()
+                    if mt == "" or mt.starts_with("@"):
+                        j = j + 1
+                        continue
+                    val ind = _uwrap_indent_of(code[j])
+                    if body_indent < 0:
+                        body_indent = ind
+                    if ind == body_indent:
+                        if mt == "pass":
+                            j = j + 1
+                            continue
+                        if not _uwrap_is_method_header(mt):
+                            return false
+                        val mend = _uwrap_block_end(code, j)
+                        if not _uwrap_method_is_trivial(code, j, mend, type_name, field_name, field_type):
+                            return false
+                        j = mend
+                        continue
+                    j = j + 1
+                i = end
+                continue
+        i = i + 1
+    true
+
+fn _uwrap_analyze_type(lines: [text], code: [text], decl_idx: i64) -> [UnitWrapDecl]:
+    val t = code[decl_idx].trim()
+    val hdr = _uwrap_type_header(t)
+    if hdr.len() != 3:
+        return []
+    if line_is_allowed(lines, decl_idx, "primitive_api") or line_is_allowed(lines, decl_idx, "unit_wrap"):
+        return []
+    val kind = hdr[0]
+    val name = hdr[1]
+    val is_pub = hdr[2] == "true"
+    val end = _uwrap_block_end(code, decl_idx)
+    var body_indent = -1
+    var field_names: [text] = []
+    var field_types: [text] = []
+    var method_starts: [i64] = []
+    var method_ends: [i64] = []
+    var i = decl_idx + 1
+    while i < end:
+        val mt = code[i].trim()
+        if mt == "" or mt.starts_with("@"):
+            i = i + 1
+            continue
+        val ind = _uwrap_indent_of(code[i])
+        if body_indent < 0:
+            body_indent = ind
+        if ind == body_indent:
+            if mt == "pass":
+                i = i + 1
+                continue
+            if _uwrap_is_method_header(mt):
+                val mend = _uwrap_block_end(code, i)
+                method_starts.push(i)
+                method_ends.push(mend)
+                i = mend
+                continue
+            val parsed = _uwrap_parse_field(mt)
+            if parsed.len() != 2:
+                return []
+            field_names.push(parsed[0])
+            field_types.push(parsed[1])
+            i = i + 1
+            continue
+        i = i + 1
+    if field_names.len() != 1:
+        return []
+    val fname = field_names[0]
+    val ftype = field_types[0]
+    if not is_bare_primitive_name(ftype):
+        return []
+    var mi = 0
+    while mi < method_starts.len():
+        if not _uwrap_method_is_trivial(code, method_starts[mi], method_ends[mi], name, fname, ftype):
+            return []
+        mi = mi + 1
+    if not _uwrap_impls_all_trivial(code, name, fname, ftype):
+        return []
+    [UnitWrapDecl(
+        kind: kind,
+        name: name,
+        is_pub: is_pub,
+        decl_line: decl_idx,
+        decl_col: _uwrap_indent_of(lines[decl_idx]),
+        field_name: fname,
+        field_type: ftype
+    )]
+
+pub fn check_single_prim_unit(source: text, file: text) -> [EasyFix]:
+    val _ = file
+    var fixes: [EasyFix] = []
+    val lines = source.split("\n")
+    if lines_allow_rule(lines, "primitive_api") or lines_allow_rule(lines, "unit_wrap"):
+        return fixes
+    val code = _uwrap_code_lines(lines)
+    var offsets: [i64] = []
+    var off = 0
+    for line in lines:
+        offsets.push(off)
+        off = off + line.byte_len() + 1
+    var i = 0
+    while i < code.len():
+        val t = code[i].trim()
+        if t != "" and _uwrap_indent_of(code[i]) == 0:
+            val matches = _uwrap_analyze_type(lines, code, i)
+            for d in matches:
+                val prefix = if d.is_pub: "pub unit" else: "unit"
+                val start = offsets[d.decl_line] + d.decl_col
+                val fix = EasyFix.create(
+                    id: "UNIT-WRAP-001:{start}",
+                    description: "consider replacing single-primitive {d.kind} `{d.name}` (field `{d.field_name}: {d.field_type}`) with `{prefix} {d.name}: {d.field_type}` (suggestion-only; review callers and add `as <suffix>` if needed)",
+                    confidence: FixConfidence.Uncertain
+                )
+                fixes.push(fix)
+        i = i + 1
+    fixes

@@ -40,3 +40,64 @@ cd examples/08_gpu/backends/vulkan && ../../../../bin/simple run ../svmg_hello.s
 bin/simple test examples/08_gpu/backends/backends_spec.spl                            # vulkan case live-passes
 ```
 
+
+## 2026-11-12 fix attempt — lane fix-runpath-gpu-20261112 (investigated, no in-scope fix)
+
+Re-traced both entry paths on current HEAD (7a06b4aafd5):
+
+- `simple run <file>` → `cli_handle_run` → `cli_run_file` → in-process
+  `interpret_file` (no bootstrap driver is delegated to by default;
+  `_cli_driver_binary()` returns ""). The CLI performs NO graphics/Vulkan
+  initialization before user code — so the "prior present init leaves
+  `VulkanInstance` in a failed state" suspect does not exist on the
+  pure-Simple run path.
+- `simple test` GPU lanes spawn a child `simple run
+  src/app/test_runner_new/hosted_lane_main.spl --hosted-lane=gpu
+  --gpu-lane=vulkan_vm`, which runs the executor in the same kind of
+  in-process interpreter. The composite runner sets no Vulkan-relevant
+  env/cwd for that child (`test_executor_composite.spl`,
+  `test_executor_hosted_lanes.spl` contain no env_set/cwd manipulation).
+
+So on the self-hosted tree, run and test share one interpreter route and
+the measured run/test divergence was an artifact of the Rust seed binary
+(`rt_vulkan_init` / `VulkanInstance::get_or_init`,
+`src/compiler_rust/runtime/src/vulkan_graphics_runtime_core.rs:392`), which
+is outside this lane's touch scope. The silent rc=0 exit when printing
+`vulkan_sffi_last_error()` is the same extern-`text` return corruption as
+`run_path_extern_text_corruption_causes_false_gpu_skip_2026-08-20`
+(extern `text` returns across the run-path JIT/native route).
+
+No source change made (nothing in the lane's scope can affect the seed's
+runtime init order). The underlying extern-`text` ABI fix belongs to the
+compiler-core lane owning `50.mir`/`70.backend`.
+
+Verification pending: re-run of `examples/08_gpu/backends/svmg_hello.spl`
+under `simple run` on a Vulkan host once the admitted compiler exists.
+
+Status: OPEN (root cause identified; fix site out of lane scope).
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: OPEN, unchanged — host-class mismatch: the filed repro is a Linux
++ dual-NVIDIA observation; this Windows lane has no equivalent Vulkan-device
+`run`-vs-`test` entry path to reproduce it, and the failure surface
+(`VulkanInstance::get_or_init` in `src/compiler_rust/runtime`) is seed-Rust
+owned.** Not re-run here. Grant unchanged: on the Linux NVIDIA host (or any
+host where `test` live-passes), run the record's two commands against a current
+seed and capture `vulkan_sffi_last_error()` after `init()` — the silent rc=0
+exit after the error probe remains a secondary suspect to settle in the same
+session.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur with the most recent in-record triage; no fresh reproduction attempted
+(record's own grant names another host/lane). No in-lane change; disposition
+and owner unchanged.
+Filed repro is Linux dual-NVIDIA specific; this Windows host has no equivalent
+run-vs-test Vulkan entry divergence. Seed-Rust runtime owned
+(`VulkanInstance::get_or_init`).

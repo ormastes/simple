@@ -1,0 +1,60 @@
+# Purpose: timeout classification and success compatibility for LSP tool results.
+# @req REQ-LSP-TIMEOUT-RESULT-001
+# bug: doc/08_tracking/bug/lsp_mcp_nonposition_timeout_success_2026_11_03.md
+use std.spec
+use std.spec.step
+use app.simple_lsp_mcp.tools.{command_result, lsp_diagnostics_output, diagnostics_result}
+use app.simple_lsp_mcp.json_helpers.{LB, make_tool_result, jsonrpc_error}
+
+val TIMEOUT_30 = "lsp request timed out after 30000 ms"
+val TIMEOUT_10 = "lsp request timed out after 10000 ms"
+
+describe "LSP child timeout result classification":
+    it "returns a JSON-RPC timeout error preserving numeric and string ids":
+        step("classify the bounded query owner's timeout sentinel")
+        expect(command_result("7", TIMEOUT_30)).to_equal(jsonrpc_error("7", -32001, TIMEOUT_30))
+        expect(command_result("\"req-8\"", TIMEOUT_30)).to_equal(jsonrpc_error("\"req-8\"", -32001, TIMEOUT_30))
+
+    it "preserves normal empty and malformed child output as tool content":
+        step("preserve the existing success envelope without interpreting child text as JSON")
+        expect(command_result("1", "symbol: hello")).to_equal(make_tool_result("1", "symbol: hello"))
+        expect(command_result("2", "")).to_equal(make_tool_result("2", ""))
+        val malformed = LB() + "invalid"
+        expect(command_result("3", malformed)).to_equal(make_tool_result("3", malformed))
+        val ordinary = "source mentions lsp request timed out after 30000 ms"
+        expect(command_result("4", ordinary)).to_equal(make_tool_result("4", ordinary))
+
+    it "recognizes every bounded runtime timeout marker before partial output":
+        step("discard incomplete diagnostics from a killed check process")
+        val partial = "probe.spl:3:4: warning: incomplete"
+        expect(lsp_diagnostics_output(partial, "stderr\nTIMEOUT\n", -1)).to_equal(TIMEOUT_10)
+        expect(lsp_diagnostics_output(partial, "Process timed out", -1)).to_equal(TIMEOUT_10)
+        expect(lsp_diagnostics_output(partial, "[TIMEOUT: Process killed after 10000ms]", -1)).to_equal(TIMEOUT_10)
+
+    it "does not confuse ordinary timeout words or non-timeout exits with deadline expiry":
+        step("require both the bounded owner exit status and trailing marker")
+        expect(lsp_diagnostics_output("ok", "\nTIMEOUT\n", 0)).to_equal("ok")
+        expect(lsp_diagnostics_output("", "Process timed out", 1)).to_equal("Process timed out")
+        expect(lsp_diagnostics_output("", "Process timed out\ncontinued", -1)).to_equal("Process timed out\ncontinued")
+        expect(lsp_diagnostics_output("", "failed to spawn", -1)).to_equal("failed to spawn")
+
+    it "preserves diagnostic failures and successful clean output":
+        step("keep check's existing stderr and stdout precedence for completed processes")
+        expect(lsp_diagnostics_output("ready\n", "ignored", 0)).to_equal("ready")
+        expect(lsp_diagnostics_output("partial", "  check error  ", 1)).to_equal("check error")
+        expect(lsp_diagnostics_output("probe.spl:1:2: error: invalid\n", "", 1)).to_equal("probe.spl:1:2: error: invalid")
+        expect(lsp_diagnostics_output("", "", 7)).to_equal("command failed with exit code 7")
+
+    it "classifies a timeout before aggregating any diagnostic-looking tail":
+        step("the error envelope wins over diagnostic block formatting")
+        val raw = TIMEOUT_10 + "\nprobe.spl:3:4: error: incomplete"
+        expect(diagnostics_result("9", "probe.spl", raw)).to_equal(jsonrpc_error("9", -32001, raw))
+
+    it "preserves successful diagnostics aggregation and unavailable diagnostics":
+        step("retain the existing raw output and human diagnostic block")
+        val raw = "probe.spl:3:4: warning: example"
+        val combined = raw + "\n<new-diagnostics>\nprobe.spl:\n  Warning (line 3, col 4): example (simple-lint)\n</new-diagnostics>"
+        expect(diagnostics_result("10", "probe.spl", raw)).to_equal(make_tool_result("10", combined))
+        val unavailable = "diagnostics unavailable in source mode"
+        expect(diagnostics_result("11", "probe.spl", unavailable)).to_equal(make_tool_result("11", unavailable))
+        expect(diagnostics_result("12", "probe.spl", "")).to_equal(make_tool_result("12", ""))

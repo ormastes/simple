@@ -11,7 +11,7 @@ evidence found in the body. This is bookkeeping, not verification.
 - **inferred** — a recorded deferral rather than a defect; it closes when the range model
   is implemented. Left OPEN so the in-source pointer stays honest.
 
-**Status:** Deferred (not faked)
+**Status:** Deferred (not faked) — re-verified still-deferred 2026-11-11 (lane ne14); in-source pointer intact, see addendum
 **Filed:** 2026-06-15
 **Component:** `src/lib/common/compress/typed/lzma2_typed.spl` — C4.3 RangeCoder scaffold
 
@@ -77,3 +77,21 @@ Use `lzma2_compress_uncompressed()` + `xz_encode()` for LZMA2/XZ framing with
 full round-trip correctness. Compression ratio is 1:1 (no compression) but the
 wire format is fully spec-compliant for the uncompressed-chunk case.
 
+
+## Addendum 2026-11-11 (lane ne14) — deferral still live and accurate (kept OPEN)
+
+Re-verified on release/1.0.0 tip (worktree simple-p3-ne14-20261111, base
+f7640d20a458):
+
+- The in-source pointer is intact: `src/lib/common/compress/typed/lzma2_typed.spl:9-10`
+  still carries `# Full LZMA literal/match range model deferred — see:
+  doc/08_tracking/bug/lzma_full_range_model_deferred_2026-06-15.md`.
+- The deferred work is still not delivered: no `LiteralCoder`, `LenCoder`,
+  `PosSlot`/`PosSpecial`/`Align`, LZ match-finder, 11-state machine, or
+  `lzma2_compress_compressed` exists anywhere under
+  `src/lib/common/compress/typed/` (ripgrep, 0 hits). The tree still delivers
+  C4.1-C4.3 (uncompressed chunks, XZ framing, RangeCoder scaffold) only.
+- This remains a recorded deferral, not a defect; it closes when the range
+  model lands. Implementing it (~2000+ lines of arithmetic-coding work) is out
+  of scope for a P3 traverse lane, so the row stays OPEN and the deferral
+  stays honest.

@@ -1,0 +1,101 @@
+# Host-private start/collect owner. It signs only an execution it started through
+# the existing native worker owner, never a caller-supplied completion claim.
+use app.buildrunner.remote_evidence_v1.*
+use app.buildrunner.remote_capture_v1.remote_evidence_capture_v1
+use app.buildrunner.remote_context_v1.*
+use app.buildrunner.remote_authority_v1.*
+use app.bootstrap_builder.transport.{BuilderAttemptV1, builder_transport_start_v1,
+    builder_transport_poll_v1, builder_transport_reaped_v1, builder_transport_collect_v1,
+    builder_transport_cancel_v1}
+use app.bootstrap_builder.process_port.BuilderProcessPortV1
+use app.bootstrap_builder.worker.builder_worker_verify_inputs_v1
+use std.common.build_manager.contracts.{BuildTaskV1, BuildHostV1, BuildResultV1, builder_task_identity_v1}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2,
+    distributed_grant_digest_v2}
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+
+struct RemoteCompletionBundleV1:
+    result: BuildResultV1
+    evidence: RemoteEvidenceBytesV1
+    completion: RemoteCompletionEnvelopeV1
+
+# This object and its process port remain in the protected host capsule. Neither
+# is wire-decodable; trusted enrollment supplies context keys and signing seed.
+class RemoteHostExecutionV1:
+    task: BuildTaskV1
+    policy: RemoteEvidencePolicyV1
+    attempt: BuilderAttemptV1
+    request_digest: text
+    grant_digest: text
+    cancelled: bool
+    delivered: bool
+
+impl RemoteHostExecutionV1:
+    me cancel() -> Result<bool, text>:
+        self.cancelled = true
+        if not builder_transport_cancel_v1(self.attempt):
+            return Err("REMOTE_CANCEL_OWNERSHIP_UNRESOLVED")
+        Ok(true)
+
+    me collect(context: RemoteAuthorityContextV1, private_seed: [u8]) -> Result<RemoteCompletionBundleV1, text>:
+        if self.cancelled: return Err("REMOTE_EXECUTION_CANCELLED")
+        if self.delivered: return Err("REMOTE_COMPLETION_ALREADY_DELIVERED")
+        val _authorized = remote_context_admit_v1(context, self.task, self.policy)?
+        if sha256_text(distributed_encode_operation_v2(context.request)?) != self.request_digest or
+                distributed_grant_digest_v2(context.signed.grant)? != self.grant_digest:
+            return Err("REMOTE_EXECUTION_AUTHORITY_CHANGED")
+        if private_seed.len() != 32: return Err("REMOTE_HOST_SIGNING_KEY_INVALID")
+        val keys = pure_ed25519_keypair_from_seed(private_seed)
+        if keys.1 != context.host_key.public_key: return Err("REMOTE_HOST_SIGNING_KEY_DIFFERS")
+        val code = builder_transport_poll_v1(self.attempt)
+        if code == -2 or code == -1: return Err("REMOTE_EXECUTION_UNRESOLVED")
+        if not builder_transport_reaped_v1(self.attempt): return Err("REMOTE_TREE_NOT_REAPED")
+        # The worker already checks these before and after process execution.
+        # Recheck immediately before capture so toolchain/input mutation refuses.
+        val inputs_error = builder_worker_verify_inputs_v1(self.task, self.attempt.local_root)
+        if inputs_error != "": return Err(inputs_error)
+        val result = builder_transport_collect_v1(self.attempt)?
+        if result.exit_code != code: return Err("REMOTE_WORKER_EXIT_DIFFERS")
+        val bytes = remote_evidence_capture_v1(self.task, result, self.policy, self.attempt.local_root)?
+        val frozen = remote_evidence_freeze_v1(self.task, result, self.policy, bytes)?
+        var completion = RemoteCompletionEnvelopeV1(version: 1,
+            task_identity: builder_task_identity_v1(self.task), host_id: self.policy.host_id,
+            assignment_digest: self.policy.assignment_digest, controller_epoch: self.policy.controller_epoch,
+            operation_id: self.policy.operation_id, request_digest: self.request_digest,
+            grant_digest: self.grant_digest, result_digest: frozen.result_digest,
+            process_digest: frozen.process_digest, output_inventory_digest: frozen.output_inventory_digest,
+            tests_digest: frozen.tests_digest, signer_id: context.host_key.identity,
+            key_revision: context.host_key.revision, completed_at: context.now,
+            tree_reaped: true, signature: [])
+        completion.signature = pure_ed25519_sign(private_seed, context.host_key.public_key,
+            remote_completion_signature_message_v1(completion)?)
+        # A local self-check detects signing/serialization errors, never replaces
+        # the independent receiving parent's authority and byte verification.
+        val expected = RemoteCompletionBindingV1(completion.task_identity, completion.host_id,
+            completion.assignment_digest, completion.controller_epoch, completion.operation_id,
+            frozen.result_digest, frozen.process_digest, frozen.output_inventory_digest, frozen.tests_digest)
+        val _checked = remote_verify_completion_v1(completion, context.signed, context.approval,
+            context.issuer, context.approver, context.host_key, context.request, self.task,
+            expected, context.now, context.policy_revision, context.revocation_epoch, context.session_generation)?
+        self.delivered = true
+        Ok(RemoteCompletionBundleV1(result, bytes, completion))
+
+fn remote_host_start_v1(task: BuildTaskV1, host: BuildHostV1, source_root: text,
+        run_root: text, process: BuilderProcessPortV1, policy: RemoteEvidencePolicyV1,
+        context: RemoteAuthorityContextV1) -> Result<RemoteHostExecutionV1, text>:
+    val _authorized = remote_context_admit_v1(context, task, policy)?
+    if context.requested.isolation_class != "native-process" or
+            context.observed.isolation_class != "native-process":
+        return Err("REMOTE_NATIVE_PROCESS_ISOLATION_REQUIRED")
+    # This owner runs on the enrolled host. Starting another SSH hop would turn
+    # plaintext remote reap files into signing authority and is forbidden.
+    if host.transport != "local" or host.id != policy.host_id:
+        return Err("REMOTE_SIGNER_REQUIRES_LOCAL_EXECUTION_OWNER")
+    val request_digest = sha256_text(distributed_encode_operation_v2(context.request)?)
+    val grant_digest = distributed_grant_digest_v2(context.signed.grant)?
+    val attempt = builder_transport_start_v1(task, host, source_root, run_root, process)
+    if attempt.error != "": return Err(attempt.error)
+    Ok(RemoteHostExecutionV1(task, policy, attempt, request_digest, grant_digest, false, false))
+
+export RemoteCompletionBundleV1, RemoteHostExecutionV1, remote_host_start_v1

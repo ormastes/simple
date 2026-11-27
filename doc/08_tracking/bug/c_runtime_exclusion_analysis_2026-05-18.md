@@ -29,7 +29,7 @@ is link-time symbol analysis on a Linux build lane.
 
 # C Runtime Exclusion Analysis
 
-Status: Open — audit still tracks removable C runtime candidates and blocked removals.
+Status: SUPERSEDED — audit still tracks removable C runtime candidates and blocked removals.
 
 **Date:** 2026-05-18
 **Last audited:** 2026-05-30 (follow-up pass — hosted_cocoa/hosted_win32 classified as stale unbuilt C duplicates; active hosted ABI resolves through Rust stubs/real-gated crate)
@@ -293,3 +293,47 @@ symbols — they provide equivalent functionality at the stdlib layer.
 | random | `src/lib/common/random_pure.spl` | 21/21 |
 | time_utils | `src/lib/common/time_utils.spl` | 53/53 |
 | audio_effects | `src/lib/common/audio_effects.spl` | 7/7 |
+
+## 2026-11-10 status — P3 runtime-lane triage (worktree simple-p3-rt-20261110)
+
+**Verdict: SUPERSEDED — the doc's own 2026-09-13 closure stands; re-verified
+consistent at base 1504212d788b.** This entry is a removal audit, not a defect.
+Spot re-verification (host-independent-source): `hosted_cocoa.c` /
+`hosted_win32.c` remain on disk, unbuilt, exactly as recorded (stale exact-ABI
+duplicates of the Rust `spl_hosted_runtime` exports); `runtime_db.c` remains
+active with its one hard blocker owned by **todo 285**
+(`doc/08_tracking/todo/todo_db.sdn:287`, "No external SQLite" directive — not
+this lane); `runtime.c` remains bootstrap-only, its exclusion gated on build
+work, not a bug. Nothing actionable remains that is not already tracked
+elsewhere. No change made.
+
+## 2026-11-11 status — P3 rt2 lane triage (worktree simple-p3-rt2-20261111)
+
+**Verdict: SUPERSEDED-by-prior-lane** — spot-check corroborates the
+2026-11-10 p3-rt addendum; the doc's own 2026-09-13 closure stands. No deep
+triage redone.
+
+Spot-check at this lane's base (790b54f7c4fc):
+
+- `hosted_cocoa.c` / `hosted_win32.c` / `runtime_db.c` / `runtime.c` all
+  still on disk exactly as recorded (stale unbuilt duplicates; active SQLite
+  wrapper; bootstrap-only respectively).
+- `runtime_db.c` still referenced in `src/compiler_rust/runtime/build.rs`
+  c_sources. The core-C lane's `tools.rs` has moved to
+  `src/compiler_rust/compiler/src/pipeline/native_project/tools.rs` but its
+  `runtime_inputs` composition (`runtime_native.c` first-class, :535-536) is
+  unchanged in shape.
+- Bookkeeping churn note: the closure's cited todo-db anchor ("No external
+  SQLite" row 285 / `todo_db.sdn:287`, P1 runtime) no longer greps under
+  that id/text at this base — the todo db was renumbered/restructured since
+  2026-09-13. The closure itself (nothing actionable not tracked elsewhere)
+  is unaffected.
+- seed-smoke (refreshed seed 0791c2b7f4a7): `bin/simple.exe check
+  src/lib/common/ctype.spl` exit 0 (W-STR-BRACE-001 lint warnings only) —
+  seed check path healthy on a runtime-adjacent stdlib module.
+
+No change made.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — Removal audit, not a defect; last blocker (runtime_db.c fate) owned by the "No external SQLite" todo. rt2 spot-checked the four named C files still on disk in the recorded states.

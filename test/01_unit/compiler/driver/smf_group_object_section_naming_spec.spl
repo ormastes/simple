@@ -1,0 +1,121 @@
+# Prevention: the v1.2 group-object SMF path (the pure-Simple producer that
+# CAN carry data-section relocations) must keep an LLVM `.data.rel.ro.<sym>`
+# pointer-table subsection as a named, writable Data section whose
+# relocation records that section as its source -- and must classify the
+# sibling kinds (.rodata.*, .data.*) through the same builder. (.bss is not
+# covered: elf_write_object cannot emit a sized SHT_NOBITS section.)
+# Bug: smf_native_codegen_data_rel_ro_subsection_2026_11_09
+# @cover src/compiler/80.driver/smf_group_object_adapter.spl
+
+use compiler.driver.smf_group_object_adapter.{smf_group_object_from_bytes_v1}
+use compiler.backend.linker.elf_writer.{
+    ElfWriterSection, ElfWriterSymbol, ElfWriterReloc,
+    elf_write_object, elf_writer_config_x86_64
+}
+use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+use compiler.backend.linker.smf_writer.{
+    SECTION_FLAG_READ, SECTION_FLAG_WRITE, SECTION_FLAG_EXEC
+}
+use std.common.string_core.{bytes_to_text}
+
+# SMF section-table entry (64 bytes): type u8 @0 | flags u32 @4 | offset u64
+# @8 | size u64 @16 | virtual_size @24 | alignment @32 | name[16] @40.
+fn entry_base(reader: SmfReaderMemory, index: i64) -> i64:
+    reader.header.section_table_offset + index * 64
+
+fn entry_type(wire: [u8], reader: SmfReaderMemory, index: i64) -> i64:
+    wire[entry_base(reader, index)] as i64
+
+fn entry_flags(wire: [u8], reader: SmfReaderMemory, index: i64) -> i64:
+    val at = entry_base(reader, index) + 4
+    (wire[at] as i64) | ((wire[at + 1] as i64) << 8) |
+        ((wire[at + 2] as i64) << 16) | ((wire[at + 3] as i64) << 24)
+
+fn entry_size(wire: [u8], reader: SmfReaderMemory, index: i64) -> i64:
+    val at = entry_base(reader, index) + 16
+    (wire[at] as i64) | ((wire[at + 1] as i64) << 8) |
+        ((wire[at + 2] as i64) << 16) | ((wire[at + 3] as i64) << 24)
+
+fn entry_name(wire: [u8], reader: SmfReaderMemory, index: i64) -> text:
+    val at = entry_base(reader, index) + 40
+    var out: [u8] = []
+    var i = 0
+    while i < 16 and wire[at + i] != 0:
+        out.push(wire[at + i])
+        i = i + 1
+    bytes_to_text(out)
+
+# One function plus the PROGBITS data section kinds clang emits for relocated and
+# plain constants. `.data.rel.ro.tbl` holds one pointer slot relocated
+# (R_X86_64_64) against the function, exactly like an LLVM pointer table.
+fn naming_object() -> [u8]:
+    val sections: [ElfWriterSection] = [
+        ElfWriterSection(".text", 1, 6, [195], 0, 0),
+        ElfWriterSection(".data.rel.ro.tbl", 1, 3, [0, 0, 0, 0, 0, 0, 0, 0], 0, 0),
+        ElfWriterSection(".rodata.str", 1, 2, [104, 105, 0, 0], 0, 0),
+        ElfWriterSection(".data.var", 1, 3, [7, 0, 0, 0], 0, 0)
+    ]
+    val symbols: [ElfWriterSymbol] = [
+        ElfWriterSymbol("nm_fn", 0x12, 0, 1, 0, 1),
+        ElfWriterSymbol("nm_tbl", 0x11, 0, 2, 0, 8),
+        ElfWriterSymbol("nm_str", 0x11, 0, 3, 0, 4),
+        ElfWriterSymbol("nm_var", 0x11, 0, 4, 0, 4)
+    ]
+    val relocs: [ElfWriterReloc] = [
+        ElfWriterReloc(0, (0 << 32) | 1, 0, ".data.rel.ro.tbl")
+    ]
+    val raw = elf_write_object(elf_writer_config_x86_64(), sections, symbols, relocs)
+    var bytes: [u8] = []
+    for byte in raw:
+        bytes.push(byte as u8)
+    bytes
+
+describe "group object SMF keeps the .data.rel.ro.<sym> subsection":
+    it "emits it as a named writable Data section":
+        val converted = smf_group_object_from_bytes_v1(naming_object(), "linux", "x86_64")
+        expect(converted.is_ok()).to_equal(true)
+        val wire = converted.unwrap()
+        val reader = SmfReaderMemory.from_data(wire).unwrap()
+        # 4 object sections plus the v1.2 relocation table (RelTab = 5).
+        expect(reader.header.section_count as i64).to_equal(5)
+        expect(entry_type(wire, reader, 4)).to_equal(5)
+        expect(entry_name(wire, reader, 1)).to_equal(".data.rel.ro.tbl")
+        expect(entry_type(wire, reader, 1)).to_equal(2)
+        expect(entry_flags(wire, reader, 1)).to_equal(SECTION_FLAG_READ + SECTION_FLAG_WRITE)
+        expect(entry_size(wire, reader, 1)).to_equal(8)
+
+    it "records that section as the relocation source, not the Code section":
+        val wire = smf_group_object_from_bytes_v1(naming_object(), "linux", "x86_64").unwrap()
+        var reader = SmfReaderMemory.from_data(wire).unwrap()
+        val relocs = reader.read_relocations().unwrap()
+        val ordered = reader.symbols_in_table_order().unwrap()
+        expect(relocs.len()).to_equal(1)
+        expect(relocs[0].source_section_index).to_equal(1)
+        expect(relocs[0].offset).to_equal(0)
+        expect(relocs[0].reloc_type).to_equal(1)
+        expect(ordered[relocs[0].symbol_index].name).to_equal("nm_fn")
+        expect(reader.lookup_symbol("nm_tbl").unwrap().section_index).to_equal(1)
+
+describe "sibling section kinds through the same builder":
+    it "keeps .text as the executable Code section":
+        val wire = smf_group_object_from_bytes_v1(naming_object(), "linux", "x86_64").unwrap()
+        val reader = SmfReaderMemory.from_data(wire).unwrap()
+        expect(entry_name(wire, reader, 0)).to_equal(".text")
+        expect(entry_type(wire, reader, 0)).to_equal(1)
+        expect(entry_flags(wire, reader, 0)).to_equal(SECTION_FLAG_READ + SECTION_FLAG_EXEC)
+
+    it "keeps .rodata.<sym> as a read-only RoData section":
+        val wire = smf_group_object_from_bytes_v1(naming_object(), "linux", "x86_64").unwrap()
+        val reader = SmfReaderMemory.from_data(wire).unwrap()
+        expect(entry_name(wire, reader, 2)).to_equal(".rodata.str")
+        expect(entry_type(wire, reader, 2)).to_equal(3)
+        expect(entry_flags(wire, reader, 2)).to_equal(SECTION_FLAG_READ)
+        expect(entry_size(wire, reader, 2)).to_equal(4)
+
+    it "keeps .data.<sym> as a writable Data section":
+        val wire = smf_group_object_from_bytes_v1(naming_object(), "linux", "x86_64").unwrap()
+        val reader = SmfReaderMemory.from_data(wire).unwrap()
+        expect(entry_name(wire, reader, 3)).to_equal(".data.var")
+        expect(entry_type(wire, reader, 3)).to_equal(2)
+        expect(entry_flags(wire, reader, 3)).to_equal(SECTION_FLAG_READ + SECTION_FLAG_WRITE)
+

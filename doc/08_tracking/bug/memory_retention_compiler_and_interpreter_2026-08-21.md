@@ -2,8 +2,11 @@
 
 Date: 2026-08-21
 Area: `src/compiler_rust` (seed), `src/compiler/80.driver` (pure-Simple driver)
-Status: PARTIALLY RESOLVED — census gap fixed; three of four hypothesised
-defects measured and REFUTED; one real retainer identified and filed below.
+Status: RESOLVED 2026-11-11 (lane interp10) — every item this ledger carried
+has an answer (see the dated addendum at the bottom); the residual
+interpreted-worker RSS floor is tracked in
+native_build_interpreted_worker_fixed_2_4gb_floor_2026-08-18.md, still OPEN
+there.
 
 ## Summary
 
@@ -278,3 +281,78 @@ parse itself. End-to-end `native-build --threads 2 --entry-closure` on a
 worker read them back as `hits=3 misses=0 parses=0`. (That build then fails in
 MIR on `std.text` — `unresolved method call: index_of/chars/merge` — identically
 with `SIMPLE_PARSE_SHARDING=0`, so it is pre-existing and unrelated.)
+
+## 2026-11-06 re-measured on the Windows seed: the open env/export item is resolved
+
+Same reproduction (`SIMPLE_MEM_TRACE=1 simple lint src/compiler/80.driver/driver_types.spl`,
+seed `D:/dev/wt/seed/simple.exe`, release/1.0.0 tip):
+
+```
+[mem] phases: module_loads=341 source=4.4MB ast_items=9598
+      parse_retained=122.8MB eval_retained=82.2MB parse_bytes_per_source_byte=28.0
+      env_entries=9097 export_entries=9810
+[mem] globals census: flat=979 owners=174 owned_entries=982 module_envs=341 import_bindings=2569
+```
+
+Against the 2026-08-21 numbers (161 envs, 53,227 env entries, 48,646 import
+bindings, 156.5 MB eval-retained): with 2.1x more modules loaded, import
+bindings fell 19x and env entries 5.9x; eval-retained halved. Whole-surface
+imports now share one `Arc<ModuleTable>` per owner
+(`interpreter_state.rs:118 record_owner_binding_layer`, seed change of
+2026-10-20) instead of re-materialising bindings per importer. Parse retention
+(28 B/source byte) is the remaining term and is the AST/FunctionDef density
+cost the interpreter must keep.
+
+## 2026-11-07 — "Open: per-module env/export materialisation" re-measured: import bindings are now shared
+
+Windows 11, `simple-base.exe` (tip `4eb1de2ecbd`, bootstrap profile,
+sha256 `c0c47b2cdd6cd6ee…`), no-arg interpreted `native_build_worker.spl`
+under `SIMPLE_MEM_TRACE=1`:
+
+```
+[mem] phases: module_loads=500 source=11.0MB ast_items=14837 parse_retained=270.3MB
+      eval_retained=161.1MB parse_bytes_per_source_byte=24.6 env_entries=14860 export_entries=14208
+[mem] globals census: flat=3682 owners=401 owned_entries=3800 module_envs=500 import_bindings=39624
+```
+
+Against the 2026-08-21 shard census (`env_entries=949861 import_bindings=927167`
+for 667 envs): **79 import bindings and 30 env entries per module, down from
+1,390 and 1,424.** The O(modules x visible globals) materialisation this
+section filed is no longer the retainer; `LayeredEnv` (module env holds its
+imports as shared layers) and `record_owner_binding_layer` (whole-surface
+import by reference) landed in between. `parse_bytes_per_source_byte` is
+24.6 (was 40.6).
+
+What remains open moved: peak RSS of that worker is still 1.99 GB and
+1.34 GB of it is live after only 100 module loads, before parse/eval
+retention can account for it — see the same-date note in
+native_build_interpreted_worker_fixed_2_4gb_floor_2026-08-18.md.
+
+## 2026-11-11 triage addendum — lane interp10 (RESOLVED for this ledger)
+
+Batch-triage verdict: every item this record carried now has an answer:
+(a) env-rebuild retention — mechanism removed, question moot; (b) parse
+retention — measured linear (~1.5 MB/module); (c) zero-slack allocation —
+REFUTED (the C runtime doubles); (d) driver eviction reclaim-zero —
+documented, needs a codegen/representation change, tracked at
+`bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md`; (e) parse-shard
+full-closure loading — FIXED 2026-08-22 (slim `parse_shard_main.spl` entry);
+(f) per-module env/export materialisation — the last "Open" item — measured
+RESOLVED on the Windows seed 2026-11-06/2026-11-07 (`import_bindings` down
+~19x; whole-surface imports share one `Arc<ModuleTable>` per owner via
+`record_owner_binding_layer`).
+
+What remains is the fixed ~2 GB RSS floor of the interpreted
+`native_build_worker` process. This ledger never claimed that item; it lives
+in `native_build_interpreted_worker_fixed_2_4gb_floor_2026-08-18.md` (still
+OPEN, separate owner) and is not re-diagnosed here.
+
+Verification basis for this flip: the in-doc 2026-11-06/07 measurements were
+taken on this same release line (Windows seed at `release/1.0.0` tip); this
+lane's seed is build-commit `46fe8f6b6def` at `origin/release/1.0.0` tip. No
+new mem-trace run was started — the ledger's questions are already answered
+by those measurements and a re-run would add no new signal.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane interp10: RESOLVED for this ledger (measured survey closed; surviving items tracked elsewhere). No in-lane change.

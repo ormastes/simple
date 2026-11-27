@@ -1,0 +1,63 @@
+# Acceptance layer: list_rooms over the dense encrypted database.
+#
+# ONE production Messenger verb call over the dense encrypted database, made once
+# at load and shared by every scenario below.  A successful read decrypts all
+# nine pages (about 45 s each on the Phase 1 seed), so each success-path verb
+# lives in its own file to stay inside the per-spec time budget.  Expected
+# payloads are serialised by Python's json.dumps in the generator and parsed
+# back here; nothing is compared with a value the adapter produced itself.
+# Lifecycle: doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md ;
+# doc/03_plan/agent_tasks/devhub_messenger_master.md ;
+# doc/04_architecture/app/devhub/messenger_gateway.md ;
+# doc/05_design/app/devhub/messenger_sdn_and_api.md
+# @manual_section: messenger-list-rooms
+
+"""
+## Purpose and audience
+Purpose: list_rooms returns exactly the rooms in the encrypted database, with the Unicode name decoded, as valid JSON, and without leaking the secret or other tables.
+Audience: DevHub release reviewers who accept the encrypted Messenger read path.
+The passphrase is public synthetic test data from dense_ground_truth.json.
+"""
+
+use std.spec.*
+use test.support.devhub_messenger_dense.*
+use std.common.json.value.{JsonValue, json_value_field, json_value_items, json_value_len}
+use app.devhub.messenger.adapter.sqlcipher_reader.{
+    messenger_sqlcipher4_list_rooms, messenger_sqlcipher4_list_members,
+    messenger_sqlcipher4_history, messenger_sqlcipher4_fetch_message
+}
+
+val dn_truth = dense_truth()
+val dn_good = truth_passphrase(dn_truth)
+val _secret_ready = dense_set_secret(dn_good)
+val dn_target = dense_target_with(dense_path(DENSE_BASE), DENSE_REF, true)
+val dn_result = messenger_sqlcipher4_list_rooms(dn_target, "user")
+
+describe "list_rooms through the production verb":
+    it "returns exactly the two rooms the generator wrote":
+        # @req REQ-MSGR-DENSE-ACC-ROOMS-001
+        step("Call list_rooms as the interactive user and compare the payload with the json.dumps ground truth")
+        # @capture(protocol_json): list_rooms status, exit code and payload against the ground-truth payload
+        expect(outcome_line(dn_result)).to_equal("ok:0:payload")
+        expect(dn_result.error).to_equal("")
+        expect(dn_result.payload).to_equal(tf(dn_truth, "rooms_payload"))
+
+    it "renders valid JSON whose count and room names match the ground truth":
+        # @req REQ-MSGR-DENSE-ACC-ROOMS-002
+        step("Parse the payload and read the count and each room back")
+        # @capture(protocol_json): parsed rooms array with id and name per room
+        val parsed = payload_json(dn_result.payload)
+        val rooms = json_value_items(json_value_field(parsed, "rooms"))
+        val want = json_value_field(json_value_field(dn_truth, "tables"), "room")
+        expect(payload_is_json(dn_result.payload)).to_equal(true)
+        expect(tn(parsed, "count")).to_equal(rows_in(want))
+        expect(json_value_len(json_value_field(parsed, "rooms"))).to_equal(rows_in(want))
+        expect(tf(rooms[0], "id")).to_equal(cell_at(want, 0, 0))
+        expect(tf(rooms[0], "name")).to_equal(cell_at(want, 0, 1))
+        expect(tf(rooms[1], "name")).to_equal(cell_at(want, 1, 1))
+
+    it "reveals no message, member or secret content":
+        # @req REQ-MSGR-DENSE-ACC-ROOMS-003
+        step("Search the room listing for message bodies, member ids and the passphrase")
+        # @capture(statistics): occurrences of foreign content in the room listing, which must be none
+        expect(leaks_none(dn_result.payload, ["tie-first", "tie-second", "other-room-only", "identity_id", "SQLite format", dn_good])).to_equal(true)

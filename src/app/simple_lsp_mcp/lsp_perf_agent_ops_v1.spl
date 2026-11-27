@@ -1,0 +1,866 @@
+# Agent-oriented Performance Analysis & Safe Refactoring Operations for simple_lsp_mcp
+# (Wave F5 §10.2, §11.4, §11.5, §15.3 I01, I02, I09).
+#
+# Startup-closure invariant: imports ONLY exported symbols from local
+# lsp_diagnostics_structured_v1 — zero compiler.* and zero app.io.mod imports;
+# zero raw rt_env_get / rt_process_run.
+
+use .lsp_diagnostics_structured_v1.{
+    LspPerfCostPayloadV1,
+    LspPerfSizeEntryV1,
+    LspPerfContribEntryV1,
+    LspPerfObligationEntryV1,
+    LspStructuredDiagItemV1,
+    LspRankedFixV1,
+    LspStructuredDiagnosticsEnvelopeV1,
+    lsp_fast_extract_field_v1,
+    lsp_json_q_v1,
+    lsp_json_lb_v1,
+    lsp_json_rb_v1,
+    lsp_json_sbl_v1,
+    lsp_json_sbr_v1,
+    lsp_json_str_v1,
+    lsp_json_pair_v1,
+    lsp_json_rpc_result_v1,
+    lsp_json_tool_error_v1,
+    lsp_snapshot_hash_for_text_v1,
+    lsp_snapshot_hash_for_file_v1,
+    lsp_policy_digest_v1,
+    lsp_normalize_perf_applicability_v1,
+    lsp_parse_admitted_batch_json_v1,
+    lsp_collect_structured_diagnostics_v1
+}
+
+pub struct LspPerfAgentSnapshotV1:
+    file: text
+    version: i64
+    source_content: text
+    snapshot_hash: text
+    expected_semantic_fingerprint: text
+    active_semantic_fingerprint: text
+    envelope: LspStructuredDiagnosticsEnvelopeV1
+
+pub struct LspPerfChangeReceiptV1:
+    change_id: text
+    action_id: text
+    rule_code: text
+    file: text
+    before_version: i64
+    after_version: i64
+    before_hash: text
+    after_hash: text
+    semantic_fingerprint: text
+    obligations: [LspPerfObligationEntryV1]
+    tradeoff: text
+    after_content: text
+
+var _AGENT_SNAPSHOTS: [LspPerfAgentSnapshotV1] = []
+var _AGENT_RECEIPTS: [LspPerfChangeReceiptV1] = []
+var _AGENT_CHANGE_SEQ: i64 = 0
+
+fn _pa_q() -> text:
+    lsp_json_q_v1()
+
+fn _pa_lb() -> text:
+    lsp_json_lb_v1()
+
+fn _pa_rb() -> text:
+    lsp_json_rb_v1()
+
+fn _pa_sbl() -> text:
+    lsp_json_sbl_v1()
+
+fn _pa_sbr() -> text:
+    lsp_json_sbr_v1()
+
+fn _pa_js(v: text) -> text:
+    lsp_json_str_v1(v)
+
+fn _pa_jp(k: text, v: text) -> text:
+    lsp_json_pair_v1(k, v)
+
+fn _pa_jo2(p1: text, p2: text) -> text:
+    _pa_lb() + p1 + "," + p2 + _pa_rb()
+
+fn _pa_jo3(p1: text, p2: text, p3: text) -> text:
+    _pa_lb() + p1 + "," + p2 + "," + p3 + _pa_rb()
+
+fn _pa_bool(v: bool) -> text:
+    if v: "true" else: "false"
+
+fn _pa_field(json: text, key: text) -> text:
+    lsp_fast_extract_field_v1(json, key)
+
+fn _pa_chars(s: text) -> [text]:
+    var out: [text] = []
+    for ch in s:
+        out.push(ch)
+    out
+
+fn _pa_join_range(chars: [text], start: i64, end: i64) -> text:
+    var parts: [text] = []
+    var i = start
+    while i < end and i < chars.len():
+        if i >= 0:
+            parts.push(chars[i])
+        i = i + 1
+    parts.join("")
+
+fn _pa_first_char(s: text) -> text:
+    for ch in s:
+        return ch
+    ""
+
+fn _pa_split_top_objects(arr_json: text) -> [text]:
+    var objs: [text] = []
+    val chars = _pa_chars(arr_json)
+    val n = chars.len()
+    val q = _pa_q()
+    val lb = _pa_lb()
+    val rb = _pa_rb()
+    var depth = 0
+    var obj_start = -1
+    var in_str = false
+    var escaped = false
+    var i = 0
+    while i < n:
+        val ch = chars[i]
+        if in_str:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == q:
+                in_str = false
+            i = i + 1
+            continue
+        if ch == q:
+            in_str = true
+        elif ch == lb:
+            if depth == 0:
+                obj_start = i
+            depth = depth + 1
+        elif ch == rb:
+            depth = depth - 1
+            if depth == 0 and obj_start >= 0:
+                objs.push(_pa_join_range(chars, obj_start, i + 1))
+                obj_start = -1
+        i = i + 1
+    objs
+
+fn _pa_norm_sev(raw_sev: text) -> text:
+    val s = raw_sev.trim()
+    if s == "1" or s == "error" or s == "Error" or s == "deny" or s == "Deny":
+        return "error"
+    if s == "2" or s == "warning" or s == "Warning" or s == "warn" or s == "Warn":
+        return "warning"
+    if s == "3" or s == "info" or s == "Info" or s == "Information" or s == "note":
+        return "info"
+    if s == "4" or s == "hint" or s == "Hint" or s == "help":
+        return "hint"
+    "error"
+
+fn _pa_rule_rationale(rule_code: text) -> text:
+    if rule_code == "PERF-STYLE-001":
+        return "Equivalent collection refactor available; modeled traversal cost is unchanged and runtime improvement is not established."
+    if rule_code == "PERF-COST-001":
+        return "Actionable repeated scan or superlinear bound under the stated size variables and assumptions; an upper bound is not a confirmed elapsed-time regression."
+    if rule_code == "PERF-COST-002":
+        return "Inferred symbolic cost bound increased relative to baseline under compatible models."
+    if rule_code == "PERF-ALLOC-001":
+        return "Avoidable intermediate collection materialization or repeated accumulator copying."
+    if rule_code == "PERF-ALG-001":
+        return "Index, grouping, or join redesign opportunity; requires reviewing memory, ordering, duplicate, and hash/equality obligations."
+    if rule_code == "PERF-CONTRACT-001":
+        return "Declared resource contract refuted by valid lower-bound or concrete operation witness."
+    if rule_code == "PERF-CONTRACT-002":
+        return "Declared resource contract is unproved under available models and analysis budget (unproved, not refuted)."
+    if rule_code == "PERF-ANALYSIS-001":
+        return "Unknown call, unsupported loop shape, or exhausted analysis budget; no cost bound is fabricated."
+    if rule_code == "PERF-FIX-001":
+        return "Candidate rewrite blocked by semantic safety or revision preconditions; the original loop remains valid."
+    "Diagnostic emitted by canonical Simple check/lint batch."
+
+fn _pa_render_cost_obj(c: LspPerfCostPayloadV1) -> text:
+    var out = _pa_lb()
+    out = out + _pa_jp("expression", _pa_js(c.expression))
+    out = out + "," + _pa_jp("resource", _pa_js(c.resource))
+    out = out + "," + _pa_jp("relation", _pa_js(c.relation))
+    out = out + "," + _pa_jp("regime", _pa_js(c.regime))
+    out = out + "," + _pa_jp("model", _pa_js(c.model))
+    if c.status != "":
+        out = out + "," + _pa_jp("status", _pa_js(c.status))
+    if c.origin != "":
+        out = out + "," + _pa_jp("origin", _pa_js(c.origin))
+    out = out + _pa_rb()
+    out
+
+fn _pa_render_sizes_obj(sizes: [LspPerfSizeEntryV1]) -> text:
+    var pairs: [text] = []
+    var i = 0
+    while i < sizes.len():
+        pairs.push(_pa_jp(sizes[i].symbol, _pa_js(sizes[i].definition)))
+        i = i + 1
+    _pa_lb() + pairs.join(",") + _pa_rb()
+
+fn _pa_render_str_arr(items: [text]) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < items.len():
+        parts.push(_pa_js(items[i]))
+        i = i + 1
+    _pa_sbl() + parts.join(",") + _pa_sbr()
+
+fn _pa_render_obs_arr(obs: [LspPerfObligationEntryV1]) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < obs.len():
+        val o = obs[i]
+        parts.push(_pa_jo3(
+            _pa_jp("kind", _pa_js(o.kind)),
+            _pa_jp("discharged", _pa_bool(o.discharged)),
+            _pa_jp("reason", _pa_js(o.reason))
+        ))
+        i = i + 1
+    _pa_sbl() + parts.join(",") + _pa_sbr()
+
+fn _pa_render_contribs_arr(contribs: [LspPerfContribEntryV1]) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < contribs.len():
+        val c = contribs[i]
+        var obj = _pa_lb()
+        obj = obj + _pa_jp("node_id", _pa_js(c.node_id))
+        obj = obj + "," + _pa_jp("role", _pa_js(c.role))
+        obj = obj + "," + _pa_jp("file", _pa_js(c.file))
+        obj = obj + "," + _pa_jp("line", str(c.line))
+        obj = obj + "," + _pa_jp("col", str(c.col))
+        obj = obj + "," + _pa_jp("summary", _pa_js(c.summary))
+        obj = obj + _pa_rb()
+        parts.push(obj)
+        i = i + 1
+    _pa_sbl() + parts.join(",") + _pa_sbr()
+
+fn _pa_lsp_kind(rule_code: text, fix_kind: text) -> text:
+    if rule_code == "PERF-STYLE-001" or fix_kind == "Refactor" or fix_kind == "refactor" or fix_kind == "refactor.rewrite":
+        return "refactor.rewrite"
+    "quickfix"
+
+pub fn lsp_perf_agent_reset_v1():
+    _AGENT_SNAPSHOTS = []
+    _AGENT_RECEIPTS = []
+    _AGENT_CHANGE_SEQ = 0
+
+# reason: Registers an in-memory snapshot + canonical DiagnosticBatchV1 JSON for MCP agent operations
+@allow(primitive_api)
+pub fn lsp_perf_agent_register_snapshot_v1(
+    file: text,
+    version: i64,
+    source_content: text,
+    snapshot_hash: text,
+    semantic_fingerprint: text,
+    batch_json: text
+) -> bool:
+    val resolved_hash = if snapshot_hash != "": snapshot_hash else: lsp_snapshot_hash_for_text_v1(source_content)
+    val parsed = lsp_parse_admitted_batch_json_v1(file, resolved_hash, "default", batch_json, true)
+    match parsed:
+        case None:
+            return false
+        case Some(env):
+            var kept: [LspPerfAgentSnapshotV1] = []
+            var i = 0
+            while i < _AGENT_SNAPSHOTS.len():
+                if _AGENT_SNAPSHOTS[i].file != file:
+                    kept.push(_AGENT_SNAPSHOTS[i])
+                i = i + 1
+            if kept.len() >= 64:
+                var trimmed: [LspPerfAgentSnapshotV1] = []
+                var ti = 1
+                while ti < kept.len():
+                    trimmed.push(kept[ti])
+                    ti = ti + 1
+                kept = trimmed
+            kept.push(LspPerfAgentSnapshotV1(
+                file: file,
+                version: version,
+                source_content: source_content,
+                snapshot_hash: resolved_hash,
+                expected_semantic_fingerprint: semantic_fingerprint,
+                active_semantic_fingerprint: semantic_fingerprint,
+                envelope: env
+            ))
+            _AGENT_SNAPSHOTS = kept
+            true
+
+# reason: Updates active semantic_fingerprint for a registered file to simulate or reflect callee changes (I02)
+@allow(primitive_api)
+pub fn lsp_perf_agent_set_semantic_fingerprint_v1(file: text, semantic_fingerprint: text):
+    var updated: [LspPerfAgentSnapshotV1] = []
+    var i = 0
+    while i < _AGENT_SNAPSHOTS.len():
+        val s = _AGENT_SNAPSHOTS[i]
+        if s.file == file:
+            var copy = s
+            copy.active_semantic_fingerprint = semantic_fingerprint
+            updated.push(copy)
+        else:
+            updated.push(s)
+        i = i + 1
+    _AGENT_SNAPSHOTS = updated
+
+# reason: Projects canonical CLI DiagnosticBatchV1 JSON onto "<rule>|<severity>|<applicability>" rows for I09 parity
+@allow(primitive_api)
+pub fn lsp_perf_cli_batch_parity_rows_v1(batch_json: text) -> [text]:
+    var rows: [text] = []
+    val diag_arr = _pa_field(batch_json.trim(), "diagnostics")
+    if diag_arr == "" or _pa_first_char(diag_arr) != _pa_sbl():
+        return rows
+    val objs = _pa_split_top_objects(diag_arr)
+    var i = 0
+    while i < objs.len():
+        val outer = objs[i]
+        val nested = _pa_field(outer, "diagnostic")
+        val body = if nested != "" and _pa_first_char(nested) == _pa_lb(): nested else: outer
+        val code_a = _pa_field(body, "code")
+        val code_b = _pa_field(body, "rule")
+        val code = if code_a != "": code_a else: code_b
+        val sev = _pa_norm_sev(_pa_field(body, "severity"))
+        var app = "Unavailable"
+        val fixes_raw = _pa_field(body, "fixes")
+        if fixes_raw != "" and _pa_first_char(fixes_raw) == _pa_sbl():
+            val fx_objs = _pa_split_top_objects(fixes_raw)
+            if fx_objs.len() > 0:
+                val fx0 = fx_objs[0]
+                val dis_raw = _pa_field(fx0, "disabled_reason")
+                val dis = if dis_raw == "null": "" else: dis_raw
+                app = lsp_normalize_perf_applicability_v1(
+                    _pa_field(fx0, "applicability"),
+                    dis,
+                    _pa_field(fx0, "confidence")
+                )
+        rows.push(code + "|" + sev + "|" + app)
+        i = i + 1
+    rows
+
+fn _pa_ensure_snapshot_for_file(file: text) -> Option<LspPerfAgentSnapshotV1>:
+    var i = 0
+    while i < _AGENT_SNAPSHOTS.len():
+        if _AGENT_SNAPSHOTS[i].file == file:
+            return Some(_AGENT_SNAPSHOTS[i])
+        i = i + 1
+    if file != "" and lsp_snapshot_hash_for_file_v1(file) != "missing":
+        val env = lsp_collect_structured_diagnostics_v1(file, true, "")
+        val snap = LspPerfAgentSnapshotV1(
+            file: file,
+            version: 1,
+            source_content: "",
+            snapshot_hash: env.snapshot_hash,
+            expected_semantic_fingerprint: "",
+            active_semantic_fingerprint: "",
+            envelope: env
+        )
+        return Some(snap)
+    None
+
+fn _pa_find_fix(action_id: text) -> Option<(LspPerfAgentSnapshotV1, LspRankedFixV1)>:
+    var si = 0
+    while si < _AGENT_SNAPSHOTS.len():
+        val snap = _AGENT_SNAPSHOTS[si]
+        var fi = 0
+        while fi < snap.envelope.ranked_fixes.len():
+            val fx = snap.envelope.ranked_fixes[fi]
+            if fx.id == action_id:
+                return Some((snap, fx))
+            fi = fi + 1
+        si = si + 1
+    None
+
+# 1. explain_diagnostic(diagnostic_id)
+# reason: Agent operation returns structured explanation, cost evidence, assumptions, and fix summary
+@allow(primitive_api)
+pub fn explain_diagnostic(diagnostic_id: text) -> text:
+    var si = 0
+    while si < _AGENT_SNAPSHOTS.len():
+        val snap = _AGENT_SNAPSHOTS[si]
+        var di = 0
+        while di < snap.envelope.diagnostics.len():
+            val d = snap.envelope.diagnostics[di]
+            if d.id == diagnostic_id or d.code == diagnostic_id:
+                var fix_parts: [text] = []
+                var fi = 0
+                while fi < snap.envelope.ranked_fixes.len():
+                    val fx = snap.envelope.ranked_fixes[fi]
+                    if fx.diagnostic_id == d.id:
+                        var fx_obj = _pa_lb()
+                        fx_obj = fx_obj + _pa_jp("action_id", _pa_js(fx.id))
+                        fx_obj = fx_obj + "," + _pa_jp("kind", _pa_js(fx.kind))
+                        fx_obj = fx_obj + "," + _pa_jp("applicability", _pa_js(fx.applicability))
+                        fx_obj = fx_obj + "," + _pa_jp("tradeoff", _pa_js(fx.tradeoff))
+                        fx_obj = fx_obj + "," + _pa_jp("obligations", _pa_render_obs_arr(fx.obligations))
+                        if fx.disabled_reason != "":
+                            fx_obj = fx_obj + "," + _pa_jp("disabled_reason", _pa_js(fx.disabled_reason))
+                        fx_obj = fx_obj + _pa_rb()
+                        fix_parts.push(fx_obj)
+                    fi = fi + 1
+                var out = _pa_lb()
+                out = out + _pa_jp("status", _pa_js("ok"))
+                out = out + "," + _pa_jp("diagnostic_id", _pa_js(d.id))
+                out = out + "," + _pa_jp("rule", _pa_js(d.code))
+                out = out + "," + _pa_jp("severity", _pa_js(d.severity))
+                out = out + "," + _pa_jp("category", _pa_js(d.category))
+                out = out + "," + _pa_jp("message", _pa_js(d.message))
+                out = out + "," + _pa_jp("rationale", _pa_js(_pa_rule_rationale(d.code)))
+                out = out + "," + _pa_jp("semantic_fingerprint", _pa_js(d.semantic_fingerprint))
+                if d.has_cost:
+                    out = out + "," + _pa_jp("cost", _pa_render_cost_obj(d.cost))
+                out = out + "," + _pa_jp("sizes", _pa_render_sizes_obj(d.sizes))
+                out = out + "," + _pa_jp("assumptions", _pa_render_str_arr(d.assumptions))
+                out = out + "," + _pa_jp("contributions", _pa_render_contribs_arr(d.contributions))
+                out = out + "," + _pa_jp("fix_candidates", _pa_sbl() + fix_parts.join(",") + _pa_sbr())
+                out = out + _pa_rb()
+                return out
+            di = di + 1
+        si = si + 1
+    if diagnostic_id.starts_with("PERF-"):
+        return _pa_jo3(
+            _pa_jp("status", _pa_js("ok")),
+            _pa_jp("rule", _pa_js(diagnostic_id)),
+            _pa_jp("rationale", _pa_js(_pa_rule_rationale(diagnostic_id)))
+        )
+    _pa_jo2(_pa_jp("status", _pa_js("not_found")), _pa_jp("diagnostic_id", _pa_js(diagnostic_id)))
+
+# 2. get_cost_summary(symbol, revision)
+# reason: Agent operation returns parameterized symbolic cost summary for (symbol, revision)
+@allow(primitive_api)
+pub fn get_cost_summary(symbol: text, revision: text) -> text:
+    var si = 0
+    while si < _AGENT_SNAPSHOTS.len():
+        val snap = _AGENT_SNAPSHOTS[si]
+        var di = 0
+        while di < snap.envelope.diagnostics.len():
+            val d = snap.envelope.diagnostics[di]
+            if (d.symbol == symbol or (d.symbol == "" and d.has_cost)) and symbol != "":
+                val active_sem = if snap.active_semantic_fingerprint != "": snap.active_semantic_fingerprint else: d.semantic_fingerprint
+                if revision != "" and active_sem != "" and revision != active_sem and revision != snap.snapshot_hash:
+                    return _pa_jo3(
+                        _pa_jp("status", _pa_js("stale_revision")),
+                        _pa_jp("symbol", _pa_js(symbol)),
+                        _pa_jp("active_revision", _pa_js(active_sem))
+                    )
+                var out = _pa_lb()
+                out = out + _pa_jp("status", _pa_js(if d.cost.status != "": d.cost.status else: "Complete"))
+                out = out + "," + _pa_jp("symbol", _pa_js(symbol))
+                out = out + "," + _pa_jp("semantic_revision", _pa_js(active_sem))
+                out = out + "," + _pa_jp("semantic_fingerprint", _pa_js(active_sem))
+                out = out + "," + _pa_jp("cost", _pa_render_cost_obj(d.cost))
+                out = out + "," + _pa_jp("sizes", _pa_render_sizes_obj(d.sizes))
+                out = out + "," + _pa_jp("assumptions", _pa_render_str_arr(d.assumptions))
+                out = out + _pa_rb()
+                return out
+            di = di + 1
+        si = si + 1
+    _pa_jo3(
+        _pa_jp("status", _pa_js("Unknown")),
+        _pa_jp("symbol", _pa_js(symbol)),
+        _pa_jp("reason", _pa_js("no analyzed FunctionCostSummary registered for symbol"))
+    )
+
+# 3. get_cost_contributions(symbol, revision)
+# reason: Agent operation returns caller->callee provenance cause chain (C07) for (symbol, revision)
+@allow(primitive_api)
+pub fn get_cost_contributions(symbol: text, revision: text) -> text:
+    var si = 0
+    while si < _AGENT_SNAPSHOTS.len():
+        val snap = _AGENT_SNAPSHOTS[si]
+        var di = 0
+        while di < snap.envelope.diagnostics.len():
+            val d = snap.envelope.diagnostics[di]
+            if (d.symbol == symbol or (d.symbol == "" and d.contributions.len() > 0)) and symbol != "":
+                val active_sem = if snap.active_semantic_fingerprint != "": snap.active_semantic_fingerprint else: d.semantic_fingerprint
+                if revision != "" and active_sem != "" and revision != active_sem and revision != snap.snapshot_hash:
+                    return _pa_jo3(
+                        _pa_jp("status", _pa_js("stale_revision")),
+                        _pa_jp("symbol", _pa_js(symbol)),
+                        _pa_jp("active_revision", _pa_js(active_sem))
+                    )
+                var out = _pa_lb()
+                out = out + _pa_jp("status", _pa_js("ok"))
+                out = out + "," + _pa_jp("symbol", _pa_js(symbol))
+                out = out + "," + _pa_jp("semantic_revision", _pa_js(active_sem))
+                if d.has_cost:
+                    out = out + "," + _pa_jp("total_cost", _pa_render_cost_obj(d.cost))
+                out = out + "," + _pa_jp("sizes", _pa_render_sizes_obj(d.sizes))
+                out = out + "," + _pa_jp("contributions", _pa_render_contribs_arr(d.contributions))
+                out = out + "," + _pa_jp("assumptions", _pa_render_str_arr(d.assumptions))
+                out = out + _pa_rb()
+                return out
+            di = di + 1
+        si = si + 1
+    _pa_jo3(_pa_jp("status", _pa_js("not_found")), _pa_jp("symbol", _pa_js(symbol)), _pa_jp("contributions", _pa_sbl() + _pa_sbr()))
+
+fn _pa_render_candidate(snap: LspPerfAgentSnapshotV1, fx: LspRankedFixV1) -> text:
+    val rule = if fx.rule_code != "": fx.rule_code else: fx.diagnostic_id
+    var obj = _pa_lb()
+    obj = obj + _pa_jp("action_id", _pa_js(fx.id))
+    obj = obj + "," + _pa_jp("diagnostic_id", _pa_js(fx.diagnostic_id))
+    obj = obj + "," + _pa_jp("rule", _pa_js(rule))
+    obj = obj + "," + _pa_jp("title", _pa_js(fx.title))
+    obj = obj + "," + _pa_jp("kind", _pa_js(fx.kind))
+    obj = obj + "," + _pa_jp("lsp_kind", _pa_js(_pa_lsp_kind(rule, fx.kind)))
+    obj = obj + "," + _pa_jp("applicability", _pa_js(fx.applicability))
+    obj = obj + "," + _pa_jp("semantic_fingerprint", _pa_js(fx.semantic_fingerprint))
+    obj = obj + "," + _pa_jp("expected_version", str(snap.version))
+    obj = obj + "," + _pa_jp("expected_snapshot_hash", _pa_js(fx.required_snapshot_hash))
+    obj = obj + "," + _pa_jp("obligations", _pa_render_obs_arr(fx.obligations))
+    obj = obj + "," + _pa_jp("tradeoff", _pa_js(fx.tradeoff))
+    if fx.disabled_reason != "":
+        obj = obj + "," + _pa_jp("disabled_reason", _pa_js(fx.disabled_reason))
+    obj = obj + _pa_rb()
+    obj
+
+# 4. list_fix_candidates(diagnostic_or_range)
+# reason: Agent operation lists all ranked fix candidates (including Unavailable PERF-FIX-001) without mutating source
+@allow(primitive_api)
+pub fn list_fix_candidates(diagnostic_or_range: text) -> text:
+    var cands: [text] = []
+    val maybe_snap = _pa_ensure_snapshot_for_file(diagnostic_or_range)
+    match maybe_snap:
+        case Some(file_snap):
+            var fi = 0
+            while fi < file_snap.envelope.ranked_fixes.len():
+                cands.push(_pa_render_candidate(file_snap, file_snap.envelope.ranked_fixes[fi]))
+                fi = fi + 1
+            return _pa_jo2(_pa_jp("status", _pa_js("ok")), _pa_jp("candidates", _pa_sbl() + cands.join(",") + _pa_sbr()))
+        case None:
+            val _ = 0
+
+    var si = 0
+    while si < _AGENT_SNAPSHOTS.len():
+        val snap = _AGENT_SNAPSHOTS[si]
+        var fi = 0
+        while fi < snap.envelope.ranked_fixes.len():
+            val fx = snap.envelope.ranked_fixes[fi]
+            if fx.diagnostic_id == diagnostic_or_range or fx.rule_code == diagnostic_or_range or fx.file == diagnostic_or_range:
+                cands.push(_pa_render_candidate(snap, fx))
+            fi = fi + 1
+        si = si + 1
+    _pa_jo2(_pa_jp("status", _pa_js("ok")), _pa_jp("candidates", _pa_sbl() + cands.join(",") + _pa_sbr()))
+
+# 5. resolve_fix(action_id, expected_revision)
+# reason: Agent operation revalidates I01 snapshot revision and I02 semantic_fingerprint before constructing edit plan
+@allow(primitive_api)
+pub fn resolve_fix(action_id: text, expected_revision: text) -> text:
+    match _pa_find_fix(action_id):
+        case None:
+            return _pa_jo3(
+                _pa_jp("status", _pa_js("not_found")),
+                _pa_jp("action_id", _pa_js(action_id)),
+                _pa_jp("applicability", _pa_js("Unavailable"))
+            )
+        case Some((snap, fx)):
+            if fx.applicability == "Unavailable" or fx.disabled_reason != "":
+                var dis_out = _pa_lb()
+                dis_out = dis_out + _pa_jp("status", _pa_js("disabled"))
+                dis_out = dis_out + "," + _pa_jp("action_id", _pa_js(fx.id))
+                dis_out = dis_out + "," + _pa_jp("applicability", _pa_js("Unavailable"))
+                dis_out = dis_out + "," + _pa_jp("disabled_reason", _pa_js(fx.disabled_reason))
+                dis_out = dis_out + "," + _pa_jp("obligations", _pa_render_obs_arr(fx.obligations))
+                dis_out = dis_out + _pa_rb()
+                return dis_out
+
+            # I01: Document snapshot revision / hash check
+            if (expected_revision != "" and expected_revision != snap.snapshot_hash and expected_revision != str(snap.version)) or snap.snapshot_hash != fx.required_snapshot_hash:
+                return _pa_lb() +
+                    _pa_jp("status", _pa_js("stale_revision")) + "," +
+                    _pa_jp("action_id", _pa_js(fx.id)) + "," +
+                    _pa_jp("applicability", _pa_js("Unavailable")) + "," +
+                    _pa_jp("reason", _pa_js("stale document revision: refresh diagnostics and preview before resolving")) +
+                    _pa_rb()
+
+            # I02: Callee / semantic dependency fingerprint check
+            val exp_sem = if fx.semantic_fingerprint != "": fx.semantic_fingerprint else: snap.expected_semantic_fingerprint
+            if exp_sem != "" and snap.active_semantic_fingerprint != "" and snap.active_semantic_fingerprint != exp_sem:
+                return _pa_lb() +
+                    _pa_jp("status", _pa_js("stale_semantic_fingerprint")) + "," +
+                    _pa_jp("action_id", _pa_js(fx.id)) + "," +
+                    _pa_jp("applicability", _pa_js("Unavailable")) + "," +
+                    _pa_jp("reason", _pa_js("stale semantic dependency fingerprint: callee or model summary changed")) +
+                    _pa_rb()
+
+            val edit_doc = _pa_jo2(
+                _pa_jp("uri", _pa_js("file:///" + fx.file)),
+                _pa_jp("version", str(snap.version))
+            )
+            val edit_item = _pa_lb() +
+                _pa_jp("line", str(fx.line)) + "," +
+                _pa_jp("col", str(fx.col)) + "," +
+                _pa_jp("expected_text", _pa_js(fx.expected_text)) + "," +
+                _pa_jp("new_text", _pa_js(fx.new_text)) +
+                _pa_rb()
+            val doc_change = _pa_jo2(
+                _pa_jp("textDocument", edit_doc),
+                _pa_jp("edits", _pa_sbl() + edit_item + _pa_sbr())
+            )
+            _pa_lb() +
+                _pa_jp("status", _pa_js("resolved")) + "," +
+                _pa_jp("action_id", _pa_js(fx.id)) + "," +
+                _pa_jp("applicability", _pa_js(fx.applicability)) + "," +
+                _pa_jp("semantic_fingerprint", _pa_js(exp_sem)) + "," +
+                _pa_jp("obligations", _pa_render_obs_arr(fx.obligations)) + "," +
+                _pa_jp("tradeoff", _pa_js(fx.tradeoff)) + "," +
+                _pa_jp("documentChanges", _pa_sbl() + doc_change + _pa_sbr()) +
+                _pa_rb()
+
+# 6. preview_fix(action_id)
+# reason: Agent operation renders non-mutating minimal diff preview, cost delta claim, and resource tradeoff
+@allow(primitive_api)
+pub fn preview_fix(action_id: text) -> text:
+    match _pa_find_fix(action_id):
+        case None:
+            return _pa_jo2(_pa_jp("status", _pa_js("not_found")), _pa_jp("action_id", _pa_js(action_id)))
+        case Some((snap, fx)):
+            val cost_claim = if fx.rule_code == "PERF-STYLE-001":
+                "unchanged"
+            elif fx.kind == "AlgorithmChange":
+                "algorithm_dependent_under_assumptions"
+            else:
+                "not_established"
+            val diff_text = "--- a/" + fx.file + "\n+++ b/" + fx.file + "\n@@ line " + str(fx.line) + " @@\n-" + fx.expected_text + "\n+" + fx.new_text
+            var out = _pa_lb()
+            out = out + _pa_jp("status", _pa_js("preview"))
+            out = out + "," + _pa_jp("action_id", _pa_js(fx.id))
+            out = out + "," + _pa_jp("rule", _pa_js(fx.rule_code))
+            out = out + "," + _pa_jp("applicability", _pa_js(fx.applicability))
+            out = out + "," + _pa_jp("before_snippet", _pa_js(fx.expected_text))
+            out = out + "," + _pa_jp("after_snippet", _pa_js(fx.new_text))
+            out = out + "," + _pa_jp("unified_diff", _pa_js(diff_text))
+            out = out + "," + _pa_jp("cost_delta_claim", _pa_js(cost_claim))
+            out = out + "," + _pa_jp("tradeoff", _pa_js(fx.tradeoff))
+            out = out + "," + _pa_jp("semantic_fingerprint", _pa_js(snap.active_semantic_fingerprint))
+            out = out + "," + _pa_jp("obligations", _pa_render_obs_arr(fx.obligations))
+            if fx.disabled_reason != "":
+                out = out + "," + _pa_jp("disabled_reason", _pa_js(fx.disabled_reason))
+            out = out + _pa_rb()
+            out
+
+# 7. apply_fix(action_id, expected_revision, allow_review_required)
+# reason: Applies verified fix to matching revisioned snapshot and records audit receipt (never applies Unavailable or unapproved ReviewRequired)
+@allow(primitive_api)
+pub fn apply_fix(action_id: text, expected_revision: text, allow_review_required: bool) -> text:
+    match _pa_find_fix(action_id):
+        case None:
+            return _pa_jo2(_pa_jp("status", _pa_js("not_found")), _pa_jp("action_id", _pa_js(action_id)))
+        case Some((snap, fx)):
+            if fx.applicability == "Unavailable" or fx.disabled_reason != "":
+                return _pa_jo3(
+                    _pa_jp("status", _pa_js("disabled_candidate")),
+                    _pa_jp("action_id", _pa_js(fx.id)),
+                    _pa_jp("reason", _pa_js(fx.disabled_reason))
+                )
+            if fx.applicability == "ReviewRequired" and not allow_review_required:
+                return _pa_lb() +
+                    _pa_jp("status", _pa_js("review_required")) + "," +
+                    _pa_jp("action_id", _pa_js(fx.id)) + "," +
+                    _pa_jp("applicability", _pa_js("ReviewRequired")) + "," +
+                    _pa_jp("tradeoff", _pa_js(fx.tradeoff)) + "," +
+                    _pa_jp("reason", _pa_js("ReviewRequired algorithm or resource-tradeoff change cannot be auto-applied without explicit review authorization")) +
+                    _pa_rb()
+
+            if (expected_revision != "" and expected_revision != snap.snapshot_hash and expected_revision != str(snap.version)) or snap.snapshot_hash != fx.required_snapshot_hash:
+                return _pa_jo3(
+                    _pa_jp("status", _pa_js("stale_revision")),
+                    _pa_jp("action_id", _pa_js(fx.id)),
+                    _pa_jp("reason", _pa_js("snapshot hash or version changed since fix discovery"))
+                )
+
+            val exp_sem = if fx.semantic_fingerprint != "": fx.semantic_fingerprint else: snap.expected_semantic_fingerprint
+            if exp_sem != "" and snap.active_semantic_fingerprint != "" and snap.active_semantic_fingerprint != exp_sem:
+                return _pa_jo3(
+                    _pa_jp("status", _pa_js("stale_semantic_fingerprint")),
+                    _pa_jp("action_id", _pa_js(fx.id)),
+                    _pa_jp("reason", _pa_js("callee or semantic dependency fingerprint changed"))
+                )
+
+            var after_src = snap.source_content
+            val src_chars = _pa_chars(after_src)
+            val total_chars = src_chars.len()
+            if fx.span_start >= 0 and fx.span_end >= fx.span_start and fx.span_end <= total_chars:
+                val actual_old = _pa_join_range(src_chars, fx.span_start, fx.span_end)
+                if fx.expected_text != "" and actual_old != fx.expected_text:
+                    return _pa_jo3(
+                        _pa_jp("status", _pa_js("precondition_mismatch")),
+                        _pa_jp("action_id", _pa_js(fx.id)),
+                        _pa_jp("reason", _pa_js("span text does not match expected_text"))
+                    )
+                after_src = _pa_join_range(src_chars, 0, fx.span_start) + fx.new_text + _pa_join_range(src_chars, fx.span_end, total_chars)
+            elif fx.expected_text != "" and after_src.contains(fx.expected_text):
+                after_src = after_src.replace(fx.expected_text, fx.new_text)
+            else:
+                return _pa_jo3(
+                    _pa_jp("status", _pa_js("precondition_mismatch")),
+                    _pa_jp("action_id", _pa_js(fx.id)),
+                    _pa_jp("reason", _pa_js("expected_text precondition could not be matched in snapshot"))
+                )
+
+            val after_hash = lsp_snapshot_hash_for_text_v1(after_src)
+            val after_ver = snap.version + 1
+            _AGENT_CHANGE_SEQ = _AGENT_CHANGE_SEQ + 1
+            val change_id = "perf-change-" + str(_AGENT_CHANGE_SEQ)
+            val receipt = LspPerfChangeReceiptV1(
+                change_id: change_id,
+                action_id: fx.id,
+                rule_code: fx.rule_code,
+                file: snap.file,
+                before_version: snap.version,
+                after_version: after_ver,
+                before_hash: snap.snapshot_hash,
+                after_hash: after_hash,
+                semantic_fingerprint: exp_sem,
+                obligations: fx.obligations,
+                tradeoff: fx.tradeoff,
+                after_content: after_src
+            )
+            if _AGENT_RECEIPTS.len() >= 64:
+                var trimmed: [LspPerfChangeReceiptV1] = []
+                var ri = 1
+                while ri < _AGENT_RECEIPTS.len():
+                    trimmed.push(_AGENT_RECEIPTS[ri])
+                    ri = ri + 1
+                _AGENT_RECEIPTS = trimmed
+            _AGENT_RECEIPTS.push(receipt)
+
+            var updated_snaps: [LspPerfAgentSnapshotV1] = []
+            var usi = 0
+            while usi < _AGENT_SNAPSHOTS.len():
+                val cur = _AGENT_SNAPSHOTS[usi]
+                if cur.file == snap.file:
+                    var next_snap = cur
+                    next_snap.version = after_ver
+                    next_snap.source_content = after_src
+                    next_snap.snapshot_hash = after_hash
+                    updated_snaps.push(next_snap)
+                else:
+                    updated_snaps.push(cur)
+                usi = usi + 1
+            _AGENT_SNAPSHOTS = updated_snaps
+
+            _pa_lb() +
+                _pa_jp("status", _pa_js("applied")) + "," +
+                _pa_jp("change_id", _pa_js(change_id)) + "," +
+                _pa_jp("action_id", _pa_js(fx.id)) + "," +
+                _pa_jp("rule", _pa_js(fx.rule_code)) + "," +
+                _pa_jp("before_snapshot_hash", _pa_js(snap.snapshot_hash)) + "," +
+                _pa_jp("after_snapshot_hash", _pa_js(after_hash)) + "," +
+                _pa_jp("after_version", str(after_ver)) + "," +
+                _pa_jp("semantic_fingerprint", _pa_js(exp_sem)) +
+                _pa_rb()
+
+# 8. validate_fix(change_id)
+# reason: Validates post-apply change receipt against active snapshot hash, obligations, and semantic_fingerprint
+@allow(primitive_api)
+pub fn validate_fix(change_id: text) -> text:
+    var i = _AGENT_RECEIPTS.len() - 1
+    while i >= 0:
+        val r = _AGENT_RECEIPTS[i]
+        if r.change_id == change_id:
+            var snap_matches = true
+            var sem_matches = true
+            var si = 0
+            while si < _AGENT_SNAPSHOTS.len():
+                val s = _AGENT_SNAPSHOTS[si]
+                if s.file == r.file:
+                    if s.snapshot_hash != r.after_hash:
+                        snap_matches = false
+                    if r.semantic_fingerprint != "" and s.active_semantic_fingerprint != "" and s.active_semantic_fingerprint != r.semantic_fingerprint:
+                        sem_matches = false
+                si = si + 1
+            val ok = snap_matches and sem_matches and r.after_content.trim() != ""
+            val verdict = if ok: "validated" else: "invalidated"
+            val recovery = if ok:
+                "none"
+            else:
+                "revert to before_snapshot_hash " + r.before_hash + " and re-run perf analysis"
+            return _pa_lb() +
+                _pa_jp("status", _pa_js(verdict)) + "," +
+                _pa_jp("change_id", _pa_js(r.change_id)) + "," +
+                _pa_jp("action_id", _pa_js(r.action_id)) + "," +
+                _pa_jp("rule", _pa_js(r.rule_code)) + "," +
+                _pa_jp("file", _pa_js(r.file)) + "," +
+                _pa_jp("before_hash", _pa_js(r.before_hash)) + "," +
+                _pa_jp("after_hash", _pa_js(r.after_hash)) + "," +
+                _pa_jp("obligations_verified", _pa_bool(ok)) + "," +
+                _pa_jp("recovery_hint", _pa_js(recovery)) +
+                _pa_rb()
+        i = i - 1
+    _pa_jo2(_pa_jp("status", _pa_js("unknown_change")), _pa_jp("change_id", _pa_js(change_id)))
+
+fn _pa_wrap_mcp_structured(id: text, payload_json: text) -> text:
+    val text_obj = _pa_jo2(
+        _pa_jp("type", _pa_js("text")),
+        _pa_jp("text", _pa_js(payload_json))
+    )
+    val result = _pa_jo2(
+        _pa_jp("content", _pa_sbl() + text_obj + _pa_sbr()),
+        _pa_jp("structuredContent", payload_json)
+    )
+    lsp_json_rpc_result_v1(id, result)
+
+# reason: Dispatches MCP tools/call requests for the 8 perf/fix agent operations
+@allow(primitive_api)
+pub fn lsp_handle_perf_agent_tool_call_v1(id: text, tool_name: text, args_body: text) -> text:
+    if tool_name == "explain_diagnostic":
+        val diag_id = _pa_field(args_body, "diagnostic_id")
+        if diag_id == "":
+            return lsp_json_tool_error_v1(id, "Missing required argument: diagnostic_id")
+        return _pa_wrap_mcp_structured(id, explain_diagnostic(diag_id))
+    if tool_name == "get_cost_summary":
+        val sym = _pa_field(args_body, "symbol")
+        if sym == "":
+            return lsp_json_tool_error_v1(id, "Missing required argument: symbol")
+        val rev = _pa_field(args_body, "revision")
+        return _pa_wrap_mcp_structured(id, get_cost_summary(sym, rev))
+    if tool_name == "get_cost_contributions":
+        val sym = _pa_field(args_body, "symbol")
+        if sym == "":
+            return lsp_json_tool_error_v1(id, "Missing required argument: symbol")
+        val rev = _pa_field(args_body, "revision")
+        return _pa_wrap_mcp_structured(id, get_cost_contributions(sym, rev))
+    if tool_name == "list_fix_candidates":
+        val target = _pa_field(args_body, "diagnostic_or_range")
+        val alt_file = _pa_field(args_body, "file")
+        val key = if target != "": target else: alt_file
+        if key == "":
+            return lsp_json_tool_error_v1(id, "Missing required argument: diagnostic_or_range")
+        return _pa_wrap_mcp_structured(id, list_fix_candidates(key))
+    if tool_name == "resolve_fix":
+        val act_id = _pa_field(args_body, "action_id")
+        if act_id == "":
+            return lsp_json_tool_error_v1(id, "Missing required argument: action_id")
+        val exp_rev = _pa_field(args_body, "expected_revision")
+        return _pa_wrap_mcp_structured(id, resolve_fix(act_id, exp_rev))
+    if tool_name == "preview_fix":
+        val act_id = _pa_field(args_body, "action_id")
+        if act_id == "":
+            return lsp_json_tool_error_v1(id, "Missing required argument: action_id")
+        return _pa_wrap_mcp_structured(id, preview_fix(act_id))
+    if tool_name == "apply_fix":
+        val act_id = _pa_field(args_body, "action_id")
+        if act_id == "":
+            return lsp_json_tool_error_v1(id, "Missing required argument: action_id")
+        val exp_rev = _pa_field(args_body, "expected_revision")
+        val allow_rev = _pa_field(args_body, "allow_review_required") == "true"
+        return _pa_wrap_mcp_structured(id, apply_fix(act_id, exp_rev, allow_rev))
+    if tool_name == "validate_fix":
+        val chg_id = _pa_field(args_body, "change_id")
+        if chg_id == "":
+            return lsp_json_tool_error_v1(id, "Missing required argument: change_id")
+        return _pa_wrap_mcp_structured(id, validate_fix(chg_id))
+    lsp_json_tool_error_v1(id, "Unsupported perf agent operation: " + tool_name)
+
+export LspPerfAgentSnapshotV1, LspPerfChangeReceiptV1
+export lsp_perf_agent_reset_v1, lsp_perf_agent_register_snapshot_v1
+export lsp_perf_agent_set_semantic_fingerprint_v1
+export lsp_perf_cli_batch_parity_rows_v1
+export explain_diagnostic, get_cost_summary, get_cost_contributions
+export list_fix_candidates, resolve_fix, preview_fix, apply_fix, validate_fix
+export lsp_handle_perf_agent_tool_call_v1

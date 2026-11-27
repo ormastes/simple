@@ -1,0 +1,53 @@
+use std.spec.*
+use std.nogc_sync_mut.io.windows_host_identity_v1.{windows_machine_guid_decode_v1, windows_boot_counter_decode_v1, windows_native_architecture_decode_v1}
+
+fn windows_identity_guid_units_v1(guid: text) -> [i64]:
+    var units: [i64] = []
+    for index in 0..guid.len():
+        units = units.push(guid.char_code_at(index))
+    units.push(0)
+
+describe "Windows host identity bounded decoding":
+    it "normalizes a complete uppercase GUID copied from REG_SZ":
+        val units = windows_identity_guid_units_v1("12345678-9ABC-4DEF-8012-3456789ABCDE")
+        expect(windows_machine_guid_decode_v1(1, 74, units).unwrap()).to_equal("windows-machine-guid-v1:12345678-9abc-4def-8012-3456789abcde")
+
+    it "rejects wrong registry type, short buffer, missing terminator and nil GUID":
+        val units = windows_identity_guid_units_v1("12345678-9abc-4def-8012-3456789abcde")
+        expect(windows_machine_guid_decode_v1(2, 74, units).is_err()).to_equal(true)
+        expect(windows_machine_guid_decode_v1(1, 72, units).is_err()).to_equal(true)
+        expect(windows_machine_guid_decode_v1(1, 74, []).is_err()).to_equal(true)
+        var unterminated = windows_identity_guid_units_v1("12345678-9abc-4def-8012-3456789abcde")
+        unterminated[36] = 65
+        expect(windows_machine_guid_decode_v1(1, 74, unterminated).is_err()).to_equal(true)
+        val zero = windows_identity_guid_units_v1("00000000-0000-0000-0000-000000000000")
+        expect(windows_machine_guid_decode_v1(1, 74, zero).is_err()).to_equal(true)
+
+    it "rejects embedded NUL, malformed separator, nonhex and nonASCII code units":
+        val separator = windows_identity_guid_units_v1("12345678_9abc-4def-8012-3456789abcde")
+        expect(windows_machine_guid_decode_v1(1, 74, separator).is_err()).to_equal(true)
+        val nonhex = windows_identity_guid_units_v1("g2345678-9abc-4def-8012-3456789abcde")
+        expect(windows_machine_guid_decode_v1(1, 74, nonhex).is_err()).to_equal(true)
+        var embedded = windows_identity_guid_units_v1("12345678-9abc-4def-8012-3456789abcde")
+        embedded[0] = 0
+        expect(windows_machine_guid_decode_v1(1, 74, embedded).is_err()).to_equal(true)
+        var unicode = windows_identity_guid_units_v1("12345678-9abc-4def-8012-3456789abcde")
+        unicode[0] = 65535
+        expect(windows_machine_guid_decode_v1(1, 74, unicode).is_err()).to_equal(true)
+
+    it "accepts only exact positive bounded successful-boot DWORD observations":
+        expect(windows_boot_counter_decode_v1(4, 4, 1).unwrap()).to_equal(1)
+        expect(windows_boot_counter_decode_v1(4, 4, 4294967294).unwrap()).to_equal(4294967294)
+        expect(windows_boot_counter_decode_v1(3, 4, 7).is_err()).to_equal(true)
+        expect(windows_boot_counter_decode_v1(4, 8, 7).is_err()).to_equal(true)
+        expect(windows_boot_counter_decode_v1(4, 4, 0).is_err()).to_equal(true)
+        expect(windows_boot_counter_decode_v1(4, 4, -1).is_err()).to_equal(true)
+        expect(windows_boot_counter_decode_v1(4, 4, 4294967295).is_err()).to_equal(true)
+        expect(windows_boot_counter_decode_v1(4, 4, 4294967296).is_err()).to_equal(true)
+
+    it "requires native architecture agreement and rejects emulation disagreement":
+        expect(windows_native_architecture_decode_v1(9, 34404).unwrap()).to_equal("x86_64")
+        expect(windows_native_architecture_decode_v1(12, 43620).unwrap()).to_equal("aarch64")
+        expect(windows_native_architecture_decode_v1(9, 43620).is_err()).to_equal(true)
+        expect(windows_native_architecture_decode_v1(0, 332).is_err()).to_equal(true)
+        expect(windows_native_architecture_decode_v1(65535, 0).is_err()).to_equal(true)

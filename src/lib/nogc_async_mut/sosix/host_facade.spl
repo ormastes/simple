@@ -24,13 +24,15 @@ The `variants/` overlay selects a module ROOT at compile time. That fits a
 per-host tool binary (unlike the compiler, which is multi-target at runtime from
 one binary and is therefore explicitly disqualified from a host-OS variants axis
 by the seam-qualification bar in `.claude/skills/spipe.md`). It is still not
-warranted for the whole facade: Windows process capture has an operation-specific
-strict byte provider, while directory listing, spawn and ordinary console text
-remain unsupported here. Their admission stays separate; supporting one operation
-does not admit the POSIX text routes for every Windows operation.
+warranted for the whole facade: process capture has an operation-specific
+strict byte provider, while ordinary console text remains unsupported here.
+Directory listing and spawn admit Windows by delegating to the cross-platform
+host providers (the same `dir_list_optional` / spawn seam capture uses), with
+UTF-8 admission unchanged. Their admission stays separate; supporting one
+operation does not admit the POSIX text routes for every Windows operation.
 """
 
-use std.nogc_sync_mut.io_runtime.{platform_name}
+use std.nogc_async_mut.io_runtime.{platform_name, host_os}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_run_bounded_bytes, process_windows_executable, process_spawn_async}
 use std.common.string_core.{str_len}
 use std.nogc_sync_mut.io.external_text_io.{TextIoError, io_text_error_message}
@@ -38,8 +40,8 @@ use std.nogc_sync_mut.io.external_text_io.{io_text_decode}
 use std.common.encoding.external_text.{utf8_format}
 use std.nogc_async_mut.sosix.text_boundary.{SOSIX_TEXT_BYTE_LIMIT,
     sosix_admit_utf8, sosix_admit_c_string, sosix_require_posix_text_provider, sosix_resolved_path_checked}
-use std.nogc_sync_mut.io_runtime.{dir_list_optional}
-use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.nogc_async_mut.io_runtime.{dir_list_optional}
+use std.nogc_async_mut.io.file_ops.{file_exists, file_read}
 export use std.nogc_async_mut.io.process_ops.{
     process_is_running as sosix_is_running,
     process_kill as sosix_kill
@@ -47,13 +49,11 @@ export use std.nogc_async_mut.io.process_ops.{
 export use std.nogc_sync_mut.io.dir_ops.{
     dir_is_real_no_follow as sosix_dir_is_real_no_follow
 }
-export use std.nogc_sync_mut.io.file_ops.{
-    file_read as sosix_file_read,
-    file_exists as sosix_file_exists,
+export use std.nogc_async_mut.io.file_ops.{
     file_atomic_write as sosix_file_atomic_write
 }
 export use std.nogc_sync_mut.io.dir_ops.{dir_create_all as sosix_dir_create_all}
-export use std.nogc_sync_mut.io_runtime.{
+export use std.nogc_async_mut.io_runtime.{
     is_dir as sosix_dir_exists,
     file_read_bytes_result as sosix_file_read_bytes_result,
     file_write_bytes as sosix_file_write_bytes,
@@ -62,7 +62,7 @@ export use std.nogc_sync_mut.io_runtime.{
 export use std.nogc_async_mut.sosix.environment.{sosix_env_get, sosix_env_get_opt,
     sosix_env_get_checked, sosix_env_get_nullable, sosix_env_set, sosix_env_set_checked,
     sosix_env_remove, sosix_env_remove_checked, sosix_cwd, sosix_cwd_checked}
-export use std.nogc_sync_mut.io_runtime.{
+export use std.nogc_async_mut.io_runtime.{
     file_read_text_at_nullable,
     file_read_text_at_nullable as sosix_file_read_text_at_nullable
 }
@@ -89,7 +89,7 @@ struct SosixProcUsage:
 fn sosix_platform() -> text:
     """Host family: "posix" or "windows".
 
-    Adapter, not an alias: the runtime reports "macos"/"linux"/"unix"/"windows"
+    Adapter, not an alias: the runtime reports "macos"/"linux"/"freebsd"/.../"unknown"/"windows"
     and callers of this facade branch on the two-valued family instead.
     """
     if platform_name() == "windows":
@@ -97,9 +97,33 @@ fn sosix_platform() -> text:
     "posix"
 
 
+fn sosix_host_os() -> text:
+    """Specific host OS: "windows", "macos", "linux", "freebsd", ... (the three-way
+    sibling of the two-valued `sosix_platform`). Real function, not an alias."""
+    host_os()
+
+
+export sosix_file_exists, sosix_file_read
+
+fn sosix_file_exists(path: text) -> bool:
+    """Real function, not an `export use ... as` alias: the seed drops aliased
+    re-exports in large compilation units (see io_runtime.spl "Unique semantic names")."""
+    file_exists(path)
+
+
+fn sosix_file_read(path: text) -> text:
+    """Real function, not an `export use ... as` alias (same seed alias-drop reason as sosix_file_exists)."""
+    file_read(path)
+
+
 fn sosix_dir_list_checked(path: text) -> Result<[text], TextIoError>:
     val admitted = sosix_admit_c_string(path, false)?
-    sosix_require_posix_text_provider()?
+    # Directory entry text is admitted below, so the host dir provider only
+    # has to enumerate names. `dir_list_optional` is already cross-platform
+    # (readdir on POSIX, FindFirstFile/read_dir on Windows); only non-Windows
+    # hosts keep the POSIX provider requirement.
+    if platform_name() != "windows":
+        sosix_require_posix_text_provider()?
     # Native provider currently collapses some open failures to an empty
     # array. Preserve that limitation; nil is the only reported failure.
     val raw = dir_list_optional(admitted)
@@ -210,11 +234,15 @@ fn sosix_run(cmd: text, args: [text]) -> SosixRun:
 
 fn sosix_spawn_checked(cmd: text, args: [text]) -> Result<i64, TextIoError>:
     val admitted = sosix_admit_c_string(cmd, false)?
-    sosix_require_posix_text_provider()?
+    # Spawn resolves through the same host seams as capture: POSIX requires
+    # the ordinary text provider, while Windows resolves bare names through
+    # the Windows executable lookup and spawns the resolved PE path.
+    if platform_name() != "windows":
+        sosix_require_posix_text_provider()?
     if admitted == "": return Err(TextIoError.Io("empty executable name"))
     sosix_arguments_checked(args)?
     var resolved = admitted
-    if not admitted.contains("/"):
+    if not admitted.contains("/") and not (platform_name() == "windows" and (admitted.contains("\\") or admitted.contains(":"))):
         val found = sosix_which_checked(admitted)?
         if val path = found: resolved = path
         else: return Err(TextIoError.Io("SOSIX executable not found: {admitted}"))
@@ -243,9 +271,9 @@ fn _tasklist_csv_fields(line: text) -> [text]:
     while i < parts.len():
         var field = parts[i]
         if i == 0 and field.starts_with("\""):
-            field = field.substring(1, field.len())
+            field = field.substring(1, field.byte_len())
         if i == parts.len() - 1 and field.ends_with("\"") and field.len() > 0:
-            field = field.substring(0, field.len() - 1)
+            field = field.substring(0, field.byte_len() - 1)
         fields.push(field)
         i = i + 1
     fields
@@ -256,7 +284,7 @@ fn _tasklist_mem_kb(raw: text) -> i64:
     # every comma and the K suffix instead of indexing fixed characters.
     var cleaned = raw
     if cleaned.ends_with(" K"):
-        cleaned = cleaned.substring(0, cleaned.len() - 2)
+        cleaned = cleaned.substring(0, cleaned.byte_len() - 2)
     var digits = ""
     for part in cleaned.split(","):
         digits = digits + part
@@ -312,7 +340,7 @@ fn sosix_proc_usage(pid: i64) -> SosixProcUsage:
     if sampled.exit_code != 0:
         return SosixProcUsage(cpu_pct: 0.0, rss_mb: 0, valid: false)
 
-    var fields = []
+    var fields: [text] = []
     for part in sampled.stdout.trim().split(" "):
         if part.trim() != "":
             fields.push(part.trim())
@@ -339,7 +367,7 @@ fn _parse_pct(raw: text) -> f64:
 
 
 export SosixRun, SosixProcUsage
-export sosix_platform, sosix_run, sosix_proc_usage, sosix_process_run
+export sosix_platform, sosix_host_os, sosix_run, sosix_proc_usage, sosix_process_run
 export sosix_run_checked, sosix_run_bounded_checked, sosix_which_checked, sosix_which
 export sosix_decode_process_bytes
 export sosix_dir_list_checked, sosix_dir_list

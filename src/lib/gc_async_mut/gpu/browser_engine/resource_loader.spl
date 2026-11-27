@@ -41,14 +41,6 @@ pub fn detect_content_type(headers: text, body_prefix: [u8]) -> ContentType:
     if body_prefix.len() == 0:
         return ContentType.Unknown
 
-    # Convert up to first 32 bytes to text for HTML sniffing
-    val prefix_len = if body_prefix.len() < 32: body_prefix.len() else: 32
-    var prefix_bytes: [u8] = []
-    var i = 0
-    while i < prefix_len:
-        prefix_bytes.push(body_prefix[i])
-        i = i + 1
-
     # PNG magic: 0x89 0x50 0x4E 0x47
     if body_prefix.len() >= 4:
         val b0 = body_prefix[0]
@@ -58,16 +50,24 @@ pub fn detect_content_type(headers: text, body_prefix: [u8]) -> ContentType:
         if b0 == 0x89 and b1 == 0x50 and b2 == 0x4E and b3 == 0x47:
             return ContentType.Image
 
-    # HTML sniffing: look for text markers
-    val sniff_text = bytes_to_text(prefix_bytes)
-    if sniff_text.starts_with("<!DOCTYPE html") or sniff_text.starts_with("<!DOCTYPE HTML"):
-        return ContentType.Html
-    if sniff_text.starts_with("<html") or sniff_text.starts_with("<HTML"):
-        return ContentType.Html
+    # HTML sniffing: ASCII markers compared as bytes, so a prefix cut inside a
+    # multi-byte character (or a binary body) never needs a text decode.
+    for marker in ["<!DOCTYPE html", "<!DOCTYPE HTML", "<html", "<HTML"]:
+        if _bytes_start_with_ascii(body_prefix, marker):
+            return ContentType.Html
 
     return ContentType.Unknown
 
-use std.common.string_core.{bytes_to_text}
+fn _bytes_start_with_ascii(bytes: [u8], marker: text) -> bool:
+    val n = marker.byte_len()
+    if bytes.len() < n:
+        return false
+    var i = 0
+    while i < n:
+        if bytes[i].to_i64() != marker.byte_at(i):
+            return false
+        i = i + 1
+    true
 
 pub class ResourceLoader:
     """Loads and dispatches resources by content type.

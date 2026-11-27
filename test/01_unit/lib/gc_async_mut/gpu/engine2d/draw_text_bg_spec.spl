@@ -23,6 +23,7 @@ use std.spec.step
 use std.spec.{describe, context, it, expect}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.color.{color_r}
+use std.io_runtime.{file_exists}
 
 
 fn _has_intermediate_red(pixels: [u32], width: i32, x: i32, y: i32, w: i32, h: i32) -> bool:
@@ -38,6 +39,23 @@ fn _has_intermediate_red(pixels: [u32], width: i32, x: i32, y: i32, w: i32, h: i
             col = col + 1
         row = row + 1
     false
+
+# 'A' on the 5x7 bitmap face at scale 1 ('#' = fg, '.' = bg), read back from
+# the cpu and software backends (identical) on 2026-11-15.
+val A_CELL: [text] = [".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"]
+
+fn _cell_mismatches(pixels: [u32], width: i32, fg: u32, bg: u32) -> i32:
+    var bad = 0
+    var row = 0
+    while row < 7:
+        var col = 0
+        while col < 5:
+            val want = if A_CELL[row][col:col + 1] == "#": fg else: bg
+            if pixels[row * width + col] != want:
+                bad = bad + 1
+            col = col + 1
+        row = row + 1
+    bad
 
 # ============================================================================
 # Tests
@@ -57,11 +75,12 @@ describe "Engine2DExtended.draw_text_bg (CPU backend)":
             var engine = Engine2D.create_with_backend(32, 16, "cpu")
             engine.clear(GREEN)
 
-            # Paint a single 'A' glyph at the origin with 16pt font. The
-            # draw_text_bg contract says the glyph cell fills with BLACK
+            # Paint a single 'A' glyph at the origin on the 7 px face at
+            # scale 1 (pixel-sharp rule: one font pixel = one device pixel).
+            # The draw_text_bg contract says the glyph cell fills with BLACK
             # and glyph foreground pixels are WHITE. Pixels outside the
-            # cell must stay GREEN.
-            engine.draw_text_bg(0, 0, "A", WHITE, BLACK, 16)
+            # 5x7 cell must stay GREEN.
+            engine.draw_text_bg(0, 0, "A", WHITE, BLACK, 7)
             engine.present()
 
             val pixels = engine.read_pixels()
@@ -72,39 +91,33 @@ describe "Engine2DExtended.draw_text_bg (CPU backend)":
             val outside_idx = 8 * 32 + 30
             expect(pixels[outside_idx]).to_equal(GREEN)
 
-            # Cell-inside pixel (column 0 bottom row of the glyph cell)
-            # must have been overwritten by the background/text path, but
-            # may be BLACK, WHITE, or antialiased text coverage depending
-            # on the active shared font renderer.
-            val inside_idx = 15 * 32 + 0
-            val inside = pixels[inside_idx]
-            expect(inside != GREEN).to_be(true)
+            # Every pixel of the 5x7 cell is exactly fg or bg.
+            expect(_cell_mismatches(pixels, 32, WHITE, BLACK)).to_equal(0)
+            # Just past the cell (right column, first row below) stays clear.
+            expect(pixels[0 * 32 + 5]).to_equal(GREEN)
+            expect(pixels[7 * 32 + 0]).to_equal(GREEN)
 
             engine.shutdown()
 
-        it "blends glyph edge coverage between bg and fg (per-pixel AA)":
+        it "paints the scale-1 glyph cell pixel-sharp, with no in-between value":
             # @req REQ-SSPEC-LIB
-            step("blends glyph edge coverage between bg and fg (per-pixel AA)")
-            # Per-pixel AA-preserving contract: output pixels that straddle
-            # an on/off boundary of the 5x7 binary font must take on a
-            # value strictly between pure bg and pure fg, not snap to one
-            # or the other. This proves draw_text_bg is blending glyph
-            # coverage instead of doing a bg-rect + opaque-glyph overlay.
+            step("paints the scale-1 glyph cell pixel-sharp, with no in-between value")
+            # Owner rule 2026-11-15: render checks run pixel-sharp. The old
+            # row drew at font_size 16 (scale 2) and asserted the bilinear
+            # blur that enlargement produces; at scale 1 one font pixel is
+            # one device pixel, so the contract is the opposite: every cell
+            # pixel is exactly fg or bg.
             val BLACK: u32 = 0xFF000000
             val WHITE: u32 = 0xFFFFFFFF
 
             var engine = Engine2D.create_with_backend(32, 16, "cpu")
             engine.clear(BLACK)
-            # font_size=16 -> scale = 16/7 = 2, glyph cell = 10x14.
-            # For 'A' row 0 = 0b01110, the top-edge sub-pixel at output
-            # coord (3, 0) bilinearly samples neighbors spanning the
-            # off-above / on-below boundary, so coverage is ~0.75 and
-            # the red channel lands near 191 — clearly not 0 or 255.
-            engine.draw_text_bg(0, 0, "A", WHITE, BLACK, 16)
+            engine.draw_text_bg(0, 0, "A", WHITE, BLACK, 7)
             engine.present()
 
             val pixels = engine.read_pixels()
-            expect(_has_intermediate_red(pixels, 32, 0, 0, 16, 16)).to_be(true)
+            expect(_has_intermediate_red(pixels, 32, 0, 0, 16, 16)).to_be(false)
+            expect(_cell_mismatches(pixels, 32, WHITE, BLACK)).to_equal(0)
 
             engine.shutdown()
 
@@ -114,9 +127,69 @@ describe "Engine2DExtended.draw_text_bg (CPU backend)":
             val GREEN: u32 = 0xFF00FF00
             var engine = Engine2D.create_with_backend(16, 16, "cpu")
             engine.clear(GREEN)
-            engine.draw_text_bg(2, 2, "", 0xFFFFFFFF, 0xFF000000, 16)
+            engine.draw_text_bg(2, 2, "", 0xFFFFFFFF, 0xFF000000, 7)
             engine.present()
             val pixels = engine.read_pixels()
             # Empty string must touch no pixels — whole scene still GREEN.
             expect(pixels[0]).to_equal(GREEN)
             engine.shutdown()
+
+# Vector face at high dpi (owner rule: >= 300 dpi, device scale >= 3.125):
+# a 16 CSS px run at scale 3.125 is 50 device px. Same font, same size on
+# every backend. This restores the antialiased-coverage check the scale-1
+# bitmap rows above cannot make (#9443 traded it away).
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val LVP_ICD: text = "/usr/share/vulkan/icd.d/lvp_icd.json"
+val HW: i32 = 96
+val HH: i32 = 64
+val HI_DPI_SIZE: i32 = 50
+
+fn _hidpi_frame(backend: text) -> [u32]:
+    var e = if backend == "vulkan": Engine2D.create_with_backend_fast(HW, HH, backend) else: Engine2D.create_with_backend(HW, HH, backend)
+    expect(e.load_font(SANS)).to_be(true)
+    expect(e.selected_font_identity() != "").to_be(true)
+    if backend == "vulkan":
+        expect(e.backend_name()).to_equal("vulkan")
+    e.clear(0xFF00FF00u32)
+    e.draw_text_bg(2, 2, "Ab", 0xFFFFFFFFu32, 0xFF000000u32, HI_DPI_SIZE)
+    e.submit_batch()
+    val px = e.read_pixels()
+    e.shutdown()
+    px
+
+fn _hidpi_intermediate(px: [u32]) -> i32:
+    var n = 0
+    for c in px:
+        val r = color_r(c)
+        if r > 0 and r < 255:
+            n = n + 1
+    n
+
+fn _hidpi_diff(a: [u32], b: [u32]) -> i32:
+    var n = 0
+    var i = 0
+    while i < HW * HH:
+        if a[i] != b[i]:
+            n = n + 1
+        i = i + 1
+    n
+
+describe "Engine2D.draw_text_bg vector face at high dpi":
+    it "blends antialiased edges identically on cpu, software and vulkan":
+        if not file_exists(SANS):
+            print("[skip] draw-text-bg-hidpi: no Liberation Sans at {SANS}; this row was not exercised")
+            return
+        val cpu = _hidpi_frame("cpu")
+        val soft = _hidpi_frame("software")
+        val inter = _hidpi_intermediate(cpu)
+        step("50 px glyph edges carry real coverage between fg and bg (333 px, read back 2026-11-15)")
+        expect(inter).to_equal(333)
+        step("cpu and software paint the same bytes")
+        expect(_hidpi_diff(cpu, soft)).to_equal(0)
+        if not file_exists(LVP_ICD):
+            print("[skip] draw-text-bg-hidpi vulkan: no llvmpipe ICD at {LVP_ICD}; the Vulkan half was not exercised")
+            return
+        val vk = _hidpi_frame("vulkan")
+        step("vulkan paints the same bytes as cpu")
+        expect(_hidpi_diff(cpu, vk)).to_equal(0)
+        expect(_hidpi_intermediate(vk)).to_equal(333)

@@ -1,0 +1,133 @@
+# @cover src/compiler/20.hir/hir_lowering/statements.spl 5%
+"""
+## Purpose and audience
+`RevisionImmutable<T>` (pinned to one revision) and `FrozenImmutable<T>`
+(permanent) handles, immutable-views plan section 2, phase P2b. Both are
+read-only like `Immutable<T>`; additionally a mutable alias must not be derived
+from them (`E_FROZEN_ALIAS`). Handle value semantics are exercised on a struct,
+whose binding is a detached copy. Cache identity (REV-01/02) belongs to W8.
+Plan: doc/03_plan/compiler/data/immutable_views_async_init_revisions_2026-11-13.md
+(IMM-03, IMM-04). Category: Language.
+## Operator workflow
+bin/simple test test/01_unit/compiler/semantics/revision_frozen_immutable_spec.spl
+## Compatibility and limitations
+Detached copy for class-typed `T` needs a producer (`snapshot()` / `frozen_copy()`)
+that is W8 / library work; here only the capability checks and the struct
+value-copy behaviour are judged.
+## Verification guidance and troubleshooting
+A RED on a "silent" case means the capability checks leak onto ordinary bindings.
+"""
+# @manual_section: Revision and frozen handles
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.{HirLowering, LoweringError}
+use compiler.hir.hir_lowering.items.*
+
+fn count_code(errors: [LoweringError], code: text) -> i64:
+    var n = 0
+    for e in errors:
+        if e.message.starts_with(code):
+            n = n + 1
+    n
+
+describe "IMM-03 RevisionImmutable<T> is pinned and read-only":
+    it "rejects a write through a RevisionImmutable<T> parameter":
+        val src = "class AstNode:\n" +
+            "    value: i64\n" +
+            "\n" +
+            "fn poke(rev: RevisionImmutable<AstNode>):\n" +
+            "    rev.value = 30\n"
+        val parsed = parse_full_frontend(src, "testdata/imm03_write.spl", "imm03_write", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/imm03_write.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(count_code(hir_lowering.errors, "E_IMMUTABLE_WRITE")).to_equal(1)
+
+    it "allows reads through a RevisionImmutable<T> parameter":
+        val src = "class AstNode:\n" +
+            "    value: i64\n" +
+            "\n" +
+            "fn peek(rev: RevisionImmutable<AstNode>) -> i64:\n" +
+            "    rev.value\n"
+        val parsed = parse_full_frontend(src, "testdata/imm03_read.spl", "imm03_read", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/imm03_read.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(count_code(hir_lowering.errors, "E_IMMUTABLE_WRITE")).to_equal(0)
+
+    it "keeps the pinned value after the live value is mutated":
+        struct Pt:
+            x: i64
+        var live = Pt(x: 10)
+        val pinned: RevisionImmutable<Pt> = live
+        live.x = 20
+        expect(pinned.x).to_equal(10)
+        val next: RevisionImmutable<Pt> = live
+        expect(next.x).to_equal(20)
+
+describe "IMM-04 FrozenImmutable<T> is permanent and cannot be aliased mutably":
+    it "rejects a write through a FrozenImmutable<T> parameter":
+        val src = "class AstNode:\n" +
+            "    value: i64\n" +
+            "\n" +
+            "fn poke(f: FrozenImmutable<AstNode>):\n" +
+            "    f.value = 30\n"
+        val parsed = parse_full_frontend(src, "testdata/imm04_write.spl", "imm04_write", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/imm04_write.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(count_code(hir_lowering.errors, "E_IMMUTABLE_WRITE")).to_equal(1)
+
+    it "rejects deriving a mutable alias from a FrozenImmutable<T>":
+        val src = "class AstNode:\n" +
+            "    value: i64\n" +
+            "\n" +
+            "fn leak(f: FrozenImmutable<AstNode>):\n" +
+            "    var m: AstNode = f\n" +
+            "    m.value = 30\n"
+        val parsed = parse_full_frontend(src, "testdata/imm04_alias.spl", "imm04_alias", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/imm04_alias.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(count_code(hir_lowering.errors, "E_FROZEN_ALIAS")).to_equal(1)
+
+    it "rejects deriving a mutable alias from a RevisionImmutable<T>":
+        val src = "class AstNode:\n" +
+            "    value: i64\n" +
+            "\n" +
+            "fn leak(r: RevisionImmutable<AstNode>):\n" +
+            "    var m: AstNode = r\n" +
+            "    m.value = 30\n"
+        val parsed = parse_full_frontend(src, "testdata/imm04_rev_alias.spl", "imm04_rev_alias", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/imm04_rev_alias.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(count_code(hir_lowering.errors, "E_FROZEN_ALIAS")).to_equal(1)
+
+    it "allows a read-only alias of a FrozenImmutable<T>":
+        val src = "class AstNode:\n" +
+            "    value: i64\n" +
+            "\n" +
+            "fn ok(f: FrozenImmutable<AstNode>) -> i64:\n" +
+            "    val v: AstNode = f\n" +
+            "    v.value\n"
+        val parsed = parse_full_frontend(src, "testdata/imm04_val_alias.spl", "imm04_val_alias", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/imm04_val_alias.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(count_code(hir_lowering.errors, "E_FROZEN_ALIAS")).to_equal(0)
+
+    it "is silent for a mutable alias of an ordinary parameter":
+        val src = "class AstNode:\n" +
+            "    value: i64\n" +
+            "\n" +
+            "fn ok(n: AstNode):\n" +
+            "    var m: AstNode = n\n" +
+            "    m.value = 30\n"
+        val parsed = parse_full_frontend(src, "testdata/imm04_plain.spl", "imm04_plain", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/imm04_plain.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(count_code(hir_lowering.errors, "E_FROZEN_ALIAS")).to_equal(0)
+
+    it "keeps the frozen value after the source struct is mutated":
+        struct Pt:
+            x: i64
+        var src = Pt(x: 10)
+        val frozen: FrozenImmutable<Pt> = src
+        src.x = 99
+        expect(frozen.x).to_equal(10)

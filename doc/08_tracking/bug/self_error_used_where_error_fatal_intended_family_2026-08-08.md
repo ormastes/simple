@@ -1,4 +1,55 @@
 # `self.error(...)` used where `self.error_fatal(...)` was intended — family sweep
+
+## Triage 2026-11-25 (P2 sweep lane) — still OPEN; not a bounded single-bug fix
+
+Reviewed for the release/1.0.0 P2 sweep. This is a multi-site diagnostic-severity
+family, not one bug: three 2026-08-08 lanes already converted the
+highest-confidence sites, and the 2026-11-06/07/10 follow-ups each landed a
+source repair whose **executable verification is explicitly pending** an
+admitted self-hosted runtime (statement-binding invariant sites, unknown
+statement fallback, GPU dispatch-scope repair, function-value refusal). No
+qualified self-hosted runtime exists in this lane either — the pinned
+`bin/simple.exe` at release/1.0.0 HEAD cannot even run `test` (rejects
+`@representation_boundary` in its own runner closure) — so none of the pending
+verifications can be advanced here, and picking off additional HIGH sites
+without runtime evidence would repeat the evidence-based-not-repro-proven
+pattern the doc itself flags. Left **OPEN**; the per-section status headers
+below are current and accurate. No code or doc-status change made beyond this
+note.
+
+## Statement-binding invariant follow-up, 2026-11-10
+
+The release/1.0.0 source at `6d496f82c5a` still records eight statement
+invariant failures as nonfatal in `mir_lowering_stmts.spl`: three missing
+let-symbol paths, two missing initializer-local paths, an empty expression
+statement payload, a missing range-loop symbol, and a missing indexed-loop
+symbol. Returning after a malformed, unused binding does not guarantee a
+later `undefined variable` diagnostic. These messages are absent from the
+legacy fatal-message allowlist, so the driver can admit incomplete MIR.
+
+This follow-up changes only those eight sites to `error_fatal`, preserving
+diagnostic collection and lowering recovery. It leaves ordinary advisories
+and the documented Option.None fallback unchanged.
+
+`test/01_unit/compiler/mir/statement_binding_fatal_spec.spl` invokes the
+production statement/range/indexed-array lowerers with unresolved symbols,
+checks their source spans and actual driver fatal classification, and
+includes resolved-binding and advisory controls. These tests isolate an
+unused malformed binding rather than relying on a later variable use to
+produce an unrelated fatal error. The additional initializer/payload guards
+still require their producer-fault boundary evidence; no coverage claim is
+made from the binding tests alone.
+
+Status: source repair and executable regression authored; verification
+pending. No admitted self-hosted full CLI/test runner was available during
+authoring. The shared `bin/simple.exe` was independently identified as the
+Rust seed and was not substituted for product verification. Required runtime
+checks, original-boundary evidence, branch coverage, and generated SPipe
+manual remain pending the campaign's runtime prerequisite. This subsection
+does not close the full diagnostic family or reuse historical test passes.
+
+Provider input/output/cache-read/cache-create token usage: unavailable.
+Comparable cohort average and ratio: unavailable; no values were guessed.
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
@@ -408,4 +459,93 @@ after the edit tool reported success). The edits were redone and committed
 immediately afterward with no further gap between edit and commit, per the
 standing shared-WC guidance in `.claude/rules/vcs.md` and this repo's
 memory notes on write-tool/edit clobbering.
+
+## Unknown statement follow-up, 2026-11-06
+
+The `E-MIR-STMT-Unknown` fallback in `mir_lowering_stmts.spl` still used
+`self.error`, despite documenting that the statement is dropped. Its message
+does not match any prefix in the current shared driver classifier,
+`driver_mir_legacy_message_is_fatal_v1`. Therefore the fallback recorded only
+an advisory and could allow publication of incomplete MIR. This is a distinct
+remaining instance of this diagnostic-severity family, discovered by reviewing
+the current producer and driver owners rather than assuming historical fixes
+covered newly added sites.
+
+The statement dispatcher now calls `report_unknown_statement`, which records
+the same code, discriminant, message and source span through `error_fatal`.
+Diagnostic collection still continues; the driver's existing fatal-error gate
+blocks publication. Well-formed statement arms and ordinary advisory severity
+are unchanged. No diagnostic-prefix rule is added.
+
+`test/01_unit/compiler/mir/unknown_statement_fatal_spec.spl` exercises this
+actual owner and the shared driver classifier, covering fatality, exact
+discriminant/message, source span, multiple collected failures, and an advisory
+negative control. It does not fabricate an invalid HIR enum handle merely to
+enter the dispatch wildcard.
+
+Status: **source repair implemented; executable verification pending**. No
+qualified self-hosted test runtime is currently available in this lane. The
+focused SSpec and compiler/core/MCP gates have not run; source review does not
+constitute native qualification. This follow-up does not close the whole
+diagnostic family or claim the other historical candidate sites are fixed.
+
+
+## GPU dispatch-scoped repair — 2026-11-07
+
+Base release05a4aa7ea1d; closed PR7316 head272348b96515 is the historical
+failed candidate, not an accepted fix. Its fatal diagnostic was applied before
+intrinsic selection, rejecting atomic pointers and non-index data. The release
+owner also evaluated a nonliteral first atomic/data argument in that dimension
+probe and again in its ordinary argument path. Both defects share that misplaced
+probe; changing only severity is insufficient.
+
+`lower_gpu_intrinsic_call` now selects exactly gpu_global_id, gpu_local_id,
+gpu_block_id, gpu_block_dim and gpu_grid_dim before inspecting the dimension.
+Nonconstant dimensions are evaluated once for recovery and emit error_fatal at
+the source span; default0 and literal dimensions retain their existing behavior.
+CAS and ordinary atomic/data operations retain their existing argument owners,
+so pointer/data expressions are evaluated once in source order. No new GPU
+backend implementation or device-runtime behavior is claimed.
+
+The regression spec preserves the original real parameter, literal/default and
+call-valued dimension controls. New controls bind actual pointer/data parameters
+for CAS and all eight ordinary atomics, and inspect named effect-call order and
+result operand identities for CAS, atomic_add and warp_shuffle. These are actual
+MIR owner calls and emitted instruction assertions, not source-presence tests.
+
+Budget: prior six family cycles remain recorded. User “retry about12hrs” explicitly
+allows three additional meaningful cycles7–9 until2026-11-07 18:56UTC. This is
+cycle7. Independent source review is required before commit/landing. SSpec and
+compiler/core/MCP/native verification remain NOT_RUN pending an admitted runtime
+and root build slot; source landing is not verification PASS or full closure.
+
+## Function-value refusal follow-up, 2026-11-06
+
+Source pin: release `fadd88059b3c376d709ef697318c6e609b885062`.
+`try_lower_function_value` in `expr_dispatch.spl` documents that it refuses
+missing or unresolved function signatures rather than guessing a function
+pointer ABI. Both refusal paths nevertheless used `self.error`, emitted an
+integer-zero recovery local, and returned `Some(local)`. Neither message
+matches the shared driver's legacy fatal-prefix rules, so refusal alone did
+not block code publication.
+
+The owner-level counterexamples use a known top-level function symbol with
+either no retained type, or a signature whose return contains an unresolved
+type parameter. The latter checks the return before lowering parameters, so
+no separate `lower_type` failure explains away the missing fatal diagnostic.
+These are compiler-owner counterexamples; source-level reachability through a
+particular HIR producer has not been executed or qualified.
+
+Both refusal paths now use `error_fatal`. Message text, source span, recovery
+local creation and continued diagnostic collection remain unchanged. This does
+not add support for unresolved function signatures or alter concrete-function
+ABI lowering.
+
+`test/01_unit/compiler/mir/function_value_refusal_fatal_spec.spl` checks the
+actual owner and driver classifier for both failures, verifies source location,
+and retains a concrete i32-to-bool function pointer as the positive ABI control.
+Status: **source repair implemented; executable verification pending**.
+The SSpec, compiler/core/MCP checks and native smokes are unrun pending a
+qualified self-hosted producer. No seed test is substituted, and the broader
+diagnostic family remains open.
 

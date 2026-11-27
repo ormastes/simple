@@ -1,0 +1,28 @@
+# @req bug hir_unit_specs_hang_over_300s_2026-11-06
+# `name: N` bare bit-width bitfield fields (seed parity, types_def/bitfield.rs)
+# used to hang the pure-Simple parser: the IntLit was never consumed and the
+# field loop re-reported the same error forever.
+use std.spec.*
+use compiler.core.parser.{parse_module_silent_checked}
+use compiler.core.ast.{module_decl_count_get, module_decl_at, decl_get_name, decl_get_field_bits}
+
+fn bf_bits(name: text) -> [i64]:
+    var i = 0
+    while i < module_decl_count_get():
+        val d = module_decl_at(i)
+        if decl_get_name(d) == name:
+            return decl_get_field_bits(d)
+        i = i + 1
+    []
+
+describe "bitfield bare bit-width fields":
+    it "parses `name: N` widths like `name: uN`":
+        expect(parse_module_silent_checked("bitfield Flags(u32):\n    mode: 4\n    rest: 28\n", "bw1.spl")).to_equal(false)
+        expect(bf_bits("Flags")).to_equal([-1, 4, 28])
+    it "matches the typed uN spelling":
+        expect(parse_module_silent_checked("bitfield Flags2(u32):\n    mode: u4\n    rest: u28\n", "bw2.spl")).to_equal(false)
+        expect(bf_bits("Flags2")).to_equal([-1, 4, 28])
+    it "still rejects over-wide bare widths":
+        expect(parse_module_silent_checked("bitfield Over(u8):\n    a: 6\n    b: 6\n", "bw3.spl")).to_equal(true)
+    it "terminates with an error on a malformed field instead of hanging":
+        expect(parse_module_silent_checked("bitfield Bad(u32):\n    4: 4\n", "bw4.spl")).to_equal(true)

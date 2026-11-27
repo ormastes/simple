@@ -1,8 +1,10 @@
 # Canonical text/UTF-8 byte conversion boundary without string algorithms.
 
+use std.common.types.{Capacity, Length}
+
 extern fn rt_text_to_bytes(s: text) -> [u8]
 extern fn rt_bytes_to_text(bytes: [u8]) -> text
-extern fn rt_byte_array_new(capacity: i64) -> [u8]
+extern fn rt_byte_array_new(capacity: i64) -> [u8]?
 extern fn rt_array_data_ptr(bytes: [u8]) -> i64
 
 pub enum TextByteBufferError:
@@ -10,16 +12,18 @@ pub enum TextByteBufferError:
     CapacityOverflow
     AllocationFailed
 
-pub fn text_byte_buffer(capacity: i64) -> Result<[u8], TextByteBufferError>:
+pub fn text_byte_buffer(capacity: Capacity) -> Result<[u8], TextByteBufferError>:
     """Allocate empty packed byte storage through the existing runtime owner.
 
     Capacity is nonnegative and leaves room for the existing 40-byte header in
     signed address-size arithmetic. The provider may round small capacity up;
     logical length remains zero. No allocation or coercion occurs on rejection.
     """
-    if capacity < 0: return Err(TextByteBufferError.NegativeCapacity)
-    if capacity > 9223372036854775767: return Err(TextByteBufferError.CapacityOverflow)
-    val bytes = rt_byte_array_new(capacity)
+    if capacity.value < 0: return Err(TextByteBufferError.NegativeCapacity)
+    if capacity.value > 9223372036854775767: return Err(TextByteBufferError.CapacityOverflow)
+    val bytes_opt = rt_byte_array_new(capacity.value)
+    if bytes_opt == nil: return Err(TextByteBufferError.AllocationFailed)
+    val bytes = bytes_opt.unwrap()
     if rt_array_data_ptr(bytes) == 0: return Err(TextByteBufferError.AllocationFailed)
     Ok(bytes)
 
@@ -30,6 +34,11 @@ pub fn text_to_bytes(s: text) -> [u8]:
     rt_text_to_bytes(s)
 
 pub fn bytes_to_text(bytes: [u8]) -> text:
+    # DEPRECATED (owner decision 2026-11-23): there is no total, panic-free,
+    # non-lossy [u8] -> text. Use std.common.encoding.external_text.
+    # bytes_to_text_checked, which rejects invalid UTF-8 with a CodecError.
+    # Removed once callers migrate; see
+    # doc/08_tracking/bug/bytes_to_text_rejects_invalid_utf8_2026-11-23.md.
     rt_bytes_to_text(bytes)
 
 # Unique semantic name for importers whose flattened unit has a colliding
@@ -43,28 +52,26 @@ export text_to_bytes, bytes_to_text, text_to_utf8_bytes, text_byte_buffer, TextB
 
 # Checked byte-carrier extraction is encoding-neutral. The caller owns charset
 # admission; UTF-16 and malformed bytes are valid external payloads here.
-use std.common.string_core.{str_len}
-
-pub fn text_byte_extraction_checked(expected_length: i64, bytes: [u8]) -> Result<[u8], TextByteBufferError>:
+pub fn text_byte_extraction_checked(expected_length: Length, bytes: [u8]) -> Result<[u8], TextByteBufferError>:
     """Validate the exact extraction result, including a genuine empty array.
 
     This deterministic guard is also the mismatch-test seam. It does not
     simulate allocator failure and does not validate an encoding.
     """
-    if expected_length < 0: return Err(TextByteBufferError.NegativeCapacity)
-    if expected_length > 9223372036854775767: return Err(TextByteBufferError.CapacityOverflow)
-    if rt_array_data_ptr(bytes) == 0 or bytes.len() != expected_length:
+    if expected_length.value < 0: return Err(TextByteBufferError.NegativeCapacity)
+    if expected_length.value > 9223372036854775767: return Err(TextByteBufferError.CapacityOverflow)
+    if rt_array_data_ptr(bytes) == 0 or bytes.len() != expected_length.value:
         return Err(TextByteBufferError.AllocationFailed)
     Ok(bytes)
 
 pub fn boxed_text_bytes_checked(value: text) -> Result<[u8], TextByteBufferError>:
-    # Native rt_string_len reads boxed byte length, including internal NUL.
+    # Native byte_len() reads boxed byte length, including internal NUL and StrBytes.
     # No Unicode traversal or decoded-character count is involved.
-    val expected = str_len(value)
+    val expected = value.byte_len()
     if expected < 0: return Err(TextByteBufferError.NegativeCapacity)
     if expected > 9223372036854775767: return Err(TextByteBufferError.CapacityOverflow)
     val bytes = rt_text_to_bytes(value)
-    text_byte_extraction_checked(expected, bytes)
+    text_byte_extraction_checked(Length(value: expected), bytes)
 
 export boxed_text_bytes_checked, text_byte_extraction_checked
 
@@ -73,7 +80,7 @@ export boxed_text_bytes_checked, text_byte_extraction_checked
 # primitives (C + Rust runtime, seed interpreter); they never change semantics,
 # they only replace per-byte Simple loops.
 extern fn rt_utf8_validate(bytes: [u8]) -> bool
-extern fn rt_array_concat(head: [u8], tail: [u8]) -> [u8]
+extern fn rt_array_concat(head: [u8], tail: [u8]) -> [u8]?
 
 pub fn utf8_bytes_valid(bytes: [u8]) -> bool:
     """Whole-array strict UTF-8 check (std::str::from_utf8 accept set).
@@ -96,11 +103,12 @@ pub fn text_bytes_concat_checked(head: [u8], tail: [u8]) -> Result<[u8], TextByt
     """
     if tail.len() == 0: return Ok(head)
     if head.len() > 9223372036854775767 - tail.len(): return Err(TextByteBufferError.CapacityOverflow)
-    val joined = rt_array_concat(head, tail)
-    # A refused concat is nil (length 0); tail is non-empty, so the exact
-    # length check detects it in every lane.
-    if joined.len() != head.len() + tail.len():
-        return Err(TextByteBufferError.AllocationFailed)
-    Ok(joined)
+    # A refused concat is nil. A non-nil result of the wrong length is also a
+    # refusal: the exact length check stays in every lane.
+    if val joined = rt_array_concat(head, tail):
+        if joined.len() != head.len() + tail.len():
+            return Err(TextByteBufferError.AllocationFailed)
+        return Ok(joined)
+    Err(TextByteBufferError.AllocationFailed)
 
 export utf8_bytes_valid, text_bytes_concat_checked

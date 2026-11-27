@@ -1,0 +1,85 @@
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+
+# A user method that shares its name with a builtin text/array method must
+# stay the user method for every receiver expression, not only a variable.
+# Native fixture: test/fixtures/native_user_method_builtin_name/main.spl
+# doc/08_tracking/bug/native_user_method_builtin_name_hijacked_2026-11-18.md
+
+fn user_method_mir(src: text) -> text:
+    val module = parse_full_frontend(src, "t.spl", "t.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("t.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    serialize_mir_module(mir_lowering.lower_module(hir))
+
+fn user_method_source(kind: text, method: text, arity: i64, form: text) -> text:
+    var params = ""
+    var call_args = ""
+    var i = 0
+    while i < arity:
+        if i > 0:
+            call_args = call_args + ", "
+        params = params + ", a{i}: text"
+        call_args = call_args + "\"abc\""
+        i = i + 1
+    var head = ""
+    if kind == "class":
+        val class_params = if arity == 0: "" else: params.substring(2)
+        head = "class K:\n    v: i64\n\n    fn " + method + "(" + class_params + ") -> i64:\n        self.v + 1000\n\n"
+    else:
+        head = "struct K:\n    v: i64\n\nimpl K:\n    fn " + method + "(self" + params + ") -> i64:\n        self.v + 1000\n\n"
+    val call = "." + method + "(" + call_args + ")\n"
+    val pre = head + "struct H:\n    k: K\n\nfn mk() -> K:\n    K(v: 4)\n\n"
+    if form == "tmp": return pre + "fn p() -> i64:\n    K(v: 4)" + call
+    if form == "call": return pre + "fn p() -> i64:\n    mk()" + call
+    if form == "field": return pre + "fn p(h: H) -> i64:\n    h.k" + call
+    if form == "idx": return pre + "fn p(ks: [K]) -> i64:\n    ks[0]" + call
+    pre + "fn p() -> i64:\n    val k = K(v: 4)\n    k" + call
+
+fn count_of(haystack: text, needle: text) -> i64:
+    haystack.split(needle).len() - 1
+
+fn hijack_report(method: text, arity: i64) -> text:
+    """"" when every receiver form calls `K.<method>` exactly once."""
+    var report = ""
+    for kind in ["class", "struct"]:
+        for form in ["tmp", "call", "field", "idx", "val"]:
+            val mir = user_method_mir(user_method_source(kind, method, arity, form))
+            val calls = count_of(mir, "\"value\":\"t.K." + method + "\"")
+            if calls != 1:
+                report = report + " {kind}/{form}:calls={calls}"
+            if form == "call" and count_of(mir, "\"value\":\"t.mk\"") != 1:
+                report = report + " {kind}/{form}:receiver-evaluated-twice"
+    report
+
+describe "User method named like a builtin keeps its user owner", tag: ["only-compiled"]:
+    it "join(sep) on a record receiver is not rt_array_join_any":
+        expect(hijack_report("join", 1)).to_equal("")
+
+    it "len() and length() on a record receiver are not rt_string_char_count":
+        expect(hijack_report("len", 0)).to_equal("")
+        expect(hijack_report("length", 0)).to_equal("")
+
+    it "char_at(i) on a record receiver is not a text slice":
+        expect(hijack_report("char_at", 1)).to_equal("")
+
+    it "index_of / find / find_str (needle, start) on a record receiver are not rt_text_find":
+        expect(hijack_report("index_of", 2)).to_equal("")
+        expect(hijack_report("find", 2)).to_equal("")
+        expect(hijack_report("find_str", 2)).to_equal("")
+
+    it "leaves the join fallback off a record receiver":
+        val mir = user_method_mir(user_method_source("class", "join", 1, "tmp"))
+        expect(mir.contains("rt_array_join_any")).to_equal(false)
+
+    it "keeps the builtins on text and array receivers":
+        val source = "fn p(parts: [text], word: text) -> text:\n    val a = parts.join(\",\")\n    val b = word.char_at(1)\n    val c = word.index_of(\"l\", 3)\n    val d = parts.len()\n    a + b\n"
+        val mir = user_method_mir(source)
+        expect(mir).to_contain("rt_array_join_any")
+        expect(mir).to_contain("spl_str_slice")
+        expect(mir).to_contain("rt_text_find")

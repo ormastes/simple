@@ -1,9 +1,10 @@
-//! Regression test for
+//! Regression tests for
+//! doc/08_tracking/bug/sspec_hollow_expect_clobbers_failure_message_2026-08-19.md
 //! doc/08_tracking/bug/spec_runner_provisional_truthy_message_clobbers_real_failure_2026-08-21.md
 //!
 //! A PROVISIONAL "expected subject to be truthy" message (raised by any falsy
-//! `expect(...)` subject) must never replace a REAL matcher failure that was
-//! already recorded earlier in the same example.
+//! `expect(...)` subject) must never replace a REAL matcher failure in the same
+//! example, regardless of which one was recorded first.
 //!
 //! Fixture-driven: the deliberately-failing spec runs in a child process and we
 //! assert on the CAPTURED runner output, so nothing in the repo stays red.
@@ -60,6 +61,29 @@ describe "provisional clobber":
     assert!(
         !output.contains("expected subject to be truthy"),
         "provisional truthy message clobbered the real failure:\n{output}"
+    );
+}
+
+#[test]
+fn real_to_equal_failure_survives_an_earlier_passing_falsy_expect() {
+    // Original 2026-08-19 ordering: a passing matcher consumes its falsy
+    // subject's provisional message before a later matcher fails for real.
+    let output = run_spec(
+        r#"
+describe "provisional clobber":
+    it "reports the later real to_equal failure":
+        expect(0).to_equal(0)
+        expect("fetch-3").to_equal("fetch-2")
+"#,
+    );
+
+    assert!(
+        output.contains("expected fetch-3 to equal fetch-2"),
+        "real to_equal failure text missing from runner output:\n{output}"
+    );
+    assert!(
+        !output.contains("expected subject to be truthy"),
+        "stale provisional truthy message clobbered the real failure:\n{output}"
     );
 }
 

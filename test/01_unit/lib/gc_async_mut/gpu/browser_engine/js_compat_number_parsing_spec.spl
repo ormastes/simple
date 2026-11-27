@@ -1,0 +1,128 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/script/js_compat.spl 58%
+# @tag: unit, browser_engine, script, js-compat
+#
+# JavaScript number-parsing and Math compatibility helpers used by page
+# scripts. Expected values are what ECMAScript defines for parseInt,
+# parseFloat and the Math functions on the same input (with the documented
+# deviation that "no number" is 0 / 0.0 because this layer has no NaN), so
+# the oracle is the language standard, not the implementation.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.script.js_compat.{
+    js_parse_int, js_parse_float,
+    js_math_floor, js_math_ceil, js_math_round, js_math_abs,
+    js_math_min, js_math_max, js_math_sqrt, js_math_pow,
+    js_string_split, js_string_join, js_string_trim, js_string_replace,
+    js_string_includes, js_array_index_of, js_array_slice
+}
+
+describe "JS compatibility number parsing and Math":
+
+    context "parseInt":
+
+        it "parses a plain decimal integer":
+            expect(js_parse_int("42")).to_equal(42)
+
+        it "skips leading whitespace and accepts one sign":
+            expect(js_parse_int("  -17")).to_equal(-17)
+            expect(js_parse_int("+7")).to_equal(7)
+
+        it "stops at the first non-digit":
+            expect(js_parse_int("12px")).to_equal(12)
+            expect(js_parse_int("3.9")).to_equal(3)
+
+        it "auto-detects a 0x prefix when the radix is omitted":
+            expect(js_parse_int("0x1F")).to_equal(31)
+            expect(js_parse_int("0Xff")).to_equal(255)
+            expect(js_parse_int("-0x10")).to_equal(-16)
+            expect(js_parse_int("0x10", 16)).to_equal(16)
+
+        it "honours an explicit radix":
+            expect(js_parse_int("101", 2)).to_equal(5)
+            expect(js_parse_int("77", 8)).to_equal(63)
+            expect(js_parse_int("ff", 16)).to_equal(255)
+            expect(js_parse_int("z", 36)).to_equal(35)
+
+        it "stops at a digit that is not valid in the radix":
+            expect(js_parse_int("129", 2)).to_equal(1)
+
+        it "returns 0 when no digit is present or the radix is invalid":
+            expect(js_parse_int("abc")).to_equal(0)
+            expect(js_parse_int("")).to_equal(0)
+            expect(js_parse_int("10", 1)).to_equal(0)
+            expect(js_parse_int("10", 37)).to_equal(0)
+
+    context "parseFloat":
+
+        it "parses the longest decimal prefix":
+            expect(js_parse_float("3.25abc")).to_equal(3.25)
+            expect(js_parse_float("1.5.7")).to_equal(1.5)
+
+        it "accepts whitespace, a sign and an exponent":
+            expect(js_parse_float("  -2.5e2")).to_equal(-250.0)
+            expect(js_parse_float("1e3")).to_equal(1000.0)
+
+        it "accepts a missing integer or fraction part":
+            expect(js_parse_float(".5")).to_equal(0.5)
+            expect(js_parse_float("5.")).to_equal(5.0)
+            expect(js_parse_float("-.5")).to_equal(-0.5)
+
+        it "ignores an exponent marker with no digits":
+            expect(js_parse_float("1e")).to_equal(1.0)
+
+        it "returns 0.0 when no numeric prefix is present":
+            expect(js_parse_float("abc")).to_equal(0.0)
+            expect(js_parse_float("")).to_equal(0.0)
+
+    context "Math":
+
+        it "floors toward negative infinity":
+            expect(js_math_floor(1.75)).to_equal(1)
+            expect(js_math_floor(-1.5)).to_equal(-2)
+
+        it "ceils toward positive infinity":
+            expect(js_math_ceil(1.25)).to_equal(2)
+            expect(js_math_ceil(-1.5)).to_equal(-1)
+
+        it "rounds to the nearest integer":
+            expect(js_math_round(2.4)).to_equal(2)
+            expect(js_math_round(2.6)).to_equal(3)
+            expect(js_math_round(-2.6)).to_equal(-3)
+
+        it "rounds halves toward positive infinity like Math.round":
+            expect(js_math_round(2.5)).to_equal(3)
+            expect(js_math_round(-2.5)).to_equal(-2)
+            expect(js_math_round(-0.5)).to_equal(0)
+
+        it "takes absolute value, min and max":
+            expect(js_math_abs(-3.5)).to_equal(3.5)
+            expect(js_math_abs(3.5)).to_equal(3.5)
+            expect(js_math_min(2.0, -1.0)).to_equal(-1.0)
+            expect(js_math_max(2.0, -1.0)).to_equal(2.0)
+
+        it "computes exact square roots and integer powers":
+            expect(js_math_sqrt(16.0)).to_equal(4.0)
+            expect(js_math_sqrt(0.0)).to_equal(0.0)
+            expect(js_math_pow(2.0, 10.0)).to_equal(1024.0)
+            expect(js_math_pow(5.0, 0.0)).to_equal(1.0)
+
+    context "string and array helpers":
+
+        it "splits and joins":
+            expect(js_string_split("a,b,c", ",")).to_equal(["a", "b", "c"])
+            expect(js_string_join(["a", "b", "c"], "-")).to_equal("a-b-c")
+
+        it "trims, searches and replaces":
+            expect(js_string_trim("  hi  ")).to_equal("hi")
+            expect(js_string_includes("hello", "ell")).to_equal(true)
+            expect(js_string_includes("hello", "xyz")).to_equal(false)
+            expect(js_string_replace("a-b", "-", "+")).to_equal("a+b")
+
+        it "finds an element index and reports -1 for a miss":
+            expect(js_array_index_of(["x", "y", "z"], "y")).to_equal(1)
+            expect(js_array_index_of(["x", "y", "z"], "q")).to_equal(-1)
+
+        it "slices a half-open range":
+            expect(js_array_slice(["a", "b", "c", "d"], 1, 3)).to_equal(["b", "c"])

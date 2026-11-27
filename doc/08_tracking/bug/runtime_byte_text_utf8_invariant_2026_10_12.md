@@ -1,6 +1,6 @@
 # Byte-to-text decoder violated the RuntimeString UTF-8 invariant
 
-Status: OPEN. Source repair reviewed; runtime tests and native qualification UNEXECUTED.
+Status: FIXED (b59c87038fd). 2026-11-03: the 3 Rust unit tests EXECUTED and pass (`cargo test --profile bootstrap -p simple-runtime --lib byte_text_utf8_invariant_tests`, 3 passed, own target dir); Simple spec `test/01_unit/runtime/byte_text_utf8_invariant_spec.spl` added. Native qualification still unexecuted.
 
 `rt_bytes_to_text` accepted packed bytes and checked boxed integer bytes, then passed them directly to `rt_string_new`. Neither path established UTF-8 validity. For example, `[0x80, 0xff, 0xc3]` could become a RuntimeString despite not being UTF-8. `RuntimeString::as_str` uses `from_utf8_unchecked`, so a subsequent ordinary string operation could violate Rust's safety contract. Byte-accessor interoperability alone does not establish that invariant. This is a concrete source defect; no undefined-behavior execution is used as evidence.
 
@@ -15,3 +15,5 @@ Validation command, from the isolated src/compiler_rust workspace:
     cargo test --locked --profile bootstrap --package simple-runtime --lib --jobs 2 --target-dir <owned-target> byte_text_utf8_invariant_tests -- --test-threads=1
 
 This command has not been run. Matched native-all feature/archive construction, Windows heap/ABI fixtures, throughput checks, and required compiler/core/lib/MCP gates remain open. No capped Simple build is restarted. Valid-input allocation preservation is a source observation, not a performance PASS.
+
+**Revalidated 2026-11-02: still plausible because OPEN. Source repair reviewed; runtime tests and native qualification UNEXECUTED; no merged fix commit with a passing regression is cited in this doc.**

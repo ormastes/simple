@@ -4,7 +4,7 @@
 - **Component:** Rust seed JIT (`bin/simple.exe run`, default execution mode)
 - **Host:** Windows 11, x86_64-pc-windows-msvc, seed binary `C:/tool-fix/bin/simple.exe`
 - **Severity:** crash (rc 139 / SIGSEGV), nothing printed to stderr
-- **Status:** open (seed defect). The supported MCP path is unaffected; partial
+- **Status:** fixed (landed; re-verified 2026-11-06, see "Re-verification 2026-11-06"). Original note: the supported MCP path is unaffected; partial
   source-side avoidance is landed (see below).
 
 ## Symptom
@@ -140,3 +140,14 @@ independently re-verified in this pass beyond the p6/p9-shape unit repro.
 
 **Status: FIXED** (crash), pending PR landing. Performance of the JIT
 fallback path for `main_dispatch` is a separate, pre-existing concern.
+
+## Re-verification 2026-11-06
+
+On a seed built from `origin/release/1.0.0` @ ecb705896a4 (`cargo build --release --bin simple`, Windows x86_64 host), run from inside the repository (outside it, the stdlib import is
+rejected before JIT compilation, so the probe has to live in the tree), the p6 repro
+`SIMPLE_EXECUTION_MODE=jit` prints `p6 before` / `p6 after A` at rc 0. The
+fix has landed. The module still drops to the interpreter
+(`unresolved external symbol 'char_from_code' (cross-module Simple function;
+per-module JIT does not link imported Simple functions) ... deferring to
+interpreter`). That is the graceful refusal that replaced the null jump; the
+performance concern noted above remains.

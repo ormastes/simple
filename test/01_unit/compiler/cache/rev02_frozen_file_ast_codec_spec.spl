@@ -1,0 +1,67 @@
+"""REV-02 (immutable views plan 2026-11-13, section 10): frozen serialization and reload.
+
+A FrozenImmutable payload is the pointer-free FileAstV1 cache object. Encoding
+must be deterministic, decode must restore the identical value, and nothing
+that varies per process (addresses, handles) may be persisted.
+"""
+
+use std.spec.*
+use compiler.common.cache_contract.file_ast_v1.{FileAstNodeV1, FileAstV1}
+use compiler.common.cache_contract.canonical_cache_codec_v1.{canonical_file_ast_encode_v1, canonical_file_ast_decode_v1, canonical_cache_object_digest_v1}
+
+fn _d(ch: text) -> text: ch.repeat(64)
+
+fn _ast(label: text) -> FileAstV1:
+    val root = FileAstNodeV1(kind: 1, flags: 0, source_start: 0, source_end: 12, first_child: 1, child_count: 2, payload_index: -1)
+    val a = FileAstNodeV1(kind: 2, flags: 1, source_start: 0, source_end: 5, first_child: 3, child_count: 0, payload_index: 0)
+    val b = FileAstNodeV1(kind: 3, flags: 0, source_start: 6, source_end: 12, first_child: 3, child_count: 0, payload_index: 1)
+    FileAstV1(source_blob_digest: _d("1"), grammar_digest: _d("2"), compiler_owner_digest: _d("3"),
+        string_table: ["main", label], nodes: [root, a, b], payload_tables: ["p0", "p1"], root_node: 0,
+        public_summary_digest: _d("4"), semantic_read_set_digest: _d("5"))
+
+describe "REV-02 frozen FileAstV1 serialization":
+    it "reloads to the identical value and re-encodes to identical bytes":
+        val ast = _ast("x")
+        val bytes = canonical_file_ast_encode_v1(ast)
+        expect(bytes.len() > 0).to_equal(true)
+        val back = canonical_file_ast_decode_v1(bytes)
+        expect(back.ok).to_equal(true)
+        val value = back.value ?? ast
+        expect(value.root_node).to_equal(0)
+        expect(value.nodes.len()).to_equal(3)
+        expect(value.string_table[1]).to_equal("x")
+        expect(value.nodes[1].payload_index).to_equal(0)
+        expect(value.nodes[0].payload_index).to_equal(-1)
+        expect(canonical_file_ast_encode_v1(value)).to_equal(bytes)
+
+    it "is deterministic: two independently built equal values give one object digest":
+        val one = canonical_file_ast_encode_v1(_ast("x"))
+        val two = canonical_file_ast_encode_v1(_ast("x"))
+        expect(canonical_cache_object_digest_v1(one)).to_equal(canonical_cache_object_digest_v1(two))
+        expect(canonical_cache_object_digest_v1(one) != canonical_cache_object_digest_v1(canonical_file_ast_encode_v1(_ast("y")))).to_equal(true)
+
+    it "persists only the declared fields: the size is a pure function of content":
+        # 56-byte envelope header + three raw 32-byte digests, two text tables,
+        # eight-byte node count, 3 x 7 u64 node words, root index, two digests.
+        # An address or handle would add bytes or vary between runs.
+        val a = canonical_file_ast_encode_v1(_ast("x"))
+        val b = canonical_file_ast_encode_v1(_ast("z"))
+        expect(a.len()).to_equal(b.len())
+
+    it "rejects truncated, trailing and wrong-kind bytes instead of reloading a partial artifact":
+        val bytes = canonical_file_ast_encode_v1(_ast("x"))
+        var cut: [u8] = []
+        var i = 0
+        while i < bytes.len() - 1:
+            cut.push(bytes[i])
+            i = i + 1
+        expect(canonical_file_ast_decode_v1(cut).ok).to_equal(false)
+        var extra = bytes.copy()
+        extra.push(0.to_u8())
+        expect(canonical_file_ast_decode_v1(extra).ok).to_equal(false)
+
+    it "refuses to encode an out-of-range node index (neighbouring pattern: no partial write)":
+        val bad = FileAstV1(source_blob_digest: _d("1"), grammar_digest: _d("2"), compiler_owner_digest: _d("3"),
+            string_table: [], nodes: [FileAstNodeV1(kind: 1, flags: 0, source_start: 0, source_end: 1, first_child: 5, child_count: 1, payload_index: -1)],
+            payload_tables: [], root_node: 0, public_summary_digest: _d("4"), semantic_read_set_digest: _d("5"))
+        expect(canonical_file_ast_encode_v1(bad).len()).to_equal(0)

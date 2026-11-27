@@ -1,0 +1,86 @@
+# Read-only explicit-state projections; no host effects or owner publication.
+use os.apps.smux.service.{ServiceState}
+use os.apps.smux.contract.{MuxSession, MuxWindow, MuxPane, MuxClientAttachment}
+
+# Pure backend contract and deferred feature discovery, re-exported by the API.
+pub fn smux_backend_contract_name() -> text:
+    return "smux-native"
+
+pub fn smux_is_deferred_feature(feature: text) -> bool:
+    # Hosted interactive copy navigation/line selection is implemented.
+    # Exact tmux key-table/config compatibility remains separately deferred.
+    if feature == "mouse":
+        return true
+    if feature == "key-table-compat":
+        return true
+    if feature == "tmux-conf":
+        return true
+    if feature == "control-mode":
+        return true
+    return false
+
+# Exact ancestry checks shared by the API; no implicit focused target lookup.
+pub fn service_pane_index(st: ServiceState, session_id: text, window_id: text, pane_id: text) -> int:
+    val idx = st.find_pane_idx(pane_id)
+    if idx < 0:
+        return -1
+    val p = st.get_pane(idx).pane
+    if p.session_id != session_id or p.window_id != window_id:
+        return -1
+    return idx
+
+pub fn service_window_index(st: ServiceState, session_id: text, window_id: text) -> int:
+    val idx = st.find_window_idx(window_id)
+    if idx < 0:
+        return -1
+    if st.get_window(idx).session_id != session_id:
+        return -1
+    return idx
+
+pub fn service_list_sessions(st: ServiceState) -> [MuxSession]:
+    var result: [MuxSession] = []
+    var i = 0
+    while i < st.session_count:
+        result.push(st.get_session(i))
+        i = i + 1
+    return result
+
+pub fn service_list_clients(st: ServiceState) -> [MuxClientAttachment]:
+    val clients = [st.c0, st.c1, st.c2, st.c3]
+    return clients[0:st.client_count]
+
+pub fn service_list_windows(st: ServiceState, session_id: text) -> [MuxWindow]:
+    var result: [MuxWindow] = []
+    var i = 0
+    while i < st.window_count:
+        val w = st.get_window(i)
+        if w.session_id == session_id:
+            result.push(w)
+        i = i + 1
+    return result
+
+pub fn service_active_window(st: ServiceState, session_id: text) -> Result<MuxWindow, text>:
+    for w in service_list_windows(st, session_id):
+        if w.is_active:
+            return Ok(w)
+    return Err("no active window in session: " + session_id)
+
+pub fn service_list_panes(st: ServiceState, session_id: text, window_id: text) -> [MuxPane]:
+    var result: [MuxPane] = []
+    var i = 0
+    while i < st.pane_count:
+        val pr = st.get_pane(i)
+        if (pr.pane.session_id == session_id and
+            pr.pane.window_id == window_id):
+            result.push(pr.pane)
+        i = i + 1
+    return result
+
+pub fn service_focused_pane(st: ServiceState, session_id: text, window_id: text) -> Result<MuxPane, text>:
+    var i = 0
+    while i < st.pane_count:
+        val pr = st.get_pane(i)
+        if pr.pane.session_id == session_id and pr.pane.window_id == window_id and pr.focus:
+            return Ok(pr.pane)
+        i = i + 1
+    return Err("no focused pane in window: " + window_id)

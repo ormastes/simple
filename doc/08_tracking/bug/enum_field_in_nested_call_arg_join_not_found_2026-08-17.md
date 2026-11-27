@@ -149,3 +149,33 @@ in the deployed seed.
 
 (Incidental, unrelated to this bug: the seed's interpolation prints a leading
 `$` — `stmt=$a` rather than `stmt=a`. Not investigated here.)
+
+## Verification 2026-11-25 (worktree work/p2w2-ah-20261125, Windows host, pinned seed `bin/simple.exe`)
+
+Re-ran the exact `enum1.spl` repro from the section above on the tracked
+release binary (`bin/simple.exe`, Rust seed v1.0.0-rc.1, 38,403,072 bytes):
+
+```
+$ SIMPLE_LIB=src bin/simple.exe run build/ah_enum1_repro.spl
+stmt=$a
+nested=$Vec2
+exit=0
+```
+
+No `method 'join' not found on value of type enum in nested call context`.
+`tags` reads back `a`/`b` verbatim, so the fully-named literal built the
+struct directly instead of auto-routing to the name-coincident
+`static fn new` — in both statement and nested-call position. (The leading
+`$` is the already-noted unrelated seed interpolation artifact.)
+
+Source-side, the fix is present in this tree:
+`should_implicitly_call_new` in
+`src/compiler_rust/compiler/src/interpreter_call/core/class_instantiation.rs:90`
+returns `false` for `has_named_arg && new_is_static`, citing the
+2026-09-27 owner ruling and `struct_literal_not_routed_to_static_new_spec`.
+
+Limit: the two named specs could not be executed here — `bin/simple.exe
+test` fails repo-wide at release/1.0.0 HEAD with
+`unknown decorator '@representation_boundary'` (pinned seed predates
+cfd89933699). The standalone repro above is direct behavioral evidence on
+the deployed binary. Status stays FIXED; nothing further to do.

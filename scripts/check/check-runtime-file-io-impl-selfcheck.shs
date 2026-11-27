@@ -1,0 +1,98 @@
+#!/bin/sh
+# Builds and runs the file-io twin selfchecks against BOTH C providers
+# (src/runtime/runtime.c and src/runtime/runtime_native.c), syntax-checks each
+# TU in its testing configurations, and runs the source contract that pins both
+# files to the one shared body in the private static headers
+#   runtime_file_exists_probe_impl.h  runtime_file_stat_impl.h
+#   runtime_file_fsync_impl.h         runtime_file_slurp_impl.h
+# clang only (never gcc). Fail-closed verdict, last line of stdout:
+#   PASS — <n> run(s) ...              exit 0
+#   FAIL — ...                         exit 1
+#   ERROR — nothing was checked (...)  exit 2
+set -u
+root=$(cd "$(dirname "$0")/../.." && pwd) || { echo "ERROR — nothing was checked (no repo root)"; exit 2; }
+cd "$root" || { echo "ERROR — nothing was checked (cd failed)"; exit 2; }
+CC=${CC:-clang}
+case "$(basename "$CC")" in *gcc*|*g++*) echo "ERROR — nothing was checked (gcc is forbidden: $CC)"; exit 2;; esac
+command -v "$CC" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (no clang: $CC)"; exit 2; }
+"$CC" --version 2>/dev/null | grep -qi clang || { echo "ERROR — nothing was checked ($CC is not clang)"; exit 2; }
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) os=windows ;;
+  *) os=posix ;;
+esac
+out="$root/build/runtime_file_io_impl_selfcheck"
+mkdir -p "$out" || { echo "ERROR — nothing was checked (mkdir $out)"; exit 2; }
+ran=0; fails=""
+
+# 1. Selfchecks linked against each provider (POSIX only: the harnesses use
+#    symlink/mkdir/fsync and the gc-sections link recipe of
+#    check-file-exists-probe-c.shs).
+if [ "$os" = posix ]; then
+  for provider in runtime.c runtime_native.c; do
+    for t in rt_file_exists_probe_selfcheck rt_file_io_twins_selfcheck; do
+      stub=""
+      [ "$provider" = runtime.c ] && [ "$t" = rt_file_io_twins_selfcheck ] && stub="-DRT_FILE_IO_TWINS_STUB_STRINGS"
+      bin="$out/${t}_${provider%.c}"
+      # shellcheck disable=SC2086
+      "$CC" -std=gnu11 -O0 -ffunction-sections -fdata-sections -DSIMPLE_RUNTIME_TESTING $stub \
+        -I src/runtime "src/runtime/$provider" "src/runtime/test/$t.c" \
+        -Wl,--gc-sections -ldl -lm -lpthread -o "$bin" > "$bin.build.txt" 2>&1
+      rc=$?
+      if [ "$rc" -ne 0 ]; then fails="$fails $t/$provider(compile rc=$rc)"; continue; fi
+      TMPDIR="$out" "$bin" > "$bin.run.txt" 2>&1
+      rc=$?
+      ran=$((ran + 1))
+      [ "$rc" -eq 0 ] || fails="$fails $t/$provider(run rc=$rc)"
+    done
+  done
+fi
+
+# 2. Syntax of both TUs in their configurations (every host).
+for tu in runtime.c runtime_native.c; do
+  i=0
+  for d in "" "-DSIMPLE_RUNTIME_TESTING" "-DSIMPLE_RUNTIME_MEMORY_OWNER" "-DSIMPLE_CORE_C_STANDALONE=1"; do
+    i=$((i + 1))
+    # shellcheck disable=SC2086
+    "$CC" -fsyntax-only -std=gnu11 $d -I src/runtime "src/runtime/$tu" > "$out/syntax_${tu}_$i.txt" 2>&1
+    rc=$?
+    ran=$((ran + 1))
+    [ "$rc" -eq 0 ] || fails="$fails syntax-$tu-$i(rc=$rc)"
+  done
+done
+
+# 3. Source contract: each shared body is defined exactly once, in its header,
+#    and both providers include every header.
+contract() { # $1 = symbol regex (definition start), $2 = header
+  n=$(grep -c -E "$1" "src/runtime/$2")
+  [ "$n" -eq 1 ] || fails="$fails contract($1 in $2: $n)"
+  for tu in runtime.c runtime_native.c; do
+    if grep -q -E "$1" "src/runtime/$tu"; then fails="$fails contract($1 still in $tu)"; fi
+    grep -q "#include \"$2\"" "src/runtime/$tu" || fails="$fails contract($tu lacks $2)"
+  done
+  ran=$((ran + 1))
+}
+contract '^static int64_t rt_file_exists_probe_begin_impl\(void\)' runtime_file_exists_probe_impl.h
+contract '^static int64_t rt_file_exists_probe_end_impl\(int64_t token\)' runtime_file_exists_probe_impl.h
+contract '^static uint_fast64_t rt_file_exists_probe_lease_admit\(void\)' runtime_file_exists_probe_impl.h
+contract '^static bool rt_file_is_regular_no_follow_impl\(' runtime_file_stat_impl.h
+contract '^static int rt_file_is_char_device_impl\(' runtime_file_stat_impl.h
+contract '^static int rt_fsync_path\(const char\* path\)' runtime_file_fsync_impl.h
+contract '^static int64_t rt_file_slurp_text_close\(FILE\* f\)' runtime_file_slurp_impl.h
+# Exported rt_* entry points stay hand-written in each provider (no rt_* in a header).
+for h in runtime_file_exists_probe_impl.h runtime_file_stat_impl.h runtime_file_fsync_impl.h runtime_file_slurp_impl.h; do
+  if grep -E '^[a-zA-Z_].*[^a-zA-Z_]rt_[a-z0-9_]+\(' "src/runtime/$h" | grep -v -E '^static ' | grep -q .; then
+    fails="$fails header-exports-rt($h)"
+  fi
+  ran=$((ran + 1))
+done
+for tu in runtime.c runtime_native.c; do
+  for sym in rt_file_exists_probe_begin rt_file_exists_probe_end rt_file_is_regular_no_follow rt_file_is_char_device rt_file_fsync rt_file_read_text; do
+    grep -q -E "^(SPL_[A-Z_]+ )?[a-z0-9_]+ +$sym\(" "src/runtime/$tu" || fails="$fails export($sym missing in $tu)"
+  done
+  ran=$((ran + 1))
+done
+
+if [ -n "$fails" ]; then echo "FAIL — $ran run(s) ($os), failed:$fails (logs: $out)"; exit 1; fi
+if [ "$ran" -eq 0 ]; then echo "ERROR — nothing was checked (0 runs)"; exit 2; fi
+echo "PASS — $ran run(s) ($os), file-io impl selfchecks on both providers + syntax + source contract green"
+exit 0

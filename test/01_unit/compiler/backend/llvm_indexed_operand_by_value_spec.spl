@@ -1,0 +1,52 @@
+# Regression (Option-word / by-value-copy family, siblings of #7066 and #7069):
+# passing an indexed enum element `args[N]` BY VALUE into translate_operand /
+# get_operand_type loses the MirOperandKind payload under native codegen and
+# the LocalId is read from garbage (undefined `%l<garbage>` local). The SSA phi
+# intrinsic and the AES / SHA256-RNDS2 / CLMUL asm helpers still did this.
+# Fix: index inside the callee via translate_operand_at / get_operand_type_at.
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_dir_list(path: text) -> [text]?
+
+val LLVM_DIR = "src/compiler/70.backend/backend/_MirToLlvm"
+
+fn by_value_hits(src: text) -> i64:
+    var hits = 0
+    for name in ["args", "operands", "ops"]:
+        for callee in ["self.translate_operand(", "self.get_operand_type("]:
+            if src.contains(callee + name + "["):
+                hits = hits + 1
+    hits
+
+describe "LLVM backend indexed operand access":
+    it "phi intrinsic reads operands by index":
+        val src = rt_file_read_text(LLVM_DIR + "/aggregate_intrinsics.spl") ?? ""
+        expect(src.len() > 0).to_equal(true)
+        expect(by_value_hits(src)).to_equal(0)
+        expect(src).to_contain("self.translate_operand_at(args, 1)")
+        expect(src).to_contain("self.get_operand_type_at(args, 3)")
+
+    it "asm crypto helpers read operands by index":
+        val src = rt_file_read_text(LLVM_DIR + "/asm_constraints_helpers.spl") ?? ""
+        expect(src.len() > 0).to_equal(true)
+        expect(by_value_hits(src)).to_equal(0)
+        expect(src).to_contain("self.translate_operand_at(args, 2)")
+
+    it "no _MirToLlvm file passes an indexed operand by value":
+        val names = rt_dir_list(LLVM_DIR) ?? []
+        var scanned = 0
+        var bad = 0
+        for n in names:
+            if n.ends_with(".spl"):
+                val path = if n.contains("/"): n else: LLVM_DIR + "/" + n
+                val src = rt_file_read_text(path) ?? ""
+                scanned = scanned + 1
+                bad = bad + by_value_hits(src)
+        expect(scanned > 0).to_equal(true)
+        expect(bad).to_equal(0)
+
+    it "the _at helpers exist in core codegen":
+        val src = rt_file_read_text(LLVM_DIR + "/core_codegen.spl") ?? ""
+        expect(src).to_contain("me translate_operand_at(operands: [MirOperand], index: i64)")
+        expect(src).to_contain("me get_operand_type_at(operands: [MirOperand], index: i64)")

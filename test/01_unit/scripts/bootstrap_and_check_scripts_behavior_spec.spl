@@ -1,0 +1,136 @@
+# @cover scripts/bootstrap/rollback-bootstrap-deploy.shs 80%
+# @cover scripts/check/check-bootstrap-platform-handoff-readiness.shs 80%
+# @cover scripts/lib/kernel-closure-inputs.shs 80%
+"""
+## Purpose and audience
+Purpose: verify real CLI validation, fail-closed error exits, and policy
+rejection behavior across bootstrap and check scripts.
+Audience: maintainers of `scripts/bootstrap/*`, `scripts/check/*`, and
+`scripts/lib/kernel-closure-inputs.shs`.
+"""
+
+use std.spec.step
+use std.spec.*
+use std.io_runtime.{process_run}
+use std.nogc_sync_mut.io.process_ops.{resolve_shell_argv, is_posix_shell_argv}
+
+fn has_posix_shell() -> bool:
+    val (sh_bin, _args) = resolve_shell_argv("true")
+    is_posix_shell_argv(sh_bin)
+
+fn run_script_sh(cmd: text) -> (text, text, i64):
+    val (sh_bin, sh_args) = resolve_shell_argv(cmd)
+    process_run(sh_bin, sh_args)
+
+describe "bootstrap and check script CLI behavior":
+
+    it "rejects unknown flags and multiple platforms in rollback-bootstrap-deploy.shs":
+        if not has_posix_shell():
+            pending("BLOCKED: POSIX sh not available for script CLI execution")
+        else:
+            step("Run rollback-bootstrap-deploy.shs with an unknown flag")
+            val (out1, err1, code1) = run_script_sh("sh scripts/bootstrap/rollback-bootstrap-deploy.shs --no-such-flag")
+            expect(code1).to_equal(2)
+            expect(err1).to_contain("unknown flag")
+            expect(out1).to_contain("ERROR — nothing was rolled back (unknown flag --no-such-flag)")
+
+            step("Run rollback-bootstrap-deploy.shs with multiple positional platforms")
+            val (out2, err2, code2) = run_script_sh("sh scripts/bootstrap/rollback-bootstrap-deploy.shs plat-a plat-b")
+            expect(code2).to_equal(2)
+            expect(err2).to_contain("multiple platform arguments")
+            expect(out2).to_contain("ERROR — nothing was rolled back (multiple platform arguments)")
+
+            step("Run rollback-bootstrap-deploy.shs with dot platform traversal")
+            val (out3, err3, code3) = run_script_sh("sh scripts/bootstrap/rollback-bootstrap-deploy.shs .")
+            expect(code3).to_equal(2)
+            expect(err3).to_contain("invalid platform")
+            expect(out3).to_contain("ERROR — nothing was rolled back (invalid platform)")
+
+    it "reports usage and rejects invalid arguments in check-bootstrap-platform-handoff-readiness.shs":
+        if not has_posix_shell():
+            pending("BLOCKED: POSIX sh not available for script CLI execution")
+        else:
+            step("Run check-bootstrap-platform-handoff-readiness.shs --help")
+            val (out_help, _err_help, code_help) = run_script_sh("sh scripts/check/check-bootstrap-platform-handoff-readiness.shs --help")
+            expect(code_help).to_equal(0)
+            expect(out_help).to_contain("usage:")
+
+            step("Reject unknown option in check-bootstrap-platform-handoff-readiness.shs")
+            val (_out_bad, err_bad, code_bad) = run_script_sh("sh scripts/check/check-bootstrap-platform-handoff-readiness.shs --invalid-option")
+            expect(code_bad).to_equal(2)
+            expect(err_bad).to_contain("usage:")
+
+            step("Reject extra positional argument after --self-test")
+            val (_out_extra, err_extra, code_extra) = run_script_sh("sh scripts/check/check-bootstrap-platform-handoff-readiness.shs --self-test extra")
+            expect(code_extra).to_equal(2)
+            expect(err_extra).to_contain("usage:")
+
+    it "rejects invalid flags and conflicting modes in check-freebsd-bootstrap-qemu.shs":
+        if not has_posix_shell():
+            pending("BLOCKED: POSIX sh not available for script CLI execution")
+        else:
+            step("Run check-freebsd-bootstrap-qemu.shs --help")
+            val (out_help, _err_help, code_help) = run_script_sh("sh scripts/check/check-freebsd-bootstrap-qemu.shs --help")
+            expect(code_help).to_equal(0)
+            expect(out_help).to_contain("Usage:")
+
+            step("Reject unknown argument in non-preflight mode")
+            val (_out_arg, err_arg, code_arg) = run_script_sh("sh scripts/check/check-freebsd-bootstrap-qemu.shs --bogus-flag")
+            expect(code_arg).to_equal(1)
+            expect(err_arg).to_contain("Invalid command-line arguments: argument_invalid")
+            expect(err_arg).to_contain("Usage:")
+
+            step("Reject multiple conflicting modes in non-preflight mode")
+            val (_out_multi, err_multi, code_multi) = run_script_sh("sh scripts/check/check-freebsd-bootstrap-qemu.shs --smoke --full")
+            expect(code_multi).to_equal(1)
+            expect(err_multi).to_contain("Invalid command-line arguments: mode_multiple")
+            expect(err_multi).to_contain("Usage:")
+
+            step("Report preflight failure reason on conflicting preflight mode")
+            val (out_pre, _err_pre, code_pre) = run_script_sh("sh scripts/check/check-freebsd-bootstrap-qemu.shs --preflight --smoke --full")
+            expect(code_pre).to_equal(1)
+            expect(out_pre).to_contain("freebsd_qemu_preflight_status=fail")
+            expect(out_pre).to_contain("freebsd_qemu_preflight_reason=mode")
+
+    it "fails closed on unknown arguments and bare run mode in check-bootstrap-must-pass.shs":
+        if not has_posix_shell():
+            pending("BLOCKED: POSIX sh not available for script CLI execution")
+        else:
+            step("Reject unknown CLI argument in check-bootstrap-must-pass.shs")
+            val (_out_bad, err_bad, code_bad) = run_script_sh("sh scripts/check/check-bootstrap-must-pass.shs --unknown-flag")
+            expect(code_bad).to_equal(2)
+            expect(err_bad).to_contain("unknown argument --unknown-flag")
+
+            step("Reject bare run mode without --record-bootstrap-success")
+            val (_out_bare, err_bare, code_bare) = run_script_sh("sh scripts/check/check-bootstrap-must-pass.shs")
+            expect(code_bare).to_equal(2)
+            expect(err_bare).to_contain("automated PASS recording requires --record-bootstrap-success")
+
+    it "errors when check-mcp-config-launchable.shs receives a missing config path":
+        if not has_posix_shell():
+            pending("BLOCKED: POSIX sh not available for script CLI execution")
+        else:
+            step("Run check-mcp-config-launchable.shs on a non-existent config path")
+            val (stdout, stderr, code) = run_script_sh("sh scripts/check/check-mcp-config-launchable.shs build/nonexistent_mcp_config_unit.json")
+            expect(code).to_equal(2)
+            expect(stdout).to_contain("ERROR — nothing was checked")
+            expect(stderr).to_contain("missing config:")
+
+    it "rejects drifted policies and missing manifest in kernel-closure-inputs.shs":
+        if not has_posix_shell():
+            pending("BLOCKED: POSIX sh not available for script CLI execution")
+        else:
+            step("Reject SIMPLE_COVERAGE_CUTOVER_STATE drift")
+            val (_out_cov, err_cov, code_cov) = run_script_sh("SIMPLE_COVERAGE_CUTOVER_STATE=dual sh scripts/lib/kernel-closure-inputs.shs")
+            expect(code_cov).to_equal(2)
+            expect(err_cov).to_contain("SIMPLE_COVERAGE_CUTOVER_STATE drifted")
+
+            step("Reject SIMPLE_KERNEL_K1_POLICY drift")
+            val (_out_k1, err_k1, code_k1) = run_script_sh("SIMPLE_KERNEL_K1_POLICY=cranelift-only sh scripts/lib/kernel-closure-inputs.shs")
+            expect(code_k1).to_equal(2)
+            expect(err_k1).to_contain("SIMPLE_KERNEL_K1_POLICY drifted")
+
+            step("Reject SIMPLE_ABI_POLICY drift")
+            val (_out_abi, err_abi, code_abi) = run_script_sh("SIMPLE_ABI_POLICY=deferred sh scripts/lib/kernel-closure-inputs.shs")
+            expect(code_abi).to_equal(2)
+            expect(err_abi).to_contain("SIMPLE_ABI_POLICY drifted")

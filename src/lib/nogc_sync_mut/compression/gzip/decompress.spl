@@ -1,0 +1,28 @@
+# GZIP member decompression, separated from compression and analysis dependencies.
+
+use std.nogc_sync_mut.compression.gzip.header.{
+    gzip_header_parse_at, gzip_header_size, gzip_footer_parse, gzip_footer_validate
+}
+use std.nogc_sync_mut.compression.gzip.inflate.{inflate_member, InflateOut}
+
+# Decompress a GZIP file: a series of one or more members (RFC 1952 2.2), each
+# with its own header, DEFLATE stream and CRC-32 + ISIZE trailer. The output is the
+# concatenation of the members' data. Any malformed member, and any bytes after the
+# last member that do not form another member, fail the whole file (nil).
+pub fn gzip_decompress(data: [u8]) -> [u8]?:
+    if data.len() < 18:
+        return None
+    var result: [u8] = []
+    var pos = 0
+    while pos < data.len():
+        val header_info = gzip_header_parse_at(data, pos)?
+        val body = inflate_member(data, gzip_header_size(header_info))?
+        val member = body.output
+        # A missing (truncated) trailer follows the same nil failure path.
+        val footer_info = gzip_footer_parse(data, body.end)?
+        if not gzip_footer_validate(footer_info, member, member.len()):
+            return None
+        for b in member:
+            result.push(b)
+        pos = body.end + 8
+    return result

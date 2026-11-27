@@ -5,10 +5,10 @@
 use std.skia.entity.enums.{SkClipOp, SkBlendMode}
 use std.skia.entity.geometry.{SkPoint, SkRect, SkIRect, SkRRect}
 use std.skia.entity.color.{SkColor}
-use std.skia.entity.paint.{SkPaint, sk_paint_new}
+use std.skia.entity.paint.{SkPaint, sk_paint_new, sk_paint_fill}
 use std.skia.entity.path.{SkPath}
 use std.skia.entity.image.{SkImage}
-use std.skia.entity.textblob.{SkTextBlob, sk_text_blob_make_from_text}
+use std.skia.entity.textblob.{SkTextBlob, sk_text_blob_make_from_text, sk_pack_text_blob_op_image}
 use std.skia.entity.font.{SkFont}
 use std.skia.entity.matrix.{Matrix3x3}
 use std.skia.entity.picture.{SkPicture, SkPictureRecorder, SkPictureOp, SkPictureOpKind, sk_picture_recorder_new, sk_picture_op_draw_rect, sk_picture_op_draw_path, sk_picture_op_draw_rrect, sk_picture_op_draw_image, sk_picture_op_draw_paint}
@@ -32,40 +32,203 @@ fn sk_save_layer_rec(bounds: SkRect?, paint: SkPaint?) -> SkCanvasSaveLayerRec:
 # is handled by the backend (cpu/vulkan).
 # ============================================================================
 
+fn _canvas_abs(v: f64) -> f64:
+    if v < 0.0: -v else: v
+
+fn _canvas_atan_poly(t: f64) -> f64:
+    val t2 = t * t
+    val t3 = t * t2
+    val t5 = t3 * t2
+    val t7 = t5 * t2
+    val t9 = t7 * t2
+    val t11 = t9 * t2
+    t - t3 / 3.0 + t5 / 5.0 - t7 / 7.0 + t9 / 9.0 - t11 / 11.0
+
+fn _canvas_atan2_deg(y: f64, x: f64) -> f64:
+    val pi = 3.141592653589793
+    val ax = _canvas_abs(x)
+    val ay = _canvas_abs(y)
+    if ax < 0.000000000001 and ay < 0.000000000001:
+        return 0.0
+    val swap = ay > ax
+    val u = if swap: ax / ay else: ay / ax
+    var angle = if u > 0.41421356237309505:
+        (pi * 0.25) + _canvas_atan_poly((u - 1.0) / (u + 1.0))
+    else:
+        _canvas_atan_poly(u)
+    if swap:
+        angle = (pi * 0.5) - angle
+    if x < 0.0:
+        angle = pi - angle
+    if y < 0.0:
+        angle = -angle
+    val deg = angle * 57.29577951308232
+    if _canvas_abs(deg) < 0.000000001:
+        return 0.0
+    deg
+
+fn _canvas_matrix_rotation_deg(m: Matrix3x3) -> f64:
+    val sx = m.scale_x()
+    if sx <= 0.000000001:
+        return 0.0
+    _canvas_atan2_deg(m.m10 / sx, m.m00 / sx)
+
+fn _canvas_empty_rect() -> SkRect:
+    SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0)
+
+fn _canvas_record_set_matrix(recorder: Option<SkPictureRecorder>, m: Matrix3x3, dx: f64, dy: f64):
+    if val rec = recorder:
+        val packed = SkRect(
+            left: m.tx(),
+            top: m.ty(),
+            right: m.scale_x(),
+            bottom: m.scale_y()
+        )
+        val rot_deg = _canvas_matrix_rotation_deg(m)
+        val det = m.m00 * m.m11 - m.m01 * m.m10
+        val mirror_sign = if det < 0.0: -1.0 else: 0.0
+        rec.record(SkPictureOp(
+            kind: SkPictureOpKind.SetMatrix,
+            rect: packed,
+            rx: rot_deg,
+            ry: mirror_sign,
+            path: None,
+            image: None,
+            paint: sk_paint_new(),
+            x: dx,
+            y: dy
+        ))
+
 class SkCanvas:
     width: i64
     height: i64
     save_count: i64
     recorder: Option<SkPictureRecorder>
+    ctm: Matrix3x3
+    matrix_stack: [Matrix3x3]
 
 fn sk_canvas_make(width: i64, height: i64) -> SkCanvas:
-    SkCanvas(width: width, height: height, save_count: 1, recorder: None)
+    SkCanvas(
+        width: width,
+        height: height,
+        save_count: 1,
+        recorder: None,
+        ctm: Matrix3x3.identity(),
+        matrix_stack: []
+    )
 
 impl SkCanvas:
     # ---- State save/restore ----
 
     fn save() -> SkCanvas:
-        SkCanvas(width: self.width, height: self.height, save_count: self.save_count + 1, recorder: self.recorder)
+        if val rec = self.recorder:
+            rec.record(SkPictureOp(
+                kind: SkPictureOpKind.Save,
+                rect: _canvas_empty_rect(),
+                rx: 0.0,
+                ry: 0.0,
+                path: None,
+                image: None,
+                paint: sk_paint_new(),
+                x: 0.0,
+                y: 0.0
+            ))
+        var next_stack: [Matrix3x3] = []
+        for m in self.matrix_stack:
+            next_stack.push(m)
+        next_stack.push(self.ctm)
+        SkCanvas(
+            width: self.width,
+            height: self.height,
+            save_count: self.save_count + 1,
+            recorder: self.recorder,
+            ctm: self.ctm,
+            matrix_stack: next_stack
+        )
 
     fn restore() -> SkCanvas:
-        val new_count = if self.save_count > 1: self.save_count - 1 else: 1
-        SkCanvas(width: self.width, height: self.height, save_count: new_count, recorder: self.recorder)
+        if self.save_count <= 1:
+            return self
+        if val rec = self.recorder:
+            rec.record(SkPictureOp(
+                kind: SkPictureOpKind.Restore,
+                rect: _canvas_empty_rect(),
+                rx: 0.0,
+                ry: 0.0,
+                path: None,
+                image: None,
+                paint: sk_paint_new(),
+                x: 0.0,
+                y: 0.0
+            ))
+        var next_ctm = self.ctm
+        var next_stack: [Matrix3x3] = []
+        val stack_len = self.matrix_stack.len()
+        if stack_len > 0:
+            next_ctm = self.matrix_stack[stack_len - 1]
+            var idx = 0
+            while idx < stack_len - 1:
+                next_stack.push(self.matrix_stack[idx])
+                idx = idx + 1
+        SkCanvas(
+            width: self.width,
+            height: self.height,
+            save_count: self.save_count - 1,
+            recorder: self.recorder,
+            ctm: next_ctm,
+            matrix_stack: next_stack
+        )
 
-    fn save_layer(rec: SkCanvasSaveLayerRec) -> SkCanvas:
-        SkCanvas(width: self.width, height: self.height, save_count: self.save_count + 1, recorder: self.recorder)
+    fn save_layer(save_rec: SkCanvasSaveLayerRec) -> SkCanvas:
+        if val rec = self.recorder:
+            val layer_rect = if val b = save_rec.bounds: b else: _canvas_empty_rect()
+            val layer_paint = if val p = save_rec.paint: p else: sk_paint_new()
+            rec.record(SkPictureOp(
+                kind: SkPictureOpKind.SaveLayer,
+                rect: layer_rect,
+                rx: 0.0,
+                ry: 0.0,
+                path: None,
+                image: None,
+                paint: layer_paint,
+                x: 0.0,
+                y: 0.0
+            ))
+        var next_stack: [Matrix3x3] = []
+        for m in self.matrix_stack:
+            next_stack.push(m)
+        next_stack.push(self.ctm)
+        SkCanvas(
+            width: self.width,
+            height: self.height,
+            save_count: self.save_count + 1,
+            recorder: self.recorder,
+            ctm: self.ctm,
+            matrix_stack: next_stack
+        )
 
     fn get_save_count() -> i64:
         self.save_count
 
     fn restore_to_count(count: i64) -> SkCanvas:
-        val new_count = if count >= 1: count else: 1
-        SkCanvas(width: self.width, height: self.height, save_count: new_count, recorder: self.recorder)
+        val target = if count >= 1: count else: 1
+        var cur = self
+        while cur.save_count > target:
+            cur = cur.restore()
+        cur
 
     # ---- Recording ----
 
     fn begin_recording(bounds: SkRect) -> SkCanvas:
         val rec = sk_picture_recorder_new().begin_recording(bounds)
-        SkCanvas(width: self.width, height: self.height, save_count: self.save_count, recorder: Some(rec))
+        SkCanvas(
+            width: self.width,
+            height: self.height,
+            save_count: self.save_count,
+            recorder: Some(rec),
+            ctm: self.ctm,
+            matrix_stack: self.matrix_stack
+        )
 
     fn end_recording() -> SkPicture:
         if val rec = self.recorder:
@@ -76,77 +239,75 @@ impl SkCanvas:
     # ---- Transform ----
 
     fn translate(dx: f64, dy: f64) -> SkCanvas:
-        if val rec = self.recorder:
-            val packed = SkRect(left: dx, top: dy, right: 1.0, bottom: 1.0)
-            rec.record(SkPictureOp(kind: SkPictureOpKind.SetMatrix, rect: packed, rx: 0.0, ry: 0.0, path: None, image: None, paint: sk_paint_new(), x: dx, y: dy))
-        self
+        val next_ctm = self.ctm.mul(Matrix3x3.translate(dx, dy))
+        _canvas_record_set_matrix(self.recorder, next_ctm, dx, dy)
+        SkCanvas(
+            width: self.width,
+            height: self.height,
+            save_count: self.save_count,
+            recorder: self.recorder,
+            ctm: next_ctm,
+            matrix_stack: self.matrix_stack
+        )
 
     fn scale(sx: f64, sy: f64) -> SkCanvas:
-        if val rec = self.recorder:
-            val packed = SkRect(left: 0.0, top: 0.0, right: sx, bottom: sy)
-            rec.record(SkPictureOp(kind: SkPictureOpKind.SetMatrix, rect: packed, rx: 0.0, ry: 0.0, path: None, image: None, paint: sk_paint_new(), x: 0.0, y: 0.0))
-        self
+        val next_ctm = self.ctm.mul(Matrix3x3.scale(sx, sy))
+        _canvas_record_set_matrix(self.recorder, next_ctm, 0.0, 0.0)
+        SkCanvas(
+            width: self.width,
+            height: self.height,
+            save_count: self.save_count,
+            recorder: self.recorder,
+            ctm: next_ctm,
+            matrix_stack: self.matrix_stack
+        )
 
     fn rotate(deg: f64) -> SkCanvas:
-        if val rec = self.recorder:
-            val packed = SkRect(left: 0.0, top: 0.0, right: 1.0, bottom: 1.0)
-            rec.record(SkPictureOp(kind: SkPictureOpKind.SetMatrix, rect: packed, rx: deg, ry: 0.0, path: None, image: None, paint: sk_paint_new(), x: 0.0, y: 0.0))
-        self
+        val next_ctm = self.ctm.mul(Matrix3x3.rotate_degrees(deg))
+        _canvas_record_set_matrix(self.recorder, next_ctm, 0.0, 0.0)
+        SkCanvas(
+            width: self.width,
+            height: self.height,
+            save_count: self.save_count,
+            recorder: self.recorder,
+            ctm: next_ctm,
+            matrix_stack: self.matrix_stack
+        )
 
     fn concat(matrix: Matrix3x3) -> SkCanvas:
-        # WHY: Lossy encoding — packs (tx, ty, scale_x, scale_y) into the
-        # SkRect slots of a SetMatrix op. Drops rotation/shear components.
-        # Future TODO: full 3x3 encoding in SkPictureOp.
-        if val rec = self.recorder:
-            val packed = SkRect(
-                left: matrix.tx(),
-                top: matrix.ty(),
-                right: matrix.scale_x(),
-                bottom: matrix.scale_y()
-            )
-            val op = SkPictureOp(
-                kind: SkPictureOpKind.SetMatrix,
-                rect: packed,
-                rx: 0.0,
-                ry: 0.0,
-                path: None,
-                image: None,
-                paint: sk_paint_new(),
-                x: 0.0,
-                y: 0.0
-            )
-            rec.record(op)
-        self
+        val next_ctm = self.ctm.mul(matrix)
+        _canvas_record_set_matrix(self.recorder, next_ctm, 0.0, 0.0)
+        SkCanvas(
+            width: self.width,
+            height: self.height,
+            save_count: self.save_count,
+            recorder: self.recorder,
+            ctm: next_ctm,
+            matrix_stack: self.matrix_stack
+        )
 
     fn set_matrix(matrix: Matrix3x3) -> SkCanvas:
-        # WHY: Lossy encoding — drops rotation component. Future TODO: full
-        # 3x3 encoding in SkPictureOp.
-        if val rec = self.recorder:
-            val packed = SkRect(
-                left: matrix.tx(),
-                top: matrix.ty(),
-                right: matrix.scale_x(),
-                bottom: matrix.scale_y()
-            )
-            val op = SkPictureOp(
-                kind: SkPictureOpKind.SetMatrix,
-                rect: packed,
-                rx: 0.0,
-                ry: 0.0,
-                path: None,
-                image: None,
-                paint: sk_paint_new(),
-                x: 0.0,
-                y: 0.0
-            )
-            rec.record(op)
-        self
+        _canvas_record_set_matrix(self.recorder, matrix, 0.0, 0.0)
+        SkCanvas(
+            width: self.width,
+            height: self.height,
+            save_count: self.save_count,
+            recorder: self.recorder,
+            ctm: matrix,
+            matrix_stack: self.matrix_stack
+        )
 
     fn reset_matrix() -> SkCanvas:
-        if val rec = self.recorder:
-            val identity = SkRect(left: 0.0, top: 0.0, right: 1.0, bottom: 1.0)
-            rec.record(SkPictureOp(kind: SkPictureOpKind.SetMatrix, rect: identity, rx: 0.0, ry: 0.0, path: None, image: None, paint: sk_paint_new(), x: 0.0, y: 0.0))
-        self
+        val id = Matrix3x3.identity()
+        _canvas_record_set_matrix(self.recorder, id, 0.0, 0.0)
+        SkCanvas(
+            width: self.width,
+            height: self.height,
+            save_count: self.save_count,
+            recorder: self.recorder,
+            ctm: id,
+            matrix_stack: self.matrix_stack
+        )
 
     # ---- Clip ----
 
@@ -171,17 +332,18 @@ impl SkCanvas:
     # ---- Draw ----
 
     fn clear(color: SkColor) -> SkCanvas:
-        # Treat clear as a full-canvas DrawRect with a solid color paint
+        # Treat clear as a full-canvas DrawRect with a solid color paint in Src mode
         val bounds = SkRect(left: 0.0, top: 0.0, right: self.width.to_f64(), bottom: self.height.to_f64())
         if val rec = self.recorder:
-            val p = sk_paint_new()
+            val p = sk_paint_fill(color).with_blend_mode(SkBlendMode.Src).with_anti_alias(false)
             rec.record(sk_picture_op_draw_rect(bounds, p))
         self
 
     fn draw_color(color: SkColor, blend_mode: SkBlendMode) -> SkCanvas:
         val bounds = SkRect(left: 0.0, top: 0.0, right: self.width.to_f64(), bottom: self.height.to_f64())
         if val rec = self.recorder:
-            rec.record(sk_picture_op_draw_rect(bounds, sk_paint_new()))
+            val p = sk_paint_fill(color).with_blend_mode(blend_mode).with_anti_alias(false)
+            rec.record(sk_picture_op_draw_rect(bounds, p))
         self
 
     fn draw_paint(paint: SkPaint) -> SkCanvas:
@@ -196,7 +358,11 @@ impl SkCanvas:
 
     fn draw_oval(oval: SkRect, paint: SkPaint) -> SkCanvas:
         if val rec = self.recorder:
-            rec.record(SkPictureOp(kind: SkPictureOpKind.DrawOval, rect: oval, rx: 0.0, ry: 0.0, path: None, image: None, paint: paint, x: 0.0, y: 0.0))
+            val rx = (oval.right - oval.left) * 0.5
+            val ry = (oval.bottom - oval.top) * 0.5
+            val cx = (oval.left + oval.right) * 0.5
+            val cy = (oval.top + oval.bottom) * 0.5
+            rec.record(SkPictureOp(kind: SkPictureOpKind.DrawOval, rect: oval, rx: rx, ry: ry, path: None, image: None, paint: paint, x: cx, y: cy))
         self
 
     fn draw_rrect(rrect: SkRRect, paint: SkPaint) -> SkCanvas:
@@ -205,9 +371,11 @@ impl SkCanvas:
         self
 
     fn draw_circle(cx: f64, cy: f64, r: f64, paint: SkPaint) -> SkCanvas:
+        if r <= 0.0:
+            return self
         val oval = SkRect(left: cx - r, top: cy - r, right: cx + r, bottom: cy + r)
         if val rec = self.recorder:
-            rec.record(SkPictureOp(kind: SkPictureOpKind.DrawOval, rect: oval, rx: 0.0, ry: 0.0, path: None, image: None, paint: paint, x: 0.0, y: 0.0))
+            rec.record(SkPictureOp(kind: SkPictureOpKind.DrawOval, rect: oval, rx: r, ry: r, path: None, image: None, paint: paint, x: cx, y: cy))
         self
 
     fn draw_line(x0: f64, y0: f64, x1: f64, y1: f64, paint: SkPaint) -> SkCanvas:
@@ -234,9 +402,16 @@ impl SkCanvas:
         self
 
     fn draw_text_blob(blob: SkTextBlob, x: f64, y: f64, paint: SkPaint) -> SkCanvas:
-        val bounds = SkRect(left: x, top: y - blob.bounds().height(), right: x + blob.bounds().width(), bottom: y)
+        val b = blob.bounds()
+        val bounds = if blob.is_empty():
+            SkRect(left: x, top: y, right: x, bottom: y)
+        else:
+            SkRect(left: x + b.left, top: y + b.top, right: x + b.right, bottom: y + b.bottom)
+        val glyph_count = blob.glyph_count().to_f64()
+        val font_sz = if blob.runs.len() > 0: blob.runs[0].font.size else: 0.0
         if val rec = self.recorder:
-            rec.record(SkPictureOp(kind: SkPictureOpKind.DrawTextBlob, rect: bounds, rx: 0.0, ry: 0.0, path: None, image: None, paint: paint, x: x, y: y))
+            val payload_img = sk_pack_text_blob_op_image(blob)
+            rec.record(SkPictureOp(kind: SkPictureOpKind.DrawTextBlob, rect: bounds, rx: glyph_count, ry: font_sz, path: None, image: Some(payload_img), paint: paint, x: x, y: y))
         self
 
     # Convenience wrapper: draw a raw text string at (x, y) using the given font and paint.
@@ -245,8 +420,17 @@ impl SkCanvas:
         val blob = sk_text_blob_make_from_text(str, font)
         self.draw_text_blob(blob, x, y, paint)
 
+    fn draw_text(str: text, x: f64, y: f64, font: SkFont, paint: SkPaint) -> SkCanvas:
+        self.draw_string(str, x, y, font, paint)
+
     fn draw_picture(picture: SkPicture, matrix: Matrix3x3?, paint: SkPaint?) -> SkCanvas:
         if val rec = self.recorder:
+            if val m = matrix:
+                var c = self.save().concat(m)
+                for op in picture.ops:
+                    rec.record(op)
+                c = c.restore()
+                return self
             for op in picture.ops:
                 rec.record(op)
         self
@@ -265,4 +449,4 @@ impl SkCanvas:
         self.height
 
     fn local_to_device() -> Matrix3x3:
-        Matrix3x3.identity()
+        self.ctm

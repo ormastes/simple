@@ -17,11 +17,44 @@
 # `__simple_main` -> the whole native-smoke-matrix went 0/19. Consolidating
 # to one function removes the drift class entirely.
 
+fn _module_path_naming_char_index_of_byte(value: text, byte_index: i64) -> i64:
+    # `substring` is character-indexed while this scan walks bytes: count the
+    # UTF-8 lead bytes before byte_index (continuation bytes are 10xxxxxx).
+    # One multibyte char before "/src/" shifted every slice by one
+    # ("rc/app/cli/main.spl", stage2_module_path_naming fixture, 2026-11-12).
+    var chars = 0
+    var b = 0
+    while b < byte_index:
+        val byte = value.byte_at(b)
+        if byte < 128 or byte >= 192:
+            chars = chars + 1
+        b = b + 1
+    chars
+
+fn _module_path_naming_suffix_after(value: text, needle: text) -> text:
+    # `needle` is "/src/"-shaped; the suffix must start with it minus the
+    # leading "/". `substring` units differ by lane (pure-Simple native and the
+    # seed interpreter slice bytes, the seed JIT/native lane slices characters;
+    # bug substring_units_differ_by_execution_lane_2026-11-12), so slice at the
+    # byte index, verify against the needle, and fall back to the character
+    # index. "" means the needle is absent.
+    val byte_index = _module_path_naming_text_index_of(value, needle)
+    if byte_index < 0:
+        return ""
+    val expected = needle.substring(1)
+    val by_bytes = value.substring(byte_index + 1)
+    if by_bytes.starts_with(expected):
+        return by_bytes
+    val by_chars = value.substring(_module_path_naming_char_index_of_byte(value, byte_index) + 1)
+    if by_chars.starts_with(expected):
+        return by_chars
+    ""
+
 fn _module_path_naming_text_index_of(value: text, needle: text) -> i64:
     if needle == "":
         return 0
-    val value_len = value.len()
-    val needle_len = needle.len()
+    val value_len: i64 = value.byte_len()
+    val needle_len: i64 = needle.byte_len()
     if needle_len > value_len:
         return -1
     var start = 0
@@ -76,7 +109,7 @@ fn _module_path_naming_strip_numbered_dirs(path: text) -> text:
     while part_index < parts.len():
         val part = parts[part_index]
         var prefix_len = 0
-        val part_len = part.len()
+        val part_len = part.byte_len()
         while part_index + 1 < parts.len() and prefix_len < part_len and prefix_len < 3:
             val code = part.char_code_at(prefix_len)
             if code < 48 or code > 57:
@@ -121,7 +154,7 @@ fn _module_path_naming_strip_numbered_dirs(path: text) -> text:
     logical_parts.join("/")
 
 pub fn module_source_relative_path(path: text) -> text:
-    """Repo-relative source path (`src/...` / `examples/...`) from any
+    """Repo-relative source path (`src/...` / `examples/...` / `test/...`) from any
     spelling of it: `../`/`./` prefixes and everything before an absolute
     `/src/` or `/examples/` are dropped, so a worktree, a frozen SCV snapshot
     (`build/scv_snapshots/<revision>/src/...`) and a bare relative path all
@@ -136,12 +169,23 @@ pub fn module_source_relative_path(path: text) -> text:
         mod_path = mod_path.substring(3)
     if mod_path.starts_with("./"):
         mod_path = mod_path.substring(2)
-    val absolute_src = _module_path_naming_text_index_of(mod_path, "/src/")
-    if absolute_src >= 0:
-        return mod_path.substring(absolute_src + 1)
-    val absolute_examples = _module_path_naming_text_index_of(mod_path, "/examples/")
-    if absolute_examples >= 0:
-        return mod_path.substring(absolute_examples + 1)
+    # Already repo-relative: do NOT search for an inner `/src/` -- a stdlib
+    # package may itself contain a `src/` dir (src/lib/nogc_sync_mut/src/...)
+    # and cutting there would rename the module. Absolute paths anchor at the
+    # FIRST `/src/`, i.e. the repo root.
+    if mod_path.starts_with("src/") or mod_path.starts_with("examples/") or mod_path.starts_with("test/"):
+        return mod_path
+    val after_src = _module_path_naming_suffix_after(mod_path, "/src/")
+    if after_src != "":
+        return after_src
+    val after_examples = _module_path_naming_suffix_after(mod_path, "/examples/")
+    if after_examples != "":
+        return after_examples
+    # Entries under test/ (fixtures, smoke binaries) anchor last, so an
+    # absolute path that also holds /src/ or /examples/ keeps its old name.
+    val after_test = _module_path_naming_suffix_after(mod_path, "/test/")
+    if after_test != "":
+        return after_test
     mod_path
 
 pub fn module_relative_name_from_path(path: text, relative_name: text) -> text:
@@ -208,6 +252,22 @@ pub fn module_logical_name_cache_warm(path: text):
     val _retained = module_logical_name_from_path(path)
     _module_logical_name_cache_retaining = false
 
+fn _module_path_naming_sdn_is_file_suffix(mod_path: text) -> bool:
+    """Whether a trailing `.sdn` is a file extension rather than the leaf of an
+    already-dotted logical module name. `compiler.backend.backend.sdn` is the
+    logical name of `70.backend/backend/sdn.spl`; stripping its `.sdn` renamed
+    imported impl methods to `compiler.backend.backend.SdnBackendImpl::m` and
+    left `SdnBackendImpl.process_module` undefined at link (waf-5, bug
+    stage2_facade_sdn_leaf_method_mangling_2026-11-02). A path (has a
+    separator) or a bare `name.sdn` file keeps the old stripping."""
+    if mod_path.contains("/") or mod_path.contains("\\"):
+        return true
+    val stem = mod_path.substring(0, mod_path.byte_len() - 4)
+    not stem.contains(".")
+
+fn _module_path_naming_portable_code(code: i64) -> bool:
+    (code >= 97 and code <= 122) or (code >= 65 and code <= 90) or (code >= 48 and code <= 57) or code == 95 or code == 46 or code == 47
+
 fn _module_logical_name_from_path_uncached(path: text) -> text:
     """Derive the dotted logical module name (e.g. `_wallB_mod_a`) from a
     source path (e.g. `src/_wallB_mod_a.spl`). Under `SIMPLE_BOOTSTRAP=1`,
@@ -226,10 +286,19 @@ fn _module_logical_name_from_path_uncached(path: text) -> text:
     # Stage 2 native currently miscompiles deletion replacement and can turn
     # the entire path into "". These are suffixes, so slice them explicitly.
     if mod_path.ends_with(".spl"):
-        mod_path = mod_path.substring(0, mod_path.len() - 4)
-    elif mod_path.ends_with(".sdn"):
-        mod_path = mod_path.substring(0, mod_path.len() - 4)
+        mod_path = mod_path.substring(0, mod_path.byte_len() - 4)
+    elif mod_path.ends_with(".sdn") and _module_path_naming_sdn_is_file_suffix(mod_path):
+        mod_path = mod_path.substring(0, mod_path.byte_len() - 4)
     mod_path = _module_path_naming_strip_numbered_dirs(mod_path)
+    # Keep the original spelling when every byte already belongs to the
+    # portable ASCII alphabet. Rebuilding each prefix retains quadratic text
+    # storage in the registry freeze scope.
+    val byte_count = mod_path.byte_len()
+    var pos = 0
+    while pos < byte_count and _module_path_naming_portable_code(mod_path.byte_at(pos) as i64):
+        pos = pos + 1
+    if pos == byte_count:
+        return mod_path.replace("/", ".")
     var portable = ""
     # WORKAROUND: `for ch in <text>` yields a corrupted loop element in the
     # seed interpreter and in pure-Simple-compiled native code, classifying
@@ -237,14 +306,96 @@ fn _module_logical_name_from_path_uncached(path: text) -> text:
     # stage4 collision. Explicit char_code_at indexing decodes correctly
     # (see doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md).
     var _san_i = 0
-    val _san_n = mod_path.len()
+    val _san_n = mod_path.byte_len()
     while _san_i < _san_n:
         val _san_code = mod_path.char_code_at(_san_i)
-        val keep = (_san_code >= 97 and _san_code <= 122) or (_san_code >= 65 and _san_code <= 90) or (_san_code >= 48 and _san_code <= 57) or _san_code == 95 or _san_code == 46 or _san_code == 47
-        if keep:
+        if _module_path_naming_portable_code(_san_code):
             portable = portable + mod_path.char_at(_san_i)
         else:
             portable = portable + "_"
         _san_i = _san_i + 1
     mod_path = portable
     mod_path.replace("/", ".")
+
+fn _module_canonical_segment_is_tier(seg: text) -> bool:
+    """True for an all-digit dotted segment. An empty segment is NOT a tier."""
+    if seg.len() == 0:
+        return false
+    var i = 0
+    while i < seg.byte_len():
+        val code = seg.char_code_at(i)
+        if code < 48 or code > 57:
+            return false
+        i = i + 1
+    true
+
+pub fn module_canonical_fold_name(module_name: text) -> text:
+    """Fold every dotted spelling of ONE physical file onto a single name:
+    drop all-digit (tier) segments and fold a leading `std.` to `lib.`.
+    Single owner for the driver's module canonicalization AND the native
+    entry predicate (`llvm_module_is_native_entry`): an entry whose path has a
+    dotted numeric directory (`test/s3sanity/dot.1/hello.spl`) is renamed by
+    the driver, so the predicate must compare folded names or no
+    `__simple_main` is emitted (bug
+    native_build_entry_main_undefined_when_source_path_has_dot_2026_10_20)."""
+    var segs: [text] = []
+    for seg in module_name.split("."):
+        if _module_canonical_segment_is_tier(seg):
+            continue
+        segs = segs.push(seg)
+    val canonical = segs.join(".")
+    if canonical == "std":
+        return "lib"
+    if canonical.starts_with("std."):
+        return "lib." + canonical.substring(4)
+    canonical
+
+# One ordered compatibility mapping for checkout and admitted-root import
+# lookup (driver_entry_closure_core) and go-to-end edge binding: the repo-
+# relative directories a `compiler.*`/`linker` import may name, in probe order.
+# Full candidates must be exhausted before interpreting a suffix as an item.
+pub fn module_numbered_compiler_candidates_v1(module_path: text) -> [text]:
+    # The exact compiler.mir_opt facade is intentionally owned by src/lib.
+    if module_path == "compiler.mir_opt": return []
+    val is_numbered = module_path.starts_with("compiler.") or module_path == "linker" or module_path.starts_with("linker.")
+    if not is_numbered: return []
+    var candidates: [text] = []
+    val mappings: [[text]] = [
+        ["compiler.common", "compiler/00.common"],
+        ["compiler.core", "compiler/10.frontend/core"],
+        ["compiler.frontend", "compiler/10.frontend"],
+        ["compiler.blocks.blocks", "compiler/15.blocks/blocks"],
+        ["compiler.blocks", "compiler/15.blocks/blocks"],
+        ["compiler.hir", "compiler/20.hir"],
+        ["compiler.traits", "compiler/25.traits"],
+        ["compiler.types", "compiler/30.types"],
+        ["compiler.semantics", "compiler/35.semantics"],
+        ["compiler.mir", "compiler/50.mir"],
+        ["compiler.borrow", "compiler/55.borrow"],
+        ["compiler.mir_opt", "compiler/60.mir_opt/mir_opt"],
+        # Parent level owns the module shims (optimization_passes, optimizer_manifest,
+        # optimizer_plugin, optimizer_kernel_contract, mir_opt_integration, and the
+        # _OptimizationPasses part package) -- files that exist ONLY here. Without
+        # this candidate, compiler.mir_opt.<name> for these fell through to the
+        # src/lib stub facade (all-zero declaration arrays; cycle-38 frontier:
+        # 3x 'no exported item' + consequences, surfaces idx 871/2183/2415).
+        # Listed AFTER the nested layout so every currently-resolving first-hit
+        # is preserved (the two levels share no file names).
+        ["compiler.mir_opt", "compiler/60.mir_opt"],
+        ["compiler.loader", "compiler/99.loader"],
+        ["compiler.backend", "compiler/70.backend"],
+        ["compiler.driver", "compiler/80.driver"],
+        ["compiler.shb", "compiler/80.driver/shb"],
+        ["compiler.interpreter", "compiler/95.interp/interpreter"],
+        ["linker", "compiler/70.backend/linker"],
+        ["compiler.backend", "compiler/70.backend/backend"],
+        ["compiler.loader", "compiler/99.loader/loader"]
+    ]
+    for mapping in mappings:
+        val prefix = mapping[0]
+        if module_path == prefix or module_path.starts_with(prefix + "."):
+            var relative = mapping[1]
+            if module_path.byte_len() > prefix.byte_len():
+                relative = relative + "/" + module_path.substring(prefix.byte_len() + 1).replace(".", "/")
+            candidates = candidates.push(relative)
+    candidates

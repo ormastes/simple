@@ -1,9 +1,11 @@
 # Rust seed's `rt_str_hash`/`rt_hash_text` is djb2, not FNV-1a — third lane divergence
 
-- **Status:** OPEN — filed as the promised standalone follow-up from
-  `doc/08_tracking/bug/rt_str_hash_truncated_fnv_offset_basis_bootstrap_lane_2026-08-31.md`,
-  whose "Status" line says the divergence "stays OPEN as its own follow-up" but
-  which did not itself carry a separate record. This file is that record.
+- **Status:** FIXED (2026-11-05 reconciliation). Merged PR #483 changed the
+  Rust runtime's `rt_hash_text` to FNV-1a-64, and `rt_str_hash` delegates to
+  that implementation (`src/compiler_rust/runtime/src/value/collections.rs`).
+  Its four-lane, four-input comparison passed with zero divergence, and the
+  same implementation remains present on `release/1.0.0`. The historical
+  analysis below records the original defect and scope.
 
 ## What was fixed (2026-08-31, `d6058da379c`, not this record)
 

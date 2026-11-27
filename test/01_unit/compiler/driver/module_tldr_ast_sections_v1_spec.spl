@@ -1,0 +1,31 @@
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.driver.cache.module_tldr_ast_sections_v1.{module_tldr_sections_of_module_v1,
+    module_tldr_sections_at_anchors_v1}
+
+val SRC: text = "pub struct Point:\n    x: i64\n\n@inline\nfn twice(a: i64) -> i64:\n    a * 2\n\nfn first<T>(xs: [T]) -> T:\n    xs[0]\n\nfn plain(a: i64) -> i64:\n    a + 1\n"
+
+describe "AST-anchored TLDR sections":
+    it "orders and de-duplicates anchors and skips attribute lines":
+        val s = module_tldr_sections_at_anchors_v1(SRC, [8, 1, 4, 1, 0], ["generic", "layout", "inline", "layout", "const"])
+        expect(s.len()).to_equal(3)
+        expect(s[0]).to_equal("layout|pub struct Point:\n    x: i64")
+        expect(s[1]).to_equal("inline|fn twice(a: i64) -> i64:\n    a * 2")
+        expect(s[2]).to_equal("generic|fn first<T>(xs: [T]) -> T:\n    xs[0]")
+
+    it "ignores anchors on indented lines":
+        expect(module_tldr_sections_at_anchors_v1(SRC, [2], ["layout"]).len()).to_equal(0)
+
+    it "derives sections from the real parsed module":
+        val parsed = parse_full_frontend(SRC, "tldr_ast_fixture.spl", "tldr_ast_fixture", Logger(level: 0))
+        val s = module_tldr_sections_of_module_v1(parsed, SRC)
+        var kinds: [text] = []
+        for entry in s:
+            kinds.push(entry.substring(0, entry.index_of("|")))
+        expect(kinds.contains("layout")).to_equal(true)
+        expect(kinds.contains("generic")).to_equal(true)
+        expect(kinds.contains("inline")).to_equal(true)
+        # The non-generic, non-inline body is never carried.
+        for entry in s:
+            expect(entry.contains("a + 1")).to_equal(false)

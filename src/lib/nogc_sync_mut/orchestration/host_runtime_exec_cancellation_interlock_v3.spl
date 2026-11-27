@@ -1,0 +1,42 @@
+# Launch interlock only: no cancellation qualification, mutation or native effect.
+# Caller retains the sole current journal writer and trusted stable ancestors.
+# Path identity is an instantaneous observation, not a dirfd/hostile-rename claim.
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_lookup_v2}
+use std.nogc_sync_mut.io.path_identity.path_entry_present
+use std.nogc_sync_mut.io.retained_file.retained_directory_open_trusted_v1
+use std.common.crypto.sha256.sha256_text
+
+pub fn host_runtime_exec_cancellation_clear_v3(journal: DistributedOperationJournalV2,
+        child_operation: OperationEnvelopeV2) -> Result<bool, text>:
+    @when(os="linux"):
+    val supported = true
+    @else:
+    val supported = false
+    @end
+    if not supported: return Err("host-exec-cancel-interlock-host-unsupported")
+    val envelope = distributed_encode_operation_v2(child_operation)?
+    if child_operation.operation != "host_runtime_exec_v3": return Err("host-exec-cancel-interlock-child-required")
+    # Lookup checks the actual writer lease/CURRENT even for a missing operation.
+    val row = distributed_operation_journal_lookup_v2(journal, child_operation.id)
+    if row.is_ok():
+        if row.unwrap().envelope != envelope: return Err("host-exec-cancel-interlock-operation-mismatch")
+        if row.unwrap().state != "admitted": return Err("host-exec-cancel-interlock-admitted-required")
+    elif row.unwrap_err() != "OPERATION_NOT_FOUND":
+        return Err(row.unwrap_err())
+    val directory = journal.root + "/host-runtime-exec-no-begin-cancellations"
+    # Unlike file_exists, only Ok(false) proves observed ENOENT under a stable
+    # existing parent; dangling links and inaccessible/indeterminate entries
+    # cannot be mistaken for an absent cancellation intent.
+    if not path_entry_present(directory)?: return Ok(true)
+    val opened = retained_directory_open_trusted_v1(directory)?
+    var owner = opened
+    val present = path_entry_present(directory + "/" + sha256_text(child_operation.id) + ".sdn")
+    val closed = owner.close()
+    # Linux close consumes this descriptor even on failure. Report uncertainty;
+    # never retry an old descriptor or convert a failed close into clearance.
+    if not closed: return Err("host-exec-cancel-interlock-directory-close")
+    if present.is_err(): return Err(present.unwrap_err())
+    if present.unwrap(): return Err("host-exec-begin-cancellation-pending")
+    Ok(true)

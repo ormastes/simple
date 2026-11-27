@@ -1,6 +1,6 @@
 # Reading a class element out of a `[Class]` field returns a COPY; `me`-method mutation is lost
 
-- **Status:** OPEN
+- **Status:** FIXED — 2026-11-11 (lane interp8): engine aliasing fixed by the 2026-11-04 ClassInstance default-carrier flip (6c7b4db3d392; minimal repro prints `local=1 refetch=1 direct=1`; class_ref spec 4/4). The office acceptance spec was still RED because office fix 68596e901bd1 was dropped from `sheets_app.spl` by a later tree transplant — restored in this lane; cursor spec 6/6 and hidden-row nav spec 6/6 under the interpreter.
 - **Filed:** 2026-08-17
 - **Severity:** HIGH (silent wrong answer, no diagnostic)
 - **Engine:** tree-walk interpreter (`bin/simple test`, and `bin/simple run` with
@@ -198,3 +198,104 @@ Headline: 105 production `Value::Object` pattern sites in 37 files have no
 `class_instance_flip_uncovered_sites_2026-09-20.txt` (repo-root-relative
 paths). The blocker is verifiability, not effort — the tripwire in that
 record's step 1 is the prerequisite for any re-land.
+
+## 2026-11-03 — re-triaged, still deferred (seedinterp lane)
+
+Re-checked against origin/release/1.0.0: the class-value-identity plan
+(ClassInstance tripwire, `b7985a1ef56`) is step 1 of a multi-step value-model
+change (105 `Value::Object` sites). Option B (narrow `Expr::Index` aliasing)
+remains unsound as recorded above, so no narrow fix was attempted. Bug stays
+OPEN.
+
+## 2026-11-03 — design + red spec landed; fix is seed value-model work (verification-pending)
+
+Design: `doc/05_design/compiler/interpreter/class_instance_reference_storage_2026-11-03.md`.
+Spec (RED on tree-walk, 2 of 4 fail; tagged in-development):
+`test/01_unit/compiler/interpreter/class_ref/class_element_reference_spec.spl`.
+No narrow fix: needs `Value::ClassInstance` producers in the Rust seed + redeploy. Stays OPEN.
+
+## 2026-11-04 note (fix-classref lane): FIXED by the default flip
+
+`Value::ClassInstance` is the seed interpreter's default class carrier now
+(`SIMPLE_INTERP_CLASS_REF=0` opts out). `class_element_reference_spec` is 4/4 by
+default on the rebuilt seed (was 2/4) and its `@tag:in-development` is dropped.
+Coordinator owns the bug_db status change.
+
+## Note 2026-11-04 — sibling shape: nested array field push from another class's `me`
+
+Observed on the Windows Rust seed (`D:/dev/wt/seed/simple.exe`, release tip,
+class-ref semantics default): inside `me` of class A, `self.b.arr.push(x)`
+where `b: B` is a class-typed field and `arr: [T]` is B's array field is
+**dropped** by the tree-walk interpreter (`SIMPLE_EXECUTION_MODE=interpret`
+reproduces on a 20-line probe); the same statement persists when the module is
+JIT-compiled, and a scalar `self.b.n = v` persists in both. `self.b.touch()`
+where `touch` is a `me` on B that does `self.arr.push(x)` persists in both.
+Consequence: the JS engine's `JsInterpreter.set_object_property` lost every
+property write (5 of 6 JS-engine specs red). Worked around in the lib by
+routing the writes through `ObjectStore` `me` methods
+(`vm_object_store.spl: update_slot / append_slot / alloc_object`); the
+interpreter defect itself remains.
+
+## Note 2026-11-05 — nested class-field array push FIXED (interpreter root cause)
+
+Root cause: `place_is_live` (`interpreter/place.rs`) walked the parent hops with
+`step_ref`, which has no `Value::ClassInstance` arm (fields sit behind a lock).
+For `self.store.items.push(x)` the `self.store` hop is a ClassInstance, so the
+place was reported "not live" and `try_place_receiver_method_call` /
+the statement-position kernel declined; the mutator then ran on a throwaway
+copy of the array. `self.store.items[0] = x` worked because `write_through`
+already handles the ClassInstance hop. Fix: `place_is_live` now walks hops with
+`projections_live`, which reads the field through the instance (Arc-handle
+clone) and continues on the owned value; `write_place` then lands the result.
+Regression spec: `test/01_unit/compiler/interpreter/nested_class_field_array_mutation_spec.spl`.
+
+## 2026-11-06 re-verification
+
+Seed from `f1390d48254`: `class_element_reference_spec` 4/4 by default (2/4
+with `SIMPLE_INTERP_CLASS_REF=0`); list-element method, list-element alias,
+for-loop element, nested grid, `map`/`filter` result, slice, dict value and
+`Option` payload probes all share identity on the interpreter. Owner decision
+2026-11-06 confirms the direction (classes reference, structs value).
+
+## 2026-11-10 triage — SUPERSEDED (seed-smoke, lane p3-interp3 row 14)
+
+`bin/simple.exe test test/01_unit/compiler/interpreter/class_ref/class_element_reference_spec.spl`
+-> 4 total, 4 passed, 0 failed on the worktree seed (ClassInstance default
+carrier on). The 2026-11-04 default-flip note stands; this lane's row-16/row-18
+repros additionally confirm dict/list element reads of class values alias.
+Bug_db status change remains with the coordinator per the 2026-11-04 note.
+
+
+## 2026-11-11 triage — FIXED (lane interp8; code change in this lane)
+
+Two layers verified separately on the fresh worktree seed (build-commit
+`46fe8f6b6def`, `SIMPLE_LIB=src`, `--mode=interpreter --no-cache`):
+
+1. **Engine layer** (the defect this record tracks): FIXED by the
+   2026-11-04 ClassInstance default-carrier flip (`6c7b4db3d392` "fix(interp):
+   class reference semantics by default"). The record's 5-line minimal repro
+   (`build/p3fix-interp8/row3_minimal_repro.spl`,
+   `SIMPLE_EXECUTION_MODE=interpreter`) now prints `local=1 refetch=1
+   direct=1` — the unblock condition's first half.
+   `test/01_unit/compiler/interpreter/class_ref/class_element_reference_spec.spl`
+   is 4/4 under `--mode=interpreter`.
+
+2. **Office acceptance layer**: `test/01_unit/app/office/cursor_hidden_row_invariant_spec.spl`
+   was still RED 6/6, but NOT for the engine defect — the office-side fix
+   `68596e901bd1` ("fix(office): SheetsApp.navigate_to landed the cursor on
+   hidden rows", 2026-08-17) is an ancestor of HEAD, yet its hunk is absent
+   from `src/app/office/sheets/sheets_app.spl`: a later tree transplant
+   (merge `9e7e7a526edb` / the "transplant current main tree onto
+   release/1.0" commits) restored the pre-fix file. The current
+   `navigate_to` had no hidden-row skip at all (zero `hidden`/`skip`
+   occurrences in the file). Restored the exact `68596e901bd1` hunk in this
+   lane. After the restore, on the interpreter:
+   - `cursor_hidden_row_invariant_spec.spl` — 6 total, 6 passed
+   - `sheets_app_hidden_row_nav_spec.spl` — 6 total, 6 passed
+
+Blast-radius note for the coordinator: the same transplant may have dropped
+other app/office hunks. The sibling record
+`calc_cursor_hidden_row_awareness_divergence_2026-08-11.md` describes this
+same lost fix from the app-defect angle and may warrant its own status flip;
+a wider audit of `68596e901bd1`-era office fixes against the current tree is
+recommended (out of scope for this lane).

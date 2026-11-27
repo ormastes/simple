@@ -1,0 +1,135 @@
+# @req REQ-PUBVIEW-001 REQ-PUBVIEW-004 REQ-PUBVIEW-008 REQ-PUBVIEW-010 REQ-PUBVIEW-011 REQ-PUBVIEW-012
+# Raw LSP surface: documentSymbol defaults to the public view with the in-band
+# synthetic summary symbol; the level is set through initializationOptions or
+# workspace/executeCommand simple.setVisibility; hover on a non-symbol line and
+# simple/hiddenSummary answer with the same hint.
+# design: doc/05_design/app/source_view/public_view_by_feature_layer.md
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_handle_initialize_with_body, lsp_handle_execute_command,
+    lsp_handle_document_symbol, lsp_handle_hidden_summary, lsp_handle_hover, lsp_visibility_level,
+    lsp_visibility_last_view}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{lsp_document_sync_apply}
+use app.lsp.visibility_provider_v1.{lsp_install_visibility_provider_v1}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_text_or,
+    json_value_items, json_value_serialize, json_value_object_from}
+
+val X_CORE = "test/fixtures/mdsoc_pubview/feature_x/10.core/core.spl"
+var X_CORE_OPEN = false
+
+fn ensure_x_core_open():
+    if X_CORE_OPEN: return
+    lsp_install_visibility_provider_v1()
+    val source = file_read(X_CORE)
+    val document = json_value_object_from([("uri", JsonValue.Str("file://" + X_CORE)),
+        ("languageId", JsonValue.Str("simple")), ("version", JsonValue.Int(1)),
+        ("text", JsonValue.Str(source))])
+    val body = json_value_serialize(json_value_object_from([("textDocument", document)]))
+    expect(lsp_document_sync_apply("textDocument/didOpen", body)).to_equal(true)
+    X_CORE_OPEN = true
+
+fn doc_body(extra: text) -> text:
+    ensure_x_core_open()
+    "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"textDocument/documentSymbol\",\"params\":{\"textDocument\":{\"uri\":\"file://" + X_CORE + "\"}" + extra + "}}"
+
+fn result_of(reply: text) -> JsonValue:
+    json_value_field(json_parse_value_strict(reply).unwrap(), "result")
+
+fn names(entries: [JsonValue]) -> [text]:
+    var out: [text] = []
+    for entry in entries:
+        val name = json_value_text_or(json_value_field(entry, "name"), "")
+        if not name.starts_with("⋯"): out.push(name)
+    out
+
+fn set_level(level: text):
+    lsp_handle_execute_command("0", "{\"params\":{\"command\":\"simple.setVisibility\",\"arguments\":[\"" + level + "\"]}}")
+
+fn hint_of(entries: [JsonValue]) -> text:
+    for entry in entries:
+        val name = json_value_text_or(json_value_field(entry, "name"), "")
+        if name.starts_with("⋯"): return name
+    ""
+
+describe "documentSymbol public view":
+    it "defaults to public with the synthetic hint symbol":
+        # @capture(document_symbol): default reply on the fixture file
+        set_level("public")
+        val entries = json_value_items(result_of(lsp_handle_document_symbol("7", doc_body(""))))
+        expect(names(entries)).to_equal(["x_core_api"])
+        val hint = hint_of(entries)
+        expect(hint.starts_with("⋯ 3 hidden")).to_equal(true)
+        expect(hint.contains("initializationOptions.simple.visibility=\"feature_private\"")).to_equal(true)
+
+    it "a per-request simpleVisibility reveals that level":
+        set_level("public")
+        val entries = json_value_items(result_of(lsp_handle_document_symbol("8", doc_body(",\"simpleVisibility\":\"layer_private\""))))
+        expect(names(entries)).to_equal(["x_core_api", "x_core_shared", "XCoreType"])
+        expect(hint_of(entries).starts_with("⋯ 1 hidden (1 module_private fn)")).to_equal(true)
+
+describe "session visibility level":
+    it "simple.setVisibility changes the session default and documentSymbol follows":
+        step("executeCommand with a valid level")
+        val reply = lsp_handle_execute_command("9", "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"workspace/executeCommand\",\"params\":{\"command\":\"simple.setVisibility\",\"arguments\":[\"all\"]}}")
+        expect(json_value_text_or(json_value_field(result_of(reply), "visibility"), "")).to_equal("all")
+        expect(lsp_visibility_level()).to_equal("all")
+        step("documentSymbol now lists everything and carries no summary")
+        val entries = json_value_items(result_of(lsp_handle_document_symbol("10", doc_body(""))))
+        expect(names(entries).len()).to_equal(4)
+        expect(hint_of(entries)).to_equal("")
+        step("an unknown level is rejected and the session level is unchanged")
+        val bad = lsp_handle_execute_command("11", "{\"params\":{\"command\":\"simple.setVisibility\",\"arguments\":[\"secret\"]}}")
+        expect(bad.contains("\"error\"")).to_equal(true)
+        expect(lsp_visibility_level()).to_equal("all")
+
+    it "initializationOptions.simple.visibility sets the session level":
+        lsp_handle_initialize_with_body("1", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"initializationOptions\":{\"simple\":{\"visibility\":\"feature_private\"}}}}")
+        expect(lsp_visibility_level()).to_equal("feature_private")
+        val entries = json_value_items(result_of(lsp_handle_document_symbol("12", doc_body(""))))
+        expect(names(entries)).to_equal(["x_core_api", "x_core_shared"])
+        set_level("public")
+
+describe "hidden summary on hover and simple/hiddenSummary":
+    it "hover on the file header line answers with the hidden summary":
+        # @capture(hover): hover reply at line 0 of the fixture file
+        set_level("public")
+        val reply = lsp_handle_hover("13", "{\"textDocument\":{\"uri\":\"file://" + X_CORE + "\"},\"position\":{\"line\":0,\"character\":1}}")
+        val value = json_value_text_or(json_value_field(json_value_field(result_of(reply), "contents"), "value"), "")
+        expect(value.starts_with("⋯ 3 hidden")).to_equal(true)
+        expect(value.contains("visibility_default: public (mdsoc_boundary)")).to_equal(true)
+
+    it "simple/hiddenSummary returns the structured summary":
+        set_level("public")
+        val reply = lsp_handle_hidden_summary("14", "{\"params\":{\"textDocument\":{\"uri\":\"file://" + X_CORE + "\"}}}")
+        val summary = result_of(reply)
+        expect(json_value_field(summary, "hidden")).to_equal(JsonValue.Int(3))
+        expect(json_value_text_or(json_value_field(summary, "next_level"), "")).to_equal("feature_private")
+        expect(json_value_text_or(json_value_field(json_value_field(json_value_field(summary, "reveal"), "lsp"), "command"), "")).to_equal("simple.setVisibility")
+
+describe "session view auto-revert over raw LSP":
+    it "executeCommand states the view; 3 documentSymbols later the session is public again":
+        # @capture(view): view lines across the countdown
+        set_level("public")
+        step("switch to layer_private")
+        val reply = lsp_handle_execute_command("20", "{\"params\":{\"command\":\"simple.setVisibility\",\"arguments\":[\"layer_private\"]}}")
+        expect(json_value_text_or(json_value_field(result_of(reply), "view"), "")).to_start_with("view: layer_private (session)")
+        step("request 1 reveals the layer-private type")
+        val one = json_value_items(result_of(lsp_handle_document_symbol("21", doc_body(""))))
+        expect(names(one)).to_contain("XCoreType")
+        expect(lsp_visibility_last_view()).to_contain("auto-revert in 2 requests")
+        step("requests 2 and 3")
+        lsp_handle_document_symbol("22", doc_body(""))
+        lsp_handle_document_symbol("23", doc_body(""))
+        expect(lsp_visibility_last_view()).to_contain("auto-reverts to public after this request")
+        expect(lsp_visibility_level()).to_equal("public")
+        step("request 4 is public and notes the revert")
+        val four = json_value_items(result_of(lsp_handle_document_symbol("24", doc_body(""))))
+        expect(names(four)).to_equal(["x_core_api"])
+        expect(lsp_visibility_last_view()).to_equal("view: public (reverted from layer_private: auto-revert after 3 private requests)")
+
+    it "a per-request simpleVisibility leaves the session level unchanged":
+        set_level("public")
+        lsp_handle_document_symbol("25", doc_body(",\"simpleVisibility\":\"all\""))
+        expect(lsp_visibility_last_view()).to_equal("view: all (per-request override; session view: public)")
+        expect(lsp_visibility_level()).to_equal("public")

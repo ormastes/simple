@@ -1,0 +1,56 @@
+"""
+## Purpose and audience
+Purpose: Pin directory-boundary matching for cached test discovery.
+Audience: test runner maintainers.
+## Operator workflow
+Run with `simple test test/01_unit/app/test_runner_new/discovery_path_boundary_spec.spl`.
+"""
+use std.test_runner.test_runner_files.{path_is_within_directory}
+use std.test_runner.test_manifest.{TestManifest, manifest_covers, manifest_merge_roots}
+
+describe "Cached test discovery directory boundaries":
+    it "includes direct and nested specs under the requested directory":
+        val root = "test/fixtures/test_runner_discovery/target"
+        expect(path_is_within_directory("{root}/one_spec.spl", root)).to_equal(true)
+        expect(path_is_within_directory("{root}/nested/two_spec.spl", root)).to_equal(true)
+
+    it "normalizes a trailing separator and Windows separators":
+        expect(path_is_within_directory("test\\fixtures\\test_runner_discovery\\target\\case_spec.spl", "test/fixtures/test_runner_discovery/target/")).to_equal(true)
+
+    it "excludes a sibling directory that only shares the name prefix":
+        val root = "test/fixtures/test_runner_discovery/target"
+        expect(path_is_within_directory("{root}-shadow/leak_spec.spl", root)).to_equal(false)
+
+    it "excludes a sibling file that only shares the name prefix":
+        expect(path_is_within_directory("test/fixtures/test_runner_discovery/target-shadow_spec.spl", "test/fixtures/test_runner_discovery/target")).to_equal(false)
+
+    it "does not lexically collapse a parent segment across a possible symlink":
+        expect(path_is_within_directory("test/root/link/../target/inside_spec.spl", "test/root/target")).to_equal(false)
+
+    it "handles current-directory, filesystem-root, and empty-directory inputs":
+        expect(path_is_within_directory("test/example_spec.spl", ".")).to_equal(true)
+        expect(path_is_within_directory("../outside/example_spec.spl", ".")).to_equal(false)
+        expect(path_is_within_directory("/tmp/example_spec.spl", ".")).to_equal(false)
+        expect(path_is_within_directory("/tmp/example_spec.spl", "/")).to_equal(true)
+        # Empty historically means an unfiltered prefix and remains so.
+        expect(path_is_within_directory("/tmp/example_spec.spl", "")).to_equal(true)
+
+    it "normalizes manifest roots while keeping empty roots uncovered":
+        val filesystem_root = TestManifest(version: 1, scan_timestamp: 1, roots: ["/"], entries: [], sdoctest_entries: [])
+        expect(manifest_covers(filesystem_root, "/tmp/tests")).to_equal(true)
+        expect(manifest_covers(filesystem_root, "tmp/tests")).to_equal(false)
+
+        val windows_root = TestManifest(version: 1, scan_timestamp: 1, roots: ["test\\fixtures\\runner"], entries: [], sdoctest_entries: [])
+        expect(manifest_covers(windows_root, "test/fixtures/runner/cases")).to_equal(true)
+
+        val empty_root = TestManifest(version: 1, scan_timestamp: 1, roots: [""], entries: [], sdoctest_entries: [])
+        expect(manifest_covers(empty_root, "test")).to_equal(false)
+
+    it "deduplicates child roots under canonical filesystem and current roots":
+        val filesystem_roots = manifest_merge_roots(["/tmp/tests/unit"], ["//"])
+        expect(filesystem_roots.len()).to_equal(1)
+        expect(filesystem_roots[0]).to_equal("/")
+
+        val current_roots = manifest_merge_roots(["test/01_unit"], ["./"])
+        expect(current_roots.len()).to_equal(1)
+        expect(current_roots[0]).to_equal(".")

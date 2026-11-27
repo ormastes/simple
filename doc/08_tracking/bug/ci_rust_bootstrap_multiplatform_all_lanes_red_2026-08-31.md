@@ -5,7 +5,10 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-31
-**Status:** OPEN (2 of 5 causes fixed elsewhere; 3 remain)
+**Status:** SUPERSEDED 2026-11-11 — all four named causes verified fixed in
+workflow/source at the p3-boot11 tip (re-checked, not cited from prior
+lanes); a green CI run remains the only unproduced evidence (host-blocked
+here). Original report below retained for history.
 **Workflow:** `.github/workflows/rust-bootstrap-multiplatform.yml`
 **Run:** <https://github.com/ormastes/simple/actions/runs/33357844564>
 **Head:** `21bf278fd7eeee85d6fc0558bac09f5bd85a9ef7` (PR #148)
@@ -130,3 +133,97 @@ script), this workflow is the *only* thing standing between a
 non-host compile break and `main` — and it must therefore be kept green rather
 than routinely ignored.
 
+
+## Re-verification 2026-11-09 (p3-subj6 lane, worktree of origin/release/1.0.0)
+
+All four named causes are addressed in the current workflow/source on this
+branch; the workflow was rewritten since 2026-08-31:
+
+- **Cause A (MSVC `unistd.h`).** `src/runtime/startup/common/runtime_log_hosted.c:18-28`
+  now carries a genuine Win32 backend, exactly the demanded shape: `#if defined(_MSC_VER)
+  || defined(SPL_TOOLCHAIN_CLANGCL)` includes `<io.h>`/`<basetsd.h>`, typedefs
+  `ssize_t` from `SSIZE_T`, and `#define write _write`; the POSIX side keeps
+  `<unistd.h>`. Not a one-line include guard.
+- **Cause B (host-native Linux lane missing freetype).**
+  `.github/workflows/rust-bootstrap-multiplatform.yml:355` installs
+  `libfreetype6-dev libunwind-dev` on Linux (also line 862 for the cranelift lane).
+- **Cause D (MinGW cross, E0463).** The `cross` job matrix (lines 913-922) now
+  includes `x86_64-pc-windows-gnu` with `pkg: gcc-mingw-w64-x86-64`, a clang
+  selector for the GNU bootstrap (938-943), and — the direct E0463 fix —
+  `cd src/compiler_rust && rustup target add ${{ matrix.target }}` (line 936).
+- **Untriaged aarch64/riscv64 lanes.** Now first-class matrix rows
+  (914-919) with `gcc-aarch64-linux-gnu` / `gcc-riscv64-linux-gnu` and the same
+  `rustup target add`.
+- **Causes C/E.** Documented fixed in
+  `ci_red_on_every_branch_untracked_bin_simple_and_apple_libc_fields_2026-08-31.md`.
+
+Executed evidence (this lane cannot run cargo or CI):
+
+- `cc -fsyntax-only src/runtime/startup/common/runtime_log_hosted.c` -> clean
+  (POSIX side of the cause-A split).
+- The workflow YAML parses (`yaml.safe_load` OK).
+
+Not executed here: an actual CI run (no cargo/CI in this lane; causes B/D are
+runner-environment properties whose true proof is a green workflow run). The
+full-tree `check-c-runtime-compiles-push.shs` remains red on 18 pre-existing
+host-compile failures unrelated to this row (baremetal/darwin/windows selfcheck
+TUs); `runtime_log_hosted.c` is not among them.
+
+
+## Triage 2026-11-10 (p3-boot4 lane, assignment row 25)
+
+**Verdict: SUPERSEDED (corroborated at this lane's base).**
+
+Independently re-verified on the p3-boot4 worktree (base
+origin/release/1.0.0), confirming the 2026-11-09 p3-subj6 re-verification
+with current line numbers:
+
+- **Cause A (MSVC `unistd.h`).** `src/runtime/startup/common/runtime_log_hosted.c:18-28`
+  carries the genuine Win32 backend: `#if defined(_MSC_VER) ||
+  defined(SPL_TOOLCHAIN_CLANGCL)` includes `<io.h>`/`<basetsd.h>`, typedefs
+  `ssize_t` from `SSIZE_T`, and `#define write _write`; POSIX side keeps
+  `<unistd.h>`. Not a one-line include guard.
+- **Cause B (host-native Linux freetype).**
+  `.github/workflows/rust-bootstrap-multiplatform.yml:355` installs
+  `libfreetype6-dev libunwind-dev` (also `:862` for the cranelift lane).
+- **Cause D (MinGW cross E0463).** `:936`
+  `cd src/compiler_rust && rustup target add ${{ matrix.target }}` in the
+  cross job matrix (`:913-922`, includes `x86_64-pc-windows-gnu` with
+  `gcc-mingw-w64-x86-64`).
+- **Formerly untriaged aarch64/riscv64 lanes.** First-class matrix rows with
+  `gcc-aarch64-linux-gnu` / `gcc-riscv64-linux-gnu` and the same
+  `rustup target add`.
+
+Host-limited: true proof of causes B/D is a green CI run, which this Windows
+lane cannot execute; the fix-content evidence above is verified at a pinned
+base. No change made in this lane.
+
+## Triage 2026-11-11 (P3 boot11 lane, work/p3-boot11-20261111)
+
+**Verdict: SUPERSEDED (fix-content verified at this lane's base,
+origin/release/1.0.0 tip f01a4d15967e).** Independent source re-check, not a
+citation of the 2026-11-09/2026-11-10 notes:
+
+- **Cause A (MSVC `unistd.h`).** `src/runtime/startup/common/runtime_log_hosted.c:18-28`
+  carries the genuine Win32 backend (`#if defined(_MSC_VER) ||
+  defined(SPL_TOOLCHAIN_CLANGCL)` → `<io.h>`/`<basetsd.h>`, `ssize_t` from
+  `SSIZE_T`, `#define write _write`); POSIX side keeps `<unistd.h>`.
+- **Cause B (host-native Linux freetype).**
+  `.github/workflows/rust-bootstrap-multiplatform.yml:355` installs
+  `libfreetype6-dev libunwind-dev` (also `:862`).
+- **Cause D (MinGW cross E0463).** `:936`
+  `cd src/compiler_rust && rustup target add ${{ matrix.target }}` inside the
+  cross matrix (`:913-922`, `x86_64-pc-windows-gnu` with
+  `gcc-mingw-w64-x86-64`).
+- **Formerly untriaged aarch64/riscv64.** First-class matrix rows with
+  `gcc-aarch64-linux-gnu` / `gcc-riscv64-linux-gnu` and the same
+  `rustup target add`.
+- **Causes C/E.** Documented fixed in the sibling record.
+
+Host limitation unchanged: true proof of B/D is a green workflow run, which
+this Windows lane cannot trigger or observe; the fix-content evidence above
+is verified at a pinned base. No change made in this lane.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — boot11 verified all four causes fixed in workflow/source at tip (Win32 backend, freetype deps, rustup target add, aarch64/riscv64 rows). A green CI run is the only unproduced evidence and is host-blocked here.

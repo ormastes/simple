@@ -1,6 +1,9 @@
 # Stage 3 makes no observable progress in driver HIR lowering once the parse phase passes
 
-- **Status:** OPEN
+- **Status:** BLOCKED 2026-11-11 (lane p3-comp9; first triaged BLOCKED by lane boot19
+  same day) — disposition re-verified: reaches the identical infra wall, no
+  seed-binary or source-only settlement possible; boot19 verbatim grant intact
+  (re-recorded in the dated addendum below). Header flipped from "OPEN".
 - **Found:** 2026-09-21, aarch64-unknown-linux-gnu, `origin/main` 63fdcd9ea57
   plus the `bind` rename (`work/elf-bind-reserved-word-20260921`)
 - **Blocks:** Stage 3 self-host, and therefore Stage 4 and any redeploy
@@ -90,3 +93,74 @@ about 18 minutes and does not leave it.
 - The phase emits no progress line between `phase3:hir:imports:start` and the
   next module, so "no log growth" cannot by itself distinguish slow from stuck.
   That observability gap is worth closing independently of the root cause.
+
+## 2026-11-11 addendum (lane boot19) — BLOCKED (needs the sanctioned bootstrap; first status stays OPEN)
+
+Verdict: BLOCKED. This row cannot be settled with the Rust seed
+`bin/simple.exe`; it needs a self-hosted stage3 candidate to replay against.
+The 2026-11-04 bootstrap triage in `doc/08_tracking/bug/bug_db.sdn:8422`
+already adjudicated exactly this and prescribed the close-out procedure;
+boot19 re-confirms the routing and adds no new diagnosis.
+
+Exact grant command (from the 2026-11-04 adjudication, verbatim):
+
+1. Fresh worktree rebased on origin/release/1.0.0 with no other bootstrap running.
+2. `SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy`
+   (sanctioned bootstrap; yields `build/bootstrap/stage3/<triple>/simple` and
+   `stage3-command.transcript`).
+3. Replay the Symptom/Reproduction section of this doc with that stage3 binary
+   under a timeout (stage3 cmd form: `build/bootstrap/stage3/<triple>/simple
+   native-build <entry> ...`, or replay `stage3-command.transcript`) and
+   capture rc plus last 50 log lines.
+4. Append the observed rc and log here (and in `bug_db.sdn`) and set status
+   closed if it no longer reproduces.
+
+Context for the granted lane: several stage-2/3 blockers behind this
+record's snapshot have since been fixed (entry-closure char/byte import drop —
+`13d7746adc0e`; `local_symbol_index_slots` reset — merge `9e7e7a526edb`/PR
+#7597; SSA duplicate-def slotting —
+`src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl:206-228`;
+checked unwrap lowering — `e569d40037c7`), so there is a reasonable chance
+the spin no longer reproduces. Per the adjudication, that is for the granted
+bootstrap run to establish — not for seed-smoke or source inspection to
+claim. The observability gap this doc notes (no progress line between
+`phase3:hir:imports:start` and the next module) remains a legitimate
+follow-up for the same lane.
+
+## 2026-11-11 addendum (lane comp9) — BLOCKED confirmed, boot19 grant intact
+
+Lane comp9 re-verified this row during the P3 essential campaign and reached
+the identical infra wall as boot19 (same day): the spin lives in the
+self-hosted Stage-3 binary's driver HIR lowering; replaying it requires the
+sanctioned full bootstrap to produce `build/bootstrap/stage3/<triple>/simple`,
+which is forbidden in this lane (entry-closure native builds; ~10 min spec
+cap; no stage3 dir exists in the lane worktree). The tracked Rust seed
+`bin/simple.exe` cannot exercise this path — interpreter mode never runs the
+self-hosted stage3 driver, so no seed-smoke or source-only settlement is
+possible. Per campaign routing this is not re-litigated.
+
+Grant integrity check: boot19 addendum (commit fa4314444bef, ancestor of the
+lane base 77be2266752d) is present and complete; the 2026-11-04 adjudication
+it quotes (bug_db.sdn) is unchanged. No absorber commit exists
+(`git log --all --grep` for this bug id finds only the boot19 doc commit;
+adjacent stage2/3 fixes 13d7746adc0e / 9e7e7a526edb / e569d40037c7 named by
+boot19 remain the same context, none claims the spin).
+
+Verbatim grant (from the 2026-11-04 adjudication via boot19, re-recorded intact):
+
+1. Fresh worktree rebased on origin/release/1.0.0 with no other bootstrap running.
+2. `SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy`
+   (sanctioned bootstrap; yields `build/bootstrap/stage3/<triple>/simple` and
+   `stage3-command.transcript`).
+3. Replay the Symptom/Reproduction section of this doc with that stage3 binary
+   under a timeout (stage3 cmd form: `build/bootstrap/stage3/<triple>/simple
+   native-build <entry> ...`, or replay `stage3-command.transcript`) and
+   capture rc plus last 50 log lines.
+4. Append the observed rc and log here (and in `bug_db.sdn`) and set status
+   closed if it no longer reproduces.
+
+Disposition: BLOCKED. Header flipped OPEN → BLOCKED 2026-11-11 (lane p3-comp9).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lanes boot19/p3-comp9: BLOCKED — grant integrity verified (fa4314444bef ancestor of base); reproduction needs the sanctioned bootstrap path. No in-lane change.

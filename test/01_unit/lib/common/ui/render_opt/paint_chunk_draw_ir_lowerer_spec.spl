@@ -5,9 +5,10 @@ use std.spec
 use common.ui.render_opt.property_trees.PaintChunks
 use common.ui.render_opt.paint_chunk_rasterizer.PaintChunkRects
 use common.ui.draw_ir.{
-    draw_ir_rect, draw_ir_embedding_config, draw_ir_source_manual
+    draw_ir_rect, draw_ir_embedding_config, draw_ir_source_manual,
+    draw_ir_batch, draw_ir_composition
 }
-use common.ui.render_opt.draw_ir_delta.draw_ir_stable_apply
+use common.ui.draw_ir_patch.draw_ir_patch_apply
 use common.ui.render_opt.paint_chunk_draw_ir_lowerer.{
     paint_chunk_draw_ir_lower_full, paint_chunk_draw_ir_lower_composition,
     paint_chunk_draw_ir_full_transaction
@@ -89,21 +90,26 @@ describe "PaintChunk full lowerer keeps producer-stable DrawIR order":
             "composition-2", "scene-2", "cpu", "paint-chunks",
             draw_ir_embedding_config("surface-2", "root", 0, 0, 64, 32, 0, 1000, true),
             draw_ir_source_manual())
-        val previous = [
-            draw_ir_rect("gone", 0, 0, 2, 2, 1u32),
-            draw_ir_rect("one", 99, 0, 2, 2, 2u32)
-        ]
+        val previous = draw_ir_composition("r1", "scene-2", "cpu", [draw_ir_batch(
+            "paint-chunks", "cpu",
+            draw_ir_embedding_config("surface-2", "root", 0, 0, 64, 32, 0, 1000, true),
+            [draw_ir_rect("gone", 0, 0, 2, 2, 1u32),
+             draw_ir_rect("one", 99, 0, 2, 2, 2u32)])])
         val transaction = paint_chunk_draw_ir_full_transaction(
-            previous, "r1", "r2", lowered)
+            previous, "r2", lowered)
         assert_true(transaction.valid)
         assert_true(transaction.transaction != nil)
-        if val stable = transaction.transaction:
-            val applied = draw_ir_stable_apply(previous, "r1", stable)
-            assert_true(applied.valid)
-            assert_true(applied.revision == "r2")
-            assert_true(applied.commands.len() == 3)
-            assert_true(applied.commands[0].component_id == "one")
-            assert_true(applied.commands[0].x == 1)
-            assert_true(applied.commands[2].component_id == "three")
+        if val patch = transaction.transaction:
+            assert_true(patch.base_revision == "r1")
+            # "gone" is tombstoned, "one" is updated in place, "two"/"three"
+            # are inserted: no stale command survives the apply.
+            val applied = draw_ir_patch_apply(previous, patch)
+            assert_true(applied.ok)
+            assert_true(applied.composition.composition_id == "r2")
+            val commands = applied.composition.batches[0].commands
+            assert_true(commands.len() == 3)
+            assert_true(commands[0].component_id == "one")
+            assert_true(commands[0].x == 1)
+            assert_true(commands[2].component_id == "three")
         else:
             assert_true(false)

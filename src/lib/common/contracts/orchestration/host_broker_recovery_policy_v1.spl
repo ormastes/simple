@@ -1,0 +1,113 @@
+# Administrative recovery DATA only. Actual Host retained fixed-child acquisition
+# is required; decoding does not authorize a root, launch, cancel or cleanup.
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_identifier_valid_v1}
+use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, container_output_identity_digest_v2}
+
+pub enum HostBrokerRecoveryDomainV1:
+    OutputFollow
+    PrimaryAttach
+
+pub struct HostBrokerRecoveryEntryV1:
+    stream_policy_digest: text
+    parent_path: text
+    layout: text
+
+pub struct HostBrokerRecoveryPolicyV1:
+    enrollment_binding_digest: text
+    service_scope_id: text
+    entries: [HostBrokerRecoveryEntryV1]
+
+# allow(primitive_api): read-only path-shape predicate over caller-supplied text
+pub fn host_broker_recovery_parent_valid_v1(path: text) -> bool:
+    if (path.byte_len() < 2 or path.byte_len() > 4095 or not path.starts_with("/") or
+            path.ends_with("/") or path.contains("//")): return false
+    val parts = path.split("/")
+    if parts.len() > 129: return false
+    for at in 1..parts.len():
+        if parts[at] == "" or parts[at] == "." or parts[at] == ".." or parts[at].byte_len() > 255: return false
+        for byte in parts[at].bytes():
+            if byte < 32u8 or byte == 127u8: return false
+    true
+
+pub fn host_broker_recovery_root_v1(parent: text, identity: ContainerOutputIdentityV2,
+        domain: HostBrokerRecoveryDomainV1) -> Result<text, text>:
+    if not host_broker_recovery_parent_valid_v1(parent): return Err("broker-recovery-parent-invalid")
+    val digest = container_output_identity_digest_v2(identity)?
+    val prefix = match domain:
+        case HostBrokerRecoveryDomainV1.OutputFollow: "/output-"
+        case HostBrokerRecoveryDomainV1.PrimaryAttach: "/primary-attach-"
+    val root = parent + prefix + digest
+    if not host_broker_recovery_parent_valid_v1(root): return Err("broker-recovery-root-invalid")
+    Ok(root)
+
+pub fn host_broker_recovery_policy_encode_v1(value: HostBrokerRecoveryPolicyV1) -> Result<text, text>:
+    if not builder_digest_valid_v1(value.enrollment_binding_digest) or not builder_identifier_valid_v1(value.service_scope_id):
+        return Err("broker-recovery-policy-binding")
+    if value.entries.len() > 64: return Err("broker-recovery-policy-entry-bound")
+    var selected: [text] = []
+    var entries: [SdnValue] = []
+    for entry in value.entries:
+        if (not builder_digest_valid_v1(entry.stream_policy_digest) or not host_broker_recovery_parent_valid_v1(entry.parent_path) or
+                entry.layout != "linux-output-primary-v1" or selected.contains(entry.stream_policy_digest)):
+            return Err("broker-recovery-policy-entry-invalid-or-ambiguous")
+        selected.push(entry.stream_policy_digest)
+        val fields: Dict<text, SdnValue> = {"streamPolicyDigest": SdnValue.String(entry.stream_policy_digest),
+            "parentPath": SdnValue.String(entry.parent_path), "layout": SdnValue.String(entry.layout)}
+        entries.push(SdnValue.Dict(fields))
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-broker-recovery-policy"),
+        "enrollmentBindingDigest": SdnValue.String(value.enrollment_binding_digest),
+        "serviceScopeId": SdnValue.String(value.service_scope_id), "entries": SdnValue.Array(entries)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if source.byte_len() > 65536: return Err("broker-recovery-policy-source-bound")
+    Ok(source)
+
+fn broker_fields_v1(value: SdnValue, names: [text]) -> Result<Dict<text, SdnValue>, text>:
+    val fields = match value:
+        case SdnValue.Dict(items): items
+        case _: return Err("broker-recovery-policy-object")
+    if fields.len() != names.len(): return Err("broker-recovery-policy-fields")
+    for name in names:
+        if not fields.contains_key(name): return Err("broker-recovery-policy-fields")
+    Ok(fields)
+
+fn broker_text_v1(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("broker-recovery-policy-text")
+
+pub fn host_broker_recovery_policy_decode_v1(source: text) -> Result<HostBrokerRecoveryPolicyV1, text>:
+    if source.byte_len() < 1 or source.byte_len() > 65536: return Err("broker-recovery-policy-source-bound")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 65536,
+            max_depth: 4, max_nodes: 1024, max_rows: 0, max_cells: 0, max_columns: 8)):
+        case Ok(value): value
+        case Err(_): return Err("broker-recovery-policy-syntax")
+    val fields = broker_fields_v1(parsed.value, ["version", "kind", "enrollmentBindingDigest", "serviceScopeId", "entries"])?
+    if fields["version"] != SdnValue.Int(1) or broker_text_v1(fields, "kind")? != "host-broker-recovery-policy":
+        return Err("broker-recovery-policy-kind-version")
+    val raw = match fields["entries"]:
+        case SdnValue.Array(items): items
+        case _: return Err("broker-recovery-policy-entries")
+    if raw.len() > 64: return Err("broker-recovery-policy-entry-bound")
+    var entries: [HostBrokerRecoveryEntryV1] = []
+    for item in raw:
+        val entry = broker_fields_v1(item, ["streamPolicyDigest", "parentPath", "layout"])?
+        entries.push(HostBrokerRecoveryEntryV1(broker_text_v1(entry, "streamPolicyDigest")?,
+            broker_text_v1(entry, "parentPath")?, broker_text_v1(entry, "layout")?))
+    val value = HostBrokerRecoveryPolicyV1(broker_text_v1(fields, "enrollmentBindingDigest")?,
+        broker_text_v1(fields, "serviceScopeId")?, entries)
+    if host_broker_recovery_policy_encode_v1(value)? != source: return Err("broker-recovery-policy-noncanonical")
+    Ok(value)
+
+# Pure selection DATA, used only after actual fixed-child read by Host owner.
+pub fn host_broker_recovery_policy_parent_v1(value: HostBrokerRecoveryPolicyV1,
+        enrollment_digest: text, service_scope: text, stream_policy_digest: text) -> Result<text, text>:
+    val canonical = host_broker_recovery_policy_encode_v1(value)?
+    if value.enrollment_binding_digest != enrollment_digest or value.service_scope_id != service_scope:
+        return Err("historical-broker-root-context-mismatch")
+    for entry in value.entries:
+        if entry.stream_policy_digest == stream_policy_digest: return Ok(entry.parent_path)
+    Err("historical-broker-root-not-authorized")

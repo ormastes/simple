@@ -1,0 +1,56 @@
+#!/bin/sh
+# Selftest (Windows Git Bash only): the Stage 3 materialized consumer
+# (bootstrap_stage3_materialized_git_state) must
+#  (1) default its budget to the native consumer's own 1200s ceiling — a full
+#      checkout walk measured 489s on 2026-11-15, so the old 300s default
+#      (scale stuck at 1 on an 80-thread host) killed a VALID receipt;
+#  (2) give the outer kill a margin for PowerShell + Add-Type startup;
+#  (3) report a timeout as a timeout (exit 3), never as an invalid receipt —
+#      the "invalid" path tells the operator to --undo a 2h materialization.
+# Stubs `powershell` on PATH; never walks a real tree.
+set -u
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) echo "SKIP — not Windows"; exit 0 ;; esac
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+. "$root/scripts/bootstrap/bootstrap-materialized-startup.shs"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/mat-consumer-timeout.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+mkdir -p "$tmp/bin" "$tmp/repo" "$tmp/out"
+: > "$tmp/receipt.env"
+PATH="$tmp/bin:$PATH"; export PATH
+
+# (1) default budget reaches the consumer as the native ceiling.
+cat > "$tmp/bin/powershell" <<EOF
+#!/bin/sh
+printf '%s\n' "\$BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS" > "$tmp/budget"
+exit 0
+EOF
+chmod +x "$tmp/bin/powershell"
+unset BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS
+( bootstrap_stage3_materialized_git_state "$tmp/repo" "$tmp/out/s.env" "$tmp/receipt.env" ) || fail "stub consumer exit 0 must pass"
+[ "$(cat "$tmp/budget")" = 1200000 ] || fail "default budget $(cat "$tmp/budget") != 1200000"
+
+# (2) outer kill margin covers consumer startup (>= 120s over the budget).
+grep -q 'stage3_outer_s=\$((BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS / 1000 + 120))' \
+  "$root/scripts/check/lib/bootstrap-stage3/authority.shs" || fail "outer kill margin < 120s"
+
+# (3) a timed-out consumer (timeout(1) exits 124) is exit 3 and the startup
+#     message names a timeout and does not advise --undo.
+printf '#!/bin/sh\nexit 124\n' > "$tmp/bin/powershell"
+BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS=1000; export BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS
+( bootstrap_stage3_materialized_git_state "$tmp/repo" "$tmp/out/s.env" "$tmp/receipt.env" ) 2>/dev/null
+rc=$?
+[ "$rc" -eq 3 ] || fail "timeout rc=$rc, want 3"
+SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT=$tmp/receipt.env; export SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT
+( bootstrap_materialized_startup "$tmp/repo" "$tmp/out" ) 2>"$tmp/err"
+rc=$?
+[ "$rc" -ne 0 ] || fail "timeout must still fail closed"
+grep -q 'timed out' "$tmp/err" || fail "timeout not reported: $(cat "$tmp/err")"
+! grep -q -- '--undo' "$tmp/err" || fail "timeout advised --undo: $(cat "$tmp/err")"
+
+# A genuine reject (exit 1) still uses the invalid-receipt path.
+printf '#!/bin/sh\nexit 1\n' > "$tmp/bin/powershell"
+( bootstrap_materialized_startup "$tmp/repo" "$tmp/out" ) 2>"$tmp/err"
+grep -q 'receipt is invalid' "$tmp/err" || fail "reject not reported as invalid"
+echo "PASS — 5 checks (default budget, outer margin, timeout rc, timeout message, reject path)"

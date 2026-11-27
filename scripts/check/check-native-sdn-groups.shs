@@ -1,0 +1,28 @@
+#!/bin/sh
+# Verify the native SDN group-counter regression.
+set -eu
+if [ "$#" -ne 2 ] || [ "$1" != --binary ] || [ ! -x "$2" ]; then
+    echo "usage: $0 --binary <native-sdn-groups-regression>" >&2
+    exit 2
+fi
+binary=$2
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-sdn-groups.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=1048576
+export SIMPLE_PROCESS_TREE_RSS_RECEIPT=$work/process.rss.env
+set +e
+sh "$repo/scripts/bootstrap/run-process-group-timeout.shs" 30 2 "$binary" > "$work/stdout" 2> "$work/stderr"
+sdn_groups_rc=$?
+set -e
+cat "$work/stdout"
+if [ "$sdn_groups_rc" -ne 0 ]; then
+    cat "$work/stderr" >&2
+    echo "FAIL native SDN groups: executable exit=$sdn_groups_rc" >&2
+    exit 1
+fi
+if grep '^FAIL ' "$work/stdout" >/dev/null || ! grep -Fx 'SDN_GROUP_REGRESSION PASS repeated-group counters and zero-denominator' "$work/stdout" >/dev/null; then
+    echo "FAIL native SDN groups: missing complete regression summary" >&2
+    exit 1
+fi
+echo "PASS native SDN groups: repeated-group counters and zero-denominator"

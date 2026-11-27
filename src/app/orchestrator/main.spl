@@ -1,0 +1,30 @@
+# Standalone compiled application entrypoint; intentionally human/CLI output.
+use std.nogc_sync_mut.sosix.host.cli_get_args
+use app.orchestrator.command.orchestrator_command_v1
+use app.orchestrator.reply_cleanup_v2.orchestrator_reply_cleanup_v2
+use app.orchestrator.server_command_v1.orchestrator_gateway_stdio_v1
+use std.nogc_async_mut.sosix.host_facade.sosix_print_raw
+
+fn main() -> i64:
+    val raw = cli_get_args()
+    var args: [text] = []
+    var index = 1
+    if raw.len() > 2 and raw[1] == "run" and raw[2].ends_with(".spl"):
+        index = 3
+    elif raw.len() > 1 and (raw[0] == "run" or raw[1].ends_with(".spl")):
+        index = 2
+    while index < raw.len():
+        args.push(raw[index])
+        index = index + 1
+    if args.len() == 1 and args[0] == "gateway-stdio-v1":
+        val gateway_reply = orchestrator_gateway_stdio_v1()
+        return gateway_reply.exit_code
+    # At most one exact cleanup attempt per retained owner. The typed reply
+    # remains live through output and process exit; exit intent is not proof
+    # of release and unresolved cleanup must never become a success response.
+    val reply = orchestrator_reply_cleanup_v2(orchestrator_command_v1(args))
+    # Canonical execution codecs already include their one record terminator.
+    # Preserve legacy metadata output while never adding a second newline.
+    val output = if reply.output.ends_with("\n"): reply.output else: reply.output + "\n"
+    sosix_print_raw(output)
+    reply.exit_code

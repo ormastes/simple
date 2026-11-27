@@ -1,8 +1,7 @@
 # Bug: `std.async_core` module does not exist — the whole async_host task-handle/cancel family is unbuildable
 
 - **Date:** 2026-07-29
-- **Status:** open (one contributing bug fixed this session; the module gap itself is
-  a design decision, not fixed)
+- **Status:** fixed (2026-11-11, P3 lane ne2) — `std.async_core` created 2026-11-05; re-verified green on the refreshed seed
 - **Severity:** CRITICAL — an entire documented API surface (task handles with
   join/abort/cancel, `JoinSet`) cannot be constructed at all
 - **Found by:** lane G9 (mission-critical robustness campaign — cancellation semantics)
@@ -94,3 +93,95 @@ them, and re-verify each of the ~12 dependent files actually compiles and constr
 (not just string-matches) via real specs — mirroring
 `test/01_unit/lib/nogc_async_mut/cancellation_spec.spl`'s approach of importing and
 calling the real module instead of grepping its source text.
+
+
+## Update 2026-11-05 (work/libbug-async-core-20261105) — module created; task-handle/cancel dispatch fixed
+
+`std.async_core` now resolves: `src/lib/nogc_async_mut/async_core.spl` exports
+`AsyncError`, `Priority` (new canonical definitions) and re-exports `Poll`
+(`std.async.poll`), `TaskState` (`std.async.task`), `CancellationToken`
+(`std.async.cancellation`). The async_host task-handle/cancel family builds and
+its dispatch path works end-to-end:
+
+- **Root cause found (closure ABI, not module resolution):** a closure whose
+  body contains an ANY-typed call (e.g. a generic task body `f() -> T`) or
+  whose return row is an enum/ANY (`Poll<()>`) is unencodable on the JIT
+  closure ABI; the enclosing function is demoted to the interpreter, where
+  stored closures no longer dispatch (the scheduler polled tasks, the poll
+  matched neither `Ready` nor `Pending`, and the task stuck in `Running`).
+  Fix: scheduler thunks are now `fn() -> i64` (1 = Ready, 0 = Pending);
+  `HostRuntime.run_task` routes the generic call through a free helper
+  (`_host_run_ready`) so the lambda body stays encodable. Cleanup actions are
+  likewise `fn() -> i64`.
+- `HostTaskHandle.is_cancelled()` now derives from the lifetime token (a live
+  class reference) instead of the cached `context.cancellation_requested`,
+  which reads stale through the snapshot the hybrid engine hands back.
+- Evidence: `async_host_handle_cancellation_contract_spec.spl` 2/2 (was 0/2,
+  header said "Expected-red … UNRUN"); owner_thread_queue 5/5,
+  task_error_surfacing 18/18, async_host 7/7, cancellation 8/8, async 10/10,
+  atomic_map OK — all on the real modules.
+
+**Remaining open (NOT fixed here, seed-level):** `async_mutex_suspend_spec`
+(12/15 red), `async_host_handle_cleanup_contract_spec` (7/8 red) and
+`host_promise_terminal_spec` (3/3 red) still fail. Minimal repros show the lib
+logic is correct when it compiles wholesale to JIT; the failures come from the
+filed seed hybrid-engine bug (class instances ferried between JIT-compiled and
+interpreted functions come back as stale snapshots — field writes on
+`task_context().unwrap()` results are lost; same class of bug documented for
+cancellation 2026-07-29), plus one missing seed extern
+(`spl_condvar_create`) and one nil-lease edge in `sync.spl`
+(`mutex_lifetime` on nil in the 65-sequential-locks test). Fixing those needs
+the seed interpreter/compiler fix, not more lib work.
+
+
+## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
+
+Module exists; stale repro fixed (Poll.unwrap was removed, spec now uses poll_unwrap): test/01_unit/lib/async_core_spec.spl 7/7. Prevention: test/01_unit/lib/async_core_importers_prevention_spec.spl (every name an importer takes from std.async_core is exported). Remaining red specs (async_mutex_suspend, handle_cleanup, host_promise_terminal) are the seed hybrid-engine stale-snapshot defect: needs Rust seed change, not fixed here.
+
+
+## Verdict addendum — 2026-11-11 (P3 lane ne2)
+
+Verdict: **FIXED.** The module gap this record tracks closed in the 2026-11-05 update
+(`work/libbug-async-core-20261105`, recorded above) and the round-15 note
+(`work/r15-stdlib-20261107`). This lane re-verified on the refreshed seed
+(`bin/simple.exe`, build-commit `0791c2b7f4a7`, all runs seed-smoke,
+`--mode=interpreter --no-cache`):
+
+- `test/01_unit/lib/async_core_spec.spl` → SPEC FILE VERDICT OK, 7/7 passed.
+- `src/lib/nogc_async_mut/async_core.spl` present on disk (1808 bytes), so the
+  `use std.async_core.{AsyncError, CancellationToken, Poll, Priority, TaskState}`
+  import surface in the async_host family now resolves.
+
+The remaining red specs named in the 2026-11-05 update (`async_mutex_suspend`,
+`async_host_handle_cleanup_contract`, `host_promise_terminal`) are the separate,
+already-filed seed hybrid-engine stale-snapshot defect — outside this record's
+module-gap scope and unaffected by this verdict.
+
+## Triage 2026-11-11 (lane p3-ne20) — verdict: SUPERSEDED (absorber named)
+
+Lane ne2 triaged this row FIXED earlier today on this base and already flipped
+the header; this lane confirms their verdict with one fresh structural check
+rather than resting on their addendum: `src/lib/nogc_async_mut/async_core.spl`
+is present on disk (1808 bytes) on origin/release/1.0.0
+(worktree @9202f187777), so the `use std.async_core.{AsyncError,
+CancellationToken, Poll, Priority, TaskState}` surface the async_host family
+imports now resolves. Their seed-smoke evidence (`async_core_spec.spl` 7/7 on
+the tracked seed) is same-day and same-branch; per the no-rerun rule it is not
+re-executed. Absorber: P3 lane ne2 verdict addendum above (FIXED
+2026-11-11). Lane evidence: `build/review/p3fix-ne20-20261111.sdn`.
+
+
+## Triage 2026-11-13 (lane p3-async-20261113, base 80a8116e5e2) — confirms FIXED
+
+Same-base structural re-verification: `src/lib/nogc_async_mut/async_core.spl`
+is present on disk (1808 bytes) on origin/release/1.0.0, so the
+`use std.async_core.{AsyncError, CancellationToken, Poll, Priority, TaskState}`
+surface the async_host family imports resolves on this base. The 2026-11-11
+lane-ne2 seed-smoke evidence (`async_core_spec.spl` 7/7) is same-branch and
+stands per the no-rerun rule. No source change.
+
+## 2026-11-13 resolution (P3 triage sweep, work/p3-triage-20261113) — row closed `fixed`
+
+Seed: scratchpad `vkinit/seed-fix`, runs capped `systemd-run MemoryMax=16G timeout 900`, cwd = this worktree at origin/release/1.0.0 `59caff4fd1b`.
+
+Evidence: `git cat-file -s origin/release/1.0.0:src/lib/nogc_async_mut/async_core.spl` = 1808 (module exists, defines AsyncError/Priority, re-exports Poll/TaskState/CancellationToken). Live: `test/01_unit/lib/async_core_spec.spl` executed=7 passed=7 failed=0; `test/01_unit/lib/async_core_importers_prevention_spec.spl` executed=1 passed=1. The async_mutex/handle_cleanup/host_promise reds stay with the separate seed stale-snapshot record.

@@ -1,0 +1,79 @@
+# Generics = ONE ERASED BODY per generic fn (owner decision 2026-10-31).
+# Every value below crosses an erased `T` boundary (param, return, a `[T]`
+# element, a `Box<T>` field) and must come back bit-exact: a tagged int
+# reaching an untagged scalar slot is the x8 class of PR #5661.
+#
+# Expected (authored; UNEXECUTED on the self-hosted compiler until run):
+# summary=7|9223372036854775807|-9223372036854775808|-1|NaN|negzero|0.1|3|4|12|42|T|F|42
+# arith=6|1.5
+# containers=1|2|5|6|omega|2.5
+
+struct Pt:
+    x: i64
+    y: i64
+
+struct Box<T>:
+    value: T
+
+fn ident<T>(x: T) -> T:
+    x
+
+fn second<T>(a: T, b: T) -> T:
+    b
+
+fn first_of<T>(items: [T]) -> T:
+    items[0]
+
+fn last_of<T>(items: [T]) -> T:
+    # `for x in items` over an erased `[T]`: the element must pass through
+    # undecoded (a record pointer decoded as an int is shredded).
+    var found = items[0]
+    for x in items:
+        found = x
+    found
+
+fn double_it(x: i64) -> i64:
+    x * 2
+
+fn half(x: f64) -> f64:
+    x / 2.0
+
+fn main():
+    # small int: identity through T
+    val small: i64 = ident(7)
+    # i64 max / min: outside the 61-bit tagged immediate -> heap wide box
+    val big_max: i64 = ident(9223372036854775807)
+    val big_min: i64 = ident(-9223372036854775807 - 1)
+    val minus_one: i64 = ident(-1)
+    # f64: NaN and -0.0 must survive the heap float box
+    val nan_f: f64 = ident(0.0 / 0.0)
+    val nan_text = if nan_f != nan_f: "NaN" else: "num"
+    val negz: f64 = ident(-0.0)
+    val negz_text = if negz == 0.0 and (1.0 / negz) < 0.0: "negzero" else: "poszero"
+    val tenth: f64 = ident(0.1)
+    # by-value struct: field integrity after the round trip
+    val p: Pt = ident(Pt(x: 3, y: 4))
+    # generic container element and generic struct field
+    val arr_first: i64 = first_of([12, 13])
+    val boxed: Box<i64> = Box(value: 42)
+    val from_box: i64 = ident(boxed.value)
+    # bool through T
+    val t: bool = ident(true)
+    val f: bool = second(true, false)
+    val t_text = if t: "T" else: "F"
+    val f_text = if f: "T" else: "F"
+    # tagged T result straight into a declared scalar parameter (x8 class)
+    val doubled = double_it(ident(21))
+    print "summary={small}|{big_max}|{big_min}|{minus_one}|{nan_text}|{negz_text}|{tenth}|{p.x}|{p.y}|{arr_first}|{from_box}|{t_text}|{f_text}|{doubled}"
+    # arithmetic on an erased result against a raw scalar (expression-position x8 class)
+    print "arith={ident(5) + 1}|{half(ident(3.0))}"
+    # records, text and f64 THROUGH a [T] container: the element read inside
+    # the generic body must not decode the tagged word as an int
+    val pts: [Pt] = [Pt(x: 1, y: 2), Pt(x: 5, y: 6)]
+    val p_first: Pt = first_of(pts)
+    val p_last: Pt = last_of(pts)
+    val names: [text] = ["alpha", "omega"]
+    val n_last: text = last_of(names)
+    val fs: [f64] = [0.5, 2.5]
+    val f_last: f64 = last_of(fs)
+    print "containers={p_first.x}|{p_first.y}|{p_last.x}|{p_last.y}|{n_last}|{f_last}"

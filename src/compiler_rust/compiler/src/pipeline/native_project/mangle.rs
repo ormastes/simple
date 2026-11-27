@@ -293,8 +293,44 @@ fn requalify_enum_check_variant_ids(
 fn is_enum_helper_method(name: &str) -> bool {
     matches!(
         name,
-        "unwrap" | "unwrap_or" | "unwrap_err" | "is_some" | "is_none" | "is_ok" | "is_err"
+        "unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"
     )
+}
+
+/// Methods that exist ONLY on `text` and that codegen lowers itself
+/// (`byte_len` -> `rt_string_len`, `char_count` -> `rt_string_char_count`).
+fn is_text_only_builtin_leaf(name: &str) -> bool {
+    matches!(name.rsplit('.').next().unwrap_or(name), "byte_len" | "char_count")
+}
+
+/// Last-resort suffix binding for a name no exact map resolved.
+///
+/// `resolve_by_suffix` cuts the name at every `_` and treats the tail as a
+/// method, so `byte_len` / `str.byte_len` is looked up as `len`. The LOCAL
+/// suffix index lists the lowercase leaf of every method the module defines
+/// (the global one only indexes uppercase leaves, and use/import-map values
+/// are `_dot_`-escaped so they contribute no leaf), so one struct `fn len()`
+/// in the module made `len` a lone candidate and every `text.byte_len()` in
+/// that file was rebound to it: `IncrChangeSet.len` read field 0 of a text
+/// pointer and every Stage 2 native-build worker died with SIGSEGV
+/// (seed_stage2_user_len_method_hijacks_text_byte_len_2026-11-23).
+///
+/// The cut tail is not the method the call names, so for a text-only builtin
+/// only an EXACT lone candidate may bind (a real user `byte_len`); otherwise
+/// the name stays as emitted and codegen's `rt_string_*` lowering owns it.
+fn resolve_unbound_by_suffix(
+    name: &str,
+    local_suffix_index: &std::collections::HashMap<String, Vec<String>>,
+    suffix_index: &std::collections::HashMap<String, Vec<String>>,
+) -> Option<String> {
+    if is_text_only_builtin_leaf(name) {
+        return [local_suffix_index, suffix_index]
+            .into_iter()
+            .filter_map(|index| index.get(name))
+            .find(|candidates| candidates.len() == 1)
+            .map(|candidates| candidates[0].clone());
+    }
+    resolve_by_suffix(name, local_suffix_index).or_else(|| resolve_by_suffix(name, suffix_index))
 }
 
 /// Owner-segment match for an enum-helper rebind.
@@ -339,6 +375,84 @@ pub(super) fn method_owner_matches(candidate: &str, type_part: &str) -> bool {
     owner.eq_ignore_ascii_case(type_part)
 }
 
+/// Rewrite `@export(..., name: "custom")` definitions and `@extern("runtime", "c_sym")`
+/// declarations in-place so their effective MIR symbol names and local call targets
+/// match the declared C ABI symbol, regardless of `no_mangle` or backend.
+pub(crate) fn apply_abi_symbol_overrides(mir: &mut crate::mir::MirModule, rewrite_entry_main: bool) {
+    use crate::mir::MirInst;
+
+    let mut renames: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut extern_targets: Vec<String> = Vec::new();
+    for func in &mut mir.functions {
+        if let Some(c_sym) = func
+            .attributes
+            .iter()
+            .find_map(|a| a.strip_prefix("extern_runtime_name="))
+            .map(str::to_string)
+        {
+            if func.name != c_sym {
+                renames.insert(func.name.clone(), c_sym.clone());
+                func.name = c_sym.clone();
+            }
+            func.blocks.clear();
+            extern_targets.push(c_sym);
+            continue;
+        }
+        if let Some(custom) = func
+            .attributes
+            .iter()
+            .find_map(|a| a.strip_prefix("export_c_name="))
+            .map(str::to_string)
+        {
+            if func.name != custom {
+                renames.insert(func.name.clone(), custom.clone());
+                func.name = custom;
+            }
+        } else if rewrite_entry_main && func.name == "main" {
+            func.name = "spl_main".to_string();
+        }
+    }
+    for sym in extern_targets {
+        mir.extern_fn_names.insert(sym);
+    }
+    if renames.is_empty() {
+        return;
+    }
+    for func in &mut mir.functions {
+        for block in &mut func.blocks {
+            for inst in &mut block.instructions {
+                match inst {
+                    MirInst::Call { target, .. } => {
+                        if let Some(mapped) = renames.get(target.name()) {
+                            *target = target.with_name(mapped.clone());
+                        }
+                    }
+                    MirInst::InterpCall { func_name, .. } => {
+                        if let Some(mapped) = renames.get(func_name.as_str()) {
+                            *func_name = mapped.clone();
+                        }
+                    }
+                    MirInst::GlobalLoad { global_name, .. } | MirInst::GlobalStore { global_name, .. } => {
+                        if let Some(mapped) = renames.get(global_name.as_str()) {
+                            *global_name = mapped.clone();
+                        }
+                    }
+                    MirInst::ClosureCreate { func_name, .. } => {
+                        for (old_prefix, new_prefix) in &renames {
+                            let old_out = format!("{old_prefix}_outlined_");
+                            if let Some(suffix) = func_name.strip_prefix(&old_out) {
+                                *func_name = format!("{new_prefix}_outlined_{suffix}");
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 /// Apply name mangling to a MIR module for the LLVM backend.
 pub(crate) fn mangle_mir(
     mir: &mut crate::mir::MirModule,
@@ -350,6 +464,8 @@ pub(crate) fn mangle_mir(
     suffix_index: &std::collections::HashMap<String, Vec<String>>,
 ) -> usize {
     use crate::mir::MirInst;
+
+    apply_abi_symbol_overrides(mir, false);
 
     let mut unresolved_count: usize = 0;
 
@@ -716,11 +832,21 @@ pub(crate) fn mangle_mir(
                             *global_name = mangled.clone();
                             continue;
                         }
-                        if extern_fns.contains(global_name.as_str()) || known_mangled.contains(global_name.as_str()) {
+                        if extern_fns.contains(global_name.as_str()) {
                             continue;
                         }
+                        // This file's explicit `use` binding wins over
+                        // `known_mangled`: a same-named `extern fn` in ANOTHER
+                        // module registers the bare identity `name -> name` in
+                        // the project import map, which put the bare name in
+                        // `known_mangled` and skipped this file's own import,
+                        // so `f as u64` reached LLVM as an undeclared global
+                        // (extern_shadow_blocks_imported_fn_value_2026-11-20).
                         if let Some(resolved) = use_map.get(global_name.as_str()) {
                             *global_name = resolved.clone();
+                            continue;
+                        }
+                        if known_mangled.contains(global_name.as_str()) {
                             continue;
                         }
                         if is_runtime_or_builtin(global_name) {
@@ -1005,8 +1131,7 @@ fn resolve_call_target(
                 });
             if let Some(b) = best {
                 *target = target.with_name(b.clone());
-            } else if let Some(resolved) = resolve_by_suffix(lookup_name, local_suffix_index)
-                .or_else(|| resolve_by_suffix(lookup_name, suffix_index))
+            } else if let Some(resolved) = resolve_unbound_by_suffix(lookup_name, local_suffix_index, suffix_index)
             {
                 *target = target.with_name(resolved);
             } else {
@@ -1017,7 +1142,7 @@ fn resolve_call_target(
                 );
             }
         } else if let Some(resolved) =
-            resolve_by_suffix(lookup_name, local_suffix_index).or_else(|| resolve_by_suffix(lookup_name, suffix_index))
+            resolve_unbound_by_suffix(lookup_name, local_suffix_index, suffix_index)
         {
             *target = target.with_name(resolved);
         } else {
@@ -1029,8 +1154,7 @@ fn resolve_call_target(
         }
     } else if let Some(resolved) =
         resolve_ambiguous_private_call_in_module(lookup_name, prefix, ambiguous_names, suffix_index)
-            .or_else(|| resolve_by_suffix(lookup_name, local_suffix_index))
-            .or_else(|| resolve_by_suffix(lookup_name, suffix_index))
+            .or_else(|| resolve_unbound_by_suffix(lookup_name, local_suffix_index, suffix_index))
     {
         *target = target.with_name(resolved);
     } else {
@@ -1042,13 +1166,17 @@ fn resolve_call_target(
     }
 }
 
+/// Resolve an ambiguous free-function call to the definition whose module path
+/// shares the longest prefix with the caller (a sibling split-part behind a
+/// facade). Not limited to `_`-prefixed names: facade-crossing calls to public
+/// helpers fail identically. A tie or no shared prefix stays unresolved.
 fn resolve_ambiguous_private_call_in_module(
     name: &str,
     prefix: &str,
     ambiguous_names: &std::collections::HashSet<String>,
     suffix_index: &std::collections::HashMap<String, Vec<String>>,
 ) -> Option<String> {
-    if !name.starts_with('_') || !ambiguous_names.contains(name) {
+    if !ambiguous_names.contains(name) {
         return None;
     }
 
@@ -1359,7 +1487,7 @@ fn resolve_method_call_static(
                 *func_name = b.clone();
             }
         } else if let Some(resolved) =
-            resolve_by_suffix(lookup_name, local_suffix_index).or_else(|| resolve_by_suffix(lookup_name, suffix_index))
+            resolve_unbound_by_suffix(lookup_name, local_suffix_index, suffix_index)
         {
             *func_name = resolved;
         }
@@ -1672,9 +1800,16 @@ mod tests {
             src.contains("let enum_helper_method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);"),
             "cranelift enum_helper predicate must be keyed on the method segment, not the whole lookup name"
         );
+        // The enum-helper refusal is folded into `no_rebind`
+        // (`enum_helper || bare_builtin_collision`), which gates every
+        // unqualified cross-module scan.
         assert!(
-            src.contains("if resolved_name.is_none() && !enum_helper {\n                    resolved_name = ctx\n                        .use_map\n                        .get(method)"),
-            "the cranelift last-resort bare-method lookup lost its enum-helper guard"
+            src.contains("let no_rebind = enum_helper || bare_builtin_collision;"),
+            "the cranelift cross-module refusal lost its enum-helper predicate"
+        );
+        assert!(
+            src.matches("if resolved_name.is_none() && !no_rebind {").count() >= 3,
+            "the cranelift unqualified bare-method scans lost their enum-helper guard"
         );
     }
 
@@ -1719,7 +1854,7 @@ mod tests {
             ),
         ]);
 
-        for helper in ["unwrap", "unwrap_or", "unwrap_err", "is_some", "is_none", "is_ok", "is_err"] {
+        for helper in ["unwrap", "unwrap_or", "unwrap_err", "expect", "is_some", "is_none", "is_ok", "is_err"] {
             for receiver in ["str", "text", "string"] {
                 let mut name = format!("{receiver}.{helper}");
                 resolve_method_call_static(
@@ -1772,6 +1907,293 @@ mod tests {
         }
         assert!(!is_enum_helper_method("len"));
         assert!(!is_enum_helper_method("to_string"));
+    }
+
+    /// Acceptance regressions for the XXH3 Phase-2 SIGSEGV (2026-11-03, ARM64
+    /// Linux attempt 8, `seed_native_numeric_conversion_suffix_rebinds_private_
+    /// reader_2026-11-03`): the private byte reader
+    /// `elf_artifact_gate___u64` indexed as bare `u64`, and
+    /// `resolve_by_suffix("to_u64")` cut `("to", "u64")` and rebound the
+    /// erased-receiver `.to_u64()` in xxh3.spl to it (the ELF reader received
+    /// integer 176 as its array pointer). `ce18f9e2026` fixed `suffix_of` to
+    /// keep the leading underscore; these tests pin both resolver routes so
+    /// the index keying can never regress back.
+    fn gate_reader_suffix_index() -> HashMap<String, Vec<String>> {
+        // Built through the real indexer, not hand-keyed: the tests then guard
+        // the actual `suffix_of` invariant, not a copy of it.
+        let mut all: HashMap<String, Vec<String>> = HashMap::new();
+        all.insert(
+            "gate".to_string(),
+            vec!["compiler__backend__introspection__elf_artifact_gate___u64".to_string()],
+        );
+        super::super::imports::build_suffix_index(&all)
+    }
+
+    /// Bare route 1: an erased-receiver numeric conversion reaching
+    /// `resolve_call_target` must stay bare when the only same-suffix symbol
+    /// in the closure is the private reader.
+    #[test]
+    fn bare_numeric_conversion_call_target_never_binds_private_reader() {
+        let idx = gate_reader_suffix_index();
+        assert!(
+            idx.get("u64").is_none(),
+            "the private reader must not index under the bare `u64` key"
+        );
+        for conv in ["to_u64", "to_i64", "to_u32", "to_i32", "to_u8", "to_i8"] {
+            assert_eq!(run_call_target(conv, &idx), conv, "{conv} must stay bare");
+        }
+    }
+
+    /// Bare route 1, positive arm: with a real conversion owner in the
+    /// closure the bare name still binds to it, so the guard is not
+    /// "never resolve".
+    #[test]
+    fn bare_numeric_conversion_call_target_still_binds_real_owner() {
+        let mut idx = gate_reader_suffix_index();
+        idx.insert(
+            "to_u64".to_string(),
+            vec!["core__numeric__convert__to_u64".to_string()],
+        );
+        assert_eq!(run_call_target("to_u64", &idx), "core__numeric__convert__to_u64");
+    }
+
+    /// Qualified route 2: a primitive-qualified static call (`u64.to_u64`)
+    /// bypasses the bare-name numeric guard in `resolve_method_call_static`,
+    /// so its safety rests entirely on the index keying.
+    #[test]
+    fn primitive_qualified_numeric_static_never_binds_private_reader() {
+        let idx = gate_reader_suffix_index();
+        for qualified in ["u64.to_u64", "i64.to_i64", "u8.to_u64", "i32.to_i64"] {
+            assert_eq!(
+                run_method_static(qualified, &idx),
+                qualified,
+                "{qualified} must stay bare"
+            );
+        }
+    }
+
+    /// Qualified route 2, positive arm: a genuinely owned conversion still
+    /// resolves to its owner even with the private reader present.
+    #[test]
+    fn primitive_qualified_numeric_static_still_binds_real_owner() {
+        let mut idx = gate_reader_suffix_index();
+        idx.insert(
+            "to_u64".to_string(),
+            vec!["core__numeric__u64.to_u64".to_string()],
+        );
+        assert_eq!(run_method_static("u64.to_u64", &idx), "core__numeric__u64.to_u64");
+    }
+
+    /// Negative control (acceptance #2): a CUSTOM owner's own conversion keeps
+    /// binding on both resolver routes; the private reader must not shadow it.
+    #[test]
+    fn custom_owner_numeric_conversion_still_resolves() {
+        let mut idx = gate_reader_suffix_index();
+        idx.insert(
+            "to_u64".to_string(),
+            vec!["lib__window__geometry__Px.to_u64".to_string()],
+        );
+        assert_eq!(run_method_static("Px.to_u64", &idx), "lib__window__geometry__Px.to_u64");
+        assert_eq!(run_call_target("Px.to_u64", &idx), "lib__window__geometry__Px.to_u64");
+    }
+
+    /// Negative control (acceptance #2): an exact authored import wins over
+    /// every suffix path. Driven through the real `mangle_mir` so the test
+    /// exercises the production routing -- the call site consults
+    /// `use_map`/`import_map` by exact name before the resolver ever runs --
+    /// with the private reader present in the suffix index.
+    #[test]
+    fn exact_authored_import_wins_over_private_reader_suffix() {
+        use crate::mir::{MirFunction, MirInst, MirModule, Terminator};
+
+        fn module_with(insts: Vec<MirInst>) -> MirModule {
+            let mut mir = MirModule::new();
+            let mut func = MirFunction::new(
+                "main".to_string(),
+                crate::hir::TypeId::VOID,
+                simple_parser::Visibility::Private,
+            );
+            func.blocks[0].instructions.extend(insts);
+            func.blocks[0].terminator = Terminator::Return(None);
+            mir.functions.push(func);
+            mir
+        }
+
+        let idx = gate_reader_suffix_index();
+        let import_map = HashMap::from([(
+            "to_u64".to_string(),
+            "lib__common__numeric__to_u64".to_string(),
+        )]);
+
+        // MethodCallStatic route.
+        let mut mir = module_with(vec![MirInst::MethodCallStatic {
+            dest: None,
+            receiver: crate::mir::VReg(0),
+            func_name: "to_u64".to_string(),
+            args: vec![],
+        }]);
+        super::mangle_mir(
+            &mut mir,
+            "app__entry",
+            true,
+            &import_map,
+            &std::collections::HashSet::new(),
+            &HashMap::new(),
+            &idx,
+        );
+        match &mir.functions[0].blocks[0].instructions[0] {
+            MirInst::MethodCallStatic { func_name, .. } => {
+                assert_eq!(func_name, "lib__common__numeric__to_u64")
+            }
+            other => panic!("expected static method call, got {other:?}"),
+        }
+
+        // CallTarget route.
+        let mut mir = module_with(vec![MirInst::Call {
+            dest: None,
+            target: CallTarget::Pure("to_u64".to_string()),
+            args: vec![],
+        }]);
+        let unresolved = super::mangle_mir(
+            &mut mir,
+            "app__entry",
+            true,
+            &import_map,
+            &std::collections::HashSet::new(),
+            &HashMap::new(),
+            &idx,
+        );
+        assert_eq!(unresolved, 0, "the exact import must resolve the call");
+        match &mir.functions[0].blocks[0].instructions[0] {
+            MirInst::Call { target, .. } => assert_eq!(target.name(), "lib__common__numeric__to_u64"),
+            other => panic!("expected call, got {other:?}"),
+        }
+    }
+
+    /// seed_stage2_user_len_method_hijacks_text_byte_len_2026-11-23: a module
+    /// that defines one struct `fn len()` must not get its `text.byte_len()` /
+    /// `text.char_count()` calls rebound to that method. Driven through the
+    /// real `mangle_mir` so the local suffix index is the production one.
+    #[test]
+    fn local_struct_len_never_captures_text_byte_len() {
+        use crate::mir::{MirFunction, MirInst, MirModule, Terminator};
+
+        fn func(name: &str, insts: Vec<MirInst>) -> MirFunction {
+            let mut func =
+                MirFunction::new(name.to_string(), crate::hir::TypeId::I64, simple_parser::Visibility::Private);
+            func.blocks[0].instructions.extend(insts);
+            func.blocks[0].terminator = Terminator::Return(None);
+            func
+        }
+        fn method(name: &str) -> MirInst {
+            MirInst::MethodCallStatic {
+                dest: None,
+                receiver: crate::mir::VReg(0),
+                func_name: name.to_string(),
+                args: vec![],
+            }
+        }
+
+        let names = ["byte_len", "str.byte_len", "text.byte_len", "char_count", "str.char_count"];
+        let mut insts: Vec<MirInst> = names.iter().map(|name| method(name)).collect();
+        insts.push(MirInst::Call {
+            dest: None,
+            target: CallTarget::Pure("byte_len".to_string()),
+            args: vec![crate::mir::VReg(0)],
+        });
+        // Control: the legacy `Owner_method` spelling still binds by suffix.
+        insts.push(method("IncrChangeSet_len"));
+
+        let mut mir = MirModule::new();
+        mir.functions.push(func("IncrChangeSet.len", vec![]));
+        mir.functions.push(func("IncrChangeSet.count", vec![]));
+        mir.functions.push(func("digest_valid", insts));
+        super::mangle_mir(
+            &mut mir,
+            "driver__incremental",
+            false,
+            &HashMap::new(),
+            &std::collections::HashSet::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        let emitted: Vec<String> = mir.functions[2].blocks[0]
+            .instructions
+            .iter()
+            .map(|inst| match inst {
+                MirInst::MethodCallStatic { func_name, .. } => func_name.clone(),
+                MirInst::Call { target, .. } => target.name().to_string(),
+                other => panic!("unexpected instruction {other:?}"),
+            })
+            .collect();
+        let mut expected: Vec<String> = names.iter().map(|name| name.to_string()).collect();
+        expected.push("byte_len".to_string());
+        expected.push("driver__incremental__IncrChangeSet.len".to_string());
+        assert_eq!(emitted, expected);
+    }
+
+    /// The same defect from SOURCE: the shape of `incremental.spl:1026` lowered
+    /// by the real HIR/MIR pipeline, so the name the mangler receives is the
+    /// one lowering actually emits rather than a hand-written one.
+    #[test]
+    fn source_struct_len_never_captures_unwrapped_text_byte_len() {
+        use crate::mir::MirInst;
+
+        const SOURCE: &str = "struct ChangeSet:\n    changes: [i64]\n\nimpl ChangeSet:\n    fn len() -> i64:\n        self.changes.len()\n\nfn digest_valid(digest_opt: text?) -> bool:\n    if digest_opt == nil:\n        return false\n    val digest = digest_opt.unwrap()\n    if digest.byte_len() != 64:\n        return false\n    true\n";
+
+        fn byte_len_calls(mir: &crate::mir::MirModule) -> Vec<String> {
+            let func = mir
+                .functions
+                .iter()
+                .find(|func| func.name.ends_with("digest_valid"))
+                .expect("digest_valid must be lowered");
+            func.blocks
+                .iter()
+                .flat_map(|block| block.instructions.iter())
+                .filter_map(|inst| match inst {
+                    MirInst::MethodCallStatic { func_name, .. } => Some(func_name.clone()),
+                    MirInst::Call { target, .. } => Some(target.name().to_string()),
+                    _ => None,
+                })
+                .filter(|name| name.contains("len"))
+                .collect()
+        }
+
+        let mut parser = simple_parser::Parser::new(SOURCE);
+        let parsed = parser.parse().expect("fixture must parse");
+        let hir = crate::hir::lower::lower(&parsed).expect("fixture must lower to HIR");
+        let mut mir = crate::mir::lower_to_mir(&hir).expect("fixture must lower to MIR");
+        assert!(
+            mir.functions.iter().any(|func| func.name == "ChangeSet.len"),
+            "the struct method must be a local `Owner.method` function"
+        );
+        let before = byte_len_calls(&mir);
+        assert!(
+            before.iter().any(|name| name == "byte_len" || name.ends_with(".byte_len")),
+            "lowering must hand the mangler a `byte_len` method name, got {before:?}"
+        );
+
+        super::mangle_mir(
+            &mut mir,
+            "driver__incremental",
+            false,
+            &HashMap::new(),
+            &std::collections::HashSet::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(byte_len_calls(&mir), before, "mangling must not rebind text.byte_len");
+    }
+
+    /// A real user `byte_len` is still an exact suffix candidate and binds.
+    #[test]
+    fn exact_user_byte_len_candidate_still_binds() {
+        let idx = HashMap::from([(
+            "byte_len".to_string(),
+            vec!["os__loader__byte_utils__byte_len".to_string()],
+        )]);
+        assert_eq!(run_call_target("byte_len", &idx), "os__loader__byte_utils__byte_len");
     }
 }
 

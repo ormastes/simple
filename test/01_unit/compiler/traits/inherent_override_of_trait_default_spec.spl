@@ -1,0 +1,45 @@
+"""
+# Inherent override of a trait default method (Phase-3 run-16 regression).
+#
+# The trait impl block does NOT write `map_array`; a separate inherent
+# `impl Mapper16:` block, written AFTER the trait impl, does. HIR trait-default
+# injection checked only the trait impl's own method table, so it synthesized
+# the default body under `Mapper16::map_array` as well -- two bodies under one
+# owner-qualified symbol. Cranelift AOT rejected the module with
+# "Duplicate definition of identifier: ...Mapper16.map_array"
+# (plugins.backend_cuda.cuda_type_mapper, Phase-3 run-16).
+#
+# Native red/green reproduction (aarch64, cranelift, producer p2shard-9):
+# a one-file native-build of this shape fails with the duplicate definition;
+# with the fix the written method is bound and no default is injected.
+# Not executed in this change (no rebuilt compiler available yet).
+"""
+
+trait Mapper16Trait:
+    fn map_one(n: i64) -> text
+    fn map_array(n: i64, size: i64) -> text:
+        "[{size} x {self.map_one(n)}]"
+    fn map_tuple(n: i64) -> text:
+        "default-tuple{n}"
+
+struct Mapper16:
+    tag: text
+
+impl Mapper16Trait for Mapper16:
+    fn map_one(n: i64) -> text:
+        "i{n}"
+
+impl Mapper16:
+    fn map_array(n: i64, size: i64) -> text:
+        "{self.map_one(n)}[{size}]"
+
+describe "inherent override of a trait default method":
+    """The inherent body wins and the untouched default stays injected."""
+
+    it "direct call runs the inherent override, not the trait default":
+        val m = Mapper16(tag: "t")
+        expect(m.map_array(1, 4)).to_equal("i1[4]")
+
+    it "a default that nothing overrides still runs its own body":
+        val m = Mapper16(tag: "t")
+        expect(m.map_tuple(2)).to_equal("default-tuple2")

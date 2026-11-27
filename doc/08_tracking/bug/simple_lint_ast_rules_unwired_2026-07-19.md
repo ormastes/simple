@@ -15,3 +15,10 @@
   owner, while the query/LSP semantic leaf now ignores named calls.
 - **Remaining fix:** route wildcard-import/export semantic leaves through the
   CLI-owned parsed adapter, then qualify the exact fresh Stage 4 binary.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+partially fixed / stage-4 qualification pending per in-file status; owner: lint lane.

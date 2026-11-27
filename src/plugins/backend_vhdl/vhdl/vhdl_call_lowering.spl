@@ -1,3 +1,4 @@
+#![allow(REQC004)]
 # VHDL Call Lowering — Lower @hardware function calls to entity instances.
 #
 # Implements AC-2 (hardware call lowering) for the VHDL RISC-V gap plan.
@@ -12,11 +13,19 @@
 
 use plugins.backend_vhdl.vhdl.vhdl_hardware_metadata.{HardwareAttr, ReturnLabel, HardwareCallInstance, CallLowerResult, PortMapEntry, deterministic_instance_name}
 use compiler.mir.mir_data.*
+use compiler.mir.mir_instruction_support.{MirCallOrigin}
 use compiler.mir.mir_instructions.{MirModule, MirFunction}
 use compiler.backend.backend.backend_types.{CompileError}
 use plugins.backend_vhdl.vhdl.vhdl_builder.VhdlBuilder
 use plugins.backend_vhdl.vhdl.vhdl_helpers.{vhdl_sanitize_identifier, vhdl_function_is_hardware_entity}
 use plugins.backend_vhdl.vhdl_backend.VhdlBackend
+# impl VhdlBackend extension modules whose methods this impl calls (operand_to_vhdl, local_type, backend_error, ...):
+# a method defined in another module is only resolvable when that module is imported here.
+use plugins.backend_vhdl.vhdl_validation.*
+use plugins.backend_vhdl.vhdl_codegen_helpers.*
+use plugins.backend_vhdl.vhdl_entity_compile.*
+use plugins.backend_vhdl.vhdl_process.*
+use plugins.backend_vhdl.vhdl_expr.*
 use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
 
 # ============================================================================
@@ -272,6 +281,7 @@ fn allocate_temp_signals(attr: HardwareAttr, inst_name: text) -> [TempSignal]:
 
 impl VhdlBackend:
     fn direct_hardware_callee(operand: MirOperand) -> MirFunction?:
+        if operand.call_origin != MirCallOrigin.Source: return nil
         match operand.kind:
             case Const(value, _):
                 match value:
@@ -289,7 +299,7 @@ impl VhdlBackend:
             case _: nil
 
     fn hardware_call_uses_port_map(caller: MirFunction, operand: MirOperand) -> bool:
-        caller.has_vhdl_metadata and caller.vhdl_metadata.has_clocked and self.direct_hardware_callee(operand).?
+        caller.has_vhdl_metadata and caller.vhdl_metadata.has_clocked and self.direct_hardware_callee(operand).is_some()
 
     fn hardware_call_name_is_reserved(func: MirFunction, name: text) -> Result<bool, CompileError>:
         val folded = name.to_lower()
@@ -852,7 +862,7 @@ impl VhdlBackend:
         Ok(())
 
     fn call_is_lowered_hardware_entity(operand: MirOperand) -> bool:
-        self.active_hardware_calls_use_port_maps and self.direct_hardware_callee(operand).?
+        self.active_hardware_calls_use_port_maps and self.direct_hardware_callee(operand).is_some()
 
 fn main():
     print("vhdl_call_lowering loaded")

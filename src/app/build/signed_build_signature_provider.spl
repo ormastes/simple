@@ -15,6 +15,7 @@ use std.nogc_sync_mut.io.process_ops.{OwnedExecutablePin}
 use std.common.string_core.{text_to_bytes}
 use std.common.crypto.types.{bytes_to_hex}
 use std.common.crypto.sha256.{sha256_text}
+use app.build.host_path_policy.{build_host_abs_path_valid_v1}
 
 val SIGNED_BUILD_SSH_NAMESPACE_V2 = "simple-build-v2"
 val SIGNED_BUILD_SSH_MAX_SIGNATURE_V2: i64 = 16384
@@ -45,11 +46,7 @@ fn _signature_rejected_v2(reason: text,
             "UNAUTHORIZED", "UNKNOWN", "", ""))
 
 fn _signature_path_v2(path: text) -> bool:
-    path.starts_with("/") and path.len() > 1 and path.len() <= 4096 and
-        not path.ends_with("/") and not path.contains("//") and
-        not path.contains("\n") and not path.contains("\r") and
-        not path.split("/").contains(".") and
-        not path.split("/").contains("..")
+    build_host_abs_path_valid_v1(path, false, false, 4096, 4096)
 
 fn _signature_digest_v2(value: text) -> bool:
     if value.len() != 64: return false
@@ -77,7 +74,7 @@ fn _signature_policy_copy_v2(source: text, destination: text,
        not file_is_regular_no_follow(destination) or
        file_size_raw(destination) <= 0 or
        file_size_raw(destination) > SIGNED_BUILD_SSH_MAX_POLICY_FILE_V2 or
-       file_hash_sha256(destination) != expected_digest:
+       not _file_sha256_matches_v1(destination, expected_digest):
         return false
     file_fsync(destination)
 
@@ -140,7 +137,7 @@ fn verify_signed_build_ssh_signature_v2(wire: text,
         config: SignedBuildSshProviderConfigV2) -> SignedBuildSignatureProbeV2:
     """Return VERIFIED only after a pinned OpenSSH process checks exact bytes."""
     val parsed = parse_signed_build_receipt_wire_v2(wire)
-    if parsed == nil:
+    if parsed.is_none():
         return _signature_rejected_v2("receipt-invalid", "")
     val receipt = parsed.unwrap()
     if receipt.build.signer_id != expected.build.allowed_signer_id or
@@ -211,3 +208,9 @@ fn verify_signed_build_private_artifact_with_ssh_v2(
         artifact_parent, artifact_limit)
 
 export verify_signed_build_private_artifact_with_ssh_v2
+
+# Absent/unreadable file == mismatch: a missing digest never matches.
+fn _file_sha256_matches_v1(path: text, expected: text) -> bool:
+    if val digest = file_hash_sha256(path):
+        return digest == expected
+    false

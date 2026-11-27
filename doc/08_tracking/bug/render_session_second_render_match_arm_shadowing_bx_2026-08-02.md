@@ -1,6 +1,20 @@
 # Second full-layout render on one SimpleWebRenderSession dies: "WebLayoutManager has no field bx"
 ## Closed 2026-09-16 — ... one session (documented in-spec). ## Fix directions Either rename the arm binding (cheap,
 
+## Re-verification 2026-11-25 (p2w4-ac lane, release/1.0.0)
+
+The cheap fix direction ("rename the arm binding") is landed in current
+source. `src/lib/gc_async_mut/gpu/browser_engine/simple_web_render_session.spl:355`
+now binds the match arm as `Some(retained_manager):` — no longer the
+same-named `retained` — and carries an explicit NOTE (:348-350) citing this
+exact bug ("the arm binding is deliberately NOT named `retained`"). The outer
+`retained` local (:335) is untouched by the arm. Verified by code inspection;
+a live two-render repro under the interpreter is blocked on this host by the
+known seed rejection of `@representation_boundary` at release/1.0.0 HEAD, so
+no new `Results:` line was obtained. The family-level interpreter match-arm
+scope leak remains a separate, known issue. Status unchanged: CLOSED (local
+fix landed).
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
 fresh dated repro if the symptom returns.

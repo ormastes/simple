@@ -1,7 +1,7 @@
 # `Native — macOS aarch64` red on `main`: `rust-bootstrap-multiplatform.yml` never installs freetype
 
 - **Filed:** 2026-09-01
-- **Status:** OPEN — pre-existing on `main`, NOT caused by any open PR
+- **Status:** SUPERSEDED (triage 2026-11-11, lane boot21; first triaged 2026-11-10 lane boot5) — freetype install verified present on every OS row of `rust-bootstrap-multiplatform.yml` at HEAD `d552f63f67f8`; only closure evidence outstanding is a native macOS workflow run, not obtainable from a Windows lane
 - **Lane:** `.github/workflows/rust-bootstrap-multiplatform.yml`, job `native`, step `Test`
 - **Severity:** blocks every macOS row of that workflow; every PR touching its trigger paths shows a red macOS check
 
@@ -98,3 +98,40 @@ error, add the corresponding install rather than reclassifying this record.
 | #253 (`52f6af5b9a7`) | queued | expected YES — triggers the same workflow |
 | #247 (`bee1f952460`) | no macOS check-run | no — workflow not triggered by its paths |
 | #235 (`a2475e29cc2`) | no macOS check-run | no — workflow not triggered by its paths |
+
+## Source reconciliation — 2026-11-03
+
+At release `8b473cc8b35a634a291f8d815888558dd7f9fffd`, the native workflow's macOS dependency step already runs `brew install coreutils freetype zstd llvm`, adds the freetype library to `RUSTFLAGS` and `LIBRARY_PATH`, and exports its include directory in `CPATH`. The original missing-install diagnosis above is historical. No duplicate installation patch was made.
+
+Registry status is now `fix-implemented-verification-pending`. This reconciliation inspected source; it did not execute the macOS workflow or establish native link qualification. A native job covering the existing `spl_fonts` link remains the closure evidence.
+
+## 2026-11-10 P3-boot5 triage (row 35) — SUPERSEDED
+
+Fix verified present in-tree at `origin/release/1.0.0` (HEAD `4343ce254922`),
+advancing this record's 2026-11-03 source reconciliation from
+fix-implemented-verification-pending to source-verified:
+`.github/workflows/rust-bootstrap-multiplatform.yml` job `native` now installs
+freetype on every OS — Linux `apt-get install -y libfreetype6-dev` (:355, :862),
+macOS `brew install coreutils freetype zstd llvm` with
+`RUSTFLAGS=-L native=$(brew --prefix freetype)/lib`, `LIBRARY_PATH` and `CPATH`
+exports (:392-398), Windows `vcpkg install freetype:x64-windows` (:414). A
+native macOS workflow run remains the only unexecuted closure evidence and is
+not obtainable from a Windows lane.
+
+
+## 2026-11-11 P3-boot21 triage — SUPERSEDED (header flip)
+
+Fresh re-verification of the 2026-11-10 boot5 disposition (not flipped then),
+at HEAD `d552f63f67f8` in the lane worktree:
+
+- `.github/workflows/rust-bootstrap-multiplatform.yml` installs freetype on
+  every OS row of job `native`: Linux `libfreetype6-dev` (:355 and :862),
+  macOS `brew install coreutils freetype zstd llvm` with
+  `RUSTFLAGS=-L native=$(brew --prefix freetype)/lib`, `LIBRARY_PATH` and
+  `CPATH` exports (:392-398), Windows `vcpkg install freetype:x64-windows`
+  (:414) — byte-for-byte the pattern this record proposed.
+
+A native macOS workflow run remains the only unexecuted closure evidence and
+is not obtainable from a Windows lane; the record's own source-reconciliation
+status ("fix-implemented-verification-pending") is advanced to
+source-re-verified. No code change this lane; header flipped.

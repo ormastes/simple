@@ -19,3 +19,15 @@ evidence before another isolated attempt.
 
 Run `sh scripts/check/check-bootstrap-stage2-resume-platform.shs` for the bounded
 platform-path regression (24 cases, no compiler or admission execution).
+
+The transcript also carries resource-owner scheduling rows that are prepended
+after constructor validation. Windows resumes require the complete five-row
+frontend policy with the producer's fixed controls and valid scheduling share.
+The recorded effective share is exported for replay; a conflicting ambient
+`SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB` is refused. POSIX budget-only rows
+and legacy transcripts without scheduling rows are supported. Unknown or
+duplicate environment names remain forbidden. The new attempt still produces
+fresh resource and admission evidence.
+
+Run `sh scripts/check/check-bootstrap-stage2-resume-frontend.shs` for the 26-case
+policy validation regression.

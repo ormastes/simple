@@ -1,0 +1,40 @@
+# @req REQ-SSPEC-COMPILER
+"""
+Purpose: a HIR cache entry stored by one build process must be a hit for the
+next process with identical inputs.
+
+Root cause being pinned: the entry header folds frontend_parse_cache_scope()
+(= the published SIMPLE_FRONTEND_CACHE_SCOPE), which embeds
+native_build_frontend_identity(). When the build cwd has no
+src/compiler/10.frontend tree (a deployed compiler building an external
+project) the identity used to be `uncacheable-<pid>-<micros>`, unique per
+process, so every reload was `rejected=header`. The two "processes" below
+differ only in their per-process token.
+"""
+
+use std.spec
+use compiler.driver.driver_build.incremental.{native_build_frontend_identity_from}
+use compiler.driver.driver_hir_cache.{
+    hir_cache_path, hir_cache_key
+}
+
+
+val EXE = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+describe "HIR cache hit across processes":
+    it "gives the same frontend identity in two processes when the frontend source tree is absent":
+        val a = native_build_frontend_identity_from(EXE, "", "111-1")
+        val b = native_build_frontend_identity_from(EXE, "", "222-2")
+        expect(a).to_equal(b)
+
+    it "still refuses a cache scope when the compiler executable is unknown":
+        val a = native_build_frontend_identity_from("", "", "111-1")
+        val b = native_build_frontend_identity_from("", "", "222-2")
+        expect(a == b).to_equal(false)
+
+    it "writes two distinct files for two targets":
+        val src = "test/fixtures/compiler/hir_cache_source_identity/left.spl"
+        val a = hir_cache_key(src, "closure", true, "", "aarch64-unknown-simpleos")
+        val b = hir_cache_key(src, "closure", true, "", "x86_64-unknown-simpleos")
+        expect(a.len()).to_equal(64)
+        expect(hir_cache_path(a, true) == hir_cache_path(b, true)).to_equal(false)

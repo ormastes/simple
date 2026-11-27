@@ -58,6 +58,9 @@ typedef long off_t;
 #ifndef O_CREAT
 #define O_CREAT 0x0040
 #endif
+#ifndef O_NOFOLLOW
+#define O_NOFOLLOW 0x20000   /* must match include/fcntl.h */
+#endif
 
 /* Forward declarations for functions defined in other libc .c files
    or later in this file. Needed because we don't include full headers. */
@@ -121,11 +124,15 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
     return (void *)(uintptr_t)r;
 }
 
-int munmap(void *addr, size_t length) {
-    int64_t r = simpleos_syscall(11, (int64_t)(uintptr_t)addr, (int64_t)length,
-                                  0, 0, 0);
+/* 0 on success, -1 with errno set when a syscall result is negative. */
+static int syscall_status(int64_t r) {
     if (r < 0) return set_errno(r);
     return 0;
+}
+
+int munmap(void *addr, size_t length) {
+    return syscall_status(simpleos_syscall(11, (int64_t)(uintptr_t)addr,
+                                           (int64_t)length, 0, 0, 0));
 }
 
 /* SimpleOS syscall 12 == mprotect, implemented in the kernel by
@@ -135,10 +142,8 @@ int munmap(void *addr, size_t length) {
  * pulled runtime_memory.o (rt_alloc / rt_free guard pages) failed with an
  * undefined reference. This is the wrapper, not a stub. */
 int mprotect(void *addr, size_t length, int prot) {
-    int64_t r = simpleos_syscall(12, (int64_t)(uintptr_t)addr, (int64_t)length,
-                                  (int64_t)prot, 0, 0);
-    if (r < 0) return set_errno(r);
-    return 0;
+    return syscall_status(simpleos_syscall(12, (int64_t)(uintptr_t)addr,
+                                           (int64_t)length, (int64_t)prot, 0, 0));
 }
 
 /* ====================================================================
@@ -305,7 +310,7 @@ ssize_t read(int fd, void *buf, size_t count) {
 int open(const char *path, int flags, ...) {
     size_t pathlen = strlen(path);
     int64_t r = simpleos_syscall(30, (int64_t)(uintptr_t)path, (int64_t)pathlen,
-                                  (int64_t)flags, 0, 0);
+                                  (int64_t)(flags & ~O_NOFOLLOW), 0, 0);
     if (r < 0) return set_errno(r);
     return (int)r;
 }
@@ -347,15 +352,20 @@ static void fmt_puts(fmt_state *st, const char *s) {
     while (*s) fmt_putc(st, *s++);
 }
 
+/* Emit digits (stored in reverse in tmp) padded to width */
+static void fmt_emit_digits(fmt_state *st, const char *tmp, int len, int width, int zero_pad) {
+    char pad = zero_pad ? '0' : ' ';
+    for (int i = len; i < width; i++) fmt_putc(st, pad);
+    for (int i = len - 1; i >= 0; i--) fmt_putc(st, tmp[i]);
+}
+
 /* Unsigned decimal */
 static void fmt_u64(fmt_state *st, uint64_t v, int width, int zero_pad) {
     char tmp[21];
     int  len = 0;
     if (v == 0) { tmp[len++] = '0'; }
     else { while (v) { tmp[len++] = '0' + (char)(v % 10); v /= 10; } }
-    char pad = zero_pad ? '0' : ' ';
-    for (int i = len; i < width; i++) fmt_putc(st, pad);
-    for (int i = len - 1; i >= 0; i--) fmt_putc(st, tmp[i]);
+    fmt_emit_digits(st, tmp, len, width, zero_pad);
 }
 
 /* Signed decimal */
@@ -381,9 +391,7 @@ static void fmt_hex(fmt_state *st, uint64_t v, int upper, int width, int zero_pa
     int  len = 0;
     if (v == 0) { tmp[len++] = '0'; }
     else { while (v) { tmp[len++] = digits[v & 0xF]; v >>= 4; } }
-    char pad = zero_pad ? '0' : ' ';
-    for (int i = len; i < width; i++) fmt_putc(st, pad);
-    for (int i = len - 1; i >= 0; i--) fmt_putc(st, tmp[i]);
+    fmt_emit_digits(st, tmp, len, width, zero_pad);
 }
 
 /* Float formatting helper — implemented in simpleos_printf_float.c */

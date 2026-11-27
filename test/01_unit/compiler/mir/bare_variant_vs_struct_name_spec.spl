@@ -1,0 +1,52 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Bare variant pattern vs same-named struct
+
+Bug: match_variant_pattern_shadowed_by_struct_name_2026-10-24. In
+`match last.kind: case Expr(e): ...` a bare variant `Expr` of the subject enum
+must resolve to that variant even when a struct named `Expr` is also visible.
+MIR used to fail with "enum match: unsupported arm pattern (Struct)".
+"""
+
+# @tag: unit, compiler, mir, match
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+val DECLS: text = "struct Expr:\n    id: i64\n\nenum Kind:\n    Expr(e: Expr)\n    Return(e: Expr)\n    Other\n\nstruct Stmt:\n    kind: Kind\n\n"
+
+fn mir_error_count(src: text, needle: text) -> i64:
+    val parsed = parse_full_frontend(src, "testdata/bare_variant.spl", "bare_variant", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("testdata/bare_variant.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    val target_context = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+    val mir = lowering.lower_module(hir)
+    var n = 0
+    for err in lowering.errors:
+        if err.message.contains(needle):
+            n = n + 1
+    n
+
+fn src_for(arms: text) -> text:
+    DECLS + "fn f(s: Stmt) -> i64:\n    val r = match s.kind:\n" + arms + "    r\n"
+
+describe "bare variant shadowed by a same-named struct":
+    it "resolves a bare payload variant through the subject enum (field subject)":
+        val arms = "        case Expr(e):\n            e.id\n        case Return(e):\n            e.id\n        case _:\n            0\n"
+        expect(mir_error_count(src_for(arms), "unsupported arm pattern")).to_equal(0)
+    it "resolves a qualified variant with the same name":
+        val arms = "        case Kind.Expr(e):\n            e.id\n        case Kind.Return(e):\n            e.id\n        case _:\n            0\n"
+        expect(mir_error_count(src_for(arms), "unsupported arm pattern")).to_equal(0)
+    it "resolves bare variants on a typed parameter subject":
+        val src = DECLS + "fn g(k: Kind) -> i64:\n    val r = match k:\n        case Expr(e):\n            e.id\n        case _:\n            0\n    r\n"
+        expect(mir_error_count(src, "unsupported arm pattern")).to_equal(0)
+    it "still treats a struct-only name as a struct pattern":
+        val src = DECLS + "fn h(x: Expr) -> i64:\n    val r = match x:\n        case Expr(i):\n            i\n    r\n"
+        expect(mir_error_count(src, "unsupported arm pattern")).to_equal(0)

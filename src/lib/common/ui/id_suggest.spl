@@ -1,0 +1,106 @@
+# Shared "did you mean" suggestion algorithm for UI id diagnostics (UIE1001).
+#
+# Frozen contract: doc/04_architecture/ui/testing/typed_ui_interface_arch.md
+# §Contracts/Identity. One algorithm, one answer — the spec-side manifest
+# resolver (std.common.spec.ui_target_resolver) and the runtime-side SGTTI
+# driver (std.ui_test.sgtti) BOTH call into here, so an unknown id produces
+# the same suggestion list no matter which lane reported it.
+#
+# Semantics (frozen):
+#   1. Primary pass: Levenshtein edit distance <= 2 against each candidate.
+#   2. Fallback pass: only when the primary pass found nothing, substring
+#      containment in either direction (candidate contains wanted, or wanted
+#      contains candidate). Empty `wanted` never matches by containment.
+#   3. Result is deduplicated, sorted lexicographically, capped at 3.
+#
+# This module is deliberately dependency-free (text + ints only) so it can sit
+# under common.ui and be imported from both the common.spec lane and the
+# nogc_sync_mut.ui_test lane without dragging either lane into the other.
+
+val UI_ID_SUGGEST_MAX_DISTANCE: i64 = 2
+val UI_ID_SUGGEST_LIMIT: i64 = 3
+
+fn _min3(a: i64, b: i64, c: i64) -> i64:
+    var m = a
+    if b < m:
+        m = b
+    if c < m:
+        m = c
+    m
+
+# Levenshtein edit distance (small ids, plain DP over two rows).
+pub fn ui_id_edit_distance(a: text, b: text) -> i64:
+    val n = a.len()
+    val m = b.len()
+    var prev: [i64] = []
+    var j = 0
+    while j <= m:
+        prev.push(j)
+        j = j + 1
+    var i = 1
+    while i <= n:
+        var cur: [i64] = []
+        cur.push(i)
+        j = 1
+        while j <= m:
+            var cost = 1
+            if a[i - 1:i] == b[j - 1:j]:
+                cost = 0
+            cur.push(_min3(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost))
+            j = j + 1
+        prev = cur
+        i = i + 1
+    prev[m]
+
+fn _contains_text(items: [text], wanted: text) -> bool:
+    for item in items:
+        if item == wanted:
+            return true
+    false
+
+fn _sorted_texts(items: [text]) -> [text]:
+    var out: [text] = []
+    for item in items:
+        var rebuilt: [text] = []
+        var placed = false
+        for existing in out:
+            if not placed and item < existing:
+                rebuilt.push(item)
+                placed = true
+            rebuilt.push(existing)
+        if not placed:
+            rebuilt.push(item)
+        out = rebuilt
+    out
+
+fn _capped(items: [text]) -> [text]:
+    var out: [text] = []
+    for item in items:
+        if out.len() >= UI_ID_SUGGEST_LIMIT:
+            return out
+        out.push(item)
+    out
+
+# The one suggestion algorithm. `candidates` may contain duplicates and empty
+# strings (both are dropped). Never returns more than 3 entries.
+pub fn ui_id_suggestions(wanted: text, candidates: [text]) -> [text]:
+    var hits: [text] = []
+    for cand in candidates:
+        if cand != "" and ui_id_edit_distance(wanted, cand) <= UI_ID_SUGGEST_MAX_DISTANCE:
+            if not _contains_text(hits, cand):
+                hits.push(cand)
+    if hits.len() == 0 and wanted != "":
+        for cand in candidates:
+            if cand != "" and (cand.contains(wanted) or wanted.contains(cand)):
+                if not _contains_text(hits, cand):
+                    hits.push(cand)
+    _capped(_sorted_texts(hits))
+
+# Render a suggestion list as a comma-separated hint fragment. Empty list -> "".
+pub fn ui_id_suggestion_hint(suggestions: [text]) -> text:
+    var hint = ""
+    for s in suggestions:
+        if hint != "":
+            hint = hint + ", "
+        hint = hint + s
+    hint

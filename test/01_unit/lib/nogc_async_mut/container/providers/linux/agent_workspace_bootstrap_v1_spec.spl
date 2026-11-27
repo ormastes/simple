@@ -1,0 +1,60 @@
+# SOURCE_AUTHORED_NOT_RUN. Command-contract cases, not a fake subprocess oracle.
+use std.spec.{describe, it, expect}
+use std.common.contracts.container.agent_workspace_manifest_v1.*
+use std.nogc_async_mut.container.providers.linux.agent_workspace_bootstrap_git_v1.*
+use std.nogc_async_mut.container.providers.linux.agent_workspace_bootstrap_verify_v1.agent_worktree_porcelain_v1
+
+fn bootstrap_workspace_fixture_v1() -> AgentWorkspaceManifestV1:
+    val files = [AgentWorkspaceFileV1(source_name: "object", relative_path: "repo/objects/ab/" + "c".repeat(38),
+        digest: "d".repeat(64), size_bytes: 100)]
+    AgentWorkspaceManifestV1(profile_digest: "a".repeat(64), repository_ref: "source", revision_oid: "b".repeat(40),
+        object_format: "sha1", source_manifest_digest: agent_workspace_files_digest_v1(files, "sha1").unwrap(),
+        slot_binding_digest: "e".repeat(64), attempt_leaf: "attempt-one", bootstrap_digest: "1".repeat(64),
+        git_digest: "2".repeat(64), agent_digest: "3".repeat(64), files: files)
+
+describe "Fixed Linux Git worktree bootstrap command contract":
+    it "REQ-AGENT-BOOT-001 excludes old fsmonitor hook semantics and ambiguous versions":
+        expect(agent_git_version_supported_v1("git version 2.36.0\n")).to_equal(true)
+        expect(agent_git_version_supported_v1("git version 2.56.0\n")).to_equal(true)
+        for value in ["git version 2.35.1\n", "git version 2.35.2\n", "git version 2.43.0.windows.1\n",
+                "git version 3.0.0\n", "git version 2.57.0\n", "git version 02.43.0\n", "git version 2.43.0"]:
+            expect(agent_git_version_supported_v1(value)).to_equal(false)
+
+    it "REQ-AGENT-BOOT-002 uses typed exact-OID worktree operations without forced removal":
+        val manifest = bootstrap_workspace_fixture_v1()
+        val argv = agent_git_command_v1(4, "/workspace", manifest).unwrap()
+        expect(argv[0]).to_equal("/usr/bin/git")
+        expect(argv).to_contain("--detach")
+        expect(argv).to_contain("--checkout")
+        expect(argv[argv.len() - 1]).to_equal(manifest.revision_oid)
+        expect(argv).to_contain("/workspace/attempt-one/worktree")
+        expect(argv).to_contain("core.hooksPath=/dev/null")
+        expect(argv).to_contain("protocol.allow=never")
+        expect(argv.contains("--force")).to_equal(false)
+        val fsck = agent_git_command_v1(2, "/workspace", manifest).unwrap()
+        expect(fsck).to_contain("fsck")
+        expect(fsck).to_contain("--full")
+        expect(fsck).to_contain("--strict")
+        expect(agent_git_command_v1(9, "/workspace", manifest).is_err()).to_equal(true)
+
+    it "REQ-AGENT-BOOT-003 supplies a complete ordered private environment":
+        val environment = agent_git_environment_v1("/workspace", "attempt-one")
+        var previous = ""
+        var home = ""
+        var path = ""
+        for entry in environment:
+            expect(entry.key > previous).to_equal(true)
+            expect(entry.key.starts_with("LD_")).to_equal(false)
+            expect(entry.key.starts_with("GIT_CONFIG_KEY_")).to_equal(false)
+            if entry.key == "HOME": home = entry.value
+            if entry.key == "PATH": path = entry.value
+            previous = entry.key
+        expect(home).to_equal("/workspace/attempt-one/home")
+        expect(path).to_equal("/nonexistent")
+
+    it "REQ-AGENT-BOOT-004 requires exactly the two expected registered worktrees":
+        val manifest = bootstrap_workspace_fixture_v1()
+        val expected = agent_worktree_porcelain_v1("/workspace", manifest)
+        expect(expected).to_start_with("worktree /workspace/attempt-one/repo\u0000bare\u0000\u0000")
+        expect(expected).to_end_with("HEAD " + manifest.revision_oid + "\u0000detached\u0000\u0000")
+        expect(expected == agent_worktree_porcelain_v1("/different", manifest)).to_equal(false)

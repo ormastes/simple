@@ -124,12 +124,12 @@ val MTVEC_MODE_VECTORED: u64 = 1  # Interrupts to base + 4*cause
 val CAUSE_INTERRUPT_BIT: u64 = 0x8000000000000000
 
 # Interrupt causes (bit 63 set)
-val CAUSE_S_SOFTWARE_INTERRUPT: u64 = CAUSE_INTERRUPT_BIT | 1
-val CAUSE_M_SOFTWARE_INTERRUPT: u64 = CAUSE_INTERRUPT_BIT | 3
-val CAUSE_S_TIMER_INTERRUPT: u64 = CAUSE_INTERRUPT_BIT | 5
-val CAUSE_M_TIMER_INTERRUPT: u64 = CAUSE_INTERRUPT_BIT | 7
-val CAUSE_S_EXTERNAL_INTERRUPT: u64 = CAUSE_INTERRUPT_BIT | 9
-val CAUSE_M_EXTERNAL_INTERRUPT: u64 = CAUSE_INTERRUPT_BIT | 11
+pub val CAUSE_S_SOFTWARE_INTERRUPT: u64 = CAUSE_INTERRUPT_BIT | 1
+pub val CAUSE_M_SOFTWARE_INTERRUPT: u64 = CAUSE_INTERRUPT_BIT | 3
+pub val CAUSE_S_TIMER_INTERRUPT: u64 = CAUSE_INTERRUPT_BIT | 5
+pub val CAUSE_M_TIMER_INTERRUPT: u64 = CAUSE_INTERRUPT_BIT | 7
+pub val CAUSE_S_EXTERNAL_INTERRUPT: u64 = CAUSE_INTERRUPT_BIT | 9
+pub val CAUSE_M_EXTERNAL_INTERRUPT: u64 = CAUSE_INTERRUPT_BIT | 11
 
 # Synchronous exception causes (bit 63 clear)
 val CAUSE_INSN_MISALIGNED: u64 = 0
@@ -255,6 +255,7 @@ fn csr_is_supported(addr: u64) -> bool:
         i = i + 1
     false
 
+@when(riscv64 or riscv32):
 fn csr_read(addr: u64) -> u64:
     """Read a CSR (csrr). `addr` must be one of the CSR_* constants."""
     if csr_shim_active:
@@ -599,40 +600,83 @@ fn csr_read_write(addr: u64, value: u64) -> u64:
             case _:
                 panic("E-CSR-UNKNOWN: csr_read_write({addr}) has no intrinsic arm")
     csr_host_guard(old)
+@else:
+fn csr_read(addr: u64) -> u64:
+    """Read a CSR (csrr). `addr` must be one of the CSR_* constants."""
+    if csr_shim_active:
+        return csr_shim_read(addr)
+    if not csr_is_supported(addr):
+        panic("E-CSR-UNKNOWN: csr_read({addr}) has no intrinsic arm")
+    panic("E-INTRINSIC-HOST: CSR intrinsic executed on the host without csr_test_shim")
+    CSR_HOST_SENTINEL
+
+fn csr_write(addr: u64, value: u64):
+    """Write a CSR (csrw)."""
+    if csr_shim_active:
+        csr_shim_write(addr, value)
+        return
+    if not csr_is_supported(addr):
+        panic("E-CSR-UNKNOWN: CSR {addr} has no intrinsic arm")
+    panic("E-INTRINSIC-HOST: CSR intrinsic executed on the host without csr_test_shim")
+
+fn csr_set_bits(addr: u64, mask: u64):
+    """Set bits in a CSR (csrs) without touching the others."""
+    if csr_shim_active:
+        csr_shim_write(addr, csr_shim_read(addr) | mask)
+        return
+    if not csr_is_supported(addr):
+        panic("E-CSR-UNKNOWN: CSR {addr} has no intrinsic arm")
+    panic("E-INTRINSIC-HOST: CSR intrinsic executed on the host without csr_test_shim")
+
+fn csr_clear_bits(addr: u64, mask: u64):
+    """Clear bits in a CSR (csrc) without touching the others."""
+    if csr_shim_active:
+        val cur = csr_shim_read(addr)
+        csr_shim_write(addr, cur - (cur & mask))
+        return
+    if not csr_is_supported(addr):
+        panic("E-CSR-UNKNOWN: CSR {addr} has no intrinsic arm")
+    panic("E-INTRINSIC-HOST: CSR intrinsic executed on the host without csr_test_shim")
+
+fn csr_read_write(addr: u64, value: u64) -> u64:
+    """Atomically swap a CSR (csrrw), returning the old value."""
+    if csr_shim_active:
+        val old = csr_shim_read(addr)
+        csr_shim_write(addr, value)
+        return old
+    if not csr_is_supported(addr):
+        panic("E-CSR-UNKNOWN: csr_read_write({addr}) has no intrinsic arm")
+    panic("E-INTRINSIC-HOST: CSR intrinsic executed on the host without csr_test_shim")
+    CSR_HOST_SENTINEL
+@end
 
 # ============================================================================
-# MSTATUS Bitfield Helpers (using int.bits[lo..hi] sugar)
+# MSTATUS Bitfield Helpers
 # ============================================================================
 
 fn mstatus_get_mpp(status: u64) -> u64:
     """Extract Machine Previous Privilege from mstatus (bits 12:11)."""
-    status.bits[11..13]
+    (status >> 11) & 0x03
 
 fn mstatus_set_mpp(status: u64, mode: u64) -> u64:
     """Set Machine Previous Privilege in mstatus."""
-    var s = status
-    s.bits[11..13] = mode & 0x03
-    s
+    (status & ~MSTATUS_MPP_MASK) | ((mode & 0x03) << 11)
 
 fn mstatus_get_spp(status: u64) -> u64:
     """Extract Supervisor Previous Privilege from mstatus (bit 8)."""
-    status.bits[8..9]
+    (status >> 8) & 0x01
 
 fn mstatus_set_spp(status: u64, mode: u64) -> u64:
     """Set Supervisor Previous Privilege in mstatus."""
-    var s = status
-    s.bits[8..9] = mode & 0x01
-    s
+    (status & ~MSTATUS_SPP) | ((mode & 0x01) << 8)
 
 fn mstatus_get_fs(status: u64) -> u64:
     """Extract floating-point status (bits 14:13)."""
-    status.bits[13..15]
+    (status >> 13) & 0x03
 
 fn mstatus_set_fs(status: u64, fs: u64) -> u64:
     """Set floating-point status field."""
-    var s = status
-    s.bits[13..15] = fs & 0x03
-    s
+    (status & ~MSTATUS_FS_MASK) | ((fs & 0x03) << 13)
 
 # ============================================================================
 # MTVEC Helpers

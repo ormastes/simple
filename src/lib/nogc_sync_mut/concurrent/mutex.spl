@@ -10,9 +10,14 @@ declaring duplicate lock hooks.
 @unsafe(reason: "raw runtime mutex allocation ABI; contract: returned handle is runtime-owned", capabilities: [ffi])
 extern fn rt_mutex_new<T>(initial: T) -> i64
 @unsafe(reason: "raw runtime mutex lock ABI; contract: nil means stale or foreign handle", capabilities: [ffi])
-extern fn rt_mutex_lock<T>(mutex: i64) -> T
+# The result is the PROTECTED VALUE as an already-tagged word, or nil for a
+# stale handle. Declared `-> i64?` (not `-> i64`) so the slot is carried as a
+# tagged optional word without double-boxing into `T?`, while remaining concrete
+# for non-generic gate callers (`mutex_lock_gate`, `mutex_lock_gate_handle`).
+# See doc/08_tracking/bug/mutex_lock_i64_return_double_boxes_protected_value_2026-11-12.md
+extern fn rt_mutex_lock(mutex: i64) -> i64?
 @unsafe(reason: "raw runtime mutex try-lock ABI; contract: nil means contended or invalid handle", capabilities: [ffi])
-extern fn rt_mutex_try_lock<T>(mutex: i64) -> T
+extern fn rt_mutex_try_lock(mutex: i64) -> i64?
 @unsafe(reason: "raw runtime mutex unlock ABI; contract: one means released and zero means invalid handle", capabilities: [ffi])
 extern fn rt_mutex_unlock<T>(mutex: i64, new_value: T) -> i64
 
@@ -44,10 +49,13 @@ class Mutex:
     # doc/08_tracking/bug/any_typed_closure_param_destroys_value_2026-07-28.md).
     # `<T>` round-trips correctly; `Any` does not.
     # @tag:api
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in with_lock", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     fn with_lock<T>(f: fn(T) -> T) -> T:
-        val current = unsafe(capabilities: [ffi]):
+        val current: T? = unsafe(capabilities: [ffi]):
             rt_mutex_lock(self._handle)
-        val updated = f(current)
+        if current.is_none():
+            panic("E-SFFI-MUTEX-002: rt_mutex_lock failed on a stale or foreign handle")
+        val updated = f(current.unwrap())
         unsafe(capabilities: [ffi]):
             rt_mutex_unlock(self._handle, updated)
         updated
@@ -65,6 +73,7 @@ class Mutex:
     # lock would hand the caller a fabricated "protected value" while holding
     # nothing, so absence is surfaced instead of coalesced.
     # @tag:api
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in lock", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     fn lock<T>() -> T?:
         unsafe(capabilities: [ffi]):
             rt_mutex_lock(self._handle)
@@ -75,6 +84,7 @@ class Mutex:
     # Returns protected value if lock acquired successfully.
     # If successful, must call unlock() to release.
     # @tag:api
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in try_lock", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     fn try_lock<T>() -> T?:
         unsafe(capabilities: [ffi]):
             rt_mutex_try_lock(self._handle)
@@ -84,6 +94,7 @@ class Mutex:
     # new_value becomes the new protected value.
     # After unlock, other threads can acquire the lock.
     # @tag:api
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in unlock", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     fn unlock<T>(new_value: T) -> i64:
         unsafe(capabilities: [ffi]):
             rt_mutex_unlock(self._handle, new_value)
@@ -93,6 +104,7 @@ class Mutex:
 # Creates a new mutex protecting the given initial value.
 # Lock starts in unlocked state - first lock() succeeds immediately.
 # @tag:api
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in mutex_new", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn mutex_new<T>(initial: T) -> Mutex:
     val handle = unsafe(capabilities: [ffi]):
         rt_mutex_new(initial)
@@ -116,10 +128,13 @@ fn mutex_new<T>(initial: T) -> Mutex:
 # doc/08_tracking/bug/cross_module_closure_call_hangs_under_held_native_lock_2026-07-28.md
 #
 # Generic over `T` — see with_lock above for why `Any` is rejected here.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in mutex_with_lock", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn mutex_with_lock<T>(mutex: Mutex, f: fn(T) -> T) -> T:
-    val current = unsafe(capabilities: [ffi]):
+    val current: T? = unsafe(capabilities: [ffi]):
         rt_mutex_lock(mutex._handle)
-    val updated = f(current)
+    if current.is_none():
+        panic("E-SFFI-MUTEX-002: rt_mutex_lock failed on a stale or foreign handle")
+    val updated = f(current.unwrap())
     unsafe(capabilities: [ffi]):
         rt_mutex_unlock(mutex._handle, updated)
     updated
@@ -136,9 +151,12 @@ fn mutex_with_lock<T>(mutex: Mutex, f: fn(T) -> T) -> T:
 # Generic over `T` (f's real result type, e.g. the RwLock's protected value)
 # — `keep_value` stays `Any` on purpose: it is always the fixed gate
 # sentinel, never real data, so it never round-trips through user code.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in mutex_with_lock_keeping", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn mutex_with_lock_keeping<T, K>(mutex: Mutex, keep_value: K, f: fn() -> T) -> T:
-    unsafe(capabilities: [ffi]):
+    val held = unsafe(capabilities: [ffi]):
         rt_mutex_lock(mutex._handle)
+    if held == nil:
+        panic("E-SFFI-MUTEX-002: rt_mutex_lock failed on a stale or foreign handle")
     val result = f()
     unsafe(capabilities: [ffi]):
         rt_mutex_unlock(mutex._handle, keep_value)
@@ -146,42 +164,69 @@ fn mutex_with_lock_keeping<T, K>(mutex: Mutex, keep_value: K, f: fn() -> T) -> T
 
 # DEPRECATED: prefer mutex_with_lock — manual lock/unlock pairing is unguarded.
 # Optional for the same reason as Mutex.lock() above.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in mutex_lock", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn mutex_lock<T>(mutex: Mutex) -> T?:
     unsafe(capabilities: [ffi]):
         rt_mutex_lock(mutex._handle)
 
 # Non-generic gate lock for the exclusion-guard shape: callers that only test
 # nil vs non-nil and pair it with mutex_unlock(m, <integer sentinel>). The
-# generic mutex_lock<T> cannot be specialized by strict monomorphization here
+# generic mutex_lock<T> cannot be specialized here
 # because T is return-only and uninferable from the argument, and call-site
 # explicit type args are currently ignored (bug
 # mutex_lock_return_only_generic_needs_call_type_2026-10-10 — the
 # workaround comments at rt_hal/boundary.spl and mcdc/dynamic_probe.spl
 # predate this finding). Same runtime contract as mutex_lock<i64>.
-fn mutex_lock_gate(mutex: Mutex) -> i64?:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in mutex_lock_gate", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn mutex_lock_gate(mutex: Mutex) -> i64?:
     unsafe(capabilities: [ffi]):
         rt_mutex_lock(mutex._handle)
 
 # Optional: nil means the lock was already held (or the handle is not live).
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in mutex_try_lock", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn mutex_try_lock<T>(mutex: Mutex) -> T?:
     unsafe(capabilities: [ffi]):
         rt_mutex_try_lock(mutex._handle)
 
 # DEPRECATED: prefer mutex_with_lock — see mutex_lock.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in mutex_unlock", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn mutex_unlock<T>(mutex: Mutex, new_value: T) -> i64:
     unsafe(capabilities: [ffi]):
         rt_mutex_unlock(mutex._handle, new_value)
 
-# @workaround bug=p4p2_cross_module_generic_free_fn_not_instantiated_2026-10-20 reason=phase-2 producer emits no object symbol for generic free fns and leaves cross-module calls on the unspecialized name (lld-link: undefined symbol lib.nogc_sync_mut.concurrent.mutex.mutex_new/mutex_unlock); i64 gates mirror mutex_lock_gate
-fn mutex_new_gate(initial: i64) -> Mutex:
+# Non-generic i64 gate constructors/unlockers mirroring `mutex_lock_gate`.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in mutex_new_gate", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn mutex_new_gate(initial: i64) -> Mutex:
     val handle = unsafe(capabilities: [ffi]):
         rt_mutex_new(initial)
     Mutex(_handle: handle)
 
-# @workaround bug=p4p2_cross_module_generic_free_fn_not_instantiated_2026-10-20 reason=phase-2 producer emits no object symbol for generic free fns and leaves cross-module calls on the unspecialized name (lld-link: undefined symbol lib.nogc_sync_mut.concurrent.mutex.mutex_new/mutex_unlock); i64 gates mirror mutex_lock_gate
-fn mutex_unlock_gate(mutex: Mutex, new_value: i64) -> i64:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in mutex_unlock_gate", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn mutex_unlock_gate(mutex: Mutex, new_value: i64) -> i64:
     unsafe(capabilities: [ffi]):
         rt_mutex_unlock(mutex._handle, new_value)
 
+# Scalar-handle gate facade for process globals. The runtime owns this handle;
+# keeping it as i64 avoids storing a managed Mutex wrapper in a long-lived
+# module global that may first initialize during a build session.
+# @allow(primitive_api) raw runtime mutex handle kept scalar on purpose: a managed wrapper cannot live in a module global initialised mid build session
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in mutex_new_gate_handle", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn mutex_new_gate_handle(initial: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_mutex_new(initial)
+
+# @allow(primitive_api) raw runtime mutex handle kept scalar on purpose: a managed wrapper cannot live in a module global initialised mid build session
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in mutex_lock_gate_handle", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn mutex_lock_gate_handle(handle: i64) -> i64?:
+    unsafe(capabilities: [ffi]):
+        rt_mutex_lock(handle)
+
+# @allow(primitive_api) raw runtime mutex handle kept scalar on purpose: a managed wrapper cannot live in a module global initialised mid build session
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in mutex_unlock_gate_handle", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn mutex_unlock_gate_handle(handle: i64, new_value: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_mutex_unlock(handle, new_value)
+
 export Mutex
 export mutex_new, mutex_with_lock
+export mutex_new_gate_handle, mutex_lock_gate_handle, mutex_unlock_gate_handle

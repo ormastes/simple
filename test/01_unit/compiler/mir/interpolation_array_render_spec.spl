@@ -1,0 +1,74 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+`"{xs}"` on an array must render the array to text before the concat.
+
+Bug: doc/08_tracking/bug/native_interpolation_array_renders_empty_2026-11-26.md
+
+`lower_string_interpolation` sends each non-text slot through
+`coerce_concat_operand`, which renders scalars (rt_raw_*_to_string), Any
+(rt_value_to_string), tuples and chars, but has no array/dict arm: the raw
+array handle goes straight into `rt_strcat_tagged`, whose text view of a
+non-string word is empty, so `"interp={xs}"` prints `interp=` on native
+(aarch64 run and x86_64 object alike). The bare `print xs` path already
+routes `runtime_array_locals` and Dict/Struct/Enum through `rt_to_string`
+(switch_operators_calls.spl lower_bootstrap_print_call).
+"""
+
+use std.spec
+use std.io_runtime.{env_set}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+fn lower_fn_json(src: text, name: text, bootstrap: text) -> text:
+    val module = parse_full_frontend(src, "interp_array.spl", "interp_array.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("interp_array.spl")
+    env_set("SIMPLE_BOOTSTRAP", bootstrap)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    env_set("SIMPLE_BOOTSTRAP", "")
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.len()) else: function.name
+        if short == name:
+            return serialize_mir_function(function)
+    ""
+
+fn renders_to_text(mir: text) -> bool:
+    mir.contains("rt_to_string") or mir.contains("rt_value_to_string")
+
+val NL: text = "\n"
+
+val SOURCE: text = "fn show(xs: [i64]) -> text:" + NL +
+    "    return \"{{xs}}\"" + NL + NL +
+    "fn show_dict(d: {text: i64}) -> text:" + NL +
+    "    return \"{{d}}\"" + NL + NL +
+    "fn show_int(n: i64) -> text:" + NL +
+    "    return \"{{n}}\"" + NL
+
+describe "string interpolation renders aggregate slots to text":
+    it "renders an array slot through the runtime formatter (flat bootstrap path)":
+        val mir = lower_fn_json(SOURCE, "show", "1")
+        expect(mir == "").to_equal(false)
+        expect(renders_to_text(mir)).to_equal(true)
+
+    it "renders an array slot through the runtime formatter (typed path)":
+        val mir = lower_fn_json(SOURCE, "show", "")
+        expect(mir == "").to_equal(false)
+        expect(renders_to_text(mir)).to_equal(true)
+
+    it "renders a dict slot through the runtime formatter":
+        val mir = lower_fn_json(SOURCE, "show_dict", "1")
+        expect(mir == "").to_equal(false)
+        expect(renders_to_text(mir)).to_equal(true)
+
+    it "keeps the scalar renderer for an i64 slot on both paths (control)":
+        for bootstrap in ["1", ""]:
+            val mir = lower_fn_json(SOURCE, "show_int", bootstrap)
+            expect(mir.contains("rt_raw_i64_to_string")).to_equal(true)

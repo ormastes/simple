@@ -54,12 +54,12 @@ pub(super) fn eval_control_expr(
             // For move closures, we capture by value (clone the environment)
             // For regular closures, we share the environment reference
             // In the interpreter, both behave the same since we clone env anyway
-            let captured_env = if *capture_all {
+            let mut captured = if *capture_all {
                 let mut captured = env.clone();
                 // A capture must not pin the store version at capture time;
                 // exec_lambda re-points the scope before running the body.
                 captured.release_scope();
-                Arc::new(captured)
+                captured
             } else {
                 // Selective capture: only copy variables referenced in the lambda
                 // body. Must preserve global-binding metadata — a plain
@@ -68,8 +68,10 @@ pub(super) fn eval_control_expr(
                 // stale-arena-index class of bug on lambda global writes.
                 let used = collect_lambda_free_vars(body, params);
                 let used: HashSet<String> = used.iter().map(|s| s.to_string()).collect();
-                Arc::new(env.project_preserving_bindings(&used))
+                env.project_preserving_bindings(&used)
             };
+            crate::interpreter::interpreter_module::stamp_closure_origin(&mut captured);
+            let captured_env = Arc::new(captured);
             Ok(Some(Value::Lambda {
                 params: names,
                 body: body.clone(),
@@ -89,19 +91,22 @@ pub(super) fn eval_control_expr(
             } else {
                 None
             };
-            let cond_val = match cov_site {
-                Some((line, column, sub)) if let_pattern.is_none() => crate::interpreter::eval_decision_cond(
-                    condition,
-                    line,
-                    column,
-                    sub,
-                    env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?,
-                _ => evaluate_expr(condition, env, functions, classes, enums, impl_methods)?,
+            let cond_val = {
+                let _clear_cond_target = crate::interpreter::push_expected_target_type(None);
+                match cov_site {
+                    Some((line, column, sub)) if let_pattern.is_none() => crate::interpreter::eval_decision_cond(
+                        condition,
+                        line,
+                        column,
+                        sub,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?,
+                    _ => evaluate_expr(condition, env, functions, classes, enums, impl_methods)?,
+                }
             };
             // `let_pattern` is the `val NAME =` of `if val NAME = EXPR:`. It
             // used to be discarded here by a `..` in this destructure, so an
@@ -117,13 +122,17 @@ pub(super) fn eval_control_expr(
             // both forms agree -- including on the "0 is falsy" landmine
             // (`Some(0)` is PRESENT and must take the then-branch).
             let mut pattern_decision: Option<bool> = None;
+            // Pattern bindings shadow same-named modules/globals only while the
+            // chosen branch runs; restored right after (not frame-permanent).
+            let mut scope_saved: Vec<(String, Option<Value>)> = Vec::new();
             if let Some(pattern) = let_pattern {
-                match crate::interpreter::interpreter_control::optional_let_binding(pattern, &cond_val) {
+                match crate::interpreter::interpreter_control::optional_let_binding_condition(pattern, &cond_val, condition)? {
                     crate::interpreter::interpreter_control::LetBind::Bind(name, inner) => {
-                        // `mark_local` before `insert`, exactly as `exec_if_core`
-                        // does: without it `is_local(NAME)` stays false and the
-                        // identifier read prefers a same-named MODULE GLOBAL.
-                        env.mark_local(name.clone());
+                        // Block-local (not `mark_local`): without a local mark the
+                        // read prefers a same-named MODULE GLOBAL, but a
+                        // frame-permanent mark would hide the module afterwards.
+                        scope_saved.push((name.clone(), env.get(&name).cloned()));
+                        env.enter_block_local(name.clone());
                         env.insert(name, inner);
                         pattern_decision = Some(true);
                     }
@@ -133,10 +142,7 @@ pub(super) fn eval_control_expr(
                     crate::interpreter::interpreter_control::LetBind::NotApplicable => {
                         let mut bindings = HashMap::new();
                         if pattern_matches(pattern, &cond_val, &mut bindings, enums, classes)? {
-                            for (name, val) in bindings {
-                                env.mark_local(name.clone());
-                                env.insert(name, val);
-                            }
+                            scope_saved = crate::interpreter::bind_block_scope_shadows(bindings, env);
                             pattern_decision = Some(true);
                         } else {
                             pattern_decision = Some(false);
@@ -156,13 +162,19 @@ pub(super) fn eval_control_expr(
             if let Some((line, column, sub)) = cov_site {
                 crate::interpreter::record_decision_site(line, column, sub, take_then);
             }
+            // A DoBlock branch captures a clone of this frame below.
+            if matches!(if take_then { Some(then_branch.as_ref()) } else { else_branch.as_deref() }, Some(Expr::DoBlock(_))) {
+                crate::interpreter::interpreter_call::publish_before_block_clone(env);
+            }
             let branch_result = if take_then {
-                evaluate_expr(then_branch, env, functions, classes, enums, impl_methods)?
+                evaluate_expr(then_branch, env, functions, classes, enums, impl_methods)
             } else if let Some(else_b) = else_branch {
-                evaluate_expr(else_b, env, functions, classes, enums, impl_methods)?
+                evaluate_expr(else_b, env, functions, classes, enums, impl_methods)
             } else {
-                Value::Nil
+                Ok(Value::Nil)
             };
+            crate::interpreter::restore_block_scope_shadows(scope_saved, env);
+            let branch_result = branch_result?;
             // If branch returned a BlockClosure (from DoBlock), execute it immediately
             // This handles the case where if branches are parsed as DoBlock expressions
             let result = if let Value::BlockClosure {
@@ -200,7 +212,29 @@ pub(super) fn eval_control_expr(
             Ok(Some(result))
         }
         Expr::Match { subject, arms } => {
-            let subject_val = evaluate_expr(subject, env, functions, classes, enums, impl_methods)?;
+            // Resolve the subject's place up front: read the subject through
+            // it (index expressions evaluate exactly once) and merge arm
+            // payload-binding container mutations back through it after the
+            // matched arm ran (the two-hop place chain).
+            let (subject_place, subject_val) = {
+                let _clear_subj_target = crate::interpreter::push_expected_target_type(None);
+                let subject_place = crate::interpreter::place::resolve_place(
+                    subject,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                let subject_val = match &subject_place {
+                    Some(place) => match crate::interpreter::place::place_slot_ref(env, place) {
+                        Some(value) => value.clone(),
+                        None => evaluate_expr(subject, env, functions, classes, enums, impl_methods)?,
+                    },
+                    None => evaluate_expr(subject, env, functions, classes, enums, impl_methods)?,
+                };
+                (subject_place, subject_val)
+            };
 
             // Check pattern exhaustiveness for enums
             if let Value::Enum { enum_name, .. } = &subject_val {
@@ -249,23 +283,27 @@ pub(super) fn eval_control_expr(
 
             for arm in arms {
                 let mut arm_bindings = HashMap::new();
-                if pattern_matches(&arm.pattern, &subject_val, &mut arm_bindings, enums, classes)? {
+                if crate::interpreter::interpreter_patterns::match_arm_matches(&arm.pattern, &subject_val, &mut arm_bindings, enums, classes)? {
                     if let Some(guard) = &arm.guard {
                         let mut guard_env = env.clone();
                         for (name, value) in &arm_bindings {
+                            guard_env.enter_block_local(name.clone());
                             guard_env.insert(name.clone(), value.clone());
                         }
-                        let guard_val = crate::interpreter::eval_decision_cond(
-                            guard,
-                            arm.span.line,
-                            arm.span.column,
-                            crate::interpreter::SUB_GUARD,
-                            &mut guard_env,
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        )?;
+                        let guard_val = {
+                            let _clear_guard_target = crate::interpreter::push_expected_target_type(None);
+                            crate::interpreter::eval_decision_cond(
+                                guard,
+                                arm.span.line,
+                                arm.span.column,
+                                crate::interpreter::SUB_GUARD,
+                                &mut guard_env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?
+                        };
                         let guard_result =
                             crate::interpreter::interpreter_control::is_condition_present(guard, &guard_val);
                         crate::interpreter::record_decision_site(
@@ -278,6 +316,7 @@ pub(super) fn eval_control_expr(
                             continue;
                         }
                     }
+                    crate::interpreter::interpreter_call::publish_before_block_clone(env);
                     let mut arm_env = env.clone();
                     // Dirty-only write-back (see copy_back_block_writes): the
                     // old whole-env write-back iterated every VISIBLE entry,
@@ -288,6 +327,14 @@ pub(super) fn eval_control_expr(
                     // expression cost O(module globals). See bug
                     // seed_match_expression_return_arm_statement_cost_cliff_2026-08-22.
                     for (name, value) in arm_bindings {
+                        // Mark the arm binding block-local, exactly as the
+                        // statement form (`exec_match_core`) does. Without it
+                        // `is_local(name)` is false and the identifier read
+                        // (literals.rs) prefers a same-named MODULE_GLOBALS
+                        // entry, so `val s = match v: case String(value): value`
+                        // returned the imported `sdn.value` module namespace.
+                        // doc/08_tracking/bug/match_binding_shadowed_by_module_namespace_2026-08-18.md
+                        arm_env.enter_block_local(name.clone());
                         arm_env.insert(name, value);
                     }
                     // Pattern bindings are arm-local setup, not writes by the
@@ -303,6 +350,19 @@ pub(super) fn eval_control_expr(
                         // Use the *_core variants so explicit `return` statements inside the arm
                         // propagate upward rather than being collapsed into a value.
                         if is_last {
+                            // COVERAGE: the arm-tail `if`/`match` below run
+                            // through exec_if_core / exec_match_core, not
+                            // exec_node, so the header of the last statement
+                            // of an arm of a value-position `match`
+                            // (`val r = match`, `return match`) ran unrecorded
+                            // -- the twin of the tail record in exec_block_fn.
+                            // Only for If/Match: any other tail falls through to
+                            // exec_node below, which records it itself (under the
+                            // invoker inside a closure body, which would put a
+                            // lambda line in a second file).
+                            if matches!(stmt, Node::If(_) | Node::Match(_)) {
+                                crate::interpreter::coverage_helpers::record_node_coverage_lexical(stmt);
+                            }
                             match stmt {
                                 Node::Expression(expr) => {
                                     result =
@@ -355,7 +415,11 @@ pub(super) fn eval_control_expr(
                             }
                         }
 
-                        match exec_node(stmt, &mut arm_env, functions, classes, enums, impl_methods)? {
+                        let arm_ctrl = {
+                            let _non_tail_expected = crate::interpreter::push_expected_target_type(None);
+                            exec_node(stmt, &mut arm_env, functions, classes, enums, impl_methods)?
+                        };
+                        match arm_ctrl {
                             // A `return` inside an if/match EXPRESSION arm must propagate out of the
                             // function, not become the expression's value. Reuse the `?`-operator
                             // early-return channel (TryError), which is already caught at every
@@ -364,41 +428,60 @@ pub(super) fn eval_control_expr(
                             Control::Return(v) => return Err(CompileError::TryError(Box::new(v))),
                             Control::Break(..) => return Ok(Some(Value::Nil)),
                             Control::Continue(_) => break,
-                            Control::Next => {
-                                if let Node::Expression(expr) = stmt {
-                                    result =
-                                        evaluate_expr(expr, &mut arm_env, functions, classes, enums, impl_methods)?;
-                                }
-                            }
+                            // exec_node already ran the statement; re-evaluating a
+                            // non-last expression statement here ran its side
+                            // effects twice. The last statement's value is captured
+                            // above. See bug
+                            // seed_val_match_arm_with_return_runs_twice_2026_11_12.
+                            Control::Next => {}
                         }
                     }
                     // Write back only what the arm actually wrote.
                     crate::interpreter::block_exec::copy_back_block_writes(&arm_env, env);
+                    // Carry container mutations made through this arm's
+                    // payload bindings back into the match subject (payload
+                    // binding -> enum payload -> subject). Arm bindings live
+                    // only in `arm_env`; read their post-arm values before
+                    // the env clone is dropped. Scalar writes keep value
+                    // semantics (merge_shared_collection_fields).
+                    let binding_paths = crate::interpreter::interpreter_patterns::pattern_subject_binding_paths(
+                        &arm.pattern,
+                        &subject_val,
+                        classes,
+                    );
+                    if !binding_paths.is_empty() {
+                        let binding_values: Vec<(String, Value)> = binding_paths
+                            .iter()
+                            .filter_map(|(name, _)| {
+                                arm_env.get(name).cloned().map(|v| (name.clone(), v))
+                            })
+                            .collect();
+                        crate::interpreter::interpreter_patterns::merge_match_arm_subject_bindings(
+                            subject_place.as_ref(),
+                            &subject_val,
+                            &arm.pattern,
+                            &binding_values,
+                            env,
+                            classes,
+                        );
+                    }
                     return Ok(Some(result));
                 }
             }
-            let ctx = ErrorContext::new()
-                .with_code(codes::INVALID_PATTERN)
-                .with_help("add a wildcard pattern (_) or another pattern to handle this case");
-            let arm_patterns = arms
-                .iter()
-                .map(|arm| format!("{}:{} {:?}", arm.span.line, arm.span.column, arm.pattern))
-                .collect::<Vec<_>>()
-                .join(", ");
-            Err(CompileError::semantic_with_context(
-                format!(
-                    "invalid pattern: match expression exhausted without matching any pattern for {} value {}; arms [{}]",
-                    subject_val.type_name(),
-                    subject_val.to_display_string(),
-                    arm_patterns
-                ),
-                ctx,
+            Err(crate::interpreter::interpreter_control::match_no_arm_error(
+                "expression",
+                &subject_val,
+                arms,
             ))
         }
-        Expr::DoBlock(nodes) => Ok(Some(Value::BlockClosure {
-            nodes: nodes.clone(),
-            env: Arc::new(env.clone()),
-        })),
+        Expr::DoBlock(nodes) => {
+            let mut captured = env.clone();
+            crate::interpreter::interpreter_module::stamp_closure_origin(&mut captured);
+            Ok(Some(Value::BlockClosure {
+                nodes: nodes.clone(),
+                env: Arc::new(captured),
+            }))
+        }
         Expr::UnsafeBlock(nodes, _) => {
             let (flow, last_value) =
                 super::super::exec_unsafe_block(nodes, env, functions, classes, enums, impl_methods)?;
@@ -747,6 +830,9 @@ fn collect_free_vars_recursive(expr: &Expr, bound: &mut Vec<String>, vars: &mut 
         Expr::ArrayRepeat { value, count } => {
             collect_free_vars_recursive(value, bound, vars);
             collect_free_vars_recursive(count, bound, vars);
+        }
+        Expr::GenericInst { expr, .. } => {
+            collect_free_vars_recursive(expr, bound, vars);
         }
         Expr::Dict(entries) => {
             for (k, v) in entries {

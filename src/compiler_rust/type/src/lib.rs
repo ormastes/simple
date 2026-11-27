@@ -789,9 +789,16 @@ pub fn nogc_strict_requested(items: &[Node]) -> bool {
         Node::ModDecl(decl) => decl.attributes.iter().any(attribute_is_nogc_strict),
         _ => false,
     });
-    let first_decl = items
-        .iter()
-        .find(|node| !matches!(node, Node::UseStmt(_) | Node::ExportUseStmt(_)));
+    let first_decl = items.iter().find(|node| {
+        !matches!(
+            node,
+            Node::UseStmt(_)
+                | Node::ExportUseStmt(_)
+                | Node::FriendDecl(_)
+                | Node::InternalExportDecl(_)
+                | Node::LayerDecl(_)
+        )
+    });
     let first_item_attrs: &[simple_parser::ast::Attribute] = match first_decl {
         Some(Node::Function(f)) => &f.attributes,
         Some(Node::Class(c)) => &c.attributes,

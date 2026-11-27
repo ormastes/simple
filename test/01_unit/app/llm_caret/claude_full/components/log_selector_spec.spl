@@ -1,0 +1,398 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+As a user resuming a past session, I want the session picker to title, tag-filter,
+branch-filter, search and group my sessions, move focus predictably and render
+the list, preview and rename views, so that I can find the session I meant.
+"""
+use std.spec.step
+
+use std.spec.*
+use app.llm_caret.claude_full.components.LogSelector.*
+
+fn mk(path: text, modified: text, custom: text, summary: text, prompt: text, branch: text, tag: text, pr: text, project: text, count: i64, msgs: [SerializedMessage]) -> LogOption:
+    LogOption.new(path, modified, custom, summary, prompt, branch, tag, pr, "o/r", project, false, count, msgs)
+
+fn l1() -> LogOption:
+    mk("/a", "2026-01-02", "", "Fix bug", "", "main", "work", "12", "/p", 3, [SerializedMessage.new("s1", "user", "hello")])
+
+fn l2() -> LogOption:
+    mk("/b", "2026-01-03", "", "", "Add docs", "dev", "Alpha", "", "", 0, [SerializedMessage.new("s2", "user", "x")])
+
+fn l3() -> LogOption:
+    mk("/c", "2026-01-01", "Fork of fix", "", "", "", "", "", "", 0, [SerializedMessage.new("s1", "user", "hello")])
+
+fn l4() -> LogOption:
+    mk("/d", "2026-01-04", "", "", "", "", "", "", "", 0, [SerializedMessage.new("s4", "assistant", "reply")])
+
+fn logs3() -> [LogOption]:
+    [l1(), l2(), l3()]
+
+fn paths(logs: [LogOption]) -> [text]:
+    var out: [text] = []
+    for l in logs:
+        out.push(l.fullPath)
+    out
+
+fn main() -> ():
+    describe("LogSelector titles and tags", fn() -> ():
+        it("prefers custom title, then summary, prompt, first user message", fn() -> ():
+            step("prefers custom title, then summary, prompt, first user message")
+            expect(getLogDisplayTitleForSelector(l3())).to_equal("Fork of fix")
+            expect(getLogDisplayTitleForSelector(l1())).to_equal("Fix bug")
+            expect(getLogDisplayTitleForSelector(l2())).to_equal("Add docs")
+            val byMessage = mk("/m", "", "", "", "", "", "", "", "", 0, [SerializedMessage.new("a", "assistant", "no"), SerializedMessage.new("b", "user", "  first user  ")])
+            expect(getLogDisplayTitleForSelector(byMessage)).to_equal("first user")
+            expect(getLogDisplayTitleForSelector(l4())).to_equal("Untitled session")
+            expect(l1().displayTitle()).to_equal("Fix bug")
+        )
+
+        it("hides sessions that have no title source", fn() -> ():
+            step("hides sessions that have no title source")
+            expect(paths(filterLogSelectorVisibleTitles([l1(), l4(), l2()]))).to_equal(["/a", "/b"])
+            expect(logSelectorHasVisibleTitleSource(l4())).to_equal(false)
+            expect(logSelectorHasVisibleTitleSource(l3())).to_equal(true)
+        )
+
+        it("lists unique tags sorted case-insensitively with an All tab", fn() -> ():
+            step("lists unique tags sorted case-insensitively with an All tab")
+            val tags = getUniqueTags([l1(), l2(), l1()])
+            expect(tags).to_equal(["Alpha", "work"])
+            expect(logSelectorTagTabs(tags)).to_equal(["All", "Alpha", "work"])
+            expect(logSelectorTagTabs([])).to_equal([])
+            expect(logSelectorSelectedTag(["All", "x"], 1)).to_equal("x")
+            expect(logSelectorSelectedTag(["All", "x"], 9)).to_equal("All")
+            expect(logSelectorSelectedTag([], 0)).to_equal("")
+        )
+    )
+
+    describe("LogSelector filtering", fn() -> ():
+        it("shows every titled session on the All tab", fn() -> ():
+            step("shows every titled session on the All tab")
+            val s = LogSelectorState.new("", "/cwd")
+            expect(paths(logSelectorDisplayedLogs([l1(), l2(), l3(), l4()], s))).to_equal(["/a", "/b", "/c"])
+        )
+
+        it("narrows by the selected tag tab", fn() -> ():
+            step("narrows by the selected tag tab")
+            var s = LogSelectorState.new("", "/cwd")
+            s.selectedTagIndex = 2
+            expect(paths(logSelectorDisplayedLogs(logs3(), s))).to_equal(["/a"])
+            s.selectedTagIndex = 1
+            expect(paths(logSelectorDisplayedLogs(logs3(), s))).to_equal(["/b"])
+        )
+
+        it("narrows by current branch only when enabled", fn() -> ():
+            step("narrows by current branch only when enabled")
+            var s = LogSelectorState.new("", "/cwd")
+            s.currentBranch = "dev"
+            expect(logSelectorDisplayedLogs(logs3(), s).len()).to_equal(3)
+            s.toggleBranchFilter()
+            expect(paths(logSelectorDisplayedLogs(logs3(), s))).to_equal(["/b"])
+            s.toggleBranchFilter()
+            expect(s.branchFilterEnabled).to_equal(false)
+        )
+
+        it("narrows to the current worktree unless all worktrees are shown", fn() -> ():
+            step("narrows to the current worktree unless all worktrees are shown")
+            var s = LogSelectorState.new("", "/p")
+            s.hasMultipleWorktrees = true
+            expect(paths(logSelectorDisplayedLogs(logs3(), s))).to_equal(["/a"])
+            s.toggleWorktrees()
+            expect(logSelectorDisplayedLogs(logs3(), s).len()).to_equal(3)
+            s.toggleAllProjects()
+            expect(s.showAllProjects).to_equal(true)
+        )
+
+        it("searches title, branch, tag and PR text case-insensitively", fn() -> ():
+            step("searches title, branch, tag and PR text case-insensitively")
+            expect(paths(filterLogSelectorByQuery(logs3(), "  FIX "))).to_equal(["/a", "/c"])
+            expect(paths(filterLogSelectorByQuery(logs3(), "alpha"))).to_equal(["/b"])
+            expect(paths(filterLogSelectorByQuery(logs3(), "pr #12"))).to_equal(["/a"])
+            expect(paths(filterLogSelectorByQuery(logs3(), "dev"))).to_equal(["/b"])
+            expect(filterLogSelectorByQuery(logs3(), "zzz").len()).to_equal(0)
+            expect(filterLogSelectorByQuery(logs3(), "").len()).to_equal(3)
+        )
+
+        it("replaces the list with agentic search results when present", fn() -> ():
+            step("replaces the list with agentic search results when present")
+            var s = LogSelectorState.new("", "/cwd")
+            s.agenticSearchState = AgenticSearchState.withResults("q", [l3()])
+            expect(paths(logSelectorDisplayedLogs(logs3(), s))).to_equal(["/c"])
+            s.agenticSearchState = AgenticSearchState.withResults("q", [])
+            expect(logSelectorDisplayedLogs(logs3(), s).len()).to_equal(3)
+            expect(AgenticSearchState.searching("q").status).to_equal("searching")
+            expect(AgenticSearchState.withError("q", "m").message).to_equal("m")
+        )
+
+        it("orders sessions newest first", fn() -> ():
+            step("orders sessions newest first")
+            expect(paths(sortLogSelectorLogsNewest(logs3()))).to_equal(["/b", "/a", "/c"])
+            expect(logSelectorCompareDateThenRelevance(l2(), l1())).to_equal(-1)
+            expect(logSelectorCompareDateThenRelevance(l3(), l1())).to_equal(1)
+            expect(logSelectorCompareDateThenRelevance(l1(), l1())).to_equal(0)
+        )
+    )
+
+    describe("LogSelector labels and text", fn() -> ():
+        it("formats metadata, marking sidechains and fork counts", fn() -> ():
+            step("formats metadata, marking sidechains and fork counts")
+            expect(formatLogMetadataForSelector(l1())).to_equal("2026-01-02 · main · work · PR #12 · 3 messages")
+            expect(buildLogMetadataWithFlags(l3(), true, true)).to_equal("    2026-01-01")
+            expect(buildLogMetadataWithFlags(l1(), false, true)).to_equal("2026-01-02 · main · work · PR #12 · 3 messages · /p")
+            expect(buildLogLabelWithFlags(l1(), 76, true, false, 1)).to_equal("Fix bug (+1 other session)")
+            expect(buildLogLabelWithFlags(l1(), 76, true, false, 3)).to_equal("Fix bug (+3 other sessions)")
+            val side = LogOption.new("/s", "", "", "Side", "", "", "", "", "", "", true, 0, [])
+            expect(buildLogLabel(side, 40)).to_equal("Side (sidechain)")
+        )
+
+        it("truncates long labels to the available width", fn() -> ():
+            step("truncates long labels to the available width")
+            val long = mk("/l", "", "", "abcdefghijklmnopqrstuvwxyz", "", "", "", "", "", 0, [])
+            expect(buildLogLabel(long, 10)).to_equal("abcdefghi…")
+            expect(truncateLogSelectorText("abc", 5)).to_equal("abc")
+            expect(truncateLogSelectorText("abcdef", 4)).to_equal("abc…")
+            expect(truncateLogSelectorText("abc", 0)).to_equal("")
+            expect(normalizeAndTruncateToWidth("a \n\t b   c", 20)).to_equal("a b c")
+        )
+
+        it("extracts a highlighted snippet around a match", fn() -> ():
+            step("extracts a highlighted snippet around a match")
+            val snip = extractSnippet("The quick brown fox jumps", "brown", 4) ?? Snippet.new("", "", "")
+            expect(snip.before).to_equal("...ick")
+            expect(snip.matched).to_equal("brown")
+            expect(snip.afterText).to_equal("fox...")
+            expect(formatSnippet(snip, "")).to_equal("...ick[*:brown]fox...")
+            expect(formatSnippet(snip, "red")).to_equal("...ick[red:brown]fox...")
+            val miss = extractSnippet("abc", "zzz", 2) ?? Snippet.new("none", "", "")
+            expect(miss.before).to_equal("none")
+            val blank = extractSnippet("abc", "  ", 2) ?? Snippet.new("none", "", "")
+            expect(blank.before).to_equal("none")
+        )
+
+        it("builds searchable text from fields and user or assistant messages only", fn() -> ():
+            step("builds searchable text from fields and user or assistant messages only")
+            val log = mk("/x", "", "", "Sum", "", "br", "tg", "7", "", 0, [SerializedMessage.new("u", "user", "hi"), SerializedMessage.new("t", "tool", "SECRET"), SerializedMessage.new("a", "assistant", "yo")])
+            expect(buildSearchableText(log)).to_equal("Sum br tg PR #7 o/r hi yo")
+            expect(extractSearchableText(SerializedMessage.new("x", "system", "s"))).to_equal("")
+        )
+
+        it("keeps the first and last thousand messages of very long sessions", fn() -> ():
+            step("keeps the first and last thousand messages of very long sessions")
+            var msgs: [SerializedMessage] = []
+            var i = 0
+            while i < 2500:
+                msgs.push(SerializedMessage.new("m" + i.to_text(), "user", "c"))
+                i = i + 1
+            val cropped = cropLogSelectorMessages(msgs)
+            expect(cropped.len()).to_equal(2000)
+            expect(cropped[0].uuid).to_equal("m0")
+            expect(cropped[999].uuid).to_equal("m999")
+            expect(cropped[1000].uuid).to_equal("m1500")
+            expect(cropped[1999].uuid).to_equal("m2499")
+            expect(cropLogSelectorMessages([SerializedMessage.new("a", "user", "b")]).len()).to_equal(1)
+        )
+
+        it("identifies a session by first message uuid or the file path", fn() -> ():
+            step("identifies a session by first message uuid or the file path")
+            expect(getSessionIdFromLogSelector(l1())).to_equal("s1")
+            expect(getSessionIdFromLogSelector(mk("/nopath", "", "t", "", "", "", "", "", "", 0, []))).to_equal("/nopath")
+            expect(getSessionIdFromLogSelector(mk("/f", "", "t", "", "", "", "", "", "", 0, [SerializedMessage.new("", "user", "x")]))).to_equal("/f")
+            expect(uniqueLogSelectorSessionIds(logs3())).to_equal(["s1", "s2"])
+            expect(logSelectorSessionWord(1)).to_equal("session")
+        )
+    )
+
+    describe("LogSelector tree and focus", fn() -> ():
+        it("groups forked sessions under their newest log", fn() -> ():
+            step("groups forked sessions under their newest log")
+            val nodes = buildLogSelectorTreeNodes(logs3(), 80, false)
+            expect(nodes.len()).to_equal(2)
+            expect(nodes[0].id).to_equal("group:s1")
+            expect(nodes[0].label).to_equal("Fix bug (+1 other session)")
+            expect(nodes[0].description).to_equal("2026-01-02 · main · work · PR #12 · 3 messages")
+            expect(nodes[0].indexInFiltered).to_equal(0)
+            expect(nodes[0].children.len()).to_equal(1)
+            expect(nodes[0].children[0].id).to_equal("log:s1:1")
+            expect(nodes[0].children[0].label).to_equal("Fork of fix")
+            expect(nodes[0].children[0].description).to_equal("    2026-01-01")
+            expect(nodes[0].children[0].indexInFiltered).to_equal(2)
+            expect(nodes[1].id).to_equal("log:s2:0")
+            expect(nodes[1].children.len()).to_equal(0)
+            expect(groupLogsBySessionId(logs3()).len()).to_equal(2)
+        )
+
+        it("focuses the first displayed session when the model is created", fn() -> ():
+            step("focuses the first displayed session when the model is created")
+            val m = LogSelectorModel.new(logs3(), LogSelectorState.new("", "/cwd"), 80, 1000000)
+            expect(m.state.focusedSessionId).to_equal("s1")
+            expect(m.state.focusedIndex).to_equal(1)
+            val none = LogSelectorModel.new([], LogSelectorState.new("", "/cwd"), 80, 100)
+            expect(none.state.focusedIndex).to_equal(0)
+            expect(none.render()).to_equal("")
+        )
+
+        it("moves focus down and up with wraparound", fn() -> ():
+            step("moves focus down and up with wraparound")
+            val s0 = LogSelectorState.new("", "/cwd")
+            val s1 = logSelectorSelectNext(logs3(), s0)
+            expect(s1.focusedIndex).to_equal(2)
+            expect(s1.focusedSessionId).to_equal("s2")
+            val s2 = logSelectorSelectNext(logs3(), s1)
+            expect(s2.focusedIndex).to_equal(3)
+            val s3 = logSelectorSelectNext(logs3(), s2)
+            expect(s3.focusedIndex).to_equal(1)
+            val back = logSelectorSelectPrevious(logs3(), s3)
+            expect(back.focusedIndex).to_equal(3)
+            expect(logSelectorSelectNext([], LogSelectorState.new("", "/cwd")).focusedIndex).to_equal(1)
+        )
+
+        it("returns a new state when moving focus and leaves the caller's state alone", fn() -> ():
+            step("returns a new state when moving focus and leaves the caller's state alone")
+            val s0 = LogSelectorState.new("", "/cwd")
+            val s1 = logSelectorSelectNext(logs3(), s0)
+            expect(s1.focusedIndex).to_equal(2)
+            expect(s0.focusedIndex).to_equal(1)
+            expect(s0.focusedSessionId).to_equal("")
+            val back = logSelectorSelectPrevious(logs3(), s1)
+            expect(back.focusedIndex).to_equal(1)
+            expect(s1.focusedIndex).to_equal(2)
+            val raw = LogSelectorState.new("", "/cwd")
+            val m = LogSelectorModel.new(logs3(), raw, 80, 1000000)
+            expect(m.state.focusedSessionId).to_equal("s1")
+            expect(raw.focusedSessionId).to_equal("")
+        )
+
+        it("renders forked sessions under a group only when it is expanded", fn() -> ():
+            step("renders forked sessions under a group only when it is expanded")
+            var s = LogSelectorState.new("", "/cwd")
+            expect(LogSelectorModel.new(logs3(), s, 80, 1000000).render().contains("Fork of fix")).to_equal(false)
+            s.toggleGroupExpanded("s1")
+            val lines = LogSelectorModel.new(logs3(), s, 80, 1000000).render().split("\n")
+            expect(lines[1]).to_equal("> Fix bug (+1 other session)")
+            expect(lines[3]).to_equal("    Fork of fix")
+            expect(lines[4]).to_equal("      2026-01-01")
+            expect(lines[5]).to_equal("  Add docs")
+            s.toggleGroupExpanded("s1")
+            expect(s.expandedGroupIds.len()).to_equal(0)
+        )
+
+        it("renames the focused session and ignores a blank name", fn() -> ():
+            step("renames the focused session and ignores a blank name")
+            var s = LogSelectorState.new("", "/cwd")
+            s.focusedSessionId = "s2"
+            s.renameValue = "  Renamed  "
+            val out = logSelectorSubmitRename(logs3(), s)
+            expect(out[1].customTitle).to_equal("Renamed")
+            expect(out[0].customTitle).to_equal("")
+            var blank = LogSelectorState.new("", "/cwd")
+            blank.focusedSessionId = "s2"
+            blank.renameValue = "   "
+            expect(logSelectorSubmitRename(logs3(), blank)[1].customTitle).to_equal("")
+        )
+
+        it("finds the focused log by session id or by position", fn() -> ():
+            step("finds the focused log by session id or by position")
+            var s = LogSelectorState.new("", "/cwd")
+            s.focusedSessionId = "s2"
+            val byId = focusedLogSelectorLog(logs3(), s) ?? l4()
+            expect(byId.fullPath).to_equal("/b")
+            s.focusedSessionId = ""
+            s.focusedIndex = 99
+            val clamped = focusedLogSelectorLog(logs3(), s) ?? l4()
+            expect(clamped.fullPath).to_equal("/c")
+            val none = focusedLogSelectorLog([], s) ?? l4()
+            expect(none.fullPath).to_equal("/d")
+        )
+
+        it("tracks search and rename view modes", fn() -> ():
+            step("tracks search and rename view modes")
+            var s = LogSelectorState.new("", "/cwd")
+            s.enterSearch("fix")
+            expect(s.viewMode).to_equal("search")
+            expect(s.searchQuery).to_equal("fix")
+            s.exitSearch()
+            expect(s.viewMode).to_equal("list")
+            expect(s.searchQuery).to_equal("")
+            s.startRename("n")
+            expect(s.viewMode).to_equal("rename")
+            s.cancelRename()
+            expect(s.renameValue).to_equal("")
+            expect(s.viewMode).to_equal("list")
+        )
+    )
+
+    describe("LogSelector rendering", fn() -> ():
+        it("computes the number of visible rows from the available height", fn() -> ():
+            step("computes the number of visible rows from the available height")
+            val s = LogSelectorState.new("", "/cwd")
+            expect(visibleLogSelectorCount(22, false, s)).to_equal(4)
+            expect(visibleLogSelectorCount(22, true, s)).to_equal(3)
+            var f = LogSelectorState.new("", "/cwd")
+            f.hasMultipleWorktrees = true
+            expect(visibleLogSelectorCount(20, true, f)).to_equal(2)
+            expect(visibleLogSelectorCount(0, false, s)).to_equal(1)
+        )
+
+        it("renders the header with tag tabs or a position counter", fn() -> ():
+            step("renders the header with tag tabs or a position counter")
+            val s = LogSelectorState.new("", "/cwd")
+            expect(renderLogSelectorHeader(3, 3, ["All", "Alpha", "work"], s)).to_equal("Resume Session · All | Alpha | work · 1/3")
+            expect(renderLogSelectorHeader(3, 3, [], s)).to_equal("Resume Session")
+            expect(renderLogSelectorHeader(9, 3, [], s)).to_equal("Resume Session (1 of 9)")
+        )
+
+        it("renders active filters and the matching footer", fn() -> ():
+            step("renders active filters and the matching footer")
+            var s = LogSelectorState.new("", "/cwd")
+            s.branchFilterEnabled = true
+            s.currentBranch = "dev"
+            s.hasMultipleWorktrees = true
+            expect(renderLogSelectorFilters(s)).to_equal("dev · current worktree")
+            s.enterSearch("x")
+            expect(renderLogSelectorFilters(s)).to_equal("")
+            expect(renderLogSelectorFooter(s)).to_equal("Type to Search · Enter select · Esc clear")
+            var a = LogSelectorState.new("", "/cwd")
+            a.isAgenticSearchOptionFocused = true
+            expect(renderLogSelectorFooter(a)).to_equal("Enter search · Down skip · Esc cancel")
+        )
+
+        it("renders the list with a focus marker on the focused session", fn() -> ():
+            step("renders the list with a focus marker on the focused session")
+            val m = LogSelectorModel.new(logs3(), LogSelectorState.new("", "/cwd"), 80, 1000000)
+            val lines = m.render().split("\n")
+            expect(lines[0]).to_equal("Resume Session · All | Alpha | work · 1/3")
+            expect(lines[1]).to_equal("> Fix bug (+1 other session)")
+            expect(lines[2]).to_equal("  2026-01-02 · main · work · PR #12 · 3 messages")
+            expect(lines[3]).to_equal("  Add docs")
+            expect(lines[4]).to_equal("  2026-01-03 · dev · Alpha")
+            expect(lines[5].starts_with("Ctrl+A projects")).to_equal(true)
+        )
+
+        it("renders search progress and failure lines", fn() -> ():
+            step("renders search progress and failure lines")
+            var s = LogSelectorState.new("", "/cwd")
+            s.enterSearch("fix")
+            val searching = LogSelectorModel.new(logs3(), s, 80, 1000000)
+            val out = searching.render()
+            expect(out.contains("Search: fix")).to_equal(true)
+            expect(out.contains("Fork of fix")).to_equal(false)
+            s.agenticSearchState = AgenticSearchState.searching("fix")
+            expect(LogSelectorModel.new(logs3(), s, 80, 1000000).render().contains("Searching...")).to_equal(true)
+            s.agenticSearchState = AgenticSearchState.withError("fix", "x")
+            expect(LogSelectorModel.new(logs3(), s, 80, 1000000).render().contains("No matching sessions found.")).to_equal(true)
+        )
+
+        it("renders the rename and preview views for the focused session", fn() -> ():
+            step("renders the rename and preview views for the focused session")
+            var r = LogSelectorState.new("", "/cwd")
+            r.startRename("New name")
+            expect(LogSelectorModel.new(logs3(), r, 80, 100).render()).to_equal("Rename session:\nNew name\nFix bug")
+            var p = LogSelectorState.new("", "/cwd")
+            p.viewMode = "preview"
+            expect(LogSelectorModel.new(logs3(), p, 80, 100).render()).to_equal("Preview: Fix bug\nFix bug main work PR #12 o/r hello")
+        )
+    )
+    return ()

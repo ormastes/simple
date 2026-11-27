@@ -1,0 +1,118 @@
+# Stdlib static archive: naming, sidecar and link-time admission.
+#
+# Plan: doc/05_design/compiler/backend_dynamic_plugin_build_groups.md §2.5.
+# The archive is `libsimple_std-<semver>-<triple>-<tier>.a` on every host
+# (Windows llvm-mingw, Linux, macOS, FreeBSD, SimpleOS), produced by llvm-ar,
+# with a `<archive>.lib.sdn` sidecar. Admission is fail-closed: every refusal
+# is a named code, and nothing is silently linked.
+#
+# Refusal codes (stable):
+#     std-archive-refused: missing-archive: <path>
+#     std-archive-refused: missing-sidecar: <path>
+#     std-archive-refused: missing-field: <field>
+#     std-archive-refused: name-mismatch: <file> != <expected>
+#     std-archive-refused: triple-mismatch: <have> != <want>
+#     std-archive-refused: tier-mismatch: <have> != <want>
+#     std-archive-refused: sha256-mismatch: <path>
+
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read, file_hash_sha256_or_empty}
+use app.io.env_ops.{env_get}
+
+val STD_ARCHIVE_NAME = "libsimple_std"
+
+val STD_ARCHIVE_SIDECAR_FIELDS = ["name", "semver", "abi_major", "abi_minor",
+    "iface_digest", "producer", "triple", "cpu_tier", "sha256"]
+
+struct StdArchiveSidecar:
+    name: text
+    semver: text
+    abi_major: text
+    abi_minor: text
+    iface_digest: text
+    producer: text
+    triple: text
+    cpu_tier: text
+    sha256: text
+    missing: [text]
+
+struct StdArchiveAdmit:
+    ok: bool
+    refusal: text
+
+fn std_archive_file_name(semver: text, triple: text, cpu_tier: text) -> text:
+    """Host-neutral archive file name; `.a` on every host, Windows included."""
+    STD_ARCHIVE_NAME + "-" + semver + "-" + triple + "-" + cpu_tier + ".a"
+
+fn std_archive_sidecar_path(archive_path: text) -> text:
+    archive_path + ".lib.sdn"
+
+fn std_archive_cache_dir(repo_root: text, triple: text, cpu_tier: text) -> text:
+    """Per-target, per-tier cache. SIMPLE_STDLIB_ARCHIVE_DIR overrides the root."""
+    val root = env_get("SIMPLE_STDLIB_ARCHIVE_DIR") ?? ""
+    val base = if root.len() > 0: root else: repo_root + "/build/std_archive"
+    base + "/" + triple + "/" + cpu_tier
+
+fn std_archive_auto_path(repo_root: text, semver: text, triple: text, cpu_tier: text) -> text:
+    """Where `--std-archive auto` looks for the prebuilt archive."""
+    std_archive_cache_dir(repo_root, triple, cpu_tier) + "/" + std_archive_file_name(semver, triple, cpu_tier)
+
+fn std_archive_render_sidecar(s: StdArchiveSidecar) -> text:
+    "name: " + s.name + "\nsemver: " + s.semver + "\nabi_major: " + s.abi_major +
+        "\nabi_minor: " + s.abi_minor + "\niface_digest: " + s.iface_digest +
+        "\nproducer: " + s.producer + "\ntriple: " + s.triple +
+        "\ncpu_tier: " + s.cpu_tier + "\nsha256: " + s.sha256 + "\n"
+
+fn _field(src: text, key: text) -> text:
+    val lines = src.replace("\r", "").split("\n")
+    var i = 0
+    while i < lines.len():
+        val l = lines[i].trim()
+        if l.starts_with(key + ":"):
+            return l[key.len() + 1:].trim()
+        i = i + 1
+    ""
+
+fn std_archive_parse_sidecar(src: text) -> StdArchiveSidecar:
+    """Parse `key: value` lines; every absent required field is listed in `missing`."""
+    var missing: [text] = []
+    var i = 0
+    while i < STD_ARCHIVE_SIDECAR_FIELDS.len():
+        if _field(src, STD_ARCHIVE_SIDECAR_FIELDS[i]).len() == 0:
+            missing.push(STD_ARCHIVE_SIDECAR_FIELDS[i])
+        i = i + 1
+    StdArchiveSidecar(_field(src, "name"), _field(src, "semver"), _field(src, "abi_major"),
+        _field(src, "abi_minor"), _field(src, "iface_digest"), _field(src, "producer"),
+        _field(src, "triple"), _field(src, "cpu_tier"), _field(src, "sha256"), missing)
+
+fn _base_name(path: text) -> text:
+    val p = path.replace("\\", "/")
+    val parts = p.split("/")
+    parts[parts.len() - 1]
+
+fn _refuse(code: text) -> StdArchiveAdmit:
+    StdArchiveAdmit(false, "std-archive-refused: " + code)
+
+fn std_archive_admit(archive_path: text, triple: text, cpu_tier: text) -> StdArchiveAdmit:
+    """Link-time admission of a prebuilt std archive for (triple, cpu_tier).
+
+    TODO(libver): once compiler.driver.libver lands, also call
+    `libver_link_check(archive_file_name, sidecar_text, host)` here and refuse
+    with `v.refusal.unwrap().name()` when `not v.ok` (ABI/producer checks)."""
+    if not file_exists(archive_path):
+        return _refuse("missing-archive: " + archive_path)
+    val sidecar_path = std_archive_sidecar_path(archive_path)
+    if not file_exists(sidecar_path):
+        return _refuse("missing-sidecar: " + sidecar_path)
+    val s = std_archive_parse_sidecar(file_read(sidecar_path))
+    if s.missing.len() > 0:
+        return _refuse("missing-field: " + s.missing[0])
+    val expected = std_archive_file_name(s.semver, s.triple, s.cpu_tier)
+    if s.name != STD_ARCHIVE_NAME or _base_name(archive_path) != expected:
+        return _refuse("name-mismatch: " + _base_name(archive_path) + " != " + expected)
+    if s.triple != triple:
+        return _refuse("triple-mismatch: " + s.triple + " != " + triple)
+    if s.cpu_tier != cpu_tier:
+        return _refuse("tier-mismatch: " + s.cpu_tier + " != " + cpu_tier)
+    if file_hash_sha256_or_empty(archive_path) != s.sha256:
+        return _refuse("sha256-mismatch: " + archive_path)
+    StdArchiveAdmit(true, "")

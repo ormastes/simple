@@ -106,3 +106,28 @@ src/compiler_rust/target/gui/debug/simple run build/metalcmp/moreops.spl   # ad-
 
 The shipped gate (`scripts/check/check-engine2d-cpu-metal-parity-evidence.shs`) only
 asserts the bit-exact ops above; extend it per primitive as each is aligned.
+
+## 2026-11-12 fix attempt (release/1.0.0 source verification)
+
+Re-checked all four aligned primitives on `release/1.0.0` (7a06b4aafd5);
+every mechanism named in the 2026-06-05 resolution is present in source:
+
+- `kernel_draw_line` replays the CPU `sw_bresenham` error loop
+  (`backend_metal_msl.spl:491-510`), `int err = adx - ady` stepping.
+- `kernel_draw_circle` replays the midpoint loop with the CPU's `d < 0`
+  decision tie-break; `kernel_draw_circle_filled` uses the shared
+  `dx²+dy² ≤ r²` distance test.
+- `kernel_draw_triangle_filled` exists (`backend_metal_msl.spl:826`) and is
+  genuinely GPU-dispatched via `_dispatch_metal_triangle`
+  (`backend_metal.spl:1871`) — no longer a mirror tautology.
+- The `line`/`circle`/`rounded_rect`/`triangle` scenes are asserted by
+  `engine2d_cpu_metal_parity_run.spl` on this branch.
+
+Note: the 2026-06 E1/E2/E3-E5 regression-pin scenes (`rect_blend`,
+`circle_filled_blend`, `triangle_filled_blend`, `degenerate_dims`) were
+accidentally dropped from the parity harness by transplant `88aac2ffe28`
+and are restored by the 2026-11-12 parity-harness restoration commit in
+PR work/fix-gpu-metal-20261112.
+
+Verification status: **fixed-unverified** — source mechanisms confirmed;
+genuine GPU readback re-run pending the admitted compiler.

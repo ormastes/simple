@@ -1,0 +1,926 @@
+#!/bin/sh
+# check-text-len-unit-mix.shs — fail when one function uses byte_len() on a
+# receiver AND indexes/slices that same receiver with the `[ ]` operator.
+#
+# Rule (doc/05_design/language/text/text_len_counts_characters_2026-11-07.md):
+# `s[i]` / `s[a..b]` are code-point operators; `byte_len()` / `byte_at` /
+# `substring` are the byte family. Mixing them on one receiver is wrong on
+# non-ASCII text (and silently so). A byte scan is bounded by byte_len() and
+# cut with substring(); a character loop is bounded by len() and indexed s[i].
+#
+# Usage: sh scripts/check/check-text-len-unit-mix.shs [--selftest] [root ...]
+#   default roots: src/lib src/app src/compiler
+# Rule 2: another text X that is passed to a byte-family method of a
+# byte-scanned receiver (s.starts_with(X), s.index_of(X), s.replace(X, ..))
+# is a byte width when it offsets that receiver; `X.len()` in the same
+# function is flagged as "(len() as byte width)" — write `X.byte_len()`.
+#
+# Verdict (last stdout line): PASS — <n> function(s) checked, 0 mixed
+#                            FAIL — <n> function(s) checked, <k> mixed: ...
+#                            ERROR — nothing was checked
+# Exit 0 / 1 / 2. --selftest runs regression fixtures first and is fatal.
+# Explicit [u8] parameters/local bindings have byte-count len(); their simple
+# receiver uses are excluded, with lexical shadowing and per-function reset.
+# A dotted root.field receiver is excluded only when root is a plain binding
+# with a declared struct type (parameter, `val x: T`, `val x = T(...)`) and
+# that struct, declared in the file or imported by name, gives field [u8].
+#
+# Rule 4 (len()-bounded byte scan, bug
+# doc/08_tracking/bug/len_bounded_byte_scanners_non_ascii_2026_11_14.md):
+# a function that never calls byte_len() but has a receiver r with both
+# r.len() (non-emptiness use) and r.substring(/byte_at(/char_code_at( bounds
+# a byte scan in code points and truncates non-ASCII text. Pre-existing hits
+# are frozen in scripts/check/text_len_bounded_byte_scan_baseline.txt
+# ("file fn recv" rows, ratchet): a hit not in the baseline FAILs, and a
+# baseline row that no longer hits is stale and FAILs too.
+# --generate-baseline rewrites it (reviewed updates only).
+
+set -u
+
+scan_file() {
+  # prints "file:line receiver" for each byte_len() line whose enclosing fn
+  # also applies `recv[` ; prints "FNCOUNT <n>" on stderr-free channel last
+  # The field map can only change a verdict when the file has a dotted len()
+  # AND a call that makes a len() a byte width (rules 2 and 4).
+  fm=""
+  if grep -Eq '[.][ \t]*[A-Za-z_][A-Za-z_0-9]*[.]len\(\)' "$1" &&
+      grep -Eq '(byte_len|substring|slice|byte_at|index_of|find|char_code_at)\(' "$1"; then
+    fm="$work/fm"; build_fieldmap "$1" > "$fm"
+  fi
+  awk -v F="$1" -v FM="$fm" '
+    BEGIN {
+      # Struct field types ("Struct<TAB>field<TAB>u8|other"); see build_fieldmap.
+      if (FM != "") {
+        while ((getline fline < FM) > 0) {
+          split(fline, fpart, "\t")
+          if (fpart[3] == "u8") fu8[fpart[1], fpart[2]] = 1; else foth[fpart[1], fpart[2]] = 1
+        }
+        close(FM)
+      }
+    }
+    function field_bytes(type, name) {
+      # root.name counts bytes only when root has a declared struct type whose
+      # visible declaration(s) give `name` the type [u8]. A field name alone
+      # proves nothing: unknown, unresolved or conflicting types stay flagged.
+      return type != "" && ((type, name) in fu8) && !((type, name) in foth) && !((type, "*") in foth)
+    }
+    function pattern_text(text, stop,   i, c, depth, out) {
+      # A binding pattern up to its first top-level stop character. `label:`
+      # inside parentheses names a field (`Wrap(doc: d)` binds d, not doc).
+      depth = 0; out = ""
+      for (i = 1; i <= length(text); i++) {
+        c = substr(text, i, 1)
+        if (c == "(" || c == "[") depth++
+        else if ((c == ")" || c == "]") && depth > 0) depth--
+        else if (depth == 0 && index(stop, c) > 0) break
+        out = out c
+      }
+      gsub(/[A-Za-z_][A-Za-z_0-9]*[ \t]*:/, " ", out)
+      return out
+    }
+    function header_ids(text,   out) {
+      out = ""
+      while (match(text, /[A-Za-z_][A-Za-z_0-9]*/)) {
+        out = out substr(text, RSTART, RLENGTH) " "
+        text = substr(text, RSTART + RLENGTH)
+      }
+      return out
+    }
+    function header_binds(text,   declaration, names, rest) {
+      # Names a for/case/if-val/while-val/with-as header binds on its own line:
+      # their type is not known here, so they never count bytes on this line.
+      # A `for` binds wherever it appears (mid-line in a comprehension).
+      names = " "
+      if (text ~ /^[ \t]*case[ \t]+/) {
+        declaration = text
+        sub(/^[ \t]*case[ \t]+/, "", declaration)
+        names = names header_ids(pattern_text(declaration, ":"))
+      }
+      rest = text
+      while (match(rest, /(^|[^A-Za-z_0-9])for[ \t]+/)) {
+        rest = substr(rest, RSTART + RLENGTH)
+        declaration = rest
+        if (!sub(/[ \t]+in[ \t].*/, "", declaration)) continue
+        names = names header_ids(pattern_text(declaration, ":"))
+      }
+      if (match(text, /(^|[^A-Za-z_0-9])(if|elif|while)[ \t]+(val|var)[ \t]+/)) {
+        declaration = pattern_text(substr(text, RSTART + RLENGTH), "=:")
+        names = names header_ids(declaration)
+      }
+      return names with_binds(text)
+    }
+    function with_binds(text,   name) {
+      # `with <expr> as <name>:` binds <name> for its body (type unknown).
+      if (!match(text, /(^|[^A-Za-z_0-9])with[ \t].*[ \t]as[ \t]+[A-Za-z_][A-Za-z_0-9]*[ \t]*:/)) return ""
+      name = substr(text, RSTART, RLENGTH)
+      sub(/[ \t]*:$/, "", name); sub(/^.*[ \t]as[ \t]+/, "", name)
+      return name " "
+    }
+    function binding_of(name,   i) {
+      if (header_lambda || index(header_names, " " name " ") > 0) return 0
+      for (i = binding_count; i > 0; i--) if (binding_name[i] == name) return i
+      return 0
+    }
+    function binding_code(text,   i, c, quote, escaped, result) {
+      # Binding keywords/backslashes inside quoted values are not syntax.
+      result = ""; quote = ""; escaped = 0
+      for (i = 1; i <= length(text); i++) {
+        c = substr(text, i, 1)
+        if (quote != "") {
+          if (escaped) escaped = 0
+          else if (c == "\\") escaped = 1
+          else if (c == quote) quote = ""
+          result = result " "
+        } else if (c == "\"" || c == sprintf("%c", 39)) {
+          quote = c; result = result " "
+        } else result = result c
+      }
+      return result
+    }
+    function bind_type(name, depth, byte_array, type) {
+      binding_count++
+      binding_name[binding_count] = name
+      binding_depth[binding_count] = depth
+      binding_byte[binding_count] = byte_array
+      binding_type[binding_count] = type
+    }
+    function byte_receiver(text, start, name,   saved_start, saved_length, result) {
+      # Callers keep using RSTART/RLENGTH of their own match().
+      saved_start = RSTART; saved_length = RLENGTH
+      result = receiver_counts_bytes(text, start, name)
+      RSTART = saved_start; RLENGTH = saved_length
+      return result
+    }
+    function receiver_counts_bytes(text, start, name,   i, previous, prefix) {
+      # Inline conditional/pattern/lambda bodies may shadow on this line.
+      # Do not mistake object.bytes.len() for a local parameter named bytes;
+      # a dotted receiver root.name is typed by the declared struct of root.
+      previous = start > 1 ? substr(text, start - 1, 1) : ""
+      if (previous ~ /[A-Za-z_0-9]/) return 0
+      prefix = substr(text, 1, start - 1)
+      sub(/[ \t]+$/, "", prefix)
+      if (substr(prefix, length(prefix), 1) == ".") {
+        prefix = substr(prefix, 1, length(prefix) - 1)
+        # Only a plain binding root: not a call result, index or a.b chain.
+        if (!match(prefix, /[A-Za-z_][A-Za-z_0-9]*$/)) return 0
+        if (RSTART > 1 && substr(prefix, RSTART - 1, 1) ~ /[.A-Za-z_0-9]/) return 0
+        i = binding_of(substr(prefix, RSTART))
+        return i > 0 && field_bytes(binding_type[i], name)
+      }
+      i = binding_of(name)
+      return i > 0 && binding_byte[i]
+    }
+    function byte_annotations(text, depth,   item, name, type) {
+      # `name: [u8]` grants byte len(); `name: Struct` records the type a
+      # dotted receiver needs. Generic or other types record nothing.
+      while (match(text, /[A-Za-z_][A-Za-z_0-9]*[ \t]*:[ \t]*(\[[ \t]*u8[ \t]*\]|[A-Z][A-Za-z_0-9]*)([ \t]*[,=)]|[ \t]*$)/)) {
+        item = substr(text, RSTART, RLENGTH)
+        name = item; sub(/[ \t]*:.*/, "", name)
+        type = item; sub(/^[^:]*:[ \t]*/, "", type); sub(/[ \t,=)]*$/, "", type)
+        if (type ~ /^\[/) bind_type(name, depth, 1, "")
+        else bind_type(name, depth, 0, type)
+        text = substr(text, RSTART + RLENGTH)
+      }
+    }
+    function literal_type(init,   type, i, c, depth) {
+      # `T(...)` with nothing after its closing paren is a struct literal of T.
+      if (!match(init, /^[ \t]*[A-Z][A-Za-z_0-9]*[ \t]*\(/)) return ""
+      type = substr(init, RSTART, RLENGTH); sub(/^[ \t]*/, "", type); sub(/[ \t]*\($/, "", type)
+      depth = 0
+      for (i = RSTART + RLENGTH - 1; i <= length(init); i++) {
+        c = substr(init, i, 1)
+        if (c == "(") depth++
+        else if (c == ")") { depth--; if (depth == 0) break }
+      }
+      if (depth != 0 || substr(init, i + 1) !~ /^[ \t]*$/) return ""
+      return type
+    }
+    function signature_types(text, depth,   i, c, part) {
+      # Only the parameter list, including continued lines, grants a type.
+      # Parenthesized defaults do not end the outer signature early.
+      part = ""
+      for (i = 1; i <= length(text); i++) {
+        c = substr(text, i, 1)
+        if (signature_quote) {
+          if (signature_escape) signature_escape = 0
+          else if (c == "\\") signature_escape = 1
+          else if (c == "\"") signature_quote = 0
+          part = part " "; continue
+        }
+        if (c == "\"") { signature_quote = 1; part = part " "; continue }
+        if (c == "(") { signature_depth++; signature_started = 1 }
+        if (signature_started) part = part (signature_depth == 1 ? c : " ")
+        if (c == ")") {
+          signature_depth--
+          if (signature_started && signature_depth == 0) { signature_active = 0; break }
+        }
+      }
+      byte_annotations(part, depth + 1)
+    }
+    function local_types(text, depth,   declaration, name, explicit_byte, i, prior, init, type) {
+      # A new local binding shadows a parameter even when its type is inferred.
+      # Install after scanning its initializer, where an outer name may occur.
+      if (text ~ /^[ \t]*(val|var)[ \t]+/) {
+        declaration = text
+        sub(/^[ \t]*(val|var)[ \t]+/, "", declaration)
+        init = declaration
+        sub(/=.*/, "", declaration)
+        type = ""
+        if (sub(/^[^=]*=/, "", init) && declaration ~ /^[A-Za-z_][A-Za-z_0-9]*[ \t]*$/) type = literal_type(init)
+        explicit_byte = declaration ~ /^[A-Za-z_][A-Za-z_0-9]*[ \t]*:[ \t]*(\[[ \t]*u8[ \t]*\]|[A-Z][A-Za-z_0-9]*)[ \t]*$/
+        if (explicit_byte) byte_annotations(declaration, depth)
+        else if (type != "") {
+          name = declaration; sub(/[ \t]*$/, "", name)
+          bind_type(name, depth, 0, type)
+        } else {
+          # Includes tuple destructuring; unknown types never grant exemption.
+          sub(/:.*/, "", declaration)
+          while (match(declaration, /[A-Za-z_][A-Za-z_0-9]*/)) {
+            name = substr(declaration, RSTART, RLENGTH)
+            bind_type(name, depth, 0)
+            declaration = substr(declaration, RSTART + RLENGTH)
+          }
+        }
+      } else if (text ~ /^[ \t]*for[ \t]+/ || text ~ /^[ \t]*case[ \t]+/) {
+        declaration = text
+        sub(/^[ \t]*(for|case)[ \t]+/, "", declaration)
+        sub(/[ \t]+in[ \t].*/, "", declaration)
+        declaration = pattern_text(declaration, ":")
+        while (match(declaration, /[A-Za-z_][A-Za-z_0-9]*/)) {
+          name = substr(declaration, RSTART, RLENGTH)
+          bind_type(name, depth + 1, 0)
+          declaration = substr(declaration, RSTART + RLENGTH)
+        }
+      }
+      # Conditional bindings are body-local, including expression/inline forms.
+      if (match(text, /(^|[^A-Za-z_0-9])(if|elif|while)[ \t]+(val|var)[ \t]+/)) {
+        declaration = pattern_text(substr(text, RSTART + RLENGTH), "=:")
+        while (match(declaration, /[A-Za-z_][A-Za-z_0-9]*/)) {
+          name = substr(declaration, RSTART, RLENGTH)
+          bind_type(name, depth + 1, 0)
+          declaration = substr(declaration, RSTART + RLENGTH)
+        }
+      }
+      name = with_binds(text)
+      if (name != "") bind_type(substr(name, 1, length(name) - 1), depth + 1, 0)
+      # Do not infer lambda parameter/capture types. Conservatively suspend
+      # inherited exemptions for its body, then restore them on lexical dedent.
+      if (index(text, "\\") > 0) {
+        prior = binding_count
+        for (i = 1; i <= prior; i++)
+          if (binding_byte[i] || binding_type[i] != "") bind_type(binding_name[i], depth + 1, 0, "")
+      }
+    }
+    function flush(   r, l, x, scanned) {
+      scanned = 0
+      for (r in bl) {
+        scanned = 1
+        if ((r) in ix) {
+          n = split(bl[r], ls, ",")
+          for (l = 1; l <= n; l++) if (ls[l] != "") print F ":" ls[l] " " r
+        }
+      }
+      for (r in bf) scanned = 1
+      # Rule 2: another text X whose len() reaches a byte-family call on a
+      # byte-scanned receiver -- directly as an argument (s.substring(0,
+      # X.len())), through an alias (val w = X.len(); s.substring(0, w)) or
+      # on the same line as that receiver byte_len()/byte op -- is a byte
+      # width in the wrong unit. Flag every X.len() line in the function.
+      if (scanned) {
+        for (x in lu) {
+          if ((x) in bl) continue
+          hit = 0
+          if ((x) in argref) hit = 1
+          if ((x) in sameline) hit = 1
+          for (a in alias) if (alias[a] == x && ((a) in argref)) hit = 1
+          if (hit) {
+            n = split(lu[x], ls, ",")
+            for (l = 1; l <= n; l++) if (ls[l] != "") print F ":" ls[l] " " x " (len() as byte width)"
+          }
+        }
+      }
+      # Rule 4: len()-bounded byte scan in a function with no byte_len().
+      if (!fnbl) for (r in lb) if ((r) in bop) print "R4 " F " " fname " " r
+      delete bl; delete ix; delete bf; delete argref; delete lu; delete alias; delete sameline
+      delete lb; delete bop; fnbl = 0
+      delete binding_name; delete binding_depth; delete binding_byte; delete binding_type; binding_count = 0
+      signature_active = 0; signature_started = 0; signature_depth = 0
+      signature_quote = 0; signature_escape = 0
+    }
+    /^[ \t]*(pub |export )?(fn|me|async fn|async me|static fn) / {
+      flush(); fncount++
+      fname = $0; sub(/^[ \t]*(pub |export )?(async |static )?(fn|me) +/, "", fname); sub(/[^A-Za-z_0-9].*$/, "", fname)
+      signature_active = 1
+      signature_indent = match($0, /[^ \t]/) - 1
+    }
+    /^[ \t]*#/ { next }
+    {
+      # Docstrings (triple-quoted blocks) are prose, not code.
+      q = gsub(/"""/, "\"\"\"")
+      if (q % 2 == 1) { in_doc = !in_doc; next }
+      if (q > 0) next
+      if (in_doc) next
+      line = $0
+      sub(/#.*$/, "", line)
+      indent = match(line, /[^ \t]/) - 1
+      if (indent < 0) next
+      if (!signature_active)
+        while (binding_count > 0 && binding_depth[binding_count] > indent) binding_count--
+      binding_line = binding_code(line)
+      header_names = header_binds(binding_line)
+      header_lambda = index(binding_line, "\\") > 0
+      if (signature_active) signature_types(line, signature_indent)
+      if (line ~ /\.byte_len\(\)/) fnbl = 1
+      tmp = line
+      while (match(tmp, /[A-Za-z_][A-Za-z_0-9]*\.(substring|byte_at|char_code_at)\(/)) {
+        r = substr(tmp, RSTART, RLENGTH); sub(/\..*$/, "", r); bop[r] = 1
+        tmp = substr(tmp, RSTART + RLENGTH)
+      }
+      tmp = line
+      while (match(tmp, /[A-Za-z_][A-Za-z_0-9]*\.len\(\)/)) {
+        r = substr(tmp, RSTART, RLENGTH - 6)
+        rest = substr(tmp, RSTART + RLENGTH)
+        if (!byte_receiver(tmp, RSTART, r) && rest !~ /^ *(==|!=|>|<=) *0([^0-9]|$)/) lb[r] = 1
+        tmp = rest
+      }
+      tmp = line
+      while (match(tmp, /[A-Za-z_][A-Za-z_0-9]*\.byte_len\(\)/)) {
+        r = substr(tmp, RSTART, RLENGTH - 11)
+        bl[r] = bl[r] "," NR
+        tmp = substr(tmp, RSTART + RLENGTH)
+      }
+      # Byte-family calls on a receiver, and the identifiers they take as
+      # offsets/widths (argref); `val w = X.len()` aliases; X.len() uses.
+      bytecall_here = 0
+      tmp = line
+      while (match(tmp, /[A-Za-z_][A-Za-z_0-9]*\.(byte_len\(\)|byte_at\(|substring\(|slice\(|index_of\(|find\(|starts_with\(|ends_with\(|split\(|replace\(|contains\()/)) {
+        mstart = RSTART; mlen = RLENGTH
+        seg = substr(tmp, mstart, mlen)
+        r = seg; sub(/\..*$/, "", r)
+        bf[r] = 1
+        if (seg ~ /byte_len\(\)$/) bytecall_here = 1
+        args = substr(tmp, mstart + mlen)
+        sub(/\).*$/, "", args)
+        # Only offset-taking calls make an argument a byte offset/width;
+        # starts_with/ends_with/split/replace/contains take whole texts.
+        if (seg !~ /\.(substring|slice|byte_at|index_of|find)\($/) args = ""
+        while (match(args, /[A-Za-z_][A-Za-z_0-9]*/)) {
+          a = substr(args, RSTART, RLENGTH)
+          if (a != r && a !~ /^(val|var|if|and|or|not|true|false|nil|as|i64|text)$/) argref[a] = 1
+          args = substr(args, RSTART + RLENGTH)
+        }
+        tmp = substr(tmp, mstart + mlen)
+      }
+      if (match(line, /(val|var) +[A-Za-z_][A-Za-z_0-9]* *(: *i64)? *= *[A-Za-z_][A-Za-z_0-9]*\.len\(\)/)) {
+        decl = substr(line, RSTART, RLENGTH)
+        sub(/^(val|var) +/, "", decl)
+        aname = decl; sub(/[^A-Za-z_0-9].*$/, "", aname)
+        src = decl; sub(/\.len\(\)$/, "", src); sub(/^.*[^A-Za-z_0-9]/, "", src)
+        alias[aname] = src
+      }
+      tmp = line
+      while (match(tmp, /[A-Za-z_][A-Za-z_0-9]*\.len\(\)/)) {
+        r = substr(tmp, RSTART, RLENGTH - 6)
+        is_bytes = byte_receiver(tmp, RSTART, r)
+        if (!is_bytes) lu[r] = lu[r] "," NR
+        rest = substr(tmp, RSTART + RLENGTH)
+        # An emptiness test (X.len() == 0 / != 0 / > 0) is unit-free.
+        if (!is_bytes && bytecall_here && rest !~ /^ *(==|!=|>|<=) *0([^0-9]|$)/) sameline[r] = 1
+        tmp = substr(tmp, RSTART + RLENGTH)
+      }
+      local_types(binding_line, indent)
+      # Rule 3: a text LITERAL whose len() sits in a byte-unit expression
+      # ("APOLV2-".len() next to value.byte_len()) is the same cross-receiver
+      # unit mix; a literal has no receiver name, so report it directly.
+      if (bytecall_here) {
+        tmp = line
+        while (match(tmp, /"[^"]*"\.len\(\)/)) {
+          rest = substr(tmp, RSTART + RLENGTH)
+          if (rest !~ /^ *(==|!=|>|<=) *0([^0-9]|$)/) print F ":" NR " <literal> (len() as byte width)"
+          tmp = rest
+        }
+      }
+      tmp = line
+      while (match(tmp, /(^|[^A-Za-z_0-9.])[A-Za-z_][A-Za-z_0-9]*\[/)) {
+        seg = substr(tmp, RSTART, RLENGTH)
+        sub(/^[^A-Za-z_]/, "", seg)
+        r = substr(seg, 1, length(seg) - 1)
+        ix[r] = 1
+        tmp = substr(tmp, RSTART + RLENGTH)
+      }
+    }
+    END { flush(); printf "FNCOUNT %d\n", fncount }
+  ' "$1"
+  return 0
+}
+
+# build_fieldmap FILE — "Struct<TAB>field<TAB>u8|other" for every field
+# declared in a struct/class/mixin body of FILE and of the structs FILE
+# imports BY NAME (`use std.*` -> src/lib, `app.*`/`compiler.*` -> src/; the
+# module itself, and its parent when the last segment is an imported item).
+# Each imported source is parsed once per run (memoised under $memo) and read
+# at the range tip in committed mode. Fail closed: an unreadable import
+# contributes nothing, and an imported Capitalised name that no resolved
+# source declares is emitted as "Name<TAB>*<TAB>other", which poisons every
+# field of that type (scan_file's field_bytes), so a local same-named struct
+# can never vouch for it.
+build_fieldmap() {
+  awk -v MEMO="$memo" -v BASE="$use_base" -v TIP="$scope_tip" '
+    function fm_feed(line, out,   ind, name, ty) {
+      if (line ~ /^[ \t]*$/ || line ~ /^[ \t]*#/) return
+      ind = match(line, /[^ \t]/) - 1
+      if (ind == 0) {
+        inblock = (line ~ /^(pub |export )?(struct|class|mixin)[ \t]+[A-Za-z_]/); bind = -1
+        if (inblock) {
+          sname = line; sub(/^(pub |export )?(struct|class|mixin)[ \t]+/, "", sname); sub(/[^A-Za-z_0-9].*$/, "", sname)
+        }
+        return
+      }
+      if (!inblock) return
+      if (bind < 0) bind = ind
+      if (ind != bind) return
+      sub(/#.*$/, "", line)
+      sub(/^[ \t]+(pub[ \t]+)?((val|var)[ \t]+)?/, "", line)
+      if (line !~ /^[A-Za-z_][A-Za-z_0-9]*[ \t]*:[ \t]*[^ \t]/) return
+      name = line; sub(/[ \t]*:.*$/, "", name)
+      ty = line; sub(/^[^:]*:[ \t]*/, "", ty); sub(/[ \t]*=.*$/, "", ty); sub(/[ \t]+$/, "", ty)
+      ty = sname "\t" name "\t" (ty ~ /^\[[ \t]*u8[ \t]*\]$/ ? "u8" : "other")
+      if (out == "") print ty; else print ty > out
+    }
+    function quoted(word,   q) {
+      q = sprintf("%c", 39); gsub(q, q "\\" q q, word)
+      return q word q
+    }
+    function add_use(path, items) { nuse++; use_path[nuse] = path; use_items[nuse] = items }
+    { fm_feed($0, "") }
+    /^[ \t]*use[ \t]+/ || collecting {
+      line = $0; sub(/#.*$/, "", line)
+      if (!collecting) sub(/^[ \t]*use[ \t]+/, "", line)
+      acc = collecting ? acc " " line : line
+      collecting = (acc ~ /[{]/ && acc !~ /[}]/)
+      if (collecting) next
+      items = "*"; mod = acc
+      if (acc ~ /[{]/) {
+        items = acc; sub(/^[^{]*[{]/, "", items); sub(/[}].*$/, "", items); gsub(/,/, " ", items)
+        sub(/[ \t]*[{].*$/, "", mod)
+      } else sub(/[ \t].*$/, "", mod)
+      sub(/[.]$/, "", mod); gsub(/[.]/, "/", mod)
+      if (mod ~ /^std\//) sub(/^std\//, "src/lib/", mod)
+      else if (mod ~ /^(app|compiler)\//) mod = "src/" mod
+      else next
+      add_use(mod ".spl", items)
+      n = split(mod, seg, "/"); q = seg[1]
+      for (i = 2; i < n; i++) q = q "/" seg[i]
+      add_use(q ".spl", seg[n])
+    }
+    END {
+      for (u = 1; u <= nuse; u++) {
+        cache = use_path[u]; gsub(/\//, "%", cache); cache = MEMO "/" cache
+        if ((getline row < cache) < 0) {
+          printf "" > cache
+          inblock = 0; bind = -1
+          if (TIP != "") {
+            cmd = "git -C " quoted(BASE) " show " quoted(TIP ":" use_path[u]) " 2>/dev/null"
+            while ((cmd | getline row) > 0) fm_feed(row, cache)
+            close(cmd)
+          } else {
+            src = BASE "/" use_path[u]
+            while ((getline row < src) > 0) fm_feed(row, cache)
+            close(src)
+          }
+        }
+        close(cache)
+        delete keep; all = (use_items[u] == "*")
+        if (!all) {
+          k = split(use_items[u], parts, /[ \t]+/)
+          for (i = 1; i <= k; i++) if (parts[i] ~ /^[A-Z]/) { keep[parts[i]] = 1; wanted[parts[i]] = 1 }
+        }
+        while ((getline row < cache) > 0) {
+          split(row, cell, "\t")
+          if (all || (cell[1] in keep)) { print row; found[cell[1]] = 1 }
+        }
+        close(cache)
+      }
+      for (t in wanted) if (!(t in found)) print t "\t*\tother"
+    }' "$1"
+}
+
+# cmp_set HITS BASELINE LABEL — ratchet one hit set against its baseline.
+# Restricted to the files in $scope_files when that is non-empty (diff mode).
+# Sets cmp_new / cmp_stale and prints the offending rows.
+cmp_set() {
+  touch "$2" 2>/dev/null
+  if [ -n "$scope_files" ]; then
+    awk 'NR==FNR{s[$0]=1; next} ($1 in s)' "$scope_files" "$2"
+  else
+    cat "$2"
+  fi | grep . | sort -u > "$tmp_base" || true
+  cmp_new=$(comm -23 "$1" "$tmp_base")
+  cmp_stale=$(comm -13 "$1" "$tmp_base")
+  cmp_nn=$(printf '%s\n' "$cmp_new" | grep -c . || true)
+  cmp_ns=$(printf '%s\n' "$cmp_stale" | grep -c . || true)
+  [ "$cmp_nn" -gt 0 ] && printf '%s\n' "$cmp_new" | sed "s|\$| (NEW $3)|"
+  [ "$cmp_ns" -gt 0 ] && printf '%s\n' "$cmp_stale" | sed 's/$/ (STALE baseline row; remove it)/'
+  return 0
+}
+
+run_scan() {
+  rm -rf "$memo"; mkdir "$memo"
+  if [ -n "$scope_files" ] && [ -n "$scope_tip" ]; then
+    sc="$work/sc"; rm -rf "$sc"; mkdir "$sc"
+    while read -r f; do mkdir -p "$sc/$(dirname "$f")"; git show "$scope_tip:$f" > "$sc/$f" 2>/dev/null || rm -f "$sc/$f"; done < "$scope_files"
+    (cd "$sc" && while read -r f; do [ -f "$f" ] && scan_file "$f"; done) < "$scope_files"
+    rm -rf "$sc"; echo "FNCOUNT 0"
+  elif [ -n "$scope_files" ]; then
+    while read -r f; do [ -f "$f" ] && scan_file "$f"; done < "$scope_files"
+    echo "FNCOUNT 0"
+  else
+    for root in "$@"; do
+      [ -e "$root" ] || continue
+      find "$root" -name '*.spl' -type f | while read -r f; do scan_file "$f"; done
+    done
+  fi > "$tmp_out"
+  total_fn=$(awk '/^FNCOUNT /{s+=$2} END{print s+0}' "$tmp_out")
+  # Old-rule hits are "file:line recv ..."; the baseline key drops the line
+  # number (it churns on every edit above the site): "file recv ...".
+  grep -v -e '^FNCOUNT ' -e '^R4 ' "$tmp_out" | sed 's/^\([^ :]*\):[0-9][0-9]* /\1 /' | sort -u > "$tmp_mix"
+  grep '^R4 ' "$tmp_out" | cut -c4- | sort -u > "$tmp_r4"
+  k=$(grep -c . "$tmp_mix" || true)
+  r4=$(grep -c . "$tmp_r4" || true)
+  if [ -n "$scope_files" ]; then
+    nf=$(grep -c . "$scope_files" || true)
+  else
+    [ "$total_fn" -eq 0 ] && { echo "ERROR — nothing was checked"; return 2; }
+  fi
+  if [ "$gen_baseline" -eq 1 ]; then
+    cp "$tmp_r4" "$baseline"; cp "$tmp_mix" "$mix_baseline"
+    echo "baseline: wrote $r4 rule-4 row(s) to $baseline, $k rule-1..3 row(s) to $mix_baseline"
+  fi
+  cmp_set "$tmp_r4" "$baseline" "len()-bounded byte scan; bound with byte_len()"; n4=$cmp_nn; s4=$cmp_ns
+  cmp_set "$tmp_mix" "$mix_baseline" "byte/code-point unit mix"; nm=$cmp_nn; sm=$cmp_ns
+  what="$total_fn function(s) checked"
+  [ -n "$scope_files" ] && what="$nf touched file(s) checked"
+  if [ $((n4 + s4 + nm + sm)) -gt 0 ]; then
+    echo "FAIL — $what, $nm new / $sm stale unit-mix row(s), $n4 new / $s4 stale len()-bounded byte scan(s) (see lines above)"
+    return 1
+  fi
+  echo "PASS — $what, $k unit-mix + $r4 len()-bounded row(s) all baselined, 0 new, 0 stale"
+  return 0
+}
+
+tmp_out=$(mktemp); tmp_r4=$(mktemp); tmp_base=$(mktemp); tmp_mix=$(mktemp); scope_files=""; use_base=$(pwd); scope_tip=""
+# $work holds the per-file field map, the import memo and the committed-mode
+# scan copy; INT/TERM (the push-tier timeout) exit through the EXIT trap.
+work=$(mktemp -d); memo="$work/memo"
+trap 'rm -f "$tmp_out" "$tmp_r4" "$tmp_base" "$tmp_mix" ${scope_files:+"$scope_files"}; rm -rf "$work" "${fx:-}"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+baseline="${TEXT_LEN_BASELINE:-scripts/check/text_len_bounded_byte_scan_baseline.txt}"
+mix_baseline="${TEXT_LEN_MIX_BASELINE:-scripts/check/text_len_unit_mix_baseline.txt}"
+gen_baseline=0
+
+# diff_scope RANGE ROOTS... — touched .spl files of BASE..TIP, one per line.
+# Scoped from the merge-base, not the base tip: a PR head behind its base
+# would otherwise pull every base-side change into scope and report the
+# base's newer rows as "new" against the head's older content (PR #10981:
+# 71 files for a 1-commit PR). No merge-base (shallow) keeps the wider,
+# stricter two-dot scope rather than failing open.
+diff_scope() {
+  ds_range="$1"; shift; ds_tip="${ds_range##*..}"
+  ds_mb=$(git merge-base "${ds_range%%..*}" "$ds_tip" 2>/dev/null) && ds_range="$ds_mb..$ds_tip"
+  git diff --name-only "$ds_range" -- "$@" 2>/dev/null | grep "[.]spl$" | sort -u
+}
+
+selftest() {
+  fx=$(mktemp -d)
+  mkdir -p "$fx/a" "$fx/b" "$fx/c"
+  printf 'fn byte_scan(s: text) -> i64:\n    var i = 0\n    while i < s.byte_len():\n        if s.byte_at(i) == 32: return i\n        i = i + 1\n    s.substring(0, 1)\n    -1\n\nfn chars(s: text) -> i64:\n    var i = 0\n    while i < s.len():\n        if s[i] == '"'"' '"'"': return i\n        i = i + 1\n    -1\n' > "$fx/a/clean.spl"
+  printf 'fn mixed(s: text) -> text:\n    var i = 0\n    while i < s.byte_len():\n        if s[i:i + 1] == " ": return s[0:i]\n        i = i + 1\n    s\n' > "$fx/b/mixed.spl"
+  printf 'fn other(s: text, arr: [i64]) -> i64:\n    # s[0] in a comment must not count\n    val n = s.byte_len()\n    arr[0] + n\n\nfn has_prefix(s: text, prefix: text) -> bool:\n    if prefix.byte_len() > s.byte_len(): return false\n    s.substring(0, prefix.byte_len()) == prefix\n' > "$fx/c/other_recv.spl"
+  mkdir -p "$fx/d"
+  printf 'fn has_prefix(s: text, prefix: text) -> bool:\n    val plen = prefix.len()\n    if plen > s.byte_len(): return false\n    s.substring(0, plen) == prefix\n' > "$fx/d/width.spl"
+  v=$(run_scan "$fx/a"); rc=$?; [ $rc -eq 0 ] || { echo "selftest: clean fixture must PASS, got rc=$rc: $v"; exit 2; }
+  v=$(run_scan "$fx/b"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: mixed fixture must FAIL, got rc=$rc"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'mixed.spl s' || { echo "selftest: mixed fixture must name mixed.spl:3 s"; exit 2; }
+  v=$(run_scan "$fx/c"); rc=$?; [ $rc -eq 0 ] || { echo "selftest: other-receiver/comment fixture must PASS, got rc=$rc: $v"; exit 2; }
+  v=$(run_scan "$fx/d"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: other-text len() as byte width must FAIL, got rc=$rc: $v"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'width.spl prefix (len() as byte width)' || { echo "selftest: width fixture must name width.spl:2 prefix"; exit 2; }
+  # Cross-receiver comparison/arithmetic: byte_len() of one text vs len() of
+  # another (named receiver, dotted receiver, and string literal) must FAIL;
+  # the all-byte_len() twin must PASS.
+  mkdir -p "$fx/e" "$fx/f"
+  printf 'fn cmp(a: text, b: text) -> bool:\n    a.byte_len() != b.len()\n\nfn dotted(a: text, j: Journal) -> bool:\n    a.byte_len() != j.head.len()\n\nfn lit(v: text) -> bool:\n    v.byte_len() == "APOLV2-".len()\n' > "$fx/e/cross.spl"
+  printf 'fn cmp(a: text, b: text) -> bool:\n    a.byte_len() != b.byte_len()\n\nfn lit(v: text) -> bool:\n    v.byte_len() == "APOLV2-".byte_len() or v.len() == 0\n' > "$fx/f/cross_ok.spl"
+  v=$(run_scan "$fx/e"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: cross-receiver unit mix must FAIL, got rc=$rc: $v"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'cross.spl b (len() as byte width)' || { echo "selftest: cross fixture must name cross.spl:2 b"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'cross.spl head (len() as byte width)' || { echo "selftest: cross fixture must name cross.spl:5 head"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'cross.spl <literal> (len() as byte width)' || { echo "selftest: cross fixture must name cross.spl:8 <literal>"; exit 2; }
+  v=$(run_scan "$fx/f"); rc=$?; [ $rc -eq 0 ] || { echo "selftest: all-byte_len() cross twin must PASS, got rc=$rc: $v"; exit 2; }
+  v=$(run_scan "$fx/none"); rc=$?; [ $rc -eq 2 ] || { echo "selftest: empty scan must ERROR, got rc=$rc"; exit 2; }
+  # Rule 4: a len()-bounded byte scan (no byte_len() anywhere in the fn) is
+  # NEW unless baselined; a baselined row that no longer hits is STALE.
+  mkdir -p "$fx/g"
+  printf 'fn quote_end(s: text) -> i64:\n    var i = 0\n    while i < s.len():\n        if s.substring(i, i + 1) == "q": return i\n        i = i + 1\n    -1\n\nfn ok_scan(s: text) -> i64:\n    if s.len() == 0: return -1\n    var i = 0\n    while i < s.byte_len():\n        if s.byte_at(i) == 113: return i\n        i = i + 1\n    -1\n' > "$fx/g/scan.spl"
+  v=$(run_scan "$fx/g"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: len()-bounded byte scan must FAIL as new, got rc=$rc: $v"; exit 2; }
+  printf '%s\n' "$v" | grep -q "scan.spl quote_end s (NEW" || { echo "selftest: rule-4 fixture must name quote_end s: $v"; exit 2; }
+  printf '%s\n' "$v" | grep -q "ok_scan" && { echo "selftest: byte_len()-bounded twin must not be flagged: $v"; exit 2; }
+  printf '%s quote_end s\n' "$fx/g/scan.spl" > "$fx/base_g"
+  v=$(baseline="$fx/base_g"; run_scan "$fx/g"); rc=$?; [ $rc -eq 0 ] || { echo "selftest: baselined rule-4 hit must PASS, got rc=$rc: $v"; exit 2; }
+  v=$(baseline="$fx/base_g"; run_scan "$fx/a"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: stale baseline row must FAIL, got rc=$rc: $v"; exit 2; }
+  printf '%s\n' "$v" | grep -q "quote_end s (STALE" || { echo "selftest: stale row must be named: $v"; exit 2; }
+  # Old-rule hits ratchet the same way: a baselined mix PASSes.
+  printf '%s s\n' "$fx/b/mixed.spl" > "$fx/base_b"
+  v=$(mix_baseline="$fx/base_b"; run_scan "$fx/b"); rc=$?; [ $rc -eq 0 ] || { echo "selftest: baselined unit-mix row must PASS, got rc=$rc: $v"; exit 2; }
+  # Diff mode: only touched files are scanned, and only their baseline rows
+  # can be stale; a new hit in a touched file still FAILs.
+  printf '%s\n' "$fx/a/clean.spl" > "$fx/scope_a"
+  v=$(baseline="$fx/base_g"; scope_files="$fx/scope_a"; run_scan); rc=$?; [ $rc -eq 0 ] || { echo "selftest: diff mode must ignore rows of untouched files, got rc=$rc: $v"; exit 2; }
+  printf '%s\n' "$fx/g/scan.spl" > "$fx/scope_g"
+  v=$(scope_files="$fx/scope_g"; run_scan); rc=$?; [ $rc -eq 1 ] || { echo "selftest: diff mode must FAIL a new hit in a touched file, got rc=$rc: $v"; exit 2; }
+  # Committed-content mode: the scan reads the range TIP, not the working tree.
+  gr="$fx/repo"; mkdir -p "$gr/src/lib" && git init -q "$gr" && printf "src/lib/t.spl
+" > "$fx/scope_t"
+  printf "fn quote_end(s: text, p: i64) -> i64:
+    val n = s.len()
+    s.substring(p, n)
+" > "$gr/src/lib/bad.spl"
+  printf "fn ok(s: text) -> i64:
+    s.byte_len()
+" > "$gr/src/lib/t.spl"
+  (cd "$gr" && git add -A && git -c user.name=t -c user.email=t@t commit -qm c)
+  printf "src/lib/t.spl
+" > "$fx/scope_t"
+  cp "$gr/src/lib/bad.spl" "$gr/src/lib/t.spl"
+  v=$(cd "$gr" && scope_tip=HEAD; scope_files="$fx/scope_t"; run_scan); rc=$?; [ $rc -eq 0 ] || { echo "selftest: clean tip + dirty working copy must PASS, got rc=$rc: $v"; exit 2; }
+  (cd "$gr" && git checkout -q -- src/lib/t.spl && cp src/lib/bad.spl src/lib/t.spl && git add -A && git -c user.name=t -c user.email=t@t commit -qm d && printf "fn ok(s: text) -> i64:
+    s.byte_len()
+" > src/lib/t.spl)
+  v=$(cd "$gr" && scope_tip=HEAD; scope_files="$fx/scope_t"; run_scan); rc=$?; [ $rc -eq 1 ] || { echo "selftest: broken tip + clean working copy must FAIL, got rc=$rc: $v"; exit 2; }
+  # Stale head (PR #10981 replay): base fixed bad.spl after the topic branched,
+  # topic touched only t.spl. Scope must be the topic's own file, not bad.spl.
+  sg="$fx/stale"; mkdir -p "$sg/src/lib" && git -c init.defaultBranch=base init -q "$sg"
+  (cd "$sg" && cp "$gr/src/lib/bad.spl" src/lib/bad.spl && printf "fn ok(s: text) -> i64:\n    s.byte_len()\n" > src/lib/t.spl \
+    && git add -A && git -c user.name=t -c user.email=t@t commit -qm root && git branch -q topic \
+    && printf "fn ok(s: text) -> i64:\n    s.byte_len()\n" > src/lib/bad.spl && git -c user.name=t -c user.email=t@t commit -qam fix \
+    && git checkout -q topic && printf "fn ok2(s: text) -> i64:\n    s.byte_len()\n" >> src/lib/t.spl \
+    && git -c user.name=t -c user.email=t@t commit -qam topic)
+  v=$(cd "$sg" && diff_scope base..topic src/lib)
+  [ "$v" = "src/lib/t.spl" ] || { echo "selftest: stale-head scope must be only the topic's src/lib/t.spl, got: $v"; exit 2; }
+  # A typed byte array counts bytes with len(). Exemption belongs to the
+  # actual simple binding, not its spelling elsewhere in the file/function.
+  mkdir -p "$fx/typed" "$fx/shadowed"
+  cat > "$fx/typed/arrays.spl" <<'FIXTURE'
+fn parameter(bytes: [u8], value: text) -> bool:
+    value.byte_len() == bytes.len()
+
+fn multiline(
+    bytes: [u8],
+    value: text
+) -> bool:
+    value.byte_len() == bytes.len()
+
+fn local(value: text) -> bool:
+    val bytes: [u8] = value.to_bytes()
+    value.byte_len() == bytes.len()
+
+fn width(bytes: [u8], value: text) -> text:
+    val count = bytes.len()
+    value.substring(0, count)
+
+fn restored(bytes: [u8], value: text, condition: bool) -> bool:
+    if condition:
+        val bytes: text = value
+        print bytes
+    value.byte_len() == bytes.len()
+
+fn matched(value: text) -> bool:
+    val bytes: [u8] = match value.to_bytes_checked():
+        case Ok(result): result
+        case Err(_): return false
+    value.byte_len() == bytes.len()
+
+fn conditional_restored(bytes: [u8], value: text, item: Option<text>) -> bool:
+    if val bytes = item:
+        print bytes
+    value.byte_len() == bytes.len()
+
+fn quoted(bytes: [u8], value: text) -> bool:
+    val note = "\\bytes: if val bytes = item"
+    value.byte_len() == bytes.len()
+FIXTURE
+  v=$(run_scan "$fx/typed"); rc=$?; [ $rc -eq 0 ] || { echo "selftest: explicit byte arrays must PASS, got rc=$rc: $v"; exit 2; }
+  cat > "$fx/shadowed/text.spl" <<'FIXTURE'
+fn text_receiver(bytes: text, value: text) -> bool:
+    value.byte_len() == bytes.len()
+FIXTURE
+  cat > "$fx/shadowed/local.spl" <<'FIXTURE'
+fn shadow(bytes: [u8], value: text) -> bool:
+    val bytes = value
+    value.byte_len() == bytes.len()
+FIXTURE
+  cat > "$fx/shadowed/nested.spl" <<'FIXTURE'
+fn shadow(bytes: [u8], value: text, condition: bool) -> bool:
+    if condition:
+        val bytes: text = value
+        return value.byte_len() == bytes.len()
+    value.byte_len() == bytes.len()
+FIXTURE
+  cat > "$fx/shadowed/function.spl" <<'FIXTURE'
+fn first(bytes: [u8], value: text) -> bool:
+    value.byte_len() == bytes.len()
+
+fn second(bytes: text, value: text) -> bool:
+    value.byte_len() == bytes.len()
+FIXTURE
+  cat > "$fx/shadowed/member.spl" <<'FIXTURE'
+fn member(bytes: [u8], value: text, object: Record) -> bool:
+    value.byte_len() == object.bytes.len()
+FIXTURE
+  cat > "$fx/shadowed/member_space.spl" <<'FIXTURE'
+fn member(bytes: [u8], value: text, object: Record) -> bool:
+    value.byte_len() == object. bytes.len()
+FIXTURE
+  cat > "$fx/shadowed/loop.spl" <<'FIXTURE'
+fn loop(bytes: [u8], value: text, values: [text]) -> bool:
+    for bytes in values:
+        if value.byte_len() == bytes.len(): return true
+    false
+FIXTURE
+  cat > "$fx/shadowed/match.spl" <<'FIXTURE'
+fn matched(bytes: [u8], value: text, item: Option<text>) -> bool:
+    match item:
+        case Some(bytes):
+            value.byte_len() == bytes.len()
+        case None: false
+FIXTURE
+  cat > "$fx/shadowed/inline.spl" <<'FIXTURE'
+fn matched(bytes: [u8], value: text, item: Option<text>) -> bool:
+    match item:
+        case Some(bytes): value.byte_len() == bytes.len()
+        case None: false
+FIXTURE
+  cat > "$fx/shadowed/tuple.spl" <<'FIXTURE'
+fn unpack(bytes: [u8], value: text, pair: (text, i64)) -> bool:
+    val (bytes, count) = pair
+    value.byte_len() == bytes.len()
+FIXTURE
+  cat > "$fx/shadowed/initializer.spl" <<'FIXTURE'
+fn initializer(bytes: text, value: text) -> bool:
+    val bytes: [u8] = value.substring(0, bytes.len()).to_bytes()
+    value.byte_len() == bytes.len()
+FIXTURE
+  cat > "$fx/shadowed/unknown.spl" <<'FIXTURE'
+fn inferred(bytes, value: text) -> bool:
+    value.byte_len() == bytes.len()
+FIXTURE
+  cat > "$fx/shadowed/ifval.spl" <<'FIXTURE'
+fn conditional(bytes: [u8], value: text, item: Option<text>) -> bool:
+    if val bytes = item:
+        return value.byte_len() == bytes.len()
+    false
+FIXTURE
+  cat > "$fx/shadowed/ifval_inline.spl" <<'FIXTURE'
+fn conditional_inline(bytes: [u8], value: text, item: Option<text>) -> bool:
+    if val bytes = item: return value.byte_len() == bytes.len()
+    false
+FIXTURE
+  cat > "$fx/shadowed/whileval.spl" <<'FIXTURE'
+fn conditional_loop(bytes: [u8], value: text, item: Option<text>) -> bool:
+    while val bytes = item:
+        return value.byte_len() == bytes.len()
+    false
+FIXTURE
+  cat > "$fx/shadowed/elifvar.spl" <<'FIXTURE'
+fn conditional_branch(bytes: [u8], value: text, item: Option<text>, condition: bool) -> bool:
+    if condition:
+        return false
+    elif var bytes = item:
+        return value.byte_len() == bytes.len()
+    false
+FIXTURE
+  cat > "$fx/shadowed/lambda.spl" <<'FIXTURE'
+fn lambda_shadow(bytes: [u8], value: text, values: [text]):
+    values.map(\bytes: value.byte_len() == bytes.len())
+FIXTURE
+  cat > "$fx/shadowed/lambda_multiline.spl" <<'FIXTURE'
+fn lambda_shadow(bytes: [u8], value: text):
+    val compare = \bytes:
+        value.byte_len() == bytes.len()
+    compare
+FIXTURE
+  # A comprehension's `for` and a `with ... as` bind a name mid-line, not at
+  # the line start: both shadow an outer [u8] binding of the same name.
+  cat > "$fx/shadowed/comprehension.spl" <<'FIXTURE'
+fn comprehension(bytes: [u8], value: text, values: [text]) -> [bool]:
+    [value.byte_len() == bytes.len() for bytes in values]
+FIXTURE
+  cat > "$fx/shadowed/with_as.spl" <<'FIXTURE'
+fn with_as(bytes: [u8], value: text, source: Source) -> bool:
+    with source.open() as bytes:
+        return value.byte_len() == bytes.len()
+    false
+FIXTURE
+  v=$(run_scan "$fx/shadowed"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: text/unknown/shadowed bindings must FAIL, got rc=$rc: $v"; exit 2; }
+  for fixture in text local nested function member member_space loop match inline tuple initializer unknown ifval ifval_inline whileval elifvar lambda lambda_multiline comprehension with_as; do
+    printf '%s\n' "$v" | grep -Fq "$fixture.spl bytes (len() as byte width) (NEW" || { echo "selftest: $fixture text-width evidence was lost: $v"; exit 2; }
+  done
+  hits=$(printf '%s\n' "$v" | grep -c '(NEW byte/code-point unit mix)' || true)
+  [ "$hits" -eq 20 ] || { echo "selftest: expected exactly 20 unsafe typed-binding fixtures, got $hits: $v"; exit 2; }
+  # [u8] struct field receivers count bytes with len(); a text field, an
+  # ambiguous name (u8 in one struct, text in another) and an unknown name
+  # stay flagged. The field map spans every scanned file.
+  mkdir -p "$fx/h" "$fx/i" "$fx/j" "$fx/k"
+  printf 'struct Streams:\n    stdout: [u8]\n    stderr: [u8] = []\n\nfn ok(a: text, s: Streams) -> bool:\n    a.byte_len() == s.stdout.len() + s.stderr.len()\n' > "$fx/h/u8_field.spl"
+  printf 'struct Doc:\n    content: text\n\nfn bad(a: text, d: Doc) -> bool:\n    a.byte_len() == d.content.len()\n' > "$fx/i/text_field.spl"
+  printf 'struct Raw:\n    data: [u8]\n\nstruct Cooked:\n    data: text\n\nfn bad(a: text, c: Cooked) -> bool:\n    a.byte_len() == c.data.len()\n' > "$fx/j/ambiguous.spl"
+  mkdir -p "$fx/k/src/app/k"
+  printf 'struct Streams:\n    stdout: [u8]\n\nstruct Other:\n    stdout: text\n' > "$fx/k/src/app/k/types.spl"
+  printf 'use app.k.types.Streams\n\nfn ok(a: text, s: Streams) -> bool:\n    a.byte_len() == s.stdout.len()\n\nfn unknown(a: text, s: Streams) -> bool:\n    a.byte_len() == s.mystery.len()\n' > "$fx/k/src/app/k/use.spl"
+  v=$(run_scan "$fx/h"); rc=$?; [ $rc -eq 0 ] || { echo "selftest: [u8] field len() beside byte_len() must PASS, got rc=$rc: $v"; exit 2; }
+  v=$(run_scan "$fx/i"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: text field len() beside byte_len() must FAIL, got rc=$rc: $v"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'text_field.spl content (len() as byte width)' || { echo "selftest: text-field fixture must name content: $v"; exit 2; }
+  v=$(run_scan "$fx/j"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: ambiguous field name must FAIL, got rc=$rc: $v"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'ambiguous.spl data (len() as byte width)' || { echo "selftest: ambiguous fixture must name data: $v"; exit 2; }
+  printf 'fn lost(a: text, s: Streams) -> bool:\n    a.byte_len() == s.stdout.len()\n' > "$fx/k/src/app/k/noimport.spl"
+  printf 'pub struct Frames:\n    pub payload: [u8]\n' > "$fx/k/src/app/k/frames.spl"
+  printf 'use app.k.frames.{\n    Frames\n}\n\nfn ok(a: text, f: Frames) -> bool:\n    a.byte_len() == f.payload.len()\n' > "$fx/k/src/app/k/multi.spl"
+  v=$(use_base="$fx/k"; run_scan "$fx/k/src"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: cross-file [u8] field must PASS and undeclared field must FAIL, got rc=$rc: $v"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'use.spl mystery (len() as byte width)' || { echo "selftest: undeclared field must be named: $v"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'noimport.spl stdout (len() as byte width)' || { echo "selftest: [u8] field from a non-imported file must stay flagged: $v"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'k/use.spl stdout' && { echo "selftest: cross-file [u8] field wrongly flagged: $v"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'k/multi.spl' && { echo "selftest: multi-line use of a pub [u8] field wrongly flagged: $v"; exit 2; }
+  # REVIEW_C P1-1: a field name is not a type. A same-named [u8] field elsewhere
+  # in the map must not exempt a receiver whose type the gate cannot see: a
+  # package import, a call result, an unannotated or chained root all FAIL.
+  mkdir -p "$fx/l/src/lib/pkg" "$fx/l/src/app/m"
+  printf 'struct Doc:\n    data: text\n' > "$fx/l/src/lib/pkg/__init__.spl"
+  printf 'struct Doc:\n    data: text\nfn load() -> Doc:\n    Doc(data: "x")\n' > "$fx/l/src/app/m/docs.spl"
+  printf 'use std.pkg.{Doc}\n\nstruct Raw:\n    data: [u8]\n\nfn bad(a: text, d: Doc) -> bool:\n    a.byte_len() == d.data.len()\n' > "$fx/l/src/app/m/case1.spl"
+  printf 'use app.m.docs.{load}\n\nstruct Raw:\n    data: [u8]\n\nfn bad(a: text) -> bool:\n    a.byte_len() == load().data.len()\n' > "$fx/l/src/app/m/case2.spl"
+  printf 'struct Raw:\n    data: [u8]\n\nfn bad(a: text, d: Doc) -> text:\n    a.substring(0, d.data.len())\n' > "$fx/l/src/app/m/case4.spl"
+  printf 'struct Raw:\n    data: [u8]\n\nfn untyped(a: text, items: [Raw]) -> bool:\n    for r in items:\n        if a.byte_len() == r.data.len(): return true\n    false\n' > "$fx/l/src/app/m/case5.spl"
+  printf 'struct Raw:\n    data: [u8]\n\nstruct Wrap:\n    raw: Raw\n\nfn chained(a: text, w: Wrap) -> bool:\n    a.byte_len() == w.raw.data.len()\n' > "$fx/l/src/app/m/case6.spl"
+  printf 'struct Raw:\n    data: [u8]\n\nfn literal_chain(a: text, b: [u8]) -> bool:\n    val r = Raw(data: b).data\n    a.byte_len() == r.data.len()\n' > "$fx/l/src/app/m/case7.spl"
+  v=$(use_base="$fx/l"; run_scan "$fx/l/src"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: unresolved receiver types must FAIL, got rc=$rc: $v"; exit 2; }
+  for fixture in case1 case2 case4 case5 case6 case7; do
+    printf '%s\n' "$v" | grep -Fq "$fixture.spl data (len() as byte width) (NEW" || { echo "selftest: $fixture unresolved-type field must stay flagged: $v"; exit 2; }
+  done
+  # The receiver type is known: a parameter, a `val x: T` annotation, a
+  # struct literal, also on a `for ... in [..]` header (that header binds
+  # only its loop name). These [u8] fields count bytes and PASS.
+  mkdir -p "$fx/n"
+  printf 'struct Streams:\n    stdout: [u8]\n\nfn header(v: text, s: Streams) -> i64:\n    var total = 0\n    for size in [v.byte_len(), s.stdout.len()]:\n        total = total + size\n    total\n\nfn literal(v: text, b: [u8]) -> bool:\n    val s = Streams(stdout: b)\n    v.byte_len() == s.stdout.len()\n\nfn annotated(v: text) -> bool:\n    val s: Streams = make()\n    v.byte_len() == s.stdout.len()\n' > "$fx/n/known.spl"
+  v=$(run_scan "$fx/n"); rc=$?; [ $rc -eq 0 ] || { echo "selftest: [u8] field on a typed receiver must PASS, got rc=$rc: $v"; exit 2; }
+  # A named-field pattern (`Wrap(doc: d)`) binds d, not doc: it shadows the
+  # typed parameter d, so d's [u8] field (or [u8] type) no longer applies.
+  mkdir -p "$fx/o"
+  printf 'struct Raw:\n    data: [u8]\n\nfn arm(a: text, d: Raw, m: Msg) -> bool:\n    match m:\n        case Wrap(doc: d):\n            a.byte_len() == d.data.len()\n        case _: false\n' > "$fx/o/arm.spl"
+  printf 'struct Raw:\n    data: [u8]\n\nfn arm(a: text, d: Raw, m: Msg) -> bool:\n    match m:\n        case Wrap(doc: d): a.byte_len() == d.data.len()\n        case _: false\n' > "$fx/o/arm_inline.spl"
+  printf 'struct Raw:\n    data: [u8]\n\nfn conditional(a: text, d: Raw, m: Msg) -> bool:\n    if val Wrap(doc: d) = m:\n        return a.byte_len() == d.data.len()\n    false\n' > "$fx/o/ifval.spl"
+  printf 'fn arm(a: text, bytes: [u8], m: Msg) -> bool:\n    match m:\n        case Wrap(doc: bytes): a.byte_len() == bytes.len()\n        case _: false\n' > "$fx/o/plain.spl"
+  v=$(run_scan "$fx/o"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: named-field pattern shadowing must FAIL, got rc=$rc: $v"; exit 2; }
+  for fixture in arm.spl arm_inline.spl ifval.spl; do
+    printf '%s\n' "$v" | grep -Fq "/o/$fixture data (len() as byte width) (NEW" || { echo "selftest: $fixture named-field shadow must stay flagged: $v"; exit 2; }
+  done
+  printf '%s\n' "$v" | grep -Fq "/o/plain.spl bytes (len() as byte width) (NEW" || { echo "selftest: plain.spl named-field shadow must stay flagged: $v"; exit 2; }
+  # Committed mode reads the IMPORTED struct at the range tip too.
+  printf 'struct Raw:\n    data: text\n' > "$gr/src/lib/ty.spl"
+  printf 'use std.ty.Raw\n\nfn bad(a: text, r: Raw) -> bool:\n    a.byte_len() == r.data.len()\n' > "$gr/src/lib/t2.spl"
+  (cd "$gr" && git add -A && git -c user.name=t -c user.email=t@t commit -qm e)
+  printf 'struct Raw:\n    data: [u8]\n' > "$gr/src/lib/ty.spl"
+  printf 'src/lib/t2.spl\n' > "$fx/scope_t2"
+  v=$(cd "$gr" && use_base="$gr"; scope_tip=HEAD; scope_files="$fx/scope_t2"; run_scan); rc=$?; [ $rc -eq 1 ] || { echo "selftest: committed import (text at tip, [u8] in working copy) must FAIL, got rc=$rc: $v"; exit 2; }
+  echo "selftest: existing ratchets, 20 unsafe typed-binding fixtures, 17 struct-field receiver fixtures and 4 named-field pattern fixtures OK"
+}
+
+do_selftest=0
+roots=""
+range=""
+want_range=0
+for a in "$@"; do
+  if [ "$want_range" -eq 1 ]; then range="$a"; want_range=0; continue; fi
+  case "$a" in
+    --selftest) do_selftest=1 ;;
+    --generate-baseline) gen_baseline=1 ;;
+    --changed) want_range=1 ;;
+    *) roots="$roots $a" ;;
+  esac
+done
+if [ "$do_selftest" -eq 1 ]; then
+  real_baseline="$baseline"; real_mix="$mix_baseline"
+  baseline="$(mktemp)"; mix_baseline="$(mktemp)"
+  selftest
+  rm -f "$baseline" "$mix_baseline"; baseline="$real_baseline"; mix_baseline="$real_mix"
+fi
+[ -z "$roots" ] && roots="src/lib src/app src/compiler"
+if [ -n "$range" ]; then
+  # Diff-scoped mode (push tier): scan only the .spl files the range touches
+  # under the roots; a deleted file is kept in scope so its rows go stale.
+  case "$range" in *..*) ;; *) echo "ERROR — nothing was checked (--changed needs BASE..HEAD)"; exit 2 ;; esac
+  scope_files=$(mktemp); scope_tip="${range##*..}"
+  # shellcheck disable=SC2086
+  diff_scope "$range" $roots > "$scope_files" || true
+  [ -s "$scope_files" ] || { echo "PASS — 0 touched .spl file(s) in $range under $roots; nothing to ratchet"; exit 0; }
+fi
+# shellcheck disable=SC2086
+run_scan $roots

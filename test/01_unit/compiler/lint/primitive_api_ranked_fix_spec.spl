@@ -1,0 +1,136 @@
+"""
+## Purpose and audience
+Executable spec of the primitive_api ranked semantic-type fixes (plan
+`unified_unit_primitive_api_scheduled_diagnostics_plan_2026-11-12` §0.3, §5
+fix rule 3, §10.2) for lint and fix-pipeline maintainers. Scope: a finding
+whose parameter/function name maps to an existing semantic type carries ranked
+DiagnosticFix candidates that replace only the type token; unknown names carry
+no fix. Out of scope: cross-file caller edits and LSP code actions (lane U1/P3).
+## Operator workflow
+Run: bin/simple test test/01_unit/compiler/lint/primitive_api_ranked_fix_spec.spl
+## Compatibility and limitations
+Candidates come from a fixed name table; every fix is Uncertain +
+review_required because it changes callers, so the legacy single `fix` alias
+stays empty and nothing auto-applies.
+## Verification guidance and troubleshooting
+A failure names the contract that broke: a missing/extra candidate, an
+unstable rank, a span that is not the type token, or a no-op replacement.
+"""
+# @feature: primitive-api-lint
+# @manual_section: primitive-api-ranked-fix
+
+use std.spec.*
+use std.common.diagnostics.diagnostic_v1.{DiagnosticV1, FixApplicability}
+use compiler.tools.fix.rules.impl_.lint_primitive_api.{primitive_api_findings, check_primitive_api}
+use compiler.tools.lint.main.{Linter}
+
+val SRC = "# header\npub fn open(port: i64, flags: i64) -> bool:\n    true\nfn hidden(port: i64) -> bool:\n    true\npub fn wait(timeout_ms: i64, size: i64, budget_ms: i32) -> bool:\n    true\n"
+
+fn _finding(path: text) -> i64:
+    val findings = primitive_api_findings("sample.spl", SRC.split("\n"))
+    var i = 0
+    while i < findings.len():
+        if findings[i].type_path == path:
+            return i
+        i = i + 1
+    -1
+
+fn _fix_types(path: text) -> text:
+    val findings = primitive_api_findings("sample.spl", SRC.split("\n"))
+    val idx = _finding(path)
+    if idx < 0:
+        return "<missing>"
+    var names: [text] = []
+    for fix in findings[idx].fixes:
+        names.push("{fix.rank}:{fix.replacements[0].new_text}")
+    names.join(",")
+
+describe "primitive_api ranked fixes":
+    """
+    Name-table candidates become ranked review-required fixes that replace
+    exactly the offending type token.
+    """
+    it "offers PortNumber for a public `port: i64` with the type-token span":
+        # @req REQ-DPOL-005
+        # @capture(statistics): fix count, rank, span and new text for open.param.port
+        step("Scan pub fn open(port: i64, ...) and inspect its fixes")
+        val findings = primitive_api_findings("sample.spl", SRC.split("\n"))
+        val f = findings[_finding("open.param.port")]
+        expect(f.fixes.len()).to_equal(1)  # oracle: only PortNumber matches the name `port`
+        val fix = f.fixes[0]
+        expect(fix.rank).to_equal(1)  # oracle: sole candidate is rank 1
+        val rep = fix.replacements[0]
+        expect(fix.replacements.len()).to_equal(1)  # oracle: one edit, the type token only
+        expect(rep.new_text).to_equal("PortNumber")  # oracle: std.common.types.PortNumber
+        expect(rep.span.start).to_equal(f.start)  # oracle: fix span == finding span
+        expect(rep.span.end).to_equal(f.end)  # oracle: fix span == finding span
+        expect(SRC.slice(rep.span.start, rep.span.end)).to_equal("i64")  # oracle: span covers the type token
+        expect(fix.preconditions[0].expected_text).to_equal("i64")  # oracle: revision precondition on the token
+
+    it "marks every candidate review-required, never an automatic fix":
+        # @req REQ-DPOL-005
+        # @capture(statistics): applicability, confidence and legacy alias for the port fix
+        step("Attach the fixes to a DiagnosticV1 and inspect the legacy alias")
+        val findings = primitive_api_findings("sample.spl", SRC.split("\n"))
+        val f = findings[_finding("open.param.port")]
+        expect(f.fixes[0].applicability == FixApplicability.ReviewRequired).to_equal(true)  # oracle: §5 rule 3 needs caller edits
+        expect(f.fixes[0].confidence.name()).to_equal("uncertain")  # oracle: name-based guess changes callers
+        val d = DiagnosticV1.warning("primitive_api", f.message).with_fixes(f.fixes)
+        expect(d.fixes.len()).to_equal(1)  # oracle: ranked list carried
+        expect(d.has_fix()).to_equal(false)  # oracle: legacy alias is first Safe/Likely only
+
+    it "offers no fix when the name matches no semantic type":
+        # @req REQ-DPOL-004
+        # @capture(statistics): fix counts for flags param and open return
+        step("Inspect findings whose names are not in the candidate table")
+        expect(_fix_types("open.param.flags")).to_equal("")  # oracle: `flags` is not in the table
+        expect(_fix_types("open.return")).to_equal("")  # oracle: `open` is not in the table; bool has no candidate
+
+    it "ranks multiple candidates repr-exact first in a stable order":
+        # @req REQ-DPOL-005
+        # @capture(statistics): ranked candidate lists for timeout_ms, size and budget_ms
+        step("Compare ranked candidates for ambiguous names across two scans")
+        expect(_fix_types("wait.param.timeout_ms")).to_equal("1:Millis,2:DurationMs")  # oracle: Millis wraps i64, DurationMs i32
+        expect(_fix_types("wait.param.budget_ms")).to_equal("1:DurationMs,2:Millis")  # oracle: i32 param prefers DurationMs
+        expect(_fix_types("wait.param.size")).to_equal("1:ByteSize,2:Length")  # oracle: table order, both wrap i64
+        expect(_fix_types("wait.param.size")).to_equal(_fix_types("wait.param.size"))  # oracle: deterministic
+
+    it "never offers a replacement equal to the original text":
+        # @req REQ-DPOL-004
+        # @capture(statistics): count of no-op replacements over all findings
+        step("Compare every replacement with the text it replaces")
+        var noop = 0
+        var total = 0
+        for f in primitive_api_findings("sample.spl", SRC.split("\n")):
+            for fix in f.fixes:
+                for rep in fix.replacements:
+                    total = total + 1
+                    if SRC.slice(rep.span.start, rep.span.end) == rep.new_text:
+                        noop = noop + 1
+        expect(total).to_equal(7)  # oracle: port 1 + timeout_ms 2 + size 2 + budget_ms 2
+        expect(noop).to_equal(0)  # oracle: a no-op fix is forbidden
+
+    it "stays silent for a private fn and keeps the compat records help-only":
+        # @req REQ-DPOL-002
+        # @capture(statistics): hidden findings and compat replacement count
+        step("Check the private fn and the EasyFix compat view")
+        expect(_finding("hidden.param.port")).to_equal(-1)  # oracle: private fn is not public API
+        var reps = 0
+        for fix in check_primitive_api(SRC, "sample.spl"):
+            reps = reps + fix.replacements.len()
+        expect(reps).to_equal(0)  # oracle: compat EasyFix view never applies a type rewrite
+
+    it "surfaces ranked candidates in the linter hint":
+        # @req REQ-DPOL-005
+        # @capture(statistics): hint text of the open.param.port lint result
+        step("Run Linter.lint_source and read the primitive_api hint")
+        var linter = Linter.new()
+        val results = linter.lint_source("sample.spl", SRC)
+        var hint = ""
+        for r in results:
+            if r.lint.code == "primitive_api" and r.line == 2 and hint == "":
+                match r.lint.fix_hint:
+                    case Some(h): hint = h
+                    case None: hint = ""
+        expect(hint.contains("1. PortNumber")).to_equal(true)  # oracle: rank-1 candidate named in the hint
+        expect(hint.contains("review required")).to_equal(true)  # oracle: applicability shown to the user

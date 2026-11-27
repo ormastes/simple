@@ -1,7 +1,29 @@
 # `rt_watchdog_start`/`rt_watchdog_stop` externs have no runtime FFI registration; the app-layer watchdog module has zero callers
 
+## Verification addendum 2026-11-25 (P3 ledger lane, Windows x86_64)
+
+- **measured** (tracked `bin/simple.exe`, `SIMPLE_LIB=src ... run --mode=interpreter`):
+  the original crash symptom is gone — a live probe calling
+  `WatchdogManager.start(5)` then `WatchdogManager.stop()` prints
+  `start ok` / `stop ok` with no `unknown extern function: rt_watchdog_start`
+  abort. (This exact call shape was previously an instant process abort.)
+- **measured** (source inspection): the facade
+  `src/lib/nogc_async_mut_noalloc/execution/watchdog_manager.spl:18` declares
+  only `extern fn rt_fault_set_timeout(secs: i64)` — backed in both lanes per
+  the 2026-11-13 Resolution below — and
+  `src/app/interpreter/core/watchdog.spl` declares no extern itself. The
+  unregistered `rt_watchdog_start`/`rt_watchdog_stop` externs no longer
+  exist anywhere in the Simple-facing source.
+- **limit stated**: `watchdog_manager_spec.spl` could not be re-run through
+  the harness on this host (tracked-seed/@representation_boundary skew, as
+  in the rest of this lane); the run-mode probe above is the dynamic
+  evidence.
+- The "fixed 2026-11-13" status is confirmed. The two follow-ups named in
+  the Resolution (`fault_detection_module_missing_2026-11-13.md`; C-lane
+  extern only records config) are unchanged and tracked separately.
+
 Date: 2026-07-08
-Status: open (dead-or-dormant; owner decision needed — delete vs wire up)
+Status: fixed 2026-11-13 (owner decision: implement and wire)
 Severity: P3
 Related: backend-isolation Gap D
 (`doc/03_plan/ui/rendering/backend_isolation_plan.md` § P3 Gap D), the new
@@ -90,3 +112,22 @@ tradeoffs (see below) and not required to advance the isolation gate.
 
 No action taken here beyond recording the finding — this bug record is
 informational for the owner to triage, not a fix.
+
+## Resolution (2026-11-13)
+
+Owner decision: keep the module and wire it to real logic, not delete.
+- `WatchdogManager.start/stop` now call `rt_fault_set_timeout(secs)` / `rt_fault_set_timeout(0)`.
+  That extern is backed in both lanes: the seed (`interpreter_extern/cli.rs`, where secs > 0 calls
+  `watchdog::start_watchdog`, which sets `TIMEOUT_EXCEEDED` checked by interpreted loops) and the
+  C runtime (`runtime_native.c`, which records `SIMPLE_TIMEOUT_SECONDS`).
+- `src/app/interpreter/core/watchdog.spl` declares no extern any more and routes through the facade.
+- Evidence: `watchdog_manager_spec` went from 0/4 (red, `unknown extern function: rt_watchdog_start`)
+  to 4/4 on seed-v4 (sha256 `af717f53…`). The new example REQ-WATCHDOG-004 really arms and
+  disarms the timer.
+
+Still open, and not covered by this fix:
+- `watchdog.spl` and `execution_guard.spl` import `std.common.fault_detection`, which does not
+  exist in `src/lib`. The pure-Simple interpreter path to `check_timeout` therefore cannot load.
+  Tracked separately: `fault_detection_module_missing_2026-11-13.md`.
+- On the C lane the extern only hands off configuration (it sets an env var); no timer thread
+  is started.

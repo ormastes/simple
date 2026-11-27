@@ -1,0 +1,69 @@
+use std.spec
+use std.common.hpack.encoder.{HpackHeader}
+use std.http_server.h2_request_headers.{h2_request_authority_error}
+
+fn header(name: text, value: text) -> HpackHeader:
+    HpackHeader(name: name, value: value, sensitive: false)
+
+fn get_with(authority: text?, host: text?) -> [HpackHeader]:
+    var headers = [header(":method", "GET"), header(":scheme", "https"), header(":path", "/")]
+    if authority != nil:
+        headers.push(header(":authority", authority ?? ""))
+    if host != nil:
+        headers.push(header("host", host ?? ""))
+    headers
+
+describe "HTTP/2 strict authority-source validation (RFC 9113 §8.3.1)":
+    it "accepts exactly one authority source":
+        expect(h2_request_authority_error(get_with(nil, nil))).to_equal("missing request authority")
+        expect(h2_request_authority_error(get_with("a.test", nil))).to_equal("")
+        expect(h2_request_authority_error(get_with(nil, "a.test"))).to_equal("")
+
+    it "accepts matching :authority and Host pairs case-insensitively":
+        expect(h2_request_authority_error(get_with("Example.test", "example.TEST"))).to_equal("")
+        expect(h2_request_authority_error(get_with("a.test:8443", "a.test:8443"))).to_equal("")
+
+    it "rejects conflicting :authority and Host values":
+        expect(h2_request_authority_error(get_with("authority.test", "other.test"))).to_equal(":authority and host mismatch")
+        expect(h2_request_authority_error(get_with("a.test:1", "a.test:2"))).to_equal(":authority and host mismatch")
+
+    it "rejects duplicate Host fields even when equal":
+        var dup = get_with(nil, "a.test")
+        dup.push(header("host", "a.test"))
+        expect(h2_request_authority_error(dup)).to_equal("multiple host fields")
+        var dup_with_authority = get_with("a.test", "a.test")
+        dup_with_authority.push(header("host", "a.test"))
+        expect(h2_request_authority_error(dup_with_authority)).to_equal("multiple host fields")
+
+    it "requires :authority for CONNECT and enforces Host agreement":
+        expect(h2_request_authority_error([
+            header(":method", "CONNECT"), header(":path", "/")
+        ])).to_equal("CONNECT requires :authority")
+        expect(h2_request_authority_error([
+            header(":method", "CONNECT"), header(":authority", "c.test:443")
+        ])).to_equal("")
+        expect(h2_request_authority_error([
+            header(":method", "CONNECT"), header(":authority", "c.test:443"),
+            header("host", "other.test:443")
+        ])).to_equal(":authority and host mismatch")
+        expect(h2_request_authority_error([
+            header(":method", "CONNECT"), header(":authority", "C.test:443"),
+            header("host", "c.test:443")
+        ])).to_equal("")
+
+    it "keeps OPTIONS star authority-optional but still rejects conflicts":
+        expect(h2_request_authority_error([
+            header(":method", "OPTIONS"), header(":scheme", "https"), header(":path", "*")
+        ])).to_equal("")
+        expect(h2_request_authority_error([
+            header(":method", "OPTIONS"), header(":scheme", "https"), header(":path", "*"),
+            header(":authority", "o.test")
+        ])).to_equal("")
+        expect(h2_request_authority_error([
+            header(":method", "OPTIONS"), header(":scheme", "https"), header(":path", "*"),
+            header(":authority", "o.test"), header("host", "p.test")
+        ])).to_equal(":authority and host mismatch")
+        # OPTIONS with a real path is an ordinary request: authority required.
+        expect(h2_request_authority_error([
+            header(":method", "OPTIONS"), header(":scheme", "https"), header(":path", "/x")
+        ])).to_equal("missing request authority")

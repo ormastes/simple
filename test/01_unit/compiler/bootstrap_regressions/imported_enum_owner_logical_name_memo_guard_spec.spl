@@ -1,0 +1,127 @@
+"""
+# Guard: imported-enum owner text must come from a memo that never retains
+# a transient-scope entry
+
+Bug `stage2_test_runner_imported_enum_owner_text_corrupt_2026_10_19`
+(lane `lane-f-enumowner`, 2026-11-08 reconciliation).
+
+## The defect
+
+The admitted Stage 2 compiler failed `test_runner_build` with ~138 MIR
+errors of the shape
+
+    enum construction: unregistered declaration 'schema=.TestExecutionMode'
+
+`enum_qualified_key` (50.mir/_MirLoweringExpr/switch_operators_calls.spl)
+builds `"{owner}.{Name}"` and the owner came back as `schema=...` -- bytes of
+the build-progress snapshot writer, not a module path. The owner text is the
+return of `bootstrap_mir_logical_module_name`, which delegates to
+`module_logical_name_from_path` (00.common/module_path_naming.spl). That
+function memoised into a MODULE-LEVEL dict on every miss; misses happen
+inside the per-file HIR and per-module MIR transient scopes, no promote root
+reaches a module-level dict, so scope end freed the retained value and later
+hits returned reused storage. gdb on the r4 Stage 2 placed the dangling
+inserts under `HirLowering.register_imported_type_methods_inner` -- exactly
+the imported-enum registration path (fix `eddc499e14e`).
+
+## What this spec pins
+
+(a) SOURCE shape: the memo store sits under the opt-in
+`_module_logical_name_cache_retaining` guard, the warm entry point toggles
+that guard, the MIR enum-owner path still routes through the shared
+derivation, and the driver warms every symbol owner at state 0. The guard
+assertions are RED at `eddc499e14e~1` (0 occurrences of the retaining flag)
+and GREEN after it.
+
+(b) BEHAVIOUR: a plain lookup and a warmed lookup agree, a repeated lookup
+(memo hit) returns the same text, and no derived owner ever carries the
+`schema=` prefix the incident observed. Interpreter-lane only: the
+rt_transient_* externs are inert here, so the native free/reuse itself is
+exercised by tier 2 of
+`scripts/check/check-transient-scope-text-field-promotion.shs`
+(`test/fixture/transient_scope/global_text_memo.spl`).
+"""
+
+use std.spec.*
+use std.io_runtime.{read_file}
+use compiler.common.module_path_naming.{module_logical_name_from_path, module_logical_name_cache_warm}
+
+val _NAMING = "src/compiler/00.common/module_path_naming.spl"
+val _MIR_GLOBALS = "src/compiler/50.mir/_MirLowering/bootstrap_globals.spl"
+val _MIR_SWITCH = "src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl"
+val _DRIVER = "src/compiler/80.driver/driver_pipeline_lowering.spl"
+
+fn _has(path: text, needle: text) -> bool:
+    read_file(path).contains(needle)
+
+fn _count(path: text, needle: text) -> i64:
+    read_file(path).split(needle).len() - 1
+
+describe "logical-name memo retains only warmed entries (source shape)":
+    """The fix for the schema= owner corruption is a retention guard on the
+    module-level memo. These assertions fail on the pre-fix text."""
+
+    it "guards the memo store behind the opt-in retaining flag":
+        assert_true(_has(_NAMING, "if _module_logical_name_cache_retaining:"))
+        # The store is the ONLY write to the cache and it is the guarded one.
+        expect(_count(_NAMING, "_module_logical_name_cache[path] = computed")).to_equal(1)
+
+    it "keeps the plain lookup free of any unguarded insert":
+        val body = read_file(_NAMING)
+        val lookup_at = body.split("pub fn module_logical_name_from_path(path: text) -> text:")
+        expect(lookup_at.len()).to_equal(2)
+        val lookup_body = lookup_at[1].split("pub fn module_logical_name_cache_warm")[0]
+        assert_true(lookup_body.contains("if _module_logical_name_cache_retaining:"))
+        assert_false(lookup_body.contains("_module_logical_name_cache[path] = _module_logical_name_from_path_uncached"))
+
+    it "exposes a warm entry point that sets and clears the retaining flag":
+        assert_true(_has(_NAMING, "pub fn module_logical_name_cache_warm(path: text):"))
+        assert_true(_has(_NAMING, "_module_logical_name_cache_retaining = true"))
+        assert_true(_has(_NAMING, "_module_logical_name_cache_retaining = false"))
+
+    it "routes the MIR enum owner key through the shared derivation":
+        assert_true(_has(_MIR_SWITCH, "val owner_module = bootstrap_mir_logical_module_name(defining_module)"))
+        assert_true(_has(_MIR_GLOBALS, "fn bootstrap_mir_logical_module_name(path: text) -> text:"))
+        assert_true(_has(_MIR_GLOBALS, "    module_logical_name_from_path(path)"))
+
+    it "warms every symbol defining module at the scope-free driver point":
+        assert_true(_has(_DRIVER, "fn driver_warm_mir_logical_names_v1(modules: Dict<text, HirModule>):"))
+        assert_true(_has(_DRIVER, "module.symbols.symbol_defining_module_scalar_raw(raw_ids[raw_index])"))
+        assert_true(_has(_DRIVER, "module_logical_name_cache_warm(owner)"))
+
+describe "logical-name derivation is stable across miss, warm and hit":
+    """Behavioural half: whatever the memo does, the owner text an enum key is
+    built from must be the same text every time and never the snapshot
+    writer's bytes."""
+
+    it "returns the same owner for a cold lookup, after warm, and on a memo hit":
+        val path = "src/lib/common/perf/execution_metrics.spl"
+        val cold = module_logical_name_from_path(path)
+        module_logical_name_cache_warm(path)
+        val warmed = module_logical_name_from_path(path)
+        val hit = module_logical_name_from_path(path)
+        assert_true(cold != "")
+        expect(warmed).to_equal(cold)
+        expect(hit).to_equal(cold)
+        assert_true(cold.ends_with("execution_metrics"))
+
+    it "never yields the build-progress snapshot prefix as an owner":
+        val owners = [
+            module_logical_name_from_path("src/lib/nogc_sync_mut/test_runner/native_owned_process.spl"),
+            module_logical_name_from_path("src/lib/nogc_sync_mut/mcdc/dynamic_aspect.spl"),
+            module_logical_name_from_path("src/lib/nogc_sync_mut/io/process_ops.spl"),
+        ]
+        for owner in owners:
+            assert_true(owner != "")
+            assert_false(owner.starts_with("schema="))
+            assert_false(owner.contains("simple-build-progress"))
+
+    it "keeps two distinct paths distinct after one of them is warmed":
+        val a = "src/lib/common/build_progress/model.spl"
+        val b = "src/lib/common/perf/execution_metrics.spl"
+        module_logical_name_cache_warm(a)
+        val owner_a = module_logical_name_from_path(a)
+        val owner_b = module_logical_name_from_path(b)
+        assert_true(owner_a != owner_b)
+        assert_true(owner_a.ends_with("model"))
+        assert_true(owner_b.ends_with("execution_metrics"))

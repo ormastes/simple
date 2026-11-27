@@ -1,0 +1,122 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, mir, regression
+"""
+# Imported enum/Value static constructor dispatch across modules and colliding enums
+
+Bug: doc/08_tracking/bug/imported_value_constructor_static_receiver_native_2026_10_16.md.
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+
+fn mir_errors_for_files(files: [(text, text, text)], entry_mod: text) -> [text]:
+    val log = Logger(level: 0)
+    var modules: Dict<text, ParserModule> = {}
+    var sources: [SourceFile] = []
+    for f in files:
+        val path = f.0
+        val mod_name = f.1
+        val content = f.2
+        modules[mod_name] = parse_full_frontend(content, path, mod_name, log)
+        sources = sources.push(SourceFile(path: path, content: content, module_name: mod_name))
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hir_mods: Dict<text, HirModule> = {}
+    var hir_list: [HirModule] = []
+    var errs: [text] = []
+    for f in files:
+        val path = f.0
+        val mod_name = f.1
+        var hl = hirlowering_for_module(path, surfaces)
+        val hir = hl.lower_module(modules[mod_name])
+        for e in hl.errors:
+            errs = errs.push("HIR({mod_name}): " + e.message)
+        hir_mods[mod_name] = hir
+        hir_list = hir_list.push(hir)
+    val entry_hir = hir_mods[entry_mod]
+    val target = driver_mir_target_context(driver_core_compile_options_default())
+    var ml = MirLowering.new_for_target(entry_hir.symbols, target)
+    for mod_name in hir_mods.keys():
+        ml.prescan_module_struct_names(hir_mods, mod_name)
+    val _mir = ml.lower_module(entry_hir, hir_list, true)
+    for e in ml.errors:
+        errs = errs.push("MIR: " + e.message)
+    errs
+
+val OWNER_SRC = "pub enum Value:\n    Nil\n    Unit\n    Int(value: i64)\n    String(value: text)\n"
+val FACADE_SRC = "export use lib.owner.{{Value}}\n"
+val COLLIDER_SRC = "pub enum Value:\n    Nil\n    Int(i64)\n    Float(f64)\n"
+
+describe "imported Value constructor static receiver":
+    it "2.1 direct import of Value.Unit, Value.Nil, Value.Int(7)":
+        val errs = mir_errors_for_files([
+            ("lib/owner.spl", "lib.owner", OWNER_SRC),
+            ("app/main.spl", "app.main", "use lib.owner.{{Value}}\nfn f() -> Value:\n    val a = Value.Unit\n    val b = Value.Nil\n    Value.Int(7)\n")
+        ], "app.main")
+        expect(errs).to_equal([])
+
+    it "2.2 re-exported Value via facade + glob import":
+        val errs = mir_errors_for_files([
+            ("lib/owner.spl", "lib.owner", OWNER_SRC),
+            ("lib/facade.spl", "lib.facade", FACADE_SRC),
+            ("app/main.spl", "app.main", "use lib.facade.*\nfn f() -> Value:\n    val a = Value.Unit\n    val b = Value.Nil\n    Value.Int(7)\n")
+        ], "app.main")
+        expect(errs).to_equal([])
+
+    it "2.3 imported Value.Unit/Nil/Int with colliding Value enum in closure":
+        val errs = mir_errors_for_files([
+            ("lib/owner.spl", "lib.owner", OWNER_SRC),
+            ("lib/collider.spl", "lib.collider", COLLIDER_SRC),
+            ("app/main.spl", "app.main", "use lib.owner.{{Value}}\nuse lib.collider.{{}}\nfn f() -> Value:\n    val a = Value.Unit\n    val b = Value.Nil\n    Value.Int(7)\n")
+        ], "app.main")
+        expect(errs).to_equal([])
+
+    it "2.4 colliding Value registered last preserves owner enum_id, Unit field, and match owner":
+        val log = Logger(level: 0)
+        val owner_ast = parse_full_frontend(OWNER_SRC, "lib/owner.spl", "lib.owner", log)
+        val collider_ast = parse_full_frontend(COLLIDER_SRC, "lib/collider.spl", "lib.collider", log)
+        val app_src = "use lib.owner.{{Value}}\nuse lib.collider.{{}}\nfn f() -> i64:\n    val a = Value.Unit\n    val b = Value.Nil\n    val c = Value.Int(7)\n    match c:\n        case Value.Int(n): n\n        case Value.Unit: 1\n        case _: 0\n"
+        val app_ast = parse_full_frontend(app_src, "app/main.spl", "app.main", log)
+        var modules: Dict<text, ParserModule> = {}
+        modules["lib.owner"] = owner_ast
+        modules["lib.collider"] = collider_ast
+        modules["app.main"] = app_ast
+        val sources = [
+            SourceFile(path: "lib/owner.spl", content: OWNER_SRC, module_name: "lib.owner"),
+            SourceFile(path: "lib/collider.spl", content: COLLIDER_SRC, module_name: "lib.collider"),
+            SourceFile(path: "app/main.spl", content: app_src, module_name: "app.main")
+        ]
+        val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+        var hl_owner = hirlowering_for_module("lib/owner.spl", surfaces)
+        val hir_owner = hl_owner.lower_module(owner_ast)
+        var hl_collider = hirlowering_for_module("lib/collider.spl", surfaces)
+        val hir_collider = hl_collider.lower_module(collider_ast)
+        var hl_app = hirlowering_for_module("app/main.spl", surfaces)
+        val hir_app = hl_app.lower_module(app_ast)
+        var hir_mods: Dict<text, HirModule> = {}
+        hir_mods["lib.owner"] = hir_owner
+        hir_mods["lib.collider"] = hir_collider
+        hir_mods["app.main"] = hir_app
+        val target = driver_mir_target_context(driver_core_compile_options_default())
+        var ml = MirLowering.new_for_target(hir_app.symbols, target)
+        ml.prescan_module_struct_names(hir_mods, "lib.owner")
+        ml.prescan_module_struct_names(hir_mods, "lib.collider")
+        ml.prescan_module_struct_names(hir_mods, "app.main")
+        # Register collider AFTER owner so bare enum_variant_index["Value"]
+        # holds collider's variants (which do not include Unit).
+        ml.register_module_enum_inventory_v1([hir_owner, hir_collider])
+        val _mir = ml.lower_module(hir_app, [hir_owner, hir_collider, hir_app], false)
+        var errs: [text] = []
+        for e in ml.errors:
+            errs = errs.push("MIR: " + e.message)
+        expect(errs).to_equal([])
+        expect(ml.enum_bare_ambiguous.get("Value") ?? false).to_equal(true)
+        expect(ml.enum_runtime_id("lib.owner.Value") != ml.enum_runtime_id("lib.collider.Value")).to_equal(true)

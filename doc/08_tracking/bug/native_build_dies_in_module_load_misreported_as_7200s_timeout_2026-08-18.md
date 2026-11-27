@@ -8,7 +8,7 @@ evidence found in the body. This is bookkeeping, not verification.
 **Severity:** HIGH — two defects stacked: the native lane of the
 engine-differential gate is 100% dark, and the error message actively
 misdirects anyone who investigates.
-**Status:** OPEN (diagnosis only; no fix attempted here).
+**Status:** SUPERSEDED (triage 2026-11-11, lane boot21; first triaged 2026-11-10 lane boot5) — all three suggested fixes re-verified in-tree at HEAD `d552f63f67f8` via PR #7545 (`820631c6e5c7`, ancestor): distinct `-1` death arms and `[TIMEOUT:`-gated timeout claim (see 2026-11-11 addendum below).
 **Found by:** the first full three-lane run of
 `scripts/check/check-engine-differential.shs` on this tree.
 
@@ -187,3 +187,55 @@ same verdict before and after the patch —
 `FAIL — 1 unbaselined divergence(s) among 11 fixture(s) compared`, with
 `agreements: 9 / divergences: 2 (1 NEW) / lane errors: 0`.
 
+
+## 2026-11-10 P3-boot5 triage (row 38) — SUPERSEDED
+
+All three suggested fixes are implemented in-tree at HEAD `4343ce254922` in
+`native_build_worker_failure_lines_v1` (src/app/cli/native_build_main.spl:2298-2346,
+landed via PR #7545 merge `820631c6e5c7`, 2026-11-07):
+
+1. "Stop overloading -1": `code == -1` is now classified into distinct arms —
+   core dump (stderr `dumped core` marker, :2302-2318), Windows native status
+   (:2319-2320), POSIX signal with the signal number printed
+   (`native_build_posix_signal`, :2321-2327, including SIGSEGV/SIGABRT vs
+   SIGKILL/SIGTERM hints), and a `-1`-without-`[TIMEOUT:` arm that explicitly
+   says "wrapper exited abnormally ... NOT a timeout" and cites this record's
+   run6 misreport ("reported 'timed out after 569328s' at 2742 s of wall",
+   :2328-2333).
+2. "Only claim a timeout when elapsed >= budget": the timeout arm (:2334-2343)
+   is now reachable only when the wrapper's own `[TIMEOUT:` marker is present
+   in worker stderr — a worker that dies mid-module-load (this record's
+   Symptom-2 shape) can no longer be relabelled as a 7200s timeout.
+
+Residual nit (non-blocking): the timeout arm still prints the configured
+budget rather than a measured elapsed time; with the `[TIMEOUT:` marker gate
+the misattribution trap is closed regardless. The separate question of WHY
+the worker died during module load (8 GiB single allocation abort) remains
+tracked in `native_build_class_surface_misses_newly_added_field_2026-08-17.md`
+and its own follow-ups.
+
+
+## 2026-11-11 P3-boot21 triage — SUPERSEDED (header flip)
+
+Fresh re-verification of the 2026-11-10 boot5 disposition (not flipped then),
+at HEAD `d552f63f67f8`:
+
+- `git merge-base --is-ancestor 820631c6e5c7 HEAD`: ANCESTOR — PR #7545
+  ("native-build: classify worker -1 deaths") is in this tree.
+- `src/app/cli/native_build_main.spl` at tip implements all three suggested
+  fixes in `native_build_worker_failure_lines_v1` (:2302-2346): core-dump arm
+  (:2313), Windows native-status arm, POSIX-signal arm with signal number
+  (:2325-2327), a `-1`-without-`[TIMEOUT:` arm that explicitly says "NOT a
+  timeout" and cites this record's own misreport (:2332-2333), and a timeout
+  arm reachable only when the wrapper's `[TIMEOUT:` marker is present in
+  worker stderr (:2334-2343).
+
+Residual nit (unchanged, non-blocking): the timeout arm still prints the
+configured budget rather than a measured elapsed time; the `[TIMEOUT:` marker
+gate closes the misattribution trap regardless. The separate question of why
+the worker died during module load is tracked elsewhere. No code change this
+lane; header flipped to match the verified disposition.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — boot21: PR #7545 (820631c6e5c7) verified ancestor; all three suggested fixes live in native_build_worker_failure_lines_v1 (:2302-2346) incl. the -1-without-[TIMEOUT: arm citing this record. Residual nit: timeout arm prints configured budget, not elapsed.

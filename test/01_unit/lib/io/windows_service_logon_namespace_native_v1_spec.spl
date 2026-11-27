@@ -1,0 +1,74 @@
+# Genuine native prerequisite specimen. This intentionally FAILS when not run
+# by a native Win64 canonical-thread runner under an actual Service(5) logon,
+# with protected actual DOS namespaces and a direct fixed global C: volume.
+# No skip, caller-asserted service bit, scripted owner or success replacement.
+use std.spec.*
+use std.nogc_sync_mut.io.windows_service_logon_namespace_v1.{WindowsServiceLogonNamespaceOwnerV1,
+    windows_service_logon_namespace_open_v1, windows_service_logon_namespace_step_v1,
+    windows_service_logon_namespace_current_v1, windows_service_logon_namespace_candidate_path_v1,
+    windows_service_logon_namespace_close_v1}
+
+var namespace_fixture_owner_v1: Option<WindowsServiceLogonNamespaceOwnerV1> = nil
+
+fn namespace_fixture_close_v1() -> bool:
+    for turn in 0..32:
+        if namespace_fixture_owner_v1.is_some():
+            val closed = windows_service_logon_namespace_close_v1(namespace_fixture_owner_v1.unwrap())
+            namespace_fixture_owner_v1 = closed.owner
+            if closed.completed: return true
+        else: return true
+    false
+
+fn namespace_fixture_admit_v1() -> Result<WindowsServiceLogonNamespaceOwnerV1, text>:
+    # A failed prior after_each can leave a genuine cleanup obligation. Never
+    # overwrite its sole fixture carrier with another admission.
+    if namespace_fixture_owner_v1.is_some() and not namespace_fixture_close_v1():
+        return Err("prior real namespace owner cleanup remains retained")
+    var opened = windows_service_logon_namespace_open_v1()
+    namespace_fixture_owner_v1 = opened.owner
+    for turn in 0..8:
+        if opened.error != "":
+            val reason = opened.error
+            namespace_fixture_close_v1()
+            return Err("required real Service-logon namespace setup: {reason}")
+        if opened.ready and opened.owner.is_some(): return Ok(opened.owner.unwrap())
+        if opened.owner.is_none(): return Err("required real namespace owner missing")
+        opened = windows_service_logon_namespace_step_v1(opened.owner.unwrap())
+        namespace_fixture_owner_v1 = opened.owner
+    namespace_fixture_close_v1()
+    Err("real namespace admission exceeded finite fixture budget")
+
+describe "Native service namespace custody (required external Windows setup)":
+    after_each:
+        expect(namespace_fixture_close_v1()).to_equal(true)
+
+    it "retains real native context through candidate/current then invalidates copied aliases on close":
+        step("Require real Service-logon namespace setup and actual native admission")
+        val admission = namespace_fixture_admit_v1()
+        expect(admission.is_ok()).to_equal(true)
+        val owner = admission.unwrap()
+        val alias = owner
+        expect(windows_service_logon_namespace_current_v1(owner).is_ok()).to_equal(true)
+        expect(windows_service_logon_namespace_candidate_path_v1(owner, "\\GLOBAL??\\C:\\").unwrap()).to_equal("C:\\")
+        expect(windows_service_logon_namespace_candidate_path_v1(alias, "\\GLOBAL??\\c:\\").unwrap()).to_equal("C:\\")
+        expect(windows_service_logon_namespace_current_v1(alias).is_ok()).to_equal(true)
+        val first_close = windows_service_logon_namespace_close_v1(owner)
+        namespace_fixture_owner_v1 = first_close.owner
+        expect(first_close.completed).to_equal(false)
+        expect(windows_service_logon_namespace_current_v1(alias).is_err()).to_equal(true)
+        expect(namespace_fixture_close_v1()).to_equal(true)
+        expect(windows_service_logon_namespace_close_v1(alias).completed).to_equal(true)
+
+    it "quarantines a real owner on second-drive substitution and still closes it":
+        step("Bind one real fixed volume before testing canonical second-drive refusal")
+        val admission = namespace_fixture_admit_v1()
+        expect(admission.is_ok()).to_equal(true)
+        val owner = admission.unwrap()
+        # unwrap is fail-fast: D: must never be attempted after failed C: setup.
+        val candidate = windows_service_logon_namespace_candidate_path_v1(owner, "\\GLOBAL??\\C:\\").unwrap()
+        expect(candidate).to_equal("C:\\")
+        val refused = windows_service_logon_namespace_candidate_path_v1(owner, "\\GLOBAL??\\D:\\")
+        expect(refused.is_err()).to_equal(true)
+        expect(refused.unwrap_err()).to_equal("windows-service-namespace-second-drive-refused")
+        expect(windows_service_logon_namespace_current_v1(owner).is_err()).to_equal(true)
+        expect(namespace_fixture_close_v1()).to_equal(true)

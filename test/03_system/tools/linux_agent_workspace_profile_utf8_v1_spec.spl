@@ -1,0 +1,38 @@
+# AUTHORED_NOT_RUN. Separately provisioned disposable negative fixture: only
+# the fixed protected agent child contains invalid UTF8. No file writes here.
+# @req REQ-LINUX-AGENT-WORKSPACE-PROFILE-001
+use std.spec.{describe, it, expect, step, fail}
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.*
+
+var agent_profile_utf8_readers_v1: [LinuxMachinePolicyOwnerV1] = []
+
+describe "Actual fixed agent workspace profile rejects invalid UTF8":
+    it "reports the exact decoding failure after a genuine protected child read":
+        step("Open the actual installed reader in the separately prepared invalid-UTF8 fixture")
+        val reader = match linux_machine_policy_open_v1():
+            case LinuxMachinePolicyOpenV1.Ready(owner):
+                agent_profile_utf8_readers_v1.push(owner)
+                owner
+            case LinuxMachinePolicyOpenV1.CleanupRequired(owner, reason):
+                agent_profile_utf8_readers_v1.push(owner)
+                val closed = owner.close_v1()
+                fail("actual negative reader setup failed:" + reason + ":" + closed)
+                return
+            case LinuxMachinePolicyOpenV1.Rejected(reason):
+                fail("actual negative fixture required:" + reason)
+                return
+        val policy = reader.read_policy_v1()
+        if policy.is_err():
+            val closed = reader.close_v1()
+            fail("actual installed machine policy unavailable:" + policy.unwrap_err() + ":" + closed)
+            return
+        step("Reject invalid protected bytes without replacement decoding or a fabricated text fallback")
+        val rejected = reader.read_agent_workspace_profile_v1()
+        val closed = reader.close_v1()
+        expect(rejected.is_err()).to_equal(true)
+        if rejected.is_ok():
+            fail("negative fixture must contain actual invalid UTF8 at the fixed protected child")
+            return
+        expect(rejected.unwrap_err()).to_equal("linux-machine-agent-workspace-profile-utf8")
+        expect(closed == "released" or closed == "consumed-error").to_equal(true)
+        expect(reader.close_v1()).to_equal("stale")

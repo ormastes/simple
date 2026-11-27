@@ -38,3 +38,11 @@ The client privilege choice is still pending. If strict no-admin execution is se
 Probe once per provider session; cache static runtime/image metadata by digest and runtime version. Invalidate on service reconnect, host reboot, image replacement, or provider generation change. Authorization is checked on every mutation. Measure warm probe, create/start, wait, destroy, peak RSS, and refusal reasons on a real Windows Server fixture. Numeric budgets await selected NFR targets.
 
 Sources and local evidence: [domain research](../01_research/domain/windows_server_process_container.md), [local research](../01_research/local/windows_server_process_container.md), [detail design](../05_design/windows_server_process_container.md), [test plan](../03_plan/sys_test/windows_server_process_container.md).
+
+## 2026-11-07 bridge amendment
+
+The user selected Docker as the first Windows process-only bridge. The earlier
+containerd/runhcs paragraph is historical design, superseded for this implementation
+by [the Docker provider architecture](windows_docker_process_provider.md). The new
+source is AWAITING_VERIFICATION; no current Windows runtime qualification or
+ordinary-client delegation is implied.

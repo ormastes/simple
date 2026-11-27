@@ -1,6 +1,6 @@
 # Bug: ModuleLoader load/unload bookkeeping diverges from documented behavior (13 failures)
 
-- **Status:** SOURCE-FIXED in the compatibility loader; fresh Stage 4 replay pending
+- **Status:** RESOLVED (verified in tree 2026-11-25; see note at bottom)
 - **Filed:** 2026-07-20
 - **Affected spec:** `test/unit/compiler/loader/module_loader_spec.spl`
 - **Command:**
@@ -98,3 +98,24 @@ print(loader.stats().module_count)   # prints 0, expected 1
 Not touched: `test/unit/compiler/loader/module_loader_spec.spl` left as-is —
 these are genuine state-tracking mismatches, not renamed/removed API surface;
 weakening the assertions to force green would violate the no-weakening rule.
+
+## Verification 2026-11-25 (lane p2w3-ai)
+
+RESOLVED. The bug_db row is `resolved-disappeared`. The divergence class
+described above — `stats()`/count bookkeeping not updated by the same path
+`load()`/`unload()` mutate — is structurally gone in the current compatibility
+loader (renamed to `src/compiler/99.loader/module_loader_compat.spl` by
+`8ccb5972927`): `stats().module_count` (`module_loader_compat.spl:512`),
+`is_loaded()` (:519), and `loaded_modules()` (:521) all read the same
+`self.modules` dict that `load()` writes (:1398, :1619) and `unload()`
+rebuilds (:1739-1743), so a successful `load()` cannot report
+`module_count == 0`. The affected spec now lives at
+`test/01_unit/compiler/loader/module_loader_spec.spl` (the
+`test/unit/compiler/loader/` path in this doc predates the test-tree
+reorg).
+
+A fresh spec execution is environment-blocked in this lane: the pinned
+`bin/simple.exe` seed rejects `@representation_boundary` tree-wide at HEAD,
+so `bin/simple.exe test` cannot run any spec. Closure rests on source
+inspection of the unified bookkeeping plus the `resolved-disappeared`
+ledger row.

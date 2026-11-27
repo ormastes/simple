@@ -282,3 +282,19 @@ phase2:parse run and lets `native-build` reach a later phase or emit a
 binary is a separate, larger question this doc's original reproduction
 never reached (it hard-stopped at file 6) — see the follow-up report.
 
+## Triage 2026-11-25 (P2 ledger sweep, Windows worktree)
+
+The `StrBytes` dispatch fix `6d9c78d9902` is confirmed an ancestor of this
+HEAD (`git merge-base --is-ancestor 6d9c78d9902... HEAD`), and the tracked
+pinned binary `bin/simple.exe` (last refreshed 2026-11-17 by `41dbae93225`)
+postdates it, so the file-6 `io_runtime.spl` blocker is cleared on the
+binary every lane actually runs — no seed rebuild needed to pick it up.
+
+NOT done here: a full end-to-end re-verification (the complete 485-file
+phase2:parse `native-build`) — that is a multi-hour Rust-seed job on a
+Linux-class host and out of scope for this sweep; the "does the whole run
+complete" question from the follow-up report stays open. The independent
+next steps 1-3 above (span-tracking on the "method not found" error path,
+`StrBytes` construction instrumentation) are Rust-seed changes and remain
+with the seed owner. No status change made.
+

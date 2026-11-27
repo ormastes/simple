@@ -6,6 +6,7 @@
 use app.io.mod.{file_is_regular_no_follow, file_read_regular_no_follow_bounded,
     file_hash_sha256, file_size_raw, process_run_bounded}
 use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+use app.build.host_path_policy.{build_host_abs_path_valid_v1}
 
 struct TrustedSshNodeV1:
     worker_id: text
@@ -36,10 +37,7 @@ fn _ssh_name_v1(value: text, allow_dot: bool) -> bool:
     not value.starts_with("-") and not value.starts_with(".")
 
 fn _ssh_path_v1(path: text) -> bool:
-    if not path.starts_with("/") or path.len() > 4096 or path.contains("\n") or
-       path.contains("\r") or path.contains("\x00"):
-        return false
-    true
+    build_host_abs_path_valid_v1(path, false, false, 4096, 4096)
 
 fn _ssh_file_problem_v1(path: text, digest: text, max_bytes: i64) -> text:
     if not _ssh_path_v1(path) or not scheduler_action_digest_valid_v1(digest):
@@ -49,7 +47,7 @@ fn _ssh_file_problem_v1(path: text, digest: text, max_bytes: i64) -> text:
     val size = file_size_raw(path)
     if size <= 0 or size > max_bytes:
         return "size-invalid"
-    if file_hash_sha256(path) != digest:
+    if not _file_sha256_matches_v1(path, digest):
         return "digest-mismatch"
     ""
 
@@ -102,3 +100,9 @@ fn probe_trusted_ssh_node_v1(node: TrustedSshNodeV1) -> TrustedSshProbeV1:
     if exit_code != 0 or stdout.len() != 0 or stderr.len() > 8192:
         return TrustedSshProbeV1(false, "ssh-probe-failed", node.worker_id)
     TrustedSshProbeV1(true, "", node.worker_id)
+
+# Absent/unreadable file == mismatch: a missing digest never matches.
+fn _file_sha256_matches_v1(path: text, expected: text) -> bool:
+    if val digest = file_hash_sha256(path):
+        return digest == expected
+    false

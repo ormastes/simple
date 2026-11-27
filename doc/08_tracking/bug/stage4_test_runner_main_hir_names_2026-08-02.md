@@ -1,5 +1,5 @@
 # Stage4 test-runner main HIR names
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-25 — repairs landed; root blocker (HIR sibling import leak) FIXED; see end of file
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -224,3 +224,29 @@ behavioral regression are tracked in
 `hir_package_sibling_imported_enum_surface_leak_2026-08-02.md`. No fourth build
 was attempted.
 
+
+## 2026-11-25 verification (release/1.0.0, worktree p2w6-ab) — STALE, closed
+
+Every repair described above is present at release/1.0.0 HEAD (`64dfa6d980f`),
+and the final blocker this doc deferred to is fixed:
+
+- Concrete-owner imports are in place, e.g.
+  `src/app/test_runner_new/test_runner_main.spl:15,17,61` imports
+  `time_now_unix_micros` from `std.nogc_sync_mut.io.time_ops` and
+  `file_write/file_read/file_exists/file_atomic_write/file_remove` from
+  `std.nogc_sync_mut.io.file_ops`.
+- The contract regression exists at
+  `test/01_unit/app/test_runner_new/test_runner_main_hir_contract_spec.spl`.
+- The last open item — "Package-sibling import leak confirmed", tracked in
+  `hir_package_sibling_imported_enum_surface_leak_2026-08-02.md` — is marked
+  FIXED there (status line: "FIXED ... re-verified 2026-08-17 by source
+  inspection"; fix owner claimed at `9299ca99288`).
+
+Execution limit: the contract spec could not be re-run on this host because
+`bin/simple.exe test` fails repo-wide at this HEAD — the pinned Rust seed
+(v1.0.0-rc.1) rejects `@representation_boundary`
+(`src/app/test_runner_new/test_runner_client.spl:9:1`). Verified by code
+inspection; no full Stage 4 rebuild was attempted (out of scope for this
+lane, same constraint as the original doc). Closing as STALE/RESOLVED; if a
+fresh Stage 4 cycle surfaces a new unresolved-name family, file it as a new
+bug rather than reopening this one.

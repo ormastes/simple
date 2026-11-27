@@ -180,24 +180,32 @@ int64_t spl_collection_capture_begin(int64_t target_value) {
     return 1;
 }
 
-int64_t spl_collection_capture_note_size(int64_t site_value, int64_t target_value,
-                                        int64_t size) {
-    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_acquire)) return 1;
-    char site_buffer[RT_COLLECTION_CAPTURE_MAX_SITE_BYTES + 1];
+/* Shared prologue of every note_* entry point. Returns 0 (lock NOT held) when
+ * capture is inactive or the target does not match: the caller returns 1.
+ * Returns 1 with the lock held and *site_out decoded into site_buffer. */
+static int spl_collection_capture_enter_site(int64_t site_value, int64_t target_value,
+                                             char* site_buffer, const char** site_out) {
+    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_acquire)) return 0;
     char target_buffer[RT_COLLECTION_CAPTURE_MAX_TARGET_BYTES + 1];
     const char* target = spl_collection_capture_text(target_value, target_buffer,
         RT_COLLECTION_CAPTURE_MAX_TARGET_BYTES);
     spl_collection_capture_lock_enter();
-    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_relaxed)) {
+    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_relaxed) ||
+            !spl_collection_capture_target_matches_locked(target)) {
         spl_collection_capture_lock_leave();
-        return 1;
+        return 0;
     }
-    if (!spl_collection_capture_target_matches_locked(target)) {
-        spl_collection_capture_lock_leave();
-        return 1;
-    }
-    const char* site = spl_collection_capture_text(site_value, site_buffer,
+    *site_out = spl_collection_capture_text(site_value, site_buffer,
         RT_COLLECTION_CAPTURE_MAX_SITE_BYTES);
+    return 1;
+}
+
+int64_t spl_collection_capture_note_size(int64_t site_value, int64_t target_value,
+                                        int64_t size) {
+    char site_buffer[RT_COLLECTION_CAPTURE_MAX_SITE_BYTES + 1];
+    const char* site = NULL;
+    if (!spl_collection_capture_enter_site(site_value, target_value, site_buffer, &site))
+        return 1;
     if (size < 0 || !spl_collection_capture_token_valid(site,
             RT_COLLECTION_CAPTURE_MAX_SITE_BYTES, 1)) {
         spl_collection_capture_error = 1;
@@ -216,22 +224,10 @@ int64_t spl_collection_capture_note_size(int64_t site_value, int64_t target_valu
 
 int64_t spl_collection_capture_note_lookup(int64_t site_value, int64_t target_value,
                                           int64_t found) {
-    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_acquire)) return 1;
     char site_buffer[RT_COLLECTION_CAPTURE_MAX_SITE_BYTES + 1];
-    char target_buffer[RT_COLLECTION_CAPTURE_MAX_TARGET_BYTES + 1];
-    const char* target = spl_collection_capture_text(target_value, target_buffer,
-        RT_COLLECTION_CAPTURE_MAX_TARGET_BYTES);
-    spl_collection_capture_lock_enter();
-    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_relaxed)) {
-        spl_collection_capture_lock_leave();
+    const char* site = NULL;
+    if (!spl_collection_capture_enter_site(site_value, target_value, site_buffer, &site))
         return 1;
-    }
-    if (!spl_collection_capture_target_matches_locked(target)) {
-        spl_collection_capture_lock_leave();
-        return 1;
-    }
-    const char* site = spl_collection_capture_text(site_value, site_buffer,
-        RT_COLLECTION_CAPTURE_MAX_SITE_BYTES);
     if ((found != 0 && found != 1) || !spl_collection_capture_token_valid(site,
             RT_COLLECTION_CAPTURE_MAX_SITE_BYTES, 1)) {
         spl_collection_capture_error = 1;
@@ -255,22 +251,10 @@ int64_t spl_collection_capture_note_lookup(int64_t site_value, int64_t target_va
 
 int64_t spl_collection_capture_note_materialization(int64_t site_value,
                                                    int64_t target_value) {
-    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_acquire)) return 1;
     char site_buffer[RT_COLLECTION_CAPTURE_MAX_SITE_BYTES + 1];
-    char target_buffer[RT_COLLECTION_CAPTURE_MAX_TARGET_BYTES + 1];
-    const char* target = spl_collection_capture_text(target_value, target_buffer,
-        RT_COLLECTION_CAPTURE_MAX_TARGET_BYTES);
-    spl_collection_capture_lock_enter();
-    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_relaxed)) {
-        spl_collection_capture_lock_leave();
+    const char* site = NULL;
+    if (!spl_collection_capture_enter_site(site_value, target_value, site_buffer, &site))
         return 1;
-    }
-    if (!spl_collection_capture_target_matches_locked(target)) {
-        spl_collection_capture_lock_leave();
-        return 1;
-    }
-    const char* site = spl_collection_capture_text(site_value, site_buffer,
-        RT_COLLECTION_CAPTURE_MAX_SITE_BYTES);
     if (!spl_collection_capture_token_valid(site, RT_COLLECTION_CAPTURE_MAX_SITE_BYTES, 1)) {
         spl_collection_capture_error = 1;
         spl_collection_capture_lock_leave();
@@ -291,22 +275,10 @@ int64_t spl_collection_capture_note_hash_probe(int64_t site_value,
                                               int64_t target_value,
                                               int64_t probes,
                                               int64_t collisions) {
-    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_acquire)) return 1;
     char site_buffer[RT_COLLECTION_CAPTURE_MAX_SITE_BYTES + 1];
-    char target_buffer[RT_COLLECTION_CAPTURE_MAX_TARGET_BYTES + 1];
-    const char* target = spl_collection_capture_text(target_value, target_buffer,
-        RT_COLLECTION_CAPTURE_MAX_TARGET_BYTES);
-    spl_collection_capture_lock_enter();
-    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_relaxed)) {
-        spl_collection_capture_lock_leave();
+    const char* site = NULL;
+    if (!spl_collection_capture_enter_site(site_value, target_value, site_buffer, &site))
         return 1;
-    }
-    if (!spl_collection_capture_target_matches_locked(target)) {
-        spl_collection_capture_lock_leave();
-        return 1;
-    }
-    const char* site = spl_collection_capture_text(site_value, site_buffer,
-        RT_COLLECTION_CAPTURE_MAX_SITE_BYTES);
     if (probes < 1 || collisions < 0 || collisions > probes ||
             !spl_collection_capture_token_valid(site,
                 RT_COLLECTION_CAPTURE_MAX_SITE_BYTES, 1)) {
@@ -341,22 +313,10 @@ int64_t spl_collection_capture_note_filter(int64_t site_value,
                                            int64_t target_value,
                                            int64_t evaluated,
                                            int64_t accepted) {
-    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_acquire)) return 1;
     char site_buffer[RT_COLLECTION_CAPTURE_MAX_SITE_BYTES + 1];
-    char target_buffer[RT_COLLECTION_CAPTURE_MAX_TARGET_BYTES + 1];
-    const char* target = spl_collection_capture_text(target_value, target_buffer,
-        RT_COLLECTION_CAPTURE_MAX_TARGET_BYTES);
-    spl_collection_capture_lock_enter();
-    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_relaxed)) {
-        spl_collection_capture_lock_leave();
+    const char* site = NULL;
+    if (!spl_collection_capture_enter_site(site_value, target_value, site_buffer, &site))
         return 1;
-    }
-    if (!spl_collection_capture_target_matches_locked(target)) {
-        spl_collection_capture_lock_leave();
-        return 1;
-    }
-    const char* site = spl_collection_capture_text(site_value, site_buffer,
-        RT_COLLECTION_CAPTURE_MAX_SITE_BYTES);
     if (evaluated < 0 || accepted < 0 || accepted > evaluated ||
             !spl_collection_capture_token_valid(site,
                 RT_COLLECTION_CAPTURE_MAX_SITE_BYTES, 1)) {
@@ -397,22 +357,10 @@ int64_t spl_collection_capture_note_filter(int64_t site_value,
 int64_t spl_collection_capture_note_loop(int64_t site_value,
                                          int64_t target_value,
                                          int64_t trips) {
-    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_acquire)) return 1;
     char site_buffer[RT_COLLECTION_CAPTURE_MAX_SITE_BYTES + 1];
-    char target_buffer[RT_COLLECTION_CAPTURE_MAX_TARGET_BYTES + 1];
-    const char* target = spl_collection_capture_text(target_value, target_buffer,
-        RT_COLLECTION_CAPTURE_MAX_TARGET_BYTES);
-    spl_collection_capture_lock_enter();
-    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_relaxed)) {
-        spl_collection_capture_lock_leave();
+    const char* site = NULL;
+    if (!spl_collection_capture_enter_site(site_value, target_value, site_buffer, &site))
         return 1;
-    }
-    if (!spl_collection_capture_target_matches_locked(target)) {
-        spl_collection_capture_lock_leave();
-        return 1;
-    }
-    const char* site = spl_collection_capture_text(site_value, site_buffer,
-        RT_COLLECTION_CAPTURE_MAX_SITE_BYTES);
     RtCollectionCaptureEntry* entry = NULL;
     if (trips >= 0 && spl_collection_capture_token_valid(site,
             RT_COLLECTION_CAPTURE_MAX_SITE_BYTES, 1))

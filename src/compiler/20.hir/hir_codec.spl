@@ -20,7 +20,7 @@ use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_types.{SymbolId}  # explicit: glob is not an import-origin for surface projection
 use compiler.hir.hir_definitions.{HirFunction, HirStruct, HirClass, HirEnum,
     HirBitfield, HirTrait, HirConst, HirParam}
-use compiler.hir.hir_types.{HirType}  # explicit: glob is not an import-origin for surface projection
+use compiler.hir.hir_types.{HirType, HirTypeKind}  # explicit: enum constructors need their declared runtime owner
 use compiler.hir.hir_types.{SymbolTable}  # explicit: class return type for the cycle-128 handle getters
 use compiler.hir.abi_interface.{HirAbiInterfaceEncoderV1, HIR_ABI_INTERFACE_DOMAIN_V1}
 use compiler.common.attributes.{FunctionAttr}
@@ -35,12 +35,33 @@ use compiler.hir.hir_codec_support.{HirCodecWriter,
 use compiler.hir.generated.hir_codec.{hc_enc_hir_module, hc_dec_hir_module}
 use std.common.encoding.utf8.{text_byte_len}
 use std.common.crypto.sha256.{sha256_text}
+use std.env.{env_get}
 
 # v8 uses typed dictionary key order and rejects v7 bucket-order records.
 # v7 rejected v6 records whose integer 3 was serialized as nil (N).
 # The canonical valid-integer grammar and ownership are unchanged.
-val HIR_CODEC_VERSION: text = "spl-hircodec-v9-a5-refusal"
-val HIR_CANONICAL_CODEC_VERSION: text = "spl-hircodec-canonical-v5-a5-refusal"
+# v15: HirFunction gained unsafe_reason/unsafe_caps (declaration-level
+# `@unsafe(...)`); a v14 record lacks both trailing fields.
+# v16/canonical v6 append exact local annotation provenance. Previous frames
+# cannot distinguish inferred from unknown and are rejected by the header.
+# v17/canonical v7 append HirModule.imported_layouts (non-owning imported
+# struct rows, 6bf24744e00; identity only since 2026-11-14, `fields` is always
+# empty). A v16 frame decodes it empty, which raises a
+# spurious W-HIR-INFER-001 on a cache hit, so v16 headers are rejected.
+# v18/canonical v8 append HirExpr.bracket_slice (the bracket-slice marker MIR
+# needs to cut text by code point). A v17 frame would decode it false and
+# silently keep the byte cut on a cache hit, so v17 headers are rejected.
+# v21/canonical v11 combine exact aspect/declaration origins, independent
+# callable parameter metadata, and per-spelling lexical binding versions.
+# Neither predecessor schema has this layout or authority; both must miss.
+# v22/canonical v12 append HirFunction.effect_region (@pure/@nogc/@nonblocking
+# admission); v21 records lack that trailing line per function and must miss.
+# v23/canonical v13 append FunctionAttr.is_must_use and compact default-file
+# Span.file (@ / @@); v22 records lack is_must_use and must miss.
+# v24/canonical v14 append HirExpr.arrow_update (`x->m()` provenance for
+# E-ARROW-UPDATE-MISMATCH); v23 records lack that line and must miss.
+pub val HIR_CODEC_VERSION: text = "spl-hircodec-v24-aspect-owner-declaration-intent-params-binding-versions-effect-region-must-use-compact-span-arrow-update"
+pub val HIR_CANONICAL_CODEC_VERSION: text = "spl-hircodec-canonical-v14-aspect-owner-declaration-intent-params-binding-versions-effect-region-must-use-compact-span-arrow-update"
 val HIR_CANONICAL_CODEC_RULES_V1: text =
     "nil-before-present;i64-signed;symbol-id-signed;text-unsigned-utf8;" +
     "stable-bottom-up-merge;duplicate-reject;strict-flatpool-text-v1"
@@ -72,9 +93,22 @@ fn hir_canonical_codec_generated_available_v1() -> bool:
     # an independent lane freezes/reviews its real-HIR golden bytes.
     false
 
+# Test-only count of complete-body encodes. Production compiler workers must
+# not mutate a process-global hot-path diagnostic. Specs explicitly enable
+# this counter around one single-owner registration.
+var _hir_module_encode_calls: i64 = 0
+
+fn hir_module_encode_calls() -> i64:
+    if (env_get("SIMPLE_HIR_ENCODE_COUNT_DIAGNOSTIC") ?? "") == "1":
+        _hir_module_encode_calls
+    else:
+        0
+
 # "" when the module carries a payload the codec refuses (see
 # hir_codec_support.spl); `hir_module_encode_reason` names it.
 fn hir_module_encode(module: HirModule) -> text:
+    if (env_get("SIMPLE_HIR_ENCODE_COUNT_DIAGNOSTIC") ?? "") == "1":
+        _hir_module_encode_calls = _hir_module_encode_calls + 1
     if module.representation_declarations.len() > 0:
         return ""
     var w = HirCodecWriter.create()
@@ -122,10 +156,10 @@ fn hir_module_encode_reason(module: HirModule) -> text:
 # The element crosses into THIS unit once; the nine scalars/small composites
 # return in one tuple (the hir_module_decode precedent: large composite
 # returns from this unit draw clean).
-# Cycle-138: dict-INDEX probe -- mono's proven access pattern (guard-first
+# Cycle-138: dict-INDEX probe -- the prior proven access pattern (guard-first
 # functions[key] read), in the codec pool, WITHOUT .values(). The cycle-137
 # verdict reinstated the read-path as the suspect: the .values()-chain probe
-# faulted on p2_add's functions dict while mono's dict-index reads of the
+# faulted on p2_add's functions dict while the prior dict-index reads of the
 # same dict succeeded. This probe discriminates rt_dict_values as the bug.
 # Cycle-141: dict+key variant. The by-value module ARGUMENT copy at the
 # probe's call site (a big host) corrupts the nested handles (the
@@ -198,7 +232,7 @@ fn hir_module_first_fn_name_p_v1(module: HirModule) -> text:
     return ""
 
 fn hir_module_first_fn_name_v1(module: HirModule) -> text:
-    # Cycle-139: mono's EXACT shape -- materialized keys + for-in element
+    # Cycle-139: the prior EXACT shape -- materialized keys + for-in element
     # used DIRECTLY in the bracket. The annotated key bind (`val k: SymbolId
     # = ks[0]`, the cycle-138 form) loses aggregate-key identity: the
     # cycle-139 hir-final-idx verdict printed first_fn_name EMPTY -- the nil
@@ -212,12 +246,12 @@ fn hir_module_first_fn_name_v1(module: HirModule) -> text:
 
 # Cycle-138: dict-index variant of the scalar extraction. The .values()-array
 # transport draws corrupted for Dict<SymbolId, HirFunction> (the cycle-132-136
-# probe faulted on it while mono's guard-first dict-index reads of the same
+# probe faulted on it while the prior guard-first dict-index reads of the same
 # dict succeeded -- verdict case (a): rt_dict_values on aggregate-keyed dicts
 # is the defect, bug record alongside). This walks keys()[position] with the
-# guard-first double access -- the exact pattern mono's collect lane proved.
+# guard-first double access -- the exact pattern the prior collect lane proved.
 fn hir_fn_scalars_at_key_v1(functions: Dict<SymbolId, HirFunction>, position: i64) -> (SymbolId, text, bool, bool, bool, bool, FunctionAttr, HirType, [HirParam]):
-    # Cycle-139: same mono shape as hir_module_first_fn_name_v1 -- the for-in
+    # Cycle-139: same shape as hir_module_first_fn_name_v1 -- the for-in
     # element goes STRAIGHT into the bracket (no `val k` bind; the annotated
     # bind loses aggregate-key identity and the guard silently nil-skips,
     # the cycle-139 verdict).
@@ -529,6 +563,45 @@ fn hir_codec_abi_interface_encoded_v1(module: HirModule) -> Result<text, text>:
                 encoded.push(canon_str(part))
             Ok(canon_field(HIR_ABI_INTERFACE_DOMAIN_V1, canon_seq(encoded)))
 
+# Decoded-HIR text sharing (2026-11-13). Every text field the generated decoder
+# reads is the reader's own line string (flat_pool_unescape returns plain text
+# unchanged), so a blob that names its source path at every Span.file and an
+# imported module at every defining_module decoded to one heap string PER
+# OCCURRENCE, all promoted with the HIR root and resident for the whole build.
+# Measured on the 329-module src/app/lint/main.spl closure: 1.9M decoded text
+# lines, 1.5M of them repeats within their own module. Same stage2 build, warm
+# cache, SIMPLE_HIR_DECODE_INTERN=0 vs 1: HIR-phase RSS growth 1329 -> 1015 MB,
+# HIR wall unchanged, memstat object byte-identical. Repeats now point at the module's first
+# occurrence before decoding. Texts are immutable values, so the decoded
+# module is value-identical (re-encode is byte-identical) and the duplicate
+# line strings die with the caller's decode scope. Lines shorter than three
+# bytes ("0", "1", "N", "\N") are never shared: they are scalars or sentinels.
+# SIMPLE_HIR_DECODE_INTERN=0 keeps the per-line strings (A/B measurement switch).
+var _hir_decode_interned_texts: i64 = 0
+
+fn hir_decode_intern_enabled() -> bool:
+    (env_get("SIMPLE_HIR_DECODE_INTERN") ?? "") != "0"
+
+# Process-lifetime count of decoded text lines that reused an earlier line.
+fn hir_decode_interned_texts() -> i64:
+    _hir_decode_interned_texts
+
+fn hir_decode_intern_lines(lines: [text]) -> [text]:
+    var canon: Dict<text, text> = {}
+    var out: [text] = []
+    var shared: i64 = 0
+    for line in lines:
+        if line.byte_len() < 3:
+            out.push(line)
+        elif canon.contains_key(line):
+            out.push(canon[line])
+            shared = shared + 1
+        else:
+            canon[line] = line
+            out.push(line)
+    _hir_decode_interned_texts = _hir_decode_interned_texts + shared
+    out
+
 fn hir_module_decode(blob: text) -> HirModule?:
     # Preserve the trusted legacy contract and its constructor exactly. The
     # portable verifier below is the only path that selects strict bounds.
@@ -539,7 +612,9 @@ fn hir_module_decode(blob: text) -> HirModule?:
         return nil
     if blob.substring(0, nl) != hir_codec_header():
         return nil
-    var r = FlatPoolReader.new(blob.substring(nl + 1, blob.len()))
+    var r = FlatPoolReader.new(blob.substring(nl + 1, blob.byte_len()))
+    if hir_decode_intern_enabled():
+        r.lines = hir_decode_intern_lines(r.lines)
     val module = hc_dec_hir_module(r)
     if module.representation_declarations.len() > 0:
         return nil
@@ -549,12 +624,39 @@ fn hir_module_decode(blob: text) -> HirModule?:
         return nil
     Some(module)
 
+# Why hir_module_decode returned nil, for the store self-check diagnostic. Same
+# steps and order as hir_module_decode; "" when it would decode. The reader
+# failure names its kind, detail, cursor line and the token at the cursor, so a
+# `reason=decode` refusal can be traced to one field from the log alone.
+fn hir_module_decode_reason(blob: text) -> text:
+    if blob == "":
+        return "empty"
+    val nl = blob.index_of("\n")
+    if nl < 0:
+        return "no_header_line"
+    val header = blob.substring(0, nl)
+    if header != hir_codec_header():
+        return "header_mismatch len={header.len()}"
+    var r = FlatPoolReader.new(blob.substring(nl + 1, blob.byte_len()))
+    val module = hc_dec_hir_module(r)
+    val raw_at = if r.pos > 0 and r.pos <= r.lines.len(): r.lines[r.pos - 1] else: ""
+    val at = if raw_at.len() > 48: raw_at.substring(0, 48) else: raw_at
+    if module.representation_declarations.len() > 0:
+        return "representation_declarations={module.representation_declarations.len()}"
+    if not r.ok:
+        return "reader kind={r.failure_kind} detail={r.failure_detail} line={r.pos}/{r.lines.len()} token={at}"
+    if r.pos != r.lines.len() - 1:
+        return "trailing line={r.pos}/{r.lines.len()} token={at}"
+    if r.lines[r.pos] != "":
+        return "unterminated line={r.pos}"
+    ""
+
 # Cache admission is stricter than the raw codec decoder. A structurally valid
 # but lossy or non-deterministic frame must not become a cache hit or durable
 # shard completion. Callers own the temporary decode/re-encode allocations.
 fn hir_module_decode_stable(blob: text) -> HirModule?:
     val decoded = hir_module_decode(blob)
-    if decoded == nil:
+    if decoded.is_none():
         return nil
     if hir_module_encode(decoded.unwrap()) != blob:
         return nil
@@ -671,7 +773,7 @@ fn hir_codec_roundtrip_selfcheck(module: HirModule) -> HirCodecRoundTrip:
         return HirCodecRoundTrip(module: module, ok: false, stable: false, bytes: 0,
             reason: hir_module_encode_reason(module))
     val decoded = hir_module_decode(blob)
-    if decoded == nil:
+    if decoded.is_none():
         return HirCodecRoundTrip(module: module, ok: false, stable: false, bytes: blob.len(), reason: "decode")
     val back: HirModule = decoded.unwrap()
     val again = hir_module_encode(back)
@@ -693,7 +795,9 @@ export hir_canonical_codec_header, hir_canonical_codec_rules_identity_v1
 export hir_canonical_codec_identity_v1
 export hir_canonical_codec_generated_available_v1
 export HirDecodeLimits, HirDecodeAuditUsage, HirDecodeAuditObserver, HirDecodeError
-export hir_module_encode, hir_module_encode_canonical, hir_module_encode_reason
+export hir_module_encode_calls
+export hir_decode_intern_lines, hir_decode_interned_texts
+export hir_module_encode, hir_module_encode_canonical, hir_module_encode_reason, hir_module_decode_reason
 export hir_module_has_rt_hal
 export hir_fn_scalars_at_v1
 export hir_module_first_fn_name_v1

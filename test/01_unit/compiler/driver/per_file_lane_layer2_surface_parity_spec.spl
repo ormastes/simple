@@ -1,0 +1,117 @@
+# Regression tests for per_file_lane_unit_mir_physical_ownership_missing_hir_2026-11-12:
+# Layer 2 TLDR surface canonical-path & identity binding parity, Layer 3 MIR
+# owner disposition, and worker_hir_profile_v1 admission contracts.
+
+use std.spec.{describe, context, it, expect}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
+use compiler.hir.hir_lowering.module_surface_source_identity.{
+    module_surface_canonical_path,
+    module_surface_bind_row_identity
+}
+use compiler.driver.driver_unit_tldr_imports_v1.{
+    UnitTldrPlanV1,
+    unit_tldr_surface_index_v1,
+    unit_tldr_surface_for_row_indexed_v1
+}
+use compiler.driver.driver_mir_physical_owners.{driver_mir_owner_disposition_v1}
+use app.cli.worker_hir_profile_v1.{
+    worker_hir_argument_error_v1,
+    worker_hir_environment_admit_v1,
+    worker_hir_profile_admit_v1
+}
+
+describe "per-file lane Layer 2 surface parity and Layer 3 / HIR profile contracts":
+    context "Layer 2 canonical path normalization and row identity binding":
+        it "strips extended-length prefixes and normalizes slashes on module_surface_canonical_path":
+            val canon = module_surface_canonical_path(".")
+            expect(canon.len()).to_be_greater_than(0)
+            expect(canon.contains("\\")).to_equal(false)
+            expect(canon.starts_with("//?/")).to_equal(false)
+
+        it "binds physical source index, canonical path, and folded logical identity":
+            val empty_surface = ModuleSurface.empty("placeholder")
+            val content = "pub val k = 1\n"
+            val bound = module_surface_bind_row_identity(
+                empty_surface,
+                "src/lib/common/provider.spl",
+                "/work/repo/src/lib/common/provider.spl",
+                "std.common.provider",
+                7,
+                content
+            )
+            expect(bound.physical_index).to_equal(7)
+            expect(bound.source_index).to_equal(7)
+            expect(bound.canonical_path).to_equal("/work/repo/src/lib/common/provider.spl")
+            expect(bound.module_name).to_equal("std.common.provider")
+            expect(bound.logical_name).to_equal("lib.common.provider")
+            expect(bound.canonical_name).to_equal("lib.common.provider")
+            expect(bound.package_name).to_equal("lib.common")
+            expect(bound.content_length).to_equal(14)
+            expect(bound.content_hash != 0).to_equal(true)
+
+        it "matches SCV snapshot TLDR surface rows to checkout std/lib alias rows via unit_tldr_surface_index_v1":
+            val content = "pub val k = 1\n"
+            val bound = module_surface_bind_row_identity(
+                ModuleSurface.empty("lib.common.provider"),
+                "src/lib/common/provider.spl",
+                "/work/repo/build/scv/snapshots/scv-revision-v1-deadbeef/src/lib/common/provider.spl",
+                "lib.common.provider",
+                3,
+                content
+            )
+            val plan = UnitTldrPlanV1(
+                unit_id: "u0",
+                picked: [],
+                parse_paths: [],
+                parsed: 0,
+                summaries: 1,
+                fallbacks: 0,
+                fallback_modules: [],
+                surfaces: [bound],
+                import_hir_lowered: 0,
+                admitted_roots: [
+                    "/work/repo/build/scv/snapshots/scv-revision-v1-deadbeef",
+                    "/work/repo"
+                ]
+            )
+            val idx = unit_tldr_surface_index_v1(plan)
+            val matched = unit_tldr_surface_for_row_indexed_v1(
+                plan,
+                idx,
+                "std.common.provider",
+                "/work/repo/src/lib/common/provider.spl"
+            )
+            expect(matched.is_some()).to_equal(true)
+            val surface = matched.unwrap()
+            expect(surface.source_index).to_equal(3)
+            expect(surface.content_length).to_equal(14)
+
+            val missed = unit_tldr_surface_for_row_indexed_v1(
+                plan,
+                idx,
+                "app.missing.mod",
+                "/work/repo/src/app/missing/mod.spl"
+            )
+            expect(missed.is_none()).to_equal(true)
+
+    context "Layer 3 MIR physical ownership disposition":
+        it "stands in unheld non-target rows and fails closed only on missing target or unscoped rows":
+            expect(driver_mir_owner_disposition_v1(true, true, true)).to_equal("hir")
+            expect(driver_mir_owner_disposition_v1(true, false, false)).to_equal("placeholder")
+            expect(driver_mir_owner_disposition_v1(true, false, true)).to_equal("placeholder")
+            expect(driver_mir_owner_disposition_v1(true, true, false)).to_equal("missing")
+            expect(driver_mir_owner_disposition_v1(false, false, false)).to_equal("missing")
+
+    context "worker_hir_profile_v1 admission":
+        it "accepts native-build --mode dynload/one-binary and rejects unknown modes":
+            expect(worker_hir_argument_error_v1(["--entry-closure", "--mode", "dynload", "--threads", "2"])).to_equal("")
+            expect(worker_hir_argument_error_v1(["--entry-closure", "--mode=one-binary"])).to_equal("")
+            expect(worker_hir_argument_error_v1(["--entry-closure", "--mode", "jit"]) != "").to_equal(true)
+
+        it "admits Stage 3 launch env keys and enforces deadline + disallowed loader env fail-closed":
+            val admitted = worker_hir_environment_admit_v1([("RUST_LOG", "warn"), ("SIMPLE_FILE_WORKERS", "0")])
+            expect(admitted.is_ok()).to_equal(true)
+            val rejected = worker_hir_environment_admit_v1([("LD_PRELOAD", "/tmp/evil.so")])
+            expect(rejected.is_err()).to_equal(true)
+            val dead = worker_hir_profile_admit_v1(["--entry-closure", "--mode", "dynload"], "src/main.spl", [], 0)
+            expect(dead.is_err()).to_equal(true)

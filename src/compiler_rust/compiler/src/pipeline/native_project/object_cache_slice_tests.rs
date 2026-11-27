@@ -21,7 +21,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const PROV_BASE: &str = "struct Pt:\n    x: i64\n    y: i64\n\nfn make_pt() -> Pt:\n    return Pt(1, 2)\n\nfn provide() -> i64:\n    return 11\n";
-const CONS: &str = "use prov.{make_pt, provide, Pt}\n\nfn consume() -> i64:\n    val p: Pt = make_pt()\n    return provide() + p.y\n";
+const CONS: &str = "use prov.{make_pt, provide, Pt}\n\nfn consume() -> i64:\n    val p: Pt = make_pt()\n    return (provide() + p.y) as i64\n";
 const OTHER: &str = "fn other_value() -> i64:\n    return 5\n";
 
 struct Fixture {
@@ -598,4 +598,98 @@ fn default_value_change_recompiles_the_caller_and_relinks_correctly() {
     fixture.build("d1");
     assert_eq!(recompiled_modules(&fixture, "d1", &before), set(&["cons", "prov"]));
     assert_eq!(run_consume(&fixture, "d1"), "consume=14", "caller must see the new default");
+}
+
+/// Perf budget (seed_global_interface_cache_rebuild_latency_2026-10-05): a
+/// no-edit rebuild must reuse every module, and a leaf body edit must
+/// recompile at most that one module. The cache key is per-module
+/// (`InterfaceSliceIndex`), never whole-project, so build cost after an edit
+/// must not scale with module count. Budgets are generous wall-time bounds on a
+/// 3-module archive: they trip only if the warm builds degrade toward a cold one.
+#[test]
+fn leaf_edit_recompile_count_and_time_budget() {
+    let _guard = crate::pipeline::execution::runtime_bundle_env_lock_for_tests()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let fixture = Fixture::new(&[("prov", PROV_BASE), ("cons", CONS), ("other", OTHER)]);
+    let t = std::time::Instant::now();
+    let cold = fixture.build("b1");
+    let cold_s = t.elapsed().as_secs_f64();
+    assert_eq!((cold.compiled, cold.cached), (3, 0));
+
+    let t = std::time::Instant::now();
+    let same = fixture.build("b1");
+    let same_s = t.elapsed().as_secs_f64();
+    assert_eq!((same.compiled, same.cached), (0, 3), "no-edit rebuild must be all cache hits");
+
+    fixture.write("other", &OTHER.replace("return 5", "return 6"));
+    let t = std::time::Instant::now();
+    let edit = fixture.build("b1");
+    let edit_s = t.elapsed().as_secs_f64();
+    assert!(edit.compiled <= 1, "leaf edit recompiled {} modules (budget 1)", edit.compiled);
+    eprintln!("[iface-cache-budget] cold={cold_s:.2}s nochange={same_s:.2}s leaf_edit={edit_s:.2}s");
+    assert!(same_s <= 30.0, "no-edit rebuild took {same_s:.1}s (budget 30s)");
+    assert!(edit_s <= 30.0, "leaf-edit rebuild took {edit_s:.1}s (budget 30s)");
+}
+
+#[test]
+fn precomputed_universal_slice_handles_member_only_and_ascii_tokens() {
+    use super::{
+        fuzzy_norm, source_dotted_pair_tokens, source_label_tokens, InterfaceSliceIndex, ModuleTokens,
+    };
+    let mut r1 = super::imports::ImportMapResult::default();
+    r1.enum_defs.insert(
+        "Color".to_string(),
+        vec![("Red".to_string(), None), ("Custom".to_string(), Some(vec![simple_parser::Type::Simple("Payload".to_string())]))],
+    );
+    r1.struct_defs.insert(
+        "m__Payload".to_string(),
+        vec![("weight".to_string(), simple_parser::Type::Simple("i64".to_string()))],
+    );
+    r1.struct_defs.insert(
+        "m__Other".to_string(),
+        vec![("Color".to_string(), simple_parser::Type::Simple("i64".to_string()))],
+    );
+    let idx1 = InterfaceSliceIndex::build(&r1);
+
+    let mut r2 = super::imports::ImportMapResult::default();
+    r2.enum_defs = r1.enum_defs.clone();
+    r2.struct_defs.insert(
+        "m__Payload".to_string(),
+        vec![("weight".to_string(), simple_parser::Type::Simple("f64".to_string()))],
+    );
+    r2.struct_defs.insert(
+        "m__Other".to_string(),
+        vec![("Color".to_string(), simple_parser::Type::Simple("i64".to_string()))],
+    );
+    let idx2 = InterfaceSliceIndex::build(&r2);
+
+    // Module mentioning neither Color nor Payload still tracks Payload through
+    // the universal Color enum payload closure.
+    let unrelated = "fn main() -> i64:\n    0\n";
+    assert_ne!(idx1.digest_for_source(unrelated), idx2.digest_for_source(unrelated));
+
+    // Accessing `.Color` as a member token reaches the member-only struct row.
+    let mut r3 = super::imports::ImportMapResult::default();
+    r3.enum_defs = r1.enum_defs.clone();
+    r3.struct_defs.insert(
+        "m__Payload".to_string(),
+        vec![("weight".to_string(), simple_parser::Type::Simple("i64".to_string()))],
+    );
+    r3.struct_defs.insert(
+        "m__Other".to_string(),
+        vec![("Color".to_string(), simple_parser::Type::Simple("f64".to_string()))],
+    );
+    let idx3 = InterfaceSliceIndex::build(&r3);
+    assert_eq!(idx1.digest_for_source(unrelated), idx3.digest_for_source(unrelated));
+    assert_ne!(
+        idx1.digest_for_tokens(&ModuleTokens::of_source("fn f(x): x.Color\n")),
+        idx3.digest_for_tokens(&ModuleTokens::of_source("fn f(x): x.Color\n"))
+    );
+
+    // ASCII fast-path token helpers match expected label and dotted pair forms.
+    assert!(source_label_tokens("Pt(x: 1, y: 2)").contains("x"));
+    let pairs = source_dotted_pair_tokens("Type.method()");
+    assert!(pairs.contains("type_method"));
+    assert!(pairs.contains(&fuzzy_norm("Typemethod")));
 }

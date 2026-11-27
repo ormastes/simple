@@ -1,0 +1,216 @@
+"""
+## Purpose and audience
+Purpose: Pin that a collapsible space ending a `text-align: center | right`
+line hangs (CSS Text 3 4.1.3) and does not move the line, as in Chrome 159.
+A whitespace-only run after an element at the line end handed its space to
+the pen, so the line was centred 2 px (right: 4-5 px) left of Chrome. On
+`examples/06_io/ui/sample_page.html` the hero buttons
+`<a class=btn>..</a><a class="btn secondary">..</a>\n` started at x=252
+against Chrome's 254.
+Audience: web renderer inline layout maintainers.
+
+Chrome oracle (Chromium 1255 Playwright build, `--headless=new
+--hide-scrollbars --force-device-scale-factor=1 --window-size=800,600
+--screenshot`, first red/orange column on the box's row), a 400 px block with
+Arial 16 px; `ib` is a 100x20 red inline-block:
+
+| content of the block      | align  | Chrome x | here (before) |
+|---------------------------|--------|----------|---------------|
+| `ib` + space              | center | 150      | 148           |
+| `ib` + space              | right  | 300      | 296           |
+| `ib` space `ib` + space   | center | 98       | 96            |
+| `ib` space `ib` + space   | right  | 196      | 192           |
+| `<b>Hello</b>` + space    | center | same as `<b>Hello</b>` | 2 px left     |
+| `<b>Hello</b>` + space    | right  | same as `<b>Hello</b>` | 5 px left     |
+| sample_page hero `.btn`   | center | 254      | 252           |
+| zero-width `ib` + space  | center | 200      | 202           |
+| zero-width `ib` + space  | right  | 400      | 404           |
+| `ib` sp `<span></span>` sp| center | 150      | 147           |
+| `ib` sp `<span></span>` sp| right  | 300      | 295           |
+| `ib` sp `<span></span>` sp x | center | 144   | 141           |
+| `ib` sp `<span></span>` sp x | right  | 288   | 283           |
+| `x` sp `<span></span>` sp `ib` | center | 156 | 158         |
+| `ib` sp `z` sp `ib` (2nd ib)  | left   | 109      | 104 (5163e40)  |
+| `ib` sp `z`                | center / right | 148 / 296 | 150 / 300 (5163e40) |
+| `ib` 1px-border/pad span `ib` | left | 101   | 100 (5163e40)  |
+| pre-wrap / break-spaces `ib` sp `<span>` sp `ib` | left | 109 | 104 (5163e40) |
+| pre-wrap `ib` + space       | center | 148      | 150 (5163e40)  |
+| rtl `ib` + space            | center | 150      | 150            |
+| pre-line `ib` sp `<span>` / `z` sp `ib` | left | 104 / 109 | 108 / 108 (pre-fix) |
+| pre-line `ib` + space       | center | 150      | 148 (pre-fix)  |
+| `x` sp `z` / pre-wrap / break-spaces sp `ib` | left | 17 | 17 |
+| NoSuchFontXyz `xx` sp `<span>` sp `ib` | left | 20 | 25 (2ffccb7) |
+| `ib` `<span margin-left:5px>` `ib` | left | 105 | 106 (55a55a5) |
+| `ib` sp `<span margin-left:5px>` sp `ib` | left | 109 | 114 (55a55a5) |
+| `ib` sp `<span border-left:1px>` / `padding-left:1px` sp `ib` | left | 105 | 109 (55a55a5) |
+| `ib`(margin-right .7 / .4px) sp `z` sp `ib` | left | 110 / 109 | 109 / 109 (55a55a5) |
+| `ib`(margin-right .6px) sp `z` sp `ib` -- open gap | left | 110 | 109: a LayoutUnit tie (100.59375 + 2 x 285/64 = 109.5); Simple carries the space as 4.445, not 4.453 |
+| `ib`(width:100.5px;inline-size:100px) sp `z` sp `ib` | left | 109 | 108 (55a55a5) |
+| nowrap `ib` sp `<span>` sp `ib` / `ib ` centre / `ib z ib` | left / center | 104 / 150 / 109 | 109 / 148 / 109 (55a55a5) |
+| (k = 4: last red device column, Chrome 159 at scale 4) | | 819 / 837 / 821 / 821 / 837 / 836 / 835 / 817 / 999 / 835 | |
+
+The interior space of `ib space ib` still counts (204.45 px line, centred at
+97.8), so only the trailing run hangs. The hang is what the closing
+whitespace-only runs CHARGED the pen, measured: a rounded space would return
+4 px where the pen took 5 (`<b>Hello</b> ` right-aligned, 39.12 + 4.45 -> 44;
+AC-7), and a guess at whether the pen charged one over-credits a line whose
+first item is zero-wide (`z` is a 0-width inline-block holding a 100 px red
+block; AC-8). A space after an empty inline collapses into the one before it
+(AC-9). `z` sits at 200 / 400 since its 0-width box starts the line there.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-INLINE-WHITESPACE-002 — a collapsible space ending a centred or right-aligned line hangs, as in Chrome 159.
+"""
+# @tag: unit, browser_engine, layout, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.io_runtime.{file_read}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_element_geometry_lines}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d_at_device_scale}
+
+fn _x_of(html: text, path: text) -> i32:
+    for l in simple_web_layout_element_geometry_lines(html, 800, 600):
+        val parts = l.split("|")
+        if parts.len() >= 6 and parts[1] == path:
+            return parts[3].to_int()
+    -1
+
+fn _block(align: text, inner: text) -> text:
+    "<html><head><style>*{margin:0;padding:0}body{font-family:Arial;font-size:16px}.h{width:400px;text-align:" + align + "}.b{display:inline-block;width:100px;height:20px;background:#f00}.z{display:inline-block;width:0;height:20px}.r{display:block;width:100px;height:20px;background:#f00}</style></head><body><div class=\"h\">" + inner + "</div></body></html>"
+# Last red device column on CSS row 10 at device scale 4 (Chrome 159 at
+# --force-device-scale-factor=4 is the oracle). The page is 420 x 40 CSS px.
+fn _last_red_k4(html: text) -> i32:
+    val k = 4
+    val w = 420 * k
+    val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(html, 420, 40, k, "cpu_simd")
+    if px.len() != w * 40 * k:
+        return -2
+    val row = 10 * k * w
+    var last = -1
+    var x = 0
+    while x < w:
+        val c = px[row + x]
+        if ((c >> 16) & 255) > 200 and ((c >> 8) & 255) < 80 and (c & 255) < 80:
+            last = x
+        x = x + 1
+    last
+
+fn _block_css(css: text, inner: text) -> text:
+    "<html><head><style>*{margin:0;padding:0}body{font-family:Arial;font-size:16px}.h{width:400px;" + css + "}.b{display:inline-block;width:100px;height:20px;background:#f00}.z{display:inline-block;width:0;height:20px}</style></head><body><div class=\"h\">" + inner + "</div></body></html>"
+
+
+describe "a collapsible space ending a centred or right-aligned line (Chrome 159)":
+    it "AC-1: a trailing space after an inline-block does not move a centred line":
+        expect(_x_of(_block("center", "<span class=\"b\"></span> "), "path:0/0")).to_equal(150)
+
+    it "AC-2: a trailing space after an inline-block does not move a right-aligned line":
+        expect(_x_of(_block("right", "<span class=\"b\"></span> "), "path:0/0")).to_equal(300)
+
+    it "AC-3: the interior space still counts, only the trailing one hangs":
+        expect(_x_of(_block("center", "<span class=\"b\"></span> <span class=\"b\"></span> "), "path:0/0")).to_equal(98)
+        expect(_x_of(_block("right", "<span class=\"b\"></span> <span class=\"b\"></span> "), "path:0/0")).to_equal(196)
+
+    it "AC-4: a trailing space after an inline text element does not move a centred line":
+        val bare = _x_of(_block("center", "<b>Hello</b>"), "path:0/0")
+        expect(bare > 0).to_equal(true)
+        expect(_x_of(_block("center", "<b>Hello</b> "), "path:0/0")).to_equal(bare)
+        expect(_x_of(_block("center", "<b>Hello </b>"), "path:0/0")).to_equal(bare)
+
+    it "AC-5: no trailing space keeps the unchanged position":
+        expect(_x_of(_block("center", "<span class=\"b\"></span>"), "path:0/0")).to_equal(150)
+        expect(_x_of(_block("right", "<span class=\"b\"></span>"), "path:0/0")).to_equal(300)
+        expect(_x_of(_block("left", "<span class=\"b\"></span> "), "path:0/0")).to_equal(0)
+
+    it "AC-6: the sample_page hero buttons start at Chrome's x":
+        val html = file_read("examples/06_io/ui/sample_page.html")
+        expect(_x_of(html, "path:1/2")).to_equal(254)
+
+    it "AC-7: a trailing space after an inline text element does not move a right-aligned line":
+        val bare = _x_of(_block("right", "<b>Hello</b>"), "path:0/0")
+        expect(bare > 0).to_equal(true)
+        expect(_x_of(_block("right", "<b>Hello</b> "), "path:0/0")).to_equal(bare)
+
+    it "AC-8: a trailing space after a zero-width first item took no pen, so nothing hangs":
+        expect(_x_of(_block("center", "<span class=\"z\"><span class=\"r\"></span></span> "), "path:0/0")).to_equal(200)
+        expect(_x_of(_block("right", "<span class=\"z\"><span class=\"r\"></span></span> "), "path:0/0")).to_equal(400)
+
+    it "AC-9: a space collapsing across an empty inline counts once":
+        expect(_x_of(_block("center", "<span class=\"b\"></span> <span></span> "), "path:0/0")).to_equal(150)
+        expect(_x_of(_block("right", "<span class=\"b\"></span> <span></span> "), "path:0/0")).to_equal(300)
+        expect(_x_of(_block("center", "<span class=\"b\"></span> <span></span> x"), "path:0/0")).to_equal(144)
+        expect(_x_of(_block("right", "<span class=\"b\"></span> <span></span> x"), "path:0/0")).to_equal(288)
+
+    it "AC-10: a space after a text run's trailing space and an empty inline counts once":
+        expect(_x_of(_block("center", "x <span></span> <span class=\"b\"></span>"), "path:0/1")).to_equal(156)
+
+    it "AC-11: a zero-width atomic ends the trailing-space tail and the collapse":
+        expect(_x_of(_block_css("", "<span class=\"b\"></span> <span class=\"z\"></span> <span class=\"b\"></span>"), "path:0/2")).to_equal(109)
+        expect(_x_of(_block_css("text-align:center", "<span class=\"b\"></span> <span class=\"z\"></span>"), "path:0/0")).to_equal(148)
+        expect(_x_of(_block_css("text-align:right", "<span class=\"b\"></span> <span class=\"z\"></span>"), "path:0/0")).to_equal(296)
+
+    it "AC-12: an empty inline with a 1 px border or padding keeps its width":
+        expect(_x_of(_block_css("", "<span class=\"b\"></span><span style=\"border-left:1px solid #000\"></span><span class=\"b\"></span>"), "path:0/2")).to_equal(101)
+        expect(_x_of(_block_css("", "<span class=\"b\"></span><span style=\"padding-left:1px\"></span><span class=\"b\"></span>"), "path:0/2")).to_equal(101)
+        expect(_x_of(_block_css("", "<span class=\"b\"></span><span></span><span class=\"b\"></span>"), "path:0/2")).to_equal(100)
+
+    it "AC-13: preserved spaces (pre-wrap, break-spaces) neither collapse nor hang":
+        expect(_x_of(_block_css("white-space:pre-wrap", "<span class=\"b\"></span> <span></span> <span class=\"b\"></span>"), "path:0/2")).to_equal(109)
+        expect(_x_of(_block_css("white-space:break-spaces", "<span class=\"b\"></span> <span></span> <span class=\"b\"></span>"), "path:0/2")).to_equal(109)
+        expect(_x_of(_block_css("white-space:pre-wrap;text-align:center", "<span class=\"b\"></span> "), "path:0/0")).to_equal(148)
+
+    it "AC-14: a trailing space hangs on a centred rtl line":
+        expect(_x_of(_block_css("direction:rtl;text-align:center", "<span class=\"b\"></span> "), "path:0/0")).to_equal(150)
+
+    it "AC-15: pre-line keeps newlines but still collapses and hangs spaces":
+        expect(_x_of(_block_css("white-space:pre-line", "<span class=\"b\"></span> <span></span> <span class=\"b\"></span>"), "path:0/2")).to_equal(104)
+        expect(_x_of(_block_css("white-space:pre-line", "<span class=\"b\"></span> <span class=\"z\"></span> <span class=\"b\"></span>"), "path:0/2")).to_equal(109)
+        expect(_x_of(_block_css("white-space:pre-line;text-align:center", "<span class=\"b\"></span> "), "path:0/0")).to_equal(150)
+
+    it "AC-16: a text lead before a zero-width atomic or a preserved space keeps both spaces":
+        expect(_x_of(_block_css("", "x <span class=\"z\"></span> <span class=\"b\"></span>"), "path:0/1")).to_equal(17)
+        expect(_x_of(_block_css("white-space:pre-wrap", "x <span></span> <span class=\"b\"></span>"), "path:0/1")).to_equal(17)
+        expect(_x_of(_block_css("white-space:break-spaces", "x <span></span> <span class=\"b\"></span>"), "path:0/1")).to_equal(17)
+
+    it "AC-17: an unresolved face (fallback metrics) still collapses the space across an empty inline":
+        expect(_x_of(_block_css("font-family:NoSuchFontXyz", "xx <span></span> <span class=\"b\"></span>"), "path:0/1")).to_equal(20)
+
+    it "AC-18: a margin-only empty inline keeps its margin and drops its 1 px box":
+        val tight = _block_css("", "<span class=\"b\"></span><span style=\"margin-left:5px\"></span><span class=\"b\"></span>")
+        val spaced = _block_css("", "<span class=\"b\"></span> <span style=\"margin-left:5px\"></span> <span class=\"b\"></span>")
+        expect(_x_of(tight, "path:0/2")).to_equal(105)
+        expect(_x_of(spaced, "path:0/2")).to_equal(109)
+        expect(_last_red_k4(tight)).to_equal(819)
+        expect(_last_red_k4(spaced)).to_equal(837)
+
+    it "AC-19: spaces collapse across an empty inline with a border or padding":
+        val bordered = _block_css("", "<span class=\"b\"></span> <span style=\"border-left:1px solid #000\"></span> <span class=\"b\"></span>")
+        val padded = _block_css("", "<span class=\"b\"></span> <span style=\"padding-left:1px\"></span> <span class=\"b\"></span>")
+        expect(_x_of(bordered, "path:0/2")).to_equal(105)
+        expect(_x_of(padded, "path:0/2")).to_equal(105)
+        expect(_last_red_k4(bordered)).to_equal(821)
+        expect(_last_red_k4(padded)).to_equal(821)
+
+    it "AC-20: a sub-px margin on an exact-width atomic carries into the pen":
+        val m7 = _block_css("", "<span class=\"b\" style=\"margin-right:0.7px\"></span> <span class=\"z\"></span> <span class=\"b\"></span>")
+        val m4 = _block_css("", "<span class=\"b\" style=\"margin-right:0.4px\"></span> <span class=\"z\"></span> <span class=\"b\"></span>")
+        expect(_x_of(m7, "path:0/2")).to_equal(110)
+        expect(_x_of(m4, "path:0/2")).to_equal(109)
+        expect(_last_red_k4(m7)).to_equal(837)
+        expect(_last_red_k4(m4)).to_equal(836)
+
+    it "AC-21: inline-size after width sets the exact width":
+        val sized = _block_css("", "<span class=\"b\" style=\"width:100.5px;inline-size:100px\"></span> <span class=\"z\"></span> <span class=\"b\"></span>")
+        expect(_x_of(sized, "path:0/2")).to_equal(109)
+        expect(_last_red_k4(sized)).to_equal(835)
+
+    it "AC-22: nowrap collapses and hangs spaces":
+        val nw = _block_css("white-space:nowrap", "<span class=\"b\"></span> <span></span> <span class=\"b\"></span>")
+        val nwc = _block_css("white-space:nowrap;text-align:center", "<span class=\"b\"></span> ")
+        val nwz = _block_css("white-space:nowrap", "<span class=\"b\"></span> <span class=\"z\"></span> <span class=\"b\"></span>")
+        expect(_x_of(nw, "path:0/2")).to_equal(104)
+        expect(_x_of(nwc, "path:0/0")).to_equal(150)
+        expect(_x_of(nwz, "path:0/2")).to_equal(109)
+        expect(_last_red_k4(nw)).to_equal(817)
+        expect(_last_red_k4(nwc)).to_equal(999)
+        expect(_last_red_k4(nwz)).to_equal(835)

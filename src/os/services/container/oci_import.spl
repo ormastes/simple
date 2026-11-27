@@ -22,7 +22,16 @@
 #  - no `{`/`}` literals in strings;
 #  - pure functions only — no IO.
 
+#
+# Generic bundle validation (digest, hooks, unpack bounds, root/mount
+# traversal, device and raw host mounts) is OWNED by the shared pure codec
+# std.common.oci.bundle_check_v1 — the same validator std.container.oci uses.
+# This adapter keeps only SimpleOS-specific lowering: capability ceiling
+# intersection, isolated-net stripping and kernel ContainerSpec construction.
+
 use os.services.container.container_manager.{ContainerSpec, caps_is_subset}
+use std.common.oci.bundle_check_v1.{OciBundleMountV1, OciBundleCheckInputV1,
+    OciBundleCheckPolicyV1, oci_bundle_check_v1}
 
 # ============================================================================
 # Edge inputs — a parsed / normalized OCI config + the import policy.
@@ -93,60 +102,27 @@ fn empty_spec() -> ContainerSpec:
     ContainerSpec(image_digest: "", root: "", caps: [], budget: 0u64)
 
 # ============================================================================
-# Distinct rejection strings (one per §6.3 check).
+# Delegation to the shared validator. Rejection strings are the shared
+# codec's (unchanged from the pre-extraction adapter).
 # ============================================================================
 
-val ERR_TRAVERSAL: text = "oci reject: mount destination escapes container root (.. traversal / above-root)"
-val ERR_HOST_MOUNT: text = "oci reject: raw host bind mount denied by policy (allow_host_mounts=false)"
-val ERR_DEVICE: text = "oci reject: uncontrolled device node mount denied by policy (allow_devices=false)"
-val ERR_HOOKS: text = "oci reject: lifecycle hooks present but not authorized (allow_hooks=false)"
-val ERR_UNPACK: text = "oci reject: unpack size/count exceeds policy bound"
-val ERR_DIGEST: text = "oci reject: missing or empty content digest but require_digest=true"
-val ERR_SRC_TRAVERSAL: text = "oci reject: mount source escapes the bundle (.. traversal)"
-val ERR_ROOT: text = "oci reject: container root_path is empty, the host root, or contains .. traversal"
+fn oci_bundle_check_input(input: OciConfigInput) -> OciBundleCheckInputV1:
+    var mounts: [OciBundleMountV1] = []
+    for mnt in input.mounts:
+        mounts.push(OciBundleMountV1(source: mnt.src, destination: mnt.dest, mount_type: mnt.mtype))
+    OciBundleCheckInputV1(root_path: input.root_path, mounts: mounts,
+        hooks_present: input.hooks_present, digest: input.digest,
+        unpack_count: input.unpack_count, unpack_size: input.unpack_size)
+
+fn oci_bundle_check_policy(policy: OciPolicy) -> OciBundleCheckPolicyV1:
+    OciBundleCheckPolicyV1(allow_host_mounts: policy.allow_host_mounts,
+        allow_devices: policy.allow_devices, allow_hooks: policy.allow_hooks,
+        max_unpack_count: policy.max_unpack_count, max_unpack_size: policy.max_unpack_size,
+        require_digest: policy.require_digest)
 
 # ============================================================================
-# Helpers.
+# SimpleOS capability lowering.
 # ============================================================================
-
-# A raw host path is an absolute path on the host ("/..."). In-container mount
-# destinations are also absolute, but a BIND source pointing at an absolute
-# host path is the "raw host mount" vector §6.3 forbids by default.
-fn is_host_path(p: text) -> bool:
-    p.starts_with("/")
-
-# Does the destination escape the container root? Two vectors: a ".." component
-# (traversal), or an absolute host path escaping via ".." after normalization.
-# Pure textual model: reject any dest containing "..".
-fn dest_escapes(dest: text) -> bool:
-    dest.contains("..")
-
-# A mount SOURCE may also escape. `is_host_path` only catches ABSOLUTE host
-# sources; a RELATIVE source such as "../../../etc" resolves above the bundle
-# and was accepted by every check before lane CESC (bug
-# oci_import_unchecked_mount_src_and_root_2026-07-27). No legitimate OCI source
-# — bind path, volume name, or pseudo-fs token — contains "..".
-fn src_escapes(src: text) -> bool:
-    src.contains("..")
-
-# The container root_path lands verbatim in ContainerSpec.root, which
-# container_view_create() turns into the confinement root. "" is the ROOTLESS
-# sentinel and "/" is the HOST root — neither may ever come from an untrusted
-# OCI bundle — and ".." resolves above the bundle.
-fn root_path_invalid(root: text) -> bool:
-    if root.len() == 0:
-        return true
-    if root == "/":
-        return true
-    root.contains("..")
-
-# Device-node mount types. OCI carries pseudo-device variants; exact-matching
-# only "device" let "devtmpfs" walk straight past the §6.3 check. (The raw
-# host-mount rule needs no such family list — it keys off an absolute host
-# SOURCE, so "rbind" and any unknown future type are covered automatically.)
-fn is_device_family(t: text) -> bool:
-    (t == "device") or (t == "devtmpfs") or (t == "mknod")
-
 # Host-net capability tokens that would grant RAW host networking. The edge
 # adapter never emits these — default net is isolated.
 fn is_host_net_cap(c: text) -> bool:
@@ -185,58 +161,14 @@ fn spec_is_isolated_net(spec: ContainerSpec) -> bool:
     true
 
 # ============================================================================
-# Core checked import — fail-CLOSED validation, then build the ContainerSpec.
-# `check_traversal` exists ONLY so the spec can prove it can FAIL: disable it
-# and the traversal-reject test fails. Production callers pass true.
+# Core checked import — shared fail-CLOSED validation, then build the
+# ContainerSpec. `check_traversal` exists ONLY so the spec can prove it can
+# FAIL: disable it and the traversal-reject test fails. Production passes true.
 # ============================================================================
 fn oci_import_checked_ex(input: OciConfigInput, policy: OciPolicy, check_traversal: bool) -> OciImportResult:
-    # (f) digest present when required.
-    if policy.require_digest:
-        if input.digest.len() == 0:
-            return OciImportResult(ok: false, error: ERR_DIGEST, spec: empty_spec())
-
-    # (d) no lifecycle hooks unless authorized.
-    if input.hooks_present:
-        if not policy.allow_hooks:
-            return OciImportResult(ok: false, error: ERR_HOOKS, spec: empty_spec())
-
-    # (e) bound unpack size/count.
-    if input.unpack_count > policy.max_unpack_count:
-        return OciImportResult(ok: false, error: ERR_UNPACK, spec: empty_spec())
-    if input.unpack_size > policy.max_unpack_size:
-        return OciImportResult(ok: false, error: ERR_UNPACK, spec: empty_spec())
-
-    # (g) the container root itself must be a real, confined bundle path.
-    if check_traversal:
-        if root_path_invalid(input.root_path):
-            return OciImportResult(ok: false, error: ERR_ROOT, spec: empty_spec())
-
-    # Per-mount checks: (a) dest traversal / above-root, (a2) SOURCE traversal,
-    # (b) raw host mount, (c) uncontrolled device node.
-    var m = 0
-    while m < input.mounts.len():
-        val mnt = input.mounts[m]
-        # (a) destination must not escape the container root.
-        if check_traversal:
-            if dest_escapes(mnt.dest):
-                return OciImportResult(ok: false, error: ERR_TRAVERSAL, spec: empty_spec())
-            # (a2) the SOURCE must not escape the bundle either.
-            if src_escapes(mnt.src):
-                return OciImportResult(ok: false, error: ERR_SRC_TRAVERSAL, spec: empty_spec())
-        # (c) device node denied by default — checked BEFORE the generic host
-        # rule so a device node still reports the precise device reason.
-        if is_device_family(mnt.mtype):
-            if not policy.allow_devices:
-                return OciImportResult(ok: false, error: ERR_DEVICE, spec: empty_spec())
-        # (b) raw host mount denied by default. Type-INDEPENDENT: ANY mount that
-        # names an absolute host path as its source is a raw host mount, whether
-        # it calls itself "bind", "rbind", or something this adapter has never
-        # heard of. Pseudo filesystems name their source "tmpfs"/"proc"/"none",
-        # so they are unaffected.
-        if is_host_path(mnt.src):
-            if not policy.allow_host_mounts:
-                return OciImportResult(ok: false, error: ERR_HOST_MOUNT, spec: empty_spec())
-        m = m + 1
+    val error = oci_bundle_check_v1(oci_bundle_check_input(input), oci_bundle_check_policy(policy), check_traversal)
+    if error != "":
+        return OciImportResult(ok: false, error: error, spec: empty_spec())
 
     # All checks passed — build the ContainerSpec. Caps = intersection with the
     # policy ceiling (never amplified), host-net stripped (isolated by default).

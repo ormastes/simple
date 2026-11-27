@@ -1,4 +1,6 @@
-use std.common.bytes.concat_copy_v1.{bytes_concat_copy_v1}
+use compiler.driver.cache.initializer_link_capture_v1.{native_link_with_initializer_capture_v1}
+use compiler.driver.cache.initializer_object_capture_v1.{driver_capture_initializer_object_v1}
+use compiler.driver.driver_build.native_cache_lease.{NativeCacheLease, native_cache_lease_begin, native_cache_lease_end, native_cache_build_root}
 use std.common.cache_host_authority_v1.{CacheRootAuthorityV1, CacheObjectAuthorityV1, CacheTempAuthorityV1,
     cache_host_open_root_v1, cache_host_root_valid_v1, cache_host_open_read_v1,
     cache_host_object_valid_v1, cache_host_size_v1, cache_host_pread_receipt_v1,
@@ -14,10 +16,10 @@ use compiler.common.native_output_intent.{NativeOutputIntentV1, native_output_in
 #
 # Backend helpers for module compilation and backend resolution
 use compiler.common.diagnostics.span.{Span}
-use std.io_runtime.{dir_create, dir_list, file_copy, file_exists, hash_text,
+use std.io_runtime.{dir_create, dir_list_or_empty, file_copy, file_exists, hash_text,
     file_size_raw, file_delete, getpid,
     file_write_exact, file_read_nullable}
-use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow,
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_is_regular_no_follow,
     file_read_regular_no_follow_bounded,
     file_read_regular_no_follow_bounded_bytes, file_write_bytes,
     secure_temp_dir_raw, file_fsync, directory_fsync}
@@ -35,16 +37,36 @@ use std.nogc_sync_mut.path.{dirname, basename}
 # already records at :34-40 for `file_read_bytes`. See
 # doc/08_tracking/bug/std_file_system_write_mocks_return_true_without_writing_2026-09-06.md
 use compiler.backend.backend_helpers.{compile_module_with_backend,
-    compile_module_with_backend_target_cpu_storage_bindings, get_effective_backend_name}
+    compile_module_with_backend_scoped_v1, get_effective_backend_name,
+    llvm_module_ir_to_path_v1, llvm_module_llc_argv_v1}
+use compiler.driver.driver_empty_object.{driver_empty_object_bytes, driver_empty_object_target}
+use compiler.driver.driver_build.native_codegen_pool_v1.{native_codegen_pool_run_v1,
+    native_codegen_pool_workers_v1, native_codegen_headroom_kib_v1,
+    native_codegen_kib_field_v1, NativeCodegenPoolResultV1,
+    native_codegen_host_cpus_for_v1, native_codegen_worker_estimate_for_v1,
+    native_codegen_commit_floor_kib_v1, native_codegen_commit_floor_kib_for_context_v1,
+    native_codegen_live_peer_shards_v1, native_codegen_process_rss_kib_v1,
+    native_codegen_cgroup_spare_kib_v1, native_codegen_admission_summary_v1,
+    NATIVE_CODEGEN_POOL_ENV_V1, NATIVE_CODEGEN_WORKER_KIB_ENV_V1,
+    NATIVE_CODEGEN_JOB_PASS_V1}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
+    transient_scope_pause, transient_scope_end, transient_promote}
+use std.nogc_sync_mut.io_runtime.{file_read_bytes_result}
+use std.nogc_sync_mut.host_limits.{host_limit_i64}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1}
 use compiler.backend.backend.backend_types.{CompiledModule, CompileError}
-use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path}
+use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path, llvm_object_llc_v1,
+    llvm_object_tool_for_v1, llvm_object_tool_v1}
 use compiler.backend.llvm_capability.{find_archive_portable}
+use compiler.backend.linker.archive_response_file.{archive_command_build, archive_is_system_ar}
 use compiler.backend.runtime_compiler.{find_c_compiler, _is_msvc_cc}
 use std.platform.{get_host_os, get_host_arch}
 use std.nogc_async_mut.sosix.host_facade.{sosix_run}
 use compiler.driver.native_relocatable_link.{native_relocatable_link_plan,
     native_relocatable_linker_version_admissible, NativeRelocatableLink}
-use compiler.driver.driver_log_helpers.{log_phase, log_error}
+use compiler.driver.driver_log_helpers.{log_phase, log_error, build_trace_enabled,
+    log_build_trace, build_trace_list, build_trace_detail}
 use compiler.driver.native_aot_artifacts.{
     native_aot_object_path_v1, native_aot_finish_diagnostics_v1}
 use compiler.driver.driver_collection_native_receipt.{
@@ -53,15 +75,28 @@ use compiler.driver.driver_collection_native_receipt.{
     collection_native_link_inputs_valid_v1}
 use compiler.backend.backend_plugin.session_authority_v2.{BackendSessionOwnedLeaseV2, BackendSessionAuthorityErrorV2}
 use compiler.driver.driver_backend_plugin_selection.{
-    driver_aot_uses_versioned_backend, driver_aot_backend_plugin_request_v1,
+    driver_aot_uses_versioned_backend, driver_aot_uses_versioned_backend_with_plugin_v1,
+    driver_aot_backend_plugin_request_v1,
     driver_cuda_plugin_request_error_v1
 }
 use compiler.backend.linker.linker_wrapper.{
-    link_to_native, link_to_shared,
+    link_to_native,
     NativeLinkConfig,
     write_elf_bytes_to_file
 }
-use compiler.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
+use compiler.backend.llvm_native_link.{NativeLinkOptions}
+use compiler.driver.driver_build.native_link_receipt_v1.{native_link_with_receipt_v1, native_shared_link_with_receipt_v1}
+use compiler.driver.driver_build.library_unit_link_v1.{
+    LIBRARY_UNITS_ENV_V1, STAGE3_LIB_DYNLIB_ENV_V1,
+    LIBRARY_UNITS_DYNLIB_EXPLICIT_ENV_V1, LIBRARY_UNITS_DYNLIB_FLAG_V1,
+    LibraryUnitBuildModeV1, LibraryUnitModeInputsV1, library_unit_select_build_mode_v1
+}
+use compiler.driver.driver_build.library_unit_dynlib_v1.{
+    LibraryUnitClosureModuleRowV1, LibraryUnitClosurePackageRequestV1,
+    library_unit_partition_and_package_closure_v1
+}
+use compiler.driver.driver_xray_link.{xray_link_with_runtime_v1}
+use compiler.driver.driver_xray_llvm_link.{xray_llvm_link_needed_v1, xray_llvm_link_objects_v1, xray_llvm_link_libraries_for_target_v1, xray_llvm_semantic_link_flags_for_target_v1, xray_llvm_thread_context_supported_v1}
 use compiler.driver.smf_writer.{Target}
 use compiler.driver.smf_group_object_adapter.{smf_group_object_from_bytes_v1}
 use compiler.driver.smf.runtime_std_package_membership_v1.{
@@ -70,12 +105,15 @@ use compiler.driver.smf.runtime_std_package_membership_v1.{
 use compiler.driver.cache.runtime_std_membership_policy_v1.{
     RuntimeStdMembershipPolicyOutputV1}
 use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1}
+use compiler.driver.driver_build.native_mir_shard.{native_cache_scope_eviction_role_allowed_v1, native_cache_scope_midbuild_sweep_v1}
+use compiler.driver.driver_build.go_to_end_trial_link_v1.{go_to_end_trial_link_run_v1,
+    go_to_end_trial_manifest_block_v1, GoToEndHostedTrialLinkerV1}
 use compiler.driver.driver_build.native_full_inventory_sources.{
     NativeFullInventorySourcesV1}
 use std.scv.compile_source_inventory_core.{
     compile_source_inventory_identity_cmp_v1}
 use compiler.driver.smf.runtime_std_native_sections_v1.{
-    RuntimeStdNativeMemberV1, runtime_std_mir_body_payload_v1,
+    RuntimeStdNativeMemberV1, runtime_std_mir_body_payload_v1, RuntimeStdMirBodyPayloadV1,
     runtime_std_native_directory_chain_real_v1,
     runtime_std_native_observed_output_digest_v1,
     RuntimeStdNativeMemberV2,
@@ -101,15 +139,20 @@ use compiler.driver.action_graph.persisted_graph.{
 use compiler.driver.action_graph.coordinator.{BuildPoolBudgetV1,
     coordinator_new_v1, coordinator_claim_v1, coordinator_complete_v1}
 use std.nogc_sync_mut.io.sysinfo_ops.{process_peak_rss_kb}
+use compiler.mir_opt.auto_vectorize_target.{auto_vectorize_target_level}
 use compiler.driver.smf_binary_helpers.{smf_u64_to_bytes}
-use driver_types.{CompileResult, CompileContext, FrozenStorageModuleSnapshotV1,
+use compiler.driver.driver_types.{CompileResult, CompileContext, FrozenStorageModuleSnapshotV1,
     FrozenNativeModuleCapsuleV1, FrozenNativeModuleCapsuleBatchV1,
     frozen_native_capsule_batch_find_v1, native_capsule_mir_identity_v1, driver_native_parsed_module_has_no_runtime_body_v1,
     driver_native_parsed_objectless_proof_v1, driver_native_parsed_objectless_proof_valid_v1}
+use compiler.driver.native_capsule_mir_identity.{compute_native_capsule_mir_identity_v1}
 use compiler.common.driver_core_types.{SourceFile}
-use compiler.driver.driver_native_prelower_cache.{driver_native_prelower_record_v1}
-use compiler.common.driver_core_modes.{driver_mir_eviction_enabled}
+use compiler.driver.driver_native_prelower_cache.{driver_native_prelower_record_v1,
+    driver_native_prelower_mir_fingerprint_v1}
+use compiler.common.driver_core_modes.{driver_mir_eviction_enabled, driver_output_format_both}
+use compiler.driver.driver_build.smf_staged_parts_v1.{smf_effective_output_is_both_v1}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_aot_pipeline.*  # CompilerDriver.go_to_end_finish_v1 lives in this impl block
 use compiler.driver.driver_phase_gates.{bootstrap_entry_module_name, driver_source_matches_entry}
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}
 use compiler.common.config.{Logger}
@@ -127,7 +170,7 @@ use compiler.driver.cache.phase_compatibility_admission.{
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.cache.package_archive_cache.{PackageArchiveAuthorityV1}
 use compiler.driver.cache.cold_hir_native_object_persistence_v1.{
-    cold_hir_native_objects_persist_v1
+    cold_hir_native_objects_persist_v1, ColdHirNativeObjectArtifactV1
 }
 use compiler.driver.perf.compiler_work_counters.{compiler_work_codegen_schedule_v1}
 use compiler.driver.action_graph.scc_compile_outputs.{
@@ -163,14 +206,15 @@ use compiler.common.cache.phase_compatibility_path_io.{
     phase_compatibility_publish_staged_io_v1
 }
 use compiler.mir.mir_data.{MirModule}
+use compiler.mir.mir_instruction_graph.{mir_unproven_call_origin_sites_v1}
 use compiler.mir_opt.storage_projection_lowering.{MirStorageViewSiteBindingV1}
 use compiler.mir_opt.mod.{TargetOptContext, target_opt_context_default}
 
 fn driver_publish_demand_scc_outputs_v1(ctx: CompileContext) -> bool:
-    if ctx.demand_scc_publication == nil:
+    if ctx.demand_scc_publication.is_none():
         return true
-    if (ctx.demand_compile_execution == nil or
-            ctx.demand_mir_admission == nil or
+    if (ctx.demand_compile_execution.is_none() or
+            ctx.demand_mir_admission.is_none() or
             ctx.demand_dirty_modules.len() == 0):
         return false
     val dirty_authority = ctx.demand_dirty_modules[0]
@@ -215,10 +259,10 @@ fn driver_publish_demand_scc_outputs_v1(ctx: CompileContext) -> bool:
     ctx.demand_compile_execution = Some(execution)
     true
 use compiler.frontend.parser_types.{ParserModule}
-use compiler.driver.driver_build.incremental.{BuildCache, FileFingerprint, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity,
+use compiler.driver.driver_build.incremental.{BuildCache, FileFingerprint, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity, native_build_object_producer_identity,
 
     native_module_cache_shadow_mismatch_v1,
-    build_cache_module_witness}
+    build_cache_module_witness, build_cache_rebind_scv_snapshot_all_v1}
 use compiler.driver.cache.native_module_witness.{
     NativeModuleConfigFactV1, NATIVE_CACHE_EMITTER_SCHEME_V1,
     native_module_cache_witness_invalid_v1,
@@ -233,7 +277,8 @@ use compiler.driver.driver_build.group_native_compile_pairs.{
 use compiler.driver.driver_build.build_outcome.{BuildOutcomeKind, BuildUnitOutcome, BuildOutcomeSet,
     build_outcome_retain_diagnostics, build_outcome_count_diagnostic_lines,
     build_outcome_retained_diagnostic_count}
-use compiler.driver.driver_log_helpers.{log_build_progress}
+use compiler.driver.driver_log_helpers.{log_build_progress, codegen_progress_begin,
+    log_codegen_progress_module_done}
 use compiler.driver.driver_pass_receipt.{LaneReceipt, lane_receipt_enabled, record_lane_receipt}
 use compiler.driver.driver_ice_boundary.{
     ice_boundary_module_start, ice_boundary_module_done, ice_boundary_fail,
@@ -245,11 +290,11 @@ use std.nogc_sync_mut.io.sysinfo_ops.{cpu_count_checked}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
 use compiler.driver.driver_build.native_group_request.{native_group_request_path_v1,
     native_group_request_v1}
+use compiler.driver.driver_build.native_staged_codegen.{native_staged_initializer_capture_dead_v1}
 use std.common.build_manager.grouped_native_contract.{NativeGroupManifestV1,
     NativeModuleResultV1, NativeGroupResultV1, native_group_manifest_identity_v1,
     native_group_result_encode_v1, native_module_result_encode_v1,
     native_group_result_validate_against_manifest_v1}
-use std.nogc_sync_mut.shell.file.{rename}
 
 @unsafe(reason: "raw recursive directory-remove ABI", capabilities: [ffi])
 extern fn rt_dir_remove_all(path: text) -> bool
@@ -258,7 +303,7 @@ extern fn rt_path_join(a: text, b: text) -> text
 @unsafe(reason: "raw stdout flush ABI", capabilities: [ffi])
 extern fn rt_stdout_flush()
 @unsafe(reason: "raw file sha256 ABI for immutable compatibility artifacts", capabilities: [ffi])
-extern fn rt_file_hash_sha256(path: text) -> text
+extern fn rt_file_hash_sha256(path: text) -> text?
 
 # Read the object size DIRECTLY rather than through `FileFingerprint.size`.
 #
@@ -405,18 +450,7 @@ fn driver_native_shadow_bounded_module(module_name: text) -> text:
     module_name.substring(0, 160)
 
 fn driver_native_shadow_sort(lines: [text]) -> [text]:
-    var sorted: [text] = []
-    for line in lines:
-        var inserted = false
-        var next: [text] = []
-        for current in sorted:
-            if not inserted and line < current:
-                next.push(line)
-                inserted = true
-            next.push(current)
-        if not inserted: next.push(line)
-        sorted = next
-    sorted
+    lines.sort()
 
 # Admit the relocatable linker by probing `--version`, not by name: llvm-mingw
 # installs LLD's MinGW driver as `ld`, which rejects `-r` (measured: every
@@ -450,6 +484,7 @@ fn _native_relocatable_linker_resolve(plan: NativeRelocatableLink) -> Result<tex
 # `file_write_exact` / `file_read_nullable` are single-definition names backed by
 # one direct `rt_file_write_text` / `rt_file_read_text` call, so they are both
 # real and unambiguous.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_file_write_text", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_file_write_text(path: text, content: text) -> bool:
     # `file_write_exact` is the one-call runtime status (io_runtime.spl:250):
@@ -461,41 +496,49 @@ fn _sffi_file_write_text(path: text, content: text) -> bool:
     unsafe(capabilities: [ffi]):
         file_write_exact(path, content)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_file_read_text", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_file_read_text(path: text) -> text?:
     unsafe(capabilities: [ffi]):
         file_read_nullable(path)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_file_exists", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_file_exists(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         file_exists(path)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_file_copy", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_file_copy(src: text, dst: text) -> bool:
     unsafe(capabilities: [ffi]):
         file_copy(src, dst)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_dir_create", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_dir_create(path: text, recursive: bool) -> bool:
     unsafe(capabilities: [ffi]):
         dir_create(path, recursive)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_dir_remove_all", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_dir_remove_all(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_dir_remove_all(path)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_path_join", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_path_join(a: text, b: text) -> text:
     unsafe(capabilities: [ffi]):
         rt_path_join(a, b)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_hash_text", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_hash_text(content: text) -> i64:
     unsafe(capabilities: [ffi]):
         hash_text(content)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_stdout_flush", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_stdout_flush():
     unsafe(capabilities: [ffi]):
@@ -526,14 +569,15 @@ fn driver_emit_phase2_compatibility_manifest_v1(
         return "phase3-" + canonical_phase3.reason
     val m2_read = reverse_reference_read_current_admitted_v1(
         canonical_phase2.canonical_root, build_cache.cache_path)
-    if not m2_read.valid or m2_read.receipt == nil:
+    if not m2_read.valid or m2_read.receipt.is_none():
         return "m2-receipt-" + m2_read.reason
     val m2_receipt_digest = reverse_reference_receipt_digest_v1(
         m2_read.receipt!)
     if m2_receipt_digest == "":
         return "m2-receipt-digest-invalid"
     var items: [PhaseCompatibilityItemV1] = []
-    for source in build_cache.entries.keys():
+    # Sorted: manifest rows are encoded in this order and digested.
+    for source in build_cache.entries.keys().sort():
         val entry = build_cache.entries[source]
         if entry.outputs.len() != 1 or entry.module_witness == "":
             continue
@@ -551,7 +595,7 @@ fn driver_emit_phase2_compatibility_manifest_v1(
             return "unreadable-artifact:" + source
         val projection = reverse_reference_exact_projection_v1(
             m2_read, source, source, "module-scc-artifact")
-        if projection == nil or projection!.key_frame !=
+        if projection.is_none() or projection!.key_frame !=
                 reverse_reference_key_encode_v1(projection!.key):
             return "m2-native-key-missing-or-ambiguous:" + source
         items = items.push(phase_compatibility_item_frame_v1(
@@ -572,7 +616,7 @@ fn driver_emit_phase2_compatibility_manifest_v1(
             source_by_frontend_key[source_key] = ""
         else:
             source_by_frontend_key[source_key] = source
-    for name in dir_list(frontend_dir) ?? []:
+    for name in dir_list_or_empty(frontend_dir) ?? []:
         if not name.ends_with(".fpc"):
             continue
         val artifact_path = _sffi_path_join(frontend_dir, name)
@@ -587,7 +631,7 @@ fn driver_emit_phase2_compatibility_manifest_v1(
         val artifact_digest = sha256_text(artifact.content)
         if artifact_digest.len() != 64:
             return "unreadable-frontend-artifact:" + name
-        val subject = name.substring(0, name.len() - 4)
+        val subject = name.substring(0, name.byte_len() - 4)
         if not source_by_frontend_key.contains_key(subject):
             return "m2-frontend-source-missing:" + subject
         val source_identity = source_by_frontend_key[subject]
@@ -596,7 +640,7 @@ fn driver_emit_phase2_compatibility_manifest_v1(
         val projection = reverse_reference_exact_projection_v1(
             m2_read, source_identity, source_identity,
             "direct-import-export")
-        if projection == nil or projection!.key_frame !=
+        if projection.is_none() or projection!.key_frame !=
                 reverse_reference_key_encode_v1(projection!.key):
             return "m2-frontend-key-missing-or-ambiguous:" + source_identity
         items = items.push(phase_compatibility_item_frame_v1(
@@ -624,12 +668,12 @@ fn driver_emit_phase2_compatibility_manifest_v1(
 fn driver_load_phase2_compatibility_manifest_v1() -> PhaseCompatibilityManifestV1?:
     val path = env_get_nullable("SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ") ?? ""
     if path == "":
-        return nil
+        return None
     val phase3_root = env_get_nullable("SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT") ?? ""
     val admitted = driver_admit_phase2_compatibility_manifest_v1(path, phase3_root)
-    if not admitted.valid or admitted.manifest == nil:
+    if not admitted.valid or admitted.manifest.is_none():
         print "[M3] reject manifest reason={admitted.reason} path={path}"
-        return nil
+        return None
     admitted.manifest
 
 fn driver_materialize_phase2_native_v1(
@@ -872,75 +916,65 @@ fn driver_native_build_threads() -> i64:
         return 0
     parsed
 
-fn driver_native_build_cache_dir() -> text:
-    val dir = env_get_nullable("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
-    if dir == "":
-        _sffi_path_join(machine_cache_root(), "native-build/v1")
-    else:
-        dir
-
 fn driver_native_build_cache_path(cache_dir: text) -> text:
     _sffi_path_join(cache_dir, "build_cache.sdn")
 
 @unsafe(reason: "raw host SIMD capability-query ABI", capabilities: [ffi])
 extern fn rt_simd_has_avx2() -> bool
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_simd_has_avx2", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_simd_has_avx2() -> bool:
     unsafe(capabilities: [ffi]):
         rt_simd_has_avx2()
 
-fn driver_native_build_cache_scope(backend: text, cache_dir: text, target: text,
-                                   target_cpu: text, opt_level: i64,
-                                   symbol_mode: text, storage_identity: text,
-                                   environment_identity: text,
-                                   provider_receipt_hash: text = "") -> (text, text):
-    val raw_target = if target == "": nil else: Some(target)
-    val compiler_id = native_build_compiler_identity()
+pub fn driver_native_profile_cache_identity_v1(profile_identity: text,
+        static_xray: bool, output_format: text) -> text:
+    if profile_identity == "" or output_format == "": return ""
+    val static_identity = static_xray.to_text()
+    sha256_text("native-target-policy-v1|{profile_identity.len()}:{profile_identity}{static_identity.len()}:{static_identity}{output_format.len()}:{output_format}")
+
+fn driver_native_build_cache_scope_for_compiler_id(
+    backend: text, cache_dir: text, target: text,
+    target_cpu: text, opt_level: i64,
+    symbol_mode: text, storage_identity: text,
+    environment_identity: text,
+    native_profile_identity: text,
+    base_compiler_id: text,
+    provider_receipt_hash: text = ""
+) -> (text, text):
+    val raw_target = if target == "": None else: Some(target)
+    # storage_identity is closure-specific and already verified per module in
+    # NativeModuleConfigFactV1.options_identity; excluding it from the scope
+    # directory prevents 41-way s<32hex> cache fragmentation across entrypoints.
+    val _per_module_storage = storage_identity
+    val compiler_id = base_compiler_id
         + if symbol_mode == "": "" else: "-" + symbol_mode
-        + "-storage-" + sha256_text(storage_identity)
         + "-environment-" + environment_identity
+        + "-target-profile-" + native_profile_identity
     val host_avx2 = target == "" and _sffi_simd_has_avx2()
     val capability_key = "native-avx2-policy-v1:cpu={target_cpu};host={host_avx2}"
     val scope_raw = native_build_cache_scope_key(
         Some(backend), raw_target, [capability_key], opt_level as i32,
         compiler_id, provider_receipt_hash)
-    # `scope` is a SINGLE directory component, so it must satisfy every
-    # filesystem's component rules at once:
-    #   - POSIX NAME_MAX (255 on ext4/xfs): the old `-storage-<sha256>` growth
-    #     pushed the raw key to 295 chars and every object write failed with
-    #     ENAMETOOLONG ("Failed to write ELF bytes to build/native_cache/...").
-    #   - Windows MAX_PATH (260 for the WHOLE path, incl. NUL): the previous
-    #     scheme's 160-head + ";digest=" + 64 form was ALWAYS 232 chars at
-    #     stage 3 (scope_raw measures 388 with a real compiler identity), and
-    #     the worst stage-3 object path -- <abs repo>/<stage3 cache dir>/
-    #     <scope>/sources-<i64 hash>n<count>/object.<module>.o with an 84-char
-    #     module name -- carries ~226 chars of overhead BESIDES the scope, so
-    #     the total blew far past 260 and cl.exe exits 1 with NO diagnostic at
-    #     all. The scope's budget is therefore ~33 chars. See
-    #     doc/08_tracking/bug/windows_bootstrap_max_path_262_2026-08-30.md.
-    #   - NTFS forbids : * ? " < > | (and \ /) in a component, and the raw key
-    #     ALWAYS contains ':' via "native-avx2-policy-v1:cpu=...", inside the
-    #     old 160-char head -- the directory could not even be created on
-    #     Windows.
-    # So: ALWAYS fold the FULL raw key into a sha256 digest and name the scope
-    # "s" + its first 128 bits -- fixed 33 chars, alphabet [s0-9a-f], which is
-    # inherently NTFS/POSIX-component-safe (no char needs escaping) and the
-    # same shape the Rust keyer uses (`scope-{:016x}`, native_project/mod.rs).
-    # Identity stays SOUND: a 128-bit sha256 prefix is collision-resistant, so
-    # two different raw keys cannot share a directory, and the same key always
-    # maps to the same one (no time, no randomness, no iteration order).
-    # NOTE: this derivation change renames every existing scope directory on
-    # every platform -- a one-time safe cache miss (stale dirs are simply
-    # never matched again), never a wrong reuse. Nothing parses the directory
-    # NAME back apart: lane ownership rides in the `.cache_scope` marker
-    # CONTENT (see check-cache-scope-ownership.shs), and cached-output
-    # filtering is a plain path-prefix match. To recover WHAT a scope dir was
-    # keyed on, recompute: the raw key is fully determined by the lane env,
-    # backend/target/cpu/opt flags, and the compiler identity above.
     val scope = "s" + sha256_text(scope_raw).substring(0, 32)
     val cache_scope_root = _sffi_path_join(cache_dir, scope)
     (cache_scope_root, scope)
+
+fn driver_native_build_cache_scope(backend: text, cache_dir: text, target: text,
+                                   target_cpu: text, opt_level: i64,
+                                   symbol_mode: text, storage_identity: text,
+                                   environment_identity: text,
+                                   native_profile_identity: text,
+                                   provider_receipt_hash: text = "",
+                                   debug_info: bool = true) -> (text, text):
+    # debug_info defaults to true: the tree-bound identity (see
+    # native_build_object_producer_identity).
+    driver_native_build_cache_scope_for_compiler_id(
+        backend, cache_dir, target, target_cpu, opt_level,
+        symbol_mode, storage_identity, environment_identity,
+        native_profile_identity, native_build_object_producer_identity(debug_info),
+        provider_receipt_hash)
 
 pub fn driver_native_capsule_identity_empty_v1(identity: text) -> bool:
     """True when a frozen source identity carries no content.
@@ -988,7 +1022,309 @@ pub fn driver_native_frozen_source_lookup(
         return (found_path, identity)
     ("", "")
 
+fn driver_native_frozen_source_table(
+    source_paths: [text], source_identities: [text], source_module_names: [text]
+) -> {text: (text, text)}:
+    var table: {text: (text, text)} = {}
+    val count = source_module_names.len()
+    if source_paths.len() != source_identities.len() or source_paths.len() != count:
+        return table
+    var module_counts: {text: i64} = {}
+    var path_counts: {text: i64} = {}
+    var idx = 0
+    while idx < count:
+        val m = source_module_names[idx]
+        val p = source_paths[idx]
+        module_counts[m] = (module_counts[m] ?? 0) + 1
+        if p != "":
+            path_counts[p] = (path_counts[p] ?? 0) + 1
+        idx = idx + 1
+    var build_idx = 0
+    while build_idx < count:
+        val m = source_module_names[build_idx]
+        val p = source_paths[build_idx]
+        if p != "" and (module_counts[m] ?? 0) == 1 and (path_counts[p] ?? 0) == 1:
+            table[m] = (p, source_identities[build_idx])
+        build_idx = build_idx + 1
+    table
+
+fn _driver_frozen_arrays_signature_v1(
+    source_paths: [text], source_identities: [text], source_module_names: [text]
+) -> text:
+    val n = source_module_names.len()
+    if n <= 0:
+        return ""
+    if source_paths.len() != n or source_identities.len() != n:
+        return ""
+    sha256_text(
+        source_module_names.join("\n") + "\n===\n" +
+        source_paths.join("\n") + "\n===\n" +
+        source_identities.join("\n")
+    )
+
+fn _driver_owner_unique_mod_paths_v1(
+    source_paths: [text], source_module_names: [text]
+) -> {text: text}:
+    var mod_counts: {text: i64} = {}
+    var mod_first_path: {text: text} = {}
+    val n = source_module_names.len()
+    if source_paths.len() != n:
+        return {}
+    var idx = 0
+    while idx < n:
+        val m = source_module_names[idx]
+        val p = source_paths[idx]
+        mod_counts[m] = (mod_counts[m] ?? 0) + 1
+        if p != "" and not mod_first_path.contains_key(m):
+            mod_first_path[m] = p
+        idx = idx + 1
+    var unique_map: {text: text} = {}
+    for m in mod_first_path.keys():
+        if (mod_counts[m] ?? 0) == 1:
+            unique_map[m] = mod_first_path[m]
+    unique_map
+
+fn _driver_selected_source_projection_v1(ctx: CompileContext) -> ([text], [text]):
+    var sel_paths: [text] = []
+    var sel_mods: [text] = []
+    var seen_src_paths: {text: bool} = {}
+    var sources_has_path_aliases = false
+    var sel_idx = 0
+    while sel_idx < ctx.sources.len():
+        val src_entry = ctx.sources[sel_idx]
+        val sp = src_entry.path
+        if sp != "":
+            if seen_src_paths.contains_key(sp):
+                sources_has_path_aliases = true
+            else:
+                seen_src_paths[sp] = true
+        sel_paths.push(sp)
+        sel_mods.push(src_entry.module_name)
+        sel_idx = sel_idx + 1
+    # Retained parsing (`SIMPLE_STAGE3_STREAMING_SURFACES=0`) already projects
+    # `ctx.sources` to `unique_entry_sources` (`sources_has_path_aliases == false`).
+    if sel_paths.len() > 0 and not sources_has_path_aliases:
+        return (sel_paths, sel_mods)
+    # Streaming-surfaces parsing (`SIMPLE_STAGE4_STREAMING_SURFACES=1` / `--low-memory`)
+    # keeps all Phase-1 alias rows in `ctx.sources`; use the frozen physical-unique
+    # lowering schedule (`frozen_storage_known_module_names`) when frozen.
+    if ctx.storage_registry_frozen and ctx.frozen_storage_known_module_names.len() > 0 and
+            ctx.source_paths_owner.len() == ctx.source_module_names_owner.len():
+        val unique_owner_paths = _driver_owner_unique_mod_paths_v1(
+            ctx.source_paths_owner, ctx.source_module_names_owner)
+        var sched_paths: [text] = []
+        var sched_mods: [text] = []
+        var kidx = 0
+        while kidx < ctx.frozen_storage_known_module_names.len():
+            val km = ctx.frozen_storage_known_module_names[kidx]
+            if unique_owner_paths.contains_key(km):
+                sched_paths.push(unique_owner_paths[km])
+                sched_mods.push(km)
+            kidx = kidx + 1
+        if sched_paths.len() > 0:
+            return (sched_paths, sched_mods)
+    (sel_paths, sel_mods)
+
+fn _driver_frozen_projected_signature_v1(
+    source_paths: [text], source_identities: [text], source_module_names: [text],
+    selected_paths: [text], selected_module_names: [text]
+) -> text:
+    val base_sig = _driver_frozen_arrays_signature_v1(
+        source_paths, source_identities, source_module_names)
+    if base_sig == "":
+        return ""
+    if selected_paths.len() <= 0 or selected_paths.len() != selected_module_names.len():
+        return base_sig
+    sha256_text(
+        base_sig + "\n===selected===\n" +
+        selected_module_names.join("\n") + "\n===\n" +
+        selected_paths.join("\n")
+    )
+
+fn _driver_frozen_fast_array_hash_v1(acc0: i64, items: [text]) -> i64:
+    var acc = acc0 * 1315423911 + items.len()
+    for item in items:
+        acc = acc * 16777619 + hash_text(item) + 1
+    acc
+
+fn _driver_frozen_fast_context_sig_v1(ctx: CompileContext) -> text:
+    val n = ctx.source_module_names_owner.len()
+    if n <= 0 or ctx.source_paths_owner.len() != n or ctx.source_identities_owner.len() != n:
+        return ""
+    var acc = _driver_frozen_fast_array_hash_v1(2166136261, ctx.source_module_names_owner)
+    acc = _driver_frozen_fast_array_hash_v1(acc, ctx.source_paths_owner)
+    acc = _driver_frozen_fast_array_hash_v1(acc, ctx.source_identities_owner)
+    acc = _driver_frozen_fast_array_hash_v1(acc, ctx.frozen_storage_known_module_names)
+    acc = acc * 16777619 + ctx.sources.len()
+    for src_entry in ctx.sources:
+        acc = acc * 16777619 + hash_text(src_entry.module_name) + 1
+        acc = acc * 16777619 + hash_text(src_entry.path) + 1
+    val frozen_flag = if ctx.storage_registry_frozen: 1 else: 0
+    "{n}:{ctx.sources.len()}:{ctx.frozen_storage_known_module_names.len()}:{frozen_flag}:{acc}"
+
+fn _driver_frozen_context_signature_v1(ctx: CompileContext) -> text:
+    val (sel_paths, sel_mods) = _driver_selected_source_projection_v1(ctx)
+    _driver_frozen_projected_signature_v1(
+        ctx.source_paths_owner, ctx.source_identities_owner, ctx.source_module_names_owner,
+        sel_paths, sel_mods)
+
+fn _driver_build_projected_frozen_maps_v1(
+    source_paths: [text], source_identities: [text], source_module_names: [text],
+    selected_paths: [text], selected_module_names: [text]
+) -> ({text: i64}, {text: text}, {text: text}):
+    var indices_map: {text: i64} = {}
+    var paths_map: {text: text} = {}
+    var ids_map: {text: text} = {}
+    val count = source_module_names.len()
+    if source_paths.len() != source_identities.len() or source_paths.len() != count:
+        return (indices_map, paths_map, ids_map)
+    var module_counts: {text: i64} = {}
+    var path_counts: {text: i64} = {}
+    var path_first_id: {text: text} = {}
+    var path_id_consistent: {text: bool} = {}
+    var idx = 0
+    while idx < count:
+        val m = source_module_names[idx]
+        val p = source_paths[idx]
+        val id = source_identities[idx]
+        module_counts[m] = (module_counts[m] ?? 0) + 1
+        if p != "":
+            path_counts[p] = (path_counts[p] ?? 0) + 1
+            if not path_first_id.contains_key(p):
+                path_first_id[p] = id
+                path_id_consistent[p] = not driver_native_capsule_identity_empty_v1(id)
+            elif driver_native_capsule_identity_empty_v1(id) or path_first_id[p] != id:
+                path_id_consistent[p] = false
+        idx = idx + 1
+    val has_projection = selected_paths.len() > 0 and selected_paths.len() == selected_module_names.len()
+    var sel_mod_counts: {text: i64} = {}
+    var sel_path_counts: {text: i64} = {}
+    var sel_mod_path: {text: text} = {}
+    if has_projection:
+        var sidx = 0
+        while sidx < selected_module_names.len():
+            val sm = selected_module_names[sidx]
+            val sp = selected_paths[sidx]
+            sel_mod_counts[sm] = (sel_mod_counts[sm] ?? 0) + 1
+            if sp != "":
+                sel_path_counts[sp] = (sel_path_counts[sp] ?? 0) + 1
+            sel_mod_path[sm] = sp
+            sidx = sidx + 1
+    var build_idx = 0
+    while build_idx < count:
+        val m = source_module_names[build_idx]
+        val p = source_paths[build_idx]
+        val id = source_identities[build_idx]
+        if p != "" and (module_counts[m] ?? 0) == 1 and
+                not driver_native_capsule_identity_empty_v1(id):
+            val p_count = path_counts[p] ?? 0
+            if p_count == 1:
+                val sp_count = sel_path_counts[p] ?? 0
+                if not has_projection or sp_count == 0 or
+                        (sp_count == 1 and (sel_mod_counts[m] ?? 0) == 1 and (sel_mod_path[m] ?? "") == p):
+                    indices_map[m] = build_idx
+                    paths_map[m] = p
+                    ids_map[m] = id
+            elif p_count > 1 and has_projection:
+                # Match CompileContext.frozen_native_cache_source_identity_v1:
+                # full-inventory phase-1 rows may alias a physical file (e.g.
+                # `std.*` + `lib.*`, or numbered compiler layers) when the
+                # physical-unique projection selects one module for that path
+                # and all phase-1 alias rows agree on a non-empty SHA-256.
+                if (sel_mod_counts[m] ?? 0) == 1 and
+                        (sel_path_counts[p] ?? 0) == 1 and
+                        (sel_mod_path[m] ?? "") == p and
+                        (path_id_consistent[p] ?? false):
+                    indices_map[m] = build_idx
+                    paths_map[m] = p
+                    ids_map[m] = id
+        build_idx = build_idx + 1
+    (indices_map, paths_map, ids_map)
+
+fn _driver_build_projected_frozen_source_index_v1(
+    source_paths: [text], source_identities: [text], source_module_names: [text],
+    selected_paths: [text], selected_module_names: [text]
+) -> {text: (i64, text, text)}:
+    val (indices_map, paths_map, ids_map) = _driver_build_projected_frozen_maps_v1(
+        source_paths, source_identities, source_module_names,
+        selected_paths, selected_module_names)
+    var index_table: {text: (i64, text, text)} = {}
+    for mk in indices_map.keys():
+        index_table[mk] = (indices_map[mk], paths_map[mk], ids_map[mk])
+    index_table
+
+fn _driver_build_frozen_source_index_v1(
+    source_paths: [text], source_identities: [text], source_module_names: [text]
+) -> {text: (i64, text, text)}:
+    _driver_build_projected_frozen_source_index_v1(
+        source_paths, source_identities, source_module_names, [], [])
+
+fn _driver_clear_ctx_frozen_source_lookup_v1(ctx: CompileContext):
+    ctx.frozen_source_lookup_key_v1 = ""
+    ctx.frozen_source_lookup_owner_len_v1 = 0
+    ctx.frozen_source_lookup_sources_len_v1 = 0
+    ctx.frozen_source_lookup_known_len_v1 = 0
+    ctx.frozen_source_lookup_frozen_flag_v1 = false
+    ctx.frozen_source_lookup_indices_v1 = {}
+    ctx.frozen_source_lookup_paths_v1 = {}
+    ctx.frozen_source_lookup_identities_v1 = {}
+
+fn _driver_install_frozen_source_table_v1(ctx: CompileContext):
+    val sig = _driver_frozen_fast_context_sig_v1(ctx)
+    if sig == "":
+        _driver_clear_ctx_frozen_source_lookup_v1(ctx)
+        return
+    if sig == ctx.frozen_source_lookup_key_v1 and
+            ctx.source_module_names_owner.len() == ctx.frozen_source_lookup_owner_len_v1 and
+            ctx.sources.len() == ctx.frozen_source_lookup_sources_len_v1 and
+            ctx.frozen_storage_known_module_names.len() == ctx.frozen_source_lookup_known_len_v1 and
+            ctx.storage_registry_frozen == ctx.frozen_source_lookup_frozen_flag_v1:
+        return
+    val (sel_paths, sel_mods) = _driver_selected_source_projection_v1(ctx)
+    val (indices_map, paths_map, ids_map) = _driver_build_projected_frozen_maps_v1(
+        ctx.source_paths_owner, ctx.source_identities_owner, ctx.source_module_names_owner,
+        sel_paths, sel_mods)
+    ctx.frozen_source_lookup_indices_v1 = indices_map
+    ctx.frozen_source_lookup_paths_v1 = paths_map
+    ctx.frozen_source_lookup_identities_v1 = ids_map
+    ctx.frozen_source_lookup_owner_len_v1 = ctx.source_module_names_owner.len()
+    ctx.frozen_source_lookup_sources_len_v1 = ctx.sources.len()
+    ctx.frozen_source_lookup_known_len_v1 = ctx.frozen_storage_known_module_names.len()
+    ctx.frozen_source_lookup_frozen_flag_v1 = ctx.storage_registry_frozen
+    ctx.frozen_source_lookup_key_v1 = sig
+
+fn _driver_frozen_cached_entry_v1(ctx: CompileContext, module_name: text) -> (text, text):
+    val n = ctx.source_module_names_owner.len()
+    if n <= 0 or ctx.source_paths_owner.len() != n or ctx.source_identities_owner.len() != n:
+        return ("", "")
+    if ctx.frozen_source_lookup_key_v1 == "" or
+            ctx.frozen_source_lookup_owner_len_v1 != n or
+            ctx.frozen_source_lookup_sources_len_v1 != ctx.sources.len() or
+            ctx.frozen_source_lookup_known_len_v1 != ctx.frozen_storage_known_module_names.len() or
+            ctx.frozen_source_lookup_frozen_flag_v1 != ctx.storage_registry_frozen or
+            (ctx.native_sources_fingerprint == "" and not ctx.storage_registry_frozen and _driver_frozen_fast_context_sig_v1(ctx) != ctx.frozen_source_lookup_key_v1):
+        _driver_install_frozen_source_table_v1(ctx)
+    if ctx.frozen_source_lookup_paths_v1.contains_key(module_name):
+        val idx = ctx.frozen_source_lookup_indices_v1[module_name]
+        val cached_path = ctx.frozen_source_lookup_paths_v1[module_name]
+        val cached_identity = ctx.frozen_source_lookup_identities_v1[module_name]
+        if idx >= 0 and idx < n and
+                ctx.source_module_names_owner[idx] == module_name and
+                ctx.source_paths_owner[idx] == cached_path and
+                ctx.source_identities_owner[idx] == cached_identity:
+            return (cached_path, cached_identity)
+        _driver_install_frozen_source_table_v1(ctx)
+        if ctx.frozen_source_lookup_paths_v1.contains_key(module_name):
+            return (
+                ctx.frozen_source_lookup_paths_v1[module_name],
+                ctx.frozen_source_lookup_identities_v1[module_name]
+            )
+    ("", "")
+
 fn driver_native_module_cache_source(ctx: CompileContext, module_name: text) -> text:
+    if ctx.source_module_names_owner.len() > 0:
+        val (cached_path, _) = _driver_frozen_cached_entry_v1(ctx, module_name)
+        return cached_path
     val (path, _) = driver_native_frozen_source_lookup(
         ctx.source_paths_owner, ctx.source_identities_owner,
         ctx.source_module_names_owner, module_name)
@@ -997,6 +1333,9 @@ fn driver_native_module_cache_source(ctx: CompileContext, module_name: text) -> 
 fn driver_native_module_source_identity(
     ctx: CompileContext, module_name: text
 ) -> text:
+    if ctx.source_module_names_owner.len() > 0:
+        val (_, cached_identity) = _driver_frozen_cached_entry_v1(ctx, module_name)
+        return cached_identity
     val (_, identity) = driver_native_frozen_source_lookup(
         ctx.source_paths_owner, ctx.source_identities_owner,
         ctx.source_module_names_owner, module_name)
@@ -1041,9 +1380,27 @@ fn driver_native_disk_source_identity(source_path: text) -> text:
     doc/08_tracking/bug/stage2_capsule_source_mutated_and_unreportable_reason_2026-09-07.md
     -- it will misread any other `case Ok(record):` field read the same way.
     """
+    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+        val content = _sffi_file_read_text(source_path) ?? ""
+        if content == "": return ""
+        return sha256_text(content)
     val content = _sffi_file_read_text(source_path) ?? ""
-    if content == "": return ""
-    sha256_text(content)
+    if content == "":
+        val _ended_empty = transient_scope_end()
+        return ""
+    val digest = sha256_text(content)
+    if not transient_scope_pause():
+        val _ended_unpaused = transient_scope_end()
+        val fallback = _sffi_file_read_text(source_path) ?? ""
+        if fallback == "": return ""
+        return sha256_text(fallback)
+    val promoted = transient_promote(digest)
+    val ended = transient_scope_end()
+    if not promoted or not ended:
+        val fallback = _sffi_file_read_text(source_path) ?? ""
+        if fallback == "": return ""
+        return sha256_text(fallback)
+    digest
 
 pub fn driver_native_capsule_result_bytes_v1(
     capsule: FrozenNativeModuleCapsuleV1
@@ -1273,15 +1630,91 @@ pub fn driver_native_collect_capsule_result_v1(
     val object_parent = dirname(object_path)
     if object_parent == "" or not directory_fsync(object_parent):
         return _collect_failure(module_name, "native-capsule-directory-fsync-failed", object_parent)
+    _driver_native_collect_capsule_persist_v1(capsule, build_cache, module_name, object_path, true)
+
+var _g_capsule_batch_collect_seq: i64 = 0
+var _g_capsule_batch_admitted_capsules: {text: text} = {}
+var _g_capsule_batch_admitted_digests: {text: text} = {}
+var _g_capsule_batch_admitted_sizes: {text: i64} = {}
+
+fn _driver_clear_batch_admitted_capsules_v1():
+    _g_capsule_batch_admitted_capsules = {}
+    _g_capsule_batch_admitted_digests = {}
+    _g_capsule_batch_admitted_sizes = {}
+
+fn _driver_batch_admitted_capsule_result_v1(
+    capsule: FrozenNativeModuleCapsuleV1
+) -> Result<(text, i64), text>:
+    val name = capsule.module_name
+    if _g_capsule_batch_admitted_capsules.contains_key(name):
+        if _g_capsule_batch_admitted_capsules[name] == capsule.capsule_identity:
+            val expected_size = _g_capsule_batch_admitted_sizes[name]
+            val receipt_path = capsule.object_path + ".capsule-receipt"
+            if _sffi_file_exists(capsule.object_path) and
+                    _sffi_file_exists(receipt_path) and
+                    file_size_raw(capsule.object_path) == expected_size:
+                return Ok((_g_capsule_batch_admitted_digests[name], expected_size))
+    driver_native_capsule_result_bytes_v1(capsule)
+
+fn _driver_native_collect_capsule_batch_v1(
+    batch: FrozenNativeModuleCapsuleBatchV1, build_cache: BuildCache,
+    module_name: text, object_path: text
+) -> text:
+    val capsule = frozen_native_capsule_batch_find_v1(batch, module_name)
+    if not capsule.ok or object_path != capsule.object_path:
+        return _collect_failure(module_name, "native-capsule-result-mismatch",
+            "capsule-ok={capsule.ok} produced={object_path}"
+                + " capsule-object={capsule.object_path}")
+    if capsule.cache_source != "":
+        if capsule.source_identity == "":
+            return _collect_failure(module_name, "native-capsule-source-mutated",
+                "frozen-identity-absent"
+                    + " cache-source={capsule.cache_source}")
+        if driver_native_capsule_identity_empty_v1(capsule.source_identity):
+            return _collect_failure(module_name, "capsule-identity-empty",
+                "frozen identity is the digest of empty content"
+                    + " cache-source={capsule.cache_source}")
+        val disk_identity = driver_native_disk_source_identity(capsule.cache_source)
+        if disk_identity != capsule.source_identity:
+            return _collect_failure(module_name, "native-capsule-source-mutated",
+                "cache-source={capsule.cache_source}"
+                    + " capsule-identity={capsule.source_identity}"
+                    + " disk-identity={disk_identity}")
+    val admission = driver_native_capsule_result_bytes_v1(capsule)
+    val (admitted_digest, admitted_size) = match admission:
+        case Ok(value): value
+        case Err(receipt_reason):
+            return _collect_failure(module_name, "native-capsule-receipt-invalid",
+                receipt_reason)
+    if not file_fsync(object_path):
+        return _collect_failure(module_name, "native-capsule-object-fsync-failed", object_path)
+    val receipt_path = object_path + ".capsule-receipt"
+    if not file_fsync(receipt_path):
+        return _collect_failure(module_name, "native-capsule-receipt-fsync-failed", receipt_path)
+    val object_parent = dirname(object_path)
+    if object_parent == "" or not directory_fsync(object_parent):
+        return _collect_failure(module_name, "native-capsule-directory-fsync-failed", object_parent)
+    _g_capsule_batch_admitted_capsules[module_name] = capsule.capsule_identity
+    _g_capsule_batch_admitted_digests[module_name] = admitted_digest
+    _g_capsule_batch_admitted_sizes[module_name] = admitted_size
+    _g_capsule_batch_collect_seq = _g_capsule_batch_collect_seq + 1
+    val persist_now = (_g_capsule_batch_collect_seq % 32) == 0
+    _driver_native_collect_capsule_persist_v1(capsule, build_cache, module_name, object_path, persist_now)
+
+fn _driver_native_collect_capsule_persist_v1(
+    capsule: FrozenNativeModuleCapsuleV1, build_cache: BuildCache,
+    module_name: text, object_path: text, persist_now: bool
+) -> text:
     if capsule.cache_source == "": return ""
     val source_fp = FileFingerprint.from_file(capsule.cache_source)
     if val source_fp_val = source_fp:
         build_cache.update_entry(capsule.cache_source, source_fp_val,
             [], [object_path], capsule.module_witness)
-        build_cache.save()
+        if persist_now:
+            build_cache.save_entries()
         return ""
     _collect_failure(module_name, "native-capsule-fingerprint-failed",
-        "FileFingerprint.from_file returned nil for {capsule.cache_source}")
+        "FileFingerprint.from_file returned None for {capsule.cache_source}")
 
 pub fn driver_native_capsule_inputs_valid_v1(
     capsule: FrozenNativeModuleCapsuleV1, backend_name: text, target: text,
@@ -1294,7 +1727,7 @@ pub fn driver_native_capsule_inputs_valid_v1(
 
 fn driver_native_leading_spaces(line: text) -> i64:
     var i: i64 = 0
-    val n = line.len()
+    val n = line.byte_len()
     while i < n and line.char_code_at(i) == 32:
         i = i + 1
     i
@@ -1302,7 +1735,7 @@ fn driver_native_leading_spaces(line: text) -> i64:
 fn driver_native_count_char(s: text, code: i64) -> i64:
     var count: i64 = 0
     var i: i64 = 0
-    val n = s.len()
+    val n = s.byte_len()
     while i < n:
         if s.char_code_at(i) == code:
             count = count + 1
@@ -1349,7 +1782,7 @@ pub fn driver_native_source_interface_text(content: text) -> text:
     (a safe, if coarser, cache miss), never "fingerprint stayed the same
     when the ABI changed" (unsound stale reuse).
     """
-    val lines = content.split("\n")
+    val lines: [text] = content.split("\n")
     var out: [text] = []
     var mode_capturing_sig = false
     var sig_indent: i64 = 0
@@ -1362,15 +1795,16 @@ pub fn driver_native_source_interface_text(content: text) -> text:
     # over every line of every source in the closure (~1M lines): three
     # helper calls per line made the fingerprint phase take 543 s for 942
     # sources (measured stage-1 build). Inline loops over builtin
-    # char_code_at pay no such per-call tax.
+    # byte_at pay no such per-call tax, and explicit `text` bindings keep
+    # Stage-2/Stage-3 codegen from cloning lines through Any text shims.
     for line in lines:
-        val trimmed = line.trim()
+        val trimmed: text = line.trim()
         if mode_capturing_sig:
             out = out.push(line)
             var ci: i64 = 0
-            val cn = trimmed.len()
+            val cn = trimmed.byte_len()
             while ci < cn:
-                val cc = trimmed.char_code_at(ci)
+                val cc = trimmed.byte_at(ci)
                 if cc == 40:
                     paren_depth = paren_depth + 1
                 elif cc == 41:
@@ -1385,8 +1819,8 @@ pub fn driver_native_source_interface_text(content: text) -> text:
             if trimmed == "":
                 continue
             var indent: i64 = 0
-            val ln = line.len()
-            while indent < ln and line.char_code_at(indent) == 32:
+            val ln = line.byte_len()
+            while indent < ln and line.byte_at(indent) == 32:
                 indent = indent + 1
             if indent > skip_until_indent:
                 continue
@@ -1399,15 +1833,15 @@ pub fn driver_native_source_interface_text(content: text) -> text:
         if driver_native_is_def_start(trimmed):
             out = out.push(line)
             var si: i64 = 0
-            val sn = line.len()
-            while si < sn and line.char_code_at(si) == 32:
+            val sn = line.byte_len()
+            while si < sn and line.byte_at(si) == 32:
                 si = si + 1
             sig_indent = si
             paren_depth = 0
             var pi: i64 = 0
-            val pn = trimmed.len()
+            val pn = trimmed.byte_len()
             while pi < pn:
-                val pc = trimmed.char_code_at(pi)
+                val pc = trimmed.byte_at(pi)
                 if pc == 40:
                     paren_depth = paren_depth + 1
                 elif pc == 41:
@@ -1421,6 +1855,24 @@ pub fn driver_native_source_interface_text(content: text) -> text:
             continue
         out = out.push(line)
     out.join("\n")
+
+fn _driver_native_source_interface_metrics_v1(content: text) -> (i64, i64):
+    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+        val interface_text = driver_native_source_interface_text(content)
+        return (interface_text.len(), _sffi_hash_text(interface_text))
+    val interface_text = driver_native_source_interface_text(content)
+    val iface_len: i64 = interface_text.len()
+    val content_hash: i64 = _sffi_hash_text(interface_text)
+    val _ended = transient_scope_end()
+    (iface_len, content_hash)
+
+fn _driver_native_fingerprint_rows_hash_v1(rows: [text]) -> i64:
+    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+        return _sffi_hash_text(rows.join("\n"))
+    val manifest = rows.join("\n")
+    val manifest_hash: i64 = _sffi_hash_text(manifest)
+    val _ended = transient_scope_end()
+    manifest_hash
 
 pub fn driver_native_sources_fingerprint(sources: [SourceFile]) -> text:
     # Interface-surface closure: hashes only the ABI-visible portion of each
@@ -1460,13 +1912,12 @@ pub fn driver_native_sources_fingerprint(sources: [SourceFile]) -> text:
         if iface_memo.contains_key(memo_key):
             row_tail = iface_memo[memo_key]
         else:
-            val interface_text = driver_native_source_interface_text(source.content)
-            val content_hash = _sffi_hash_text(interface_text)
-            row_tail = "{interface_text.len()}:{content_hash}"
+            val (iface_len, content_hash) = _driver_native_source_interface_metrics_v1(source.content)
+            row_tail = "{iface_len}:{content_hash}"
             iface_memo[memo_key] = row_tail
         rows = rows.push("{source.path.len()}:{source.path}{source.module_name.len()}:{source.module_name}{row_tail}")
-    val manifest = rows.join("\n")
-    "{_sffi_hash_text(manifest)}n{sources.len()}"
+    val manifest_hash = _driver_native_fingerprint_rows_hash_v1(rows)
+    "{manifest_hash}n{sources.len()}"
 
 pub fn driver_native_module_is_export_facade(mir: MirModule, parsed_module: ParserModule?) -> bool:
     # Objectless = nothing for a backend to emit. Besides import/export
@@ -1483,7 +1934,7 @@ pub fn driver_native_module_is_export_facade(mir: MirModule, parsed_module: Pars
     # same typed objectless outcome a facade records.
     if mir.functions.keys().len() > 0 or mir.statics.keys().len() > 0 or mir.constants.keys().len() > 0:
         return false
-    if parsed_module == nil:
+    if parsed_module.is_none():
         return false
     val parsed = parsed_module
     # Extern-only declaration modules (e.g. std.nogc_sync_mut.env.types: only
@@ -1525,12 +1976,9 @@ fn driver_render_native_launch_metadata(ctx: CompileContext) -> text:
 fn driver_native_launch_metadata_trailer(ctx: CompileContext) -> [u8]:
     val payload = driver_render_native_launch_metadata(ctx).bytes()
     var out: [u8] = []
-    # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-    out = bytes_concat_copy_v1(out, payload)
-    # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-    out = bytes_concat_copy_v1(out, smf_u64_to_bytes(payload.len()))
-    # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-    out = bytes_concat_copy_v1(out, driver_native_launch_trailer_magic())
+    out = out.concat(payload)
+    out = out.concat(smf_u64_to_bytes(payload.len()))
+    out = out.concat(driver_native_launch_trailer_magic())
     out
 
 # The existing cache receipt owner reads one whole retained regular file at
@@ -1549,7 +1997,7 @@ fn driver_native_entry_object_stream_v1(source: CacheObjectAuthorityV1,
     val digest = sha256_u8_hex(bytes)
     if digest != expected_digest:
         return Err("entry-object-copy-original-digest-differs")
-    if temp != nil:
+    if temp.is_some():
         if cache_host_write_temp_v1(temp!, 0, bytes) != count:
             return Err("entry-object-copy-write-failed")
     Ok(digest)
@@ -1566,7 +2014,7 @@ fn driver_native_entry_object_receipt_barrier_v1(root: CacheRootAuthorityV1,
         return "entry-object-original-receipt-unavailable"
     val expected = "native-capsule-result-v1\n{capsule_identity}\n{source_path}\n{size}\n{digest}\n"
     var reason = match driver_native_entry_object_stream_v1(
-            receipt, nil, expected.len(), sha256_text(expected)):
+            receipt, None, expected.len(), sha256_text(expected)):
         case Ok(_): ""
         case Err(_): "entry-object-original-receipt-changed"
     if reason == "" and cache_host_fsync_object_v1(receipt) != 1:
@@ -1610,7 +2058,7 @@ pub fn driver_native_entry_object_copy_v1(source_path: text, requested_path: tex
         Err(receipt_reason)
     if result.is_ok():
         if source_path == requested_path:
-            result = driver_native_entry_object_stream_v1(source, nil, expected_size, expected_digest)
+            result = driver_native_entry_object_stream_v1(source, None, expected_size, expected_digest)
         else:
             val temp = cache_host_secure_temp_v1(destination_root)
             if not cache_host_temp_valid_v1(temp):
@@ -1627,7 +2075,7 @@ pub fn driver_native_entry_object_copy_v1(source_path: text, requested_path: tex
                         if published == 0:
                             val existing = cache_host_open_read_v1(destination_root, basename(requested_path))
                             if cache_host_object_valid_v1(existing):
-                                result = driver_native_entry_object_stream_v1(existing, nil, expected_size, expected_digest)
+                                result = driver_native_entry_object_stream_v1(existing, None, expected_size, expected_digest)
                                 val _existing_closed = cache_host_close_object_v1(existing)
                             else:
                                 result = Err("entry-object-existing-destination-unavailable")
@@ -1641,7 +2089,7 @@ pub fn driver_native_entry_object_copy_v1(source_path: text, requested_path: tex
             result = Err("entry-object-published-handle-unavailable")
         else:
             result = driver_native_entry_object_stream_v1(
-                published_object, nil, expected_size, expected_digest)
+                published_object, None, expected_size, expected_digest)
             if result.is_ok() and cache_host_fsync_object_v1(published_object) != 1:
                 result = Err("entry-object-published-fsync-failed")
             if cache_host_close_object_v1(published_object) != 0:
@@ -1658,6 +2106,23 @@ pub fn driver_native_entry_object_copy_v1(source_path: text, requested_path: tex
 fn driver_native_collection_link_inputs_cleanup_v1(directory: text) -> bool:
     if directory.len() <= 0: return true
     dir_remove(directory, true)
+
+fn driver_native_cleanup_archive_intermediates_v1(output: text, object_files: [text]):
+    """Remove loose aot-* objects alongside an archive and any .go-to-end-trial
+    marker once emit-archive succeeds; preserves objects under external cache dirs."""
+    if (env_get_nullable("SIMPLE_KEEP_ARCHIVE_OBJECTS") ?? "") == "1":
+        return
+    val out_dir = dirname(output)
+    val prefix = out_dir + "/aot-"
+    for obj_path in object_files:
+        if obj_path.starts_with(prefix) and (obj_path.ends_with(".o") or obj_path.ends_with(".obj")):
+            val _obj_deleted = file_delete(obj_path)
+            val receipt = obj_path + ".capsule-receipt"
+            if file_exists(receipt):
+                val _rcpt_deleted = file_delete(receipt)
+    val trial_path = output + ".go-to-end-trial"
+    if file_exists(trial_path):
+        val _trial_deleted = file_delete(trial_path)
 
 fn driver_native_collection_link_input_directory_v1(output: text) -> text:
     val parent = dirname(output)
@@ -1771,7 +2236,7 @@ pub fn driver_native_extern_decl_site_in(content: text, shown_path: text, name: 
         val trimmed = line.trim()
         if not trimmed.starts_with("extern fn "):
             continue
-        if driver_native_extern_decl_matches(trimmed.substring(10, trimmed.len()), name):
+        if driver_native_extern_decl_matches(trimmed.substring(10, trimmed.byte_len()), name):
             return "{shown_path}:{line_no}"
     ""
 
@@ -1823,9 +2288,7 @@ pub fn driver_native_link_failure_message(kind: text, err: text, names: [text], 
             found = found.push("  error: extern fn {name} is declared but not implemented anywhere -- declared at {site}")
     if found.len() == 0:
         return "{kind}: {err}"
-    var out = "{kind}: unimplemented extern function(s)\n"
-    for entry in found:
-        out = out + entry + "\n"
+    var out = "{kind}: unimplemented extern function(s)\n" + found.join("\n") + "\n"
     out = out + "  An `extern fn` needs a definition in something the link sees: the C/Rust\n"
     out = out + "  runtime, an external provider archive, or an implementation in this program.\n"
     out = out + "  raw linker output follows (preserved for debugging):\n"
@@ -1858,7 +2321,7 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
     if not capsules.ok:
         return CompileResult.CodegenError(capsules.reason)
     val direct_result = _compile_frozen_module_capsule(capsules, backend_name,
-        "", is_release, driver_opt_level, "", nil, entry_module_name)
+        "", is_release, driver_opt_level, "", None, entry_module_name)
     match direct_result:
         case Ok(obj_path):
             var direct_objects = [obj_path]
@@ -1891,11 +2354,36 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
                         "native collection direct link-input admission failed: {reason}")
                 direct_objects = retained.unwrap()
             if effective_backend == "llvm" or effective_backend == "llvm-lib":
+                var llvm_objects = direct_objects
+                var llvm_libraries = ctx.options.native_libraries
+                var llvm_linker_flags = ctx.options.native_linker_flags
+                var llvm_thread_context = false
+                match xray_llvm_link_needed_v1(ctx.options.xray_enabled, effective_backend, ctx.native_target, false):
+                    case Err(reason):
+                        return driver_native_collection_link_cleanup_error_v1(direct_link_input_dir, CompileResult.CodegenError(reason))
+                    case Ok(needed):
+                        if needed:
+                            match xray_llvm_link_objects_v1(direct_objects, true, effective_backend, ctx.native_target, false):
+                                case Err(reason):
+                                    return driver_native_collection_link_cleanup_error_v1(direct_link_input_dir, CompileResult.CodegenError(reason))
+                                case Ok(linked): llvm_objects = linked
+                            llvm_libraries = xray_llvm_link_libraries_for_target_v1(llvm_libraries, ctx.native_target)
+                            llvm_thread_context = xray_llvm_thread_context_supported_v1(
+                                ctx.native_target,
+                                (env_get_nullable("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1",
+                                env_get_nullable("SIMPLE_RUNTIME_PATH") ?? "")
+                            match xray_llvm_semantic_link_flags_for_target_v1(llvm_linker_flags, ctx.native_target):
+                                case Ok(flags): llvm_linker_flags = flags
+                                case Err(reason):
+                                    return driver_native_collection_link_cleanup_error_v1(direct_link_input_dir, CompileResult.CodegenError(reason))
                 val llvm_opts = NativeLinkOptions(
-                    libraries: ctx.options.native_libraries,
+                    libraries: llvm_libraries,
                     library_paths: ctx.options.native_library_paths,
-                    linker_flags: ctx.options.native_linker_flags,
+                    linker_flags: llvm_linker_flags,
+                    xray_thread_context_v1: llvm_thread_context,
+                    xray_startup_consumer_v1: ctx.options.xray_startup_consumer_v1,
                     debug: ctx.options.debug_info,
+                    strip_output: ctx.options.strip_output,
                     verbose: ctx.options.verbose,
                     pie: true,
                     bare_metal: false,
@@ -1909,7 +2397,7 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
                     return driver_native_collection_link_cleanup_error_v1(
                         direct_link_input_dir,
                         CompileResult.CodegenError("native collection direct link input changed before LLVM link"))
-                match link_llvm_native(direct_objects, output, llvm_opts):
+                match native_link_with_initializer_capture_v1(ctx, llvm_objects, output, llvm_opts):
                     case Ok(_):
                         return driver_native_success_with_launch_metadata(ctx, output,
                             direct_bindings, direct_objects, direct_link_input_dir)
@@ -1936,7 +2424,15 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
                 return driver_native_collection_link_cleanup_error_v1(
                     direct_link_input_dir,
                     CompileResult.CodegenError("native collection direct link input changed before hosted link"))
-            match link_llvm_native(direct_objects, output, hosted_opts):
+            # XRay PR5b: only --xray builds call into driver_xray_link.
+            var direct_link_objects = direct_objects
+            if ctx.options.xray_enabled:
+                match xray_link_with_runtime_v1(direct_objects, true, effective_backend, ctx.native_target):
+                    case Ok(linked): direct_link_objects = linked
+                    case Err(xray_error):
+                        return driver_native_collection_link_cleanup_error_v1(
+                            direct_link_input_dir, CompileResult.CodegenError(xray_error))
+            match native_link_with_initializer_capture_v1(ctx, direct_link_objects, output, hosted_opts):
                 case Ok(_):
                     return driver_native_success_with_launch_metadata(ctx, output,
                         direct_bindings, direct_objects, direct_link_input_dir)
@@ -1947,8 +2443,36 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
         case Err(e):
             return CompileResult.CodegenError(e)
 
+# Staged native codegen BuildCache reuse slot: kept in a 1-element module-private
+# array inside this module so `BuildCache` never crosses a module boundary as a
+# class value and never triggers Stage-2 `None`-global assignment lowering bugs.
+var _staged_active_build_cache_slot_v1: [BuildCache] = []
+var _staged_active_build_cache_path_v1: text = ""
+
+fn _clear_staged_active_build_cache_v1():
+    _staged_active_build_cache_slot_v1 = []
+    _staged_active_build_cache_path_v1 = ""
+
+# Cache scope retention runs at most once per process (its first native
+# compile), never again hours later from a staged batch.
+var _native_cache_scope_retention_ran_v1: bool = false
+
+fn _native_cache_scope_retention_first_call_v1() -> bool:
+    if _native_cache_scope_retention_ran_v1:
+        return false
+    _native_cache_scope_retention_ran_v1 = true
+    true
+
 impl CompilerDriver:
     me compile_to_native(output: text) -> CompileResult:
+        val lease = match native_cache_lease_begin(native_cache_build_root(env_get_nullable("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? "")):
+            case Ok(value): value
+            case Err(reason): return CompileResult.CodegenError(reason)
+        val result = self._compile_to_native_leased(output, lease)
+        native_cache_lease_end(lease)
+        result
+
+    me _compile_to_native_leased(output: text, lease: NativeCacheLease) -> CompileResult:
         log_phase("aot:native_entry")
         val ctx: CompileContext = _extract_driver_ctx(self)
         val backend_name = ctx.options.backend
@@ -1961,7 +2485,8 @@ impl CompilerDriver:
         val native_target = ctx.native_target
         val native_cpu = env_get_nullable("SIMPLE_NATIVE_CPU") ?? ""
         log_phase("aot:native_plugin_gate:start")
-        val uses_versioned_backend = driver_aot_uses_versioned_backend(backend_name)
+        val uses_versioned_backend = driver_aot_uses_versioned_backend_with_plugin_v1(
+            backend_name, ctx.options.backend_plugin_path)
         log_phase("aot:native_plugin_gate:done")
         if uses_versioned_backend:
             log_phase("aot:native_request:start")
@@ -1998,20 +2523,21 @@ impl CompilerDriver:
                     log_phase("aot:native_session_open:ok")
                     var session = loaded_session
                     val result = self._compile_to_native_with_backend_session(
-                        output, Some(session), native_target, native_cpu)
+                        output, Some(session), native_target, native_cpu, lease)
                     if not session.close():
                         return CompileResult.CodegenError(
                             "BACKEND_PLUGIN_TEARDOWN_FAILED: backend session close failed")
                     return result
         log_phase("aot:native_builtin:start")
         self._compile_to_native_with_backend_session(
-            output, nil, native_target, native_cpu)
+            output, None, native_target, native_cpu, lease)
 
     me _compile_to_native_with_backend_session(
         output: text,
         backend_session: BackendSessionOwnedLeaseV2?,
         native_target: text,
-        native_cpu: text
+        native_cpu: text,
+        lease: NativeCacheLease
     ) -> CompileResult:
         val ctx: CompileContext = _extract_driver_ctx(self)
         val log = ctx.logger
@@ -2046,7 +2572,7 @@ impl CompilerDriver:
             print "[NATIVE] effective_backend={effective_backend}"
 
         # Load build cache
-        val cache_dir = driver_native_build_cache_dir()
+        val cache_dir = lease.cache_root
         if not _sffi_dir_create(cache_dir, true):
             return CompileResult.CodegenError(
                 "native-build failed to create cache directory {cache_dir}")
@@ -2063,7 +2589,13 @@ impl CompilerDriver:
         ):
             return CompileResult.CodegenError(
                 "native-build failed to publish provider identity receipt")
-        val symbol_mode = if no_mangle_requested: "no-mangle" else: ""
+        val base_symbol_mode = if no_mangle_requested: "no-mangle" else: ""
+        val symbol_mode = if ctx.options.debug_info == (not is_release) and not ctx.options.strip_output:
+            base_symbol_mode
+        else:
+            val dbg_tag = if ctx.options.debug_info: "dbg1" else: "dbg0"
+            val strip_tag = if ctx.options.strip_output: "strip1" else: "strip0"
+            if base_symbol_mode == "": "{dbg_tag}-{strip_tag}" else: "{base_symbol_mode}-{dbg_tag}-{strip_tag}"
         val storage_identity = ctx.freeze_storage_registry()
         if storage_identity == "invalid":
             return CompileResult.CodegenError(
@@ -2080,16 +2612,52 @@ impl CompilerDriver:
         # recorded fingerprints predate the tag and cannot match. See
         # NativeModuleConfigFactV1.emitter_scheme and site-19's emission
         # divergence (stage3 link, 36 undefined symbols across schemes).
+        val native_profile_identity = driver_native_profile_cache_identity_v1(
+            ctx.config.get("target_profile_identity_v1") ?? "",
+            ctx.options.xray_enabled, ctx.options.output_format.to_text())
+        if native_profile_identity == "":
+            return CompileResult.CodegenError("native cache requires normalized target policy identity")
         val module_cache_config = NativeModuleConfigFactV1(
-            compiler_identity: native_build_compiler_identity(),
+            compiler_identity: native_build_object_producer_identity(ctx.options.debug_info),
             target_identity: "{native_target}|cpu={native_cpu}",
-            options_identity: "backend={effective_backend}|opt={driver_opt_level}|release={is_release}|symbols={symbol_mode}|storage={sha256_text(storage_identity)}|environment={environment_identity.digest}",
+            options_identity: "backend={effective_backend}|opt={driver_opt_level}|release={is_release}|symbols={symbol_mode}|storage={sha256_text(storage_identity)}|environment={environment_identity.digest}|target-policy={native_profile_identity}",
             provider_identity: provider_receipt_hash,
             emitter_scheme: NATIVE_CACHE_EMITTER_SCHEME_V1)
-        val (base_cache_scope_root, _) = driver_native_build_cache_scope(
+        val (base_cache_scope_root, base_cache_scope_name) = driver_native_build_cache_scope(
             effective_backend, cache_dir, native_target, native_cpu,
             driver_opt_level, symbol_mode, storage_identity,
-            environment_identity.digest, provider_receipt_hash)
+            environment_identity.digest, native_profile_identity, provider_receipt_hash,
+            ctx.options.debug_info)
+        # Bounded: every compiler/option identity gets its own scope dir and
+        # nothing removed old ones. Keep the current scope plus the newest,
+        # SIMPLE_NATIVE_CACHE_SCOPES_KEEP (default 6: the default root is shared
+        # by every backend/opt/target combination) in total; scopes used in
+        # the last 6 hours (another lane) are never removed. Legacy
+        # "scope-<16hex>" dirs from the previous naming can never match again.
+        # Only an unmarked top-level process evicts, on its first call. Shard/worker/unit children
+        # and the ledger link child reach here once per batch, hours into a
+        # build: their retention pass deleted scopes that earlier children of
+        # the same build had published into and the link still needed. The
+        # current scope stays live without the pass: the phase and ownership
+        # markers below are rewritten on every call.
+        # Default floor is max(6, mir_shard_count + 2) when SIMPLE_MIR_SHARD_COUNT
+        # is set (preserving explicit SIMPLE_NATIVE_CACHE_SCOPES_KEEP), and active
+        # shard ledger scopes are marked live before sweeping.
+        if native_cache_scope_eviction_role_allowed_v1(
+                env_get_nullable("SIMPLE_MIR_SHARD") ?? "",
+                env_get_nullable("SIMPLE_HIR_SHARD") ?? "",
+                env_get_nullable("SIMPLE_PARSE_SHARD") ?? "",
+                env_get_nullable("SIMPLE_MIR_SHARD_LINK") ?? "",
+                env_get_nullable("SIMPLE_FILE_WORKER_UNIT") ?? "",
+                env_get_nullable("SIMPLE_NATIVE_BUILD_WORKER") ?? "") and
+                _native_cache_scope_retention_first_call_v1():
+            val _scopes_evicted = native_cache_scope_midbuild_sweep_v1(
+                lease,
+                base_cache_scope_name,
+                env_get_nullable("SIMPLE_HIR_CACHE_DIR") ?? "",
+                env_get_nullable("SIMPLE_MIR_SHARD_QUEUE") ?? "",
+                env_get_nullable("SIMPLE_MIR_SHARD_LINK") ?? "",
+                env_get_nullable("SIMPLE_MIR_SHARD_COUNT") ?? "")
         if ctx.native_sources_fingerprint == "":
             return CompileResult.CodegenError(
                 "native build source fingerprint missing before cache setup")
@@ -2101,10 +2669,16 @@ impl CompilerDriver:
         # merely hid safe reusable objects before their witness could be read.
         # The closure digest remains comparison/diagnostic metadata.
         val cache_scope_root = base_cache_scope_root
+        val clean_requested = (env_get_nullable("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") == "1"
+        if not self.native_staged_codegen.active or
+                self.native_staged_codegen.batches_flushed == 0 or
+                self.native_staged_codegen.modules_flushed == 0 or
+                clean_requested:
+            _clear_staged_active_build_cache_v1()
         # --clean requested a clean build: drop this entry's cache scope so no
         # previously compiled object in this scope can be reused. Consume the
         # flag (clear the env) so it applies to this build only.
-        if (env_get_nullable("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") == "1":
+        if clean_requested:
             if not _sffi_dir_remove_all(base_cache_scope_root):
                 return CompileResult.CodegenError(
                     "native-build failed to remove clean cache scope {base_cache_scope_root}")
@@ -2134,7 +2708,13 @@ impl CompilerDriver:
                 "native-build failed to write cache ownership marker")
         val cache_path = driver_native_build_cache_path(cache_dir)
         val object_base = _sffi_path_join(cache_scope_root, "object")
-        var build_cache: BuildCache = BuildCache.load(cache_path)
+        var build_cache: BuildCache = if (self.native_staged_codegen.active and
+                _staged_active_build_cache_slot_v1.len() == 1 and
+                _staged_active_build_cache_path_v1 == cache_path):
+            _staged_active_build_cache_slot_v1[0]
+        else:
+            BuildCache.load(cache_path)
+        _clear_staged_active_build_cache_v1()
         val phase2_compatibility_manifest =
             driver_load_phase2_compatibility_manifest_v1()
         var phase2_native_items_handled: {text: bool} = {}
@@ -2165,12 +2745,19 @@ impl CompilerDriver:
         # empty/partial .smf. See driver_mir_eviction_enabled for the full
         # reasoning (bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20,
         # hazard 3).
-        # go-to-end also releases each module's MIR once its object is written.
+        # Every lane releases each module's MIR once its object is written (it was
+        # gated on low_memory/go-to-end, so normal stage3 builds held the whole
+        # closure MIR through codegen + link). SIMPLE_KEEP_MIR=1 keeps it for debugging.
+        val effective_evict_format = if smf_effective_output_is_both_v1(ctx.options.output_format):
+            driver_output_format_both()
+        else:
+            ctx.options.output_format
         val low_memory = driver_mir_eviction_enabled(
-            ctx.options.low_memory or go_to_end_enabled_v1(), ctx.options.output_format)
+            (env_get_nullable("SIMPLE_KEEP_MIR") ?? "") != "1", effective_evict_format)
+        _driver_install_frozen_source_table_v1(ctx)
         val all_module_names = ctx.mir_modules.keys()
         var module_names = all_module_names
-        var native_group: NativeGroupManifestV1? = nil
+        var native_group: NativeGroupManifestV1? = None
         var group_name_by_source: {text: text} = {}
         if native_group_request_path_v1() != "":
             if emit_entry_object_requested:
@@ -2188,18 +2775,33 @@ impl CompilerDriver:
                     "native group backend or target mismatch")
             native_group = Some(admitted_group)
             module_names = []
+            var candidates_by_leaf: {text: [(text, text)]} = {}
+            for candidate in all_module_names:
+                val candidate_source = driver_native_module_cache_source(ctx,
+                    candidate).replace("\\", "/")
+                if candidate_source == "":
+                    continue
+                val cslash = candidate_source.rfind("/")
+                val cleaf = if cslash >= 0: candidate_source.substring(cslash + 1) else: candidate_source
+                var bucket: [(text, text)] = []
+                if candidates_by_leaf.contains_key(cleaf):
+                    bucket = candidates_by_leaf[cleaf]
+                bucket.push((candidate, candidate_source))
+                candidates_by_leaf[cleaf] = bucket
+            var seen_group_modules: {text: bool} = {}
             for member in admitted_group.members:
+                val mslash = member.source_path.rfind("/")
+                val mleaf = if mslash >= 0: member.source_path.substring(mslash + 1) else: member.source_path
                 var matched = ""
-                for candidate in all_module_names:
-                    val candidate_source = driver_native_module_cache_source(ctx,
-                        candidate).replace("\\", "/")
-                    if candidate_source == member.source_path or
-                            candidate_source.ends_with("/" + member.source_path):
-                        if matched != "":
-                            return CompileResult.CodegenError(
-                                "native group member has multiple logical modules: {member.source_path}")
-                        matched = candidate
-                if matched == "" or module_names.contains(matched):
+                if candidates_by_leaf.contains_key(mleaf):
+                    for (candidate, candidate_source) in candidates_by_leaf[mleaf]:
+                        if candidate_source == member.source_path or
+                                candidate_source.ends_with("/" + member.source_path):
+                            if matched != "":
+                                return CompileResult.CodegenError(
+                                    "native group member has multiple logical modules: {member.source_path}")
+                            matched = candidate
+                if matched == "" or seen_group_modules.contains_key(matched):
                     return CompileResult.CodegenError(
                         "native group member source has no unique MIR module: {member.source_path}")
                 val observed_source = driver_native_module_cache_source(ctx, matched)
@@ -2207,11 +2809,14 @@ impl CompilerDriver:
                     return CompileResult.CodegenError(
                         "native group member source changed: {member.source_path}")
                 group_name_by_source[member.source_path] = matched
-                module_names = module_names.push(matched)
+                seen_group_modules[matched] = true
+                module_names.push(matched)
         val total_modules = module_names.len()
         if trace:
             print "[NATIVE] compiling {total_modules} modules..."
             _sffi_stdout_flush()
+        if build_trace_enabled():
+            log_build_trace("driver:codegen:start backend={effective_backend} target={native_target} output={output} total_modules={total_modules} modules={build_trace_list(module_names)}")
 
         # Guard (bug #119): refuse empty mir_modules. A requested --entry that
         # produces no modules is likely a misconfiguration (isolated entry with
@@ -2253,11 +2858,13 @@ impl CompilerDriver:
             self.native_staged_codegen.modules_flushed
         else:
             0
+        var build_module_objects: {text: text} = {}
         if staged_active:
             if native_group.? or emit_entry_object_requested:
                 return CompileResult.CodegenError(
                     "staged native codegen does not support grouped or entry-object publication")
             object_files = self.native_staged_codegen.object_files
+            build_module_objects = self.native_staged_codegen.module_objects
             collection_bindings = self.native_staged_codegen.collection_bindings
             module_outcomes = self.native_staged_codegen.module_outcomes
             module_unit_id = self.native_staged_codegen.module_unit_id
@@ -2275,6 +2882,7 @@ impl CompilerDriver:
 
         # Phase 1: Check cache, collect cached objects, identify uncached modules
         var uncached_names: [text] = []
+        var cache_hit_evict_names: [text] = []
         var entry_object_ready_path = ""
         var entry_object_ready_capsule = ""
         var entry_object_ready_count = 0
@@ -2283,6 +2891,18 @@ impl CompilerDriver:
         var progress_cache_scanned = 0
         log_build_progress("native_cache", "modules", 0, total_modules,
             "pending", 5, 6, 0, 0, "running")
+        # #5797: entries recorded under a prior SCV snapshot revision name the
+        # same files; move them onto this build's snapshot paths in one pass so
+        # an unrelated edit does not orphan every module's object.
+        var scv_rebind_sources: [text] = []
+        for rebind_name in module_names:
+            val rebind_source = driver_native_module_cache_source(ctx, rebind_name)
+            if rebind_source != "":
+                scv_rebind_sources.push(rebind_source)
+        val scv_rebound = build_cache_rebind_scv_snapshot_all_v1(
+            build_cache, scv_rebind_sources)
+        if trace:
+            print "[NATIVE] scv snapshot rebind: {scv_rebound} entries"
         for name in module_names:
             progress_cache_scanned = progress_cache_scanned + 1
             if lane_receipt_on:
@@ -2306,6 +2926,9 @@ impl CompilerDriver:
                 module_unit_id = module_unit_id + 1
                 module_outcomes.record(BuildUnitOutcome.ok(module_unit_id, name, 0, 0))
                 object_files = object_files.push(prelower_object)
+                build_module_objects[name] = prelower_object
+                if staged_active:
+                    self.native_staged_codegen.module_objects[name] = prelower_object
                 continue
             # ParserImport/export facades contribute symbols through their imported
             # implementation modules and have no object code of their own.
@@ -2316,13 +2939,14 @@ impl CompilerDriver:
                     driver_native_module_source_identity(ctx, name), ctx.mir_modules[name])
             if frozen_objectless or (ctx.modules.has(name) and driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules[name])):
                 val objectless_reason = driver_cold_hir_record_objectless_v1(
-                    ctx, name)
+                    self.ctx, name)
                 if objectless_reason != "":
                     return CompileResult.CodegenError(objectless_reason)
                 lane_objectless = lane_objectless + 1
                 val _prelower_objectless = driver_native_prelower_record_v1(ctx, name, "",
                     ctx.mir_modules[name].functions.keys().len(),
-                    ctx.mir_modules[name].statics.keys().len())
+                    ctx.mir_modules[name].statics.keys().len(),
+                    driver_native_prelower_mir_fingerprint_v1(ctx, name))
                 continue
             val cache_source = driver_native_module_cache_source(ctx, name)
             var used_cache = false
@@ -2382,7 +3006,7 @@ impl CompilerDriver:
                     witness_reason == "match"):
                     build_cache.get_cached_outputs(cache_source)
                 else:
-                    nil
+                    None
                 if cached_outputs.?:
                     val all_outputs = cached_outputs.unwrap()
                     val (scoped_outputs, all_in_scope) = driver_native_build_filter_scoped_outputs(all_outputs, cache_scope_root)
@@ -2436,7 +3060,7 @@ impl CompilerDriver:
                                         case Err(reason): return CompileResult.CodegenError("native collection cache binding failed: {reason}")
                     if capsule_matches:
                         val handoff_reason = driver_cold_hir_record_verified_object_v1(
-                            ctx, name, scoped_outputs[0], cached_capsule_identity)
+                            self.ctx, name, scoped_outputs[0], cached_capsule_identity)
                         if handoff_reason != "":
                             return CompileResult.CodegenError(handoff_reason)
                         if emit_entry_object_requested and driver_source_matches_entry(
@@ -2455,8 +3079,10 @@ impl CompilerDriver:
                             BuildUnitOutcome.ok(module_unit_id, name, 0, 0))
                         for obj in scoped_outputs:
                             object_files = object_files.push(obj)
-                        if staged_active:
-                            self.native_staged_codegen.module_objects[name] = scoped_outputs[0]
+                        if scoped_outputs.len() > 0:
+                            build_module_objects[name] = scoped_outputs[0]
+                            if staged_active:
+                                self.native_staged_codegen.module_objects[name] = scoped_outputs[0]
                         if collection_receipt_requested:
                             collection_bindings = collection_bindings.push(cached_collection_binding)
                         if native_group.? and scoped_outputs.len() == 1:
@@ -2466,9 +3092,10 @@ impl CompilerDriver:
                         if scoped_outputs.len() == 1:
                             val _prelower_reused = driver_native_prelower_record_v1(ctx, name,
                                 scoped_outputs[0], ctx.mir_modules[name].functions.keys().len(),
-                                ctx.mir_modules[name].statics.keys().len())
+                                ctx.mir_modules[name].statics.keys().len(),
+                    driver_native_prelower_mir_fingerprint_v1(ctx, name))
                         if low_memory:
-                            ctx.evict_mir_module(name)
+                            cache_hit_evict_names = cache_hit_evict_names.push(name)
                         used_cache = true
                     elif not all_in_scope or not outputs_exist or not capsule_matches:
                         build_cache.remove_entry(cache_source)
@@ -2479,6 +3106,7 @@ impl CompilerDriver:
                     progress_cache_scanned, total_modules, name,
                     5, 6, 0, cache_hit_count, "running")
 
+        ctx.evict_mir_modules(cache_hit_evict_names)
         log_build_progress("native_cache", "modules", total_modules,
             total_modules, "complete", 5, 6, 0, cache_hit_count, "running")
 
@@ -2505,7 +3133,7 @@ impl CompilerDriver:
         # Staged batches carry the counts/lines; only the final call writes
         # the build-wide receipt.
         if not staged_flushing:
-            _sffi_file_write_text(_sffi_path_join(cache_scope_root,
+            file_atomic_write(_sffi_path_join(cache_scope_root,
                 "native-module-witness-shadow-v1.receipt"),
                 witness_shadow_receipt_lines.join("\n") + "\n")
 
@@ -2522,8 +3150,12 @@ impl CompilerDriver:
         log_build_progress("native_compile", "modules",
             total_modules - uncached_names.len(), total_modules,
             native_compile_current, 5, 6, 0, cache_hit_count, "running")
+        codegen_progress_begin(uncached_names.len())
+        if build_trace_enabled():
+            log_build_trace("driver:codegen:plan cached={cache_hit_count} uncached={uncached_names.len()} uncached_modules={build_trace_list(uncached_names)}")
         if uncached_names.len() > 0:
-            if (env_get("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
+            _driver_clear_batch_admitted_capsules_v1()
+            if (env_get_nullable("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
                 for emitted_name in uncached_names:
                     print "[M4 emit] module={emitted_name} work=1"
             var frozen_module_witnesses: {text: text} = {}
@@ -2543,6 +3175,11 @@ impl CompilerDriver:
                     if not driver_source_matches_entry(ctx, pending_source, pending_name):
                         return CompileResult.CodegenError(
                             "entry-object dependency ObjectReady unavailable: " + pending_name)
+            # Resolve the auto-vectorize memo (a module-level text global)
+            # OUTSIDE the per-module codegen scope: first assigned inside one,
+            # it would be freed at that scope's end and read by every later
+            # module. See compile_module_with_backend_scoped_v1.
+            val _vectorize_level_memo = auto_vectorize_target_level()
             val capsules = ctx.freeze_native_module_capsules_v1(uncached_names,
                 object_base, effective_backend, native_target, native_cpu,
                 driver_opt_level, is_release, provider_receipt_hash,
@@ -2615,7 +3252,7 @@ impl CompilerDriver:
                     if run_pair:
                         val failures = _driver_group_pair_execute_v1(
                             capsules, group_manifest, window[0], window[1],
-                            native_target, ctx.options.target_opt_ctx,
+                            native_target, target_opt_context_default(),
                             build_cache, module_outcomes, module_unit_id,
                             pair_start / 2 + 1)
                         module_unit_id = module_unit_id + failures
@@ -2650,39 +3287,33 @@ impl CompilerDriver:
                 # bootstrap-path default could never reach the builder at all.
                 # Carry the intent explicitly; build() reports whether it can
                 # actually honour it.
-                # An admitted BackendSession owns a stateful adapter and has no
-                # reentrancy capability yet. Keep its provider lane serial even
-                # though the built-in lane may request multiple workers.
-                val provider_threads = if backend_session.?:
+                # An admitted external/non-LLVM BackendSession owns a stateful
+                # adapter and stays serial. Built-in static LLVM (`plugin_path == ""`
+                # and `effective_backend == "llvm"`) unlocks the concurrent pool.
+                val builtin_llvm_pool_lane = effective_backend == "llvm" and
+                    ctx.options.backend_plugin_path == ""
+                val provider_threads = if backend_session.? and not builtin_llvm_pool_lane:
                     1
                 else:
                     driver_native_build_threads()
-                # Report the REAL degree of concurrency, unconditionally.
-                # `build()` compiles in-process, one unit at a time
-                # (parallel.spl:510-513), so concurrency on this path is 1 no
-                # matter what `provider_threads` says. This print is not gated
-                # on --verbose on purpose: the >1h33m silent step-5 phase in
+                # Report the REAL degree of concurrency, unconditionally (not
+                # gated on --verbose: the >1h33m silent step-5 phase in
                 # doc/08_tracking/bug/native_build_step5_serial_threads_ignored_2026-09-04.md
-                # was observed WITHOUT --verbose, so a verbose-only notice
-                # would not have surfaced it, and the verbose notice inside
-                # build() itself is likewise unreachable by default. Do not
-                # weaken this into a claim of parallelism -- the route to real
-                # parallelism is staged in
-                # doc/03_plan/compiler/native_codegen/step5_real_parallelism_plan_2026-09-04.md
-                # Every clause here must be unconditionally TRUE. `provider_threads`
-                # is the RESOLVED value, not the user's --threads: it is 1 when a
-                # BackendSession is admitted, and 0 when SIMPLE_NATIVE_BUILD_THREADS
-                # is unset (`driver_native_build_threads`, :248-255). So it must not
-                # be described as "requested", and "N is not honoured" would be false
-                # at 1 and meaningless at 0. State the resolved value and the
-                # invariant separately.
-                val uncached_count = uncached_names.len()
-                print "[NATIVE] codegen: {uncached_count} uncached module(s), "
-                    + "concurrency=1 (threads resolve to {provider_threads} here, but "
-                    + "build() compiles modules sequentially in this process -- no "
-                    + "value above 1 takes effect; see "
-                    + "step5_real_parallelism_plan_2026-09-04.md)"
-                _sffi_stdout_flush()
+                # was observed without it). build() itself compiles in-process,
+                # one unit at a time; the only concurrency is the pool below.
+                # Real parallelism (plan P2): for the built-in llvm lane the
+                # native codegen process pool translates every uncached module
+                # here and runs its llc in N concurrent child processes. It is
+                # a prefetch -- build() below still publishes, verifies and
+                # collects every module in order, taking the pooled object
+                # where one exists and compiling serially otherwise. The pool
+                # prints the honest `concurrency=N` line itself (N=1 with the
+                # reason when it is not admitted).
+                val pool_objects = _driver_codegen_pool_prefetch_v1(capsules,
+                    effective_backend, native_target, is_release,
+                    driver_opt_level, provider_receipt_hash,
+                    backend_session.?, ctx.options.backend_plugin_path,
+                    provider_threads, uncached_names)
                 val parallel_cfg = ParallelBuildConfig(
                     num_threads: provider_threads,
                     parallel_threshold: 4,
@@ -2692,16 +3323,21 @@ impl CompilerDriver:
                     unit_timeout_ms: 0
                 )
                 var builder = ParallelBuilder.create(parallel_cfg)
-                builder.set_owner_collect(driver_native_collect_capsule_result_v1(
-                    capsules, build_cache, _1, _2))
+                _g_capsule_batch_collect_seq = 0
+                # Defer per-module O(entries) build_cache.sdn rewrites inside a batch:
+                # compile_to_native saves the whole batch immediately after build() at
+                # line ~2982, and checkpointing every 32 modules bounds crash-recovery loss
+                # without 4,231 quadratic manifest serializations.
+                builder.set_owner_collect(fn(unit_name: text, obj_path: text): _driver_native_collect_capsule_batch_v1(
+                    capsules, build_cache, unit_name, obj_path))
 
                 for name in uncached_names:
                     builder.add_unit(name, [])
-
-                val build_result = builder.build(_compile_frozen_module_capsule(
+                val build_result = builder.build(fn(unit_name: text) -> Result<text, text>: _compile_frozen_module_capsule_prefetched_v1(
                     capsules, effective_backend, native_target, is_release,
                     driver_opt_level, provider_receipt_hash, backend_session,
-                    _1))
+                    pool_objects, unit_name))
+                _driver_codegen_pool_cleanup_v1(pool_objects)
                 cache_miss_count = cache_miss_count + build_result.stats.completed
                     + build_result.stats.failed
                 # The builder's OWN ledger of what it dispatched. Every unit it
@@ -2725,23 +3361,27 @@ impl CompilerDriver:
                         cache_hit_count + build_result.stats.completed,
                         total_modules, first_err[0], 5, 6,
                         build_result.stats.failed, cache_hit_count, "failed")
+                    log_build_trace("driver:codegen:failed completed={build_result.stats.completed} failed={build_result.stats.failed} first_module={first_err[0]} detail={build_trace_detail(first_err[1])}")
 
             # Post-process: update cache and collect object paths. Do not rely
             # on BuildResult.outputs here: stage1-generated compilers can lose
             # pushes into arrays that start empty. _compile_one_module writes
             # objects at this stable path, so reconstruct from uncached_names.
+            log_phase("aot:native_compile:post_codegen_collect:start modules={uncached_names.len()}")
             var reconstructed_outputs: [text] = []
             for name in uncached_names:
+                ctx.directory_aspect_objects_v2.remove(name)
+                ctx.initializer_object_receipts_v1.remove(name)
                 val capsule = frozen_native_capsule_batch_find_v1(capsules, name)
                 val obj_path = if capsule.ok: capsule.object_path else: ""
-                # Evaluate the receipt invariant EXACTLY ONCE per unit. Deciding
-                # with `..._valid_v1` and then re-deriving the reason with
-                # `..._reason_v1` reads the same mutable state twice: if it
-                # differs between the two reads -- the very instability this
-                # branch exists to report -- the recorded reason comes back
-                # empty and the diagnosis is lost again. One read, one verdict.
+                # Evaluate the receipt invariant EXACTLY ONCE per unit. Reuse
+                # the batch collector's verified (digest, size) when the same
+                # capsule, object, and receipt still match on disk; otherwise run
+                # full driver_native_capsule_result_bytes_v1 so no MIR/receipt
+                # mutation is ever missed while avoiding a second 20 GiB MIR
+                # serialization sweep across 800+ modules.
                 val capsule_admission: Result<(text, i64), text> = if capsule.ok:
-                    driver_native_capsule_result_bytes_v1(capsule)
+                    _driver_batch_admitted_capsule_result_v1(capsule)
                 else:
                     Err(capsule.reason)
                 val capsule_reason = match capsule_admission:
@@ -2750,8 +3390,9 @@ impl CompilerDriver:
                 if capsule.ok and capsule_reason == "" and
                         not module_outcomes.has_path(name):
                     val handoff_reason = driver_cold_hir_record_verified_object_v1(
-                        ctx, name, obj_path, capsule.capsule_identity)
+                        self.ctx, name, obj_path, capsule.capsule_identity)
                     if handoff_reason != "":
+                        _driver_clear_batch_admitted_capsules_v1()
                         return CompileResult.CodegenError(handoff_reason)
                     if emit_entry_object_requested and driver_source_matches_entry(
                             ctx, capsule.cache_source, name):
@@ -2760,26 +3401,32 @@ impl CompilerDriver:
                         entry_object_ready_capsule = capsule.capsule_identity
                         val (admitted_digest, admitted_size) = match capsule_admission:
                             case Ok(value): value
-                            case Err(reason): return CompileResult.CodegenError(reason)
+                            case Err(reason):
+                                _driver_clear_batch_admitted_capsules_v1()
+                                return CompileResult.CodegenError(reason)
                         entry_object_ready_digest = admitted_digest
                         entry_object_ready_size = admitted_size
                     reconstructed_outputs = reconstructed_outputs.push(obj_path)
                     object_files = object_files.push(obj_path)
+                    build_module_objects[name] = obj_path
                     if staged_active:
                         self.native_staged_codegen.module_objects[name] = obj_path
                     if collection_receipt_requested:
                         val binding = match collection_native_bind_capsule_v1(capsule):
                             case Ok(value): value
-                            case Err(reason): return CompileResult.CodegenError("native collection object binding failed: {reason}")
+                            case Err(reason):
+                                _driver_clear_batch_admitted_capsules_v1()
+                                return CompileResult.CodegenError("native collection object binding failed: {reason}")
                         collection_bindings = collection_bindings.push(binding)
                     if native_group.?: group_object_paths[name] = obj_path
-                    if ctx.demand_scc_publication != nil:
-                        var publication = ctx.demand_scc_publication!
+                    if self.ctx.demand_scc_publication.is_some():
+                        var publication = self.ctx.demand_scc_publication!
                         if not scc_publication_complete_object_v1(
                                 &mut publication, name, obj_path):
+                            _driver_clear_batch_admitted_capsules_v1()
                             return CompileResult.CodegenError(
                                 "SCC publication output ownership mismatch: {name}")
-                        ctx.demand_scc_publication = Some(publication)
+                        self.ctx.demand_scc_publication = Some(publication)
                     # Record the entry on THIS build_cache, not only inside
                     # driver_native_collect_capsule_result_v1: that checkpoint
                     # receives the cache as a call argument and its update never
@@ -2787,16 +3434,34 @@ impl CompilerDriver:
                     # empty `entries: []` and a second identical build reported
                     # 0 hits / N misses (cache fixture 2026-08-21, 3 modules).
                     if capsule.cache_source != "":
+                        # `capsule_admission == Ok(...)` already verified
+                        # `capsule.source_identity != ""` and matched disk source
+                        # identity against `capsule.source_identity`.
                         val source_unchanged = capsule.source_identity != ""
-                            and driver_native_disk_source_identity(
-                                capsule.cache_source) == capsule.source_identity
                         if source_unchanged:
+                            val (initializer_object_digest, initializer_object_size) = match capsule_admission:
+                                case Ok(value): value
+                                case Err(reason):
+                                    _driver_clear_batch_admitted_capsules_v1()
+                                    return CompileResult.CodegenError(reason)
+                            val _initializer_observed = if native_staged_initializer_capture_dead_v1(staged_flushing, self.native_staged_codegen.shard_queue):
+                                false
+                            else:
+                                driver_capture_initializer_object_v1(
+                                    ctx, name, capsule.cache_source, capsule.source_identity,
+                                    obj_path, initializer_object_digest, initializer_object_size, capsule.capsule_identity)
                             if val src_fp = FileFingerprint.from_file(capsule.cache_source):
                                 build_cache.update_entry(capsule.cache_source, src_fp,
                                     [], [obj_path], capsule.module_witness)
                     val _prelower_recorded = driver_native_prelower_record_v1(ctx, name,
                         obj_path, ctx.mir_modules[name].functions.keys().len(),
-                        ctx.mir_modules[name].statics.keys().len())
+                        ctx.mir_modules[name].statics.keys().len(),
+                    driver_native_prelower_mir_fingerprint_v1(ctx, name))
+                    if low_memory:
+                        ctx.mir_modules.remove(name)
+                        if ctx.bootstrap_entry_mir_name != "" and ctx.bootstrap_entry_mir_name == name:
+                            ctx.bootstrap_entry_mir = None
+                            ctx.bootstrap_entry_mir_name = ""
                     module_unit_id = module_unit_id + 1
                     module_outcomes.record(
                         BuildUnitOutcome.ok(module_unit_id, name, 0, 0))
@@ -2831,21 +3496,32 @@ impl CompilerDriver:
                         # Stated explicitly — silent absence is forbidden (R3).
                         module_outcomes.record(
                             BuildUnitOutcome.not_run(module_unit_id, name))
+            _driver_clear_batch_admitted_capsules_v1()
             # Evict MIR for compiled modules in low-memory mode
             if low_memory:
-                for name in uncached_names:
-                    ctx.evict_mir_module(name)
+                ctx.evict_mir_modules(uncached_names)
+            log_phase("aot:native_compile:post_codegen_collect:done outputs={reconstructed_outputs.len()}")
 
         # Save build cache. Done BEFORE the fail-closed check so the modules that
         # did build stay reusable on the retry (a failing build must not also
-        # throw away the good work it did).
-        build_cache.save()
+        # throw away the good work it did). A non-final staged batch saves the
+        # entries only; the final save publishes the reverse-reference receipt.
+        log_phase("aot:native_compile:cache_save:start entries={build_cache.entries.keys().len()}")
         if staged_flushing:
+            build_cache.save_entries()
+        else:
+            build_cache.save()
+            _clear_staged_active_build_cache_v1()
+        log_phase("aot:native_compile:cache_save:done")
+        if staged_flushing:
+            _staged_active_build_cache_slot_v1 = [build_cache]
+            _staged_active_build_cache_path_v1 = cache_path
             # Non-final staged batch: hand back everything the final verdict
             # and link need. No verdict, ledger, manifest or link here -- a
             # failed module stays recorded in module_outcomes and blocks the
             # final link exactly as an unstaged failure would.
             self.native_staged_codegen.object_files = object_files
+            self.native_staged_codegen.module_objects = build_module_objects
             self.native_staged_codegen.collection_bindings = collection_bindings
             self.native_staged_codegen.module_outcomes = module_outcomes
             self.native_staged_codegen.module_unit_id = module_unit_id
@@ -2940,18 +3616,19 @@ impl CompilerDriver:
                                             wrote_output = file_write_bytes(
                                                 private_output, smf_bytes)
                                         Err(reason):
-                                            log_error(log,
+                                            log_error(
                                                 "native group SMF rejected {member.module_id}: {reason}")
                                 Err(reason):
-                                    log_error(log,
+                                    log_error(
                                         "native group object read rejected {member.module_id}: {reason}")
                     if not wrote_output:
                         failed_sccs[member.scc_id] = true
                     else:
-                        val digest = rt_file_hash_sha256(private_output)
-                        if digest.len() != 64:
+                        val digest_opt = rt_file_hash_sha256(private_output)
+                        if digest_opt == nil or digest_opt.unwrap().len() != 64:
                             failed_sccs[member.scc_id] = true
                         else:
+                            val digest = digest_opt.unwrap()
                             result = NativeModuleResultV1(member.module_id,
                                 "OK", 0, member.output_kind, member.output_path,
                                 digest, false, "")
@@ -2997,17 +3674,14 @@ impl CompilerDriver:
             for item in normalized_results:
                 val progress_path = _sffi_path_join(group_progress_root,
                     sha256_text(item.module_id) + ".sdn")
-                val progress_tmp = progress_path + ".tmp-{getpid()}"
                 val progress_text = native_module_result_encode_v1(item)
-                if progress_text == "" or not _sffi_file_write_text(
-                        progress_tmp, progress_text) or
-                        not rename(progress_tmp, progress_path):
+                if progress_text == "" or not file_atomic_write(
+                        progress_path, progress_text):
                     return CompileResult.CodegenError(
                         "native group progress receipt write failed")
             val result_text = native_group_result_encode_v1(group_result)
-            val result_tmp = group_result_path + ".tmp-{getpid()}"
-            if result_text == "" or not _sffi_file_write_text(result_tmp,
-                    result_text) or not rename(result_tmp, group_result_path):
+            if result_text == "" or not file_atomic_write(group_result_path,
+                    result_text):
                 return CompileResult.CodegenError(
                     "native group result write failed")
             if group_failed:
@@ -3043,11 +3717,46 @@ impl CompilerDriver:
                 else:
                     self.go_to_end.record("codegen", go_to_end_outcome.source_path,
                         go_to_end_outcome.label() + ": " + go_to_end_outcome.diagnostics)
-            return self.go_to_end_finish_v1(object_files.len(), go_to_end_built)
+            # Trial link (driver_build/go_to_end_trial_link_v1.spl): the same
+            # hosted link line over every emitted object, reporting each
+            # undefined symbol with the failed module that defines it. Its
+            # artifact is `<output>.go-to-end-trial`, never `output`; the
+            # verdict below stays a failure.
+            var go_to_end_failed: [text] = []
+            for failed_name in self.go_to_end.modules:
+                if not go_to_end_failed.contains(failed_name):
+                    go_to_end_failed = go_to_end_failed.push(failed_name)
+            for excluded_name in self.go_to_end.excluded:
+                if not go_to_end_failed.contains(excluded_name):
+                    go_to_end_failed = go_to_end_failed.push(excluded_name)
+            # Codegen rows are recorded by source path; symbols carry module
+            # names, so add the module name of every failed path.
+            for failed_source in ctx.sources:
+                if go_to_end_failed.contains(failed_source.path) and not go_to_end_failed.contains(failed_source.module_name):
+                    go_to_end_failed = go_to_end_failed.push(failed_source.module_name)
+            val trial_opts = NativeLinkOptions(
+                libraries: ctx.options.native_libraries,
+                library_paths: ctx.options.native_library_paths,
+                linker_flags: ctx.options.native_linker_flags,
+                debug: ctx.options.debug_info,
+                verbose: ctx.options.verbose,
+                pie: true,
+                bare_metal: false,
+                opt_level: driver_opt_level,
+                stage4_backend: effective_backend,
+                stage4_compiler_hash: native_build_compiler_identity(),
+                target_triple: native_target,
+                runtime_path: env_get_nullable("SIMPLE_RUNTIME_PATH") ?? "",
+                runtime_bundle: env_get_nullable("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
+            )
+            val trial = go_to_end_trial_link_run_v1(GoToEndHostedTrialLinkerV1(opts: trial_opts),
+                object_files, output, go_to_end_failed)
+            return self.go_to_end_finish_with_trial_v1(object_files.len(), go_to_end_built,
+                go_to_end_trial_manifest_block_v1(trial), trial.summary())
         if outcome_verdict != "":
             return CompileResult.CodegenError(outcome_verdict)
 
-        if not driver_publish_demand_scc_outputs_v1(ctx):
+        if not driver_publish_demand_scc_outputs_v1(self.ctx):
             return CompileResult.CodegenError(
                 "demand-driven SCC publication failed closed")
 
@@ -3085,14 +3794,18 @@ impl CompilerDriver:
         if lane_failure != "":
             return CompileResult.CodegenError(lane_failure)
 
-        val cold_object_reason = driver_cold_hir_persist_verified_objects_v1(
-            ctx, machine_cache_root())
+        # A MIR shard worker holds only its claimed modules' objects; the link
+        # child replays them from the ledger and persists the full inventory.
+        val cold_object_reason = if self.native_staged_codegen.shard_queue != "":
+            ""
+        else:
+            driver_cold_hir_persist_verified_objects_v1(self.ctx, machine_cache_root())
         if cold_object_reason != "":
             return CompileResult.CodegenError(
                 "cold HIR native object publication failed: {cold_object_reason}")
 
         if emit_entry_object_requested:
-            if native_group != nil or entry_object_ready_count != 1 or
+            if native_group.is_some() or entry_object_ready_count != 1 or
                     entry_object_ready_path == "" or entry_object_ready_capsule == "":
                 return CompileResult.CodegenError("entry-object exact publication membership unavailable")
             # Authority is the exact digest/size returned by the successful
@@ -3178,43 +3891,66 @@ impl CompilerDriver:
                     collection_link_input_dir,
                     CompileResult.CodegenError("emit-archive requires llvm-ar, ar, or lib.exe"))
             val host_os = get_host_os()
-            val system_ar = archiver == "ar" or archiver.ends_with("/ar")
+            val system_ar = archive_is_system_ar(archiver)
             if effective_backend == "cranelift" and host_os == "macos" and system_ar:
                 return driver_native_collection_link_cleanup_error_v1(
                     collection_link_input_dir,
                     CompileResult.CodegenError("Cranelift Mach-O archives require llvm-ar"))
-            val msvc_lib = archiver == "lib" or archiver.ends_with("lib.exe")
-            var args: [text] = []
-            if msvc_lib:
-                args = ["/NOLOGO", "/OUT:{output}"]
-            else:
-                val archive_flags = if host_os == "macos" and system_ar: "rcs" else: "rcsD"
-                args = [archive_flags, output]
-            for obj in object_files:
-                args = args.push(obj)
+            # Object paths go through an @response file: 1400+ paths overflow
+            # the Windows 32767-char command line (os error 206).
+            val archive_cmd = archive_command_build(archiver, host_os, output, object_files)
             if not driver_native_collection_link_inputs_current_v1(
                     collection_bindings, object_files):
                 return driver_native_collection_link_cleanup_error_v1(
                     collection_link_input_dir,
                     CompileResult.CodegenError("native collection link input changed before archive creation"))
-            val (_stdout, stderr, code) = process_run(archiver, args)
+            if archive_cmd.response_path != "":
+                if not _sffi_file_write_text(archive_cmd.response_path, archive_cmd.response_body):
+                    return driver_native_collection_link_cleanup_error_v1(
+                        collection_link_input_dir,
+                        CompileResult.CodegenError("emit-archive cannot write response file: {archive_cmd.response_path}"))
+            val (_stdout, stderr, code) = process_run(archiver, archive_cmd.argv)
+            if archive_cmd.response_path != "":
+                val _rsp_deleted = file_delete(archive_cmd.response_path)
             if code != 0:
                 return driver_native_collection_link_cleanup_error_v1(
                     collection_link_input_dir,
                     CompileResult.CodegenError("emit-archive failed: {stderr}"))
             driver_log_info(log, "Native archive written to {output}")
-            return driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files, collection_link_input_dir)
+            val archive_result = driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files, collection_link_input_dir)
+            match archive_result:
+                case CompileResult.Success(_):
+                    driver_native_cleanup_archive_intermediates_v1(output, object_files)
+                case _: ()
+            return archive_result
 
         if emit_shared_requested:
+            # The LLVM stage-1 adapter rejects packed DSO IDs; never claim that
+            # linking its main-image runtime makes a shared image observable.
+            match xray_llvm_link_needed_v1(ctx.options.xray_enabled, effective_backend, native_target, true):
+                case Err(reason):
+                    return driver_native_collection_link_cleanup_error_v1(collection_link_input_dir, CompileResult.CodegenError(reason))
+                case Ok(_): ()
             var shared_config = NativeLinkConfig.default()
             shared_config.pie = false
             shared_config.verbose = ctx.options.verbose
+            shared_config.target_triple = native_target
+            shared_config.runtime_path = env_get_nullable("SIMPLE_RUNTIME_PATH") ?? ""
+            shared_config.runtime_bundle = env_get_nullable("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
             if not driver_native_collection_link_inputs_current_v1(
                     collection_bindings, object_files):
                 return driver_native_collection_link_cleanup_error_v1(
                     collection_link_input_dir,
                     CompileResult.CodegenError("native collection link input changed before shared link"))
-            match link_to_shared(object_files, output, shared_config):
+            # XRay PR5b: only --xray builds call into driver_xray_link.
+            var shared_link_objects = object_files
+            if ctx.options.xray_enabled:
+                match xray_link_with_runtime_v1(object_files, true, effective_backend, native_target):
+                    case Ok(linked): shared_link_objects = linked
+                    case Err(xray_error):
+                        return driver_native_collection_link_cleanup_error_v1(
+                            collection_link_input_dir, CompileResult.CodegenError(xray_error))
+            match native_shared_link_with_receipt_v1(shared_link_objects, output, shared_config):
                 case Ok(_):
                     driver_log_info(log, "Native shared library written to {output}")
                     return driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files, collection_link_input_dir)
@@ -3225,16 +3961,143 @@ impl CompilerDriver:
 
         if trace:
             print "[NATIVE] linking {object_files.len()} object files..."
+        if build_trace_enabled():
+            log_build_trace("driver:link:start backend={effective_backend} objects={object_files.len()} output={output} inputs={build_trace_list(object_files)}")
         log_build_progress("link", "objects", object_files.len(),
             object_files.len(), output, 5, 6, 0, cache_hit_count, "running")
+        val explicit_dynlib_requested = (env_get_nullable(LIBRARY_UNITS_DYNLIB_EXPLICIT_ENV_V1) ?? "") == "1"
+        val mode_env_val = env_get_nullable("SIMPLE_NATIVE_BUILD_MODE") ?? ""
+        val effective_driver_mode = if mode_env_val != "":
+            mode_env_val
+        elif driver_output_format_is_self_contained(ctx.options.output_format):
+            "one-binary"
+        else:
+            ""
+        val selected_unit_link_mode = library_unit_select_build_mode_v1(LibraryUnitModeInputsV1(
+            args: if explicit_dynlib_requested: [LIBRARY_UNITS_DYNLIB_FLAG_V1] else: [],
+            build_mode: effective_driver_mode,
+            stage3_env: env_get_nullable("SIMPLE_BOOTSTRAP_STAGE3") ?? "",
+            stage4_env: env_get_nullable("SIMPLE_BOOTSTRAP_STAGE4") ?? "",
+            stage3_dynlib_env: env_get_nullable(STAGE3_LIB_DYNLIB_ENV_V1) ?? "",
+            library_units_env: env_get_nullable(LIBRARY_UNITS_ENV_V1) ?? "",
+            whole_program_env: env_get_nullable("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "",
+            explicit_emit_mode: if native_output_mode != "": native_output_mode else: "",
+            target_or_os: if native_target != "": native_target else: get_host_os(),
+            linker_env: env_get_nullable("SIMPLE_LINKER") ?? ""
+        ))
+        var dynlib_unit_files: [text] = []
+        var dynlib_unit_inits: [text] = []
+        var dynlib_retained_syms: [text] = []
+        var dynlib_extra_flags: [text] = []
+        var effective_link_objects = object_files
+        if selected_unit_link_mode == LibraryUnitBuildModeV1.DynLibUnits and
+                not collection_receipt_requested and native_group == None:
+            val entry_src_candidate = env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY") ?? (
+                if ctx.options.input_files.len() > 0: ctx.options.input_files[ctx.options.input_files.len() - 1] else: "")
+            var closure_rows: [LibraryUnitClosureModuleRowV1] = []
+            var missing_source_modules: [text] = []
+            for mod_key in build_module_objects.keys():
+                val mod_obj = build_module_objects[mod_key]
+                if mod_obj == "":
+                    continue
+                var mod_src = driver_native_module_cache_source(ctx, mod_key)
+                if mod_src == "":
+                    mod_src = ctx.frozen_native_cache_source_v1(mod_key)
+                if mod_src != "":
+                    closure_rows = closure_rows.push(LibraryUnitClosureModuleRowV1(
+                        module_name: mod_key, source_path: mod_src, object_path: mod_obj))
+                else:
+                    missing_source_modules = missing_source_modules.push(mod_key)
+            val strict_dynlib_closure = explicit_dynlib_requested or
+                (env_get_nullable("SIMPLE_BOOTSTRAP_STAGE3") ?? "") == "1" or
+                (env_get_nullable("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1" or
+                effective_driver_mode == "dynload"
+            if strict_dynlib_closure and entry_src_candidate == "":
+                return driver_native_collection_link_cleanup_error_v1(
+                    collection_link_input_dir,
+                    CompileResult.CodegenError(
+                        "library-unit dyn-lib packaging requires a resolved entry source"))
+            if missing_source_modules.len() > 0 or closure_rows.len() != object_files.len():
+                val first_missing = if missing_source_modules.len() > 0: missing_source_modules[0] else: "<untracked-object>"
+                if strict_dynlib_closure:
+                    return driver_native_collection_link_cleanup_error_v1(
+                        collection_link_input_dir,
+                        CompileResult.CodegenError(
+                            "library-unit dyn-lib closure row mismatch: rows={closure_rows.len()} objects={object_files.len()} missing_sources={missing_source_modules.len()} first={first_missing}"))
+                if trace:
+                    print "[library-unit-dynlib] fallback=flat-objects reason=closure-row-mismatch rows={closure_rows.len()} objects={object_files.len()} first={first_missing}"
+            elif closure_rows.len() > 0 and entry_src_candidate != "":
+                val unit_producer = module_cache_config.compiler_identity + "|" +
+                    module_cache_config.target_identity + "|" +
+                    module_cache_config.options_identity + "|" +
+                    module_cache_config.provider_identity
+                match library_unit_partition_and_package_closure_v1(LibraryUnitClosurePackageRequestV1(
+                        repo_root: "",
+                        entry_source: entry_src_candidate,
+                        output_path: output,
+                        cache_root: base_cache_scope_root,
+                        producer_identity: unit_producer,
+                        scope_key: base_cache_scope_name,
+                        target_or_os: if native_target != "": native_target else: get_host_os(),
+                        rows: closure_rows)):
+                    case Ok(unit_plan):
+                        var reused_units = 0
+                        var built_units = 0
+                        for ua in unit_plan.unit_artifacts:
+                            if ua.reused:
+                                reused_units = reused_units + 1
+                            else:
+                                built_units = built_units + 1
+                        print "[library-unit-dynlib] units={unit_plan.unit_artifacts.len()} reused={reused_units} built={built_units} entry_objects={unit_plan.entry_objects.len()} staged={unit_plan.staged_dynlibs.len()}"
+                        _sffi_stdout_flush()
+                        effective_link_objects = unit_plan.entry_objects
+                        dynlib_unit_files = unit_plan.staged_dynlibs
+                        dynlib_unit_inits = unit_plan.unit_init_symbols
+                        dynlib_retained_syms = unit_plan.retained_symbols
+                        dynlib_extra_flags = unit_plan.linker_flags
+                    case Err(unit_err):
+                        if not explicit_dynlib_requested and unit_err.starts_with("no-library-units:"):
+                            if trace:
+                                print "[library-unit-dynlib] fallback=flat-objects reason={unit_err}"
+                        else:
+                            return driver_native_collection_link_cleanup_error_v1(
+                                collection_link_input_dir,
+                                CompileResult.CodegenError("library-unit dyn-lib packaging failed: {unit_err}"))
         if effective_backend == "llvm" or effective_backend == "llvm-lib":
             # LLVM path: compile C runtime and link with entry point
             if trace:
                 print "[NATIVE] creating NativeLinkOptions..."
+            var llvm_objects = effective_link_objects
+            var llvm_libraries = ctx.options.native_libraries
+            var llvm_linker_flags = ctx.options.native_linker_flags + dynlib_extra_flags
+            var llvm_thread_context = false
+            match xray_llvm_link_needed_v1(ctx.options.xray_enabled, effective_backend, native_target, false):
+                case Err(reason):
+                    return driver_native_collection_link_cleanup_error_v1(collection_link_input_dir, CompileResult.CodegenError(reason))
+                case Ok(needed):
+                    if needed:
+                        match xray_llvm_link_objects_v1(effective_link_objects, true, effective_backend, native_target, false):
+                            case Err(reason):
+                                return driver_native_collection_link_cleanup_error_v1(collection_link_input_dir, CompileResult.CodegenError(reason))
+                            case Ok(linked): llvm_objects = linked
+                        llvm_libraries = xray_llvm_link_libraries_for_target_v1(llvm_libraries, native_target)
+                        llvm_thread_context = xray_llvm_thread_context_supported_v1(
+                            native_target,
+                            (env_get_nullable("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1",
+                            env_get_nullable("SIMPLE_RUNTIME_PATH") ?? "")
+                        match xray_llvm_semantic_link_flags_for_target_v1(llvm_linker_flags, native_target):
+                            case Ok(flags): llvm_linker_flags = flags
+                            case Err(reason):
+                                return driver_native_collection_link_cleanup_error_v1(collection_link_input_dir, CompileResult.CodegenError(reason))
             val llvm_opts = NativeLinkOptions(
-                libraries: ctx.options.native_libraries,
+                libraries: llvm_libraries,
                 library_paths: ctx.options.native_library_paths,
-                linker_flags: ctx.options.native_linker_flags,
+                linker_flags: llvm_linker_flags,
+                unit_dynlibs: dynlib_unit_files,
+                retained_symbols: dynlib_retained_syms,
+                unit_init_symbols: dynlib_unit_inits,
+                xray_thread_context_v1: llvm_thread_context,
+                xray_startup_consumer_v1: ctx.options.xray_startup_consumer_v1,
                 debug: ctx.options.debug_info,
                 strip_output: ctx.options.strip_output,
                 verbose: ctx.options.verbose,
@@ -3250,18 +4113,21 @@ impl CompilerDriver:
             if trace:
                 print "[NATIVE] calling link_llvm_native..."
             if not driver_native_collection_link_inputs_current_v1(
-                    collection_bindings, object_files):
+                    collection_bindings, effective_link_objects):
                 return driver_native_collection_link_cleanup_error_v1(
                     collection_link_input_dir,
                     CompileResult.CodegenError("native collection link input changed before LLVM link"))
-            match link_llvm_native(object_files, output, llvm_opts):
+            match native_link_with_initializer_capture_v1(ctx, llvm_objects, output, llvm_opts):
                 case Ok(_):
-                    log_build_progress("link", "objects", object_files.len(),
-                        object_files.len(), output, 6, 6, 0,
+                    log_build_progress("link", "objects", effective_link_objects.len(),
+                        effective_link_objects.len(), output, 6, 6, 0,
                         cache_hit_count, "succeeded")
+                    if build_trace_enabled():
+                        log_build_trace("driver:link:done rc=0 output={output} output_bytes={file_size_raw(output)}")
                     driver_log_info(log, "Native executable written to {output} (backend: LLVM)")
-                    return driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files, collection_link_input_dir)
+                    return driver_native_success_with_launch_metadata(ctx, output, collection_bindings, effective_link_objects, collection_link_input_dir)
                 case Err(e):
+                    log_build_trace("driver:link:failed output={output} detail={build_trace_detail(e)}")
                     driver_native_collection_link_cleanup_error_v1(
                         collection_link_input_dir,
                         driver_native_link_failure_result(ctx, "LLVM native linking failed", e))
@@ -3271,8 +4137,12 @@ impl CompilerDriver:
             val hosted_opts = NativeLinkOptions(
                 libraries: ctx.options.native_libraries,
                 library_paths: ctx.options.native_library_paths,
-                linker_flags: ctx.options.native_linker_flags,
+                linker_flags: ctx.options.native_linker_flags + dynlib_extra_flags,
+                unit_dynlibs: dynlib_unit_files,
+                retained_symbols: dynlib_retained_syms,
+                unit_init_symbols: dynlib_unit_inits,
                 debug: ctx.options.debug_info,
+                strip_output: ctx.options.strip_output,
                 verbose: ctx.options.verbose,
                 pie: true,
                 bare_metal: false,
@@ -3284,18 +4154,29 @@ impl CompilerDriver:
                 runtime_bundle: env_get_nullable("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
             )
             if not driver_native_collection_link_inputs_current_v1(
-                    collection_bindings, object_files):
+                    collection_bindings, effective_link_objects):
                 return driver_native_collection_link_cleanup_error_v1(
                     collection_link_input_dir,
                     CompileResult.CodegenError("native collection link input changed before hosted link"))
-            match link_llvm_native(object_files, output, hosted_opts):
+            # XRay PR5b: only --xray builds call into driver_xray_link.
+            var hosted_link_objects = effective_link_objects
+            if ctx.options.xray_enabled:
+                match xray_link_with_runtime_v1(effective_link_objects, true, effective_backend, native_target):
+                    case Ok(linked): hosted_link_objects = linked
+                    case Err(xray_error):
+                        return driver_native_collection_link_cleanup_error_v1(
+                            collection_link_input_dir, CompileResult.CodegenError(xray_error))
+            match native_link_with_initializer_capture_v1(ctx, hosted_link_objects, output, hosted_opts):
                 case Ok(_):
-                    log_build_progress("link", "objects", object_files.len(),
-                        object_files.len(), output, 6, 6, 0,
+                    log_build_progress("link", "objects", effective_link_objects.len(),
+                        effective_link_objects.len(), output, 6, 6, 0,
                         cache_hit_count, "succeeded")
+                    if build_trace_enabled():
+                        log_build_trace("driver:link:done rc=0 output={output} output_bytes={file_size_raw(output)}")
                     driver_log_info(log, "Native executable written to {output} (backend: {effective_backend})")
-                    driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files, collection_link_input_dir)
+                    driver_native_success_with_launch_metadata(ctx, output, collection_bindings, effective_link_objects, collection_link_input_dir)
                 case Err(e):
+                    log_build_trace("driver:link:failed output={output} detail={build_trace_detail(e)}")
                     driver_native_collection_link_cleanup_error_v1(
                         collection_link_input_dir,
                         driver_native_link_failure_result(ctx, "Hosted native linking failed", e))
@@ -3395,18 +4276,26 @@ fn _driver_group_pair_mark_started_v1(
         return "native group progress directory unavailable"
     val marker = _sffi_path_join(progress_root,
         sha256_text(member_id) + ".started")
-    val marker_tmp = marker + ".tmp-{getpid()}"
     val marker_body = "SIMPLE-NATIVE-MODULE-STARTED-1\n" +
         native_group_manifest_identity_v1(manifest) + "\n" + member_id + "\n"
-    if not _sffi_file_write_text(marker_tmp, marker_body) or
-            not rename(marker_tmp, marker):
+    if not file_atomic_write(marker, marker_body):
         return "native group start marker write failed"
     ""
+
+fn _driver_capsule_lease_failure_reason_v1(capsule: FrozenNativeModuleCapsuleV1) -> text:
+    if capsule.identity_valid():
+        return ""
+    if capsule.mir_identity == "":
+        return "capsule-mir-lease-violated"
+    if compute_native_capsule_mir_identity_v1(capsule.mir_module) == "":
+        return "capsule-mir-identity-recompute-failed"
+    "capsule-mir-lease-violated"
 
 fn _driver_group_pair_finalize_receipt_v1(
     capsule: FrozenNativeModuleCapsuleV1, object_path: text
 ) -> text:
-    if not capsule.identity_valid(): return "capsule-mir-lease-violated"
+    val lease_reason = _driver_capsule_lease_failure_reason_v1(capsule)
+    if lease_reason != "": return lease_reason
     if object_path != capsule.object_path:
         return "capsule-object-path-mismatch"
     val object_fp = FileFingerprint.from_file(object_path)
@@ -3425,7 +4314,7 @@ fn _driver_group_pair_finalize_receipt_v1(
         print "[receipt-size-canary] optional-bound scalar field read miscompiled: {size_canary} path={object_path}"
         _sffi_stdout_flush()
     val receipt_path = object_path + ".capsule-receipt"
-    if not _sffi_file_write_text(receipt_path, receipt):
+    if not file_atomic_write(receipt_path, receipt):
         return "capsule-receipt-write-failed"
     if (_sffi_file_read_text(receipt_path) ?? "") != receipt:
         return "capsule-receipt-write-unverified"
@@ -3565,7 +4454,23 @@ fn _compile_frozen_module_capsule(
     is_release: bool, opt_level: i64, provider_receipt_hash: text,
     backend_session: BackendSessionOwnedLeaseV2?, name: text
 ) -> Result<text, text>:
+    val no_prefetched: {text: text} = {}
+    _compile_frozen_module_capsule_prefetched_v1(batch, backend_name, target,
+        is_release, opt_level, provider_receipt_hash, backend_session,
+        no_prefetched, name)
+
+# Same as _compile_frozen_module_capsule, but a module whose object the native
+# codegen pool already produced (`prefetched[name]` = staged object) publishes
+# that object instead of re-running translate + llc. Identity, receipt and
+# collect logic are shared, so the two lanes cannot drift.
+fn _compile_frozen_module_capsule_prefetched_v1(
+    batch: FrozenNativeModuleCapsuleBatchV1, backend_name: text, target: text,
+    is_release: bool, opt_level: i64, provider_receipt_hash: text,
+    backend_session: BackendSessionOwnedLeaseV2?, prefetched: {text: text},
+    name: text
+) -> Result<text, text>:
     compiler_work_codegen_schedule_v1(1)
+    val prefetched_object = if prefetched.has(name): prefetched[name] else: ""
     """Compile one parent-frozen module capsule without CompileContext/cache access."""
     if not batch.ok:
         return _aot_compile_failure(name, "invalid-capsule-batch")
@@ -3606,11 +4511,9 @@ fn _compile_frozen_module_capsule(
                 "native group progress directory unavailable")
         val marker = _sffi_path_join(progress_root,
             sha256_text(member_id) + ".started")
-        val marker_tmp = marker + ".tmp-{getpid()}"
         val marker_body = "SIMPLE-NATIVE-MODULE-STARTED-1\n" +
             native_group_manifest_identity_v1(manifest) + "\n" + member_id + "\n"
-        if not _sffi_file_write_text(marker_tmp, marker_body) or
-                not rename(marker_tmp, marker):
+        if not file_atomic_write(marker, marker_body):
             return _aot_compile_failure(name,
                 "native group start marker write failed")
         group_member_id = member_id
@@ -3633,18 +4536,21 @@ fn _compile_frozen_module_capsule(
     match _compile_selected_module(backend_name, is_release, opt_level,
         capsule.output_base,
         name, capsule.mir_module, capsule.storage_snapshot,
-        capsule.target_cpu, backend_session):
+        capsule.target_cpu, backend_session, prefetched_object):
         case Err(error):
             if group_member_id != "":
                 log_phase("native_group:codegen:error member={group_member_id} backend={backend_name}")
+            log_build_trace("driver:codegen:module:failed module={name} source={capsule.cache_source} backend={backend_name} detail={build_trace_detail(error)}")
             val _ice_line = ice_boundary_fail(name, capsule.cache_source, "codegen", backend_name, error)
             return Err(error)
         case Ok(object_path):
             ice_boundary_module_done(name, "codegen")
+            log_codegen_progress_module_done(name)
             if group_member_id != "":
                 log_phase("native_group:codegen:done member={group_member_id} backend={backend_name}")
-            if not capsule.identity_valid():
-                return _aot_compile_failure(name, "capsule-mir-lease-violated")
+            val lease_reason = _driver_capsule_lease_failure_reason_v1(capsule)
+            if lease_reason != "":
+                return _aot_compile_failure(name, lease_reason)
             if object_path != capsule.object_path:
                 return _aot_compile_failure(name, "capsule-object-path-mismatch")
             val object_fp = FileFingerprint.from_file(object_path)
@@ -3664,6 +4570,8 @@ fn _compile_frozen_module_capsule(
             # would otherwise be recorded as a size of -1 and only surface far
             # away as an opaque `receipt-content-mismatch`.
             val object_size = file_size_raw(object_path)
+            if build_trace_enabled():
+                log_build_trace("driver:codegen:module:done module={name} source={capsule.cache_source} backend={backend_name} object={object_path} object_bytes={object_size}")
             if object_size < 0:
                 return _aot_compile_failure(name,
                     "capsule-object-size-unreadable:{object_path}")
@@ -3687,7 +4595,7 @@ fn _compile_frozen_module_capsule(
             if size_canary != "":
                 print "[receipt-size-canary] optional-bound scalar field read miscompiled: {size_canary} path={object_path}"
                 _sffi_stdout_flush()
-            if not _sffi_file_write_text(receipt_path, receipt):
+            if not file_atomic_write(receipt_path, receipt):
                 return _aot_compile_failure(name, "capsule-receipt-write-failed")
             # Do not trust the write's own bool. A `file_write_text` name
             # collision (a same-arity stdlib shadow returning `()`) once made
@@ -3801,7 +4709,7 @@ pub fn driver_runtime_std_compile_native_members_v1(
     expected_index_digest: text, artifact_root: text,
     target_cpu: text, expected_target: text
 ) -> Result<[RuntimeStdNativeMemberV1], text>:
-    if ctx.runtime_std_full_inventory_selection == nil or
+    if ctx.runtime_std_full_inventory_selection.is_none() or
             artifact_root !=
                 ctx.runtime_std_full_inventory_selection!.artifact_root or
             (package_identity != "simple.runtime" and
@@ -3876,7 +4784,7 @@ pub fn driver_runtime_std_compile_native_action_v1(
             not runtime_std_native_directory_chain_real_v1(object_store_root):
         return Err("runtime/std native action target or object store invalid")
     val action = runtime_std_build_action_v1(authority, package_identity)
-    if action == nil:
+    if action.is_none():
         return Err("runtime/std native package action unavailable")
     var graph = PersistedBuildGraphV1("pending", "",
         action!.snapshot_revision, [action!])
@@ -3888,6 +4796,11 @@ pub fn driver_runtime_std_compile_native_action_v1(
         return Err("runtime/std native action graph invalid")
     val budget = BuildPoolBudgetV1(action!.pool, 1,
         action!.memory_budget_bytes)
+    # LOCK CLAIM ONLY: this token hashes getpid + the absolute artifact root, so it
+    # differs per process/checkout. It is passed solely to coordinator_claim_v1 /
+    # coordinator_complete_v1 and must never reach a receipt, manifest, object or
+    # digest (BuildActionResultV1 has no owner field; see
+    # fixpoint_fingerprint_determinism_spec.spl).
     val owner_token = sha256_text("runtime-std-native-action-owner-v1|" +
         package_identity + "|" + generation + "|" +
         getpid().to_text() + "|" + artifact_root)
@@ -3917,7 +4830,7 @@ pub fn driver_runtime_std_compile_native_action_v1(
         peak_kb * 1024)
     if not complete.commit.accepted or
             complete.coordinator.runtime.len() != 1 or
-            complete.coordinator.runtime[0].result == nil:
+            complete.coordinator.runtime[0].result.is_none():
         return Err("runtime/std native action completion rejected")
     val result = complete.coordinator.runtime[0].result!
     if not result.success or result.cancelled:
@@ -3940,7 +4853,7 @@ fn _runtime_std_hir_emission_digest_v2(
             emission.module_identity != module_identity or
             emission.semantic_payloads.len() != 7:
         return ""
-    val names = ["debug.smf", "exports.smf", "generics.smf",
+    val names: [text] = ["debug.smf", "exports.smf", "generics.smf",
         "hir-summaries.smf", "imports.smf", "initialization.smf",
         "types.smf"]
     var rows: [text] = ["simple-runtime-std-live-hir/v2",
@@ -3961,7 +4874,7 @@ fn _runtime_std_compile_native_members_v2(
     expected_index_digest: text, artifact_root: text,
     target_cpu: text, expected_target: text
 ) -> Result<[RuntimeStdNativeMemberV2], text>:
-    if ctx.runtime_std_full_inventory_selection == nil or
+    if ctx.runtime_std_full_inventory_selection.is_none() or
             artifact_root !=
                 ctx.runtime_std_full_inventory_selection!.artifact_root or
             (package_identity != "simple.runtime" and
@@ -4042,7 +4955,7 @@ fn _runtime_std_compile_native_members_v2(
             return Err("runtime/std native v2 target cfg receipt invalid")
         val hir_digest = _runtime_std_hir_emission_digest_v2(ctx,
             member.source_identity, member.source_digest, name)
-        if hir_digest == "" or hir_emission.native_emit_witness == nil or
+        if hir_digest == "" or hir_emission.native_emit_witness.is_none() or
                 not runtime_std_native_emit_witness_valid_v1(
                     hir_emission.native_emit_witness!,
                     member.source_identity, member.source_digest, name,
@@ -4107,7 +5020,7 @@ fn _runtime_std_compile_native_members_v2(
         var object_digest = ""
         var object_bytes = 0
         var capsule_digest = ""
-        var capsule: FrozenNativeModuleCapsuleV1? = nil
+        var capsule: FrozenNativeModuleCapsuleV1? = None
         if kind == RuntimeStdNativeOutcomeKindV2.code_object:
             if code_index >= compiled_code.len() or
                     compiled_code[code_index].source_identity !=
@@ -4169,7 +5082,7 @@ pub fn driver_runtime_std_compile_native_action_v2(
         return Err("runtime/std native v2 target or object store invalid")
     val action = runtime_std_build_action_v2(
         authority, package_identity, budget)
-    if action == nil:
+    if action.is_none():
         return Err("runtime/std native v2 package action unavailable")
     var graph = PersistedBuildGraphV1("pending", "",
         action!.snapshot_revision, [action!])
@@ -4181,6 +5094,11 @@ pub fn driver_runtime_std_compile_native_action_v2(
         return Err("runtime/std native v2 action graph invalid")
     val pool_budget = BuildPoolBudgetV1(action!.pool, 1,
         action!.memory_budget_bytes)
+    # LOCK CLAIM ONLY: this token hashes getpid + the absolute artifact root, so it
+    # differs per process/checkout. It is passed solely to coordinator_claim_v1 /
+    # coordinator_complete_v1 and must never reach a receipt, manifest, object or
+    # digest (BuildActionResultV1 has no owner field; see
+    # fixpoint_fingerprint_determinism_spec.spl).
     val owner_token = sha256_text("runtime-std-native-action-owner-v2|" +
         package_identity + "|" + generation + "|" +
         getpid().to_text() + "|" + artifact_root)
@@ -4221,7 +5139,7 @@ pub fn driver_runtime_std_compile_native_action_v2(
         peak_kb * 1024)
     if not complete.commit.accepted or
             complete.coordinator.runtime.len() != 1 or
-            complete.coordinator.runtime[0].result == nil:
+            complete.coordinator.runtime[0].result.is_none():
         return Err("runtime/std native v2 action completion rejected")
     val result = complete.coordinator.runtime[0].result!
     if not result.success or result.cancelled:
@@ -4232,9 +5150,16 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
                             output_base: text, name: text, mir_module: MirModule,
                             storage_snapshot: FrozenStorageModuleSnapshotV1,
                             frozen_target_cpu: text,
-                            backend_session: BackendSessionOwnedLeaseV2?) -> Result<text, text>:
+                            backend_session: BackendSessionOwnedLeaseV2?,
+                            prefetched_object: text) -> Result<text, text>:
     if not storage_snapshot.ok or storage_snapshot.module_name != name:
         return _aot_compile_failure(name, "storage-snapshot-module-mismatch")
+    # Unproven callable authority is a per-MODULE failure here, never the
+    # backend panic that killed the whole run-19 census worker (class 5 of
+    # p3_census_mir_classes_2026-11-13). Fail closed; the call is never emitted.
+    val unproven_call_sites = mir_unproven_call_origin_sites_v1(mir_module)
+    if unproven_call_sites.len() > 0:
+        return _aot_compile_failure(name, "unproven-call-origin: " + unproven_call_sites.join("; "))
     if (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1":
         print "[NATIVE] select module:done"
     if mir_module.functions.keys().len() == 0 and
@@ -4250,12 +5175,24 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
         val empty_obj_path = native_aot_object_path_v1(output_base, name)
         val empty_c_path = empty_obj_path + ".empty_module.c"
         val empty_symbol = "simple_empty_module_" + name.replace(".", "_")
+        # Prefer the direct object writer (ELF and Windows COFF): it needs no
+        # C tool. A second find_c_compiler() discovery ignores the lane's
+        # bound C tool and returned "" on the Windows GNU stage 2 matrix
+        # (64 ICEs, windows_gnu_stage2_qualification_..._2026-10-25.md §1).
+        val empty_target = driver_empty_object_target(
+            env_get_nullable("SIMPLE_NATIVE_BUILD_TARGET") ?? "",
+            get_host_os(), get_host_arch())
+        val empty_bytes = driver_empty_object_bytes(empty_target, empty_symbol)
+        if empty_bytes.is_some() and file_write_bytes(empty_obj_path, empty_bytes!) and
+                file_is_regular_no_follow(empty_obj_path):
+            return Ok(empty_obj_path)
         if not _sffi_file_write_text(empty_c_path,
                 "int {empty_symbol} = 0;\n"):
             return _aot_compile_failure(name,
                 "failed to write empty module C file {empty_c_path}")
         val empty_cc = find_c_compiler()
         if empty_cc == "":
+            val _del_c = file_delete(empty_c_path)
             return _aot_compile_failure(name,
                 "no C compiler available for empty module object {empty_c_path}")
         val empty_args: [text] = if _is_msvc_cc(empty_cc):
@@ -4263,6 +5200,7 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
         else:
             ["-c", "-o", empty_obj_path, empty_c_path]
         val (_empty_out, empty_err, empty_code) = process_run(empty_cc, empty_args)
+        val _del_c = file_delete(empty_c_path)
         if empty_code != 0 or
                 not file_is_regular_no_follow(empty_obj_path):
             return _aot_compile_failure(name,
@@ -4276,9 +5214,17 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
         if not c_ok:
             return Err("Failed to write bootstrap empty C file {c_path}")
         val (_cc_out, cc_err, cc_code) = process_run("cc", ["-c", c_path, "-o", obj_path])
+        val _del_c = file_delete(c_path)
         if cc_code != 0:
             return Err("Bootstrap empty object compile failed: {cc_err}")
         return Ok(obj_path)
+    val builtin_llvm_pool = backend_name == "llvm" or (backend_name == "auto" and not is_release)
+    if prefetched_object != "" and (not backend_session.? or builtin_llvm_pool):
+        val pooled_obj_path = native_aot_object_path_v1(output_base, name)
+        if _driver_codegen_pool_publish_object_v1(prefetched_object, pooled_obj_path):
+            return Ok(pooled_obj_path)
+        # Staged object unreadable or unwritable: the serial lane below
+        # recompiles the module and reports any real failure itself.
 
     # Finish the Result inside the selected provider branch. A self-hosted
     # conditional composite temporary can outlive its active flat payload and
@@ -4390,9 +5336,9 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
             print "warning: published object; diagnostic staging cleanup failed: {diagnostic_dir}"
         return Ok(obj_path)
     _finish_selected_module_compile(
-        compile_module_with_backend_target_cpu_storage_bindings(
+        compile_module_with_backend_scoped_v1(
             backend_name, mir_module, is_release, opt_level, frozen_target_cpu,
-            storage_snapshot.sites), output_base, name)
+            storage_snapshot.sites, None, None, None, None, []), output_base, name)
 
 fn _finish_selected_module_compile(
     compiled: Result<CompiledModule, CompileError>,
@@ -4411,6 +5357,13 @@ fn _finish_selected_module_compile(
                 if (env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     val bootstrap_obj = llvm_bootstrap_last_object_path()
                     if bootstrap_obj != "" and _sffi_file_copy(bootstrap_obj, obj_path):
+                        val keep_intermediates = (env_get_nullable("SIMPLE_KEEP_BUILD_INTERMEDIATES") ?? "") == "1"
+                        val keep_ir = (env_get_nullable("SIMPLE_KEEP_LLVM_IR") ?? "") == "1"
+                        if not keep_intermediates:
+                            val _del_boot_obj = file_delete(bootstrap_obj)
+                            if not keep_ir and bootstrap_obj.ends_with(".o"):
+                                val boot_ir = bootstrap_obj.slice(0, bootstrap_obj.byte_len() - 1) + "ll"
+                                val _del_boot_ir = file_delete(boot_ir)
                         return Ok(obj_path)
                 match write_elf_bytes_to_file(obj_path, obj_bytes):
                     case Ok(_):
@@ -4422,6 +5375,195 @@ fn _finish_selected_module_compile(
                 _aot_compile_failure(name, "backend produced no object code")
         case _:
             _aot_compile_failure(name, "backend result not Ok")
+
+# ---------------------------------------------------------------------------
+# Process-parallel native codegen pool (step 5, plan P2)
+# compiler/80.driver/driver_build/native_codegen_pool_v1.spl owns scheduling;
+# these are the driver-side hooks. The pool is a PREFETCH: it produces staged
+# objects, and the ordinary ParallelBuilder pass then publishes each one through
+# _compile_frozen_module_capsule_prefetched_v1, so identity checks, receipts,
+# cache collection and failure accounting are the serial lane's own code.
+# ---------------------------------------------------------------------------
+
+# Copy a pooled object to its capsule path through the serial lane's own
+# writer (write_elf_bytes_to_file), so the published bytes are identical.
+fn _driver_codegen_pool_publish_object_v1(staged_path: text, obj_path: text) -> bool:
+    match file_read_bytes_result(staged_path):
+        case Ok(bytes):
+            if bytes.len() == 0:
+                return false
+            match write_elf_bytes_to_file(obj_path, bytes):
+                case Ok(_): true
+                case Err(_): false
+        case Err(_): false
+
+# The built-in in-process `llvm` lane only: no backend session/plugin, no
+# native-group manifest, no translation-scope or bitcode-debug variants, and
+# an object tool present (clang by default, llc as the fallback). Anything else
+# keeps the serial lane (concurrency=1).
+# reason: internal codegen pool admission predicate over backend flags
+@allow(primitive_api)
+pub fn _driver_codegen_pool_lane_reason_v1(backend_name: text, is_release: bool,
+        backend_session_present: bool, plugin_path: text) -> text:
+    if (env_get_nullable(NATIVE_CODEGEN_POOL_ENV_V1) ?? "") == "0":
+        return "{NATIVE_CODEGEN_POOL_ENV_V1}=0"
+    if plugin_path != "":
+        return "backend session owns codegen"
+    val builtin_llvm = backend_name == "llvm" or (backend_name == "auto" and not is_release)
+    if not builtin_llvm:
+        if backend_session_present:
+            return "backend session owns codegen"
+        return "backend {backend_name} is not the built-in llvm lane"
+    if native_group_request_path_v1() != "":
+        return "native group manifest lane"
+    # llvm_module_ir_to_path_v1 wraps every module's IR emission in a per-module
+    # transient scope by default and when SIMPLE_CODEGEN_MODULE_SCOPE=1, so explicit
+    # =1 stays eligible for the concurrent llc/clang process pool.
+    if (env_get_nullable("SIMPLE_LLVM_BITCODE_DEBUG") ?? "") == "1":
+        return "SIMPLE_LLVM_BITCODE_DEBUG=1"
+    if (env_get_nullable("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? "") == "1":
+        return "SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ=1"
+    if native_tool_strict_requested_v1():
+        return "strict native tool admission (nm symbol check runs in the serial lane)"
+    if llvm_object_tool_v1() == "":
+        return "llc not found"
+    ""
+
+# Pool emission for job `index`: translate the module in this process exactly
+# as the serial lane would and return the llc argv, or [] to leave the module
+# to the serial lane (invalid capsule, empty MIR, ICE skip, translate failure).
+fn _driver_codegen_pool_emit_v1(batch: FrozenNativeModuleCapsuleBatchV1,
+        backend_name: text, target: text, is_release: bool, opt_level: i64,
+        provider_receipt_hash: text, names: [text], index: i64,
+        ir_path: text, obj_path: text, pool_llc: text) -> [text]:
+    val none: [text] = []
+    if index < 0 or index >= names.len() or not batch.ok:
+        return none
+    val name = names[index]
+    val capsule = frozen_native_capsule_batch_find_v1(batch, name)
+    if not capsule.ok or capsule.module_name != name:
+        return none
+    if not driver_native_capsule_inputs_valid_v1(capsule, backend_name, target,
+            is_release, opt_level, provider_receipt_hash):
+        return none
+    if capsule.storage_snapshot.registry_identity != batch.registry_identity:
+        return none
+    if not capsule.storage_snapshot.ok or capsule.storage_snapshot.module_name != name:
+        return none
+    val fn_count = capsule.mir_module.functions.keys().len()
+    val static_count = capsule.mir_module.statics.keys().len()
+    val const_count = capsule.mir_module.constants.keys().len()
+    if fn_count == 0 and static_count == 0 and const_count == 0:
+        return none
+    val ice_gate = ice_boundary_module_start(name, capsule.cache_source, "codegen", backend_name)
+    if ice_gate != "":
+        # Close the breadcrumb; build() reopens it and reports the refusal.
+        ice_boundary_module_done(name, "codegen")
+        return none
+    val reason = llvm_module_ir_to_path_v1(capsule.mir_module, is_release,
+        opt_level, capsule.target_cpu, capsule.storage_snapshot.sites, ir_path)
+    ice_boundary_module_done(name, "codegen")
+    if reason != "":
+        log_build_trace("driver:codegen-pool:emit:serial module={name} detail={build_trace_detail(reason)}")
+        return none
+    print "[NATIVE] codegen-pool: ir {index + 1}/{names.len()} {name}"
+    _sffi_stdout_flush()
+    llvm_module_llc_argv_v1(is_release, opt_level, capsule.target_cpu, obj_path, ir_path, pool_llc)
+
+# Run the pool over `names` and return {module: staged object} for every
+# module it produced. {} when the lane is ineligible or only one worker is
+# admitted; the caller then compiles everything serially. Always prints the
+# honest `concurrency=N` line for this phase.
+fn _driver_codegen_pool_prefetch_v1(batch: FrozenNativeModuleCapsuleBatchV1,
+        backend_name: text, target: text, is_release: bool, opt_level: i64,
+        provider_receipt_hash: text, backend_session_present: bool,
+        plugin_path: text, requested_threads: i64, names: [text]) -> {text: text}:
+    var prefetched: {text: text} = {}
+    val lane_reason = _driver_codegen_pool_lane_reason_v1(backend_name, is_release,
+        backend_session_present, plugin_path)
+    val detected_cpus = match cpu_count_checked():
+        case Ok(count): count
+        case Err(_): 1
+    val host_cpus = native_codegen_host_cpus_for_v1(detected_cpus, host_limit_i64("max_threads", 0))
+    val budget_kib = native_codegen_kib_field_v1(
+        env_get_nullable("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB") ?? "")
+    val estimate_kib = native_codegen_worker_estimate_for_v1(native_codegen_kib_field_v1(
+        env_get_nullable(NATIVE_CODEGEN_WORKER_KIB_ENV_V1) ?? ""), host_limit_i64("worker_mem_mib", 0))
+    val headroom_kib = if lane_reason == "": native_codegen_headroom_kib_v1() else: 0
+    val shard_spec = env_get_nullable("SIMPLE_MIR_SHARD") ?? ""
+    val file_worker_unit = env_get_nullable("SIMPLE_FILE_WORKER_UNIT") ?? ""
+    val raw_file_workers = env_get_nullable("SIMPLE_NATIVE_FILE_WORKERS") ?? ""
+    val hir_shard_spec = env_get_nullable("SIMPLE_HIR_SHARD") ?? ""
+    val file_workers_field = if raw_file_workers != "":
+        raw_file_workers
+    elif file_worker_unit == "1":
+        hir_shard_spec
+    else:
+        ""
+    val in_shard_tree = budget_kib > 0 or shard_spec != "" or file_worker_unit == "1"
+    val peer_shards = native_codegen_live_peer_shards_v1(shard_spec, file_worker_unit,
+        file_workers_field, host_cpus, requested_threads)
+    val resident_kib = if lane_reason == "": native_codegen_process_rss_kib_v1() else: 0
+    val cgroup_spare_kib = if lane_reason == "": native_codegen_cgroup_spare_kib_v1() else: -1
+    val floor_kib = if lane_reason == "": native_codegen_commit_floor_kib_for_context_v1(in_shard_tree) else: 0
+    var workers: i64 = 1
+    if lane_reason == "":
+        workers = native_codegen_pool_workers_v1(host_cpus, requested_threads,
+            names.len(), budget_kib, headroom_kib, estimate_kib, floor_kib,
+            resident_kib, peer_shards, cgroup_spare_kib)
+    val admission_detail = native_codegen_admission_summary_v1(host_cpus, budget_kib,
+        resident_kib, headroom_kib, cgroup_spare_kib, floor_kib, estimate_kib, peer_shards)
+    var first_object = ""
+    if batch.ok and names.len() > 0:
+        val first = frozen_native_capsule_batch_find_v1(batch, names[0])
+        if first.ok:
+            first_object = first.object_path
+    var why = lane_reason
+    if why == "" and workers < 2:
+        why = "one worker admitted ({admission_detail})"
+    if why == "" and first_object == "":
+        why = "first capsule unavailable"
+    var stage_root = ""
+    if why == "":
+        stage_root = secure_temp_dir_raw(dirname(first_object), "simple-codegen-pool")
+        if stage_root.len() <= 0:
+            why = "pool staging unavailable"
+    val ledger = if why == "": stage_root + "/ledger" else: ""
+    if why == "" and not dir_create_all(ledger):
+        why = "pool ledger unavailable"
+        val _removed = dir_remove(stage_root, true)
+    if why != "":
+        print "[NATIVE] codegen: {names.len()} uncached module(s), concurrency=1 (serial lane in this process: {why})"
+        _sffi_stdout_flush()
+        return prefetched
+    print "[NATIVE] codegen: {names.len()} uncached module(s), concurrency={workers} (process pool: {workers} llc workers, IR translation serial in this process; {admission_detail})"
+    _sffi_stdout_flush()
+    # Resolve the tool once: every job's argv is built for this same answer.
+    val pool_llc = llvm_object_llc_v1()
+    val result = native_codegen_pool_run_v1(llvm_object_tool_for_v1(pool_llc), names, workers, stage_root, ledger,
+        fn(job_index: i64, ir_path: text, obj_path: text) -> [text]: _driver_codegen_pool_emit_v1(batch, backend_name, target, is_release,
+            opt_level, provider_receipt_hash, names, job_index, ir_path, obj_path, pool_llc))
+    var index: i64 = 0
+    while index < names.len():
+        if result.states[index] == NATIVE_CODEGEN_JOB_PASS_V1:
+            prefetched[names[index]] = result.objects[index]
+        index = index + 1
+    print "[NATIVE] codegen-pool: done workers={result.workers} peak_live={result.peak_live} passed={result.passed} failed={result.failed} serial={result.skipped} first_object_ms={result.first_object_ms} wall_ms={result.wall_ms} idle_wakeups={result.idle_wakeups} timed_out={result.timed_out} stage={stage_root}"
+    _sffi_stdout_flush()
+    if prefetched.keys().len() == 0 and (env_get_nullable("SIMPLE_LLVM_KEEP_STAGE") ?? "") != "1":
+        val _removed_empty = dir_remove(stage_root, true)
+    prefetched
+
+# Remove the pool staging root (staged objects, IR, ledger, receipts) once
+# build() has published every pooled object. SIMPLE_LLVM_KEEP_STAGE=1 keeps it.
+fn _driver_codegen_pool_cleanup_v1(prefetched: {text: text}):
+    if (env_get_nullable("SIMPLE_LLVM_KEEP_STAGE") ?? "") == "1":
+        return
+    for name in prefetched.keys():
+        val stage_root = dirname(prefetched[name])
+        if stage_root != "" and stage_root.contains("simple-codegen-pool"):
+            val _removed = dir_remove(stage_root, true)
+        return
 
 export RuntimeStdNativeActionEmissionV1
 export RuntimeStdNativeActionEmissionV2

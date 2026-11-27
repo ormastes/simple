@@ -1,0 +1,418 @@
+use std.spec.*
+use std.nogc_async_immut.persistent_map.{
+    PersistentMap,
+    HAMT_LEAF, HAMT_BRANCH, HAMT_COLLISION,
+    hamt_empty, hamt_leaf, hamt_branch, hamt_collision,
+    hamt_node_tag, hamt_get, hamt_set, hamt_remove,
+    hamt_node_entries, hamt_node_count, hamt_index, hamt_bit_pos
+}
+use std.nogc_sync_mut.src.map.Map
+use std.nogc_sync_mut.src.collections.hashmap.HashMap
+use std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveSetAlgorithm, AdaptiveSetAttribute}
+use std.nogc_sync_mut.src.collections.ordered_map.OrderedMap
+use std.nogc_sync_mut.src.collections.btree.BTreeMap
+
+describe "Compact HAMT tag packing and SoA collections":
+
+    describe "HAMT packed branch headers and flat collision nodes":
+        it "represents empty, leaf, packed branch, and flat collision tags":
+            val empty = hamt_empty()
+            expect(hamt_node_tag(empty)).to_equal(0)
+            expect(hamt_node_count(empty)).to_equal(0)
+            expect(hamt_node_entries(empty).len()).to_equal(0)
+
+            val leaf1 = hamt_leaf(1, "k1", 10)
+            val leaf2 = hamt_leaf(2, "k2", 20)
+            expect(hamt_node_tag(leaf1)).to_equal(HAMT_LEAF)
+            expect(leaf1.len()).to_equal(4)
+
+            val branch = hamt_branch(3, [leaf1, leaf2])
+            expect(hamt_node_tag(branch)).to_equal(HAMT_BRANCH)
+            # Single flat array: [packed_header, leaf1, leaf2]
+            expect(branch.len()).to_equal(3)
+
+            val col = hamt_collision(99, [["a", 1], ["b", 2], ["c", 3]])
+            expect(hamt_node_tag(col)).to_equal(HAMT_COLLISION)
+            # Single flat array: [HAMT_COLLISION, hash, k1, v1, k2, v2, k3, v3]
+            expect(col.len()).to_equal(8)
+            expect(hamt_node_count(col)).to_equal(3)
+
+        it "preserves 32-bit high-bit 0x80000000 bitmaps in signed i64 shifts":
+            val high_bit: i64 = 0x80000000
+            val low_and_high: i64 = 0x80000001
+            val all_32_bits: i64 = 0xFFFFFFFF
+
+            # Slot 0 (hash = 0) and slot 31 (hash = 31) at shift = 0
+            expect(hamt_bit_pos(31, 0)).to_equal(high_bit)
+            expect(hamt_index(low_and_high, 1)).to_equal(0)
+            expect(hamt_index(low_and_high, high_bit)).to_equal(1)
+            expect(hamt_index(all_32_bits, high_bit)).to_equal(31)
+
+            var root = hamt_empty()
+            root = hamt_set(root, "slot0", 100, 0, 0)
+            root = hamt_set(root, "slot31", 3100, 31, 0)
+            expect(hamt_node_tag(root)).to_equal(HAMT_BRANCH)
+            expect(root.len()).to_equal(3)
+            expect(((root[0] >> 3) & 0xFFFFFFFF)).to_equal(low_and_high)
+            expect(hamt_get(root, "slot0", 0, 0)).to_equal(100)
+            expect(hamt_get(root, "slot31", 31, 0)).to_equal(3100)
+
+            # Populate all 32 slots at root level, including negative 64-bit hashes
+            var full_root = hamt_empty()
+            var slot = 0
+            while slot < 32:
+                val h = if slot == 31: -1 else: slot
+                full_root = hamt_set(full_root, "s_{slot}", slot * 7, h, 0)
+                slot = slot + 1
+
+            expect(hamt_node_tag(full_root)).to_equal(HAMT_BRANCH)
+            expect(full_root.len()).to_equal(33)
+            expect(((full_root[0] >> 3) & 0xFFFFFFFF)).to_equal(all_32_bits)
+            expect(hamt_node_count(full_root)).to_equal(32)
+            expect(hamt_get(full_root, "s_0", 0, 0)).to_equal(0)
+            expect(hamt_get(full_root, "s_31", -1, 0)).to_equal(217)
+            expect(hamt_node_entries(full_root).len()).to_equal(32)
+
+            # Remove slot 0 and verify high-bit branch stays intact, then collapses cleanly
+            val without_0 = hamt_remove(root, "slot0", 0, 0).unwrap()
+            expect(hamt_node_tag(without_0)).to_equal(HAMT_LEAF)
+            expect(hamt_get(without_0, "slot31", 31, 0)).to_equal(3100)
+
+            # Sign-extended 32-bit negative bitmap input (-2147483648 == 0xFFFFFFFF80000000) masks cleanly to 0x80000000
+            val neg_bitmap_branch = hamt_branch(-2147483648, [hamt_leaf(31, "neg31", 99)])
+            expect(hamt_node_tag(neg_bitmap_branch)).to_equal(HAMT_BRANCH)
+            expect(((neg_bitmap_branch[0] >> 3) & 0xFFFFFFFF)).to_equal(high_bit)
+            expect(hamt_get(neg_bitmap_branch, "neg31", 31, 0)).to_equal(99)
+
+            # Deep multi-level branch insert + recursive hamt_remove (same low 15 bits, split at shift=15)
+            val h_deep_a: i64 = (31 << 15) | (31 << 10) | (31 << 5) | 31
+            val h_deep_b: i64 = (1 << 15) | (31 << 10) | (31 << 5) | 31
+            var deep = hamt_empty()
+            deep = hamt_set(deep, "da", 111, h_deep_a, 0)
+            deep = hamt_set(deep, "db", 222, h_deep_b, 0)
+            expect(hamt_get(deep, "da", h_deep_a, 0)).to_equal(111)
+            expect(hamt_get(deep, "db", h_deep_b, 0)).to_equal(222)
+            val deep_after_rem = hamt_remove(deep, "da", h_deep_a, 0).unwrap()
+            expect(hamt_node_tag(deep_after_rem)).to_equal(HAMT_LEAF)
+            expect(hamt_get(deep_after_rem, "db", h_deep_b, 0)).to_equal(222)
+
+        it "handles multi-way hash collisions, updates, promotion, and collapse in flat layout":
+            val shared_hash: i64 = 0x7ACEBEEF
+            val other_hash: i64 = 0x12345678
+
+            var node = hamt_empty()
+            node = hamt_set(node, "c1", "one", shared_hash, 0)
+            node = hamt_set(node, "c2", "two", shared_hash, 0)
+            expect(hamt_node_tag(node)).to_equal(HAMT_COLLISION)
+            expect(node.len()).to_equal(6)
+
+            node = hamt_set(node, "c3", "three", shared_hash, 0)
+            expect(node.len()).to_equal(8)
+            expect(hamt_get(node, "c1", shared_hash, 0)).to_equal("one")
+            expect(hamt_get(node, "c2", shared_hash, 0)).to_equal("two")
+            expect(hamt_get(node, "c3", shared_hash, 0)).to_equal("three")
+            expect(hamt_get(node, "missing", shared_hash, 0)).to_be_nil()
+
+            # Overwrite existing key in flat collision node
+            node = hamt_set(node, "c2", "TWO", shared_hash, 0)
+            expect(node.len()).to_equal(8)
+            expect(hamt_get(node, "c2", shared_hash, 0)).to_equal("TWO")
+
+            # Promote collision node into branch when a distinct hash arrives
+            val promoted = hamt_set(node, "other", "four", other_hash, 0)
+            expect(hamt_node_tag(promoted)).to_equal(HAMT_BRANCH)
+            expect(hamt_node_count(promoted)).to_equal(4)
+            expect(hamt_node_entries(promoted).len()).to_equal(4)
+            expect(hamt_get(promoted, "c1", shared_hash, 0)).to_equal("one")
+            expect(hamt_get(promoted, "c2", shared_hash, 0)).to_equal("TWO")
+            expect(hamt_get(promoted, "c3", shared_hash, 0)).to_equal("three")
+            expect(hamt_get(promoted, "other", other_hash, 0)).to_equal("four")
+
+            # Remove down to 1 collision entry -> collapses back to leaf
+            val after_r1 = hamt_remove(node, "c1", shared_hash, 0).unwrap()
+            expect(hamt_node_tag(after_r1)).to_equal(HAMT_COLLISION)
+            expect(after_r1.len()).to_equal(6)
+
+            val after_r2 = hamt_remove(after_r1, "c3", shared_hash, 0).unwrap()
+            expect(hamt_node_tag(after_r2)).to_equal(HAMT_LEAF)
+            expect(hamt_get(after_r2, "c2", shared_hash, 0)).to_equal("TWO")
+
+            val after_r3 = hamt_remove(after_r2, "c2", shared_hash, 0)
+            expect(after_r3.is_none()).to_be(true)
+
+    describe "Lazy zero-allocation init and tombstone reuse in Map and HashMap":
+        it "keeps empty Map and HashMap at capacity 0 with zero backing slots":
+            var gmap: Map<text, i64> = Map.new()
+            expect(gmap.capacity).to_equal(0)
+            expect(gmap.slots.len()).to_equal(0)
+            expect(gmap.len()).to_equal(0)
+            expect(gmap.is_empty()).to_be(true)
+            expect(gmap.has("a")).to_be(false)
+            expect(gmap.get("a").is_none()).to_be(true)
+            expect(gmap.remove("a").is_none()).to_be(true)
+            expect(gmap.keys().len()).to_equal(0)
+            expect(gmap.values().len()).to_equal(0)
+            gmap.clear()
+            expect(gmap.capacity).to_equal(0)
+
+            val reserved_gmap: Map<i64, i64> = Map.with_capacity(32)
+            expect(reserved_gmap.capacity).to_equal(32)
+            expect(reserved_gmap.slots.len()).to_equal(0)
+
+            var hmap = HashMap.new()
+            expect(hmap.capacity).to_equal(0)
+            expect(hmap.states.len()).to_equal(0)
+            expect(hmap.len()).to_equal(0)
+            expect(hmap.is_empty()).to_be(true)
+            expect(hmap.contains_key("a")).to_be(false)
+            expect(hmap.get("a").is_none()).to_be(true)
+            expect(hmap.remove("a").is_none()).to_be(true)
+            hmap.clear()
+            expect(hmap.capacity).to_equal(0)
+
+            val reserved_hmap = HashMap.with_capacity(32)
+            expect(reserved_hmap.capacity).to_equal(32)
+            expect(reserved_hmap.states.len()).to_equal(0)
+
+        it "reuses tombstones across insert/remove cycles without unbounded capacity growth":
+            var gmap: Map<i64, i64> = Map.new()
+            var hmap = HashMap.new()
+
+            var i: i64 = 0
+            while i < 8:
+                gmap.insert(i, i * 10)
+                hmap.insert("k_{i}", "{i * 10}")
+                i = i + 1
+
+            val steady_gcap = gmap.capacity
+            val steady_hcap = hmap.capacity
+
+            # Run 120 churn cycles keeping live size <= 9; tombstones must be reused/compacted in-place
+            var round: i64 = 0
+            while round < 120:
+                val add_k = 8 + round
+                val rem_k = round
+                gmap.insert(add_k, add_k * 10)
+                expect(gmap.remove(rem_k) ?? -1).to_equal(rem_k * 10)
+                expect(gmap.has(rem_k)).to_be(false)
+                expect(gmap.get(add_k) ?? -1).to_equal(add_k * 10)
+
+                hmap.insert("k_{add_k}", "{add_k * 10}")
+                expect(hmap.remove("k_{rem_k}") ?? "").to_equal("{rem_k * 10}")
+                expect(hmap.contains_key("k_{rem_k}")).to_be(false)
+                expect(hmap.get("k_{add_k}") ?? "").to_equal("{add_k * 10}")
+                round = round + 1
+
+            expect(gmap.len()).to_equal(8)
+            expect(hmap.len()).to_equal(8)
+            expect(gmap.capacity).to_equal(steady_gcap)
+            expect(hmap.capacity).to_equal(steady_hcap)
+
+            # Verify every surviving entry after 120 churn cycles
+            var check_k: i64 = 120
+            while check_k < 128:
+                expect(gmap.get(check_k) ?? -1).to_equal(check_k * 10)
+                expect(hmap.get("k_{check_k}") ?? "").to_equal("{check_k * 10}")
+                check_k = check_k + 1
+
+        it "preserves probe chains across collisions when middle entries become tombstones":
+            # Force collisions in a small capacity-4 table
+            var gmap: Map<i64, text> = Map.with_capacity(4)
+            gmap.insert(0, "zero")
+            gmap.insert(4, "four")
+            gmap.insert(8, "eight")
+            expect(gmap.remove(4) ?? "").to_equal("four")
+            expect(gmap.get(8) ?? "").to_equal("eight")
+            expect(gmap.get(0) ?? "").to_equal("zero")
+            expect(gmap.get(4).is_none()).to_be(true)
+            # Reinsert into tombstone chain
+            gmap.insert(12, "twelve")
+            expect(gmap.get(12) ?? "").to_equal("twelve")
+            expect(gmap.get(8) ?? "").to_equal("eight")
+            expect(gmap.len()).to_equal(3)
+
+        it "handles with_capacity(0/-5/5/10), negative and i64::MIN keys, 100% tombstone saturation, and swap-remove behind tombstones":
+            # 1) Zero, negative, and non-power-of-2 capacities (5 and 10)
+            var g0: Map<i64, text> = Map.with_capacity(0)
+            var gneg: Map<i64, text> = Map.with_capacity(-5)
+            var g5: Map<i64, text> = Map.with_capacity(5)
+            var g10: Map<i64, text> = Map.with_capacity(10)
+            expect(g0.capacity).to_equal(0)
+            expect(gneg.capacity).to_equal(0)
+            expect(g5.capacity).to_equal(5)
+            expect(g10.capacity).to_equal(10)
+            expect(g5.slots.len()).to_equal(0)
+            expect(g10.slots.len()).to_equal(0)
+
+            var h0 = HashMap.with_capacity(0)
+            var hneg = HashMap.with_capacity(-5)
+            var h5 = HashMap.with_capacity(5)
+            var h10 = HashMap.with_capacity(10)
+            expect(h0.capacity).to_equal(1)
+            expect(hneg.capacity).to_equal(1)
+            expect(h5.capacity).to_equal(5)
+            expect(h10.capacity).to_equal(10)
+
+            # 2) Negative & i64::MIN (-9223372036854775808) keys across non-power-of-2 and power-of-2 capacities
+            val min_i64: i64 = -9223372036854775807 - 1
+            val extreme_keys: [i64] = [min_i64, min_i64 + 1, -1000000007, -1, 0, 1, 9223372036854775807]
+            for ek in extreme_keys:
+                g0.insert(ek, "v0_{ek}")
+                gneg.insert(ek, "vn_{ek}")
+                g5.insert(ek, "v5_{ek}")
+                g10.insert(ek, "v10_{ek}")
+                h5.insert("hk_{ek}", "hv5_{ek}")
+                h10.insert("hk_{ek}", "hv10_{ek}")
+
+            for ek in extreme_keys:
+                expect(g0.get(ek) ?? "").to_equal("v0_{ek}")
+                expect(gneg.get(ek) ?? "").to_equal("vn_{ek}")
+                expect(g5.get(ek) ?? "").to_equal("v5_{ek}")
+                expect(g10.get(ek) ?? "").to_equal("v10_{ek}")
+                expect(h5.get("hk_{ek}") ?? "").to_equal("hv5_{ek}")
+                expect(h10.get("hk_{ek}") ?? "").to_equal("hv10_{ek}")
+
+            expect(g5.remove(min_i64) ?? "").to_equal("v5_{min_i64}")
+            expect(g5.has(min_i64)).to_be(false)
+            expect(g10.remove(-1) ?? "").to_equal("v10_-1")
+            expect(g10.has(-1)).to_be(false)
+
+            # 3) HashMap.with_capacity(4) at 100% tombstone saturation (size=1, tombstones=3, empty=0)
+            var hsat = HashMap.with_capacity(4)
+            var cand = 0
+            while hsat.capacity == 4 and (hsat.size + hsat.tombstones) < 4 and cand < 200:
+                val ck = "sat_{cand}"
+                hsat.insert(ck, "val_{cand}")
+                if (hsat.size + hsat.tombstones) < 4:
+                    expect(hsat.remove(ck) ?? "").to_equal("val_{cand}")
+                cand = cand + 1
+
+            expect(hsat.capacity).to_equal(4)
+            expect(hsat.size).to_equal(1)
+            expect(hsat.tombstones).to_equal(3)
+            val live_key = "sat_{cand - 1}"
+            expect(hsat.get(live_key) ?? "").to_equal("val_{cand - 1}")
+            expect(hsat.contains_key("never_inserted")).to_be(false)
+            expect(hsat.get("never_inserted").is_none()).to_be(true)
+            expect(hsat.get_observed("never_inserted").value.is_none()).to_be(true)
+            expect(hsat.remove("never_inserted").is_none()).to_be(true)
+            hsat.insert("after_full_tombstones", "recovered")
+            expect(hsat.get(live_key) ?? "").to_equal("val_{cand - 1}")
+            expect(hsat.get("after_full_tombstones") ?? "").to_equal("recovered")
+            expect(hsat.len()).to_equal(2)
+
+            # 4) Map.remove swap-remove when relocated last_d entry sits behind an earlier tombstone
+            var gswap: Map<i64, text> = Map.with_capacity(8)
+            # Keys 0, 8, 16, 24 all share low bits mod 8 (probe chain 0 -> 1 -> 2 -> 3)
+            gswap.insert(0, "d0")
+            gswap.insert(8, "d1")
+            gswap.insert(16, "d2")
+            gswap.insert(24, "d3_last")
+            # Remove d=1 (key 8): leaves a tombstone BEFORE d=3 (key 24), then relocates last_d=3 -> d=1
+            expect(gswap.remove(8) ?? "").to_equal("d1")
+            expect(gswap.get(24) ?? "").to_equal("d3_last")
+            expect(gswap.get(16) ?? "").to_equal("d2")
+            expect(gswap.get(0) ?? "").to_equal("d0")
+            expect(gswap.get(8).is_none()).to_be(true)
+            # Remove d=0 (key 0): relocates new last_d=2 (key 16, sitting behind tombstone) -> d=0
+            expect(gswap.remove(0) ?? "").to_equal("d0")
+            expect(gswap.get(16) ?? "").to_equal("d2")
+            expect(gswap.get(24) ?? "").to_equal("d3_last")
+            expect(gswap.get(0).is_none()).to_be(true)
+            expect(gswap.len()).to_equal(2)
+
+    describe "AdaptiveMap lazy Linear mode":
+        it "allocates zero hash or ordered slots while <= 8 entries in Linear mode":
+            var amap: AdaptiveMap<i64, text> = AdaptiveMap.new()
+            var k: i64 = 0
+            while k < 8:
+                expect(amap.put(k, "v_{k}")).to_be(true)
+                k = k + 1
+
+            expect(amap.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+            expect(amap.hash_entries.capacity).to_equal(0)
+            expect(amap.hash_entries.slots.len()).to_equal(0)
+            expect(amap.ordered_entries.allocated_slots()).to_equal(0)
+
+            # 9th entry promotes to Hash cleanly
+            expect(amap.put(8, "v_8")).to_be(true)
+            expect(amap.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+            expect(amap.get(0) ?? "").to_equal("v_0")
+            expect(amap.get(8) ?? "").to_equal("v_8")
+
+            # Transition to Ordered resets idle hash backing to zero
+            amap.set_attribute(AdaptiveSetAttribute.Ordered)
+            expect(amap.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+            expect(amap.hash_entries.capacity).to_equal(0)
+            expect(amap.hash_entries.slots.len()).to_equal(0)
+            expect(amap.keys().len()).to_equal(9)
+
+    describe "Compact SoA OrderedMap and BTreeMap sorted invariants":
+        it "maintains AVL balance, packed metadata, sorted keys/values, slot reuse, and clear in OrderedMap":
+            var omap: OrderedMap<i64, text> = OrderedMap.new()
+            expect(omap.is_empty()).to_be(true)
+            expect(omap.allocated_slots()).to_equal(0)
+
+            # Insert interleaved positive, negative, and zero keys
+            val inputs: [i64] = [40, -10, 20, 0, -30, 50, 10, 30, -20]
+            for x in inputs:
+                expect(omap.insert(x, "n_{x}")).to_be(true)
+
+            expect(omap.len()).to_equal(9)
+            expect(omap.tree_height()).to_be_less_than(6)
+            expect(omap.keys()).to_equal([-30, -20, -10, 0, 10, 20, 30, 40, 50])
+            expect(omap.values()).to_equal(["n_-30", "n_-20", "n_-10", "n_0", "n_10", "n_20", "n_30", "n_40", "n_50"])
+
+            # Remove root/internal nodes and verify slot reuse via free_nodes
+            val peak_slots = omap.allocated_slots()
+            expect(omap.remove(20) ?? "").to_equal("n_20")
+            expect(omap.remove(-10) ?? "").to_equal("n_-10")
+            expect(omap.remove(0) ?? "").to_equal("n_0")
+            expect(omap.insert(5, "n_5")).to_be(true)
+            expect(omap.insert(15, "n_15")).to_be(true)
+            expect(omap.insert(25, "n_25")).to_be(true)
+            expect(omap.allocated_slots()).to_equal(peak_slots)
+            expect(omap.keys()).to_equal([-30, -20, 5, 10, 15, 25, 30, 40, 50])
+
+            omap.clear()
+            expect(omap.is_empty()).to_be(true)
+            expect(omap.len()).to_equal(0)
+            expect(omap.allocated_slots()).to_equal(0)
+            expect(omap.keys().len()).to_equal(0)
+
+        it "maintains sorted parallel arrays, updates, removals, and endpoints in BTreeMap":
+            var btree = BTreeMap.new()
+            expect(btree.is_empty()).to_be(true)
+            expect(btree.first_key().is_none()).to_be(true)
+            expect(btree.last_key().is_none()).to_be(true)
+
+            btree.insert("pear", "green")
+            btree.insert("apple", "red")
+            btree.insert("mango", "orange")
+            btree.insert("banana", "yellow")
+            btree.insert("cherry", "crimson")
+            # Update existing key in-place
+            btree.insert("apple", "honeycrisp")
+
+            expect(btree.len()).to_equal(5)
+            expect(btree.is_empty()).to_be(false)
+            expect(btree.first_key() ?? "").to_equal("apple")
+            expect(btree.last_key() ?? "").to_equal("pear")
+            expect(btree.keys()).to_equal(["apple", "banana", "cherry", "mango", "pear"])
+            expect(btree.values()).to_equal(["honeycrisp", "yellow", "crimson", "orange", "green"])
+            expect(btree.has("mango")).to_be(true)
+            expect(btree.has("kiwi")).to_be(false)
+
+            expect(btree.remove("apple") ?? "").to_equal("honeycrisp")
+            expect(btree.remove("cherry") ?? "").to_equal("crimson")
+            expect(btree.remove("pear") ?? "").to_equal("green")
+            expect(btree.remove("missing").is_none()).to_be(true)
+            expect(btree.keys()).to_equal(["banana", "mango"])
+            expect(btree.values()).to_equal(["yellow", "orange"])
+            expect(btree.first_key() ?? "").to_equal("banana")
+            expect(btree.last_key() ?? "").to_equal("mango")
+
+            btree.clear()
+            expect(btree.is_empty()).to_be(true)
+            expect(btree.len()).to_equal(0)

@@ -1,5 +1,5 @@
 # Unwired-Extraction Audit — dedup authored, never wired (2026-08-11)
-## Open 2026-09-16 — needs owner triage
+## Audit record — doc corrections landed 2026-11-25; wiring follow-ups scoped to owner lanes (see dated status at bottom)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -352,3 +352,26 @@ own admission), not a single fixable defect. Any concrete wiring fix
 belongs in a dedicated follow-up scoped to one extraction at a time. Left
 as-is, no code change attempted.
 
+
+## Status 2026-11-25 (work/p3-bao-20261125)
+
+Actions-required ledger, re-checked on current source:
+
+1. rv32_rv64_rtl_unification_results_2026-07-21.md — path correction DONE
+   this session (dated note appended; `riscv_rtl/common/` → `riscv_common/`,
+   COMPLETE stands).
+2. browser_color_commonization_blocked_2026-05-10.md — already REOPENED
+   2026-08-11 ("partially resolved"); no further action.
+3. lexer_position_unification_2026-07-29.md — disposition correction DONE
+   this session (dated note appended; `lexer_scanners.spl` confirmed deleted).
+4. Spec + wire-or-delete for `mcp_common.spl` / `mcp_startup_lib.shs` —
+   still open; a test-design + wiring task, not a P3 drive-by.
+5. Specs for the still-orphaned `arch/common` helpers — still open; same
+   class. (`timer_math.spl` was already resolved 2026-10-04 per instance 1.)
+6. Systemic orphan-extraction reporting gate — still open; lint-design work
+   for an owner lane.
+
+This document is an audit record, not a single fixable defect (per the
+2026-09-13 triage). With items 1-3 landed the doc-only corrections are
+complete; items 4-6 remain as scoped follow-ups. The "Open 2026-09-16 —
+needs owner triage" header is superseded by this note.

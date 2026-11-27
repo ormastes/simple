@@ -1,0 +1,45 @@
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.driver.driver_source_loading.{_driver_entry_import_module_paths}
+
+val LB = "{"
+val RB = "}"
+
+# Bugs: stage4_full_cli_lazy_import_closure_gap_2026_08_04 (already fixed by
+# lazy_named_import_closure_spec), stage4_full_cli_unlinkable_579 (closure side).
+# Prevention for the whole class: every NAMED `use lazy` declared by the full
+# CLI command module (src/app/cli/_CliMain/main_and_help.spl) must be collected
+# into the entry closure, across the import spellings the scanner sees.
+
+fn _contains(paths: [text], m: text) -> bool:
+    paths.contains(m)
+
+describe "entry import scan keeps named lazy owners":
+    it "collects every named use-lazy module of the real full-CLI command module":
+        val src = file_read("src/app/cli/_CliMain/main_and_help.spl") ?? ""
+        expect(src.len()).to_be_greater_than(0)
+        val paths = _driver_entry_import_module_paths(src)
+        for line in src.split("\n"):
+            val t = line.trim()
+            if t.starts_with("use lazy ") and (t.contains("{") or t.contains("(")):
+                var rest = t.substring(9).trim()
+                var cut = rest.len()
+                for d in ["{", "(", " "]:
+                    val at = rest.index_of(d) ?? -1
+                    if at >= 0 and at < cut:
+                        cut = at
+                var m = rest.substring(0, cut)
+                while m.ends_with("."):
+                    m = m.substring(0, m.len() - 1)
+                expect(_contains(paths, m)).to_equal(true)
+
+    it "collects the owner for pub/export/import lazy spellings and skips name-less lazy":
+        val paths = _driver_entry_import_module_paths(
+            "export use lazy zq.exp." + LB + "A" + RB + "\nimport lazy zq.imp." + LB + "B" + RB + "\nuse lazy zq.bare\nuse lazy zq.star.*\nuse lazy zq.alias as z\nuse lazy zq.paren (C)\n")
+        expect(_contains(paths, "zq.exp")).to_equal(true)
+        expect(_contains(paths, "zq.imp")).to_equal(true)
+        expect(_contains(paths, "zq.paren")).to_equal(true)
+        expect(_contains(paths, "zq.bare")).to_equal(false)
+        expect(_contains(paths, "zq.star")).to_equal(false)
+        expect(_contains(paths, "zq.alias")).to_equal(false)
+        expect(_contains(paths, "lazy")).to_equal(false)

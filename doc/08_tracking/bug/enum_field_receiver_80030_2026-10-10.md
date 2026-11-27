@@ -1,6 +1,6 @@
 # BUG-MIR-ENUM-FIELD-RECEIVER-20261010
 
-Date: 2026-10-10. Status: OPEN; provisional source workaround, UNRUN.
+Date: 2026-10-10. Status: fix-implemented-verification-pending (receiver-recovery fixes d4f17951cf6 and 5a4e937a6d1 are ancestors of release/1.0.0; no source workaround is applied, trust_audit.spl keeps the original expression).
 Canonical bug DB record is registered by this publication with open status.
 Textual schema/CRC validation is separate from qualified self-hosted check-dbs,
 which is not claimed. The source workaround and six tests are not included.
@@ -33,3 +33,9 @@ permission, missing root and forbidden allowed axiom. Expected hashes are
 independently derived from the frozen public framing contract. All UNRUN.
 Original two failure cycles are retained; only cycle3 remains for this owner.
 No compiler build or test is performed by preparation.
+
+## Update 2026-11-03 (lane s3g2)
+
+Both underlying source-fix leads are ancestors of origin/release/1.0.0, and `src/compiler/00.common/assurance/trust_audit.spl` still carries the original `audit.status.name()` (the private workaround was never published). Regression spec added: `test/01_unit/compiler/common/trust_audit_status_field_receiver_spec.spl` (all four statuses, independent sha256sum goldens; passes interpreted).
+
+Stage3 verify: with a producer built from release/1.0.0, `native-build` the spec above (or compile the module containing `canonical_trust_audit_hash_v1`); expect no "unresolved method call: name" and the spec to pass. On success set status fixed; on failure the failing producer's receiver-type recovery for `Field(param, enum_field).method()` in `src/compiler/50.mir/_MirLoweringExpr` is the owner.

@@ -1,0 +1,103 @@
+# AUTHORED_NOT_RUN. Real production parser calls; no owner/admission fixtures.
+use std.spec.{describe, it, expect, fail}
+use std.common.contracts.container.linux_cgroup_stats_v1.*
+use std.common.contracts.container.execution_stats_v1.*
+
+describe "checked fixed cgroup2 counter parsing":
+    it "keeps zero distinct from missing and accepts the signed storage maximum":
+        expect(linux_cgroup_stats_scalar_parse_v1("0\n").unwrap()).to_equal(0)
+        expect(linux_cgroup_stats_scalar_parse_v1("9223372036854775807\n").unwrap()).to_equal(9223372036854775807)
+        expect(linux_cgroup_stats_scalar_parse_v1("4294967297\n").unwrap()).to_equal(4294967297)
+
+    it "refuses negative fractional unit signed leading-zero and malformed scalar forms":
+        for source in ["", "\n", "0", "-1\n", "+1\n", "01\n", "1.0\n", "1MB\n", " 1\n", "1 \n", "1\n\n", "1\r\n", "1\0\n", "é\n"]:
+            expect(linux_cgroup_stats_scalar_parse_v1(source).is_err()).to_equal(true)
+
+    it "refuses overflow before arithmetic can wrap":
+        for source in ["9223372036854775808\n", "9999999999999999999\n", "18446744073709551615\n"]:
+            expect(linux_cgroup_stats_scalar_parse_v1(source).is_err()).to_equal(true)
+
+    it "returns the actual cumulative CPU usage and validates bounded extra counters":
+        val result = linux_cgroup_stats_cpu_usage_parse_v1("usage_usec 123456\nuser_usec 120000\nsystem_usec 3456\ncore_sched.force_idle_usec 0\n")
+        expect(result.is_ok()).to_equal(true)
+        match result.unwrap():
+            case ContainerStatsCounterV1.Observed(value): expect(value).to_equal(123456)
+            case _: fail("actual cumulative usage must be an observed value")
+
+    it "distinguishes an observed CPU zero from the absent usage field":
+        val zero = linux_cgroup_stats_cpu_usage_parse_v1("usage_usec 0\n").unwrap()
+        match zero:
+            case ContainerStatsCounterV1.Observed(value): expect(value).to_equal(0)
+            case _: fail("actual CPU zero must remain observed")
+        val absent = linux_cgroup_stats_cpu_usage_parse_v1("nr_periods 0\n").unwrap()
+        match absent:
+            case ContainerStatsCounterV1.Unsupported(code): expect(code).to_equal("linux-cgroup2-usage-not-exposed")
+            case _: fail("absent usage must remain explicitly unsupported")
+
+    it "rejects duplicate keys malformed lines truncated data and invalid extra counters":
+        for source in ["usage_usec 1\nusage_usec 2\n", "usage_usec 1\nuser_usec 2\nuser_usec 3\n", "usage_usec 1", "usage_usec  1\n", "usage_usec\t1\n", "usage_usec 1\n\n", "usage_usec 1\nextra -1\n", "usage_usec 1\nextra 9223372036854775808\n", "usage_usec 1\nExtra 2\n"]:
+            expect(linux_cgroup_stats_cpu_usage_parse_v1(source).is_err()).to_equal(true)
+
+    it "enforces source and CPU field-count bounds using valid distinct rows":
+        var many = ""
+        var at: i64 = 0
+        while at < 65:
+            many = many + "counter" + str(at) + " 0\n"
+            at = at + 1
+        expect(linux_cgroup_stats_cpu_usage_parse_v1(many).is_err()).to_equal(true)
+        var long_scalar = ""
+        while long_scalar.byte_len() < 64: long_scalar = long_scalar + "1"
+        expect(linux_cgroup_stats_scalar_parse_v1(long_scalar + "\n").is_err()).to_equal(true)
+        var long_cpu = "usage_usec 0\n"
+        while long_cpu.byte_len() <= 8192: long_cpu = long_cpu + "other 0\n"
+        expect(linux_cgroup_stats_cpu_usage_parse_v1(long_cpu).is_err()).to_equal(true)
+
+    it "aggregates all four actual I/O counters across distinct devices":
+        val parsed = linux_cgroup_stats_io_parse_v1("8:0 rbytes=10 wbytes=20 rios=1 wios=2 dbytes=0 dios=0\n259:1 wios=4 rios=3 wbytes=40 rbytes=30\n").unwrap()
+        expect(parsed.read_bytes).to_equal(40)
+        expect(parsed.write_bytes).to_equal(60)
+        expect(parsed.read_operations).to_equal(4)
+        expect(parsed.write_operations).to_equal(6)
+        expect(parsed.device_count).to_equal(2)
+
+    it "treats only an actual empty I/O collection as available empty data":
+        val empty = linux_cgroup_stats_io_parse_v1("").unwrap()
+        expect(empty.device_count).to_equal(0)
+        expect(empty.read_bytes).to_equal(0)
+        expect(empty.write_bytes).to_equal(0)
+        expect(container_stats_io_validate_v1(ContainerStatsIoV1.Observed(empty)).is_ok()).to_equal(true)
+        expect(container_stats_io_validate_v1(ContainerStatsIoV1.Unsupported("linux-cgroup2-io-not-exposed")).is_ok()).to_equal(true)
+        expect(linux_cgroup_stats_io_parse_v1("\n").is_err()).to_equal(true)
+
+    it "rejects duplicate device or field records and missing required counters":
+        for source in ["8:0 rbytes=1 wbytes=2 rios=3 wios=4\n8:0 rbytes=5 wbytes=6 rios=7 wios=8\n", "8:0 rbytes=1 wbytes=2 rios=3 rbytes=4\n", "8:0 rbytes=1 wbytes=2 rios=3 extra=4\n", "8:0 rbytes=1 wbytes=2 rios=3 wios=4 extra=5 extra=6\n"]:
+            expect(linux_cgroup_stats_io_parse_v1(source).is_err()).to_equal(true)
+
+    it "refuses malformed or noncanonical device and numeric records":
+        for source in ["08:0 rbytes=1 wbytes=2 rios=3 wios=4\n", "8:-1 rbytes=1 wbytes=2 rios=3 wios=4\n", "4294967296:0 rbytes=1 wbytes=2 rios=3 wios=4\n", "8:0:1 rbytes=1 wbytes=2 rios=3 wios=4\n", "8:0 rbytes=1 wbytes=-2 rios=3 wios=4\n", "8:0 rbytes=1B wbytes=2 rios=3 wios=4\n", "8:0 rbytes=1 wbytes=2 rios=3 wios=4", "8:0  rbytes=1 wbytes=2 rios=3 wios=4\n"]:
+            expect(linux_cgroup_stats_io_parse_v1(source).is_err()).to_equal(true)
+
+    it "checks aggregate overflow separately from valid individual counters":
+        val maximum = linux_cgroup_stats_io_parse_v1("8:0 rbytes=9223372036854775807 wbytes=0 rios=0 wios=0\n").unwrap()
+        expect(maximum.read_bytes).to_equal(9223372036854775807)
+        expect(linux_cgroup_stats_io_parse_v1("8:0 rbytes=9223372036854775807 wbytes=0 rios=0 wios=0\n8:1 rbytes=1 wbytes=0 rios=0 wios=0\n").is_err()).to_equal(true)
+        expect(linux_cgroup_stats_io_parse_v1("8:0 rbytes=0 wbytes=0 rios=9223372036854775807 wios=0\n8:1 rbytes=0 wbytes=0 rios=1 wios=0\n").is_err()).to_equal(true)
+
+    it "bounds the actual device collection before accumulation":
+        var rows = ""
+        var device: i64 = 0
+        while device < 128:
+            rows = rows + "8:" + str(device) + " rbytes=0 wbytes=0 rios=0 wios=0\n"
+            device = device + 1
+        expect(linux_cgroup_stats_io_parse_v1(rows).unwrap().device_count).to_equal(128)
+        expect(linux_cgroup_stats_io_parse_v1(rows + "8:128 rbytes=0 wbytes=0 rios=0 wios=0\n").is_err()).to_equal(true)
+        var overlong = "8:0 rbytes=0 wbytes=0 rios=0 wios=0\n"
+        while overlong.byte_len() <= 32768: overlong = overlong + "8:1 rbytes=0 wbytes=0 rios=0 wios=0\n"
+        expect(linux_cgroup_stats_io_parse_v1(overlong).is_err()).to_equal(true)
+
+    it "rejects semantic zero fabrication and unsupported error masking":
+        expect(container_stats_counter_validate_v1(ContainerStatsCounterV1.Observed(0)).is_ok()).to_equal(true)
+        expect(container_stats_counter_validate_v1(ContainerStatsCounterV1.Observed(-1)).is_err()).to_equal(true)
+        expect(container_stats_counter_validate_v1(ContainerStatsCounterV1.Unsupported("permission-denied")).is_err()).to_equal(true)
+        val fabricated = ContainerStatsIoCountersV1(read_bytes: 1, write_bytes: 0, read_operations: 0, write_operations: 0, device_count: 0)
+        expect(container_stats_io_validate_v1(ContainerStatsIoV1.Observed(fabricated)).is_err()).to_equal(true)

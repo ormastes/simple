@@ -1,0 +1,495 @@
+# EasyFix Rules - `nil` outside `unsafe` (NIL-UNSAFE-001), Safe subset
+#
+# One detector: lint.rules.nil_outside_unsafe_rule.check_nil_outside_unsafe.
+# A finding gets an edit ONLY when the optional type is provable from this file:
+#
+#   (a) `x: T? = nil`              -> `= None`      (typed declaration / default)
+#   (b) `return nil`               -> `return None` (enclosing fn `-> T?` / `-> Option<T>`)
+#   (c) `Type(field: nil)`         -> `field: None` (Type declared here, field `T?`)
+#   (d) `x == nil` / `x != nil`    -> `x.is_none()` / `x.is_some()`
+#   (e) `case nil:`                -> `case None:`  (`match x:` on the same kind of x)
+#
+# For (d)/(e) `x` is a parameter or `val`/`var` of the enclosing fn declared `T?`
+# (every declaration of that name in the fn must be optional), or `self.f` where
+# the enclosing class/struct/impl target is declared once in this file with
+# `f: T?`. Everything else stays a lint finding without an edit: untyped
+# bindings, extern/rt_* results, indexed slot tables, tail `nil`, assignments,
+# lambdas, multi-line fn headers, fn-typed and union types, non-ASCII lines.
+#
+# Not in the default producer registry: the lint is allow-by-default, so plain
+# `simple fix` / `lint --fix` must not rewrite nil. The CLI opts in with
+# `simple fix --rule NIL-UNSAFE-001 --safe-only <files>`.
+
+use std.tooling.easy_fix.types.{FixConfidence, Replacement, EasyFix}
+use compiler.tools.lint.rules.nil_outside_unsafe_rule.{check_nil_outside_unsafe, nil_lint_indent_of, nil_lint_is_word_char, nil_lint_blank_triple_spans, nil_lint_code_of, nil_lint_triple_quote_count}
+
+struct NilFixTables:
+    code: [text]         # per line: strings, comments and docstrings blanked, columns kept
+    owner: [text]        # per line: enclosing class/struct/impl target name, or ""
+    field_keys: [text]   # "Type.field"
+    field_types: [text]
+    dup_types: [text]    # type names declared more than once (never trusted)
+
+fn _nil_code_lines(lines: [text]) -> [text]:
+    var out: [text] = []
+    var in_doc = false
+    for line in lines:
+        val quotes = if line.contains("\"\"\""): nil_lint_triple_quote_count(line) else: 0
+        if in_doc:
+            if quotes % 2 == 1: in_doc = false
+            out.push("")
+            continue
+        if quotes % 2 == 1:
+            in_doc = true
+            out.push("")
+            continue
+        val unquoted = if quotes > 0: nil_lint_blank_triple_spans(line) else: line
+        if unquoted.contains("\"") or unquoted.contains("'") or unquoted.contains("#"):
+            out.push(nil_lint_code_of(unquoted))
+        else:
+            out.push(unquoted)
+    out
+
+fn _nil_is_ident(s: text) -> bool:
+    if s == "": return false
+    val first = s.substring(0, 1)
+    if first >= "0" and first <= "9": return false
+    var i = 0
+    while i < s.byte_len():
+        if not nil_lint_is_word_char(s.substring(i, i + 1)): return false
+        i = i + 1
+    true
+
+fn _nil_leading_ident(s: text) -> text:
+    var i = 0
+    while i < s.byte_len() and nil_lint_is_word_char(s.substring(i, i + 1)):
+        i = i + 1
+    s.substring(0, i)
+
+fn _nil_strip_words(t: text, words: [text]) -> text:
+    var s = t
+    var changed = true
+    while changed:
+        changed = false
+        for w in words:
+            if s.starts_with(w):
+                s = s.substring(w.byte_len(), s.byte_len()).trim()
+                changed = true
+    s
+
+fn _nil_count(s: text, needle: text) -> i64:
+    var n = 0
+    var start = 0
+    while start < s.byte_len():
+        val at = s.index_of(needle, start)
+        if at < 0: break
+        n = n + 1
+        start = at + needle.byte_len()
+    n
+
+# True when `w` is a whole identifier in `s` (not a member `.w`).
+fn _nil_has_word(s: text, w: text) -> bool:
+    var start = 0
+    while start < s.byte_len():
+        val at = s.index_of(w, start)
+        if at < 0: return false
+        val end = at + w.byte_len()
+        val before_ok = at == 0 or (not nil_lint_is_word_char(s.substring(at - 1, at)) and s.substring(at - 1, at) != ".")
+        val after_ok = end >= s.byte_len() or not nil_lint_is_word_char(s.substring(end, end + 1))
+        if before_ok and after_ok: return true
+        start = end
+    false
+
+# `T?` or `Option<T>`; fn types, unions and raw pointers are never trusted.
+fn _nil_optional_type(ty: text) -> bool:
+    val t = ty.trim()
+    if t == "" or t.contains("->") or t.contains("|") or t.contains("&") or t.contains("=") or t.contains("*"): return false
+    if t.starts_with("fn(") or t.starts_with("fn "): return false
+    if _nil_count(t, "<") != _nil_count(t, ">") or _nil_count(t, "(") != _nil_count(t, ")") or _nil_count(t, "[") != _nil_count(t, "]"): return false
+    if t.ends_with("?"): return t.byte_len() > 1
+    t.starts_with("Option<") and t.ends_with(">")
+
+# `[modifiers] IDENT: TYPE [= default]` -> [IDENT, TYPE]; [] for any other shape.
+fn _nil_typed_name(seg: text) -> [text]:
+    val s = _nil_strip_words(seg.trim(), ["pub ", "val ", "var ", "mut ", "static ", "const "])
+    val colon = s.index_of(":", 0)
+    if colon <= 0: return []
+    val name = s.substring(0, colon).trim()
+    if not _nil_is_ident(name): return []
+    var ty = s.substring(colon + 1, s.byte_len())
+    val eq = ty.index_of(" = ", 0)
+    if eq >= 0: ty = ty.substring(0, eq)
+    [name, ty.trim()]
+
+fn _nil_class_header_name(t: text) -> text:
+    val s = _nil_strip_words(t, ["pub ", "export "])
+    if not s.ends_with(":"): return ""
+    if s.starts_with("class "): return _nil_leading_ident(s.substring(6, s.byte_len()).trim())
+    if s.starts_with("struct "): return _nil_leading_ident(s.substring(7, s.byte_len()).trim())
+    ""
+
+fn _nil_impl_header_name(t: text) -> text:
+    if not t.starts_with("impl ") or not t.ends_with(":"): return ""
+    val body = t.substring(5, t.byte_len() - 1)
+    val at = body.index_of(" for ", 0)
+    val target = if at >= 0: body.substring(at + 5, body.byte_len()) else: body
+    _nil_leading_ident(target.trim())
+
+fn _nil_tables(lines: [text]) -> NilFixTables:
+    val code = _nil_code_lines(lines)
+    var owner: [text] = []
+    var field_keys: [text] = []
+    var field_types: [text] = []
+    var seen_types: [text] = []
+    var dup_types: [text] = []
+    var cur = ""
+    var cur_indent = -1
+    var cur_is_decl = false
+    var body_indent = -1
+    for c in code:
+        val t = c.trim()
+        if t == "":
+            owner.push(cur)
+            continue
+        val indent = nil_lint_indent_of(c)
+        if cur != "" and indent <= cur_indent:
+            cur = ""
+            cur_indent = -1
+        val class_name = _nil_class_header_name(t)
+        val impl_name = if class_name == "": _nil_impl_header_name(t) else: ""
+        if class_name != "" or impl_name != "":
+            cur = if class_name != "": class_name else: impl_name
+            cur_indent = indent
+            cur_is_decl = class_name != ""
+            body_indent = -1
+            if cur_is_decl:
+                if seen_types.contains(cur): dup_types.push(cur)
+                seen_types.push(cur)
+            owner.push("")
+            continue
+        owner.push(cur)
+        if cur != "" and cur_is_decl:
+            if body_indent < 0: body_indent = indent
+            if indent == body_indent:
+                val tn = _nil_typed_name(t)
+                if tn.len() == 2:
+                    field_keys.push(cur + "." + tn[0])
+                    field_types.push(tn[1])
+    NilFixTables(code: code, owner: owner, field_keys: field_keys, field_types: field_types, dup_types: dup_types)
+
+fn _nil_field_optional(tables: NilFixTables, type_name: text, field: text) -> bool:
+    if type_name == "" or tables.dup_types.contains(type_name): return false
+    val key = type_name + "." + field
+    var hits = 0
+    var optional = false
+    var i = 0
+    while i < tables.field_keys.len():
+        if tables.field_keys[i] == key:
+            hits = hits + 1
+            optional = _nil_optional_type(tables.field_types[i])
+        i = i + 1
+    hits == 1 and optional
+
+fn _nil_is_fn_header(t: text) -> bool:
+    val s = _nil_strip_words(t, ["pub ", "export ", "static ", "async "])
+    (s.starts_with("fn ") or s.starts_with("me ")) and s.ends_with(":")
+
+# A block opener a statement may sit under without changing what `return` or a
+# local name refers to. Lambdas and anything unrecognised are not plain.
+fn _nil_is_plain_block(t: text) -> bool:
+    if not t.ends_with(":") or t.contains("\\") or t.contains("fn("): return false
+    for kw in ["if ", "elif ", "else:", "for ", "while ", "match ", "case ", "loop:", "try:", "catch ", "catch:"]:
+        if t.starts_with(kw): return true
+    false
+
+# Line index of the single-line fn header that owns line `li`, or -1.
+fn _nil_enclosing_fn(code: [text], li: i64) -> i64:
+    var cur = nil_lint_indent_of(code[li])
+    var i = li - 1
+    while i >= 0:
+        val t = code[i].trim()
+        if t != "":
+            val indent = nil_lint_indent_of(code[i])
+            if indent < cur:
+                if _nil_is_fn_header(t): return i
+                if not _nil_is_plain_block(t): return -1
+                cur = indent
+        i = i - 1
+    -1
+
+fn _nil_fn_end(code: [text], header: i64) -> i64:
+    val indent = nil_lint_indent_of(code[header])
+    var i = header + 1
+    while i < code.len():
+        if code[i].trim() != "" and nil_lint_indent_of(code[i]) <= indent: return i
+        i = i + 1
+    code.len()
+
+# Byte index of the `)` matching the first `(` of a fn header, or -1.
+fn _nil_params_close(t: text, open: i64) -> i64:
+    var depth = 0
+    var i = open
+    while i < t.byte_len():
+        val ch = t.substring(i, i + 1)
+        if ch == "(": depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0: return i
+        i = i + 1
+    -1
+
+fn _nil_fn_return_type(t: text) -> text:
+    val open = t.index_of("(", 0)
+    if open < 0: return ""
+    val close = _nil_params_close(t, open)
+    if close < 0: return ""
+    val rest = t.substring(close + 1, t.byte_len()).trim()
+    if not rest.starts_with("->") or not rest.ends_with(":"): return ""
+    rest.substring(2, rest.byte_len() - 1).trim()
+
+fn _nil_fn_params(t: text) -> [text]:
+    var out: [text] = []
+    val open = t.index_of("(", 0)
+    if open < 0: return out
+    val close = _nil_params_close(t, open)
+    if close < 0: return out
+    val params = t.substring(open + 1, close)
+    var depth = 0
+    var start = 0
+    var i = 0
+    while i < params.byte_len():
+        val ch = params.substring(i, i + 1)
+        if ch == "(" or ch == "[" or ch == "{{" or ch == "<": depth = depth + 1
+        elif ch == ")" or ch == "]" or ch == "}}": depth = depth - 1
+        elif ch == ">" and i > 0 and params.substring(i - 1, i) != "-": depth = depth - 1
+        elif ch == "," and depth == 0:
+            out.push(params.substring(start, i))
+            start = i + 1
+        i = i + 1
+    if params.substring(start, params.byte_len()).trim() != "": out.push(params.substring(start, params.byte_len()))
+    out
+
+# Declared types of every `val NAME` / `var NAME` on one line ("" = untyped).
+fn _nil_decl_types(c: text, name: text) -> [text]:
+    var out: [text] = []
+    for kw in ["val ", "var "]:
+        val needle = kw + name
+        var start = 0
+        while start < c.byte_len():
+            val at = c.index_of(needle, start)
+            if at < 0: break
+            val end = at + needle.byte_len()
+            start = end
+            if at > 0 and nil_lint_is_word_char(c.substring(at - 1, at)): continue
+            if end < c.byte_len() and nil_lint_is_word_char(c.substring(end, end + 1)): continue
+            val rest = c.substring(end, c.byte_len()).trim()
+            if not rest.starts_with(":"):
+                out.push("")
+                continue
+            var ty = rest.substring(1, rest.byte_len())
+            val eq = ty.index_of(" = ", 0)
+            if eq >= 0: ty = ty.substring(0, eq)
+            out.push(ty.trim())
+    out
+
+# True when every binding of `name` visible at line `li` is declared optional
+# in the enclosing fn: a typed parameter and/or typed `val`/`var`, with no loop,
+# pattern or destructuring binding of the same name anywhere in that fn.
+fn _nil_local_optional(code: [text], li: i64, name: text) -> bool:
+    val h = _nil_enclosing_fn(code, li)
+    if h < 0: return false
+    var proven = false
+    for p in _nil_fn_params(code[h].trim()):
+        val tn = _nil_typed_name(p)
+        if tn.len() == 2 and tn[0] == name:
+            if not _nil_optional_type(tn[1]): return false
+            proven = true
+        elif tn.len() != 2 and _nil_has_word(p, name):
+            return false
+    val end = _nil_fn_end(code, h)
+    var i = h + 1
+    while i < end:
+        val c = code[i]
+        if c.contains(name):
+            val t = c.trim()
+            if t.starts_with("for "):
+                val in_at = t.index_of(" in ", 0)
+                val vars = if in_at >= 0: t.substring(0, in_at) else: t
+                if _nil_has_word(vars, name): return false
+            if t.starts_with("case "):
+                val colon = t.index_of(":", 0)
+                val pattern = if colon >= 0: t.substring(0, colon) else: t
+                if _nil_has_word(pattern, name): return false
+            if (c.contains("val (") or c.contains("var (") or c.contains("\\")) and _nil_has_word(c, name): return false
+            for ty in _nil_decl_types(c, name):
+                if not _nil_optional_type(ty): return false
+                if i <= li: proven = true
+        i = i + 1
+    proven
+
+fn _nil_operand_ok(operand: text) -> bool:
+    if operand.starts_with("self."): return _nil_is_ident(operand.substring(5, operand.byte_len()))
+    _nil_is_ident(operand)
+
+fn _nil_expr_optional(tables: NilFixTables, li: i64, operand: text) -> bool:
+    if operand.starts_with("self."):
+        return _nil_field_optional(tables, tables.owner[li], operand.substring(5, operand.byte_len()))
+    _nil_local_optional(tables.code, li, operand)
+
+# Text after the last top-level `,` or unmatched opener: the declaration that
+# an `= nil` initialises (`var x: T?`, or one parameter of a fn header).
+fn _nil_last_segment(lhs: text) -> text:
+    var depth = 0
+    var i = lhs.byte_len()
+    while i > 0:
+        val ch = lhs.substring(i - 1, i)
+        if ch == ")" or ch == "]" or ch == "}}" or ch == ">": depth = depth + 1
+        elif ch == "(" or ch == "[" or ch == "{{" or ch == "<":
+            if depth == 0: return lhs.substring(i, lhs.byte_len())
+            depth = depth - 1
+        elif ch == "," and depth == 0:
+            return lhs.substring(i, lhs.byte_len())
+        i = i - 1
+    lhs
+
+# Name called by the `(` that encloses column `upto` of line `li` (looking back
+# at most 40 lines); "" for a method call, a bracket/brace, or anything unclear.
+fn _nil_enclosing_callee(code: [text], li: i64, upto: i64) -> text:
+    var depth = 0
+    var row = li
+    var s = code[li].substring(0, upto)
+    while true:
+        var i = s.byte_len()
+        while i > 0:
+            val ch = s.substring(i - 1, i)
+            if ch == ")" or ch == "]" or ch == "}}": depth = depth + 1
+            elif ch == "(" or ch == "[" or ch == "{{":
+                if depth == 0:
+                    if ch != "(": return ""
+                    var k = i - 1
+                    while k > 0 and nil_lint_is_word_char(s.substring(k - 1, k)):
+                        k = k - 1
+                    if k > 0 and s.substring(k - 1, k) == ".": return ""
+                    return s.substring(k, i - 1)
+                depth = depth - 1
+            i = i - 1
+        row = row - 1
+        if row < 0 or li - row > 40: return ""
+        s = code[row]
+        if s.trim().ends_with(":"): return ""
+    ""
+
+fn _nil_ends_with_word(s: text, words: [text]) -> bool:
+    for w in words:
+        if s.ends_with(w):
+            val at = s.byte_len() - w.byte_len()
+            if at == 0 or not nil_lint_is_word_char(s.substring(at - 1, at)): return true
+    false
+
+# (b): `return nil` alone, or as the whole body of a one-line if/elif/else/case.
+fn _nil_is_plain_return(code_line: text, before_trim: text) -> bool:
+    if before_trim == "return": return true
+    if not before_trim.ends_with("return"): return false
+    val head = before_trim.substring(0, before_trim.byte_len() - 6).trim()
+    if not head.ends_with(":") or head.contains("\\") or head.contains("fn("): return false
+    val t = code_line.trim()
+    t.starts_with("if ") or t.starts_with("elif ") or t.starts_with("else:") or t.starts_with("case ")
+
+pub fn check_nil_unsafe(source: text, file: text) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    val findings = check_nil_outside_unsafe(source)
+    if findings.len() == 0: return fixes
+    val lines = source.split("\n")
+    val tables = _nil_tables(lines)
+    var offsets: [i64] = []
+    var off = 0
+    for line in lines:
+        offsets.push(off)
+        off = off + line.byte_len() + 1
+    for f in findings:
+        val li = f.line_num - 1
+        val col = f.column - 1
+        val line = lines[li]
+        # Columns are byte columns; a non-ASCII line is left to a human.
+        if line.len() != line.byte_len(): continue
+        val code = tables.code[li]
+        if col + 3 > code.byte_len() or line.substring(col, col + 3) != "nil": continue
+        val before = code.substring(0, col)
+        val bt = before.trim()
+        val after = code.substring(col + 3, code.byte_len()).trim()
+        var start = col
+        var new_text = ""
+        var what = ""
+        if bt.ends_with("==") or bt.ends_with("!="):
+            # (d) presence test on a proven-optional local or self field
+            val lhs = bt.substring(0, bt.byte_len() - 2).trim()
+            var k = lhs.byte_len()
+            while k > 0 and (nil_lint_is_word_char(lhs.substring(k - 1, k)) or lhs.substring(k - 1, k) == "."):
+                k = k - 1
+            val operand = lhs.substring(k, lhs.byte_len())
+            val prefix = lhs.substring(0, k).trim()
+            val prefix_ok = prefix == "" or prefix.ends_with("(") or prefix.ends_with(",") or prefix.ends_with(":") or (prefix.ends_with("=") and not prefix.ends_with("==") and not prefix.ends_with("!=") and not prefix.ends_with("<=") and not prefix.ends_with(">=")) or _nil_ends_with_word(prefix, ["if", "elif", "while", "and", "or", "not", "return", "assert"])
+            val after_ok = after == "" or after.starts_with(":") or after.starts_with(")") or after.starts_with(",") or after.starts_with("and ") or after.starts_with("or ")
+            if prefix_ok and after_ok and not code.contains("\\") and not code.contains("fn(") and _nil_operand_ok(operand) and _nil_expr_optional(tables, li, operand):
+                # `lhs` is a prefix of `before` up to trailing spaces, so the
+                # operand starts at the same column in the source line.
+                start = before.index_of(lhs, 0) + k
+                if bt.ends_with("=="):
+                    new_text = operand + ".is_none()"
+                    what = "`{operand} == nil` -> `{operand}.is_none()`"
+                else:
+                    new_text = operand + ".is_some()"
+                    what = "`{operand} != nil` -> `{operand}.is_some()`"
+        elif bt == "case":
+            # (e) `case nil:` under `match x:` with x proven optional
+            if after.starts_with(":"):
+                val indent = nil_lint_indent_of(code)
+                var m = li - 1
+                while m >= 0 and (tables.code[m].trim() == "" or nil_lint_indent_of(tables.code[m]) >= indent):
+                    m = m - 1
+                if m >= 0:
+                    val mt = tables.code[m].trim()
+                    if mt.starts_with("match ") and mt.ends_with(":"):
+                        val subject = mt.substring(6, mt.byte_len() - 1).trim()
+                        if _nil_operand_ok(subject) and _nil_expr_optional(tables, m, subject):
+                            new_text = "None"
+                            what = "`case nil:` -> `case None:` (`{subject}` is optional)"
+        elif bt.ends_with("return"):
+            # (b) `return nil` in a fn declared `-> T?` / `-> Option<T>`
+            if after == "" and _nil_is_plain_return(code, bt):
+                val h = _nil_enclosing_fn(tables.code, li)
+                if h >= 0:
+                    val ret = _nil_fn_return_type(tables.code[h].trim())
+                    if _nil_optional_type(ret):
+                        new_text = "None"
+                        what = "`return nil` -> `return None` (fn returns `{ret}`)"
+        elif bt.ends_with("="):
+            # (a) `x: T? = nil`
+            val lhs = bt.substring(0, bt.byte_len() - 1)
+            val tn = _nil_typed_name(_nil_last_segment(lhs))
+            if (after == "" or after.starts_with(",") or after.starts_with(")")) and tn.len() == 2 and _nil_optional_type(tn[1]):
+                new_text = "None"
+                what = "`{tn[0]}: {tn[1]} = nil` -> `= None`"
+        elif bt.ends_with(":"):
+            # (c) `Type(field: nil)` with `field: T?` declared on Type in this file
+            val pre = before.substring(0, before.index_of(bt, 0) + bt.byte_len() - 1)
+            var k = pre.byte_len()
+            while k > 0 and nil_lint_is_word_char(pre.substring(k - 1, k)):
+                k = k - 1
+            val field = pre.substring(k, pre.byte_len())
+            val lead = pre.substring(0, k).trim()
+            if _nil_is_ident(field) and (lead == "" or lead.ends_with("(") or lead.ends_with(",")) and (after == "" or after.starts_with(",") or after.starts_with(")")):
+                val callee = _nil_enclosing_callee(tables.code, li, k)
+                if _nil_is_ident(callee) and _nil_field_optional(tables, callee, field):
+                    new_text = "None"
+                    what = "`{field}: nil` -> `{field}: None` (`{callee}.{field}` is optional)"
+        if new_text == "": continue
+        var fix = EasyFix.create(
+            id: "NIL-UNSAFE-001:{offsets[li] + start}",
+            description: what,
+            confidence: FixConfidence.Safe
+        )
+        fix.add_replacement(Replacement.create(
+            file: file, start: offsets[li] + start, end: offsets[li] + col + 3, line: f.line_num, column: start + 1, new_text: new_text))
+        fixes.push(fix)
+    fixes

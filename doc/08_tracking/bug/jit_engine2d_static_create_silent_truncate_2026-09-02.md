@@ -1,8 +1,11 @@
 # JIT: direct `Engine2D.create_with_backend_fast` from flat main silently truncates (trait dispatch)
 
 - **Filed:** 2026-09-02
-- **Status:** OPEN — observation, needs a minimal repro reduction and a codegen
-  owner; do NOT paper over by de-JITing the path
+- **Status:** FIXED 2026-11-11 (lane ne12, verification-limited) — root trait-dispatch
+  cause fixed in seed 2026-10-20 (6da314289493 + efd9c18cbdaf; was
+  verification-pending on a redeployed seed); filed program shape completes fully
+  under JIT on fresh seed 46fe8f6b6def (Windows non-Metal fallback path); the
+  Darwin/Metal lane itself was not re-runnable on this host
 - **Platform:** aarch64-apple-darwin, seed driver, `gui,metal,runtime-symbol-table`
 
 ## Symptom
@@ -63,3 +66,53 @@ JIT-compile and where allocations land), not a deterministic miscompile of
 that one function. The ground-rect injection was reverted; the Metal lane
 keeps `engine.clear` per frame instead. Root cause NOT found; treat any new
 JIT-lane heap-corruption crash in this app as this family until reduced.
+
+## Triage 2026-11-11 (lane ne12, seed-smoke on fresh seed 46fe8f6b6def)
+
+**Verdict: FIXED (verification-limited) — kept honest about what was re-run.**
+
+Root cause: the filed silent truncation sat on the same trait-dispatch defect
+as `native_with_trait_impl_no_vtable_duck_trap_2026-07-28` (`class Engine2D
+with DrawIrRenderTarget` — no vtable registered, duck-dispatch slot). That
+doc records: fix implemented 2026-10-20 in the seed
+(`6da314289493` "trait dispatch for `class X with Trait` and Option<Trait>
+payloads" + `efd9c18cbdaf` single-trait restriction; both `DrawIrRenderTarget`
+conformers are single-trait mixin classes), status
+"fix-implemented-verification-pending: needs a redeployed seed + native build
+of the Draw IR executor". Today's fresh seed (build-commit 46fe8f6b6def,
+2026-11-11) IS the redeployed seed that verification was waiting for.
+
+Seed-smoke evidence (this lane, Windows host): the filed program shape
+(flat `main`, direct static `Engine2D.create_with_backend_fast(320, 240, ...)`,
+then `backend_name()`, `clear`, `shutdown`) now completes fully under the
+DEFAULT JIT lane — all four lines printed, exit 0, no truncation, no trap:
+
+```
+JIT:        start / created backend=cpu / cleared ok / shutdown ok
+interpreter: start / created backend=cpu / cleared ok / shutdown ok
+```
+
+(`build/review/ne12/row5_engine2d_shape.spl`; "cpu" exercises the documented
+non-Metal fallback of `create_with_backend_fast`, which forwards to
+`create_with_backend` — the Metal-only fast path is Darwin-only.)
+
+**Verification limit:** the exact filed lane (aarch64-apple-darwin, Metal,
+`create_with_backend_fast(..., "metal")`) cannot execute on this Windows host —
+Metal does not exist here, and this lane is forbidden from native builds. The
+Darwin JIT+Metal re-run remains for a macOS lane; if it still truncates there,
+reopen with the macOS repro. The sibling heap-corruption observation in this
+doc (composition-mutation crash family) was explicitly "treat any new crash in
+this app as this family until reduced" — no new instance was observed in this
+lane's runs.
+
+Not carried by seedfix A (fa6939eb4b9e is JIT tuple unbox; unrelated to
+trait/vtable dispatch).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne12: FIXED at tip (root trait-dispatch cause resolved; verification-limited note recorded there stands). No independent re-verification in this lane.
+
+## 2026-11-13 follow-up (Linux aarch64, lane uia)
+
+Not re-verifiable on the JIT here. On release/1.0.0 5221a5058a8, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5 the record's program (Engine2D.create_with_backend_fast 320x240 cpu, clear, shutdown) prints all four lines and exits 0 both by default and with SIMPLE_EXECUTION_MODE=interpret, but the default run is not a JIT run: the module is demoted to the interpreter (ambiguous call to env_get from engine2d sffi_vulkan.spl / backend_vulkan, see jit_co_compiled_definition_ambiguity_debt_2026-09-15), and SIMPLE_JIT_STRICT=1 exits 1 on that lowering error. So the JIT static-create path this record is about was not exercised.
+

@@ -1,0 +1,233 @@
+# Schema-aware V1 import is a proposal, never admission or settlement.
+# The snapshot and signed patch are authored under accepted_original_schema.
+# accepted_* inputs come from the host, independently of submitted bytes.
+use std.scv.solver_contract_v1.*
+use std.scv.solver_host_v1.{solver_host_preflight_v1, solver_host_result_v1}
+use std.scv.solver_budget_v1.*
+use std.scv.solver_db_budget_v1.*
+use std.scv.db_schema_identity_v2.*
+use std.scv.db_schema_codec_v2.*
+use std.scv.db_schema_migration_v2.*
+use std.scv.db_reducer.*
+use std.scv.db_patch.*
+use std.scv.db_patch_codec.{db_patch_decode}
+use std.scv.db_snapshot.{db_snapshot_decode, db_snapshot_encode}
+use std.scv.db_policy_codec.{DbPolicyConfig, db_policy_decode}
+use std.scv.db_canonical.{db_canonical_text}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+
+struct DbRowsSchemaInputV1:
+    submitted_snapshot: text
+    submitted_patch: text
+    accepted_policy: text
+    accepted_policy_revision: text
+    historical_binding: DbV1SchemaBindingV2
+    accepted_original_schema: DbSchemaV2
+    accepted_current_schema: DbSchemaV2
+
+struct DbRowsSchemaSolveV1:
+    result: SolveResultV1
+    inputs: DbRowsSchemaInputV1
+    uid_edits: [DbCellEditV2]
+    preview: MergePlan?
+
+struct DbRowsSchemaPreviewV1:
+    preview: MergePlan
+    uid_edits: [DbCellEditV2]
+
+fn solver_db_rows_schema_identity_v1(input: DbRowsSchemaInputV1) -> Result<text, text>:
+    val original = input.accepted_original_schema
+    val current = input.accepted_current_schema
+    val historical = input.historical_binding
+    val checked_original = db_schema_check_revision_v2(original)?
+    val checked_current = db_schema_check_revision_v2(current)?
+    if historical.original_schema_revision != original.revision: return Err("SCVDB_SCHEMA_ORIGINAL_REVISION_REQUIRED")
+    if historical.binding_digest != db_schema_v1_binding_digest_v2(historical.v1_schema_revision, original)?: return Err("SCVDB_SCHEMA_V1_BINDING_DIGEST")
+    val material = solver_frame_v1(sha256_u8_hex(db_schema_bytes_v2(original)?)) + solver_frame_v1(sha256_u8_hex(db_schema_bytes_v2(current)?)) + solver_frame_v1(historical.v1_schema_revision) + solver_frame_v1(historical.binding_digest)
+    Ok(sha256_text("scv-db-rows-schema-identity-v1" + material))
+
+fn solver_db_rows_schema_column_v1(schema: DbSchemaV2, name: text) -> Result<i64, text>:
+    val canonical = db_canonical_text(name)?
+    var index = 0
+    while index < schema.columns.len():
+        if not schema.columns[index].tombstone and db_canonical_text(schema.columns[index].name)? == canonical:
+            return Ok(index)
+        index = index + 1
+    Err("SCVDB_SCHEMA_V1_NAME_UNMAPPED")
+
+fn solver_db_rows_schema_evolution_v1(input: DbRowsSchemaInputV1) -> Result<bool, text>:
+    val original = input.accepted_original_schema
+    val current = input.accepted_current_schema
+    if not db_schema_uid_equal_v2(original.table_uid, current.table_uid): return Err("SCVDB_SCHEMA_TABLE_MISMATCH")
+    if original.tombstone or current.tombstone: return Err("SCVDB_SCHEMA_TABLE_TOMBSTONED")
+    if original.table_name != current.table_name: return Err("SCVDB_SCHEMA_TABLE_MAPPING_REQUIRED")
+    for source in original.columns:
+        val index = db_schema_column_index_v2(current, source.column_uid)
+        if source.tombstone:
+            if index >= 0 and not current.columns[index].tombstone: return Err("SCVDB_SCHEMA_DROP_RECREATE_IDENTITY")
+            continue
+        if index < 0: return Err("SCVDB_SCHEMA_COLUMN_UNMAPPED")
+        val target = current.columns[index]
+        if target.tombstone: return Err("SCVDB_SCHEMA_DROP_EDIT_CONFLICT")
+        if source.logical_type != target.logical_type: return Err("SCVDB_SCHEMA_MIGRATION_REQUIRED")
+        if source.merge_policy != target.merge_policy: return Err("SCVDB_SCHEMA_POLICY_MIGRATION_REQUIRED")
+        # Only attribute renames/presentation order are projected. Default,
+        # nullability, constraint, visibility and introduction changes need a
+        # separately reviewed migration; this adapter cannot execute one.
+        var comparable = source
+        comparable.name = target.name
+        comparable.presentation_order = target.presentation_order
+        if db_schema_column_digest_v2(comparable)? != db_schema_column_digest_v2(target)?: return Err("SCVDB_SCHEMA_DEFINITION_MIGRATION_REQUIRED")
+    for column in current.columns:
+        if db_schema_column_index_v2(original, column.column_uid) >= 0: continue
+        if column.tombstone or column.constraints.len() > 0: return Err("SCVDB_SCHEMA_ADDITION_MIGRATION_REQUIRED")
+        if not column.nullable:
+            match column.introduction_default:
+                NoDefault: return Err("SCVDB_SCHEMA_BACKFILL_REQUIRED")
+                Constant(_): ()
+    Ok(true)
+
+fn solver_db_rows_schema_fields_v1(input: DbRowsSchemaInputV1, fields: [DbField], project: bool) -> Result<[DbField], text>:
+    var mapped: [DbField] = []
+    for field in fields:
+        val source = input.accepted_original_schema.columns[solver_db_rows_schema_column_v1(input.accepted_original_schema, field.name)?]
+        val index = db_schema_column_index_v2(input.accepted_current_schema, source.column_uid)
+        if index < 0: return Err("SCVDB_SCHEMA_COLUMN_UNMAPPED")
+        val target = input.accepted_current_schema.columns[index]
+        val typed = db_schema_cell_type_v2(target, db_schema_v1_state_v2(field.value))?
+        var name = field.name
+        if project: name = target.name
+        for prior in mapped:
+            if db_canonical_text(prior.name)? == db_canonical_text(name)?: return Err("SCVDB_SCHEMA_NAME_COLLISION")
+        mapped.push(DbField(name: name, value: field.value))
+    Ok(mapped)
+
+fn solver_db_rows_schema_preview_v1(input: DbRowsSchemaInputV1, state: MaterializedState, patch: DbPatch, config: DbPolicyConfig) -> Result<DbRowsSchemaPreviewV1, text>:
+    val evolution = solver_db_rows_schema_evolution_v1(input)?
+    if config.merge.fields.len() == 0: return Err("SCVDB_SCHEMA_POLICY_MAPPING_REQUIRED")
+    val kind = config.merge.fields[0].kind
+    for field in config.merge.fields:
+        if field.kind != kind: return Err("SCVDB_SCHEMA_TABLE_MAPPING_REQUIRED")
+        val column = input.accepted_original_schema.columns[solver_db_rows_schema_column_v1(input.accepted_original_schema, field.field)?]
+        # This bounded schema route supports scalar updates. Other declared
+        # algebras remain on the existing V1 reducer route until mapped.
+        match field.rule:
+            ScalarConflict:
+                if column.merge_policy != "scalar-conflict-v1": return Err("SCVDB_SCHEMA_POLICY_MIGRATION_REQUIRED")
+            _: return Err("SCVDB_SCHEMA_POLICY_MAPPING_REQUIRED")
+    for constraint in config.merge.constraints:
+        if constraint.kind != kind: return Err("SCVDB_SCHEMA_TABLE_MAPPING_REQUIRED")
+        for name in constraint.key_fields + constraint.unique_fields:
+            val mapped = solver_db_rows_schema_column_v1(input.accepted_original_schema, name)?
+        for reference in constraint.references:
+            val mapped = solver_db_rows_schema_column_v1(input.accepted_original_schema, reference.field)?
+    for row in state.rows:
+        if row.kind != kind: return Err("SCVDB_SCHEMA_TABLE_MAPPING_REQUIRED")
+        val checked_fields = solver_db_rows_schema_fields_v1(input, row.fields, false)?
+    var edits: [DbCellEditV2] = []
+    for operation in patch.operations:
+        match operation:
+            UpdateFields(row, authored, condition):
+                if db_ref_kind(row) != kind: return Err("SCVDB_SCHEMA_TABLE_MAPPING_REQUIRED")
+                val checked_fields = solver_db_rows_schema_fields_v1(input, condition.expected_fields, false)?
+                for edit in authored:
+                    edits.push(db_schema_adapt_v1_edit_v2(input.historical_binding, input.accepted_original_schema, input.accepted_current_schema, patch, row, edit)?)
+            _: return Err("SCVDB_SCHEMA_OPERATION_MAPPING_REQUIRED")
+    # Preserve the authored patch, schema stamp, payload digest and signature.
+    # The reducer still checks scalar conflicts, causal history and the entire
+    # original-policy constraint closure before any name projection.
+    var preview = db_plan_patch(state, patch, config.merge)?
+    if preview.conflicts.len() == 0:
+        var projected = preview.proposed
+        var rows: [DbRow] = []
+        for row in projected.rows:
+            var mapped = row
+            mapped.fields = solver_db_rows_schema_fields_v1(input, row.fields, true)?
+            rows.push(mapped)
+        projected.rows = rows
+        projected.revision = db_state_digest(projected)?
+        preview.proposed = projected
+    Ok(DbRowsSchemaPreviewV1(preview: preview, uid_edits: edits))
+
+fn solver_db_rows_schema_refusal_v1(request: SolveRequestV1, policy: SolverHostPolicyV1, input: DbRowsSchemaInputV1, status: text, code: text, spent: i64) -> DbRowsSchemaSolveV1:
+    var conflicts: [SolverConflictV1] = []
+    if code != "": conflicts.push(SolverConflictV1(domain: "db.rows", code: code, subject: "schema-bound-v1-import", input_key: ""))
+    DbRowsSchemaSolveV1(result: solver_host_result_v1(request, policy, status, nil, conflicts, spent, spent), inputs: input, uid_edits: [], preview: nil)
+
+fn solve_db_rows_schema_v1(request: SolveRequestV1, policy: SolverHostPolicyV1, input: DbRowsSchemaInputV1) -> DbRowsSchemaSolveV1:
+    """Retain exact submitted text on every outcome; never normalize on failure."""
+    var budget = solver_budget_host_v1(request, policy)
+    budget = solver_budget_texts_v1(budget, [input.submitted_snapshot, input.submitted_patch, input.accepted_policy, input.accepted_policy_revision, input.historical_binding.v1_schema_revision, input.historical_binding.original_schema_revision, input.historical_binding.binding_digest])
+    budget = solver_budget_schema_v1(budget, input.accepted_original_schema)
+    budget = solver_budget_schema_v1(budget, input.accepted_current_schema)
+    var refusal = "resource_limited"
+    if not budget.limited: refusal = solver_host_preflight_v1(request, policy, "db.rows", budget.spent, budget.spent)
+    if request.cancelled: refusal = "cancelled"
+    if refusal != "": return solver_db_rows_schema_refusal_v1(request, policy, input, refusal, "", budget.spent)
+    val binding = request.binding
+    if binding.profile_digest != "db-rows-schema-v1": return solver_db_rows_schema_refusal_v1(request, policy, input, "unsupported", "SCVDB_SCHEMA_PROFILE_REQUIRED", budget.spent)
+    if (binding.base_model_id != sha256_text(input.submitted_snapshot) or binding.left_model_id != sha256_text(input.submitted_patch) or
+        binding.right_model_id != sha256_text(input.accepted_policy) or binding.expected_root != binding.base_model_id or
+        binding.policy_revision != input.accepted_policy_revision or binding.configuration_digest != input.accepted_policy_revision or
+        binding.schema_revision != input.accepted_current_schema.revision):
+        return solver_db_rows_schema_refusal_v1(request, policy, input, "failed", "SCVDB_SCHEMA_INPUT_BINDING", budget.spent)
+    var identity = ""
+    match solver_db_rows_schema_identity_v1(input):
+        Ok(value): identity = value
+        Err(code): return solver_db_rows_schema_refusal_v1(request, policy, input, "needs_inputs", code, budget.spent)
+    if binding.identity_map_revision != identity: return solver_db_rows_schema_refusal_v1(request, policy, input, "failed", "SCVDB_SCHEMA_IDENTITY_BINDING", budget.spent)
+    val state = match db_snapshot_decode(input.submitted_snapshot):
+        Ok(value): value
+        Err(code): return solver_db_rows_schema_refusal_v1(request, policy, input, "failed", code, budget.spent)
+    val patch = match db_patch_decode(input.submitted_patch):
+        Ok(value): value
+        Err(code): return solver_db_rows_schema_refusal_v1(request, policy, input, "failed", code, budget.spent)
+    val config = match db_policy_decode(input.accepted_policy, binding.policy_revision):
+        Ok(value): value
+        Err(code): return solver_db_rows_schema_refusal_v1(request, policy, input, "failed", code, budget.spent)
+    budget = solver_budget_state_patch_v1(budget, state, patch)
+    budget = solver_budget_db_config_v1(budget, config)
+    # Name-to-UID projection and the V2 edit owner perform bounded searches.
+    # Charge their products before entering them, including membership scans
+    # across all edits in an original signed patch.
+    val columns = input.accepted_original_schema.columns.len() + input.accepted_current_schema.columns.len()
+    for row in state.rows:
+        budget = solver_budget_charge_v1(budget, row.fields.len() * columns)
+    var edit_count = 0
+    for operation in patch.operations:
+        match operation:
+            UpdateFields(_, authored, condition):
+                edit_count = edit_count + authored.len()
+                budget = solver_budget_charge_v1(budget, (authored.len() + condition.expected_fields.len()) * columns)
+            _: ()
+    budget = solver_budget_count_v1(budget, edit_count)
+    # The existing edit adapter independently rechecks original patch/schema
+    # digests for each edit. Account those repeated owner checks explicitly.
+    budget = solver_budget_charge_v1(budget, (budget.spent / 64) * edit_count)
+    if budget.limited: return solver_db_rows_schema_refusal_v1(request, policy, input, "resource_limited", "", budget.spent)
+    if (binding.repository != config.merge.repository or binding.namespace != config.merge.namespace or
+        binding.namespace != input.accepted_original_schema.table_uid.database_namespace or
+        binding.base_revision != state.revision or binding.left_revision != patch.payload_digest or binding.right_revision != config.revision or
+        binding.operation_bundle_digest != patch.payload_digest or config.merge.schema_revision != input.historical_binding.v1_schema_revision or
+        patch.schema_revision != input.historical_binding.v1_schema_revision):
+        return solver_db_rows_schema_refusal_v1(request, policy, input, "failed", "SCVDB_SCHEMA_INPUT_BINDING", budget.spent)
+    val proposed = match solver_db_rows_schema_preview_v1(input, state, patch, config):
+        Ok(value): value
+        Err(code): return solver_db_rows_schema_refusal_v1(request, policy, input, "needs_inputs", code, budget.spent)
+    var conflicts: [SolverConflictV1] = []
+    for conflict in proposed.preview.conflicts:
+        conflicts.push(SolverConflictV1(domain: "db.rows", code: conflict.code, subject: conflict.entity + ":" + conflict.field, input_key: solver_result_key_v1(request, policy)))
+    var root: text? = nil
+    var status = "conflicted"
+    if conflicts.len() == 0:
+        match db_snapshot_encode(proposed.preview.proposed):
+            Ok(wire):
+                # Bind the complete current schema as well as projected rows;
+                # row-only validation cannot bless different constraints.
+                root = sha256_text("scv-db-schema-rows-candidate-v1" + solver_frame_v1(identity) + solver_frame_v1(sha256_text(wire)))
+                status = "proposed"
+            Err(code): return solver_db_rows_schema_refusal_v1(request, policy, input, "failed", code, budget.spent)
+    DbRowsSchemaSolveV1(result: solver_host_result_v1(request, policy, status, root, conflicts, budget.spent, budget.spent), inputs: input, uid_edits: proposed.uid_edits, preview: proposed.preview)
+
+export DbRowsSchemaInputV1, DbRowsSchemaSolveV1
+export solver_db_rows_schema_identity_v1, solve_db_rows_schema_v1

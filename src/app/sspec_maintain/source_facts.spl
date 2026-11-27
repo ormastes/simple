@@ -248,13 +248,13 @@ fn _resolved_binding_value(bindings: Dict<text, text>, name: text) -> text:
     val open_at = rhs.index_of("[")
     if open_at <= 0: return rhs
     val base = rhs.substring(0, open_at).trim()
-    val index_text = rhs.substring(open_at + 1, rhs.len() - 1).trim()
+    val index_text = rhs.substring(open_at + 1, rhs.byte_len() - 1).trim()
     val index = _digits_to_index(index_text)
     if index < 0: return rhs
     if not bindings.has(base): return rhs
     val array_text = bindings[base].trim()
     if not array_text.starts_with("[") or not array_text.ends_with("]"): return rhs
-    val inner = array_text.substring(1, array_text.len() - 1)
+    val inner = array_text.substring(1, array_text.byte_len() - 1)
     # A nested array or call argument list would make a comma split wrong, and
     # a wrong split could invent a finding — so decline to guess.
     if inner.contains("[") or inner.contains("("): return rhs
@@ -708,14 +708,26 @@ fn extract_sspec_manual_facts(path: text, content: text) -> SspecManualFacts:
     var visible_steps: i64 = 0
     var evidence_blocks: i64 = 0
     var trace_links: i64 = 0
+    # The canonical SPipe generator renders an executable `step("...")` call as
+    # a plain `- <label>` bullet under the `## Scenarios` section (pinned by
+    # test/01_unit/app/tooling/spipe_docgen_scenario_body_spec.spl, which
+    # asserts the ordered `1. ` form is NOT emitted). Counting only
+    # `step `/`1. `/`data-step=` therefore scored every stepped manual as
+    # having zero visible steps. Same principle as the evidence-block matching
+    # below: match what the generator actually emits, and scope the bullet rule
+    # to the scenarios region so unrelated prose bullets are not counted.
+    var in_scenarios = false
     for raw in lines:
         val line = raw.trim()
         val folded = line.lower()
         if line.starts_with("#"): headings = headings + 1
+        if line.starts_with("## "):
+            in_scenarios = folded.starts_with("## scenarios")
         if (
             folded.starts_with("step ") or
             folded.starts_with("1. ") or
-            folded.contains("data-step=")
+            folded.contains("data-step=") or
+            (in_scenarios and line.starts_with("- "))
         ): visible_steps = visible_steps + 1
         # Matches what manual_render.spl actually emits: terminal_grid renders
         # as a ```text fence (not ```textgrid), unknown kinds as

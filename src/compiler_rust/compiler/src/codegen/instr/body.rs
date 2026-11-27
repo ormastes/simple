@@ -17,19 +17,9 @@ use super::{compile_instruction, InstrContext, InstrResult};
 /// Collect VRegs that are live across block boundaries.
 /// Only these need Cranelift Variables for phi node insertion.
 /// Block-local VRegs stay as raw Cranelift Values in vreg_values.
-fn collect_cross_block_vregs(func: &MirFunction) -> HashSet<VReg> {
-    let live_ins = func.compute_live_ins();
-    let mut cross_block = HashSet::new();
-    for live_set in live_ins.values() {
-        for vreg in live_set {
-            cross_block.insert(*vreg);
-        }
-    }
-    cross_block
-}
-
-fn sorted_cross_block_vregs(func: &MirFunction) -> Vec<VReg> {
-    let mut vregs: Vec<_> = collect_cross_block_vregs(func).into_iter().collect();
+fn sorted_cross_block_vregs(live_ins: &HashMap<BlockId, HashSet<VReg>>) -> Vec<VReg> {
+    let cross_block: HashSet<VReg> = live_ins.values().flatten().copied().collect();
+    let mut vregs: Vec<_> = cross_block.into_iter().collect();
     vregs.sort_by_key(|v| v.0);
     vregs
 }
@@ -304,6 +294,18 @@ pub(super) fn build_vreg_types(
                     {
                         types_map.insert(*d, TypeId::F64);
                     }
+                    // `to_f32` had no arm either, so its dest stayed untyped and a
+                    // chained int cast (`f(x).to_f32().to_i64()`) took the
+                    // untyped-receiver `rt_to_int_dynamic` route, which returned
+                    // the promoted-f64 BIT PATTERN (12.0 -> 0x4028000000000000).
+                    // Bug: native_call_result_f64_to_int_conversion_bits_2026-11-23.md
+                    MirInst::MethodCallStatic {
+                        dest: Some(d),
+                        func_name,
+                        ..
+                    } if func_name == "to_f32" || func_name.ends_with(".to_f32") => {
+                        types_map.insert(*d, TypeId::F32);
+                    }
                     // USER-DEFINED methods returning f32/f64. The arms above only
                     // cover the hard-coded builtin conversion names; a plain
                     // `class B: fn getf(k: i64) -> f64` fell through to the empty
@@ -342,6 +344,24 @@ pub(super) fn build_vreg_types(
                         types_map.insert(*d, ty);
                     }
                     MirInst::MethodCallStatic { .. } => {}
+                    // A hybrid-routed call keeps the callee's declared return
+                    // type on its dest exactly like the plain `Call` below.
+                    // Without this stamp `compile_interp_call` had no scalar
+                    // evidence for a plain user function's dest and left the
+                    // bridge's tagged RuntimeValue in the vreg (an `-> i64`
+                    // callee answering 7 reached the caller as 56). Heap
+                    // (`boxed_result`) returns stay unstamped on purpose: their
+                    // RuntimeValue must remain boxed across the bridge.
+                    MirInst::InterpCall {
+                        dest: Some(d),
+                        func_name,
+                        boxed_result: false,
+                        ..
+                    } => {
+                        if let Some(&ty) = function_return_types.get(func_name.as_str()) {
+                            types_map.insert(*d, ty);
+                        }
+                    }
                     MirInst::Call {
                         dest: Some(d),
                         target,
@@ -435,7 +455,7 @@ pub(super) fn build_vreg_types(
                         // so they never reach that helper — this arm is where the
                         // Call-shaped half of the family must be typed.
                         let ty = ty.or_else(|| match base {
-                            "rt_slice" | "rt_take" | "rt_drop" | "rt_reverse" | "rt_concat" => {
+                            "rt_slice" | "rt_slice_text_bytes" | "rt_take" | "rt_drop" | "rt_reverse" | "rt_concat" => {
                                 match args.first().and_then(|a| types_map.get(a).copied()) {
                                     Some(TypeId::STRING) => Some(TypeId::STRING),
                                     _ => None,
@@ -458,7 +478,13 @@ pub(super) fn build_vreg_types(
                             types_map.insert(*dest, ty);
                         }
                     }
-                    MirInst::BoxInt { dest, .. } | MirInst::UnboxInt { dest, .. } => {
+                    MirInst::BoxInt { dest, .. } => {
+                        // BoxInt produces a tagged RuntimeValue, not a raw i64
+                        // (mirrors BoxFloat below), so erased conversions inspect
+                        // its tag instead of treating `n << 3` as raw bits.
+                        types_map.insert(*dest, TypeId::ANY);
+                    }
+                    MirInst::UnboxInt { dest, .. } => {
                         types_map.insert(*dest, TypeId::I64);
                     }
                     MirInst::BoxFloat { dest, .. } => {
@@ -561,15 +587,27 @@ fn sync_vregs_to_vars(
     }
 }
 
-/// Sync Variables → vreg_values: call use_var for all declared vreg Variables.
+/// Sync Variables -> vreg_values at a block entry: `use_var` for the block's
+/// LIVE-IN vregs only, and forget every other cross-block value, which belongs
+/// to the previously translated block (the terminator sync would otherwise
+/// write it back). Re-reading every declared Variable at every block made
+/// translation O(vars x blocks): each `use_var` on a not-yet-sealed block adds
+/// a block parameter (`layout_with_style_flow`, 2,212 vars x 3,134 blocks, ~1 s).
 /// VRegs are sorted to ensure deterministic block parameter order.
+/// Bug: doc/08_tracking/bug/jit_block_entry_sync_all_vars_quadratic_compile_2026-11-23.md
 fn sync_vars_to_vregs(
     builder: &mut FunctionBuilder,
     vreg_values: &mut HashMap<VReg, cranelift_codegen::ir::Value>,
     vreg_vars: &HashMap<VReg, Variable>,
     vreg_types: &HashMap<VReg, TypeId>,
+    live_in: &HashSet<VReg>,
 ) {
-    let mut sorted: Vec<_> = vreg_vars.iter().collect();
+    for vreg in vreg_vars.keys() {
+        if !live_in.contains(vreg) {
+            vreg_values.remove(vreg);
+        }
+    }
+    let mut sorted: Vec<_> = live_in.iter().filter_map(|v| vreg_vars.get_key_value(v)).collect();
     sorted.sort_by_key(|(v, _)| v.0);
     for (&vreg, &var) in sorted {
         let val = builder.use_var(var);
@@ -591,6 +629,133 @@ fn sync_vars_to_vregs(
     }
 }
 
+/// A call whose callee is declared `-> f64`/`-> f32` returns the float as raw
+/// IEEE-754 bits in an i64 register (the uniform user-function return ABI;
+/// f32 as the bits of its promoted f64). `build_vreg_types` already types the
+/// dest from the callee's declared return type, so decode it here, at the
+/// producer, exactly as `sync_vars_to_vregs` decodes a cross-block float.
+/// Consumers that pick float vs. int lowering from the Cranelift value type
+/// otherwise operated on the bits: `floor(x).to_i32()` gave 0, `.to_i64()`
+/// gave 0x4047800000000000, `f(x).abs()`/`.sqrt()` returned garbage and
+/// `f(x).floor()`/`.max(..)` failed with "function not found: f64.floor".
+/// doc/08_tracking/bug/native_call_result_f64_to_int_conversion_bits_2026-11-23.md
+fn decode_float_call_result(
+    builder: &mut FunctionBuilder,
+    inst: &MirInst,
+    vreg_values: &mut HashMap<VReg, cranelift_codegen::ir::Value>,
+    vreg_types: &HashMap<VReg, TypeId>,
+) {
+    let dest = match inst {
+        MirInst::Call { dest: Some(d), .. }
+        | MirInst::InterpCall { dest: Some(d), .. }
+        | MirInst::IndirectCall { dest: Some(d), .. }
+        | MirInst::MethodCallStatic { dest: Some(d), .. }
+        | MirInst::MethodCallVirtual { dest: Some(d), .. } => *d,
+        _ => return,
+    };
+    let Some(&val) = vreg_values.get(&dest) else {
+        return;
+    };
+    if builder.func.dfg.value_type(val) != types::I64 {
+        return;
+    }
+    let decoded = match vreg_types.get(&dest).copied() {
+        Some(TypeId::F64) => builder.ins().bitcast(types::F64, MemFlags::new(), val),
+        Some(TypeId::F32) => {
+            let wide = builder.ins().bitcast(types::F64, MemFlags::new(), val);
+            builder.ins().fdemote(types::F32, wide)
+        }
+        _ => return,
+    };
+    vreg_values.insert(dest, decoded);
+}
+
+/// Cranelift cannot inline raw assembly. A naked body is therefore emitted as
+/// a same-ABI call to its C sidecar, explicitly forwarding arguments and
+/// returning the assembly body's result instead of falling through to ud2.
+fn compile_naked_function_body<M: Module>(
+    module: &mut M,
+    cranelift_func: &mut cranelift_codegen::ir::Function,
+    func: &MirFunction,
+    func_ids: &mut super::super::func_id_table::FuncIdTable,
+) -> InstrResult<()> {
+    let mut asm_blocks = 0usize;
+    let mut naked_asm = None;
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            match inst {
+                MirInst::InlineAsm {
+                    dialect,
+                    instructions,
+                    volatile,
+                    constraints,
+                    inputs,
+                    outputs,
+                } => {
+                    let declared: Vec<&str> = constraints
+                        .split(',')
+                        .filter(|c| !c.is_empty() && *c != "~{memory}")
+                        .collect();
+                    if !declared.is_empty() || !inputs.is_empty() || !outputs.is_empty() {
+                        return Err(format!(
+                            "E-NAKED-CLOBBER: `{}` is @naked; its raw asm block must not carry clobbers(...) \
+                             or bound operands (the whole register file belongs to the author), found `{}`",
+                            func.name, constraints
+                        ));
+                    }
+                    naked_asm = Some((instructions, *volatile, *dialect));
+                    asm_blocks += 1;
+                }
+                other => {
+                    return Err(format!(
+                        "E-NAKED-BODY: `{}` is @naked; its body must be exactly one raw asm block, found {:?}",
+                        func.name, other
+                    ));
+                }
+            }
+        }
+        if !matches!(block.terminator, Terminator::Return(None) | Terminator::Unreachable) {
+            return Err(format!(
+                "E-NAKED-BODY: `{}` is @naked; control flow other than fall-through is not allowed, found {:?}",
+                func.name, block.terminator
+            ));
+        }
+    }
+    if asm_blocks != 1 {
+        return Err(format!(
+            "E-NAKED-BODY: `{}` is @naked; its body must be exactly one raw asm block, found {asm_blocks}",
+            func.name
+        ));
+    }
+
+    let (instructions, volatile, dialect) = naked_asm.expect("one naked asm block");
+    let symbol = crate::codegen::inline_asm::register_naked_inline_asm(instructions, volatile, dialect);
+    let func_id = if let Some(func_id) = func_ids.get(&symbol).copied() {
+        func_id
+    } else {
+        let sig = crate::codegen::shared::build_mir_signature(func, module.isa().default_call_conv());
+        let func_id = module
+            .declare_function(&symbol, cranelift_module::Linkage::Import, &sig)
+            .map_err(|e| e.to_string())?;
+        func_ids.insert(symbol, func_id);
+        func_id
+    };
+
+    let mut func_ctx = FunctionBuilderContext::new();
+    let mut builder = FunctionBuilder::new(cranelift_func, &mut func_ctx);
+    let entry = builder.create_block();
+    builder.append_block_params_for_function_params(entry);
+    builder.switch_to_block(entry);
+    let func_ref = module.declare_func_in_func(func_id, builder.func);
+    let args = builder.block_params(entry).to_vec();
+    let call = builder.ins().call(func_ref, &args);
+    let results = builder.inst_results(call).to_vec();
+    builder.ins().return_(&results);
+    builder.seal_block(entry);
+    builder.finalize();
+    Ok(())
+}
+
 /// Compile a complete MIR function body.
 /// This is shared between AOT (cranelift.rs) and JIT (jit.rs) backends.
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
@@ -598,11 +763,12 @@ pub fn compile_function_body<M: Module>(
     module: &mut M,
     cranelift_func: &mut cranelift_codegen::ir::Function,
     func: &MirFunction,
-    func_ids: &mut std::collections::BTreeMap<String, cranelift_module::FuncId>,
+    func_ids: &mut super::super::func_id_table::FuncIdTable,
     runtime_funcs: &HashMap<&'static str, cranelift_module::FuncId>,
     global_ids: &std::collections::BTreeMap<String, cranelift_module::DataId>,
     import_map: &std::sync::Arc<std::collections::HashMap<String, String>>,
     use_map: &std::collections::HashMap<String, String>,
+    ambiguous_names: &std::sync::Arc<std::collections::HashSet<String>>,
     data_exports: &std::sync::Arc<std::collections::HashSet<String>>,
     vtable_data_ids: &std::collections::BTreeMap<String, cranelift_module::DataId>,
     vtable_type_ids: &std::collections::BTreeMap<crate::hir::TypeId, cranelift_module::DataId>,
@@ -620,7 +786,14 @@ pub fn compile_function_body<M: Module>(
     // inline array accessor fast paths emit `u32 len@8; items@16` instead of
     // the hosted `u64 len@8; data*@24` layout.
     fam_arrays: bool,
+    // The function's live-in sets when the caller already has them (the
+    // JIT computes them on a helper thread, off the translation path).
+    live_ins: Option<HashMap<BlockId, HashSet<VReg>>>,
 ) -> InstrResult<()> {
+    if func.attributes.iter().any(|attr| attr == "naked") {
+        return compile_naked_function_body(module, cranelift_func, func, func_ids);
+    }
+
     let mut func_ctx = FunctionBuilderContext::new();
     let mut builder = FunctionBuilder::new(cranelift_func, &mut func_ctx);
 
@@ -668,7 +841,8 @@ pub fn compile_function_body<M: Module>(
     // Declare Cranelift Variables for all VRegs to handle SSA across blocks.
     // This lets Cranelift automatically insert phi nodes (block params) where needed.
     // VRegs are sorted to ensure deterministic Variable ID assignment.
-    let sorted_cross_block_vregs = sorted_cross_block_vregs(func);
+    let live_ins = live_ins.unwrap_or_else(|| func.compute_live_ins());
+    let sorted_cross_block_vregs = sorted_cross_block_vregs(&live_ins);
     let mut vreg_vars: HashMap<VReg, Variable> = HashMap::new();
     for vreg in &sorted_cross_block_vregs {
         let var = Variable::from_u32(var_idx);
@@ -983,7 +1157,7 @@ pub fn compile_function_body<M: Module>(
         if mir_block.id != func.entry_block {
             builder.switch_to_block(cl_block);
             // At block entry, populate vreg_values from Variables (SSA phi resolution)
-            sync_vars_to_vregs(&mut builder, &mut vreg_values, &vreg_vars, &vreg_types);
+            sync_vars_to_vregs(&mut builder, &mut vreg_values, &vreg_vars, &vreg_types, &live_ins[&mir_block.id]);
         }
 
         if let Some(resume_map) = generator_resume_map.as_ref() {
@@ -1045,6 +1219,7 @@ pub fn compile_function_body<M: Module>(
                     variables: &variables,
                     extra_variables: &mut extra_variables,
                     extra_var_base,
+                    implicit_param_slots,
                     vreg_from_local: &mut vreg_from_local,
                     func,
                     entry_block,
@@ -1061,6 +1236,7 @@ pub fn compile_function_body<M: Module>(
                     nil_tainted: &mut nil_tainted,
                     nil_tainted_locals: &mut nil_tainted_locals,
                     fn_arities,
+                    ambiguous_names,
                     enum_defs,
                     tag_runtime_pool_join_result,
                     baremetal,
@@ -1088,6 +1264,7 @@ pub fn compile_function_body<M: Module>(
                     variables: &variables,
                     extra_variables: &mut extra_variables,
                     extra_var_base,
+                    implicit_param_slots,
                     vreg_from_local: &mut vreg_from_local,
                     func,
                     entry_block,
@@ -1104,12 +1281,14 @@ pub fn compile_function_body<M: Module>(
                     nil_tainted: &mut nil_tainted,
                     nil_tainted_locals: &mut nil_tainted_locals,
                     fn_arities,
+                    ambiguous_names,
                     enum_defs,
                     tag_runtime_pool_join_result,
                     baremetal,
                     fam_arrays,
                 };
                 compile_instruction(&mut instr_ctx, &mut builder, inst)?;
+                decode_float_call_result(&mut builder, inst, &mut vreg_values, &vreg_types);
                 // Ensure all vreg values are i64 (extend smaller int types)
                 // and sync to Variables for cross-block SSA.
                 //
@@ -1250,8 +1429,8 @@ pub fn compile_function_body<M: Module>(
                                     .bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), as_f64)
                             } else if val_type.is_float() && ret_ty.is_int() {
                                 // Narrow int return slots (runtime-spec fns): real
-                                // value conversion.
-                                builder.ins().fcvt_to_sint(ret_ty, rv)
+                                // value conversion, saturating like an explicit cast.
+                                super::helpers::float_to_int_saturating(&mut builder, rv, ret_ty, true)
                             } else if val_type.is_float() && ret_ty.is_float() {
                                 // Float width conversion
                                 if val_type.bits() < ret_ty.bits() {
@@ -1438,7 +1617,7 @@ mod tests {
             };
         }
 
-        assert_eq!(sorted_cross_block_vregs(&func), vec![shared]);
+        assert_eq!(sorted_cross_block_vregs(&func.compute_live_ins()), vec![shared]);
     }
 
     /// FR-DRIVER-0002a: verify `build_vreg_types` populates a TypeId for every
@@ -1749,5 +1928,25 @@ mod tests {
         assert_eq!(map.get(&signed).copied(), Some(TypeId::I32));
         assert_eq!(map.get(&unsigned).copied(), Some(TypeId::U32));
         assert_eq!(map.get(&boolean).copied(), Some(TypeId::BOOL));
+    }
+
+    #[test]
+    fn build_vreg_types_marks_box_int_as_any_and_unbox_int_as_i64() {
+        let mut func = MirFunction::new("test".to_string(), TypeId::I64, Visibility::Private);
+        let raw = func.new_vreg();
+        let boxed = func.new_vreg();
+        let unboxed = func.new_vreg();
+        let entry = func.block_mut(BlockId(0)).unwrap();
+        entry.instructions.push(MirInst::ConstInt { dest: raw, value: 65 });
+        entry.instructions.push(MirInst::BoxInt { dest: boxed, value: raw });
+        entry.instructions.push(MirInst::UnboxInt {
+            dest: unboxed,
+            value: boxed,
+        });
+        entry.terminator = Terminator::Return(Some(unboxed));
+
+        let map = build_vreg_types(&func, &HashMap::new());
+        assert_eq!(map.get(&boxed).copied(), Some(TypeId::ANY));
+        assert_eq!(map.get(&unboxed).copied(), Some(TypeId::I64));
     }
 }

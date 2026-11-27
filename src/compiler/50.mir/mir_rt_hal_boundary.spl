@@ -1,3 +1,4 @@
+use compiler.mir.mir_instruction_support.{MirCallOrigin}
 # codex-impl
 # Lower typed @rt(hal) metadata to a real runtime dispatch at each normal
 # function exit. Static non-HAL functions never call this pass and receive no
@@ -12,7 +13,7 @@ fn rt_hal_boundary_receipt(value: MirOperand?) -> MirOperand:
             match operand.kind:
                 case Move(local): MirOperand.copy(local)
                 case _: operand
-        nil: MirOperand.const_int(-1)
+        None: MirOperand.const_int(-1)
 
 fn rt_hal_boundary_call(operation_id: text, compare_c: bool, compare_rust: bool, receipt: MirOperand) -> MirInst:
     val function = MirOperand(kind: MirOperandKind.Const(
@@ -21,7 +22,7 @@ fn rt_hal_boundary_call(operation_id: text, compare_c: bool, compare_rust: bool,
             params: [MirType(kind: MirTypeKind.Opaque("str")), MirType.bool(), MirType.bool(), MirType.i64()],
             return_type: MirType.i64(), is_variadic: false
         )))
-    ))
+    ), call_origin: MirCallOrigin.Runtime)
     val operation = MirOperand(kind: MirOperandKind.Const(
         MirConstValue.Str(operation_id), MirType(kind: MirTypeKind.Opaque("str"))
     ))
@@ -30,7 +31,7 @@ fn rt_hal_boundary_call(operation_id: text, compare_c: bool, compare_rust: bool,
             operation, MirOperand.const_bool(compare_c),
             MirOperand.const_bool(compare_rust), receipt
         ]),
-        span: nil
+        span: None
     )
 
 pub fn inject_rt_hal_boundary(function: MirFunction, operation_id: text, compare_c: bool, compare_rust: bool) -> MirFunction:
@@ -60,7 +61,7 @@ pub fn inject_rt_hal_controller_finalize(function: MirFunction, plan_path: text)
         MirType(kind: MirTypeKind.FuncPtr(MirSignature(
             params: [], return_type: MirType.unit(), is_variadic: false
         )))
-    ))
+    ), call_origin: MirCallOrigin.Runtime)
     var blocks: [MirBlock] = []
     var block_index = 0
     for original_block in function.blocks:
@@ -72,12 +73,12 @@ pub fn inject_rt_hal_controller_finalize(function: MirFunction, plan_path: text)
                     params: [MirType(kind: MirTypeKind.Opaque("str"))],
                     return_type: MirType.unit(), is_variadic: false
                 )))
-            ))
+            ), call_origin: MirCallOrigin.Runtime)
             val plan = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str(plan_path), MirType(kind: MirTypeKind.Opaque("str"))
             ))
             var entry: [MirInst] = [MirInst(
-                kind: MirInstKind.Call(None, installer, [plan]), span: nil
+                kind: MirInstKind.Call(None, installer, [plan]), span: None
             )]
             for instruction in block.instructions: entry.push(instruction)
             block = MirBlock(id: block.id, label: block.label,
@@ -85,7 +86,7 @@ pub fn inject_rt_hal_controller_finalize(function: MirFunction, plan_path: text)
         match block.terminator:
             case Ret(_):
                 var instructions = block.instructions
-                instructions.push(MirInst(kind: MirInstKind.Call(None, finalize, []), span: nil))
+                instructions.push(MirInst(kind: MirInstKind.Call(None, finalize, []), span: None))
                 blocks.push(MirBlock(id: block.id, label: block.label,
                     instructions: instructions, terminator: block.terminator))
             case _: blocks.push(block)
@@ -100,13 +101,13 @@ pub fn inject_rt_hal_worker_complete(function: MirFunction) -> MirFunction:
         MirType(kind: MirTypeKind.FuncPtr(MirSignature(
             params: [], return_type: MirType.unit(), is_variadic: false
         )))
-    ))
+    ), call_origin: MirCallOrigin.Runtime)
     var blocks: [MirBlock] = []
     for block in function.blocks:
         match block.terminator:
             case Ret(_):
                 var instructions = block.instructions
-                instructions.push(MirInst(kind: MirInstKind.Call(None, complete, []), span: nil))
+                instructions.push(MirInst(kind: MirInstKind.Call(None, complete, []), span: None))
                 blocks.push(MirBlock(id: block.id, label: block.label,
                     instructions: instructions, terminator: block.terminator))
             case _: blocks.push(block)

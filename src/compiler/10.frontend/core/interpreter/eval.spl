@@ -21,6 +21,9 @@ extern fn rt_coverage_decision_probe(decision_id: i64, result: bool,
 extern fn rt_coverage_condition_probe(decision_id: i64, condition_id: i64,
     result: bool, file: text, line: i64, column: i64)
 
+fn interp_coverage_enabled() -> bool:
+    rt_coverage_enabled()
+
 # The runtime SFFI ABI is decision-id/result/file/line/column.  Keep the
 # compiler-owned ID stable for one parsed AST: an execution counter produces a
 # different ID each time a loop reaches the same branch and cannot truthfully
@@ -43,7 +46,8 @@ fn coverage_condition_id(condition_eid: i64) -> i64:
     -1
 
 fn coverage_span_decision_id(span_id: i64) -> i64:
-    if span_is_valid(span_id): return span_start(span_id) + 1
+    if rt_coverage_enabled():
+        if span_is_valid(span_id): return span_start(span_id) + 1
     -1
 
 fn record_control_decision(file: text, line: i64, column: i64, decision_id: i64, taken: bool):
@@ -51,6 +55,7 @@ fn record_control_decision(file: text, line: i64, column: i64, decision_id: i64,
         rt_coverage_decision_probe(decision_id, taken, file, line, column)
 
 fn record_control_condition(decision_id: i64, condition_eid: i64, taken: bool):
+    if decision_id < 0: return
     if rt_coverage_enabled():
         val condition_node = expr_get(condition_eid)
         val condition_span = condition_node.span_id
@@ -91,6 +96,14 @@ fn eval_control_condition(condition_eid: i64, decision_id: i64) -> i64:
         val right_value = eval_control_condition(condition_node.right, decision_id)
         if eval_had_error: return -1
         return val_make_bool(val_is_truthy(right_value))
+    # `if x.?:` is PRESENCE, not payload truthiness: `if Some(0).?:` is taken.
+    # (core_interp_option_coalesce_and_presence_gaps_2026-11-06)
+    if condition_node.tag == EXPR_EXISTS_CHECK:
+        val present_value = eval_expr(condition_eid)
+        if eval_had_error: return -1
+        val present = not val_is_nil(present_value)
+        record_control_condition(decision_id, condition_eid, present)
+        return val_make_bool(present)
     val condition_value = eval_expr(condition_eid)
     if eval_had_error: return -1
     val taken = val_is_truthy(condition_value)
@@ -108,7 +121,7 @@ fn eval_control_condition(condition_eid: i64, decision_id: i64) -> i64:
 # (module_get_path()) for entry-script top-level code, which executes
 # immediately as its own module is loaded; falls back to a "<entry>"
 # sentinel only if neither signal is available.
-fn coverage_owner_file() -> text:
+pub fn coverage_owner_file() -> text:
     if eval_current_decl_id >= 0:
         val owned = decl_owner_file_get(eval_current_decl_id)
         if owned != "":
@@ -120,8 +133,24 @@ fn coverage_owner_file() -> text:
 
 # The same owner signal used for coverage is the authoritative caller identity
 # for resolving duplicate bare-name functions.
-fn eval_caller_file() -> text:
+pub fn eval_caller_file() -> text:
     coverage_owner_file()
+
+# Entry file of the current run (set by eval_module). module_get_path() is NOT
+# usable for this at top level: it points at the last imported module once the
+# imports have loaded.
+pub var eval_entry_file: text = ""
+
+# File whose `use unit.*` imports govern a suffix literal evaluated now: the
+# owner of the executing function, else the entry file (top-level statements).
+pub fn eval_unit_scope_file() -> text:
+    if eval_current_decl_id >= 0:
+        val owned = decl_owner_file_get(eval_current_decl_id)
+        if owned != "":
+            return owned
+    if eval_entry_file != "":
+        return eval_entry_file
+    "<entry>"
 
 # ===== Type Checking Integration =====
 # Basic runtime type checking for function parameters
@@ -140,7 +169,10 @@ use compiler.core.ast_expr.{EXPR_METHOD_CALL, EXPR_NEW, EXPR_NIL_LIT, EXPR_NULL_
 use compiler.core.ast_expr.{EXPR_PASS_DN, EXPR_PASS_DO_NOTHING, EXPR_PASS_TODO, EXPR_RANGE, EXPR_RETURN}
 use compiler.core.ast_expr.{EXPR_SLICE, EXPR_SPAWN, EXPR_STRING_LIT, EXPR_STRUCT_LIT, EXPR_TRY}
 use compiler.core.ast_expr.{EXPR_TUPLE, EXPR_UNARY, EXPR_UNIT, EXPR_UNSAFE_BLOCK, EXPR_WHILE}
-use compiler.core.ast_expr.{EXPR_YIELD, expr_i_val, expr_kind_name, expr_s_val}
+use compiler.core.ast_expr.{EXPR_YIELD, expr_kind_name, expr_owner_int, expr_owner_str}
+use compiler.core.ast_expr.{EXPR_SUFFIXED_LIT}
+use compiler.core.interpreter.eval_units.{eval_suffixed_lit, eval_unit_checked_cast}
+use compiler.core.unit_constraint.{unit_constraint_find}
 use compiler.core.interpreter.env.{env_assign, env_define, env_get_local, env_has_frame, env_lookup}
 use compiler.core.interpreter.env.{env_lookup_global, env_pop_scope, env_push_scope, env_set_local}
 use compiler.core.interpreter.eval_access.{eval_try}
@@ -186,7 +218,7 @@ fn struct_satisfies(vid: i64, expected_name: text) -> bool:
             return false
     true
 
-fn type_check_value(value_id: i64, expected_type: i64) -> bool:
+pub fn type_check_value(value_id: i64, expected_type: i64) -> bool:
     # TYPE_ANY or TYPE_VOID means no constraint
     if expected_type == TYPE_ANY or expected_type == TYPE_VOID:
         return true
@@ -238,104 +270,191 @@ fn type_check_value(value_id: i64, expected_type: i64) -> bool:
     # Default: allow if we don't recognize the type
     true
 
-fn eval_option_binding_value(value_id: i64) -> i64:
+pub fn eval_option_binding_value(value_id: i64) -> i64:
     if val_is_struct(value_id):
         val option_name = val_get_struct_name(value_id)
         if option_name == "Option::None": return val_make_nil()
         if option_name == "Option::Some":
             return val_struct_get_field_idx(value_id, 1)
+        # `Ok(x).?` is x and `Err(e).?` is absent, as on the seed.
+        if option_name == "Result::Err": return val_make_nil()
+        if option_name == "Result::Ok":
+            return val_struct_get_field_idx(value_id, 1)
     value_id
-
-# ===== Type Erasure / Monomorphization Support =====
-# Cache and specialization logic live in core.monomorphize (shared module).
-# Interpreter-specific type inference from runtime values stays here.
-use compiler.core.monomorphize.{mono_cache_init, mono_cache_lookup, mono_cache_register, mono_specialize}
-
-fn infer_type_args_from_values(arg_values: [i64]) -> text:
-    # Infer type arguments from runtime values
-    # Simple approach: concatenate type kinds
-    var type_str: text = ""
-    for av in arg_values:
-        val kind = val_get_kind(av)
-        if type_str != "":
-            type_str = type_str + "_"
-        type_str = type_str + str(kind)
-    type_str
-
-fn infer_type_tags_from_values(arg_values: [i64]) -> [i64]:
-    """Infer concrete type tags from runtime argument values
-
-    Maps value kinds to type tags:
-    - VAL_INT (2) → TYPE_I64 (2)
-    - VAL_FLOAT (3) → TYPE_F64 (3)
-    - VAL_TEXT (4) → TYPE_TEXT (4)
-    - VAL_BOOL (1) → TYPE_BOOL (1)
-    - Others → TYPE_ANY (12)
-    """
-    var type_tags: [i64] = []
-    for av in arg_values:
-        val kind = val_get_kind(av)
-        # Value kinds align with type tags for primitives
-        if kind == 1:  # VAL_BOOL
-            type_tags.push(TYPE_BOOL)
-        elif kind == 2:  # VAL_INT
-            type_tags.push(TYPE_I64)
-        elif kind == 3:  # VAL_FLOAT
-            type_tags.push(TYPE_F64)
-        elif kind == 4:  # VAL_TEXT
-            type_tags.push(TYPE_TEXT)
-        else:
-            type_tags.push(TYPE_ANY)
-    type_tags
 
 # ===== Local AST Constants for static_for and comptime =====
 # STMT_STATIC_FOR = 17 (from ast.spl, avoids import dependency)
-val EVAL_STMT_STATIC_FOR: i64 = 17
+pub val EVAL_STMT_STATIC_FOR: i64 = 17
 # STMT_COMPTIME = 18 (from ast.spl, avoids import dependency)
-val EVAL_STMT_COMPTIME: i64 = 18
+pub val EVAL_STMT_COMPTIME: i64 = 18
 # STMT_BIND = 20 (from ast.spl, avoids import dependency)
-val EVAL_STMT_BIND: i64 = 20
+pub val EVAL_STMT_BIND: i64 = 20
 # STMT_LAZY_VAL_DECL = 21 (from ast.spl, avoids import dependency)
-val EVAL_STMT_LAZY_VAL_DECL: i64 = 21
+pub val EVAL_STMT_LAZY_VAL_DECL: i64 = 21
 # DECL_LAZY_VAL = 12 (from ast.spl, avoids import dependency)
-val EVAL_DECL_LAZY_VAL: i64 = 12
+pub val EVAL_DECL_LAZY_VAL: i64 = 12
 
 # ===== Control Flow Flags =====
-var eval_returning: bool = false
-var eval_return_value: i64 = -1
-var eval_breaking: bool = false
-var eval_continuing: bool = false
-var eval_had_error: bool = false
-var eval_error_msg: text = ""
+pub var eval_returning: bool = false
+pub var eval_return_value: i64 = -1
+pub var eval_breaking: bool = false
+pub var eval_continuing: bool = false
+pub var eval_had_error: bool = false
+pub var eval_error_msg: text = ""
 # Labeled break/continue: target label name (empty = unlabeled)
-var eval_break_label: text = ""
-var eval_continue_label: text = ""
+pub var eval_break_label: text = ""
+pub var eval_continue_label: text = ""
 # Label stack: names of currently active loop labels (innermost last)
-var eval_label_stack: [text] = []
+pub var eval_label_stack: [text] = []
 
 # ===== Defer Stack =====
 # Flat parallel arrays: expression IDs and their block scope depth.
-var eval_defer_eids: [i64] = []
-var eval_defer_depths: [i64] = []
-var eval_defer_depth: i64 = 0
+pub var eval_defer_eids: [i64] = []
+pub var eval_defer_depths: [i64] = []
+pub var eval_defer_depth: i64 = 0
 
 # ===== Errdefer Stack =====
 # Separate parallel arrays for errdefer: only executed when scope exits with error.
-var eval_errdefer_eids: [i64] = []
-var eval_errdefer_depths: [i64] = []
+pub var eval_errdefer_eids: [i64] = []
+pub var eval_errdefer_depths: [i64] = []
 
 # ===== Yield Accumulator Stack =====
-var eval_yield_stack: [[i64]] = []
+pub var eval_yield_stack: [[i64]] = []
 
 # ===== LOAD_FAST: Current Function Tracking =====
-var eval_current_decl_id: i64 = -1
-var eval_implicit_new_stack: [i64] = []
+pub var eval_current_decl_id: i64 = -1
+pub var eval_implicit_new_stack: [i64] = []
 
-# ===== Warning Tracking =====
-var eval_warnings: [text] = []
+# ===== Warning Tracking & Per-Site Memoization =====
+pub var eval_warnings: [text] = []
 
-fn eval_get_warnings() -> [text]:
-    eval_warnings
+val EVAL_MEMO_HM_SIZE: i64 = 256
+var match_expr_memo_eids: [i64] = []
+var match_expr_memo_types: [text] = []
+var match_expr_memo_nexts: [i64] = []
+var match_expr_memo_buckets: [i64] = []
+var match_expr_memo_found: bool = false
+
+var match_stmt_memo_sids: [i64] = []
+var match_stmt_memo_types: [text] = []
+var match_stmt_memo_nexts: [i64] = []
+var match_stmt_memo_buckets: [i64] = []
+pub var match_stmt_memo_found: bool = false
+var eval_match_exhaustive_runs: i64 = 0
+
+var ignored_ret_memo_sids: [i64] = []
+var ignored_ret_memo_nexts: [i64] = []
+var ignored_ret_memo_buckets: [i64] = []
+
+fn eval_memo_make_buckets() -> [i64]:
+    var buckets: [i64] = []
+    var i: i64 = 0
+    while i < EVAL_MEMO_HM_SIZE:
+        buckets.push(-1)
+        i = i + 1
+    buckets
+
+fn eval_match_expr_memo_get(eid: i64) -> text:
+    if eid < 0 or match_expr_memo_buckets.len() == 0:
+        match_expr_memo_found = false
+        return ""
+    val bucket = eid % EVAL_MEMO_HM_SIZE
+    var idx = match_expr_memo_buckets[bucket]
+    while idx != -1:
+        if match_expr_memo_eids[idx] == eid:
+            match_expr_memo_found = true
+            return match_expr_memo_types[idx]
+        idx = match_expr_memo_nexts[idx]
+    match_expr_memo_found = false
+    ""
+
+fn eval_match_expr_memo_put(eid: i64, inferred_type: text):
+    if eid < 0: return
+    if match_expr_memo_buckets.len() == 0:
+        match_expr_memo_buckets = eval_memo_make_buckets()
+    val bucket = eid % EVAL_MEMO_HM_SIZE
+    var idx = match_expr_memo_buckets[bucket]
+    while idx != -1:
+        if match_expr_memo_eids[idx] == eid:
+            match_expr_memo_types[idx] = inferred_type
+            return
+        idx = match_expr_memo_nexts[idx]
+    val new_idx = match_expr_memo_eids.len()
+    match_expr_memo_eids.push(eid)
+    match_expr_memo_types.push(inferred_type)
+    match_expr_memo_nexts.push(match_expr_memo_buckets[bucket])
+    match_expr_memo_buckets[bucket] = new_idx
+    eval_match_exhaustive_runs = eval_match_exhaustive_runs + 1
+
+# reason: core AST statement arena IDs are raw i64 indices across interpreter modules
+@allow(primitive_api)
+pub fn eval_match_stmt_memo_get(sid: i64) -> text:
+    if sid < 0 or match_stmt_memo_buckets.len() == 0:
+        match_stmt_memo_found = false
+        return ""
+    val bucket = sid % EVAL_MEMO_HM_SIZE
+    var idx = match_stmt_memo_buckets[bucket]
+    while idx != -1:
+        if match_stmt_memo_sids[idx] == sid:
+            match_stmt_memo_found = true
+            return match_stmt_memo_types[idx]
+        idx = match_stmt_memo_nexts[idx]
+    match_stmt_memo_found = false
+    ""
+
+# reason: core AST statement arena IDs are raw i64 indices across interpreter modules
+@allow(primitive_api)
+pub fn eval_match_stmt_memo_put(sid: i64, inferred_type: text):
+    if sid < 0: return
+    if match_stmt_memo_buckets.len() == 0:
+        match_stmt_memo_buckets = eval_memo_make_buckets()
+    val bucket = sid % EVAL_MEMO_HM_SIZE
+    var idx = match_stmt_memo_buckets[bucket]
+    while idx != -1:
+        if match_stmt_memo_sids[idx] == sid:
+            match_stmt_memo_types[idx] = inferred_type
+            return
+        idx = match_stmt_memo_nexts[idx]
+    val new_idx = match_stmt_memo_sids.len()
+    match_stmt_memo_sids.push(sid)
+    match_stmt_memo_types.push(inferred_type)
+    match_stmt_memo_nexts.push(match_stmt_memo_buckets[bucket])
+    match_stmt_memo_buckets[bucket] = new_idx
+    eval_match_exhaustive_runs = eval_match_exhaustive_runs + 1
+
+# reason: core interpreter telemetry counter matches raw i64 arena count APIs
+@allow(primitive_api)
+pub fn eval_match_exhaustive_check_count() -> i64:
+    eval_match_exhaustive_runs
+
+# reason: core AST statement arena IDs and seen predicate use raw i64/bool primitives
+@allow(primitive_api)
+pub fn eval_ignored_return_sid_seen(sid: i64) -> bool:
+    if sid < 0 or ignored_ret_memo_buckets.len() == 0:
+        return false
+    val bucket = sid % EVAL_MEMO_HM_SIZE
+    var idx = ignored_ret_memo_buckets[bucket]
+    while idx != -1:
+        if ignored_ret_memo_sids[idx] == sid:
+            return true
+        idx = ignored_ret_memo_nexts[idx]
+    false
+
+# reason: core AST statement arena IDs are raw i64 indices across interpreter modules
+@allow(primitive_api)
+pub fn eval_ignored_return_sid_mark(sid: i64):
+    if sid < 0: return
+    if eval_ignored_return_sid_seen(sid): return
+    if ignored_ret_memo_buckets.len() == 0:
+        ignored_ret_memo_buckets = eval_memo_make_buckets()
+    val bucket = sid % EVAL_MEMO_HM_SIZE
+    val new_idx = ignored_ret_memo_sids.len()
+    ignored_ret_memo_sids.push(sid)
+    ignored_ret_memo_nexts.push(ignored_ret_memo_buckets[bucket])
+    ignored_ret_memo_buckets[bucket] = new_idx
+
+fn eval_clear_warnings():
+    eval_warnings = []
 
 fn eval_reset():
     eval_returning = false
@@ -345,6 +464,20 @@ fn eval_reset():
     eval_had_error = false
     eval_error_msg = ""
     eval_warnings = []
+    match_expr_memo_eids = []
+    match_expr_memo_types = []
+    match_expr_memo_nexts = []
+    match_expr_memo_buckets = []
+    match_expr_memo_found = false
+    match_stmt_memo_sids = []
+    match_stmt_memo_types = []
+    match_stmt_memo_nexts = []
+    match_stmt_memo_buckets = []
+    match_stmt_memo_found = false
+    eval_match_exhaustive_runs = 0
+    ignored_ret_memo_sids = []
+    ignored_ret_memo_nexts = []
+    ignored_ret_memo_buckets = []
     eval_break_label = ""
     eval_continue_label = ""
     eval_label_stack = []
@@ -366,14 +499,14 @@ fn eval_reset():
     # doc/08_tracking/bug/pure_simple_interpreter_core_jit_interpret_not_reentrant_2026-08-20.md
     enum_table_reset()
 
-fn eval_set_error(msg: text):
+pub fn eval_set_error(msg: text):
     eval_had_error = true
     eval_error_msg = msg
 
 fn eval_get_error() -> text:
     eval_error_msg
 
-fn eval_has_error() -> bool:
+pub fn eval_has_error() -> bool:
     eval_had_error
 
 # ===== Expression Evaluation =====
@@ -385,6 +518,13 @@ fn eval_integer_cast_type(type_tag: i64) -> bool:
 
 fn eval_cast_expr(eid: i64) -> i64:
     val cast_node = expr_get(eid)
+    # `raw as Port` for a constrained unit (`unit Port: u16 where ...` /
+    # `in lo..hi`): checked at the boundary, SPL-UNIT-005 out of range.
+    val cast_unit_name = type_tag_name(cast_node.i_val)
+    if unit_constraint_find(cast_unit_name) >= 0:
+        val cast_payload = eval_expr(cast_node.left)
+        if eval_had_error: return -1
+        return eval_unit_checked_cast(cast_unit_name, cast_payload)
     if not eval_integer_cast_type(cast_node.i_val):
         eval_set_error("core interpreter only supports enum/integer casts to integer types")
         return -1
@@ -415,7 +555,7 @@ fn eval_cast_expr(eid: i64) -> i64:
     eval_set_error("cast operand is not an enum discriminant or integer")
     -1
 
-fn eval_expr(eid: i64) -> i64:
+pub fn eval_expr(eid: i64) -> i64:
     if eid < 0: return val_make_nil()
     if eval_had_error: return -1
     if eval_returning: return eval_return_value
@@ -504,6 +644,11 @@ fn eval_expr(eid: i64) -> i64:
             eval_set_error("force-unwrap `!` applied to a nil value")
             return -1
         if tag == EXPR_TRY: return eval_try(eid)
+        if tag == EXPR_SUFFIXED_LIT:
+            val sl_f = expr_get(eid).f_val
+            if sl_f != "" and expr_get(eid).extra != 2:
+                return eval_suffixed_lit(eid, parse_float_text(sl_f))
+            return eval_suffixed_lit(eid, 0.0)
         if tag == EXPR_NEW:
             val new_node = expr_get(eid)
             val inner_eid = new_node.right
@@ -531,16 +676,16 @@ fn eval_bool_lit(eid: i64) -> i64:
 
 fn eval_ident(eid: i64) -> i64:
     # Fast path: LOAD_FAST via pre-resolved local index
-    val local_idx = expr_i_val[eid]
+    val local_idx = expr_owner_int(eid)
     if local_idx >= 0:
         if env_has_frame():
             val fast_val = env_get_local(local_idx)
             if fast_val >= 0:
                 if val_is_thunk(fast_val):
-                    val forced = eval_expr(val_thunk_get_expr(fast_val))
+                    val forced = val_copy_if_value_struct(eval_expr(val_thunk_get_expr(fast_val)))
                     if eval_had_error: return -1
                     env_set_local(local_idx, forced)
-                    env_assign(expr_s_val[eid], forced)
+                    env_assign(expr_owner_str(eid), forced)
                     return forced
                 return fast_val
     # Slow path: hash map lookup
@@ -570,7 +715,7 @@ fn eval_ident(eid: i64) -> i64:
     val vid = env_lookup(name)
     if vid >= 0:
         if val_is_thunk(vid):
-            val forced = eval_expr(val_thunk_get_expr(vid))
+            val forced = val_copy_if_value_struct(eval_expr(val_thunk_get_expr(vid)))
             if eval_had_error: return -1
             env_assign(name, forced)
             return forced
@@ -579,6 +724,9 @@ fn eval_ident(eid: i64) -> i64:
     var decl_id = func_resolve_for_caller(eval_caller_file(), name)
     if decl_id < 0:
         decl_id = func_flat_lookup_for_caller(eval_caller_file(), name)
+    if decl_id == FUNC_LOOKUP_AMBIGUOUS:
+        eval_set_error(func_ambiguous_call_message(eval_caller_file(), name, func_owners_of(name)))
+        return -1
     if decl_id >= 0:
         return val_make_function(name, decl_id)
     # Try deferred (lazy) modules before giving up
@@ -587,6 +735,9 @@ fn eval_ident(eid: i64) -> i64:
         var decl_id2 = func_resolve_for_caller(eval_caller_file(), name)
         if decl_id2 < 0:
             decl_id2 = func_flat_lookup_for_caller(eval_caller_file(), name)
+        if decl_id2 == FUNC_LOOKUP_AMBIGUOUS:
+            eval_set_error(func_ambiguous_call_message(eval_caller_file(), name, func_owners_of(name)))
+            return -1
         if decl_id2 >= 0:
             return val_make_function(name, decl_id2)
         val vid2 = env_lookup(name)
@@ -634,18 +785,17 @@ fn eval_if_expr(eid: i64) -> i64:
     val then_id = e_node.right
     val else_id = e_node.extra
 
-    val cond_val = eval_control_condition(cond_id, coverage_span_decision_id(e_node.span_id))
+    var decision_id: i64 = -1
+    if rt_coverage_enabled():
+        decision_id = coverage_span_decision_id(e_node.span_id)
+    val cond_val = eval_control_condition(cond_id, decision_id)
     if eval_had_error: return -1
 
     val taken = val_is_truthy(cond_val)
-    val span_id = e_node.span_id
-    var source_line = 0
-    var source_column = 0
-    if span_is_valid(span_id):
-        source_line = span_line(span_id)
-        source_column = span_col(span_id)
-    if span_is_valid(span_id):
-        record_control_decision(coverage_owner_file(), source_line, source_column, span_start(span_id) + 1, taken)
+    if rt_coverage_enabled():
+        val span_id = e_node.span_id
+        if span_is_valid(span_id):
+            record_control_decision(coverage_owner_file(), span_line(span_id), span_col(span_id), span_start(span_id) + 1, taken)
 
     if taken:
         return eval_expr(then_id)
@@ -661,26 +811,9 @@ fn eval_block_expr(eid: i64) -> i64:
     val value_expr = e_node.left
     eval_block(stmts, value_expr)
 
-fn eval_block(stmts: [i64], value_expr: i64) -> i64:
-    env_push_scope()
-    eval_defer_depth = eval_defer_depth + 1
-    val my_depth = eval_defer_depth
-
-    var last_val = val_make_nil()
-
-    for sid in stmts:
-        if eval_had_error: break
-        if eval_returning: break
-        if eval_breaking: break
-        if eval_continuing: break
-        last_val = eval_stmt(sid)
-
-    if value_expr >= 0:
-        val ctrl_interrupted = eval_had_error or eval_returning or eval_breaking or eval_continuing
-        if ctrl_interrupted == false:
-            last_val = eval_expr(value_expr)
-
-    # Execute deferred expressions at this depth in reverse order (LIFO)
+# @allow(primitive_api) core-interpreter internal scope depth counter shared with eval_calls/call_method_eval
+pub fn eval_run_scope_defers(my_depth: i64):
+    """Run LIFO defer (and errdefer on error) handlers registered at my_depth."""
     val saved_returning = eval_returning
     val saved_had_error = eval_had_error
     eval_returning = false
@@ -730,6 +863,28 @@ fn eval_block(stmts: [i64], value_expr: i64) -> i64:
         eval_errdefer_depths.pop()
     eval_defer_depth = eval_defer_depth - 1
 
+pub fn eval_block(stmts: [i64], value_expr: i64) -> i64:
+    env_push_scope()
+    eval_defer_depth = eval_defer_depth + 1
+    val my_depth = eval_defer_depth
+
+    var last_val = val_make_nil()
+
+    for sid in stmts:
+        if eval_had_error: break
+        if eval_returning: break
+        if eval_breaking: break
+        if eval_continuing: break
+        last_val = eval_stmt(sid)
+
+    if value_expr >= 0:
+        val ctrl_interrupted = eval_had_error or eval_returning or eval_breaking or eval_continuing
+        if ctrl_interrupted == false:
+            last_val = eval_expr(value_expr)
+
+    # Execute deferred expressions at this depth in reverse order (LIFO)
+    eval_run_scope_defers(my_depth)
+
     env_pop_scope()
     last_val
 
@@ -741,6 +896,52 @@ fn eval_for_expr(eid: i64) -> i64:
     val iterable_eid = e_node.left
     val body_stmts = e_node.stmts
 
+    # Stream bounded range expressions in O(1) memory without allocating a
+    # [i64] VAL_ARRAY (matching eval_stmt_for). The loop is bounded by the
+    # range end itself; there is deliberately no iteration cap here (see
+    # doc/08_tracking/bug/core_interpreter_hard_loop_iteration_caps_2026-08-28.md):
+    # a silent cap turned `for i in 0..2_000_000` into a wrong partial answer.
+    if iterable_eid >= 0 and expr_get(iterable_eid).tag == EXPR_RANGE:
+        val range_node = expr_get(iterable_eid)
+        val start_val = eval_expr(range_node.left)
+        if eval_had_error: return -1
+        val end_val = eval_expr(range_node.right)
+        if eval_had_error: return -1
+        val inclusive = range_node.i_val
+        val start_n = val_get_int(start_val)
+        val end_n = val_get_int(end_val)
+        var current = start_n
+        val limit = end_n
+        var range_last_val = val_make_nil()
+        while current <= limit:
+            if eval_breaking: break
+            if eval_returning: break
+            if eval_had_error: break
+            if inclusive == 0:
+                if current == limit: break
+            eval_continuing = false
+            eval_continue_label = ""
+            env_push_scope()
+            env_define(iter_name, val_make_int(current))
+            for sid in body_stmts:
+                if eval_had_error: break
+                if eval_returning: break
+                if eval_breaking: break
+                if eval_continuing: break
+                range_last_val = eval_stmt(sid)
+            env_pop_scope()
+            # Seed parity: checked increment — stop at i64::MAX instead of
+            # wrapping to a ~2^63-iteration loop (seed breaks on overflow).
+            if current == 9223372036854775807: break
+            current = current + 1
+        if eval_breaking:
+            if eval_break_label == "":
+                eval_breaking = false
+        if eval_continuing:
+            if eval_continue_label == "":
+                eval_continuing = false
+        return range_last_val
+
     val iterable = eval_expr(iterable_eid)
     if eval_had_error: return -1
 
@@ -749,14 +950,15 @@ fn eval_for_expr(eid: i64) -> i64:
 
     # Iterate over array
     if kind == VAL_ARRAY:
-        val elements = val_get_array(iterable)
+        val elements = val_get_array(val_copy_if_value_struct(iterable))
         for elem_vid in elements:
             if eval_breaking: break
             if eval_returning: break
             if eval_had_error: break
             eval_continuing = false
+            eval_continue_label = ""
             env_push_scope()
-            env_define(iter_name, elem_vid)
+            env_define(iter_name, val_copy_if_value_struct(elem_vid))
             for sid in body_stmts:
                 if eval_had_error: break
                 if eval_returning: break
@@ -764,59 +966,22 @@ fn eval_for_expr(eid: i64) -> i64:
                 if eval_continuing: break
                 last_val = eval_stmt(sid)
             env_pop_scope()
-        eval_breaking = false
-        eval_continuing = false
-        return last_val
-
-    # Iterate over range (check if iterable is a range pair)
-    # Range is stored as: left=start, right=end, i_val=inclusive
-    if kind == VAL_INT:
-        # Check if iterable_eid is a RANGE expression
-        val iterable_tag = expr_get(iterable_eid).tag
-        if iterable_tag == EXPR_RANGE:
-            val range_node = expr_get(iterable_eid)
-            val start_val = eval_expr(range_node.left)
-            if eval_had_error: return -1
-            val end_val = eval_expr(range_node.right)
-            if eval_had_error: return -1
-            val inclusive = range_node.i_val
-            val start_n = val_get_int(start_val)
-            val end_n = val_get_int(end_val)
-            var current = start_n
-            val limit = end_n
-            var _range_iter: i64 = 0
-            while _range_iter < 1000001:
-                if eval_breaking: break
-                if eval_returning: break
-                if eval_had_error: break
-                val should_stop = current > limit
-                val at_limit = current == limit
-                if inclusive != 0:
-                    if should_stop: break
-                else:
-                    if at_limit: break
-                    if should_stop: break
+        if eval_breaking:
+            if eval_break_label == "":
+                eval_breaking = false
+        if eval_continuing:
+            if eval_continue_label == "":
                 eval_continuing = false
-                env_push_scope()
-                env_define(iter_name, val_make_int(current))
-                for sid in body_stmts:
-                    if eval_had_error: break
-                    if eval_returning: break
-                    if eval_breaking: break
-                    if eval_continuing: break
-                    last_val = eval_stmt(sid)
-                env_pop_scope()
-                current = current + 1
-                _range_iter = _range_iter + 1
-            eval_breaking = false
-            eval_continuing = false
-            return last_val
+        return last_val
 
     eval_set_error("cannot iterate over " + val_kind_name(kind))
     -1
 
 # ===== Range Expression =====
-# Range creates an array of integers for now
+# Range creates an array of integers for now. Materialize every element —
+# a silent element cap here turned `0..2_000_000` (and any range-for whose
+# iterable evaluates through this path) into a wrong truncated array. See
+# doc/08_tracking/bug/core_interpreter_hard_loop_iteration_caps_2026-08-28.md.
 fn eval_range(eid: i64) -> i64:
     val e_node = expr_get(eid)
     val start_val = eval_expr(e_node.left)
@@ -828,18 +993,13 @@ fn eval_range(eid: i64) -> i64:
     val end_n = val_get_int(end_val)
     var elements: [i64] = []
     var current = start_n
-    var _range_iter2: i64 = 0
-    while _range_iter2 < 10001:
-        val should_stop = current > end_n
-        val at_limit = current == end_n
-        if inclusive != 0:
-            if should_stop: break
-        else:
-            if at_limit: break
-            if should_stop: break
+    while current <= end_n:
+        if inclusive == 0:
+            if current == end_n: break
         elements.push(val_make_int(current))
+        # Same checked-increment parity guard as eval_for_expr.
+        if current == 9223372036854775807: break
         current = current + 1
-        _range_iter2 = _range_iter2 + 1
     val_make_array(elements)
 
 # ===== While Expression =====
@@ -851,20 +1011,24 @@ fn eval_while_expr(eid: i64) -> i64:
     var last_val = val_make_nil()
     var iterations: i64 = 0
     val max_iterations: i64 = 1000000
+    var decision_id: i64 = -1
+    if rt_coverage_enabled():
+        decision_id = coverage_span_decision_id(e_node.span_id)
 
     while iterations < max_iterations:
         if eval_had_error: break
         if eval_returning: break
         if eval_breaking: break
-        val cond_val = eval_control_condition(cond_eid, coverage_span_decision_id(e_node.span_id))
+        val cond_val = eval_control_condition(cond_eid, decision_id)
         if eval_had_error: break
         val taken = val_is_truthy(cond_val)
-        val span_id = e_node.span_id
         # Coverage bookkeeping (owner-file lookup, span line/col decode) is
         # gated on rt_coverage_enabled() BEFORE it is computed; previously the
         # per-iteration decode ran unconditionally and only the probe was gated.
-        if rt_coverage_enabled() and span_is_valid(span_id):
-            record_control_decision(coverage_owner_file(), span_line(span_id), span_col(span_id), span_start(span_id) + 1, taken)
+        if rt_coverage_enabled():
+            val span_id = e_node.span_id
+            if span_is_valid(span_id):
+                record_control_decision(coverage_owner_file(), span_line(span_id), span_col(span_id), span_start(span_id) + 1, taken)
         if taken == false: break
         eval_continuing = false
         env_push_scope()
@@ -892,9 +1056,12 @@ fn eval_match_expr(eid: i64) -> i64:
     if eval_had_error: return -1
     val arm_ids = e_node.args
 
-    # Exhaustiveness check: warn if enum variants are not all covered
-    val inferred_type = infer_match_enum_type(arm_ids)
-    check_match_exhaustive(arm_ids, inferred_type)
+    # Exhaustiveness check: warn if enum variants are not all covered (memoized per eid)
+    var inferred_type = eval_match_expr_memo_get(eid)
+    if not match_expr_memo_found:
+        inferred_type = infer_match_enum_type(arm_ids)
+        check_match_exhaustive(arm_ids, inferred_type)
+        eval_match_expr_memo_put(eid, inferred_type)
 
     for arm_id in arm_ids:
         val pattern_eid = arm_get_pattern(arm_id)
@@ -909,22 +1076,21 @@ fn eval_match_expr(eid: i64) -> i64:
         if matched:
             # Check guard
             if guard_eid >= 0:
-                val guard_val = eval_control_condition(guard_eid, coverage_span_decision_id(expr_get(guard_eid).span_id))
+                var guard_decision_id: i64 = -1
+                if rt_coverage_enabled():
+                    guard_decision_id = coverage_span_decision_id(expr_get(guard_eid).span_id)
+                val guard_val = eval_control_condition(guard_eid, guard_decision_id)
                 if eval_had_error:
                     env_pop_scope()
                     return -1
                 val guard_taken = val_is_truthy(guard_val)
-                val guard_span = expr_get(guard_eid).span_id
-                var guard_line: i64 = 0
-                var guard_column: i64 = 0
-                if span_is_valid(guard_span):
-                    guard_line = span_line(guard_span)
-                    guard_column = span_col(guard_span)
-                if span_is_valid(guard_span):
-                    record_control_decision(
-                        coverage_owner_file(), guard_line, guard_column,
-                        span_start(guard_span) + 1, guard_taken
-                    )
+                if rt_coverage_enabled():
+                    val guard_span = expr_get(guard_eid).span_id
+                    if span_is_valid(guard_span):
+                        record_control_decision(
+                            coverage_owner_file(), span_line(guard_span), span_col(guard_span),
+                            span_start(guard_span) + 1, guard_taken
+                        )
                 if guard_taken == false:
                     env_pop_scope()
                     continue
@@ -939,7 +1105,7 @@ fn eval_match_expr(eid: i64) -> i64:
             # Pattern binding: case X as name: — bind scrutinee to name
             val binding_name = arm_get_binding(arm_id)
             if binding_name != "":
-                env_define(binding_name, scrutinee)
+                env_define(binding_name, val_copy_if_value_struct(scrutinee))
             var last_val = val_make_nil()
             for sid in body_stmts:
                 if eval_had_error: break
@@ -1017,7 +1183,7 @@ fn match_pattern(value_id: i64, pattern_eid: i64) -> bool:
         if val_is_boxed_enum(value_id) and name_is_spelled_like_a_variant(name):
             return match_enum_variant_pattern(value_id, name, [])
         # Binding: bind value to name
-        env_define(name, value_id)
+        env_define(name, val_copy_if_value_struct(value_id))
         return true
 
     # Literal patterns: direct comparison avoids allocating intermediate values
@@ -1090,7 +1256,7 @@ fn match_pattern(value_id: i64, pattern_eid: i64) -> bool:
                 tt_ok = tt_kind == VAL_STRUCT and val_get_struct_name(value_id) == tt_type_name
             if not tt_ok:
                 return false
-            env_define(tt_binder_name, value_id)
+            env_define(tt_binder_name, val_copy_if_value_struct(value_id))
             return true
 
     if tag == EXPR_CALL:
@@ -1098,10 +1264,28 @@ fn match_pattern(value_id: i64, pattern_eid: i64) -> bool:
         if callee_variant != "":
             return match_enum_variant_pattern(value_id, callee_variant, e_node.args)
 
+    # `case Type.Variant(x):` -- the core parser builds a qualified call as
+    # EXPR_METHOD_CALL (receiver `Type`, method `Variant`), not EXPR_CALL over
+    # an EXPR_FIELD_ACCESS callee. Without this arm the pattern fell through to
+    # the equality default, which evaluated `x` unbound ("undefined variable").
+    if tag == EXPR_METHOD_CALL:
+        val mc_receiver = expr_get(e_node.left)
+        if mc_receiver.tag == EXPR_IDENT and name_is_spelled_like_a_variant(mc_receiver.s_val):
+            val mc_variant = e_node.s_val
+            val mc_is_option = mc_variant == "Some" or mc_variant == "None" or mc_variant == "Ok" or mc_variant == "Err"
+            if val_is_boxed_enum(value_id) or mc_is_option or enum_variant_is_declared(mc_variant):
+                return match_enum_variant_pattern(value_id, mc_variant, e_node.args)
+
     if tag == EXPR_FIELD_ACCESS:
         # `case Type.Variant:` — only claim it when the scrutinee really is a
         # boxed enum, so ordinary constant patterns (`case Colors.RED:`) keep
         # falling through to the equality default below.
+        # `case Option.None:` on a FLAT Option (raw-or-nil word, e.g. a
+        # Dict.get miss) is the nil test, same as bare `case None:`.
+        if e_node.s_val == "None" and val_is_boxed_enum(value_id) == false:
+            val fa_receiver = expr_get(e_node.left)
+            if fa_receiver.tag == EXPR_IDENT and fa_receiver.s_val == "Option":
+                return val_is_nil(value_id)
         if val_is_boxed_enum(value_id):
             val fa_variant = e_node.s_val
             if fa_variant != "":
@@ -1134,7 +1318,7 @@ fn val_enum_variant_name(value_id: i64) -> text:
     if tag_idx < 0: return ""
     val_get_text(val_struct_get_field_idx(value_id, tag_idx))
 
-fn val_is_boxed_enum(value_id: i64) -> bool:
+pub fn val_is_boxed_enum(value_id: i64) -> bool:
     """True when `value_id` is the boxed [__tag, __payload] struct that
     eval_enum_variant_call builds for every enum variant construction."""
     if value_id < 0: return false
@@ -1190,6 +1374,13 @@ fn match_enum_variant_pattern(value_id: i64, variant: text, arg_eids: [i64]) -> 
                 return match_enum_variant_pattern(val_struct_get_field_idx(value_id, 1), variant, arg_eids)
             if struct_name == "Option::None":
                 return false
+        else:
+            # SPL-PAT-001 (config/policy/diagnostic_policy.sdn): a Some/None
+            # pattern against a boxed non-Option enum can never match. Only the
+            # boxed form is decidable here; flat Option is raw-or-nil.
+            val pat_struct = val_get_struct_name(value_id)
+            if not pat_struct.starts_with("Option::"):
+                eval_warnings.push("warning[SPL-PAT-001]: `case {variant}(...)` tested against non-Option enum value `{pat_struct}`")
         val tag_text = val_get_text(val_struct_get_field_idx(value_id, 0))
         if tag_text != variant: return false
         if arg_eids.len() == 0: return true
@@ -1228,10 +1419,11 @@ use compiler.core.interpreter.eval_builtins.*
 use compiler.core.interpreter.eval_stmts.*
 # From eval_ops.spl
 use compiler.core.interpreter.eval_ops.*
+use compiler.core.interpreter.eval_calls.val_copy_if_value_struct
 
 # ===== Exports =====
 # Symbols defined in this file
-export eval_warnings, eval_get_warnings, eval_clear_warnings
+export eval_warnings, eval_clear_warnings, eval_match_exhaustive_check_count, eval_run_scope_defers
 
 # Re-exports from eval_tables.spl
 

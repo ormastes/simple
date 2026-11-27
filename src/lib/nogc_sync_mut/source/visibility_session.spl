@@ -1,0 +1,92 @@
+# MDSOC+ toggleable session view state (REQ-PUBVIEW-010..012).
+# A session holds one immutable SourceVisibilitySessionV1; every request
+# replaces it with the value returned by serve/set. No locks, no mutation:
+# the LSP and MCP servers keep exactly one current value per session.
+# A private view auto-reverts to public after `limit` served requests or on
+# an explicit visibility=public; the next public response says why once.
+# Design: doc/05_design/app/source_view/public_view_by_feature_layer.md
+use std.nogc_sync_mut.source.visibility_view.{source_visibility_level_valid_v1}
+
+val SOURCE_VISIBILITY_AUTO_REVERT_DEFAULT_V1: i64 = 3
+
+pub struct SourceVisibilitySessionV1:
+    level: text
+    feature: text
+    layer: text
+    # Private requests served so far under the current private view.
+    served: i64
+    limit: i64
+    # One-shot revert reason shown on the next public response.
+    notice: text
+
+pub struct SourceVisibilityServedV1:
+    session: SourceVisibilitySessionV1
+    level: text
+    feature: text
+    layer: text
+    view: text
+
+# Config knob value (e.g. SIMPLE_VISIBILITY_AUTO_REVERT); default 3.
+pub fn source_visibility_auto_revert_limit_v1(raw: text) -> i64:
+    val parsed = raw.trim().to_int() ?? 0
+    if parsed > 0: return parsed
+    SOURCE_VISIBILITY_AUTO_REVERT_DEFAULT_V1
+
+pub fn source_visibility_session_default_v1(limit: i64) -> SourceVisibilitySessionV1:
+    val bounded = if limit > 0: limit else: SOURCE_VISIBILITY_AUTO_REVERT_DEFAULT_V1
+    SourceVisibilitySessionV1("public", "", "", 0, bounded, "")
+
+pub fn source_visibility_scope_label_v1(feature: text, layer: text) -> text:
+    var parts: [text] = []
+    if feature != "": parts.push("feature=" + feature)
+    if layer != "": parts.push("layer=" + layer)
+    if parts.len() == 0: return ""
+    " (" + parts.join(", ") + ")"
+
+fn source_visibility_reverted_v1(session: SourceVisibilitySessionV1, reason: text) -> SourceVisibilitySessionV1:
+    SourceVisibilitySessionV1("public", "", "", 0, session.limit,
+        "reverted from " + session.level + ": " + reason)
+
+# Explicit switch. An unknown level returns the session unchanged; callers
+# validate first to report the error. public from a private view is a revert.
+pub fn source_visibility_session_set_v1(session: SourceVisibilitySessionV1, level: text,
+        feature: text, layer: text) -> SourceVisibilitySessionV1:
+    if not source_visibility_level_valid_v1(level): return session
+    if level == "public":
+        if session.level != "public":
+            return source_visibility_reverted_v1(session, "explicit visibility=public")
+        return SourceVisibilitySessionV1("public", feature, layer, 0, session.limit, session.notice)
+    SourceVisibilitySessionV1(level, feature, layer, 0, session.limit, "")
+
+fn source_visibility_requests_word_v1(count: i64) -> text:
+    if count == 1: return "1 request"
+    str(count) + " requests"
+
+# Serve one request. A valid `override_level` serves that level once and
+# returns the session unchanged; request scopes narrow without persisting.
+pub fn source_visibility_session_serve_v1(session: SourceVisibilitySessionV1, override_level: text,
+        override_feature: text, override_layer: text) -> SourceVisibilityServedV1:
+    val feature = if override_feature != "": override_feature else: session.feature
+    val layer = if override_layer != "": override_layer else: session.layer
+    val scope = source_visibility_scope_label_v1(feature, layer)
+    if override_level != "":
+        # An invalid level is passed through for the caller to reject; the
+        # session (countdown and notice) is returned untouched.
+        if not source_visibility_level_valid_v1(override_level):
+            val rejected = "view: rejected visibility=" + override_level + "; session view: " + session.level + " (unchanged)"
+            return SourceVisibilityServedV1(session, override_level, feature, layer, rejected)
+        val view = "view: " + override_level + scope + " (per-request override; session view: " + session.level + ")"
+        return SourceVisibilityServedV1(session, override_level, feature, layer, view)
+    if session.level == "public":
+        val note = if session.notice != "": " (" + session.notice + ")" else: ""
+        val next = SourceVisibilitySessionV1("public", session.feature, session.layer, 0, session.limit, "")
+        return SourceVisibilityServedV1(next, "public", feature, layer, "view: public" + scope + note)
+    val served = session.served + 1
+    val remaining = session.limit - served
+    if remaining <= 0:
+        val view = "view: " + session.level + scope + ", auto-reverts to public after this request; set visibility=public to return"
+        val reason = "auto-revert after " + source_visibility_requests_word_v1(session.limit).replace(" request", " private request")
+        return SourceVisibilityServedV1(source_visibility_reverted_v1(session, reason), session.level, feature, layer, view)
+    val view = "view: " + session.level + scope + ", auto-revert in " + source_visibility_requests_word_v1(remaining) + "; set visibility=public to return"
+    val next = SourceVisibilitySessionV1(session.level, session.feature, session.layer, served, session.limit, "")
+    SourceVisibilityServedV1(next, session.level, feature, layer, view)

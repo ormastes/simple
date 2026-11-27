@@ -1,0 +1,49 @@
+# Purpose: a directory an owner later opens as trusted is created 0700, not
+# 0777 & ~umask. With the common desktop umask 0002 a `dir_create` directory
+# is 0775, which retained_directory_open_trusted_v1 refuses
+# (SCVDB_DIR_FINAL_UNTRUSTED) — the failure that kept host cleanup, terminal
+# wait and exec publication dead on such hosts.
+use std.nogc_sync_mut.io.dir_entry_ops.{directory_create_private}
+use std.nogc_sync_mut.io.retained_file.{retained_directory_open_trusted_v1}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_exists}
+use std.nogc_sync_mut.io_runtime.{dir_remove}
+use std.io_runtime.{process_run_timeout}
+
+fn mode_of(path: text) -> text:
+    process_run_timeout("stat", ["-c", "%a", path], 5000).0.trim()
+
+fn chmod(mode: text, path: text) -> bool:
+    process_run_timeout("chmod", [mode, path], 5000).2 == 0
+
+describe "directory_create_private":
+    it "creates every missing component 0700 and the result opens as trusted":
+        val root = secure_temp_dir("/tmp", "private-dir-spec").unwrap()
+        val leaf = root + "/journal/host-cleanup-receipts-v1"
+        expect(directory_create_private(leaf)).to_equal(true)
+        expect(mode_of(root + "/journal")).to_equal("700")
+        expect(mode_of(leaf)).to_equal("700")
+        var opened = retained_directory_open_trusted_v1(leaf).unwrap()
+        expect(opened.close()).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "is idempotent and leaves an existing component's mode alone":
+        val root = secure_temp_dir("/tmp", "private-dir-spec").unwrap()
+        expect(directory_create_private(root + "/a")).to_equal(true)
+        expect(chmod("750", root + "/a")).to_equal(true)
+        expect(directory_create_private(root + "/a/b")).to_equal(true)
+        expect(directory_create_private(root + "/a/b")).to_equal(true)
+        expect(mode_of(root + "/a")).to_equal("750")
+        expect(mode_of(root + "/a/b")).to_equal("700")
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "shows the failure it replaces: a group-writable final directory is refused":
+        val root = secure_temp_dir("/tmp", "private-dir-spec").unwrap()
+        expect(directory_create_private(root + "/shared")).to_equal(true)
+        expect(chmod("775", root + "/shared")).to_equal(true)
+        expect(retained_directory_open_trusted_v1(root + "/shared").unwrap_err()).to_equal("SCVDB_DIR_FINAL_UNTRUSTED")
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "refuses an empty path and a path it cannot create":
+        expect(directory_create_private("")).to_equal(false)
+        expect(directory_create_private("/proc/definitely-not-creatable/x")).to_equal(false)
+        expect(file_exists("/proc/definitely-not-creatable")).to_equal(false)

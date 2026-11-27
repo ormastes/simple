@@ -1,0 +1,55 @@
+"""Hosted SOSIX memory-backed executable owner.
+
+The provider uses the existing sealed executable pin and V4 process owner. Pin
+creation is currently supported only by the Linux native provider. It does not
+fall back to a pathname when this capability is unavailable. The caller owns
+this image and closes it after starting or abandoning it; the process owner
+acquires its own descriptor before start returns.
+"""
+use std.common.binary_inspect.{byte_to_hex}
+use std.nogc_sync_mut.io.process_observation_v4.{
+    OwnedExecutablePin, OwnedCwdPinV4, ProcessObservationRequestV4,
+    ProcessObservationStartV4, process_observation_start_pinned_v4
+}
+
+pub fn sosix_memory_digest_matches_v1(digest: [u8], expected_sha256: text) -> bool:
+    if digest.len() != 32 or expected_sha256.len() != 64: return false
+    var actual = ""
+    for byte in digest: actual = actual + byte_to_hex(byte as i64)
+    actual == expected_sha256
+
+pub class SosixMemoryExecutableV1:
+    pin: OwnedExecutablePin
+    var closed: bool
+
+    pub static fn prepare(path: text) -> Result<SosixMemoryExecutableV1, text>:
+        val pin = OwnedExecutablePin.pin(path)?
+        Ok(SosixMemoryExecutableV1(pin: pin, closed: false))
+
+    pub fn digest(self) -> Result<[u8], text>:
+        if self.closed: return Err("SOSIX executable is closed")
+        self.pin.digest()
+
+    pub fn digest_expected(self, expected_sha256: text) -> Result<[u8], text>:
+        val digest = self.digest()?
+        if not sosix_memory_digest_matches_v1(digest, expected_sha256):
+            return Err("SOSIX executable digest mismatch")
+        Ok(digest)
+
+    pub fn start_expected(self, cwd: OwnedCwdPinV4, request: ProcessObservationRequestV4, expected_digest: [u8]) -> Result<ProcessObservationStartV4, text>:
+        if self.closed: return Err("SOSIX executable is closed")
+        if expected_digest.len() != 32: return Err("SOSIX executable digest must be 32 bytes")
+        if self.pin.digest()? != expected_digest: return Err("SOSIX executable digest mismatch")
+        process_observation_start_pinned_v4(self.pin, cwd, request)
+
+    pub fn start(self, cwd: OwnedCwdPinV4, request: ProcessObservationRequestV4) -> Result<ProcessObservationStartV4, text>:
+        if self.closed: return Err("SOSIX executable is closed")
+        process_observation_start_pinned_v4(self.pin, cwd, request)
+
+    pub me fn close() -> Result<bool, text>:
+        if self.closed: return Ok(true)
+        val result = self.pin.close()?
+        self.closed = true
+        Ok(result)
+
+export SosixMemoryExecutableV1, sosix_memory_digest_matches_v1

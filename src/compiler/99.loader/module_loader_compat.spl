@@ -20,7 +20,7 @@ use compiler.loader.module_loader_semantic.{
 }
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
 use compiler.backend.linker.obj_taker.{SymbolType}
-use compiler.loader.smf_mmap_native.{native_alloc_exec_memory, native_alloc_rw_memory, native_write_exec_memory, native_make_executable, native_make_rw, native_flush_icache, native_reloc_write_i32, native_reloc_write_i64, native_call_function_0}
+use compiler.loader.smf_mmap_native.{native_alloc_exec_memory, native_alloc_rw_memory, native_write_exec_memory, native_make_executable, native_make_rw, native_flush_icache, native_reloc_write_i32, native_reloc_write_i64, native_call_function_0, native_free_exec_memory}
 use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{smf_reloc_compute_wire}
 use compiler.loader.aspect_pack_section.{smf_validate_optional_aspect_pack, smf_register_validated_aspect_pack}
 use compiler.loader.aspect_lifecycle_gate.{
@@ -68,6 +68,22 @@ use common.plugin.iface_id.{IfaceId, ParamHeader}
 use common.plugin.negotiation.{HostOfferV1}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.io_runtime.{file_read_bytes}
+use compiler.loader.hot_swap_pin.{HotSwapSlot, HotSwapRead, hot_swap_slot_load, hot_swap_try, hot_swap_read_begin, hot_swap_reclaim, hot_swap_rollback, hot_swap_slot_release}
+use compiler.driver.watcher.smf_manifest.{SmfManifestEntry}
+
+# Roll back a failed load transaction: unmap every candidate mapping exactly
+# once (ledger is flat [addr, size, ...]) and return the error. Global symbol
+# state is only mutated after the commit point, so there is nothing to unpublish.
+fn _compat_release_exec_mappings(allocs: [i64]):
+    var i = 0
+    while i + 1 < allocs.len():
+        unsafe(capabilities: [raw_ptr]):
+            _ = native_free_exec_memory(allocs[i], allocs[i + 1])
+        i = i + 2
+
+fn _compat_load_fail(allocs: [i64], message: text) -> LoadResult:
+    _compat_release_exec_mappings(allocs)
+    LoadResult.Error(message: message)
 
 fn _jit_cached_loaded_symbol(sym_name: text, rec_cache: JitCacheRecord) -> LoadedSymbol:
     val code = rec_cache.code
@@ -147,6 +163,10 @@ struct LoadedModule:
     symbols: Dict<text, LoadedSymbol>
     load_time: i64
     version: i64
+    # Executable/GOT mappings this module owns, flat [addr, size, ...]. The
+    # load transaction's rollback ledger is handed over at the commit point
+    # and unmapped exactly once by `unload`.
+    exec_mappings: [i64]
 
 impl LoadedModule:
     fn has_symbol(name: text) -> bool:
@@ -155,7 +175,7 @@ impl LoadedModule:
     fn get_symbol(name: text) -> LoadedSymbol?:
         if self.symbols.has(name):
             return Some(self.symbols[name])
-        nil
+        None
 
     fn exported_symbols() -> [LoadedSymbol]:
         var out: [LoadedSymbol] = []
@@ -392,6 +412,10 @@ struct ModuleLoader:
     # struct, so keeping these fields in a class prevents a copy from silently
     # duplicating one snapshot lease without incrementing its global refcount.
     aspect_owner: _ModuleAspectOwnerV1
+    # RB-LOAD-02: identity-pinned hot-swap slot per SMF module path. A
+    # pinned path reloads only through hot_swap_try (refusal keeps the old
+    # module loaded); per-call readers pin the slot image.
+    hot_swap_slots: Dict<text, HotSwapSlot>
 
 fn _moduleloader_aspect_result(found: bool, facet_key: text, code: text, message: text) -> ApkFacetLoadV1:
     var empty: [u8] = []
@@ -574,9 +598,11 @@ impl ModuleLoader:
             if not apk_loader_invalidate_catalog_v1(
                     self.aspect_owner.loader_cell[0]):
                 return Err("visible aspect catalog update refused while bindings are live")
+        val catalog_index = match _apk_index_catalog_v1(catalog, opened):
+            case Ok(index): index
+            case Err(e): return Err(e)
         val snapshot = _ModuleAspectCatalogSnapshotV1(
-            bytes: catalog, digest: digest,
-            index: _apk_index_catalog_v1(catalog, opened))
+            bytes: catalog, digest: digest, index: catalog_index)
         if old_digest != "":
             _module_aspect_snapshot_release(old_digest)
         _module_aspect_snapshot_retain(snapshot)
@@ -1368,7 +1394,7 @@ impl ModuleLoader:
                 # silently downgrade to metadata modules. Metadata registration
                 # also avoids copying the full source into a temporary byte
                 # buffer; the JIT sidecar loader owns any data it actually needs.
-                val m = LoadedModule(path: path, reader: "", symbols: {}, load_time: 0, version: 1)
+                val m = LoadedModule(path: path, reader: "", symbols: {}, load_time: 0, version: 1, exec_mappings: [])
                 self.modules[path] = m
                 self.module_intents[path] = "source_metadata"
                 val _ = self.jit.load_smf_metadata(path)
@@ -1394,6 +1420,9 @@ impl ModuleLoader:
                     case Ok(candidate):
                         candidate
                 var symbols: Dict<text, LoadedSymbol> = {}
+                # Rollback ledger: flat [addr, size, addr, size, ...]; one array per
+                # load transaction (not per relocation).
+                var allocs: [i64] = []
                 val exported_smf_symbols: [SmfSymbol] = reader.exported_symbols()
                 for smf_sym in exported_smf_symbols:
                     val code_result = reader.read_code(smf_sym)
@@ -1401,22 +1430,24 @@ impl ModuleLoader:
                         case Ok(value):
                             value
                         case Err(err):
-                            return LoadResult.Error(message: err)
+                            return _compat_load_fail(allocs, err)
                     # A size-0 symbol has no code to enter; calling it jumps
                     # into an empty allocation (0xC0000005 on `main`).
                     if code.len() == 0:
-                        return LoadResult.Error(message: "SMF symbol {smf_sym.name} in {path} has no code (size 0); refusing to load it as executable")
+                        return _compat_load_fail(allocs, "SMF symbol {smf_sym.name} in {path} has no code (size 0); refusing to load it as executable")
                     val addr = native_alloc_exec_memory(code.len() as i64)
                     if addr == 0:
-                        return LoadResult.Error(message: "Failed to allocate executable memory for {smf_sym.name}")
+                        return _compat_load_fail(allocs, "Failed to allocate executable memory for {smf_sym.name}")
+                    allocs.push(addr)
+                    allocs.push(code.len() as i64)
                     val written = unsafe(capabilities: [raw_ptr]):
                         native_write_exec_memory(addr, code, 0)
                     if written != code.len() as i64:
-                        return LoadResult.Error(message: "Failed to copy executable bytes for {smf_sym.name}")
+                        return _compat_load_fail(allocs, "Failed to copy executable bytes for {smf_sym.name}")
                     val executable = unsafe(capabilities: [raw_ptr]):
                         native_make_executable(addr, code.len() as i64)
                     if not executable:
-                        return LoadResult.Error(message: "Failed to mark executable memory for {smf_sym.name}")
+                        return _compat_load_fail(allocs, "Failed to mark executable memory for {smf_sym.name}")
                     native_flush_icache(addr, code.len() as i64)
                     val symbol_size: i64 = smf_sym.size as i64
                     val symbol_ty = _loader_symbol_type_from_smf(smf_sym.ty)
@@ -1430,20 +1461,19 @@ impl ModuleLoader:
                         file_offset: symbol_file_offset
                     )
                     symbols[smf_sym.name] = loaded_sym
-                    self.global_symbols[smf_sym.name] = (path, loaded_sym)
 
                 val ordered_symbols_result = reader.symbols_in_table_order()
                 val ordered_symbols = match ordered_symbols_result:
                     case Ok(value):
                         value
                     case Err(err):
-                        return LoadResult.Error(message: err)
+                        return _compat_load_fail(allocs, err)
                 val relocs_result = reader.read_relocations()
                 val relocs = match relocs_result:
                     case Ok(value):
                         value
                     case Err(err):
-                        return LoadResult.Error(message: err)
+                        return _compat_load_fail(allocs, err)
                 if relocs.len() > 0:
                     # Synthesize a per-module GOT for wire-4 (GotRel32) sites
                     # before patching anything: R_X86_64_GOTPCREL loads
@@ -1466,7 +1496,9 @@ impl ModuleLoader:
                     if got_target_names.len() > 0:
                         val got_base = native_alloc_rw_memory(got_target_names.len() as i64 * 8)
                         if got_base == 0:
-                            return LoadResult.Error(message: "Failed to allocate GOT for GotRel32 relocations")
+                            return _compat_load_fail(allocs, "Failed to allocate GOT for GotRel32 relocations")
+                        allocs.push(got_base)
+                        allocs.push(got_target_names.len() as i64 * 8)
                         var got_index = 0i64
                         for got_target_name in got_target_names:
                             val slot_addr = got_base + got_index * 8
@@ -1477,7 +1509,7 @@ impl ModuleLoader:
                                 if self.global_symbols.has(got_target_name):
                                     got_target_addr = self.global_symbols[got_target_name][1].address
                             if got_target_addr == 0:
-                                return LoadResult.Error(message: "Unresolved GOT symbol: {got_target_name}")
+                                return _compat_load_fail(allocs, "Unresolved GOT symbol: {got_target_name}")
                             unsafe(capabilities: [raw_ptr]):
                                 native_reloc_write_i64(slot_addr, 0, got_target_addr)
                             got_slot_addr[got_target_name] = slot_addr
@@ -1488,13 +1520,13 @@ impl ModuleLoader:
                         val writable = unsafe(capabilities: [raw_ptr]):
                             native_make_rw(loaded_sym.address, loaded_sym.size)
                         if not writable:
-                            return LoadResult.Error(message: "Failed to make memory writable for relocation at {sym_name}")
+                            return _compat_load_fail(allocs, "Failed to make memory writable for relocation at {sym_name}")
                         for reloc in relocs:
                             val write_width = if reloc.reloc_type == 1: 8 else: 4
                             if loaded_sym.address <= 0 or loaded_sym.size < write_width or reloc.offset < 0 or reloc.offset > loaded_sym.size - write_width:
-                                return LoadResult.Error(message: "Relocation offset {reloc.offset} with width {write_width} out of bounds")
+                                return _compat_load_fail(allocs, "Relocation offset {reloc.offset} with width {write_width} out of bounds")
                             if loaded_sym.address > 0x7FFFFFFFFFFFFFFF - reloc.offset:
-                                return LoadResult.Error(message: "Relocation address overflow at offset {reloc.offset}")
+                                return _compat_load_fail(allocs, "Relocation address overflow at offset {reloc.offset}")
                             var target_addr = 0i64
                             var target_name = ""
                             if reloc.symbol_index >= 0 and reloc.symbol_index < ordered_symbols.len():
@@ -1505,12 +1537,12 @@ impl ModuleLoader:
                                     if self.global_symbols.has(target_name):
                                         target_addr = self.global_symbols[target_name][1].address
                             if target_addr == 0:
-                                return LoadResult.Error(message: "Unresolved symbol at index {reloc.symbol_index}")
+                                return _compat_load_fail(allocs, "Unresolved symbol at index {reloc.symbol_index}")
                             val place = loaded_sym.address + reloc.offset
                             var reloc_s = target_addr
                             if reloc.reloc_type == 4:
                                 if not got_slot_addr.has(target_name):
-                                    return LoadResult.Error(message: "GotRel32 requires GOT synthesis but no slot found for {target_name}")
+                                    return _compat_load_fail(allocs, "GotRel32 requires GOT synthesis but no slot found for {target_name}")
                                 reloc_s = got_slot_addr[target_name]
                             val computed = loader_smf_reloc_value(reloc.reloc_type, reloc_s, place, reloc.addend)
                             match computed:
@@ -1532,13 +1564,13 @@ impl ModuleLoader:
                                             unsafe(capabilities: [raw_ptr]):
                                                 native_reloc_write_i32(loaded_sym.address, reloc.offset, value as i32)
                                         _:
-                                            return LoadResult.Error(message: "Unknown relocation type: {reloc.reloc_type}")
+                                            return _compat_load_fail(allocs, "Unknown relocation type: {reloc.reloc_type}")
                                 case Err(message):
-                                    return LoadResult.Error(message: message)
+                                    return _compat_load_fail(allocs, message)
                         val executable = unsafe(capabilities: [raw_ptr]):
                             native_make_executable(loaded_sym.address, loaded_sym.size)
                         if not executable:
-                            return LoadResult.Error(message: "Failed to restore executable memory for {sym_name}")
+                            return _compat_load_fail(allocs, "Failed to restore executable memory for {sym_name}")
                         native_flush_icache(loaded_sym.address, loaded_sym.size)
 
                 if not aspect_candidate.present:
@@ -1546,7 +1578,7 @@ impl ModuleLoader:
                     match metadata_result:
                         case Err(err):
                             if symbols.is_empty():
-                                return LoadResult.Error(message: err)
+                                return _compat_load_fail(allocs, err)
                         case Ok(_):
                             pass
 
@@ -1561,8 +1593,8 @@ impl ModuleLoader:
                         _module_aspect_gate_key_v1(
                             self.aspect_owner.identity, "pack-register", path))
                     if not admission.acquired:
-                        return LoadResult.Error(
-                            message: "aspect-pack commit timed out waiting for lifecycle owner: " + path)
+                        return _compat_load_fail(allocs,
+                            "aspect-pack commit timed out waiting for lifecycle owner: " + path)
                     if not self.aspect_owner.loader_cell.has(0):
                         self.aspect_owner.loader_cell[0] = apk_loader_new()
                     var aspect_commit_error = ""
@@ -1573,12 +1605,17 @@ impl ModuleLoader:
                         case Ok(_):
                             self.aspect_owner.pack_paths[path] = true
                     if not _module_aspect_gate_exit_v1(admission):
-                        return LoadResult.Error(
-                            message: "aspect-pack commit lost lifecycle ownership: " + path)
+                        return _compat_load_fail(allocs,
+                            "aspect-pack commit lost lifecycle ownership: " + path)
                     if aspect_commit_error != "":
-                        return LoadResult.Error(message: "aspect-pack commit failed {path}: {aspect_commit_error}")
+                        return _compat_load_fail(allocs, "aspect-pack commit failed {path}: {aspect_commit_error}")
 
-                val m = LoadedModule(path: path, reader: "", symbols: symbols, load_time: 0, version: 1)
+                # Commit point: executable symbols + aspect pack all validated; no
+                # failure path remains, so publishing cannot dangle after a rollback.
+                for publish_name in symbols.keys():
+                    self.global_symbols[publish_name] = (path, symbols[publish_name])
+
+                val m = LoadedModule(path: path, reader: "", symbols: symbols, load_time: 0, version: 1, exec_mappings: allocs)
                 self.modules[path] = m
                 self.module_intents[path] = "smf_artifact"
                 return LoadResult.Success(module: m)
@@ -1587,10 +1624,36 @@ impl ModuleLoader:
         self.reload_with_intent(path, ModuleLoadIntent.SmfArtifact)
 
     me reload_with_intent(path: text, intent: ModuleLoadIntent) -> LoadResult:
+        # A pinned module is replaced only after the slot admits the new
+        # image; any refusal returns before unload, so the old module stays.
+        # If the load after an admitted swap fails, the swap is rolled back
+        # (one CAS) so the slot never ends a generation ahead of the module;
+        # old images are reclaimed only after a successful load.
+        var committed = -1
+        if self.hot_swap_slots.has(path):
+            val slot = self.hot_swap_slots[path]
+            val _stale = hot_swap_reclaim(slot)
+            val swapped = hot_swap_try(slot, slot.current_generation(), file_read_bytes(path))
+            if swapped.is_err():
+                return LoadResult.Error(message: swapped.unwrap_err())
+            committed = swapped.unwrap()
         self.unload(path)
-        if self.modules.has(path):
-            return LoadResult.Error(message: "module unload blocked: " + path)
-        self.load_with_intent(path, intent)
+        val result = if self.modules.has(path):
+            LoadResult.Error(message: "module unload blocked: " + path)
+        else:
+            self.load_with_intent(path, intent)
+        if committed >= 0:
+            val slot = self.hot_swap_slots[path]
+            match result:
+                case LoadResult.Success(_):
+                    val _freed = hot_swap_reclaim(slot)
+                case _:
+                    match hot_swap_rollback(slot, committed):
+                        case Err(message):
+                            return LoadResult.Error(message: message)
+                        case Ok(_):
+                            pass
+        result
 
     me unload(path: text):
         if not self.modules.has(path):
@@ -1664,6 +1727,11 @@ impl ModuleLoader:
                 _kept_self_dependency_semantic_fingerprints[_k] = self.dependency_semantic_fingerprints[_k]
         self.dependency_semantic_fingerprints = _kept_self_dependency_semantic_fingerprints
         if self.modules.has(path):
+            # Unmap the module's code/GOT mappings exactly once, on the only
+            # path that drops the module record (the gate returns above keep
+            # the module and therefore its mappings). See doc/08_tracking/bug/
+            # compat_loader_unload_leaks_exec_mappings_2026-11-03.md
+            _compat_release_exec_mappings(self.modules[path].exec_mappings)
             # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
             # natively (rt_dict_remove); assigning it back destroys the map on the
             # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
@@ -1791,7 +1859,7 @@ impl ModuleLoader:
                 val addr = match address:
                     Some(value):
                         value
-                    nil:
+                    None:
                         0
                 var owner = "__jit__"
                 val rec: MappedRecord? = self.jit.exec_mapper.lookup(sym_name)
@@ -1799,7 +1867,7 @@ impl ModuleLoader:
                     Some(value):
                         val rv: MappedRecord = value
                         owner = rv.owner_id
-                    nil:
+                    None:
                         pass
                 val sym = LoadedSymbol(
                     name: sym_name,
@@ -1828,7 +1896,7 @@ impl ModuleLoader:
     fn get_module(path: text) -> LoadedModule?:
         if self.modules.has(path):
             return Some(self.modules[path])
-        nil
+        None
 
 fn moduleloaderconfig_default() -> ModuleLoaderConfig:
     ModuleLoaderConfig(
@@ -1855,7 +1923,8 @@ fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
             semantic_dependencies: {},
             semantic_fingerprints: {},
             dependency_semantic_fingerprints: {},
-            aspect_owner: _module_aspect_owner_new_v1()
+            aspect_owner: _module_aspect_owner_new_v1(),
+            hot_swap_slots: {}
     )
 
 fn moduleloader_aspect_loader_handle(self: ModuleLoader) -> i64:
@@ -1999,13 +2068,65 @@ me moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
 me moduleloader_reload_with_intent(self: ModuleLoader, path: text, intent: ModuleLoadIntent) -> LoadResult:
     self.reload_with_intent(path, intent)
 
+# RB-LOAD-02 loader entry: pin a loaded SMF module to `row`; its current
+# artifact bytes become slot generation 0 (identity-admitted, no fallback).
+# Ok = the pinned generation; Err = the loader diagnostic text.
+me moduleloader_pin_hot_swap(self: ModuleLoader, path: text, row: SmfManifestEntry) -> Result<i64, text>:
+    if not self.modules.has(path):
+        return Err("SMF-E-HOTSWAP-NOT-LOADED: {path}")
+    if self.hot_swap_slots.has(path):
+        return _compat_hot_swap_repin(self, path, row)
+    val slot = hot_swap_slot_load(row, file_read_bytes(path))?
+    self.hot_swap_slots[path] = slot
+    Ok(slot.current_generation())
+
+# Re-pin of an already pinned module (same rule as LazyModuleLoader): the same
+# identity is a no-op (Ok = current generation); a different identity is
+# refused and the live slot kept, since readers may hold it.
+# reason: Result carries the loader diagnostic text
+@allow(primitive_api)
+fn _compat_hot_swap_repin(self: ModuleLoader, path: text, row: SmfManifestEntry) -> Result<i64, text>:
+    val slot = self.hot_swap_slots[path]
+    val p = slot.pinned
+    if p.iface_digest != row.iface_digest or p.abi_digest != row.abi_digest or
+            p.native_target != row.native_target or p.profile != row.profile or
+            p.allowed_families != row.allowed_families:
+        return Err("SMF-E-HOTSWAP-ALREADY-PINNED: {path} is pinned to a different unit identity")
+    Ok(slot.current_generation())
+
+# Per-call reader pin on a pinned module's current image.
+# reason: Result carries the loader diagnostic text
+@allow(primitive_api)
+fn moduleloader_hot_swap_read_begin(self: ModuleLoader, path: text) -> Result<HotSwapRead, text>:
+    if not self.hot_swap_slots.has(path):
+        return Err("SMF-E-HOTSWAP-NOT-PINNED: {path}")
+    hot_swap_read_begin(self.hot_swap_slots[path])
+
+# Public unload also releases the path's hot-swap slot (reload's internal
+# unload keeps it: the slot outlives the swap it admitted).
 me moduleloader_unload(self: ModuleLoader, path: text):
     self.unload(path)
+    if not self.modules.has(path) and self.hot_swap_slots.has(path):
+        val _released = moduleloader_release_hot_swap(self, path)
+
+# RB-LOAD-02: retire a path's slot (one CAS, see hot_swap_slot_release) and
+# drop it from the table by rebuilding the dict without the key. An unknown
+# or already-released path fails closed.
+me moduleloader_release_hot_swap(self: ModuleLoader, path: text) -> Result<i64, text>:
+    if not self.hot_swap_slots.has(path):
+        return Err("SMF-E-HOTSWAP-NOT-PINNED: {path}")
+    val freed = hot_swap_slot_release(self.hot_swap_slots[path])?
+    var kept: Dict<text, HotSwapSlot> = {}
+    for k in self.hot_swap_slots.keys():
+        if k != path:
+            kept[k] = self.hot_swap_slots[k]
+    self.hot_swap_slots = kept
+    Ok(freed)
 
 me moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
     self.resolve_symbol(name)
 
-fn moduleloader_execute_smf(path: text) -> Result<i64, text>:
+pub fn moduleloader_execute_smf(path: text) -> Result<i64, text>:
     val loader = moduleloader_with_defaults()
     match moduleloader_load(loader, path):
         case Success(_):

@@ -31,3 +31,46 @@ Validation uses one line-offset index per affected source and sorting per replac
 Only the four touched existing owner files were checked for existing @allow directives: zero. No signature-proven supported warning rewrite was confirmed in those owned files. Therefore this packet applies no fabricated cleanup or suppression to production source, and makes no all-warning-clean claim. Donor, staging, encoding and inference owners remain untouched; root owns review/application and future authorized verification.
 
 Revision 2 reconciles existing `fix_atomic_write_failure_check.spl`: its directory target now fails source admission before any atomic write. The retained filename preserves callers, while comments/output accurately describe invalid-source rejection and directory preservation. This oracle does not exercise file_atomic_write failure. Actual atomic-write-failure coverage remains unqualified; no fake provider or permission assumption was introduced. Production implementation and 17 new scenarios are unchanged.
+
+<!-- wave-f-perf-analysis-collection-refactoring-2026-11-19 -->
+
+## Semantic legality obligations and `--fix-safe` lifecycle for collection refactors (2026-11-18)
+
+Canonical plan: [Simple Performance Analysis and Collection Refactoring](../../03_plan/compiler/performance_analysis_and_collection_refactoring_2026-11-18.md) (`D06`, `D10`, §7, §10, §16.2; contracts in `src/compiler/35.semantics/perf/perf_analysis_contracts_v1.spl` and `src/lib/common/diagnostics/fix_transaction.spl`).
+
+### Separation of recognition, legality, and profitability
+
+Loop-to-collection and performance-related rewrites separate three questions (`D06`): (1) structural **recognition** (`LoopIdiomCandidateV1`), (2) language-semantic **legality** (`SafetyObligationStatusV1`), and (3) resource **profitability**. Passing tests or re-typechecking after an edit is regression evidence, never a substitute for discharging semantic preconditions (`D10`).
+
+### 13-point `VerifiedSafe` proof obligations (`SafetyObligationKind`)
+
+Automatic application (`PerfFixApplicability.VerifiedSafe` / `FixApplicability.Automatic`) requires every one of the 13 obligations in `perf_analysis_contracts_v1.spl` to be discharged:
+
+1. `collection_identity` — replacing a fresh local builder cannot alter an object identity or partial buffer observable elsewhere (`S06`).
+2. `aliasing` — input collections, output builders, captured references, and iterators do not alias or interfere (`S03`).
+3. `mutation` — callbacks neither mutate the iterated source nor depend on partially built output prefixes (`S04`).
+4. `evaluation_order` — exact callback/iterator call count, order, and short-circuit termination (`any`/`all`/`find`) are preserved (`S12`).
+5. `timing_eagerness` — eager loops keep an eager terminal consumer (`collect()` / `fold(...)`) at the exact original point (`S02`).
+6. `failure_prefix_cleanup` — mid-iteration error order, visible prefix state, fallback evaluation, and scope cleanup/destructors match (`S05`, `S18`).
+7. `control_flow_exits` — `break`, `continue`, labeled exits, and early `return` paths are modeled and preserved.
+8. `capture_lifetime` — value/reference capture bindings, ownership, and borrow lifetimes remain valid.
+9. `numeric_semantics` — fold seeds on empty inputs (`S07`), non-associative order (`S08`), floating-point rounding/NaN/signed-zero order (`S09`), and checked overflow traps (`S10`) are preserved.
+10. `output_shape_duplicates` — result type, duplicate-key retention, grouped vs flat join shape (`S16`, `S17`), and empty-input results match.
+11. `runtime_effects` — I/O, volatile/MMIO, locks, clocks, RNG, async suspension, and cancellation points are never reordered or dropped (`S11`).
+12. `resource_restrictions` — active `nogc`, fixed-capacity, and declared `@cost` memory/allocation limits are respected (§10.4).
+13. `revision_currency` — source bytes (`source_hash`), document `version`, `expected_text`, callee effect summaries, and library model versions (`dependency_fingerprint`) match the current snapshot (`I01`, `I02`).
+
+Any unknown or unmet obligation downgrades the candidate to `Unavailable` (`PERF-FIX-001`) or `ReviewRequired` (for index/join/allocation tradeoffs). LLM-generated or solver-synthesized patches never self-assign `VerifiedSafe` (§10.1).
+
+### 8-stage safe edit lifecycle and `--fix-safe` batch rules
+
+1. **Discover** candidates read-only without touching disk or overlay buffers.
+2. **Resolve** lazily against the exact source and typed HIR revision when requested.
+3. **Validate** all 13 obligations plus `EditTransaction` triple preconditions (`version`, `source_hash`, `expected_text`) and `dependency_fingerprint`.
+4. **Preview** minimal syntax-preserving diffs (preserving comments, indentation, captures, and unexpanded macro boundaries, `S15`) alongside honest cost/allocation tradeoff notes (`S14`).
+5. **Apply** deterministically through `EditTransaction`, rejecting overlapping or conflicting spans (`OverlappingEdits`, `I07`).
+6. **Check** by reparsing/type-checking and running selected verification specs.
+7. **Record** rule ID, before/after digests, discharged assumptions, and verification status.
+8. **Recover** cleanly without overwriting concurrent user edits if validation fails.
+
+In `--fix-safe` batch mode, dependent semantic facts are recomputed between chained edits so invalidated candidates are skipped rather than applied stale, rewrite cycles are bounded, `ReviewRequired` algorithm changes (`PERF-ALG-001`) are excluded with an explanation, and `@allow(...)` suppressions are never synthesized automatically (§10.3).

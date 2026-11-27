@@ -19,7 +19,7 @@
 # Usage:
 #   Can be run as standalone script, or imported and called directly
 
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{getpid}
@@ -190,7 +190,12 @@ fn compile_llvm_direct_opts(source_file: text, output_file: text, opts: CompileO
         val cpp_size = file_size(temp_cpp)
         debug("compile", "Generated C++ (" + str(cpp_size) + " bytes)")
 
-    var generated_source = rt_file_read_text(temp_cpp) ?? ""
+    val generated_opt = rt_file_read_text(temp_cpp)
+    if generated_opt.is_none():
+        error("compile", "failed to read generated C source: " + temp_cpp)
+        file_delete(temp_cpp)
+        return 1
+    var generated_source = generated_opt.unwrap()
     if not llvm_direct_generated_c_is_textual(generated_source):
         generated_source = llvm_direct_minimal_c_source_from_simple(source_file)
         if not file_write(temp_cpp, generated_source):
@@ -220,7 +225,12 @@ fn compile_llvm_direct_opts(source_file: text, output_file: text, opts: CompileO
             error("compile", "Simple layout section map not found: " + opts.simple_layout_section_map_path)
             file_delete(temp_cpp)
             return 1
-        val section_map_text = rt_file_read_text(opts.simple_layout_section_map_path) ?? ""
+        val section_map_opt = rt_file_read_text(opts.simple_layout_section_map_path)
+        if section_map_opt.is_none():
+            error("compile", "Simple layout section map could not be read: " + opts.simple_layout_section_map_path)
+            file_delete(temp_cpp)
+            return 1
+        val section_map_text = section_map_opt.unwrap()
         val applied = native_layout_apply_c_section_map(generated_source, section_map_text, true)
         if applied.diagnostic_count > 0:
             error("compile", "Simple layout section map failed: " + applied.diagnostics.join(","))
@@ -405,16 +415,43 @@ fn main() -> i64:
         if arg == "--pgo-generate":
             opts.pgo_generate = true
         if arg.starts_with("--pgo-use="):
-            opts.pgo_use_path = arg.substring(10, arg.len())
+            opts.pgo_use_path = arg.substring(10, arg.byte_len())
         if arg.starts_with("--march="):
-            opts.march_target = arg.substring(8, arg.len())
+            opts.march_target = arg.substring(8, arg.byte_len())
         if arg == "--simple-profile-counters":
             opts.simple_profile_counters = true
         if arg.starts_with("--simple-layout-section-map="):
-            opts.simple_layout_section_map_path = arg.substring(28, arg.len())
+            opts.simple_layout_section_map_path = arg.substring(28, arg.byte_len())
         if arg == "--release-optimized":
             opts.opt_level = "-O3"
             opts.march_target = "x86-64-v3"
             opts.use_lto = true
 
     compile_llvm_direct_opts(source_file, output_file, opts)
+
+pub fn llvm_direct_minimal_c_source(source: text) -> text:
+    var functions: [text] = []
+    var seen: {text: bool} = {}
+    val lines = source.split("\n")
+    var i = 0
+    while i < lines.len():
+        val name = llvm_direct_function_name_from_simple_line(lines[i])
+        if name != "" and name != "main" and not seen.contains(name):
+            seen[name] = true
+            functions.push(name)
+        i = i + 1
+
+    var fragments: [text] = ["#include <stdint.h>\n"]
+    var fi = 0
+    while fi < functions.len():
+        val name = functions[fi]
+        fragments.push("static int {name}(void) {\n  return 0;\n}\n")
+        fi = fi + 1
+    fragments.push("int main(void) {\n")
+    var ci = 0
+    while ci < functions.len():
+        val name = functions[ci]
+        fragments.push("  (void){name}();\n")
+        ci = ci + 1
+    fragments.push("  return 0;\n}\n")
+    fragments.join("")

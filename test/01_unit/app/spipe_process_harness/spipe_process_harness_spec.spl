@@ -7,6 +7,7 @@ hook path helpers, and event JSONL formatting.
 
 use std.spipe.*
 use std.nogc_async_mut.spipe_process_harness.types.{
+    Provider, GateVerdict, ApprovalRequirement, HookSessionId, ModelName, FeatureSlug,
     HarnessOptions, GateDecision, HudSnapshot, HookDeploySnippet
 }
 use std.nogc_async_mut.spipe_process_harness.core.{
@@ -44,83 +45,83 @@ describe "SPipe Process Harness":
 
         it "normalizes claude":
             val p = normalize_provider("claude")
-            expect(p).to_equal("claude")
+            expect(p).to_equal(Provider.Claude)
 
         it "normalizes Claude (capitalized)":
             val p = normalize_provider("Claude")
-            expect(p).to_equal("claude")
+            expect(p).to_equal(Provider.Claude)
 
         it "normalizes codex":
             val p = normalize_provider("codex")
-            expect(p).to_equal("codex")
+            expect(p).to_equal(Provider.Codex)
 
         it "normalizes openai as codex":
             val p = normalize_provider("openai")
-            expect(p).to_equal("codex")
+            expect(p).to_equal(Provider.Codex)
 
         it "normalizes gpt as codex":
             val p = normalize_provider("gpt-4o")
-            expect(p).to_equal("codex")
+            expect(p).to_equal(Provider.Codex)
 
         it "normalizes gemini":
             val p = normalize_provider("gemini")
-            expect(p).to_equal("gemini")
+            expect(p).to_equal(Provider.Gemini)
 
         it "normalizes google as gemini":
             val p = normalize_provider("google")
-            expect(p).to_equal("gemini")
+            expect(p).to_equal(Provider.Gemini)
 
         it "returns unknown for empty string":
             val p = normalize_provider("")
-            expect(p).to_equal("unknown")
+            expect(p).to_equal(Provider.Unknown)
 
-        it "passes through unknown provider":
+        it "maps an unrecognised provider to Unknown":
             val p = normalize_provider("llama")
-            expect(p).to_equal("llama")
+            expect(p).to_equal(Provider.Unknown)
 
     describe "state_path and event_log_path":
 
         it "state_path uses feature name":
-            val path = state_path("my-feature")
+            val path = state_path(FeatureSlug(value: "my-feature"))
             expect(path).to_equal(".spipe/my-feature/state.md")
 
         it "state_path defaults when empty":
-            val path = state_path("")
+            val path = state_path(FeatureSlug(value: ""))
             expect(path).to_equal(".spipe/spipe-process-harness/state.md")
 
         it "event_log_path uses feature name":
-            val path = event_log_path("my-feature")
+            val path = event_log_path(FeatureSlug(value: "my-feature"))
             expect(path).to_equal(".spipe/my-feature/events.jsonl")
 
     describe "gate_from_state":
 
         it "blocks on empty state":
-            val gate = gate_from_state("", false)
-            expect(gate.allowed == false).to_equal(true)
+            val gate = gate_from_state("", ApprovalRequirement.NotRequired)
+            expect(gate.verdict).to_equal(GateVerdict.Block)
 
-        it "blocks on empty state with exit code 2":
-            val gate = gate_from_state("", false)
-            expect(gate.exit_code).to_equal(2)
+        it "blocks on empty state with a reason":
+            val gate = gate_from_state("", ApprovalRequirement.NotRequired)
+            expect(gate.reason).to_equal("missing SPipe state")
 
         it "allows approved state":
             val state = make_approved_state()
-            val gate = gate_from_state(state, true)
-            expect(gate.allowed).to_equal(true)
+            val gate = gate_from_state(state, ApprovalRequirement.Required)
+            expect(gate.verdict).to_equal(GateVerdict.Allow)
 
         it "blocks when approval required but missing":
             val state = make_unapproved_state()
-            val gate = gate_from_state(state, true)
-            expect(gate.allowed == false).to_equal(true)
+            val gate = gate_from_state(state, ApprovalRequirement.Required)
+            expect(gate.verdict).to_equal(GateVerdict.Block)
 
         it "allows when approval not required even without approval marker":
             val state = make_unapproved_state()
-            val gate = gate_from_state(state, false)
-            expect(gate.allowed).to_equal(true)
+            val gate = gate_from_state(state, ApprovalRequirement.NotRequired)
+            expect(gate.verdict).to_equal(GateVerdict.Allow)
 
         it "blocks when Prevent: block in state":
             val state = make_blocked_state()
-            val gate = gate_from_state(state, false)
-            expect(gate.allowed == false).to_equal(true)
+            val gate = gate_from_state(state, ApprovalRequirement.NotRequired)
+            expect(gate.verdict).to_equal(GateVerdict.Block)
 
     describe "render_hud":
 
@@ -146,21 +147,21 @@ describe "SPipe Process Harness":
 
     describe "deploy_snippets":
 
-        it "returns 3 snippets":
+        it "returns 4 snippets":
             val snippets = deploy_snippets()
-            expect(snippets.len()).to_equal(3)
+            expect(snippets.len()).to_equal(4)
 
         it "first snippet is for claude":
             val snippets = deploy_snippets()
-            expect(snippets[0].provider).to_equal("claude")
+            expect(snippets[0].provider).to_equal(Provider.Claude)
 
         it "second snippet is for codex":
             val snippets = deploy_snippets()
-            expect(snippets[1].provider).to_equal("codex")
+            expect(snippets[1].provider).to_equal(Provider.Codex)
 
         it "third snippet is for gemini":
             val snippets = deploy_snippets()
-            expect(snippets[2].provider).to_equal("gemini")
+            expect(snippets[2].provider).to_equal(Provider.Gemini)
 
         it "claude snippet path contains claude-settings-hooks":
             val snippets = deploy_snippets()
@@ -169,45 +170,56 @@ describe "SPipe Process Harness":
     describe "provider_hook_events":
 
         it "claude has 9 events":
-            val events = provider_hook_events("claude")
+            val events = provider_hook_events(Provider.Claude)
             expect(events.len()).to_equal(9)
 
         it "codex has 5 events":
-            val events = provider_hook_events("codex")
+            val events = provider_hook_events(Provider.Codex)
             expect(events.len()).to_equal(5)
 
         it "gemini has 5 events":
-            val events = provider_hook_events("gemini")
+            val events = provider_hook_events(Provider.Gemini)
             expect(events.len()).to_equal(5)
 
         it "claude events contain PreToolUse":
-            val events = provider_hook_events("claude")
+            val events = provider_hook_events(Provider.Claude)
             expect(events[0]).to_equal("PreToolUse")
 
         it "codex events contain session_start":
-            val events = provider_hook_events("codex")
+            val events = provider_hook_events(Provider.Codex)
             expect(events[0]).to_equal("session_start")
+
+    describe "kimi and unknown providers":
+
+        it "recognises kimi":
+            expect(normalize_provider("kimi")).to_equal(Provider.Kimi)
+
+        it "has no hook events for kimi":
+            expect(provider_hook_events(Provider.Kimi).len()).to_equal(0)
+
+        it "has no hook events for unknown":
+            expect(provider_hook_events(Provider.Unknown).len()).to_equal(0)
 
     describe "hook_command":
 
         it "returns bin/simple command for claude":
-            val cmd = hook_command("claude")
+            val cmd = hook_command(Provider.Claude)
             expect(cmd).to_contain("bin/simple")
 
         it "includes provider name in command":
-            val cmd = hook_command("gemini")
+            val cmd = hook_command(Provider.Gemini)
             expect(cmd).to_contain("gemini")
 
     describe "hook_jsonl":
 
         it "produces valid json with provider field":
-            val j = hook_jsonl("claude", "PreToolUse", "sess-1", "sonnet", "{}")
+            val j = hook_jsonl(Provider.Claude, "PreToolUse", HookSessionId(value: "sess-1"), ModelName(value: "sonnet"), "{}")
             expect(j).to_contain("\"provider\":\"claude\"")
 
         it "includes event field":
-            val j = hook_jsonl("codex", "tool_start", "sess-2", "gpt-4o", "{}")
+            val j = hook_jsonl(Provider.Codex, "tool_start", HookSessionId(value: "sess-2"), ModelName(value: "gpt-4o"), "{}")
             expect(j).to_contain("\"event\":\"tool_start\"")
 
         it "includes type field":
-            val j = hook_jsonl("gemini", "session_start", "sess-3", "gemini-pro", "{}")
+            val j = hook_jsonl(Provider.Gemini, "session_start", HookSessionId(value: "sess-3"), ModelName(value: "gemini-pro"), "{}")
             expect(j).to_contain("\"type\":\"spipe_hook\"")

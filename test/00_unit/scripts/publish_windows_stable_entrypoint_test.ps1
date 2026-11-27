@@ -59,8 +59,9 @@ try {
     if ((Get-Sha256 $receipt) -ne $receiptBefore) { throw 'receipt failure changed prior receipt' }
 
     # Keep the fully qualified staging name below the legacy Windows 260-byte
-    # limit while still exercising a deep path with spaces.
-    $long = Join-Path $Work ('nested ' * 7)
+    # limit while still exercising a deep path with spaces (Win32 strips
+    # trailing spaces on directory creation, so trim only the outer tail).
+    $long = Join-Path $Work (('nested ' * 7).TrimEnd())
     New-Item -ItemType Directory -Path $long -Force | Out-Null
     $longStable = Join-Path $long 'simple.exe'
     & $Publisher -Candidate $candidate -Destination $longStable -ExpectedSha256 $lockedCandidate -Receipt (Join-Path $long 'receipt.env')

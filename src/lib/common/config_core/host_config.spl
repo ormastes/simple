@@ -25,7 +25,7 @@ val HOST_CONFIG_SCHEMA = "simple-host-config-v1"
 
 # Integer key with inclusive bounds. tree_rss_host_pct is a share of host RAM
 # handed to one process tree; the shell twin (host_config_valid) and the
-# consumer (scripts/bootstrap/lib/tree-rss-policy.shs) enforce the same 1..75.
+# consumer (scripts/bootstrap/lib/tree-rss-policy.shs) enforce the same 1..90.
 fn host_config_int_range_field(key: text, min_value: i64, max_value: i64) -> ConfigFieldDescriptor:
     ConfigFieldDescriptor(
         key: key,
@@ -47,13 +47,21 @@ fn host_config_schema() -> [ConfigFieldDescriptor]:
         config_int_field("max_build_jobs", "", 1),
         config_int_field("max_threads", "", 1),
         config_int_field("worker_mem_mib", "", 1),
+        # Memory limits (MiB / count). Consumers: shard + codegen pool commit
+        # floor and the build start guard (mem_reserve_free_mib), launch-script
+        # probes (probe_max_mib, probe_max_parallel; scripts/setup/host-limits.shs).
+        config_int_field("mem_reserve_free_mib", "", 1),
+        config_int_field("probe_max_mib", "", 1),
+        config_int_field("probe_max_parallel", "", 1),
         config_int_field("tree_rss_base_mib", "", 1),
         config_int_field("tree_rss_per_job_mib", "", 1),
-        host_config_int_range_field("tree_rss_host_pct", 1, 75),
+        host_config_int_range_field("tree_rss_host_pct", 1, 90),
         config_enum_field("cpu_family", "", ["x86_64", "aarch64", "riscv64"]),
         config_field("cpu_features", "text", ""),
         config_enum_field("os", "", ["windows", "linux", "macos", "freebsd", "simpleos"]),
         config_field("llvm_root", "text", ""),
+        # User-owned server context document; credential material stays outside.
+        config_field("server_config", "text", ""),
         config_int_field("llvm_version", "", 1),
         config_enum_field("gpu", "", ["on", "off"]),
         # cache: each is only a DEFAULT for an existing consumer variable
@@ -74,7 +82,17 @@ fn host_config_schema() -> [ConfigFieldDescriptor]:
         # (counted, with reason) when off. See std.spec.requires_feature.
         config_enum_field("hwir", "", ["on", "off"]),
         config_enum_field("assurance", "", ["on", "off"]),
-        config_enum_field("arm_baremetal", "", ["on", "off"])
+        config_enum_field("arm_baremetal", "", ["on", "off"]),
+        # cache retention (compiler.driver.cache.metadata.cache_limits reads
+        # SIMPLE_HOST_CACHE_*; SIMPLE_CACHE_* env overrides win). Not consumer
+        # defaults, so they are exported by host_config_load.
+        config_int_field("cache_memory_max_bytes", "", 1),
+        config_int_field("cache_storage_max_bytes", "", 1),
+        config_int_field("cache_max_branches", "", 1),
+        config_field("cache_kept_branches", "text", ""),
+        config_int_field("cache_versions_per_source", "", 1),
+        config_int_field("cache_per_source_max_disk_bytes", "", 1),
+        config_int_field("cache_per_source_max_memory_bytes", "", 1)
     ]
 
 # Cache keys, in the shell twin's HOST_CONFIG_CACHE_KEYS order.
@@ -117,7 +135,7 @@ fn _hc_value_ok(desc: ConfigFieldDescriptor, value: text) -> bool:
     true
 
 # Environment variable that overrides `key`: SIMPLE_HOST_<KEY>.
-fn host_config_env_name(key: text) -> text:
+pub fn host_config_env_name(key: text) -> text:
     "SIMPLE_HOST_" + key.upper()
 
 fn _hc_parse(content: text, layer: text) -> [ConfigEntry]:
@@ -148,7 +166,7 @@ fn _hc_layer_entries(content: text, layer: text) -> [ConfigEntry]:
     entries
 
 # All contributions, tagged with their layer. Any document may be "".
-fn host_config_entries(defaults_text: text, host_text: text, user_text: text, env: [(text, text)]) -> [ConfigEntry]:
+pub fn host_config_entries(defaults_text: text, host_text: text, user_text: text, env: [(text, text)]) -> [ConfigEntry]:
     var result: [ConfigEntry] = []
     for e in _hc_layer_entries(defaults_text, "vendor"):
         result.push(e)
@@ -200,7 +218,7 @@ fn host_config_resolve(entries: [ConfigEntry], key: text) -> ConfigResolution:
             kept.push(e)
     config_resolve_valid(schema[idx], kept)
 
-fn host_config_value(entries: [ConfigEntry], key: text) -> text:
+pub fn host_config_value(entries: [ConfigEntry], key: text) -> text:
     host_config_resolve(entries, key).value
 
 # (consumer variable, value) defaults for every cache key whose consumer
@@ -233,3 +251,34 @@ fn host_config_cpu_features(entries: [ConfigEntry]) -> [text]:
         if f != "":
             result.push(f)
     result
+
+# Integer value of `key`, or `default_value` when the key is unset or invalid
+# (invalid values already fell through every layer in host_config_resolve).
+pub fn host_config_int(entries: [ConfigEntry], key: text, default_value: i64) -> i64:
+    val raw = host_config_value(entries, key)
+    if raw == "":
+        return default_value
+    val parsed = raw.to_i64() ?? 0
+    if parsed > 0:
+        return parsed
+    default_value
+
+# Typed getters for the resource-limit keys. `default_value` is the consumer's
+# own built-in default; 0 means "no bound / let the consumer decide".
+fn host_config_max_build_jobs(entries: [ConfigEntry], default_value: i64) -> i64:
+    host_config_int(entries, "max_build_jobs", default_value)
+
+fn host_config_max_threads(entries: [ConfigEntry], default_value: i64) -> i64:
+    host_config_int(entries, "max_threads", default_value)
+
+fn host_config_worker_mem_mib(entries: [ConfigEntry], default_value: i64) -> i64:
+    host_config_int(entries, "worker_mem_mib", default_value)
+
+fn host_config_mem_reserve_free_mib(entries: [ConfigEntry], default_value: i64) -> i64:
+    host_config_int(entries, "mem_reserve_free_mib", default_value)
+
+fn host_config_probe_max_mib(entries: [ConfigEntry], default_value: i64) -> i64:
+    host_config_int(entries, "probe_max_mib", default_value)
+
+fn host_config_probe_max_parallel(entries: [ConfigEntry], default_value: i64) -> i64:
+    host_config_int(entries, "probe_max_parallel", default_value)

@@ -1,5 +1,5 @@
 # An `Err(FsError)` payload reads as a zero/default value in freestanding cranelift builds
-## Open 2026-09-16 — needs owner triage
+## Open 2026-11-11 — LIVE (not re-verifiable on a no-cargo lane), keep OPEN (lane ne10; see addendum)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -88,3 +88,39 @@ No workaround was applied and the gate was NOT made to pass. Rewriting the
 mount path to avoid `match` would hide a compiler defect that affects every
 `Result<_, FsError>` consumer in the freestanding kernel, not just this lane.
 
+
+---
+
+## 2026-11-11 addendum — lane ne10 (P3 traverse, batch ne10)
+
+**Verdict: LIVE — keep OPEN.** No fix evidence found on release; the defect is not re-verifiable
+on this lane.
+
+- **State check:** the reproduce path, the gate
+  (`scripts/check/check-simpleos-nvfs-server-roundtrip-ovmf.shs`), and the source under test
+  (`src/os/kernel/boot/nvfs_root_mount_transaction.spl`) all still exist unchanged in kind; no
+  commit touching the freestanding/cranelift enum-match or `FsError` payload path was found in
+  the release history since filing. The hosted interpreter remains correct by construction of
+  this record, so the only signal a seed-smoke run can give (the 3/3 unit spec) was already
+  green in the doc and proves nothing about the freestanding build mode.
+- **Blocker:** reproduction requires a cargo-built seed plus the OVMF x86_64 freestanding gate;
+  this is a no-cargo lane (and the lane's known Windows native-build hang rules out native
+  re-proof here as well). Grant command (from this doc's Reproduce section, on a cargo-capable
+  Linux host with OVMF):
+  `cd src/compiler_rust && cargo build --release --bin simple && sh scripts/check/check-simpleos-nvfs-server-roundtrip-ovmf.shs`
+  then `grep -a 'production mount' build/os/nvfsrt/nvfs_server_roundtrip_ovmf.serial.log` and the
+  one-run discriminator from the doc (classify a locally constructed `FsError.NotFound`; `6` ⇒
+  H2 payload loss, `0` ⇒ H1 no-arm-selected).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne10: LIVE, not re-verifiable in a no-cargo Windows lane
+(repro needs a cargo-built seed plus the OVMF freestanding gate). Grant
+command recorded in the ne10 addendum stands. No in-lane change.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred).** Not re-verifiable on this Windows lane: reproduction needs a cargo-built seed plus the OVMF x86_64 freestanding gate (Linux). Grant command and the H1/H2 one-run discriminator stand in this record; no commit touching the freestanding/cranelift enum-match or FsError payload path was observed in release history since filing.

@@ -1,0 +1,249 @@
+"""
+## Purpose and audience
+Purpose: Verify the pure goal-start task-skill selector (`task_skills` table of
+`doc/00_llm_process/knowledge_registry.sdn`) and its `GoalSkillSelectionV1`
+receipt across Claude, Codex, Gemini, Kimi and an unknown provider.
+Audience: SPipe/tooling engineers who maintain cross-provider skill routing.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario names the routing contract (SKILL-00x) that regressed.
+## Compatibility and limitations
+Fixture registry text is local to this spec; the real registry file is
+checked by `test/02_integration/app/llm_process/knowledge_routing_process_spec.spl`.
+Troubleshooting: a red scenario means the selection contract changed — read
+`doc/00_llm_process/knowledge_registry_schema.md` before editing an oracle.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.common.llm.task_skill_selector.*
+
+fn row(id: text, task: text, claude: text, codex: text, gemini: text, kimi: text,
+        aliases: text, depends: text) -> text:
+    "  - skill_id: " + id + "\n" +
+    "    task_class: " + task + "\n" +
+    "    version: 1\n" +
+    "    canonical_path: .agents/skills/" + id + "/SKILL.md\n" +
+    "    claude: " + claude + "\n" +
+    "    codex: " + codex + "\n" +
+    "    gemini: " + gemini + "\n" +
+    "    kimi: " + kimi + "\n" +
+    "    aliases: " + aliases + "\n" +
+    "    depends_on: " + depends + "\n" +
+    "    fallback: ask\n"
+
+fn header() -> text:
+    "knowledge_registry:\n  version: 2\n  selection: exact-feature-then-longest-source-prefix\n" +
+    "feature_routes:\n  - feature_id: demo\n    group_id: g\n" +
+    "task_skills:\n"
+
+fn base_rows() -> text:
+    row("impl", "impl", ".claude/skills/impl.md", ".codex/skills/impl/SKILL.md",
+        ".gemini/commands/impl.toml", "disabled", "implement", "verify") +
+    row("verify", "verify", ".claude/skills/verify.md", ".codex/skills/verify/SKILL.md",
+        ".gemini/commands/verify.toml", "disabled", "none", "none") +
+    row("debug", "debug", "disabled", ".codex/skills/debug/SKILL.md",
+        "disabled", "disabled", "none", "none")
+
+fn registry() -> text:
+    header() + base_rows()
+
+fn select(text_value: text, task: GoalTaskClass, provider: SkillProvider) -> GoalSkillSelectionV1:
+    select_goal_skills(text_value, task, provider)
+
+fn has_error(sel: GoalSkillSelectionV1, kind: TaskSkillErrorKind) -> bool:
+    match sel.error:
+        case Some(issue): issue.kind == kind
+        case None: false
+
+fn error_subject(sel: GoalSkillSelectionV1) -> text:
+    match sel.error:
+        case Some(issue): issue.subject.value
+        case None: ""
+
+fn has_primary(sel: GoalSkillSelectionV1) -> bool:
+    match sel.primary:
+        case Some(_): true
+        case None: false
+
+fn primary_id(sel: GoalSkillSelectionV1) -> text:
+    match sel.primary:
+        case Some(skill): skill.id.value
+        case None: ""
+
+fn primary_path(sel: GoalSkillSelectionV1) -> text:
+    match sel.primary:
+        case Some(skill): skill.path.value
+        case None: ""
+
+fn primary_canonical(sel: GoalSkillSelectionV1) -> text:
+    match sel.primary:
+        case Some(skill): skill.canonical_path.value
+        case None: ""
+
+fn version_text(sel: GoalSkillSelectionV1) -> text:
+    match sel.registry_version:
+        case Some(version): version.value
+        case None: ""
+
+fn parsed_rows(registry_text: text) -> [TaskSkillRow]:
+    match parse_task_skill_table(registry_text).table:
+        case Some(table): table.rows
+        case None: []
+
+fn parsed_version(registry_text: text) -> text:
+    match parse_task_skill_table(registry_text).table:
+        case Some(table): table.version.value
+        case None: ""
+
+fn parse_clean(registry_text: text) -> bool:
+    match parse_task_skill_table(registry_text).issue:
+        case Some(_): false
+        case None: true
+
+describe "goal-start task skill selection":
+    it "parses task_skills rows and the registry version from registry text":
+        # @req SKILL-001
+        step("Parse the fixture registry")
+        val rows = parsed_rows(registry())
+        step("Check the parsed table shape")
+        expect(parse_clean(registry())).to_equal(true)
+        expect(parsed_version(registry())).to_equal("2")
+        expect(rows.len()).to_equal(3)
+        expect(rows[0].id.value).to_equal("impl")
+        expect(rows[0].depends_on[0].value).to_equal("verify")
+        expect(rows[0].aliases[0].value).to_equal("implement")
+        expect(rows[2].task_class == GoalTaskClass.Debug).to_equal(true)
+
+    it "selects the primary skill and provider adapter for Claude Codex and Gemini":
+        # @req SKILL-002
+        step("Select verify for each enabled provider")
+        val claude = select(registry(), GoalTaskClass.Verify, SkillProvider.Claude)
+        val codex = select(registry(), GoalTaskClass.Verify, SkillProvider.Codex)
+        val gemini = select(registry(), GoalTaskClass.Verify, SkillProvider.Gemini)
+        step("Each provider gets its own adapter path for the same canonical skill")
+        expect(claude.outcome == GoalSkillOutcome.Selected).to_equal(true)
+        expect(primary_id(claude)).to_equal("verify")
+        expect(primary_path(claude)).to_equal(".claude/skills/verify.md")
+        expect(primary_path(codex)).to_equal(".codex/skills/verify/SKILL.md")
+        expect(primary_path(gemini)).to_equal(".gemini/commands/verify.toml")
+        expect(primary_canonical(claude)).to_equal(".agents/skills/verify/SKILL.md")
+
+    it "carries the transitive required dependencies of the primary skill":
+        # @req SKILL-003
+        step("Select impl, which depends on verify")
+        val sel = select(registry(), GoalTaskClass.Impl, SkillProvider.Codex)
+        step("Dependencies are resolved to provider paths")
+        expect(sel.outcome == GoalSkillOutcome.Selected).to_equal(true)
+        expect(sel.dependencies.len()).to_equal(1)
+        expect(sel.dependencies[0].id.value).to_equal("verify")
+        expect(sel.dependencies[0].path.value).to_equal(".codex/skills/verify/SKILL.md")
+        step("A skill without dependencies selects none")
+        expect(select(registry(), GoalTaskClass.Verify, SkillProvider.Codex).dependencies.len()).to_equal(0)
+
+    it "rejects a task class or dependency with no skill row":
+        # @req SKILL-004
+        step("No row serves the setup task class")
+        val missing = select(registry(), GoalTaskClass.Setup, SkillProvider.Codex)
+        expect(missing.outcome == GoalSkillOutcome.Rejected).to_equal(true)
+        expect(has_error(missing, TaskSkillErrorKind.SkillMissing)).to_equal(true)
+        expect(error_subject(missing)).to_equal("setup")
+        expect(has_primary(missing)).to_equal(false)
+        step("A dependency on an absent skill rejects the whole table")
+        val bad_dep = header() + row("impl", "impl", "a", "b", "c", "disabled", "none", "ghost")
+        val dep = select(bad_dep, GoalTaskClass.Impl, SkillProvider.Codex)
+        expect(has_error(dep, TaskSkillErrorKind.DependencyMissing)).to_equal(true)
+        expect(error_subject(dep)).to_equal("ghost")
+
+    it "rejects a skill or dependency that is not enabled for the provider":
+        # @req SKILL-005
+        step("Kimi is a known provider with no adapter in the fixture")
+        val kimi = select(registry(), GoalTaskClass.Verify, SkillProvider.Kimi)
+        expect(kimi.outcome == GoalSkillOutcome.Rejected).to_equal(true)
+        expect(has_error(kimi, TaskSkillErrorKind.NotEnabledForProvider)).to_equal(true)
+        expect(error_subject(kimi)).to_equal("verify")
+        step("Claude has no debug adapter")
+        expect(has_error(select(registry(), GoalTaskClass.Debug, SkillProvider.Claude), TaskSkillErrorKind.NotEnabledForProvider)).to_equal(true)
+        step("A disabled dependency also rejects the primary")
+        val dep_disabled = header() +
+            row("impl", "impl", "a", "b", "c", "disabled", "none", "verify") +
+            row("verify", "verify", "disabled", "e", "f", "disabled", "none", "none")
+        val sel = select(dep_disabled, GoalTaskClass.Impl, SkillProvider.Claude)
+        expect(has_error(sel, TaskSkillErrorKind.NotEnabledForProvider)).to_equal(true)
+        expect(error_subject(sel)).to_equal("verify")
+
+    it "rejects a cyclic dependency even for an unrelated task class":
+        # @req SKILL-006
+        step("Build impl -> verify -> impl")
+        val cyclic = header() +
+            row("impl", "impl", "a", "b", "c", "disabled", "none", "verify") +
+            row("verify", "verify", "a", "b", "c", "disabled", "none", "impl") +
+            row("debug", "debug", "a", "b", "c", "disabled", "none", "none")
+        step("Selecting debug still fails closed on the table-wide cycle")
+        val sel = select(cyclic, GoalTaskClass.Debug, SkillProvider.Codex)
+        expect(sel.outcome == GoalSkillOutcome.Rejected).to_equal(true)
+        expect(has_error(sel, TaskSkillErrorKind.CyclicDependency)).to_equal(true)
+        expect(has_primary(sel)).to_equal(false)
+        step("A self dependency is a cycle too")
+        val self_dep = header() + row("debug", "debug", "a", "b", "c", "disabled", "none", "debug")
+        expect(has_error(select(self_dep, GoalTaskClass.Debug, SkillProvider.Codex), TaskSkillErrorKind.CyclicDependency)).to_equal(true)
+
+    it "rejects duplicate ids ambiguous aliases ambiguous task classes and malformed rows":
+        # @req SKILL-007
+        step("Duplicate skill id")
+        val dup = registry() + row("verify", "release", "a", "b", "c", "disabled", "none", "none")
+        val dup_sel = select(dup, GoalTaskClass.Debug, SkillProvider.Codex)
+        expect(has_error(dup_sel, TaskSkillErrorKind.DuplicateSkillId)).to_equal(true)
+        expect(error_subject(dup_sel)).to_equal("verify")
+        step("Alias shared by two skills")
+        val alias_twice = registry() + row("release", "release", "a", "b", "c", "disabled", "implement", "none")
+        val alias_sel = select(alias_twice, GoalTaskClass.Debug, SkillProvider.Codex)
+        expect(has_error(alias_sel, TaskSkillErrorKind.AmbiguousAlias)).to_equal(true)
+        expect(error_subject(alias_sel)).to_equal("implement")
+        step("Alias shadowing another skill id")
+        val alias_id = registry() + row("release", "release", "a", "b", "c", "disabled", "debug", "none")
+        expect(has_error(select(alias_id, GoalTaskClass.Debug, SkillProvider.Codex), TaskSkillErrorKind.AmbiguousAlias)).to_equal(true)
+        step("Two primary skills for one task class")
+        val two_primary = registry() + row("checker", "verify", "a", "b", "c", "disabled", "none", "none")
+        expect(has_error(select(two_primary, GoalTaskClass.Debug, SkillProvider.Codex), TaskSkillErrorKind.AmbiguousTaskClass)).to_equal(true)
+        step("Unknown task class, unknown fallback, missing column, missing version, missing section")
+        val bad_class = header() + row("x", "deploy", "a", "b", "c", "disabled", "none", "none")
+        expect(has_error(select(bad_class, GoalTaskClass.Debug, SkillProvider.Codex), TaskSkillErrorKind.MalformedRow)).to_equal(true)
+        val bad_fallback = registry().replace("fallback: ask", "fallback: guess")
+        expect(has_error(select(bad_fallback, GoalTaskClass.Debug, SkillProvider.Codex), TaskSkillErrorKind.MalformedRow)).to_equal(true)
+        val no_column = registry().replace("    gemini: disabled\n", "")
+        expect(has_error(select(no_column, GoalTaskClass.Debug, SkillProvider.Codex), TaskSkillErrorKind.MalformedRow)).to_equal(true)
+        val no_version = registry().replace("  version: 2\n", "")
+        expect(has_error(select(no_version, GoalTaskClass.Debug, SkillProvider.Codex), TaskSkillErrorKind.RegistryVersionMissing)).to_equal(true)
+        val no_section = header().replace("task_skills:\n", "")
+        expect(has_error(select(no_section, GoalTaskClass.Debug, SkillProvider.Codex), TaskSkillErrorKind.TaskSkillsSectionMissing)).to_equal(true)
+
+    it "gives an unknown provider the ask fallback and a digest-bearing receipt":
+        # @req SKILL-008
+        step("Unknown provider activates nothing and asks")
+        val unknown = select(registry(), GoalTaskClass.Verify, SkillProvider.Unknown)
+        expect(unknown.outcome == GoalSkillOutcome.FallbackAsk).to_equal(true)
+        expect(has_primary(unknown)).to_equal(false)
+        expect(unknown.fallback_candidates[0].id.value).to_equal("verify")
+        expect(unknown.fallback_candidates[0].path.value).to_equal(".agents/skills/verify/SKILL.md")
+        step("Receipt records registry version, digest, provider, outcome and skills")
+        val sel = select(registry(), GoalTaskClass.Impl, SkillProvider.Codex)
+        expect(version_text(sel)).to_equal("2")
+        expect(sel.registry_digest.value.len()).to_equal(64)
+        val receipt = goal_skill_selection_receipt(sel).value
+        expect(receipt).to_start_with("schema=GoalSkillSelectionV1\n")
+        expect(receipt).to_contain("registry_version=2\n")
+        expect(receipt).to_contain("registry_digest=sha256:" + sel.registry_digest.value + "\n")
+        expect(receipt).to_contain("provider=codex\n")
+        expect(receipt).to_contain("task_class=impl\n")
+        expect(receipt).to_contain("outcome=selected\n")
+        expect(receipt).to_contain("primary=impl|.codex/skills/impl/SKILL.md|version=1\n")
+        expect(receipt).to_contain("dependency=verify|.codex/skills/verify/SKILL.md|version=1\n")
+        step("A rejected receipt still carries version and digest but no skills")
+        val rejected = goal_skill_selection_receipt(select(registry(), GoalTaskClass.Setup, SkillProvider.Codex)).value
+        expect(rejected).to_contain("outcome=rejected\n")
+        expect(rejected).to_contain("error=skill-missing:setup\n")
+        expect(rejected).to_contain("registry_version=2\n")
+        expect(rejected.contains("primary=")).to_equal(false)
+        step("One changed byte changes the digest")
+        val other = select(registry().replace("implement", "implemenT"), GoalTaskClass.Impl, SkillProvider.Codex)
+        expect(other.registry_digest.value == sel.registry_digest.value).to_equal(false)

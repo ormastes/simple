@@ -9,30 +9,32 @@
 
 # Explicit owners for names the seed resolved through its flat namespace;
 # the pure-Simple HIR resolves per module and reported them as unresolved.
-use compiler.core.ast.{decl_get, expr_get, stmts_contain_yield}
-use compiler.core.ast_expr.{EXPR_FIELD_ACCESS, EXPR_IDENT, expr_get_arg_names}
+use compiler.core.ast.{decl_get, decl_get_param_muts, expr_get, stmts_contain_yield}
+use compiler.core.ast_expr.{EXPR_FIELD_ACCESS, EXPR_IDENT, expr_get_arg_names, expr_owner_int}
 use compiler.core.ast_stmt.{STMT_ASSIGN}
-use compiler.core.interpreter.env.{env_define, env_lookup, env_pop_frame, env_pop_scope, env_push_frame}
+use compiler.core.interpreter.env.{env_assign, env_define, env_has_frame, env_lookup, env_pop_frame, env_pop_scope, env_push_frame}
 use compiler.core.interpreter.env.{env_push_scope, env_set_local}
-use compiler.core.interpreter.eval.{eval_caller_file, eval_current_decl_id, eval_expr, eval_had_error, eval_return_value}
-use compiler.core.interpreter.eval.{eval_returning, eval_set_error, eval_yield_stack, infer_type_args_from_values, infer_type_tags_from_values}
+use compiler.core.interpreter.eval.{eval_caller_file, eval_current_decl_id, eval_defer_depth, eval_expr, eval_had_error, eval_return_value, eval_run_scope_defers}
+use compiler.core.interpreter.eval.{eval_returning, eval_set_error, eval_yield_stack}
 use compiler.core.interpreter.eval.{type_check_value}
+use compiler.core.interpreter.eval_units.{val_is_unit}
 use compiler.core.interpreter.eval_builtins.{eval_builtin_call}
+use compiler.core.interpreter.eval_units.{eval_unit_checked_construct}
+use compiler.core.unit_constraint.{unit_constraint_find}
 use compiler.core.interpreter.eval_ops.{eval_enum_variant_call, eval_struct_constructor}
 use compiler.core.interpreter.eval_stmts.{eval_stmt}
-use compiler.core.interpreter.eval_tables.{enum_table_lookup, func_flat_lookup_for_caller, func_module_namespace_lookup, func_resolve_for_caller, func_resolve_module_member_for_caller}
-use compiler.core.interpreter.eval_tables.{func_table_lookup, struct_table_lookup}
-use compiler.core.interpreter.jit.{jit_is_compiled, jit_record_call, jit_try_execute}
+use compiler.core.interpreter.eval_tables.{enum_table_lookup_in, func_flat_lookup_for_caller, func_module_namespace_lookup, func_resolve_for_caller, func_resolve_module_member_for_caller}
+use compiler.core.interpreter.eval_tables.{FUNC_LOOKUP_AMBIGUOUS, func_ambiguous_call_message, func_owners_of}
+use compiler.core.interpreter.eval_tables.{func_table_lookup, struct_table_lookup, func_yield_cache_get, func_yield_cache_set}
+use compiler.core.interpreter.jit.{jit_is_compiled, jit_record_call, jit_try_execute_checked}
 use compiler.core.interpreter.module_loader_core.{try_force_any_deferred_for}
-use compiler.core.interpreter.resolve.{resolve_cached_local_count, resolve_is_slot_shadowed}
+use compiler.core.interpreter.resolve.{resolve_cached_local_count, resolve_is_fast_local, resolve_is_slot_shadowed}
 use compiler.core.interpreter.value.{val_get_func_decl, val_get_int, val_get_struct_fields, val_get_struct_name, val_get_struct_values}
 use compiler.core.interpreter.value.{val_is_function, val_is_int, val_is_struct, val_make_array, val_make_int}
 use compiler.core.interpreter.value.{val_make_nil, val_make_struct}
-use compiler.core.interpreter.value.{val_is_array, val_get_array, val_array_push, val_struct_set_field_idx}
+use compiler.core.interpreter.value.{val_is_array, val_get_array, val_array_copy, val_array_push, val_struct_set_field_idx}
+use compiler.core.interpreter.value_places.{InterpreterValuePlace, eval_prepare_value_place}
 use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ANY}
-use compiler.core.monomorphize.{mono_cache_init, mono_cache_lookup, mono_cache_register, mono_specialize}
-
-var _yield_cache: {} = {}
 
 # ===== Float Parsing Utilities =====
 
@@ -55,6 +57,11 @@ fn eval_call(eid: i64) -> i64:
         # Check for struct constructor (only uppercase names)
         val first_ch = name[0]
         if first_ch >= "A" and first_ch <= "Z":
+            # `Port(raw)` for a constrained unit: checked at the boundary,
+            # Ok(unit) / Err(ConstraintError). Unconstrained units keep the
+            # struct-constructor path below.
+            if arg_eids.len() == 1 and unit_constraint_find(name) >= 0:
+                return eval_unit_checked_construct(name, arg_eids[0])
             val struct_decl = struct_table_lookup(name)
             if struct_decl >= 0:
                 return eval_struct_constructor(name, struct_decl, arg_eids, arg_names)
@@ -68,6 +75,9 @@ fn eval_call(eid: i64) -> i64:
         var decl_id = func_resolve_for_caller(eval_caller_file(), name)
         if decl_id < 0:
             decl_id = func_flat_lookup_for_caller(eval_caller_file(), name)
+        if decl_id == FUNC_LOOKUP_AMBIGUOUS:
+            eval_set_error(func_ambiguous_call_message(eval_caller_file(), name, func_owners_of(name)))
+            return -1
         if decl_id >= 0:
             return eval_function_call(decl_id, arg_eids, arg_names)
 
@@ -84,6 +94,9 @@ fn eval_call(eid: i64) -> i64:
             var decl_id2 = func_resolve_for_caller(eval_caller_file(), name)
             if decl_id2 < 0:
                 decl_id2 = func_flat_lookup_for_caller(eval_caller_file(), name)
+            if decl_id2 == FUNC_LOOKUP_AMBIGUOUS:
+                eval_set_error(func_ambiguous_call_message(eval_caller_file(), name, func_owners_of(name)))
+                return -1
             if decl_id2 >= 0:
                 return eval_function_call(decl_id2, arg_eids, arg_names)
             # Maybe it's a struct constructor after forcing
@@ -93,6 +106,13 @@ fn eval_call(eid: i64) -> i64:
                 if struct_decl2 >= 0:
                     return eval_struct_constructor(name, struct_decl2, arg_eids, arg_names)
 
+        # Flat Option encoding for unit payloads only: with no Option enum in
+        # scope, `Some(<unit>)` IS the unit value. Any other unresolved `Some`
+        # stays an undefined-function error (Fable #9838).
+        if name == "Some" and arg_eids.len() == 1:
+            val some_vid = eval_expr(arg_eids[0])
+            if some_vid >= 0 and val_is_unit(some_vid):
+                return some_vid
         eval_set_error("undefined function: " + name)
         return -1
 
@@ -114,7 +134,7 @@ fn eval_call(eid: i64) -> i64:
                 # A namespace member may be a struct constructor or a type.
                 # Let the existing non-function paths below inspect it.
             # Check enum variant constructor: Enum.Variant(payload)
-            val enum_variants = enum_table_lookup(type_name)
+            val enum_variants = enum_table_lookup_in(eval_caller_file(), type_name)
             if enum_variants != "":
                 # Only treat as variant if member_name is a known variant
                 val variant_list = enum_variants.split(",")
@@ -147,7 +167,7 @@ fn eval_call(eid: i64) -> i64:
                         return eval_function_call(lazy_member_decl, arg_eids, arg_names)
                     # Continue through the non-function member paths.
                 # Retry enum variant
-                val enum_variants2 = enum_table_lookup(type_name)
+                val enum_variants2 = enum_table_lookup_in(eval_caller_file(), type_name)
                 if enum_variants2 != "":
                     val variant_list2 = enum_variants2.split(",")
                     var is_variant2 = false
@@ -182,18 +202,15 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
     val fn_name = d_node.name
     val param_names = d_node.param_names
     val param_types = d_node.param_types
-    val type_params = d_node.type_params
     val body_stmts = d_node.body_stmts
 
     # Record call for JIT threshold tracking
     jit_record_call(fn_name)
 
     # Evaluate arguments
-    var arg_values: [i64] = []
-    for aeid in arg_eids:
-        val av = eval_expr(aeid)
-        if eval_had_error: return -1
-        arg_values.push(av)
+    val argument_context = eval_prepare_call_arguments(decl_id, arg_eids, arg_names, 0)
+    if eval_had_error: return -1
+    var arg_values: [i64] = argument_context.values
 
     var has_named_args = false
     for arg_name in arg_names:
@@ -242,21 +259,6 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
             pi = pi + 1
         arg_values = ordered_values
 
-    # Check if function is generic (has type parameters)
-    # If so, look up or create monomorphic instance
-    var actual_decl_id = decl_id
-    if type_params.len() > 0:
-        val type_args_str = infer_type_args_from_values(arg_values)
-        val cache_key = fn_name + "__" + type_args_str
-        val cached_decl = mono_cache_lookup(cache_key)
-        if cached_decl >= 0:
-            actual_decl_id = cached_decl
-        else:
-            val type_tags = infer_type_tags_from_values(arg_values)
-            val specialized_decl = mono_specialize(decl_id, type_params, type_tags)
-            mono_cache_register(cache_key, specialized_decl)
-            actual_decl_id = specialized_decl
-
     # Type check arguments if parameter types are specified
     if param_types.len() > 0:
         var pi: i64 = 0
@@ -280,45 +282,42 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
                 raw_args.push(val_get_int(av))
             else:
                 raw_args.push(av)
-        val jit_result = jit_try_execute(fn_name, raw_args)
-        if jit_result != -1:
-            return val_make_int(jit_result)
+        val jit_exec = jit_try_execute_checked(fn_name, raw_args)
+        if jit_exec.0:
+            return val_make_int(jit_exec.1)
 
     # Fall back to tree-walking
-    val local_count = resolve_cached_local_count(actual_decl_id)
+    val local_count = resolve_cached_local_count(decl_id)
     val prev_decl_id = eval_current_decl_id
-    eval_current_decl_id = actual_decl_id
+    eval_current_decl_id = decl_id
     if local_count > 0:
         env_push_frame(local_count)
     env_push_scope()
+    eval_defer_depth = eval_defer_depth + 1
+    val my_depth = eval_defer_depth
     var pi: i64 = 0
     for pname in param_names:
         var pval = val_make_nil()
         if pi < arg_values.len():
             pval = arg_values[pi]
-            # Value-type arrays and structs are copied on bind so callee
-            # mutations never leak back to the caller's argument. Reference
-            # types (class/actor) keep sharing the same value_id — mutations
-            # through them are meant to be visible to the caller. See
-            # decl_set_is_value_type / interp_struct_is_value_type (#108).
-            pval = val_copy_for_parameter(pval)
+            # Owned value snapshots or resolved mut places were prepared in
+            # source evaluation order, before any later argument ran.
         env_define(pname, pval)
         # LOAD_FAST: set fast local for non-shadowed params
         if local_count > 0:
-            val is_shadowed = resolve_is_slot_shadowed(actual_decl_id, pi)
+            val is_shadowed = resolve_is_slot_shadowed(decl_id, pi)
             if is_shadowed == false:
                 env_set_local(pi, pval)
         pi = pi + 1
 
     # Generator detection: push yield accumulator if body contains yield
-    val yield_key = "{actual_decl_id}"
     var is_gen = false
-    val cached_yield = _yield_cache[yield_key]
-    if cached_yield.?:
-        is_gen = cached_yield == "y"
+    val cached_yield = func_yield_cache_get(decl_id)
+    if cached_yield >= 0:
+        is_gen = cached_yield == 1
     else:
         is_gen = stmts_contain_yield(body_stmts)
-        _yield_cache[yield_key] = if is_gen: "y" else: "n"
+        func_yield_cache_set(decl_id, is_gen)
     if is_gen:
         eval_yield_stack.push([])
 
@@ -354,10 +353,17 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
     # the gate unchanged — that is what keeps case E (class returned) REF.
     last_val = val_copy_if_value_struct(last_val)
 
+    eval_run_scope_defers(my_depth)
+
+    # Whole replacements of declared-mut parameters reach the frozen caller
+    # place; in-place mutations already changed its owned ValueId.
+    argument_context.capture_mutations(param_names)
+
     env_pop_scope()
     if local_count > 0:
         env_pop_frame()
     eval_current_decl_id = prev_decl_id
+    argument_context.apply_mutations()
     last_val
 
 # ===== Struct (value type) vs Class (reference type) param-copy support (#108) =====
@@ -378,10 +384,8 @@ fn interp_struct_is_value_type(vid: i64) -> bool:
     decl_get(decl_id).is_value_type
 
 fn val_struct_deep_copy(vid: i64) -> i64:
-    """Deep-copy a struct value for value-type param binding. Nested fields
-    and arrays are copied recursively. Class-typed (reference) fields keep
-    the same value_id, so a class field embedded in a struct still shares its
-    identity with the caller after the struct itself is copied."""
+    """Copy value-struct fields, forking array descriptors instead of their
+    contents. Class fields retain their reference identities."""
     val context = InterpreterValueCopyContext(copies: {})
     context.copy_value(vid)
 
@@ -397,11 +401,8 @@ class InterpreterValueCopyContext:
         if self.copies.contains_key(vid):
             return self.copies[vid] ?? -1
         if is_array:
-            val copied = val_make_array([])
+            val copied = val_array_copy(vid)
             self.copies[vid] = copied
-            for element in val_get_array(vid):
-                val cloned = self.copy_value(element)
-                val _ = val_array_push(copied, cloned)
             return copied
         val fields = val_get_struct_fields(vid)
         val values = val_get_struct_values(vid)
@@ -417,11 +418,9 @@ class InterpreterValueCopyContext:
             index = index + 1
         copied
 
-fn val_copy_for_parameter(vid: i64) -> i64:
-    """Copy array storage and value structs across a parameter binding.
-    Array elements follow their own value/reference semantics, so nested
-    arrays and structs are copied while class and actor identities are shared.
-    Scalar values are immutable arena entries and keep their identity."""
+pub fn val_copy_for_parameter(vid: i64) -> i64:
+    """Fork array descriptors and copy value-struct fields at a value boundary.
+    Array backing is shared until a write; classes and actors keep identity."""
     if vid < 0: return vid
     if not val_is_array(vid):
         if not val_is_struct(vid): return vid
@@ -429,33 +428,111 @@ fn val_copy_for_parameter(vid: i64) -> i64:
     val context = InterpreterValueCopyContext(copies: {})
     context.copy_value(vid)
 
-fn val_copy_if_value_struct(vid: i64) -> i64:
-    """The shared value-type copy gate for every identity-contract copy site
-    (F1 step S1). Returns a deep copy when `vid` is a confirmed user `struct`
-    (value type) and returns `vid` UNCHANGED for everything else — classes,
-    actors, builtin pseudo structs, and all non-struct value kinds. Because the
-    gate is `interp_struct_is_value_type`, which is false for every class-origin
-    decl, no reference value can ever be copied through here: class identity is
-    structurally out of reach of this function.
-
-    Copy sites using this gate (see the F1 plan):
-      1. parameter binding      — eval_function_call, above
-      2. struct-literal field init — eval_struct_constructor, below
-      3. local binding (val/var) — eval_stmts.spl eval_stmt_val_decl/var_decl
-      4. struct field store      — eval_assign_expr in eval_access.spl. That
-         file is the LIVE one, measured by sabotage: `obj.f = s` in a function
-         body parses as an assignment EXPRESSION, so it never reaches
-         eval_stmts.spl's STMT_ASSIGN handler, AND eval_ops.spl's
-         `export use ..._EvalOps.access_literal_assign_eval.*` does NOT win --
-         disabling the copy in _EvalOps left case H correct, disabling it in
-         eval_access.spl alone broke it. Three near-identical copies of this
-         branch exist (eval_access.spl, _EvalOps/access_literal_assign_eval.spl,
-         eval_stmts.spl eval_stmt_assign); all three are gated so they cannot
-         drift apart on the identity contract, but only eval_access.spl is
-         load-bearing today.
-      5. function return         — eval_function_call, above; covers both
-         `return e` and a tail-expression body."""
+pub fn val_copy_if_value_struct(vid: i64) -> i64:
+    """Compatibility name for the shared value-copy gate. Arrays fork an
+    O(1) descriptor; confirmed value structs copy fields with array forks.
+    Classes, actors and scalar arena values keep their identities."""
     if vid < 0: return vid
+    if val_is_array(vid): return val_array_copy(vid)
     if val_is_struct(vid) and interp_struct_is_value_type(vid):
         return val_struct_deep_copy(vid)
     vid
+
+pub fn val_make_array_snapshot(elements: [i64]) -> i64:
+    var owned: [i64] = []
+    for element in elements:
+        owned.push(val_copy_if_value_struct(element))
+    val_make_array(owned)
+
+class InterpreterCallArguments:
+    values: [i64]
+    places: [InterpreterValuePlace]
+    targets: [i64]
+    mut_flags: [i64]
+    inputs: [i64]
+    writebacks: [i64]
+
+    me capture_mutations(parameter_names: [text]):
+        var index: i64 = 0
+        while index < self.values.len():
+            var replacement: i64 = -1
+            val target = self.targets[index]
+            if self.mut_flags[index] == 1 and target >= 0 and target < parameter_names.len():
+                val current = env_lookup(parameter_names[target])
+                # In-place changes already reached the owned place. Only a
+                # whole-value replacement needs explicit caller writeback.
+                if current != self.values[index]: replacement = current
+            self.writebacks.push(replacement)
+            index = index + 1
+
+    fn apply_mutations():
+        var index: i64 = 0
+        while index < self.writebacks.len():
+            if self.writebacks[index] >= 0:
+                self.places[index].store(self.writebacks[index])
+                if eval_had_error: return
+            index = index + 1
+
+fn eval_argument_targets(parameter_names: [text], argument_names: [text], count: i64, offset: i64) -> [i64]:
+    var targets: [i64] = []
+    var claimed: [i64] = []
+    var next = offset
+    var has_named = false
+    for name in argument_names:
+        if name != "": has_named = true
+    var index: i64 = 0
+    while index < count:
+        var target: i64 = -1
+        val name = if index < argument_names.len(): argument_names[index] else: ""
+        if name != "":
+            var parameter = offset
+            while parameter < parameter_names.len():
+                if parameter_names[parameter] == name:
+                    target = parameter
+                    break
+                parameter = parameter + 1
+        else:
+            if has_named:
+                while claimed.contains(next): next = next + 1
+            target = next
+            next = next + 1
+        targets.push(target)
+        if target >= 0: claimed.push(target)
+        index = index + 1
+    targets
+
+pub fn eval_prepare_call_arguments(declaration: i64, argument_eids: [i64], argument_names: [text], offset: i64) -> InterpreterCallArguments:
+    val parameter_names = decl_get(declaration).param_names
+    val parameter_mutability = decl_get_param_muts(declaration)
+    val targets = eval_argument_targets(parameter_names, argument_names, argument_eids.len(), offset)
+    val prepared = InterpreterCallArguments(values: [], places: [], targets: targets,
+        mut_flags: [], inputs: [], writebacks: [])
+    var index: i64 = 0
+    while index < argument_eids.len():
+        val place = eval_prepare_value_place(argument_eids[index])
+        if eval_had_error: return prepared
+        val target = targets[index]
+        val is_mut = target >= 0 and target < parameter_mutability.len() and parameter_mutability[target] == 1
+        if is_mut and val_is_array(place.value) and place.root_name == "" and place.kinds.len() == 0:
+            eval_set_error("mut array argument requires a writable place")
+            return prepared
+        prepared.places.push(place)
+        prepared.inputs.push(place.value)
+        prepared.mut_flags.push(if is_mut: 1 else: 0)
+        # Snapshot each value argument before evaluating the next argument.
+        prepared.values.push(if is_mut: place.value else: val_copy_for_parameter(place.value))
+        index = index + 1
+    index = 0
+    while index < prepared.values.len():
+        if prepared.mut_flags[index] == 1:
+            var other: i64 = 0
+            while other < prepared.values.len():
+                if prepared.mut_flags[other] == 0 and val_is_array(prepared.inputs[index]) and val_is_array(prepared.inputs[other]):
+                    if prepared.inputs[index] == prepared.inputs[other] or prepared.places[index].overlaps(prepared.places[other]):
+                        eval_set_error("array argument aliases both mut and value parameters")
+                        return prepared
+                other = other + 1
+            prepared.values[index] = prepared.places[index].mutable_value()
+            if eval_had_error: return prepared
+        index = index + 1
+    prepared

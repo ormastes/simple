@@ -1,0 +1,64 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/04_architecture/compiler/macro_rr_invalidation.md ; plan: doc/03_plan/sys_test/macro_rr_invalidation.md ; design: doc/05_design/compiler/macro_rr_invalidation.md
+
+"""
+## Purpose and audience
+
+Purpose: pin that `interface_digest_of_source` captures `macro ` contract
+header lines (design §4.7) while ignoring macro bodies. Audience: compiler
+cache engineers.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/cache/action_key_macro_header_spec.spl --mode=interpreter`.
+2. Every scenario must pass; a failure means macro contract edits escape the deps_iface fold.
+
+## Compatibility and limitations
+
+Text-level interface capture only. Failing-first: the `macro ` prefix is not
+yet captured by `source_interface_parts`.
+"""
+
+# doc-path: doc/03_plan/sys_test/macro_rr_invalidation.md
+# doc-path: doc/04_architecture/compiler/macro_rr_invalidation.md
+# doc-path: doc/05_design/compiler/macro_rr_invalidation.md
+# doc-path: doc/03_plan/agent_tasks/macro_rr_invalidation.md
+# @manual: primary
+# @tag:in-development
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+
+"""
+# Interface digest macro header capture
+"""
+use std.spec.step
+
+use std.spec.*
+use compiler.driver.cache.action_key.{interface_digest_of_source}
+
+fn macro_source_v1(header: text, body: text) -> text:
+    header + "\n    emit result:\n        " + body + "\n"
+
+describe "interface digest macro headers":
+    # @req REQ-MACRO-RR-002
+    it "changes when the macro contract line changes":
+        step("Edit the macro header signature")
+        val before = macro_source_v1("macro twice(x: Int) -> (returns result: Int):", "x + x")
+        val after = macro_source_v1("macro twice(x: Int, y: Int) -> (returns result: Int):", "x + x")
+        expect(interface_digest_of_source(after) == interface_digest_of_source(before)).to_equal(false)
+
+    # @req REQ-MACRO-RR-002
+    it "is equal when only the macro body changes":
+        step("Edit the expansion body; the header stays")
+        val before = macro_source_v1("macro twice(x: Int) -> (returns result: Int):", "x + x")
+        val after = macro_source_v1("macro twice(x: Int) -> (returns result: Int):", "x * 2")
+        expect(interface_digest_of_source(after)).to_equal(interface_digest_of_source(before))
+
+    # @req REQ-MACRO-RR-007
+    it "keeps a macro-free source digest when only a fn body line changes":
+        step("Control: existing body-insensitive behaviour")
+        val before = "fn helper_value() -> i64:\n    1\n"
+        val after = "fn helper_value() -> i64:\n    2\n"
+        expect(interface_digest_of_source(after)).to_equal(interface_digest_of_source(before))

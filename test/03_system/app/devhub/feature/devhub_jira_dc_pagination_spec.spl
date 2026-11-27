@@ -1,0 +1,81 @@
+"""
+## Purpose and audience
+Exercise the production DevHub Jira Data Center search against local scripted HTTP.
+Audience: maintainers of the Jira adapter. Synthetic account values only.
+## Evidence status
+AUTHORED_UNRUN: no admitted self-hosted runtime; no observed RED/GREEN or docgen PASS.
+"""
+use std.spec.*
+use std.common.json.value.{json_value_len, json_value_field, json_value_at}
+use test.fixtures.devhub.emulated.emu_harness.{emu_start, emu_base, emu_row, emu_load, emu_problems, emu_stop, emu_home, emu_devhub, emu_json, emu_field}
+
+val DC_PATH = "/jira/rest/api/2/search"
+val DC_AUTH = "Authorization=Bearer syn-jira-token"
+val DC_JSON = "Content-Type: application/json"
+
+fn dc_page(fixture: text, remaining: i64, start_at: i64) -> text:
+    val body = "eq:\{\"jql\":\"project = ACME\",\"maxResults\":{remaining},\"startAt\":{start_at}\}"
+    emu_row("POST", DC_PATH, DC_AUTH, body, 200, DC_JSON, "@jira/{fixture}")
+
+fn dc_search_failure(rows: [text], requests: i64, expected: text):
+    val generation = emu_load(rows)
+    val result = emu_devhub(["jira", "search", "project = ACME", "--limit", "5", "--json"])
+    expect(result.rc == 0).to_equal(false)
+    expect(result.combined()).to_contain(expected)
+    expect(emu_problems(generation, requests)).to_equal("")
+
+# @req REQ-DEVHUB-JIRA-DC-PAGING-001
+describe "REQ-DEVHUB-JIRA-DC-PAGING-001: offset pagination reaches all allowed results":
+    it "should collect a server-capped first page and a nonzero-offset continuation":
+        step("Start a local Jira emulator and configure a Data Center context path")
+        expect(emu_start("jira-dc-pagination")).to_contain("127.0.0.1:")
+        val configured = emu_home("jira:\n    url: {emu_base()}/jira\n    deployment: datacenter\n    auth: bearer\n", "jira:\n    token: syn-jira-token\n")
+        step("Serve two issues at offset zero and the final issue at offset two")
+        val generation = emu_load([dc_page("search_dc_first.json", 5, 0), dc_page("search_dc_last.json", 3, 2)])
+        val result = emu_devhub(["jira", "search", "project = ACME", "--limit", "5", "--json"])
+        step("Require all three issues and exact remaining-limit and startAt request bodies")
+        expect(result.rc).to_equal(0)
+        val issues = json_value_field(emu_json(result.out), "issues")
+        expect(json_value_len(issues)).to_equal(3)
+        expect(emu_field(json_value_at(issues, 0), "key")).to_equal("ACME-1")
+        expect(emu_field(json_value_at(issues, 1), "key")).to_equal("ACME-2")
+        expect(emu_field(json_value_at(issues, 2), "key")).to_equal("ACME-3")
+        expect(emu_problems(generation, 2)).to_equal("")
+
+    it "should stop at the requested limit without requesting the remaining issue":
+        step("Serve two issues with total three but request a limit of two")
+        val generation = emu_load([dc_page("search_dc_first.json", 2, 0)])
+        val result = emu_devhub(["jira", "search", "project = ACME", "--limit", "2", "--json"])
+        expect(result.rc).to_equal(0)
+        expect(json_value_len(json_value_field(emu_json(result.out), "issues"))).to_equal(2)
+        expect(emu_problems(generation, 1)).to_equal("")
+
+    it "should stop after an empty zero-total response":
+        step("Serve an empty page whose total is zero")
+        val generation = emu_load([dc_page("search_dc_empty.json", 5, 0)])
+        val result = emu_devhub(["jira", "search", "project = ACME", "--limit", "5", "--json"])
+        expect(result.rc).to_equal(0)
+        expect(json_value_len(json_value_field(emu_json(result.out), "issues"))).to_equal(0)
+        expect(emu_problems(generation, 1)).to_equal("")
+
+# @req REQ-DEVHUB-JIRA-DC-PAGING-002
+describe "REQ-DEVHUB-JIRA-DC-PAGING-002: inconsistent metadata cannot masquerade as complete results":
+    it "should reject a repeated response offset instead of looping or duplicating issues":
+        step("Return offset zero again when the second request asks for offset two")
+        dc_search_failure([dc_page("search_dc_first.json", 5, 0), dc_page("search_dc_first.json", 3, 2)], 2, "invalid Data Center pagination metadata")
+
+    it "should reject an empty page while the advertised total has outstanding issues":
+        step("Serve no issues while claiming a total of three")
+        dc_search_failure([dc_page("search_dc_stalled.json", 5, 0)], 1, "Data Center page made no progress")
+
+    it "should reject a string total instead of silently treating it as zero":
+        step("Serve a string where the integer total is required")
+        dc_search_failure([dc_page("search_dc_bad_total.json", 5, 0)], 1, "invalid Data Center pagination metadata")
+
+    it "should reject a missing startAt instead of silently treating it as zero":
+        step("Omit the required response offset")
+        dc_search_failure([dc_page("search_dc_missing_start.json", 5, 0)], 1, "invalid Data Center pagination metadata")
+
+    it "should stop the local emulator":
+        step("Release the local socket and child process")
+        expect(emu_stop()).to_equal(true)

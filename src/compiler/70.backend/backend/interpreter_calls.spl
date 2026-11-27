@@ -1,4 +1,3 @@
-use compiler.backend.backend_types.{backend_value_bool_v1, backend_value_int_v1, backend_value_runtime_value_v1, backend_value_string_v1}
 # Interpreter Backend - Function Calls and Builtins
 #
 # Extracted from interpreter.spl. Contains InterpreterBackendImpl methods for:
@@ -8,26 +7,45 @@ use compiler.backend.backend_types.{backend_value_bool_v1, backend_value_int_v1,
 # - value_to_string
 
 use compiler.hir.hir.*
+use compiler.hir.hir_types.{HirSymbol, HirModule}
 use compiler.common.diagnostics.span.{Span}
 use compiler.backend.backend_types.*
-use compiler.backend.env.{EvalContext, Environment}
-use compiler.backend.interpreter.{InterpreterBackendImpl, itrace}
+use compiler.backend.env.{
+    EvalContext,
+    Environment,
+    InterpModuleIndex,
+    SymbolNameMap,
+    FnByNameMap,
+    FnByIdMap,
+    ModuleIndexMap,
+    ModuleByNameMap
+}
+use compiler.backend.interpreter.{InterpreterBackendImpl, itrace, interp_trace_enabled}
 use compiler.backend.interpreter_aop_weave.*
 use compiler.backend.interpreter_run_abi.{interpreter_run_abi}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+# DHR P2 assert hook: present only in a SIMPLE_FEATURES=dhr build, so the
+# default kernel closure gains no import (DHR OFF-01).
+@when(feature = "dhr"):
+use std.nogc_sync_mut.crash.failure_slot_v1.{publish_assert_failure}
+@end
 
 extern fn rt_print_value(value: i64)
 extern fn rt_println_value(value: i64)
-extern fn rt_file_exists(path_ptr: i64, path_len: i64) -> bool
+# Raw enum discriminant introspection for BuiltinTag.EnvGet error diagnostics.
+# Typed enum argument, same ABI pattern as interpreter.spl's
+# rt_enum_discriminant(HirExprKind).
+extern fn rt_enum_discriminant(value: Value) -> i64
+extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_exists_probe_begin() -> i64
 extern fn rt_file_exists_probe_end(token: i64) -> i64
-extern fn rt_file_is_regular_no_follow(path_ptr: i64, path_len: i64) -> bool
-extern fn rt_file_read_text(path_ptr: i64, path_len: i64) -> text
-extern fn rt_file_write_text(path_ptr: i64, path_len: i64, content_ptr: i64, content_len: i64) -> bool
+extern fn rt_file_is_regular_no_follow(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_file_write_text(path: text, content: text) -> bool
 @unsafe(reason: "raw borrowed filesystem path pointer/length delete ABI", capabilities: [ffi])
-extern fn rt_file_delete(path_ptr: i64, path_len: i64) -> bool
-extern fn rt_env_get(name_ptr: i64, name_len: i64) -> text
-extern fn rt_env_set(name_ptr: i64, name_len: i64, value_ptr: i64, value_len: i64) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_env_get(name: text) -> text?
+extern fn rt_env_set(name: text, value: text) -> bool
 
 # itrace is imported from interpreter.spl: the ptr-based rt_env_get here
 # returns a non-zero runtime value even for an UNSET env var, so a local
@@ -56,6 +74,7 @@ enum BuiltinTag:
     EnvGet
     EnvSet
     Assert
+    Panic
     Unknown
 
 fn interp_binop_disc(op: HirBinOp) -> i64:
@@ -101,6 +120,8 @@ fn lookup_builtin_tag(name: text) -> BuiltinTag:
     if name == "__assert":
         # `assert COND[, MSG]` desugars to __assert(...) in parser_stmts.spl.
         return BuiltinTag.Assert
+    if name == "panic":
+        return BuiltinTag.Panic
     if name == "print":
         return BuiltinTag.Print
     if name == "println":
@@ -135,12 +156,116 @@ fn lookup_builtin_tag(name: text) -> BuiltinTag:
         return BuiltinTag.EnvSet
     BuiltinTag.Unknown
 
+fn interp_method_key(qualified: text) -> text:
+    """`Type::method` of a method symbol name, dropping any module prefix
+    (`a.b.Type::method` -> `Type::method`); "" when it is not a method name."""
+    val sep = qualified.index_of("::")
+    if sep < 0:
+        return ""
+    val owner = qualified.substring(0, sep)
+    val dot = owner.last_index_of(".")
+    val type_name = if dot >= 0: owner.substring(dot + 1, owner.byte_len()) else: owner
+    "{type_name}{qualified.substring(sep, qualified.byte_len())}"
+
+fn interp_const_indexes(m: HirModule) -> [i64]:
+    """0..n-1 over `m`'s module constants (all still to bind)."""
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < m.constants.len():
+        out = out.push(i)
+        i = i + 1
+    out
+
+fn interp_key_matches(qualified: text, key: text) -> bool:
+    """`qualified` names `key`'s method, allowing a trait segment between
+    type and method (`m.i64::m.Trait::to_equal` matches `i64::to_equal`)."""
+    val c = interp_method_key(qualified)
+    if c == "" or c == key:
+        return c == key
+    val ks = key.index_of("::")
+    val cs = c.index_of("::")
+    if ks < 0 or cs < 0 or c.substring(0, cs) != key.substring(0, ks):
+        return false
+    c.ends_with(key.substring(ks, key.byte_len()))
+
+fn interp_find_method(pm: HirModule, key: text) -> HirFunction?:
+    """The function of `pm` whose symbol or own name has method key `key`."""
+    for pf_ in pm.functions.values():
+        val pf: HirFunction = pf_
+        if interp_key_matches(pf.name, key):
+            return Some(pf)
+        if val psym = pm.symbols.get_symbol_raw(pf.symbol.id):
+            if interp_key_matches(psym.name, key):
+                return Some(pf)
+    None
+
+fn interp_short_method_key(c: text) -> text:
+    """Collapse `Type::Trait::method` to `Type::method`; returns `c` when
+    there is only one `::` separator."""
+    val first_sep = c.index_of("::")
+    if first_sep < 0:
+        return ""
+    val last_sep = c.last_index_of("::")
+    if last_sep <= first_sep:
+        return c
+    "{c.substring(0, first_sep)}{c.substring(last_sep, c.byte_len())}"
+
+var _interp_module_index_rebuild_count: i64 = 0
+
+# reason: diagnostic counter exposing module-index rebuilds to hotpath unit specs
+@allow(primitive_api)
+pub fn interp_module_index_rebuild_count() -> i64:
+    _interp_module_index_rebuild_count
+
+pub fn interp_reset_module_index_rebuild_count():
+    _interp_module_index_rebuild_count = 0
+
+pub fn interp_build_module_index(m: HirModule) -> InterpModuleIndex:
+    """Build `(names, fn_by_name, fn_by_id, method_by_key)` once for `m`."""
+    _interp_module_index_rebuild_count = _interp_module_index_rebuild_count + 1
+    var names_map: SymbolNameMap = {}
+    for nsym_ in m.symbols.symbols.values():
+        val ns: HirSymbol = nsym_
+        val ns_id: i64 = ns.id.id
+        names_map[ns_id] = ns.name
+    var fn_index: FnByNameMap = {}
+    var fn_by_id: FnByIdMap = {}
+    var method_by_key: FnByNameMap = {}
+    for fidx_fn_ in m.functions.values():
+        val pf: HirFunction = fidx_fn_
+        fn_index[pf.name] = pf
+        val fid: i64 = pf.symbol.id
+        if not fn_by_id.has(fid):
+            fn_by_id[fid] = pf
+        val c_own = interp_method_key(pf.name)
+        if c_own != "":
+            if not method_by_key.has(c_own):
+                method_by_key[c_own] = pf
+            val s_own = interp_short_method_key(c_own)
+            if s_own != "" and s_own != c_own and not method_by_key.has(s_own):
+                method_by_key[s_own] = pf
+        if val psym = m.symbols.get_symbol_raw(fid):
+            val c_sym = interp_method_key(psym.name)
+            if c_sym != "":
+                if not method_by_key.has(c_sym):
+                    method_by_key[c_sym] = pf
+                val s_sym = interp_short_method_key(c_sym)
+                if s_sym != "" and s_sym != c_sym and not method_by_key.has(s_sym):
+                    method_by_key[s_sym] = pf
+    InterpModuleIndex(
+        names: names_map,
+        fn_by_name: fn_index,
+        fn_by_id: fn_by_id,
+        method_by_key: method_by_key,
+        ready: true
+    )
+
 impl InterpreterBackendImpl:
     fn resolve_function_by_name(name: text, ctx: EvalContext) -> HirFunction?:
         if ctx.fn_by_name.has(name):
             return Some(ctx.fn_by_name[name])
         if ctx.has_fn_index:
-            return nil
+            return None
         val candidates = ctx.module.functions.values()
         var found_index = -1
         var i = 0
@@ -152,16 +277,60 @@ impl InterpreterBackendImpl:
         if found_index >= 0:
             Some(candidates[found_index])
         else:
-            nil
+            None
+
+    fn ensure_module_index(m: HirModule, ctx: EvalContext) -> InterpModuleIndex:
+        """Return pre-indexed lookup tables for `m` in O(1), lazily building and
+        caching in `ctx.env` only when `ctx` omitted pre-built indexes."""
+        if ctx.module_indexes.has(m.name):
+            val hit: InterpModuleIndex = ctx.module_indexes[m.name]
+            return hit
+        if val env_hit = ctx.env.get_module_index(m.name):
+            return env_hit
+        val built = interp_build_module_index(m)
+        ctx.env.cache_module_index(m.name, built)
+        built
+
+    fn provider_context_for(name: text, ctx: EvalContext) -> EvalContext?:
+        """Context of the imported module that defines `name`, sharing the caller's env."""
+        if not ctx.has_fn_owner or not ctx.fn_owner.has(name):
+            return None
+        val owner: HirModule = ctx.fn_owner[name]
+        Some(self.module_context(owner, ctx))
+
+    fn module_context(owner: HirModule, ctx: EvalContext) -> EvalContext:
+        """Context that evaluates in `owner`, reusing pre-indexed module tables in O(1)."""
+        val oidx = self.ensure_module_index(owner, ctx)
+        EvalContext(
+            env: ctx.env,
+            module: owner,
+            backend: ctx.backend,
+            names: oidx.names,
+            fn_by_name: oidx.fn_by_name,
+            has_fn_index: true,
+            fn_by_id: oidx.fn_by_id,
+            has_fn_by_id: true,
+            method_by_key: oidx.method_by_key,
+            has_method_index: true,
+            module_indexes: ctx.module_indexes,
+            provider_method_by_key: ctx.provider_method_by_key,
+            provider_method_owner: ctx.provider_method_owner,
+            has_provider_method_index: ctx.has_provider_method_index,
+            fn_owner: ctx.fn_owner,
+            has_fn_owner: ctx.has_fn_owner,
+            strict_mem: ctx.strict_mem
+        )
 
     fn call_function(fn_value: Value, args: [Value], ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
         itrace("[CF] call_function enter")
         match fn_value:
             case Value.Function(f):
-                itrace("[CF] Function arm f_nil={f == nil}")
+                if interp_trace_enabled():
+                    itrace("[CF] Function arm f_nil={f == nil}")
                 # Typed rebind (stage4 extracted-payload hazard, iteration 18).
                 val f_t: FunctionValue = f
-                itrace("[CF] name={f_t.name}")
+                if interp_trace_enabled():
+                    itrace("[CF] name={f_t.name}")
                 # Check for builtin functions first
                 val builtin_result = self.try_call_builtin(f_t.name, args)
                 if builtin_result.?:
@@ -181,9 +350,13 @@ impl InterpreterBackendImpl:
                 # entry points). Last-writer-wins matches the old no-break loop.
                 val cf_target_hit = self.resolve_function_by_name(f_t.name, ctx)
                 if cf_target_hit.?:
-                    self.call_hir_function(cf_target_hit.unwrap(), args, ctx)
-                else:
-                    Err(BackendError.runtime_error("function '{f_t.name}' not found", Some(span)))
+                    return self.call_hir_function(cf_target_hit.unwrap(), args, ctx)
+                # Imported function: run it in its defining module's context
+                # so its own locals, calls and types resolve there.
+                if val owner_ctx = self.provider_context_for(f_t.name, ctx):
+                    if val owner_fn = self.resolve_function_by_name(f_t.name, owner_ctx):
+                        return self.call_hir_function(owner_fn, args, owner_ctx)
+                Err(BackendError.runtime_error("function '{f_t.name}' not found", Some(span)))
 
             case Value.Closure(c):
                 itrace("[CF] Closure arm")
@@ -210,6 +383,7 @@ impl InterpreterBackendImpl:
                     return result
         # AOP hook (task #31): weave declarative `on pc{...} use ... before`
         # advice for interpreted calls. See interpreter_aop_weave.spl.
+        val frame_depth = ctx.env.scope_depth()
         ctx.env.push_scope()
 
         # Bind parameters
@@ -227,8 +401,17 @@ impl InterpreterBackendImpl:
             ctx.env.define(param.name, value)
 
         # Execute body
-        val result = self.eval_block(fn_.body, ctx)?
+        # A `return` arrives as a ControlFlow error carrying its value on the env.
+        var result: Value = Value.Nil
+        match self.eval_block(fn_.body, ctx):
+            case Ok(v): result = v
+            case Err(e):
+                if e.kind == BackendErrorKind.ControlFlow and e.message == "return":
+                    result = e.ctl_value ?? Value.Nil
+                else:
+                    return Err(e)
 
+        ctx.env.truncate_scopes(frame_depth + 1)
         ctx.env.pop_scope()
         # AOP hook (task #31): weave after_success/after_error advice.
         self.interp_aop_run_after(fn_, ctx, result)
@@ -237,13 +420,70 @@ impl InterpreterBackendImpl:
     fn call_function_by_id(method_id: SymbolId, args: [Value], ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
         """Look up function by symbol ID and call it."""
         # Look up function definition in module
-        if not ctx.module.functions.has(method_id):
-            return Err(BackendError.runtime_error("function not found by symbol ID", Some(span)))
+        if ctx.module.functions.has(method_id):
+            return self.call_hir_function(ctx.module.functions[method_id], args, ctx)
+        val raw_id: i64 = method_id.id
+        if ctx.fn_by_id.has(raw_id):
+            val hit_fn: HirFunction = ctx.fn_by_id[raw_id]
+            return self.call_hir_function(hit_fn, args, ctx)
+        if not ctx.has_fn_by_id:
+            val lazy_idx = self.ensure_module_index(ctx.module, ctx)
+            if lazy_idx.fn_by_id.has(raw_id):
+                val lazy_fn: HirFunction = lazy_idx.fn_by_id[raw_id]
+                return self.call_hir_function(lazy_fn, args, ctx)
+        # SymbolIds are per module: a method of an imported type carries the
+        # caller module's id for it, never the provider's. Resolve it by its
+        # `Type::method` name in the module that defines it instead.
+        var qname = ""
+        var defining = ""
+        if val sym = ctx.module.symbols.get_symbol_raw(raw_id):
+            qname = sym.name
+            defining = sym.defining_module ?? ""
+        if val found = self.call_method_by_key(interp_method_key(qname), args, ctx):
+            return found
+        val shown = if qname != "": qname else: "<unnamed>"
+        Err(BackendError.runtime_error("function '{shown}' not found by symbol ID {method_id.id} (defined in '{defining}') at {span.file}:{span.line}:{span.col}", Some(span)))
 
-        val fn_ = ctx.module.functions[method_id]
-        self.call_hir_function(fn_, args, ctx)
+    fn call_method_by_key(key: text, args: [Value], ctx: EvalContext) -> Result<Value, BackendError>?:
+        """Call the `Type::method` function from the entry module or the
+        imported module that defines it; None when no module has it."""
+        if key == "":
+            return None
+        if ctx.method_by_key.has(key):
+            val own_hit: HirFunction = ctx.method_by_key[key]
+            return Some(self.call_hir_function(own_hit, args, ctx))
+        if not ctx.has_method_index:
+            val own_idx = self.ensure_module_index(ctx.module, ctx)
+            if own_idx.method_by_key.has(key):
+                val lazy_own: HirFunction = own_idx.method_by_key[key]
+                return Some(self.call_hir_function(lazy_own, args, ctx))
+            if val fallback_own = interp_find_method(ctx.module, key):
+                return Some(self.call_hir_function(fallback_own, args, ctx))
+        if not ctx.has_fn_owner:
+            return None
+        if ctx.has_provider_method_index:
+            if ctx.provider_method_by_key.has(key) and ctx.provider_method_owner.has(key):
+                val owner_fn: HirFunction = ctx.provider_method_by_key[key]
+                val owner_mod: HirModule = ctx.provider_method_owner[key]
+                return Some(self.call_hir_function(owner_fn, args, self.module_context(owner_mod, ctx)))
+            return None
+        var seen: Dict<text, bool> = {}
+        for pm_ in ctx.fn_owner.values():
+            val pm: HirModule = pm_
+            if not seen.has(pm.name):
+                seen[pm.name] = true
+                val pm_idx = self.ensure_module_index(pm, ctx)
+                if pm_idx.method_by_key.has(key):
+                    val pm_fn: HirFunction = pm_idx.method_by_key[key]
+                    return Some(self.call_hir_function(pm_fn, args, self.module_context(pm, ctx)))
+                if val owner_fn = interp_find_method(pm, key):
+                    return Some(self.call_hir_function(owner_fn, args, self.module_context(pm, ctx)))
+        None
 
-    fn call_closure(closure: ClosureValue, args: [Value], ctx: EvalContext) -> Result<Value, BackendError>:
+    fn call_closure(closure: ClosureValue, args: [Value], caller_ctx: EvalContext) -> Result<Value, BackendError>:
+        # Run in the defining module's scope (shares the caller's env).
+        val ctx = if closure.owner.name == caller_ctx.module.name: caller_ctx else: self.module_context(closure.owner, caller_ctx)
+        val frame_depth = ctx.env.scope_depth()
         ctx.env.push_scope()
 
         # Captures already use the environment's stable text keys.
@@ -256,13 +496,22 @@ impl InterpreterBackendImpl:
             val value = if i < args.len():
                 args[i]
             else:
-                return Err(BackendError.runtime_error("missing argument for parameter", nil))
+                return Err(BackendError.runtime_error("missing argument for parameter", None))
 
             ctx.env.define(param.name, value)
 
-        # Evaluate body
-        val result = self.eval_expr(closure.body, ctx)?
+        # Evaluate body. A `return` (or a `?` early exit) inside the body ends
+        # the closure itself, not the function that called it.
+        var result: Value = Value.Nil
+        match self.eval_expr(closure.body, ctx):
+            case Ok(v): result = v
+            case Err(e):
+                if e.kind == BackendErrorKind.ControlFlow and e.message == "return":
+                    result = e.ctl_value ?? Value.Nil
+                else:
+                    return Err(e)
 
+        ctx.env.truncate_scopes(frame_depth + 1)
         ctx.env.pop_scope()
         Ok(result)
 
@@ -279,7 +528,8 @@ impl InterpreterBackendImpl:
             case HirAssignOp.Mod: self.eval_binop(HirBinOp.Mod, left, right, span, false, false)
             case _: Err(BackendError.not_implemented("assignment operator not implemented"))
 
-    fn try_call_builtin(name: text, args: [Value]) -> Option<Result<Value, BackendError>>:
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in try_call_builtin", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+    fn try_call_builtin(name: text, args: [Value]) -> Result<Value, BackendError>?:
         """Try to call a builtin function. Returns None if not a builtin.
         Optimization D-6: resolves name to BuiltinTag via lookup_builtin_tag (one linear
         scan of BUILTIN_TABLE), then dispatches via match tag — avoids per-call string
@@ -287,18 +537,24 @@ impl InterpreterBackendImpl:
         """
         itrace("[TCB0] try_call_builtin enter")
         val tag = lookup_builtin_tag(name)
-        itrace("[TCB] try_call_builtin name={name}")
+        if interp_trace_enabled():
+            itrace("[TCB] try_call_builtin name={name}")
         match tag:
             case BuiltinTag.Print:
-                itrace("[BUILTIN] Print reached args_len={args.len()}")
+                if interp_trace_enabled():
+                    itrace("[BUILTIN] Print reached args_len={args.len()}")
                 if args.len() > 0:
                     # Typed rebind (stage4 ANY-erased list element).
                     val arg: Value = args[0]
-                    itrace("[BUILTIN] Print arg bound nil={arg == nil}")
+                    if interp_trace_enabled():
+                        itrace("[BUILTIN] Print arg bound nil={arg == nil}")
+                    # `print` ends the line like the language statement does;
+                    # rt_print_value wrote no newline, so native runs printed
+                    # every line glued together.
                     match arg:
                         case Value.RuntimeValue(ptr):
                             itrace("[BUILTIN] Print RuntimeValue case")
-                            rt_print_value(ptr)
+                            rt_println_value(ptr)
                         # Pure-Simple print path for scalars: the
                         # rt_value_int -> rt_print_value pointer round-trip
                         # SEGVs on stage4 ("[BUILTIN] Print ptr done" then
@@ -340,13 +596,24 @@ impl InterpreterBackendImpl:
                     var assert_msg = "assertion failed"
                     if args.len() > 1:
                         assert_msg = "assertion failed: " + self.value_to_string(args[1])
-                    Some(Err(BackendError.runtime_error(assert_msg, nil)))
+                    @when(feature = "dhr"):
+                    publish_assert_failure("interpreter:assert", assert_msg)
+                    @end
+                    Some(Err(BackendError.runtime_error(assert_msg, None)))
+            case BuiltinTag.Panic:
+                # `panic(msg)` must raise with its message, not "function 'panic' not found".
+                var panic_msg = "panic"
+                if args.len() > 0:
+                    panic_msg = "panic: " + self.value_to_string(args[0])
+                Some(Err(BackendError.runtime_error(panic_msg, None)))
             case BuiltinTag.Println:
                 if args.len() > 0:
-                    val arg = args[0]
+                    val arg: Value = args[0]
                     match arg:
                         case Value.RuntimeValue(ptr):
                             rt_println_value(ptr)
+                        case Value.String(sv):
+                            print sv
                         case _:
                             val msg = self.value_to_string(arg)
                             print msg
@@ -355,11 +622,9 @@ impl InterpreterBackendImpl:
                 Some(Ok(Value.Nil))
             case BuiltinTag.ToString:
                 if args.len() > 0:
-                    # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                    Some(Ok(backend_value_string_v1(self.value_to_string(args[0]))))
+                    Some(Ok(Value.String(self.value_to_string(args[0]))))
                 else:
-                    # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                    Some(Ok(backend_value_string_v1("")))
+                    Some(Ok(Value.String("")))
 
             case BuiltinTag.TypeOf:
                 if args.len() > 0:
@@ -367,13 +632,11 @@ impl InterpreterBackendImpl:
                     match arg:
                         case Value.RuntimeValue(ptr):
                             val _ = ptr
-                            # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                            Some(Ok(backend_value_string_v1("runtime_value")))
+                            Some(Ok(Value.String("runtime_value")))
                         case _:
-                            # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                            Some(Ok(backend_value_string_v1(arg.type_name())))
+                            Some(Ok(Value.String(arg.type_name())))
                 else:
-                    Some(Err(BackendError.runtime_error("type_of requires value argument", nil)))
+                    Some(Err(BackendError.runtime_error("type_of requires value argument", None)))
 
             case BuiltinTag.Clone:
                 if args.len() > 0:
@@ -382,71 +645,66 @@ impl InterpreterBackendImpl:
                         case Value.RuntimeValue(ptr):
                             # Bootstrap interpreter fallback treats the runtime
                             # pointer as an opaque refcounted handle.
-                            # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                            Some(Ok(backend_value_runtime_value_v1(ptr)))
+                            Some(Ok(Value.RuntimeValue(ptr)))
                         case _:
                             Some(Ok(arg))
                 else:
-                    Some(Err(BackendError.runtime_error("clone requires value argument", nil)))
+                    Some(Err(BackendError.runtime_error("clone requires value argument", None)))
 
             # File I/O operations
             case BuiltinTag.FileExists:
                 if args.len() > 0:
                     match args[0]:
                         case Value.String(path):
-                            val result = rt_file_exists(path.ptr(), path.len())
-                            # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                            Some(Ok(backend_value_bool_v1(result)))
+                            val result = rt_file_exists(path)
+                            Some(Ok(Value.Bool(result)))
                         case _:
-                            Some(Err(BackendError.type_error("file_exists requires string path", nil)))
+                            Some(Err(BackendError.type_error("file_exists requires string path", None)))
                 else:
-                    Some(Err(BackendError.runtime_error("file_exists requires path argument", nil)))
+                    Some(Err(BackendError.runtime_error("file_exists requires path argument", None)))
 
             case BuiltinTag.FileExistsProbeBegin:
                 if args.len() == 0:
-                    # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                    Some(Ok(backend_value_int_v1(rt_file_exists_probe_begin())))
+                    Some(Ok(Value.Int(rt_file_exists_probe_begin())))
                 else:
-                    Some(Err(BackendError.runtime_error("rt_file_exists_probe_begin takes no arguments", nil)))
+                    Some(Err(BackendError.runtime_error("rt_file_exists_probe_begin takes no arguments", None)))
 
             case BuiltinTag.FileExistsProbeEnd:
                 if args.len() == 1:
                     match args[0]:
                         case Value.Int(token):
-                            # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                            Some(Ok(backend_value_int_v1(rt_file_exists_probe_end(token))))
+                            Some(Ok(Value.Int(rt_file_exists_probe_end(token))))
                         case _:
-                            Some(Err(BackendError.type_error("rt_file_exists_probe_end requires integer token", nil)))
+                            Some(Err(BackendError.type_error("rt_file_exists_probe_end requires integer token", None)))
                 else:
-                    Some(Err(BackendError.runtime_error("rt_file_exists_probe_end requires one token", nil)))
+                    Some(Err(BackendError.runtime_error("rt_file_exists_probe_end requires one token", None)))
 
             case BuiltinTag.FileIsRegularNoFollow:
                 if args.len() > 0:
                     match args[0]:
                         case Value.String(path):
-                            val result = rt_file_is_regular_no_follow(path.ptr(), path.len())
-                            # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                            Some(Ok(backend_value_bool_v1(result)))
+                            val result = rt_file_is_regular_no_follow(path)
+                            Some(Ok(Value.Bool(result)))
                         case _:
-                            Some(Err(BackendError.type_error("file_is_regular_no_follow requires string path", nil)))
+                            Some(Err(BackendError.type_error("file_is_regular_no_follow requires string path", None)))
                 else:
-                    Some(Err(BackendError.runtime_error("file_is_regular_no_follow requires path argument", nil)))
+                    Some(Err(BackendError.runtime_error("file_is_regular_no_follow requires path argument", None)))
 
             case BuiltinTag.FileRead:
                 if args.len() > 0:
                     match args[0]:
                         case Value.String(path):
-                            val ptr = rt_file_read_text(path.ptr(), path.len())
-                            if ptr == "":
-                                # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                                Some(Ok(backend_value_string_v1("")))
+                            val read_opt = rt_file_read_text(path)
+                            if read_opt == nil:
+                                Some(Err(BackendError.runtime_error("file_read: cannot read {path}", None)))
+                            elif read_opt.unwrap() == "":
+                                Some(Ok(Value.String("")))
                             else:
-                                # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                                Some(Ok(backend_value_string_v1(ptr)))
+                                Some(Ok(Value.String(read_opt.unwrap())))
                         case _:
-                            Some(Err(BackendError.type_error("file_read requires string path", nil)))
+                            Some(Err(BackendError.type_error("file_read requires string path", None)))
                 else:
-                    Some(Err(BackendError.runtime_error("file_read requires path argument", nil)))
+                    Some(Err(BackendError.runtime_error("file_read requires path argument", None)))
 
             case BuiltinTag.FileWrite:
                 if args.len() >= 2:
@@ -454,45 +712,46 @@ impl InterpreterBackendImpl:
                         case Value.String(path):
                             match args[1]:
                                 case Value.String(content):
-                                    val result = rt_file_write_text(path.ptr(), path.len(), content.ptr(), content.len())
-                                    # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                                    Some(Ok(backend_value_bool_v1(result)))
+                                    val result = rt_file_write_text(path, content)
+                                    Some(Ok(Value.Bool(result)))
                                 case _:
-                                    Some(Err(BackendError.type_error("file_write requires string path and content", nil)))
+                                    Some(Err(BackendError.type_error("file_write requires string path and content", None)))
                         case _:
-                            Some(Err(BackendError.type_error("file_write requires string path and content", nil)))
+                            Some(Err(BackendError.type_error("file_write requires string path and content", None)))
                 else:
-                    Some(Err(BackendError.runtime_error("file_write requires path and content arguments", nil)))
+                    Some(Err(BackendError.runtime_error("file_write requires path and content arguments", None)))
 
             case BuiltinTag.FileDelete:
                 if args.len() > 0:
                     match args[0]:
                         case Value.String(path):
                             val result = unsafe(capabilities: [ffi]):
-                                rt_file_delete(path.ptr(), path.len())
-                            # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                            Some(Ok(backend_value_bool_v1(result)))
+                                rt_file_delete(path)
+                            Some(Ok(Value.Bool(result)))
                         case _:
-                            Some(Err(BackendError.type_error("file_delete requires string path", nil)))
+                            Some(Err(BackendError.type_error("file_delete requires string path", None)))
                 else:
-                    Some(Err(BackendError.runtime_error("file_delete requires path argument", nil)))
+                    Some(Err(BackendError.runtime_error("file_delete requires path argument", None)))
 
             # Environment variable operations
             case BuiltinTag.EnvGet:
                 if args.len() > 0:
                     match args[0]:
                         case Value.String(name):
-                            val ptr = rt_env_get(name.ptr(), name.len())
+                            val ptr_opt = rt_env_get(name)
+                            # absent: an unset variable is the empty string under this
+                            # backend's env_get contract, exactly like the set-but-empty case.
+                            val ptr = if ptr_opt == nil: "" else: ptr_opt.unwrap()
                             if ptr == "":
-                                # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                                Some(Ok(backend_value_string_v1("")))
+                                Some(Ok(Value.String("")))
                             else:
-                                # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                                Some(Ok(backend_value_string_v1(ptr)))
+                                Some(Ok(Value.String(ptr)))
+                        case Value.Function(fv):
+                            Some(Err(BackendError.type_error("env_get requires string name (got function '" + fv.name + "')", None)))
                         case _:
-                            Some(Err(BackendError.type_error("env_get requires string name", nil)))
+                            Some(Err(BackendError.type_error("env_get requires string name (got Value tag " + rt_enum_discriminant(args[0]).to_text() + ")", None)))
                 else:
-                    Some(Err(BackendError.runtime_error("env_get requires name argument", nil)))
+                    Some(Err(BackendError.runtime_error("env_get requires name argument", None)))
 
             case BuiltinTag.EnvSet:
                 if args.len() >= 2:
@@ -500,18 +759,17 @@ impl InterpreterBackendImpl:
                         case Value.String(name):
                             match args[1]:
                                 case Value.String(value):
-                                    val result = rt_env_set(name.ptr(), name.len(), value.ptr(), value.len())
-                                    # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                                    Some(Ok(backend_value_bool_v1(result)))
+                                    val result = rt_env_set(name, value)
+                                    Some(Ok(Value.Bool(result)))
                                 case _:
-                                    Some(Err(BackendError.type_error("env_set requires string name and value", nil)))
+                                    Some(Err(BackendError.type_error("env_set requires string name and value", None)))
                         case _:
-                            Some(Err(BackendError.type_error("env_set requires string name and value", nil)))
+                            Some(Err(BackendError.type_error("env_set requires string name and value", None)))
                 else:
-                    Some(Err(BackendError.runtime_error("env_set requires name and value arguments", nil)))
+                    Some(Err(BackendError.runtime_error("env_set requires name and value arguments", None)))
 
             case BuiltinTag.Unknown:
-                nil
+                None
 
     fn try_owned_run_abi(name: text, owner: text, external: bool, args: [Value]) -> Result<Value, BackendError>?:
         interpreter_run_abi(name, owner, external, args, self.program_args)

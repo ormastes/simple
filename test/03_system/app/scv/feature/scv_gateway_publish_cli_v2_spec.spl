@@ -1,0 +1,85 @@
+use std.spec.*
+use app.scv.gateway_publish_config_v2.{scv_gateway_publish_config_parse_v2}
+use app.scv.gateway_publish_commands_v2.{scv_gateway_publish_command_v2,
+    scv_gateway_publish_root_command_v2}
+
+fn _scv_gateway_publish_config_source_v2() -> text:
+    "version: 2\n" +
+    "repository: repo-42\n" +
+    "listen_host: 127.0.0.1\n" +
+    "listen_port: 24321\n" +
+    "bearer_token_env: SCV_GATEWAY_TOKEN\n" +
+    "github_host: github.com\n" +
+    "github_owner: simple-org\n" +
+    "github_repository: simple-repo\n" +
+    "github_repository_id: \"4242\"\n" +
+    "remote: \"https://github.com/simple-org/simple-repo\"\n" +
+    "source_root: /srv/scv/repository\n" +
+    "scratch_parent: /var/tmp/scv-publish\n" +
+    "outbox_root: /var/lib/scv/publish-outbox\n" +
+    "principal_id: scv-service\n" +
+    "base_ref: refs/heads/main\n" +
+    "allow_prepare: true\n" +
+    "allow_reconcile: true\n" +
+    "allow_topic_publish: false\nallow_landing_reconcile: false\nallow_landing_observation_write: false\n"
+
+describe "SCV GitHub publication v2 native CLI and host policy":
+    it "parses one strict native SDN policy with environment-only credentials":
+        val config = scv_gateway_publish_config_parse_v2(
+            _scv_gateway_publish_config_source_v2().bytes()).unwrap()
+        expect(config.gateway.repository).to_equal("repo-42")
+        expect(config.gateway.bearer_token_env).to_equal("SCV_GATEWAY_TOKEN")
+        expect(config.policy.repository.github_repository_id).to_equal("4242")
+        expect(config.policy.remote).to_equal("https://github.com/simple-org/simple-repo")
+        expect(config.policy.allow_prepare).to_equal(true)
+        expect(config.policy.allow_reconcile).to_equal(true)
+        expect(config.policy.allow_topic_publish).to_equal(false)
+        expect(config.policy.allow_landing_reconcile).to_equal(false)
+        expect(config.policy.allow_landing_observation_write).to_equal(false)
+        expect(config.policy.landing_request_budget).to_equal(12u64)
+
+    it "preserves legacy v2 policy files with landing capabilities defaulted off":
+        val source = _scv_gateway_publish_config_source_v2()
+            .replace("allow_landing_reconcile: false\n", "")
+            .replace("allow_landing_observation_write: false\n", "")
+        val config = scv_gateway_publish_config_parse_v2(source.bytes()).unwrap()
+        expect(config.policy.allow_landing_reconcile).to_equal(false)
+        expect(config.policy.allow_landing_observation_write).to_equal(false)
+        expect(config.policy.landing_request_budget).to_equal(12u64)
+
+    it "rejects malformed optional capabilities and insufficient landing request budget":
+        val malformed = _scv_gateway_publish_config_source_v2().replace(
+            "allow_landing_reconcile: false", "allow_landing_reconcile: maybe")
+        expect(scv_gateway_publish_config_parse_v2(malformed.bytes()).is_err()).to_equal(true)
+        val undersized = _scv_gateway_publish_config_source_v2().replace(
+            "allow_landing_reconcile: false", "allow_landing_reconcile: true")
+            .replace("allow_landing_observation_write: false", "allow_landing_observation_write: true") +
+            "landing_request_budget: 4\n"
+        expect(scv_gateway_publish_config_parse_v2(undersized.bytes()).is_err()).to_equal(true)
+
+    it "rejects an inline secret field rather than accepting client-injected credentials":
+        val source = _scv_gateway_publish_config_source_v2() + "github_token: plaintext-secret\n"
+        expect(scv_gateway_publish_config_parse_v2(source.bytes()).is_err()).to_equal(true)
+
+    it "rejects a non-GitHub transport URL in host policy":
+        val source = _scv_gateway_publish_config_source_v2().replace(
+            "https://github.com/simple-org/simple-repo", "https://evil.example/repository")
+        expect(scv_gateway_publish_config_parse_v2(source.bytes()).is_err()).to_equal(true)
+
+    it "keeps production startup refused unless loopback development is explicit":
+        val result = scv_gateway_publish_command_v2(["serve", "--config", "/missing/policy.sdn"])
+        expect(result.exit_code).to_equal(1)
+        expect(result.output).to_contain("tls_unavailable")
+
+    it "routes the top-level gateway publish-serve command to the v2 owner":
+        val result = scv_gateway_publish_root_command_v2(
+            ["publish-serve", "--config", "/missing/policy.sdn"])
+        expect(result.exit_code).to_equal(1)
+        expect(result.output).to_contain("tls_unavailable")
+
+    it "rejects unknown or duplicated server command arguments":
+        expect(scv_gateway_publish_command_v2(["serve", "--config", "p.sdn",
+            "--config", "other.sdn"]).output).to_contain("invalid_request")
+        expect(scv_gateway_publish_command_v2(["serve", "--config", "p.sdn",
+            "--development-loopback", "--reason", "audit", "--token", "secret"]).output)
+            .to_contain("invalid_request")

@@ -1,0 +1,141 @@
+# @req REQ-SSPEC-COMPILER
+# Exercise real index lowering for both resolved HIR callee representations.
+use std.spec
+use std.io_runtime.{env_get, env_set}
+use compiler.common.diagnostics.span.Span
+use compiler.common.dependency.visibility.Visibility
+use compiler.common.driver_core_types.driver_core_compile_options_default
+use compiler.driver.driver_mir_target.driver_mir_target_context
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir_lowering_types.MirLowering
+use compiler.mir.mir_types.*
+use compiler.mir.mir_instruction_kinds.MirInstKind
+use compiler.mir.mir_instruction_support.MirOperandKind
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir._MirLowering.provider_metadata.mir_provider_callable_key
+
+fn cli_named_array_index_probe(name: text, named: bool, bootstrap: text):
+    val span = Span.empty()
+    val text_type = HirType(kind: HirTypeKind.Str, span: span)
+    val array_type = HirType(kind: HirTypeKind.Array(text_type, nil), span: span)
+    val function_type = HirType(kind: HirTypeKind.Function([], array_type, []), span: span)
+    var symbols = SymbolTable.new()
+    val symbol = symbols.define(name, SymbolKind.Function, Some(function_type), span,
+        Visibility.Private, false, Some("test.cli_named_array"))
+    var lowering = MirLowering.new_for_target(symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    lowering.current_function_symbols = [symbol]
+    lowering.current_function_names = [name]
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 100), "index_probe", MirSignature(params: [],
+        return_type: lowering.bootstrap_text_type(), is_variadic: false), span)
+    lowering.builder = builder
+    val callee_kind = if named: HirExprKind.NamedVar(symbol, name) else: HirExprKind.Var(symbol)
+    val callee = HirExpr(kind: callee_kind, has_type_: true, type_: function_type, span: span)
+    val base = HirExpr(kind: HirExprKind.Call(callee, [], []), has_type_: true, type_: array_type, span: span)
+    val index = HirExpr(kind: HirExprKind.IntLit(0), has_type_: true,
+        type_: HirType(kind: HirTypeKind.Int(64, true), span: span), span: span)
+    val old_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+    env_set("SIMPLE_BOOTSTRAP", bootstrap)
+    val output = lowering.lower_index_expr(base, index, true, text_type)
+    env_set("SIMPLE_BOOTSTRAP", old_bootstrap)
+    expect(lowering.errors.len()).to_equal(0)
+    var finished = lowering.builder
+    finished.terminate_return(nil)
+    val function = finished.end_function()
+    var original_calls = 0
+    var runtime_substitutions = 0
+    var array_reads = 0
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, target, _):
+                    match target.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(actual), _):
+                            if actual == name or actual.ends_with("." + name) or actual.ends_with("::" + name):
+                                original_calls = original_calls + 1
+                            if actual == "spl_get_arg": runtime_substitutions = runtime_substitutions + 1
+                            if actual == "rt_array_get": array_reads = array_reads + 1
+                        case _: ()
+                case MirInstKind.GetElementPtr(_, _, _): array_reads = array_reads + 1
+                case _: ()
+    expect(original_calls).to_equal(1)
+    expect(runtime_substitutions).to_equal(0)
+    expect(array_reads).to_be_greater_than(0)
+    expect(output.id).to_be_greater_than(-1)
+
+describe "bootstrap indexing of CLI-named array-returning functions":
+    it "indexes the actual get_args return for Var and NamedVar in both modes":
+        for bootstrap in ["0", "1"]:
+            for named in [false, true]:
+                cli_named_array_index_probe("get_args", named, bootstrap)
+    it "indexes the actual get_cli_args return for Var and NamedVar in both modes":
+        for bootstrap in ["0", "1"]:
+            for named in [false, true]:
+                cli_named_array_index_probe("get_cli_args", named, bootstrap)
+    it "keeps unrelated array-returning calls on ordinary indexing":
+        cli_named_array_index_probe("local_items", false, "1")
+        cli_named_array_index_probe("local_items", true, "1")
+
+fn cli_eprint_ownership_probe(owned: bool, named: bool, bootstrap: text, imported: bool = false):
+    val span = Span.empty()
+    val text_type = HirType(kind: HirTypeKind.Str, span: span)
+    val result_type = HirType(kind: if owned: HirTypeKind.Int(64, true) else: HirTypeKind.Unit, span: span)
+    val function_type = HirType(kind: HirTypeKind.Function([text_type], result_type, []), span: span)
+    var symbols = SymbolTable.new()
+    val symbol = symbols.define("eprint", SymbolKind.Function, Some(function_type), span,
+        Visibility.Private, false, if owned: Some("test.cli_named_array") else: nil)
+    var lowering = MirLowering.new_for_target(symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    if imported:
+        lowering.callable_link_names[mir_provider_callable_key("test.cli_named_array", "eprint")] = "provider.eprint"
+    elif owned:
+        lowering.current_function_symbols = [symbol]
+        lowering.current_function_names = ["eprint"]
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 100), "eprint_probe", MirSignature(params: [],
+        return_type: MirType.i64(), is_variadic: false), span)
+    lowering.builder = builder
+    val callee_kind = if named: HirExprKind.NamedVar(symbol, "eprint") else: HirExprKind.Var(symbol)
+    val callee = HirExpr(kind: callee_kind, has_type_: true, type_: function_type, span: span)
+    val argument = HirExpr(kind: HirExprKind.StringLit("owned", nil), has_type_: true, type_: text_type, span: span)
+    val call = HirExpr(kind: HirExprKind.Call(callee, [HirCallArg(has_name: false, name: "", value: argument, span: span)], []),
+        has_type_: true, type_: result_type, span: span)
+    val old_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+    env_set("SIMPLE_BOOTSTRAP", bootstrap)
+    val output = lowering.lower_expr(call)
+    env_set("SIMPLE_BOOTSTRAP", old_bootstrap)
+    expect(lowering.errors.len()).to_equal(0)
+    var finished = lowering.builder
+    finished.terminate_return(nil)
+    val function = finished.end_function()
+    var owned_calls = 0
+    var builtin_calls = 0
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, target, _):
+                    match target.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(actual), _):
+                            if actual == "eprint" or actual.ends_with(".eprint") or actual.ends_with("::eprint"):
+                                owned_calls = owned_calls + 1
+                            if actual == "rt_eprintln" or actual == "rt_eprintln_str": builtin_calls = builtin_calls + 1
+                        case _: ()
+                case _: ()
+    expect(owned_calls).to_equal(if owned: 1 else: 0)
+    expect(builtin_calls).to_equal(if owned: 0 else: 1)
+    expect(output.id).to_be_greater_than(-1)
+
+describe "source eprint ownership during MIR lowering":
+    it "preserves source definitions for Var and NamedVar in both modes":
+        for bootstrap in ["0", "1"]:
+            for named in [false, true]:
+                cli_eprint_ownership_probe(true, named, bootstrap)
+    it "retains builtin eprint runtime dispatch without a source definition":
+        for bootstrap in ["0", "1"]:
+            for named in [false, true]:
+                cli_eprint_ownership_probe(false, named, bootstrap)
+    it "preserves imported provider eprint ownership without a current-module name":
+        for bootstrap in ["0", "1"]:
+            for named in [false, true]:
+                cli_eprint_ownership_probe(true, named, bootstrap, true)

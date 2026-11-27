@@ -1,0 +1,147 @@
+# Live closure-bound parameter effects. Resolver-owned terminal module identity
+# follows imported_callback_receipts; names alone never authorize a contract.
+use compiler.hir.hir_types.{HirModule, HirSymbol, HirType, HirTypeKind, SymbolKind}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.common.cache.canonical_identity.{canon_str, canon_nat}
+use compiler.semantics.param_effects.ownership_contract_budget.{OwnershipContractBudgetV1}
+
+pub struct ImportedEffectContractV1:
+    consumer_symbol: i64
+    provider_name: text
+    provider_path: text
+    provider_symbol: i64
+    signature: text
+    effects: [text]
+    names: [text]
+
+pub struct ImportedEffectContractsV1:
+    contracts: [ImportedEffectContractV1]
+    incomplete: bool
+
+# This is an identity encoder, not a new ownership/type inference algorithm.
+# Unknown/generic/device layouts deliberately have no portable identity here.
+pub fn ownership_contract_type_identity_v1(module: HirModule, type_: HirType,
+        budget: OwnershipContractBudgetV1, depth: i64 = 0) -> text:
+    if depth >= 128 or not budget.take():
+        budget.exhausted = true
+        return ""
+    if type_ == nil: return ""
+    var tag = ""
+    var children: [HirType] = []
+    match type_.kind:
+        case HirTypeKind.Int(bits, signed): return "int" + canon_nat(bits) + canon_str("{signed}")
+        case HirTypeKind.Float(bits): return "float" + canon_nat(bits)
+        case HirTypeKind.Bool: return "bool"
+        case HirTypeKind.Char: return "char"
+        case HirTypeKind.Str: return "str"
+        case HirTypeKind.Unit: return "unit"
+        case HirTypeKind.Never: return "never"
+        case HirTypeKind.Array(inner, size):
+            var length = "dynamic"
+            if val count = size: length = "{count}"
+            tag = "array" + canon_str(length)
+            children = [inner]
+        case HirTypeKind.Slice(inner):
+            tag = "slice"
+            children = [inner]
+        case HirTypeKind.Ref(inner, mutable):
+            tag = "ref" + canon_str("{mutable}")
+            children = [inner]
+        case HirTypeKind.Ptr(inner, mutable):
+            tag = "ptr" + canon_str("{mutable}")
+            children = [inner]
+        case HirTypeKind.Optional(inner):
+            tag = "optional"
+            children = [inner]
+        case HirTypeKind.Unique(inner):
+            tag = "unique"
+            children = [inner]
+        case HirTypeKind.Isolated(inner):
+            tag = "iso"
+            children = [inner]
+        case HirTypeKind.Shared(inner):
+            tag = "shared"
+            children = [inner]
+        case HirTypeKind.Weak(inner):
+            tag = "weak"
+            children = [inner]
+        case HirTypeKind.Dict(key, value):
+            tag = "dict"
+            children = [key, value]
+        case HirTypeKind.Result(ok, err):
+            tag = "result"
+            children = [ok, err]
+        case HirTypeKind.Tuple(items):
+            tag = "tuple"
+            children = items
+        case HirTypeKind.Union(items):
+            tag = "union"
+            children = items
+        case HirTypeKind.Named(id, args):
+            if not module.symbols.symbols.contains_key(id.id): return ""
+            val symbol: HirSymbol = module.symbols.symbols[id.id]
+            if symbol.id.id != id.id: return ""
+            val owner = symbol.defining_module ?? module.name
+            if owner == "" or symbol.name == "": return ""
+            tag = "named" + canon_str(owner) + canon_str(symbol.name)
+            children = args
+        case HirTypeKind.Function(params, result, effects):
+            if effects.len() != 0: return ""
+            tag = "function"
+            for param in params: children.push(param)
+            children.push(result)
+        case _: return ""
+    var identity = tag + canon_nat(children.len())
+    for child in children:
+        val encoded = ownership_contract_type_identity_v1(module, child, budget, depth + 1)
+        if encoded == "": return ""
+        identity = identity + canon_str(encoded)
+    identity
+
+pub(package) fn verified_imported_effect_contracts_v1(consumer: HirModule,
+        providers: Dict<text, HirModule>, work_limit: i64) -> ImportedEffectContractsV1:
+    val budget = OwnershipContractBudgetV1(remaining: work_limit, exhausted: false)
+    var contracts: [ImportedEffectContractV1] = []
+    for key in consumer.symbols.symbols.keys():
+        if not budget.take(): break
+        val symbol: HirSymbol = consumer.symbols.symbols[key]
+        if symbol.id.id != key or symbol.kind != SymbolKind.Function: continue
+        if consumer.functions.contains_key(symbol.id): continue
+        val owner = symbol.defining_module ?? ""
+        if owner == "" or not providers.contains_key(owner): continue
+        val provider: HirModule = providers[owner]
+        if provider.nogc_param_effect_symbol_ids.len() != provider.nogc_param_effects.len(): continue
+        var imported_signature = ""
+        if val signature = symbol.type_:
+            imported_signature = ownership_contract_type_identity_v1(consumer, signature, budget)
+        if imported_signature == "": continue
+        var matched: [ImportedEffectContractV1] = []
+        for function_key in provider.functions.keys():
+            if not budget.take(): break
+            val function: HirFunction = provider.functions[function_key]
+            if function_key.id != function.symbol.id or not function.is_public or function.is_extern: continue
+            if function.type_params.len() != 0 or function.effects.len() != 0: continue
+            if symbol.name != function.name and symbol.name != owner + "." + function.name: continue
+            var parameters: [HirType] = []
+            var names: [text] = []
+            for param in function.params:
+                if not budget.take(): break
+                parameters.push(param.type_)
+                names.push(param.name)
+            val signature = HirType(kind: HirTypeKind.Function(parameters, function.return_type, []), span: function.span)
+            val declared = ownership_contract_type_identity_v1(provider, signature, budget)
+            if declared == "" or declared != imported_signature: continue
+            var matching_rows = 0
+            var effects: [text] = []
+            var row = 0
+            for id in provider.nogc_param_effect_symbol_ids:
+                if not budget.take(): break
+                if id == function.symbol.id:
+                    matching_rows = matching_rows + 1
+                    effects = provider.nogc_param_effects[row]
+                row = row + 1
+            if matching_rows != 1 or effects.len() != function.params.len(): continue
+            matched.push(ImportedEffectContractV1(key, owner, provider.path,
+                function.symbol.id, declared, effects, names))
+        if matched.len() == 1: contracts.push(matched[0])
+    ImportedEffectContractsV1(contracts: contracts, incomplete: budget.exhausted)

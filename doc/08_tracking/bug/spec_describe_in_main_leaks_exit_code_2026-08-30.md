@@ -67,3 +67,60 @@ An explicit `return ()` as the last statement of `main`, applied to the six
 files under `test/01_unit/app/llm_caret/claude_full/ink/` that hit this, each
 marked with a `ponytail:` comment pointing here. Remove the workaround and this
 record together when the exit-code path is fixed.
+
+---
+
+## Addendum 2026-11-11 — lane runner7: still LIVE on the test path (run path fixed)
+
+Re-checked on the refreshed Windows seed (`bin/simple.exe` at HEAD
+`68ab3383080f`, 2026-11-11). The defect is now PATH-SPLIT:
+
+- **`bin/simple run` — FIXED.** The 7-line minimal repro
+  (`fn main() -> ():` ending in `describe "x": ...`) exits **0** with
+  `1 examples, 0 failures`. The trailing-describe value no longer reaches the
+  process status on the run path.
+- **`bin/simple test` — STILL LIVE.** The same file through the test runner
+  exits **1** while printing
+  `SPEC FILE VERDICT: ... outcome=OK declared>=0 executed=1 passed=1 failed=0`
+  and `Results: 1 total, 1 passed, 0 failed`. Verified on the minimal repro and
+  on all six `test/01_unit/app/llm_caret/claude_full/ink/**` specs after
+  removing their `return ()` workaround: every file reports
+  `passed=N failed=0` yet the runner process exits 1. A module-level-`describe`
+  control spec (no `main`) exits 0 through the same path, so the leak is
+  specific to `describe` as `main`'s trailing expression inside the test
+  child's exit-status plumbing.
+
+The six `return ()` workarounds in the ink specs are therefore STILL REQUIRED;
+an attempt to remove them this lane was reverted
+(`git checkout -- test/01_unit/app/llm_caret/claude_full/ink/`).
+
+Verdict: LIVE — owner decision. The remaining surface is the test child's
+exit-code path (`bin/simple test` spawns/executes the spec differently from
+`bin simple run`; the leaked `main` value still reaches the process status
+there). Fix surface is `src/compiler_rust/driver/**` (seed lane). Until fixed,
+any gate that trusts the process exit code over the verdict line remains wrong
+in the fail-closed direction.
+
+---
+
+## Addendum 2026-11-13 — lane p3-misc-b: symptom shifted on release/1.0.0 seed; still seed-lane LIVE
+
+Reproduced once on release/1.0.0 tip (`6f4cb189867`, seed `bin/simple.exe`
+copied from the primary clone) with the 7-line minimal repro:
+
+- `bin/simple run /tmp/t.spl` — exits **0** (run-path fix holds), prints
+  `1 examples, 0 failures`, but emits **no `SPEC FILE VERDICT:` line at all**.
+  Control: a normal no-`main` spec (`context_log_modes_spec.spl`) via the same
+  `run` path DOES emit the verdict line. So with `describe` as `fn main`'s tail
+  expression the driver verdict epilogue is now skipped entirely.
+- `bin/simple test /tmp/t.spl --timeout 300` — exits **1** via the fail-closed
+  `fail_closed_on_no_examples` guard in
+  `src/app/test_runner_new/test_runner_client.spl:371` ("0 examples executed:
+  produced no SPEC FILE VERDICT line and exited 0"). The pure-Simple bypass at
+  `test_runner_single.spl:1918-1954` (spec_runner_describe_tail_expression_exit_code)
+  cannot fire because `has_verdict == 0` — there is no verdict to trust.
+
+Disposition: seed-Rust-only (the epilogue that emits the child verdict lives in
+`src/compiler_rust/driver/**`; this lane has no cargo/rustc to rebuild the
+seed). Not chaseable here. The six `return ()` ink-spec workarounds remain
+required.

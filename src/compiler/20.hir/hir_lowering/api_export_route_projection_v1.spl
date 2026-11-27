@@ -1,0 +1,199 @@
+# Frozen route identity joined to current retained callable observations.
+# No declaration-public shortcut grants external visibility or publication.
+use compiler.common.api_signature_facts_v1.{ApiSignatureFactsV1, ApiCallableFactV1, ApiSignatureKindV1}
+use compiler.common.api_export_route_facts_v1.{ApiExportJoinV1, ApiExportRouteFactV1, ApiExportRouteFactsV1}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName, ModuleSurface}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path}
+
+fn api_route_key_v1(index: i64, name: text) -> text:
+    "{index}:{name.len()}:{name}"
+
+# Called only on fresh consumer output before production retention. Rebinding
+# an old record is not cache validation. One bounded physical scan per module,
+# never per callable/route; path canonicalization uses the existing HIR owner.
+pub fn bind_api_signature_surface_v1(facts: ApiSignatureFactsV1,
+        registry: ModuleSurfacesByName) -> ApiSignatureFactsV1:
+    var bound = facts
+    bound.surface_generation = 0
+    bound.surface_index = -1
+    bound.surface_path = ""
+    bound.surface_binding_reason = "registry-not-frozen"
+    if registry == nil or not registry.frozen or registry.generation <= 0: return bound
+    if registry.surfaces.len() > 4096 or facts.module_path.len() > 1024:
+        bound.surface_binding_reason = "surface-binding-budget"
+        return bound
+    val path = module_surface_canonical_path(facts.module_path)
+    if path == "" or path.len() > 1024:
+        bound.surface_binding_reason = "signature-path-unavailable"
+        return bound
+    var found = -1
+    var index = 0
+    while index < registry.surfaces.len():
+        val surface: ModuleSurface = registry.surfaces[index]
+        if surface.canonical_path == path:
+            if found >= 0:
+                bound.surface_binding_reason = "ambiguous-signature-path"
+                return bound
+            if not surface.frozen or surface.generation != registry.generation or surface.physical_index != index:
+                bound.surface_binding_reason = "signature-surface-identity-invalid"
+                return bound
+            found = index
+        index = index + 1
+    if found < 0:
+        bound.surface_binding_reason = "signature-surface-unavailable"
+        return bound
+    bound.surface_generation = registry.generation
+    bound.surface_index = found
+    bound.surface_path = path
+    bound.surface_binding_reason = ""
+    bound
+
+pub fn project_api_export_routes_v1(registry: ModuleSurfacesByName,
+        signatures: Dict<text, ApiSignatureFactsV1>) -> ApiExportRouteFactsV1:
+    var result = ApiExportRouteFactsV1(0, [], ["ancestor-visibility-not-collected"], false)
+    if registry == nil or not registry.frozen or registry.generation <= 0:
+        result.unknown_reasons.push("registry-not-frozen")
+        return result
+    result.registry_generation = registry.generation
+    if registry.surfaces.len() > 4096 or registry.ordered_names.len() > 16384 or signatures.len() > 256:
+        result.unknown_reasons.push("export-projection-budget")
+        result.truncated = true
+        return result
+    if registry.ordered_names.len() != registry.ordered_indices.len():
+        result.unknown_reasons.push("registry-index-malformed")
+        return result
+    # Build validated scalar alias and declaration-authority indexes ONCE.
+    # Never trust a construction-time aggregate dictionary after freeze.
+    var aliases: Dict<text, i64> = {}
+    var authorities: Dict<text, i64> = {}
+    var index = 0
+    while index < registry.ordered_names.len():
+        val name = registry.ordered_names[index]
+        val target = registry.ordered_indices[index]
+        if name.len() == 0 or name.len() > 512 or target < 0 or target >= registry.surfaces.len():
+            result.unknown_reasons.push("registry-index-malformed")
+            return result
+        if aliases.has(name) and aliases[name] != target:
+            result.unknown_reasons.push("registry-index-ambiguous")
+            return result
+        aliases[name] = target
+        index = index + 1
+    var route_count = 0
+    var authority_count = 0
+    index = 0
+    while index < registry.surfaces.len():
+        val surface: ModuleSurface = registry.surfaces[index]
+        val origins = surface.export_origin_index
+        val authority = surface.declaration_authority_index
+        if not surface.frozen or surface.generation != registry.generation or surface.physical_index != index or surface.canonical_path.len() == 0 or surface.canonical_path.len() > 1024 or surface.module_name.len() > 512:
+            result.unknown_reasons.push("surface-identity-invalid")
+            return result
+        if not origins.frozen or not authority.frozen or origins.names.len() != origins.owner_modules.len() or origins.names.len() != origins.source_names.len() or origins.names.len() != origins.resolution_kinds.len() or authority.names.len() != authority.declaring_modules.len() or authority.names.len() != authority.source_names.len() or authority.names.len() != authority.visibilities.len():
+            result.unknown_reasons.push("surface-index-malformed")
+            return result
+        route_count = route_count + origins.names.len()
+        authority_count = authority_count + authority.names.len()
+        if route_count > 4096 or authority_count > 16384:
+            result.unknown_reasons.push("export-projection-budget")
+            result.truncated = true
+            return result
+        var row = 0
+        while row < authority.names.len():
+            val name = authority.names[row]
+            if name.len() == 0 or name.len() > 256 or authority.declaring_modules[row].len() > 512 or authority.source_names[row].len() > 256:
+                result.unknown_reasons.push("surface-index-malformed")
+                return result
+            val key = api_route_key_v1(index, name)
+            if authorities.has(key):
+                result.unknown_reasons.push("surface-index-malformed")
+                return result
+            authorities[key] = row
+            row = row + 1
+        index = index + 1
+    var callable_ids: Dict<text, i64> = {}
+    var callable_visibility: Dict<text, Visibility> = {}
+    for module_key in signatures.keys():
+        val facts: ApiSignatureFactsV1 = signatures[module_key]
+        val physical = facts.surface_index
+        if facts.surface_binding_reason != "" or facts.surface_generation != registry.generation or physical < 0 or physical >= registry.surfaces.len():
+            result.unknown_reasons.push("signature-surface-binding-mismatch")
+            continue
+        if facts.callables.len() > 128 or facts.nodes.len() > 1024:
+            result.unknown_reasons.push("signature-observation-budget")
+            result.truncated = true
+            continue
+        if not aliases.has(facts.module_name) or aliases[facts.module_name] != physical or facts.surface_path != registry.surfaces[physical].canonical_path or module_key != facts.module_name:
+            result.unknown_reasons.push("signature-surface-binding-mismatch")
+            continue
+        for raw_callable in facts.callables:
+            val callable: ApiCallableFactV1 = raw_callable
+            var owner = -1
+            if callable.declaration_owner == facts.module_name or callable.declaration_owner == facts.module_path:
+                owner = physical
+            elif aliases.has(callable.declaration_owner):
+                owner = aliases[callable.declaration_owner]
+            if owner != physical or callable.local_symbol < 0 or callable.declaration_name.len() == 0 or callable.declaration_name.len() > 256 or callable.signature_root < 0 or callable.signature_root >= facts.nodes.len():
+                result.unknown_reasons.push("callable-observation-identity-invalid")
+                continue
+            if facts.nodes[callable.signature_root].kind != ApiSignatureKindV1.Function:
+                result.unknown_reasons.push("callable-observation-identity-invalid")
+                continue
+            val key = api_route_key_v1(physical, callable.declaration_name)
+            if callable_ids.has(key):
+                callable_ids[key] = -2
+            else:
+                callable_ids[key] = callable.local_symbol
+                callable_visibility[key] = callable.declared_visibility
+    # Existing physical/flat row order is retained as process-local provenance.
+    # No cross-generation stable ordering or durable identity is asserted.
+    index = 0
+    while index < registry.surfaces.len():
+        val surface: ModuleSurface = registry.surfaces[index]
+        val origins = surface.export_origin_index
+        val authority = surface.declaration_authority_index
+        var row = 0
+        var seen_names: Dict<text, bool> = {}
+        while row < origins.names.len():
+            val name = origins.names[row]
+            val owner_name = origins.owner_modules[row]
+            val source_name = origins.source_names[row]
+            if name.len() == 0 or name.len() > 256 or owner_name.len() > 512 or source_name.len() > 256 or origins.resolution_kinds[row].len() > 128 or seen_names.has(name):
+                result.unknown_reasons.push("surface-index-malformed")
+                result.routes = []
+                return result
+            seen_names[name] = true
+            var route = ApiExportRouteFactV1(index, surface.canonical_path, surface.module_name, name,
+                -1, "", owner_name, source_name, -1, Visibility.Private,
+                ApiExportJoinV1.Unknown, "export-origin-unresolved")
+            route.resolution_kind = origins.resolution_kinds[row]
+            if aliases.has(owner_name):
+                val terminal = aliases[owner_name]
+                route.terminal_index = terminal
+                route.terminal_path = registry.surfaces[terminal].canonical_path
+                val alias_key = api_route_key_v1(index, name)
+                val terminal_key = api_route_key_v1(terminal, source_name)
+                route.unknown_reason = "export-authority-unavailable"
+                if authorities.has(alias_key) and authorities.has(terminal_key):
+                    val alias_row = authorities[alias_key]
+                    val terminal_row = authorities[terminal_key]
+                    val terminal_authority = registry.surfaces[terminal].declaration_authority_index
+                    val alias_owner = authority.declaring_modules[alias_row]
+                    val terminal_owner = terminal_authority.declaring_modules[terminal_row]
+                    route.declared_visibility = terminal_authority.visibilities[terminal_row]
+                    route.unknown_reason = "export-authority-mismatch"
+                    if aliases.has(alias_owner) and aliases.has(terminal_owner) and aliases[alias_owner] == terminal and aliases[terminal_owner] == terminal and authority.source_names[alias_row] == source_name and terminal_authority.source_names[terminal_row] == source_name and authority.visibilities[alias_row] == route.declared_visibility:
+                        route.unknown_reason = "callable-observation-unavailable"
+                        if callable_ids.has(terminal_key):
+                            if callable_ids[terminal_key] == -2:
+                                route.unknown_reason = "ambiguous-callable-observation"
+                            elif callable_visibility[terminal_key] != route.declared_visibility:
+                                route.unknown_reason = "callable-visibility-mismatch"
+                            else:
+                                route.local_symbol = callable_ids[terminal_key]
+                                route.join_status = ApiExportJoinV1.Joined
+                                route.unknown_reason = "ancestor-visibility-not-collected"
+            result.routes.push(route)
+            row = row + 1
+        index = index + 1
+    result

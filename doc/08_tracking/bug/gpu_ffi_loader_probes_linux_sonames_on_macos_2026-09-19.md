@@ -1,6 +1,6 @@
 # GPU FFI loader probes Linux sonames on macOS (and `spl_dlopen` raises where `DynLib.load` expects nil)
 
-- Status: SOURCE FIXED (2026-09-21); macOS on-device validation pending
+- Status: CLOSED (2026-11-11) — macOS on-device validation PASS, including live Homebrew Vulkan load
 - Found: 2026-09-19
 - Component: `src/lib/nogc_sync_mut/gpu/engine2d/ffi_dispatch.spl` (`gpu_lib_candidates`, :60-84), `src/lib/nogc_sync_mut/sffi/dynamic.spl` (:121-128), seed runtime `spl_dlopen`
 - Binary: deployed Rust seed (macOS aarch64)
@@ -52,3 +52,48 @@ The public `gpu_lib_candidates`, `try_load_gpu_lib`, `DynLib.load`, and
 `DynLib.load_checked` signatures are unchanged. SimpleOS keeps the static
 selection from `SIMPLE_OS_KERNEL`; the candidate lookup is only used on hosted
 dynamic paths. SOSIX app and host interfaces are untouched.
+
+## 2026-11-11 macOS on-device validation (CLOSE)
+
+The originally affected macOS host (Apple silicon, macOS 26.2 SDK, Homebrew
+Vulkan at `/opt/homebrew/lib/libvulkan.dylib`) ran a native probe
+(`scratch/ffi_macos_probe.spl`, mirroring
+`test/01_unit/lib/gpu/engine2d/ffi_dispatch_platform_spec.spl`) built from the
+stage2-admitted pure-Simple compiler pair at `4ff1e3b51f5`. The relevant
+candidate-mapping code is byte-identical to `origin/release/1.0.0` head
+(17986cb5) in both `ffi_dispatch.spl` and the `sffi_dispatch.spl` twin.
+
+Probe verdict: PASS (exit 0), 2026-11-11:
+
+```
+platform_name() = macos
+PASS: ffi_dispatch macOS candidates are the 6 dylib paths
+PASS: no Linux .so soname in the Darwin candidate list
+PASS: sffi_dispatch twin matches ffi_dispatch on macOS
+PASS: Linux sonames and Windows DLLs stay distinct
+PASS: DynLib.load returns nil (not raise) for unresolvable libraries
+PASS: live candidate list uses the runtime platform identity
+DEVICE-RAN: try_load_gpu_lib found the Homebrew Vulkan loader
+```
+
+Both acceptance signals from the 2026-09-21 note are now observed on the real
+host: clean `nil` on unresolvable libraries (no `spl_dlopen` raise) and a
+non-nil `try_load_gpu_lib("vulkan")` via the explicit `/opt/homebrew/lib`
+prefixes. Closing.
+
+## 2026-11-04 native macOS acceptance (lane 4)
+
+Host: macOS 26 (Darwin 25.5.0) arm64, Vulkan loader present at
+`/opt/homebrew/lib/libvulkan.1.dylib`, no CUDA. Tree: release/1.0.0 `63f61763a3f`.
+Binary: `/Users/ormastes/.local/share/simple-seeds/release100-7a0e6fe516f-20261031/simple` (Rust bootstrap seed, interpreter, `SIMPLE_LIB=src`).
+
+- `ffi_dispatch_platform_spec.spl`: 4/4 passed
+- `ffi_cuda_spec.spl`: 3/3 passed (no `spl_dlopen failed for 'libcuda.so.1'` abort)
+- `ffi_vulkan_spec.spl`: 4/4 passed (no `libvulkan.so.1` abort)
+
+The originally affected macOS host case is now VERIFIED on the seed
+interpreter lane. Still unverified: an admitted pure-Simple macOS runtime —
+the only deployed one (`bin/release/aarch64-apple-darwin-macho/simple`,
+2026-09-18) SIGSEGVs (rc 139) in test-runner setup for every spec, a
+stale-deploy/bootstrap issue owned by the bootstrap lane, not this loader.
+Status: VERIFIED on macOS (seed lane); pure-Simple-runtime acceptance pending redeploy.

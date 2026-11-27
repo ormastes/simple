@@ -1,0 +1,196 @@
+#!/bin/sh
+# Run only with a freshly rebuilt producer whose CompileOptions layout includes slot 6.
+# No fallback: the caller supplies the producer and declares its kind. A Rust
+# seed is permitted only as an explicit bootstrap diagnostic to AOT this harness.
+# Run under the caller's shared time/RSS watchdog; this script starts none.
+set -eu
+if [ "$#" -lt 2 ] || [ ! -x "$1" ] || [ ! -d "$2" ]; then
+    echo "usage: $0 /absolute/compatible-simple /absolute/compatible-runtime-dir [--jobs=1..64] [--output=/absolute/new-directory] [--producer-kind=self-hosted|rust-seed-bootstrap-diagnostic] [--k1-policy=llvm|llvm-cranelift]" >&2
+    exit 2
+fi
+producer=$1
+runtime=$2
+shift 2
+jobs=1
+output=
+producer_kind=self-hosted
+k1_policy=${SIMPLE_KERNEL_K1_POLICY:-}
+for arg in "$@"; do
+    case "$arg" in
+        --jobs=*) jobs=${arg#*=} ;;
+        --output=*) output=${arg#*=} ;;
+        --producer-kind=*) producer_kind=${arg#*=} ;;
+        --k1-policy=*) k1_policy=${arg#*=} ;;
+        *) echo "unknown option: $arg" >&2; exit 2 ;;
+    esac
+done
+case "$jobs" in ''|*[!0-9]*|????*) echo 'jobs must be an integer from 1 to 64' >&2; exit 2 ;; esac
+[ "$jobs" -ge 1 ] && [ "$jobs" -le 64 ] || { echo 'jobs must be from 1 to 64' >&2; exit 2; }
+case "$producer_kind" in self-hosted|rust-seed-bootstrap-diagnostic) ;; *) echo 'invalid producer kind' >&2; exit 2 ;; esac
+case "$producer:$producer_kind" in
+    */compiler_rust/*:self-hosted) echo 'Rust seed requires --producer-kind=rust-seed-bootstrap-diagnostic' >&2; exit 2 ;;
+esac
+case "$producer" in /*) ;; *) echo "producer path must be absolute" >&2; exit 2 ;; esac
+case "$runtime" in /*) ;; *) echo "runtime path must be absolute" >&2; exit 2 ;; esac
+case "$output" in ''|/*) ;; *) echo 'output directory must be absolute' >&2; exit 2 ;; esac
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+cd "$repo"
+mkdir -p "$repo/build"
+if [ -n "$output" ]; then
+    # Fail if it already exists: stale executables must never satisfy a proof.
+    mkdir "$output"
+    fixture=$output
+else
+    fixture=$(mktemp -d "$repo/build/six-source-roots.XXXXXX")
+fi
+finish() {
+    status=$?
+    trap - 0
+    printf 'exit_status=%s\n' "$status" > "$fixture/status.env"
+    printf 'Six-root proof evidence (exit %s): %s\n' "$status" "$fixture" >&2
+    exit "$status"
+}
+trap finish 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+printf 'Six-root proof evidence: %s\n' "$fixture"
+
+# Match the canonical bootstrap source selection; never infer CUDA from the host.
+kernel_manifest=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn
+kernel_setting() {
+    awk -v key="$1" '$1 == key ":" { count++; value=$2 }
+        END { if (count != 1 || value == "") exit 1; print value }' "$kernel_manifest"
+}
+canonical_k1=$(kernel_setting k1_policy)
+alternate_k1=$(kernel_setting k1_policy_alternates)
+k1_policy=${k1_policy:-$canonical_k1}
+case "$k1_policy" in "$canonical_k1"|"$alternate_k1") ;; *) echo 'K1 policy is not manifest-pinned' >&2; exit 2 ;; esac
+case "$k1_policy" in
+    llvm) k1_root=src/compositions/kernel_llvm ;;
+    llvm-cranelift) k1_root=src/compositions/kernel_llvm_cranelift ;;
+    *) echo 'unsupported K1 policy' >&2; exit 2 ;;
+esac
+cuda_setting() {
+    awk -v key="$1" '
+        /^compiler_backends:[[:space:]]*$/ { section=1; next }
+        /^[^[:space:]#]/ { section=0; cuda=0 }
+        section && /^  cuda:[[:space:]]*$/ { cuda=1; next }
+        section && /^  [^[:space:]#]/ { cuda=0 }
+        section && cuda && $1 == key ":" { count++; value=$2 }
+        END { if (count != 1 || value == "") exit 1; print value }
+    ' src/compiler/simple.sdn
+}
+cuda_enabled=$(cuda_setting enabled)
+cuda_placement=$(cuda_setting placement)
+case "$cuda_enabled:$cuda_placement" in
+    true:static) cuda_mode=static ;;
+    true:dynamic) cuda_mode=dynamic ;;
+    false:static|false:dynamic) cuda_mode=disabled ;;
+    *) echo 'invalid compiler manifest CUDA selection' >&2; exit 2 ;;
+esac
+cuda_root=src/compositions/cuda_$cuda_mode
+for source_root in "$k1_root" "$cuda_root" src/compiler src/app src/lib src/plugins; do
+    [ "$(CDPATH= cd -- "$source_root" && pwd -P)" = "$repo/$source_root" ] || {
+        echo "noncanonical source root: $source_root" >&2; exit 2;
+    }
+done
+cuda_file=$cuda_root/plugins/backend_registry/selected_cuda_backend.spl
+cuda_template=$cuda_file
+if [ "$cuda_mode" = static ]; then
+    cuda_template=src/plugins/backend_registry/selected_cuda_backend.spl
+fi
+[ ! -L "$cuda_file" ] && [ ! -L "$cuda_template" ]
+cmp "$cuda_file" "$cuda_template"
+{
+    printf 'producer_kind_declared=%s\nproducer=%s\nruntime=%s\njobs=%s\nk1_policy=%s\ncuda_root=%s\n' \
+        "$producer_kind" "$producer" "$runtime" "$jobs" "$k1_policy" "$cuda_root"
+    printf 'source_commit=%s\n' "$(git rev-parse HEAD)"
+} > "$fixture/identity.env"
+shasum -a 256 "$producer" "$kernel_manifest" src/compiler/simple.sdn \
+    "$k1_root/compiler/driver/bootstrap_k1_selected.spl" "$cuda_file" "$cuda_template" \
+    scripts/check/check-focused-six-source-roots.shs \
+    test/fixtures/bootstrap_six_roots/focused_harness.spl > "$fixture/inputs.sha256"
+# Include symlinked archives/providers because compatible runtime directories
+# may be staging views. Hashes record supplied bytes, not an admission claim.
+find -L "$runtime" -type f \( -name '*.a' -o -name '*.so' -o -name '*.dylib' -o -name '*.dll' -o -name '*.lib' \) \
+    -exec shasum -a 256 {} + > "$fixture/runtime.sha256"
+[ -s "$fixture/runtime.sha256" ] || { echo 'no runtime archive/provider found' >&2; exit 2; }
+# The bounded count also applies to downstream native work launched by harness.
+SIMPLE_NATIVE_BUILD_THREADS=$jobs
+SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap
+SIMPLE_KERNEL_K1_POLICY=$k1_policy
+export SIMPLE_NATIVE_BUILD_THREADS SIMPLE_NATIVE_RUNTIME_BUNDLE SIMPLE_KERNEL_K1_POLICY
+for n in 1 2 3 4 5 6 7; do
+    mkdir -p "$fixture/root$n"
+done
+cat > "$fixture/root6/sixth_only.spl" <<'SPL'
+pub fn six_roots_unique_value() -> i64:
+    24681357
+SPL
+cat > "$fixture/main.spl" <<'SPL'
+use sixth_only.{six_roots_unique_value}
+
+fn main():
+    print "six-root-result={six_roots_unique_value()}"
+SPL
+# Compile the actual patched focused closure into a dedicated dispatcher.
+# Only the explicitly declared Rust bootstrap producer uses its native Rust
+# coordinator. Every proof invocation below enters run_focused_native_build
+# and fixed_v2 directly, without these command-local bootstrap overrides.
+set -- native-build --source "$k1_root" --source "$cuda_root" \
+    --source src/compiler --source src/app --source src/lib --source src/plugins \
+    --entry-closure --threads "$jobs" --backend llvm --mode one-binary --runtime-bundle core-c-bootstrap \
+    --entry test/fixtures/bootstrap_six_roots/focused_harness.spl \
+    --runtime-path "$runtime" --output "$fixture/focused-harness"
+printf '%s\n' "$producer" "$@" > "$fixture/harness-build.argv"
+if [ "$producer_kind" = rust-seed-bootstrap-diagnostic ]; then
+    printf '%s\n' SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 \
+        SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NATIVE_BUILD_TRACE=1 > "$fixture/harness-build.env"
+    SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 \
+        SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NATIVE_BUILD_TRACE=1 "$producer" "$@"
+else
+    : > "$fixture/harness-build.env"
+    "$producer" "$@"
+fi > "$fixture/harness-build.log" 2>&1 || { cat "$fixture/harness-build.log"; exit 1; }
+# The unique helper has no copy in the entry directory or first five roots.
+"$fixture/focused-harness" native-build --runtime-path "$runtime" --source "$fixture/root1" --source "$fixture/root2" \
+    --source "$fixture/root3" --source "$fixture/root4" --source "$fixture/root5" \
+    --source "$fixture/root6" --entry "$fixture/main.spl" --output "$fixture/six" \
+    > "$fixture/six.log" 2>&1 || { cat "$fixture/six.log"; exit 1; }
+"$fixture/six" > "$fixture/six-run.log" 2>&1
+actual=$(cat "$fixture/six-run.log")
+[ "$actual" = "six-root-result=24681357" ]
+if "$fixture/focused-harness" native-build --runtime-path "$runtime" --source "$fixture/root1" --source "$fixture/root2" \
+    --source "$fixture/root3" --source "$fixture/root4" --source "$fixture/root5" \
+    --entry "$fixture/main.spl" --output "$fixture/missing" > "$fixture/missing.log" 2>&1; then
+    echo "FAIL: omitting the only helper root unexpectedly compiled" >&2
+    exit 1
+else
+    missing_status=$?
+fi
+# A crash, unrelated compiler error or ambient resolution is not a valid control.
+[ "$missing_status" -eq 1 ]
+rg -qi "(unresolved|not found|no source file).*sixth_only|sixth_only.*(unresolved|not found|no source file)|missing module surface for sixth_only$" "$fixture/missing.log"
+[ ! -e "$fixture/missing" ]
+if "$fixture/focused-harness" native-build --runtime-path "$runtime" --source "$fixture/root1" --source "$fixture/root2" \
+    --source "$fixture/root3" --source "$fixture/root4" --source "$fixture/root5" \
+    --source "$fixture/root6" --source "$fixture/root7" --entry "$fixture/main.spl" \
+    --output "$fixture/seven" > "$fixture/seven.log" 2>&1; then
+    echo "FAIL: seven focused source roots unexpectedly compiled" >&2
+    exit 1
+else
+    seven_status=$?
+fi
+[ "$seven_status" -eq 1 ]
+[ ! -e "$fixture/seven" ]
+rg -q 'at most six --source roots' "$fixture/seven.log"
+# Exercise the compatibility symbol with the sole helper in its fifth root.
+SIMPLE_RUNTIME_PATH="$runtime" "$fixture/focused-harness" --legacy-five \
+    "$fixture/root1" "$fixture/root2" "$fixture/root3" "$fixture/root4" \
+    "$fixture/root6" "$fixture/main.spl" "$fixture/legacy-five" \
+    > "$fixture/legacy-five.log" 2>&1 || { cat "$fixture/legacy-five.log"; exit 1; }
+"$fixture/legacy-five" > "$fixture/legacy-five-run.log" 2>&1
+actual=$(cat "$fixture/legacy-five-run.log")
+[ "$actual" = "six-root-result=24681357" ]
+echo 'PASS: focused sixth-root helper executed; omission and seventh root rejected; legacy five-root API executed'

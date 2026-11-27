@@ -504,3 +504,7 @@ Census-only record ("individual class-(ii) items to be filed/fixed
 per lane") -- an enumeration of a vacuity family, not a single
 localized bug. Leaving OPEN, out of this lane's per-item scope.
 
+
+## Triage 2026-11-04 (c28-w4)
+
+Triage 2026-11-04: of the two seed instances, should_keep_selective_export is gone (fixed) while eval_get_warnings (src/compiler/10.frontend/core/interpreter/eval.spl:295) still exists with test callers only (eval_clear_warnings_spec, match_fallthrough_diagnostic_spec). The 197-function census is a floor and its class-(ii) items remain unfiled; this stays a tracking row. QUESTION: file one row per class-(ii) item or delete the census and rely on a lint rule?

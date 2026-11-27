@@ -5,7 +5,9 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-18
-**Status:** OPEN — perf finding, no fix attempted here
+**Status:** SUPERSEDED 2026-11-11 (lane p3fix-comp6-20261111) — codegen lane cleared of
+the defect (lib+runtime fix merged at tip; ratchet PASS on Windows seed); lib/runtime
+residuals tracked by their own lanes (see addenda)
 **Binary used:** `bin/release/x86_64-unknown-linux-gnu/simple` (Rust bootstrap
 seed — printed `WARNING: this Rust-built Simple binary is a bootstrap seed
 only`), 59620392 bytes, mtime 2026-08-18 01:08:42. `readlink -f bin/simple`
@@ -474,3 +476,72 @@ additionally checks 12 join/bytes cases through the new fast paths
   to copy; a census of other `parts.push(char_*)`-then-`join` loops has not
   been done.
 
+
+
+---
+
+## 2026-11-10 (p3-compiler lane, rows 1-8, Windows worktree, seed-smoke) — SUPERSEDED FOR THE COMPILER LANE
+
+Lane: `work/p3-compiler-20261110` on `origin/release/1.0.0` (base `dfc7da8523f4`).
+Runtime: worktree Rust seed `bin/simple.exe` (built 2026-11-10). Seed-smoke only.
+
+**Disposition: SUPERSEDED for the compiler lane.** The 2026-09-06 re-measurement's
+conclusion stands and is now confirmed on this host: the codegen lane is not the defect.
+The lib+runtime fix (per-element boxed round-trips removed; `base64.spl` accumulates
+`[u8]` and converts once) is merged on base, and the wired ratchet passes on the Windows
+seed:
+
+`sh scripts/check/check-base64url-codegen-lane-perf.shs` →
+`PASS — 100 vector(s) KAT-verified, ratio 20.1x under ceiling 60x` (same envelope as the
+recorded 17.6x aarch64 measurement; correctness KAT asserted before timing).
+
+Remaining OPEN items named by this record are all outside `src/compiler` (this lane's
+scope): utf8_validate `u64`-window ASCII fast path and base64 decode single-pass
+(`src/lib/common/base_encoding/utilities.spl`, `base64.spl`), `char_from_code` census,
+and `rt_array_join`'s quadratic (`src/runtime`) — these belong to the lib/runtime lanes.
+C-MIG-0019 time_utils was already debunked in-record as a measurement artifact.
+
+
+---
+
+## 2026-11-11 (lane p3fix-comp6-20261111) — Status flipped SUPERSEDED
+
+Independent re-verification on this lane's fresh worktree (Windows Git
+Bash, base `bf946163122f`, tracked seed `bin/simple.exe`):
+
+`sh scripts/check/check-base64url-codegen-lane-perf.shs` →
+**`PASS — 100 vector(s) KAT-verified, ratio 7.5x under ceiling 60x
+(c_us=46635 simple_us=350083)`** — an improvement on the 20.1x the
+2026-11-10 lane recorded, still with the encode+decode KAT asserted
+before timing. Absorber: the 2026-09-06 lib+runtime fix (`9e5671ad32d`
+lineage) merged on release/1.0.0. The record's remaining named items
+(utf8_validate `u64`-window fast path, base64 decode single-pass,
+`char_from_code` census, `rt_array_join` quadratic) are lib/runtime-lane
+scope, not compiler; C-MIG-0019 time_utils was debunked in-record as a
+measurement artifact. Status line flipped from OPEN.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane p3fix-comp6-20261111's SUPERSEDED verdict (codegen lane
+cleared of the >2x C-oracle residuals; method correction recorded there). No
+independent re-measurement in this lane (perf-harness rerun exceeds the
+per-bug timebox).
+
+---
+
+## 2026-11-26 (Linux x86_64, Lane 1) — Single-pass `base64url_decode` + `bug_db.sdn` sync to `fixed`
+
+- Collapsed `base64url_decode` in `src/lib/common/base_encoding/base64.spl` from
+  3 passes (rewrite `-`/`_` + re-pad + `_bytes_to_text` + `base64_decode`) to a
+  single pass sharing `_base64_decode_bytes_impl(encoded, url_safe)` with
+  `base64_decode_bytes`.
+- Added single-pass lenient `base64url_decode` edge-case assertions (empty,
+  2-char/3-char tails, whitespace, `-`/`_`, `+`/`/`) in
+  `test/01_unit/lib/common/base_encoding/base64/base64_spec.spl`.
+- Verification on Linux x86_64 (bootstrap binary):
+  - `test/01_unit/lib/common/base_encoding/base64/` (`--mode=interpreter`): **53/53 PASS** (23+11+9+10)
+  - Full `test/01_unit/lib/common/base_encoding/` (`--mode=interpreter`, prior to adding the 1 extra spec block): **126/126 PASS**
+  - `SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1 ... test/05_perf/lib/base64url_codegen_lane_perf.spl`:
+    `KAT OK: 100/100 vectors match (encode+decode)`,
+    `c_us=78201 simple_us=599592` (**7.67x** under 60x ceiling; `simple_us` improved from 812684 before the decode refactor).
+- `bug_db.sdn` status synced from `open` to `fixed`.

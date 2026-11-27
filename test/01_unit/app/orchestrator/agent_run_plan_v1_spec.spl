@@ -1,0 +1,231 @@
+# Offline authoring regressions. Genuine probe and workspace qualification
+# remains with the native Host acceptance suite.
+use std.spec.{describe, it, expect, step}
+use app.orchestrator.agent_run_plan_v1.{LinuxAgentRunPlanV1, linux_agent_run_plan_v1, agent_run_plan_command_v1}
+use app.orchestrator.agent_run_admission_v1.{LinuxAgentAdmissionFactsV1, linux_agent_admission_v1,
+    linux_agent_prepare_wire_v1, linux_agent_prepared_v1, linux_agent_execute_wire_v1, linux_agent_admitted_invocation_v1}
+use app.orchestrator.controller_authority_issue_v1.ControllerIssuedAuthorityV1
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2}
+use std.common.contracts.container.execution_draft_v3.container_execution_draft_bind_v3
+use std.common.contracts.distributed_control_v2.{ExecutionEnvironmentV2, ExecutionGrantV2, OperationEnvelopeV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_grant_digest_v2, distributed_encode_operation_v2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_authority_codec_v2.distributed_signature_from_hex_v2
+use std.common.contracts.orchestration.host_controller_status_v3.HostControllerStatusV3
+use std.common.contracts.orchestration.host_prepare_associated_v3.host_prepare_associated_decode_v3
+use std.common.contracts.orchestration.host_reservation_codec_v1.{host_reservation_encode_intent_v1, host_reservation_receipt_v1}
+use std.common.contracts.orchestration.host_execution_association_v3.{HostPreparedAssociatedReplyV3, HostExecutionAssociationV3,
+    host_prepared_associated_reply_encode_v3}
+use std.common.contracts.orchestration.host_execute_associated_v3.host_execute_associated_decode_v3
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.value.SdnValue
+use std.common.contracts.container.agent_workspace_manifest_v1.{agent_workspace_manifest_decode_v1, agent_workspace_manifest_encode_v1}
+use std.common.contracts.container.agent_executable_profile_v1.AgentExecutableProfileV1
+use std.common.contracts.container.linux_agent_workspace_profile_v1.LinuxAgentWorkspaceProfileV1
+use std.common.contracts.container.linux_agent_workspace_profile_v2.{LinuxAgentWorkspaceProfileV2,
+    linux_agent_workspace_layout_digest_v2, linux_agent_workspace_profile_encode_v2}
+use std.common.contracts.orchestration.agent_workspace_invocation_v2.{AgentWorkspaceInvocationManifestV2,
+    agent_workspace_invocation_manifest_encode_v2, agent_workspace_invocation_manifest_decode_v2}
+use std.common.crypto.sha256.sha256_text
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.{linux_oci_retained_request_decode_v1,
+    linux_oci_retained_request_encode_v1}
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.host_agent_invoke_request_decode_v4
+use test.fixtures.orchestration.agent_workspace_invocation_fixture_v1.agent_workspace_invocation_fixture_v1
+
+fn agent_run_plan_fixture_v1() -> (LinuxOciRequestV1, text, text, [text]):
+    var manifest = agent_workspace_invocation_fixture_v1().packet.manifest
+    var workspace = agent_workspace_manifest_decode_v1(manifest.workspace_manifest).unwrap()
+    val base = LinuxAgentWorkspaceProfileV1(machine_policy_digest: "1".repeat(64), workspace_profile_digest: "2".repeat(64),
+        assets_root: "/srv/agent-assets", repository_ref: workspace.repository_ref, revision_oid: workspace.revision_oid,
+        object_format: workspace.object_format, source_manifest_digest: workspace.source_manifest_digest,
+        bootstrap_digest: workspace.bootstrap_digest, git_digest: workspace.git_digest, agent_digest: workspace.agent_digest,
+        bootstrap_program: "/opt/simple/bootstrap", image: "example@sha256:" + "7".repeat(64),
+        agent_program: manifest.inner_argv[0], image_config_id: manifest.image_config_id)
+    val executable = AgentExecutableProfileV1(architecture: "linux-aarch64", image_size_bytes: 290069784,
+        max_image_bytes: 536870912, bootstrap_memory_bytes: 402653184, agent_memory_bytes: 268435456)
+    val profile = LinuxAgentWorkspaceProfileV2(base: base, executable_profile: executable,
+        bootstrap_profile: "linux-agent-worktree-bootstrap-v1", approved_layout: "reserved-workspace-immutable-assets-v1",
+        approved_layout_digest: linux_agent_workspace_layout_digest_v2(base, executable).unwrap())
+    val profile_bytes = linux_agent_workspace_profile_encode_v2(profile).unwrap()
+    workspace.profile_digest = sha256_text(profile_bytes)
+    manifest.workspace_manifest = agent_workspace_manifest_encode_v1(workspace).unwrap()
+    val native_manifest = AgentWorkspaceInvocationManifestV2(base: manifest, executable_profile: executable)
+    val request = LinuxOciRequestV1(pod_uid: manifest.desired.workload_uid, attempt: manifest.task_use.attempt,
+        operation_id: manifest.operation_id, image: base.image, bundle_path: "", command: [base.bootstrap_program],
+        args: [], timeout_ms: manifest.workload_duration_ms, cpu_limit_millis: 1000, memory_limit_bytes: 1073741824,
+        pid_limit: 64, network_policy: "none", filesystem_policy: "read-only", replace_entrypoint: true)
+    (request, agent_workspace_invocation_manifest_encode_v2(native_manifest).unwrap(), profile_bytes,
+        ["a".repeat(64), "b".repeat(64), "c".repeat(64), "d".repeat(64), "e".repeat(64)])
+
+describe "Linux V4 agent run plan authoring":
+    it "derives exact native bootstrap arguments and both interactive draft pins":
+        step("Build a candidate from the exact manifest, approved profile and ordered probe transcript pins")
+        val (request, manifest, profile, probes) = agent_run_plan_fixture_v1()
+        val source = linux_oci_retained_request_encode_v1(request).unwrap()
+        val plan = linux_agent_run_plan_v1(source, manifest, profile, probes).unwrap()
+        val native = linux_oci_retained_request_decode_v1(plan.draft.request_bytes).unwrap()
+        val invocation = host_agent_invoke_request_decode_v4(plan.invocation).unwrap()
+        expect(invocation.operation_id).to_equal(request.operation_id)
+        expect(invocation.manifest).to_equal(manifest)
+        expect(native.args).to_equal(["--invocation-manifest-sha256", sha256_text(manifest)])
+        expect(plan.draft.request_digest).to_equal(linux_oci_request_digest_v1(native).unwrap())
+        expect(plan.draft.agent_invocation_manifest_digest).to_equal(sha256_text(manifest))
+        expect(plan.draft.remote_build_task_digest).to_equal("")
+        val reordered = [probes[1], probes[0], probes[2], probes[3], probes[4]]
+        val other = linux_agent_run_plan_v1(source, manifest, profile, reordered).unwrap()
+        expect(other.draft.agent_probe_list_digest == plan.draft.agent_probe_list_digest).to_equal(false)
+
+    it "refuses input drift and an incomplete expected provider probe set":
+        val (request, manifest, profile, probes) = agent_run_plan_fixture_v1()
+        val source = linux_oci_retained_request_encode_v1(request).unwrap()
+        expect(linux_agent_run_plan_v1(source, manifest, profile, ["a".repeat(64)]).unwrap_err()).to_equal(
+            "provider-profiled-probe-set-incomplete")
+        var changed = request
+        changed.attempt = changed.attempt + 1
+        expect(linux_agent_run_plan_v1(linux_oci_retained_request_encode_v1(changed).unwrap(), manifest, profile, probes).unwrap_err()).to_equal(
+            "agent-run-workload-binding")
+        changed = request
+        changed.args = ["unexpected"]
+        expect(linux_agent_run_plan_v1(linux_oci_retained_request_encode_v1(changed).unwrap(), manifest, profile, probes).unwrap_err()).to_equal(
+            "agent-run-bootstrap-template")
+        expect(agent_run_plan_command_v1(["agent-run-plan"]).exit_code).to_equal(2)
+
+fn agent_admission_fixture_v1() -> (LinuxAgentRunPlanV1, HostControllerStatusV3, ContainerHostScopeV2,
+        LinuxAgentAdmissionFactsV1, text, [text]):
+    val (template, manifest_source, profile, probes) = agent_run_plan_fixture_v1()
+    var request = template
+    request.timeout_ms = 1000
+    val native_scope = ContainerHostScopeV2(physical_host_id: "host-a", service_scope_id: "epoch-" + "4".repeat(64),
+        boot_id: "boot-a", provider_generation: 3, native_machine_id: "machine-a",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot-a")
+    var manifest = agent_workspace_invocation_manifest_decode_v2(manifest_source).unwrap()
+    manifest.base.task_use.host_scope_digest = sha256_text(container_host_scope_bytes_v2(native_scope).unwrap())
+    manifest.base.not_after = 30000
+    manifest.base.workload_duration_ms = 10000
+    val source = agent_workspace_invocation_manifest_encode_v2(manifest).unwrap()
+    val plan = linux_agent_run_plan_v1(linux_oci_retained_request_encode_v1(request).unwrap(), source, profile, probes).unwrap()
+    val scope = ContainerHostScopeV2(physical_host_id: native_scope.physical_host_id, service_scope_id: "service-a",
+        boot_id: "", provider_generation: native_scope.provider_generation, native_machine_id: native_scope.native_machine_id,
+        continuity_mode: "service-incarnation-v1", continuity_id: "incarnation-a")
+    val status = HostControllerStatusV3(scope: scope, backend: "linux-service", authority_id: "host-" + "1".repeat(64),
+        enrollment_digest: "1".repeat(64), provider_identity_digest: "2".repeat(64), revision: 8,
+        cpu_millis: 4000, memory_bytes: 4294967296, available_cpu_millis: 4000,
+        available_memory_bytes: 4294967296, retained_reservations: 0, ready: true)
+    val environment = ExecutionEnvironmentV2(host_id: scope.physical_host_id, execution_platform: "linux-aarch64",
+        target_platform: "linux-aarch64", test_runtime: "native", isolation_class: "native-container",
+        toolchain_digest: "1".repeat(64), sdk_digest: "2".repeat(64), abi: "gnu", isa: "aarch64", optimization: "release")
+    val facts = LinuxAgentAdmissionFactsV1(controller_id: "controller", principal: "agent-user", project: "simple",
+        environment: environment, policy_revision: 4, revocation_epoch: 2, session_generation: 3,
+        grant_id: "agent-grant", reservation_nonce: "b".repeat(64), prepare_deadline_ms: 5000)
+    (plan, status, native_scope, facts, profile, probes)
+
+# This fixture supplies proof wire data and exercises its bindings only. The
+# Controller's installed signer and the Host verification are separate owners.
+fn agent_admission_pair_v1(grant: ExecutionGrantV2, operation: OperationEnvelopeV2,
+        digit: text = "a") -> ControllerIssuedAuthorityV1:
+    val signature = distributed_signature_from_hex_v2(digit.repeat(128)).unwrap()
+    val signed = DistributedSignedGrantV2(grant: grant, issuer_id: "controller", key_revision: 1, signature: signature)
+    val approval = DistributedSignedApprovalV2(approver_id: "approver", key_revision: 1,
+        grant_digest: distributed_grant_digest_v2(grant).unwrap(),
+        request_digest: sha256_text(distributed_encode_operation_v2(operation).unwrap()),
+        policy_revision: operation.policy_revision, session_generation: operation.session_generation,
+        expires_at: grant.expires_at, signature: signature)
+    ControllerIssuedAuthorityV1(signed, approval)
+
+fn agent_admission_prepare_reply_v1(wire: text, native_scope: ContainerHostScopeV2) -> text:
+    val prepare = host_prepare_associated_decode_v3(wire).unwrap()
+    val receipt = host_reservation_receipt_v1(prepare.prepare.intent, prepare.prepare.operation).unwrap()
+    val association = HostExecutionAssociationV3(enrollment_digest: "1".repeat(64), service_scope: prepare.service_scope,
+        intent_digest: sha256_text(host_reservation_encode_intent_v1(prepare.prepare.intent).unwrap()),
+        prepared_receipt_digest: receipt.receipt_digest, prepared_revision: receipt.prepared_revision,
+        epoch_record_digest: "4".repeat(64), service_process_identity_digest: "5".repeat(64),
+        execution: container_execution_draft_bind_v3(prepare.draft, native_scope).unwrap(), readonly_rootfs: true,
+        agent_invocation_manifest_digest: prepare.draft.agent_invocation_manifest_digest,
+        agent_probe_list_digest: prepare.draft.agent_probe_list_digest)
+    host_prepared_associated_reply_encode_v3(HostPreparedAssociatedReplyV3(prepare, receipt, association)).unwrap()
+
+fn agent_admission_execute_reply_v1(operation_id: text, association_digest: text) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-execution-admission"),
+        "operationId": SdnValue.String(operation_id), "associationDigest": SdnValue.String(association_digest),
+        "state": SdnValue.String("execution-admitted"), "pending": SdnValue.Bool(true)}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+describe "Linux interactive Controller admission composition":
+    it "binds reservation and execute to the exact service observation and native association":
+        step("Compose the Controller reservation from the exact profile, probes and two scopes")
+        val (plan, status, native_scope, facts, profile, probes) = agent_admission_fixture_v1()
+        val admitted = linux_agent_admission_v1(plan, status, native_scope, facts, profile, probes, 100).unwrap()
+        expect(admitted.reservation.fence.revision).to_equal(status.revision)
+        expect(admitted.reservation.reservation.service_scope_id).to_equal(status.scope.service_scope_id)
+        expect(admitted.reservation.reservation.cpu_millis).to_equal(1000)
+        expect(admitted.operation.memory_bytes).to_equal(1073741824)
+        expect(admitted.operation.duration_ms).to_equal(10000)
+        expect(admitted.grant.operations).to_equal(["host_reservation_v1", "host_execute_associated_v3"])
+        val reserved = agent_admission_pair_v1(admitted.grant, admitted.operation)
+        val prepare = linux_agent_prepare_wire_v1(admitted, reserved).unwrap()
+
+        step("Carry the exact prepared receipt into the execute and check its admission")
+        val prepared = linux_agent_prepared_v1(admitted, reserved, agent_admission_prepare_reply_v1(prepare, native_scope), 200).unwrap()
+        val signed = agent_admission_pair_v1(admitted.grant, prepared.operation)
+        val execute = linux_agent_execute_wire_v1(prepared, signed, 300).unwrap()
+        val decoded = host_execute_associated_decode_v3(execute.execute_wire).unwrap()
+        expect(decoded.operation.payload_digest).to_equal(execute.association_digest)
+        expect(decoded.association.agent_invocation_manifest_digest).to_equal(plan.draft.agent_invocation_manifest_digest)
+        expect(decoded.association.agent_probe_list_digest).to_equal(plan.draft.agent_probe_list_digest)
+        expect(linux_agent_admitted_invocation_v1(execute,
+            agent_admission_execute_reply_v1(execute.operation_id, execute.association_digest)).unwrap()).to_equal(plan.invocation)
+        expect(linux_agent_admitted_invocation_v1(execute,
+            agent_admission_execute_reply_v1(execute.operation_id, "b".repeat(64))).unwrap_err()).to_equal("remote-run-execute-reply-association")
+
+    it "refuses stale readiness, task-use scope drift, changed probes and insufficient capacity":
+        val (plan, status, native_scope, facts, profile, probes) = agent_admission_fixture_v1()
+        var changed_status = status
+        changed_status.ready = false
+        expect(linux_agent_admission_v1(plan, changed_status, native_scope, facts, profile, probes, 100).unwrap_err()).to_equal(
+            "agent-admission-linux-host-not-ready")
+        changed_status = status
+        changed_status.available_cpu_millis = 999
+        expect(linux_agent_admission_v1(plan, changed_status, native_scope, facts, profile, probes, 100).unwrap_err()).to_equal(
+            "agent-admission-host-capacity")
+        var different_scope = native_scope
+        different_scope.provider_generation = 4
+        expect(linux_agent_admission_v1(plan, status, different_scope, facts, profile, probes, 100).unwrap_err()).to_equal(
+            "agent-admission-host-scope")
+        different_scope = native_scope
+        different_scope.boot_id = "boot-b"
+        different_scope.continuity_id = "boot-b"
+        expect(linux_agent_admission_v1(plan, status, different_scope, facts, profile, probes, 100).unwrap_err()).to_equal(
+            "agent-admission-task-use-scope")
+        expect(linux_agent_admission_v1(plan, status, native_scope, facts, profile,
+            [probes[1], probes[0], probes[2], probes[3], probes[4]], 100).unwrap_err()).to_equal("agent-admission-plan-drift")
+
+    it "requires enough signed duration for the ordered probes and the agent":
+        val (plan, status, native_scope, facts, profile, probes) = agent_admission_fixture_v1()
+        val invocation = host_agent_invoke_request_decode_v4(plan.invocation).unwrap()
+        var template = linux_oci_retained_request_decode_v1(plan.draft.request_bytes).unwrap()
+        template.args = []
+        template.timeout_ms = 2000
+        val changed = linux_agent_run_plan_v1(linux_oci_retained_request_encode_v1(template).unwrap(),
+            invocation.manifest, profile, probes).unwrap()
+        expect(linux_agent_admission_v1(changed, status, native_scope, facts, profile, probes, 100).unwrap_err()).to_equal(
+            "agent-admission-probe-duration")
+
+    it "refuses a different prepare echo, native association, proof or elapsed window":
+        val (plan, status, native_scope, facts, profile, probes) = agent_admission_fixture_v1()
+        val admitted = linux_agent_admission_v1(plan, status, native_scope, facts, profile, probes, 100).unwrap()
+        val reserved = agent_admission_pair_v1(admitted.grant, admitted.operation)
+        val prepare = linux_agent_prepare_wire_v1(admitted, reserved).unwrap()
+        val alternate = agent_admission_pair_v1(admitted.grant, admitted.operation, "b")
+        val other_prepare = linux_agent_prepare_wire_v1(admitted, alternate).unwrap()
+        expect(linux_agent_prepared_v1(admitted, reserved, agent_admission_prepare_reply_v1(other_prepare, native_scope), 200).unwrap_err()).to_equal(
+            "agent-admission-prepare-echo")
+        var different_scope = native_scope
+        different_scope.provider_generation = 4
+        expect(linux_agent_prepared_v1(admitted, reserved, agent_admission_prepare_reply_v1(prepare, different_scope), 200).unwrap_err()).to_equal(
+            "agent-admission-native-association")
+        val reply = agent_admission_prepare_reply_v1(prepare, native_scope)
+        val prepared = linux_agent_prepared_v1(admitted, reserved, reply, 200).unwrap()
+        expect(linux_agent_execute_wire_v1(prepared, reserved, 300).unwrap_err()).to_equal("agent-admission-proof-binding")
+        val signed = agent_admission_pair_v1(admitted.grant, prepared.operation)
+        expect(linux_agent_execute_wire_v1(prepared, signed, 5000).unwrap_err()).to_equal("agent-admission-window")

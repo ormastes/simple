@@ -40,7 +40,7 @@ extern fn rt_simd_has_rvv() -> bool
 @unsafe(reason: "raw target SIMD profile-discriminant ABI", capabilities: [ffi])
 extern fn rt_simd_detect_profile() -> i64
 @unsafe(reason: "raw runtime-owned SIMD profile text ABI", capabilities: [ffi])
-extern fn rt_simd_profile_name() -> text
+extern fn rt_simd_profile_name() -> text?
 
 # Bulk array copy — SIMD workaround for SplValue slot layout (bug_simd_bulk_copy_blocked_by_spl_array_layout).
 # Copies `count` i64 elements from `src` into `dst` at the runtime level.
@@ -58,7 +58,8 @@ enum SimdTier:
     riscv64_rvv
     wasm128
 
-fn detect_profile() -> SimdTier:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in detect_profile", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn detect_profile() -> SimdTier:
     """Detect the canonical SIMD tier for the current host."""
     unsafe(capabilities: [ffi]):
         match rt_simd_detect_profile():
@@ -73,38 +74,49 @@ fn detect_profile() -> SimdTier:
             case 8: SimdTier.wasm128
             case _: panic("invalid rt_simd_detect_profile discriminant")
 
-fn profile_name() -> text:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in profile_name", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn profile_name() -> text:
     """Get the canonical SIMD tier name for the current host."""
-    unsafe(capabilities: [ffi]):
+    val name = unsafe(capabilities: [ffi]):
         rt_simd_profile_name()
+    if val tier = name:
+        return tier
+    # absent: the bridge produced no name; "unknown" is not a SimdTier name,
+    # so it cannot be mistaken for a detected tier (same contract as simd/profile.spl).
+    "unknown"
 
-fn has_sse() -> bool:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in has_sse", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn has_sse() -> bool:
     """Check if SSE (128-bit) is available."""
     unsafe(capabilities: [ffi]):
         rt_simd_has_sse()
 
-fn has_avx() -> bool:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in has_avx", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn has_avx() -> bool:
     """Check if AVX (256-bit) is available."""
     unsafe(capabilities: [ffi]):
         rt_simd_has_avx()
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in has_avx2", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
-fn has_avx2() -> bool:
+pub fn has_avx2() -> bool:
     """Check if AVX2 (256-bit integer) is available."""
     unsafe(capabilities: [ffi]):
         rt_simd_has_avx2()
 
-fn has_neon() -> bool:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in has_neon", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn has_neon() -> bool:
     """Check if ARM NEON (128-bit) is available."""
     unsafe(capabilities: [ffi]):
         rt_simd_has_neon()
 
-fn has_rvv() -> bool:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in has_rvv", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn has_rvv() -> bool:
     """Check if RISC-V vector support is available."""
     unsafe(capabilities: [ffi]):
         rt_simd_has_rvv()
 
-fn simd_width() -> i64:
+pub fn simd_width() -> i64:
     """Get maximum SIMD width in bits (128, 256, or 512)."""
     match detect_profile():
         case SimdTier.x86_64_avx512: 512
@@ -160,6 +172,18 @@ impl Vec4f:
         """Convert to array."""
         [self.x, self.y, self.z, self.w]
 
+    fn lane(index: i64) -> f32:
+        """Return lane `index` (0-3), panicking if out of bounds."""
+        if index == 0:
+            return self.x
+        if index == 1:
+            return self.y
+        if index == 2:
+            return self.z
+        if index == 3:
+            return self.w
+        panic("Vec4f.lane: index out of bounds")
+
 """
 8-element f32 vector (256-bit AVX register).
 Maps to __m256 (x86). Falls back to 2x Vec4f on ARM.
@@ -200,6 +224,26 @@ impl Vec8f:
         """Convert to array."""
         [self.e0, self.e1, self.e2, self.e3, self.e4, self.e5, self.e6, self.e7]
 
+    fn lane(index: i64) -> f32:
+        """Return lane `index` (0-7), panicking if out of bounds."""
+        if index == 0:
+            return self.e0
+        if index == 1:
+            return self.e1
+        if index == 2:
+            return self.e2
+        if index == 3:
+            return self.e3
+        if index == 4:
+            return self.e4
+        if index == 5:
+            return self.e5
+        if index == 6:
+            return self.e6
+        if index == 7:
+            return self.e7
+        panic("Vec8f.lane: index out of bounds")
+
 """
 4-element f64 vector (256-bit AVX register).
 Maps to __m256d (x86). Falls back to 2x Vec2d on ARM.
@@ -227,6 +271,18 @@ impl Vec4d:
         """Convert to array."""
         [self.x, self.y, self.z, self.w]
 
+    fn lane(index: i64) -> f64:
+        """Return lane `index` (0-3), panicking if out of bounds."""
+        if index == 0:
+            return self.x
+        if index == 1:
+            return self.y
+        if index == 2:
+            return self.z
+        if index == 3:
+            return self.w
+        panic("Vec4d.lane: index out of bounds")
+
 """
 4-element i32 vector (128-bit SSE/NEON register).
 Maps to __m128i (x86) or int32x4_t (ARM).
@@ -253,6 +309,18 @@ impl Vec4i:
     fn to_array() -> [i32]:
         """Convert to array."""
         [self.x, self.y, self.z, self.w]
+
+    fn lane(index: i64) -> i32:
+        """Return lane `index` (0-3), panicking if out of bounds."""
+        if index == 0:
+            return self.x
+        if index == 1:
+            return self.y
+        if index == 2:
+            return self.z
+        if index == 3:
+            return self.w
+        panic("Vec4i.lane: index out of bounds")
 
 """
 8-element i32 vector (256-bit AVX2 register).
@@ -294,6 +362,26 @@ impl Vec8i:
         """Convert to array."""
         [self.e0, self.e1, self.e2, self.e3, self.e4, self.e5, self.e6, self.e7]
 
+    fn lane(index: i64) -> i32:
+        """Return lane `index` (0-7), panicking if out of bounds."""
+        if index == 0:
+            return self.e0
+        if index == 1:
+            return self.e1
+        if index == 2:
+            return self.e2
+        if index == 3:
+            return self.e3
+        if index == 4:
+            return self.e4
+        if index == 5:
+            return self.e5
+        if index == 6:
+            return self.e6
+        if index == 7:
+            return self.e7
+        panic("Vec8i.lane: index out of bounds")
+
 # ============================================================================
 # f32x4 Intrinsics (128-bit)
 # ============================================================================
@@ -309,27 +397,32 @@ extern fn rt_simd_div_f32x4(a: Vec4f, b: Vec4f) -> Vec4f
 @unsafe(reason: "raw f32x4 fused-operation ABI", capabilities: [ffi])
 extern fn rt_simd_fma_f32x4(a: Vec4f, b: Vec4f, c: Vec4f) -> Vec4f
 
-fn simd_add_f32x4(a: Vec4f, b: Vec4f) -> Vec4f:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_add_f32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_add_f32x4(a: Vec4f, b: Vec4f) -> Vec4f:
     """Add two f32x4 vectors: a + b."""
     unsafe(capabilities: [ffi]):
         rt_simd_add_f32x4(a, b)
 
-fn simd_sub_f32x4(a: Vec4f, b: Vec4f) -> Vec4f:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_sub_f32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_sub_f32x4(a: Vec4f, b: Vec4f) -> Vec4f:
     """Subtract two f32x4 vectors: a - b."""
     unsafe(capabilities: [ffi]):
         rt_simd_sub_f32x4(a, b)
 
-fn simd_mul_f32x4(a: Vec4f, b: Vec4f) -> Vec4f:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_mul_f32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_mul_f32x4(a: Vec4f, b: Vec4f) -> Vec4f:
     """Multiply two f32x4 vectors (element-wise): a * b."""
     unsafe(capabilities: [ffi]):
         rt_simd_mul_f32x4(a, b)
 
-fn simd_div_f32x4(a: Vec4f, b: Vec4f) -> Vec4f:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_div_f32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_div_f32x4(a: Vec4f, b: Vec4f) -> Vec4f:
     """Divide two f32x4 vectors (element-wise): a / b."""
     unsafe(capabilities: [ffi]):
         rt_simd_div_f32x4(a, b)
 
-fn simd_fma_f32x4(a: Vec4f, b: Vec4f, c: Vec4f) -> Vec4f:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_fma_f32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_fma_f32x4(a: Vec4f, b: Vec4f, c: Vec4f) -> Vec4f:
     """Fused multiply-add: a * b + c (single rounding)."""
     unsafe(capabilities: [ffi]):
         rt_simd_fma_f32x4(a, b, c)
@@ -349,27 +442,32 @@ extern fn rt_simd_div_f32x8(a: Vec8f, b: Vec8f) -> Vec8f
 @unsafe(reason: "raw f32x8 fused-operation ABI", capabilities: [ffi])
 extern fn rt_simd_fma_f32x8(a: Vec8f, b: Vec8f, c: Vec8f) -> Vec8f
 
-fn simd_add_f32x8(a: Vec8f, b: Vec8f) -> Vec8f:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_add_f32x8", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_add_f32x8(a: Vec8f, b: Vec8f) -> Vec8f:
     """Add two f32x8 vectors: a + b."""
     unsafe(capabilities: [ffi]):
         rt_simd_add_f32x8(a, b)
 
-fn simd_sub_f32x8(a: Vec8f, b: Vec8f) -> Vec8f:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_sub_f32x8", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_sub_f32x8(a: Vec8f, b: Vec8f) -> Vec8f:
     """Subtract two f32x8 vectors: a - b."""
     unsafe(capabilities: [ffi]):
         rt_simd_sub_f32x8(a, b)
 
-fn simd_mul_f32x8(a: Vec8f, b: Vec8f) -> Vec8f:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_mul_f32x8", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_mul_f32x8(a: Vec8f, b: Vec8f) -> Vec8f:
     """Multiply two f32x8 vectors (element-wise): a * b."""
     unsafe(capabilities: [ffi]):
         rt_simd_mul_f32x8(a, b)
 
-fn simd_div_f32x8(a: Vec8f, b: Vec8f) -> Vec8f:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_div_f32x8", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_div_f32x8(a: Vec8f, b: Vec8f) -> Vec8f:
     """Divide two f32x8 vectors (element-wise): a / b."""
     unsafe(capabilities: [ffi]):
         rt_simd_div_f32x8(a, b)
 
-fn simd_fma_f32x8(a: Vec8f, b: Vec8f, c: Vec8f) -> Vec8f:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_fma_f32x8", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_fma_f32x8(a: Vec8f, b: Vec8f, c: Vec8f) -> Vec8f:
     """Fused multiply-add: a * b + c (single rounding)."""
     unsafe(capabilities: [ffi]):
         rt_simd_fma_f32x8(a, b, c)
@@ -389,27 +487,32 @@ extern fn rt_simd_div_f64x4(a: Vec4d, b: Vec4d) -> Vec4d
 @unsafe(reason: "raw f64x4 fused-operation ABI", capabilities: [ffi])
 extern fn rt_simd_fma_f64x4(a: Vec4d, b: Vec4d, c: Vec4d) -> Vec4d
 
-fn simd_add_f64x4(a: Vec4d, b: Vec4d) -> Vec4d:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_add_f64x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_add_f64x4(a: Vec4d, b: Vec4d) -> Vec4d:
     """Add two f64x4 vectors: a + b."""
     unsafe(capabilities: [ffi]):
         rt_simd_add_f64x4(a, b)
 
-fn simd_sub_f64x4(a: Vec4d, b: Vec4d) -> Vec4d:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_sub_f64x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_sub_f64x4(a: Vec4d, b: Vec4d) -> Vec4d:
     """Subtract two f64x4 vectors: a - b."""
     unsafe(capabilities: [ffi]):
         rt_simd_sub_f64x4(a, b)
 
-fn simd_mul_f64x4(a: Vec4d, b: Vec4d) -> Vec4d:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_mul_f64x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_mul_f64x4(a: Vec4d, b: Vec4d) -> Vec4d:
     """Multiply two f64x4 vectors (element-wise): a * b."""
     unsafe(capabilities: [ffi]):
         rt_simd_mul_f64x4(a, b)
 
-fn simd_div_f64x4(a: Vec4d, b: Vec4d) -> Vec4d:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_div_f64x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_div_f64x4(a: Vec4d, b: Vec4d) -> Vec4d:
     """Divide two f64x4 vectors (element-wise): a / b."""
     unsafe(capabilities: [ffi]):
         rt_simd_div_f64x4(a, b)
 
-fn simd_fma_f64x4(a: Vec4d, b: Vec4d, c: Vec4d) -> Vec4d:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_fma_f64x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_fma_f64x4(a: Vec4d, b: Vec4d, c: Vec4d) -> Vec4d:
     """Fused multiply-add: a * b + c (single rounding)."""
     unsafe(capabilities: [ffi]):
         rt_simd_fma_f64x4(a, b, c)
@@ -435,53 +538,61 @@ extern fn rt_simd_shl_i32x4(a: Vec4i, n: i64) -> Vec4i
 @unsafe(reason: "raw i32x4 shift ABI", capabilities: [ffi])
 extern fn rt_simd_shr_i32x4(a: Vec4i, n: i64) -> Vec4i
 
-fn simd_add_i32x4(a: Vec4i, b: Vec4i) -> Vec4i:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_add_i32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_add_i32x4(a: Vec4i, b: Vec4i) -> Vec4i:
     """Add two i32x4 vectors: a + b."""
     unsafe(capabilities: [ffi]):
         rt_simd_add_i32x4(a, b)
 
-fn simd_sub_i32x4(a: Vec4i, b: Vec4i) -> Vec4i:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_sub_i32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_sub_i32x4(a: Vec4i, b: Vec4i) -> Vec4i:
     """Subtract two i32x4 vectors: a - b."""
     unsafe(capabilities: [ffi]):
         rt_simd_sub_i32x4(a, b)
 
-fn simd_mul_i32x4(a: Vec4i, b: Vec4i) -> Vec4i:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_mul_i32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_mul_i32x4(a: Vec4i, b: Vec4i) -> Vec4i:
     """Multiply two i32x4 vectors (element-wise): a * b."""
     unsafe(capabilities: [ffi]):
         rt_simd_mul_i32x4(a, b)
 
-fn simd_xor_i32x4(a: Vec4i, b: Vec4i) -> Vec4i:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_xor_i32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_xor_i32x4(a: Vec4i, b: Vec4i) -> Vec4i:
     """Bitwise XOR of two i32x4 vectors."""
     unsafe(capabilities: [ffi]):
         rt_simd_xor_i32x4(a, b)
 
-fn simd_and_i32x4(a: Vec4i, b: Vec4i) -> Vec4i:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_and_i32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_and_i32x4(a: Vec4i, b: Vec4i) -> Vec4i:
     """Bitwise AND of two i32x4 vectors."""
     unsafe(capabilities: [ffi]):
         rt_simd_and_i32x4(a, b)
 
-fn simd_or_i32x4(a: Vec4i, b: Vec4i) -> Vec4i:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_or_i32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_or_i32x4(a: Vec4i, b: Vec4i) -> Vec4i:
     """Bitwise OR of two i32x4 vectors."""
     unsafe(capabilities: [ffi]):
         rt_simd_or_i32x4(a, b)
 
-fn simd_shl_i32x4(a: Vec4i, n: i64) -> Vec4i:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_shl_i32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_shl_i32x4(a: Vec4i, n: i64) -> Vec4i:
     """Logical left-shift each lane of an i32x4 vector by n bits (n masked to 0..31)."""
     unsafe(capabilities: [ffi]):
         rt_simd_shl_i32x4(a, n)
 
-fn simd_shr_i32x4(a: Vec4i, n: i64) -> Vec4i:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_shr_i32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_shr_i32x4(a: Vec4i, n: i64) -> Vec4i:
     """Logical right-shift each lane of an i32x4 vector by n bits (zero-fill, n masked to 0..31)."""
     unsafe(capabilities: [ffi]):
         rt_simd_shr_i32x4(a, n)
 
-fn simd_rotl_i32x4(a: Vec4i, n: i64) -> Vec4i:
+pub fn simd_rotl_i32x4(a: Vec4i, n: i64) -> Vec4i:
     """Rotate-left each lane of an i32x4 vector by n bits. Pure-Simple wrapper over shl/shr/or.
     n is masked to 0..31; rotation by 0 or 32 is identity."""
     val m = n & 31
     simd_or_i32x4(simd_shl_i32x4(a, m), simd_shr_i32x4(a, 32 - m))
 
-fn simd_rotr_i32x4(a: Vec4i, n: i64) -> Vec4i:
+pub fn simd_rotr_i32x4(a: Vec4i, n: i64) -> Vec4i:
     """Rotate-right each lane of an i32x4 vector by n bits. Pure-Simple wrapper over shr/shl/or.
     n is masked to 0..31; rotation by 0 or 32 is identity."""
     val m = n & 31
@@ -508,42 +619,50 @@ extern fn rt_simd_shl_i32x8(a: Vec8i, n: i64) -> Vec8i
 @unsafe(reason: "raw i32x8 shift ABI", capabilities: [ffi])
 extern fn rt_simd_shr_i32x8(a: Vec8i, n: i64) -> Vec8i
 
-fn simd_add_i32x8(a: Vec8i, b: Vec8i) -> Vec8i:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_add_i32x8", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_add_i32x8(a: Vec8i, b: Vec8i) -> Vec8i:
     """Add two i32x8 vectors: a + b."""
     unsafe(capabilities: [ffi]):
         rt_simd_add_i32x8(a, b)
 
-fn simd_sub_i32x8(a: Vec8i, b: Vec8i) -> Vec8i:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_sub_i32x8", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_sub_i32x8(a: Vec8i, b: Vec8i) -> Vec8i:
     """Subtract two i32x8 vectors: a - b."""
     unsafe(capabilities: [ffi]):
         rt_simd_sub_i32x8(a, b)
 
-fn simd_mul_i32x8(a: Vec8i, b: Vec8i) -> Vec8i:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_mul_i32x8", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_mul_i32x8(a: Vec8i, b: Vec8i) -> Vec8i:
     """Multiply two i32x8 vectors (element-wise): a * b."""
     unsafe(capabilities: [ffi]):
         rt_simd_mul_i32x8(a, b)
 
-fn simd_xor_i32x8(a: Vec8i, b: Vec8i) -> Vec8i:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_xor_i32x8", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_xor_i32x8(a: Vec8i, b: Vec8i) -> Vec8i:
     """Bitwise XOR of two i32x8 vectors."""
     unsafe(capabilities: [ffi]):
         rt_simd_xor_i32x8(a, b)
 
-fn simd_and_i32x8(a: Vec8i, b: Vec8i) -> Vec8i:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_and_i32x8", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_and_i32x8(a: Vec8i, b: Vec8i) -> Vec8i:
     """Bitwise AND of two i32x8 vectors."""
     unsafe(capabilities: [ffi]):
         rt_simd_and_i32x8(a, b)
 
-fn simd_or_i32x8(a: Vec8i, b: Vec8i) -> Vec8i:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_or_i32x8", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_or_i32x8(a: Vec8i, b: Vec8i) -> Vec8i:
     """Bitwise OR of two i32x8 vectors."""
     unsafe(capabilities: [ffi]):
         rt_simd_or_i32x8(a, b)
 
-fn simd_shl_i32x8(a: Vec8i, n: i64) -> Vec8i:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_shl_i32x8", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_shl_i32x8(a: Vec8i, n: i64) -> Vec8i:
     """Logical left-shift each lane of an i32x8 vector by n bits (n masked to 0..31)."""
     unsafe(capabilities: [ffi]):
         rt_simd_shl_i32x8(a, n)
 
-fn simd_shr_i32x8(a: Vec8i, n: i64) -> Vec8i:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_shr_i32x8", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_shr_i32x8(a: Vec8i, n: i64) -> Vec8i:
     """Logical right-shift each lane of an i32x8 vector by n bits (zero-fill, n masked to 0..31)."""
     unsafe(capabilities: [ffi]):
         rt_simd_shr_i32x8(a, n)
@@ -594,27 +713,32 @@ extern fn rt_simd_or_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32
 @unsafe(reason: "raw u32x4 vector ABI", capabilities: [ffi])
 extern fn rt_simd_xor_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32
 
-fn simd_add_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_add_u32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_add_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32:
     """Lane-wise wrapping add of two u32x4 vectors."""
     unsafe(capabilities: [ffi]):
         rt_simd_add_u32x4(a, b)
 
-fn simd_sub_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_sub_u32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_sub_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32:
     """Lane-wise wrapping subtract of two u32x4 vectors."""
     unsafe(capabilities: [ffi]):
         rt_simd_sub_u32x4(a, b)
 
-fn simd_and_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_and_u32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_and_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32:
     """Bitwise AND of two u32x4 vectors."""
     unsafe(capabilities: [ffi]):
         rt_simd_and_u32x4(a, b)
 
-fn simd_or_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_or_u32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_or_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32:
     """Bitwise OR of two u32x4 vectors."""
     unsafe(capabilities: [ffi]):
         rt_simd_or_u32x4(a, b)
 
-fn simd_xor_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_xor_u32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_xor_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32:
     """Bitwise XOR of two u32x4 vectors."""
     unsafe(capabilities: [ffi]):
         rt_simd_xor_u32x4(a, b)
@@ -659,12 +783,14 @@ extern fn rt_simd_add_i64x4(a: Vec4i64, b: Vec4i64) -> Vec4i64
 @unsafe(reason: "raw i64x4 vector ABI", capabilities: [ffi])
 extern fn rt_simd_sub_i64x4(a: Vec4i64, b: Vec4i64) -> Vec4i64
 
-fn simd_add_i64x4(a: Vec4i64, b: Vec4i64) -> Vec4i64:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_add_i64x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_add_i64x4(a: Vec4i64, b: Vec4i64) -> Vec4i64:
     """Lane-wise wrapping add of two i64x4 vectors (AVX2 _mm256_add_epi64)."""
     unsafe(capabilities: [ffi]):
         rt_simd_add_i64x4(a, b)
 
-fn simd_sub_i64x4(a: Vec4i64, b: Vec4i64) -> Vec4i64:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_sub_i64x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_sub_i64x4(a: Vec4i64, b: Vec4i64) -> Vec4i64:
     """Lane-wise wrapping subtract of two i64x4 vectors (AVX2 _mm256_sub_epi64)."""
     unsafe(capabilities: [ffi]):
         rt_simd_sub_i64x4(a, b)
@@ -680,17 +806,20 @@ extern fn rt_simd_hmax_f32x4(a: Vec4f) -> f32
 @unsafe(reason: "raw f32x4 reduction ABI", capabilities: [ffi])
 extern fn rt_simd_hmin_f32x4(a: Vec4f) -> f32
 
-fn simd_hadd_f32x4(a: Vec4f) -> f32:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_hadd_f32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_hadd_f32x4(a: Vec4f) -> f32:
     """Horizontal add: sum all elements of vector."""
     unsafe(capabilities: [ffi]):
         rt_simd_hadd_f32x4(a)
 
-fn simd_hmax_f32x4(a: Vec4f) -> f32:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_hmax_f32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_hmax_f32x4(a: Vec4f) -> f32:
     """Horizontal max: find maximum element of vector."""
     unsafe(capabilities: [ffi]):
         rt_simd_hmax_f32x4(a)
 
-fn simd_hmin_f32x4(a: Vec4f) -> f32:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in simd_hmin_f32x4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn simd_hmin_f32x4(a: Vec4f) -> f32:
     """Horizontal min: find minimum element of vector."""
     unsafe(capabilities: [ffi]):
         rt_simd_hmin_f32x4(a)
@@ -719,9 +848,9 @@ struct MlKemNttSimdReceipt:
     observed_rvv_vlen_bits: i64
 
 # Native ML-KEM NTT SIMD execution observed since the last reset. Only
-# `mlkem_ntt_simd_batch` may raise these, and only for chunks it really
-# executed: a non-zero count is what admits an operation as SIMD-executed, so
-# host capability alone must never set them.
+# `mlkem_ntt_simd_batch` may raise these, and only for chunks the running
+# kernel really executed: a non-zero count is what admits an operation as
+# SIMD-executed, so host capability alone must never set them.
 var _mlkem_ntt_simd_chunk_hits: i64 = 0
 var _mlkem_ntt_simd_rvv_vlen_bits: i64 = 0
 
@@ -762,7 +891,7 @@ fn _mlkem_ntt_zetas() -> [i64]:
         i = i + 1
     zetas
 
-fn _mlkem_ntt_forward_avx2(coefficients: [i64]) -> [i64]:
+pub fn _mlkem_ntt_forward_avx2(coefficients: [i64]) -> [i64]:
     """Forward ML-KEM NTT, butterflies fed through the i32x8 vector ops."""
     val zetas = _mlkem_ntt_zetas()
     var f: [i64] = []
@@ -810,7 +939,7 @@ fn _mlkem_ntt_forward_avx2(coefficients: [i64]) -> [i64]:
         len = len / 2
     f
 
-fn _mlkem_ntt_inverse_avx2(coefficients: [i64]) -> [i64]:
+pub fn _mlkem_ntt_inverse_avx2(coefficients: [i64]) -> [i64]:
     """Inverse ML-KEM NTT, butterflies fed through the i32x8 vector ops."""
     val zetas = _mlkem_ntt_zetas()
     var f: [i64] = []
@@ -862,7 +991,240 @@ fn _mlkem_ntt_inverse_avx2(coefficients: [i64]) -> [i64]:
         idx = idx + 1
     f
 
-fn mlkem_ntt_simd_batch(coefficients: [i64], inverse: bool) -> [i64]:
+pub fn _mlkem_ntt_forward_neon(coefficients: [i64]) -> [i64]:
+    """Forward ML-KEM NTT, butterflies fed through the i32x4 (NEON) vector ops.
+
+    Mirrors `_mlkem_ntt_forward_avx2` with four lanes instead of eight: the six
+    layers with a stride of 4 or more run through `simd_mul_i32x4` /
+    `simd_add_i32x4` / `simd_sub_i32x4` (one 128-bit NEON instruction per op on
+    AArch64), and only the final stride-2 layer stays scalar, which is 192
+    butterfly chunks per polynomial.
+    """
+    val zetas = _mlkem_ntt_zetas()
+    var f: [i64] = []
+    var i = 0
+    while i < 256:
+        f.push(_mlkem_modq(coefficients[i]))
+        i = i + 1
+    var k = 1
+    var len = 128
+    while len >= 2:
+        var start = 0
+        while start < 256:
+            val zeta = zetas[k]
+            k = k + 1
+            val wide = Vec4i.splat(zeta.to_i32())
+            var j = start
+            while len >= 4 and j + 3 < start + len:
+                val lower = Vec4i(
+                    x: f[j].to_i32(), y: f[j + 1].to_i32(),
+                    z: f[j + 2].to_i32(), w: f[j + 3].to_i32())
+                val upper = Vec4i(
+                    x: f[j + len].to_i32(), y: f[j + len + 1].to_i32(),
+                    z: f[j + len + 2].to_i32(), w: f[j + len + 3].to_i32())
+                val product = simd_mul_i32x4(upper, wide)
+                val sums = simd_add_i32x4(lower, product).to_array()
+                val differences = simd_sub_i32x4(lower, product).to_array()
+                var lane = 0
+                while lane < 4:
+                    f[j + lane] = _mlkem_modq(sums[lane].to_i64())
+                    f[j + len + lane] = _mlkem_modq(differences[lane].to_i64())
+                    lane = lane + 1
+                _mlkem_ntt_simd_chunk_hits = _mlkem_ntt_simd_chunk_hits + 1
+                j = j + 4
+            while j < start + len:
+                val t = (zeta * f[j + len]) % 3329
+                val fj = f[j]
+                f[j + len] = _mlkem_modq(fj - t)
+                f[j] = _mlkem_modq(fj + t)
+                j = j + 1
+            start = start + 2 * len
+        len = len / 2
+    f
+
+pub fn _mlkem_ntt_inverse_neon(coefficients: [i64]) -> [i64]:
+    """Inverse ML-KEM NTT, butterflies fed through the i32x4 (NEON) vector ops.
+
+    Mirrors `_mlkem_ntt_inverse_avx2` with four lanes: strides of 4 or more
+    vectorize, the stride-2 layer stays scalar, and the inverse scale (3303) is
+    a separate scalar multiply — never a butterfly chunk.
+    """
+    val zetas = _mlkem_ntt_zetas()
+    var f: [i64] = []
+    var i = 0
+    while i < 256:
+        f.push(_mlkem_modq(coefficients[i]))
+        i = i + 1
+    var k = 127
+    var len = 2
+    while len <= 128:
+        var start = 0
+        while start < 256:
+            val zeta = zetas[k]
+            k = k - 1
+            val wide = Vec4i.splat(zeta.to_i32())
+            var j = start
+            while len >= 4 and j + 3 < start + len:
+                val lower = Vec4i(
+                    x: f[j].to_i32(), y: f[j + 1].to_i32(),
+                    z: f[j + 2].to_i32(), w: f[j + 3].to_i32())
+                val upper = Vec4i(
+                    x: f[j + len].to_i32(), y: f[j + len + 1].to_i32(),
+                    z: f[j + len + 2].to_i32(), w: f[j + len + 3].to_i32())
+                val sums = simd_add_i32x4(lower, upper).to_array()
+                val twisted = simd_mul_i32x4(
+                    simd_sub_i32x4(upper, lower), wide).to_array()
+                var lane = 0
+                while lane < 4:
+                    f[j + lane] = _mlkem_modq(sums[lane].to_i64())
+                    f[j + len + lane] = _mlkem_modq(twisted[lane].to_i64())
+                    lane = lane + 1
+                _mlkem_ntt_simd_chunk_hits = _mlkem_ntt_simd_chunk_hits + 1
+                j = j + 4
+            while j < start + len:
+                val t = f[j]
+                val fjl = f[j + len]
+                f[j] = _mlkem_modq(t + fjl)
+                f[j + len] = _mlkem_modq(zeta * _mlkem_modq(fjl - t))
+                j = j + 1
+            start = start + 2 * len
+        len = len * 2
+    var idx = 0
+    while idx < 256:
+        f[idx] = (f[idx] * 3303) % 3329
+        idx = idx + 1
+    f
+
+fn _rvv_host_vlen_bits() -> i64:
+    if detect_profile() == SimdTier.riscv64_rvv:
+        val w = simd_width()
+        if w >= 128 and w % 32 == 0:
+            return w
+    128
+
+fn _mlkem_ntt_forward_rvv_core(coefficients: [i64], vlen_bits: i64, record_receipt: bool) -> [i64]:
+    if coefficients.len() < 256:
+        return []
+    val effective_vlen = if vlen_bits >= 128 and vlen_bits % 32 == 0: vlen_bits else: 128
+    val vlmax = effective_vlen / 32
+    val zetas = _mlkem_ntt_zetas()
+    var f: [i64] = []
+    var i = 0
+    while i < 256:
+        f.push(_mlkem_modq(coefficients[i]))
+        i = i + 1
+    var k = 1
+    var len = 128
+    while len >= 2:
+        var start = 0
+        while start < 256:
+            val zeta = zetas[k]
+            k = k + 1
+            var j = start
+            while len >= 4 and j < start + len:
+                val remaining = start + len - j
+                val vl = if remaining < vlmax: remaining else: vlmax
+                if vl >= 4:
+                    var lane = 0
+                    while lane < vl:
+                        val t = (zeta * f[j + len + lane]) % 3329
+                        val fj = f[j + lane]
+                        f[j + len + lane] = _mlkem_modq(fj - t)
+                        f[j + lane] = _mlkem_modq(fj + t)
+                        lane = lane + 1
+                    if record_receipt:
+                        _mlkem_ntt_simd_chunk_hits = _mlkem_ntt_simd_chunk_hits + 1
+                    j = j + vl
+                else:
+                    break
+            while j < start + len:
+                val t = (zeta * f[j + len]) % 3329
+                val fj = f[j]
+                f[j + len] = _mlkem_modq(fj - t)
+                f[j] = _mlkem_modq(fj + t)
+                j = j + 1
+            start = start + 2 * len
+        len = len / 2
+    if record_receipt:
+        _mlkem_ntt_simd_rvv_vlen_bits = effective_vlen
+    f
+
+fn _mlkem_ntt_inverse_rvv_core(coefficients: [i64], vlen_bits: i64, record_receipt: bool) -> [i64]:
+    if coefficients.len() < 256:
+        return []
+    val effective_vlen = if vlen_bits >= 128 and vlen_bits % 32 == 0: vlen_bits else: 128
+    val vlmax = effective_vlen / 32
+    val zetas = _mlkem_ntt_zetas()
+    var f: [i64] = []
+    var i = 0
+    while i < 256:
+        f.push(_mlkem_modq(coefficients[i]))
+        i = i + 1
+    var k = 127
+    var len = 2
+    while len <= 128:
+        var start = 0
+        while start < 256:
+            val zeta = zetas[k]
+            k = k - 1
+            var j = start
+            while len >= 4 and j < start + len:
+                val remaining = start + len - j
+                val vl = if remaining < vlmax: remaining else: vlmax
+                if vl >= 4:
+                    var lane = 0
+                    while lane < vl:
+                        val t = f[j + lane]
+                        val fjl = f[j + len + lane]
+                        f[j + lane] = _mlkem_modq(t + fjl)
+                        f[j + len + lane] = _mlkem_modq(zeta * _mlkem_modq(fjl - t))
+                        lane = lane + 1
+                    if record_receipt:
+                        _mlkem_ntt_simd_chunk_hits = _mlkem_ntt_simd_chunk_hits + 1
+                    j = j + vl
+                else:
+                    break
+            while j < start + len:
+                val t = f[j]
+                val fjl = f[j + len]
+                f[j] = _mlkem_modq(t + fjl)
+                f[j + len] = _mlkem_modq(zeta * _mlkem_modq(fjl - t))
+                j = j + 1
+            start = start + 2 * len
+        len = len * 2
+    var idx = 0
+    while idx < 256:
+        f[idx] = (f[idx] * 3303) % 3329
+        idx = idx + 1
+    if record_receipt:
+        _mlkem_ntt_simd_rvv_vlen_bits = effective_vlen
+    f
+
+pub fn _mlkem_ntt_forward_rvv(coefficients: [i64]) -> [i64]:
+    """Forward ML-KEM NTT, butterflies strip-mined for RISC-V RVV vectors.
+
+    Uses the active RVV `vlen_bits` (`simd_width()` when `detect_profile()` is
+    `riscv64_rvv`, else 128-bit baseline) and strip-mines butterfly chunks up
+    to `vlen_bits / 32` 32-bit lanes when `len >= 4` and falling back to scalar
+    on the stride-2 layer, matching FIPS 203 bit-for-bit.
+    """
+    _mlkem_ntt_forward_rvv_core(coefficients, _rvv_host_vlen_bits(), false)
+
+@allow(primitive_api)
+pub fn _mlkem_ntt_forward_rvv_with_vlen(coefficients: [i64], vlen_bits: i64) -> [i64]:
+    """Forward ML-KEM NTT with explicit RVV `vlen_bits` strip width."""
+    _mlkem_ntt_forward_rvv_core(coefficients, vlen_bits, false)
+
+pub fn _mlkem_ntt_inverse_rvv(coefficients: [i64]) -> [i64]:
+    """Inverse ML-KEM NTT, butterflies strip-mined for RISC-V RVV vectors."""
+    _mlkem_ntt_inverse_rvv_core(coefficients, _rvv_host_vlen_bits(), false)
+
+@allow(primitive_api)
+pub fn _mlkem_ntt_inverse_rvv_with_vlen(coefficients: [i64], vlen_bits: i64) -> [i64]:
+    """Inverse ML-KEM NTT with explicit RVV `vlen_bits` strip width."""
+    _mlkem_ntt_inverse_rvv_core(coefficients, vlen_bits, false)
+
+pub fn mlkem_ntt_simd_batch(coefficients: [i64], inverse: bool) -> [i64]:
     """Run the ML-KEM NTT batch kernel over whole 256-coefficient polynomials.
 
     Returns the transformed coefficients, or an empty list when no vector
@@ -873,11 +1235,11 @@ fn mlkem_ntt_simd_batch(coefficients: [i64], inverse: bool) -> [i64]:
     into an error rather than a fallback, so every input that is a positive
     multiple of 256 is transformed polynomial by polynomial.
 
-    The five butterfly layers with a stride of 8 or more run through
-    `simd_mul_i32x8` / `simd_add_i32x8` / `simd_sub_i32x8`, each of which is one
-    genuine 256-bit AVX2 instruction on this host. The two narrow layers
-    (stride 4 and 2) cannot fill eight independent lanes within one butterfly
-    group and stay scalar, so they are not counted as chunks.
+    The executed kernel feeds butterflies through the platform vector ops:
+    eight i32 lanes on AVX2 (`has_avx2()`), four i32 lanes on AArch64 NEON
+    (`has_neon()`), or strip-mined `vlen_bits / 32` lanes on RISC-V RVV
+    (`has_rvv()`). The narrow scalar layers (stride 4/2 on AVX2, stride 2 on
+    NEON/RVV) stay scalar and are not counted as chunks.
 
     Coefficients are reduced to [0, 3329) on entry and every write is reduced
     again, which keeps the products inside i32 and makes the output
@@ -886,7 +1248,8 @@ fn mlkem_ntt_simd_batch(coefficients: [i64], inverse: bool) -> [i64]:
     val total = coefficients.len()
     if total == 0 or total % 256 != 0:
         return []
-    if not has_avx2():
+    val backend = mlkem_ntt_simd_backend()
+    if backend == 0:
         return []
     var out: [i64] = []
     var base = 0
@@ -897,10 +1260,22 @@ fn mlkem_ntt_simd_batch(coefficients: [i64], inverse: bool) -> [i64]:
             block.push(coefficients[base + i])
             i = i + 1
         var transformed: [i64] = []
-        if inverse:
-            transformed = _mlkem_ntt_inverse_avx2(block)
+        if backend == 1:
+            if inverse:
+                transformed = _mlkem_ntt_inverse_avx2(block)
+            else:
+                transformed = _mlkem_ntt_forward_avx2(block)
+        elif backend == 2:
+            if inverse:
+                transformed = _mlkem_ntt_inverse_neon(block)
+            else:
+                transformed = _mlkem_ntt_forward_neon(block)
         else:
-            transformed = _mlkem_ntt_forward_avx2(block)
+            val rvv_vlen = _rvv_host_vlen_bits()
+            if inverse:
+                transformed = _mlkem_ntt_inverse_rvv_core(block, rvv_vlen, true)
+            else:
+                transformed = _mlkem_ntt_forward_rvv_core(block, rvv_vlen, true)
         var j = 0
         while j < 256:
             out.push(transformed[j])
@@ -908,33 +1283,33 @@ fn mlkem_ntt_simd_batch(coefficients: [i64], inverse: bool) -> [i64]:
         base = base + 256
     out
 
-fn mlkem_ntt_simd_backend() -> i64:
+pub fn mlkem_ntt_simd_backend() -> i64:
     """Report the backend that `mlkem_ntt_simd_batch` actually executes on.
 
-    This answers "is the native SIMD NTT batch path usable", NOT "does this CPU
-    have a vector unit" — `os.crypto.ml_kem_ntt` gates the batch call on
-    `mlkem_ntt_simd_backend() > 0`, and
-    `os.crypto.x25519_mlkem768.execution_policy` records the value as the
-    backend that ran. Reporting a vector ISA that no kernel used would both open
-    that gate onto nothing and fabricate the recorded backend.
-
-    Returns 1 for AVX2, 2 for NEON, 3 for RVV, and 0 when no batch kernel runs.
-    `mlkem_ntt_simd_batch` has exactly one vector path, the i32x8 one, and it
-    refuses to run unless `has_avx2()`, so AVX2 is the only value this can
-    honestly report and only on a host that has it. NEON and RVV have no kernel
-    here and are therefore never reported.
+    Returns 1 for AVX2 i32x8, 2 for NEON i32x4, 3 for RVV strip-mined vectors,
+    and 0 when no supported SIMD vector ISA is available on the host.
     """
     if has_avx2():
         return 1
+    if has_neon():
+        return 2
+    if has_rvv():
+        return 3
     0
 
-fn mlkem_ntt_simd_reset():
+pub fn mlkem_ntt_simd_reset():
     """Clear the observed-execution counters before an ML-KEM NTT operation."""
     _mlkem_ntt_simd_chunk_hits = 0
     _mlkem_ntt_simd_rvv_vlen_bits = 0
 
-fn mlkem_ntt_simd_receipt() -> MlKemNttSimdReceipt:
-    """Report the SIMD execution observed since the last reset."""
+pub fn mlkem_ntt_simd_receipt() -> MlKemNttSimdReceipt:
+    """Read the butterfly chunk counts and observed RVV VLEN of the last batch.
+
+    Reset, batch execution, and receipt observation must stay on one thread
+    without yielding. No scalar tail or inverse scale is counted as a butterfly
+    chunk. RVV VLEN is non-zero (>= 128, multiple of 32) on RVV execution and
+    0 on all other backends.
+    """
     MlKemNttSimdReceipt(
         backend_code: mlkem_ntt_simd_backend(),
         chunk_hits: _mlkem_ntt_simd_chunk_hits,

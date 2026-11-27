@@ -1,0 +1,91 @@
+"""select_test_child_binary: the on-disk identity gate for --compiler=phase2.
+
+An empty selector keeps the caller's binary; a selected CLI that is missing or
+whose sha256 does not match the declared pin is refused, never run.
+"""
+
+use std.spec.*
+use std.test_runner.compiler_select.{select_test_child_binary, resolve_test_compiler}
+use std.io_runtime.{file_hash_sha256_or_empty}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, secure_temp_dir}
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
+use std.test_runner.test_executor_parsing.{_tp_get_temp_dir}
+
+val WRONG_SHA: text = "abababababababababababababababababababababababababababababababab"
+
+fn scratch_cli(name: text) -> text:
+    val dir = secure_temp_dir(_tp_get_temp_dir(), "select-bin-").unwrap().replace("\\", "/")
+    val path = dir + "/" + name
+    file_write(path, "#!/bin/sh\nexit 0\n")
+    path
+
+val SAVED_CLI: text = env_get("SIMPLE_PHASE2_FULL_CLI")
+val SAVED_SHA: text = env_get("SIMPLE_PHASE2_FULL_CLI_SHA256")
+
+fn restore_env():
+    env_set("SIMPLE_PHASE2_FULL_CLI", SAVED_CLI)
+    env_set("SIMPLE_PHASE2_FULL_CLI_SHA256", SAVED_SHA)
+
+describe "select_test_child_binary":
+    after_each:
+        restore_env()
+
+    it "returns the default binary (empty) for an empty selector":
+        env_set("SIMPLE_PHASE2_FULL_CLI", "/nonexistent/cli")
+        env_set("SIMPLE_PHASE2_FULL_CLI_SHA256", WRONG_SHA)
+        expect(select_test_child_binary("").unwrap()).to_equal("")
+
+    it "refuses an unknown selector":
+        expect(select_test_child_binary("phase9").unwrap_err()).to_contain("phase9")
+
+    it "refuses when SIMPLE_PHASE2_FULL_CLI is unset":
+        env_set("SIMPLE_PHASE2_FULL_CLI", "")
+        env_set("SIMPLE_PHASE2_FULL_CLI_SHA256", WRONG_SHA)
+        expect(select_test_child_binary("phase2").unwrap_err()).to_contain("requires SIMPLE_PHASE2_FULL_CLI")
+
+    it "refuses when the sha256 pin is unset":
+        val cli = scratch_cli("cli_nopin")
+        env_set("SIMPLE_PHASE2_FULL_CLI", cli)
+        env_set("SIMPLE_PHASE2_FULL_CLI_SHA256", "")
+        expect(select_test_child_binary("phase2").unwrap_err()).to_contain("requires SIMPLE_PHASE2_FULL_CLI_SHA256")
+        file_delete(cli)
+
+    it "refuses a missing CLI file":
+        env_set("SIMPLE_PHASE2_FULL_CLI", "/nonexistent/dir/phase2_simple")
+        env_set("SIMPLE_PHASE2_FULL_CLI_SHA256", WRONG_SHA)
+        val err = select_test_child_binary("phase2").unwrap_err()
+        expect(err).to_contain("does not exist")
+        expect(err).to_contain("/nonexistent/dir/phase2_simple")
+
+    it "refuses a sha256 mismatch and names declared and actual digests":
+        val cli = scratch_cli("cli_mismatch")
+        env_set("SIMPLE_PHASE2_FULL_CLI", cli)
+        env_set("SIMPLE_PHASE2_FULL_CLI_SHA256", WRONG_SHA)
+        val err = select_test_child_binary("phase2").unwrap_err()
+        expect(err).to_contain("sha256 mismatch")
+        expect(err).to_contain(WRONG_SHA)
+        expect(err).to_contain(file_hash_sha256_or_empty(cli))
+        file_delete(cli)
+
+    it "accepts a CLI whose sha256 matches the pin":
+        val cli = scratch_cli("cli_match")
+        env_set("SIMPLE_PHASE2_FULL_CLI", cli)
+        env_set("SIMPLE_PHASE2_FULL_CLI_SHA256", file_hash_sha256_or_empty(cli))
+        expect(select_test_child_binary("phase2").unwrap()).to_equal(cli)
+        file_delete(cli)
+
+    it "compares the pin case-insensitively":
+        val cli = scratch_cli("cli_upper")
+        env_set("SIMPLE_PHASE2_FULL_CLI", cli)
+        env_set("SIMPLE_PHASE2_FULL_CLI_SHA256", file_hash_sha256_or_empty(cli).upper())
+        expect(select_test_child_binary("phase2").unwrap()).to_equal(cli)
+        file_delete(cli)
+
+describe "resolve_test_compiler pin validation":
+    it "refuses a missing sha256 pin":
+        expect(resolve_test_compiler("phase2", "/p2/simple", "", "").unwrap_err()).to_contain("requires SIMPLE_PHASE2_FULL_CLI_SHA256")
+    it "refuses a sha256 pin that is not 64 hex chars":
+        expect(resolve_test_compiler("phase2", "/p2/simple", "abc123", "").unwrap_err()).to_contain("not a 64-char hex sha256")
+    it "refuses a 64-char pin containing a non-hex character":
+        val bad = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+        expect(resolve_test_compiler("phase2", "/p2/simple", bad, "").unwrap_err()).to_contain("not a 64-char hex sha256")

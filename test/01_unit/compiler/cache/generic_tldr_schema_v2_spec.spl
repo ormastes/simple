@@ -1,0 +1,183 @@
+# Identity/codec contracts, not proof of typed extraction or source-free
+# instantiation. Inputs below deliberately supply real SHA-256 test identities.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.generic_tldr_view_v1.*
+use compiler.common.cache_contract.guard_id_v1.{active_guard_root_empty_v1}
+use compiler.frontend.cache_artifact.generic_tldr_projector.{GenericDeclInputV1, GenericFieldInputV1, project_generic_template_v1, project_generic_template_v2}
+
+fn schema_v2_input(name: text) -> GenericDeclInputV1:
+    GenericDeclInputV1(module_path: "pkg", name: name, params: ["T"],
+        param_kinds: [GENERIC_PARAM_KIND_TYPE], fields: [], visibility_root: "public",
+        active_guard_root: active_guard_root_empty_v1("qualified-test-profile").root_digest,
+        source_digest: sha256_text("source fixture"), bounds: [], body_digest: sha256_text("body fixture"),
+        declaration_kind: "function", signature_digest: sha256_text("typed signature fixture"),
+        instantiation_digest: sha256_text("closed defaults fixture"))
+
+fn schema_v2_entry(name: text) -> GenericTemplateEntryV1:
+    project_generic_template_v2(schema_v2_input(name)).unwrap()
+
+fn schema_v2_wire(entries: [GenericTemplateEntryV1]) -> text:
+    generic_template_section_encode_v2(build_generic_template_section_v2(entries).unwrap()).unwrap()
+
+describe "Versioned generic template identity schema":
+    it "round trips Unicode metadata with UTF8 byte framing":
+        val wire = schema_v2_wire([schema_v2_entry("箱")])
+        val decoded = generic_template_section_decode_v2(wire)
+        expect(decoded.ok).to_equal(true)
+        expect(decoded.section.entries[0].symbol_id).to_equal("pkg.箱")
+        expect(decoded.section.entries[0].signature_digest).to_equal(sha256_text("typed signature fixture"))
+        expect(generic_template_section_encode_v2(decoded.section).unwrap()).to_equal(wire)
+        expect(wire.contains("7:pkg.箱")).to_equal(true)
+
+    it "sorts distinct declarations and rejects duplicate symbols":
+        val a = schema_v2_entry("a")
+        val z = schema_v2_entry("z")
+        expect(schema_v2_wire([z, a])).to_equal(schema_v2_wire([a, z]))
+        expect(build_generic_template_section_v2([a, a]).is_err()).to_equal(true)
+
+    it "rejects V1 unknown kinds missing roots and fake function storage fields":
+        val input = schema_v2_input("id")
+        val legacy = project_generic_template_v1(input).unwrap()
+        expect(generic_template_entry_valid_v2(legacy)).to_equal(false)
+        val old_wire = generic_template_section_encode_v1(build_generic_template_section_v1([legacy]))
+        expect(generic_template_section_decode_v2(old_wire).ok).to_equal(false)
+        var bad = input
+        bad.declaration_kind = "unknown"
+        expect(project_generic_template_v2(bad).is_err()).to_equal(true)
+        bad = input
+        bad.signature_digest = ""
+        expect(project_generic_template_v2(bad).is_err()).to_equal(true)
+        bad = input
+        bad.instantiation_digest = ""
+        expect(project_generic_template_v2(bad).is_err()).to_equal(true)
+        bad = input
+        bad.fields = [GenericFieldInputV1(name: "fake_argument", type_text: "T")]
+        expect(project_generic_template_v2(bad).is_err()).to_equal(true)
+        val current = schema_v2_entry("id")
+        expect(generic_template_id_v1(current)).to_equal("")
+        expect(generic_template_section_encode_v1(GenericTemplateSectionV1(entries: [current], digest: "ignored"))).to_equal("")
+
+    it "changes the signature facet for callable signatures and instantiation defaults":
+        val original = schema_v2_entry("id")
+        var signature_edit = original
+        signature_edit.signature_digest = sha256_text("different typed parameters or result")
+        var defaults_edit = original
+        defaults_edit.instantiation_digest = sha256_text("different closed defaults or captures")
+        expect(generic_template_id_v2(original) == generic_template_id_v2(signature_edit)).to_equal(false)
+        expect(generic_template_id_v2(original) == generic_template_id_v2(defaults_edit)).to_equal(false)
+        val signature_changes = generic_template_changed_facets_v2(Some(original), Some(signature_edit)).unwrap()
+        val defaults_changes = generic_template_changed_facets_v2(Some(original), Some(defaults_edit)).unwrap()
+        expect(signature_changes.len()).to_equal(1)
+        expect(signature_changes[0].facet).to_equal(GENERIC_FACET_SIGNATURE_V1)
+        expect(defaults_changes.len()).to_equal(1)
+        expect(defaults_changes[0].facet).to_equal(GENERIC_FACET_SIGNATURE_V1)
+
+    it "keeps ordinary body edits separate and preserves bound facet separation":
+        val original = schema_v2_entry("id")
+        var body_edit = original
+        body_edit.body_digest = sha256_text("different ordinary body")
+        expect(generic_template_id_v2(original)).to_equal(generic_template_id_v2(body_edit))
+        val body_changes = generic_template_changed_facets_v2(Some(original), Some(body_edit)).unwrap()
+        expect(body_changes.len()).to_equal(1)
+        expect(body_changes[0].facet).to_equal(GENERIC_FACET_BODY_V1)
+        var bound_edit = original
+        bound_edit.bounds = [GenericBoundV1(param_index: 0, bound_key: "canonical-bound")]
+        val bound_changes = generic_template_changed_facets_v2(Some(original), Some(bound_edit)).unwrap()
+        expect(bound_changes.len()).to_equal(1)
+        expect(bound_changes[0].facet).to_equal(GENERIC_FACET_BOUND_V1)
+
+    it "rejects corrupted truncated trailing and noncanonical frames":
+        val wire = schema_v2_wire([schema_v2_entry("id")])
+        expect(generic_template_section_decode_v2(wire.replace(sha256_text("typed signature fixture"), sha256_text("tampered signature"))).ok).to_equal(false)
+        expect(generic_template_section_decode_v2(wire + "0:").ok).to_equal(false)
+        expect(generic_template_section_decode_v2(wire.substring(0, wire.len() - 1)).ok).to_equal(false)
+        expect(generic_template_section_decode_v2("064:" + wire.substring(3)).ok).to_equal(false)
+        expect(generic_template_section_decode_v1(wire).ok).to_equal(false)
+
+    it "never turns incomplete V2 metadata into unchanged-facet success":
+        var invalid = schema_v2_entry("id")
+        invalid.instantiation_digest = ""
+        expect(generic_template_id_v2(invalid)).to_equal("")
+        expect(generic_template_changed_facets_v2(Some(invalid), Some(invalid)).is_err()).to_equal(true)
+
+    it "encodes a versioned known-empty section distinctly from missing bytes":
+        val wire = schema_v2_wire([])
+        expect(generic_template_section_decode_v2(wire).ok).to_equal(true)
+        expect(generic_template_section_decode_v2(wire).section.entries.len()).to_equal(0)
+        expect(generic_template_section_decode_v2("").ok).to_equal(false)
+
+    it "preserves the exact V1 codec fixture":
+        val legacy = GenericTemplateEntryV1(symbol_id: "pkg.Box", source_digest: "source",
+            visibility_root: "public", active_guard_root: "guard", language_schema: GENERIC_TLDR_VIEW_SCHEMA_V1,
+            params: [GenericParamV1(index: 0, kind: "type", binder_id: "pkg.Box#0", display_name: "T")],
+            fields: [GenericTemplateFieldV1(name: "value", type_key: "v9:pkg.Box#0", generic: true)], bounds: [], body_digest: "")
+        val wire = generic_template_section_encode_v1(build_generic_template_section_v1([legacy]))
+        expect(wire).to_equal("64:9f9ccc97163c39206a4acfb1c52f9f9de116362541c9f867114fff5c14c6352b27:generic-template-section/v11:17:pkg.Box6:source6:public5:guard20:generic-tldr-view/v11:14:type9:pkg.Box#01:T1:15:value12:v9:pkg.Box#01:11:00:")
+        expect(generic_template_section_decode_v1(wire).ok).to_equal(true)
+
+    it "keeps legacy facet callers safe when handed V2 entries":
+        val original = schema_v2_entry("id")
+        var changed = original
+        changed.instantiation_digest = sha256_text("changed defaults")
+        val changes = generic_template_changed_facets_v1(Some(original), Some(changed))
+        expect(changes.len()).to_equal(1)
+        expect(changes[0].facet).to_equal(GENERIC_FACET_SIGNATURE_V1)
+        expect(generic_template_signature_fingerprint_v1(changed)).to_equal(generic_template_facets_v2(changed).unwrap().signature_fingerprint)
+
+    it "normalizes bound order and duplicates through the V2 bounded sorter":
+        var first = schema_v2_entry("id")
+        first.bounds = [GenericBoundV1(param_index: 0, bound_key: "z"), GenericBoundV1(param_index: 0, bound_key: "a"), GenericBoundV1(param_index: 0, bound_key: "z")]
+        var second = first
+        second.bounds = [GenericBoundV1(param_index: 0, bound_key: "a"), GenericBoundV1(param_index: 0, bound_key: "z")]
+        expect(generic_template_facets_v2(first).unwrap().bound_fingerprint).to_equal(generic_template_facets_v2(second).unwrap().bound_fingerprint)
+
+    it "byte frames nested Unicode nominal and binder structural keys":
+        var input = schema_v2_input("Box")
+        input.module_path = "包"
+        input.declaration_kind = "struct"
+        input.fields = [GenericFieldInputV1(name: "item", type_text: "[T]?"), GenericFieldInputV1(name: "other", type_text: "Other<T>")]
+        val entry = project_generic_template_v2(input).unwrap()
+        expect(entry.fields[0].type_key.contains("v9:包.Box#0")).to_equal(true)
+        expect(entry.fields[1].type_key.contains("a15:Named:包.Other")).to_equal(true)
+        expect(generic_template_section_decode_v2(schema_v2_wire([entry])).ok).to_equal(true)
+
+    it "rejects excessive type nesting before the recursive parser":
+        var input = schema_v2_input("Deep")
+        input.declaration_kind = "struct"
+        var type_text = "T"
+        var depth = 0
+        while depth < 65:
+            type_text = "[" + type_text + "]"
+            depth = depth + 1
+        input.fields = [GenericFieldInputV1(name: "value", type_text: type_text)]
+        expect(project_generic_template_v2(input).is_err()).to_equal(true)
+
+    it "charges repeated qualified binder and nominal prefixes before projection":
+        var input = schema_v2_input("Wide")
+        input.declaration_kind = "struct"
+        var module_path = "m"
+        var power = 0
+        while power < 18:
+            module_path = module_path + module_path
+            power = power + 1
+        input.module_path = module_path
+        var names: [text] = []
+        var kinds: [text] = []
+        var i = 0
+        while i < 128:
+            names = names.push("T{i}")
+            kinds = kinds.push(GENERIC_PARAM_KIND_TYPE)
+            i = i + 1
+        input.params = names
+        input.param_kinds = kinds
+        expect(project_generic_template_v2(input).is_err()).to_equal(true)
+        input.params = []
+        input.param_kinds = []
+        var fields: [GenericFieldInputV1] = []
+        i = 0
+        while i < 128:
+            fields = fields.push(GenericFieldInputV1(name: "f{i}", type_text: "Local"))
+            i = i + 1
+        input.fields = fields
+        expect(project_generic_template_v2(input).is_err()).to_equal(true)

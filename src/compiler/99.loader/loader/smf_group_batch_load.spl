@@ -18,7 +18,12 @@ use compiler.backend.linker.smf_reader.{SmfReaderImpl}
 use compiler.backend.linker.smf_reader_memory.{SmfRelocEntry}
 use compiler.backend.linker.obj_taker.{SmfSymbol, SymbolType, SymbolBinding}
 use compiler.backend.linker.smf_enums.{Platform, Arch, CompressionType}
+use compiler.backend.linker.smf_header.{SMF_HEADER_SIZE, SMF_VERSION_MINOR, smf_header_size_at}
 use std.platform.{get_host_os, get_host_arch}
+use compiler.backend.linker.smf_meta.{smf_meta_unit_identity_text}
+use compiler.driver.unit_identity.{unit_identity_decode}
+use compiler.driver.watcher.{smf_manifest_entry_new_with_identity}
+use compiler.loader.hot_swap_pin.{HotSwapSlot, hot_swap_slot_load}
 
 struct NativeGroupBatchImageV1:
     path: text
@@ -60,9 +65,10 @@ fn native_group_batch_validate_sections(bytes: [u8],
             header.compression != CompressionType.None_:
         return Err("native group SMF target or executable status is unproven")
     val (major, minor) = header.version
-    if major != 1 or (minor != 1 and minor != 2):
-        return Err("native group SMF requires format v1.1 or v1.2")
-    if header.header_offset != bytes.len() - 128 or
+    if major != 1 or minor < 1 or minor > SMF_VERSION_MINOR:
+        return Err("native group SMF requires format v1.1 to v1.3")
+    # Trailer: 96 bytes for the v1.3 / Rust seed layout, 128 for legacy packed.
+    if header.header_offset != bytes.len() - smf_header_size_at(bytes, header.header_offset) or
             bytes[header.header_offset + 12] != 0:
         return Err("native group SMF requires an uncompressed trailer header")
     val sym_count = header.symbol_count as i64
@@ -108,6 +114,11 @@ fn native_group_batch_validate_sections(bytes: [u8],
                 reloc_sections = reloc_sections + 1
                 if flags != 0 or size % 24 != 0 or reloc_sections > 1:
                     return Err("native group SMF relocation section is invalid")
+            elif kind == 7:
+                # Note (e.g. .simple_meta): read-only metadata, never mapped;
+                # a symbol or relocation naming it is refused below.
+                if flags != 1:
+                    return Err("native group SMF Note flags are invalid")
             else:
                 return Err("native group SMF section kind is unsupported")
         var data: [u8] = []
@@ -121,7 +132,7 @@ fn native_group_batch_preflight(path: text,
         host: Platform) -> Result<NativeGroupBatchImageV1, text>:
     val reader = SmfReaderImpl.open(path)?
     val bytes = reader.sffi.mem.data
-    if bytes.len() < 128 or bytes.len() > 134217728:
+    if bytes.len() < SMF_HEADER_SIZE or bytes.len() > 134217728:
         return Err("native group SMF byte size is invalid: {path}")
     val sections = native_group_batch_validate_sections(bytes, reader, host)?
     val symbols = reader.sffi.mem.symbols_in_table_order()?
@@ -308,7 +319,8 @@ pub fn moduleloader_load_native_batch_v1(loader: LazyModuleLoader,
     var public_names: Dict<text, text> = {}
     var total_bytes: i64 = 0
     for path in paths:
-        if path == "" or seen_paths.has(path) or loader.modules.has(path):
+        if path == "" or seen_paths.has(path) or loader.modules.has(path) or
+                loader.hot_swap_slots.has(path):
             return Err("native group batch path is empty, repeated, or loaded")
         seen_paths[path] = true
         val image = native_group_batch_preflight(path, host)?
@@ -421,6 +433,34 @@ pub fn moduleloader_load_native_batch_v1(loader: LazyModuleLoader,
         val message = sealed.unwrap_err()
         native_group_batch_rollback(loader, staged)
         return Err(message)
+    # RB-LOAD-02: an identity-carrying image is pinned to the identity it
+    # carries, from the mapped bytes, so every later reload is admission
+    # checked. All slots are built before any is published; a failure rolls
+    # the whole batch back.
+    var slots: [(text, HotSwapSlot)] = []
+    for image in images:
+        val pinned = native_group_batch_identity_slot(image)
+        if pinned.is_err():
+            native_group_batch_rollback(loader, staged)
+            return Err("native group hot-swap pin failed: {image.path}: {pinned.unwrap_err()}")
+        if val slot = pinned.unwrap():
+            slots.push((image.path, slot))
+    for entry in slots:
+        val (path, slot) = entry
+        loader.hot_swap_slots[path] = slot
     Ok(staged)
+
+# Ok(None) = legacy image without a unit identity record (not pinned).
+# reason: Result carries the loader diagnostic text
+@allow(primitive_api)
+fn native_group_batch_identity_slot(image: NativeGroupBatchImageV1) -> Result<Option<HotSwapSlot>, text>:
+    val raw = smf_meta_unit_identity_text(image.bytes)?
+    if raw == "":
+        return Ok(None)
+    val id = unit_identity_decode(raw)?
+    val row = smf_manifest_entry_new_with_identity(
+        image.path, image.path, 0, "native", 0, true, false, false,
+        id.policy, id.capabilities, id.iface_digest, id.abi_digest, [], [], id.target_triple)
+    Ok(Some(hot_swap_slot_load(row, image.bytes)?))
 
 export moduleloader_load_native_batch_v1

@@ -64,3 +64,27 @@ coverage numbers derived from no sdoctest data at all — a tool that reports
 success without doing its job. Implement the two functions against the real
 sdoctest block format, or delete the sdoctest arms of the command.
 
+
+## 2026-11-10 triage (P3 runner2 lane, work/p3-runner2-20261110): SUPERSEDED dupe — both defects resolved
+
+This doc was already marked obsolete 2026-09-16 as a dupe of
+`doc_coverage_command_broken_missing_load_sdoctest_blocks_2026-09-05.md`.
+On this base (origin/release/1.0.0) both of its defects are now resolved:
+
+1. Missing `load_sdoctest_blocks` / `compute_sdoctest_coverage`: defined at
+   `src/app/doc_coverage/analysis/sdoctest_coverage.spl:96,135` (landed
+   with merge 9e7e7a526edb, PR #7597). Not stubs: the loader scans README +
+   doc/*.md + doc/07_guide for fenced sdoctest blocks and the coverage
+   function aggregates per-file and overall counters against them.
+2. Two-`DocItem`-struct migration break (`class DocItem has no field named
+   has_inline_comment`): FIXED in this lane — see the 2026-11-10 triage
+   append in the dupe doc for the migration + evidence.
+
+The "Do not stub" requirement is honored: no empty-list stub was added;
+the real implementations (which postdate this doc) are what run.
+
+Seed-smoke evidence (Rust seed `bin/simple.exe`, this worktree):
+`bin/simple.exe doc-coverage` -> exit 0 with a real report over 9233 files
+(75323 items, 41% documented, 11% sdoctest); the second defect's
+`jit-fallback` on doc_coverage_command.spl (struct 'Nil' field 'items')
+still demotes the module to the interpreter, but the run completes.

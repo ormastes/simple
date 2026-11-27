@@ -1,0 +1,110 @@
+use std.spec.*
+use std.io_runtime.{env_get_opt}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val MATRIX = "spec/compiler_schema/target_hir_migration_matrix.sdn"
+val INVENTORY = "doc/03_plan/compiler/hir/immutable_hir_p0_mir_inventory_20261103.md"
+
+# Every raw entrypoint / boundary anchor cited by the P0 inventory.
+val ANCHORS: [text] = [
+    "module_lowering.spl:508", "module_lowering.spl:512", "module_lowering.spl:655",
+    "module_lowering.spl:663", "module_lowering.spl:1842", "module_lowering.spl:1950",
+    "module_lowering.spl:2278", "module_lowering.spl:2299", "module_lowering.spl:2326",
+    "module_lowering.spl:2606", "module_lowering.spl:2620", "module_lowering.spl:2649",
+    "module_lowering.spl:3512", "module_lowering.spl:3554", "archive_borrowed_module_v1.spl:33",
+    "asm_and_targets.spl:111", "asm_and_targets.spl:125", "asm_and_targets.spl:149",
+    "asm_and_targets.spl:232", "asm_and_targets.spl:242", "mir_cfg_select.spl:",
+    "mir_target_context.spl:144", "provider_metadata.spl:375", "declaration_default_bindings_v1.spl:113",
+    "declaration_default_rewrite_v1.spl:531", "resident_default_global_owner.spl:68",
+    "native_trait_conversion.spl:174", "native_trait_thunks.spl:33", "switch_operators_calls.spl:7924",
+    "driver_pipeline_lowering.spl:1003", "driver_pipeline_lowering.spl:1055",
+    "driver_pipeline_lowering.spl:1070", "driver_pipeline_lowering.spl:1183",
+    "driver_pipeline_lowering.spl:1201", "driver_pipeline_lowering.spl:1484",
+    "driver_pipeline_lowering.spl:1602", "driver_pipeline_lowering.spl:1635",
+    "transient_owner.spl:48"]
+
+fn read(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn section_rows(src: text, header: text) -> [[text]]:
+    var out: [[text]] = []
+    var inside = false
+    for line in src.split("\n"):
+        if line.starts_with(header):
+            inside = true
+        elif inside and line.starts_with("  - "):
+            out.push(line.substring(4, line.len()).split(" | "))
+        elif inside and line.trim() != "" and not line.starts_with("#"):
+            inside = false
+    out
+
+fn pending_count(rows: [[text]]) -> i64:
+    var n = 0
+    for r in rows:
+        if r[2] == "pending":
+            n = n + 1
+    n
+
+# Qualifier: default may leave `legacy` only with zero pending rows AND the Stage-3 gate set.
+fn default_flip_allowed(rows: [[text]], stage3: text?) -> bool:
+    pending_count(rows) == 0 and stage3 != nil
+
+describe "TargetHIR P8 migration matrix (U7)":
+    it "covers every P0 inventory entrypoint with a well-formed row":
+        val rows = section_rows(read(MATRIX), "rows:")
+        expect(rows.len() >= ANCHORS.len()).to_equal(true)
+        for r in rows:
+            expect(r.len()).to_equal(4)
+            val d = r[2]
+            expect(d == "migrated" or d == "pending" or d == "retained").to_equal(true)
+        for a in ANCHORS:
+            var hit = false
+            for r in rows:
+                if r[1].contains(a):
+                    hit = true
+            expect(hit).to_equal(true)
+
+    it "anchors still exist in the P0 inventory document":
+        val inv = read(INVENTORY)
+        expect(inv.contains("module_lowering.spl:508")).to_equal(true)
+        expect(inv.contains("asm_and_targets.spl:111")).to_equal(true)
+        expect(inv.contains("archive_borrowed_module_v1.spl:33")).to_equal(true)
+        expect(inv.contains("driver_pipeline_lowering.spl:1003")).to_equal(true)
+
+    it "does not claim PR-D's unwired reader as migrated":
+        val rows = section_rows(read(MATRIX), "rows:")
+        for r in rows:
+            if r[0] == "cfg_select_expr":
+                expect(r[2]).to_equal("pending")
+                expect(r[3].contains("#6565")).to_equal(true)
+        expect(read("src/compiler/50.mir/mir_target_hir_select.spl").contains("fn mir_target_hir_select_arm")).to_equal(true)
+
+    it "IHIR-04: typed arm reader takes TargetHIR, not a raw HirModule":
+        val src = read("src/compiler/50.mir/mir_target_hir_select.spl")
+        expect(src.contains("fn mir_target_hir_select_arm(view: TargetHIR")).to_equal(true)
+        expect(src.contains("HirModule")).to_equal(false)
+        # Strict-API compile rejection of raw HirModule is not yet enforceable: checklist item stays open.
+        val chk = section_rows(read(MATRIX), "legacy_deletion_checklist:")
+        var has = false
+        for c in chk:
+            if c[0] == "ihir04_strict":
+                has = true
+        expect(has).to_equal(true)
+
+    it "keeps the default legacy until zero pending and the Stage-3 gate is set":
+        val rows = section_rows(read(MATRIX), "rows:")
+        expect(pending_count(rows) > 0).to_equal(true)
+        expect(default_flip_allowed(rows, env_get_opt("SIMPLE_STAGE3_COMPILER"))).to_equal(false)
+        expect(default_flip_allowed(rows, "/x/stage3")).to_equal(false)
+        val none: [[text]] = []
+        expect(default_flip_allowed(none, nil)).to_equal(false)
+        expect(default_flip_allowed(none, "/x/stage3")).to_equal(true)
+
+    it "Stage-3 qualification is PENDING, never faked":
+        val s3 = env_get_opt("SIMPLE_STAGE3_COMPILER")
+        if s3 == nil:
+            print "PENDING: SIMPLE_STAGE3_COMPILER unset; Stage-3 qualification not run"
+        else:
+            print "PENDING: Stage-3 gate set but typed-mode self-host run not recorded"
+        expect(section_rows(read(MATRIX), "legacy_deletion_checklist:").len()).to_equal(6)

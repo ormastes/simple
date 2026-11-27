@@ -434,3 +434,15 @@ them now have their own entries: the parser continuation regression (fixed in
 `fba46571d6a`) and the implicit-self hint. The rest await the next seed
 rebuild, and this audit remains the checklist for attributing any failure.
 
+
+## Verification note 2026-11-25 (work/p2w1-aj-20261125)
+
+Status header (`Closed 2026-09-16 — audit complete; both bootstrap-gating
+changes measured and CLEARED`) re-confirmed against the body on
+`origin/release/1.0.0` (21e831c0a9b): the audit enumerates all 20
+behaviour-capable changes, and the two bootstrap-gating follow-ups
+(vulkan_backend return-shape byte-identical SPIR-V; interpreter_eval.rs
+glob-`main` hunks safe-to-compile) carry measured verdicts in-file. This is an
+audit record, not a live defect — nothing to re-run. No spec execution
+attempted: the pinned seed at HEAD rejects `@representation_boundary`
+repo-wide, so any run would fail for an unrelated reason.

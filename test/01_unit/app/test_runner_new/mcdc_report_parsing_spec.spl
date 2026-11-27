@@ -1,0 +1,119 @@
+# @req REQ-MCDC-ENFORCEMENT-005
+"""
+# MC/DC report parsing and decision/condition counting
+
+The runner extracts one bounded evidence envelope from child output and builds
+per-condition results from the compiler's obligation manifest. Malformed,
+duplicated or ambiguous input must be rejected (invalid sentinel / nil), never
+quietly counted as coverage.
+"""
+
+use std.spec.*
+use std.test_runner.test_runner_mcdc_report.{
+    test_runner_extract_mcdc_evidence_v1,
+    test_runner_build_mcdc_evidence,
+    test_runner_mcdc_evidence_v1_text
+}
+
+val INVALID = "MCDC-EVIDENCE-invalid"
+val SCHEMA = "schema: simple-mcdc-obligations-v1\n"
+val BEGIN = "__SIMPLE_MCDC_EVIDENCE_BEGIN__"
+val END = "__SIMPLE_MCDC_EVIDENCE_END__"
+
+fn cond(rid: i64, sem: text, ordinal: i64) -> text:
+    "condition|{rid}|{sem}|v1|{ordinal}|0|0|0|0|false|compiler-boolean-projection-v1"
+
+fn manifest_of(rows: [text]) -> text:
+    SCHEMA + rows.join("\n") + "\n"
+
+describe "evidence envelope extraction":
+    it "returns empty when the output carries no envelope":
+        expect(test_runner_extract_mcdc_evidence_v1("")).to_equal("")
+        expect(test_runner_extract_mcdc_evidence_v1("1 example, 0 failures")).to_equal("")
+
+    it "extracts a bare header block ended by the first non-protocol line":
+        val out = test_runner_extract_mcdc_evidence_v1("MCDC-EVIDENCE-v1\ncounters|0|0\nsummary line")
+        expect(out).to_start_with("MCDC-EVIDENCE-v1")
+        expect(out).to_contain("counters|0|0")
+        expect(out.contains("summary line")).to_equal(false)
+
+    it "extracts an explicit begin/end envelope and drops surrounding noise":
+        val out = test_runner_extract_mcdc_evidence_v1("noise\n{BEGIN}\nMCDC-EVIDENCE-v1\ncounters|0|0\n{END}\ntail")
+        expect(out).to_start_with("MCDC-EVIDENCE-v1")
+        expect(out.contains("noise")).to_equal(false)
+        expect(out.contains("tail")).to_equal(false)
+
+    it "rejects a block with no counters row":
+        expect(test_runner_extract_mcdc_evidence_v1("MCDC-EVIDENCE-v1\nsaturated|false\nend")).to_equal(INVALID)
+
+    it "rejects two counters rows":
+        expect(test_runner_extract_mcdc_evidence_v1("MCDC-EVIDENCE-v1\ncounters|0|0\ncounters|0|0\nend")).to_equal(INVALID)
+
+    it "rejects two envelopes":
+        expect(test_runner_extract_mcdc_evidence_v1("MCDC-EVIDENCE-v1\ncounters|0|0\nx\nMCDC-EVIDENCE-v1\ncounters|0|0")).to_equal(INVALID)
+        expect(test_runner_extract_mcdc_evidence_v1("{BEGIN}\nMCDC-EVIDENCE-v1\ncounters|0|0\n{END}\n{BEGIN}\nMCDC-EVIDENCE-v1\ncounters|0|0\n{END}")).to_equal(INVALID)
+
+    it "rejects an unterminated explicit envelope and a stray end marker":
+        expect(test_runner_extract_mcdc_evidence_v1("{BEGIN}\nMCDC-EVIDENCE-v1\ncounters|0|0")).to_equal(INVALID)
+        expect(test_runner_extract_mcdc_evidence_v1("{END}")).to_equal(INVALID)
+
+    it "rejects a foreign row inside an explicit envelope":
+        expect(test_runner_extract_mcdc_evidence_v1("{BEGIN}\nMCDC-EVIDENCE-v1\ncounters|0|0\nrandom text\n{END}")).to_equal(INVALID)
+
+describe "obligation manifest to condition counting":
+    it "yields one result per condition across several decisions":
+        val m = manifest_of([cond(1, "d1", 0), cond(1, "d1", 1), cond(2, "d2", 0)])
+        val ev = test_runner_build_mcdc_evidence(m, [], [], false)
+        expect(ev.?).to_equal(true)
+        expect(ev.unwrap().conditions.len()).to_equal(3)
+
+    it "marks every condition uncovered when no evaluation was recorded":
+        val m = manifest_of([cond(1, "d1", 0), cond(1, "d1", 1)])
+        val ev = test_runner_build_mcdc_evidence(m, [], [], false).unwrap()
+        for c in ev.conditions:
+            expect(c.covered).to_equal(false)
+            expect(c.classification).to_equal("insufficient-evidence")
+
+    it "preserves semantic id, ordinal and policy per condition":
+        val m = manifest_of([cond(5, "alpha", 0), cond(5, "alpha", 1)])
+        val ev = test_runner_build_mcdc_evidence(m, [], [], false).unwrap()
+        expect(ev.conditions[0].semantic_id).to_equal("alpha")
+        expect(ev.conditions[1].condition_ordinal).to_equal(1)
+        expect(ev.conditions[1].applied_policy).to_equal("compiler-boolean-projection-v1")
+
+    it "reports saturation with a non-zero dropped count":
+        val m = manifest_of([cond(1, "d1", 0)])
+        val ev = test_runner_build_mcdc_evidence(m, [], [], true).unwrap()
+        expect(ev.recorder_saturated).to_equal(true)
+        expect(ev.dropped_count > 0).to_equal(true)
+        val clean = test_runner_build_mcdc_evidence(m, [], [], false).unwrap()
+        expect(clean.dropped_count).to_equal(0)
+
+    it "rejects a manifest without the schema line":
+        expect(test_runner_build_mcdc_evidence(cond(1, "d1", 0) + "\n", [], [], false).?).to_equal(false)
+
+    it "rejects a manifest with no condition rows":
+        expect(test_runner_build_mcdc_evidence(SCHEMA, [], [], false).?).to_equal(false)
+        expect(test_runner_build_mcdc_evidence("", [], [], false).?).to_equal(false)
+
+    it "rejects malformed condition rows":
+        val bad_fields = SCHEMA + "condition|1|d1|v1|0\n"
+        val bad_bool = SCHEMA + "condition|1|d1|v1|0|0|0|0|0|maybe|p\n"
+        val bad_int = SCHEMA + "condition|x|d1|v1|0|0|0|0|0|false|p\n"
+        val neg_ordinal = SCHEMA + "condition|1|d1|v1|-1|0|0|0|0|false|p\n"
+        val big_ordinal = SCHEMA + "condition|1|d1|v1|256|0|0|0|0|false|p\n"
+        val empty_sem = SCHEMA + "condition|1||v1|0|0|0|0|0|false|p\n"
+        val empty_policy = SCHEMA + "condition|1|d1|v1|0|0|0|0|0|false|\n"
+        for m in [bad_fields, bad_bool, bad_int, neg_ordinal, big_ordinal, empty_sem, empty_policy]:
+            expect(test_runner_build_mcdc_evidence(m, [], [], false).?).to_equal(false)
+
+describe "evidence text round trip":
+    it "serialises header, saturation, counters and one row per condition":
+        val m = manifest_of([cond(1, "d1", 0), cond(2, "d2", 0)])
+        val ev = test_runner_build_mcdc_evidence(m, [], [], false).unwrap()
+        val text_out = test_runner_mcdc_evidence_v1_text(ev)
+        expect(text_out).to_start_with("MCDC-EVIDENCE-v1")
+        expect(text_out).to_contain("saturated|false")
+        expect(text_out).to_contain("counters|0|0")
+        expect(text_out).to_contain("condition|d1|v1|0|false|insufficient-evidence")
+        expect(text_out).to_contain("condition|d2|v1|0|false|insufficient-evidence")

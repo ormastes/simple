@@ -1,8 +1,13 @@
 # arm64 `arm64-desktop-engine2d` media phase: seed native codegen cannot compile two `src/os/apps/dbd/` bodies (2026-09-01)
 
-Status: **OPEN**. Fifth blocker in the chain behind the arm64 WM+Vulkan pixel
-gate. Found after clearing three earlier prerequisites in a fresh
-`origin/main` worktree.
+Status: **SUPERSEDED** 2026-11-11 (lane p3-comp9; closed 2026-11-09 closure first
+confirmed by P3 compiler-seed lane 2026-11-10). Premise stale: (a) bare
+`provider.configured` is invalid Simple — the hard error is parity with the
+self-hosted compiler, pinned on both engines; (b) the imported static call no
+longer reproduces and is pinned by
+`test/01_unit/bugs/dbd_implicit_self_read_and_imported_static_call_spec.spl`
+(2/2 PASS on the tracked seed 46fe8f6b6def, re-verified lane p3-comp9). See the
+dated addendum below.
 
 ## Prerequisites cleared first (each was a separate hard stop)
 
@@ -73,3 +78,97 @@ remains **UNPROVEN**. No boot was attempted.
 (`NVIDIA TITAN RTX`, `apiVersion 1.4.312`, `driverName NVIDIA`).
 The gate's own `--selftest` is green with the fresh seed:
 `PASS — 25 selftest fixture(s) checked, ... renderer=n/a`.
+
+## Closure (2026-11-09): premise stale — (a) is not a compiler gap, (b) no longer reproduces
+
+Re-examined against the canonical language rule before touching the seed.
+
+**(a) `provider.configured` without `self.` is INVALID Simple, not valid
+Simple.** "Implicit self" means the `self` *parameter* is implicit; the field
+receiver is never implicit. Sources of truth, all agreeing:
+
+- `doc/07_guide/language/coding_style.md` — `this.x` -> `self.x (implicit
+  self)`; "`self.x` works, but `self` parameter is implicit"; rule 3 "In
+  methods, do not write `self` as a parameter."
+- Pure-Simple HIR lowering,
+  `src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl:326-346`:
+  a non-static method gets exactly one injected symbol, `self`. Field names
+  are never injected into the method scope, so a bare `provider` is an
+  unresolved name in the self-hosted compiler too — the seed's
+  `variable provider not found` / `GlobalLoad: unresolved identifier` IS parity.
+- The already-landed contract for the assignment form:
+  `scripts/check/check-implicit-self-field-assignment.shs` records "the chosen
+  fix direction is a hard error, not implicit-self resolution" and pins it on
+  both engines; `test/01_unit/compiler/hir/implicit_self_field_hir_probe_spec.spl`
+  pins the self-hosted lowering hard-error.
+- The source was fixed where the defect actually was: `dbd_provisioning.spl`
+  now reads `self.provider.configured` in `pub fn ready()` (`:169-172`) and
+  `boot_owner.provider.configured` in `admit_boot_owner` (`:139`); no bare
+  `provider` remains (landed with 711c590347f).
+
+Measured on the current seed (`bin/simple.exe`, release/1.0.0 at 27e65c24371):
+the bare-read probe is rejected on BOTH engines with a diagnostic naming
+`provider`; the explicit `self.provider.configured` probe runs and prints
+`true` on both. The guard above grew READ probes (`interpreter/read`,
+`jit/read`) so a future compiler that silently *accepts* a bare field read is
+caught as a contract drift, the same way a silently-accepted bare write is.
+
+**(b) `DbdTransactionOwnerV1.new()` on a `use`-imported class** does not
+reproduce on the current seed: a two-module repro (class exported from module
+A with `static fn new()`, called inside a `static fn create()` constructor in
+module B that imports it) prints the field value under both
+`SIMPLE_EXECUTION_MODE=interpreter` and `=jit` with no `jit-compile-error`
+demotion. Pinned by
+`test/01_unit/bugs/dbd_implicit_self_read_and_imported_static_call_spec.spl`
+(+ `dbd_transaction_owner_shape_helper.spl`), which mirrors both dbd shapes
+exactly (self-less `pub fn ready()` nested read; imported static call in a
+static constructor): 2 examples, 0 failures.
+
+Not re-run here: the full arm64 engine2d media phase (needs the aarch64
+sysroot + QEMU lane on a Linux host). If that lane still fails on the dbd
+bodies, it is a different defect and should be filed with its current output.
+
+Status: **closed** (stale premise, evidence above). No seed change was made or
+needed; changing the seed to resolve bare fields would have BROKEN parity with
+the self-hosted compiler and the recorded contract.
+
+## Triage 2026-11-10 (P3 compiler-seed lane, work/p3-seed-20261110)
+
+Verdict: **SUPERSEDED (closed 2026-11-09 closure confirmed)**. Closure evidence
+verified present in this worktree (base `origin/release/1.0.0`,
+1504212d788b): `test/01_unit/bugs/dbd_implicit_self_read_and_imported_static_call_spec.spl`
+and `test/01_unit/bugs/dbd_transaction_owner_shape_helper.spl` both exist; the
+source fix (`self.provider.configured`, landed with 711c590347f) is the recorded
+contract direction (hard error on bare field read, pinned on both engines by
+`scripts/check/check-implicit-self-field-assignment.shs`). No seed change made
+or needed; a bare-field-resolving seed would break parity with the self-hosted
+compiler. The full arm64 media phase re-run remains a Linux/QEMU-lane item per
+the closure note.
+
+## Triage 2026-11-11 (lane comp9, worktree simple-p3-comp9-20261111, base 77be2266752d)
+
+Verdict: **SUPERSEDED** — confirms the 2026-11-09 closure and the P3 compiler-seed
+lane 2026-11-10 confirmation; not re-litigated. Fresh re-verification at this base
+(not resting on prior addenda alone):
+
+- Source fix 711c590347f IS an ancestor of the lane base; the fixed sources are in
+  tree exactly as the closure records: `self.provider.configured` at
+  `src/os/apps/dbd/dbd_provisioning.spl:170` and `boot_owner.provider.configured`
+  at :139; no bare `provider` remains.
+- Both pinning specs exist:
+  `test/01_unit/bugs/dbd_implicit_self_read_and_imported_static_call_spec.spl` and
+  `test/01_unit/bugs/dbd_transaction_owner_shape_helper.spl`.
+- Behavioral (tracked seed bin/simple.exe @ 46fe8f6b6def,
+  `SIMPLE_LIB=src ... test ... --mode=interpreter --no-cache`):
+  `dbd_implicit_self_read_and_imported_static_call_spec.spl` → outcome=OK,
+  executed=2 passed=2 failed=0.
+- Premise-stale reasoning unchanged: (a) a bare field read is invalid Simple and
+  the seed's hard error IS parity with the self-hosted compiler
+  (`declaration_lowering.spl:326-346` injects only the `self` symbol), pinned on
+  both engines by `scripts/check/check-implicit-self-field-assignment.shs`; a
+  seed that resolved bare fields would break that contract.
+- Not re-run (per the closure note): the full arm64 engine2d media phase needs the
+  aarch64 sysroot + QEMU lane on a Linux host; if it still fails on the dbd bodies
+  it is a different defect to file with its current output.
+
+Disposition: SUPERSEDED. Header flipped OPEN → SUPERSEDED 2026-11-11 (lane p3-comp9).

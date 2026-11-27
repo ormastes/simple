@@ -1,0 +1,48 @@
+# P8 migrate: typed TargetHIR reader for decl-level @cfg guards.
+# Covers matrix rows cfg_decl_predicate (MirLowering.decl_cfg_keep) and
+# cfg_decl_group (MirLowering.cfg_group_winners). Same contract as PR #6606's
+# expression-arm wiring: legacy unchanged, shadow recomputes through the typed
+# reader and a divergence is fatal, typed uses the typed verdict.
+# The live path has no frozen HirSnapshot yet (P5/P6), so it binds a synthetic
+# per-module snapshot id; snapshot identity is not enforced live until then.
+
+use compiler.common.mir_target_context.{MirTargetContext}
+use compiler.mir.mir_cfg_select.{mir_cfg_item_enabled}
+use compiler.hir.target_hir.hir_snapshot.{HirSnapshotId, hir_snapshot_id_new, hir_snapshot_id_equals, hir_snapshot_id_text}
+use compiler.hir.target_hir.target_hir.{TargetHIR, target_hir_for_context}
+
+# Ok(true) keep / Ok(false) drop; malformed guard -> Err.
+fn mir_target_hir_decl_cfg_enabled(view: TargetHIR, snapshot: HirSnapshotId, cfg: [text], features: [text]) -> Result<bool, text>:
+    if not hir_snapshot_id_equals(view.snapshot, snapshot):
+        return Err("target_hir_snapshot_mismatch: " + hir_snapshot_id_text(view.snapshot) + " != " + hir_snapshot_id_text(snapshot))
+    val verdict = mir_cfg_item_enabled(cfg, view.target, features)
+    if verdict == -2:
+        return Err("target_hir_malformed_cfg_condition")
+    Ok(verdict == 1)
+
+# Legacy encoding in/out: 1 keep, 0 drop, -2 malformed. Err on shadow divergence.
+fn mir_target_hir_live_decl_cfg(mode: text, module_name: text, cfg: [text], target: MirTargetContext, features: [text], legacy_verdict: i64) -> Result<i64, text>:
+    if mode == "legacy":
+        return Ok(legacy_verdict)
+    val snap = hir_snapshot_id_new(if module_name.trim() == "": "mir.live_lowering" else: module_name, "live-lowering-unfrozen", 0)
+    if snap.is_err():
+        return Err(snap.unwrap_err())
+    val view = target_hir_for_context(snap.unwrap(), target, "decl_cfg")
+    if view.is_err():
+        return Err(view.unwrap_err())
+    val typed = mir_target_hir_decl_cfg_enabled(view.unwrap(), snap.unwrap(), cfg, features)
+    var typed_v = 0
+    if typed.is_err():
+        if typed.unwrap_err() != "target_hir_malformed_cfg_condition":
+            return Err(typed.unwrap_err())
+        typed_v = -2
+    elif typed.unwrap():
+        typed_v = 1
+    var legacy_norm = legacy_verdict
+    if legacy_norm != 1 and legacy_norm != -2:
+        legacy_norm = 0
+    if typed_v != legacy_norm:
+        return Err("target_hir_shadow_mismatch: decl_cfg legacy=" + legacy_verdict.to_string() + " typed=" + typed_v.to_string())
+    if mode == "typed":
+        return Ok(typed_v)
+    Ok(legacy_verdict)

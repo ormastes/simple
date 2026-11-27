@@ -1,0 +1,75 @@
+# Caret profile view contribution (REQ-CARET-EXT-003, acceptance CU-006).
+# The builtin caret.workbench v2 manifest registers the same logical view ids
+# whether the shell is TUI or GUI; the caret profile never activates the
+# `event:*` wildcard or unrelated builtin applications.
+
+use std.spec
+use std.spec.step
+use std.editor.core.session.{EditSession}
+use std.editor.extensions.builtin.caret_workbench_ext.{caret_workbench_ext_load}
+use app.editor.editor_controller.{EditorController}
+use app.editor.profile_plan.{profile_activation_plan}
+use app.editor.gui_shell.{gui_shell_new, gui_shell_apply_profile}
+use app.editor.tui_shell.{editor_tui_apply_profile}
+
+fn _ctrl() -> EditorController:
+    var session = EditSession.new()
+    session.open_empty()
+    EditorController.new(session)
+
+fn _view_ids(ctrl: EditorController) -> [text]:
+    var ids: [text] = []
+    for entry in ctrl.extension_host.view_registry:
+        ids.push(entry.view.id)
+    ids
+
+describe "caret profile view contribution":
+
+    it "builtin caret manifest decodes with zero diagnostics":
+        # @req REQ-CARET-EXT-003
+        step("decode builtin manifest")
+        val load = caret_workbench_ext_load()
+        expect(load.issues.len()).to_equal(0)
+        expect(load.manifest.schema_version).to_equal("simple.ide.extension/2")
+        expect(load.manifest.name).to_equal("caret.workbench")
+        expect(load.manifest.contributes_view_containers.len()).to_equal(1)
+        expect(load.manifest.contributes_view_containers[0].id).to_equal("caret.agents")
+
+    it "plan names the narrow profile event, not the wildcard":
+        # @req REQ-CARET-EXT-003
+        val plan = profile_activation_plan("caret")
+        expect(plan.steps.contains("event:onProfile:caret")).to_equal(true)
+        expect(plan.steps.contains("event:*")).to_equal(false)
+
+    it "TUI and GUI caret register the identical plan view ids":
+        # @req REQ-CARET-EXT-003
+        step("apply caret through both shells")
+        val tui = _ctrl()
+        editor_tui_apply_profile(tui, "caret")
+        var session = EditSession.new()
+        session.open_empty()
+        val gui = gui_shell_new(session)
+        gui_shell_apply_profile(gui, "caret")
+        val tui_ids = _view_ids(tui)
+        val gui_ids = _view_ids(gui.ctrl)
+        expect(tui_ids).to_equal(gui_ids)
+        for id in ["caret.agent_roster", "caret.attention_inbox", "caret.terminal", "caret.composer", "trace.explorer"]:
+            expect(tui.extension_host.view_registered(id)).to_equal(true)
+        expect(tui.extension_host.view_container_registry.len()).to_equal(1)
+
+    it "caret does not activate unrelated builtin applications":
+        # @req REQ-CARET-EXT-003
+        val ctrl = _ctrl()
+        editor_tui_apply_profile(ctrl, "caret")
+        expect(ctrl.extension_host.is_active("caret.workbench")).to_equal(true)
+        expect(ctrl.extension_host.is_active("simple-language")).to_equal(true)
+        expect(ctrl.extension_host.is_active("markdown-language")).to_equal(false)
+        # only the language and the caret workbench are active
+        expect(ctrl.extension_host.active_count()).to_equal(2)
+
+    it "editor profile does not register caret views":
+        # @req REQ-CARET-EXT-003
+        val ctrl = _ctrl()
+        editor_tui_apply_profile(ctrl, "editor")
+        expect(ctrl.extension_host.is_active("caret.workbench")).to_equal(false)
+        expect(ctrl.extension_host.view_registered("caret.agent_roster")).to_equal(false)

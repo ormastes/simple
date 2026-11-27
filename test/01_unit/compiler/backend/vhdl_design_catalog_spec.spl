@@ -352,6 +352,38 @@ describe "VHDL design-wide catalog":
         expect(tag_result.is_err()).to_equal(true)
         expect(tag_result.unwrap_err()).to_contain("invalid flat fields")
 
+    it "preserves direct MIR hardware metadata when no sidecar row matches":
+        # @req REQ-SSPEC-COMPILER
+        step("preserves direct MIR hardware metadata when no sidecar row matches")
+        val mir = catalog_module_b("direct_mir_entry", true)
+        var modules: Dict<text, MirModule> = {}
+        modules[mir.name] = mir
+        val result = vhdl_build_design_catalog(modules, "direct_mir_contract")
+        expect(result.is_ok()).to_equal(true)
+        val catalog = result.unwrap()
+        expect(catalog.hardware_entity_count).to_equal(1)  # oracle: 1 — the one MIR-flagged entry
+        var preserved = false
+        for symbol in catalog.design.functions.keys():
+            val func = catalog.design.functions[symbol]
+            if func.name == "direct_mir_entry":
+                preserved = func.has_vhdl_metadata and func.vhdl_metadata.is_hardware
+        expect(preserved).to_equal(true)
+
+    it "rejects a generic direct MIR hardware entry before VHDL emission":
+        # @req REQ-SSPEC-COMPILER
+        step("rejects a generic direct MIR hardware entry before VHDL emission")
+        var mir = catalog_module_b("generic_direct_entry", true)
+        val symbol = SymbolId(id: catalog_function_symbol(mir, "generic_direct_entry"))
+        var func = mir.functions[symbol]
+        func.generic_params = ["T"]
+        func.is_generic_template = true
+        mir.functions[symbol] = func
+        var modules: Dict<text, MirModule> = {}
+        modules[mir.name] = mir
+        val result = vhdl_build_design_catalog(modules, "generic_direct_contract")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("is generic")
+
     it "rebases module-local symbols and orders record dependencies":
         # @req REQ-SSPEC-COMPILER
         step("rebases module-local symbols and orders record dependencies")

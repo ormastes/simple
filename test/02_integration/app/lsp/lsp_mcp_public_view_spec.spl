@@ -1,0 +1,100 @@
+# @req REQ-PUBVIEW-001 REQ-PUBVIEW-003 REQ-PUBVIEW-004 REQ-PUBVIEW-005 REQ-PUBVIEW-007 REQ-PUBVIEW-009
+# End to end through the simple-lsp-mcp bridge (`handle_tool_call`, which
+# spawns the deployed binary on src/app/cli/query_visibility.spl): the default
+# public view hides private symbols, says so IN the symbol list the LLM reads,
+# names the exact `visibility` argument, and each reveal level adds exactly one
+# known symbol of the two-feature x two-layer fixture test/fixtures/mdsoc_pubview.
+# design: doc/05_design/app/source_view/public_view_by_feature_layer.md
+use std.spec
+use std.spec.step
+use app.simple_lsp_mcp.tools.{handle_tool_call}
+use app.simple_lsp_mcp.session_state.{lsp_reset_location}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_text_or, json_value_items, json_value_has}
+
+val X_CORE = "test/fixtures/mdsoc_pubview/feature_x/10.core/core.spl"
+val ROOT = "test/fixtures/mdsoc_pubview"
+
+fn call_text(tool: text, arguments: text) -> text:
+    lsp_reset_location()
+    val reply = handle_tool_call("1", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"" + tool + "\",\"arguments\":{" + arguments + "}}}")
+    val wire = json_parse_value_strict(reply).unwrap()
+    val content = json_value_items(json_value_field(json_value_field(wire, "result"), "content"))
+    json_value_text_or(json_value_field(content[0], "text"), "")
+
+fn call(tool: text, arguments: text) -> [JsonValue]:
+    json_value_items(json_parse_value_strict(call_text(tool, arguments)).unwrap())
+
+fn names(entries: [JsonValue]) -> [text]:
+    var out: [text] = []
+    for entry in entries:
+        val name = json_value_text_or(json_value_field(entry, "name"), "")
+        if not name.starts_with("⋯"): out.push(name)
+    out
+
+fn summary_entry(entries: [JsonValue]) -> JsonValue:
+    for entry in entries:
+        if json_value_text_or(json_value_field(entry, "name"), "").starts_with("⋯"): return entry
+    JsonValue.Null
+
+describe "lsp_symbols public view through the lsp-mcp bridge":
+    it "defaults to public and carries the hidden summary in the list itself":
+        # @capture(symbols): default lsp_symbols reply on feature_x/10.core/core.spl
+        step("default call: only the feature-root-exported symbol is listed")
+        val entries = call("lsp_symbols", "\"file\":\"" + X_CORE + "\"")
+        expect(names(entries)).to_equal(["x_core_api"])
+        step("the trailing synthetic entry is the in-band hint")
+        val hint = summary_entry(entries)
+        expect(hint != JsonValue.Null).to_equal(true)
+        val text = json_value_text_or(json_value_field(hint, "name"), "")
+        expect(text.starts_with("⋯ 3 hidden (1 feature_private fn, 1 layer_private type, 1 module_private fn)")).to_equal(true)
+        expect(text.contains("lsp_symbols visibility=\"feature_private\"")).to_equal(true)
+        expect(text.contains("workspace/executeCommand simple.setVisibility [\"feature_private\"]")).to_equal(true)
+        step("structured summary: counts by class and kind, reveal handles, default rule")
+        val summary = json_value_field(hint, "simpleHiddenSummary")
+        expect(json_value_field(summary, "hidden")).to_equal(JsonValue.Int(3))
+        expect(json_value_field(json_value_field(summary, "by_class"), "feature_private")).to_equal(JsonValue.Int(1))
+        expect(json_value_field(json_value_field(summary, "by_kind"), "fn")).to_equal(JsonValue.Int(2))
+        expect(json_value_text_or(json_value_field(json_value_field(json_value_field(summary, "reveal"), "mcp"), "visibility"), "")).to_equal("feature_private")
+        expect(json_value_text_or(json_value_field(summary, "visibility_default"), "")).to_equal("public (mdsoc_boundary)")
+
+    it "each reveal level adds exactly one more symbol and the counts match":
+        # @capture(reveal): names per visibility level
+        step("feature_private adds the layer-exported, not feature-exported fn")
+        val feature_level = call("lsp_symbols", "\"file\":\"" + X_CORE + "\",\"visibility\":\"feature_private\"")
+        expect(names(feature_level)).to_equal(["x_core_api", "x_core_shared"])
+        expect(json_value_field(json_value_field(summary_entry(feature_level), "simpleHiddenSummary"), "hidden")).to_equal(JsonValue.Int(2))
+        step("layer_private adds the pub-but-unexported type")
+        val layer_level = call("lsp_symbols", "\"file\":\"" + X_CORE + "\",\"visibility\":\"layer_private\"")
+        expect(names(layer_level)).to_equal(["x_core_api", "x_core_shared", "XCoreType"])
+        expect(json_value_field(json_value_field(summary_entry(layer_level), "simpleHiddenSummary"), "hidden")).to_equal(JsonValue.Int(1))
+        step("all adds the module-private fn and no summary entry remains")
+        val everything = call("lsp_symbols", "\"file\":\"" + X_CORE + "\",\"visibility\":\"all\"")
+        expect(names(everything)).to_equal(["x_core_api", "x_core_shared", "XCoreType", "x_core_secret"])
+        expect(summary_entry(everything)).to_equal(JsonValue.Null)
+        step("public hidden count equals what `all` adds")
+        val public = call("lsp_symbols", "\"file\":\"" + X_CORE + "\"")
+        expect(json_value_field(json_value_field(summary_entry(public), "simpleHiddenSummary"), "hidden")).to_equal(JsonValue.Int(names(everything).len() - names(public).len()))
+
+    it "rejects an unknown visibility level instead of silently showing all":
+        val reply = call_text("lsp_symbols", "\"file\":\"" + X_CORE + "\",\"visibility\":\"secret\"")
+        expect(reply.contains("unsupported_visibility")).to_equal(true)
+        expect(reply.contains("x_core_api")).to_equal(false)
+
+describe "workspace public views through the lsp-mcp bridge":
+    it "by feature lists one feature across both layers":
+        # @capture(by_feature): lsp_workspace_symbols feature=feature_x
+        val entries = call("lsp_workspace_symbols", "\"feature\":\"" + ROOT + "/feature_x\",\"root\":\"" + ROOT + "\"")
+        expect(names(entries)).to_equal(["x_core_api", "x_app_api"])
+        val hint = json_value_text_or(json_value_field(summary_entry(entries), "name"), "")
+        expect(hint.starts_with("⋯ 6 hidden")).to_equal(true)
+        step("every listed symbol carries its feature and layer")
+        expect(json_value_text_or(json_value_field(entries[1], "layer"), "")).to_equal("20.app")
+        expect(json_value_text_or(json_value_field(entries[1], "feature"), "").ends_with("feature_x")).to_equal(true)
+
+    it "by layer lists one layer across both features, at the requested level":
+        # @capture(by_layer): lsp_workspace_symbols layer=20.app visibility=layer_private
+        val entries = call("lsp_workspace_symbols", "\"layer\":\"20.app\",\"root\":\"" + ROOT + "\",\"visibility\":\"layer_private\"")
+        expect(names(entries)).to_equal(["x_app_api", "x_app_shared", "X_APP_LIMIT", "y_app_api", "y_app_shared", "Y_APP_LIMIT"])
+        val hint = json_value_text_or(json_value_field(summary_entry(entries), "name"), "")
+        expect(hint.starts_with("⋯ 2 hidden (2 module_private fn)")).to_equal(true)
+        expect(hint.contains("visibility=\"all\"")).to_equal(true)

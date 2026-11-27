@@ -37,10 +37,11 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir_result,
     simple_web_layout_render_html_draw_ir_result_at_time
 }
-use test.system.browser_dom_identity_helpers.{system_dom_identity_index, system_dom_route}
+use test.fixtures.system_support.browser_dom_identity_helpers.{system_dom_identity_index, system_dom_route}
+use std.nogc_sync_mut.ui.compare_view_host.{compare_view_inspect}
 
-val WIDTH: i32 = 64
-val HEIGHT: i32 = 48
+val WIDTH: i32 = 240
+val HEIGHT: i32 = 160
 
 fn _node_index(nodes: [HNode], component_id: text) -> i32:
     var index = 0
@@ -76,6 +77,13 @@ fn _style(command: DrawIrCommand, key: text) -> text:
             return property.value
     fail("missing Draw IR computed style: {key}")
     ""
+
+fn _marker_points(command: DrawIrCommand) -> [i32]:
+    var out: [i32] = []
+    for point in command.points:
+        out.push(point.x)
+        out.push(point.y)
+    out
 
 fn _geometry(
     result: SimpleWebLayoutDrawIrResult, component_id: text
@@ -283,6 +291,7 @@ fn check_nested_disclosure_independent():
         open_inner, "inner-content"
     )).to_equal([32, 20, 32, 20])
     val open_pixels = _pixels(open_inner)
+    compare_view_inspect("details_summary nested disclosure", "closed inner", closed_pixels, WIDTH, HEIGHT, "open inner", open_pixels, WIDTH, HEIGHT)
     expect(open_pixels[21 * WIDTH + 33]).to_equal(0xFF7C3AEDu32)
 
 describe "Production details and summary rendering":
@@ -345,9 +354,9 @@ describe "Production details and summary rendering":
         expect(authored.hit_index.styles[
             _node_index(authored.hit_index.nodes, "summary")
         ].display).to_equal("list-item")
-        expect(_geometry(closed, "label")[0]).to_equal(16)
-        expect(_geometry(opened, "label")[0]).to_equal(16)
-        expect(_geometry(authored, "label")[0]).to_equal(16)
+        expect(_geometry(closed, "label")[0]).to_equal(17)
+        expect(_geometry(opened, "label")[0]).to_equal(17)
+        expect(_geometry(authored, "label")[0]).to_equal(17)
         expect(_geometry(blocked, "label")[0]).to_equal(0)
 
         step("Emit canonical disclosure marker Draw IR")
@@ -360,22 +369,28 @@ describe "Production details and summary rendering":
         val authored_marker = _command(
             authored.composition, "summary::marker"
         )
-        expect(closed_marker.kind).to_equal("text")
-        expect(closed_marker.text_value).to_equal("▶")
-        expect([closed_marker.x, closed_marker.y]).to_equal([0, 0])
+        # Chrome 159 fills the canonical disclosure path in a 0.66em square
+        # (16 px: 675/64) that ends on the baseline (text top 0 + ascent 14):
+        # its closed triangle covers rows 3..13 of this fixture, the top row
+        # partially. Points are 1/64 px: closed (0,0) (0.86,0.5) (0,1), open
+        # (0,0.07) (0.5,0.93) (1,0.07) of that square.
+        expect(closed_marker.kind).to_equal("path")
+        expect(_marker_points(closed_marker)).to_equal([0, 221, 580, 558, 0, 896])
+        expect(_style(closed_marker, "path-fill")).to_equal("{0xFF111111u32}")
+        expect([closed_marker.x, closed_marker.y]).to_equal([0, 3])
         expect(closed_marker.parent_id).to_equal("summary")
         expect(_style(
             closed_marker, "summary-marker-state"
         )).to_equal("closed")
-        expect(open_marker.kind).to_equal("text")
-        expect(open_marker.text_value).to_equal("▼")
-        expect([open_marker.x, open_marker.y]).to_equal([0, 0])
+        expect(open_marker.kind).to_equal("path")
+        expect(_marker_points(open_marker)).to_equal([0, 268, 337, 848, 675, 268])
+        expect([open_marker.x, open_marker.y]).to_equal([0, 3])
         expect(open_marker.parent_id).to_equal("summary")
         expect(_style(
             open_marker, "summary-marker-state"
         )).to_equal("open")
-        expect(authored_marker.text_value).to_equal("▶")
-        expect([authored_marker.x, authored_marker.y]).to_equal([0, 0])
+        expect(_marker_points(authored_marker)).to_equal([0, 221, 580, 558, 0, 896])
+        expect([authored_marker.x, authored_marker.y]).to_equal([0, 3])
         expect(_style(
             authored_marker, "summary-marker-state"
         )).to_equal("closed")
@@ -410,9 +425,11 @@ describe "Production details and summary rendering":
         )
         expect(_non_white_pixel_count(closed_pixels)).to_be_greater_than(0)
         expect(_non_white_pixel_count(open_pixels)).to_be_greater_than(0)
+        compare_view_inspect("details_summary marker closed vs open", "closed", closed_pixels, WIDTH, HEIGHT, "open", open_pixels, WIDTH, HEIGHT)
         expect(_pixel_difference_count(
             closed_pixels, open_pixels
         )).to_be_greater_than(0)
+        compare_view_inspect("details_summary marker closed vs authored", "default closed", closed_pixels, WIDTH, HEIGHT, "authored list-item closed", authored_pixels, WIDTH, HEIGHT)
         expect(_pixel_difference_count(
             closed_pixels, authored_pixels
         )).to_equal(0)

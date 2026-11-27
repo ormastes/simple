@@ -1,0 +1,39 @@
+# @req REQ-SSPEC-UNIT
+# Bug: doc/08_tracking/bug/mir_named_default_empty_array_2026-11-17.md
+use std.spec.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.named_call_arguments_v1.*
+use compiler.hir.hir_definitions.{HirParam, HirExpr, HirExprKind, HirCallArg}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable}
+use compiler.common.diagnostics.span.{Span}
+
+fn nde_span() -> Span:
+    Span(start: 0, end: 0, line: 0, col: 1, file: "synthetic", length: 0)
+
+fn nde_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: nde_span())
+
+fn nde_expr(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: nde_type(), span: nde_span())
+
+fn nde_int(v: i64) -> HirExpr:
+    nde_expr(HirExprKind.IntLit(v, None))
+
+fn nde_param(id: i64, name: text, has_default: bool, default: HirExpr) -> HirParam:
+    HirParam(symbol: SymbolId(id: id), name: name, type_: nde_type(), has_default: has_default, default: default, span: nde_span(), is_mutable: false)
+
+fn nde_arg(name: text) -> HirCallArg:
+    HirCallArg(has_name: true, name: name, value: nde_int(0), span: nde_span())
+
+describe "Named call omitted empty-array default":
+    it "accepts an omitted default that is an empty array literal":
+        bootstrap_fn_param_defaults_register("nde.mod.f_empty", [nde_param(1, "a", false, nde_int(0)), nde_param(2, "friends", true, nde_expr(HirExprKind.ArrayLit([], None)))], "nde.mod")
+        var lowering = MirLowering.new(SymbolTable.new())
+        expect(lowering.named_call_slots_v1("nde.mod.f_empty", [nde_arg("a")])).to_equal(Ok([0]))
+
+    it "still rejects an omitted non-empty array literal default":
+        bootstrap_fn_param_defaults_register("nde.mod.f_full", [nde_param(1, "a", false, nde_int(0)), nde_param(2, "xs", true, nde_expr(HirExprKind.ArrayLit([nde_int(1)], None)))], "nde.mod")
+        var lowering = MirLowering.new(SymbolTable.new())
+        val r = lowering.named_call_slots_v1("nde.mod.f_full", [nde_arg("a")])
+        expect(r.is_err()).to_equal(true)

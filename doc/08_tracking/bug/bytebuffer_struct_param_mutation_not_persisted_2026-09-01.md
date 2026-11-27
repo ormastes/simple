@@ -1,7 +1,10 @@
 # ByteBuffer struct-parameter mutation lost across a foreign method call (test), segfaults under `run`
 
 Date: 2026-09-01
-Status: OPEN
+Status: FIXED 2026-11-11 (lane ne3) — interpreter write-back lane re-verified
+green and the JIT-lane (`bin/simple run`) SIGSEGV re-verified GONE on the
+refreshed 2026-11-11 seed (exit 0, `s.len()=2`). See "Addendum 2026-11-11"
+at the end of this file.
 Severity: High — silent data corruption under `bin/simple test` (fail-closed zeros
 read back as valid data), SIGSEGV under `bin/simple run`
 
@@ -187,3 +190,45 @@ further in this pass.
 
 ## Not fixed here
 `bin/simple run` JIT-lane SIGSEGV (see above) — separate defect, still open.
+
+
+## Addendum 2026-11-11 — lane ne3: FIXED — both lanes now verified on the
+## refreshed seed
+
+Traversed on work/p3-ne3-20261111 (origin/release/1.0.0 tip 93490a99c5d8),
+refreshed seed bin/simple.exe (2026-11-11, build-commit 0791c2b7f4a7), all runs
+seed-smoke (`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe ...`).
+
+**Interpreter/`test` lane — re-verified green** (the 2026-09-01 fix holds at
+this tip):
+- `test/01_unit/lib/common/bytes/ints_spec.spl`: 11 total, 11 passed, 0 failed.
+- `test/01_unit/lib/common/bytes/bytes_foundation_spec.spl`: 6 total, 6 passed,
+  0 failed.
+(`build/review/p3fix-ne3-20261111-logs/row5_bytes.log`.)
+
+**JIT/`run` lane — the SIGSEGV documented as "NOT fixed here" is GONE.** The
+exact minimal repro from this file
+(`build/review/p3fix-ne3-20261111-logs/row5_jit_repro.spl`, `U16le.of(0xBEEF)
+.store(b)` + `freeze()`) now runs to completion under
+`bin/simple.exe run ... --no-cache`-equivalent invocation:
+exit code 0, output `s.len()=2` — the caller's `ByteBuffer` mutation persists
+across the foreign method call on the JIT lane too
+(`build/review/p3fix-ne3-20261111-logs/row5_jit_repro.log`). The seed carrying
+the write-back fix is the tracked binary itself, so no separate fixing commit
+needs to be cited for the JIT lane's recovery; it was fixed somewhere between
+the 2026-09-01 report and the 2026-11-11 refreshed seed
+(0791c2b7f4a7, itself an ancestor of this tip).
+
+Verdict: row closed. `ByteBuffer` remains a `class` (`src/lib/common/bytes/
+span.spl:137`) and the chained-`MethodCall` write-back shape is exercised green
+by both engines' entry points used by `test` and `run`.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne3 re-verified interpreter lane green (ints 11/11, foundation 6/6) and the JIT SIGSEGV gone on the refreshed seed (exit 0, s.len()=2).
+
+## 2026-11-13 resolution (P3 triage sweep, work/p3-triage-20261113) — row closed `fixed`
+
+Seed: scratchpad `vkinit/seed-fix`, runs capped `systemd-run MemoryMax=16G timeout 900`, cwd = this worktree at origin/release/1.0.0 `59caff4fd1b`.
+
+Evidence (live, this lane): `test/01_unit/lib/common/bytes/ints_spec.spl` executed=11 passed=11; `test/01_unit/lib/common/bytes/bytes_foundation_spec.spl` executed=6 passed=6. The doc's minimal `run` repro (`U16le.of(0xBEEF).store(b)` then `b.freeze()`) exits 0 and prints `s.len()=2`, bytes `b0=239 b1=190` (0xEF, 0xBE) — the mutation persists and there is no SIGSEGV.

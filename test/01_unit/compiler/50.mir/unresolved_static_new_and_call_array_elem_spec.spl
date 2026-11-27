@@ -1,0 +1,68 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: implicitly static `fn new`, builder chains, and field slices
+# on elements of a call-returned struct array
+
+Stage2 (d72188e68ec) native-building `src/app/cli/lint_entry.spl` failed with
+269 `unresolved method call` MIR errors (`new` 182, `with_fix` 38, `slice` 34,
+`with_easy_fix` 5) -- see
+doc/08_tracking/bug/mir_unresolved_method_nonstatic_new_and_array_call_elem_2026-10-25.md.
+
+- `new` / builder chains: `impl LintDiag: fn new(..)` (no `static`, no
+  `self`) parsed as an instance method with a synthesized `self`, so
+  `LintDiag.new(..)` reached MIR's static-nominal arm, which only accepts a
+  Function symbol. `.with_fix(..)` then ran on the const-0 placeholder.
+- `slice`: `val lines = make_lines(s)` / `val lines: [Line] = ..` left no
+  element-owner row for `lines`, so `lines[i].raw` lost its text type and
+  `.slice(..)` had no proven text receiver.
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules, ModuleSurfacesByName}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val ctor_source = "pub class Diag:\n    code: text\n    hint: text\n\nimpl Diag:\n    fn new(code: text) -> Diag:\n        Diag(code: code, hint: \"\")\n\n    fn with_fix(hint: text) -> Diag:\n        Diag(code: self.code, hint: hint)\n\nfn use_it() -> text:\n    val d = Diag.new(\"S001\").with_fix(\"do it\")\n    d.hint\n"
+
+val slice_source = "pub class Line:\n    raw: text\n    trimmed: text\n\nfn make_lines(src: text) -> [Line]:\n    var out: [Line] = []\n    out.push(Line(raw: src, trimmed: src))\n    out\n\nfn untyped_call() -> text:\n    val lines = make_lines(\"abc\")\n    val c1 = lines[0]\n    c1.raw.slice(0, 2)\n\nfn typed_call() -> text:\n    val lines: [Line] = make_lines(\"abc\")\n    val c2 = lines[0]\n    val t = c2.trimmed\n    t.slice(1)\n"
+
+fn lower_single_module_errors(source: text) -> text:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: source, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var hir_modules: Dict<text, HirModule> = {}
+    hir_modules["app.main"] = hir
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.prescan_module_struct_names(hir_modules, "app.main")
+    mir_lowering.lower_module(hir, [hir])
+    var out = ""
+    for e in mir_lowering.errors:
+        out = out + e.message + "\n"
+    print "unresolved_static_new mir errors: [{out}]"
+    out
+
+describe "implicitly static constructor without self":
+    it "resolves Type.new(..) and the builder chained on its result":
+        val errs = lower_single_module_errors(ctor_source)
+        expect(errs.contains("unresolved method call: new")).to_equal(false)
+        expect(errs.contains("unresolved method call: with_fix")).to_equal(false)
+
+describe "field slice on an element of a call-returned struct array":
+    it "resolves slice for untyped and typed let bindings of the call result":
+        val errs = lower_single_module_errors(slice_source)
+        expect(errs.contains("unresolved method call: slice")).to_equal(false)

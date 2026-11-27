@@ -1,0 +1,186 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# methods-mir-20261031: MIR method-call receiver typing
+
+Bug: doc/08_tracking/bug/methods_mir_2026-10-31.md. Lowers the original
+receiver shapes through pure-Simple HIR+MIR in-process (seed-hosted).
+
+- Shapes 1-3 (untyped param substring/slice, un-annotated return, narrowed `text?`)
+  lower clean (root fix waf-2): erased slice/substring dispatch through the
+  runtime-polymorphic rt_slice, an un-annotated callee's inferred body type
+  types its call result, and a `text?` len receiver narrows (runtime-checked).
+- Shapes 4-6 (call-result receiver, unsafe-block value, enum payload binder)
+  lower clean in a single module; they reproduced only in the full stage3
+  closure.
+- The workaround form (explicit annotations) lowers clean.
+"""
+
+# @tag: unit, compiler, mir, stage2
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lines(xs: [text]) -> text:
+    xs.join("\n") + "\n"
+
+fn lower_closure(names: [text], srcs: [text]) -> text:
+    """Lower every module through HIR, prescan all, then MIR-lower the last one.
+    Returns the concatenated HIR/MIR diagnostics ("" when clean)."""
+    val (out, _) = lower_closure_mir(names, srcs)
+    out
+
+fn lower_closure_mir(names: [text], srcs: [text]) -> (text, MirModule):
+    """lower_closure plus the lowered MIR of the last module."""
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var asts: [Module] = []
+    var i = 0
+    while i < names.len():
+        val path = names[i].replace(".", "/") + ".spl"
+        val ast = parse_full_frontend(srcs[i], path, names[i], log)
+        modules[names[i]] = ast
+        sources.push(SourceFile(path: path, content: srcs[i], module_name: names[i]))
+        asts.push(ast)
+        i = i + 1
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hirs: [HirModule] = []
+    var out = ""
+    i = 0
+    while i < names.len():
+        var hl = hirlowering_for_module(names[i], surfaces)
+        hirs.push(hl.lower_module(asts[i]))
+        for e in hl.errors:
+            out = out + "hir: " + e.message + "\n"
+        i = i + 1
+    val last = hirs.len() - 1
+    var ml = MirLowering.new(hirs[last].symbols)
+    var pre: Dict<text, HirModule> = {}
+    i = 0
+    while i < names.len():
+        pre["m" + i.to_text()] = hirs[i]
+        i = i + 1
+    i = 0
+    while i < names.len():
+        ml.prescan_module_struct_names(pre, "m" + i.to_text())
+        i = i + 1
+    val mir = ml.lower_module(hirs[last], hirs)
+    for e in ml.errors:
+        # Exhaustiveness notes are advisory and unrelated to these bugs.
+        if not e.message.contains("non-exhaustive enum match"):
+            out = out + "mir: " + e.message + "\n"
+    print "diagnostics: [" + out + "]"
+    (out, mir)
+
+fn lower_one(src: text) -> text:
+    lower_closure(["app.main"], [src])
+
+fn unit_local_count(src: text, fn_name: text) -> i64:
+    """Number of MIR locals typed Unit in `fn_name` (-1 when the function is absent)."""
+    val (_, mir) = lower_closure_mir(["app.main"], [src])
+    var count = -1
+    for f in mir.functions.values():
+        if f.name == fn_name or f.name.ends_with("." + fn_name):
+            count = 0
+            for l in f.locals:
+                if serialize_mir_type(l.type_) == "\"Unit\"":
+                    count = count + 1
+    count
+
+describe "methods-mir-20261031 receiver shapes":
+    it "shape 1 untyped parameter receiver lowers clean":
+        val d = lower_one(lines(["fn take_len(value):", "    value.len()", "", "fn sub_of(value):", "    value.substring(0, 1)", "", "fn slice_of(value):", "    value[0:1]", "", "fn sub_tail(value):", "    value.substring(1)"]))
+        expect(d.contains("unresolved method call")).to_equal(false)
+        expect(d).to_equal("")
+
+    it "shape 2 un-annotated return result receiver lowers clean":
+        val d = lower_one(lines(["fn make_list(n: i64):", "    var out: [i64] = []", "    out.push(n)", "    out", "", "fn use_list() -> i64:", "    make_list(3).len()"]))
+        expect(d.contains("unresolved method call")).to_equal(false)
+        expect(d).to_equal("")
+
+    it "shape 3 narrowed optional text receiver lowers clean":
+        val d = lower_one(lines(["fn narrowed(x: text?) -> i64:", "    if x == nil:", "        return 0", "    x.len()"]))
+        expect(d.contains("unresolved method call")).to_equal(false)
+        expect(d).to_equal("")
+
+    it "shape 2 array-literal tail binding carries its parsed array type":
+        val d = lower_one(lines(["fn make_lit(n: i64):", "    val out = [n]", "    out", "", "fn use_lit() -> i64:", "    make_lit(3).len()"]))
+        expect(d).to_equal("")
+
+    it "shape 2 untyped call-initialized tail binding returns dynamically (owner decision 2026-11-06: infer, warn)":
+        val d = lower_one(lines(["fn build(n: i64) -> [i64]:", "    [n]", "", "fn make_any(n: i64):", "    val out = build(n)", "    out", "", "fn use_any() -> i64:", "    make_any(3).len()"]))
+        expect(d.contains("unresolved method call")).to_equal(false)
+        expect(d).to_contain("W-RET-INFER-001")
+
+    it "custom-owner len on a nominal receiver still uses its own method":
+        val d = lower_one(lines(["class Bag:", "    n: i64", "    fn len() -> i64:", "        self.n", "", "fn make_bag():", "    val b: Bag = Bag(n: 2)", "    b", "", "fn bag_len() -> i64:", "    make_bag().len()"]))
+        expect(d).to_equal("")
+
+    it "workaround form for shapes 1-3 (annotations) lowers clean":
+        val d = lower_one(lines(["fn take_len(value: text) -> i64:", "    value.len()", "", "fn make_list(n: i64) -> [i64]:", "    var out: [i64] = []", "    out.push(n)", "    out", "", "fn use_list() -> i64:", "    make_list(3).len()"]))
+        expect(d).to_equal("")
+
+    it "shape 4 call-result receiver .is_err() lowers clean":
+        val d = lower_one(lines(["fn check(v: i64) -> Result<i64, text>:", "    if v > 0:", "        return Ok(v)", "    Err(\"neg\")", "", "class Ctx:", "    n: i64", "    fn check_expr(v: i64) -> Result<i64, text>:", "        check(v + self.n)", "", "fn direct(v: i64) -> bool:", "    check(v).is_err()", "", "fn via_ctx(c: Ctx, v: i64) -> bool:", "    c.check_expr(v).is_err()"]))
+        expect(d).to_equal("")
+
+    it "shape 5 unsafe-block value receiver lowers clean":
+        val d = lower_one(lines(["extern fn rt_probe_words() -> [i64]", "", "fn words_len() -> i64:", "    val w = unsafe:", "        rt_probe_words()", "    w.len()"]))
+        expect(d).to_equal("")
+
+    it "shape 6 enum payload binder receiver lowers clean":
+        val d = lower_one(lines(["enum Outcome:", "    Success(code: [u8], n: i64)", "    Failure(msg: text)", "", "fn code_len(o: Outcome) -> i64:", "    match o:", "        case Success(code, _):", "            code.len()", "        case Failure(msg):", "            msg.len()"]))
+        expect(d).to_equal("")
+
+    it "untyped index/field receiver of a mutating method keeps the i64 write-back slot (Unit placeholder is not a type)":
+        # Since 87aaaa999c7 an untyped HirExpr carries a Unit HirType placeholder
+        # with has_type_ false. The write-back receiver type must come from the
+        # presence bit: a `!= nil` test admitted the placeholder and the GEP /
+        # load / get_field of the receiver slot was typed Unit instead of the
+        # documented i64 default (method_calls_literals.spl, receiver_type).
+        val index_src = lines(["fn push_first(xs):", "    xs[0].push(1)"])
+        expect(lower_one(index_src)).to_equal("")
+        expect(unit_local_count(index_src, "push_first")).to_equal(0)
+        val field_src = lines(["class P:", "    items: [i64]", "", "fn push_items(p):", "    p.items.push(1)"])
+        expect(lower_one(field_src)).to_equal("")
+        expect(unit_local_count(field_src, "push_items")).to_equal(0)
+
+    it "untyped receivers through the positive-only type probes still lower clean (audit pin)":
+        # The `if val x = receiver.type_` probes for Str / Int / Array|Slice only
+        # SET a flag on a positive match, so the Unit placeholder falls through
+        # exactly like an absent type. Pin that the untyped text/int receivers
+        # keep their builtin routes (no unresolved-call diagnostic). `lines()`
+        # is deliberately absent: over an untyped receiver it stays loud by
+        # design (text_builtin_resolution_allowed needs a proven text receiver).
+        val d = lower_one(lines(["fn c(s):", "    s.contains(\"a\")", "", "fn f2(s):", "    s.find(\"a\", 0)", "", "fn sub(s):", "    s.substring(0, 1)", "", "fn ch(n):", "    n.chr()"]))
+        expect(d.contains("unresolved method call")).to_equal(false)
+        expect(d).to_equal("")
+
+describe "methods-mir-20261031 cross-module receiver shapes":
+    it "shape 4 imported call-result receiver .is_err() lowers clean":
+        val a = lines(["pub fn check(v: i64) -> Result<i64, text>:", "    if v > 0:", "        return Ok(v)", "    Err(\"neg\")"])
+        val b = lines(["use app.lib.*", "", "fn direct(v: i64) -> bool:", "    check(v).is_err()", "", "fn direct_ok(v: i64) -> bool:", "    check(v).is_ok()"])
+        val d = lower_closure(["app.lib", "app.main"], [a, b])
+        expect(d.contains("unresolved method call")).to_equal(false)
+
+    it "shape 5 unsafe-block value of an imported array fn lowers clean":
+        val a = lines(["pub fn probe_words() -> [i64]:", "    [1, 2]"])
+        val b = lines(["use app.lib.*", "", "fn words_len() -> i64:", "    val w = unsafe:", "        probe_words()", "    w.len()"])
+        val d = lower_closure(["app.lib", "app.main"], [a, b])
+        expect(d.contains("unresolved method call")).to_equal(false)
+
+    it "shape 6 imported enum payload binder receiver lowers clean":
+        val a = lines(["pub enum Outcome:", "    Success(code: [u8], n: i64)", "    Failure(msg: text)"])
+        val b = lines(["use app.lib.*", "", "fn code_len(o: Outcome) -> i64:", "    match o:", "        case Success(code, _):", "            code.len()", "        case Failure(msg):", "            msg.len()"])
+        val d = lower_closure(["app.lib", "app.main"], [a, b])
+        expect(d.contains("unresolved method call")).to_equal(false)

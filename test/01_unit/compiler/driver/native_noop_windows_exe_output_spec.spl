@@ -1,0 +1,63 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+# Zero-work native receipt: resolve the `.exe` the Windows GNU linker wrote
+
+A Windows GNU link given `-o <path>` with no extension writes `<path>.exe`.
+The no-op receipt fingerprinted only the bare `<path>`, so a build whose link
+SUCCEEDED was refused with `native no-op receipt publication failed:
+output-missing` (Stage 2 compiler-test matrix row test_runner_build, pin
+18a1f28937c2, log line 5146; the outputs dir held simple_test_runner.exe only).
+"""
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_write_exact}
+use compiler.driver.cache.native_noop_admission.{
+    native_noop_request_v1, native_noop_admit_v1, native_noop_publish_built_v1,
+    native_noop_admission_hit_v1, native_noop_built_output_v1
+}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+
+fn exe_output_request(root: text, output: text):
+    native_noop_request_v1(
+        root, output, "llvm", "x86_64-pc-windows-gnu", 2, true, false,
+        false, "release", ["gc_sync_mut"], "", "rev-1", "tree-1",
+        "inventory-1", "authority-1", sha256_text("env-1"),
+        "invocation-1", ["main.spl"])
+
+fn fresh_root(name: text) -> text:
+    val root = "build/tmp/native-noop-exe-output-spec/{name}"
+    val _removed = rt_dir_remove_all(root)
+    expect(rt_dir_create_all(root)).to_be(true)
+    root
+
+describe "Zero-work native receipt Windows .exe output":
+    it "publishes and re-admits when only <output>.exe was written":
+        # @req REQ-SSPEC-COMPILER
+        val root = fresh_root("exe-only")
+        val source = "{root}/main.spl"
+        val output = "{root}/app"
+        expect(file_write_exact(source, "fn main():\n    print 1\n")).to_be(true)
+        expect(file_write_exact("{output}.exe", "pe-image-v1")).to_be(true)
+        expect(native_noop_built_output_v1(output)).to_equal("{output}.exe")
+        val request = exe_output_request(root, output)
+        expect(native_noop_publish_built_v1(request, [source], output)).to_equal("ok")
+        expect(native_noop_admission_hit_v1(native_noop_admit_v1(request))).to_be(true)
+
+    it "keeps an existing bare output and invents nothing when neither exists":
+        # @req REQ-SSPEC-COMPILER
+        val root = fresh_root("bare-and-missing")
+        val source = "{root}/main.spl"
+        val bare = "{root}/tool"
+        expect(file_write_exact(source, "fn main():\n    print 1\n")).to_be(true)
+        expect(file_write_exact(bare, "elf-image-v1")).to_be(true)
+        expect(file_write_exact("{bare}.exe", "stale-pe")).to_be(true)
+        expect(native_noop_built_output_v1(bare)).to_equal(bare)
+        val missing = "{root}/never-linked"
+        expect(native_noop_built_output_v1(missing)).to_equal(missing)
+        val request = exe_output_request(root, missing)
+        expect(native_noop_publish_built_v1(request, [source], missing)).to_equal("output-missing")

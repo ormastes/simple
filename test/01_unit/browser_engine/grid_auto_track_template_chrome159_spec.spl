@@ -1,0 +1,105 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+# `auto` tracks in grid-template-columns (Chrome 159)
+
+Bug web_grid_auto_track_takes_full_width_with_flex_item_2026-11-27. The column
+template parser accepted lengths and `fr` only: any `auto` token made it return
+no columns, so a grid such as `auto 1fr` fell back to block layout and every
+item was laid out full-width, one under the other. An `auto` track is as wide
+as the widest item lying in it alone (max-content); `fr` tracks share what is
+left, and without an `fr` track the `auto` tracks share it (justify-content:
+normal stretches them).
+
+Page: each case is a `.w` grid (margin-left 40px, 200px wide unless noted); the
+blue run is measured on the device row through CSS row `case * 30 + 10`.
+
+| case | template / items | k=1 Chrome / base | k=4 Chrome / base |
+|------|------------------|-------------------|-------------------|
+| 0 | 205px `auto 1fr`; a div holding a row flex with a 40px blue item at margin-left:10% (the bug repro) | 44..79 / 61..100 | 176..319 / 242..401 |
+| 1 | 205px `auto 1fr`; one blue item at grid-column:2, margin-left:10% | 61..100 / 61..100 | 242..401 / 242..401 |
+| 2 | `auto 1fr`; one 40px blue item | 40..79 / 40..79 | 160..319 / 160..319 |
+| 3 | `1fr auto`; an empty item, then a 40px blue item | 200..239 / none | 800..959 / none |
+| 4 | `auto auto`; a 30px item, then a 40px blue item (65px each to share) | 135..174 / none | 540..699 / none |
+| 5 | `100px auto`; an empty item, then a 40px blue item | 140..179 / none | 560..719 / none |
+| 6 | `auto 1fr`, column-gap 10px; a 40px item, then a 20px blue item | 90..109 / none | 360..439 / none |
+| 7 | `auto 1fr`; a blue auto-width item holding `abc` (16px monospace, 28.8px) | 40..68 / 40..239 | 160..275 / 160..959 |
+"""
+
+"""
+Traceability: web_grid_auto_track_takes_full_width_with_flex_item_2026-11-27 — an `auto` column track in grid-template-columns is sized by its items' max-content.
+"""
+# @tag: unit, browser_engine, layout, grid, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+
+val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff}}.w{{margin-left:40px;width:200px;height:30px}}</style></head><body><div class=\"w\" style=\"display:grid;grid-template-columns:auto 1fr;width:205px\"><div><div style=\"display:flex\"><div style=\"margin-left:10%;width:40px;height:20px;background:#00f\"></div></div></div></div><div class=\"w\" style=\"display:grid;grid-template-columns:auto 1fr;width:205px\"><div style=\"grid-column:2;margin-left:10%;width:40px;height:20px;background:#00f\"></div></div><div class=\"w\" style=\"display:grid;grid-template-columns:auto 1fr\"><div style=\"width:40px;height:20px;background:#00f\"></div></div><div class=\"w\" style=\"display:grid;grid-template-columns:1fr auto\"><div style=\"height:20px\"></div><div style=\"width:40px;height:20px;background:#00f\"></div></div><div class=\"w\" style=\"display:grid;grid-template-columns:auto auto\"><div style=\"width:30px;height:20px\"></div><div style=\"width:40px;height:20px;background:#00f\"></div></div><div class=\"w\" style=\"display:grid;grid-template-columns:100px auto\"><div style=\"height:20px\"></div><div style=\"width:40px;height:20px;background:#00f\"></div></div><div class=\"w\" style=\"display:grid;grid-template-columns:auto 1fr;column-gap:10px\"><div style=\"width:40px;height:20px\"></div><div style=\"width:20px;height:20px;background:#00f\"></div></div><div class=\"w\" style=\"display:grid;grid-template-columns:auto 1fr\"><div style=\"height:20px;background:#00f;color:#00f;font:16px/20px monospace\">abc</div><div style=\"height:20px\"></div></div></body></html>"
+var g_px1: [u32] = []
+var g_px4: [u32] = []
+
+fn _px(k: i32) -> [u32]:
+    if k == 1:
+        if g_px1.len() == 0:
+            g_px1 = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, CSS_W, CSS_H, "cpu_simd")
+        return g_px1
+    if g_px4.len() == 0:
+        g_px4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, k, "cpu_simd")
+    g_px4
+
+# Blue runs " a..b" on the device row through CSS row `row * 30 + 10`.
+fn _runs(k: i32, row: i32) -> text:
+    val px = _px(k)
+    val w = CSS_W * k
+    val y = (row * 30 + 10) * k
+    var out = ""
+    var x = 0
+    var inr = false
+    var start = 0
+    while x <= w:
+        var blue = false
+        if x < w:
+            val v = px[y * w + x]
+            val r = ((v >> 16u32) & 0xFFu32).to_i32()
+            val b = (v & 0xFFu32).to_i32()
+            blue = b > 128 and r < 128
+        if blue and not inr:
+            inr = true
+            start = x
+        if not blue and inr:
+            inr = false
+            out = out + " {start}..{x - 1}"
+        x = x + 1
+    out
+
+fn _both(row: i32, r1: text, r4: text):
+    expect(_runs(1, row)).to_equal(r1)
+    expect(_runs(4, row)).to_equal(r4)
+
+describe "auto tracks in grid-template-columns (Chrome 159)":
+    it "AC-1: the bug repro: an auto track holding a row flex is its max-content":
+        _both(0, " 44..79", " 176..319")
+
+    it "AC-2: a fr track takes what the auto track leaves":
+        _both(1, " 61..100", " 242..401")
+        _both(2, " 40..79", " 160..319")
+        _both(3, " 200..239", " 800..959")
+
+    it "AC-3: without a fr track the auto tracks share the free space":
+        _both(4, " 135..174", " 540..699")
+        _both(5, " 140..179", " 560..719")
+
+    it "AC-4: column-gap sits between the tracks":
+        _both(6, " 90..109", " 360..439")
+
+    it "AC-5: an auto track around text is the text's max-content":
+        _both(7, " 40..68", " 160..275")

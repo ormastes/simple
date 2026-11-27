@@ -1,0 +1,79 @@
+# @req REQ-IF-VAL-RESULT-CONTRACT
+# @tag: unit, compiler, hir
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.eval.{eval_has_error, eval_get_error}
+use compiler.core.interpreter.value.{val_to_text}
+
+fn core_binding_eval(body: text) -> text:
+    val prelude = "enum Option<T>:\n    Some(T)\n    None\nenum Result<T, E>:\n    Ok(T)\n    Err(E)\n"
+    val result = core_interpret(prelude + "fn main():\n" + body, "result_binding_core.spl")
+    if eval_has_error():
+        return "ERR:" + eval_get_error()
+    val_to_text(result)
+
+fn binding_diagnostics(source: text) -> [text]:
+    val file = "testdata/if_val_result_contract.spl"
+    val parsed = parse_full_frontend(source, file, "if_val_result_contract", Logger(level: 0))
+    var lowering = HirLowering.with_filename(file)
+    val hir = lowering.lower_module(parsed)
+    var messages: [text] = []
+    for error in lowering.errors:
+        messages = messages.push(error.message)
+    messages
+
+fn result_diagnostic_count(messages: [text]) -> i64:
+    var count = 0
+    for message in messages:
+        if message.contains("cannot bind a Result") and message.contains("Result.ok.?"):
+            count = count + 1
+    count
+
+describe "Result presence-binding contract":
+    it "rejects Result parameters in if and while before binding their carrier":
+        step("lower actual Result-typed if-val and while-val source")
+        val if_source = "fn inspect(value: Result<i64, text>) -> i64:\n    if val item = value: return 1\n    0\n"
+        val while_source = "fn inspect(value: Result<i64, text>) -> i64:\n    while val item = value: return 1\n    0\n"
+        expect(result_diagnostic_count(binding_diagnostics(if_source)) > 0).to_equal(true)
+        expect(result_diagnostic_count(binding_diagnostics(while_source)) > 0).to_equal(true)
+
+    it "rejects a Result-producing call without interpreting Ok as presence":
+        step("lower an actual producer call rather than a declared local only")
+        val source = "fn make() -> Result<i64, text>:\n    Ok(7)\nfn main() -> i64:\n    if val item = make(): return 1\n    0\n"
+        expect(result_diagnostic_count(binding_diagnostics(source)) > 0).to_equal(true)
+
+    it "preserves the documented ok projection and nested optional Result":
+        step("lower explicit Result.ok.? and optional Result payload bindings")
+        val projected = "fn inspect(value: Result<i64, text>) -> i64:\n    if val item = value.ok.?: return item\n    0\n"
+        val nested = "fn inspect(value: Result<i64, text>?) -> i64:\n    if val item = value:\n        match item:\n            case Ok(number): return number\n            case Err(_): return 0\n    0\n"
+        expect(binding_diagnostics(projected).len()).to_equal(0)
+        expect(binding_diagnostics(nested).len()).to_equal(0)
+
+    it "preserves explicitly authored Result presence before bridge coalescing":
+        step("parse and lower explicit Result .? in if-val and while-val")
+        val explicit_if = "fn inspect(value: Result<i64, text>) -> i64:\n    if val item = value.?: return 1\n    0\n"
+        val explicit_while = "fn inspect(value: Result<i64, text>) -> i64:\n    while val item = value.?: return 1\n    0\n"
+        expect(binding_diagnostics(explicit_if).len()).to_equal(0)
+        expect(binding_diagnostics(explicit_while).len()).to_equal(0)
+
+    it "rejects bare Ok and Err in the actual flat core interpreter":
+        step("execute raw if-val and while-val bindings before optional unwrapping")
+        val bare_ok = core_binding_eval("    if val item = Result.Ok(7): return 99\n    0\n")
+        val bare_err = core_binding_eval("    if val item = Result.Err(\"no\"): return 99\n    0\n")
+        val bare_while = core_binding_eval("    while val item = Result.Ok(7): return 99\n    0\n")
+        expect(bare_ok.contains("ERR:cannot bind a Result")).to_equal(true)
+        expect(bare_err.contains("ERR:cannot bind a Result")).to_equal(true)
+        expect(bare_while.contains("ERR:cannot bind a Result")).to_equal(true)
+
+    it "keeps explicit presence and Some Result on the flat core provider":
+        step("execute authored .? and inspect the preserved optional Result payload")
+        val explicit_if = core_binding_eval("    if val item = Result.Ok(7).?: return item\n    0\n")
+        val explicit_while = core_binding_eval("    while val item = Result.Ok(7).?: return item\n    0\n")
+        val nested = core_binding_eval("    if val item = Option.Some(Result.Ok(7)):\n        match item:\n            case Result.Ok(number): return number\n            case Result.Err(_): return 1\n    0\n")
+        expect(explicit_if).to_equal("7")
+        expect(explicit_while).to_equal("7")
+        expect(nested).to_equal("7")

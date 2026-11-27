@@ -1,0 +1,237 @@
+# Bug 2 & Bug 3 verification:
+#   - phase2_struct_dict_key_copy_identity_hash_2026-11-18
+#   - hir_lambda_param_hint_outlives_module_scope_2026-11-14
+#
+# Verifies:
+# 1. Single-field struct Dict keys (`SymbolId` pattern used by 20.hir/abi_interface.spl)
+#    canonicalize via `rt_value_int_wide(getfield)` across get/set/contains/remove/keys/for-in
+#    and cross-module calls, and 0 `# @workaround` sites remain in abi_interface.spl / join_point_model.spl.
+# 2. Reusing a single HirLowering across `ha.spl` (`names.join(",")`) -> `begin_module("hb.spl")` ->
+#    `hb_apply(xs, fn(p: text) -> i64: 0)` resets `lambda_param_hint`, `registering_lexical_import`,
+#    and `impl_textual_method_keys`, produces 0 `E-HIR-VISIT-UNHANDLED` failures under
+#    `walk_hir_module` + `hir_module_encode_retained_v1`, and watcher_client.spl stays clean.
+
+use std.spec.{describe, context, it, expect}
+use std.io_runtime.{file_read}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.driver.driver_hir_cache.{hir_module_encode_retained_v1}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.generated.hir_visitor.{walk_hir_block, walk_hir_module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule, HirTypeKind}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_verify.{mir_verify_module}
+
+fn hv_dict_lower_mir(mods: [(text, text, text)]) -> (MirModule, [text]):
+    var parsed_by_path: Dict<text, Module> = {}
+    var modules_by_name: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var paths: [text] = []
+    for entry in mods:
+        val key = entry.0
+        val mod_name = entry.1
+        val src = entry.2
+        val parsed = parse_full_frontend(src, key, mod_name, Logger(level: 0))
+        parsed_by_path[key] = parsed
+        modules_by_name[mod_name] = parsed
+        sources.push(SourceFile(path: key, content: src, module_name: mod_name))
+        paths.push(key)
+
+    val surfaces = module_surfaces_from_modules(modules_by_name, sources).unwrap()
+    var hir_mods: Dict<text, HirModule> = {}
+    var hir_list: [HirModule] = []
+    var errors: [text] = []
+    for key in paths:
+        var hl = hirlowering_for_module(key, surfaces)
+        val hm = hl.lower_module(parsed_by_path[key])
+        for e in hl.errors: errors.push(e.message)
+        hir_mods[key] = hm
+        hir_list.push(hm)
+
+    val last_key = paths[paths.len() - 1]
+    val target_hir = hir_mods[last_key]
+    var ml = MirLowering.new(target_hir.symbols)
+    for key in paths:
+        ml.prescan_module_struct_names(hir_mods, key)
+    val mir = ml.lower_module(target_hir, hir_list)
+    for e in ml.errors: errors.push(e.message)
+    (mir, errors)
+
+fn hv_dict_find_fn(mir: MirModule, name: text) -> MirFunction?:
+    for f in mir.functions.values():
+        val dot = f.name.rfind(".")
+        val short = if dot >= 0: f.name.substring(dot + 1, f.name.len()) else: f.name
+        if short == name:
+            return Some(f)
+    None
+
+fn hv_dict_local_id(op: MirOperand) -> i64:
+    match op.kind:
+        case MirOperandKind.Copy(local): local.id
+        case MirOperandKind.Move(local): local.id
+        case _: -1
+
+fn hv_dict_callee_name(op: MirOperand) -> text:
+    match op.kind:
+        case MirOperandKind.Const(MirConstValue.Str(name), _): name
+        case _: ""
+
+fn hv_dict_definer(func: MirFunction, target_id: i64) -> text:
+    for blk in func.blocks:
+        for inst in blk.instructions:
+            match inst.kind:
+                case MirInstKind.Call(dest, fop, args):
+                    if val d = dest:
+                        if d.id == target_id:
+                            val cname = hv_dict_callee_name(fop)
+                            if cname == "rt_value_int_wide" and args.len() == 1:
+                                return "call:rt_value_int_wide(" + hv_dict_definer(func, hv_dict_local_id(args[0])) + ")"
+                            return "call:" + cname
+                case MirInstKind.GetField(dest, _, _):
+                    if dest.id == target_id: return "getfield"
+                case MirInstKind.Cast(dest, op, _):
+                    if dest.id == target_id: return hv_dict_definer(func, hv_dict_local_id(op))
+                case MirInstKind.Copy(dest, src):
+                    if dest.id == target_id: return hv_dict_definer(func, src.id)
+                case MirInstKind.Move(dest, src):
+                    if dest.id == target_id: return hv_dict_definer(func, src.id)
+                case _: ()
+    "other"
+
+fn hv_dict_key_definers(func: MirFunction) -> [text]:
+    var seen: [text] = []
+    for blk in func.blocks:
+        for inst in blk.instructions:
+            match inst.kind:
+                case MirInstKind.Call(_, fop, args):
+                    val cname = hv_dict_callee_name(fop)
+                    if (cname == "rt_dict_get" or cname == "rt_dict_set" or
+                        cname == "rt_dict_contains" or cname == "rt_dict_contains_key" or
+                        cname == "rt_dict_remove") and args.len() >= 2:
+                        seen.push(hv_dict_definer(func, hv_dict_local_id(args[1])))
+                case _: ()
+    seen
+
+fn hv_dict_struct_rebuild_count(func: MirFunction) -> i64:
+    var count = 0
+    for blk in func.blocks:
+        for inst in blk.instructions:
+            match inst.kind:
+                case MirInstKind.Aggregate(_, kind, operands):
+                    match kind:
+                        case AggregateKind.Struct(_):
+                            if operands.len() == 1 and hv_dict_definer(func, hv_dict_local_id(operands[0])) == "call:rt_value_as_int_wide":
+                                count = count + 1
+                        case _: ()
+                case _: ()
+    count
+
+describe "struct-keyed Dict key canonicalization and HIR scope reset":
+    context "Bug 2: phase2_struct_dict_key_copy_identity_hash_2026-11-18":
+        it "canonicalizes abi_interface-style SymbolId dict keys across set, get, contains, remove, keys, and for-in":
+            val src = "struct SymbolId:\n    id: i64\n\n" +
+                "fn visit_symbol_table(tbl: Dict<SymbolId, i64>, sid: SymbolId) -> i64:\n" +
+                "    var local_map: Dict<SymbolId, i64> = {{}}\n" +
+                "    local_map[sid] = 7\n" +
+                "    var acc = 0\n" +
+                "    if local_map.contains(sid):\n" +
+                "        acc = local_map[sid] ?? 0\n" +
+                "    for dk_0 in tbl.keys():\n" +
+                "        acc = acc + (tbl[dk_0] ?? 0)\n" +
+                "    val _drop = local_map.remove(sid)\n" +
+                "    acc\n"
+            val (mir, errs) = hv_dict_lower_mir([("test/sym_dict.spl", "sym_dict", src)])
+            expect(errs).to_equal([])
+            val verify_report = mir_verify_module(mir)
+            expect(verify_report.fatal_count()).to_equal(0)
+
+            val maybe_fn = hv_dict_find_fn(mir, "visit_symbol_table")
+            expect(maybe_fn.?).to_equal(true)
+            if val present = maybe_fn:
+                val key_defs = hv_dict_key_definers(present)
+                expect(key_defs.len()).to_be_greater_than(2)
+                for kd in key_defs:
+                    expect(kd).to_equal("call:rt_value_int_wide(getfield)")
+                expect(hv_dict_struct_rebuild_count(present)).to_be_greater_than(0)
+
+        it "canonicalizes SymbolId dict keys passed across module boundaries and keeps target files clean":
+            val prov = "struct SymbolId:\n    id: i64\n\n" +
+                "pub fn make_sid(raw: i64) -> SymbolId:\n    SymbolId(id: raw)\n\n" +
+                "pub fn seed_tbl(sid: SymbolId) -> Dict<SymbolId, i64>:\n" +
+                "    var d: Dict<SymbolId, i64> = {{}}\n" +
+                "    d[sid] = 99\n" +
+                "    d\n"
+            val cons = "use prov_sym.{{SymbolId, make_sid, seed_tbl}}\n\n" +
+                "fn read_tbl() -> i64:\n" +
+                "    val s = make_sid(11)\n" +
+                "    val d = seed_tbl(s)\n" +
+                "    var total = d[s] ?? 0\n" +
+                "    for k in d.keys():\n" +
+                "        total = total + (d[k] ?? 0)\n" +
+                "    total\n"
+            val (mir, errs) = hv_dict_lower_mir([
+                ("test/prov_sym.spl", "prov_sym", prov),
+                ("test/cons_sym.spl", "cons_sym", cons)
+            ])
+            expect(errs).to_equal([])
+            val maybe_fn = hv_dict_find_fn(mir, "read_tbl")
+            expect(maybe_fn.?).to_equal(true)
+            if val present = maybe_fn:
+                val key_defs = hv_dict_key_definers(present)
+                expect(key_defs.len()).to_be_greater_than(1)
+                for kd in key_defs:
+                    expect(kd).to_equal("call:rt_value_int_wide(getfield)")
+                expect(hv_dict_struct_rebuild_count(present)).to_be_greater_than(0)
+
+            val abi_src = file_read("src/compiler/20.hir/abi_interface.spl")
+            val jp_src = file_read("src/compiler/35.semantics/join_point_model.spl")
+            expect(abi_src.contains("# @workaround")).to_equal(false)
+            expect(jp_src.contains("# @workaround")).to_equal(false)
+
+    context "Bug 3: hir_lambda_param_hint_outlives_module_scope_2026-11-14":
+        it "clears lambda_param_hint, registering_lexical_import, and impl_textual_method_keys across ha -> hb":
+            val ha_src = "fn join_names(names: [text]) -> text:\n    names.join(\",\")\n"
+            val hb_src = "fn hb_apply(xs: [text], cb: fn(text) -> i64) -> i64:\n    0\n\n" +
+                "fn hb_run(xs: [text]) -> i64:\n    hb_apply(xs, fn(p: text) -> i64: 0)\n"
+
+            val pa = parse_full_frontend(ha_src, "ha.spl", "ha", Logger(level: 0))
+            val pb = parse_full_frontend(hb_src, "hb.spl", "hb", Logger(level: 0))
+
+            var hl = HirLowering.with_filename("ha.spl")
+            hl.begin_module("ha.spl")
+            val _hma = hl.lower_module(pa)
+            hl.registering_lexical_import = true
+            hl.impl_textual_method_keys = ["StaleTrait::stale_method"]
+
+            hl.begin_module("hb.spl")
+            val hint_is_error = match hl.lambda_param_hint.kind:
+                case HirTypeKind.Error: true
+                case _: false
+            expect(hint_is_error).to_equal(true)
+            expect(hl.registering_lexical_import).to_equal(false)
+            expect(hl.impl_textual_method_keys).to_equal([])
+
+            val hmb = hl.lower_module(pb)
+            expect(hl.errors.len()).to_equal(0)
+
+            var visited = walk_hir_module(hmb, 0, \node, acc: acc + 1)
+            for fn_def in hmb.functions.values():
+                visited = walk_hir_block(fn_def.body, visited, \node, acc: acc + 1)
+            expect(visited).to_be_greater_than(0)
+            val retained_blob = hir_module_encode_retained_v1(hmb)
+            expect(retained_blob.len()).to_be_greater_than(0)
+
+            var ml = MirLowering.new(hmb.symbols)
+            val mir = ml.lower_module(hmb, [])
+            expect(ml.errors.len()).to_equal(0)
+            expect(mir_verify_module(mir).fatal_count()).to_equal(0)
+
+            val watcher_src = file_read("src/compiler/80.driver/watcher/watcher_client.spl")
+            expect(watcher_src.contains("_watcher_no_mtime")).to_equal(false)

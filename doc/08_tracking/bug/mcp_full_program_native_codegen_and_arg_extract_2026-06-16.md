@@ -147,3 +147,5 @@ against. Left OPEN; no code changed this pass.
 4. Keep the exact native MCP build/handshake/feature SSpec as the regression gate;
    investigate the historical interpreter-only nested-argument repro separately
    if source debugging becomes a supported production lane.
+
+**Revalidated 2026-11-02: still plausible because OPEN (bootstrap defect C and portability defect D remain); no merged fix commit with a passing regression is cited in this doc.**

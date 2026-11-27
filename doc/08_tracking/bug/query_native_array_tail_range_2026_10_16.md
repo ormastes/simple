@@ -44,3 +44,7 @@ SPL object grafts. See the sibling boundary-header report's evidence directory.
 This qualifies the scoped workaround, not array range engine support, full CLI
 capabilities, compiler generation admission or deployment. DB reconciliation
 remains pending; the original grammar still needs a future engine repair.
+
+## Resolution (2026-11-04, opus-n88b)
+
+Status: fix-implemented-verification-pending. Landed in 3a16118c603 (array range slices via lower_runtime_array_slice in text_index_ranges.spl; Result unwrap/unwrap_err admit Enum payloads in method_calls_literals.spl lower_result_unwrap_core). Pass-level spec: `bin/simple.exe test test/01_unit/compiler/50.mir/array_range_unwrap_enum_lowering_spec.spl` (2/2 pass). Native verify (stage3): rebuild with a native producer and compile a[1..].join / Result<_, Enum>.unwrap_err() fixtures; then remove the source workarounds.

@@ -46,8 +46,23 @@ inspection) to see the full compiler/interpreter diagnostic.
 use std.spec.{describe, it, expect}
 use std.io_runtime.{write_file, mkdir_p, process_run_timeout}
 
-const SIMPLE_SEED_BINARY: text = "src/compiler_rust/target/bootstrap/simple"
 const FIXTURE_DIR: text = "build/tmp/compiler_interpreter_integration"
+
+extern fn rt_file_exists(path: text) -> bool
+
+fn _seed_binary() -> text:
+    """Resolve the deployed seed binary: canonical bootstrap path first, then
+    the Windows bootstrap spelling, then the repo-root seed copy used by
+    worktree-based runners (bin/simple.exe is the same Rust seed build)."""
+    if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
+        return "src/compiler_rust/target/bootstrap/simple"
+    if rt_file_exists("src/compiler_rust/target/bootstrap/simple.exe"):
+        return "src/compiler_rust/target/bootstrap/simple.exe"
+    if rt_file_exists("bin/simple.exe"):
+        return "bin/simple.exe"
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    return "src/compiler_rust/target/bootstrap/simple"
 
 fn _run_fixture(name: text, source: text) -> (text, text, i32):
     """Write `source` to a per-scenario fixture file under FIXTURE_DIR and
@@ -57,7 +72,7 @@ fn _run_fixture(name: text, source: text) -> (text, text, i32):
     mkdir_p(FIXTURE_DIR)
     val fixture_path = FIXTURE_DIR + "/" + name + ".spl"
     write_file(fixture_path, source)
-    process_run_timeout(SIMPLE_SEED_BINARY, ["run", fixture_path], 30000)
+    process_run_timeout(_seed_binary(), ["run", fixture_path], 30000)
 
 
 # ============================================================================
@@ -291,7 +306,7 @@ describe "Module System Integration":
         mkdir_p(FIXTURE_DIR)
         write_file(FIXTURE_DIR + "/mod_helper.spl", "fn helper_add(a: i64, b: i64) -> i64:\n    a + b\nexport helper_add\n")
         write_file(FIXTURE_DIR + "/mod_main_import.spl", "use " + "mod_helper." + "{" + "helper_add" + "}" + "\nprint(helper_add(10, 20))\n")
-        val (stdout, stderr, exit_code) = process_run_timeout(SIMPLE_SEED_BINARY, ["run", FIXTURE_DIR + "/mod_main_import.spl"], 30000)
+        val (stdout, stderr, exit_code) = process_run_timeout(_seed_binary(), ["run", FIXTURE_DIR + "/mod_main_import.spl"], 30000)
         expect(exit_code).to_equal(0)  # oracle: the seed binary exits 0 on successful compile-and-run
         expect(stdout.contains("30")).to_equal(true)  # oracle: 10 + 20 is 30
 
@@ -306,7 +321,7 @@ describe "Module System Integration":
         mkdir_p(FIXTURE_DIR)
         write_file(FIXTURE_DIR + "/mod_unexported_helper.spl", "fn _secret_add(a: i64, b: i64) -> i64:\n    a + b\n")
         write_file(FIXTURE_DIR + "/mod_main_visibility.spl", "use " + "mod_unexported_helper." + "{" + "_secret_add" + "}" + "\nprint(_secret_add(1, 2))\n")
-        val (stdout, stderr, exit_code) = process_run_timeout(SIMPLE_SEED_BINARY, ["run", FIXTURE_DIR + "/mod_main_visibility.spl"], 30000)
+        val (stdout, stderr, exit_code) = process_run_timeout(_seed_binary(), ["run", FIXTURE_DIR + "/mod_main_visibility.spl"], 30000)
         expect(exit_code).to_equal(1)  # oracle: the seed binary exits 1 on parse/compile/runtime failure
 
     it "detects circular dependencies":
@@ -321,7 +336,7 @@ describe "Module System Integration":
         write_file(FIXTURE_DIR + "/mod_circ_a.spl", "use " + "mod_circ_b." + "{" + "b_val" + "}" + "\nval a_val = 1\n")
         write_file(FIXTURE_DIR + "/mod_circ_b.spl", "use " + "mod_circ_a." + "{" + "a_val" + "}" + "\nval b_val = 2\n")
         write_file(FIXTURE_DIR + "/mod_main_circular.spl", "use " + "mod_circ_a." + "{" + "a_val" + "}" + "\nprint(a_val)\n")
-        val (stdout, stderr, exit_code) = process_run_timeout(SIMPLE_SEED_BINARY, ["run", FIXTURE_DIR + "/mod_main_circular.spl"], 30000)
+        val (stdout, stderr, exit_code) = process_run_timeout(_seed_binary(), ["run", FIXTURE_DIR + "/mod_main_circular.spl"], 30000)
         expect(exit_code).to_equal(1)  # oracle: the seed binary exits 1 on parse/compile/runtime failure
 
     it "loads transitive dependencies":
@@ -332,7 +347,7 @@ describe "Module System Integration":
         write_file(FIXTURE_DIR + "/mod_level1.spl", "fn level1_val() -> i64:\n    100\nexport level1_val\n")
         write_file(FIXTURE_DIR + "/mod_level2.spl", "use " + "mod_level1." + "{" + "level1_val" + "}" + "\nfn level2_val() -> i64:\n    level1_val() + 1\nexport level2_val\n")
         write_file(FIXTURE_DIR + "/mod_main_transitive.spl", "use " + "mod_level2." + "{" + "level2_val" + "}" + "\nprint(level2_val())\n")
-        val (stdout, stderr, exit_code) = process_run_timeout(SIMPLE_SEED_BINARY, ["run", FIXTURE_DIR + "/mod_main_transitive.spl"], 30000)
+        val (stdout, stderr, exit_code) = process_run_timeout(_seed_binary(), ["run", FIXTURE_DIR + "/mod_main_transitive.spl"], 30000)
         expect(exit_code).to_equal(0)  # oracle: the seed binary exits 0 on successful compile-and-run
         expect(stdout.contains("101")).to_equal(true)  # oracle: level1_val() 100 + 1 is 101
 

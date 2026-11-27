@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: cocoa_dynload_owner_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 /* Load the admitted Cocoa provider without opening a GUI window. */
 #include <dlfcn.h>
 #include <stdint.h>
@@ -42,3 +47,5 @@ int main(int argc, char **argv) {
     }
     return 0;
 }
+
+#endif /* !_WIN32 */

@@ -1,0 +1,92 @@
+## CAS critical-section provider contract for SimpleOS.
+##
+## Reproduce guard for bug naked_asm_lowering_miscompiles_simpleos_mutex_2026-09-01:
+## the cranelift freestanding backend previously ignored @naked, so the old
+## naked-asm CAS/cpuid critical-section provider in os.kernel.net.thread_shim
+## was miscompiled (prologue before the asm thunk, ud2 after the wrapper
+## call).  This spec pins the replacement provider: mutual exclusion is
+## established by a single compare-and-swap against the runtime atomic state
+## word (rt_atomic_int_compare_exchange), with NO @naked and NO asm volatile
+## anywhere in the provider source.
+##
+## Behavioral legs run against the real thread_shim module at interpreter
+## level; freestanding/x86_64 disassembly evidence remains a QEMU system
+## acceptance responsibility.
+
+use std.spec
+use std.spec.step
+use std.io_runtime.{read_file_text}
+use os.kernel.net.thread_shim.{
+    spl_mutex_create,
+    spl_mutex_lock,
+    spl_mutex_try_lock,
+    spl_mutex_unlock,
+    spl_mutex_destroy,
+}
+
+describe "SimpleOS CAS critical-section provider":
+
+    it "establishes mutual exclusion with acquire/release CAS on the state word":
+        step("create")
+        val handle = spl_mutex_create()
+        expect(handle > 0).to_equal(true)
+        step("acquire: unlocked -> owner CAS succeeds exactly once")
+        expect(spl_mutex_try_lock(handle)).to_equal(true)
+        step("second acquire fails: the state word still carries the owner")
+        expect(spl_mutex_try_lock(handle)).to_equal(false)
+        step("blocking lock also fails while held (bounded spin budget)")
+        expect(spl_mutex_lock(handle)).to_equal(false)
+        step("release: owner -> unlocked CAS succeeds")
+        expect(spl_mutex_unlock(handle)).to_equal(true)
+        step("double release fail-stops: unlocked word cannot release again")
+        expect(spl_mutex_unlock(handle)).to_equal(false)
+        step("reacquire after a clean release")
+        expect(spl_mutex_lock(handle)).to_equal(true)
+        expect(spl_mutex_unlock(handle)).to_equal(true)
+        spl_mutex_destroy(handle)
+
+    it "fails closed on invalid handles":
+        step("zero handle")
+        expect(spl_mutex_try_lock(0)).to_equal(false)
+        expect(spl_mutex_unlock(0)).to_equal(false)
+        expect(spl_mutex_lock(0)).to_equal(false)
+        step("negative handle")
+        expect(spl_mutex_try_lock(-7)).to_equal(false)
+        expect(spl_mutex_unlock(-7)).to_equal(false)
+        step("destroy on an invalid handle is inert")
+        spl_mutex_destroy(0)
+        spl_mutex_destroy(-7)
+
+    it "makes destruction terminal and never recycles the word":
+        step("destroyed word rejects acquire and release")
+        val handle = spl_mutex_create()
+        expect(handle > 0).to_equal(true)
+        spl_mutex_destroy(handle)
+        expect(spl_mutex_try_lock(handle)).to_equal(false)
+        expect(spl_mutex_unlock(handle)).to_equal(false)
+        step("a fresh create gets a distinct live word")
+        val fresh = spl_mutex_create()
+        expect(fresh > 0).to_equal(true)
+        expect(fresh == handle).to_equal(false)
+        expect(spl_mutex_try_lock(fresh)).to_equal(true)
+        expect(spl_mutex_unlock(fresh)).to_equal(true)
+        spl_mutex_destroy(fresh)
+
+    it "leaves a locked word locked when destroy cannot claim it":
+        step("acquire, then destroy must not steal an owned word")
+        val handle = spl_mutex_create()
+        expect(spl_mutex_try_lock(handle)).to_equal(true)
+        spl_mutex_destroy(handle)
+        step("word is still owned: acquire fails, owner release succeeds")
+        expect(spl_mutex_try_lock(handle)).to_equal(false)
+        expect(spl_mutex_unlock(handle)).to_equal(true)
+        step("now unlocked, destroy claims it and becomes terminal")
+        spl_mutex_destroy(handle)
+        expect(spl_mutex_try_lock(handle)).to_equal(false)
+
+    it "has no @naked or asm volatile dependency in the provider source":
+        step("provider source must not rely on @naked lowering")
+        val source = read_file_text("src/os/kernel/net/thread_shim.spl")
+        expect(source).to_contain("rt_atomic_int_compare_exchange")
+        expect(source.contains("@naked\nfn")).to_equal(false)
+        expect(source.contains("asm volatile:")).to_equal(false)

@@ -1,0 +1,143 @@
+#!/bin/sh
+# Bounded, diagnostic-only SCV metadata capture after a failed ladder step.
+# Port of the former capture-ladder-scv-evidence.py; --selftest replaces
+# scripts/check/check-ladder-scv-evidence.py.
+#
+# Usage: sh scripts/bootstrap/capture-ladder-scv-evidence.shs <checkout> <output-dir>
+#        sh scripts/bootstrap/capture-ladder-scv-evidence.shs --selftest
+# Budgets (tests only): SCV_CAPTURE_MAX_SNAPSHOTS (32), SCV_CAPTURE_MAX_BYTES (16 MiB).
+set -u
+
+NAMES="SCV_COMPILE_SNAPSHOT SCV_COMPILE_INVENTORY SCV_COMPILE_RECEIPT"
+self_path=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+
+json_str() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk 'BEGIN { ORS = ""; printf "\"" }
+        NR > 1 { printf "\\n" } { printf "%s", $0 } END { printf "\"" }'
+}
+
+capture() {
+    max_snapshots=${SCV_CAPTURE_MAX_SNAPSHOTS:-32}
+    max_bytes=${SCV_CAPTURE_MAX_BYTES:-16777216}
+    root=$(cd "$1" && pwd -P) || return 1
+    output=$2
+    [ ! -e "$output" ] || { echo "capture: output exists: $output" >&2; return 1; }
+    mkdir -p "$output" || return 1
+    files="" errors="" truncated=false used=0 count=0
+    add_error() { errors="$errors${errors:+,}
+    $(json_str "$1")"; }
+    for relative in build/scv/snapshots .simple/scv/snapshots; do
+        family=$root/$relative
+        [ -e "$family" ] || [ -L "$family" ] || continue
+        if [ -L "$family" ] || [ ! -d "$family" ]; then
+            add_error "$relative: outside checkout or symlink"
+            continue
+        fi
+        case "$(cd "$family" && pwd -P)/" in
+            "$root"/*) ;;
+            *) add_error "$relative: outside checkout or symlink"; continue ;;
+        esac
+        # Visit only immediate snapshot directories, never source subtrees.
+        for entry in "$family"/* "$family"/.[!.]*; do
+            [ -d "$entry" ] && [ ! -L "$entry" ] || continue
+            if [ "$count" -ge "$max_snapshots" ]; then
+                truncated=true
+                break
+            fi
+            count=$((count + 1))
+            for name in $NAMES; do
+                source=$entry/$name
+                key=${source#"$root"/}
+                if [ -L "$source" ] || [ ! -f "$source" ]; then
+                    add_error "$key: missing or nonregular metadata"
+                    continue
+                fi
+                size=$(wc -c < "$source" | tr -d ' ')
+                if [ "$size" -gt $((max_bytes - used)) ]; then
+                    truncated=true
+                    add_error "$key: byte budget exceeded"
+                    continue
+                fi
+                mkdir -p "$output/$(dirname "$key")" && cp "$source" "$output/$key" || {
+                    add_error "$key: copy failed"; continue; }
+                used=$((used + size))
+                sha=$(sha256sum < "$source" | awk '{ print $1 }')
+                files="$files${files:+,}
+    {
+      \"path\": $(json_str "$key"),
+      \"bytes\": $size,
+      \"sha256\": \"$sha\"
+    }"
+            done
+        done
+    done
+    {
+        printf '{\n  "schema": "ladder-scv-evidence-v1",\n  "admission": "none",\n'
+        printf '  "checkout": %s,\n' "$(json_str "$root")"
+        if [ -n "$files" ]; then printf '  "files": [%s\n  ],\n' "$files"; else printf '  "files": [],\n'; fi
+        if [ -n "$errors" ]; then printf '  "errors": [%s\n  ],\n' "$errors"; else printf '  "errors": [],\n'; fi
+        printf '  "truncated": %s,\n  "bytes": %s,\n  "snapshots": %s\n}\n' "$truncated" "$used" "$count"
+    } > "$output/index.json"
+}
+
+selftest() {
+    fails=0 n=0
+    bad() { echo "selftest: $1" >&2; fails=$((fails + 1)); }
+    t=$(mktemp -d)
+    # 1. metadata only, both roots, exact copies and hashes.
+    n=$((n + 1)); r=$t/one
+    for family in build/scv .simple/scv; do
+        snap=$r/$family/snapshots/scv-revision-v2-fixture
+        mkdir -p "$snap"
+        for name in $NAMES; do printf '%s\nsource=68bb1b5\n' "$name" > "$snap/$name"; done
+        printf 'not diagnostic metadata' > "$snap/source.spl"
+    done
+    capture "$r" "$r/evidence" || bad "capture failed"
+    [ "$(grep -c '"path":' "$r/evidence/index.json")" -eq 6 ] || bad "expected 6 files"
+    grep -q '"errors": \[\]' "$r/evidence/index.json" || bad "unexpected errors"
+    grep -q '"truncated": false' "$r/evidence/index.json" || bad "unexpectedly truncated"
+    for family in build/scv .simple/scv; do
+        for name in $NAMES; do
+            key=$family/snapshots/scv-revision-v2-fixture/$name
+            cmp -s "$r/$key" "$r/evidence/$key" || bad "copy differs: $key"
+            grep -q "\"sha256\": \"$(sha256sum < "$r/$key" | awk '{ print $1 }')\"" "$r/evidence/index.json" \
+                || bad "hash missing: $key"
+        done
+    done
+    [ -z "$(find "$r/evidence" -name '*.spl')" ] || bad "source file copied"
+    # 2. byte and snapshot budgets, missing metadata.
+    n=$((n + 1)); r=$t/two
+    for name in a b; do mkdir -p "$r/build/scv/snapshots/$name"; printf 12345 > "$r/build/scv/snapshots/$name/SCV_COMPILE_SNAPSHOT"; done
+    SCV_CAPTURE_MAX_BYTES=4 SCV_CAPTURE_MAX_SNAPSHOTS=1 capture "$r" "$r/evidence" || bad "bounded capture failed"
+    j=$r/evidence/index.json
+    grep -q '"truncated": true' "$j" && grep -q '"snapshots": 1$' "$j" && grep -q '"bytes": 0,' "$j" \
+        && grep -q 'budget exceeded' "$j" && grep -q 'missing' "$j" || bad "budget case: $(tr -d '\n' < "$j")"
+    # 3. the production exit trap keeps the exit status and captures only failures.
+    owner=$(dirname "$self_path")/phase-ladder-step.shs
+    trap_text=$(awk 'BEGIN { RS = "\001" } { i = index($0, "record_ladder_exit() {"); j = index($0, "exe=\n");
+        if (!i || !j) exit 3; printf "%s", substr($0, i, j - i) }' "$owner") || bad "trap markers missing"
+    for row in "0 1" "7 1" "9 0"; do
+        set -- $row
+        n=$((n + 1)); r=$t/trap$1
+        mkdir -p "$r/evidence"
+        if [ "$2" = 1 ]; then mkdir -p "$r/scripts/bootstrap" && cp "$self_path" "$r/scripts/bootstrap/"; fi
+        printf 'set -eu\nevidence_root=$PWD/evidence\nsource_revision=fixture\nplatform=linux-x86_64\nattempt_role=planning\nthreads=1\n%s\nexit %s\n' \
+            "$trap_text" "$1" > "$r/trap.sh"
+        (cd "$r" && sh trap.sh > /dev/null 2>&1)
+        rc=$?
+        [ "$rc" -eq "$1" ] || bad "trap exit $1 became $rc"
+        grep -q "exit_status: $1" "$r/evidence/attempt.sdn" 2>/dev/null || bad "trap $1: attempt.sdn"
+        if [ "$1" -ne 0 ]; then [ -e "$r/evidence/scv-capture.log" ] || bad "trap $1: no capture log"
+        else [ ! -e "$r/evidence/scv-capture.log" ] || bad "trap 0: captured on success"; fi
+        if [ "$1" -eq 7 ]; then
+            grep -q '"admission": "none"' "$r/evidence/scv-failure/index.json" 2>/dev/null || bad "trap 7: no index"
+        fi
+    done
+    rm -rf "$t"
+    if [ "$fails" -ne 0 ]; then echo "FAIL — $fails check(s) failed across $n case(s)"; return 1; fi
+    echo "PASS — $n selftest case(s) checked"
+}
+
+if [ "${1:-}" = --selftest ]; then selftest; exit $?; fi
+[ $# -eq 2 ] || { echo "usage: $0 <checkout> <output-dir> | --selftest" >&2; exit 2; }
+capture "$1" "$2"

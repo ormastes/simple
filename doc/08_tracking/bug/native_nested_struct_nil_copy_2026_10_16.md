@@ -28,3 +28,15 @@ Its authorized FIRST AND ONLY control execution PASSED: exit0, exact `PASS tco-l
 A PowerShell argv verifier initially constructed its comparison array incorrectly and FAILED CLOSED before linking; its failure receipt remains intact. A corrected verifier parsed the actual executed entry command and established exact argument equality before link. No entry recompile or unsafe bypass followed that failure.
 
 Scope: actual TailCallOptimization shared controls, including false manifest presence before and after by-value transformation, PASS. This does not fix or qualify the baked producer nil guard, nor admit a new compiler. BDD and broad compiler/lib/MCP/LSP gates remain UNRUN; no Phase3 completion, deployment or merge is claimed. Evidence: external mir-tco-local-identity-native-cycle3/strict-link/{strict-link-receipt.json,control-run-started.json,control-run-receipt.json,control.stdout.log,control.stderr.log,strict-link.map}.
+## Triage 2026-11-04 (opus-n88b)
+
+Workaround supplies a canonical owned DriverManifestAttr at MirBuilder sites; cycle3 qualification passed per the record above. Baked producer nil-carrier guard remains to verify.
+Fixture: test/04_smoke/nested_record_nil_copy_native.spl (interpreter lane passes; native lane unverified).
+Stage3 repro: `bin/simple native-build --entry test/04_smoke/nested_record_nil_copy_native.spl --output build/x && build/x` -> expected stdout in the fixture header.
+Status: open. workaround in place; native repro fixture added; real producer fix still needed.
+
+## Bootstrap repro/prevention 2026-11-05
+Bootstrap review: fixture test/04_smoke/nested_record_nil_copy_native.spl exists; workaround in place; verification-pending on a stage3 native run. No new change.
+
+## Opus rerun 2026-11-09
+The producer copy guard is implemented in source by dd6c7902c4d (`copy_struct_value_recursive` in mir_lowering_stmts.spl tests address != 0 AND != canonical nil word before any field read), pinned by `test/01_unit/compiler/mir/record_copy_absence_spec.spl` (null and nil word both route to structcopy_merge). The baked 0CD6 producer predates it. Status fix-implemented-verification-pending; MirBuilder workaround may be retired after a native stage3 run of test/04_smoke/nested_record_nil_copy_native.spl.

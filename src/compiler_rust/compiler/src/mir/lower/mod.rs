@@ -46,6 +46,18 @@ pub fn lower_to_mir(hir: &HirModule) -> MirLowerResult<MirModule> {
         .lower_module(hir)
 }
 
+/// [`lower_to_mir`] for the in-process JIT lane: additionally emits the S1
+/// block-end `rt_array_free` of proven-unique scalar array locals
+/// (`array_move.rs`, doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md).
+pub fn lower_to_mir_jit(hir: &HirModule) -> MirLowerResult<MirModule> {
+    MirLowerer::new()
+        .with_block_array_release(true)
+        .with_refined_types(&hir.refined_types)
+        .with_type_registry(&hir.types)
+        .with_trait_infos(&hir.trait_infos)
+        .lower_module(hir)
+}
+
 /// [`lower_to_mir`] with an explicit `[i64]` word-lane switch (false for
 /// freestanding and WASM targets, whose runtimes lack `rt_typed_words_i64_*`).
 pub fn lower_to_mir_with_word_lane(hir: &HirModule, signed_word_lane: bool) -> MirLowerResult<MirModule> {

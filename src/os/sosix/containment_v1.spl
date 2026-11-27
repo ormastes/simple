@@ -1,0 +1,47 @@
+# SimpleOS SOSIX containment body (lane N4, architecture pure_simple_container 4.2).
+# Source only: nothing here has run under QEMU real firmware or on a board, so
+# support reports every axis false. Mapped: memory and process count -> mem and pids.
+# Every other requested axis is a typed refusal naming the gap.
+# PONYTAIL: the real ResourceDomain (os.services.container.container_manager) is a
+# non-pub u64 struct, unreachable from here, so SimpleOsContainDomainV1 mirrors its
+# mem/pids as the contract i64 units. Ceiling: i64 range (2^63-1) not u64, and nothing
+# consumes the mirror yet. Upgrade: bind to the real ResourceDomain once it is exported.
+# Wiring into the lib facade goes through the existing SimpleOS SOSIX provider binding
+# (architecture 4.2); lib sosix/simpleos/containment_v1.spl stays a refusal (see bug record).
+use std.common.contracts.sosix.containment_v1.{SosixContainRequestV1, SosixContainSupportV1, SosixContainFlagV1, SosixContainBytesV1, SosixContainCountV1, sosix_contain_support_none_v1, sosix_contain_request_reason_v1}
+
+pub struct SimpleOsContainDomainV1:
+    mem: SosixContainBytesV1     # ResourceDomain.mem; 0 = no limit
+    pids: SosixContainCountV1    # ResourceDomain.pids; 0 = no limit
+
+pub struct SimpleOsContainMapV1:
+    accepted: SosixContainFlagV1
+    reason: text                 # "" when accepted, else the gap or invalid reason
+    domain: SimpleOsContainDomainV1
+
+fn _mappable_support_v1() -> SosixContainSupportV1:
+    val none = sosix_contain_support_none_v1("simpleos-managed-container-v1")
+    val yes = SosixContainFlagV1(true)
+    SosixContainSupportV1(mechanism: none.mechanism, memory_accounting: "",
+        memory_hard_limit: yes, process_limit: yes, cpu_rate_limit: none.cpu_rate_limit,
+        kill_all_descendants: none.kill_all_descendants, write_confinement: none.write_confinement,
+        read_confinement: none.read_confinement, network_isolation: none.network_isolation,
+        pid_isolation: none.pid_isolation, root_remap: none.root_remap, unprivileged: none.unprivileged)
+
+# Pure mapping: the request memory and process limits onto ResourceDomain, or
+# the first refusal (invalid request, or an axis with no SimpleOS mapping yet:
+# cpu rate, network isolation, pid isolation, root remap, write confinement, deadline).
+pub fn simpleos_contain_map_request_v1(request: SosixContainRequestV1) -> SimpleOsContainMapV1:
+    val empty = SimpleOsContainDomainV1(mem: SosixContainBytesV1(0), pids: SosixContainCountV1(0))
+    val reason = sosix_contain_request_reason_v1(request, _mappable_support_v1())
+    if reason != "":
+        return SimpleOsContainMapV1(accepted: SosixContainFlagV1(false), reason: reason, domain: empty)
+    SimpleOsContainMapV1(accepted: SosixContainFlagV1(true), reason: "",
+        domain: SimpleOsContainDomainV1(mem: request.limits.memory, pids: request.limits.processes))
+
+# Every axis false: unverified on QEMU real firmware and on a board.
+pub fn simpleos_contain_support_v1() -> SosixContainSupportV1:
+    sosix_contain_support_none_v1("simpleos-unverified")
+
+export SimpleOsContainDomainV1, SimpleOsContainMapV1
+export simpleos_contain_map_request_v1, simpleos_contain_support_v1

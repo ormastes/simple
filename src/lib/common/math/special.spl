@@ -79,6 +79,19 @@ fn _sqrt_nan() -> f64:
     val inf = big * 10.0
     inf - inf
 
+fn _sqrt_abs_residual(m: f64, c: f64) -> f64:
+    """|m - c*c| computed exactly via a Dekker two-product (no FMA needed):
+    c*c = p + err exactly, so m - c*c = (m - p) - err, with m - p exact for
+    p within a factor of 2 of m (Sterbenz)."""
+    val split = 134217729.0
+    val t = split * c
+    val c_hi = t - (t - c)
+    val c_lo = c - c_hi
+    val p = c * c
+    val err = ((c_hi * c_hi - p) + 2.0 * c_hi * c_lo) + c_lo * c_lo
+    val r = (m - p) - err
+    if r < 0.0: 0.0 - r else: r
+
 fn _sqrt_f64(x: f64) -> f64:
     """Square root via Newton's method. Domain: x >= 0.
 
@@ -132,6 +145,23 @@ fn _sqrt_f64(x: f64) -> f64:
         if delta <= 1.0e-15 * bound:
             break
         i = i + 1
+    # Correct rounding (sqrt_f64_not_correctly_rounded_2026-09-01): Newton in
+    # f64 lands within 1 ulp but not always on the nearest double. m is in
+    # [1, 4) so g is in [1, 2] and its ulp is exactly 2^-52; pick whichever of
+    # g-u, g, g+u has the smallest EXACT residual |m - c*c|.
+    val ulp = 2.220446049250313e-16
+    val lo_c = g - ulp
+    val hi_c = g + ulp
+    var best = g
+    var best_r = _sqrt_abs_residual(m, g)
+    val r_lo = _sqrt_abs_residual(m, lo_c)
+    if r_lo < best_r:
+        best = lo_c
+        best_r = r_lo
+    val r_hi = _sqrt_abs_residual(m, hi_c)
+    if r_hi < best_r:
+        best = hi_c
+    g = best
     var result = g
     if e >= 0:
         var k = 0

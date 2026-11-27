@@ -1,10 +1,10 @@
 use std.spec.*
-use compiler.backend.runtime_compiler.{find_c_compiler, find_runtime_source_dir, runtime_abi_policy_v1, runtime_abi_define_args_v1, runtime_core_c_sources_v1, runtime_object_paths_v1, runtime_thread_rust_owner_v1, _is_mingw, _is_msvc_cc, _runtime_dir_walk_up, _runtime_dir_not_found_message}
+use compiler.backend.runtime_compiler.{c_compiler_override, find_c_compiler, find_runtime_source_dir, runtime_abi_policy_v1, runtime_abi_define_args_v1, runtime_core_c_sources_v1, runtime_object_paths_v1, runtime_posix_cache_prune_v1, runtime_thread_rust_owner_v1, _is_mingw, _is_msvc_cc, _runtime_dir_walk_up, _runtime_dir_not_found_message, _runtime_posix_cache_keep_v1, _runtime_posix_cache_min_age_s_v1}
 use compiler.backend.llvm_native_link_runtime_owner.{llvm_runtime_owner_compile_owner_v1}
 use app.io.mod.{cwd}
-use std.io_runtime.{file_read_nullable, process_run}
+use std.io_runtime.{dir_create, dir_exists, dir_remove_all, file_exists, file_read_nullable, file_write, getpid, process_run}
 
-extern fn rt_env_get(key: text) -> text
+extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_set(key: text, value: text)
 
 fn with_env(key: text, value: text, block: fn()):
@@ -58,6 +58,60 @@ describe "Runtime Compiler":
             )
         )
 
+    it "uses the GNU link driver for runtime and entry compilation":
+        with_env("CC", "/pinned/llvm-mingw/clang.exe", fn():
+            with_env("SIMPLE_CC", "/ambient/clang.exe", fn():
+                expect(c_compiler_override(true, false, "host")).to_equal("/pinned/llvm-mingw/clang.exe")
+            )
+        )
+
+    it "falls back to SIMPLE_CC when Windows GNU CC is empty":
+        with_env("CC", "", fn():
+            with_env("SIMPLE_CC", "/fallback/llvm-mingw/clang.exe", fn():
+                expect(c_compiler_override(true, false, "host")).to_equal("/fallback/llvm-mingw/clang.exe")
+            )
+        )
+
+    it "rejects a non-Clang CC on the unqualified Windows GNU lane":
+        with_env("CC", "C:/VS/cl.exe", fn():
+            expect(c_compiler_override(true, false, "host")).to_equal("")
+        )
+
+    it "fails closed after a rejected override instead of rediscovering":
+        with_env("SIMPLE_NATIVE_BUILD_TARGET", "x86_64-pc-windows-gnu", fn():
+            with_env("CC", "", fn():
+                with_env("SIMPLE_CC", "C:/VS/cl.exe", fn():
+                    expect(find_c_compiler()).to_equal("")
+                )
+            )
+        )
+
+    it "keeps SIMPLE_CC as the cross driver on a Windows GNU host":
+        with_env("CC", "/pinned/llvm-mingw/clang.exe", fn():
+            with_env("SIMPLE_CC", "/cross/clang", fn():
+                expect(c_compiler_override(true, true, "aarch64-unknown-linux-gnu")).to_equal("/cross/clang")
+            )
+        )
+
+    it "reuses the llvm-mingw CC for a Windows GNU cross architecture":
+        # Repro: x86_64 Windows host -> aarch64-pc-windows-gnu found no C
+        # compiler unless SIMPLE_CC was set; llvm-mingw clang is multi-target.
+        with_env("CC", "/pinned/llvm-mingw/clang.exe", fn():
+            with_env("SIMPLE_CC", "", fn():
+                expect(c_compiler_override(true, true, "aarch64-pc-windows-gnu")).to_equal("/pinned/llvm-mingw/clang.exe")
+            )
+            with_env("SIMPLE_CC", "/explicit/clang.exe", fn():
+                expect(c_compiler_override(true, true, "aarch64-pc-windows-gnu")).to_equal("/explicit/clang.exe")
+            )
+        )
+
+    it "accepts a non-Clang cross driver on a Windows GNU host":
+        with_env("CC", "/pinned/llvm-mingw/clang.exe", fn():
+            with_env("SIMPLE_CC", "/cross/gcc", fn():
+                expect(c_compiler_override(true, true, "aarch64-unknown-linux-gnu")).to_equal("/cross/gcc")
+            )
+        )
+
     it "honors the explicit Windows ABI outside MSYS":
         with_env("SIMPLE_LINKER_FLAVOR", "", fn():
             with_env("MSYSTEM", "", fn():
@@ -107,14 +161,14 @@ describe "Runtime Compiler":
         step("Verify: canonical facades preserve nullable env and direct process semantics")
         val source = file_read_nullable("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
         expect(source).to_contain("use std.io_runtime.{host_arch, host_os, env_get_nullable, file_exists, file_delete, process_run}")
-        expect(source).to_contain("use std.nogc_sync_mut.io.sysinfo_ops.{getpid}")
+        expect(source).to_contain("use std.nogc_sync_mut.io.sysinfo_ops.\{getpid}")
         expect(source.contains("extern fn rt_env_get")).to_be(false)
         expect(source.contains("extern fn rt_file_exists")).to_be(false)
         expect(source.contains("extern fn rt_file_delete")).to_be(false)
         expect(source.contains("extern fn rt_process_run")).to_be(false)
         expect(source.contains("extern fn rt_getpid")).to_be(false)
-        expect(source.split("env_get_nullable(").len() - 1).to_equal(14)
-        expect(source.split("file_exists(").len() - 1).to_equal(7)
+        expect(source.split("env_get_nullable(").len() - 1).to_equal(19)
+        expect(source.split("file_exists(").len() - 1).to_equal(8)
         expect(source.split("process_run(cc, comp_args)").len() - 1).to_equal(1)
         expect(source.split("val pid = getpid()").len() - 1).to_equal(1)
         expect(source.split("val compile_pid = getpid()").len() - 1).to_equal(1)
@@ -169,6 +223,75 @@ describe "Runtime Compiler":
     it "finds runtime sources from cwd when no override is set":
         with_env("SIMPLE_PROJECT_ROOT", "", fn():
             expect(find_runtime_source_dir()).to_equal("src/runtime")
+        )
+
+    # bug native_build_inprocess_link_access_violation_2026-11-05
+    it "renders the missing-runtime diagnostic as text when SIMPLE_PROJECT_ROOT is unset":
+        with_env("SIMPLE_PROJECT_ROOT", "", fn():
+            val msg = _runtime_dir_not_found_message()
+            expect(msg).to_start_with("Runtime source directory not found")
+            expect(msg).to_contain("SIMPLE_PROJECT_ROOT=<unset>")
+            expect(msg).to_contain("running executable (")
+        )
+
+    it "renders the missing-runtime diagnostic with the configured project root":
+        with_env("SIMPLE_PROJECT_ROOT", "/w1/probe/root", fn():
+            val msg = _runtime_dir_not_found_message()
+            expect(msg).to_contain("SIMPLE_PROJECT_ROOT=/w1/probe/root")
+            expect(msg).to_contain("under the current directory (")
+        )
+
+    it "marks POSIX runtime cache subdirs used and prunes stale keyed siblings on publish":
+        val base = "build/test-artifacts/rt-objcache-prune-{getpid()}"
+        dir_remove_all(base)
+        val k1 = "0000000000000000000000000000000000000001"
+        val k2 = "0000000000000000000000000000000000000002"
+        val k3 = "0000000000000000000000000000000000000003"
+        val k4 = "0000000000000000000000000000000000000004"
+        for k in [k1, k2, k3, k4, "foreign-dir"]:
+            expect(dir_create(base + "/" + k, true)).to_equal(true)
+            expect(file_write(base + "/" + k + "/runtime.o", "obj")).to_equal(true)
+        with_env("SIMPLE_RT_OBJ_CACHE_KEEP", "2", fn():
+            with_env("SIMPLE_RT_OBJ_CACHE_MIN_AGE_S", "0", fn():
+                expect(runtime_posix_cache_prune_v1(base + "/" + k1, false)).to_equal(0)
+                expect(file_exists(base + "/" + k1 + "/.last-use")).to_equal(true)
+                expect(dir_exists(base + "/" + k2)).to_equal(true)
+                expect(runtime_posix_cache_prune_v1(base + "/" + k1, true)).to_equal(2)
+                expect(dir_exists(base + "/" + k1)).to_equal(true)
+                expect(dir_exists(base + "/foreign-dir")).to_equal(true)
+                var remaining_keys = 0
+                for k in [k1, k2, k3, k4]:
+                    if dir_exists(base + "/" + k):
+                        remaining_keys = remaining_keys + 1
+                expect(remaining_keys).to_equal(2)
+            )
+        )
+        dir_remove_all(base)
+
+    it "falls back to defaults on invalid or single-char POSIX cache env values":
+        with_env("SIMPLE_RT_OBJ_CACHE_KEEP", "invalid", fn():
+            expect(_runtime_posix_cache_keep_v1()).to_equal(4)
+        )
+        with_env("SIMPLE_RT_OBJ_CACHE_KEEP", "a", fn():
+            expect(_runtime_posix_cache_keep_v1()).to_equal(4)
+        )
+        with_env("SIMPLE_RT_OBJ_CACHE_KEEP", "0", fn():
+            expect(_runtime_posix_cache_keep_v1()).to_equal(4)
+        )
+        with_env("SIMPLE_RT_OBJ_CACHE_KEEP", "7", fn():
+            expect(_runtime_posix_cache_keep_v1()).to_equal(7)
+        )
+        with_env("SIMPLE_RT_OBJ_CACHE_MIN_AGE_S", "invalid", fn():
+            expect(_runtime_posix_cache_min_age_s_v1()).to_equal(3600)
+        )
+        with_env("SIMPLE_RT_OBJ_CACHE_MIN_AGE_S", "a", fn():
+            expect(_runtime_posix_cache_min_age_s_v1()).to_equal(3600)
+        )
+        with_env("SIMPLE_RT_OBJ_CACHE_MIN_AGE_S", "-1", fn():
+            expect(_runtime_posix_cache_min_age_s_v1()).to_equal(3600)
+        )
+        with_env("SIMPLE_RT_OBJ_CACHE_MIN_AGE_S", "0", fn():
+            expect(_runtime_posix_cache_min_age_s_v1()).to_equal(0)
         )
 
 # # Runtime Compiler Unit Tests

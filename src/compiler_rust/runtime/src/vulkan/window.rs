@@ -17,6 +17,29 @@ use winit::{
 #[cfg(target_os = "linux")]
 use winit::platform::x11::EventLoopBuilderExtX11;
 
+// The previous closure handled only requests and window events. Keep every
+// other lifecycle callback inert, including resumed, while using run_app.
+struct WindowEventHandler<F>(F);
+
+impl<T: 'static, F: FnMut(Event<T>, &winit::event_loop::ActiveEventLoop)> winit::application::ApplicationHandler<T>
+    for WindowEventHandler<F>
+{
+    fn resumed(&mut self, _target: &winit::event_loop::ActiveEventLoop) {}
+
+    fn user_event(&mut self, target: &winit::event_loop::ActiveEventLoop, event: T) {
+        (self.0)(Event::UserEvent(event), target);
+    }
+
+    fn window_event(
+        &mut self,
+        target: &winit::event_loop::ActiveEventLoop,
+        window_id: winit::window::WindowId,
+        event: WinitWindowEvent,
+    ) {
+        (self.0)(Event::WindowEvent { window_id, event }, target);
+    }
+}
+
 /// Window handle type
 pub type WindowHandle = u64;
 
@@ -222,33 +245,35 @@ impl WindowManager {
         });
 
         // Run event loop
-        let _ = event_loop.run(move |event, target| match event {
-            Event::UserEvent(UserEvent::Request(request)) => {
-                Self::handle_request(request, &windows, &instance, target);
-            }
+        let _ = event_loop.run_app(&mut WindowEventHandler(
+            move |event: Event<UserEvent>, target: &winit::event_loop::ActiveEventLoop| match event {
+                Event::UserEvent(UserEvent::Request(request)) => {
+                    Self::handle_request(request, &windows, &instance, target);
+                }
 
-            Event::WindowEvent {
-                window_id,
-                event: win_event,
-            } => {
-                let windows_lock = windows.lock();
-                let window_handle = windows_lock
-                    .iter()
-                    .find(|(_, state)| state.window.id() == window_id)
-                    .map(|(handle, _)| *handle);
-                drop(windows_lock);
+                Event::WindowEvent {
+                    window_id,
+                    event: win_event,
+                } => {
+                    let windows_lock = windows.lock();
+                    let window_handle = windows_lock
+                        .iter()
+                        .find(|(_, state)| state.window.id() == window_id)
+                        .map(|(handle, _)| *handle);
+                    drop(windows_lock);
 
-                if let Some(handle) = window_handle {
-                    if let Some(event) = Self::convert_window_event(handle, win_event) {
-                        let _ = event_sender.send(event);
+                    if let Some(handle) = window_handle {
+                        if let Some(event) = Self::convert_window_event(handle, win_event) {
+                            let _ = event_sender.send(event);
+                        }
                     }
                 }
-            }
 
-            Event::AboutToWait => {}
+                Event::AboutToWait => {}
 
-            _ => {}
-        });
+                _ => {}
+            },
+        ));
 
         tracing::info!("Event loop thread exiting");
     }

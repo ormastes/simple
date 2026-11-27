@@ -5,8 +5,8 @@
 # receipt after re-checking the generation lease.
 set -eu
 
-[ "$#" -eq 5 ] || {
-    echo "usage: $0 OUTPUT GENERATION_DIR LEASE LEASE_SHA ENGINE_DONE" >&2
+[ "$#" -eq 5 ] || [ "$#" -eq 7 ] || {
+    echo "usage: $0 OUTPUT GENERATION_DIR LEASE LEASE_SHA ENGINE_DONE [RESUME_INPUT RESUME_SHA]" >&2
     exit 2
 }
 
@@ -15,6 +15,8 @@ generation_dir=$2
 lease=$3
 lease_sha=$4
 engine_done=$5
+resume_input=${6:-}
+resume_input_sha=${7:-}
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 contract="$root/scripts/bootstrap/bootstrap-scheduler-contract.shs"
 . "$contract"
@@ -32,6 +34,18 @@ wait_seconds=${SIMPLE_BOOTSTRAP_QUALIFY_WAIT_SECONDS:-14400}
 case "$wait_seconds" in ''|*[!0-9]*|0) exit 2 ;; esac
 waited=0
 admission=
+if [ -n "$resume_input" ]; then
+    [ "$(bootstrap_scheduler_hash_file "$resume_input")" = "$resume_input_sha" ] || exit 1
+    BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+    BOOTSTRAP_STAGE3_VERSION_ROOT=$root
+    export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+    . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+    bootstrap_scheduler_verify_resume_input "$resume_input" "$output" "$root" "$lease" "$lease_sha" || {
+        echo 'qualification-error: admitted resume input did not verify' >&2
+        exit 1
+    }
+    admission=$(bootstrap_scheduler_manifest_value admission_path "$resume_input") || exit 1
+else
 cleanup_marker="$generation_dir/stage2-cleanup.ready"
 while [ "$waited" -lt "$wait_seconds" ] && [ ! -f "$cleanup_marker" ]; do
     if [ -f "$engine_done" ]; then
@@ -74,6 +88,7 @@ done
     echo 'qualification-error: timed out waiting for Stage-2 smoke admission' >&2
     exit 1
 }
+fi
 
 BOOTSTRAP_STAGE3_FACADE_PATH=\
 "$root/scripts/check/lib/bootstrap-stage3-provenance.shs"

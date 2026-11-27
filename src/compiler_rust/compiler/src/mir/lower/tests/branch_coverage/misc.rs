@@ -432,6 +432,8 @@ fn extract_attrs_already_has_inject() {
         is_ghost: false,
         is_sync: false,
         has_suspension: false,
+        generic_params: vec![],
+        generic_bounds: vec![],
     };
     let attrs = lowerer.extract_function_attributes(&func);
     assert_eq!(attrs.iter().filter(|a| *a == "inject").count(), 1);
@@ -460,6 +462,8 @@ fn extract_attrs_already_has_pure() {
         is_ghost: false,
         is_sync: false,
         has_suspension: false,
+        generic_params: vec![],
+        generic_bounds: vec![],
     };
     let attrs = lowerer.extract_function_attributes(&func);
     assert_eq!(attrs.iter().filter(|a| *a == "pure").count(), 1);
@@ -488,6 +492,8 @@ fn extract_attrs_already_has_mode() {
         is_ghost: false,
         is_sync: false,
         has_suspension: false,
+        generic_params: vec![],
+        generic_bounds: vec![],
     };
     let attrs = lowerer.extract_function_attributes(&func);
     assert_eq!(attrs.iter().filter(|a| *a == "actor").count(), 1);
@@ -516,6 +522,8 @@ fn extract_effects_already_has_async() {
         is_ghost: false,
         is_sync: false,
         has_suspension: false,
+        generic_params: vec![],
+        generic_bounds: vec![],
     };
     let effects = lowerer.extract_function_effects(&func);
     assert_eq!(effects.iter().filter(|a| *a == "async").count(), 1);

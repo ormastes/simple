@@ -34,34 +34,38 @@ use std.spec.step
 use std.spec.step
 
 use std.spec.*
+use std.io_runtime.{dir_walk, file_read_text}
 
-
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-
-fn _scan(pattern: text, path: text) -> text:
-    val cmd = "rg -n '" + pattern + "' " + path + " -g '*.spl' || true"
-    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
-    stdout.trim()
-
-fn _non_empty_scan_lines(scan: text) -> [text]:
-    var result: [text] = []
-    for line in scan.split("\n"):
-        val trimmed = line.trim()
-        if trimmed.len() > 0:
-            result.push(trimmed)
-    result
+fn _find_enum_decl_lines(root: text, needle: text) -> [text]:
+    var matches: [text] = []
+    val files = dir_walk(root)
+    for path in files:
+        if not path.ends_with(".spl"):
+            continue
+        val content = file_read_text(path)
+        val lines = content.split("\n")
+        var line_num = 1
+        for line in lines:
+            if line.trim().starts_with(needle):
+                matches.push(path.replace("\\", "/") + ":" + line_num.to_text() + ": " + line.trim())
+            line_num = line_num + 1
+    matches
 
 describe "GC strategy naming":
     # @manual scenario evidence
     it "has only one compiler enum named GcMode":
         # @req REQ-SSPEC-COMPILER
         step("has only one compiler enum named GcMode")
-        val matches = _non_empty_scan_lines(_scan("enum GcMode:", "src/compiler"))
+        val matches = _find_enum_decl_lines("src/compiler", "enum GcMode:")
         expect(matches.len()).to_equal(1)
         expect(matches[0].starts_with("src/compiler/00.common/gc_config.spl:")).to_equal(true)
 
     it "uses GcStrategy for write barrier GC algorithms":
         # @req REQ-SSPEC-COMPILER
         step("uses GcStrategy for write barrier GC algorithms")
-        val matches = _non_empty_scan_lines(_scan("enum GcStrategy:", "src/compiler/55.borrow/gc_analysis/barriers.spl"))
-        expect(matches.len()).to_equal(1)
+        val content = file_read_text("src/compiler/55.borrow/gc_analysis/barriers.spl")
+        var count = 0
+        for line in content.split("\n"):
+            if line.trim().starts_with("enum GcStrategy:"):
+                count = count + 1
+        expect(count).to_equal(1)

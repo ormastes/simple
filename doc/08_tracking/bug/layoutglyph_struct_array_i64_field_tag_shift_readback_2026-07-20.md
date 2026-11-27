@@ -206,3 +206,31 @@ above (separate struct-in-container hop, not this bug). Deleting the
 `_prepare_text_active` scalar-mirror workaround now that the root cause is
 fixed is left to whoever next touches `font_renderer.spl` with board access
 to re-verify the OVMF gate, per this repo's board-runnable rule.
+
+## Verification 2026-11-25 (p2w3-ah lane, release/1.0.0) — fix confirmed in-tree; closing as resolved
+
+Code inspection on release/1.0.0 HEAD confirms the root fix described in the
+"Root-fix (2026-07-20)" section is present and intact:
+`note_container_elem_type` (`src/compiler/50.mir/_MirLoweringExpr/
+expr_dispatch.spl:3252`) carries the struct-name capture into
+`array_element_struct_syms` for push/index-assign-populated containers, with
+the in-code comment explicitly citing this bug ID. Both regression guards
+exist: `test/03_system/native/struct_array_push_i64_field_tagshift.spl`
+(native-build exit-code gate) and
+`test/01_unit/compiler/codegen/struct_array_i64_field_precision_spec.spl`
+(SSpec parity guard).
+
+**Verification limit:** neither guard was executed in this lane —
+`bin/simple test` is repo-wide blocked at this HEAD (pinned Rust seed rejects
+`@representation_boundary`, added by cfd89933699), and the native-build gate
+needs a self-hosted binary / long closure build not available here. The
+hosted-lane fix verification recorded in the Root-fix section stands.
+
+**Residuals, restated for the record (not this bug):** the freestanding
+x86_64-unknown-none OVMF desktop boot was never independently re-verified
+(board-runnable follow-up); the `_prepare_text_active` scalar-mirror
+workaround is still in place pending that board re-verification; the
+glyph-cache notdef residual is a separate struct-in-container defect. The
+tracked bug — LayoutGlyph struct-in-array i64 tag-shift readback — is fixed
+on the hosted native-build lane and the fix is target-independent MIR
+lowering. Status: RESOLVED.

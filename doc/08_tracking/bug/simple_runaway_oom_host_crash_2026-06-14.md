@@ -72,3 +72,14 @@ is killed at the 4 GB cap instead of thrashing host swap into a global OOM.
   accumulates unboundedly. Hunt which spec/input balloons and add per-spec
   reclamation or process isolation. Tracked separately — the cap above prevents
   the host crash regardless of which leak fires.
+
+## Verification 2026-11-25 (p2w5-ad lane, release/1.0.0)
+
+Containment fix confirmed in tree: `container_adapter.spl` carries
+`resource_flags: "--memory=4g --memory-swap=4g --pids-limit=512 --cpus=4.0"`
+(line 57) injected into both `docker create` commands (lines 124 and 203).
+The 2026-09-13 stale-by-host closure stands; the root-leak hunt remains a
+separate open runtime topic as recorded. No new evidence either way is
+obtainable from this Windows host (no docker scopes, no kernel OOM log).
+
+Status: CLOSED (stale by host), unchanged.

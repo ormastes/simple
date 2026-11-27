@@ -30,6 +30,12 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        let _ = self.expected_target_type.take();
+        let orig_callee = callee;
+        let callee = match callee {
+            Expr::GenericInst { expr, .. } => expr.as_ref(),
+            other => other,
+        };
         // PAREN-FORM STRUCT SPREAD: `S(..base, field: v)`.
         // `Expr::StructSpread` is produced ONLY by `parse_arguments`, so an
         // argument list carrying one is a struct-update construction and never
@@ -40,6 +46,10 @@ impl Lowerer {
         }
         // Check for special builtins: generator, future, spawn, await, print, etc.
         if let Expr::Identifier(name) = callee {
+            if let Some(erased) = self.lower_record_unit_ctor(name, args, ctx)? {
+                return Ok(erased);
+            }
+            self.check_unit_call_args(name, args, ctx)?;
             if let Some((type_name, "new")) = name.rsplit_once('.') {
                 if let Some(type_id) = self.module.types.lookup(type_name) {
                     if matches!(self.module.types.get(type_id), Some(HirType::Bitfield { .. })) {
@@ -64,24 +74,32 @@ impl Lowerer {
                         ty: TypeId::ANY,
                     });
                     let args_hir = self.lower_call_args(args, ctx)?;
-                    // `Some(f)` with a FUNCTION payload: answer `Option<fn>`,
-                    // not ANY. An ANY payload binds `case Some(h)` as ANY, and
-                    // an indirect call through an ANY callee mixes the raw
-                    // and tagged conventions (LLVM: wrong result even for a
-                    // local `f`). Other payloads keep ANY.
-                    let ty = match (name.as_str(), args_hir.first()) {
-                        ("Some", Some(payload))
-                            if matches!(self.module.types.get(payload.ty), Some(HirType::Function { .. })) =>
+                    // Keep an already-known function or nominal record payload
+                    // on Some, including record variables and call results.
+                    // Otherwise `Some(owned)` binds ANY and a later field read
+                    // loses its authored record owner. Other shapes stay erased;
+                    // no field-name or layout guessing may create an owner.
+                    // A local bound to a lambda keeps the lambda's expression
+                    // type; its function type lives in `lambda_local_fn_types`.
+                    let payload_ty = match args_hir.first() {
+                        Some(HirExpr { kind: HirExprKind::Local(idx), .. }) => {
+                            ctx.lambda_local_fn_types.get(idx).copied().or(args_hir.first().map(|p| p.ty))
+                        }
+                        other => other.map(|p| p.ty),
+                    };
+                    let ty = match (name.as_str(), payload_ty) {
+                        ("Some", Some(payload_ty))
+                            if matches!(self.module.types.get(payload_ty), Some(HirType::Function { .. } | HirType::Struct { .. })) =>
                         {
                             self.module.types.register(HirType::Enum {
                                 name: "Option".to_string(),
                                 variants: vec![
-                                    ("Some".to_string(), Some(vec![payload.ty])),
+                                    ("Some".to_string(), Some(vec![payload_ty])),
                                     ("None".to_string(), None),
                                 ],
                                 generic_params: vec!["T".to_string()],
                                 is_generic_template: false,
-                                type_bindings: std::collections::HashMap::from([("T".to_string(), payload.ty)]),
+                                type_bindings: std::collections::HashMap::from([("T".to_string(), payload_ty)]),
                             })
                         }
                         _ => TypeId::ANY,
@@ -108,22 +126,7 @@ impl Lowerer {
             // Skip primitives here so lower_utility_builtin lowers them as Cast.
             let ctor_ty = self.resolve_constructor_type(name);
             if let Some(struct_ty) = ctor_ty {
-                if matches!(self.module.types.get(struct_ty), Some(HirType::Bitfield { .. })) {
-                    return self.lower_bitfield_constructor(struct_ty, args, ctx);
-                }
-                // ROOT FIX (bug simpleos_native_build_field_defaults_and_boxed_trait_dispatch,
-                // 2026-07-16): this used to be `lower_call_args`, which
-                // "lowers arguments as positional field initializers" —
-                // dropping `arg.name` entirely and lowering values in
-                // literal-source order regardless of the struct's declared
-                // field order. See `lower_struct_init_fields` in
-                // collections.rs for the full root-cause writeup; it
-                // reorders named args to their declared slot and fills any
-                // field the call site omits (relying on a class-level
-                // default) with `nil` instead of leaving it unset.
-                let provided: Vec<(Option<&str>, &Expr)> = args.iter().map(|a| (a.name.as_deref(), &a.value)).collect();
-                let (fields_hir, binding) = self.lower_struct_init_fields(name, struct_ty, &provided, None, ctx)?;
-                return Ok(Self::finish_struct_init(struct_ty, fields_hir, binding));
+                return self.lower_resolved_constructor(name, struct_ty, args, ctx);
             } else if self.lenient_types
                 && name.starts_with(|c: char| c.is_ascii_uppercase())
                 && args.iter().any(|a| a.name.is_some())
@@ -222,6 +225,29 @@ impl Lowerer {
         // This handles Expr::Path with 2 segments like Container.with_profile()
         if let Expr::Path(segments) = callee {
             if segments.len() == 2 {
+                if self.active_fn_generic_params.iter().any(|p| p == &segments[0]) {
+                    let args_hir = self.lower_call_args(args, ctx)?;
+                    let trait_name = self
+                        .active_fn_generic_bounds
+                        .iter()
+                        .find(|b| b.type_param == segments[0])
+                        .and_then(|b| b.bounds.first().map(|tb| tb.trait_name.clone()));
+                    return Ok(HirExpr {
+                        kind: HirExprKind::TypeParamStaticCall {
+                            type_param: segments[0].clone(),
+                            trait_name,
+                            method: segments[1].clone(),
+                            args: args_hir,
+                        },
+                        ty: TypeId::ANY,
+                    });
+                }
+                if let Some(prim_default) = (segments[1] == "default" && args.is_empty())
+                    .then(|| Self::primitive_default_hir_expr(&segments[0]))
+                    .flatten()
+                {
+                    return Ok(prim_default);
+                }
                 if let Some(type_id) = self.module.types.lookup(&segments[0]) {
                     if matches!(self.module.types.get(type_id), Some(HirType::Bitfield { .. })) && segments[1] == "new"
                     {
@@ -242,21 +268,62 @@ impl Lowerer {
             }
             _ => self.call_return_type(callee, func_hir.ty),
         };
+        let resolved_callee_symbol = match (&func_hir.kind, callee) {
+            (HirExprKind::Global(symbol), Expr::Identifier(_)) => Some(symbol.as_str()),
+            (_, Expr::Identifier(name)) => Some(name.as_str()),
+            (HirExprKind::Global(symbol), _) => Some(symbol.as_str()),
+            _ => None,
+        };
+        let ret_ty = match callee {
+            Expr::Identifier(name) => self.owner_scoped_extern_return(name).unwrap_or(ret_ty),
+            _ => ret_ty,
+        };
+        let ret_ty = self.refine_generic_identity_return(orig_callee, resolved_callee_symbol, args, ret_ty, ctx);
         // Check the RESOLVED symbol, not the bare callee name: in a flattened
         // unit with a cross-module same-named collision, `func_hir.kind` may
         // carry a different (owner-mangled) symbol than `callee`'s bare text,
         // and `proven_nonescaping_functions`/other per-symbol sets below are
         // keyed by the symbol `lower_function` actually emitted
         // (`flatten_emitted_symbol`), not by the ambiguous bare name.
-        let resolved_callee_symbol = match (&func_hir.kind, callee) {
-            (HirExprKind::Global(symbol), Expr::Identifier(_)) => Some(symbol.as_str()),
-            (_, Expr::Identifier(name)) => Some(name.as_str()),
-            _ => None,
-        };
         let proven_nonescaping = resolved_callee_symbol
             .is_some_and(|symbol| self.proven_nonescaping_functions.contains(symbol))
             && !self.is_reference_type(ret_ty);
-        let mut args_hir = if proven_nonescaping {
+        // A lambda passed positionally to a fn-typed parameter takes that
+        // parameter's declared callback param types. Without this, a
+        // placeholder lambda (`apply(_1 + 1, 4)`) defaulted its params to ANY
+        // while the callee invokes it with raw scalars, so the JIT computed on
+        // a tagged/raw mix (`apply(_1 + 1, 4)` returned 40, not 5).
+        let callee_fn_param_types: Vec<Option<Vec<TypeId>>> = match self.module.types.get(func_hir.ty) {
+            Some(HirType::Function { params, .. }) if args.iter().all(|a| a.name.is_none()) => params
+                .clone()
+                .into_iter()
+                .map(|p| match self.module.types.get(p) {
+                    Some(HirType::Function { params, .. }) => Some(params.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let has_typed_lambda_arg = args.iter().enumerate().any(|(i, a)| {
+            matches!(a.value, Expr::Lambda { .. }) && matches!(callee_fn_param_types.get(i), Some(Some(_)))
+        });
+        let mut args_hir = if has_typed_lambda_arg {
+            let capability_checkpoint = proven_nonescaping.then(|| self.capability_env.clone());
+            let mut out = Vec::with_capacity(args.len());
+            for (i, arg) in args.iter().enumerate() {
+                match (&arg.value, callee_fn_param_types.get(i)) {
+                    (Expr::Lambda { params, body, capture_all, .. }, Some(Some(param_tys))) => {
+                        let param_tys = param_tys.clone();
+                        out.push(self.lower_lambda_with_param_types(params, body, *capture_all, ctx, &param_tys)?);
+                    }
+                    _ => out.push(self.lower_expr(&arg.value, ctx)?),
+                }
+            }
+            if let Some(checkpoint) = capability_checkpoint {
+                self.capability_env = checkpoint;
+            }
+            out
+        } else if proven_nonescaping {
             self.lower_nonescaping_call_args(args, ctx)?
         } else if matches!(callee, Expr::Identifier(name) if name == "array_sort_by")
             && matches!(args, [_, ast::Argument { value: Expr::Lambda { .. }, .. }])
@@ -277,24 +344,179 @@ impl Lowerer {
             self.lower_call_args(args, ctx)?
         };
 
+        // BOOL-ARG STATIC ADMISSION (doc/08_tracking/bug/bool_typed_parameter_accepts_non_bool_and_jit_corrupts_it_2026-08-04):
+        // lowering-side mirror of the interpreter pre-scan in `bind_args`: a
+        // literal non-bool argument at a `bool`-declared parameter of a
+        // directly-named function is a lowering error, so the JIT lane cannot
+        // re-tag it into a corrupt value. Existence probes (`x.?`), Option
+        // payloads, and non-literal expressions keep the runtime PRESENCE
+        // contract. Spreads are statically uncounted and keep the runtime
+        // contract for every spread-touched slot.
+        if let (Expr::Identifier(_), HirExprKind::Global(symbol)) = (callee, &func_hir.kind) {
+            if let Some(slots) = self.fn_param_bool.get(symbol) {
+                if !slots.is_empty() && !args.iter().any(|a| matches!(a.value, Expr::Spread(_))) {
+                    let named: std::collections::HashSet<&str> =
+                        args.iter().filter_map(|a| a.name.as_deref()).collect();
+                    let names = self.fn_param_names.get(symbol);
+                    let mut cursor = 0usize;
+                    for arg in args {
+                        let slot = match arg.name.as_deref() {
+                            Some(n) => names.and_then(|ns| ns.iter().position(|p| p == n)),
+                            None => {
+                                // Advance past slots a named argument claimed.
+                                while cursor < slots.len() {
+                                    let claimed = names
+                                        .and_then(|ns| ns.get(cursor))
+                                        .map(|p| named.contains(p.as_str()))
+                                        .unwrap_or(false);
+                                    if !claimed {
+                                        break;
+                                    }
+                                    cursor += 1;
+                                }
+                                let s = (cursor < slots.len()).then_some(cursor);
+                                cursor += 1;
+                                s
+                            }
+                        };
+                        if let Some(i) = slot {
+                            if slots[i] {
+                                if let Some(kind) =
+                                    crate::interpreter::interpreter_call::non_bool_literal_arg_kind(&arg.value)
+                                {
+                                    let pname = names
+                                        .and_then(|ns| ns.get(i))
+                                        .map(String::as_str)
+                                        .unwrap_or("?");
+                                    return Err(LowerError::Unsupported(format!(
+                                        "type mismatch: parameter '{pname}' is declared 'bool' but the argument is a {kind} literal"
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Safe code never passes a literal `None` to a parameter that is not
+        // declared `T?` (nil only inside `unsafe`; the empty value is an
+        // Option). Checked against the callee's HIR parameter types, so it
+        // covers imported functions without a new table, and only when some
+        // positional argument IS a literal `None` (one scan of `args`).
+        // Erased (`Any`) and type-parameter slots keep the runtime contract.
+        if ctx.unsafe_depth == 0
+            && args.iter().any(|a| a.name.is_none() && matches!(&a.value, Expr::Identifier(n) if n == "None"))
+            && args.iter().all(|a| a.name.is_none() && !matches!(a.value, Expr::Spread(_)))
+        {
+            if let (Expr::Identifier(_), HirExprKind::Global(_)) = (callee, &func_hir.kind) {
+                if let Some(HirType::Function { params, .. }) = self.module.types.get(func_hir.ty) {
+                    let params = params.clone();
+                    for (i, arg) in args.iter().enumerate() {
+                        if !matches!(&arg.value, Expr::Identifier(n) if n == "None") {
+                            continue;
+                        }
+                        let Some(&pty) = params.get(i) else { break };
+                        let erased = matches!(
+                            self.module.types.get(pty),
+                            None | Some(HirType::Any) | Some(HirType::Nil) | Some(HirType::Void)
+                        );
+                        if !erased && !self.is_optional_source_type(pty) {
+                            return Err(LowerError::Unsupported(format!(
+                                "call to `{callee_name}` passes None to argument {} whose parameter is not declared optional (`T?`); \
+                                 wrap the parameter type in `T?` or pass a value (nil only inside `unsafe`)",
+                                i + 1,
+                                callee_name = match callee { Expr::Identifier(n) => n.as_str(), _ => "?" }
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
         // M12 3b: fill omitted trailing arguments from the callee's parameter
         // defaults, for a directly-named free function called purely
         // positionally (same-module table first, then the importing file's
         // cross-module contract table). A default that cannot be materialised
         // at the call site is a compile error (`fill_omitted_default_args`):
         // codegen would otherwise pad the slot with tagged nil.
+        // True once `args_hir` is known to be in declared slot order.
+        let mut args_in_slot_order = args.iter().all(|a| a.name.is_none());
         if let (Expr::Identifier(name), HirExprKind::Global(symbol)) = (callee, &func_hir.kind) {
+            let own = self.own_declared_function_names.contains(name);
+            let params = self.fn_param_defaults.get(symbol).or_else(|| {
+                if own { return None; }
+                self.current_file.as_ref().and_then(|path| {
+                    self.imported_fn_param_defaults
+                        .get(&crate::interpreter::normalize_path_key(path))
+                        .and_then(|contracts| contracts.get(name))
+                })
+            }).cloned();
             if args.iter().all(|a| a.name.is_none()) {
-                let params = self.fn_param_defaults.get(symbol).or_else(|| {
-                    if self.own_declared_function_names.contains(name) { return None; }
+                if let Some(params) = params {
+                    self.fill_omitted_default_args(symbol, &params, &mut args_hir, ctx)?;
+                }
+            } else if let Some(params) = params {
+                // Named arguments: map every argument onto its declared slot
+                // and fill the rest from constant defaults. Without this the
+                // args were passed in source order with omitted slots left
+                // unset (tagged nil) - bug
+                // jit_layout_run_full_with_ports_nil_receiver (rc=139).
+                let names = self.fn_param_names.get(symbol).or_else(|| {
+                    if own { return None; }
                     self.current_file.as_ref().and_then(|path| {
-                        self.imported_fn_param_defaults
+                        self.imported_fn_param_names
                             .get(&crate::interpreter::normalize_path_key(path))
                             .and_then(|contracts| contracts.get(name))
                     })
                 }).cloned();
-                if let Some(params) = params {
-                    self.fill_omitted_default_args(symbol, &params, &mut args_hir, ctx)?;
+                let Some(names) = names else {
+                    return Err(LowerError::Unsupported(format!(
+                        "call to `{symbol}` uses named arguments but its parameter names are unknown here; \
+                         pass the arguments positionally"
+                    )));
+                };
+                // Empty names = variadic callee: keep the legacy path.
+                if !names.is_empty() {
+                    args_hir = self.bind_named_call_args(symbol, &names, &params, args, args_hir, ctx)?;
+                    args_in_slot_order = true;
+                }
+            }
+        }
+
+        // A function or type (constructor) value can never inhabit an
+        // enum-typed parameter. Checked on the FINAL slot-ordered arguments
+        // (after named binding and default fill); a named-argument call that
+        // was not re-ordered above is skipped rather than checked against the
+        // wrong slot. See `reject_callable_for_enum_slot`.
+        if args_in_slot_order && !args.iter().any(|a| matches!(a.value, Expr::Spread(_))) {
+            // The callee's HIR value type when it is already a `Function`;
+            // otherwise (callee declared after the caller) the declared
+            // parameter type names recorded for the resolved symbol.
+            let slot_types: Vec<Option<TypeId>> = match self.module.types.get(func_hir.ty) {
+                Some(HirType::Function { params, .. }) => params.iter().map(|p| Some(*p)).collect(),
+                _ => match (callee, &func_hir.kind) {
+                    (Expr::Identifier(_), HirExprKind::Global(symbol)) => self
+                        .fn_param_type_names
+                        .get(symbol)
+                        .map(|names| {
+                            names
+                                .iter()
+                                .map(|n| n.as_deref().and_then(|n| self.module.types.lookup(n)))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                },
+            };
+            let callee_name = match callee {
+                Expr::Identifier(n) => n.as_str(),
+                _ => "?",
+            };
+            for (i, (arg, pty)) in args_hir.iter().zip(slot_types.iter()).enumerate() {
+                if let Some(pty) = pty {
+                    self.reject_callable_for_enum_slot(*pty, arg, &format!("argument {} of `{callee_name}`", i + 1))?;
+                    self.reject_float_for_int_slot(*pty, arg, &format!("argument {} of `{callee_name}`", i + 1))?;
                 }
             }
         }
@@ -309,6 +531,140 @@ impl Lowerer {
             },
             ty: ret_ty,
         })
+    }
+
+    /// Reject a function or type (constructor) value bound to an enum-typed
+    /// slot: a free-function parameter, a typed `val`/`var`, or a field of a
+    /// class declared in the same file (method arguments are not covered: no
+    /// resolved parameter list at that HIR site). Such a value can never be an enum value, but the JIT used to
+    /// accept it and then `match` silently fell to `case _:` (or a
+    /// `case Some(V):` arm over `T?` matched it outright). Bug:
+    /// doc/08_tracking/bug/match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14.md
+    ///
+    /// Deliberately narrow, because the seed's aggregate typing is not
+    /// authoritative (see `validate_declared_return_type`): it fires only when
+    /// the slot is a user enum (also through `T?`; never `Option`/`Result`)
+    /// and the value is either typed `Function` or is a bare reference to a
+    /// type name (`Global("Vec4f")` typed as struct/enum `Vec4f`, which is how
+    /// a class name used as a value lowers). Struct-typed locals and every
+    /// erased slot keep the existing contract.
+    pub(crate) fn reject_callable_for_enum_slot(
+        &self,
+        expected: TypeId,
+        value: &HirExpr,
+        slot: &str,
+    ) -> LowerResult<()> {
+        let slot_ty = self.module.types.optional_inner(expected).unwrap_or(expected);
+        let enum_name = match self.module.types.get(slot_ty) {
+            Some(HirType::Enum { name, .. }) if name != "Option" && name != "Result" => name.clone(),
+            _ => return Ok(()),
+        };
+        let found = match (&value.kind, self.module.types.get(value.ty)) {
+            (_, Some(HirType::Function { .. })) => match &value.kind {
+                HirExprKind::Global(symbol) => format!("the function `{symbol}`"),
+                _ => "a function value".to_string(),
+            },
+            (HirExprKind::Global(symbol), Some(HirType::Struct { name, .. })) if Self::names_type(symbol, name) => {
+                format!("the type `{name}` (a constructor value, not an instance)")
+            }
+            (HirExprKind::Global(symbol), Some(HirType::Enum { name, .. })) if Self::names_type(symbol, name) => {
+                format!("the enum type `{name}` itself, not one of its variants")
+            }
+            _ => return Ok(()),
+        };
+        Err(LowerError::Unsupported(format!(
+            "type mismatch: {slot} is declared as enum `{enum_name}` but receives {found}; \
+             a function or type value can never be an enum value"
+        )))
+    }
+
+    /// `symbol` is a bare reference to the type `type_name` (possibly
+    /// module-qualified with `.` on either side), not a variable that holds
+    /// one. A `::` path is an enum variant (`Kind::I8`, and `Token::Token` for
+    /// a variant spelled like its enum), never a type reference.
+    fn names_type(symbol: &str, type_name: &str) -> bool {
+        if symbol.contains("::") {
+            return false;
+        }
+        let tail = |s: &str| s.rsplit('.').next().unwrap_or(s).to_string();
+        symbol == type_name || tail(symbol) == tail(type_name)
+    }
+
+    /// Map a call that uses named arguments onto the callee's declared slots.
+    /// Positional arguments fill slots 0..n, each named argument fills the
+    /// slot of the same name, and every remaining slot takes its constant
+    /// default (lowered in the caller, once). A required slot left unfilled,
+    /// an unknown or duplicated name, or a non-constant default is a hard
+    /// lowering error - never an unset slot that codegen pads with nil.
+    /// Arguments are passed in declared slot order.
+    pub(super) fn bind_named_call_args(
+        &mut self,
+        callee: &str,
+        names: &[String],
+        defaults: &[Option<Expr>],
+        args: &[ast::Argument],
+        args_hir: Vec<HirExpr>,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Vec<HirExpr>> {
+        let mut slots: Vec<Option<HirExpr>> = (0..names.len()).map(|_| None).collect();
+        let mut next_positional = 0usize;
+        for (arg, hir) in args.iter().zip(args_hir) {
+            let index = match arg.name.as_deref() {
+                None => {
+                    // Positional arguments fill the lowest UNFILLED slots in
+                    // order: a named argument may precede them (the
+                    // interpreter binds `f(1, c: 3, 2, 4)` as a=1, b=2, c=3,
+                    // d=4), so the cursor must skip slots a named argument
+                    // already took. Advancing blindly from the argument
+                    // position collided with earlier named slots ("parameter
+                    // N more than once or beyond its arity",
+                    // seed_jit_hir_positional_after_named_arg_2026-11-04).
+                    while next_positional < slots.len() && slots[next_positional].is_some() {
+                        next_positional += 1;
+                    }
+                    let i = next_positional;
+                    next_positional += 1;
+                    i
+                }
+                Some(n) => names.iter().position(|p| p == n).ok_or_else(|| {
+                    LowerError::Unsupported(format!("call to `{callee}` names unknown parameter `{n}`"))
+                })?,
+            };
+            match slots.get_mut(index) {
+                Some(slot @ None) => *slot = Some(hir),
+                _ => {
+                    return Err(LowerError::Unsupported(format!(
+                        "call to `{callee}` passes parameter {} more than once or beyond its arity",
+                        index + 1
+                    )));
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(slots.len());
+        for (index, slot) in slots.into_iter().enumerate() {
+            match slot {
+                Some(hir) => out.push(hir),
+                None => match defaults.get(index).and_then(|d| d.as_ref()) {
+                    Some(expr) if self.is_fillable_default(callee, expr) => {
+                        out.push(self.lower_default_expr_in_callee_scope(callee, expr, ctx)?)
+                    }
+                    Some(_) => {
+                        return Err(LowerError::Unsupported(format!(
+                            "call to `{callee}` omits argument {} whose default is not a call-site constant; \
+                             a cross-module/native call cannot evaluate it, pass the argument explicitly",
+                            index + 1
+                        )));
+                    }
+                    None => {
+                        return Err(LowerError::Unsupported(format!(
+                            "call to `{callee}` omits required argument {} (`{}`)",
+                            index + 1, names[index]
+                        )));
+                    }
+                },
+            }
+        }
+        Ok(out)
     }
 
     /// Append the callee's default for every omitted trailing positional
@@ -332,8 +688,8 @@ impl Lowerer {
         let first_omitted = args_hir.len();
         for (index, slot) in defaults.iter().enumerate().skip(first_omitted) {
             match slot {
-                Some(expr) if Self::is_constant_default(expr) => {
-                    let lowered = self.lower_expr(expr, ctx)?;
+                Some(expr) if self.is_fillable_default(callee, expr) => {
+                    let lowered = self.lower_default_expr_in_callee_scope(callee, expr, ctx)?;
                     args_hir.push(lowered);
                 }
                 Some(_) => {
@@ -347,6 +703,211 @@ impl Lowerer {
             }
         }
         Ok(())
+    }
+
+    fn lower_default_expr_in_callee_scope(
+        &mut self,
+        callee: &str,
+        expr: &Expr,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        if let Some(callee_owner) = self.fn_param_default_owners.get(callee).cloned() {
+            if callee_owner != self.current_function_owner {
+                let prev_owner = std::mem::replace(&mut self.current_function_owner, callee_owner);
+                let prev_scope = self.enter_flatten_struct_scope();
+                let res = self.lower_expr(expr, ctx);
+                self.module.types.replace_scope_aliases(prev_scope);
+                self.current_function_owner = prev_owner;
+                return res;
+            }
+        }
+        self.lower_expr(expr, ctx)
+    }
+
+    fn is_flattened_unit(&self) -> bool {
+        !self.flatten_owner_import_bindings.is_empty()
+            || !self.flatten_owner_glob_sources.is_empty()
+            || self
+                .flatten_fn_owners
+                .values()
+                .any(|owners| owners.iter().any(Option::is_some))
+            || self
+                .flatten_all_type_owners
+                .values()
+                .any(|owners| owners.iter().any(Option::is_some))
+    }
+
+    fn flatten_type_owner_defines(&self, owner: Option<&str>, name: &str) -> bool {
+        self.flatten_all_type_owners
+            .get(name)
+            .is_some_and(|owners| owners.iter().any(|o| o.as_deref() == owner))
+    }
+
+    fn flatten_reexport_type_definer(&self, importer: &str, source_owner: &str, source_name: &str) -> Option<(String, String)> {
+        const HOP_BUDGET: usize = 64;
+        let mut found: Option<(String, String)> = None;
+        let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+        let mut pending = vec![(source_owner.to_string(), source_name.to_string())];
+        let mut hops = 0usize;
+        while let Some((owner, name)) = pending.pop() {
+            hops += 1;
+            if hops > HOP_BUDGET {
+                return None;
+            }
+            if owner == importer || !seen.insert((owner.clone(), name.clone())) {
+                continue;
+            }
+            if self.flatten_type_owner_defines(Some(&owner), &name) {
+                match &found {
+                    None => found = Some((owner, name)),
+                    Some(previous) if previous.0 == owner && previous.1 == name => {}
+                    Some(_) => return None,
+                }
+                continue;
+            }
+            if let Some(next) = self
+                .flatten_owner_import_bindings
+                .get(&owner)
+                .and_then(|bindings| bindings.get(&name))
+            {
+                pending.push(next.clone());
+                continue;
+            }
+            if let Some(globs) = self.flatten_owner_glob_sources.get(&owner) {
+                for glob_owner in globs.iter().rev() {
+                    pending.push((glob_owner.clone(), name.clone()));
+                }
+            }
+        }
+        found
+    }
+
+    fn flattened_ctor_type_matches_callee(&self, fn_name: &str, type_name: &str) -> bool {
+        let Some(callee_owner) = self.fn_param_default_owners.get(fn_name).map(|o| o.as_deref()) else {
+            return false;
+        };
+        let caller_owner = self.current_function_owner.as_deref();
+        if !self.flatten_type_owner_defines(callee_owner, type_name) {
+            return false;
+        }
+        if callee_owner == caller_owner {
+            return self.resolve_constructor_type(type_name).is_some();
+        }
+        // Caller-local same-named struct shadows the callee's default type.
+        if self.flatten_type_owner_defines(caller_owner, type_name) {
+            return false;
+        }
+        let caller_importer = caller_owner.unwrap_or("<entry>");
+        if let Some((source_owner, source_name)) = self
+            .flatten_owner_import_bindings
+            .get(caller_importer)
+            .and_then(|bindings| bindings.get(type_name))
+        {
+            match self.flatten_reexport_type_definer(caller_importer, source_owner, source_name) {
+                Some((owner, orig_name)) if Some(owner.as_str()) == callee_owner && orig_name == type_name => {}
+                _ => return false,
+            }
+        }
+        if let Some(globs) = self.flatten_owner_glob_sources.get(caller_importer) {
+            for glob_owner in globs {
+                if let Some((owner, _)) = self.flatten_reexport_type_definer(caller_importer, glob_owner, type_name) {
+                    if Some(owner.as_str()) != callee_owner {
+                        return false;
+                    }
+                }
+            }
+        }
+        let scoped_name = if !self.flatten_struct_owners.is_empty() {
+            super::super::module_lowering::resolve_owned_struct(
+                &self.flatten_struct_owners,
+                &self.flatten_owner_import_bindings,
+                &self.flatten_owner_glob_sources,
+                callee_owner,
+                type_name,
+            )
+            .unwrap_or_else(|| type_name.to_string())
+        } else {
+            type_name.to_string()
+        };
+        self.resolve_constructor_type(&scoped_name).is_some()
+    }
+
+    /// The constructor type the caller sees must be the very type the callee
+    /// module declares: the callee has exactly one defining file, and the
+    /// caller imported or resolved `type_name` from that single file and no
+    /// other (an unrelated same-named type, directly or via glob, adds a second
+    /// owner).
+    fn ctor_type_matches_callee(&self, callee: &str, type_name: &str) -> bool {
+        let fn_owners = self.imported_fn_owners.get(callee).or_else(|| {
+            self.resolve_function_alias(callee)
+                .and_then(|original| self.imported_fn_owners.get(original))
+        });
+        match (fn_owners, self.imported_type_owners.get(type_name)) {
+            (Some(f), Some(t)) => f.len() == 1 && f == t,
+            _ => false,
+        }
+    }
+
+    /// `is_constant_default`, plus a constructor call `T(const, ...)` whose `T`
+    /// resolves to the callee's own struct/class (imported or resolved from the
+    /// callee's defining module) and is not shadowed by a caller-local or
+    /// unrelated imported `T`. Constructor arguments must themselves be
+    /// fillable, so nothing captures caller scope.
+    /// (lean_native_constructor_default_argument_2026_10_21)
+    pub(super) fn is_fillable_default(&self, fn_name: &str, expr: &Expr) -> bool {
+        if Self::is_constant_default(expr) || self.is_unit_enum_variant(expr) {
+            return true;
+        }
+        match expr {
+            Expr::Call { callee, args } => match callee.as_ref() {
+                Expr::Identifier(name) => {
+                    let ctor_ok = if self.is_flattened_unit() {
+                        self.flattened_ctor_type_matches_callee(fn_name, name)
+                    } else if self.own_declared_function_names.contains(fn_name)
+                        && !self.imported_fn_owners.contains_key(fn_name)
+                    {
+                        self.own_declared_type_names.contains(name)
+                            && !self.imported_type_owners.contains_key(name)
+                            && self.resolve_constructor_type(name).is_some()
+                    } else {
+                        !self.own_declared_type_names.contains(name)
+                            && self.resolve_constructor_type(name).is_some()
+                            && self.ctor_type_matches_callee(fn_name, name)
+                    };
+                    ctor_ok && args.iter().all(|a| self.is_fillable_default(fn_name, &a.value))
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// `Enum.Variant` / `Enum::Variant` naming a payload-free variant of an
+    /// enum the caller resolves (local registry or `global_enum_defs`, the
+    /// same sources `lower_field_access` uses). It lowers to the variant
+    /// global and captures nothing from caller scope.
+    fn is_unit_enum_variant(&self, expr: &Expr) -> bool {
+        let (enum_name, variant) = match expr {
+            Expr::FieldAccess { receiver, field } => match receiver.as_ref() {
+                Expr::Identifier(name) => (name.as_str(), field.as_str()),
+                _ => return false,
+            },
+            Expr::Path(segments) if segments.len() == 2 => (segments[0].as_str(), segments[1].as_str()),
+            _ => return false,
+        };
+        let scoped = self.module.types.scoped_name(enum_name).to_string();
+        if let Some(HirType::Enum { variants, .. }) = self.module.types.lookup(&scoped).and_then(|id| self.module.types.get(id)) {
+            if !variants.is_empty() {
+                return variants
+                    .iter()
+                    .any(|(name, payload)| name == variant && payload.as_ref().map_or(true, |p| p.is_empty()));
+            }
+        }
+        self.global_enum_defs.as_ref().and_then(|defs| defs.get(&scoped)).is_some_and(|variants| {
+            variants
+                .iter()
+                .any(|(name, payload)| name == variant && payload.as_ref().map_or(true, |p| p.is_empty()))
+        })
     }
 
     /// True for default-value expressions that are self-contained constants —
@@ -363,6 +924,12 @@ impl Lowerer {
             | Expr::Nil
             | Expr::Symbol(_)
             | Expr::Atom(_) => true,
+            // A bare `None` lowers to HirExprKind::Nil exactly like `nil`
+            // (lower_identifier), so an Option-typed `= None` default is a
+            // self-contained constant too. `lower_function` rejects a `= None`
+            // default on a non-optional parameter, so this never fills a
+            // non-optional slot with None.
+            Expr::Identifier(name) if name == "None" => true,
             // Ordinary quoted strings use FString syntax too. Only literal
             // parts are safe here; interpolation must not capture caller scope.
             Expr::FString { parts, .. } => parts.iter().all(|part| matches!(part, ast::FStringPart::Literal(_))),
@@ -414,6 +981,22 @@ impl Lowerer {
         self.global_struct_key_for_name(name)
             .and_then(|key| self.module.types.lookup(&key))
             .or(bare_ctor_ty)
+    }
+
+    pub(super) fn lower_resolved_constructor(
+        &mut self,
+        name: &str,
+        struct_ty: TypeId,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        if matches!(self.module.types.get(struct_ty), Some(HirType::Bitfield { .. })) {
+            return self.lower_bitfield_constructor(struct_ty, args, ctx);
+        }
+        // Reorder named args to declared field slots and fill defaulted/omitted fields.
+        let provided: Vec<(Option<&str>, &Expr)> = args.iter().map(|a| (a.name.as_deref(), &a.value)).collect();
+        let (fields_hir, binding) = self.lower_struct_init_fields(name, struct_ty, &provided, None, ctx)?;
+        Ok(Self::finish_struct_init(struct_ty, fields_hir, binding))
     }
 
     /// Lower a PAREN-form struct-update construction `S(..base, field: v)`.
@@ -622,6 +1205,11 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<Option<HirExpr>> {
+        // A module-level or imported `fn` of the same name wins over the cast,
+        // as in the interpreter (`builtin_wins_over_user_fn`; only `exit`,
+        // `dprint`, `panic` are unshadowable, and none is a cast).
+        // doc/08_tracking/bug/jit_user_fn_named_like_primitive_calls_cast_2026-11-24.md
+        let user_fn = self.declared_function_returns.contains_key(name);
         if args.len() == 1 {
             let cast_target = match name {
                 "i8" => Some(TypeId::I8),
@@ -639,8 +1227,72 @@ impl Lowerer {
                 "char" => Some(TypeId::CHAR),
                 _ => None,
             };
-            if let Some(target) = cast_target {
+            if let Some(target) = cast_target.filter(|_| !user_fn) {
                 let inner = self.lower_expr(&args[0].value, ctx)?;
+                // The CALL form `f64(text)` / `i32(text)` PARSES its text, like
+                // `text.to_f64()` / `text.to_int()` and the interpreter's `T(x)`
+                // builtins (unparsable -> 0.0 / 0). It must not share the
+                // `x as T` Cast, whose text->number rule is the single-character
+                // code point (`"x" as f64 == 120.0`, `"5" as i32 == 53`).
+                // doc/08_tracking/bug/float_parse_call_failure_value_differs_from_seed_2026-10-10.md
+                if inner.ty == TypeId::STRING {
+                    let is_float = matches!(target, TypeId::F32 | TypeId::F64);
+                    let is_int = matches!(
+                        target,
+                        TypeId::I8
+                            | TypeId::I16
+                            | TypeId::I32
+                            | TypeId::I64
+                            | TypeId::U8
+                            | TypeId::U16
+                            | TypeId::U32
+                            | TypeId::U64
+                    );
+                    if is_float || is_int {
+                        // The int target must NOT reuse `text.to_int()`: since
+                        // bdcbec5bd33 `rt_string_to_int` answers a failed parse
+                        // of a ONE-character text with its code point (the
+                        // `ch.to_i32()` checksum contract), so `int("-")` was
+                        // 45 and `int("x")` 120. `int(text)` is the total
+                        // leading-digit parse (0 on failure), which is
+                        // `rt_string_to_int_lenient` — the same entry the
+                        // codegen `int`/`i64` builtin arm calls, defined in the
+                        // Rust runtime, the C runtime and simple_core. It returns
+                        // a raw i64, like `rt_string_to_int`.
+                        // doc/08_tracking/bug/seed_jit_conversion_call_text_parse_2026-11-06.md
+                        let parsed_ty = if is_float { TypeId::F64 } else { TypeId::I64 };
+                        let parsed = if is_float {
+                            HirExpr {
+                                kind: HirExprKind::MethodCall {
+                                    receiver: Box::new(inner),
+                                    method: "to_f64".to_string(),
+                                    args: Vec::new(),
+                                    dispatch: DispatchMode::Static,
+                                    generic_args: vec![],
+                                },
+                                ty: parsed_ty,
+                            }
+                        } else {
+                            HirExpr {
+                                kind: HirExprKind::BuiltinCall {
+                                    name: "rt_string_to_int_lenient".to_string(),
+                                    args: vec![inner],
+                                },
+                                ty: parsed_ty,
+                            }
+                        };
+                        if target == parsed_ty {
+                            return Ok(Some(parsed));
+                        }
+                        return Ok(Some(HirExpr {
+                            kind: HirExprKind::Cast {
+                                expr: Box::new(parsed),
+                                target,
+                            },
+                            ty: target,
+                        }));
+                    }
+                }
                 return Ok(Some(HirExpr {
                     kind: HirExprKind::Cast {
                         expr: Box::new(inner),
@@ -896,5 +1548,85 @@ impl Lowerer {
             },
             ty: TypeId::I64,
         }))
+    }
+}
+
+
+#[cfg(test)]
+mod some_record_payload_tests {
+    use crate::hir::lower::tests::parse_and_lower;
+    use crate::hir::types::{HirModule, HirStmt, HirType, TypeId};
+
+    fn returned_type(module: &HirModule, name: &str) -> TypeId {
+        module.functions.iter().find(|f| f.name == name).expect("fixture function")
+            .body.iter().find_map(|statement| match statement {
+                HirStmt::Return(Some(value)) => Some(value.ty),
+                _ => None,
+            }).expect("fixture return expression")
+    }
+
+    fn assert_nominal_record_binding(declaration: &str) {
+        let source = format!(
+            "{declaration} Record:\n    reducer: i64\n\nclass Decoy:\n    reducer: bool\n\nfn probe(value: Record) -> i64:\n    return match Some(value):\n        Some(owned): owned.reducer\n        nil: -1\n"
+        );
+        let module = parse_and_lower(&source).expect("Some(record variable) must lower with its nominal field owner");
+        let probe = module.functions.iter().find(|f| f.name == "probe").expect("probe");
+        let expected = probe.params.iter().find(|local| local.name == "value").expect("record input").ty;
+        let owned = probe.locals.iter().find(|local| local.name == "owned").expect("payload binding");
+        assert_eq!(owned.ty, expected, "Some payload must keep the input's exact nominal TypeId");
+        assert!(matches!(module.types.get(owned.ty), Some(HirType::Struct { name, .. }) if name == "Record"),
+            "payload owner must be Record, never the same-field Decoy: {:?}", module.types.get(owned.ty));
+    }
+
+    #[test]
+    fn some_class_variable_retains_its_exact_nominal_payload_owner() {
+        assert_nominal_record_binding("class");
+    }
+
+    #[test]
+    fn some_struct_variable_retains_its_exact_nominal_payload_owner() {
+        assert_nominal_record_binding("struct");
+    }
+
+    #[test]
+    fn scalar_dynamic_and_array_payloads_keep_the_existing_erased_route() {
+        for parameter in ["i64", "any", "[i64]"] {
+            let source = format!("fn wrap(value: {parameter}) -> any:\n    return Some(value)\n");
+            let module = parse_and_lower(&source).expect("unchanged Some fallback fixture");
+            assert_eq!(returned_type(&module, "wrap"), TypeId::ANY,
+                "non-record/function payload {parameter} must not acquire a nominal owner");
+        }
+    }
+
+    #[test]
+    fn existing_some_function_payload_keeps_its_function_binding() {
+        let module = parse_and_lower(
+            "fn wrap() -> any:\n    val callback = \\x: x + 1\n    return Some(callback)\n"
+        ).expect("existing Some(function) route");
+        let ty = returned_type(&module, "wrap");
+        match module.types.get(ty) {
+            Some(HirType::Enum { name, variants, type_bindings, .. }) => {
+                assert_eq!(name, "Option");
+                let payloads = variants.iter().find(|(variant, _)| variant == "Some")
+                    .and_then(|(_, payload)| payload.as_ref()).expect("Some function payload");
+                assert_eq!(payloads.len(), 1, "Some must retain exactly one function payload");
+                let payload = payloads[0];
+                assert!(matches!(module.types.get(payload), Some(HirType::Function { .. })));
+                assert_eq!(type_bindings.get("T"), Some(&payload));
+            }
+            other => panic!("Some(function) lost its typed Option: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn some_dynamic_payload_does_not_guess_an_unrelated_same_named_field_owner() {
+        let source = "class Record:\n    reducer: i64\n\nclass Decoy:\n    reducer: bool\n\nfn probe(value: any) -> i64:\n    return match Some(value):\n        Some(owned): owned.reducer\n        nil: -1\n";
+        let diagnostic = parse_and_lower(source).err()
+            .expect("a dynamic payload must not bypass the ambiguous field-owner rejection")
+            .to_string();
+        assert!(diagnostic.contains("cannot infer field type")
+            && diagnostic.contains("struct 'ANY'")
+            && diagnostic.contains("field 'reducer'"),
+            "expected the actual ambiguous dynamic-field diagnostic, got {diagnostic}");
     }
 }

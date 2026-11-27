@@ -3,7 +3,10 @@ use compiler.traits.trait_impl.{ImplBlock}
 use compiler.backend.linker.linker_wrapper.*
 use compiler.backend.linker.native_link_result.{NativeLinkSuccessV1, native_link_success_v1, native_link_output_v1, native_link_engine_id_for_path_v1}
 use compiler.backend.linker.native_config.{NativeLinkConfig}
+@when(os = "macos" or feature = "macho"):
 use compiler.backend.linker.macho.native_adapter.{native_macho_plan_v1, native_macho_link_files_v1}
+@end
+use compiler.backend.linker.macho_feature.{MACHO_NOT_BUILT_ERROR}
 export NativeLinkConfig
 # Direct import from the concrete defining sibling module — the seed mangler
 # bare-externs calls whose import chain crosses the facade wildcard re-export.
@@ -32,7 +35,8 @@ use compiler.backend.linker._LinkerWrapper.native_link_reproduce_v1.{
 # Split into modules:
 #   linker_wrapper_helpers.spl — SMF linking, self-contained linking, binary helpers
 
-use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read, file_read_bytes, file_write, file_write_bytes, file_rename, file_hash_sha256, env_get, process_run, cwd, host_os, host_arch, getpid, time_now_unix_micros}
+use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read, file_read_bytes, file_write_bytes, file_rename, file_hash_sha256_or_shell, env_get, process_run, cwd, host_os, host_arch, getpid, time_now_unix_micros}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use std.io_runtime.{process_run_bounded}
 use std.common.crypto.sha256.{sha256_text}
 # Was: std.platform.{host_os, host_arch} (nogc_sync_mut.platform), whose
@@ -49,7 +53,7 @@ use std.common.crypto.sha256.{sha256_text}
 # directly instead of a second, disagreeing detector.
 use std.log.{debug, info}
 use std.string_builder.{StringBuilder}
-use compiler.backend.linker.managed_native_args_v1.{managed_native_extra_args_error_v1, managed_native_input_args_error_v1}
+use compiler.backend.linker.managed_native_args_v1.{managed_native_extra_args_error_v1, managed_native_input_args_error_v1, managed_native_cc_link_host_admitted_v1, managed_native_linker_selector_v1}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1, native_tool_strict_resolve_v1, native_tool_strict_revalidate_v1}
 use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_strict_archives_v1, native_runtime_strict_revalidate_v1, native_runtime_strict_generated_inputs_v1}
 use compiler.backend.linker._LinkerWrapper.native_all_support.{native_all_msvc_llvm_link_inputs, native_all_input_present, native_all_input_dir}
@@ -65,20 +69,21 @@ use compiler.backend.linker.smf_enums.{Platform, Arch}
 use compiler.backend.linker.obj_taker.{ObjTaker, ObjTakeResult, objtaker_with_defaults, objtaker_take_object}
 use compiler.backend.linker.platform_defaults.{elf_emulation}
 use compiler.backend.linker._LinkerWrapper.link_command_record.{record_link_command, link_command_record_path}
-use compiler.backend.runtime_compiler.{find_c_compiler, hosted_c_compiler_plan, windows_link_flavor_for_target}
+use compiler.backend.runtime_compiler.{find_c_compiler, c_driver_admit_v1, hosted_c_compiler_plan, hosted_cross_c_target_args, hosted_mingw_clang_target, windows_link_flavor_for_target}
 
 # Internal ELF engine (lane A7/B3): SIMPLE_LINKER=internal routes here instead
 # of an external linker. Same imports link_engine_external.spl uses for its
 # own LinkRequestV1-shaped entry point -- internal_link_native() below is the
 # one shared implementation both callers now use.
-use compiler.backend.linker.elf.elf_static_link.{elf_link_with_operations, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE}
+use compiler.backend.linker.elf.elf_static_link.{elf_link_with_operations, ElfLinkRequest, ELF_LINK_STATIC_EXEC, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE}
 use compiler.backend.linker.elf.elf_operation_bindings.{ElfSealedOperationsV1, elf_builtin_file_operations_v1}
 use compiler.backend.linker.native_image_publish.{native_image_publish}
 use compiler.backend.linker.elf.freebsd_hosted.{freebsd_hosted_inputs, freebsd_brand_image}
 use compiler.backend.linker.elf.link_trace.{elf_link_trace}
 use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link_archives_policy}
-use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text, boot_layout_add_defsym}
+use compiler.backend.linker.boot_layout.boot_layout_plan.{BootLayoutPlan, boot_layout_from_text, boot_layout_from_file, boot_layout_add_defsym}
 use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.internal_elf_hosted_target.{internal_elf_hosted_target_sysroot_v1}
 use compiler.backend.linker.coff.coff_link.{
     CoffLinkRequest,
     coff_link_amd64_retained_image_policy_full,
@@ -136,6 +141,38 @@ fn detect_preferred_backend(extra_flags: [text]) -> text:
                 return backend
     ""
 
+fn _direct_linker_translate_single_token_v1(tok: text, os: text) -> [text]:
+    val darwin = os == "macos" or os == "darwin" or os == "Darwin"
+    if tok == "":
+        return []
+    if tok == "-export_dynamic" or tok == "--export-dynamic":
+        return if darwin: ["-export_dynamic"] else: ["--export-dynamic"]
+    if tok == "--no-gc-sections":
+        return if darwin: [] else: ["--no-gc-sections"]
+    [tok]
+
+pub fn direct_linker_translate_extra_flags_v1(extra_flags: [text], os: text) -> [text]:
+    """Translate C-driver `-Wl,...` flags for direct raw linker (`ld64`/`ld.lld`/`mold`) invocations."""
+    var out: [text] = []
+    for flag in extra_flags:
+        if flag.starts_with("-Wl,"):
+            val parts = flag.substring(4).split(",")
+            var idx = 0
+            while idx < parts.len():
+                val p = parts[idx]
+                if p == "-rpath" and idx + 1 < parts.len():
+                    out.push("-rpath")
+                    out.push(parts[idx + 1])
+                    idx = idx + 2
+                else:
+                    for mapped in _direct_linker_translate_single_token_v1(p, os):
+                        out.push(mapped)
+                    idx = idx + 1
+        else:
+            for mapped in _direct_linker_translate_single_token_v1(flag, os):
+                out.push(mapped)
+    out
+
 fn unresolved_symbol_flags_for_unix_linker(os: text) -> [text]:
     if os == "linux" or os == "freebsd":
         return ["--allow-multiple-definition"]
@@ -163,7 +200,7 @@ fn hosted_native_link_os_supported(os: text) -> bool:
     os == "linux" or os == "macos" or os == "darwin" or os == "windows" or
         os == "windows-mingw" or os == "windows-msvc" or os == "freebsd"
 
-fn hosted_native_link_arch_supported(os: text, arch: text) -> bool:
+pub fn hosted_native_link_arch_supported(os: text, arch: text) -> bool:
     val x64 = arch == "x86_64" or arch == "amd64"
     val arm64 = arch == "aarch64" or arch == "arm64"
     if os == "windows" or os == "windows-mingw" or os == "windows-msvc":
@@ -179,22 +216,34 @@ fn hosted_native_link_arch_supported(os: text, arch: text) -> bool:
 fn hosted_native_link_unsupported_error(os: text) -> text:
     "Native linking is unsupported on host OS '" + os + "'"
 
-fn hosted_native_link_unsupported_arch_error(os: text, arch: text) -> text:
+pub fn hosted_native_link_unsupported_arch_error(os: text, arch: text) -> text:
     "Native linking is unsupported on host architecture '" + arch + "' for OS '" + os + "'"
 
-fn native_linker_abi_for_target(target: text) -> text:
+pub fn native_linker_abi_for_target(target: text) -> text:
     if target.ends_with("-pc-windows-gnu"): return "windows-gnu"
     if target.ends_with("-pc-windows-msvc"): return "windows-msvc"
     if target.ends_with("-apple-darwin"): return "darwin"
     if target.ends_with("-linux-gnu") or target.ends_with("-unknown-freebsd"): return "elf"
     ""
 
-fn native_effective_link_os(host: text, target: text, linker_abi: text) -> text:
+pub fn native_effective_link_os(host: text, target: text, linker_abi: text) -> text:
     if linker_abi == "windows-gnu" or target.ends_with("-pc-windows-gnu"):
         return "windows-mingw"
     if linker_abi == "windows-msvc" or target.ends_with("-pc-windows-msvc"):
         return "windows-msvc"
     host
+
+pub fn native_windows_link_os_for_flavor(os: text, flavor: text) -> text:
+    """Resolve the bare host spelling "windows" to the concrete link lane. Pure.
+
+    native_effective_link_os() returns the host ("windows") when no target
+    triple or linker ABI is set -- the ordinary `native-build` case. The
+    default lane is decided by windows_link_flavor_for_config (llvm-mingw GNU
+    since the no-MSVC policy), so name it explicitly here: the trace then says
+    which linker family runs, and the MinGW arm is selected directly."""
+    if os != "windows": return os
+    if flavor == "msvc": return "windows-msvc"
+    "windows-mingw"
 
 # ============================================================================
 # Native Linking
@@ -217,10 +266,10 @@ pub fn link_error_detail(site: text, payload: text) -> text:
         return site + ": no error payload (native return channel produced " + rendered + ")"
     site + ": " + rendered
 
-fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+pub fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) -> Result<text, text>:
     native_link_output_v1(link_to_native_with_engine(object_files, output, config))
 
-fn link_to_native_with_engine(object_files: [text], output: text, config: NativeLinkConfig) -> Result<NativeLinkSuccessV1, text>:
+pub fn link_to_native_with_engine(object_files: [text], output: text, config: NativeLinkConfig) -> Result<NativeLinkSuccessV1, text>:
     val result = native_link_with_admitted_inputs_and_engine_v1(object_files, output, config)
     if native_tool_strict_requested_v1() and result.is_ok():
         val tools_checked = native_tool_strict_revalidate_v1()
@@ -231,7 +280,7 @@ fn link_to_native_with_engine(object_files: [text], output: text, config: Native
             return Err(runtime_checked.unwrap_err())
     result
 
-fn native_link_with_admitted_inputs_v1(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+fn native_link_with_admitted_inputs_v1(object_files: [text], output: text, config: NativeLinkConfig) -> Result<text, text>:
     native_link_output_v1(native_link_with_admitted_inputs_and_engine_v1(object_files, output, config))
 
 fn native_link_with_admitted_inputs_and_engine_v1(object_files: [text], output: text, config: NativeLinkConfig) -> Result<NativeLinkSuccessV1, text>:
@@ -281,7 +330,11 @@ fn native_link_with_admitted_inputs_and_engine_v1(object_files: [text], output: 
         val simpleos_target = if native_target != "": native_target elif explicit_target != "": explicit_target else: "simpleos"
         return native_link_success_v1(link_simpleos_internal(object_files, output, simpleos_target, config), "internal:simpleos")
 
-    val os = native_effective_link_os(host_os(), config.target_triple, config.linker_abi)
+    val effective_os = native_effective_link_os(host_os(), config.target_triple, config.linker_abi)
+    var windows_flavor = ""
+    if effective_os == "windows":
+        windows_flavor = windows_link_flavor_for_config(config)
+    val os = native_windows_link_os_for_flavor(effective_os, windows_flavor)
     if reproduce_path != "" and os != "linux":
         return Err("native-link-reproduce-requires-linux-lld")
     if trace:
@@ -315,6 +368,8 @@ fn native_link_with_admitted_inputs_and_engine_v1(object_files: [text], output: 
             return Err("Cannot mix SMF and object inputs; convert all to SMF or all to objects")
         return link_smf_bundle_with_engine(smf_inputs, output, config)
 
+    if not output.ends_with(".go-to-end-trial"):
+        _native_windows_trial_artifact_unresolved_v1 = false
     # Platform-specific linking
     if os == "windows-mingw":
         if requested_linker_override().trim().lower() == "internal":
@@ -328,7 +383,7 @@ fn native_link_with_admitted_inputs_and_engine_v1(object_files: [text], output: 
         print "[LINKER] calling link_native_unix..."
     link_native_unix_with_engine(object_files, output, config)
 
-fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig) -> Result<text, text>:
     native_link_output_v1(link_native_unix_with_engine(object_files, output, config))
 
 fn link_native_unix_with_engine(object_files: [text], output: text, config: NativeLinkConfig) -> Result<NativeLinkSuccessV1, text>:
@@ -534,10 +589,12 @@ fn link_native_unix_with_engine(object_files: [text], output: text, config: Nati
     # See doc/08_tracking/bug/linux_native_link_unconditional_lsdl2_2026-09-06.md
 
     val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
+    val stage3_host_only = (env_get("SIMPLE_BOOTSTRAP_STAGE3") ?? "") == "1" or
+        (env_get("SIMPLE_STAGE3_MINIMAL_STATIC_PRIMITIVES") ?? "") == "1"
     var native_support_inputs = object_files
     for archive in runtime_archives:
         native_support_inputs.push(archive)
-    for flag in native_all_gnu_support_args(native_support_inputs, os, brew_prefix):
+    for flag in native_all_gnu_support_args_for_stage_v1(native_support_inputs, os, brew_prefix, stage3_host_only):
         args.push(flag)
 
     # Libraries from config
@@ -549,8 +606,8 @@ fn link_native_unix_with_engine(object_files: [text], output: text, config: Nati
     if config.debug:
         args.push("-g")
 
-    # Extra flags
-    for flag in config.extra_flags:
+    # Extra flags (translate `-Wl,...` prefixes for direct raw linker drivers)
+    for flag in direct_linker_translate_extra_flags_v1(config.extra_flags, os):
         args.push(flag)
 
     # CRT epilogue: crtend.o, crtn.o (after libs)
@@ -608,13 +665,18 @@ fn link_native_unix_with_engine(object_files: [text], output: text, config: Nati
 # (design D4: reject, never mask). allow_duplicate_definitions is not listed:
 # internal:elf is stricter (duplicate strong definitions are a loud error).
 fn internal_simpleos_unsupported_config_field(config: NativeLinkConfig) -> text:
-    if internal_simpleos_flags(config.extra_flags).is_err(): return "extra_flags"
+    val simpleos_flags: Result<InternalSimpleOsFlags, text> = internal_simpleos_flags(config.extra_flags)
+    if simpleos_flags.is_err(): return "extra_flags"
     if config.debug:
         return "debug"
     ""
 
-fn link_simpleos_internal(object_files: [text], output: text, target: text,
-        config: NativeLinkConfig) -> Result:
+pub fn link_simpleos_internal(object_files: [text], output: text, target: text,
+        config: NativeLinkConfig) -> Result<text, text>:
+    native_link_output_v1(link_simpleos_internal_with_engine_v1(object_files, output, target, config))
+
+pub fn link_simpleos_internal_with_engine_v1(object_files: [text], output: text, target: text,
+        config: NativeLinkConfig) -> Result<NativeLinkSuccessV1, text>:
     """Host-independent production facade for the internal SimpleOS linker."""
     val unsupported_field = internal_simpleos_unsupported_config_field(config)
     if unsupported_field != "":
@@ -622,7 +684,9 @@ fn link_simpleos_internal(object_files: [text], output: text, target: text,
     val provider_error = native_runtime_provider_selection_error_for_config_platform(config, false)
     if provider_error != "":
         return Err(link_error_detail("simpleos-runtime-provider-selection", provider_error))
-    internal_link_simpleos(object_files, output, target, config)
+    # This implementation publishes through the in-house BootLayoutPlan/ELF
+    # engines only; it has no external linker fallback.
+    native_link_success_v1(internal_link_simpleos(object_files, output, target, config), "internal:simpleos")
 
 struct InternalSimpleOsFlags:
     script: text
@@ -631,7 +695,6 @@ struct InternalSimpleOsFlags:
     gc_sections: bool
     nostdlib: bool
     static_link: bool
-    archive_group: bool
     wraps: [text]
 
 struct InternalCoffFlags:
@@ -667,7 +730,6 @@ fn internal_simpleos_flags(extra_flags: [text]) -> Result<InternalSimpleOsFlags,
     var nostdlib = false
     var static_link = false
     var group_depth: i64 = 0
-    var archive_group = false
     var wraps: [text] = []
     var i: i64 = 0
     while i < extra_flags.len():
@@ -691,8 +753,9 @@ fn internal_simpleos_flags(extra_flags: [text]) -> Result<InternalSimpleOsFlags,
             i = i + 1
             continue
         elif flag == "--start-group":
+            # Archives always resolve to a fixpoint (group semantics), so
+            # the group is only checked for balance.
             group_depth = group_depth + 1
-            archive_group = true
             i = i + 1
             continue
         elif flag == "--end-group":
@@ -745,11 +808,11 @@ fn internal_simpleos_flags(extra_flags: [text]) -> Result<InternalSimpleOsFlags,
             continue
 
         var equals: i64 = 0
-        while equals < defsym_value.len() and defsym_value[equals:equals + 1] != "=":
+        while equals < defsym_value.byte_len() and defsym_value.substring(equals, equals + 1) != "=":
             equals = equals + 1
         if equals <= 0 or equals + 1 >= defsym_value.len():
             return Err("internal SimpleOS --defsym requires non-empty name=expression")
-        val name = defsym_value[0:equals]
+        val name = defsym_value.substring(0, equals)
         val expr = defsym_value.substring(equals + 1)
         if not _internal_simpleos_symbol_name_valid(name) or expr.contains("\0"):
             return Err("internal SimpleOS --defsym has an invalid symbol name or expression")
@@ -767,16 +830,20 @@ fn internal_simpleos_flags(extra_flags: [text]) -> Result<InternalSimpleOsFlags,
         return Err("internal SimpleOS archive group is not closed")
     Ok(InternalSimpleOsFlags(script: script, defsym_names: names,
         defsym_exprs: exprs, gc_sections: gc_sections, nostdlib: nostdlib,
-        static_link: static_link, archive_group: archive_group, wraps: wraps))
+        static_link: static_link, wraps: wraps))
 
 fn internal_elf_unsupported_config_field(config: NativeLinkConfig) -> text:
     # ELF consumes user libraries/search paths and the selected runtime
     # provider archives. The remaining fields need explicit implementations;
     # rejecting them prevents a successful link with silently changed policy.
-    if internal_elf_runpath(config.extra_flags).is_err(): return "extra_flags"
-    if internal_elf_hash_style(config.extra_flags).is_err(): return "extra_flags"
-    if internal_elf_as_needed(config.extra_flags).is_err(): return "extra_flags"
-    if internal_elf_gc_sections(config.extra_flags).is_err(): return "extra_flags"
+    val elf_runpath: Result<text, text> = internal_elf_runpath(config.extra_flags)
+    if elf_runpath.is_err(): return "extra_flags"
+    val elf_hash_style: Result<text, text> = internal_elf_hash_style(config.extra_flags)
+    if elf_hash_style.is_err(): return "extra_flags"
+    val elf_as_needed: Result<bool, text> = internal_elf_as_needed(config.extra_flags)
+    if elf_as_needed.is_err(): return "extra_flags"
+    val elf_gc_sections: Result<bool, text> = internal_elf_gc_sections(config.extra_flags)
+    if elf_gc_sections.is_err(): return "extra_flags"
     if config.debug: return "debug"
     ""
 
@@ -801,7 +868,8 @@ fn internal_elf_runpath(extra_flags: [text]) -> Result<text, text>:
                 flag == "--no-undefined" or
                 flag.starts_with("--hash-style=") or flag == "--strip-all" or
                 flag == "-s" or flag == "--as-needed" or flag == "--no-as-needed" or
-                flag == "-Wl,--as-needed" or flag == "-Wl,--no-as-needed":
+                flag == "-Wl,--as-needed" or flag == "-Wl,--no-as-needed" or
+                flag.starts_with("--sysroot="):
             # These are modeled internal-ELF policies. Every image emits the
             # sorted unwind header and GNU SHA-1 note; section-GC selection is
             # projected into ElfLinkRequest before layout.
@@ -840,6 +908,19 @@ fn internal_elf_hash_style(extra_flags: [text]) -> Result<text, text>:
                 return Err("internal ELF hash style flags conflict")
             selected = style
     if selected == "": return Ok("both")
+    Ok(selected)
+
+fn internal_elf_sysroot(extra_flags: [text]) -> Result<text, text>:
+    """Return the `--sysroot=<dir>` target root, or "" for the host root."""
+    var selected = ""
+    for flag in extra_flags:
+        if flag.starts_with("--sysroot="):
+            val root = flag.substring(10)
+            if root == "" or root.contains("\0"):
+                return Err("internal ELF sysroot is empty or contains NUL")
+            if selected != "" and selected != root:
+                return Err("internal ELF sysroot flags conflict")
+            selected = root
     Ok(selected)
 
 fn internal_elf_bind_now(extra_flags: [text]) -> bool:
@@ -883,8 +964,9 @@ fn internal_coff_unsupported_config_field(config: NativeLinkConfig) -> text:
     # internal:coff consumes libraries, library_paths, and runtime provider
     # archives itself. Modeled optional-header flags become typed PE policy;
     # every other option remains a fail-closed unsupported field.
-    if internal_coff_flags(
-            config.extra_flags, _windows_link_arch(config)).is_err():
+    val coff_flags: Result<InternalCoffFlags, text> = internal_coff_flags(
+        config.extra_flags, _windows_link_arch(config))
+    if coff_flags.is_err():
         return "extra_flags"
     if config.debug: return "debug"
     ""
@@ -893,12 +975,12 @@ fn _internal_coff_number(value: text) -> Result<i64, text>:
     if value == "": return Err("empty numeric value")
     var base: i64 = 10
     var index: i64 = 0
-    if value.len() > 2 and value.substring(0, 2).lower() == "0x":
+    if value.byte_len() > 2 and value.substring(0, 2).lower() == "0x":
         base = 16
         index = 2
-    if index >= value.len(): return Err("empty hexadecimal value")
+    if index >= value.byte_len(): return Err("empty hexadecimal value")
     var result: i64 = 0
-    while index < value.len():
+    while index < value.byte_len():
         val byte = value.byte_at(index) as i64
         var digit: i64 = -1
         if byte >= 48 and byte <= 57:
@@ -943,14 +1025,14 @@ fn _internal_coff_version(value: text, kind: text) -> Result<(i64, i64), text>:
 fn _internal_coff_entry_valid(entry: text) -> bool:
     if entry == "": return false
     var index: i64 = 0
-    while index < entry.len():
+    while index < entry.byte_len():
         if (entry.byte_at(index) as i64) <= 32: return false
         index = index + 1
     true
 
 fn _internal_coff_library_key(library: text) -> text:
     var key = library.trim().lower()
-    if key.ends_with(".lib"): key = key.substring(0, key.len() - 4)
+    if key.ends_with(".lib"): key = key.substring(0, key.byte_len() - 4)
     key
 
 fn _internal_coff_push_unique_casefold(values: [text], value: text) -> [text]:
@@ -1337,23 +1419,42 @@ fn internal_link_publish_bytes(output: text, bytes: [u8]) -> bool:
     native_image_publish(output, bytes)
 
 fn internal_link_simpleos(object_files: [text], output: text, target: text,
-        config: NativeLinkConfig) -> Result:
+        config: NativeLinkConfig) -> Result<text, text>:
     """Link a SimpleOS kernel through BootLayoutPlan without external lld."""
     var target_arch = RelocArch.X86_64
     var default_script = "src/os/kernel/arch/x86_64/linker.ld"
+    var elf32 = false
     val normalized = target.lower()
     if normalized.contains("aarch64") or normalized.contains("arm64"):
         target_arch = RelocArch.AArch64
         default_script = "src/os/kernel/arch/arm64/linker.ld"
+    elif normalized.contains("riscv64"):
+        # Relocations come from the shared riscv_reloc module via elf_boot_link.
+        target_arch = RelocArch.Riscv64
+        default_script = "src/os/kernel/arch/riscv64/linker.ld"
+    elif normalized.contains("arm32") or normalized.contains("armv7"):
+        target_arch = RelocArch.Arm32
+        default_script = ""
+        elf32 = true
+    elif normalized.contains("riscv32") or normalized.contains("rv32"):
+        target_arch = RelocArch.Riscv32
+        default_script = ""
+        elf32 = true
+    elif normalized.contains("i686") or normalized.contains("i386") or normalized.contains("x86_32"):
+        # 32-bit SimpleOS userland: no kernel default script; ld.lld's default
+        # layout at --image-base 0x400000, mirrored by the static ELF32 engine.
+        target_arch = RelocArch.I386
+        default_script = ""
+        elf32 = true
     elif normalized != "" and not normalized.contains("x86_64") and not normalized.contains("amd64") and normalized != "simpleos":
-        return Err("internal engine: unsupported SimpleOS target '{target}' (internal:simpleos supports x86_64 and arm64)")
+        return Err("internal engine: unsupported SimpleOS target '{target}' (internal:simpleos supports x86_64, arm64, riscv64, i686, riscv32 and arm32)")
     val flags = internal_simpleos_flags(config.extra_flags)?
     val configured_script = env_get("SIMPLE_LINKER_SCRIPT") ?? ""
     if flags.script != "" and configured_script != "" and flags.script != configured_script:
         return Err("internal engine: SimpleOS linker script flag conflicts with SIMPLE_LINKER_SCRIPT")
     val selected_script = if flags.script != "": flags.script else: configured_script
     val script_path = if selected_script != "": selected_script else: default_script
-    if not file_exists(script_path): return Err("internal engine: SimpleOS linker script not found: {script_path}")
+    if (script_path != "" or not elf32) and not file_exists(script_path): return Err("internal engine: SimpleOS linker script not found: {script_path}")
     var objects: [[i64]] = []
     for path in object_files:
         if not file_exists(path): return Err("internal engine: input {path} cannot be read")
@@ -1372,14 +1473,37 @@ fn internal_link_simpleos(object_files: [text], output: text, target: text,
         if internal_elf_library_kind(path) != 1:
             return Err("internal engine: SimpleOS library is not a static archive: {path}")
         archives = archives.push(internal_link_native_read_i64(path))
-    val plan = boot_layout_from_text(file_read(script_path))
+    # INCLUDE lines (the arm common SECTIONS tail) are spliced like ld.lld -T.
+    val plan = if script_path != "": boot_layout_from_file(script_path, config.library_paths) else: boot_layout_from_text("")
     if plan.is_err(): return Err("internal engine: SimpleOS linker script: {plan.unwrap_err()}")
     var boot_plan = plan.unwrap()
+    if boot_plan.input_files.len() > 0:
+        # ld.lld reads script INPUT() files where -T appears, ahead of the
+        # command-line objects.
+        var script_objects: [[i64]] = []
+        for name in boot_plan.input_files:
+            # ld.lld: the path as given first, then each -L directory.
+            var path = name
+            if not file_exists(path):
+                path = ""
+                for directory in config.library_paths:
+                    if path == "" and file_exists(directory + "/" + name):
+                        path = directory + "/" + name
+            if path == "": return Err("internal engine: SimpleOS script INPUT {name} cannot be read")
+            script_objects = script_objects.push(internal_link_native_read_i64(path))
+        for obj in objects: script_objects = script_objects.push(obj)
+        objects = script_objects
     var defsym_i: i64 = 0
     while defsym_i < flags.defsym_names.len():
         boot_plan = boot_layout_add_defsym(boot_plan,
             flags.defsym_names[defsym_i], flags.defsym_exprs[defsym_i])
         defsym_i = defsym_i + 1
+    # i386 SECTIONS scripts (the x86_32 kernel) go through elf_boot_link, which
+    # writes ELFCLASS32 for EM_386; arm32/riscv32 SECTIONS links are still rejected.
+    val i386_script = target_arch == RelocArch.I386 and boot_plan.sections.len() > 0
+    if elf32 and not i386_script:
+        return internal_link_simpleos_elf32(objects, archives, boot_plan, target_arch,
+            flags.gc_sections, flags.wraps, output, config)
     val linked = elf_boot_link_archives_policy(objects, archives, boot_plan,
         target_arch, config.strip_output, config.retained_symbols,
         flags.gc_sections, flags.wraps)
@@ -1387,6 +1511,37 @@ fn internal_link_simpleos(object_files: [text], output: text, target: text,
     var bytes: [u8] = []
     for b in linked.unwrap(): bytes = bytes.push(b as u8)
     if not internal_link_publish_bytes(output, bytes):
+        return Err("internal engine: could not publish {output}")
+    Ok(output)
+
+# ponytail: 32-bit SimpleOS user links take ENTRY/INPUT scripts only and use the
+# static ELF32 engine's lld-default layout at 0x400000 (inside every 32-bit
+# spawn window). i386 SECTIONS links already use elf_boot_link's ELF32 output;
+# upgrade path for arm32/riscv32: ELF32 in elf_boot_link for those machines.
+fn internal_link_simpleos_elf32(objects: [[i64]], archives: [[i64]],
+        plan: BootLayoutPlan, target_arch: RelocArch, gc_sections: bool,
+        wraps: [text], output: text, config: NativeLinkConfig) -> Result<text, text>:
+    if plan.sections.len() > 0:
+        return Err("internal engine: 32-bit SimpleOS user links take no SECTIONS script (ENTRY/INPUT only)")
+    var obj_bytes: [[u8]] = []
+    for obj in objects:
+        var b: [u8] = []
+        for v in obj: b = b.push(v as u8)
+        obj_bytes = obj_bytes.push(b)
+    var ar_bytes: [[u8]] = []
+    for ar in archives:
+        var b: [u8] = []
+        for v in ar: b = b.push(v as u8)
+        ar_bytes = ar_bytes.push(b)
+    val entry = if plan.entry != "": plan.entry else: "_start"
+    val operations = elf_builtin_file_operations_v1()?
+    val request = ElfLinkRequest(objects: obj_bytes, archives: ar_bytes, shared: [],
+        entry: entry, target: target_arch, mode: ELF_LINK_STATIC_EXEC, interp: "",
+        gc_sections: gc_sections, wraps: wraps)
+    val linked = elf_link_with_operations(request, config.strip_output,
+        config.retained_symbols, operations)
+    if linked.is_err(): return Err("internal engine: {linked.unwrap_err()}")
+    if not native_image_publish(output, linked.unwrap().image, true):
         return Err("internal engine: could not publish {output}")
     Ok(output)
 
@@ -1435,16 +1590,213 @@ class _InternalElfByteInputs:
                 if loaded.kind != 0: return Ok(loaded)
         Err("internal engine: ELF library '{name}' was not found")
 
-fn internal_link_macho_native(os: text, arch: text, config: NativeLinkConfig,
+fn _darwin_host_os_version() -> text:
+    if file_exists("/usr/bin/sw_vers"):
+        val (out, _, code) = process_run("/usr/bin/sw_vers", ["-productVersion"])
+        if code == 0:
+            val trimmed = out.trim().split("\n")[0].trim()
+            val parts = trimmed.split(".")
+            if parts.len() >= 2:
+                val major = parts[0].to_int()
+                val minor = parts[1].to_int()
+                if major >= 11 and major <= 99 and minor >= 0 and minor <= 99:
+                    return "{major}.{minor}"
+    "14.0"
+
+fn _darwin_signing_identifier_for_output(output: text) -> text:
+    val normalized = output.replace("\\", "/")
+    val slash_parts = normalized.split("/")
+    val raw_leaf = if slash_parts.len() > 0: slash_parts[slash_parts.len() - 1] else: "app"
+    var chars: [text] = []
+    for idx in 0..raw_leaf.byte_len():
+        val b = raw_leaf.byte_at(idx)
+        val ok = (b >= 48u8 and b <= 57u8) or (b >= 65u8 and b <= 90u8) or (b >= 97u8 and b <= 122u8) or b == 45u8 or b == 46u8 or b == 95u8
+        if ok:
+            chars.push(raw_leaf.substring(idx, idx + 1))
+        else:
+            chars.push("_")
+    val clean = chars.join("")
+    if clean == "": "simple.app" else: "simple." + clean
+
+fn _resolve_darwin_framework_tbd(name: text, sdk: text) -> text:
+    if sdk != "":
+        val sdk_tbd = sdk + "/System/Library/Frameworks/" + name + ".framework/" + name + ".tbd"
+        if file_exists(sdk_tbd): return sdk_tbd
+        val sdk_ver_tbd = sdk + "/System/Library/Frameworks/" + name + ".framework/Versions/A/" + name + ".tbd"
+        if file_exists(sdk_ver_tbd): return sdk_ver_tbd
+    val sys_tbd = "/System/Library/Frameworks/" + name + ".framework/" + name + ".tbd"
+    if file_exists(sys_tbd): return sys_tbd
+    ""
+
+fn _adapt_darwin_host_macho_config(config: NativeLinkConfig, output: text) -> NativeLinkConfig:
+    for ef in config.extra_flags:
+        if ef == "-platform_version" or ef.starts_with("-platform_version "):
+            return config
+    var adapted = config
+    adapted.debug = false
+    # Raw native_macho_plan_v1 emits unstripped Mach-O images and rejects
+    # strip_output=true; internal_link_macho_native applies post-link strip -S -x
+    # (and re-signs ad-hoc) when the hosted Darwin caller requested strip_output.
+    adapted.strip_output = false
+    adapted.prefer_size_linker = false
+    adapted.retained_symbols = []
+    adapted.allow_duplicate_definitions = true
+    if adapted.runtime_path == "none":
+        adapted.runtime_bundle = ""
+    var sdk = darwin_sdk_path()
+    var lib_paths: [text] = []
+    for p in config.library_paths:
+        if p != "" and not lib_paths.contains(p):
+            lib_paths.push(p)
+    var raw_libs: [text] = []
+    for lib in config.libraries:
+        if lib != "":
+            raw_libs.push(lib)
+    var extra: [text] = ["--macho-hosted-darwin-abi"]
+    var rpaths_seen: [text] = []
+    var frameworks: [text] = []
+    var sign_id = ""
+    var idx = 0
+    while idx < config.extra_flags.len():
+        val flag = config.extra_flags[idx]
+        if (flag == "-isysroot" or flag == "-syslibroot") and idx + 1 < config.extra_flags.len():
+            sdk = config.extra_flags[idx + 1]
+            idx = idx + 2
+        elif flag == "-framework" and idx + 1 < config.extra_flags.len():
+            val fw = config.extra_flags[idx + 1]
+            if fw != "" and not frameworks.contains(fw):
+                frameworks.push(fw)
+            idx = idx + 2
+        elif flag == "-rpath" and idx + 1 < config.extra_flags.len():
+            val rp = config.extra_flags[idx + 1]
+            if rp != "" and not rpaths_seen.contains(rp):
+                rpaths_seen.push(rp)
+                extra.push("-rpath")
+                extra.push(rp)
+            idx = idx + 2
+        elif flag.starts_with("-Wl,"):
+            val wl_parts = flag.substring(4).split(",")
+            var wi = 0
+            while wi < wl_parts.len():
+                val wp = wl_parts[wi]
+                if wp == "":
+                    wi = wi + 1
+                elif wp == "-rpath" and wi + 1 < wl_parts.len():
+                    val rp = wl_parts[wi + 1]
+                    if rp != "" and not rpaths_seen.contains(rp):
+                        rpaths_seen.push(rp)
+                        extra.push("-rpath")
+                        extra.push(rp)
+                    wi = wi + 2
+                elif wp == "-framework" and wi + 1 < wl_parts.len():
+                    val fw = wl_parts[wi + 1]
+                    if fw != "" and not frameworks.contains(fw):
+                        frameworks.push(fw)
+                    wi = wi + 2
+                elif wp == "-e" and wi + 1 < wl_parts.len():
+                    extra.push("-e")
+                    extra.push(wl_parts[wi + 1])
+                    wi = wi + 2
+                elif wp.starts_with("-L") and wp.byte_len() > 2:
+                    val lp = wp.substring(2)
+                    if not lib_paths.contains(lp):
+                        lib_paths.push(lp)
+                    wi = wi + 1
+                elif wp.starts_with("-l") and wp.byte_len() > 2:
+                    raw_libs.push(wp.substring(2))
+                    wi = wi + 1
+                elif wp == "-dead_strip" or wp == "-export_dynamic" or wp == "-S" or wp == "-x" or wp == "-pie" or wp == "-no_pie" or wp == "-search_paths_first" or wp == "-headerpad_max_install_names":
+                    wi = wi + 1
+                else:
+                    extra.push("-Wl," + wp)
+                    wi = wi + 1
+            idx = idx + 1
+        elif flag == "-L" and idx + 1 < config.extra_flags.len():
+            val lp = config.extra_flags[idx + 1]
+            if lp != "" and not lib_paths.contains(lp):
+                lib_paths.push(lp)
+            idx = idx + 2
+        elif flag.starts_with("-L") and flag.byte_len() > 2:
+            val lp = flag.substring(2)
+            if not lib_paths.contains(lp):
+                lib_paths.push(lp)
+            idx = idx + 1
+        elif flag == "-l" and idx + 1 < config.extra_flags.len():
+            raw_libs.push(config.extra_flags[idx + 1])
+            idx = idx + 2
+        elif flag.starts_with("-l") and flag.byte_len() > 2:
+            raw_libs.push(flag.substring(2))
+            idx = idx + 1
+        elif (flag == "-e" or flag == "--macho-max-image-bytes" or flag == "-client_name") and idx + 1 < config.extra_flags.len():
+            extra.push(flag)
+            extra.push(config.extra_flags[idx + 1])
+            idx = idx + 2
+        elif flag == "--macho-signing-identifier" and idx + 1 < config.extra_flags.len():
+            sign_id = config.extra_flags[idx + 1]
+            idx = idx + 2
+        elif flag == "-dead_strip" or flag == "-export_dynamic" or flag == "-S" or flag == "-x" or flag == "-g" or flag == "-pie" or flag == "-search_paths_first" or flag == "-headerpad_max_install_names":
+            idx = idx + 1
+        else:
+            extra.push(flag)
+            idx = idx + 1
+    for fw in frameworks:
+        val fw_tbd = _resolve_darwin_framework_tbd(fw, sdk)
+        if fw_tbd != "":
+            raw_libs.push(fw_tbd)
+        else:
+            extra.push("-framework")
+            extra.push(fw)
+    if sdk != "":
+        val sdk_usr_lib = sdk + "/usr/lib"
+        if not lib_paths.contains(sdk_usr_lib):
+            lib_paths.push(sdk_usr_lib)
+        val sdk_sys_lib = sdk + "/usr/lib/system"
+        if not lib_paths.contains(sdk_sys_lib):
+            lib_paths.push(sdk_sys_lib)
+        extra.push("-syslibroot")
+        extra.push(sdk)
+    if file_exists("/opt/homebrew/lib") and not lib_paths.contains("/opt/homebrew/lib"):
+        lib_paths.push("/opt/homebrew/lib")
+    var libs: [text] = []
+    var has_system = false
+    for lib in raw_libs:
+        val clean_lib = if lib.starts_with("-l"): lib.substring(2) else: lib
+        if clean_lib == "System" or clean_lib == "c" or clean_lib == "m" or clean_lib == "pthread" or clean_lib == "dl":
+            if not has_system:
+                has_system = true
+                libs.push("System")
+        elif clean_lib != "" and not libs.contains(clean_lib):
+            libs.push(clean_lib)
+    if not has_system:
+        libs.push("System")
+    val host_ver = _darwin_host_os_version()
+    extra.push("-platform_version")
+    extra.push("macos")
+    extra.push(host_ver)
+    extra.push(host_ver)
+    val final_sign_id = if sign_id != "": sign_id else: _darwin_signing_identifier_for_output(output)
+    extra.push("--macho-signing-identifier")
+    extra.push(final_sign_id)
+    adapted.libraries = libs
+    adapted.library_paths = lib_paths
+    adapted.extra_flags = extra
+    adapted
+
+pub fn internal_link_macho_native(os: text, arch: text, config: NativeLinkConfig,
         object_files: [text], output: text) -> Result<text, text>:
+    @when(os = "macos" or feature = "macho"):
     if native_tool_strict_requested_v1(): return Err("managed native admission requires the admitted external hosted linker")
     val host = host_os()
     val selected_arch = if arch == "arm64": "aarch64" elif arch == "amd64": "x86_64" else: arch
     val actual_arch = if host_arch() == "arm64": "aarch64" elif host_arch() == "amd64": "x86_64" else: host_arch()
     if (os != "macos" and os != "darwin") or (host != "macos" and host != "darwin") or selected_arch != actual_arch:
         return Err("internal engine: unsupported Mach-O cross-host link")
+    val raw_has_platform_version = config.extra_flags.contains("-platform_version")
+    val post_link_strip = config.strip_output and not raw_has_platform_version
+    val effective_config = _adapt_darwin_host_macho_config(config, output)
     # Finish pure configuration checks before runtime discovery or input reads.
-    val plan = native_macho_plan_v1(selected_arch, config, output)?
+    val plan = native_macho_plan_v1(selected_arch, effective_config, output)?
+    val config = effective_config
     if config.runtime_bundle != "" and config.runtime_bundle != "auto" and not native_runtime_bundle_is_known(config.runtime_bundle):
         return Err("internal engine: unsupported runtime bundle '{config.runtime_bundle}'")
     val selection_error = native_runtime_provider_selection_error_for_config(config)
@@ -1452,10 +1804,25 @@ fn internal_link_macho_native(os: text, arch: text, config: NativeLinkConfig,
     var runtime_dir = config.runtime_path
     if runtime_dir == "": runtime_dir = find_runtime_lib_dir()
     val runtime_archives = native_runtime_archive_inputs(runtime_dir, config.runtime_bundle)
-    native_macho_link_files_v1(plan, object_files, runtime_archives, output)
+    val linked_output = native_macho_link_files_v1(plan, object_files, runtime_archives, output)?
+    if post_link_strip:
+        if not file_exists("/usr/bin/strip"):
+            return Err("internal engine: Mach-O strip_output requested but /usr/bin/strip not found")
+        val (_s_out, s_err, s_code) = process_run("/usr/bin/strip", ["-S", "-x", linked_output])
+        if s_code != 0:
+            return Err("internal engine: Mach-O post-link strip failed ({s_code}): {s_err}")
+        if file_exists("/usr/bin/codesign"):
+            val sign_id = _darwin_signing_identifier_for_output(linked_output)
+            val (_c_out, c_err, c_code) = process_run("/usr/bin/codesign", ["--force", "--sign", "-", "--identifier", sign_id, linked_output])
+            if c_code != 0:
+                return Err("internal engine: Mach-O post-strip ad-hoc codesign failed ({c_code}): {c_err}")
+    Ok(linked_output)
+    @else:
+    Err(MACHO_NOT_BUILT_ERROR)
+    @end
 
 fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
-        object_files: [text], output: text) -> Result:
+        object_files: [text], output: text) -> Result<text, text>:
     """Link `object_files` with the internal ELF engine (`internal:elf`, lane
     A7 `elf_static_link.elf_link`) for SIMPLE_LINKER=internal.
 
@@ -1471,20 +1838,13 @@ fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
     internal_link_native_with_operations(os, arch, config, object_files, output, operations)
 
 fn internal_link_native_with_operations(os: text, arch: text, config: NativeLinkConfig,
-        object_files: [text], output: text, operations: ElfSealedOperationsV1) -> Result:
+        object_files: [text], output: text, operations: ElfSealedOperationsV1) -> Result<text, text>:
     if not operations.has_byte_source(): return Err("internal engine: ELF byte-source operation is not bound")
     var source = _InternalElfByteInputs(operations: operations, cache: {})
-    var norm_arch = arch
-    if arch == "amd64":
-        norm_arch = "x86_64"
-    elif arch == "arm64":
-        norm_arch = "aarch64"
-    if os != "linux" and os != "freebsd":
-        return Err("internal engine: unsupported hosted ELF OS '{os}'")
-    if norm_arch != "x86_64" and norm_arch != "aarch64":
-        return Err("internal engine: unsupported architecture '{arch}' (internal:elf supports x86_64 and aarch64 only)")
-    if norm_arch != host_arch() or os != host_os():
-        return Err("internal engine: unsupported cross-host link (target {os}/{arch}; hosted ELF requires the matching sysroot)")
+    val sysroot = internal_elf_sysroot(config.extra_flags)?
+    if sysroot != "" and os != "freebsd":
+        return Err("internal engine: unsupported --sysroot for hosted ELF OS '{os}'")
+    val hosted = internal_elf_hosted_target_sysroot_v1(os, arch, host_os(), host_arch(), sysroot)?
     var before: [text] = []
     var after: [text] = []
     var system_shared: [text] = []
@@ -1492,7 +1852,7 @@ fn internal_link_native_with_operations(os: text, arch: text, config: NativeLink
     var system_paths: [text] = []
     var interpreter = ""
     if os == "freebsd":
-        val selected = freebsd_hosted_inputs("", config.pie)?
+        val selected = freebsd_hosted_inputs(sysroot, config.pie)?
         before = selected.before
         after = selected.after
         system_shared = selected.shared
@@ -1517,12 +1877,8 @@ fn internal_link_native_with_operations(os: text, arch: text, config: NativeLink
         if not system_paths.contains(libdir): system_paths.push(libdir)
         val nonshared = "{libdir}/libc_nonshared.a"
         if file_exists(nonshared): system_archives.push(nonshared)
-        if norm_arch == "x86_64":
-            for directory in ["/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/lib64", "/usr/lib64"]:
-                if not system_paths.contains(directory): system_paths.push(directory)
-        else:
-            for directory in ["/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/lib", "/usr/lib"]:
-                if not system_paths.contains(directory): system_paths.push(directory)
+        for directory in hosted.lib_dirs:
+            if not system_paths.contains(directory): system_paths.push(directory)
     elf_link_trace("inputs: read start")
     # Inputs stay packed `[u8]` all the way into the engine. Widening them per
     # byte to `[i64]` cost 8x the input size and OOM-killed full-CLI links.
@@ -1560,9 +1916,7 @@ fn internal_link_native_with_operations(os: text, arch: text, config: NativeLink
         else:
             return Err("internal engine: ELF library '{path}' is neither an ar archive nor an ET_DYN object")
     elf_link_trace("inputs: read done")
-    var target_arch = RelocArch.X86_64
-    if norm_arch == "aarch64":
-        target_arch = RelocArch.AArch64
+    val target_arch = hosted.reloc
     var mode = ELF_LINK_DYNAMIC_EXEC
     if config.pie:
         mode = ELF_LINK_DYNAMIC_PIE
@@ -1588,7 +1942,7 @@ fn internal_link_native_with_operations(os: text, arch: text, config: NativeLink
     Ok(output)
 
 # Build self-contained binary when given SMF inputs
-fn link_smf_bundle(smf_inputs: [text], output: text, config: NativeLinkConfig) -> Result:
+fn link_smf_bundle(smf_inputs: [text], output: text, config: NativeLinkConfig) -> Result<text, text>:
     native_link_output_v1(link_smf_bundle_with_engine(smf_inputs, output, config))
 
 fn link_smf_bundle_with_engine(smf_inputs: [text], output: text, config: NativeLinkConfig) -> Result<NativeLinkSuccessV1, text>:
@@ -1807,11 +2161,11 @@ fn native_runtime_archive_link_args(runtime_dir: text, runtime_bundle: text,
     if runtime_bundle != "" and runtime_bundle != "auto":
         return []
     if cc_fallback:
-        var fallback = ["-L", runtime_dir, "-lsimple_compiler"]
+        var fallback: [text] = ["-L", runtime_dir, "-lsimple_compiler"]
         if emit_rpath:
             fallback.push("-Wl,-rpath," + runtime_dir)
         return fallback
-    var fallback = ["-L", runtime_dir, "-lsimple_compiler"]
+    var fallback: [text] = ["-L", runtime_dir, "-lsimple_compiler"]
     if emit_rpath:
         fallback.push("-rpath")
         fallback.push(runtime_dir)
@@ -1820,7 +2174,7 @@ fn native_runtime_archive_link_args(runtime_dir: text, runtime_bundle: text,
 fn native_runtime_archive_inputs(runtime_dir: text, runtime_bundle: text) -> [text]:
     native_runtime_archive_inputs_for_platform(runtime_dir, runtime_bundle, false)
 
-fn native_runtime_archive_inputs_for_platform(runtime_dir: text, runtime_bundle: text,
+pub fn native_runtime_archive_inputs_for_platform(runtime_dir: text, runtime_bundle: text,
         msvc: bool) -> [text]:
     if runtime_dir == "" or runtime_dir == "none":
         return []
@@ -1916,19 +2270,6 @@ fn native_msvc_llvm_all_inputs(configured: [text], objects: [text], runtime: [te
         val _admitted = native_runtime_strict_archives_v1(root, [selected[selected.len() - 1]])?
     return Ok(selected)
 
-fn native_runtime_archive_inputs(runtime_dir: text) -> [text]:
-    if runtime_dir == "" or runtime_dir == "none":
-        return []
-    val names = native_runtime_archive_names(
-        file_exists("{runtime_dir}/libsimple_compiler.a"),
-        file_exists("{runtime_dir}/libsimple_compiler_backfill.a"),
-        file_exists("{runtime_dir}/libsimple_native_all.a")
-    )
-    var inputs: [text] = []
-    for name in names:
-        inputs.push(runtime_dir + "/" + name)
-    inputs
-
 fn cc_fallback_object_args(object_files: [text]) -> [text]:
     var args: [text] = []
     for obj in object_files:
@@ -1982,6 +2323,12 @@ fn cc_fallback_extra_flags(extra_flags: [text]) -> [text]:
         val flag = extra_flags[index]
         if flag == "-rpath" and index + 1 < extra_flags.len():
             result = result.push("-Wl,-rpath," + extra_flags[index + 1])
+            index = index + 2
+        elif flag == "--build-id=sha1":
+            result = result.push("-Wl,--build-id=sha1")
+            index = index + 1
+        elif flag == "-z" and index + 1 < extra_flags.len() and extra_flags[index + 1] == "start-stop-gc":
+            result = result.push("-Wl,-z,start-stop-gc")
             index = index + 2
         else:
             result = result.push(flag)
@@ -2107,7 +2454,7 @@ fn publish_darwin_link_tool_identity(tool_path: text) -> text:
     if os != "macos" and os != "darwin": return ""
     val resolved = darwin_resolve_link_tool(tool_path)
     if resolved == "": return darwin_link_tool_unresolved_error(tool_path)
-    val artifact = file_hash_sha256(resolved)
+    val artifact = file_hash_sha256_or_shell(resolved)
     if artifact.len() != 64: return "darwin-link-tool-digest-failed"
     val behavior = sha256_text(
         "simple-darwin-link-tool-behavior-v1|artifact=64:" + artifact +
@@ -2122,7 +2469,7 @@ fn publish_darwin_link_tool_identity(tool_path: text) -> text:
         "build/native_cache"
     else:
         configured_cache_root
-    if not file_write(
+    if not file_atomic_write(
         cache_root + "/native_link_tool_identity.receipt",
         "simple-darwin-link-tool-identity-v1\npath=" + resolved +
         "\nartifact=" + artifact + "\nbehavior=" + behavior +
@@ -2134,14 +2481,14 @@ fn publish_darwin_link_tool_identity(tool_path: text) -> text:
 
 pub fn native_direct_platform_flags(os: text, linker_type: text, strip_output: bool = false) -> [text]:
     if os == "linux" or os == "freebsd":
-        var flags = ["--eh-frame-hdr", "--build-id", "--hash-style=gnu",
+        var flags: [text] = ["--eh-frame-hdr", "--build-id", "--hash-style=gnu",
             "-z", "relro", "-z", "now", "--gc-sections"]
         if linker_type == "mold" or linker_type == "lld": flags.push("--icf=all")
         elif linker_type == "gold": flags.push("--icf=safe")
         if strip_output: flags.push("--strip-all")
         return flags
     if os == "macos" or os == "darwin":
-        var flags = ["-dead_strip"]
+        var flags: [text] = ["-dead_strip"]
         if strip_output:
             flags.push("-S")
             flags.push("-x")
@@ -2170,7 +2517,7 @@ pub fn darwin_sdk_path() -> text:
 
 pub fn native_cc_platform_flags(os: text, strip_output: bool = false) -> [text]:
     if os == "macos" or os == "darwin" or os == "Darwin":
-        var flags = ["-Wl,-dead_strip"]
+        var flags: [text] = ["-Wl,-dead_strip"]
         val sdk = darwin_sdk_path()
         if sdk != "":
             flags.push("-isysroot")
@@ -2178,10 +2525,34 @@ pub fn native_cc_platform_flags(os: text, strip_output: bool = false) -> [text]:
         if strip_output: flags.push("-Wl,-S,-x")
         return flags
     if os == "linux" or os == "Linux" or os == "freebsd" or os == "FreeBSD":
-        var flags = ["-Wl,-z,relro", "-Wl,-z,now", "-Wl,--gc-sections"]
+        var flags: [text] = ["-Wl,-z,relro", "-Wl,-z,now", "-Wl,--gc-sections"]
         if strip_output: flags.push("-Wl,--strip-all")
         return flags
     []
+
+pub fn native_cc_icf_safe_supported(linker_selector: text, hosted_cross: bool) -> bool:
+    """Whether the cc-selected ELF linker accepts `--icf=safe`.
+
+    An empty selector uses this path's native-host LLD default.  Managed tool
+    authority instead returns an absolute `-fuse-ld=<path>` selector, so test
+    the selected engine rather than comparing the whole flag with the named
+    `-fuse-ld=bfd` spelling.  GNU BFD rejects every ICF option.
+    """
+    if hosted_cross: return false
+    if linker_selector == "": return true
+    val selected = linker_selector.lower().replace("\\", "/")
+    val linker_path = if selected.starts_with("-fuse-ld="): selected[9:] else: selected
+    val parts = linker_path.split("/")
+    if parts.len() == 0: return false
+    var executable = parts[parts.len() - 1]
+    if executable.ends_with(".exe"): executable = executable[0:executable.len() - 4]
+    if executable == "lld-link" or executable.starts_with("lld-link-") or
+            executable == "lld-coff" or executable.starts_with("lld-coff-"):
+        return false
+    executable == "lld" or executable == "ld.lld" or
+        executable.starts_with("lld-") or executable.starts_with("ld.lld-") or
+        executable == "mold" or executable.starts_with("mold-") or
+        executable == "gold" or executable == "ld.gold" or executable.starts_with("ld.gold-")
 
 fn cc_requested_fuse_ld_flag(os_name: text, hosted_cross: bool) -> Result<text, text>:
     """Resolve SIMPLE_LINKER into a -fuse-ld= flag for the cc fallback path.
@@ -2203,7 +2574,7 @@ fn cc_requested_fuse_ld_flag(os_name: text, hosted_cross: bool) -> Result<text, 
         request would point the cross driver at a host-native linker."""
     if native_tool_strict_requested_v1():
         val path = native_tool_strict_resolve_v1("linker")?
-        return Ok("-fuse-ld=" + path)
+        return managed_native_linker_selector_v1(host_os(), path)
     val requested = requested_linker_override()
     if requested == "":
         return Ok("")
@@ -2217,10 +2588,10 @@ fn cc_requested_fuse_ld_flag(os_name: text, hosted_cross: bool) -> Result<text, 
     val resolved_path = resolved.unwrap()
     Ok("-fuse-ld=" + linker_fuse_ld_name(linker_type_for_path(resolved_path)))
 
-fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) -> Result<text, text>:
     if native_tool_strict_requested_v1():
-        if host_os() != "linux" and host_os() != "windows":
-            return Err("managed native C-driver linking is admitted only for Linux and Windows")
+        if not managed_native_cc_link_host_admitted_v1(host_os()):
+            return Err("managed native C-driver linking is admitted only for Linux, Windows and macOS")
         val argument_error = managed_native_extra_args_error_v1(config.extra_flags)
         if argument_error != "": return Err(argument_error)
         val path_argument_error = managed_native_input_args_error_v1(object_files + [output] + config.library_paths + config.libraries)
@@ -2268,9 +2639,17 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         print "[linker-wrapper] cc-fuse-ld-selection failed: {fuse_ld_result.unwrap_err()}"
         return Err(link_error_detail("cc-fuse-ld-selection", fuse_ld_result.unwrap_err()))
     val requested_fuse_ld = fuse_ld_result.unwrap()
-    var cc = if native_tool_strict_requested_v1():
-        native_tool_strict_resolve_v1("cc")?
-    else: env_get("SIMPLE_CC") ?? ""
+    var cc: text = ""
+    if native_tool_strict_requested_v1():
+        cc = native_tool_strict_resolve_v1("cc")?
+    else:
+        cc = env_get("SIMPLE_CC") ?? ""
+        # Clang-only policy (CLAUDE.md: Never use GCC). An explicit SIMPLE_CC
+        # that resolves to GCC is refused, never linked through collect2.
+        if cc != "" and not hosted_cross and os_name != "windows":
+            cc = match c_driver_admit_v1(cc):
+                case Ok(v): v
+                case Err(e): return Err(link_error_detail("cc-clang-only", e))
     if native_tool_strict_requested_v1() and not cc.lower().contains("clang"):
         return Err("managed C-driver linking requires admitted clang with an absolute linker path")
     if cc == "":
@@ -2279,7 +2658,11 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             if cc == "":
                 return Err("required cross C compiler '" + compiler_plan.command + "' was not found")
         else:
-            cc = "cc"
+            # Never bare `cc`: on Ubuntu it is gcc-13 and the link runs through
+            # collect2. find_c_compiler() yields clang or "" with the refusal printed.
+            cc = find_c_compiler()
+            if cc == "":
+                return Err(link_error_detail("cc-clang-only", "no clang C driver for the hosted native link (clang-only toolchain; gcc and bare cc are never used). Source scripts/setup/llvm-toolchain-env.shs or set SIMPLE_CC=clang-23"))
     if link_os == "windows-mingw" and not cc.lower().contains("clang"):
         return Err("Windows GNU native links require clang or clang-cl; selected compiler was '" + cc + "'")
     if os_name == "macos" or os_name == "darwin":
@@ -2299,6 +2682,12 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         # generated entry shim). Passing only obj0 dropped the entry-point
         # object -> "Undefined symbols: _main" on Mach-O.
         var args = native_retained_symbol_cc_args(config.retained_symbols, link_os)
+        # Strict mode: --ld-path=<admitted ld64>, so the clang driver runs the
+        # pinned linker instead of whatever `ld` it finds itself.
+        if requested_fuse_ld != "":
+            args.push(requested_fuse_ld)
+        for target_arg in hosted_cross_c_target_args(target, os_name, arch_name):
+            args.push(target_arg)
         for obj in cc_fallback_object_args(object_files):
             args.push(obj)
         val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
@@ -2316,12 +2705,19 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         for path in object_files: support_inputs.push(path)
         for runtime_arg in runtime_args:
             support_inputs.push(runtime_arg)
-        for flag in native_all_gnu_support_args(support_inputs, link_os, brew_prefix):
+        val stage3_host_only = (env_get("SIMPLE_BOOTSTRAP_STAGE3") ?? "") == "1" or
+            (env_get("SIMPLE_STAGE3_MINIMAL_STATIC_PRIMITIVES") ?? "") == "1"
+        for flag in native_all_gnu_support_args_for_stage_v1(support_inputs, link_os, brew_prefix, stage3_host_only):
             args.push(flag)
         for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)
         for flag in native_cc_platform_flags(link_os, config.strip_output):
             args.push(flag)
+        # Mach-O ld64 requires explicit `-U` for optional `__attribute__((weak_import))`
+        # / `__attribute__((weak))` runtime hooks (`runtime_thread.c`, `runtime_value.h`,
+        # `runtime_fork.c`) so they resolve to NULL when no Simple module defines them.
+        for weak_sym in ["_worker_loop_entry", "_simple_note_user_threads_started", "_spl_immortal_registry_freeze_for_fork_child_v1"]:
+            args.push("-Wl,-U," + weak_sym)
         for flag in ["-o", output]:
             args.push(flag)
         record_link_command(output, cc, args, config.verbose)
@@ -2351,13 +2747,16 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         var support_inputs = object_files
         for runtime_arg in runtime_args:
             support_inputs.push(runtime_arg)
-        for flag in native_all_gnu_support_args(support_inputs, link_os, ""):
+        val stage3_host_only = (env_get("SIMPLE_BOOTSTRAP_STAGE3") ?? "") == "1" or
+            (env_get("SIMPLE_STAGE3_MINIMAL_STATIC_PRIMITIVES") ?? "") == "1"
+        for flag in native_all_gnu_support_args_for_stage_v1(support_inputs, link_os, "", stage3_host_only):
             args.push(flag)
         for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)
         if config.allow_duplicate_definitions:
             args.push("-Wl,--allow-multiple-definition")
-        args.push("-Wl,--gc-sections")
+        if not config.extra_flags.contains("-Wl,--no-gc-sections") and not config.extra_flags.contains("--no-gc-sections"):
+            args.push("-Wl,--gc-sections")
         if config.strip_output:
             args.push("-Wl,--strip-all")
         args.push("-o")
@@ -2371,7 +2770,7 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
     else:
         var args: [text] = []
         if link_os == "windows-mingw":
-            args.push("--target=x86_64-w64-windows-gnu")
+            args.push("--target=" + hosted_mingw_clang_target(target))
         # An explicit SIMPLE_LINKER request wins over this arm's historical
         # default. With neither set, behaviour is byte-identical to before.
         if requested_fuse_ld != "":
@@ -2380,7 +2779,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push("-fuse-ld=lld")
         if not config.pie:
             args.push("-no-pie")
-        for flag in native_retained_symbol_cc_args(config.retained_symbols, link_os):
+        val retained_target = if target != "": target else: config.target_triple
+        for flag in native_retained_symbol_cc_args_for_target(config.retained_symbols, link_os, retained_target):
             args.push(flag)
         for obj in object_files:
             args.push(obj)
@@ -2392,7 +2792,9 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         var support_inputs = object_files
         for runtime_arg in runtime_args:
             support_inputs.push(runtime_arg)
-        for flag in native_all_gnu_support_args(support_inputs, link_os, ""):
+        val stage3_host_only = (env_get("SIMPLE_BOOTSTRAP_STAGE3") ?? "") == "1" or
+            (env_get("SIMPLE_STAGE3_MINIMAL_STATIC_PRIMITIVES") ?? "") == "1"
+        for flag in native_all_gnu_support_args_for_stage_v1(support_inputs, link_os, "", stage3_host_only):
             args.push(flag)
         for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)
@@ -2408,13 +2810,22 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         # doc/08_tracking/bug/linux_native_link_unconditional_lsdl2_2026-09-06.md
         if config.allow_duplicate_definitions:
             args.push("-Wl,--allow-multiple-definition")
-        args.push("-Wl,--gc-sections")
+        # An explicit `-Wl,--no-gc-sections` in extra_flags must not be undone
+        # by this later default (last flag wins in lld). This also applies to a
+        # USER `--linker-flags -Wl,--no-gc-sections` on a normal cc link, which
+        # was silently overridden before (behaviour change, deliberate: the
+        # user asked for it). First consumer: the go-to-end trial link
+        # (driver_build/go_to_end_trial_link_v1.spl), which needs every
+        # undefined reference reported, including in sections GC would drop.
+        if not config.extra_flags.contains("-Wl,--no-gc-sections") and not config.extra_flags.contains("--no-gc-sections"):
+            args.push("-Wl,--gc-sections")
         if config.strip_output:
             args.push("-Wl,--strip-all")
-        # --icf is an lld/mold/gold extension; GNU bfd rejects it outright, so
-        # honouring SIMPLE_LINKER=ld/gnu/bfd here means dropping the flag
-        # rather than handing bfd an option that fails the link.
-        if not hosted_cross and requested_fuse_ld != "-fuse-ld=bfd":
+        # --icf is an lld/mold/gold extension; GNU bfd rejects it outright.
+        # Managed authority uses an absolute selector (for example
+        # -fuse-ld=/usr/bin/x86_64-linux-gnu-ld.bfd), so decide from the
+        # selected engine rather than one exact named spelling.
+        if native_cc_icf_safe_supported(requested_fuse_ld, hosted_cross):
             args.push("-Wl,--icf=safe")
         args.push("-o")
         args.push(output)
@@ -2430,7 +2841,7 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
 pub fn windows_link_flavor_for_config(config: NativeLinkConfig) -> text:
     """"msvc" or "gnu" for this link request, decided from the TARGET first
     (config.target_triple / config.linker_abi, then the driver's --target),
-    then the SIMPLE_LINKER_FLAVOR / SIMPLE_WINDOWS_ABI overrides, else msvc.
+    then the SIMPLE_LINKER_FLAVOR / SIMPLE_WINDOWS_ABI overrides, else gnu.
     Never from MSYSTEM: Git Bash sets it for every shell, which used to route
     MSVC-ABI runtime objects (and `x86_64-pc-windows-msvc` links) through
     the MinGW arm."""
@@ -2445,9 +2856,12 @@ fn _windows_link_arch(config: NativeLinkConfig) -> text:
         return "aarch64"
     if target.starts_with("x86_64-") or target.starts_with("amd64-"):
         return "x86_64"
+    if target.starts_with("i686-") or target.starts_with("i386-") or target.starts_with("x86-"):
+        return "i686"
     val detected = host_arch().lower()
     if detected == "arm64": return "aarch64"
     if detected == "amd64": return "x86_64"
+    if detected == "i386" or detected == "x86": return "i686"
     detected
 
 fn internal_coff_runtime_is_msvc(os: text, mingw_env: bool) -> bool:
@@ -2457,26 +2871,76 @@ fn internal_coff_runtime_is_msvc(os: text, mingw_env: bool) -> bool:
     if os == "windows-msvc": return true
     not mingw_env
 
-fn link_native_windows(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+fn link_native_windows(object_files: [text], output: text, config: NativeLinkConfig) -> Result<text, text>:
     native_link_output_v1(link_native_windows_with_engine(object_files, output, config))
 
-fn native_windows_strict_extra_args_error(extra_flags: [text], allow_duplicate_definitions: bool) -> text:
-    """Reject duplicate-policy overrides before either Windows linker engine runs."""
+var _native_windows_trial_artifact_unresolved_v1: bool = false
+
+pub fn native_windows_trial_artifact_unresolved_begin_v1():
+    _native_windows_trial_artifact_unresolved_v1 = true
+
+pub fn native_windows_trial_artifact_unresolved_end_v1():
+    _native_windows_trial_artifact_unresolved_v1 = false
+
+fn _native_windows_strict_token_error(tok: text, allow_unresolved: bool, allow_xlink_recurse: bool) -> text:
+    if tok == "":
+        return "empty nested linker token"
+    if tok.starts_with("-xlink=") or tok.starts_with("/xlink="):
+        if not allow_xlink_recurse:
+            return "nested xlink argument"
+        val inner = tok.substring(7, tok.byte_len()).trim()
+        return _native_windows_strict_token_error(inner, allow_unresolved, false)
+    if tok == "-xlink" or tok == "/xlink" or tok.starts_with("@") or tok == "-xlinker" or tok.starts_with("-xlinker=") or tok == "/link" or tok.starts_with("/link:"):
+        return "nested linker argument"
+    if tok == "--allow-multiple-definition" or tok == "-allow-multiple-definition" or tok == "muldefs" or tok == "-z" or tok.starts_with("-z"):
+        return "duplicate-definition option"
+    if tok == "/force" or tok == "-force" or tok.starts_with("/force:") or tok.starts_with("-force:"):
+        if allow_unresolved and (tok == "/force:unresolved" or tok == "-force:unresolved"):
+            return ""
+        return "FORCE option"
+    ""
+
+fn _native_windows_strict_extra_args_error_impl(extra_flags: [text], allow_duplicate_definitions: bool, allow_unresolved: bool) -> text:
     if allow_duplicate_definitions: return ""
     for flag in extra_flags:
         # Quotes are command-line syntax, not an escape from policy validation.
         val normalized = flag.replace("\"", "").trim().lower()
         if normalized == "/force" or normalized == "-force" or normalized.starts_with("/force:") or normalized.starts_with("-force:"):
+            if allow_unresolved and (normalized == "/force:unresolved" or normalized == "-force:unresolved"):
+                continue
             return "strict Windows link rejects FORCE option: {flag}"
-        if normalized == "--allow-multiple-definition" or normalized == "muldefs":
+        if normalized == "--allow-multiple-definition" or normalized == "-allow-multiple-definition" or normalized == "muldefs" or normalized == "-z" or normalized.starts_with("-z"):
             return "strict Windows link rejects duplicate-definition option: {flag}"
+        # Split `-Wl,` payloads on `,` so safe diagnostic flags pass while nested
+        # duplicate-definition, FORCE, or response-file tokens are rejected.
+        if normalized.starts_with("-wl,"):
+            val payload = normalized.substring(4, normalized.byte_len())
+            if payload.trim() == "":
+                return "strict Windows link rejects nested linker arguments: {flag}"
+            val parts = payload.split(",")
+            for part in parts:
+                val tok_err = _native_windows_strict_token_error(part.trim(), allow_unresolved, true)
+                if tok_err != "":
+                    return "strict Windows link rejects nested linker arguments: {flag}"
+            continue
+        if normalized.starts_with("-xlink=") or normalized.starts_with("/xlink="):
+            val xlink_err = _native_windows_strict_token_error(normalized, allow_unresolved, true)
+            if xlink_err != "":
+                return "strict Windows link rejects nested linker arguments: {flag}"
+            continue
         # Nested argv cannot be checked as ordinary direct-linker flags.
-        if normalized.starts_with("@") or normalized.starts_with("-wl,") or normalized == "-xlinker" or normalized == "/link":
+        if normalized.starts_with("@") or normalized == "-xlinker" or normalized.starts_with("-xlinker=") or normalized == "/link" or normalized.starts_with("/link:") or normalized == "-xlink" or normalized == "/xlink":
             return "strict Windows link rejects nested linker arguments: {flag}"
     ""
 
+fn native_windows_strict_extra_args_error(extra_flags: [text], allow_duplicate_definitions: bool, allow_unresolved_trial_artifact: bool = false) -> text:
+    """Reject duplicate-policy overrides before either Windows linker engine runs."""
+    val allow_unresolved = allow_unresolved_trial_artifact or _native_windows_trial_artifact_unresolved_v1
+    _native_windows_strict_extra_args_error_impl(extra_flags, allow_duplicate_definitions, allow_unresolved)
+
 fn link_native_windows_with_engine(object_files: [text], output: text, config: NativeLinkConfig) -> Result<NativeLinkSuccessV1, text>:
-    val argument_error = native_windows_strict_extra_args_error(config.extra_flags, config.allow_duplicate_definitions)
+    val allow_unresolved = _native_windows_trial_artifact_unresolved_v1 and output.ends_with(".go-to-end-trial")
+    val argument_error = _native_windows_strict_extra_args_error_impl(config.extra_flags, config.allow_duplicate_definitions, allow_unresolved)
     if argument_error != "": return Err(argument_error)
     if requested_linker_override().trim().lower() == "internal":
         val target_arch = _windows_link_arch(config)
@@ -2529,8 +2993,8 @@ fn link_native_windows_with_engine(object_files: [text], output: text, config: N
             if native_all_input_present(with_llvm):
                 val llvm = with_llvm[with_llvm.len() - 1]
                 if not library_files.contains(llvm): library_files.push(llvm)
-        var support_libraries = ["kernel32.lib", "ws2_32.lib", "bcrypt.lib",
-            "userenv.lib", "ntdll.lib", "advapi32.lib", "d3d11.lib", "dxgi.lib"]
+        var support_libraries: [text] = ["kernel32.lib", "ws2_32.lib", "mswsock.lib", "bcrypt.lib",
+            "userenv.lib", "ntdll.lib", "advapi32.lib", "shell32.lib", "ole32.lib", "d3d11.lib", "dxgi.lib"]
         for library in native_all_msvc_support_libraries(support_inputs):
             if not support_libraries.contains(library): support_libraries.push(library)
         # Do not make an unused SDK library an unconditional prerequisite.
@@ -2613,7 +3077,7 @@ fn link_native_windows_with_engine(object_files: [text], output: text, config: N
     # MSVC: delegate to MsvcLinker with proper CRT paths
     return _link_native_msvc_with_engine(object_files, output, config)
 
-fn _link_native_msvc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+fn _link_native_msvc(object_files: [text], output: text, config: NativeLinkConfig) -> Result<text, text>:
     native_link_output_v1(_link_native_msvc_with_engine(object_files, output, config))
 
 fn _link_native_msvc_with_engine(object_files: [text], output: text, config: NativeLinkConfig) -> Result<NativeLinkSuccessV1, text>:
@@ -2626,6 +3090,9 @@ fn _link_native_msvc_with_engine(object_files: [text], output: text, config: Nat
     if link_arch == "aarch64":
         msvc_config.machine = "ARM64"
         # MsvcConfig.default() pre-populates the x64 CRT/SDK directories.
+        msvc_config.lib_paths = []
+    elif link_arch == "i686":
+        msvc_config.machine = "X86"
         msvc_config.lib_paths = []
 
     # Populate CRT library paths from VS/SDK detection
@@ -2657,7 +3124,7 @@ fn _link_native_msvc_with_engine(object_files: [text], output: text, config: Nat
     # CROSS-PLATFORM: this list is inside _link_native_msvc and is reached
     # only on the Windows/MSVC link path; Linux, macOS and mingw are
     # byte-unaffected.
-    val win_libs = ["kernel32.lib", "ws2_32.lib", "bcrypt.lib", "userenv.lib", "ntdll.lib", "advapi32.lib", "d3d11.lib", "dxgi.lib"]
+    val win_libs: [text] = ["kernel32.lib", "ws2_32.lib", "mswsock.lib", "bcrypt.lib", "userenv.lib", "ntdll.lib", "advapi32.lib", "shell32.lib", "ole32.lib", "d3d11.lib", "dxgi.lib"]
     for wlib in win_libs:
         if not msvc_config.libs.contains(wlib):
             msvc_config.libs.push(wlib)
@@ -2691,11 +3158,15 @@ fn _link_native_msvc_with_engine(object_files: [text], output: text, config: Nat
     # Keep this final MSVC boundary defensive because an early self-hosted
     # compiler can misclassify its host while the selected linker is still
     # unambiguously link.exe.
-    var extra = native_retained_symbol_msvc_args(config.retained_symbols)
+    val msvc_target = if config.target_triple != "": config.target_triple else: link_arch
+    var extra = native_retained_symbol_msvc_args_for_target(config.retained_symbols, msvc_target)
+    var has_opt_noref = false
     for flag in native_msvc_extra_args(config.extra_flags):
+        if flag.replace("\"", "").trim().lower() == "/opt:noref":
+            has_opt_noref = true
         extra.push(flag)
     # Size optimization: remove unreferenced data + fold identical COMDATs
-    if not config.debug:
+    if not config.debug and not has_opt_noref:
         extra.push("/OPT:REF,ICF")
     if config.strip_output:
         extra.push("/DEBUG:NONE")
@@ -2715,7 +3186,7 @@ fn _link_native_msvc_with_engine(object_files: [text], output: text, config: Nat
     if msvc_config.link_exe == "":
         match find_link_exe():
             case Some(path): msvc_config.link_exe = path
-            case nil:
+            case None:
                 return Err("Windows MSVC linking failed: {LLD_LINK_INSTALL_HINT}")
     val executed_path = msvc_config.link_exe
     val linker = MsvcLinker.new(msvc_config)

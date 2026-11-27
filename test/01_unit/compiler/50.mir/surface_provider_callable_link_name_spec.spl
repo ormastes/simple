@@ -1,0 +1,176 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+"""
+# MIR: surface-only providers register module-qualified callable link names
+
+Under per-file `--compile-mode=file` with `[unit-tldr]` surface imports,
+free-function-only provider modules have `needs_class_hir = false` and
+`needs_decl_hir = false`, so they enter MIR lowering via
+`SurfaceCallOriginRowsV1` and `register_surface_callable_origin_rows_v1`
+without a full `HirModule` in `MirLowering`.
+
+Previously `_register_one_surface_callable_origin_v1` populated only
+`callable_text_value_abi` and skipped `callable_link_names`, so
+`provider_callable_symbol_name` missed in `callable_link_names` and emitted
+unmangled bare symbol references (such as `transient_scope_pause`) while the
+defining unit emitted `lib.nogc_sync_mut.sffi.transient.transient_scope_pause`.
+
+These examples pin the contract:
+- surface-only free functions receive canonical `<owner>.<fn>` link names with
+  `std.` folded to `lib.`, matching `provider_callable_symbol_name` and lowered
+  `MirInstKind.Call` operands under non-bootstrap (`SIMPLE_BOOTSTRAP=0`);
+- `extern fn`, `@export("C")`, `@global`, and `@entry` preserve bare ABI names;
+- pre-existing HIR-derived `callable_link_names` remain authoritative.
+"""
+
+use std.spec
+use std.io_runtime.{env_get, env_set}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.driver.driver_surface_call_origin_rows_v1.{SurfaceCallOriginRowsV1, surface_call_origin_rows_capture_v1}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule, SymbolId}
+use compiler.mir.mir.*
+use compiler.mir.mir_instructions.{MirInstKind, MirOperandKind, mir_module_functions_sorted}
+use compiler.mir.mir_types.{MirConstValue}
+
+val std_transient_src = "pub fn transient_scope_pause() -> i64:\n    7\n"
+val app_roots_src = "pub fn native_build_closure_roots_v1() -> i64:\n    35\n"
+val abi_provider_src = "extern fn extern_helper() -> i64\n\n@export(\"C\")\npub fn export_helper() -> i64:\n    1\n\n@global\npub fn global_helper() -> i64:\n    2\n\n@entry\npub fn entry_helper() -> i64:\n    3\n"
+val consumer_src = "use std.repro_transient.\{transient_scope_pause\}\nuse app.repro_roots.\{native_build_closure_roots_v1\}\nuse app.repro_abi.\{extern_helper, export_helper, global_helper, entry_helper\}\n\npub fn run_all() -> i64:\n    transient_scope_pause() + native_build_closure_roots_v1() + extern_helper() + export_helper() + global_helper() + entry_helper()\n"
+
+struct SurfaceLinkProbe:
+    transient_sym_name: text
+    roots_sym_name: text
+    extern_sym_name: text
+    export_sym_name: text
+    global_sym_name: text
+    entry_sym_name: text
+    call_targets: [text]
+    errors: i64
+    preserved_authoritative: text
+    qualified_member_link: text
+    unmangled_flags_count: i64
+
+fn find_symbol_id(hir: HirModule, name: text) -> SymbolId:
+    val raw_id = hir.symbols.root_scope_symbols[name]
+    SymbolId(id: raw_id)
+
+fn collect_call_targets(mir_mod: MirModule) -> [text]:
+    var targets: [text] = []
+    for func in mir_module_functions_sorted(mir_mod):
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(value, _):
+                                match value:
+                                    case MirConstValue.Str(sym):
+                                        targets.push(sym)
+                                    case _: ()
+                            case _: ()
+                    case _: ()
+    targets
+
+fn run_surface_link_probe() -> SurfaceLinkProbe:
+    val log = Logger(level: 0)
+    var modules: Dict<text, ParserModule> = {}
+    var sources: [SourceFile] = []
+
+    val m_std = parse_full_frontend(std_transient_src, "src/lib/repro_transient.spl", "std.repro_transient", log)
+    val m_roots = parse_full_frontend(app_roots_src, "src/app/repro_roots.spl", "app.repro_roots", log)
+    val m_abi = parse_full_frontend(abi_provider_src, "src/app/repro_abi.spl", "app.repro_abi", log)
+    val m_consumer = parse_full_frontend(consumer_src, "src/app/repro_consumer.spl", "app.repro_consumer", log)
+
+    modules["std.repro_transient"] = m_std
+    modules["app.repro_roots"] = m_roots
+    modules["app.repro_abi"] = m_abi
+    modules["app.repro_consumer"] = m_consumer
+    sources.push(SourceFile(path: "src/lib/repro_transient.spl", content: std_transient_src, module_name: "std.repro_transient"))
+    sources.push(SourceFile(path: "src/app/repro_roots.spl", content: app_roots_src, module_name: "app.repro_roots"))
+    sources.push(SourceFile(path: "src/app/repro_abi.spl", content: abi_provider_src, module_name: "app.repro_abi"))
+    sources.push(SourceFile(path: "src/app/repro_consumer.spl", content: consumer_src, module_name: "app.repro_consumer"))
+
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    val origin_rows = surface_call_origin_rows_capture_v1(surfaces)
+
+    var consumer_hir_lowering = hirlowering_for_module("src/app/repro_consumer.spl", surfaces)
+    val consumer_hir = consumer_hir_lowering.lower_module(m_consumer)
+
+    val old_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+    env_set("SIMPLE_BOOTSTRAP", "0")
+    val target = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(consumer_hir.symbols, target)
+    lowering.callable_link_names["app.repro_auth#auth_fn"] = "custom.authoritative.auth_fn"
+    val _added = lowering.register_surface_callable_origin_rows_v1(
+        origin_rows.owners, origin_rows.names, origin_rows.externs,
+        origin_rows.methods, origin_rows.statics, origin_rows.unmangled_abis)
+    val _auth = lowering.register_surface_callable_origins_v1(
+        "app.repro_auth", ["auth_fn"], [false], [false], [false], [false])
+    val preserved_authoritative = lowering.callable_link_names["app.repro_auth#auth_fn"]
+    val _qmember = lowering.register_surface_callable_origins_v1(
+        "app.repro_box", ["Box.get_v"], [false], [true], [false], [false])
+    val qualified_member_link = lowering.callable_link_names["app.repro_box#Box.get_v"]
+
+    val transient_sym_name = lowering.provider_callable_symbol_name(find_symbol_id(consumer_hir, "transient_scope_pause"), "transient_scope_pause")
+    val roots_sym_name = lowering.provider_callable_symbol_name(find_symbol_id(consumer_hir, "native_build_closure_roots_v1"), "native_build_closure_roots_v1")
+    val extern_sym_name = lowering.provider_callable_symbol_name(find_symbol_id(consumer_hir, "extern_helper"), "extern_helper")
+    val export_sym_name = lowering.provider_callable_symbol_name(find_symbol_id(consumer_hir, "export_helper"), "export_helper")
+    val global_sym_name = lowering.provider_callable_symbol_name(find_symbol_id(consumer_hir, "global_helper"), "global_helper")
+    val entry_sym_name = lowering.provider_callable_symbol_name(find_symbol_id(consumer_hir, "entry_helper"), "entry_helper")
+
+    val mir_mod = lowering.lower_module(consumer_hir)
+    env_set("SIMPLE_BOOTSTRAP", old_bootstrap)
+
+    val call_targets = collect_call_targets(mir_mod)
+
+    var unmangled_count = 0
+    for flag in origin_rows.unmangled_abis:
+        if flag:
+            unmangled_count = unmangled_count + 1
+
+    SurfaceLinkProbe(
+        transient_sym_name: transient_sym_name,
+        roots_sym_name: roots_sym_name,
+        extern_sym_name: extern_sym_name,
+        export_sym_name: export_sym_name,
+        global_sym_name: global_sym_name,
+        entry_sym_name: entry_sym_name,
+        call_targets: call_targets,
+        errors: lowering.errors.len(),
+        preserved_authoritative: preserved_authoritative,
+        qualified_member_link: qualified_member_link,
+        unmangled_flags_count: unmangled_count
+    )
+
+describe "surface-only provider callable link names":
+    it "resolves canonical module-qualified link names with std->lib folding under non-bootstrap lowering":
+        val probe = run_surface_link_probe()
+        expect(probe.errors).to_equal(0)
+        expect(probe.transient_sym_name).to_equal("lib.repro_transient.transient_scope_pause")
+        expect(probe.roots_sym_name).to_equal("app.repro_roots.native_build_closure_roots_v1")
+        expect(probe.qualified_member_link).to_equal("app.repro_box.Box.get_v")
+        expect(probe.call_targets).to_contain("lib.repro_transient.transient_scope_pause")
+        expect(probe.call_targets).to_contain("app.repro_roots.native_build_closure_roots_v1")
+
+    it "keeps bare ABI names for extern, @export(\"C\"), @global, and @entry surface callables":
+        val probe = run_surface_link_probe()
+        expect(probe.unmangled_flags_count).to_equal(3)
+        expect(probe.extern_sym_name).to_equal("extern_helper")
+        expect(probe.export_sym_name).to_equal("export_helper")
+        expect(probe.global_sym_name).to_equal("global_helper")
+        expect(probe.entry_sym_name).to_equal("entry_helper")
+        expect(probe.call_targets).to_contain("extern_helper")
+        expect(probe.call_targets).to_contain("export_helper")
+        expect(probe.call_targets).to_contain("global_helper")
+        expect(probe.call_targets).to_contain("entry_helper")
+
+    it "preserves authoritative HIR callable_link_names rows when surface rows are registered later":
+        val probe = run_surface_link_probe()
+        expect(probe.preserved_authoritative).to_equal("custom.authoritative.auth_fn")

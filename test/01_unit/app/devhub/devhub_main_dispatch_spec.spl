@@ -1,0 +1,65 @@
+# Purpose and audience: coverage evidence for the devhub (itf) CLI owners.
+# @req REQ-SSPEC-UNIT
+# src/app/devhub/main.spl had 0% line coverage (2026-11-13 measurement); these
+# examples drive the dispatcher and the global-log/launch-mode arg filters.
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use app.devhub.main.{handle_itf, _itf_is_global_log_arg, _itf_global_log_args, _itf_clean_global_log_args, _itf_clean_launch_mode_args}
+
+describe "handle_itf dispatch":
+    it "prints help and succeeds with no arguments":
+        step("dispatch an empty argv")
+        expect(handle_itf([])).to_equal(0)
+
+    it "succeeds for every help spelling":
+        step("dispatch -h, --help and help")
+        expect(handle_itf(["-h"])).to_equal(0)
+        expect(handle_itf(["--help"])).to_equal(0)
+        expect(handle_itf(["help"])).to_equal(0)
+
+    it "succeeds for both version spellings":
+        step("dispatch --version and version")
+        expect(handle_itf(["--version"])).to_equal(0)
+        expect(handle_itf(["version"])).to_equal(0)
+
+    it "returns 1 for an unknown command":
+        step("dispatch a verb no handler owns")
+        expect(handle_itf(["no-such-verb"])).to_equal(1)
+
+describe "global log arg recognition":
+    it "accepts bare and valued log flags and rejects ordinary words":
+        step("classify flags")
+        expect(_itf_is_global_log_arg("--json")).to_equal(true)
+        expect(_itf_is_global_log_arg("--quiet")).to_equal(true)
+        expect(_itf_is_global_log_arg("--log-mode=llm")).to_equal(true)
+        expect(_itf_is_global_log_arg("--progress=dots")).to_equal(true)
+        expect(_itf_is_global_log_arg("jira")).to_equal(false)
+        expect(_itf_is_global_log_arg("--jsonx")).to_equal(false)
+
+    it "collects only the leading global prefix including flag values":
+        step("prefix stops at the first command word")
+        val got = _itf_global_log_args(["--json", "--log-mode", "llm", "jira", "--quiet"])
+        expect(got).to_equal(["--json", "--log-mode", "llm"])
+
+    it "returns nothing when the argv starts with a command":
+        step("no prefix")
+        expect(_itf_global_log_args(["wiki", "--json"]).len()).to_equal(0)
+
+    it "strips the global prefix and keeps later flags for the subcommand":
+        step("clean argv")
+        val got = _itf_clean_global_log_args(["--surface", "tui", "--verbose", "jira", "list", "--json"])
+        expect(got).to_equal(["jira", "list", "--json"])
+
+describe "launch mode arg cleanup":
+    it "drops the two-token ordinary mode control":
+        step("--mode ordinary")
+        expect(_itf_clean_launch_mode_args(["--mode", "ordinary", "wiki"])).to_equal(["wiki"])
+
+    it "drops the single-token ordinary mode control":
+        step("--mode=ordinary")
+        expect(_itf_clean_launch_mode_args(["--mode=ordinary", "jira"])).to_equal(["jira"])
+
+    it "leaves other modes untouched":
+        step("--mode debug is not the launcher control")
+        expect(_itf_clean_launch_mode_args(["--mode", "debug", "wiki"])).to_equal(["--mode", "debug", "wiki"])

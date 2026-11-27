@@ -38,3 +38,32 @@ Next qualification must use a newly admitted producer with the codec fix and
 intact symbol IDs, retain fresh/warm cache identities, then establish actual
 returned fields and real case counts. Full CLI/TestRunner qualification and
 authenticated review admission remain required before this draft can land.
+
+## Verification pending (n88_b, 2026-11-04)
+
+The retained-HIR inspection above ties the failure to the frozen producer's old codec (fixed in source). Re-qualify on a stage3 producer:
+
+```
+bin/simple native-build --entry test/fixtures/compiler/source_change_contract_native.spl -o build/source_change_contract.exe && build/source_change_contract.exe
+```
+
+Expect SOURCE_CONTRACT_RETURN_INFERRED_OK and 16 SOURCE_CONTRACT_CASE_PASS. Source shape pinned by `bin/simple.exe test test/01_unit/compiler/80.driver/n88b_native_workaround_shapes_spec.spl`.
+
+## Re-qualified 2026-11-06 (WP2 reconcile lane)
+
+`source_change_contract_native.spl` native-built from current `release/1.0.0`
+with the seed (`bin/simple.exe native-build`, llc from `C:/msys64/clang64/bin`,
+`CC` = llvm-mingw clang) and ran clean: `SOURCE_CONTRACT_RETURN_INFERRED_OK`,
+16 x `SOURCE_CONTRACT_CASE_PASS`, `SOURCE_CONTRACT_RESULTS_PASS_16`, exit 0.
+The probe and `contracts_v1.spl` were correct; the historical failure was the
+frozen producer's old HIR codec (`put_i64` 3 encoded as nil), as the retained-HIR
+inspection above concluded. A fresh build on a sparse worktree additionally needs
+`llc` on PATH, `CC` set to the bootstrap clang, and `/tools/counterpart/` plus
+`/src/compositions/` checked out; without them the failures are `llc not found`,
+`Windows GNU linking requires bootstrap-owned clang through CC` and a missing
+`simple_counterpart_abi.h`, none of which are source-change defects.
+
+## WA-W2-3 Fixtures Audit (2026-11-26)
+- **Classification:** `ROOT-FIXED+RETIRED` (stale `# @workaround` tag on `test/fixtures/compiler/source_change_contract_native.spl:1`).
+- `source_change_contract_native.spl` already asserts `val inferred = source_contract_case_v1(0)` unconditionally alongside the `SourceChangeShapeV1` typed control, and `#7142` (`e61eb9c4a48` / `b6b3c251caa`) landed in `src/compiler`.
+- Retired the stale `# @workaround` marker on line 1 while preserving `SourceChangeShapeV1`, `SOURCE_CONTRACT_RETURN_INFERRED_OK`, and the paired inferred-vs-explicit contract checks (`n88b_native_workaround_shapes_spec.spl` compatibility preserved); verified clean HIR/MIR/LLVM lowering (`hir=0 mir=0 llvm=0 void=0`) on inferred two-module `source_contract_case_v1` and `b05_d.spl`.

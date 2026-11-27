@@ -1,0 +1,76 @@
+use std.spec.*
+use compiler.backend.runtime_object_cache_posix.{runtime_posix_cache_fingerprint_command_v1}
+use std.io_runtime.{host_os, file_write, dir_create_all, process_run}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+
+fn cache_fingerprint_fixture() -> text:
+    val root = secure_temp_dir("/tmp", "runtime-cache-spec-").unwrap()
+    expect(dir_create_all(root + "/runtime's source")).to_be(true)
+    file_write(root + "/runtime's source/one file.c", "int one = 1;\n")
+    file_write(root + "/runtime's source/one.h", "#define ONE 1\n")
+    root
+
+fn cache_fingerprint_command(root: text, flags: text) -> text:
+    runtime_posix_cache_fingerprint_command_v1(root + "/runtime's source", "/usr/bin/cc", flags, host_os())
+
+fn cache_fingerprint_run(command: text) -> (text, text, i64):
+    # Stock host tools only: a Homebrew/coreutils installation must not hide
+    # macOS's lack of sha256sum. The production helper chooses by host OS.
+    process_run("/usr/bin/env", ["PATH=/usr/bin:/bin", "/bin/sh", "-c", command])
+
+@when(os="macos"):
+describe "macOS runtime object fingerprint":
+    it "hashes quoted source names with stock tools and repeats the exact key":
+        val root = cache_fingerprint_fixture()
+        val command = cache_fingerprint_command(root, "profile=core;owner='c'")
+        val (first, first_err, first_code) = cache_fingerprint_run(command)
+        val (second, second_err, second_code) = cache_fingerprint_run(command)
+        expect(first_code).to_equal(0)
+        expect(second_code).to_equal(0)
+        expect(first_err).to_equal("")
+        expect(second_err).to_equal("")
+        expect(first.len()).to_equal(40)
+        for ch in first:
+            expect("0123456789abcdef".contains(ch)).to_be(true)
+        expect(second).to_equal(first)
+        expect(dir_remove(root, true)).to_be(true)
+
+    it "changes the key for source bytes, added headers and semantic flags":
+        val root = cache_fingerprint_fixture()
+        val command = cache_fingerprint_command(root, "profile=core")
+        val (initial, _, initial_code) = cache_fingerprint_run(command)
+        file_write(root + "/runtime's source/one file.c", "int one = 2;\n")
+        val (edited, _, edited_code) = cache_fingerprint_run(command)
+        file_write(root + "/runtime's source/two.h", "#define TWO 2\n")
+        val (added, _, added_code) = cache_fingerprint_run(command)
+        val (flags, _, flags_code) = cache_fingerprint_run(cache_fingerprint_command(root, "profile=full"))
+        expect([initial_code, edited_code, added_code, flags_code]).to_equal([0, 0, 0, 0])
+        expect(edited == initial).to_be(false)
+        expect(added == edited).to_be(false)
+        expect(flags == added).to_be(false)
+        expect(dir_remove(root, true)).to_be(true)
+
+    it "refuses absent sources, failed compiler identification and empty identification":
+        val root = cache_fingerprint_fixture()
+        val missing = runtime_posix_cache_fingerprint_command_v1(root + "/missing", "/usr/bin/cc", "flags", host_os())
+        val failed = runtime_posix_cache_fingerprint_command_v1(root + "/runtime's source", "/usr/bin/false", "flags", host_os())
+        val empty = runtime_posix_cache_fingerprint_command_v1(root + "/runtime's source", "/usr/bin/true", "flags", host_os())
+        for command in [missing, failed, empty]:
+            val (out, _, code) = cache_fingerprint_run(command)
+            expect(code == 0).to_be(false)
+            expect(out).to_equal("")
+        expect(dir_remove(root, true)).to_be(true)
+
+    it "refuses a source hash failure without a partial digest":
+        val root = cache_fingerprint_fixture()
+        expect(dir_create_all(root + "/tools")).to_be(true)
+        val tool = root + "/tools/shasum"
+        expect(file_write(tool, "#!/bin/sh\nexit 7\n")).to_be(true)
+        val (_, _, chmod_code) = process_run("/bin/chmod", ["700", tool])
+        expect(chmod_code).to_equal(0)
+        val (out, _, code) = process_run("/usr/bin/env", ["PATH=" + root + "/tools:/usr/bin:/bin", "/bin/sh", "-c", cache_fingerprint_command(root, "flags")])
+        expect(code == 0).to_be(false)
+        expect(out).to_equal("")
+        expect(dir_remove(root, true)).to_be(true)
+@end

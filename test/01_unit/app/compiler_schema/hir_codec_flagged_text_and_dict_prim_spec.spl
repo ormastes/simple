@@ -1,0 +1,350 @@
+"""
+Purpose: Regression coverage for the srfix5 HIR-cache codec fixes.
+
+1. `_text_presence_flag_of` + `_field_is_bare` keep `has_<field>`-flagged text fields
+   bare (`""`, never `Option<text>` / `nil`) in generated decoders such as
+   `hc_dec_hir_call_arg` (`HirCallArg.name`) and `specialization_of`.
+2. `_hc_enc_flagged_text` normalizes `!present` and `nil` to `""` and round-trips
+   `HirCallArg` without `Option` wrapping.
+3. Generated `prim_i64` dict keys use `var key_i64_{k}: i64 = 0` + `val dk{k}: i64 = key_i64_{k}`
+   and reject `"N"` with `nil_in_non_optional_dict_key`; generated `prim_bool` dict values
+   decode via `raw_dv == "1"` and reject `"N"` / non-`"0"`/`"1"`.
+"""
+# @cover src/app/compiler_schema/codec_gen.spl
+# @cover src/compiler/20.hir/generated/hir_codec.spl
+
+use std.spec.*
+use std.io_runtime.{cwd, file_read}
+use app.compiler_schema.codec_gen.{CodecUniverse, emit_codec_file}
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.hir_definitions.{HirCallArg, HirClass, HirExpr, HirExprKind, HirImpl}
+use compiler.hir.hir_types.{HirType, HirTypeKind, HirModule, SymbolTable}
+use compiler.hir.generated.hir_codec.{
+    hc_enc_hir_call_arg, hc_dec_hir_call_arg,
+    hc_enc_hir_class, hc_dec_hir_class,
+    hc_enc_hir_impl, hc_dec_hir_impl,
+    hc_enc_symbol_table, hc_dec_symbol_table,
+    hc_dec_hir_module
+}
+
+fn body_of(generated: text, fn_name: text) -> text:
+    val start = generated.index_of("fn " + fn_name + "(r: FlatPoolReader)")
+    if start < 0:
+        return ""
+    val rest = generated.substring(start, generated.len())
+    val stop = rest.index_of("\nfn hc_enc_")
+    if stop < 0:
+        return rest
+    rest.substring(0, stop)
+
+fn enc_body_of(generated: text, fn_name: text) -> text:
+    val start = generated.index_of("fn " + fn_name + "(w: HirCodecWriter")
+    if start < 0:
+        return ""
+    val rest = generated.substring(start, generated.len())
+    val stop = rest.index_of("\nfn hc_dec_")
+    if stop < 0:
+        return rest
+    rest.substring(0, stop)
+
+fn sample_call_arg(has_name: bool, name: text) -> HirCallArg:
+    val empty_span = Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0)
+    val err_type = HirType(kind: HirTypeKind.Error, span: empty_span)
+    val value_expr = HirExpr(
+        kind: HirExprKind.IntLit(value: 7, suffix: None),
+        has_type_: false,
+        type_: err_type,
+        span: empty_span
+    )
+    HirCallArg(has_name: has_name, name: name, value: value_expr, span: empty_span)
+
+fn hir_impl_wire_with_bool_dicts(is_array_rows: text, is_optional_rows: text) -> text:
+    var out = "0\n"             # type_ (absent)
+    out = out + "0\n"           # has_trait_
+    out = out + "0\n"           # trait_ (absent)
+    out = out + "0\n"           # type_params
+    out = out + "0\n"           # where_clause
+    out = out + "0\n"           # methods
+    out = out + "0\n"           # method_return_struct_names
+    out = out + is_array_rows   # method_return_is_array
+    out = out + is_optional_rows # method_return_is_optional
+    out = out + "0\n"           # assoc_type_impls
+    out = out + "0\n"           # cfg
+    out = out + "0\n"           # cfg_group
+    out = out + "-1\n"          # cfg_arm
+    out = out + "0\n"           # span (absent)
+    out
+
+fn symbol_table_wire(symbols_rows: text, scopes_rows: text, union_owner_rows: text) -> text:
+    var out = symbols_rows
+    out = out + scopes_rows
+    out = out + "0\n"               # current_scope (absent -> placeholder)
+    out = out + "0\n"               # next_symbol_id
+    out = out + "1\n"               # next_scope_id
+    out = out + "0\n"               # gpu_function_targets
+    out = out + "0\n"               # gpu_function_backend_orders
+    out = out + "0\n"               # qualified_functions
+    out = out + "0\n"               # qualified_types
+    out = out + "0\n"               # exact_symbols
+    out = out + "0\n"               # module_callables
+    out = out + "0\n"               # root_scope_symbols
+    out = out + "0\n"               # structural_union_symbols
+    out = out + union_owner_rows
+    out
+
+fn hir_module_wire_with_provenance(provenance_rows: text) -> text:
+    var out = "m\nm.spl\n"
+    out = out + "0\n0\n0\n0\n0\n" # imports, exports, domain_blocks, symbols, functions
+    out = out + "0\n0\n0\n0\n0\n" # gpu_function_targets..enums
+    out = out + "0\n0\n0\n0\n0\n" # bitfields..static_asserts
+    out = out + "0\n0\n0\n0\n0\n" # aop_advices..types
+    out = out + "0\n0\n0\n0\n0\n" # extend_enums..nogc_param_effect_symbol_ids
+    out = out + "0\n0\n"          # nogc_param_effects, attr_sites
+    out = out + provenance_rows
+    out = out + "0\n"             # imported_layouts
+    out
+
+describe "HIR codec flagged text fields and prim_i64/prim_bool dictionaries":
+    """Verifies bare flagged-text handling and prim_i64/prim_bool dict codecs."""
+    it "emits bare flagged text encode/decode and typed prim_i64/prim_bool dict decoders":
+        val gen_src = file_read("src/app/compiler_schema/codec_gen.spl")
+        expect(gen_src).to_contain("fn _text_presence_flag_of(")
+        expect(gen_src).to_contain("if _text_presence_flag_of(u, decl, f) != \"\":")
+        expect(gen_src).to_contain("fn _hc_enc_flagged_text(w: HirCodecWriter, present: bool, v: text):")
+
+        val generated = emit_codec_file(CodecUniverse.load(cwd()))
+        expect(generated).to_contain("fn _hc_enc_flagged_text(w: HirCodecWriter, present: bool, v: text):")
+
+        val call_arg_dec = body_of(generated, "hc_dec_hir_call_arg")
+        expect(call_arg_dec).to_contain("val f_name = if raw1 == \"\\\\N\": \"\" else: flat_pool_unescape(raw1)")
+        expect(call_arg_dec.contains("var f_name: text?")).to_equal(false)
+        expect(call_arg_dec.contains("if raw1 == \"\\\\N\": nil")).to_equal(false)
+
+        val call_arg_enc = enc_body_of(generated, "_hc_enc_hir_call_arg_body")
+        expect(call_arg_enc).to_contain("_hc_enc_flagged_text(w, node.has_name, node.name)")
+
+        for fn_name in ["hc_dec_hir_class", "hc_dec_hir_struct", "hc_dec_hir_enum", "hc_dec_hir_trait"]:
+            val dec = body_of(generated, fn_name)
+            expect(dec).to_contain("val f_specialization_of = if raw")
+            expect(dec).to_contain("== \"\\\\N\": \"\" else: flat_pool_unescape(")
+            expect(dec.contains("var f_specialization_of: text?")).to_equal(false)
+            expect(dec.contains("f_specialization_of = if raw")).to_equal(true)
+
+        for enc_name in ["_hc_enc_hir_class_body", "_hc_enc_hir_struct_body", "_hc_enc_hir_enum_body", "_hc_enc_hir_trait_body"]:
+            val enc = enc_body_of(generated, enc_name)
+            expect(enc).to_contain("_hc_enc_flagged_text(w, node.has_specialization_of, node.specialization_of)")
+            expect(enc).to_contain("_hc_enc_flagged_text(w, node.has_doc_comment, node.doc_comment)")
+
+        val sym_dec = body_of(generated, "hc_dec_symbol_table")
+        expect(sym_dec).to_contain("var key_i64_0: i64 = 0")
+        expect(sym_dec).to_contain("r.reject_malformed(\"nil_in_non_optional_dict_key\")")
+        expect(sym_dec).to_contain("val dk0: i64 = key_i64_0")
+        expect(sym_dec.contains("var parsed_dk")).to_equal(false)
+
+        val impl_dec = body_of(generated, "hc_dec_hir_impl")
+        expect(impl_dec).to_contain("val dv8: bool = raw_dv8 == \"1\"")
+        expect(impl_dec).to_contain("r.reject_malformed(\"nil_in_non_optional_scalar\")")
+        expect(impl_dec).to_contain("r.reject_malformed(\"bool_dictionary_value\")")
+
+        val mod_dec = body_of(generated, "hc_dec_hir_module")
+        expect(mod_dec).to_contain("var key_i64_37: i64 = 0")
+        expect(mod_dec).to_contain("val dk37: i64 = key_i64_37")
+        expect(mod_dec).to_contain("val dv37: bool = raw_dv37 == \"1\"")
+        expect(mod_dec.contains("var parsed_dk")).to_equal(false)
+
+    it "encodes absent/nil flagged text as empty and round-trips HirCallArg without Option wrapping":
+        # Raw wire `\\N` in HirCallArg.name decodes to bare "", never nil.
+        var wire_reader = FlatPoolReader.new("0\n\\N\n0\n0\n")
+        val decoded_wire = hc_dec_hir_call_arg(wire_reader)
+        expect(wire_reader.ok).to_equal(true)
+        expect(decoded_wire.has_name).to_equal(false)
+        expect(decoded_wire.name).to_equal("")
+        expect(decoded_wire.name != nil).to_equal(true)
+
+        # !present with nil name encodes cleanly as "" and round-trips cleanly.
+        val nil_absent = sample_call_arg(false, nil)
+        var w1 = HirCodecWriter.create()
+        hc_enc_hir_call_arg(w1, nil_absent)
+        expect(w1.ok).to_equal(true)
+        val wire1 = w1.finish()
+        expect(wire1.contains("\\N")).to_equal(false)
+        var r1 = FlatPoolReader.new(wire1)
+        val dec1 = hc_dec_hir_call_arg(r1)
+        expect(r1.ok).to_equal(true)
+        expect(dec1.has_name).to_equal(false)
+        expect(dec1.name).to_equal("")
+        expect(dec1.name != nil).to_equal(true)
+        var w1_again = HirCodecWriter.create()
+        hc_enc_hir_call_arg(w1_again, dec1)
+        expect(w1_again.ok).to_equal(true)
+        expect(w1_again.finish()).to_equal(wire1)
+
+        # present with nil name normalizes to "" without poisoning writer.
+        val nil_present = sample_call_arg(true, nil)
+        var w2 = HirCodecWriter.create()
+        hc_enc_hir_call_arg(w2, nil_present)
+        expect(w2.ok).to_equal(true)
+        var r2 = FlatPoolReader.new(w2.finish())
+        val dec2 = hc_dec_hir_call_arg(r2)
+        expect(r2.ok).to_equal(true)
+        expect(dec2.has_name).to_equal(true)
+        expect(dec2.name).to_equal("")
+
+        # !present with stale non-empty name normalizes to "" on encode.
+        val stale_absent = sample_call_arg(false, "stale_arg")
+        var w3 = HirCodecWriter.create()
+        hc_enc_hir_call_arg(w3, stale_absent)
+        expect(w3.ok).to_equal(true)
+        var r3 = FlatPoolReader.new(w3.finish())
+        val dec3 = hc_dec_hir_call_arg(r3)
+        expect(r3.ok).to_equal(true)
+        expect(dec3.has_name).to_equal(false)
+        expect(dec3.name).to_equal("")
+
+        # present with real name preserves exact text across round-trip.
+        val named = sample_call_arg(true, "count")
+        var w4 = HirCodecWriter.create()
+        hc_enc_hir_call_arg(w4, named)
+        expect(w4.ok).to_equal(true)
+        val wire4 = w4.finish()
+        var r4 = FlatPoolReader.new(wire4)
+        val dec4 = hc_dec_hir_call_arg(r4)
+        expect(r4.ok).to_equal(true)
+        expect(dec4.has_name).to_equal(true)
+        expect(dec4.name).to_equal("count")
+        var w4_again = HirCodecWriter.create()
+        hc_enc_hir_call_arg(w4_again, dec4)
+        expect(w4_again.finish()).to_equal(wire4)
+
+    it "keeps HirClass specialization_of and doc_comment bare across nil encode and round-trip":
+        val parsed = parse_full_frontend("class Box:\n    value: i64\n", "box.spl", "box", Logger(level: 0))
+        var lowering = HirLowering.with_filename("box.spl")
+        val hm = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        val cls_keys = hm.classes.keys()
+        expect(cls_keys.len()).to_equal(1)
+        var cls: HirClass = hm.classes[cls_keys[0]]
+        cls.has_doc_comment = false
+        cls.doc_comment = nil
+        cls.has_specialization_of = false
+        cls.specialization_of = nil
+
+        var w = HirCodecWriter.create()
+        hc_enc_hir_class(w, cls)
+        expect(w.ok).to_equal(true)
+        val wire = w.finish()
+        var r = FlatPoolReader.new(wire)
+        val dec = hc_dec_hir_class(r)
+        expect(r.ok).to_equal(true)
+        expect(dec.has_doc_comment).to_equal(false)
+        expect(dec.doc_comment).to_equal("")
+        expect(dec.doc_comment != nil).to_equal(true)
+        expect(dec.has_specialization_of).to_equal(false)
+        expect(dec.specialization_of).to_equal("")
+        expect(dec.specialization_of != nil).to_equal(true)
+
+    it "handles prim_i64 dict keys and rejects N with nil_in_non_optional_dict_key":
+        # SymbolTable.symbols N key rejection
+        var r_sym_nil = FlatPoolReader.new(symbol_table_wire("1\nN\n0\n", "0\n", "0\n"))
+        val _st1 = hc_dec_symbol_table(r_sym_nil)
+        expect(r_sym_nil.ok).to_equal(false)
+        expect(r_sym_nil.failure_kind).to_equal("malformed")
+        expect(r_sym_nil.failure_detail).to_equal("nil_in_non_optional_dict_key")
+
+        # SymbolTable.structural_union_owners N key rejection and key 3 round-trip
+        var r_owner_nil = FlatPoolReader.new(symbol_table_wire("0\n", "0\n", "1\nN\nOwner\n"))
+        val _st2 = hc_dec_symbol_table(r_owner_nil)
+        expect(r_owner_nil.ok).to_equal(false)
+        expect(r_owner_nil.failure_detail).to_equal("nil_in_non_optional_dict_key")
+
+        var st = SymbolTable.new()
+        st.structural_union_owners[3] = "UnionOwner"
+        st.structural_union_owners[42] = "OtherOwner"
+        var ws = HirCodecWriter.create()
+        hc_enc_symbol_table(ws, st)
+        expect(ws.ok).to_equal(true)
+        var rs = FlatPoolReader.new(ws.finish())
+        val dec_st = hc_dec_symbol_table(rs)
+        expect(rs.ok).to_equal(true)
+        expect(dec_st.structural_union_owners.contains_key(3)).to_equal(true)
+        expect(dec_st.structural_union_owners[3]).to_equal("UnionOwner")
+        expect(dec_st.structural_union_owners[42]).to_equal("OtherOwner")
+
+        # HirModule.local_annotation_provenance N key rejection + valid key 3 & bool round-trip
+        var rm_nil_key = FlatPoolReader.new(hir_module_wire_with_provenance("1\nN\n1\n"))
+        val _m1 = hc_dec_hir_module(rm_nil_key)
+        expect(rm_nil_key.ok).to_equal(false)
+        expect(rm_nil_key.failure_kind).to_equal("malformed")
+        expect(rm_nil_key.failure_detail).to_equal("nil_in_non_optional_dict_key")
+
+        var rm_ok = FlatPoolReader.new(hir_module_wire_with_provenance("2\n3\n1\n9\n0\n"))
+        val m_ok = hc_dec_hir_module(rm_ok)
+        expect(rm_ok.ok).to_equal(true)
+        expect(m_ok.local_annotation_provenance[3]).to_equal(true)
+        expect(m_ok.local_annotation_provenance[9]).to_equal(false)
+
+    it "handles prim_bool dict values and rejects N or non-0/1 tokens":
+        val empty_span = Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0)
+        val err_type = HirType(kind: HirTypeKind.Error, span: empty_span)
+        val imp = HirImpl(
+            type_: err_type,
+            has_trait_: false,
+            trait_: err_type,
+            type_params: [],
+            where_clause: [],
+            methods: {},
+            method_return_struct_names: {},
+            method_return_is_array: {"items": true, "count": false},
+            method_return_is_optional: {"find": true, "id": false},
+            assoc_type_impls: [],
+            cfg: [],
+            cfg_group: 0,
+            cfg_arm: -1,
+            span: empty_span
+        )
+        var wi = HirCodecWriter.create()
+        hc_enc_hir_impl(wi, imp)
+        expect(wi.ok).to_equal(true)
+        val imp_wire = wi.finish()
+        var ri = FlatPoolReader.new(imp_wire)
+        val dec_imp = hc_dec_hir_impl(ri)
+        expect(ri.ok).to_equal(true)
+        expect(dec_imp.method_return_is_array["items"]).to_equal(true)
+        expect(dec_imp.method_return_is_array["count"]).to_equal(false)
+        expect(dec_imp.method_return_is_optional["find"]).to_equal(true)
+        expect(dec_imp.method_return_is_optional["id"]).to_equal(false)
+        var wi_again = HirCodecWriter.create()
+        hc_enc_hir_impl(wi_again, dec_imp)
+        expect(wi_again.finish()).to_equal(imp_wire)
+
+        # Reject "N" in HirImpl bool dict value
+        var ri_nil = FlatPoolReader.new(hir_impl_wire_with_bool_dicts("1\nitems\nN\n", "0\n"))
+        val _d1 = hc_dec_hir_impl(ri_nil)
+        expect(ri_nil.ok).to_equal(false)
+        expect(ri_nil.failure_kind).to_equal("malformed")
+        expect(ri_nil.failure_detail).to_equal("nil_in_non_optional_scalar")
+
+        # Reject non-"0"/"1" in HirImpl bool dict value
+        var ri_bad = FlatPoolReader.new(hir_impl_wire_with_bool_dicts("0\n", "1\nfind\ntrue\n"))
+        val _d2 = hc_dec_hir_impl(ri_bad)
+        expect(ri_bad.ok).to_equal(false)
+        expect(ri_bad.failure_kind).to_equal("malformed")
+        expect(ri_bad.failure_detail).to_equal("bool_dictionary_value")
+
+        # Reject "N" and "2" in HirModule.local_annotation_provenance bool dict value
+        var rm_nil_val = FlatPoolReader.new(hir_module_wire_with_provenance("1\n3\nN\n"))
+        val _m2 = hc_dec_hir_module(rm_nil_val)
+        expect(rm_nil_val.ok).to_equal(false)
+        expect(rm_nil_val.failure_detail).to_equal("nil_in_non_optional_scalar")
+
+        var rm_bad_val = FlatPoolReader.new(hir_module_wire_with_provenance("1\n3\n2\n"))
+        val _m3 = hc_dec_hir_module(rm_bad_val)
+        expect(rm_bad_val.ok).to_equal(false)
+        expect(rm_bad_val.failure_detail).to_equal("bool_dictionary_value")

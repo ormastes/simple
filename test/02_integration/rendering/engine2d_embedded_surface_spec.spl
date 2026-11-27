@@ -65,6 +65,7 @@ use common.ui.draw_ir.{
     draw_ir_embedding_config,
     draw_ir_image_command,
     draw_ir_rect,
+    draw_ir_style_prop,
     draw_ir_text,
     draw_ir_text_resolved_font
 }
@@ -77,6 +78,9 @@ use common.ui.window_scene.{
     simple_gui_internal_window_scene,
     wm_content_frame_checksum
 }
+use common.ui.generated.fluid_light_theme_snapshot.{fluid_light_theme_render_snapshot}
+use common.ui.wm_chrome_theme.{apply_theme_render_snapshot_to_wm_chrome, reset_wm_chrome_theme, wm_chrome_theme}
+use common.ui.theme_draw_ir_material.{theme_draw_ir_surface_command_color}
 use common.ui.window_scene_draw_ir.{
     shared_wm_content_frame_image_uri,
     shared_wm_scene_draw_ir_composition_with_content
@@ -85,6 +89,31 @@ use common.ui.window_scene_draw_ir.{
 val BG: u32 = rgb(0, 0, 0)
 val RED: u32 = rgb(255, 0, 0)
 val GREEN: u32 = rgb(0, 255, 0)
+
+# In the fixed 160x120 scene the taskbar clock (wm-taskbar-objects command
+# "taskbar-clock", text "09:41", box (108,90) 36x12) paints over the
+# window's content box from row 94 down (x 108..125, y 94..102), so the
+# content-frame evidence covers rows 68..93 of the 112-wide box.
+val WM_CLOCK_TOP: i32 = 94
+
+fn wm_content_region_evidence(pixels: [u32], content_w: i32) -> i32:
+    var green = 0
+    var y = 68
+    while y < WM_CLOCK_TOP:
+        var x = 14
+        while x < 14 + content_w:
+            if pixels[y * 160 + x] == GREEN:
+                green = green + 1
+            x = x + 1
+        y = y + 1
+    green
+
+fn magenta_pixel_count(pixels: [u32]) -> i32:
+    var count = 0
+    for pixel in pixels:
+        if pixel == 0xFFFF00FFu32:
+            count = count + 1
+    count
 
 # @manual_section: engine2d embedded render surface
 describe "Engine2D embedded render surface":
@@ -164,11 +193,12 @@ describe "Engine2D embedded render surface":
             val result = engine2d_draw_ir_adv_batch(engine, batch, false)
             val p = result.pixels[1 * 4 + 1]
 
-            # Opaque RED (alpha 255) scaled by opacity_milli=500 -> alpha 127,
-            # then Porter-Duff src-over onto opaque BG (black): the integer
-            # math resolves to exactly rgba(127, 0, 0, 255) — ~50% red.
+            # Opaque RED (alpha 255) scaled by opacity_milli=500 rounds to alpha
+            # 128 (Chrome: alpha = round(0.5*255); its opacity:0.5 red over white
+            # paints ff7f7f, which needs alpha 128), then src-over onto opaque
+            # black: round(255*128/255) = 128 -> rgba(128, 0, 0, 255).
             expect(color_a(p)).to_equal(255)  # oracle: src-over onto an opaque background yields an opaque pixel
-            expect(color_r(p)).to_equal(127)  # oracle: alpha 255 scaled by opacity_milli 500 truncates to 127
+            expect(color_r(p)).to_equal(128)  # oracle: alpha 255 scaled by opacity_milli 500 rounds to 128
             expect(color_g(p)).to_equal(0)  # oracle: pure red contributes no green channel
             expect(color_b(p)).to_equal(0)  # oracle: pure red contributes no blue channel
             engine.shutdown()
@@ -177,16 +207,26 @@ describe "Engine2D embedded render surface":
             # @req REQ-EMBEDSURF-004
             # @capture(gui_image): canonical WM window composition sample retained
             step("Build the canonical WM scene dispatch it on CPU Vulkan and Metal and compare the compositions")
+            # No theme package installed: window_scene_draw_ir emits its
+            # documented no-package stream (plain rects, shadow first). The themed
+            # stream production bootstraps install is covered by the next example.
+            # The chrome theme is process-global, so clear it explicitly.
+            reset_wm_chrome_theme()
             val window = simple_gui_internal_window("surf", "win", 1u64, "app", "One", 10, 36, 120, 80, "", false, false, 1)
             val scene = simple_gui_internal_window_scene(160, 120, DRAW_IR_BACKEND_GPU, [window])
             val taskbar = empty_taskbar_model()
-            val content_pixels: [u32] = [GREEN; 120 * 52]
+            # Content rect rule (_shared_wm_scene_window_content_rect, and the
+            # compositor's attach check): (x+4, y+32, w-8, h-36) = 112x44 at (14,68).
+            val content_w = 120 - 8
+            val content_h = 80 - 36
+            val content_pixels: [u32] = [GREEN; content_w * content_h]
             val frame = WmContentFrame(window_id: "win", scene_revision: 7, content_revision: 1,
-                origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 120, height: 52,
+                origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: content_w, height: content_h,
                 pixels: content_pixels, checksum: wm_content_frame_checksum(content_pixels),
                 parent_window_id: "", offset_x: 0, offset_y: 0)
             val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar, [frame], DRAW_IR_BACKEND_GPU, 1000, "09:41", 0)
-            val content_image = engine2d_resolved_draw_ir_image(shared_wm_content_frame_image_uri(frame), 120, 52, content_pixels)
+            val content_image = engine2d_resolved_draw_ir_image(shared_wm_content_frame_image_uri(frame), content_w, content_h, content_pixels)
+            val chrome = wm_chrome_theme()
             var window_batches = 0
             var content_batches = 0
             for batch in composition.batches:
@@ -196,14 +236,20 @@ describe "Engine2D embedded render surface":
                     expect(batch.embedding.y).to_equal(36)  # oracle: the canonical window sits at y=36 below the titlebar
                     expect(batch.embedding.width).to_equal(125)  # oracle: the window body embeds 120 wide plus the 5px shadow margin
                     expect(batch.embedding.height).to_equal(84)  # oracle: the window body embeds 80 high plus the 4px shadow margin
-                    expect(batch.embedding.opacity_milli).to_equal(930)  # oracle: the canonical translucent window carries 930 milli opacity
+                    expect(batch.embedding.opacity_milli).to_equal(930)  # oracle: the unfocused window's translucency is its 930 milli embedding opacity
                     expect(batch.embedding.clip).to_be(true)
+                    expect(batch.commands[0].component_id).to_equal("win-shadow")  # oracle: the no-package stream paints the drop shadow first
                     expect(batch.commands[0].kind).to_equal(DRAW_IR_COMMAND_RECT)
-                    expect((batch.commands[0].color >> 24) & 0xFFu32).to_equal(0x33u32)  # oracle: the window body color carries alpha 0x33
-                    expect(batch.commands[1].width).to_equal(120)  # oracle: the content command spans the window's 120px client width
-                    expect(batch.commands[1].height).to_equal(80)  # oracle: the content command spans the window's 80px client height
-                    expect(batch.commands[1].hit_rect.width).to_equal(120)  # oracle: the hit rect matches the client width
-                    expect(batch.commands[1].hit_rect.height).to_equal(80)  # oracle: the hit rect matches the client height
+                    expect(batch.commands[0].color).to_equal(chrome.window_shadow)  # oracle: shadow color comes from the chrome theme (default 0x28000000)
+                    var body_found = 0
+                    for command in batch.commands:
+                        if command.component_id == "win-body":
+                            body_found = body_found + 1
+                            expect(command.kind).to_equal(DRAW_IR_COMMAND_RECT)
+                            expect(command.width).to_equal(120)  # oracle: the body spans the 120px window width
+                            expect(command.height).to_equal(80)  # oracle: the body spans the 80px window height
+                            expect(command.color).to_equal(chrome.host_window_body)  # oracle: body color comes from the chrome theme
+                    expect(body_found).to_equal(1)
                     var resolved_text = 0
                     for command in batch.commands:
                         if command.kind == DRAW_IR_COMMAND_TEXT and command.computed_style.len() > 0:
@@ -211,10 +257,10 @@ describe "Engine2D embedded render surface":
                     expect(resolved_text).to_be_greater_than(0)  # oracle: the canonical window must emit at least one font-resolved text command
                 if batch.batch_id == "content-win":
                     content_batches = content_batches + 1
-                    expect(batch.embedding.x).to_equal(10)  # oracle: the content frame shares the window's x=10 origin
-                    expect(batch.embedding.y).to_equal(64)  # oracle: the content frame sits at y=64 below the 28px titlebar
-                    expect(batch.embedding.width).to_equal(120)  # oracle: the content frame is the full 120px client width
-                    expect(batch.embedding.height).to_equal(52)  # oracle: the content frame is the full 52px client height
+                    expect(batch.embedding.x).to_equal(14)  # oracle: the content frame starts inside the 4px window border
+                    expect(batch.embedding.y).to_equal(68)  # oracle: the content frame starts 32px below the window top
+                    expect(batch.embedding.width).to_equal(content_w)
+                    expect(batch.embedding.height).to_equal(content_h)
                     expect(batch.commands.len()).to_equal(1)  # oracle: a content frame batch is exactly one image command
                     expect(batch.commands[0].kind).to_equal(DRAW_IR_COMMAND_IMAGE)
                     expect(batch.commands[0].image_uri).to_equal(content_image.image_uri)
@@ -235,6 +281,8 @@ describe "Engine2D embedded render surface":
             expect(color_g(shadow_pixel)).to_be_less_than(color_g(after_shadow))
             expect(color_b(shadow_pixel)).to_be_less_than(color_b(after_shadow))
             expect(after_shadow).to_equal(scene.background.color)
+            expect(wm_content_region_evidence(expected.pixels, content_w)).to_equal(content_w * (WM_CLOCK_TOP - 68))
+            expect(magenta_pixel_count(expected.pixels)).to_equal(0)  # oracle: the fail-closed invalid-content placeholder is never drawn
             match Engine2D.create_requested_backend(160, 120, "vulkan"):
                 Err(reason):
                     expect(reason.len()).to_be_greater_than(0)  # oracle: a failed backend request must state why
@@ -263,7 +311,10 @@ describe "Engine2D embedded render surface":
                                 expect(alpha_result.fallback_required).to_be(false)
                                 expect(alpha_result.readback_source).to_equal("device_readback")
                                 expect(alpha_result.backend_handle).to_be_greater_than(0)  # oracle: a device readback carries a live backend handle
-                                expect(alpha_result.pixels[0]).to_equal(0x33330000u32)  # oracle: alpha src-over onto the opaque 2x2 red clear yields exactly alpha 0x33 red
+                                # Engine2D stores straight-alpha ARGB: the first rect clears the
+                                # transparent child to exactly 0x33FF0000. Composited onto an
+                                # opaque black parent, CPU, NVIDIA and llvmpipe all give 0xFF330000.
+                                expect(alpha_result.pixels[0]).to_equal(0x33FF0000u32)
                                 child.shutdown()
                                 expect(parent.session.ref_count).to_equal(refs_before)
                     val result = engine2d_draw_ir_adv_fresh_device_composition_with_images(engine, composition, [content_image])
@@ -309,6 +360,67 @@ describe "Engine2D embedded render surface":
                     expect(result.pixels).to_equal(expected.pixels)
                     engine.shutdown()
             cpu.shutdown()
+
+        it "composites the themed WM window that production bootstraps install":
+            # @req REQ-EMBEDSURF-004
+            step("Install the default fluid_light snapshot, check the themed chrome stream, and composite it")
+            # host_wm_theme_bootstrap installs the registry default (fluid_light)
+            # and simpleos_wm_theme_bootstrap installs the generated fluid_light
+            # snapshot before the first frame, so this is the stream users see.
+            val chrome_snapshot = fluid_light_theme_render_snapshot()
+            apply_theme_render_snapshot_to_wm_chrome(chrome_snapshot)
+            val window = simple_gui_internal_window("surf", "win", 1u64, "app", "One", 10, 36, 120, 80, "", false, false, 1)
+            val scene = simple_gui_internal_window_scene(160, 120, DRAW_IR_BACKEND_GPU, [window])
+            val taskbar = empty_taskbar_model()
+            val content_w = 120 - 8
+            val content_h = 80 - 36
+            val content_pixels: [u32] = [GREEN; content_w * content_h]
+            val frame = WmContentFrame(window_id: "win", scene_revision: 7, content_revision: 1,
+                origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: content_w, height: content_h,
+                pixels: content_pixels, checksum: wm_content_frame_checksum(content_pixels),
+                parent_window_id: "", offset_x: 0, offset_y: 0)
+            val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar, [frame], DRAW_IR_BACKEND_GPU, 1000, "09:41", 0)
+            val content_image = engine2d_resolved_draw_ir_image(shared_wm_content_frame_image_uri(frame), content_w, content_h, content_pixels)
+            var window_batches = 0
+            var content_batches = 0
+            for batch in composition.batches:
+                if batch.batch_id == "window-win":
+                    window_batches = window_batches + 1
+                    expect(batch.embedding.opacity_milli).to_equal(930)  # oracle: the unfocused window's translucency is its 930 milli embedding opacity
+                    expect(batch.commands[0].component_id).to_equal("win-body")  # oracle: the themed body paints first, under the titlebar
+                    val body = batch.commands[0]
+                    expect(body.kind).to_equal(DRAW_IR_COMMAND_RECT)
+                    expect(body.width).to_equal(120)
+                    expect(body.height).to_equal(80)
+                    expect(body.hit_rect.width).to_equal(120)  # oracle: the themed body carries the window hit rect
+                    expect(body.hit_rect.height).to_equal(80)
+                    expect(body.color).to_equal(theme_draw_ir_surface_command_color(chrome_snapshot, false, "body", DRAW_IR_BACKEND_GPU))  # oracle: body color comes from the installed theme's surface authority
+                    expect(body.computed_style.len()).to_be_greater_than(0)  # oracle: themed chrome carries resolved style
+                    var titlebar_found = 0
+                    for command in batch.commands:
+                        if command.component_id == "win-titlebar":
+                            titlebar_found = titlebar_found + 1
+                            expect(command.width).to_equal(120)
+                            expect(command.height).to_equal(28)  # oracle: the titlebar is 28px high
+                    expect(titlebar_found).to_equal(1)
+                if batch.batch_id == "content-win":
+                    content_batches = content_batches + 1
+                    expect(batch.embedding.x).to_equal(14)
+                    expect(batch.embedding.y).to_equal(68)
+                    expect(batch.commands.len()).to_equal(1)
+                    expect(batch.commands[0].kind).to_equal(DRAW_IR_COMMAND_IMAGE)
+                    expect(batch.commands[0].image_uri).to_equal(content_image.image_uri)
+            expect(window_batches).to_equal(1)
+            expect(content_batches).to_equal(1)
+            var cpu = Engine2D.create_with_backend(160, 120, "cpu")
+            val expected = engine2d_draw_ir_adv_composition_with_images(cpu, composition, false, [content_image])
+            expect(expected.skipped_command_count).to_equal(0)
+            expect(wm_content_region_evidence(expected.pixels, content_w)).to_equal(content_w * (WM_CLOCK_TOP - 68))
+            expect(magenta_pixel_count(expected.pixels)).to_equal(0)
+            # The strict fresh-device arm for this stream lives in
+            # engine2d_themed_wm_fresh_device_spec.spl.
+            cpu.shutdown()
+            reset_wm_chrome_theme()
 
         it "nested embedding depth 2: an embedded surface can itself display another embedded render's output":
             # @req REQ-EMBEDSURF-005
@@ -443,7 +555,10 @@ describe "Engine2D embedded render surface":
             val scaled_blend_image = engine2d_resolved_draw_ir_image("image://scaled-blend", 2, 1, [half_source, zero_source])
             var scaled_blend_full_cpu = Engine2D.create_with_backend(3, 1, "cpu")
             val scaled_blend_full_result = engine2d_draw_ir_adv_composition_with_images(scaled_blend_full_cpu, scaled_blend_full_composition, false, [scaled_blend_image])
-            expect(scaled_blend_full_result.pixels).to_equal([rgba(120, 70, 49, 255), rgba(120, 70, 49, 255), blend_bg])
+            # Chrome image rule (2026-11-17): b = round(40*128/255) +
+            # (60*127+127)/255 = 20 + 30 = 50 (exact 49.96); the truncating rule
+            # gave 49. r and g are unchanged (110+10, 50+20).
+            expect(scaled_blend_full_result.pixels).to_equal([rgba(120, 70, 50, 255), rgba(120, 70, 50, 255), blend_bg])
             scaled_blend_full_cpu.shutdown()
 
             step("Scale transparent IMAGE pixels through Vulkan src-over with CPU-oracle parity")
@@ -457,7 +572,7 @@ describe "Engine2D embedded render surface":
                 draw_ir_batch("batch-scaled-blend-root", "gpu", scaled_blend_root, [draw_ir_rect("scaled-blend-root-background", 0, 0, 4, 1, BG)]),
                 scaled_blend_batch
             ])
-            val scaled_blend_oracle = [BG, rgba(120, 70, 49, 255), rgba(120, 70, 49, 255), blend_bg]
+            val scaled_blend_oracle = [BG, rgba(120, 70, 50, 255), rgba(120, 70, 50, 255), blend_bg]
             var scaled_blend_cpu = Engine2D.create_with_backend(4, 1, "cpu")
             val scaled_blend_expected = engine2d_draw_ir_adv_fresh_device_composition_with_images(scaled_blend_cpu, scaled_blend_composition, [scaled_blend_image])
             expect(scaled_blend_expected.pixels).to_equal(scaled_blend_oracle)
@@ -611,9 +726,15 @@ describe "Engine2D embedded render surface":
             # @capture(statistics): mixed-composition rejection counters retained
             step("Submit a composition mixing device image and mirror rect and require the typed rejection")
             val embedding = draw_ir_embedding_config("surf-mixed", "win-mixed", 0, 0, 2, 1, 0, 1000, true)
+            # A style-free translucent rect over this opaque image now blends on
+            # the device byte-identically to CPU (NVIDIA GB10 and llvmpipe), so
+            # the off-device half of the mix is a rounded (masked) translucent
+            # rect, which still has no checked device path.
+            var masked_rect = draw_ir_rect("mixed-rect", 0, 0, 1, 1, rgba(255, 0, 0, 128))
+            masked_rect.computed_style = [draw_ir_style_prop("border-radius", "1px")]
             val batch = draw_ir_batch("batch-mixed", "gpu", embedding, [
                 draw_ir_image_command("mixed-image", 0, 0, 2, 1, "image://mixed", []),
-                draw_ir_rect("mixed-rect", 0, 0, 1, 1, rgba(255, 0, 0, 128))
+                masked_rect
             ])
             val composition = draw_ir_composition("mixed-composition", "mixed-scene", "gpu", [batch])
             val image = engine2d_resolved_draw_ir_image("image://mixed", 2, 1, [GREEN, GREEN])

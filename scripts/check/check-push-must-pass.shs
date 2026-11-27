@@ -19,13 +19,55 @@ ALLOW_UNPROMOTED_LEDGER=0
 MUST_CHECK_CONFLICT_UNION_DONE=0
 RUNTIME_API_EXPECT_REMOVALS=${MUST_CHECK_EXPECT_RUNTIME_API_REMOVALS:-}
 EVIDENCE_REV=""
-MUST_CHECK_PUSH_BUDGET_S=${MUST_CHECK_PUSH_BUDGET_S:-10}
+# Default blocking budget: 10s on an idle Linux host, scaled by a host factor
+# so a slow-but-correct gate is not turned into an ERROR by host speed alone.
+# The budget only bounds wall time -- it never changes any gate's verdict.
+# Measured 2026-10-24 on the 80-thread Windows host: push-tree-size alone
+# 8.0-11.4s and push-stage2-parent-runtime-inheritance 5.1-5.8s (git process
+# spawn is several times slower under MSYS), so every push ERRORed at 10s and
+# agents exported MUST_CHECK_PUSH_BUDGET_S=180 by hand.
+#   Windows (MINGW/MSYS/CYGWIN): x6
+#   Linux/BSD/Darwin: x ceil(2 * loadavg1 / nproc), clamped to 1..6
+#   Darwin: additionally floored at x4 (see below)
+must_check_default_budget_s() {
+    _bf=1
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*) _bf=6 ;;
+        *)
+            _bl=""
+            if [ -r /proc/loadavg ]; then
+                _bl=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)
+            else
+                # Darwin/FreeBSD/OpenBSD/NetBSD have no /proc/loadavg;
+                # `sysctl -n vm.loadavg` prints "{ 1m 5m 15m }".
+                _bl=$(sysctl -n vm.loadavg 2>/dev/null | tr -d '{}' | awk '{ print $1 }')
+            fi
+            if [ -n "$_bl" ]; then
+                _bn=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+                _bf=$(awk -v l="${_bl:-0}" -v n="${_bn:-1}" 'BEGIN { if (n < 1) n = 1; f = int((2 * l + n - 1) / n); if (f < 1) f = 1; if (f > 6) f = 6; print f }')
+            fi
+            ;;
+    esac
+    # Measured 2026-11-04 on a 10-core M-series macOS host (load ~5.5,
+    # 146k-file tree): push-tree-size alone took 31.6s wall at 30% CPU
+    # (APFS-bound git ls-tree), so every push ERRORed at 10s. Darwin gets a
+    # x4 floor on top of the load factor, clamped to the same x6 ceiling.
+    case "$(uname -s 2>/dev/null)" in
+        Darwin) _bf=$(( _bf < 4 ? 4 : _bf )) ;;
+    esac
+    echo $(( 10 * _bf ))
+}
+MUST_CHECK_DEFAULT_PUSH_BUDGET_S=$(must_check_default_budget_s)
+MUST_CHECK_PUSH_BUDGET_S=${MUST_CHECK_PUSH_BUDGET_S:-$MUST_CHECK_DEFAULT_PUSH_BUDGET_S}
 MUST_CHECK_BUDGET_MS=0
 MUST_CHECK_BUDGET_SPENT_MS=0
 MUST_CHECK_BLOCKING_RUN=0
 MUST_CHECK_BUDGET_OVERRUN=""
 TIMEOUT_BIN=""
-REMOTE_QUERY_TIMEOUT_S=3
+# ls-remote bound for base resolution. 3s was too tight: measured 0.7-1.0s
+# idle on Windows over HTTPS and well past 3s under load, and a timeout
+# made every new-branch push die "cannot verify published new-ref base".
+REMOTE_QUERY_TIMEOUT_S=${MUST_CHECK_REMOTE_QUERY_TIMEOUT_S:-15}
 REQUIRED_BOOTSTRAP_IDS='compiler-stage1
 compiler-stage2
 compiler-stage3
@@ -309,8 +351,94 @@ push_now_ms() {
     esac
 }
 
+# Deferred-parallel blocking gates (2026-10-24). Within run_manifest_push_gates
+# every blocking dispatch arm calls run_push_gate; while PUSH_PAR_DIR is set,
+# run_push_gate LAUNCHES the gate in the background (each under the budget
+# left at batch start) and push_gate_defer_collect waits for all of them, in
+# manifest order, applying exactly the sequential verdict rules (124/137 ->
+# budget overrun = UNKNOWN, other non-zero -> FAIL). The batch's wall time is
+# charged to the budget once. Replaces the "exactly four known rows" fast path
+# as the general case: with 8 blocking rows that path never fired and every
+# push ran sequentially (29-31s on the Windows host). Advisory rows
+# (MUST_CHECK_ADVISORY=1) stay sequential. SIMPLE_PUSH_SEQUENTIAL_GATES=1
+# disables deferral.
+PUSH_PAR_DIR=""
+push_gate_defer_begin() {
+    PUSH_PAR_DIR=""
+    [ "${SIMPLE_PUSH_SEQUENTIAL_GATES:-0}" = 1 ] && return 0
+    PUSH_PAR_DIR=$(mktemp -d) || { PUSH_PAR_DIR=""; return 0; }
+    PUSH_PAR_T0=$(push_now_ms)
+    PUSH_PAR_LEFT=$(( MUST_CHECK_BUDGET_MS - MUST_CHECK_BUDGET_SPENT_MS ))
+    PUSH_PAR_N=0
+    : > "$PUSH_PAR_DIR/jobs"
+}
+push_gate_defer_launch() {  # id cmd... (blocking only)
+    _dl_id=$1; shift
+    PUSH_PAR_N=$(( PUSH_PAR_N + 1 ))
+    _dl_out="$PUSH_PAR_DIR/$PUSH_PAR_N.out"
+    if [ "$PUSH_PAR_LEFT" -le 0 ]; then
+        printf '%s\t%s\t%s\n' "$_dl_id" "-" "$_dl_out" >> "$PUSH_PAR_DIR/jobs"
+        return 0
+    fi
+    "$TIMEOUT_BIN" -k 2 "$(( PUSH_PAR_LEFT / 1000 )).$(printf '%03d' $(( PUSH_PAR_LEFT % 1000 )))" sh "$@" >"$_dl_out" 2>&1 &
+    printf '%s\t%s\t%s\n' "$_dl_id" "$!" "$_dl_out" >> "$PUSH_PAR_DIR/jobs"
+}
+push_gate_defer_abort() {
+    [ -n "$PUSH_PAR_DIR" ] || return 0
+    while IFS="$(printf '\t')" read -r _da_id _da_pid _da_out; do
+        [ "$_da_pid" = - ] || { kill "$_da_pid" 2>/dev/null; wait "$_da_pid" 2>/dev/null; }
+    done < "$PUSH_PAR_DIR/jobs"
+    rm -rf "$PUSH_PAR_DIR"; PUSH_PAR_DIR=""
+}
+push_gate_defer_collect() {
+    [ -n "$PUSH_PAR_DIR" ] || return 0
+    _dc_fail=0
+    _dc_jobs="$PUSH_PAR_DIR/jobs"
+    _dc_dir=$PUSH_PAR_DIR
+    PUSH_PAR_DIR=""
+    while IFS="$(printf '\t')" read -r _dc_id _dc_pid _dc_out; do
+        if [ "$_dc_pid" = - ]; then
+            MUST_CHECK_BUDGET_OVERRUN=$_dc_id
+            echo "push-must-check: ERROR — blocking gate $_dc_id not run: the ${MUST_CHECK_BUDGET_MS}ms blocking budget is exhausted (${MUST_CHECK_BUDGET_SPENT_MS}ms spent)" >&2
+            _dc_fail=1; continue
+        fi
+        wait "$_dc_pid"; _dc_rc=$?
+        _dc_ms=$(( $(push_now_ms) - PUSH_PAR_T0 ))
+        cat "$_dc_out" 2>/dev/null
+        MUST_CHECK_BLOCKING_RUN=$(( MUST_CHECK_BLOCKING_RUN + 1 ))
+        echo "push-must-check: gate $_dc_id exit=$_dc_rc ${_dc_ms}ms (parallel batch, budget ${MUST_CHECK_BUDGET_MS}ms)" >&2
+        case "$_dc_rc" in
+            0) : ;;
+            124|137)
+                [ -n "$MUST_CHECK_BUDGET_OVERRUN" ] || MUST_CHECK_BUDGET_OVERRUN=$_dc_id
+                echo "push-must-check: ERROR — blocking gate $_dc_id killed at the push budget (${MUST_CHECK_BUDGET_MS}ms); its verdict is UNKNOWN, not a pass. Split the push, or run the slow tier: sign-local-ci-receipt.shs --run --tier local" >&2
+                _dc_fail=1 ;;
+            *)
+                echo "push-must-check: BLOCKING gate $_dc_id failed (exit $_dc_rc)" >&2
+                _dc_fail=1 ;;
+        esac
+    done < "$_dc_jobs"
+    MUST_CHECK_BUDGET_SPENT_MS=$(( MUST_CHECK_BUDGET_SPENT_MS + $(push_now_ms) - PUSH_PAR_T0 ))
+    rm -rf "$_dc_dir"
+    return "$_dc_fail"
+}
+
 run_push_gate() {
     _gate_id=$1; _gate_blocking=$2; shift 2
+    # Fail closed with a clear ERROR when the gate script is absent from this
+    # checkout (sparse worktree). `sh <missing>` otherwise exits 127 with only
+    # a terse "No such file" line, which agents read as a broken host and
+    # route around with --no-verify.
+    if [ ! -f "$1" ]; then
+        echo "push-must-check: ERROR — gate $_gate_id not run: script $1 is missing from this checkout (sparse worktree?). Materialise scripts/ and config/ in full (git sparse-checkout add scripts config), or push from a full checkout. A missing gate is never a pass (gate verdict ERROR, push blocked)." >&2
+        MUST_CHECK_BLOCKING_RUN=$(( MUST_CHECK_BLOCKING_RUN + 1 ))
+        [ "$_gate_blocking" = true ] && return 1
+        return 0
+    fi
+    if [ "$_gate_blocking" = true ] && [ -n "$PUSH_PAR_DIR" ]; then
+        push_gate_defer_launch "$_gate_id" "$@"
+        return 0
+    fi
     _gate_t0=$(push_now_ms)
     if [ "$_gate_blocking" = true ]; then
         _left=$(( MUST_CHECK_BUDGET_MS - MUST_CHECK_BUDGET_SPENT_MS ))
@@ -542,6 +670,7 @@ run_manifest_push_gates() {
         fi
     fi
 
+    push_gate_defer_begin
     while IFS="$_tab" read -r _id _blocking _mode _command; do
         case "$_id:$_mode:$_command" in
             'push-stage2-parent-runtime-inheritance:tree:sh scripts/check/check-stage2-parent-runtime-inheritance.shs')
@@ -566,10 +695,21 @@ run_manifest_push_gates() {
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-kernel-closure.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-conflict-markers:range:sh scripts/check/check-no-conflict-markers-push.shs {range}')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-conflict-markers-push.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-private-import-baseline:tree:sh scripts/check/check-private-import-baseline.shs')
+                # Private cross-module imports: no stale baseline entry, and the
+                # baseline gains no line vs the merge-base (removals only).
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-private-import-baseline.shs" --range "$_range" || { rm -f "$_push_rows"; return 1; } ;;
             'push-text-encoding:range:sh scripts/check/check-text-encoding-push.shs {range}')
                 # Simple text formats (*.spl *.sdn *.shs *.sdl) must be valid UTF-8
                 # with LF endings in committed content; diff-scoped, ~1s.
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-text-encoding-push.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-bug-close-evidence:range:sh scripts/check/check-bug-close-evidence.shs {range}')
+                # CU-015 CI side: a bug closed in the range needs existing reproducer + prevention specs.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-bug-close-evidence.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-no-single-quoted-raw-string:range:sh scripts/check/check-no-single-quoted-raw-string.shs {range}')
+                # Advisory (ADR-005): no NEW single-quoted raw strings in touched
+                # src/**/*.spl. Blocking only after the lexer switch lands.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-single-quoted-raw-string.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
             'push-no-document-symlinks:ref:sh scripts/check/check-no-document-symlinks-push.shs --rev')
                 # Mode-level damage every other guard is blind to: a 120000
                 # entry whose blob is the whole TEXT of the file it used to
@@ -637,6 +777,8 @@ run_manifest_push_gates() {
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-guard-wiring.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
             'push-sosix-capsule-boundaries:tree:sh scripts/check/check-sosix-capsule-boundaries.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-sosix-capsule-boundaries.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-no-truncated-hash-identity:tree:sh scripts/check/check-no-truncated-hash-identity.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-truncated-hash-identity.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-main-test-runnable:ref:sh scripts/check/check-main-test-runnable-push.shs --rev')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-main-test-runnable-push.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
             'push-c-runtime-compiles:ref:sh scripts/check/check-c-runtime-compiles-push.shs --rev')
@@ -650,8 +792,67 @@ run_manifest_push_gates() {
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-process-wait-eintr-retry.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-mir-transient-scope-boundary:tree:sh scripts/check/check-mir-transient-scope-boundary.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-mir-transient-scope-boundary.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-class-field-dict-bracket-read:tree:sh scripts/check/check-class-field-dict-bracket-read.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-class-field-dict-bracket-read.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-per-file-overlap-receipt:tree:sh scripts/check/check-per-file-overlap-receipt.shs --selftest')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-per-file-overlap-receipt.shs" --selftest || { rm -f "$_push_rows"; return 1; } ;;
+            'push-bug-claims-reap-report:tree:sh scripts/check/bug-claim.shs reap --report')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/bug-claim.shs" reap --report || { rm -f "$_push_rows"; return 1; } ;;
+            'push-seed-extern-registry:tree:sh scripts/check/check-seed-extern-registry.shs')
+                # Advisory: honestly RED on main (145 new unregistered externs at
+                # wiring); repo-wide outage class, kept visible per the
+                # wire-RED-don't-silence rule. Owner: refresh
+                # scripts/check/seed_extern_registry_baseline.txt.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-seed-extern-registry.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-bug-difficulty-coverage:tree:sh scripts/check/check-bug-difficulty-coverage.shs')
+                # Advisory: honestly RED on main (open bugs missing bug_difficulty
+                # rows at wiring); bug_db owners add the rows, then promote.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-bug-difficulty-coverage.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-stage2-scope-prune-selftest:tree:sh scripts/check/check-stage2-scope-prune-selftest.shs')
+                # Advisory: honestly RED on main (fixture2 stale scope dir not
+                # removed at wiring); live prune regression, owner repair pending.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-stage2-scope-prune-selftest.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-bootstrap-stage2-worker-pool:tree:sh scripts/check/check-bootstrap-stage2-worker-pool.shs')
+                # Advisory: honestly RED on main (probe predates the owner's
+                # mandatory --backend flag; guard drifted, repair pending).
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-bootstrap-stage2-worker-pool.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-bootstrap-full-cli-source-scope:tree:sh scripts/check/check-bootstrap-full-cli-source-scope.shs')
+                # Advisory: honestly RED on main (extracted bootstrap_stream_batch
+                # drifted from bootstrap-from-scratch.sh; repair pending).
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-bootstrap-full-cli-source-scope.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-bootstrap-phase4-module-collection:tree:sh scripts/check/check-bootstrap-phase4-module-collection.shs')
+                # Advisory: honestly RED on main (run_failed_binary_module_inventory
+                # not found; extraction drifted from the owner script, repair pending).
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-bootstrap-phase4-module-collection.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-core-lib-closure:tree:sh scripts/check/check-core-lib-closure.shs')
+                # Advisory: honestly RED on main (60 NEW lib files reached outside
+                # the CORE baseline at wiring); WP-09 owners re-baseline deliberately.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-core-lib-closure.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-untyped-return-value:tree:sh scripts/check/check-untyped-return-value.shs')
+                # Advisory: honestly RED on main (hard-scope offenders at wiring);
+                # compiler owners fix or baseline the offenders, then promote.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-untyped-return-value.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-container-provider-imports:tree:sh scripts/check/check-container-provider-imports.shs')
+                # Advisory at wiring (2026-11-13): container provider internals are
+                # imported only through std.container; pre-existing app imports are
+                # baselined and the baseline can only shrink.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-container-provider-imports.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-session-heap-reclaim:tree:sh scripts/check/check-session-heap-reclaim.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-session-heap-reclaim.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-runtime-concat-nul:tree:sh scripts/check/check-runtime-concat-nul.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runtime-concat-nul.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-rt-stdin-read-timeout-eintr:range:sh scripts/check/check-rt-stdin-read-timeout-eintr.shs --range')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rt-stdin-read-timeout-eintr.shs" --range "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-nogc-checker-wiring:tree:sh scripts/check/check-nogc-checker-wiring.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-nogc-checker-wiring.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-no-placeholder-callbacks:tree:sh scripts/check/check-no-placeholder-callbacks.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-placeholder-callbacks.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-stage-exe-launch-diagnostic:tree:sh scripts/bootstrap/tests/stage-exe-launch-test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/bootstrap/tests/stage-exe-launch-test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-phase-ladder-resume-revision:tree:sh scripts/bootstrap/tests/phase-ladder-resume-revision-test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/bootstrap/tests/phase-ladder-resume-revision-test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-windows-session-argv:tree:sh scripts/bootstrap/tests/windows-session-argv-test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/bootstrap/tests/windows-session-argv-test.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-tcp-write-nosigpipe:tree:tcp_probe_root=$(mktemp -d) && SIMPLE_TCP_CHECK_OUT=$tcp_probe_root/probe sh scripts/check/check-tcp-write-nosigpipe.shs')
                 # Allocate only when the advisory row runs; the probe itself requires a new child directory.
                 run_push_gate "$_id" "$_blocking" -c 'tcp_probe_root=$(mktemp -d) && SIMPLE_TCP_CHECK_OUT=$tcp_probe_root/probe sh scripts/check/check-tcp-write-nosigpipe.shs' || { rm -f "$_push_rows"; return 1; } ;;
@@ -683,8 +884,33 @@ run_manifest_push_gates() {
                 # rt-dual-implementation row was moved off. See
                 # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-mock-file-system-io.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-platform-variant-dirs:tree:sh scripts/check/check-platform-variant-dirs.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-platform-variant-dirs.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-primitive-api-added:range:sh scripts/check/check-primitive-api-added.shs --changed {range}')
+                # Blocking, diff-scoped: a range may not add public bare
+                # primitives (count at head > count at base) in touched src .spl.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-primitive-api-added.shs" --changed "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-nil-outside-unsafe-added:range:sh scripts/check/check-nil-outside-unsafe-added.shs --changed {range}')
+                # Blocking, diff-scoped: a range may not add nil outside unsafe
+                # (count at head > count at base) in touched src .spl.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-nil-outside-unsafe-added.shs" --changed "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-continuity-proven-setters:range:sh scripts/check/check-continuity-proven-setters.shs --changed {range}')
+                # Blocking, diff-scoped: a touched src .spl may not exceed its reviewed
+                # continuity_proven setter cap (allowlist; no binary needed).
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-continuity-proven-setters.shs" --changed "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-text-len-unit-mix:range:sh scripts/check/check-text-len-unit-mix.shs --changed {range}')
+                # Blocking, diff-scoped: byte/code-point unit mixes and
+                # len()-bounded byte scans in the .spl files the range touches
+                # (pushed-commit content), ratcheted against the two baselines.
+                # Design: doc/05_design/language/text/text_len_counts_characters_2026-11-07.md
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-text-len-unit-mix.shs" --changed "$_range" || { rm -f "$_push_rows"; return 1; } ;;
             'push-dual-run-shadow:tree:sh scripts/check/check-dual-run-shadow.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-dual-run-shadow.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-trace-query-p0:tree:sh scripts/check/check-trace-query-p0.shs')
+                # Advisory: needs a runnable simple binary (exits 2 without one).
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-trace-query-p0.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-arch-import-closure:tree:sh scripts/check/check-arch-import-closure.shs --all')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-arch-import-closure.shs" --all || { rm -f "$_push_rows"; return 1; } ;;
             'push-hir-cache-cold-warm-parity:tree:sh scripts/check/check-hir-cache-cold-warm-parity.shs')
                 # Advisory for the same reason as push-dual-run-shadow: it
                 # builds a closure twice and exits 2 without a runnable compiler.
@@ -699,12 +925,20 @@ run_manifest_push_gates() {
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-freebsd-phase2-test-runner-contract.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-linux-phase2-test-runner-contract:tree:sh scripts/check/check-linux-phase2-test-runner-contract.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-linux-phase2-test-runner-contract.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-no-refresh-file-lock:tree:sh scripts/check/check-no-refresh-file-lock.shs')
+                # The compile refresh is lockless by directive (2026-11-04):
+                # a file lock creeping back into the inventory/snapshot/
+                # workaround-index paths is the exact defect PR #6669 removed.
+                # Grep-only, <1s, fail-closed on 0 files.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-refresh-file-lock.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-windows-msvc-toolchain-contract:tree:sh scripts/check/check-windows-msvc-toolchain-contract.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-windows-msvc-toolchain-contract.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-tracking-doc-registration:tree:sh scripts/check/check-tracking-doc-registration.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-tracking-doc-registration.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-nested-fn-jit-lowering:tree:sh scripts/check/check-nested-fn-jit-lowering.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-nested-fn-jit-lowering.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-runtime-no-duplicate-rt-symbols:tree:sh scripts/check/check-runtime-no-duplicate-rt-symbols.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runtime-no-duplicate-rt-symbols.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-bootstrap-lane-verdict-line:tree:sh scripts/check/check-bootstrap-lane-verdict-line.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-bootstrap-lane-verdict-line.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-runner-binary-extern-freshness:tree:sh scripts/check/check-runner-binary-extern-freshness.shs')
@@ -748,8 +982,10 @@ run_manifest_push_gates() {
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-windows-checkout-damage-push.shs" --scan-only "$_range" || { rm -f "$_push_rows"; return 1; } ;;
             'push-no-direct-rt:ref:sh scripts/check/check-no-direct-rt.shs --roots src --rev')
                 # --roots src reproduces the pre-2026-08-28 src-only scan scope so
-                # this MANDATORY pre-push gate keeps its existing meaning against
-                # the existing baseline. The widened default
+                # this push gate keeps its existing meaning against the src
+                # baseline. Advisory since 2026-09-23 in config/check/must_check_gates.sdn
+                # (push_blocking=false; skipped on ordinary fast pushes, executed
+                # when MUST_CHECK_ADVISORY=1). The widened default
                 # (src,examples,tools,scripts,test) is honestly RED against that
                 # baseline until a lane migrates the debt or the baseline is
                 # deliberately regenerated for the wider scope.
@@ -758,11 +994,11 @@ run_manifest_push_gates() {
                 # pushed sha. Measured at conversion: the working checkout held
                 # 24 untracked .spl the commit does not (16342 vs 16318 files).
                 # See doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
-                # Push admission is a delta ratchet against the outgoing
-                # range's committed base. The older tracked baseline remains
-                # authoritative for standalone/bootstrap and release lanes,
-                # but cannot block a zero-debt branch merely because main has
-                # independently moved above that frozen snapshot.
+                # When run (MUST_CHECK_ADVISORY=1), push admission is a delta
+                # ratchet against the outgoing range's committed base. The older
+                # tracked baseline remains authoritative for standalone/bootstrap
+                # and release lanes, without blocking zero-debt branches merely
+                # because main has independently moved above that frozen snapshot.
                 _direct_rt_base=${_range%%..*}
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-direct-rt.shs" --roots src --rev "$_ref" --baseline-rev "$_direct_rt_base" || { rm -f "$_push_rows"; return 1; } ;;
             'push-orphan-part-files:ref:sh scripts/check/check-orphan-part-files.shs --rev')
@@ -773,6 +1009,8 @@ run_manifest_push_gates() {
                 # had itself stopped compiling (sweep/seed.tsv recorded it as
                 # `compile failed`) with nothing acting on the row.
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-orphan-part-files.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-extern-return-shape:ref:sh scripts/check/check-extern-return-shape.shs --rev')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-extern-return-shape.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
             'push-port-io-single-owner:ref:sh scripts/check/check-port-io-single-owner.shs --rev')
                 # ref, not tree, since 2026-09-07 — same wrong-tree defect the
                 # rt-dual-implementation row was moved off. See
@@ -859,6 +1097,18 @@ run_manifest_push_gates() {
                 # backend_vulkan_blit_spirv.spl are byte-identical to what
                 # glslangValidator produces from it right now.
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-blit-spirv-pinned.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-library-unit-drift:tree:sh scripts/check/check-library-unit-drift.shs --selftest')
+                # Advisory by manifest (push_blocking: false); enforced by the extended CI job only.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-library-unit-drift.shs" --selftest || { rm -f "$_push_rows"; return 1; } ;;
+            'push-source-ownership:tree:sh scripts/check/check-source-ownership.shs --selftest')
+                # Advisory by manifest (push_blocking: false); enforced by the extended CI job only.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-source-ownership.shs" --selftest || { rm -f "$_push_rows"; return 1; } ;;
+            'push-enum-discriminant-convention-fence:tree:sh scripts/check/check-enum-discriminant-convention-fence.shs')
+                # Advisory by manifest (push_blocking: false); enforced by the extended CI job.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-enum-discriminant-convention-fence.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-bug-db-table-shape:tree:sh scripts/check/check-bug-db-table-shape.shs')
+                # Advisory by manifest (push_blocking: false); enforced by the extended CI job.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-bug-db-table-shape.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-deployed-closure-dedup:tree:sh scripts/check/check-deployed-closure-dedup.shs')
                 # Advisory by manifest: honestly RED on this host (a stray
                 # backup binary under bin/release/aarch64-unknown-linux-gnu/
@@ -880,11 +1130,25 @@ run_manifest_push_gates() {
                 # backend_vulkan_shadow_rect_spirv.spl are byte-identical to what
                 # glslangValidator produces from it right now.
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-shadow-rect-spirv-pinned.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-css-group-restore-spirv-pinned:tree:sh scripts/check/check-css-group-restore-spirv-pinned.shs')
+                # Same shape as the sibling SPIR-V pin gates above, for
+                # shaders/css_group_restore.comp -> backend_vulkan_css_group_restore_spirv.spl.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-css-group-restore-spirv-pinned.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-gradient-layer-spirv-pinned:tree:sh scripts/check/check-gradient-layer-spirv-pinned.shs')
+                # Same shape as the sibling SPIR-V pin gates above, for
+                # shaders/gradient_layer.comp -> backend_vulkan_gradient_layer_spirv.spl.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-gradient-layer-spirv-pinned.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-glass-material-spirv-pinned:tree:sh scripts/check/check-glass-material-spirv-pinned.shs')
                 # Blocking: same shape as the sibling SPIR-V pin gates above,
                 # for shaders/glass_material.comp ->
                 # backend_vulkan_glass_material_spirv.spl.
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-glass-material-spirv-pinned.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-font-atlas-batch-spirv-pinned:tree:sh scripts/check/check-font-atlas-batch-spirv-pinned.shs')
+                # Same shape as the sibling SPIR-V pin gates above, for
+                # shaders/font_atlas_batch.comp -> backend_vulkan_font_spirv.spl
+                # (head + tail halves; also pins the trusted sha256 value and
+                # the GLSL source hash).
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-font-atlas-batch-spirv-pinned.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-chrome-dynlib-probe:tree:sh scripts/check/check-chrome-dynlib-probe.shs')
                 # Advisory by manifest: stage B needs a pinned CEF drop most
                 # push hosts lack, and stage A needs a runnable Simple binary a
@@ -908,6 +1172,8 @@ run_manifest_push_gates() {
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-generated-visitors-fresh.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-hir-codec-complete:tree:sh scripts/check/check-hir-codec-complete.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-hir-codec-complete.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-node-view-gen-fresh:tree:sh scripts/check/check-node-view-gen-fresh.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-node-view-gen-fresh.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-cache-writer-runtime-provisioning:tree:sh scripts/check/check-cache-writer-runtime-provisioning.shs')
                 # Advisory by manifest: a static grep over the cache-writer
                 # workflows that needs rg, which a bare push host may lack.
@@ -924,14 +1190,21 @@ run_manifest_push_gates() {
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-allocation-registry-churn.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-windows-coff-compat-alias-gc:tree:sh scripts/check/check-windows-coff-compat-alias-gc.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-windows-coff-compat-alias-gc.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-no-monomorphization:ref:sh scripts/check/check-no-monomorphization.shs --rev')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-monomorphization.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
             'push-lib-common-no-os-import:ref:sh scripts/check/check-lib-common-no-os-import.shs --rev')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-lib-common-no-os-import.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
-            'push-sdn-crc32-sealed:ref:sh scripts/check/check-sdn-crc32-sealed.shs --rev')
+            'push-sdn-crc32-sealed:range:sh scripts/check/check-sdn-crc32-sealed.shs --range')
                 # Every sealed *.sdn at the pushed sha must verify: reseal-on-copy
                 # is a no-op. A stale #sdn-crc32 header makes the loader read the
                 # whole file as nil (bug_db.sdn 2026-09-23, test_db.sdn
                 # 2026-09-05); no other gate looks at the header. ~1s.
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-sdn-crc32-sealed.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+                # RANGE-scoped (2026-11-04): only sealed files the range touches fail;
+                # untouched drift is a NOTE (it failed EVERY PR). --rev stays in extended CI.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-sdn-crc32-sealed.shs" --range "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-sdn-row-shape:range:sh scripts/check/check-sdn-row-shape.shs --range')
+                # Fused-row guard (PR 6633): range-scoped to touched table .sdn files.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-sdn-row-shape.shs" --range "$_range" || { rm -f "$_push_rows"; return 1; } ;;
             'push-rust-duplicate-reexport:range:sh scripts/check/check-rust-duplicate-reexport.shs --range')
                 # The static, sub-second half of the "seed does not compile"
                 # class: a name re-exported twice in one file is rustc E0252
@@ -953,17 +1226,363 @@ run_manifest_push_gates() {
                 # rt_* symptom. ~5s on a 7-commit range; revert/trailer/bulk
                 # escapes are the script's own.
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-stale-snapshot-rewind.shs" --range "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-devhub-windows-launch-modes:tree:sh test/00_unit/scripts/devhub_windows_launch_modes_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/00_unit/scripts/devhub_windows_launch_modes_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-hir-worker-diagnostics-workaround:tree:sh test/00_unit/scripts/hir_worker_diagnostics_workaround_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/00_unit/scripts/hir_worker_diagnostics_workaround_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-kernel-plugin-phase8-source-contract:tree:sh test/00_unit/scripts/kernel_plugin_phase8_source_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/00_unit/scripts/kernel_plugin_phase8_source_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-stage4-runtime-abi-provenance-wiring-mutation:tree:sh test/00_unit/scripts/stage4_runtime_abi_provenance_wiring_mutation_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/00_unit/scripts/stage4_runtime_abi_provenance_wiring_mutation_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-artifact-service-bridge-ownership-contract:tree:sh test/01_unit/compiler/action_graph/artifact_service_bridge_ownership_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/compiler/action_graph/artifact_service_bridge_ownership_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-package-archive-admission-import-contract:tree:sh test/01_unit/compiler/action_graph/package_archive_admission_import_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/compiler/action_graph/package_archive_admission_import_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-backend-plugin-failure-diagnostics-source-contract:tree:sh test/01_unit/compiler/backend/backend_plugin_failure_diagnostics_source_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/compiler/backend/backend_plugin_failure_diagnostics_source_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-backend-plugin-v1-abi-contract:tree:sh test/01_unit/compiler/backend_plugin/backend_plugin_v1_abi_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/compiler/backend_plugin/backend_plugin_v1_abi_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-package-index-driver-cutover-contract:tree:sh test/01_unit/compiler/cache/package_index_driver_cutover_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/compiler/cache/package_index_driver_cutover_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-interpreter-load-facade-contract:tree:sh test/01_unit/compiler/interpreter/interpreter_load_facade_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/compiler/interpreter/interpreter_load_facade_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-portable-numeric-path-contract:tree:sh test/01_unit/compiler/portable_numeric_path_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/compiler/portable_numeric_path_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-app-io-mod-source-run-path-contract:tree:sh test/01_unit/infrastructure/app_io_mod_source_run_path_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/infrastructure/app_io_mod_source_run_path_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-strict-noalloc-proof-contract:tree:sh test/01_unit/lib/nogc_async_mut_noalloc/kernel_plugin/strict_noalloc_proof_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/lib/nogc_async_mut_noalloc/kernel_plugin/strict_noalloc_proof_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-x86-64-enum-variant-result-contract:tree:sh test/01_unit/os/kernel/arch/x86_64_enum_variant_result_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/os/kernel/arch/x86_64_enum_variant_result_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-x86-64-exec-token-result-v2:tree:sh test/01_unit/os/kernel/arch/x86_64_exec_token_result_v2_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/os/kernel/arch/x86_64_exec_token_result_v2_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-x86-64-text-eq-any-contract:tree:sh test/01_unit/os/kernel/arch/x86_64_text_eq_any_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/os/kernel/arch/x86_64_text_eq_any_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-x86-64-typed-handoff-source:tree:sh test/01_unit/os/kernel/arch/x86_64_typed_handoff_source_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/os/kernel/arch/x86_64_typed_handoff_source_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-baremetal-rt-string-join-contract:tree:sh test/01_unit/os/kernel/boot/baremetal_rt_string_join_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/os/kernel/boot/baremetal_rt_string_join_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-fat32-mount-value-owner-contract:tree:sh test/01_unit/os/kernel/fs/fat32_mount_value_owner_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/os/kernel/fs/fat32_mount_value_owner_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-real-worker-native:tree:sh test/01_unit/os/smf/kernel_plugin/real_worker_native_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/os/smf/kernel_plugin/real_worker_native_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-shared-memory-native:tree:sh test/01_unit/os/smf/kernel_plugin/shared_memory_native_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/os/smf/kernel_plugin/shared_memory_native_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-signature-policy-native:tree:sh test/01_unit/os/smf/kernel_plugin/signature_policy_native_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/os/smf/kernel_plugin/signature_policy_native_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-run-allocation-observer-reset-count-link:tree:sh test/01_unit/runtime/run_allocation_observer_reset_count_link_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/runtime/run_allocation_observer_reset_count_link_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-run-io-uring-queue-contract:tree:sh test/01_unit/runtime/run_io_uring_queue_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/runtime/run_io_uring_queue_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-run-transient-empty-scope:tree:sh test/01_unit/runtime/run_transient_empty_scope_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/runtime/run_transient_empty_scope_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-run-x86-avx512-xstate-runtime:tree:sh test/01_unit/runtime/run_x86_avx512_xstate_runtime_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/runtime/run_x86_avx512_xstate_runtime_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-value-format-string-runtime:tree:sh test/01_unit/runtime/value_format_string_runtime_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/runtime/value_format_string_runtime_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-windows-core-c-mingw-source-contract:tree:sh test/01_unit/runtime/windows_core_c_mingw_source_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/runtime/windows_core_c_mingw_source_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-aspect-pack-file-size-facade-contract:tree:sh test/01_unit/scripts/aspect_pack_file_size_facade_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/aspect_pack_file_size_facade_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-cache-archive-directory:tree:sh test/01_unit/scripts/bootstrap_cache_archive_directory_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_cache_archive_directory_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-cache-escaped-writer:tree:sh test/01_unit/scripts/bootstrap_cache_escaped_writer_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_cache_escaped_writer_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-cache-policy:tree:sh test/01_unit/scripts/bootstrap_cache_policy_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_cache_policy_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-cache-prune-attempts:tree:sh test/01_unit/scripts/bootstrap_cache_prune_attempts_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_cache_prune_attempts_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-fingerprint-diff:tree:sh test/01_unit/scripts/bootstrap_fingerprint_diff_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_fingerprint_diff_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-fingerprint-tmp-contract:tree:sh test/01_unit/scripts/bootstrap_fingerprint_tmp_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_fingerprint_tmp_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-hosted-runtime-windows-find-authority:tree:sh test/01_unit/scripts/bootstrap_hosted_runtime_windows_find_authority_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_hosted_runtime_windows_find_authority_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-jest-json-validator:tree:sh test/01_unit/scripts/bootstrap_jest_json_validator_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_jest_json_validator_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-jobs-policy:tree:sh test/01_unit/scripts/bootstrap_jobs_policy_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_jobs_policy_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-phase-status-classification:tree:sh test/01_unit/scripts/bootstrap_phase_status_classification_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_phase_status_classification_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-phase3-docs-inventory:tree:sh test/01_unit/scripts/bootstrap_phase3_docs_inventory_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_phase3_docs_inventory_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-phase3-expanded-runner:tree:sh test/01_unit/scripts/bootstrap_phase3_expanded_runner_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_phase3_expanded_runner_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-phase3-nested-inventory:tree:sh test/01_unit/scripts/bootstrap_phase3_nested_inventory_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_phase3_nested_inventory_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-planner-admission-bound-contract:tree:sh test/01_unit/scripts/bootstrap_planner_admission_bound_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_planner_admission_bound_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-portability-owner-contract:tree:sh test/01_unit/scripts/bootstrap_portability_owner_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_portability_owner_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-reviewed-reason:tree:sh test/01_unit/scripts/bootstrap_reviewed_reason_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_reviewed_reason_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-session-cmd-argv-windows:tree:sh test/01_unit/scripts/bootstrap_session_cmd_argv_windows_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_session_cmd_argv_windows_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-session-guard:tree:sh test/01_unit/scripts/bootstrap_session_guard_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_session_guard_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-session-transcript:tree:sh test/01_unit/scripts/bootstrap_session_transcript_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_session_transcript_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-stage2-rss-observation-budget:tree:sh test/01_unit/scripts/bootstrap_stage2_rss_observation_budget_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_stage2_rss_observation_budget_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-stage3-current-acceptance-contract:tree:sh test/01_unit/scripts/bootstrap_stage3_current_acceptance_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_stage3_current_acceptance_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-stage3-darwin-nested-watchdog:tree:sh test/01_unit/scripts/bootstrap_stage3_darwin_nested_watchdog_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_stage3_darwin_nested_watchdog_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-stage3-descriptor-map-contract:tree:sh test/01_unit/scripts/bootstrap_stage3_descriptor_map_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_stage3_descriptor_map_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-stage3-direct-parallel-policy:tree:sh test/01_unit/scripts/bootstrap_stage3_direct_parallel_policy_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_stage3_direct_parallel_policy_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-stage3-directory-snapshot-streaming:tree:sh test/01_unit/scripts/bootstrap_stage3_directory_snapshot_streaming_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_stage3_directory_snapshot_streaming_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-stage3-evidence-reuse-contract:tree:sh test/01_unit/scripts/bootstrap_stage3_evidence_reuse_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_stage3_evidence_reuse_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-stage3-explicit-one-route:tree:sh test/01_unit/scripts/bootstrap_stage3_explicit_one_route_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_stage3_explicit_one_route_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-stage3-fingerprint-details-verification:tree:sh test/01_unit/scripts/bootstrap_stage3_fingerprint_details_verification_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_stage3_fingerprint_details_verification_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-stage3-receipt-pure-parent:tree:sh test/01_unit/scripts/bootstrap_stage3_receipt_pure_parent_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_stage3_receipt_pure_parent_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-stage3-resume-manifest-receiver-env-contract:tree:sh test/01_unit/scripts/bootstrap_stage3_resume_manifest_receiver_env_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_stage3_resume_manifest_receiver_env_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-stage3-resume-output-path:tree:sh test/01_unit/scripts/bootstrap_stage3_resume_output_path_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_stage3_resume_output_path_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-stage3-unit-supervisor:tree:sh test/01_unit/scripts/bootstrap_stage3_unit_supervisor_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_stage3_unit_supervisor_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-stage3-windows-native-compatibility:tree:sh test/01_unit/scripts/bootstrap_stage3_windows_native_compatibility_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_stage3_windows_native_compatibility_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-transcript-failure-diagnostics:tree:sh test/01_unit/scripts/bootstrap_transcript_failure_diagnostics_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_transcript_failure_diagnostics_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-windows-compatibility-junction:tree:sh test/01_unit/scripts/bootstrap_windows_compatibility_junction_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_windows_compatibility_junction_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-candidate-frontend-darwin-capture:tree:sh test/01_unit/scripts/candidate_frontend_darwin_capture_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/candidate_frontend_darwin_capture_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-candidate-frontend-hash-portability:tree:sh test/01_unit/scripts/candidate_frontend_hash_portability_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/candidate_frontend_hash_portability_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-caret-external-receipt-semantic-quarantine:tree:sh test/01_unit/scripts/caret_external_receipt_semantic_quarantine_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/caret_external_receipt_semantic_quarantine_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-check-seed-builds-push-selftest-isolation:tree:sh test/01_unit/scripts/check_seed_builds_push_selftest_isolation_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/check_seed_builds_push_selftest_isolation_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-compiled-check-tree:tree:sh test/01_unit/scripts/compiled_check_tree_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/compiled_check_tree_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-conflict-marker-guard-raw-diff:tree:sh test/01_unit/scripts/conflict_marker_guard_raw_diff_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/conflict_marker_guard_raw_diff_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-cross-language-execution-mode-receipt-contract:tree:sh test/01_unit/scripts/cross_language_execution_mode_receipt_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/cross_language_execution_mode_receipt_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-db-runtime-capsule-provenance-gate:tree:sh test/01_unit/scripts/db_runtime_capsule_provenance_gate_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/db_runtime_capsule_provenance_gate_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-doc06-spec-layout-migration:tree:sh test/01_unit/scripts/doc06_spec_layout_migration_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/doc06_spec_layout_migration_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-engine2d-rendering-raw-v1-writer-contract:tree:sh test/01_unit/scripts/engine2d_rendering_raw_v1_writer_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/engine2d_rendering_raw_v1_writer_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-f64-call-abi-guard-contract:tree:sh test/01_unit/scripts/f64_call_abi_guard_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/f64_call_abi_guard_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-interpreter-startup-producer:tree:sh test/01_unit/scripts/interpreter_startup_producer_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/interpreter_startup_producer_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-kpf-cross-placement-semantic-mutation:tree:sh test/01_unit/scripts/kpf_cross_placement_semantic_mutation_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/kpf_cross_placement_semantic_mutation_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-kpf-extended-enum-sealer-mutation:tree:sh test/01_unit/scripts/kpf_extended_enum_sealer_mutation_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/kpf_extended_enum_sealer_mutation_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-linux-vulkan-renderdoc-reason-precedence-contract:tree:sh test/01_unit/scripts/linux_vulkan_renderdoc_reason_precedence_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/linux_vulkan_renderdoc_reason_precedence_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-macos-m5-hermetic-snapshot-wrapper:tree:sh test/01_unit/scripts/macos_m5_hermetic_snapshot_wrapper_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/macos_m5_hermetic_snapshot_wrapper_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-macos-process-observer-detail:tree:sh test/01_unit/scripts/macos_process_observer_detail_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/macos_process_observer_detail_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-macos-process-observer-permission:tree:sh test/01_unit/scripts/macos_process_observer_permission_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/macos_process_observer_permission_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-macos-process-observer:tree:sh test/01_unit/scripts/macos_process_observer_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/macos_process_observer_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-macos-reverse-reference-m4-contract:tree:sh test/01_unit/scripts/macos_reverse_reference_m4_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/macos_reverse_reference_m4_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-macos-stage3-authority-portability-contract:tree:sh test/01_unit/scripts/macos_stage3_authority_portability_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/macos_stage3_authority_portability_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-materialize-symlinks-windows-posix-sh-guard:tree:sh test/01_unit/scripts/materialize_symlinks_windows_posix_sh_guard_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/materialize_symlinks_windows_posix_sh_guard_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-mcdc-cross-engine-vectors-gate:tree:sh test/01_unit/scripts/mcdc_cross_engine_vectors_gate_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/mcdc_cross_engine_vectors_gate_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-mci-v2-independent-review-contract:tree:sh test/01_unit/scripts/mci_v2_independent_review_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/mci_v2_independent_review_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-mcp-startup-lib-obsolete-contract:tree:sh test/01_unit/scripts/mcp_startup_lib_obsolete_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/mcp_startup_lib_obsolete_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-orchestration-storage-roots:tree:sh test/01_unit/scripts/orchestration_storage_roots_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/orchestration_storage_roots_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-performance-receipt-fail-closed:tree:sh test/01_unit/scripts/performance_receipt_fail_closed_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/performance_receipt_fail_closed_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-performance-target-identity:tree:sh test/01_unit/scripts/performance_target_identity_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/performance_target_identity_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-phase3-test-inventory:tree:sh test/01_unit/scripts/phase3_test_inventory_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/phase3_test_inventory_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-phase1-current-authority:tree:sh test/01_unit/scripts/bootstrap_phase1_current_authority_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_phase1_current_authority_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-phase1-tool-containment:tree:sh test/01_unit/scripts/bootstrap_phase1_tool_containment_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_phase1_tool_containment_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-stage3-snapshot-path-contract:tree:sh test/01_unit/scripts/bootstrap_stage3_snapshot_path_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_stage3_snapshot_path_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-strategy-fallback-contract:tree:sh test/01_unit/scripts/bootstrap_strategy_fallback_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/bootstrap_strategy_fallback_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-portable-process-lock-macos-observer:tree:sh test/01_unit/scripts/portable_process_lock_macos_observer_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/portable_process_lock_macos_observer_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-portable-process-lock-windows-birth:tree:sh test/01_unit/scripts/portable_process_lock_windows_birth_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/portable_process_lock_windows_birth_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-portable-semantic-scope-authority-contract:tree:sh test/01_unit/scripts/portable_semantic_scope_authority_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/portable_semantic_scope_authority_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-prepush-dispatcher-git-env-isolation:tree:sh test/01_unit/scripts/prepush_dispatcher_git_env_isolation_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/prepush_dispatcher_git_env_isolation_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-preserve-phase-binary-keep-newest:tree:sh test/01_unit/scripts/preserve_phase_binary_keep_newest_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/preserve_phase_binary_keep_newest_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-process-group-bounded-log-contract:tree:sh test/01_unit/scripts/process_group_bounded_log_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/process_group_bounded_log_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-process-tree-rss-bounded-diagnostic:tree:sh test/01_unit/scripts/process_tree_rss_bounded_diagnostic_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/process_tree_rss_bounded_diagnostic_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-process-tree-rss-cgroup-root:tree:sh test/01_unit/scripts/process_tree_rss_cgroup_root_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/process_tree_rss_cgroup_root_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-process-tree-rss-controller-exit:tree:sh test/01_unit/scripts/process_tree_rss_controller_exit_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/process_tree_rss_controller_exit_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-process-tree-rss-deadline:tree:sh test/01_unit/scripts/process_tree_rss_deadline_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/process_tree_rss_deadline_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-process-tree-rss-diagnostics:tree:sh test/01_unit/scripts/process_tree_rss_diagnostics_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/process_tree_rss_diagnostics_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-process-tree-rss-monitor-budget:tree:sh test/01_unit/scripts/process_tree_rss_monitor_budget_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/process_tree_rss_monitor_budget_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-process-tree-rss-monitor:tree:sh test/01_unit/scripts/process_tree_rss_monitor_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/process_tree_rss_monitor_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-process-tree-rss-observation-budget:tree:sh test/01_unit/scripts/process_tree_rss_observation_budget_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/process_tree_rss_observation_budget_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-process-tree-rss-proc-stat:tree:sh test/01_unit/scripts/process_tree_rss_proc_stat_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/process_tree_rss_proc_stat_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-process-tree-rss-windows-parent-guard:tree:sh test/01_unit/scripts/process_tree_rss_windows_parent_guard_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/process_tree_rss_windows_parent_guard_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-product-frontend-worker-estimates:tree:sh test/01_unit/scripts/product_frontend_worker_estimates_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/product_frontend_worker_estimates_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-publish-win-stage-rc-msvc-contract:tree:sh test/01_unit/scripts/publish_win_stage_rc_msvc_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/publish_win_stage_rc_msvc_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-publish-win-stage-rc-tmp-cleanup:tree:sh test/01_unit/scripts/publish_win_stage_rc_tmp_cleanup_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/publish_win_stage_rc_tmp_cleanup_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-required-gates-sparse-checkout:tree:sh test/01_unit/scripts/required_gates_sparse_checkout_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/required_gates_sparse_checkout_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-sanitizer-smoke-reporting:tree:sh test/01_unit/scripts/sanitizer_smoke_reporting_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/sanitizer_smoke_reporting_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-scv-bootstrap-composition-scope-contract:tree:sh test/01_unit/scripts/scv_bootstrap_composition_scope_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/scv_bootstrap_composition_scope_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-sffi-admission-acceptance-runner:tree:sh test/01_unit/scripts/sffi_admission_acceptance_runner_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/sffi_admission_acceptance_runner_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-sffi-contract-inventory-columns:tree:sh test/01_unit/scripts/sffi_contract_inventory_columns_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/sffi_contract_inventory_columns_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-sffi-evidence-admission-contract:tree:sh test/01_unit/scripts/sffi_evidence_admission_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/sffi_evidence_admission_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-simpleos-toolchain-desktop-boot-receipt-contract:tree:sh test/01_unit/scripts/simpleos_toolchain_desktop_boot_receipt_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/simpleos_toolchain_desktop_boot_receipt_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-simpleos-workflow-bootstrap-memory-route:tree:sh test/01_unit/scripts/simpleos_workflow_bootstrap_memory_route_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/simpleos_workflow_bootstrap_memory_route_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-stage2-parent-admission:tree:sh test/01_unit/scripts/stage2_parent_admission_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/stage2_parent_admission_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-storage-roots-darwin-case-marker:tree:sh test/01_unit/scripts/storage_roots_darwin_case_marker_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/storage_roots_darwin_case_marker_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-tool-storage-roots-mutation:tree:sh test/01_unit/scripts/tool_storage_roots_mutation_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/tool_storage_roots_mutation_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-tree-size-guard-duplicate-entry:tree:sh test/01_unit/scripts/tree_size_guard_duplicate_entry_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/tree_size_guard_duplicate_entry_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-unoq-qrb2210-cpu-server-live-runner-contract:tree:sh test/01_unit/scripts/unoq_qrb2210_cpu_server_live_runner_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/unoq_qrb2210_cpu_server_live_runner_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-unoq-qrb2210-native-2d-live-runner-contract:tree:sh test/01_unit/scripts/unoq_qrb2210_native_2d_live_runner_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/unoq_qrb2210_native_2d_live_runner_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-vulkan-2d-c-evidence-contract:tree:sh test/01_unit/scripts/vulkan_2d_c_evidence_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/vulkan_2d_c_evidence_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-vulkan-2d-c-immutable-runs-contract:tree:sh test/01_unit/scripts/vulkan_2d_c_immutable_runs_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/vulkan_2d_c_immutable_runs_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-web-server-request-port-evidence:tree:sh test/01_unit/scripts/web_server_request_port_evidence_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/web_server_request_port_evidence_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-windows-msvc-cl-environment:tree:sh test/01_unit/scripts/windows_msvc_cl_environment_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/windows_msvc_cl_environment_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-c-cpp-conformance:tree:sh test/01_unit/sdk/kernel_plugin/c_cpp_conformance_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/sdk/kernel_plugin/c_cpp_conformance_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-c-abi-conformance:tree:sh test/01_unit/tool/kernel_plugin_schema/c_abi_conformance_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/tool/kernel_plugin_schema/c_abi_conformance_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-generated-wit-fixture:tree:sh test/01_unit/tool/kernel_plugin_schema/generated_wit_fixture_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/tool/kernel_plugin_schema/generated_wit_fixture_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-diagnostic-sweep-resume:tree:sh test/02_integration/bootstrap_diagnostic_sweep_resume_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/02_integration/bootstrap_diagnostic_sweep_resume_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-bootstrap-stage3-runtime-authority-root:tree:sh test/02_integration/bootstrap_stage3_runtime_authority_root_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/02_integration/bootstrap_stage3_runtime_authority_root_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-run-process-stdout-lifecycle-native:tree:sh test/02_integration/runtime/run_process_stdout_lifecycle_native_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/02_integration/runtime/run_process_stdout_lifecycle_native_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-compiler-loader-retained-contract:tree:sh test/05_perf/profile_scripts/compiler_loader_retained_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/profile_scripts/compiler_loader_retained_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-cross-language-byte-retained-contract:tree:sh test/05_perf/profile_scripts/cross_language_byte_retained_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/profile_scripts/cross_language_byte_retained_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-cross-language-compile-failure-contract:tree:sh test/05_perf/profile_scripts/cross_language_compile_failure_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/profile_scripts/cross_language_compile_failure_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-engine2d-vulkan-c-parity-contract:tree:sh test/05_perf/profile_scripts/engine2d_vulkan_c_parity_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/profile_scripts/engine2d_vulkan_c_parity_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-aspect-pack-section-overlap-sweep-contract:tree:sh test/05_perf/startup/aspect_pack_section_overlap_sweep_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/aspect_pack_section_overlap_sweep_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-aspect-pack-single-section-scan-contract:tree:sh test/05_perf/startup/aspect_pack_single_section_scan_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/aspect_pack_single_section_scan_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-component-dynsmf-binding-index-contract:tree:sh test/05_perf/startup/component_dynsmf_binding_index_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/component_dynsmf_binding_index_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-component-dynsmf-loaded-index-contract:tree:sh test/05_perf/startup/component_dynsmf_loaded_index_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/component_dynsmf_loaded_index_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-dynsmf-autoload-manifest-index-contract:tree:sh test/05_perf/startup/dynsmf_autoload_manifest_index_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/dynsmf_autoload_manifest_index_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-dynsmf-disabled-policy-index-contract:tree:sh test/05_perf/startup/dynsmf_disabled_policy_index_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/dynsmf_disabled_policy_index_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-dynsmf-dispatch-snapshot-bound-contract:tree:sh test/05_perf/startup/dynsmf_dispatch_snapshot_bound_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/dynsmf_dispatch_snapshot_bound_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-dynsmf-export-witness-single-parse-contract:tree:sh test/05_perf/startup/dynsmf_export_witness_single_parse_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/dynsmf_export_witness_single_parse_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-dynsmf-frozen-payload-handoff-contract:tree:sh test/05_perf/startup/dynsmf_frozen_payload_handoff_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/dynsmf_frozen_payload_handoff_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-dynsmf-library-facet-revocation-index-contract:tree:sh test/05_perf/startup/dynsmf_library_facet_revocation_index_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/dynsmf_library_facet_revocation_index_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-dynsmf-loaded-membership-index-contract:tree:sh test/05_perf/startup/dynsmf_loaded_membership_index_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/dynsmf_loaded_membership_index_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-dynsmf-section-overlap-sweep-contract:tree:sh test/05_perf/startup/dynsmf_section_overlap_sweep_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/dynsmf_section_overlap_sweep_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-dynsmf-startup-settings-join-contract:tree:sh test/05_perf/startup/dynsmf_startup_settings_join_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/dynsmf_startup_settings_join_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-dynsmf-trust-admission-index-contract:tree:sh test/05_perf/startup/dynsmf_trust_admission_index_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/dynsmf_trust_admission_index_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-dynsmf-trust-digest-validator-contract:tree:sh test/05_perf/startup/dynsmf_trust_digest_validator_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/dynsmf_trust_digest_validator_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-dynsmf-trust-parse-index-contract:tree:sh test/05_perf/startup/dynsmf_trust_parse_index_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/dynsmf_trust_parse_index_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-dynsmf-trusted-binding-owner-index-contract:tree:sh test/05_perf/startup/dynsmf_trusted_binding_owner_index_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/dynsmf_trusted_binding_owner_index_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-http-response-cache-admission-contract:tree:sh test/05_perf/startup/http_response_cache_admission_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/http_response_cache_admission_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-sql-stmt-cache-admission-contract:tree:sh test/05_perf/startup/sql_stmt_cache_admission_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/sql_stmt_cache_admission_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-aspect-pack-cardinality-contract:tree:sh test/01_unit/scripts/aspect_pack_cardinality_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/aspect_pack_cardinality_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-dynsmf-facet-ref-count-contract:tree:sh test/01_unit/scripts/dynsmf_facet_ref_count_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/dynsmf_facet_ref_count_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-binary-size-go-parity-producer:tree:sh test/01_unit/scripts/binary_size_go_parity_producer_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/binary_size_go_parity_producer_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-process-tree-rss-absolute-limit:tree:sh test/01_unit/scripts/process_tree_rss_absolute_limit_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/process_tree_rss_absolute_limit_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-process-tree-rss-watchdog:tree:sh test/01_unit/scripts/process_tree_rss_watchdog_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/01_unit/scripts/process_tree_rss_watchdog_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-dbfs-file-meta-cache-cardinality-contract:tree:sh test/05_perf/startup/dbfs_file_meta_cache_cardinality_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/dbfs_file_meta_cache_cardinality_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-decorators-cache-cardinality-contract:tree:sh test/05_perf/startup/decorators_cache_cardinality_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/decorators_cache_cardinality_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-unwired-duplicate-cache-stats-key-snapshot-contract:tree:sh test/05_perf/startup/duplicate_cache_stats_key_snapshot_contract_test.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/test/05_perf/startup/duplicate_cache_stats_key_snapshot_contract_test.shs" || { rm -f "$_push_rows"; return 1; } ;;
             *)
                 # Fail-closed, and never silent: until 2026-09-06 this arm returned
                 # 2 without a word, so the caller reported "one or more gates
                 # failed" after a run in which no blocking gate had failed.
                 echo "push-must-check: manifest row '$_id' (mode $_mode, command \"$_command\") at $_ref matches no dispatch arm in $SELF_REL — refusing the row (fail-closed)" >&2
+                push_gate_defer_abort
                 rm -f "$_push_rows"; return 2 ;;
         esac
     done < "$_push_rows"
+    push_gate_defer_collect
+    _defer_rc=$?
     rm -f "$_push_rows"
     [ "$_advisory_skipped" -eq 0 ] ||
         echo "push-must-check: $_advisory_skipped advisory gate(s) skipped on this push (MUST_CHECK_ADVISORY=1 runs them; they never block)" >&2
+    return "$_defer_rc"
 }
 
 # The manifest is read from the COMMIT being pushed, so the dispatch arms must be
@@ -1083,17 +1702,62 @@ published_main_ref() {
 # main, use the unique merge-base of tip and main as the predecessor if it
 # descends from the old ref. Every commit this drops from old..tip is reachable
 # from published main; the branch's own commits all stay in range.
+#
+# Release lines (2026-11-17): a PR based on release/<x.y> that merges the
+# advanced release tip had merge-base(tip, main) as its base, so every
+# inherited release commit was scanned. Candidates are now published main plus
+# every versioned refs/remotes/<remote>/release/<x.y>; each must have a unique
+# merge-base with the tip, and the one leaving the fewest tip-side commits wins.
+# Any unique merge-base with a published tip is itself published.
 main_merged_predecessor() {
     _mm_tip=$1
     _mm_old=$2
     _mm_ref=$(published_main_ref) || return 1
-    _mm_base=$(git -C "$ROOT" merge-base --all "$_mm_ref" "$_mm_tip") || return 1
-    [ -n "$_mm_base" ] || return 1
-    [ "$(printf '%s\n' "$_mm_base" | wc -l | tr -d ' ')" -eq 1 ] || return 1
-    [ "$_mm_base" != "$_mm_tip" ] || return 1
+    _mm_remote=${MUST_CHECK_PUSH_REMOTE}
+    _mm_cands=$(printf '%s\n' "$_mm_ref"
+        git -C "$ROOT" for-each-ref --format='%(refname)' "refs/remotes/$_mm_remote/release/" 2>/dev/null)
+    _mm_old_count=$(git -C "$ROOT" rev-list --count "$_mm_old..$_mm_tip") || return 1
+    _mm_best=""
+    _mm_best_count=""
+    for _mm_cand in $_mm_cands; do
+        case "$_mm_cand" in
+            "$_mm_ref") ;;
+            refs/remotes/"$_mm_remote"/release/*)
+                _mm_version=${_mm_cand#refs/remotes/$_mm_remote/release/}
+                case "$_mm_version" in *.*) ;; *) continue ;; esac
+                case "$_mm_version" in ''|.*|*.|*..*|*[!0-9.]*) continue ;; esac
+                ;;
+            *) continue ;;
+        esac
+        _mm_base=$(git -C "$ROOT" merge-base --all "$_mm_cand" "$_mm_tip") || continue
+        [ -n "$_mm_base" ] || continue
+        [ "$(printf '%s\n' "$_mm_base" | wc -l | tr -d ' ')" -eq 1 ] || continue
+        [ "$_mm_base" != "$_mm_tip" ] || continue
+        _mm_count=$(git -C "$ROOT" rev-list --count "$_mm_base..$_mm_tip") || continue
+        if [ -z "$_mm_best_count" ] || [ "$_mm_count" -lt "$_mm_best_count" ]; then
+            _mm_best=$_mm_base
+            _mm_best_count=$_mm_count
+        fi
+    done
+    # Local tracking refs only decide WHETHER to narrow. A stale or missing
+    # refs/remotes/<remote>/release/<x.y> made published main the closest local
+    # candidate, so a release-line PR was charged with the release line's whole
+    # history (2026-11-23, runtime_api_regression_guard_release_range...).
+    # Whenever narrowing is possible, or the range carries a merge that may have
+    # pulled in a published line, the base comes from the LIVE remote lines
+    # instead; if those cannot be confirmed, return 2 (ERROR), never a wrong range.
+    _mm_merges=$(git -C "$ROOT" rev-list --count --merges "$_mm_old..$_mm_tip") || return 2
+    if [ -z "$_mm_best" ] || [ "$_mm_best_count" -ge "$_mm_old_count" ]; then
+        [ "$_mm_merges" -gt 0 ] || return 1
+    fi
+    _mm_live=$(rebased_push_published_base "$_mm_tip") || {
+        echo "push-must-check: ERROR — cannot confirm the push's published base line (main, release_phase3, release/*) at $_mm_remote; fetch it and retry" >&2
+        return 2
+    }
+    _mm_live_count=$(git -C "$ROOT" rev-list --count "$_mm_live..$_mm_tip") || return 2
     # Only replace old when it is strictly narrower.
-    [ "$(git -C "$ROOT" rev-list --count "$_mm_base..$_mm_tip")" -lt "$(git -C "$ROOT" rev-list --count "$_mm_old..$_mm_tip")" ] || return 1
-    printf '%s\n' "$_mm_base"
+    [ "$_mm_live_count" -lt "$_mm_old_count" ] || return 1
+    printf '%s\n' "$_mm_live"
 }
 
 # A non-fast-forward PR update replaces a branch built on an old base with a
@@ -1116,6 +1780,15 @@ main_merged_predecessor() {
 # tracking ref, unrelated history, ambiguous merge base on every candidate, or
 # an unavailable remote remains a refusal. The entire tip-side range from the
 # chosen base is checked by every range guard.
+published_line_fetch() {
+    # $1 remote/destination, $2 refs/heads/<line>, $3 sha the live query
+    # advertised. Objects only (no ref, no FETCH_HEAD); success requires that
+    # exact sha to be present afterwards, so nothing local is trusted.
+    "$TIMEOUT_BIN" -k 1s "${REMOTE_QUERY_TIMEOUT_S}s" git -C "$ROOT" fetch -q --no-tags --no-write-fetch-head \
+        "$1" "$2" </dev/null >/dev/null 2>&1 || return 1
+    git -C "$ROOT" rev-parse --verify --quiet "$3^{commit}" >/dev/null
+}
+
 rebased_push_published_base() {
     _rebased_tip=$1
     _rebased_remote=${MUST_CHECK_PUSH_REMOTE:-}
@@ -1125,6 +1798,7 @@ rebased_push_published_base() {
     _rebased_lines=$("$TIMEOUT_BIN" -k 1s "${REMOTE_QUERY_TIMEOUT_S}s" git -C "$ROOT" ls-remote --exit-code "$_rebased_remote" \
         refs/heads/main refs/heads/release_phase3 'refs/heads/release/*' 2>/dev/null) || return 1
     _rebased_best=""
+    _rebased_missing=""
     _rebased_best_count=""
     while read -r _rebased_sha _rebased_ref; do
         case "$_rebased_ref" in
@@ -1137,7 +1811,17 @@ rebased_push_published_base() {
             *) continue ;;
         esac
         case "$_rebased_sha" in ''|*[!0-9a-f]*) continue ;; esac
-        git -C "$ROOT" rev-parse --verify --quiet "$_rebased_sha^{commit}" >/dev/null || continue
+        # A protected line advertised by the LIVE query but not yet fetched
+        # (release/* moves several times an hour) used to be skipped, so the
+        # choice silently fell to main and every release-based push was
+        # measured from merge-base(release, main): unrelated rt_* deltas
+        # blamed on a docs-only push. Fetch exactly that advertised object
+        # (bounded, no ref update) instead of trusting any local tracking ref.
+        git -C "$ROOT" rev-parse --verify --quiet "$_rebased_sha^{commit}" >/dev/null ||
+            published_line_fetch "$_rebased_remote" "$_rebased_ref" "$_rebased_sha" || {
+            _rebased_missing="$_rebased_missing ${_rebased_ref#refs/heads/}"
+            continue
+        }
         _rebased_base=$(git -C "$ROOT" merge-base --all "$_rebased_sha" "$_rebased_tip") || continue
         [ -n "$_rebased_base" ] || continue
         [ "$(printf '%s\n' "$_rebased_base" | wc -l | tr -d ' ')" -eq 1 ] || continue
@@ -1150,6 +1834,14 @@ rebased_push_published_base() {
     done <<REBASED_LINES
 $_rebased_lines
 REBASED_LINES
+    # An unavailable advertised line might be the closest base. Returning a
+    # different candidate here silently charges its upstream changes to this
+    # push, even though the on-demand fetch just failed. Refuse the incomplete
+    # comparison instead of treating the missing line as unrelated history.
+    if [ -n "$_rebased_missing" ]; then
+        echo "push-must-check: remote has newer$_rebased_missing than this clone has fetched; run git fetch first" >&2
+        return 1
+    fi
     [ -n "$_rebased_best" ] || return 1
     printf '%s\n' "$_rebased_best"
 }
@@ -1166,7 +1858,16 @@ REBASED_LINES
 new_ref_published_base() {
     _nr_ref=$1
     _nr_tip=$2
-    case "$_nr_ref" in refs/heads/*) _nr_branch=${_nr_ref#refs/heads/} ;; *) return 1 ;; esac
+    # `git push origin HEAD:refs/heads/<b>` reports the local ref as HEAD:
+    # resolve it to the checked-out branch; a detached HEAD has no upstream
+    # and takes the closest-published-line path below.
+    if [ "$_nr_ref" = HEAD ]; then
+        _nr_ref=$(git -C "$ROOT" symbolic-ref -q HEAD 2>/dev/null) || _nr_ref=HEAD
+    fi
+    case "$_nr_ref" in
+        refs/heads/*) _nr_branch=${_nr_ref#refs/heads/} ;;
+        *) new_ref_closest_published_base "$_nr_tip"; return ;;
+    esac
     _nr_merge=$(git -C "$ROOT" config --get-all "branch.$_nr_branch.merge" 2>/dev/null) || _nr_merge=""
     # `--get-all` may return several configured upstreams. Never let a mixed
     # release/main value drop into the ordinary-main fallback by accident.
@@ -1191,22 +1892,91 @@ new_ref_published_base() {
             case "$_nr_push_remote" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
             _nr_destination=${MUST_CHECK_PUSH_DESTINATION:-}
             case "$_nr_destination" in ''|-*) return 1 ;; esac
+            # A stale/forged tracking ref must never replace this live query
+            # (see --self-test-release-base); a failed query refuses, and says why.
             _nr_line=$("$TIMEOUT_BIN" -k 1s "${REMOTE_QUERY_TIMEOUT_S}s" \
-                git -C "$ROOT" ls-remote --exit-code "$_nr_destination" "$_nr_merge" 2>/dev/null) || return 1
+                git -C "$ROOT" ls-remote --exit-code "$_nr_destination" "$_nr_merge" 2>/dev/null) || {
+                echo "push-must-check: ls-remote of $_nr_merge at the push destination failed or exceeded ${REMOTE_QUERY_TIMEOUT_S}s (MUST_CHECK_REMOTE_QUERY_TIMEOUT_S)" >&2
+                return 1
+            }
             _nr_sha=${_nr_line%%[[:space:]]*}
             _nr_seen_ref=${_nr_line#*[[:space:]]}
             [ "$_nr_seen_ref" = "$_nr_merge" ] || return 1
-            git -C "$ROOT" rev-parse --verify --quiet "$_nr_sha^{commit}" >/dev/null || return 1
+            git -C "$ROOT" rev-parse --verify --quiet "$_nr_sha^{commit}" >/dev/null ||
+                published_line_fetch "$_nr_destination" "$_nr_merge" "$_nr_sha" || {
+                echo "push-must-check: remote has newer ${_nr_merge#refs/heads/} ($_nr_sha) than this clone has fetched; run git fetch first" >&2
+                return 1
+            }
             _nr_base=$(git -C "$ROOT" merge-base --all "$_nr_sha" "$_nr_tip") || return 1
             [ -n "$_nr_base" ] || return 1
             [ "$(printf '%s\n' "$_nr_base" | wc -l | tr -d ' ')" -eq 1 ] || return 1
             printf '%s\n' "$_nr_base"
             ;;
         *)
-            # Keep the historical main-based behavior for ordinary new refs.
-            git -C "$ROOT" merge-base "$_nr_tip" origin/main
+            # No release upstream. With no upstream at all, base on the closest
+            # published protected line
+            # (main, release_phase3, release/*), as rebased pushes already do.
+            # Measuring a release-based branch against origin/main scanned
+            # every main..release difference and overran the push budget.
+            # Only for a branch with NO upstream at all: a configured
+            # non-release upstream (e.g. a near-match like release_phase30)
+            # keeps the historical origin/main base and must not gain release
+            # authority (--self-test-release-base).
+            if [ -z "$_nr_merge" ]; then
+                new_ref_closest_published_base "$_nr_tip"
+            else
+                git -C "$ROOT" merge-base "$_nr_tip" origin/main
+            fi
             ;;
     esac
+}
+
+# Closest published protected line for a new ref without a usable release
+# upstream. A local tracking ref cannot override failed live authority.
+new_ref_closest_published_base() {
+    rebased_push_published_base "$1"
+}
+
+# Release promotion (2026-11-27): a branch whose declared base is main
+# (`branch.<b>.merge = refs/heads/main`, exactly one value) and whose tip is
+# already published on a versioned release/<x.y> line of the actual push
+# destination carries 0 unreviewed commits, exactly like a tag. The verdict is
+# release-promotion-admission.shs's, on the LIVE remote; exit 0 is the only
+# admission, and every other outcome leaves the normal range gates in force.
+# A local, non-authoritative pre-check keeps an ordinary main-based push from
+# paying a remote query: its tip is neither on a release tracking ref nor
+# tree-identical to one's tip.
+# Prints the admission line. Returns non-zero when not admitted.
+release_promotion_admission() {
+    _rp_ref=$1; _rp_sha=$2
+    case "$_rp_ref" in refs/heads/*) ;; *) return 1 ;; esac
+    _rp_merge=$(git -C "$ROOT" config --get-all "branch.${_rp_ref#refs/heads/}.merge" 2>/dev/null) || return 1
+    [ "$_rp_merge" = refs/heads/main ] || return 1
+    _rp_remote=${MUST_CHECK_PUSH_REMOTE:-}
+    case "$_rp_remote" in ''|*[!A-Za-z0-9._/-]*) return 1 ;; esac
+    _rp_destination=${MUST_CHECK_PUSH_DESTINATION:-}
+    case "$_rp_destination" in ''|-*) return 1 ;; esac
+    _rp_tree=$(git -C "$ROOT" rev-parse --verify --quiet "$_rp_sha^{tree}") || return 1
+    _rp_candidate=0
+    for _rp_tip in $(git -C "$ROOT" for-each-ref --format='%(objectname)' "refs/remotes/$_rp_remote/release/" 2>/dev/null); do
+        if [ "$_rp_tip" = "$_rp_sha" ] ||
+            git -C "$ROOT" merge-base --is-ancestor "$_rp_sha" "$_rp_tip" 2>/dev/null ||
+            [ "$(git -C "$ROOT" rev-parse --verify --quiet "$_rp_tip^{tree}")" = "$_rp_tree" ]; then
+            _rp_candidate=1
+            break
+        fi
+    done
+    [ "$_rp_candidate" -eq 1 ] || return 1
+    _rp_out=$(sh "$ROOT/scripts/check/release-promotion-admission.shs" --repo "$ROOT" \
+        --base-ref refs/heads/main --head "$_rp_sha" --remote "$_rp_destination" 2>/dev/null)
+    _rp_rc=$?
+    _rp_line=$(printf '%s\n' "$_rp_out" | tail -n 1)
+    if [ "$_rp_rc" -ne 0 ]; then
+        echo "push-must-check: release promotion of $_rp_ref: $_rp_line" >&2
+        return 1
+    fi
+    case "$_rp_line" in "PASS — release promotion: $_rp_sha tree == published release/"*) ;; *) return 1 ;; esac
+    printf '%s\n' "$_rp_line"
 }
 
 # The blocking budget needs GNU timeout(1). Absence is an ERROR naming the
@@ -1216,8 +1986,8 @@ new_ref_published_base() {
 case "$MUST_CHECK_PUSH_BUDGET_S" in
     ''|*[!0-9]*|0) echo "push-must-check: ERROR — nothing was checked (MUST_CHECK_PUSH_BUDGET_S must be a positive integer, got '$MUST_CHECK_PUSH_BUDGET_S')"; exit 2 ;;
 esac
-[ "$MUST_CHECK_PUSH_BUDGET_S" -eq 10 ] ||
-    echo "push-must-check: NOTE — blocking budget overridden to ${MUST_CHECK_PUSH_BUDGET_S}s via MUST_CHECK_PUSH_BUDGET_S (default 10s)" >&2
+[ "$MUST_CHECK_PUSH_BUDGET_S" -eq "$MUST_CHECK_DEFAULT_PUSH_BUDGET_S" ] ||
+    echo "push-must-check: NOTE — blocking budget overridden to ${MUST_CHECK_PUSH_BUDGET_S}s via MUST_CHECK_PUSH_BUDGET_S (host default ${MUST_CHECK_DEFAULT_PUSH_BUDGET_S}s)" >&2
 MUST_CHECK_BUDGET_MS=$(( MUST_CHECK_PUSH_BUDGET_S * 1000 ))
 # Tool selection (2026-09-24 fix): `command -v timeout` alone is unsafe on two
 # real hosts. (1) Stock macOS has no `timeout` at all — only Homebrew's
@@ -1247,6 +2017,10 @@ if command -v gtimeout >/dev/null 2>&1 && _is_gnu_timeout gtimeout; then
     TIMEOUT_BIN=gtimeout
 elif command -v timeout >/dev/null 2>&1 && _is_gnu_timeout timeout; then
     TIMEOUT_BIN=timeout
+elif [ -x /usr/bin/timeout ] && _is_gnu_timeout /usr/bin/timeout; then
+    TIMEOUT_BIN=/usr/bin/timeout
+elif [ -x /bin/timeout ] && _is_gnu_timeout /bin/timeout; then
+    TIMEOUT_BIN=/bin/timeout
 else
     echo "push-must-check: ERROR — nothing was checked (GNU timeout(1) not found or not identifiable via --version: install GNU coreutils so 'timeout' or 'gtimeout' resolves to it. On Windows this means Git Bash's own coreutils 'timeout' must precede C:\\Windows\\System32 on PATH — that System32 'timeout.exe' is an unrelated countdown command and is never accepted here. On stock macOS: 'brew install coreutils' provides 'gtimeout')"
     exit 2
@@ -1362,6 +2136,16 @@ if [ "${1:-}" = --self-test-release-base ]; then
     [ "$(git -C "$ROOT" rev-list --count "$_st_release_one..$_st_tip")" -eq 1 ] || exit 2
     echo 'push-must-check: release-based new ref scans its one own commit: PASS'
 
+    # `git push origin HEAD:refs/heads/<b>` reports local ref HEAD.
+    [ "$(new_ref_published_base HEAD "$_st_tip")" = "$_st_release_one" ] || exit 2
+    echo 'push-must-check: HEAD local ref resolves to the checked-out branch: PASS'
+    # No upstream at all: base on the closest published line, not origin/main.
+    git -C "$ROOT" branch -q --unset-upstream fix/release || exit 2
+    [ "$(new_ref_published_base refs/heads/fix/release "$_st_tip")" = "$_st_release_one" ] || exit 2
+    [ "$(new_ref_published_base HEAD "$(git -C "$ROOT" rev-parse HEAD)")" = "$_st_release_one" ] || exit 2
+    git -C "$ROOT" branch -q --set-upstream-to=origin/release/1.0 fix/release || exit 2
+    echo 'push-must-check: upstream-less release-based new ref scans only its own commit: PASS'
+
     git -C "$ROOT" switch -q release/1.0
     printf 'release two\n' >> "$ROOT/release.txt"
     git -C "$ROOT" add release.txt && git -C "$ROOT" commit -qm release-two &&
@@ -1369,6 +2153,39 @@ if [ "${1:-}" = --self-test-release-base ]; then
     git -C "$ROOT" switch -q fix/release
     [ "$(new_ref_published_base refs/heads/fix/release "$_st_tip")" = "$_st_release_one" ] || exit 2
     echo 'push-must-check: advanced published release keeps the common base: PASS'
+
+    # Release advanced on the remote and this clone has not fetched it. The
+    # base must still come from release (fetched on demand), never from
+    # main: merge-base(release, main) blamed release-vs-main rt_* deltas on
+    # every docs-only release push (2026-11-07).
+    _st_rel_prev=$(git -C "$_st_dir/remote.git" rev-parse refs/heads/release/1.0) || exit 2
+    _st_rel_remote=$(printf 'release three (remote only)\n' | git -C "$_st_dir/remote.git" -c user.name=test -c user.email=test@example.com \
+        commit-tree "$_st_rel_prev^{tree}" -p "$_st_rel_prev") || exit 2
+    git -C "$_st_dir/remote.git" update-ref refs/heads/release/1.0 "$_st_rel_remote" || exit 2
+    git -C "$ROOT" rev-parse --verify --quiet "$_st_rel_remote^{commit}" >/dev/null && exit 2
+    # The advertised release object is genuinely absent. Inject only the
+    # transfer failure, keeping the live Git advertisement/merge-base path:
+    # neither an older main candidate nor the new-ref wrapper may mask it.
+    (
+        published_line_fetch() { return 1; }
+        if rebased_push_published_base "$_st_tip" >"$_st_dir/unfetched.out" 2>"$_st_dir/unfetched.err"; then
+            echo 'push-must-check: failed release fetch selected a stale base: FAIL' >&2; exit 2
+        fi
+        [ ! -s "$_st_dir/unfetched.out" ] || exit 2
+        grep -q 'run git fetch first' "$_st_dir/unfetched.err" || exit 2
+        if new_ref_closest_published_base "$_st_tip" >"$_st_dir/unfetched-new.out" 2>"$_st_dir/unfetched-new.err"; then
+            echo 'push-must-check: new-ref fallback masked failed release fetch: FAIL' >&2; exit 2
+        fi
+        [ ! -s "$_st_dir/unfetched-new.out" ] || exit 2
+        grep -q 'run git fetch first' "$_st_dir/unfetched-new.err" || exit 2
+    ) || exit 2
+    echo 'push-must-check: failed advertised release fetch refuses rebased and new-ref stale bases: PASS'
+    [ "$(rebased_push_published_base "$_st_tip")" = "$_st_release_one" ] || {
+        echo 'push-must-check: unfetched release tip fell back to a main base: FAIL' >&2; exit 2; }
+    git -C "$ROOT" rev-parse --verify --quiet "$_st_rel_remote^{commit}" >/dev/null || exit 2
+    [ "$(new_ref_closest_published_base "$_st_tip")" = "$_st_release_one" ] || exit 2
+    git -C "$_st_dir/remote.git" update-ref refs/heads/release/1.0 "$_st_rel_prev" || exit 2
+    echo 'push-must-check: unfetched advanced release is fetched and stays the base (not main): PASS'
 
     git -C "$ROOT" switch -q main && git -C "$ROOT" switch -qc fix/main
     git -C "$ROOT" branch -q --set-upstream-to=origin/main
@@ -1492,8 +2309,12 @@ if [ "${1:-}" = --self-test-release-base ]; then
     _st_unfetched=$(printf 'remote-only legacy\n' | git -C "$_st_dir/remote.git" -c user.name=test -c user.email=test@example.com commit-tree "$_st_tree" -p "$_st_published_merge") || exit 2
     git -C "$_st_dir/remote.git" update-ref refs/heads/release_phase3 "$_st_unfetched" || exit 2
     git -C "$ROOT" rev-parse --verify --quiet "$_st_unfetched^{commit}" >/dev/null && exit 2
-    new_ref_published_base refs/heads/work/legacy "$_st_own" >/dev/null 2>&1 && exit 2
-    echo 'push-must-check: unavailable published legacy commit refuses: PASS'
+    # The live-advertised commit is now fetched on demand (objects only); the
+    # result must equal the unique merge base with that exact fetched sha.
+    _st_got=$(new_ref_published_base refs/heads/work/legacy "$_st_own" 2>/dev/null) || exit 2
+    git -C "$ROOT" rev-parse --verify --quiet "$_st_unfetched^{commit}" >/dev/null || exit 2
+    [ "$_st_got" = "$(git -C "$ROOT" merge-base "$_st_unfetched" "$_st_own")" ] || exit 2
+    echo 'push-must-check: unfetched published legacy commit is fetched on demand and bases the range: PASS'
 
     git -C "$ROOT" push -q origin :refs/heads/release_phase3 || exit 2
     git -C "$ROOT" update-ref refs/remotes/origin/release_phase3 "$_st_legacy" || exit 2
@@ -1505,7 +2326,9 @@ fi
 
 if [ "${1:-}" = --self-test ]; then
     _tmp=$(mktemp -d) || exit 2
-    trap 'rm -rf "$_tmp"' EXIT INT TERM
+    trap 'rm -rf "$_tmp"' EXIT
+    trap 'rm -rf "$_tmp"; exit 130' INT
+    trap 'rm -rf "$_tmp"; exit 143' TERM
     cp "$ROOT/$MANIFEST_REL" "$_tmp/manifest"
     cp "$ROOT/$LEDGER_REL" "$_tmp/ledger"
     printf '%s\n' 'self-test authoritative evidence' > "$_tmp/evidence"
@@ -1584,6 +2407,34 @@ if [ "${1:-}" = --self-test ]; then
     [ "$_rc" -ne 0 ] || die "budget-exhausted gate reported success (rc=0), never a pass is required"
     [ "$MUST_CHECK_BUDGET_OVERRUN" = "budget-exhausted-fixture" ] || die "budget-exhausted gate did not record MUST_CHECK_BUDGET_OVERRUN"
 
+    # Deferred-parallel fixtures: the batch must apply the sequential verdict
+    # rules -- a failing, a budget-killed, and an all-pass batch.
+    case "$(uname -s 2>/dev/null || printf unknown)" in
+        MINGW*|MSYS*|CYGWIN*) _par_pass_budget_ms=120000; _par_budget_ms=4000; _par_sleep=12 ;;
+        *) _par_pass_budget_ms=5000; _par_budget_ms=1000; _par_sleep=3 ;;
+    esac
+    printf '#!/bin/sh\nexit 1\n' > "$_tmp/fail-gate.shs"
+    MUST_CHECK_BUDGET_MS=$_par_pass_budget_ms; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+    push_gate_defer_begin
+    [ -n "$PUSH_PAR_DIR" ] || die "deferred batch did not start"
+    run_push_gate "par-pass" true "$_tmp/fast-gate.shs" || die "deferred launch returned non-zero"
+    run_push_gate "par-fail" true "$_tmp/fail-gate.shs" || die "deferred launch returned non-zero"
+    push_gate_defer_collect >/dev/null 2>&1 && die "deferred batch with a failing gate passed"
+    printf '#!/bin/sh\nsleep %s\nexit 0\n' "$_par_sleep" > "$_tmp/slow-gate-par.shs"
+    MUST_CHECK_BUDGET_MS=$_par_budget_ms; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+    push_gate_defer_begin
+    run_push_gate "par-slow" true "$_tmp/slow-gate-par.shs"
+    run_push_gate "par-pass" true "$_tmp/fast-gate.shs"
+    push_gate_defer_collect >/dev/null 2>&1 && die "deferred batch with a budget-killed gate passed"
+    [ "$MUST_CHECK_BUDGET_OVERRUN" = "par-slow" ] || die "deferred overrun did not name the killed gate"
+    MUST_CHECK_BUDGET_MS=$_par_pass_budget_ms; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+    push_gate_defer_begin
+    run_push_gate "par-a" true "$_tmp/fast-gate.shs"
+    run_push_gate "par-b" true "$_tmp/fast-gate.shs"
+    push_gate_defer_collect >/dev/null 2>&1 || die "all-pass deferred batch failed"
+    [ "$MUST_CHECK_BUDGET_SPENT_MS" -gt 0 ] || die "deferred batch did not charge the budget"
+    MUST_CHECK_BUDGET_MS=500; MUST_CHECK_BUDGET_SPENT_MS=500; MUST_CHECK_BUDGET_OVERRUN=""
+
     # Awk dispatcher parity fixture (review finding item2#4ii): a push-blocking
     # manifest row whose `id:mode:command` key matches no exact arm in the
     # dispatcher's case statement must fail closed with exit 2, never be
@@ -1616,12 +2467,28 @@ if [ "${1:-}" = --self-test ]; then
     git -C "$_rebased_repo" commit -q --allow-empty -m old || die "rebased fixture old branch failed"
     _rebased_old=$(git -C "$_rebased_repo" rev-parse HEAD)
     git -C "$_rebased_repo" push -q origin old || die "rebased fixture old push failed"
+    _selftest_empty_chain() {
+        _sec_repo=$1
+        _sec_branch=$2
+        _sec_n=$3
+        _sec_pfx=$4
+        _sec_parent=$(git -C "$_sec_repo" rev-parse HEAD) || return 1
+        {
+            _sec_i=0
+            while [ "$_sec_i" -lt "$_sec_n" ]; do
+                _sec_msg="$_sec_pfx-$_sec_i"
+                printf 'commit refs/heads/%s\ncommitter Test <test@example.com> %d +0000\ndata %d\n%s\n' \
+                    "$_sec_branch" "$((1700000000 + _sec_i))" "${#_sec_msg}" "$_sec_msg"
+                if [ "$_sec_i" -eq 0 ]; then
+                    printf 'from %s\n' "$_sec_parent"
+                fi
+                _sec_i=$((_sec_i + 1))
+            done
+        } | git -C "$_sec_repo" fast-import --quiet &&
+        git -C "$_sec_repo" reset -q --hard "refs/heads/$_sec_branch"
+    }
     git -C "$_rebased_repo" switch -q main
-    _rebased_i=0
-    while [ "$_rebased_i" -lt 65 ]; do
-        git -C "$_rebased_repo" commit -q --allow-empty -m "main-$_rebased_i" || die "rebased fixture main commit failed"
-        _rebased_i=$((_rebased_i + 1))
-    done
+    _selftest_empty_chain "$_rebased_repo" main 65 main || die "rebased fixture main commit failed"
     _rebased_expected=$(git -C "$_rebased_repo" rev-parse HEAD)
     git -C "$_rebased_repo" push -q origin main || die "rebased fixture advanced main push failed"
     git -C "$_rebased_repo" switch -q -c replacement
@@ -1636,9 +2503,13 @@ if [ "${1:-}" = --self-test ]; then
     mkdir -p "$ROOT/scripts/check"
     cp "$_saved_root/scripts/check/check-no-conflict-tree-push.shs" "$ROOT/scripts/check/" || die "rebased fixture guard copy failed"
     printf 'refs/heads/replacement %s refs/heads/old %s\n' "$_rebased_tip" "$_rebased_old" > "$_tmp/rebased/refs"
+    case "$(uname -s 2>/dev/null || printf unknown)" in
+        MINGW*|MSYS*|CYGWIN*) _union_budget_ms=180000 ;;
+        *) _union_budget_ms=10000 ;;
+    esac
     (
         cd "$ROOT" || exit 1
-        MUST_CHECK_BUDGET_MS=10000
+        MUST_CHECK_BUDGET_MS=$_union_budget_ms
         MUST_CHECK_BUDGET_SPENT_MS=0
         MUST_CHECK_BUDGET_OVERRUN=""
         run_conflict_tree_union "$_tmp/rebased/refs"
@@ -1652,12 +2523,16 @@ if [ "${1:-}" = --self-test ]; then
     MUST_CHECK_PUSH_REMOTE=origin
     mkdir -p "$_tmp/rebased/slow-bin"
     _real_git=$(command -v git)
-    cat > "$_tmp/rebased/slow-bin/git" <<'SLOW_GIT'
+    case "$(uname -s 2>/dev/null || printf unknown)" in
+        MINGW*|MSYS*|CYGWIN*) _slow_remote_sleep=150; _slow_remote_bound=90 ;;
+        *) _slow_remote_sleep=10; _slow_remote_bound=8 ;;
+    esac
+    cat > "$_tmp/rebased/slow-bin/git" <<SLOW_GIT
 #!/bin/sh
-case " $* " in
-    *' ls-remote '*) sleep 5 ;;
+case " \$* " in
+    *' ls-remote '*) exec sleep $_slow_remote_sleep ;;
 esac
-exec "$REBASE_FIXTURE_REAL_GIT" "$@"
+exec "\$REBASE_FIXTURE_REAL_GIT" "\$@"
 SLOW_GIT
     chmod +x "$_tmp/rebased/slow-bin/git"
     (
@@ -1668,7 +2543,7 @@ SLOW_GIT
         _slow_start=$(date +%s)
         if rebased_push_published_base "$_rebased_tip" >/dev/null 2>&1; then exit 1; fi
         _slow_elapsed=$(( $(date +%s) - _slow_start ))
-        [ "$_slow_elapsed" -lt 5 ] || exit 1
+        [ "$_slow_elapsed" -lt "$_slow_remote_bound" ] || exit 1
     ) || die "slow remote was accepted or not bounded"
 
     # Release-line rebase fixture (2026-10-19): main and release_phase3 are
@@ -1731,29 +2606,70 @@ SLOW_GIT
     printf 'refs/heads/stale %s refs/heads/stale %s\n' "$_stale_tip" "$_stale_old" > "$_tmp/rebased/stale-refs"
     (
         cd "$ROOT" || exit 1
-        MUST_CHECK_BUDGET_MS=10000; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+        MUST_CHECK_BUDGET_MS=$_union_budget_ms; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
         run_conflict_tree_union "$_tmp/rebased/stale-refs"
     ) >/dev/null 2>&1 || die "stale branch merging main was rejected by the commit bound"
     (
         cd "$ROOT" || exit 1
         MUST_CHECK_PUSH_REMOTE=missing-remote
-        MUST_CHECK_BUDGET_MS=10000; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+        MUST_CHECK_BUDGET_MS=$_union_budget_ms; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
         run_conflict_tree_union "$_tmp/rebased/stale-refs"
     ) >/dev/null 2>&1 && die "stale merge admitted without a verifiable remote main"
     git -C "$ROOT" switch -q -c big main
     _big_old=$(git -C "$ROOT" rev-parse HEAD)
-    _big_i=0
-    while [ "$_big_i" -lt 65 ]; do
-        git -C "$ROOT" commit -q --allow-empty -m "big-$_big_i" || die "big fixture commit failed"
-        _big_i=$((_big_i + 1))
-    done
+    _selftest_empty_chain "$ROOT" big 65 big || die "big fixture commit failed"
     _big_tip=$(git -C "$ROOT" rev-parse HEAD)
     printf 'refs/heads/big %s refs/heads/big %s\n' "$_big_tip" "$_big_old" > "$_tmp/rebased/big-refs"
     (
         cd "$ROOT" || exit 1
-        MUST_CHECK_BUDGET_MS=10000; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+        MUST_CHECK_BUDGET_MS=$_union_budget_ms; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
         run_conflict_tree_union "$_tmp/rebased/big-refs"
     ) >/dev/null 2>&1 && die "65 genuinely new commits passed the 64-commit bound"
+    # Release-line merge fixture (2026-11-17): a PR branch based on
+    # release/<x.y> merges the advanced release tip. The per-ref base must be
+    # that release merge-base, not merge-base(tip, main), or every inherited
+    # release commit is charged to the push.
+    git -C "$ROOT" switch -q -c release/9.9 main
+    git -C "$ROOT" commit -q --allow-empty -m rel-root || die "release fixture commit failed"
+    git -C "$ROOT" push -q origin release/9.9 || die "release fixture push failed"
+    git -C "$ROOT" switch -q -c relpr release/9.9
+    git -C "$ROOT" commit -q --allow-empty -m relpr-own || die "release fixture own commit failed"
+    _relpr_old=$(git -C "$ROOT" rev-parse HEAD)
+    git -C "$ROOT" switch -q release/9.9
+    _selftest_empty_chain "$ROOT" release/9.9 70 rel-adv || die "release fixture advance failed"
+    git -C "$ROOT" push -q origin release/9.9 || die "release fixture advance push failed"
+    git -C "$ROOT" switch -q relpr
+    git -C "$ROOT" merge -q --no-ff -m merge-release release/9.9 || die "release fixture merge failed"
+    _relpr_tip=$(git -C "$ROOT" rev-parse HEAD)
+    [ "$(git -C "$ROOT" rev-list --count "$_relpr_old..$_relpr_tip")" -gt 64 ] || die "release fixture did not exceed the 64-commit bound"
+    _relpr_pred=$(MUST_CHECK_PUSH_REMOTE=origin main_merged_predecessor "$_relpr_tip" "$_relpr_old") ||
+        die "release fixture: no published-line predecessor for a release merge"
+    [ "$_relpr_pred" = "$(git -C "$ROOT" rev-parse refs/remotes/origin/release/9.9)" ] ||
+        die "release fixture: per-ref base is not the published release tip"
+    [ "$(git -C "$ROOT" rev-list --count "$_relpr_pred..$_relpr_tip")" -eq 2 ] ||
+        die "release fixture: range is not just the branch's own commits"
+    # Stale/missing release tracking ref (2026-11-23): the topic branches off
+    # release/9.9 (which differs from main) and the local tracking ref is
+    # first deleted, then rewound. The base must still be the live release
+    # tip -- never merge-base(tip, main) -- and only the topic's own commits
+    # are in range. An unreachable push remote is an ERROR (rc 2).
+    _relpr_live=$(git -C "$ROOT" rev-parse refs/remotes/origin/release/9.9)
+    [ "$(git -C "$ROOT" rev-list --count "main..$_relpr_live")" -gt 0 ] || die "stale-release fixture: release/9.9 does not differ from main"
+    git -C "$ROOT" update-ref -d refs/remotes/origin/release/9.9 || die "stale-release fixture: ref delete failed"
+    _relpr_pred=$(MUST_CHECK_PUSH_REMOTE=origin main_merged_predecessor "$_relpr_tip" "$_relpr_old" 2>/dev/null) ||
+        die "stale-release fixture: missing release tracking ref was not resolved live"
+    [ "$_relpr_pred" = "$_relpr_live" ] || die "stale-release fixture: missing tracking ref fell back to main's merge-base"
+    git -C "$ROOT" update-ref refs/remotes/origin/release/9.9 "$_relpr_old^" || die "stale-release fixture: ref rewind failed"
+    _relpr_pred=$(MUST_CHECK_PUSH_REMOTE=origin main_merged_predecessor "$_relpr_tip" "$_relpr_old" 2>/dev/null) ||
+        die "stale-release fixture: stale release tracking ref was not resolved live"
+    [ "$_relpr_pred" = "$_relpr_live" ] || die "stale-release fixture: stale tracking ref chose a wrong base"
+    [ "$(git -C "$ROOT" rev-list --count "$_relpr_pred..$_relpr_tip")" -eq 2 ] ||
+        die "stale-release fixture: range is not just the topic's own commits"
+    git -C "$ROOT" remote add dead "$_tmp/no-such-remote" || die "stale-release fixture: dead remote add failed"
+    git -C "$ROOT" update-ref refs/remotes/dead/main refs/remotes/origin/main || die "stale-release fixture: dead main ref failed"
+    _relpr_rc=0
+    MUST_CHECK_PUSH_REMOTE=dead main_merged_predecessor "$_relpr_tip" "$_relpr_old" >/dev/null 2>&1 || _relpr_rc=$?
+    [ "$_relpr_rc" -eq 2 ] || die "stale-release fixture: unconfirmable base line did not ERROR (rc $_relpr_rc)"
     ROOT=$_saved_root
     MUST_CHECK_PUSH_REMOTE=$_saved_remote
 
@@ -1814,7 +2730,7 @@ SLOW_GIT
         die "committed-dispatcher-newer-than-running-script: the committed run_three_push_gates_parallel never ran (marker missing or wrong)"
     rm -rf "$_ncd_tmp"
 
-    echo "push-must-check: PASS — 33 ledger/budget/dispatcher/rebase/stale-merge fixtures checked"
+    echo "push-must-check: PASS — 34 ledger/budget/dispatcher/rebase/stale-merge fixtures checked"
     exit 0
 fi
 
@@ -1856,8 +2772,13 @@ MUST_CHECK_CONFLICT_UNION_DONE=1
 export MUST_CHECK_CONFLICT_UNION_DONE
 
 MUST_CHECK_TOTAL_SPENT_MS=0
+_refs_content=0
+_refs_gated=0
+_refs_promoted=0
+_refs_tags=0
 while read -r _local_ref _local_sha _remote_ref _remote_sha; do
     [ "$_local_sha" = "$ZERO" ] && continue
+    _refs_content=$(( _refs_content + 1 ))
     # PER-REF BUDGET (2026-09-24 fix): the blocking budget is per PUSHED REF,
     # not shared across the whole invocation. Sharing one MUST_CHECK_BUDGET_MS
     # across `while read` iterations meant a legitimate 2-ref push (the bound
@@ -1902,9 +2823,31 @@ while read -r _local_ref _local_sha _remote_ref _remote_sha; do
             git -C "$ROOT" merge-base --is-ancestor "$_tag_commit" "$_tag_base" ||
                 die "tag $_local_ref points at $_tag_commit, which is not published on $_tag_base; land the commit through a pull request first"
             echo "push-must-check: tag $_local_ref -> $_tag_commit is already published on $_tag_base; 0 new commits, range gates do not apply"
+            _refs_tags=$(( _refs_tags + 1 ))
             continue
             ;;
     esac
+    # Release promotion: admitted like a tag, on verified conditions only (see
+    # release_promotion_admission). The conflict-tree union above already ran
+    # over this tip; the range-bound checks (64-commit bound, per-commit size
+    # band, the manifest's range rows, the ledger) do not apply to commits
+    # that were gated when they landed on the release line. The promoted TREE
+    # is still checked: absolute size band, duplicate entries, src/ band and
+    # path floors; every sealed *.sdn against its seal; and no conflict
+    # markers in any file that differs from main.
+    if _promo_line=$(release_promotion_admission "$_local_ref" "$_local_sha"); then
+        _promo_main=$(published_main_ref) || die "release promotion needs refs/remotes/$MUST_CHECK_PUSH_REMOTE/main; fetch it and retry"
+        sh "$ROOT/scripts/check/check-tree-size-push.shs" --push-tip "$_promo_main..$_local_sha" ||
+            die "release promotion tip $_local_sha has a structurally wrong tree"
+        sh "$ROOT/scripts/check/check-sdn-crc32-sealed.shs" --rev "$_local_sha" --root "$ROOT" ||
+            die "release promotion tip $_local_sha has a sealed *.sdn that does not verify"
+        sh "$ROOT/scripts/check/check-no-conflict-markers-push.shs" "$_promo_main..$_local_sha" ||
+            die "release promotion tip $_local_sha carries conflict markers, or the marker scan could not run"
+        echo "push-must-check: $_promo_line"
+        _refs_promoted=$(( _refs_promoted + 1 ))
+        continue
+    fi
+    _refs_gated=$(( _refs_gated + 1 ))
     _ledger=$(git -C "$ROOT" show "$_local_sha:$LEDGER_REL" 2>/dev/null) || die "ledger is missing from $_local_sha"
     _manifest=$(git -C "$ROOT" show "$_local_sha:$MANIFEST_REL" 2>/dev/null) || die "manifest is missing from $_local_sha"
     load_committed_dispatcher "$_local_sha"
@@ -1916,9 +2859,16 @@ while read -r _local_ref _local_sha _remote_ref _remote_sha; do
     elif ! git -C "$ROOT" merge-base --is-ancestor "$_predecessor" "$_local_sha"; then
         _predecessor=$(rebased_push_published_base "$_local_sha") ||
             die "cannot verify a published PR base (main, release_phase3, release/*) for rebased ref $_local_ref"
-    elif _mm_pred=$(main_merged_predecessor "$_local_sha" "$_predecessor"); then
-        echo "push-must-check: $_local_ref merged published main; range base $_predecessor -> $_mm_pred (already-published main commits excluded)"
-        _predecessor=$_mm_pred
+    else
+        _mm_rc=0
+        _mm_pred=$(main_merged_predecessor "$_local_sha" "$_predecessor") || _mm_rc=$?
+        case "$_mm_rc" in
+            0)
+                echo "push-must-check: $_local_ref merged a published line; range base $_predecessor -> $_mm_pred (already-published commits excluded)"
+                _predecessor=$_mm_pred ;;
+            1) ;;
+            *) echo "push-must-check: ERROR — nothing was checked (cannot confirm the published base line for $_local_ref)"; exit 2 ;;
+        esac
     fi
     ALLOW_UNPROMOTED_LEDGER=0
     if ledger_is_unpromoted_at_rev "$_predecessor"; then
@@ -1936,4 +2886,22 @@ while read -r _local_ref _local_sha _remote_ref _remote_sha; do
     MUST_CHECK_TOTAL_SPENT_MS=$(( MUST_CHECK_TOTAL_SPENT_MS + MUST_CHECK_BUDGET_SPENT_MS ))
 done < "$_unique_refs"
 
-echo "push-must-check: PASS — $MUST_CHECK_BLOCKING_RUN blocking gate(s) checked in ${MUST_CHECK_TOTAL_SPENT_MS}ms total (each pushed ref got its own ${MUST_CHECK_PUSH_BUDGET_S}s budget), bootstrap ledger validated"
+# The verdict names what was actually done per kind of ref. A ref that carries
+# content and was neither range-gated nor admitted on a verified condition
+# would mean nothing was checked for it: that is an ERROR, never a pass.
+if [ "$_refs_content" -gt 0 ] && [ $(( _refs_gated + _refs_promoted + _refs_tags )) -ne "$_refs_content" ]; then
+    echo "push-must-check: ERROR — nothing was checked for $(( _refs_content - _refs_gated - _refs_promoted - _refs_tags )) of $_refs_content pushed ref(s) (exit 2)"
+    exit 2
+fi
+_verdict_admitted=""
+[ "$_refs_promoted" -eq 0 ] ||
+    _verdict_admitted="$_verdict_admitted; $_refs_promoted ref(s) admitted as a RELEASE PROMOTION (range gates and ledger NOT run for them; conflict-tree, tree-size, SDN seal and conflict-marker checks of the promoted tree passed)"
+[ "$_refs_tags" -eq 0 ] ||
+    _verdict_admitted="$_verdict_admitted; $_refs_tags tag(s) admitted as already published (range gates NOT run for them)"
+if [ "$_refs_gated" -gt 0 ]; then
+    echo "push-must-check: PASS — $_refs_gated ref(s) range-gated: $MUST_CHECK_BLOCKING_RUN blocking gate(s) checked in ${MUST_CHECK_TOTAL_SPENT_MS}ms total (each pushed ref got its own ${MUST_CHECK_PUSH_BUDGET_S}s budget), bootstrap ledger validated$_verdict_admitted"
+elif [ -n "$_verdict_admitted" ]; then
+    echo "push-must-check: PASS — 0 ref(s) range-gated${_verdict_admitted}"
+else
+    echo "push-must-check: PASS — 0 refs carried content (deletion only), nothing to gate"
+fi

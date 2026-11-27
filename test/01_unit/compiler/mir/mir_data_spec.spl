@@ -1,27 +1,71 @@
-describe "Mir Data":
-    it "skipped":
-        val pending_reason = "pre-existing test failures - functions/imports not available"
-        expect(pending_reason.len()).to_be_greater_than(0)
+use std.spec.*
+use compiler.mir.mir_types.{MirType}
+use compiler.mir.mir_data.{
+    MirBuilder,
+    bootstrap_fn_ret_shape_register,
+    bootstrap_fn_ret_shape_lookup,
+    bootstrap_fn_registries_entry_count_v1,
+    bootstrap_fn_registries_reset_after_session_v1,
+    bootstrap_fn_session_epoch_v1
+}
+use compiler.hir.hir_types.{HirModule, SymbolTable}
+use compiler.hir.target_hir.hir_freeze.{
+    HirSnapshotSessionCacheV1,
+    hir_snapshot_freeze,
+    hir_snapshot_read,
+    hir_snapshot_session_epoch_v1,
+    hir_snapshot_verify_count_v1,
+    hir_snapshot_session_cache_hits_v1
+}
 
-# # # MIR Data Specification
-# #
-# # **Feature IDs:** #TBD
-# # **Category:** Compiler
-# # **Status:** In Progress
-# #
-# # ## Overview
-# #
-# # Tests MirBuilder creation and MirType static factory methods.
-# 
-# use std.spec
-# use compiler.mir_data.*
-# 
-# 
-# describe "MirBuilder":
-#     it "creates a new builder with next_local_id 0":
-#         var builder = MirBuilder.new()
-#         expect(builder.next_local_id).to_equal(0)
-# 
-#     it "creates MirType.i64":
-#         val t = MirType.i64()
-#         expect(t.kind != nil).to_equal(true)
+fn mir_data_fixture_module(name: text, path: text) -> HirModule:
+    HirModule(name: name, path: path, imports: [], exports: [],
+        domain_blocks: [], symbols: SymbolTable.new(), functions: {},
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+describe "Mir Data and session reset coordination":
+    it "creates a new MirBuilder with next_local_id 0 and constructs MirType.i64":
+        val builder = MirBuilder.new()
+        expect(builder.next_local_id).to_equal(0)
+        val t = MirType.i64()
+        expect(t.size_bytes()).to_equal(8)
+
+    it "clears bootstrap fn registries and advances hir_freeze session epoch on session reset":
+        bootstrap_fn_ret_shape_register("mir_data_spec.session_fn", "mir_data_spec.Shape")
+        expect(bootstrap_fn_ret_shape_lookup("mir_data_spec.session_fn") ?? "").to_equal("mir_data_spec.Shape")
+        expect(bootstrap_fn_registries_entry_count_v1()).to_be_greater_than(0)
+
+        val snap = hir_snapshot_freeze(mir_data_fixture_module("mir.session_mod", "m.spl"), 0).unwrap()
+        var session_cache = HirSnapshotSessionCacheV1.new()
+        val epoch_before = bootstrap_fn_session_epoch_v1()
+        expect(hir_snapshot_session_epoch_v1()).to_equal(epoch_before)
+
+        val verifies_t0 = hir_snapshot_verify_count_v1()
+        val _read1 = hir_snapshot_read(snap).unwrap()
+        val _read2 = hir_snapshot_read(snap).unwrap()
+        val hits_after_warm = hir_snapshot_session_cache_hits_v1()
+        expect(hir_snapshot_verify_count_v1()).to_equal(verifies_t0 + 1)
+        val _cached1 = session_cache.read(snap).unwrap()
+        val _cached2 = session_cache.read(snap).unwrap()
+        expect(session_cache.sha256_verifications).to_equal(1)
+        expect(session_cache.cache_hits).to_equal(1)
+
+        bootstrap_fn_registries_reset_after_session_v1()
+
+        expect(bootstrap_fn_registries_entry_count_v1()).to_equal(0)
+        expect(bootstrap_fn_ret_shape_lookup("mir_data_spec.session_fn") ?? "").to_equal("")
+        expect(bootstrap_fn_session_epoch_v1()).to_equal(epoch_before + 1)
+        expect(hir_snapshot_session_epoch_v1()).to_equal(epoch_before + 1)
+
+        # Both hir_snapshot_read and explicit HirSnapshotSessionCacheV1 must re-verify after session reset.
+        val after_reset = hir_snapshot_read(snap).unwrap()
+        expect(after_reset.path).to_equal("m.spl")
+        expect(hir_snapshot_verify_count_v1()).to_equal(verifies_t0 + 2)
+        expect(hir_snapshot_session_cache_hits_v1()).to_equal(hits_after_warm)
+
+        val cached_after_reset = session_cache.read(snap).unwrap()
+        expect(cached_after_reset.path).to_equal("m.spl")
+        expect(session_cache.sha256_verifications).to_equal(2)

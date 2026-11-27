@@ -84,3 +84,17 @@ slot or sign-extended incorrectly. Related documented class:
 Minimal isolation of whether the corruption is in `to_u8()`, the bitwise
 `(hi<<4)|lo`, `char_at`/`char_code_at`, or `[u8].push` under JIT. Needs a
 compiler-side investigation in the JIT/MIR lowering path.
+
+## Re-verified Closed 2026-11-25 (release/1.0.0 pinned seed)
+
+The 2026-09-13 closure is confirmed on the binary release/1.0.0 ships
+(`bin/simple.exe`, 38,403,072 bytes, Rust seed v1.0.0-rc.1, Windows). The
+entry's exact reproducer prints the expected bytes on BOTH engines:
+
+```
+len=5
+b0=48 b1=130 b2=1
+```
+
+under default `run` (JIT) and `SIMPLE_EXECUTION_MODE=interpreter` alike; the
+`b0=249 b1=251 b2=250` garbage does not occur. Closure stands.

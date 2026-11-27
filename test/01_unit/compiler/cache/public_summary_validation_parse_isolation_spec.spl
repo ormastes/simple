@@ -1,0 +1,97 @@
+# Bug stage2_parse_shard_segv_named_type_find_2026-11-13.
+#
+# project_public_summary_v1 validates its rendered virtual text with a second,
+# low-level parse. In a parse shard that parse runs after the retained file
+# parse's transient scope has ended, and that scope reclaimed every flat type
+# pool owner reset_all_pools() had replaced inside it except the few promoted
+# for HIR. The validation parse used to run against those process-global pools
+# directly: named_type_find -> named_type_module_at read the reclaimed
+# named_type_modules spine (SIGSEGV in rt_text_eq_any/strlen), and
+# flat_span_new pushed into the reclaimed span pools.
+#
+# The contract pinned here is the isolation that rules that out regardless of
+# reclamation: the validation parse runs on fresh flat pools and leaves the
+# caller's active pools exactly as it found them.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1, PathSemanticsV1}
+use compiler.frontend.cache_artifact.*
+use compiler.core.parser.{parse_module_silent_checked}
+use compiler.core.types.{reset_all_pools, named_type_find, flat_pool_state_take, flat_pool_state_install}
+
+fn digest(label: text) -> text:
+    sha256_text(label)
+
+fn fact(kind: FrontendPublicFactKindV1, symbol: text, bytes: text) -> FrozenPublicFactV1:
+    FrozenPublicFactV1(
+        fact_kind: kind,
+        stable_symbol_id: symbol,
+        canonical_bytes: bytes,
+        is_public: true,
+        contains_executable_body: false,
+        contains_private_source: false,
+        dependency_symbol_ids: [],
+    )
+
+# A public declaration plus its matching forward declaration.
+fn public_decl(symbol: text, bytes: text) -> [FrozenPublicFactV1]:
+    [fact(FrontendPublicFactKindV1.ForwardDeclaration, symbol, bytes),
+     fact(FrontendPublicFactKindV1.Declaration, symbol, bytes)]
+
+fn summary_input(facts: [FrozenPublicFactV1]) -> PublicSummaryProjectionInputV1:
+    PublicSummaryProjectionInputV1(
+        snapshot_id: digest("snapshot"),
+        logical_path: LogicalSourcePathV1(
+            repository_namespace_digest: digest("repo"),
+            module_relative_utf8: "pkg/retained.spl",
+            path_semantics: PathSemanticsV1.CaseSensitiveNfc,
+        ),
+        source_blob_digest: digest("source"),
+        compiler_owner_digest: digest("compiler"),
+        grammar_digest: digest("grammar"),
+        facts: facts,
+    )
+
+# Lengths of the active pools, read through a take/install round trip.
+fn active_named_type_count() -> i64:
+    val pools = flat_pool_state_take()
+    val n = pools.named_type_names.len()
+    flat_pool_state_install(pools)
+    n
+
+fn active_span_count() -> i64:
+    val pools = flat_pool_state_take()
+    val n = pools.span_pool_start.len()
+    flat_pool_state_install(pools)
+    n
+
+describe "public summary validation parse isolation":
+    it "runs the validation parse on fresh pools and leaves the retained parse's pools untouched":
+        reset_all_pools()
+        expect(parse_module_silent_checked("struct RetainedFoo:\n    x: i64\n",
+            "pkg/retained.spl")).to_equal(false)
+        val foo = named_type_find("RetainedFoo")
+        expect(foo >= 0).to_equal(true)
+        val names_before = active_named_type_count()
+        val spans_before = active_span_count()
+        expect(spans_before > 0).to_equal(true)
+
+        val summary = project_public_summary_v1(summary_input(public_decl("sym:summary_only",
+            "pub extern fn summary_only(value: SummaryOnlyBar) -> SummaryOnlyBar")))
+        expect(summary.is_ok()).to_equal(true)
+
+        # The validation parse's own declarations never reach the caller.
+        expect(named_type_find("SummaryOnlyBar")).to_equal(-1)
+        expect(active_named_type_count()).to_equal(names_before)
+        expect(active_span_count()).to_equal(spans_before)
+        # The caller's registry and module ownership are reinstated.
+        expect(named_type_find("RetainedFoo")).to_equal(foo)
+        reset_all_pools()
+
+    it "still rejects grammar-invalid summary text from the isolated parse":
+        reset_all_pools()
+        val summary = project_public_summary_v1(summary_input(public_decl("sym:broken",
+            "pub extern fn broken(value: ) ->")))
+        expect(summary.is_err()).to_equal(true)
+        expect(summary.unwrap_err()).to_equal("public summary rendering is not grammar-valid Simple")
+        reset_all_pools()

@@ -50,7 +50,7 @@ val ENC_FIXTURE: text = "test/fixtures/database/sqlcipher4/messenger.sqlcipher4"
 val ENC_SECRET_REF: text = "secret://messenger/fixture"
 val ENC_ENV_VAR: text = "SIMPLE_SECRET_MESSENGER_FIXTURE"
 val TAMPERED_FIXTURE: text = "test/fixtures/database/sqlcipher4/messenger_tampered.sqlcipher4"
-val SHORT_FIXTURE: text = "test/fixtures/database/sqlcipher4/not_page_multiple.bin"
+val SHORT_FIXTURE: text = "test/fixtures/database/sqlcipher4/not_page_multiple.dat"
 
 # --- outcome helpers (flat match arms; arms RETURN values) ------------------
 
@@ -78,6 +78,8 @@ fn _error_outcome(e: StoragePortError) -> text:
             "authentication_failed:{d}"
         StoragePortError.CorruptSource(d):
             "corrupt_source:{d}"
+        StoragePortError.SnapshotUnavailable(d):
+            "snapshot_unavailable:{d}"
         StoragePortError.Io(d):
             "io:{d}"
 
@@ -278,7 +280,7 @@ describe "explicit-format policy (D01)":
         expect(_open_outcome(ENC_FIXTURE, "sqlcipher4", "").starts_with("missing_secret:")).to_equal(true)
 
     it "a file that is not a whole number of pages fails CorruptSource":
-        step("open not_page_multiple.bin as sqlcipher4")
+        step("open not_page_multiple.dat as sqlcipher4")
         expect(_open_outcome(SHORT_FIXTURE, "sqlcipher4", ENC_SECRET_REF).starts_with("corrupt_source:")).to_equal(true)
 
 describe "sqlite3 backend over the plaintext pager fixture":
@@ -326,3 +328,28 @@ describe "sqlcipher4 backend over the encrypted fixture (SecretRef path)":
     it "close_view zeroizes the plaintext snapshot":
         step("open, close, inspect image byte 0")
         expect(_closed_image_byte0(ENC_FIXTURE, "sqlcipher4", ENC_SECRET_REF)).to_equal(0)
+
+
+describe "storage plaintext owner release":
+    # Wiping a populated owner is judged natively: the seed interpreter's arrays are
+    # copy-on-write, so a callee's write cannot be guaranteed to reach the owner.
+    # See test/fixtures/devhub/native_storage_wipe_alias and
+    # doc/08_tracking/bug/seed_interpreter_zeroize_not_guaranteed_2026_10_31.md.
+    it "closing an empty owner succeeds without indexing it":
+        val view = StorageReadView(
+            format: STORAGE_FORMAT_SQLCIPHER4,
+            source_path: "empty-memory",
+            image: [],
+            page_size: 4096,
+            page_count: 0,
+            reserved_bytes: 80,
+            text_encoding: 1)
+        val port = database_storage_port_v1()
+        expect(port.close_view(view)).to_equal(true)
+
+
+describe "storage snapshot admission diagnostics":
+    it "preserves typed snapshot unavailability without calling it corruption":
+        val error = StoragePortError.SnapshotUnavailable(detail: "unsupported journal mode")
+        expect(error.code()).to_equal("STORAGE_PORT_SNAPSHOT_UNAVAILABLE")
+        expect(error.message()).to_equal("snapshot unavailable: unsupported journal mode")

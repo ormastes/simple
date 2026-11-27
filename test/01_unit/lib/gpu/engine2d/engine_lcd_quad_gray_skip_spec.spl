@@ -1,0 +1,76 @@
+# @tag: unit, gpu, engine2d, text, perf
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 1%
+#
+# On the cpu_simd lane every glyph quad first tries the LCD composite. When
+# the quad's atlas cells carry no LCD coverage (a grayscale atlas), the
+# composite walks every pixel and then returns [] -- 576 of 624 quads, 4.4 s
+# of the 4x css-layout render. Outputs are pinned by hashes measured on the
+# base implementation (release/1.0.0 0354c53a8be), the gray-quad cost by a
+# wall budget.
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.engine.{engine2d_lcd_quad_composite}
+use std.gc_async_mut.gpu.engine2d_host_clock.{time_now_unix_micros}
+
+val ATLAS_W = 512
+val ATLAS_H = 64
+val QUAD_W = 40
+val QUAD_H = 64
+# Measured on the base implementation (release/1.0.0 0354c53a8be).
+val LCD_HASH: i64 = 1937688059
+
+fn atlas(lcd: bool) -> [u32]:
+    var out: [u32] = [0u32; ATLAS_W * ATLAS_H]
+    var i = 0
+    while i < ATLAS_W * ATLAS_H:
+        val k = (i * 13) % 5
+        out[i] = if k < 2:
+            0u32
+        elif k == 2:
+            0xFFFFFFFFu32
+        elif k == 3:
+            0x80FFFFFFu32
+        else:
+            0x00FFFFFFu32
+        i = i + 1
+    if lcd:
+        # One LCD cell late in each quad's last row.
+        var q = 0
+        while q < 12:
+            out[(ATLAS_H - 1) * ATLAS_W + q * QUAD_W + QUAD_W - 3] = 0xFF4080C0u32
+            q = q + 1
+    out
+
+fn hash(acc0: i64, px: [u32]) -> i64:
+    var acc = acc0
+    for p in px:
+        acc = (acc * 31 + (p as i64)) % 4294967291
+    acc
+
+fn run(cells: [u32], rounds: i32) -> (i64, i64, i64):
+    var dst: [u32] = [0xFFEEF0FFu32; QUAD_W * QUAD_H]
+    dst[5] = 0xFF102030u32
+    var acc: i64 = 17
+    var empty: i64 = 0
+    val t0 = time_now_unix_micros()
+    var r = 0
+    while r < rounds:
+        val out = engine2d_lcd_quad_composite(cells, ATLAS_W, (r % 12) * QUAD_W, 0, QUAD_W, QUAD_H, 0xFF202020u32, dst)
+        if out.len() == 0:
+            empty = empty + 1
+        acc = hash(acc, out)
+        r = r + 1
+    (time_now_unix_micros() - t0, acc, empty)
+
+describe "LCD quad composite on a grayscale atlas":
+    it "returns [] for every gray quad within a time budget":
+        val r = run(atlas(false), 120)
+        print "lcd_gray elapsed_us={r.0} empty={r.2}"
+        expect(r.2).to_equal(120)
+        expect(r.0 < 300000).to_equal(true)
+
+    it "keeps the measured LCD output":
+        val r = run(atlas(true), 12)
+        print "lcd_mixed elapsed_us={r.0} hash={r.1} empty={r.2}"
+        expect(r.2).to_equal(0)
+        expect(r.1).to_equal(LCD_HASH)

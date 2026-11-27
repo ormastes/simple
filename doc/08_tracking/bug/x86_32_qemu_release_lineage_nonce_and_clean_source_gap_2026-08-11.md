@@ -37,3 +37,18 @@ once. Retain all source/compiler/kernel/image/QEMU/argv/nonce identities.
 - Owner: x86_32 SimpleOS execution lane
 - Final reviewer: independent normal/highest-capability reviewer
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+Not pursued in this lane: same lineage/nonce/clean-source family; owner lane is the QEMU release-lineage lane, not a Windows seed lane.
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, base f790f7f266e)
+
+Concur: lineage/nonce/clean-source family belongs to the x86_32 QEMU release
+lane; the canonical row needs an admitted pure-Simple Stage 4 CLI and clean
+isolated sources, which this Windows seed lane cannot produce. No in-lane
+change.

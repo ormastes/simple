@@ -1,0 +1,142 @@
+"""
+## Purpose and audience
+Purpose: Pin the boxes Chrome gives the replaced media elements `<canvas>`,
+`<svg>`, `<audio>` and `<video>` when no media is loaded -- the web catalog's
+`animation` probe row (`examples/06_io/ui/web_catalog/animation.html` lines
+37-39) and the neighbouring cases that row does not exercise.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159 headless shell, 900x760, `--dump-dom` of
+getBoundingClientRect / getComputedStyle; page `<!doctype html>`,
+`*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}`, each row a
+`<div>` at the top of `<body>`, no whitespace between siblings; BP is
+`style="border:2px solid red;padding:3px"`):
+
+| fixture                                              | x   | y   | w   | h   |
+|------------------------------------------------------|-----|-----|-----|-----|
+| row A `<canvas width=120 height=40>fallback`         | 0   | 110 | 120 | 40  |
+| row A `<svg width=120 height=40><rect ...>`          | 120 | 110 | 120 | 40  |
+| row A `<audio controls><span>fallback`               | 240 | 96  | 300 | 54  |
+| row A `<video controls width=120><span>fallback`     | 540 | 0   | 120 | 150 |
+| row B `<canvas>`                                     | 0   | 0   | 300 | 150 |
+| row B `<svg>`                                        | 300 | 0   | 300 | 150 |
+| row B `<audio>` (no controls)                        | display:none, 0x0     |
+| row B `<video>`                                      | 600 | 0   | 300 | 150 |
+| row C `<video height=50>`                            | 0   | 0   | 300 | 50  |
+| row C `<video width=200 height=50>`                  | 300 | 0   | 200 | 50  |
+| row C `<video height=50 BP>`                         | 500 | 0   | 310 | 50  |
+| row D `<canvas width=120>`                           | 0   | 0   | 120 | 150 |
+| row D `<video style="width:120px">`                  | 120 | 0   | 120 | 150 |
+| row D `<svg width=120>`                              | 240 | 0   | 120 | 150 |
+| row D `<video style="height:40px">`                  | 360 | 110 | 300 | 40  |
+| row E `<audio controls style="width:200px">`         | 0   | 106 | 200 | 54  |
+| row E `<video controls width=120 BP>`                | 200 | 0   | 120 | 160 |
+| row F `<video BP>`                                   | 0   | 0   | 310 | 160 |
+| row F `<svg BP>`                                     | 310 | 0   | 310 | 160 |
+| row G `<canvas BP>`                                  | 0   | 0   | 310 | 160 |
+| row G `<audio controls BP>`                          | 310 | 106 | 300 | 54  |
+
+Three rules follow from the table:
+1. There is NO ratio scaling. A `<video>` with one axis specified keeps the
+   other axis at its default (width=120 -> 120x150, height=50 -> 300x50).
+   (Chromium 131 scaled these 2:1 -- 120x60, 100x50; current Chrome does not.)
+2. The 300x150 default is a CONTENT size: an auto axis adds the element's own
+   padding and border around it even under `box-sizing:border-box` (rows F,
+   G, and the 160 px height of row E's video). `<audio controls>` is the
+   exception -- its 300x54 is an explicit UA-sheet size, so it stays 300x54.
+3. `<svg>` is a replaced box with the same 300x150 default, and `<audio>`
+   without `controls` is `display:none`.
+
+Before this change `<svg>` without a height was 1 px tall (1x1 with no
+attributes), `<audio>` without `controls` was a 300x54 box that wrapped the
+line, and a padded/bordered auto axis lost its padding and border (row E's
+video 120x150, rows F/G 300x150).
+
+Not asserted here (stated residue): Chrome's line box is 157 px for a 150 px
+replaced box (a 7 px strut descent) where this engine's is 156; whitespace
+containing a newline between inline siblings is dropped (general inline-text
+behaviour, also true of `<span>x</span>\n<span>y</span>`), so the fixtures
+carry no whitespace between siblings; and `<canvas width=120 height=40 BP>` is
+130x50 in Chrome (canvas attributes are an intrinsic size, not CSS width) but
+120x40 here.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-REPLACED-003 — canvas/svg/audio/video take Chrome's used size and sit bottom-aligned on one inline row.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 760
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}</style></head><body><div>"
+val BP: text = "style=\"border:2px solid red;padding:3px\""
+
+val ROW_A: text = "<canvas id=\"c\" width=\"120\" height=\"40\">Canvas unsupported</canvas><svg id=\"s\" width=\"120\" height=\"40\" role=\"img\"><rect width=\"120\" height=\"40\" fill=\"#7c3aed\"></rect></svg><audio id=\"a\" controls><span id=\"af\">Audio unsupported</span></audio><video id=\"v\" controls width=\"120\"><span id=\"vf\">Video unsupported</span></video>"
+val ROW_B: text = "<canvas id=\"c\"></canvas><svg id=\"s\"></svg><audio id=\"a\"></audio><video id=\"v\"></video>"
+val ROW_C: text = "<video id=\"h\" height=\"50\"></video><video id=\"b\" width=\"200\" height=\"50\"></video><video id=\"p\" height=\"50\" " + BP + "></video>"
+val ROW_D: text = "<canvas id=\"c\" width=\"120\"></canvas><video id=\"w\" style=\"width:120px\"></video><svg id=\"s\" width=\"120\"></svg><video id=\"h\" style=\"height:40px\"></video>"
+val ROW_E: text = "<audio id=\"a\" controls style=\"width:200px\"></audio><video id=\"v\" controls width=\"120\" " + BP + "></video>"
+val ROW_F: text = "<video id=\"v\" " + BP + "></video><svg id=\"s\" " + BP + "></svg>"
+val ROW_G: text = "<canvas id=\"c\" " + BP + "></canvas><audio id=\"a\" controls " + BP + "></audio>"
+
+fn probe(inner: text, id: text, name: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        HEAD + inner + "</div></body></html>", VW, VH, id, name)
+
+fn box_of(inner: text, id: text) -> text:
+    probe(inner, id, "x") + "," + probe(inner, id, "y") + " " + probe(inner, id, "w") + "x" + probe(inner, id, "h")
+
+describe "replaced media elements take Chrome's boxes on one inline row":
+    it "AC-1 (control): the catalog row keeps its boxes, bottoms on one baseline":
+        step("Chrome: video 120x150 at y=0; canvas and svg 120x40 at y=110; audio 300x54 at y=96")
+        expect(box_of(ROW_A, "v")).to_equal("540,0 120x150")
+        expect(box_of(ROW_A, "c")).to_equal("0,110 120x40")
+        expect(box_of(ROW_A, "s")).to_equal("120,110 120x40")
+        expect(box_of(ROW_A, "a")).to_equal("240,96 300x54")
+
+    it "AC-2 (control): fallback children of audio/video generate no box":
+        step("Chrome: the fallback <span> is 0x0")
+        expect(probe(ROW_A, "af", "w") + "x" + probe(ROW_A, "af", "h")).to_equal("0x0")
+        expect(probe(ROW_A, "vf", "w") + "x" + probe(ROW_A, "vf", "h")).to_equal("0x0")
+
+    it "AC-3: <svg> without attributes is the 300x150 default, like <canvas>":
+        step("Chrome: canvas 0,0 300x150 and svg 300,0 300x150")
+        expect(box_of(ROW_B, "c")).to_equal("0,0 300x150")
+        expect(box_of(ROW_B, "s")).to_equal("300,0 300x150")
+
+    it "AC-4: <audio> without controls is display:none and takes no room":
+        step("Chrome: audio 0x0, so the video after it stays on the line at x=600")
+        expect(probe(ROW_B, "a", "w") + "x" + probe(ROW_B, "a", "h")).to_equal("0x0")
+        expect(box_of(ROW_B, "v")).to_equal("600,0 300x150")
+
+    it "AC-5 (control): one specified axis never scales the other":
+        step("Chrome: <video height=50> is 300x50, width=200 height=50 is 200x50, style=width:120px is 120x150, style=height:40px is 300x40")
+        expect(box_of(ROW_C, "h")).to_equal("0,0 300x50")
+        expect(box_of(ROW_C, "b")).to_equal("300,0 200x50")
+        expect(box_of(ROW_D, "w")).to_equal("120,0 120x150")
+        expect(box_of(ROW_D, "h")).to_equal("360,110 300x40")
+
+    it "AC-6: an svg with only a width keeps the 150 px default height":
+        step("Chrome: <canvas width=120> and <svg width=120> are both 120x150")
+        expect(box_of(ROW_D, "c")).to_equal("0,0 120x150")
+        expect(box_of(ROW_D, "s")).to_equal("240,0 120x150")
+
+    it "AC-7: an auto axis adds padding and border around the default content size":
+        step("Chrome: <video BP>, <svg BP> and <canvas BP> are 310x160 under box-sizing:border-box")
+        expect(box_of(ROW_F, "v")).to_equal("0,0 310x160")
+        expect(box_of(ROW_F, "s")).to_equal("310,0 310x160")
+        expect(box_of(ROW_G, "c")).to_equal("0,0 310x160")
+
+    it "AC-8: only the auto axis grows — a specified axis stays border-box":
+        step("Chrome: <video width=120 BP> is 120x160 and <video height=50 BP> is 310x50")
+        expect(box_of(ROW_E, "v")).to_equal("200,0 120x160")
+        expect(box_of(ROW_C, "p")).to_equal("500,0 310x50")
+
+    it "AC-9 (control): <audio controls> keeps its explicit 300x54 UA size":
+        step("Chrome: 300x54 with BP, 200x54 with style=width:200px; bottoms on the baseline")
+        expect(box_of(ROW_G, "a")).to_equal("310,106 300x54")
+        expect(box_of(ROW_E, "a")).to_equal("0,106 200x54")

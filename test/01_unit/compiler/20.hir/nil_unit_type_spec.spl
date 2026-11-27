@@ -1,0 +1,69 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# `Nil` is the unit type, `nil` its only value
+
+Owner decision 2026-11-12 (doc/07_guide/language/robust_semantic_absence.md
+§ Unit type): `Nil` resolves to the same unit type as `()`; `Ok(nil)` for a
+`Result<Nil, E>` and `return nil` / tail `nil` in a `-> Nil` function are the
+one safe `nil`. `Nil` is never absence, so `Nil?` / `Option<Nil>` are
+rejected. Every other safe `nil` stays NIL-UNSAFE-001.
+"""
+
+# @tag: unit, compiler, hir, lint
+
+use std.spec.{describe, it, expect, step}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.core.parser.{parser_has_errors}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.tools.lint.static_rules.{LintParamsV1, LintUnit, StaticLintFinding, run_static_lint_rule_table}
+use compiler.tools.lint.rules.nil_outside_unsafe_rule.{nil_outside_unsafe_lint_rule}
+
+fn nil_unit_lowering_errors(source: text) -> text:
+    val parsed = parse_full_frontend(source, "nil_unit.spl", "nil_unit", Logger(level: 0))
+    expect(parser_has_errors()).to_be(false)
+    var lowering = HirLowering.with_filename("nil_unit.spl")
+    val _module = lowering.lower_module(parsed)
+    var messages: [text] = []
+    for error in lowering.errors:
+        messages.push(error.message)
+    messages.join("\n")
+
+fn nil_unit_findings(src: text) -> [StaticLintFinding]:
+    val run = run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("fixture.spl", src), [nil_outside_unsafe_lint_rule()])
+    run.findings
+
+describe "Nil unit type in HIR lowering":
+    it "resolves Nil in Result<Nil, text> with Ok(nil)":
+        step("the dap_bridge.spl / service_v1.spl shape that failed Phase 2")
+        val errors = nil_unit_lowering_errors("fn f() -> Result<Nil, text>:\n    Ok(nil)\n")
+        expect(errors.contains("unresolved type: Nil")).to_be(false)
+        expect(errors).to_equal("")
+
+    it "resolves a -> Nil return with return nil":
+        val errors = nil_unit_lowering_errors("fn g(x: i64) -> Nil:\n    if x > 0:\n        return nil\n    nil\n")
+        expect(errors).to_equal("")
+
+    it "rejects Nil? and Option<Nil>":
+        val opt = nil_unit_lowering_errors("fn h(x: Nil?) -> i64:\n    0\n")
+        expect(opt).to_contain("Nil is the unit type, never absence")
+        val generic = nil_unit_lowering_errors("fn k(x: Option<Nil>) -> i64:\n    0\n")
+        expect(generic).to_contain("Nil is the unit type, never absence")
+
+describe "nil_outside_unsafe unit exception":
+    it "admits Ok(nil) in a Result<Nil, E> or Result<(), E> function":
+        expect(nil_unit_findings("fn f() -> Result<Nil, text>:\n    Ok(nil)\n").len()).to_equal(0)
+        expect(nil_unit_findings("fn f() -> Result<(), text>:\n    if true:\n        return Ok(nil)\n    Ok(nil)\n").len()).to_equal(0)
+
+    it "admits return nil and tail nil in a -> Nil function":
+        expect(nil_unit_findings("fn g(x: i64) -> Nil:\n    if x > 0:\n        return nil\n    nil\n").len()).to_equal(0)
+
+    it "still rejects every other safe nil":
+        expect(nil_unit_findings("fn f():\n    val x = nil\n").len()).to_equal(1)
+        expect(nil_unit_findings("fn f() -> Nil:\n    val x = nil\n    nil\n").len()).to_equal(1)
+        expect(nil_unit_findings("fn f() -> Result<i64, text>:\n    Ok(nil)\n").len()).to_equal(1)
+        expect(nil_unit_findings("fn f() -> i64?:\n    nil\n").len()).to_equal(1)
+        step("the exception ends with the unit function's body")
+        expect(nil_unit_findings("fn g() -> Nil:\n    nil\nfn h() -> i64?:\n    nil\n").len()).to_equal(1)

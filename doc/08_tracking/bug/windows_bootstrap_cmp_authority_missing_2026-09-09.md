@@ -69,3 +69,35 @@ The focused proof does not admit a build cache or close this P1. One successful
 post-fix MSVC incremental bootstrap with the applied canonical tool-authority
 PATH is still required. The bug database status therefore remains
 `fix-implemented-verification-pending`.
+
+## 2026-11-10 status: focused verification PASS; bootstrap admission still needs grant
+
+P1 verification lane `p1verify-scripts-20261110` (worktree
+`simple-p1verify-scripts-20261110`, branch `work/p1verify-scripts-20261110`,
+HEAD af1fbbfc125e on the release/1.0.0 line) re-ran the retained
+verification against current source, each command once:
+
+- `sh test/01_unit/scripts/bootstrap_compare_files_test.shs`: **PASS**
+  (exit 0, ~6.8s, Git Bash on Windows; llvm-mingw `cc` built the mode
+  fixture, so the forced-status cases ran, not skipped). The expected
+  negative-control diagnostics were observed: wrong explicit candidate
+  refused with status 2 and caller path/hash values retained (no partial
+  publish); nonexistent stale candidate refused with status 2; cmp statuses
+  1/2/126/127 preserved through `bootstrap_stage3_require_equal`; empty-PATH
+  comparator refusal; spaced comparator path longer than 260 characters
+  bound to the correct physical candidate; byte drift and ambient-shadow
+  re-resolution refused. The test's own wiring assertions also hold: no
+  bare `cmp -s` remains in `scripts/bootstrap/bootstrap-from-scratch.sh`,
+  and it carries at least 12 `bootstrap_stage3_require_equal` call sites.
+
+Verdict for the checkable scope: **VERIFIED** (1 of 6 cycles used; no fix
+required). The doc's named closing evidence — one successful post-fix live
+bootstrap with the applied canonical tool-authority PATH — remains a heavy
+bootstrap run and was NOT launched (lane rules forbid it):
+
+    sh scripts/bootstrap/run-phase1-local.shs --output=build/bootstrap
+
+That command needs a grant from the parent bootstrap owner (confirm no live
+writer owns the output cache). Recorded as BLOCKED-needs-grant in
+`build/review/p1verify-scripts-20261110.sdn`. Status: fix verified at the
+focused/source level; live admission proof still pending.

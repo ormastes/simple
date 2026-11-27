@@ -314,3 +314,16 @@ one finding touches any of the code above**. Two independent gaps:
 
 Both gaps should be closed before the baseline is trusted as a description of
 the tree.
+
+## 9. Update 2026-11-03 - root cause A ported to the async families
+
+Status: FIX-IMPLEMENTED-VERIFICATION-PENDING (full 42-spec re-sweep not run).
+
+- `gc_async_mut` and `nogc_async_mut` `interpreter_object.spl` now use the ObjectStore slot index
+  (`sync_prop_slots`/`find_prop_slot`, nogc_sync_mut commit 511a02d9b2b) and mutate through
+  `self.object_store.<field>` (no COW alias round trip); `create_object` and the gc frozen check
+  (`_get_internal_object_property`) no longer scan/copy the whole table.
+- Root cause C stays OPEN: the stray `js_to_string(value)` is retained in the async families (section 5: removal exposes a JIT stack overflow).
+- Budget specs: `test/01_unit/lib/{gc,nogc}_async_mut/js/engine/object_property_write_budget_spec.spl`
+  (20k inserts over 2k objects + rewrites + reads; budget 40 s; old code >600 s timeout, new ~13 s).
+- Remaining: the 4096-timer specs run on the nogc_sync_mut family; re-sweep them to close.

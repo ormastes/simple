@@ -1,0 +1,125 @@
+# Known-wrong rows for doc/08_tracking/bug/native_generic_payload_encoding_2026-11-15.md:
+# wrong natively BEFORE and AFTER the fix (run-34 Stage 2 and the fix's
+# Stage 2, cranelift and llvm). Not acceptance rows: each stays here until
+# its own fix lands, then moves to free_fn_payload / erased_dict_value.
+# Expected stdout (seed `simple run main.spl`), native output in brackets:
+# hash get 9000000000   [1125000000: generic method writes the Dict raw, reads decode]
+# hash get -5           [-1]
+# r04 3                 [0: T bound to an array, first([[1, 2, 3]])]
+# c03 12                [1: if val over pick<T>(o: T?)]
+# cb 7                  [56: generic fn passed as a callback]
+# b10 48                [a pointer: generic method `-> T?` through `??`]
+# boxt ok hi            [a pointer: Box<text>.get() into wrap]
+# d04 33                [264: Box<i64>.get() into wrap, T not bindable from a method result]
+# e03 8                 [0: Dict<text, Dict<text, i64>> through lookup_res]
+# r03 circle 5          [panic: T bound to an enum with payload; last, it aborts]
+
+enum Shape:
+    Circle(r: i64)
+    Dot
+
+enum Placement:
+    Column
+    SparseHash
+
+class Store<T>:
+    hash: Dict<i64, T>
+
+impl Store<T>:
+    fn get(node: i64) -> Result<T, text>:
+        if self.hash.contains_key(node):
+            return Ok(self.hash[node])
+        Err("absent")
+
+    me set(node: i64, value: T):
+        self.hash[node] = value
+
+class Box<T>:
+    v: T
+
+impl Box<T>:
+    fn get() -> T:
+        self.v
+
+    fn opt() -> T?:
+        Some(self.v)
+
+fn first<T>(xs: [T]) -> T?:
+    if xs.len() == 0:
+        return None
+    Some(xs[0])
+
+fn wrap<T>(x: T) -> Result<T, text>:
+    Ok(x)
+
+fn pick<T>(o: T?) -> T?:
+    o
+
+fn apply(f: fn([i64]) -> i64?, xs: [i64]) -> i64:
+    f(xs) ?? -1
+
+fn hash_get(v: i64) -> text:
+    val h: Dict<i64, i64> = {}
+    var s = Store(hash: h)
+    s.set(1, v)
+    match s.get(1):
+        case Ok(x): "{x}"
+        case Err(e): e
+
+fn lookup_res<T>(d: Dict<text, T>, k: text) -> Result<T, text>:
+    if d.contains_key(k):
+        return Ok(d[k])
+    Err("absent")
+
+fn d04() -> i64:
+    val b = Box(v: 33)
+    match wrap(b.get()):
+        case Ok(v): v
+        case Err(_): -1
+
+fn e03() -> i64:
+    val inner: Dict<text, i64> = {"x": 8}
+    val outer: Dict<text, Dict<text, i64>> = {"o": inner}
+    match lookup_res(outer, "o"):
+        case Ok(d): d["x"]
+        case Err(_): -1
+
+fn r03() -> text:
+    match first([Shape.Circle(5)]):
+        case Some(s):
+            match s:
+                case Circle(r): "circle {r}"
+                case Dot: "dot"
+        case None: "none"
+
+fn r04() -> i64:
+    match first([[1, 2, 3]]):
+        case Some(inner): inner.len()
+        case None: -1
+
+fn c03() -> i64:
+    val o: i64? = Some(12)
+    if val x = pick(o):
+        return x
+    -1
+
+fn b10() -> i64:
+    val b = Box(v: 48)
+    b.opt() ?? -1
+
+fn boxt() -> text:
+    val b = Box(v: "hi")
+    match wrap(b.get()):
+        case Ok(v): "ok {v}"
+        case Err(e): "err {e}"
+
+print "hash get {hash_get(9000000000)}"
+print "hash get {hash_get(-5)}"
+print "r04 {r04()}"
+print "c03 {c03()}"
+print "cb {apply(first, [7, 8])}"
+print "b10 {b10()}"
+print "boxt {boxt()}"
+print "d04 {d04()}"
+print "e03 {e03()}"
+print "r03 {r03()}"

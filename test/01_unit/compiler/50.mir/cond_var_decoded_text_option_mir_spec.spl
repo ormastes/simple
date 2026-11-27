@@ -1,0 +1,153 @@
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl
+# @cover src/compiler/50.mir/mir_lowering_types.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/builtin_method_extras.spl
+"""
+# Conditional `var` `decoded_text_option_locals` representation across paths
+
+Regression spec for conditional `var` reassignment between `Some(...)` (which holds
+a boxed `RuntimeEnum` option handle) and `Dict.get(...)` (which returns an
+already-decoded `char*` marked in `decoded_text_option_locals`):
+```simple
+var name: text? = d.get(key)
+name = Some("Codec")
+if name == None:
+    name = d.get(fallback)
+if val resolved = name:
+    use_text(resolved)
+```
+Without snapshotting/restoring/intersecting `decoded_text_option_locals` across
+branches and loops, the `then`-branch `d.get(fallback)` leaves the `var` marked
+in `decoded_text_option_locals`, causing `if val resolved = name:` to omit
+`rt_unwrap_or_self` and `rt_interp_cstr` even when `name` holds `Some("Codec")`.
+"""
+
+# @tag: unit, compiler, mir, optional
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+struct CondVarOptProbe:
+    mir_mod: MirModule
+    ir: text
+    errors: [text]
+
+fn lower_cond_var_opt_probe(src: text, tag: text) -> CondVarOptProbe:
+    val file = "cond_var_opt_probe_" + tag + ".spl"
+    val module = parse_full_frontend(src, file, "cond_var_opt_probe_" + tag, Logger(level: 0))
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(module)
+    var errs: [text] = []
+    for e in hl.errors:
+        errs = errs.push("hir: " + e.message)
+    val m: HirModule = hir
+    var mir_owner = MirLowering.new_for_target(m.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = mir_owner.lower_module(m)
+    for e in mir_owner.errors:
+        errs = errs.push("mir: " + e.message)
+    val ir = MirToLlvm.create("cond_var_opt_probe_" + tag, CodegenTarget.X86_64, None).translate_module(mir)
+    CondVarOptProbe(mir_mod: mir, ir: ir, errors: errs)
+
+fn find_opt_probe_fn(mir_mod: MirModule, target_name: text) -> MirFunction?:
+    for function in mir_mod.functions.values():
+        if function.name == target_name or function.name.ends_with("." + target_name):
+            return Some(function)
+    None
+
+fn count_opt_fn_calls(function: MirFunction, callee_name: text) -> i64:
+    var count = 0
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, _):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(name), _):
+                            if name == callee_name:
+                                count = count + 1
+                        case _: ()
+                case _: ()
+    count
+
+describe "conditional var decoded_text_option_locals across branches and loops in MIR":
+    it "emits rt_unwrap_or_self on if-val after conditional if d.get following Some assignment":
+        val src = """fn probe(d: Dict<i64, text>, k1: i64, k2: i64, has_exact: bool) -> i64:
+    var owner = d.get(k1)
+    if has_exact:
+        owner = Some("Codec")
+    if owner == None:
+        owner = d.get(k2)
+    if val resolved = owner:
+        return resolved.len()
+    0
+"""
+        val probe = lower_cond_var_opt_probe(src, "if_then_dget")
+        expect(probe.errors.len()).to_equal(0)
+        val fn_opt = find_opt_probe_fn(probe.mir_mod, "probe")
+        expect(fn_opt.?).to_equal(true)
+        if val func = fn_opt:
+            expect(count_opt_fn_calls(func, "rt_unwrap_or_self") >= 1).to_equal(true)
+        expect(probe.ir).to_contain("@rt_unwrap_or_self")
+
+    it "emits rt_unwrap_or_self after if/elif chain mixing d.get and Some":
+        val src = """fn probe(d: Dict<i64, text>, k1: i64, k2: i64, mode: i64) -> i64:
+    var owner: text? = Some("Codec")
+    if mode == 1:
+        owner = d.get(k1)
+    elif mode == 2:
+        owner = d.get(k2)
+    else:
+        owner = Some("Fallback")
+    if val resolved = owner:
+        return resolved.len()
+    0
+"""
+        val probe = lower_cond_var_opt_probe(src, "elif_chain")
+        expect(probe.errors.len()).to_equal(0)
+        val fn_opt = find_opt_probe_fn(probe.mir_mod, "probe")
+        expect(fn_opt.?).to_equal(true)
+        if val func = fn_opt:
+            expect(count_opt_fn_calls(func, "rt_unwrap_or_self") >= 1).to_equal(true)
+
+    it "emits rt_unwrap_or_self when loop conditionally assigns d.get onto Some":
+        val src = """fn probe(d: Dict<i64, text>, cond: bool) -> i64:
+    var owner: text? = Some("Codec")
+    var i = 0
+    while i < 2:
+        if cond:
+            owner = d.get(i)
+        i = i + 1
+    if val resolved = owner:
+        return resolved.len()
+    0
+"""
+        val probe = lower_cond_var_opt_probe(src, "while_dget")
+        expect(probe.errors.len()).to_equal(0)
+        val fn_opt = find_opt_probe_fn(probe.mir_mod, "probe")
+        expect(fn_opt.?).to_equal(true)
+        if val func = fn_opt:
+            expect(count_opt_fn_calls(func, "rt_unwrap_or_self") >= 1).to_equal(true)
+
+    it "keeps decoded_text_option_locals direct decode for pure d.get without Some":
+        val src = """fn probe(d: Dict<i64, text>, k: i64) -> i64:
+    var owner = d.get(k)
+    if val resolved = owner:
+        return resolved.len()
+    0
+"""
+        val probe = lower_cond_var_opt_probe(src, "pure_dget")
+        expect(probe.errors.len()).to_equal(0)
+        val fn_opt = find_opt_probe_fn(probe.mir_mod, "probe")
+        expect(fn_opt.?).to_equal(true)
+        if val func = fn_opt:
+            expect(count_opt_fn_calls(func, "rt_unwrap_or_self")).to_equal(0)

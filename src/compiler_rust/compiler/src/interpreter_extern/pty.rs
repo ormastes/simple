@@ -39,6 +39,93 @@ pub fn rt_pty_write(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(pty_write_impl(handle, data.as_bytes())))
 }
 
+fn value_text_array(value: Option<&Value>) -> Option<Vec<String>> {
+    match value? {
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Str(text) => Some(text.as_str().to_string()),
+                _ => None,
+            })
+            .collect(),
+        _ => None,
+    }
+}
+
+/// `rt_pty_spawn_exec_v1(handle: i32, program: text, args: [text], cwd: text, env: [text]) -> i64`
+///
+/// Literal structured exec (no shell); same contract as the compiled lane's
+/// `simple_runtime::value::pty::rt_pty_spawn_exec_v1`. -1 off Unix.
+pub fn rt_pty_spawn_exec_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let master_fd = args.first().and_then(|v| v.as_int().ok()).unwrap_or(-1) as i32;
+    let fields = (
+        match args.get(1) {
+            Some(Value::Str(text)) => Some(text.as_str().to_string()),
+            _ => None,
+        },
+        value_text_array(args.get(2)),
+        match args.get(3) {
+            Some(Value::Str(text)) => Some(text.as_str().to_string()),
+            _ => None,
+        },
+        value_text_array(args.get(4)),
+    );
+    let (Some(program), Some(argv), Some(cwd), Some(env)) = fields else {
+        return Ok(Value::Int(-1));
+    };
+    Ok(Value::Int(pty_spawn_exec_impl(master_fd, &program, &argv, &cwd, &env)))
+}
+
+/// `rt_pty_write_bytes_v1(handle: i64, data: [u8]) -> i64` — accepted count, 0 when full, -1 failure.
+pub fn rt_pty_write_bytes_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = args.first().and_then(|v| v.as_int().ok()).unwrap_or(-1);
+    let bytes: Option<Vec<u8>> = match args.get(1) {
+        // `[u8]` is usually the packed byte representation in the interpreter.
+        Some(Value::ByteArray(packed)) | Some(Value::FrozenByteArray(packed)) => Some(packed.as_slice().to_vec()),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| item.as_int().ok().filter(|b| (0..=255).contains(b)).map(|b| b as u8))
+            .collect(),
+        _ => None,
+    };
+    let Some(bytes) = bytes else {
+        return Ok(Value::Int(-1));
+    };
+    if handle < 0 || handle > i32::MAX as i64 {
+        return Ok(Value::Int(-1));
+    }
+    Ok(Value::Int(pty_write_bytes_impl(handle as i32, &bytes)))
+}
+
+/// `rt_pty_exit_code_v1(handle: i64) -> i64` — code, 128+signal, -1 running, -2 none.
+pub fn rt_pty_exit_code_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = args.first().and_then(|v| v.as_int().ok()).unwrap_or(-1);
+    Ok(Value::Int(simple_runtime::value::pty::rt_pty_exit_code_v1(handle)))
+}
+
+#[cfg(unix)]
+fn pty_spawn_exec_impl(master_fd: i32, program: &str, argv: &[String], cwd: &str, env: &[String]) -> i64 {
+    match simple_runtime::value::pty::pty_exec_request(program, argv, cwd, env) {
+        Some(request) => unix_impl::pty_spawn_exec(master_fd, &request),
+        None => -1,
+    }
+}
+
+#[cfg(not(unix))]
+fn pty_spawn_exec_impl(_master_fd: i32, _program: &str, _argv: &[String], _cwd: &str, _env: &[String]) -> i64 {
+    -1
+}
+
+#[cfg(unix)]
+fn pty_write_bytes_impl(handle: i32, data: &[u8]) -> i64 {
+    simple_runtime::value::pty::pty_write_bytes_some(handle, data)
+}
+
+#[cfg(not(unix))]
+fn pty_write_bytes_impl(_handle: i32, _data: &[u8]) -> i64 {
+    -1
+}
+
 fn value_text(value: &Value) -> String {
     match value {
         Value::Str(text) => text.as_str().to_string(),
@@ -65,12 +152,33 @@ pub fn rt_pty_is_running(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(pty_is_running_impl(handle)))
 }
 
+/// `rt_pty_hangup(handle: i64) -> bool`
+///
+/// Hangs up the child ahead of `rt_pty_close` so a batch teardown shares one
+/// grace period (see `simple_runtime::value::pty::rt_pty_hangup`).
+pub fn rt_pty_hangup(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = args.first().and_then(|v| v.as_int().ok()).unwrap_or(-1) as i32;
+    Ok(Value::Bool(pty_hangup_impl(handle)))
+}
+
+/// `rt_pty_resize(handle: i64, rows: i32, cols: i32) -> bool`
+pub fn rt_pty_resize(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = args.first().and_then(|v| v.as_int().ok()).unwrap_or(-1) as i32;
+    let rows = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(0) as i32;
+    let cols = args.get(2).and_then(|v| v.as_int().ok()).unwrap_or(0) as i32;
+    Ok(Value::Bool(pty_resize_impl(handle, rows, cols)))
+}
+
 // -------------------------------------------------------------------------
 // Platform implementations
 // -------------------------------------------------------------------------
 
 #[cfg(unix)]
 mod unix_impl {
+    use simple_runtime::value::pty::{
+        hangup_pty_child, probe_pty_child_with, reap_pty_child_record, set_pty_fd_cloexec, waitpid_nohang,
+        PtyChildProbe, PtyChildRecord,
+    };
     use std::collections::HashMap;
     use std::ffi::CString;
     use std::sync::Mutex;
@@ -78,7 +186,7 @@ mod unix_impl {
     /// Maps master_fd -> slave_fd so `pty_spawn_impl` can wire up the child.
     lazy_static::lazy_static! {
         static ref SLAVE_TABLE: Mutex<HashMap<i32, i32>> = Mutex::new(HashMap::new());
-        static ref CHILD_TABLE: Mutex<HashMap<i32, libc::pid_t>> = Mutex::new(HashMap::new());
+        static ref CHILD_TABLE: Mutex<HashMap<i32, PtyChildRecord>> = Mutex::new(HashMap::new());
     }
 
     pub(super) fn pty_open(rows: i32, cols: i32) -> i32 {
@@ -113,10 +221,14 @@ mod unix_impl {
                 libc::fcntl(master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
             }
         }
+        // Later panes' children must not inherit this pair (see set_pty_fd_cloexec).
+        set_pty_fd_cloexec(master_fd);
+        set_pty_fd_cloexec(slave_fd);
 
         if let Ok(mut table) = SLAVE_TABLE.lock() {
             table.insert(master_fd, slave_fd);
         }
+        simple_runtime::value::pty::note_pty_owned(master_fd);
 
         master_fd
     }
@@ -140,6 +252,14 @@ mod unix_impl {
         let argv0 = shell.rsplit('/').next().unwrap_or(shell);
         let argv0_cstr = match CString::new(argv0) {
             Ok(s) => s,
+            Err(_) => return -1,
+        };
+
+        // A command LINE ("/bin/sh -i") is not a path. Windows hands the line to
+        // CreateProcess; here it is run through /bin/sh when the direct exec fails,
+        // so one PTY interface takes the same command text on every platform.
+        let line_cstr = match CString::new(format!("exec {}", shell)) {
+            Ok(value) => value,
             Err(_) => return -1,
         };
 
@@ -171,6 +291,11 @@ mod unix_impl {
                 libc::dup2(slave_fd, libc::STDIN_FILENO);
                 libc::dup2(slave_fd, libc::STDOUT_FILENO);
                 libc::dup2(slave_fd, libc::STDERR_FILENO);
+                // A slave that already was fd 0-2 kept its close-on-exec flag through
+                // the no-op dup2; clear it so exec keeps the standard streams.
+                for std_fd in 0..=libc::STDERR_FILENO {
+                    libc::fcntl(std_fd, libc::F_SETFD, 0);
+                }
                 if slave_fd > libc::STDERR_FILENO {
                     libc::close(slave_fd);
                 }
@@ -185,6 +310,9 @@ mod unix_impl {
                 // exec shell — argv = [argv0, NULL]
                 let argv: &[*const libc::c_char] = &[argv0_cstr.as_ptr(), std::ptr::null()];
                 libc::execvp(shell_cstr.as_ptr(), argv.as_ptr());
+                let sh_argv: &[*const libc::c_char] =
+                    &[c"sh".as_ptr(), c"-c".as_ptr(), line_cstr.as_ptr(), std::ptr::null()];
+                libc::execv(c"/bin/sh".as_ptr(), sh_argv.as_ptr());
 
                 // exec failed.
                 libc::_exit(127);
@@ -197,11 +325,34 @@ mod unix_impl {
                 table.remove(&master_fd);
             }
             if let Ok(mut table) = CHILD_TABLE.lock() {
-                table.insert(master_fd, pid);
+                table.insert(master_fd, PtyChildRecord::new(pid));
             }
+            simple_runtime::value::pty::note_pty_spawn(master_fd, pid);
 
             pid as i64
         }
+    }
+
+    /// Structured literal exec (shared with the compiled lane:
+    /// `simple_runtime::value::pty::fork_pty_exec`), recorded in this lane's
+    /// child table so close/is_running/hangup own it.
+    pub(super) fn pty_spawn_exec(master_fd: i32, request: &simple_runtime::value::pty::PtyExecRequest) -> i64 {
+        let slave_fd = match SLAVE_TABLE.lock().ok().and_then(|t| t.get(&master_fd).copied()) {
+            Some(fd) => fd,
+            None => return -1,
+        };
+        let pid = simple_runtime::value::pty::fork_pty_exec(master_fd, slave_fd, request);
+        if pid < 0 {
+            return -1;
+        }
+        if let Ok(mut table) = SLAVE_TABLE.lock() {
+            table.remove(&master_fd);
+        }
+        if let Ok(mut table) = CHILD_TABLE.lock() {
+            table.insert(master_fd, PtyChildRecord::new(pid));
+        }
+        simple_runtime::value::pty::note_pty_spawn(master_fd, pid);
+        pid as i64
     }
 
     pub(super) fn pty_write(fd: i32, data: &[u8]) -> bool {
@@ -227,7 +378,14 @@ mod unix_impl {
     }
 
     pub(super) fn pty_close(fd: i32) -> bool {
+        // Same ownership rule as the compiled lane: an fd we no longer own is
+        // already closed (idempotent success) and must not be closed again —
+        // its number may have been reused by an unrelated file.
+        if !simple_runtime::value::pty::take_pty_owned(fd) {
+            return true;
+        }
         simple_runtime::value::pty::forget_pty_utf8(fd as i64);
+        simple_runtime::value::pty::forget_pty_spawn(fd);
         if let Ok(mut table) = SLAVE_TABLE.lock() {
             if let Some(slave) = table.remove(&fd) {
                 unsafe {
@@ -235,10 +393,56 @@ mod unix_impl {
                 }
             }
         }
-        if let Ok(mut table) = CHILD_TABLE.lock() {
-            table.remove(&fd);
+        let child = CHILD_TABLE.lock().ok().and_then(|mut table| table.remove(&fd));
+        let closed = unsafe { libc::close(fd) == 0 };
+        // Closing the master hangs up the child; reap it (bounded, then
+        // SIGKILL) so no zombie or survivor outlives the close. Same owner as
+        // the compiled lane: simple_runtime::value::pty::reap_pty_child.
+        if let Some(record) = child {
+            if !reap_pty_child_record(record) {
+                eprintln!("PTY close: child {} could not be reaped", record.pid);
+            }
         }
-        unsafe { libc::close(fd) == 0 }
+        closed
+    }
+
+    /// Hangs up the child of `fd` ahead of its close, under the table lock
+    /// (see `hangup_pty_child`). False when no child is attached.
+    pub(super) fn pty_hangup(fd: i32) -> bool {
+        let Ok(mut table) = CHILD_TABLE.lock() else {
+            return false;
+        };
+        match table.get_mut(&fd) {
+            Some(record) => hangup_pty_child(record),
+            None => false,
+        }
+    }
+
+    /// TIOCSWINSZ makes the kernel signal the foreground group; the direct
+    /// SIGWINCH covers a child that is not (yet) that group.
+    pub(super) fn pty_resize(fd: i32, rows: i32, cols: i32) -> bool {
+        if fd < 0 || !(1..=u16::MAX as i32).contains(&rows) || !(1..=u16::MAX as i32).contains(&cols) {
+            return false;
+        }
+        let ws = libc::winsize {
+            ws_row: rows as libc::c_ushort,
+            ws_col: cols as libc::c_ushort,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        if unsafe { libc::ioctl(fd, libc::TIOCSWINSZ as _, &ws as *const libc::winsize) } != 0 {
+            return false;
+        }
+        if let Some(pid) = CHILD_TABLE
+            .lock()
+            .ok()
+            .and_then(|table| table.get(&fd).map(|record| record.pid))
+        {
+            unsafe {
+                libc::kill(pid, libc::SIGWINCH);
+            }
+        }
+        true
     }
 
     pub(super) fn pty_is_running(fd: i32) -> bool {
@@ -246,19 +450,18 @@ mod unix_impl {
             Ok(value) => value,
             Err(_) => return false,
         };
-        let pid = match table.get(&fd).copied() {
-            Some(value) => value,
+        let pid = match table.get(&fd) {
+            Some(record) => record.pid,
             None => return false,
         };
-        let mut status = 0;
-        let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-        if result == 0 {
-            return true;
+        // Same classifier as the compiled lane: EINTR is retried, not an exit.
+        match probe_pty_child_with(pid, waitpid_nohang) {
+            PtyChildProbe::Running => true,
+            PtyChildProbe::Gone => {
+                table.remove(&fd);
+                false
+            }
         }
-        if result == pid {
-            table.remove(&fd);
-        }
-        false
     }
 }
 
@@ -288,331 +491,18 @@ fn pty_close_impl(handle: i32) -> bool {
 fn pty_is_running_impl(handle: i32) -> bool {
     unix_impl::pty_is_running(handle)
 }
-
-#[cfg(windows)]
-mod windows_impl {
-    use std::collections::HashMap;
-    use std::ffi::c_void;
-    use std::sync::atomic::{AtomicI32, Ordering};
-    use std::sync::Mutex;
-    use std::time::{Duration, Instant};
-
-    type Handle = *mut c_void;
-    type Hpcon = *mut c_void;
-    const INVALID_HANDLE_VALUE: Handle = -1_isize as Handle;
-    const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x0008_0000;
-    const CREATE_UNICODE_ENVIRONMENT: u32 = 0x0000_0400;
-    const STARTF_USESTDHANDLES: u32 = 0x0000_0100;
-    const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x0002_0016;
-
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct Coord {
-        x: i16,
-        y: i16,
-    }
-    #[repr(C)]
-    struct SecurityAttributes {
-        length: u32,
-        descriptor: *mut c_void,
-        inherit: i32,
-    }
-    #[repr(C)]
-    struct StartupInfoW {
-        cb: u32,
-        reserved: *mut u16,
-        desktop: *mut u16,
-        title: *mut u16,
-        x: u32,
-        y: u32,
-        x_size: u32,
-        y_size: u32,
-        x_chars: u32,
-        y_chars: u32,
-        fill: u32,
-        flags: u32,
-        show: u16,
-        reserved2_len: u16,
-        reserved2: *mut u8,
-        stdin: Handle,
-        stdout: Handle,
-        stderr: Handle,
-    }
-    #[repr(C)]
-    struct StartupInfoExW {
-        startup: StartupInfoW,
-        attributes: *mut c_void,
-    }
-    #[repr(C)]
-    struct ProcessInformation {
-        process: Handle,
-        thread: Handle,
-        process_id: u32,
-        thread_id: u32,
-    }
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn CreatePipe(read: *mut Handle, write: *mut Handle, attrs: *mut SecurityAttributes, size: u32) -> i32;
-        fn CloseHandle(handle: Handle) -> i32;
-        fn CreatePseudoConsole(size: Coord, input: Handle, output: Handle, flags: u32, console: *mut Hpcon) -> i32;
-        fn ClosePseudoConsole(console: Hpcon);
-        fn InitializeProcThreadAttributeList(list: *mut c_void, count: u32, flags: u32, bytes: *mut usize) -> i32;
-        fn UpdateProcThreadAttribute(
-            list: *mut c_void,
-            flags: u32,
-            attribute: usize,
-            value: *mut c_void,
-            size: usize,
-            previous: *mut c_void,
-            returned: *mut usize,
-        ) -> i32;
-        fn DeleteProcThreadAttributeList(list: *mut c_void);
-        fn CreateProcessW(
-            app: *const u16,
-            command: *mut u16,
-            process_attrs: *mut c_void,
-            thread_attrs: *mut c_void,
-            inherit: i32,
-            flags: u32,
-            environment: *mut c_void,
-            directory: *const u16,
-            startup: *mut StartupInfoW,
-            info: *mut ProcessInformation,
-        ) -> i32;
-        fn WriteFile(
-            file: Handle,
-            buffer: *const c_void,
-            bytes: u32,
-            written: *mut u32,
-            overlapped: *mut c_void,
-        ) -> i32;
-        fn PeekNamedPipe(
-            pipe: Handle,
-            buffer: *mut c_void,
-            size: u32,
-            read: *mut u32,
-            available: *mut u32,
-            left: *mut u32,
-        ) -> i32;
-        fn ReadFile(file: Handle, buffer: *mut c_void, bytes: u32, read: *mut u32, overlapped: *mut c_void) -> i32;
-    }
-
-    struct Pty {
-        console: Hpcon,
-        input: Handle,
-        output: Handle,
-        process: Option<Handle>,
-    }
-    unsafe impl Send for Pty {}
-    lazy_static::lazy_static! { static ref PTYS: Mutex<HashMap<i32, Pty>> = Mutex::new(HashMap::new()); }
-    static NEXT_HANDLE: AtomicI32 = AtomicI32::new(1);
-
-    pub(super) fn open(rows: i32, cols: i32) -> i32 {
-        unsafe {
-            let mut con_in = INVALID_HANDLE_VALUE;
-            let mut input = INVALID_HANDLE_VALUE;
-            let mut output = INVALID_HANDLE_VALUE;
-            let mut con_out = INVALID_HANDLE_VALUE;
-            let mut attrs = SecurityAttributes {
-                length: std::mem::size_of::<SecurityAttributes>() as u32,
-                descriptor: std::ptr::null_mut(),
-                inherit: 0,
-            };
-            if CreatePipe(&mut con_in, &mut input, &mut attrs, 0) == 0
-                || CreatePipe(&mut output, &mut con_out, &mut attrs, 0) == 0
-            {
-                for h in [con_in, input, output, con_out] {
-                    if h != INVALID_HANDLE_VALUE {
-                        CloseHandle(h);
-                    }
-                }
-                return -1;
-            }
-            let mut console = std::ptr::null_mut();
-            let hr = CreatePseudoConsole(
-                Coord {
-                    x: cols.clamp(1, i16::MAX as i32) as i16,
-                    y: rows.clamp(1, i16::MAX as i32) as i16,
-                },
-                con_in,
-                con_out,
-                0x2 | 0x4,
-                &mut console,
-            );
-            CloseHandle(con_in);
-            CloseHandle(con_out);
-            if hr < 0 {
-                CloseHandle(input);
-                CloseHandle(output);
-                return -1;
-            }
-            let id = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-            if let Ok(mut table) = PTYS.lock() {
-                table.insert(
-                    id,
-                    Pty {
-                        console,
-                        input,
-                        output,
-                        process: None,
-                    },
-                );
-                id
-            } else {
-                ClosePseudoConsole(console);
-                CloseHandle(input);
-                CloseHandle(output);
-                -1
-            }
-        }
-    }
-
-    pub(super) fn spawn(id: i32, shell: &str) -> i64 {
-        if shell.is_empty() {
-            return -1;
-        }
-        let Ok(mut table) = PTYS.lock() else {
-            return -1;
-        };
-        let Some(pty) = table.get_mut(&id) else {
-            return -1;
-        };
-        unsafe {
-            let mut bytes = 0usize;
-            InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut bytes);
-            let mut storage = vec![0u8; bytes];
-            let list = storage.as_mut_ptr().cast();
-            if InitializeProcThreadAttributeList(list, 1, 0, &mut bytes) == 0 {
-                return -1;
-            }
-            if UpdateProcThreadAttribute(
-                list,
-                0,
-                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-                pty.console,
-                std::mem::size_of::<Hpcon>(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            ) == 0
-            {
-                DeleteProcThreadAttributeList(list);
-                return -1;
-            }
-            let mut startup: StartupInfoExW = std::mem::zeroed();
-            startup.startup.cb = std::mem::size_of::<StartupInfoExW>() as u32;
-            startup.startup.flags = STARTF_USESTDHANDLES;
-            startup.startup.stdin = INVALID_HANDLE_VALUE;
-            startup.startup.stdout = INVALID_HANDLE_VALUE;
-            startup.startup.stderr = INVALID_HANDLE_VALUE;
-            startup.attributes = list;
-            let mut info: ProcessInformation = std::mem::zeroed();
-            let mut command: Vec<u16> = shell.encode_utf16().chain(std::iter::once(0)).collect();
-            let ok = CreateProcessW(
-                std::ptr::null(),
-                command.as_mut_ptr(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                0,
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                &mut startup.startup,
-                &mut info,
-            );
-            DeleteProcThreadAttributeList(list);
-            if ok == 0 {
-                return -1;
-            }
-            CloseHandle(info.thread);
-            pty.process = Some(info.process);
-            info.process_id as i64
-        }
-    }
-
-    pub(super) fn write(id: i32, data: &[u8]) -> bool {
-        if data.is_empty() {
-            return true;
-        }
-        let Ok(table) = PTYS.lock() else { return false };
-        let Some(pty) = table.get(&id) else { return false };
-        let mut written = 0;
-        unsafe {
-            WriteFile(
-                pty.input,
-                data.as_ptr().cast(),
-                data.len().min(u32::MAX as usize) as u32,
-                &mut written,
-                std::ptr::null_mut(),
-            ) != 0
-                && written as usize == data.len()
-        }
-    }
-
-    pub(super) fn read(id: i32, timeout_ms: u64) -> String {
-        let start = Instant::now();
-        loop {
-            let output = {
-                let Ok(table) = PTYS.lock() else { return String::new() };
-                let Some(pty) = table.get(&id) else {
-                    return String::new();
-                };
-                pty.output
-            };
-            let mut available = 0;
-            let ok = unsafe {
-                PeekNamedPipe(
-                    output,
-                    std::ptr::null_mut(),
-                    0,
-                    std::ptr::null_mut(),
-                    &mut available,
-                    std::ptr::null_mut(),
-                )
-            };
-            if ok == 0 {
-                return String::new();
-            }
-            if available > 0 {
-                let mut data = vec![0u8; (available as usize).min(4096)];
-                let mut read = 0;
-                if unsafe {
-                    ReadFile(
-                        output,
-                        data.as_mut_ptr().cast(),
-                        data.len() as u32,
-                        &mut read,
-                        std::ptr::null_mut(),
-                    )
-                } != 0
-                {
-                    data.truncate(read as usize);
-                    return String::from_utf8_lossy(&data).into_owned();
-                }
-                return String::new();
-            }
-            if start.elapsed() >= Duration::from_millis(timeout_ms) {
-                return String::new();
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    pub(super) fn close(id: i32) -> bool {
-        let Ok(mut table) = PTYS.lock() else { return false };
-        let Some(pty) = table.remove(&id) else { return false };
-        unsafe {
-            if let Some(process) = pty.process {
-                CloseHandle(process);
-            }
-            ClosePseudoConsole(pty.console);
-            CloseHandle(pty.input);
-            CloseHandle(pty.output);
-        }
-        true
-    }
+#[cfg(unix)]
+fn pty_hangup_impl(handle: i32) -> bool {
+    unix_impl::pty_hangup(handle)
 }
 
+#[cfg(unix)]
+fn pty_resize_impl(handle: i32, rows: i32, cols: i32) -> bool {
+    unix_impl::pty_resize(handle, rows, cols)
+}
+
+// Windows PTY ownership lives in simple_runtime::value::pty. Keep this
+// interpreter adapter as delegation rather than a second ConPTY/Win32 owner.
 #[cfg(windows)]
 fn pty_open_impl(rows: i32, cols: i32) -> i32 {
     simple_runtime::value::pty::host_pty_open(rows, cols)
@@ -636,6 +526,15 @@ fn pty_close_impl(handle: i32) -> bool {
 #[cfg(windows)]
 fn pty_is_running_impl(handle: i32) -> bool {
     simple_runtime::value::pty::host_pty_is_running(handle as i64)
+}
+#[cfg(windows)]
+fn pty_hangup_impl(handle: i32) -> bool {
+    simple_runtime::value::pty::rt_pty_hangup(handle as i64)
+}
+
+#[cfg(windows)]
+fn pty_resize_impl(handle: i32, rows: i32, cols: i32) -> bool {
+    simple_runtime::value::pty::host_pty_resize(handle as i64, rows, cols)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -662,6 +561,15 @@ fn pty_close_impl(_handle: i32) -> bool {
 fn pty_is_running_impl(_handle: i32) -> bool {
     false
 }
+#[cfg(not(any(unix, windows)))]
+fn pty_hangup_impl(_handle: i32) -> bool {
+    false
+}
+
+#[cfg(not(any(unix, windows)))]
+fn pty_resize_impl(_handle: i32, _rows: i32, _cols: i32) -> bool {
+    false
+}
 
 #[cfg(test)]
 mod tests {
@@ -677,8 +585,14 @@ mod tests {
             Value::Bool(false)
         );
         assert_eq!(rt_pty_read(&[Value::Int(-1), Value::Int(0)]).unwrap(), Value::text(""));
-        assert_eq!(rt_pty_close(&[Value::Int(-1)]).unwrap(), Value::Bool(false));
+        // Not an owned PTY: nothing to close, idempotent success (unix and windows).
+        assert_eq!(rt_pty_close(&[Value::Int(-1)]).unwrap(), Value::Bool(true));
         assert_eq!(rt_pty_is_running(&[Value::Int(-1)]).unwrap(), Value::Bool(false));
+        assert_eq!(rt_pty_hangup(&[Value::Int(-1)]).unwrap(), Value::Bool(false));
+        assert_eq!(
+            rt_pty_resize(&[Value::Int(-1), Value::Int(24), Value::Int(80)]).unwrap(),
+            Value::Bool(false)
+        );
     }
     #[test]
     fn empty_write_is_safe_for_invalid_handle() {

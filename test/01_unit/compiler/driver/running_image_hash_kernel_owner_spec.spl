@@ -1,0 +1,93 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, driver, cache
+"""
+# Cross-platform kernel running-image identity (MP2 Part A)
+
+Verifies that `native_build_select_running_image_path_v1` selects the kernel
+owner per platform without ever consulting `argv[0]` or `SIMPLE_BINARY`, and
+that `native_build_running_image_hash()` resolves a canonical 64-char sha256 on
+Windows via `windows_image_path()` rather than returning empty on `/proc`-less
+hosts.
+"""
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+use std.nogc_sync_mut.io.windows_image_owner.{windows_image_path}
+use compiler.driver.driver_build.incremental.{
+    native_build_select_running_image_path_v1,
+    native_build_running_image_hash,
+    native_build_unadmitted_identity_decision_v1
+}
+
+extern fn rt_file_hash_sha256(path: text) -> text?
+
+fn _is_lowercase_sha256(s: text) -> bool:
+    if s.len() != 64:
+        return false
+    for i in 0..64:
+        val ch = s.substring(i, i + 1)
+        val ok_digit = ch >= "0" and ch <= "9"
+        val ok_hex = ch >= "a" and ch <= "f"
+        if not (ok_digit or ok_hex):
+            return false
+    true
+
+describe "native_build_select_running_image_path_v1":
+    it "selects Win32 kernel image path on Windows and ignores /proc/self/exe":
+        val selected = native_build_select_running_image_path_v1(
+            true, true, "windows",
+            Ok("C:\\dev\\simple\\bin\\simple.exe"),
+            Ok("/opt/simple/bin/simple"))
+        expect(selected).to_equal("C:\\dev\\simple\\bin\\simple.exe")
+
+        val by_platform = native_build_select_running_image_path_v1(
+            true, false, "windows",
+            Ok("C:/dev/simple/bin/simple.exe"),
+            Err("inactive"))
+        expect(by_platform).to_equal("C:/dev/simple/bin/simple.exe")
+
+    it "fails closed on Windows when kernel image query fails or names a .spl script":
+        expect(native_build_select_running_image_path_v1(
+            true, true, "windows", Err("truncated"), Err("inactive"))).to_equal("")
+        expect(native_build_select_running_image_path_v1(
+            true, true, "windows", Ok(""), Err("inactive"))).to_equal("")
+        expect(native_build_select_running_image_path_v1(
+            true, true, "windows", Ok("C:\\work\\main.spl"), Err("inactive"))).to_equal("")
+
+    it "selects Darwin kernel image path on macOS/darwin and rejects invalid results":
+        expect(native_build_select_running_image_path_v1(
+            true, false, "macos",
+            Err("inactive"),
+            Ok("/opt/simple/bin/simple"))).to_equal("/opt/simple/bin/simple")
+        expect(native_build_select_running_image_path_v1(
+            false, false, "darwin",
+            Err("inactive"),
+            Ok("/usr/local/bin/simple"))).to_equal("/usr/local/bin/simple")
+        expect(native_build_select_running_image_path_v1(
+            true, false, "macos",
+            Err("inactive"),
+            Err("Darwin image query failed"))).to_equal("")
+        expect(native_build_select_running_image_path_v1(
+            true, false, "macos",
+            Err("inactive"),
+            Ok("/tmp/script.spl"))).to_equal("")
+
+    it "uses /proc/self/exe on Linux and BSD only when present":
+        expect(native_build_select_running_image_path_v1(
+            true, false, "linux", Err("inactive"), Err("inactive"))).to_equal("/proc/self/exe")
+        expect(native_build_select_running_image_path_v1(
+            true, false, "freebsd", Err("inactive"), Err("inactive"))).to_equal("/proc/self/exe")
+        expect(native_build_select_running_image_path_v1(
+            false, false, "linux", Err("inactive"), Err("inactive"))).to_equal("")
+
+describe "native_build_running_image_hash on host":
+    it "returns a canonical 64-char sha256 and qualifies unadmitted stability on Windows":
+        val digest = native_build_running_image_hash()
+        expect(_is_lowercase_sha256(digest)).to_equal(true)
+        if host_is_windows_host():
+            val win_res = windows_image_path()
+            expect(win_res.is_ok()).to_equal(true)
+            val expected_opt = rt_file_hash_sha256(win_res.unwrap())
+            expect(expected_opt.is_some()).to_equal(true)
+            expect(digest).to_equal(expected_opt.unwrap())
+        expect(native_build_unadmitted_identity_decision_v1(digest, digest, "", "")).to_equal("stable")

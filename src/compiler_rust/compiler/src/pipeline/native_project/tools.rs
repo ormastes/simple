@@ -122,7 +122,7 @@ fn archive_has_exact_runtime_members(archive: &Path, inputs: &[&str]) -> bool {
         .iter()
         .copied()
         .filter(|input| input.ends_with(".c"))
-        .map(|input| format!("{}.{}", input.trim_end_matches(".c"), host_object_extension()))
+        .map(|input| format!("{}.{}", core_c_object_stem(input), host_object_extension()))
         .collect();
     actual.sort();
     expected.sort();
@@ -231,23 +231,29 @@ pub(crate) fn hosted_linux_cross_compiler(
 }
 
 pub(crate) fn target_c_compiler(target: simple_common::target::Target) -> String {
-    // Windows GNU bootstrap is Clang-only.  The MinGW GCC driver rejects the
-    // target-qualified flags used by the generated-C and hosted-link paths,
-    // and using two driver families makes their ABI/toolchain policy diverge.
-    if target.os == simple_common::target::TargetOS::Windows
-        && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
-    {
-        return "clang".to_string();
-    }
+    target_c_compiler_with_env(target, &simple_common::platform::cc_detect::ToolDetectEnv::from_process())
+}
+
+pub(crate) fn target_c_compiler_with_env(
+    target: simple_common::target::Target,
+    env: &simple_common::platform::cc_detect::ToolDetectEnv,
+) -> String {
     hosted_linux_cross_compiler(target, false)
         .map(str::to_string)
-        .unwrap_or_else(|| simple_common::platform::cc_detect::detect_c_compiler_for_target(&target))
+        .unwrap_or_else(|| simple_common::platform::cc_detect::detect_c_compiler_for_target_with_env(&target, env))
 }
 
 pub(crate) fn target_cxx_compiler(target: simple_common::target::Target) -> String {
+    target_cxx_compiler_with_env(target, &simple_common::platform::cc_detect::ToolDetectEnv::from_process())
+}
+
+pub(crate) fn target_cxx_compiler_with_env(
+    target: simple_common::target::Target,
+    env: &simple_common::platform::cc_detect::ToolDetectEnv,
+) -> String {
     hosted_linux_cross_compiler(target, true)
         .map(str::to_string)
-        .unwrap_or_else(|| simple_common::platform::cc_detect::detect_cxx_compiler_for_target(&target))
+        .unwrap_or_else(|| simple_common::platform::cc_detect::detect_cxx_compiler_for_target_with_env(&target, env))
 }
 
 /// Return the linker arguments for terminfo symbols used by hosted LLVM.
@@ -298,6 +304,34 @@ fn host_object_extension() -> &'static str {
     }
 }
 
+/// Build-time pin of the levelled vector provider the bootstrap built for this
+/// host (`SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256`, 64 lowercase hex). Unset or
+/// empty => `Ok(None)` (scalar default unchanged); malformed => `Err`, so a pin
+/// that can never match is never baked. Mirrors
+/// `runtime_vector_provider_pin_from_env_v1` in runtime_compiler.spl.
+pub(crate) fn core_c_vector_provider_pin(raw: Option<&str>) -> Result<Option<String>, String> {
+    match raw {
+        None | Some("") => Ok(None),
+        Some(pin) if pin.len() == 64 && pin.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) => {
+            Ok(Some(pin.to_string()))
+        }
+        Some(_) => Err("SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256 must be 64 lowercase hex digits".to_string()),
+    }
+}
+
+/// The pin define, emitted only for the TU that owns the provider loader.
+pub(crate) fn core_c_vector_provider_pin_define(source: &str, pin: Option<&str>) -> Option<String> {
+    match pin {
+        Some(pin) if source == "runtime_simd_utf8.c" => Some(format!("-DSIMPLE_VECTOR_PROVIDER_PIN_HEX={pin}")),
+        _ => None,
+    }
+}
+
+/// Archive-reuse fingerprint term: a different or absent pin never reuses.
+pub(crate) fn core_c_vector_provider_pin_fingerprint(pin: Option<&str>) -> String {
+    format!("vector_pin={}", pin.unwrap_or("none"))
+}
+
 pub(crate) fn core_c_target_flags(
     target: simple_common::target::Target,
     compiler: &str,
@@ -318,41 +352,112 @@ pub(crate) fn core_c_target_flags(
     flags
 }
 
+/// Compiler + flags for C sources of a hosted Linux cross target (e.g.
+/// `--target x86_64-unknown-linux-gnu` on macOS). `Ok(None)`: not a hosted
+/// cross build, or its GNU cross driver is installed and owns its sysroot.
+/// Otherwise clang is driven with `--target`/`--sysroot`; without a sysroot
+/// the build fails up front instead of compiling host headers/sources.
+pub(crate) fn hosted_cross_c_setup(
+    target: simple_common::target::Target,
+) -> Result<Option<(String, Vec<String>)>, String> {
+    hosted_cross_c_setup_with(
+        target,
+        simple_common::platform::cc_detect::command_exists,
+        std::env::var("SIMPLE_CROSS_SYSROOT").ok(),
+    )
+}
+
+pub(crate) fn hosted_cross_c_setup_with(
+    target: simple_common::target::Target,
+    exists: impl Fn(&str) -> bool,
+    sysroot: Option<String>,
+) -> Result<Option<(String, Vec<String>)>, String> {
+    if target.os != simple_common::target::TargetOS::Linux || target.is_host() {
+        return Ok(None);
+    }
+    let gnu = hosted_linux_cross_compiler(target, false);
+    if gnu.is_some_and(|tool| exists(tool)) {
+        return Ok(None);
+    }
+    let Some(triple) = super::linker::generated_c_object_triple(target) else {
+        return Ok(None);
+    };
+    let alternative = gnu.map(|tool| format!("install `{tool}` or ")).unwrap_or_default();
+    let sysroot = sysroot.filter(|dir| !dir.trim().is_empty()).ok_or_else(|| {
+        format!(
+            "cross target {triple} needs a target C sysroot for the runtime: {alternative}set \
+             SIMPLE_CROSS_SYSROOT=<dir> (used as clang --target={triple} --sysroot=<dir>)"
+        )
+    })?;
+    if !std::path::Path::new(&sysroot).is_dir() {
+        return Err(format!("SIMPLE_CROSS_SYSROOT={sysroot} is not a directory (cross target {triple})"));
+    }
+    if !exists("clang") {
+        return Err(format!("cross target {triple} needs clang on PATH ({alternative}install clang)"));
+    }
+    Ok(Some(("clang".to_string(), vec![format!("--target={triple}"), format!("--sysroot={sysroot}")])))
+}
+
 pub(crate) fn windows_gnu_target_flag(
     target: simple_common::target::Target,
     compiler: &str,
 ) -> Option<&'static str> {
+    let base = compiler.rsplit(['/', '\\']).next().unwrap_or(compiler);
     (target.os == simple_common::target::TargetOS::Windows
         && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu)
         .then_some(())
-        .filter(|_| compiler.to_ascii_lowercase().contains("clang"))
-        .map(|_| "--target=x86_64-w64-windows-gnu")
+        .filter(|_| base.to_ascii_lowercase().contains("clang") && !msvc_style_c_driver(compiler))
+        .map(|_| match target.arch {
+            simple_common::target::TargetArch::Aarch64 => "--target=aarch64-w64-windows-gnu",
+            simple_common::target::TargetArch::Arm => "--target=armv7-w64-windows-gnu",
+            simple_common::target::TargetArch::X86 => "--target=i686-w64-windows-gnu",
+            _ => "--target=x86_64-w64-windows-gnu",
+        })
 }
 
 pub(crate) fn compiler_accepts_target_flag(compiler: &str) -> bool {
     compiler.to_ascii_lowercase().contains("clang")
 }
 
-/// C11-atomics flags required by the MSVC-style drivers, and by nobody else.
+/// Whether the compiler accepts CL-style compile and output arguments.
+fn msvc_style_c_driver(cc: &str) -> bool {
+    let normalized = cc.replace('\\', "/");
+    let base = normalized.rsplit('/').next().unwrap_or(cc);
+    matches!(base.to_ascii_lowercase().as_str(), "cl" | "cl.exe" | "clang-cl" | "clang-cl.exe")
+}
+
+/// Runtime C codegen switches, selected by driver syntax rather than target ABI.
+fn core_c_codegen_flags(cc: &str) -> &'static [&'static str] {
+    if msvc_style_c_driver(cc) {
+        // Windows SEH unwind data is mandatory; GNU PIC/unwind flags do not apply.
+        &["-c", "-O1", "-Gy", "-Gw", "-GS-"]
+    } else {
+        &["-c", "-Os", "-ffunction-sections", "-fdata-sections", "-fno-unwind-tables",
+          "-fno-asynchronous-unwind-tables", "-fno-stack-protector", "-fPIC", "-std=gnu11"]
+    }
+}
+
+/// C11-atomics flags required by the selected C driver.
 ///
 /// Measured 2026-09-06 (cl 19.44.35207, MSVC 2022 14.44): without BOTH
 /// `-std:c11` and `-experimental:c11atomics`, cl.exe stops at
 /// `fatal error C1189: "C atomics require C11 or later"` inside
 /// `<vcruntime_c11_stdatomic.h>` before it ever reaches a runtime source, so
 /// `runtime.c` / `runtime_native.c` cannot compile at all. With both, they
-/// compile clean (the GNU-shaped `-f*` / `-std=gnu11` flags around them are
-/// merely ignored with `warning D9002`). clang-cl 18.1.8 accepts both too --
-/// it needs neither, and reports `-experimental:c11atomics` as unused -- so
-/// one flag set covers both MSVC drivers.
+/// compile clean. clang-cl needs C11 mode, but reports the cl.exe-only
+/// experimental flag as unused, so keep that switch exclusive to cl.exe.
 ///
 /// Gated on the compiler BINARY, not on `LinkerFlavor::Msvc`: that flavor can
 /// also resolve to plain `clang` (see `MSVC_C_COMPILERS` in `cc_detect`),
 /// whose GNU driver rejects `-std:c11`. Every gcc/clang lane on Linux/macOS
 /// gets an empty slice, so their argument vectors stay byte-identical.
 fn msvc_c11_atomics_flags(cc: &str) -> &'static [&'static str] {
-    let base = Path::new(cc).file_name().and_then(|n| n.to_str()).unwrap_or(cc);
-    if simple_common::platform::cc_detect::is_msvc_compiler(cc) || base.contains("clang-cl") {
+    let normalized = cc.replace('\\', "/");
+    let base = normalized.rsplit('/').next().unwrap_or(cc);
+    if matches!(base.to_ascii_lowercase().as_str(), "cl" | "cl.exe") {
         &["-std:c11", "-experimental:c11atomics"]
+    } else if msvc_style_c_driver(cc) {
+        &["-std:c11"]
     } else {
         &[]
     }
@@ -394,10 +499,32 @@ fn run_core_c_command(command: &mut std::process::Command) -> Result<(), String>
     }
 }
 
+/// Per-OS async driver owners for the core-C composition. Mirrors
+/// `runtime_core_c_platform_sources_v1` in
+/// src/compiler/70.backend/backend/runtime_compiler.spl: platform/async_driver.c
+/// owns the 14 rt_driver_* exports and dispatches to one OS backend (IOCP on
+/// Windows). Without them the seed->stage2 bootstrap_main link fails with 15
+/// undefined rt_driver_* symbols. Other OS backends are not yet admitted.
+pub(crate) fn core_c_platform_sources(windows_target: bool) -> &'static [&'static str] {
+    if windows_target {
+        &["platform/async_driver.c", "platform/async_windows.c"]
+    } else {
+        &[]
+    }
+}
+
+/// Flat object/archive-member stem for a core-C source that may live in a
+/// subdirectory (`platform/async_driver.c` -> `platform_async_driver`).
+pub(crate) fn core_c_object_stem(source: &str) -> String {
+    source.trim_end_matches(".c").replace('/', "_")
+}
+
 fn build_c_runtime_library(
     build_dir: &Path,
     include_stage4_hosted: bool,
     include_cranelift_stubs: bool,
+    no_rust_array_packing: bool,
+    piped_observer: &super::piped_observer::PipedObserverSelection,
 ) -> Option<PathBuf> {
     let archive = build_dir.join(host_archive_name());
     let runtime_root = find_core_c_runtime_source_root().or_else(|| {
@@ -405,9 +532,17 @@ fn build_c_runtime_library(
         None
     })?;
     let target = effective_target();
+    piped_observer.validate(target, &runtime_root).map_err(|error| {
+        eprintln!("native-build: invalid observer source authority: {error}");
+    }).ok()?;
     let mut runtime_inputs = vec![
         "runtime_native.c",
+        "runtime_payload_text.h",
+        "runtime_crt_file.h",
+        "runtime_env_owned.h",
         "runtime_file_view.c",
+        "runtime_disk_headroom.c",
+        "runtime_memory_headroom.c",
         "runtime_cache_host_authority_v1.c",
         "runtime_framebuffer.c",
         "runtime_directx_core.c",
@@ -429,6 +564,10 @@ fn build_c_runtime_library(
         "runtime_fork.c",
         "runtime_memtrack.c",
         "runtime_process.c",
+        // Session-owned process trees + shared pdeathsig / birth-identity arms.
+        // runtime_process.c, runtime_process_owned.c and runtime_fork.c call
+        // into it, so every list that carries those must carry this.
+        "runtime_process_tree.c",
         // Owned-process receipt ABI (rt_process_run_owned_observed_bounded_value
         // and siblings) and the coverage probe/dump ABI. Both were registered by
         // 97a39131fe3 "fix(runtime): close core tool host providers" and dropped
@@ -473,6 +612,8 @@ fn build_c_runtime_library(
         // failed with undefined _simple_contract_check (2026-07-30).
         "runtime_contracts.c",
         "runtime_font.c",
+        // rt_db_* fast in-memory DB: self-contained C, sole definition of these symbols.
+        "runtime_db.c",
         // Canonical OS-thread and closure-pool provider. runtime_thread.c owns
         // both rt_thread_* and rt_pool_*; compiling runtime_pool.c beside it
         // would create duplicate pool definitions.
@@ -553,6 +694,23 @@ fn build_c_runtime_library(
         // and has ZERO overlap with the 1,302 symbols defined by the other
         // members of this list.
         "runtime_backend_plugin.c",
+        // Local Unix byte-connection owner (18 rt_local_unix_*_v1 leaves) and
+        // the retained private-credential owner (6 rt_retained_private_
+        // credential_*_v1). Same never-an-archive-member class as
+        // runtime_terminal.c above: both TUs define every leaf on every host
+        // (Linux/Darwin real, elsewhere an exact unsupported status), but this
+        // list never carried them, so the Windows smux_client link stubbed all
+        // 24 as abort-on-call (smux_client_native_windows_link_stubs_2026-11-15).
+        // Measured collision-free: the only undefined references are the
+        // rt_array_*/rt_value_int owners already in runtime_native.c.
+        "runtime_socket_nonblock.c",
+        "runtime_retained_private_credential_v1.c",
+        "runtime_local_unix_v1.h",
+        "runtime_local_unix_transfer_v1.h",
+        "runtime_local_unix_bridge_v1.h",
+        "runtime_process_tree.h",
+        "runtime_retained_private_credential_v1.h",
+        "runtime_workspace_storage_v1.h",
         "runtime_value.h",
         "runtime.h",
         "runtime_core_intrinsics_impl.h",
@@ -589,8 +747,26 @@ fn build_c_runtime_library(
         // this in the include_stage4_hosted == false arm only.
         runtime_inputs.push("runtime_cranelift_bridge_stub.c");
     }
+    runtime_inputs.extend_from_slice(core_c_platform_sources(
+        target.os == simple_common::target::TargetOS::Windows,
+    ));
 
-    let fingerprint = runtime_inputs_fingerprint(&runtime_root, &runtime_inputs)?;
+    let vector_pin = match core_c_vector_provider_pin(
+        std::env::var("SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256").ok().as_deref(),
+    ) {
+        Ok(pin) => pin,
+        Err(error) => {
+            eprintln!("native-build: {error}");
+            return None;
+        }
+    };
+    let mut fingerprint = format!("{};no_rust_array_packing={no_rust_array_packing};{}",
+        runtime_inputs_fingerprint(&runtime_root, &runtime_inputs)?,
+        core_c_vector_provider_pin_fingerprint(vector_pin.as_deref()));
+    if piped_observer.is_rust() {
+        fingerprint.push(';');
+        fingerprint.push_str(&piped_observer.fingerprint());
+    }
     let fingerprint_path = build_dir.join(format!("{}.inputs.fingerprint", host_archive_name()));
 
     if has_nonempty_archive_payload(&archive)
@@ -616,7 +792,18 @@ fn build_c_runtime_library(
     #[cfg(not(unix))]
     let build_dir_ino_before: u64 = 0;
 
-    let cc = target_c_compiler(target);
+    let mut cc = target_c_compiler(target);
+    let cross_flags = match hosted_cross_c_setup(target) {
+        Ok(Some((cross_cc, flags))) => {
+            cc = cross_cc;
+            flags
+        }
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            eprintln!("native-build: {error}");
+            return None;
+        }
+    };
     let ar = find_archive_tool().map_err(|error| {
         eprintln!("native-build: core-C archive tool discovery failed: {error}");
     }).ok()?;
@@ -631,7 +818,8 @@ fn build_c_runtime_library(
     // successfully while no .obj appears at the requested path, and the
     // failure surfaces much later and far from its cause, at the archive
     // step: `llvm-ar: runtime_native.obj: no such file or directory`.
-    let msvc = simple_common::platform::cc_detect::is_msvc_compiler(&cc);
+    let msvc = msvc_style_c_driver(&cc);
+    let sqlite_include = if include_stage4_hosted { stage_windows_sqlite_header_include(build_dir) } else { None };
     // Host C translation units compile independently; run them across the
     // rayon pool (sized by --threads, default = host parallelism) instead of
     // one cc at a time. The serial loop cost OS lanes tens of minutes
@@ -645,29 +833,19 @@ fn build_c_runtime_library(
             .collect::<Vec<_>>()
             .into_par_iter()
             .map(|source| {
-                let object = build_dir.join(format!("{}.{}", source.trim_end_matches(".c"), obj_ext));
+                let object = build_dir.join(format!("{}.{}", core_c_object_stem(source), obj_ext));
                 let mut command = std::process::Command::new(&cc);
-                if msvc {
-                    command
-                        .arg("-c")
-                        .arg("-O1")   // -Os: optimise for size
-                        .arg("-Gy")   // -ffunction-sections
-                        .arg("-Gw")   // -fdata-sections
-                        .arg("-GS-"); // -fno-stack-protector
-                    // -fPIC and the unwind-table flags have no MSVC equivalent: Windows
-                    // code is position-independent by construction and SEH unwind data
-                    // is not optional there.
-                } else {
-                    command
-                        .arg("-c")
-                        .arg("-Os")
-                        .arg("-ffunction-sections")
-                        .arg("-fdata-sections")
-                        .arg("-fno-unwind-tables")
-                        .arg("-fno-asynchronous-unwind-tables")
-                        .arg("-fno-stack-protector")
-                        .arg("-fPIC")
-                        .arg("-std=gnu11");
+                if source == "runtime_sqlite.c" {
+                    if let Some(include) = &sqlite_include {
+                        command.arg(format!("-I{}", include.display()));
+                    }
+                }
+                command.args(core_c_codegen_flags(&cc));
+                if let Some(define) = piped_observer.c_define() {
+                    command.arg(define);
+                }
+                if no_rust_array_packing {
+                    command.arg("-DSIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING=1");
                 }
                 command
                     .args(msvc_c11_atomics_flags(&cc))
@@ -677,6 +855,8 @@ fn build_c_runtime_library(
                     // 16 names.  Mirrors runtime_compiler.spl:545 in the pure-Simple lane.
                     .arg("-DSIMPLE_RUNTIME_MEMORY_OWNER=1")
                     .args(core_c_target_flags(target, &cc, source, riscv_vector))
+                    .args(core_c_vector_provider_pin_define(source, vector_pin.as_deref()))
+                    .args(&cross_flags)
                     .arg(format!("-I{}", runtime_root.display()))
                     .arg(format!("-I{}", runtime_root.join("platform").display()))
                     .arg(runtime_root.join(source))
@@ -753,18 +933,29 @@ fn build_c_runtime_library(
     Some(archive)
 }
 
+pub(super) fn build_core_c_runtime_with_piped_observer(
+    build_dir: &Path, selection: &super::piped_observer::PipedObserverSelection,
+) -> Option<PathBuf> {
+    build_c_runtime_library(build_dir, false, true, true, selection)
+}
+
 pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
-    build_c_runtime_library(build_dir, false, true)
+    build_c_runtime_library(build_dir, false, true, true, &super::piped_observer::PipedObserverSelection::CoreC)
+}
+
+/// C exports supplement a Rust runtime whose lazy arrays must observe C threads.
+pub(crate) fn build_core_c_runtime_supplement_library(build_dir: &Path) -> Option<PathBuf> {
+    build_c_runtime_library(build_dir, false, true, false, &super::piped_observer::PipedObserverSelection::CoreC)
 }
 
 pub(crate) fn build_stage4_compiler_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
     // The compiler backfill owns the real Cranelift hooks. Keep ordinary
     // bootstrap's named-trap stubs out of this archive to prevent overlap.
-    build_c_runtime_library(build_dir, false, false)
+    build_c_runtime_library(build_dir, false, false, false, &super::piped_observer::PipedObserverSelection::CoreC)
 }
 
 pub(crate) fn build_stage4_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
-    build_c_runtime_library(build_dir, true, false)
+    build_c_runtime_library(build_dir, true, false, false, &super::piped_observer::PipedObserverSelection::CoreC)
 }
 
 /// Compile ONLY `src/runtime/runtime_sqlite.c` into a standalone object.
@@ -818,33 +1009,12 @@ fn build_sqlite_runtime_object_with_include(build_dir: &Path, sqlite_include: Op
     // archive step failed with `llvm-ar: runtime_native.obj: no such file or
     // directory` AFTER every translation unit had compiled successfully. Give
     // MSVC its own spelling of the same intent; the GNU branch is unchanged.
-    let msvc = simple_common::platform::cc_detect::is_msvc_compiler(&cc);
+    let msvc = msvc_style_c_driver(&cc);
     let mut command = std::process::Command::new(&cc);
     if let Some(include) = sqlite_include {
         command.arg(format!("-I{}", include.display()));
     }
-    if msvc {
-        command
-            .arg("-c")
-            .arg("-O1")   // -Os: optimise for size
-            .arg("-Gy")   // -ffunction-sections
-            .arg("-Gw")   // -fdata-sections
-            .arg("-GS-"); // -fno-stack-protector
-        // -fPIC and the unwind-table flags have no MSVC equivalent: Windows
-        // code is position-independent by construction, and SEH unwind data is
-        // not optional there.
-    } else {
-        command
-            .arg("-c")
-            .arg("-Os")
-            .arg("-ffunction-sections")
-            .arg("-fdata-sections")
-            .arg("-fno-unwind-tables")
-            .arg("-fno-asynchronous-unwind-tables")
-            .arg("-fno-stack-protector")
-            .arg("-fPIC")
-            .arg("-std=gnu11");
-    }
+    command.args(core_c_codegen_flags(&cc));
     let status = command
         .args(msvc_c11_atomics_flags(&cc))
         .arg("-DSIMPLE_CORE_C_STANDALONE=1")
@@ -860,6 +1030,31 @@ fn build_sqlite_runtime_object_with_include(build_dir: &Path, sqlite_include: Op
         .status()
         .ok()?;
     (status.success() && std::fs::metadata(&object).map(|m| m.len() > 0).unwrap_or(false)).then_some(object)
+}
+
+/// Seed-only exception (user decision 2026-11-04): the Rust seed may compile
+/// `runtime_sqlite.c` against a real `sqlite3.h`. On Windows/MSVC the header is
+/// not on clang-cl's default include path, so stage ONLY `sqlite3.h` from an
+/// installed MSYS2 SDK into a private directory (a whole MinGW include tree
+/// would select foreign stdint/stdlib headers). Pure-Simple lanes never use this.
+#[cfg(all(target_os = "windows", target_env = "msvc"))]
+fn stage_windows_sqlite_header_include(build_dir: &Path) -> Option<PathBuf> {
+    for prefix in ["C:/msys64/clang64", "C:/msys64/ucrt64", "C:/msys64/mingw64"] {
+        let header = Path::new(prefix).join("include/sqlite3.h");
+        if !header.is_file() {
+            continue;
+        }
+        let include = build_dir.join("sqlite-sdk-include");
+        std::fs::create_dir_all(&include).ok()?;
+        std::fs::copy(&header, include.join("sqlite3.h")).ok()?;
+        return Some(include);
+    }
+    None
+}
+
+#[cfg(not(all(target_os = "windows", target_env = "msvc")))]
+fn stage_windows_sqlite_header_include(_build_dir: &Path) -> Option<PathBuf> {
+    None
 }
 
 pub(crate) struct BootstrapToolsSqliteInputs {
@@ -1238,6 +1433,29 @@ fn executable_file_names(tool: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
+mod core_c_platform_source_tests {
+    use super::{core_c_object_stem, core_c_platform_sources};
+
+    #[test]
+    fn windows_core_c_carries_async_driver_and_iocp_backend() {
+        // Parity with runtime_core_c_platform_sources_v1 (runtime_compiler.spl):
+        // without these the seed->stage2 link leaves the 14 rt_driver_* externs
+        // undefined (stage2_runtime_missing_rt_heap_aux_live_bytes_2026-11-02 sibling).
+        assert_eq!(
+            core_c_platform_sources(true),
+            &["platform/async_driver.c", "platform/async_windows.c"]
+        );
+        assert!(core_c_platform_sources(false).is_empty());
+    }
+
+    #[test]
+    fn subdir_sources_get_flat_object_stems() {
+        assert_eq!(core_c_object_stem("platform/async_driver.c"), "platform_async_driver");
+        assert_eq!(core_c_object_stem("runtime_native.c"), "runtime_native");
+    }
+}
+
+#[cfg(test)]
 mod executable_file_name_tests {
     use super::executable_file_names;
 
@@ -1372,6 +1590,18 @@ pub(crate) fn find_runtime_library() -> Option<PathBuf> {
 /// the returned RISC-V path is a compiler-rt archive under the clang resource
 /// directory, while ELF cross toolchains may report libgcc instead.
 pub(crate) fn find_compiler_rt_builtins(triple: &str) -> Option<PathBuf> {
+    // Explicit override: a cross builtins archive when the host clang ships none
+    // for this triple. Never libgcc.
+    if let Ok(p) = std::env::var("SIMPLE_COMPILER_RT_BUILTINS") {
+        let path = PathBuf::from(p);
+        let is_gcc = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map_or(false, |n| n.starts_with("libgcc"));
+        if path.is_file() && !is_gcc {
+            return Some(path);
+        }
+    }
     let cc = find_c_compiler();
     let output = std::process::Command::new(&cc)
         .arg(format!("--target={triple}"))
@@ -1470,6 +1700,152 @@ pub(crate) fn find_objcopy_tool() -> Option<String> {
     None
 }
 
+/// Select BFD only for a Windows GNU target's intermediate COFF closure.
+fn target_coff_partial_link_command(target: simple_common::target::Target) -> Result<Option<std::process::Command>, String> {
+    use simple_common::target::{LinkerFlavor, TargetArch, TargetOS};
+    let arch = match target.arch {
+        TargetArch::X86_64 => "x86_64",
+        TargetArch::X86 => "i686",
+        TargetArch::Aarch64 => "aarch64",
+        _ => "other",
+    };
+    super::coff_partial_link::command(
+        target.os == TargetOS::Windows && target.linker_flavor() == LinkerFlavor::Gnu,
+        arch,
+    )
+}
+
+/// Select an objcopy that supports symbol localization for the target object
+/// format. LLVM 18 rejects non-empty `--localize-symbols` lists for COFF, so
+/// Windows GNU projections must use GNU objcopy instead.
+fn find_stage4_objcopy_tool(target: simple_common::target::Target) -> Option<String> {
+    if target.os == simple_common::target::TargetOS::Windows
+        && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
+    {
+        return super::coff_partial_link::gnu_tool(&["x86_64-w64-mingw32-objcopy", "objcopy"], "objcopy");
+    }
+    find_objcopy_tool()
+}
+
+fn find_stage4_nm_tool(target: simple_common::target::Target) -> Option<String> {
+    if target.os == simple_common::target::TargetOS::Windows
+        && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
+    {
+        return super::coff_partial_link::gnu_tool(&["x86_64-w64-mingw32-nm", "nm"], "nm");
+    }
+    None
+}
+
+/// Repair GNU PE/COFF `ld -r` output for source-level weak definitions.
+///
+/// GNU ld can reorder the fallback symbol while leaving a WeakExternal aux
+/// record's index unchanged.  LLD then follows the stale index (or crashes on
+/// an out-of-range one).  Resolve the compiler-generated `.weak.*.default.*`
+/// fallback by name and rewrite the aux index before objcopy sees the object.
+fn repair_coff_weak_fallback_indices(path: &Path) -> Result<(), String> {
+    use object::read::coff::{CoffFile, CoffHeader, ImageSymbol};
+
+    let mut bytes = std::fs::read(path)
+        .map_err(|err| format!("failed to read COFF closure {}: {err}", path.display()))?;
+    let coff: CoffFile<'_> = CoffFile::parse(&*bytes)
+        .map_err(|err| format!("failed to parse COFF closure {}: {err}", path.display()))?;
+    let table = coff.coff_symbol_table();
+    let strings = table.strings();
+    let mut named = Vec::new();
+    for (index, symbol) in table.iter() {
+        if let Ok(name) = symbol.name(strings) {
+            if let Ok(name) = std::str::from_utf8(name) {
+                named.push((index.0, name.to_string(), symbol.section_number()));
+            }
+        }
+    }
+    let mut repairs = Vec::new();
+    for (index, symbol) in table.iter() {
+        if symbol.storage_class() != object::pe::IMAGE_SYM_CLASS_WEAK_EXTERNAL
+            || symbol.number_of_aux_symbols() == 0
+            || symbol.section_number() > 0
+        {
+            continue;
+        }
+        let Ok(name) = symbol.name(strings) else { continue };
+        let Ok(name) = std::str::from_utf8(name) else { continue };
+        let prefix = format!(".weak.{name}.default.");
+        let matches: Vec<usize> = named
+            .iter()
+            .filter(|(_, candidate, section)| *section > 0 && candidate.starts_with(&prefix))
+            .map(|(candidate_index, _, _)| *candidate_index)
+            .collect();
+        match matches.as_slice() {
+            [fallback] => repairs.push((index.0 + 1, *fallback)),
+            [] => {}
+            _ => {
+                return Err(format!(
+                    "ambiguous COFF WeakExternal fallback for `{name}` in {}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    let symbol_offset = coff.coff_header().pointer_to_symbol_table() as usize;
+    drop(coff);
+    for (aux_index, fallback_index) in repairs {
+        let offset = symbol_offset + aux_index * object::pe::IMAGE_SIZEOF_SYMBOL;
+        let end = offset + 4;
+        if end > bytes.len() {
+            return Err(format!("invalid COFF WeakExternal aux index in {}", path.display()));
+        }
+        bytes[offset..end].copy_from_slice(&(fallback_index as u32).to_le_bytes());
+    }
+    std::fs::write(path, bytes)
+        .map_err(|err| format!("failed to repair COFF closure {}: {err}", path.display()))
+}
+
+fn coff_defined_weak_symbols(path: &Path) -> Result<BTreeSet<String>, String> {
+    use object::read::coff::{CoffFile, CoffHeader, ImageSymbol};
+
+    let bytes = std::fs::read(path)
+        .map_err(|err| format!("failed to read COFF object {}: {err}", path.display()))?;
+    let coff: CoffFile<'_> = CoffFile::parse(&*bytes)
+        .map_err(|err| format!("failed to parse COFF object {}: {err}", path.display()))?;
+    let table = coff.coff_symbol_table();
+    let strings = table.strings();
+    let primary_indices: BTreeSet<usize> = table.iter().map(|(index, _)| index.0).collect();
+    let section_count = coff.coff_header().number_of_sections() as i32;
+    let mut weak = BTreeSet::new();
+    for (index, symbol) in table.iter() {
+        if symbol.storage_class() != object::pe::IMAGE_SYM_CLASS_WEAK_EXTERNAL {
+            continue;
+        }
+        let defined = if (1..=section_count).contains(&symbol.section_number()) {
+            return Err("COFF WeakExternal must be an undefined alias with a fallback auxiliary record".into());
+        } else if symbol.number_of_aux_symbols() > 0 {
+            let aux = table
+                .get::<object::pe::ImageAuxSymbolWeak>(index, 1)
+                .map_err(|err| format!("invalid COFF WeakExternal aux record: {err}"))?;
+            let fallback_index = aux.weak_default_sym_index.get(object::LittleEndian) as usize;
+            if !primary_indices.contains(&fallback_index) {
+                return Err(format!(
+                    "COFF WeakExternal fallback index {fallback_index} is not a primary symbol"
+                ));
+            }
+            let fallback = table
+                .symbol(object::SymbolIndex(fallback_index))
+                .map_err(|err| format!("invalid COFF WeakExternal fallback: {err}"))?;
+            (1..=section_count).contains(&fallback.section_number())
+        } else {
+            false
+        };
+        if defined {
+            if let Ok(name) = symbol.name(strings) {
+                if let Ok(name) = std::str::from_utf8(name) {
+                    weak.insert(name.to_string());
+                }
+            }
+        }
+    }
+    Ok(weak)
+}
+
 fn canonical_archive_symbol(symbol: &str) -> &str {
     #[cfg(target_os = "macos")]
     {
@@ -1486,11 +1862,18 @@ fn canonical_archive_symbol(symbol: &str) -> &str {
 /// is how runtime_memtrack.c's rt_heap_* fallbacks yield to the Rust runtime
 /// accounting (93e0b028ffb). `archive_global_symbols` counts these as defined.
 pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String>, String> {
+    archive_weak_global_symbols_with_nm(path, None)
+}
+
+fn archive_weak_global_symbols_with_nm(path: &Path, nm: Option<&str>) -> Result<BTreeSet<String>, String> {
     // Mach-O weak definitions appear as T in the one-letter nm output. Read
     // their explicit flags; an undefined weak reference is not an owner.
     let macho = cfg!(target_os = "macos");
     let output = {
-        let mut cmd = nm_command()?;
+        let mut cmd = match nm {
+            Some(tool) => std::process::Command::new(tool),
+            None => nm_command()?,
+        };
         cmd.arg("-g").arg(if macho { "-m" } else { "-p" });
         cmd.arg(external_tool_path(path)).output()
     }
@@ -2347,6 +2730,29 @@ pub(crate) fn build_stage4_runtime_capsule_archive(
 /// Project the requested Rust runtime exports without exposing the rlib's
 /// remaining global ABI. Allowed runtime externals must be supplied by the
 /// adjacent exact Stage-4 capsules.
+fn stage4_rust_runtime_projection_roots(
+    defined: &BTreeMap<String, usize>,
+    requested: &[String],
+) -> Result<Vec<String>, String> {
+    const THREAD_PACKING_HOOK: &str = "simple_note_user_threads_started";
+    let hook_definitions: usize = defined.iter()
+        .filter(|(name, _)| canonical_archive_symbol(name) == THREAD_PACKING_HOOK)
+        .map(|(_, count)| *count).sum();
+    // These two real Rust providers can pack tagged arrays in place. A
+    // synthetic projection with no packing providers needs no callback, but
+    // an incomplete real provider must fail rather than lose thread safety.
+    let packs_arrays = defined.keys().any(|name| matches!(canonical_archive_symbol(name),
+        "rt_typed_words_i64_set" | "rt_typed_words_i64_push"));
+    if (packs_arrays || hook_definitions != 0) && hook_definitions != 1 {
+        return Err(format!("Stage4 Rust array-packing owner requires exactly one {THREAD_PACKING_HOOK} definition; found {hook_definitions}"));
+    }
+    let mut roots = requested.to_vec();
+    if hook_definitions == 1 && !roots.iter().any(|name| name == THREAD_PACKING_HOOK) {
+        roots.push(THREAD_PACKING_HOOK.to_string());
+    }
+    Ok(roots)
+}
+
 pub(crate) fn build_stage4_rust_runtime_projection_archive(
     rust_runtime_archive: &Path,
     requested_symbols: &[String],
@@ -2379,9 +2785,13 @@ pub(crate) fn build_stage4_rust_runtime_projection_archive(
         }
         return Ok(output);
     }
+    let (defined, _) = archive_global_symbols(rust_runtime_archive)?;
+    // Root the callback, rather than merely exempting it from localization:
+    // it must survive archive extraction and the exact-global-set oracle.
+    let roots = stage4_rust_runtime_projection_roots(&defined, requested_symbols)?;
     project_stage4_archive_closure(
         &[rust_runtime_archive],
-        requested_symbols,
+        &roots,
         allowed_external_runtime_symbols,
         temp_dir,
         "stage4_rust_runtime",
@@ -2409,6 +2819,7 @@ pub(super) fn bootstrap_mutex_runtime_requested_symbols() -> Vec<String> {
         "rt_process_rss_kib",
         "rt_file_create_excl",
         "rt_file_sync",
+        "rt_dir_sync",
         "rt_simple_abi_version",
         "rt_simple_abi_version_deferred",
         "rt_sosix_directory_pair_check_v1",
@@ -2956,28 +3367,43 @@ fn project_stage4_archive_closure(
                 temp_dir.display()
             )
         })?;
-        let cc = find_c_compiler();
-        let mut closure_cmd = std::process::Command::new(&cc);
-        // A relocatable closure made by GNU ld can carry misaligned AArch64
-        // LDST relocations into an lld final link. Use the selected linker
-        // for both steps so the capsule has the same relocation semantics.
-        let fuse_ld = super::linker::requested_linker_driver_name()?;
-        if let Some(linker) = fuse_ld {
-            closure_cmd.arg(format!("-fuse-ld={linker}"));
-        }
-        closure_cmd.arg("-nostdlib").arg("-Wl,-r");
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        {
-            closure_cmd.arg("-no-pie");
-            if partial_link_gc_sections_allowed(&cc, fuse_ld) {
-                closure_cmd.arg("-Wl,--gc-sections");
+        // The closure contains target objects, so a hosted cross build must
+        // select the same C driver and target flag as the runtime producers.
+        // Otherwise Clang invokes the host linker on a Windows GNU archive.
+        let target = effective_target();
+        let cc = target_c_compiler(target);
+        let coff_command = target_coff_partial_link_command(target)?;
+        let coff_partial = coff_command.is_some();
+        let mut closure_cmd = coff_command.unwrap_or_else(|| std::process::Command::new(&cc));
+        if !coff_partial {
+            if let Some(flag) = windows_gnu_target_flag(target, &cc) {
+                closure_cmd.arg(flag);
+            }
+            // A relocatable closure made by GNU ld can carry misaligned AArch64
+            // LDST relocations into an lld final link. Use the selected linker
+            // for both steps so the capsule has the same relocation semantics.
+            let fuse_ld = super::linker::requested_linker_driver_name()?;
+            if let Some(linker) = fuse_ld {
+                closure_cmd.arg(format!("-fuse-ld={linker}"));
+            }
+            closure_cmd.arg("-nostdlib").arg("-Wl,-r");
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            {
+                closure_cmd.arg("-no-pie");
+                if partial_link_gc_sections_allowed(&cc, fuse_ld) {
+                    closure_cmd.arg("-Wl,--gc-sections");
+                }
             }
         }
         for symbol in &requested {
-            #[cfg(target_os = "macos")]
-            closure_cmd.arg(format!("-Wl,-u,_{symbol}"));
-            #[cfg(not(target_os = "macos"))]
-            closure_cmd.arg(format!("-Wl,--undefined={symbol}"));
+            if coff_partial {
+                closure_cmd.arg(format!("--undefined={symbol}"));
+            } else {
+                #[cfg(target_os = "macos")]
+                closure_cmd.arg(format!("-Wl,-u,_{symbol}"));
+                #[cfg(not(target_os = "macos"))]
+                closure_cmd.arg(format!("-Wl,--undefined={symbol}"));
+            }
         }
         // The current Apple linker ignores `-u`-seeded archive extraction in
         // `-r` mode: members defining the requested roots never load and the
@@ -2985,7 +3411,7 @@ fn project_stage4_archive_closure(
         // reference object instead; its own array symbol is not in `requested`
         // so the localization pass below demotes it like any other non-root.
         #[cfg(target_os = "macos")]
-        {
+        if !coff_partial {
             let refs_c = temp_dir.join(format!("{stem}_refs.c"));
             let refs_o = temp_dir.join(format!("{stem}_refs.o"));
             let mut source = String::new();
@@ -3013,23 +3439,38 @@ fn project_stage4_archive_closure(
             }
             closure_cmd.arg(&refs_o);
         }
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        closure_cmd.arg("-Wl,--start-group");
+        if coff_partial {
+            closure_cmd.arg("--start-group");
+        } else {
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            closure_cmd.arg("-Wl,--start-group");
+        }
         for archive in inputs {
             closure_cmd.arg(archive);
         }
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        closure_cmd.arg("-Wl,--end-group");
+        if coff_partial {
+            closure_cmd.arg("--end-group");
+        } else {
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            closure_cmd.arg("-Wl,--end-group");
+        }
+        let closure_program = closure_cmd.get_program().to_string_lossy().into_owned();
         let closure = closure_cmd
             .arg("-o")
             .arg(&closure_object)
             .output()
-            .map_err(|err| format!("failed to execute Stage4 runtime capsule closure link with {cc}: {err}"))?;
+            .map_err(|err| format!("failed to execute Stage4 runtime capsule closure link with {closure_program}: {err}"))?;
         if !closure.status.success() {
             return Err(format!(
                 "Stage4 runtime capsule closure link failed: {}",
                 String::from_utf8_lossy(&closure.stderr).trim()
             ));
+        }
+
+        if target.os == simple_common::target::TargetOS::Windows
+            && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
+        {
+            repair_coff_weak_fallback_indices(&closure_object)?;
         }
 
         reject_partial_link_tombstones(&closure_object, "Stage4 runtime capsule")?;
@@ -3083,7 +3524,7 @@ fn project_stage4_archive_closure(
         // Always newline-terminated: GNU objcopy 2.42 exits 1 with no message
         // on a zero-byte --localize-symbols/--weaken-symbols file, while a
         // lone "\n" is an empty list to both GNU and LLVM objcopy.
-        std::fs::write(&localize_path, localize_text + "\n")
+        std::fs::write(&localize_path, localize_text.clone() + "\n")
             .map_err(|err| format!("failed to write Stage4 runtime capsule localization list: {err}"))?;
 
         // Allowed-external symbols that are kept global (above) must yield to
@@ -3107,10 +3548,18 @@ fn project_stage4_archive_closure(
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join("\n");
-        std::fs::write(&weaken_path, weaken_text + "\n")
+        std::fs::write(&weaken_path, if coff_partial { "\n".to_string() } else { weaken_text.clone() + "\n" })
             .map_err(|err| format!("failed to write Stage4 runtime capsule weaken list: {err}"))?;
 
-        let objcopy = find_objcopy_tool().ok_or_else(|| missing_llvm_tool_error("llvm-objcopy") + " (Stage4 runtime capsule)")?;
+        let objcopy = find_stage4_objcopy_tool(target).ok_or_else(|| {
+            if target.os == simple_common::target::TargetOS::Windows
+                && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
+            {
+                "no GNU objcopy was found for the Stage4 Windows GNU runtime capsule".to_string()
+            } else {
+                missing_llvm_tool_error("llvm-objcopy") + " (Stage4 runtime capsule)"
+            }
+        })?;
         let localized = std::process::Command::new(&objcopy)
             .arg(format!("--localize-symbols={}", localize_path.display()))
             .arg(format!("--weaken-symbols={}", weaken_path.display()))
@@ -3138,8 +3587,28 @@ fn project_stage4_archive_closure(
             ));
         }
 
+        if coff_partial {
+            let private_names = localize_text.lines().map(str::to_owned).collect();
+            super::coff_weak_projection::localize_weak(&localized_object, &private_names)?;
+            let weak_names = weaken_text.lines().map(str::to_owned).collect();
+            super::coff_weak_projection::project(&localized_object, &weak_names)?;
+        }
         let (localized_defined, localized_undefined) = archive_global_symbols(&localized_object)?;
-        let localized_weak = archive_weak_global_symbols(&localized_object)?;
+        // LLVM 18 llvm-nm reports GNU objcopy's COFF WeakExternal symbols as
+        // strong `T`. Inspect Windows GNU output with the matching GNU reader.
+        let stage4_nm = find_stage4_nm_tool(target);
+        if target.os == simple_common::target::TargetOS::Windows
+            && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
+            && stage4_nm.is_none()
+        {
+            return Err("no GNU nm was found for the Stage4 Windows GNU runtime capsule".to_string());
+        }
+        let mut localized_weak = archive_weak_global_symbols_with_nm(&localized_object, stage4_nm.as_deref())?;
+        if target.os == simple_common::target::TargetOS::Windows
+            && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
+        {
+            localized_weak.extend(coff_defined_weak_symbols(&localized_object)?);
+        }
         let strong_external: Vec<&str> = localized_defined
             .keys()
             .filter(|raw| allowed_external.contains(canonical_archive_symbol(raw)))
@@ -3328,35 +3797,45 @@ pub(crate) fn build_compiler_backfill_archive(
                 temp_dir.display()
             )
         })?;
+        let target = effective_target();
         let cc = find_c_compiler();
-        let mut closure_cmd = std::process::Command::new(&cc);
-        // Match the final linker's relocation handling. GNU ld's partial
-        // AArch64 closure can leave misaligned LDST128 relocations that lld
-        // rejects when the localized backfill reaches the final link.
-        let fuse_ld = super::linker::requested_linker_driver_name()?;
-        if let Some(linker) = fuse_ld {
-            closure_cmd.arg(format!("-fuse-ld={linker}"));
-        }
-        closure_cmd.arg("-nostdlib").arg("-Wl,-r");
-        #[cfg(target_os = "linux")]
-        {
-            closure_cmd.arg("-no-pie");
-            if partial_link_gc_sections_allowed(&cc, fuse_ld) {
-                closure_cmd.arg("-Wl,--gc-sections");
+        let coff_command = target_coff_partial_link_command(target)?;
+        let coff_partial = coff_command.is_some();
+        let mut closure_cmd = coff_command.unwrap_or_else(|| std::process::Command::new(&cc));
+        if !coff_partial {
+            // Match the final linker's relocation handling. GNU ld's partial
+            // AArch64 closure can leave misaligned LDST128 relocations that lld
+            // rejects when the localized backfill reaches the final link.
+            let fuse_ld = super::linker::requested_linker_driver_name()?;
+            if let Some(linker) = fuse_ld {
+                closure_cmd.arg(format!("-fuse-ld={linker}"));
+            }
+            closure_cmd.arg("-nostdlib").arg("-Wl,-r");
+            #[cfg(target_os = "linux")]
+            {
+                closure_cmd.arg("-no-pie");
+                if partial_link_gc_sections_allowed(&cc, fuse_ld) {
+                    closure_cmd.arg("-Wl,--gc-sections");
+                }
             }
         }
         for export in &manifest {
-            #[cfg(target_os = "macos")]
-            closure_cmd.arg(format!("-Wl,-u,_{export}"));
-            #[cfg(not(target_os = "macos"))]
-            closure_cmd.arg(format!("-Wl,--undefined={export}"));
+            if coff_partial {
+                closure_cmd.arg(format!("--undefined={export}"));
+            } else {
+                #[cfg(target_os = "macos")]
+                closure_cmd.arg(format!("-Wl,-u,_{export}"));
+                #[cfg(not(target_os = "macos"))]
+                closure_cmd.arg(format!("-Wl,--undefined={export}"));
+            }
         }
+        let closure_program = closure_cmd.get_program().to_string_lossy().into_owned();
         let closure_result = closure_cmd
             .arg("-o")
             .arg(&closure_object)
             .arg(compiler_archive)
             .output()
-            .map_err(|err| format!("failed to execute compiler backfill closure link with {cc}: {err}"))?;
+            .map_err(|err| format!("failed to execute compiler backfill closure link with {closure_program}: {err}"))?;
         if !closure_result.status.success() {
             return Err(format!(
                 "compiler backfill closure link failed: {}",
@@ -3364,6 +3843,9 @@ pub(crate) fn build_compiler_backfill_archive(
             ));
         }
 
+        if coff_partial {
+            repair_coff_weak_fallback_indices(&closure_object)?;
+        }
         reject_partial_link_tombstones(&closure_object, "compiler backfill")?;
         let (closure_defined, closure_undefined) = archive_global_symbols(&closure_object)?;
         for export in &manifest {
@@ -3789,6 +4271,11 @@ pub(crate) fn is_system_symbol(sym: &str) -> bool {
 pub(crate) fn is_system_symbol_for_target(sym: &str, target: simple_common::target::Target) -> bool {
     if target.os == simple_common::target::TargetOS::Windows {
         let name = sym.strip_prefix('_').unwrap_or(sym);
+        // i686 stdcall decoration: `_Name@N` (N = arg bytes).
+        let name = match name.rsplit_once('@') {
+            Some((base, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => base,
+            _ => name,
+        };
         return is_windows_system_name(sym)
             || is_windows_system_name(name)
             || is_windows_system_prefix(sym)
@@ -4004,6 +4491,9 @@ fn is_windows_system_name(name: &str) -> bool {
             | "__security_check_cookie"
             | "__GSHandlerCheck"
             | "___chkstk_ms"
+            // i686 MinGW stack probe (compiler-rt chkstk2.S); i386 COFF
+            // decorates it to `__alloca`. A stub skips guard-page probing.
+            | "_alloca"
             | "__main"
             | "__popcountdi2"
             | "__acrt_iob_func"
@@ -4168,6 +4658,7 @@ fn is_windows_system_prefix(name: &str) -> bool {
         || name.starts_with("Close")
         || name.starts_with("Delete")
         || name.starts_with("Duplicate")
+        || name.starts_with("Derive")
         || name.starts_with("Flush")
         || name.starts_with("Map")
         || name.starts_with("Unmap")
@@ -4177,6 +4668,12 @@ fn is_windows_system_prefix(name: &str) -> bool {
         || name.starts_with("MultiByte")
         || name.starts_with("Heap")
         || name.starts_with("Local")
+        || name.starts_with("Open")
+        || name.starts_with("AllocateAnd")
+        || name.starts_with("Convert")
+        || name.starts_with("FreeSid")
+        || name.starts_with("IsValidSid")
+        || name.starts_with("EqualSid")
         || name.starts_with("SH")
         || name.starts_with("PropVariant")
         || name.starts_with("Variant")
@@ -4803,7 +5300,73 @@ mod llvm_tool_policy_tests {
             .expect_err("a missing compiler must fail");
         assert!(error.contains("could not start"), "{error}");
         assert!(error.contains("runtime_native.c"), "{error}");
-        assert!(error.contains(missing.to_str().unwrap()), "{error}");
+        // The command is rendered with Debug formatting, which escapes Windows
+        // path separators; compare against the same rendering.
+        assert!(error.contains(&format!("{missing:?}")), "{error}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn coff_weak_fallback_repair_distinguishes_defined_and_unresolved_aliases() {
+        use object::read::coff::{CoffFile, CoffHeader, ImageSymbol};
+
+        let directory = tempfile::tempdir().unwrap();
+        let defined = directory.path().join("defined.c");
+        let defined_object = directory.path().join("defined.o");
+        std::fs::write(
+            &defined,
+            "__attribute__((weak)) int owner(void) { return 1; }\nint root(void) { return owner(); }\n",
+        )
+        .unwrap();
+        let compile = std::process::Command::new("clang")
+            .args(["--target=x86_64-w64-windows-gnu", "-c"])
+            .arg(&defined)
+            .arg("-o")
+            .arg(&defined_object)
+            .output()
+            .unwrap();
+        assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
+        assert!(super::coff_defined_weak_symbols(&defined_object).unwrap().contains("owner"));
+
+        let mut bytes = std::fs::read(&defined_object).unwrap();
+        let coff: CoffFile<'_> = CoffFile::parse(&*bytes).unwrap();
+        let table = coff.coff_symbol_table();
+        let strings = table.strings();
+        let weak_index = table
+            .iter()
+            .find_map(|(index, symbol)| {
+                (symbol.storage_class() == object::pe::IMAGE_SYM_CLASS_WEAK_EXTERNAL
+                    && symbol.name(strings).ok() == Some(b"owner"))
+                .then_some(index.0)
+            })
+            .unwrap();
+        let symbol_offset = coff.coff_header().pointer_to_symbol_table() as usize;
+        drop(coff);
+        let aux_offset = symbol_offset + (weak_index + 1) * object::pe::IMAGE_SIZEOF_SYMBOL;
+        bytes[aux_offset..aux_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        std::fs::write(&defined_object, bytes).unwrap();
+        assert!(super::coff_defined_weak_symbols(&defined_object).is_err());
+        super::repair_coff_weak_fallback_indices(&defined_object).unwrap();
+        assert!(super::coff_defined_weak_symbols(&defined_object).unwrap().contains("owner"));
+
+        let unresolved = directory.path().join("unresolved.c");
+        let unresolved_object = directory.path().join("unresolved.o");
+        std::fs::write(
+            &unresolved,
+            "extern int missing(void) __attribute__((weak));\nint root(void) { return missing ? missing() : 0; }\n",
+        )
+        .unwrap();
+        let compile = std::process::Command::new("clang")
+            .args(["--target=x86_64-w64-windows-gnu", "-c"])
+            .arg(&unresolved)
+            .arg("-o")
+            .arg(&unresolved_object)
+            .output()
+            .unwrap();
+        assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
+        assert!(!super::coff_defined_weak_symbols(&unresolved_object)
+            .unwrap()
+            .contains("missing"));
     }
 
     #[cfg(unix)]
@@ -4819,6 +5382,16 @@ mod llvm_tool_policy_tests {
     #[test]
     fn core_c_command_accepts_successful_exit() {
         assert!(super::run_core_c_command(std::process::Command::new("/bin/sh").args(["-c", "exit 0"])).is_ok());
+    }
+
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    #[test]
+    fn stage4_runtime_sqlite_header_staging_exposes_only_sqlite3_h() {
+        let directory = tempfile::tempdir().unwrap();
+        let include = super::stage_windows_sqlite_header_include(directory.path())
+            .expect("installed MSYS2 SQLite SDK header must be discoverable for the seed stage4 runtime");
+        let names: Vec<_> = std::fs::read_dir(&include).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("sqlite3.h")], "only sqlite3.h may reach MSVC's include path");
     }
 
     #[cfg(all(target_os = "windows", target_env = "msvc"))]

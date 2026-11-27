@@ -7,6 +7,7 @@ use app.io.mod.{dir_create_all, dir_remove_all, secure_temp_dir,
 use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
 use compiler.common.build_contract.{ActionSpec, AttemptSpec,
     action_spec_digest_v1, input_manifest_digest_v1}
+use app.build.host_path_policy.{build_host_abs_path_valid_v1}
 
 val BUILD_WORKER_MAX_INPUT_BYTES_V1: i64 = 268435456
 val BUILD_WORKER_MAX_TOTAL_BYTES_V1: i64 = 1073741824
@@ -36,11 +37,7 @@ fn _worker_stage_name_v1(value: text) -> bool:
     true
 
 fn _worker_stage_path_v1(path: text) -> bool:
-    path.starts_with("/") and path.len() > 1 and path.len() <= 4096 and
-        not path.ends_with("/") and not path.contains("//") and
-        not path.contains("\n") and not path.contains("\r") and
-        not path.split("/").contains(".") and
-        not path.split("/").contains("..")
+    build_host_abs_path_valid_v1(path, false, false, 4096, 4096)
 
 fn _worker_stage_reject_v1(root: text, reason: text) -> BuildInputStageV1:
     if root != "" and not dir_remove_all(root):
@@ -59,7 +56,7 @@ fn _worker_copy_input_v1(source_root: text, input_root: text,
     val size = file_size_raw(source)
     if size < 0 or size > BUILD_WORKER_MAX_INPUT_BYTES_V1:
         return _BuildInputCopyV1("input-size-invalid", 0)
-    if file_hash_sha256(source) != digest:
+    if not _file_sha256_matches_v1(source, digest):
         return _BuildInputCopyV1("input-digest-mismatch", 0)
     val slash = destination.last_index_of("/")
     if slash < input_root.len() or
@@ -68,7 +65,7 @@ fn _worker_copy_input_v1(source_root: text, input_root: text,
     if not file_copy(source, destination) or
        not file_is_regular_no_follow(destination) or
        file_size_raw(destination) != size or
-       file_hash_sha256(destination) != digest:
+       not _file_sha256_matches_v1(destination, digest):
         return _BuildInputCopyV1("input-copy-mismatch", 0)
     _BuildInputCopyV1("", size)
 
@@ -134,3 +131,9 @@ fn stage_build_inputs_v1(action: ActionSpec, attempt: AttemptSpec,
 
 export BUILD_WORKER_MAX_INPUT_BYTES_V1, BUILD_WORKER_MAX_TOTAL_BYTES_V1
 export BUILD_WORKER_MAX_INPUTS_V1, BuildInputStageV1, stage_build_inputs_v1
+
+# Absent/unreadable file == mismatch: a missing digest never matches.
+fn _file_sha256_matches_v1(path: text, expected: text) -> bool:
+    if val digest = file_hash_sha256(path):
+        return digest == expected
+    false

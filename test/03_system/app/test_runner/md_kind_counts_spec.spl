@@ -1,0 +1,171 @@
+# @req REQ-TESTRUNNER-MD-KIND
+# @cover src/lib/nogc_sync_mut/test_runner/sdoctest/runner.spl 10%
+"""
+# Test runner md kind: mixed fences give correct counts
+
+**Feature IDs:** #test-runner-md-kind
+**Category:** Tooling
+
+## Overview
+
+A Markdown file can hold green, red, skipped and ignored fences, plus fences of
+other languages. The SDoctest summary must count each fence once under the
+right heading: skipped fences are counted as skipped and never run, ignored
+fences are invisible, other-language fences are not fences at all.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY")
+    if b != "":
+        return b
+    "bin/simple"
+
+fn write_md(name: text, lines: [text]) -> text:
+    val dir = "build/md_kind/counts_" + name
+    process_run_bounded("rm", ["-rf", dir], 10000, 65536)
+    process_run_bounded("mkdir", ["-p", dir], 10000, 65536)
+    val path = dir + "/doc.md"
+    file_write(path, lines.join("\n") + "\n")
+    path
+
+fn run_md(md: text) -> (text, i64):
+    val (out, err, code) = process_run_bounded(real_binary(), ["test", "--no-session-daemon", md], 300000, 4194304)
+    (out + err, code)
+
+val GREEN = ["```simple", "val a = 1", "```"]
+val RED = ["```simple", "assert 1 == 2", "```"]
+
+describe "md kind summary counts":
+    # @capture(exec)
+    it "counts two green and one red fence":
+        step("Write two green fences and one red")
+        val md = write_md("two_one", GREEN + RED + GREEN)
+        val (report, code) = run_md(md)
+        expect(code).to_equal(1)
+        expect(report).to_contain("SDoctest Results: 3 total, 2 passed, 1 failed, 0 skipped, 0 errors")
+
+    # @capture(exec)
+    it "counts only green fences when all are green":
+        val md = write_md("all_green", GREEN + GREEN + GREEN)
+        val (report, code) = run_md(md)
+        expect(code).to_equal(0)
+        expect(report).to_contain("SDoctest Results: 3 total, 3 passed, 0 failed, 0 skipped, 0 errors")
+
+    # @capture(exec)
+    it "counts only red fences when all are red":
+        val md = write_md("all_red", RED + RED)
+        val (report, code) = run_md(md)
+        expect(code).to_equal(1)
+        expect(report).to_contain("SDoctest Results: 2 total, 0 passed, 2 failed, 0 skipped, 0 errors")
+
+    # @capture(exec)
+    it "counts a skip-modifier fence as skipped and does not run it":
+        val md = write_md("skip_mod", GREEN + ["```simple:skip", "assert 1 == 2", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(0)
+        expect(report).to_contain("SDoctest Results: 2 total, 1 passed, 0 failed, 1 skipped, 0 errors")
+
+    # @capture(exec)
+    it "counts a skip-next marker block as skipped":
+        val md = write_md("skip_next", ["<!--sdoctest:skip-next-->"] + RED + GREEN)
+        val (report, code) = run_md(md)
+        expect(code).to_equal(0)
+        expect(report).to_contain("2 total, 1 passed, 0 failed, 1 skipped")
+
+    # @capture(exec)
+    it "counts every fence in a skip region as skipped":
+        val md = write_md("skip_region", ["<!--sdoctest:skip-begin-->"] + RED + RED + ["<!--sdoctest:skip-end-->"] + GREEN)
+        val (report, code) = run_md(md)
+        expect(code).to_equal(0)
+        expect(report).to_contain("3 total, 1 passed, 0 failed, 2 skipped")
+
+    # @capture(exec)
+    it "leaves an ignored fence out of the totals":
+        val md = write_md("ignore_next", ["<!--sdoctest:ignore-next-->"] + RED + GREEN)
+        val (report, code) = run_md(md)
+        expect(code).to_equal(0)
+        expect(report).to_contain("1 total, 1 passed, 0 failed, 0 skipped")
+
+    # @capture(exec)
+    it "does not count a python fence":
+        val md = write_md("python_not_counted", ["```python", "print(1)", "```"] + GREEN)
+        val (report, code) = run_md(md)
+        expect(code).to_equal(0)
+        expect(report).to_contain("1 total, 1 passed")
+
+    # @capture(exec)
+    it "passes a should_fail fence that fails":
+        val md = write_md("should_fail_ok", ["```simple:should_fail", "print undefined_name_zzz", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(0)
+        expect(report).to_contain("1 total, 1 passed, 0 failed")
+
+    # @capture(exec)
+    it "passes a should_fail fence whose assertion fails":
+        val md = write_md("should_fail_assert", ["```simple:should_fail", "assert 1 == 2", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(0)
+        expect(report).to_contain("1 total, 1 passed, 0 failed")
+
+    # @capture(exec)
+    it "fails a should_fail fence that succeeds":
+        val md = write_md("should_fail_bad", ["```simple:should_fail", "val a = 1", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(1)
+        expect(report).to_contain("1 total, 0 passed, 1 failed")
+
+    # @capture(exec)
+    it "reports a fail_as_success fence as accepted":
+        val md = write_md("accepted", ["```simple:fail_as_success", "assert 1 == 2", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(0)
+        expect(report).to_contain("1 accepted")
+
+    # @capture(exec)
+    it "lets a later fence use a function defined in an earlier fence":
+        step("Define a function in fence one and call it in fence two")
+        val md = write_md("preamble", ["```simple", "fn forty_two() -> i64:", "    42", "```", "", "```simple", "assert forty_two() == 42", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(0)
+        expect(report).to_contain("2 total, 2 passed, 0 failed")
+
+    # @capture(exec)
+    it "does not share a plain val between fences":
+        val md = write_md("no_val_share", ["```simple", "val shared = 5", "```", "```simple", "assert shared == 5", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(1)
+        expect(report).to_contain("2 total, 1 passed, 1 failed")
+
+describe "md kind expected-output transcripts":
+    # @capture(exec)
+    it "passes a transcript whose output matches":
+        val md = write_md("transcript_ok", ["```sdoctest", ">>> 1 + 1", "2", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(0)
+        expect(report).to_contain("1 total, 1 passed, 0 failed")
+
+    # @capture(exec)
+    it "fails a transcript whose output differs":
+        val md = write_md("transcript_bad", ["```sdoctest", ">>> 1 + 1", "3", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(1)
+        expect(report).to_contain("Output mismatch")
+
+    # @capture(exec)
+    it "skips the comparison under ignore_output":
+        val md = write_md("transcript_ignore", ["```sdoctest:ignore_output", ">>> 1 + 1", "3", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(0)
+        expect(report).to_contain("1 skipped")
+
+    # @capture(exec)
+    it "checks printed output as well as expression values":
+        val md = write_md("transcript_print", ["```sdoctest", ">>> print \"hi\"", "hi", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(0)

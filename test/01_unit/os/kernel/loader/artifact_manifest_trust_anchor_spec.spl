@@ -1,0 +1,133 @@
+# Purpose and audience: reproducer specification for bug #18 (Ed25519 trust-anchor signature verification in artifact_manifest.spl).
+# @req REQ-SSPEC-OS
+
+"""Reproduce absence of Ed25519 trust-anchor verification and fail-closed signature rejection in artifact_manifest.spl."""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed}
+use os.kernel.loader.artifact_manifest.{
+    manifest_kind_elf,
+    manifest_for_kind,
+    manifest_with_entrypoint,
+    manifest_with_signature,
+    manifest_sha256_hex,
+    manifest_reason_ok,
+    manifest_reason_content_hash_mismatch,
+    manifest_reason_missing_signature,
+    manifest_reason_invalid_signature_format,
+    manifest_reason_untrusted_signer,
+    manifest_reason_signature_verification_failed,
+    manifest_reason_trust_anchor_missing,
+    manifest_trust_anchor_register,
+    manifest_trust_anchors_clear,
+    manifest_trust_anchor_count,
+    manifest_sign_ed25519,
+    manifest_verify_signature,
+    manifest_verify_signed_artifact
+}
+
+fn _test_seed_primary() -> [u8]:
+    [
+        0x9du8, 0x61u8, 0xb1u8, 0x9du8, 0xefu8, 0xfdu8, 0x5au8, 0x60u8,
+        0xbau8, 0x84u8, 0x4au8, 0xf4u8, 0x92u8, 0xecu8, 0x2cu8, 0xc4u8,
+        0x44u8, 0x49u8, 0xc5u8, 0x69u8, 0x7bu8, 0x32u8, 0x69u8, 0x19u8,
+        0x70u8, 0x3bu8, 0xacu8, 0x03u8, 0x1cu8, 0xaeu8, 0x7fu8, 0x60u8
+    ]
+
+fn _test_seed_secondary() -> [u8]:
+    [
+        0x4cu8, 0xcdu8, 0x08u8, 0x9bu8, 0x28u8, 0xffu8, 0x96u8, 0xdau8,
+        0x9du8, 0xb6u8, 0xc3u8, 0x46u8, 0xecu8, 0x11u8, 0x4eu8, 0x0fu8,
+        0x5bu8, 0x8au8, 0x31u8, 0x9fu8, 0x35u8, 0xabu8, 0xa6u8, 0x24u8,
+        0xdau8, 0x8cu8, 0xf6u8, 0xedu8, 0x4fu8, 0xb8u8, 0xa6u8, 0xfbu8
+    ]
+
+describe "artifact manifest Ed25519 trust-anchor verification (#18)":
+    it "signs and verifies an artifact manifest against a registered trust anchor":
+        step("register trust anchor, compute SHA-256 digest, sign manifest with Ed25519, and verify artifact + signature")
+        manifest_trust_anchors_clear()
+        val seed = _test_seed_primary()
+        val kp = pure_ed25519_keypair_from_seed(seed)
+        val pk = kp.1
+        val reg = manifest_trust_anchor_register("release-key-1", pk)
+        expect(reg.ok).to_equal(true)
+        expect(manifest_trust_anchor_count()).to_equal(1)
+
+        val payload: [u8] = [0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8, 0x02u8, 0x01u8]
+        val digest = manifest_sha256_hex(payload)
+        val base_m = manifest_with_signature(
+            manifest_with_entrypoint(manifest_for_kind(manifest_kind_elf()), "main"),
+            "",
+            [digest]
+        )
+        val signed = manifest_sign_ed25519(base_m, "release-key-1", seed, pk, digest)
+        val sig_check = manifest_verify_signature(signed, digest)
+        expect(sig_check.ok).to_equal(true)
+        expect(sig_check.reason).to_equal(manifest_reason_ok())
+
+        val full_check = manifest_verify_signed_artifact(signed, payload)
+        expect(full_check.ok).to_equal(true)
+        expect(full_check.reason).to_equal(manifest_reason_ok())
+        manifest_trust_anchors_clear()
+
+    it "rejects missing, malformed, untrusted-signer, forged, and payload-tampered manifests":
+        step("verify fail-closed reasons for missing signature, bad wire envelope, unknown signer, tampered entrypoint, and tampered artifact bytes")
+        manifest_trust_anchors_clear()
+        val seed = _test_seed_primary()
+        val kp = pure_ed25519_keypair_from_seed(seed)
+        val pk = kp.1
+        expect(manifest_trust_anchor_register("release-key-1", pk).ok).to_equal(true)
+
+        val payload: [u8] = [0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8, 0x02u8, 0x01u8]
+        val digest = manifest_sha256_hex(payload)
+        val unsigned_m = manifest_with_signature(
+            manifest_with_entrypoint(manifest_for_kind(manifest_kind_elf()), "main"),
+            "",
+            [digest]
+        )
+        val missing_chk = manifest_verify_signature(unsigned_m, digest)
+        expect(missing_chk.ok).to_equal(false)
+        expect(missing_chk.reason).to_equal(manifest_reason_missing_signature())
+
+        val fake_m = manifest_with_signature(unsigned_m, "ed25519:release-key-1:aabbcc", [digest])
+        val fmt_chk = manifest_verify_signature(fake_m, digest)
+        expect(fmt_chk.ok).to_equal(false)
+        expect(fmt_chk.reason).to_equal(manifest_reason_invalid_signature_format())
+
+        val rogue_seed = _test_seed_secondary()
+        val rogue_kp = pure_ed25519_keypair_from_seed(rogue_seed)
+        val rogue_signed = manifest_sign_ed25519(unsigned_m, "rogue-key", rogue_seed, rogue_kp.1, digest)
+        val untrusted_chk = manifest_verify_signature(rogue_signed, digest)
+        expect(untrusted_chk.ok).to_equal(false)
+        expect(untrusted_chk.reason).to_equal(manifest_reason_untrusted_signer())
+
+        val signed = manifest_sign_ed25519(unsigned_m, "release-key-1", seed, pk, digest)
+        val tampered_entry = manifest_with_entrypoint(signed, "evil_main")
+        val forged_chk = manifest_verify_signature(tampered_entry, digest)
+        expect(forged_chk.ok).to_equal(false)
+        expect(forged_chk.reason).to_equal(manifest_reason_signature_verification_failed())
+
+        val bad_payload: [u8] = [0x00u8, 0x01u8, 0x02u8]
+        val full_tamper = manifest_verify_signed_artifact(signed, bad_payload)
+        expect(full_tamper.ok).to_equal(false)
+        expect(full_tamper.reason).to_equal(manifest_reason_content_hash_mismatch())
+        manifest_trust_anchors_clear()
+
+    it "fails closed when no trust anchors are registered":
+        step("clear trust anchors and verify previously signed manifest fails closed")
+        manifest_trust_anchors_clear()
+        val seed = _test_seed_primary()
+        val kp = pure_ed25519_keypair_from_seed(seed)
+        val pk = kp.1
+        val payload: [u8] = [0x41u8, 0x42u8, 0x43u8]
+        val digest = manifest_sha256_hex(payload)
+        val base_m = manifest_with_signature(
+            manifest_with_entrypoint(manifest_for_kind(manifest_kind_elf()), "main"),
+            "",
+            [digest]
+        )
+        val signed = manifest_sign_ed25519(base_m, "release-key-1", seed, pk, digest)
+        val no_anchor_chk = manifest_verify_signature(signed, digest)
+        expect(no_anchor_chk.ok).to_equal(false)
+        expect(no_anchor_chk.reason).to_equal(manifest_reason_trust_anchor_missing())

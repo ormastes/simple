@@ -37,7 +37,7 @@ use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, LocalKind}
 use compiler.mir.mir_instructions (MirModule, MirFunction, MirBlock)
 use compiler.backend.feature_caps (x86_caps_from_target, preferred_lane_count_x86)
 use compiler.mir_opt.auto_vectorize_target (auto_vectorize_target_level)
-use compiler.mir_opt.auto_vectorize_receipt (SimdReqEvidence, check_simd_requirement)
+use compiler.mir_opt.auto_vectorize_receipt (SimdReqEvidence, SimdReqVerdict, check_simd_requirement)
 use compiler.mir_opt.auto_vectorize_alias (AliasBase, alias_base, decide_recipe_aliasing, alias_decision_permits_vectorization, alias_decision_requires_guard)
 use compiler.frontend.parser_types (Attribute)
 
@@ -46,14 +46,14 @@ use compiler.mir_opt.auto_vectorize_types (VectorLoopInfo, ArrayAccess)
 # Re-import from sub-modules for coordinator use and re-export
 use compiler.mir_opt.auto_vectorize_analysis (DependencyAnalysisResult, LoopBounds, analyze_loop_dependencies, is_simple_loop, detect_array_accesses, get_operand_local, detect_loop_bounds_only)
 use compiler.mir_opt.auto_vectorize_validate (VectorizabilityResult, check_vectorizability, get_vectorizable_type)
-use compiler.mir_opt.auto_vectorize_cost (CostEstimate, estimate_vectorization_cost, should_vectorize_loop)
+use compiler.mir_opt.auto_vectorize_cost (AutoVecCostEstimate, estimate_vectorization_cost, should_vectorize_loop)
 use compiler.mir_opt.auto_vectorize_codegen (VectorizeContext, VectorizedLoop, create_vector_loop, create_alignment_check_block, create_peeling_block, create_vector_loop_block, create_alias_guard_block, create_scalar_version_block, create_remainder_guard_block, element_size_bytes, vector_loop_locals, vector_mir_type, simd_binop_name)
 
 # ============================================================================
 # Main Auto-Vectorization Pass
 # ============================================================================
 
-fn run_auto_vectorize(module: MirModule) -> MirModule:
+pub fn run_auto_vectorize(module: MirModule) -> MirModule:
     """
     N1 Wave — pattern-match loops and rewrite elementwise-add patterns.
 
@@ -209,7 +209,7 @@ fn run_auto_vectorize(module: MirModule) -> MirModule:
         # the honest maximum — see the "not yet fatal" note in
         # doc/08_tracking/bug/auto_vectorize_pass_is_analysis_only_2026-09-13.md.
         match outcome.verdict:
-            case Error:
+            case SimdReqVerdict.Error:
                 print("error[SIMD-REQ-001] {cur_func.name}: {outcome.reason}")
             case Warn:
                 print("warning[SIMD-REQ-001] {cur_func.name}: {outcome.reason}")
@@ -228,7 +228,11 @@ fn run_auto_vectorize(module: MirModule) -> MirModule:
                 constants: new_module.constants,
                 types:     new_module.types,
                 external_layout_traces: new_module.external_layout_traces,
-                collection_plan_explanations: new_module.collection_plan_explanations
+                collection_plan_explanations: new_module.collection_plan_explanations,
+                enum_semantic_declarations: new_module.enum_semantic_declarations,
+                attr_sites: new_module.attr_sites,
+                initializer_plan_v1: new_module.initializer_plan_v1,
+                xray_ring_wrap: new_module.xray_ring_wrap
             )
 
     new_module
@@ -237,7 +241,7 @@ fn run_auto_vectorize(module: MirModule) -> MirModule:
 # K3 Wave — Internal helpers
 # ============================================================================
 
-fn _is_index_increment(op: MirBinOp, left: MirOperand, right: MirOperand) -> bool:
+pub fn _is_index_increment(op: MirBinOp, left: MirOperand, right: MirOperand) -> bool:
     """
     Heuristic: detect the induction variable increment  i = i + 1.
     Returns true if op is Add and one operand is a small integer constant (0-4).
@@ -252,7 +256,7 @@ fn _is_index_increment(op: MirBinOp, left: MirOperand, right: MirOperand) -> boo
         case _:
             false
 
-fn _operand_is_small_const(op: MirOperand) -> bool:
+pub fn _operand_is_small_const(op: MirOperand) -> bool:
     """Return true if this operand is an integer constant in [0, 16]."""
     match op.kind:
         case Const(ty, val):
@@ -262,7 +266,7 @@ fn _operand_is_small_const(op: MirOperand) -> bool:
         case _:
             false
 
-fn _binop_name(op: MirBinOp) -> text:
+pub fn _binop_name(op: MirBinOp) -> text:
     """Return a human-readable name for a BinOp variant."""
     match op:
         case Add:  "add"
@@ -276,12 +280,12 @@ fn _binop_name(op: MirBinOp) -> text:
         case Shr:  "shr"
         case _:    "other"
 
-fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFunction:
+pub fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFunction:
     """Rewrite without a runtime alias guard. Callers that have not PROVEN the
     bases disjoint must use rewrite_elementwise_add_guarded instead."""
     _rewrite_elementwise_add_impl(recipe, func, false)
 
-fn rewrite_elementwise_add_guarded(recipe: VectorRecipe, func: MirFunction) -> MirFunction:
+pub fn rewrite_elementwise_add_guarded(recipe: VectorRecipe, func: MirFunction) -> MirFunction:
     """Rewrite behind a runtime alias guard (loop versioning).
 
     Used when the alias oracle answers NeedsRuntimeGuard: the bases cannot be
@@ -611,7 +615,7 @@ fn _rewrite_elementwise_add_impl(recipe: VectorRecipe, func: MirFunction, emit_g
         while made < temp_count:
             guard_locals.push(MirLocal(
                 id: LocalId(id: t + made),
-                name: nil,
+                name: None,
                 type_: MirType(kind: MirTypeKind.I64),
                 kind: LocalKind.Temp,
                 is_ghost: false))
@@ -696,7 +700,7 @@ fn _loop_bound(func: MirFunction, header_id: i64, candidates: [LocalId]) -> Loop
             val found = _find_bound_in(func, blk.id.id, candidates)
             if found.?:
                 return found
-    nil
+    None
 
 fn _branches_to(blk: MirBlock, target_id: i64) -> bool:
     match blk.terminator:
@@ -723,16 +727,16 @@ fn _find_bound_in(func: MirFunction, block_id: i64, candidates: [LocalId]) -> Lo
                                             return Some(LoopBound(index: l, bound: right))
                                 case _: pass_do_nothing
                     case _: pass_do_nothing
-    nil
+    None
 
-fn _patch_block_id(id: BlockId, old_id: i64, new_id: i64) -> BlockId:
+pub fn _patch_block_id(id: BlockId, old_id: i64, new_id: i64) -> BlockId:
     """Return new_id as BlockId if id.id == old_id, otherwise return id unchanged."""
     if id.id == old_id:
         BlockId.new(new_id)
     else:
         id
 
-fn _patch_terminator_target(block: MirBlock, old_id: i64, new_id: i64) -> MirBlock:
+pub fn _patch_terminator_target(block: MirBlock, old_id: i64, new_id: i64) -> MirBlock:
     """
     Defect B fix — predecessor patching.
 
@@ -755,7 +759,7 @@ fn _patch_terminator_target(block: MirBlock, old_id: i64, new_id: i64) -> MirBlo
             block.terminator
     MirBlock(..block, terminator: new_terminator)
 
-fn supports_elementwise_rewrite(op_name: text) -> bool:
+pub fn supports_elementwise_rewrite(op_name: text) -> bool:
     """
     Phase-1 auto-application supports the hot scalar idioms that map cleanly to
     elementwise vector ops without reassociation.
@@ -768,7 +772,7 @@ fn supports_elementwise_rewrite(op_name: text) -> bool:
         return true
     op_name == "xor_elementwise"
 
-fn _log_recipe(func_name: text, recipe: VectorRecipe):
+pub fn _log_recipe(func_name: text, recipe: VectorRecipe):
     """
     Emit a compiler diagnostic note for a matched VectorRecipe.
     In a full compiler this would call the diagnostic engine; here
@@ -796,7 +800,7 @@ fn find_rewrite_block_by_id(func: MirFunction, id: BlockId) -> MirBlock?:
     for block in func.blocks:
         if block.id.id == id.id:
             return Some(block)
-    nil
+    None
 
 class RewriteLoopTerminator:
     cond: MirOperand
@@ -817,7 +821,7 @@ fn detect_loop_bounds_legacy(loop_header: BlockId, func: MirFunction) -> LoopBou
     # Locate the header block
     val header_block = find_rewrite_block_by_id(func, loop_header)
     if not header_block.?:
-        return nil
+        return None
 
     val header = header_block.unwrap()
 
@@ -827,10 +831,10 @@ fn detect_loop_bounds_legacy(loop_header: BlockId, func: MirFunction) -> LoopBou
             # Conservatively treat else_ as exit (loop body is then_)
             Some(RewriteLoopTerminator(cond: cond, exit_block: else_))
         case _:
-            nil
+            None
 
     if not loop_term.?:
-        return nil
+        return None
 
     val term = loop_term.unwrap()
     detect_loop_bounds_only(func, header, term.cond, term.exit_block)
@@ -848,7 +852,7 @@ fn detect_loop_bounds_legacy(loop_header: BlockId, func: MirFunction) -> LoopBou
 # This is the same splicing pattern used by rewrite_elementwise_add but
 # exposed as a reusable primitive for the Wave L3b rewriter.
 
-fn splice_vectorized_block(
+pub fn splice_vectorized_block(
     original:   BlockId,
     vectorized: MirBlock,
     remainder:  MirBlock,
@@ -895,7 +899,7 @@ fn splice_vectorized_block(
 # attribute.  Used during HIR→MIR lowering to populate MirFunction.has_fast_math.
 # FP reductions are refused unless this returns true (§8 failure mode F3).
 
-fn has_fast_math(fn_attrs: [Attribute]) -> bool:
+pub fn has_fast_math(fn_attrs: [Attribute]) -> bool:
     """
     Return true if fn_attrs contains an @fast_math attribute.
 

@@ -1,0 +1,155 @@
+# REQ-DTA-E1/G1: pure predicate and plugin-instance identity contracts.
+# Admission of code, loading, dispatch, and the lifetime of executable code
+# remain with the caller. A digest or descriptor is not a load capability.
+use compiler.common.cache_contract.aspect_match_shard_v1.{PointcutSelectorV1, pointcut_selector_parse_v1}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_v1_parse, digest_v1_new,
+    digest_v1_text, HASH_ALGO_SHA256_V1}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+
+pub trait Pointcut:
+    fn compile() -> PointcutSelectorV1
+
+pub class SelectorPointcutV1:
+    source: text
+
+impl Pointcut for SelectorPointcutV1:
+    fn compile() -> PointcutSelectorV1:
+        pointcut_selector_parse_v1(self.source)
+
+pub enum PluginFieldRoleV1:
+    Instance
+    Scope
+
+pub struct PluginConfigFieldV1:
+    name: text
+    role: PluginFieldRoleV1
+
+pub struct PluginConfigValueV1:
+    name: text
+    value: text
+
+pub struct PluginDefinitionV1:
+    code_digest: text
+    fields: [PluginConfigFieldV1]
+
+# Scope values are deliberately absent. The object cannot accidentally retain
+# the first directory or matcher when shared by later requests.
+pub struct PluginInstanceDescriptorV1:
+    key: text
+    canonical_identity: text
+    values: [PluginConfigValueV1]
+
+pub struct PluginCanonicalConfigV1:
+    canonical_identity: text
+    values: [PluginConfigValueV1]
+
+pub struct PluginInstanceAcquireV1:
+    instance: PluginInstanceDescriptorV1
+    hit: bool
+
+val PLUGIN_CONFIG_MAX_FIELDS_V1: i64 = 128
+val PLUGIN_CONFIG_MAX_BYTES_V1: i64 = 65536
+val PLUGIN_POOL_MAX_INSTANCES_V1: i64 = 4096
+
+fn _plugin_frame_v1(value: text) -> text:
+    "{value.byte_len()}:{value}"
+
+fn _plugin_field_name_v1(name: text) -> bool:
+    if name == "": return false
+    for ch in name.chars():
+        if not ((ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+                (ch >= "0" and ch <= "9") or ch == "_" or ch == "." or ch == "-"):
+            return false
+    true
+
+# The schema is closed: each declared field appears exactly once, including
+# scope fields. A plugin may declare any field name as scope, but cannot hide
+# undeclared fields or change field roles without changing instance identity.
+pub fn plugin_config_canonical_v1(definition: PluginDefinitionV1,
+        config: [PluginConfigValueV1]) -> Result<PluginCanonicalConfigV1, text>:
+    var code_identity = ""
+    match digest_v1_parse(definition.code_digest):
+        case Some(d):
+            if d.algo_id != HASH_ALGO_SHA256_V1:
+                return Err("plugin-code-digest-invalid")
+            code_identity = digest_v1_text(d)
+        case None: return Err("plugin-code-digest-invalid")
+    if definition.fields.len() > PLUGIN_CONFIG_MAX_FIELDS_V1 or config.len() != definition.fields.len():
+        return Err("plugin-config-field-count")
+    var fields: [PluginConfigFieldV1] = []
+    var bytes: i64 = 0
+    for field in definition.fields:
+        if not _plugin_field_name_v1(field.name): return Err("plugin-config-field-name")
+        for prior in fields:
+            if prior.name == field.name: return Err("plugin-config-duplicate-declaration")
+        bytes = bytes + field.name.byte_len()
+        if bytes > PLUGIN_CONFIG_MAX_BYTES_V1: return Err("plugin-config-size")
+        var index = fields.len()
+        fields.push(field)
+        while index > 0 and fields[index - 1].name > field.name:
+            fields[index] = fields[index - 1]
+            index = index - 1
+        fields[index] = field
+    var seen: [text] = []
+    for item in config:
+        if seen.contains(item.name): return Err("plugin-config-duplicate-value")
+        seen.push(item.name)
+        var declared = false
+        for field in fields:
+            if field.name == item.name: declared = true
+        if not declared: return Err("plugin-config-undeclared-field")
+        bytes = bytes + item.name.byte_len() + item.value.byte_len()
+        if bytes > PLUGIN_CONFIG_MAX_BYTES_V1: return Err("plugin-config-size")
+    var canonical = "aspect-plugin-instance/v1" + _plugin_frame_v1(code_identity)
+    var retained: [PluginConfigValueV1] = []
+    for field in fields:
+        canonical = canonical + _plugin_frame_v1(field.name)
+        if field.role == PluginFieldRoleV1.Scope:
+            canonical = canonical + "S"
+        else:
+            canonical = canonical + "I"
+            for item in config:
+                if item.name == field.name:
+                    canonical = canonical + _plugin_frame_v1(item.value)
+                    retained.push(item)
+    Ok(PluginCanonicalConfigV1(canonical_identity: canonical, values: retained))
+
+pub fn plugin_instance_descriptor_v1(definition: PluginDefinitionV1,
+        config: [PluginConfigValueV1]) -> Result<PluginInstanceDescriptorV1, text>:
+    val config_identity = plugin_config_canonical_v1(definition, config)?
+    val hex = sha256_u8_hex(text_to_bytes(config_identity.canonical_identity))
+    match digest_v1_new(HASH_ALGO_SHA256_V1, hex):
+        case Some(d):
+            Ok(PluginInstanceDescriptorV1(key: digest_v1_text(d),
+                canonical_identity: config_identity.canonical_identity, values: config_identity.values))
+        case None: Err("plugin-instance-digest-unavailable")
+
+# Single driver-loop owner. No executable code is loaded or evicted here.
+# A full pool refuses new identities; existing descriptors remain reusable.
+# Counters count descriptors, never native library loads or admitted plugins.
+pub class PluginInstancePoolV1:
+    capacity: i64
+    instances: Dict<text, PluginInstanceDescriptorV1>
+    created_count: i64
+    hits: i64
+
+    static fn create(capacity: i64) -> Result<PluginInstancePoolV1, text>:
+        if capacity <= 0 or capacity > PLUGIN_POOL_MAX_INSTANCES_V1:
+            return Err("plugin-instance-capacity")
+        Ok(PluginInstancePoolV1(capacity: capacity, instances: {}, created_count: 0, hits: 0))
+
+    me acquire(definition: PluginDefinitionV1,
+            config: [PluginConfigValueV1]) -> Result<PluginInstanceAcquireV1, text>:
+        val wanted = plugin_instance_descriptor_v1(definition, config)?
+        if self.instances.contains_key(wanted.key):
+            val existing = self.instances[wanted.key]
+            if existing.canonical_identity != wanted.canonical_identity:
+                return Err("plugin-instance-digest-collision")
+            self.hits = self.hits + 1
+            return Ok(PluginInstanceAcquireV1(instance: existing, hit: true))
+        if self.instances.len() >= self.capacity:
+            return Err("plugin-instance-capacity")
+        self.instances[wanted.key] = wanted
+        self.created_count = self.created_count + 1
+        Ok(PluginInstanceAcquireV1(instance: wanted, hit: false))

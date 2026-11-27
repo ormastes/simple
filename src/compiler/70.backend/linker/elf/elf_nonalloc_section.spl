@@ -1,26 +1,44 @@
 """Append metadata without changing existing section indices or load segments."""
 use compiler.backend.linker.elf_parser.{elf_parse_object, elf_section_name}
-
-fn elf_metadata_put(bytes: [i64], offset: i64, width: i64, value: i64) -> [i64]:
-    var result = bytes
-    var i: i64 = 0
-    while i < width:
-        result[offset + i] = (value >> (i * 8)) & 255
-        i = i + 1
-    result
+use compiler.backend.linker.elf.byte_buffers.{elf_u8_zeros}
 
 fn elf_append_nonalloc_section(image: [i64], name: text, kind: i64, payload: [i64]) -> Result<[i64], text>:
-    if name == "" or name.contains("\0"): return Err("ELF metadata section name is invalid")
-    if kind < 0 or kind > 4294967295: return Err("ELF metadata section type exceeds 32 bits")
+    """`[i64]` form of `elf_append_nonalloc_section_bytes`."""
     var raw: [u8] = []
     for byte in image:
         if byte < 0 or byte > 255: return Err("ELF metadata image contains a non-byte value")
         raw.push(byte as u8)
+    val out = elf_append_nonalloc_section_bytes(raw, name, kind, payload)?
+    var result: [i64] = []
+    for byte in out: result.push(byte as i64)
+    Ok(result)
+
+fn elf_append_nonalloc_section_bytes(image: [u8], name: text, kind: i64, payload: [i64]) -> Result<[u8], text>:
+    """Append with sh_flags 0 and sh_entsize 0."""
+    elf_append_nonalloc_section_bytes_with(image, name, kind, 0, 0, payload)
+
+fn elf_append_nonalloc_section_bytes_with(image: [u8], name: text, kind: i64, flags: i64, entsize: i64, payload: [i64]) -> Result<[u8], text>:
+    """Append a non-allocated section to a packed image. The result is
+    allocated once at its final size and filled with native `write_span`."""
+    if name == "" or name.contains("\0"): return Err("ELF metadata section name is invalid")
+    if kind < 0 or kind > 4294967295: return Err("ELF metadata section type exceeds 32 bits")
+    var payload_bytes: [u8] = []
     for byte in payload:
         if byte < 0 or byte > 255: return Err("ELF metadata payload contains a non-byte value")
-    val object = elf_parse_object(raw)?
-    if raw.len() < 64 or raw[4] != 2 or raw[5] != 1:
-        return Err("ELF metadata append requires little-endian ELF64")
+        payload_bytes.push(byte as u8)
+    val object = elf_parse_object(image)?
+    val w32 = image.len() >= 52 and image[4] == 1u8
+    if (not w32 and (image.len() < 64 or image[4] != 2u8)) or image[5] != 1u8:
+        return Err("ELF metadata append requires little-endian ELF32 or ELF64")
+    # Section-header geometry differs by class: entry size, sh_offset/sh_size/
+    # sh_addralign field positions/widths, and e_shoff/e_shnum header offsets.
+    val sh: i64 = if w32: 40 else: 64
+    val word: i64 = if w32: 4 else: 8
+    val off_field: i64 = if w32: 16 else: 24
+    val size_field: i64 = if w32: 20 else: 32
+    val align_field: i64 = if w32: 32 else: 48
+    val e_shoff_at: i64 = if w32: 32 else: 40
+    val e_shnum_at: i64 = if w32: 48 else: 60
     val count = object.sections.len()
     val strings_index = object.header.e_shstrndx
     if count >= 65279 or strings_index <= 0 or strings_index >= count:
@@ -32,36 +50,35 @@ fn elf_append_nonalloc_section(image: [i64], name: text, kind: i64, payload: [i6
     val strings = object.sections[strings_index]
     if strings.sh_type != 3 or strings.sh_addr < 0 or strings.sh_addr > image.len() or strings.sh_size < 1 or strings.sh_size > image.len() - strings.sh_addr:
         return Err("ELF metadata section-name table is invalid")
-    var result = image
-    val payload_offset = result.len()
-    for byte in payload: result.push(byte)
-    val strings_offset = result.len()
+    val name_bytes = name.bytes()
+    val payload_offset = image.len()
+    val strings_offset = payload_offset + payload_bytes.len()
+    var headers_offset = strings_offset + strings.sh_size + name_bytes.len() + 1
+    while headers_offset % word != 0: headers_offset = headers_offset + 1
+    val new_header = headers_offset + count * sh
+    var result: [u8] = elf_u8_zeros(new_header + sh)
+    result.write_span(image, 0, 0, image.len())
+    if payload_bytes.len() > 0: result.write_span(payload_bytes, payload_offset, 0, payload_bytes.len())
+    result.write_span(image, strings_offset, strings.sh_addr, strings.sh_size)
     i = 0
-    while i < strings.sh_size:
-        result.push(image[strings.sh_addr + i])
+    while i < name_bytes.len():
+        result[strings_offset + strings.sh_size + i] = name_bytes[i] as u8
         i = i + 1
-    for byte in name.bytes(): result.push(byte as i64)
-    result.push(0)
-    while result.len() % 8 != 0: result.push(0)
-    val headers_offset = result.len()
-    i = 0
-    while i < count * 64:
-        result.push(image[object.header.e_shoff + i])
-        i = i + 1
-    val new_header = result.len()
-    i = 0
-    while i < 64:
-        result.push(0)
-        i = i + 1
-    result = elf_metadata_put(result, headers_offset + strings_index * 64 + 24, 8, strings_offset)
-    result = elf_metadata_put(result, headers_offset + strings_index * 64 + 32, 8, strings.sh_size + name.bytes().len() + 1)
-    result = elf_metadata_put(result, new_header, 4, strings.sh_size)
-    result = elf_metadata_put(result, new_header + 4, 4, kind)
-    result = elf_metadata_put(result, new_header + 24, 8, payload_offset)
-    result = elf_metadata_put(result, new_header + 32, 8, payload.len())
-    result = elf_metadata_put(result, new_header + 48, 8, 1)
-    result = elf_metadata_put(result, 40, 8, headers_offset)
-    result = elf_metadata_put(result, 60, 2, count + 1)
+    result.write_span(image, headers_offset, object.header.e_shoff, count * sh)
+    val put_at: [i64] = [headers_offset + strings_index * sh + off_field, headers_offset + strings_index * sh + size_field,
+        new_header, new_header + 4, new_header + 8, new_header + off_field, new_header + size_field, new_header + align_field,
+        new_header + (if w32: 36 else: 56),
+        e_shoff_at, e_shnum_at]
+    val put_width: [i64] = [word, word, 4, 4, word, word, word, word, word, word, 2]
+    val put_value: [i64] = [strings_offset, strings.sh_size + name_bytes.len() + 1, strings.sh_size, kind,
+        flags, payload_offset, payload_bytes.len(), 1, entsize, headers_offset, count + 1]
+    var pi: i64 = 0
+    while pi < put_at.len():
+        var b: i64 = 0
+        while b < put_width[pi]:
+            result[put_at[pi] + b] = ((put_value[pi] >> (b * 8)) & 255) as u8
+            b = b + 1
+        pi = pi + 1
     Ok(result)
 
-export elf_append_nonalloc_section
+export elf_append_nonalloc_section, elf_append_nonalloc_section_bytes, elf_append_nonalloc_section_bytes_with

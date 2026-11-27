@@ -41,6 +41,9 @@ pub unsafe extern "C" fn rt_file_mmap(
     {
         use libc::mmap;
 
+        let Ok(offset) = libc::off_t::try_from(offset) else {
+            return std::ptr::null_mut();
+        };
         unsafe {
             let addr = mmap(addr.cast(), length, prot, flags, fd, offset);
 

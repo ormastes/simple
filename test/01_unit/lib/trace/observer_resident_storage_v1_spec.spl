@@ -1,0 +1,33 @@
+use std.spec.*
+use std.common.trace.observer_config_v1.{trace_config_defaults_v1}
+use std.nogc_sync_mut.trace.observer_resident_storage_v1.*
+
+describe "resident generation allocation budget":
+    it "charges descriptor pool slots map every channel and scratch":
+        var config = trace_config_defaults_v1()
+        config.max_contexts = 2
+        config.buffer_bytes = 192
+        # 80 descriptor + 64 pool + 64 slots + 48 map + 640 rings + 96 scratch.
+        expect(trace_resident_storage_bytes_v1(config, 3).unwrap()).to_equal(992)
+
+    it "rejects extreme requests before multiplication or allocation":
+        var config = trace_config_defaults_v1()
+        config.max_contexts = 18446744073709551615u64
+        expect(trace_resident_storage_bytes_v1(config, 1).is_err()).to_equal(true)
+        config.max_contexts = 64
+        config.buffer_bytes = 18446744073709551615u64
+        expect(trace_resident_storage_bytes_v1(config, 1).is_err()).to_equal(true)
+        config.buffer_bytes = 96
+        expect(trace_resident_storage_bytes_v1(config, 0).is_err()).to_equal(true)
+        expect(trace_resident_storage_bytes_v1(config, 4097).is_err()).to_equal(true)
+        config.max_resident_generations = 17
+        expect(trace_resident_storage_bytes_v1(config, 1).is_err()).to_equal(true)
+
+    it "bounds the largest generation below the process storage limit":
+        var config = trace_config_defaults_v1()
+        config.max_contexts = 64
+        config.buffer_bytes = 393216
+        config.max_resident_generations = 16
+        val bytes = trace_resident_storage_bytes_v1(config, 4096).unwrap()
+        expect(bytes).to_equal(25241840)
+        expect(bytes).to_be_less_than(TRACE_RESIDENT_BYTES_LIMIT_V1 - 33554432)

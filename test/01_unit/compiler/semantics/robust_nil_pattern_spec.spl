@@ -1,0 +1,39 @@
+# Purpose and audience: acceptance evidence (design S-11) for compiler lint maintainers.
+# @req REQ-SSPEC-COMPILER
+# design: doc/05_design/language/robust_types/robust_types_layer_contracts_2026-11-12.md §9 S-11
+"""
+# S-11: typed `None` is accepted, raw `nil` patterns and comparisons are diagnosed
+
+Rule G of the robust guide: `case None:` on a legacy `Option<T>` is the only
+sanctioned absence pattern in safe code. A raw `case nil:` pattern and a raw
+`== nil` / `!= nil` comparison are `NIL-UNSAFE-001` outside `unsafe:`, exactly
+like a `nil` literal in assignment or return.
+"""
+
+# @tag: unit, compiler, lint, robust
+
+use std.spec.*
+use compiler.tools.lint.static_rules.{LintParamsV1, LintUnit, StaticLintFinding, run_static_lint_rule_table}
+use compiler.tools.lint.rules.nil_outside_unsafe_rule.{nil_outside_unsafe_lint_rule}
+
+fn nil_findings(src: text) -> [StaticLintFinding]:
+    val run = run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("src/lib/example.spl", src), [nil_outside_unsafe_lint_rule()])
+    run.findings
+
+describe "S-11 None pattern versus raw nil":
+    it "accepts a typed None arm on a legacy Option":
+        expect(nil_findings("fn f(x: Option<i64>) -> i64:\n    match x:\n        case Some(v): v\n        case None: 0\n").len()).to_equal(0)
+
+    it "diagnoses a raw case nil pattern in safe code":
+        val found = nil_findings("fn f(x: Option<i64>) -> i64:\n    match x:\n        case nil: 0\n        case _: 1\n")
+        expect(found.len()).to_equal(1)
+        expect(found[0].code).to_equal("NIL-UNSAFE-001")
+        expect(found[0].line_num).to_equal(3)
+
+    it "diagnoses a raw nil comparison in safe code":
+        val found = nil_findings("fn f(p: Ptr) -> bool:\n    if p == nil: return true\n    p != nil\n")
+        expect([f.line_num for f in found]).to_equal([2, 3])
+
+    it "keeps raw nil patterns and comparisons inside unsafe":
+        expect(nil_findings("fn f(p: Ptr) -> bool:\n    unsafe:\n        p == nil\n").len()).to_equal(0)
+        expect(nil_findings("fn f(x: Option<i64>) -> i64:\n    unsafe:\n        match x:\n            case nil: 0\n            case _: 1\n").len()).to_equal(0)

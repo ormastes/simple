@@ -10,7 +10,7 @@ use compiler.backend.linker.elf_inspect.{
     ET_DYN, ELF64_SHDR_SIZE
 }
 use compiler.backend.linker.elf_parser.{
-    ElfStringTable, elf_strtab_get, elf_parse_string_table
+    ElfStringTable, elf_strtab_get, elf_strtab_len, elf_strtab_byte, elf_parse_string_table
 }
 
 val SHT_DYNSYM_SO: i64 = 11
@@ -40,6 +40,7 @@ struct ElfSharedLib:
     export_sizes: {text: i64}
     export_values: {text: i64}
     export_versions: {text: text} # reference spelling -> required version name
+    needs: [text] = []   # undefined GLOBAL/WEAK dynamic symbols this object references
 
 fn elf_shared_effective_soname(embedded: text, fallback_name: text) -> Result<text, text>:
     if embedded != "": return Ok(embedded)
@@ -56,15 +57,46 @@ fn elf_shared_symbol_binding_linkable(binding: i64) -> bool:
     """GLOBAL, WEAK, and GNU_UNIQUE definitions participate in DSO lookup."""
     binding == 1 or binding == 2 or binding == 10
 
+fn elf_so_c32(bytes: [u8]) -> bool:
+    (bytes[4] as i64) == 1
+
+fn elf_so_shdr_size(bytes: [u8]) -> i64:
+    if elf_so_c32(bytes): 40 else: ELF64_SHDR_SIZE
+
+fn elf_so_word(bytes: [u8], at: i64) -> i64:
+    """Class-width address/size word (Elf32_Addr or Elf64_Addr)."""
+    if elf_so_c32(bytes): elf_read_u32_le(bytes, at) else: elf_read_u64_le(bytes, at)
+
+fn elf_so_sym_size(bytes: [u8]) -> i64:
+    if elf_so_c32(bytes): 16 else: 24
+
+fn elf_so_dyn_size(bytes: [u8]) -> i64:
+    if elf_so_c32(bytes): 8 else: 16
+
+fn elf_so_sym_value(bytes: [u8], e: i64) -> i64:
+    if elf_so_c32(bytes): elf_read_u32_le(bytes, e + 4) else: elf_read_u64_le(bytes, e + 8)
+
+fn elf_so_sym_size_field(bytes: [u8], e: i64) -> i64:
+    if elf_so_c32(bytes): elf_read_u32_le(bytes, e + 8) else: elf_read_u64_le(bytes, e + 16)
+
+fn elf_so_sym_info_at(bytes: [u8], e: i64) -> i64:
+    """Offset of st_info: Elf32_Sym puts value/size before info, Elf64_Sym after."""
+    if elf_so_c32(bytes): e + 12 else: e + 4
+
 fn elf_so_shdr(bytes: [u8], shoff: i64, i: i64) -> ElfSectionHeader:
     """Section header i with sh_addr repurposed as the FILE offset (elf_parser convention)."""
-    val h = shoff + i * ELF64_SHDR_SIZE
+    val h = shoff + i * elf_so_shdr_size(bytes)
+    if elf_so_c32(bytes):
+        return ElfSectionHeader(sh_name: elf_read_u32_le(bytes, h), sh_type: elf_read_u32_le(bytes, h + 4),
+            sh_flags: elf_read_u32_le(bytes, h + 8), sh_addr: elf_read_u32_le(bytes, h + 16),
+            sh_size: elf_read_u32_le(bytes, h + 20), sh_info: elf_read_u32_le(bytes, h + 28))
     ElfSectionHeader(sh_name: elf_read_u32_le(bytes, h), sh_type: elf_read_u32_le(bytes, h + 4),
         sh_flags: elf_read_u64_le(bytes, h + 8), sh_addr: elf_read_u64_le(bytes, h + 24),
         sh_size: elf_read_u64_le(bytes, h + 32), sh_info: elf_read_u32_le(bytes, h + 44))
 
 fn elf_so_link(bytes: [u8], shoff: i64, i: i64) -> i64:
-    elf_read_u32_le(bytes, shoff + i * ELF64_SHDR_SIZE + 40)
+    val at = if elf_so_c32(bytes): 24 else: 40
+    elf_read_u32_le(bytes, shoff + i * elf_so_shdr_size(bytes) + at)
 
 fn elf_so_range_valid(bytes: [u8], offset: i64, size: i64) -> bool:
     offset >= 0 and size >= 0 and offset <= bytes.len() and size <= bytes.len() - offset
@@ -87,12 +119,12 @@ fn elf_so_checked_linked_strtab(bytes: [u8], shoff: i64, shnum: i64,
     Ok(section)
 
 fn elf_so_strtab_get(strtab: ElfStringTable, index: i64, role: text) -> Result<text, text>:
-    if index < 0 or index >= strtab.data.len():
+    if index < 0 or index >= elf_strtab_len(strtab):
         return Err("shared object {role} string offset {index} is out of range")
     var cursor = index
-    while cursor < strtab.data.len():
-        if strtab.data[cursor] == 0:
-            return Ok(elf_strtab_get(strtab, index))
+    while cursor < elf_strtab_len(strtab):
+        if elf_strtab_byte(strtab, cursor) == 0u8:
+            return elf_strtab_get(strtab, index)
         cursor = cursor + 1
     Err("shared object {role} string is not NUL terminated")
 
@@ -262,6 +294,7 @@ fn elf_parse_shared_dynamic(bytes: [u8], header: ElfHeader,
     var export_sizes: {text: i64} = {}
     var export_values: {text: i64} = {}
     var export_versions: {text: text} = {}
+    var needs: [text] = []
     var k: i64 = 1
     while k < symbol_count:
         val e = symtab_offset + k * 24
@@ -270,6 +303,11 @@ fn elf_parse_shared_dynamic(bytes: [u8], header: ElfHeader,
         val shndx = elf_read_u16_le(bytes, e + 6)
         val linkable = (shndx != 0 and elf_shared_symbol_binding_linkable(info >> 4) and
             elf_shared_symbol_visible(other))
+        if shndx == 0 and ((info >> 4) == 1 or (info >> 4) == 2):
+            match elf_so_strtab_get(strtab, elf_read_u32_le(bytes, e), "dynamic symbol name"):
+                case Ok(v):
+                    if v != "": needs = needs.push(v)
+                case Err(err): return Err(err)
         if linkable:
             val name = elf_so_strtab_get(strtab, elf_read_u32_le(bytes, e),
                 "dynamic symbol name")?
@@ -301,7 +339,7 @@ fn elf_parse_shared_dynamic(bytes: [u8], header: ElfHeader,
     soname = elf_shared_effective_soname(soname, fallback_name)?
     Ok(ElfSharedLib(soname: soname, machine: header.e_machine, exports: exports,
         export_sizes: export_sizes, export_values: export_values,
-        export_versions: export_versions))
+        export_versions: export_versions, needs: needs))
 
 fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedLib, text>:
     """Parse an ET_DYN shared object's SONAME and dynamic exports."""
@@ -315,7 +353,7 @@ fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedL
             return Err("sectionless shared objects require ELF64")
         return elf_parse_shared_dynamic(bytes, header, fallback_name)
     if (shoff <= 0 or shnum <= 0 or shoff > bytes.len() or
-            shnum > (bytes.len() - shoff) / ELF64_SHDR_SIZE):
+            shnum > (bytes.len() - shoff) / elf_so_shdr_size(bytes)):
         return Err("shared object has no usable section header table")
 
     var dynsym_i: i64 = -1
@@ -324,7 +362,7 @@ fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedL
     var verdef_i: i64 = -1
     var i: i64 = 0
     while i < shnum:
-        val t = elf_read_u32_le(bytes, shoff + i * ELF64_SHDR_SIZE + 4)
+        val t = elf_read_u32_le(bytes, shoff + i * elf_so_shdr_size(bytes) + 4)
         if t == SHT_DYNSYM_SO:
             dynsym_i = i
         else if t == SHT_DYNAMIC_SO:
@@ -338,8 +376,9 @@ fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedL
         return Err("shared object has no .dynsym")
 
     val symsec = elf_so_checked_section(bytes, shoff, shnum, dynsym_i, ".dynsym")?
-    if symsec.sh_size % 24 != 0:
-        return Err("shared object .dynsym size is not a multiple of 24")
+    val syment = elf_so_sym_size(bytes)
+    if symsec.sh_size % syment != 0:
+        return Err("shared object .dynsym size is not a multiple of {syment}")
     val symstrsec = elf_so_checked_linked_strtab(bytes, shoff, shnum, dynsym_i,
         ".dynsym string table")?
     val strtab = elf_parse_string_table(bytes, symstrsec)
@@ -380,7 +419,8 @@ fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedL
     var export_sizes: {text: i64} = {}
     var export_values: {text: i64} = {}
     var export_versions: {text: text} = {}
-    val count = symsec.sh_size / 24
+    var needs: [text] = []
+    val count = symsec.sh_size / syment
     if versym_i >= 0:
         val versymsec = elf_so_checked_section(bytes, shoff, shnum, versym_i,
             ".gnu.version")?
@@ -388,13 +428,19 @@ fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedL
             return Err("truncated .gnu.version table")
     var k: i64 = 1
     while k < count:
-        val e = symsec.sh_addr + k * 24
-        val info = bytes[e + 4] as i64
-        val other = bytes[e + 5] as i64
-        val shndx = elf_read_u16_le(bytes, e + 6)
+        val e = symsec.sh_addr + k * syment
+        val ia = elf_so_sym_info_at(bytes, e)
+        val info = bytes[ia] as i64
+        val other = bytes[ia + 1] as i64
+        val shndx = elf_read_u16_le(bytes, ia + 2)
         val bind = info >> 4
         val linkable = (shndx != 0 and elf_shared_symbol_binding_linkable(bind) and
             elf_shared_symbol_visible(other))
+        if shndx == 0 and (bind == 1 or bind == 2):
+            match elf_so_strtab_get(strtab, elf_read_u32_le(bytes, e), "dynamic symbol name"):
+                case Ok(v):
+                    if v != "": needs = needs.push(v)
+                case Err(err): return Err(err)
         if linkable:
             val name = elf_so_strtab_get(strtab, elf_read_u32_le(bytes, e),
                 "dynamic symbol name")?
@@ -405,8 +451,8 @@ fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedL
                 hidden = elf_read_u16_le(bytes, versym_off + k * 2) & VERSYM_HIDDEN != 0
             if not hidden:
                 exports[name] = info & 0xf
-                export_values[name] = elf_read_u64_le(bytes, e + 8)
-                export_sizes[name] = elf_read_u64_le(bytes, e + 16)
+                export_values[name] = elf_so_sym_value(bytes, e)
+                export_sizes[name] = elf_so_sym_size_field(bytes, e)
             if versym_off >= 0:
                 val raw_version = elf_read_u16_le(bytes, versym_off + k * 2)
                 val version = raw_version & 0x7fff
@@ -415,8 +461,8 @@ fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedL
                         return Err(".gnu.version index {version} has no version definition")
                     val qualified = name + "@" + version_names[version]
                     exports[qualified] = info & 0xf
-                    export_values[qualified] = elf_read_u64_le(bytes, e + 8)
-                    export_sizes[qualified] = elf_read_u64_le(bytes, e + 16)
+                    export_values[qualified] = elf_so_sym_value(bytes, e)
+                    export_sizes[qualified] = elf_so_sym_size_field(bytes, e)
                     export_versions[qualified] = version_names[version]
                     if not hidden:
                         export_versions[name] = version_names[version]
@@ -425,29 +471,30 @@ fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedL
     var soname = ""
     if dynamic_i >= 0:
         val dsec = elf_so_checked_section(bytes, shoff, shnum, dynamic_i, ".dynamic")?
-        if dsec.sh_size % 16 != 0:
-            return Err("shared object .dynamic size is not a multiple of 16")
+        val dent = elf_so_dyn_size(bytes)
+        if dsec.sh_size % dent != 0:
+            return Err("shared object .dynamic size is not a multiple of {dent}")
         val dstrsec = elf_so_checked_linked_strtab(bytes, shoff, shnum, dynamic_i,
             ".dynamic string table")?
         val dstr = elf_parse_string_table(bytes, dstrsec)
         var found_null = false
         var d: i64 = 0
-        while d + 16 <= dsec.sh_size:
-            val tag = elf_read_u64_le(bytes, dsec.sh_addr + d)
+        while d + dent <= dsec.sh_size:
+            val tag = elf_so_word(bytes, dsec.sh_addr + d)
             if tag == 0:
                 found_null = true
                 d = dsec.sh_size
             else:
                 if tag == DT_SONAME_SO:
                     soname = elf_so_strtab_get(dstr,
-                        elf_read_u64_le(bytes, dsec.sh_addr + d + 8), "DT_SONAME")?
-                d = d + 16
+                        elf_so_word(bytes, dsec.sh_addr + d + dent / 2), "DT_SONAME")?
+                d = d + dent
         if not found_null:
             return Err("shared object .dynamic lacks DT_NULL")
     soname = elf_shared_effective_soname(soname, fallback_name)?
     Ok(ElfSharedLib(soname: soname, machine: header.e_machine, exports: exports,
         export_sizes: export_sizes, export_values: export_values,
-        export_versions: export_versions))
+        export_versions: export_versions, needs: needs))
 
 fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
     """Strict byte-only parser; callers with an input filename use the named form."""

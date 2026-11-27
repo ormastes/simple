@@ -88,6 +88,10 @@ fn fe_cond_select(a: FeP256, b: FeP256, choose_b: u64) -> FeP256:
         l3: a.l3 ^ (mask & (a.l3 ^ b.l3))
     )
 
+fn fe_cond_swap(a: FeP256, b: FeP256, swap: u64) -> (FeP256, FeP256):
+    """Constant-time swap: (b, a) when swap == 1, else (a, b)."""
+    (fe_cond_select(a, b, swap), fe_cond_select(b, a, swap))
+
 fn fe_eq(a: FeP256, b: FeP256) -> bool:
     """Constant-time equality: folds every limb, never short-circuits."""
     var acc: u64 = a.l0 ^ b.l0
@@ -98,7 +102,8 @@ fn fe_eq(a: FeP256, b: FeP256) -> bool:
     is_zero == 1u64
 
 fn fe_is_zero(a: FeP256) -> bool:
-    fe_eq(a, fe_zero())
+    # Compare the canonical value so a non-canonical zero (p itself) is zero.
+    fe_eq(_fe_sub_p_once(a), fe_zero())
 
 # --- Reduction helpers ------------------------------------------------------
 
@@ -324,6 +329,27 @@ fn fe_inv(a: FeP256) -> FeP256:
         limb_idx = limb_idx - 1
     result
 
+fn fe_pow(a: FeP256, exponent_be: [u8]) -> FeP256:
+    """a^e mod p, with the exponent given as big-endian bytes.
+
+    Left-to-right square-and-multiply over a PUBLIC exponent (callers pass
+    curve constants or test vectors, never secrets), so the loop shape depends
+    only on the exponent. An empty or all-zero exponent yields 1.
+    """
+    var result = fe_one()
+    var i: i64 = 0
+    while i < exponent_be.len():
+        val byte = exponent_be[i].to_u64()
+        var bit: i64 = 7
+        while bit >= 0:
+            result = fe_sq(result)
+            val b = (byte >> bit.to_u64()) & 1u64
+            val multiplied = fe_mul(result, a)
+            result = fe_cond_select(result, multiplied, b)
+            bit = bit - 1
+        i = i + 1
+    result
+
 # --- Byte conversion (big-endian, SEC1 wire order) ---------------------------
 
 fn _fe_be_load_u64(bytes: [u8], offset: u64) -> u64:
@@ -356,9 +382,12 @@ fn _fe_be_store_u64(out: [u8], value: u64) -> [u8]:
 
 fn fe_to_bytes(a: FeP256) -> [u8]:
     """Serialize as 32 big-endian bytes."""
+    # Fully reduce first (constant-time conditional subtract) so a
+    # non-canonical input such as p serializes as its canonical value.
+    val r = _fe_sub_p_once(a)
     var out: [u8] = []
-    out = _fe_be_store_u64(out, a.l3)
-    out = _fe_be_store_u64(out, a.l2)
-    out = _fe_be_store_u64(out, a.l1)
-    out = _fe_be_store_u64(out, a.l0)
+    out = _fe_be_store_u64(out, r.l3)
+    out = _fe_be_store_u64(out, r.l2)
+    out = _fe_be_store_u64(out, r.l1)
+    out = _fe_be_store_u64(out, r.l0)
     out

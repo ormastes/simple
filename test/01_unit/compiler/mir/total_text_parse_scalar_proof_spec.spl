@@ -1,0 +1,54 @@
+use std.spec.*
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.MirLowering
+use compiler.mir.mir_json.serialize_mir_function
+
+fn total_text_parse_mir(body: text) -> text:
+    val source = "extern fn opaque_word() -> i64\n\nfn fallback() -> i64:\n    print \"fallback-effect\"\n    99\n\nfn probe() -> i64:\n    {body}\n"
+    val parsed = parse_full_frontend(source, "total_text_parse.spl", "total_text_parse.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("total_text_parse.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    expect(lowering.errors.len()).to_equal(0)
+    for function in mir.functions.values():
+        if function.name == "probe" or function.name.ends_with(".probe"):
+            return serialize_mir_function(function)
+    ""
+
+describe "total text conversion keeps a plain scalar result":
+    it "does not interpret the raw to_i64 value three as nil":
+        val mir = total_text_parse_mir("\"3\".to_i64() ?? fallback()")
+        expect(mir.len() > 0).to_equal(true)
+        expect(mir).to_contain("rt_string_to_int_lenient")
+        expect(mir.contains("rt_is_some")).to_equal(false)
+        expect(mir.contains("fallback")).to_equal(false)
+
+    it "keeps the to_int twin scalar and its default unevaluated":
+        val mir = total_text_parse_mir("\"3\".to_int() ?? fallback()")
+        expect(mir).to_contain("rt_string_to_int_lenient")
+        expect(mir.contains("rt_is_some")).to_equal(false)
+        expect(mir.contains("fallback")).to_equal(false)
+
+    it "keeps actual inventory-style substring conversion scalar":
+        val mir = total_text_parse_mir("\"generation=3\".substring(11).to_i64() ?? fallback()")
+        expect(mir).to_contain("rt_string_to_int_lenient")
+        expect(mir.contains("rt_is_some")).to_equal(false)
+        expect(mir.contains("fallback")).to_equal(false)
+
+    it "preserves the strict parser optional presence check":
+        val mir = total_text_parse_mir("\"3\".parse_int() ?? fallback()")
+        expect(mir).to_contain("rt_string_parse_int")
+        expect(mir).to_contain("rt_is_some")
+        expect(mir).to_contain("fallback")
+
+    it "preserves presence checks for an opaque extern result":
+        val mir = total_text_parse_mir("opaque_word() ?? fallback()")
+        expect(mir).to_contain("opaque_word")
+        expect(mir).to_contain("rt_is_some")
+        expect(mir).to_contain("fallback")

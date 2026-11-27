@@ -1,0 +1,116 @@
+# @req VIEW-02 VIEW-04 VIEW-05 VIEW-07 VIEW-12 VIEW-13 VIEW-14 VIEW-15 VIEW-16 CACHE-04
+# Unit transition evidence only; real concurrent authenticated-session and
+# protocol acceptance remain separate gates.
+use std.spec.step
+use std.common.source.contracts.{SourceSnapshotV1, SourceRangeV1}
+use std.nogc_sync_mut.source.projection.{source_project_raw_v1, source_project_ranges_v1}
+use std.nogc_sync_mut.source.session.{source_view_session_new_v1,
+    source_view_set_preferences_v1, source_view_commit_open_v1}
+
+describe "source projection preserves snapshot byte ranges":
+    it "preserves Korean emoji decorations and CRLF in a whole-line page":
+        step("project a bounded original-byte page")
+        val snapshot = SourceSnapshotV1("s1", "fixture", "한😀|\r\nnext\n")
+        match source_project_raw_v1(snapshot, 0, 10):
+            Ok(page):
+                expect(page.source_text).to_equal("한😀|\r\n")
+                expect(page.selected[0].end_byte).to_equal(10)
+                expect(page.next_byte).to_equal(10)
+                expect(page.completeness).to_equal("partial")
+                expect(page.omitted[0].start_byte).to_equal(10)
+                expect(page.omitted[0].end_byte).to_equal(15)
+                expect(page.evidence_kind).to_equal("raw_text")
+            Err(reason): fail(reason)
+
+    it "preserves a final line without a newline and records prior omission":
+        step("continue at the returned source boundary")
+        val snapshot = SourceSnapshotV1("s2", "fixture", "one\ntwo")
+        match source_project_raw_v1(snapshot, 4, 3):
+            Ok(page):
+                expect(page.source_text).to_equal("two")
+                expect(page.next_byte).to_equal(-1)
+                expect(page.omitted[0].start_byte).to_equal(0)
+                expect(page.omitted[0].end_byte).to_equal(4)
+            Err(reason): fail(reason)
+
+    it "admits an empty snapshot as a complete empty page":
+        step("open valid empty source")
+        match source_project_raw_v1(SourceSnapshotV1("empty", "fixture", ""), 0, 10):
+            Ok(page):
+                expect(page.source_text).to_equal("")
+                expect(page.omitted.len()).to_equal(0)
+                expect(page.completeness).to_equal("complete")
+            Err(reason): fail(reason)
+
+    it "refuses to cut a long source line or start inside a line":
+        step("reject a page that would split source tokens")
+        val snapshot = SourceSnapshotV1("s3", "fixture", "abcdef\n")
+        match source_project_raw_v1(snapshot, 0, 3):
+            Ok(_): fail("long line silently truncated")
+            Err(reason): expect(reason).to_equal("source_line_exceeds_budget")
+        match source_project_raw_v1(snapshot, 2, 10):
+            Ok(_): fail("accepted non-line cursor")
+            Err(reason): expect(reason).to_equal("source_offset_requires_line_boundary")
+
+    it "retains disjoint omissions and rejects overlapping or split UTF8 ranges":
+        step("validate explicit provider range boundaries")
+        val snapshot = SourceSnapshotV1("s4", "fixture", "한|body|tail")
+        match source_project_ranges_v1(snapshot, [SourceRangeV1(0, 3), SourceRangeV1(8, 13)], 8):
+            Ok(page):
+                expect(page.source_text).to_equal("한|tail")
+                expect(page.omitted[0].start_byte).to_equal(3)
+                expect(page.omitted[0].end_byte).to_equal(8)
+            Err(reason): fail(reason)
+        match source_project_ranges_v1(snapshot, [SourceRangeV1(1, 3)], 8):
+            Ok(_): fail("accepted split UTF8")
+            Err(reason): expect(reason).to_equal("invalid_source_byte_boundary")
+        match source_project_ranges_v1(snapshot, [SourceRangeV1(0, 3), SourceRangeV1(2, 3)], 8):
+            Ok(_): fail("accepted overlapping ranges")
+            Err(reason): expect(reason).to_equal("unordered_or_overlapping_source_ranges")
+
+describe "source session transitions require a serialized authenticated owner":
+    it "consumes first help only on successful open and keeps agents independent":
+        step("commit success without consuming help on failure")
+        val first = source_view_session_new_v1("workspace", "agent-a").unwrap()
+        val failed = source_view_commit_open_v1(first, false).unwrap()
+        expect(failed.1).to_equal(false)
+        val opened = source_view_commit_open_v1(failed.0, true).unwrap()
+        expect(opened.1).to_equal(true)
+        val next = source_view_commit_open_v1(opened.0, true).unwrap()
+        expect(next.1).to_equal(false)
+        val second = source_view_session_new_v1("workspace", "agent-b").unwrap()
+        expect(second.help_seen).to_equal(false)
+        expect(second.preferences.line_numbers).to_equal(false)
+
+    it "replays desired settings without double toggles or cross-setting mutation":
+        step("replay an idempotent versioned preference request")
+        val initial = source_view_session_new_v1("workspace", "agent").unwrap()
+        val changed = source_view_set_preferences_v1(initial, 1, 0, "num", "true").unwrap()
+        val replayed = source_view_set_preferences_v1(changed, 1, 0, "num", "true").unwrap()
+        expect(replayed.preferences_version).to_equal(1)
+        expect(replayed.preferences.line_numbers).to_equal(true)
+        expect(replayed.preferences.virtual_hints).to_equal(false)
+        expect(replayed.preferences.inline_info).to_equal("important")
+        expect(initial.preferences.line_numbers).to_equal(false)
+        match source_view_set_preferences_v1(replayed, 1, 0, "num", "false"):
+            Ok(_): fail("accepted changed replay payload")
+            Err(reason): expect(reason).to_equal("request_payload_mismatch")
+        match source_view_set_preferences_v1(replayed, 2, 0, "hint", "true"):
+            Ok(_): fail("accepted stale preference version")
+            Err(reason): expect(reason).to_equal("stale_preferences")
+
+    it "bounds retained receipts and explicitly expires old requests":
+        step("expire a replay outside the retained receipt window")
+        var session = source_view_session_new_v1("workspace", "agent").unwrap()
+        var sequence = 1
+        while sequence <= 65:
+            session = source_view_set_preferences_v1(session, sequence, sequence - 1, "num", "true").unwrap()
+            sequence = sequence + 1
+        expect(session.receipts.len()).to_equal(64)
+        match source_view_set_preferences_v1(session, 1, 0, "num", "true"):
+            Ok(_): fail("expired receipt was silently reapplied")
+            Err(reason): expect(reason).to_equal("request_receipt_expired")
+        session.active = false
+        match source_view_commit_open_v1(session, true):
+            Ok(_): fail("expired session opened a view")
+            Err(reason): expect(reason).to_equal("session_expired")

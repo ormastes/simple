@@ -1,0 +1,41 @@
+use std.spec.*
+use compiler.hir.hir_types.{HirModule, SymbolTable}
+use compiler.hir.target_hir.target_hir_counters.{target_hir_bench_fanout, target_hir_counters_zero, target_hir_counters_add, target_hir_counters_text}
+
+fn fixture() -> HirModule:
+    HirModule(name: "app.main", path: "a.spl", imports: [], exports: [],
+        domain_blocks: [], symbols: SymbolTable.new(), functions: {},
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+fn triples(n: i64) -> [text]:
+    val all = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86-unknown-linux-gnu",
+        "riscv64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "aarch64-unknown-linux-gnu",
+        "x86-pc-windows-msvc", "riscv32-unknown-none-elf"]
+    var out: [text] = []
+    var i = 0
+    while i < n:
+        out.push(all[i])
+        i = i + 1
+    out
+
+describe "TargetHIR P7 bench counters (PERF-TH-01)":
+    it "PERF-TH-01: 1/2/4/8 fan-out decodes once and scales resolutions linearly":
+        for n in [1, 2, 4, 8]:
+            val c = target_hir_bench_fanout(fixture(), triples(n), ["i64", "usize", "bool", "f64"]).unwrap()
+            expect(c.decodes).to_equal(1)
+            expect(c.resolutions).to_equal(n)
+            expect(c.fresh_builds).to_equal(n)
+            expect(c.probes).to_equal(n * 4)
+
+    it "PERF-TH-01: refuses an empty fan-out and an unsupported target by name":
+        expect(target_hir_bench_fanout(fixture(), [], ["i64"]).unwrap_err()).to_equal("target_hir_bench_no_targets")
+        expect(target_hir_bench_fanout(fixture(), ["x86_64-unknown-linux-gnu"], ["no_such_type"]).is_err()).to_be(true)
+
+    it "PERF-TH-01: counters add field-wise and render stably":
+        val z = target_hir_counters_zero()
+        val one = target_hir_bench_fanout(fixture(), triples(1), ["i64"]).unwrap()
+        val two = target_hir_counters_add(target_hir_counters_add(z, one), one)
+        expect(target_hir_counters_text(two)).to_equal("resolutions=2 probes=2 decodes=2 fresh_builds=2")

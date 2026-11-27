@@ -68,6 +68,8 @@ class TestPixelBackend:
     w: i32
     h: i32
     pixels: [u32]
+    texts: [text]
+    taskbar_region_fill_count: i64
 
     static fn create(width: i32, height: i32, fill: u32) -> TestPixelBackend:
         val total = if width > 0 and height > 0: width * height else: 0
@@ -76,7 +78,7 @@ class TestPixelBackend:
         while i < total:
             pixels.push(fill)
             i = i + 1
-        TestPixelBackend(w: width, h: height, pixels: pixels)
+        TestPixelBackend(w: width, h: height, pixels: pixels, texts: [], taskbar_region_fill_count: 0)
 
 impl CompositorBackend for TestPixelBackend:
 
@@ -93,6 +95,8 @@ impl CompositorBackend for TestPixelBackend:
             i = i + 1
 
     me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if y >= self.h - 56:
+            self.taskbar_region_fill_count = self.taskbar_region_fill_count + 1
         var x0 = if x < 0: 0 else: x
         var y0 = if y < 0: 0 else: y
         var x1 = x + w
@@ -114,7 +118,7 @@ impl CompositorBackend for TestPixelBackend:
             yy = yy + 1
 
     me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
-        pass_do_nothing
+        self.texts.push(text_str)
 
     me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
         pass_do_nothing
@@ -127,7 +131,16 @@ impl CompositorBackend for TestPixelBackend:
             self.pixels[idx] = color
 
     me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
-        pass_do_nothing
+        var row = 0
+        while row < h:
+            var col = 0
+            while col < w:
+                val px = x + col
+                val py = y + row
+                if px >= 0 and py >= 0 and px < self.w and py < self.h:
+                    self.pixels[py * self.w + px] = pixels[row * w + col]
+                col = col + 1
+            row = row + 1
 
     me present():
         pass_do_nothing
@@ -265,7 +278,11 @@ describe "SharedWmScene render executor (common.ui.window_scene_draw_ir)":
         shared_wm_scene_render_to_backend(backend, _one_window_scene(WM_CHROME_KIND_TITLED))
         step("Sample a pixel inside the window's titlebar band (y in [10,38)), clear of the traffic-light dots and close button")
         val probe = backend.pixels[20 * 140 + 75]
-        expect(probe).to_equal(theme.title_unfocused)
+        # oracle: the Aqua titlebar is a vertical gradient (+14 at row 0 -> -14 at row 27,
+        # integer-truncated lerp); row 10 is 14 + (-28 * 10 / 27) = +4 per RGB channel.
+        val base = theme.title_unfocused
+        val shaded = 0xFF000000u32 | ((((base >> 16) & 0xFFu32) + 4u32) << 16) | ((((base >> 8) & 0xFFu32) + 4u32) << 8) | ((base & 0xFFu32) + 4u32)
+        expect(probe).to_equal(shaded)
 
     it "renders arbitrary titlebar text through the backend with bounded truncation":
         # @req REQ-UI-WMEXEC-007

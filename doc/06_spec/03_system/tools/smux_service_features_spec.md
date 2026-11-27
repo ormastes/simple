@@ -31,7 +31,7 @@ Typed API results are the intended oracle; no rendered frame is asserted.
 
 ## Resize and focus — REQ-SMUX-CORE-003
 
-1. Split, focus the new pane and resize it to 100 by 30. Its sibling keeps its
+1. Split, focus the new pane and resize it to 30 by 20 within the window. Its sibling keeps its
    width, focus stays on the resized pane and resize count increases once.
 2. Request zero columns and negative rows. Both fail; original dimensions and
    resize metrics stay unchanged.

@@ -57,8 +57,19 @@ impl<'a> MirLowerer<'a> {
                 let Some((_, decl_ty)) = decl_fields.get(i) else {
                     continue;
                 };
-                let boxed = self.box_scalar_for_tagged_slot(*decl_ty, field.ty, field_regs[i])?;
-                field_regs[i] = boxed;
+                // `P(v: 3)` with `v: f64` stores a float constant.
+                let raw = self.float_slot_from_int_literal(*decl_ty, field, field_regs[i])?;
+                let boxed = self.box_scalar_for_tagged_slot(*decl_ty, field.ty, raw)?;
+                // ...and the other direction: a TAGGED value (`any`, erased
+                // `T`, `T?`) stored into a RAW scalar field must be decoded,
+                // as a `val` binding, a return and a call argument already
+                // are. `P(x: v)` with `v: any = 4` stored the tagged word and
+                // `.x` read 32.
+                field_regs[i] = if Self::is_raw_literal_typed_any(field) {
+                    boxed
+                } else {
+                    self.unbox_scalar_for_raw_slot(*decl_ty, field.ty, boxed)?
+                };
             }
         }
 
@@ -326,10 +337,7 @@ impl<'a> MirLowerer<'a> {
         } else {
             // Struct field access — direct memory load at byte offset
             let byte_offset = (field_index as u32) * 8;
-            let owner_name = self
-                .type_registry
-                .and_then(|registry| registry.get_type_name(receiver_ty))
-                .map(str::to_owned);
+            let owner_name = self.field_owner_name(receiver, receiver_ty);
             // Native-project lowering replaces this with an authoritative
             // collision-free module-qualified layout decision.
             let owner_has_vtable = None;
@@ -350,6 +358,25 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
+    /// A bound-proved loop replaces the receiver with its hoisted data pointer,
+    /// which only the typed `[u8]`/`[u32]`/`[u64]` readers consume. The generic
+    /// `rt_array_get` / `rt_array_get_text` / `rt_index_get` take the array
+    /// handle, so re-lower the receiver for them: with the raw pointer `[f64]`
+    /// 7.5 read as 0.0 and `[text]` "ab" as "".
+    /// Bug: seed_jit_hoisted_loop_data_ptr_reaches_generic_array_get_2026-11-27
+    fn array_handle_for_generic_get(
+        &mut self,
+        receiver: &HirExpr,
+        receiver_reg: VReg,
+        hoisted_data_ptr: Option<VReg>,
+    ) -> MirLowerResult<VReg> {
+        if hoisted_data_ptr.is_some() {
+            self.lower_expr(receiver)
+        } else {
+            Ok(receiver_reg)
+        }
+    }
+
     pub(super) fn lower_index_expr(
         &mut self,
         receiver: &HirExpr,
@@ -363,8 +390,8 @@ impl<'a> MirLowerer<'a> {
         } else {
             self.lower_expr(receiver)?
         };
-        let index_reg = self.lower_expr(index)?;
-        let index_ty = if index.ty == TypeId::ANY || index.ty.0 == u32::MAX {
+        let mut index_reg = self.lower_expr(index)?;
+        let mut index_ty = if index.ty == TypeId::ANY || index.ty.0 == u32::MAX {
             self.recover_receiver_type(index).unwrap_or(index.ty)
         } else {
             index.ty
@@ -379,6 +406,22 @@ impl<'a> MirLowerer<'a> {
             .type_registry
             .and_then(|tr| recovered_receiver_ty.and_then(|ty| tr.get(ty)))
             .is_some_and(|ty| matches!(ty, HirType::Array { .. }));
+        // An index that is statically `ANY` (an `any` value, an erased generic,
+        // an unannotated lambda parameter, the result of any-arithmetic) is a
+        // TAGGED word. An array or text is indexed by an integer, so decode it
+        // once here: every typed read below then sees a raw index, and the
+        // generic path boxes a raw index exactly once. Left tagged, it reached
+        // `rt_typed_words_i64_at` undecoded or was boxed a second time
+        // (`xs[i - 1] + xs[0]` on `[10, 20, 30]`, `i = 3`, answered 13).
+        // A dict / unknown receiver keeps the tagged key it expects.
+        if index.ty == TypeId::ANY
+            && index_ty == TypeId::ANY
+            && !Self::is_raw_literal_typed_any(index)
+            && (receiver_is_array || recovered_receiver_ty == Some(TypeId::STRING))
+        {
+            index_reg = self.unbox_scalar_for_raw_slot(TypeId::I64, TypeId::ANY, index_reg)?;
+            index_ty = TypeId::I64;
+        }
         // Mirror `receiver_is_array` (and Dict #117): test the ANY-recovered
         // type, not the raw `receiver_ty`. When `[u8]`/`[u32]`/`[u64]` erases
         // to ANY across extern facades, the raw ty is ANY and these typed
@@ -606,6 +649,7 @@ impl<'a> MirLowerer<'a> {
         {
             // HIR already proved this receiver is an array, so avoid the
             // generic collection dispatcher and boxed-index path.
+            let receiver_reg = self.array_handle_for_generic_get(receiver, receiver_reg, hoisted_data_ptr)?;
             self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
@@ -666,6 +710,7 @@ impl<'a> MirLowerer<'a> {
             };
             // Use rt_index_get(collection_rv, index_rv) for arrays/strings/dicts
             let target = CallTarget::from_name("rt_index_get");
+            let receiver_reg = self.array_handle_for_generic_get(receiver, receiver_reg, hoisted_data_ptr)?;
             self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();

@@ -1,4 +1,5 @@
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { atomicWriteDurable } from "./directory_fsync.js";
 import { dirname, join } from "node:path";
 
 import { canonicalJson, contentHash, freezeDeep, sha256Hex, ZERO_HASH } from "./canonical.js";
@@ -17,23 +18,7 @@ function clone(value) {
 }
 
 function writeAtomic(path, bytes) {
-  mkdirSync(dirname(path), { recursive: true });
-  const temporary = `${path}.tmp-${process.pid}-${Date.now()}`;
-  let descriptor = -1;
-  try {
-    descriptor = openSync(temporary, "wx", 0o600);
-    writeFileSync(descriptor, bytes);
-    fsyncSync(descriptor);
-    closeSync(descriptor);
-    descriptor = -1;
-    renameSync(temporary, path);
-  } finally {
-    if (descriptor !== -1) {
-      try { fsyncSync(descriptor); } catch { /* close below */ }
-      try { closeSync(descriptor); } catch { /* cleanup below */ }
-    }
-    if (existsSync(temporary)) unlinkSync(temporary);
-  }
+  atomicWriteDurable(path, bytes);
 }
 
 /**

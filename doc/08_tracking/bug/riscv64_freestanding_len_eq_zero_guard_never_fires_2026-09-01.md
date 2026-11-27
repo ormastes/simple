@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN
+- Status: SUPERSEDED
 - Date: 2026-09-01
 - Lane: `scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs`
 - Split out of `riscv64_in_guest_dict_values_yields_empty_erased_receiver_2026-09-01.md`,
@@ -277,3 +277,74 @@ count in-guest, to split the search: a count of 2 blames HIR lowering, a count
 of 1 blames the parser. Do not assume which; the last two assumptions here were
 both wrong.
 
+
+---
+
+# VERIFIED AT TIP (2026-11-05, worktree lane) — fix present, in-guard + in-guest green
+
+Re-verified against `origin/release/1.0.0` (worktree `/tmp/riscv-laneA`):
+
+1. **The fix is in the source.** The Cranelift inline `.len()` fast path
+   (`src/compiler_rust/compiler/src/codegen/instr/helpers.rs:121-126`) now has
+   the target-gated (`InstrContext::baremetal`, from `Target::is_baremetal()`)
+   tag-11 arm: `let is_bm_dict = builder.ins().icmp_imm(IntCC::Equal, object_type, 11);`
+   joining the offset-8 length group — exactly the shape this record's
+   "FIXED" section describes, with a comment citing this bug doc.
+
+2. **The derived-both-sides guard is GREEN at tip.**
+   `sh scripts/check/check-inline-len-covers-baremetal-heap-tags.shs` →
+   `PASS — 8 length-bearing tag(s) checked, all recognised or baselined` (rc=0).
+
+3. **The fail-open shapes run CORRECTLY in-guest under real OpenSBI v1.4
+   fw_payload.** The new probe entry
+   `examples/09_embedded/simple_os/arch/riscv64/freestanding_cmp_probe_entry.spl`
+   (steps 5-7) printed, verbatim:
+
+   ```
+   [probe] empty dict len == 0 = true (EXPECTED)
+   [probe] empty dict loop ticks = EXPECTED      <- 0 ticks on an empty dict
+   [probe] two-entry array len = EXPECTED        <- array path still good
+   ```
+
+   Command and scope notes are identical to those recorded in
+   `riscv64_freestanding_bool_in_collection_always_true_2026-09-01.md` (same
+   probe run, probe rc=0, serial log
+   `build/os/riscv64_cmp_probe/probe.serial.log`).
+
+## Adjacent observation, NOT this defect (do not conflate)
+
+The same probe boot observed that three `d["k"] = v` INSERTS into a `{}` dict
+literal leave `d.len()` at **0** in-guest — dict element insertion via
+index-assign is silently dropped on this lane. That belongs to the
+dict-writes family (cf.
+`riscv64_in_guest_dict_values_yields_empty_erased_receiver_2026-09-01.md`,
+whose rt_index_set fix may not cover the typed `Dict<text, i64>` store path),
+NOT to this record's `len()` fail-open: the -1 sentinel is gone, empty-dict
+guards and loop bounds answer correctly. Filed here only so the next session
+does not re-derive it; it needs its own record.
+
+**Status: FIXED at tip, behaviorally verified in-guest 2026-11-05.**
+
+---
+
+# P3 TRIAGE ADDENDUM (2026-11-11, lane boot8) — SUPERSEDED
+
+Verdict: **SUPERSEDED — already fixed at tip; re-verified by source + guard this lane.**
+
+This doc carries a 2026-11-05 "VERIFIED AT TIP" addendum (fix present, derived
+guard GREEN, fail-open shapes run CORRECTLY in-guest under OpenSBI fw_payload).
+Spot-checked at `work/p3-boot8-20261111` HEAD (`7d4140c1a6b3`):
+
+- Source: the Cranelift inline `.len()` baremetal tag-11 arm is present at
+  `src/compiler_rust/compiler/src/codegen/instr/helpers.rs:111`
+  (`let is_bm_dict = builder.ins().icmp_imm(IntCC::Equal, object_type, 11);`
+  joining the offset-8 length group).
+- Guard: `sh scripts/check/check-inline-len-covers-baremetal-heap-tags.shs` →
+  `PASS — 8 length-bearing tag(s) checked, all recognised or baselined` (rc=0).
+- Ancestry: fixing merge `91bc01a35eb` (PR #257) IS an ancestor of this HEAD.
+
+Host-limit note: in-guest behavioral re-run is not possible on this Windows
+host; verification here is source-presence + guard. The in-guest proof stands
+from the cited 2026-11-05 addendum. The adjacent dict-index-assign-insert drop
+noted there is a separate defect (dict-writes family), not this record's
+`.len()` fail-open.

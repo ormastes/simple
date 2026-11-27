@@ -1,0 +1,69 @@
+"""
+## Purpose and audience
+Purpose: Prove the library-unit source digest is deterministic, independent of
+input order and path separator style, and sensitive to content and path changes.
+Audience: build and driver engineers maintaining library-unit planning.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Pure function over an already-scanned (path, content hash) list; no filesystem walking.
+Plan: doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md.
+"""
+# @req: REQ-BUILD-SRC-001
+
+use std.spec.*
+use std.spec.step
+use compiler.driver.driver_build.source_inventory_v1.{SourceInventoryFileV1}
+use compiler.driver.driver_build.library_unit_digest_v1.{library_unit_source_digest_v1}
+
+fn f(path: text, digest: text) -> SourceInventoryFileV1:
+    SourceInventoryFileV1(path: path, digest: digest)
+
+# @manual_section: library_unit_digest
+describe "library unit source digest":
+    """A unit's (path, content hash) list folds into one stable digest."""
+
+    it "is identical for the same inputs":
+        # @req: REQ-BUILD-SRC-001
+        step("Digest the same list twice")
+        val a = library_unit_source_digest_v1([f("src/a.spl", "h1"), f("src/b.spl", "h2")])
+        val b = library_unit_source_digest_v1([f("src/a.spl", "h1"), f("src/b.spl", "h2")])
+        expect(a).to_equal(b)
+        expect(a.len()).to_equal(64)
+
+    it "is independent of input order":
+        # @req: REQ-BUILD-SRC-001
+        step("Digest two permutations")
+        val a = library_unit_source_digest_v1([f("src/b.spl", "h2"), f("src/a.spl", "h1"), f("src/c.spl", "h3")])
+        val b = library_unit_source_digest_v1([f("src/c.spl", "h3"), f("src/a.spl", "h1"), f("src/b.spl", "h2")])
+        expect(a).to_equal(b)
+
+    it "normalizes backslash separators to slash":
+        # @req: REQ-BUILD-SRC-001
+        step("Digest Windows-style and POSIX-style paths")
+        val a = library_unit_source_digest_v1([f("src\\lib\\a.spl", "h1")])
+        val b = library_unit_source_digest_v1([f("src/lib/a.spl", "h1")])
+        expect(a).to_equal(b)
+
+    it "changes when any content hash changes":
+        # @req: REQ-BUILD-SRC-001
+        step("Flip one content hash")
+        val a = library_unit_source_digest_v1([f("src/a.spl", "h1"), f("src/b.spl", "h2")])
+        val b = library_unit_source_digest_v1([f("src/a.spl", "h1"), f("src/b.spl", "hX")])
+        expect(a == b).to_equal(false)
+
+    it "changes when a path is renamed or a file is added":
+        # @req: REQ-BUILD-SRC-001
+        step("Rename one path, then add one file")
+        val a = library_unit_source_digest_v1([f("src/a.spl", "h1")])
+        val r = library_unit_source_digest_v1([f("src/z.spl", "h1")])
+        val p = library_unit_source_digest_v1([f("src/a.spl", "h1"), f("src/b.spl", "h2")])
+        expect(a == r).to_equal(false)
+        expect(a == p).to_equal(false)
+
+    it "cannot move characters between path and hash":
+        # @req: REQ-BUILD-SRC-001
+        step("Shift a boundary character between fields")
+        val a = library_unit_source_digest_v1([f("src/ab", "c")])
+        val b = library_unit_source_digest_v1([f("src/a", "bc")])
+        expect(a == b).to_equal(false)

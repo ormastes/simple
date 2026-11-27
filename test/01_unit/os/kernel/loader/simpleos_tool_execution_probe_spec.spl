@@ -1,0 +1,166 @@
+# Checker and fail-closed component contracts only. Synthetic evidence below
+# exercises comparisons; it is never guest execution or compiler qualification.
+# @cover src/os/kernel/loader/simpleos_tool_execution_probe_v1.spl
+use std.spec.{describe, it, expect}
+use std.fs_driver.mount_table.{MountTable}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.loader.executable_authority_registry.{ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1}
+use os.kernel.scheduler.process_execution_observation.{SchedulerExecutionEvidenceV1, SchedulerExecutionEvidenceTokenV1}
+use os.kernel.loader.simpleos_tool_execution_probe_v1.{
+    SimpleOsToolProbeRequestV1, SimpleOsToolProbeStatusV1,
+    simpleos_tool_probe_request_error_v1, simpleos_tool_probe_evidence_error_v1,
+    simpleos_tool_probe_run_installed_v1, simpleos_tool_probe_unresolved_evidence_v1
+}
+
+val TOOL_PROBE_TEST_IMAGE: text = "1111111111111111111111111111111111111111111111111111111111111111"
+
+fn tool_probe_test_request() -> SimpleOsToolProbeRequestV1:
+    SimpleOsToolProbeRequestV1(path: "/bin/simple_lint",
+        argv: ["/bin/simple_lint", "--help"], image_sha256: TOOL_PROBE_TEST_IMAGE,
+        target_arch: "x86_64", expected_stdout: "lint help\n".bytes(),
+        expected_stderr: [], expected_exit: 0, max_stdout: 4096, max_stderr: 4096)
+
+fn tool_probe_test_evidence() -> SchedulerExecutionEvidenceV1:
+    SchedulerExecutionEvidenceV1(child_id: 2u64, generation: 1u64, parent_id: 1u64,
+        image_hash: TOOL_PROBE_TEST_IMAGE, mount_id: 1u64, filesystem_name: "fat32",
+        canonical_source_path: "/bin/simple_lint", target_os: "simpleos",
+        target_arch: "x86_64", target_abi: "simpleos", mount_generation: 1u64,
+        file_generation: 1u64, command_observed: true, executable_path: "/bin/simple_lint",
+        argv: ["/bin/simple_lint", "--help"], argv_file_bindings: [], exit_code: 0,
+        stdout_bytes: "lint help\n".bytes(), stderr_bytes: [],
+        stdout_truncated: false, stderr_truncated: false,
+        stdout_capture_complete: true, stderr_capture_complete: true)
+
+describe "SimpleOS installed-tool probe component contracts":
+    it "compares the complete stdout bytes without line or CR normalization":
+        val request = tool_probe_test_request()
+        expect(simpleos_tool_probe_evidence_error_v1(request, tool_probe_test_evidence())).to_equal("")
+        var extra = tool_probe_test_evidence()
+        extra.stdout_bytes = "lint help\nextra\n".bytes()
+        expect(simpleos_tool_probe_evidence_error_v1(request, extra)).to_equal("tool-stdout-mismatch")
+        var crlf = tool_probe_test_evidence()
+        crlf.stdout_bytes = "lint help\r\n".bytes()
+        expect(simpleos_tool_probe_evidence_error_v1(request, crlf)).to_equal("tool-stdout-mismatch")
+
+    it "does not mistake stderr output or missing capture for matching stdout":
+        var observed = tool_probe_test_evidence()
+        observed.stdout_bytes = []
+        observed.stderr_bytes = "lint help\n".bytes()
+        expect(simpleos_tool_probe_evidence_error_v1(tool_probe_test_request(), observed)).to_equal("tool-stdout-mismatch")
+        observed = tool_probe_test_evidence()
+        observed.stderr_bytes = "unexpected diagnostic\n".bytes()
+        expect(simpleos_tool_probe_evidence_error_v1(tool_probe_test_request(), observed)).to_equal("tool-stderr-mismatch")
+
+    it "rejects truncation and an output prefix exceeding its declared bound":
+        var observed = tool_probe_test_evidence()
+        observed.stdout_truncated = true
+        expect(simpleos_tool_probe_evidence_error_v1(tool_probe_test_request(), observed)).to_equal("tool-output-truncated-or-over-bound")
+        observed = tool_probe_test_evidence()
+        observed.stderr_truncated = true
+        expect(simpleos_tool_probe_evidence_error_v1(tool_probe_test_request(), observed)).to_equal("tool-output-truncated-or-over-bound")
+
+    it "matches image, target, launch path and every argv entry":
+        var observed = tool_probe_test_evidence()
+        observed.image_hash = "2222222222222222222222222222222222222222222222222222222222222222"
+        expect(simpleos_tool_probe_evidence_error_v1(tool_probe_test_request(), observed)).to_equal("executed-image-mismatch")
+        observed = tool_probe_test_evidence()
+        observed.target_os = "linux"
+        expect(simpleos_tool_probe_evidence_error_v1(tool_probe_test_request(), observed)).to_equal("executed-target-mismatch")
+        observed = tool_probe_test_evidence()
+        observed.argv = ["/bin/simple_lint", "--version"]
+        expect(simpleos_tool_probe_evidence_error_v1(tool_probe_test_request(), observed)).to_equal("executed-argv-mismatch")
+        observed = tool_probe_test_evidence()
+        observed.executable_path = "/bin/other"
+        expect(simpleos_tool_probe_evidence_error_v1(tool_probe_test_request(), observed)).to_equal("executed-image-mismatch")
+
+    it "validates exit status independently and allows a deliberate lint finding exit":
+        var observed = tool_probe_test_evidence()
+        observed.exit_code = 1
+        expect(simpleos_tool_probe_evidence_error_v1(tool_probe_test_request(), observed)).to_equal("tool-exit-mismatch")
+        var request = tool_probe_test_request()
+        request.expected_exit = 1
+        expect(simpleos_tool_probe_evidence_error_v1(request, observed)).to_equal("")
+
+    it "rejects comparison-only records without a complete observed identity":
+        var observed = tool_probe_test_evidence()
+        observed.command_observed = false
+        expect(simpleos_tool_probe_evidence_error_v1(tool_probe_test_request(), observed)).to_equal("execution-identity-incomplete")
+        observed = tool_probe_test_evidence()
+        observed.file_generation = 0u64
+        expect(simpleos_tool_probe_evidence_error_v1(tool_probe_test_request(), observed)).to_equal("execution-identity-incomplete")
+
+    it "accepts silent output only when both owner-issued capture outcomes are complete":
+        var request = tool_probe_test_request()
+        request.expected_stdout = []
+        var observed = tool_probe_test_evidence()
+        observed.stdout_bytes = []
+        expect(simpleos_tool_probe_request_error_v1(request)).to_equal("")
+        expect(simpleos_tool_probe_evidence_error_v1(request, observed)).to_equal("")
+        observed.stdout_capture_complete = false
+        expect(simpleos_tool_probe_evidence_error_v1(request, observed)).to_equal("process-output-capture-incomplete")
+        observed.stdout_capture_complete = true
+        observed.stderr_capture_complete = false
+        expect(simpleos_tool_probe_evidence_error_v1(request, observed)).to_equal("process-output-capture-incomplete")
+
+    it "rejects matching nonempty stdout when either capture owner failed or remains pending":
+        var observed = tool_probe_test_evidence()
+        observed.stderr_capture_complete = false
+        expect(simpleos_tool_probe_evidence_error_v1(tool_probe_test_request(), observed)).to_equal("process-output-capture-incomplete")
+        observed.stderr_capture_complete = true
+        observed.stdout_capture_complete = false
+        expect(simpleos_tool_probe_evidence_error_v1(tool_probe_test_request(), observed)).to_equal("process-output-capture-incomplete")
+
+    it "rejects malformed argv, digest and output bounds before touching authority":
+        var request = tool_probe_test_request()
+        request.argv = ["/bin/simple_lint", "--help\0hidden"]
+        expect(simpleos_tool_probe_request_error_v1(request)).to_equal("invalid-launch-arguments")
+        request = tool_probe_test_request()
+        request.image_sha256 = "not-a-hash"
+        expect(simpleos_tool_probe_request_error_v1(request)).to_equal("invalid-tool-image-digest")
+        request = tool_probe_test_request()
+        request.max_stdout = 65537
+        expect(simpleos_tool_probe_request_error_v1(request)).to_equal("invalid-output-bound")
+
+    it "does not qualify other CPUs through merged or unreviewed capture routes":
+        var request = tool_probe_test_request()
+        request.target_arch = "riscv64"
+        expect(simpleos_tool_probe_request_error_v1(request)).to_equal("target-capture-route-not-admitted")
+
+    it "rejects traversal and noncanonical aliases before opening or executing a tool":
+        for path in ["/bin/../other", "/bin//simple_lint", "/bin/./simple_lint",
+                     "/bin/simple_lint/", "/bin/sub/..", "/bin/sub/.",
+                     "/bin/\\other", "/bin/tool\nother"]:
+            var request = tool_probe_test_request()
+            request.path = path
+            request.argv = [path, "--help"]
+            expect(simpleos_tool_probe_request_error_v1(request)).to_equal("noncanonical-tool-path")
+            val result = simpleos_tool_probe_run_installed_v1(
+                Scheduler.new_bootstrap(), MountTable.new(),
+                ExecutableAuthorityRegistryV1(owner_epoch: 0u64), 0,
+                CapabilitySet.empty(), 0, request)
+            expect(result.status).to_equal(SimpleOsToolProbeStatusV1.Blocked)
+            expect(result.reason).to_equal("noncanonical-tool-path")
+            expect(result.evidence.?).to_equal(false)
+
+    it "retains both opaque owner coordinates when evidence consumption and cleanup are indeterminate":
+        # These deliberately unusable coordinates test ownership transport only;
+        # they are not submitted to an owner or accepted as execution evidence.
+        val issued = SchedulerExecutionEvidenceTokenV1(slot: 7, generation: 19u64, nonce: 23u64)
+        val admission = ExecutableAuthorityTokenV1(slot_index: 3, generation: 29u64, nonce: 31u64)
+        val unresolved = simpleos_tool_probe_unresolved_evidence_v1(
+            Scheduler.new_bootstrap(), 0, Some(issued), Some(admission))
+        expect(unresolved.status).to_equal(SimpleOsToolProbeStatusV1.Failed)
+        expect(unresolved.reason).to_equal("execution-evidence-consumption-indeterminate")
+        expect(unresolved.evidence.?).to_equal(false)
+        expect(unresolved.pending_evidence_token.unwrap().slot).to_equal(7)
+        expect(unresolved.pending_evidence_token.unwrap().generation).to_equal(19u64)
+        expect(unresolved.pending_evidence_token.unwrap().nonce).to_equal(23u64)
+        expect(unresolved.pending_admission_token.unwrap().slot_index).to_equal(3)
+        expect(unresolved.pending_admission_token.unwrap().generation).to_equal(29u64)
+        expect(unresolved.pending_admission_token.unwrap().nonce).to_equal(31u64)
+        val absent = simpleos_tool_probe_unresolved_evidence_v1(
+            Scheduler.new_bootstrap(), -13, None, None)
+        expect(absent.reason).to_equal("authenticated-execution-evidence-unavailable")
+        expect(absent.pending_evidence_token.?).to_equal(false)
+        expect(absent.pending_admission_token.?).to_equal(false)

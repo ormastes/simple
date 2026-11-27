@@ -37,6 +37,16 @@ impl<'a> MirLowerer<'a> {
     /// specialized, no registry at all). Callers MUST treat `None` as
     /// permissive and keep the previous behavior — only `Some(false)` is a
     /// positive "this enum does not have that name".
+    /// #6953: `variant_name`'s index in its OWNING enum, resolved through
+    /// `resolved_ty` / `enum_name` in this module's type registry. Carried on
+    /// the MIR instruction so no backend re-derives it from the bare name.
+    pub(super) fn owned_variant_discriminant(&self, enum_name: &str, variant_name: &str, resolved_ty: TypeId) -> u32 {
+        let owned = self
+            .type_registry
+            .and_then(|registry| registry.owned_or_unique_variant_discriminant(resolved_ty, Some(enum_name), variant_name));
+        owned.unwrap_or_else(|| crate::hir::name_only_variant_discriminant("mir enum constructor", variant_name)) as u32
+    }
+
     pub(super) fn enum_declares_variant(
         &self,
         enum_name: &str,
@@ -130,22 +140,26 @@ impl<'a> MirLowerer<'a> {
     /// lambda's compiled parameter types agree with its call site before
     /// stamping them onto the boundary — a lambda compiled with `x: i64` that
     /// is handed a `text` handle must NOT be given a typed boundary.
-    fn function_signature_for_callee(&self, callee: &HirExpr, args: &[HirExpr]) -> (Vec<TypeId>, TypeId) {
+    /// `(param types, return type, declared)`. `declared` is true when the
+    /// signature is the callee's declared function type, false when it is
+    /// only inferred from the argument types (see
+    /// `MirInst::IndirectCall::signature_declared`).
+    fn function_signature_for_callee(&self, callee: &HirExpr, args: &[HirExpr]) -> (Vec<TypeId>, TypeId, bool) {
         let arg_types = || args.iter().map(|arg| arg.ty).collect::<Vec<_>>();
         let Some(registry) = self.type_registry else {
-            return (arg_types(), TypeId::ANY);
+            return (arg_types(), TypeId::ANY, false);
         };
         if let Some(HirType::Function { params, ret }) = registry.get(callee.ty) {
-            return (params.clone(), *ret);
+            return (params.clone(), *ret, true);
         }
         if let HirExprKind::Index { receiver, .. } = &callee.kind {
             if let Some(HirType::Array { element, .. }) = registry.get(receiver.ty) {
                 if let Some(HirType::Function { params, ret }) = registry.get(*element) {
-                    return (params.clone(), *ret);
+                    return (params.clone(), *ret, true);
                 }
             }
         }
-        (arg_types(), TypeId::ANY)
+        (arg_types(), TypeId::ANY, false)
     }
 
     fn call_returns_array_of(&self, callee: &HirExpr, element_type: TypeId) -> bool {
@@ -178,7 +192,7 @@ impl<'a> MirLowerer<'a> {
     /// done a few lines below for arbitrary user enums (see
     /// `doc/08_tracking/bug/enum_field_i64_zero_destructure_2026-04-28.md`);
     /// the `Some`/`Ok`/`Err` fast paths above bypassed that logic.
-    fn box_enum_payload_if_needed(&mut self, value: VReg, arg_ty: TypeId) -> MirLowerResult<VReg> {
+    pub(super) fn box_enum_payload_if_needed(&mut self, value: VReg, arg_ty: TypeId) -> MirLowerResult<VReg> {
         if arg_ty == TypeId::BOOL {
             // Enum payloads hold RuntimeValues. Boolean true is SPECIAL_TRUE
             // (11), not the tagged integer 1 (8) produced by BoxInt.
@@ -265,38 +279,183 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
+    /// Declared parameter types of `callee` (excluding `self`): the
+    /// `HirType::Function` signature when the callee expression carries one,
+    /// otherwise the per-module table filled from `HirFunction::params`.
+    fn callee_param_types(&self, callee: &HirExpr) -> Vec<TypeId> {
+        if let Some(registry) = self.type_registry {
+            if let Some(HirType::Function { params, .. }) = registry.get(callee.ty) {
+                return params.clone();
+            }
+        }
+        if let HirExprKind::Global(name) = &callee.kind {
+            return self.function_param_types.get(name).cloned().unwrap_or_default();
+        }
+        Vec::new()
+    }
+
     pub(super) fn box_args_for_any_params(
         &mut self,
         callee: &HirExpr,
         args: &[HirExpr],
         arg_regs: &mut [VReg],
     ) -> MirLowerResult<()> {
-        let params = if let Some(registry) = self.type_registry {
-            if let Some(HirType::Function { params, .. }) = registry.get(callee.ty) {
-                params.clone()
-            } else if let HirExprKind::Global(name) = &callee.kind {
-                self.function_param_types.get(name).cloned().unwrap_or_default()
-            } else {
-                Vec::new()
-            }
-        } else if let HirExprKind::Global(name) = &callee.kind {
-            self.function_param_types.get(name).cloned().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let params = self.callee_param_types(callee);
+        self.coerce_args_for_param_slots(&params, args, arg_regs, true)
+    }
+
+    /// A literal that HIR typed `ANY` is still a RAW machine word (it is what
+    /// `box_arg_for_any_param` boxes on the way INTO a tagged slot), so it must
+    /// never be fed to the tagged->raw decoders.
+    pub(super) fn is_raw_literal_typed_any(arg: &HirExpr) -> bool {
+        arg.ty == TypeId::ANY
+            && matches!(
+                arg.kind,
+                HirExprKind::Integer(_) | HirExprKind::Float(_) | HirExprKind::Bool(_) | HirExprKind::Nil
+            )
+    }
+
+    /// Make every argument match the representation of its DECLARED parameter
+    /// slot, in both directions:
+    ///
+    /// - raw scalar -> tagged slot (`any`, `T`, `i64?`): box, as before;
+    /// - tagged value -> raw scalar slot (`i64`, `f64`, `u64`, ...): UNBOX.
+    ///
+    /// The second direction was missing. A generic type parameter `T` erases
+    /// to `TypeId::ANY` (hir/lower/type_resolver.rs), so a read of an erased
+    /// struct field (`Box<i64>.value`), a generic function's result
+    /// (`id(7)`), or an untyped local holding either is a TAGGED word. `val`
+    /// bindings, `return` and `if` merges already decode such a word into a
+    /// raw slot (`unbox_scalar_for_raw_slot`), but a CALL argument did not, so
+    /// `fn double_it(x: i64)` received `21 << 3 == 168` for `double_it(a.value)`
+    /// and returned 336 — while `print "{a.value}"` (an ANY consumer) and
+    /// `double_it(21)` (a raw literal) were both right.
+    /// Bug: doc/08_tracking/bug/erased_field_arg_into_scalar_param_tagged_seed_2026-10-31.md
+    ///
+    /// `bool` parameters follow the interpreter's presence rule for a dynamic
+    /// argument (nil -> false, present -> true, a real bool kept), see
+    /// `present_any_as_bool_arg`. Direct calls apply it in
+    /// `coerce_args_for_bool_params` BEFORE this pass and say so with
+    /// `bool_params_already_decoded`, so the already-raw result is not
+    /// decoded twice; method calls have no such pass and decode here.
+    pub(super) fn coerce_args_for_param_slots(
+        &mut self,
+        params: &[TypeId],
+        args: &[HirExpr],
+        arg_regs: &mut [VReg],
+        bool_params_already_decoded: bool,
+    ) -> MirLowerResult<()> {
         if params.is_empty() {
             return Ok(());
         }
         for (i, arg_reg) in arg_regs.iter_mut().enumerate() {
+            let Some(param_ty) = params.get(i).copied() else {
+                continue;
+            };
+            let Some(arg_expr) = args.get(i) else {
+                continue;
+            };
+            // `takef(3)` / `takef(-3)` into `x: f64` passes a float constant.
+            let float_reg = self.float_slot_from_int_literal(param_ty, arg_expr, *arg_reg)?;
+            if float_reg != *arg_reg {
+                *arg_reg = float_reg;
+                continue;
+            }
             // `Any?` params are tagged-value slots too -- see
             // `slot_holds_tagged_value`.
-            if params.get(i).copied().is_some_and(|p| self.slot_holds_tagged_value(p)) {
-                if let Some(arg_expr) = args.get(i) {
-                    *arg_reg = self.box_arg_for_any_param(*arg_reg, arg_expr)?;
-                }
+            if self.slot_holds_tagged_value(param_ty) {
+                *arg_reg = self.box_arg_for_any_param(*arg_reg, arg_expr)?;
+                continue;
             }
+            if !Self::is_raw_scalar_type(param_ty)
+                || !self.slot_holds_tagged_value(arg_expr.ty)
+                || Self::is_raw_literal_typed_any(arg_expr)
+            {
+                continue;
+            }
+            if param_ty == TypeId::BOOL {
+                if !bool_params_already_decoded && arg_expr.ty == TypeId::ANY {
+                    *arg_reg = self.present_any_as_bool_arg(*arg_reg)?;
+                }
+                continue;
+            }
+            *arg_reg = self.unbox_scalar_for_raw_slot(param_ty, arg_expr.ty, *arg_reg)?;
         }
         Ok(())
+    }
+
+    /// Decode a DYNAMIC (`any`-typed) argument bound to a declared `bool`
+    /// parameter with the interpreter's rule (`present_value_as_bool_arg`):
+    /// a real bool keeps its value, everything else is its presence.
+    ///
+    ///     if rt_value_is_bool(v): rt_value_truthy(v) else: rt_is_some(v)
+    ///
+    /// Plain `rt_is_some` mapped a TAGGED `false` (a present, non-nil word, e.g.
+    /// `Box<bool>(value: false).value`) to `true`.
+    fn present_any_as_bool_arg(&mut self, value: VReg) -> MirLowerResult<VReg> {
+        use crate::mir::effects::LocalKind;
+        use crate::mir::function::MirLocal;
+
+        let is_bool = self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                dest: Some(dest),
+                target: CallTarget::from_name("rt_value_is_bool"),
+                args: vec![value],
+            });
+            dest
+        })?;
+        let (slot_addr, then_id, else_id, merge_id) = self.with_func(|func, current_block| {
+            let local_index = func.locals.len();
+            func.locals.push(MirLocal {
+                name: format!("$bool_arg_{}", local_index),
+                ty: TypeId::BOOL,
+                kind: LocalKind::Local,
+                is_ghost: false,
+            });
+            let addr = func.new_vreg();
+            func.block_mut(current_block).unwrap().instructions.push(MirInst::LocalAddr {
+                dest: addr,
+                local_index,
+            });
+            let then_id = func.new_block();
+            let else_id = func.new_block();
+            let merge_id = func.new_block();
+            func.block_mut(current_block).unwrap().terminator = crate::mir::Terminator::Branch {
+                cond: is_bool,
+                then_block: then_id,
+                else_block: else_id,
+            };
+            (addr, then_id, else_id, merge_id)
+        })?;
+        for (block_id, decoder) in [(then_id, "rt_value_truthy"), (else_id, "rt_is_some")] {
+            self.set_current_block(block_id)?;
+            self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: CallTarget::from_name(decoder),
+                    args: vec![value],
+                });
+                block.instructions.push(MirInst::Store {
+                    addr: slot_addr,
+                    value: dest,
+                    ty: TypeId::BOOL,
+                });
+            })?;
+            self.finalize_block_jump(merge_id)?;
+        }
+        self.set_current_block(merge_id)?;
+        self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            func.block_mut(current_block).unwrap().instructions.push(MirInst::Load {
+                dest,
+                addr: slot_addr,
+                ty: TypeId::BOOL,
+            });
+            dest
+        })
     }
 
     /// `&mut scalar_local` passed to an `extern fn` is an out slot: the foreign
@@ -359,19 +518,7 @@ impl<'a> MirLowerer<'a> {
         args: &[HirExpr],
         arg_regs: &mut [VReg],
     ) -> MirLowerResult<()> {
-        let params = if let Some(registry) = self.type_registry {
-            if let Some(HirType::Function { params, .. }) = registry.get(callee.ty) {
-                params.clone()
-            } else if let HirExprKind::Global(name) = &callee.kind {
-                self.function_param_types.get(name).cloned().unwrap_or_default()
-            } else {
-                Vec::new()
-            }
-        } else if let HirExprKind::Global(name) = &callee.kind {
-            self.function_param_types.get(name).cloned().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let params = self.callee_param_types(callee);
 
         for (index, arg_reg) in arg_regs.iter_mut().enumerate() {
             if params.get(index) != Some(&TypeId::BOOL) {
@@ -386,11 +533,15 @@ impl<'a> MirLowerer<'a> {
 
             *arg_reg = if arg.ty == TypeId::NIL || matches!(arg.kind, HirExprKind::Nil) {
                 self.lower_bool_expr(false)?
-            } else if arg.ty == TypeId::ANY
-                || self
-                    .type_registry
-                    .and_then(|registry| registry.get(arg.ty))
-                    .is_some_and(|ty| matches!(ty, HirType::Pointer { .. }))
+            } else if arg.ty == TypeId::ANY {
+                // A dynamic word may BE a tagged bool (an erased `T` field or
+                // generic result holding `false`); presence alone read it as
+                // true. Keep a real bool, apply the presence rule to the rest.
+                self.present_any_as_bool_arg(*arg_reg)?
+            } else if self
+                .type_registry
+                .and_then(|registry| registry.get(arg.ty))
+                .is_some_and(|ty| matches!(ty, HirType::Pointer { .. }))
             {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
@@ -409,7 +560,7 @@ impl<'a> MirLowerer<'a> {
         Ok(())
     }
 
-    pub(super) fn lower_call_expr(&mut self, callee: &HirExpr, args: &[HirExpr]) -> MirLowerResult<VReg> {
+    pub(super) fn lower_call_expr(&mut self, callee: &HirExpr, args: &[HirExpr], expr_ty: TypeId) -> MirLowerResult<VReg> {
         if let HirExprKind::Global(name) = &callee.kind {
             if let Some((receiver_name, method_name)) = name.rsplit_once('.') {
                 if matches!(method_name, "push" | "append" | "len") {
@@ -515,7 +666,11 @@ impl<'a> MirLowerer<'a> {
                 self.coerce_args_for_bool_params(callee, args, &mut arg_regs)?;
                 self.box_args_for_any_params(callee, args, &mut arg_regs)?;
                 let callee_reg = self.lower_global_expr(name.clone(), callee.ty)?;
-                let (param_types, return_type) = self.function_signature_for_callee(callee, args);
+                let (param_types, return_type, signature_declared) = self.function_signature_for_callee(callee, args);
+                // The arguments above were coerced with `callee_param_types`,
+                // which is the declared function type only when it agrees
+                // with the signature recorded here.
+                let signature_declared = signature_declared && self.callee_param_types(callee) == param_types;
                 return self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
@@ -526,6 +681,7 @@ impl<'a> MirLowerer<'a> {
                         return_type,
                         args: arg_regs,
                         effect: crate::mir::effects::Effect::Io,
+                        signature_declared,
                     });
                     dest
                 });
@@ -570,10 +726,13 @@ impl<'a> MirLowerer<'a> {
                         }
                         "is_ok" | "is_err" => {
                             if let Some(receiver) = receiver {
+                                let checked = if variant_name == "is_ok" { "Ok" } else { "Err" };
                                 let expected = HirExpr {
-                                    kind: HirExprKind::Integer(Self::enum_variant_discriminant(
-                                        if variant_name == "is_ok" { "Ok" } else { "Err" },
-                                    )),
+                                    kind: HirExprKind::Integer(i64::from(self.owned_variant_discriminant(
+                                        enum_name,
+                                        checked,
+                                        receiver.ty,
+                                    ))),
                                     ty: TypeId::I64,
                                 };
                                 let expected_enum_id = HirExpr {
@@ -685,6 +844,7 @@ impl<'a> MirLowerer<'a> {
                         || self.available_functions.contains(name.as_str()));
 
                 if is_enum && !is_declared_static_fn && !arg_regs.is_empty() {
+                    let discriminant = self.owned_variant_discriminant(enum_name, variant_name, callee.ty);
                     // Single-arg variants store the argument directly as the
                     // enum payload. Primitive payloads still need runtime
                     // boxing, the same as multi-arg payload array entries.
@@ -699,9 +859,10 @@ impl<'a> MirLowerer<'a> {
                                 | TypeId::U8
                                 | TypeId::U16
                                 | TypeId::U32
-                                | TypeId::BOOL
                         );
-                        if arg_ty == TypeId::U64 {
+                        if arg_ty == TypeId::BOOL {
+                            self.box_scalar_for_tagged_slot(TypeId::ANY, arg_ty, arg_regs[0])?
+                        } else if arg_ty == TypeId::U64 {
                             self.box_u64_runtime_value(arg_regs[0])?
                         } else if needs_box {
                             self.with_func(|func, current_block| {
@@ -739,10 +900,10 @@ impl<'a> MirLowerer<'a> {
                             });
                             dest
                         })?;
-                        // Push each arg into the array. `rt_array_push` (per its
-                        // runtime comment) expects values to arrive *tagged*; for
-                        // integer-typed args we must insert MirInst::BoxInt first,
-                        // mirroring what regular `arr.push(int)` lowering does.
+                        // Push each arg into the array. `rt_array_push` expects
+                        // tagged values. Integer args use BoxInt; bool args use
+                        // rt_value_bool because bool has dedicated true/false
+                        // tags and is not BoxInt-compatible.
                         // Without this, integer enum fields are stored untagged,
                         // and destructuring later applies DECODE_INT to a raw int,
                         // silently zeroing the field. See
@@ -758,7 +919,6 @@ impl<'a> MirLowerer<'a> {
                                     | TypeId::U8
                                     | TypeId::U16
                                     | TypeId::U32
-                                    | TypeId::BOOL
                             );
                             // Float payloads need BoxFloat (lossless heap box):
                             // a raw double stored untagged loses its low 3
@@ -768,7 +928,9 @@ impl<'a> MirLowerer<'a> {
                             // lowering_expr_method.rs; see
                             // doc/08_tracking/bug/seed_f64_array_element_precision_mask_2026-07-19.md.
                             let needs_float_box = matches!(arg_ty, TypeId::F32 | TypeId::F64);
-                            let push_arg = if arg_ty == TypeId::U64 {
+                            let push_arg = if arg_ty == TypeId::BOOL {
+                                self.box_scalar_for_tagged_slot(TypeId::ANY, arg_ty, *arg)?
+                            } else if arg_ty == TypeId::U64 {
                                 self.box_u64_runtime_value(*arg)?
                             } else if needs_box || needs_float_box {
                                 self.with_func(|func, current_block| {
@@ -808,12 +970,14 @@ impl<'a> MirLowerer<'a> {
                             dest,
                             enum_name: enum_name.to_string(),
                             variant_name: variant_name.to_string(),
+                            discriminant,
                             payload: payload_reg,
                         });
                         dest
                     });
                 }
                 if is_enum && !is_declared_static_fn {
+                    let discriminant = self.owned_variant_discriminant(enum_name, variant_name, callee.ty);
                     return self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
@@ -821,6 +985,7 @@ impl<'a> MirLowerer<'a> {
                             dest,
                             enum_name: enum_name.to_string(),
                             variant_name: variant_name.to_string(),
+                            discriminant,
                         });
                         dest
                     });
@@ -843,30 +1008,52 @@ impl<'a> MirLowerer<'a> {
             // `private_dup_overloads`): resolve this call site to the variant
             // whose parameter types exactly match the argument types. No exact
             // match: prefer an extern decl of the same name (the local defs
-            // demonstrably have different signatures), else the last local
-            // definition — the previous last-write-wins behavior.
-            let dup_resolved: Option<String> = self.private_dup_overloads.get(name.as_str()).and_then(|candidates| {
-                let arg_tys: Vec<TypeId> = args.iter().map(|a| a.ty).collect();
-                let exact = candidates.iter().find(|(param_tys, _)| *param_tys == arg_tys);
-                // No exact type match (args may have inferred as Any): if the
-                // arity singles out one candidate, that is still unambiguous.
-                let by_arity = || {
-                    let mut same_arity = candidates
-                        .iter()
-                        .filter(|(param_tys, _)| param_tys.len() == arg_tys.len());
-                    match (same_arity.next(), same_arity.next()) {
-                        (Some(only), None) => Some(only),
-                        _ => None,
+            // demonstrably have different signatures). Otherwise the call is
+            // AMBIGUOUS and a compile error (owner decision 2026-11-09, bug
+            // jit_co_compiled_definition_ambiguity_debt_2026-09-15) -- it used
+            // to fall back to the LAST local definition, the silent
+            // wrong-dispatch the record documents.
+            let dup_resolved: Option<String> = match self.private_dup_overloads.get(name.as_str()) {
+                None => None,
+                Some(candidates) => {
+                    let arg_tys: Vec<TypeId> = args.iter().map(|a| a.ty).collect();
+                    let exact = candidates.iter().find(|(param_tys, _)| *param_tys == arg_tys);
+                    // No exact type match (args may have inferred as Any): if the
+                    // arity singles out one candidate, that is still unambiguous.
+                    let by_arity = || {
+                        let mut same_arity = candidates
+                            .iter()
+                            .filter(|(param_tys, _)| param_tys.len() == arg_tys.len());
+                        match (same_arity.next(), same_arity.next()) {
+                            (Some(only), None) => Some(only),
+                            _ => None,
+                        }
+                    };
+                    match exact.or_else(by_arity) {
+                        Some((_, mangled)) => Some(mangled.clone()),
+                        None if self.extern_fn_name_set.contains(name.as_str()) => None, // bare name → extern import
+                        None => {
+                            let render = |tys: &[TypeId]| {
+                                tys.iter().map(|t| format!("{:?}", t)).collect::<Vec<_>>().join(", ")
+                            };
+                            return Err(MirLowerError::Unsupported(format!(
+                                "ambiguous call to `{name}`: {} co-compiled definitions with differing \
+                                 signatures ({}) and the argument types ({}) select none of them. Qualify \
+                                 the call (annotate the arguments or import the intended definition \
+                                 selectively) or rename the duplicate definitions to unique names. \
+                                 [compiler_cross_module_private_symbol_collision]",
+                                candidates.len(),
+                                candidates
+                                    .iter()
+                                    .map(|(tys, _)| format!("({})", render(tys)))
+                                    .collect::<Vec<_>>()
+                                    .join(" vs "),
+                                render(&arg_tys),
+                            )));
+                        }
                     }
-                };
-                exact.or_else(by_arity).map(|(_, mangled)| mangled.clone()).or_else(|| {
-                    if self.extern_fn_name_set.contains(name.as_str()) {
-                        None // keep bare name → extern import
-                    } else {
-                        candidates.last().map(|(_, mangled)| mangled.clone())
-                    }
-                })
-            });
+                }
+            };
             let call_target_name = if let Some(mangled) = dup_resolved.as_deref() {
                 mangled
             } else if name == "rt_array_new_with_cap" && self.call_returns_array_of(callee, TypeId::U64) {
@@ -874,7 +1061,8 @@ impl<'a> MirLowerer<'a> {
             } else {
                 name
             };
-            let call_target = CallTarget::from_name(call_target_name);
+            let specialized_call_target = self.specialize_named_call(call_target_name, args, Some(expr_ty), &[]);
+            let call_target = CallTarget::from_name(&specialized_call_target);
             self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
@@ -889,7 +1077,9 @@ impl<'a> MirLowerer<'a> {
             // Indirect call through closure/function pointer
             let callee_reg = self.lower_expr(callee)?;
 
-            let (param_types, return_type) = self.function_signature_for_callee(callee, args);
+            let (param_types, return_type, signature_declared) = self.function_signature_for_callee(callee, args);
+            self.coerce_args_for_bool_params(callee, args, &mut arg_regs)?;
+            self.coerce_args_for_param_slots(&param_types, args, &mut arg_regs, true)?;
 
             self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
@@ -901,6 +1091,7 @@ impl<'a> MirLowerer<'a> {
                     return_type,
                     args: arg_regs,
                     effect: crate::mir::effects::Effect::Io,
+                    signature_declared,
                 });
                 dest
             })

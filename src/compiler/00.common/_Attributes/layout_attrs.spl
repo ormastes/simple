@@ -36,7 +36,7 @@ use compiler.common.diagnostics.span.{Span}
 # ============================================================================
 
 # Import shared helpers from attributes.spl
-use compiler.common.attributes.{NamedArg, extract_named_args, get_named_string_arg, get_named_int_arg, get_named_int_array_arg}
+use compiler.common.attributes.{NamedArg, extract_named_args, get_named_string_arg, get_named_int_arg, get_named_int_array_arg, parse_embed_attr, apply_embed_layout_attr_v1, _decl_attrs_can_cache_permanent_v1}
 
 # ============================================================================
 # Volatile Attribute Types
@@ -47,7 +47,7 @@ struct TaskPolicyValidation:
     diagnostics: [TaskPolicyDiagnostic]
     has_errors: bool
 
-fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
+pub fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
     """Extract @task attributes from a list of attributes."""
     var found = false
     var instances = 1
@@ -76,7 +76,7 @@ fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
             val named_args = extract_named_args(attr)
             if named_args.has("instances"):
                 val v = extract_int_arg(named_args["instances"])
-                if v != nil:
+                if v.is_some():
                     instances = v ?? 1
             if named_args.has("group"):
                 val g = extract_string_arg(named_args["group"])
@@ -90,7 +90,7 @@ fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
                     frame_value = frame_parsed.unwrap()
             if named_args.has("wait_nodes"):
                 val w = extract_int_arg(named_args["wait_nodes"])
-                if w != nil:
+                if w.is_some():
                     wait_nodes = w ?? 0
             if named_args.has("policy"):
                 policy = extract_string_arg(named_args["policy"])
@@ -133,23 +133,23 @@ fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
                     case _: ()
 
     if not found:
-        return nil
+        return None
 
     TaskAttr(
         instances: instances,
-        group: if has_group: Some(group_value) else: nil,
-        frame: if has_frame: Some(frame_value) else: nil,
+        group: if has_group: Some(group_value) else: None,
+        frame: if has_frame: Some(frame_value) else: None,
         wait_nodes: wait_nodes,
         policy: policy,
-        weight: if has_weight: Some(weight_value) else: nil,
-        priority: if has_priority: Some(priority_value) else: nil,
-        latency_hint: if has_latency_hint: Some(latency_hint_value) else: nil,
-        runtime_ns: if has_runtime_ns: Some(runtime_ns_value) else: nil,
-        period_ns: if has_period_ns: Some(period_ns_value) else: nil,
-        deadline_ns: if has_deadline_ns: Some(deadline_ns_value) else: nil
+        weight: if has_weight: Some(weight_value) else: None,
+        priority: if has_priority: Some(priority_value) else: None,
+        latency_hint: if has_latency_hint: Some(latency_hint_value) else: None,
+        runtime_ns: if has_runtime_ns: Some(runtime_ns_value) else: None,
+        period_ns: if has_period_ns: Some(period_ns_value) else: None,
+        deadline_ns: if has_deadline_ns: Some(deadline_ns_value) else: None
     )
 
-fn validate_task_policy_attr(attr: TaskAttr, runtime_family: text, effects: [text]) -> TaskPolicyValidation:
+pub fn validate_task_policy_attr(attr: TaskAttr, runtime_family: text, effects: [text]) -> TaskPolicyValidation:
     """Validate @task scheduler policy against runtime family/effects.
 
     Fair/background policies are valid in any runtime family. RT and deadline
@@ -183,7 +183,7 @@ fn validate_task_policy_attr(attr: TaskAttr, runtime_family: text, effects: [tex
             has_errors = true
 
     if is_deadline:
-        if attr.runtime_ns == nil or attr.period_ns == nil or attr.deadline_ns == nil:
+        if attr.runtime_ns.is_none() or attr.period_ns.is_none() or attr.deadline_ns.is_none():
             diagnostics.push(TaskPolicyDiagnostic(
                 level: "error",
                 message: "@task(policy='deadline') requires runtime, period, and deadline parameters"
@@ -230,14 +230,34 @@ fn validate_task_policy_attr(attr: TaskAttr, runtime_family: text, effects: [tex
 # Layout Attribute Parsing
 # ============================================================================
 
-fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
+var _layout_attr_absent_cached: LayoutAttr? = None
+
+pub fn layout_attr_absent_shared_v1() -> LayoutAttr:
+    if val cached = _layout_attr_absent_cached:
+        return cached
+    val fresh = LayoutAttr(
+        layout_kind: TypeLayoutKind.Simple,
+        has_explicit_align: false,
+        explicit_align: 0,
+        is_packed: false,
+        is_preserve_order: false,
+        is_compactq: false
+    )
+    if _decl_attrs_can_cache_permanent_v1():
+        _layout_attr_absent_cached = Some(fresh)
+    fresh
+
+pub fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
     """Extract layout attributes from a list of attributes."""
+    if attrs.len() == 0:
+        return layout_attr_absent_shared_v1()
     var layout_kind = TypeLayoutKind.Simple
     var has_explicit_align = false
     var explicit_align_value: i64 = 0
     var is_packed = false
     var is_preserve_order = false
     var is_compactq = false
+    var has_embed = false
 
     for attr in attrs:
         if attr.name == "repr":
@@ -264,16 +284,22 @@ fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
             is_preserve_order = true
         elif attr.name == "compactq":
             is_compactq = true
+        elif attr.name == "embed":
+            has_embed = true
 
-    LayoutAttr(
+    val result = LayoutAttr(
         layout_kind: layout_kind,
-        explicit_align: if has_explicit_align: Some(explicit_align_value) else: nil,
+        has_explicit_align: has_explicit_align,
+        explicit_align: explicit_align_value,
         is_packed: is_packed,
         is_preserve_order: is_preserve_order,
         is_compactq: is_compactq
     )
+    if has_embed:
+        return apply_embed_layout_attr_v1(result, parse_embed_attr(attrs))
+    result
 
-fn parse_platform_attrs(attrs: [Attribute]) -> PlatformParseResult:
+pub fn parse_platform_attrs(attrs: [Attribute]) -> PlatformParseResult:
     """Extract @platform attributes from a list of attributes.
 
     Parses each @platform occurrence into a typed PlatformVariant and
@@ -480,14 +506,14 @@ fn parse_platform_attrs(attrs: [Attribute]) -> PlatformParseResult:
     )
 
 # Extract string value from an expression (for @repr("C"))
-fn extract_string_arg(expr: Expr) -> text:
+pub fn extract_string_arg(expr: Expr) -> text:
     match expr_kind(expr):
         case StringLit(value, _):
             value
         case _:
             ""
 
-fn extract_text_arg(expr: Expr) -> text:
+pub fn extract_text_arg(expr: Expr) -> text:
     match expr_kind(expr):
         case StringLit(value, _):
             value
@@ -500,7 +526,7 @@ fn extract_text_arg(expr: Expr) -> text:
         case _:
             ""
 
-fn extract_int_array_arg(expr: Expr) -> [i64]:
+pub fn extract_int_array_arg(expr: Expr) -> [i64]:
     var out: [i64] = []
     match expr_kind(expr):
         case ArrayLit(items):
@@ -516,7 +542,7 @@ fn extract_int_array_arg(expr: Expr) -> [i64]:
 
 # Extract barriers option from attribute args
 # Handles: @volatile(true), @volatile(barriers: true)
-fn extract_barriers_arg(args: [Expr]) -> bool:
+pub fn extract_barriers_arg(args: [Expr]) -> bool:
     for arg in args:
         # Check for bare true literal: @volatile(true)
         match arg.kind:
@@ -536,15 +562,15 @@ fn extract_barriers_arg(args: [Expr]) -> bool:
     false
 
 # Extract integer value from an expression (for @align(16))
-fn extract_int_arg(expr: Expr) -> i64?:
+pub fn extract_int_arg(expr: Expr) -> i64?:
     match expr_kind(expr):
         case IntLit(value):
             Some(value)
         case _:
-            nil
+            None
 
 # Check if a number is a power of 2
-fn is_power_of_two(n: i64) -> bool:
+pub fn is_power_of_two(n: i64) -> bool:
     """Check if n is a power of 2.
 
     Uses bitwise trick: n & (n-1) == 0 for powers of 2.
@@ -552,7 +578,7 @@ fn is_power_of_two(n: i64) -> bool:
     n > 0 and (n & (n - 1)) == 0
 
 # Validate alignment value
-fn validate_alignment(align: i64, span: Span) -> Result<i64, text>:
+pub fn validate_alignment(align: i64, span: Span) -> Result<i64, text>:
     """Validate that alignment is a positive power of 2.
 
     Returns the alignment if valid, or an error message.

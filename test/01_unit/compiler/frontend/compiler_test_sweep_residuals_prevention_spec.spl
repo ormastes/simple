@@ -1,0 +1,59 @@
+"""
+## Purpose and audience
+Prevention guard for `#4654` / `#5385` compiler test sweep residuals covering core parser error recovery and `@cfg` preprocessing, `15.blocks` `BlockDefinition` trait defaults, and `VhdlBackend` creation/target support.
+Audience: compiler frontend, blocks, and backend engineers maintaining `src/compiler/10.frontend/core/`, `15.blocks/`, and `70.backend/backend/vhdl_backend.spl`.
+"""
+# @req: REQ-COMPILER-SWEEP-4654-5385 — core parser recovery, BlockDefinition self-contained defaults, and VhdlBackend surface stay coherent.
+
+use std.spec.*
+use compiler.core.parser.{parse_module, parser_has_errors, parser_get_errors, preprocess_conditionals}
+use compiler.blocks.definition.{BlockDefinition, block_default_description_v1, block_default_examples_v1}
+use compiler.blocks.context.{BlockContext, BlockError}
+use compiler.blocks.value.{BlockValue}
+use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_default_options}
+use compiler.backend.backend.vhdl_backend.{VhdlBackend}
+
+struct SweepGuardBlock:
+    tag: text
+
+impl BlockDefinition for SweepGuardBlock:
+    fn kind() -> text:
+        "sweep_guard"
+
+    fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+        Err(BlockError.parse("unused"))
+
+describe "compiler test sweep residuals prevention (#4654, #5385)":
+    it "resets parser errors across parses and strips false conditional blocks cleanly":
+        step("Parse malformed module, then parse valid module and verify errors clear")
+        parse_module("fn broken(:\n    1\n", "broken.spl")
+        expect(parser_has_errors()).to_equal(true)
+        expect(parser_get_errors().len()).to_be_greater_than(0)
+
+        parse_module("fn healthy(x: i64) -> i64:\n    x + 1\n", "healthy.spl")
+        expect(parser_has_errors()).to_equal(false)
+
+        val pp = preprocess_conditionals(
+            "@cfg(os = \"plan9\")\n" +
+            "use missing.mod.{{\n" +
+            "    Item\n" +
+            "}\n" +
+            "fn kept() -> i64:\n" +
+            "    7\n"
+        )
+        expect(pp).to_contain("fn kept() -> i64:")
+        expect(pp.contains("Item")).to_equal(false)
+
+    it "keeps BlockDefinition trait defaults self-contained alongside exported block_default helpers":
+        step("Instantiate minimal BlockDefinition impl and check default methods vs helpers")
+        val blk = SweepGuardBlock(tag: "ok")
+        expect(blk.kind()).to_equal("sweep_guard")
+        expect(blk.description()).to_equal(block_default_description_v1())
+        expect(blk.examples().len()).to_equal(block_default_examples_v1().len())
+
+    it "keeps VhdlBackend creation and target support intact":
+        step("Create VhdlBackend for CodegenTarget.Riscv32 and verify backend name and target check")
+        val backend = VhdlBackend.create(CodegenTarget.Riscv32, compileoptions_default_options())
+        expect(backend.backend_name()).to_equal("vhdl")
+        expect(backend.supports_target(CodegenTarget.Riscv32)).to_equal(true)
+        expect(backend.supports_target(CodegenTarget.X86_64)).to_equal(true)

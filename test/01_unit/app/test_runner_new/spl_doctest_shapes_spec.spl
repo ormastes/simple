@@ -1,0 +1,124 @@
+"""Comment doctest extraction: example shapes, attachment, line numbers and
+what must NOT be extracted.
+
+# @req REQ-TESTRUNNER-COMMENT-KIND
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.test_runner.test_executor_parsing.{_tp_get_temp_dir}
+use std.test_runner.doctest_runner.{extract_doctests, Doctest}
+
+fn extract(source: text) -> [Doctest]:
+    val dir = secure_temp_dir(_tp_get_temp_dir(), "spl-doctest-shape-").unwrap().replace("\\", "/")
+    val path = dir + "/sample.spl"
+    file_write(path, source)
+    extract_doctests(path)
+
+describe "multi-line examples":
+    it "joins every body line with newlines":
+        val found = extract("## ```simple\n## val a = 1\n## val b = 2\n## val c = a + b\n## ```\n")
+        expect(found[0].code).to_equal("val a = 1\nval b = 2\nval c = a + b")
+    it "keeps a blank body line":
+        val found = extract("## ```simple\n## val a = 1\n##\n## val b = 2\n## ```\n")
+        expect(found[0].code).to_equal("val a = 1\n\nval b = 2")
+    it "keeps nested block indentation":
+        val found = extract("## ```simple\n## fn g(n: i64) -> i64:\n##     if n > 0:\n##         n\n##     else:\n##         0\n## ```\n")
+        expect(found[0].code).to_equal("fn g(n: i64) -> i64:\n    if n > 0:\n        n\n    else:\n        0")
+    it "gives two separate examples in one comment block":
+        val found = extract("## ```simple\n## val a = 1\n## ```\n## prose between\n## ```simple\n## val b = 2\n## ```\n")
+        expect(found.len()).to_equal(2)
+        expect(found[0].code).to_equal("val a = 1")
+        expect(found[1].code).to_equal("val b = 2")
+
+describe "comments without examples":
+    it "yields nothing for a prose-only doc comment":
+        val found = extract("## Adds numbers.\n## Returns the sum.\nfn add(a: i64, b: i64) -> i64:\n    a + b\n")
+        expect(found.len()).to_equal(0)
+    it "yields nothing for a file with no comments":
+        val found = extract("fn add(a: i64, b: i64) -> i64:\n    a + b\n")
+        expect(found.len()).to_equal(0)
+    it "yields nothing for an empty file":
+        val found = extract("")
+        expect(found.len()).to_equal(0)
+    it "yields nothing for an empty fence":
+        val found = extract("## ```simple\n## ```\n")
+        expect(found.len()).to_equal(0)
+    it "yields nothing for an unterminated fence at end of file":
+        val found = extract("## ```simple\n## val a = 1\n")
+        expect(found.len()).to_equal(0)
+    it "discards an open fence when a code line interrupts it":
+        val found = extract("## ```simple\n## val a = 1\nfn f():\n    1\n## ```\n")
+        expect(found.len()).to_equal(0)
+
+describe "ordinary comments are not examples":
+    it "ignores code in a plain comment without a fence":
+        val found = extract("# val a = 1\n# print a\nfn f():\n    1\n")
+        expect(found.len()).to_equal(0)
+    it "ignores a trailing comment after code":
+        val found = extract("val a = 1  # ```simple\nval b = 2  # ```\n")
+        expect(found.len()).to_equal(0)
+    it "ignores a fence in a slash-slash comment":
+        val found = extract("// ```simple\n// val a = 1\n// ```\n")
+        expect(found.len()).to_equal(0)
+    it "ignores a fence in a string literal":
+        val found = extract("val s = \"```simple\"\nval t = \"```\"\n")
+        expect(found.len()).to_equal(0)
+
+describe "attachment":
+    it "extracts a module-level example above the first declaration":
+        val found = extract("## Module docs.\n## ```simple\n## val a = 1\n## ```\n\nfn f():\n    1\n")
+        expect(found.len()).to_equal(1)
+    it "extracts a function example":
+        val found = extract("fn f():\n    1\n\n## ```simple\n## val a = f()\n## ```\nfn g():\n    2\n")
+        expect(found.len()).to_equal(1)
+        expect(found[0].code).to_equal("val a = f()")
+    it "extracts a class example":
+        val found = extract("## ```simple\n## val c = C()\n## ```\nclass C:\n    x: i64\n")
+        expect(found.len()).to_equal(1)
+    it "extracts a method example inside a class":
+        val found = extract("class C:\n    x: i64\n\n    ## ```simple\n    ## val c = C(x: 1)\n    ## ```\n    fn m(self):\n        self.x\n")
+        expect(found.len()).to_equal(1)
+        expect(found[0].code).to_equal("val c = C(x: 1)")
+    it "extracts an example with no declaration after it":
+        val found = extract("## ```simple\n## val a = 1\n## ```\n")
+        expect(found.len()).to_equal(1)
+    it "collects examples from several declarations in file order":
+        val found = extract("## ```simple\n## val a = 1\n## ```\nfn f():\n    1\n## ```simple\n## val b = 2\n## ```\nclass C:\n    x: i64\n")
+        expect(found.len()).to_equal(2)
+        expect(found[0].code).to_equal("val a = 1")
+        expect(found[1].code).to_equal("val b = 2")
+
+describe "line numbers":
+    it "is the 1-based line of the opening fence":
+        val found = extract("## ```simple\n## val a = 1\n## ```\n")
+        expect(found[0].line_number).to_equal(1)
+    it "counts lines above the fence":
+        val found = extract("# header\n# more\n\n## ```simple\n## val a = 1\n## ```\n")
+        expect(found[0].line_number).to_equal(4)
+    it "reports each example at its own fence line":
+        val found = extract("## ```simple\n## val a = 1\n## ```\nfn f():\n    1\n## ```simple\n## val b = 2\n## ```\n")
+        expect(found[0].line_number).to_equal(1)
+        expect(found[1].line_number).to_equal(6)
+    it "counts the lines of a preceding multi-line example":
+        val found = extract("/// ```simple\n/// val a = 1\n/// val b = 2\n/// val c = 3\n/// ```\n/// ```simple\n/// val d = 4\n/// ```\n")
+        expect(found[0].line_number).to_equal(1)
+        expect(found[1].line_number).to_equal(6)
+    it "counts correctly for an indented method example":
+        val found = extract("class C:\n    x: i64\n\n    ## ```simple\n    ## val a = 1\n    ## ```\n    fn m(self):\n        1\n")
+        expect(found[0].line_number).to_equal(4)
+
+describe "missing input":
+    it "returns no examples for a file that does not exist":
+        val found = extract_doctests("/nonexistent/path/nothing_here.spl")
+        expect(found.len()).to_equal(0)
+
+describe "docstring blocks":
+    it "extracts a fenced example from a triple-quote docstring":
+        val found = extract("fn f():\n    \"\"\"\n    ```simple\n    val a = 1\n    ```\n    \"\"\"\n    1\n")
+        expect(found.len()).to_equal(1)
+        expect(found[0].code).to_equal("val a = 1")
+    it "extracts a sdoctest section from a docstring":
+        val found = extract("fn f():\n    \"\"\"\n    sdoctest:\n        val a = 1\n        val b = 2\n    \"\"\"\n    1\n")
+        expect(found.len()).to_equal(1)
+        expect(found[0].code).to_equal("val a = 1\nval b = 2")

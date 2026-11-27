@@ -1,0 +1,78 @@
+"""
+## Purpose and audience
+Purpose: Pin `display: flow-root` (CSS Display 3): a block-level box that
+establishes a new block formatting context. Its children's margins do not
+collapse through it, it contains its floats, and it is narrowed to avoid a
+preceding float; otherwise it sizes like `display:block`.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159 headless, `--dump-dom` + getBoundingClientRect(),
+`body{margin:0}`, `.w{width:400px;margin-bottom:10px}`, 2026-11-19). Every
+expected rect is "x y w h" relative to its `.w` container and is quoted in the
+`step` of its example.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-DISPLAY-FLOW-ROOT-001 — `display:flow-root` establishes a block formatting context.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val PRE: text = "<html><head><style>body{{margin:0}} .w{{width:400px;margin-bottom:10px}}</style></head><body>"
+val POST: text = "</body></html>"
+val PAGE_F1: text = PRE + "<div class=w id=f1 style=\"display:flow-root\"><div id=f1a style=\"margin:20px 0;height:10px\"></div></div>" + POST
+val PAGE_G1: text = PRE + "<div class=w id=g1><div id=g1a style=\"margin:20px 0;height:10px\"></div></div>" + POST
+val PAGE_F2: text = PRE + "<div class=w id=f2 style=\"display:flow-root\"><div id=f2a style=\"float:left;width:30px;height:50px\"></div></div>" + POST
+val PAGE_F3: text = PRE + "<div class=w id=f3 style=\"display:flow-root\"><div id=f3a style=\"float:left;width:30px;height:50px\"></div><div id=f3b style=\"height:10px\"></div></div>" + POST
+val PAGE_F4: text = PRE + "<div class=w id=f4><div id=f4a style=\"float:left;width:100px;height:50px\"></div><div id=f4b style=\"display:flow-root;height:20px\"></div></div>" + POST
+val PAGE_F5: text = PRE + "<div class=w id=f5 style=\"display:flow-root;padding:5px;border:2px solid;width:300px\"><div id=f5a style=\"width:50%;height:10px\"></div></div>" + POST
+
+fn _g(page: text, id: text, field: text) -> i32:
+    simple_web_layout_debug_layout_by_id(page, 900, 2000, id, field).to_i32()
+
+fn _size(page: text, id: text) -> text:
+    val w = _g(page, id, "w")
+    val h = _g(page, id, "h")
+    "{w} {h}"
+
+# "x y w h" of `id` relative to its container `box`.
+fn _rect(page: text, id: text, box: text) -> text:
+    val x = _g(page, id, "x") - _g(page, box, "x")
+    val y = _g(page, id, "y") - _g(page, box, "y")
+    val w = _g(page, id, "w")
+    val h = _g(page, id, "h")
+    "{x} {y} {w} {h}"
+
+describe "display:flow-root (Chrome 159)":
+    it "blocks parent-child margin collapse":
+        step("Chrome 159: f1 400 x 50, f1a 0 20 400 10")
+        expect(_size(PAGE_F1, "f1")).to_equal("400 50")
+        expect(_rect(PAGE_F1, "f1a", "f1")).to_equal("0 20 400 10")
+
+    it "a plain block collapses the child margin out":
+        step("Chrome 159: g1 400 x 10, g1a 0 0 400 10")
+        expect(_size(PAGE_G1, "g1")).to_equal("400 10")
+        expect(_rect(PAGE_G1, "g1a", "g1")).to_equal("0 0 400 10")
+
+    it "contains its float":
+        step("Chrome 159: f2 400 x 50, f2a 0 0 30 50")
+        expect(_size(PAGE_F2, "f2")).to_equal("400 50")
+        expect(_rect(PAGE_F2, "f2a", "f2")).to_equal("0 0 30 50")
+
+    it "contains a float followed by an in-flow block":
+        step("Chrome 159: f3 400 x 50, f3a 0 0 30 50, f3b 0 0 400 10")
+        expect(_size(PAGE_F3, "f3")).to_equal("400 50")
+        expect(_rect(PAGE_F3, "f3b", "f3")).to_equal("0 0 400 10")
+
+    it "is narrowed to avoid a preceding float":
+        step("Chrome 159: f4 400 x 20, f4a 0 0 100 50, f4b 100 0 300 20")
+        expect(_size(PAGE_F4, "f4")).to_equal("400 20")
+        expect(_rect(PAGE_F4, "f4b", "f4")).to_equal("100 0 300 20")
+
+    it "sizes padding, border and percent children like a block":
+        step("Chrome 159: f5 314 x 24, f5a 7 7 150 10")
+        expect(_size(PAGE_F5, "f5")).to_equal("314 24")
+        expect(_rect(PAGE_F5, "f5a", "f5")).to_equal("7 7 150 10")

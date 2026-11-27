@@ -1,7 +1,7 @@
 // Core function execution logic
 
-use super::arg_binding::{bind_args, bind_args_with_values, name_callee};
-use super::async_support::{is_async_function, wrap_in_promise};
+use super::arg_binding::{bind_args, bind_args_with_values, bind_args_with_values_named, name_callee};
+use super::async_support::{is_async_function, wrap_async_result};
 use super::macros::*;
 use crate::error::CompileError;
 use crate::interpreter::{
@@ -9,6 +9,77 @@ use crate::interpreter::{
     FUNCTION_MODULE_OWNER, MODULE_ENV_BY_OWNER, MODULE_GLOBALS, owned_global, owned_globals_snapshot, owner_bindings,
     owner_has_globals, seed_owner_globals, set_owned_global, visit_pattern_binding_names,
 };
+
+fn enter_generic_type_bindings(
+    func: &FunctionDef,
+    local_env: &Env,
+    classes: &HashMap<String, Arc<ClassDef>>,
+) -> crate::interpreter::GenericTypeBindingsGuard {
+    let pending = crate::interpreter::take_pending_call_generics();
+    let self_val = local_env.get("self");
+    let self_class_def = self_val
+        .as_ref()
+        .and_then(|v| v.aggregate_class())
+        .and_then(|name| classes.get(name));
+    let pending_class_def = pending
+        .as_ref()
+        .and_then(|p| p.class_name.as_deref())
+        .and_then(|name| classes.get(name));
+    let effective_class_def = self_class_def.or(pending_class_def);
+
+    let has_generic_params = !func.generic_params.is_empty()
+        || !func.type_bindings.is_empty()
+        || pending.is_some()
+        || effective_class_def.is_some_and(|c| !c.generic_params.is_empty());
+
+    if !has_generic_params {
+        return crate::interpreter::GenericTypeBindingsGuard::enter(HashMap::new());
+    }
+
+    let mut bindings: HashMap<String, Type> = func.type_bindings.clone();
+    if let Some(pending) = pending {
+        if let Some(class_args) = pending.class_args {
+            if let Some(class_def) = effective_class_def {
+                for (param, arg_ty) in class_def.generic_params.iter().zip(class_args.into_iter()) {
+                    bindings.insert(param.clone(), arg_ty);
+                }
+            }
+        }
+        if let Some(fn_args) = pending.fn_args {
+            if !func.generic_params.is_empty() {
+                for (param, arg_ty) in func.generic_params.iter().zip(fn_args.into_iter()) {
+                    bindings.insert(param.clone(), arg_ty);
+                }
+            } else if let Some(class_def) = effective_class_def {
+                for (param, arg_ty) in class_def.generic_params.iter().zip(fn_args.into_iter()) {
+                    bindings.entry(param.clone()).or_insert(arg_ty);
+                }
+            }
+        }
+    }
+
+    let mut type_param_names: std::collections::HashSet<String> = func.generic_params.iter().cloned().collect();
+    if let Some(class_def) = effective_class_def {
+        type_param_names.extend(class_def.generic_params.iter().cloned());
+        if let Some(sv) = &self_val {
+            for field in &class_def.fields {
+                if let Some(fval) = sv.aggregate_field(&field.name) {
+                    crate::interpreter::unify_generic_type_value(&field.ty, &fval, &type_param_names, &mut bindings);
+                }
+            }
+        }
+    }
+
+    for param in &func.params {
+        if let Some(param_ty) = &param.ty {
+            if let Some(arg_val) = local_env.get(&param.name) {
+                crate::interpreter::unify_generic_type_value(param_ty, &arg_val, &type_param_names, &mut bindings);
+            }
+        }
+    }
+
+    crate::interpreter::GenericTypeBindingsGuard::enter(bindings)
+}
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
 use simple_parser::ast::{
@@ -23,6 +94,24 @@ use std::time::Instant;
 
 type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
+
+/// Primitive trait methods receive the runtime value directly, like enum
+/// methods. Preserve the selected impl's signed width on the implicit binding
+/// so another trait call on `self` does not collapse back to the i64 impl.
+fn bind_direct_method_self(env: &mut Env, owner: &str, value: Value) {
+    let width = if matches!(&value, Value::Int(_)) {
+        match owner {
+            "i8" => Some(8),
+            "i16" => Some(16),
+            "i32" => Some(32),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    env.insert("self".into(), value);
+    env.set_declared_int_width("self", width);
+}
 
 /// Origin of the value presented to the SFFI v2 return-contract boundary.
 /// Keeping this separate from `Value` prevents fallthrough from first being
@@ -208,6 +297,20 @@ pub(crate) fn publish_and_repoint(env: &mut Env) {
     publish_live_bound_globals(env);
     env.refresh_scope(owned_globals_snapshot());
     env.drop_published_globals();
+    env.mark_published_globals_refreshed();
+}
+
+/// Control-flow frames (if-expression and match arms, `unsafe` blocks, spec
+/// examples) run in a CLONE of `env` and later `copy_back_block_writes` refreshes
+/// `env` from the store, so a callee reached from the clone can update a global
+/// the frame also holds. Publish first, exactly as a call does: the frame then
+/// holds no unpublished write that the refresh could revert, and no copy that
+/// could be published over the callee's newer value. A frame with no global in
+/// its overlay pays one length check.
+pub(crate) fn publish_before_block_clone(env: &mut Env) {
+    if env.nonlocal_overlay_len() != 0 {
+        publish_and_repoint(env);
+    }
 }
 
 /// `SIMPLE_ENV_AUDIT=1`: recompute the `nonlocal_overlay` superset on every
@@ -669,6 +772,11 @@ pub(crate) fn execute_function_body(
     // one `execute_function_body` call, so moving the hook down (and deleting
     // the four upstream copies) preserves the previous counts exactly instead
     // of double-counting the paths that already recorded.
+    // Per-call phase timers (SIMPLE_PERF_COUNTERS=1): everything before the
+    // body's locals are marked, the marking walk, the body, and the restore
+    // epilogue. Off: one atomic load each, no clock read.
+    let body_prelude_start = crate::perf_counters::phase_start();
+    crate::perf_counters::bump(&crate::perf_counters::BODY_CALLS, 1);
     if let Some(cov) = crate::coverage::get_global_coverage() {
         cov.lock().unwrap().record_function_call(&func.name);
     }
@@ -709,6 +817,15 @@ pub(crate) fn execute_function_body(
         }
         saved
     });
+    // Lexical caller for the private-fn call rule: an owned named function is
+    // its own caller (drop any enclosing closure's origin); an owner-less one
+    // (a nested `fn` value) is where it was written, as stamped on the env it
+    // captured. A fresh/flat-path env carries no stamp, so it stays strict.
+    let _closure_origin = if func_owner_module.is_none() {
+        crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(local_env)
+    } else {
+        crate::interpreter::interpreter_module::ClosureOriginGuard::enter(None)
+    };
     // COVERAGE: expression-level decision sites (if-expressions, standalone
     // `and`/`or`) anchor on the function that owns them; follows the same
     // owner rule as CURRENT_EXEC_MODULE (lambdas inherit). Off: no work.
@@ -738,12 +855,30 @@ pub(crate) fn execute_function_body(
     });
 
     for param in &func.params {
+        // An explicitly spelled but untyped self parameter still derives its
+        // type from the selected impl, not from the widthless runtime Int.
+        let implicit_self_width = if param.name == "self" && param.ty.is_none() {
+            local_env.declared_int_width("self")
+        } else {
+            None
+        };
         local_env.mark_local(param.name.clone());
+        // `fn f(x: i32)`: the parameter's declared narrow width is its static
+        // receiver type for `x.m()` trait dispatch (see `CowEnv::declared_int_widths`).
+        if let Some(width) = Env::narrow_signed_width_of(param.ty.as_ref()).or(implicit_self_width) {
+            local_env.set_declared_int_width(&param.name, Some(width));
+        }
+        if param_is_borrow_mut(param) {
+            local_env.insert(crate::interpreter::place::borrow_param_marker(&param.name), Value::Nil);
+        }
     }
 
     // Insert bound arguments into environment
     for (name, val) in bound_args {
-        local_env.insert(name, val);
+        if matches!(val, Value::BorrowMut(_)) {
+            local_env.insert(crate::interpreter::place::borrow_param_marker(&name), val.clone());
+        }
+        local_env.insert(name, unwrap_aggregate_borrow(val));
     }
 
     // Generator function support: set up GENERATOR_YIELDS before execution
@@ -753,10 +888,27 @@ pub(crate) fn execute_function_body(
 
     let synthetic_body = effective_function_body(func);
     let body = synthetic_body.as_ref().unwrap_or(&func.body);
+    crate::perf_counters::phase_end(&crate::perf_counters::BODY_NS_PRELUDE, body_prelude_start);
+    let mark_start = crate::perf_counters::phase_start();
     mark_block_locals(body, local_env);
+    crate::perf_counters::phase_end(&crate::perf_counters::BODY_NS_MARK_LOCALS, mark_start);
 
     // Execute function body - handle result manually to ensure flag restoration
-    let exec_result = exec_block_fn(body, local_env, functions, classes, enums, impl_methods);
+    let _generic_bindings = enter_generic_type_bindings(func, local_env, classes);
+    let _fn_return_guard = crate::interpreter::push_current_fn_return_type(func.return_type.clone());
+    let _expected_target_guard = crate::interpreter::push_expected_target_type(None);
+    let exec_start = crate::perf_counters::phase_start();
+    let exec_result = crate::interpreter::exec_block_fn_with_target(
+        body,
+        local_env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        func.return_type.clone(),
+    );
+    crate::perf_counters::phase_end(&crate::perf_counters::BODY_NS_EXEC_BLOCK, exec_start);
+    let epilogue_start = crate::perf_counters::phase_start();
 
     // ALWAYS restore flags before handling the result to avoid flag leaking on error
     IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = saved_in_immutable_fn);
@@ -898,13 +1050,16 @@ pub(crate) fn execute_function_body(
     // plain Int: `0xFFFF_8000_0000_0000` would compare as negative there.
     let result = crate::interpreter::coerce_to_declared_unsigned(result, func.return_type.as_ref());
 
-    // Wrap in Promise if async and requested
+    // Wrap in a ready future if async and requested. When the program has
+    // the std.async Future class this builds the Future.from_value shape;
+    // otherwise it falls back to the legacy Promise wrap.
     let result = if wrap_async && is_async_function(func) {
-        wrap_in_promise(result)
+        wrap_async_result(result, classes.contains_key("Future"))
     } else {
         result
     };
 
+    crate::perf_counters::phase_end(&crate::perf_counters::BODY_NS_EPILOGUE, epilogue_start);
     Ok(result)
 }
 
@@ -1017,7 +1172,7 @@ pub(crate) fn exec_function_with_values_and_self(
             // Check if this is an enum method (fields contains just "self")
             if fields.len() == 1 && fields.contains_key("self") {
                 // For enum methods, self should be the enum value directly
-                local_env.insert("self".into(), fields.get("self").unwrap().clone());
+                bind_direct_method_self(&mut local_env, class_name, fields.get("self").unwrap().clone());
             } else {
                 // For class methods, self is an Object — Arc::clone is O(1)
                 local_env.insert(
@@ -1082,6 +1237,7 @@ pub(crate) fn exec_function_with_captured_env(
         let mut local_env = captured_env_with_live_globals(func, captured_env);
 
         let self_mode = SelfMode::IncludeSelf;
+        let arg_places = capture_argument_places(args, outer_env, functions, classes, enums, impl_methods);
         let bound_args = bind_args(
             &func.params,
             args,
@@ -1110,9 +1266,12 @@ pub(crate) fn exec_function_with_captured_env(
         local_env.release_scope();
         sync_owned_captured_globals(func, &local_env, outer_env);
         if result.is_ok() {
-            write_back_mutable_arguments(func, args, outer_env, &local_env, classes, self_mode);
+            write_back_mutable_arguments(func, args, &arg_places, outer_env, &local_env, classes, self_mode);
         }
         restore_parked_arguments(&parked, outer_env, &local_env);
+        if result.is_ok() {
+            write_back_borrow_arguments(func, args, outer_env, &local_env, functions, classes, enums, impl_methods, self_mode)?;
+        }
         result
     })
 }
@@ -1176,7 +1335,37 @@ fn is_value_type_struct(v: &Value, classes: &HashMap<String, Arc<ClassDef>>) -> 
 /// once per-call env setup was O(args)). A handle that changed carries the
 /// callee's new container; writing back a value-equal one is observably a
 /// no-op, so identity is the right — and O(1) — test.
-fn merge_shared_collection_fields(caller_val: &mut Value, callee_val: &Value) -> bool {
+/// Enum payloads participate in the same shared-container contract as
+/// struct fields: `DriverInstance.RamFs(d)` binds `d` to the payload struct,
+/// and a container mutation through that binding (`d.fd_table.push(..)`)
+/// must carry back through the variant into the caller's enum value. Same
+/// variant only; scalars inside the payload stay value-copied exactly like
+/// top-level struct fields, and a payload the callee replaced wholesale is
+/// not carried (value semantics for the payload itself).
+pub(crate) fn merge_shared_collection_fields(caller_val: &mut Value, callee_val: &Value) -> bool {
+    if let (
+        Value::Enum {
+            enum_name: caller_name,
+            variant: caller_variant,
+            payload: Some(caller_payload),
+        },
+        Value::Enum {
+            enum_name: callee_name,
+            variant: callee_variant,
+            payload: Some(callee_payload),
+        },
+    ) = (&mut *caller_val, callee_val)
+    {
+        if caller_name != callee_name || caller_variant != callee_variant {
+            return false;
+        }
+        let mut merged = (**caller_payload).clone();
+        if merge_shared_collection_fields(&mut merged, callee_payload) {
+            **caller_payload = merged;
+            return true;
+        }
+        return false;
+    }
     let (
         Value::Object {
             fields: caller_fields, ..
@@ -1332,6 +1521,115 @@ fn trap_self_write(site: &str, func_name: &str, caller_name: &str, value: &Value
     );
 }
 
+/// One navigation step of a field-argument receiver path.
+#[derive(Debug, Clone)]
+enum FieldStep {
+    /// Intermediate or leaf struct/class field.
+    Field(String),
+    /// Literal array index (`obj.items[0]`). ONLY integer literals are
+    /// tracked: a non-literal index expression is never re-evaluated for
+    /// write-back (its side effects would run twice), so arguments through
+    /// one keep their previous no-write-back behavior.
+    Index(i64),
+}
+
+/// Render a step list the way `mut_field_written` keys are compared
+/// (`starts_with` guards): `mounts.[0].driver`.
+fn render_field_steps(steps: &[FieldStep]) -> String {
+    let mut out = String::new();
+    for step in steps {
+        match step {
+            FieldStep::Field(name) => {
+                if !out.is_empty() {
+                    out.push('.');
+                }
+                out.push_str(name);
+            }
+            FieldStep::Index(i) => out.push_str(&format!("[{i}]")),
+        }
+    }
+    out
+}
+
+/// Split a field-argument receiver into its root identifier and the
+/// intermediate steps: `o.h` -> ("o", [Field("h")]), `o` -> ("o", []),
+/// `o.items[0].h` -> ("o", [Field("items"), Index(0)]).
+fn field_receiver_path(receiver: &simple_parser::ast::Expr) -> Option<(String, Vec<FieldStep>)> {
+    match receiver {
+        simple_parser::ast::Expr::Identifier(obj) => Some((obj.clone(), Vec::new())),
+        simple_parser::ast::Expr::FieldAccess { receiver, field } => {
+            let (obj, mut path) = field_receiver_path(receiver)?;
+            path.push(FieldStep::Field(field.clone()));
+            Some((obj, path))
+        }
+        simple_parser::ast::Expr::Index { receiver, index } => {
+            // Literal indices only — see `FieldStep::Index`.
+            let simple_parser::ast::Expr::Integer(idx) = index.as_ref() else {
+                return None;
+            };
+            let (obj, mut path) = field_receiver_path(receiver)?;
+            path.push(FieldStep::Index(*idx));
+            Some((obj, path))
+        }
+        _ => None,
+    }
+}
+
+/// Set `root.<steps...> = new`, copy-on-write along the path. False when the
+/// path does not resolve through objects/arrays.
+fn set_nested_path(root: &mut Value, steps: &[FieldStep], new: Value) -> bool {
+    let Some((head, rest)) = steps.split_first() else {
+        return false;
+    };
+    match (head, root) {
+        (FieldStep::Field(name), Value::Object { fields, .. }) => {
+            if rest.is_empty() {
+                Arc::make_mut(fields).insert(name.clone(), new);
+                true
+            } else {
+                match Arc::make_mut(fields).get_mut(name) {
+                    Some(child) => set_nested_path(child, rest, new),
+                    None => false,
+                }
+            }
+        }
+        // Reference-semantics class on the path (`o.h.items` with `o`/`h`
+        // classes): write into the shared cell so every handle sees it. The
+        // child is cloned out rather than recursed into under the write lock,
+        // so a self-referencing chain cannot deadlock.
+        (FieldStep::Field(name), Value::ClassInstance(instance)) => {
+            if rest.is_empty() {
+                instance.set_field(name.clone(), new);
+                return true;
+            }
+            let Some(mut child) = instance.field(name) else {
+                return false;
+            };
+            if !set_nested_path(&mut child, rest, new) {
+                return false;
+            }
+            if !matches!(child, Value::ClassInstance(_)) {
+                instance.set_field(name.clone(), child);
+            }
+            true
+        }
+        (FieldStep::Index(idx), Value::Array(items)) => {
+            let raw = if *idx < 0 { *idx + items.len() as i64 } else { *idx };
+            if raw < 0 || raw as usize >= items.len() {
+                return false;
+            }
+            let idx = raw as usize;
+            if rest.is_empty() {
+                Arc::make_mut(items)[idx] = new;
+                true
+            } else {
+                set_nested_path(&mut Arc::make_mut(items)[idx], rest, new)
+            }
+        }
+        _ => false,
+    }
+}
+
 fn park_written_back_arguments(
     func: &FunctionDef,
     args: &[Argument],
@@ -1352,8 +1650,19 @@ fn park_written_back_arguments(
         if !outer_env.is_local(caller_name.as_str()) {
             continue;
         }
+        // `f(x.items, x)`: the Field write-back reads `x` from the caller
+        // frame, so a Nil placeholder there would drop the write.
+        let is_field_receiver_root = args.iter().any(|a| match &a.value {
+            simple_parser::ast::Expr::FieldAccess { receiver, .. } => {
+                field_receiver_path(receiver).is_some_and(|(root, _)| root == *caller_name)
+            }
+            _ => false,
+        });
+        if is_field_receiver_root {
+            continue;
+        }
         let parkable = match outer_env.get(caller_name.as_str()) {
-            Some(v @ (Value::Array(_) | Value::Dict(_) | Value::Tuple(_) | Value::Object { .. })) => {
+            Some(v @ (Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Tuple(_) | Value::Object { .. })) => {
                 !is_value_type_struct(v, classes)
             }
             _ => false,
@@ -1390,6 +1699,218 @@ fn restore_parked_arguments(parked: &[ParkedArg], outer_env: &mut Env, local_env
     }
 }
 
+/// Peel every `&mut` layer off a value.
+fn peel_borrow_mut(value: &Value) -> Value {
+    let mut current = value.clone();
+    while let Value::BorrowMut(borrow) = &current {
+        let inner = borrow.inner().clone();
+        current = inner;
+    }
+    current
+}
+
+/// A `&mut` argument to a non-scalar binds as the plain value, so every mutation
+/// form in the callee (`p.f = v`, `p.a.b = v`, `p[i] = v`, `p.push(v)`) works on
+/// it without each one having to know about `Value::BorrowMut`;
+/// `write_back_borrow_arguments` stores the result back into the borrowed place.
+/// A scalar has no projections to write through and keeps its wrapper so that
+/// `*p` stays valid.
+fn unwrap_aggregate_borrow(value: Value) -> Value {
+    if !matches!(value, Value::BorrowMut(_)) {
+        return value;
+    }
+    let peeled = peel_borrow_mut(&value);
+    match peeled {
+        Value::Int(_)
+        | Value::UInt { .. }
+        | Value::Float(_)
+        | Value::Float32(_)
+        | Value::Bool(_)
+        | Value::Str(_)
+        | Value::Symbol(_)
+        | Value::Nil => value,
+        aggregate => aggregate,
+    }
+}
+
+/// True when `param` is declared `&mut T`.
+fn param_is_borrow_mut(param: &simple_parser::ast::Parameter) -> bool {
+    matches!(
+        &param.ty,
+        Some(Type::Pointer {
+            kind: simple_parser::ast::PointerKind::BorrowMut,
+            ..
+        })
+    )
+}
+
+/// Store a callee's final `&mut` parameter value into the place the caller
+/// borrowed: `f(&mut x)`, `f(&mut a.b[i])`, or a bare `f(x)` against a parameter
+/// declared `&mut T`.
+///
+/// The interpreter copies values into a callee (copy-on-write `Arc`s), so a
+/// borrow is modelled as copy-in/copy-out. Unlike the by-value write-back below,
+/// this one deliberately ignores the task #91 value-type exclusion: an explicit
+/// `&mut` is what opts a `struct` out of value semantics. A throwing callee
+/// publishes nothing, matching the by-value write-back's contract.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_back_borrow_arguments(
+    func: &FunctionDef,
+    args: &[Argument],
+    outer_env: &mut Env,
+    local_env: &Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    self_mode: SelfMode,
+) -> Result<(), CompileError> {
+    let is_ref_mut = |arg: &Argument| {
+        matches!(
+            &arg.value,
+            Expr::Unary {
+                op: simple_parser::ast::UnaryOp::RefMut,
+                ..
+            }
+        )
+    };
+    if !args.iter().any(is_ref_mut) && !func.params.iter().any(param_is_borrow_mut) {
+        return Ok(());
+    }
+    let params: Vec<_> = func
+        .params
+        .iter()
+        .filter(|p| !(self_mode == SelfMode::SkipSelf && p.name == METHOD_SELF))
+        .collect();
+    let mut positional_idx = 0usize;
+    for arg in args {
+        if matches!(&arg.value, Expr::Spread(_)) {
+            return Ok(());
+        }
+        let param = match &arg.name {
+            Some(name) => params.iter().find(|p| p.name == name.as_str()),
+            None => {
+                positional_idx += 1;
+                params.get(positional_idx - 1)
+            }
+        };
+        let Some(param) = param.copied() else {
+            continue;
+        };
+        if param.variadic {
+            return Ok(());
+        }
+        let place_expr = match &arg.value {
+            Expr::Unary {
+                op: simple_parser::ast::UnaryOp::RefMut,
+                operand,
+            } => operand.as_ref(),
+            bare if param_is_borrow_mut(param) => bare,
+            _ => continue,
+        };
+        let Some(callee_val) = local_env.get(&param.name) else {
+            continue;
+        };
+        let new_val = peel_borrow_mut(callee_val);
+        // The place the `&mut` expression resolved when it was evaluated.
+        if is_ref_mut(arg) {
+            if let Some(Value::BorrowMut(borrow)) =
+                local_env.get(&crate::interpreter::place::borrow_param_marker(&param.name))
+            {
+                if let Some(place) = borrow.place() {
+                    crate::interpreter::place::write_place(outer_env, place, new_val);
+                    continue;
+                }
+            }
+        }
+        // A caller variable that is itself a live borrow keeps its wrapper.
+        if let Expr::Identifier(name) = place_expr {
+            if let Some(Value::BorrowMut(borrow)) = outer_env.get(name) {
+                *borrow.inner_mut() = new_val;
+                continue;
+            }
+        }
+        match crate::interpreter::place::resolve_place(
+            place_expr, outer_env, functions, classes, enums, impl_methods,
+        )? {
+            Some(place) => {
+                crate::interpreter::place::write_place(outer_env, &place, new_val);
+            }
+            // Not a place (a call result, say): the borrow was of a temporary,
+            // which nothing can observe. A module global not promoted into this
+            // frame is the one identifier case left.
+            None => {
+                if let Expr::Identifier(name) = place_expr {
+                    if MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name)) {
+                        crate::interpreter::interpreter_helpers::sync_flat_global(name, &new_val);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Three-way merge of the final values of an all-`mut` aliased parameter group
+/// against the shared pre-call array handle.
+///
+/// When the SAME caller array reaches two or more `mut` parameters, every
+/// mutation inside the callee copy-on-write-forks its own `Arc` off that
+/// shared handle (the interpreter's mutation paths re-read the binding and
+/// `Arc::make_mut` while any sibling slot still holds a strong ref). The
+/// pre-call handle itself is never parked for a multi-bound caller name, so
+/// `base` here is still the pristine fork point. Each fork is replayed in
+/// argument order:
+///   * ptr-equal to `base` -> the parameter was never mutated; no contribution;
+///   * `base`'s length-or-longer with `base` as an elementwise prefix ->
+///     append-only (push/append/extend/insert-at-end); everything past
+///     `base.len()` is new and is appended to the running result;
+///   * same length as `base` -> in-place slot edits; only the changed slots
+///     overwrite the running result;
+///   * anything else (shrink, or a rewrite that is not a prefix extension) ->
+///     the fork is the newest whole state; last replace wins, matching
+///     shared-storage last-writer semantics.
+///
+/// Returns `None` when no fork contributed (the caller binding is left
+/// untouched, exactly as the per-argument write-back would have). No
+/// synchronization is introduced: this runs on the calling thread after the
+/// callee has returned, and the decision uses only `Arc::ptr_eq` /
+/// elementwise compares — compare-and-swap style handle identity, never a
+/// lock, so concurrent execution semantics are unchanged.
+///
+/// Residual divergence, documented not hidden: a fork cannot record the
+/// interleaving of a sibling's destructive op (pop/remove of a region a
+/// sibling appended), so `push`-then-`pop` mixes across two `mut` aliases may
+/// still differ from the JIT's truly-shared storage. The filed defect class
+/// (append-only and in-place-edit traffic through aliased `mut` params) is
+/// exact.
+fn merge_aliased_mut_array_group(base: &Arc<ArrayData>, forks: &[Value]) -> Option<Vec<Value>> {
+    let base_len = base.len();
+    let mut merged: Vec<Value> = base.to_vec();
+    let mut changed = false;
+    for fork in forks {
+        let Value::Array(fork_arc) = fork else {
+            continue;
+        };
+        if Arc::ptr_eq(fork_arc, base) {
+            continue;
+        }
+        if fork_arc.len() >= base_len && (0..base_len).all(|i| fork_arc[i] == base[i]) {
+            merged.extend(fork_arc[base_len..].iter().cloned());
+        } else if fork_arc.len() == base_len {
+            for i in 0..base_len {
+                if fork_arc[i] != base[i] {
+                    merged[i] = fork_arc[i].clone();
+                }
+            }
+        } else {
+            merged = fork_arc.to_vec();
+        }
+        changed = true;
+    }
+    changed.then_some(merged)
+}
+
 // Bug #19 fix: write back mutable-container parameters to caller's bindings.
 //
 // When a function is called with a simple identifier argument (e.g., `f(a)`)
@@ -1402,9 +1923,32 @@ fn restore_parked_arguments(parked: &[ParkedArg], outer_env: &mut Env, local_env
 //
 // This is only done for identifier arguments and positional one-level field
 // arguments, and only for container types; primitives keep value semantics.
+/// Capture argument places BEFORE `bind_args` runs: the post-call write-back
+/// merges shared containers through these places, and any index expressions
+/// in the argument must resolve at argument-evaluation time, not after the
+/// body ran. Non-place arguments (calls, literals) get `None` and keep their
+/// previous no-write-back behavior.
+#[allow(clippy::too_many_arguments)]
+fn capture_argument_places(
+    args: &[Argument],
+    outer_env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Vec<Option<crate::interpreter::place::Place>> {
+    args.iter()
+        .map(|arg| {
+            crate::interpreter::place::resolve_place(&arg.value, outer_env, functions, classes, enums, impl_methods)
+                .unwrap_or(None)
+        })
+        .collect()
+}
+
 fn write_back_mutable_arguments(
     func: &FunctionDef,
     args: &[Argument],
+    arg_places: &[Option<crate::interpreter::place::Place>],
     outer_env: &mut Env,
     local_env: &Env,
     classes: &HashMap<String, Arc<ClassDef>>,
@@ -1434,7 +1978,77 @@ fn write_back_mutable_arguments(
     // diagnostic and exit code 0. Track the mutated names and never let a
     // non-`mut` parameter clobber one.
     let mut mut_written: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for arg in args {
+    // Same rule for `obj.field` arguments: `f(h.items, h.items)` against
+    // `fn f(mut a, b)` must not let `b`'s stale snapshot revert `a`'s write.
+    let mut mut_field_written: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+
+    // All-`mut` aliased groups (both-aliases-`mut` residual of this bug's doc):
+    // when the SAME caller array binding reaches two or more `mut` parameters,
+    // each body mutation legitimately COW-forks its own `Arc`, and the
+    // per-argument last-wins write-back below drops every fork but the last
+    // (`push_both(z, z)` kept [1,8], losing the [1,7] fork — interpreter 2 vs
+    // JIT 3). The caller handle is never parked for a multi-bound name (see
+    // `park_written_back_arguments`), so it is still the pristine pre-call
+    // base at this point: merge each all-`mut` group's forks back against it
+    // and write ONE reconciled value, then skip the group's members in the
+    // per-argument loop. Groups mixing `mut` and non-`mut` members keep the
+    // existing per-argument path (the mut/immut clobber guard above).
+    let mut merged_group_params: HashSet<String> = HashSet::new();
+    if let Some(bindings) = identifier_arg_bindings(func, args, self_mode) {
+        let mut groups: HashMap<String, Vec<(String, bool)>> = HashMap::new();
+        for (caller_name, param_name) in &bindings {
+            let param_is_mut = params_to_bind
+                .iter()
+                .find(|p| p.name == param_name.as_str())
+                .map(|p| p.mutability.is_mutable())
+                .unwrap_or(false);
+            groups
+                .entry(caller_name.clone())
+                .or_default()
+                .push((param_name.clone(), param_is_mut));
+        }
+        // A `mut` class parameter mutated the caller's object through the
+        // shared cell. Record it up front, before any argument is written
+        // back, so a non-`mut` `obj.field` sibling holding the pre-call
+        // snapshot cannot clobber it regardless of argument order
+        // (`f(x, x.items)` and `f(x.items, x)` alike).
+        for (caller_name, members) in &groups {
+            let class_mutated = members.iter().any(|(param_name, is_mut)| {
+                *is_mut && matches!(local_env.get(param_name.as_str()), Some(Value::ClassInstance(_)))
+            });
+            if class_mutated {
+                mut_written.insert(caller_name.clone());
+            }
+        }
+        for (caller_name, members) in &groups {
+            if members.len() < 2 || !members.iter().all(|(_, is_mut)| *is_mut) {
+                continue;
+            }
+            let Some(Value::Array(base)) = outer_env.get(caller_name.as_str()) else {
+                continue;
+            };
+            let base = Arc::clone(base);
+            let mut forks: Vec<Value> = Vec::with_capacity(members.len());
+            for (param_name, _) in members {
+                if let Some(v) = local_env.get(param_name.as_str()) {
+                    forks.push(v.clone());
+                }
+            }
+            if let Some(merged) = merge_aliased_mut_array_group(&base, &forks) {
+                let new_val = Value::Array(Arc::new(ArrayData::from(merged)));
+                trap_self_write("write_back_ident_merged", &func.name, caller_name, &new_val);
+                outer_env.insert(caller_name.clone(), new_val);
+                if !outer_env.is_local(caller_name) {
+                    crate::interpreter::place::sync_module_global(outer_env, caller_name);
+                }
+            }
+            for (param_name, _) in members {
+                merged_group_params.insert(param_name.clone());
+            }
+        }
+    }
+
+    for (arg_idx, arg) in args.iter().enumerate() {
         // A spread can bind multiple parameters, so later positional arguments
         // cannot be reconstructed safely without binder provenance. Named
         // arguments remain safe because they identify their parameter.
@@ -1452,7 +2066,18 @@ fn write_back_mutable_arguments(
             },
             Field {
                 obj_name: String,
+                // Intermediate steps between `obj_name` and `field_name`
+                // (`o.h.items` -> [Field("h")], `o.items[0].h` ->
+                // [Field("items"), Index(0)]); empty for the one-level case.
+                path: Vec<FieldStep>,
                 field_name: String,
+                param_name: String,
+            },
+            // General place argument (`o.items[i].driver`, including
+            // non-literal index expressions): the place was captured
+            // before the call, at argument-evaluation time.
+            Place {
+                place: crate::interpreter::place::Place,
                 param_name: String,
             },
         }
@@ -1491,17 +2116,29 @@ fn write_back_mutable_arguments(
                     param_name: param.name.clone(),
                 }
             } else if let simple_parser::ast::Expr::FieldAccess { receiver, field } = &arg.value {
-                if let simple_parser::ast::Expr::Identifier(obj) = receiver.as_ref() {
-                    ArgSource::Field {
-                        obj_name: obj.clone(),
+                match field_receiver_path(receiver) {
+                    Some((obj, path)) => ArgSource::Field {
+                        obj_name: obj,
+                        path,
                         field_name: field.clone(),
                         param_name: param.name.clone(),
-                    }
-                } else {
-                    continue;
+                    },
+                    None => match arg_places.get(arg_idx).cloned().flatten() {
+                        Some(place) => ArgSource::Place {
+                            place,
+                            param_name: param.name.clone(),
+                        },
+                        None => continue,
+                    },
                 }
             } else {
-                continue;
+                match arg_places.get(arg_idx).cloned().flatten() {
+                    Some(place) => ArgSource::Place {
+                        place,
+                        param_name: param.name.clone(),
+                    },
+                    None => continue,
+                }
             }
         };
         match source {
@@ -1512,6 +2149,11 @@ fn write_back_mutable_arguments(
                 if caller_name == METHOD_SELF && self_mode == SelfMode::SkipSelf {
                     continue;
                 }
+                if merged_group_params.contains(&param_name) {
+                    // Member of an all-`mut` aliased group already reconciled
+                    // by the three-way merge pre-pass above.
+                    continue;
+                }
                 let param_is_mut = params_to_bind
                     .iter()
                     .find(|p| p.name == param_name)
@@ -1519,7 +2161,10 @@ fn write_back_mutable_arguments(
                     .unwrap_or(false);
                 // Aliased argument: a non-`mut` parameter must never overwrite a
                 // caller binding that a `mut` parameter has already updated.
-                if !param_is_mut && mut_written.contains(&caller_name) {
+                if !param_is_mut
+                    && (mut_written.contains(&caller_name)
+                        || mut_field_written.iter().any(|(o, _)| *o == caller_name))
+                {
                     continue;
                 }
                 if std::env::var("SIMPLE_DEBUG_WBMA").is_ok() {
@@ -1533,12 +2178,48 @@ fn write_back_mutable_arguments(
                     );
                 }
                 if let Some(callee_val) = local_env.get(&param_name) {
+                    // A `mut` class parameter mutated the caller's object through
+                    // the shared cell (recorded in `mut_written` by the pre-pass):
+                    // nothing to write back.
+                    if param_is_mut && matches!(callee_val, Value::ClassInstance(_)) {
+                        mut_written.insert(caller_name.clone());
+                        continue;
+                    }
+                    // `x: mut i64` (type-position `mut` capability) binds a plain
+                    // caller variable by reference: write a scalar reassignment
+                    // back. See mut_param_annotation_no_reference_propagation_2026-07-20.
+                    let param_type_is_mut = params_to_bind.iter().any(|p| {
+                        p.name == param_name
+                            && matches!(
+                                p.ty,
+                                Some(Type::Capability {
+                                    capability: simple_parser::ast::ReferenceCapability::Exclusive,
+                                    ..
+                                })
+                            )
+                    });
+                    if param_type_is_mut
+                        && !matches!(
+                            callee_val,
+                            Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
+                        )
+                        && outer_env.contains_key(&caller_name)
+                    {
+                        let new_val = callee_val.clone();
+                        mut_written.insert(caller_name.clone());
+                        outer_env.insert(caller_name.clone(), new_val);
+                        if !outer_env.is_local(&caller_name) {
+                            crate::interpreter::place::sync_module_global(outer_env, &caller_name);
+                        }
+                        continue;
+                    }
                     // Value-type structs (task #91) keep VALUE semantics: never
-                    // write callee mutations back to the caller's binding.
-                    if !is_value_type_struct(callee_val, classes)
+                    // write callee mutations back to the caller's binding, unless the
+                    // parameter is an explicit `mut` one (then full write-back).
+                    if (param_is_mut || !is_value_type_struct(callee_val, classes))
                         && matches!(
                             callee_val,
-                            Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
+                            Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
                         )
                         && outer_env.contains_key(&caller_name)
                     {
@@ -1547,11 +2228,22 @@ fn write_back_mutable_arguments(
                         if param_is_mut {
                             mut_written.insert(caller_name.clone());
                         }
-                        outer_env.insert(caller_name, new_val);
-                    } else if is_value_type_struct(callee_val, classes) {
-                        // Value-type struct: fields stay value-copied, but its
-                        // container-valued fields are shared handles. See
-                        // merge_shared_collection_fields.
+                        outer_env.insert(caller_name.clone(), new_val);
+                        // A module-level `var` passed from module scope: reads
+                        // resolve through the module-global stores, so the
+                        // frame insert alone is invisible to the caller.
+                        if !outer_env.is_local(&caller_name) {
+                            crate::interpreter::place::sync_module_global(outer_env, &caller_name);
+                        }
+                    } else if !param_is_mut
+                        && (is_value_type_struct(callee_val, classes)
+                            || matches!(callee_val, Value::Enum { .. }))
+                    {
+                        // Value-type struct or enum: fields stay value-copied,
+                        // but container-valued fields (including containers
+                        // nested inside an enum variant payload, e.g.
+                        // `DriverInstance.RamFs(d)` reaching `d.fd_table`) are
+                        // shared handles. See merge_shared_collection_fields.
                         // Take the caller's handle OUT of the frame before
                         // mutating: `get().cloned()` leaves `outer_env` holding
                         // the same `Arc`, so the `Arc::make_mut` inside
@@ -1575,19 +2267,90 @@ fn write_back_mutable_arguments(
             }
             ArgSource::Field {
                 obj_name,
+                path,
                 field_name,
                 param_name,
             } => {
                 // Write back mutated field value into the caller's object.
                 // e.g., `write_first(self.values, next)` — after the call,
                 // write the callee's `values` param back into `self.values`.
+                let field_param_is_mut = params_to_bind
+                    .iter()
+                    .find(|p| p.name == param_name)
+                    .map(|p| p.mutability.is_mutable())
+                    .unwrap_or(false);
+                if !path.is_empty() {
+                    // Nested receiver (`o.h.items`, `o.items[0].driver`): an
+                    // explicit `mut` parameter writes back the whole parameter
+                    // through the path; a non-mut parameter carries only shared
+                    // container handles (the same value semantics as a top-level
+                    // value-type struct argument). Without the non-mut merge, a
+                    // container mutation through a by-value argument nested in an
+                    // array element or enum payload is silently dropped — the
+                    // two-hop place chain of
+                    // doc/08_tracking/bug/seed_interpreter_cross_module_struct_field_read_zero_2026-11-05.md.
+                    let callee_val = local_env.get(&param_name).cloned();
+                    if field_param_is_mut {
+                        if let Some(callee_val) = callee_val {
+                            if matches!(
+                                callee_val,
+                                Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_) | Value::Enum { .. }
+                            ) {
+                                if let Some(mut root) = outer_env.get(&obj_name).cloned() {
+                                    let mut steps = path.clone();
+                                    steps.push(FieldStep::Field(field_name.clone()));
+                                    if set_nested_path(&mut root, &steps, callee_val) {
+                                        mut_field_written
+                                            .insert((obj_name.clone(), render_field_steps(&steps)));
+                                        outer_env.insert(obj_name, root);
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    if mut_written.contains(&obj_name) {
+                        continue;
+                    }
+                    if let Some(callee_val) = callee_val {
+                        if matches!(callee_val, Value::Object { .. } | Value::Enum { .. }) {
+                            let taken = outer_env.take_frame_owned(&obj_name);
+                            let took = taken.is_some();
+                            if let Some(mut root) = taken.or_else(|| outer_env.get(&obj_name).cloned()) {
+                                let mut steps: Vec<crate::interpreter::place::SubjectStep> = path
+                                    .iter()
+                                    .map(|step| match step {
+                                        FieldStep::Field(name) => {
+                                            crate::interpreter::place::SubjectStep::Field(name.clone())
+                                        }
+                                        FieldStep::Index(idx) => crate::interpreter::place::SubjectStep::Index(*idx),
+                                    })
+                                    .collect();
+                                steps.push(crate::interpreter::place::SubjectStep::Field(field_name.clone()));
+                                if crate::interpreter::place::merge_subject_step(&mut root, &steps, &callee_val) {
+                                    outer_env.insert(obj_name, root);
+                                } else if took {
+                                    outer_env.restore_frame_owned(obj_name, root);
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if !field_param_is_mut
+                    && (mut_field_written.iter().any(|(o, f)| {
+                        *o == obj_name && (*f == field_name || f.starts_with(&format!("{field_name}.")))
+                    }) || mut_written.contains(&obj_name))
+                {
+                    continue;
+                }
                 if let Some(callee_val) = local_env.get(&param_name).cloned() {
                     // Value-type structs (task #91) keep VALUE semantics: a
                     // struct passed as `obj.field` is not mutated back either.
                     if !is_value_type_struct(&callee_val, classes)
                         && matches!(
                             callee_val,
-                            Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
+                            Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
                         )
                     {
                         // Same dead-alias copy-on-write as the value-type path
@@ -1609,14 +2372,107 @@ fn write_back_mutable_arguments(
                                             );
                                         }
                                     }
+                                    if field_param_is_mut {
+                                        mut_field_written.insert((obj_name.clone(), field_name.clone()));
+                                    }
                                     Arc::make_mut(&mut fields).insert(field_name, callee_val);
-                                    outer_env.insert(obj_name, Value::Object { class, fields });
+                                    outer_env.insert(obj_name.clone(), Value::Object { class, fields });
+                                    if !outer_env.is_local(&obj_name) {
+                                        crate::interpreter::place::sync_module_global(outer_env, &obj_name);
+                                    }
+                                }
+                                // Reference-semantics class: write the field
+                                // into the shared cell; every handle sees it.
+                                Value::ClassInstance(instance) => {
+                                    instance.set_field(field_name, callee_val);
+                                    if took {
+                                        outer_env.restore_frame_owned(obj_name, Value::ClassInstance(instance));
+                                    }
                                 }
                                 other => {
                                     if took {
                                         outer_env.restore_frame_owned(obj_name, other);
                                     }
                                 }
+                            }
+                        }
+                    } else if !field_param_is_mut
+                        && (is_value_type_struct(&callee_val, classes)
+                            || matches!(callee_val, Value::Enum { .. }))
+                    {
+                        // Value-type struct / enum field argument (`f(o.cfg)`):
+                        // shared containers merge back into the field while
+                        // scalars keep value semantics — the field-argument
+                        // twin of the identifier-argument merge above. Without
+                        // it, a container mutation through the parameter is
+                        // silently dropped.
+                        let taken = outer_env.take_frame_owned(&obj_name);
+                        let took = taken.is_some();
+                        if let Some(mut obj_val) = taken.or_else(|| outer_env.get(&obj_name).cloned()) {
+                            let merged = match &mut obj_val {
+                                Value::Object { fields, .. } if fields.contains_key(&field_name) => {
+                                    let field = Arc::make_mut(fields)
+                                        .get_mut(&field_name)
+                                        .expect("field presence checked");
+                                    merge_shared_collection_fields(field, &callee_val)
+                                }
+                                _ => false,
+                            };
+                            if merged {
+                                outer_env.insert(obj_name, obj_val);
+                            } else if took {
+                                outer_env.restore_frame_owned(obj_name, obj_val);
+                            }
+                        }
+                    }
+                }
+            }
+            ArgSource::Place {
+                place,
+                param_name,
+            } => {
+                // General place argument (`self.mounts[i].driver`): the place
+                // was captured at argument-evaluation time, so non-literal
+                // index expressions resolve to the same element the argument
+                // was read from. `mut` parameters write back the whole value;
+                // non-mut value-type structs/enums merge shared containers
+                // only (value semantics for scalars).
+                if merged_group_params.contains(&param_name) {
+                    continue;
+                }
+                let param_is_mut = params_to_bind
+                    .iter()
+                    .find(|p| p.name == param_name)
+                    .map(|p| p.mutability.is_mutable())
+                    .unwrap_or(false);
+                if !param_is_mut
+                    && (mut_written.contains(&place.root)
+                        || mut_field_written.iter().any(|(o, _)| *o == place.root))
+                {
+                    continue;
+                }
+                if let Some(callee_val) = local_env.get(&param_name).cloned() {
+                    if param_is_mut {
+                        if matches!(
+                            callee_val,
+                            Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_) | Value::Enum { .. }
+                        ) {
+                            mut_field_written.insert((place.root.clone(), format!("@{}", place.root)));
+                            crate::interpreter::place::write_place(outer_env, &place, callee_val);
+                        }
+                        continue;
+                    }
+                    if matches!(callee_val, Value::Object { .. } | Value::Enum { .. }) {
+                        let taken = outer_env.take_frame_owned(&place.root);
+                        let took = taken.is_some();
+                        if let Some(mut root) = taken.or_else(|| outer_env.get(&place.root).cloned()) {
+                            if crate::interpreter::place::merge_place_containers(&mut root, &place.projections, &callee_val) {
+                                outer_env.insert(place.root.clone(), root);
+                                if !outer_env.is_local(&place.root) {
+                                    crate::interpreter::place::sync_module_global(outer_env, &place.root);
+                                }
+                            } else if took {
+                                outer_env.restore_frame_owned(place.root.clone(), root);
                             }
                         }
                     }
@@ -1670,7 +2526,7 @@ fn exec_function_inner(
         if fields.len() == 1 && fields.contains_key("self") {
             // For enum methods, self should be the enum value directly, not wrapped in Object
             let self_val = fields.get("self").unwrap().clone();
-            local_env.insert("self".into(), self_val);
+            bind_direct_method_self(&mut local_env, class_name, self_val);
         } else {
             // For class methods, self is an Object — Arc::clone is O(1)
             local_env.insert(
@@ -1687,6 +2543,7 @@ fn exec_function_inner(
     } else {
         SelfMode::IncludeSelf
     };
+    let arg_places = capture_argument_places(args, outer_env, functions, classes, enums, impl_methods);
     let bound = bind_args(
         &func.params,
         args,
@@ -1719,9 +2576,12 @@ fn exec_function_inner(
     sync_owned_captured_globals(func, &local_env, outer_env);
 
     if result.is_ok() {
-        write_back_mutable_arguments(func, args, outer_env, &local_env, classes, self_mode);
+        write_back_mutable_arguments(func, args, &arg_places, outer_env, &local_env, classes, self_mode);
     }
     restore_parked_arguments(&parked, outer_env, &local_env);
+    if result.is_ok() {
+        write_back_borrow_arguments(func, args, outer_env, &local_env, functions, classes, enums, impl_methods, self_mode)?;
+    }
 
     // Runtime profiler return hook
     if crate::runtime_profile::is_profiling_active() {
@@ -1756,12 +2616,24 @@ fn exec_function_with_values_and_writeback_inner(
         crate::runtime_profile::record_full_call(&func.name, None, vec![], crate::runtime_profile::CallType::Direct);
     }
 
+    use crate::perf_counters::{self as pc, phase_end, phase_start};
+    pc::bump(&pc::OWNED_CALLS, 1);
+    let t = phase_start();
     publish_and_repoint(outer_env);
+    phase_end(&pc::OWNED_NS_PUBLISH_REPOINT, t);
+    let t = phase_start();
     let mut local_env = captured_env_with_live_globals(func, &Env::new());
+    phase_end(&pc::OWNED_NS_SCOPE, t);
     let self_mode = SelfMode::IncludeSelf;
-    let bound = bind_args_with_values(
+    let t = phase_start();
+    let arg_places = capture_argument_places(original_args, outer_env, functions, classes, enums, impl_methods);
+    phase_end(&pc::OWNED_NS_ARG_PLACES, t);
+    let t = phase_start();
+    let bound = bind_args_with_values_named(
         &func.params,
         &args,
+        // Spread arguments expand to several values, so names only line up 1:1.
+        if original_args.len() == args.len() { original_args } else { &[] },
         outer_env,
         functions,
         classes,
@@ -1769,6 +2641,7 @@ fn exec_function_with_values_and_writeback_inner(
         impl_methods,
         self_mode,
     ).map_err(|e| name_callee(e, func))?;
+    phase_end(&pc::OWNED_NS_BIND, t);
     // The pre-evaluated argument vector holds its own handle on every
     // argument. Kept alive across the body, it pins a parked receiver's field
     // Arc (strong_count > 1), so each `me` push deep-copies the backing Vec —
@@ -1779,8 +2652,11 @@ fn exec_function_with_values_and_writeback_inner(
 
     crate::layout_recorder::record_function_return();
 
+    let t = phase_start();
     let parked = park_written_back_arguments(func, original_args, outer_env, classes, self_mode);
     outer_env.release_scope();
+    phase_end(&pc::OWNED_NS_PARK, t);
+    let t = phase_start();
     let result = execute_function_body(
         func,
         bound,
@@ -1791,15 +2667,27 @@ fn exec_function_with_values_and_writeback_inner(
         impl_methods,
         true,
     );
+    phase_end(&pc::OWNED_NS_BODY, t);
     // The callee is done executing: drop its snapshot so the sync below
     // writes the store in place instead of copying the owner map.
+    let t = phase_start();
     local_env.release_scope();
     sync_owned_captured_globals(func, &local_env, outer_env);
+    phase_end(&pc::OWNED_NS_SYNC, t);
 
+    let t = phase_start();
     if result.is_ok() {
-        write_back_mutable_arguments(func, original_args, outer_env, &local_env, classes, self_mode);
+        write_back_mutable_arguments(func, original_args, &arg_places, outer_env, &local_env, classes, self_mode);
     }
+    phase_end(&pc::OWNED_NS_WRITEBACK, t);
+    let t = phase_start();
     restore_parked_arguments(&parked, outer_env, &local_env);
+    phase_end(&pc::OWNED_NS_RESTORE, t);
+    let t = phase_start();
+    if result.is_ok() {
+        write_back_borrow_arguments(func, original_args, outer_env, &local_env, functions, classes, enums, impl_methods, self_mode)?;
+    }
+    phase_end(&pc::OWNED_NS_BORROW_WB, t);
 
     if crate::runtime_profile::is_profiling_active() {
         crate::runtime_profile::record_full_return(None);
@@ -1893,6 +2781,61 @@ fn exec_function_with_bound_args_inner(
 mod tests {
     use super::*;
     use simple_parser::Parser;
+
+    fn int_array(values: &[i64]) -> Value {
+        Value::Array(Arc::new(ArrayData::from(
+            values.iter().map(|v| Value::Int(*v)).collect::<Vec<_>>(),
+        )))
+    }
+
+    fn int_vec(value: &Value) -> Vec<i64> {
+        let Value::Array(items) = value else {
+            panic!("expected array, got {value:?}");
+        };
+        items.iter().map(|v| v.as_int().unwrap()).collect()
+    }
+
+    // The filed both-mut-alias repro: base [1], a pushes 7 ([1,7]), b pushes 8
+    // ([1,8]) -> the shared-storage answer [1,7,8].
+    #[test]
+    fn merge_appends_each_mut_alias_suffix_in_argument_order() {
+        let base = Arc::new(ArrayData::from(vec![Value::Int(1)]));
+        let forks = [int_array(&[1, 7]), int_array(&[1, 8])];
+        let merged = merge_aliased_mut_array_group(&base, &forks).expect("both forks contributed");
+        assert_eq!(
+            merged,
+            vec![Value::Int(1), Value::Int(7), Value::Int(8)]
+        );
+    }
+
+    #[test]
+    fn merge_skips_unmutated_forks_and_reports_no_change_when_all_untouched() {
+        let base = Arc::new(ArrayData::from(vec![Value::Int(1)]));
+        let untouched = Value::Array(Arc::clone(&base));
+        assert!(merge_aliased_mut_array_group(&base, &[untouched]).is_none());
+        // One untouched + one appended fork still merges, ignoring the untouched one.
+        let merged = merge_aliased_mut_array_group(&base, [Value::Array(Arc::clone(&base)), int_array(&[1, 9])].as_slice())
+            .expect("one fork contributed");
+        assert_eq!(merged, vec![Value::Int(1), Value::Int(9)]);
+    }
+
+    #[test]
+    fn merge_carries_same_length_slot_edits_without_dropping_sibling_appends() {
+        let base = Arc::new(ArrayData::from(vec![Value::Int(1), Value::Int(2)]));
+        // a edits slot 0 in place ([9,2]); b appends ([1,2,8]).
+        let forks = [int_array(&[9, 2]), int_array(&[1, 2, 8])];
+        let merged = merge_aliased_mut_array_group(&base, &forks).expect("both forks contributed");
+        assert_eq!(merged, vec![Value::Int(9), Value::Int(2), Value::Int(8)]);
+    }
+
+    #[test]
+    fn merge_last_replace_wins_for_non_prefix_rewrites() {
+        let base = Arc::new(ArrayData::from(vec![Value::Int(1)]));
+        // a appends ([1,7]); b rewrote the whole array ([4,5,6]).
+        let forks = [int_array(&[1, 7]), int_array(&[4, 5, 6])];
+        let merged = merge_aliased_mut_array_group(&base, &forks).expect("both forks contributed");
+        assert_eq!(merged, vec![Value::Int(4), Value::Int(5), Value::Int(6)]);
+    }
 
     #[test]
     fn sffi_return_contract_rejects_missing_non_optional_return() {

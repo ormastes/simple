@@ -119,3 +119,20 @@ completion (10,706 spec files at 5-10 s each), so more instances of every shape
 above almost certainly remain. The same two typo families were also observed
 outside `test/01_unit`; they were counted, not touched.
 
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the 2026-09-13 continuation: PARTIALLY FIXED stands — 43 spec files repaired; the two bisected files were spec-side defects (fixed); rv32_sv32_walker_spec remains OPEN via the separately-tracked allow-reserved-keyword defect (assessed too invasive for a P3 lane: 11 parser consumers). The wider sweep (lib/app/os/std trees) was never completed per the record; no new sweep evidence this lane.
+
+
+---
+## 2026-11-13 triage — lane live-p3-l6 (Windows host, seed bin/simple.exe, worktree lp6-wt, base f790f7f266e)
+
+The one remaining file is now RESOLVED on this base. `allow`-in-pattern-position
+no longer fails: `bin/simple.exe compile test/01_unit/hardware/rv32i/rv32_sv32_walker_spec.spl`
+gets past lex/parse (the reserved-keyword defect tracked separately was fixed
+elsewhere). The file then hit the spec lint `spipe_false_boolean_wrapper_assertions`
+(12 sites of `expect(x).to_be(false)`), per the repo rule replaced with
+`expect_not(x)` (mechanical, semantics identical). After the repair the spec runs
+green: `declared>=9 executed=9 passed=9 failed=0`. Change landed in this lane:
+`test/01_unit/hardware/rv32i/rv32_sv32_walker_spec.spl`.

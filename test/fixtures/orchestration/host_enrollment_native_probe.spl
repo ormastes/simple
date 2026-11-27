@@ -1,0 +1,50 @@
+# Deterministic real Ed25519 authorization fixture; no root or provider effects.
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.*
+use std.nogc_sync_mut.orchestration.host_enrollment_v1.*
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_authority_snapshot_create_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_encode_grant_v2}
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+
+pub struct HostEnrollmentFixtureV1:
+    binding: HostEnrollmentBindingV1
+    credential: HostEnrollmentCredentialV1
+    policy: LocalAuthorityPolicyV1
+    context: HostReservationAuthorizationContextV1
+
+pub fn host_enrollment_fixture_v1() -> HostEnrollmentFixtureV1:
+    val base = verification_fixture()
+    val binding = HostEnrollmentBindingV1(config_digest: "b".repeat(64), policy_digest: "c".repeat(64),
+        native_machine_id: "machine-001", native_boot_id: "boot-001",
+        provider_identity_digest: "a".repeat(64), machine_parent: "/var/lib/simple/hosts")
+    var operation = base.request
+    operation.operation = "host_enroll_v1"
+    operation.payload_digest = host_enrollment_payload_digest_v1(binding).unwrap()
+    var signed = base.signed
+    signed.grant.operations = ["host_enroll_v1"]
+    signed.signature = pure_ed25519_sign_from_seed_v1(verification_seed(1),
+        distributed_grant_signature_message_v2(signed).unwrap()).signature
+    var approval = base.approval
+    approval.grant_digest = sha256_text(distributed_encode_grant_v2(signed.grant).unwrap())
+    approval.request_digest = sha256_text(distributed_encode_operation_v2(operation).unwrap())
+    approval.signature = pure_ed25519_sign_from_seed_v1(verification_seed(65),
+        distributed_approval_signature_message_v2(approval).unwrap()).signature
+    var issuer = base.issuer
+    issuer.operations = ["host_enroll_v1"]
+    var approver = base.approver
+    approver.operations = ["host_enroll_v1"]
+    val snapshot = distributed_authority_snapshot_create_v2([issuer, approver], 7, 4, 2).unwrap()
+    val policy = LocalAuthorityPolicyV1(snapshot: snapshot, session_generation: 3, source_digest: binding.policy_digest)
+    HostEnrollmentFixtureV1(binding: binding,
+        credential: HostEnrollmentCredentialV1(operation: operation, signed: signed, approval: approval),
+        policy: policy, context: HostReservationAuthorizationContextV1(grant_clock: 100,
+            monotonic_ms: 10, policy_revision: 4, revocation_epoch: 2, session_generation: 3))
+
+pub fn host_enrollment_expect_rejected_v1(fixture: HostEnrollmentFixtureV1, reason: text):
+    val result = host_enrollment_authorize_v1(fixture.binding, fixture.credential, fixture.policy,
+        "worker_1", 512, fixture.context)
+    assert(result.is_err())
+    assert(result.unwrap_err() == reason)

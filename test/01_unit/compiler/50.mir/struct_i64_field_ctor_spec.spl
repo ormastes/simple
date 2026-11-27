@@ -1,0 +1,148 @@
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+# @cover src/compiler/50.mir/mir_data.spl
+"""
+# MIR lowering: struct constructor operands and field reads keep declared order
+
+Bug `native_struct_i64_field_ctor_reads_wrong_value_2026-11-05`: a stage3
+(s3_fable44) native build of `struct P: a: i64; val p = P(a: 7)` printed FAIL
+for `p.a == 7`. It no longer reproduces (Stage 2 bootstrap-fable-13 cranelift
+and llvm both print PASS); this spec pins the MIR shape the native backends
+consume: one `Aggregate(Struct)` whose operands are the field values in
+DECLARED order (named arguments may be written in any order), and `GetField`
+indices that name the declared slot of the field being read.
+
+Native twin: test/fixtures/compiler/struct_i64_field_ctor_native.spl
+"""
+
+# @tag: unit, compiler, mir, struct
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+struct CtorLowered:
+    fatal: [text]
+    ctors: [text]
+    fields: [i64]
+
+fn ctor_const_text(value: MirConstValue) -> text:
+    match value:
+        case MirConstValue.Int(v): "i{v}"
+        case MirConstValue.Float(v): "f{v}"
+        case MirConstValue.Bool(v): "b{v}"
+        case MirConstValue.Str(v): "s{v}"
+        case _: "c?"
+
+fn ctor_lower(src: text) -> CtorLowered:
+    val file = "testdata/fixture_struct_i64_field_ctor.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_struct_i64_field_ctor", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var fatal: [text] = []
+    for e in hir_lowering.errors:
+        fatal = fatal.push("hir: " + e.message)
+    for e in lowering.errors:
+        if e.fatal:
+            fatal = fatal.push("mir: " + e.message)
+    var ctors: [text] = []
+    var fields: [i64] = []
+    for function in mir.functions.values():
+        # local id -> constant it holds (following Copy/Move chains)
+        var consts: Dict<i64, text> = {}
+        var ints: Dict<i64, i64> = {}
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Const(dest, value, _):
+                        consts[dest.id] = ctor_const_text(value)
+                        match value:
+                            case MirConstValue.Int(v):
+                                ints[dest.id] = v
+                            case _: pass
+                    case MirInstKind.Copy(dest, src_local):
+                        if consts.contains_key(src_local.id):
+                            consts[dest.id] = consts[src_local.id]
+                        if ints.contains_key(src_local.id):
+                            ints[dest.id] = ints[src_local.id]
+                    case MirInstKind.Move(dest, src_local):
+                        if consts.contains_key(src_local.id):
+                            consts[dest.id] = consts[src_local.id]
+                    case MirInstKind.UnaryOp(dest, op, operand):
+                        # `-5` may lower as Neg(Const 5): record the folded value `i-5`
+                        match op:
+                            case MirUnaryOp.Neg:
+                                match operand.kind:
+                                    case MirOperandKind.Const(value, _):
+                                        match value:
+                                            case MirConstValue.Int(v):
+                                                consts[dest.id] = "i{0 - v}"
+                                            case _: pass
+                                    case MirOperandKind.Copy(local):
+                                        if ints.contains_key(local.id):
+                                            consts[dest.id] = "i{0 - ints[local.id]}"
+                                    case _: pass
+                            case _: pass
+                    case _: pass
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Aggregate(_, kind, operands):
+                        match kind:
+                            case AggregateKind.Struct(_):
+                                var parts: [text] = []
+                                for op in operands:
+                                    match op.kind:
+                                        case MirOperandKind.Const(value, _):
+                                            parts = parts.push(ctor_const_text(value))
+                                        case MirOperandKind.Copy(local):
+                                            parts = parts.push(consts.get(local.id) ?? "l")
+                                        case MirOperandKind.Move(local):
+                                            parts = parts.push(consts.get(local.id) ?? "l")
+                                ctors = ctors.push(parts.join(","))
+                            case _: pass
+                    case MirInstKind.GetField(_, _, field_index):
+                        fields = fields.push(field_index)
+                    case _: pass
+    for m in fatal:
+        print "diagnostic: {m}"
+    print "ctors={ctors} fields={fields}"
+    CtorLowered(fatal: fatal, ctors: ctors, fields: fields)
+
+describe "struct constructor operands and field reads keep declared order":
+    it "single i64 field: P(a: 7) stores 7 and p.a reads slot 0 (the bug repro)":
+        val low = ctor_lower("struct P:\n    a: i64\n\nfn main() -> i64:\n    val p = P(a: 7)\n    if p.a == 7:\n        return 0\n    return 1\n")
+        expect(low.fatal.len()).to_equal(0)
+        expect(low.ctors).to_equal(["i7"])
+        expect(low.fields).to_equal([0])
+
+    it "multiple i64 fields keep declared order, including negative and i64::MAX":
+        val low = ctor_lower("struct M:\n    x: i64\n    y: i64\n    z: i64\n\nfn f() -> i64:\n    val m = M(x: -5, y: 9223372036854775807, z: 42)\n    m.z\n")
+        expect(low.fatal.len()).to_equal(0)
+        expect(low.ctors).to_equal(["i-5,i9223372036854775807,i42"])
+        expect(low.fields).to_equal([2])
+
+    it "named arguments out of declared order are reordered to declared slots":
+        val low = ctor_lower("struct M:\n    x: i64\n    y: i64\n    z: i64\n\nfn f() -> i64:\n    val o = M(z: 3, x: 1, y: 2)\n    o.y + o.z\n")
+        expect(low.fatal.len()).to_equal(0)
+        expect(low.ctors).to_equal(["i1,i2,i3"])
+        expect(low.fields).to_equal([1, 2])
+
+    it "mixed field types keep declared order":
+        val low = ctor_lower("struct Mixed:\n    f: f64\n    t: text\n    b: bool\n\nfn f() -> bool:\n    val q = Mixed(t: \"hi\", b: true, f: 2.5)\n    q.b\n")
+        expect(low.fatal.len()).to_equal(0)
+        expect(low.ctors).to_equal(["f2.5,shi,btrue"])
+        expect(low.fields).to_equal([2])
+
+    it "nested struct field reads the outer then inner declared slot":
+        val low = ctor_lower("struct Inner:\n    v: i64\n\nstruct Outer:\n    k: i64\n    inner: Inner\n\nfn f() -> i64:\n    val n = Outer(inner: Inner(v: 22), k: 11)\n    n.inner.v\n")
+        expect(low.fatal.len()).to_equal(0)
+        expect(low.ctors).to_equal(["i22", "i11,l"])
+        expect(low.fields).to_equal([1, 0])

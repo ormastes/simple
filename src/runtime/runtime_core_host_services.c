@@ -17,14 +17,21 @@
 #if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
 #define _DARWIN_C_SOURCE
 #endif
+/* Linux: CPU_SET / pthread_setaffinity_np / sched_getcpu (thread pinning,
+ * below) are GNU extensions. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 
 #include "runtime.h"
+#include "runtime_core_text_arg.h"
 
 #include <errno.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -32,6 +39,7 @@
 #include <windows.h>
 #include <winioctl.h>
 #include "platform/runtime_win_long_path.h"
+#include "platform/spl_win_utf16_private.h"
 #include "platform/windows_system_processor_count.h"
 #include <sys/stat.h>
 #ifndef SYMLINK_FLAG_RELATIVE
@@ -45,6 +53,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <dirent.h>
 #include <unistd.h>
 #if defined(__FreeBSD__)
 #include <sys/types.h>
@@ -126,10 +135,12 @@ int64_t rt_file_stat(const uint8_t* path, uint64_t path_len) {
 bool rt_process_exists(int64_t pid) {
     if (pid <= 0) return false;
 #if defined(_WIN32)
-    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+    HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
     if (!process) return GetLastError() == ERROR_ACCESS_DENIED;
+    /* Not the exit code: exit 259 would read as STILL_ACTIVE forever. */
+    DWORD status = WaitForSingleObject(process, 0);
     CloseHandle(process);
-    return true;
+    return status == WAIT_TIMEOUT;
 #else
     return kill((pid_t)pid, 0) == 0 || errno == EPERM;
 #endif
@@ -163,6 +174,601 @@ int32_t rt_package_chmod(const uint8_t* path, uint64_t path_len, int32_t mode) {
     buffer[path_len] = '\0';
     return chmod(buffer, (mode_t)mode) == 0 ? 0 : -1;
 #endif
+}
+
+/* Rest of the package_sffi.spl family (Rust twin: runtime value/sffi/package.rs).
+ * Text args arrive as (ptr,len) pairs: every name below is in text_arg_indices
+ * (src/compiler/50.mir/text_extern_abi.spl). Status returns follow the Rust
+ * twin: 0 ok / -1 error; exists/is_dir answer 1/0, -1 for a null path. Each
+ * body delegates to the long-path-aware file primitive in runtime_native.c. */
+int64_t rt_package_sha256(const uint8_t* path, uint64_t path_len) {
+    return rt_file_hash_sha256(path, path_len);
+}
+
+int64_t rt_package_file_size(const uint8_t* path, uint64_t path_len) {
+    return rt_file_size(path, path_len);
+}
+
+int32_t rt_package_copy_file(const uint8_t* src, uint64_t src_len,
+                             const uint8_t* dst, uint64_t dst_len) {
+    return rt_file_copy(src, src_len, dst, dst_len) ? 0 : -1;
+}
+
+int32_t rt_package_mkdir_all(const uint8_t* path, uint64_t path_len) {
+    return rt_dir_create_all(path, path_len) ? 0 : -1;
+}
+
+int32_t rt_package_remove_dir_all(const uint8_t* path, uint64_t path_len) {
+    return rt_dir_remove_all(path, path_len) ? 0 : -1;
+}
+
+int32_t rt_package_exists(const uint8_t* path, uint64_t path_len) {
+    if (!path) return -1;
+    return rt_file_exists(path, path_len) ? 1 : 0;
+}
+
+int32_t rt_package_is_dir(const uint8_t* path, uint64_t path_len) {
+    if (!path) return -1;
+    return rt_dir_exists(path, path_len) ? 1 : 0;
+}
+
+int32_t rt_package_create_symlink(const uint8_t* target, uint64_t target_len,
+                                  const uint8_t* link, uint64_t link_len) {
+    if (!target || !link || target_len == 0 || link_len == 0 ||
+        target_len >= 4096 || link_len >= 4096) return -1;
+    char target_buf[4096];
+    char link_buf[4096];
+    memcpy(target_buf, target, (size_t)target_len);
+    target_buf[target_len] = '\0';
+    memcpy(link_buf, link, (size_t)link_len);
+    link_buf[link_len] = '\0';
+#if defined(_WIN32)
+    /* Windows does not translate '/' when following a reparse point; store
+     * native separators (same rule as the Rust twin's symlink_file). */
+    for (char* p = target_buf; *p; p++) if (*p == '/') *p = (char)92;
+    wchar_t target_w[4096];
+    wchar_t link_w[4096];
+    if (MultiByteToWideChar(CP_UTF8, 0, target_buf, -1, target_w, 4096) == 0) return -1;
+    if (MultiByteToWideChar(CP_UTF8, 0, link_buf, -1, link_w, 4096) == 0) return -1;
+    return CreateSymbolicLinkW(link_w, target_w, SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) ? 0 : -1;
+#else
+    return symlink(target_buf, link_buf) == 0 ? 0 : -1;
+#endif
+}
+
+/* .tar.gz create/extract (Rust twin: value/sffi/package.rs, flate2 + tar). The
+ * C runtime carries no zlib, so the codec is local and dependency-free:
+ *  - create writes a ustar archive inside a valid gzip stream made of stored
+ *    (uncompressed) deflate blocks, so any gunzip/tar reads it back (larger
+ *    than a compressed archive, never wrong);
+ *  - extract has a full inflate (stored, fixed and dynamic Huffman blocks), so
+ *    archives produced by the Rust twin or by tar/gzip are accepted.
+ * Entries naming an absolute path, a drive, a backslash or a ".." component are
+ * refused (-1), as the tar crate's unpack refuses to escape the destination. */
+#define PKG_TAR_MAX_DEPTH 64
+#define PKG_TAR_MAX_PATH 4096
+
+static uint32_t pkg_crc32_update(uint32_t crc, const uint8_t* data, size_t len) {
+    uint32_t table[256];
+    for (uint32_t i = 0; i < 256; i++) {
+        uint32_t c = i;
+        for (int k = 0; k < 8; k++) c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+        table[i] = c;
+    }
+    crc = ~crc;
+    for (size_t i = 0; i < len; i++) crc = table[(crc ^ data[i]) & 0xffu] ^ (crc >> 8);
+    return ~crc;
+}
+
+static FILE* pkg_fopen(const char* path, int write) {
+#if defined(_WIN32)
+    wchar_t wide[PKG_TAR_MAX_PATH];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wide, PKG_TAR_MAX_PATH) == 0) return NULL;
+    return _wfopen(wide, write ? L"wb" : L"rb");
+#else
+    return fopen(path, write ? "wb" : "rb");
+#endif
+}
+
+/* ---- gzip writer: stored deflate blocks ---- */
+typedef struct {
+    FILE* file;
+    uint8_t block[65535];
+    size_t used;
+    uint32_t crc;
+    uint32_t isize;
+    int failed;
+} PkgGz;
+
+static void pkg_gz_put(PkgGz* gz, const void* data, size_t len) {
+    if (!gz->failed && len && fwrite(data, 1, len, gz->file) != len) gz->failed = 1;
+}
+
+static void pkg_gz_flush_block(PkgGz* gz, int final_block) {
+    uint8_t head[5];
+    head[0] = final_block ? 1 : 0;
+    head[1] = (uint8_t)(gz->used & 0xff);
+    head[2] = (uint8_t)(gz->used >> 8);
+    head[3] = (uint8_t)(~gz->used & 0xff);
+    head[4] = (uint8_t)((~gz->used >> 8) & 0xff);
+    pkg_gz_put(gz, head, 5);
+    pkg_gz_put(gz, gz->block, gz->used);
+    gz->used = 0;
+}
+
+static void pkg_gz_write(PkgGz* gz, const void* data, size_t len) {
+    const uint8_t* p = (const uint8_t*)data;
+    gz->crc = pkg_crc32_update(gz->crc, p, len);
+    gz->isize += (uint32_t)len;
+    while (len) {
+        size_t room = sizeof(gz->block) - gz->used;
+        size_t n = len < room ? len : room;
+        memcpy(gz->block + gz->used, p, n);
+        gz->used += n;
+        p += n;
+        len -= n;
+        if (gz->used == sizeof(gz->block)) pkg_gz_flush_block(gz, 0);
+    }
+}
+
+static void pkg_gz_begin(PkgGz* gz, FILE* file) {
+    static const uint8_t header[10] = {0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff};
+    memset(gz, 0, sizeof(*gz));
+    gz->file = file;
+    pkg_gz_put(gz, header, sizeof(header));
+}
+
+static int pkg_gz_finish(PkgGz* gz) {
+    uint8_t tail[8];
+    pkg_gz_flush_block(gz, 1);
+    for (int i = 0; i < 4; i++) {
+        tail[i] = (uint8_t)(gz->crc >> (8 * i));
+        tail[4 + i] = (uint8_t)(gz->isize >> (8 * i));
+    }
+    pkg_gz_put(gz, tail, sizeof(tail));
+    return gz->failed ? -1 : 0;
+}
+
+/* ---- ustar writer ---- */
+static void pkg_tar_octal(char* field, size_t width, uint64_t value) {
+    for (size_t i = width - 1; i-- > 0;) {
+        field[i] = (char)('0' + (value & 7u));
+        value >>= 3;
+    }
+    field[width - 1] = '\0';
+}
+
+static int pkg_tar_header(PkgGz* gz, const char* name, int is_dir, uint64_t size, uint32_t mode, uint64_t mtime) {
+    uint8_t block[512];
+    size_t name_len = strlen(name);
+    const char* tail = name;
+    memset(block, 0, sizeof(block));
+    if (name_len > 100) {
+        /* ustar: split at a '/' so prefix <= 155 and name <= 100. */
+        size_t split = 0;
+        for (size_t i = 0; i < name_len; i++) {
+            if (name[i] == '/' && i <= 155 && name_len - i - 1 <= 100) split = i;
+        }
+        if (!split) return -1;
+        tail = name + split + 1;
+        name_len = strlen(tail);
+        memcpy(block + 345, name, split);
+    }
+    memcpy(block, tail, name_len);
+    pkg_tar_octal((char*)block + 100, 8, mode & 07777u);
+    pkg_tar_octal((char*)block + 108, 8, 0);
+    pkg_tar_octal((char*)block + 116, 8, 0);
+    pkg_tar_octal((char*)block + 124, 12, is_dir ? 0 : size);
+    pkg_tar_octal((char*)block + 136, 12, mtime);
+    memset(block + 148, ' ', 8);
+    block[156] = is_dir ? '5' : '0';
+    memcpy(block + 257, "ustar", 6);
+    memcpy(block + 263, "00", 2);
+    uint32_t sum = 0;
+    for (int i = 0; i < 512; i++) sum += block[i];
+    pkg_tar_octal((char*)block + 148, 7, sum);
+    block[155] = ' ';
+    pkg_gz_write(gz, block, sizeof(block));
+    return 0;
+}
+
+static int pkg_tar_add_file(PkgGz* gz, const char* full, const char* name, uint64_t size, uint32_t mode, uint64_t mtime) {
+    if (size > 077777777777ULL) return -1;
+    if (pkg_tar_header(gz, name, 0, size, mode, mtime) != 0) return -1;
+    FILE* in = pkg_fopen(full, 0);
+    if (!in) return -1;
+    uint8_t buf[16384];
+    uint64_t left = size;
+    int rc = 0;
+    while (left) {
+        size_t want = left < sizeof(buf) ? (size_t)left : sizeof(buf);
+        size_t got = fread(buf, 1, want, in);
+        if (got != want) { rc = -1; break; }
+        pkg_gz_write(gz, buf, got);
+        left -= got;
+    }
+    fclose(in);
+    if (rc != 0) return -1;
+    size_t pad = (size_t)((512 - (size % 512)) % 512);
+    if (pad) {
+        uint8_t zeros[512] = {0};
+        pkg_gz_write(gz, zeros, pad);
+    }
+    return 0;
+}
+
+static int pkg_tar_walk(PkgGz* gz, const char* dir, const char* rel, int depth) {
+    if (depth > PKG_TAR_MAX_DEPTH) return -1;
+#if defined(_WIN32)
+    char pattern[PKG_TAR_MAX_PATH];
+    wchar_t wide[PKG_TAR_MAX_PATH];
+    if (snprintf(pattern, sizeof(pattern), "%s/*", dir) >= (int)sizeof(pattern)) return -1;
+    if (MultiByteToWideChar(CP_UTF8, 0, pattern, -1, wide, PKG_TAR_MAX_PATH) == 0) return -1;
+    WIN32_FIND_DATAW find;
+    HANDLE handle = FindFirstFileW(wide, &find);
+    if (handle == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_NOT_FOUND ? 0 : -1;
+    int rc = 0;
+    do {
+        char entry[1024];
+        if (find.cFileName[0] == L'.' && (find.cFileName[1] == 0 || (find.cFileName[1] == L'.' && find.cFileName[2] == 0))) continue;
+        if (WideCharToMultiByte(CP_UTF8, 0, find.cFileName, -1, entry, sizeof(entry), NULL, NULL) == 0) { rc = -1; break; }
+        char full[PKG_TAR_MAX_PATH], name[PKG_TAR_MAX_PATH];
+        if (snprintf(full, sizeof(full), "%s/%s", dir, entry) >= (int)sizeof(full)) { rc = -1; break; }
+        if (snprintf(name, sizeof(name), "%s%s%s", rel, rel[0] ? "/" : "", entry) >= (int)sizeof(name)) { rc = -1; break; }
+        int is_dir = (find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        uint64_t size = ((uint64_t)find.nFileSizeHigh << 32) | find.nFileSizeLow;
+        if (is_dir) {
+            if (pkg_tar_header(gz, name, 1, 0, 0755, 0) != 0 || pkg_tar_walk(gz, full, name, depth + 1) != 0) { rc = -1; break; }
+        } else if (pkg_tar_add_file(gz, full, name, size, 0644, 0) != 0) { rc = -1; break; }
+    } while (FindNextFileW(handle, &find));
+    FindClose(handle);
+    return rc;
+#else
+    DIR* d = opendir(dir);
+    if (!d) return -1;
+    int rc = 0;
+    struct dirent* e;
+    while ((e = readdir(d)) != NULL) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        char full[PKG_TAR_MAX_PATH], name[PKG_TAR_MAX_PATH];
+        if (snprintf(full, sizeof(full), "%s/%s", dir, e->d_name) >= (int)sizeof(full)) { rc = -1; break; }
+        if (snprintf(name, sizeof(name), "%s%s%s", rel, rel[0] ? "/" : "", e->d_name) >= (int)sizeof(name)) { rc = -1; break; }
+        struct stat st;
+        if (stat(full, &st) != 0) { rc = -1; break; }
+        if (S_ISDIR(st.st_mode)) {
+            if (pkg_tar_header(gz, name, 1, 0, (uint32_t)st.st_mode & 0777, (uint64_t)st.st_mtime) != 0 ||
+                pkg_tar_walk(gz, full, name, depth + 1) != 0) { rc = -1; break; }
+        } else if (S_ISREG(st.st_mode)) {
+            if (pkg_tar_add_file(gz, full, name, (uint64_t)st.st_size, (uint32_t)st.st_mode & 0777, (uint64_t)st.st_mtime) != 0) { rc = -1; break; }
+        }
+    }
+    closedir(d);
+    return rc;
+#endif
+}
+
+int32_t rt_package_create_tarball(const uint8_t* src, uint64_t src_len,
+                                  const uint8_t* out, uint64_t out_len) {
+    if (!src || !out || src_len == 0 || out_len == 0 || src_len >= PKG_TAR_MAX_PATH || out_len >= PKG_TAR_MAX_PATH) return -1;
+    char src_path[PKG_TAR_MAX_PATH], out_path[PKG_TAR_MAX_PATH];
+    memcpy(src_path, src, (size_t)src_len);
+    src_path[src_len] = '\0';
+    memcpy(out_path, out, (size_t)out_len);
+    out_path[out_len] = '\0';
+    FILE* file = pkg_fopen(out_path, 1);
+    if (!file) return -1;
+    PkgGz* gz = (PkgGz*)malloc(sizeof(PkgGz));
+    if (!gz) { fclose(file); return -1; }
+    pkg_gz_begin(gz, file);
+    int rc = pkg_tar_walk(gz, src_path, "", 0);
+    if (rc == 0) {
+        uint8_t zeros[1024] = {0};
+        pkg_gz_write(gz, zeros, sizeof(zeros));
+        rc = pkg_gz_finish(gz);
+    }
+    free(gz);
+    if (fclose(file) != 0) rc = -1;
+    return rc == 0 ? 0 : -1;
+}
+
+/* ---- inflate (RFC 1951), canonical-Huffman decode ---- */
+typedef struct {
+    const uint8_t* in;
+    size_t in_len, in_pos;
+    uint32_t bit_buf;
+    int bit_cnt;
+    uint8_t* out;
+    size_t out_len, out_cap;
+    int error;
+} PkgInf;
+
+typedef struct { uint16_t count[16]; uint16_t symbol[288]; } PkgHuff;
+
+static int pkg_inf_bits(PkgInf* s, int need) {
+    while (s->bit_cnt < need) {
+        if (s->in_pos >= s->in_len) { s->error = 1; return 0; }
+        s->bit_buf |= (uint32_t)s->in[s->in_pos++] << s->bit_cnt;
+        s->bit_cnt += 8;
+    }
+    int v = (int)(s->bit_buf & ((1u << need) - 1u));
+    s->bit_buf >>= need;
+    s->bit_cnt -= need;
+    return v;
+}
+
+static void pkg_inf_put(PkgInf* s, uint8_t b) {
+    if (s->out_len == s->out_cap) {
+        size_t cap = s->out_cap ? s->out_cap * 2 : 65536;
+        uint8_t* grown = (uint8_t*)realloc(s->out, cap);
+        if (!grown) { s->error = 1; return; }
+        s->out = grown;
+        s->out_cap = cap;
+    }
+    s->out[s->out_len++] = b;
+}
+
+static int pkg_huff_build(PkgHuff* h, const uint16_t* lengths, int n) {
+    uint16_t offs[16];
+    memset(h->count, 0, sizeof(h->count));
+    memset(h->symbol, 0, sizeof(h->symbol));
+    for (int i = 0; i < n; i++) h->count[lengths[i]]++;
+    if (h->count[0] == n) return 0;
+    int left = 1;
+    for (int len = 1; len < 16; len++) {
+        left <<= 1;
+        left -= h->count[len];
+        if (left < 0) return -1;
+    }
+    offs[1] = 0;
+    for (int len = 1; len < 15; len++) offs[len + 1] = (uint16_t)(offs[len] + h->count[len]);
+    for (int i = 0; i < n; i++) if (lengths[i]) h->symbol[offs[lengths[i]]++] = (uint16_t)i;
+    return 0;
+}
+
+static int pkg_huff_decode(PkgInf* s, const PkgHuff* h) {
+    int code = 0, first = 0, index = 0;
+    for (int len = 1; len < 16; len++) {
+        code |= pkg_inf_bits(s, 1);
+        if (s->error) return -1;
+        int count = h->count[len];
+        if (code - count < first) return h->symbol[index + (code - first)];
+        index += count;
+        first += count;
+        first <<= 1;
+        code <<= 1;
+    }
+    s->error = 1;
+    return -1;
+}
+
+static void pkg_inf_codes(PkgInf* s, const PkgHuff* lit, const PkgHuff* dist) {
+    static const uint16_t len_base[29] = {3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258};
+    static const uint16_t len_extra[29] = {0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0};
+    static const uint16_t dist_base[30] = {1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577};
+    static const uint16_t dist_extra[30] = {0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13};
+    for (;;) {
+        int sym = pkg_huff_decode(s, lit);
+        if (s->error) return;
+        if (sym < 256) { pkg_inf_put(s, (uint8_t)sym); if (s->error) return; continue; }
+        if (sym == 256) return;
+        sym -= 257;
+        if (sym >= 29) { s->error = 1; return; }
+        int len = len_base[sym] + pkg_inf_bits(s, len_extra[sym]);
+        int ds = pkg_huff_decode(s, dist);
+        if (s->error || ds < 0 || ds >= 30) { s->error = 1; return; }
+        size_t d = (size_t)dist_base[ds] + (size_t)pkg_inf_bits(s, dist_extra[ds]);
+        if (s->error || d > s->out_len) { s->error = 1; return; }
+        for (int i = 0; i < len; i++) { pkg_inf_put(s, s->out[s->out_len - d]); if (s->error) return; }
+    }
+}
+
+static void pkg_inflate(PkgInf* s) {
+    int final_block;
+    do {
+        final_block = pkg_inf_bits(s, 1);
+        int type = pkg_inf_bits(s, 2);
+        if (s->error) return;
+        if (type == 0) {
+            s->bit_buf = 0;
+            s->bit_cnt = 0;
+            if (s->in_pos + 4 > s->in_len) { s->error = 1; return; }
+            unsigned len = (unsigned)s->in[s->in_pos] | ((unsigned)s->in[s->in_pos + 1] << 8);
+            unsigned nlen = (unsigned)s->in[s->in_pos + 2] | ((unsigned)s->in[s->in_pos + 3] << 8);
+            s->in_pos += 4;
+            if (len != (~nlen & 0xffffu) || s->in_pos + len > s->in_len) { s->error = 1; return; }
+            for (unsigned i = 0; i < len; i++) { pkg_inf_put(s, s->in[s->in_pos++]); if (s->error) return; }
+        } else if (type == 1) {
+            PkgHuff lit, dist;
+            uint16_t lengths[288];
+            int i = 0;
+            for (; i < 144; i++) lengths[i] = 8;
+            for (; i < 256; i++) lengths[i] = 9;
+            for (; i < 280; i++) lengths[i] = 7;
+            for (; i < 288; i++) lengths[i] = 8;
+            pkg_huff_build(&lit, lengths, 288);
+            for (i = 0; i < 30; i++) lengths[i] = 5;
+            pkg_huff_build(&dist, lengths, 30);
+            pkg_inf_codes(s, &lit, &dist);
+        } else if (type == 2) {
+            static const uint8_t order[19] = {16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15};
+            uint16_t lengths[320];
+            int nlen = pkg_inf_bits(s, 5) + 257;
+            int ndist = pkg_inf_bits(s, 5) + 1;
+            int ncode = pkg_inf_bits(s, 4) + 4;
+            if (s->error || nlen > 286 || ndist > 30) { s->error = 1; return; }
+            int i = 0;
+            for (; i < ncode; i++) lengths[order[i]] = (uint16_t)pkg_inf_bits(s, 3);
+            for (; i < 19; i++) lengths[order[i]] = 0;
+            PkgHuff lencode, lit, dist;
+            if (s->error || pkg_huff_build(&lencode, lengths, 19) != 0) { s->error = 1; return; }
+            int idx = 0;
+            while (idx < nlen + ndist) {
+                int sym = pkg_huff_decode(s, &lencode);
+                if (s->error) return;
+                if (sym < 16) { lengths[idx++] = (uint16_t)sym; continue; }
+                int prev = 0, rep;
+                if (sym == 16) {
+                    if (idx == 0) { s->error = 1; return; }
+                    prev = lengths[idx - 1];
+                    rep = 3 + pkg_inf_bits(s, 2);
+                } else if (sym == 17) rep = 3 + pkg_inf_bits(s, 3);
+                else rep = 11 + pkg_inf_bits(s, 7);
+                if (s->error || idx + rep > nlen + ndist) { s->error = 1; return; }
+                while (rep--) lengths[idx++] = (uint16_t)prev;
+            }
+            if (lengths[256] == 0) { s->error = 1; return; }
+            if (pkg_huff_build(&lit, lengths, nlen) < 0 || pkg_huff_build(&dist, lengths + nlen, ndist) < 0) { s->error = 1; return; }
+            pkg_inf_codes(s, &lit, &dist);
+        } else {
+            s->error = 1;
+            return;
+        }
+    } while (!final_block && !s->error);
+}
+
+/* Returns a malloc'd tar byte stream, or NULL on any gzip/deflate error. */
+static uint8_t* pkg_gunzip_file(const char* path, size_t* out_len) {
+    FILE* f = pkg_fopen(path, 0);
+    if (!f) return NULL;
+    size_t cap = 0, len = 0;
+    uint8_t* data = NULL;
+    for (;;) {
+        if (len == cap) {
+            size_t ncap = cap ? cap * 2 : 65536;
+            uint8_t* grown = (uint8_t*)realloc(data, ncap);
+            if (!grown) { free(data); fclose(f); return NULL; }
+            data = grown;
+            cap = ncap;
+        }
+        size_t got = fread(data + len, 1, cap - len, f);
+        len += got;
+        if (got == 0) break;
+    }
+    fclose(f);
+    if (len < 18 || data[0] != 0x1f || data[1] != 0x8b || data[2] != 8) { free(data); return NULL; }
+    size_t pos = 10;
+    uint8_t flg = data[3];
+    if (flg & 4) { pos += 2 + (data[pos] | (data[pos + 1] << 8)); }
+    if (flg & 8) { while (pos < len && data[pos]) pos++; pos++; }
+    if (flg & 16) { while (pos < len && data[pos]) pos++; pos++; }
+    if (flg & 2) pos += 2;
+    if (pos + 8 > len) { free(data); return NULL; }
+    PkgInf s;
+    memset(&s, 0, sizeof(s));
+    s.in = data + pos;
+    s.in_len = len - pos - 8;
+    pkg_inflate(&s);
+    if (s.error) { free(s.out); free(data); return NULL; }
+    const uint8_t* tail = data + len - 8;
+    uint32_t want_crc = rt__shared_read_u32_le(tail);
+    uint32_t want_size = rt__shared_read_u32_le(tail + 4);
+    if (pkg_crc32_update(0, s.out, s.out_len) != want_crc || (uint32_t)s.out_len != want_size) {
+        free(s.out);
+        free(data);
+        return NULL;
+    }
+    free(data);
+    *out_len = s.out_len;
+    return s.out ? s.out : (uint8_t*)calloc(1, 1);
+}
+
+static int pkg_tar_name_safe(const char* name) {
+    if (!name[0] || name[0] == '/' || strchr(name, '\\') || strchr(name, ':')) return 0;
+    for (const char* p = name; *p;) {
+        const char* end = strchr(p, '/');
+        size_t n = end ? (size_t)(end - p) : strlen(p);
+        if (n == 2 && p[0] == '.' && p[1] == '.') return 0;
+        p = end ? end + 1 : p + n;
+    }
+    return 1;
+}
+
+static uint64_t pkg_tar_parse_octal(const uint8_t* field, size_t width) {
+    uint64_t v = 0;
+    for (size_t i = 0; i < width && field[i] >= '0' && field[i] <= '7'; i++) v = (v << 3) | (uint64_t)(field[i] - '0');
+    return v;
+}
+
+static int pkg_mkdir_c(const char* path) {
+    return rt_dir_create_all((const uint8_t*)path, (uint64_t)strlen(path)) ? 0 : -1;
+}
+
+int32_t rt_package_extract_tarball(const uint8_t* tarball, uint64_t tarball_len,
+                                   const uint8_t* dest, uint64_t dest_len) {
+    if (!tarball || !dest || tarball_len == 0 || dest_len == 0 || tarball_len >= PKG_TAR_MAX_PATH || dest_len >= PKG_TAR_MAX_PATH) return -1;
+    char tar_path[PKG_TAR_MAX_PATH], dest_path[PKG_TAR_MAX_PATH];
+    memcpy(tar_path, tarball, (size_t)tarball_len);
+    tar_path[tarball_len] = '\0';
+    memcpy(dest_path, dest, (size_t)dest_len);
+    dest_path[dest_len] = '\0';
+    size_t tar_len = 0;
+    uint8_t* tar = pkg_gunzip_file(tar_path, &tar_len);
+    if (!tar) return -1;
+    int rc = pkg_mkdir_c(dest_path);
+    char long_name[PKG_TAR_MAX_PATH];
+    int have_long = 0;
+    size_t pos = 0;
+    while (rc == 0 && pos + 512 <= tar_len) {
+        const uint8_t* h = tar + pos;
+        int zero = 1;
+        for (int i = 0; i < 512 && zero; i++) if (h[i]) zero = 0;
+        if (zero) break;
+        uint64_t size = pkg_tar_parse_octal(h + 124, 12);
+        size_t data_pos = pos + 512;
+        if (size > tar_len || data_pos + size > tar_len) { rc = -1; break; }
+        size_t next = data_pos + (size_t)((size + 511) / 512) * 512;
+        char type = (char)h[156];
+        if (type == 'L') {
+            if (size >= sizeof(long_name)) { rc = -1; break; }
+            memcpy(long_name, tar + data_pos, (size_t)size);
+            long_name[size] = '\0';
+            have_long = 1;
+            pos = next;
+            continue;
+        }
+        if (type == 'x' || type == 'g') { pos = next; continue; }
+        char name[PKG_TAR_MAX_PATH];
+        if (have_long) {
+            snprintf(name, sizeof(name), "%s", long_name);
+            have_long = 0;
+        } else {
+            char part[156], base[101];
+            memcpy(base, h, 100);
+            base[100] = '\0';
+            memcpy(part, h + 345, 155);
+            part[155] = '\0';
+            if (part[0]) snprintf(name, sizeof(name), "%s/%s", part, base);
+            else snprintf(name, sizeof(name), "%s", base);
+        }
+        size_t n = strlen(name);
+        while (n && name[n - 1] == '/') name[--n] = '\0';
+        if (n >= 2 && name[0] == '.' && name[1] == '/') memmove(name, name + 2, strlen(name + 2) + 1);
+        if (!strcmp(name, ".") || !name[0]) { pos = next; continue; }
+        if (!pkg_tar_name_safe(name)) { rc = -1; break; }
+        char full[PKG_TAR_MAX_PATH];
+        if (snprintf(full, sizeof(full), "%s/%s", dest_path, name) >= (int)sizeof(full)) { rc = -1; break; }
+        if (type == '5') {
+            rc = pkg_mkdir_c(full);
+        } else if (type == '0' || type == '\0') {
+            char parent[PKG_TAR_MAX_PATH];
+            snprintf(parent, sizeof(parent), "%s", full);
+            char* slash = strrchr(parent, '/');
+            if (slash) { *slash = '\0'; rc = pkg_mkdir_c(parent); }
+            FILE* f = rc == 0 ? pkg_fopen(full, 1) : NULL;
+            if (!f) { rc = -1; break; }
+            if (size && fwrite(tar + data_pos, 1, (size_t)size, f) != (size_t)size) rc = -1;
+            if (fclose(f) != 0) rc = -1;
+#if !defined(_WIN32)
+            if (rc == 0) chmod(full, (mode_t)(pkg_tar_parse_octal(h + 100, 8) & 0777));
+#endif
+        } else {
+            fprintf(stderr, "Runtime error: rt_package_extract_tarball: unsupported tar entry type 0x%02x for %s\n", (unsigned)(uint8_t)type, name);
+            rc = -1;
+        }
+        pos = next;
+    }
+    free(tar);
+    return rc == 0 ? 0 : -1;
 }
 
 /* ================================================================
@@ -255,17 +861,6 @@ static void core_host_micros_to_civil(int64_t micros, CoreHostCivilTime* out) {
     out->microsecond = tod % 1000000LL;
 }
 
-/* Copy a tagged text argument into buf as a NUL-terminated C string.
- * Returns 0 when the value is not a text or does not fit. */
-static int core_host_text_arg(int64_t value, char* buf, size_t buf_size) {
-    int64_t len = rt_string_len(value);
-    if (len < 0 || (uint64_t)len >= buf_size) return 0;
-    const uint8_t* data = rt_string_data(value);
-    if (!data && len != 0) return 0;
-    if (len != 0) memcpy(buf, data, (size_t)len);
-    buf[(size_t)len] = '\0';
-    return 1;
-}
 
 /* Snapshot links use tagged text so their extern ABI needs no raw-text MIR
  * exception. All paths here are private absolute paths emitted by the snapshot
@@ -359,15 +954,7 @@ static int core_snapshot_windows_target_kind(const char* path, int32_t kind) {
 }
 
 static wchar_t* core_snapshot_windows_raw_target(const char* target) {
-    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, target, -1, NULL, 0);
-    if (count <= 0) return NULL;
-    wchar_t* wide = (wchar_t*)malloc((size_t)count * sizeof(wchar_t));
-    if (!wide) return NULL;
-    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, target, -1, wide, count)) {
-        free(wide);
-        return NULL;
-    }
-    return wide;
+    return spl_win_utf8_to_wide(target, -1, MB_ERR_INVALID_CHARS, malloc, free, NULL);
 }
 
 static int core_snapshot_windows_match(const char* link, const char* target,
@@ -759,7 +1346,7 @@ static int64_t core_host_parse_timestamp(const char* s) {
 
 int64_t rt_timestamp_from_iso(int64_t iso_value) {
     char buf[128];
-    if (!core_host_text_arg(iso_value, buf, sizeof(buf))) return -1;
+    if (!core_text_arg(iso_value, buf, sizeof(buf))) return -1;
     return core_host_parse_timestamp(buf);
 }
 
@@ -780,7 +1367,7 @@ int64_t rt_timestamp_diff_seconds(int64_t a, int64_t b) {
  * fails closed to the empty string. */
 int64_t rt_time_format(int64_t ts_seconds, int64_t fmt_value) {
     char fmt[256];
-    if (!core_host_text_arg(fmt_value, fmt, sizeof(fmt))) return rt_string_new(NULL, 0);
+    if (!core_text_arg(fmt_value, fmt, sizeof(fmt))) return rt_string_new(NULL, 0);
     if (ts_seconds > INT64_MAX / 1000000LL || ts_seconds < INT64_MIN / 1000000LL)
         return rt_string_new(NULL, 0);
     CoreHostCivilTime ct;
@@ -840,6 +1427,181 @@ int64_t rt_cpu_count(void) {
 #endif
 }
 
+
+/* ---- CPU topology + thread pinning (build-runner fiber scheduler) ----------
+ * Platform-neutral surface behind std.nogc_sync_mut.platform.host_io:
+ *   rt_cpu_topology_count()          logical processors across ALL groups
+ *   rt_cpu_topology_field(i, f)      f: 0 group, 1 number in group (Linux/
+ *                                    FreeBSD: OS cpu id), 2 socket/package,
+ *                                    3 NUMA node; -1 when out of range
+ *   rt_thread_pin_current(i)         pin the calling thread to entry i
+ *   rt_thread_current_cpu()          (group << 16) | number of the CPU now
+ *                                    running the caller, -1 if unknown
+ * Windows enumerates every processor group (a host with > 64 logical CPUs
+ * has several; a thread stays in its process's initial group unless it is
+ * assigned explicitly with SetThreadGroupAffinity). macOS has no affinity
+ * API: pinning reports false there. Rust twin: runtime/src/cpu_topology.rs. */
+#define RT_TOPO_MAX 1024
+typedef struct { int32_t group, number, socket, numa; } RtTopoCpu;
+static RtTopoCpu spl_topo_cpus[RT_TOPO_MAX];
+static int32_t spl_topo_n = -1;
+
+#if defined(_WIN32)
+static INIT_ONCE spl_topo_once = INIT_ONCE_STATIC_INIT;
+static int spl_topo_find(LOGICAL_PROCESSOR_RELATIONSHIP rel, WORD group, BYTE number) {
+    DWORD len = 0;
+    GetLogicalProcessorInformationEx(rel, NULL, &len);
+    if (len == 0) return 0;
+    BYTE* buf = (BYTE*)malloc(len);
+    if (!buf) return 0;
+    int result = 0, index = 0;
+    if (GetLogicalProcessorInformationEx(rel, (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)buf, &len)) {
+        for (DWORD off = 0; off < len;) {
+            PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX e = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)(buf + off);
+            if (rel == RelationProcessorPackage) {
+                for (WORD g = 0; g < e->Processor.GroupCount; g++) {
+                    GROUP_AFFINITY* a = &e->Processor.GroupMask[g];
+                    if (a->Group == group && (a->Mask >> number) & 1) result = index;
+                }
+                index++;
+            } else if (rel == RelationNumaNode) {
+#if defined(__MINGW32__)
+                /* MinGW-w64 exposes the original one-group NUMA layout. */
+                GROUP_AFFINITY* a = &e->NumaNode.GroupMask;
+                if (a->Group == group && (a->Mask >> number) & 1)
+                    result = (int)e->NumaNode.NodeNumber;
+#else
+                WORD count = e->NumaNode.GroupCount ? e->NumaNode.GroupCount : 1;
+                for (WORD g = 0; g < count; g++) {
+                    GROUP_AFFINITY* a = &e->NumaNode.GroupMasks[g];
+                    if (a->Group == group && (a->Mask >> number) & 1) result = (int)e->NumaNode.NodeNumber;
+                }
+#endif
+            }
+            off += e->Size;
+        }
+    }
+    free(buf);
+    return result;
+}
+static BOOL CALLBACK spl_topo_init(PINIT_ONCE once, PVOID param, PVOID* ctx) {
+    (void)once; (void)param; (void)ctx;
+    int32_t n = 0;
+    WORD groups = GetActiveProcessorGroupCount();
+    for (WORD g = 0; g < groups && n < RT_TOPO_MAX; g++) {
+        DWORD count = GetActiveProcessorCount(g);
+        for (DWORD p = 0; p < count && n < RT_TOPO_MAX; p++) {
+            spl_topo_cpus[n].group = g;
+            spl_topo_cpus[n].number = (int32_t)p;
+            spl_topo_cpus[n].socket = spl_topo_find(RelationProcessorPackage, g, (BYTE)p);
+            spl_topo_cpus[n].numa = spl_topo_find(RelationNumaNode, g, (BYTE)p);
+            n++;
+        }
+    }
+    spl_topo_n = n;
+    return TRUE;
+}
+static void spl_topo_ensure(void) { InitOnceExecuteOnce(&spl_topo_once, spl_topo_init, NULL, NULL); }
+#else
+#include <pthread.h>
+#if defined(__linux__)
+#include <sched.h>
+#endif
+#include <dirent.h>
+#include <stdio.h>
+static pthread_once_t spl_topo_once = PTHREAD_ONCE_INIT;
+static int spl_topo_read_int(const char* path, int fallback) {
+    FILE* f = fopen(path, "r");
+    if (!f) return fallback;
+    int v = fallback;
+    if (fscanf(f, "%d", &v) != 1) v = fallback;
+    fclose(f);
+    return v;
+}
+static void spl_topo_init(void) {
+    int32_t n = 0;
+    long conf = sysconf(_SC_NPROCESSORS_CONF);
+    char path[160];
+    for (long cpu = 0; cpu < conf && n < RT_TOPO_MAX; cpu++) {
+        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%ld/online", cpu);
+        if (cpu > 0 && spl_topo_read_int(path, 1) == 0) continue;
+        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%ld/topology/physical_package_id", cpu);
+        int socket = spl_topo_read_int(path, 0);
+        int numa = 0;
+        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%ld", cpu);
+        DIR* d = opendir(path);
+        if (d) {
+            struct dirent* ent;
+            while ((ent = readdir(d)) != NULL) {
+                if (strncmp(ent->d_name, "node", 4) == 0 && ent->d_name[4] >= '0' && ent->d_name[4] <= '9') {
+                    numa = atoi(ent->d_name + 4);
+                    break;
+                }
+            }
+            closedir(d);
+        }
+        spl_topo_cpus[n].group = 0;
+        spl_topo_cpus[n].number = (int32_t)cpu;
+        spl_topo_cpus[n].socket = socket < 0 ? 0 : socket;
+        spl_topo_cpus[n].numa = numa;
+        n++;
+    }
+    spl_topo_n = n;
+}
+static void spl_topo_ensure(void) { pthread_once(&spl_topo_once, spl_topo_init); }
+#endif
+
+int64_t rt_cpu_topology_count(void) {
+    spl_topo_ensure();
+    return spl_topo_n;
+}
+
+int64_t rt_cpu_topology_field(int64_t index, int64_t field) {
+    spl_topo_ensure();
+    if (index < 0 || index >= spl_topo_n) return -1;
+    const RtTopoCpu* c = &spl_topo_cpus[index];
+    switch (field) {
+        case 0: return c->group;
+        case 1: return c->number;
+        case 2: return c->socket;
+        case 3: return c->numa;
+        default: return -1;
+    }
+}
+
+bool rt_thread_pin_current(int64_t index) {
+    spl_topo_ensure();
+    if (index < 0 || index >= spl_topo_n) return false;
+    const RtTopoCpu* c = &spl_topo_cpus[index];
+#if defined(_WIN32)
+    GROUP_AFFINITY affinity;
+    memset(&affinity, 0, sizeof(affinity));
+    affinity.Group = (WORD)c->group;
+    affinity.Mask = (KAFFINITY)1 << c->number;
+    return SetThreadGroupAffinity(GetCurrentThread(), &affinity, NULL) != 0;
+#elif defined(__linux__)
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(c->number, &set);
+    return pthread_setaffinity_np(pthread_self(), sizeof(set), &set) == 0;
+#else
+    (void)c;
+    return false;
+#endif
+}
+
+int64_t rt_thread_current_cpu(void) {
+#if defined(_WIN32)
+    PROCESSOR_NUMBER pn;
+    GetCurrentProcessorNumberEx(&pn);
+    return ((int64_t)pn.Group << 16) | (int64_t)pn.Number;
+#elif defined(__linux__)
+    int cpu = sched_getcpu();
+    return cpu < 0 ? -1 : (int64_t)cpu;
+#else
+    return -1;
+#endif
+}
 /* OS CSPRNG fill -- same provider shape as rt_random_hex in runtime_native.c
  * (BCryptGenRandom via bcrypt.dll on Windows, /dev/urandom elsewhere).
  * Returns 0 on failure; never degrades to a weak source. */

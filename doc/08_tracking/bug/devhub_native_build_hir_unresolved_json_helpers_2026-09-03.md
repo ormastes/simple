@@ -1,11 +1,12 @@
 # devhub native-build fails in HIR: `unresolved name: json_object_get` (+89 more)
-## Open 2026-09-16 — needs owner triage
+## SUPERSEDED 2026-11-11 (lane p3-compiler4) — defect class fixed-at-tip
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-03
-- Status: OPEN
+- Status: SUPERSEDED 2026-11-11 (lane p3fix-comp6-20261111) — defect class fixed at tip
+  (bb27a92a7a8 + facade-owner fixes); re-verified fresh-seed (see triage addenda)
 - Platform observed: Windows x86_64-pc-windows-msvc
 - Severity: blocks the entire devhub compiler/native lane
 
@@ -110,3 +111,111 @@ on a 7-line json program. `[mir-lower] WARNING: unresolved method call
 those runs, so any future "successful" devhub build is suspect until they are
 addressed.
 
+## Status 2026-11-05 — NOT REPRODUCIBLE on release/1.0.0 (defect class fixed)
+
+Verified on branch `work/rel100-devhub-fixes-20261105` @ `c3b2271c310`:
+
+1. **Data side (this record's "repaired data-side" commits) is merged here.**
+   `src/lib/common/json/__init__.spl` now declares real `export use`
+   owner-module edges (`common.json.{array_ops,object_ops,parser,path_ops,
+   serializer,types,utilities,validation}.*`), and the file_system facade has
+   likewise (facade-owner fix `0a3963ca0d5` reachable from HEAD).
+2. **Compiler side is merged here.** `bb27a92a7a8` ("fix(compiler,lib): four
+   native-build defects — devhub 175→21, MIR module globals, caret suite,
+   diagnostics transport (#345)") is an ancestor of HEAD.
+3. **Re-ran the original repro** with the tracked `bin/simple.exe` seed:
+
+   ```
+   bin/simple.exe native-build src/app/devhub/main.spl -o build/devhub-lane/devhub_native.exe
+   ```
+
+   The log contains **zero** `unresolved name` / `invalid export origin` /
+   `unresolved type` lines — HIR name resolution, the phase this record's
+   175-error census died in, is clean. The build proceeded deep into later
+   phases and was killed at a 20-minute wall-clock cap during codegen; no
+   artifact was produced in this session.
+4. **Interpreter lane still healthy:** `bin/simple.exe run
+   src/app/devhub/main.spl --version` prints `devhub 0.1.0` (exit 0), and the
+   full `test/01_unit/app/devhub` suite runs 1046+ examples with only one
+   unrelated, separately-explained failure (see below).
+
+**Still open, tracked elsewhere (not this record):** the remaining 21-error
+census and the post-HIR MIR/SEGV warnings named in the UPDATE above remain the
+subject of the sibling records (`hir_generic_type_param_unresolved_cross_module`,
+`print_raw_builtin_unknown_to_selfhosted_hir`,
+`implicit_self_field_read_unresolved_in_plain_fn_method`, and the unfiled
+`rt_env_cwd` item) plus the stage2 SEGV-after-monomorphize caveat.
+
+**Suite note for the merge owner:** in the directory-mode unit sweep,
+`test/01_unit/app/devhub/wiki_backend_routing_spec.spl` fails 15/1 while the
+same file passes 16/16 when run alone. Root cause (verified by env diff and
+stderr capture): the directory runner exports `SIMPLE_JIT_ENABLED=1` to route
+children (single-file runs instead set `SIMPLE_EXECUTION_MODE=interpret`), so
+the spec's last test — which spawns the real `bin/itf wiki --help` — executes
+devhub through the seed JIT. The seed JIT then reports 23 pre-existing
+`[CODEGEN-STUB-FALLBACK] body compilation failed` errors, all in
+`src/lib/{gc_async_mut,nogc_async_mut,nogc_sync_mut}/http_client/request.spl`
+(`GlobalLoad: unresolved identifier 'request'` in `create_headers`,
+`add_header`, `send_request`, `http_get/post/put/delete`, `response_*`),
+unrelated to the `errors.spl` `kind` regression that test guards. None of the
+23 failing functions are in `src/app/devhub/**`; fixing them belongs to the
+http_client/seed-JIT lane. No source change was made for this record.
+
+
+
+## Triage 2026-11-10 (p3-boot4 lane, assignment row 31)
+
+**Verdict: SUPERSEDED (defect class fixed; corroborated + fresh seed-smoke).**
+
+Re-verified at this lane's base (origin/release/1.0.0):
+
+- Compiler fix `bb27a92a7a8` (devhub 175→21 among four native-build fixes)
+  is an ancestor of this base.
+- `src/lib/common/json/__init__.spl` (14 lines) now declares real `export
+  use` owner-module edges (`common.json.{array_ops,object_ops,parser,
+  path_ops,serializer,types,utilities,validation}.*`), and the facade
+  closure defect that made those edges necessary
+  (`entry_closure_drops_facade_reexport_owner_modules_2026-09-03.md`) is
+  fixed via `7d8820319a2` / `5334d6c7b3d` / `4a5b072e594` — all ancestors.
+- Fresh seed-smoke (worktree Rust seed `bin/simple.exe`, label seed-smoke):
+  `bin/simple.exe run src/app/devhub/main.spl --version` → `devhub 0.1.0`,
+  exit 0 (2026-11-10).
+
+The remaining sibling items (search `Id`, `print_raw`, `errors.spl kind`,
+`rt_env_cwd`, stage2 SEGV-after-monomorphize) are tracked in their own
+records, not this one. No change made in this lane.
+
+## Triage 2026-11-11 (p3-compiler4 lane, batch 4 row 2) — SUPERSEDED
+
+Corroborates the 2026-11-05 and 2026-11-10 (p3-boot4) triages with fresh
+seed-smoke at this lane's base:
+
+- Facade owner edges present: `src/lib/common/json/__init__.spl` declares real
+  `export use` owner-module edges; compiler fix `bb27a92a7a8` and the closure-defect fixes
+  (`7d8820319a2` / `5334d6c7b3d` / `4a5b072e594`) are ancestors of the base.
+- Seed-smoke (2026-11-11 refreshed seed, interpreter):
+  `bin/simple.exe run src/app/devhub/main.spl --version` -> `devhub 0.1.0`,
+  exit 0. HIR name resolution, the phase this record's 175-error census died
+  in, is clean on the interpreter lane.
+
+Sibling items (search `Id`, `print_raw`, `errors.spl kind`, `rt_env_cwd`,
+stage2 SEGV-after-monomorphize) remain tracked in their own records. No code
+change.
+
+
+---
+
+## 2026-11-11 (lane p3fix-comp6-20261111) — Status flipped SUPERSEDED
+
+Independent re-verification on this lane's fresh worktree (base
+`bf946163122f`, tracked seed `bin/simple.exe`):
+
+`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe run
+src/app/devhub/main.spl --version` → **`devhub 0.1.0`, exit 0** —
+HIR name resolution (the phase this record's 175-error census died in)
+is clean on the interpreter lane of the fresh seed. Absorber: compiler
+fix `bb27a92a7a8` (devhub 175→21) plus the facade-owner data fixes and
+closure-defect fixes, all ancestors of the base (per the 2026-11-05,
+2026-11-10 p3-boot4, and 2026-11-11 p3-compiler4 triages above).
+Sibling items remain tracked in their own records. Status line flipped
+from OPEN.

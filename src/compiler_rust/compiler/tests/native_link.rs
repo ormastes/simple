@@ -17,7 +17,6 @@ use simple_compiler::codegen::Codegen;
 use simple_compiler::hir::Lowerer;
 use simple_compiler::linker::LinkerBuilder;
 use simple_compiler::module_resolver::ModuleResolver;
-use simple_compiler::monomorphize::monomorphize_module;
 
 const STACK_SIZE: usize = 16 * 1024 * 1024;
 
@@ -40,9 +39,6 @@ fn compile_file_to_object(
     // Parse
     let mut parser = simple_parser::Parser::new(source);
     let ast = parser.parse().map_err(|e| format!("parse: {e}"))?;
-
-    // Mono
-    let ast = monomorphize_module(&ast);
 
     // HIR
     let root = project_root();

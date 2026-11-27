@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+import { atomicWriteDurable } from "./directory_fsync.js";
 import { canonicalJson, freezeDeep, ZERO_HASH } from "./canonical.js";
 import { canonicalSnapshotTuple as canonicalModelSnapshotTuple, createSnapshotId } from "../model/identity.js";
 import { safeNamespace } from "../workspace/paths.js";
@@ -133,10 +134,7 @@ export function createSnapshotMetadata(input) {
 }
 
 function atomicWrite(path, text) {
-  mkdirSync(dirname(path), { recursive: true });
-  const temporary = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(temporary, text, { encoding: "utf8", flag: "wx" });
-  renameSync(temporary, path);
+  atomicWriteDurable(path, text, { mode: 0o644 });
 }
 
 export class ImmutableSnapshotStore {

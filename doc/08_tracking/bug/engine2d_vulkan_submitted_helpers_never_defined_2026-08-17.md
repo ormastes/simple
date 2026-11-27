@@ -1,6 +1,15 @@
 # engine2d imported five `vulkan_submitted_*` helpers that were never defined
 
 - **Status:** FIXED 2026-08-17 (implemented) — commit adding them to `backend_vulkan.spl`.
+- **Re-verified 2026-11-05 (vulkan-fixes lane):** all five helpers present at
+  `src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl:808-866` (plus the
+  shared `_vulkan_submission_is_proven` predicate at :738), and
+  `test/01_unit/lib/gpu/engine2d/vulkan_submitted_helpers_spec.spl` passes
+  12/12 on the seed interpreter (was un-runnable before the fix — the import
+  line itself is the red-first half). No bug_db.sdn row exists for this id;
+  the doc is the authority.
+- **Status: wait verification** — interpreter-verified; native GPU lane
+  verification pending.
 - **Found:** lane ENGINE2D2, while repairing the
   `VulkanBackend.fenced_submission_generation` whole-module de-JIT.
 - **Tool attribution:** Rust SEED (`bin/simple`, `bin/simple run`).

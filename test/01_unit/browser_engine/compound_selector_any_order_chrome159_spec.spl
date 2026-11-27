@@ -1,0 +1,76 @@
+"""
+## Purpose and audience
+Purpose: Pin that a compound selector matches with its `tag`, `#id` and
+`.class` parts in ANY order (Selectors 4 §3.1), not only `tag#id.class`.
+Audience: browser-engine selector maintainers.
+
+Chrome oracle (Chrome 159, 900x2000, `div{width:10px}`, matching rule sets
+`width:77px`, getBoundingClientRect width, 2026-11-16):
+
+| selector        | element                          | width |
+|-----------------|----------------------------------|------:|
+| `div.a.b#t1`    | `<div id=t1 class="b a">`        | 77 |
+| `.a#t2`         | `<div id=t2 class="a">`          | 77 |
+| `div.a#t3.b`    | `<div id=t3 class="b a">`        | 77 |
+| `#t4.a`         | `<div id=t4 class="a">`          | 77 |
+| `div.a#u5`      | `<div id=t5 class="a">` (id differs)  | 10 |
+| `*.a#t6`        | `<div id=t6 class="a">`          | 77 |
+| `span.a#t7`     | `<div id=t7 class="a">` (tag differs) | 10 |
+
+Specificity counts every part in any order (same oracle): `#s1.a.b{30px}` (1,2,0) beats a later
+`#s1.a{20px}` (1,1,0) -> 30; `.a#s2{30px}` (1,1,0) beats a later `#s2{20px}` (1,0,0) -> 30.
+
+Filed as `compound_tag_class_id` in
+doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-COMPOUND-SELECTOR-ORDER-001 — compound selector parts match in any order.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core_selectors.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val PAGE: text = "<html><head><style>body{{margin:0}} div{{width:10px;height:5px}}" +
+    " div.a.b#t1{{width:77px}} .a#t2{{width:77px}} div.a#t3.b{{width:77px}} #t4.a{{width:77px}}" +
+    " div.a#u5{{width:77px}} *.a#t6{{width:77px}} span.a#t7{{width:77px}} #s1.a.b{{width:30px}} #s1.a{{width:20px}} .a#s2{{width:30px}} #s2{{width:20px}}</style></head><body>" +
+    "<div id=t1 class=\"b a\"></div><div id=t2 class=\"a\"></div><div id=t3 class=\"b a\"></div>" +
+    "<div id=t4 class=\"a\"></div><div id=t5 class=\"a\"></div><div id=t6 class=\"a\"></div>" +
+    "<div id=t7 class=\"a\"></div>" +
+    "<div id=s1 class=\"a b\"></div><div id=s2 class=\"a\"></div>" +
+    "</body></html>"
+
+fn _w(id: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "w")
+
+describe "compound selector parts match in any order":
+    it "AC-1: tag, two classes, then id":
+        expect(_w("t1")).to_equal("77")
+
+    it "AC-2: class then id":
+        expect(_w("t2")).to_equal("77")
+
+    it "AC-3: id between classes":
+        expect(_w("t3")).to_equal("77")
+
+    it "AC-4: id then class":
+        expect(_w("t4")).to_equal("77")
+
+    it "AC-5: a different id does not match":
+        expect(_w("t5")).to_equal("10")
+
+    it "AC-6: universal tag with class and id":
+        expect(_w("t6")).to_equal("77")
+
+    it "AC-7: a different tag does not match":
+        expect(_w("t7")).to_equal("10")
+
+    it "AC-8: two classes after an id outweigh one":
+        step("Chrome 159: #s1.a.b (1,2,0) beats the later #s1.a (1,1,0)")
+        expect(_w("s1")).to_equal("30")
+
+    it "AC-9: a class before the id still counts":
+        step("Chrome 159: .a#s2 (1,1,0) beats the later #s2 (1,0,0)")
+        expect(_w("s2")).to_equal("30")

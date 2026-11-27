@@ -51,3 +51,23 @@ translation rows.
 Native Linux Vulkan RenderDoc capture succeeds. Translation rows remain
 host-supported-but-failing, never reported as native DirectX/Metal or passes.
 
+
+## Triage 2026-11-25 (p3-bam lane, Windows worktree) — status header normalized, still environment-blocked
+
+This record's headers disagree: the top line says "Closed 2026-09-16" (a
+bookkeeping classification from the ledger normalization pass, explicitly
+"not a re-run of the repro") while the Status section below still says
+"Open; blocks Linux DirectX-on-Vulkan and Metal-on-Vulkan RenderDoc
+capture." Neither is backed by an executed re-verification.
+
+Triage disposition: **UNVERIFIED — environment-blocked.** The only faithful
+repro requires a Linux host with RenderDoc (`renderdoccmd`), a Vulkan ICD,
+and the engine2d capture pipeline; none of that exists on this Windows
+verification host, and the mis-resolution (runtime-selected backend text →
+`VulkanBackend.create()` binding to `compiler.backend.vulkan_backend`'s
+`create(vk_version)`) is inside the same-named-class static-call resolver,
+which cannot be exercised end-to-end without that pipeline. Per ledger rules
+the entry is left as-is — neither re-opened nor confirmed closed. Read the
+2026-09-16 "Closed" header as bookkeeping only; if the RenderDoc capture
+lane is next exercised on Linux, re-run the dynamic translation probe and
+record the result here.

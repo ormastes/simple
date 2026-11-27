@@ -236,6 +236,110 @@ pub(crate) fn byte_array_write_span(
     }
 }
 
+/// The one bounds rule (and message) for every `fill_span` destination.
+/// Mirrors `write_span_range_check`; the native twins print the same text.
+pub(crate) fn fill_span_range_check(dst_len: usize, dst_off: i64, count: i64) -> Result<(), CompileError> {
+    let dst_len = dst_len as i64;
+    if dst_off < 0 || dst_off.checked_add(count).is_none_or(|end| end > dst_len) {
+        let ctx = ErrorContext::new()
+            .with_code(codes::INDEX_OUT_OF_BOUNDS)
+            .with_help("fill_span never grows the destination; ensure dst_off+count <= dst.len()");
+        return Err(CompileError::semantic_with_context(
+            format!("fill_span out of range: dst_off={dst_off} count={count} dst_len={dst_len}"),
+            ctx,
+        ));
+    }
+    Ok(())
+}
+
+/// Volatile in-place fill of a boxed/packed-word array:
+/// `dst[dst_off..dst_off+count] = value`. Returns the count written.
+///
+/// Compiler-owned twin of `rt_array_fill_span` (both runtimes). The write
+/// happens on the caller's exclusive storage -- every owner reaches this
+/// kernel through `Arc::make_mut` on the place it resolved -- so no raw
+/// pointer ever leaves the runtime boundary and no per-element allocation
+/// happens. `count <= 0` is a no-op returning 0; an out-of-range span never
+/// writes. Bug: doc/08_tracking/bug/secure_memory_interpreter_raw_pointer_aliasing_2026-08-24.md
+pub(crate) fn array_fill_span(
+    dst: &mut crate::value::ArrayData,
+    dst_off: i64,
+    count: i64,
+    value: &Value,
+) -> Result<i64, CompileError> {
+    if count <= 0 {
+        return Ok(0);
+    }
+    fill_span_range_check(dst.len(), dst_off, count)?;
+    let (d, n) = (dst_off as usize, count as usize);
+    for k in 0..n {
+        dst.assign_index(d + k, value.clone());
+    }
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    Ok(count)
+}
+
+/// Volatile in-place fill of packed `[u8]` storage. A byte-representable
+/// value (`u8`, or an `Int` in `0..=255`, exactly what an index store accepts)
+/// is written with `write_volatile` and sealed with a SeqCst fence, so a
+/// secret wipe is never elided; any other value widens the destination to
+/// boxed values exactly as `write_span` does.
+pub(crate) fn byte_array_fill_span(
+    dst: &mut Vec<u8>,
+    dst_off: i64,
+    count: i64,
+    value: &Value,
+) -> Result<ByteSpanWrite, CompileError> {
+    if count <= 0 {
+        return Ok(ByteSpanWrite::InPlace(0));
+    }
+    fill_span_range_check(dst.len(), dst_off, count)?;
+    let (d, n) = (dst_off as usize, count as usize);
+    let byte = match value {
+        Value::UInt { value, width: 8 } => u8::try_from(*value).ok(),
+        Value::Int(value) => u8::try_from(*value).ok(),
+        _ => None,
+    };
+    match byte {
+        Some(byte) => {
+            let base = dst[d..d + n].as_mut_ptr();
+            for k in 0..n {
+                // SAFETY: `d + k < dst.len()` was validated above and `base`
+                // points into the uniquely borrowed `dst`.
+                unsafe { base.add(k).write_volatile(byte) };
+            }
+            std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+            Ok(ByteSpanWrite::InPlace(count))
+        }
+        None => {
+            let mut widened = Value::byte_array_values(dst);
+            for slot in &mut widened[d..d + n] {
+                *slot = value.clone();
+            }
+            Ok(ByteSpanWrite::Widened(widened, count))
+        }
+    }
+}
+
+/// Evaluate `fill_span(dst_off, count, value)`'s operands once, in order.
+pub(crate) fn eval_fill_span_args(
+    args: &[Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<(i64, i64, Value), CompileError> {
+    let dst_off = eval_arg(args, 0, Value::Int(-1), env, functions, classes, enums, impl_methods)?
+        .as_int()
+        .unwrap_or(-1);
+    let count = eval_arg(args, 1, Value::Int(0), env, functions, classes, enums, impl_methods)?
+        .as_int()
+        .unwrap_or(0);
+    let value = eval_arg(args, 2, Value::Int(0), env, functions, classes, enums, impl_methods)?;
+    Ok((dst_off, count, value))
+}
+
 /// A value packed `[u8]` storage can hold without changing what reading it
 /// back yields: exactly a `u8`-typed value.
 fn packed_byte_of(value: &Value) -> Option<u8> {
@@ -318,6 +422,17 @@ pub fn handle_packed_array_methods(
                 Value::Int(count)
             }
         }
+        // Same evaluation order and errors as the boxed `fill_span` arm.
+        "fill_span" => {
+            let (dst_off, count, _value) =
+                eval_fill_span_args(args, env, functions, classes, enums, impl_methods)?;
+            if count <= 0 {
+                Value::Int(0)
+            } else {
+                fill_span_range_check(arr.len(), dst_off, count)?;
+                Value::Int(count)
+            }
+        }
         _ => return Ok(None),
     }))
 }
@@ -327,6 +442,34 @@ pub(crate) fn array_push_value(arr: &[Value], item: Value) -> Value {
     let mut result = arr.to_vec();
     result.push(item);
     Value::array(result)
+}
+
+/// Shared array sum semantics for direct (`interpreter_method`) and chained
+/// (`interpreter_helpers::method_dispatch`) receivers.
+pub(crate) fn sum_array_values(arr: &[Value]) -> Value {
+    let mut total: i64 = 0;
+    let mut ftotal = 0.0f64;
+    let mut has_float = false;
+    for item in arr {
+        match item {
+            Value::Int(n) => total = total.wrapping_add(*n),
+            Value::UInt { value, .. } => total = total.wrapping_add(*value as i64),
+            Value::Float(f) => {
+                has_float = true;
+                ftotal += *f;
+            }
+            Value::Float32(f) => {
+                has_float = true;
+                ftotal += *f as f64;
+            }
+            _ => {}
+        }
+    }
+    if has_float {
+        Value::Float(total as f64 + ftotal)
+    } else {
+        Value::Int(total)
+    }
 }
 
 /// Handle Array methods
@@ -347,38 +490,33 @@ pub fn handle_array_methods(
         "is_empty" => Value::Bool(arr.is_empty()),
         "first" => arr.first().cloned().unwrap_or(Value::Nil),
         "last" => arr.last().cloned().unwrap_or(Value::Nil),
-        "get" => {
-            let idx = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            arr.get(idx).cloned().unwrap_or(Value::Nil)
-        }
-        // Array `at`: bounds-checked element access returning a real
-        // `Option` -- `Value::some(elem)` in range, `Value::none()` otherwise.
+        // Array `get` / `at`: bounds-checked element access under the FLAT
+        // Option encoding — the bare element in range, `Value::Nil` otherwise
+        // (including negative indices, which are signed-checked and never
+        // saturate to 0).
         //
-        // Until this arm existed the seed had NO array `at` at all: the only
-        // `at` binding was the *text* one (`"char_at" | "at" =>
-        // rt_string_char_at`). Every `arr.at(i)` therefore fell to
-        // `_ => Ok(None)` ("unhandled"). On this interpreter that surfaced
-        // loudly as "method `at` not found on type `array`", but on the JIT and
-        // native-LLVM lanes the same gap silently yields `nil`, which reads as
-        // `None` for EVERY index -- in-range hits included, and
-        // indistinguishable from a genuinely absent element. See
-        // doc/08_tracking/bug/array_at_returns_nil_for_every_index_2026-08-01.md.
+        // Owner decision (2026-11-09, array_get_contract_drift_crypto_2026-10-18):
+        // `a.get(i)` returns `T?` on EVERY lane; `a[i]` is the direct form.
+        // `.get(i)` and `.at(i)` are the same operation. The original seed
+        // implementation of that decision returned a BOXED `Value::some(elem)`,
+        // diverging from the pure-Simple interpreter's flat encoding (bare
+        // word = Some payload, nil = None — see its
+        // `match_enum_variant_pattern`). That divergence broke every
+        // `arr.get(i).<method>(...)` chain in the stdlib (e.g. the js engine's
+        // `parts.get(i).trim()`, seedfix 2026-11-11) with
+        // "method not found on value of type enum in nested call context".
+        // Flat returns plus the matcher's flat `Some` arm (interpreter_patterns.rs)
+        // restore pure-Simple parity: chains work AND `Some(v)`/`None` patterns
+        // bind. JIT/native lanes keep their typed Optional form untouched.
         //
-        // Note this must build an actual Option, NOT the "flat" encoding the
-        // pure-Simple interpreter uses (where the bare element stands for
-        // `Some`). This interpreter's pattern matcher rejects a bare `i64`
-        // against `Some(v)`/`None` with "match expression exhausted", so
-        // returning the element directly trades a loud missing-method error for
-        // a loud missing-pattern one.
-        //
-        // The index is read as *signed* on purpose. The `get` arm above uses
-        // `eval_arg_usize`, which cannot represent `at(-1)`; a negative index
-        // must resolve to `None`, not wrap around to a huge positive one.
-        "at" => {
+        // The index is read as *signed* on purpose: `eval_arg_usize` cannot
+        // represent `at(-1)`; a negative index must resolve to absent, not
+        // wrap (or saturate) to another element.
+        "get" | "at" => {
             let idx_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             match idx_val {
-                Value::Int(idx) if idx >= 0 && (idx as usize) < arr.len() => Value::some(arr[idx as usize].clone()),
-                _ => Value::none(),
+                Value::Int(idx) if idx >= 0 && (idx as usize) < arr.len() => arr[idx as usize].clone(),
+                _ => Value::Nil,
             }
         }
         "has" | "contains" => {
@@ -443,6 +581,20 @@ pub fn handle_array_methods(
                     _ => write_span_source(&src)?.len(),
                 };
                 write_span_range_check(arr.len(), src_len, dst_off, src_off, count)?;
+                Value::Int(count)
+            }
+        }
+        // Bulk in-place volatile fill: validation and count only, exactly like
+        // `write_span` above -- the owning caller performs the write on the
+        // place it resolved (identifier fast path / place-mutation leaf /
+        // `evaluate_method_call_with_self_update` write-back).
+        "fill_span" => {
+            let (dst_off, count, _value) =
+                eval_fill_span_args(args, env, functions, classes, enums, impl_methods)?;
+            if count <= 0 {
+                Value::Int(0)
+            } else {
+                fill_span_range_check(arr.len(), dst_off, count)?;
                 Value::Int(count)
             }
         }
@@ -617,13 +769,14 @@ pub fn handle_array_methods(
             Value::text_from_bytes(joined)
         }
         "sum" => {
-            let mut total: i64 = 0;
-            for item in arr {
-                if let Value::Int(n) = item {
-                    total += n;
-                }
-            }
-            Value::Int(total)
+            // `[u8]`/`[u16]`/`[u32]`/`[u64]` elements are `Value::UInt`; they
+            // used to be skipped, so `[0xffffffffu32, 3u32].sum()` was 0 here
+            // while the JIT (`rt_array_sum`) returned the real sum. Same i64
+            // two's-complement wrap as the C lane. A float element promotes the
+            // result to float(int_sum) + float_sum, as `rt_array_sum` does
+            // (floats were skipped too, so `[1.5, 2.25].sum()` was 0).
+            // doc/08_tracking/bug/interp_unsigned_array_sum_returns_zero_2026-11-23.md
+            sum_array_values(arr)
         }
         "index_of" => {
             let needle = args
@@ -650,6 +803,59 @@ pub fn handle_array_methods(
                 _ => super::numeric_ordering(a, b).unwrap_or(std::cmp::Ordering::Equal),
             });
             Value::array(new_arr)
+        }
+        "sort_by" => {
+            // `xs.sort_by(\a, b: a - b)`: comparator returns an int (sign is the
+            // ordering) or a bool (true = a before b). Stable merge sort so a
+            // comparator error propagates instead of panicking.
+            let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let mut items = arr.to_vec();
+            let mut width = 1;
+            while width < items.len() {
+                let mut merged = Vec::with_capacity(items.len());
+                let mut start = 0;
+                while start < items.len() {
+                    let mid = (start + width).min(items.len());
+                    let end = (start + 2 * width).min(items.len());
+                    let (mut i, mut j) = (start, mid);
+                    while i < mid && j < end {
+                        // reduce over [right] with init left calls func(left, right).
+                        let ord = eval_array_reduce(
+                            &[items[j].clone()],
+                            items[i].clone(),
+                            func.clone(),
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?;
+                        let right_first = match ord {
+                            Value::Int(n) => n > 0,
+                            Value::Bool(b) => !b,
+                            other => {
+                                return Err(CompileError::semantic(format!(
+                                    "sort_by comparator must return an int or bool, got {}",
+                                    other.type_name()
+                                )))
+                            }
+                        };
+                        // Ties keep the left element first (stable).
+                        if right_first {
+                            merged.push(items[j].clone());
+                            j += 1;
+                        } else {
+                            merged.push(items[i].clone());
+                            i += 1;
+                        }
+                    }
+                    merged.extend_from_slice(&items[i..mid]);
+                    merged.extend_from_slice(&items[j..end]);
+                    start = end;
+                }
+                items = merged;
+                width *= 2;
+            }
+            Value::array(items)
         }
         "sort_desc" => {
             let mut new_arr = arr.to_vec();
@@ -872,7 +1078,7 @@ pub fn handle_array_methods(
         }
         "group_by" => {
             let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            let mut groups: HashMap<String, Vec<Value>> = HashMap::new();
+            let mut groups: indexmap::IndexMap<String, (Value, Vec<Value>)> = indexmap::IndexMap::new();
             if let Value::Lambda {
                 params,
                 body,
@@ -885,11 +1091,17 @@ pub fn handle_array_methods(
                         local_env.insert(param.clone(), item.clone());
                     }
                     let key = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
-                    let key_str = key.to_key_string();
-                    groups.entry(key_str).or_default().push(item.clone());
+                    groups
+                        .entry(key.to_key_string())
+                        .or_insert_with(|| (key, Vec::new()))
+                        .1
+                        .push(item.clone());
                 }
             }
-            let result: HashMap<String, Value> = groups.into_iter().map(|(k, v)| (k, Value::array(v))).collect();
+            let result: crate::value::DictMap = groups
+                .into_iter()
+                .map(|(k, (key, v))| (k, Value::wrap_dict_entry(&key, Value::array(v))))
+                .collect();
             Value::Dict(Arc::new(result))
         }
         "compact" => {
@@ -1013,6 +1225,17 @@ pub fn handle_array_methods(
         "clear" => {
             // Return empty array (functional style - original is not modified)
             Value::array(vec![])
+        }
+        "reserve" => {
+            // `[T].reserve(additional)` is a capacity hint (std `Reserve`
+            // trait: `fn reserve(additional: usize)`): it never changes
+            // contents. The interpreter's `Vec<Value>` model has implicit
+            // capacity, so the only observable work is evaluating the
+            // argument; the receiver is untouched (deliberately NOT in the
+            // self-update MUTATING_METHODS list -- write-back would clobber
+            // the receiver with this unit value).
+            let _additional = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
+            Value::Nil
         }
         "sorted" => {
             // Alias for sort - returns a new sorted array
@@ -1251,6 +1474,13 @@ pub fn handle_byte_array_methods(
         match method {
             "len" | "length" => return Ok(Some(Value::Int(bytes.len() as i64))),
             "is_empty" => return Ok(Some(Value::Bool(bytes.is_empty()))),
+            // The packed payload, as `rt_array_data_ptr` returns it. Widening
+            // first (below) answered with the `Vec<Value>` cell pointer, so FFI
+            // consumers read tagged value cells instead of the bytes
+            // (seed_interp_mut_out_param_writeback_and_u8_data_ptr_2026-08-31, gap 2).
+            // `bytes` borrows the value's shared `Arc<Vec<u8>>`, so the pointer
+            // stays valid while the caller retains the array.
+            "ptr" | "data_ptr" => return Ok(Some(Value::Int(bytes.as_ptr() as i64))),
             _ => {}
         }
     }
@@ -1340,6 +1570,28 @@ mod byte_array_metadata_fast_path_tests {
         }
     }
 
+    /// seed_interp_mut_out_param_writeback_and_u8_data_ptr_2026-08-31 gap 2:
+    /// `[u8].data_ptr()` must address the packed bytes, not widened value cells.
+    #[test]
+    fn byte_array_data_ptr_addresses_the_packed_payload() {
+        for value in [
+            Value::byte_array(vec![1, 2, 3, 4]),
+            Value::frozen_byte_array(vec![1, 2, 3, 4]),
+        ] {
+            for method in ["data_ptr", "ptr"] {
+                let ptr = call_value(value.clone(), method, &[])
+                    .expect("data_ptr")
+                    .as_int()
+                    .expect("int pointer");
+                let (Value::ByteArray(bytes) | Value::FrozenByteArray(bytes)) = &value else { unreachable!() };
+                assert_eq!(ptr, bytes.as_ptr() as i64, "{method} must return the packed byte pointer");
+                // SAFETY: `ptr` addresses `bytes`, which `value` keeps alive here.
+                let word = unsafe { std::ptr::read_unaligned(ptr as *const u32) };
+                assert_eq!(word, 0x0403_0201);
+            }
+        }
+    }
+
     #[test]
     fn bytes_evidence_byte_array_fallback_and_mutation_contracts_are_unchanged() {
         let bogus_arg = [Argument::new(None, Expr::Integer(99))];
@@ -1397,7 +1649,7 @@ pub fn handle_fixed_size_array_methods(
 /// Handle FrozenDict methods (read-only operations only)
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_frozen_dict_methods(
-    map: &std::sync::Arc<HashMap<String, Value>>,
+    map: &std::sync::Arc<crate::value::DictMap>,
     method: &str,
     args: &[Argument],
     env: &mut Env,
@@ -1448,7 +1700,7 @@ pub fn handle_frozen_dict_methods(
 /// has always raised.
 pub(crate) fn apply_dict_mutation_in_place(
     method: &str,
-    map: &mut HashMap<String, Value>,
+    map: &mut crate::value::DictMap,
     key: Option<Value>,
     value: Option<Value>,
 ) -> Result<(), CompileError> {
@@ -1459,10 +1711,12 @@ pub(crate) fn apply_dict_mutation_in_place(
             map.insert(key_str, Value::wrap_dict_entry(&key_val, value.unwrap_or(Value::Nil)));
         }
         "remove" | "delete" => {
-            map.remove(&key.unwrap_or(Value::Nil).to_key_string());
+            map.shift_remove(&key.unwrap_or(Value::Nil).to_key_string());
         }
         "merge" | "extend" => match value {
             Some(Value::Dict(other)) => {
+                // Merging a module namespace copies its fns into a plain dict.
+                crate::interpreter::interpreter_call::gate_module_namespace_handout(&other)?;
                 map.extend(other.iter().map(|(k, v)| (k.clone(), v.clone())));
             }
             _ => {
@@ -1481,7 +1735,7 @@ pub(crate) fn apply_dict_mutation_in_place(
 /// Handle Dict methods
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_dict_methods(
-    map: &HashMap<String, Value>,
+    map: &crate::value::DictMap,
     method: &str,
     args: &[Argument],
     env: &mut Env,
@@ -1490,6 +1744,15 @@ pub fn handle_dict_methods(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
+    // Every method that reads no fn out of the dict, or reads one key that
+    // its own arm judges, skips the namespace gate; any other method hands a
+    // module namespace's values out (or copies it) and is judged first.
+    if !matches!(
+        method,
+        "len" | "length" | "is_empty" | "has" | "contains_key" | "contains" | "keys" | "get" | "get_or"
+    ) {
+        crate::interpreter::interpreter_call::gate_module_namespace_handout(map)?;
+    }
     let result = match method {
         "len" | "length" => Value::Int(map.len() as i64),
         "is_empty" => Value::Bool(map.is_empty()),
@@ -1500,18 +1763,26 @@ pub fn handle_dict_methods(
         "get" => {
             let key_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let key = key_val.to_key_string();
-            map.get(&key)
-                .cloned()
+            let stored = map.get(&key).cloned();
+            // `m.get("f")` on a module namespace names `f` like `m["f"]`.
+            if let Some(Value::Function { def, .. }) = &stored {
+                if matches!(def.visibility, simple_parser::ast::Visibility::Private)
+                    && def.name == key
+                    && crate::interpreter::is_module_namespace_dict(map)
+                {
+                    crate::interpreter::interpreter_call::gate_private_call(&def.name, def)?;
+                }
+            }
+            stored
                 .map(|stored| Value::unwrap_dict_entry(&key_val, stored))
                 .unwrap_or(Value::Nil)
         }
-        // `keys`/`values`/`entries` all iterate in the canonical sorted-by-key
-        // order (`dict_entries_sorted`) so that `keys()[i]` and `values()[i]`
-        // describe the SAME entry. `values` must not use `map.values()`: that
-        // is raw HashMap order and would desync from the sorted `keys()`.
+        // `keys`/`values`/`entries` all iterate in INSERTION order through
+        // `dict_entries_ordered`, so `keys()[i]` and `values()[i]` describe
+        // the SAME entry (doc/07_guide/language/dict_iteration_order.md).
         "keys" => {
             note_keys_materialization();
-            let keys: Vec<Value> = crate::value::dict_entries_sorted(map)
+            let keys: Vec<Value> = crate::value::dict_entries_ordered(map)
                 .into_iter()
                 .map(|(k, v)| Value::dict_entry_key_for_iteration(v, k))
                 .collect();
@@ -1519,7 +1790,7 @@ pub fn handle_dict_methods(
         }
         "values" => {
             note_keys_materialization();
-            let vals: Vec<Value> = crate::value::dict_entries_sorted(map)
+            let vals: Vec<Value> = crate::value::dict_entries_ordered(map)
                 .into_iter()
                 .map(|(_, v)| Value::dict_entry_value_for_iteration(v))
                 .collect();
@@ -1548,7 +1819,7 @@ pub fn handle_dict_methods(
             let other = eval_arg(
                 args,
                 0,
-                Value::Dict(Arc::new(HashMap::new())),
+                Value::Dict(Arc::new(crate::value::DictMap::new())),
                 env,
                 functions,
                 classes,
@@ -1565,7 +1836,7 @@ pub fn handle_dict_methods(
         // equivalent used by the identifier fast path.
         "clear" => {
             // Return empty dict (functional style - original is not modified)
-            Value::Dict(Arc::new(HashMap::new()))
+            Value::Dict(Arc::new(crate::value::DictMap::new()))
         }
         "clone" | "copy" => {
             // Return a shallow copy of the dict
@@ -1575,13 +1846,22 @@ pub fn handle_dict_methods(
             let key_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let key = key_val.to_key_string();
             let default = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            // Names `f` like `m.get("f")`.
+            if let Some(Value::Function { def, .. }) = map.get(&key) {
+                if matches!(def.visibility, simple_parser::ast::Visibility::Private)
+                    && def.name == key
+                    && crate::interpreter::is_module_namespace_dict(map)
+                {
+                    crate::interpreter::interpreter_call::gate_private_call(&def.name, def)?;
+                }
+            }
             map.get(&key)
                 .cloned()
                 .map(|stored| Value::unwrap_dict_entry(&key_val, stored))
                 .unwrap_or(default)
         }
         "entries" | "items" => {
-            let entries: Vec<Value> = crate::value::dict_entries_sorted(map)
+            let entries: Vec<Value> = crate::value::dict_entries_ordered(map)
                 .into_iter()
                 .map(|(k, v)| {
                     Value::Tuple(vec![
@@ -1633,9 +1913,9 @@ pub fn handle_dict_methods(
         }
         "compact" => {
             // Remove nil/None entries, unwrap Some values
-            let result: HashMap<String, Value> = map
+            let result: crate::value::DictMap = map
                 .iter()
-                .filter_map(|(k, v)| match v {
+                .filter_map(|(k, stored)| match Value::dict_entry_value_ref(stored) {
                     Value::Nil => None,
                     Value::Enum {
                         ref enum_name,
@@ -1643,12 +1923,14 @@ pub fn handle_dict_methods(
                         ref payload,
                     } if enum_name == "Option" => {
                         if variant == "Some" {
-                            payload.as_ref().map(|p| (k.clone(), p.as_ref().clone()))
+                            payload
+                                .as_ref()
+                                .map(|p| (k.clone(), Value::rewrap_dict_entry(stored, p.as_ref().clone())))
                         } else {
                             None
                         }
                     }
-                    other => Some((k.clone(), other.clone())),
+                    _ => Some((k.clone(), stored.clone())),
                 })
                 .collect();
             Value::Dict(Arc::new(result))
@@ -1665,10 +1947,13 @@ pub fn handle_dict_methods(
         }
         "setdefault" => {
             // Get value if key exists, otherwise set and return default
-            let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
+            let key_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let default = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let mut new_map = map.clone();
-            let value = new_map.entry(key).or_insert(default.clone()).clone();
+            let stored = new_map
+                .entry(key_val.to_key_string())
+                .or_insert_with(|| Value::wrap_dict_entry(&key_val, default.clone()));
+            let value = Value::dict_entry_value_for_iteration(stored);
             // Return tuple of [value, new_dict]
             Value::Tuple(vec![value, Value::Dict(Arc::new(new_map))])
         }
@@ -1814,7 +2099,7 @@ mod keys_materialization_tests {
     }
 
     fn dict_of(n: usize) -> Value {
-        let mut map = HashMap::new();
+        let mut map = crate::value::DictMap::new();
         for i in 0..n {
             map.insert(format!("k{i}"), Value::Int(i as i64));
         }

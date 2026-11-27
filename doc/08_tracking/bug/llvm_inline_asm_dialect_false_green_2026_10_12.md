@@ -25,3 +25,84 @@ workaround commit is `ef00661e2e38368279179acdfeb5fb4424514dba`, and the source 
 now use `recover=5c225cff453d79a5a1c8b172d5bda6f0215f86f7`, its parent on that
 branch, which still has the original port instructions. A row was added to
 `bug_db.sdn` by hand; qualified bug-database reconciliation remains pending.
+
+## Typed Rust dialect transport candidate (2026-10-25)
+
+Source audit on release `f9d07913dcc4ca9623445150c7b8b5e4947610aa`
+found that the Rust HIR lowerer discarded `AsmConstraintKind::Options`, HIR
+and MIR carried no syntax metadata, and LLVM emission selected ATT explicitly.
+The pure-Simple emitter already retained `intel_syntax`; its existing llc
+error-diagnostic admission and failed-object deletion are separate source fixes.
+
+The candidate retains a typed `AsmDialect` from parser options through HIR and
+MIR, with an unspecified default preserving each backend's established behavior
+(LLVM ATT; sidecar target-driven syntax), plus explicit ATT or Intel selection. Conflicting
+`att_syntax`/`intel_syntax` options fail during HIR lowering. Ordinary LLVM,
+the generic LLVM emitter, and the naked raw-block emitter select the requested
+Inkwell dialect. Cranelift's sidecar retains the dialect in its registry and
+symbol hash, honors explicit ATT and Intel through its existing syntax mechanism,
+and rejects explicit Intel on a non-x86 target before writing the sidecar.
+Unsupported generic emitters reject explicit syntax. Unrelated
+options keep their existing policy. No assembly instruction, operand, clobber,
+volatile marker or workaround directive is deleted.
+
+Authored Rust regressions cover default/conflicting options, parsed option
+transport through HIR and MIR, sidecar dialect identity/default preservation,
+explicit syntax selection and non-x86 rejection without sidecar publication,
+and LLVM IR dialect selection across the three LLVM emission paths. These tests
+are **UNEXECUTED**: this session prohibits Cargo, Rust/runtime builds and native
+compiler builds. Source diff whitespace validation alone passed; there is no
+compiled or native qualification claim.
+
+The bug remains **OPEN** and all six port-source directive workarounds remain.
+This metadata repair does not establish LLVM callback error handling, failed
+object/cache publication prevention in the Rust path, original x86 port opcode
+bytes, hardware execution, or current-source bootstrap qualification. Those
+remain removal gates; ARM host execution would not establish x86-native success.
+
+## Source-owner explicit-dialect repair (2026-11-05, aarch64 host, worktree `work/libbug-linux-asmdialect-20261105`)
+
+The six tagged directive workarounds in
+`src/lib/nogc_async_mut_noalloc/baremetal/x86/io.spl` were replaced by the
+prescribed explicit dialect declaration: each `asm volatile(...)` now carries
+`options(intel_syntax)` with the bare Intel template (no
+`.intel_syntax noprefix` / `.att_syntax prefix` text, registers, inputs,
+outputs, volatile markers and `io_wait` unchanged), and the `@workaround` tags
+were removed. The typed dialect transport (`AsmDialect::from_options`,
+`parser/src/stmt_parsing/asm.rs` `options(...)`; LLVM paths select
+`InlineAsmDialect::Intel`; pure-Simple `aggregate_intrinsics.spl` appends
+`inteldialect`) is present in this branch's source, satisfying the
+prerequisite for workaround removal.
+
+Verification on this host (seed snapshot binary, no LLVM feature, so no
+compiler-native IR emission; interpreter + external LLVM 23.1.0 tools):
+
+- `llvm_inline_asm_dialect_admission_spec.spl` (interpreter): 3/4 examples
+  PASS — bare Intel ports in default AT&T are rejected (false-green closed),
+  and all six port instructions with `inteldialect` retain bytes
+  `EE`/`EC`/`66 EF`/`66 ED`/`EF`/`ED` through llc 23.1.0 + llvm-objdump.
+  Example 4 (warning-producing objects) FAILS identically before and after the
+  change and identically on `main`: with `--function-sections`, the inline
+  label `error:` becomes a local symbol and this host's llvm-objdump 23.1.0
+  splits the `<inline_asm_probe>` symbol run at `<error>:`, so the spec's
+  scanner never sees the `ee out` instruction. Host-toolchain rendering
+  detail, unrelated to this bug; not fixed here.
+- Dedicated probe (interpreter, pure-Simple frontend + LLVM emitter over the
+  exact repaired statements): all six `asm` blocks lower to MIR with
+  `options = ["intel_syntax"]`, volatile set, no directive text; the emitter
+  produces `call void asm sideeffect inteldialect "out dx, al", ...` with
+  `inteldialect` x3 and no `.intel_syntax`; the emitted text assembles through
+  llc and disassembles to the expected `out` opcodes.
+- Seed frontend compiles the modified module cleanly (`simple compile` to SMF,
+  `simple lint` 0 errors; only the pre-existing style warning).
+
+Pre-existing separate defects observed (identical for the old workaround
+source, out of scope here, repair candidates): the pure-Simple LLVM emitter
+renders `AsmLocation.RegSpec` constraints as the literal text `{name}`
+(`_MirToLlvm/asm_constraints_helpers.spl` `constraint_location`, should be
+`"{{" + name + "}}"`) and emits asm operand args as `i64` without coercing the
+value, both of which llc rejects for RegSpec operands. These block
+end-to-end pure-Simple LLVM emission of any RegSpec inline asm until fixed.
+
+## 2026-11-05 compiler-defects sweep (winboot-rel100 lane)
+Ancestor check: seed-side typed dialect transport a652b819e43 "fix(llvm): retain typed assembly dialect across seed lowering" and source-owner explicit-dialect repair 754803cda4e are ancestors of tip 816655ee5cb (merge fd2b4f32fa5, PR #6791); io.spl now carries `options(intel_syntax)` on all six port instructions with no @workaround tags. Host checks (Windows, LLVM 23.1.1 lld-link): cargo test -p simple-compiler --lib inline_asm 20/20 PASS; test/01_unit/compiler/backend/llvm_inline_asm_dialect_admission_spec.spl 14/14 PASS on the seed interpreter (the aarch64-host example-4 llvm-objdump rendering gap does not reproduce here).

@@ -1,0 +1,101 @@
+# @tag: system, compiler, driver, cli, native
+# @req REQ-CLI-COMPILE-NATIVE-FUNCTIONS-01
+"""
+# Pure-Simple `compile` emits the module's functions into a native library
+
+`cli_compile_pure_simple` (the pure-Simple single-file compile entry) must
+lower the positional source as a real AOT input. Before the fix it set
+`cli_mode_text = "aot"` only for `--xray` with a non-empty native target, so
+every other native-output route (the LLVM backend everywhere, every backend on
+a non-Linux host) lowered the source to an empty stub module: the library
+linked, exit code 0, and its only export was `simple_empty_module_<name>`.
+Record: doc/08_tracking/bug/xray_llvm_simple_compiled_module_emits_zero_functions_2026-11-13.md
+
+Each example spawns ONE compile child (several minutes under the seed), loads
+the produced library in this process and CALLS the exported functions, so a
+vacuous object cannot pass.
+
+Host preconditions: `PSC_SIMPLE_BINARY` (else `SIMPLE_BINARY`, else
+`bin/simple`) names the Simple binary that runs the driver; on Windows `CC`
+must be the llvm-mingw UCRT clang (the shared link refuses anything else).
+"""
+use std.spec.*
+use std.nogc_sync_mut.io_runtime.{process_run_timeout, env_get, env_set, env_remove_process, host_os, dir_create_all, file_delete, file_exists}
+
+extern fn rt_host_dynlib_open(path: text, mode: i64) -> i64
+extern fn rt_host_dynlib_symbol(handle: i64, name: text) -> i64
+extern fn rt_call_ptr_2(addr: i64, arg1: i64, arg2: i64) -> i64
+
+val DRIVER = "test/fixtures/cli/pure_simple_compile_library_driver.spl"
+val OUT_DIR = "build/test/pure_simple_compile_library"
+
+fn simple_binary() -> text:
+    val lane = env_get("PSC_SIMPLE_BINARY")
+    if lane != "": return lane
+    val explicit = env_get("SIMPLE_BINARY")
+    if explicit != "": explicit else: "bin/simple"
+
+fn library_path(stem: text) -> text:
+    if host_os() == "windows": "{OUT_DIR}/{stem}.dll" else: "{OUT_DIR}/lib{stem}.so"
+
+val COMPILED = "PSC-MODE default=[aot] native=[aot] smf=[] vulkan=[]\nPSC-COMPILE rc=0\n"
+
+# Compiles `source` to a shared library with the LLVM backend; returns the
+# driver's PSC-* stdout lines followed by the child's `error` stderr lines.
+# The test runner exports SIMPLE_MCDC_MODE=on to its children; a plain
+# shared-library compile must not inherit that instrumentation request.
+fn compile_library(source: text, out: text) -> text:
+    dir_create_all(OUT_DIR)
+    if file_exists(out):
+        file_delete(out)
+    env_set("PSC_SRC", source)
+    env_set("PSC_OUT", out)
+    env_set("PSC_BACKEND", "llvm")
+    env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", "shared")
+    val runner_mcdc = env_get("SIMPLE_MCDC_MODE")
+    env_remove_process("SIMPLE_MCDC_MODE")
+    val (stdout, stderr, _) = process_run_timeout(simple_binary(), ["run", DRIVER], 1500000)
+    if runner_mcdc != "":
+        env_set("SIMPLE_MCDC_MODE", runner_mcdc)
+    var report = ""
+    for line in stdout.split("\n"):
+        if line.starts_with("PSC-"):
+            report = report + line.trim() + "\n"
+    for line in stderr.split("\n"):
+        if line.starts_with("error"):
+            report = report + line.trim() + "\n"
+    report
+
+fn call2(handle: i64, symbol: text, a: i64, b: i64) -> i64:
+    val addr = rt_host_dynlib_symbol(handle, symbol)
+    if addr == 0: return -1
+    rt_call_ptr_2(addr, a, b)
+
+describe "pure-Simple compile: native library carries the module's functions":
+    it "emits and runs the functions of a library module without pub or main":
+        val out = library_path("xray_inprocess_prog")
+        step("compile the three-function fixture to a shared library")
+        val report = compile_library("test/fixtures/xray/xray_inprocess_prog.spl", out)
+        expect(report).to_equal(COMPILED)
+        step("load the produced library")
+        val handle = rt_host_dynlib_open(out, 0)
+        expect(handle != 0).to_equal(true)
+        val prefix = "test.fixtures.xray.xray_inprocess_prog."
+        expect(rt_host_dynlib_symbol(handle, prefix + "add1") != 0).to_equal(true)
+        expect(rt_host_dynlib_symbol(handle, "simple_empty_module_test_fixtures_xray_xray_inprocess_prog")).to_equal(0)
+        expect(call2(handle, prefix + "traced", 1, 0)).to_equal(44)
+        expect(call2(handle, prefix + "scaled", 0, 0)).to_equal(7)
+        expect(call2(handle, prefix + "scaled", 5, 0)).to_equal(15)
+
+    it "emits and runs both functions of a two-function pub library module":
+        val out = library_path("two_fn_library")
+        step("compile the two-function pub library")
+        val report = compile_library("test/fixtures/cli/two_fn_library.spl", out)
+        expect(report).to_equal(COMPILED)
+        step("load the produced library")
+        val handle = rt_host_dynlib_open(out, 0)
+        expect(handle != 0).to_equal(true)
+        val prefix = "test.fixtures.cli.two_fn_library."
+        expect(call2(handle, prefix + "twice", 21, 0)).to_equal(42)
+        expect(call2(handle, prefix + "twice_plus", 20, 2)).to_equal(42)
+        expect(call2(handle, prefix + "twice_plus", 20, 0)).to_equal(40)

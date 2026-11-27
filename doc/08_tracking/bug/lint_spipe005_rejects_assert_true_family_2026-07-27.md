@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** open
+**Status:** SUPERSEDED
 **Found:** 2026-07-27 (Simple RISC-V hardening campaign, Lane F)
 **Area:** `src/compiler/90.tools/lint/_LintMain/traceability_and_assertions.spl:376`
 **Severity:** medium — the linter rejects the assertion form the project's own rules
@@ -65,4 +65,33 @@ catching what it is for.
   — a second lint false positive found the same day
 - `doc/08_tracking/bug/test_runner_post_spec_lint_gate_empty_file_arg_2026-07-20.md`
 - Campaign plan: `doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-27.md`
+
+## Addendum 2026-11-11 — lane runner4: SUPERSEDED
+
+The fix is in the tree at release/1.0.0 tip `b364745fdbf8`:
+`statement_has_direct_assertion`
+(`src/compiler/90.tools/lint/_LintMain/traceability_and_assertions.spl:703-704`)
+now recognizes the full standalone assertion family — `assert_true(`,
+`assert_false(`, `assert_equal(`, `assert_not_equal(`, `assert_contains(`,
+`assert_nil(` — exactly the list this doc prescribed.
+
+seed-smoke verification with the refreshed 2026-11-11 seed (lint, JIT lane):
+
+- Fixture whose only assertion is `assert_true(1 == 1)`: no SPIPE005
+  (passes lint apart from unrelated docstring warnings).
+- Fixture with a genuinely assertion-less example (`val x = 1`): SPIPE005
+  still fires — the rule keeps catching what it is for.
+
+Regression-fixture gap closed in this lane: the negative oracles already
+existed in `test/02_integration/app/spipe_quality_lint_spec.spl` (unasserted
+and empty-body examples), but no positive `assert_true`-only oracle did; added
+`accepts examples whose only assertion is a standalone assert_`
+(commit `43c481c4d9a2`). Note: that spec file has a PRE-EXISTING, unrelated
+failure at HEAD — `respects allow on spipe_placeholder_tests` (allow-attribute
+suppression, `expect(true).to_equal(true)` still linting despite
+`@allow(spipe_placeholder_tests)`) — verified failing on the unmodified HEAD
+file as well; not caused by and not in scope of this row.
+
+Verdict: SUPERSEDED. The SPIPE005/SPIPE006 contradiction is resolved; authors
+following `.claude/rules/testing.md` no longer get lint-induced workarounds.
 

@@ -1,0 +1,39 @@
+# @cover src/compiler/10.frontend/core/interpreter/eval_builtins.spl
+# Compile this helper-boundary spec natively; set SIMPLE_NO_JIT=1 so each
+# nested source program exercises the real Core interpreter builtin dispatch.
+use std.spec.{describe, it, expect, step}
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.eval.{eval_has_error, eval_get_error}
+use compiler.core.interpreter.value.{val_get_int}
+use std.nogc_sync_mut.sffi.host.{heap_alloc_count, heap_array_capacity_bytes}
+
+describe "Core interpreter collection counter bridge":
+    it "returns the actual runtime allocation total within its native observation bounds":
+        step("Execute the allocation extern through a real nested Core program")
+        val before = heap_alloc_count()
+        val result = core_interpret("fn main() -> i64:\n    rt_heap_alloc_count()\n", "allocation_counter_builtin.spl")
+        val after = heap_alloc_count()
+        expect(eval_has_error()).to_equal(false)
+        if not eval_has_error():
+            val observed = val_get_int(result)
+            expect(observed).to_be_greater_than(before - 1)
+            expect(observed).to_be_less_than(after + 1)
+
+    it "returns array capacity from the real runtime after warming the Core result arena":
+        step("Retain a first result before taking the capacity oracle")
+        val source = "fn main() -> i64:\n    val warm = rt_heap_array_capacity_bytes()\n    rt_heap_array_capacity_bytes()\n"
+        val result = core_interpret(source, "capacity_counter_builtin.spl")
+        val expected = heap_array_capacity_bytes()
+        expect(eval_has_error()).to_equal(false)
+        if not eval_has_error():
+            expect(val_get_int(result)).to_equal(expected)
+
+    it "refuses allocation-counter arguments with the real evaluator error":
+        val result = core_interpret("fn main() -> i64:\n    rt_heap_alloc_count(1)\n", "allocation_counter_arity.spl")
+        expect(eval_has_error()).to_equal(true)
+        expect(eval_get_error()).to_contain("rt_heap_alloc_count expects zero arguments")
+
+    it "refuses capacity-counter arguments with the real evaluator error":
+        val result = core_interpret("fn main() -> i64:\n    rt_heap_array_capacity_bytes(1)\n", "capacity_counter_arity.spl")
+        expect(eval_has_error()).to_equal(true)
+        expect(eval_get_error()).to_contain("rt_heap_array_capacity_bytes expects zero arguments")

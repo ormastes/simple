@@ -16,32 +16,81 @@ val CSS_TIMING_MAX_SOURCE_BYTES: i32 = 256
 val CSS_TIMING_MAX_F64: f64 = 1.7976931348623157e308
 
 fn _timing_f64(raw: text) -> f64?:
-    if val parsed = raw.trim().parse_f64():
-        if (
-            parsed == parsed and
-            parsed >= 0.0 - CSS_TIMING_MAX_F64 and
-            parsed <= CSS_TIMING_MAX_F64
-        ):
-            return Some(parsed)
-    nil
+    val s = raw.trim()
+    val slen = s.byte_len()
+    if slen == 0:
+        return None
+    var idx = 0
+    val first = s.byte_at(0) as i64
+    if first == 43 or first == 45:
+        idx = 1
+    var digits = 0
+    while idx < slen:
+        val b = s.byte_at(idx) as i64
+        if b >= 48 and b <= 57:
+            digits = digits + 1
+            idx = idx + 1
+        else:
+            break
+    if idx < slen and (s.byte_at(idx) as i64) == 46:
+        idx = idx + 1
+        while idx < slen:
+            val b = s.byte_at(idx) as i64
+            if b >= 48 and b <= 57:
+                digits = digits + 1
+                idx = idx + 1
+            else:
+                break
+    if digits == 0:
+        return None
+    if idx < slen:
+        val eb = s.byte_at(idx) as i64
+        if eb == 101 or eb == 69:
+            idx = idx + 1
+            if idx < slen:
+                val sb = s.byte_at(idx) as i64
+                if sb == 43 or sb == 45:
+                    idx = idx + 1
+            var exp_digits = 0
+            while idx < slen:
+                val b = s.byte_at(idx) as i64
+                if b >= 48 and b <= 57:
+                    exp_digits = exp_digits + 1
+                    idx = idx + 1
+                else:
+                    break
+            if exp_digits == 0:
+                return None
+    if idx != slen:
+        return None
+    val parsed = s.to_f64()
+    if (
+        parsed == parsed and
+        parsed >= 0.0 - CSS_TIMING_MAX_F64 and
+        parsed <= CSS_TIMING_MAX_F64
+    ):
+        return Some(parsed)
+    None
 
 fn _timing_function_inner(value: text, name: text) -> text?:
     val prefix = name + "("
+    val vlen = value.byte_len()
+    val plen = prefix.byte_len()
     if (
         not value.starts_with(prefix) or not value.ends_with(")") or
-        value.len() <= prefix.len()
+        vlen <= plen
     ):
-        return nil
-    val inner = value.substring(prefix.len(), value.len() - 1)
+        return None
+    val inner = value.substring(plen, vlen - 1)
     if inner.contains("(") or inner.contains(")"):
-        return nil
+        return None
     Some(inner)
 
 fn _parse_cubic_bezier(value: text) -> TimingFunction?:
     if val inner = _timing_function_inner(value, "cubic-bezier"):
         val parts = inner.split(",")
         if parts.len() != 4:
-            return nil
+            return None
         if val x1 = _timing_f64(parts[0]):
             if val y1 = _timing_f64(parts[1]):
                 if val x2 = _timing_f64(parts[2]):
@@ -50,7 +99,7 @@ fn _parse_cubic_bezier(value: text) -> TimingFunction?:
                             return Some(TimingFunction.CubicBezier(
                                 x1, y1, x2, y2
                             ))
-    nil
+    None
 
 fn _normalized_step_position(raw: text) -> text:
     val position = raw.trim().lower()
@@ -73,7 +122,7 @@ fn _parse_steps(value: text) -> TimingFunction?:
     if val inner = _timing_function_inner(value, "steps"):
         val parts = inner.split(",")
         if parts.len() < 1 or parts.len() > 2:
-            return nil
+            return None
         if val steps = parts[0].trim().parse_i64():
             val position = if parts.len() == 2:
                 _normalized_step_position(parts[1])
@@ -84,12 +133,12 @@ fn _parse_steps(value: text) -> TimingFunction?:
                 not (steps == 1 and position == "jump-none")
             ):
                 return Some(TimingFunction.Steps(steps, position))
-    nil
+    None
 
 fn parse_timing_function(timing_str: text) -> TimingFunction?:
     """Strictly parse one CSS timing function; invalid input returns nil."""
     if timing_str.len() > CSS_TIMING_MAX_SOURCE_BYTES:
-        return nil
+        return None
     val value = timing_str.trim().lower()
     if value == "linear":
         return Some(TimingFunction.Linear)
@@ -105,7 +154,7 @@ fn parse_timing_function(timing_str: text) -> TimingFunction?:
         return _parse_cubic_bezier(value)
     if value.starts_with("steps(") or value == "step-start" or value == "step-end":
         return _parse_steps(value)
-    nil
+    None
 
 fn evaluate_timing(timing: TimingFunction, t: f64, before: bool = false) -> f64:
     """Evaluate one parsed CSS timing function at input progress t."""

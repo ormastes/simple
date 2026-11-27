@@ -4,7 +4,9 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (2026-09-13)
+- Status: OPEN (triaged LIVE 2026-11-11, lane ne13 — 2026-11-05 wakeup fix
+  confirmed in source; dominant per-request re-compile term remains, needing
+  runtime/verdict-transport support + linux measurement. See addendum.)
 
 ## Summary
 
@@ -94,3 +96,94 @@ grep -c 'execve("/bin/sh"' /tmp/warm.log                     # 0, post-fix
 /usr/bin/time -f 'wall=%e s' bin/simple test test/fixtures/concurrency/conc_a_spec.spl --no-session-daemon --no-session-share
 ```
 
+
+## Update 2026-11-03
+No change. The light daemon is bypassed on non-linux; a wall-time budget spec
+must be authored and measured on linux. Left open.
+
+
+## Update 2026-11-05 — polling fixed; per-request worker re-compile remains
+Measured on this host (aarch64, shared, phase1 seed binary
+`build/phase_snapshots/phase1_1793422538/simple`, worktree
+wt-libbug-w6-daemonperf, fixture test/fixtures/concurrency/conc_a_spec.spl,
+5 warm samples per lane):
+
+| scenario | before (median) | after (median) |
+|---|---|---|
+| daemon lane (warm) | 1.47 s (1.33–1.60) | 1.27 s (1.25–1.31) |
+| direct lane | 0.68 s (0.62–0.73) | 0.69 s (0.68–0.70) |
+
+A strace of the warm daemon lane showed the doc's "socket setup /
+serialization / handshake" notes were only half the story: the daemon's idle
+loop called `dir_list(LIGHT_REQ_DIR)` every 250 ms, and `dir_list()` is a
+SHELL-OUT — every idle poll was `execve("/bin/sh", ["-c", "ls -1 ..."]) +
+execve("/usr/bin/ls")`, ~480 fork/execs per 60 s daemon lifetime. So the lane
+had NOT actually reached zero shell spawns; it moved them into the daemon's
+poll loop. The client separately polled the response every 100 ms.
+
+Fixed (this lane): wakeup-protocol signaling.
+- `run_one_via_daemon()` bumps a wakeup sequence file
+  (`.build/test_daemon_light/wakeup.seq`, atomic tmp+rename, content = the
+  request id) AFTER the request rename is visible.
+- `light_daemon.spl`'s idle loop stat()s that one file in-process every
+  10 ms (was: dir_list shell-out every 250 ms); a changed sequence triggers
+  one drain of the request dir. A dir_list fallback sweep remains for
+  clients predating the protocol: 500 ms cadence until the first wakeup is
+  seen, 5 s afterwards (an old client discovering the 5 s sweep withdraws
+  within its 2000 ms claim-wait and runs direct — correct, just not
+  served). Idle lifetime unchanged (~60 s), stop-file latency improved
+  250 ms -> <=10 ms.
+- Client response pickup polls every 10 ms (was 100 ms), cutting up to
+  100 ms of per-request pickup latency.
+
+Measured result: ~0.2 s/invocation off the warm daemon lane (1.47 -> 1.27 s
+median), idle daemon now performs zero subprocess work in steady state
+(strace pin: 4 execves per 3 s window = only the two daemon-start execves
+plus one drain; pre-fix 26). Pinned by
+`test/05_perf/test_runner/light_daemon_wakeup_no_idle_shell_spec.spl`.
+
+Still open (dominant remaining term): the per-request worker
+`simple run test_runner_new/test_runner_single.spl ...` re-compiles the
+full runner module graph in a fresh child on EVERY request (amortization
+factor 1.0, as daemon_backlog.spl already documents). Serving in-process is
+the only way to remove it, but the response body is built from the worker's
+captured stdout and there is no in-process stdout-capture facility in the
+stdlib, so that change needs runtime support or a structured (non-printed)
+verdict transport. The lane is still ~0.58 s slower than direct per
+invocation because of it.
+
+## Addendum 2026-11-11 (lane ne13) — still LIVE; wakeup fix confirmed in source
+
+**Source verification (tip c8b6d0ebe90e):** the 2026-11-05 wakeup protocol is
+in the tree and unchanged — `light_daemon.spl:278-324` idle loop stat()s
+`LIGHT_WAKE` in-process every 10 ms (was: `dir_list()` shell-out every 250 ms),
+with the 500 ms/5 s fallback sweep and stop-file check; `test_runner_client.spl`
+`run_one_via_daemon` bumps the wakeup sequence after the request rename. So
+the polling half of this doc's diagnosis is fixed as recorded; the 1.47 -> 1.27 s
+median improvement and the still-open ~0.58 s gap stand as the current truth.
+
+**Verification limits of this lane (Windows):** the pinned perf spec
+`test/05_perf/test_runner/light_daemon_wakeup_no_idle_shell_spec.spl` fails
+2/2 on this host with instrumentation sentinels (`execve count = -1, daemon
+ends = -1`) because the light daemon is bypassed on non-linux — exactly the
+constraint this doc already records ("must be authored and measured on
+linux"). No new wall-clock evidence is possible from this lane; the aarch64
+linux measurements in the 2026-11-05 update remain the latest honest numbers.
+
+**Why not fixed in this lane:** the remaining term is the per-request
+re-compile (amortization 1.0). The documented fixes are (a) in-process serving,
+which needs runtime support for stdout capture or a structured verdict
+transport — a runtime/stdlib change with a bootstrap bar, not P3 scope; or
+(b) further measurement on an unloaded linux host to separate protocol cost
+from contention. Routed to the test-runner/runtime owner.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane ne13: still LIVE. The 2026-11-05 wakeup protocol is in-tree unchanged (light_daemon.spl idle-loop LIGHT_WAKE stat); the recorded ~0.58 s residual gap stands as current truth. Daemon-lane perf work exceeds the per-bug timebox; disposition stands.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred).** The 2026-11-05 wakeup protocol is confirmed present in source at this base; the dominant remaining term is the per-request re-compile of the full runner module graph in a fresh child (amortization 1.0). The documented fixes (in-process serving needing runtime stdout-capture/structured verdict transport, or unloaded-Linux measurement) are runtime/test-runner owner work, not P3 scope.

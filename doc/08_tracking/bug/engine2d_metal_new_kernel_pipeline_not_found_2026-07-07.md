@@ -139,3 +139,19 @@ kernel_xyz(...)` to `_engine2d_msl()`'s embedded MSL string and observe
 `metal_last_error()` after `create_compute_pipeline(device, lib,
 "kernel_xyz")`.
 
+
+## 2026-11-12 fix attempt (release/1.0.0 investigation)
+
+No source change. Re-reviewed the Metal FFI compile path on
+`release/1.0.0` (7a06b4aafd5): `_engine2d_msl()` kernels are compiled at
+runtime via `metal_sffi_compile_shader` with no Simple/Rust-layer caching,
+and the doc's 2026-07-07 non-reproduction evidence (5/5 runs, 10/10
+new-kernel pipeline creations) still stands as the most recent observation.
+No reproducible defect exists in the current source to fix; the
+most-plausible cause remains the transient `MTLCompilerService` wedge.
+
+Verification status: **investigated — remains closed (transient,
+non-reproducing)**. If it recurs, capture `metal_last_error()` +
+`lib.functionNames()` per the original guidance before assuming a code
+defect. Native re-verification of the GPU offload evidence gate awaits the
+admitted compiler from the in-flight bootstrap.

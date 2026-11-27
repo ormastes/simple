@@ -7,6 +7,18 @@ alwaysApply: false
 ---
 # Bootstrap & Binary Architecture
 
+## Sanctioned bootstrap shell scripts
+
+The only `.sh` files exempt from the "ALL code in `.spl`/`.shs`" rule are the
+bootstrap scripts (CLAUDE.md counts 7; the gate exempts 8 paths, because `build-phase3-phase4.sh` was already exempt but uncounted), listed in `scan_forbidden_extension_files` of
+`scripts/check/check-repo-hygiene.shs`: `bootstrap-from-scratch.sh`,
+`bootstrap-seed.sh`, `bootstrap-verify.sh`, `build-phase3-phase4.sh`, and the
+exec'd resume stages `resume-stage2-from-cache.sh`,
+`resume-stage3-from-admitted.sh`, `resume-stage4-from-admitted.sh` plus the
+worker `lib/stage3-native-build-worker.sh` (all under `scripts/bootstrap/`). They are POSIX
+`sh` and are referenced by name from about 150 files, so they are not renamed.
+Owner sign-off on this exemption is pending (coordinator default, 2026-11-26).
+
 ## Bootstrap failure collection
 
 During diagnosis, finish every independently runnable module/build/test row,
@@ -380,9 +392,78 @@ on a live run means nothing has flushed yet, not that nothing happened. Confirm
 with `lsof -p <worker>` that it is the process's fd 1/2, and judge liveness from
 CPU/RSS rather than from log size.
 
+## Unified Phase 3 / Phase 4 Architecture & Protected Bootstrap Policy (2026-11-22)
+
+See [phase3_phase4_shared_build.md](../../doc/07_guide/tooling/phase3_phase4_shared_build.md)
+and [bootstrap_options.md](../../doc/07_guide/tooling/bootstrap_options.md) for full details:
+
+1. **Shared Cross-Platform Phased Build Script (`scripts/bootstrap/build-phase3-phase4.sh` & Windows `scripts/bootstrap/build-phase3-phase4.bat`):**
+   - One shared script across **Linux, macOS, FreeBSD, Windows (Git-Bash/MSYS2), and SimpleOS**.
+   - Displays an **interactive Phased Build Menu** when invoked interactively without `--phase=...` (or with `--menu`), and accepts non-interactive `--phase=p3a|p3|p4|all`.
+   - **Windows `.bat` (`scripts/bootstrap/build-phase3-phase4.bat`):** Supports 2 configs delegating to the same `.sh` script — **`mingw` is DEFAULT** (`--win-config=mingw`, `llvm-mingw` clang + `ld.lld`), and **`msvc` is optional** (`--win-config=msvc`, `clang-cl`).
+   - **Deprecated standalone Phase 3/4 scripts** (`p3-selfbuild-stage3.shs`, `p3-manual-link-stage3.shs`, `p3-smoke-stage3.shs`, `p3-targeted-stage2-build.shs`, `p3-entry-groups.shs`, etc.): invoking them directly pauses with migration instructions showing how to run `build-phase3-phase4.sh` (including phased/shard mode) and returns without building.
+2. **Default Bootstrap Skips Phase 1 & Phase 2 Once Phase 3+ Compiler Exists:**
+   - In `scripts/bootstrap/bootstrap-from-scratch.sh`, when a working native pure-Simple Phase 3+ host compiler already exists (`bin/release/<triple>/simple` or `bin/simple` without the Rust-seed banner), **default bootstrap skips Phase 1 (Cargo Rust seed) and Phase 2 (`seed -> stage2`)** and delegates directly to `scripts/bootstrap/build-phase3-phase4.sh` (`P3 -> P4`).
+   - Pass `--from-seed` / `--cold-bootstrap` (or `--full-bootstrap` in CI) ONLY when intentionally rebuilding Phase 1 & Phase 2 from the Rust seed; pass `--skip-seed` to require an existing Phase 3+ compiler without seed fallback.
+3. **Compile Mode (`shard` Default, `file` Optional) & Platform/CPU Unit Link (`native_host_match`):**
+   - **`--compile-mode=shard` is DEFAULT** in `build-phase3-phase4.sh` (phase-based HIR/MIR shard build: `SIMPLE_FILE_WORKERS=0`, `SIMPLE_HIR_SHARDING=1`, `SIMPLE_MIR_SHARDING=1`).
+   - **`--compile-mode=file` is optional** (parallel per-file worker pool: `SIMPLE_FILE_WORKERS=1`).
+   - **Platform & CPU Link Policy (`scripts/bootstrap/stage3-native-host-link-policy.{sdn,shs}`):** Enforces mandatory **`native_host_match` tag check** (`target (platform, cpu) == host (os, arch)`). Minimizes `simple` to link **only** thin entry + `(platform, cpu)` static primitive archive (`libsimple-primitive-<platform>-<cpu>.a`) + dead-stripped primitive C core statically, while linking `lib/libsimple-{std,compiler-common,compiler,app}.dylib` (`.so`) dynamically. **Phase 3 builds ONLY native host targets** — non-native backends (other CPUs, VHDL, GPU/CUDA/Vulkan, Wasm) are NOT built during Phase 3, **but if a `.dylib` already exists on disk, `simple` can load and use it** (`--backend-plugin <existing.dylib>`).
+4. **Phase 4 Dual-Mode Build (`--xray` + Optimized Release):**
+   - Phase 4 builds **both** the optimized production binary (`simple`: `--profile=prod --release --strip`) AND the XRay-instrumented debug binary (`simple-debug`: `--profile=dev --debug --no-strip --xray`), plus Stage 5 essentials (`simple_test_runner`, `simple_build_runner`, `simple_mcp_server`, `simple_lsp_mcp_server`).
+5. **Zero-Compile `--path-check` Alive Verification & Protected Script Guard:**
+   - Every core bootstrap script carries a top-of-file `PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER` banner.
+   - Run `sh scripts/check/fast-verify-bootstrap-scripts.shs` for a sub-second check of sealed `.sdn` SHA-256 digests, protected banners, syntax, and `check-bootstrap-path-matrix-all.shs` across Unix/Windows/SimpleOS using extensible `PATH_ACTION|...|status=ALIVE` superset records without running actual compilation.
+
+## Python phase policy (owner, 2026-11-27)
+
+Python is allowed only up to the point where Phase 2 is built and verified:
+pre-p2 trust gates may stay Python, because judging an unverified Simple binary
+with itself is circular. From Phase 3 on, everything is pure Simple
+(`.spl`/`.shs`). A script used both pre-p2 and p3+ keeps its Python copy for the
+pre-p2 path, gains a Simple twin, and every p3+ caller uses the twin
+(duplication accepted; parity on identical inputs + runtime measured). Do not
+change hash pins of pre-p2 trust gates. Census:
+`doc/08_tracking/todo/python_phase_census_2026-11-27.md`.
+
+## Seed build script (2026-11-24)
+
+`bin/simple.exe` is a legacy git-tracked seed and goes stale; do not commit new
+seed binaries. Build one with `sh scripts/setup/build-seed.shs` (pinned nightly
+from `rust-toolchain.toml`; Windows default = `x86_64-pc-windows-gnu` +
+llvm-mingw UCRT clang, `--msvc` = msvc + clang-cl; clang elsewhere, never gcc;
+`--locked --profile bootstrap -p simple-driver`, `SEED_JOBS` default 4). It
+installs atomically to the gitignored `bin/local/simple.exe` (point
+`SIMPLE_BINARY` at it); `--in-place` overwrites the tracked `bin/simple.exe`
+and warns not to commit it. A locked target fails with exit 1 and no temp
+left behind. The seed source revision goes to the untracked `<dest>.seed-rev`.
+`--check` reports FRESH/STALE/DIRTY/UNKNOWN against the last commit and any
+uncommitted change under `src/compiler_rust`/`src/runtime` (exit 0/1/1/2;
+setup.shs prints it); `--selftest` runs 8 fixtures.
+
 ## Bootstrap Commands
 ```bash
-# Full bootstrap (recommended):
+# Fast zero-compile verification of protected bootstrap scripts + alive path matrix:
+sh scripts/check/fast-verify-bootstrap-scripts.shs
+
+# Default bootstrap (skips Phase 1 & 2 and runs build-phase3-phase4.sh P3 -> P4 when Phase 3+ exists):
+sh scripts/bootstrap/bootstrap-from-scratch.sh
+sh scripts/bootstrap/bootstrap-from-scratch.sh --skip-seed        # require existing Phase 3+; never fall back to seed
+sh scripts/bootstrap/bootstrap-from-scratch.sh --from-seed        # cold rebuild from Phase 1 Rust seed (--cold-bootstrap)
+
+# Direct shared cross-platform Phase 3 / Phase 4 build (Linux, macOS, FreeBSD, Windows Git-Bash/MSYS2, SimpleOS):
+sh scripts/bootstrap/build-phase3-phase4.sh --menu
+sh scripts/bootstrap/build-phase3-phase4.sh --phase=p3 --compile-mode=shard   # shard is DEFAULT
+sh scripts/bootstrap/build-phase3-phase4.sh --phase=p3 --compile-mode=file    # per-file worker pool optional
+sh scripts/bootstrap/build-phase3-phase4.sh --phase=p4                        # builds release `simple` + debug-xray `simple-debug` + Stage 5 tools
+sh scripts/bootstrap/build-phase3-phase4.sh --phase=all
+sh scripts/bootstrap/build-phase3-phase4.sh --path-check
+
+# Windows .bat launcher (delegates to build-phase3-phase4.sh; mingw DEFAULT, msvc optional):
+#   scripts\bootstrap\build-phase3-phase4.bat --phase=p3 --compile-mode=shard
+#   scripts\bootstrap\build-phase3-phase4.bat --win-config=msvc --phase=p3 --compile-mode=shard
+
+# Full bootstrap + deploy (historical warning preserved below):
 scripts/bootstrap/bootstrap-from-scratch.sh --deploy
 # WARNING: --deploy replaces bin/release/<triple>/simple with the STAGE4 CLI
 # without any smoke gate. Verified broken 2026-06-11 (lint coredumps, test
@@ -453,3 +534,23 @@ authority before emitting anything. The flag is REFUSED (exit 64) outside the
 trust-root Stage-2 lane rather than silently ignored, and a producer failure
 fails the run leaving no receipt. Pinned by
 `scripts/check/check-bootstrap-stage3-receipt-autowire.shs`.
+
+## State 2026-10-25 (release/1.0.0)
+
+Stage 3 runs from a frozen admitted Stage 2; source fixes need a Stage 2
+rebuild. #4498 prescans all closure structs in the bootstrap-fixed MIR lane;
+#4499 fixes inner `/src/` module naming; Windows links `ws2_32` + `mswsock`
+(#4430).
+
+Per-file src to obj is the DEFAULT (#4525 compiler, #4542 guide, scripts PR 2026-10-25): each module lowers to its own `aot-<hash>.o` in the per-module object cache under `SIMPLE_NATIVE_BUILD_CACHE_DIR`, codegen fans out over `SIMPLE_NATIVE_BUILD_THREADS` (scripts: host.sdn `max_build_jobs`), then all objects link into one binary. Stage 3 scripts pass `SIMPLE_BOOTSTRAP=` empty so the bootstrap_fixed shortcut is not forced; `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` opts back into the whole-program lane (hashed into the Stage 3 args). First-object proof: 9-module closure, 9 objects, first at 160 s, last at 174 s, binary runs. A full
+
+Per-file pipeline flip readiness (P-F): unset `SIMPLE_FILE_WORKERS` takes `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1` (`native_file_worker_v1.spl`, `"1"` since 2026-11-04: file-based src→obj is the DEFAULT); `SIMPLE_FILE_WORKERS=0` / `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` are per-invocation opt-outs. Never flip a shared default (config, script-global env, constant) to suit one build; pass the option at the call site with a why-comment. Stage 3 scripts pass a set value (0|1) through and hash it into the args receipt (unset = unchanged hash, resume-compatible; worker gets `per-file:fw=0|1`). Prove overlap with `sh scripts/check/check-per-file-overlap-receipt.shs <receipt dir>` (obj_done(A) < hir_start(B), first-object ms, objects/min). See `doc/07_guide/tooling/bootstrap_options.md`.
+Stage 3 run of the per-file lane is not yet proven.
+Exception (2026-11-13, owner request): Stage 3 reads `stage3_file_workers: 0` from tracked `config/bootstrap.sdn` (env `SIMPLE_FILE_WORKERS` overrides) until bug #8504 layers 2-3 are fixed; the resume's tree RSS cap now defaults to the admitted Stage 3 MemoryHigh (no private ceiling/cap pair) and its go-to-end follows `SIMPLE_BOOTSTRAP_GO_TO_END` (default 1). Table: `doc/07_guide/tooling/bootstrap_options.md` § "Repo-tracked bootstrap settings".
+
+Shard knobs, `.spab` (`SIMPLE_FRONTEND_SPAB`, opt-in), DigestV1 (unknown algo =
+miss) and the Lean cache gates: `doc/07_guide/tooling/bootstrap_options.md`.
+*(2026-11-22 reconciliation: `build-phase3-phase4.sh` defaults to `--compile-mode=shard` / `SIMPLE_FILE_WORKERS=0` with `--compile-mode=file` optional; see "Unified Phase 3 / Phase 4 Architecture & Protected Bootstrap Policy (2026-11-22)" above.)*
+Never `git stash`; never GCC on Windows.
+
+**Independent oracle (2026-11-27):** a test oracle or fixture generator whose value is that it is NOT Simple (reference `hashlib`/`cryptography`/`sqlite3`, an independent HTTP/SigV4 checker) stays Python as the policy exception `INDEPENDENT_ORACLE`; census rows in `doc/08_tracking/todo/python_phase_census_2026-11-27.md`.

@@ -1,7 +1,9 @@
-use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver.{compiler_driver_create, compiler_driver_create_with_environment_variant_policy_v1, compiler_driver_run_compile}
+use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_handoff_peek_list_v1, native_entry_closure_handoff_policy_collection_take_list_v1, native_entry_closure_handoff_library_policy_take_list_v1}
 use compiler.driver.bootstrap_api_low_memory.{bootstrap_low_memory_requested}
 use compiler.common.driver_core_modes.{CompileMode, driver_output_format_native}
-use compiler.common.driver_compile_options.{driver_core_compile_options_default, compileoptions_normalize_mir_optimization}
+use compiler.common.driver_compile_options.{driver_core_compile_options_default, compileoptions_normalize_mir_optimization, representation_project_root_from_inputs_v1}
 use compiler.common.driver_compile_result.{CompileResult}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 
@@ -20,10 +22,68 @@ pub fn aot_native_project_with_backend_fixed(
     opt_level: i64,
     no_borrow_check: bool
 ) -> CompileResult:
+    if source_count < 0 or source_count > 5:
+        return CompileResult.RuntimeError("fixed native project API accepts zero to five source roots")
+    aot_native_project_with_backend_fixed_v2(source_0, source_1, source_2,
+        source_3, source_4, "", source_count, entry, output, backend, strip,
+        release, opt_level, no_borrow_check)
+
+# reason: fixed-arity bootstrap AOT entrypoint mirrors legacy scalar strip/release/opt_level/no_borrow_check parameters
+@allow(primitive_api)
+pub fn aot_native_project_with_backend_fixed_v2(
+    source_0: text,
+    source_1: text,
+    source_2: text,
+    source_3: text,
+    source_4: text,
+    source_5: text,
+    source_count: i64,
+    entry: text,
+    output: text,
+    backend: text,
+    strip: bool,
+    release: bool,
+    opt_level: i64,
+    no_borrow_check: bool,
+    managed_build_phase: text = "",
+    backend_plugin_path: text = "",
+    xray_enabled: bool = false,
+    xray_startup_consumer_v1: bool = false,
+    debug_info_override: i64 = -1
+) -> CompileResult:
+    match bootstrap_native_driver_with_backend_fixed_v1(source_0, source_1, source_2, source_3, source_4, source_5, source_count, entry, output, backend, strip, release, opt_level, no_borrow_check, managed_build_phase, backend_plugin_path, xray_enabled, xray_startup_consumer_v1, debug_info_override):
+        case Ok(driver): compiler_driver_run_compile(driver)
+        case Err(reason): CompileResult.RuntimeError(reason)
+
+# reason: canonical fixed-arity bootstrap driver construction shared by compile and diagnostic-only parsing
+@allow(primitive_api)
+pub fn bootstrap_native_driver_with_backend_fixed_v1(
+    source_0: text,
+    source_1: text,
+    source_2: text,
+    source_3: text,
+    source_4: text,
+    source_5: text,
+    source_count: i64,
+    entry: text,
+    output: text,
+    backend: text,
+    strip: bool,
+    release: bool,
+    opt_level: i64,
+    no_borrow_check: bool,
+    managed_build_phase: text = "",
+    backend_plugin_path: text = "",
+    xray_enabled: bool = false,
+    xray_startup_consumer_v1: bool = false,
+    debug_info_override: i64 = -1
+) -> Result<CompilerDriver, text>:
+    if source_count < 0 or source_count > 6:
+        return Err("fixed v2 native project API accepts zero to six source roots")
     var options = driver_core_compile_options_default()
     # Capture the focused CLI target once; empty retains host-default behavior.
     options.native_target = env_get("SIMPLE_NATIVE_BUILD_TARGET")
-    if source_count <= 0:
+    if source_count == 0:
         options.input_files = [entry]
     elif source_count == 1:
         options.input_files = [source_0, entry]
@@ -33,9 +93,25 @@ pub fn aot_native_project_with_backend_fixed(
         options.input_files = [source_0, source_1, source_2, entry]
     elif source_count == 4:
         options.input_files = [source_0, source_1, source_2, source_3, entry]
-    else:
+    elif source_count == 5:
         options.input_files = [source_0, source_1, source_2, source_3, source_4, entry]
+    else:
+        options.input_files = [source_0, source_1, source_2, source_3, source_4, source_5, entry]
     options.bootstrap_input_count = source_count + 1
+    var representation_dirs: [text] = []
+    if source_count > 0:
+        representation_dirs.push(source_0)
+    if source_count > 1:
+        representation_dirs.push(source_1)
+    if source_count > 2:
+        representation_dirs.push(source_2)
+    if source_count > 3:
+        representation_dirs.push(source_3)
+    if source_count > 4:
+        representation_dirs.push(source_4)
+    if source_count > 5:
+        representation_dirs.push(source_5)
+    options.representation_project_root = representation_project_root_from_inputs_v1(representation_dirs, entry)
     if source_count > 0:
         options.bootstrap_input_0 = source_0
     if source_count > 1:
@@ -46,6 +122,8 @@ pub fn aot_native_project_with_backend_fixed(
         options.bootstrap_input_3 = source_3
     if source_count > 4:
         options.bootstrap_input_4 = source_4
+    if source_count > 5:
+        options.bootstrap_input_5 = source_5
     if source_count == 0:
         options.bootstrap_input_0 = entry
     elif source_count == 1:
@@ -56,18 +134,46 @@ pub fn aot_native_project_with_backend_fixed(
         options.bootstrap_input_3 = entry
     elif source_count == 4:
         options.bootstrap_input_4 = entry
-    else:
+    elif source_count == 5:
         options.bootstrap_input_5 = entry
+    else:
+        options.bootstrap_input_6 = entry
     options.mode = CompileMode.Aot
+    options.cli_mode_text = "aot"
     options.output_file = Some(output)
     options.output_format = driver_output_format_native()
     options.backend = backend
+    options.backend_plugin_path = backend_plugin_path
     options.release = release
+    options.debug_info = if debug_info_override == 0: false elif debug_info_override == 1: true else: not release
+    options.strip_output = strip
+    options.xray_enabled = xray_enabled
+    options.xray_startup_consumer_v1 = xray_startup_consumer_v1
+    options.profile = if release: "prod" else: "dev"
+    options.managed_build_phase = managed_build_phase
     options.opt_level = opt_level
     options.no_borrow_check = no_borrow_check
     # Reclaim only for the explicit Stage4 low-memory profile. Ordinary focused
     # builds and the no-opt-in negative control retain their source buffers.
     options.low_memory = bootstrap_low_memory_requested()
+    val peeked_reqs = native_entry_closure_handoff_peek_list_v1()
+    if peeked_reqs.len() > 0:
+        val req = peeked_reqs[0]
+        options.native_source_roots = req.binding.source_roots
+        options.native_source_snapshot_root = req.snapshot.snapshot_root
+    val taken_lib_pols = native_entry_closure_handoff_library_policy_take_list_v1()
+    if taken_lib_pols.len() > 0:
+        val lib_pol = taken_lib_pols[0]
+        options.library_mode = lib_pol.mode
+        options.gc_off = lib_pol.gc_off
+        options.allowed_families = lib_pol.allowed_families
     options = compileoptions_normalize_mir_optimization(options)
-    val driver = compiler_driver_create(options)
-    compiler_driver_run_compile(driver)
+    val taken_collections = native_entry_closure_handoff_policy_collection_take_list_v1()
+    val driver = if taken_collections.len() > 0:
+        match compiler_driver_create_with_environment_variant_policy_v1(options, taken_collections[0]):
+            case Ok(created): created
+            case Err(reason):
+                return Err("invalid environment variant policy: " + reason)
+    else:
+        compiler_driver_create(options)
+    Ok(driver)

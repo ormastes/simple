@@ -6,7 +6,7 @@ across RV64/x86_32/ARM32/Windows/FreeBSD/macOS guests, each blocker requiring
 a real or QEMU-emulated target host and an admitted Stage-4 CLI build. Not
 reproducible or actionable from a pure-Simple bugfix worktree. Left OPEN.
 
-Status: OPEN
+Status: fix-implemented-verification-pending (re-verified 2026-11-26; scripts/qemu fixes landed, cross-target QEMU/Stage-4 matrix pending)
 
 Canonical plan:
 [`sosix_parallel_qemu_refactor.md`](../../03_plan/agent_tasks/sosix_parallel_qemu_refactor.md)
@@ -42,3 +42,48 @@ Canonical plan:
 All rows retain stable acceptance IDs in the canonical plan. This record may be
 closed only after the matching implementation and canonical evidence land; a
 plan-document completion or current-host handoff does not close it.
+
+## Triage 2026-11-11 (p3fix lane boot24)
+
+**Verdict: BLOCKED (verbatim grant). Fresh re-verification at tip
+6233df4b9f9ea — every unblock condition still requires an admitted
+Stage-4 CLI and/or a non-Windows QEMU/target host; none is reachable
+from this Windows p3fix worktree (in-lane QEMU and bootstrap runs are
+forbidden by campaign policy).**
+
+Fresh checks this pass:
+
+- `test/03_system/os/qemu/sosix_qemu_remaining_owners_spec.spl` exists
+  unchanged; the guest/runtime and external-host blocker tables above
+  still describe the current state (no RV64/x86_32/ARM32/Windows/
+  FreeBSD/macOS row has new evidence).
+- No admitted Stage-4 CLI is present in-tree (`release/` carries only
+  FILE.md/support.sdn/version.sdn; no `build/bootstrap/` in a fresh
+  checkout), so the Full-CLI, system-test/docgen, positioned-I/O, and
+  typed-importer rows cannot be exercised here.
+- Shared-owner source repairs are still in-tree (e.g.
+  `collect-sosix-qemu-evidence.shs:349` writes
+  `sosix_qemu_matrix_promotion_status=pending` on non-PASS rows), so the
+  remaining gap is execution evidence, not source state.
+
+Grants carried verbatim from this record for the sanctioned lanes:
+
+- Windows + guest owners:
+  `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check/check-sosix-qemu-matrix.ps1 -AllGuests -Run`
+- FreeBSD operator:
+  `sh scripts/qemu/simple-freebsd-media.shs --check`
+- macOS operator:
+  `SIMPLE_QEMU_ACCELERATOR=tcg sh scripts/check/check-sosix-qemu-matrix.shs --host macos --all-guests --run --parallel`
+- Full-CLI / system-test / positioned-I/O / typed-importer owners:
+  with a source-matched admitted Stage-4 CLI,
+  `release/x86_64-unknown-linux-gnu/simple test test/03_system/os/qemu/sosix_qemu_remaining_owners_spec.spl --mode=interpreter`
+  then
+  `release/x86_64-unknown-linux-gnu/simple spipe-docgen test/03_system/os/qemu/sosix_qemu_remaining_owners_spec.spl --output doc/06_spec --no-index`
+  (require PASS and zero stubs); per-owner focused specs and gates as
+  listed in the tables above.
+
+
+## BF-10 Fix & Verification Status (2026-11-26)
+
+- **Code fix:** Repaired `REPO_ROOT` / `ROOT` two-level parent path resolution (`/../..`) in `scripts/qemu/create-qemu-temp-layout.shs`, `scripts/qemu/cleanup-qemu-temp.shs` (with multi-match glob iteration in `remove_if_exists`), and `scripts/qemu/linux_qemu_net_parity_bench.shs` (which previously resolved `scripts/` instead of repo root). Verified via `sh -n`, `sh scripts/qemu/simple-qemu-settings.shs --self-test` (`simple_qemu_settings_self_test=pass`), and `test/01_unit/os/wm_bf10/bf10_wm_pin_and_evidence_gates_spec.spl` (`4 passed, 0 failed`). Kernel/compiler/CLI/check-script items (`src/os/kernel/`, `src/compiler/`, `scripts/check/`) remain outside BF-10 file ownership.
+- **Pending cross-host QEMU verification:** Run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check/check-sosix-qemu-matrix.ps1 -AllGuests -Run`, FreeBSD `sh scripts/qemu/simple-freebsd-media.shs --check`, macOS `sh scripts/check/check-sosix-qemu-matrix.shs --host macos --all-guests --run --parallel`, and Stage-4 `test/03_system/os/qemu/sosix_qemu_remaining_owners_spec.spl`.

@@ -298,38 +298,34 @@ bool rt_rocm_free(int64_t ptr) {
            rocm_hip_ok("hipFree", rocm.free_device(pointer));
 }
 
-bool rt_rocm_memcpy_h2d(int64_t dst, int64_t src_data, int64_t size) {
+/* Staged host<->device copy: H2D fills the bounce buffer from the array before
+ * the HIP call, D2H drains it into the array after. */
+static bool rocm_memcpy_staged(int64_t array, int64_t device_handle, int64_t size, int host_to_device) {
     size_t bytes;
-    void *destination;
+    void *device;
     uint8_t *copy;
-    if (!rocm_loaded() || !rocm_handle(dst, &destination) || !rocm_size(size, &bytes) ||
-        !rocm_array_has(src_data, size)) return false;
+    if (!rocm_loaded() || !rocm_handle(device_handle, &device) || !rocm_size(size, &bytes) ||
+        !rocm_array_has(array, size)) return false;
     if (bytes == 0) return true;
     copy = malloc(bytes);
     if (!copy) { rocm_set_error("out of memory"); return false; }
-    for (int64_t i = 0; i < size; i++)
-        copy[i] = (uint8_t)rt_bytes_u8_at((SplArray *)(uintptr_t)src_data, i);
-    int ok = rocm_hip_ok("hipMemcpy(H2D)",
-                         rocm.memcpy(destination, copy, bytes, HIP_MEMCPY_HOST_TO_DEVICE));
+    if (host_to_device) for (int64_t i = 0; i < size; i++)
+        copy[i] = (uint8_t)rt_bytes_u8_at((SplArray *)(uintptr_t)array, i);
+    int ok = host_to_device
+        ? rocm_hip_ok("hipMemcpy(H2D)", rocm.memcpy(device, copy, bytes, HIP_MEMCPY_HOST_TO_DEVICE))
+        : rocm_hip_ok("hipMemcpy(D2H)", rocm.memcpy(copy, device, bytes, HIP_MEMCPY_DEVICE_TO_HOST));
+    if (ok && !host_to_device) for (int64_t i = 0; i < size; i++)
+        rt_bytes_u8_set((SplArray *)(uintptr_t)array, i, copy[i]);
     free(copy);
     return ok;
 }
 
+bool rt_rocm_memcpy_h2d(int64_t dst, int64_t src_data, int64_t size) {
+    return rocm_memcpy_staged(src_data, dst, size, 1);
+}
+
 bool rt_rocm_memcpy_d2h(int64_t dst_data, int64_t src, int64_t size) {
-    size_t bytes;
-    void *source;
-    uint8_t *copy;
-    if (!rocm_loaded() || !rocm_handle(src, &source) || !rocm_size(size, &bytes) ||
-        !rocm_array_has(dst_data, size)) return false;
-    if (bytes == 0) return true;
-    copy = malloc(bytes);
-    if (!copy) { rocm_set_error("out of memory"); return false; }
-    int ok = rocm_hip_ok("hipMemcpy(D2H)",
-                         rocm.memcpy(copy, source, bytes, HIP_MEMCPY_DEVICE_TO_HOST));
-    if (ok) for (int64_t i = 0; i < size; i++)
-        rt_bytes_u8_set((SplArray *)(uintptr_t)dst_data, i, copy[i]);
-    free(copy);
-    return ok;
+    return rocm_memcpy_staged(dst_data, src, size, 0);
 }
 
 bool rt_rocm_memcpy_d2d(int64_t dst, int64_t src, int64_t size) {

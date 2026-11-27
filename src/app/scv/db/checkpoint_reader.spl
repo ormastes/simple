@@ -2,7 +2,7 @@
 # internals, not authorization capabilities. Always retain the returned state.
 # Limits describe encoded bytes/work reservations, never process RSS.
 use app.scv.db.checkpoint_objects.{db_checkpoint_page_read}
-use app.scv.db.local_store.{DbStoreView, db_store_read}
+use app.scv.db.local_store.{DbStoreView, db_store_read_accounted}
 use std.scv.db_pages.*
 use std.scv.db_canonical.{db_canonical_text, db_bytes_less, db_domain_bytes, db_frame, db_u64_bytes}
 use std.scv.db_admission.{DbAdmissionPolicy}
@@ -96,11 +96,20 @@ fn db_checkpoint_reader_work(initial: DbCheckpointReader, record: DbPageRecord) 
     db_checkpoint_reader_reserve(initial, 0u64, record.payload.len() as u64 + record.key.len() as u64 + 1u64)
 
 fn db_checkpoint_reader_store(initial: DbCheckpointReader, channel: text) -> Result<(DbCheckpointReader, DbStoreView), text>:
-    # Include the HEAD pointer and the actual local_store generation ceiling.
-    # The compact checkpoint barrier has its own 2048-byte generation ceiling.
-    val bound = if channel == "checkpoint-install": 2113u64 else: 67108929u64
-    val reader = db_checkpoint_reader_reserve(initial, bound, bound)?
-    Ok((reader, db_store_read(reader.root, channel)))
+    # Validate counters before subtraction, then admit only reads fitting both
+    # cumulative budgets. Charge actual encoded bytes rather than channel maxima.
+    val checked = db_checkpoint_reader_reserve(initial, 0u64, 0u64)?
+    val io_remaining = checked.limits.io_bytes - checked.io_bytes
+    val work_remaining = checked.limits.work_bytes - checked.work_bytes
+    val limit = if io_remaining < work_remaining: io_remaining else: work_remaining
+    val read = match db_store_read_accounted(checked.root, limit, channel):
+        Ok(value): value
+        Err(reason):
+            if reason != "SCVDB_STORE_READ_QUOTA": return Err(reason)
+            if io_remaining <= work_remaining: return Err("SCVDB_CHECKPOINT_READ_QUOTA")
+            return Err("SCVDB_CHECKPOINT_WORK_QUOTA")
+    val reader = db_checkpoint_reader_reserve(checked, read.io_bytes, read.io_bytes)?
+    Ok((reader, read.view))
 
 fn db_checkpoint_reader_page(initial: DbCheckpointReader, manifest: DbPageManifest, entry: DbPageEntry) -> Result<(DbCheckpointReader, DbRecordPage), text>:
     var reader = initial

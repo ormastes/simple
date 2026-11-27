@@ -177,3 +177,19 @@ Conservative: make the JIT defer (widen the guard) rather than teach the closure
 ABI to encode `text` returns. Deferring restores correct behaviour immediately
 and costs only JIT coverage; encoding `text` across the closure ABI is a
 feature, not a bug fix.
+
+
+## 2026-11-09 — FIXED (verified) on work/p3-subj4-seed-20261109
+
+Both repro shapes from this report now print correct values under the
+DEFAULT JIT lane:
+
+- Deployed Nov 5 2026 bootstrap seed
+  (`src/compiler_rust/target/bootstrap/simple`):
+  `["ab","cd"].map(\z: z + "!")` -> `ab!`; `[1,2].map(\v: "n{v}")` -> `n1`.
+- Fresh cargo build of `origin/release/1.0.0` source
+  (`build/agent-worktrees/p3-subj4/target/bootstrap/simple`): identical output.
+
+The underlying closure-ABI repair landed in the lambda-ABI work
+(PR #5779, merge 792845d5a16, ancestor of release/1.0.0). The deployed
+binary already postdates the fix; no live regression. Status open -> fixed.

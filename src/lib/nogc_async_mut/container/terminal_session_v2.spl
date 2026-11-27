@@ -1,0 +1,179 @@
+# Canonical tagged terminal ownership. Dispatch preserves the returned owner;
+# correlation and platform projection create no native or control authority.
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_identifier_valid_v1}
+use std.common.contracts.container.primary_connection_v2.ContainerTerminalChunkV2
+use std.common.text_bytes.boxed_text_bytes_checked
+use std.nogc_sync_mut.io.process_ops.{PipedProcessRefV1, process_read_stdout_ref_v1, process_is_piped_alive_ref_v1}
+use std.nogc_async_mut.container.terminal_session_v1.{ContainerOwnedTerminalSessionV1,
+    container_terminal_reference_v1, container_terminal_validate_v1,
+    container_terminal_cleanup_v1, container_terminal_identity_equal_v1,
+    ContainerPrimaryAttachSessionV1, container_primary_attach_adoption_v1,
+    container_primary_attach_native_cleaned_v1, ContainerPrimaryAttachAdoptionV1,
+    ContainerPrimaryAttachAdoptionTurnV1, container_primary_attach_adopt_v1, container_primary_attach_plan_v1}
+use std.common.contracts.container.primary_attach_v1.{ContainerPrimaryAttachPlanV1, HostAgentPaneBindingV4,
+    container_primary_attach_plan_digest_v1, host_agent_pane_binding_validate_v4}
+use std.nogc_async_mut.container.providers.windows.primary_connection_v2.{WindowsPrimaryConnectionV2,
+    windows_primary_connection_read_v2, windows_primary_connection_identity_v2,
+    windows_primary_connection_validate_v2, windows_primary_connection_cleanup_v2,
+    windows_primary_connection_absence_matches_v2, windows_primary_connection_transport_active_v2}
+
+pub enum ContainerOwnedTerminalSessionV2:
+    Legacy(session: ContainerOwnedTerminalSessionV1)
+    WindowsConnection(session: WindowsPrimaryConnectionV2)
+
+pub struct ContainerTerminalReadTurnV2:
+    session: ContainerOwnedTerminalSessionV2
+    chunks: [ContainerTerminalChunkV2]
+    eof: bool
+    error: text
+
+pub struct ContainerTerminalCleanupTurnV2:
+    session: ContainerOwnedTerminalSessionV2
+    cleaned: bool
+    error: text
+
+# No synthetic PipedProcessRef is available for a direct Engine connection.
+pub fn container_terminal_legacy_v2(session: ContainerOwnedTerminalSessionV2) -> Result<ContainerOwnedTerminalSessionV1, text>:
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(legacy): Ok(legacy)
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(_): Err("container-terminal-windows-has-no-legacy-process")
+
+pub fn container_terminal_validate_v2(session: ContainerOwnedTerminalSessionV2) -> Result<(), text>:
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(legacy): container_terminal_validate_v1(legacy)
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(connection): windows_primary_connection_validate_v2(connection)
+
+# Native process references are an optional capability. A direct connection
+# has none; callers must use the common read/active/cleanup operations.
+pub fn container_terminal_reference_v2(session: ContainerOwnedTerminalSessionV2) -> Result<PipedProcessRefV1?, text>:
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(legacy): Ok(Some(container_terminal_reference_v1(legacy)?))
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(_): Ok(None)
+
+# Transport activity only: neither branch proves the container workload alive.
+pub fn container_terminal_transport_active_v2(session: ContainerOwnedTerminalSessionV2) -> Result<bool, text>:
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(legacy): process_is_piped_alive_ref_v1(container_terminal_reference_v1(legacy)?)
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(connection): windows_primary_connection_transport_active_v2(connection)
+
+pub fn container_terminal_identity_equal_v2(left: ContainerOwnedTerminalSessionV2,
+        right: ContainerOwnedTerminalSessionV2) -> bool:
+    match left:
+        case ContainerOwnedTerminalSessionV2.Legacy(a):
+            match right:
+                case ContainerOwnedTerminalSessionV2.Legacy(b): container_terminal_identity_equal_v1(a, b)
+                case _: false
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(a):
+            match right:
+                case ContainerOwnedTerminalSessionV2.WindowsConnection(b):
+                    val first = windows_primary_connection_identity_v2(a)
+                    val second = windows_primary_connection_identity_v2(b)
+                    (builder_digest_valid_v1(first) and builder_digest_valid_v1(second) and first == second)
+                case _: false
+
+pub fn container_terminal_read_v2(session: ContainerOwnedTerminalSessionV2) -> ContainerTerminalReadTurnV2:
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(legacy):
+            val reference = container_terminal_reference_v1(legacy)
+            if reference.is_err():
+                return ContainerTerminalReadTurnV2(session: session, chunks: [], eof: false, error: reference.unwrap_err())
+            val observed = process_read_stdout_ref_v1(reference.unwrap())
+            match observed:
+                case Ok(Some(value)):
+                    match boxed_text_bytes_checked(value):
+                        case Ok(bytes):
+                            ContainerTerminalReadTurnV2(session: session,
+                                chunks: [ContainerTerminalChunkV2(stream: "stdout", bytes: bytes)], eof: false, error: "")
+                        case Err(_):
+                            ContainerTerminalReadTurnV2(session: session, chunks: [], eof: false,
+                                error: "container-terminal-legacy-byte-extraction-failed")
+                case Ok(None): ContainerTerminalReadTurnV2(session: session, chunks: [], eof: false, error: "")
+                case Err(reason):
+                    if reason == "process_stdout_eof":
+                        ContainerTerminalReadTurnV2(session: session, chunks: [], eof: true, error: "")
+                    else:
+                        ContainerTerminalReadTurnV2(session: session, chunks: [], eof: false, error: reason)
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(connection):
+            val turn = windows_primary_connection_read_v2(connection)
+            ContainerTerminalReadTurnV2(session: ContainerOwnedTerminalSessionV2.WindowsConnection(turn.session),
+                chunks: turn.chunks, eof: turn.eof, error: turn.error)
+
+pub struct ContainerPrimaryOutputReadV1:
+    session: ContainerPrimaryAttachSessionV1
+    chunks: [ContainerTerminalChunkV2]
+    eof: bool
+    error: text
+
+# Adoption-gated primary output (milestone_0022 N4). One call is one
+# non-blocking native read of at most PIPED_RAW_CAP (8192) raw bytes, framed to
+# at most 3*(cap+3) text bytes; no max parameter, no truncation, no remainder.
+# Invalid UTF-8 turns the legacy piped stream to Err("process_stdout_failed"):
+# an existing transport property, not widened here. The caller replaces its
+# canonical session with the returned one and keeps eof sticky on its owner.
+# Lives here, not in terminal_session_v1, because v2 already imports v1.
+pub fn container_primary_output_read_v1(session: ContainerPrimaryAttachSessionV1) -> ContainerPrimaryOutputReadV1:
+    if not container_primary_attach_adoption_v1(session).is_some():
+        return ContainerPrimaryOutputReadV1(session: session, chunks: [], eof: false, error: "primary-output-not-adopted")
+    if container_primary_attach_native_cleaned_v1(session):
+        return ContainerPrimaryOutputReadV1(session: session, chunks: [], eof: false, error: "primary-output-native-cleaned")
+    val turn = container_terminal_read_v2(ContainerOwnedTerminalSessionV2.Legacy(
+        ContainerOwnedTerminalSessionV1.PrimaryAttach(session)))
+    match turn.session:
+        case ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.PrimaryAttach(returned)):
+            ContainerPrimaryOutputReadV1(session: returned, chunks: turn.chunks, eof: turn.eof, error: turn.error)
+        # Defensive and unreachable today: container_terminal_read_v2 returns the
+        # Legacy session it was given unchanged, so no spec drives this arm.
+        case _:
+            ContainerPrimaryOutputReadV1(session: session, chunks: [], eof: false, error: "primary-output-owner-changed")
+
+val HOST_AGENT_LEASE_EPOCH_MAX_V4: i64 = 9223372036854775807
+
+# Agent-side adoption (milestone_0021 14B, milestone_0022 N4). Built only from
+# a controller-issued pane binding the caller has ALREADY verified (signature,
+# authorize kind and live service incarnation/epoch are PR3b), never from an
+# unsigned packet field. Plan gates: integrity (request_digest re-derives) and
+# plan.identity.parent_operation_id == the agent operation. Deliberately NOT
+# enforced (14B clause dropped by milestone_0021 14C): plan.identity.binding_digest
+# is the control-target binding digest (primary_input_v1), not the pane binding
+# digest; the plan<->binding pairing is the controller-signed attach digest over
+# {planDigest, paneBindingDigest}, checked by the PR3b authorize path.
+# allow(primitive_api): reviewed lease-epoch DATA word (milestone_0022 N4)
+pub fn host_agent_attach_adoption_v4(plan: ContainerPrimaryAttachPlanV1, binding: HostAgentPaneBindingV4, operation_id: text, lease_epoch: i64) -> Result<ContainerPrimaryAttachAdoptionV1, text>:
+    val valid = host_agent_pane_binding_validate_v4(binding)?
+    if lease_epoch < 0 or lease_epoch >= HOST_AGENT_LEASE_EPOCH_MAX_V4: return Err("attach-lease-epoch-range")
+    if not builder_identifier_valid_v1(operation_id) or plan.identity.parent_operation_id != operation_id:
+        return Err("attach-plan-operation-mismatch")
+    if container_primary_attach_plan_digest_v1(plan)? != plan.request_digest: return Err("attach-plan-digest-mismatch")
+    Ok(ContainerPrimaryAttachAdoptionV1(binding_uid: valid.binding_uid, service_incarnation: valid.service_incarnation,
+        session_id: valid.session_id, window_id: valid.window_id, pane_id: valid.pane_id,
+        service_epoch: valid.service_epoch, child_incarnation: lease_epoch + 1))
+
+# Applies the agent adoption to the agent's own session using the session's
+# retained plan. Always returns the canonical session (unchanged on refusal);
+# the caller replaces its single copy with turn.session.
+# allow(primitive_api): reviewed lease-epoch DATA word (milestone_0022 N4)
+pub fn host_agent_attach_adopt_v4(session: ContainerPrimaryAttachSessionV1, binding: HostAgentPaneBindingV4, operation_id: text, lease_epoch: i64) -> ContainerPrimaryAttachAdoptionTurnV1:
+    val adoption = host_agent_attach_adoption_v4(container_primary_attach_plan_v1(session), binding, operation_id, lease_epoch)
+    if adoption.is_err(): return ContainerPrimaryAttachAdoptionTurnV1(session: session, error: adoption.unwrap_err())
+    container_primary_attach_adopt_v1(session, adoption.unwrap())
+
+pub fn container_terminal_cleanup_v2(session: ContainerOwnedTerminalSessionV2) -> ContainerTerminalCleanupTurnV2:
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(legacy):
+            val turn = container_terminal_cleanup_v1(legacy)
+            ContainerTerminalCleanupTurnV2(session: ContainerOwnedTerminalSessionV2.Legacy(turn.session),
+                cleaned: turn.cleaned, error: turn.error)
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(connection):
+            val turn = windows_primary_connection_cleanup_v2(connection)
+            val retained = ContainerOwnedTerminalSessionV2.WindowsConnection(turn.session)
+            if turn.error != "":
+                return ContainerTerminalCleanupTurnV2(session: retained, cleaned: false, error: turn.error)
+            val absence = match turn.absence:
+                case Some(value): value
+                case None:
+                    return ContainerTerminalCleanupTurnV2(session: retained, cleaned: false,
+                        error: "container-terminal-windows-cleanup-absence-required")
+            val matched = windows_primary_connection_absence_matches_v2(turn.session, absence)
+            if matched.is_err():
+                return ContainerTerminalCleanupTurnV2(session: retained, cleaned: false, error: matched.unwrap_err())
+            ContainerTerminalCleanupTurnV2(session: retained, cleaned: true, error: "")

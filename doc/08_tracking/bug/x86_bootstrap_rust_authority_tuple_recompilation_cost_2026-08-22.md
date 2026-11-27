@@ -1,6 +1,6 @@
 # x86 bootstrap Rust authority tuple rebuild delays Stage 2
 
-Status: OPEN (P2)
+Status: BLOCKED (kept OPEN), re-confirmed 2026-11-11 (lane boot23); grant verbatim below. Was: OPEN (P2).
 
 ## Summary
 
@@ -104,3 +104,76 @@ build evidence with a cached stale binary.
 5. Complete admitted Stage 2 and Stage 3 with
    `SIMPLE_NO_STUB_FALLBACK=1`, then pass the Stage-3 provenance and sanity
    gates. Stage 4 remains a separate required production gate.
+
+
+---
+
+## Triage addendum 2026-11-11 (lane boot16)
+
+**Verdict: BLOCKED** (requires cargo/rustc plus a sanctioned full bootstrap; both
+are forbidden in this lane, and the recorded reproduction host is
+x86_64-linux, not this Windows-native host).
+
+This is a P2 authority-build *performance* bug: a clean x86_64 build spends
+23m21s across four serial Cargo invocations, recompiling shared LTO-heavy
+compiler units because the package feature/profile tuples differ. Its
+acceptance criteria require a measured >=30% clean pre-Stage-2 wall-time
+reduction with byte- and provenance-correct seed/native-all/runtime-symbol-table
+/compiler-backfill artifacts — which can only be demonstrated by running the
+full Rust-authority bootstrap and timing it.
+
+This lane forbids cargo/rustc and entry-closure native builds, and this host is
+Windows-native, so neither a reproduction nor a fix verification is possible
+here. The 2026-11-04 `bug_db.sdn` triage reached the same conclusion: "needs a
+working self-hosted stage3 to verify or repro; cannot be settled with the Rust
+seed."
+
+Exact grant command to settle this row (sanctioned bootstrap lane,
+x86_64-linux host, fresh worktree on origin/release/1.0.0, isolated output):
+
+    SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_LLVM_DIAGNOSTIC_DIR=build/native_probe/x86_bootstrap_readiness/llvm-diag \
+    sh scripts/bootstrap/bootstrap-from-scratch.sh \
+      --full-bootstrap --stop-after-stage2 --backend=llvm --mode=dynload \
+      --jobs=1 --output=build/native_probe/x86_bootstrap_readiness/bootstrap
+
+Then compare the four `rust-*-build.log` Cargo wall times against the recorded
+9m56s / 10m00s / 1m25s / 2m00s baseline and demonstrate the dominant repeated
+compiler units with Cargo timing/fingerprint evidence before optimizing.
+
+## Addendum 2026-11-11 (lane boot23) — BLOCKED re-confirmed; boot16 disposition stands
+
+Re-verification at this lane's base (`41935a5f61860`), one source check: the
+four separate Cargo authority invocations are still present in
+`scripts/bootstrap/bootstrap-from-scratch.sh` (lines 3912 `simple-driver`,
+3923 `simple-native-all` + `spl_hosted_runtime`, 3933 `simple-runtime
+--features runtime-symbol-table`, 3942 `simple-compiler-backfill`) — the
+repeated-work structure this record measures is unchanged at this tip.
+
+Disposition unchanged: **BLOCKED** (kept OPEN). This is a P2 authority-build
+performance bug whose acceptance criteria require a measured >=30% clean
+pre-Stage-2 wall-time reduction with byte- and provenance-correct artifacts —
+only demonstrable by running the full Rust-authority bootstrap on the recorded
+x86_64-linux host. This lane forbids cargo/rustc and entry-closure native
+builds, and the recorded reproduction host is Linux, not this Windows-native
+host. Owner: cargo/seed-fix lane with a sanctioned bootstrap grant.
+
+Verbatim grant command (sanctioned bootstrap lane, x86_64-linux host, fresh
+worktree on origin/release/1.0.0, isolated output):
+
+    SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_LLVM_DIAGNOSTIC_DIR=build/native_probe/x86_bootstrap_readiness/llvm-diag \
+    sh scripts/bootstrap/bootstrap-from-scratch.sh \
+      --full-bootstrap --stop-after-stage2 --backend=llvm --mode=dynload \
+      --jobs=1 --output=build/native_probe/x86_bootstrap_readiness/bootstrap
+
+Then compare the four `rust-*-build.log` Cargo wall times against the recorded
+9m56s / 10m00s / 1m25s / 2m00s baseline and demonstrate the dominant repeated
+compiler units with Cargo timing/fingerprint evidence before optimizing.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+Not pursued in this lane: BLOCKED re-confirmed 2026-11-11 (lane boot23): cargo/rustc + sanctioned full bootstrap required. Not chaseable here.

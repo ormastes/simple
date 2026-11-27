@@ -3,12 +3,124 @@ use simple_parser::ast::ReferenceCapability;
 
 use crate::hir::lifetime::{ReferenceOrigin, ScopeKind};
 use crate::hir::lower::context::FunctionContext;
-use crate::hir::lower::error::{LowerError, LowerResult};
+use crate::hir::lower::error::{LowerError, LowerResult, LOWERING_TYPE_ERROR_TAG};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{
-    ConcurrencyMode, FunctionLayoutHint, HirContract, HirFunction, HirStmt, HirType, LayoutAnchor, LayoutPhase,
+    ConcurrencyMode, FunctionLayoutHint, HirContract, HirExpr, HirFunction, HirStmt, HirType, LayoutAnchor, LayoutPhase,
     LocalVar, PointerKind, TypeId,
 };
+
+pub(crate) enum AstFnAbiOverride {
+    Export(String),
+    ExternRuntime(String),
+}
+
+fn extract_string_lit_expr(expr: &ast::Expr) -> Option<String> {
+    match expr {
+        ast::Expr::String(s) => Some(s.clone()),
+        ast::Expr::FString { parts, .. } => {
+            let mut out = String::new();
+            for p in parts {
+                match p {
+                    ast::FStringPart::Literal(lit) => out.push_str(lit),
+                    _ => return None,
+                }
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn ast_extern_runtime_target(f: &ast::FunctionDef) -> Option<String> {
+    for dec in &f.decorators {
+        if let ast::Expr::Identifier(name) = &dec.name {
+            if name == "extern" {
+                if let Some(args) = &dec.args {
+                    if args.len() >= 2 {
+                        let kind = extract_string_lit_expr(&args[0].value);
+                        if matches!(kind.as_deref(), Some("runtime" | "c" | "C")) {
+                            if let Some(target) = extract_string_lit_expr(&args[1].value) {
+                                return Some(target);
+                            }
+                        }
+                    } else if let Some(first) = args.first() {
+                        if first.name.as_deref() == Some("name") {
+                            if let Some(target) = extract_string_lit_expr(&first.value) {
+                                return Some(target);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn ast_function_abi_override(f: &ast::FunctionDef) -> Option<AstFnAbiOverride> {
+    if let Some(target) = ast_extern_runtime_target(f) {
+        return Some(AstFnAbiOverride::ExternRuntime(target));
+    }
+    for dec in &f.decorators {
+        if let ast::Expr::Identifier(name) = &dec.name {
+            if name == "export" {
+                if let Some(args) = &dec.args {
+                    for arg in args {
+                        if arg.name.as_deref() == Some("name") {
+                            if let Some(custom) = extract_string_lit_expr(&arg.value) {
+                                return Some(AstFnAbiOverride::Export(custom));
+                            }
+                        }
+                    }
+                }
+                return Some(AstFnAbiOverride::Export(f.name.clone()));
+            }
+            if name == "global" {
+                return Some(AstFnAbiOverride::Export(f.name.clone()));
+            }
+        }
+    }
+    for attr in &f.attributes {
+        if attr.name == "export" {
+            if let Some(named) = &attr.named_args {
+                for (k, v) in named {
+                    if k == "name" {
+                        if let Some(custom) = extract_string_lit_expr(v) {
+                            return Some(AstFnAbiOverride::Export(custom));
+                        }
+                    }
+                }
+            }
+            return Some(AstFnAbiOverride::Export(f.name.clone()));
+        }
+        if attr.name == "global" {
+            return Some(AstFnAbiOverride::Export(f.name.clone()));
+        }
+    }
+    None
+}
+
+fn collect_fn_abi_attributes(f: &ast::FunctionDef, attributes: &mut Vec<String>) {
+    if let Some(override_kind) = ast_function_abi_override(f) {
+        match override_kind {
+            AstFnAbiOverride::Export(sym) => {
+                if sym != f.name {
+                    let entry = format!("export_c_name={sym}");
+                    if !attributes.contains(&entry) {
+                        attributes.push(entry);
+                    }
+                }
+            }
+            AstFnAbiOverride::ExternRuntime(sym) => {
+                let entry = format!("extern_runtime_name={sym}");
+                if !attributes.contains(&entry) {
+                    attributes.push(entry);
+                }
+            }
+        }
+    }
+}
 
 /// Whether an unannotated function body produces a value at its boundary.
 ///
@@ -19,6 +131,10 @@ fn body_produces_value(body: &[HirStmt]) -> bool {
     fn stmt_produces_value(stmt: &HirStmt) -> bool {
         match stmt {
             HirStmt::Return(Some(_)) => true,
+            // The "no arm matched" tail of a statement match diverges; it
+            // must not turn a procedural body into a value-returning one
+            // (it stands where a missing `else` used to be).
+            HirStmt::Expr(expr) if expr.is_match_exhausted_panic() => false,
             HirStmt::Expr(expr) => expr.ty != TypeId::VOID,
             HirStmt::If {
                 then_block,
@@ -30,6 +146,14 @@ fn body_produces_value(body: &[HirStmt]) -> bool {
     }
 
     body.last().is_some_and(stmt_produces_value) || body.iter().any(|stmt| matches!(stmt, HirStmt::Return(Some(_))))
+}
+
+/// A float flowing into an integer slot (parameter or declared return) is a
+/// type error: the program must write `as iN` / `.to_iN()`, which saturates
+/// identically on every engine. int -> float widening stays implicit.
+/// doc/08_tracking/bug/float_passed_to_int_typed_param_or_return_engines_disagree_2026-11-24.md
+pub(crate) fn is_float_into_int(expected: TypeId, found: TypeId) -> bool {
+    matches!(found, TypeId::F32 | TypeId::F64) && is_numeric_type(expected) && !matches!(expected, TypeId::F32 | TypeId::F64)
 }
 
 fn is_numeric_type(ty: TypeId) -> bool {
@@ -85,7 +209,7 @@ impl Lowerer {
             return true;
         }
         if is_numeric_type(expected) && is_numeric_type(found) {
-            return true;
+            return !is_float_into_int(expected, found);
         }
         // Truthiness: the seed itself coerces numeric tails in `-> bool`
         // functions (coerce_exists_tail_in_place), and the interpreter
@@ -339,9 +463,107 @@ impl Lowerer {
         }
     }
 
+    /// Reject a float argument bound to an integer-typed parameter (see
+    /// `is_float_into_int`). Called beside `reject_callable_for_enum_slot` at
+    /// every call site whose parameter types are resolved.
+    pub(crate) fn reject_float_for_int_slot(&self, expected: TypeId, value: &HirExpr, slot: &str) -> LowerResult<()> {
+        if !is_float_into_int(expected, value.ty) {
+            return Ok(());
+        }
+        let name = |t: TypeId| match t {
+            TypeId::I8 => "i8",
+            TypeId::I16 => "i16",
+            TypeId::I32 => "i32",
+            TypeId::I64 => "i64",
+            TypeId::U8 => "u8",
+            TypeId::U16 => "u16",
+            TypeId::U32 => "u32",
+            TypeId::U64 => "u64",
+            TypeId::F32 => "f32",
+            _ => "f64",
+        };
+        let int = name(expected);
+        Err(LowerError::Unsupported(format!(
+            "{LOWERING_TYPE_ERROR_TAG} type mismatch: {slot} is declared as `{int}` but receives `{}`; convert explicitly with `as {int}` or `.to_{int}()`",
+            name(value.ty)
+        )))
+    }
+
+    /// `T?` returned where a concrete scalar is declared. The seed's Option
+    /// typing is authoritative here (a declared `-> T?` or `Dict.get`), and
+    /// admitting it hands the caller the Option heap word. `bool` is left out:
+    /// a bool return slot already decodes truthiness (`rt_value_truthy`, the
+    /// `_json_bool` shape pinned in branch_coverage/types.rs), so no heap word
+    /// escapes there.
+    fn is_option_into_scalar(&self, expected: TypeId, found: TypeId) -> bool {
+        let scalar = matches!(
+            self.module.types.get(expected),
+            Some(HirType::Char | HirType::Int { .. } | HirType::Float { .. } | HirType::String)
+        );
+        // A type the untyped-receiver suffix search borrowed is not the
+        // program's declared type (see `suffix_guessed_return_types`).
+        let guessed = self.suffix_guessed_return_types.contains(&found);
+        // Any payload: an Option word reaches the scalar slot whatever `T` is
+        // (`Option<f64>` into `-> i64` printed garbage when narrowed to `T`).
+        scalar && !guessed && self.is_option_type(found)
+    }
+
+    /// `T?` (shared-pointer form) or an `Option<..>` enum, payload known or not.
+    pub(in crate::hir::lower) fn is_option_type(&self, ty: TypeId) -> bool {
+        self.module.types.optional_inner(ty).is_some()
+            || matches!(self.module.types.get(ty), Some(HirType::Enum { name, .. }) if name == "Option")
+    }
+
+    /// Payload of a `T?` (shared-pointer form) or an `Option<T>` enum.
+    fn option_payload(&self, ty: TypeId) -> Option<TypeId> {
+        if let Some(inner) = self.module.types.optional_inner(ty) {
+            return Some(inner);
+        }
+        match self.module.types.get(ty) {
+            Some(HirType::Enum { name, type_bindings, .. }) if name == "Option" => type_bindings.get("T").copied(),
+            _ => None,
+        }
+    }
+
+    fn scalar_type_name(&self, ty: TypeId) -> String {
+        match self.module.types.get(ty) {
+            _ if ty == TypeId::ANY => "any".to_string(),
+            Some(HirType::Bool) => "bool".to_string(),
+            Some(HirType::Char) => "char".to_string(),
+            Some(HirType::String) => "text".to_string(),
+            Some(HirType::Float { bits }) => format!("f{bits}"),
+            Some(HirType::Int { bits, signedness }) => {
+                format!("{}{bits}", if matches!(signedness, crate::hir::Signedness::Unsigned) { "u" } else { "i" })
+            }
+            other => format!("{other:?}"),
+        }
+    }
+
     pub(crate) fn validate_declared_return_type(&self, expected: TypeId, found: TypeId) -> LowerResult<()> {
+        // Before the compatibility check: `T?` shares the shared-pointer
+        // representation, which `hir_types_compatible` admits as `T`.
+        if self.is_option_into_scalar(expected, found) {
+            let want = self.scalar_type_name(expected);
+            let got = self.option_payload(found).map(|p| self.scalar_type_name(p)).unwrap_or_else(|| "any".to_string());
+            let func = self.current_function_name.clone().unwrap_or_default();
+            return Err(LowerError::Unsupported(format!(
+                "{LOWERING_TYPE_ERROR_TAG} type mismatch: `{func}` is declared to return `{want}` but returns `{got}?`; unwrap with `?? <default>` or declare `-> {want}?`"
+            )));
+        }
         if self.hir_types_compatible(expected, found) {
             return Ok(());
+        }
+        // float -> int return: owner-approved fatal type error (2026-11-24).
+        // Other primitive pairs stay the untagged `TypeMismatch` below, which
+        // still falls back to the interpreter on `run`.
+        if is_float_into_int(expected, found) {
+            let func = self.current_function_name.clone().unwrap_or_default();
+            return Err(LowerError::Unsupported(format!(
+                "{LOWERING_TYPE_ERROR_TAG} type mismatch: `{func}` is declared to return `{}` but returns `{}`; convert explicitly with `as {}`",
+                self.scalar_type_name(expected),
+                self.scalar_type_name(found),
+                self.scalar_type_name(expected)
+            )));
         }
         // Aggregate on either side: the seed's aggregate typing in the
         // gradual corners (trailing `match` arm unification, cross-module
@@ -606,6 +828,7 @@ fn expr_uses_self(expr: &ast::Expr) -> bool {
             .iter()
             .any(|(key, value)| expr_uses_self(key) || expr_uses_self(value)),
         ast::Expr::ArrayRepeat { value, count } => expr_uses_self(value) || expr_uses_self(count),
+        ast::Expr::GenericInst { expr, .. } => expr_uses_self(expr),
         ast::Expr::StructInit { fields, spread, .. } => {
             fields.iter().any(|(_, value)| expr_uses_self(value))
                 || spread.as_ref().map(|expr| expr_uses_self(expr)).unwrap_or(false)
@@ -1074,6 +1297,15 @@ impl Lowerer {
         let fn_flatten_owner = Self::flatten_owner_of(f.attributes.iter().map(|a| a.name.as_str()));
         let previous_function_owner = std::mem::replace(&mut self.current_function_owner, fn_flatten_owner.clone());
         let previous_type_scope = self.enter_flatten_struct_scope();
+        let mut active_generics = self.active_impl_generic_params.clone();
+        for gp in &f.generic_params {
+            if !active_generics.contains(gp) {
+                active_generics.push(gp.clone());
+            }
+        }
+        let generic_bounds = Self::extract_generic_bounds(&f.where_clause);
+        let previous_fn_generics = std::mem::replace(&mut self.active_fn_generic_params, active_generics.clone());
+        let previous_fn_bounds = std::mem::replace(&mut self.active_fn_generic_bounds, generic_bounds.clone());
         self.current_function_name = Some(func_name.clone());
         // Attribution anchor for the `lenient_types` unresolved-name fallback:
         // `Expr::Identifier` has no span, so the enclosing function's
@@ -1159,6 +1391,21 @@ impl Lowerer {
                     function: f.name.clone(),
                 });
             };
+            // A `= None` default is only meaningful on an Option (`T?`)
+            // parameter. Rejecting it here, at the declaration, is what lets
+            // call sites fill an omitted `None` default as a constant
+            // (`is_constant_default`) without ever passing None to a
+            // non-optional slot.
+            if let (Some(ast::Expr::Identifier(d)), Some(t)) = (&param.default, &param.ty) {
+                let optional = matches!(t, ast::Type::Optional(_))
+                    || matches!(t, ast::Type::Generic { name, .. } if name == "Option");
+                if d == "None" && !optional {
+                    return Err(LowerError::Unsupported(format!(
+                        "parameter `{}` of `{}` defaults to None but is not declared optional (`T?`)",
+                        param.name, f.name
+                    )));
+                }
+            }
             // The parser injects `self` before HIR lowering and records that
             // synthetic parameter as immutable, even for `me` methods.  Once
             // `has_self` is true the mutable implicit-self branch above is not
@@ -1176,6 +1423,21 @@ impl Lowerer {
                 param.inject,
             );
             self.record_optional_trait_payload(param.ty.as_ref(), param_index, &mut ctx);
+            if let Some(n) = param.ty.as_ref().and_then(Self::simple_type_name) {
+                match self.unit_kind_of_type_name(&n) {
+                    Some(kind) => {
+                        ctx.local_unit_kinds.insert(param.name.clone(), kind);
+                    }
+                    None => {
+                        ctx.local_type_names.insert(param.name.clone(), n);
+                    }
+                }
+            }
+        }
+        if let Some(owner) = owner_type {
+            if ctx.lookup("self").is_some() {
+                ctx.local_type_names.insert("self".to_string(), owner.to_string());
+            }
         }
 
         let params: Vec<LocalVar> = ctx.locals.clone();
@@ -1197,7 +1459,21 @@ impl Lowerer {
         };
         let effective_body: &ast::Block = driver_synthesized.as_ref().unwrap_or(&f.body);
 
-        let mut body = match self.lower_block(effective_body, &mut ctx) {
+        // An implicit tail `match` in a function with a declared non-void
+        // return is value-position: exhausting its arms must fail closed, as
+        // the interpreter does and as `val r = match ..` already does here.
+        // doc/08_tracking/bug/seed_value_match_no_arm_yields_nil_2026-11-02.md
+        let saved_value_tail_match = self.value_tail_match.take();
+        if declared_return_type.map_or(false, |ty| ty != TypeId::VOID && ty != TypeId::NIL) {
+            if let Some(tail @ (ast::Node::Match(_) | ast::Node::Expression(ast::Expr::Match { .. }))) =
+                effective_body.statements.last()
+            {
+                self.value_tail_match = Some(tail as *const ast::Node as usize);
+            }
+        }
+        let lowered_body = self.lower_block(effective_body, &mut ctx);
+        self.value_tail_match = saved_value_tail_match;
+        let mut body = match lowered_body {
             Ok(body) => body,
             Err(error) => {
                 // A whole-module de-JIT names only the entry file; this names
@@ -1206,6 +1482,8 @@ impl Lowerer {
                 if std::env::var_os("SIMPLE_SEED_RETURN_TYPE_DEBUG").is_some() {
                     eprintln!("lowering error in function {}: {error:?}", func_name);
                 }
+                self.active_fn_generic_params = previous_fn_generics;
+                self.active_fn_generic_bounds = previous_fn_bounds;
                 return Err(error);
             }
         };
@@ -1244,9 +1522,20 @@ impl Lowerer {
         }
         if declared_return_type.is_some() {
             if let Err(error) = self.validate_implicit_return_type(&body, return_type) {
-                if std::env::var_os("SIMPLE_SEED_RETURN_TYPE_DEBUG").is_some() {
-                    eprintln!("return-type mismatch in function {}: {error:?}", func_name);
-                }
+                // The HIR tail carries no span: point at the function instead.
+                let error = match error {
+                    LowerError::Unsupported(message) => {
+                        LowerError::Unsupported(format!("{message} (function at line {})", f.span.line))
+                    }
+                    other => other,
+                };
+                // Unconditional: the error variant carries only two TypeIds, so
+                // without this line a strict-JIT refusal names no function.
+                eprintln!(
+                    "error: declared return type mismatch in function `{}` ({}): {error:?}",
+                    func_name,
+                    self.current_file.as_ref().map(|p| p.display().to_string()).unwrap_or_default()
+                );
                 return Err(error);
             }
         }
@@ -1347,6 +1636,7 @@ impl Lowerer {
                 }
             }
         }
+        collect_fn_abi_attributes(f, &mut attributes);
 
         // Extract layout hint from #[layout(...)] attribute
         let layout_hint = self.extract_layout_hint(&f.attributes);
@@ -1382,6 +1672,8 @@ impl Lowerer {
         self.current_function_line = previous_function_line;
         self.current_function_owner = previous_function_owner;
         self.module.types.replace_scope_aliases(previous_type_scope);
+        self.active_fn_generic_params = previous_fn_generics;
+        self.active_fn_generic_bounds = previous_fn_bounds;
 
         // Use qualified name for methods (ClassName.method) for DI compatibility
         let name = if let Some(owner) = owner_type {
@@ -1413,6 +1705,8 @@ impl Lowerer {
             is_ghost: f.is_ghost(),
             is_sync: f.is_sync,
             has_suspension,
+            generic_params: active_generics,
+            generic_bounds,
         })
     }
 }

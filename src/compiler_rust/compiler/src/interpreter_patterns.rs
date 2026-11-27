@@ -10,7 +10,7 @@ use crate::error::CompileError;
 use crate::value::Value;
 use simple_parser::ast::{Expr, FStringPart, Pattern, Type};
 
-use super::{Classes, Enums, BLOCK_SCOPED_ENUMS, MODULE_GLOBALS};
+use super::{Classes, Enums, ImplMethods, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, MODULE_GLOBALS};
 
 fn pattern_enum_name_matches(pattern_name: &str, value_name: &str) -> bool {
     if pattern_name == "_" || pattern_name == value_name || matches!(pattern_name, "Option" | "Result") {
@@ -25,7 +25,72 @@ fn pattern_enum_name_matches(pattern_name: &str, value_name: &str) -> bool {
     })
 }
 
+/// Does the user enum `enum_name` declare its own `Some` or `None` variant?
+/// Such an enum is matched by variant name, never through the flat-Option
+/// look-through in `pattern_matches`.
+fn enum_declares_option_variant(enum_name: &str, enums: &Enums) -> bool {
+    let declares = |def: &simple_parser::ast::EnumDef| def.variants.iter().any(|v| v.name == "Some" || v.name == "None");
+    if let Some(def) = enums.get(enum_name) {
+        return declares(def);
+    }
+    if BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).is_some_and(|def| declares(def))) {
+        return true;
+    }
+    GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).is_some_and(|def| declares(def)))
+}
+
+/// Number of times an Option pattern (`Some(..)` / `None` / `nil`) was tested
+/// against a `Result` value. Counted on every detection; the stderr warning is
+/// printed once per process so a hot loop cannot flood the log.
+pub(crate) static OPTION_PATTERN_OVER_RESULT_HITS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+static OPTION_PATTERN_OVER_RESULT_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// An Option-shaped pattern (`Some(..)`, `None`, `nil`) can never match a
+/// `Result` value (`Ok`/`Err`): the arm silently matches nothing and the
+/// binding keeps its previous value.
+/// See doc/08_tracking/bug/option_pattern_against_result_value_matches_nothing_2026-09-19.md.
+/// Returns true when `value` is a `Result` enum value (the caller then
+/// falls through to "no match").
+fn warn_option_pattern_over_result(pattern_text: &str, value: &Value) -> bool {
+    use std::sync::atomic::Ordering;
+    let is_result = matches!(value, Value::Enum { enum_name, .. } if enum_name == "Result");
+    if !is_result {
+        return false;
+    }
+    OPTION_PATTERN_OVER_RESULT_HITS.fetch_add(1, Ordering::Relaxed);
+    if !OPTION_PATTERN_OVER_RESULT_WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "warning[option-pattern-on-result]: `case {}` is an Option pattern tested against a \
+             `Result` value (Ok/Err); it can never match. Use `case Ok(..)`/`case Err(..)`. \
+             (reported once per process)",
+            pattern_text
+        );
+    }
+    true
+}
+
 /// Check if a pattern is a catch-all that covers any value.
+/// Raw i64 of an integer literal pattern (`0`, `42i32`, `0x300u64`).
+fn int_literal_bits(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Integer(i) | Expr::TypedInteger(i, _) => Some(*i),
+        _ => None,
+    }
+}
+
+/// Numeric value of an integer literal pattern, for comparing against an
+/// unsigned scrutinee. A `u64`-suffixed literal above i64::MAX is lexed as its
+/// bit pattern (`0xFFFF_FFFF_FFFF_FFFFu64` -> -1i64) and is read back as
+/// unsigned; every other literal keeps its signed value, so a negative literal
+/// never equals (and sits below) every `Value::UInt`.
+fn int_pattern_bound(expr: &Expr) -> Option<i128> {
+    match expr {
+        Expr::TypedInteger(i, simple_parser::NumericSuffix::U64) => Some(*i as u64 as i128),
+        _ => int_literal_bits(expr).map(i128::from),
+    }
+}
+
 pub(crate) fn is_catch_all_pattern(pattern: &Pattern) -> bool {
     match pattern {
         Pattern::Wildcard => true,
@@ -122,6 +187,157 @@ pub(super) fn match_sequence_pattern(
     }
 }
 
+/// A callable or type value: a scrutinee no enum-variant arm can ever match.
+fn is_callable_or_type_value(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Constructor { .. }
+            | Value::Function { .. }
+            | Value::Lambda { .. }
+            | Value::BlockClosure { .. }
+            | Value::NativeFunction(_)
+            | Value::EnumType { .. }
+            | Value::EnumVariantConstructor { .. }
+            | Value::TraitType { .. }
+    )
+}
+
+/// The arm text of a variant-shaped pattern that cannot match a callable or
+/// type scrutinee, if `pattern` (seen through `|` and `: T`) contains one.
+/// `Some`/`None`/`Ok`/`Err` are excluded: a nullable callable (`fn_opt: (fn)?`)
+/// legitimately matches `case Some(f):` through the flat Option encoding.
+fn variant_arm_over_callable(pattern: &Pattern) -> Option<String> {
+    match pattern {
+        Pattern::Identifier(name) if crate::pattern_case_naming::case_name_is_spelled_like_a_variant(name) => {
+            Some(name.clone())
+        }
+        Pattern::Enum { name, variant, .. } if !matches!(variant.as_str(), "Some" | "None" | "Ok" | "Err") => {
+            Some(if name == "_" { variant.clone() } else { format!("{name}.{variant}") })
+        }
+        Pattern::Or(alternatives) => alternatives.iter().find_map(variant_arm_over_callable),
+        Pattern::Typed { pattern, .. } => variant_arm_over_callable(pattern),
+        _ => None,
+    }
+}
+
+/// `_`, or a binder NOT spelled like a variant, at the top of `pattern` or in
+/// one of its `|` alternatives. Unlike [`is_catch_all_pattern`], `I8` does not
+/// count: over a callable it is exactly the silent first-arm binding.
+fn has_binder_or_wildcard_alternative(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Wildcard | Pattern::MutIdentifier(_) | Pattern::MoveIdentifier(_) => true,
+        Pattern::Identifier(name) => !crate::pattern_case_naming::case_name_is_spelled_like_a_variant(name),
+        Pattern::Or(alternatives) => alternatives.iter().any(has_binder_or_wildcard_alternative),
+        Pattern::Typed { pattern, .. } => has_binder_or_wildcard_alternative(pattern),
+        _ => false,
+    }
+}
+
+/// A variant-shaped pattern NODE (not looking through `|`/`: T`, which recurse
+/// on their own) that can never match a callable or type value.
+fn variant_node_over_callable(pattern: &Pattern) -> Option<String> {
+    match pattern {
+        Pattern::Identifier(_) | Pattern::Enum { .. } => variant_arm_over_callable(pattern),
+        _ => None,
+    }
+}
+
+thread_local! {
+    /// True while [`match_arm_matches`] is testing an arm. Only then does
+    /// [`pattern_matches`] refuse a variant-spelled SUB-pattern over a callable
+    /// payload; `val`/`if val`/`for` destructuring keeps binding it.
+    static MATCH_ARM_MODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The first sub-pattern refused under [`MATCH_ARM_MODE`] in the current arm.
+    static MATCH_ARM_REFUSAL: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Enters arm mode with no recorded refusal; restores the previous state on
+/// drop, including on `?` error paths.
+struct MatchArmModeGuard {
+    prev_mode: bool,
+    prev_refusal: Option<(String, String)>,
+}
+
+impl MatchArmModeGuard {
+    fn enter() -> Self {
+        let prev_mode = MATCH_ARM_MODE.with(|m| m.replace(true));
+        let prev_refusal = MATCH_ARM_REFUSAL.with(|r| r.borrow_mut().take());
+        Self { prev_mode, prev_refusal }
+    }
+
+    fn take_refusal(&self) -> Option<(String, String)> {
+        MATCH_ARM_REFUSAL.with(|r| r.borrow_mut().take())
+    }
+}
+
+impl Drop for MatchArmModeGuard {
+    fn drop(&mut self) {
+        MATCH_ARM_MODE.with(|m| m.set(self.prev_mode));
+        let prev = self.prev_refusal.take();
+        MATCH_ARM_REFUSAL.with(|r| *r.borrow_mut() = prev);
+    }
+}
+
+/// `value` is pre-rendered as "<type_name> value <display>".
+fn callable_scrutinee_error(subject: &str, value: &str, arm: &str) -> CompileError {
+    let ctx = crate::error::ErrorContext::new()
+        .with_code(crate::error::codes::INVALID_PATTERN)
+        .with_help("the scrutinee should be an enum value; check that the enum variant expression did not resolve to a same-named class, function or type");
+    CompileError::semantic_with_context(
+        format!("invalid pattern: {subject} is a {value}, not an enum value; {arm} can never match it"),
+        ctx,
+    )
+}
+
+fn describe_callable(value: &Value) -> String {
+    format!("{} value {}", value.type_name(), value.to_display_string())
+}
+
+/// Match one `match` arm. Identical to [`pattern_matches`] except that a
+/// variant-shaped arm reached with a constructor/function/type scrutinee is a
+/// runtime error instead of a silent answer: `case I8:` used to bind such a
+/// value irrefutably, so the match took its first arm with exit 0
+/// (match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14). Only the
+/// match-arm loops call this; `val`/`if val`/`for` binding keeps
+/// [`pattern_matches`], where `val Handler = some_fn` is a legitimate binding.
+///
+/// The same holds for a variant-spelled SUB-pattern (`case W(I8):`,
+/// `case Some(I8):`) reached with a callable payload: under arm mode it fails
+/// to match and is recorded, and the arm errors if it then does not match at
+/// all. An alternative that does match (`case W(I8 | f):`, `case W(I8) | _:`)
+/// still wins, as at the top level.
+pub(crate) fn match_arm_matches(
+    pattern: &Pattern,
+    value: &Value,
+    bindings: &mut HashMap<String, Value>,
+    enums: &Enums,
+    classes: &Classes,
+) -> Result<bool, CompileError> {
+    // An arm with a real catch-all alternative (`case _ | I8:`, `case f | I8:`)
+    // still matches anything.
+    if is_callable_or_type_value(value) && !has_binder_or_wildcard_alternative(pattern) {
+        if let Some(arm) = variant_arm_over_callable(pattern) {
+            return Err(callable_scrutinee_error(
+                "match scrutinee",
+                &describe_callable(value),
+                &format!("arm `case {arm}:`"),
+            ));
+        }
+    }
+    let guard = MatchArmModeGuard::enter();
+    let matched = pattern_matches(pattern, value, bindings, enums, classes)?;
+    if !matched {
+        if let Some((sub, payload)) = guard.take_refusal() {
+            return Err(callable_scrutinee_error(
+                "match payload",
+                &payload,
+                &format!("sub-pattern `{sub}`"),
+            ));
+        }
+    }
+    Ok(matched)
+}
+
 /// Check if a pattern matches a value, populating bindings.
 pub(crate) fn pattern_matches(
     pattern: &Pattern,
@@ -130,6 +346,39 @@ pub(crate) fn pattern_matches(
     enums: &Enums,
     classes: &Classes,
 ) -> Result<bool, CompileError> {
+    // Pattern matching is unchanged by the reference-semantics class carrier
+    // (class_instance_reference_storage_2026-11-03.md): a `Value::ClassInstance`
+    // is matched through an `Object` view of its class + fields. Field values are
+    // Arc-clones, so a class-typed field bound by a sub-pattern keeps its identity.
+    // Binding patterns (`x`, `Some(x)` via recursion, Or/Typed wrappers) bind the
+    // ORIGINAL handle `orig`: the view is a snapshot, so binding it would detach
+    // `x` from the shared instance and drop every later mutation through it.
+    let orig = value;
+    let object_view;
+    let value = if let Value::ClassInstance(instance) = value {
+        object_view = Value::Object {
+            class: instance.class().to_string(),
+            fields: std::sync::Arc::new(instance.fields_snapshot()),
+        };
+        &object_view
+    } else {
+        value
+    };
+    // Inside a `match` arm, a variant-spelled sub-pattern over a callable
+    // payload (`case W(I8):` on `W(Vec4f)`) does not bind: it fails and is
+    // recorded, and `match_arm_matches` errors if the whole arm then fails.
+    // Value shape first, so data values never pay the thread-local read.
+    if is_callable_or_type_value(orig) && MATCH_ARM_MODE.with(|m| m.get()) {
+        if let Some(sub) = variant_node_over_callable(pattern) {
+            MATCH_ARM_REFUSAL.with(|r| {
+                let mut slot = r.borrow_mut();
+                if slot.is_none() {
+                    *slot = Some((sub, describe_callable(orig)));
+                }
+            });
+            return Ok(false);
+        }
+    }
     match pattern {
         Pattern::Wildcard => Ok(true),
 
@@ -143,17 +392,20 @@ pub(crate) fn pattern_matches(
             } = value
             {
                 // Check if this identifier is a known variant of the enum
-                // Look in both module-level enums and block-scoped enums
+                // Look in module-level enums, block-scoped enums, and GLOBAL_ENUMS
                 let enum_def = enums
                     .get(enum_name)
                     .cloned()
-                    .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
+                    .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))
+                    .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
                 if let Some(enum_def) = enum_def {
                     let is_variant = enum_def.variants.iter().any(|v| &v.name == name);
                     if is_variant {
-                        // This is a unit variant pattern - match only if variant matches
-                        // and the value has no payload (unit variant)
-                        return Ok(variant == name && payload.is_none());
+                        // A bare variant name is a variant test, not a binding: it matches
+                        // on the variant alone, whether or not the variant carries a payload
+                        // (`case Clocked:` against `Clocked(dom)`). The payload is ignored.
+                        let _ = payload;
+                        return Ok(variant == name);
                     }
                     // See doc/08_tracking/bug/case_bare_ident_is_irrefutable_binding_2026-08-01.md
                     //
@@ -179,36 +431,49 @@ pub(crate) fn pattern_matches(
                 }
             }
             // Normal identifier pattern - bind the value
-            bindings.insert(name.clone(), value.clone());
+            bindings.insert(name.clone(), orig.clone());
             Ok(true)
         }
 
         Pattern::MutIdentifier(name) => {
-            bindings.insert(name.clone(), value.clone());
+            bindings.insert(name.clone(), orig.clone());
             Ok(true)
         }
 
         Pattern::MoveIdentifier(name) => {
             // Move pattern - transfers ownership during pattern matching
             // For the interpreter, this behaves the same as a regular binding
-            bindings.insert(name.clone(), value.clone());
+            bindings.insert(name.clone(), orig.clone());
             Ok(true)
         }
 
         Pattern::Literal(lit_expr) => {
             match lit_expr.as_ref() {
-                Expr::Integer(i) | Expr::TypedInteger(i, _) => {
-                    if let Value::Int(v) = value {
-                        Ok(*v == *i)
-                    } else {
-                        Ok(false)
+                Expr::Integer(_) | Expr::TypedInteger(_, _) => {
+                    match value {
+                        Value::Int(v) => Ok(int_literal_bits(lit_expr) == Some(*v)),
+                        // An unsuffixed literal above i64::MAX (`0x8000000000000000`)
+                        // is lexed as its i64 bit pattern, indistinguishable in the
+                        // AST from `case -N`. Against a 64-bit unsigned scrutinee
+                        // compare the 64-bit pattern, as JIT/native do; otherwise
+                        // `case 0x8000000000000000` never matched
+                        // (seed_interp_u64_high_bit_literal_pattern_2026-11-06).
+                        Value::UInt { value: v, width: 64 }
+                            if matches!(lit_expr.as_ref(), Expr::Integer(i) if *i < 0) =>
+                        {
+                            Ok(int_literal_bits(lit_expr) == Some(*v as i64))
+                        }
+                        // Narrower unsigned scrutinees (`b: u8`) compare by numeric
+                        // VALUE, so a negative literal never matches.
+                        Value::UInt { value: v, .. } => Ok(Some(*v as i128) == int_pattern_bound(lit_expr)),
+                        _ => Ok(false),
                     }
                 }
                 Expr::Float(f) | Expr::TypedFloat(f, _) => {
-                    if let Value::Float(v) = value {
-                        Ok((*v - *f).abs() < f64::EPSILON)
-                    } else {
-                        Ok(false)
+                    match value {
+                        Value::Float(v) => Ok((*v - *f).abs() < f64::EPSILON),
+                        Value::Float32(v) => Ok((*v as f64 - *f).abs() < f32::EPSILON as f64),
+                        _ => Ok(false),
                     }
                 }
                 Expr::String(s) => {
@@ -251,8 +516,13 @@ pub(crate) fn pattern_matches(
                         Ok(false)
                     }
                 }
-                Expr::Nil => Ok(matches!(value, Value::Nil)
-                    || matches!(value, Value::Enum { ref variant, .. } if variant == "None")),
+                Expr::Nil => {
+                    if warn_option_pattern_over_result("nil", value) {
+                        return Ok(false);
+                    }
+                    Ok(matches!(value, Value::Nil)
+                        || matches!(value, Value::Enum { ref variant, .. } if variant == "None"))
+                }
                 _ => Ok(false),
             }
         }
@@ -301,16 +571,33 @@ pub(crate) fn pattern_matches(
             // the bug.
             if matches!(variant.as_str(), "Some" | "None" | "Ok" | "Err")
                 && !matches!(value, Value::Enum { .. } | Value::Nil | Value::Object { .. })
-                && std::env::var("SIMPLE_DIAG_OPTION_PATTERN_SHAPE").as_deref() == Ok("1")
+                && crate::hir::lower::option_pattern_shape_diag::shape_gate()
+                    != crate::hir::lower::option_pattern_shape_diag::ShapeGate::Off
             {
+                if crate::hir::lower::option_pattern_shape_diag::shape_gate()
+                    == crate::hir::lower::option_pattern_shape_diag::ShapeGate::Error
+                {
+                    return Err(CompileError::Semantic(format!(
+                        "error[SPL-PAT-001]: `case {}(...)` tested against a \
+                         non-Option/non-Result value of runtime kind `{}`",
+                        variant,
+                        value.type_name()
+                    )));
+                }
                 eprintln!(
-                    "warning[option-pattern-shape]: `case {}(...)` tested against a \
+                    "warning[SPL-PAT-001]: `case {}(...)` tested against a \
                      non-Option/non-Result value of runtime kind `{}`; this pattern can \
                      never legitimately match and the compiler answers it silently \
                      (the default engine binds a corrupt value)",
                     variant,
                     value.type_name()
                 );
+            }
+
+            if matches!(variant.as_str(), "Some" | "None") && matches!(enum_name.as_str(), "Option" | "_") {
+                if warn_option_pattern_over_result(variant.as_str(), value) {
+                    return Ok(false);
+                }
             }
 
             // Special case: Nil matches Option::None
@@ -320,6 +607,27 @@ pub(crate) fn pattern_matches(
                 && payload.is_none()
             {
                 return Ok(true);
+            }
+            // Flat Option encoding (parity with the pure-Simple interpreter's
+            // `match_enum_variant_pattern`): a bare non-Nil, non-Enum value IS
+            // its own `Some` payload. The pure-Simple interpreter has always
+            // matched `case Some(x)` this way (flat raw-or-nil word); the seed
+            // matcher lacked the arm, which forced the 2026-11-09 array-get
+            // change to box results as real `Option::Some` values and thereby
+            // broke every `arr.get(i).<method>()` chain in the stdlib
+            // (seedfix 2026-11-11 js-runtime failure). Enum scrutinees keep
+            // the name-keyed arm below — only flat values take this path.
+            if variant == "Some"
+                && matches!(enum_name.as_str(), "Option" | "_")
+                && !matches!(value, Value::Enum { .. } | Value::Nil)
+            {
+                return match payload {
+                    None => Ok(true),
+                    Some(patterns) if patterns.len() == 1 => {
+                        pattern_matches(&patterns[0], value, bindings, enums, classes)
+                    }
+                    _ => Ok(false),
+                };
             }
             if let Value::Enum {
                 enum_name: ve,
@@ -372,6 +680,47 @@ pub(crate) fn pattern_matches(
                     if payload.is_none() && value_payload.is_some() {
                         return Ok(true);
                     }
+                }
+                // A `T?` value holding a user enum is `Option::Some(<enum>)`. A
+                // variant pattern of that user enum (`Ev.Action(n)`) must look
+                // through the Some wrapper instead of falling to the wildcard
+                // (match_on_optional_enum_variant_falls_to_wildcard_2026-08-07).
+                if ve == "Option"
+                    && vv == "Some"
+                    && !matches!(variant.as_str(), "Some" | "None" | "Ok" | "Err")
+                    && !matches!(enum_name.as_str(), "Option" | "Result")
+                {
+                    if let Some(inner) = value_payload {
+                        if matches!(inner.as_ref(), Value::Enum { .. }) {
+                            return pattern_matches(pattern, inner.as_ref(), bindings, enums, classes);
+                        }
+                    }
+                }
+                // The converse: a `Kind?` slot holding a BARE `Kind` value (no
+                // Option wrapper -- parameter binding, typed `val` and field
+                // init never Some-wrap) is its own `Some` payload, exactly like
+                // the bare scalar handled by the flat-Option arm above. Without
+                // this no `case Some(...)` arm matched it at all (`Some(F32)`,
+                // `Some(Wrap(n))`, even `Some(x)` fell to `case _:`). Excluded:
+                // Option/Result values, and an enum that declares its own
+                // `Some`/`None` variants (`enum Opt: Some(i64) | None`), which
+                // keeps the name-keyed match above. When the definition is not
+                // visible here, a value whose variant is itself spelled
+                // `Some`/`None` is left alone for the same reason.
+                // optional_enum_some_variant_match_engine_divergence_2026-11-14
+                if variant == "Some"
+                    && matches!(enum_name.as_str(), "Option" | "_")
+                    && !matches!(ve.as_str(), "Option" | "Result")
+                    && !matches!(vv.as_str(), "Some" | "None")
+                    && !enum_declares_option_variant(ve, enums)
+                {
+                    return match payload {
+                        None => Ok(true),
+                        Some(patterns) if patterns.len() == 1 => {
+                            pattern_matches(&patterns[0], value, bindings, enums, classes)
+                        }
+                        _ => Ok(false),
+                    };
                 }
             }
 
@@ -514,9 +863,17 @@ pub(crate) fn pattern_matches(
         }
 
         Pattern::Or(patterns) => {
+            // A callable-payload refusal recorded by a losing alternative is
+            // dropped when a later alternative matches, like its bindings.
+            let saved_refusal = MATCH_ARM_MODE
+                .with(|m| m.get())
+                .then(|| MATCH_ARM_REFUSAL.with(|r| r.borrow().clone()));
             for pat in patterns {
                 let mut temp_bindings = HashMap::new();
-                if pattern_matches(pat, value, &mut temp_bindings, enums, classes)? {
+                if pattern_matches(pat, orig, &mut temp_bindings, enums, classes)? {
+                    if let Some(saved) = saved_refusal {
+                        MATCH_ARM_REFUSAL.with(|r| *r.borrow_mut() = saved);
+                    }
                     bindings.extend(temp_bindings);
                     return Ok(true);
                 }
@@ -538,31 +895,36 @@ pub(crate) fn pattern_matches(
             };
 
             if type_matches {
-                pattern_matches(pattern, value, bindings, enums, classes)
+                pattern_matches(pattern, orig, bindings, enums, classes)
             } else {
                 Ok(false)
             }
         }
 
         Pattern::Range { start, end, inclusive } => {
-            // Range patterns only work with integers
-            let Value::Int(val) = value else {
+            // Range patterns only work with integers. Signed and unsigned
+            // scrutinees compare by numeric value in i128, so a `Value::UInt`
+            // (`u: u64`, `x.to_u64()`) is in `1..=9` exactly when its value is.
+            // An `Int` scrutinee keeps the historical i64 comparison against
+            // the literal's raw bits.
+            // Bounds must be integer literals.
+            let (val, start_val, end_val) = match value {
+                Value::Int(v) => (
+                    *v as i128,
+                    int_literal_bits(start).map(i128::from),
+                    int_literal_bits(end).map(i128::from),
+                ),
+                Value::UInt { value: v, .. } => (*v as i128, int_pattern_bound(start), int_pattern_bound(end)),
+                _ => return Ok(false),
+            };
+            let (Some(start_val), Some(end_val)) = (start_val, end_val) else {
                 return Ok(false);
-            };
-            // Evaluate start and end expressions (must be integer literals)
-            let start_val = match start.as_ref() {
-                Expr::Integer(i) | Expr::TypedInteger(i, _) => *i,
-                _ => return Ok(false),
-            };
-            let end_val = match end.as_ref() {
-                Expr::Integer(i) | Expr::TypedInteger(i, _) => *i,
-                _ => return Ok(false),
             };
             // Check if value is in range
             if *inclusive {
-                Ok(*val >= start_val && *val <= end_val)
+                Ok(val >= start_val && val <= end_val)
             } else {
-                Ok(*val >= start_val && *val < end_val)
+                Ok(val >= start_val && val < end_val)
             }
         }
 
@@ -622,11 +984,12 @@ pub(crate) fn check_enum_exhaustiveness(
     arm_patterns: &[&Pattern],
     enums: &Enums,
 ) -> Option<Vec<String>> {
-    // Get the enum definition from module-level or block-scoped enums
+    // Get the enum definition from module-level, block-scoped, or global enums
     let enum_def = enums
         .get(enum_name)
         .cloned()
-        .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))?;
+        .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))
+        .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))?;
 
     // Get all variant names from the enum definition
     let all_variants: Vec<String> = enum_def.variants.iter().map(|v| v.name.clone()).collect();
@@ -649,21 +1012,274 @@ pub(crate) fn check_enum_exhaustiveness(
     }
 }
 
+/// Map the bindings of a MATCHED arm pattern to the storage they alias inside
+/// the match subject: `(binding name, steps from subject root to the aliased
+/// storage)`. This is the provenance the post-arm container merge uses to
+/// carry shared-handle mutations (array/dict/bytearray fields) from a payload
+/// binding back into the subject without touching value-semantic scalars.
+///
+/// Only structurally unambiguous aliases are reported: whole-subject
+/// identifier patterns, enum-variant payload patterns, positional
+/// class/struct payload patterns (declaration order), and tuple/array
+/// element patterns. Literal, wildcard, and guard-shaped patterns bind
+/// nothing worth merging (or nothing at all).
+pub(crate) fn pattern_subject_binding_paths(
+    pattern: &Pattern,
+    subject: &Value,
+    classes: &Classes,
+) -> Vec<(String, Vec<crate::interpreter::place::SubjectStep>)> {
+    use crate::interpreter::place::SubjectStep;
+    fn prepend(
+        paths: Vec<(String, Vec<SubjectStep>)>,
+        step: SubjectStep,
+    ) -> Vec<(String, Vec<SubjectStep>)> {
+        paths
+            .into_iter()
+            .map(|(name, mut steps)| {
+                steps.insert(0, step.clone());
+                (name, steps)
+            })
+            .collect()
+    }
+    match pattern {
+        Pattern::Identifier(name) | Pattern::MutIdentifier(name) | Pattern::MoveIdentifier(name) => {
+            vec![(name.clone(), Vec::new())]
+        }
+        Pattern::Typed { pattern, .. } => pattern_subject_binding_paths(pattern, subject, classes),
+        Pattern::Wildcard | Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Rest => Vec::new(),
+        // Named struct pattern `case Point(x: a, y: b)`: field patterns alias
+        // the object's fields by name.
+        Pattern::Struct { fields, .. } => {
+            let Value::Object { fields: obj_fields, .. } = subject else {
+                return Vec::new();
+            };
+            let mut out = Vec::new();
+            for (field_name, pat) in fields {
+                let Some(field_val) = obj_fields.get(field_name) else {
+                    continue;
+                };
+                out.extend(prepend(
+                    pattern_subject_binding_paths(pat, field_val, classes),
+                    SubjectStep::Field(field_name.clone()),
+                ));
+            }
+            out
+        }
+        Pattern::Tuple(patterns) | Pattern::Array(patterns) => {
+            let elements: Option<Vec<&Value>> = match subject {
+                Value::Tuple(values) => patterns
+                    .len()
+                    .eq(&values.len())
+                    .then(|| values.iter().collect()),
+                Value::Array(items) => patterns
+                    .len()
+                    .eq(&items.len())
+                    .then(|| (0..items.len()).map(|i| &items[i]).collect()),
+                _ => None,
+            };
+            let Some(elements) = elements else {
+                return Vec::new();
+            };
+            let mut out = Vec::new();
+            for (idx, (pat, elem)) in patterns.iter().zip(elements).enumerate() {
+                out.extend(prepend(
+                    pattern_subject_binding_paths(pat, elem, classes),
+                    SubjectStep::Index(idx as i64),
+                ));
+            }
+            out
+        }
+        Pattern::Enum {
+            name: enum_name,
+            variant,
+            payload,
+        } => match (subject, payload) {
+            // Real enum subject: payload patterns alias the variant payload.
+            (
+                Value::Enum {
+                    enum_name: value_name,
+                    variant: value_variant,
+                    payload: value_payload,
+                },
+                Some(patterns),
+            ) if pattern_enum_name_matches(enum_name, value_name)
+                && variant == value_variant
+                && value_payload.is_some() =>
+            {
+                let value_payload = value_payload.as_ref().expect("checked above");
+                if patterns.len() == 1 {
+                    prepend(
+                        pattern_subject_binding_paths(&patterns[0], value_payload, classes),
+                        SubjectStep::Payload,
+                    )
+                } else if let Value::Tuple(values) = value_payload.as_ref() {
+                    if patterns.len() != values.len() {
+                        return Vec::new();
+                    }
+                    let mut out = Vec::new();
+                    for (idx, (pat, elem)) in patterns.iter().zip(values.iter()).enumerate() {
+                        for (name, mut steps) in pattern_subject_binding_paths(pat, elem, classes) {
+                            steps.insert(0, SubjectStep::Index(idx as i64));
+                            steps.insert(0, SubjectStep::Payload);
+                            out.push((name, steps));
+                        }
+                    }
+                    out
+                } else {
+                    Vec::new()
+                }
+            }
+            // Positional class/struct pattern: payload patterns alias fields
+            // in declaration order (same rule `pattern_matches` binds by).
+            (Value::Object { class, fields }, Some(patterns))
+                if (*enum_name == "_" || enum_name == class || matches!(enum_name.as_str(), "Option" | "Result"))
+                    && variant == class =>
+            {
+                let Some(class_def) = classes.get(class.as_str()) else {
+                    return Vec::new();
+                };
+                let field_names: Vec<&str> = class_def.fields.iter().map(|f| f.name.as_str()).collect();
+                if patterns.len() != field_names.len() {
+                    return Vec::new();
+                }
+                let mut out = Vec::new();
+                for (pat, field_name) in patterns.iter().zip(field_names) {
+                    let Some(field_val) = fields.get(field_name) else {
+                        continue;
+                    };
+                    out.extend(prepend(
+                        pattern_subject_binding_paths(pat, field_val, classes),
+                        SubjectStep::Field(field_name.to_string()),
+                    ));
+                }
+                out
+            }
+            _ => Vec::new(),
+        },
+        // `Pattern::Or` / guard combinations: an alternative arm may bind
+        // through a different route; conservatively merge nothing.
+        _ => Vec::new(),
+    }
+}
+
+/// After a match arm ran, carry container mutations made through its payload
+/// bindings back into the match subject (the "two-hop" place chain: payload
+/// binding -> enum payload -> array element / field -> subject root). Reads
+/// the post-arm subject from its place when the subject is an lvalue, merges
+/// each still-live binding's shared containers into it, and writes it back.
+/// Value-semantic scalar fields are never carried (see
+/// `merge_shared_collection_fields`). `binding_values` must be the POST-arm
+/// values of the bindings named by `pattern_subject_binding_paths`.
+pub(crate) fn merge_match_arm_subject_bindings(
+    subject_place: Option<&crate::interpreter::place::Place>,
+    subject_fallback: &Value,
+    pattern: &Pattern,
+    binding_values: &[(String, Value)],
+    env: &mut crate::value::Env,
+    classes: &Classes,
+) {
+    let paths = pattern_subject_binding_paths(pattern, subject_fallback, classes);
+    if paths.is_empty() {
+        return;
+    }
+    let mut current = subject_place
+        .and_then(|place| crate::interpreter::place::place_slot_ref(env, place).cloned())
+        .unwrap_or_else(|| subject_fallback.clone());
+    // The arm itself stored a new value into the subject place (e.g.
+    // `case Some(cur): var s = cur; s.xs.push(x); g = Some(s)`). That explicit
+    // store is the newer truth: merging the stale payload binding's containers
+    // over it would rewind the store. See
+    // doc/08_tracking/bug/executable_authority_registry_slots_lost_on_store_2026-11-15.md.
+    if subject_place.is_some() && current != *subject_fallback {
+        return;
+    }
+    let mut changed = false;
+    for (name, steps) in &paths {
+        let Some((_, binding)) = binding_values.iter().find(|(n, _)| n == name) else {
+            continue;
+        };
+        if crate::interpreter::place::merge_subject_step(&mut current, steps, binding) {
+            changed = true;
+        }
+    }
+    if changed {
+        if let Some(place) = subject_place {
+            crate::interpreter::place::write_place(env, place, current);
+        }
+    }
+}
+
+/// Evaluate a match subject THROUGH its place when the subject is an lvalue:
+/// index expressions run exactly once, and the post-arm payload-binding merge
+/// gets the place to write back through. Non-place subjects keep their
+/// previous evaluate-once behavior with `place == None`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_match_subject(
+    subject_expr: &Expr,
+    env: &mut crate::value::Env,
+    functions: &mut HashMap<String, std::sync::Arc<simple_parser::ast::FunctionDef>>,
+    classes: &mut Classes,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<(Value, Option<crate::interpreter::place::Place>), CompileError> {
+    let place = crate::interpreter::place::resolve_place(subject_expr, env, functions, classes, enums, impl_methods)?;
+    let value = match &place {
+        Some(p) => match crate::interpreter::place::place_slot_ref(env, p) {
+            Some(v) => v.clone(),
+            None => crate::interpreter::evaluate_expr(subject_expr, env, functions, classes, enums, impl_methods)?,
+        },
+        None => crate::interpreter::evaluate_expr(subject_expr, env, functions, classes, enums, impl_methods)?,
+    };
+    Ok((value, place))
+}
+
+/// Post-arm reconciliation shared by every match executor: while the arm's
+/// payload bindings are still live in `env`, collect their (possibly
+/// mutated) values and merge shared containers back into the match subject
+/// through its place. No-op for patterns that bind nothing aliasing the
+/// subject.
+pub(crate) fn merge_arm_bindings_into_subject(
+    subject_place: Option<&crate::interpreter::place::Place>,
+    subject: &Value,
+    pattern: &Pattern,
+    env: &mut crate::value::Env,
+    classes: &Classes,
+) {
+    let paths = pattern_subject_binding_paths(pattern, subject, classes);
+    if paths.is_empty() {
+        return;
+    }
+    let binding_values: Vec<(String, Value)> = paths
+        .iter()
+        .filter_map(|(name, _)| env.get(name).cloned().map(|v| (name.clone(), v)))
+        .collect();
+    merge_match_arm_subject_bindings(subject_place, subject, pattern, &binding_values, env, classes);
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
-    use simple_parser::ast::Pattern;
+    use simple_parser::ast::{Expr, Pattern};
     use simple_parser::Parser;
     use crate::interpreter::MODULE_GLOBALS;
     use crate::interpreter::evaluate_module;
     use crate::value::Value;
 
-    use super::pattern_matches;
+    use super::{match_arm_matches, pattern_matches, OPTION_PATTERN_OVER_RESULT_HITS};
+
+    /// Start each snippet from a fresh interpreter, like one `simple run`
+    /// process. Without it a previous snippet's module globals (functions
+    /// included) on the same test thread answered calls in the next one.
+    fn fresh_interpreter() {
+        crate::interpreter::clear_module_cache();
+        crate::interpreter::clear_interpreter_state();
+    }
 
     /// Run a Simple snippet and return the exit code.
     /// Use `main = <expr>` to set a numeric exit code (0 = ok, non-zero = error).
     fn run(src: &str) -> i32 {
+        fresh_interpreter();
         let mut parser = Parser::new(src);
         let module = parser.parse().expect("parse");
         evaluate_module(&module.items).expect("evaluate")
@@ -723,6 +1339,44 @@ mod tests {
     // Each asserts a VALUE, not just that an arm was taken: a test that only
     // checked "the Some arm fired" would pass even if the binding were garbage,
     // which is exactly the mistake the original report made about the JIT.
+
+    /// An arm that copies the payload, grows it, and stores it back into the
+    /// matched global must keep the store: the post-arm payload merge must not
+    /// overwrite it with the stale binding's (empty) array.
+    #[test]
+    fn match_arm_store_into_subject_global_is_not_rewound_by_payload_merge() {
+        let src = r#"
+struct S:
+    n: i64
+    xs: [i64]
+
+var g: S? = nil
+
+fn reset():
+    g = Some(S(n: 0, xs: []))
+
+fn add(x: i64):
+    match g:
+        case Some(cur):
+            var s = cur
+            s.xs.push(x)
+            s.n = s.n + 1
+            g = Some(s)
+        case None:
+            pass
+
+fn len_of() -> i64:
+    match g:
+        case Some(c): c.xs.len() * 10 + c.n
+        case None: -1
+
+reset()
+add(5)
+add(6)
+main = len_of() - 22
+"#;
+        assert_eq!(run(src), 0);
+    }
 
     #[test]
     fn some_pattern_matches_bare_value_at_nullable_param_and_binds_it() {
@@ -806,6 +1460,26 @@ fn probe(v: i64?) -> i64:
 main = probe(Some(9)) - 9
 "#;
         assert_eq!(run(src), 0, "an explicit `Some(9)` must still destructure to 9");
+    }
+
+    #[test]
+    fn user_enum_variant_pattern_looks_through_option_some() {
+        let src = r#"
+enum Ev:
+    Action(name: text)
+    Other
+
+fn mk() -> Ev?:
+    return Ev.Action(name: "go")
+
+fn probe() -> i64:
+    match mk():
+        case Ev.Action(n): 1
+        case _: 0
+
+main = probe() - 1
+"#;
+        assert_eq!(run(src), 0, "`Ev.Action(n)` must match Option::Some(Ev.Action) from a `Ev?` fn");
     }
 
     #[test]
@@ -1370,5 +2044,408 @@ main = construct()
             "a real static method on the class must still be called normally, not shadowed \
              by the enum-variant fallback"
         );
+    }
+
+    // --- Option pattern against a `Result` value (diagnosed, matches nothing) ---
+    // doc/08_tracking/bug/option_pattern_against_result_value_matches_nothing_2026-09-19.md
+
+    fn result_ok() -> Value {
+        Value::Enum {
+            enum_name: "Result".to_string(),
+            variant: "Ok".to_string(),
+            payload: Some(Box::new(Value::Int(1))),
+        }
+    }
+
+    #[test]
+    fn option_patterns_over_result_value_match_nothing_and_are_counted() {
+        use std::sync::atomic::Ordering;
+        let enums = HashMap::new();
+        let classes = HashMap::new();
+        let some = Pattern::Enum {
+            name: "Option".to_string(),
+            variant: "Some".to_string(),
+            payload: Some(vec![Pattern::Identifier("v".to_string())]),
+        };
+        let none = Pattern::Enum {
+            name: "Option".to_string(),
+            variant: "None".to_string(),
+            payload: None,
+        };
+        let nil = Pattern::Literal(Box::new(Expr::Nil));
+        for pat in [&some, &none, &nil] {
+            let before = OPTION_PATTERN_OVER_RESULT_HITS.load(Ordering::Relaxed);
+            let mut bindings = HashMap::new();
+            assert!(!pattern_matches(pat, &result_ok(), &mut bindings, &enums, &classes).unwrap());
+            assert!(bindings.is_empty(), "an Option pattern over a Result must not bind");
+            assert!(OPTION_PATTERN_OVER_RESULT_HITS.load(Ordering::Relaxed) > before);
+        }
+    }
+
+    #[test]
+    fn option_patterns_over_real_option_values_are_not_diagnosed() {
+        use std::sync::atomic::Ordering;
+        let enums = HashMap::new();
+        let classes = HashMap::new();
+        let nil = Pattern::Literal(Box::new(Expr::Nil));
+        let before = OPTION_PATTERN_OVER_RESULT_HITS.load(Ordering::Relaxed);
+        let mut bindings = HashMap::new();
+        assert!(pattern_matches(&nil, &Value::Nil, &mut bindings, &enums, &classes).unwrap());
+        assert_eq!(OPTION_PATTERN_OVER_RESULT_HITS.load(Ordering::Relaxed), before);
+    }
+
+    // --- bare `case Variant:` arm against a PAYLOAD-carrying variant ---
+    // Bug: doc/08_tracking/bug/match_unqualified_imported_enum_variant_default_arms_2026-10-24.md
+    // The bare identifier arm was required to see `payload.is_none()`, so a
+    // payload variant matched no arm and the fn faulted "missing return".
+
+    const BARE_PAYLOAD_ENUM: &str = "enum PK:\n    Comb(s: i64)\n    Clocked(d: i64)\n    Idle\n";
+
+    #[test]
+    fn bare_arm_matches_payload_variant() {
+        let src = format!(
+            "{BARE_PAYLOAD_ENUM}fn f(k: PK) -> i64:\n    match k:\n        case Comb: 1\n        case Clocked: 2\n        case Idle: 3\nmain = f(PK.Clocked(9)) + 10 * f(PK.Comb(1)) + 100 * f(PK.Idle)\n"
+        );
+        assert_eq!(run(&src), 2 + 10 + 300);
+    }
+
+    #[test]
+    fn bare_arm_payload_variant_with_default_arm() {
+        let src = format!(
+            "{BARE_PAYLOAD_ENUM}fn f(k: PK) -> i64:\n    match k:\n        case Clocked: 2\n        case _: 7\nmain = f(PK.Clocked(9)) + 10 * f(PK.Comb(1))\n"
+        );
+        assert_eq!(run(&src), 2 + 70);
+    }
+
+    #[test]
+    fn qualified_arm_still_matches_payload_variant() {
+        let src = format!(
+            "{BARE_PAYLOAD_ENUM}fn f(k: PK) -> i64:\n    match k:\n        case PK.Comb: 1\n        case PK.Clocked: 2\n        case PK.Idle: 3\nmain = f(PK.Clocked(9)) + 10 * f(PK.Comb(1))\n"
+        );
+        assert_eq!(run(&src), 12);
+    }
+
+    #[test]
+    fn bare_arm_payload_variant_nested_in_match() {
+        let src = format!(
+            "{BARE_PAYLOAD_ENUM}fn f(a: PK, b: PK) -> i64:\n    match a:\n        case Comb:\n            match b:\n                case Clocked: 5\n                case _: 6\n        case _: 9\nmain = f(PK.Comb(1), PK.Clocked(2)) + 10 * f(PK.Comb(1), PK.Idle) + 100 * f(PK.Idle, PK.Idle)\n"
+        );
+        assert_eq!(run(&src), 5 + 60 + 900);
+    }
+
+    // --- `Value::UInt` scrutinee vs integer literal / range patterns ---
+    // Bug: doc/08_tracking/bug/2026-10-30_seed_uint_scrutinee_never_matches_int_patterns.md
+
+    fn uint(v: u64) -> Value {
+        Value::UInt { value: v, width: 64 }
+    }
+
+    fn matches(pat: &Pattern, v: &Value) -> bool {
+        let mut bindings = HashMap::new();
+        pattern_matches(pat, v, &mut bindings, &HashMap::new(), &HashMap::new()).unwrap()
+    }
+
+    fn int_range(start: i64, end: i64, inclusive: bool) -> Pattern {
+        Pattern::Range {
+            start: Box::new(Expr::Integer(start)),
+            end: Box::new(Expr::Integer(end)),
+            inclusive,
+        }
+    }
+
+    #[test]
+    fn uint_scrutinee_matches_int_range_patterns_by_value() {
+        assert!(matches(&int_range(1, 9, true), &uint(5)));
+        assert!(matches(&int_range(1, 9, true), &uint(9)));
+        assert!(!matches(&int_range(1, 9, false), &uint(9)));
+        assert!(!matches(&int_range(1, 9, true), &uint(0)));
+        // A negative start bound is below every UInt; the value still counts.
+        assert!(matches(&int_range(-5, 5, true), &uint(3)));
+        // u64::MAX is not -1: it must not fall into a range around zero.
+        assert!(!matches(&int_range(-1, 0, true), &uint(u64::MAX)));
+    }
+
+    #[test]
+    fn uint_scrutinee_never_matches_a_negative_int_literal() {
+        let minus_one = Pattern::Literal(Box::new(Expr::Integer(-1)));
+        // A narrower unsigned scrutinee never matches a negative literal. (A
+        // 64-bit one compares bit patterns: see
+        // `u64_scrutinee_matches_an_over_i64_max_unsuffixed_literal`.)
+        assert!(!matches(&minus_one, &Value::UInt { value: 255, width: 8 }));
+        let zero = Pattern::Literal(Box::new(Expr::Integer(0)));
+        assert!(matches(&zero, &uint(0)));
+        // A `u64`-suffixed literal above i64::MAX is lexed as its bit pattern
+        // (`0xFFFF_FFFF_FFFF_FFFFu64` -> -1i64) and must still match.
+        let max_u64 = Pattern::Literal(Box::new(Expr::TypedInteger(-1, simple_parser::NumericSuffix::U64)));
+        assert!(matches(&max_u64, &uint(u64::MAX)));
+    }
+
+    /// seed_interp_u64_high_bit_literal_pattern_2026-11-06: `case
+    /// 0x8000000000000000` is lexed as i64::MIN and must match that u64.
+    #[test]
+    fn u64_scrutinee_matches_an_over_i64_max_unsuffixed_literal() {
+        let high_bit = Pattern::Literal(Box::new(Expr::Integer(i64::MIN)));
+        assert!(matches(&high_bit, &uint(0x8000_0000_0000_0000)));
+        assert!(!matches(&high_bit, &uint(5)));
+        let src = "fn classify(u: u64) -> i64:\n    match u:\n        case 0x8000000000000000: 1\n        case _: 2\nfn probe() -> i64:\n    val s: u64 = 0x8000000000000000\n    classify(s) * 10 + classify(5)\nmain = probe()\n";
+        assert_eq!(run(src), 12);
+    }
+
+    #[test]
+    fn uint_match_end_to_end_takes_the_right_arm() {
+        let src = "fn classify(u: u64) -> i64:
+    match u:
+        case 0: 1
+        case 1..=9: 2
+        case 10..100: 3
+        case _: 4
+main = classify(0) + 10 * classify(5) + 100 * classify(42) + 1000 * classify(1000)
+";
+        assert_eq!(run(src), 1 + 20 + 300 + 4000);
+    }
+
+    // --- match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14 ---
+    //
+    // A `match` whose scrutinee is a constructor / function / type value (not
+    // an enum value) used to bind the first variant-spelled arm (`case I8:`)
+    // as an irrefutable binding, so the match silently answered with arm 1.
+    // It must fail loudly and name the value's runtime kind instead.
+    //
+    // The fixtures pass the value through an UNTYPED `code(k)` parameter: a
+    // `k: Kind` parameter now refuses a callable at the call boundary
+    // (`reject_callable_for_enum_param`), before the match is reached, and
+    // this suite pins the match-arm check itself.
+
+    fn run_err(src: &str) -> String {
+        fresh_interpreter();
+        let mut parser = Parser::new(src);
+        let module = parser.parse().expect("parse");
+        match evaluate_module(&module.items) {
+            Ok(code) => panic!("expected a runtime error, program exited with {code}"),
+            Err(e) => format!("{e:?}"),
+        }
+    }
+
+    #[test]
+    fn match_on_constructor_value_errors_instead_of_taking_first_arm() {
+        let src = "class Vec4f:\n    x: i64\nenum Kind:\n    I8\n    F32\nfn code(k) -> i64:\n    match k:\n        case I8: 1\n        case F32: 2\n        case _: 3\nmain = code(Vec4f)\n";
+        let err = run_err(src);
+        assert!(err.contains("can never match it"), "wrong error: {err}");
+        assert!(err.contains("constructor value"), "error must name the value kind: {err}");
+        assert!(err.contains("case I8"), "error must name the arm: {err}");
+    }
+
+    #[test]
+    fn statement_and_val_match_on_constructor_value_error_too() {
+        // Statement form (`exec_match_core`) and `val r = match` form.
+        let stmt = "class Vec4f:\n    x: i64\nenum Kind:\n    I8\n    F32\nfn code(k) -> i64:\n    var r = 0\n    match k:\n        case I8:\n            r = 1\n        case F32:\n            r = 2\n    r\nmain = code(Vec4f)\n";
+        let err = run_err(stmt);
+        assert!(err.contains("can never match it") && err.contains("constructor value"), "wrong error: {err}");
+        let val_form = "class Vec4f:\n    x: i64\nenum Kind:\n    I8\n    F32\nfn code(k) -> i64:\n    val r = match k:\n        case Kind.I8: 1\n        case _: 3\n    r\nmain = code(Vec4f)\n";
+        let err = run_err(val_form);
+        // The parser may lower `Kind.I8` to an unqualified variant pattern, so
+        // only the variant name is asserted.
+        assert!(err.contains("can never match it") && err.contains("I8:"), "wrong error: {err}");
+    }
+
+    #[test]
+    fn earlier_binder_or_wildcard_arm_still_wins_over_callable() {
+        let src = "enum Kind:\n    I8\n    F32\nfn helper() -> i64:\n    7\nfn code(k) -> i64:\n    match k:\n        case _: 5\n        case I8: 1\nmain = code(helper)\n";
+        assert_eq!(run(src), 5);
+    }
+
+    #[test]
+    fn match_on_function_value_errors_instead_of_taking_first_arm() {
+        let src = "enum Kind:\n    I8\n    F32\nfn helper() -> i64:\n    1\nfn code(k) -> i64:\n    match k:\n        case I8: 1\n        case F32: 2\nmain = code(helper)\n";
+        let err = run_err(src);
+        assert!(err.contains("can never match it"), "wrong error: {err}");
+        assert!(err.contains("function value"), "error must name the value kind: {err}");
+    }
+
+    #[test]
+    fn variant_spelled_arms_against_callables_refuse_directly() {
+        let enums = HashMap::new();
+        let classes = HashMap::new();
+        let pattern = Pattern::Identifier("I8".to_string());
+        for value in [
+            Value::Constructor { class_name: "Vec4f".to_string() },
+            Value::EnumType { enum_name: "Kind".to_string() },
+            Value::EnumVariantConstructor {
+                enum_name: "Kind".to_string(),
+                variant_name: "Wrap".to_string(),
+            },
+        ] {
+            let mut bindings = HashMap::new();
+            let got = match_arm_matches(&pattern, &value, &mut bindings, &enums, &classes);
+            assert!(got.is_err(), "`case I8:` over {} must be refused", value.type_name());
+            assert!(bindings.is_empty());
+        }
+        let ctor = Value::Constructor { class_name: "Vec4f".to_string() };
+        // `case I8 | F32:` and a qualified `case Kind.I8:` are refused too.
+        let or_pat = Pattern::Or(vec![Pattern::Identifier("I8".to_string()), Pattern::Identifier("F32".to_string())]);
+        let qualified = Pattern::Enum { name: "Kind".to_string(), variant: "I8".to_string(), payload: None };
+        for p in [&or_pat, &qualified] {
+            let mut bindings = HashMap::new();
+            assert!(match_arm_matches(p, &ctor, &mut bindings, &enums, &classes).is_err());
+        }
+        // Controls: lowercase binders and `_` still match a callable, `case
+        // Some(f):` keeps the flat-Option binding, a capitalized arm over plain
+        // data (`case WS_OPCODE_TEXT:` on an i64) still binds, and the shared
+        // binder `pattern_matches` (`val Handler = some_fn`) is unchanged.
+        let mut bindings = HashMap::new();
+        assert!(match_arm_matches(&Pattern::Identifier("f".to_string()), &ctor, &mut bindings, &enums, &classes).unwrap());
+        assert!(match_arm_matches(&Pattern::Wildcard, &ctor, &mut bindings, &enums, &classes).unwrap());
+        let or_catch_all = Pattern::Or(vec![Pattern::Wildcard, Pattern::Identifier("I8".to_string())]);
+        assert!(match_arm_matches(&or_catch_all, &ctor, &mut bindings, &enums, &classes).unwrap());
+        let or_binder = Pattern::Or(vec![Pattern::Identifier("I8".to_string()), Pattern::Identifier("f".to_string())]);
+        assert!(match_arm_matches(&or_binder, &ctor, &mut bindings, &enums, &classes).unwrap());
+        let some_f = Pattern::Enum {
+            name: "Option".to_string(),
+            variant: "Some".to_string(),
+            payload: Some(vec![Pattern::Identifier("f".to_string())]),
+        };
+        assert!(match_arm_matches(&some_f, &ctor, &mut bindings, &enums, &classes).unwrap());
+        assert!(match_arm_matches(&pattern, &Value::Int(2), &mut bindings, &enums, &classes).unwrap());
+        assert!(pattern_matches(&Pattern::Identifier("Handler".to_string()), &ctor, &mut bindings, &enums, &classes).unwrap());
+    }
+
+    // Residual: a variant-spelled SUB-pattern over a callable payload
+    // (`case W(I8):` on `W(Vec4f)`) bound it silently.
+    #[test]
+    fn nested_variant_sub_pattern_over_callable_payload_is_refused() {
+        let enums = HashMap::new();
+        let classes = HashMap::new();
+        let ctor = Value::Constructor { class_name: "Vec4f".to_string() };
+        let wrapped = Value::Enum {
+            enum_name: "Wrap".to_string(),
+            variant: "W".to_string(),
+            payload: Some(Box::new(ctor.clone())),
+        };
+        let w = |p: Pattern| Pattern::Enum { name: "_".to_string(), variant: "W".to_string(), payload: Some(vec![p]) };
+        let some = |p: Pattern| Pattern::Enum { name: "Option".to_string(), variant: "Some".to_string(), payload: Some(vec![p]) };
+        let i8 = || Pattern::Identifier("I8".to_string());
+        let qualified = Pattern::Enum { name: "Kind".to_string(), variant: "I8".to_string(), payload: None };
+        for (pattern, value) in [
+            (w(i8()), &wrapped),
+            (w(qualified), &wrapped),
+            (some(i8()), &ctor),
+            (Pattern::Tuple(vec![i8(), Pattern::Wildcard]), &Value::Tuple(vec![ctor.clone(), Value::Int(1)])),
+        ] {
+            let mut bindings = HashMap::new();
+            let err = match_arm_matches(&pattern, value, &mut bindings, &enums, &classes).unwrap_err();
+            assert!(format!("{err:?}").contains("sub-pattern `"), "{err:?}");
+            assert!(bindings.is_empty());
+        }
+        // A matching alternative still wins; binders still bind.
+        for pattern in [
+            w(Pattern::Or(vec![i8(), Pattern::Identifier("f".to_string())])),
+            Pattern::Or(vec![w(i8()), Pattern::Wildcard]),
+            w(Pattern::Identifier("f".to_string())),
+        ] {
+            let mut bindings = HashMap::new();
+            assert!(match_arm_matches(&pattern, &wrapped, &mut bindings, &enums, &classes).unwrap());
+        }
+        // `case (W(I8) | W(f), 0):` on `(W(Vec4f), 1)`: the matching `W(f)`
+        // drops the `I8` refusal, so the arm is a plain miss, not an error.
+        let or_then_miss = Pattern::Tuple(vec![
+            Pattern::Or(vec![w(i8()), w(Pattern::Identifier("f".to_string()))]),
+            Pattern::Literal(Box::new(Expr::Integer(0))),
+        ]);
+        let pair = Value::Tuple(vec![wrapped.clone(), Value::Int(1)]);
+        let mut bindings = HashMap::new();
+        assert!(!match_arm_matches(&or_then_miss, &pair, &mut bindings, &enums, &classes).unwrap());
+        // Outside a match arm (`val`/`if val` destructuring) nothing changes,
+        // and the arm mode does not leak out of `match_arm_matches`.
+        let mut bindings = HashMap::new();
+        assert!(pattern_matches(&w(i8()), &wrapped, &mut bindings, &enums, &classes).unwrap());
+        assert!(matches!(bindings.get("I8"), Some(Value::Constructor { .. })));
+        assert!(!super::MATCH_ARM_MODE.with(|m| m.get()));
+    }
+
+    // JIT residual of the same bug, interpreter twin: a callable bound to a
+    // `Kind` / `Kind?` parameter is refused at the call boundary. Without it,
+    // `case Some(I8):` over a `Kind?` parameter matched a constructor silently
+    // (printed "i8", rc 0), and every non-strict JIT run that falls back to
+    // the interpreter inherited that.
+    #[test]
+    fn callable_bound_to_enum_parameter_is_refused_at_the_call() {
+        let decls = "class Vec4f:\n    x: i64\nenum Kind:\n    I8\n    F32\nfn helper() -> i64:\n    1\n";
+        for (callee, call, kind) in [
+            ("fn code(k: Kind) -> i64:\n    match k:\n        case _: 3\n", "code(Vec4f)", "constructor value"),
+            ("fn code(k: Kind) -> i64:\n    match k:\n        case _: 3\n", "code(helper)", "function value"),
+            ("fn code(k: Kind?) -> i64:\n    match k:\n        case Some(I8): 1\n        case _: 3\n", "code(Vec4f)", "constructor value"),
+            ("fn code(k: Kind) -> i64:\n    match k:\n        case _: 3\n", "code(k: Vec4f)", "constructor value"),
+        ] {
+            let err = run_err(&format!("{decls}{callee}main = {call}\n"));
+            assert!(
+                err.contains("is declared as enum `Kind`") && err.contains(kind) && err.contains("parameter 'k'"),
+                "wrong error for {call}: {err}"
+            );
+        }
+        // Typed `val` twin: `val k: Kind? = Vec4f` then `case Some(I8):`
+        // answered 1 silently.
+        let err = run_err(&format!(
+            "{decls}fn code() -> i64:\n    val k: Kind? = Vec4f\n    match k:\n        case Some(I8): 1\n        case _: 3\nmain = code()\n"
+        ));
+        assert!(
+            err.contains("binding `k`") && err.contains("is declared as enum `Kind`") && err.contains("constructor value"),
+            "wrong error for typed val: {err}"
+        );
+        // Controls: a real variant into `Kind` and `Kind?`, and a function
+        // into a fn-typed parameter, still bind.
+        let fns = "fn code(k: Kind) -> i64:\n    match k:\n        case I8: 1\n        case _: 3\nfn opt(k: Kind?) -> i64:\n    match k:\n        case _: 30\nfn apply(f: fn() -> i64) -> i64:\n    f()\n";
+        assert_eq!(run(&format!("{decls}{fns}main = code(Kind.I8)\n")), 1);
+        assert_eq!(run(&format!("{decls}{fns}main = code(Kind.F32)\n")), 3);
+        assert_eq!(run(&format!("{decls}{fns}main = opt(Kind.F32)\n")), 30);
+        assert_eq!(run(&format!("{decls}{fns}main = 100 * apply(helper)\n")), 100);
+    }
+
+    // --- optional_enum_some_variant_match_engine_divergence_2026-11-14 ---
+
+    // The `main = expr` harness used to take `case _:` for a real `Kind.I8`
+    // while `simple run` of the same source answered the `I8` arm. Cause: `run`
+    // reused the thread's interpreter state, so an earlier snippet's
+    // `fn code(...)` (here: one with only `case _: 3`) answered the call. The
+    // CLI evaluates one module per process and never saw it.
+    #[test]
+    fn harness_real_enum_value_takes_its_variant_arm() {
+        let decls = "enum Kind:\n    I8\n    F32\n";
+        let stale = "fn code(k: Kind) -> i64:\n    match k:\n        case _: 3\n";
+        assert_eq!(run(&format!("{decls}{stale}main = code(Kind.I8)\n")), 3);
+        let untyped = "fn code(k) -> i64:\n    match k:\n        case I8: 1\n        case F32: 2\n        case _: 3\n";
+        let typed = "fn code(k: Kind) -> i64:\n    match k:\n        case I8: 1\n        case F32: 2\n        case _: 3\n";
+        for callee in [untyped, typed] {
+            assert_eq!(run(&format!("{decls}{callee}main = code(Kind.I8)\n")), 1, "{callee}");
+            assert_eq!(run(&format!("{decls}{callee}main = code(Kind.F32)\n")), 2, "{callee}");
+        }
+    }
+
+    // A `Kind?` slot holding a bare `Kind` value is its own `Some` payload,
+    // exactly like a bare scalar in a `T?` slot.
+    #[test]
+    fn some_variant_pattern_looks_through_a_bare_enum_in_an_optional_slot() {
+        let decls = "enum Kind:\n    I8\n    F32\n    Wrap(i64)\n";
+        let opt = "fn opt(k: Kind?) -> i64:\n    match k:\n        case Some(I8): 1\n        case Some(F32): 2\n        case Some(Wrap(n)): 10 + n\n        case None: 4\n        case _: 5\n";
+        for (call, want) in [("opt(Kind.F32)", 2), ("opt(Kind.I8)", 1), ("opt(Kind.Wrap(7))", 17), ("opt(nil)", 4), ("opt(Some(Kind.F32))", 2)] {
+            assert_eq!(run(&format!("{decls}{opt}main = {call}\n")), want, "{call}");
+        }
+        let binder = "fn b(k: Kind?) -> i64:\n    match k:\n        case Some(x): 1\n        case _: 5\n";
+        assert_eq!(run(&format!("{decls}{binder}main = b(Kind.F32)\n")), 1);
+        assert_eq!(run(&format!("{decls}{binder}main = b(nil)\n")), 5);
+    }
+
+    // Guards: a user enum that declares its own `Some` keeps name-keyed
+    // matching (its other variants never match `case Some(x):`), and Result /
+    // None / nil never match `Some`.
+    #[test]
+    fn some_pattern_look_through_keeps_its_guards() {
+        let own_some = "enum Opt:\n    Some(i64)\n    None\nfn f(o: Opt) -> i64:\n    match o:\n        case Some(x): x\n        case _: 99\n";
+        assert_eq!(run(&format!("{own_some}main = f(Opt.None)\n")), 99);
+        assert_eq!(run(&format!("{own_some}main = f(Opt.Some(7))\n")), 7);
+        let none_some = "fn f(o) -> i64:\n    match o:\n        case Some(x): 1\n        case _: 5\n";
+        assert_eq!(run(&format!("{none_some}main = f(None)\n")), 5);
+        assert_eq!(run(&format!("{none_some}main = f(nil)\n")), 5);
+        assert_eq!(run(&format!("{none_some}main = f(Ok(1))\n")), 5);
+        assert_eq!(run(&format!("{none_some}main = f(Err(1))\n")), 5);
     }
 }

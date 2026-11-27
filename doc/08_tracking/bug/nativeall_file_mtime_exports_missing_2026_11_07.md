@@ -1,0 +1,21 @@
+# Mtime facade source and diagnostic result
+
+Canonical bug nativeall_file_mtime_exports_missing_2026_11_07 remains root-owned; base bfcab1cde567ad9efa4ced3bb2c67299587dde14. Status: open P1; diagnostic verified, broader qualification pending.
+
+Two typed RuntimeValue->i64 exports share native libc stat/wstat rather than rt_file_stat or a SystemTime reinterpretation. Full counted paths must fit4096 and validate UTF-8; first NUL terminates the copied path. Copy executes under with_typed_ptr registry locking, then filesystem access executes after lock release. Byte and Windows UTF16 buffers are fixed4096 stack storage. Only successful native status initializes stat metadata. Both names return native st_mtime or-1. Existing rt_file_stat zero/error/pre-epoch behavior is unchanged.
+
+Root-authorized Windows-only manifest addition enables the existing locked libc0.2 crate; its preexisting dependency was Unix-only. Cargo.lock hash remained748886e81c790424916482ee6cc28591724abea2152fb2f0e313c85c908b1ab3. No dependency version/network/lock updates, custom CRT layout or timezone emulator.
+
+Diagnostic ledger (three cycles; two later metadata-proof cycles retained separately): preparationcycle1 stopped on restored gitattributes normalizing filtered Git identity, preserving exact raw bytes. Root accepted pre-reviewed LF identities; no attribute/source edits. Cycle2/runtimeattempt1 failed with four E0433 references because libc was only cfgUnix; zero tests executed. Root authorized the narrow Windows dependency. Cycle3/runtimeattempt2 passed six actual named owner tests,0failed/0ignored/1414filtered; bootstrap1m34s. No passing tests rerun.
+
+Windows diagnostic exercised known fractional and Unicode path, native CRT pre-epoch policy, epoch/error distinction from rt_file_stat,4095/4096 length bounds and NUL, invalid managed bytes/values, directories/non-directory parents, and copied bytes surviving input free. Invalid managed UTF8 rejection is not a claim of C MultiByteToWideChar(flags0) malformed-byte parity. Unix-specific signed-floor/symlink branches and Windows reparse/symlink fixture remain UNRUN. No overall verify or nativeall admission claimed.
+
+Resource receipt: rawexit0, resource_errornone, Jobpeak1277956096, RSS1173499904, targetpeak279437312, minfree5174005760 bytes. Frozen guard3c72d99ecbbaf704749261e23ebc4865fbf8f4b4f6252614fab0ce003c442293 applied OS Job limits of8GiB,2CPU affinity and16processes, plus collector deadline1200s and32MiBlog bound. RSS,3GiBtarget size and2GiBfree-disk reserve were soft sampled monitoring policies: resource sampling500ms nominal, target scan at least5s apart with2ssoft scan budget. There was no hard disk quota or exact500ms sampling guarantee. Actual command/env, logs, receipts, copied-cache lineage and all failure evidence retained in `C:/dev/simple/.git/worktrees/nativeall-file-mtime-d88f/evidence/`.
+
+Broader whole-nativeall archive/link, admittedP2, source-matchedSSpec/native integration and core/MCP qualification remain UNRUN. Unrelated full unsafe-backlog known baseline FAIL is not rerun; no SPL source or audit-map edits.
+
+Source-only unsafe audit reuse:44,954owned src/test SPL path/mode/blob rows, mapSHA256 a63e8ab8b722dbc4853a0f5d88b2a87f44e35e24f591c2b1a2ce29729ed524ca, reused from stdio-unsafe-input-equality.sdn and rebase-input-equality.sdn in the stdio evidence directory. Exact scripts/check/check-raw-sffi-unsafe-ratchet.shs blob3b73712b805b979280f7eb1f0c09f9d941d1114e and scripts/audit/sffi-contract-inventory.shs blob394b158d0514cb2a6f94a6b46def4791cc815da6 match. No branch SPL changes. Baseline FAIL400/399+3764/3546 retained, audit not rerun; this source-only scope excludes C/Rust.
+
+Metadata-proof cycle4 stopped on an overbroad filename classifier matching an unrelated CRT check; initial reports/DB were not written. The subsequent exact retained-map/two-script identity proof is cycle5, within the total6cycle cap. No runtime tests were rerun.
+
+Final metadata cycle6 reconciled a stale tracked ledger sidecar retained by the sparse index after filesystem resealing. Explicit owned sidecars were replaced by one current native seal. Total6cycles reached; no further repair/test cycle authorized.

@@ -1,0 +1,105 @@
+# Purpose and audience: read-only TestDB query over a real in-memory runner database, for CLI/MCP facade authors and evidence reviewers.
+# @req TESTDB-001 TESTDB-002 TESTDB-003
+use std.spec.*
+use std.database.core.{SdnTable}
+use std.database.test_extended.database.{TestDatabaseExtended}
+use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
+use std.common.traceability.case_events.{TraceCaseEvent}
+use std.common.traceability.test_query.{
+    TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestQueryLimit, TestQuery,
+    TestQueryStatus, TestQualification, TestQueryErrorKind
+}
+
+"""
+# RunnerTestDb.query_case_attempts
+
+Purpose: prove the database-backed query returns typed attempt rows for one
+exact case, never mutates the store, and reports an unreadable or unknown run
+as a typed error rather than an empty success. Audience: authors of the future
+`simple test query` CLI/MCP facade.
+"""
+
+fn _db() -> RunnerTestDb:
+    RunnerTestDb(db: TestDatabaseExtended.create("target/test-db-query-unit-no-save"), current_run_id: "")
+
+fn _query(run_id: TestRunId?) -> TestQuery:
+    TestQuery(case_key: TestCaseKey(path: TestCasePath(value: "test/a_spec.spl"), name: TestCaseName(value: "adds")),
+        run_id: run_id, limit: TestQueryLimit(value: 10), cursor: None)
+
+fn _store(owner: RunnerTestDb, run_id: text, events: [TraceCaseEvent]):
+    match owner.db.record_trace_case_events(run_id, "test/a_spec.spl", events):
+        case Ok(_): pass
+        case Err(reason): fail("fixture events rejected: {reason}")
+
+fn _trace_row_count(owner: RunnerTestDb) -> i64:
+    match owner.db.db.get_table("trace_case_events"):
+        case Some(table): table.rows.len()
+        case None: 0
+
+describe "RunnerTestDb read-only case attempt query":
+    it "returns separate attempt rows for the queried case and leaves the store unchanged":
+        # @req TESTDB-001
+        step("Record one run where the queried case failed then passed and a neighbour also ran")
+        var owner = _db()
+        val run_id = owner.start_run()
+        _store(owner, run_id, [TraceCaseEvent("adds", "started", "not_finished"), TraceCaseEvent("other", "started", "not_finished"),
+            TraceCaseEvent("adds", "finished", "failed"), TraceCaseEvent("other", "finished", "passed"),
+            TraceCaseEvent("adds", "started", "not_finished"), TraceCaseEvent("adds", "finished", "passed")])
+        val before = _trace_row_count(owner)
+        step("Query that exact case in that run")
+        match owner.query_case_attempts(_query(Some(TestRunId(value: run_id)))):
+            case Err(error): fail("query failed: {error.detail}")
+            case Ok(page):
+                step("Both attempts are present, in order, and only the second qualifies")
+                expect(page.rows.len()).to_equal(2)
+                match page.rows[0].qualification:
+                    case TestQualification.Pass: fail("a failed attempt qualified")
+                    case TestQualification.NotPass: pass
+                match page.rows[1].qualification:
+                    case TestQualification.Pass: pass
+                    case TestQualification.NotPass: fail("the passing attempt did not qualify")
+        step("The query added or removed no stored rows")
+        expect(_trace_row_count(owner)).to_equal(before)
+
+    it "finds the case across runs when no run id is given":
+        # @req TESTDB-001
+        step("Record the case in two separate runs")
+        var owner = _db()
+        val first = owner.start_run()
+        _store(owner, first, [TraceCaseEvent("adds", "started", "not_finished"), TraceCaseEvent("adds", "finished", "failed")])
+        val second = owner.start_run()
+        _store(owner, second, [TraceCaseEvent("adds", "started", "not_finished"), TraceCaseEvent("adds", "finished", "pending")])
+        step("Rows from both runs are returned and the pending one is not PASS")
+        match owner.query_case_attempts(_query(None)):
+            case Err(error): fail("query failed: {error.detail}")
+            case Ok(page):
+                expect(page.rows.len()).to_equal(2)
+                for row in page.rows:
+                    match row.qualification:
+                        case TestQualification.Pass: fail("a non-passing row qualified")
+                        case TestQualification.NotPass: pass
+
+    it "reports an unknown run as a typed error instead of an empty page":
+        # @req TESTDB-004
+        step("Query a run id that was never started")
+        var owner = _db()
+        match owner.query_case_attempts(_query(Some(TestRunId(value: "no-such-run")))):
+            case Ok(_): fail("an unknown run returned a page")
+            case Err(error):
+                match error.kind:
+                    case TestQueryErrorKind.UnknownRun: pass
+                    case _: fail("wrong error kind for an unknown run")
+
+    it "reports a corrupt trace table as a typed store error, not an empty success":
+        # @req TESTDB-003
+        step("Replace the trace event table with an incompatible schema")
+        var owner = _db()
+        val run_id = owner.start_run()
+        owner.db.db.set_table("trace_case_events", SdnTable.new("trace_case_events", ["bogus"]))
+        step("The query fails with StoreUnreadable")
+        match owner.query_case_attempts(_query(Some(TestRunId(value: run_id)))):
+            case Ok(_): fail("a corrupt store returned a page")
+            case Err(error):
+                match error.kind:
+                    case TestQueryErrorKind.StoreUnreadable: pass
+                    case _: fail("wrong error kind for a corrupt store")

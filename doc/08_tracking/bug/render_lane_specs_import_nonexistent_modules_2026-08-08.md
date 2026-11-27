@@ -1,6 +1,6 @@
 # Render-lane specs import modules that were never implemented (2026-08-08)
 
-**Status:** partially fixed — 2 of 27 specs unblocked, 25 remain legitimately RED
+**Status:** fixed (2026-11-27 W4-7 — all 12 remaining missing modules landed; 10/10 remaining import-RED specs pass 81/81)
 **Area:** `src/lib/{cc,blink,content}` (Chromium-mirror render lane)
 
 ## Summary
@@ -242,3 +242,87 @@ specs demand at BASE, not that session's in-flight design.
 `std.blink.css_parser.{parser,selector,tokenizer}`, `std.blink.dom.{node,interaction_state}`,
 `std.cc.entity.property_tree`, all of `std.viz.*`, `std.content.entity.web_contents`,
 `std.content.feature.render_widget_host_view`. Their specs resolve and run.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867) — PARTIAL: record table stale; most modules landed; one spec fixed this lane
+
+**Fresh measurement of all 24 previously-red specs** (tracked seed `bin/simple.exe`,
+`SIMPLE_LIB=src`, `--mode=interpreter --no-cache`, this worktree; mirrored copies
+under `lib_standalone/` and `test/unit/` not re-measured):
+
+| Spec | 2026-08-09 state | 2026-11-13 verdict |
+|---|---|---|
+| blink/block_flow | RED (missing module) | **7/7 PASS** (module landed) |
+| blink/computed_style | RED | **6/6 PASS** (landed) |
+| blink/document | RED | ERROR 0 executed — `blink.dom.document` still missing |
+| blink/flex | RED | ERROR 0 executed — `blink.layout.flex` still missing |
+| blink/form_paint | RED | **8/8 PASS** (landed) |
+| blink/hit_test | RED | **7/7 PASS** (landed) |
+| blink/html_tokenizer | RED | **8/8 PASS** |
+| blink/html_tree_builder | RED | **7/7 PASS** |
+| blink/image_paint | RED | **3/3 PASS** (landed) |
+| blink/inline_flow | RED | ERROR 0 executed — `blink.layout` (module root) still missing |
+| blink/input_event | RED | **8/8 PASS** (landed) |
+| blink/navigation_controller | RED | ERROR 0 executed — `blink.navigation.controller` missing |
+| blink/navigation_fetch | RED | ERROR 0 executed — `blink.network.fetch` + controller missing |
+| blink/paint_artifact | RED | **10/10 PASS** (landed) |
+| blink/paint_controller | RED | ERROR 0 executed — `blink.feature.paint.paint_controller` missing |
+| blink/paint_tree_walker | RED | **6/6 PASS** (landed) |
+| blink/scroll_manager | RED | ERROR 0 executed — `blink.scroll.manager` missing |
+| blink/style_cascade | RED | **39/39 PASS** (landed) |
+| blink/url/url_parser | RED | **8/8 PASS** (landed) |
+| cc/layer_base | RED | ERROR 0 executed — `cc.entity.layer_base` still missing |
+| cc/picture_layer_impl | RED | ERROR 0 executed — `cc.feature.raster_source` + `picture_layer_impl` missing |
+| cc/tile_manager | RED | ERROR 0 executed — `cc.feature.tile_manager` + `raster_buffer_provider` missing |
+| cc/tile | RED | **7/7 PASS** (landed; both `tile_id_new`/`tile_new` and `Tile.new`/`TileKey.new` shapes present) |
+| content/web_contents | RED | was 8/8 FAIL (`function _rect not found` — spec-side helper never defined); **fixed this lane: added the missing `fn _rect() -> SkRect` helper → 8/8 PASS** |
+
+**Net: 24 RED (2026-08-09) → 14 PASS, 10 import-RED.** The remaining gap is 9
+unimplemented modules (each still honestly fail-closed at import, not vacuous):
+`blink.dom.document`, `blink.layout.flex`, `blink.layout` (module root/inline
+flow), `blink.navigation.controller`, `blink.network.fetch`,
+`blink.feature.paint.paint_controller`, `blink.scroll.manager`,
+`cc.entity.layer_base`, `cc.feature.{tile_manager, raster_buffer_provider,
+raster_source, picture_layer_impl}`. The 2026-08-09 triage table's "Demanded
+surface" column remains the implementation spec for each.
+
+**Not attempted beyond web_contents:** with 10 rows still gated, full module
+implementation (value objects + verification across three mirrored trees) exceeds
+this row's 20-minute box; and the 2026-08-09 caveat about concurrently-claimed
+modules (`cc.entity.tile`/`layer_base` were "IN PROGRESS" by another session then)
+applies — most of the landed modules above arrived from such parallel lanes.
+This row's web_contents fix is spec-side only (a referenced-but-never-defined
+helper), verified non-vacuous by the file's sentinel assertions
+(`chunk_count == 2`, `last_end == 7`).
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+Needs an owner decision, not attempted. Re-counted at release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: 12 of the 24 listed modules now exist; 12 are still missing (blink.dom.document, blink.feature.paint.paint_controller, blink.layout root, blink.layout.flex, blink.navigation.controller, blink.network.fetch, blink.scroll.manager, cc.entity.layer_base, cc.feature.{raster_source,picture_layer_impl,raster_buffer_provider,tile_manager}), leaving 10 red specs. The modules were never written and have no consumer; some specs are internally inconsistent (scroll_manager_spec: the example titled Hidden returns false asserts true). Implementing library code only to satisfy them, or deleting them, is the owner's call.
+
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with the same-day p3-gpu measurement: 14 of the 24 specs PASS (modules landed); 10 remain import-RED on 9 unimplemented modules (`blink.dom.document`, `blink.layout` root, `blink.layout.flex`, `blink.navigation.controller`, `blink.network.fetch`, `blink.feature.paint.paint_controller`, `blink.scroll.manager`, `cc.entity.layer_base`, `cc.feature.{raster_source,picture_layer_impl,raster_buffer_provider,tile_manager}`). Implementing even one module against the pinned spec API + verifying across the three mirrored test trees exceeds a per-bug P3 box, and the record notes some specs are internally inconsistent (scroll_manager "Hidden returns false asserts true"), which needs an owner decision, not a lane guess. No in-lane change. Owner: render-lane feature work (module-by-module, starting with the ranked table's `blink.url`-chain/`paint_artifact` style landed examples).
+
+## Resolution 2026-11-27 (Windows host, W4-7) — FIXED
+
+All 12 remaining missing modules and supporting types/spec fixes landed and all 10 remaining RED specs pass (81/81 total examples, 0 failed):
+- Implemented:
+  - `src/lib/blink/dom/document.spl` (`ReadyState`, `Document`, `document_new`)
+  - `src/lib/blink/layout/flex.spl` (`FlexDirection`, `JustifyContent`, `AlignItems`, `FlexItem`, `FlexContainer`, `flex_item_new`, `flex_container_row`, `flex_container_column`, `layout_flex` — `JustifyContent.FlexEnd` uses `remaining` without clamping negative overflow)
+  - `src/lib/blink/layout/inline_flow.spl` + `src/lib/blink/layout/__init__.spl` (`InlineItemKind`, `InlineItem`, `InlineBox`, `LineBox`, `InlineLayoutResult`, `inline_text`, `inline_element`, `estimate_text_width`, `wrap_text_run`, `layout_inline_flow`)
+  - `src/lib/blink/network/fetch.spl` (`FetchResponse`, `fetch_text` via `std.io_runtime`)
+  - `src/lib/blink/navigation/controller.spl` (`NavigationEntry`, `NavigationController`, `navigation_entry_new`, `navigation_controller_new`)
+  - `src/lib/blink/feature/paint/paint_controller.spl` (`PaintController`)
+  - `src/lib/blink/scroll/manager.spl` (`OverflowBehavior`, `ScrollableArea`, `ScrollManager`, `scrollable_area_new`, `scroll_manager_new`)
+  - `src/lib/cc/entity/layer_base.spl` (`LayerId`, `LayerType`, `Layer`, `layer_id_new`, `layer_new`)
+  - `src/lib/cc/feature/raster_source.spl` (`RasterSource`)
+  - `src/lib/cc/feature/picture_layer_impl.spl` (`PictureLayerImpl`)
+  - `src/lib/cc/feature/raster_buffer_provider.spl` (`RasterBufferProvider` returning `Bitmap.zeros(w, h)`)
+  - `src/lib/cc/feature/tile_manager.spl` (`TileManager` with `me.tiles[i] = t` write-back)
+- Added `SkIRect.make_xywh` in `src/lib/skia/entity/geometry.spl`.
+- Fixed pre-existing broken spec constructs in `flex_spec.spl` (`var items` + `FlexEnd` coverage), `navigation_controller_spec.spl` & `navigation_fetch_spec.spl` (broken `expect(...).to_equal(false) # not nil` -> `.is_some()` + field assertions), `scroll_manager_spec.spl` (`Hidden returns false` assertion `false`), and `tile_manager_spec.spl` (`sk_capability_cpu()` + `4*w*h` bitmap allocation / `set_pixel` / `fill_rect` coverage).
+- Verified PASS (`wa3_shared_bin/simple.exe --mode=interpreter`, `SIMPLE_LIB=src`): `document_spec` (7/7), `flex_spec` (9/9), `inline_flow_spec` (11/11), `navigation_controller_spec` (8/8), `navigation_fetch_spec` (6/6), `paint_controller_spec` (7/7), `scroll_manager_spec` (8/8), `layer_base_spec` (8/8), `picture_layer_impl_spec` (9/9), `tile_manager_spec` (8/8). (`test/01_unit/lib_standalone/**` and `test/unit/lib/**` do not exist on `HEAD`.)

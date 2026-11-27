@@ -15,8 +15,7 @@
 # reports the arithmetic it used. A refusal a caller can read is worth more than
 # a verdict it has to trust.
 
-use std.io_runtime.{read_file, host_os}
-use std.nogc_sync_mut.io.process_ops.{shell_int}
+use std.gc_async_mut.slang.host.slang_host.{host_os_name, host_file_read, host_run_int, host_run_text, parse_meminfo_bytes, parse_vm_stat_page_size, parse_vm_stat_available_pages, darwin_available_bytes, slang_windows_available_bytes_fast}
 
 # Bytes to leave for the OS, the page cache and whatever else shares this
 # machine. Deliberately generous: the cost of being wrong upward is a refused
@@ -41,31 +40,59 @@ fn default_headroom_bytes() -> i64:
         return floor_bytes
     proportional
 
+var _cached_mem_total_bytes: i64 = 0
+
+# reason: test-only reset of memoized physical memory byte total
+@allow(primitive_api)
+pub fn reset_mem_total_cache_for_test():
+    _cached_mem_total_bytes = 0
+
 # Physical memory. Distinct from mem_available_bytes: this one never changes
-# under load, which is exactly what a reserve should be sized against.
+# under load, which is exactly what a reserve should be sized against. Positive
+# probes are memoized so repeated model loads do not re-spawn PowerShell/sysctl.
 fn mem_total_bytes() -> i64:
-    val content = read_file("/proc/meminfo")
-    for line in content.split("\n"):
-        if line.starts_with("MemTotal:"):
-            for part in line.split(" "):
-                val t = part.trim()
-                if t != "" and t != "MemTotal:" and t != "kB":
-                    return t.to_i64() * 1024
-    if host_os() == "windows":
-        return _win32_os_kib("TotalVisibleMemorySize")
-    shell_int("sysctl -n hw.memsize", -1)
+    if _cached_mem_total_bytes > 0:
+        return _cached_mem_total_bytes
+    val os = host_os_name()
+    var total: i64 = -1
+    if os == "linux":
+        total = parse_meminfo_bytes(host_file_read("/proc/meminfo"), "MemTotal")
+    elif os == "windows":
+        total = _win32_os_kib("TotalVisibleMemorySize")
+    else:
+        total = host_run_int("sysctl", ["-n", "hw.memsize"])
+    if total > 0:
+        _cached_mem_total_bytes = total
+    total
 
 # Windows has neither /proc/meminfo nor sysctl. Win32_OperatingSystem reports
-# TotalVisibleMemorySize and FreePhysicalMemory in KiB. FreePhysicalMemory is
-# used as the MemAvailable analogue (measured 2026-10-03 within 10% of the
-# perf counter Memory\AvailableKBytes, at ~1.2 s per probe vs ~3.3 s). Same
-# PowerShell/CIM probe the test runner's system_monitor uses.
-# -1 when the probe fails, which check_fit turns into a refusal.
+# TotalVisibleMemorySize in KiB (same PowerShell/CIM probe the test runner's
+# system_monitor uses). -1 when the probe fails, which check_fit turns into a
+# refusal.
 fn _win32_os_kib(field: text) -> i64:
-    val kib = shell_int("powershell -NoProfile -Command \"(Get-CimInstance Win32_OperatingSystem)." + field + "\"", -1)
+    val kib = host_run_int("powershell", ["-NoProfile", "-Command", "(Get-CimInstance Win32_OperatingSystem)." + field])
     if kib <= 0:
         return -1
     kib * 1024
+
+# MemAvailable analogue on Windows: queries SOSIX GlobalMemoryStatusEx first
+# (`slang_windows_available_bytes_fast`, <1 ms), falling back to PowerShell CIM
+# `Win32_PerfFormattedData_PerfOS_Memory.AvailableBytes` (free + zeroed +
+# STANDBY file-cache pages) only when the fast snapshot is unavailable.
+# Win32_OperatingSystem FreePhysicalMemory excludes the standby list, so after a
+# process reads multi-GB model files it collapses while the OS can still hand
+# the memory out: on 2026-11-15 slang refused a 256M-parameter model ("needs 10
+# GiB ... only 6 GiB available") for 30+ minutes with ~38 GiB available.
+# Measured 2026-11-15 on a heavily loaded host: CIM probes took 54-135 s wall,
+# which caused 64-120 s fixed model-load overhead before the SOSIX fast path.
+fn _win32_available_bytes() -> i64:
+    val fast = slang_windows_available_bytes_fast()
+    if fast > 0:
+        return fast
+    val bytes = host_run_int("powershell", ["-NoProfile", "-Command", "(Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory).AvailableBytes"])
+    if bytes <= 0:
+        return -1
+    bytes
 
 struct FitVerdict:
     fits: bool
@@ -80,21 +107,13 @@ struct FitVerdict:
 # Returns -1 when the host's memory cannot be established at all. That is
 # deliberately not "assume it fits": `check_fit` turns -1 into a refusal.
 fn mem_available_bytes() -> i64:
-    val linux = _mem_available_linux()
-    if linux > 0:
-        return linux
-    if host_os() == "windows":
-        return _win32_os_kib("FreePhysicalMemory")
-    _mem_available_darwin()
-
-fn _mem_available_linux() -> i64:
-    val content = read_file("/proc/meminfo")
-    for line in content.split("\n"):
-        if line.starts_with("MemAvailable:"):
-            for part in line.split(" "):
-                val t = part.trim()
-                if t != "" and t != "MemAvailable:" and t != "kB":
-                    return t.to_i64() * 1024
+    val os = host_os_name()
+    if os == "linux":
+        return parse_meminfo_bytes(host_file_read("/proc/meminfo"), "MemAvailable")
+    if os == "windows":
+        return _win32_available_bytes()
+    if os == "macos":
+        return _mem_available_darwin()
     -1
 
 # macOS has no /proc, so the Linux lane above returns -1 there and every load
@@ -104,26 +123,23 @@ fn _mem_available_linux() -> i64:
 # headroom rule above exists for, so the check matters more here, not less.
 #
 # `vm_stat` reports pages, not bytes, and there is no MemAvailable analogue, so
-# availability is derived as total minus resident: active + wired + compressed.
-# That is CONSERVATIVE by construction — inactive and purgeable pages are
-# reclaimable and are counted as unavailable anyway — which errs toward refusing
-# a load that would have fitted, the safe direction for this gate.
+# availability is the pages vm_stat itself calls reclaimable: free + inactive +
+# speculative, capped at hw.memsize. Purgeable pages are left out (they overlap
+# active/inactive), and memory vm_stat does not account for at all (GPU and
+# firmware carve-outs on Apple silicon) is never counted as available — the
+# old "total minus active+wired+compressed" did count it. The page size comes
+# from vm_stat's own header, so the counts and their unit share one source;
+# hw.pagesize is only the fallback.
 fn _mem_available_darwin() -> i64:
-    val total = shell_int("sysctl -n hw.memsize", 0)
+    val total = mem_total_bytes()
     if total <= 0:
         return -1
-    val page_size = shell_int("sysctl -n hw.pagesize", 0)
+    # No shell pipe: vm_stat runs directly and slang_host parses its text.
+    val stat = host_run_text("vm_stat", [])
+    var page_size = parse_vm_stat_page_size(stat)
     if page_size <= 0:
-        return -1
-    # One awk pass so a slow host is not probed three times; `gsub` strips the
-    # trailing '.' vm_stat prints after every page count.
-    val pages = shell_int("vm_stat | awk '/Pages active/ {a=$3} /Pages wired down/ {w=$4} /Pages occupied by compressor/ {c=$5} END {gsub(/\\./,\"\",a); gsub(/\\./,\"\",w); gsub(/\\./,\"\",c); print a+0+w+0+c+0}'", -1)
-    if pages < 0:
-        return -1
-    val used = pages * page_size
-    if used >= total:
-        return 0
-    total - used
+        page_size = host_run_int("sysctl", ["-n", "hw.pagesize"])
+    darwin_available_bytes(total, page_size, parse_vm_stat_available_pages(stat))
 
 fn _gib(bytes: i64) -> text:
     (bytes / (1024 * 1024 * 1024)).to_text() + " GiB"
@@ -133,8 +149,21 @@ fn _gib(bytes: i64) -> text:
 # guessed here because it depends on context length, which is the caller's
 # choice.
 fn check_fit(model_bytes: i64, overhead_bytes: i64, headroom_bytes: i64) -> FitVerdict:
-    val available = mem_available_bytes()
+    check_fit_with_available(model_bytes, overhead_bytes, headroom_bytes, mem_available_bytes())
+
+# The arithmetic of `check_fit` against an availability the caller already
+# probed. Two probes seconds apart are not the same number (Windows
+# FreePhysicalMemory measured drifting ~270 MB between calls), so a caller that
+# must compare several verdicts against ONE budget probes once and passes it
+# here. -1 still means "unknown" and still refuses. A negative `model_bytes`
+# (dir_byte_size could not list the model directory) is likewise unknown and
+# refuses.
+fn check_fit_with_available(model_bytes: i64, overhead_bytes: i64, headroom_bytes: i64, available: i64) -> FitVerdict:
     val needed = model_bytes + overhead_bytes + headroom_bytes
+    if model_bytes < 0:
+        return FitVerdict(fits: false, model_bytes: model_bytes, available_bytes: available,
+            headroom_bytes: headroom_bytes,
+            reason: "could not establish the model size (model directory could not be listed); refusing rather than loading blind")
     if available < 0:
         return FitVerdict(fits: false, model_bytes: model_bytes, available_bytes: -1,
             headroom_bytes: headroom_bytes,
@@ -146,4 +175,29 @@ fn check_fit(model_bytes: i64, overhead_bytes: i64, headroom_bytes: i64) -> FitV
     FitVerdict(fits: true, model_bytes: model_bytes, available_bytes: available,
         headroom_bytes: headroom_bytes, reason: "")
 
-export FitVerdict, default_headroom_bytes, mem_available_bytes, mem_total_bytes, check_fit
+# Runtime cost beyond the weights, for admission only (never for allocation).
+#
+# GGUF hyperparameters (layers, kv heads, head dim) are not readable before the
+# backend opens the file, so the exact KV size
+# (2 * n_layers * n_ctx * n_kv_heads * head_dim * 2 bytes, f16) cannot be
+# computed here. Instead: KV bytes = n_ctx * kv_bytes_per_token, with
+# kv_bytes_per_token = model_bytes / 32768 clamped to [16 KiB, 512 KiB]. Checked
+# against real shapes: Qwen2.5-1.5B Q4 (~1 GB file) is 28 KiB/token vs 32 KiB
+# here; Qwen2.5-7B Q4 (~4.4 GB) is 56 KiB vs 134 KiB; Llama-3-8B (GQA) 128 KiB vs 150 KiB; Llama-3-70B
+# (GQA) 320 KiB vs the 512 KiB cap. Not covered: MHA models (Llama-2-7B is 512 KiB
+# vs 116 KiB), which are rare now and still bounded by the headroom. Plus 512 MiB for compute
+# buffers. A 1.5B Q4 model at n_ctx 4096 therefore needs ~0.6 GiB, not 6 GiB.
+fn estimate_runtime_overhead_bytes(model_bytes: i64, n_ctx: i64) -> i64:
+    val kib = 1024
+    val compute_slack = 512 * 1024 * 1024
+    var per_token = model_bytes / 32768
+    if per_token < 16 * kib:
+        per_token = 16 * kib
+    if per_token > 512 * kib:
+        per_token = 512 * kib
+    var ctx = n_ctx
+    if ctx < 0:
+        ctx = 0
+    ctx * per_token + compute_slack
+
+export FitVerdict, default_headroom_bytes, mem_available_bytes, mem_total_bytes, reset_mem_total_cache_for_test, check_fit, check_fit_with_available, estimate_runtime_overhead_bytes

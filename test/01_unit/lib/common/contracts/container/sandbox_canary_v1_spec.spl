@@ -1,0 +1,32 @@
+"""Host-neutral sandbox canary comparison."""
+
+use std.spec.{describe, it, expect}
+use std.common.contracts.container.sandbox_canary_v1.{SandboxCanaryPlanV1, SandboxCanaryResultV1,
+    sandbox_canary_status_v1, SANDBOX_CANARY_QUALIFIED_V1, SANDBOX_CANARY_UNQUALIFIED_V1}
+
+fn _digest(c: text) -> text:
+    c.repeat(64)
+
+fn _plan() -> [SandboxCanaryPlanV1]:
+    [SandboxCanaryPlanV1(id: "a", expected: "allow", requirement: "R1"),
+     SandboxCanaryPlanV1(id: "b", expected: "deny", requirement: "R2")]
+
+describe "sandbox_canary_v1":
+    it "qualifies when every canary matches with evidence":
+        val results = [SandboxCanaryResultV1(id: "a", observed: "allow", evidence_digest: _digest("e")),
+                       SandboxCanaryResultV1(id: "b", observed: "deny", evidence_digest: _digest("e"))]
+        val status = sandbox_canary_status_v1(_plan(), results)
+        expect(status.status).to_equal(SANDBOX_CANARY_QUALIFIED_V1)
+        expect(status.missing.len()).to_equal(0)
+    it "reports a missing result":
+        val results = [SandboxCanaryResultV1(id: "a", observed: "allow", evidence_digest: _digest("e"))]
+        val status = sandbox_canary_status_v1(_plan(), results)
+        expect(status.status).to_equal(SANDBOX_CANARY_UNQUALIFIED_V1)
+        expect(status.missing).to_equal(["b"])
+        expect(status.reason).to_equal("canaries-not-passed")
+    it "reports a wrong verdict and a bad digest":
+        val results = [SandboxCanaryResultV1(id: "a", observed: "deny", evidence_digest: _digest("e")),
+                       SandboxCanaryResultV1(id: "b", observed: "deny", evidence_digest: "")]
+        expect(sandbox_canary_status_v1(_plan(), results).missing).to_equal(["a", "b"])
+    it "is unqualified for a plan with no results":
+        expect(sandbox_canary_status_v1(_plan(), []).missing.len()).to_equal(2)

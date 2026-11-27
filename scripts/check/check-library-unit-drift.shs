@@ -1,0 +1,114 @@
+#!/bin/sh
+# Library-unit source drift gate (plan section 4.2,
+# doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md).
+#
+# Thin wrapper over the Simple library_unit_drift_v1
+# (src/compiler/80.driver/driver_build/library_unit_drift_v1.spl) via
+# scripts/check/library_unit_drift_entry.spl: compares a library dir's RECORDED
+# inventory (<dir>/source_inventory.lock, one root-relative path per line, '#'
+# comments ignored) against the ACTUAL source set (source_inventory_scan_v1:
+# every *.spl under <dir>, skipping vendor, build, target, node_modules and dot
+# dirs). Any added or removed path is drift. Both sets empty is ERROR.
+# Regenerate a lock after adding/removing a .spl: `simple build sources
+# --write-lock <dir>` (writes from source_inventory_scan_v1, globs not applied).
+#
+# Usage: sh scripts/check/check-library-unit-drift.shs [--selftest] [<lib dir>]  (default src/compiler = the real units)
+# Env: SIMPLE_BIN (default bin/simple).
+# Verdict is the last stdout line. Exit 0 PASS / 1 FAIL / 2 ERROR.
+# Closure: when <dir>/simple.sdn exists, its `dependencies:` are walked recursively
+# (cycle = ERROR) and every unit in the closure needs its own source_inventory.lock.
+# NOT wired into any push-tier gate (extended CI only).
+
+LC_ALL=C
+export LC_ALL
+
+script_dir=$(cd "$(dirname "$0")" && pwd)
+entry="$script_dir/library_unit_drift_entry.spl"
+SIMPLE_BIN=${SIMPLE_BIN:-"$script_dir/../../bin/simple"}
+
+# check <dir> -> prints verdict, returns 0/1/2. The verdict line decides; an
+# interpreter that printed no verdict is ERROR, never a pass.
+check_dir() {
+    if [ ! -f "$entry" ]; then
+        echo "ERROR — nothing was checked (missing entry: $entry)"; return 2
+    fi
+    tmpout=$(mktemp 2>/dev/null) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    "$SIMPLE_BIN" run "$entry" -- "$1" > "$tmpout" 2>/dev/null
+    irc=$?
+    out=$(tr -d '\r' < "$tmpout" | grep -E '^(PASS|FAIL|ERROR) ' | tail -n 1)
+    rm -f "$tmpout"
+    if [ "$irc" -ne 0 ] && [ "$irc" -ne 1 ] && [ "$irc" -ne 2 ]; then
+        echo "ERROR — nothing was checked (interpreter rc=$irc)"; return 2
+    fi
+    case $out in
+        "PASS "*) [ "$irc" -eq 0 ] && { echo "$out"; return 0; } ;;
+        "FAIL "*) [ "$irc" -eq 1 ] && { echo "$out"; return 1; } ;;
+        "ERROR "*) echo "$out"; return 2 ;;
+    esac
+    echo "ERROR — nothing was checked (verdict/rc mismatch or no verdict, rc=$irc)"; return 2
+}
+
+expect() { # name want_rc dir
+    out=$(check_dir "$3"); rc=$?
+    if [ "$rc" -ne "$2" ]; then
+        echo "selftest FAIL: $1 expected rc=$2 got rc=$rc ($out)"; return 1
+    fi
+    return 0
+}
+
+selftest() {
+    root=$(mktemp -d 2>/dev/null) || { echo "ERROR — nothing was checked (selftest mktemp failed)"; return 2; }
+    bad=0
+    mk() { mkdir -p "$root/$1/sub" "$root/$1/vendor"; printf 'x\n' > "$root/$1/a.spl"; printf 'x\n' > "$root/$1/sub/b.spl"
+           printf 'x\n' > "$root/$1/vendor/ignored.spl"; printf '# recorded\na.spl\nsub/b.spl\n' > "$root/$1/source_inventory.lock"; }
+    mk clean
+    mk added;   printf 'x\n' > "$root/added/c.spl"
+    mk removed; rm "$root/removed/sub/b.spl"
+    mkdir -p "$root/empty"; : > "$root/empty/source_inventory.lock"
+    mkdir -p "$root/nolock"
+    expect clean-pass 0 "$root/clean" || bad=1
+    expect added-fail 1 "$root/added" || bad=1
+    expect removed-fail 1 "$root/removed" || bad=1
+    expect empty-error 2 "$root/empty" || bad=1
+    expect nolock-error 2 "$root/nolock" || bad=1
+    out=$(check_dir "$root/added")
+    case $out in *"added: c.spl"*) ;; *) echo "selftest FAIL: added verdict does not name c.spl ($out)"; bad=1;; esac
+    # Manifest dependency closure: root unit "app" depends on "lib"; both need a lock.
+    sdn() { printf 'project:\n  name: %s\n  version: 1\n  type: library\n' "$2" > "$root/$1/simple.sdn"
+            [ -n "$3" ] && printf '  dependencies:\n    - project: %s\n' "$3" >> "$root/$1/simple.sdn"; return 0; }
+    mk cl/app; mk cl/lib; sdn cl/app APP ../lib; sdn cl/lib LIB ""
+    mk cldrift/app; mk cldrift/lib; sdn cldrift/app APP ../lib; sdn cldrift/lib LIB ""; printf 'x\n' > "$root/cldrift/lib/c.spl"
+    mk clcycle/app; mk clcycle/lib; sdn clcycle/app APP ../lib; sdn clcycle/lib LIB ../app
+    mk clnolock/app; mk clnolock/lib; sdn clnolock/app APP ../lib; sdn clnolock/lib LIB ""; rm "$root/clnolock/lib/source_inventory.lock"
+    mk clmissing/app; sdn clmissing/app APP ../gone
+    expect closure-pass 0 "$root/cl/app" || bad=1
+    expect closure-dep-drift-fail 1 "$root/cldrift/app" || bad=1
+    expect closure-cycle-error 2 "$root/clcycle/app" || bad=1
+    expect closure-dep-nolock-error 2 "$root/clnolock/app" || bad=1
+    expect closure-missing-manifest-error 2 "$root/clmissing/app" || bad=1
+    out=$(check_dir "$root/cldrift/app")
+    case $out in *"LIB (added: c.spl)"*) ;; *) echo "selftest FAIL: closure verdict does not name LIB drift ($out)"; bad=1;; esac
+    rm -rf "$root"
+    if [ "$bad" -ne 0 ]; then echo "ERROR — selftest failed, nothing was checked"; return 2; fi
+    return 0
+}
+
+run_selftest=0
+dir=""
+for a in "$@"; do
+    case $a in
+        --selftest) run_selftest=1 ;;
+        *) dir=$a ;;
+    esac
+done
+
+selftest || exit 2
+if [ "$run_selftest" -eq 1 ] && [ -z "$dir" ]; then
+    echo "PASS — selftest: 11 fixture(s) checked"; exit 0
+fi
+if [ -z "$dir" ]; then dir=src/compiler; fi
+if [ -z "$dir" ]; then
+    echo "ERROR — nothing was checked (usage: check-library-unit-drift.shs [--selftest] <lib dir>)"; exit 2
+fi
+check_dir "$dir"
+exit $?

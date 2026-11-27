@@ -1,6 +1,6 @@
 # match pattern binding shadowed by an in-scope module namespace (2026-08-18)
 
-Status: OPEN (compiler defect); call-site unblocked in `engine.spl`.
+Status: FIXED 2026-10-30 (seed interpreter; see the last section). Call-site rename in `engine.spl` kept.
 
 ## Symptom
 
@@ -114,3 +114,44 @@ third example goes RED; that is the signal to replace its body with
 Related closure-scope defects worth checking together, since the shape matches:
 `interp_member_path_store_lost_in_bdd_closure_2026-07-03.md` and
 `interp_crossmodule_array_writeback_lost_in_bdd_closure_2026-06-29.md`.
+
+## 2026-10-30 — FIXED in the seed interpreter
+
+Root cause: the identifier read (`interpreter/expr/literals.rs`) prefers a
+same-named `MODULE_GLOBALS` entry over an env value unless the name is marked
+local (`Env::is_local`). The statement form `exec_match_core` marked arm
+bindings block-local, but three other match evaluators did not:
+
+- `interpreter/expr/control.rs`: a match used as an EXPRESSION
+  (`val s = match v: case String(value): value`);
+- `interpreter_call/block_execution.rs`: the two statement-match executors
+  used for BDD `it`/`describe` closure bodies.
+
+The guard env (`case Ok(color) if color == 7`) was missing the mark in all
+four evaluators, `exec_match_core` included.
+
+Every arm and guard binding now calls `enter_block_local`. The closure
+executors also call `exit_block_local` when they restore.
+
+The fix also closes a second hazard. Before it, an unmarked arm binding was
+added to the frame's `nonlocal_overlay`. On each call made out of the frame,
+`publish_live_bound_globals` (via `nonlocal_overlay_entries`) publishes any non-local
+name that has a module binding. So a call inside `case String(value):` could
+also publish the payload over the owned `value` global, not just misread it.
+
+Found through `test/01_unit/app/test_runner_new/sdn_worker_protocol_spec.spl`
+and `sdn_wrapper_spec.spl`: `app.test_runner_new.sdn_worker_protocol` reads
+the worker schema with `val schema = match root["schema"]: case
+SdnValue.String(value): value`, and `use std.common.sdn.value.{SdnValue}`
+put the `value` module namespace in scope, so every message was rejected as
+"unsupported test runner worker SDN schema".
+
+Specs:
+- Reproducing: `test/01_unit/app/test_runner_new/sdn_worker_protocol_spec.spl`
+  (1/8 -> 8/8), `sdn_wrapper_spec.spl` (5/10 -> 10/10).
+- Generalization: `test/01_unit/language/match_binding_module_name_shadow_spec.spl`
+  — closure body, match expression, match expression with a `return` arm, and
+  guard; 2/6 on the old seed, 6/6 on the rebuilt one.
+
+These go green on the shared seed only after it is rebuilt from a tree that
+contains the fix.

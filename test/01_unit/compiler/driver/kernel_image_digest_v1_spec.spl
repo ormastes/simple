@@ -1,0 +1,82 @@
+"""Checks current Linux image hashing and statically inspects lazy context wiring.
+
+The context scenario checks source wiring only; it does not instrument runtime
+file opens during context construction. The session-retention scenario needs a
+fresh process to prove a cold capture; a suite that already called the owner
+before this spec can only check that an existing memo survives teardown.
+"""
+
+use std.spec.*
+use std.io_runtime.{env_get, env_set, file_read, platform_name}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.kernel_image_digest_v1.{kernel_image_digest_v1}
+use std.nogc_sync_mut.sffi.rc_graph.{rt_rc_count}
+use compiler.driver.session.build_session.{
+    build_session_inactive, session_kept_begin
+}
+
+describe "Kernel image digest owner":
+    it "keeps the memo alive across a build-session teardown":
+        if platform_name() == "linux":
+            val old_session = env_get("SIMPLE_BUILD_SESSION")
+            val old_end = env_get("SIMPLE_BUILD_SESSION_END")
+            env_set("SIMPLE_BUILD_SESSION", "1")
+            env_set("SIMPLE_BUILD_SESSION_END", "1")
+            var session = build_session_inactive()
+            val began = session.begin()
+            var allocation_started = false
+            var allocation_ended = false
+            var ended = false
+            var same_after_end = false
+            if began:
+                allocation_started = session.publish_alloc_begin()
+                var first_digest = ""
+                if allocation_started:
+                    # Copy out the RC-owned text before session teardown; the
+                    # value-struct wrapper itself is session-local.
+                    first_digest = kernel_image_digest_v1().unwrap().sha256
+                    allocation_ended = session.publish_alloc_end()
+                ended = allocation_ended and
+                    session.end(session_kept_begin(session))
+                if ended:
+                    same_after_end =
+                        kernel_image_digest_v1().unwrap().sha256 == first_digest
+            env_set("SIMPLE_BUILD_SESSION", old_session ?? "")
+            env_set("SIMPLE_BUILD_SESSION_END", old_end ?? "")
+            expect(began).to_equal(true)
+            expect(allocation_started).to_equal(true)
+            expect(allocation_ended).to_equal(true)
+            expect(ended).to_equal(true)
+            expect(same_after_end).to_equal(true)
+
+    it "matches an external hash of this process image and memoizes the result":
+        if platform_name() == "linux":
+            val identity = kernel_image_digest_v1().unwrap()
+            val repeated = kernel_image_digest_v1().unwrap()
+            val (stdout, _stderr, code) = process_run_bounded(
+                "sha256sum", ["/proc/{getpid()}/exe"], 5000, 4096)
+            expect(code).to_equal(0)
+            expect(stdout.split(" ")[0].trim()).to_equal(identity.sha256)
+            expect(repeated.sha256).to_equal(identity.sha256)
+            expect(unsafe(capabilities: [ffi]):
+                rt_rc_count(identity.sha256)).to_equal(1)
+        else:
+            expect(kernel_image_digest_v1().is_err()).to_equal(true)
+
+    it "declares lazy context wiring without invoking capture eagerly":
+        val source = file_read("src/compiler/80.driver/driver_types.spl")
+        expect(source).to_contain(
+            "kernel_image_digest_provider: kernel_image_digest_v1,")
+        expect(source).to_contain(
+            "kernel_image_digest_provider: fn() -> Result<KernelImageDigestV1, text>")
+        expect(source.contains(
+            "kernel_image_digest_provider: kernel_image_digest_v1(),"))
+            .to_equal(false)
+
+    it "statically checks non-Linux unavailable wiring":
+        val source = file_read(
+            "src/lib/nogc_sync_mut/io/kernel_image_digest_v1.spl")
+        expect(source).to_contain("if platform_name() != \"linux\":")
+        expect(source).to_contain(
+            "current kernel image digest is unavailable on this host")

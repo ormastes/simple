@@ -10,6 +10,81 @@ use simple_parser::ast::{Argument, BinOp, ClassDef, EnumDef, Expr, FunctionDef, 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
+
+/// Max failure messages retained per example; further ones only bump a counter.
+const BDD_FAILURE_CAP: usize = 16;
+
+/// Every failing expect inside one example (bounded), instead of only the last.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct BddFailures {
+    msgs: Vec<String>,
+    overflow: usize,
+}
+
+impl BddFailures {
+    pub(crate) const fn new() -> Self {
+        BddFailures { msgs: Vec::new(), overflow: 0 }
+    }
+
+    fn push(&mut self, msg: String) {
+        if self.msgs.len() < BDD_FAILURE_CAP {
+            self.msgs.push(msg);
+        } else {
+            self.overflow += 1;
+        }
+    }
+
+    fn clear(&mut self) {
+        self.msgs.clear();
+        self.overflow = 0;
+    }
+
+    /// Messages joined by newline, with a "+N more" note when the cap was hit.
+    pub(crate) fn summary(&self) -> Option<String> {
+        if self.msgs.is_empty() {
+            return None;
+        }
+        let mut out = self.msgs.join("\n");
+        if self.overflow > 0 {
+            out.push_str(&format!("\n+{} more", self.overflow));
+        }
+        Some(out)
+    }
+}
+
+/// Record one failing expect (appends; earlier failures in the example are kept).
+/// Upper bound on one recorded failure message. `expect(source).to_contain(..)`
+/// formats the whole actual value; a 300 KB source file overflowed the test
+/// runner's bounded child-output capture, which then dropped the MIDDLE of the
+/// stream (including later example names/verdicts).
+const MAX_BDD_FAILURE_MSG_BYTES: usize = 2000;
+
+fn bound_bdd_failure(mut msg: String) -> String {
+    if msg.len() <= MAX_BDD_FAILURE_MSG_BYTES {
+        return msg;
+    }
+    let mut cut = MAX_BDD_FAILURE_MSG_BYTES;
+    while !msg.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let omitted = msg.len() - cut;
+    msg.truncate(cut);
+    msg.push_str(&format!("... [failure message truncated: {omitted} bytes omitted]"));
+    msg
+}
+
+pub(crate) fn push_bdd_failure(msg: String) {
+    BDD_FAILURE_MSG.with(|cell| cell.borrow_mut().push(bound_bdd_failure(msg)));
+}
+
+fn take_bdd_failure_summary() -> Option<String> {
+    BDD_FAILURE_MSG.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let out = slot.summary();
+        slot.clear();
+        out
+    })
+}
 use std::sync::Arc;
 
 type Enums = HashMap<String, Arc<EnumDef>>;
@@ -40,7 +115,7 @@ fn record_assertion_failure(msg: String) -> Result<(), CompileError> {
         )));
     }
     BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-    BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = Some(msg));
+    push_bdd_failure(msg);
     Ok(())
 }
 
@@ -51,8 +126,7 @@ fn record_assertion_failure(msg: String) -> Result<(), CompileError> {
 /// exit 0. A passing matcher outside an `it` is unchanged.
 pub(crate) fn finish_bdd_matcher(result: Value) -> Result<Value, CompileError> {
     if matches!(result, Value::Bool(false)) && !BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
-        let msg = BDD_FAILURE_MSG
-            .with(|cell| cell.borrow_mut().take())
+        let msg = take_bdd_failure_summary()
             .unwrap_or_else(|| "expectation failed".to_string());
         BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
         return Err(CompileError::semantic(format!(
@@ -94,12 +168,39 @@ thread_local! {
     pub(crate) static BDD_INDENT: RefCell<usize> = const { RefCell::new(0) };
     // (passed, failed) counts for current describe block
     pub(crate) static BDD_COUNTS: RefCell<(usize, usize)> = const { RefCell::new((0, 0)) };
+    // (passed, failed) cumulative over the whole process. BDD_COUNTS is reset when
+    // a top-level describe ends, so summary accessors imported from std.spec
+    // (`get_executed_test_count`) read these through `rt_bdd_*_total` instead.
+    pub(crate) static BDD_TOTALS: RefCell<(i64, i64)> = const { RefCell::new((0, 0)) };
     // Whether current "it" block has a failed expectation
     pub(crate) static BDD_EXPECT_FAILED: RefCell<bool> = const { RefCell::new(false) };
     // Whether we're currently inside an "it" block (expect should be silent)
     pub(crate) static BDD_INSIDE_IT: RefCell<bool> = const { RefCell::new(false) };
+    // Whether the current "it" block called the spec library's `pending(...)`.
+    // The pure-Simple runner (spec.spl `_execute_it`) reports such an example
+    // as "pending" when no assertion failed; the `it` handler mirrors that
+    // instead of printing a green check and counting a pass. The Simple
+    // library's own `test_pending` counter is a module global the interpreter
+    // cannot observe from here, so the `pending` arm raises this flag.
+    pub(crate) static BDD_PENDING_IN_IT: RefCell<bool> = const { RefCell::new(false) };
+    // Whether the current "it" block called the spec library's `skip(...)` in its
+    // body. skip() is a declaration (a sibling of `it`); called inside an example
+    // the Simple body drops it, so without this flag the example reported a pass.
+    // Skip wins: the example is recorded as skipped even if a later expect fails.
+    pub(crate) static BDD_SKIP_IN_IT: RefCell<bool> = const { RefCell::new(false) };
+    // Whether the current "it" block's `pending(...)` reason starts with
+    // `BLOCKED:` -- an environment-gated example (counted BLOCKED, never a pass).
+    pub(crate) static BDD_PENDING_BLOCKED: RefCell<bool> = const { RefCell::new(false) };
+    // Examples counted BLOCKED in this process (pending BLOCKED: or a failure
+    // whose message starts with `precondition:`). They are recorded as skipped in
+    // BDD_TEST_RESULTS and named here so the SPEC FILE VERDICT carries `blocked=`.
+    pub(crate) static BDD_BLOCKED_TOTAL: RefCell<usize> = const { RefCell::new(0) };
+    // Whether the active `std.spec` helper inside `it` already recorded a failure
+    // into `BDD_TOTALS.1` via `rt_bdd_record_result(0)`, so the enclosing `it`
+    // runner does not count the same example twice.
+    pub(crate) static BDD_FAILED_RECORDED_IN_IT: RefCell<bool> = const { RefCell::new(false) };
     // Failure message from expect (for display in it block)
-    pub(crate) static BDD_FAILURE_MSG: RefCell<Option<String>> = const { RefCell::new(None) };
+    pub(crate) static BDD_FAILURE_MSG: RefCell<BddFailures> = const { RefCell::new(BddFailures::new()) };
     // Provisional "hollow call" failure: a bare `expect(<call>)` whose result is
     // falsy and which has NOT yet had a matcher applied. A following `.to_*()`
     // matcher clears this (the call was checked after all); if no matcher ever
@@ -213,6 +314,249 @@ fn write_test_result_evidence(path: &Path) {
             })
     });
     let _ = std::fs::write(path, format!("simple-bdd-v1\n{passed}\n{failed}\n"));
+}
+
+/// Record a skipped / pending / planned example that never ran: it joins the
+/// result list as `skipped` (so the file verdict's `executed` and `skipped`
+/// carry it) and the ignored-test list, and it never touches `BDD_COUNTS`, so
+/// it can neither pass nor fail.
+fn record_describe_level_skip(name: String) {
+    BDD_IGNORED_TESTS.with(|cell| cell.borrow_mut().push(name.clone()));
+    let desc_path = get_current_describe_path();
+    record_test_result(desc_path, name, true, true);
+}
+
+/// `skip(...)` called while an `it` body runs: flag that example skipped so the
+/// `it` arm records it as skipped instead of a pass. Returns whether it did.
+fn mark_skip_in_example() -> bool {
+    if !BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
+        return false;
+    }
+    BDD_SKIP_IN_IT.with(|cell| *cell.borrow_mut() = true);
+    true
+}
+
+/// RAII guard restoring `std.spec._case_depth` when leaving an in-`it`
+/// `std.spec.skip(...)` call (even on errors or panics), mutating only stores
+/// that already hold `_case_depth`.
+#[derive(Debug)]
+struct CaseDepthGuard {
+    owner: Arc<str>,
+    prev_owned: Option<Value>,
+    prev_flat: Option<Value>,
+}
+
+impl CaseDepthGuard {
+    fn enter(owner: &Arc<str>, def_name: &str) -> Option<Self> {
+        if def_name != "skip" || !BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
+            return None;
+        }
+        let prev_owned = crate::interpreter::owned_global(owner, "_case_depth");
+        let prev_flat = crate::interpreter::MODULE_GLOBALS.with(|cell| cell.borrow().get("_case_depth").cloned());
+        let current = prev_owned.as_ref().or(prev_flat.as_ref())?;
+        let Value::Array(arr) = current else {
+            return None;
+        };
+        if !arr.is_empty() {
+            return None;
+        }
+        let pushed = Value::array(vec![Value::Int(1)]);
+        if prev_owned.is_some() {
+            crate::interpreter::set_owned_global(owner, "_case_depth", pushed.clone(), false);
+        }
+        if prev_flat.is_some() {
+            crate::interpreter::MODULE_GLOBALS.with(|cell| {
+                cell.borrow_mut().insert("_case_depth".to_owned(), pushed);
+            });
+        }
+        Some(Self {
+            owner: Arc::clone(owner),
+            prev_owned,
+            prev_flat,
+        })
+    }
+}
+
+impl Drop for CaseDepthGuard {
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev_owned.take() {
+            crate::interpreter::set_owned_global(&self.owner, "_case_depth", prev, false);
+        }
+        if let Some(prev) = self.prev_flat.take() {
+            crate::interpreter::MODULE_GLOBALS.with(|cell| {
+                cell.borrow_mut().insert("_case_depth".to_owned(), prev);
+            });
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct SpecDslCallGuard {
+    def_name: String,
+    owner: Arc<str>,
+    current_test_errors_len: usize,
+    test_errors_len: usize,
+    test_failed: i64,
+    bdd_failed_total: i64,
+    case_depth_guard: Option<CaseDepthGuard>,
+}
+
+fn is_spec_outcome_dsl(name: &str) -> bool {
+    matches!(name, "pending" | "pending_it" | "skip" | "skip_it" | "skip_context")
+}
+
+fn is_std_spec_owner(owner: &str) -> bool {
+    let normalized = owner.replace('\\', "/").to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "lib/nogc_sync_mut/spec.spl"
+            | "lib/nogc_sync_mut/spec/__init__.spl"
+            | "lib/nogc_sync_mut/spec/dsl.spl"
+            | "lib/gc_async_mut/spec.spl"
+            | "lib/gc_async_mut/spec/__init__.spl"
+            | "lib/nogc_async_mut/spec.spl"
+            | "lib/nogc_async_mut/spec/__init__.spl"
+            | "lib/std/src/spec/dsl.spl"
+            | "lib/std/src/spec/__init__.spl"
+    ) || normalized.ends_with("/lib/nogc_sync_mut/spec.spl")
+        || normalized.ends_with("/lib/nogc_sync_mut/spec/__init__.spl")
+        || normalized.ends_with("/lib/nogc_sync_mut/spec/dsl.spl")
+        || normalized.ends_with("/lib/gc_async_mut/spec.spl")
+        || normalized.ends_with("/lib/gc_async_mut/spec/__init__.spl")
+        || normalized.ends_with("/lib/nogc_async_mut/spec.spl")
+        || normalized.ends_with("/lib/nogc_async_mut/spec/__init__.spl")
+        || normalized.ends_with("/lib/std/src/spec/dsl.spl")
+        || normalized.ends_with("/lib/std/src/spec/__init__.spl")
+}
+
+fn std_spec_outcome_owner(def: &Arc<FunctionDef>) -> Option<Arc<str>> {
+    if !is_spec_outcome_dsl(&def.name) {
+        return None;
+    }
+    let ptr = Arc::as_ptr(def) as usize;
+    let owner = crate::interpreter::FUNCTION_MODULE_OWNER.with(|cell| cell.borrow().get(&ptr).cloned())?;
+    is_std_spec_owner(&owner).then_some(owner)
+}
+
+fn read_spec_global(owner: &Arc<str>, key: &str) -> Option<Value> {
+    crate::interpreter::owned_global(owner, key)
+        .or_else(|| crate::interpreter::MODULE_GLOBALS.with(|cell| cell.borrow().get(key).cloned()))
+}
+
+fn read_spec_array_info(owner: &Arc<str>, key: &str) -> (usize, Option<String>) {
+    match read_spec_global(owner, key) {
+        Some(Value::Array(arr)) => {
+            let last = arr.last().map(|v| v.to_display_string());
+            (arr.len(), last)
+        }
+        _ => (0, None),
+    }
+}
+
+fn read_spec_int(owner: &Arc<str>, key: &str) -> i64 {
+    match read_spec_global(owner, key) {
+        Some(Value::Int(n)) => n,
+        _ => 0,
+    }
+}
+
+/// Snapshot `std.spec` error/failure counters right before dispatching a
+/// resolved non-local `std.spec` `pending`/`pending_it`/`skip`/`skip_it`/
+/// `skip_context` definition. Returns `None` for any user or non-spec fn.
+pub(crate) fn begin_spec_dsl_def(def: &Arc<FunctionDef>) -> Option<SpecDslCallGuard> {
+    let owner = std_spec_outcome_owner(def)?;
+    let (current_test_errors_len, _) = read_spec_array_info(&owner, "current_test_errors");
+    let (test_errors_len, _) = read_spec_array_info(&owner, "test_errors");
+    let test_failed = read_spec_int(&owner, "test_failed");
+    let bdd_failed_total = BDD_TOTALS.with(|cell| cell.borrow().1);
+    let case_depth_guard = CaseDepthGuard::enter(&owner, &def.name);
+    Some(SpecDslCallGuard {
+        def_name: def.name.clone(),
+        owner,
+        current_test_errors_len,
+        test_errors_len,
+        test_failed,
+        bdd_failed_total,
+        case_depth_guard,
+    })
+}
+
+/// Reconcile the Rust BDD harness bookkeeping with the resolved `std.spec`
+/// `.spl` DSL outcome, returning `call_res` unchanged when `guard` is `None`.
+pub(crate) fn finish_spec_dsl_def(
+    args: &[Argument],
+    guard: Option<SpecDslCallGuard>,
+    call_res: Result<Value, CompileError>,
+) -> Result<Value, CompileError> {
+    let Some(mut before) = guard else {
+        return call_res;
+    };
+    drop(before.case_depth_guard.take());
+    let val = call_res?;
+    let (after_case_errs, last_case_err) = read_spec_array_info(&before.owner, "current_test_errors");
+    let (after_suite_errs, last_suite_err) = read_spec_array_info(&before.owner, "test_errors");
+    let after_test_failed = read_spec_int(&before.owner, "test_failed");
+    let after_bdd_failed_total = BDD_TOTALS.with(|cell| cell.borrow().1);
+
+    let rejected = after_case_errs > before.current_test_errors_len
+        || after_suite_errs > before.test_errors_len
+        || after_test_failed > before.test_failed
+        || after_bdd_failed_total > before.bdd_failed_total;
+
+    if rejected {
+        let dsl_name = &before.def_name;
+        let msg = if after_case_errs > before.current_test_errors_len {
+            last_case_err
+        } else if after_suite_errs > before.test_errors_len {
+            last_suite_err
+        } else {
+            None
+        }
+        .unwrap_or_else(|| format!("{dsl_name} rejected by active safety profile"));
+
+        if BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
+            BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+            push_bdd_failure(msg);
+            if after_bdd_failed_total > before.bdd_failed_total {
+                BDD_FAILED_RECORDED_IN_IT.with(|cell| *cell.borrow_mut() = true);
+            }
+        } else if BDD_INDENT.with(|cell| *cell.borrow()) > 0 {
+            let desc_path = get_current_describe_path();
+            let name_str = extract_desc_str(args, "unnamed");
+            let indent = BDD_INDENT.with(|cell| *cell.borrow());
+            let indent_str = "  ".repeat(indent);
+            println!("{}\x1b[31m✗ {}\x1b[0m", indent_str, name_str);
+            println!("{}  \x1b[31m{}\x1b[0m", indent_str, msg);
+            BDD_COUNTS.with(|cell| cell.borrow_mut().1 += 1);
+            if after_bdd_failed_total == before.bdd_failed_total {
+                BDD_TOTALS.with(|cell| cell.borrow_mut().1 += 1);
+            }
+            record_test_result(desc_path, name_str, false, false);
+        }
+        return Ok(val);
+    }
+
+    if matches!(before.def_name.as_str(), "pending" | "pending_it") {
+        if BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
+            BDD_PENDING_IN_IT.with(|cell| *cell.borrow_mut() = true);
+            if extract_desc_str(args, "").trim_start().starts_with("BLOCKED:") {
+                BDD_PENDING_BLOCKED.with(|cell| *cell.borrow_mut() = true);
+            }
+        } else if BDD_INDENT.with(|cell| *cell.borrow()) > 0 {
+            record_describe_level_skip(extract_desc_str(args, "unnamed"));
+        }
+    } else if !mark_skip_in_example() && BDD_INDENT.with(|cell| *cell.borrow()) > 0 {
+        record_describe_level_skip(extract_desc_str(args, "unnamed"));
+    }
+
+    Ok(val)
+}
+
+/// Record an example executed OUTSIDE the tree-walk interpreter (a spec run
+/// on the JIT through the rt_bdd_* runtime), so the file verdict and the
+/// `SIMPLE_TEST_RESULT_FILE` evidence count it exactly like an interpreted one.
+pub fn record_external_test_result(describe_path: String, test_name: String, passed: bool, skipped: bool) {
+    record_test_result(describe_path, test_name, passed, skipped);
 }
 
 fn record_test_result(describe_path: String, test_name: String, passed: bool, skipped: bool) {
@@ -508,6 +852,8 @@ pub(crate) fn exec_block_value(
         }
         Value::BlockClosure { nodes, env: captured } => {
             let captured_clone = Env::clone(&captured);
+            let _closure_origin =
+                crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
             exec_block_closure(&nodes, &captured_clone, functions, classes, enums, impl_methods)
         }
         // A pending example (`it "x"` with no body) legitimately has a Nil body.
@@ -543,7 +889,12 @@ fn exec_bdd_block_into(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     use super::block_execution::exec_block_closure_into;
+    use crate::interpreter::interpreter_module::ClosureOriginGuard;
 
+    // These fast paths run the block against the example env, not through
+    // exec_lambda / exec_block_value, so the body's lexical origin is entered
+    // here (test_private_access_closure_attribution_2026-11-14): a test block
+    // handed to `it` by a src helper is still the test's code.
     match block {
         Value::Lambda {
             params,
@@ -552,6 +903,7 @@ fn exec_bdd_block_into(
         } => {
             if params.is_empty() {
                 if let Expr::DoBlock(nodes) = body.as_ref() {
+                    let _closure_origin = ClosureOriginGuard::enter_closure(&captured);
                     return localize_bdd_return(exec_block_closure_into(
                         nodes,
                         env,
@@ -575,14 +927,17 @@ fn exec_bdd_block_into(
                 impl_methods,
             )
         }
-        Value::BlockClosure { nodes, .. } => localize_bdd_return(exec_block_closure_into(
-            &nodes,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )),
+        Value::BlockClosure { nodes, env: captured } => {
+            let _closure_origin = ClosureOriginGuard::enter_closure(&captured);
+            localize_bdd_return(exec_block_closure_into(
+                &nodes,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            ))
+        }
         other => exec_block_value(other, env, functions, classes, enums, impl_methods),
     }
 }
@@ -719,10 +1074,10 @@ fn eval_arg(
     }
 }
 
-/// Evaluate an operand that sits in an ASSERTION position (an `expect(...)`
+/// The value of an operand that sits in an ASSERTION position (an `expect(...)`
 /// subject, or either side of a comparison inside one).
 ///
-/// Identical to `evaluate_expr` except for `expr.?` (`Expr::ExistsCheck`).
+/// Identical to the `evaluate_expr` result except for `expr.?` (`Expr::ExistsCheck`).
 /// The parser documents `.?` as "existence check — is present/non-empty",
 /// returning a bool (`simple_parser::token`, `TokenKind::DotQuestion`), but the
 /// evaluator deliberately yields the PRESENT PAYLOAD (or `Value::Nil` when
@@ -737,19 +1092,44 @@ fn eval_arg(
 /// `.?` to its documented bool contract here restores the intended meaning
 /// without touching the payload-binding contract at condition/let-pattern sites.
 /// See doc/08_tracking/bug/sspec_test_path_value_semantics_divergence_2026-07-20.md.
-fn eval_assertion_operand(
-    expr: &Expr,
+/// Applied to an ALREADY-EVALUATED operand so the caller evaluates it once.
+fn collapse_assertion_operand(expr: &Expr, value: &Value) -> Value {
+    if matches!(expr, Expr::ExistsCheck(_)) {
+        return Value::Bool(!matches!(value, Value::Nil));
+    }
+    value.clone()
+}
+
+/// `left <op> right` over ALREADY-EVALUATED operands, through the standard
+/// binary evaluator so ordering semantics (unsigned, float, text, `__lt__`)
+/// stay identical to `simple run`. The values are bound to NUL-prefixed
+/// temporaries no source name can spell — the same pattern as the compound
+/// field-setter path in interpreter/node_exec.rs — and removed before the
+/// result is propagated, so no operand expression is ever re-evaluated.
+#[allow(clippy::too_many_arguments)]
+fn eval_ordered_cmp_on_values(
+    op: BinOp,
+    left: Value,
+    right: Value,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    let value = evaluate_expr(expr, env, functions, classes, enums, impl_methods)?;
-    if matches!(expr, Expr::ExistsCheck(_)) {
-        return Ok(Value::Bool(!matches!(value, Value::Nil)));
-    }
-    Ok(value)
+    let lhs_temp = "\u{0}expect_cmp_lhs".to_string();
+    let rhs_temp = "\u{0}expect_cmp_rhs".to_string();
+    env.insert(lhs_temp.clone(), left);
+    env.insert(rhs_temp.clone(), right);
+    let binary = Expr::Binary {
+        op,
+        left: Box::new(Expr::Identifier(lhs_temp.clone())),
+        right: Box::new(Expr::Identifier(rhs_temp.clone())),
+    };
+    let result = evaluate_expr(&binary, env, functions, classes, enums, impl_methods);
+    env.remove(&lhs_temp);
+    env.remove(&rhs_temp);
+    result
 }
 
 pub(super) fn eval_bdd_builtin(
@@ -762,7 +1142,7 @@ pub(super) fn eval_bdd_builtin(
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     match name {
-        "describe" | "context" => {
+        "describe" | "context" | "feature" | "scenario" => {
             // Use extract_desc_str for string/fstring literals to avoid FString interpolation
             // errors on description text.  For non-literal first args (e.g. Symbol for
             // `with_context`), fall back to eval_arg.
@@ -812,9 +1192,9 @@ pub(super) fn eval_bdd_builtin(
             println!("{}{}", indent_str, name_str);
 
             // Create ExampleGroup object
-            // - `describe` always creates a top-level group (no parent)
-            // - `context` creates a child of the current group (if there is one)
-            let is_describe = name == "describe";
+            // - `describe` and `feature` always create a top-level group (no parent)
+            // - `context` and `scenario` create a child of the current group (if there is one)
+            let is_describe = name == "describe" || name == "feature";
             let parent = if is_describe {
                 None // describe always creates top-level group
             } else {
@@ -969,8 +1349,12 @@ pub(super) fn eval_bdd_builtin(
             BDD_EXPECT_NEEDS_MATCHER.with(|cell| *cell.borrow_mut() = 0);
             BDD_MATCHER_COUNT.with(|cell| *cell.borrow_mut() = 0);
             BDD_VACUOUS_SUBJECT.with(|cell| *cell.borrow_mut() = None);
-            BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = None);
+            BDD_FAILURE_MSG.with(|cell| cell.borrow_mut().clear());
             BDD_PROVISIONAL_MSG.with(|cell| *cell.borrow_mut() = None);
+            BDD_FAILED_RECORDED_IN_IT.with(|cell| *cell.borrow_mut() = false);
+            BDD_PENDING_IN_IT.with(|cell| *cell.borrow_mut() = false);
+            BDD_SKIP_IN_IT.with(|cell| *cell.borrow_mut() = false);
+            BDD_PENDING_BLOCKED.with(|cell| *cell.borrow_mut() = false);
             BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
 
             BDD_LAZY_VALUES.with(|cell| {
@@ -995,6 +1379,7 @@ pub(super) fn eval_bdd_builtin(
             // Create a fresh environment for this test to prevent memory accumulation.
             // Each test gets its own copy of the environment that is discarded after the test.
             // This prevents values created during one test from persisting into subsequent tests.
+            crate::interpreter::interpreter_call::publish_before_block_clone(env);
             let mut test_env = env.clone();
 
             // Use cached hooks to avoid O(n²) performance with deeply nested contexts
@@ -1021,6 +1406,24 @@ pub(super) fn eval_bdd_builtin(
             let indent = BDD_INDENT.with(|cell| *cell.borrow());
             let indent_str = "  ".repeat(indent);
 
+            // skip() called in the body wins over every other outcome: the
+            // example is skipped, never a pass, and a failure after the skip
+            // does not turn it into one.
+            if BDD_SKIP_IN_IT.with(|cell| *cell.borrow()) {
+                // The Simple skip() body already printed its "... skipped (<reason>)"
+                // line, which the runner's `Results:` line counts; this marker is
+                // worded so that it is not counted a second time.
+                println!("{}\x1b[33m○ {} (skip in body)\x1b[0m", indent_str, name_str);
+                BDD_IGNORED_TESTS.with(|cell| cell.borrow_mut().push(name_str.clone()));
+                record_test_result(get_current_describe_path(), name_str.clone(), true, true);
+                BDD_LAZY_VALUES.with(|cell| {
+                    for (_, (_, cached)) in cell.borrow_mut().iter_mut() {
+                        *cached = None;
+                    }
+                });
+                return Ok(Some(Value::Nil));
+            }
+
             // Check if block execution had an error first
             match result {
                 Err(ref e) => {
@@ -1028,6 +1431,9 @@ pub(super) fn eval_bdd_builtin(
                     println!("{}\x1b[31m✗ {}\x1b[0m", indent_str, name_str);
                     println!("{}  \x1b[31m{}\x1b[0m", indent_str, e);
                     BDD_COUNTS.with(|cell| cell.borrow_mut().1 += 1);
+                    if !BDD_FAILED_RECORDED_IN_IT.with(|cell| *cell.borrow()) {
+                        BDD_TOTALS.with(|cell| cell.borrow_mut().1 += 1);
+                    }
                     let desc_path = get_current_describe_path();
                     record_test_result(desc_path, name_str.clone(), false, false);
                     // Don't propagate the error - allow other tests to run
@@ -1050,7 +1456,7 @@ pub(super) fn eval_bdd_builtin(
                     let matchers = BDD_MATCHER_COUNT.with(|cell| *cell.borrow());
                     let vacuous = needs > matchers;
                     let failed = hard_failed || (provisional && !matcher_ran) || vacuous;
-                    let mut failure_msg = BDD_FAILURE_MSG.with(|cell| cell.borrow().clone());
+                    let mut failure_msg = BDD_FAILURE_MSG.with(|cell| cell.borrow().summary());
                     // A provisional message is a FALLBACK, never a replacement: it
                     // is reported only when no real matcher failure was recorded.
                     if failure_msg.is_none() {
@@ -1068,18 +1474,59 @@ pub(super) fn eval_bdd_builtin(
                         ));
                     }
 
-                    if failed {
+                    let pending = BDD_PENDING_IN_IT.with(|cell| *cell.borrow());
+                    let desc_path = get_current_describe_path();
+                    // BLOCKED: an environment-gated example -- a failure whose
+                    // message is `precondition: ...` (an `Err("precondition: ...")`
+                    // surfaced by the example) or `pending("BLOCKED: ...")`. Never
+                    // a pass and never a failure: recorded as skipped and counted
+                    // in BDD_BLOCKED_TOTAL so the verdict line carries `blocked=`.
+                    // The ✗ + message lines are kept so the pure-Simple runner's
+                    // `parse_blocked_examples` reads the same shape from either
+                    // binary. Bug: llm_caret_env_gated_specs_no_blocked_outcome_2026-11-12.
+                    let precondition_blocked = failed
+                        && failure_msg
+                            .as_deref()
+                            .map(|m| m.trim_start().starts_with("precondition:"))
+                            .unwrap_or(false);
+                    let pending_blocked = !failed && pending && BDD_PENDING_BLOCKED.with(|cell| *cell.borrow());
+                    if precondition_blocked || pending_blocked {
+                        if precondition_blocked {
+                            println!("{}\x1b[31m✗ {}\x1b[0m", indent_str, name_str);
+                            if let Some(msg) = &failure_msg {
+                                println!("{}  \x1b[31m{}\x1b[0m", indent_str, msg);
+                            }
+                        } else {
+                            println!("{}\x1b[33m○ {} (pending)\x1b[0m", indent_str, name_str);
+                        }
+                        BDD_BLOCKED_TOTAL.with(|cell| *cell.borrow_mut() += 1);
+                        BDD_IGNORED_TESTS.with(|cell| cell.borrow_mut().push(name_str.clone()));
+                        record_test_result(desc_path, name_str.clone(), true, true);
+                    } else if failed {
                         println!("{}\x1b[31m✗ {}\x1b[0m", indent_str, name_str);
                         if let Some(msg) = failure_msg {
                             println!("{}  \x1b[31m{}\x1b[0m", indent_str, msg);
                         }
                         BDD_COUNTS.with(|cell| cell.borrow_mut().1 += 1);
+                        if !BDD_FAILED_RECORDED_IN_IT.with(|cell| *cell.borrow()) {
+                            BDD_TOTALS.with(|cell| cell.borrow_mut().1 += 1);
+                        }
+                        record_test_result(desc_path, name_str.clone(), false, false);
+                    } else if pending {
+                        // Same rule as spec.spl `_execute_it`: the pending counter
+                        // moved and nothing failed, so this example is pending --
+                        // neither a pass nor a failure. It is recorded as skipped so
+                        // the SPEC FILE VERDICT carries it, and it never reaches the
+                        // passed tally or the green check.
+                        println!("{}\x1b[33m○ {} (pending)\x1b[0m", indent_str, name_str);
+                        BDD_IGNORED_TESTS.with(|cell| cell.borrow_mut().push(name_str.clone()));
+                        record_test_result(desc_path, name_str.clone(), true, true);
                     } else {
                         println!("{}\x1b[32m✓ {}\x1b[0m", indent_str, name_str);
                         BDD_COUNTS.with(|cell| cell.borrow_mut().0 += 1);
+                        BDD_TOTALS.with(|cell| cell.borrow_mut().0 += 1);
+                        record_test_result(desc_path, name_str.clone(), true, false);
                     }
-                    let desc_path = get_current_describe_path();
-                    record_test_result(desc_path, name_str.clone(), !failed, false);
 
                     // Reset lazy value caches after each test so they are
                     // re-evaluated for the next test (fresh values per test).
@@ -1136,41 +1583,49 @@ pub(super) fn eval_bdd_builtin(
 
             println!("{}\x1b[33m○ {} (planned)\x1b[0m", indent_str, name_str);
 
-            BDD_IGNORED_TESTS.with(|cell| cell.borrow_mut().push(name_str.clone()));
-
-            let desc_path = get_current_describe_path();
-            record_test_result(desc_path, name_str.clone(), true, true);
-
-            BDD_COUNTS.with(|cell| cell.borrow_mut().0 += 1);
+            // Planned work is neither a pass nor a failure; see `pending`.
+            record_describe_level_skip(name_str);
 
             Ok(Some(Value::Nil))
         }
         "pending" | "pending_it" => {
-            // The BDD table is consulted before regular function dispatch.  Keep
+            // The BDD table is consulted before regular function dispatch. Keep
             // the historical standalone marker only when no Simple definition
-            // owns this name; otherwise a user or stdlib DSL implementation
-            // would be silently bypassed and the enclosing example could pass
-            // without running its body.
-            if functions.contains_key(name) {
+            // owns this name; otherwise let the Simple DSL body run and reconcile
+            // its outcome in `begin_spec_dsl_call` / `finish_spec_dsl_call` so
+            // governance rejections (e.g. SIMPLE_SAFETY_PROFILE=critical) fail
+            // instead of silently passing/skipping.
+            if env.get(name).is_some() || functions.contains_key(name) {
                 return Ok(None);
             }
 
             let name_str = extract_desc_str(args, "unnamed");
+
+            if BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
+                BDD_PENDING_IN_IT.with(|cell| *cell.borrow_mut() = true);
+                if name_str.trim_start().starts_with("BLOCKED:") {
+                    BDD_PENDING_BLOCKED.with(|cell| *cell.borrow_mut() = true);
+                }
+                return Ok(Some(Value::Nil));
+            }
 
             let indent = BDD_INDENT.with(|cell| *cell.borrow());
             let indent_str = "  ".repeat(indent);
 
             println!("{}\x1b[33m○ {} (skipped)\x1b[0m", indent_str, name_str);
 
-            // Track skipped test for qualified ignore prompting
-            BDD_IGNORED_TESTS.with(|cell| cell.borrow_mut().push(name_str.clone()));
-
-            let desc_path = get_current_describe_path();
-            record_test_result(desc_path, name_str.clone(), true, true);
-
-            BDD_COUNTS.with(|cell| cell.borrow_mut().0 += 1);
+            // A pending example is neither a pass nor a failure: it is recorded
+            // as skipped (carried by the verdict) and never enters the passed
+            // tally behind the per-describe "N examples, M failures" line.
+            record_describe_level_skip(name_str);
 
             Ok(Some(Value::Nil))
+        }
+        "skip" | "skip_it" | "skip_context" => {
+            // Let the Simple spec library body run first via `begin_spec_dsl_call` /
+            // `finish_spec_dsl_call`; only valid non-rejected skips mark the example
+            // or describe skipped.
+            Ok(None)
         }
         "expect" => {
             BDD_EXPECT_SEQ.with(|cell| *cell.borrow_mut() += 1);
@@ -1210,8 +1665,28 @@ pub(super) fn eval_bdd_builtin(
                 if matches!(op, BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq));
             if is_cmp_form {
                 if let Expr::Binary { op, left, right } = arg_expr {
-                    let left_val = eval_assertion_operand(left, env, functions, classes, enums, impl_methods)?;
-                    let right_val = eval_assertion_operand(right, env, functions, classes, enums, impl_methods)?;
+                    // A `.?` compared against a literal `nil` is a T? value
+                    // comparison (`opt.? == nil`), the documented contract; the
+                    // bool collapse would turn it into `false == nil` and
+                    // diverge from `simple run`. Keep the payload there.
+                    //
+                    // Each operand is evaluated EXACTLY ONCE (left, then right);
+                    // every arm below works on these values. Re-evaluating the
+                    // subject re-ran side-effecting operands, so
+                    // `expect(store.allocate_id() > id)` asserted on a second
+                    // allocation (bug method_chain_poisons_receiver_type_2026-09-16).
+                    let left_raw = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
+                    let right_raw = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
+                    let left_val = if matches!(right.as_ref(), Expr::Nil) {
+                        left_raw.clone()
+                    } else {
+                        collapse_assertion_operand(left, &left_raw)
+                    };
+                    let right_val = if matches!(left.as_ref(), Expr::Nil) {
+                        right_raw.clone()
+                    } else {
+                        collapse_assertion_operand(right, &right_raw)
+                    };
                     let (matched, op_word) = match op {
                         // Bridge `nil` (Value::Nil) and `Option::None`: the language's
                         // `==` treats an empty optional as equal to `nil` (see
@@ -1252,7 +1727,16 @@ pub(super) fn eval_bdd_builtin(
                                 BinOp::GtEq => ">=",
                                 _ => "?",
                             };
-                            let value = evaluate_expr(arg_expr, env, functions, classes, enums, impl_methods)?;
+                            let value = eval_ordered_cmp_on_values(
+                                *op,
+                                left_raw,
+                                right_raw,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?;
                             if !value.truthy() {
                                 BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = true);
                                 BDD_PROVISIONAL_SEQ
@@ -2187,14 +2671,20 @@ pub fn clear_bdd_state() {
     // Clear local BDD state
     BDD_INDENT.with(|cell| *cell.borrow_mut() = 0);
     BDD_COUNTS.with(|cell| *cell.borrow_mut() = (0, 0));
+    BDD_TOTALS.with(|cell| *cell.borrow_mut() = (0, 0));
+    BDD_PENDING_IN_IT.with(|cell| *cell.borrow_mut() = false);
+    BDD_SKIP_IN_IT.with(|cell| *cell.borrow_mut() = false);
+    BDD_PENDING_BLOCKED.with(|cell| *cell.borrow_mut() = false);
+    BDD_BLOCKED_TOTAL.with(|cell| *cell.borrow_mut() = 0);
     BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
+    BDD_FAILED_RECORDED_IN_IT.with(|cell| *cell.borrow_mut() = false);
     BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = false);
     BDD_MATCHER_RAN.with(|cell| *cell.borrow_mut() = false);
     BDD_EXPECT_NEEDS_MATCHER.with(|cell| *cell.borrow_mut() = 0);
     BDD_MATCHER_COUNT.with(|cell| *cell.borrow_mut() = 0);
     BDD_VACUOUS_SUBJECT.with(|cell| *cell.borrow_mut() = None);
     BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = false);
-    BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = None);
+    BDD_FAILURE_MSG.with(|cell| cell.borrow_mut().clear());
     BDD_PROVISIONAL_MSG.with(|cell| *cell.borrow_mut() = None);
     BDD_SHARED_EXAMPLES.with(|cell| cell.borrow_mut().clear());
     BDD_CONTEXT_DEFS.with(|cell| cell.borrow_mut().clear());
@@ -2227,6 +2717,12 @@ pub fn get_ignored_tests() -> Vec<String> {
 /// Get individual test results: (describe_path, test_name, passed, skipped)
 pub fn get_test_results() -> Vec<(String, String, bool, bool)> {
     BDD_TEST_RESULTS.with(|cell| cell.borrow().clone())
+}
+
+/// Number of examples counted BLOCKED (environment missing). Each is also one
+/// of the skipped entries in `get_test_results`.
+pub fn get_blocked_test_count() -> usize {
+    BDD_BLOCKED_TOTAL.with(|cell| *cell.borrow())
 }
 
 #[cfg(test)]
@@ -2289,5 +2785,125 @@ mod is_condition_present_tests {
         // generic truthy() rather than panicking.
         assert!(!is_condition_present(None, &Value::Int(0)));
         assert!(is_condition_present(None, &Value::Int(1)));
+    }
+}
+
+// Last-failure-only regression: two failing expects inside ONE example must
+// both survive to the reported failure message, not just the second.
+#[cfg(test)]
+mod failure_retention_tests {
+    use super::*;
+
+    fn reported() -> String {
+        BDD_FAILURE_MSG.with(|cell| cell.borrow().summary().unwrap_or_default())
+    }
+
+    #[test]
+    fn two_failing_expects_in_one_example_both_reported() {
+        clear_bdd_state();
+        BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
+        record_assertion_failure("expected 11 to equal 22".to_string()).unwrap();
+        record_assertion_failure("expected 33 to equal 44".to_string()).unwrap();
+        let out = reported();
+        clear_bdd_state();
+        assert!(out.contains("expected 11 to equal 22"), "first failure lost: {out}");
+        assert!(out.contains("expected 33 to equal 44"), "second failure lost: {out}");
+    }
+
+    #[test]
+    fn huge_failure_message_is_bounded() {
+        clear_bdd_state();
+        BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
+        record_assertion_failure(format!("expected {} to contain x", "é".repeat(300_000))).unwrap();
+        let out = reported();
+        clear_bdd_state();
+        assert!(out.len() < 4000, "unbounded failure message: {}", out.len());
+        assert!(out.contains("failure message truncated"), "no truncation note: {out}");
+    }
+
+    #[test]
+    fn failures_are_bounded_with_more_note() {
+        clear_bdd_state();
+        BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
+        for i in 0..20 {
+            record_assertion_failure(format!("failure-{i}")).unwrap();
+        }
+        let out = reported();
+        clear_bdd_state();
+        assert!(out.contains("failure-0"), "{out}");
+        assert!(out.contains("failure-15"), "{out}");
+        assert!(!out.contains("failure-16"), "cap exceeded: {out}");
+        assert!(out.contains("+4 more"), "missing overflow note: {out}");
+    }
+}
+
+// skip() inside an `it` body must mark that example skipped (it used to be
+// dropped, so the example passed). doc/08_tracking/bug/spec_skip_reported_as_pass_2026-11-19.md
+#[cfg(test)]
+mod skip_in_example_tests {
+    use super::*;
+
+    #[test]
+    fn skip_inside_an_example_flags_it() {
+        clear_bdd_state();
+        BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
+        assert!(mark_skip_in_example());
+        assert!(BDD_SKIP_IN_IT.with(|cell| *cell.borrow()));
+        clear_bdd_state();
+        assert!(!BDD_SKIP_IN_IT.with(|cell| *cell.borrow()));
+    }
+
+    #[test]
+    fn skip_outside_an_example_does_not_flag() {
+        clear_bdd_state();
+        assert!(!mark_skip_in_example());
+        assert!(!BDD_SKIP_IN_IT.with(|cell| *cell.borrow()));
+    }
+}
+
+/// `rt_bdd_executed_total() -> i64`: examples executed (passed + failed) so far.
+pub(crate) fn rt_bdd_executed_total(_args: &[crate::value::Value]) -> Result<crate::value::Value, CompileError> {
+    Ok(crate::value::Value::Int(BDD_TOTALS.with(|cell| {
+        let t = cell.borrow();
+        t.0 + t.1
+    })))
+}
+
+/// `rt_bdd_failed_total() -> i64`: examples that failed so far.
+pub(crate) fn rt_bdd_failed_total(_args: &[crate::value::Value]) -> Result<crate::value::Value, CompileError> {
+    Ok(crate::value::Value::Int(BDD_TOTALS.with(|cell| cell.borrow().1)))
+}
+
+/// `rt_bdd_record_result(passed: bool)`: lets the pure-Simple runner (spec.spl's
+/// own `_execute_it`) feed the same cumulative counter the intrinsics feed.
+pub(crate) fn rt_bdd_record_result(args: &[crate::value::Value]) -> Result<crate::value::Value, CompileError> {
+    let passed = match args.first() {
+        Some(crate::value::Value::Bool(b)) => *b,
+        Some(crate::value::Value::Int(i)) => *i != 0,
+        _ => false,
+    };
+    BDD_TOTALS.with(|cell| {
+        let mut t = cell.borrow_mut();
+        if passed { t.0 += 1 } else { t.1 += 1 }
+    });
+    Ok(crate::value::Value::Nil)
+}
+
+#[cfg(test)]
+mod totals_tests {
+    use super::*;
+    use crate::value::Value;
+
+    #[test]
+    fn totals_accumulate_and_survive_count_reset() {
+        clear_bdd_state();
+        rt_bdd_record_result(&[Value::Bool(true)]).unwrap();
+        rt_bdd_record_result(&[Value::Bool(false)]).unwrap();
+        // The per-describe reset must not touch the cumulative totals.
+        BDD_COUNTS.with(|cell| *cell.borrow_mut() = (0, 0));
+        assert!(matches!(rt_bdd_executed_total(&[]).unwrap(), Value::Int(2)));
+        assert!(matches!(rt_bdd_failed_total(&[]).unwrap(), Value::Int(1)));
+        clear_bdd_state();
+        assert!(matches!(rt_bdd_executed_total(&[]).unwrap(), Value::Int(0)));
     }
 }

@@ -1,6 +1,7 @@
 # @cover src/compiler/70.backend/linker/elf/elf_static_link.spl 80%
 # @cover src/compiler/70.backend/linker/elf_parser.spl 80%
 # @cover src/compiler/70.backend/linker/elf/elf_exec_writer.spl 80%
+# @cover src/compiler/70.backend/linker/elf/elf_operation_bindings.spl 80%
 """ITEM4-REQ-001/004/007 static operational ELF composition. UNRUN.
 
 Real object inputs traverse the full linker. Custom callbacks delegate actual
@@ -335,6 +336,40 @@ describe "Static ELF operational composition dispatch":
             expect(linked.is_err()).to_equal(true)
             if linked.is_ok(): return
             expect(linked.unwrap_err()).to_contain("item4 selected " + names[index] + " rejected")
+
+    it "offers the Result-free relocation only on unmodified builtin operations":
+        step("Builtin fast relocation equals the sealed Result path, accept and reject alike")
+        val builtin = elf_builtin_operations_v1()
+        expect(builtin.is_ok()).to_equal(true)
+        if builtin.is_err(): return
+        val ops = builtin.unwrap()
+        val window = [0x11, 0x22, 0x33, 0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0x55, 0x66, 0x77, 0x88]
+        # (rtype, S, A, P): R_X86_64_64, PC32, 32, 32S, PLT32, then 32 / 32S / PC32 overflow rejects
+        val cases = [[1, 0x401000, 8, 0], [2, 0x401000, -4, 0x400ff0], [10, 0x7fff0000, 4, 0],
+            [11, -16, 0, 0], [4, 0x402000, -4, 0x401000], [10, 0x100000000, 0, 0],
+            [11, 0x80000000, 0, 0], [2, 0x200000000, 0, 0]]
+        var accepted = 0
+        var rejected = 0
+        for c in cases:
+            val slow = ops.relocate(RelocArch.X86_64, window, 4, c[0], c[1], c[2], c[3])
+            val fast = ops.relocate_fast(RelocArch.X86_64, window, 4, c[0], c[1], c[2], c[3])
+            if slow.is_ok():
+                accepted = accepted + 1
+                expect(fast).to_equal(slow.unwrap())
+            else:
+                rejected = rejected + 1
+                expect(fast.len()).to_equal(0)
+        expect(accepted).to_equal(5)
+        expect(rejected).to_equal(3)
+        step("Operations sealed from caller providers never take the builtin fast path")
+        val resealed = elf_seal_operations_v1(elf_builtin_operation_providers_v1(), elf_operation_policy_v1())
+        expect(resealed.is_ok()).to_equal(true)
+        if resealed.is_err(): return
+        expect(resealed.unwrap().relocate_fast(RelocArch.X86_64, window, 4, 1, 0x401000, 8, 0).len()).to_equal(0)
+        val files = elf_builtin_file_operations_v1()
+        expect(files.is_ok()).to_equal(true)
+        if files.is_err(): return
+        expect(files.unwrap().relocate_fast(RelocArch.X86_64, window, 4, 1, 0x401000, 8, 0).len()).to_equal(16)
 
     it "rejects malformed operation results before later indexing or image publication":
         step("Reject short results and a real writer image whose PT_LOAD address contradicts the selected plan")

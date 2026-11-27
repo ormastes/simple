@@ -1,0 +1,146 @@
+# @cover src/os/realtime/irq.spl
+# @session:mutating
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-DHR-05
+# plan: doc/03_plan/app/debug/dhr_debug_spy_replay_recovery_plan_2026-11-17.md
+#
+# DHR P6 arch trap routing: the RV32 machine trap entry
+# (src/os/realtime/context/riscv32.spl riscv_trap_handler) decodes mcause with
+# irq_rv32_mcause_is_external; an external cause takes the PLIC claim, hands it
+# to irq_dispatch_claimed, and completes it when that returns true; every other
+# cause takes the unchanged timer_isr path. The handler itself is a thin MMIO
+# wrapper (csrr mcause, PLIC claim/complete) and is not executed here; these
+# examples drive the decode and the claim dispatch it calls.
+
+use std.spec.*
+use std.replay.bm_replay_core.{bm_ring_init}
+use std.replay.portable_replay.{portable_replay_reset}
+use os.realtime.replay.mode.{rtos_replay_set_mode}
+use os.realtime.replay.hooks.{rr_divergence_count, rr_reset_divergences, rr_event_count}
+use os.realtime.task.{task_table_init, task_create, task_delete, task_get, task_set_state,
+    TASK_STATE_READY, TASK_STATE_BLOCKED}
+use os.realtime.scheduler.{sched_init, sched_set_current}
+use os.realtime.irq.{irq_init, irq_bind, irq_rv32_mcause_is_external, irq_dispatch_claimed}
+
+val OFF: i32 = 0
+val RECORD: i32 = 1
+val REPLAY: i32 = 2
+
+val MCAUSE_M_EXTERNAL: u32 = 0x8000000Bu32
+val MCAUSE_M_TIMER: u32 = 0x80000007u32
+val MCAUSE_M_SOFTWARE: u32 = 0x80000003u32
+val MCAUSE_S_EXTERNAL: u32 = 0x80000009u32
+val MCAUSE_ECALL_M: u32 = 0x0000000Bu32
+val MCAUSE_ILLEGAL_INSN: u32 = 0x00000002u32
+
+fn _reset():
+    rtos_replay_set_mode(OFF)
+    bm_ring_init()
+    portable_replay_reset()
+    rr_reset_divergences()
+    task_table_init()
+    var i = 0
+    while i < 16:
+        task_delete(i)
+        i = i + 1
+    sched_init()
+    irq_init()
+
+fn _task(priority: i32) -> i32:
+    task_create(priority, 0u64, 0u64, 0u32, "t")
+
+fn _state(id: i32) -> i32:
+    task_get(id).state
+
+describe "RV32 trap entry mcause decode":
+    it "routes only the machine external interrupt to the IRQ path":
+        expect(irq_rv32_mcause_is_external(MCAUSE_M_EXTERNAL)).to_equal(true)
+
+    it "keeps the machine timer interrupt on the timer path":
+        expect(irq_rv32_mcause_is_external(MCAUSE_M_TIMER)).to_equal(false)
+
+    it "leaves every other cause on the unchanged path":
+        expect(irq_rv32_mcause_is_external(MCAUSE_M_SOFTWARE)).to_equal(false)
+        expect(irq_rv32_mcause_is_external(MCAUSE_S_EXTERNAL)).to_equal(false)
+        expect(irq_rv32_mcause_is_external(MCAUSE_ECALL_M)).to_equal(false)
+        expect(irq_rv32_mcause_is_external(MCAUSE_ILLEGAL_INSN)).to_equal(false)
+        expect(irq_rv32_mcause_is_external(0u32)).to_equal(false)
+
+describe "RV32 trap entry external claim dispatch":
+    it "dispatches the claimed vector to its bound task and asks for completion":
+        _reset()
+        val c = _task(3)
+        val h = _task(1)
+        val g = _task(1)
+        sched_set_current(c)
+        irq_bind(5, h)
+        irq_bind(6, g)
+        task_set_state(h, TASK_STATE_BLOCKED)
+        task_set_state(g, TASK_STATE_BLOCKED)
+        expect(irq_rv32_mcause_is_external(MCAUSE_M_EXTERNAL)).to_equal(true)
+        expect(irq_dispatch_claimed(5)).to_equal(true)
+        expect(_state(h)).to_equal(TASK_STATE_READY)
+        expect(_state(g)).to_equal(TASK_STATE_BLOCKED)
+        expect(rr_event_count()).to_equal(0)
+
+    it "records exactly the claimed vector through irq_dispatch":
+        _reset()
+        val c = _task(3)
+        val h = _task(1)
+        sched_set_current(c)
+        irq_bind(7, h)
+        task_set_state(h, TASK_STATE_BLOCKED)
+        rtos_replay_set_mode(RECORD)
+        expect(irq_dispatch_claimed(7)).to_equal(true)
+        expect(rr_event_count()).to_equal(1)
+        sched_init()
+        sched_set_current(c)
+        task_set_state(h, TASK_STATE_BLOCKED)
+        rtos_replay_set_mode(REPLAY)
+        expect(irq_dispatch_claimed(7)).to_equal(true)
+        expect(_state(h)).to_equal(TASK_STATE_READY)
+        expect(rr_divergence_count()).to_equal(0)
+
+    it "claim 0 (nothing pending) dispatches nothing and needs no completion":
+        _reset()
+        val c = _task(3)
+        val h = _task(1)
+        sched_set_current(c)
+        irq_bind(0, h)
+        task_set_state(h, TASK_STATE_BLOCKED)
+        rtos_replay_set_mode(RECORD)
+        expect(irq_dispatch_claimed(0)).to_equal(false)
+        expect(_state(h)).to_equal(TASK_STATE_BLOCKED)
+        expect(rr_event_count()).to_equal(0)
+
+    it "an unbound vector is completed and ignored off-replay":
+        _reset()
+        val c = _task(3)
+        val h = _task(1)
+        sched_set_current(c)
+        irq_bind(5, h)
+        task_set_state(h, TASK_STATE_BLOCKED)
+        expect(irq_dispatch_claimed(9)).to_equal(true)
+        expect(_state(h)).to_equal(TASK_STATE_BLOCKED)
+        expect(rr_event_count()).to_equal(0)
+
+    it "Replay still completes a claim the log refuses, waking nothing":
+        _reset()
+        val c = _task(3)
+        val h = _task(1)
+        val g = _task(1)
+        sched_set_current(c)
+        irq_bind(5, h)
+        irq_bind(6, g)
+        task_set_state(h, TASK_STATE_BLOCKED)
+        task_set_state(g, TASK_STATE_BLOCKED)
+        rtos_replay_set_mode(RECORD)
+        expect(irq_dispatch_claimed(5)).to_equal(true)
+        sched_init()
+        sched_set_current(c)
+        task_set_state(h, TASK_STATE_BLOCKED)
+        rtos_replay_set_mode(REPLAY)
+        expect(irq_dispatch_claimed(6)).to_equal(true)
+        expect(_state(g)).to_equal(TASK_STATE_BLOCKED)
+        expect(_state(h)).to_equal(TASK_STATE_BLOCKED)
+        expect(rr_divergence_count()).to_equal(1)

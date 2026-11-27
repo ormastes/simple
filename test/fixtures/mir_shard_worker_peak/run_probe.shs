@@ -1,0 +1,54 @@
+#!/bin/sh
+# MIR-shard worker peak probe (smf_record_module_parts_v1 codegen scope).
+#
+# usage: sh run_probe.shs <stage2-simple> <admission.env> <runtime-authority-dir> <src-checkout> <out-dir>
+#   <src-checkout> must hold src/ plus examples/10_tooling/trace32_tools and
+#   tools/counterpart at the same sha (src/app symlinks and the runtime need them).
+#   Prints per-pid VmHWM (GiB), wall seconds and rc; writes <out-dir>/{build.log,
+#   hwm.tsv,smf_spool.sha256,prog,prog.stdout}. One run at a time, MemAvailable >= 40 GiB.
+#
+# Closure: --entry-closure src/app/test_runner_new/main.spl, --source src,
+#   SIMPLE_MIR_SHARD_COUNT=2 -> worker 0 = 171 modules / 4531 fns / 401,064 MIR
+#   instructions, worker 1 = 170 modules. cranelift, opt 0, OutputFormat.Both.
+#
+# BEFORE (Stage 2 sha256 815b43e8a20a27d21606017a07b40d32098064d425df55abb1f62cee567d3b0b,
+#   source e45e89468d3e, 2026-11-15, three runs):
+#   worker 0 VmHWM 6.63 GiB (6,954,124 / 6,950,452 KiB) - 3.35 GiB before the SMF
+#     recompile, +3.28 GiB during its 17 s spool-write window (strace-aligned)
+#   worker 1 VmHWM 2.25 GiB; coordinator 2.27 GiB; wall 707-741 s (no strace)
+#   SMF spool objects: 341, sha256 of sorted "sha256sum *.o" list = 68cbdb4a53d08594...
+#     (identical in all three runs)
+#   rc=1 without the runtime args below (rt_package_chmod/rt_process_exists undefined);
+#   linked-stdout baseline is taken with them.
+s2=$1; adm=$2; ra=$3; src=$4; o=$5
+mkdir -p "$o" && o=$(cd "$o" && pwd)
+sha256sum "$s2"
+cd "$src" || exit 2
+t0=$(date +%s)
+env SIMPLE_BOOTSTRAP= SIMPLE_SHARD_SMALL_CLOSURE_MAX=0 SIMPLE_NATIVE_GO_TO_END=1 SIMPLE_FILE_WORKERS=0 \
+  SIMPLE_MIR_SHARD_COUNT=2 SIMPLE_CACHE_SCOPE=mirpeak-probe-$t0 SIMPLE_NATIVE_ARENA_DECLS=1 SIMPLE_NO_STUB_FALLBACK=1 \
+  SIMPLE_FRONTEND_CACHE=1 SIMPLE_FRONTEND_CACHE_DIR=$o/cache/frontend SIMPLE_HIR_CACHE=1 SIMPLE_HIR_CACHE_DIR=$o/cache/hir \
+  MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 SIMPLE_PHASE_RSS=1 \
+  SIMPLE_ABI_POLICY=v1 SIMPLE_ABI_ADMISSION_RECEIPT=$adm \
+  systemd-run --user --scope -q -p MemoryMax=24G -p MemorySwapMax=0 \
+  timeout 5400 "$s2" native-build --backend=cranelift --source src \
+  --entry-closure src/app/test_runner_new/main.spl \
+  --target aarch64-unknown-linux-gnu --runtime-bundle core-c-bootstrap --mode dynload --runtime-path "$ra" \
+  --cache-dir $o/cache -o $o/prog > $o/build.log 2>&1 &
+root=$!
+desc() { echo $1; for c in $(cat /proc/$1/task/*/children 2>/dev/null); do desc $c; done; }
+while [ -d /proc/$root ]; do
+  for p in $(desc $root); do
+    awk -v p=$p '/^VmHWM/{print p, $2}' /proc/$p/status 2>/dev/null
+  done
+  sleep 1
+done > $o/hwm.raw
+wait $root; rc=$?
+awk '{if($2>h[$1])h[$1]=$2} END{for(p in h) if(h[p]>1048576) printf "%s %.2f\n", p, h[p]/1048576}' $o/hwm.raw | sort -k2 -rn > $o/hwm.tsv
+ls -d build/smf_object_spool/p* 2>/dev/null | while read d; do
+  [ -n "$(ls $d)" ] && [ $(stat -c %Y $d) -ge $t0 ] && (cd $d && sha256sum *.o | sort -k2)
+done > $o/smf_spool.sha256
+[ -x $o/prog ] && $o/prog > $o/prog.stdout 2>&1
+cat $o/hwm.tsv
+echo "wall=$(( $(date +%s) - t0 )) rc=$rc smf_objects=$(wc -l < $o/smf_spool.sha256) smf_list_sha=$(sha256sum < $o/smf_spool.sha256 | cut -c1-16)"
+grep -c 'codegen-scope\] WARNING' $o/build.log

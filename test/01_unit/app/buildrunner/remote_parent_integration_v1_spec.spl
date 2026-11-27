@@ -1,0 +1,293 @@
+use std.spec.{describe, it, expect}
+use std.common.build_manager.contracts.{BuildTaskV1, BuildHostV1, BuildInputV1,
+    BuildResultV1, BuildRunV1, builder_task_identity_v1}
+use std.common.build_manager.codec.{builder_encode_task_v1, builder_encode_result_v1}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.contracts.distributed_control_v2.{ExecutionEnvironmentV2,
+    ExecutionGrantV2, OperationEnvelopeV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2,
+    DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_environment_digest_v2,
+    distributed_encode_operation_v2, distributed_grant_digest_v2}
+use std.common.contracts.distributed_operation_state_v2.{distributed_operation_initial_v2,
+    distributed_operation_transition_v2}
+use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_open_v2,
+    distributed_operation_journal_commit_v2, distributed_operation_journal_lookup_v2,
+    distributed_operation_journal_close_v2}
+use std.common.task_runner.journal.{task_runner_journal_history_v1, task_runner_journal_release_v1}
+use app.buildrunner.task_context.{BuildRunnerTaskContextV1, build_runner_context_encode_v1}
+use app.buildrunner.task_database.build_runner_database_collect_v1
+use app.buildrunner.process_evidence.{BuildRunnerProcessEvidenceV1,
+    build_runner_process_evidence_encode_v1}
+use app.buildrunner.remote_evidence_v1.{RemoteEvidencePolicyV1, RemoteOutputBytesV1,
+    RemoteEvidenceBytesV1, remote_policy_encode_v1, remote_inventory_digest_v1,
+    remote_evidence_freeze_v1}
+use app.buildrunner.remote_authority_v1.{RemoteCompletionEnvelopeV1, remote_completion_encode_v1}
+use app.buildrunner.remote_context_v1.{RemoteAuthorityContextV1, remote_context_admit_v1}
+use app.buildrunner.remote_host_v1.{RemoteCompletionBundleV1, remote_host_start_v1}
+use app.bootstrap_builder.process_port.builder_process_portable_v1
+use app.buildrunner.remote_session_v1.{RemoteDatabaseSessionV1, remote_database_session_open_v1}
+use app.io.file_ops.{secure_temp_dir, file_atomic_write, file_atomic_write_bytes,
+    file_read_regular_no_follow_bounded_bytes}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use test.fixtures.app.llm_caret.distributed_authority_verification_fixture_v2.{verification_seed,
+    verification_bytes, verification_key}
+use test.fixtures.buildrunner.remote_authority_v1.remote_authority_resign_v1
+
+# Source-authored integration specs. Real files and journals are exercised when
+# run; process/reap observations here are signed test fixtures, not real launches.
+struct RemoteParentFixtureV1:
+    root: text
+    run: BuildRunV1
+    task: BuildTaskV1
+    policy: RemoteEvidencePolicyV1
+    context_payload: text
+    authority: RemoteAuthorityContextV1
+    bundle: RemoteCompletionBundleV1
+
+fn parent_fixture_v1(isolation: text = "native-process") -> RemoteParentFixtureV1:
+    val root = secure_temp_dir("/tmp", "remote-parent-spec").unwrap()
+    val compiler_bytes = "fixture compiler bytes".bytes()
+    val runtime_bytes = "fixture runtime bytes".bytes()
+    val tools = [BuildInputV1("tools/simple", sha256_u8_hex(compiler_bytes)),
+        BuildInputV1("tools/runtime.a", sha256_u8_hex(runtime_bytes))]
+    val policy = RemoteEvidencePolicyV1(host_id: "worker_1", assignment_digest: sha256_text("assignment"),
+        controller_epoch: 7, operation_id: "operation_1", action_kind: "build", expected_tests: [],
+        test_report_path: "", maximum_bytes: 65536, toolchain_inputs: tools)
+    val policy_wire = remote_policy_encode_v1(policy).unwrap()
+    val toolchain_digest = remote_inventory_digest_v1(tools)
+    val environment = ExecutionEnvironmentV2(host_id: "worker_1", execution_platform: "linux",
+        target_platform: "linux", test_runtime: "native", isolation_class: isolation,
+        toolchain_digest: toolchain_digest, sdk_digest: sha256_text("sdk"), abi: "gnu",
+        isa: "x86_64", optimization: "debug")
+    val environment_digest = distributed_environment_digest_v2(environment).unwrap()
+    val context_payload = build_runner_context_encode_v1(BuildRunnerTaskContextV1(
+        backend: "llvm", runtime_digest: tools[1].digest, policy_digest: sha256_text(policy_wire),
+        environment_digest: environment_digest)).unwrap()
+    val source = "fn main(): 0\n"
+    val task = BuildTaskV1(id: "parent_compile", attempt: 1, phase: "native",
+        producer_digest: tools[0].digest, source_digest: sha256_text(source),
+        toolchain_digest: toolchain_digest, dependencies: [], program: "tools/simple",
+        args: ["native-build", "src/main.spl"], inputs: [BuildInputV1("src/main.spl", sha256_text(source)),
+            tools[0], tools[1], BuildInputV1("remote-policy/parent_compile.sdn", sha256_text(policy_wire)),
+            BuildInputV1("task-context/parent_compile.sdn", sha256_text(context_payload))],
+        outputs: ["artifact/program.bin"], cache_key: sha256_text("parent cache"), timeout_ms: 500,
+        memory_limit_bytes: 512, links: [], memory_policy: "enforce")
+
+    # Independent signing messages use the published field order. They do not
+    # call the production grant/approval signature-message builders.
+    val grant_wire = "DBC_EXECUTION_GRANT_V2\ngrant_1\nuser_1\nproject_1\nworker_1\n" +
+        environment_digest + "\n4\n2\n200\n1024\n1000\n1\nbuild\n"
+    val request_digest = sha256_text(builder_encode_task_v1(task))
+    val request_wire = "DBC_OPERATION_V2\noperation_1\n" + request_digest +
+        "\nuser_1\nproject_1\nworker_1\nbuild\n" + environment_digest + "\n4\n2\n3\n512\n500\n"
+    val grant_message = "DBC_GRANT_SIGNATURE_V2\nissuer_1\n1\n" + grant_wire.replace("\n", "%0A") + "\n"
+    val approval_message = "DBC_APPROVAL_SIGNATURE_V2\napprover_1\n1\n" + sha256_text(grant_wire) +
+        "\n" + sha256_text(request_wire) + "\n4\n3\n190\n"
+    val issuer_signature = pure_ed25519_sign_from_seed_v1(verification_seed(1), verification_bytes(grant_message))
+    val approver_signature = pure_ed25519_sign_from_seed_v1(verification_seed(65), verification_bytes(approval_message))
+    val host_signature = pure_ed25519_sign_from_seed_v1(verification_seed(129), [])
+    val grant = ExecutionGrantV2(id: "grant_1", principal: "user_1", project: "project_1",
+        host_id: "worker_1", operations: ["build"], environment_digest: environment_digest,
+        policy_revision: 4, revocation_epoch: 2, expires_at: 200,
+        maximum_memory_bytes: 1024, maximum_duration_ms: 1000)
+    val signed = DistributedSignedGrantV2(grant: grant, issuer_id: "issuer_1", key_revision: 1,
+        signature: issuer_signature.signature)
+    val approval = DistributedSignedApprovalV2(approver_id: "approver_1", key_revision: 1,
+        grant_digest: sha256_text(grant_wire), request_digest: sha256_text(request_wire),
+        policy_revision: 4, session_generation: 3, expires_at: 190, signature: approver_signature.signature)
+    val request = OperationEnvelopeV2(version: 2, id: "operation_1", payload_digest: request_digest,
+        principal: "user_1", project: "project_1", host_id: "worker_1", operation: "build",
+        environment_digest: environment_digest, policy_revision: 4, revocation_epoch: 2,
+        session_generation: 3, memory_bytes: 512, duration_ms: 500)
+    expect(distributed_encode_operation_v2(request).unwrap()).to_equal(request_wire)
+    expect(distributed_grant_digest_v2(grant).unwrap()).to_equal(sha256_text(grant_wire))
+    val authority = RemoteAuthorityContextV1(signed: signed, approval: approval,
+        issuer: verification_key("issuer_1", "grant-issuer", issuer_signature.public_key),
+        approver: verification_key("approver_1", "human-approver", approver_signature.public_key),
+        host_key: verification_key("host_signer_1", "execution-host", host_signature.public_key),
+        request: request, requested: environment, observed: environment,
+        now: 100, policy_revision: 4, revocation_epoch: 2, session_generation: 3,
+        assignment_digest: policy.assignment_digest, controller_epoch: policy.controller_epoch)
+    expect(remote_context_admit_v1(authority, task, policy)).to_equal(Ok(true))
+
+    val stdout = "fixture compiler stdout\n".bytes()
+    val stderr: [u8] = []
+    val output = RemoteOutputBytesV1("artifact/program.bin", [0 as u8, 127 as u8, 255 as u8, 10 as u8])
+    val result = BuildResultV1(task_id: task.id, attempt: task.attempt,
+        identity_digest: builder_task_identity_v1(task), host_id: policy.host_id, status: "OK",
+        exit_code: 0, outputs: [BuildInputV1(output.path, sha256_u8_hex(output.content))],
+        cache_hits: -1, cache_misses: -1, cache_stores: -1)
+    val process = build_runner_process_evidence_encode_v1(BuildRunnerProcessEvidenceV1(
+        task_identity: builder_task_identity_v1(task), pid: 71, process_generation: 83,
+        native_identity_digest: sha256_text("fixture native observation"), exit_code: 0,
+        signal_number: 0, outcome: "exited", stdout_digest: sha256_u8_hex(stdout),
+        stderr_digest: sha256_u8_hex(stderr), transport_execution_digest: sha256_text("fixture execution"))).unwrap()
+    val bytes = RemoteEvidenceBytesV1(process, stdout, stderr, [output])
+    val frozen = remote_evidence_freeze_v1(task, result, policy, bytes).unwrap()
+    val completion = remote_authority_resign_v1(RemoteCompletionEnvelopeV1(version: 1,
+        task_identity: builder_task_identity_v1(task), host_id: policy.host_id,
+        assignment_digest: policy.assignment_digest, controller_epoch: policy.controller_epoch,
+        operation_id: policy.operation_id, request_digest: sha256_text(request_wire),
+        grant_digest: sha256_text(grant_wire), result_digest: frozen.result_digest,
+        process_digest: frozen.process_digest, output_inventory_digest: frozen.output_inventory_digest,
+        tests_digest: frozen.tests_digest, signer_id: "host_signer_1", key_revision: 1,
+        completed_at: 99, tree_reaped: true, signature: []))
+    val host = BuildHostV1(id: "worker_1", transport: "ssh", endpoint: "fixture-worker",
+        workspace: "/fixture/work", worker_program: "/fixture/buildrunner",
+        worker_digest: sha256_text("fixture worker"), slots: 1)
+    val run = BuildRunV1(tasks: [task], hosts: [host], keep_going: false, max_attempts: 1)
+
+    for directory in ["source/src", "source/tools", "source/remote-policy", "source/task-context", "state"]:
+        expect(dir_create_all(root + "/" + directory)).to_equal(true)
+    expect(file_atomic_write(root + "/source/src/main.spl", source)).to_equal(true)
+    expect(file_atomic_write_bytes(root + "/source/tools/simple", compiler_bytes)).to_equal(true)
+    expect(file_atomic_write_bytes(root + "/source/tools/runtime.a", runtime_bytes)).to_equal(true)
+    expect(file_atomic_write(root + "/source/remote-policy/parent_compile.sdn", policy_wire)).to_equal(true)
+    expect(file_atomic_write(root + "/source/task-context/parent_compile.sdn", context_payload)).to_equal(true)
+    RemoteParentFixtureV1(root, run, task, policy, context_payload, authority,
+        RemoteCompletionBundleV1(result, bytes, completion))
+
+fn parent_open_v1(fixture: RemoteParentFixtureV1, foreign: bool = false) -> RemoteDatabaseSessionV1:
+    var operations = distributed_operation_journal_open_v2(fixture.root + "/operations",
+        sha256_text("fixture authority"), sha256_text(fixture.root + "/nonce"), 1000).unwrap()
+    if operations.operations.len() == 0:
+        val initial = distributed_operation_initial_v2(
+            distributed_encode_operation_v2(fixture.authority.request).unwrap()).unwrap()
+        operations = distributed_operation_journal_commit_v2(operations, initial).unwrap()
+        val executing = distributed_operation_transition_v2(initial, "executing", "").unwrap()
+        operations = distributed_operation_journal_commit_v2(operations, executing).unwrap()
+        if foreign:
+            var request = fixture.authority.request
+            request.id = "operation_foreign"
+            val foreign_initial = distributed_operation_initial_v2(distributed_encode_operation_v2(request).unwrap()).unwrap()
+            operations = distributed_operation_journal_commit_v2(operations, foreign_initial).unwrap()
+            val foreign_executing = distributed_operation_transition_v2(foreign_initial, "executing", "").unwrap()
+            operations = distributed_operation_journal_commit_v2(operations, foreign_executing).unwrap()
+    remote_database_session_open_v1(fixture.run, fixture.root + "/state", fixture.root + "/source",
+        {fixture.task.id: fixture.policy}, operations).unwrap()
+
+fn parent_release_v1(session: RemoteDatabaseSessionV1):
+    expect(task_runner_journal_release_v1(session.database.journal)).to_equal(Ok(true))
+    expect(distributed_operation_journal_close_v2(session.operations)).to_equal(Ok(true))
+
+var remote_forbidden_spawn_calls_v1: i64 = 0
+
+fn remote_forbidden_spawn_v1(program: text, digest: text, args: [text], directory: text) -> Result<i64, text>:
+    remote_forbidden_spawn_calls_v1 = remote_forbidden_spawn_calls_v1 + 1
+    Err("test native launcher must not be called")
+
+describe "Remote parent signed completion and real journal integration V1":
+    it "refuses container sandbox VM and emulated grants before native launch":
+        for isolation in ["native-container", "sandbox", "vm", "emulated"]:
+            val fixture = parent_fixture_v1(isolation)
+            var host = fixture.run.hosts[0]
+            host.transport = "local"
+            host.endpoint = ""
+            var port = builder_process_portable_v1()
+            port.spawn_operation = remote_forbidden_spawn_v1
+            remote_forbidden_spawn_calls_v1 = 0
+            expect(remote_host_start_v1(fixture.task, host, fixture.root + "/source",
+                fixture.root + "/state", port, fixture.policy, fixture.authority).unwrap_err())
+                .to_equal("REMOTE_NATIVE_PROCESS_ISOLATION_REQUIRED")
+            expect(remote_forbidden_spawn_calls_v1).to_equal(0)
+            var session: RemoteDatabaseSessionV1 = parent_open_v1(fixture)
+            expect(session.accept(fixture.task, fixture.bundle, fixture.authority).unwrap_err())
+                .to_equal("REMOTE_NATIVE_PROCESS_ISOLATION_REQUIRED")
+            expect(task_runner_journal_history_v1(session.database.journal,
+                session.journal_identities[fixture.task.id]).unwrap().len()).to_equal(0)
+            parent_release_v1(session)
+            expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "publishes exact accepted bytes and durably refuses a second completion":
+        val fixture = parent_fixture_v1()
+        var session: RemoteDatabaseSessionV1 = parent_open_v1(fixture)
+        val accepted = session.accept(fixture.task, fixture.bundle, fixture.authority).unwrap()
+        expect(file_read_regular_no_follow_bounded_bytes(accepted.outputs_root + "/artifact/program.bin", 1024).unwrap())
+            .to_equal(fixture.bundle.evidence.outputs[0].content)
+        expect(accepted.completion_digest).to_equal(sha256_text(remote_completion_encode_v1(fixture.bundle.completion).unwrap()))
+        val history = task_runner_journal_history_v1(session.database.journal,
+            session.journal_identities[fixture.task.id]).unwrap()
+        expect(history.len()).to_equal(1)
+        expect(history[0].status).to_equal("passed")
+        expect(history[0].reason).to_equal("")
+        expect(history[0].result_validated).to_equal(true)
+        expect(history[0].group_id).to_equal(fixture.policy.operation_id)
+        val completed = distributed_operation_journal_lookup_v2(session.operations, fixture.policy.operation_id).unwrap()
+        expect(completed.state).to_equal("completed")
+        expect(completed.outcome_digest).to_equal(accepted.completion_digest)
+        parent_release_v1(session)
+        var reopened: RemoteDatabaseSessionV1 = parent_open_v1(fixture)
+        expect(reopened.accept(fixture.task, fixture.bundle, fixture.authority).unwrap_err())
+            .to_equal("REMOTE_COMPLETION_REPLAY")
+        val retained = task_runner_journal_history_v1(reopened.database.journal,
+            reopened.journal_identities[fixture.task.id]).unwrap()
+        expect(retained.len()).to_equal(1)
+        parent_release_v1(reopened)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "retains cancellation across reopen and excludes a late task record":
+        val fixture = parent_fixture_v1()
+        var session: RemoteDatabaseSessionV1 = parent_open_v1(fixture)
+        expect(session.cancel(fixture.policy.operation_id, sha256_text("cancel before accept"))).to_equal(Ok(true))
+        parent_release_v1(session)
+        var reopened: RemoteDatabaseSessionV1 = parent_open_v1(fixture)
+        expect(reopened.accept(fixture.task, fixture.bundle, fixture.authority).unwrap_err())
+            .to_equal("REMOTE_EXECUTION_CANCELLED")
+        val history = task_runner_journal_history_v1(reopened.database.journal,
+            reopened.journal_identities[fixture.task.id]).unwrap()
+        expect(history.len()).to_equal(0)
+        val cancelled = distributed_operation_journal_lookup_v2(reopened.operations, fixture.policy.operation_id).unwrap()
+        expect(cancelled.state).to_equal("cancelled")
+        expect(cancelled.outcome_digest).to_equal(sha256_text("cancel before accept"))
+        parent_release_v1(reopened)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "refuses cancellation of a real foreign operation sharing the journal":
+        val fixture = parent_fixture_v1()
+        var session: RemoteDatabaseSessionV1 = parent_open_v1(fixture, true)
+        expect(session.cancel("operation_foreign", sha256_text("foreign cancellation")).unwrap_err())
+            .to_equal("REMOTE_OPERATION_NOT_OWNED")
+        val foreign = distributed_operation_journal_lookup_v2(session.operations, "operation_foreign").unwrap()
+        expect(foreign.state).to_equal("executing")
+        val owned = distributed_operation_journal_lookup_v2(session.operations, fixture.policy.operation_id).unwrap()
+        expect(owned.state).to_equal("executing")
+        val history = task_runner_journal_history_v1(session.database.journal,
+            session.journal_identities[fixture.task.id]).unwrap()
+        expect(history.len()).to_equal(0)
+        parent_release_v1(session)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "reconciles an exact durable task row after the inter-journal crash boundary":
+        val fixture = parent_fixture_v1()
+        var session: RemoteDatabaseSessionV1 = parent_open_v1(fixture)
+        val frozen = remote_evidence_freeze_v1(fixture.task, fixture.bundle.result,
+            fixture.policy, fixture.bundle.evidence).unwrap()
+        # Simulate the successful task append followed by loss of the process
+        # before its operation terminal commit. Release/reopen replays both WALs.
+        session.database.journal = build_runner_database_collect_v1(session.database.journal,
+            fixture.task, fixture.context_payload, fixture.policy.operation_id, "grouped",
+            fixture.bundle.result, frozen.observed, fixture.bundle.evidence.process_payload,
+            frozen.stdout_digest, frozen.stderr_digest, true).unwrap()
+        parent_release_v1(session)
+        var reopened: RemoteDatabaseSessionV1 = parent_open_v1(fixture)
+        expect(reopened.cancel(fixture.policy.operation_id, sha256_text("too late cancellation")).unwrap_err())
+            .to_equal("REMOTE_COMPLETION_ALREADY_COMMITTING")
+        val interrupted = distributed_operation_journal_lookup_v2(reopened.operations, fixture.policy.operation_id).unwrap()
+        expect(interrupted.state).to_equal("executing")
+        val accepted = reopened.accept(fixture.task, fixture.bundle, fixture.authority).unwrap()
+        expect(file_read_regular_no_follow_bounded_bytes(accepted.outputs_root + "/artifact/program.bin", 1024).unwrap())
+            .to_equal(fixture.bundle.evidence.outputs[0].content)
+        val history = task_runner_journal_history_v1(reopened.database.journal,
+            reopened.journal_identities[fixture.task.id]).unwrap()
+        expect(history.len()).to_equal(1)
+        expect(history[0].result_digest).to_equal(sha256_text(builder_encode_result_v1(fixture.bundle.result) +
+            "\n" + fixture.bundle.evidence.process_payload))
+        val completed = distributed_operation_journal_lookup_v2(reopened.operations, fixture.policy.operation_id).unwrap()
+        expect(completed.state).to_equal("completed")
+        expect(completed.outcome_digest).to_equal(accepted.completion_digest)
+        expect(reopened.accept(fixture.task, fixture.bundle, fixture.authority).unwrap_err())
+            .to_equal("REMOTE_COMPLETION_REPLAY")
+        parent_release_v1(reopened)
+        expect(dir_remove_all(fixture.root)).to_equal(true)

@@ -85,7 +85,7 @@ being switched on, not by the fixture reporting numbers regardless.
 
 ## Backend coverage
 
-`interpreter` and `cranelift` are exercised here directly. `llvm` needs a full
+`interpreter` and the in-process JIT lane (matrix column `cranelift`) are exercised here directly. `llvm` needs a full
 `native-build` (minutes, not seconds) so it is asserted statically here and was
 measured by hand; the transcript is in the bug doc above. Its row is still
 checked so the matrix cannot drift back.
@@ -103,33 +103,43 @@ use std.spec.step
 
 use std.spec.*
 use std.common.mem_infra.config.{mem_infra_row_supported, mem_infra_auto_rows, resolve_mem_infra}
-use std.io_runtime.process_run
+use std.common.mem_infra.parity.{
+    MemInfraBackendLane, MemInfraGateMode, MemInfraExitOutcome,
+    MemInfraProbeEvaluation, mem_infra_status_label,
+    mem_infra_evaluate_harden_poison_probe, mem_infra_evaluate_harden_tamper_probe
+}
+use std.io_runtime.{env_get, env_set, env_remove_process}
+use std.spec.engine_probe.{run_under_engine}
 
 val TAMPER_FIXTURE = "test/fixture/mem_infra/harden_tamper_probe.spl"
 val POISON_FIXTURE = "test/fixture/mem_infra/harden_poison_workload.spl"
 
-# The SIMPLE_TEST_BINARY override is expanded by the CHILD SHELL
-# (`${SIMPLE_TEST_BINARY:-bin/simple}`) rather than read Simple-side via
-# `env_get`. Either spelling works; this one is kept only because it makes the
-# default visible at the point of use, and to match the sibling guard spec.
-#
-# Do NOT re-derive the old explanation for this. An earlier version of the
-# guard spec claimed the shell form was load-bearing because "the spec runner
-# does not surface that variable to the spec body". That diagnosis was refuted
-# on 2026-08-02: the real defect was that `bin/simple test` handed the spec to a
-# long-lived helper (src/app/test_daemon/light_daemon.spl) whose environment was
-# frozen at whichever invocation first started it, so BOTH `env_get` and a
-# forked shell saw a stale value. It is fixed in `test_runner_client.spl` —
-# naming a binary-override variable now takes the direct lane. See
-# doc/08_tracking/bug/test_daemon_freezes_env_binary_override_dead_2026-08-02.md
-fn run_fixture(engine: text, fixture: text, harden_on: bool) -> text:
-    val gate = if harden_on: "SIMPLE_MEM_HARDEN=1 " else: ""
-    # NB: `{{`/`}}` are escaped braces — a bare `{...}` in a Simple text literal
-    # is string interpolation, so an unescaped `${SIMPLE_TEST_BINARY:-…}` parses
-    # as an interpolation of a variable named `SIMPLE_TEST_BINARY:-…`.
-    val cmd = "{gate}SIMPLE_EXECUTION_MODE={engine} \"${{SIMPLE_TEST_BINARY:-bin/simple}}\" run '{fixture}' 2>&1"
-    val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
-    out
+fn _restore_env(key: text, prev: text?):
+    match prev:
+        case Some(value):
+            val _ = env_set(key, value)
+        case None:
+            val _ = env_remove_process(key)
+
+fn eval_harden_fixture(engine: text, fixture: text, harden_on: bool, is_tamper: bool) -> MemInfraProbeEvaluation:
+    val prev_harden = env_get("SIMPLE_MEM_HARDEN")
+    val prev_strict = env_get("SIMPLE_JIT_STRICT")
+    if harden_on:
+        val _ = env_set("SIMPLE_MEM_HARDEN", "1")
+    else:
+        val _ = env_remove_process("SIMPLE_MEM_HARDEN")
+    if engine == "jit":
+        val _ = env_set("SIMPLE_JIT_STRICT", "1")
+    val (out, err, code) = run_under_engine(fixture, engine)
+    _restore_env("SIMPLE_JIT_STRICT", prev_strict)
+    _restore_env("SIMPLE_MEM_HARDEN", prev_harden)
+    val lane = if engine == "jit": MemInfraBackendLane.Jit else: MemInfraBackendLane.Interpreter
+    val gate = if harden_on: MemInfraGateMode.On else: MemInfraGateMode.Off
+    val exit_outcome = if code == 0: MemInfraExitOutcome.Zero else: MemInfraExitOutcome.NonZero
+    val combined = out + "\n" + err
+    if is_tamper:
+        return mem_infra_evaluate_harden_tamper_probe(lane, gate, combined, exit_outcome)
+    mem_infra_evaluate_harden_poison_probe(lane, gate, combined, exit_outcome)
 
 describe "harden capability-matrix row matches observed quarantine behaviour":
     # @manual scenario evidence
@@ -141,32 +151,45 @@ describe "harden capability-matrix row matches observed quarantine behaviour":
         assert_equal(mem_infra_row_supported("harden", "interpreter"), true)
 
         step("With SIMPLE_MEM_HARDEN=1 the tampered block is reported")
-        val harden_on = run_fixture("interpreter", POISON_FIXTURE, true)
-        assert_equal(harden_on.contains("tampered_check=1"), true)
+        val harden_on = eval_harden_fixture("interpreter", POISON_FIXTURE, true, false)
+        assert_equal(mem_infra_status_label(harden_on.status), "passed")
 
         step("Sabotage control: with the knob unset nothing is quarantined")
-        val harden_off = run_fixture("interpreter", POISON_FIXTURE, false)
-        assert_equal(harden_off.contains("tampered_check=0"), true)
+        val harden_off = eval_harden_fixture("interpreter", POISON_FIXTURE, false, false)
+        assert_equal(mem_infra_status_label(harden_off.status), "passed")
 
     it "detects write-after-free on the in-process JIT lane, which claims harden: true":
         # @req REQ-SSPEC-LIB
         step("detects write-after-free on the in-process JIT lane, which claims harden: true")
-        step("Confirm the matrix claims harden support on cranelift")
+        step("Confirm the matrix claims harden support for the cranelift column (exercised via the in-process JIT lane)")
         assert_equal(mem_infra_row_supported("harden", "cranelift"), true)
 
-        step("With SIMPLE_MEM_HARDEN=1 the tamper count tracks our writes exactly")
-        val harden_on = run_fixture("jit", TAMPER_FIXTURE, true)
-        assert_equal(harden_on.contains("t0=0"), true)
-        assert_equal(harden_on.contains("t1=1"), true)
-        assert_equal(harden_on.contains("t2=2"), true)
-        assert_equal(harden_on.contains("t3=3"), true)
+        step("With SIMPLE_MEM_HARDEN=1 the tamper count tracks our writes exactly without interpreter demotion")
+        val harden_on = eval_harden_fixture("jit", TAMPER_FIXTURE, true, true)
+        assert_equal(mem_infra_status_label(harden_on.status), "passed")
 
-        step("Sabotage control: with the knob unset every count stays zero")
-        val harden_off = run_fixture("jit", TAMPER_FIXTURE, false)
-        assert_equal(harden_off.contains("t0=0"), true)
-        assert_equal(harden_off.contains("t1=0"), true)
-        assert_equal(harden_off.contains("t2=0"), true)
-        assert_equal(harden_off.contains("t3=0"), true)
+        step("Sabotage control: with the knob unset every count stays zero without interpreter demotion")
+        val harden_off = eval_harden_fixture("jit", TAMPER_FIXTURE, false, true)
+        assert_equal(mem_infra_status_label(harden_off.status), "passed")
+
+    it "rejects silent interpreter demotion even when tamper tokens appear in output":
+        # @req REQ-SSPEC-LIB
+        step("JIT child demoting via [jit-fallback] or [engine-demotion] must fail parity instead of counting as cranelift/JIT")
+        val demoted_fb = mem_infra_evaluate_harden_tamper_probe(
+            MemInfraBackendLane.Jit,
+            MemInfraGateMode.On,
+            "[jit-fallback] lowered via interpreter\nharden_tamper_probe: t0=0 t1=1 t2=2 t3=3\n",
+            MemInfraExitOutcome.Zero
+        )
+        assert_equal(mem_infra_status_label(demoted_fb.status), "demoted-to-interpreter")
+
+        val demoted_eng = mem_infra_evaluate_harden_tamper_probe(
+            MemInfraBackendLane.Jit,
+            MemInfraGateMode.On,
+            "[engine-demotion] reason=hybrid-interp-splice\nharden_tamper_probe: t0=0 t1=1 t2=2 t3=3\n",
+            MemInfraExitOutcome.Zero
+        )
+        assert_equal(mem_infra_status_label(demoted_eng.status), "demoted-to-interpreter")
 
     it "claims harden: false on llvm, whose core runtime lane has no quarantine":
         # @req REQ-SSPEC-LIB

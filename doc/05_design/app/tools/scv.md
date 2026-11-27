@@ -90,6 +90,37 @@ current view: operation ids must be safe `op_` refs, view ids must be safe
 `view_` refs, target commits must be safe existing `commit_` refs, and restored
 bookmark rows must be valid before `HEAD_OP`, `workspaces.sdn`, or
 `bookmarks.sdn` are rewritten.
+
+`restore-op --check <op>` is a read-only advisory preflight. It checks the
+operation/view/default commit references, target tree rows and raw byte
+reconstruction, bookmark rows, current `HEAD_OP`/workspace/bookmark/status
+agreement, unresolved snapshot WAL, dirty tracked paths, and untracked target
+collisions. It reads worktree files through the bounded no-follow reader and
+currently rejects tracked files above 16 MiB for this check. It does not invoke
+WAL recovery, and rejects target tree/metadata reads or reconstructed target
+files above the same 16 MiB preflight limit. It does not change repository
+files, authorize a later restore, or claim
+concurrency safety. It validates canonical `file_` and `sha256_` prefixes
+before passing target rows to the existing structural reconstruction owner,
+checks existing target parents for canonical in-root paths, and rejects target
+files whose paths are file ancestors of other target paths.
+The check admits at most 10,000 target/current rows, 64 MiB of raw bytes per
+target or current view, 32 direct parents per operation/commit, and 256
+bookmarks; small object records are capped at 256 KiB and tree/status/WAL text
+at 16 MiB.
+The existing structural object reader still assumes the `.scv` object-store
+directories are not replaced adversarially during inspection; the preflight
+does not acquire a cross-process mutation lease. Output says `mutation=unsupported` and
+`atomicity=unclaimed`; it also reports `operation_id_integrity=unavailable`
+because current operation IDs are not content hashes of their payloads.
+Successful validation means only that the target and checked local view passed
+this read-only inspection. The legacy mutating
+`restore-op <op>` path remains sequential and is not covered by a complete
+working-tree WAL or whole-view atomic publication protocol. A shared mutation
+owner and recovery journal remain required before stronger restore guarantees
+can be claimed. The legacy route also assigns `HEAD_OP` to the selected
+historical operation, so the current operation ancestry can be left behind;
+the preflight does not correct that history behavior.
 New operation writes also validate their parent operation, target commit, and
 current bookmark rows before writing the operation object or moving current
 metadata. Target commits must have an existing tree, valid state, and existing

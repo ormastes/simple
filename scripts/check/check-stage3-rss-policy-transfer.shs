@@ -31,6 +31,11 @@ with tempfile.TemporaryDirectory(prefix='stage3-policy-') as tmp:
     bindir.mkdir()
     fixture_worker = fixture / 'scripts/bootstrap/lib/stage3-native-build-worker.sh'
     fixture_worker.parent.mkdir(parents=True)
+    policy_helper = fixture / 'scripts/bootstrap/lib/stage3-source-policy.shs'
+    policy_helper.parent.mkdir(parents=True, exist_ok=True)
+    policy_helper.write_text((root / 'scripts/bootstrap/lib/stage3-source-policy.shs').read_text())
+    tree_policy = fixture / 'scripts/bootstrap/lib/tree-rss-policy.shs'
+    tree_policy.write_text((root / 'scripts/bootstrap/lib/tree-rss-policy.shs').read_text())
     facade = fixture / 'scripts/check/lib/bootstrap-stage3-provenance.shs'
     facade.parent.mkdir(parents=True)
     capture = base / 'capture'
@@ -77,58 +82,87 @@ bootstrap_stage3_memory_darwin_session_mode() { echo new; }
             case_env = dict(env)
             if mode is not None:
                 case_env['SIMPLE_BOOTSTRAP_RSS_CAP_MODE'] = mode
-            run(setup + helpers + policy + launch, case_env)
+            run(setup + helpers + 'set -- --source src/app --entry-closure\n' + policy + launch, case_env)
             args = capture.read_text().splitlines()
-            assert len(args) == 29 and args[-1] == (mode or 'enforce'), (route, args)
+            assert len(args) == 37 and args[32:] == [
+                mode or 'enforce', '--stage3-source-policy-v1',
+                '--source', 'src/app', '--entry-closure'], (route, args)
             assert args[7] == platform, (route, args[7])
         print(f'PASS: {route} {platform}: explicit monitor, enforce and default transport')
     for invalid in ('', 'disabled', 'MONITOR', 'monitor enforce'):
         run(helpers + policy + 'exit 99', dict(env, SIMPLE_BOOTSTRAP_RSS_CAP_MODE=invalid), 2)
 
-    # Exercise the actual worker. A facade collaborator stops at the watchdog
-    # call, after its real argument, policy and ABI transfer validation. Darwin
-    # avoids kernel-specific Linux cgroup setup; no compiler is ever invoked.
-    facade.write_text('''
-bootstrap_stage3_hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
-bootstrap_stage3_normalized_absolute() { case "$1" in /*) return 0;; *) return 1;; esac; }
-bootstrap_stage3_manifest_value() { sed -n "s/^$1=//p" "$2"; }
-bootstrap_stage3_run_transcribed() {
-  printf 'mode=%s\\n' "$SIMPLE_BOOTSTRAP_RSS_CAP_MODE"
-  printf 'session=%s|%s\\n' "${SIMPLE_BOOTSTRAP_SESSION_ID-unset}" "${SIMPLE_BOOTSTRAP_SESSION_EXEC-unset}"
-  shift 6
-  for arg do
-    [ "$arg" != -- ] || break
-    case "$arg" in SIMPLE_BOOTSTRAP_RSS_CAP_MODE=*|SIMPLE_BOOTSTRAP_SESSION_ID=*|SIMPLE_BOOTSTRAP_SESSION_EXEC=*) exit 98;; esac
-  done
-  return 73
-}
-''')
+    # Source the production command-snapshot owner and replace only its final
+    # watchdog executable with a recording Perl spy. No compiler is invoked.
+    facade.write_text(
+        '. ' + shlex.quote(str(root / 'scripts/check/lib/bootstrap-stage3/authority.shs')) + '\n' +
+        '. ' + shlex.quote(str(root / 'scripts/check/lib/bootstrap-stage3/command-snapshot.shs')) + '\n')
+    watchdog_spy = fixture / 'scripts/resource/process-tree-rss-watchdog.pl'
+    watchdog_spy.parent.mkdir(parents=True)
+    watchdog_spy.write_text('use strict; use warnings; print "observed-session=", ($ENV{SIMPLE_BOOTSTRAP_SESSION_ID} // "unset"), "|", ($ENV{SIMPLE_BOOTSTRAP_SESSION_EXEC} // "unset"), "\\n"; print join("\\n", @ARGV), "\\n"; exit 73;\n')
     admitted = base / 'admitted'
     admitted.write_text('NONEXECUTABLE TEST DATA\n')
     import hashlib
     digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
     receipt = base / 'admission.env'
     receipt.write_text('schema=simple-bootstrap-stage2-admission-v2\nstatus=admitted\nsimple_abi_policy=v1\ncandidate_sha256=' + digest(admitted) + '\n')
-    args = ['fixture'] * 29
-    args[1], args[6], args[7] = str(fixture), str(admitted), 'aarch64-apple-darwin'
+    args = ['fixture'] * 32
+    args[0], args[1], args[2] = str(base / 'worker.transcript'), str(fixture), str(base / 'worker.log')
+    args[3], args[4], args[5] = str(base / 'home'), str(base / 'tmp'), '/usr/bin:/bin'
+    args[6], args[7] = str(admitted), 'aarch64-apple-darwin'
+    args[8], args[9], args[10] = 'cranelift', '1', ''
+    args[11], args[12], args[13] = str(base / 'cache'), str(base / 'runtime'), str(base / 'candidate')
+    args[14], args[15], args[16], args[17] = str(base / 'progress'), str(base / 'profile'), str(base / 'memory'), 'fixture-id'
+    args[18:25] = ['direct', 'none', '4194304', '', '', '', '1']
     args[25:28] = ['v1', str(receipt), digest(receipt)]
-    for mode, ambient in [('monitor', 'enforce'), ('enforce', 'monitor')]:
-        args[28] = mode
-        command = ' '.join(map(shlex.quote, ['/bin/sh', str(worker)] + args))
-        result = run(command, dict(env, SIMPLE_BOOTSTRAP_RSS_CAP_MODE=ambient), 73)
-        assert result.stdout == f'mode={mode}\nsession=unset|unset\n'
-        result = run(command, dict(env, SIMPLE_BOOTSTRAP_SESSION_ID='123', SIMPLE_BOOTSTRAP_SESSION_EXEC='/fixture/session-helper'), 73)
-        assert result.stdout == f'mode={mode}\nsession=123|/fixture/session-helper\n'
+    args[28:32] = ['', '', '1000', 'per-file']
+    args += ['enforce', '--stage3-source-policy-v1', '--source', 'src/app', '--entry-closure']
+    (base / 'home').mkdir()
+    (base / 'tmp').mkdir()
+    cap_args = None
     for invalid in ('', 'disabled', 'MONITOR', 'monitor enforce'):
-        args[28] = invalid
-        result = run(' '.join(map(shlex.quote, ['/bin/sh', str(worker)] + args)), env, 64)
-        assert 'invalid RSS cap mode transfer' in result.stderr
-    args[28] = 'monitor'
+        invalid_args = list(args)
+        invalid_args[32] = invalid
+        invalid_command = ' '.join(map(shlex.quote, ['/bin/sh', str(worker)] + invalid_args))
+        invalid_result = run(invalid_command, dict(env, PATH='/usr/bin:/bin'), 64)
+        assert 'invalid typed RSS cap mode' in invalid_result.stderr
+    for requested, ambient in [('monitor', 'enforce'), ('enforce', 'monitor'), ('enforce', None)]:
+        worker_args = list(args)
+        worker_args[32] = requested
+        command = ' '.join(map(shlex.quote, ['/bin/sh', str(worker)] + worker_args))
+        case_env = dict(env, PATH='/usr/bin:/bin')
+        if ambient is not None:
+            case_env['SIMPLE_BOOTSTRAP_RSS_CAP_MODE'] = ambient
+        result = run(command, case_env, 73)
+        watchdog_args = pathlib.Path(worker_args[2]).read_text().splitlines()
+        assert f'--rss-cap-mode={requested}' in watchdog_args, (watchdog_args, result.stderr)
+        assert 'observed-session=unset|unset' in watchdog_args, watchdog_args
+        assert not ambient or f'--rss-cap-mode={ambient}' not in watchdog_args, watchdog_args
+        assert '--session-mode=new' in watchdog_args, watchdog_args
+        current_caps = [arg for arg in watchdog_args if arg.startswith((
+            '--max-rss-kib=', '--compiler-jobs=', '--cap-source=', '--cap-bound='))]
+        assert current_caps and (cap_args is None or current_caps == cap_args), (current_caps, cap_args)
+        cap_args = current_caps
+        separator = watchdog_args.index('--')
+        assert not any(arg.startswith('SIMPLE_BOOTSTRAP_RSS_CAP_MODE=') for arg in watchdog_args[separator + 1:])
+        transcript_rows = pathlib.Path(worker_args[0]).read_text().splitlines()
+        shard_rows = [row.split(':', 2)[2] for row in transcript_rows if row.startswith('explicit-env:')
+                      and 'SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=' in row]
+        assert len(shard_rows) == 1, shard_rows
+        shard_budget = shard_rows[0].split('=', 1)[1]
+        assert (shard_budget == '0') == (requested == 'monitor'), (requested, shard_budget)
+        session_env = dict(case_env, SIMPLE_BOOTSTRAP_RSS_CAP_MODE=ambient or requested,
+                           SIMPLE_BOOTSTRAP_SESSION_ID='123', SIMPLE_BOOTSTRAP_SESSION_EXEC='/fixture/session-helper')
+        result = run(command, session_env, 73)
+        session_args = pathlib.Path(worker_args[2]).read_text().splitlines()
+        assert f'--rss-cap-mode={requested}' in session_args, session_args
+        assert '--session-mode=inherit' in session_args, session_args
+        assert 'observed-session=123|/fixture/session-helper' in session_args, session_args
     args[27] = '0' * 64
     result = run(' '.join(map(shlex.quote, ['/bin/sh', str(worker)] + args)), env, 64)
     assert 'verified ABI admission transfer is absent or changed' in result.stderr
     args[27] = digest(receipt)
-    run(' '.join(map(shlex.quote, ['/bin/sh', str(worker)] + args[:-1])), env, 64)
+    run(' '.join(map(shlex.quote, ['/bin/sh', str(worker)] + args[:-3])), env, 64)
     print('PASS: worker policy validation, stale environment override, session preservation, ABI refusal and arity')
 print('PASS: shell transport controls only; native and real systemd/cgroup execution remain unrun')
 PY

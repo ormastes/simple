@@ -158,23 +158,25 @@ fn _tls_desc_pair(obj: ElfObject, reloc: ElfRelocation) -> i64:
         i = i + 1
     -1
 
-fn _tls_is_pair(obj: ElfObject, index: i64) -> bool:
-    val candidate = obj.relocations[index]
-    if elf_reloc_type(candidate) != R_X86_64_PLT32_TLS and
-            elf_reloc_type(candidate) != R_X86_64_TLSDESC_CALL_TLS:
-        return false
-    var i: i64 = 0
-    while i < obj.relocations.len():
-        val r = obj.relocations[i]
-        if (elf_reloc_type(r) == R_X86_64_TLSGD_TLS and _tls_gd_pair(obj, r) == index) or
-                (elf_reloc_type(r) == R_X86_64_TLSLD_TLS and _tls_ld_pair(obj, r) == index):
-            return true
-        if elf_reloc_type(r) == R_X86_64_GOTPC32_TLSDESC_TLS and _tls_desc_pair(obj, r) == index:
-            return true
-        i = i + 1
-    false
+fn _tls_pair_members(obj: ElfObject) -> {i64: bool}:
+    """Indices that `_tls_is_pair` accepts, computed in one pass over the
+    heads instead of a full relocation scan per candidate (was O(n^2))."""
+    var members: {i64: bool} = {}
+    for r in obj.relocations:
+        val rtype = elf_reloc_type(r)
+        var p: i64 = -1
+        if rtype == R_X86_64_TLSGD_TLS: p = _tls_gd_pair(obj, r)
+        else if rtype == R_X86_64_TLSLD_TLS: p = _tls_ld_pair(obj, r)
+        else if rtype == R_X86_64_GOTPC32_TLSDESC_TLS: p = _tls_desc_pair(obj, r)
+        if p >= 0: members[p] = true
+    members
 
 fn _tls_relax_object(obj: ElfObject) -> Result<ElfObject, text>:
+    # See doc/08_tracking/bug/internal_elf_linker_perf_200obj_2026-11-16.md
+    # No early `return Ok(obj)`: an empty pair set does not rule out unpaired heads,
+    # which must still be rejected below. (The 5-32x later-phase slowdown once
+    # blamed on sharing the input object no longer reproduces; see the bug doc.)
+    val members = _tls_pair_members(obj)
     var raw = obj.raw
     var relocs: [ElfRelocation] = []
     var i: i64 = 0
@@ -247,9 +249,9 @@ fn _tls_relax_object(obj: ElfObject) -> Result<ElfObject, text>:
                 r_addend: r.r_addend, section_idx: r.section_idx,
                 target_section_idx: r.target_section_idx))
         else if rtype == R_X86_64_TLSDESC_CALL_TLS:
-            if not _tls_is_pair(obj, i):
+            if not members.has(i):
                 return Err("UnsupportedFeature: unpaired R_X86_64_TLSDESC_CALL")
-        else if not _tls_is_pair(obj, i):
+        else if not members.has(i):
             relocs = relocs.push(r)
         i = i + 1
     Ok(ElfObject(header: obj.header, sections: obj.sections, symbols: obj.symbols,
@@ -397,8 +399,14 @@ fn elf_tls_tpoff(a64: bool, address: i64, tls_start: i64, tls_memsz: i64,
     x86-64 (variant II): the block ends at TP and starts
     align_up(p_memsz, p_align) below it."""
     if a64:
-        return address - tls_start + _tls_align_up(16, tls_align)
+        return elf_tls_tpoff_variant1(address, tls_start, 16, tls_align)
     address - tls_start - _tls_align_up(tls_memsz, tls_align)
+
+fn elf_tls_tpoff_variant1(address: i64, tls_start: i64, tcb_size: i64,
+        tls_align: i64) -> i64:
+    """Variant-I TLS (AArch64 TCB=16, ARM32 TCB=8): the block starts
+    align_up(tcb_size, p_align) past TP. i386 is variant II (elf_tls_tpoff a64=false)."""
+    address - tls_start + _tls_align_up(tcb_size, tls_align)
 
 fn elf_relax_tls(objects: [ElfObject], target: RelocArch) -> Result<[ElfObject], text>:
     match target:
@@ -414,4 +422,4 @@ fn elf_relax_tls(objects: [ElfObject], target: RelocArch) -> Result<[ElfObject],
             Ok(out)
         case _: Ok(objects)
 
-export elf_relax_tls, elf_tls_tpoff
+export elf_relax_tls, elf_tls_tpoff, elf_tls_tpoff_variant1

@@ -62,25 +62,88 @@ cd "${repo_root}"
 
 SELFTEST_EXPECTED=6
 
+CR=$(printf '\r')
+_HASH_TOOL=""
+if command -v sha256sum >/dev/null 2>&1; then _HASH_TOOL=sha256sum
+elif command -v shasum >/dev/null 2>&1; then _HASH_TOOL=shasum
+elif command -v sha256 >/dev/null 2>&1; then _HASH_TOOL=sha256
+fi
+_TIMEOUT_BIN=""
+_TIMEOUT_BIN_INIT=0
+
 hash_file() {
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
-  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
-  elif command -v sha256 >/dev/null 2>&1; then sha256 -q "$1"
-  else echo "error: no SHA-256 tool" >&2; return 1; fi
+  case "${_HASH_TOOL}" in
+    sha256sum)
+      _hf=$(sha256sum -- "$1") || return 1
+      _hf=${_hf%%[[:space:]]*}
+      printf '%s\n' "${_hf#\\}"
+      ;;
+    shasum)
+      _hf=$(shasum -a 256 -- "$1") || return 1
+      _hf=${_hf%%[[:space:]]*}
+      printf '%s\n' "${_hf#\\}"
+      ;;
+    sha256) sha256 -q "$1" ;;
+    *) echo "error: no SHA-256 tool" >&2; return 1 ;;
+  esac
 }
 
-value() { sed -n "s/^$1=//p" "${receipt}" | awk 'NR==1 { value=$0 } END { if (NR==1) print value }'; }
+value() {
+  _val_key="$1="
+  _val_count=0
+  _val_out=""
+  while IFS= read -r _val_line || [ -n "${_val_line}" ]; do
+    _val_line=${_val_line%$CR}
+    case "${_val_line}" in
+      "${_val_key}"*)
+        _val_count=$((_val_count + 1))
+        _val_out=${_val_line#"${_val_key}"}
+        ;;
+    esac
+  done < "${receipt}"
+  if [ "${_val_count}" -eq 1 ]; then
+    printf '%s\n' "${_val_out}"
+  fi
+}
 
 bounded_smoke() {
+  if [ "${_TIMEOUT_BIN_INIT}" -eq 0 ]; then
+    _TIMEOUT_BIN_INIT=1
+    for _tb in /usr/bin/timeout timeout gtimeout; do
+      if "${_tb}" --version >/dev/null 2>&1; then
+        _TIMEOUT_BIN=${_tb}
+        break
+      fi
+    done
+  fi
+  if [ -n "${_TIMEOUT_BIN}" ]; then
+    "${_TIMEOUT_BIN}" 30 "$1" -c 'print(1+1)' </dev/null 2>/dev/null
+    return $?
+  fi
   smoke_out="${deploy_dir}/.rollback-smoke-out.$$"
-  "$1" -c 'print(1+1)' >"${smoke_out}" 2>/dev/null &
+  smoke_done="${deploy_dir}/.rollback-smoke-done.$$"
+  rm -f "${smoke_done}"
+  "$1" -c 'print(1+1)' </dev/null >"${smoke_out}" 2>/dev/null &
   smoke_pid=$!
-  (sleep 30; kill "${smoke_pid}" 2>/dev/null || true; sleep 2; kill -KILL "${smoke_pid}" 2>/dev/null || true) &
+  (
+    watchdog_t=0
+    while [ "${watchdog_t}" -lt 30 ] && [ ! -f "${smoke_done}" ]; do
+      sleep 1 2>/dev/null || break
+      watchdog_t=$((watchdog_t + 1))
+    done
+    if [ ! -f "${smoke_done}" ]; then
+      kill "${smoke_pid}" 2>/dev/null || true
+      sleep 1 2>/dev/null || true
+      kill -KILL "${smoke_pid}" 2>/dev/null || true
+    fi
+  ) </dev/null >/dev/null 2>&1 &
   watchdog_pid=$!
   smoke_status=0
   wait "${smoke_pid}" || smoke_status=$?
+  : >"${smoke_done}"
   kill "${watchdog_pid}" 2>/dev/null || true
   wait "${watchdog_pid}" 2>/dev/null || true
+  rm -f "${smoke_done}"
   cat "${smoke_out}"
   rm -f "${smoke_out}"
   return "${smoke_status}"
@@ -168,6 +231,18 @@ run_fixture() {
   set -e
 }
 
+selftest_symlink() {
+  case "$(uname -s 2>/dev/null || echo unknown)" in
+    MINGW*|MSYS*|CYGWIN*)
+      MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict" ln -s "$1" "$2" 2>/dev/null ||
+        MSYS="${MSYS:+$MSYS }winsymlinks" ln -s "$1" "$2"
+      ;;
+    *)
+      ln -s "$1" "$2"
+      ;;
+  esac
+}
+
 # Fixture 1: a normal rollback restores the previous binary (must PASS).
 selftest_case_normal() {
   fx=$(mktemp -d)
@@ -177,7 +252,7 @@ selftest_case_normal() {
   cur_hash=$(hash_file "${fx}/bin/release/selftest-platform/simple")
   back_hash=$(hash_file "${fx}/bin/release/selftest-platform/simple.pre_deploy")
   write_fixture_receipt "${fx}" "${cur_hash}" "${back_hash}"
-  ln -s "${fx}/bin/release/selftest-platform/simple" "${fx}/bin/simple"
+  selftest_symlink "${fx}/bin/release/selftest-platform/simple" "${fx}/bin/simple"
   run_fixture "${fx}"
   out=$(cat "${fx}/out")
   ok=1
@@ -217,7 +292,7 @@ selftest_case_dangling() {
   write_fixture_receipt "${fx}" "${cur_hash}" "${back_hash}"
   # bin/simple points at a path that does not exist: already dangling, and a
   # completed rollback would still leave it dangling.
-  ln -s "${fx}/bin/release/selftest-platform/simple-ghost" "${fx}/bin/simple"
+  selftest_symlink "${fx}/bin/release/selftest-platform/simple-ghost" "${fx}/bin/simple"
   run_fixture "${fx}"
   out=$(cat "${fx}/out")
   ok=1

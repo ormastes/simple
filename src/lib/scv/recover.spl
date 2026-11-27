@@ -2,7 +2,7 @@
 #
 # `scv recover --level <0..5>`:
 #   0  rebuild derived indexes (parser index invalidation + rebuild-db)
-#   1  rebuild DB from journal/objects (WAL recovery + rebuild-db)
+#   1  rebuild DB from journal/objects after WAL recovery is clean
 #   2  reconstruct heads from the operation DAG (newest tip op wins)
 #   3  reconstruct from a git backend checkout (--git <path>): re-init + import + snapshot
 #   4  checkpoint restore + journal replay (--checkpoint <id>)
@@ -11,7 +11,7 @@
 
 use app.io.mod (file_exists, file_read, file_delete, dir_walk, dir_create, process_run)
 use std.nogc_sync_mut.io.file_ops.{file_read_bytes, file_write_bytes, file_modified_time}
-use std.scv.core.{scv_repo_dir, scv_objects_dir, scv_head_path, scv_workspace_path, scv_object_path, scv_parser_index_path, scv_line_set_contains}
+use std.scv.core.{scv_split_parent_ids, scv_repo_dir, scv_objects_dir, scv_head_path, scv_workspace_path, scv_object_path, scv_parser_index_path, scv_line_set_contains}
 use std.scv.store.{scv_repo_exists, scv_init_repo, scv_write_text, scv_create_parent_dir, scv_object_field}
 use std.scv.journal.{scv_wal_recover, scv_rebuild_db, scv_journal_events_path}
 use std.scv.stabilize.{scv_doctor, scv_checkpoint_verify, scv_checkpoints_dir}
@@ -52,6 +52,8 @@ fn scv_recover_level_0(root: text) -> text:
 
 fn scv_recover_level_1(root: text) -> text:
     var out = scv_wal_recover(root)
+    if out.starts_with("ERROR"):
+        return out
     val rebuilt = scv_rebuild_db(root)
     if rebuilt.starts_with("ERROR"):
         return out + rebuilt
@@ -69,11 +71,12 @@ fn scv_recover_level_2(root: text) -> text:
         val content = file_read(path)
         if scv_object_field(content, "view") == "":
             continue
-        val parts = path.split("/")
+        # dir_walk yields native separators (backslash on Windows).
+        val parts = path.replace("\\", "/").split("/")
         val name = parts[parts.len() - 1]
         val id = if name.ends_with(".sdn"): name[0:name.len() - 4] else: name
         op_rows.push("{id}|{path}")
-        for parent in scv_object_field(content, "parents").split(","):
+        for parent in scv_split_parent_ids(scv_object_field(content, "parents")):
             val p = parent.trim()
             if p != "":
                 parents = parents + p + "\n"
@@ -144,10 +147,12 @@ fn scv_recover_level_4(root: text, checkpoint: text) -> text:
     if not verify.starts_with("OK"):
         return verify + "FAIL — recover level 4: checkpoint {checkpoint} did not verify\n"
     val data_dir = "{scv_checkpoints_dir(root)}/{checkpoint}/data"
-    val prefix = "{data_dir}/"
+    # dir_walk yields native separators (backslash on Windows); normalize
+    # both sides of the prefix match.
+    val prefix = data_dir.replace("\\", "/") + "/"
     var restored = 0
     for path in dir_walk(data_dir):
-        if not path.starts_with(prefix):
+        if not path.replace("\\", "/").starts_with(prefix):
             continue
         val rel = path[prefix.len():]
         val dst = "{scv_repo_dir(root)}/{rel}"
@@ -206,7 +211,9 @@ fn scv_recover_level_5(root: text) -> text:
     var checkpoints = 0
     val checkpoints_dir = scv_checkpoints_dir(root)
     if file_exists(checkpoints_dir):
-        for path in dir_walk(checkpoints_dir):
+        for walked in dir_walk(checkpoints_dir):
+            # dir_walk yields native separators (backslash on Windows).
+            val path = walked.replace("\\", "/")
             if path.ends_with("/manifest.sdn"):
                 checkpoints = checkpoints + 1
     out = out + " checkpoints={checkpoints}\n"

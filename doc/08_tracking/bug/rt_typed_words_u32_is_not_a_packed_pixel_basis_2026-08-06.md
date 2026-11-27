@@ -325,3 +325,19 @@ fix. No action needed.
 
 Status: CLOSED (2026-09-13) — finding fully documented and guarded; nothing
 actionable remains.
+
+## Verification 2026-11-25 (p3-bam lane, Windows worktree) — closure confirmed
+
+Binary: worktree-tracked `bin/simple.exe` (38,403,072 bytes, x86_64 Windows),
+`SIMPLE_LIB=src`, branch `work/p3-bam-20261125` off `release/1.0.0`.
+
+- Regression spec `bin/simple.exe test
+  test/01_unit/lib/common/memory/u32_array_layout_spec.spl --mode=interpreter`
+  → `Results: 2 total, 2 passed, 0 failed` (verdict OK). The documented
+  layout guarantee and the extern-reachability gap note both still hold.
+- Fence script `scripts/check/check-u32-array-not-packed.shs` still present.
+- Storage-contract citations re-confirmed by source read:
+  `src/runtime/simple_core/core_array_ops.spl` `rt_typed_words_u32_at` still
+  hardcodes the `idx * 8` stride.
+
+The 2026-09-13 CLOSED disposition stands; nothing actionable remains.

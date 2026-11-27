@@ -1,0 +1,97 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+#
+# Caret per-agent change overlay (design §18.1): Git-aware categories from
+# `git status --porcelain=v1` with rename sources, keyed by the registered
+# (workspace, agent, worktree, base, head, index generation) identity.
+
+use std.spec
+use std.spec.step
+use app.llm_caret.agent_change_overlay.{agent_change_entry_from_porcelain_line_v1,
+    agent_change_entries_from_porcelain_v1, agent_change_overlay_from_porcelain_v1,
+    agent_change_overlay_key_v1, agent_change_category_v1, agent_change_overlay_paths_v1,
+    agent_committed_change_from_name_status_line_v1, agent_committed_changes_v1,
+    agent_committed_category_v1, agent_hunks_from_unified_diff_v1}
+
+fn porcelain_fixture_v1() -> text:
+    "?? new/untracked.spl\n M src/lib/a.spl\nM  src/lib/b.spl\nMM src/lib/c.spl\nR  old/name.spl -> new/name.spl\n!! build/ignored.o\n\n"
+
+describe "agent change overlay porcelain parsing":
+    it "classifies untracked, unstaged, staged and mixed entries":
+        # @req REQ-SSPEC-UNIT
+        step("categories")
+        val entries = agent_change_entries_from_porcelain_v1(porcelain_fixture_v1())
+        expect(entries.len()).to_equal(5)
+        expect(entries[0].path).to_equal("new/untracked.spl")
+        expect(agent_change_category_v1(entries[0])).to_equal("untracked")
+        expect(agent_change_category_v1(entries[1])).to_equal("unstaged")
+        expect(agent_change_category_v1(entries[2])).to_equal("staged")
+        expect(agent_change_category_v1(entries[3])).to_equal("staged+unstaged")
+
+    it "keeps the original path of a rename and drops ignored files":
+        # @req REQ-SSPEC-UNIT
+        step("rename + ignored")
+        val entries = agent_change_entries_from_porcelain_v1(porcelain_fixture_v1())
+        expect(entries[4].path).to_equal("new/name.spl")
+        expect(entries[4].original_path).to_equal("old/name.spl")
+        expect(entries[4].staged).to_equal(true)
+        var has_ignored = false
+        for e in entries:
+            if e.path.contains("ignored"): has_ignored = true
+        expect(has_ignored).to_equal(false)
+        expect(agent_change_entry_from_porcelain_line_v1("").is_none()).to_equal(true)
+        expect(agent_change_entry_from_porcelain_line_v1("abc").is_none()).to_equal(true)
+
+    it "normalises backslashes and quoted paths":
+        # @req REQ-SSPEC-UNIT
+        step("path normalisation")
+        val e = agent_change_entry_from_porcelain_line_v1(" M \"src\\dir\\x y.spl\"")!
+        expect(e.path).to_equal("src/dir/x y.spl")
+
+describe "agent committed and pushed categories":
+    it "classifies name-status lines and lets an unpushed change win over a pushed one":
+        # @req REQ-SSPEC-UNIT
+        step("name-status parsing")
+        val pushed = "A\tsrc/new.spl\nM\tsrc/both.spl\nR100\tsrc/old.spl\tsrc/moved.spl\n"
+        val unpushed = "M\tsrc/both.spl\nD\tsrc/gone.spl\n\n"
+        val r = agent_committed_change_from_name_status_line_v1("R100\tsrc/old.spl\tsrc/moved.spl", true)!
+        expect(r.status).to_equal("renamed")
+        expect(r.original_path).to_equal("src/old.spl")
+        expect(r.path).to_equal("src/moved.spl")
+        expect(agent_committed_category_v1(r)).to_equal("pushed")
+        expect(agent_committed_change_from_name_status_line_v1("", false).is_none()).to_equal(true)
+        step("merge of the two ranges")
+        val all = agent_committed_changes_v1(pushed, unpushed)
+        expect(all.len()).to_equal(4)
+        expect(all[0].path).to_equal("src/both.spl")
+        expect(agent_committed_category_v1(all[0])).to_equal("committed")
+        expect(all[1].status).to_equal("deleted")
+        expect(all[2].path).to_equal("src/new.spl")
+        expect(agent_committed_category_v1(all[2])).to_equal("pushed")
+
+    it "extracts hunks from a unified diff, including a deletion":
+        # @req REQ-SSPEC-UNIT
+        step("hunk headers")
+        val diff = "diff --git a/src/x.spl b/src/x.spl\n--- a/src/x.spl\n+++ b/src/x.spl\n@@ -10,3 +10,5 @@ fn f():\n-a\n+b\n@@ -40 +42,0 @@\n-c\n" +
+            "diff --git a/src/gone.spl b/src/gone.spl\n--- a/src/gone.spl\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-x\n-y\n"
+        val hunks = agent_hunks_from_unified_diff_v1(diff)
+        expect(hunks.len()).to_equal(3)
+        expect(hunks[0].path).to_equal("src/x.spl")
+        expect(hunks[0].old_start).to_equal(10)
+        expect(hunks[0].old_len).to_equal(3)
+        expect(hunks[0].new_start).to_equal(10)
+        expect(hunks[0].new_len).to_equal(5)
+        expect(hunks[1].old_len).to_equal(1)
+        expect(hunks[1].new_len).to_equal(0)
+        expect(hunks[2].path).to_equal("src/gone.spl")
+        expect(agent_hunks_from_unified_diff_v1("").len()).to_equal(0)
+
+describe "agent change overlay identity":
+    it "is keyed by workspace, agent, worktree, base, head and generation":
+        # @req REQ-SSPEC-UNIT
+        step("overlay key")
+        val o = agent_change_overlay_from_porcelain_v1("ws1", "agent-a", "wt-7", "abc123", "def456", 3, porcelain_fixture_v1())
+        expect(agent_change_overlay_key_v1(o)).to_equal("ws1/agent-a/wt-7@abc123..def456#3")
+        expect(o.entries.len()).to_equal(5)
+        expect(agent_change_overlay_paths_v1(o)).to_equal(["new/untracked.spl", "src/lib/a.spl", "src/lib/b.spl", "src/lib/c.spl", "new/name.spl"])

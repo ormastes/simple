@@ -1,0 +1,166 @@
+# Pure bounded protocol progress, NOT a grant or native submission owner.
+# The actual session must authenticate every control and use the native revision
+# barrier before IO. A returned disposition never authorizes an Engine write.
+use std.nogc_async_mut.container.providers.windows.docker_broker_frame_v3.{
+    WindowsDockerBrokerFrameV3, windows_docker_broker_frame_validate_v3}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+
+pub enum WindowsDockerBrokerDispositionV3:
+    NewFrame
+    ContinueFrame
+    ProgressOnly
+    Complete
+    Unknown
+
+pub struct WindowsDockerBrokerProgressTurnV3:
+    disposition: WindowsDockerBrokerDispositionV3
+    frame_sequence: i64
+    accepted_prefix: i64
+
+# Stable across partial-prefix retries and progress replies. No lease is encoded;
+# these values only correlate with the actual issuer's retained current entry.
+pub fn windows_docker_broker_effect_digest_v3(frame: WindowsDockerBrokerFrameV3) -> Result<text, text>:
+    val valid = windows_docker_broker_frame_validate_v3(frame)?
+    if not ["input", "geometry", "progress"].contains(frame.kind):
+        return Err("broker-progress-control-frame-required")
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("windows-docker-broker-effect-v3"),
+        "targetDigest": SdnValue.String(frame.target_digest), "controlKind": SdnValue.String(frame.control_kind),
+        "nonceDigest": SdnValue.String(frame.nonce_digest), "revision": SdnValue.Int(frame.revision),
+        "frameSequence": SdnValue.Int(frame.frame_sequence), "payloadDigest": SdnValue.String(frame.payload_digest),
+        "payloadBytes": SdnValue.Int(frame.payload_bytes), "rows": SdnValue.Int(frame.rows), "cols": SdnValue.Int(frame.cols)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
+
+pub class WindowsDockerBrokerProgressV3:
+    target_digest: text
+    first_sequence: i64
+    active: WindowsDockerBrokerFrameV3?
+    effect_digest: text
+    accepted_prefix: i64
+    complete: bool
+    unknown: bool
+
+impl WindowsDockerBrokerProgressV3:
+    # Target/sequence come from the retained channel context, never first-frame
+    # adoption. This constructor validates metadata only, not authenticated origin.
+    pub static fn create_v3(target_digest: text, first_sequence: i64 = 1) -> Result<WindowsDockerBrokerProgressV3, text>:
+        if not builder_digest_valid_v1(target_digest) or first_sequence <= 0:
+            return Err("broker-progress-context-invalid")
+        Ok(WindowsDockerBrokerProgressV3(target_digest: target_digest, first_sequence: first_sequence,
+            active: None, effect_digest: "", accepted_prefix: 0, complete: false, unknown: false))
+
+    fn _turn(disposition: WindowsDockerBrokerDispositionV3) -> WindowsDockerBrokerProgressTurnV3:
+        val sequence = match self.active:
+            case Some(frame): frame.frame_sequence
+            case None: self.first_sequence
+        WindowsDockerBrokerProgressTurnV3(disposition: disposition,
+            frame_sequence: sequence, accepted_prefix: self.accepted_prefix)
+
+    # The caller retains this updated object. Native pending IO and native write
+    # attempt_sequence remain in the actual transport owner, not this frame counter.
+    pub me fn offer_v3(frame: WindowsDockerBrokerFrameV3) -> Result<WindowsDockerBrokerProgressTurnV3, text>:
+        val valid = windows_docker_broker_frame_validate_v3(frame)?
+        if frame.kind != "input" and frame.kind != "geometry":
+            return Err("broker-progress-request-required")
+        if frame.target_digest != self.target_digest: return Err("broker-progress-target-mismatch")
+        val digest = windows_docker_broker_effect_digest_v3(frame)?
+        var expected = self.first_sequence
+        if val current = self.active:
+            if frame.frame_sequence == current.frame_sequence:
+                if digest != self.effect_digest: return Err("broker-progress-immutable-frame-mismatch")
+                if self.unknown: return Ok(self._turn(WindowsDockerBrokerDispositionV3.Unknown))
+                if self.complete: return Ok(self._turn(WindowsDockerBrokerDispositionV3.Complete))
+                if frame.accepted_prefix != self.accepted_prefix:
+                    return Ok(self._turn(WindowsDockerBrokerDispositionV3.ProgressOnly))
+                return Ok(self._turn(WindowsDockerBrokerDispositionV3.ContinueFrame))
+            if self.unknown: return Err("broker-progress-unknown-channel-frozen")
+            if not self.complete: return Err("broker-progress-previous-frame-incomplete")
+            if current.frame_sequence == 9223372036854775807: return Err("broker-progress-sequence-exhausted")
+            expected = current.frame_sequence + 1
+        if frame.frame_sequence != expected: return Err("broker-progress-sequence-mismatch")
+        if frame.accepted_prefix != 0: return Err("broker-progress-new-frame-prefix")
+        self.active = Some(frame)
+        self.effect_digest = digest
+        self.accepted_prefix = 0
+        self.complete = false
+        self.unknown = false
+        Ok(self._turn(WindowsDockerBrokerDispositionV3.NewFrame))
+
+    # Feed only the exact progress reply from the authenticated retained broker
+    # channel. Decoder validity and checksums do not establish that provenance.
+    pub me fn observe_progress_v3(reply: WindowsDockerBrokerFrameV3) -> Result<WindowsDockerBrokerProgressTurnV3, text>:
+        val valid = windows_docker_broker_frame_validate_v3(reply)?
+        if reply.kind != "progress": return Err("broker-progress-reply-required")
+        if self.active == None: return Err("broker-progress-no-active-frame")
+        if windows_docker_broker_effect_digest_v3(reply)? != self.effect_digest:
+            return Err("broker-progress-reply-binding-mismatch")
+        if self.unknown: return Ok(self._turn(WindowsDockerBrokerDispositionV3.Unknown))
+        if self.complete:
+            if reply.unknown: return Err("broker-progress-after-completion-contradiction")
+            return Ok(self._turn(WindowsDockerBrokerDispositionV3.Complete))
+        if reply.accepted_prefix < self.accepted_prefix:
+            # A stale progress response never rewinds the accepted byte prefix.
+            # Unknown is sticky even when it accompanies an older known prefix.
+            if reply.unknown:
+                self.unknown = true
+                return Ok(self._turn(WindowsDockerBrokerDispositionV3.Unknown))
+            return Ok(self._turn(WindowsDockerBrokerDispositionV3.ProgressOnly))
+        self.accepted_prefix = reply.accepted_prefix
+        if reply.unknown:
+            self.unknown = true
+            return Ok(self._turn(WindowsDockerBrokerDispositionV3.Unknown))
+        self.complete = reply.complete
+        Ok(self._turn(if self.complete: WindowsDockerBrokerDispositionV3.Complete else: WindowsDockerBrokerDispositionV3.ProgressOnly))
+
+# Consumed AFTER the existing sole logical reader decodes output. This tracker
+# creates no reader/endpoint. Output sequence is independent of control-frame
+# sequence; byte offsets are per actual stdout/stderr channel, or merged TTY.
+pub class WindowsDockerBrokerOutputProgressV3:
+    target_digest: text
+    tty: bool
+    next_sequence: i64
+    sequence_exhausted: bool
+    stdout_offset: i64
+    stderr_offset: i64
+    tty_offset: i64
+    stdout_end: bool
+    stderr_end: bool
+    tty_end: bool
+
+impl WindowsDockerBrokerOutputProgressV3:
+    pub static fn create_v3(target_digest: text, tty: bool,
+            first_sequence: i64 = 1) -> Result<WindowsDockerBrokerOutputProgressV3, text>:
+        if not builder_digest_valid_v1(target_digest) or first_sequence <= 0:
+            return Err("broker-output-context-invalid")
+        Ok(WindowsDockerBrokerOutputProgressV3(target_digest: target_digest, tty: tty,
+            next_sequence: first_sequence, sequence_exhausted: false,
+            stdout_offset: 0, stderr_offset: 0, tty_offset: 0,
+            stdout_end: false, stderr_end: false, tty_end: false))
+
+    pub me fn accept_v3(frame: WindowsDockerBrokerFrameV3) -> Result<bool, text>:
+        val valid = windows_docker_broker_frame_validate_v3(frame)?
+        if frame.kind != "output" or frame.target_digest != self.target_digest:
+            return Err("broker-output-target-or-kind")
+        if self.sequence_exhausted or frame.frame_sequence != self.next_sequence:
+            return Err("broker-output-sequence")
+        if (self.tty and frame.stream != "tty") or (not self.tty and frame.stream == "tty"):
+            return Err("broker-output-mode")
+        val offset = if frame.stream == "stdout": self.stdout_offset elif frame.stream == "stderr": self.stderr_offset else: self.tty_offset
+        val ended = if frame.stream == "stdout": self.stdout_end elif frame.stream == "stderr": self.stderr_end else: self.tty_end
+        if ended or frame.byte_offset != offset: return Err("broker-output-offset-or-after-eof")
+        # The shared validator checked offset+body.len overflow before this update.
+        val next_offset = offset + frame.payload_bytes
+        if frame.stream == "stdout":
+            self.stdout_offset = next_offset
+            self.stdout_end = frame.complete
+        elif frame.stream == "stderr":
+            self.stderr_offset = next_offset
+            self.stderr_end = frame.complete
+        else:
+            self.tty_offset = next_offset
+            self.tty_end = frame.complete
+        if self.next_sequence == 9223372036854775807: self.sequence_exhausted = true
+        else: self.next_sequence = self.next_sequence + 1
+        Ok(true)

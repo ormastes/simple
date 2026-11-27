@@ -5,10 +5,12 @@ use common.ui.glass.theme.{is_glass_theme}
 use common.ui.glass.tokens.{GlassColorTokens}
 use common.ui.profile.{Breakpoints, default_breakpoints}
 use common.string_builder.{StringBuilder}
-use nogc_sync_mut.ui.theme_package.{load_theme_package, resolve_theme_alias}
+use nogc_sync_mut.ui.theme_package.{resolve_theme_alias, resolved_theme_css, theme_package_fingerprint}
 use common.ui.wm_chrome_theme.{active_theme_composed_css, active_theme_source_fingerprint}
 
 # Source: doc/05_design/stitch_design_system.md (macOS-style window controls).
+# These literals are intentionally used only by the package-less compatibility
+# sheet. Resolved folder packages take the early structural-adapter branch.
 val WM_TRAFFIC_CLOSE = "#FF5F57"
 val WM_TRAFFIC_MIN = "#FFBD2E"
 val WM_TRAFFIC_MAX = "#28CA41"
@@ -20,12 +22,22 @@ fn generate_css(theme: text) -> text:
     """Generate comprehensive CSS for all widget types.
     Colors are derived from ThemeColors to stay in sync with TUI ANSI colors."""
     val canonical_theme = resolve_theme_alias(theme)
-    val pkg = load_theme_package(canonical_theme)
+    val resolved_css = resolved_theme_css(canonical_theme)
+    val resolved_fingerprint = theme_package_fingerprint(canonical_theme)
     val installed_css = active_theme_composed_css(canonical_theme)
     val installed_fingerprint = active_theme_source_fingerprint(canonical_theme)
     val installed_matches_package = installed_css != "" and
-        installed_fingerprint == pkg.fingerprint
-    val package_css = if installed_matches_package: installed_css else: pkg.snapshot.composed_css
+        installed_fingerprint == resolved_fingerprint
+    val package_css = if installed_matches_package: installed_css else: resolved_css
+    # A resolved folder package is the visual authority. Its adapter retains
+    # complete DOM layout and interaction semantics but references package
+    # variables for every visual/material property.
+    if package_css != "":
+        return generate_package_authoritative_css(
+            canonical_theme,
+            resolved_fingerprint,
+            package_css
+        )
     # Determine if dark variant
     val is_dark = canonical_theme != "light" and canonical_theme != "ios_light"
     val is_glass = is_glass_theme(canonical_theme)
@@ -283,7 +295,7 @@ fn generate_css(theme: text) -> text:
     parts.push(".tab-bar-item-active .tab-bar-label { color: {accent}; font-weight: 600; }\n")
     parts.push(".tab-bar-icon { font-size: 22px; line-height: 1; }\n")
     parts.push(".tab-bar-label { font-size: 10px; color: {dim_fg}; letter-spacing: 0.02em; }\n")
-    parts.push(".tab-bar-badge { position: absolute; top: 2px; right: 6px; background: {error}; color: #fff; font-size: 9px; font-weight: 700; min-width: 16px; height: 16px; line-height: 16px; text-align: center; border-radius: 999px; padding: 0 4px; }\n")
+    parts.push(".tab-bar-badge { position: absolute; top: 2px; right: 6px; background: var(--ui-badge-background, {error}); color: var(--ui-badge-text, #fff); font-size: 9px; font-weight: 700; min-width: 16px; height: 16px; line-height: 16px; text-align: center; border-radius: 999px; padding: 0 4px; }\n")
 
     # ── Input ──
     parts.push(".widget-input { padding: 10px 12px; background: rgba(255,255,255,0.05); border: 1px solid {border_color}; color: {fg}; font-family: inherit; font-size: inherit; border-radius: 12px; width: 100%; transition: all 0.2s; backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }\n")
@@ -1264,6 +1276,7 @@ fn generate_css(theme: text) -> text:
     parts.push(":root[data-wm-motion=off] .wm-accent-palette.action-feedback, :root[data-wm-motion=off] .wm-accent-choice.action-feedback, :root[data-wm-motion=off] .wm-accent-swatch.action-feedback { animation: none !important; transition: none !important; transform: none !important; filter: none !important; }\n")
     parts.push(".wm-accent-choice:focus-visible { outline: 2px solid rgba({accent_rgb},0.76); outline-offset: 2px; }\n")
     parts.push(".wm-accent-swatch { width: 28px; height: 28px; border-radius: 999px; box-shadow: inset 0 1px 0 rgba(255,255,255,0.30), 0 8px 18px rgba(0,0,0,0.22); }\n")
+    parts.push(".wm-accent-theme { background: var(--ui-accent); }\n")
     parts.push(".wm-accent-blue { background: #64d2ff; }\n")
     parts.push(".wm-accent-green { background: #30d158; }\n")
     parts.push(".wm-accent-rose { background: #ff375f; }\n")
@@ -1654,7 +1667,7 @@ fn generate_css(theme: text) -> text:
     parts.push(".wm-taskbar-item.minimized { opacity: 0.5; }\n")
     parts.push(".wm-taskbar-icon { width: 26px; height: 26px; min-width: 26px; border-radius: 999px; display: inline-grid; place-items: center; overflow: hidden; background: linear-gradient(135deg, rgba({accent_rgb},0.72), rgba(255,255,255,0.18)); color: {fg}; font-size: 11px; font-weight: 750; box-shadow: inset 0 1px 0 rgba(255,255,255,0.20), 0 3px 10px rgba(0,0,0,0.24); }\n")
     parts.push(".wm-taskbar-label { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n")
-    parts.push(".wm-taskbar-badge { position: absolute; top: -5px; right: -4px; min-width: 16px; height: 16px; padding: 0 4px; display: inline-grid; place-items: center; border-radius: 999px; color: #fff; background: #ef4444; font-size: 9px; font-weight: 850; line-height: 1; box-shadow: 0 6px 16px rgba(0,0,0,0.28), 0 0 0 2px rgba(12,12,18,0.82); animation: wm-taskbar-badge-pulse 1400ms ease-in-out infinite; }\n")
+    parts.push(".wm-taskbar-badge { position: absolute; top: -5px; right: -4px; min-width: 16px; height: 16px; padding: 0 4px; display: inline-grid; place-items: center; border-radius: 999px; color: var(--ui-badge-text, #fff); background: var(--ui-badge-background, #d70015); font-size: 9px; font-weight: 850; line-height: 1; box-shadow: 0 6px 16px rgba(0,0,0,0.28), 0 0 0 2px rgba(12,12,18,0.82); animation: wm-taskbar-badge-pulse 1400ms ease-in-out infinite; }\n")
     parts.push(".wm-taskbar-tray { height: 28px; min-width: 28px; border-radius: 999px; padding: 0 8px; display: inline-flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.07); color: {dim_fg}; font-size: 11px; }\n")
     parts.push(".wm-taskbar-preview { position: fixed; z-index: 11800; width: min(320px, calc(100vw - 24px)); min-height: 104px; display: grid; grid-template-columns: 42px minmax(0, 1fr); align-items: center; gap: 12px; padding: 14px; border-radius: 22px; border: 1px solid rgba(255,255,255,0.18); color: {fg}; background: linear-gradient(180deg, rgba(255,255,255,0.17), rgba(255,255,255,0.07)), {panel_bg}; box-shadow: 0 24px 72px rgba(0,0,0,0.36), inset 0 1px 0 rgba(255,255,255,0.18); backdrop-filter: blur(30px) saturate(180%); -webkit-backdrop-filter: blur(30px) saturate(180%); animation: wm-taskbar-preview-in 150ms cubic-bezier(0.22, 0.8, 0.2, 1) both; pointer-events: auto; }\n")
     parts.push(".wm-taskbar-preview[hidden] { display: none; }\n")
@@ -1851,7 +1864,7 @@ fn generate_css(theme: text) -> text:
     result = result.replace(p_font_body, ui_font_body)
     result = result.replace(p_font_label, ui_font_label)
     result = result.replace(p_wm_window_radius, wm_window_radius)
-    if is_glass and package_css == "":
+    if is_glass:
         result = "{result}\n/* Glass theme touch-up */\n"
         result = "{result}.widget-panel, .widget-menubar, .widget-statusbar, .widget-dialog, .widget-list, .widget-tabs { backdrop-filter: blur(28px) saturate(175%); -webkit-backdrop-filter: blur(28px) saturate(175%); }\n"
         result = "{result}.widget-button { background-image: linear-gradient(180deg, rgba(255,255,255,0.20), rgba(255,255,255,0.08)); }\n"
@@ -1880,15 +1893,6 @@ fn generate_css(theme: text) -> text:
     result = result.replace("{" + "wm_close_hover" + "}", WM_TRAFFIC_CLOSE_HOVER)
     result = result.replace("{" + "wm_min_hover" + "}", WM_TRAFFIC_MIN_HOVER)
     result = result.replace("{" + "wm_max_hover" + "}", WM_TRAFFIC_MAX_HOVER)
-
-    # The resolved folder package is the final visual authority. This adapter's
-    # preceding CSS supplies shared structure and compatibility fallbacks only.
-    # Keep identity beside the CSS so renderer evidence can bind the submitted
-    # stylesheet to the same content-addressed package used by WM chrome.
-    if package_css != "":
-        result = result + "\n/* Folder theme package theme=" + pkg.id +
-            " fingerprint=" + pkg.fingerprint + " */\n"
-        result = result + package_css
 
     return result
 

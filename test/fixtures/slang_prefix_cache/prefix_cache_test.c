@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdint.h>
+#include <string.h>
 int64_t slang_ggml_str_reset(void);
 int64_t slang_ggml_str_push(int64_t);
 int64_t slang_ggml_backend_init(void);
@@ -29,6 +30,19 @@ int64_t slang_ggml_prefix_resident_bytes(void);
 int64_t slang_ggml_prefix_rejected_bytes(void);
 int64_t slang_ggml_prefix_restore_failures(void);
 int64_t slang_ggml_capabilities(void);
+int64_t slang_ggml_str_push_bytes(const uint8_t *, int64_t);
+int64_t slang_ggml_request_str_push_bytes(int64_t, const uint8_t *, int64_t);
+int64_t slang_ggml_request_out_into(int64_t, uint8_t *, int64_t, int64_t *);
+int64_t slang_ggml_model_open(const uint8_t *, int64_t, int64_t);
+int64_t slang_ggml_model_close(int64_t);
+int64_t slang_ggml_request_create_for(int64_t, int64_t);
+int64_t slang_ggml_request_embed_configure(int64_t, int64_t);
+int64_t slang_ggml_request_embed_eval(int64_t);
+int64_t slang_ggml_request_embeddings_into(int64_t, uint8_t *, int64_t, int64_t *);
+int64_t slang_ggml_request_rerank_tokenize(int64_t, int64_t);
+int64_t slang_ggml_request_tokens_set(int64_t, const uint8_t *, int64_t);
+int64_t slang_ggml_request_sampler_configure(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t slang_ggml_request_is_eog(int64_t, int64_t);
 int64_t slang_ggml_free(void);
 int64_t slang_ggml_request_configure(int64_t);
 int64_t slang_ggml_context_profile_configure(int64_t, int64_t);
@@ -52,6 +66,13 @@ void mock_llama_fail_restore_once(void);
 void mock_llama_fail_remove_once(void);
 void mock_llama_fail_serialize_once(void);
 void mock_llama_fail_decode_once(void);
+void mock_llama_corrupt_restore_once(void);
+void mock_llama_short_decode_once(void);
+int64_t mock_llama_restore_calls(void);
+void mock_llama_set_n_ubatch(uint32_t);
+void mock_llama_set_gpu_offload(int);
+int64_t mock_llama_short_first_decodes(void);
+int64_t mock_llama_decode_calls(void);
 static void text(const char *s) { slang_ggml_str_reset(); while (*s) slang_ggml_str_push((unsigned char)*s++); }
 static void prefill(const char *s, int64_t expected_start) {
     text(s);
@@ -80,7 +101,7 @@ int main(void) {
     assert(slang_ggml_context_profile_configure(1, -1) < 0);
     assert(slang_ggml_context_profile_configure(1, 2) == 0);
     slang_ggml_backend_init(); text("model"); assert(slang_ggml_model_load(0) == 0);
-    assert(slang_ggml_ctx_create(64) == 0); assert(slang_ggml_capabilities() == 31);
+    assert(slang_ggml_ctx_create(64) == 0); assert(slang_ggml_capabilities() == (31 | 256 | 512));
     assert(slang_ggml_ctx_create(64) < 0);
     assert(slang_ggml_model_load(0) < 0);
     assert(slang_ggml_n_ctx() == 64);
@@ -203,6 +224,56 @@ int main(void) {
     assert(slang_ggml_request_close(contender) == 0);
     assert(slang_ggml_prefix_cache_configure(0, 0) < 0);
     assert(slang_ggml_request_close(consumer) == 0);
+
+    /* Fail closed: a snapshot is never restored into a request whose context
+     * size differs from the one it was taken from. */
+    assert(slang_ggml_prefix_cache_configure(2, 1024) == 2);
+    int64_t restores = mock_llama_restore_calls();
+    int64_t failures = slang_ggml_prefix_restore_failures();
+    int64_t resized = slang_ggml_request_create(16);
+    request_prefill(resized, "pinY", 0);
+    assert(mock_llama_restore_calls() == restores);
+    assert(slang_ggml_prefix_restore_failures() == failures);
+    assert(slang_ggml_request_close(resized) == 0);
+
+    /* Fail closed: a restore that reports success but leaves fewer cells than
+     * the reused tokens is dropped, and the whole prompt is prefilled. */
+    int64_t verified = slang_ggml_request_create(32);
+    mock_llama_corrupt_restore_once();
+    request_prefill(verified, "pinZ", 0);
+    assert(mock_llama_restore_calls() == restores + 1);
+    assert(slang_ggml_prefix_restore_failures() == failures + 1);
+    assert(slang_ggml_request_close(verified) == 0);
+
+    /* Fail closed: a context whose cells do not match its token list is
+     * never admitted as a snapshot. */
+    admissions = slang_ggml_prefix_admissions();
+    int64_t holed = slang_ggml_request_create(32);
+    request_text(holed, "hole");
+    assert(slang_ggml_request_tokenize(holed, 1) == 5);
+    assert(slang_ggml_request_prefix_prepare(holed) == 0);
+    mock_llama_short_decode_once();
+    assert(slang_ggml_request_eval_prompt(holed) == 5);
+    assert(slang_ggml_prefix_admissions() == admissions);
+    assert(slang_ggml_request_close(holed) == 0);
+
+    /* The full-first-micro-batch rule is off for a model with no offloaded
+     * layers: nothing is warmed up and no reuse is given back. */
+    mock_llama_set_n_ubatch(4);
+    /* A cold prompt is two decodes: everything but the last token, then the
+     * last token alone (same batch shape as a prefix hit). No warm-up decode. */
+    int64_t decodes = mock_llama_decode_calls();
+    int64_t cpu_tiny = slang_ggml_request_create(32);
+    request_prefill(cpu_tiny, "ab", 0);
+    assert(mock_llama_decode_calls() == decodes + 2);
+    assert(slang_ggml_request_close(cpu_tiny) == 0);
+    int64_t cpu_seeded = slang_ggml_request_create(32);
+    request_prefill(cpu_seeded, "warmup", 0);
+    assert(slang_ggml_request_close(cpu_seeded) == 0);
+    int64_t cpu_hit = slang_ggml_request_create(32);
+    request_prefill(cpu_hit, "warmupX", 6);
+    assert(slang_ggml_request_close(cpu_hit) == 0);
+    mock_llama_set_n_ubatch(1);
     assert(slang_ggml_prefix_cache_configure(0, 0) == 0);
     assert(slang_ggml_free() == 0);
     assert(slang_ggml_context_profile_configure(0, 0) == 0);
@@ -214,5 +285,135 @@ int main(void) {
     assert(slang_ggml_request_kv_clear(first) < 0);
     assert(slang_ggml_prefix_hits() == 0);
     assert(slang_ggml_prefix_resident_bytes() == 0);
+
+    /* With layers offloaded, the first decode a fresh context runs is always one
+     * full micro-batch: a cold prompt shorter than that is preceded by a
+     * throwaway full micro-batch, and a restore on a fresh (cold) context gives
+     * reuse back until its suffix is a full micro-batch. Once a context is warm
+     * and recycled for a serial follow-up, it keeps full reuse without backing off. */
+    text("model"); assert(slang_ggml_model_load(-1) == 0);
+    assert(slang_ggml_request_configure(4) == 4);
+    assert(slang_ggml_prefix_cache_configure(2, 1024) == 2);
+    mock_llama_set_n_ubatch(4);
+    int64_t short_first = mock_llama_short_first_decodes();
+    int64_t tiny = slang_ggml_request_create(32);
+    request_prefill(tiny, "ab", 0);
+    assert(mock_llama_short_first_decodes() == short_first);
+    assert(slang_ggml_request_close(tiny) == 0);
+    /* Open a fresh context for seeded, keeping tiny's warm ctx consumed, then
+     * keep seeded open so backed_off and full_suffix get fresh cold contexts. */
+    int64_t seeded = slang_ggml_request_create(32);
+    request_prefill(seeded, "warmup", 0);
+    int64_t backed_off = slang_ggml_request_create(32);
+    request_prefill(backed_off, "warmupX", 4);
+    assert(mock_llama_short_first_decodes() == short_first);
+    int64_t full_suffix = slang_ggml_request_create(32);
+    request_prefill(full_suffix, "warmupXabcd", 7);
+    assert(mock_llama_short_first_decodes() == short_first);
+    assert(slang_ggml_request_close(full_suffix) == 0);
+    assert(slang_ggml_request_close(backed_off) == 0);
+    assert(slang_ggml_request_close(seeded) == 0);
+    /* Serial request reuses the warm idle context: full reuse (6 of 7), no short first decode. */
+    int64_t warm_serial = slang_ggml_request_create(32);
+    request_prefill(warm_serial, "warmupY", 6);
+    assert(mock_llama_short_first_decodes() == short_first);
+    assert(slang_ggml_request_close(warm_serial) == 0);
+    /* Off again when the micro-batch is the whole context (fresh ctx of different size). */
+    mock_llama_set_n_ubatch(33);
+    decodes = mock_llama_decode_calls();
+    int64_t whole = slang_ggml_request_create(33);
+    request_prefill(whole, "zz", 0);
+    assert(mock_llama_decode_calls() == decodes + 2);
+    assert(slang_ggml_request_close(whole) == 0);
+    mock_llama_set_n_ubatch(1);
+    assert(slang_ggml_free() == 0);
+
+    /* Asking for every layer (-1) on a llama.cpp with no GPU device offloads
+     * nothing, so the rule stays off: no throwaway decode, full reuse. */
+    mock_llama_set_gpu_offload(0);
+    text("model"); assert(slang_ggml_model_load(-1) == 0);
+    assert(slang_ggml_prefix_cache_configure(2, 1024) == 2);
+    mock_llama_set_n_ubatch(4);
+    decodes = mock_llama_decode_calls();
+    int64_t no_gpu_tiny = slang_ggml_request_create(32);
+    request_prefill(no_gpu_tiny, "ab", 0);
+    assert(mock_llama_decode_calls() == decodes + 2);
+    assert(slang_ggml_request_close(no_gpu_tiny) == 0);
+    int64_t no_gpu_seeded = slang_ggml_request_create(32);
+    request_prefill(no_gpu_seeded, "warmup", 0);
+    assert(slang_ggml_request_close(no_gpu_seeded) == 0);
+    int64_t no_gpu_hit = slang_ggml_request_create(32);
+    request_prefill(no_gpu_hit, "warmupX", 6);
+    assert(slang_ggml_request_close(no_gpu_hit) == 0);
+    mock_llama_set_n_ubatch(1);
+    mock_llama_set_gpu_offload(1);
+    assert(slang_ggml_free() == 0);
+
+    /* Model handles, bulk I/O, embeddings, token input, sampler config. */
+    text("chat"); assert(slang_ggml_model_load(0) == 0);
+    const uint8_t path[] = "embed.gguf";
+    int64_t h = slang_ggml_model_open(path, 10, 0);
+    assert(h > 0);
+    assert(slang_ggml_model_open(path, 10, 0) == h);   /* same path, same handle */
+    int64_t er = slang_ggml_request_create_for(h, 64);
+    int64_t cr = slang_ggml_request_create_for(0, 64);
+    assert(er > 0 && cr > 0);
+    /* Two owners hold h: the first close only gives back its hold, so the other
+     * owner's open request (er, used below) keeps working; the last owner's close is refused
+     * while that request is open. */
+    assert(slang_ggml_model_close(h) == 0);
+    assert(slang_ggml_model_close(h) == -9);            /* last owner: busy while a request is open */
+    const uint8_t hello[] = "hello";
+    assert(slang_ggml_request_str_push_bytes(er, hello, 5) == 5);
+    assert(slang_ggml_request_str_push_bytes(er, hello, 0) == 5);
+    assert(slang_ggml_request_embed_configure(er, 1) == 1);
+    assert(slang_ggml_request_tokenize(er, 1) == 6);
+    assert(slang_ggml_request_embed_eval(er) == 6);
+    int64_t need = -1;
+    assert(slang_ggml_request_embeddings_into(er, 0, 0, &need) == -4 && need == 16);
+    uint8_t vec[16];
+    assert(slang_ggml_request_embeddings_into(er, vec, 16, &need) == 0 && need == 16);
+    float lane0; memcpy(&lane0, vec, 4); assert(lane0 == 1.0f);
+    assert(slang_ggml_request_rerank_tokenize(er, 2) == 8); /* bos h e eos l l o eos */
+    const uint8_t codes[8] = {5, 0, 0, 0, 7, 0, 0, 0};
+    assert(slang_ggml_request_tokens_set(er, codes, 8) == 2);
+    assert(slang_ggml_request_token_at(er, 1) == 7);
+    const uint8_t bad[4] = {99, 0, 0, 0};
+    assert(slang_ggml_request_tokens_set(er, bad, 4) == -8);
+    assert(slang_ggml_request_sampler_configure(cr, 800, 40, 950, 1100, 7) == 0);
+    assert(slang_ggml_request_sampler_configure(cr, 0, 0, 1000, 1000, -1) == 0);
+    assert(slang_ggml_request_piece(cr, 65) == 1);
+    uint8_t piece[4]; int64_t got = 0;
+    assert(slang_ggml_request_out_into(cr, piece, 4, &got) == 0 && got == 1 && piece[0] == 65);
+    assert(slang_ggml_request_close(er) == 0);
+    assert(slang_ggml_request_close(cr) == 0);
+    assert(slang_ggml_model_close(h) == 0);
+    assert(slang_ggml_model_close(h) == -8);
+    assert(slang_ggml_free() == 0);
+
+    /* No default model: EOG must come from the handle request's own vocab. */
+    int64_t h2 = slang_ggml_model_open(path, 10, 0);
+    int64_t r2 = slang_ggml_request_create_for(h2, 64);
+    assert(h2 > 0 && r2 > 0);
+    assert(slang_ggml_is_eog(2) == -1);
+    assert(slang_ggml_request_is_eog(r2, 2) == 1);
+    assert(slang_ggml_request_is_eog(r2, 5) == 0);
+    assert(slang_ggml_request_close(r2) == 0);
+    assert(slang_ggml_model_close(h2) == 0);
+
+    /* Two models with different EOG ids: a request on model B stops at B's
+     * EOG (7), never at the default model's (2). Fails on the old shim, whose
+     * only EOG check read the default model's vocab. */
+    text("chat"); assert(slang_ggml_model_load(0) == 0);
+    const uint8_t eog7[] = "eog7.gguf";
+    int64_t hb = slang_ggml_model_open(eog7, 9, 0);
+    int64_t rb = slang_ggml_request_create_for(hb, 64);
+    assert(hb > 0 && rb > 0);
+    assert(slang_ggml_is_eog(2) == 1 && slang_ggml_is_eog(7) == 0);
+    assert(slang_ggml_request_is_eog(rb, 7) == 1);
+    assert(slang_ggml_request_is_eog(rb, 2) == 0);
+    assert(slang_ggml_request_close(rb) == 0);
+    assert(slang_ggml_model_close(hb) == 0);
+    assert(slang_ggml_free() == 0);
     return 0;
 }

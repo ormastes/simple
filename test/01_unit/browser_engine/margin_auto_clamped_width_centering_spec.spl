@@ -1,0 +1,66 @@
+"""
+## Purpose and audience
+Purpose: Pin horizontal `margin: auto` distribution when the block's used width
+comes from a max-width CLAMP of a percentage or px width — the shape
+`width: min(1100px, 100%); margin: auto` (which desugars to `width: 100%` plus
+an implied `max-width: 1100px`) that centres a page column on a wide viewport.
+The auto-margin step measured free space from the UNCLAMPED width, so 100% of
+the container left nothing to distribute and the column stayed at x=0.
+Audience: browser-engine layout maintainers.
+
+Why it hid: every pixel/geometry lane ran at 900 px, where `min(1100px, 100%)`
+is 100% and no centring is expected. The first 3840x2160 comparison against
+Chrome exposed it (web catalog `overview`: 9.15% mismatch, the whole card 1346
+px left of Chrome's).
+
+Chrome oracle (Chrome 159 headless shell, 3840x2160,
+`*{box-sizing:border-box}body{margin:0;padding:0}`, getBoundingClientRect):
+
+| style on the block                                   | x    | w    |
+|------------------------------------------------------|------|------|
+| `width:min(1100px, 100%); margin:auto`               | 1370 | 1100 |
+| `width:50%; max-width:1100px; margin:auto`           | 1370 | 1100 |
+| `width:2000px; max-width:1100px; margin:auto`        | 1370 | 1100 |
+| `width:min(1100px, 100%); margin-left:auto`          | 2740 | 1100 |
+| `width:50%; margin:auto` (control, no clamp)         | 960  | 1920 |
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-MARGIN-AUTO-CLAMPED-WIDTH-001 — auto margins share the space left by the max-width-clamped used width.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 3840
+val VH: i32 = 2160
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;padding:0}</style></head><body>"
+
+fn probe(style: text, field: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        HEAD + "<main id=\"m\" style=\"" + style + "\">x</main></body></html>", VW, VH, "m", field)
+
+describe "auto margins use the max-width-clamped used width":
+    it "AC-1: width:min(1100px, 100%) with margin:auto is centred":
+        step("Chrome 159: x=1370, w=1100 at a 3840 px viewport")
+        expect(probe("width:min(1100px, 100%);margin:auto", "x")).to_equal("1370")
+        expect(probe("width:min(1100px, 100%);margin:auto", "w")).to_equal("1100")
+
+    it "AC-2: a percentage width clamped by max-width is centred":
+        step("Chrome 159: 50% of 3840 is 1920, clamped to 1100, centred at 1370")
+        expect(probe("width:50%;max-width:1100px;margin:auto", "x")).to_equal("1370")
+
+    it "AC-3: a px width clamped by max-width is centred on the clamped width":
+        step("Chrome 159: width 2000px clamps to 1100, x=1370")
+        expect(probe("width:2000px;max-width:1100px;margin:auto", "x")).to_equal("1370")
+
+    it "AC-4: one auto margin takes all the free space":
+        step("Chrome 159: margin-left:auto pushes the 1100 px block to x=2740")
+        expect(probe("width:min(1100px, 100%);margin-left:auto", "x")).to_equal("2740")
+
+    it "AC-5: control — an unclamped percentage width keeps centring on its own width":
+        step("Chrome 159: 50% -> 1920 wide at x=960")
+        expect(probe("width:50%;margin:auto", "x")).to_equal("960")
+        expect(probe("width:50%;margin:auto", "w")).to_equal("1920")

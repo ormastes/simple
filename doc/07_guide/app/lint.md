@@ -399,6 +399,8 @@ The linter reads project-wide lint levels from `simple.sdn`:
 [lints]
 primitive_api = "warn"
 bare_bool = "warn"
+bare_text = "warn"
+bare_text_domain = "warn"
 export_outside_init = "deny"
 too_many_arguments = "warn"
 wildcard_match = "allow"
@@ -410,6 +412,8 @@ wildcard_match = "allow"
 |------|---------|-------------|
 | `primitive_api` | warn | Bare primitives in public APIs |
 | `bare_bool` | warn | Boolean parameters (suggest enum) |
+| `bare_text` | warn | Public `text` with no domain name (use a domain type or `unit X: text`); warn in every profile |
+| `bare_text_domain` | warn | Public `text` whose name reads as a domain (`url`, `path`, `host`, `sql`, ...); deny in robust/critical |
 | `print_in_test_spec` | warn | `print()` in test specs |
 | `todo_format` | warn | TODO/FIXME format compliance |
 | `spipe_no_print_based_tests` | **deny** | Print-based BDD tests |
@@ -580,8 +584,10 @@ and `<backend>_debug_profiler(...)`.
 
 **Not flagged: accessor pairing.** Building a group by pairing
 `session.debug()` with `session.profile()` is a *correctness* defect, not a
-policy question — classes are value types here, so the two halves are
-independent copies that diverge. That belongs to
+policy question when the halves are `struct` values (value types: two
+independent copies that diverge). Under the 2026-11-06 owner decision `class`
+values are reference types on every lane, and pairing two class handles no
+longer diverges. That belongs to
 `doc/08_tracking/bug/capability_group_from_unsound_under_value_semantics_2026-08-09.md`;
 reporting it as a DCA001 warning would imply it is merely discouraged.
 
@@ -624,9 +630,71 @@ failure the pin exists to prevent.
 
 ---
 
+<!-- antigravity-early-defect-detection-2026-11-18 -->
+
+## Cost Tiers, Pre-Execution Admission, and Coverage Receipts
+
+See the master architecture and rollout plan in [early_defect_detection_2026-11-18.md](../../03_plan/compiler/early_defect_detection_2026-11-18.md) (`WP-01`, `WP-02`, `WP-04`).
+
+### Rule Cost Tiers (`Low`, `Medium`, `High`)
+
+Every supplemental lint and fix producer in `src/compiler/90.tools/lint/_LintMain/rule_cost_tier.spl`, `src/compiler/90.tools/lint/static_rules.spl`, and `src/compiler/90.tools/fix/rules/registry.spl` declares an explicit execution cost tier (unmeasured supplemental rules default to `High`):
+
+| Cost Tier | Scope of Work | Admitted Execution Profiles |
+|-----------|---------------|-----------------------------|
+| `Low` | Bounded single-pass AST/HIR/lexical checks using already-available local facts | Normal build/check, `lint --fast`, interactive LSP, default full lint |
+| `Medium` | Extra module/function passes, cold header/export indexing, serialization sweeps | Default full lint (`bin/simple lint`), explicit LSP/MCP lint jobs, CI assurance |
+| `High` | Interprocedural dataflow, alias/resource reasoning, whole-graph/cross-artifact audits | Default full lint (`bin/simple lint`), explicit LSP/MCP lint jobs, CI assurance |
+
+Default full lint (`bin/simple lint` without `--fast`) enables **all applicable `Low + Medium + High` analyses** in the requested file/module/workspace scope (`ED-03`, `ED-T03`). Normal compilation runs mandatory language validity plus admitted `Low` checks only (`ED-02`, `ED-T01`), and compilation acceptance never depends on whether cached `Medium`/`High` lint findings happen to be warm (`ED-T33`).
+
+### Pre-Execution `--fast` Cost-Tier Ceiling (`tier_profile`)
+
+Cost admission is enforced **before** loading plugins, building transitive import closures, or invoking analysis/fix producers (`src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl`, `src/compiler/90.tools/lint/_LintMain/lint_checks.spl`, `src/compiler/90.tools/fix/rules/registry.spl`):
+
+- Passing `--fast` sets a hard `Low`-only cost-tier ceiling (`FastLint`).
+- Severity flags and directives (`--warn-all`, `--deny-all`, `simple.sdn` `[lints]`, and file-level `@warn`/`@deny` or `#![warn(...)]`/`#![deny(...)]`) govern the **severity presentation** of admitted, completed findings only (`ED-09`).
+- Neither `--warn-all`, `--deny-all`, nor file-level `@warn`/`@deny` can ever override `--fast` or `NormalBuild` to dispatch `Medium` or `High` producers (`ED-T02`). Post-execution filtering of already-executed heavy checks is forbidden.
+
+### Honest Coverage and Budget Exhaustion Receipts
+
+CLI lint (`src/app/io/cli_lint_commands.spl`), the lint kernel (`src/lib/common/lint_kernel/model.spl`), and canonical batches (`src/lib/common/diagnostics/diagnostic_batch.spl`, `src/lib/common/diagnostics/diagnostic_batch_v1_schema.sdn`) emit real per-rule and per-file execution receipts rather than inferring coverage from static rule-catalog counts:
+
+- Each run records `applicable`, `complete`, `pending`, `exempted`, `unsupported`, and `timed_out` counts alongside the evaluated scope (`file`, `changed_files`, or `workspace`) and `policy_digest`.
+- Explicit `@allow` suppressions and profile exemptions are recorded as `exempted`, never silently counted as clean analyzed passes.
+- Unsupported rules/toolchains report `unsupported` (`ED-T04`), parser-recovery runs report partial/incomplete semantic coverage (`ED-T06`), and changed-file or `--fast` runs record their restricted scope so they cannot satisfy a full-workspace assurance gate (`ED-T30`).
+- When a rule or worker hits time/memory limits or crashes, `budget_exhausted` and batch status reflect `timed_out` or `incomplete` (`ED-T05`) — **never** a fabricated `pass` or cached negative ("no defects") result (`ED-07`).
+
+---
+
 ## Related Commands
 
 - `simple build check` — All quality checks
 - `simple build fmt` — Code formatting
 - `simple duplicate-check` — Code duplication detection
 - `simple doc-coverage` — Documentation coverage
+
+<!-- wave-f-perf-analysis-collection-refactoring-2026-11-19 -->
+
+## Symbolic Performance Analysis & Safe Collection Refactoring Profiles (`PERF-*`)
+
+Canonical plan: [Simple Performance Analysis and Collection Refactoring](../../03_plan/compiler/performance_analysis_and_collection_refactoring_2026-11-18.md) (`D06`–`D10`, §8.3, §9.2, §10.3, §11.3, §16.2).
+
+Lint is the canonical default owner (`D07`) of symbolic complexity composition, caller cost propagation, conservative loop-idiom recognition, and safe collection refactoring (`src/compiler/35.semantics/perf/` and `src/compiler/35.semantics/perf_facts/`). CLI, CI, LSP, and MCP project the same `PerfFindingRecordV1` and `DiagnosticBatchV1` results rather than maintaining separate analyzers.
+
+### Perf Lint Profiles and Cost-Tier Mapping
+
+| CLI / Profile Invocation | Analysis Tier | Scope of Work |
+|--------------------------|---------------|---------------|
+| `simple lint --profile perf-fast` (or `lint --fast`) | `T1` (`Low`) | Single-pass bottom-up recognition of the 6 conservative loop idioms (`Map`, `Filter`, `FilterMap`, `OrderedFold`, `Any`/`All`, `Find`) and local known-library cost composition. |
+| `simple lint --profile perf [--changed] [--format json]` | `T1 + T2` (`Low + Medium`) | Compositional caller cost propagation (`FunctionCostSummaryV1`), multivariate size substitution (`O(n*m)` `PERF-COST-001`), baseline comparison (`PERF-COST-002`), resource contract checks (`PERF-CONTRACT-001/002`), and `PERF-ALG-001` / `PERF-ALLOC-001` advisories. |
+| `simple lint --profile perf --explain PERF-COST-001` | Metadata / Provenance | Expands rule rationale, size definitions, `BoundEvidenceV1` assumptions, and caller-to-callee provenance chains. |
+| `simple lint --profile perf --fix-safe` | Explicit Write (`P2`) | Applies only `VerifiedSafe` local refactors whose 13 semantic legality obligations, document revisions, and callee/model dependency fingerprints match; skips `ReviewRequired` algorithm changes and never inserts `@allow` suppressions. |
+| `simple lint --profile perf-deep` | `T1..T3` (`High`) | Enables bounded recurrence/loop-bound solvers and deeper equivalence checks behind finite per-unit budgets (`PERF-ANALYSIS-001` on timeout). |
+
+### Severity and Suppression Rules for `PERF-*`
+
+- `PERF-STYLE-001` (loop-to-collection assist) remains Hint/Assist even under `--deny-all`; imperative loops are never treated as defects (`D09`).
+- `PERF-FIX-001` represents a disabled refactoring candidate (`PerfFixApplicability.Unavailable`) with an explicit unmet-obligation reason, not a warning on the user's loop.
+- `PERF-CONTRACT-001` (refuted contract) is an Error in the contract's enforcement profile; `PERF-CONTRACT-002` (unproved contract) warns by default and becomes an Error only in an explicit strict-verification profile, always stating `"unproved"` rather than `"violated"`.
+- Intentional suppressions require file-scoped `@allow(named_rule) # reason: <description>` (`LINTALLOW001` rejects missing reasons or wildcard suppressions).

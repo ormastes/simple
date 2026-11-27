@@ -1,0 +1,72 @@
+"""
+## Purpose and audience
+Executable spec of the owner decision (2026-11-19) that ALL public `text` is
+flagged (SPL-TEXT-001, warning), superseding the earlier exemption. For lint
+maintainers: a bare text/str/String parameter or return on a public API gets one
+SPL-TEXT-001 finding with no ranked fix, while the numeric-primitive audit
+(`primitive_api_audit_source`) stays numeric-only and numeric primitives are
+still flagged exactly once.
+## Operator workflow
+Run: bin/simple test test/01_unit/compiler/lint/primitive_api_text_flagged_spec.spl
+## Compatibility and limitations
+Single-line `pub fn` heads only, like the text scanner itself.
+## Verification guidance and troubleshooting
+A failing case means the rule diverged from `primitive_api_findings` in
+src/compiler/90.tools/fix/rules/impl_/lint_primitive_api.spl.
+"""
+# @feature: primitive-api-lint
+# @manual_section: primitive-api-text-flagged
+
+use std.spec.*
+use compiler.tools.fix.rules.impl_.lint_primitive_api.{primitive_api_findings, primitive_api_audit_source}
+
+fn _findings(source: text) -> i64:
+    primitive_api_findings("sample.spl", source.split("\n")).len()
+
+describe "primitive_api text flagged":
+    """
+    Every public text-family API is an SPL-TEXT-001 finding.
+    """
+    it "flags a bare text parameter and return":
+        # @req REQ-DPOL-006
+        # @capture(statistics): finding and audit counts for greet
+        step("Scan pub fn greet(name: text) -> text")
+        val source = "pub fn greet(name: text) -> text:\n    name\n"
+        expect(_findings(source)).to_equal(2)  # oracle: param and return each flagged
+        expect(primitive_api_audit_source(source, "sample.spl").len()).to_equal(0)  # oracle: audit stays numeric-only
+
+    it "flags str and String":
+        # @req REQ-DPOL-006
+        step("Scan pub fns using str and String")
+        expect(_findings("pub fn a(name: str) -> String:\n    name\n")).to_equal(2)  # oracle: whole text family flagged
+
+    it "carries no ranked type fix for text":
+        # @req REQ-DPOL-006
+        val fs = primitive_api_findings("sample.spl", "pub fn f(port: text):\n    pass\n".split("\n"))
+        expect(fs[0].fixes.len()).to_equal(0)  # oracle: text has no numeric-family candidates
+
+    it "still flags a bare numeric parameter":
+        # @req REQ-DPOL-006
+        step("Scan pub fn open(port: i64)")
+        expect(_findings("pub fn open(port: i64):\n    pass\n")).to_equal(1)  # oracle: numeric primitive unchanged
+
+    it "does not flag optional text or generic text containers":
+        # @req REQ-DPOL-006
+        expect(_findings("pub fn f(name: text?):\n    pass\n")).to_equal(0)  # oracle: Option text is not the bare text family
+        expect(_findings("pub fn g(names: List<text>) -> List<text>:\n    names\n")).to_equal(0)  # oracle: container of text is not bare text
+
+    it "does not flag text fields of a private struct":
+        # @req REQ-DPOL-006
+        expect(_findings("struct Rec:\n    pub file: text\n")).to_equal(0)  # oracle: only pub struct/class fields are public API
+
+    it "flags a public text field with a trailing comment":
+        # @req REQ-DPOL-006
+        val fs = primitive_api_findings("sample.spl", "pub struct Rec:\n    pub file: text  # the file\n".split("\n"))
+        expect(fs.len()).to_equal(1)  # oracle: the comment is not part of the type
+        expect(fs[0].code).to_equal("SPL-TEXT-001")  # oracle: text field finding code
+        expect(fs[0].type_path).to_equal("Rec.field.file")  # oracle: owner and field name
+
+    it "honours a struct-level @allow for its text fields":
+        # @req REQ-DPOL-006
+        expect(_findings("@allow(primitive_api)\npub struct Rec:\n    pub file: text\n")).to_equal(0)  # oracle: allow covers fields
+        expect(_findings("pub struct Rec:\n    pub file: text\n")).to_equal(1)  # oracle: same struct without allow is flagged

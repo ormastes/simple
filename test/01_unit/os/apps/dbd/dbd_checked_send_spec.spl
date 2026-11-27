@@ -1,0 +1,50 @@
+# AUTHORED_UNRUN: actual DBD sender, no stub transport or shadow encryption.
+# @req REQ-TLS-CHECKED-SEAL-003
+# A negative descriptor tests the native send failure contract. It does not
+# count syscalls; no-write on seal Err additionally requires control-flow review.
+use std.spec.step
+use std.spipe.*
+use os.apps.dbd.dbd.{DbdLiveClientSessionV1, DbdTlsSendStatusV1}
+use os.apps.dbd.dbd_tls.{DbdTlsSessionV1, DbdTlsSessionStatusV1}
+use os.apps.dbd.dbd_auth_ingress.{DbdMutableAuthRequestOwnerV1}
+use os.tls13.server_types.{Tls13ServerContext}
+use os.tls13.handshake13.{CIPHER_AES_128_GCM_SHA256}
+use os.tls13.record13.{RecordKey}
+fn _bytes(value: u8, count: i64) -> [u8]:
+    var out: [u8] = []
+    var index: i64 = 0
+    while index < count:
+        out.push(value)
+        index = index + 1
+    out
+
+fn _context(client_sequence: u64 = 0u64) -> Tls13ServerContext:
+    Tls13ServerContext(
+        cipher_suite: CIPHER_AES_128_GCM_SHA256,
+        named_group: 29u16,
+        server_random: _bytes(1u8, 32),
+        server_keyshare_pub: _bytes(2u8, 32),
+        client_app_key: _bytes(3u8, 16),
+        client_app_iv: _bytes(4u8, 12),
+        server_app_key: _bytes(5u8, 16),
+        server_app_iv: _bytes(6u8, 12),
+        client_seq: client_sequence,
+        server_seq: 0u64
+    )
+
+describe "DBD writer preserves checked TLS failure":
+    it "returns transport failure on seal rejection without sequence commitment":
+        step("Reject an invalid server key through the actual sender")
+        var tls = DbdTlsSessionV1.from_context(_context()).unwrap()
+        tls.server_key = RecordKey(key: _bytes(1u8, 17), iv: _bytes(2u8, 12))
+        var client = DbdLiveClientSessionV1.create(tls, DbdMutableAuthRequestOwnerV1.new(71))
+        expect(client.send_text(-1, "+OK\r\n")).to_equal(DbdTlsSendStatusV1.TransportFailed)
+        expect(client.tls.server_sequence).to_equal(0i64)
+        expect(client.tls.status).to_equal(DbdTlsSessionStatusV1.Failed)
+
+    it "reports actual write failure without rolling back an already consumed nonce":
+        step("Seal valid bytes and send to an invalid descriptor")
+        val tls = DbdTlsSessionV1.from_context(_context()).unwrap()
+        var client = DbdLiveClientSessionV1.create(tls, DbdMutableAuthRequestOwnerV1.new(72))
+        expect(client.send_text(-1, "+OK\r\n")).to_equal(DbdTlsSendStatusV1.TransportFailed)
+        expect(client.tls.server_sequence).to_equal(1i64)

@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-09-02 — isolated while fixing
   `is_dir_always_false_shell_dependency_2026-09-02.md`
-- **Status:** OPEN (compiler/interpreter defect; not fixed here)
+- **Status:** SUPERSEDED (compiler/interpreter defect; not fixed here)
 - **Host:** Windows 11, `bin/simple.exe` 16,347,136 bytes,
   md5 `d52d770724a9f8797e98ac7819709ab9`
 
@@ -61,3 +61,41 @@ Interpreter module/name resolution
 extern registry in `interpreter_extern/mod.rs`). A file-local definition must
 win over any imported name, and an import naming `{process_run}` must not bring
 `is_dir` into scope at all. Verifying the fix needs a seed rebuild.
+
+## Addendum 2026-11-11 — lane interp5 verdict: SUPERSEDED
+
+Verdict: **SUPERSEDED** — the exact resolution defect no longer reproduces on
+the refreshed seed. The seed-rebuild precondition this bug was waiting on has
+happened (tracked `bin/simple.exe` is now the 2026-11-11 refreshed seed), and
+the seed-interpreter resolution family has since been fixed:
+
+- `10e216d19f8c9b2dd9bf8fd24544793c6ad07caa` (2026-11-09, "fix(resolve):
+  ambiguous co-compiled duplicate definition is a compile error (owner decision
+  6)") — touched `pipeline/module_loader.rs` plus four interpreter call-path
+  sites: the caller's own definition wins, an import brings only the names it
+  names, unresolved ambiguity is a compile error.
+- `7a60d8bb19fa8c449d901e046929e802fbfb49a6` (2026-11-06, "fix(seed-interp):
+  fn-valued locals shadow imported functions") — lexical locals win first.
+- Related pure-Simple resolver tiering: `21ac6ca4ec1d` (2026-11-04, local tier
+  wins over stdlib import tier).
+
+All are ancestors of base `b364745fdbf8`.
+
+Seed-smoke verification (2026-11-11, lane interp5, refreshed seed
+`bin/simple.exe` 2026-11-11 build, `SIMPLE_LIB=src`, `SIMPLE_TIMEOUT_SECONDS=0`).
+Minimal reduction of the reported shape — module Target defines its own
+`fn marker() -> "LOCAL"` and imports only `{other}` from module Source, which
+also exports `marker() -> "IMPORTED"`; a caller imports
+`Target.{marker}`:
+
+- Interpreter (`SIMPLE_EXECUTION_MODE=interpret`): prints
+  `probe -> LOCAL` — the file-local definition wins; the unrequested same-named
+  import does not enter scope.
+- JIT control (`SIMPLE_EXECUTION_MODE=jit`): identical, `probe -> LOCAL`.
+
+Scratch probe modules lived only under `src/lib/interp5_probe_*.spl` for the
+run and were deleted afterwards (`git status` clean). The original second
+instance (`dir_walk`/`dir_list` shell lanes) is independently moot: both files
+now use the native provider by owner decision (see
+`seed_directory_discovery_shell_provider_2026_10_05.md` and the comments at
+`src/lib/nogc_sync_mut/io/dir_ops.spl:68-93`). No further action.

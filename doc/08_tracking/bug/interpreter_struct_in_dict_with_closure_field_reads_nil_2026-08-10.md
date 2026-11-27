@@ -1,6 +1,24 @@
 # Interpreter: struct-in-Dict field with a closure-typed sibling field reads back nil
 
-Status: OPEN (P2)
+## 2026-11-03 retained public-API detector; no source workaround
+
+Added `test/01_unit/lib/nogc_async_mut/actor_singleton_closure_persistence_spec.spl`
+against the production `make_handlers`, `spawn_actor`, and `get_actor_runtime`
+owners. Separate scenarios retain named-function handlers, lambda-literal
+handlers, and the adjacent empty-handler control. Each records the prior actor
+count, reacquires the singleton after spawning, requires an exact increment,
+and checks the actor's stats by its actual integer id. No local actor double or
+library workaround replaces the struct/Dict/closure boundary.
+
+Execution is **TEST_BLOCKED** until a qualified pure-Simple test runtime is
+available. The tracked Windows `bin/simple.exe` is the Rust seed and was not
+run. This does not re-establish the historical failure on current source and
+does not prove an interpreter fix; status remains OPEN. Resume with:
+`<qualified-selfhosted-runtime> test test/01_unit/lib/nogc_async_mut/actor_singleton_closure_persistence_spec.spl --mode=interpreter`.
+Retain producer/source/backend/runtime identities and all three scenario
+results before choosing the faulty owner or changing the actor library.
+
+Status: RESOLVED (P2) — verified fixed on the pinned seed 2026-11-25 (see final section)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Symptom
@@ -101,3 +119,51 @@ which is core compiler-internals work well beyond this lane's per-item
 budget and risky to attempt without deep interpreter familiarity.
 Leaving OPEN, no attempt (per the record's own explicit guidance).
 
+
+## Canonical database reconciliation — 2026-11-03
+
+OPEN; PR #6301 MERGED at 5cec7885187661e950f941045cdb6b8d522a4884 and contributes real actor singleton/closure persistence detectors only, not a production repair. TEST_BLOCKED: named/lambda/empty-handler production API scenarios UNRUN without a qualified self-hosted runtime. Await detector execution and triage; no current interpreter regression or repair is claimed from source inspection alone.
+
+## 2026-11-04 triage (libbug-async): INTERPRETER-ROOT
+Real-API repro: under `fn main` (JIT) `actor_count=1`; same code in a non-`main` function (tree-walk interpreter) `actor_count=0`. `actor_singleton_closure_persistence_spec.spl` under seed `run`: 0/3. Likely same root as the class-field value-copy aliasing in the Promise/Future record (class embedded in a container is copied, not aliased, by the interpreter). No lib change made.
+
+## 2026-11-04 note (libbug-async lane)
+
+`actor_singleton_closure_persistence_spec` was NOT this interpreter bug: `ActorRuntime` was declared `struct`, so the module-level singleton (`get_actor_runtime()` returning a copy, then `.spawn_actor` mutating that copy) lost every spawn by value semantics. Lib-free repro `C:/tmp_lb/a2.spl`: a struct singleton keeps n=0, a class singleton keeps n=1 under `SIMPLE_INTERP_CLASS_REF=1`. Fixed by making `ActorRuntime` a `class` (3/3 under `SIMPLE_INTERP_CLASS_REF=1`). Without that flag the seed interpreter still copies class values (0/3), which is the remaining interpreter-side issue.
+
+## 2026-11-04 note (fix-classref lane): interpreter root fixed by default
+
+Class reference semantics are the seed-interpreter default now
+(`Value::ClassInstance`; `SIMPLE_INTERP_CLASS_REF=0` opts out). Rebuilt seed,
+default run: `actor_singleton_closure_persistence_spec` 3/3 (was 0/3).
+Coordinator owns the bug_db status change.
+
+## 2026-11-25 verification (lane p2w3-ak): RESOLVED on the pinned seed
+
+Verified on worktree work/p2w3-ak-20261125 (release/1.0.0 tip dd709d76f18)
+with the tracked `bin/simple.exe` (Rust seed v1.0.0-rc.1, Windows). A probe
+replicating the spec's exact assertions — named handler AND lambda-literal
+handler registered via `make_handlers()`, spawned through the public
+`spawn_actor` facade, runtime reacquired via an independent
+`get_actor_runtime()` call — prints:
+
+```
+actor_count=1
+stats=Actor 0: processed=0, errors=0, pending=0, methods=[process, lambda_process]
+contains_not_found=false
+contains_process=true
+```
+
+The original symptom (`actor_count=0`, `not found`, actor silently lost) no
+longer reproduces; both the named-function and the closure-literal trigger
+shapes persist across singleton accessors. This confirms the 2026-11-04
+fix-classref note: the `ActorRuntime` struct→class repair plus the
+interpreter's default class reference semantics (`Value::ClassInstance`) are
+present and effective in the pinned seed.
+
+Limit: `bin/simple.exe test test/01_unit/lib/nogc_async_mut/actor_singleton_closure_persistence_spec.spl`
+itself could not be executed at this HEAD — the pinned seed rejects the
+`@representation_boundary` decorator added repo-wide by cfd89933699 (fails in
+`src/app/test_runner_new/test_runner_client.spl`), the known source/binary
+inconsistency at release/1.0.0 HEAD. The probe above exercises the identical
+production API calls and assertions as the spec's three scenarios.

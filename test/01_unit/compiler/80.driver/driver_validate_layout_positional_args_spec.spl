@@ -1,0 +1,126 @@
+"""
+## Purpose and audience
+
+Regression coverage for the 80.driver skipped-default named argument fix in
+`src/compiler/80.driver/driver_hir_pipeline_lowering.spl`.
+
+Audience: compiler driver and bootstrap maintainers.
+"""
+
+# Stage 3 self-host failed MIR lowering on driver_hir_pipeline_lowering.spl
+# because the bootstrap path called
+# `driver_validate_value_struct_layout_declarations_v1(..., aop_snapshots: Some(...))`
+# skipping 4 leading `= []` default parameters via a named argument.
+# Passing all 8 arguments positionally avoids requiring declaration scope for
+# skipped named defaults while preserving identical validation behavior.
+
+# @tag:unit
+# @tag:compiler
+# @tag:driver
+
+use std.spec.{describe, it, expect, expect_not, step}
+use std.io_runtime.{file_read}
+use std.nogc_sync_mut.io.env_ops.{env_set}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirField, HirStruct}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable, SymbolKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
+use compiler.semantics.value_struct_layout.{ValueStructLayoutModuleV1, value_struct_layout_declarations_v1}
+use compiler.common.cache_contract.directory_tldr_snapshot_v2.{DirectoryTldrSourceSnapshotV2}
+use compiler.driver.driver_hir_pipeline_support.{driver_validate_value_struct_layout_declarations_v1}
+
+val LOWERING_PATH = "src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
+
+fn vsl_pos_span() -> Span:
+    Span(start: 0, end: 0, line: 1, col: 1, file: "", length: 0)
+
+fn vsl_pos_self_cycle_decl() -> ValueStructLayoutModuleV1:
+    var table = SymbolTable.new()
+    val node_sym = table.define("VslPosNode", SymbolKind.Struct, None, vsl_pos_span(), Visibility.Public, false, None)
+    val named = HirType(kind: HirTypeKind.Named(node_sym, []), span: vsl_pos_span())
+    val no_default = HirExpr(
+        kind: HirExprKind.NilLit,
+        has_type_: true,
+        type_: HirType(kind: HirTypeKind.Int(64, true), span: vsl_pos_span()),
+        span: vsl_pos_span()
+    )
+    val me_field = HirField(
+        symbol: SymbolId(id: 0),
+        name: "me",
+        type_: named,
+        has_default: false,
+        default: no_default,
+        visibility: Visibility.Public,
+        is_public: true,
+        is_volatile: false,
+        has_bits_attr: false,
+        bits_width: 0,
+        has_fixed_address: false,
+        fixed_address: 0,
+        span: vsl_pos_span()
+    )
+    val node_struct = HirStruct(
+        symbol: node_sym,
+        name: "VslPosNode",
+        type_params: [],
+        fields: [me_field],
+        visibility: Visibility.Public,
+        is_public: true,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: vsl_pos_span(),
+        has_layout_attr: false,
+        layout_attr: LayoutAttr(layout_kind: TypeLayoutKind.Simple, is_packed: false),
+        has_platform_attr: false,
+        platform_has_error: false,
+        platform_has_warning: false,
+        platform_diagnostic_message: "",
+        platform_diagnostic_line: 0,
+        is_generic_template: false,
+        has_specialization_of: false,
+        specialization_of: "",
+        type_bindings: {}
+    )
+    var structs: Dict<SymbolId, HirStruct> = {}
+    structs[node_sym] = node_struct
+    value_struct_layout_declarations_v1("pkg.vsl_pos", "synthetic/vsl_pos.spl", structs, table)
+
+describe "driver_validate_value_struct_layout_declarations_v1 positional args":
+    """
+    Verifies positional 8-argument invocation of
+    `driver_validate_value_struct_layout_declarations_v1` and guards against
+    reintroducing skipped-default `aop_snapshots:` calls in HIR lowering.
+    """
+    it "accepts 8 positional args with empty transport arrays and Some snapshots":
+        step("Call validator with empty declarations and positional [], [], [], [], Some([])")
+        env_set("SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE", "")
+        val no_modules: Dict<text, HirModule> = {}
+        val empty_snapshots: [DirectoryTldrSourceSnapshotV2] = []
+        val errors_typed = driver_validate_value_struct_layout_declarations_v1(
+            [], [], no_modules, [], [], [], [], Some(empty_snapshots))
+        expect(errors_typed.len()).to_equal(0)
+
+        val errors_literal = driver_validate_value_struct_layout_declarations_v1(
+            [], [], no_modules, [], [], [], [], Some([]))
+        expect(errors_literal.len()).to_equal(0)
+
+    it "validates layout declarations when called with 8 positional args":
+        step("Call validator with a self-cyclical struct declaration and positional defaults")
+        env_set("SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE", "")
+        val no_modules: Dict<text, HirModule> = {}
+        val errors = driver_validate_value_struct_layout_declarations_v1(
+            ["pkg.vsl_pos"], [vsl_pos_self_cycle_decl()], no_modules,
+            [], [], [], [], Some([]))
+        expect(errors.len()).to_equal(1)
+        expect(errors[0]).to_contain("recursive by-value struct layout: VslPosNode.me -> VslPosNode")
+
+    it "keeps driver_hir_pipeline_lowering.spl free of skipped-default aop_snapshots named args":
+        step("Inspect driver_hir_pipeline_lowering.spl for positional validator calls")
+        val src = file_read(LOWERING_PATH)
+        expect(src.len()).to_be_greater_than(0)
+        expect_not(src.contains("aop_snapshots:"))
+        val call_count = src.split("driver_validate_value_struct_layout_declarations_v1(").len() - 1
+        expect(call_count).to_equal(3)
+        expect(src).to_contain("self.ctx.hir_modules, [], [], [], [],")
+        expect(src).to_contain("Some(driver_aop_directory_snapshots_capture_v2(self.ctx))")

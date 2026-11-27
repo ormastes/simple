@@ -1,0 +1,57 @@
+"""
+## Purpose and audience
+Prevention guard for `#4611` ensuring `ParserParamHeader.has_default` survives module-surface serialization and that `MethodCall` checks (static, instance, explicit `self`, trait default, and module-qualified) stay enforced in HIR lowering.
+Audience: compiler engineers maintaining `src/compiler/10.frontend/parser_types.spl` and `src/compiler/20.hir/hir_lowering/`.
+"""
+# @req: REQ-COMPILER-HIR-4611 — default parameters propagate through module surfaces and MethodCall sites check arity.
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module, ParserParamHeader}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule}
+
+describe "call-site arity prevention (#4611)":
+    it "preserves has_default across ParserParamHeader and enforces imported method arity without counting self":
+        step("Parse provider header with default parameter and inspect ModuleSurfaceParam + HirLowering errors")
+        val log = Logger(level: 0)
+        val provider_src =
+            "pub class Counter:\n" +
+            "    n: i64\n" +
+            "    static fn make(start: i64, step: i64 = 1) -> Counter:\n" +
+            "        Counter(n: start + step)\n" +
+            "    fn bump(self, delta: i64, scale: i64 = 2) -> i64:\n" +
+            "        self.n + delta * scale\n"
+        val consumer_src =
+            "use lib.cnt.{{Counter}}\n" +
+            "fn ok_fn() -> i64:\n" +
+            "    val c = Counter.make(1)\n" +
+            "    c.bump(3)\n" +
+            "fn bad_fn() -> i64:\n" +
+            "    val c = Counter.make(1, 2, 3)\n" +
+            "    c.bump()\n"
+        val mod_p = parse_full_frontend(provider_src, "lib.cnt", "lib.cnt", log)
+        val mod_c = parse_full_frontend(consumer_src, "app.main", "app.main", log)
+        var modules: Dict<text, Module> = {}
+        modules["lib.cnt"] = mod_p
+        modules["app.main"] = mod_c
+        val files = [
+            SourceFile(path: "lib.cnt", content: provider_src, module_name: "lib.cnt"),
+            SourceFile(path: "app.main", content: consumer_src, module_name: "app.main")
+        ]
+        val surfaces_res = module_surfaces_from_modules(modules, files)
+        expect(surfaces_res.is_ok()).to_equal(true)
+        val surfaces = surfaces_res.unwrap()
+        var lowering = hirlowering_for_module("app.main", surfaces)
+        val _hir: HirModule = lowering.lower_module(mod_c)
+        var msgs: [text] = []
+        for e in lowering.errors:
+            msgs = msgs.push(e.message)
+        val joined = msgs.join("\n")
+        expect(lowering.errors.len()).to_equal(2)
+        expect(joined).to_contain("function 'make' accepts at most 2 argument(s), but 3 were provided")
+        expect(joined).to_contain("function 'bump' requires argument(s) delta")

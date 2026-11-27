@@ -18,16 +18,19 @@ fn freebsd_hosted_inputs(root: text, pie: bool) -> Result<FreebsdHostedInputs, t
     if root.contains("\0"): return Err("FreeBSD sysroot contains NUL")
     var prefix = root
     while prefix.ends_with("/"):
-        prefix = prefix.substring(0, prefix.len() - 1)
+        prefix = prefix.substring(0, prefix.byte_len() - 1)
     val lib = prefix + "/usr/lib"
-    val before = [lib + (if pie: "/Scrt1.o" else: "/crt1.o"),
+    val before: [text] = [lib + (if pie: "/Scrt1.o" else: "/crt1.o"),
         lib + "/crti.o", lib + (if pie: "/crtbeginS.o" else: "/crtbegin.o")]
-    val after = [lib + (if pie: "/crtendS.o" else: "/crtend.o"), lib + "/crtn.o"]
+    val after: [text] = [lib + (if pie: "/crtendS.o" else: "/crtend.o"), lib + "/crtn.o"]
     for path in before + after:
         if not file_exists(path): return Err("FreeBSD startup input cannot be read: {path}")
     val loader = prefix + "/libexec/ld-elf.so.1"
     val libc = prefix + "/lib/libc.so.7"
-    if not file_exists(loader): return Err("FreeBSD interpreter cannot be read: {loader}")
+    # The loader is never read by the link; only its target path is recorded.
+    # A cross-link sysroot (headers + libs) often omits /libexec, so require
+    # it only when linking against the host root.
+    if prefix == "" and not file_exists(loader): return Err("FreeBSD interpreter cannot be read: {loader}")
     if not file_exists(libc): return Err("FreeBSD libc cannot be read: {libc}")
     var shared: [text] = []
     # New FreeBSD releases split low-level system interfaces into libsys;

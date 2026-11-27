@@ -1,0 +1,46 @@
+# Fail-closed UTF-8 decoding at summary page boundaries.
+# A page must never cut a scalar in half (no U+FFFD), valid text split across
+# pages must round-trip, and an invalid record must be a corrupt-entry error.
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.errors_v1 (SummaryErrorCodeV1)
+use compiler.driver.cache.summary.summary_store_v1 (summary_page_text_v1)
+
+fn join_pages(bytes: [u8], limit: i64) -> text:
+    var out = ""
+    var cursor: i64 = 0
+    while cursor < bytes.len():
+        val page = summary_page_text_v1(bytes, cursor, limit).unwrap()
+        expect(page.end > cursor).to_equal(true)
+        out = out + page.text
+        cursor = page.end
+    out
+
+describe "summary page UTF-8 boundary":
+    it "round-trips a record whose multibyte scalar straddles a page boundary":
+        step("Split 'aé한😀z' at every page size")
+        val record = "aé한😀z"
+        val bytes = text_to_bytes(record)
+        for limit in [1, 2, 3, 4, 5, 64]:
+            expect(join_pages(bytes, limit)).to_equal(record)
+        step("A 2-byte page starting at 'é' is not cut to a lone lead byte")
+        val first = summary_page_text_v1(bytes, 0, 2).unwrap()
+        expect(first.text).to_equal("a")
+        expect(first.end).to_equal(1)
+        expect(first.text.contains("�")).to_equal(false)
+
+    it "rejects a record with invalid UTF-8 as corrupt":
+        var bad = text_to_bytes("ab")
+        bad.push(0xFFu8)
+        bad.push(0x63u8)
+        match summary_page_text_v1(bad, 0, 2):
+            case Err(error): expect(error.code).to_equal(SummaryErrorCodeV1.SummaryCorrupt)
+            case Ok(_): expect(true).to_equal(false)
+
+    it "rejects a cursor inside a multibyte scalar":
+        val bytes = text_to_bytes("é")
+        match summary_page_text_v1(bytes, 1, 4):
+            case Err(error): expect(error.code).to_equal(SummaryErrorCodeV1.SummaryTokenInvalid)
+            case Ok(_): expect(true).to_equal(false)

@@ -1,0 +1,61 @@
+# Regression: MIR "unresolved method call" on inferred receivers.
+# bug: mir_unresolved_method_inferred_receiver_2026-10-24 (UNEXECUTED on a
+# producer carrying the fix; red on stage2 p2shard-6 via
+# `simple compile <this file> --format=smf`: is_err/unwrap_err/unwrap/bytes/len).
+use std.spec.*
+
+struct _ScopedLowerer:
+    base: i64
+
+impl _ScopedLowerer:
+    fn lower_scoped(v: i64) -> Result<i64, text>:
+        if v > 0:
+            return Ok(v + self.base)
+        Err("neg")
+
+# Typed call arm + untyped Err constructor arm (driver_pipeline_lowering.spl).
+fn _merge_if_val(maybe: i64?) -> i64:
+    val lowerer = _ScopedLowerer(base: 10)
+    val scoped_entry = if val present = maybe:
+        lowerer.lower_scoped(present)
+    else:
+        Err("missing")
+    if scoped_entry.is_err():
+        if scoped_entry.unwrap_err() == "missing":
+            return -2
+        return -1
+    scoped_entry.unwrap()
+
+fn _merge_plain_if(flag: bool) -> i64:
+    val lowerer = _ScopedLowerer(base: 1)
+    val entry = if flag:
+        lowerer.lower_scoped(5)
+    else:
+        Err("off")
+    if entry.is_err():
+        return -1
+    entry.unwrap()
+
+# Untyped substring binding, then .bytes() (incremental.spl).
+fn _bytes_of_inferred_substring(full: text) -> i64:
+    val relative = full.substring(1, full.len())
+    relative.bytes().len()
+
+# Annotation must beat the initializer's Infer marker.
+fn _bytes_of_annotated_copy(full: text) -> i64:
+    val relative = full.substring(1, full.len())
+    val relative_text: text = relative
+    relative_text.bytes().len()
+
+describe "MIR method resolution on inferred receivers":
+    it "adopts the typed arm's Result type over an untyped Err arm":
+        expect(_merge_if_val(Some(2))).to_equal(12)
+        expect(_merge_if_val(nil)).to_equal(-2)
+        expect(_merge_plain_if(true)).to_equal(6)
+        expect(_merge_plain_if(false)).to_equal(-1)
+
+    it "resolves bytes on an inferred substring binding":
+        expect(_bytes_of_inferred_substring("xabc")).to_equal(3)
+
+    it "lets a text annotation beat the initializer's Infer marker":
+        expect(_bytes_of_annotated_copy("xabc")).to_equal(3)

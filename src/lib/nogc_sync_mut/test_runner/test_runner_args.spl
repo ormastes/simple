@@ -29,6 +29,9 @@ use std.io_runtime.{file_exists}
 use std.common.convert.{try_parse_in_range}
 use std.nogc_sync_mut.test_runner.resource_policy.{test_default_max_procs, test_max_procs_value_valid}
 use std.test_runner.native_compile_contract.{native_test_source_roots_error}
+use std.test_runner.native_compile_contract.{native_test_library_mode_error, native_test_library_lanes_error, native_test_library_resume_error}
+use compiler.common.library_mode_policy_v1.{library_mode_parse_args_v1}
+use std.common.float_class_pure.{is_inf_f64}
 
 # =========================================================================
 # Mode String Parsing
@@ -54,7 +57,7 @@ use std.test_runner.native_compile_contract.{native_test_source_roots_error}
 # likely trigger), covered by
 # test/01_unit/compiler/assurance/policy_graph_contamination_probe_spec.spl.
 
-fn parse_mode_str(m: text) -> TestExecutionMode:
+pub fn parse_mode_str(m: text) -> TestExecutionMode:
     if m == "native" or m == "binary":
         return TestExecutionMode.Native
     if m == "compile":
@@ -79,7 +82,7 @@ fn parse_mode_str(m: text) -> TestExecutionMode:
 fn _test_arg_is_numeric_option(arg: text) -> bool:
     (
         arg == "--max-mem" or arg == "--worker-memory-mb" or arg == "--max-procs" or arg == "--cpu-threshold" or arg == "--mem-threshold" or
-        arg == "--resource-limit" or arg == "--max-workers" or
+        arg == "--resource-limit" or arg == "--max-workers" or arg == "--threads" or arg == "-j" or
         arg == "--parallel-timeout" or arg == "--fuzz-time" or
         arg == "--chaos-trials" or arg == "--chaos-fault-rate" or
         arg == "--batch-size" or arg == "--max-sessions" or arg == "--timeout" or
@@ -89,11 +92,30 @@ fn _test_arg_is_numeric_option(arg: text) -> bool:
 fn _test_arg_is_signed_number(value: text) -> bool:
     value.len() > 1 and ((value[1:2] >= "0" and value[1:2] <= "9") or value[1:2] == ".")
 
+fn _test_arg_is_decimal_number(value: text) -> bool:
+    if value == "": return false
+    var i = 0
+    if value.starts_with("-"): i = 1
+    if i >= value.len(): return false
+    var seen_dot = false
+    var seen_digit = false
+    while i < value.len():
+        val ch = value[i:i + 1]
+        if ch == ".":
+            if seen_dot: return false
+            seen_dot = true
+        elif ch >= "0" and ch <= "9":
+            seen_digit = true
+        else:
+            return false
+        i = i + 1
+    seen_digit
+
 fn _test_arg_has_empty_equals_value(arg: text) -> bool:
     (
         arg == "--max-mem=" or arg == "--worker-memory-mb=" or arg == "--max-procs=" or arg == "--execution-mode=" or
         arg == "--cpu-threshold=" or arg == "--mem-threshold=" or
-        arg == "--resource-limit=" or arg == "--max-workers=" or
+        arg == "--resource-limit=" or arg == "--max-workers=" or arg == "--threads=" or
         arg == "--parallel-timeout=" or arg == "--fuzz-time=" or
         arg == "--fuzz-corpus=" or arg == "--chaos-trials=" or
         arg == "--chaos-fault-rate=" or arg == "--deploy-platform=" or
@@ -102,10 +124,14 @@ fn _test_arg_has_empty_equals_value(arg: text) -> bool:
         arg == "--max-sessions=" or arg == "--session-reset=" or
         arg == "--sdoctest-env=" or arg == "--mode=" or
         arg == "--native-backend=" or arg == "--native-source=" or
-        arg == "--timeout=" or arg == "--seed=" or arg == "--format="
+        arg == "--timeout=" or arg == "--seed=" or arg == "--format=" or
+        arg == "--compiler="
     )
 
-fn test_args_validation_error(args: [text]) -> text:
+pub fn test_args_validation_error(args: [text]) -> text:
+    val library_policy = library_mode_parse_args_v1(args)
+    if library_policy.is_err(): return library_policy.unwrap_err()
+    val library_mode = library_policy.unwrap().mode
     var i = 0
     var native_source_roots: [text] = []
     while i < args.len():
@@ -113,29 +139,35 @@ fn test_args_validation_error(args: [text]) -> text:
         val needs_value = (
             arg == "--max-mem" or arg == "--worker-memory-mb" or arg == "--max-procs" or arg == "--execution-mode" or
             arg == "--cpu-threshold" or arg == "--mem-threshold" or
-            arg == "--resource-limit" or arg == "--max-workers" or
+            arg == "--resource-limit" or arg == "--max-workers" or arg == "--threads" or arg == "-j" or
             arg == "--parallel-timeout" or arg == "--fuzz-time" or
             arg == "--fuzz-corpus" or arg == "--chaos-trials" or
             arg == "--chaos-fault-rate" or arg == "--deploy-platform" or
             arg == "--batch-size" or arg == "--session-kind" or
             arg == "--max-sessions" or arg == "--session-reset" or
             arg == "--sdoctest-env" or arg == "--tag" or arg == "--format" or
-            arg == "--mode" or arg == "--native-backend" or arg == "--native-source" or
+            arg == "--mode" or arg == "--native-backend" or arg == "--native-source" or arg == "--library-mode" or
             arg == "--timeout" or arg == "--seed" or
-            arg == "--profile"
+            arg == "--profile" or arg == "--compiler"
         )
         if needs_value:
             if i + 1 >= args.len():
                 return "missing value for {arg}"
             val value = args[i + 1]
+            if library_mode != "" and arg == "--mode" and value != "native" and value != "binary":
+                return native_test_library_mode_error(library_mode, "", false)
             if value == "" or (value.starts_with("-") and
                 (not _test_arg_is_numeric_option(arg) or not _test_arg_is_signed_number(value))):
                 return "missing value for {arg}"
+            if (arg == "--cpu-threshold" or arg == "--mem-threshold") and not _test_arg_is_decimal_number(value):
+                return "invalid value for {arg}: {value}"
+            if (arg == "--cpu-threshold" or arg == "--mem-threshold") and is_inf_f64(parse_f64(value)):
+                return "invalid value for {arg}: {value} (outside finite f64 range)"
             if arg == "--format" and value == "json":
                 return "JSON test output is retired; use --format sdn"
             if arg == "--format" and value != "text" and value != "sdn" and value != "doc":
                 return "invalid value for --format: {value}"
-            if arg == "--worker-memory-mb" and (try_parse_in_range(value, 1, 1048576) == nil):
+            if arg == "--worker-memory-mb" and (try_parse_in_range(value, 1, 1048576).is_none()):
                 return "invalid value for --worker-memory-mb: {value} (expected 1..1048576 MiB)"
             if arg == "--max-procs" and not test_max_procs_value_valid(value):
                 return "invalid value for --max-procs: {value} (expected a nonnegative integer)"
@@ -148,9 +180,15 @@ fn test_args_validation_error(args: [text]) -> text:
             i = i + 2
             continue
 
+        if library_mode != "" and arg.starts_with("--mode=") and arg != "--mode=native" and arg != "--mode=binary":
+            return native_test_library_mode_error(library_mode, "", false)
+        if arg.starts_with("--library-mode="):
+            i = i + 1
+            continue
+
         if arg.starts_with("--worker-memory-mb="):
             val value = arg.substring(19)
-            if try_parse_in_range(value, 1, 1048576) == nil:
+            if try_parse_in_range(value, 1, 1048576).is_none():
                 return "invalid value for --worker-memory-mb: {value} (expected 1..1048576 MiB)"
             i = i + 1
             continue
@@ -159,6 +197,26 @@ fn test_args_validation_error(args: [text]) -> text:
             val value = arg.substring(12)
             if not test_max_procs_value_valid(value):
                 return "invalid value for --max-procs: {value} (expected a nonnegative integer)"
+            i = i + 1
+            continue
+
+        if arg.starts_with("--cpu-threshold="):
+            val value = arg.substring(16)
+            if value == "": return "missing value for --cpu-threshold"
+            if not _test_arg_is_decimal_number(value):
+                return "invalid value for --cpu-threshold: {value}"
+            if is_inf_f64(parse_f64(value)):
+                return "invalid value for --cpu-threshold: {value} (outside finite f64 range)"
+            i = i + 1
+            continue
+
+        if arg.starts_with("--mem-threshold="):
+            val value = arg.substring(16)
+            if value == "": return "missing value for --mem-threshold"
+            if not _test_arg_is_decimal_number(value):
+                return "invalid value for --mem-threshold: {value}"
+            if is_inf_f64(parse_f64(value)):
+                return "invalid value for --mem-threshold: {value} (outside finite f64 range)"
             i = i + 1
             continue
 
@@ -191,7 +249,7 @@ fn test_args_validation_error(args: [text]) -> text:
             continue
 
         val known = (
-            arg == "--unit" or arg == "--integration" or arg == "--system" or
+            arg == "--unit" or arg == "--integration" or arg == "--system" or arg == "--smoke" or
             arg == "--fail-fast" or arg == "--list" or arg == "--list-ignored" or
             arg == "--only-slow" or arg == "--only-skipped" or arg == "--show-tags" or
             arg == "--gc-log" or arg == "--gc=off" or arg == "--gc=OFF" or
@@ -205,7 +263,7 @@ fn test_args_validation_error(args: [text]) -> text:
             arg == "--assert-ran" or arg == "--container-sequential" or
             arg == "--container-seq" or arg == "--self-protect" or
             arg == "--no-self-protect" or arg == "--resume" or
-            arg == "--parallel" or arg == "--sequential" or arg == "-s" or
+            arg == "--parallel" or arg == "-p" or arg == "--sequential" or arg == "-s" or
             arg == "--closure-warnings" or arg == "--ci" or arg == "--fuzz" or
             arg == "--fuzz-differential" or arg == "--no-shrink" or arg == "--chaos" or
             arg == "--deploy" or arg == "--deploy-upgrade" or arg == "--security" or
@@ -217,11 +275,13 @@ fn test_args_validation_error(args: [text]) -> text:
             arg == "--no-session-share" or arg == "--session-daemon" or
             arg == "--no-session-daemon" or arg == "--session-debug" or
             arg == "--sdoctest" or arg == "--sdoctest-force" or arg == "--doc" or
-            arg == "--compile" or arg.starts_with("--max-mem=") or
+            arg.starts_with("--compiler=") or
+            arg == "--compile" or arg.starts_with("--compile=") or arg.starts_with("--max-mem=") or
             arg.starts_with("--native-backend=") or arg.starts_with("--native-source=") or
             arg.starts_with("--execution-mode=") or arg.starts_with("--cpu-threshold=") or
             arg.starts_with("--mem-threshold=") or arg.starts_with("--resource-limit=") or
-            arg.starts_with("--max-workers=") or arg.starts_with("--parallel-timeout=") or
+            arg.starts_with("--max-workers=") or arg.starts_with("--threads=") or
+            arg.starts_with("--parallel-timeout=") or
             arg.starts_with("--fuzz-time=") or arg.starts_with("--fuzz-corpus=") or
             arg.starts_with("--chaos-trials=") or arg.starts_with("--chaos-fault-rate=") or
             arg.starts_with("--deploy-platform=") or arg.starts_with("--batch-size=") or
@@ -234,11 +294,24 @@ fn test_args_validation_error(args: [text]) -> text:
         if not known and arg.starts_with("-"):
             return "unknown option: {arg}"
         if _test_arg_has_empty_equals_value(arg):
-            return "missing value for {arg.substring(0, arg.len() - 1)}"
+            return "missing value for {arg.substring(0, arg.byte_len() - 1)}"
         i = i + 1
-    native_test_source_roots_error(native_source_roots)
+    val roots_error = native_test_source_roots_error(native_source_roots)
+    if roots_error != "": return roots_error
+    if library_mode != "":
+        val options = parse_test_args(args)
+        val resume_error = native_test_library_resume_error(options.library_mode, options.resume)
+        if resume_error != "": return resume_error
+        val route_error = native_test_library_mode_error(library_mode, options.native_backend,
+            not options.safe_mode and options.execution_mode == "" and not options.container_sequential)
+        if route_error != "": return route_error
+        return native_test_library_lanes_error(library_mode,
+            options.sdoctest or options.path.ends_with(".md"), options.spl_doctest or options.whole)
+    ""
 
-fn parse_test_args(args: [text]) -> TestOptions:
+# Parse arguments after validating them with `test_args_validation_error`.
+# Runtime entrypoints must keep that gate ahead of this low-level conversion.
+pub fn parse_test_args(args: [text]) -> TestOptions:
     var path = ""
     # Every positional target, in order. `path` keeps the first one for the
     # many call sites that still reason about a single base path; `paths`
@@ -250,8 +323,16 @@ fn parse_test_args(args: [text]) -> TestOptions:
     var fail_fast = false
     var mode = TestExecutionMode.Interpreter
     var native_backend = ""
+    var library_mode = ""
     var native_source_roots: [text] = []
-    var timeout = 120
+    # 2026-11-05: default raised 120 -> 900 (matches CLIENT_DEFAULT_TIMEOUT_SECS
+    # in app.test_runner_new.timeout_budget and KILL_SIMPLE_MIN_AGE_SECS in
+    # scripts/resource/kill_simple_monitor.shs). The 2026-08-17 raise covered the
+    # client path only; this direct-dispatch default still killed honest specs
+    # whose interpreter run exceeds 120s (browser_session_fetch_wasm_chain_spec
+    # needs ~590s under the seed) as a deterministic premature child
+    # termination. Bug: doc/08_tracking/bug/fetch_wasm_chain_spec_runner_premature_child_termination_2026-06-30.md
+    var timeout = 900
     var list = false
     var list_ignored = false
     var only_slow = false
@@ -323,6 +404,7 @@ fn parse_test_args(args: [text]) -> TestOptions:
     var manifest_status = false
     var clean = false
     var no_cover_check = false
+    var compiler = ""
     # Session sharing options
     var session_share = true
     var session_daemon = true
@@ -345,6 +427,8 @@ fn parse_test_args(args: [text]) -> TestOptions:
             level = TestLevel.Integration
         elif arg == "--system":
             level = TestLevel.System
+        elif arg == "--smoke":
+            level = TestLevel.Smoke
         elif arg == "--fail-fast":
             fail_fast = true
         elif arg == "--list":
@@ -444,7 +528,7 @@ fn parse_test_args(args: [text]) -> TestOptions:
                 mem_threshold = parse_f64(args[i])
         elif arg.starts_with("--mem-threshold="):
             mem_threshold = parse_f64(arg[16:])
-        elif arg == "--parallel":
+        elif arg == "--parallel" or arg == "-p":
             parallel = true
             sequential = false
         elif arg == "--sequential" or arg == "-s":
@@ -462,6 +546,12 @@ fn parse_test_args(args: [text]) -> TestOptions:
                 max_workers = args[i].to_int() ?? 0
         elif arg.starts_with("--max-workers="):
             max_workers = arg[14:].to_int() ?? 0
+        elif arg == "--threads" or arg == "-j":
+            i = i + 1
+            if i < args.len():
+                max_workers = args[i].to_int() ?? 0
+        elif arg.starts_with("--threads="):
+            max_workers = arg[10:].to_int() ?? 0
         elif arg == "--parallel-timeout":
             i = i + 1
             if i < args.len():
@@ -620,11 +710,21 @@ fn parse_test_args(args: [text]) -> TestOptions:
                 native_backend = args[i]
         elif arg.starts_with("--native-backend="):
             native_backend = arg.substring(17)
+        elif arg == "--library-mode":
+            i = i + 1
+            if i < args.len(): library_mode = args[i]
+        elif arg.starts_with("--library-mode="):
+            library_mode = arg.substring(15)
         elif arg == "--native-source":
             i = i + 1
             if i < args.len(): native_source_roots.push(args[i])
         elif arg.starts_with("--native-source="):
             native_source_roots.push(arg.substring(16))
+        elif arg == "--compiler":
+            i = i + 1
+            if i < args.len(): compiler = args[i]
+        elif arg.starts_with("--compiler="):
+            compiler = arg.substring(11)
         elif arg == "--timeout":
             i = i + 1
             if i < args.len():
@@ -669,7 +769,12 @@ fn parse_test_args(args: [text]) -> TestOptions:
         native_backend = "llvm"
     if native_backend != "":
         mode = TestExecutionMode.Native
-        # Legacy cache and daemon entries do not bind the selected producer.
+        # Legacy cache entries do not bind the selected producer. The native
+        # daemon transport has its own pinned profile and bypasses that cache.
+        no_cache = true
+        assert_ran = true
+    if compiler != "" and native_backend == "":
+        # Daemon and cache entries do not bind the selected compiler either.
         no_cache = true
         assert_ran = true
         session_daemon = false
@@ -693,6 +798,7 @@ fn parse_test_args(args: [text]) -> TestOptions:
         fail_fast: fail_fast,
         mode: mode,
         native_backend: native_backend,
+        library_mode: library_mode,
         native_source_roots: native_source_roots,
         timeout: timeout,
         list: list,
@@ -766,6 +872,7 @@ fn parse_test_args(args: [text]) -> TestOptions:
         session_reset: session_reset,
         assert_ran: assert_ran,
         no_cover_check: no_cover_check,
+        compiler: compiler,
         batch_size: batch_size,
         batch_manifest: batch_manifest,
         batch_result: batch_result,
@@ -776,45 +883,32 @@ fn parse_test_args(args: [text]) -> TestOptions:
 # Helper Functions
 # =========================================================================
 
-fn parse_f64(s: text) -> f64:
-    """Parse float from string (simple implementation)"""
+pub fn parse_f64(s: text) -> f64:
+    """Parse a validated decimal threshold without losing sign or digit place."""
     var result = 0.0
-    var decimal_part = 0.0
-    var decimal_divisor = 1.0
     var seen_dot = false
-
-    for i in 0..s.len():
+    var decimal_divisor = 1.0
+    var negative = false
+    var i = 0
+    if s.starts_with("-"):
+        negative = true
+        i = 1
+    while i < s.len():
         val ch = s[i:i + 1]
-
         if ch == ".":
             seen_dot = true
         else:
-            val is_digit = ch >= "0" and ch <= "9"
-            if is_digit:
-                var digit = 0
-                if ch == "0": digit = 0
-                if ch == "1": digit = 1
-                if ch == "2": digit = 2
-                if ch == "3": digit = 3
-                if ch == "4": digit = 4
-                if ch == "5": digit = 5
-                if ch == "6": digit = 6
-                if ch == "7": digit = 7
-                if ch == "8": digit = 8
-                if ch == "9": digit = 9
+            val digit = (ch.char_code_at(0) - 48) as f64
+            if seen_dot:
+                decimal_divisor = decimal_divisor * 10.0
+                result = result + (digit / decimal_divisor)
+            else:
+                result = result * 10.0 + digit
+        i = i + 1
 
-                if seen_dot:
-                    decimal_divisor = decimal_divisor * 10.0
-                    decimal_part = decimal_part + (digit * 1.0)
-                else:
-                    result = result * 10.0 + (digit * 1.0)
+    if negative: -result else: result
 
-    if seen_dot:
-        result = result + (decimal_part / decimal_divisor)
-
-    result
-
-fn _is_fork_available() -> bool:
+pub fn _is_fork_available() -> bool:
     """Auto-detect fork availability. fork() is Linux-only.
     Uses /proc/stat existence check instead of spawning uname subprocess."""
     file_exists("/proc/stat")
@@ -822,3 +916,5 @@ fn _is_fork_available() -> bool:
 # =========================================================================
 # Exports
 # =========================================================================
+
+export normalize_profile_name, valid_profile_names_help

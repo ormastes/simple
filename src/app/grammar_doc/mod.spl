@@ -10,7 +10,7 @@
 #   bin/simple grammar-doc --treesitter     — Tree-sitter status report
 #   bin/simple grammar-doc --format=json    — JSON output
 
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_write}
 use std.io_runtime.{file_exists}
@@ -192,12 +192,12 @@ fn collect_treesitter_keywords(ts_text: text) -> [text]:
             val start_idx = rest.index_of("\"") ?? -1
             if start_idx < 0:
                 break
-            val after_start = rest.slice(start_idx + 1, rest.len())
+            val after_start = rest.slice(start_idx + 1, rest.byte_len())
             val end_idx = after_start.index_of("\"") ?? -1
             if end_idx < 0:
                 break
             val ts_kw = after_start.slice(0, end_idx)
-            rest = after_start.slice(end_idx + 1, after_start.len())
+            rest = after_start.slice(end_idx + 1, after_start.byte_len())
 
             var is_alpha = false
             if ts_kw.len() > 0:
@@ -273,10 +273,14 @@ fn main() -> i64:
         if arg == "--treesitter":
             do_treesitter = true
         elif arg.starts_with("--format="):
-            format = arg.slice(9, arg.len())
+            format = arg.slice(9, arg.byte_len())
 
     # Read and parse SDN source of truth — all state local to main
-    val sdn_text = rt_file_read_text(sdn_path) ?? ""
+    val sdn_text_opt = rt_file_read_text(sdn_path)
+    if sdn_text_opt == nil:
+        print "Error: could not read {sdn_path}"
+        return 1
+    val sdn_text = sdn_text_opt.unwrap()
     if sdn_text == "":
         print "Error: could not read {sdn_path}"
         return 1
@@ -317,7 +321,7 @@ fn main() -> i64:
             val eq_idx = trimmed.index_of("=") ?? -1
             if eq_idx > 0:
                 val key = trimmed.slice(0, eq_idx).trim()
-                var value_part = trimmed.slice(eq_idx + 1, trimmed.len()).trim()
+                var value_part = trimmed.slice(eq_idx + 1, trimmed.byte_len()).trim()
                 value_part = value_part.replace("\"", "")
                 if current_section == "keywords":
                     kw_names.push(key)
@@ -365,7 +369,11 @@ fn main() -> i64:
     # Tree-sitter mode
     if do_treesitter:
         val ts_path = "src/compiler/10.frontend/parser/treesitter/queries/highlights.scm"
-        val ts_text = rt_file_read_text(ts_path) ?? ""
+        val ts_text_opt = rt_file_read_text(ts_path)
+        if ts_text_opt == nil:
+            print "Error: could not read {ts_path}"
+            return 1
+        val ts_text = ts_text_opt.unwrap()
         if ts_text == "":
             print "Error: could not read {ts_path}"
             return 1
@@ -536,7 +544,10 @@ fn main() -> i64:
 
     # Also generate treesitter status
     val ts_path2 = "src/compiler/10.frontend/parser/treesitter/queries/highlights.scm"
-    val ts_text2 = rt_file_read_text(ts_path2) ?? ""
+    var ts_text2 = ""
+    if val ts_read2 = rt_file_read_text(ts_path2):
+        ts_text2 = ts_read2
+    # absent: the optional tree-sitter status page is skipped, as for an empty file
     if ts_text2 != "":
         val ts_kws = collect_treesitter_keywords(ts_text2)
         var st_parts: [text] = []

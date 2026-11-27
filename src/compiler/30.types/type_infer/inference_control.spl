@@ -1,5 +1,4 @@
-# @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
-use compiler.types.dim_constraints.{DimCheckTiming}
+use compiler.types.type_infer.inference_expr.*
 use compiler.hir.hir_types.{HirTypeKind}
 # Pipeline, Dimension, Control Flow, and Effect Inference
 #
@@ -15,7 +14,7 @@ use compiler.hir.hir_types.{HirTypeKind}
 # Effect inference methods are in inference_effects.spl.
 
 use compiler.hir.hir.*
-use compiler.hir.hir_definitions.{HirBlock, HirStmt, HirParam}
+use compiler.hir.hir_definitions.{HirBlock, HirStmt, HirParam, HirConst}
 use compiler.frontend.core.lexer.*
 use compiler.types.dim_constraints.*
 use compiler.traits.traits.*
@@ -26,6 +25,13 @@ use compiler.types.type_infer.trait_collection.*
 use compiler.types.type_infer.generic_calls.*
 use compiler.types.type_infer_types.{HmInferContext}
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
+
+# SPL-PAT-001 (config/policy/diagnostic_policy.sdn): how the offending pattern
+# is shown in the diagnostic, mirroring the seed's option_pattern_shape_diag.rs.
+fn option_pattern_shown(variant: text) -> text:
+    if variant == "None":
+        return "None"
+    "{variant}(_)"
 
 impl HmInferContext:
     # =========================================================================
@@ -262,7 +268,7 @@ impl HmInferContext:
         val resolved_right = self.resolve(right)
 
         match (resolved_left.kind, resolved_right.kind):
-            case (Tensor(elem_l, dims_l, dev_l), Tensor(elem_r, dims_r, dev_r)):
+            case (Tensor(elem_l, dims_l, dev_l), Tensor(elem_r, dims_r, _)):
                 # Unify element types
                 match self.unify(elem_l, elem_r):
                     case Err(e): return Err(e)
@@ -400,7 +406,7 @@ impl HmInferContext:
         for c in self.dim_solver.constraints:
             val timing = self.dim_solver.classify_constraint(c)
             match timing:
-                case DimCheckTiming.CompileTime | DimCheckTiming.Both:
+                case CompileTime | Both:
                     # Try to solve at compile time
                     match self.dim_solver.solve_constraint(c):
                         case Err(err):
@@ -534,6 +540,9 @@ impl HmInferContext:
                 # Synthesize target type, then check value against it
                 match self.synthesize_expr(target):
                     case Ok(target_ty):
+                        match self.check_arrow_update(target, target_ty, value):
+                            case Err(e): return Err(e)
+                            case Ok(_): pass
                         match self.infer_expr(value, InferMode.Check(target_ty)):
                             case Ok(_):
                                 Ok(HirType(kind: HirTypeKind.Unit, span: stmt.span))
@@ -546,6 +555,62 @@ impl HmInferContext:
             case _:
                 Ok(HirType(kind: HirTypeKind.Unit, span: stmt.span))
 
+    me check_arrow_update(target: HirExpr, target_ty: HirType, value: HirExpr) -> Result<(), TypeInferError>:
+        """E-ARROW-UPDATE-MISMATCH: `x->m()` (desugared `x = x.m()`) whose
+        method returns a type other than the receiver's. Only values carrying
+        the parser's arrow provenance are checked; a written `x = x.m()` is not."""
+        var call = value
+        var tries = 0
+        var peeling = true
+        while peeling:
+            match call.kind:
+                case Try(inner):
+                    call = inner
+                    tries = tries + 1
+                case _:
+                    peeling = false
+        if not call.arrow_update:
+            return Ok(())
+        var method_name = ""
+        var method_key = ""
+        match call.kind:
+            case MethodCall(_, method, _, resolution):
+                method_name = method
+                method_key = match resolution:
+                    case InstanceMethod(_, method_id): method_id.id.to_text()
+                    case TraitMethod(_, method_id): method_id.id.to_text()
+                    case StaticMethod(_, method_id): method_id.id.to_text()
+                    case FreeFunction(func_id): func_id.id.to_text()
+                    case _: ""
+            case _: pass
+        if method_key == "" or not self.env[method_key].?:
+            return Ok(())
+        var ret = self.resolve(self.instantiate(self.env[method_key]))
+        match ret.kind:
+            case Function(_, fn_ret, _): ret = self.resolve(fn_ret)
+            case _: return Ok(())
+        # `x->m()?` stores the `?` payload: unwrap one Result/Option per `?`.
+        while tries > 0:
+            match ret.kind:
+                case Result(ok, _): ret = self.resolve(ok)
+                case Optional(inner): ret = self.resolve(inner)
+                case _: return Ok(())
+            tries = tries - 1
+        val receiver_ty = self.resolve(target_ty)
+        match self.unify(receiver_ty, ret):
+            case Ok(_): Ok(())
+            case Err(_):
+                val receiver = match target.kind:
+                    case Var(symbol):
+                        if self.symbol_names.contains_key(symbol.id): self.symbol_names[symbol.id] else: "x"
+                    case NamedVar(_, name): name
+                    case _: "x"
+                val recv_name = self.nil_compare_type_name(receiver_ty)
+                val ret_name = self.nil_compare_type_name(ret)
+                Err(TypeInferError.Other(
+                    "E-ARROW-UPDATE-MISMATCH: arrow update `{receiver}->{method_name}(...)` assigns the result of `{method_name}` back to `{receiver}`, but `{receiver}` has type {recv_name} and `{method_name}` returns {ret_name}; `->` needs a method returning the receiver's type (bind `{receiver}.{method_name}(...)` to a new name instead)",
+                    value.span))
+
     me infer_optional_pattern_payload(variant: text, payload: HirPatternPayload?, inner: HirType, span: Span) -> Result<(), TypeInferError>:
         if variant == "Some":
             if val present_payload = payload:
@@ -557,10 +622,11 @@ impl HmInferContext:
             else:
                 Err(TypeInferError.Other("Option pattern 'Some' requires exactly one payload pattern", span))
         else:
-            if val _ = payload:
-                Err(TypeInferError.Other("Option pattern 'None' cannot have a payload pattern", span))
-            else:
-                Ok(())
+            match payload:
+                case None:
+                    Ok(())
+                case _:
+                    Err(TypeInferError.Other("Option pattern 'None' cannot have a payload pattern", span))
 
     me infer_option_pattern(variant: text, payload: HirPatternPayload?, expected: HirType, span: Span) -> Result<(), TypeInferError>:
         val resolved = self.resolve(expected)
@@ -581,11 +647,11 @@ impl HmInferContext:
             # Named scrutinees may be user enums whose variants happen to be
             # named Some or None. HIR does not yet expose enum ownership to the
             # inference context, so retain those until ownership is explicit.
-            case Named(_, _) | HirTypeKind.Any | HirTypeKind.Error:
+            case Named(_, _) | Any | Error:
                 Ok(())
             case _:
                 Err(TypeInferError.Other(
-                    "Option pattern '{variant}' requires an optional scrutinee; found '{resolved.kind}'",
+                    "error[SPL-PAT-001]: pattern `{option_pattern_shown(variant)}` expects Option<T>, found '{resolved.kind}' (Option pattern '{variant}' requires an optional scrutinee)\n  fix: the value is never nil -- bind it directly (`val j = x`) or remove the pattern; if absence is intended, make the subject `T?` and use `if val j = x:`",
                     span
                 ))
 
@@ -621,7 +687,7 @@ impl HmInferContext:
                 # user enum. Keep named owners untouched so a user enum may
                 # legitimately define Some/None variants.
                 val builtin_option_shape = match owner.kind:
-                    case HirTypeKind.Error | Optional(_): variant == "Some" or variant == "None"
+                    case Error | Optional(_): variant == "Some" or variant == "None"
                     case _: false
                 if builtin_option_shape:
                     self.infer_option_pattern(variant, payload, expected, pattern.span)
@@ -643,7 +709,7 @@ impl HmInferContext:
         for lambdas and other expressions within the function.
         """
         if fn_.is_extern: return
-        val saved_env = self.env
+        val env_mark = self.env_mark()
         val saved_function_symbol = self.current_function_symbol
         self.current_function_symbol = Some(fn_.symbol)
         self.enter_level()
@@ -664,7 +730,7 @@ impl HmInferContext:
         val has_return_type = fn_.return_type.kind != HirTypeKind.Infer(0, 0)
         val saved_return_type = self.current_return_type
         val saved_fn_name = self.current_fn_name
-        self.current_return_type = if has_return_type: Some(fn_.return_type) else: nil
+        self.current_return_type = if has_return_type: Some(fn_.return_type) else: None
         self.current_fn_name = fn_.name
 
         # Infer body with bidirectional checking
@@ -672,9 +738,29 @@ impl HmInferContext:
             # Return type annotated - use Check mode to propagate into body
             match self.infer_block(fn_.body):
                 case Ok(body_ty):
-                    match self.subsume(body_ty, fn_.return_type):
-                        case Err(e): self.error(e)
-                        case _: pass
+                    # Implicit tail: the same optional-payload rejection
+                    # infer_return_expr applies to explicit `return`
+                    # statements. A bare `.?` (or any optional) tail body in a
+                    # non-optional-return function used to surface only as a
+                    # span-0:0 generic `type mismatch`, or subsume silently
+                    # and leak the payload (or nil) to callers. See
+                    # doc/08_tracking/bug/dot_question_returns_optional_but_25_sites_return_it_as_bool_2026-08-09.md
+                    val resolved_body = self.resolve(body_ty)
+                    val declared = self.resolve(fn_.return_type)
+                    val optional_tail_leak = match resolved_body.kind:
+                        case Optional(_):
+                            match declared.kind:
+                                case Optional(_) | Infer(_, _): false
+                                case _: true
+                        case _: false
+                    if optional_tail_leak:
+                        self.error(TypeInferError.Other(
+                            "optional value of type '{resolved_body.kind}' cannot satisfy the non-optional return type '{declared.kind}' of function '{self.current_fn_name}' ('.?' yields T? -- the payload if present, nil if absent); return `expr != nil` or an explicit comparison instead",
+                            fn_.span))
+                    else:
+                        match self.subsume(body_ty, fn_.return_type):
+                            case Err(e): self.error(e)
+                            case _: pass
                 case Err(e):
                     self.error(e)
         else:
@@ -684,10 +770,12 @@ impl HmInferContext:
                 case Err(e):
                     self.error(e)
 
+        self.check_effect_region(fn_)
+
         self.current_return_type = saved_return_type
         self.current_fn_name = saved_fn_name
         self.current_function_symbol = saved_function_symbol
-        self.env = saved_env
+        self.env_unwind(env_mark)
 
         self.exit_level()
 
@@ -705,6 +793,51 @@ impl HmInferContext:
         self.bind_poly(fn_.name, scheme)
         self.bind_poly(fn_.symbol.id.to_text(), scheme)
 
+    me _bind_module_constants(module: HirModule):
+        """Bind module-level constants/globals into env so functions referencing them infer."""
+        val const_keys = module.constants.keys()
+        var pending_consts: [HirConst] = []
+        var pending_vars: [HirType] = []
+        var pending_bind_names: [bool] = []
+        var const_idx = 0
+        while const_idx < const_keys.len():
+            val raw_const = module.constants[const_keys[const_idx]]
+            if raw_const.?:
+                val const_: HirConst = raw_const
+                val existing_name = self.env[const_.name]
+                val bind_name = not existing_name.?
+                val bound_ty = match const_.type_.kind:
+                    case HirTypeKind.Infer(_, _):
+                        val fresh = self.fresh_var(const_.span)
+                        pending_consts.push(const_)
+                        pending_vars.push(fresh)
+                        pending_bind_names.push(bind_name)
+                        fresh
+                    case _:
+                        const_.type_
+                if bind_name:
+                    self.bind_mono(const_.name, bound_ty)
+                self.bind_mono(const_.symbol.id.to_text(), bound_ty)
+            const_idx = const_idx + 1
+        var p_idx = 0
+        while p_idx < pending_consts.len():
+            val const_ = pending_consts[p_idx]
+            val bound_ty = pending_vars[p_idx]
+            val bind_name = pending_bind_names[p_idx]
+            match self.synthesize_expr(const_.value):
+                case Ok(inferred):
+                    match self.unify(bound_ty, inferred):
+                        case Ok(_):
+                            val resolved = self.resolve(bound_ty)
+                            if bind_name:
+                                self.bind_mono(const_.name, resolved)
+                            self.bind_mono(const_.symbol.id.to_text(), resolved)
+                        case Err(e):
+                            self.error(e)
+                case Err(e):
+                    self.error(e)
+            p_idx = p_idx + 1
+
     me infer_module(module: HirModule):
         """Infer types for all functions in a module."""
         # Register symbol mutability from module symbol table for narrowing
@@ -715,13 +848,16 @@ impl HmInferContext:
         self.collect_traits_from_module(module)
         self.collect_impls_from_module(module)
         self._register_module_symbols(module)
+        self.module_env_vars = self.env_free_var_ids()
+        self.module_env_vars_ready = true
 
         # Forward-declare every function's signature first so a body may call
         # a function declared later in the module (`undefined: <callee>`
         # otherwise depends on dict iteration order).
-        for dk_11 in module.functions.keys():
-            # ANY-transport hazard sweep round 3: annotated rebind.
-            val fn_: HirFunction = module.functions[dk_11]
+        val fn_keys = module.functions.keys()
+        var decl_idx = 0
+        while decl_idx < fn_keys.len():
+            val fn_: HirFunction = module.functions[fn_keys[decl_idx]]
             val symbol = module.symbols.get_symbol(fn_.symbol)
             if symbol.?:
                 var param_types: [HirType] = []
@@ -740,14 +876,26 @@ impl HmInferContext:
                 val scheme = self.generalize_all(sig_ty)
                 self.bind_poly(fn_.name, scheme)
                 self.bind_poly(fn_.symbol.id.to_text(), scheme)
+            decl_idx = decl_idx + 1
 
-        for dk_10 in module.functions.keys():
-            # ANY-transport hazard sweep round 3: annotated rebind.
-            val fn_: HirFunction = module.functions[dk_10]
+        self._bind_module_constants(module)
+        # Refresh module_env_vars after binding module constants (unannotated globals
+        # introduce level-0 variables that generalize must not quantify).
+        self.module_env_vars = self.env_free_var_ids()
+
+        var infer_idx = 0
+        while infer_idx < fn_keys.len():
+            val fn_: HirFunction = module.functions[fn_keys[infer_idx]]
             val symbol = module.symbols.get_symbol(fn_.symbol)
             if symbol.?:
                 self.infer_function(fn_)
+            infer_idx = infer_idx + 1
 
+        self.module_env_vars_ready = false
+        self.module_env_vars = {}
+        self.env_trail_names = []
+        self.env_trail_prev = []
+        self.env_trail_had = []
         self.finish_direct_function_bounds()
 
         # After all type inference, solve dimension constraints
@@ -759,6 +907,7 @@ impl HmInferContext:
             val sym: HirSymbol = module.symbols.symbols[dk_9]
             self.register_symbol_mutability(sym.id.id, sym.is_mutable)
             self.symbol_names[sym.id.id] = sym.name
+            self.note_declared_fn_symbol(sym, module.name, module.path)
             self.symbol_kinds[sym.id.id] = match sym.kind:
                 case SymbolKind.Struct: "struct"
                 case SymbolKind.Class: "class"

@@ -220,6 +220,53 @@ fn coerce_binop_operands(
     }
 }
 
+/// `+ - *` whose static result type is u8/u16/u32 wraps modulo 2^width at the
+/// operation, not only at a typed store (matches the interpreter). The HIR types
+/// a binary op as its left operand, so the dest vreg type is the result width.
+/// The right operand must be the same narrow type, or an in-range integer
+/// literal; a wider non-literal operand (`b * s`, `s: i64`) or an out-of-range
+/// literal widens instead, as in the interpreter
+/// (`u8_times_wider_int_widens_spec`).
+pub(crate) fn wrap_narrow_unsigned_arith<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    op: BinOp,
+    dest: VReg,
+    right: VReg,
+    rhs: cranelift_codegen::ir::Value,
+    val: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) || builder.func.dfg.value_type(val) != types::I64 {
+        return val;
+    }
+    let dest_ty = ctx.vreg_types.get(&dest).copied();
+    let mask: i64 = match dest_ty {
+        Some(TypeId::U8) => 0xFF,
+        Some(TypeId::U16) => 0xFFFF,
+        Some(TypeId::U32) => 0xFFFF_FFFF,
+        _ => return val,
+    };
+    let same_width = ctx.vreg_types.get(&right).copied() == dest_ty;
+    let in_range_literal = || {
+        let dfg = &builder.func.dfg;
+        match dfg.value_def(rhs).inst().map(|i| dfg.insts[i]) {
+            Some(cranelift_codegen::ir::InstructionData::UnaryImm {
+                opcode: cranelift_codegen::ir::Opcode::Iconst,
+                imm,
+            }) => {
+                let n: i64 = imm.into();
+                (0..=mask).contains(&n)
+            }
+            _ => false,
+        }
+    };
+    if same_width || in_range_literal() {
+        builder.ins().band_imm(val, mask)
+    } else {
+        val
+    }
+}
+
 pub(crate) fn compile_binop<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -723,7 +770,85 @@ pub(crate) fn compile_binop<M: Module>(
             return Err("Layer connect operator (~>) requires ML runtime support".to_string());
         }
     };
+    if !is_float {
+        if let Some((narrow_ty, signed)) = narrow_arith_width(ctx, builder, op, pre_lhs, pre_rhs, left_vreg, right_vreg)
+        {
+            let reduced = builder.ins().ireduce(narrow_ty, val);
+            return Ok(if signed {
+                builder.ins().sextend(types::I64, reduced)
+            } else {
+                builder.ins().uextend(types::I64, reduced)
+            });
+        }
+    }
     Ok(val)
+}
+
+/// Declared width a narrow integer `+ - * / <<` must wrap to, as
+/// `(cranelift type, signed)`, or `None` to keep the i64 result.
+///
+/// Every integer op above is computed in i64, so a narrow result only wrapped
+/// when it happened to pass through a narrowing `Store` into a typed local:
+/// `val n = m + 1` wrapped while `(k - 1).to_text()` did not
+/// (`i32::MIN - 1` printed `-2147483649`). This mirrors the interpreter's
+/// static-width rule (`interpreter/expr/ops.rs::static_int_width`): both
+/// operands share one narrow width, or one is narrow and the other is an
+/// untyped literal (an `iconst` here). For unsigned widths the literal must
+/// also fit, as in `uint_arith_wrap_width` (`18u8 * 65536` stays wide).
+/// doc/08_tracking/bug/seed_i32_overflow_interp_vs_jit_divergence_2026-11-05.md
+fn narrow_arith_width<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    builder: &FunctionBuilder,
+    op: BinOp,
+    lhs: cranelift_codegen::ir::Value,
+    rhs: cranelift_codegen::ir::Value,
+    left_vreg: VReg,
+    right_vreg: VReg,
+) -> Option<(cranelift_codegen::ir::Type, bool)> {
+    let width_of = |vreg: VReg| -> Option<(cranelift_codegen::ir::Type, bool, u32)> {
+        match ctx.vreg_types.get(&vreg).copied()? {
+            TypeId::I8 => Some((types::I8, true, 8)),
+            TypeId::I16 => Some((types::I16, true, 16)),
+            TypeId::I32 => Some((types::I32, true, 32)),
+            TypeId::U8 => Some((types::I8, false, 8)),
+            TypeId::U16 => Some((types::I16, false, 16)),
+            TypeId::U32 => Some((types::I32, false, 32)),
+            _ => None,
+        }
+    };
+    let literal = |v: cranelift_codegen::ir::Value| -> Option<i64> {
+        let dfg = &builder.func.dfg;
+        let cranelift_codegen::ir::ValueDef::Result(inst, _) = dfg.value_def(v) else {
+            return None;
+        };
+        match dfg.insts[inst] {
+            cranelift_codegen::ir::InstructionData::UnaryImm {
+                opcode: cranelift_codegen::ir::Opcode::Iconst,
+                imm,
+            } => Some(imm.bits()),
+            _ => None,
+        }
+    };
+    let (narrow, other_vreg, other_value) = match op {
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => match (width_of(left_vreg), width_of(right_vreg)) {
+            (Some(l), Some(r)) => return (l == r).then_some((l.0, l.1)),
+            (Some(l), None) => (l, right_vreg, rhs),
+            (None, Some(r)) => (r, left_vreg, lhs),
+            (None, None) => return None,
+        },
+        // A shift has the type of its left operand; the count is any int.
+        BinOp::ShiftLeft => return width_of(left_vreg).map(|(ty, signed, _)| (ty, signed)),
+        _ => return None,
+    };
+    let (ty, signed, bits) = narrow;
+    if !matches!(ctx.vreg_types.get(&other_vreg).copied(), None | Some(TypeId::I64)) {
+        return None;
+    }
+    let imm = literal(other_value)?;
+    if !signed && !(imm >= 0 && (imm as u64) < (1u64 << bits)) {
+        return None;
+    }
+    Some((ty, signed))
 }
 
 /// Compile built-in I/O function calls (print, println, eprint, eprintln, etc.)
@@ -959,6 +1084,16 @@ pub(crate) fn compile_interp_call<M: Module>(
         // `val (a,b,c) = rt_http_request(...)`) read them correctly. Scalar
         // returns keep the historical unbox unchanged.
         let is_extern_bridge = func_name.starts_with("rt_") || func_name.starts_with("spl_");
+        // Direct Win64 ABI externs (GetProcessHeap/HeapAlloc/CreateProcessW/...)
+        // carry no rt_/spl_ prefix but declare raw scalar i64 destinations
+        // (pointers/DWORDs) exactly like the rt_*/spl_ bridge family. Without
+        // this their InterpCall result stays a boxed RuntimeValue and JIT'd
+        // callers read the tagged word as a raw pointer (segfaulted inside
+        // RtlAllocateHeap when path_identity.spl passed the boxed GetProcessHeap
+        // result into HeapAlloc).
+        #[cfg(windows)]
+        let is_extern_bridge =
+            is_extern_bridge || crate::interpreter::interpreter_extern::windows_abi::is_supported_name(func_name);
         let keep_boxed_result = boxed_result || interp_call_keeps_boxed_result(func_name);
         let value = if !keep_boxed_result
             && (ctx.vreg_types.get(d).copied() == Some(TypeId::F64) || interp_call_returns_f64(func_name))

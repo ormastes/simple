@@ -1,0 +1,180 @@
+"""A generic callee's Result/Option payload is instantiated from its arguments.
+
+`fn stored<T>(r: Result<T, text>, tag: text) -> Result<T, text>` called with a
+`Result<text, text>` argument has payload `text` at the call site. Before the
+fix enum_match_expr_type answered the declared `Result<T, text>`, so `.unwrap()`
+failed with "unsupported Result unwrap payload type: payload is other" and a
+`?`-bound `Option<text>` lost its type (`unresolved method call: is_none`).
+Phase 4 sites: distributed_operation_journal_v2.spl:102 and :450."""
+# @req REQ-ENUM-RESULT-OPTIONAL
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirCallArg}
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_types.{MirSignature}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn gp_t() -> HirType:
+    HirType(kind: HirTypeKind.TypeParam("T", []), span: Span.empty())
+
+fn gp_text() -> HirType:
+    HirType(kind: HirTypeKind.Str, span: Span.empty())
+
+fn gp_int() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+
+fn gp_result(ok: HirType) -> HirType:
+    HirType(kind: HirTypeKind.Result(ok, gp_text()), span: Span.empty())
+
+fn gp_option(inner: HirType) -> HirType:
+    HirType(kind: HirTypeKind.Optional(inner), span: Span.empty())
+
+fn gp_typed(type_: HirType) -> HirExpr:
+    HirExpr(kind: HirExprKind.Error, has_type_: true, type_: type_, span: Span.empty())
+
+fn gp_untyped() -> HirExpr:
+    HirExpr(kind: HirExprKind.Error, has_type_: false, type_: HirType(kind: HirTypeKind.Error, span: Span.empty()), span: Span.empty())
+
+fn gp_arg(value: HirExpr) -> HirCallArg:
+    HirCallArg(has_name: false, name: "", value: value, span: Span.empty())
+
+fn gp_call(params: [HirType], ret: HirType, args: [HirExpr]) -> HirExpr:
+    val callee = gp_typed(HirType(kind: HirTypeKind.Function(params, ret, []), span: Span.empty()))
+    var call_args: [HirCallArg] = []
+    for a in args:
+        call_args.push(gp_arg(a))
+    HirExpr(kind: HirExprKind.Call(callee, call_args, []), has_type_: false,
+        type_: HirType(kind: HirTypeKind.Error, span: Span.empty()), span: Span.empty())
+
+fn gp_lowering() -> MirLowering:
+    var lowering = MirLowering.new(SymbolTable.new())
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 91), "generic_payload_probe",
+        MirSignature(params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+    lowering.builder = builder
+    lowering
+
+# fn stored<T>(result: Result<T, text>, tag: text) -> Result<T, text>
+fn gp_stored(arg: HirExpr) -> HirExpr:
+    gp_call([gp_result(gp_t()), gp_text()], gp_result(gp_t()), [arg, gp_typed(gp_text())])
+
+fn gp_same(actual: HirType?, expected: HirType) -> bool:
+    if val found = actual:
+        return hir_types_equal(found, expected)
+    false
+
+describe "Generic call Result payload instantiation":
+    it "binds T from a Result<text, text> argument so unwrap sees text":
+        step("Recover the call's Result type and its Ok payload")
+        var lowering = gp_lowering()
+        val call = gp_stored(gp_typed(gp_result(gp_text())))
+        expect(gp_same(lowering.enum_match_expr_type(call), gp_result(gp_text()))).to_equal(true)
+        expect(gp_same(lowering.result_ok_hir_type(call), gp_text())).to_equal(true)
+
+    it "binds T to Option<text> so a ?-bound value keeps its Option type":
+        step("`stored(read_optional())?` is Option<text>, so is_none resolves")
+        var lowering = gp_lowering()
+        val call = gp_stored(gp_typed(gp_result(gp_option(gp_text()))))
+        val tried = HirExpr(kind: HirExprKind.Try(call), has_type_: false,
+            type_: HirType(kind: HirTypeKind.Error, span: Span.empty()), span: Span.empty())
+        expect(gp_same(lowering.enum_match_expr_type(tried), gp_option(gp_text()))).to_equal(true)
+
+    it "keeps the declared type when an argument type is unknown":
+        step("No evidence for T: fail closed to the unsubstituted declaration")
+        var lowering = gp_lowering()
+        val call = gp_stored(gp_untyped())
+        expect(gp_same(lowering.enum_match_expr_type(call), gp_result(gp_t()))).to_equal(true)
+
+    it "keeps the declared type when T binds a scalar":
+        step("An erased body may store a scalar T as a tagged word; keep the declared type")
+        var lowering = gp_lowering()
+        val call = gp_stored(gp_typed(gp_result(gp_int())))
+        expect(gp_same(lowering.enum_match_expr_type(call), gp_result(gp_t()))).to_equal(true)
+
+    it "keeps the declared type when arguments bind T inconsistently":
+        step("fn pick<T>(a: T, b: T) -> Result<T, text> with (i64, text)")
+        var lowering = gp_lowering()
+        val call = gp_call([gp_t(), gp_t()], gp_result(gp_t()), [gp_typed(gp_int()), gp_typed(gp_text())])
+        expect(gp_same(lowering.enum_match_expr_type(call), gp_result(gp_t()))).to_equal(true)
+
+fn gp_lower_source(body: text) -> text:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(body, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: body, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["main_hir"] = hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "main_hir")
+    mir_lowering.lower_module(hir, [hir])
+    var out = ""
+    for e in lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    out
+
+val GP_SOURCE = "fn stored<T>(result: Result<T, text>, tag: text) -> Result<T, text>:\n    result\n\nfn read_text() -> Result<text, text>:\n    Ok(\"abc\")\n\nfn read_optional() -> Result<Option<text>, text>:\n    Ok(Some(\"bytes\"))\n\nfn width(t: text) -> i64:\n    t.len()\n\nfn lease() -> i64:\n    val got = stored(read_text(), \"lease\")\n    if got.is_err(): return 0\n    width(got.unwrap())\n\nfn optional_bytes() -> Result<bool, text>:\n    val bytes = stored(read_optional(), \"opt\")?\n    if bytes.is_none() or width(bytes.unwrap()) != 5:\n        return Ok(false)\n    Ok(true)\n\nfn main() -> i64:\n    lease()\n"
+
+describe "Generic call payload through source lowering":
+    it "lowers unwrap and ?-bound is_none on a generic passthrough result":
+        step("Phase 4 journal shape: stored<T>(...).unwrap() and stored<T>(...)?.is_none()")
+        val out = gp_lower_source(GP_SOURCE)
+        expect(out.contains("unsupported Result unwrap payload type")).to_equal(false)
+        expect(out.contains("unresolved method call")).to_equal(false)
+
+val GP_PROVIDER = "fn stored<T>(result: Result<T, text>, tag: text) -> Result<T, text>:\n    result\n\nexport stored\n"
+val GP_CONSUMER = "use probe.gp.*\n\nfn read_text() -> Result<text, text>:\n    Ok(\"abc\")\n\nfn read_optional() -> Result<Option<text>, text>:\n    Ok(Some(\"bytes\"))\n\nfn width(t: text) -> i64:\n    t.len()\n\nfn lease() -> i64:\n    val got = stored(read_text(), \"lease\")\n    if got.is_err(): return 0\n    width(got.unwrap())\n\nfn optional_bytes() -> Result<bool, text>:\n    val bytes = stored(read_optional(), \"opt\")?\n    if bytes.is_none() or width(bytes.unwrap()) != 5:\n        return Ok(false)\n    Ok(true)\n\nfn main() -> i64:\n    lease()\n"
+
+fn gp_lower_two_module() -> text:
+    val log = Logger(level: 0)
+    val lib_ast = parse_full_frontend(GP_PROVIDER, "probe/gp.spl", "probe.gp", log)
+    val main_ast = parse_full_frontend(GP_CONSUMER, "probe/main.spl", "probe.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["probe.gp"] = lib_ast
+    modules["probe.main"] = main_ast
+    val sources = [
+        SourceFile(path: "probe/gp.spl", content: GP_PROVIDER, module_name: "probe.gp"),
+        SourceFile(path: "probe/main.spl", content: GP_CONSUMER, module_name: "probe.main")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lib_lowering = hirlowering_for_module("probe/gp", surfaces)
+    var main_lowering = hirlowering_for_module("probe.main", surfaces)
+    val lib_hir = lib_lowering.lower_module(lib_ast)
+    val main_hir = main_lowering.lower_module(main_ast)
+    var mir_lowering = MirLowering.new(main_hir.symbols)
+    var hir_modules: Dict<text, HirModule> = {}
+    hir_modules["probe.gp"] = lib_hir
+    hir_modules["probe.main"] = main_hir
+    for module_key in hir_modules.keys():
+        mir_lowering.prescan_module_struct_names(hir_modules, module_key)
+    mir_lowering.lower_module(main_hir, [lib_hir, main_hir])
+    var out = ""
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    out
+
+describe "Cross-module generic call payload":
+    it "lowers unwrap and ?-bound is_none on an imported generic passthrough":
+        step("Journal shape: operation_stored_result_v2 lives in another module")
+        val out = gp_lower_two_module()
+        expect(out.contains("unsupported Result unwrap payload type")).to_equal(false)
+        expect(out.contains("unresolved method call")).to_equal(false)

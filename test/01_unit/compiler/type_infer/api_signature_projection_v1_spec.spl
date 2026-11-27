@@ -1,0 +1,146 @@
+# REQ-EAPI-001/002/006: observation candidate, not enforcement acceptance.
+# Authored execution checks; unrun until a source-matched runtime is admitted.
+use std.spec.{describe, it, expect}
+use compiler.common.api_signature_facts_v1.{ApiSignatureKindV1, ApiSignatureFactsV1}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolTable, SymbolKind, SymbolId}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.types.type_infer_types.{Substitution}
+use compiler.types.type_infer.api_signature_projection_v1.{ApiSignatureProjectorV1}
+use compiler.driver.hir_typecheck_consumer_v1.{collect_module_typecheck_receipt_v1}
+use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_hir_pipeline_passes.{publish_module_typecheck_receipt_v1, run_typecheck_warn_pass}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+fn signature_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn signature_module(source: text) -> HirModule:
+    val parsed = parse_and_build_module(source, "signature_owner.spl")
+    val lowering = HirLowering.with_filename("signature_owner.spl")
+    lowering.use_explicit_semantic_policy()
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    module
+
+fn signature_projector() -> ApiSignatureProjectorV1:
+    ApiSignatureProjectorV1("signature_owner", SymbolTable.new(), Substitution.new(), [], false)
+
+describe "owned API signature projection":
+    it "retains compiler primitive kinds inside callbacks and containers":
+        var p = signature_projector()
+        val callback = signature_type(HirTypeKind.Function([
+            signature_type(HirTypeKind.Optional(signature_type(HirTypeKind.Str))),
+            signature_type(HirTypeKind.Char)], signature_type(HirTypeKind.Bool), []))
+        expect(p.project(callback, -1, 0, 0, [])).to_equal(0)
+        expect(p.nodes[0].kind).to_equal(ApiSignatureKindV1.Function)
+        expect(p.nodes[1].kind).to_equal(ApiSignatureKindV1.Bool)
+        expect(p.nodes[1].ordinal).to_equal(-1)
+        expect(p.nodes[2].kind).to_equal(ApiSignatureKindV1.Optional)
+        expect(p.nodes[3].kind).to_equal(ApiSignatureKindV1.Text)
+        expect(p.nodes[3].parent).to_equal(2)
+        expect(p.nodes[4].kind).to_equal(ApiSignatureKindV1.Char)
+
+    it "follows live substitution and rejects cycles without mutating it":
+        var p = signature_projector()
+        p.substitution.insert(71, signature_type(HirTypeKind.Int(32, false)))
+        p.project(signature_type(HirTypeKind.Infer(71, 1)), -1, 0, 0, [])
+        expect(p.nodes[0].kind).to_equal(ApiSignatureKindV1.Integer)
+        expect(p.nodes[0].bits).to_equal(32)
+        expect(p.nodes[0].mutable_or_signed).to_equal(false)
+        p.substitution.insert(72, signature_type(HirTypeKind.Infer(73, 1)))
+        p.substitution.insert(73, signature_type(HirTypeKind.Infer(72, 1)))
+        p.project(signature_type(HirTypeKind.Infer(72, 1)), -1, 1, 0, [])
+        expect(p.nodes[1].unknown_reason).to_equal("substitution-cycle")
+        expect(p.substitution.map.len()).to_equal(3)
+        p.project(signature_type(HirTypeKind.Infer(74, 1)), -1, 2, 0, [])
+        expect(p.nodes[2].unknown_reason).to_equal("unresolved-inference")
+        p.project(signature_type(HirTypeKind.Tuple([
+            signature_type(HirTypeKind.Infer(71, 1)),
+            signature_type(HirTypeKind.Infer(71, 1))])), -1, 3, 0, [])
+        expect(p.nodes[4].kind).to_equal(ApiSignatureKindV1.Integer)
+        expect(p.nodes[5].kind).to_equal(ApiSignatureKindV1.Integer)
+
+    it "binds nominal IDs to their declaration owner and checks actual arguments":
+        var p = signature_projector()
+        val id = p.symbols.define("Label", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, Some("domain.labels"))
+        p.project(signature_type(HirTypeKind.Named(id, [signature_type(HirTypeKind.Str)])), -1, 0, 0, [])
+        expect(p.nodes[0].local_symbol).to_equal(id.id)
+        expect(p.nodes[0].declaration_owner).to_equal("domain.labels")
+        expect(p.nodes[0].declaration_name).to_equal("Label")
+        expect(p.nodes[0].unknown_reason).to_equal("nominal-members-not-projected")
+        expect(p.nodes[1].kind).to_equal(ApiSignatureKindV1.Text)
+        p.project(signature_type(HirTypeKind.Named(SymbolId(99999), [])), -1, 1, 0, [])
+        expect(p.nodes[2].kind).to_equal(ApiSignatureKindV1.Unknown)
+        expect(p.nodes[2].unknown_reason).to_equal("nominal-symbol-absent")
+
+    it "bounds depth and wide signatures and exposes truncation":
+        var p = signature_projector()
+        p.project(signature_type(HirTypeKind.Bool), -1, 0, 32, [])
+        expect(p.nodes[0].unknown_reason).to_equal("type-depth-budget")
+        var children: [HirType] = []
+        for index in 0..1100: children.push(signature_type(HirTypeKind.Bool))
+        p.project(signature_type(HirTypeKind.Tuple(children)), -1, 1, 0, [])
+        expect(p.nodes.len()).to_equal(1024)
+        expect(p.exhausted).to_equal(true)
+
+    it "collects inside the production consumer and preserves default lease absence":
+        val module = signature_module("pub fn echo(value: text) -> text:\n    value\n")
+        val ordinary = collect_module_typecheck_receipt_v1(module.name, module, TypecheckPassSeverity.Advisory)
+        expect(ordinary.api_signatures).to_be_nil()
+        val collected = collect_module_typecheck_receipt_v1(module.name, module, TypecheckPassSeverity.Advisory, true)
+        val facts = collected.api_signatures.unwrap()
+        expect(facts.callables.len()).to_equal(1)
+        expect(facts.callables[0].declaration_name).to_equal("echo")
+        expect(facts.nodes[1].kind).to_equal(ApiSignatureKindV1.Text)
+        expect(facts.nodes[2].kind).to_equal(ApiSignatureKindV1.Text)
+        expect(facts.unknown_reasons).to_contain("effective-export-closure-not-collected")
+        expect(collected.errors).to_equal(ordinary.errors)
+
+    it "retains only promoted scalar facts after their HIR scratch owner ends":
+        val started = transient_scope_begin()
+        if not started:
+            expect(started).to_be(true)
+            return
+        # Do not allocate spec framework assertions inside reclaimed scratch.
+        val parsed = parse_and_build_module("pub fn flag() -> bool:\n    true\n", "signature_owner.spl")
+        val lowering = HirLowering.with_filename("signature_owner.spl")
+        lowering.use_explicit_semantic_policy()
+        val module = lowering.lower_module(parsed)
+        val lowering_errors = lowering.errors.len()
+        val collected = collect_module_typecheck_receipt_v1(module.name, module, TypecheckPassSeverity.Advisory, true)
+        var facts: ApiSignatureFactsV1 = collected.api_signatures.unwrap()
+        val paused = transient_scope_pause()
+        val promoted = paused and transient_promote(facts)
+        val ended = transient_scope_end()
+        expect(lowering_errors).to_equal(0)
+        expect(paused).to_be(true)
+        expect(promoted).to_be(true)
+        expect(ended).to_be(true)
+        if not promoted or not ended: return
+        expect(facts.callables[0].declaration_name).to_equal("flag")
+        expect(facts.nodes[1].kind).to_equal(ApiSignatureKindV1.Bool)
+        expect(facts.module_path).to_equal("signature_owner.spl")
+
+    it "replaces production storage and clears absent modules on a new pass":
+        val module = signature_module("pub fn flag() -> bool:\n    true\n")
+        val collected = collect_module_typecheck_receipt_v1(module.name, module, TypecheckPassSeverity.Advisory, true)
+        val ctx = CompileContext.create(driver_core_compile_options_default())
+        val modules: Dict<text, HirModule> = {module.name: module}
+        run_typecheck_warn_pass(ctx, modules)
+        expect(ctx.api_signature_facts.len()).to_equal(1)
+        expect(ctx.api_signature_facts[module.name].callables[0].declaration_name).to_equal("flag")
+        publish_module_typecheck_receipt_v1(ctx, collected)
+        publish_module_typecheck_receipt_v1(ctx, collected)
+        expect(ctx.api_signature_facts.len()).to_equal(1)
+        expect(ctx.api_signature_node_count).to_equal(collected.api_signatures.unwrap().nodes.len())
+        val empty_modules: Dict<text, HirModule> = {}
+        run_typecheck_warn_pass(ctx, empty_modules)
+        expect(ctx.api_signature_facts.len()).to_equal(0)
+        expect(ctx.api_signature_node_count).to_equal(0)

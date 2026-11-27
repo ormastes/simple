@@ -1,0 +1,47 @@
+# Private retained-owner seam, no public fd getter or caller identity factory.
+@when(os="linux"):
+use std.nogc_sync_mut.io.anchored_io_linux_v1.anchored_linux_metadata_v1
+use std.nogc_sync_mut.io.linux_process_replace_abi_v1.{fcntl, fchdir}
+use std.nogc_sync_mut.io.process_ops.process_capture_native_mode_check_v1
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+
+# Called ONLY at the existing real retained-directory producers, before yield.
+# A metadata failure still returns its original resource owner; it is incapable
+# of admission to this new cwd seam because its private birth identity is empty.
+pub(package) fn retained_directory_birth_v1(fd: i64) -> [u8]:
+    val metadata = unsafe(capabilities: [ffi, raw_ptr]): anchored_linux_metadata_v1(fd, "", true)
+    if metadata.is_ok(): metadata.unwrap().identity else: []
+
+fn retained_directory_cwd_entry_v1() -> Result<(), text>:
+    process_capture_native_mode_check_v1()?
+    unsafe(capabilities: [ffi, raw_ptr]): linux_machine_process_origin_check_v1()
+
+# Result carries an acquired duplicate even when post-validation fails. Caller
+# immediately installs it in canonical replacement state before reading error.
+@unsafe(reason: "duplicates exact producer-bound directory under already isolated file table", capabilities: [ffi, raw_ptr])
+pub(package) fn retained_directory_cwd_duplicate_v1(fd: i64, birth: [u8]) -> (i64, text):
+    val entry = retained_directory_cwd_entry_v1()
+    if entry.is_err(): return (-1, entry.unwrap_err())
+    if birth.len() != 16: return (-1, "linux-replace-cwd-birth-unavailable")
+    val before = anchored_linux_metadata_v1(fd, "", true)
+    if before.is_err(): return (-1, "linux-replace-cwd-source-metadata")
+    if before.unwrap().identity != birth or (before.unwrap().mode & 61440u32) != 16384u32:
+        return (-1, "linux-replace-cwd-source-stale")
+    val duplicate = fcntl(fd as i32, 1030, 3) as i64 # F_DUPFD_CLOEXEC, min3.
+    if duplicate < 0: return (-1, "linux-replace-cwd-duplicate")
+    val after = anchored_linux_metadata_v1(duplicate, "", true)
+    if after.is_err(): return (duplicate, "linux-replace-cwd-duplicate-metadata")
+    if after.unwrap().identity != birth or (after.unwrap().mode & 61440u32) != 16384u32:
+        return (duplicate, "linux-replace-cwd-duplicate-mismatch")
+    (duplicate, "")
+
+@unsafe(reason: "enters independently held exact directory after birth-identity revalidation", capabilities: [ffi, raw_ptr])
+pub(package) fn retained_directory_cwd_enter_v1(fd: i64, birth: [u8]) -> Result<(), text>:
+    retained_directory_cwd_entry_v1()?
+    if birth.len() != 16: return Err("linux-replace-cwd-birth-unavailable")
+    val current = anchored_linux_metadata_v1(fd, "", true)?
+    if current.identity != birth or (current.mode & 61440u32) != 16384u32:
+        return Err("linux-replace-cwd-current-stale")
+    if fchdir(fd as i32) != 0: return Err("linux-replace-enter-cwd-failed")
+    Ok(())
+@end

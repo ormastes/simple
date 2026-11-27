@@ -1,0 +1,214 @@
+"""
+## Purpose and audience
+Compiler maintainers verify that source modifier observations bind the original
+top-level declaration, even when nested parsing emits synthetic declarations.
+## Workflow
+Parse real enum/class source, interleave another parse, restore the complete
+pool frame, then exercise the production flat bridge and module-owner copies.
+## Limits
+These are declaration facts, not resolved exports or requester permissions.
+Offsets and source digests identify the selected preprocessed parser input.
+"""
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.core.ast.{decl_count, decl_get_name, decl_get_tag, DECL_ENUM, DECL_IMPL}
+use compiler.frontend.core._Ast.module_state.{module_decl_count_get, module_decl_at}
+use compiler.core.parser.{parser_init_with_path, parser_has_errors}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, FLAT_POOL_CODEC_VERSION}
+use compiler.frontend.core._ParserDecls.enum_module_body.{
+    parser_top_level_visibility_intent_count_v1,
+    parser_top_level_visibility_intent_decl_id_v1,
+    parser_top_level_visibility_intent_bindings_valid_v1,
+    flat_pending_pools_dump, flat_pending_pools_restore,
+    pending_decl_attr_state_take, pending_decl_attr_state_install}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module,
+    flat_pools_dump_all, flat_pools_restore_all, build_module_from_flat_pool_blob}
+use compiler.frontend.desugar.desugar_async.{desugar_module}
+use compiler.frontend.declaration_intent_v1.{parser_declaration_intent_index_v1}
+use compiler.frontend.parse_context.{parse_context_take, parse_context_install}
+use compiler.frontend.core.parser_preprocessor.{_pp_preprocess_conditionals}
+use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner, module_surface_owner_value}
+
+val BINDING_PATH = "declaration_binding.spl"
+val BINDING_SOURCE = "pri enum Signal:\n    Ready\n    fn code(self) -> i64:\n        1\npub fn after() -> i64:\n    2\n"
+
+fn parse_binding_source(source: text):
+    parser_init_with_path(source, BINDING_PATH)
+    parse_module_body()
+
+fn binding_has_decl_id(source_id: i64) -> bool:
+    for index in 0..parser_top_level_visibility_intent_count_v1():
+        if parser_top_level_visibility_intent_decl_id_v1(index) == source_id: return true
+    false
+
+describe "original source declaration visibility bindings":
+    it "binds an enum rather than its earlier synthetic impl or member":
+        step("Parse a private enum with a method and a later public function")
+        parse_binding_source(BINDING_SOURCE)
+        expect(parser_has_errors()).to_equal(false)
+        expect(parser_top_level_visibility_intent_bindings_valid_v1()).to_equal(true)
+        expect(parser_top_level_visibility_intent_count_v1()).to_equal(2)
+        val enum_id = parser_top_level_visibility_intent_decl_id_v1(0)
+        expect(decl_get_tag(enum_id)).to_equal(DECL_ENUM)
+        expect(decl_get_name(enum_id)).to_equal("Signal")
+        expect(decl_get_name(parser_top_level_visibility_intent_decl_id_v1(1))).to_equal("after")
+        var synthetic_impls = 0
+        for index in 0..module_decl_count_get():
+            val source_id = module_decl_at(index)
+            if decl_get_tag(source_id) == DECL_IMPL:
+                synthetic_impls = synthetic_impls + 1
+                expect(binding_has_decl_id(source_id)).to_equal(false)
+        expect(synthetic_impls).to_equal(1)
+        for source_id in 0..decl_count():
+            if decl_get_name(source_id) == "Signal__code":
+                expect(binding_has_decl_id(source_id)).to_equal(false)
+
+    it "requires the whole snapshot before reusing raw IDs from another parse":
+        step("Keep the full snapshot and its separate pending payload")
+        parse_binding_source(BINDING_SOURCE)
+        val original_id = parser_top_level_visibility_intent_decl_id_v1(0)
+        val blob = flat_pools_dump_all()
+        val pending = flat_pending_pools_dump()
+        step("Recycle exactly the same raw IDs with different declaration names")
+        parse_binding_source(BINDING_SOURCE.replace("Signal", "Other").replace("after", "later"))
+        expect(parser_top_level_visibility_intent_decl_id_v1(0)).to_equal(original_id)
+        expect(flat_pending_pools_restore(FlatPoolReader.new(pending))).to_equal(true)
+        expect(parser_top_level_visibility_intent_decl_id_v1(0)).to_equal(-1)
+        expect(parser_top_level_visibility_intent_bindings_valid_v1()).to_equal(false)
+        step("Restore all AST families before trusting the original IDs")
+        expect(flat_pools_restore_all(blob)).to_equal(true)
+        expect(parser_top_level_visibility_intent_decl_id_v1(0)).to_equal(original_id)
+        expect(decl_get_name(original_id)).to_equal("Signal")
+
+    it "clears bindings on a late canonical-frame failure and rejects both predecessor headers":
+        parse_binding_source(BINDING_SOURCE)
+        val blob = flat_pools_dump_all()
+        step("Reject trailing data after valid pending metadata and all other families")
+        expect(flat_pools_restore_all(blob + "unexpected\n")).to_equal(false)
+        expect(parser_top_level_visibility_intent_decl_id_v1(0)).to_equal(-1)
+        expect(parser_top_level_visibility_intent_count_v1()).to_equal(0)
+        for old_header in ["spl-flatpool-v17-declaration-visibility-intent", "spl-flatpool-v16-field-array-sizes-aspect-owner-v1"]:
+            expect(flat_pools_restore_all(blob.replace(FLAT_POOL_CODEC_VERSION, old_header))).to_equal(false)
+            expect(parser_top_level_visibility_intent_decl_id_v1(0)).to_equal(-1)
+
+    it "retains snapshot-qualified IDs through the bridge cache and module-owner rebuilds":
+        step("Build a production ParserModule and capture its flat pools")
+        val parsed = parse_and_build_module(BINDING_SOURCE, BINDING_PATH)
+        expect(parser_has_errors()).to_equal(false)
+        expect(parsed.source_declaration_intents_v1.len()).to_equal(2)
+        expect(parsed.source_declaration_digest_v1).to_equal(sha256_text(BINDING_SOURCE))
+        val original = parsed.source_declaration_intents_v1[0]
+        expect(original.decl_name).to_equal("Signal")
+        expect(original.decl_kind).to_equal(DECL_ENUM)
+        expect(original.modifier).to_equal("pri")
+        expect(original.source_start).to_equal(0)
+        val blob = flat_pools_dump_all()
+        val cached = build_module_from_flat_pool_blob(blob, BINDING_SOURCE, BINDING_PATH)
+        expect(cached.?).to_equal(true)
+        expect(cached.unwrap().source_declaration_intents_v1[0].raw_decl_id).to_equal(original.raw_decl_id)
+        val rebuilt = module_surface_owner_value(ModuleSurfaceParserOwner.new(cached.unwrap()))
+        val desugared = desugar_module(rebuilt)
+        expect(desugared.source_declaration_intents_v1[0].raw_decl_id).to_equal(original.raw_decl_id)
+        expect(desugared.source_declaration_digest_v1).to_equal(parsed.source_declaration_digest_v1)
+        step("Reject a cache frame paired with different content or path")
+        expect(build_module_from_flat_pool_blob(blob, BINDING_SOURCE.replace("Signal", "Other"), BINDING_PATH).?).to_equal(false)
+        expect(build_module_from_flat_pool_blob(blob, BINDING_SOURCE, "another.spl").?).to_equal(false)
+
+    it "rejects duplicate IDs and IDs outside the top-level module":
+        parse_binding_source(BINDING_SOURCE)
+        val source_id = parser_top_level_visibility_intent_decl_id_v1(0)
+        var duplicate = pending_decl_attr_state_take()
+        duplicate.TOP_LEVEL_VISIBILITY_DECL_IDS_V1 = [source_id, source_id]
+        pending_decl_attr_state_install(duplicate)
+        expect(parser_top_level_visibility_intent_bindings_valid_v1()).to_equal(false)
+        val duplicate_frame = flat_pools_dump_all()
+        expect(flat_pools_restore_all(duplicate_frame)).to_equal(false)
+        expect(parser_top_level_visibility_intent_decl_id_v1(0)).to_equal(-1)
+        parse_binding_source(BINDING_SOURCE)
+        var member_id = -1
+        for candidate in 0..decl_count():
+            if decl_get_name(candidate) == "Signal__code": member_id = candidate
+        expect(member_id).to_be_greater_than(-1)
+        var non_module = pending_decl_attr_state_take()
+        non_module.TOP_LEVEL_VISIBILITY_DECL_IDS_V1 = [member_id, source_id]
+        pending_decl_attr_state_install(non_module)
+        expect(parser_top_level_visibility_intent_bindings_valid_v1()).to_equal(false)
+        val non_module_frame = flat_pools_dump_all()
+        expect(flat_pools_restore_all(non_module_frame)).to_equal(false)
+        parse_binding_source(BINDING_SOURCE)
+        var outside = pending_decl_attr_state_take()
+        outside.TOP_LEVEL_VISIBILITY_DECL_IDS_V1 = [decl_count(), -1]
+        pending_decl_attr_state_install(outside)
+        val outside_frame = flat_pools_dump_all()
+        expect(flat_pools_restore_all(outside_frame)).to_equal(false)
+
+    it "restores IDs only after the entire parse context is installed":
+        parse_binding_source(BINDING_SOURCE)
+        val original_id = parser_top_level_visibility_intent_decl_id_v1(0)
+        val original = parse_context_take()
+        parse_binding_source(BINDING_SOURCE.replace("Signal", "Other"))
+        val other = parse_context_take()
+        parse_context_install(original)
+        expect(parser_top_level_visibility_intent_decl_id_v1(0)).to_equal(original_id)
+        expect(decl_get_name(original_id)).to_equal("Signal")
+        parse_context_install(other)
+        expect(decl_get_name(parser_top_level_visibility_intent_decl_id_v1(0))).to_equal("Other")
+
+    it "preserves lexical aspect owners without inventing a container declaration ID":
+        val source = "aspect Trace:\n    on pc{{ execution(* target(..)) }} use advice before\npub fn target() -> i64:\n    1\n"
+        val parsed = parse_and_build_module(source, "aspect_binding.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(parsed.aop_advices.len()).to_equal(1)
+        expect(parsed.aop_advices[0].aspect_name).to_equal("Trace")
+        expect(parsed.source_declaration_intents_v1.len()).to_equal(1)
+        expect(parsed.source_declaration_intents_v1[0].decl_name).to_equal("target")
+
+    it "clears stale binding admission at initialization before any new declaration is parsed":
+        parse_binding_source(BINDING_SOURCE)
+        expect(parser_top_level_visibility_intent_decl_id_v1(0)).to_be_greater_than(-1)
+        parser_init_with_path("fn fresh():\n    1\n", "fresh.spl")
+        expect(parser_top_level_visibility_intent_count_v1()).to_equal(0)
+        expect(parser_top_level_visibility_intent_decl_id_v1(0)).to_equal(-1)
+        expect(parser_top_level_visibility_intent_bindings_valid_v1()).to_equal(false)
+
+    it "identifies selected parser input after preprocessing changes byte offsets":
+        val source = "@cfg(true)\npri fn kept() -> i64:\n    1\n"
+        val selected = _pp_preprocess_conditionals(source)
+        expect(selected == source).to_equal(false)
+        val parsed = parse_and_build_module(source, "selected_binding.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(parsed.source_declaration_digest_v1).to_equal(sha256_text(selected))
+        expect(parsed.source_declaration_intents_v1.len()).to_equal(1)
+        expect(parsed.source_declaration_intents_v1[0].source_start).to_equal(1)
+        val blob = flat_pools_dump_all()
+        expect(build_module_from_flat_pool_blob(blob, source, "selected_binding.spl").?).to_equal(true)
+
+    it "keeps directly consumed decorator declarations unknown rather than inferring omitted":
+        val parsed = parse_and_build_module("@simd\nfn decorated() -> i64:\n    1\n", "decorator_binding.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(parsed.functions.contains_key("decorated")).to_equal(true)
+        expect(parsed.source_declaration_intents_v1.len()).to_equal(0)
+
+    it "projects only the final typed dictionary owner of a duplicate name":
+        step("Parse two source declarations that write the same function entry")
+        val module = parse_and_build_module("pub fn same() -> i64:\n    1\npri fn same() -> i64:\n    2\n", BINDING_PATH)
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.source_declaration_intents_v1.len()).to_equal(2)
+        expect(module.source_declaration_intents_v1[0].projection_key).to_equal("")
+        expect(module.source_declaration_intents_v1[1].projection_key).to_equal("function:same")
+        val index = parser_declaration_intent_index_v1(module.source_declaration_intents_v1)
+        expect(index.is_ok()).to_equal(true)
+        expect(index.unwrap()["function:same"]).to_equal("pri")
+
+    it "keeps enum ownership separate from its generated methods":
+        step("Project the production enum and its synthetic impl through the bridge")
+        val module = parse_and_build_module(BINDING_SOURCE, BINDING_PATH)
+        expect(parser_has_errors()).to_equal(false)
+        val index = parser_declaration_intent_index_v1(module.source_declaration_intents_v1)
+        expect(index.is_ok()).to_equal(true)
+        val targets = index.unwrap()
+        expect(targets["enum:Signal"]).to_equal("pri")
+        expect(targets["function:after"]).to_equal("public")
+        expect(targets.contains_key("function:Signal__code")).to_equal(false)
+        expect(targets.len()).to_equal(2)

@@ -20,3 +20,7 @@ Fixture results and full Web/core/MCP qualification remain pending. Native
 MIR may expose existing untyped helper limitations; retain those failures.
 Other Web errors (_make_j0/_inc32 local calls, mutex keeping helper, chr and
 collection method ownership) remain separate; this repair does not claim them fixed.
+
+**Revalidated 2026-11-02: still plausible because OPEN; source repair and regressions AUTHORED_UNEXECUTED; no merged fix commit with a passing regression is cited in this doc.**
+
+**Verified 2026-11-03 (grp03):** `tls_sha256 as sha256` alias is on origin/release/1.0.0; `test/01_unit/lib/tls/canonical_sha256_alias_spec.spl` executes 2/2 passing.

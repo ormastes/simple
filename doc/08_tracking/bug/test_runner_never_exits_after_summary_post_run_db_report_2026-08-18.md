@@ -129,3 +129,71 @@ outside a hang fix. Nothing was changed; this is filed with the reproducer and e
   involvement cannot be ablated the same way — but the fd evidence already rules the daemon out.
 - rc 143/144 is unverified, never a failure, on this host (earlyoom). Neither run here hit that:
   run A's 124 is `timeout`'s SIGTERM at exactly its 1800s deadline, run B exited by itself.
+
+## Round 8 part 2 note 2026-11-06 (not reproduced on Windows seed)
+`generate_test_result_md` on the current 4904-line test_db.sdn: load 90 ms, generate 448 ms. A 3-file directory run with the DB phase enabled exits normally. The Linux-seed 780 s report generation / non-exit is not reproducible here; stays OPEN for a Linux re-probe (`timeout 1800 bin/simple test test/fixtures/_accept_run --unstable`).
+
+## 2026-11-11 — runner10 lane verdict: BLOCKED (verbatim grant; needs Linux re-probe)
+
+Grant (known-live route, quoted verbatim): "Windows interpreted driver
+>240s (keep to unit-scale specs; abort any spec >10 min and mark BLOCKED
+with the grant instead)." This row is blocked on a different platform
+constraint — the hang was reproduced only on the Linux Rust seed, and this
+lane runs the Windows tracked seed — but the same grant governs: no
+long-running directory-lane reproduction was attempted beyond the evidence
+already on file.
+
+Fresh checks this lane at base 79d5af6723f6:
+
+- The reproducer fixture is unchanged and tracked:
+  `test/fixtures/_accept_run/` (pass_a, pass_b, fail, crash, timeout specs).
+- The 2026-11-06 round-8 note's disposition is the governing evidence and
+  was NOT re-run (campaign no-rerun rule; this lane's planned reproduction
+  died with its session): on the current Windows seed,
+  `generate_test_result_md` over the then-4904-line test_db.sdn loaded in
+  90 ms and generated in 448 ms, and a 3-file directory run with the DB
+  phase enabled exited normally — the Linux-seed 780 s report generation /
+  post-summary non-exit does not reproduce on Windows.
+
+Disposition: Status stays OPEN, owned by a Linux-seed lane. Next step
+remains the 2026-11-06 note's Linux re-probe (`timeout 1800 bin/simple test
+test/fixtures/_accept_run --unstable`, watch the post-summary DB/report
+phase and the +693 s residual spin). The small zombie-reap leak noted in
+the body (`execution.rs:1713-1719` Children dropped unreaped) is cosmetic
+and separate.
+
+## 2026-11-13 — P3 runner priority lane (work/p3-runner-lane-20261113, base 80a8116e5e2): not reproducible on Windows seed; DB-phase exit re-verified
+
+Two bounded checks on the Windows seed-smoke binary (`bin/simple.exe`,
+`Simple v1.0.0-rc.1`), per the verbatim grant "Windows interpreted driver
+>240s (keep to unit-scale specs; abort any spec >10 min and mark BLOCKED
+with the grant instead)":
+
+1. **Exact reproducer, capped:** `timeout 600 bin/simple.exe test
+   test/fixtures/_accept_run --unstable` — outer rc 124 (cap kill) with the
+   run still INSIDE the 5th fixture (`timeout_spec`); 4/5 fixtures had
+   completed (~15 s of test execution: crash PASS 7.7 s, fail FAIL 2.4 s,
+   pass_a/pass_b PASS ~2 s each) and `Session setup: 375 ms` printed at
+   ~590 s. The ~590 s is pre-summary module load, not the post-summary
+   phase — the hang shape (summary printed, then spin) was never reached.
+   BLOCKED past 10 min per the grant, same as the 2026-11-11 runner10 lane.
+2. **Post-summary DB/report phase, bounded:** a 3-file directory run
+   (pass_a + pass_b + fail, DB phase enabled, outer cap 480 s) printed the
+   complete summary (`Results: 3 total, 2 passed, 1 failed` / `Some tests
+   failed.`), then `update_test_database` + `generate_test_result_md` both
+   completed (`doc/08_tracking/test/test_db.sdn` mtime 09:58,
+   `test_result.md` mtime 09:57), and the process EXITED ON ITS OWN with
+   the runner's own rc=1 — total wall 141 s. This reproduces the
+   2026-11-06 round-8 disposition at the newer base: the post-summary
+   non-exit is not reproducible on the Windows seed.
+
+**Zombie-reap leak (recorded as cosmetic): stale.** The current
+`wait_with_timeout` kill helpers (`src/compiler_rust/driver/src/cli/test_runner/execution.rs`,
+timeout branch) use `Command::status()` for the kill/taskkill helpers —
+blocking waits that reap — and the child itself is consumed by
+`wait_with_output()` in the waiter thread. The dropped-unreaped-`Child`
+pattern from the 2026-08-18 body is gone in current source.
+
+Disposition unchanged: OPEN for the Linux-seed re-probe
+(`timeout 1800 bin/simple test test/fixtures/_accept_run --unstable`,
+watch the post-summary DB/report phase and the +693 s residual spin).

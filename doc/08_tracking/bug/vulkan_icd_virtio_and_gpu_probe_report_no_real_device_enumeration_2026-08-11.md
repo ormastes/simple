@@ -109,3 +109,97 @@ scope. A real virtio-gpu transport (ring buffer I/O, Venus
 `VK_STRUCTURE_TYPE_*` decode) still does not exist; `_venus_device_available`
 is the single wire-in point for when it does.
 
+
+## 2026-11-25 triage (release/1.0.0, worktree p2w6-al) — fixed half persists; open half is hardware-lane
+
+Verified by code inspection at release/1.0.0 HEAD (`f3fb8f24dc9`):
+
+- **Fixed half (H1, fail-closed) is intact.**
+  `src/lib/nogc_async_mut/gpu/vulkan_icd_virtio.spl` still has
+  `VenusTransportError` (`:69`), `VenusCallStatus` (`:57`),
+  `_venus_device_available` (`:445`), and `_venus_transport_send` (`:451`)
+  returning `Err(VenusTransportError.Unavailable(...))` with no fabricated
+  handle; every public `venus_icd_*` entry point maps the typed status
+  through `_venus_result_from_transport` (`:465`). No regression to the old
+  always-`is_ok: true` counter-handle behavior.
+- **Open half is genuinely still open.** All five vendor probes in
+  `src/os/drivers/gpu/gpu_vendor_probe.spl` still hard-code `device_id: 0`
+  (`:45,89,132,176,...`) with `is_available()` defined as
+  `self.device_id > 0`. Closing this half needs a real ICD/DRM query —
+  hardware/owner-lane work, not a bounded pure-Simple fix.
+
+Execution limit: `test/01_unit/os/vulkan/venus_icd_fail_closed_spec.spl`
+exists but could not be re-run on this host — `bin/simple.exe test` fails
+repo-wide at this HEAD (pinned seed rejects `@representation_boundary` in
+the test runner). Status stays **open** for the `gpu_vendor_probe.spl` half
+only; no header change.
+
+## 2026-11-26 triage on a real-GPU Linux host (gpuvk lane, aarch64 NVIDIA GB10) — stays OPEN, gap narrowed
+
+Seed `/home/yoon/.cache/cargo-target-wr-seed1126b/release/simple` (sha256 prefix
+`fb80903917d6d5f5`), worktree on release/1.0.0 `add1f502e86`.
+
+This record's earlier text is stale in two places:
+
+- `gpu_vendor_probe.spl` no longer derives availability from `device_id > 0`. A
+  `GpuProbeState` enum (`NotProbed` / `NoDevice` / `DevicePresent(id)`) was added, and every
+  vendor `.probe()` returns `NotProbed`.
+- A real host vendor probe now exists in the userland library:
+  `gpu_vendor_probe_sysfs` / `gpu_vendor_probe_host`
+  (`src/lib/nogc_async_mut/gpu/vulkan_icd_virtio.spl`) read sysfs DRM PCI ids and the matching
+  ICD manifest.
+
+The specs could not run on the earlier Windows lanes. They now run green here:
+`venus_icd_fail_closed_spec` 5/5, `gpu_vendor_probe_id_spec` 4/4,
+`device_enumeration_boundary_spec` 17/17, `vulkan_icd_virtio_spec` 12/12.
+
+Live probe on this host (`SIMPLE_EXECUTION_MODE=interpret seed run`):
+
+```
+host avail=true vendor=nvidia vid=4318 did=11794 card=card0 icd=/usr/share/vulkan/icd.d/nvidia_icd.json reason=sysfs-pci-device-detected
+venus avail=false reason=no-virtio-gpu-sysfs-device
+candidate_enumeration_is_available=false
+```
+
+So the Linux host probe reports real data (`10de:2e12`, matching `/sys/class/drm/card0`), and the
+Venus side correctly fails closed on a host with no virtio-gpu.
+
+**Remaining gap (why this stays OPEN):** `vulkan.device.enumeration@1` needs queue families,
+memory heaps/types and limits. A PCI vendor/device id is not that data. The SimpleOS-side
+candidate (`src/os/drivers/gpu/gpu_vendor_probe.spl`, read by
+`boundary_enumeration_provider.spl`'s `_vendor_probe_reports_any_device`) still has no
+kernel-side source. Wiring the Linux sysfs probe into those kernel driver probes would be wrong
+twice over: it is not available on the board, and `candidate_enumeration_is_available()` would
+flip to `executed` on id-only data. Closing this needs one of two things:
+
+- (a) a SimpleOS PCI-scan (`src/os/drivers/pci/`) to vendor-probe bridge that yields
+  `DevicePresent`, **together with** a provider change so that an id alone does not count as
+  enumeration;
+- (b) a real virtio-gpu Venus transport that decodes the device, queue and memory replies.
+
+Both are board/driver-lane work and need board evidence under `.claude/rules/board-runnable.md`.
+No code change in this lane.
+
+## BF-10 Addendum (2026-11-26, status stays OPEN)
+
+- **Code hardening (`src/os/drivers/gpu/`):**
+  - Added `GpuVendorRegistry.not_probed_count()`, `no_device_count()`, `all_probes_unrun()`, and explicit `not_probed=<n> no_device=<n>` reporting in `src/os/drivers/gpu/gpu_vendor_probe.spl` so unrun `NotProbed` stubs remain visibly distinguishable from real probed `NoDevice` states.
+  - Replaced raw `shell(_lavapipe_vulkaninfo_command())` with `process_run_bounded("/usr/bin/env", ["VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json", "vulkaninfo"], LAVAPIPE_ENUMERATION_TIMEOUT_MS, LAVAPIPE_ENUMERATION_MAX_OUTPUT_BYTES)` in `src/os/drivers/gpu/board_vulkan/boundary_enumeration_provider.spl`.
+- **Host verification (`SIMPLE_LIB=src`, `--mode=interpreter`):**
+  - `test/01_unit/os/wm_bf10/bf10_virtio_capset_and_gpu_probe_spec.spl` (plus `venus_icd_fail_closed_spec.spl` and `readback_boundary_gate_spec.spl`).
+- **Remaining open gap:** Matches upstream 2026-11-26 triage above — SimpleOS candidate still needs queue families, memory heaps/types, and limits via board PCI/Venus transport (`status=open` preserved).
+
+## 2026-11-27 W5-3 Precondition Hardening & Host Verification (`fix-implemented-verification-pending`)
+
+- **Source (`src/lib/nogc_async_mut/gpu/vulkan_icd_virtio.spl`)**:
+  - Confirmed real sysfs/DRM/ICD probing (`venus_probe_sysfs_drm`, `gpu_vendor_probe_sysfs`, `gpu_vendor_probe_host`, `venus_icd_probe_host`) and fail-closed `_venus_device_available()` / `_venus_transport_send()`.
+  - Hardened `venus_icd_connect` (`ring_size <= 0` -> `false`), `venus_icd_allocate_memory` (`size <= 0` -> `VenusCallStatus.Failed`, `"invalid-allocation-size"`), and `venus_icd_create_buffer` (`size <= 0` -> `VenusCallStatus.Failed`, `"invalid-buffer-size"`).
+- **Host verification (`SIMPLE_LIB=src`, `--mode=interpreter` on Windows)**:
+  - `test/01_unit/lib/nogc_async_mut/gpu/vulkan_icd_virtio_bounds_spec.spl` (new): 3/3 PASS.
+  - `test/01_unit/lib/nogc_async_mut/gpu/vulkan_icd_virtio_spec.spl`: 12/12 PASS.
+  - `test/01_unit/lib/gpu/vulkan_icd_virtio_probe_spec.spl`: 5/5 PASS.
+  - `test/01_unit/os/vulkan/venus_icd_fail_closed_spec.spl`: 5/5 PASS.
+  - `test/01_unit/lib/gpu/gpu_vendor_probe_id_spec.spl`: 4/4 PASS.
+  - `test/01_unit/os/wm_bf10/bf10_virtio_capset_and_gpu_probe_spec.spl`: 3/3 PASS.
+  - (`device_enumeration_boundary_spec.spl`: 9/17 PASS on Windows — 8/17 fail solely on Linux `vulkaninfo`/lavapipe ICD subprocess absence.)
+- **Pending**: QEMU VirtIO-GPU Venus / SimpleOS PCI board verification (`waiting-for: QEMU VirtIO-GPU Venus / SimpleOS PCI board verification`).

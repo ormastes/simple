@@ -175,10 +175,10 @@ fn rasterize_ttf_index(font_handle: i64, face_generation: i64, glyph_index: i32,
 # Vector Font Rasterization (Pure Simple, ported from compositor)
 # ============================================================================
 
-val VF_MOVE: i32 = 0
-val VF_LINE: i32 = 1
-val VF_CLOSE: i32 = 2
-val VF_END: i32 = 3
+pub val VF_MOVE: i32 = 0
+pub val VF_LINE: i32 = 1
+pub val VF_CLOSE: i32 = 2
+pub val VF_END: i32 = 3
 
 class VectorFontRasterStats:
     glyph_rasterizations: i64
@@ -300,22 +300,22 @@ val _FONT_GLYPH_SLOT_CAP: i64 = 64
 fn _try_vector_font_glyph_slot(prefix: text, slot: text, codepoint: i32, font_size: i32) -> CachedGlyph?:
     val slot_prefix = prefix + "_VECTOR_FONT_GLYPH_" + slot
     if _vector_font_env_i64(slot_prefix + "_CODEPOINT") != codepoint.to_i64():
-        return nil
+        return None
     if _vector_font_env_i64(slot_prefix + "_FONT_SIZE") != font_size.to_i64():
-        return nil
+        return None
     val width = _vector_font_env_i64(slot_prefix + "_WIDTH").to_i32()
     val height = _vector_font_env_i64(slot_prefix + "_HEIGHT").to_i32()
     val advance = _vector_font_env_i64(slot_prefix + "_ADVANCE").to_i32()
     val expected_checksum = _vector_font_env_i64(slot_prefix + "_CHECKSUM")
     if width <= 0 or height <= 0 or advance <= 0 or expected_checksum <= 0:
-        return nil
+        return None
     val expected_len = width * height
     val pixels = _vector_font_env_pixels(slot_prefix + "_PIXELS", expected_len)
     if pixels.len() != expected_len:
-        return nil
+        return None
     val checksum = _vector_font_pixels_checksum(pixels, width, height, advance)
     if checksum != expected_checksum:
-        return nil
+        return None
     CachedGlyph(
         codepoint: codepoint,
         face_id: 0,
@@ -334,7 +334,7 @@ fn _try_vector_font_glyph_from_backend(prefix: text, codepoint: i32, font_size: 
     val status = _vector_font_env_text(prefix + "_VECTOR_FONT_STATUS")
     val reason = _vector_font_env_text(prefix + "_VECTOR_FONT_REASON")
     if status != "pass" or (not reason.contains("matched-cpu") and not reason.contains("glyph-pixels-returned")):
-        return nil
+        return None
     var glyph_count = _vector_font_env_i64(prefix + "_VECTOR_FONT_GLYPH_COUNT")
     if glyph_count <= 0:
         glyph_count = 1
@@ -476,10 +476,12 @@ fn rasterize_vector_accelerated(cmds: [i32], codepoint: i32, font_size: i32) -> 
 
 fn rasterize_vector(cmds: [i32], codepoint: i32, font_size: i32) -> CachedGlyph:
     val glyph_w = vf_glyph_width(codepoint)
-    val pixel_w = glyph_w * font_size / 24
     val pixel_h = font_size
-    if pixel_w <= 0 or pixel_h <= 0:
+    if glyph_w <= 0 or pixel_h <= 0:
         return CachedGlyph.empty(codepoint, font_size)
+    var pixel_w = (glyph_w * font_size + 12) / 24
+    if pixel_w < 1:
+        pixel_w = 1
 
     _vector_font_glyph_rasterizations = _vector_font_glyph_rasterizations + 1
     _vector_font_command_triplets = _vector_font_command_triplets + (cmds.len() / 3).to_i64()
@@ -526,14 +528,18 @@ fn vf_point_inside(cmds: [i32], px: i32, py: i32, scale_n: i32, scale_d: i32) ->
     """Ray-casting point-in-polygon test (even-odd rule)."""
     var crossings = 0
     var i = 0
-    var move_x = 0
-    var move_y = 0
-    var cur_x = 0
-    var cur_y = 0
+    val sn = (scale_n as i64) * 2
+    val sd = scale_d as i64
+    val sx = ((px as i64) * 2 + 1) * sd
+    val sy = ((py as i64) * 2 + 1) * sd
+    var move_x: i64 = 0
+    var move_y: i64 = 0
+    var cur_x: i64 = 0
+    var cur_y: i64 = 0
     while i + 2 < cmds.len():
         val cmd = cmds[i]
-        val cx = cmds[i + 1] * scale_n / scale_d
-        val cy = cmds[i + 2] * scale_n / scale_d
+        val cx = (cmds[i + 1] as i64) * sn
+        val cy = (cmds[i + 2] as i64) * sn
         if cmd == VF_MOVE:
             move_x = cx
             move_y = cy
@@ -542,22 +548,26 @@ fn vf_point_inside(cmds: [i32], px: i32, py: i32, scale_n: i32, scale_d: i32) ->
         else if cmd == VF_LINE:
             val y1 = cur_y
             val y2 = cy
-            if (y1 <= py and py < y2) or (y2 <= py and py < y1):
+            if (y1 <= sy and sy < y2) or (y2 <= sy and sy < y1):
                 val dy = y2 - y1
-                if dy != 0:
-                    val ix = cur_x + (py - y1) * (cx - cur_x) / dy
-                    if px < ix:
+                if dy > 0:
+                    if (sx - cur_x) * dy < (sy - y1) * (cx - cur_x):
+                        crossings = crossings + 1
+                else if dy < 0:
+                    if (sx - cur_x) * dy > (sy - y1) * (cx - cur_x):
                         crossings = crossings + 1
             cur_x = cx
             cur_y = cy
         else if cmd == VF_CLOSE:
             val y1 = cur_y
             val y2 = move_y
-            if (y1 <= py and py < y2) or (y2 <= py and py < y1):
+            if (y1 <= sy and sy < y2) or (y2 <= sy and sy < y1):
                 val dy = y2 - y1
-                if dy != 0:
-                    val ix = cur_x + (py - y1) * (move_x - cur_x) / dy
-                    if px < ix:
+                if dy > 0:
+                    if (sx - cur_x) * dy < (sy - y1) * (move_x - cur_x):
+                        crossings = crossings + 1
+                else if dy < 0:
+                    if (sx - cur_x) * dy > (sy - y1) * (move_x - cur_x):
                         crossings = crossings + 1
             cur_x = move_x
             cur_y = move_y
@@ -665,22 +675,22 @@ fn bitmap_font_accelerator_stats() -> BitmapFontAcceleratorStats:
 fn _try_bitmap_font_glyph_slot(prefix: text, slot: text, codepoint: i32, font_size: i32) -> CachedGlyph?:
     val slot_prefix = prefix + "_BITMAP_FONT_GLYPH_" + slot
     if _vector_font_env_i64(slot_prefix + "_CODEPOINT") != codepoint.to_i64():
-        return nil
+        return None
     if _vector_font_env_i64(slot_prefix + "_FONT_SIZE") != font_size.to_i64():
-        return nil
+        return None
     val width = _vector_font_env_i64(slot_prefix + "_WIDTH").to_i32()
     val height = _vector_font_env_i64(slot_prefix + "_HEIGHT").to_i32()
     val advance = _vector_font_env_i64(slot_prefix + "_ADVANCE").to_i32()
     val expected_checksum = _vector_font_env_i64(slot_prefix + "_CHECKSUM")
     if width <= 0 or height <= 0 or advance <= 0 or expected_checksum <= 0:
-        return nil
+        return None
     val expected_len = width * height
     val pixels = _vector_font_env_pixels(slot_prefix + "_PIXELS", expected_len)
     if pixels.len() != expected_len:
-        return nil
+        return None
     val checksum = _vector_font_pixels_checksum(pixels, width, height, advance)
     if checksum != expected_checksum:
-        return nil
+        return None
     CachedGlyph(
         codepoint: codepoint,
         face_id: 0,
@@ -699,7 +709,7 @@ fn _try_bitmap_font_glyph_from_backend(prefix: text, codepoint: i32, font_size: 
     val status = _vector_font_env_text(prefix + "_BITMAP_FONT_STATUS")
     val reason = _vector_font_env_text(prefix + "_BITMAP_FONT_REASON")
     if status != "pass" or (not reason.contains("matched-cpu") and not reason.contains("glyph-pixels-returned")):
-        return nil
+        return None
     var glyph_count = _vector_font_env_i64(prefix + "_BITMAP_FONT_GLYPH_COUNT")
     if glyph_count <= 0:
         glyph_count = 1
@@ -789,7 +799,7 @@ fn rasterize_bitmap_accelerated(codepoint: i32, font_size: i32) -> CachedGlyph:
 # ============================================================================
 
 @unsafe(reason: "glyph mask-blend span; the span is validated inside the kernel", capabilities: [ffi])
-extern fn rt_engine2d_blend_mask_span_u32(dst: [u32], offset: i64, mask: [u8], mask_offset: i64, count: i64, color: u32) -> [u32]
+extern fn rt_engine2d_blend_mask_span_u32(dst: [u32], offset: i64, mask: [u8], mask_offset: i64, count: i64, color: u32) -> [u32]?
 
 fn blit_glyph(buffer: [u32], buf_w: i32, buf_h: i32,
               x: i32, y: i32, glyph: CachedGlyph, color: u32) -> [u32]:
@@ -814,9 +824,11 @@ fn blit_glyph(buffer: [u32], buf_w: i32, buf_h: i32,
             val mask_off = (grow.to_i64()) * gw
             val dst_off = (y + grow).to_i64() * bw + x.to_i64()
             if (mask_off + gw) <= glyph.pixels.len() and (dst_off + gw) <= out.len():
-                val span = rt_engine2d_blend_mask_span_u32(out, dst_off, glyph.pixels, mask_off, gw, color)
-                if span.len() == gw:
-                    out.write_span(span, dst_off, 0, gw)
+                if val span = rt_engine2d_blend_mask_span_u32(out, dst_off, glyph.pixels, mask_off, gw, color):
+                    if span.len() == gw:
+                        out.write_span(span, dst_off, 0, gw)
+                    else:
+                        all_rows_done = false
                 else:
                     all_rows_done = false
             else:

@@ -1,0 +1,43 @@
+# Pure comparison helper. Neither its inputs nor successful result create an
+# installed reader, epoch custody, machine writer, admission or launch right.
+use std.common.contracts.container.linux_fresh_epoch_v1.*
+use std.common.contracts.container.machine_policy_v1.machine_container_policy_decode_v1
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.*
+use std.common.crypto.sha256.sha256_text
+
+pub fn linux_fresh_epoch_storage_binding_v1(record: MachineFreshEpochRecordV1, profile_bytes: text,
+        machine_bytes: text, uid: i64, gid: i64, process_digest: text, physical: (i64, i64),
+        state_id: text, wal_id: text, objects_id: text, graph_id: text, run_id: text, partition_id: text) -> Result<(), text>:
+    val checked = machine_fresh_epoch_record_validate_v1(record)?
+    val p = linux_fresh_epoch_profile_decode_v1(profile_bytes)?
+    val m = machine_container_policy_decode_v1(machine_bytes)?
+    if (m.mode != "standalone" or record.authority_id != m.authority_id or record.physical_host_id != m.physical_host_id or
+            record.native_machine_id != m.native_machine_id or record.machine_policy_digest != sha256_text(machine_bytes) or
+            p.text_v1("machinePolicyDigest")? != record.machine_policy_digest or record.profile_digest != sha256_text(profile_bytes) or
+            record.epoch_id != p.text_v1("epochId")? or record.service_uid != uid or record.service_gid != gid or
+            p.number_v1("serviceUid")? != uid or p.number_v1("serviceGid")? != gid or
+            record.principal_id != "linux:uid:" + str(uid) or not m.local_principals.contains(record.principal_id) or
+            record.process_identity_digest != process_digest):
+        return Err("fresh-epoch-storage-installed-principal-binding")
+    if (record.capacity_cpu_millis != m.cpu_millis or record.capacity_memory_bytes != m.memory_bytes or
+            m.cpu_millis > physical.0 or m.memory_bytes > physical.1 or
+            record.observed_cpu_millis != p.number_v1("partitionCpuMillis")? or
+            record.observed_memory_bytes != p.number_v1("partitionMemoryBytes")? or
+            record.reserved_cpu_millis != p.number_v1("reservedCpuMillis")? or
+            record.reserved_memory_bytes != p.number_v1("reservedMemoryBytes")? or
+            record.outside_cpu_millis != p.number_v1("outsideCpuMillis")? or
+            record.outside_memory_bytes != p.number_v1("outsideMemoryBytes")? or
+            record.provider_policy_digest != p.text_v1("providerPolicyDigest")?):
+        return Err("fresh-epoch-storage-installed-budget-binding")
+    var matched = 0
+    for provider in m.providers:
+        if (provider.backend == "linux-podman" and sha256_text(provider.policy_bytes) == record.provider_policy_digest and
+                provider.identity_digest == record.provider_identity_digest):
+            linux_fresh_epoch_provider_matches_v1(p, provider.policy_bytes)?
+            matched = matched + 1
+    if matched != 1: return Err("fresh-epoch-storage-provider-binding")
+    val machine = sha256_text("MACHINE-FRESH-EPOCH-WAL-ROOTS-V1\n" + state_id + "\n" + wal_id + "\n" + objects_id + "\n")
+    if (record.store_identity_digest != sha256_text("FRESH-EPOCH-STORES-V1\n" + graph_id + "\n" + run_id + "\n" + machine + "\n") or
+            record.partition_identity_digest != sha256_text("FRESH-EPOCH-CGROUP-V1\n" + partition_id + "\n")):
+        return Err("fresh-epoch-storage-native-roots-binding")
+    Ok(())

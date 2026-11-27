@@ -218,3 +218,22 @@ complexity fact but was not the measured cost at <=1300 modules.
 Memory follow-up (open): the heap registry keeps one entry per live object
 for the process lifetime (~16+ B/entry plus rehash doubling) and is part
 of the 12.8 GB job commit observed at the end of full-CLI parse.
+
+## Note (2026-11-07, Phase 2 Lane 4)
+
+fix-implemented-verification-pending: the production parent-visible receipt boundary accepts only the inventory
+cache root plus expected pointer and invokes `compile_source_inventory_read_at_pointer_v1` itself; its sibling-only
+`cold_hir_source_inventory_admit_reader_owned_v1` receives that result directly. It no longer re-derives the
+inventory digest (sort + encode + sha256 over every row). There is no exported fast authority or separately
+supplied inventory/digest pair.
+The exported defensive admission boundary re-derives the payload digest, so a freely constructed
+`CompileSourceInventoryReadV1(valid=true, digest=expected, inventory=modified)` with a matching substituted
+snapshot is rejected. The admitted owner retains its inventory and package-private row lookup can use only
+that bound payload.
+Seed-interpreter measurement, admission of a 1-module closure over a synthetic inventory:
+14,443 rows 38.5 s (digest alone 42.8 s) BEFORE; the earlier 3,000-row probe measured 5957 ms -> 12 ms on the
+reader-owned path. Spec: test/01_unit/compiler/cache/cold_hir_admission_cost_spec.spl (3 scenarios, including
+actual forged-reader copied-digest inventory substitution rejection). Not yet addressed: the per-row typed ABI
+re-encode (~310 ms/module, `hir_abi_interface_encoded_v1`) -- needs the HIR-encode lane's receipt reuse.
+Verification needs a Stage 2 binary: `SIMPLE_PACKAGE_INDEX_COLD_INIT=1` build of src/app/classrepro/main.spl, read
+`phase3:hir:cold_receipts` from `SIMPLE_COMPILER_PHASE_PROFILE=1` (expect << 6.4 s fixed).

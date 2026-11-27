@@ -1,3 +1,4 @@
+use compiler.common.dependency.manifest_visibility_v1.{ParserManifestVisibilityV1}
 # Parser Types - AST Type Definitions
 #
 # This module contains all AST (Abstract Syntax Tree) type definitions.
@@ -17,6 +18,7 @@ use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.dynamic_identity.closure.{Closure}
 use compiler.common.assurance.representation_manifest_v1.{RepresentationDeclarationV1}
 use compiler.frontend.trace_policy.{frontend_compiler_trace_enabled}
+use compiler.frontend.declaration_intent_v1.{ParserDeclarationIntentV1}
 
 fn _parser_type_trace_enabled() -> bool:
     frontend_compiler_trace_enabled()
@@ -90,6 +92,15 @@ struct ParserModule:
     extend_enums: [ParserExtendEnum] = []
     # Source facts only. Admissions are rebuilt under resolved caller policy.
     representation_declarations: [RepresentationDeclarationV1] = []
+    # `@required_init(warning|error)`: per-module opt-in to the required-field
+    # verifier (20.hir/hir_lowering/required_field_init_v1.spl); "" = none.
+    # Set by the flat bridge from the module marker. Append-only, see above.
+    required_init_mode: text = ""
+    # Original declaration identities scoped by name (source path) and digest.
+    # Generated nodes and unbound observations have no row; never infer omitted.
+    source_declaration_intents_v1: [ParserDeclarationIntentV1] = []
+    source_declaration_digest_v1: text = ""
+    manifest_visibility_v1: ParserManifestVisibilityV1 = ParserManifestVisibilityV1()
 
 struct DomainBlock:
     """Raw top-level domain block captured at module scope."""
@@ -161,7 +172,7 @@ struct ContractBlock:
 fn contract_block_empty() -> ContractBlock:
     ContractBlock(
         preconditions: [], invariants: [], postconditions: [],
-        error_postconditions: [], decrease_measure: nil,
+        error_postconditions: [], decrease_measure: None,
         postcondition_binding: "", error_binding: "", proof_uses: ""
     )
 
@@ -233,6 +244,7 @@ struct ParserParamHeader:
     has_type_: bool
     type_: Type
     is_mutable: bool
+    has_default: bool
     span: Span
 
 struct ParserFunctionHeader:
@@ -252,7 +264,7 @@ struct ParserFunctionHeader:
     is_extern: bool
     span: Span
 
-fn parser_function_header(function_: ParserFunction) -> ParserFunctionHeader:
+pub fn parser_function_header(function_: ParserFunction) -> ParserFunctionHeader:
     var params: [ParserParamHeader] = []
     for param in function_.params:
         params.push(ParserParamHeader(
@@ -260,6 +272,7 @@ fn parser_function_header(function_: ParserFunction) -> ParserFunctionHeader:
             has_type_: param.has_type_,
             type_: param.type_,
             is_mutable: param.is_mutable,
+            has_default: param.has_default,
             span: param.span))
     ParserFunctionHeader(
         name: function_.name,
@@ -642,6 +655,10 @@ struct AopAdvice:
     handler: text        # interceptor function name (as text identifier)
     priority: i64
     span: Span
+    # Empty name is the explicit legacy top-level owner, not a named aspect.
+    aspect_name: text = ""
+    # Bound from loader authority after parse/cache restore, never a file path.
+    aspect_module: text = ""
 
 struct DiBinding:
     """DI binding: bind on pc{...} -> Impl"""
@@ -662,7 +679,7 @@ struct MockDecl:
     trait_name: text
     span: Span
 
-fn parser_module_new(
+pub fn parser_module_new(
     name: text,
     imports: [ParserImport],
     exports: [Export],
@@ -746,5 +763,6 @@ export Type, TypeKind, Expr, ExprKind, CallArg
 export Pattern, PatternKind, Stmt, StmtKind
 export BinOp, UnaryOp, AssignOp
 export Block, MatchArm, CatchClause, Param
+export TargetLane, TargetLaterConfig
 
 # Re-exported from parser_types_utils

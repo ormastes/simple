@@ -1,4 +1,25 @@
 # `(i64).to_u8().to_char()` chained call fails in nested-call dispatch context
+
+## Verified 2026-11-25 (release/1.0.0 @ a19165ae174, Windows pinned seed)
+
+Re-checked on the pinned Windows seed (`bin/simple.exe`, Rust seed
+v1.0.0-rc.1) with `run`-mode probes (spec-mode runs are environment-blocked
+repo-wide at this HEAD by the known `unknown decorator
+'@representation_boundary'` seed/source inconsistency):
+
+- Chained form `val a = (key + 32).to_u8().to_char()` still errors with the
+  exact documented text `method 'to_char' not found on value of type i64 in
+  nested call context` — the underlying Rust-seed nested-call dispatcher gap
+  (`method_dispatch.rs:855`) remains open-architectural. Fixing it requires a
+  seed rebuild, which is out of scope for this pure-Simple lane.
+- Non-chained intermediate-`val` form prints `a` correctly.
+- The call-site workaround in `src/os/compositor/host_gui_event_router.spl:21-27`
+  (intermediate typed `val`s for both branches) is present at HEAD.
+
+Row classification unchanged: **product bug RESOLVED (2026-09-13) via
+call-site workaround; underlying seed dispatcher gap remains
+OPEN-architectural (Rust seed only, not fixable without seed rebuild).**
+
 Status: RESOLVED (2026-09-13) -- call-site fix confirmed present + regression-locked; underlying seed nested-call dispatcher gap stays OPEN-architectural
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Found:** 2026-08-07, U4.2 coverage-closure unit (WM/GUI/web system-test

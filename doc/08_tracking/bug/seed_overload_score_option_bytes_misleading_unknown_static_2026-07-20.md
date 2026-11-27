@@ -1,7 +1,7 @@
 # Seed interp: Option-wrapped extern bytes → misleading "unknown static method" from constructor overload scoring
 
 - **Date:** 2026-07-20
-- **Status:** open (seed Rust defect — .spl call-site workaround landed; see below)
+- **Status:** fixed 2026-11-04 (objects.rs: scoring unwraps Option::Some; "no overload of C.m matches argument types (...)" diagnostic; tests in compiler/tests/interpreter_constructor_test.rs)
 - **Severity:** high (diagnostic actively misleads: reports a name-resolution
   failure for what is an argument-type mismatch; cost multiple debugging hours
   during the emit-object campaign)
@@ -81,3 +81,16 @@ misleading error above, which cost a WC-archaeology detour before the
 mean "argument type mismatch", and earlier greens in a shared WC may have been
 native-build **cache replays** (`[NATIVE] cache hit`) — always re-verify with
 `SIMPLE_NATIVE_BUILD_CLEAN=1`.
+
+## Verification 2026-11-25 (p2w5-ag lane) — fix confirmed present on release/1.0.0
+
+Both seed-side fixes are present at release/1.0.0 HEAD:
+`src/compiler_rust/compiler/src/interpreter_method/special/objects.rs:77-90`
+unwraps `Option::Some` in `constructor_value_matches_type` before scoring, and
+:440 emits `no overload of {class}.{method} matches argument types (...)` when
+name-matching candidates are all rejected by scoring — never "unknown static
+method". Regression tests exist in
+`src/compiler_rust/compiler/tests/interpreter_constructor_test.rs` (:178
+Option-wrapped-array scoring, :199-218 no-matching-overload diagnostic).
+`cargo test` is forbidden in this lane (no Rust builds), so this is a
+code-inspection confirmation of the 2026-11-04 fix record, not a re-run.

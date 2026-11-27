@@ -13,11 +13,12 @@ use compiler.hir.hir_types.{Effect}
 #   getter.add_search_path("/usr/lib/simple")
 #   val smf_data = getter.get("std/io/mod")?
 
-use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.io_runtime.{file_read_bytes}
 use std.nogc_sync_mut.io.dir_ops.{dir_walk}
 use std.nogc_sync_mut.sffi.file_bytes.{file_write_bytes_tagged_native}
 
-use compiler.backend.linker.lib_smf.{LibSmfHeader, ModuleIndexEntry, LSMF_HEADER_SIZE, fnv1a_hash, lib_smf_text_to_bytes}
+use compiler.backend.linker.lib_smf.{LibSmfHeader, ModuleIndexEntry, LSMF_HEADER_SIZE, fnv1a_hash}
 use compiler.backend.linker.lib_smf_reader.{LibSmfReader}
 use compiler.backend.linker.smf_reader.{SmfReaderImpl}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
@@ -212,6 +213,15 @@ impl SmfGetter:
         if search_result.is_ok():
             return search_result
 
+        # ObjectProvider takes "module_name_or_path"; the lazy loader passes
+        # the file path it loaded. Resolve an existing file and index it.
+        if file_exists(module_name):
+            val direct = self.load_single_file(SmfLocation.single_file(module_name, module_name, 0))
+            if direct.is_ok():
+                self.module_index[module_name] = SmfLocation.single_file(
+                    module_name, module_name, direct.unwrap().len())
+            return direct
+
         Err("Module not found: {module_name}")
 
     """Get object file data for a module.
@@ -282,19 +292,12 @@ impl SmfGetter:
                 case SmfSourceType.LibraryFile:
                     pass_dn
 
-        # For library-embedded modules, write the SMF data to a temporary
-        # file and open it with SmfReaderImpl.  This avoids requiring a new
-        # in-memory constructor on SmfReaderImpl (which depends on Rust SFFI
-        # file handles).  The temp file is cleaned up by the caller via close().
-        val safe_name = module_name.replace("/", "_")
-        val tmp_path = "/tmp/smf_getter_{safe_name}.smf"
-        val ok = file_write_bytes_tagged_native(tmp_path, data)
-        if not ok:
-            return Err("Failed to write temp SMF for library module {module_name}")
-        val reader_result = SmfReaderImpl.open(tmp_path)
-        if reader_result.is_err():
-            return Err("Failed to open temp SMF for {module_name}: {reader_result.unwrap_err()}")
-        reader_result
+        # Load library-embedded module directly from memory instead of staging
+        # into /tmp/smf_getter_*.smf (which leaks temp files across calls).
+        val mem_result = SmfReaderMemory.from_data(data)
+        if mem_result.is_err():
+            return Err("Failed to parse SMF in memory for {module_name}: {mem_result.unwrap_err()}")
+        SmfReaderImpl.from_memory(module_name, mem_result.unwrap())
 
     """Check if a module exists.
 
@@ -333,12 +336,11 @@ impl SmfGetter:
 
     """Load SMF data from a single file."""
     fn load_single_file(location: SmfLocation) -> Result<[u8], text>:
-        val file_result = file_read(location.file_path)
-        if file_result.is_err():
+        if not file_exists(location.file_path):
             return Err("Failed to read SMF file: {location.file_path}")
 
-        val file_text = file_result.unwrap()
-        val file_data = lib_smf_text_to_bytes(file_text)
+        # Binary-safe: SMF images carry non-UTF-8 bytes.
+        val file_data = file_read_bytes(location.file_path)
 
         if self.verbose:
             print "[smf-getter] Loaded single file: {location.module_name} ({file_data.len()} bytes)"
@@ -367,23 +369,20 @@ impl SmfGetter:
 
             if file_exists(full_path):
                 # Load and index
-                val file_result = file_read(full_path)
-                if file_result.is_ok():
-                    val file_text = file_result.unwrap()
-                    val file_data = lib_smf_text_to_bytes(file_text)
+                val file_data = file_read_bytes(full_path)
 
-                    # Add to index
-                    val location = SmfLocation.single_file(
-                        module_name,
-                        full_path,
-                        file_data.len()
-                    )
-                    self.module_index[module_name] = location
+                # Add to index
+                val location = SmfLocation.single_file(
+                    module_name,
+                    full_path,
+                    file_data.len()
+                )
+                self.module_index[module_name] = location
 
-                    if self.verbose:
-                        print "[smf-getter] Found and indexed: {module_name} at {full_path}"
+                if self.verbose:
+                    print "[smf-getter] Found and indexed: {module_name} at {full_path}"
 
-                    return Ok(file_data)
+                return Ok(file_data)
 
         Err("Module {module_name} not found in search paths")
 

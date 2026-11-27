@@ -1,0 +1,62 @@
+"""Real descriptor-relative bounded reads; native qualification pending.
+
+Symlink cases exercise both final and intermediate components. There are no
+ordinary-path fallback reads in the API under test.
+"""
+use std.spec.{describe, it, expect}
+use std.common.io.read_only_file_view.{read_only_file_view_read_beneath_bounded_v1}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, file_write_bytes}
+use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_remove_all}
+use std.nogc_sync_mut.io.snapshot_links.{snapshot_symlink_create_nofollow_v1}
+
+fn setup_bounded_view_root() -> text:
+    val root = secure_temp_dir_raw("/tmp", "bounded-beneath-v1-")
+    expect(root.len()).to_be_greater_than(0)
+    expect(dir_create(root + "/real", false)).to_equal(true)
+    expect(file_write_bytes(root + "/real/value.sdn", "bytes".bytes())).to_equal(true)
+    root
+
+fn check_beneath_refused(root: text, path: text, limit: i64):
+    var refused = false
+    match read_only_file_view_read_beneath_bounded_v1(root, path, limit):
+        case Ok(_): ()
+        case Err(_): refused = true
+    expect(refused).to_equal(true)
+
+describe "Bounded file view reads beneath an admitted root":
+    it "returns exact bytes including empty files and checks the real size":
+        val root = setup_bounded_view_root()
+        expect(read_only_file_view_read_beneath_bounded_v1(root, "real/value.sdn", 5)).to_equal(Ok("bytes".bytes()))
+        expect(read_only_file_view_read_beneath_bounded_v1(root, "real/value.sdn", 4)).to_equal(Err("file_view_source_limit"))
+        expect(file_write_bytes(root + "/empty", [])).to_equal(true)
+        expect(read_only_file_view_read_beneath_bounded_v1(root, "empty", 0)).to_equal(Ok([]))
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "rejects dot traversal absolute escape and non-regular inputs":
+        val root = setup_bounded_view_root()
+        check_beneath_refused(root, "real/../real/value.sdn", 32)
+        check_beneath_refused(root, "/etc/passwd", 32)
+        check_beneath_refused(root, "real", 32)
+        check_beneath_refused(root, "missing", 32)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "rejects final symlinks and intermediate directory symlinks":
+        val root = setup_bounded_view_root()
+        expect(snapshot_symlink_create_nofollow_v1(root, root + "/alias", "real", 2)).to_equal(true)
+        expect(snapshot_symlink_create_nofollow_v1(root, root + "/leaf", "real/value.sdn", 1)).to_equal(true)
+        expect(read_only_file_view_read_beneath_bounded_v1(root, "alias/value.sdn", 32)).to_equal(Err("file_view_symlink_or_non_regular"))
+        expect(read_only_file_view_read_beneath_bounded_v1(root, "leaf", 32)).to_equal(Err("file_view_symlink_or_non_regular"))
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "rejects invalid ceilings before opening any path":
+        expect(read_only_file_view_read_beneath_bounded_v1("missing", "file", -1)).to_equal(Err("file_view_invalid_limit"))
+        expect(read_only_file_view_read_beneath_bounded_v1("missing", "file", 16777217)).to_equal(Err("file_view_invalid_limit"))
+
+    it "releases every successful or refused descriptor instead of exhausting the pool":
+        val root = setup_bounded_view_root()
+        # The existing runtime pool holds 1024 descriptors. A leaked descriptor
+        # on either success or the size-error path makes this loop fail.
+        for attempt in 0..1100:
+            expect(read_only_file_view_read_beneath_bounded_v1(root, "real/value.sdn", 5)).to_equal(Ok("bytes".bytes()))
+            expect(read_only_file_view_read_beneath_bounded_v1(root, "real/value.sdn", 4)).to_equal(Err("file_view_source_limit"))
+        expect(dir_remove_all(root)).to_equal(true)

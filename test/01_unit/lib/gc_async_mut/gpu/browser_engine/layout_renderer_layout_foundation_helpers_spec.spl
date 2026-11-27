@@ -1,0 +1,157 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+# @tag: unit, browser_engine, layout, table, grid
+#
+# Pure helpers of the layout foundation, called directly:
+#
+# - collapsed-border style precedence (CSS 2.2 section 17.6.2.1: `hidden`
+#   wins, then -- at equal width -- double > solid > dashed > dotted > ridge >
+#   outset > groove > inset, and `none` loses to everything);
+# - named grid areas from a normalised `grid-template-areas` string (CSS Grid
+#   section 7.3: a name must cover a filled rectangle, `.` is a null cell);
+# - percentage min/max sizes resolved against the containing block (CSS 2.2
+#   sections 10.4 and 10.7: a percentage of an unknown containing size
+#   computes to 0 here, the renderer's "no constraint");
+# - viewBox-ratio scaling with rounding and saturation;
+# - per-line text box offsets/widths from recorded float-shortened line boxes.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{
+    simple_web_collapsed_border_style_rank, grid_template_area_rects,
+    style_with_resolved_percent_min_max, svg_ratio_scaled_px, svg_ratio_view_box_milli,
+    text_line_box_dx, text_line_box_w, replaced_specified_box_h,
+    replaced_default_is_content_size
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{renderer_default_style}
+
+describe "Collapsed border style precedence":
+
+    it "orders the styles from inset to hidden":
+        expect(simple_web_collapsed_border_style_rank("inset")).to_equal(1)
+        expect(simple_web_collapsed_border_style_rank("groove")).to_equal(2)
+        expect(simple_web_collapsed_border_style_rank("outset")).to_equal(3)
+        expect(simple_web_collapsed_border_style_rank("ridge")).to_equal(4)
+        expect(simple_web_collapsed_border_style_rank("dotted")).to_equal(5)
+        expect(simple_web_collapsed_border_style_rank("dashed")).to_equal(6)
+        expect(simple_web_collapsed_border_style_rank(" Solid ")).to_equal(7)
+        expect(simple_web_collapsed_border_style_rank("double")).to_equal(8)
+        expect(simple_web_collapsed_border_style_rank("hidden")).to_equal(9)
+
+    it "ranks none and empty lowest and rejects an unknown style":
+        expect(simple_web_collapsed_border_style_rank("none")).to_equal(0)
+        expect(simple_web_collapsed_border_style_rank("")).to_equal(0)
+        expect(simple_web_collapsed_border_style_rank("wavy")).to_equal(-1)
+
+describe "Named grid areas":
+
+    it "finds each rectangular area with its start and span":
+        val rects = grid_template_area_rects("h h|s m|s m")
+        expect(rects.len()).to_equal(3)
+        expect(rects[0].area).to_equal("h")
+        expect(rects[0].row_start).to_equal(0)
+        expect(rects[0].col_start).to_equal(0)
+        expect(rects[0].row_span).to_equal(1)
+        expect(rects[0].col_span).to_equal(2)
+        expect(rects[1].area).to_equal("s")
+        expect(rects[1].row_start).to_equal(1)
+        expect(rects[1].row_span).to_equal(2)
+        expect(rects[1].col_span).to_equal(1)
+        expect(rects[2].area).to_equal("m")
+        expect(rects[2].col_start).to_equal(1)
+
+    it "skips null cells":
+        val rects = grid_template_area_rects(". a|. a")
+        expect(rects.len()).to_equal(1)
+        expect(rects[0].col_start).to_equal(1)
+        expect(rects[0].row_span).to_equal(2)
+
+    it "drops a name that does not fill a rectangle":
+        val rects = grid_template_area_rects("a b|b a")
+        expect(rects.len()).to_equal(0)
+        val l_shape = grid_template_area_rects("a a|a b")
+        expect(l_shape.len()).to_equal(1)
+        expect(l_shape[0].area).to_equal("b")
+
+    it "returns nothing for an empty template":
+        expect(grid_template_area_rects("").len()).to_equal(0)
+
+describe "Percentage min and max sizes":
+
+    it "resolves each percentage against its containing size":
+        var st = renderer_default_style()
+        st.min_width_px = -50
+        st.max_width_px = -25
+        st.min_height_px = -10
+        st.max_height_px = -75
+        val out = style_with_resolved_percent_min_max(st, 200, 400)
+        expect(out.min_width_px).to_equal(100)
+        expect(out.max_width_px).to_equal(50)
+        expect(out.min_height_px).to_equal(40)
+        expect(out.max_height_px).to_equal(300)
+
+    it "resolves a percentage of an unknown containing size to 0":
+        var st = renderer_default_style()
+        st.min_width_px = -50
+        st.min_height_px = -50
+        val out = style_with_resolved_percent_min_max(st, 0, 0)
+        expect(out.min_width_px).to_equal(0)
+        expect(out.min_height_px).to_equal(0)
+
+    it "returns a style without percentages unchanged":
+        var st = renderer_default_style()
+        st.min_width_px = 12
+        val out = style_with_resolved_percent_min_max(st, 200, 400)
+        expect(out.min_width_px).to_equal(12)
+
+describe "viewBox ratio scaling":
+
+    it "scales a length by num/den with rounding":
+        expect(svg_ratio_scaled_px(32, 24000, 24000)).to_equal(32)
+        expect(svg_ratio_scaled_px(900, 50000, 200000)).to_equal(225)
+        expect(svg_ratio_scaled_px(10, 1000, 3000)).to_equal(3)
+        expect(svg_ratio_scaled_px(10, 2000, 3000)).to_equal(7)
+
+    it "returns 0 for a non-positive length or numerator":
+        expect(svg_ratio_scaled_px(0, 1000, 1000)).to_equal(0)
+        expect(svg_ratio_scaled_px(10, 0, 1000)).to_equal(0)
+
+    it "ignores a viewBox far taller than one unit wide":
+        expect(svg_ratio_view_box_milli(" viewBox=\"0 0 0.001 1000000\"").len()).to_equal(0)
+        expect(svg_ratio_view_box_milli(" viewBox=\"0 0 1 10000000000\"").len()).to_equal(4)
+        expect(svg_ratio_view_box_milli(" viewBox=\"0 0 20 10\"").len()).to_equal(4)
+        expect(svg_ratio_view_box_milli(" width=\"10\"").len()).to_equal(0)
+
+describe "Replaced element sizes":
+
+    it "reads the specified border-box height":
+        var st = renderer_default_style()
+        expect(replaced_specified_box_h(st)).to_equal(0)
+        st.height_px = 40
+        st.pad_t = 2
+        st.pad_b = 3
+        st.border_t = 1
+        st.border_b = 1
+        expect(replaced_specified_box_h(st)).to_equal(47)
+        st.border_box = true
+        expect(replaced_specified_box_h(st)).to_equal(40)
+
+    it "treats the UA default as a content size except for audio":
+        expect(replaced_default_is_content_size("canvas")).to_equal(true)
+        expect(replaced_default_is_content_size("video")).to_equal(true)
+        expect(replaced_default_is_content_size("audio")).to_equal(false)
+        expect(replaced_default_is_content_size("div")).to_equal(false)
+
+describe "Per-line text boxes":
+
+    it "reads a recorded line box as (dx, width) pairs":
+        val boxes: [[i32]] = [[], [60, 340, 0, 400]]
+        expect(text_line_box_dx([], boxes, 1, 0)).to_equal(60)
+        expect(text_line_box_w([], boxes, 1, 0, 400)).to_equal(340)
+        expect(text_line_box_dx([], boxes, 1, 1)).to_equal(0)
+        expect(text_line_box_w([], boxes, 1, 1, 400)).to_equal(400)
+
+    it "falls back past the recorded lines":
+        val boxes: [[i32]] = [[], [60, 340]]
+        expect(text_line_box_dx([], boxes, 1, 3)).to_equal(0)
+        expect(text_line_box_w([], boxes, 1, 3, 400)).to_equal(400)

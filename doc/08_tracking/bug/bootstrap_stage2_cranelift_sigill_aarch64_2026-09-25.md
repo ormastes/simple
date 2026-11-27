@@ -63,3 +63,49 @@ signature here is an illegal instruction, not empty MIR bodies.
 Blocks the local trust-root stage2 bootstrap (and therefore local
 `simple release version-check`) on this aarch64 host. CI lanes (x86_64
 runners) are unaffected; the 1.0.0-rc.1 release validation proceeds via CI.
+
+## Not reproduced at current source — 2026-11-05
+
+Full documented repro re-run in an isolated detached worktree at current
+release/1.0.0 (df48a86ff5a), --full-bootstrap --stop-after-stage2 --mode=dynload
+--jobs=8 --backend=cranelift --invalidate-cache=stage2 (fresh stage2 cache;
+the preflight drift check requires a quiescent tree, so the repro ran outside
+the shared worktree):
+
+- Stage 1 (Rust seed + native-all + runtime-nolto + backfill): built clean.
+- Stage 2: 1567 modules rebuilt (cache invalidated), candidate produced.
+- Stage 2 sanity gate: PASS — 1 binary checked, 0 tombstone references. This
+  is the exact gate that failed with "candidate_frontend_smoke:
+  hello-world-positional-build failed (raw rc=132)" on 2026-09-25.
+- Candidate binary verified directly: --help rc=0; the stage2 candidate
+  compiled and ran further probes (see the stage2 f64 / silent-wrong-value
+  bug docs) without any illegal instruction.
+
+Differences vs the 2026-09-25 run that may contribute: --mode dynload is no
+longer implemented by the Rust seed and the pipeline emits one-binary instead
+(the 2026-09-25 notes listed a dynload-stub trampoline as one suspect), and
+~6 weeks of stage2 codegen repairs landed in between. Whatever the exact
+repair, the rc=132 signature does not reproduce at current release/1.0.0
+source. Not claimed: stages beyond stage2 (the repro stops there by design).
+
+## Stage2 compiler-test matrix — final record (2026-11-05)
+
+The stage2 phase-verification matrix (strategy=normal, profile=slim) ran to
+its campaign deadline on the same trust-root candidate. Per-cell results
+(verification/summary.env):
+
+- compiler_version: PASS (candidate reports simple-bootstrap 1.0.0-rc.1).
+- test_runner_build: PASS in 338s, artifact present (sha256
+  390fccc80f8a...). The stage2 candidate builds the test runner end-to-end.
+- compiler_cli_build: FAIL after 2951s — the ONLY failed cell, and it is the
+  MIR-shard worker-reap blockage filed as
+  stage2_mir_shard_worker_reap_block_low_memory_2026-11-05 (failed_modules=0;
+  no lowering/codegen error).
+- module_compile sweep: INCOMPLETE (campaign deadline; 15113-module
+  inventory unfinished). Every module compile that ran completed PASS
+  (samples f06-f08v, p3: all PASS with artifacts).
+
+No codegen defect surfaced anywhere in the matrix. The 2026-09-25 SIGILL
+and the stage2 aarch64 native-codegen failure family are not reproducible
+at current release/1.0.0 source; the remaining stage2 gate is the filed
+shard-lifecycle infra issue.

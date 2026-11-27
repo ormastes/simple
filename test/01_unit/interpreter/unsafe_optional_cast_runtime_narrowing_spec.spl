@@ -1,0 +1,46 @@
+"""
+# Unsafe Optional Cast Runtime Narrowing Specification
+
+Prevention specification for bug 4418 (`jit_unsafe_optional_as_cast_garbage_2026_11_09`)
+covering the interpreter runtime narrowing paths (`??`, `if val`, and `match`)
+for function-returned `u64?` values above 32-bit `i32` max.
+"""
+
+use std.spec.*
+
+fn make_u64_opt(v: u64) -> u64?:
+    if v != 0:
+        Some(v)
+    else:
+        nil
+
+fn extract_via_match(opt: u64?) -> u64:
+    match opt:
+        case Some(inner): inner
+        case nil: 0
+
+fn extract_via_if_val(opt: u64?) -> u64:
+    if val Some(inner) = opt:
+        return inner
+    0
+
+describe "unsafe optional cast runtime narrowing (bug 4418)":
+    """Verifies optional payload narrowing preserves 64-bit numeric values without corruption."""
+
+    it "preserves high u64 payload across ?? fallback without zeroing or heap-tag noise":
+        val high: u64 = 4275044352
+        val present = make_u64_opt(high)
+        val absent = make_u64_opt(0)
+        expect((present ?? 0) as u64).to_equal(4275044352)
+        expect((absent ?? 99) as u64).to_equal(99)
+
+    it "preserves high u64 payload across if val and match narrowing":
+        val high: u64 = 4275044352
+        val present = make_u64_opt(high)
+        expect(extract_via_if_val(present)).to_equal(4275044352)
+        expect(extract_via_match(present)).to_equal(4275044352)
+
+    it "handles nil option uniformly through match and if val":
+        val absent = make_u64_opt(0)
+        expect(extract_via_if_val(absent)).to_equal(0)
+        expect(extract_via_match(absent)).to_equal(0)

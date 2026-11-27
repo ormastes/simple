@@ -1,0 +1,201 @@
+# @req HOST-02 ORCH-02
+# NOT_RUN. Actual signature arithmetic and owned temporary journal fixtures;
+# the Container provider is explicitly scripted, not enrolled/native evidence.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use test.fixtures.orchestration.host_runtime_exec_begin_fixture_v3.*
+use std.nogc_sync_mut.orchestration.host_runtime_exec_begin_v3.*
+use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
+use std.nogc_sync_mut.orchestration.host_local_command_v1.host_local_retained_execution_v2
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.host_authorized_execute_v2
+use std.nogc_sync_mut.orchestration.host_exec_private_publication_v3.host_exec_private_publish_v3
+use std.common.contracts.orchestration.host_execute_request_v2.host_execute_request_encode_v2
+use std.common.contracts.orchestration.host_runtime_exec_v3.*
+use std.common.contracts.orchestration.host_capacity_v1.HostReservationStateV1
+use std.common.contracts.orchestration.assignment_v1.{ControllerAssignmentBindingV1, controller_assignment_bytes_v1}
+use std.common.contracts.container.exec_v3.ContainerExecRequestV3
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_grant_digest_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.{daemon_operation_admit_v2, daemon_operation_begin_v2, daemon_operation_record_outcome_v2}
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_recover_execution_v2
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.file_atomic_write
+use std.nogc_sync_mut.io_runtime.{dir_create, read_file_text_result}
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.verification_fixture
+use test.fixtures.orchestration.host_authorized_execution_fixture_v2.{host_execution_clock_v2, host_execution_expired_clock_v2}
+use test.fixtures.orchestration.host_local_resolver_fixture_v2.host_local_resolver_consumed_fixture_v2
+use test.fixtures.orchestration.host_exec_control_installation_fixture_v3.{host_installation_fixture_v3, host_installation_dispose_v3}
+
+describe "Signed Host exec child begin refusal and ownership":
+    it "rejects malformed packet bytes without mutating journal or consuming provider results":
+        step("Pass malformed and oversized untrusted wire to the actual producer")
+        val fixture = exec_begin_fixture_v3()
+        val before = fixture.local.capacity.journal.sequence
+        val consumed = host_local_resolver_consumed_fixture_v2(fixture.local.container)
+        for bytes in ["not canonical SDN", "x".repeat(4194305)]:
+            val turn = host_runtime_exec_begin_v3(fixture.local, bytes, host_execution_clock_v2(), host_execution_clock_v2)
+            expect(turn.error != "").to_equal(true)
+            expect(turn.lease.is_none()).to_equal(true)
+            expect(turn.control_cleanup.is_none()).to_equal(true)
+            expect(turn.local.capacity.journal.sequence).to_equal(before)
+            expect(host_local_resolver_consumed_fixture_v2(turn.local.container)).to_equal(consumed)
+        exec_begin_fixture_close_v3(fixture, fixture.local)
+
+    it "verifies both signatures before any native resolver read":
+        step("Corrupt approval frame while preserving the canonical child and parent chain")
+        val fixture = exec_begin_fixture_v3()
+        var packet = fixture.packet
+        packet.approval.signature[0] = ((packet.approval.signature[0] as i64 + 1) % 256) as u8
+        val before = host_local_resolver_consumed_fixture_v2(fixture.local.container)
+        val turn = host_runtime_exec_begin_v3(fixture.local, host_runtime_exec_request_encode_v3(packet).unwrap(),
+            host_execution_clock_v2(), host_execution_clock_v2)
+        expect(turn.error).to_equal("APPROVAL_SIGNATURE_INVALID")
+        expect(turn.lease.is_none()).to_equal(true)
+        expect(host_local_resolver_consumed_fixture_v2(turn.local.container)).to_equal(before)
+        exec_begin_fixture_close_v3(fixture, turn.local)
+
+    it "refuses expired child authority before native reads and leaves the parent charged":
+        step("Use exact approval expiry rather than interpreting expiry as native cleanup")
+        val fixture = exec_begin_fixture_v3()
+        val before = host_local_resolver_consumed_fixture_v2(fixture.local.container)
+        val turn = host_runtime_exec_begin_v3(fixture.local, host_runtime_exec_request_encode_v3(fixture.packet).unwrap(),
+            host_execution_expired_clock_v2(), host_execution_expired_clock_v2)
+        expect(turn.error).to_equal("APPROVAL_EXPIRED")
+        expect(turn.lease.is_none()).to_equal(true)
+        expect(turn.local.capacity.ledger.reservations.len()).to_equal(1)
+        expect(host_local_resolver_consumed_fixture_v2(turn.local.container)).to_equal(before)
+        exec_begin_fixture_close_v3(fixture, turn.local)
+
+    it "refuses unproven continuity before native resolution":
+        step("Keep the actual journal and signed packet but quarantine the current owner")
+        var fixture = exec_begin_fixture_v3()
+        fixture.local.capacity.ledger.continuity_proven = false
+        val before = host_local_resolver_consumed_fixture_v2(fixture.local.container)
+        val turn = host_runtime_exec_begin_v3(fixture.local, host_runtime_exec_request_encode_v3(fixture.packet).unwrap(),
+            host_execution_clock_v2(), host_execution_clock_v2)
+        expect(turn.error).to_equal("host-exec-begin-reconciliation-required")
+        expect(turn.lease.is_none()).to_equal(true)
+        expect(host_local_resolver_consumed_fixture_v2(turn.local.container)).to_equal(before)
+        exec_begin_fixture_close_v3(fixture, turn.local)
+
+    it "never remints from executing unknown or terminal child journal rows":
+        step("Persist actual child transitions before invoking first-begin again")
+        for terminal in ["executing", "outcome-unknown", "completed", "failed", "cancelled"]:
+            var fixture = exec_begin_fixture_v3()
+            fixture.local.capacity.journal = daemon_operation_admit_v2(fixture.local.capacity.journal, fixture.packet.operation).unwrap().journal
+            fixture.local.capacity.journal = daemon_operation_begin_v2(fixture.local.capacity.journal, fixture.packet.operation).unwrap()
+            if terminal == "outcome-unknown":
+                fixture.local.capacity.journal = distributed_operation_journal_recover_execution_v2(fixture.local.capacity.journal, "exec-child").unwrap()
+            elif terminal != "executing":
+                fixture.local.capacity.journal = daemon_operation_record_outcome_v2(fixture.local.capacity.journal,
+                    fixture.packet.operation, terminal, "f".repeat(64)).unwrap()
+            val sequence = fixture.local.capacity.journal.sequence
+            val consumed = host_local_resolver_consumed_fixture_v2(fixture.local.container)
+            val turn = host_runtime_exec_begin_v3(fixture.local, host_runtime_exec_request_encode_v3(fixture.packet).unwrap(),
+                host_execution_clock_v2(), host_execution_clock_v2)
+            expect(turn.error).to_equal("host-exec-begin-recovery-required")
+            expect(turn.recovery_required).to_equal(true)
+            expect(turn.lease.is_none()).to_equal(true)
+            expect(turn.local.capacity.journal.sequence).to_equal(sequence)
+            expect(host_local_resolver_consumed_fixture_v2(turn.local.container)).to_equal(consumed)
+            exec_begin_fixture_close_v3(fixture, turn.local)
+
+    it "requires the original archive for an admitted retry":
+        step("Retain an admitted WAL row without its mandatory prior packet archive")
+        var fixture = exec_begin_fixture_v3()
+        fixture.local.capacity.journal = daemon_operation_admit_v2(fixture.local.capacity.journal, fixture.packet.operation).unwrap().journal
+        val before = host_local_resolver_consumed_fixture_v2(fixture.local.container)
+        val turn = host_runtime_exec_begin_v3(fixture.local, host_runtime_exec_request_encode_v3(fixture.packet).unwrap(),
+            host_execution_clock_v2(), host_execution_clock_v2)
+        expect(turn.error.starts_with("host-exec-begin-admitted-archive-required:")).to_equal(true)
+        expect(turn.recovery_required).to_equal(true)
+        expect(turn.lease.is_none()).to_equal(true)
+        expect(host_local_resolver_consumed_fixture_v2(turn.local.container)).to_equal(before)
+        exec_begin_fixture_close_v3(fixture, turn.local)
+
+    it "retains durable executing ownership after expiry and refuses every repeated begin":
+        step("Archive exact verified fixture bytes, commit actual BEGIN, then retry twice at approval expiry")
+        var fixture = exec_begin_fixture_v3()
+        val policy = fixture.local.policy
+        val packet = fixture.packet
+        val bytes = host_runtime_exec_request_encode_v3(packet).unwrap()
+        val guard = fn() -> Result<HostReservationAuthorizationContextV1, text>:
+            val grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, packet.signed, packet.approval,
+                packet.operation, 100, 7, 4, 2, 3)?
+            Ok(host_execution_clock_v2())
+        val archived = host_exec_private_publish_v3(fixture.local.capacity.journal.root, "host-runtime-exec-requests",
+            sha256_text("exec-child") + ".sdn", bytes, guard)
+        expect(archived.error).to_equal("")
+        expect(archived.published_new).to_equal(true)
+        fixture.local.capacity.journal = daemon_operation_admit_v2(fixture.local.capacity.journal, packet.operation).unwrap().journal
+        fixture.local.capacity.journal = daemon_operation_begin_v2(fixture.local.capacity.journal, packet.operation).unwrap()
+        fixture.local.capacity.ledger.revision = fixture.local.capacity.journal.sequence + 1
+        val sequence = fixture.local.capacity.journal.sequence
+        val consumed = host_local_resolver_consumed_fixture_v2(fixture.local.container)
+        var current = fixture.local
+        for repetition in 0..2:
+            val turn = host_runtime_exec_begin_v3(current, bytes, host_execution_expired_clock_v2(), host_execution_expired_clock_v2)
+            current = turn.local
+            expect(turn.error).to_equal("host-exec-begin-recovery-required")
+            expect(turn.recovery_required).to_equal(true)
+            expect(turn.lease.is_none()).to_equal(true)
+            expect(current.capacity.journal.sequence).to_equal(sequence)
+            expect(current.capacity.journal.operations["exec-child"].state).to_equal("executing")
+            expect(current.capacity.ledger.reservations.len()).to_equal(1)
+            expect(current.capacity.ledger.reservations[0].state).to_equal(HostReservationStateV1.Executing)
+            expect(host_local_resolver_consumed_fixture_v2(current.container)).to_equal(consumed)
+        exec_begin_fixture_close_v3(fixture, current)
+
+    it "does not turn a preexisting delegation file into authority":
+        step("Leave an owned synthetic orphan final and prove first-begin refuses instead of decoding a lease")
+        val fixture = exec_begin_fixture_v3()
+        val directory = fixture.local.capacity.journal.root + "/host-runtime-exec-delegations"
+        assert(dir_create(directory, true))
+        assert(file_atomic_write(directory + "/" + sha256_text("exec-child") + ".sdn", "synthetic-orphan"))
+        val before = host_local_resolver_consumed_fixture_v2(fixture.local.container)
+        val turn = host_runtime_exec_begin_v3(fixture.local, host_runtime_exec_request_encode_v3(fixture.packet).unwrap(),
+            host_execution_clock_v2(), host_execution_clock_v2)
+        expect(turn.error).to_equal("host-exec-begin-delegation-already-recorded")
+        expect(turn.recovery_required).to_equal(true)
+        expect(turn.lease.is_none()).to_equal(true)
+        expect(host_local_resolver_consumed_fixture_v2(turn.local.container)).to_equal(before)
+        exec_begin_fixture_close_v3(fixture, turn.local)
+
+    it "retains the updated Container owner when resolver inspection fails":
+        step("Consume an explicit failed resolver response and retain its owner rather than an old snapshot")
+        val fixture = exec_begin_fixture_v3("resolver-recover-failed")
+        val before = host_local_resolver_consumed_fixture_v2(fixture.local.container)
+        val turn = host_runtime_exec_begin_v3(fixture.local, host_runtime_exec_request_encode_v3(fixture.packet).unwrap(),
+            host_execution_clock_v2(), host_execution_clock_v2)
+        expect(turn.error.starts_with("host-inspect-recovery-unknown:")).to_equal(true)
+        expect(turn.lease.is_none()).to_equal(true)
+        expect(host_local_resolver_consumed_fixture_v2(turn.local.container)).to_be_greater_than(before)
+        exec_begin_fixture_close_v3(fixture, turn.local)
+
+    it "retains successful resolver progress when protected installation is absent":
+        step("Resolve the actual scripted parent then refuse absent completed installation without admitting a child")
+        val fixture = exec_begin_fixture_v3()
+        val before = host_local_resolver_consumed_fixture_v2(fixture.local.container)
+        val sequence = fixture.local.capacity.journal.sequence
+        val turn = host_runtime_exec_begin_v3(fixture.local, host_runtime_exec_request_encode_v3(fixture.packet).unwrap(),
+            host_execution_clock_v2(), host_execution_clock_v2)
+        expect(turn.error != "").to_equal(true)
+        expect(turn.lease.is_none()).to_equal(true)
+        expect(host_local_resolver_consumed_fixture_v2(turn.local.container)).to_equal(before + 2)
+        expect(turn.local.capacity.journal.sequence).to_equal(sequence)
+        expect(turn.local.capacity.journal.operations.contains_key("exec-child")).to_equal(false)
+        exec_begin_fixture_close_v3(fixture, turn.local)
+
+    it "keeps native creation gateway callbacks and raw policy outside this producer":
+        step("Guard first-begin publication and common owner boundaries without claiming native runtime qualification")
+        val source = read_file_text_result("src/lib/nogc_sync_mut/orchestration/host_runtime_exec_begin_v3.spl").unwrap()
+        for forbidden in ["use std.nogc_async_mut.container.providers", "simple_container_apply_v2", "simple_container_exec_create",
+                "process_spawn", "process_run", "host_capacity_owner_settle", "container_exec_admission_decode"]:
+            expect(source.contains(forbidden)).to_equal(false)
+        expect(source.contains("host_exec_control_installation_load_v3(current)")).to_equal(true)
+        expect(source.contains("not delegated.published_new")).to_equal(true)
+        expect(source.contains("begin_journal_sequence: begin_sequence")).to_equal(true)
+        expect(source.contains("begin_journal_commit_digest: begin_revision")).to_equal(true)

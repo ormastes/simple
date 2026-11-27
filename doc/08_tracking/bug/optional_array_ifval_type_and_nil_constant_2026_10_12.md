@@ -23,3 +23,30 @@ Final cycle3 exact cb8ce176 successor/unchanged99c36f fixture failed in4.304s, e
 Authored regression and native reproducer bytes are preserved as adjacent `.spl.repro` report attachments, outside executable test discovery. They are not passing tests or skipped placeholders. The original private source files remain available for explicit future qualification.
 
 Reproduction attachments: [seven authored SSpec cases](optional_array_ifval_type_and_nil_constant_2026_10_12_metadata.spl.repro) and [unchanged native fixture](optional_array_ifval_type_and_nil_constant_2026_10_12_native.spl.repro). The absolute paths inside the evidence JSON identify preserved execution artifacts; those files are not repository-relative links.
+
+**Revalidated 2026-11-02: still plausible because the report title (Guarded Optional array loses payload type then emits invalid LLVM nil pointer c) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+**2026-11-03 fix (sonB): fix-implemented-verification-pending.** (1) The HIR half
+(payload type on the Let node for `if val`) is already implemented on
+release/1.0.0 via `binding_source_type`/`binding_payload_type`
+(`20.hir/hir_lowering/statements.spl:51-79`, used by all four val/var paths), so the
+old `hir_proposal.patch` no longer applies and is obsolete. (2) The MIR nil half is
+now applied from `nil_copy_proposal.patch`: the ExistsCheck else-arm no longer emits
+`Int(3)` typed Array/Slice (invalid `add ptr`); it emits a raw int word and a normal
+copy, mirroring the Some arm (`expr_dispatch.spl` ~6707). Spec (promoted from the
+`_metadata.spl.repro` attachment):
+`test/01_unit/compiler/mir/optional_array_ifval_payload_spec.spl`.
+Verify: `bin/<stage3> test test/01_unit/compiler/mir/optional_array_ifval_payload_spec.spl`,
+then native-build `${d##*/}_native.spl.repro` and check the LLVM verifies.
+
+**2026-11-07 (m-optarr): spec re-scoped, 8/8 pass.** The 4/7 failures were stale
+spec premises, not compiler defects: (a) `[any]`/`any?` in safe source now hits
+policy error `W-ANY-COMPILE-001` (no Any outside unsafe), so case 1 asserts that
+diagnostic plus zero MIR errors and case 4 accepts either the policy error or
+the iter error; (b) the HIR Let now always carries the resolved binding type, so
+an unmarked binding's Let is `Optional(payload)` (not nil) - the cases now assert
+it stays nullable on both Let and symbol. Added a nested-optional case (marked
+`[any]??` unwraps exactly one layer). Run: `bin/simple.exe run
+test/01_unit/compiler/mir/optional_array_ifval_payload_spec.spl` -> `outcome=OK
+executed=8 passed=8`. Remaining verification: native-build of the
+`_native.spl.repro` fixture on a fresh stage3 (not run; stage3 builds owned elsewhere).

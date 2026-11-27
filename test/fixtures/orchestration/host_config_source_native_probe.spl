@@ -1,0 +1,42 @@
+# Direct HostConfig source boundary only, not host admission or enrollment.
+# NOT_RUN. No resource_set or provider imports; integer fields remain numeric.
+use std.common.contracts.orchestration.host_config_v1.*
+use std.common.contracts.orchestration.resource_v1.parse_resource_document
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.string_core.str_len
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+
+pub fn host_config_source_checks():
+    val source = file_read_regular_no_follow_bounded("test/fixtures/orchestration/host_local_config.sdn", 1048576).unwrap()
+    val config = decode_host_config(source).unwrap()
+    assert(config.physical_host_id == "machine")
+    assert(config.service_scope_id == "user")
+    assert(config.cpu_ceiling_millis == 2000)
+    assert(config.memory_ceiling_bytes == 4294967296)
+    assert(config.maximum_journal_events == 10000)
+    assert(config.maintenance_interval_ms == 100)
+    val parsed = parse_resource_document(source).unwrap()
+    val canonical = sdn_encode_canonical(parsed.0) + "\n"
+    val same = decode_host_config(canonical).unwrap()
+    assert(same.maximum_journal_events == config.maximum_journal_events)
+    assert(same.journal_root == config.journal_root)
+    assert(decode_host_config("{").is_err())
+    val duplicate = source.replace("    controllerRef: controller", "    controllerRef: controller\n    controllerRef: other")
+    val duplicated = decode_host_config(duplicate).unwrap_err()
+    assert(duplicated.kind == "duplicate_key")
+    assert(duplicated.path == "spec.controllerRef")
+    assert(duplicated.line > 0)
+    val unknown = source.replace("    serviceScopeId: user", "    serviceScopeId: user\n    privileged: true")
+    val refused = decode_host_config(unknown).unwrap_err()
+    assert(refused.kind == "unknown_field")
+    assert(refused.path == "spec.privileged")
+    assert(decode_host_config(source.replace("kind: HostConfig", "kind: Pod")).is_err())
+    assert(decode_host_config(source.replace("maximumJournalEvents: 10000", "maximumJournalEvents: 100001")).is_err())
+    val oversize = "é".repeat(524289)
+    assert(str_len(oversize) == 1048578)
+    assert(decode_host_config(oversize).unwrap_err().kind == "host_config_limit")
+    print "host-config-source-probe: direct source boundary assertions passed"
+
+fn main() -> i64:
+    host_config_source_checks()
+    0

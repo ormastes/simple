@@ -34,3 +34,16 @@ reader agree; add a round-trip spec (`write header → read field → equal`).
 ## Status
 CLOSED 2026-09-13 (fixed; both sides read offset 68). Originally: OPEN — recorded. Out of AC-7 scope (sidecar lane unaffected). Validate before relying on the
 user-script SMF source-hash field.
+
+## 2026-11-25 re-verification — closure confirmed (code inspection, release/1.0.0)
+
+- Writer: `src/compiler/70.backend/linker/smf_header.spl` `offset_bytes()`
+  serializes 48 bytes after the 20-byte fixed prefix before appending
+  `source_hash`, i.e. base offset 68; the decode side reads
+  `bytes_to_u64_le_header(bytes, o + 68)` (`smf_header.spl:601`).
+- Reader: `src/compiler/80.driver/cache/cache_validator.spl:301`
+  `source_hash()` reads `self.u64_at(start + 68 + self.field_shift())` — the
+  same base offset 68 plus the v1.3 field shift both sides share.
+- Runtime exercise remains impossible on this host (pinned seed rejects
+  `@representation_boundary` at HEAD); inspection confirms writer and reader
+  agree, so the closure stands.

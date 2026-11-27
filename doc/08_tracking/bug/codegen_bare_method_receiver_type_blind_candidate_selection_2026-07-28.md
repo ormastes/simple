@@ -1,4 +1,16 @@
 # Bare-method codegen binds by name-suffix with no receiver-type check
+## Triage 2026-11-25 — still OPEN; root fix is out-of-scope Rust-seed codegen
+
+Re-checked at `origin/release/1.0.0` HEAD `0819b116ecb`: the mitigation is
+still the per-name allowlist only — `is_bare_builtin_collection_method` in
+`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:174` (with
+the `SIMPLE_DEBUG_ERASED_RECEIVER_BIND` report-only probe at :66-70). No
+TypeId-to-name receiver-type check has landed in `InstrContext`. The real fix
+(step 3 below: plumb a TypeId-to-name map into codegen and consult the
+receiver type) is a cross-layer change inside `src/compiler_rust/**`, which is
+out of scope by repo policy ("fix .spl not Rust"), and its validation needs a
+full bootstrap. Remains OPEN, seed-codegen owner lane.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
@@ -172,3 +184,19 @@ against an archive built with
 - In-file `SAFETY NOTE (Agent δ, 2026-04-13)` documents the ambiguity half,
   which is already loud
 
+
+## 2026-11-27 — `files[path].as_str()` Dict-index site: root cause found and fixed
+
+The `Dict<text, SdnValue>` index expression was NOT the problem
+(`get_index_element_type` types it correctly). The type was lost one step
+earlier: `val files = match a: case Some(v): match v.as_dict(): case Some(e): e ...`
+— a `match` that is the sole body of an outer match arm is a tail match
+STATEMENT, and `lower_do_block` (`hir/lower/expr/control.rs`) only gave tail
+`if` statements a value type, so the arm block (and `files`) became NIL/ANY.
+`files[k]` then had an erased receiver and `.as_str()` hit
+`CODEGEN-AMBIGUOUS-METHOD` (4 candidates). Fix: tail `Node::Match` is typed
+like tail `Node::If` via `hir_tail_if_value_type`. Minimal reproducer: nested
+tail match + two types sharing a method name. Test:
+`nested_tail_match_arm_keeps_payload_type_for_dict_index_receiver`
+(`hir/lower/tests/conditional_empty_array_tests.rs`). The per-name allowlist
+mitigation / TypeId receiver check (the general class) remains OPEN.

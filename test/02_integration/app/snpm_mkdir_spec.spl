@@ -1,0 +1,44 @@
+use std.spec
+use std.spec.step
+use app.snpm.cache.{cache_package}
+use app.snpm.config.{SnpmConfig}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all, is_dir}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+
+"""
+## Purpose and audience
+
+snpm creates directories through `rt_mkdir`, whose status is an i64 (0 on
+success, -errno on failure). `cache_package` must create the per-package and
+per-version cache directories on disk and copy the tarball into them.
+Audience: snpm maintainers.
+"""
+
+describe "snpm directory creation":
+    it "creates the package cache directories on disk":
+        step("Create a scratch root with a source tarball")
+        # Host-portable fixture scope: no mktemp/shell; secure_temp_dir works
+        # on every host and dir_remove_all tears the scope down.
+        val root = match secure_temp_dir(get_temp_dir(), "snpm-mkdir-"):
+            Ok(path): path.replace("\\", "/")
+            Err(reason):
+                expect("secure_temp_dir: " + reason).to_equal("")
+                ""
+        expect(root.len() > 0).to_equal(true)
+        expect(file_create_exclusive(root + "/src.spk", "payload\n")).to_equal(true)
+        step("Cache the package using the scratch root as cache_dir")
+        val config = SnpmConfig(
+            registry_url: "",
+            cache_dir: root,
+            modules_dir: root + "/spl_modules",
+            lockfile_name: "snpm-lock.sdn",
+            manifest_name: "package.sdn",
+            auth_token: ""
+        )
+        cache_package("demo", "1.0.0", root + "/src.spk", config)
+        step("The version directory exists on disk")
+        expect(is_dir(root + "/demo/1.0.0")).to_equal(true)
+        step("The tarball was copied into the version directory")
+        expect(file_exists(root + "/demo/1.0.0/demo-1.0.0.spk")).to_equal(true)
+        val _removed = dir_remove_all(root)

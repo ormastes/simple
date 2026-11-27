@@ -1,0 +1,88 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+## Purpose and audience
+Pins the per-hop route-array alignment cost of the HIR re-export walk.
+`find_reexport_source_walk` re-ran `module_surface_route_arrays_aligned` on
+every hop. That check probes every export-origin name with a linear scan, so
+one hop costs O(origins^2) text compares. On the Phase 3 serial
+`bootstrap_main.spl` closure (run-21 Stage 2, 2026-11-13) it was ~9% of all
+HIR samples, under `find_reexport_source_walk`. `find_reexport_source`
+already proves the whole frozen registry aligned once per generation
+(`module_surfaces_frozen_alignment`), so a walk under that proof must not
+rescan; an unproven walk (direct call, no validated generation) still checks.
+Audience: compiler engineers maintaining HIR re-export materialization.
+"""
+
+# @tag: unit, compiler, hir, native-safe
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types.{ParserImport}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering._Items.module_reexport_materialization.*
+use compiler.hir.hir_lowering._Items.module_import_registration.*
+use compiler.hir.hir_lowering._Items.module_lowering.*
+use compiler.hir.hir_lowering.module_surface.{
+    ModuleSurface,
+    ModuleSurfacesByName,
+    module_surface_export_origin_index_empty,
+    module_surface_export_origin_index_put
+}
+
+val RWA_NAMES: i64 = 24
+
+fn rwa_registry() -> ModuleSurfacesByName:
+    var facade = ModuleSurface.empty("rwa.facade")
+    var leaf = ModuleSurface.empty("rwa.leaf")
+    facade.content_hash = 31
+    leaf.content_hash = 32
+    facade.imports = [ParserImport(module: "rwa.leaf", items: [], is_lazy: false, span: Span.empty())]
+    facade.import_item_offsets = [0, 0]
+    val origins = module_surface_export_origin_index_empty()
+    var index = 0
+    while index < RWA_NAMES:
+        module_surface_export_origin_index_put(
+            origins, "Item{index}", "rwa.leaf", "Item{index}", "explicit")
+        index = index + 1
+    leaf.export_origin_index = origins
+    ModuleSurfacesByName.from_parts(
+        [facade, leaf], {"rwa.facade": 0, "rwa.leaf": 1},
+        ["rwa.facade", "rwa.leaf"], [0, 1]).unwrap()
+
+describe "re-export walk route alignment":
+    it "does not rescan route arrays on hops under a validated registry":
+        step("Resolve every leaf item through the glob facade")
+        var lowering = hirlowering_for_module("consumer", rwa_registry())
+        var index = 0
+        var found = 0
+        while index < RWA_NAMES:
+            val hop: HirReexportSource = lowering.find_reexport_source(0, "Item{index}")
+            if hop.found and hop.module_name == "rwa.leaf" and hop.item_name == "Item{index}":
+                found = found + 1
+            index = index + 1
+        expect(found).to_equal(RWA_NAMES)
+        step("No per-hop quadratic alignment scan ran")
+        expect(lowering.reexport_route_alignment_scans).to_equal(0)
+
+    it "still checks route arrays on a walk with no validated registry":
+        step("Direct walk before any find_reexport_source call")
+        var lowering = hirlowering_for_module("consumer", rwa_registry())
+        val state: HirReexportWalkState = HirReexportWalkState.fresh()
+        val hop: HirReexportSource = lowering.find_reexport_source_walk(0, "Item3", 0, state)
+        expect(hop.found).to_equal(true)
+        expect(hop.module_name).to_equal("rwa.leaf")
+        expect(lowering.reexport_route_alignment_scans > 0).to_equal(true)
+
+    it "rejects a misaligned facade on an unvalidated walk":
+        step("Break the facade import offsets, then walk directly")
+        val registry = rwa_registry()
+        val facade: ModuleSurface = registry.surfaces[0]
+        facade.import_item_offsets = [0]
+        var lowering = hirlowering_for_module("consumer", registry)
+        val state: HirReexportWalkState = HirReexportWalkState.fresh()
+        val hop: HirReexportSource = lowering.find_reexport_source_walk(0, "Item3", 0, state)
+        expect(hop.found).to_equal(false)
+        expect(state.valid).to_equal(false)

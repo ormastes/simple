@@ -1,6 +1,6 @@
 ---
 id: lint_code_impl_indent_parse_error_2026-07-05
-status: OPEN
+status: RESOLVED (stale — file removed in tree reorganization; verified 2026-11-25)
 severity: low
 discovered: 2026-07-05
 discovered_by: Stage-4 bootstrap module graph loading diagnostics
@@ -46,3 +46,22 @@ Parser error on a specific syntactic construct (likely indentation-sensitive cod
 3. If valid, add parser support for the indentation pattern in impl blocks.
 4. If invalid, refactor the code to use a supported syntax pattern.
 5. Add a regression test to prevent this parse error from reoccurring.
+
+## Verification 2026-11-25 (lane p3-baw, release/1.0.0 @ 1301149fa3f) — STALE, closing
+
+The filed file `src/compiler/tools/fix/rules/impl_/lint_code.spl` **no longer
+exists**: the fix-rules tree was reorganized to `src/compiler/90.tools/fix/rules/`
+and no `lint_code.spl` exists anywhere under `src/` (`find src -name
+'lint_code*'` → 0 hits; the `lint_code` name survives only as a rule
+identifier referenced from `90.tools/fix/rules/impl_/impl.spl`,
+`lint_nil_unsafe.spl`, and `90.tools/lint/` files).
+
+The successor directory `src/compiler/90.tools/fix/rules/impl_/` was parsed by
+the deployed seed (`SIMPLE_LIB=src bin/simple.exe check
+src/compiler/90.tools/fix/rules/impl_`): the run produced only style warnings
+(`export use *` advisories from later files) and **no** `unexpected token in
+expression: Indent` parse error before the 120 s bound elapsed — the original
+parse failure does not reproduce on any current file.
+
+Verdict: STALE (the defective file was removed/renamed by the tree
+reorganization). Status → RESOLVED.

@@ -1,0 +1,158 @@
+# @req REQ-DEVHUB-REAL-FILES
+# @cover src/app/devhub/editor.spl
+# @cover src/app/devhub/backend_resolve.spl
+# @cover src/app/devhub/cmd_daily_debug.spl
+# @cover src/app/devhub/cmd_auth.spl
+# @cover src/app/devhub/cmd_lifecycle.spl
+use std.spec.*
+use std.env.{env_get}
+use std.io.file_ops.{secure_temp_dir}
+use std.io.dir_ops.{dir_create_all, dir_remove_all, is_dir}
+use std.io_runtime.{file_write, file_exists, read_file_text_result}
+use app.devhub.editor.{prepare_editor_file, cleanup_editor_file}
+use app.devhub.backend_resolve.{load_repo_devhub_config_from, repo_parent_directory, find_repo_root_from}
+use app.devhub.cmd_daily_debug.{save_watermark_atomic_at, render_watermark, daily_debug_inbox_filter}
+use app.devhub.cmd_auth.{ensure_auth_config_dir}
+use app.devhub.cmd_lifecycle.{lifecycle_source_files}
+
+fn workflow_test_workspace() -> text:
+    var root = env_get("TMPDIR")
+    if root == "": root = env_get("TEMP")
+    if root == "": root = env_get("TMP")
+    if root == "" and is_dir("/tmp"): root = "/tmp"
+    match secure_temp_dir(root, "devhub-real-files"):
+        case Ok(path): path.replace("\\", "/")
+        case Err(reason):
+            fail(reason)
+            ""
+
+describe "DevHub actual file workflows":
+    it "should bound an inbox read by the timestamp captured before fetching":
+        step("Build one closed-open watermark interval")
+        val filter = daily_debug_inbox_filter("2026-10-26T00:00:00Z", "2026-10-27T00:00:00Z")
+        expect(filter).to_equal("receivedDateTime ge 2026-10-26T00:00:00Z and receivedDateTime lt 2026-10-27T00:00:00Z")
+
+    it "should include the previous upper boundary in the next inbox read":
+        step("Start the next interval exactly where the preceding query stopped")
+        val filter = daily_debug_inbox_filter("2026-10-27T00:00:00Z", "2026-10-27T00:00:01Z")
+        expect(filter).to_start_with("receivedDateTime ge 2026-10-27T00:00:00Z")
+        expect(filter).to_end_with("receivedDateTime lt 2026-10-27T00:00:01Z")
+
+    it "should represent an unchanged watermark as an empty interval":
+        step("Use one timestamp for both bounds without widening the query")
+        val stamp = "2026-10-27T00:00:00Z"
+        expect(daily_debug_inbox_filter(stamp, stamp)).to_equal("receivedDateTime ge 2026-10-27T00:00:00Z and receivedDateTime lt 2026-10-27T00:00:00Z")
+
+    it "should prepare distinct private editor files with exact Unicode and empty content":
+        step("Create two edit workspaces below one explicit temporary parent")
+        val root = workflow_test_workspace()
+        val first = prepare_editor_file(root, "héllo 日本", ".md").unwrap()
+        val second = prepare_editor_file(root, "", ".html").unwrap()
+        val first_text = read_file_text_result(first.1)
+        val second_text = read_file_text_result(second.1)
+        val distinct = first.0 != second.0 and first.1 != second.1
+        val cleaned_first = cleanup_editor_file(first.0)
+        val cleaned_second = cleanup_editor_file(second.0)
+        val clean_root = dir_remove_all(root)
+        step("Check real bytes and independent workspace ownership after cleanup")
+        expect(first_text.unwrap()).to_equal("héllo 日本")
+        expect(second_text.unwrap()).to_equal("")
+        expect(distinct).to_equal(true)
+        expect(cleaned_first and cleaned_second and clean_root).to_equal(true)
+
+    it "should reject a missing edit parent before launching an editor":
+        step("Attempt to prepare an editor file below an absent directory")
+        val root = workflow_test_workspace()
+        val result = prepare_editor_file(root + "/absent", "body", ".md")
+        val cleaned = dir_remove_all(root)
+        expect(result.is_err()).to_equal(true)
+        expect(cleaned).to_equal(true)
+
+    it "should reject an editor suffix that could escape the private workspace":
+        step("Pass an unsupported suffix and inspect the explicit error")
+        val root = workflow_test_workspace()
+        val result = prepare_editor_file(root, "body", "/../escaped")
+        val escaped = file_exists(root + "/escaped")
+        val cleaned = dir_remove_all(root)
+        expect(result.is_err()).to_equal(true)
+        expect(escaped).to_equal(false)
+        expect(cleaned).to_equal(true)
+
+    it "should load a repository backend from real nested files":
+        step("Create a repository config and a nested working directory")
+        val root = workflow_test_workspace()
+        val made = dir_create_all(root + "/.spipe") and dir_create_all(root + "/a/b")
+        val wrote = file_write(root + "/.spipe/config.sdn", "devhub:\n    git_backend: bitbucket\n")
+        val found = find_repo_root_from(root + "/a/b")
+        val config = load_repo_devhub_config_from(root)
+        val cleaned = dir_remove_all(root)
+        expect(made and wrote and cleaned).to_equal(true)
+        expect(found).to_equal(root)
+        expect(config.git_backend).to_equal("bitbucket")
+
+    it "should distinguish absent repository config from real empty content":
+        step("Load a missing file and then an actual empty configuration")
+        val root = workflow_test_workspace()
+        val missing = load_repo_devhub_config_from(root)
+        val made = dir_create_all(root + "/.spipe")
+        val wrote = file_write(root + "/.spipe/config.sdn", "")
+        val empty = load_repo_devhub_config_from(root)
+        val cleaned = dir_remove_all(root)
+        expect(made and wrote and cleaned).to_equal(true)
+        expect(missing.git_backend).to_equal("")
+        expect(empty.git_backend).to_equal("")
+
+    it "should walk Windows and Unix parent directories without crossing a root":
+        step("Normalize native separators and stop at filesystem roots")
+        expect(repo_parent_directory("C:\\repo\\nested")).to_equal("C:/repo")
+        expect(repo_parent_directory("C:/repo")).to_equal("C:/")
+        expect(repo_parent_directory("C:/")).to_equal("")
+        expect(repo_parent_directory("//server/share/repo")).to_equal("//server/share")
+        expect(repo_parent_directory("//server/share")).to_equal("")
+        expect(repo_parent_directory("/repo/nested")).to_equal("/repo")
+        expect(repo_parent_directory("/")).to_equal("")
+
+    it "should atomically persist a watermark without a predictable sibling staging file":
+        step("Write two successive actual watermark versions")
+        val root = workflow_test_workspace()
+        val path = root + "/watermark.sdn"
+        val first = save_watermark_atomic_at(path, "2026-10-26T00:00:00Z")
+        val second = save_watermark_atomic_at(path, "2026-10-27T00:00:00Z")
+        val content = read_file_text_result(path)
+        val predictable = file_exists(path + ".tmp")
+        val cleaned = dir_remove_all(root)
+        expect(first and second and cleaned).to_equal(true)
+        expect(content.unwrap()).to_equal(render_watermark("2026-10-27T00:00:00Z"))
+        expect(predictable).to_equal(false)
+
+    it "should report watermark write failure for a missing parent":
+        step("Attempt an atomic write to an absent directory")
+        val root = workflow_test_workspace()
+        val wrote = save_watermark_atomic_at(root + "/absent/watermark.sdn", "2026-10-27T00:00:00Z")
+        val cleaned = dir_remove_all(root)
+        expect(wrote).to_equal(false)
+        expect(cleaned).to_equal(true)
+
+    it "should create an auth directory with the native provider and reject a file collision":
+        step("Create a real nested directory and a conflicting regular file")
+        val root = workflow_test_workspace()
+        val created = ensure_auth_config_dir(root + "/config/devhub")
+        val directory = is_dir(root + "/config/devhub")
+        val wrote = file_write(root + "/occupied", "do not replace")
+        val refused = ensure_auth_config_dir(root + "/occupied/child")
+        val original = read_file_text_result(root + "/occupied")
+        val cleaned = dir_remove_all(root)
+        expect(created and directory and wrote and cleaned).to_equal(true)
+        expect(refused).to_equal(false)
+        expect(original.unwrap()).to_equal("do not replace")
+
+    it "should discover real nested lifecycle consumers instead of mock filenames":
+        step("Create version consumers under a private source root")
+        val root = workflow_test_workspace()
+        val made = dir_create_all(root + "/nested")
+        val wrote = file_write(root + "/nested/consumer.spl", "val VERSION = \"1.0.0\"\n")
+        val files = lifecycle_source_files(root)
+        val cleaned = dir_remove_all(root)
+        expect(made and wrote and cleaned).to_equal(true)
+        expect(files).to_contain(root + "/nested/consumer.spl")
+        expect(files.contains(root + "/nested/example.txt")).to_equal(false)

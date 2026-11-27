@@ -3,22 +3,31 @@
 # @req TOR-FM-04
 use std.spec.*
 use std.spec.step
-use app.io.mod.{process_run, file_write, dir_create_all, dir_remove_all}
+use std.io_runtime.{env_get, process_run, file_write, dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.fs.host_path.{host_path_canonical}
+use std.nogc_sync_mut.io.process_ops.{resolve_shell_argv}
 
 val META_RUNNER = "scripts/check/cert/tool-qual-meta.shs"
 
+fn _tmp_parent() -> text:
+    val candidate = env_get("TMPDIR") ?? (env_get("TEMP") ?? (env_get("TMP") ?? "/tmp"))
+    val clean = if candidate == "": "/tmp" else: candidate
+    host_path_canonical(clean)
+
 fn qualify_missing_compiler(count: text) -> (text, i64):
-    val (created, create_error, create_code) = process_run("mktemp", ["-d"])
-    expect(create_code).to_equal(0)
-    val work = created.trim()
-    expect(work.is_empty()).to_equal(false)
+    val work = secure_temp_dir(_tmp_parent(), "tool-qual-meta").unwrap()
     val corpus = work + "/corpus"
     expect(dir_create_all(corpus)).to_equal(true)
     expect(file_write(corpus + "/control.spl", "fn main():\n    print(42)\n")).to_equal(true)
-    val (output, errors, code) = process_run("env", [
-        "META_K=" + count,
-        "SIMPLE_BIN=" + work + "/absent-compiler",
-        "sh", META_RUNNER, corpus
+    val (sh_bin, sh_argv) = resolve_shell_argv("META_K=\"$1\" SIMPLE_BIN=\"$2\" \"$3\" \"$4\" \"$5\"")
+    val (output, errors, code) = process_run(sh_bin, sh_argv + [
+        "_",
+        count,
+        work + "/absent-compiler",
+        sh_bin,
+        META_RUNNER,
+        corpus
     ])
     expect(dir_remove_all(work)).to_equal(true)
     (output + errors, code)

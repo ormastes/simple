@@ -3,7 +3,7 @@ use std.spec.{describe, it, expect}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.driver_core_types.{SourceFile}
-use compiler.frontend.parser_types.{ParserModule, ParserTypeParam, ParserTypeAlias}
+use compiler.frontend.parser_types.{ParserModule, ParserTypeParam}
 use compiler.frontend.parser_types_expr.{Type, TypeKind}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.hir.hir_types.*
@@ -13,6 +13,7 @@ use compiler.hir.hir_lowering.type_aliases.*
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_lowering.type_equality.hir_types_equal
 
 fn alias_parser_name(name: text) -> Type:
     Type(kind: TypeKind.Named(name, []), span: Span.empty())
@@ -52,6 +53,17 @@ fn alias_dict_text_i64(kind: HirTypeKind) -> bool:
         case _: false
 
 describe("HIR alias representation", fn():
+    it("expands an actually parsed generic alias chain into the direct composite type", fn():
+        val lowering = alias_local_lowering("type Rows<T> = Dict<text, [T]>\ntype Records<V> = Rows<V>\n")
+        val integer = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        val actual = HirType(kind: lowering.lower_named_kind("Records", [integer], Span.empty()), span: Span.empty())
+        val expected = HirType(kind: HirTypeKind.Dict(
+            HirType(kind: HirTypeKind.Str, span: Span.empty()),
+            HirType(kind: HirTypeKind.Array(integer, nil), span: Span.empty())), span: Span.empty())
+        expect(hir_types_equal(actual, expected)).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+    )
+
     it("expands a forward alias chain into a typed dictionary", fn():
         val lowering = alias_local_lowering("type AChain = ZMap\ntype ZMap = Dict<text, i64>\n")
         expect(alias_dict_text_i64(lowering.lower_named_kind("AChain", [], Span.empty()))).to_equal(true)
@@ -176,14 +188,8 @@ describe("HIR alias representation", fn():
     )
 
     it("preserves imported generic arguments and resolves defaults in the owner", fn():
-        val owner_source = "pub class Cell:\n    value: i64\npub type Items = Dict<text, text>\n"
+        val owner_source = "pub class Cell:\n    value: i64\npub type Items<T = Cell> = Dict<text, T>\n"
         val owner_module = parse_and_build_module(owner_source, "pkg/owner.spl")
-        # Construct the parser's generic alias template explicitly: this
-        # scenario tests HIR substitution, without claiming parser coverage.
-        owner_module.type_aliases["Items"] = ParserTypeAlias(
-            name: "Items", type_params: [alias_formal("T", "Cell")],
-            type_: Type(kind: TypeKind.Named("Dict", [alias_parser_name("text"), alias_parser_name("T")]), span: Span.empty()),
-            visibility: Visibility.Public, is_public: true, span: Span.empty())
         var modules: {text: ParserModule} = {}
         modules["pkg.owner"] = owner_module
         val registry = module_surfaces_from_modules(modules, [SourceFile(path: "pkg/owner.spl", content: owner_source, module_name: "pkg.owner")]).unwrap()
@@ -227,12 +233,8 @@ describe("HIR alias representation", fn():
     )
 
     it("preserves explicit generic alias arguments in imported array fields and returns", fn():
-        val owner_source = "pub type Box = [text]\npub class Holder:\n    items: [Box<i64>]\npub fn boxes() -> [Box<i64>]:\n    []\n"
+        val owner_source = "pub type Box<T = text> = [T]\npub class Holder:\n    items: [Box<i64>]\npub fn boxes() -> [Box<i64>]:\n    []\n"
         val owner_module = parse_and_build_module(owner_source, "pkg/owner.spl")
-        owner_module.type_aliases["Box"] = ParserTypeAlias(
-            name: "Box", type_params: [alias_formal("T", "text")],
-            type_: Type(kind: TypeKind.Array(alias_parser_name("T"), nil), span: Span.empty()),
-            visibility: Visibility.Public, is_public: true, span: Span.empty())
         var modules: {text: ParserModule} = {}
         modules["pkg.owner"] = owner_module
         val registry = module_surfaces_from_modules(modules, [SourceFile(path: "pkg/owner.spl", content: owner_source, module_name: "pkg.owner")]).unwrap()

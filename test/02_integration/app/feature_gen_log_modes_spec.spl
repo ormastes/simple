@@ -19,27 +19,56 @@ Audience: compiler and tooling engineers who maintain this spec
 
 # @req: REQ-APP-FeatGenLogMode-001
 
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, skip}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.env.platform.{is_windows, get_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_exists}
+use std.env.variables.{env_get}
+use std.nogc_sync_mut.io.env_ops.{cwd}
 
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+val CLI_RUN_TIMEOUT_MS: i64 = 120000
+val CLI_RUN_MAX_OUT: i64 = 16777216
 
-val FIXTURE_DIR = "/tmp/simple_feature_gen_log_mode_fixture"
+fn _cli_repo_root() -> text:
+    cwd().replace("\\", "/")
+
+# This spec pins the compiler_rust seed binary's feature-gen subcommand. The seed
+# debug build is a qualification-environment artifact: where it is not
+# built, every scenario below is reported as an honest skip instead of a
+# failure, mirroring the compiled-binary handling of
+# simple_lsp_mcp_log_modes_spec.spl.
+val SEED_CLI = _cli_repo_root() + "/src/compiler_rust/target/debug/simple" + (if is_windows(): ".exe" else: "")
+
+fn _seed_it(name: text, block: fn()):
+    if file_exists(SEED_CLI):
+        it(name, block)
+    else:
+        skip(name, "compiler_rust seed debug binary is not built on this host")
+
+val FIXTURE_DIR = get_temp_dir().replace("\\", "/") + "/simple_feature_gen_log_mode_fixture"
 
 fn _setup_fixture():
-    val (_out, _err, _code) = rt_process_run("/bin/sh", [
-        "-c",
-        "rm -rf " + FIXTURE_DIR + " && mkdir -p " + FIXTURE_DIR + "/doc/08_tracking/feature && cat > " + FIXTURE_DIR + "/doc/08_tracking/feature/feature_db.sdn <<'EOF'\nfeatures |id, group, device, component, title, description, status, priority, source_file, requirement, research, plan, architecture, design, system_spec, spec_doc, implementation, unit_tests, integration_tests, guide, external_system, external_id, external_url, last_synced_at, created_at, updated_at, valid|\n    REQ-001,core,core,core,\"Sample feature\",\"Does work\",current,P1,,,,,,,,,,,,,,,,,2026-06-04,2026-06-04,true\n    REQ-002,tools,tools,tools,\"Planned feature\",\"Does later\",request,P2,,,,,,,,,,,,,,,,,2026-06-04,2026-06-04,true\nEOF"
-    ])
+    val _removed = dir_remove_all(FIXTURE_DIR)
+    if not dir_create_all(FIXTURE_DIR + "/doc/08_tracking/feature"):
+        fail("could not create fixture dir " + FIXTURE_DIR + "/doc/08_tracking/feature")
+    if not file_create_exclusive(FIXTURE_DIR + "/doc/08_tracking/feature/feature_db.sdn", "features |id, group, device, component, title, description, status, priority, source_file, requirement, research, plan, architecture, design, system_spec, spec_doc, implementation, unit_tests, integration_tests, guide, external_system, external_id, external_url, last_synced_at, created_at, updated_at, valid|\n    REQ-001,core,core,core,\"Sample feature\",\"Does work\",current,P1,,,,,,,,,,,,,,,,,2026-06-04,2026-06-04,true\n    REQ-002,tools,tools,tools,\"Planned feature\",\"Does later\",request,P2,,,,,,,,,,,,,,,,,2026-06-04,2026-06-04,true\n"):
+        fail("could not write fixture file " + FIXTURE_DIR + "/doc/08_tracking/feature/feature_db.sdn")
 
+fn _run_seed(subcommand: text, args: [text]) -> (text, text, i64):
+    val seed = SEED_CLI
+    val joined = ([subcommand] + args).join(" ")
+    val (shell, shell_args) = if is_windows():
+        val sh = env_get("ComSpec") ?? "cmd.exe"
+        (sh, ["/d", "/c", "cd /d " + FIXTURE_DIR + " && " + seed + " " + joined])
+    else:
+        ("/bin/sh", ["-c", "cd \"" + FIXTURE_DIR + "\" && \"" + seed + "\" " + joined])
+    process_run_bounded(shell, shell_args, CLI_RUN_TIMEOUT_MS, CLI_RUN_MAX_OUT)
 fn _run_feature_gen(args: [text]) -> (text, text, i64):
-    val joined = args.join(" ")
-    rt_process_run("/bin/sh", [
-        "-c",
-        "REPO=$(pwd); cd " + FIXTURE_DIR + " && \"$REPO/src/compiler_rust/target/debug/simple\" feature-gen " + joined
-    ])
+    _run_seed("feature-gen", args)
 
 describe "feature-gen log mode CLI options":
-    it "shows shared log options in help":
+    _seed_it "shows shared log options in help":
         # @req REQ-001
         # @req REQ-002
         # @req REQ-001
@@ -54,7 +83,7 @@ describe "feature-gen log mode CLI options":
         expect(out).to_contain("--log-mode")
         expect(out).to_contain("--progress")
 
-    it "supports log-mode json":
+    _seed_it "supports log-mode json":
         # @req REQ-SSPEC-INTEGRATION
         step("supports log-mode json")
         step("Verify: supports log-mode json")
@@ -66,7 +95,7 @@ describe "feature-gen log mode CLI options":
         expect(out).to_contain("\"status\":\"ok\"")
         expect(out).to_contain("\"features\":2")
 
-    it "supports dot progress":
+    _seed_it "supports dot progress":
         # @req REQ-SSPEC-INTEGRATION
         step("supports dot progress")
         step("Verify: supports dot progress")
@@ -77,7 +106,7 @@ describe "feature-gen log mode CLI options":
         expect(out).to_contain(".")
         expect(out).to_contain("Done. Generated tracking docs for 2 features")
 
-    it "rejects invalid log mode":
+    _seed_it "rejects invalid log mode":
         # @req REQ-SSPEC-INTEGRATION
         step("rejects invalid log mode")
         step("Verify: rejects invalid log mode")

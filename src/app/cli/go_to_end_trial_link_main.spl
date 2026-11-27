@@ -1,0 +1,43 @@
+# One-shot go-to-end trial link over an existing object set, no recompile:
+#
+#   simple run src/app/cli/go_to_end_trial_link_main.spl \
+#       (--ledger <mir-queue-dir> | --objects <dir> [--failed a.b,c.d]) --out <path> \
+#       [--backend <name>] [--target <triple>] [--runtime-path <libsimple_native_all.a>]
+#
+# Writes `<out>.go-to-end.sdn` (verdict, undefined symbols with their failed
+# module, other link errors) and, when symbols are unresolved,
+# `<out>.go-to-end-trial` for inspection. Exit 0 only when the trial is clean
+# and no row failed; the trial artifact is never an admissible binary.
+use app.io.args_ops.{get_args}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.driver.driver_build.go_to_end_trial_link_v1.{go_to_end_trial_from_inputs_v1,
+    go_to_end_trial_inputs_from_ledger_v1, go_to_end_trial_inputs_from_objects_dir_v1,
+    go_to_end_trial_link_options_v1, GoToEndTrialInputsV1}
+
+fn flag_value(args: [text], flag: text) -> text:
+    var i = 0
+    while i < args.len():
+        if args[i] == flag and i + 1 < args.len(): return args[i + 1]
+        if args[i].starts_with(flag + "="): return args[i].substring(flag.byte_len() + 1)
+        i += 1
+    ""
+
+fn main() -> i64:
+    val args = get_args()
+    val ledger = flag_value(args, "--ledger")
+    val objects = flag_value(args, "--objects")
+    val out = flag_value(args, "--out")
+    if out == "" or (ledger == "" and objects == ""):
+        eprint "usage: go_to_end_trial_link_main.spl (--ledger <dir> | --objects <dir> [--failed a,b]) --out <path> [--backend B] [--target T] [--runtime-path P]"
+        return 2
+    val failed_arg = flag_value(args, "--failed")
+    val failed: [text] = if failed_arg == "": [] else: failed_arg.split(",")
+    val inputs: GoToEndTrialInputsV1 = if ledger != "":
+        go_to_end_trial_inputs_from_ledger_v1(ledger)
+    else:
+        go_to_end_trial_inputs_from_objects_dir_v1(objects, failed)
+    val opts = go_to_end_trial_link_options_v1(flag_value(args, "--backend"),
+        flag_value(args, "--target"), flag_value(args, "--runtime-path"))
+    val verdict = go_to_end_trial_from_inputs_v1(inputs, out, opts)
+    eprint verdict
+    if inputs.failed_rows.len() == 0 and inputs.failed_modules.len() == 0 and verdict.contains("trial link verdict=clean"): 0 else: 1

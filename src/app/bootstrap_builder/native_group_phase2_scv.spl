@@ -11,7 +11,7 @@ use compiler.driver.driver_build.native_full_inventory_sources.{
     NativeFullInventorySourcesV1, native_full_inventory_source_paths_v1
 }
 use compiler.driver.cache.cold_package_ownership_v1.{
-    ColdPackageOwnershipManifestV1, ColdPackageOwnershipCaptureV1,
+    ColdPackageOwnershipManifestV1,
     cold_package_ownership_capture_v1,
     COLD_PACKAGE_OWNERSHIP_POLICY_IDENTITY_V1
 }
@@ -52,15 +52,14 @@ fn phase2_native_scv_publish_v1(
     val role_policy = file_read_regular_no_follow_bounded(
         role_policy_path, 65536)?
     val role_policy_digest = file_hash_sha256(role_policy_path)
-    if role_policy_digest != sha256_text(role_policy):
+    if role_policy_digest.is_none() or role_policy_digest.unwrap() != sha256_text(role_policy):
         return Err("phase2 module role policy changed during read")
     var module_sources: [Phase2ModuleSourceV1] = []
     for entry in copied.source_entries:
         if entry.source_identity.ends_with(".spl"):
             module_sources = module_sources.push(Phase2ModuleSourceV1(
                 entry.source_identity, entry.content_digest))
-    # @workaround bug=native-result-ok-record-inference-20261018 reason=retain-declared-result-ok-record
-    val selection: Phase2ModuleSelectionV1 = phase2_module_roles_select_v1(
+    val selection = phase2_module_roles_select_v1(
         role_policy, module_sources)?
     var included: Dict<text, bool> = {}
     for path in selection.included_paths:
@@ -78,7 +77,7 @@ fn phase2_native_scv_publish_v1(
     if reason != "ok" or inventory_digest == "":
         return Err("phase2 source inventory publication failed: " + reason)
     val readback = compile_source_inventory_read_current_v1(cache_root)
-    if not readback.valid or readback.inventory == nil or
+    if not readback.valid or readback.inventory.is_none() or
             readback.digest != inventory_digest or
             readback.inventory!.entries.len() != selected_entries.len():
         return Err("phase2 source inventory readback differs")
@@ -86,7 +85,10 @@ fn phase2_native_scv_publish_v1(
     if not scv.valid or scv.source_drifted or
             scv.inventory_count != selected_entries.len():
         return Err("phase2 SCV acquisition failed: " + scv.reason)
-    val receipt_digest = file_hash_sha256(scv.receipt_path)
+    val receipt_digest_opt = file_hash_sha256(scv.receipt_path)
+    if receipt_digest_opt.is_none():
+        return Err("cannot hash phase2 SCV receipt: " + scv.receipt_path)
+    val receipt_digest = receipt_digest_opt.unwrap()
     var spl_count = 0
     for entry in inventory.entries:
         if entry.source_identity.ends_with(".spl"):
@@ -111,8 +113,7 @@ fn phase2_native_scv_publish_v1(
                 "{scv.snapshot_root}/{entry.source_identity}", 65536)?
             manifests = manifests.push(ColdPackageOwnershipManifestV1(
                 entry.source_identity, content))
-    # @workaround bug=native-result-ok-record-inference-20261018 reason=retain-declared-result-ok-record
-    val captured: ColdPackageOwnershipCaptureV1 = cold_package_ownership_capture_v1(inventory,
+    val captured = cold_package_ownership_capture_v1(inventory,
         full_sources, policy_content, manifests)?
     var runtime_count = 0
     var std_count = 0

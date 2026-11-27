@@ -1,7 +1,9 @@
 @allow(unnamed_duplicate_typed_args) # reason: positional API -- arg order is conventional
 # HTTP Client Type Definitions and Constants
 
-val HTTP_VERSION = "HTTP/1.1"
+use std.nogc_async_mut.http.url.{url_encode as http_url_encode, url_decode as http_url_decode}
+
+pub val HTTP_VERSION = "HTTP/1.1"
 val METHOD_GET = "GET"
 val METHOD_POST = "POST"
 val METHOD_PUT = "PUT"
@@ -40,62 +42,14 @@ val USER_AGENT_DEFAULT = "SimpleHTTP/1.0"
 val ACCEPT_DEFAULT = "*/*"
 
 fn url_encode(text: text) -> text:
-    var parts: [text] = []
-    var i = 0
-    var len = text.length()
-    while i < len:
-        var ch = text.char_at(i)
-        var code = text.char_code_at(i)
-        var is_alpha = (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
-        var is_digit = code >= 48 and code <= 57
-        var is_unreserved = is_alpha or is_digit or ch == "-" or ch == "_" or ch == "." or ch == "~"
-        if is_unreserved:
-            parts.push(ch)
-        else:
-            var hex = code.to_string(16).upper()
-            if hex.length() == 1:
-                hex = "0" + hex
-            parts.push("%" + hex)
-        i = i + 1
-    parts.join("")
+    # Preserve UTF-8 byte encoding through the configured family's URL owner.
+    http_url_encode(text)
 
 fn url_decode(text: text) -> text:
-    # Byte-consistent scan: `run_start` tracks a pending byte RANGE of
-    # untouched input to flush as one slice, so a multibyte UTF-8 codepoint
-    # is never split into single-byte pieces (each of which would decode
-    # to U+FFFD on its own -- see
-    # doc/08_tracking/bug/mixed_byte_and_codepoint_indexing_defect_class_2026-08-18.md).
-    # `%`/`+` are always single ASCII bytes, so per-byte comparison via
-    # `.substring(i, i+1)` is safe for detecting them.
-    var parts: [text] = []
-    var i = 0
-    var len = text.length()
-    var run_start = 0
-    while i < len:
-        var ch = text.substring(i, i + 1)
-        if ch == "%":
-            if run_start < i:
-                parts.push(text.substring(run_start, i))
-            if i + 2 < len:
-                var hex = text.substring(i + 1, i + 3)
-                var code = hex.parse_int(16)
-                parts.push(code.to_char())
-                i = i + 3
-            else:
-                parts.push(ch)
-                i = i + 1
-            run_start = i
-        elif ch == "+":
-            if run_start < i:
-                parts.push(text.substring(run_start, i))
-            parts.push(" ")
-            i = i + 1
-            run_start = i
-        else:
-            i = i + 1
-    if run_start < len:
-        parts.push(text.substring(run_start, len))
-    parts.join("")
+    # Keep HTTP client decoding aligned with the profile's HTTP URL owner.
+    http_url_decode(text)
+
+export url_decode
 
 fn url_encode_component(component: text) -> text:
     url_encode(text: component)
@@ -228,7 +182,7 @@ fn _url_valid_ipv6(inner: text) -> bool:
     if compression >= 0 and compression != inner.last_index_of("::"):
         return false
     val before = if compression >= 0: inner.slice(0, compression) else: inner
-    val after = if compression >= 0: inner.slice(compression + 2, inner.len()) else: ""
+    val after = if compression >= 0: inner.slice(compression + 2, inner.byte_len()) else: ""
     if before.ends_with(":") or after.starts_with(":"):
         return false
     var groups: [text] = []
@@ -260,7 +214,7 @@ fn _url_valid_ipv6(inner: text) -> bool:
         return units < 8
     units == 8
 
-fn parse_url(url: text) -> Option<UrlParts>:
+pub fn parse_url(url: text) -> Option<UrlParts>:
     """Parse an absolute URL, fail-closed.
 
     Returns `None` for anything that is not an absolute URL. This parser never
@@ -287,19 +241,19 @@ fn parse_url(url: text) -> Option<UrlParts>:
     if si >= trimmed.length():
         return None
     val scheme = trimmed.substring(0, si).to_lower()
-    var rest = trimmed.substring(si + 1, trimmed.length())
+    var rest = trimmed.substring(si + 1, trimmed.byte_len())
     val special = url_is_special(scheme)
 
     # --- fragment then query (both split before the authority) ----------
     var fragment = ""
     val frag_at = rest.index_of("#")
     if frag_at >= 0:
-        fragment = rest.substring(frag_at + 1, rest.length())
+        fragment = rest.substring(frag_at + 1, rest.byte_len())
         rest = rest.substring(0, frag_at)
     var query = ""
     val q_at = rest.index_of("?")
     if q_at >= 0:
-        query = rest.substring(q_at + 1, rest.length())
+        query = rest.substring(q_at + 1, rest.byte_len())
         rest = rest.substring(0, q_at)
 
     # --- opaque path (data:, about:, javascript:, mailto:) --------------
@@ -311,7 +265,7 @@ fn parse_url(url: text) -> Option<UrlParts>:
             scheme: scheme, host: "", port: 0, path: rest,
             query: query, fragment: fragment, opaque: true))
 
-    val after = rest.substring(2, rest.length())
+    val after = rest.substring(2, rest.byte_len())
 
     # --- authority ------------------------------------------------------
     var authority = after
@@ -319,13 +273,13 @@ fn parse_url(url: text) -> Option<UrlParts>:
     val slash_at = after.index_of("/")
     if slash_at >= 0:
         authority = after.substring(0, slash_at)
-        path = after.substring(slash_at, after.length())
+        path = after.substring(slash_at, after.byte_len())
 
     # Everything up to the LAST "@" is userinfo, not the host. Splitting on the
     # first "@" is the classic "http://evil.com@good.com" host-spoof.
     val at_pos = authority.last_index_of("@")
     if at_pos >= 0:
-        authority = authority.substring(at_pos + 1, authority.length())
+        authority = authority.substring(at_pos + 1, authority.byte_len())
 
     var host = ""
     var port = 0
@@ -337,11 +291,11 @@ fn parse_url(url: text) -> Option<UrlParts>:
         if not _url_valid_ipv6(inner):
             return None
         host = "[" + inner.to_lower() + "]"
-        val tail = authority.substring(close + 1, authority.length())
+        val tail = authority.substring(close + 1, authority.byte_len())
         if tail.length() > 0:
             if not tail.starts_with(":"):
                 return None
-            val ptxt = tail.substring(1, tail.length())
+            val ptxt = tail.substring(1, tail.byte_len())
             if ptxt.length() > 0:
                 val p = _url_parse_port(ptxt)
                 if p < 0:
@@ -351,7 +305,7 @@ fn parse_url(url: text) -> Option<UrlParts>:
         val colon = authority.index_of(":")
         if colon >= 0:
             host = authority.substring(0, colon).to_lower()
-            val ptxt = authority.substring(colon + 1, authority.length())
+            val ptxt = authority.substring(colon + 1, authority.byte_len())
             if ptxt.length() > 0:
                 val p = _url_parse_port(ptxt)
                 if p < 0:
@@ -420,7 +374,7 @@ fn parse_query_string(query: text) -> list:
         var eq_pos = pair.index_of("=")
         if eq_pos >= 0:
             var key = pair.substring(0, eq_pos)
-            var value = pair.substring(eq_pos + 1, pair.length())
+            var value = pair.substring(eq_pos + 1, pair.byte_len())
             key = url_decode(text: key)
             value = url_decode(text: value)
             params.append((key, value))

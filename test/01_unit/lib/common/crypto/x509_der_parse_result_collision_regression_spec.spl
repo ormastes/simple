@@ -1,0 +1,44 @@
+# Regression spec for bug duplicate_type_name_collision_audit_2026-07-17.
+#
+# src/lib/common/crypto/x509.spl and src/lib/common/cert/x509_typed.spl each
+# declared `enum X509ParseResult` with DIFFERENT variant payloads
+# (Ok(cert: X509Certificate)/Err(msg) vs Ok(cert: X509Cert)/Err(reason)).
+# The interpreter keys its enum registry on the BARE name, so co-loading both
+# modules clobbered one declaration and `case` arms against the loser silently
+# matched nothing. The audit renamed the zero-consumer crypto twin to
+# X509DerParseResult; an Aug 2026 tree-restore (ae55a746719) silently reverted
+# the rename, re-introducing the collision. This spec co-loads both modules and
+# pins the distinct type names plus per-module enum resolution.
+#
+# See: doc/08_tracking/bug/duplicate_type_name_collision_audit_2026-07-17.md
+
+use std.spec.step
+
+use std.spec.*
+use std.cert.x509_typed.{x509_parse_der, X509ParseResult}
+use std.crypto.x509.{x509_parse_spki, X509DerParseResult}
+
+# Distinct type annotations for the two enums: merely compiling both proves
+# the bare enum registry no longer carries a single clobbered `X509ParseResult`.
+fn _typed_is_err(r: X509ParseResult) -> bool:
+    if val X509ParseResult.Err(reason) = r:
+        return true
+    return false
+
+fn _der_is_err(r: X509DerParseResult) -> bool:
+    if val X509DerParseResult.Err(msg) = r:
+        return true
+    return false
+
+describe "x509 duplicate enum type-name collision regression (duplicate_type_name_collision_audit_2026-07-17)":
+    it "resolves the typed module's parser to the typed module's enum":
+        step("parse invalid DER through std.cert.x509_typed")
+        val r = x509_parse_der([0x00u8])
+        step("the result matches the typed enum's Err arm, not a hijacked twin")
+        expect(_typed_is_err(r)).to_equal(true)
+
+    it "resolves the crypto module's parser to the crypto module's renamed enum":
+        step("parse invalid SPKI through std.crypto.x509")
+        val r = x509_parse_spki([0x00u8])
+        step("the result matches X509DerParseResult.Err, the renamed twin")
+        expect(_der_is_err(r)).to_equal(true)

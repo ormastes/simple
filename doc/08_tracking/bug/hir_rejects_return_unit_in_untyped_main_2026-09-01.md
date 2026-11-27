@@ -1,10 +1,12 @@
 # HIR rejects `return ()` in a `fn main():` that declares no return type
 
 - **Date:** 2026-09-01
-- **Status:** OPEN — measured, not fixed. Filed rather than worked around, per
-  CLAUDE.md ("when a short, safe grammar or compact expression form fails ...
-  fix it or record a concrete bug/feature request instead of silently
-  normalizing the workaround").
+- **Status:** CLOSED 2026-11-09 (stale) — FIXED by `8a4fe2ae2b3` (fix(hir):
+  untyped fns infer return type from tail value, 2026-11-06, merged on
+  release/1.0.0). The doc repro `fn main(): print("hello"); return ()` now
+  lowers with zero HIR errors; guard spec
+  `test/01_unit/compiler/hir/return_unit_in_untyped_main_spec.spl` 1/1 PASS on
+  the seed interpreter at release/1.0.0 HEAD 2026-11-09.
 - **Found by:** goal item 2, x86_64 WM host-Vulkan lane, while re-measuring
   `hir_register_imported_symbol_inner_self_bound_to_bool_2026-09-01.md`.
 
@@ -70,3 +72,32 @@ defects compounded into an eight-minute repro that measured nothing.
   through.
 - Whether the four files above currently compile on any lane, or are simply
   never native-built.
+
+## Addendum 2026-11-11 — P3 lane compiler3 verdict: SUPERSEDED
+
+Triage on refreshed seed (build-commit 0791c2b7f4a7, bin/simple.exe 37577216 bytes)
+at release/1.0.0 tip 7d4140c1a6b3 (work/p3-compiler3-20261111).
+
+- Prior closure (2026-11-09, recorded above) cites fixing commit 8a4fe2ae2b3 and
+  guard spec `test/01_unit/compiler/hir/return_unit_in_untyped_main_spec.spl`.
+- Seed-smoke re-verification (2026-11-11):
+  `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test test/01_unit/compiler/hir/return_unit_in_untyped_main_spec.spl --mode=interpreter --no-cache`
+  → SPEC FILE VERDICT outcome=OK, declared>=1 executed=1 passed=1 failed=0.
+- Verdict: SUPERSEDED. No code change.
+
+---
+
+## 2026-11-11 (lane p3fix-comp7-20261111) — re-verified FIXED, no header change needed
+
+Independent re-verification of the compiler3 addendum on this lane's fresh
+worktree (base `a64cda1ee32d`, tracked seed `bin/simple.exe`,
+build-commit 46fe8f6b6def):
+
+- Fixing commit present in this branch: `8a4fe2ae2b39` ("fix(hir): untyped fns
+  infer return type from tail value; robust requires -> T").
+- Guard spec `test/01_unit/compiler/hir/return_unit_in_untyped_main_spec.spl`
+  (`--mode=interpreter --no-cache`) → `outcome=OK, executed=1 passed=1 failed=0`.
+
+Disposition confirmed: FIXED by `8a4fe2ae2b3` (doc marked CLOSED 2026-11-09)
+before this campaign; header already carried the CLOSED status, so no flip was
+required. This row was already resolved going into the P3 pass.

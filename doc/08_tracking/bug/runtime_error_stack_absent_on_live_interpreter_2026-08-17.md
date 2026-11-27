@@ -1,5 +1,22 @@
 # Runtime errors carry no "Call stack:" section on the live interpreter (2026-08-17)
 
+## Triage 2026-11-25 (p2w4-ac lane, release/1.0.0)
+
+Reconfirmed OPEN: `MirInterpreter.format_error` / `call_stack_trace`
+(`src/compiler/95.interp/mir_interpreter.spl:182,197`) still have zero call
+sites — the only `.format_error(` call in `src/` is on the unrelated
+semantics formatter (`src/compiler/35.semantics/error_formatter.spl:549`),
+and the only other `format_error` reference is `src/app/cli/p3_groups/group_4.spl`
+importing `compiler.types.type_infer.format_error`; neither touches
+`MirInterpreter`. The wiring fix itself is
+small, but proving it green requires the self-hosted interpreter: `bin/simple
+run` on this host executes the pinned Rust seed, which additionally rejects
+`@representation_boundary` at release/1.0.0 HEAD, so neither the named
+reproducer nor `runtime_error_stack_spec.spl` can run here. Per the standing
+rule (spec is legitimately RED, do not weaken it) no spec or fixture was
+touched. Left OPEN; unblock condition unchanged (give `format_error` a caller
+on the interpreter error-reporting path, verify on a self-hosted binary).
+
 Status: OPEN — spec is legitimately RED, do not weaken it.
 
 ## Summary

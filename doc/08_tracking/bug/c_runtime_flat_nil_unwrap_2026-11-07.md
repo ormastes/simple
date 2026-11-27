@@ -1,0 +1,7 @@
+# Flat-nil unwrap in the C runtime — verification waiting
+
+Canonical flat nil passed through rt_unwrap_or_trap because enum probing returned a negative enum id. The helper now compares the full word with rt_core_nil before that passthrough and reuses the existing boxed-None diagnostic, flush and abort. Zero, false, true and Char carriers remain distinct; other enum/Result handling and ABI are unchanged. Rust and PureCore are separate providers.
+
+The permanent fixture is src/runtime/test/rt_unwrap_flat_nil_selfcheck.c. Its present mode requires21 exact checks over seven canonical carriers through direct unwrap, real Array.push/pop and boxed Some. Separate nil, empty-pop and boxed-none modes print a pre-call marker and must abort without returning. Link it only against the actual selected canonical core-C archive, using the pinned runtime_value.h and normal provider provenance. An extracted helper, weak stub or duplicate-provider link is not qualification.
+
+STATUS: WAIT_VERIFY. Source review is complete; fixture compilation, actual21 checks/three abort children, old/new comparison, runtime/provider binding and downstream qualification are UNRUN. The historical Array.pop aggregate-payload issue is not closed by this repair. Source landing does not imply runtime PASS. The qualification oracle must require platform abort status, exactly one established None diagnostic and pre-call marker, empty stdout, and no normal-return marker. Generic nonzero exit is insufficient. Retain the artifact/archive/tool/link bindings and each child stdout/stderr/status.

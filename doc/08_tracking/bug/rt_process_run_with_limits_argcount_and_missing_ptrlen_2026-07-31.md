@@ -1,11 +1,11 @@
 # Bug: rt_process_run_with_limits Arg-Count Mismatch and Missing JIT Expansion
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-25 — both defects fixed in current source (see verification note)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-31  
-**Status:** Dormant (unreachable)  
+**Status:** Resolved 2026-11-25 (was: Dormant/unreachable; defects now repaired at all three layers)  
 **Severity:** High (when activated)
 
 ## Defect Summary
@@ -83,3 +83,30 @@ Whoever wires up a call site owns fixing both defects before landing the change.
 
 See also: `doc/08_tracking/bug/rt_process_spawn_async_jit_missing_ptr_len_expansion_2026-07-31.md` — the live sibling defect that prompted this audit.
 
+
+## Verification 2026-11-25 (release/1.0.0 @ 4c6024f8271) — fixed in source
+
+All three layers named in "Why It Cannot Be Fixed Incrementally" now agree,
+verified by source inspection (the Rust runtime cannot be rebuilt on this
+host, but both defects were source-level spec/table mismatches, decidable by
+reading the source):
+
+1. **Arity:** `RuntimeFuncSpec::new("rt_process_run_with_limits", &[I64; 8],
+   &[I64])` at `src/compiler_rust/compiler/src/codegen/runtime_sffi.rs:1769`
+   now declares 8 I64 args, with a comment requiring an exact match to the
+   Rust definition. The Rust signature
+   (`src/compiler_rust/runtime/src/value/sffi/env_process.rs:1702`) still has
+   the 8 parameters — spec and definition match.
+2. **JIT ptr/len expansion:** `rt_process_run_with_limits` is now present in
+   `process_c_runtime_arg_indices` (`src/compiler_rust/compiler/src/codegen/
+   instr/calls.rs:3414`, `Some(&[0])` — cmd expands to (ptr, len)).
+3. **Simple-level wrapper:** `src/lib/nogc_sync_mut/sffi/system_hosted_extras.spl:8`
+   now declares all 8 parameters (`cpu_seconds`, `max_fds`, `max_procs`
+   included). The pure-Simple extern-ABI table
+   (`src/compiler/50.mir/text_extern_abi.spl:110`) also lists the function
+   with the same (ptr, len) treatment.
+
+The doc's stated fix order (spec first, then table entry, then wrappers) is
+exactly what the current tree reflects. No Rust rebuild or native execution
+was possible here, so this is a static verification; the mismatch class it
+guards against is fully decidable at source level.

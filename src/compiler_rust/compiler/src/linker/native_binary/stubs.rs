@@ -143,6 +143,7 @@ const RT_KEEP: &[&str] = &[
     "rt_file_write_text_at_cached_repeat",
     "rt_file_write_bytes_at",
     "rt_mmap",
+    "rt_mmap_create",
     "rt_mmap_raw",
     "rt_munmap",
     "rt_munmap_raw",
@@ -268,6 +269,7 @@ const RT_KEEP: &[&str] = &[
     "rt_epoll_wait",
     "rt_stdin_read",
     "rt_stdin_read_all",
+    "rt_stdin_read_timeout_v1",
     "rt_stdin_read_line",
     "rt_stdout_write",
     "rt_stdout_flush",
@@ -314,6 +316,7 @@ const RT_KEEP: &[&str] = &[
     "rt_file_rename",
     "rt_crc32_text",
     "rt_file_sync",
+    "rt_dir_sync",
     "rt_file_create_excl",
     "rt_mem_snapshot_open",
     "rt_mem_snapshot_record",
@@ -323,6 +326,9 @@ const RT_KEEP: &[&str] = &[
     "rt_file_size",
     "rt_file_lock",
     "rt_file_unlock",
+    "rt_file_lock_owned_acquire_v2",
+    "rt_file_lock_owned_state_v2",
+    "rt_file_lock_owned_release_v2",
     "rt_getpid",
     "rt_file_hash_sha256",
     "rt_path_parent",
@@ -681,6 +687,7 @@ int main(int argc, char** argv) {
 {w}bool rt_file_rename(const char* a, const char* b) {{ (void)a; (void)b; return true; }}
 {w}int64_t rt_crc32_text(const char* a, int64_t n) {{ (void)a; (void)n; return 0; }}
 {w}bool rt_file_sync(const char* a, int64_t n) {{ (void)a; (void)n; return true; }}
+{w}bool rt_dir_sync(const char* a, int64_t n) {{ (void)a; (void)n; return true; }}
 {w}bool rt_file_create_excl(const char* a, int64_t an, const char* b, int64_t bn) {{ (void)a; (void)an; (void)b; (void)bn; return true; }}
 {w}void rt_fault_set_stack_overflow_detection(int64_t v) {{ (void)v; }}
 {w}void rt_fault_set_timeout(int64_t v) {{ (void)v; }}

@@ -1,0 +1,50 @@
+#!/bin/sh
+# Static ownership regression, not Stage2 link or executable test evidence.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+python3 - "$root" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+root = Path(sys.argv[1])
+helper = re.compile(
+    r'@always_inline\nfn _sffi_enum_discriminant<T>\(value: T\) -> i64:\n'
+    r'    unsafe\(capabilities: \[ffi\]\):\n'
+    r'        rt_enum_discriminant\(value\)(?=\n|$)'
+)
+boundary = re.compile(
+    r'@unsafe\(reason: "[^"]+", capabilities: \[ffi\]\)\n'
+    r'extern fn rt_enum_discriminant<T>\(value: T\) -> i64(?=\n|$)'
+)
+
+def owned(source):
+    return (len(helper.findall(source)) == 1 and
+            len(boundary.findall(source)) == 1)
+
+owner = root / 'src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl'
+source = owner.read_text()
+assert owned(source), 'enum payload diagnostics lack the local generic FFI owner'
+assert '_sffi_enum_discriminant<MirTypeKind>(actual_mir.kind)' in source
+
+# Every current MIR expression caller needs its own private inline wrapper;
+# an identically named sibling definition is not a module-owned link symbol.
+callers = []
+for path in sorted(owner.parent.glob('*.spl')):
+    text = path.read_text()
+    calls = [line for line in text.splitlines()
+             if '_sffi_enum_discriminant' in line
+             and not line.lstrip().startswith(('#', 'fn '))]
+    if calls:
+        assert owned(text), f'{path.name}: private helper called without local FFI owner'
+        callers.append(path.name)
+assert owner.name in callers
+
+# Sabotage proves the gate rejects the observed missing-definition bug and
+# preserves the real generic unsafe boundary rather than a hardcoded return.
+assert not owned(helper.sub('', source)), 'missing-helper mutation admitted'
+assert not owned(boundary.sub('', source)), 'missing-extern mutation admitted'
+assert not owned(source.replace('rt_enum_discriminant(value)', '0')), 'constant-return mutation admitted'
+assert not owned(source.replace('    unsafe(capabilities: [ffi]):', '    if true:')), 'unguarded FFI mutation admitted'
+print(f'PASS: {len(callers)} MIR caller modules own their generic discriminant wrappers; 4 negative mutations rejected')
+PY

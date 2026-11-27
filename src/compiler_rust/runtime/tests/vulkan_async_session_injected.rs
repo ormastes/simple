@@ -233,6 +233,10 @@ mod vulkan_graphics_runtime_core {
     }
 }
 
+// The owner resolves the shared protocol as `crate::vulkan_async_protocol`.
+#[path = "../src/vulkan_async_protocol.rs"]
+pub mod vulkan_async_protocol;
+
 #[path = "../src/vulkan_graphics_runtime_async.rs"]
 mod api;
 use api::*;

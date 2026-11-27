@@ -37,6 +37,8 @@ Mission-critical V2 bootstrap/admission status is owned by
 failure is `doc/08_tracking/bug/stage3_selfhost_exit_139_2026-08-14.md`.
 
 ## Role
+- BSM P2: `CompilerDriver.compile()` opens a `BuildSession` (`ctx.session`, log `build-session: id=<S>`) before source loading; HIR lowering publishes flat HIR rows via `driver_publish_flat_hir_row_v1` (adopt-then-append with a session, legacy promote without).
+- BSM P6: `compile()` = begin -> `compile_in_session_v1()` -> `session.end(session_kept_values_v1(result))`. Callers reading `driver.ctx` products after compile (generate_headers, collection-plan explain, cold full-index) set `ctx.config["build-session-retain-products"]="1"`; any other post-compile ctx read points into freed session memory.
 
 Own source discovery, import closure, phase orchestration, execution-mode
 selection, and compiler-driver performance under `src/compiler/80.driver/`.
@@ -273,3 +275,87 @@ Generic archive signatures retain declaration linkage metadata in digest v2.
 Driver archive transport must preserve this field through specialization;
 caller display qualifiers cannot establish the native callee owner. The
 source-reviewed repair requires a fresh generation for native qualification.
+
+## MIR shard PASS must consult the go-to-end ledger (2026-10-25)
+
+`aot_compile_mir_shard_v1` publishes PASS per claimed module. "No outcome,
+no object" means an objectless facade only when the child's go-to-end ledger
+did not exclude the module (`native_mir_shard_module_passed_v1`). The ledger
+is in-process and dies with the child, so cross-process failure detail goes
+through the ledger terminals (FAILED) and the ICE receipt part rows
+(`mir_lower`). Bug:
+`doc/08_tracking/bug/mir_shard_go_to_end_failure_published_as_pass_2026-10-25.md`.
+
+## TRACE32 physical owners (2026-10-25)
+
+Windows may materialize app symlinks as ordinary target-text files. Exact import
+fallback now covers `app.mcp_t32` and `app.cmm_lsp` alongside `app.t32_cli`, after
+ordinary resolution with existing prefix boundaries. Preserve requested-name
+closure aliases instead of rewriting HIR names. Source regressions are UNRUN;
+actual T32 consumers need a rebuilt producer and real Hello compile/run sanity.
+See [matrix](../../../08_tracking/bug/tooling_phase3_matrix_2026_10_25.md).
+
+## FileFiber admission overflow (2026-10-28)
+
+The scheduler latches reservation overflow without consuming the pending head.
+FileFiber drains runnable and external IO/host work before reporting that error
+and terminalizing unfinished fibers. Queued fills and ready async results count
+as external work. Focused Phase 1 specs passed; native qualification is pending.
+See `doc/08_tracking/bug/fiber_scheduler_reservation_overflow_2026_10_28.md`.
+
+## Default build mode (2026-11-04)
+
+- Default build mode (user policy 2026-11-04): unset `SIMPLE_FILE_WORKERS` resolves to `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"` (`native_file_worker_v1.spl`): file-based src → obj, one process per file (parse → HIR → MIR → obj), then link. Supersedes the 2026-10-26 opt-in. Opt-outs are per invocation only: `SIMPLE_FILE_WORKERS=0` (two-pass shard route), `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` (whole-program route), `SIMPLE_MIR_SHARDING=0`. Never flip a shared default (config, script-global env, constant) to suit one build; pass the option at the call site with a why-comment. Gap: per-package library archives are not yet the default link input. Runtime proof pending a stage3 binary: `sh scripts/check/check-per-file-overlap-receipt.shs <receipt dir>`. See `doc/07_guide/tooling/bootstrap_options.md` § Default build mode.
+
+## SCV refresh is lockless (2026-11-04)
+
+Parallel `compile`/`native-build` coordinators on ONE project root no longer
+serialize on `build/scv/compile-events/refresh.lock` nor fail with
+`SCV-E-ADMISSION: compile-event-refresh-lock-unavailable` /
+`workaround writer lock unavailable`; parallel runs need no per-case root
+copies. Every published SCV object is immutable + content-addressed, the
+pointer swap is an atomic rename with a pre-swap compare, and reclamation is
+age-based. Do not reintroduce `file_lock` in `src/app/compiler_entrypoint/`,
+`src/lib/scv/compile_*.spl` or the workaround store: the guard
+`scripts/check/check-no-refresh-file-lock.shs` fails closed on it. See
+`doc/05_design/compiler/scv/lockless_refresh.md`.
+
+## Library unit plan v1 (2026-11-13, slice 1 of library unit build + link)
+
+- Design: `doc/05_design/compiler/incremental_build/library_unit_build_and_link.md`.
+  Module: `src/compiler/80.driver/driver_build/library_unit_plan_v1.spl`
+  (`library_unit_decl_parse_v1`, `library_unit_path_normalize_v1`,
+  `library_unit_plan_v1`, `library_unit_cache_key_v1`); spec
+  `test/01_unit/compiler/80.driver/library_unit_plan_v1_spec.spl`. Pure
+  functions, NOT wired into native-build; imported directly, not via `__init__`.
+- Planner is Kahn-by-levels with explicit cycle `Err`; `BuildGraph.topological_order`
+  (parallel.spl) tolerates cycles silently, so it is not reused for planning.
+- Measured manifest drift the planner fails closed on: `src/lib` → `../../compiler_rust`
+  (manifest lives at `src/compiler_rust`), `src/app` and `src/compiler` → `../../rust`
+  (nonexistent). Fix those lines before any flag turns the unit path on.
+- Trap: `bin/simple lint` on the seed reports `error[W-ANY-NOTRUN]` ("no check
+  worker? set SIMPLE_BINARY") unless `SIMPLE_BINARY=<binary>` is exported; two-arm
+  `Option` matches draw `non_exhaustive_match` (same as `project.spl`), left as is.
+- Slices 2-5 (2026-11-13, same lane, all unwired): `library_unit_iface_v1.spl`
+  (unit source digest; per-module digest = `native_interface_decls_v1` +
+  `native_interface_whole_digest_v1`, the body-free carrier — spec proves field
+  reorder / variant insert / `val` value / method default change it, bodies do
+  not; `iface.sdn` decode fails closed), `library_unit_archive_v1.spl`
+  (archive via `find_archive_portable` + `archive_command_build`; write-once
+  `receipt.sdn` re-verifies unit_key and records scope_key),
+  `library_unit_graph_v1.spl` (plan → `ParallelBuilder`; poison/buildable),
+  `library_unit_link_v1.spl` (flag predicate, link set keyed from CURRENT iface
+  digests, application-in-closure = Err). Manifest drift fixed in `5703f224213`.
+- Traps: `ParallelBuilder.build` puts only DIRECT failures in `errors`
+  (dependents are `Failed("Dependency failed")` in `stats.failed`); the seed JIT
+  demotes a module touching `ArchiveCommand.response_path` ("Cannot infer field
+  type") and runs it interpreted; the archive spec's real-archiver branch depends
+  on `find_archive_portable()` and asserts the Err text when none exists.
+- Blockers before wiring: `doc/08_tracking/bug/library_unit_build_slice5_prerequisites_2026-11-13.md`.
+- Review M1 (2026-11-13): `native_interface_decls_v1` now keeps the in-string
+  continuation lines of an open NON-fn declaration (`val HELP = """…"""`), since
+  private string constants are inlined by value into importers; fn/me bodies and
+  module docstrings stay out. Over-inclusive only for its other users
+  (native_module_witness_facts, native_source_interface_index). Unit archives
+  require llvm-ar (`library_unit_archiver_v1`; binutils `ar`/`lib.exe` refused)
+  and are built at `<archive>.tmp.<pid>` then renamed — write-once, lockless.

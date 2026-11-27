@@ -1,0 +1,44 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: concrete generic-class static factories leave no unsubstituted T
+
+Bug native_future_receiver_typeparam_2026_10_18 (`E-MIR-TYPE-TypeParam:
+unsubstituted generic type parameter 'T' reached MIR lowering`). Both the
+inferred form (`Fut.from_value(true)`) and the explicit-receiver form
+(`Fut<bool>.from_value(true)`) must lower with zero MIR errors in a function
+returning `Fut<bool>`; the inferred form must not require source authors to
+spell the type. The cross-module std Future owner (the real failing shape) is
+phase3: `bin/simple native-build` of test/fixtures/compiler/async_file_future_receiver/main.spl
+must exit 0 and print async-file-task-called then async-file-future-ready-pass.
+"""
+
+# @tag: unit, compiler, mir, generics
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn mir_error_count(src: text) -> i64:
+    val file = "testdata/aggregate_receiver_spec.spl"
+    val parsed = parse_full_frontend(src, file, "aggregate_receiver_spec", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    lowering.errors.len()
+
+val FUT = "enum FutState<T>:\n    Pending\n    Ready(T)\n\nclass Fut<T>:\n    state: FutState<T>\n\nimpl Fut<T>:\n    static fn from_value(v: T) -> Fut<T>:\n        Fut(state: FutState.Ready(v))\n    static fn pending() -> Fut<T>:\n        Fut(state: FutState.Pending)\n\n"
+
+describe "generic static receiver specialization":
+    it "lowers the inferred factory form with no unsubstituted T":
+        expect(mir_error_count(FUT + "fn guard() -> Fut<bool>:\n    Fut.from_value(true)\n")).to_equal(0)
+
+    it "lowers the explicit receiver form with no unsubstituted T":
+        expect(mir_error_count(FUT + "fn guard() -> Fut<bool>:\n    Fut<bool>.from_value(true)\n")).to_equal(0)
+
+    it "lowers a parameterless static factory in a concrete return context":
+        expect(mir_error_count(FUT + "fn waiting() -> Fut<bool>:\n    Fut<bool>.pending()\n")).to_equal(0)

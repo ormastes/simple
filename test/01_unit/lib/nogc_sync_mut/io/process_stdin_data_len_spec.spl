@@ -1,0 +1,45 @@
+"""
+Piped stdin text ABI: the runtime writes bytes `[offset, data_len)` of a text,
+so `data_len` must be the UTF-8 byte length. A code-point count made smux
+deliver only 8 of 13 bytes for ESC [ A, 0x02, "한", "😀", 0x07, "z" and leave
+`queued:5` forever.
+# @manual: primary
+"""
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.process_ops.{process_stdin_data_len}
+use std.common.text_bytes.{text_to_bytes}
+use os.apps.smux.input_queue.{pane_input_new, pane_input_enqueue, pane_input_remaining, pane_input_advance}
+
+fn repro_text() -> text:
+    "\x1b[A\x02한😀\x07z"
+
+describe "piped stdin byte length (repro)":
+    it "reports the UTF-8 byte length for multibyte input":
+        # @req REQ-SMUX-INPUT-001
+        step("Measure the sibling-lane repro text")
+        expect(text_to_bytes(repro_text()).len()).to_equal(13)
+        expect(process_stdin_data_len(repro_text())).to_equal(13)
+
+    it "leaves 5 bytes writable after an 8-byte prefix, so the queue drains":
+        # @req REQ-SMUX-INPUT-001
+        step("Window remaining after the observed 8-byte delivery")
+        expect(process_stdin_data_len(repro_text()) - 8).to_equal(5)
+
+describe "byte/char unit generalization":
+    it "matches byte length for 2-, 3- and 4-byte scalars and ASCII":
+        # @req REQ-SMUX-INPUT-001
+        step("Compare against text_to_bytes for each width")
+        for s in ["abc", "é", "한국", "😀😀", ""]:
+            expect(process_stdin_data_len(s)).to_equal(text_to_bytes(s).len())
+
+    it "keeps queue offsets in bytes across advance on multibyte input":
+        # @req REQ-SMUX-INPUT-001
+        step("Enqueue the repro text and advance by the observed 8 bytes")
+        val q = pane_input_enqueue(pane_input_new(), repro_text()).unwrap()
+        expect(pane_input_remaining(q).len()).to_equal(13)
+        val next = pane_input_advance(q, 8).unwrap()
+        expect(next.offset).to_equal(8)
+        expect(pane_input_remaining(next).len()).to_equal(5)
+        step("Advance the rest; the queue resets to empty")
+        val done = pane_input_advance(next, 5).unwrap()
+        expect(pane_input_remaining(done).len()).to_equal(0)

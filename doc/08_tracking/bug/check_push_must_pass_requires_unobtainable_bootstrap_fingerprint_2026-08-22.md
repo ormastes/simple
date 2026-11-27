@@ -4,7 +4,12 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN (blocks every push through the tracked pre-push dispatcher)
+**Status:** FIXED, 2026-11-08. The gate now permits an `unrecorded`, all-TODO
+ledger only when the published predecessor is also unpromoted; any genuine PASS
+still requires the matching fingerprint and evidence. The exact unpromoted-TODO
+and unpromoted-with-PASS fixtures are covered by `sh
+scripts/check/check-push-must-pass.shs --self-test`, which passes all 33
+ledger/budget/dispatcher/rebase/stale-merge fixtures.
 **Introduced by:** 09e879ff838 `fix(check): harden must-check ledger ownership`
 **Hook chain:** `scripts/hooks/pre-push` -> `pre-push-conflict-tree-guard.shs` -> `exec check-push-must-pass.shs`
 
@@ -53,3 +58,36 @@ and `check-no-unresolved-runtime-symbols.shs` (landed advisory while honestly
 RED, promoted once green). Keep the structural guards mandatory; they must
 not be skipped as collateral of an unobtainable gate.
 
+
+## Triage 2026-11-10 (p3-boot3 lane, assignment row 24)
+
+**Verdict: SUPERSEDED (FIXED verified live).**
+
+The in-doc "Status: FIXED, 2026-11-08" note is confirmed on this lane's
+base:
+
+- The gate now permits an `unrecorded`, all-TODO ledger only when the
+  published predecessor is also unpromoted
+  (`ALLOW_UNPROMOTED_LEDGER`, `ledger_is_unpromoted_at_rev` at
+  `scripts/check/check-push-must-pass.shs:254,316,2261`), and any genuine PASS
+  still requires the matching fingerprint (`:255`); an unpromoted ledger
+  carrying a PASS row fails closed (`:272,281`, self-test fixture
+  `unpromoted ledger with PASS accepted` guard at `:1868-1869`).
+- `sh scripts/check/check-push-must-pass.shs --self-test` — PASS, 33
+  ledger/budget/dispatcher/rebase/stale-merge fixtures checked (run on the
+  p3-boot3 worktree, rc=0, 2026-11-10).
+
+No change made in this lane.
+
+## Triage 2026-11-11 (P3 boot11 lane, work/p3-boot11-20261111)
+
+**Verdict: FIXED — verified live in this lane (evidence re-run, not cited).**
+`sh scripts/check/check-push-must-pass.shs --self-test` — PASS, "33
+ledger/budget/dispatcher/rebase/stale-merge fixtures checked", rc=0, run
+2026-11-11 on this worktree. The unpromoted-ledger permission
+(`ALLOW_UNPROMOTED_LEDGER` / `ledger_is_unpromoted_at_rev`,
+`scripts/check/check-push-must-pass.shs:254,316,2261`) and the
+fail-closed PASS-row guard (`:272,281`) are present at this base. The
+circular-gate shape this doc recorded (hook blocks the fixes needed to
+produce the evidence it demands) no longer holds for an all-TODO
+`unrecorded` ledger. No change made in this lane.

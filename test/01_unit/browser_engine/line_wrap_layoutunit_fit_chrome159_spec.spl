@@ -1,0 +1,98 @@
+"""
+## Purpose and audience
+Purpose: pin where a text run breaks into lines against Chrome 159. Chrome
+fits a word on a line when the run's exact width up to that word's end (in
+LayoutUnits, 1/64 px) is at most the available width; the collapsible space
+after the word hangs and is not counted. Simple summed whole-px advances, so
+a run measuring 117.39 px fit a 117 px box, and it counted the trailing space,
+so a word that fit only without its space moved to the next line.
+Audience: browser-engine inline layout maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless, `--hide-scrollbars
+--force-device-scale-factor=1 --window-size=400,450`, host default
+sans-serif). Bands i = 0..7 are 52 px tall; each holds a red block with
+line-height 16 px and the text `P P` (one phrase twice). The phrase's own
+width P (span getBoundingClientRect, white-space: pre) and the block heights:
+
+| band | size | box | phrase | P width | Chrome height | lines |
+|------|------|-----|--------|---------|---------------|-------|
+| 0 | 16px | 117 | The quick brown | 117.3906 | 48 | 3 |
+| 1 | 16px | 118 | The quick brown | 117.3906 | 32 | 2 |
+| 2 | 16px | 224 | Simple renders the web catalog | 224.1250 | 48 | 3 |
+| 3 | 16px | 225 | Simple renders the web catalog | 224.1250 | 32 | 2 |
+| 4 | 10.6667px | 95 | The quick brown fox | 95.3750 | 48 | 3 |
+| 5 | 10.6667px | 96 | The quick brown fox | 95.3750 | 32 | 2 |
+| 6 | 13.3333px | 167 | Sphinx of black quartz judge | 167.4531 | 48 | 3 |
+| 7 | 13.3333px | 168 | Sphinx of black quartz judge | 167.4531 | 32 | 2 |
+
+Even bands: P is a fraction wider than the box, so Chrome never puts a whole
+phrase on one line (3 lines); Simple's whole-px sum rounded P down to the box
+and fit it (2 lines). Odd bands: P fits only without the space after it, which
+hangs, so Chrome lays out one phrase per line (2 lines); Simple counted the
+space and moved the phrase's last word down (3 lines).
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-LINE-WRAP-FIT-001 -- a word fits a line when its exact LayoutUnit run width, without the hanging trailing space, is at most the available width.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_text.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_resolved_engine2d_backend}
+
+val LW_W: i32 = 400
+val LW_H: i32 = 450
+val LW_PAGE: text = "<!DOCTYPE html><html><body style=\"margin:0;background:#fff;color:#000;font:16px sans-serif\"><div style=\"height:52px;overflow:hidden;font-size:16px\"><div style=\"width:117px;line-height:16px;background:#f00;color:transparent\">The quick brown The quick brown</div></div><div style=\"height:52px;overflow:hidden;font-size:16px\"><div style=\"width:118px;line-height:16px;background:#f00;color:transparent\">The quick brown The quick brown</div></div><div style=\"height:52px;overflow:hidden;font-size:16px\"><div style=\"width:224px;line-height:16px;background:#f00;color:transparent\">Simple renders the web catalog Simple renders the web catalog</div></div><div style=\"height:52px;overflow:hidden;font-size:16px\"><div style=\"width:225px;line-height:16px;background:#f00;color:transparent\">Simple renders the web catalog Simple renders the web catalog</div></div><div style=\"height:52px;overflow:hidden;font-size:10.6667px\"><div style=\"width:95px;line-height:16px;background:#f00;color:transparent\">The quick brown fox The quick brown fox</div></div><div style=\"height:52px;overflow:hidden;font-size:10.6667px\"><div style=\"width:96px;line-height:16px;background:#f00;color:transparent\">The quick brown fox The quick brown fox</div></div><div style=\"height:52px;overflow:hidden;font-size:13.3333px\"><div style=\"width:167px;line-height:16px;background:#f00;color:transparent\">Sphinx of black quartz judge Sphinx of black quartz judge</div></div><div style=\"height:52px;overflow:hidden;font-size:13.3333px\"><div style=\"width:168px;line-height:16px;background:#f00;color:transparent\">Sphinx of black quartz judge Sphinx of black quartz judge</div></div></body></html>"
+# Chrome 159 line counts per band.
+val LW_CHROME: [i32] = [3, 2, 3, 2, 3, 2, 3, 2]
+
+fn lw_lines(px: [u32], band: i32) -> i32:
+    var red = 0
+    var y = band * 52
+    while y < band * 52 + 52:
+        val p = px[y * LW_W + 2]
+        if ((p >> 16) & 255u32) > 200u32 and ((p >> 8) & 255u32) < 60u32:
+            red = red + 1
+        y = y + 1
+    red / 16
+
+fn lw_mismatches(px: [u32]) -> i32:
+    if px.len() != LW_W * LW_H:
+        return 99
+    var bad = 0
+    var b = 0
+    while b < LW_CHROME.len():
+        val got = lw_lines(px, b)
+        if got != LW_CHROME[b]:
+            print "band {b}: {got} lines, Chrome {LW_CHROME[b]}"
+            bad = bad + 1
+        b = b + 1
+    bad
+
+describe "line wrap fit against the LayoutUnit run width (Chrome 159)":
+    it "AC-1: breaks where Chrome breaks at 16 px and fractional sizes (cpu_simd)":
+        step("a phrase a fraction wider than the box wraps; a phrase fitting without its trailing space stays")
+        expect(lw_mismatches(simple_web_render_html_to_pixels_with_resolved_engine2d_backend(LW_PAGE, LW_W, LW_H, "cpu_simd"))).to_equal(0)
+
+# Shrink-to-fit boxes (float, inline-block) holding one run: Chrome sizes them
+# at the run's LayoutUnit width (117.3906, 117.3906, 167.4531, 95.3750 px) and
+# lays the run on ONE line (height 16 each). Simple sizes them at the rounded
+# width, so the exact fit must not wrap a run inside its own box.
+val LW_STF_PAGE: text = "<!DOCTYPE html><html><body style=\"margin:0;background:#fff;color:#000;font:16px sans-serif\"><div style=\"height:52px;overflow:hidden\"><div style=\"float:left;line-height:16px;background:#f00;color:transparent\">The quick brown</div></div><div style=\"height:52px;overflow:hidden\"><div style=\"display:inline-block;line-height:16px;background:#f00;color:transparent\">The quick brown</div></div><div style=\"height:52px;overflow:hidden;font-size:13.3333px\"><div style=\"float:left;line-height:16px;background:#f00;color:transparent\">Sphinx of black quartz judge</div></div><div style=\"height:52px;overflow:hidden;font-size:10.6667px\"><div style=\"display:inline-block;line-height:16px;background:#f00;color:transparent\">The quick brown fox</div></div></body></html>"
+
+fn lw_stf_mismatches(px: [u32]) -> i32:
+    if px.len() != LW_W * LW_H:
+        return 99
+    var bad = 0
+    var b = 0
+    while b < 4:
+        val got = lw_lines(px, b)
+        if got != 1:
+            print "shrink-to-fit band {b}: {got} lines, Chrome 1"
+            bad = bad + 1
+        b = b + 1
+    bad
+
+describe "line wrap fit in a shrink-to-fit box (Chrome 159)":
+    it "AC-2: a run in a float / inline-block sized from it stays on one line":
+        step("16 px, 13.3333 px and 10.6667 px runs whose exact width exceeds the rounded box")
+        expect(lw_stf_mismatches(simple_web_render_html_to_pixels_with_resolved_engine2d_backend(LW_STF_PAGE, LW_W, LW_H, "cpu_simd"))).to_equal(0)

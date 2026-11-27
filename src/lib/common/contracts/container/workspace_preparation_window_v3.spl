@@ -1,0 +1,34 @@
+# Deadline DATA arithmetic, used only with original clocks/context retained by
+# the actual source owner. Calling this function supplies no admission proof.
+pub fn container_workspace_preparation_deadline_v3(original_monotonic_ns: i64,
+        preparation_budget_ms: i64, now_monotonic_ns: i64,
+        not_after_unix_ms: i64, now_unix_ms: i64) -> Result<i64, text>:
+    if original_monotonic_ns <= 0 or preparation_budget_ms <= 0 or preparation_budget_ms > 86400000:
+        return Err("linux-workspace-preparation-budget")
+    if original_monotonic_ns > 9223372036854775807 - preparation_budget_ms * 1000000:
+        return Err("linux-workspace-preparation-budget")
+    val deadline = original_monotonic_ns + preparation_budget_ms * 1000000
+    if now_monotonic_ns < original_monotonic_ns or now_monotonic_ns >= deadline or now_unix_ms <= 0 or now_unix_ms >= not_after_unix_ms:
+        return Err("linux-workspace-original-preparation-expired")
+    Ok(deadline)
+
+# Bracket an actual wall sample with the original owner's monotonic clock.
+# Floor remaining milliseconds and reserve another millisecond for wall-clock
+# quantization. This value only RESTRICTS an existing admitted launch window.
+pub fn container_workspace_launch_expiry_v3(existing_expiry_unix_ms: i64,
+        original_deadline_monotonic_ns: i64, signed_not_after_unix_ms: i64,
+        before_monotonic_ns: i64, sampled_unix_ms: i64,
+        after_monotonic_ns: i64) -> Result<i64, text>:
+    if (before_monotonic_ns <= 0 or after_monotonic_ns < before_monotonic_ns or
+            after_monotonic_ns >= original_deadline_monotonic_ns or sampled_unix_ms <= 0 or
+            sampled_unix_ms >= signed_not_after_unix_ms or sampled_unix_ms >= existing_expiry_unix_ms):
+        return Err("linux-workspace-original-launch-window-expired")
+    val remaining_ms = (original_deadline_monotonic_ns - after_monotonic_ns) / 1000000
+    if remaining_ms <= 1 or sampled_unix_ms > 9223372036854775807 - remaining_ms:
+        return Err("linux-workspace-original-launch-window-expired")
+    val monotonic_ceiling = sampled_unix_ms + remaining_ms - 1
+    var expiry = existing_expiry_unix_ms
+    if signed_not_after_unix_ms < expiry: expiry = signed_not_after_unix_ms
+    if monotonic_ceiling < expiry: expiry = monotonic_ceiling
+    if expiry <= sampled_unix_ms: return Err("linux-workspace-original-launch-window-expired")
+    Ok(expiry)

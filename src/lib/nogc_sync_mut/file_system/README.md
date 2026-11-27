@@ -77,7 +77,7 @@ Unix-style permission management.
 - `file_make_readonly`, `file_make_writable`, `file_make_executable`
 
 ### watch.spl
-File change detection (mock implementation).
+File change detection by polling the real mtime (second granularity).
 
 **Exports:**
 - `watch_create` - Create watcher for path
@@ -89,7 +89,7 @@ Miscellaneous utilities: temp files, glob, tree ops, symlinks, disk usage.
 
 **Exports:**
 - **Temp files:** `temp_file_create`, `temp_file_create_with_name`, `temp_dir_create`, `temp_file_cleanup`
-- **Glob:** `glob_match`, `glob_find`, `glob_find_files`, `glob_filter`
+- **Glob:** `glob_match(path, pattern)` (re-export of `std.glob`), `glob_find_under(pattern, root)` (was `glob_find`, renamed to avoid colliding with `std.fs.glob_find(pattern)`), `glob_find_files`, `glob_filter`
 - **Tree:** `tree_create`, `tree_print`
 - **Symlinks:** `symlink_create`, `symlink_read`, `symlink_resolve`
 - **Disk usage:** `disk_usage`, `disk_usage_human`
@@ -126,7 +126,7 @@ val files = dir_walk("/home/user")
 
 ## Design Principles
 
-1. **Pure Simple** - No external dependencies, mock implementations
+1. **Real host I/O** - every function re-exports the real owner (io_runtime, io.file_ops, sffi) or wraps a runtime primitive; no mocks (by-name binding lets a mock hijack real callers)
 2. **Option/nil pattern** - No try/catch, all errors return nil
 3. **Focused modules** - Each module 200-400 lines with clear responsibility
 4. **Backward compatible** - Facade exports all original APIs
@@ -134,9 +134,13 @@ val files = dir_walk("/home/user")
 
 ## Implementation Notes
 
-- All file I/O operations are **mock implementations** for demonstration
-- Real implementations would use SFFI to call platform-specific APIs
-- Permission bits use Unix octal format (755, 644, etc.)
+- All file I/O hits the real filesystem. Where the runtime has no primitive
+  (`file_created_time`, `file_accessed_time`, `symlink_create`, `symlink_read`)
+  the function fails closed (nil/false).
+- Recursive operations (`dir_walk_dirs`, `dir_copy`, `dir_delete_all`,
+  `dir_move`) never follow symlinks; `dir_move` refuses a destination equal to
+  or inside the source.
+- Permission bits are octal literals (0o755, 0o644, ...)
 - Path operations assume forward-slash separators
 - Glob patterns support: `*` (any chars), `?` (one char), `[abc]` (character class)
 

@@ -26,6 +26,7 @@ use std.gc_async_mut.gpu.engine2d.backend_metal.{MetalBackend}
 use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.nogc_sync_mut.io.time_ops.{time_now_micros}
 use std.env.variables.{env_get}
+use std.nogc_sync_mut.ui.compare_view_host.{compare_view_inspect}
 use os.compositor.host_compositor_entry.{HostCompositor, HostedWindow, host_wm_force_direct_chrome}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use common.window_protocol.geometry.{Size}
@@ -354,7 +355,7 @@ fn metal_image(w: i32, h: i32) -> Engine2DReadback:
 # Parity comparison (honest: requires device_readback source on the Metal side)
 # ---------------------------------------------------------------------------
 
-fn compare_exact(name: text, cpu_rb: Engine2DReadback, metal_rb: Engine2DReadback):
+fn compare_exact(name: text, w: i32, h: i32, cpu_rb: Engine2DReadback, metal_rb: Engine2DReadback):
     val cpu_px = cpu_rb.pixels
     val metal_px = metal_rb.pixels
     print "{name}: cpu_source={cpu_rb.source} metal_source={metal_rb.source} cpu_checksum={cpu_rb.checksum} metal_checksum={metal_rb.checksum}"
@@ -366,6 +367,7 @@ fn compare_exact(name: text, cpu_rb: Engine2DReadback, metal_rb: Engine2DReadbac
         _failures = _failures + 1
         print "{name}: DIVERGE reason=length cpu={cpu_px.len()} metal={metal_px.len()}"
         return
+    compare_view_inspect("engine2d gpu offload " + name, "cpu software", cpu_px, w, h, "metal " + metal_rb.source, metal_px, w, h)
     var mism = 0
     var first = -1
     var i = 0
@@ -603,7 +605,7 @@ fn main() -> i64:
         val metal_prim = metal_primitives(pw, ph)
         val t2 = time_now_micros()
         print "stage-time metal_primitives_us={t2 - t1}"
-        compare_exact("primitives", cpu_prim, metal_prim)
+        compare_exact("primitives", pw, ph, cpu_prim, metal_prim)
 
         val t3 = time_now_micros()
         val cpu_txt = cpu_text(pw, ph)
@@ -612,18 +614,18 @@ fn main() -> i64:
         val metal_txt = metal_text(pw, ph)
         val t5 = time_now_micros()
         print "stage-time metal_text_us={t5 - t4}"
-        compare_exact("text", cpu_txt, metal_txt)
+        compare_exact("text", pw, ph, cpu_txt, metal_txt)
 
         print "PROVENANCE primitives backend=metal source={metal_prim.source}"
         print "PROVENANCE text backend=metal source={metal_txt.source}"
 
     if stage == "all" or stage == "indexed_fill":
         print "=== GPU offload evidence: indexed_fill (GPU-dict palette LUT) parity ==="
-        # Small surface where a full pixel-exact compare is cheap; indexed_fill
+        # Parity surface where a full pixel-exact compare is performed; indexed_fill
         # covers the whole surface so every pixel is a table lookup (no reliance
         # on the initial framebuffer contents).
-        val iw = 64
-        val ih = 48
+        val iw = 256
+        val ih = 256
         val ti0 = time_now_micros()
         val cpu_if = cpu_indexed_fill(iw, ih)
         val ti1 = time_now_micros()
@@ -631,13 +633,13 @@ fn main() -> i64:
         val metal_if = metal_indexed_fill(iw, ih)
         val ti2 = time_now_micros()
         print "stage-time metal_indexed_fill_us={ti2 - ti1}"
-        compare_exact("indexed_fill", cpu_if, metal_if)
+        compare_exact("indexed_fill", iw, ih, cpu_if, metal_if)
         print "PROVENANCE indexed_fill backend=metal source={metal_if.source}"
 
     if stage == "all" or stage == "gradient_rect":
         print "=== GPU offload evidence: draw_gradient_rect (W3 dual-algorithm) parity ==="
-        val gw = 64
-        val gh = 48
+        val gw = 256
+        val gh = 256
         val tg0 = time_now_micros()
         val cpu_gr = cpu_gradient_rect(gw, gh)
         val tg1 = time_now_micros()
@@ -645,13 +647,13 @@ fn main() -> i64:
         val metal_gr = metal_gradient_rect(gw, gh)
         val tg2 = time_now_micros()
         print "stage-time metal_gradient_rect_us={tg2 - tg1}"
-        compare_exact("gradient_rect", cpu_gr, metal_gr)
+        compare_exact("gradient_rect", gw, gh, cpu_gr, metal_gr)
         print "PROVENANCE gradient_rect backend=metal source={metal_gr.source}"
 
     if stage == "all" or stage == "rounded_rect":
         print "=== GPU offload evidence: draw_rounded_rect (fill dual-algorithm) parity ==="
-        val rw = 64
-        val rh = 48
+        val rw = 256
+        val rh = 256
         val tr0 = time_now_micros()
         val cpu_rr = cpu_rounded_rect(rw, rh)
         val tr1 = time_now_micros()
@@ -659,13 +661,13 @@ fn main() -> i64:
         val metal_rr = metal_rounded_rect(rw, rh)
         val tr2 = time_now_micros()
         print "stage-time metal_rounded_rect_us={tr2 - tr1}"
-        compare_exact("rounded_rect", cpu_rr, metal_rr)
+        compare_exact("rounded_rect", rw, rh, cpu_rr, metal_rr)
         print "PROVENANCE rounded_rect backend=metal source={metal_rr.source}"
 
     if stage == "all" or stage == "image":
         print "=== GPU offload evidence: draw_image (blit dual-algorithm) parity ==="
-        val iw2 = 64
-        val ih2 = 48
+        val iw2 = 256
+        val ih2 = 256
         val tim0 = time_now_micros()
         val cpu_im = cpu_image(iw2, ih2)
         val tim1 = time_now_micros()
@@ -673,13 +675,13 @@ fn main() -> i64:
         val metal_im = metal_image(iw2, ih2)
         val tim2 = time_now_micros()
         print "stage-time metal_image_us={tim2 - tim1}"
-        compare_exact("image", cpu_im, metal_im)
+        compare_exact("image", iw2, ih2, cpu_im, metal_im)
         print "PROVENANCE image backend=metal source={metal_im.source}"
 
     if stage == "all" or stage == "text_edge":
         print "=== GPU offload evidence: draw_text edge cases (GPU-dict glyph atlas) parity ==="
-        val ew = 64
-        val eh = 48
+        val ew = 256
+        val eh = 256
         val te0 = time_now_micros()
         val cpu_te = cpu_text_edge(ew, eh)
         val te1 = time_now_micros()
@@ -687,7 +689,7 @@ fn main() -> i64:
         val metal_te = metal_text_edge(ew, eh)
         val te2 = time_now_micros()
         print "stage-time metal_text_edge_us={te2 - te1}"
-        compare_exact("text_edge", cpu_te, metal_te)
+        compare_exact("text_edge", ew, eh, cpu_te, metal_te)
         print "PROVENANCE text_edge backend=metal source={metal_te.source}"
 
     if stage == "all" or stage == "text_heavy":

@@ -1,8 +1,33 @@
 # Bug: SPipe Docgen Exits Successfully Without Producing Manual
-## Open 2026-09-16 — needs owner triage
+## Fixed 2026-11-25 — output-existence postcondition added to the docgen CLI
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+
+## 2026-11-25 resolution
+
+- **fix:** `src/app/spipe_docgen/spipe_docgen/main.spl` now treats a
+  `generate_feature_doc_semantic_v1` `Ok(path)` whose file is missing as an
+  error: it prints `docgen reported success but produced no manual: <path>`,
+  marks the run failed, and the CLI exits nonzero (`had_error` -> return 1).
+  Write failures already propagated (`native_fs_write_string` returning false
+  becomes `Err` -> `had_error` in `publish_semantic_docgen_v1`); this closes
+  the remaining silent-success-with-no-artifact hole at the CLI, which is the
+  postcondition this doc's reproduction notes asked for.
+- **contributing cause already fixed elsewhere:** the original exit-0-no-output
+  run went through the Rust-seed `bin/simple spipe-docgen` subcommand route,
+  which dropped argv; that is tracked and worked around in
+  `doc/08_tracking/bug/spipe_docgen_subcommand_argv_drop_2026-08-16.md`
+  (`args_from_proc_cmdline` fallback in `main()`).
+- **verification limit:** runtime verification is blocked on this host —
+  release/1.0.0 HEAD is source/binary inconsistent (the pinned seed rejects
+  `@representation_boundary` in `src/lib`, so no docgen invocation can run at
+  HEAD). Verified by code inspection: the postcondition sits on the only `Ok`
+  path between generation and the summary/exit-code computation, and both
+  `spipe_err` and `native_fs_exists` are already in scope in that function.
+- The mirrored manual
+  `doc/06_spec/03_system/app/simple_wm/feature/wm_glass_theme_host_simpleos_spec.md`
+  now exists in-tree.
 
 ## Observed
 

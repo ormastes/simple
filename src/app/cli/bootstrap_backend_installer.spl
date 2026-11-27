@@ -1,19 +1,55 @@
-# Canonical full bootstrap composition. The LLVM producer projects its own
-# implementation at this exact logical module; bootstrap_main keeps its ABI.
+# Canonical bootstrap composition. Supports both `full` (default when
+# `SIMPLE_BOOTSTRAP_STAGE3 != "1"`) and `host-only` (`SIMPLE_BACKEND_COMPOSITION=host-only`
+# or `SIMPLE_BOOTSTRAP_STAGE3=1`) without changing `bootstrap_main`'s ABI.
 use compiler.driver.bootstrap_k1_selected.{
     install_selected_k1_backend_table_v1, selected_k1_backend_policy_v1}
+use compiler.backend.static_backend_registry.{
+    active_static_backend_table_v1, full_static_backend_table_installed_v1,
+    install_host_only_static_backend_composition_v1,
+    installed_backend_composition_mode_v1,
+    selected_backend_composition_mode_v1, validate_k1_static_backend_table_v1}
+use compiler.common.cuda_backend_policy.{install_cuda_backend_mode_v1}
+use app.cli.bootstrap_essential_backend_request.{
+    bootstrap_essential_backend_choices_v1,
+    bootstrap_essential_backend_request_error_v1}
 use plugins.backend_registry.full_static_backend_registry.{
     install_full_static_backends_for_k1_policy_v1}
 
+fn _bootstrap_host_only_active_v1() -> bool:
+    if full_static_backend_table_installed_v1():
+        return false
+    installed_backend_composition_mode_v1() == "host-only" or
+        selected_backend_composition_mode_v1() == "host-only"
+
+# reason: boolean installation verdict is the canonical bootstrap_backend_installer ABI shared with bootstrap_main
+@allow(primitive_api)
 pub fn bootstrap_install_worker_backends_v1() -> bool:
+    val policy = selected_k1_backend_policy_v1()
     if not install_selected_k1_backend_table_v1(): return false
-    install_full_static_backends_for_k1_policy_v1(selected_k1_backend_policy_v1())
+    val mode = selected_backend_composition_mode_v1()
+    if mode == "host-only":
+        if not install_cuda_backend_mode_v1("disabled"): return false
+        if not install_host_only_static_backend_composition_v1(policy): return false
+        return validate_k1_static_backend_table_v1(policy, active_static_backend_table_v1())
+    if mode != "full":
+        return false
+    install_full_static_backends_for_k1_policy_v1(policy)
 
 pub fn bootstrap_backend_request_error_v1(backend: text, plugin_path: text) -> text:
-    # Full composition adds no restriction. Existing driver/plugin validation
-    # remains authoritative; this does not claim any request has compiled.
+    # Full composition adds no restriction. Host-only enforces the K1 + explicit
+    # dynamic plugin request gate before compilation starts.
+    if _bootstrap_host_only_active_v1():
+        return bootstrap_essential_backend_request_error_v1(
+            selected_k1_backend_policy_v1(), backend, plugin_path,
+            full_static_backend_table_installed_v1())
     ""
 
-pub fn bootstrap_backend_choices_v1() -> text: "llvm|cranelift"
+pub fn bootstrap_backend_choices_v1() -> text:
+    if _bootstrap_host_only_active_v1():
+        return bootstrap_essential_backend_choices_v1(selected_k1_backend_policy_v1())
+    "llvm|cranelift"
 
-pub fn bootstrap_backend_capability_label_v1() -> text: ""
+pub fn bootstrap_backend_capability_label_v1() -> text:
+    if _bootstrap_host_only_active_v1():
+        return " (host-only composition)"
+    ""

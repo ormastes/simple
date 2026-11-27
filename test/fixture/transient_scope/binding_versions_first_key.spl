@@ -1,0 +1,155 @@
+# Repro: Scope.binding_versions_v1 keeps the FIRST key text object; after
+# unbind + rebind with an equal text, that object is reachable only from the
+# version dict, which the snapshot/table promotions do not reach, so ending the
+# transient scope frees it (native only; rt_transient_* are inert in the
+# interpreter). Expected (seed): alphaC_fn_0=3 / betaC_fn_0=3. Native before
+# the workaround: a freed key with value 0. Bug record:
+# doc/08_tracking/bug/s3_binding_versions_keys_freed_transient_scope_2026-11-19.md
+# The workaround shape (promote each scope's binding_versions_v1 dict as a
+# root before scope end) makes native output match the seed.
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+extern fn rt_dict_contains<K>(dict: i64, key: K) -> bool
+
+struct ScopeId:
+    id: i64
+
+enum ScopeKind:
+    Module
+    Function
+
+struct Scope:
+    id: ScopeId
+    parent: ScopeId?
+    kind: ScopeKind
+    symbols: Dict<text, i64>
+    binding_versions_v1: Dict<text, i64> = {}
+
+class Table:
+    symbols: Dict<i64, text>
+    scopes: Dict<i64, Scope>
+    root_scope_symbols: Dict<text, i64>
+    current_scope: ScopeId
+    next_symbol_id: i64
+    next_scope_id: i64
+
+    static fn new() -> Table:
+        val root: Dict<text, i64> = {}
+        var t = Table(symbols: {}, scopes: {}, root_scope_symbols: root, current_scope: ScopeId(id: 0), next_symbol_id: 0, next_scope_id: 1)
+        t.scopes[0] = Scope(id: ScopeId(id: 0), parent: nil, kind: ScopeKind.Module, symbols: root, binding_versions_v1: {})
+        t
+
+    me reset_module():
+        self.root_scope_symbols = {}
+        self.symbols = {}
+        self.scopes = {}
+        self.current_scope = ScopeId(id: 0)
+        self.next_symbol_id = 0
+        self.next_scope_id = 1
+        self.scopes[0] = Scope(
+            id: ScopeId(id: 0), parent: nil,
+            kind: ScopeKind.Module, symbols: self.root_scope_symbols,
+            binding_versions_v1: {})
+
+    fn snapshot() -> Table:
+        Table(symbols: self.symbols, scopes: self.scopes, root_scope_symbols: self.root_scope_symbols, current_scope: self.current_scope, next_symbol_id: self.next_symbol_id, next_scope_id: self.next_scope_id)
+
+    fn binding_version_v1(scope_id: i64, name: text) -> i64:
+        if scope_id < 0 or scope_id >= self.next_scope_id: return -1
+        val scope: Scope = self.scopes[scope_id]
+        if not rt_dict_contains(scope.binding_versions_v1, name): return 0
+        val version: i64 = scope.binding_versions_v1[name]
+        version
+
+    me advance_binding_version_v1(scope_id: i64, name: text):
+        val previous = self.binding_version_v1(scope_id, name)
+        if previous < 0 or previous == 9223372036854775807:
+            panic("lexical binding version is invalid or exhausted")
+        self.scopes[scope_id].binding_versions_v1[name] = previous + 1
+
+    me define(name: text) -> i64:
+        val raw_id = self.next_symbol_id
+        self.next_symbol_id = raw_id + 1
+        self.symbols[raw_id] = name
+        if self.scopes[self.current_scope.id].symbols.get(name) == nil:
+            self.advance_binding_version_v1(self.current_scope.id, name)
+            self.scopes[self.current_scope.id].symbols[name] = raw_id
+        raw_id
+
+    me unbind(name: text):
+        if self.scopes[self.current_scope.id].symbols.get(name) != nil:
+            self.advance_binding_version_v1(self.current_scope.id, name)
+            self.scopes[self.current_scope.id].symbols.remove(name)
+
+    me rebind(name: text, id: i64):
+        self.advance_binding_version_v1(self.current_scope.id, name)
+        self.scopes[self.current_scope.id].symbols[name] = id
+
+fn fresh_name(seed: text, i: i64) -> text:
+    seed + "_fn_{i}"
+
+fn churn() -> i64:
+    var c: [text] = []
+    var i = 0
+    while i < 40000:
+        c = c.push("[churn-filler-text-xxxxxxxxxxxxxxxxxxxx] item={i}")
+        i = i + 1
+    c.len()
+
+fn dump(label: text, d: Dict<text, i64>):
+    var ks = d.keys()
+    var out = ""
+    for k in ks:
+        out = out + "[" + k + "=" + "{d[k]}" + "]"
+    print "{label} n={d.len()} {out}"
+
+class ModRoot:
+    names: [text]
+
+fn run_module(t: Table, seed: text) -> Table:
+    t.reset_module()
+    if not rt_transient_array_scope_begin():
+        print "FAIL begin"
+    var root = ModRoot(names: [])
+    # A: reachable from the module root
+    val a = fresh_name(seed + "A", 0)
+    root.names = root.names.push(a)
+    val _ia = t.define(a)
+    # B: not reachable from the module root
+    val _ib = t.define(fresh_name(seed + "B", 0))
+    # C: first bound with o1 (unreached), unbound, rebound with an equal o2 (reached)
+    val o1 = fresh_name(seed + "C", 0)
+    val ic = t.define(o1)
+    t.unbind(o1)
+    val o2 = fresh_name(seed + "C", 0)
+    root.names = root.names.push(o2)
+    t.rebind(o2, ic)
+    val snap = t.snapshot()
+    if not rt_transient_array_scope_pause():
+        print "FAIL pause"
+    val p0 = rt_transient_heap_promote(root)
+    val p1 = rt_transient_heap_promote(snap)
+    val p2 = rt_transient_heap_promote(t.symbols)
+    val p3 = rt_transient_heap_promote(t.scopes)
+    val p4 = rt_transient_heap_promote(t.root_scope_symbols)
+    if not rt_transient_array_scope_end():
+        print "FAIL end"
+    print "promote {p0} {p1} {p2} {p3} {p4}"
+    snap
+
+fn main() -> i64:
+    var t = Table.new()
+    var snaps: [Table] = []
+    snaps = snaps.push(run_module(t, "alpha"))
+    snaps = snaps.push(run_module(t, "beta"))
+    print "churn={churn()}"
+    var m = 0
+    while m < snaps.len():
+        val s = snaps[m]
+        dump("m{m} symbols", s.scopes[0].symbols)
+        dump("m{m} versions", s.scopes[0].binding_versions_v1)
+        m = m + 1
+    0

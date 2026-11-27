@@ -4,7 +4,10 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (2026-09-13)
+- Status: FIXED (verified 2026-11-11, lane rt3) — the duplicate
+  `declare void @rt_eprintln(ptr)` was dropped from
+  `generate_wasm_runtime_declarations` by `9566e7565aa5` (2026-11-06); the
+  regression spec passes 4/4 on the fresh seed. See the 2026-11-11 addendum.
 - Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed, `sha256sum` first 8:
   see `readlink -f bin/simple` in this worktree — shared with `/home/yoon/dev/simple`)
 - Found while implementing todo 213 (`test/integration/compiler/llvm_backend_e2e_spec.spl:189`,
@@ -58,3 +61,26 @@ otherwise-empty MIR module (zero functions), so it reproduces unconditionally �
 emitting them into the IR text, or find where `rt_eprintln` is declared twice
 in the template list.
 
+
+---
+
+## 2026-11-11 — Lane rt3 triage verdict: FIXED
+
+**Fixing change:** `9566e7565aa5` (2026-11-06, "fix(llvm): drop duplicate
+rt_eprintln wasm runtime declaration") removed the second
+`declare void @rt_eprintln(ptr)` from
+`generate_wasm_runtime_declarations()` in
+`src/compiler/70.backend/backend/llvm_backend_tools.spl`, and added the
+regression spec `test/01_unit/compiler/backend/llvm_runtime_decls_unique_spec.spl`
+which scans every declaration generator in both backend files and asserts each
+`@rt_*` symbol is declared at most once per generator. The fix is an ancestor
+of the current base.
+
+**History:** this row was briefly closed by the 2026-11-09 wave4 stale-close
+(`dc4733c1942b`), then reverted to `fix-implemented-verification-pending` by
+`31449a6b6afc`; the verification below is the pending confirmation.
+
+**Verification (seed-smoke, seed build 46fe8f6b6def):**
+- `test/01_unit/compiler/backend/llvm_runtime_decls_unique_spec.spl` 4/4 PASS
+  (both `llvm_backend.spl` and `llvm_backend_tools.spl` declare each runtime
+  symbol at most once per generator).

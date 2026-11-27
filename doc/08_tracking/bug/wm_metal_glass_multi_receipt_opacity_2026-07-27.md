@@ -1,5 +1,5 @@
 # WM Metal Glass Multi-Receipt and Inactive Opacity
-## Open 2026-09-16 — needs owner triage
+## Triaged 2026-11-25 — fix-implemented-verification-pending; native Metal run needs an admitted macOS producer (not actionable on this host)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -247,3 +247,159 @@ providers, before the strict native recipe above is eligible. Retain provider
 hashes and actual dynamic-loader resolution. Stage 2 admission, a raw Stage 3
 binary, an old trusted manifest, or portable unit tests alone cannot satisfy
 this route. The Metal lane does not author or mint its own producer receipts.
+
+## 2026-11-04 native macOS run (lane 4)
+
+Tree release/1.0.0 `1ebaf7d1e1f`, seed `/Users/ormastes/.local/share/simple-seeds/release100-7a0e6fe516f-20261031/simple`, `--mode=interpreter`:
+- backend_metal_device_identity 2/2, backend_readback_handle_contract 1/1 PASS.
+- draw_ir_adv 68/70: red "submits a GPU-selected Draw IR batch through the
+  runtime host GPU queue" (expected false to equal true) and "stages retained
+  Vulkan composition damage for a partial host refresh" (expected 4278190080
+  to equal 4294901760).
+- window_scene_draw_ir 4/12 and host_compositor_entry 42/61: UNRUNNABLE on
+  release/1.0.0 — see
+  `spec_helpers_dropped_by_release_transplant_88aac2ffe28_2026-11-04.md`.
+Native gate (`build-macos-gpu-2d-live-native.shs --build metal`) needs the
+admitted full-CLI (Lane 1). Status unchanged: source fixed / runtime unverified.
+
+## 2026-11-04 — acceptance specs reconciled on release/1.0.0 (macOS M4, seed interpreter)
+
+Status: **fix-implemented / verification-pending** (native Metal not run).
+
+Binary: `~/.local/share/simple-seeds/release100-7a0e6fe516f-20261031/simple`
+(Rust seed, interpreter). No admitted self-hosted macOS Stage 2 exists
+(`/private/tmp/lanes/stage_artifacts.txt`: lane1 s2d built, sanity refused),
+so the Metal native path could not be exercised; the receipt/opacity
+validation below is covered only through the interpreter.
+
+Changes:
+- `window_scene_draw_ir_spec`: restored the helpers, imports and in-body
+  locals dropped by transplant `88aac2ffe28`/`bb3f6ab8ab2` (from
+  `88aac2ffe28~1`), then reconciled to current source: `maximize-state`
+  text command (added `31d21e30f82`, 2026-08-25) shifts window indices and
+  counts (9->10 legacy, 8->9 themed, plan 34->36); focused-window titlebar is
+  `title_focused`; resolved-font title style index 2 is `font-size` and the
+  advance list moved to `advance_widths`; engine bitmap fallback is now gated
+  by `has_ttf`. **12/12 pass** (was 4/12).
+- `host_compositor_entry_spec`: restored from `88aac2ffe28~1` (helpers,
+  imports, receipt fixtures) and reconciled: provenance evidence now reads
+  `last_readback_source/last_backend_handle/last_readback_checksum`
+  (raw-string contract), requested attempt is
+  `render_draw_ir_composition_from_retained_damage` (`fd085136a6d`),
+  recompose fixture uses a local-web owner (owner port 0; a positive port is
+  renderer-owned since `553ea5aae8e`) and a 64x60 window so content fits.
+  **55/63** (was 42/61). All Metal receipt cases pass (exact pair, missing,
+  duplicate, reordered, extra, unfulfilled, inactive fail-closed).
+- `src/lib/gc_async_mut/gpu/engine2d/engine.spl`: restored
+  `Engine2D.window_present_enabled()` (added `d2b1f7b2235`, deleted by the
+  stale-snapshot commit `8a87db7d9eb`); `host_compositor_core.spl` and
+  `hosted_entry.spl` call it on every Engine2D frame, so any hosted Draw IR
+  frame failed with `method window_present_enabled not found`.
+
+Remaining reds (not weakened, recorded):
+- host `recomposes a rejected host GPU material frame`: the fixture fakes
+  Metal via `selected_backend_name = "metal"` on a CPU engine; the CPU
+  recompose still creates offscreens via `backend_name()=="metal"` ->
+  `create_shared_metal_offscreen` -> `shared-metal-parent-required`. Needs an
+  owner decision: real Metal engine fixture (native lane) vs routing on
+  `metal_backend` presence.
+- host: 7 other reds unrelated to Metal glass (taskbar `contains` arity and
+  `cannot assign to const 'comp'` are seed-interpreter semantics; chrome
+  pixel/theme color, wheel delta, cache release, display-app input).
+- `draw_ir_adv_spec` 68/70: both reds are Vulkan/host-GPU-queue cases, not
+  Metal glass. `8a87db7d9eb` also deleted `Engine2D.vulkan_present_readback_bytes`,
+  `stage_present_damage`, `finalize_compute_frame_no_readback`,
+  `present_window_device`, `latest_vulkan_frame_receipt`,
+  `read_pixels_damaged`, `invalidate_damage_mirror`,
+  `create_vulkan_window_present`, `create_vulkan_external_window_present`
+  (all still have callers) — Vulkan owner must restore them.
+
+## 2026-11-04 — Vulkan Engine2D methods reconciled (work/bug-vkrestore-20261104)
+
+Corrects the list above: on `release/1.0.0` only TWO of the methods
+`8a87db7d9eb` deleted were still missing. `vulkan_present_readback_bytes`,
+`vulkan_device_finalize_no_readback_count`, `stage_present_damage`,
+`finalize_compute_frame_no_readback`, `present_window_device`,
+`latest_vulkan_frame_receipt`, `read_pixels_damaged`,
+`invalidate_damage_mirror` had already been re-added by later work (several now
+`me` rather than `fn`), and `window_present_enabled` by PR #6579.
+
+- Restored `Engine2D.create_vulkan_window_present` and
+  `Engine2D.create_vulkan_external_window_present` (callers:
+  `compositor_engine2d.spl:274/282`, `hosted_entry.spl:152` via the compositor
+  wrapper, `strict_semantic_vulkan_window_producer.spl:137`). Reconciled with
+  the current `Engine2D` field list (identical to `create_vulkan_backend`) and
+  `VulkanBackend.init_window_present` / `init_external_window_present` /
+  `enable_frame_batching` / `last_error`, all present.
+- No other file in `8a87db7d9eb` removed a definition.
+- Regression spec: `test/01_unit/lib/gc_async_mut/gpu/engine2d/engine_vulkan_present_api_spec.spl`
+  (2/2) pins all 11 names on `Engine2D`.
+- `draw_ir_adv_spec` still 68/70; neither red calls the restored constructors
+  (pixel `0xFF000000` vs `0xFFFF0000` on retained Vulkan damage, and the
+  runtime host GPU queue returning false) — host has no Vulkan device; NOT caused
+  by the deletion. `host_compositor_entry_spec` 55/63 identical with and
+  without this change (same 8 reds listed above).
+
+## 2026-11-12 fix attempt (release/1.0.0 — merged fix commit cited, source re-verified)
+
+The 2026-11-02 close-invalid revalidation kept this row open because "no
+merged fix commit or passing regression [was] cited in the bug doc or git
+history". That evidence now exists:
+
+- **Merged fix commit: `fa6bab7921e` "fix(metal): validate every WM glass
+  material receipt" (2026-07-27)**, confirmed an ancestor of
+  `release/1.0.0` HEAD (7a06b4aafd5) via `git merge-base --is-ancestor`.
+  It touched `draw_ir_adv.spl` (+347), `host_compositor_core.spl` (+90),
+  `backend_metal.spl`, `draw_ir_target_metal.spl`, `engine.spl`,
+  `window_scene_draw_ir.spl`, and added the focused specs
+  (`backend_metal_device_identity_spec.spl`,
+  `backend_readback_handle_contract_spec.spl` updates,
+  `draw_ir_adv_spec.spl`, `host_compositor_entry_spec.spl`) plus the strict
+  native fixture `test/02_integration/rendering/macos_metal_glass_receipts_native.spl`.
+- **Defect 1 (inactive/sub-opaque opacity)**: the fail-closed gate is
+  present at `draw_ir_adv.spl:2730-2743` — a Metal-selected sub-opaque
+  parent-sampling batch returns
+  `metal-parent-material-subopaque-requires-gpu-only-delta` with ordered
+  unfulfilled receipts instead of manufacturing a mirror-backed child
+  (`_engine2d_draw_ir_unfulfilled_metal_receipts`). CPU seeded/delta path
+  (500/930) is intact beside it.
+- **Defect 2 (multi-receipt last-wins)**: per-receipt ordered validation is
+  present at `host_compositor_core.spl:139-152` (requested/material/
+  unfulfilled counts plus per-index receipt checks against the presented
+  framebuffer handle/device).
+- **Defect 3 (spec name mismatch)**: `window_scene_draw_ir_spec.spl`
+  expects `engine2d-rounded-material-v1` (lines 276/334), matching
+  production emission.
+- 2026-11-04 seed-interpreter evidence (this doc above): device-identity
+  2/2, readback-handle 1/1, all Metal receipt host cases pass; remaining
+  reds are Vulkan/seed-semantics, not Metal glass.
+
+Verification status: **fix-implemented-verification-pending** — the merged
+fix is cited and source-verified; native Metal execution (strict fixture,
+admitted producer) still pending, per the admission constraints documented
+above. DB row updated to `fix-implemented-verification-pending`.
+
+## 2026-11-25 triage (release/1.0.0, worktree p2w6-ab) — SKIP, stays open
+
+The status header ("Open 2026-09-16 — needs owner triage") understated the
+body: the merged fix commit `fa6bab7921e` is cited and source-verified in
+the 2026-11-12 section, and the row's own status is
+**fix-implemented-verification-pending**. The header now says so.
+
+What remains is exclusively native macOS Metal execution: the strict fixture
+(`test/02_integration/rendering/macos_metal_glass_receipts_native.spl`)
+behind the admitted Stage3 producer gate. That requires a macOS host, the
+coordinated admitted compiler/runtime providers, and the RSS-guarded recipe
+above — none of which exists on this Windows lane (pinned Rust seed only, no
+bootstrap, no Metal device). Source-side spot check at release/1.0.0 HEAD
+(`64dfa6d980f`): the fail-closed sub-opaque Metal gate and the strict native
+fixture file are present. Classification: SKIP (macOS-only native
+verification); left open pending the admitted producer, per the admission
+constraints documented above.
+
+## 2026-11-27 W5-3 Host Unit Verification & DB Transition (`fix-implemented-verification-pending`)
+
+- Verified source fix in `draw_ir_adv.spl` (`metal-parent-material-subopaque-requires-gpu-only-delta` with ordered `_engine2d_draw_ir_unfulfilled_metal_receipts`), `backend_metal.spl` (`draw_ir_apply_glass_material_device` `not self.gpu_only` fail-closed rejection), `draw_ir_target_metal.spl`, and `host_compositor_core.spl` remains present.
+- Added host unit coverage in `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_metal_readback_provenance_and_glass_spec.spl` (4/4 PASS on Windows interpreter host) pinning `draw_ir_apply_glass_material_device` `gpu_only=false` rejection and unavailable `gpu_only=true` fail-closed status.
+- Re-verified `backend_metal_device_identity_spec.spl` (2/2 PASS), `backend_readback_handle_contract_spec.spl` (1/1 PASS), `backend_metal_hardening_spec.spl` (36/36 PASS), and `host_compositor_entry_spec.spl` (54/64 PASS; all Metal glass receipt cases passed, 10 pre-existing unrelated Web/taskbar/wheel/const failures).
+- Transitioned `.sdn` shard row from `open` -> `fix-implemented-verification-pending` (`waiting-for: macOS Metal host verification`).

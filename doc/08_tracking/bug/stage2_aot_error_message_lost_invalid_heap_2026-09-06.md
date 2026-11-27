@@ -88,3 +88,23 @@ already-built stage-2 binary. No bootstrap was run for this record.
    raising site) so the real AOT error is nameable.
 2. Re-run the reproducer, record the now-visible message.
 3. Only then decide whether the restored `_MirToLlvm` guards are relevant.
+
+---
+
+## Triage 2026-11-13 (lane p3-misc-b) — raising-site hardening landed; payload ABI remains stage-2 lane
+
+At release/1.0.0 tip the bounded pure-Simple half of "Next step 1" is already
+in the tree: `_aot_compile_failure`
+(`src/compiler/80.driver/driver_aot_native_output.spl:3460`) prints the unit
+and reason BARE (no interpolated temporaries) plus literal anchor lines and
+lengths at the raising site, before returning the Err — exactly the
+"capture the message eagerly at the raising site" strategy, with a comment
+citing this record. Verified the pinned spec
+`test/01_unit/compiler/backend/backend_aot_object_path_scalar_native_spec.spl`
+— 3/3 GREEN on the seed.
+
+What remains is the Err-payload ABI survival across the stage-2 native
+crossing — fixable and verifiable only in the bootstrap/stage-2 lane (needs a
+rebuilt stage-2 binary carrying any candidate fix; this Windows lane has the
+seed only). Not pursued here per the 20-min lane rule; no further pure-Simple
+change is pending for this record.

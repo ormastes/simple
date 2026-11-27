@@ -9,7 +9,8 @@
 # Impact: Blocks loop_opt.spl from loading (4 test failures)
 # Workaround: Assign [] to variable first, then return variable
 
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, step}
+use compiler.core.parser.{parse_module, parser_has_errors, parser_set_had_error}
 
 # Compatibility and limitations
 # Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
@@ -22,27 +23,27 @@ use std.spec.{describe, it, expect}
 # doc-path: doc/05_design/lib/compiler_analysis_oracles.md
 # @manual: primary
 
+enum TestEnum:
+    Empty
+    Single(i64)
+    Multiple(i64, i64)
+
 describe "Match Empty Array Bug":
-    it "reproduces parser error with direct [] return":
-        # This pattern causes parse error during module loading:
-        # fn get_items(value: TestEnum) -> [i64]:
-        #     match value:
-        #         case Empty: []        <- PARSE ERROR
-        #         case Single(x): [x]
-        #         case Multiple(x, y): [x, y]
+    it "parses direct empty array literal inside match arm":
+        val source = "enum Sample:\n    Empty\n    One(i64)\nfn get_items(value: Sample) -> [i64]:\n    match value:\n        case Empty: []\n        case One(x): [x]\n"
+        parser_set_had_error(false)
+        parse_module(source, "match_empty_array_probe.spl")
+        expect(parser_has_errors()).to_equal(false)
 
-describe "Compiler alias analysis registry":
-    it "resolving an unregistered alias reports nothing":
-        step("Verify: resolving an unregistered alias reports nothing")
-        # @req: REQ-CMP-COMPILER_ANALYSIS-001
-        alias_registry_clear()
-        expect(alias_registry_resolve("Wave6UnknownAlias")).to_equal("")  # oracle: unknown aliases resolve to the empty sentinel
+    it "evaluates direct [] match arm inside interpreted function":
+        fn get_items(value: TestEnum) -> [i64]:
+            match value:
+                case Empty: []
+                case Single(x): [x]
+                case Multiple(x, y): [x, y]
 
-    it "clearing the registry drops previously resolvable state":
-        step("Verify: clearing the registry drops previously resolvable state")
-        # @req: REQ-CMP-COMPILER_ANALYSIS-001
-        alias_registry_clear()
-        expect(alias_registry_resolve("anything")).to_equal("")  # oracle: after clear no alias remains registered
+        expect(get_items(TestEnum.Empty).len()).to_equal(0)
+        expect(get_items(TestEnum.Single(7))).to_equal([7])
 
     it "works with non-empty array literal":
         fn get_items(value: TestEnum) -> [i64]:

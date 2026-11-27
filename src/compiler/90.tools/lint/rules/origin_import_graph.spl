@@ -1,0 +1,344 @@
+# Cross-file ORIGIN summaries for exported functions, carried through the
+# SIF origin section (compiler.driver.sif.sif_origin).
+#
+# Extends the one-hop bound_unit_import_summaries (PR #11808) to N hops:
+# a module's summary is computed with the summaries of the modules IT imports,
+# so `A: extern fn` -> `B: fn wrap() = a_extern()` -> `C: use b.wrap` sees
+# wrap's return as extern_return. Depth-bounded, cycle-guarded (visiting set),
+# memoized per root. Every hop goes through the serialized SIF section, and a
+# cached section whose version/digest does not verify is a MISS (recomputed
+# from source), never a crash.
+#
+# The producer (origin_summary_of_source) lowers each file to HIR and reads the
+# origin side table from compiler.semantics.lint.hir_origin_table. Import
+# discovery (`use` lines) stays textual.
+
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.*
+use compiler.semantics.lint.hir_origin_table.{hir_origin_table_for_module, hir_origin_table_facts, HirOriginTable}
+use compiler.driver.sif.sif_origin.{FnOriginSummary, sif_origin_serialize, sif_origin_parse, sif_origin_status}
+use compiler.tools.lint.rules.bound_import_graph.{bound_resolve_module}
+
+val ORIGIN_IMPORT_MAX_DEPTH: i64 = 16
+
+pub class OriginModuleSummary:
+    module: text
+    fns: [FnOriginSummary]
+
+class OriginGraphMemo:
+    paths: [text]
+    sections: [text]
+
+fn _og_use_modules(source: text) -> [text]:
+    var mods: [text] = []
+    for raw in source.split("\n"):
+        val t = raw.trim()
+        if not t.starts_with("use "):
+            continue
+        val open = t.find(".{{")
+        if open <= 4:
+            continue
+        val m = t.substring(4, open).trim()
+        if m != "" and not mods.contains(m):
+            mods.push(m)
+    mods
+
+fn _og_find(known: [FnOriginSummary], name: text) -> i64:
+    var i = 0
+    while i < known.len():
+        if known[i].fn_name == name:
+            return i
+        i = i + 1
+    -1
+
+# Per-function HIR facts the summary needs beyond the origin table: which
+# local copies which symbol, and every call in the body.
+class _OgFnWalk:
+    copy_of: Dict<i64, i64>
+    init_of: Dict<i64, HirExpr>
+    calls: [HirExpr]
+
+fn _og_sym(e: HirExpr) -> i64:
+    match e.kind:
+        case HirExprKind.NamedVar(symbol, _):
+            symbol.id
+        case HirExprKind.Var(symbol):
+            symbol.id
+        case _:
+            -1
+
+# Callee name of a call. A callee imported from a module lowered without its
+# surface is an `Error` node (unresolved name) whose span still covers the
+# identifier, so the name is read back from the source at that span.
+fn _og_callee_name(hir: HirModule, source: text, callee: HirExpr) -> text:
+    match callee.kind:
+        case HirExprKind.NamedVar(_, name):
+            name
+        case HirExprKind.Var(symbol):
+            if val s = hir.symbols.symbols.get(symbol.id):
+                return s.name
+            ""
+        case HirExprKind.Error:
+            if callee.span.start >= 0 and callee.span.end > callee.span.start and callee.span.end <= source.byte_len():
+                return source.substring(callee.span.start, callee.span.end).trim()
+            ""
+        case _:
+            ""
+
+fn _og_walk_expr(w: _OgFnWalk, e: HirExpr):
+    match e.kind:
+        case HirExprKind.Call(callee, args, _):
+            w.calls.push(e)
+            _og_walk_expr(w, callee)
+            for a in args:
+                _og_walk_expr(w, a.value)
+        case HirExprKind.MethodCall(receiver, _, args, _):
+            _og_walk_expr(w, receiver)
+            for a in args:
+                _og_walk_expr(w, a.value)
+        case HirExprKind.Binary(_, l, r):
+            _og_walk_expr(w, l)
+            _og_walk_expr(w, r)
+        case HirExprKind.Unary(_, operand):
+            _og_walk_expr(w, operand)
+        case HirExprKind.Cast(inner, _):
+            _og_walk_expr(w, inner)
+        case HirExprKind.Return(value):
+            if val v = value:
+                _og_walk_expr(w, v)
+        case HirExprKind.If(cond, then_, else_):
+            _og_walk_expr(w, cond)
+            _og_walk_block(w, then_)
+            if val eb = else_:
+                _og_walk_block(w, eb)
+        case HirExprKind.IfChain(arms, else_):
+            for arm in arms:
+                _og_walk_expr(w, arm.cond)
+                _og_walk_block(w, arm.then_)
+            if val eb = else_:
+                _og_walk_block(w, eb)
+        case HirExprKind.Loop(body, _):
+            _og_walk_block(w, body)
+        case HirExprKind.While(cond, body, _):
+            _og_walk_expr(w, cond)
+            _og_walk_block(w, body)
+        case HirExprKind.For(_, iter, body, _):
+            _og_walk_expr(w, iter)
+            _og_walk_block(w, body)
+        case HirExprKind.Block(b):
+            _og_walk_block(w, b)
+        case HirExprKind.UnsafeBlock(b):
+            _og_walk_block(w, b)
+        case _:
+            ()
+
+fn _og_walk_block(w: _OgFnWalk, b: HirBlock):
+    for stmt in b.stmts:
+        match stmt.kind:
+            case HirStmtKind.Let(symbol, _, init):
+                val src = _og_sym(init)
+                if src >= 0:
+                    w.copy_of[symbol.id] = src
+                else:
+                    w.init_of[symbol.id] = init
+                _og_walk_expr(w, init)
+            case HirStmtKind.Expr(e):
+                _og_walk_expr(w, e)
+            case HirStmtKind.Block(inner):
+                _og_walk_block(w, inner)
+            case _:
+                ()
+    if b.has:
+        _og_walk_expr(w, b.value)
+
+# Follow let-copy links (`val b = a`) back to the first non-copy symbol.
+fn _og_root_sym(w: _OgFnWalk, sym: i64) -> i64:
+    var s = sym
+    var hops = 0
+    while hops < 64:
+        if val next = w.copy_of.get(s):
+            s = next
+            hops = hops + 1
+        else:
+            return s
+    s
+
+fn _og_param_index(f: HirFunction, sym: i64) -> i64:
+    var i = 0
+    while i < f.params.len():
+        if f.params[i].symbol.id == sym:
+            return i
+        i = i + 1
+    -1
+
+# The value the function returns: the block tail, else a trailing
+# `return v` or expression statement.
+fn _og_tail(b: HirBlock) -> HirExpr?:
+    if b.has:
+        return Some(b.value)
+    if b.stmts.len() == 0:
+        return None
+    match b.stmts[b.stmts.len() - 1].kind:
+        case HirStmtKind.Expr(e):
+            match e.kind:
+                case HirExprKind.Return(value):
+                    value
+                case _:
+                    Some(e)
+        case _:
+            None
+
+fn _og_origin_of_value(hir: HirModule, source: text, table: HirOriginTable, f: HirFunction, w: _OgFnWalk, e: HirExpr, known: [FnOriginSummary]) -> text:
+    match e.kind:
+        case HirExprKind.Call(callee, args, _):
+            val ci = _og_find(known, _og_callee_name(hir, source, callee))
+            if ci < 0:
+                return ""
+            val co = known[ci].return_origin
+            if co == "extern_return":
+                return co
+            if co.starts_with("param:"):
+                val k = co.substring(6, co.byte_len()).to_int()
+                if k < args.len():
+                    return _og_origin_of_value(hir, source, table, f, w, args[k].value, known)
+            ""
+        case _:
+            val sym = _og_sym(e)
+            if sym < 0:
+                return ""
+            val root = _og_root_sym(w, sym)
+            val pi = _og_param_index(f, root)
+            if pi >= 0:
+                return "param:{pi}"
+            if val init = w.init_of.get(root):
+                val via = _og_origin_of_value(hir, source, table, f, w, init, known)
+                if via != "":
+                    return via
+            for row in hir_origin_table_facts(table):
+                if row.symbol_id == sym and row.root_origin == "extern_return":
+                    return "extern_return"
+            ""
+
+fn _og_summarise_fn(hir: HirModule, source: text, table: HirOriginTable, f: HirFunction, known: [FnOriginSummary]) -> FnOriginSummary:
+    var w = _OgFnWalk(copy_of: {}, init_of: {}, calls: [])
+    _og_walk_block(w, f.body)
+    var origin = ""
+    if val tail = _og_tail(f.body):
+        origin = _og_origin_of_value(hir, source, table, f, w, tail, known)
+    var flows: [i64] = []
+    var pi = 0
+    while pi < f.params.len():
+        var hit = false
+        for call in w.calls:
+            match call.kind:
+                case HirExprKind.Call(callee, args, _):
+                    val ci = _og_find(known, _og_callee_name(hir, source, callee))
+                    if ci >= 0:
+                        var ai = 0
+                        while ai < args.len():
+                            if known[ci].boundary_params.contains(ai) and _og_param_index(f, _og_root_sym(w, _og_sym(args[ai].value))) == pi:
+                                hit = true
+                            ai = ai + 1
+                case _:
+                    ()
+        if hit:
+            flows.push(pi)
+        pi = pi + 1
+    FnOriginSummary(fn_name: f.name, return_origin: origin, boundary_params: flows)
+
+# Origin summaries of every top-level fn / extern fn in `source`, given the
+# summaries of the modules it imports. Externs are boundaries themselves.
+# Produced from HIR: the file is lowered alone, the origin side table
+# (hir_origin_table_for_module) supplies extern_return roots, and imported
+# callees resolve by name against `imported`.
+pub fn origin_summary_of_source(source: text, imported: [OriginModuleSummary]) -> [FnOriginSummary]:
+    var known: [FnOriginSummary] = []
+    for m in imported:
+        for f in m.fns:
+            known.push(f)
+    val parsed = parse_full_frontend(source, "origin_summary.spl", "origin_summary", Logger(level: 0))
+    var lowering = HirLowering.with_filename("origin_summary.spl")
+    val hir = lowering.lower_module(parsed)
+    val table = hir_origin_table_for_module(hir)
+    var fns: [HirFunction] = []
+    for f in hir.functions.values():
+        fns.push(f)
+    var i = 1
+    while i < fns.len():
+        var j = i
+        while j > 0 and fns[j - 1].span.start > fns[j].span.start:
+            val tmp = fns[j - 1]
+            fns[j - 1] = fns[j]
+            fns[j] = tmp
+            j = j - 1
+        i = i + 1
+    var out: [FnOriginSummary] = []
+    for f in fns:
+        if f.is_extern:
+            var all: [i64] = []
+            var k = 0
+            while k < f.params.len():
+                all.push(k)
+                k = k + 1
+            val e = FnOriginSummary(fn_name: f.name, return_origin: "extern_return", boundary_params: all)
+            known.push(e)
+            out.push(e)
+        else:
+            val s = _og_summarise_fn(hir, source, table, f, known)
+            known.push(s)
+            out.push(s)
+    out
+
+fn _og_memo_get(memo: OriginGraphMemo, path: text) -> text:
+    var i = 0
+    while i < memo.paths.len():
+        if memo.paths[i] == path:
+            return memo.sections[i]
+        i = i + 1
+    ""
+
+fn _og_summaries(source: text, path: text, depth: i64, visiting: [text], memo: OriginGraphMemo) -> [OriginModuleSummary]:
+    var out: [OriginModuleSummary] = []
+    if depth >= ORIGIN_IMPORT_MAX_DEPTH:
+        return out
+    for m in _og_use_modules(source):
+        val dep_path = bound_resolve_module(m, path)
+        if dep_path == "" or visiting.contains(dep_path):
+            continue
+        var section = _og_memo_get(memo, dep_path)
+        if sif_origin_status(section) != "":
+            # Miss (absent, stale version, corrupt): recompute from source.
+            val dep_src = file_read(dep_path)
+            var next_visiting = [v for v in visiting]
+            next_visiting.push(dep_path)
+            val sub = _og_summaries(dep_src, dep_path, depth + 1, next_visiting, memo)
+            section = sif_origin_serialize(m, origin_summary_of_source(dep_src, sub))
+            memo.paths.push(dep_path)
+            memo.sections.push(section)
+        val fns = sif_origin_parse(section)
+        if fns.len() > 0:
+            out.push(OriginModuleSummary(module: m, fns: fns))
+    out
+
+# Origin summaries of the modules `source` (at `path`) imports, N hops deep.
+pub fn origin_import_summaries(source: text, path: text) -> [OriginModuleSummary]:
+    origin_import_summaries_cached(source, path, [], [])
+
+# Same, seeded with previously stored SIF origin sections (cache_paths[i] ->
+# cache_sections[i]). A section that does not verify is ignored (cache miss).
+pub fn origin_import_summaries_cached(source: text, path: text, cache_paths: [text], cache_sections: [text]) -> [OriginModuleSummary]:
+    if not source.contains("use "):
+        return []
+    var memo = OriginGraphMemo(paths: [], sections: [])
+    var i = 0
+    while i < cache_paths.len() and i < cache_sections.len():
+        if sif_origin_status(cache_sections[i]) == "":
+            memo.paths.push(cache_paths[i])
+            memo.sections.push(cache_sections[i])
+        i = i + 1
+    _og_summaries(source, path, 0, [path], memo)

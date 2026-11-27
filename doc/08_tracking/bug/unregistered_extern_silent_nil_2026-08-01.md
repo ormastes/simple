@@ -925,3 +925,10 @@ default lane on both the old and the new binary.
 ## 2026-08-26 ag-batch: rt_hash_sha256 extern breaks test_host_env spec
 
 `test/01_unit/app/test_host_env_spec.spl` scenario "rejects stale or substituted SIMD source compiler and receipt provenance" fails with `semantic: unknown extern function: rt_hash_sha256` — pre-existing at HEAD (proven via in-place `git show HEAD:` restore, Results: 4 total, 3 passed, 1 failed). Left RED; blocks the sspec modernization oracle rewrite for this spec.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+partially fixed (_cos/_sin instance closed); the extern-registration policy remainder belongs to the linker/extern lane.

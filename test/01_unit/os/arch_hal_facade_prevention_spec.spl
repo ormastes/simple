@@ -1,0 +1,99 @@
+# Purpose and audience: prevention specification for bug #45 (HAL facade encapsulation and runtime sanity).
+# @req REQ-SSPEC-OS
+
+"""Prevent direct os.kernel.arch.* leakage and verify os.kernel.hal.* facade behavior."""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{file_read, dir_walk}
+use os.kernel.hal.mod.{Architecture, get_arch, get_arch_name}
+use os.kernel.hal.entropy.{
+    Rv32SecureEntropyCandidate,
+    Rv32SecureEntropyProvenance,
+    rv32_admit_secure_entropy_candidate
+}
+use os.kernel.hal.reset.{
+    hal_reset_set_test_mode,
+    hal_reset_requested_for_test,
+    hal_system_reset
+}
+use os.kernel.hal.paging.{
+    riscv64_vmm_create_address_space,
+    riscv64_vmm_map_page_in,
+    rv64_sfence_vma_addr,
+    rv32_sfence_vma
+}
+
+describe "HAL facade encapsulation and multiarch prevention (#45)":
+    it "exposes arch identity, entropy admission, and reset latch cleanly through os.kernel.hal":
+        step("verify get_arch/get_arch_name consistency, entropy admission fail-closed checks, and reset test-mode latch")
+        val arch = get_arch()
+        val slug = get_arch_name()
+        val expected_non_empty = slug == "x86_64" or slug == "x86_32" or slug == "arm64" or slug == "arm32" or slug == "riscv64" or slug == "riscv32"
+        expect(expected_non_empty).to_equal(true)
+        if slug == "x86_64":
+            expect(arch).to_equal(Architecture.X86_64)
+
+        val good_bytes: [u8] = [
+            0x11u8, 0x22u8, 0x33u8, 0x44u8, 0x55u8, 0x66u8, 0x77u8, 0x88u8,
+            0x99u8, 0xaau8, 0xbbu8, 0xccu8, 0xddu8, 0xeeu8, 0xffu8, 0x01u8
+        ]
+        val ok_cand = Rv32SecureEntropyCandidate(
+            provenance: Rv32SecureEntropyProvenance.VirtioRngMmio,
+            capability_present: true,
+            provider_ready: true,
+            authenticated_handoff: true,
+            bytes: good_bytes
+        )
+        expect(rv32_admit_secure_entropy_candidate(ok_cand).is_ok()).to_equal(true)
+
+        val bad_cand = Rv32SecureEntropyCandidate(
+            provenance: Rv32SecureEntropyProvenance.Unavailable,
+            capability_present: false,
+            provider_ready: false,
+            authenticated_handoff: false,
+            bytes: []
+        )
+        expect(rv32_admit_secure_entropy_candidate(bad_cand).is_err()).to_equal(true)
+
+        hal_reset_set_test_mode(true)
+        expect(hal_system_reset()).to_equal(0i64)
+        expect(hal_reset_requested_for_test()).to_equal(true)
+        hal_reset_set_test_mode(false)
+        expect(hal_reset_requested_for_test()).to_equal(false)
+
+    it "keeps os.kernel.hal facades decoupled from os.kernel.arch.* and protects migrated callers":
+        step("verify src/os/kernel/hal/*.spl files never import os.kernel.arch.* directly and key callers use hal facades")
+        var hal_leaks: [text] = []
+        for raw in dir_walk("src/os/kernel/hal"):
+            val norm = raw.replace("\\", "/")
+            if not norm.ends_with(".spl"):
+                continue
+            val body = file_read(norm)
+            for line in body.split("\n"):
+                val stripped = line.trim()
+                if stripped.starts_with("use os.kernel.arch.") or stripped.starts_with("export use os.kernel.arch."):
+                    hal_leaks.push(norm + ":" + stripped)
+        expect(hal_leaks).to_equal([])
+
+        for migrated in [
+            "src/os/drivers/virtio/virtio_rng_mmio.spl",
+            "src/os/drivers/framebuffer/ramfb.spl",
+            "src/os/cli.spl",
+            "src/os/kernel/memory/vmm_core.spl",
+            "src/os/kernel/memory/vmm.spl",
+            "src/os/kernel/memory/user_address_space.spl",
+            "src/os/kernel/boot/cpu.spl",
+            "src/os/kernel/boot/tcp_baremetal_min.spl",
+            "src/os/kernel/boot/riscv_services.spl",
+            "src/os/kernel/loader/x86_64_server_first_dispatch.spl",
+            "src/os/kernel/loader/arm64_fs_exec_spawn.spl",
+            "src/os/kernel/loader/x86_64_fs_exec_spawn.spl",
+            "src/os/kernel/ipc/syscall_spm.spl"
+        ]:
+            val content = file_read(migrated)
+            expect(content.contains("os.kernel.hal.")).to_equal(true)
+            for line in content.split("\n"):
+                val s = line.trim()
+                if not s.starts_with("#"):
+                    expect(s.starts_with("use os.kernel.arch.")).to_equal(false)

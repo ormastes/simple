@@ -29,3 +29,25 @@ Trace every `JsValue.Symbol` construction and pattern through HIR-to-MIR enum
 resolution, fix the shared qualified-variant lowering, and rerun the fixture.
 Do not replace symbols with strings or use the Rust seed as target evidence.
 
+
+## Triage 2026-11-25 (fleet lane p2w1-ai, worktree wt-p2w1-ai, release/1.0.0 HEAD 50adb6f42ce)
+
+SKIP — left open, but the specific blocking construct no longer exists in the
+tree:
+
+- `src/lib/nogc_sync_mut/js/types/js_types.spl:7-15`: `enum JsValue` now has
+  only `Undefined/Null/Boolean/Number/String/Object/Array/Function` — there
+  is **no `Symbol` variant** and no `JsValue.Symbol` construction or pattern
+  anywhere under `src/lib/nogc_sync_mut/js/` (grep-verified). `interpreter.spl`
+  was split (`interpreter_eval*.spl`) and `Symbol.iterator`/`Symbol.asyncIterator`
+  are handled as plain strings.
+- The required-fix verification (rebuild stage2, native-build the
+  `browser_script_css_animation` fixture) needs a full bootstrap-scale
+  compiler build, which this lane cannot perform; an interpreter-mode run of
+  the fixture on the pinned seed exceeded a 180 s timeout while still
+  executing, so it is not evidence either way.
+
+Net: the named `JsValue.Symbol` lowering blocker cannot recur in its filed
+form (the variant is gone), but the underlying qualified-enum-variant
+lowering question and the stage2 fixture re-run remain unverified — leaving
+OPEN for an owner with bootstrap capacity.

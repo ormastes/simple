@@ -1,6 +1,6 @@
 # Dynamic-runtime lane links 509 rt_* twice (executable + .so), and an ABI seam shows
 
-Status: OPEN — top residual risk of the `dynamic-runtime` lane
+Status: LIVE (triaged 2026-11-11, lanes work/p3-rt2-20261111 + work/p3-rt3-20261111 — structural dual-`rt_*`-definition seam in the dynamic-runtime lane; fix owner: compiler/native_project linker lane; see addenda below)
 Component: `pipeline/native_project/linker.rs` (dynamic lane), `src/runtime`
 
 ## What was built
@@ -60,3 +60,101 @@ by construction rather than relying on precedence.
   the supplement but does not remove it.
 - `scripts/check/check-rt-dual-implementation-ratchet.shs` — the repo's existing
   position on parallel `rt_*` implementations.
+
+## 2026-11-11 status — P3 rt2 lane triage (worktree simple-p3-rt2-20261111)
+
+**Verdict: LIVE (structural, by source audit at base 790b54f7c4fc);
+reproduction BLOCKED — heavy native build, exact commands below.**
+
+The designed fix (project the core-C supplement so it contributes only the
+C-only gap symbols and localizes everything the `.so` already exports) is
+NOT implemented at this base:
+
+- `build_core_c_runtime_supplement_library`
+  (`src/compiler_rust/compiler/src/pipeline/native_project/tools.rs:925`)
+  still builds the FULL core-C archive (`build_c_runtime_library(.., false,
+  true, false, ..)` — no projection/localization flag exists in that
+  signature).
+- The dynamic-runtime lane still appends that archive AFTER the shared
+  runtime (`linker.rs:2203-2237`), and the block comment explicitly
+  preserves the reported seam's mechanism: "a static definition never
+  COLLIDES with a shared-object one — the executable's copy simply wins for
+  the whole process, **including calls made from inside the runtime**."
+  That is the ABI seam this doc reports (Rust-side `.so` callers binding to
+  C implementations wherever the two representations differ).
+- `git log --grep` over this lane since filing finds no fix commit;
+  `bug_db.sdn` still registers this doc OPEN (P3). The 2026-11-07 child
+  `hosted_native_all_rust_argv_overrides_c_array_owner_2026-11-07` fixed
+  one concrete argv instance in the native_all composition; it does not
+  project the dynamic-lane supplement.
+- `scripts/check/check-rt-dual-implementation-ratchet.shs` does not
+  mention/scoped-cover the dynamic lane (grep 'dynamic' → no match), so no
+  ratchet currently pins the dual-definition count down.
+
+Reproduction is not possible inside this lane: no `libsimple_runtime.so` /
+`simple_runtime.dll` exists anywhere in this worktree (find: none; `build/`
+holds only `review/`), and producing one plus the Stage4 driver link is a
+heavy entry-closure native build — forbidden here. Exact commands needing
+grant (Linux ELF lane, per the doc's measurement method):
+
+```bash
+# 1. build the shared runtime cdylib (aarch64/x86_64 linux, from repo root)
+cargo build --profile bootstrap -p simple-runtime --features runtime-symbol-table \
+  --manifest-path src/compiler_rust/Cargo.toml
+# 2. link the Stage4 driver against it via the dynamic lane
+SIMPLE_RUNTIME_PATH=src/compiler_rust/target/bootstrap \
+  bin/simple.exe native-build --source src/compiler --source src/app --source src/lib \
+  --entry-closure --entry src/compiler/80.driver/main.spl \
+  --runtime-bundle dynamic-runtime --output build/review/dyn_rt_driver
+# 3. measure the dual-defined rt_* set
+nm build/review/dyn_rt_driver | grep ' [Tt] rt_' | awk '{print $NF}' | sort -u > /tmp/exe_rt.txt
+nm -D --defined-only src/compiler_rust/target/bootstrap/libsimple_runtime.so \
+  | grep ' rt_' | awk '{print $NF}' | sort -u > /tmp/so_rt.txt
+comm -12 /tmp/exe_rt.txt /tmp/so_rt.txt | wc -l   # doc-era value: 509
+# 4. seam symptom oracle: run a 3-line array-handle hello under interpret + AOT paths
+```
+
+Labels: host-independent-source (static composition audit at pinned base);
+blocked-repro (needs-grant commands above). No change made in this lane —
+the fix is a linker/projection feature in the compiler/native_project
+lane, deliberately not attempted here under the no-heavy-build constraint.
+
+## 2026-11-11 second-pass corroboration — P3 rt3 lane (worktree simple-p3-rt3-20261111, base 7f0fa174083)
+
+**Verdict: LIVE (corroborates lane p3-rt2 same-day triage; fresh source re-check, no re-diagnosis).**
+
+All four structural facts from the rt2 addendum still hold at this base:
+
+- `build_core_c_runtime_supplement_library` (`tools.rs:925`) still calls
+  `build_c_runtime_library(.., false, true, false, ..)` — no projection/
+  localization parameter exists in that signature; the full core-C archive
+  is still the supplement.
+- The dynamic-runtime lane (`linker.rs:2203-2237`) still appends that archive
+  AFTER the shared runtime; the block comment still states the seam mechanism
+  verbatim ("the executable's copy simply wins for the whole process,
+  including calls made from inside the runtime"). The `projected core-C
+  supplement` wording at `linker.rs:2316` is in the `is_native_all`
+  Linux/FreeBSD branch only — it does NOT cover the dynamic-runtime lane.
+- `scripts/check/check-rt-dual-implementation-ratchet.shs` still has zero
+  `dynamic` mentions — nothing pins the dual-definition count down for this
+  lane.
+- `git log --grep` over the dynamic-lane linker/tools since filing finds no
+  projection fix commit.
+
+Named owner: **compiler/native_project dynamic-runtime linker lane** (project
+the core-C supplement the way `build_stage4_rust_runtime_projection_archive`
+projects the Rust runtime, localized to the C-only gap symbols). Reproduction
+remains grant-gated per the rt2 addendum commands (Linux ELF lane: cdylib
+build + Stage4 driver link + `nm`/`comm` dual-set measurement + array-handle
+hello under interpret/AOT). No change made in this lane.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — rt3 corroborated rt2 fresh: supplement-archive call signature unchanged, dynamic lane still appends full core-C after the shared runtime, ratchet has zero `dynamic` mentions. Owner: compiler/native_project dynamic-runtime linker lane (projection archive).
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred).** Windows lane: reproduction impossible here (no Linux ELF `libsimple_runtime.so`; producing one plus the Stage4 driver link is a heavy entry-closure build this lane does not run). Prior-lane structural facts not re-derived: full core-C archive still appended after the shared runtime in the dynamic lane, no projection/localization parameter in `build_c_runtime_library`, ratchet has no dynamic-lane coverage. Owner remains compiler/native_project dynamic-runtime linker lane.

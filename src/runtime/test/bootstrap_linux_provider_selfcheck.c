@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: bootstrap_linux_provider_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 #define _GNU_SOURCE
 #include "runtime.h"
 #include "runtime_thread.h"
@@ -45,3 +50,5 @@ int main(void) {
     puts("PASS: real directory, bounded nofollow reads, string owner/free, native thread id");
     return 0;
 }
+
+#endif /* !_WIN32 */

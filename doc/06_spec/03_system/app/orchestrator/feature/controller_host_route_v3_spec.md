@@ -1,0 +1,7 @@
+# Actual Controller to retained Host status
+
+Status: AUTHORED_NOT_RUN. One executable scenario invokes the real Controller CLI dispatcher and canonical reply cleanup. Required public fixture: `C:\SimpleQualification\controller-host-route-v3.sdn`, exactly four text fields: `controllerRoot`, `controllerConfigDigest`, `expectedScopeDigest`, `expectedEnrollmentDigest`. It requires a genuine protected, installed local Windows Controller root and a running V6 Host with installed matching enrollment. Missing prerequisites fail; no skip or mock success exists.
+
+The scenario opens the actual Controller journal through production code, authenticates the actual retained Host, archives the real status, closes exchange/reader/Controller ownership through production cleanup, and compares typed status scope/enrollment to independently configured expectations. The whole actual returned reply survives assertion failure in this process; that is not durable post-exit native ownership.
+
+This does not execute a workload or qualify native fault handling. Required follow-up procedures remain NOT_RUN: genuine signed dispatch through validate/prepare/execute, exact execute archival and inspect-only resume after lost reply, unauthorized tuple cancellation refusal, partial close ownership retention, service-stop quiesce and drain, changed selector Unknown, failed-startup new lease without ready refusal, and restart with the same setup credential. Cross-host transport and interactive terminal admission are outside this local Host-only route.

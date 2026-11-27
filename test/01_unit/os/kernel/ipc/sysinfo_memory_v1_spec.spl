@@ -1,0 +1,30 @@
+"""SysInfo(Memory) copies real PMM page-frame counts out, never a zeroed buffer."""
+
+use std.spec.{describe, it, expect}
+use os.kernel.ipc.sysinfo_memory_v1.{SYSINFO_MEMORY_BUF_BYTES_V1, sysinfo_memory_words_v1}
+
+# P0 (SimpleOS, 2026-11-13): _handle_sysinfo(kind=0) returned status 0 and never
+# wrote MemInfoBuf, so the userland mem_info() saw 0 pages and the compiler's
+# worker pool read 0 free memory and refused. These are the words it now writes.
+describe "SysInfo(Memory) copy-out words":
+    it "reports total, free, used page frames and the page size of an 8 GiB guest":
+        # PMM: 2097152 frames, 8 GiB tracked, 1572864 frames free.
+        val words = sysinfo_memory_words_v1(2097152u64, 1572864u64, 8589934592u64)
+        expect(words.len()).to_equal(4)
+        expect(words[0]).to_equal(2097152u64)
+        expect(words[1]).to_equal(1572864u64)
+        expect(words[2]).to_equal(524288u64)
+        expect(words[3]).to_equal(4096u64)
+
+    it "matches the @repr(C) MemInfoBuf size (three u64 and a padded u32)":
+        expect(SYSINFO_MEMORY_BUF_BYTES_V1).to_equal(32u64)
+
+    it "clamps a free count above total so used never underflows":
+        val words = sysinfo_memory_words_v1(100u64, 150u64, 409600u64)
+        expect(words[1]).to_equal(100u64)
+        expect(words[2]).to_equal(0u64)
+
+    it "reports page size 0 before the PMM is initialised, so readers see unknown":
+        val words = sysinfo_memory_words_v1(0u64, 0u64, 0u64)
+        expect(words[0]).to_equal(0u64)
+        expect(words[3]).to_equal(0u64)

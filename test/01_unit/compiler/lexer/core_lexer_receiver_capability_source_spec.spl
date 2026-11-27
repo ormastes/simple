@@ -2,8 +2,8 @@
 ## Purpose and audience
 
 Executable specification for `CoreLexer`'s receiver-capability contract —
-which cursor helpers are declared with the mutable `me` receiver versus a
-plain `fn`, and which snapshot/tuple handoffs stay value-based — for compiler
+which cursor helpers use a value-copy `fn` receiver versus the mutable `me`
+receiver, and which snapshot/tuple handoffs stay value-based — for compiler
 owners changing `src/compiler/10.frontend/core/lexer_struct.spl` or
 `lexer.spl`.
 
@@ -24,22 +24,9 @@ comment moved without this spec being updated.
 
 Re-run after any change to `lexer_struct.spl` or `lexer.spl`. A failing
 scenario names the exact substring expected; grep the named source file for
-it to see what changed.
-
-# NOTE: as of 2026-09-06 the "aliases only live-cursor query helpers..."
-# scenario is RED — every listed query helper (at_end, peek, peek_next,
-# peek_at, word_boundary_at, measure_indent_from, skip_indent_from,
-# line_starts_binary_op, leading_op_continues, char_slice,
-# fs_nested_string_may_open, fs_expr_has_word, fs_expr_ends_with_word) is
-# declared with a plain `fn`, not the `me` receiver this spec expects, at
-# src/compiler/10.frontend/core/lexer_struct.spl:204 (at_end),
-# :209 (peek), and onward. Filed:
-# doc/08_tracking/bug/core_lexer_query_helpers_declared_fn_not_me_2026-09-06.md
-# NOTE: the "documents why scratch slicing..." scenario is RED because the
-# expected comment substring "that caller has already made the value copy"
-# no longer exists anywhere in
-# src/compiler/10.frontend/core/lexer_struct.spl — the documenting comment
-# was removed or reworded. Same bug record above.
+it to see what changed. The 2026-11-08 resolution pins the tighter `fn`
+value-copy receiver for all 13 query helpers; `me` is reserved for mutation
+whose effects must be visible to the caller.
 """
 # research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 # @manual_section: core lexer receiver capability source
@@ -49,7 +36,7 @@ use std.spec.*
 use std.spec.step
 
 describe "CoreLexer receiver capabilities":
-    it "aliases only live-cursor query helpers and scratch-backed slicing":
+    it "uses value-receiver query helpers and scratch-backed slicing":
         # @req REQ-LEXER-CAPABILITY-001
         # @capture(statistics): per-signature me-vs-fn declaration verdicts retained
         step("Read the lexer struct source and pin each query helper's receiver capability")
@@ -72,8 +59,8 @@ describe "CoreLexer receiver capabilities":
         for signature in live_methods:
             val declared_as_me_receiver = source.contains("    me {signature}:")
             val declared_as_plain_fn = source.contains("    fn {signature}:")
-            expect(declared_as_me_receiver).to_be(true)
-            expect(declared_as_plain_fn).to_be(false)
+            expect(declared_as_me_receiver).to_be(false)
+            expect(declared_as_plain_fn).to_be(true)
 
     it "keeps externally observed snapshots and tuple handoff value-based":
         # @req REQ-LEXER-CAPABILITY-002
@@ -96,7 +83,7 @@ describe "CoreLexer receiver capabilities":
         step("Read the lexer and lexer struct sources and pin the scratch-slicing rationale comment")
         val lexer = file_read("src/compiler/10.frontend/core/lexer.spl")
         val source = file_read("src/compiler/10.frontend/core/lexer_struct.spl")
-        expect(lexer).to_contain("        val lx = current_core_lexer_slot[0]\n        return lx.char_slice(start, end)")
+        expect(lexer).to_contain("        val lx: CoreLexer = current_core_lexer_slot[0]\n        return core_lexer_char_slice(lx, start, end)")
         expect(source).to_contain("that caller has already made the value copy")
         expect(source).to_contain("self.slice_parts.clear()")
         expect(source).to_contain("self.slice_parts.push(self.source_chars[i])")

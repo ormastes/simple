@@ -1,0 +1,51 @@
+#!/bin/sh
+# Exercise the production audit in a tiny real Git source tree.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+SCRATCH=$(mktemp -d)
+trap 'rm -rf "$SCRATCH"' EXIT HUP INT TERM
+mkdir -p "$SCRATCH/scripts/check" "$SCRATCH/good" "$SCRATCH/bad" "$SCRATCH/empty"
+cp "$ROOT/scripts/check/check-riscv-rtl-truth.shs" "$SCRATCH/scripts/check/"
+cp "$ROOT/test/fixtures/riscv_truth/"*.vhd "$SCRATCH/bad/"
+cat > "$SCRATCH/good/reference.vhd" <<'VHDL'
+entity reference is
+end entity reference;
+architecture rtl of reference is
+  signal value : bit;
+begin
+  value <= '1';
+end architecture rtl;
+VHDL
+git -C "$SCRATCH" init -q
+git -C "$SCRATCH" add good/reference.vhd
+cd "$SCRATCH"
+passed=0
+check() {
+    expected=$1
+    pattern=$2
+    shift 2
+    actual=0
+    sh scripts/check/check-riscv-rtl-truth.shs "$@" > "$SCRATCH/result" 2>&1 || actual=$?
+    if [ "$actual" -ne "$expected" ] || ! grep -Fq "$pattern" "$SCRATCH/result"; then
+        cat "$SCRATCH/result"
+        echo "FAIL expected_exit=$expected actual_exit=$actual expected=$pattern"
+        exit 1
+    fi
+    if [ "$expected" -ne 0 ] && grep -q '^riscv_rtl_truth_ok=true' "$SCRATCH/result"; then
+        echo "FAIL rejected input reported success"
+        exit 1
+    fi
+    passed=$((passed + 1))
+}
+# Exact former vacuous default and explicit missing/empty admission paths.
+check 2 'riscv_rtl_truth_checked_files=0'
+check 2 'class=absent' --lane missing
+check 2 'class=empty' --lane empty
+check 2 'explicit lane missing' --lane good --lane missing
+check 2 'explicit lane missing' --lane good --lane empty
+# Positive data and the retained fake-core / undefined-entity sabotage controls.
+check 0 'riscv_rtl_truth_ok=true' --lane good
+grep -q '^riscv_rtl_truth_checked_files=1$' "$SCRATCH/result"
+check 1 'scripted step-counter core' --lane bad
+grep -q 'wrapper instantiates undefined entity' "$SCRATCH/result"
+echo "STATUS: PASS riscv-rtl-truth-contract passed=$passed failed=0"

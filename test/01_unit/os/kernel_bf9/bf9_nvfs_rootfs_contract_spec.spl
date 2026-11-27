@@ -1,0 +1,59 @@
+"""
+# @req REQ-SSPEC-OS
+# @cover src/os/services/vfs/vfs_init.spl
+#
+# Host unit specification for BF-9 Bug #11:
+#   image_builder_nvfs_rootfs_marker_preexisting_2026-06-28
+#
+# Verifies hosted DBFS / NvfsPosix rootfs mounting, rewrite without stale
+# pre-existing marker carryover, size checks, and executable readback.
+"""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use os.services.vfs.vfs_init.{
+    _clear_vfs_rootfs_for_test,
+    _mount_hosted_rootfs_for_test,
+    g_vfs_write_file_text,
+    g_vfs_read_file_text,
+    g_vfs_file_exists,
+    g_vfs_file_size,
+    g_vfs_read_file_bytes
+}
+use std.fs_driver.instance.{DriverInstance}
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
+use std.fs_driver.types.{MountOptions}
+
+fn _nvfs_root() -> DriverInstance:
+    var drv = NvfsPosixDriver.new("bf9-nvfs-root")
+    drv.mount(MountOptions.default()).unwrap()
+    DriverInstance.NvfsPosix(drv)
+
+fn _dbfs_root() -> DriverInstance:
+    DriverInstance.DbFs(DbFsDriver.new_hosted())
+
+describe "SimpleOS NVFS/DBFS rootfs clean marker contract":
+    it "mounts fresh NvfsPosix rootfs with absent marker then roundtrips exact marker write/rewrite":
+        step("clear VFS state, mount fresh NvfsPosix, verify marker absent before write")
+        _clear_vfs_rootfs_for_test()
+        expect(_mount_hosted_rootfs_for_test(_nvfs_root())).to_equal(true)
+        expect(g_vfs_file_exists("/VERSION")).to_equal(false)
+
+        expect(g_vfs_write_file_text("/VERSION", "simpleos-bf9-v1")).to_equal(true)
+        expect(g_vfs_file_exists("/VERSION")).to_equal(true)
+        expect(g_vfs_read_file_text("/VERSION")).to_equal("simpleos-bf9-v1")
+        expect(g_vfs_file_size("/VERSION").unwrap().to_i64()).to_equal(15)
+
+        step("overwrite marker and confirm clean replacement without trailing bytes")
+        expect(g_vfs_write_file_text("/VERSION", "v2")).to_equal(true)
+        expect(g_vfs_file_size("/VERSION").unwrap().to_i64()).to_equal(2)
+        expect(g_vfs_read_file_text("/VERSION")).to_equal("v2")
+
+    it "remounting a clean DbFs rootfs isolates earlier markers":
+        step("verify remount starts clean and stores fresh file bytes")
+        _clear_vfs_rootfs_for_test()
+        expect(_mount_hosted_rootfs_for_test(_dbfs_root())).to_equal(true)
+        expect(g_vfs_file_exists("/VERSION")).to_equal(false)
+        expect(g_vfs_write_file_text("/etc/bf9_probe", "clean-dbfs")).to_equal(true)
+        expect(g_vfs_read_file_bytes("/etc/bf9_probe").len()).to_equal(10u64)

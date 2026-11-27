@@ -1,0 +1,77 @@
+# @cover src/lib/nogc_sync_mut/database/bug.spl
+use std.spec.*
+use std.env.{env_get}
+use std.io.file_ops.{secure_temp_dir}
+use std.io.dir_ops.{dir_remove_all}
+use std.io_runtime.{file_copy, file_exists, file_write, read_file_text_result}
+use std.nogc_sync_mut.database.bug.{Bug, BugSeverity, BugStatus, create_bug_database, load_bug_database}
+
+fn append_bug_workspace() -> text:
+    var parent = env_get("TMPDIR")
+    if parent == "": parent = env_get("TEMP")
+    if parent == "": parent = env_get("TMP")
+    if parent == "": parent = "/tmp"
+    secure_temp_dir(parent, "bug-append-test").unwrap()
+
+fn append_bug_record(id: text) -> Bug:
+    Bug(id: id, severity: BugSeverity.P2, status: BugStatus.Open,
+        title: "Append preserving regression", description: ["new description"],
+        file: "src/lib/nogc_sync_mut/database/bug.spl", line: 1,
+        reproducible_by: "test/01_unit/lib/database/bug_append_preserving_spec.spl",
+        fix_strategy: ["preserve all original bytes"], investigation_log: ["regression control"],
+        created_at: "2026-10-27", updated_at: "2026-10-27", valid: true)
+
+describe "Canonical BugDatabase append preserving legacy records":
+    it "should append a new open bug without losing opaque fields or Unicode":
+        step("Copy a legacy registry with an extra field and CRLF metadata")
+        val root = append_bug_workspace()
+        val path = root + "/registry.sdn"
+        val copied = file_copy("test/fixtures/database/bug_append_legacy/opaque.sdn.fixture", path)
+        var database = create_bug_database(path)
+        val appended = database.append_open_bugs_preserving_legacy([append_bug_record("new_preserving_record")])
+        val content = read_file_text_result(path).unwrap()
+        val reopened = load_bug_database(path)
+        val lock_left = file_exists(path + ".lock")
+        val cleaned = dir_remove_all(root)
+        step("Check exact opaque payload and canonical new record after release")
+        expect(copied and appended and cleaned).to_equal(true)
+        expect(content).to_contain("true, EXTRA_UNPARSED_保持\r\n")
+        expect(content).to_contain("    retained_opaque, 0, Preserve this exact field\r\n")
+        expect(reopened!.get_bug("new_preserving_record") != nil).to_equal(true)
+        expect(lock_left).to_equal(false)
+
+    it "should reject an invalid checksum without rewriting any bytes":
+        step("Copy a deliberately invalid CRC input and retain its original text")
+        val root = append_bug_workspace()
+        val path = root + "/registry.sdn"
+        val copied = file_copy("test/fixtures/database/bug_append_legacy/invalid_crc.sdn.fixture", path)
+        val before = read_file_text_result(path).unwrap()
+        var database = create_bug_database(path)
+        val appended = database.append_open_bugs_preserving_legacy([append_bug_record("rejected_crc_record")])
+        val after = read_file_text_result(path).unwrap()
+        val lock_left = file_exists(path + ".lock")
+        val cleaned = dir_remove_all(root)
+        expect(copied and cleaned).to_equal(true)
+        expect(appended).to_equal(false)
+        expect(after).to_equal(before)
+        expect(lock_left).to_equal(false)
+
+    it "should refuse pending WAL and duplicate records without discarding either":
+        step("Keep an authoritative pending WAL and an existing opaque ID")
+        val root = append_bug_workspace()
+        val path = root + "/registry.sdn"
+        val copied = file_copy("test/fixtures/database/bug_append_legacy/opaque.sdn.fixture", path)
+        val before = read_file_text_result(path).unwrap()
+        var database = create_bug_database(path)
+        val duplicate = database.append_open_bugs_preserving_legacy([append_bug_record("retained_opaque")])
+        val wal_written = file_write(path + ".wal", "pending authoritative transaction")
+        val appended = database.append_open_bugs_preserving_legacy([append_bug_record("rejected_wal_record")])
+        val after = read_file_text_result(path).unwrap()
+        val wal = read_file_text_result(path + ".wal").unwrap()
+        val lock_left = file_exists(path + ".lock")
+        val cleaned = dir_remove_all(root)
+        expect(copied and wal_written and cleaned).to_equal(true)
+        expect(duplicate or appended).to_equal(false)
+        expect(after).to_equal(before)
+        expect(wal).to_equal("pending authoritative transaction")
+        expect(lock_left).to_equal(false)

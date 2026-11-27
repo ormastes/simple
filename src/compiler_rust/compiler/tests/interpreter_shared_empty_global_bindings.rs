@@ -9,13 +9,17 @@
 //! but left it allocating per frame.
 //!
 //! doc/08_tracking/bug/seed_empty_global_bindings_map_allocated_per_frame_2026-08-23.md
-use simple_compiler::value::CowEnv;
-use std::sync::Arc;
+use simple_compiler::value::{CowEnv, LayeredEnv};
+use std::sync::{Arc, Mutex};
 
 const N: usize = 1000;
+// These tests inspect the same process-wide Arc's exact holder count. Keep
+// other tests in this binary from adding or dropping holders mid-assertion.
+static GLOBAL_BINDINGS_COUNT: Mutex<()> = Mutex::new(());
 
 #[test]
 fn every_frame_shares_one_empty_global_bindings_map() {
+    let _guard = GLOBAL_BINDINGS_COUNT.lock().unwrap();
     let shared = CowEnv::shared_empty_global_bindings();
     let before = Arc::strong_count(&shared);
 
@@ -39,9 +43,10 @@ fn every_frame_shares_one_empty_global_bindings_map() {
 
 #[test]
 fn with_base_and_from_map_frames_share_it_too() {
+    let _guard = GLOBAL_BINDINGS_COUNT.lock().unwrap();
     let shared = CowEnv::shared_empty_global_bindings();
     let before = Arc::strong_count(&shared);
-    let base = Arc::new(std::collections::HashMap::new());
+    let base = Arc::new(LayeredEnv::new());
     let a = CowEnv::with_base(Arc::clone(&base));
     let b = CowEnv::from_map(std::collections::HashMap::new());
     assert_eq!(Arc::strong_count(&shared), before + 2);
@@ -54,6 +59,7 @@ fn with_base_and_from_map_frames_share_it_too() {
 /// sibling frames observe nothing.
 #[test]
 fn a_real_binding_copies_on_write_and_does_not_leak_into_siblings() {
+    let _guard = GLOBAL_BINDINGS_COUNT.lock().unwrap();
     let shared = CowEnv::shared_empty_global_bindings();
     let mut writer = CowEnv::new();
     let sibling = CowEnv::new();

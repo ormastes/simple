@@ -1,0 +1,108 @@
+# FV-OWN-02: executable solver twin for the source-linked Lean transfer model.
+# This exercises production events/overlap/CFG, not source-presence assertions.
+# Execution is NOT_RUN until an admitted Simple runner produces a receipt.
+use std.spec.{describe, it, expect, step}
+use compiler.borrow.borrow_check.borrow_graph.{Place, PlaceBase, PlaceElem, place_local, place_field, place_index, place_conflicts_with}
+use compiler.borrow.borrow_check.ownership_flow.{OwnershipFlow, OwnershipEvent, ownership_contains, ownership_event_transfer, ownership_write_covers}
+
+fn ownership_refinement_constant(base: Place, index: i64) -> Place:
+    Place(base: base.base, projections: [PlaceElem.ConstantIndex(index)])
+
+describe "FV-OWN-02 ownership-flow transfer refinement":
+    it "records a move without losing an existing different-place hazard":
+        step("Preserve exact maybe-moved places")
+        val first = place_field(place_local(1), 0)
+        val second = place_field(place_local(1), 1)
+        val moved = ownership_event_transfer([first], OwnershipEvent.Move(second))
+        expect(moved.len()).to_equal(2)
+        expect(ownership_contains(moved, first)).to_equal(true)
+        expect(ownership_contains(moved, second)).to_equal(true)
+        val repeated = ownership_event_transfer(moved, OwnershipEvent.Move(second))
+        expect(repeated.len()).to_equal(2)
+
+    it "revives only covered projections and preserves an ancestor move":
+        step("Require definite write coverage before revival")
+        val root = place_local(1)
+        val field = place_field(root, 0)
+        val other = place_field(root, 1)
+        val partial = ownership_event_transfer([root, field, other], OwnershipEvent.Revive(field))
+        expect(ownership_contains(partial, root)).to_equal(true)
+        expect(ownership_contains(partial, field)).to_equal(false)
+        expect(ownership_contains(partial, other)).to_equal(true)
+        val whole = ownership_event_transfer(partial, OwnershipEvent.Revive(root))
+        expect(whole.len()).to_equal(0)
+
+    it "keeps symbolic-index hazards while distinguishing constant elements":
+        step("Retain conservative symbolic-index overlap")
+        val root = place_local(1)
+        val dynamic_a = place_index(root, 7)
+        val dynamic_b = place_index(root, 8)
+        val zero = ownership_refinement_constant(root, 0)
+        val one = ownership_refinement_constant(root, 1)
+        expect(place_conflicts_with(dynamic_a, dynamic_b)).to_equal(true)
+        expect(place_conflicts_with(dynamic_a, zero)).to_equal(true)
+        expect(place_conflicts_with(zero, one)).to_equal(false)
+        expect(ownership_write_covers(dynamic_a, dynamic_a)).to_equal(false)
+        val state = ownership_event_transfer([dynamic_a], OwnershipEvent.Revive(dynamic_a))
+        expect(ownership_contains(state, dynamic_a)).to_equal(true)
+
+    it "rejects a moved read while accepting a distinct base":
+        step("Reject a real solver read after move")
+        var flow = OwnershipFlow.create()
+        val moved = place_field(place_local(1), 0)
+        flow.record(0, OwnershipEvent.Move(moved))
+        flow.record(1, OwnershipEvent.Read(place_local(2)))
+        flow.record(2, OwnershipEvent.Read(moved))
+        val errors = flow.check(0, {0: [0, 1, 2]}, {})
+        expect(errors.len()).to_equal(1)
+        expect(errors[0].point).to_equal(2)
+        expect(errors[0].message).to_contain("Use of moved value")
+
+    it "preserves reachable branch hazards under successor permutation":
+        step("Join reachable predecessor hazards")
+        for order in [[1, 2], [2, 1]]:
+            var flow = OwnershipFlow.create()
+            val moved = place_local(1)
+            flow.record(0, OwnershipEvent.Move(moved))
+            flow.record(1, OwnershipEvent.Read(moved))
+            val errors = flow.check(0, {0: [], 1: [0], 2: [], 3: [1]},
+                {0: order, 1: [3], 2: [3]})
+            expect(errors.len()).to_equal(1)
+            expect(errors[0].point).to_equal(1)
+
+    it "rejects writing through a moved ancestor but accepts exact reinitialization":
+        step("Distinguish descendant writes from replacing the moved owner")
+        val root = place_local(1)
+        val field = place_field(root, 0)
+        var invalid = OwnershipFlow.create()
+        invalid.record(0, OwnershipEvent.Move(root))
+        invalid.record(1, OwnershipEvent.Write(field))
+        invalid.record(2, OwnershipEvent.Revive(field))
+        val errors = invalid.check(0, {0: [0, 1, 2]}, {})
+        expect(errors.len()).to_equal(1)
+        expect(errors[0].point).to_equal(1)
+        var valid = OwnershipFlow.create()
+        valid.record(0, OwnershipEvent.Move(root))
+        valid.record(1, OwnershipEvent.Write(root))
+        valid.record(2, OwnershipEvent.Revive(root))
+        valid.record(3, OwnershipEvent.Read(root))
+        val valid_errors = valid.check(0, {0: [0, 1, 2, 3]}, {})
+        expect(valid_errors.len()).to_equal(0)
+
+    it "does not leak a terminal branch move into the surviving branch":
+        step("Exclude terminal predecessors from the join")
+        var flow = OwnershipFlow.create()
+        val moved = place_local(1)
+        flow.record(0, OwnershipEvent.Move(moved))
+        flow.record(1, OwnershipEvent.Read(moved))
+        val errors = flow.check(0, {0: [], 1: [0], 2: [], 3: [1]},
+            {0: [1, 2], 2: [3]})
+        expect(errors.len()).to_equal(0)
+
+    it "fails closed when the analysis cannot cover the CFG":
+        step("Reject incomplete ownership analysis")
+        var flow = OwnershipFlow.create()
+        flow.record(0, OwnershipEvent.Read(place_local(1)))
+        val errors = flow.check(0, {0: [0]}, {}, 0)
+        expect(errors.len()).to_equal(1)
+        expect(errors[0].message).to_contain("budget exhausted")

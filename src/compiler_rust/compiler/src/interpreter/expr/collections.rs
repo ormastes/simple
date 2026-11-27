@@ -8,8 +8,8 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 
 use super::super::{
-    comprehension_iterate, create_range_object_opt, normalize_index, shared_text_is_ascii, slice_collection,
-    ClassDef, Enums, Env, FunctionDef, ImplMethods,
+    comprehension_for_each, create_range_object_opt, normalize_index, shared_text_is_ascii, slice_collection,
+    slice_collection_by, ClassDef, Enums, Env, FunctionDef, ImplMethods,
 };
 
 /// Compute slice indices from start, end, length, and inclusive flag.
@@ -258,7 +258,7 @@ pub(super) fn eval_collection_expr(
             Ok(Some(result?))
         }
         Expr::Dict(entries) => {
-            let mut map = HashMap::new();
+            let mut map = crate::value::DictMap::new();
             for (k, v) in entries {
                 // Handle dict spread: **expr
                 if let Expr::DictSpread(inner) = k {
@@ -448,30 +448,23 @@ pub(super) fn eval_collection_expr(
                             Ok(Value::frozen_byte_array(sliced))
                         }
                         Value::Str(s) => {
-                            // BYTE-indexed, matching the native lane (`rt_slice`
-                            // slices `s->data` raw bytes), the byte-indexed
-                            // `.slice()`/`.substring()` methods, and the
-                            // Expr::Slice path below. Indexing by CHARACTER here
-                            // silently corrupted every byte-offset slice on
-                            // multi-byte text — the engine divergence behind
-                            // doc/08_tracking/bug/test_harness_execution_divergence_2026-07-29.md
-                            // (glob `_glob_at` false negatives, js `string_charAt`
-                            // returning empty for CJK under `bin/simple test`'s
-                            // forced SIMPLE_EXECUTION_MODE=interpret).
-                            let bytes = s.as_bytes();
-                            let len = bytes.len() as i64;
+                            // CODE-POINT-indexed (ADR-005 item 5), agreeing with
+                            // `len()` and `s[i]`. ASCII text slices bytes (same
+                            // result, O(1) index math).
+                            let len = crate::interpreter::text_cp_len(&s) as i64;
                             let (start_idx, end_idx) = compute_slice_indices(start, end, len, inclusive);
-                            // A range that splits a multi-byte codepoint cannot
-                            // be held in a Rust String; preserve the RAW bytes
-                            // (Value::StrBytes) so reassembly re-validates —
-                            // U+FFFD substitution here shredded every 1-unit
-                            // slice walk (json/toml tokenizers) because the
-                            // original byte was unrecoverable at concat time.
-                            let sliced: Vec<u8> = bytes
-                                .get(start_idx..end_idx.min(bytes.len()))
-                                .map(|b| b.to_vec())
-                                .unwrap_or_default();
-                            Ok(Value::text_from_bytes(sliced))
+                            if shared_text_is_ascii(&s) {
+                                let sliced: Vec<u8> = s
+                                    .as_bytes()
+                                    .get(start_idx..end_idx.min(s.len()))
+                                    .map(|b| b.to_vec())
+                                    .unwrap_or_default();
+                                Ok(Value::text_from_bytes(sliced))
+                            } else {
+                                let sliced: String =
+                                    s.chars().skip(start_idx).take(end_idx.saturating_sub(start_idx)).collect();
+                                Ok(Value::text(sliced))
+                            }
                         }
                         Value::Object {
                             ref class, ref fields, ..
@@ -670,7 +663,22 @@ pub(super) fn eval_collection_expr(
                 Value::Dict(map) => {
                     let key = idx_val.to_key_string();
                     // Return nil for missing keys instead of erroring
-                    Ok(crate::interpreter::module_dict_get(&map, &key)
+                    let stored = crate::interpreter::module_dict_get(&map, &key);
+                    // `m["f"]` on a module namespace names `f` exactly like
+                    // `m.f` does: a non-local receiver name holding the fn under
+                    // its own name, or any receiver (a local alias included)
+                    // holding a registered module namespace. A dict program
+                    // code built and handed out is its owner's data.
+                    if let Some(Value::Function { def, .. }) = &stored {
+                        if matches!(def.visibility, simple_parser::ast::Visibility::Private)
+                            && def.name == key
+                            && (matches!(receiver.as_ref(), Expr::Identifier(ns) if !env.is_local(ns))
+                                || crate::interpreter::is_module_namespace_dict(&map))
+                        {
+                            crate::interpreter::interpreter_call::gate_private_call(&def.name, def)?;
+                        }
+                    }
+                    Ok(stored
                         .map(|stored| Value::unwrap_dict_entry(&idx_val, stored))
                         .unwrap_or(Value::Nil))
                 }
@@ -817,7 +825,8 @@ pub(super) fn eval_collection_expr(
             condition,
         } => {
             let iter_val = evaluate_expr(iterable, env, functions, classes, enums, impl_methods)?;
-            let envs = comprehension_iterate(
+            let mut result = Vec::new();
+            comprehension_for_each(
                 &iter_val,
                 pattern,
                 condition,
@@ -826,13 +835,11 @@ pub(super) fn eval_collection_expr(
                 classes,
                 enums,
                 impl_methods,
+                |inner_env, functions, classes| {
+                    result.push(evaluate_expr(expr, inner_env, functions, classes, enums, impl_methods)?);
+                    Ok(())
+                },
             )?;
-
-            let mut result = Vec::new();
-            for mut inner_env in envs {
-                let val = evaluate_expr(expr, &mut inner_env, functions, classes, enums, impl_methods)?;
-                result.push(val);
-            }
             Ok(Some(Value::array(result)))
         }
         Expr::DictComprehension {
@@ -843,7 +850,8 @@ pub(super) fn eval_collection_expr(
             condition,
         } => {
             let iter_val = evaluate_expr(iterable, env, functions, classes, enums, impl_methods)?;
-            let envs = comprehension_iterate(
+            let mut result = crate::value::DictMap::new();
+            comprehension_for_each(
                 &iter_val,
                 pattern,
                 condition,
@@ -852,14 +860,13 @@ pub(super) fn eval_collection_expr(
                 classes,
                 enums,
                 impl_methods,
+                |inner_env, functions, classes| {
+                    let k = evaluate_expr(key, inner_env, functions, classes, enums, impl_methods)?;
+                    let v = evaluate_expr(value, inner_env, functions, classes, enums, impl_methods)?;
+                    result.insert(k.to_key_string(), Value::wrap_dict_entry(&k, v));
+                    Ok(())
+                },
             )?;
-
-            let mut result = HashMap::new();
-            for mut inner_env in envs {
-                let k = evaluate_expr(key, &mut inner_env, functions, classes, enums, impl_methods)?;
-                let v = evaluate_expr(value, &mut inner_env, functions, classes, enums, impl_methods)?;
-                result.insert(k.to_key_string(), Value::wrap_dict_entry(&k, v));
-            }
             Ok(Some(Value::Dict(Arc::new(result))))
         }
         Expr::Slice {
@@ -872,7 +879,7 @@ pub(super) fn eval_collection_expr(
             let len = match &recv_val {
                 Value::Array(arr) => arr.len() as i64,
                 Value::ByteArray(arr) | Value::FrozenByteArray(arr) => arr.len() as i64,
-                Value::Str(s) => s.len() as i64,
+                Value::Str(s) => crate::interpreter::text_cp_len(s) as i64,
                 // Byte length for an already-raw-bytes text value, matching the
                 // `Value::Str` arm above (which is also byte-indexed) and the
                 // `Value::StrBytes` arm of the dispatch match further below.
@@ -1004,7 +1011,13 @@ pub(super) fn eval_collection_expr(
             }
 
             let result = match recv_val {
-                Value::Array(arr) => Ok(Value::array(slice_collection(&arr, start_idx, end_idx, step_val))),
+                Value::Array(arr) => Ok(Value::array(slice_collection_by(
+                    arr.len(),
+                    |i| arr.get_value(i).expect("slice index below len"),
+                    start_idx,
+                    end_idx,
+                    step_val,
+                ))),
                 Value::ByteArray(bytes) => Ok(Value::byte_array(slice_collection(
                     &bytes, start_idx, end_idx, step_val,
                 ))),
@@ -1012,31 +1025,17 @@ pub(super) fn eval_collection_expr(
                     &bytes, start_idx, end_idx, step_val,
                 ))),
                 Value::Str(s) => {
-                    // BYTE-indexed slicing. The `len` these indices were
-                    // normalized against (above) is already the BYTE length
-                    // (`s.len()`), but this arm then sliced a CHAR vector with
-                    // those byte-derived indices — an internally mixed index
-                    // space that corrupted every multi-byte slice (e.g.
-                    // "日本語"[3:6] returned "" instead of "本"). Slicing the
-                    // byte slice makes the unit match the normalization and the
-                    // native lane; a range that splits a codepoint preserves
-                    // the RAW bytes (Value::StrBytes) so reassembly
-                    // re-validates, matching the compiled lane.
-                    let sliced = slice_collection(s.as_bytes(), start_idx, end_idx, step_val);
-                    // UTF-8 slice audit, stage 1 (COUNTING ONLY, default off).
-                    // Preserving the RAW bytes is what makes a mid-codepoint
-                    // boundary invisible: `Value::StrBytes` holds them and the
-                    // byte length is the only tell. Record it; do not fail.
-                    if simple_runtime::text_slice_audit::enabled() {
-                        simple_runtime::text_slice_audit::note(
-                            simple_runtime::text_slice_audit::site::INTERP_BRACKET,
-                            start_idx,
-                            end_idx,
-                            s.as_bytes(),
-                            &sliced,
-                        );
+                    // CODE-POINT-indexed (ADR-005): `len` above was normalized
+                    // against the code-point count, so slice the chars. ASCII
+                    // text keeps the byte fast path (identical result).
+                    if shared_text_is_ascii(&s) {
+                        let sliced = slice_collection(s.as_bytes(), start_idx, end_idx, step_val);
+                        Ok(Value::text_from_bytes(sliced))
+                    } else {
+                        let chars: Vec<char> = s.chars().collect();
+                        let sliced = slice_collection(&chars, start_idx, end_idx, step_val);
+                        Ok(Value::text(sliced.into_iter().collect::<String>()))
                     }
-                    Ok(Value::text_from_bytes(sliced))
                 }
                 Value::StrBytes(b) => {
                     // Same BYTE-indexed slicing as the `Value::Str` arm above,

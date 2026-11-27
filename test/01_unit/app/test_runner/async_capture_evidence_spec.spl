@@ -1,0 +1,31 @@
+use std.test_runner.test_runner_async.{AsyncTestRun, create_temp_files, cleanup_temp_files, collect_async_result}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_exists}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+
+describe "Async capture evidence ownership":
+    it "retains captures when an owned token has no completion receipt":
+        val (out, err) = create_temp_files("unresolved_capture_spec.spl")
+        file_write(out, "unresolved stdout evidence")
+        file_write(err, "unresolved stderr evidence")
+        # An unissued token cannot acquire or terminate any real process.
+        val run = AsyncTestRun(pid: 9223372036854775807,
+            file_path: "unresolved_capture_spec.spl", start_time: time_now_unix_micros(),
+            stdout_file: out, stderr_file: err, timeout_ms: 1000)
+        val result = collect_async_result(run, -1)
+        val retained_out = file_exists(out)
+        val retained_err = file_exists(err)
+        cleanup_temp_files(out, err)
+        expect(result.process_completion).to_be_nil()
+        expect(retained_out).to_equal(true)
+        expect(retained_err).to_equal(true)
+
+    it "cleans captures when admission never acquired a child":
+        val (out, err) = create_temp_files("denied_capture_spec.spl")
+        file_write(err, "admission denied")
+        val run = AsyncTestRun(pid: -1, file_path: "denied_capture_spec.spl",
+            start_time: time_now_unix_micros(), stdout_file: out, stderr_file: err,
+            timeout_ms: 1000)
+        val result = collect_async_result(run, -1)
+        expect(result.failed).to_be_greater_than(0)
+        expect(file_exists(out)).to_equal(false)
+        expect(file_exists(err)).to_equal(false)

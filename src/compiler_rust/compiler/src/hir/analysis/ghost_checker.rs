@@ -263,6 +263,11 @@ impl<'a> GhostChecker<'a> {
                     self.check_ghost_expr(arg, func_name);
                 }
             }
+            HirExprKind::TypeParamStaticCall { args, .. } => {
+                for arg in args {
+                    self.check_ghost_expr(arg, func_name);
+                }
+            }
             HirExprKind::FieldAccess { receiver, .. } => {
                 self.check_ghost_expr(receiver, func_name);
             }
@@ -418,6 +423,11 @@ impl<'a> GhostChecker<'a> {
                     self.check_non_ghost_expr(arg, func_name, in_contract);
                 }
             }
+            HirExprKind::TypeParamStaticCall { args, .. } => {
+                for arg in args {
+                    self.check_non_ghost_expr(arg, func_name, in_contract);
+                }
+            }
             HirExprKind::FieldAccess { receiver, .. } => {
                 self.check_non_ghost_expr(receiver, func_name, in_contract);
             }
@@ -501,6 +511,8 @@ mod tests {
             is_ghost: false,
             is_sync: false,
             has_suspension: false,
+            generic_params: vec![],
+            generic_bounds: vec![],
         });
 
         // Add a ghost function that calls pure_fn
@@ -533,6 +545,8 @@ mod tests {
             is_ghost: true,
             is_sync: false,
             has_suspension: false,
+            generic_params: vec![],
+            generic_bounds: vec![],
         });
 
         let checker = GhostChecker::new(&module);

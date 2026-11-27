@@ -6,7 +6,9 @@ use compiler.driver.cache.cold_hir_semantic_seed_v1.{
     cold_hir_inventory_generation_binding_reason_v1,
     cold_hir_source_mismatch_evidence_v1
 }
-use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1, CompileSourceInventoryV1, compile_source_inventory_digest_v1}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1,
+    CompileSourceInventoryV1, CompileSourceInventoryReadV1,
+    compile_source_inventory_digest_v1}
 use std.common.crypto.sha256.{sha256_text}
 
 fn seed_probe_module() -> HirModule:
@@ -17,6 +19,11 @@ fn seed_probe_module() -> HirModule:
         bitfields: {}, traits: {}, impls: [], constants: {},
         static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
         mock_decls: [], types: [], extend_enums: [])
+
+fn admitted_inventory(
+    inventory: CompileSourceInventoryV1, digest: text
+) -> CompileSourceInventoryReadV1:
+    CompileSourceInventoryReadV1(true, "", digest, Some(inventory))
 
 describe "cold HIR source mismatch diagnostics":
     it "skips a missing physical alias before reporting the later mismatch":
@@ -128,7 +135,7 @@ describe "cold HIR seed from one admitted inventory entry":
         lowered["pkg.mod"] = physical_hir
         lowered["pkg.alias"] = physical_hir
         val receipts = cold_hir_typed_receipts_from_lowered_sources_v1(
-            "/frozen", digest, inventory, snapshot, snapshot_digest,
+            "/frozen", digest, admitted_inventory(inventory, digest), snapshot, snapshot_digest,
             ["/frozen/pkg/mod.spl", "/frozen/pkg/mod.spl"],
             [sha256_text(content), sha256_text(content)],
             [content.len(), content.len()],
@@ -140,14 +147,14 @@ describe "cold HIR seed from one admitted inventory entry":
         expect(receipts.unwrap()[0].seed.inventory_digest).to_equal(snapshot_digest)
         expect(receipts.unwrap()[0].abi_payload.len()).to_be_greater_than(0)
         val changed = cold_hir_typed_receipts_from_lowered_sources_v1(
-            "/frozen", digest, inventory, snapshot, snapshot_digest,
+            "/frozen", digest, admitted_inventory(inventory, digest), snapshot, snapshot_digest,
             ["/frozen/pkg/mod.spl"],
             [sha256_text("changed")], ["changed".len()],
             ["pkg.mod"], lowered)
         expect(changed.is_err()).to_be(true)
         expect(changed.unwrap_err()).to_equal("cold-hir-source-content-mismatch")
         val missing = cold_hir_typed_receipts_from_lowered_sources_v1(
-            "/frozen", digest, inventory, snapshot, snapshot_digest,
+            "/frozen", digest, admitted_inventory(inventory, digest), snapshot, snapshot_digest,
             ["/frozen/pkg/mod.spl"],
             [sha256_text(content)], [content.len()],
             ["absent"], lowered)
@@ -155,13 +162,13 @@ describe "cold HIR seed from one admitted inventory entry":
         expect(missing.unwrap_err()).to_equal("cold-hir-lowered-module-missing:absent")
         lowered["bad|key"] = physical_hir
         val invalid_module_key = cold_hir_typed_receipts_from_lowered_sources_v1(
-            "/frozen", digest, inventory, snapshot, snapshot_digest,
+            "/frozen", digest, admitted_inventory(inventory, digest), snapshot, snapshot_digest,
             ["/frozen/pkg/mod.spl"], [source.content_digest], [content.len()],
             ["bad|key"], lowered)
         expect(invalid_module_key.unwrap_err()).to_equal("cold-hir-module-identity-invalid")
         val complete_snapshot = snapshot + "\npkg/unused.spl|sha256_{unrelated.content_digest}|{unrelated.byte_count}"
         val duplicate_module_key = cold_hir_typed_receipts_from_lowered_sources_v1(
-            "/frozen", digest, inventory,
+            "/frozen", digest, admitted_inventory(inventory, digest),
             complete_snapshot, sha256_text(complete_snapshot),
             ["/frozen/pkg/mod.spl", "/frozen/pkg/unused.spl"],
             [source.content_digest, unrelated.content_digest],
@@ -169,29 +176,29 @@ describe "cold HIR seed from one admitted inventory entry":
             ["pkg.mod", "pkg.mod"], lowered)
         expect(duplicate_module_key.unwrap_err()).to_equal("cold-hir-module-source-mismatch")
         val wrong_source_digest = cold_hir_typed_receipts_from_lowered_sources_v1(
-            "/frozen", snapshot_digest, inventory, snapshot, snapshot_digest,
+            "/frozen", snapshot_digest, admitted_inventory(inventory, digest), snapshot, snapshot_digest,
             ["/frozen/pkg/mod.spl"], [source.content_digest], [content.len()],
             ["pkg.mod"], lowered)
         expect(wrong_source_digest.unwrap_err()).to_equal("cold-hir-inventory-mismatch")
         val wrong_snapshot_digest = cold_hir_typed_receipts_from_lowered_sources_v1(
-            "/frozen", digest, inventory, snapshot, digest,
+            "/frozen", digest, admitted_inventory(inventory, digest), snapshot, digest,
             ["/frozen/pkg/mod.spl"], [source.content_digest], [content.len()],
             ["pkg.mod"], lowered)
         expect(wrong_snapshot_digest.unwrap_err()).to_equal("cold-hir-snapshot-inventory-mismatch")
         val absent_from_snapshot = cold_hir_typed_receipts_from_lowered_sources_v1(
-            "/frozen", digest, inventory, "", sha256_text(""),
+            "/frozen", digest, admitted_inventory(inventory, digest), "", sha256_text(""),
             ["/frozen/pkg/mod.spl"], [source.content_digest], [content.len()],
             ["pkg.mod"], lowered)
         expect(absent_from_snapshot.unwrap_err()).to_equal("cold-hir-source-absent")
         val changed_snapshot = "pkg/mod.spl|sha256_{sha256_text(unused)}|{source.byte_count}"
         val changed_row = cold_hir_typed_receipts_from_lowered_sources_v1(
-            "/frozen", digest, inventory, changed_snapshot, sha256_text(changed_snapshot),
+            "/frozen", digest, admitted_inventory(inventory, digest), changed_snapshot, sha256_text(changed_snapshot),
             ["/frozen/pkg/mod.spl"], [source.content_digest], [content.len()],
             ["pkg.mod"], lowered)
         expect(changed_row.unwrap_err()).to_equal("cold-hir-snapshot-source-content-mismatch")
         val duplicate_snapshot = "{snapshot}\n{snapshot}"
         val duplicate_row = cold_hir_typed_receipts_from_lowered_sources_v1(
-            "/frozen", digest, inventory, duplicate_snapshot, sha256_text(duplicate_snapshot),
+            "/frozen", digest, admitted_inventory(inventory, digest), duplicate_snapshot, sha256_text(duplicate_snapshot),
             ["/frozen/pkg/mod.spl"], [source.content_digest], [content.len()],
             ["pkg.mod"], lowered)
         expect(duplicate_row.unwrap_err()).to_equal("cold-hir-snapshot-source-invalid")
@@ -205,7 +212,7 @@ describe "cold HIR seed from one admitted inventory entry":
                 "cold-hir-inventory-generation-mismatch")
         val wrong_size = "pkg/mod.spl|sha256_{source.content_digest}|{source.byte_count + 1}"
         val wrong_bytes = cold_hir_typed_receipts_from_lowered_sources_v1(
-            "/frozen", digest, inventory, wrong_size, sha256_text(wrong_size),
+            "/frozen", digest, admitted_inventory(inventory, digest), wrong_size, sha256_text(wrong_size),
             ["/frozen/pkg/mod.spl"], [source.content_digest], [content.len()],
             ["pkg.mod"], lowered)
         expect(wrong_bytes.unwrap_err()).to_equal("cold-hir-snapshot-source-content-mismatch")

@@ -33,6 +33,29 @@ fn uint_wrap_width(left: &Value, right: &Value) -> Option<u8> {
     }
 }
 
+/// Width selection for `+ - *`. Like `uint_wrap_width`, but a plain `Int`
+/// operand that cannot be represented in the unsigned operand's width
+/// cannot have been a same-typed literal/value, so it is a wider signed
+/// operand (`u8 * i64`); the operation then stays in i64 instead of
+/// narrowing both sides to the u8 width (`18u8 * 65536` must not become 0).
+fn uint_arith_wrap_width(left: &Value, right: &Value) -> Option<u8> {
+    fn fits(width: u8, v: &Value) -> bool {
+        match (width, v) {
+            (64, _) => true,
+            (w, Value::Int(n)) if w < 64 => *n >= 0 && (*n as u64) < (1u64 << w),
+            _ => true,
+        }
+    }
+    match (left, right) {
+        (Value::UInt { width, .. }, other @ Value::Int(_)) | (other @ Value::Int(_), Value::UInt { width, .. })
+            if !fits(*width, other) =>
+        {
+            None
+        }
+        _ => uint_wrap_width(left, right),
+    }
+}
+
 /// Compare integer values without routing `u64` through signed `i64` storage.
 ///
 /// `Value::as_int()` intentionally exposes the raw machine word as `i64` for
@@ -122,6 +145,75 @@ fn division_by_zero_error(message: &'static str, help: &'static str) -> CompileE
         .with_help(help)
         .with_note("check that the divisor is not zero before the operation");
     CompileError::semantic_with_context(message.to_string(), ctx)
+}
+
+/// Static integer width of an expression, as the pure-Simple type checker
+/// assigns it: an untyped literal adopts the typed operand, so `m + 1` with
+/// `m: i32` is i32. `Value::Int` carries no width, so the interpreter reads
+/// it from the declaration (`Env::declared_int_width`), a cast, or a suffix.
+/// Bug: doc/08_tracking/bug/seed_i32_overflow_interp_vs_jit_divergence_2026-11-05.md
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum StaticIntWidth {
+    /// An unsuffixed integer literal: takes the other operand's width.
+    Literal,
+    /// A declared i8/i16/i32 value.
+    Narrow(u8),
+    /// i64, unknown, or not an integer: no narrowing.
+    Wide,
+}
+
+pub(crate) fn static_int_width(expr: &Expr, env: &Env) -> StaticIntWidth {
+    use simple_parser::NumericSuffix;
+    match expr {
+        Expr::Integer(_) => StaticIntWidth::Literal,
+        Expr::TypedInteger(_, NumericSuffix::I8) => StaticIntWidth::Narrow(8),
+        Expr::TypedInteger(_, NumericSuffix::I16) => StaticIntWidth::Narrow(16),
+        Expr::TypedInteger(_, NumericSuffix::I32) => StaticIntWidth::Narrow(32),
+        Expr::Identifier(name) => env
+            .declared_int_width(name)
+            .map_or(StaticIntWidth::Wide, StaticIntWidth::Narrow),
+        Expr::Cast { target_type, .. } => {
+            let resolved = crate::interpreter::resolve_generic_type_in_scope(target_type);
+            Env::narrow_signed_width_of(Some(&resolved)).map_or(StaticIntWidth::Wide, StaticIntWidth::Narrow)
+        }
+        Expr::Unary {
+            op: UnaryOp::Neg | UnaryOp::BitNot,
+            operand,
+        } => static_int_width(operand, env),
+        // A shift has the type of its left operand.
+        Expr::Binary {
+            op: BinOp::ShiftLeft | BinOp::ShiftRight,
+            left,
+            ..
+        } => static_int_width(left, env),
+        Expr::Binary {
+            op:
+                BinOp::Add
+                | BinOp::Sub
+                | BinOp::Mul
+                | BinOp::Div
+                | BinOp::Mod
+                | BinOp::BitAnd
+                | BinOp::BitOr
+                | BinOp::BitXor,
+            left,
+            right,
+        } => match (static_int_width(left, env), static_int_width(right, env)) {
+            (StaticIntWidth::Literal, StaticIntWidth::Literal) => StaticIntWidth::Literal,
+            (StaticIntWidth::Narrow(w), StaticIntWidth::Literal)
+            | (StaticIntWidth::Literal, StaticIntWidth::Narrow(w)) => StaticIntWidth::Narrow(w),
+            (StaticIntWidth::Narrow(a), StaticIntWidth::Narrow(b)) if a == b => StaticIntWidth::Narrow(a),
+            _ => StaticIntWidth::Wide,
+        },
+        _ => StaticIntWidth::Wide,
+    }
+}
+
+/// Two's-complement wrap of `v` to a signed `width`-bit integer, sign-extended
+/// back to i64 (what a native `i32` add/sub/mul produces).
+pub(crate) fn wrap_signed(v: i64, width: u8) -> i64 {
+    let shift = 64 - u32::from(width);
+    (v << shift) >> shift
 }
 
 fn fast_int_binop(op: &BinOp, left: i64, right: i64) -> Result<Option<Value>, CompileError> {
@@ -250,6 +342,26 @@ fn try_dunder_unaryop(
     None
 }
 
+/// Equality between a 64-bit `Value::UInt` and a NEGATIVE `Value::Int`.
+///
+/// An unsuffixed literal above `i64::MAX` (`0xFFFF_FFFF_FFFF_FFF0`) lexes to
+/// its 64-bit pattern stored as a negative `i64`, so `u64_field == 0xFFFF...`
+/// compared `UInt` against `Int(-16)` and was always false, while the JIT and
+/// native lanes compare the machine words and say true
+/// (interp_u64_above_i64_max_signed_compare_and_print_2026-11-03). Compare
+/// the bit patterns for exactly that shape, as the compiled lanes do; every
+/// other pair keeps `Value` equality.
+fn uint64_word_eq(left: &Value, right: &Value) -> Option<bool> {
+    match (left, right) {
+        (Value::UInt { value, width: 64 }, Value::Int(i)) | (Value::Int(i), Value::UInt { value, width: 64 })
+            if *i < 0 =>
+        {
+            Some(*value == *i as u64)
+        }
+        _ => None,
+    }
+}
+
 /// Ordering for comparisons where at least one side is an UNSIGNED integer
 /// (`Value::UInt`), returning `None` when neither side is unsigned so the
 /// caller falls through to its existing arms.
@@ -297,6 +409,13 @@ fn is_2d_array(arr: &[Value]) -> bool {
 }
 
 /// Check if a value is a pointer type (can be dereferenced)
+/// A borrowed aggregate parameter binds as the plain value (see
+/// `unwrap_aggregate_borrow`), so `*p` on it is the value itself.
+fn operand_is_borrow_param(operand: &Expr, env: &Env) -> bool {
+    matches!(operand, Expr::Identifier(name)
+        if env.contains_key(&crate::interpreter::place::borrow_param_marker(name)))
+}
+
 fn is_pointer_type(val: &Value) -> bool {
     matches!(
         val,
@@ -469,6 +588,7 @@ pub(super) fn eval_op_expr(
                                     body,
                                     env: lambda_env,
                                 } => {
+                                    let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&lambda_env);
                                     let mut local_env = Env::clone(&lambda_env);
                                     for (i, param_name) in params.iter().enumerate() {
                                         if let Some(arg) = all_args.get(i) {
@@ -482,7 +602,8 @@ pub(super) fn eval_op_expr(
                                 _ => {
                                     // Try looking up function by name
                                     if let Expr::Identifier(name) = callee.as_ref() {
-                                        if let Some(func_def) = functions.get(name).cloned() {
+                                        if let Some(func_def) = crate::interpreter::interpreter_call::caller_bound_function(name, functions) {
+                                            crate::interpreter::interpreter_call::gate_private_call(&func_def.name, &func_def)?;
                                             let mut env_clone = env.clone();
                                             return Ok(Some(super::super::exec_function_with_values(
                                                 &func_def,
@@ -526,6 +647,7 @@ pub(super) fn eval_op_expr(
                                     body,
                                     env: lambda_env,
                                 } => {
+                                    let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&lambda_env);
                                     let mut local_env = Env::clone(&lambda_env);
                                     if let Some(param_name) = params.first() {
                                         local_env.insert(param_name.clone(), left_val);
@@ -537,7 +659,8 @@ pub(super) fn eval_op_expr(
                                 _ => {
                                     // Try looking up function by name from the right expression
                                     if let Expr::Identifier(name) = right.as_ref() {
-                                        if let Some(func_def) = functions.get(name).cloned() {
+                                        if let Some(func_def) = crate::interpreter::interpreter_call::caller_bound_function(name, functions) {
+                                            crate::interpreter::interpreter_call::gate_private_call(&func_def.name, &func_def)?;
                                             let mut env_clone = env.clone();
                                             return Ok(Some(super::super::exec_function_with_values(
                                                 &func_def,
@@ -567,37 +690,124 @@ pub(super) fn eval_op_expr(
 
             let mut left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
             let mut right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
-
-            // Newtype-wrap detection: if both operands are Objects of the SAME class
-            // with a single `value` field (the canonical newtype shape), arithmetic
-            // ops unwrap to the inner value, perform the op on raw scalars, then
-            // re-wrap the int/float result back into the newtype. Comparison ops
-            // (==, !=, <, >, <=, >=) return Bool and never re-wrap.
-            let newtype_wrap_class: Option<String> = match (&left_val, &right_val) {
-                (Value::Object { class: lc, fields: lf }, Value::Object { class: rc, fields: rf })
-                    if lc == rc
-                        && lf.len() == 1
-                        && lf.contains_key("value")
-                        && rf.len() == 1
-                        && rf.contains_key("value")
-                        && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) =>
-                {
-                    Some(lc.clone())
-                }
-                _ => None,
-            };
-
-            // For newtype arithmetic, unwrap to inner scalars so use_float detection
-            // and Int/Float dispatch see the real underlying types.
-            if newtype_wrap_class.is_some() {
-                if let Value::Object { fields, .. } = &left_val {
-                    if let Some(inner) = fields.get("value").cloned() {
-                        left_val = inner;
+            // Cross-unit / unit-vs-bare-scalar deny (mirrors the pure-Simple matrix in
+            // `compiler/30.types/units/unit_ops.spl`, code SPL-UNIT-002). Only
+            // `unit`/numeric-`newtype` record classes take part; ordinary classes and
+            // structs are untouched.
+            {
+                let unit_class_of = |v: &Value| -> Option<String> {
+                    let name = match v {
+                        Value::Object { class, fields } if fields.len() == 1 && fields.contains_key("value") => {
+                            class.as_str()
+                        }
+                        Value::ClassInstance(inst) => inst.class(),
+                        _ => return None,
+                    };
+                    crate::interpreter_unit::is_record_unit_class(name).then(|| name.to_string())
+                };
+                let is_scalar = |v: &Value| matches!(v, Value::Int(_) | Value::UInt { .. } | Value::Float(_));
+                let cmp = matches!(
+                    op,
+                    BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq
+                );
+                let arith = matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod);
+                let op_sym = match op {
+                    BinOp::Add => "+",
+                    BinOp::Sub => "-",
+                    BinOp::Mul => "*",
+                    BinOp::Div => "/",
+                    BinOp::Mod => "%",
+                    BinOp::Eq => "==",
+                    BinOp::NotEq => "!=",
+                    BinOp::Lt => "<",
+                    BinOp::Gt => ">",
+                    BinOp::LtEq => "<=",
+                    BinOp::GtEq => ">=",
+                    _ => "?",
+                };
+                if arith || cmp {
+                    let lu = unit_class_of(&left_val);
+                    let ru = unit_class_of(&right_val);
+                    let deny = match (&lu, &ru) {
+                        (Some(l), Some(r)) if l != r => {
+                            Some(format!("`{} {} {}`: distinct units never mix implicitly", l, op_sym, r))
+                        }
+                        (Some(l), None) if is_scalar(&right_val) && (cmp || matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mod)) => {
+                            Some(format!(
+                                "`{} {} <scalar>`: no implicit arithmetic between a unit and a raw scalar; convert explicitly",
+                                l, op_sym
+                            ))
+                        }
+                        (None, Some(r)) if is_scalar(&left_val) && (cmp || matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mod)) => {
+                            Some(format!(
+                                "`<scalar> {} {}`: no implicit arithmetic between a unit and a raw scalar; convert explicitly",
+                                op_sym, r
+                            ))
+                        }
+                        _ => None,
+                    };
+                    if let Some(why) = deny {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_OPERATION)
+                            .with_help("convert explicitly through `.value`, or construct the intended unit");
+                        return Err(CompileError::semantic_with_context(
+                            format!("SPL-UNIT-002: {} is not an approved unit operation", why),
+                            ctx,
+                        ));
                     }
                 }
-                if let Value::Object { fields, .. } = &right_val {
-                    if let Some(inner) = fields.get("value").cloned() {
-                        right_val = inner;
+            }
+
+
+            // Newtype/`unit` shape: a registered unit/newtype record class instance (or struct object) whose
+            // only field is `value` (cross-unit mixes were already denied above). Rules:
+            //   U (+|-|%) U -> U        U * U, U / U -> the bare scalar
+            //   U * n, n * U, U / n -> U      comparisons unwrap through `as_int`.
+            let newtype_wrap_class: Option<String>;
+            let newtype_as_instance: bool;
+            {
+                let shape = |v: &Value| -> Option<(String, Value, bool)> {
+                    match v {
+                        Value::Object { class, fields } if fields.len() == 1 => {
+                            fields.get("value").map(|x| (class.clone(), x.clone(), false))
+                        }
+                        Value::ClassInstance(inst)
+                            if crate::interpreter_unit::is_record_unit_class(inst.class()) =>
+                        {
+                            inst.with_fields(|f| {
+                                if f.len() == 1 {
+                                    f.get("value").map(|x| (inst.class().to_string(), x.clone(), true))
+                                } else {
+                                    None
+                                }
+                            })
+                        }
+                        _ => None,
+                    }
+                };
+                let is_scalar = |v: &Value| matches!(v, Value::Int(_) | Value::UInt { .. } | Value::Float(_));
+                let arith = matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod);
+                let scale = matches!(op, BinOp::Mul | BinOp::Div);
+                match (shape(&left_val), shape(&right_val)) {
+                    (Some((lc, lv, li)), Some((rc, rv, _))) if lc == rc && arith => {
+                        left_val = lv;
+                        right_val = rv;
+                        newtype_as_instance = li;
+                        newtype_wrap_class = if scale { None } else { Some(lc) };
+                    }
+                    (Some((lc, lv, li)), None) if scale && is_scalar(&right_val) => {
+                        left_val = lv;
+                        newtype_as_instance = li;
+                        newtype_wrap_class = Some(lc);
+                    }
+                    (None, Some((rc, rv, ri))) if matches!(op, BinOp::Mul) && is_scalar(&left_val) => {
+                        right_val = rv;
+                        newtype_as_instance = ri;
+                        newtype_wrap_class = Some(rc);
+                    }
+                    _ => {
+                        newtype_as_instance = false;
+                        newtype_wrap_class = None;
                     }
                 }
             }
@@ -624,6 +834,18 @@ pub(super) fn eval_op_expr(
                         Ok(result_family) => {
                             // Operation allowed - perform it on inner values
                             let result_val = evaluate_unit_binary_inner(lv, rv, *op)?;
+                            // Comparisons yield a plain bool, and U * U / U / U on a
+                            // nominal `unit Name: T` yield the underlying scalar
+                            // (pure-Simple `unit_op_verdict`), never a unit.
+                            if matches!(
+                                op,
+                                BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq
+                            ) || (matches!(op, BinOp::Mul | BinOp::Div)
+                                && left_family == right_family
+                                && crate::interpreter_unit::is_record_unit_class(left_family))
+                            {
+                                return Ok(Some(result_val));
+                            }
                             // Return unit with result family (or left family if same-family operation).
                             //
                             // The result SUFFIX is the left operand's suffix whenever the
@@ -652,6 +874,29 @@ pub(super) fn eval_op_expr(
                             ));
                         }
                     }
+                }
+                // Scaling needs a numeric scalar: `text * 1_sfx` (the `(expr)_sfx`
+                // desugar) used to repeat the text and wrap it as a numeric unit.
+                // Bug: paren_expr_unit_suffix_parsed_as_call_2026-11-16.
+                (Value::Unit { suffix, .. }, other) | (other, Value::Unit { suffix, .. })
+                    if matches!(op, BinOp::Mul | BinOp::Div)
+                        && !matches!(
+                            other,
+                            Value::Int(_) | Value::UInt { .. } | Value::Float(_) | Value::Float32(_)
+                        ) =>
+                {
+                    let ctx = ErrorContext::new().with_code(codes::INVALID_OPERATION).with_help(format!(
+                        "for a text-based unit use the literal form \"...\"_{}",
+                        suffix
+                    ));
+                    return Err(CompileError::semantic_with_context(
+                        format!(
+                            "unit suffix `_{}` needs a numeric value (got {})",
+                            suffix,
+                            other.type_name()
+                        ),
+                        ctx,
+                    ));
                 }
                 // Mixed unit/non-unit operations: allow scaling (mul/div)
                 (Value::Unit { value, suffix, family }, other) | (other, Value::Unit { value, suffix, family })
@@ -717,6 +962,15 @@ pub(super) fn eval_op_expr(
             if newtype_wrap_class.is_none() {
                 if let (Value::Int(left), Value::Int(right)) = (&left_val, &right_val) {
                     if let Some(value) = fast_int_binop(op, *left, *right)? {
+                        // A result inside i8 is unchanged by any narrow wrap, so
+                        // the static width walk runs only off the hot small-int path.
+                        if let Value::Int(r) = value {
+                            if !(i8::MIN as i64..=i8::MAX as i64).contains(&r) {
+                                if let StaticIntWidth::Narrow(w) = static_int_width(expr, env) {
+                                    return Ok(Some(Value::Int(wrap_signed(r, w))));
+                                }
+                            }
+                        }
                         return Ok(Some(value));
                     }
                 }
@@ -805,7 +1059,7 @@ pub(super) fn eval_op_expr(
                             impl_methods,
                         ) {
                             result
-                        } else if let Some(width) = uint_wrap_width(&left_val, &right_val) {
+                        } else if let Some(width) = uint_arith_wrap_width(&left_val, &right_val) {
                             // Unsigned wrap: u32/u16/u8/u64 + ... applies modulo-2^width.
                             let lhs = left_val.as_int()? as u64;
                             let rhs = right_val.as_int()? as u64;
@@ -842,7 +1096,7 @@ pub(super) fn eval_op_expr(
                         impl_methods,
                     ) {
                         result
-                    } else if let Some(width) = uint_wrap_width(&left_val, &right_val) {
+                    } else if let Some(width) = uint_arith_wrap_width(&left_val, &right_val) {
                         // Unsigned wrap: 0u32 - 1u32 yields 0xFFFFFFFF, not -1.
                         let lhs = left_val.as_int()? as u64;
                         let rhs = right_val.as_int()? as u64;
@@ -893,7 +1147,7 @@ pub(super) fn eval_op_expr(
                                 impl_methods,
                             ) {
                                 result
-                            } else if let Some(width) = uint_wrap_width(&left_val, &right_val) {
+                            } else if let Some(width) = uint_arith_wrap_width(&left_val, &right_val) {
                                 let lhs = left_val.as_int()? as u64;
                                 let rhs = right_val.as_int()? as u64;
                                 Ok(wrap_uint(lhs.wrapping_mul(rhs), width))
@@ -1012,7 +1266,9 @@ pub(super) fn eval_op_expr(
                     // them so `opt == nil` works whether `opt` is a bare nil or a
                     // function-returned Option::None. Checked before __eq__ so a
                     // user enum's operator overload can't shadow nil semantics.
-                    if left_val.is_nil_like() || right_val.is_nil_like() {
+                    if let Some(eq) = uint64_word_eq(&left_val, &right_val) {
+                        Ok(Value::Bool(eq))
+                    } else if left_val.is_nil_like() || right_val.is_nil_like() {
                         Ok(Value::Bool(left_val.is_nil_like() && right_val.is_nil_like()))
                     } else if let Some(result) = try_object_binop_method(
                         "__eq__",
@@ -1038,7 +1294,9 @@ pub(super) fn eval_op_expr(
                 }
                 BinOp::NotEq => {
                     // See BinOp::Eq above: nil literal and Option::None compare equal.
-                    if left_val.is_nil_like() || right_val.is_nil_like() {
+                    if let Some(eq) = uint64_word_eq(&left_val, &right_val) {
+                        Ok(Value::Bool(!eq))
+                    } else if left_val.is_nil_like() || right_val.is_nil_like() {
                         Ok(Value::Bool(!(left_val.is_nil_like() && right_val.is_nil_like())))
                     } else if let Some(result) = try_object_binop_method(
                         "__ne__",
@@ -1276,7 +1534,7 @@ pub(super) fn eval_op_expr(
                     }
                 }
                 BinOp::BitOr => {
-                    if let Some(width) = uint_wrap_width(&left_val, &right_val) {
+                    if let Some(width) = uint_arith_wrap_width(&left_val, &right_val) {
                         let lhs = left_val.as_int()? as u64;
                         let rhs = right_val.as_int()? as u64;
                         Ok(wrap_uint(lhs | rhs, width))
@@ -1285,7 +1543,7 @@ pub(super) fn eval_op_expr(
                     }
                 }
                 BinOp::BitXor => {
-                    if let Some(width) = uint_wrap_width(&left_val, &right_val) {
+                    if let Some(width) = uint_arith_wrap_width(&left_val, &right_val) {
                         let lhs = left_val.as_int()? as u64;
                         let rhs = right_val.as_int()? as u64;
                         Ok(wrap_uint(lhs ^ rhs, width))
@@ -1295,9 +1553,12 @@ pub(super) fn eval_op_expr(
                 }
                 BinOp::ShiftLeft => {
                     // Shift width is always derived from LHS (the value being shifted).
+                    // u8/u16 promote to u64 width (C-style) so `b0 << 8` keeps its high bits and a
+                    // following `| b1` (mixed-width bitor adopts the wider width) does not re-narrow it.
                     if let Value::UInt { value: lv, width } = &left_val {
                         let rhs = right_val.as_int()? as u64;
-                        Ok(wrap_uint(lv.wrapping_shl(rhs as u32), *width))
+                        let out_width = if *width < 32 { 64 } else { *width };
+                        Ok(wrap_uint(lv.wrapping_shl(rhs as u32), out_width))
                     } else {
                         Ok(Value::Int(left_val.as_int()? << right_val.as_int()?))
                     }
@@ -1490,13 +1751,19 @@ pub(super) fn eval_op_expr(
             let mut final_value = result?;
             // Re-wrap newtype: turn raw Int/Float result back into Object { class, value }.
             if let Some(wrap_class) = newtype_wrap_class {
-                if matches!(final_value, Value::Int(_) | Value::Float(_)) {
+                if matches!(final_value, Value::Int(_) | Value::UInt { .. } | Value::Float(_)) {
                     let mut field_map: std::collections::HashMap<String, Value> =
                         std::collections::HashMap::with_capacity(1);
                     field_map.insert("value".to_string(), final_value);
-                    final_value = Value::Object {
-                        class: wrap_class,
-                        fields: std::sync::Arc::new(field_map),
+                    final_value = if newtype_as_instance {
+                        Value::ClassInstance(std::sync::Arc::new(crate::value::ClassInstance::new(
+                            wrap_class, field_map,
+                        )))
+                    } else {
+                        Value::Object {
+                            class: wrap_class,
+                            fields: std::sync::Arc::new(field_map),
+                        }
                     };
                 }
             }
@@ -1515,6 +1782,30 @@ pub(super) fn eval_op_expr(
                             format!("cannot borrow `{}` as mutable because it is immutable", var_name),
                             ctx,
                         ));
+                    }
+                }
+            }
+
+            // `&mut a[f()]` names one element: resolve it once and keep it, so
+            // the call's write-back reaches that element without running f again.
+            if matches!(op, UnaryOp::RefMut) && crate::interpreter::place::place_has_index(operand) {
+                use crate::interpreter::place::{place_slot_ref, resolve_place, Projection};
+                if let Some(place) = resolve_place(operand, env, functions, classes, enums, impl_methods)? {
+                    let slot = place_slot_ref(env, &place).cloned();
+                    let current = match (slot, place.projections.last(), operand.as_ref()) {
+                        (Some(value), _, _) => Some(value),
+                        // A packed array's scalar elements have no slot to borrow.
+                        (None, Some(Projection::Index(Value::Int(index))), Expr::Index { receiver, .. }) => {
+                            let frozen = Expr::Index {
+                                receiver: receiver.clone(),
+                                index: Box::new(Expr::Integer(*index)),
+                            };
+                            Some(evaluate_expr(&frozen, env, functions, classes, enums, impl_methods)?)
+                        }
+                        _ => None,
+                    };
+                    if let Some(current) = current {
+                        return Ok(Some(Value::BorrowMut(BorrowMutValue::at_place(current, place))));
                     }
                 }
             }
@@ -1572,7 +1863,7 @@ pub(super) fn eval_op_expr(
                     }
                     UnaryOp::Deref => {
                         // E1054 - Invalid Dereference
-                        if !is_pointer_type(&val) {
+                        if !is_pointer_type(&val) && !operand_is_borrow_param(operand, env) {
                             let ctx = ErrorContext::new()
                                 .with_code(codes::INVALID_DEREFERENCE)
                                 .with_help("dereference operator (*) can only be applied to pointer types")
@@ -1604,7 +1895,7 @@ pub(super) fn eval_op_expr(
             }
 
             // E1054 - Invalid Dereference (check for non-unit types)
-            if matches!(op, UnaryOp::Deref) && !is_pointer_type(&val) {
+            if matches!(op, UnaryOp::Deref) && !is_pointer_type(&val) && !operand_is_borrow_param(operand, env) {
                 let ctx = ErrorContext::new()
                     .with_code(codes::INVALID_DEREFERENCE)
                     .with_help("dereference operator (*) can only be applied to pointer types")
@@ -1646,7 +1937,11 @@ pub(super) fn eval_op_expr(
                         // whose magnitude 2^63 overflows i64) evaluate correctly
                         // instead of raising "integer negation overflow".
                         let int_value = val.as_int()?;
-                        Value::Int(int_value.wrapping_neg())
+                        let negated = int_value.wrapping_neg();
+                        Value::Int(match static_int_width(operand, env) {
+                            StaticIntWidth::Narrow(width) => wrap_signed(negated, width),
+                            _ => negated,
+                        })
                     }
                 }
                 UnaryOp::Not => Value::Bool(!is_condition_present(operand, &val)),
@@ -2272,5 +2567,73 @@ mod is_condition_present_tests {
         let cond = Expr::Integer(0);
         assert!(!is_condition_present(&cond, &Value::Int(0)));
         assert!(is_condition_present(&cond, &Value::Int(1)));
+    }
+
+    // --- declared narrow signed width on arithmetic ---
+    // Bug: doc/08_tracking/bug/seed_i32_overflow_interp_vs_jit_divergence_2026-11-05.md
+    // `m + 1` with `m: i32` is typed i32 by the pure-Simple compiler (the
+    // literal adopts the typed operand), so native code wraps at 32 bits on
+    // BOTH edges. The interpreter promoted to i64 instead.
+
+    fn run_main(src: &str) -> i32 {
+        let module = simple_parser::Parser::new(src).parse().expect("parse");
+        crate::interpreter::evaluate_module(&module.items).expect("evaluate")
+    }
+
+    #[test]
+    fn i32_declared_arithmetic_wraps_on_both_edges() {
+        let src = "\
+fn probe() -> i64:
+    var r = 0
+    val m: i32 = 2147483647
+    if m + 1 == -2147483648:
+        r = r + 1
+    val k: i32 = -2147483648
+    if k - 1 == 2147483647:
+        r = r + 2
+    val n = m + 1
+    if n == -2147483648:
+        r = r + 4
+    if n - 1 == 2147483647:
+        r = r + 8
+    var c: i32 = 2147483647
+    c += 1
+    if c == -2147483648:
+        r = r + 16
+    val b: i8 = 127
+    if b + 1 == -128:
+        r = r + 32
+    if (m as i32) * 2 == -2:
+        r = r + 64
+    r
+main = probe()
+";
+        assert_eq!(run_main(src), 127);
+    }
+
+    #[test]
+    fn i32_param_arithmetic_wraps() {
+        let src = "fn inc(x: i32) -> i64:\n    x + 1\nfn probe() -> i64:\n    if inc(2147483647) == -2147483648:\n        return 1\n    0\nmain = probe()\n";
+        assert_eq!(run_main(src), 1);
+    }
+
+    #[test]
+    fn untyped_and_i64_arithmetic_still_promotes() {
+        let src = "\
+fn probe() -> i64:
+    var r = 0
+    val big = 2147483647
+    if big + 1 == 2147483648:
+        r = r + 1
+    val w: i64 = 2147483647
+    if w + 1 == 2147483648:
+        r = r + 2
+    val m: i32 = 2147483647
+    if (m as i64) + 1 == 2147483648:
+        r = r + 4
+    r
+main = probe()
+";
+        assert_eq!(run_main(src), 7);
     }
 }

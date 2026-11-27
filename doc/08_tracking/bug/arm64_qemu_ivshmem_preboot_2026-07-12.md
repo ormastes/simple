@@ -26,3 +26,40 @@ config write/probe owner. The intended BAR window `0x3e000000..0x3e7fffff` is
 inside low PCI MMIO and does not overlap ECAM or the ELF. Do not bypass BAR
 discovery or add a guest success marker.
 
+
+## 2026-11-03 source review and raw firmware handoff prerequisite
+
+The current Simple PCI read owner still selects x86 CF8/CFC port I/O;
+its ARM64 write override obtains an ECAM base of zero. The shared
+`PciHostDescriptor` and checked address helper exist, but the active ARM64
+Linux Image entry discarded firmware x0 before entering Simple code.
+
+The startup prerequisite now retains x0 in reserved boot register x20 across
+relocation and publishes it only after clearing BSS. The exported
+`rt_arm64_boot_dtb_address()` returns that **untrusted raw scalar**, with zero
+meaning absent. It does not dereference firmware bytes, validate the DTB,
+protect its bytes from kernel/scratch/BSS overlap, or initialize PCI.
+
+A lightweight ARM64 user-emulation fixture checks the exact publication/getter
+with both direct and relocated startup shapes; missing-save and
+publish-before-BSS-clear mutations must fail. Cross-assembly checks the full
+production startup object. These tests do not execute privileged EL/MMU/cache
+transitions, full firmware boot, or a PCI device.
+
+The bug remains OPEN. A checked boot-memory range owner, PCI `reg`/`bus-range`/
+`ranges` decoder using the shared FDT reader, and descriptor-backed ECAM/BAR
+access are still required before native ivshmem discovery can be verified.
+No hardcoded ECAM address, synthetic vendor ID, or zero-base fallback is an
+acceptable substitute. The current self-relocation direction and possible
+DTB-byte overlap are separate boot constraints; saving x0 does not fix them.
+
+## Triage 2026-11-25 (fleet lane p2w1-ac, Windows worktree @ origin/release/1.0.0)
+
+SKIP — environment-blocked, status OPEN is accurate. This is an ARM64 QEMU /
+PCI ECAM lane: reproduction requires a QEMU aarch64 VM booting a static
+AArch64 ELF with an ivshmem device, and the remaining work (checked boot-memory
+range owner, FDT `reg`/`bus-range`/`ranges` decoder, descriptor-backed
+ECAM/BAR access) is kernel/driver code that cannot be exercised on this
+Windows host. The 2026-11-03 source-review state stands: the x0-retention
+startup prerequisite is landed, the bug is genuinely still OPEN, and no
+hardcoded-ECAM or synthetic-vendor shortcut is acceptable. No code change made.

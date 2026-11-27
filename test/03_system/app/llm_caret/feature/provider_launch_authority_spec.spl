@@ -1,0 +1,87 @@
+# Production-import regression for legacy provider launch refusal.
+# @req REQ-CARET-LAUNCH-001 REQ-CARET-LAUNCH-002 REQ-CARET-LAUNCH-003
+use std.spec.*
+use std.spec.step
+use app.llm_caret.agent_plan.{AgentLaunchRequest, AgentLaunchPlan,
+    build_agent_launch_plan, agent_plan_launch_error_v1}
+use app.llm_caret.agent_runtime.{MessagingAgentLaunchContext,
+    launch_agent_plan_with_all, launch_messaging_agent_plan_with_all}
+use app.llm_caret.workbench.pane_team.launch_pane_team
+use os.apps.smux.api.smux_list_sessions
+
+fn launch_request(provider: text, session_id: text) -> AgentLaunchRequest:
+    AgentLaunchRequest(provider: provider, agent_md_path: "agent.md",
+        skill_path: "skill.md", task_desc: "task", model: "",
+        session_id: session_id, extra_args: [])
+
+describe "Caret legacy provider launch authority":
+    it "preserves fresh Claude and Codex plan interfaces":
+        step("Build the supported legacy plans without launching a CLI")
+        val claude = build_agent_launch_plan(launch_request("", ""))
+        expect(claude.provider).to_equal("claude_cli")
+        expect(claude.argv).to_equal(["-p", claude.prompt, "--output-format", "json"])
+        expect(agent_plan_launch_error_v1(claude)).to_equal("")
+        val codex = build_agent_launch_plan(launch_request("codex", ""))
+        expect(codex.argv).to_equal(["exec", codex.prompt])
+        expect(agent_plan_launch_error_v1(codex)).to_equal("")
+
+    it "refuses providers without legacy adapters on both process paths":
+        step("Refuse unsupported provider plans before invoking even a configured executable")
+        val context = MessagingAgentLaunchContext(task_id: "task", room_id: "room",
+            agent_id: "agent", database_path: "")
+        for provider in ["gemini", "gemini_cli", "kimi", "kimi_cli", "opencode_cli"]:
+            val plan = build_agent_launch_plan(launch_request(provider, ""))
+            expect(plan.argv.len()).to_equal(0)
+            val expected = "provider_adapter_required:" + provider
+            val process = launch_agent_plan_with_all("agent", plan,
+                "/bin/echo", "/bin/echo", "/bin/echo", "/bin/echo", "/bin/echo")
+            expect(process.status).to_equal("not_started")
+            expect(process.reason).to_equal(expected)
+            expect(process.pid).to_equal(-1)
+            val messaging = launch_messaging_agent_plan_with_all("agent", plan,
+                "/bin/echo", "/bin/echo", "/bin/echo", "/bin/echo", "/bin/echo", context)
+            expect(messaging.reason).to_equal(expected)
+            expect(messaging.pid).to_equal(-1)
+
+    it "refuses hand built unsupported and empty supported plans":
+        step("Validate launch values independently of the plan builder")
+        val forged = AgentLaunchPlan(provider: "kimi", mode: "agent", prompt: "p",
+            argv: ["-p", "p"], summary: "forged")
+        val empty = AgentLaunchPlan(provider: "claude", mode: "agent", prompt: "p",
+            argv: [], summary: "empty")
+        for plan in [forged, empty]:
+            val process = launch_agent_plan_with_all("agent", plan,
+                "/bin/echo", "/bin/echo", "/bin/echo", "/bin/echo", "/bin/echo")
+            expect(process.reason).to_equal("provider_adapter_required:" + plan.provider)
+            expect(process.pid).to_equal(-1)
+
+    it "refuses Codex legacy resume instead of using Claude resume flags":
+        step("Require an adapter for the Codex resume subcommand")
+        val plan = build_agent_launch_plan(launch_request("codex", "session-1"))
+        expect(plan.argv.len()).to_equal(0)
+        val process = launch_agent_plan_with_all("agent", plan,
+            "/bin/echo", "/bin/echo", "", "", "")
+        expect(process.reason).to_equal("provider_adapter_required:codex")
+        expect(process.pid).to_equal(-1)
+
+    it "preserves unknown provider and team refusal semantics":
+        step("Keep unknown provider errors and nonexecutable team plans")
+        val unknown = build_agent_launch_plan(launch_request("bogus", ""))
+        val process = launch_agent_plan_with_all("agent", unknown, "", "", "", "", "")
+        expect(process.status).to_equal("error")
+        expect(process.reason).to_equal("unknown_provider:bogus")
+        expect(process.pid).to_equal(-1)
+        val team = build_agent_launch_plan(launch_request("team", ""))
+        expect(agent_plan_launch_error_v1(team)).to_equal("team_plan_not_executable")
+
+    it "preflights the entire pane team before creating a session":
+        step("Reject a valid first member followed by an unsupported member without smux effects")
+        val before = smux_list_sessions().len()
+        val team = launch_pane_team("adapter-preflight",
+            [launch_request("claude", ""), launch_request("kimi", "")], 2,
+            "/bin/echo", "/bin/echo", "/bin/echo", "/bin/echo", "/bin/echo")
+        expect(team.ok).to_equal(false)
+        expect(team.error).to_equal("provider_adapter_required:kimi")
+        expect(team.agents.len()).to_equal(0)
+        expect(team.session_id).to_equal("")
+        expect(smux_list_sessions().len()).to_equal(before)

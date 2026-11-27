@@ -279,6 +279,7 @@ impl LlvmEmitter<'_> {
             "push" => Some("rt_array_push"),
             "pop" => Some("rt_array_pop"),
             "clear" => Some("rt_array_clear"),
+            "reserve" => Some("rt_array_reserve"),
             // Receiver-polymorphic. `rt_array_reverse` reverses IN PLACE and
             // returns a bool, and this table applied it to EVERY receiver, so
             // text got the `false` receiver-mismatch answer and an array had
@@ -361,8 +362,8 @@ impl LlvmEmitter<'_> {
             "index_of" => Some("rt_index_of"),
             "find_str" => Some("rt_string_find"),
             "rfind" | "last_index_of" => Some("rt_string_rfind"),
-            "slice" | "substring" => Some("rt_slice"),
-            "get" => Some("rt_index_get"),
+            "slice" | "substring" => Some("rt_slice_text_bytes"),
+            "get" => Some("rt_get"),
             "keys" => Some("rt_dict_keys"),
             "values" => Some("rt_dict_values"),
             // `.unwrap()` must use the trap helper, NOT the raw payload reader.
@@ -633,7 +634,8 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             let recv = self.get(args[0])?;
             let variant = if method == "is_ok" { "Ok" } else { "Err" };
             let enum_id = self.i64_const(0);
-            let disc = self.i64_const(Self::enum_variant_discriminant(variant));
+            // Untyped receiver: builtin Result (MIR lowers typed receivers by owner, #6953).
+            let disc = self.i64_const(crate::hir::builtin_owner_discriminant("Result", variant).unwrap_or(0));
             let result = self.call_runtime("rt_enum_check_variant", &[recv, enum_id, disc])?;
             if let Some(d) = dest {
                 self.set(*d, result);
@@ -681,13 +683,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         let i8_ptr_type = self.backend.context_ref().ptr_type(inkwell::AddressSpace::default());
         let slot_bytes = (i64_type.get_bit_width() / 8) as u64;
 
-        let interp_call = self.module.get_function("rt_interp_call").unwrap_or_else(|| {
-            let fn_type = i64_type.fn_type(
-                &[i64_type.into(), i64_type.into(), i64_type.into(), i64_type.into()],
-                false,
-            );
-            self.module.add_function("rt_interp_call", fn_type, None)
-        });
+        let interp_call = self.backend.declare_rt_interp_call(self.module);
 
         let name_bytes = func_name.as_bytes();
         let name_const = self.backend.context_ref().const_string(name_bytes, false);
@@ -695,14 +691,10 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         name_global.set_initializer(&name_const);
         name_global.set_constant(true);
         let name_ptr = name_global.as_pointer_value();
-        let name_ptr_i64 = self
-            .builder
-            .build_ptr_to_int(name_ptr, i64_type, "func_name_ptr")
-            .map_err(|e| format!("LLVM ptr_to_int failed: {}", e))?;
         let name_len = i64_type.const_int(name_bytes.len() as u64, false);
         let argc = i64_type.const_int(args.len() as u64, false);
         let argv = if args.is_empty() {
-            i64_type.const_int(0, false)
+            i8_ptr_type.const_null()
         } else {
             let alloc_fn = self.module.get_function("rt_alloc").unwrap_or_else(|| {
                 let fn_type = i64_type.fn_type(&[i64_type.into()], false);
@@ -758,10 +750,10 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                     .map_err(|e| format!("LLVM store failed: {}", e))?;
             }
 
-            argv_raw
+            argv_ptr
         };
 
-        let call_args = [name_ptr_i64.into(), name_len.into(), argc.into(), argv.into()];
+        let call_args = [name_ptr.into(), name_len.into(), argc.into(), argv.into()];
         let call_site = self
             .builder
             .build_call(interp_call, &call_args, "interp_call")
@@ -795,7 +787,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         Ok(())
     }
 
-    fn emit_inline_asm(&mut self, instructions: &[String], volatile: bool) -> Result<(), String> {
+    fn emit_inline_asm(&mut self, instructions: &[String], volatile: bool, dialect: crate::hir::AsmDialect) -> Result<(), String> {
         let fn_type = self.backend.context_ref().void_type().fn_type(&[], false);
         let asm = self.backend.context_ref().create_inline_asm(
             fn_type,
@@ -803,7 +795,10 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             "~{memory}".to_string(),
             volatile,
             false,
-            Some(InlineAsmDialect::ATT),
+            Some(match dialect {
+                crate::hir::AsmDialect::Default | crate::hir::AsmDialect::Att => InlineAsmDialect::ATT,
+                crate::hir::AsmDialect::Intel => InlineAsmDialect::Intel,
+            }),
             false,
         );
         self.builder
@@ -822,7 +817,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         _effect: Effect,
     ) -> Result<(), String> {
         self.backend.compile_indirect_call(
-            *dest, callee, param_types, &return_type, args, self.vreg_map, self.builder,
+            *dest, callee, param_types, &return_type, args, self.vreg_map, self.builder, self.module,
         ).map_err(|error| error.to_string())
     }
 
@@ -1656,7 +1651,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         Ok(())
     }
 
-    fn emit_enum_unit(&mut self, dest: VReg, _enum_name: &str, _variant_name: &str) -> Result<(), String> {
+    fn emit_enum_unit(&mut self, dest: VReg, _enum_name: &str, _variant_name: &str, _discriminant: u32) -> Result<(), String> {
         // Enum unit variant: encode as tagged integer (discriminant only)
         let result = self.call_runtime("rt_enum_unit", &[self.i64_const(0)])?;
         self.set(dest, result);
@@ -1668,6 +1663,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         dest: VReg,
         _enum_name: &str,
         _variant_name: &str,
+        _discriminant: u32,
         payload: VReg,
     ) -> Result<(), String> {
         let pay = self.get(payload)?;
@@ -1992,7 +1988,18 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     // =========================================================================
     // Memory safety — no-ops (use trait defaults)
     // =========================================================================
-    fn emit_drop(&mut self, _value: VReg, _ty: TypeId) -> Result<(), String> {
+    fn emit_drop(&mut self, value: VReg, ty: TypeId) -> Result<(), String> {
+        if ty == TypeId::STRING {
+            if let Ok(val) = self.get(value) {
+                self.call_runtime_void("rt_string_free", &[val])?;
+            }
+        } else if !crate::codegen::instr::is_drop_scalar_type(ty) {
+            if let Ok(val) = self.get(value) {
+                if matches!(val, BasicValueEnum::IntValue(_)) {
+                    self.call_runtime_void("rt_rc_release", &[val])?;
+                }
+            }
+        }
         Ok(())
     }
 

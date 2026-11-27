@@ -1,0 +1,134 @@
+"""
+## Purpose and audience
+Purpose: Pin that an `<input type=submit|button|reset>` label wider than its
+content box starts at the start edge and is clipped at the PADDING box, as
+Chrome 159 does, instead of being centred. A label that fits stays centred.
+Audience: browser-engine form-control paint and Draw IR maintainers.
+
+Chrome oracle (Chrome 159, `--headless --dump-dom` + `--screenshot`,
+300x200, 2026-11-16). Each input is
+`display:block;box-sizing:border-box;width:30px;height:16px;padding:2px;
+border:1px solid #fff;color:#22c55e;font:8px Arial`, value `ABCDEFGHIJK`
+(scrollWidth 58 > clientWidth 28, computed `text-align: center`):
+
+| input                    | ink columns | note                                     |
+|--------------------------|-------------|------------------------------------------|
+| `#b1` submit             | 3..28       | starts at content x 3, ends in padding   |
+| `#b2` button, `#b3` reset | 3..28       | same as submit                           |
+| `#r` submit, rtl         | 1..26       | end-anchored at content right 27         |
+| `#f` submit 80px, `ABC`  | 31..47      | fits (16.45 in 74), so centred           |
+
+Nothing is inked right of x=28 (the border column is 29). The padding box,
+not the content box (3..27) and not the border box, is the clip. The
+engine centred every label, so an overflowing one lost both ends.
+
+Filed in doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(`button_label_overflow`).
+"""
+
+"""
+Traceability: REQ-WEB-RENDER-001 — overflowing button labels start-align and clip at the padding box.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_raster.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir,
+    simple_web_layout_render_html_software_pixels
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels,
+    simple_web_render_html_to_readback_with_engine2d_backend,
+    simple_web_resolved_engine2d_backend_name
+}
+
+val W: i32 = 96
+val H: i32 = 80
+
+val PAGE: text = "<html><head><style>html,body{{margin:0;padding:0;background:#fff}}" +
+    " input{{display:block;box-sizing:border-box;width:30px;height:16px;padding:2px;" +
+    "border:1px solid #fff;color:#22c55e;background:#fff;font-family:Arial;font-size:8px;outline:none}}" +
+    " #r{{direction:rtl}} #f{{width:80px}}</style></head><body>" +
+    "<input id=b1 type=submit value=ABCDEFGHIJK><input id=b2 type=button value=ABCDEFGHIJK>" +
+    "<input id=b3 type=reset value=ABCDEFGHIJK><input id=r type=submit value=ABCDEFGHIJK>" +
+    "<input id=f type=submit value=ABC></body></html>"
+
+fn _geometry(id: text) -> text:
+    val composition = simple_web_layout_render_html_draw_ir(PAGE, W, H)
+    for c in composition.batches[0].commands:
+        if c.component_id == id + "_value":
+            if not c.clip_rect.present:
+                return "x=" + c.x.to_text() + "|clip=absent"
+            return "x=" + c.x.to_text() + "|clip=" + c.clip_rect.x.to_text() + "," +
+                c.clip_rect.y.to_text() + "," + c.clip_rect.width.to_text() + "," +
+                c.clip_rect.height.to_text()
+    "missing " + id + "_value"
+
+# Text-coloured (green-dominant) ink columns of the 16px row starting at
+# y0, as "first..last"; "none" when nothing is inked.
+fn _ink_cols(pixels: [u32], y0: i32) -> text:
+    var first = 999
+    var last = -1
+    var y = y0
+    while y < y0 + 16:
+        var x = 0
+        while x < W:
+            val p = pixels[y * W + x]
+            val r = ((p >> 16) & 0xFFu32).to_i64()
+            val g = ((p >> 8) & 0xFFu32).to_i64()
+            if g > r + 40:
+                if x < first:
+                    first = x
+                if x > last:
+                    last = x
+            x = x + 1
+        y = y + 1
+    if last < 0:
+        return "none"
+    first.to_text() + ".." + last.to_text()
+
+fn _check_pixels(pixels: [u32]):
+    step("Chrome 159: submit/button/reset ink 3..28")
+    expect(_ink_cols(pixels, 0)).to_equal("3..28")
+    expect(_ink_cols(pixels, 16)).to_equal("3..28")
+    expect(_ink_cols(pixels, 32)).to_equal("3..28")
+    step("Chrome 159: rtl ink 1..26")
+    expect(_ink_cols(pixels, 48)).to_equal("1..26")
+    step("Chrome 159: a fitting label is centred, ink 31..47; engine 32..46")
+    expect(_ink_cols(pixels, 64)).to_equal("32..46")
+
+describe "overflowing button label (Chrome 159)":
+    it "AC-1: an overflowing submit label starts at the content start, clipped at the padding box":
+        step("Chrome 159: ink 3..28 = content x 3, padding box 1..29")
+        expect(_geometry("b1")).to_equal("x=3|clip=1,1,28,14")
+
+    it "AC-2: button and reset labels follow the same rule":
+        expect(_geometry("b2")).to_equal("x=3|clip=1,17,28,14")
+        expect(_geometry("b3")).to_equal("x=3|clip=1,33,28,14")
+
+    it "AC-3: under rtl the overflowing label is end-anchored at the content right edge":
+        step("Chrome 159: ink 1..26, content right 27; engine run 11 x 5px = 55")
+        expect(_geometry("r")).to_equal("x=-28|clip=1,49,28,14")
+
+    it "AC-4: a label that fits stays centred":
+        step("Chrome 159: ink 31..47 for a 16.45px label in the 74px content box")
+        expect(_geometry("f")).to_equal("x=32|clip=1,65,78,14")
+
+    it "AC-5: the software raster and the Engine2D path paint Chrome's ink columns":
+        _check_pixels(simple_web_layout_render_html_software_pixels(PAGE, W, H))
+        _check_pixels(simple_web_render_html_to_pixels(PAGE, W, H))
+
+describe "overflowing button label on a real Vulkan device":
+    it "AC-6: a Vulkan device readback paints Chrome's ink columns":
+        # Runs where a Vulkan ICD is installed (llvmpipe:
+        # VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json). Where none
+        # is, the row has nothing to drive and says so: it is NOT exercised.
+        if not file_exists("/usr/share/vulkan/icd.d/lvp_icd.json"):
+            print("[skip] AC-6: no llvmpipe ICD; this Vulkan row was not exercised")
+            return
+        step("the request really resolved to Vulkan (no silent software fallback)")
+        expect(simple_web_resolved_engine2d_backend_name(W, H, "vulkan")).to_equal("vulkan")
+        val rb = simple_web_render_html_to_readback_with_engine2d_backend(PAGE, W, H, "vulkan")
+        expect(rb.source).to_equal("device_readback")
+        _check_pixels(rb.pixels)
+        expect(rb.pixels).to_equal(simple_web_layout_render_html_software_pixels(PAGE, W, H))

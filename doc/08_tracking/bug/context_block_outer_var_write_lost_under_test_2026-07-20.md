@@ -1,8 +1,19 @@
 # `context <obj>:` block body writes to an outer `var` are lost under `test`
-## Open 2026-09-16 — needs owner triage
+## RESOLVED (verified 2026-11-25) — the 2026-09-16 "Open" banner below is stale bookkeeping
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+**Verification 2026-11-25 (work/p2w1-af-20261125, release/1.0.0, Windows,
+pinned Rust seed v1.0.0-rc.1 `bin/simple.exe`):** both affected specs are now
+fully green with the assertions unchanged (`expect res == 42` etc.):
+- `SIMPLE_LIB=src bin/simple.exe test test/feature/usage/classes_spec.spl
+  --mode=interpreter` -> **23 total, 23 passed, 0 failed** (was 20/23; the
+  three `context`-block examples named below all pass).
+- `SIMPLE_LIB=src bin/simple.exe test test/feature/usage/structs_spec.spl
+  --mode=interpreter` -> **10 total, 10 passed, 0 failed** (was 8/10).
+(Runs required a local, reverted strip of `@representation_boundary` decorator
+lines — the release/1.0.0 source/binary inconsistency; no source was
+changed.) Whatever seed/evaluator revision fixed the outer-`var` write
+propagation, the defect this record describes no longer reproduces on the
+pinned binary. Status: **STALE / CLOSED**.
 
 **Date:** 2026-07-20
 **Component:** `bin/simple test` (SSpec evaluator) scoping for `context

@@ -5,18 +5,22 @@
 # are confined to the caller-provided SCV cache root.
 
 use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote,
+    transient_session_heap_live_v1}
 @allow(star_import) # reason: public compatibility facade over the pure inventory core
 export use std.scv.compile_source_inventory_core.*
-use std.nogc_sync_mut.io_runtime.{dir_list}
+use std.nogc_sync_mut.io_runtime.{dir_list_or_empty}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
-use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_lock, file_unlock}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_publish_noreplace_raw, file_modified_time}
+use std.nogc_sync_mut.io.stderr_ops.{stderr_write}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.io_runtime.{process_is_running}
 use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
 
 extern fn rt_getpid() -> i64
 
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_rename(from_path: text, to_path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_is_regular_no_follow(path: text) -> bool
 extern fn rt_file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> text?
@@ -24,7 +28,7 @@ extern fn rt_file_size(path: text) -> i64
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_dir_create_all(path: text) -> bool
 
-fn compile_source_inventory_apply_and_publish_v1(
+pub fn compile_source_inventory_apply_and_publish_v1(
     cache_root: text, events: [CompileSourceEventV1],
     cursor_head: text = "", cursor_rows: i64 = -1,
     cursor_filesystem_digest: text = "",
@@ -54,7 +58,6 @@ fn compile_source_inventory_apply_and_publish_v1(
             COMPILE_SOURCE_INVENTORY_SCHEMA_V1,
             next_generation, rebuilt.inventory!.entries)
     else:
-        # @workaround bug=mir_optional_record_nil_join_2026_10_18 recover=4f00255ec1ee6908b81e4db1333d95f1a8d5d7c0 reason=retain-optional-provider-owner-without-a-call-plus-nil-merge
         var seeded = false
         if inventory.generation == 0 and inventory.entries.len() == 0:
             if val seed = compile_source_inventory_initial_events_v1(events):
@@ -81,8 +84,44 @@ fn compile_source_inventory_apply_and_publish_v1(
     if digest == "":
         return CompileSourceInventoryReadV1(
             false, "inventory-publication-failed:" + publish_reason, "", nil)
-    compile_source_inventory_publication_readback_v1(
-        cache_root, digest, expected_pointer_digest)
+    compile_source_inventory_publication_readback_owned_v1(
+        cache_root, digest, expected_pointer_digest, inventory)
+
+# Only the successful local publisher supplies this owner. Its canonical
+# encoding validated every row and produced published_digest in this call;
+# fresh matching immutable bytes need no second decode. Never retain this
+# authority across requests or expose it as a general reader parameter.
+fn compile_source_inventory_publication_readback_owned_v1(
+    cache_root: text, published_digest: text, expected_pointer_digest: text,
+    inventory: CompileSourceInventoryV1
+) -> CompileSourceInventoryReadV1:
+    val root = compile_source_inventory_storage_v1(cache_root)
+    # Match the ordinary reader's captured-pointer semantics. Immutable bytes
+    # matching the locally published SHA need no additional lock or wait.
+    val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+    val separator = pointer_content.index_of("\n")
+    val pointer = if separator < 0: pointer_content else: pointer_content[:separator]
+    var admitted = CompileSourceInventoryReadV1(false, "inventory-generation-invalid", "", nil)
+    if compile_source_inventory_digest_valid_v1(pointer) and pointer == published_digest:
+        if compile_source_inventory_publication_bytes_match_v1(root, published_digest):
+            admitted = CompileSourceInventoryReadV1(true, "ok", published_digest, Some(inventory))
+    else:
+        # Preserve full admission and first-error diagnostics for a different
+        # or malformed captured pointer; never adopt another writer's owner.
+        admitted = compile_source_inventory_read_at_pointer_v1(cache_root, pointer_content)
+    compile_source_inventory_publication_readback_result_v1(
+        admitted, pointer_content, published_digest, expected_pointer_digest)
+
+# The raw immutable blob and SHA scratch never escape this scalar predicate.
+# A refused nested begin leaves the caller's active/paused scope untouched.
+fn compile_source_inventory_publication_bytes_match_v1(root: text, digest: text) -> bool:
+    val owns_scratch = transient_scope_begin()
+    val content = compile_source_inventory_read_text_v1(
+        "{root}/generations/{digest}.inventory") ?? ""
+    val matches = content != "" and sha256_text(content) == digest
+    if owns_scratch and not transient_scope_end():
+        return false
+    matches
 
 fn compile_source_inventory_publication_readback_v1(
     cache_root: text, published_digest: text, expected_pointer_digest: text
@@ -95,6 +134,13 @@ fn compile_source_inventory_publication_readback_v1(
     """
     val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
     val admitted = compile_source_inventory_read_at_pointer_v1(cache_root, pointer_content)
+    compile_source_inventory_publication_readback_result_v1(
+        admitted, pointer_content, published_digest, expected_pointer_digest)
+
+fn compile_source_inventory_publication_readback_result_v1(
+    admitted: CompileSourceInventoryReadV1, pointer_content: text,
+    published_digest: text, expected_pointer_digest: text
+) -> CompileSourceInventoryReadV1:
     if not admitted.valid:
         return CompileSourceInventoryReadV1(false,
             "inventory-publication-readback-invalid:{admitted.reason}" +
@@ -232,6 +278,9 @@ fn compile_source_inventory_apply_cold_events_v1(
 ) -> CompileSourceInventoryChangeV1:
     if initial_generation < 0:
         return CompileSourceInventoryChangeV1(false, "event-invalid", nil, false, false)
+    val log_progress = events.len() >= 2000
+    if log_progress:
+        stderr_write("[scv] cold-apply start events={events.len()}\n")
     # A normal Git cold listing is a unique create batch. The existing
     # initializer validates every row and sorts once, avoiding a singleton
     # inventory plus full event reducer invocation for each file. Refusal is
@@ -242,6 +291,8 @@ fn compile_source_inventory_apply_cold_events_v1(
         val changed = events.len() > 0
         val inventory = CompileSourceInventoryV1(
             1, initial_generation + events.len(), initial!.entries)
+        if log_progress:
+            stderr_write("[scv] cold-apply done entries={initial!.entries.len()}\n")
         return CompileSourceInventoryChangeV1(
             true, if changed: "ok" else: "ok-no-change",
             Some(inventory), changed, changed)
@@ -251,13 +302,17 @@ fn compile_source_inventory_apply_cold_events_v1(
     var generation = initial_generation
     var content_changed = false
     var semantics_changed = false
+    var processed = 0
     for event in events:
+        processed = processed + 1
+        if log_progress and processed % 2000 == 0:
+            stderr_write("[scv] cold-apply progress={processed}/{events.len()}\n")
         var position = -1
         var single: [CompileSourceInventoryEntryV1] = []
         if positions.has(event.source_identity):
             position = positions[event.source_identity]
             if active[position]:
-                single = single.push(retained[position])
+                single.push(retained[position])
         val changed = compile_source_inventory_apply_event_v1(
             CompileSourceInventoryV1(1, generation, single), event)
         if not changed.valid:
@@ -275,15 +330,17 @@ fn compile_source_inventory_apply_cold_events_v1(
                 active[position] = true
             else:
                 positions[event.source_identity] = retained.len()
-                retained = retained.push(next.entries[0])
-                active = active.push(true)
+                retained.push(next.entries[0])
+                active.push(true)
     var entries: [CompileSourceInventoryEntryV1] = []
     var index = 0
     while index < retained.len():
         if active[index]:
-            entries = entries.push(retained[index])
+            entries.push(retained[index])
         index = index + 1
     val inventory = CompileSourceInventoryV1(1, generation, compile_source_inventory_sort_v1(entries))
+    if log_progress:
+        stderr_write("[scv] cold-apply done entries={entries.len()}\n")
     val reason = if generation == initial_generation: "ok-no-change" else: "ok"
     CompileSourceInventoryChangeV1(true, reason, Some(inventory), content_changed, semantics_changed)
 
@@ -372,6 +429,25 @@ fn compile_source_inventory_read_text_v1(path: text) -> text?:
         return nil
     rt_file_read_regular_no_follow_bounded(path, size)
 
+# Strict canonical unsigned wire decimal parser (`0|[1-9][0-9]*`, bounded by
+# INT64_MAX). Returns boxed `Option<i64>` (`Some(n)` / `None`), keeping every
+# nonnegative `i64` (including `0` and reserved tag `3`) distinct from `None`.
+fn compile_source_inventory_decimal_v1(value: text) -> i64?:
+    if value == "" or (value.byte_len() > 1 and value.byte_at(0) == 48):
+        return None
+    var result: i64 = 0
+    var index = 0
+    while index < value.byte_len():
+        val code = value.byte_at(index)
+        if code < 48 or code > 57: return None
+        val digit = code - 48
+        if result > 922337203685477580 or
+                (result == 922337203685477580 and digit > 7):
+            return None
+        result = result * 10 + digit
+        index = index + 1
+    Some(result)
+
 fn compile_source_inventory_decode_v1(content: text) -> CompileSourceInventoryReadV1:
     compile_source_inventory_decode_content_v1(content, "")
 
@@ -386,22 +462,45 @@ fn compile_source_inventory_decode_content_v1(
             not lines[1].starts_with("generation=") or
             not lines[2].starts_with("count="):
         return CompileSourceInventoryReadV1(false, "inventory-header-invalid", "", nil)
-    val generation = lines[1].substring(11).to_i64() ?? -1
-    val count = lines[2].substring(6).to_i64() ?? -1
-    if generation < 0 or count < 0 or lines.len() != count + 3:
+    val generation_opt = compile_source_inventory_decimal_v1(lines[1].substring(11))
+    val count_opt = compile_source_inventory_decimal_v1(lines[2].substring(6))
+    val generation = generation_opt ?? -1
+    val count = count_opt ?? -1
+    if generation_opt == None or count_opt == None or count != lines.len() - 3:
         return CompileSourceInventoryReadV1(false, "inventory-count-invalid", "", nil)
     var entries: [CompileSourceInventoryEntryV1] = []
+    var previous = ""
+    var canonical = true
     var index = 3
+    val log_decode_progress = count >= 5000
     while index < lines.len():
+        val row_num = index - 2
+        if log_decode_progress and row_num % 5000 == 0:
+            stderr_write("[scv] decode progress={row_num}/{count}\n")
         val fields = lines[index].split("|")
         if fields.len() != 7:
             return CompileSourceInventoryReadV1(false, "inventory-row-invalid", "", nil)
-        entries = entries.push(CompileSourceInventoryEntryV1(
-            fields[0], fields[1], fields[2], fields[3], fields[4], fields[5],
-            fields[6].to_i64() ?? -1))
+        val size_opt = compile_source_inventory_decimal_v1(fields[6])
+        if size_opt == None:
+            return CompileSourceInventoryReadV1(false, "inventory-row-invalid", "", nil)
+        val size = size_opt!
+        val entry = CompileSourceInventoryEntryV1(
+            fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], size)
+        # The wire header and decimal parser already enforce their canonical
+        # spellings. Validate the remaining encoder invariants directly:
+        # valid fields and strictly increasing byte-ordered unique identities.
+        # Re-encoding every admitted generation duplicates all row strings and
+        # the entire inventory inside a caller-owned transient scope.
+        if not compile_source_inventory_entry_valid_unscoped_v1(entry) or
+                compile_source_inventory_identity_cmp_v1(previous, entry.source_identity) >= 0:
+            canonical = false
+        previous = entry.source_identity
+        entries.push(entry)
         index = index + 1
     val inventory = CompileSourceInventoryV1(1, generation, entries)
-    if compile_source_inventory_encode_v1(inventory) != content:
+    # Preserve malformed-row precedence over canonicality, as in the original
+    # decode-then-encode validator, even when an earlier row is noncanonical.
+    if not canonical:
         return CompileSourceInventoryReadV1(false, "inventory-noncanonical", "", nil)
     val digest = if verified_digest == "": sha256_text(content) else: verified_digest
     CompileSourceInventoryReadV1(true, "ok", digest, Some(inventory))
@@ -504,45 +603,235 @@ fn compile_source_inventory_publish_reasoned_v1(
     val root = compile_source_inventory_storage_v1(cache_root)
     if not rt_dir_create_all("{root}/generations"):
         return ("", "publish-storage-mkdir-failed")
-    val publication_lock = file_lock("{root}/publication.lock", 5)
-    if publication_lock < 0:
-        return ("", "publish-lock-unavailable")
+    # LOCKLESS publication (doc/05_design/compiler/scv/lockless_refresh.md).
+    # Generation blobs are immutable and content-addressed; CURRENT is a small
+    # pointer replaced by one atomic rename. A concurrent publisher is detected
+    # by re-reading CURRENT, never excluded by a lock: a moved pointer with our
+    # exact content is a benign identical-content race, any other move is
+    # `publish-cursor-superseded` and the refresh owner re-observes from it.
     val current_pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
     if cursor_head != "" and sha256_text(current_pointer_content) != expected_pointer_digest:
-        val _unlocked = file_unlock(publication_lock)
+        if current_pointer_content == pointer_content:
+            return (digest, "ok")
         return ("", "publish-cursor-superseded")
     val current = compile_source_inventory_read_at_pointer_v1(
         cache_root, current_pointer_content)
     if current.valid and current.inventory!.generation > inventory.generation:
-        val _unlocked = file_unlock(publication_lock)
         return ("", "publish-superseded-by-newer-generation")
     if current.valid and current.inventory!.generation == inventory.generation:
         val existing_digest = current.digest
         if existing_digest == digest:
             if cursor_head == "" or
                     current_pointer_content == pointer_content:
-                val _unlocked = file_unlock(publication_lock)
                 return (digest, "ok")
         else:
-            val _unlocked = file_unlock(publication_lock)
-            # Same generation, different content: no retry can ever clear this.
-            return ("", "publish-generation-digest-divergence (cached inventory at this generation has different content; clear {cache_root} to rebuild)")
+            # Same generation, different content: another publisher advanced
+            # from the same base while we observed. Re-observe from its pointer.
+            return ("", "publish-cursor-superseded")
     val generation_path = "{root}/generations/{digest}.inventory"
-    if not rt_file_exists(generation_path):
-        val generation_staged = "{generation_path}.tmp.{rt_getpid()}"
-        rt_file_delete(generation_staged)
-        if (not file_create_excl(generation_staged, content) or
-                not rt_file_rename(generation_staged, generation_path)):
-            rt_file_delete(generation_staged)
-            val raced = compile_source_inventory_read_text_v1(generation_path)
-            if raced == nil or raced! != content:
-                val _unlocked = file_unlock(publication_lock)
-                return ("", "publish-generation-write-failed")
+    if not compile_source_inventory_publish_blob_v1(generation_path, content):
+        return ("", "publish-generation-write-failed path={generation_path}")
+    # Final compare before the swap, for EVERY caller: the base is the pointer
+    # read at the top of this publication (cursor callers additionally bound it
+    # to their observed digest above), so a cursor-less publisher can never
+    # roll CURRENT back over a newer generation. The rename itself is the only
+    # window a concurrent same-base publisher can win; its pointer also names a
+    # complete immutable generation, so the next refresh re-derives from it.
+    val latest = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+    if sha256_text(latest) != sha256_text(current_pointer_content):
+        if latest == pointer_content:
+            return (digest, "ok")
+        return ("", "publish-cursor-superseded")
     if not file_atomic_write("{root}/CURRENT", pointer_content):
-        val _unlocked = file_unlock(publication_lock)
-        return ("", "publish-current-write-failed")
-    val _unlocked = file_unlock(publication_lock)
+        return ("", "publish-current-write-failed path={root}/CURRENT")
+    # A sweeper that read the OLD pointer may have just reclaimed a blob we
+    # reused; CURRENT names it now, so put it back (content is in hand).
+    if not rt_file_exists(generation_path) and
+            not compile_source_inventory_publish_blob_v1(generation_path, content):
+        return ("", "publish-generation-write-failed path={generation_path}")
+    val _aged_reclaimed = compile_source_inventory_gc_generations_v1(
+        cache_root, COMPILE_SOURCE_INVENTORY_PUBLISH_GC_MIN_AGE_S_V1)
+    val _excess_reclaimed = compile_source_inventory_prune_generations_v1(
+        cache_root, digest, COMPILE_SOURCE_INVENTORY_MAX_EXTRA_GENERATIONS_V1,
+        COMPILE_SOURCE_INVENTORY_PRUNE_MIN_AGE_S_V1)
     (digest, "ok")
+
+# Half the inventory GC floor (compiler_inventory_gc_v1 uses one day).
+val COMPILE_SOURCE_INVENTORY_REUSE_TOUCH_S: i64 = 43200
+# Publish-time retention: sweep unreferenced generations > 1h old and cap total
+# aged unreferenced blobs in source-inventory/generations/ to newest 3 (+ CURRENT)
+# while protecting young blobs (< 600s) for concurrent lockless readers.
+val COMPILE_SOURCE_INVENTORY_PUBLISH_GC_MIN_AGE_S_V1: i64 = 3600
+val COMPILE_SOURCE_INVENTORY_MAX_EXTRA_GENERATIONS_V1: i64 = 3
+val COMPILE_SOURCE_INVENTORY_PRUNE_MIN_AGE_S_V1: i64 = 600
+
+fn compile_source_inventory_publish_blob_v1(final_path: text, content: text) -> bool:
+    """Publish one content-addressed immutable file without a lock.
+
+    Stage privately (pid + clock in the name), then publish with the
+    no-replace primitive. A loser whose winner holds identical bytes discards
+    its copy; a partial stage never reaches the final name.
+    """
+    if rt_file_exists(final_path):
+        val existing = compile_source_inventory_read_text_v1(final_path)
+        if existing == nil or existing! != content:
+            return false
+        # Reuse refreshes the age an age-based sweeper reads: an identical
+        # record last referenced long ago must not look reclaimable at the
+        # moment a new pointer is about to name it. Rewriting identical bytes
+        # through the atomic replace is harmless to any concurrent reader; a
+        # refused replace (open file on Windows) keeps the existing bytes.
+        val modified = file_modified_time(final_path)
+        if modified > 0 and time_now_unix_micros() / 1000000 - modified > COMPILE_SOURCE_INVENTORY_REUSE_TOUCH_S:
+            val _touched = file_atomic_write(final_path, content)
+        return true
+    val staged = "{final_path}.tmp.{rt_getpid()}.{time_now_unix_micros()}"
+    rt_file_delete(staged)
+    if not file_create_excl(staged, content):
+        return false
+    val published = file_publish_noreplace_raw(staged, final_path)
+    if rt_file_exists(staged):
+        rt_file_delete(staged)
+    if published == 1:
+        return true
+    val raced = compile_source_inventory_read_text_v1(final_path)
+    raced != nil and raced! == content
+
+# Age-based, reference-tolerant reclamation of unreferenced generation blobs.
+# Lock-free: the only referenced blob is the one CURRENT names at this instant;
+# every other blob older than `min_age_s` is deleted, and a delete that loses
+# to a concurrent sweep is not an error. Shard children re-read their admitted
+# generation by digest hours into a build, so callers pass a day-scale age.
+fn compile_source_inventory_gc_generations_v1(cache_root: text, min_age_s: i64) -> i64:
+    if not compile_source_inventory_cache_root_valid_v1(cache_root) or min_age_s <= 0:
+        return 0
+    val root = compile_source_inventory_storage_v1(cache_root)
+    val pointer = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+    val separator = pointer.index_of("\n")
+    val referenced = if separator < 0: pointer else: pointer[:separator]
+    val now = time_now_unix_micros() / 1000000
+    var removed = 0
+    for name in dir_list_or_empty("{root}/generations"):
+        if not name.ends_with(".inventory"):
+            continue
+        val digest = name[:name.len() - ".inventory".len()]
+        if digest == referenced or not compile_source_inventory_digest_valid_v1(digest):
+            continue
+        val path = "{root}/generations/{name}"
+        val modified = file_modified_time(path)
+        if modified <= 0 or now - modified < min_age_s:
+            continue
+        # Re-read the pointer immediately before the unlink: a publisher may
+        # have named this blob since the listing (and touched it on reuse).
+        val latest = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+        val latest_separator = latest.index_of("\n")
+        if digest == (if latest_separator < 0: latest else: latest[:latest_separator]):
+            continue
+        val recheck = file_modified_time(path)
+        if recheck <= 0 or now - recheck < min_age_s:
+            continue
+        if rt_file_delete(path):
+            removed = removed + 1
+    removed
+
+fn _compile_source_inventory_header_generation_v1(path: text) -> i64:
+    val content = compile_source_inventory_read_text_v1(path) ?? ""
+    if content == "":
+        return -1
+    val first_nl = content.index_of("\n")
+    if first_nl < 0 or content.substring(0, first_nl) != "simple-compile-source-inventory-v1":
+        return -1
+    val gen_start = first_nl + 1
+    val second_nl = content.index_of("\n", gen_start)
+    if second_nl <= gen_start:
+        return -1
+    val gen_line = content.substring(gen_start, second_nl)
+    if not gen_line.starts_with("generation="):
+        return -1
+    compile_source_inventory_decimal_v1(
+        gen_line.substring(11, gen_line.byte_len())) ?? -1
+
+fn _compile_source_inventory_pointer_digest_v1(pointer_content: text) -> text:
+    val separator = pointer_content.index_of("\n")
+    if separator < 0: pointer_content else: pointer_content.substring(0, separator)
+
+# Bounded newest-N retention: keeps CURRENT (and `keep_digest`) plus at most
+# `max_extra` newest unreferenced `.inventory` generation blobs ordered by
+# (generation, mtime, digest) descending, while never deleting blobs younger
+# than `min_age_s` (protecting concurrent lockless readers and publishers).
+fn compile_source_inventory_prune_generations_v1(
+    cache_root: text, keep_digest: text, max_extra: i64,
+    min_age_s: i64 = COMPILE_SOURCE_INVENTORY_PRUNE_MIN_AGE_S_V1
+) -> i64:
+    if not compile_source_inventory_cache_root_valid_v1(cache_root) or max_extra < 0:
+        return 0
+    val root = compile_source_inventory_storage_v1(cache_root)
+    val referenced = _compile_source_inventory_pointer_digest_v1(
+        compile_source_inventory_read_pointer_content_v1(cache_root) ?? "")
+    var digests: [text] = []
+    var paths: [text] = []
+    var mtimes: [i64] = []
+    var evicted: [bool] = []
+    for name in dir_list_or_empty("{root}/generations"):
+        if not name.ends_with(".inventory") or name.byte_len() <= 10:
+            continue
+        val digest = name.substring(0, name.byte_len() - 10)
+        if (digest == referenced or digest == keep_digest or
+                not compile_source_inventory_digest_valid_v1(digest)):
+            continue
+        val path = "{root}/generations/{name}"
+        digests.push(digest)
+        paths.push(path)
+        mtimes.push(file_modified_time(path))
+        evicted.push(false)
+    if digests.len() <= max_extra:
+        return 0
+    val now = time_now_unix_micros() / 1000000
+    var has_eligible = false
+    var ci = 0
+    while ci < mtimes.len():
+        if mtimes[ci] > 0 and (min_age_s <= 0 or now - mtimes[ci] >= min_age_s):
+            has_eligible = true
+        ci = ci + 1
+    if not has_eligible:
+        return 0
+    var gens: [i64] = []
+    var gi = 0
+    while gi < paths.len():
+        gens.push(_compile_source_inventory_header_generation_v1(paths[gi]))
+        gi = gi + 1
+    var remaining = digests.len()
+    var removed = 0
+    while remaining > max_extra:
+        var oldest = -1
+        var i = 0
+        while i < digests.len():
+            if (not evicted[i] and gens[i] >= 0 and mtimes[i] > 0 and
+                    (min_age_s <= 0 or now - mtimes[i] >= min_age_s)):
+                if oldest < 0:
+                    oldest = i
+                elif gens[i] < gens[oldest]:
+                    oldest = i
+                elif gens[i] == gens[oldest] and mtimes[i] < mtimes[oldest]:
+                    oldest = i
+                elif (gens[i] == gens[oldest] and mtimes[i] == mtimes[oldest] and
+                        digests[i] < digests[oldest]):
+                    oldest = i
+            i = i + 1
+        if oldest < 0:
+            break
+        evicted[oldest] = true
+        remaining = remaining - 1
+        val latest = _compile_source_inventory_pointer_digest_v1(
+            compile_source_inventory_read_pointer_content_v1(cache_root) ?? "")
+        if digests[oldest] == latest or digests[oldest] == keep_digest:
+            continue
+        val recheck_mtime = file_modified_time(paths[oldest])
+        if recheck_mtime <= 0 or (min_age_s > 0 and now - recheck_mtime < min_age_s):
+            continue
+        if rt_file_delete(paths[oldest]):
+            removed = removed + 1
+    removed
 
 fn compile_source_inventory_read_current_v1(
     cache_root: text
@@ -558,8 +847,9 @@ fn compile_source_inventory_revalidate_verified_pointer_v1(
     Trusted caller contract: verified_digest came from successful read_at_pointer
     of expected_pointer_content in this same refresh, and fresh Git, journal and
     membership checks passed. This is not standalone inventory admission.
-    Retain the fresh bounded blob read/hash under publication.lock; identical
-    authenticated bytes need no second parse or entry-validation allocation.
+    Re-read the fresh bounded blob and hash it; identical authenticated bytes
+    need no second parse or entry-validation allocation. No lock: CURRENT is
+    compared by full digest, and the generation blob is immutable.
     Empty result means success; other results preserve the rejection reason.
     """
     if not compile_source_inventory_cache_root_valid_v1(cache_root):
@@ -574,52 +864,146 @@ fn compile_source_inventory_revalidate_verified_pointer_v1(
             pointer != verified_digest:
         return "inventory-pointer-invalid"
     val root = compile_source_inventory_storage_v1(cache_root)
-    val publication_lock = file_lock("{root}/publication.lock", 5)
-    if publication_lock < 0:
-        return "publish-lock-unavailable"
     val current_pointer = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
     if sha256_text(current_pointer) != sha256_text(expected_pointer_content):
-        val _unlocked = file_unlock(publication_lock)
         return "publish-cursor-superseded"
-    var reason = ""
     val content = compile_source_inventory_read_text_v1(
         "{root}/generations/{verified_digest}.inventory") ?? ""
     if content == "" or sha256_text(content) != verified_digest:
-        reason = "inventory-generation-invalid"
-    if not file_unlock(publication_lock):
-        return "publish-unlock-failed"
-    reason
+        return "inventory-generation-invalid"
+    ""
 
 fn compile_source_inventory_revalidate_pointer_v1(
     cache_root: text, expected_pointer_content: text
 ) -> CompileSourceInventoryReadV1:
-    """Admit an unchanged refresh under the same lock used by publication.
+    """Admit an unchanged refresh against the current pointer, lock-free.
 
     The event owner must first validate fresh Git, journal and membership state.
     Matching CURRENT bytes do not authorize a cached inventory: reread and
-    validate the complete immutable blob while publication remains excluded.
+    validate the complete immutable blob the pointer names. (Only consumers
+    of an already-admitted digest use compile_source_inventory_read_admitted_digest_v1,
+    which verifies once per process per digest.)
     """
     if not compile_source_inventory_cache_root_valid_v1(cache_root):
         return CompileSourceInventoryReadV1(false, "publish-cache-root-invalid", "", nil)
-    val root = compile_source_inventory_storage_v1(cache_root)
-    val publication_lock = file_lock("{root}/publication.lock", 5)
-    if publication_lock < 0:
-        return CompileSourceInventoryReadV1(false, "publish-lock-unavailable", "", nil)
     val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
     # Preserve publication's complete-byte binding. Native text equality may
     # stop at an embedded NUL; a changed CURRENT must still be rejected.
     if sha256_text(pointer_content) != sha256_text(expected_pointer_content):
-        val _unlocked = file_unlock(publication_lock)
         return CompileSourceInventoryReadV1(false, "publish-cursor-superseded", "", nil)
-    val current = compile_source_inventory_read_at_pointer_v1(cache_root, pointer_content)
-    if not file_unlock(publication_lock):
-        return CompileSourceInventoryReadV1(false, "publish-unlock-failed", "", nil)
-    current
+    compile_source_inventory_read_at_pointer_v1(cache_root, pointer_content)
 
 fn compile_source_inventory_read_at_pointer_v1(
     cache_root: text, pointer_content: text
 ) -> CompileSourceInventoryReadV1:
-    """Read one immutable inventory generation selected by a captured CURRENT record."""
+    """Read one authenticated generation, retaining only the complete result graph."""
+    # Active and paused scopes belong to the caller. Refused begin preserves
+    # the original reader, including when a foreign owner holds the C scope.
+    if transient_array_scope_state_v1() != 0:
+        return compile_source_inventory_read_at_pointer_unscoped_v1(cache_root, pointer_content)
+    if not transient_scope_begin():
+        return compile_source_inventory_read_at_pointer_unscoped_v1(cache_root, pointer_content)
+    val result = compile_source_inventory_read_at_pointer_unscoped_v1(cache_root, pointer_content)
+    # Entry validation ends only scopes it opened. No per-file scratch owner
+    # or mutable caller trace/cost object is inside this reader boundary.
+    val scope_state = transient_array_scope_state_v1()
+    if scope_state != 1:
+        if scope_state == 2:
+            val ended = transient_scope_end()
+        return CompileSourceInventoryReadV1(false, "inventory-read-scratch-state-invalid", "", nil)
+    if not transient_scope_pause():
+        val ended = transient_scope_end()
+        return CompileSourceInventoryReadV1(false, "inventory-read-scratch-pause-failed", "", nil)
+    val retained = transient_promote(result)
+    val ended = transient_scope_end()
+    # Never access result after a failed promote/end. Construct failure values
+    # after retirement; an end failure is not retried or reported as restored.
+    if not retained:
+        return CompileSourceInventoryReadV1(false, "inventory-read-scratch-promote-failed", "", nil)
+    if not ended:
+        return CompileSourceInventoryReadV1(false, "inventory-read-scratch-end-failed", "", nil)
+    result
+
+# Generation blobs this process read, hashed and decoded (cost observability).
+var _compile_source_inventory_full_reads_v1: i64 = 0
+
+fn compile_source_inventory_full_read_count_v1() -> i64:
+    _compile_source_inventory_full_reads_v1
+
+# One-entry memo of the last generation an admitted-digest read verified.
+var _admitted_generation_memo_root_v1: text = ""
+var _admitted_generation_memo_v1: CompileSourceInventoryReadV1 = CompileSourceInventoryReadV1(
+    false, "", "", None)
+
+fn compile_source_inventory_read_admitted_digest_v1(
+    cache_root: text, digest: text
+) -> CompileSourceInventoryReadV1:
+    """Read the generation a caller already holds as an admitted digest.
+
+    Verified once per process per (cache_root, digest). The blob is
+    content-addressed (its name is its sha256), the first read here verified
+    and decoded all of its bytes, and the decoded value is immutable and
+    promoted out of the reader's transient scope; re-verifying the same bytes
+    in the same process adds no integrity, only cost (a 46k-row tree paid it 21
+    times per warm build). Every process still verifies the complete blob
+    before trusting it, a different digest or cache root is always a fresh
+    full read, and a rejection is never remembered. Publication, refresh and
+    the entry-closure final admission (which must see corruption landing
+    after its own preparation) keep compile_source_inventory_read_at_pointer_v1
+    / _revalidate_pointer_v1, which re-read every time.
+
+    Single-threaded by construction: callers are the sequential driver and
+    entrypoint phases (source authority, HIR lowering, cold-HIR seed); the
+    only in-process threads in a native build are the backend group-native
+    object workers, which never reach this reader.
+    """
+    if _admitted_generation_memo_v1.valid and _admitted_generation_memo_root_v1 == cache_root and
+            _admitted_generation_memo_v1.digest == digest:
+        return _admitted_generation_memo_v1
+    # A result read under a caller-owned transient scope dies with that scope;
+    # only a result this reader promoted itself may outlive the call. Under a
+    # live build session that promotion is session adoption, not permanence
+    # (runtime_native.c rt_transient_heap_promote, BSM alias): the graph is
+    # reclaimed by rt_session_heap_end, so it must not enter the memo either.
+    val promotable = transient_array_scope_state_v1() == 0 and not transient_session_heap_live_v1()
+    val read = compile_source_inventory_read_at_pointer_v1(cache_root, digest)
+    if promotable and read.valid and read.digest == digest and read.inventory.?:
+        _admitted_generation_memo_root_v1 = cache_root
+        _admitted_generation_memo_v1 = read
+    read
+
+fn compile_source_inventory_seed_admitted_digest_v1(cache_root: text, digest: text) -> bool:
+    """Verify and memoize an admitted generation BEFORE the caller opens a scope.
+
+    compile_source_inventory_read_admitted_digest_v1 may only retain a result
+    it promoted itself, so it stores nothing while a caller-owned transient
+    scope is active or paused. Every native-build caller reads under such a
+    scope (source-authority validation opens its own; the parse-closure owner
+    wraps the whole walk), so the memo stayed empty and a warm hello-world
+    coordinator fully re-read, re-hashed and re-decoded one 18.6 MB generation
+    8 times through the admitted reader (measured 2026-11-24, 7 of 8 at scope
+    state 1). A scope owner calls this first, at state 0: the one full
+    verification happens here and the scoped reads that follow are memo hits.
+
+    Adds no trust: it IS the admitted read, moved ahead of the scope. Under an
+    active or paused scope it does nothing and returns false, so it can never
+    add a read. A rejected blob is not remembered and returns false; the
+    caller's own read then fails closed exactly as before.
+
+    Also a no-op under a live build session: promotion there is session
+    adoption (runtime_native.c rt_transient_heap_promote, BSM alias), so the
+    memoized graph would be reclaimed at session end and every later hit
+    would dangle.
+    """
+    if transient_array_scope_state_v1() != 0 or transient_session_heap_live_v1():
+        return false
+    val seeded = compile_source_inventory_read_admitted_digest_v1(cache_root, digest)
+    seeded.valid and seeded.digest == digest
+
+fn compile_source_inventory_read_at_pointer_unscoped_v1(
+    cache_root: text, pointer_content: text
+) -> CompileSourceInventoryReadV1:
+    """Original immutable-generation admission, with scratch owned by its caller."""
     if not compile_source_inventory_cache_root_valid_v1(cache_root):
         return CompileSourceInventoryReadV1(false, "inventory-cache-root-invalid", "", nil)
     val root = compile_source_inventory_storage_v1(cache_root)
@@ -635,6 +1019,7 @@ fn compile_source_inventory_read_at_pointer_v1(
         pointer_content[:separator]
     if not compile_source_inventory_digest_valid_v1(pointer):
         return CompileSourceInventoryReadV1(false, "inventory-pointer-invalid", "", nil)
+    _compile_source_inventory_full_reads_v1 = _compile_source_inventory_full_reads_v1 + 1
     val content = compile_source_inventory_read_text_v1(
         "{root}/generations/{pointer}.inventory") ?? ""
     if content == "" or sha256_text(content) != pointer:
@@ -645,24 +1030,22 @@ fn compile_source_inventory_recover_v1(cache_root: text) -> i64:
     if not compile_source_inventory_cache_root_valid_v1(cache_root):
         return 0
     val root = compile_source_inventory_storage_v1(cache_root)
-    val recovery_lock = file_lock("{root}/publication.lock", 1)
-    if recovery_lock < 0:
-        return 0
+    # Lock-free: a stage whose owner pid is dead is garbage for every sweeper;
+    # a delete that loses to a concurrent sweep is simply not counted.
     var removed = 0
-    for name in dir_list(root):
+    for name in dir_list_or_empty(root):
         if name.starts_with("CURRENT.tmp."):
-            val owner = name.substring(12).to_i64() ?? -1
+            val owner = name.substring(12).split(".")[0].to_i64() ?? -1
             if owner > 0 and not process_is_running(owner) and
                     rt_file_delete("{root}/{name}"):
                 removed = removed + 1
-    for name in dir_list("{root}/generations"):
+    for name in dir_list_or_empty("{root}/generations"):
         if name.contains(".inventory.tmp."):
             val parts = name.split(".tmp.")
-            val owner = if parts.len() == 2: parts[1].to_i64() ?? -1 else: -1
+            val owner = if parts.len() == 2: parts[1].split(".")[0].to_i64() ?? -1 else: -1
             if owner > 0 and not process_is_running(owner) and
                     rt_file_delete("{root}/generations/{name}"):
                 removed = removed + 1
-    val _unlocked = file_unlock(recovery_lock)
     removed
 
 fn compile_source_inventory_snapshot_rows_v1(
@@ -671,9 +1054,9 @@ fn compile_source_inventory_snapshot_rows_v1(
     val entries = compile_source_inventory_sort_v1(inventory.entries)
     var rows: [text] = []
     for entry in entries:
-        if not compile_source_inventory_entry_valid_v1(entry):
+        if not compile_source_inventory_entry_valid_unscoped_v1(entry):
             return ""
-        rows = rows.push("{entry.source_identity}|sha256_{entry.content_digest}|{entry.byte_count}")
+        rows.push("{entry.source_identity}|sha256_{entry.content_digest}|{entry.byte_count}")
     rows.join("\n")
 
 export COMPILE_SOURCE_INVENTORY_SCHEMA_V1
@@ -694,9 +1077,12 @@ export compile_source_inventory_encode_v1, compile_source_inventory_decode_v1
 export compile_source_inventory_digest_v1
 export compile_source_inventory_publish_v1, compile_source_inventory_publish_reasoned_v1, compile_source_inventory_read_current_v1
 export compile_source_inventory_read_pointer_content_v1, compile_source_inventory_read_at_pointer_v1
+export compile_source_inventory_read_admitted_digest_v1, compile_source_inventory_full_read_count_v1
+export compile_source_inventory_seed_admitted_digest_v1
 export compile_source_inventory_revalidate_pointer_v1
 export compile_source_inventory_publication_readback_v1
 export compile_source_inventory_recover_v1
+export compile_source_inventory_publish_blob_v1, compile_source_inventory_gc_generations_v1, compile_source_inventory_prune_generations_v1
 export compile_source_inventory_snapshot_rows_v1
 
 export compile_source_inventory_revalidate_verified_pointer_v1

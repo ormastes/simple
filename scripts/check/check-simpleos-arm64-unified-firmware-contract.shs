@@ -1,0 +1,131 @@
+#!/bin/sh
+# Exercise the production firmware preparation and QEMU argv without booting.
+# Port of the former check-simpleos-arm64-unified-firmware-contract.py: slices
+# the real lane script (check-simpleos-arm64-unified-live.shs), runs the slices
+# against a real clang/ld.lld ELF fixture, and asserts the firmware contract.
+#
+# Usage: sh scripts/check/check-simpleos-arm64-unified-firmware-contract.shs [--lane <file>]
+# Exit: 0 PASS, 1 FAIL, 2 ERROR (missing toolchain / lane markers).
+set -u
+
+here=$(cd "$(dirname "$0")" && pwd)
+lane=$here/check-simpleos-arm64-unified-live.shs
+[ "${1:-}" = --lane ] && lane=$2
+
+# slice <start-marker> <end-marker>: lane text from start up to (not incl.) end.
+slice() {
+    awk -v a="$1" -v b="$2" 'BEGIN { RS = "\001" } {
+        i = index($0, a); if (!i) exit 3
+        rest = substr($0, i); j = index(rest, b); if (!j) exit 3
+        printf "%s", substr(rest, 1, j - 1) }' "$lane"
+}
+
+fails=0
+check() { # check <label> <condition-status>
+    if [ "$2" -ne 0 ]; then echo "contract: $1" >&2; fails=$((fails + 1)); fi
+}
+
+prepare=$(slice 'objcopy=${LLVM_OBJCOPY:-llvm-objcopy}' '
+rm -f "$serial"') || { echo "ERROR — nothing was checked (prepare markers missing in $lane)"; exit 2; }
+argv=$(slice 'set -- -no-user-config' '
+qemu_args=') || { echo "ERROR — nothing was checked (argv markers missing in $lane)"; exit 2; }
+guard=$(slice 'test "$firmware_hashes" =' '
+qemu-system-aarch64 "$@"') || { echo "ERROR — nothing was checked (guard markers missing in $lane)"; exit 2; }
+
+compiler=${CLANG:-$(command -v clang)}
+linker=${LLD:-$(command -v ld.lld)}
+[ -n "$compiler" ] && [ -n "$linker" ] || { echo "ERROR — nothing was checked (clang and ld.lld required for actual ELF fixture)"; exit 2; }
+
+base=$(mktemp -d)
+# Mixed (C:/...) form on Windows so native llvm tools and MSYS sh agree.
+if command -v cygpath > /dev/null 2>&1; then base=$(cygpath -m "$base"); fi
+trap 'rm -rf "$base"' EXIT
+fixture="$base/arm64 firmware '"
+mkdir -p "$fixture"
+printf '.section .text\n.global _start\n_start:\n.long 0,0\n.quad 0,64\n.zero 32\n.ascii "ARMd"\n.long 0\n' > "$fixture/header.S"
+# Native (non-MSYS) toolchains on Windows need native paths.
+native() { if command -v cygpath > /dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
+"$compiler" --target=aarch64-none-elf -c "$(native "$fixture/header.S")" -o "$(native "$fixture/header.o")" \
+    && "$linker" -Ttext=0x40000000 "$(native "$fixture/header.o")" -o "$(native "$fixture/kernel file.elf")" \
+    || { echo "ERROR — nothing was checked (ELF fixture build failed)"; exit 2; }
+[ "$(od -An -tx1 -N4 "$fixture/kernel file.elf" | tr -d ' \n')" = 7f454c46 ]
+check "fixture is not an ELF" $?
+export fixture
+
+setup='
+set -eu
+esp_dir="$fixture/efi media"
+esp_log="$fixture/build.log"
+kernel="$fixture/kernel file.elf"
+kernel_image="$fixture/kernel flat.Image"
+serial="$fixture/serial"
+font_disk="$fixture/fonts.img"
+shm="$fixture/shared memory"
+qmp="$fixture/qmp.sock"
+fail() { echo "$1" >&2; exit 23; }
+sh() {
+    test "$BOOT_PROTOCOL" = linux
+    test "$KERNEL_ELF" = "$kernel_image"
+    test "$(od -An -tx1 -j56 -N4 "$KERNEL_ELF" | tr -d " \n")" = 41524d64
+    test "$(wc -c < "$KERNEL_ELF")" -eq 64
+    test "$OUT_DIR" = "$esp_dir"
+    test "$1" = scripts/os/build-simpleos-aarch64-efi-esp.shs
+    mkdir -p "$OUT_DIR"
+    printf fresh > "$OUT_DIR/esp.img"
+    printf firmware > "$OUT_DIR/AAVMF_CODE.fd"
+    printf nvram > "$OUT_DIR/AAVMF_VARS.fd"
+}
+'
+run() { # run <body>: stdout -> $base/out, stderr -> $base/err, returns status
+    sh -c "$setup$1" > "$base/out" 2> "$base/err"
+}
+
+run "$prepare
+$guard
+$argv
+printf '%s\n' \"\$@\""
+check "production prepare/guard/argv failed: $(head -c 400 "$base/err")" $?
+flat="$fixture/kernel flat.Image"
+[ "$(od -An -tx1 -j56 -N4 "$flat" 2>/dev/null | tr -d ' \n')" = 41524d64 ] \
+    && [ "$(od -An -tu8 -j16 -N8 "$flat" | tr -d ' \n')" = 64 ]
+check "flat Image header (ARMd magic / image_size 64) wrong" $?
+has() { grep -Fxq -- "$1" "$base/out"; }
+! has -kernel && ! has -bios
+check "argv uses -kernel or -bios" $?
+# A -drive value is the line after "-drive".
+awk 'p { print; p = 0 } $0 == "-drive" { p = 1 }' "$base/out" > "$base/drives"
+for d in "if=pflash,format=raw,readonly=on,file=$fixture/efi media/AAVMF_CODE.fd" \
+         "if=pflash,format=raw,file=$fixture/efi media/AAVMF_VARS.fd" \
+         "if=none,file=$fixture/efi media/esp.img,format=raw,id=esp"; do
+    grep -Fxq -- "$d" "$base/drives"
+    check "missing drive: $d" $?
+done
+for a in virtio-blk-pci,drive=esp,bootindex=0 virtio-blk-device,drive=fontdisk \
+         virtio-keyboard-device virtio-mouse-device virtio-sound-device,audiodev=audio0; do
+    has "$a"
+    check "missing argv: $a" $?
+done
+
+expect_fail() { # expect_fail <label> <diagnostic> <body>
+    run "$3"
+    rc=$?
+    [ "$rc" -eq 23 ] && grep -q "$2" "$base/err"
+    check "$1: expected exit 23 + $2, got rc=$rc" $?
+}
+expect_fail "builder failure" real-firmware-image-build-failed "sh() { return 9; }
+$prepare"
+expect_fail "missing inputs" real-firmware-input-missing 'sh() { rm -rf "$OUT_DIR"; mkdir -p "$OUT_DIR"; }
+'"$prepare"
+expect_fail "prelaunch mutation" prelaunch-real-firmware-mutated "$prepare
+printf changed > \"\$esp_dir/esp.img\"
+$guard"
+expect_fail "raw ELF copy" flat-image-header-invalid 'LLVM_OBJCOPY=raw_copy
+raw_copy() { cp "$3" "$4"; }
+'"$prepare"
+
+if [ "$fails" -ne 0 ]; then
+    echo "FAIL — $fails firmware contract check(s) failed"
+    exit 1
+fi
+echo 'PASS: real ELF-to-Image extraction, raw ELF rejection, production firmware argv, quoted paths, builder failure, missing inputs, prelaunch mutation'
+echo 'Native firmware boot and physical-board qualification: NOT RUN'

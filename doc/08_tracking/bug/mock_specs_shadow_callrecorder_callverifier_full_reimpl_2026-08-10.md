@@ -1,6 +1,6 @@
 # mock_spec twins shadow CallRecorder/CallVerifier with a full alternate mock framework
 
-Status: OPEN (P3)
+Status: CLOSED 2026-11-25 (fixed 2026-08-10; see dated verification at bottom)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 - **Files**:
@@ -110,3 +110,15 @@ CallRecorder/CallVerifier product API rather than importing it) --
 not a functional bug, a cleanup task across two ~600-line files.
 Leaving OPEN, out of this lane's per-item scope.
 
+
+## Verification 2026-11-25 (work/p3-bao-20261125) — CLOSE confirmed
+
+Re-verified on current source (post tree reorganisation the twins live at
+`test/01_unit/lib/common/mock_spec.spl` and `test/01_unit/std/mock_spec.spl`):
+both import the real framework (`use std.spec.mock.{...}` at lines 14 and 20
+respectively; 311 and 43 lines, no local `class CallRecorder`/`CallVerifier`
+declarations). Executed the canonical suite:
+`SIMPLE_LIB=src bin/simple.exe test test/01_unit/lib/common/mock_spec.spl
+--mode=interpreter` => 41 examples, 0 failures. The 2026-09-13 triage note
+("Leaving OPEN") predates the 2026-08-10 fix + 2026-08-17 re-verification
+recorded above; the OPEN header is stale. Closed.

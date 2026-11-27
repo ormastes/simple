@@ -1,0 +1,178 @@
+# @req ORCH-02 HOST-02
+# Execution NOT_RUN. Record and filesystem publication contracts only;
+# no native attachment, authenticated admission, cleanup proof, or Input rights.
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.orchestration.host_primary_attach_record_v1.*
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.{HostHelperStreamConsumedV1, host_helper_stream_consumed_encode_v1, host_helper_stream_consumed_decode_v1, host_helper_stream_publish_v1, host_helper_stream_path_v1}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io_runtime.{dir_create, dir_remove}
+use std.common.contracts.container.primary_attach_v1.*
+use std.common.contracts.container.stream_v2.*
+use std.common.build_manager.group_process_stream_protocol_v2.{group_process_stream_template_encode_v3, group_process_child_argv_digest_v2}
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use test.fixtures.orchestration.container_primary_attach_fixture_v1.container_primary_attach_fixture_v1
+
+fn primary_consumed_fixture_v1() -> HostPrimaryAttachConsumedV1:
+    val plan = container_primary_attach_fixture_v1()
+    HostPrimaryAttachConsumedV1(operation_id: plan.identity.operation_id,
+        operation_digest: "a".repeat(64), packet_digest: "b".repeat(64),
+        execution_proof_digest: "c".repeat(64), prepared_receipt_digest: "d".repeat(64),
+        deadline_unix_ms: 1000, primary_plan: plan)
+
+fn primary_consumed_wire_v1(source: text, key: text, value: SdnValue) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    var fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn primary_consumed_without_v1(source: text, key: text) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    val fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    var retained: Dict<text, SdnValue> = {}
+    for name in fields.keys():
+        if name != key: retained[name] = fields[name]
+    sdn_encode_canonical(SdnValue.Dict(retained)) + "\n"
+
+describe "Host primary attach consumed record contract":
+    it "publishes primary consumption once and preserves the original bytes on every replay":
+        step("publishes primary consumption once and preserves the original bytes on every replay")
+        val root = secure_temp_dir("/tmp", "host-primary-consumed-once").unwrap()
+        val record = primary_consumed_fixture_v1()
+        val source = host_primary_attach_consumed_encode_v1(record).unwrap()
+        host_helper_stream_publish_v1(root, record.operation_id, "primary-consumed", source, true).unwrap()
+        val path = host_helper_stream_path_v1(root, record.operation_id, "primary-consumed")
+        expect(file_read_regular_no_follow_bounded(path, 8388608).unwrap()).to_equal(source)
+        expect(host_helper_stream_publish_v1(root, record.operation_id, "primary-consumed", source, true).is_err()).to_equal(true)
+        expect(file_read_regular_no_follow_bounded(path, 8388608).unwrap()).to_equal(source)
+        var changed = record
+        changed.packet_digest = "e".repeat(64)
+        val changed_source = host_primary_attach_consumed_encode_v1(changed).unwrap()
+        expect(changed_source == source).to_equal(false)
+        expect(host_helper_stream_publish_v1(root, record.operation_id, "primary-consumed", changed_source, true).is_err()).to_equal(true)
+        expect(file_read_regular_no_follow_bounded(path, 8388608).unwrap()).to_equal(source)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "refuses to overwrite a partial primary consumption archive":
+        step("refuses to overwrite a partial primary consumption archive")
+        val root = secure_temp_dir("/tmp", "host-primary-consumed-partial").unwrap()
+        val record = primary_consumed_fixture_v1()
+        val source = host_primary_attach_consumed_encode_v1(record).unwrap()
+        expect(dir_create(root + "/host-helper-stream-primary-consumed", true)).to_equal(true)
+        val path = host_helper_stream_path_v1(root, record.operation_id, "primary-consumed")
+        val partial = "incomplete-primary-consumption"
+        expect(file_create_exclusive(path, partial)).to_equal(true)
+        expect(host_primary_attach_consumed_decode_v1(file_read_regular_no_follow_bounded(path, 8388608).unwrap()).is_err()).to_equal(true)
+        expect(host_helper_stream_publish_v1(root, record.operation_id, "primary-consumed", source, true).is_err()).to_equal(true)
+        expect(file_read_regular_no_follow_bounded(path, 8388608).unwrap()).to_equal(partial)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "round trips stdin and tty with full nested plan and retained evidence digests":
+        step("round trips stdin and tty with full nested plan and retained evidence digests")
+        for mode in ["stdin", "tty"]:
+            var record = primary_consumed_fixture_v1()
+            record.primary_plan.terminal_mode = mode
+            record.primary_plan.request_digest = container_primary_attach_plan_digest_v1(record.primary_plan).unwrap()
+            val source = host_primary_attach_consumed_encode_v1(record).unwrap()
+            val decoded = host_primary_attach_consumed_decode_v1(source).unwrap()
+            expect(host_primary_attach_consumed_encode_v1(decoded).unwrap()).to_equal(source)
+            expect(decoded.operation_id).to_equal(record.operation_id)
+            expect(decoded.operation_digest).to_equal(record.operation_digest)
+            expect(decoded.packet_digest).to_equal(record.packet_digest)
+            expect(decoded.execution_proof_digest).to_equal(record.execution_proof_digest)
+            expect(decoded.prepared_receipt_digest).to_equal(record.prepared_receipt_digest)
+            expect(decoded.deadline_unix_ms).to_equal(1000)
+            expect(decoded.primary_plan.terminal_mode).to_equal(mode)
+            expect(container_primary_attach_plan_encode_v1(decoded.primary_plan).unwrap()).to_equal(container_primary_attach_plan_encode_v1(record.primary_plan).unwrap())
+            val parsed = parse_resource_document(source).unwrap()
+            val fields = as_dict(parsed.0, "", parsed.1).unwrap()
+            expect(fields["kind"]).to_equal(SdnValue.String("host-primary-attach-consumed"))
+            expect(fields["primaryPlan"]).to_equal(SdnValue.String(container_primary_attach_plan_encode_v1(record.primary_plan).unwrap()))
+            expect(fields.contains_key("outputPlan")).to_equal(false)
+
+    it "refuses another operation and nonpositive expiry on encode and decode":
+        step("refuses another operation and nonpositive expiry on encode and decode")
+        val original = primary_consumed_fixture_v1()
+        val source = host_primary_attach_consumed_encode_v1(original).unwrap()
+        var changed = original
+        changed.operation_id = "another-operation"
+        expect(host_primary_attach_consumed_encode_v1(changed).is_err()).to_equal(true)
+        expect(host_primary_attach_consumed_decode_v1(primary_consumed_wire_v1(source, "operationId", SdnValue.String(changed.operation_id))).is_err()).to_equal(true)
+        for expiry in [0, -1]:
+            changed = original
+            changed.deadline_unix_ms = expiry
+            expect(host_primary_attach_consumed_encode_v1(changed).is_err()).to_equal(true)
+            expect(host_primary_attach_consumed_decode_v1(primary_consumed_wire_v1(source, "deadlineUnixMs", SdnValue.Int(expiry))).is_err()).to_equal(true)
+
+    it "refuses malformed hashes for every retained correlation field":
+        step("refuses malformed hashes for every retained correlation field")
+        val original = primary_consumed_fixture_v1()
+        val source = host_primary_attach_consumed_encode_v1(original).unwrap()
+        for invalid in ["", "a".repeat(63), "g".repeat(64)]:
+            for key in ["operationDigest", "packetDigest", "executionProofDigest", "preparedReceiptDigest"]:
+                var changed = original
+                if key == "operationDigest": changed.operation_digest = invalid
+                if key == "packetDigest": changed.packet_digest = invalid
+                if key == "executionProofDigest": changed.execution_proof_digest = invalid
+                if key == "preparedReceiptDigest": changed.prepared_receipt_digest = invalid
+                expect(host_primary_attach_consumed_encode_v1(changed).is_err()).to_equal(true)
+                expect(host_primary_attach_consumed_decode_v1(primary_consumed_wire_v1(source, key, SdnValue.String(invalid))).is_err()).to_equal(true)
+
+    it "refuses nested launch argument and request digest mutation":
+        step("refuses nested launch argument and request digest mutation")
+        val original = primary_consumed_fixture_v1()
+        val source = host_primary_attach_consumed_encode_v1(original).unwrap()
+        var changed = original
+        changed.primary_plan.launch_template.request.args = ["attach", "substituted-native-id"]
+        changed.primary_plan.launch_template.request.child_argv_digest = group_process_child_argv_digest_v2(
+            changed.primary_plan.launch_template.request.program, changed.primary_plan.launch_template.request.args)
+        expect(host_primary_attach_consumed_encode_v1(changed).is_err()).to_equal(true)
+        val changed_template = group_process_stream_template_encode_v3(changed.primary_plan.launch_template).unwrap()
+        val original_plan_source = container_primary_attach_plan_encode_v1(original.primary_plan).unwrap()
+        val changed_args_plan = primary_consumed_wire_v1(original_plan_source, "launchTemplate", SdnValue.String(changed_template))
+        expect(host_primary_attach_consumed_decode_v1(primary_consumed_wire_v1(source, "primaryPlan", SdnValue.String(changed_args_plan))).is_err()).to_equal(true)
+        changed = original
+        changed.primary_plan.request_digest = "0".repeat(64)
+        expect(host_primary_attach_consumed_encode_v1(changed).is_err()).to_equal(true)
+        val plan_source = container_primary_attach_plan_encode_v1(original.primary_plan).unwrap()
+        val stale_plan = primary_consumed_wire_v1(plan_source, "requestDigest", SdnValue.String("0".repeat(64)))
+        expect(host_primary_attach_consumed_decode_v1(primary_consumed_wire_v1(source, "primaryPlan", SdnValue.String(stale_plan))).is_err()).to_equal(true)
+        val duplicate_plan = plan_source.slice(0, plan_source.len() - 2) + ", version: 1" + "}\n"
+        expect(host_primary_attach_consumed_decode_v1(primary_consumed_wire_v1(source, "primaryPlan", SdnValue.String(duplicate_plan))).is_err()).to_equal(true)
+        expect(host_primary_attach_consumed_decode_v1(primary_consumed_wire_v1(source, "primaryPlan", SdnValue.String(plan_source + "\n"))).is_err()).to_equal(true)
+
+    it "separates primary consumed archives from valid output consumed archives":
+        step("separates primary consumed archives from valid output consumed archives")
+        val record = primary_consumed_fixture_v1()
+        val primary_source = host_primary_attach_consumed_encode_v1(record).unwrap()
+        val primary = record.primary_plan
+        var output_plan = ContainerOutputPlanV2(mode: "output-follow", workload: primary.workload,
+            runtime: primary.runtime, identity: primary.identity, resources: primary.resources,
+            provider_identity_digest: primary.provider_identity_digest, policy_digest: primary.policy_digest,
+            launch_template: primary.launch_template, request_digest: "")
+        output_plan.request_digest = container_output_plan_digest_v2(output_plan).unwrap()
+        val output = HostHelperStreamConsumedV1(operation_id: record.operation_id,
+            operation_digest: record.operation_digest, packet_digest: record.packet_digest,
+            execution_proof_digest: record.execution_proof_digest, prepared_receipt_digest: record.prepared_receipt_digest,
+            deadline_unix_ms: record.deadline_unix_ms, output_plan: output_plan)
+        val output_source = host_helper_stream_consumed_encode_v1(output).unwrap()
+        expect(host_helper_stream_consumed_decode_v1(output_source).unwrap().operation_id).to_equal(record.operation_id)
+        expect(host_primary_attach_consumed_decode_v1(output_source).is_err()).to_equal(true)
+        expect(host_helper_stream_consumed_decode_v1(primary_source).is_err()).to_equal(true)
+        expect(host_primary_attach_consumed_decode_v1(primary_consumed_wire_v1(primary_source, "kind", SdnValue.String("host-helper-stream-consumed"))).is_err()).to_equal(true)
+        val output_nested = container_output_plan_encode_v2(output_plan).unwrap()
+        expect(host_primary_attach_consumed_decode_v1(primary_consumed_wire_v1(primary_source, "primaryPlan", SdnValue.String(output_nested))).is_err()).to_equal(true)
+
+    it "refuses extra duplicate missing mistyped and noncanonical outer fields":
+        step("refuses extra duplicate missing mistyped and noncanonical outer fields")
+        val source = host_primary_attach_consumed_encode_v1(primary_consumed_fixture_v1()).unwrap()
+        expect(host_primary_attach_consumed_decode_v1(primary_consumed_wire_v1(source, "inputAuthorized", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(host_primary_attach_consumed_decode_v1(primary_consumed_wire_v1(source, "outputPlan", SdnValue.String("substitute"))).is_err()).to_equal(true)
+        expect(host_primary_attach_consumed_decode_v1(primary_consumed_without_v1(source, "primaryPlan")).is_err()).to_equal(true)
+        expect(host_primary_attach_consumed_decode_v1(primary_consumed_wire_v1(source, "deadlineUnixMs", SdnValue.String("1000"))).is_err()).to_equal(true)
+        expect(host_primary_attach_consumed_decode_v1(primary_consumed_wire_v1(source, "primaryPlan", SdnValue.Int(1))).is_err()).to_equal(true)
+        val duplicate = source.slice(0, source.len() - 2) + ", version: 1" + "}\n"
+        expect(host_primary_attach_consumed_decode_v1(duplicate).is_err()).to_equal(true)
+        expect(host_primary_attach_consumed_decode_v1(" " + source).is_err()).to_equal(true)
+        expect(host_primary_attach_consumed_decode_v1(source + "\n").is_err()).to_equal(true)

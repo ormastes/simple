@@ -1,0 +1,222 @@
+# Machine-code evidence for `@must(avx512)` / `@prefer(avx512)` receipts.
+#
+# The MIR-opt receipt (60.mir_opt/mir_opt/auto_vectorize_receipt.spl) can only
+# say what the vectorizer rewrote. Whether AVX-512 actually reached the
+# machine code is decided here, from the emitted bytes: they are decoded into
+# instruction boundaries (so an 0x62 byte inside a displacement or immediate
+# is never mistaken for an EVEX prefix) and an instruction counts as ZMM only
+# when it is EVEX with vector length 512 (L'L = 10). A register-form EVEX
+# instruction with b = 1 reuses L'L as a rounding mode and is not counted:
+# scalar ops (VADDSS {rn-sae}) share that encoding, so counting it could
+# claim AVX-512 for code that has none. The backend never emits it.
+# Bytes that cannot be decoded never count as evidence.
+use compiler.mir_opt.auto_vectorize_receipt.{SimdReqOutcome, SimdReqVerdict}
+use compiler.mir.mir_data.{MirModule}
+use compiler.backend.native.mach_inst.{EncodedFunction}
+
+struct X86ZmmEvidenceV1:
+    decoded: bool
+    instructions: i64
+    evex_instructions: i64
+    zmm_instructions: i64
+    reason: text
+
+struct X86InstShapeV1:
+    length: i64
+    evex: bool
+    zmm: bool
+
+fn x86_inst_invalid() -> X86InstShapeV1:
+    X86InstShapeV1(length: -1, evex: false, zmm: false)
+
+fn x86_modrm_length(code: [i64], at: i64) -> i64:
+    """Bytes taken by ModRM (+SIB, +displacement) starting at `at`, or -1."""
+    if at >= code.len(): return -1
+    val modrm = code[at]
+    val mod_ = modrm >> 6
+    val rm = modrm & 7
+    var length = 1
+    if mod_ == 3: return length
+    if rm == 4:
+        if at + 1 >= code.len(): return -1
+        length = length + 1
+        if mod_ == 0 and (code[at + 1] & 7) == 5: length = length + 4
+    if mod_ == 0 and rm == 5: length = length + 4
+    if mod_ == 1: length = length + 1
+    if mod_ == 2: length = length + 4
+    length
+
+fn x86_legacy_one_byte(code: [i64], at: i64, opcode: i64, rex_w: bool, op16: bool) -> i64:
+    """Length after the opcode byte for the one-byte map, or -1 if unknown."""
+    val imm_z = if op16: 2 else: 4
+    val low = opcode & 7
+    if opcode < 0x40 and low <= 3: return x86_modrm_length(code, at)
+    if opcode < 0x40 and low == 4: return 1
+    if opcode < 0x40 and low == 5: return imm_z
+    if opcode >= 0x50 and opcode <= 0x5F: return 0
+    if opcode == 0x63: return x86_modrm_length(code, at)
+    if opcode == 0x68: return imm_z
+    if opcode == 0x6A: return 1
+    if opcode == 0x69:
+        val m = x86_modrm_length(code, at)
+        return if m < 0: -1 else: m + imm_z
+    if opcode == 0x6B or opcode == 0x80 or opcode == 0x83 or opcode == 0xC0 or opcode == 0xC1 or opcode == 0xC6:
+        val m = x86_modrm_length(code, at)
+        return if m < 0: -1 else: m + 1
+    if opcode == 0x81 or opcode == 0xC7:
+        val m = x86_modrm_length(code, at)
+        return if m < 0: -1 else: m + imm_z
+    if opcode >= 0x70 and opcode <= 0x7F: return 1
+    if opcode >= 0x84 and opcode <= 0x8F: return x86_modrm_length(code, at)
+    if opcode >= 0x90 and opcode <= 0x99: return 0
+    if opcode == 0x9C or opcode == 0x9D: return 0
+    if opcode == 0xA8: return 1
+    if opcode == 0xA9: return imm_z
+    if opcode >= 0xB0 and opcode <= 0xB7: return 1
+    if opcode >= 0xB8 and opcode <= 0xBF: return if rex_w: 8 else: imm_z
+    if opcode == 0xC2: return 2
+    if opcode == 0xC3 or opcode == 0xC9 or opcode == 0xCC or opcode == 0xF4: return 0
+    if opcode == 0xCD: return 1
+    if opcode >= 0xD0 and opcode <= 0xD3: return x86_modrm_length(code, at)
+    if opcode == 0xE8 or opcode == 0xE9: return 4
+    if opcode == 0xEB: return 1
+    if opcode == 0xF6 or opcode == 0xF7:
+        if at >= code.len(): return -1
+        val m = x86_modrm_length(code, at)
+        if m < 0: return -1
+        val reg = (code[at] >> 3) & 7
+        if reg <= 1: return m + (if opcode == 0xF6: 1 else: imm_z)
+        return m
+    if opcode == 0xFE or opcode == 0xFF: return x86_modrm_length(code, at)
+    -1
+
+fn x86_legacy_0f(code: [i64], at: i64, opcode: i64) -> i64:
+    if opcode == 0x05 or opcode == 0x0B or opcode == 0x31 or opcode == 0xA2 or opcode == 0x77: return 0
+    if opcode >= 0xC8 and opcode <= 0xCF: return 0
+    if opcode >= 0x80 and opcode <= 0x8F: return 4
+    val m = x86_modrm_length(code, at)
+    if m < 0: return -1
+    if (opcode >= 0x70 and opcode <= 0x73) or opcode == 0xA4 or opcode == 0xAC or opcode == 0xBA or opcode == 0xC2 or (opcode >= 0xC4 and opcode <= 0xC6): return m + 1
+    m
+
+fn x86_vector_map_tail(code: [i64], at: i64, map: i64, opcode: i64) -> i64:
+    """Length after the opcode for VEX/EVEX maps 0F (1), 0F38 (2), 0F3A (3)."""
+    val m = x86_modrm_length(code, at)
+    if m < 0: return -1
+    if map == 3: return m + 1
+    if map == 1 and ((opcode >= 0x70 and opcode <= 0x73) or opcode == 0xC2 or (opcode >= 0xC4 and opcode <= 0xC6)): return m + 1
+    if map == 1 or map == 2: return m
+    -1
+
+fn x86_decode_one(code: [i64], start: i64) -> X86InstShapeV1:
+    var at = start
+    var op16 = false
+    var prefixes = 0
+    while at < code.len():
+        val b = code[at]
+        if b == 0x66 or b == 0x67 or b == 0xF0 or b == 0xF2 or b == 0xF3 or b == 0x2E or b == 0x36 or b == 0x3E or b == 0x26 or b == 0x64 or b == 0x65:
+            if b == 0x66: op16 = true
+            at = at + 1
+            prefixes = prefixes + 1
+            if prefixes > 14: return x86_inst_invalid()
+        else:
+            break
+    if at >= code.len(): return x86_inst_invalid()
+    var rex_w = false
+    if code[at] >= 0x40 and code[at] <= 0x4F:
+        rex_w = (code[at] & 8) != 0
+        at = at + 1
+        if at >= code.len(): return x86_inst_invalid()
+    val lead = code[at]
+    if lead == 0x62:
+        # EVEX: 62 P0 P1 P2 opcode ModRM ...
+        if at + 5 >= code.len(): return x86_inst_invalid()
+        val p0 = code[at + 1]
+        val p1 = code[at + 2]
+        val p2 = code[at + 3]
+        val map = p0 & 3
+        if map == 0 or (p1 & 4) == 0: return x86_inst_invalid()
+        val opcode = code[at + 4]
+        val tail = x86_vector_map_tail(code, at + 5, map, opcode)
+        if tail < 0: return x86_inst_invalid()
+        val ll = (p2 >> 5) & 3
+        val reg_form = (code[at + 5] >> 6) == 3
+        val zmm = ll == 2 and not ((p2 & 0x10) != 0 and reg_form)
+        return X86InstShapeV1(length: at + 5 + tail - start, evex: true, zmm: zmm)
+    if lead == 0xC4 or lead == 0xC5:
+        val header = if lead == 0xC4: 3 else: 2
+        if at + header >= code.len(): return x86_inst_invalid()
+        val map = if lead == 0xC4: code[at + 1] & 0x1F else: 1
+        val opcode = code[at + header]
+        if map == 1 and opcode == 0x77: return X86InstShapeV1(length: at + header + 1 - start, evex: false, zmm: false)
+        val tail = x86_vector_map_tail(code, at + header + 1, map, opcode)
+        if tail < 0: return x86_inst_invalid()
+        return X86InstShapeV1(length: at + header + 1 + tail - start, evex: false, zmm: false)
+    if lead == 0x0F:
+        if at + 1 >= code.len(): return x86_inst_invalid()
+        val second = code[at + 1]
+        if second == 0x38 or second == 0x3A:
+            val tail = x86_modrm_length(code, at + 3)
+            if tail < 0 or at + 2 >= code.len(): return x86_inst_invalid()
+            return X86InstShapeV1(length: at + 3 + tail + (if second == 0x3A: 1 else: 0) - start, evex: false, zmm: false)
+        val tail = x86_legacy_0f(code, at + 2, second)
+        if tail < 0: return x86_inst_invalid()
+        return X86InstShapeV1(length: at + 2 + tail - start, evex: false, zmm: false)
+    val tail = x86_legacy_one_byte(code, at + 1, lead, rex_w, op16)
+    if tail < 0: return x86_inst_invalid()
+    X86InstShapeV1(length: at + 1 + tail - start, evex: false, zmm: false)
+
+fn x86_zmm_evidence(code: [i64]) -> X86ZmmEvidenceV1:
+    var at = 0
+    var instructions = 0
+    var evex = 0
+    var zmm = 0
+    while at < code.len():
+        val shape = x86_decode_one(code, at)
+        if shape.length <= 0 or at + shape.length > code.len():
+            return X86ZmmEvidenceV1(decoded: false, instructions: instructions, evex_instructions: evex, zmm_instructions: zmm, reason: "undecodable-byte-at-{at}")
+        instructions = instructions + 1
+        if shape.evex: evex = evex + 1
+        if shape.zmm: zmm = zmm + 1
+        at = at + shape.length
+    X86ZmmEvidenceV1(decoded: true, instructions: instructions, evex_instructions: evex, zmm_instructions: zmm, reason: "decoded-{instructions}-instructions")
+
+fn x86_avx512_machine_code_receipt(level: text, backend: text, code: [i64]) -> SimdReqOutcome:
+    """Receipt for an `avx512` requirement judged on emitted machine code.
+    Satisfied only when the bytes decode and contain at least one ZMM
+    instruction; anything else is Error for @must/@error_not and Warn for
+    @prefer/@warn_not. Other backends are not adjudicated here."""
+    if level == "" or level == "none" or backend != "avx512":
+        return SimdReqOutcome(verdict: SimdReqVerdict.NotRequested, reason: "")
+    val evidence = x86_zmm_evidence(code)
+    if evidence.decoded and evidence.zmm_instructions > 0:
+        return SimdReqOutcome(verdict: SimdReqVerdict.Satisfied, reason: "avx512-satisfied-by-{evidence.zmm_instructions}-zmm-instructions")
+    val why = if not evidence.decoded: "machine-code-undecodable-{evidence.reason}" else: "emitted-machine-code-has-no-zmm-instruction"
+    val verdict = if level == "must" or level == "error_not": SimdReqVerdict.Error else: SimdReqVerdict.Warn
+    SimdReqOutcome(verdict: verdict, reason: "@{level}({backend}) unsatisfied: {why}")
+
+fn x86_avx512_confirm_receipt(planned: SimdReqOutcome, machine: SimdReqOutcome) -> SimdReqOutcome:
+    """The final receipt: a MIR-opt `Satisfied` stands only when the machine
+    code agrees. A MIR-opt failure is never upgraded by machine evidence."""
+    if planned.verdict == SimdReqVerdict.Satisfied and machine.verdict != SimdReqVerdict.NotRequested and machine.verdict != SimdReqVerdict.Satisfied:
+        return machine
+    planned
+
+fn x86_avx512_report_machine_receipts(module: MirModule, encoded: [EncodedFunction]) -> [text]:
+    """Judge every `avx512` requirement on its function's emitted bytes and
+    print the unmet ones (SIMD-REQ-002), matching how the MIR-opt receipt
+    reports SIMD-REQ-001: the optimizer pipeline has no diagnostic channel,
+    so an unmissable line is the honest maximum. Returns the printed lines."""
+    var lines: [text] = []
+    for function in module.functions.values():
+        if function.simd_req_backend != "avx512": continue
+        for encoded_function in encoded:
+            if encoded_function.name == function.name:
+                val outcome = x86_avx512_machine_code_receipt(function.simd_req_level, function.simd_req_backend, encoded_function.code)
+                if outcome.verdict == SimdReqVerdict.Error: lines.push("error[SIMD-REQ-002] {function.name}: {outcome.reason}")
+                elif outcome.verdict == SimdReqVerdict.Warn: lines.push("warning[SIMD-REQ-002] {function.name}: {outcome.reason}")
+    for line in lines:
+        print(line)
+    lines
+
+export X86ZmmEvidenceV1, x86_zmm_evidence, x86_avx512_machine_code_receipt, x86_avx512_confirm_receipt, x86_avx512_report_machine_receipts

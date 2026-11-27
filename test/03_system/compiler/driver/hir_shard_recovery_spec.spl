@@ -8,7 +8,9 @@ use std.spec
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_aggregate_exit}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_seal, hir_shard_recovery_progress, hir_shard_recovery_failure_count, hir_shard_recovery_complete, hir_shard_recovery_finished}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory, hir_shard_recovery_close_inventory}
-use std.io_runtime.{dir_create_all, dir_exists, dir_list, dir_list_optional, file_read, file_write, getpid}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_unclaimed_count, hir_shard_recovery_replacements_dispatchable}
+use std.io_runtime.{dir_create_all, dir_exists, dir_list_or_empty, dir_list_optional, file_read, file_write, file_exists, getpid, process_spawn_async, time_now_monotonic_ms}
+use std.nogc_sync_mut.io.process_ops.{process_wait}
 use std.common.crypto.sha256.{sha256_text}
 
 # Each scenario owns a new queue. Keep receipts for inspection after the run.
@@ -20,7 +22,7 @@ fn recovery_fixture(label: text) -> text:
 
 fn corrupt_recovery_record(queue: text, suffix: text, content: text):
     var changed = 0
-    for name in dir_list(queue):
+    for name in dir_list_or_empty(queue):
         if name.ends_with(suffix):
             expect(file_write("{queue}/{name}", content)).to_equal(true)
             changed = changed + 1
@@ -29,7 +31,7 @@ fn corrupt_recovery_record(queue: text, suffix: text, content: text):
 fn only_recovery_terminal(queue: text) -> text:
     var record = ""
     var found = 0
-    for name in dir_list(queue):
+    for name in dir_list_or_empty(queue):
         if name.ends_with(".terminal"):
             record = file_read("{queue}/{name}")
             found = found + 1
@@ -64,7 +66,7 @@ describe "HIR shard bounded recovery decisions":
                 expect(hir_shard_recovery_complete(queue, owner)).to_equal(true)
                 expect(hir_shard_recovery_finished(queue, owner)).to_equal(true)
             var terminals = 0
-            for name in dir_list(queue):
+            for name in dir_list_or_empty(queue):
                 if name.ends_with(".terminal"): terminals = terminals + 1
             expect(terminals).to_equal(20)
             expect(hir_shard_recovery_close_inventory(queue, false)).to_equal(0)
@@ -125,41 +127,80 @@ describe "HIR shard bounded recovery decisions":
             expect(dir_list_optional("{queue}/missing").is_none()).to_equal(true)
 
     describe "REQ-KG-005: replacement consumes newly attributed work":
+        it "should count inventory rows without claims before deciding on replacement":
+            step("Count newly claimable rows as the coordinator seals crashed work")
+            val queue = recovery_fixture("replacement-unclaimed-count")
+            val paths = ["first.spl", "second.spl"]
+            expect(hir_shard_recovery_inventory(queue, "closure-two", paths)).to_equal(true)
+            expect(hir_shard_recovery_unclaimed_count(queue)).to_equal(2)
+            expect(hir_shard_recovery_claim(queue, "worker-0", paths[0], "key-0")).to_equal(1)
+            expect(hir_shard_recovery_unclaimed_count(queue)).to_equal(1)
+            expect(hir_shard_recovery_claim(queue, "worker-1", paths[1], "key-1")).to_equal(1)
+            val unclaimed = hir_shard_recovery_unclaimed_count(queue)
+            expect(unclaimed).to_equal(0)
+            expect(hir_shard_recovery_can_replace(false, -134, 2, unclaimed)).to_equal(false)
+
+        it "should drop a queued replacement when the other worker claims the last row":
+            step("Let one crashed worker queue a replacement while another is still running")
+            val queue = recovery_fixture("replacement-stale-queue")
+            val paths = ["crashed.spl", "last.spl"]
+            expect(hir_shard_recovery_inventory(queue, "closure-two-workers", paths)).to_equal(true)
+            expect(hir_shard_recovery_claim(queue, "worker-crashed", paths[0], "key-crashed")).to_equal(1)
+            expect(hir_shard_recovery_seal(queue, "worker-crashed", "CRASH")).to_equal(1)
+            val remaining_at_reap = hir_shard_recovery_unclaimed_count(queue)
+            expect(remaining_at_reap).to_equal(1)
+            expect(hir_shard_recovery_can_replace(false, -134, 1, remaining_at_reap)).to_equal(true)
+            expect(hir_shard_recovery_replacements_dispatchable(queue, 1)).to_equal(true)
+            step("The other worker claims the final row before replacement dispatch")
+            expect(hir_shard_recovery_claim(queue, "worker-live", paths[1], "key-last")).to_equal(1)
+            expect(hir_shard_recovery_terminal(queue, "worker-live", paths[1], "PASS", true)).to_equal(true)
+            expect(hir_shard_recovery_replacements_dispatchable(queue, 1)).to_equal(false)
+            expect(hir_shard_recovery_replacements_dispatchable(queue, 0)).to_equal(false)
+
         it "should replace a crashed worker after one newly sealed module":
             step("Record a module crash during a local collect-all build")
-            expect(hir_shard_recovery_can_replace(false, 139, 1)).to_equal(true)
+            expect(hir_shard_recovery_can_replace(false, 139, 1, 3)).to_equal(true)
 
         it "should replace a timed-out worker only after attributed work":
             step("Attribute a timed-out worker to its active module")
-            expect(hir_shard_recovery_can_replace(false, 124, 1)).to_equal(true)
+            expect(hir_shard_recovery_can_replace(false, 124, 1, 3)).to_equal(true)
 
         it "should accept a reaped signal status after progress":
             step("Observe a confirmed signal death after a module claim")
-            expect(hir_shard_recovery_can_replace(false, -139, 1)).to_equal(true)
+            expect(hir_shard_recovery_can_replace(false, -139, 1, 3)).to_equal(true)
 
         it "should stop when a worker fails before claiming a module":
             step("Observe a preflight failure without module progress")
-            expect(hir_shard_recovery_can_replace(false, 1, 0)).to_equal(false)
+            expect(hir_shard_recovery_can_replace(false, 1, 0, 3)).to_equal(false)
 
         it "should stop when a crash cannot be attributed to new work":
             step("Observe an unattributed crash without opening another retry")
-            expect(hir_shard_recovery_can_replace(false, 139, 0)).to_equal(false)
+            expect(hir_shard_recovery_can_replace(false, 139, 0, 3)).to_equal(false)
 
         it "should reject a negative progress count":
             step("Reject invalid progress as evidence for a replacement")
-            expect(hir_shard_recovery_can_replace(false, 139, -1)).to_equal(false)
+            expect(hir_shard_recovery_can_replace(false, 139, -1, 3)).to_equal(false)
+
+        # UNEXECUTED: written without running the spec (no builds allowed in this lane).
+        it "should not replace a crashed worker when no inventory row is unclaimed":
+            step("Observe a crash after every module was claimed and sealed")
+            expect(hir_shard_recovery_can_replace(false, -134, 735, 0)).to_equal(false)
+
+        it "should not replace when the inventory is unreadable":
+            step("Treat an unreadable inventory as no remaining work")
+            expect(hir_shard_recovery_can_replace(false, 139, 1, -1)).to_equal(false)
 
         it "should not replace a worker that completed successfully":
             step("Finish a successful worker without scheduling crash recovery")
-            expect(hir_shard_recovery_can_replace(false, 0, 3)).to_equal(false)
+            expect(hir_shard_recovery_can_replace(false, 0, 3, 3)).to_equal(false)
 
         it "should stop after a module crash under explicit fail-fast policy":
             step("Apply the CI fail-fast policy to an attributed crash")
-            expect(hir_shard_recovery_can_replace(true, 139, 1)).to_equal(false)
+            expect(hir_shard_recovery_can_replace(true, 139, 1, 3)).to_equal(false)
 
         it "should stop after multiple claims under explicit fail-fast policy":
             step("Keep fail-fast authoritative even when the worker made progress")
-            expect(hir_shard_recovery_can_replace(true, 1, 5)).to_equal(false)
+            expect(hir_shard_recovery_can_replace(true, 1, 5, 3)).to_equal(false)
 
     describe "REQ-KG-004: failures prohibit successful aggregate admission":
         it "should allow a failure-free aggregate":
@@ -251,7 +292,7 @@ describe "HIR shard bounded recovery decisions":
             step("Use a missing queue to exercise unavailable durable accounting")
             val queue = "build/test_output/hir_recovery/{getpid()}-missing-queue"
             expect(dir_exists(queue)).to_equal(false)
-            expect(hir_shard_recovery_claim(queue, "worker", "a.spl", "key-a")).to_equal(-1)
+            expect(hir_shard_recovery_claim(queue, "worker", "a.spl", "key-a")).to_equal(-3)  # HIR_SHARD_CLAIM_PUBLISH_FAILED_V1: names the cause
             expect(hir_shard_recovery_terminal(queue, "worker", "a.spl", "PASS", true)).to_equal(false)
             expect(hir_shard_recovery_seal(queue, "worker", "CRASH")).to_equal(-1)
             expect(hir_shard_recovery_progress(queue, "worker")).to_equal(-1)
@@ -341,3 +382,67 @@ describe "HIR shard bounded recovery decisions":
             expect(source).to_contain("reaped != -2 and reaped != -1")
             expect(source).to_contain("val sealed = if owner_stopped:")
             expect(source).to_contain("val unfinished = if all_stopped:")
+
+    describe "lockless claim and terminal (exclusive create)":
+        it "never creates or waits on a queue-wide lock file":
+            step("Claim and terminalize one shard and look for the shared lock")
+            val queue = recovery_fixture("lockless-no-lock")
+            expect(hir_shard_recovery_claim(queue, "w", "a.spl", "k")).to_equal(1)
+            expect(hir_shard_recovery_terminal(queue, "w", "a.spl", "PASS", true)).to_equal(true)
+            expect(file_exists("{queue}/.lock")).to_equal(false)
+
+        it "returns 0 for a second claim and leaves the first record byte-identical":
+            val queue = recovery_fixture("lockless-second-claim")
+            expect(hir_shard_recovery_claim(queue, "first", "a.spl", "k1")).to_equal(1)
+            val digest = sha256_text("a.spl")
+            val claim_path = "{queue}/{digest}.claim"
+            val original = file_read(claim_path)
+            expect(hir_shard_recovery_claim(queue, "second", "a.spl", "k2")).to_equal(0)
+            expect(hir_shard_recovery_claim(queue, "first", "a.spl", "k1")).to_equal(0)
+            expect(file_read(claim_path)).to_equal(original)
+
+        it "returns -1 when the existing claim record is invalid":
+            val queue = recovery_fixture("lockless-invalid-claim")
+            val digest = sha256_text("a.spl")
+            expect(file_write("{queue}/{digest}.claim", "partial-no-newline")).to_equal(true)
+            expect(hir_shard_recovery_claim(queue, "w", "a.spl", "k")).to_equal(-4)
+
+        it "writes the terminal exactly once and never leaves temp files":
+            val queue = recovery_fixture("lockless-terminal-once")
+            expect(hir_shard_recovery_claim(queue, "w", "a.spl", "k")).to_equal(1)
+            expect(hir_shard_recovery_terminal(queue, "other", "a.spl", "PASS", true)).to_equal(false)
+            expect(hir_shard_recovery_terminal(queue, "w", "a.spl", "FAILED", false)).to_equal(true)
+            val record = only_recovery_terminal(queue)
+            expect(hir_shard_recovery_terminal(queue, "w", "a.spl", "PASS", true)).to_equal(false)
+            expect(only_recovery_terminal(queue)).to_equal(record)
+            for name in dir_list_or_empty(queue):
+                expect(name.ends_with(".tmp")).to_equal(false)
+
+        it "lets exactly one of eight concurrent processes win the same shard":
+            step("Spawn eight claimers for one module and sum their verdicts")
+            val queue = recovery_fixture("lockless-race")
+            var pids: [i64] = []
+            for index in 0..8:
+                val pid = process_spawn_async("bin/simple.exe", ["run", "test/03_system/compiler/driver/hir_claim_race_worker.spl", queue, "racer-{index}", "contested.spl"])
+                expect(pid).to_be_greater_than(0)
+                pids = pids.push(pid)
+            for pid in pids:
+                val waited = process_wait(pid, 300000)
+                expect(waited).to_be_greater_than(-1)
+            var winners = 0
+            var losers = 0
+            for index in 0..8:
+                val verdict = file_read("{queue}/verdict-racer-{index}.txt")
+                if verdict == "1": winners = winners + 1
+                if verdict == "0": losers = losers + 1
+            expect(winners).to_equal(1)
+            expect(losers).to_equal(7)
+
+        it "claims 200 shards sequentially within the time budget":
+            val queue = recovery_fixture("lockless-perf")
+            val start = time_now_monotonic_ms()
+            for index in 0..200:
+                expect(hir_shard_recovery_claim(queue, "w", "m-{index}.spl", "k")).to_equal(1)
+            val elapsed = time_now_monotonic_ms() - start
+            print "claim200_ms={elapsed}"
+            expect(elapsed).to_be_less_than(20000)

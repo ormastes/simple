@@ -1,24 +1,52 @@
-use std.io_runtime.{file_read}
+"""
+## Purpose and audience
 
-fn diagnostics_source(name: text) -> text:
-    file_read("src/compiler/00.common/diagnostics/{name}.spl")
+`Severity` is the one shared severity vocabulary for every diagnostic producer
+(Simple compiler, CMM/T32 tooling, Markdown LSP). Since the extraction to
+`std.common.diagnostics`, `compiler.common.diagnostics.severity.Severity` is a
+re-export of that type. This spec exercises the behaviour (names, priority
+order, predicates) through the compiler import path instead of grepping the
+source file, so it stays valid wherever the definition lives (REQ-DIAG-001).
+"""
+# @cover src/compiler/00.common/diagnostics/severity.spl
+# @cover src/lib/common/diagnostics/severity.spl
 
+use std.spec
+use compiler.common.diagnostics.severity.{Severity}
+use std.common.diagnostics.severity.{Severity as StdSeverity}
+
+# Typed with the std path; fed values built through the compiler path.
+fn std_name(s: StdSeverity) -> text:
+    s.name()
+
+# @manual_section: severity
 describe "Severity":
-    it "keeps severity variants available":
-        val source = diagnostics_source("severity")
+    it "names all five variants and orders them by priority, through the compiler path":
+        # @req REQ-DIAG-001
+        # @capture(value): variant names and priorities
+        step("Build every variant through compiler.common and read its name and priority")
+        val all = [Severity.Error, Severity.Warning, Severity.Note, Severity.Help, Severity.Info]
+        val names = ["error", "warning", "note", "help", "info"]
+        var i = 0
+        while i < all.len():
+            expect(all[i].name()).to_equal(names[i])
+            expect(all[i].to_string()).to_equal(names[i])
+            expect(all[i].priority()).to_equal(i)   # oracle: Error=0 ... Info=4
+            i = i + 1
+        step("The same values are accepted by a function typed with the std.common Severity")
+        expect(std_name(Severity.Help)).to_equal("help")
 
-        expect(source).to_contain("enum Severity")
-        expect(source).to_contain("Error")
-        expect(source).to_contain("Warning")
-        expect(source).to_contain("Note")
-        expect(source).to_contain("Help")
-        expect(source).to_contain("Info")
-
-    it "keeps severity display and predicate helpers available":
-        val source = diagnostics_source("severity")
-
-        expect(source).to_contain("fn name() -> text")
-        expect(source).to_contain("fn color() -> text")
-        expect(source).to_contain("fn priority() -> i32")
-        expect(source).to_contain("fn is_error() -> bool")
-        expect(source).to_contain("fn is_warning() -> bool")
+    it "classifies only Error as an error and only Warning as a warning":
+        # @req REQ-DIAG-001
+        # @capture(value): predicate results per variant
+        step("Evaluate is_error/is_warning on every variant")
+        expect(Severity.Error.is_error()).to_equal(true)
+        expect(Severity.Error.is_warning()).to_equal(false)
+        expect(Severity.Warning.is_warning()).to_equal(true)
+        expect(Severity.Warning.is_error()).to_equal(false)
+        for s in [Severity.Note, Severity.Help, Severity.Info]:
+            expect(s.is_error()).to_equal(false)
+            expect(s.is_warning()).to_equal(false)
+        step("Each variant carries a distinct ANSI color escape")
+        expect(Severity.Error.color()).to_not_equal(Severity.Warning.color())
+        expect(Severity.Error.color().starts_with("\033[")).to_equal(true)

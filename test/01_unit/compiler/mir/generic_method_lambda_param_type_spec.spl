@@ -1,0 +1,150 @@
+"""
+Regression spec: generic method lambda parameter HIR type propagation.
+
+Covers:
+1. Scoped swap/lookup helpers for erased callback HIR bindings across nested calls.
+2. MIR lowering of `FutureBox<Result<[u8], text>>.then(\result: match result: case Ok(...): ... case Err(...): ...)`
+   where the lambda parameter must receive the concrete `Result` type so bare
+   `Ok`/`Err` arms resolve without ambiguity or lambda-slot materialization errors.
+3. Scalar `TypeParam` lowering (`FutureBox<i64>.then(\n: n + 1)`) keeps erased
+   tagged decoding intact (`local_needs_erased_decode`).
+4. Nested generic calls with shadowed `<T>` inside a lambda (`FutureBox<...>.then`
+   nesting `InnerBox<...>.then`) and unrelated generic free calls inside a lambda
+   do not leak outer bindings.
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.{HirType, HirTypeKind, HirModule}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering.MirLowering
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.{
+    erased_callback_hir_bindings_swap_v1,
+    erased_callback_hir_binding_lookup_v1
+}
+
+fn lower_generic_method_lambda_errors(source: text) -> [text]:
+    val path = "generic_method_lambda_param_type.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(hir.symbols)
+    val _mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for err in lowering.errors:
+        messages.push(err.message)
+    messages
+
+describe "generic method lambda parameter HIR type propagation":
+    it "swaps, looks up, and restores scoped callback HIR bindings":
+        val dummy_span = Span(start: 0, end: 0, line: 1, col: 1)
+        val str_ty = HirType(kind: HirTypeKind.Str, span: dummy_span)
+        val bool_ty = HirType(kind: HirTypeKind.Bool, span: dummy_span)
+        var outer: Dict<text, HirType> = {}
+        outer["T"] = str_ty
+        val saved_outer = erased_callback_hir_bindings_swap_v1(outer)
+        expect(erased_callback_hir_binding_lookup_v1("T") != None).to_equal(true)
+        var inner: Dict<text, HirType> = {}
+        inner["T"] = bool_ty
+        val saved_inner = erased_callback_hir_bindings_swap_v1(inner)
+        if val inner_t = erased_callback_hir_binding_lookup_v1("T"):
+            val is_bool = match inner_t.kind:
+                case HirTypeKind.Bool: true
+                case _: false
+            expect(is_bool).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+        val _ = erased_callback_hir_bindings_swap_v1(saved_inner)
+        if val outer_t = erased_callback_hir_binding_lookup_v1("T"):
+            val is_str = match outer_t.kind:
+                case HirTypeKind.Str: true
+                case _: false
+            expect(is_str).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+        val _ = erased_callback_hir_bindings_swap_v1(saved_outer)
+        expect(erased_callback_hir_binding_lookup_v1("T") == None).to_equal(true)
+
+    it "lowers bare Ok/Err match inside generic FutureBox .then lambda":
+        val src =
+            "enum AltResult:\n" +
+            "    Ok(val_: i64)\n" +
+            "    Err(err: text)\n" +
+            "class FutureBox<T>:\n" +
+            "    value: T\n" +
+            "    fn then<U>(f: fn(T) -> FutureBox<U>) -> FutureBox<U>:\n" +
+            "        f(self.value)\n" +
+            "fn run_case(fut: FutureBox<Result<[u8], text>>) -> FutureBox<Result<text, text>>:\n" +
+            "    fut.then(\\result:\n" +
+            "        match result:\n" +
+            "            case Ok(bytes):\n" +
+            "                FutureBox(value: Ok(\"{bytes.len()}\"))\n" +
+            "            case Err(e):\n" +
+            "                FutureBox(value: Err(e))\n" +
+            "    )\n"
+        val errs = lower_generic_method_lambda_errors(src)
+        expect(errs.len()).to_equal(0)
+
+    it "preserves scalar erased decoding and isolates nested/unrelated generic lambdas":
+        val src =
+            "enum InnerState:\n" +
+            "    Active(code: i64)\n" +
+            "    Idle\n" +
+            "enum ShadowState:\n" +
+            "    Active(label: text)\n" +
+            "    Stopped\n" +
+            "class FutureBox<T>:\n" +
+            "    value: T\n" +
+            "    fn then<U>(f: fn(T) -> FutureBox<U>) -> FutureBox<U>:\n" +
+            "        f(self.value)\n" +
+            "class InnerBox<T>:\n" +
+            "    inner: T\n" +
+            "    fn bind<U>(f: fn(T) -> InnerBox<U>) -> InnerBox<U>:\n" +
+            "        f(self.inner)\n" +
+            "fn apply_free<T>(x: T, cb: fn(T) -> i64) -> i64:\n" +
+            "    cb(x)\n" +
+            "fn run_scalar(nf: FutureBox<i64>) -> FutureBox<i64>:\n" +
+            "    nf.then(\\n:\n" +
+            "        FutureBox(value: n + 1)\n" +
+            "    )\n" +
+            "fn run_nested(outer_f: FutureBox<Result<i64, text>>, inner_b: InnerBox<InnerState>) -> FutureBox<i64>:\n" +
+            "    outer_f.then(\\res:\n" +
+            "        match res:\n" +
+            "            case Ok(k):\n" +
+            "                val inner_out = inner_b.bind(\\st:\n" +
+            "                    match st:\n" +
+            "                        case InnerState.Active(code): InnerBox(inner: code + k)\n" +
+            "                        case InnerState.Idle: InnerBox(inner: k)\n" +
+            "                )\n" +
+            "                val extra = apply_free(k, \\v: v + 2)\n" +
+            "                FutureBox(value: inner_out.inner + extra)\n" +
+            "            case Err(_):\n" +
+            "                FutureBox(value: 0)\n" +
+            "    )\n"
+        val errs = lower_generic_method_lambda_errors(src)
+        expect(errs.len()).to_equal(0)
+
+    it "prescans generic class type parameter names in prescan_module_struct_names":
+        val src =
+            "class FutureBox<T>:\n" +
+            "    value: T\n"
+        val path = "prescan_class_type_params.spl"
+        val parsed = parse_full_frontend(src, path, path, Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename(path)
+        val hir = hir_lowering.lower_module(parsed)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        var modules: Dict<text, HirModule> = {}
+        modules[hir.name] = hir
+        var lowering = MirLowering.new(hir.symbols)
+        lowering.prescan_module_struct_names(modules, hir.name)
+        expect(lowering.struct_type_param_names.has("FutureBox")).to_equal(true)
+        val names = lowering.struct_type_param_names["FutureBox"]
+        expect(names.len()).to_equal(1)
+        expect(names[0]).to_equal("T")

@@ -1,9 +1,10 @@
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { canonicalJson, freezeDeep } from "./canonical.js";
 import { canonicalRoot, safeNamespace } from "../workspace/paths.js";
+import { fsyncDirectory, mkdirDurable } from "./directory_fsync.js";
 
 const STORES = new WeakSet();
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -94,10 +95,21 @@ export function createAuthorityManifestV1(input) {
   return freezeDeep({ ...unsigned, snapshotUid });
 }
 function atomic(path, value) {
-  mkdirSync(dirname(path), { recursive: true });
-  const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(temp, `${canonicalJson(value)}\n`, { encoding: "utf8", flag: "wx" });
-  renameSync(temp, path);
+  mkdirDurable(dirname(path));
+  const temp = `${path}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`;
+  let fd = -1;
+  try {
+    fd = openSync(temp, "wx");
+    writeFileSync(fd, `${canonicalJson(value)}
+`, "utf8");
+    fsyncSync(fd);
+    closeSync(fd); fd = -1;
+    renameSync(temp, path);
+  } finally {
+    if (fd !== -1) closeSync(fd);
+    if (existsSync(temp)) unlinkSync(temp);
+  }
+  fsyncDirectory(dirname(path));
 }
 /** Content-addressed authority manifests. Only KnowledgeCompiler publishes through this store. */
 export class TargetInventoryStoreV1 {

@@ -1,0 +1,107 @@
+# @cover src/app/llm_caret/cs_main.spl 20%
+# @cover src/app/llm_caret/workbench/key_chunker.spl 80%
+# Purpose and audience: executable specification evidence for the caret terminal-surface team.
+
+"""
+CU-005: terminal passthrough is byte-exact on a real smux pane.
+
+Key bytes are split across read-chunk boundaries (ESC [ A, Ctrl+B, Hangul,
+emoji, an unknown leader chord), chunked by `split_complete_keys`, routed by
+the production `cs_terminal_keys_via` -> `terminal_key_step` with the REAL
+`pane_send_raw` send. The pane child (hex_echo_stub.shs) computes the hex of
+what it actually read; the marker is child-computed, never PTY echo (see
+doc/08_tracking/bug/caret_smux_multi_launch_spec_marker_matched_pty_echo_2026-11-14.md).
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.{thread_sleep_ms}
+use std.common.text_bytes.{bytes_to_text}
+use app.llm_caret.cs_main.{cs_terminal_keys_via}
+use app.llm_caret.cs_dashboard.{CsDashboard, CsAgent}
+use app.llm_caret.workbench.key_chunker.{split_complete_keys}
+use app.llm_caret.workbench.key_resolver.{KeyFocus}
+use app.llm_caret.workbench.leader_keys.{LeaderState}
+use app.llm_caret.pane_backend.{pane_send_raw}
+use app.llm_caret.workbench.session_source.{clear_live_sessions}
+use os.apps.smux.api.{smux_reset_for_test, smux_create_session,
+    smux_list_windows, smux_list_panes, smux_pane_spawn, smux_capture,
+    smux_close_pane}
+
+val STUB: text = "test/fixtures/caret_workbench/hex_echo_stub.shs"
+val SESS: text = "caret-hex-live"
+
+fn _hex_tokens(content: text) -> [text]:
+    var out: [text] = []
+    val parts = content.split("HX:")
+    var i = 1
+    while i < parts.len():
+        val p = parts[i]
+        if p.len() >= 2:
+            out.push(p.slice(0, 2))
+        i = i + 1
+    out
+
+fn _hex2(b: u8) -> text:
+    val digits = "0123456789abcdef"
+    val n = b as i64
+    digits.slice(n / 16, n / 16 + 1) + digits.slice(n % 16, n % 16 + 1)
+
+describe "Caret terminal passthrough on a real smux pane":
+    it "delivers split ESC-[-A, Ctrl+B, Hangul, emoji and an unknown chord byte-exactly":
+        # @req: REQ-CARET-UI-CU005
+        step("Start a real hex-echo child on a real smux pane")
+        smux_reset_for_test()
+        clear_live_sessions()
+        val s = smux_create_session(SESS)
+        val w = smux_list_windows(s.id)[0]
+        val p = smux_list_panes(s.id, w.id)[0]
+        val spawned = smux_pane_spawn(s.id, w.id, p.id, "bash", [STUB])
+        expect(spawned.is_ok()).to_equal(true)
+        val pid = spawned.unwrap()
+        var ready = false
+        var t = 0
+        while t < 100 and not ready:
+            thread_sleep_ms(100)
+            val cap = smux_capture(s.id, w.id, p.id, 20)
+            if cap.is_ok() and cap.unwrap().content.contains("HX-READY"):
+                ready = true
+            t = t + 1
+        expect(ready).to_equal(true)
+
+        step("Chunk the raw bytes across read boundaries with the production chunker")
+        # ESC [ A | Ctrl+B | U+D55C (ED 95 9C) | U+1F600 (F0 9F 98 80) | leader(07) z
+        val chunks: [[u8]] = [[27, 91], [65, 2, 237, 149], [156, 240, 159], [152, 128, 7], [122]]
+        val expected: [u8] = [27, 91, 65, 2, 237, 149, 156, 240, 159, 152, 128, 7, 122]
+        val agent = CsAgent(agent_id: "hex-agent", spec: "x", status: "running", pid: pid,
+            pane_id: p.id, cpu_pct: -1.0, rss_mb: -1, detail: "")
+        var d = CsDashboard(session: SESS, manager_status: "running", agents: [agent],
+            selected: 0, input: "", log: [], screen: [], pins: [], mru: [])
+        var state = LeaderState.Idle
+        var carry: [u8] = []
+        for chunk in chunks:
+            val (keys, rest) = split_complete_keys(carry, chunk)
+            carry = rest
+            val (d2, st2, _focus, _tail) = cs_terminal_keys_via(d, state, KeyFocus.TerminalSurface, keys,
+                \pane, b: pane_send_raw(SESS, pane, bytes_to_text(b)))
+            d = d2
+            state = st2
+            thread_sleep_ms(150)
+        expect(carry.len()).to_equal(0)
+
+        step("The child-computed hex equals the input bytes exactly")
+        var want: [text] = []
+        for b in expected:
+            want.push(_hex2(b))
+        var got: [text] = []
+        var i = 0
+        while i < 100 and got.len() < want.len():
+            thread_sleep_ms(100)
+            val cap = smux_capture(s.id, w.id, p.id, 100)
+            if cap.is_ok():
+                got = _hex_tokens(cap.unwrap().content)
+            i = i + 1
+        expect(got).to_equal(want)
+
+        val _closed = smux_close_pane(s.id, w.id, p.id)
+        smux_reset_for_test()
+        clear_live_sessions()

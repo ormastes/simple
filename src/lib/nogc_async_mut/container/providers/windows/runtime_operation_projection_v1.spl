@@ -1,0 +1,107 @@
+use std.nogc_async_mut.container.providers.windows.docker_progress_v2.WindowsDockerProgressV2
+use std.nogc_async_mut.container.providers.windows.docker_progress_query_v6.windows_docker_progress_query_v6
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{windows_docker_request_reason_v1, windows_docker_policy_reason_v1, WINDOWS_DOCKER_MAX_RECORDS_V1}
+use std.common.contracts.container.execution_v2.ContainerHostScopeV2
+# Pure projection/lookup only. No executor, native owner or registry lives here.
+use std.common.contracts.container.runtime_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{WindowsDockerPolicyV1,
+    WindowsDockerRequestV1, windows_docker_request_digest_v1, WINDOWS_DOCKER_ENGINE_V1, WINDOWS_DOCKER_NATIVE_ENGINE_V1}
+
+pub struct WindowsDockerRecordV1:
+    digest: text
+    state: RuntimeStateV1
+    create_attempted: bool
+    candidate_id: text
+    native_birth_retained: bool = false
+
+pub fn windows_runtime_record_index_v1(records: [WindowsDockerRecordV1], request: WindowsDockerRequestV1) -> i64:
+    var index = 0
+    while index < records.len():
+        val identity = records[index].state.identity
+        if identity.pod_uid == request.pod_uid and identity.attempt == request.attempt: return index
+        index = index + 1
+    -1
+
+pub fn windows_runtime_record_state_v1(records: [WindowsDockerRecordV1], request: WindowsDockerRequestV1) -> RuntimeStateV1:
+    val index = windows_runtime_record_index_v1(records, request)
+    if index < 0: return runtime_state_empty()
+    records[index].state
+
+pub fn windows_runtime_operation_v1(state: RuntimeStateV1, operation: text,
+        status: text, reason: text, command: RuntimeCommandV1) -> RuntimeOperationV1:
+    RuntimeOperationV1(status: status, operation: operation, command: command,
+        state: state, exit_code: -1, stdout: "", stderr: "", reason: reason)
+
+pub fn windows_runtime_failure_v1(state: RuntimeStateV1, operation: text, reason: text) -> RuntimeOperationV1:
+    windows_runtime_operation_v1(state, operation, RUNTIME_STATUS_BLOCKED, reason, runtime_command_empty())
+
+pub fn windows_runtime_record_binding_v1(records: [WindowsDockerRecordV1], policy: WindowsDockerPolicyV1, request: WindowsDockerRequestV1) -> Result<i64, text>:
+    val digest = windows_docker_request_digest_v1(policy, request)?
+    val index = windows_runtime_record_index_v1(records, request)
+    if index < 0: return Err("docker-attempt-not-prepared")
+    val record = records[index]
+    if record.digest != digest or record.state.identity.operation_id != request.operation_id:
+        return Err("docker-request-binding-mismatch")
+    Ok(index)
+
+pub fn windows_runtime_intent_v1(records: [WindowsDockerRecordV1], policy: WindowsDockerPolicyV1, request: WindowsDockerRequestV1) -> Result<RuntimeIntentV1, text>:
+    val index = windows_runtime_record_binding_v1(records, policy, request)?
+    val state = records[index].state
+    var native_id = state.identity.native_id
+    if native_id == "": native_id = records[index].candidate_id
+    Ok(RuntimeIntentV1(pod_uid: request.pod_uid, attempt: request.attempt,
+        provider_generation: policy.provider_generation, operation_id: request.operation_id,
+        engine: WINDOWS_DOCKER_NATIVE_ENGINE_V1, native_id: native_id, node_boot_id: policy.node_boot_id,
+        phase: if state.identity.native_id == "" and native_id != "": "unknown" else: state.phase))
+
+pub fn windows_runtime_probe_v1(observed: Result<bool, text>, scripted: bool) -> RuntimeProbeV1:
+    match observed:
+        case Err(reason): return runtime_probe_unavailable(WINDOWS_DOCKER_ENGINE_V1,
+            WINDOWS_DOCKER_NATIVE_ENGINE_V1, reason)
+        case Ok(_): ()
+    RuntimeProbeV1(provider: WINDOWS_DOCKER_ENGINE_V1, engine: WINDOWS_DOCKER_NATIVE_ENGINE_V1,
+        engine_present: true, healthy: true, launch_capable: false,
+        privilege: RUNTIME_PRIVILEGE_UNKNOWN,
+        reason: if scripted: "scripted-contract-only-not-live-qualified" else: "engine-observed-request-admission-required")
+
+
+pub fn windows_runtime_progress_begin_v1(records: [WindowsDockerRecordV1], policy: WindowsDockerPolicyV1, scope: ContainerHostScopeV2?, script_error: text, action: text, request: WindowsDockerRequestV1) -> WindowsDockerProgressV2:
+    val state = windows_runtime_record_state_v1(records, request)
+    var progress = WindowsDockerProgressV2(request, action, "engine", runtime_command_empty())
+    var error = windows_docker_request_reason_v1(policy, request)
+    if error == "": error = windows_docker_policy_reason_v1(policy)
+    if error == "": error = script_error
+    if error == "" and not ["prepare", "create", "start", "inspect"].contains(action): error = "docker-progress-action"
+    if error != "": return windows_runtime_progress_fail_v1(progress, error, state)
+    if action == "prepare":
+        if windows_runtime_record_index_v1(records, request) >= 0:
+            val bound = windows_runtime_record_binding_v1(records, policy, request)
+            if bound.is_err(): return windows_runtime_progress_fail_v1(progress, bound.unwrap_err(), state)
+            progress.result = Some(windows_runtime_operation_v1(state, "prepare_pod", RUNTIME_STATUS_OK,
+                "docker-attempt-already-reserved", runtime_command_empty()))
+            return progress
+        if records.len() >= WINDOWS_DOCKER_MAX_RECORDS_V1: return windows_runtime_progress_fail_v1(progress, "docker-record-limit", state)
+    else:
+        val bound = windows_runtime_record_binding_v1(records, policy, request)
+        if bound.is_err(): return windows_runtime_progress_fail_v1(progress, bound.unwrap_err(), state)
+        val record = records[bound.unwrap()]
+        if action == "create":
+            if record.state.phase != "prepared" or record.create_attempted:
+                return windows_runtime_progress_fail_v1(progress, "docker-create-reserved-no-retry-use-exact-id-recovery", state)
+        else: progress.native_id = record.state.identity.native_id
+    windows_runtime_progress_command_v1(progress, policy, scope, state)
+
+pub fn windows_runtime_progress_fail_v1(progress: WindowsDockerProgressV2, error: text, state: RuntimeStateV1) -> WindowsDockerProgressV2:
+    var failed = progress
+    failed.error = error
+    failed.result = Some(windows_runtime_failure_v1(state, if progress.action == "prepare": "prepare_pod" else: progress.action, error))
+    failed
+
+pub fn windows_runtime_progress_command_v1(progress: WindowsDockerProgressV2, policy: WindowsDockerPolicyV1, scope: ContainerHostScopeV2?, state: RuntimeStateV1) -> WindowsDockerProgressV2:
+    var next = progress
+    val command = windows_docker_progress_query_v6(policy, next.request, scope,
+        next.stage, next.native_id, next.command)
+    if command.is_err(): return windows_runtime_progress_fail_v1(next, command.unwrap_err(), state)
+    next.command = command.unwrap()
+    if next.stage == "start": next.effect_command = Some(next.command)
+    next

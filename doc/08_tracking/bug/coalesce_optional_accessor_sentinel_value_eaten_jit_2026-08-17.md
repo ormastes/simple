@@ -107,3 +107,20 @@ must carry a distinguishable `T?` with a BOXED payload across the JIT call
 boundary), not a local patch — suppressing the nil check for these accessors
 would trade this bug for the strictly worse `[].first() ?? -1` leak. Not
 attempted; standing workaround unchanged.
+
+## Fixed 2026-11-03
+
+Seed HIR lowering: `Lowerer::lower_optional_subject` / `optionalize_array_accessor`
+(`src/compiler_rust/compiler/src/hir/lower/expr/helpers.rs`). For `[intN].first/last/pop/min/max/get(i)/remove(i)`
+used as the subject of `??`, `if val`, `match` (expr and stmt forms), the accessor is
+lowered to the runtime call itself (`rt_array_*`) typed `T?` (tagged), so presence is
+the runtime tag, not a raw value compare. Collateral also fixed: `if val x = xs.first()`
+and `match xs.first(): case Some(v)` lost a present 3, and `[].get(0) ?? -1` returned 0
+on the JIT. Probe extended (`ifval_*`, `match_*`, `empty_get_default`); class spec 3/3 green.
+
+Follow-up (review, 2026-11-03): subject optionalization is gated on the patterns
+(`Some`/`None`/`nil`, or a payload binding for `if val`/`while val`), so
+`match xs.first(): case 3:` and plain `if xs.first() == 3:` keep plain `T`
+(probe: `literal_match_*`, `plain_if_*`). Remaining gap: `[u64]` elements are
+excluded (u64 boxing differs); `[3u64].first() ?? 9` still gives 9 on the JIT,
+byte-identical to the deployed seed (no regression). Needs a u64-aware tagged path.

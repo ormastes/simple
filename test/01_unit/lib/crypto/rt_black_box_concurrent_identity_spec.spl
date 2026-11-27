@@ -1,0 +1,108 @@
+"""
+Direct native rt_black_box identity under competing OS-thread calls.
+
+BUG-RT-BLACK-BOX-SHARED-SINK-001: the MSVC and generic C implementations
+previously shared one volatile sink between every caller. Volatile does not
+provide atomicity or inter-thread synchronization. Each invocation must return
+its own argument, including zero and both signed i64 extremes.
+
+AUTHORED_NOT_RUN. This is a native-only regression. Qualification requires the
+actual changed C implementation and real OS-thread/atomic providers. Interpreter
+execution, a Rust strong-symbol override, or the unchanged GNU asm branch does
+not exercise the corrected branches. The bounded rendezvous fails if workers
+run inline. It is stress coverage, not a deterministic reproduction of the old
+race, a data-race detector, an optimizer-opacity proof, or a timing guarantee.
+"""
+
+# @req: REQ-RT-BLACK-BOX-IDENTITY-001
+# @req: REQ-RT-BLACK-BOX-CONCURRENT-001
+use std.spec.{describe, it, expect, step}
+use std.concurrent.thread.{thread_spawn_with_args, thread_yield}
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
+use std.nogc_sync_mut.io.thread.thread_native_current_id
+
+# Call the primitive directly. Never hide nil behind the input value.
+extern fn rt_black_box(value: i64) -> i64?
+
+val WAIT_BUDGET: i64 = 1048576
+val CALLS_PER_WORKER: i64 = 65536
+var ready_workers: AtomicI64 = atomic_i64_new(0)
+var release_workers: AtomicI64 = atomic_i64_new(0)
+
+fn identity_input_v1(index: i64) -> i64:
+    match index % 8:
+        case 0: 0
+        case 1: 1
+        case 2: 0 - 1
+        case 3: 9223372036854775807
+        case 4: (0 - 9223372036854775807) - 1
+        case 5: 4294967297
+        case 6: 0 - 4294967297
+        case _: 85
+
+fn primitive_matches_v1(expected: i64) -> bool:
+    if val observed = rt_black_box(expected):
+        return observed == expected
+    false
+
+fn concurrent_identity_worker_v1(main_thread: i64, phase: i64) -> i64:
+    val own_thread = thread_native_current_id()
+    if own_thread <= 0 or own_thread == main_thread:
+        return 0 - 1
+    ready_workers.fetch_add(1, MemoryOrdering.AcqRel)
+    var waits: i64 = 0
+    while release_workers.load(MemoryOrdering.Acquire) == 0 and waits < WAIT_BUDGET:
+        thread_yield()
+        waits = waits + 1
+    if release_workers.load(MemoryOrdering.Acquire) != 1:
+        return 0 - 2
+    var index: i64 = 0
+    while index < CALLS_PER_WORKER:
+        val expected = identity_input_v1(index + phase)
+        if not primitive_matches_v1(expected):
+            return 0 - 3
+        index = index + 1
+    own_thread
+
+describe "native rt_black_box keeps each caller's own i64":
+    it "preserves present zero, nonzero, negative, wide and extreme values":
+        step("Call the actual primitive directly across all eight input classes")
+        var index: i64 = 0
+        while index < 8:
+            expect(primitive_matches_v1(identity_input_v1(index))).to_equal(true)
+            index = index + 1
+
+    it "preserves per-call identity after two real OS workers rendezvous":
+        step("Start distinct OS threads and hold both at the atomic release gate")
+        val main_thread = thread_native_current_id()
+        var first = thread_spawn_with_args(main_thread, 0, concurrent_identity_worker_v1)
+        var second = thread_spawn_with_args(main_thread, 3, concurrent_identity_worker_v1)
+        var waits: i64 = 0
+        while ready_workers.load(MemoryOrdering.Acquire) != 2 and waits < WAIT_BUDGET:
+            thread_yield()
+            waits = waits + 1
+        val both_ready = ready_workers.load(MemoryOrdering.Acquire) == 2
+        if both_ready:
+            release_workers.store(1, MemoryOrdering.Release)
+        else:
+            release_workers.store(0 - 1, MemoryOrdering.Release)
+
+        step("Collect both worker outcomes and retire atomic handles before asserting")
+        val first_result = first.join()
+        val second_result = second.join()
+        unsafe(capabilities: [ffi]):
+            ready_workers.free()
+            release_workers.free()
+
+        step("Require both workers to preserve every input and report distinct live thread identities")
+        expect(main_thread > 0).to_equal(true)
+        expect(both_ready).to_equal(true)
+        expect(first_result != nil).to_equal(true)
+        expect(second_result != nil).to_equal(true)
+        val first_thread = first_result ?? 0
+        val second_thread = second_result ?? 0
+        expect(first_thread > 0).to_equal(true)
+        expect(second_thread > 0).to_equal(true)
+        expect(first_thread != main_thread).to_equal(true)
+        expect(second_thread != main_thread).to_equal(true)
+        expect(first_thread != second_thread).to_equal(true)

@@ -2,7 +2,7 @@ use os.services.block_device.{BlockDevice}
 use std.fs_driver.block_device_owner.{fs_block_device_owner_new_identity}
 
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_read_bytes(path: text) -> [u8]?
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 
 fn _validate_sector_size(sector_size: u32) -> Result<(), text>:
@@ -46,21 +46,11 @@ impl CachedRawImageBlockDevice:
             case None: return Err("cached_raw_image_block_device: failed to read image bytes: " + image_path)
         CachedRawImageBlockDevice.from_bytes(image_path, image_bytes, sector_size)
 
-    me fn flush() -> Result<(), text>:
-        if self.image_path == "":
-            return Err("cached_raw_image_block_device: flush requires a backing image path")
-        if not self.dirty:
-            return Ok(())
-        if not rt_file_write_bytes(self.image_path, self.image_bytes):
-            return Err("cached_raw_image_block_device: flush failed: " + self.image_path)
-        self.dirty = false
-        Ok(())
-
     fn image_len() -> u64:
         self.image_bytes.len().to_u64()
 
 impl BlockDevice for CachedRawImageBlockDevice:
-    fn read_sector(lba: u64) -> Result<[u8], text>:
+    me fn read_sector(lba: u64) -> Result<[u8], text>:
         val sector_bytes = self.sector_size_bytes.to_i64()
         val image_bytes = self.image_bytes
         val start = (lba * self.sector_size_bytes).to_i64()
@@ -92,6 +82,16 @@ impl BlockDevice for CachedRawImageBlockDevice:
 
         self.image_bytes = image_bytes
         self.dirty = true
+        Ok(true)
+
+    me fn flush() -> Result<bool, text>:
+        if self.image_path == "":
+            return Err("cached_raw_image_block_device: flush requires a backing image path")
+        if not self.dirty:
+            return Ok(true)
+        if not rt_file_write_bytes(self.image_path, self.image_bytes):
+            return Err("cached_raw_image_block_device: flush failed: " + self.image_path)
+        self.dirty = false
         Ok(true)
 
     fn sector_size() -> u32:

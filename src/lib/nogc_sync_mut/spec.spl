@@ -17,11 +17,15 @@
 # NOTE: No static fn, no try/catch/throw - runs on bootstrap runtime.
 
 use std.nogc_sync_mut.src.testing.mock.prevention.{ForbiddenCallGuard, check_guards}
+use std.nogc_sync_mut.src.testing.mock.builder.{mock_auto_registry, mock_auto_registry_enable}
+use std.nogc_sync_mut.spec.dir_prevention.{DirPreventionRule, dir_prevention_load, DIR_PREVENTION_ENV}
 use std.spec.skip_governance.{
     skip_ref, validate_skip_it, validate_bare_pending,
     validate_free_text_skip, validate_skip_ref_record
 }
 use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.spec.evidence_path.{test_evidence_path_v1}
+export use std.nogc_sync_mut.spec.evidence_path.{set_test_evidence_path_v1}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
 use std.io_runtime.{exit, file_append_text, file_exists, file_read}
 use std.nogc_sync_mut.fs.host_path.{host_path_is_absolute}
@@ -31,9 +35,153 @@ use std.nogc_sync_mut.spec.trace_events.{emit_trace_case_event}
 # Global Test State
 # ================================================================
 
+# Cumulative example counters live in the runtime (interpreter bridge
+# interpreter_call/bdd.rs, native runtime.c). describe/it intrinsics feed them
+# directly; this file's own runner feeds them through rt_bdd_record_result.
+extern fn rt_bdd_executed_total() -> i64
+extern fn rt_bdd_failed_total() -> i64
+extern fn rt_bdd_record_result(passed: i64)
+
+fn _expect_num_kind(s: text) -> i64:
+    # 0 = non-numeric, 1 = i64 integer, 2 = finite f64, 3 = +inf, 4 = -inf, 5 = NaN
+    val n = s.byte_len()
+    if n == 0:
+        return 0
+    val low = s.lower()
+    if low == "nan" or low == "+nan" or low == "-nan":
+        return 5
+    if low == "inf" or low == "+inf" or low == "infinity" or low == "+infinity":
+        return 3
+    if low == "-inf" or low == "-infinity":
+        return 4
+    var i: i64 = 0
+    var neg = false
+    val b0 = s.byte_at(0)
+    if b0 == 43u8:
+        i = 1
+    elif b0 == 45u8:
+        neg = true
+        i = 1
+    if i >= n:
+        return 0
+    var int_digits: i64 = 0
+    var sig_start: i64 = -1
+    while i < n:
+        val b = s.byte_at(i)
+        if b >= 48u8 and b <= 57u8:
+            int_digits = int_digits + 1
+            if b != 48u8 and sig_start < 0:
+                sig_start = i
+            i = i + 1
+        else:
+            break
+    val int_end = i
+    var has_dot = false
+    var frac_digits: i64 = 0
+    if i < n and s.byte_at(i) == 46u8:
+        has_dot = true
+        i = i + 1
+        while i < n:
+            val b = s.byte_at(i)
+            if b >= 48u8 and b <= 57u8:
+                frac_digits = frac_digits + 1
+                i = i + 1
+            else:
+                break
+    if int_digits == 0 and frac_digits == 0:
+        return 0
+    var has_exp = false
+    if i < n:
+        val be = s.byte_at(i)
+        if be == 101u8 or be == 69u8:
+            has_exp = true
+            i = i + 1
+            if i < n:
+                val bs = s.byte_at(i)
+                if bs == 43u8 or bs == 45u8:
+                    i = i + 1
+            var exp_digits: i64 = 0
+            while i < n:
+                val b = s.byte_at(i)
+                if b >= 48u8 and b <= 57u8:
+                    exp_digits = exp_digits + 1
+                    i = i + 1
+                else:
+                    break
+            if exp_digits == 0:
+                return 0
+    if i != n:
+        return 0
+    if has_dot or has_exp:
+        return 2
+    val sig_len: i64 = if sig_start < 0: 0 else: int_end - sig_start
+    if sig_len <= 18:
+        return 1
+    if sig_len == 19:
+        val sig_slice = s.slice(sig_start, int_end)
+        val limit = if neg: "9223372036854775808" else: "9223372036854775807"
+        if sig_slice <= limit:
+            return 1
+    2
+
+fn _expect_compare_num(sa: text, sb: text) -> i64:
+    # Returns -1 (<), 0 (==), 1 (>), or 2 (IEEE-754 unordered when either is NaN).
+    val ka = _expect_num_kind(sa)
+    val kb = _expect_num_kind(sb)
+    if ka == 0 or kb == 0:
+        if sa < sb:
+            return -1
+        if sa > sb:
+            return 1
+        return 0
+    if ka == 5 or kb == 5:
+        return 2
+    if ka == 3 and kb == 3:
+        return 0
+    if ka == 4 and kb == 4:
+        return 0
+    if ka == 3:
+        return 1
+    if kb == 3:
+        return -1
+    if ka == 4:
+        return -1
+    if kb == 4:
+        return 1
+    if ka == 1 and kb == 1:
+        val ai: i64 = sa.to_int()
+        val bi: i64 = sb.to_int()
+        if ai < bi:
+            return -1
+        if ai > bi:
+            return 1
+        return 0
+    val af: f64 = sa.to_float()
+    val bf: f64 = sb.to_float()
+    if af != af or bf != bf:
+        return 2
+    if af < bf:
+        return -1
+    if af > bf:
+        return 1
+    0
+
+fn _expect_is_nil(candidate: any?) -> bool:
+    candidate == None
+
+fn _expect_array_contains(arr: [any], item) -> bool:
+    if arr.len() <= 0:
+        return false
+    arr.contains(item)
+
+fn _expect_dict_contains(dct: Dict<any, any>, item) -> bool:
+    if dct.len() <= 0:
+        return false
+    dct.contains(item)
+
 var current_suite = ""
 var current_context = ""
-var suite_stack = []
+var suite_stack: [text] = []
 var test_passed = 0
 var test_failed = 0
 var test_pending = 0
@@ -43,18 +191,18 @@ var test_skipped = 0
 # expectations verified nothing; the runner reports it VACUOUS, not PASS
 # (plan ids BUG-02, T12; task 15a). Written to the `.expectations` sidecar.
 var _expectations_evaluated: i64 = 0
-var test_errors = []
+var test_errors: [text] = []
 var indent_level = 0
 
 # Hook storage
-var before_hooks = []
-var after_hooks = []
+var before_hooks: [fn()] = []
+var after_hooks: [fn()] = []
 # Suite-scoped after_all hooks, drained by the enclosing describe (see below).
-var after_all_hooks = []
+var after_all_hooks: [fn()] = []
 
 # Assertion failures are accumulated in-place so a later passing matcher cannot
 # overwrite an earlier failure through nested-call global writeback.
-var current_test_errors = []
+var current_test_errors: [text] = []
 
 # Aggregate mode is opt-in. In-place array mutations are intentional: nested
 # Simple calls can restore an older snapshot of a scalar module global.
@@ -78,14 +226,16 @@ var _aggregate_in_hook: [i64] = []
 # like the aggregate markers above, so nested-call global writeback cannot
 # restore a stale scalar. Empty means no case can consume a failure.
 var _case_depth: [i64] = []
+# One entry per skip() called inside the running example (see skip()).
+var _skipped_in_case: [i64] = []
 var _aggregate_failed_cases: [i64] = []
 var _aggregate_selected_case: [text] = []
 var _aggregate_selected_results: [text] = []
 
-fn _aggregate_active() -> bool:
+pub fn _aggregate_active() -> bool:
     _aggregate_ledger_paths.len() == 1
 
-fn _aggregate_enum() -> bool:
+pub fn _aggregate_enum() -> bool:
     _aggregate_enumerating.len() == 1
 
 fn _aggregate_valid_sha(value: text) -> bool:
@@ -133,7 +283,7 @@ fn _aggregate_owner_end_append(row: text) -> bool:
         return false
     true
 
-fn _aggregate_declare(name: text, kind: text) -> text:
+pub fn _aggregate_declare(name: text, kind: text) -> text:
     if not _aggregate_active():
         return ""
     if _aggregate_in_test.len() > 0 or _aggregate_in_hook.len() > 0:
@@ -159,7 +309,7 @@ fn _aggregate_declare(name: text, kind: text) -> text:
         return ""
     id
 
-fn _aggregate_result(id: text, outcome: text):
+pub fn _aggregate_result(id: text, outcome: text):
     if id != "":
         val _ = _aggregate_append("result\t{id}\t{outcome}")
         if _aggregate_selected_case.contains(id):
@@ -325,7 +475,7 @@ fn _write_test_result_evidence(passed: i64, failed: i64):
     write is not visible to callees until the writing function returns, so
     reading them here recorded the totals from BEFORE the test that just ran —
     which meant a failing final test could leave false-green evidence behind."""
-    val path = env_get("SIMPLE_TEST_RESULT_FILE") ?? ""
+    val path = test_evidence_path_v1()
     if path != "":
         val _ = file_write(path, "simple-bdd-v1\n{passed}\n{failed}\n")
         # Expectation tally in a SIDECAR, not a 4th line: four readers (the
@@ -382,6 +532,7 @@ fn _execute_it(name: text, block: fn()) -> text:
     current_test_errors.clear()
     _expect_provisional_len = -1
     val pending_before = test_pending
+    val skipped_before = _skipped_in_case.len()
     _case_depth.push(1)
     if _aggregate_active():
         _aggregate_in_test.push(1)
@@ -406,6 +557,21 @@ fn _execute_it(name: text, block: fn()) -> text:
     if _aggregate_active():
         val _ = _aggregate_in_test.pop()
 
+    # skip() in the body wins over every other outcome: the example is
+    # skipped, never a pass, and a later failing expect does not change that.
+    if _skipped_in_case.len() > skipped_before:
+        while _skipped_in_case.len() > skipped_before:
+            val _ = _skipped_in_case.pop()
+        if test_pending > pending_before:
+            test_pending = pending_before
+        test_skipped = test_skipped + 1
+        _write_test_result_evidence(test_passed, test_failed)
+        print "{indent}  it {name} ... skipped"
+        # The trace vocabulary has no skipped outcome; pending is the
+        # neither-pass-nor-fail one.
+        emit_trace_case_event(full_name, "finished", "pending")
+        return "skip"
+
     # Check result via Option pattern
     var passed = test_passed
     var failed = test_failed
@@ -420,6 +586,7 @@ fn _execute_it(name: text, block: fn()) -> text:
     elif current_test_errors.len() == 0:
         passed = passed + 1
         test_passed = passed
+        rt_bdd_record_result(1)
         # Persist before any later nested call can restore the caller's global
         # snapshot and stale the local tally under interpreter writeback.
         _write_test_result_evidence(passed, failed)
@@ -433,6 +600,7 @@ fn _execute_it(name: text, block: fn()) -> text:
             test_pending = pending_before
         failed = failed + 1
         test_failed = failed
+        rt_bdd_record_result(0)
         # The error formatting below performs nested calls (join/push).  In
         # pure interpreter mode those calls may restore the pre-call global
         # snapshot, so serialize the authoritative local counters first.
@@ -441,7 +609,7 @@ fn _execute_it(name: text, block: fn()) -> text:
         val current_test_error = current_test_errors.join("; ")
         print "{indent}    Error: {current_test_error}"
         test_errors.push("{full_name}: {current_test_error}")
-        emit_trace_case_event(full_name, "finished", "failed")
+        emit_trace_case_event(full_name, "finished", "failed", current_test_error)
         return "fail"
 
 fn _aggregate_run_case(name: text, kind: text, block: fn()):
@@ -467,6 +635,8 @@ fn _aggregate_conditional_case(name: text, kind: text, block: fn(), eligible: bo
     else:
         test_skipped = test_skipped + 1
         _aggregate_result(id, "skip")
+    # Statement-position unit tail (doc/08_tracking/bug/native_const_type_void_unit_tail_if_join_2026-11-13.md)
+    ()
 
 pub fn it(name: text, block: fn()):
     if _aggregate_active():
@@ -545,15 +715,16 @@ fn _target_arch() -> text:
 # resolver serializes an already-resolved policy across the process boundary
 # via SIMPLE_SAFETY_PROFILE (`compiler.common.assurance.policy.policy_env_value`)
 # — this reads it back, same as `driver_safety_severity.spl`'s subprocess path.
-fn _active_assurance_profile() -> text:
+pub fn _active_assurance_profile() -> text:
     env_get("SIMPLE_SAFETY_PROFILE") ?? ""
 
 # Reject means a REAL diagnostic: count as a failed example (not a warning
 # that gets silently ignored), same accounting `_execute_it` uses on assertion
 # failure. Used by skip_it/skip/skip_via_ref, which stand alone (like
 # `it(name, block)`) with no enclosing `_execute_it` to fold into.
-fn _reject_skip(name: text, message: text):
+pub fn _reject_skip(name: text, message: text):
     test_failed = test_failed + 1
+    rt_bdd_record_result(0)
     print "    it {name} ... FAILED (skip rejected under critical: {message})"
     test_errors.push("{current_suite} > {name}: {message}")
     _write_test_result_evidence(test_passed, test_failed)
@@ -585,6 +756,7 @@ pub fn skip_it(name: text, block: fn()):
         print "    it {name} ... skipped (compiled-only)"
     else:
         _execute_it(name, block)
+    ()
 
 pub fn pending(name: text):
     if _aggregate_active() and _aggregate_in_test.len() == 0:
@@ -635,6 +807,17 @@ pub fn planned(name: text, reason: text):
 
 # @tag(name=file_name, reason=reason)
 pub fn skip(name: text, reason: text):
+    # Called inside a running example (`it "x": if not gate: skip(...)`): that
+    # example is skipped, and _execute_it reports it so (skip wins). Before this
+    # the call was dropped and the example reported a pass. A rejected reason
+    # fails the example, like pending() does.
+    if _case_depth.len() > 0:
+        val in_case = validate_free_text_skip(reason, _active_assurance_profile())
+        if not in_case.ok:
+            current_test_errors.push("skip rejected under critical: {in_case.message}")
+            return
+        _skipped_in_case.push(1)
+        return
     if _aggregate_active():
         val id = _aggregate_declare(name, "skip")
         if _aggregate_enum() or id == "":
@@ -729,6 +912,7 @@ pub fn skip_context(reason: text):
         if _aggregate_active():
             _aggregate_errors.push("skip_context rejected outside a case")
         test_failed = test_failed + 1
+        rt_bdd_record_result(0)
         print "  context skipped: FAILED (skip rejected under critical: {validation.message})"
         test_errors.push("{current_suite}: {validation.message}")
         _write_test_result_evidence(test_passed, test_failed)
@@ -811,6 +995,7 @@ pub fn skip_on_windows(name: text, block: fn()):
         print "    it {name} ... skipped (Windows-only skip)"
     else:
         it(name, block)
+    ()
 
 pub fn skip_on_linux(name: text, block: fn()):
     """Skip test if running on Linux."""
@@ -822,6 +1007,7 @@ pub fn skip_on_linux(name: text, block: fn()):
         print "    it {name} ... skipped (Linux-only skip)"
     else:
         it(name, block)
+    ()
 
 pub fn skip_on_macos(name: text, block: fn()):
     """Skip test if running on macOS."""
@@ -833,6 +1019,7 @@ pub fn skip_on_macos(name: text, block: fn()):
         print "    it {name} ... skipped (macOS-only skip)"
     else:
         it(name, block)
+    ()
 
 pub fn skip_on_unix(name: text, block: fn()):
     """Skip test if running on Unix-like systems."""
@@ -844,6 +1031,7 @@ pub fn skip_on_unix(name: text, block: fn()):
         print "    it {name} ... skipped (Unix-only skip)"
     else:
         it(name, block)
+    ()
 
 pub fn only_on_windows(name: text, block: fn()):
     """Run test ONLY on Windows, skip on other platforms."""
@@ -855,6 +1043,7 @@ pub fn only_on_windows(name: text, block: fn()):
     else:
         test_skipped = test_skipped + 1
         print "    it {name} ... skipped (Windows-only)"
+    ()
 
 pub fn only_on_linux(name: text, block: fn()):
     """Run test ONLY on Linux, skip on other platforms."""
@@ -866,6 +1055,7 @@ pub fn only_on_linux(name: text, block: fn()):
     else:
         test_skipped = test_skipped + 1
         print "    it {name} ... skipped (Linux-only)"
+    ()
 
 pub fn only_on_macos(name: text, block: fn()):
     """Run test ONLY on macOS, skip on other platforms."""
@@ -877,6 +1067,7 @@ pub fn only_on_macos(name: text, block: fn()):
     else:
         test_skipped = test_skipped + 1
         print "    it {name} ... skipped (macOS-only)"
+    ()
 
 pub fn only_on_unix(name: text, block: fn()):
     """Run test ONLY on Unix-like systems, skip on Windows."""
@@ -888,6 +1079,7 @@ pub fn only_on_unix(name: text, block: fn()):
     else:
         test_skipped = test_skipped + 1
         print "    it {name} ... skipped (Unix-only)"
+    ()
 
 # ================================================================
 # Target Environment Skip Functions
@@ -903,6 +1095,7 @@ pub fn skip_on_baremetal(name: text, block: fn()):
         print "    it {name} ... skipped (not on baremetal)"
     else:
         it(name, block)
+    ()
 
 pub fn only_on_baremetal(name: text, block: fn()):
     """Run test ONLY on bare-metal targets."""
@@ -914,6 +1107,7 @@ pub fn only_on_baremetal(name: text, block: fn()):
     else:
         test_skipped = test_skipped + 1
         print "    it {name} ... skipped (baremetal-only)"
+    ()
 
 pub fn skip_on_remote(name: text, block: fn()):
     """Skip test when running on remote target."""
@@ -925,6 +1119,7 @@ pub fn skip_on_remote(name: text, block: fn()):
         print "    it {name} ... skipped (not on remote)"
     else:
         it(name, block)
+    ()
 
 pub fn only_on_remote(name: text, block: fn()):
     """Run test ONLY on remote targets."""
@@ -936,6 +1131,7 @@ pub fn only_on_remote(name: text, block: fn()):
     else:
         test_skipped = test_skipped + 1
         print "    it {name} ... skipped (remote-only)"
+    ()
 
 # @tag(arch=arch, name=file_name)
 pub fn only_on_arch(arch: text, name: text, block: fn()):
@@ -948,6 +1144,7 @@ pub fn only_on_arch(arch: text, name: text, block: fn()):
     else:
         test_skipped = test_skipped + 1
         print "    it {name} ... skipped ({arch}-only)"
+    ()
 
 # @tag(arch=arch, name=file_name)
 pub fn skip_on_arch(arch: text, name: text, block: fn()):
@@ -960,6 +1157,7 @@ pub fn skip_on_arch(arch: text, name: text, block: fn()):
         print "    it {name} ... skipped (skip on {arch})"
     else:
         it(name, block)
+    ()
 
 # ================================================================
 # Runtime-Based Skip Functions
@@ -978,6 +1176,7 @@ pub fn skip_on_interpreter(name: text, block: fn()):
         print "    it {name} ... skipped (compiled-only)"
     else:
         it(name, block)
+    ()
 
 pub fn only_on_interpreter(name: text, block: fn()):
     """Run test ONLY in interpreter mode."""
@@ -989,6 +1188,7 @@ pub fn only_on_interpreter(name: text, block: fn()):
     else:
         test_skipped = test_skipped + 1
         print "    it {name} ... skipped (interpreter-only)"
+    ()
 
 # @tag(name=file_name, module_name=module_name)
 pub fn skip_if_missing_module(name: text, module_name: text, block: fn()):
@@ -1046,6 +1246,7 @@ pub fn skip_if_missing_module(name: text, module_name: text, block: fn()):
     else:
         test_skipped = test_skipped + 1
         print "    it {name} ... skipped (module file not found: {module_path})"
+    ()
 
 fn module_name_to_path(module_name: text) -> text:
     """Convert module name to file path.
@@ -1137,18 +1338,21 @@ fn _drain_after_all(baseline: i64):
 # Prevention mocks
 # ================================================================
 #
-# IMPORTANT ordering contract: call prevent()/prevent_at_most()/prevent_file()
-# AFTER the code under test has run, not at the top of the `it` body. The
-# interpreter copies a class instance (like a MockFunction) by value on every
-# form of storage (array push, class-field construction, closure capture) —
-# only continued access through the ORIGINAL variable observes later
-# mutations. An "arm early, auto-check at the end of _execute_it" design was
-# attempted and found to silently report zero calls (always green) for any
-# guard armed before the forbidden call happened — a fail-open DSL. See
-# doc/08_tracking/bug/prevention_mock_deferred_arming_impossible_2026-08-07.md
-# for the repro. These three functions therefore check IMMEDIATELY, against
-# mockfn's current state, and record a failure right where they are called
-# (same mechanism as a failed `expect`: std.nogc_sync_mut.spec.fail_assertion).
+# Ordering contract: call prevent()/prevent_at_most()/prevent_file() AFTER the
+# code under test has run, not at the top of the `it` body. These three check
+# IMMEDIATELY, against mockfn's current state, and record a failure right where
+# they are called (same mechanism as a failed `expect`: fail_assertion). The
+# original "arm early, auto-check at the end of the example" design was
+# blocked by the interpreter copying class instances by value on storage; that
+# limitation is gone since the class-ref default flip (re-verified 2026-11-04,
+# doc/08_tracking/bug/prevention_mock_deferred_arming_impossible_2026-08-07.md)
+# and the directory-wide policy below is built on exactly that deferred check.
+# The immediate-check semantics of these three are kept unchanged.
+#
+# Directory-wide scope: a `_prevention.sdn` in the spec's directory (or an
+# ancestor up to `test/`) applies to every spec under it with no per-file
+# declaration — see std.nogc_sync_mut.spec.dir_prevention and the
+# `_dir_prevention_*` hooks below.
 #
 # IMPORT NOTE: `use std.spec.*` does NOT reliably expose every pub fn in this
 # module (a pre-existing, unrelated limitation — even the long-standing
@@ -1170,15 +1374,67 @@ pub fn prevent_at_most(mockfn, n: i32, reason: text):
         fail_assertion(msg)
 
 pub fn prevent_file(mockfn, reason: text):
-    """NOTE: true file scope (checked automatically after every example in
-    the spec file) is NOT achievable — module-level spec state does not
-    persist from one `it` example to the next under this runner (verified;
-    see the bug doc above). prevent_file() therefore behaves exactly like
-    prevent(): an immediate check of mockfn's current state in the example
-    it is called from. Call it explicitly in every example (or from
-    before_each/after_each with a mock built fresh each time) to approximate
-    file-wide coverage."""
+    """Deliberately an alias for prevent(): an immediate check of mockfn's
+    current state in the example it is called from. True auto-checked file
+    scope is achievable since 2026-11-04 (the directory-wide policy below
+    runs on exactly that before/after_each hook), but changing this
+    function's semantics is a separate decision. Call it explicitly in
+    every example (or from before_each/after_each) for file-wide coverage,
+    or declare the seam in a `_prevention.sdn`."""
     prevent(mockfn, reason)
+
+# ----------------------------------------------------------------
+# Directory-wide prevention policy (sspec_no_dir_wide_prevention_scope_2026-08-07)
+# ----------------------------------------------------------------
+# The runner resolves `_prevention.sdn` files for the spec's directory chain
+# and passes them in SIMPLE_SPEC_DIR_PREVENTION. When at least one rule
+# loads, MockFunction.new starts recording every mock it builds, and a
+# before_each/after_each pair registered HERE (at module init, so it wraps
+# every example of the importing spec under both the seed's intrinsic `it`
+# and this module's _execute_it) fails any example whose per-example call
+# delta on a named mock exceeds the rule's budget. With no policy nothing is
+# registered and MockFunction.new is unchanged.
+
+var _dir_prevention_env: text = ""
+var _dir_prevention_loaded: bool = false
+var _dir_prevention_rules: [DirPreventionRule] = []
+var _dir_prevention_baseline: [i64] = []
+
+fn _dir_prevention_before():
+    # Policy files are read here, inside the first example, not at module
+    # init: file reads issued while this module is still initialising die
+    # silently under the seed (measured 2026-11-04 — env_get/file_exists
+    # work there, every text-read provider does not), so init only records
+    # the env value and registers the hooks.
+    if not _dir_prevention_loaded:
+        _dir_prevention_rules = dir_prevention_load(_dir_prevention_env)
+        mock_auto_registry_enable()
+        _dir_prevention_loaded = true
+    _dir_prevention_baseline.clear()
+    for m in mock_auto_registry():
+        _dir_prevention_baseline.push(m.call_count() as i64)
+
+fn _dir_prevention_after():
+    val mocks = mock_auto_registry()
+    var i = 0
+    while i < mocks.len():
+        val m = mocks[i]
+        val base: i64 = if i < _dir_prevention_baseline.len(): _dir_prevention_baseline[i] else: 0
+        val delta = (m.call_count() as i64) - base
+        for rule in _dir_prevention_rules:
+            if rule.mock_name == m.name and delta > rule.max_allowed:
+                fail_assertion("forbidden call (directory policy {rule.source}): {m.name} called {delta}x in this example (allowed {rule.max_allowed}) — {rule.reason}")
+        i = i + 1
+
+fn _dir_prevention_init() -> bool:
+    val env_value = env_get(DIR_PREVENTION_ENV) ?? ""
+    if env_value == "":
+        return false
+    _dir_prevention_env = env_value
+    before_each(fn(): _dir_prevention_before())
+    after_each(fn(): _dir_prevention_after())
+    true
+
 
 # ================================================================
 # Expectations
@@ -1250,6 +1506,8 @@ pub trait ExpectScalarMatcher:
     fn to_be_true()
     fn to_be_false()
     fn to_be_nil()
+    fn to_be_none()
+    fn to_be_some()
     fn to_be_truthy()
     fn to_be_falsy()
     fn to_be_greater_than(expected)
@@ -1257,6 +1515,7 @@ pub trait ExpectScalarMatcher:
     fn to_be_at_least(expected)
     fn to_be_at_most(expected)
     fn to_contain(item)
+    fn not_to_contain(item)
     fn to_start_with(prefix: text)
     fn to_end_with(suffix: text)
     fn to_be_empty()
@@ -1296,6 +1555,16 @@ impl ExpectScalarMatcher for i64:
         helper.to_be_nil()
         _expect_helper_slots = [helper]
 
+    fn to_be_none():
+        var helper = _expect_helper_slots[0]
+        helper.to_be_none()
+        _expect_helper_slots = [helper]
+
+    fn to_be_some():
+        var helper = _expect_helper_slots[0]
+        helper.to_be_some()
+        _expect_helper_slots = [helper]
+
     fn to_be_truthy():
         var helper = _expect_helper_slots[0]
         helper.to_be_truthy()
@@ -1324,6 +1593,11 @@ impl ExpectScalarMatcher for i64:
     fn to_be_at_most(expected):
         var helper = _expect_helper_slots[0]
         helper.to_be_at_most(expected)
+        _expect_helper_slots = [helper]
+
+    fn not_to_contain(item):
+        var helper = _expect_helper_slots[0]
+        helper.not_to_contain(item)
         _expect_helper_slots = [helper]
 
     fn to_contain(item):
@@ -1381,6 +1655,7 @@ pub class ExpectHelper:
         else:
             if not matches:
                 fail_assertion("Expected {expected}, got {self.value}")
+        ()
 
     fn to_be(expected):
         _expect_begin_matcher(self.implicit_error)
@@ -1391,6 +1666,7 @@ pub class ExpectHelper:
         else:
             if not matches:
                 fail_assertion("Expected {expected}, got {self.value}")
+        ()
 
     fn to_be_true():
         _expect_begin_matcher(self.implicit_error)
@@ -1400,6 +1676,7 @@ pub class ExpectHelper:
         else:
             if self.value != true:
                 fail_assertion("Expected true, got {self.value}")
+        ()
 
     fn to_be_false():
         _expect_begin_matcher(self.implicit_error)
@@ -1409,15 +1686,40 @@ pub class ExpectHelper:
         else:
             if self.value != false:
                 fail_assertion("Expected false, got {self.value}")
+        ()
 
     fn to_be_nil():
         _expect_begin_matcher(self.implicit_error)
+        val is_nil = _expect_is_nil(self.value)
         if self.negated:
-            if self.value == nil:
+            if is_nil:
                 fail_assertion("Expected value to NOT be nil")
         else:
-            if self.value != nil:
+            if not is_nil:
                 fail_assertion("Expected nil, got {self.value}")
+        ()
+
+    fn to_be_none():
+        _expect_begin_matcher(self.implicit_error)
+        val is_none = _expect_is_nil(self.value)
+        if self.negated:
+            if is_none:
+                fail_assertion("Expected value to NOT be None")
+        else:
+            if not is_none:
+                fail_assertion("Expected None, got {self.value}")
+        ()
+
+    fn to_be_some():
+        _expect_begin_matcher(self.implicit_error)
+        val is_none = _expect_is_nil(self.value)
+        if self.negated:
+            if not is_none:
+                fail_assertion("Expected value to NOT be Some")
+        else:
+            if is_none:
+                fail_assertion("Expected Some, got None")
+        ()
 
     fn to_be_truthy():
         _expect_begin_matcher(self.implicit_error)
@@ -1427,6 +1729,7 @@ pub class ExpectHelper:
         else:
             if not self.value:
                 fail_assertion("Expected truthy value, got {self.value}")
+        ()
 
     fn to_be_falsy():
         _expect_begin_matcher(self.implicit_error)
@@ -1436,52 +1739,81 @@ pub class ExpectHelper:
         else:
             if self.value:
                 fail_assertion("Expected falsy value, got {self.value}")
+        ()
 
     fn to_be_greater_than(expected):
         _expect_begin_matcher(self.implicit_error)
+        val sa: text = "{self.value}"
+        val sb: text = "{expected}"
+        val cmp = _expect_compare_num(sa, sb)
+        val gt = cmp == 1
         if self.negated:
-            if self.value > expected:
+            if gt:
                 fail_assertion("Expected {self.value} to NOT be greater than {expected}")
         else:
-            if self.value <= expected:
+            if not gt:
                 fail_assertion("Expected {self.value} to be greater than {expected}")
+        ()
 
     fn to_be_less_than(expected):
         _expect_begin_matcher(self.implicit_error)
+        val sa: text = "{self.value}"
+        val sb: text = "{expected}"
+        val cmp = _expect_compare_num(sa, sb)
+        val lt = cmp == -1
         if self.negated:
-            if self.value < expected:
+            if lt:
                 fail_assertion("Expected {self.value} to NOT be less than {expected}")
         else:
-            if self.value >= expected:
+            if not lt:
                 fail_assertion("Expected {self.value} to be less than {expected}")
+        ()
 
     fn to_be_at_least(expected):
         _expect_begin_matcher(self.implicit_error)
+        val sa: text = "{self.value}"
+        val sb: text = "{expected}"
+        val cmp = _expect_compare_num(sa, sb)
+        val ge = cmp == 0 or cmp == 1
         if self.negated:
-            if self.value >= expected:
+            if ge:
                 fail_assertion("Expected {self.value} to NOT be at least {expected}")
         else:
-            if self.value < expected:
+            if not ge:
                 fail_assertion("Expected {self.value} to be at least {expected}")
+        ()
 
     fn to_be_at_most(expected):
         _expect_begin_matcher(self.implicit_error)
+        val sa: text = "{self.value}"
+        val sb: text = "{expected}"
+        val cmp = _expect_compare_num(sa, sb)
+        val le = cmp == 0 or cmp == -1
         if self.negated:
-            if self.value <= expected:
+            if le:
                 fail_assertion("Expected {self.value} to NOT be at most {expected}")
         else:
-            if self.value > expected:
+            if not le:
                 fail_assertion("Expected {self.value} to be at most {expected}")
+        ()
+
+    fn not_to_contain(item):
+        self.not_().to_contain(item)
 
     fn to_contain(item):
         _expect_begin_matcher(self.implicit_error)
-        val contains = self.value.contains(item)
+        var contains = self.value.contains(item)
+        if not contains:
+            contains = _expect_array_contains(self.value, item)
+        if not contains:
+            contains = _expect_dict_contains(self.value, item)
         if self.negated:
             if contains:
                 fail_assertion("Expected {self.value} to NOT contain {item}")
         else:
             if not contains:
                 fail_assertion("Expected {self.value} to contain {item}")
+        ()
 
     fn to_start_with(prefix: text):
         _expect_begin_matcher(self.implicit_error)
@@ -1492,6 +1824,7 @@ pub class ExpectHelper:
         else:
             if not starts:
                 fail_assertion("Expected '{self.value}' to start with '{prefix}'")
+        ()
 
     fn to_end_with(suffix: text):
         _expect_begin_matcher(self.implicit_error)
@@ -1502,6 +1835,7 @@ pub class ExpectHelper:
         else:
             if not ends:
                 fail_assertion("Expected '{self.value}' to end with '{suffix}'")
+        ()
 
     fn to_be_empty():
         _expect_begin_matcher(self.implicit_error)
@@ -1512,6 +1846,7 @@ pub class ExpectHelper:
         else:
             if not is_empty:
                 fail_assertion("Expected empty, got length {self.value.len()}")
+        ()
 
     fn to_have_length(expected: i64):
         _expect_begin_matcher(self.implicit_error)
@@ -1522,6 +1857,7 @@ pub class ExpectHelper:
         else:
             if actual_len != expected:
                 fail_assertion("Expected length {expected}, got {actual_len}")
+        ()
 
     fn to_be_close_to(expected, tolerance):
         _expect_begin_matcher(self.implicit_error)
@@ -1535,6 +1871,7 @@ pub class ExpectHelper:
         else:
             if abs_diff > tolerance:
                 fail_assertion("Expected {self.value} to be close to {expected} (tolerance: {tolerance}), diff: {abs_diff}")
+        ()
 
     fn to_match(pattern: text):
         _expect_begin_matcher(self.implicit_error)
@@ -1545,6 +1882,7 @@ pub class ExpectHelper:
         else:
             if not matches:
                 fail_assertion("Expected '{self.value}' to match '{pattern}'")
+        ()
 
 # ================================================================
 # Assertion Helpers
@@ -1644,18 +1982,20 @@ pub fn assert_contains(text_value: text, substring: text):
 # ================================================================
 
 pub fn print_summary():
-    val total = test_passed + test_failed + test_pending + test_skipped
+    val executed = rt_bdd_executed_total()
+    val failed_total = rt_bdd_failed_total()
+    val total = executed + test_pending + test_skipped
     print ""
     print "Test Summary:"
     print "  Total:   {total}"
-    print "  Passed:  {test_passed}"
-    print "  Failed:  {test_failed}"
+    print "  Passed:  {executed - failed_total}"
+    print "  Failed:  {failed_total}"
     if test_pending > 0:
         print "  Pending: {test_pending}"
     if test_skipped > 0:
         print "  Skipped: {test_skipped}"
 
-    if test_failed > 0:
+    if failed_total > 0:
         print ""
         print "Failures:"
         var idx = 1
@@ -1664,7 +2004,7 @@ pub fn print_summary():
             idx = idx + 1
 
 pub fn get_exit_code() -> i64:
-    if test_failed > 0:
+    if rt_bdd_failed_total() > 0:
         return 1
     return 0
 
@@ -1672,7 +2012,7 @@ pub fn get_test_count() -> i64:
     test_passed + test_failed + test_pending + test_skipped
 
 pub fn get_executed_test_count() -> i64:
-    test_passed + test_failed
+    rt_bdd_executed_total()
 
 pub fn get_expectation_count() -> i64:
     _expectations_evaluated
@@ -1706,3 +2046,7 @@ pub fn get_expectation_count() -> i64:
 # Users should import env_detect directly: use std.spec.env_detect.{get_runtime_mode, is_interpreter, ...}
 
 # Internal helper export (used by skip_it, skip_on_interpreter, only_on_interpreter)
+
+# Armed last: module-level initializers in this file run in order, and the
+# hooks must register before any importing spec's first example.
+val _dir_prevention_armed: bool = _dir_prevention_init()

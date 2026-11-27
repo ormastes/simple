@@ -1,4 +1,29 @@
 # `VulkanFfi.loader_probe()` reports false on a host with a working Vulkan loader
+## Re-verified 2026-11-25 (p2w6-ak lane) — Status: FIXED on release/1.0.0 tip (inspection-verified; native GPU lane still pending)
+
+The fix this doc recommended (resolution check via `DynLib.sym` instead of the
+`call0(...) != 0` call-status comparison) is present on `release/1.0.0` tip at
+`src/lib/nogc_sync_mut/gpu/engine2d/ffi_vulkan.spl:128-155` with an inline
+comment documenting both original defects. The Dynamic-mode regression test
+this doc's "Spec status" section asked for is now added to
+`test/01_unit/lib/gpu/engine2d/ffi_vulkan_spec.spl` ("loader_probe (raw
+symbol-resolution signal) / reports true when the host loader resolves
+vkEnumerateInstanceVersion"): red-first proven against a temporarily restored
+inverted probe ("expected false to equal true"), 5/5 green with the fix
+(2026-11-05, seed interpreter, host with libvulkan.so.1 present).
+
+Audit finding (same honesty class, NOT fixed here): a portable negative
+control (probe a library without the export and require false) is blocked by
+an interpreter/native divergence — the interpreter-extern `spl_dlsym`
+(`src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs:362`) raises a
+typed error on an unresolved symbol while native `spl_dlsym` returns 0, so
+`DynLib.sym`'s documented "Returns 0 if not found"
+(`src/lib/nogc_sync_mut/sffi/dynamic.spl:354`) holds only on the native path.
+Recorded here so the divergence is not lost.
+
+**Status: wait verification** — fix and regression test on tip; native GPU
+lane verification pending.
+
 ## Closed 2026-09-16 — Status RESOLVED 2026-08-17; source-content evidence fix present in ffi_vulkan.spl
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
@@ -105,3 +130,25 @@ EOF
 SIMPLE_MODULE_LIMIT=4000 bin/simple run probe.spl
 ```
 
+
+## Re-verification 2026-11-25 (p2w6-ak lane, release/1.0.0 tip ef77d4bd6ec)
+
+Confirmed by direct source inspection that the fix is present and unreverted
+on the current tip: `src/lib/nogc_sync_mut/gpu/engine2d/ffi_vulkan.spl:128-155`
+resolves the symbol via `self._dyn_lib.sym("vkEnumerateInstanceVersion") != 0`
+with the inline comment documenting both original defects (inverted
+`VK_SUCCESS == 0` comparison; missing out-pointer argument to `call0`), and
+the Dynamic-mode regression test is present in
+`test/01_unit/lib/gpu/engine2d/ffi_vulkan_spec.spl:114-134` ("loader_probe
+(raw symbol-resolution signal)").
+
+Runtime verification on this host is environment-blocked, stated honestly:
+(a) this Windows host has no Vulkan loader reachable through the seed's
+dynamic loader — the doc's own probe script prints `NIL`
+(`VulkanFfi.create_dynamic()` returns nil), so `loader_probe()` cannot be
+exercised here in either direction; (b) the spec-file `test` lane is blocked
+repo-wide at HEAD by the known `unknown decorator '@representation_boundary'`
+seed/source inconsistency. The 2026-11-05 lane's red-first/green execution
+evidence (host with libvulkan.so.1) stands as the executed proof; this note
+adds tip-presence confirmation only. Native GPU lane verification remains
+pending as before.

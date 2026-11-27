@@ -1,0 +1,117 @@
+# Feature CMM-PARSE: real strict/runtime parser ownership and recovery.
+use std.spec
+use app.cmm_lsp.cmm_ast.{CmmProgram, CmmStmt}
+use app.cmm_lsp.cmm_parser_source.{parse_cmm_source as parse_cmm_strict_source, parse_cmm_source_with_policy}
+
+fn parse_cmm_runtime_source(source: text) -> CmmProgram:
+    parse_cmm_source_with_policy(source, true)
+
+fn parse_cmm_fixture(source: text) -> CmmProgram:
+    parse_cmm_strict_source(source)
+
+fn cmm_statement_kinds(program: CmmProgram) -> [text]:
+    var kinds: [text] = []
+    for statement in program.statements:
+        val kind = match statement:
+            case CmmStmt.Command(_, _, _): "Command"
+            case CmmStmt.PrintStmt(_, _): "PrintStmt"
+            case CmmStmt.Block(_, _): "Block"
+            case CmmStmt.DialogBlock(_, _, _): "DialogBlock"
+            case CmmStmt.ErrorNode(_, _): "ErrorNode"
+            case CmmStmt.EmptyLine(_): "EmptyLine"
+            case CmmStmt.CommentLine(_, _): "CommentLine"
+            case _: "Other"
+        if kind != "EmptyLine" and kind != "CommentLine":
+            kinds = kinds.push(kind)
+    kinds
+
+fn expect_cmm_statement_kinds(source: text, expected: [text]):
+    val program = parse_cmm_fixture(source)
+    expect(program.errors.len()).to_equal(0)
+    expect(cmm_statement_kinds(program)).to_equal(expected)
+
+fn expect_cmm_recovery_after_error(source: text, expected_suffix: [text]):
+    val program = parse_cmm_fixture(source)
+    expect(program.errors.len()).to_be_greater_than(0)
+    val kinds = cmm_statement_kinds(program)
+    expect(kinds.len()).to_equal(expected_suffix.len() + 1)
+    expect(kinds[0]).to_equal("ErrorNode")
+    var index = 0
+    while index < expected_suffix.len():
+        expect(kinds[index + 1]).to_equal(expected_suffix[index])
+        index = index + 1
+
+describe "CMM-PARSE explicit strict and runtime policies":
+    it "retains valid statement kinds and order under both explicit source policies":
+        step("Parse a nonempty command and print program with strict and tolerant source policies")
+        val source = "SYStem.CPU CortexA53\nPRINT \"hello\"\n"
+        expect_cmm_statement_kinds(source, ["Command", "PrintStmt"])
+        val runtime = parse_cmm_runtime_source(source)
+        expect(runtime.errors.len()).to_equal(0)
+        expect(runtime.warnings.len()).to_equal(0)
+        expect(cmm_statement_kinds(runtime)).to_equal(["Command", "PrintStmt"])
+
+    it "keeps strict unclosed-block failure separate from runtime recovery":
+        step("Retain the partial block only for the existing tolerant caller")
+        val source = "(\nPRINT \"kept\"\n"
+        val strict = parse_cmm_fixture(source)
+        expect(strict.errors.len()).to_be_greater_than(0)
+        expect(strict.warnings.len()).to_equal(0)
+        expect(cmm_statement_kinds(strict)).to_equal(["ErrorNode"])
+        val runtime = parse_cmm_runtime_source(source)
+        expect(runtime.errors.len()).to_equal(0)
+        expect(runtime.warnings.len()).to_equal(1)
+        expect(runtime.warnings[0]).to_contain("unclosed block")
+        expect(cmm_statement_kinds(runtime)).to_equal(["Block"])
+        match runtime.statements[0]:
+            case CmmStmt.Block(statements, _):
+                expect(statements.len()).to_be_greater_than(0)
+                match statements[0]:
+                    case CmmStmt.PrintStmt(values, _): expect(values.len()).to_equal(1)
+                    case _: fail("partial block lost its PRINT statement")
+            case _: fail("runtime parser did not retain its partial block")
+
+    it "keeps strict unclosed-dialog failure separate from runtime recovery":
+        step("Preserve a parsed dialog item and record the existing runtime warning")
+        val source = "DIALOG (\nTEXT \"kept\"\n"
+        val strict = parse_cmm_fixture(source)
+        expect(strict.errors.len()).to_be_greater_than(0)
+        expect(strict.warnings.len()).to_equal(0)
+        val runtime = parse_cmm_runtime_source(source)
+        expect(runtime.errors.len()).to_equal(0)
+        expect(runtime.warnings.len()).to_equal(1)
+        expect(runtime.warnings[0]).to_contain("unclosed DIALOG block")
+        expect(cmm_statement_kinds(runtime)).to_equal(["DialogBlock"])
+        match runtime.statements[0]:
+            case CmmStmt.DialogBlock(_, items, _): expect(items.len()).to_equal(1)
+            case _: fail("runtime parser did not retain its partial dialog")
+
+    it "preserves each facade's diagnostic while recovering the next statement":
+        step("Report a missing DO target and continue to the following PRINT")
+        val source = "DO\nPRINT \"after\"\n"
+        expect_cmm_recovery_after_error(source, ["PrintStmt"])
+        val strict = parse_cmm_fixture(source)
+        expect(strict.errors[0]).to_contain("Failed to parse statement")
+        val runtime = parse_cmm_runtime_source(source)
+        expect(runtime.errors.len()).to_equal(1)
+        expect(runtime.errors[0]).to_contain("Expected filename after DO")
+        expect(runtime.warnings.len()).to_equal(0)
+        expect(cmm_statement_kinds(runtime)).to_equal(["ErrorNode", "PrintStmt"])
+
+    it "returns block helper accumulation instead of discarding copied arrays":
+        step("Retain the error node and valid suffix inside a closed block")
+        val runtime = parse_cmm_runtime_source("(\nDO\nPRINT \"after\"\n)\n")
+        expect(runtime.errors.len()).to_equal(1)
+        expect(runtime.errors[0]).to_contain("Expected filename after DO")
+        expect(runtime.warnings.len()).to_equal(0)
+        expect(cmm_statement_kinds(runtime)).to_equal(["Block"])
+        match runtime.statements[0]:
+            case CmmStmt.Block(statements, _):
+                var nonempty: [text] = []
+                for statement in statements:
+                    match statement:
+                        case CmmStmt.ErrorNode(_, _): nonempty = nonempty.push("ErrorNode")
+                        case CmmStmt.PrintStmt(_, _): nonempty = nonempty.push("PrintStmt")
+                        case _: ()
+                expect(nonempty).to_equal(["ErrorNode", "PrintStmt"])
+            case _: fail("runtime parser lost the closed block")

@@ -1,5 +1,9 @@
 # SOSIX runtime unification feature expert
 
+## 2026-10-29 host process handoff
+
+Use the [shared-contract/platform-owner design](../../../05_design/runtime/sosix_runtime_unification_design.md#2026-10-29-host-process-coordination-contract) and [integration/TDD guide](../../../07_guide/lib/sosix_runtime_library.md#host-process-integration-workflow--2026-10-29). Release baseline `f0d6c75f235` includes #5233/#5234 cooperative Darwin snapshot V1. Strict V4 stays unavailable on Mac; image/tree experiments are unlanded and do not change admission. Coordinate shared runtime/registry edits; each host owns its adapter and evidence. C gate/P1 diagnostic results do not qualify deployed native Simple/P2.
+
 ## 2026-10-11 variation handoff
 
 The [selected Item 5 integration](../../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-variation-and-sosix-integration) extends this existing expert. Earlier seed-era status below remains dated history. Before proposing a new body, identify its current semantic owner, callers and reused/moved/retired implementation. Do not duplicate a Future, schema, feature decoder, service-ID table, GPU runtime or selection ladder.
@@ -89,3 +93,39 @@ queues, QEMU serial-bytes-observed row (needs pure-Simple deploy).
   behavior examples on the `io_rw` route.
 - Still red and pre-existing, outside this lane's edits: `fs_service_vfs_backend_v1_spec`
   (seed parse error), `fs_service_adapter_v1_spec` (indexed field receiver), `fs_ipc_codec_v1_spec`.
+
+## Darwin descendant signal race (2026-10-29)
+
+A repeated group SIGKILL may return EPERM after an earlier successful SIGKILL
+and observed leader exit. Keep ownership and resample until zero live members
+or the cleanup deadline; EPERM alone never permits retirement. Initial denial
+still errors. Native and deterministic evidence is in
+`scripts/check/check-sosix-darwin-process.shs`; the executable SSpec and manual
+are `darwin_process_signal_race_spec` under the process system-test trees.
+
+## Darwin local IPC + Seatbelt activation leaf (2026-11-13, C7)
+
+Source-only, unqualified on a Mac. `runtime_local_unix_v1.h` now runs on
+`__APPLE__` (PID-only origin, post-effect parent re-walk, `getpeereid` +
+`LOCAL_PEERTOKEN`/`LOCAL_PEERPID` peer, `SO_NOSIGPIPE`, CLOEXEC set after
+creation/receipt); stdout stage/adopt stays Linux-only. Peer strength is read
+via `local_unix_peer_identity_class_v1()`. SOSIX owns
+`sosix_darwin_sandbox_apply_v1` (`nogc_async_mut/sosix/darwin_sandbox_v1.spl`,
+native pair in `runtime_sosix_darwin_sandbox_v1.h`, included by
+`runtime_process_owned.c`); non-Darwin answers `Unsupported` without native
+entry. The leaf is deliberately not `rt_*`. Mac-qualified 2026-11-14: Darwin
+`local_unix_v1_selfcheck.c` PASS and the disposable-child probe
+`src/runtime/test/sosix_darwin_sandbox_v1_selfcheck.c` 12/12 on the compiled
+attempt profile (see `doc/04_architecture/native_macos_simple_container.md`). Design: `doc/05_design/simple_container_macos_seatbelt.md` §2.3/§9.1/§15.2.
+
+Shared extraction (2026-11-26, container S0): the Seatbelt lifecycle machine, attempt key/dir layout and canary comparison are host-neutral and live in `src/lib/common/contracts/container/contained_lifecycle_v1.spl`, `src/lib/common/container_policy/attempt_dir_plan_v1.spl` and `src/lib/common/contracts/container/sandbox_canary_v1.spl`. `providers/macos/seatbelt_{provider,capabilities}_v1.spl` forward to them (keeping the `seatbelt-`/`SCMAC-*` error prefixes, the leading-`/` path check and the 103-byte sun_path limit); `SeatbeltAttemptDirPlanV1`, `SeatbeltCanaryPlanV1`, `SeatbeltCanaryResultV1`, `SeatbeltQualificationV1` are type aliases. Edit shared rules there, not in the macOS leaf.
+
+## PTY shell kinds (2026-11-14)
+
+`std.sosix.pty` is the single PTY entry point (smux and Caret import nothing
+lower). A pane names a shell kind: `shs` (the Simple shell, `ShellApp`, hosted
+via `src/app/shs/main.spl`; the only kind on SimpleOS) or `native`
+(`/bin/sh`, `cmd.exe`; refused on SimpleOS). `sosix_pty_default_shell()` is
+native on hosts unless `SIMPLE_PTY_SHELL=shs`. Unix `rt_pty_spawn` accepts a
+command line with arguments (falls back to `/bin/sh -c "exec <line>"`).
+Design and open phases: `doc/05_design/pty_shell_kinds_shs_default.md`.

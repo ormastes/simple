@@ -1,0 +1,206 @@
+"""
+## Purpose and audience
+Purpose: Pin general OpenType `dev2` (Devanagari) shaping against Chrome 159:
+Indic syllable segmentation, reph, pre-base matra reordering and the GSUB
+feature stages (locl ccmp | nukt akhn rphf rkrf blwf half pstf vatu cjct |
+pres abvs blws psts haln), for any Devanagari run rather than the one pinned
+word हिन्दी the shaper used to admit.
+Audience: web renderer text maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--force-device-scale-factor=1`, 400x300, `<html lang="hi">`, body
+`font:16px <Noto Sans Devanagari via @font-face>`, the bundled
+`assets/fonts/google-fonts/ofl/notosansdevanagari/NotoSansDevanagari[wdth,wght].ttf`
+— the face the engine resolves for `lang="hi"`). Widths are Range
+getBoundingClientRect widths. Glyph ids are Chrome's own: `--print-to-pdf`
+keeps the face's glyph ids in the Skia PDF Type3 fonts (CharProcs `/g<hex>`),
+read back in drawing order.
+
+| text            | Range width | glyph ids                                    | rule                        |
+|-----------------|-------------|----------------------------------------------|-----------------------------|
+| हिन्दी            | 30.234375   | 544 88 245 73 33                             | pre-base matra, half form   |
+| क्षत्रिय           | 33.734375   | 90 545 304 81                                | akhn, rkrf, matra over conj |
+| प्रकार            | 32.09375    | 309 56 31 82                                 | rkrf                        |
+| कृष्ण             | 29.015625   | 56 36 255 70                                 | below matra, half form      |
+| र्म              | 9.578125    | 80 506                                       | reph to syllable end        |
+| किताब            | 38.84375    | 545 56 71 31 78                              | pre-base matra per syllable |
+| स्त्री             | 19.203125   | 256 304 33                                   | half + rakar conjunct       |
+| हिंदी             | 25.28125    | 559 88 785 73 33                             | anusvara, abvs              |
+| ज़रूर             | 30.859375   | 224 494 82                                   | nukt, blws ru ligature      |
+| क + ् + ZWJ + ष | 18.0625     | 232 3 86                                     | ZWJ: explicit half form     |
+| क + ् + ZWNJ + ष| 21.546875   | 56 103 3 86                                  | ZWNJ: explicit halant       |
+| र्कि             | 16.4375     | 590 56 785                                   | reph + pre-base matra       |
+| कर्त्ता            | 27.5        | 56 442 31 506                                | reph after post-base matra  |
+| र + ् + ZWJ + य | 14.234375   | 507 81                                       | eyelash ra                  |
+| र्ई              | 7.859375    | 7 506 506                                    | ccmp split vowel + reph     |
+| क्               | 12.296875   | 56 103                                       | final halant stays          |
+| नमस्ते दुनिया       | 72.90625    | 75 80 256 71 40 3 490 545 75 81 31           | two words, one run          |
+
+Chrome rounds each glyph advance to 1/64 px, so a run of n glyphs may differ
+from the unrounded font-unit sum by up to n/64 px; widths are compared in
+1/64 px with that tolerance.
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-SHAPING-DEV2-001 — Devanagari runs are shaped as in Chrome (HarfBuzz dev2).
+"""
+# @tag: unit, browser_engine, text, chrome159
+# @cover src/lib/skia/feature/shaper/indic_dev2.spl 1%
+use std.spec.*
+use std.skia.feature.glyph.ot_parser.{OtFont, parse_offset_table}
+use std.skia.feature.shaper.ot_layout_shaper.{resolve_canonical_layout_run, layout_tag}
+use std.common.encoding.utf8.{text_codepoints}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir
+}
+
+val DEVA_FONT = "assets/fonts/google-fonts/ofl/notosansdevanagari/NotoSansDevanagari[wdth,wght].ttf"
+val W: i32 = 400
+val H: i32 = 120
+
+fn _codepoints(value: text) -> [u32]:
+    var codepoints: [u32] = []
+    for codepoint in text_codepoints(value): codepoints.push(codepoint as u32)
+    codepoints
+
+# "complete|glyph ids|width in 1/64 px at 16px" of the canonical dev2 run.
+fn _shape_cps(font: OtFont, codepoints: [u32]) -> text:
+    match resolve_canonical_layout_run(font, layout_tag("dev2"), "hi", codepoints, 0, codepoints.len(), []):
+        case Some(run):
+            var ids = ""
+            var units: i64 = 0
+            for glyph in run.glyphs:
+                ids = if ids == "": "{glyph.glyph_id}" else: ids + " {glyph.glyph_id}"
+                units = units + glyph.x_advance_units
+            val complete = run.substitution_complete and run.positioning_complete
+            "{complete}|{ids}|{units * 16 * 64 / run.units_per_em as i64}"
+        case None:
+            "none"
+
+fn _ids(shaped: text) -> text:
+    val parts = shaped.split("|")
+    if parts.len() != 3: return shaped
+    parts[0] + "|" + parts[1]
+
+# Chrome's Range width in 1/64 px, within one 1/64 px per glyph.
+fn _width_matches(shaped: text, chrome_64: i64, glyphs: i64) -> bool:
+    val parts = shaped.split("|")
+    if parts.len() != 3: return false
+    val ours = parts[2].to_i64()
+    val delta = if ours > chrome_64: ours - chrome_64 else: chrome_64 - ours
+    delta <= glyphs
+
+fn _page(txt: text) -> text:
+    "<!doctype html><html lang=\"hi\"><body style=\"margin:0;background:#fff;font:16px Liberation Sans;color:#000\"><div style=\"position:absolute;left:20px;top:30px;white-space:nowrap\">" + txt + "</div></body></html>"
+
+# "valid|width|glyph ids" of the page's single text command.
+fn _run(txt: text) -> text:
+    val c = simple_web_layout_render_html_draw_ir(_page(txt), W, H)
+    var out = "no-text"
+    for b in c.batches:
+        for cmd in b.commands:
+            if cmd.text_value != "":
+                var ids = ""
+                for glyph in cmd.glyph_run.glyph_ids:
+                    ids = if ids == "": "{glyph}" else: ids + " {glyph}"
+                out = "{cmd.glyph_run.valid}|{cmd.width}|{ids}"
+    out
+
+describe "dev2 Devanagari shaping against Chrome 159":
+    it "AC-1: pre-base matra reorders per syllable and half forms ligate":
+        val font = parse_offset_table(file_read_bytes(DEVA_FONT)).?
+        step("हिन्दी 30.234375 px")
+        val hindi = _shape_cps(font, _codepoints("हिन्दी"))
+        expect(_ids(hindi)).to_equal("true|544 88 245 73 33")
+        expect(_width_matches(hindi, 1935, 5)).to_equal(true)
+        step("किताब 38.84375 px")
+        val kitab = _shape_cps(font, _codepoints("किताब"))
+        expect(_ids(kitab)).to_equal("true|545 56 71 31 78")
+        expect(_width_matches(kitab, 2486, 5)).to_equal(true)
+        step("कृष्ण 29.015625 px")
+        val krishna = _shape_cps(font, _codepoints("कृष्ण"))
+        expect(_ids(krishna)).to_equal("true|56 36 255 70")
+        expect(_width_matches(krishna, 1857, 4)).to_equal(true)
+
+    it "AC-2: akhn and rkrf conjuncts form before the matra is placed":
+        val font = parse_offset_table(file_read_bytes(DEVA_FONT)).?
+        step("क्षत्रिय 33.734375 px")
+        val kshatriya = _shape_cps(font, _codepoints("क्षत्रिय"))
+        expect(_ids(kshatriya)).to_equal("true|90 545 304 81")
+        expect(_width_matches(kshatriya, 2159, 4)).to_equal(true)
+        step("प्रकार 32.09375 px")
+        val prakar = _shape_cps(font, _codepoints("प्रकार"))
+        expect(_ids(prakar)).to_equal("true|309 56 31 82")
+        expect(_width_matches(prakar, 2054, 4)).to_equal(true)
+        step("स्त्री 19.203125 px")
+        val stri = _shape_cps(font, _codepoints("स्त्री"))
+        expect(_ids(stri)).to_equal("true|256 304 33")
+        expect(_width_matches(stri, 1229, 3)).to_equal(true)
+
+    it "AC-3: reph moves to the end of its syllable":
+        val font = parse_offset_table(file_read_bytes(DEVA_FONT)).?
+        step("र्म 9.578125 px")
+        val rma = _shape_cps(font, _codepoints("र्म"))
+        expect(_ids(rma)).to_equal("true|80 506")
+        expect(_width_matches(rma, 613, 2)).to_equal(true)
+        step("र्कि 16.4375 px: reph joins the pre-base matra")
+        val rki = _shape_cps(font, _codepoints("र्कि"))
+        expect(_ids(rki)).to_equal("true|590 56 785")
+        expect(_width_matches(rki, 1052, 3)).to_equal(true)
+        step("कर्त्ता 27.5 px: reph after the post-base matra")
+        val kartta = _shape_cps(font, _codepoints("कर्त्ता"))
+        expect(_ids(kartta)).to_equal("true|56 442 31 506")
+        expect(_width_matches(kartta, 1760, 4)).to_equal(true)
+        step("र्ई 7.859375 px: ccmp splits the vowel before the reph is placed")
+        val rii = _shape_cps(font, _codepoints("र्ई"))
+        expect(_ids(rii)).to_equal("true|7 506 506")
+        expect(_width_matches(rii, 503, 3)).to_equal(true)
+
+    it "AC-4: nukta, anusvara and a final halant":
+        val font = parse_offset_table(file_read_bytes(DEVA_FONT)).?
+        step("ज़रूर 30.859375 px")
+        val zarur = _shape_cps(font, _codepoints("ज़रूर"))
+        expect(_ids(zarur)).to_equal("true|224 494 82")
+        expect(_width_matches(zarur, 1975, 3)).to_equal(true)
+        step("हिंदी 25.28125 px")
+        val hindi = _shape_cps(font, _codepoints("हिंदी"))
+        expect(_ids(hindi)).to_equal("true|559 88 785 73 33")
+        expect(_width_matches(hindi, 1618, 5)).to_equal(true)
+        step("क् 12.296875 px")
+        val k = _shape_cps(font, _codepoints("क्"))
+        expect(_ids(k)).to_equal("true|56 103")
+        expect(_width_matches(k, 787, 2)).to_equal(true)
+
+    it "AC-5: ZWJ asks for a half form, ZWNJ for an explicit halant":
+        val font = parse_offset_table(file_read_bytes(DEVA_FONT)).?
+        step("क ् ZWJ ष 18.0625 px")
+        val zwj = _shape_cps(font, [2325u32, 2381u32, 8205u32, 2359u32])
+        expect(_ids(zwj)).to_equal("true|232 3 86")
+        expect(_width_matches(zwj, 1156, 3)).to_equal(true)
+        step("क ् ZWNJ ष 21.546875 px")
+        val zwnj = _shape_cps(font, [2325u32, 2381u32, 8204u32, 2359u32])
+        expect(_ids(zwnj)).to_equal("true|56 103 3 86")
+        expect(_width_matches(zwnj, 1379, 4)).to_equal(true)
+        step("र ् ZWJ य 14.234375 px: eyelash ra, no reph")
+        val eyelash = _shape_cps(font, [2352u32, 2381u32, 8205u32, 2351u32])
+        expect(_ids(eyelash)).to_equal("true|507 81")
+        expect(_width_matches(eyelash, 911, 2)).to_equal(true)
+
+    it "AC-6: a two-word run shapes each syllable and keeps the space":
+        val font = parse_offset_table(file_read_bytes(DEVA_FONT)).?
+        step("नमस्ते दुनिया 72.90625 px")
+        val hello = _shape_cps(font, _codepoints("नमस्ते दुनिया"))
+        expect(_ids(hello)).to_equal("true|75 80 256 71 40 3 490 545 75 81 31")
+        expect(_width_matches(hello, 4666, 11)).to_equal(true)
+
+    it "AC-7: a text the shaper cannot segment stays out of the shaped lane":
+        val font = parse_offset_table(file_read_bytes(DEVA_FONT)).?
+        step("a matra with no base is a broken cluster (Chrome inserts a dotted circle)")
+        expect(_shape_cps(font, [2367u32, 2325u32])).to_equal("none")
+
+    it "AC-8: the page's Devanagari text command carries Chrome's glyph run":
+        step("नमस्ते दुनिया: Chrome 72.90625 wide (was an unshaped 103); the command width is whole px, floored")
+        expect(_run("नमस्ते दुनिया")).to_equal("true|72|75 80 256 71 40 3 490 545 75 81 31")
+        step("क्षत्रिय: Chrome 33.734375 wide")
+        expect(_run("क्षत्रिय")).to_equal("true|33|90 545 304 81")

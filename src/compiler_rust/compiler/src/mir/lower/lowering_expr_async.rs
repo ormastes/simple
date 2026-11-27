@@ -20,7 +20,12 @@ impl<'a> MirLowerer<'a> {
         self.set_current_block(body_block)?;
 
         // Lower the lambda body INTO the body block
-        let body_reg = self.lower_expr(body)?;
+        let outer_lambda_params = self.lambda_param_types.len();
+        self.lambda_param_types
+            .extend(param_local_indices.iter().copied().zip(params.iter().map(|(_, ty)| *ty)));
+        let body_reg = self.lower_expr(body);
+        self.lambda_param_types.truncate(outer_lambda_params);
+        let body_reg = body_reg?;
 
         // Add return terminator to body block
         self.with_func(|func, current_block| {

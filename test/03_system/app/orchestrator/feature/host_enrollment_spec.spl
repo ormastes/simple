@@ -1,0 +1,112 @@
+# @req HOST-ENROLLMENT-01 HOST-ENROLLMENT-02
+# NOT_RUN. Real signatures and bounded codecs; no filesystem/native claims.
+use test.fixtures.orchestration.host_enrollment_native_probe.*
+use std.nogc_sync_mut.orchestration.host_enrollment_v1.*
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.distributed_authority_codec_v2.{distributed_encode_signed_grant_v2, distributed_encode_signed_approval_v2}
+
+fn host_enrollment_wire_fields_v1(fixture: HostEnrollmentFixtureV1) -> Dict<text, SdnValue>:
+    {"version": SdnValue.Int(1), "kind": SdnValue.String("host-enrollment-credential"),
+        "operation": SdnValue.String(distributed_encode_operation_v2(fixture.credential.operation).unwrap()),
+        "signedGrant": SdnValue.String(distributed_encode_signed_grant_v2(fixture.credential.signed).unwrap()),
+        "signedApproval": SdnValue.String(distributed_encode_signed_approval_v2(fixture.credential.approval).unwrap())}
+
+describe "Signed host enrollment binding":
+    it "authorizes real existing Ed25519 signatures bound to every native/configuration field":
+        val fixture = host_enrollment_fixture_v1()
+        val bytes = host_enrollment_payload_bytes_v1(fixture.binding).unwrap()
+        expect(host_enrollment_payload_digest_v1(fixture.binding).unwrap()).to_equal(sha256_text(bytes))
+        val grant = host_enrollment_authorize_v1(fixture.binding, fixture.credential, fixture.policy,
+            "worker_1", 512, fixture.context).unwrap()
+        expect(grant.id).to_equal("grant_1")
+        val encoded = host_enrollment_credential_encode_v1(fixture.credential).unwrap()
+        val decoded = host_enrollment_credential_decode_v1(encoded).unwrap()
+        expect(host_enrollment_credential_encode_v1(decoded).unwrap()).to_equal(encoded)
+        expect(host_enrollment_authorize_v1(fixture.binding, decoded, fixture.policy,
+            "worker_1", 512, fixture.context).unwrap().id).to_equal("grant_1")
+
+    it "rejects mutation of each bound payload field before any authority effects":
+        var changed = host_enrollment_fixture_v1()
+        changed.binding.config_digest = "d".repeat(64)
+        host_enrollment_expect_rejected_v1(changed, "host-enrollment-payload-mismatch")
+        changed = host_enrollment_fixture_v1()
+        changed.binding.policy_digest = "d".repeat(64)
+        host_enrollment_expect_rejected_v1(changed, "host-enrollment-payload-mismatch")
+        changed = host_enrollment_fixture_v1()
+        changed.binding.native_machine_id = "machine-002"
+        host_enrollment_expect_rejected_v1(changed, "host-enrollment-payload-mismatch")
+        changed = host_enrollment_fixture_v1()
+        changed.binding.native_boot_id = "boot-002"
+        host_enrollment_expect_rejected_v1(changed, "host-enrollment-payload-mismatch")
+        changed = host_enrollment_fixture_v1()
+        changed.binding.provider_identity_digest = "d".repeat(64)
+        host_enrollment_expect_rejected_v1(changed, "host-enrollment-payload-mismatch")
+        changed = host_enrollment_fixture_v1()
+        changed.binding.machine_parent = "/var/lib/simple/other-hosts"
+        host_enrollment_expect_rejected_v1(changed, "host-enrollment-payload-mismatch")
+
+    it "rejects wrong action, local expectations, policy source and stale context":
+        var changed = host_enrollment_fixture_v1()
+        changed.credential.operation.operation = "host_execute_v1"
+        host_enrollment_expect_rejected_v1(changed, "host-enrollment-action-mismatch")
+        val fixture = host_enrollment_fixture_v1()
+        expect(host_enrollment_authorize_v1(fixture.binding, fixture.credential, fixture.policy,
+            "other-host", 512, fixture.context).unwrap_err()).to_equal("host-enrollment-host-mismatch")
+        expect(host_enrollment_authorize_v1(fixture.binding, fixture.credential, fixture.policy,
+            "worker_1", 513, fixture.context).unwrap_err()).to_equal("host-enrollment-memory-mismatch")
+        changed = host_enrollment_fixture_v1()
+        changed.credential.operation.environment_digest = "e".repeat(64)
+        host_enrollment_expect_rejected_v1(changed, "host-enrollment-provider-mismatch")
+        changed = host_enrollment_fixture_v1()
+        changed.policy.source_digest = "e".repeat(64)
+        host_enrollment_expect_rejected_v1(changed, "host-enrollment-policy-digest-mismatch")
+        changed = host_enrollment_fixture_v1()
+        changed.context.policy_revision = 5
+        host_enrollment_expect_rejected_v1(changed, "host-enrollment-policy-context-mismatch")
+        changed = host_enrollment_fixture_v1()
+        changed.context.revocation_epoch = 3
+        host_enrollment_expect_rejected_v1(changed, "host-enrollment-policy-context-mismatch")
+        changed = host_enrollment_fixture_v1()
+        changed.context.session_generation = 4
+        host_enrollment_expect_rejected_v1(changed, "host-enrollment-policy-context-mismatch")
+        changed = host_enrollment_fixture_v1()
+        changed.context.grant_clock = 190
+        host_enrollment_expect_rejected_v1(changed, "APPROVAL_EXPIRED")
+
+    it "rejects rebinding payload and approval digests without a new real approval signature":
+        var changed = host_enrollment_fixture_v1()
+        changed.binding.native_machine_id = "machine-002"
+        changed.credential.operation.payload_digest = host_enrollment_payload_digest_v1(changed.binding).unwrap()
+        host_enrollment_expect_rejected_v1(changed, "APPROVAL_PAYLOAD_MISMATCH")
+        changed.credential.approval.request_digest = sha256_text(distributed_encode_operation_v2(changed.credential.operation).unwrap())
+        host_enrollment_expect_rejected_v1(changed, "APPROVAL_SIGNATURE_INVALID")
+
+    it "rejects actual issuer and approver signature corruption":
+        var changed = host_enrollment_fixture_v1()
+        changed.credential.signed.signature[0] = ((changed.credential.signed.signature[0] as i64 + 1) % 256) as u8
+        host_enrollment_expect_rejected_v1(changed, "ISSUER_SIGNATURE_INVALID")
+        changed = host_enrollment_fixture_v1()
+        changed.credential.approval.signature[0] = ((changed.credential.approval.signature[0] as i64 + 1) % 256) as u8
+        host_enrollment_expect_rejected_v1(changed, "APPROVAL_SIGNATURE_INVALID")
+
+    it "rejects noncanonical unknown malformed oversized and invalid native binding data":
+        val fixture = host_enrollment_fixture_v1()
+        val encoded = host_enrollment_credential_encode_v1(fixture.credential).unwrap()
+        expect(host_enrollment_credential_decode_v1(encoded + "\n").unwrap_err()).to_equal("host-enrollment-credential-noncanonical")
+        assert(host_enrollment_credential_decode_v1("version: [").is_err())
+        expect(host_enrollment_credential_decode_v1("😀".repeat(300000)).unwrap_err()).to_equal("host-enrollment-credential-size")
+        var fields = host_enrollment_wire_fields_v1(fixture)
+        fields["authorized"] = SdnValue.Bool(true)
+        expect(host_enrollment_credential_decode_v1(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n").unwrap_err()).to_equal("host-enrollment-credential-unknown-field:authorized")
+        var changed = fixture.binding
+        changed.machine_parent = "/var/lib/../hosts"
+        expect(host_enrollment_payload_bytes_v1(changed).unwrap_err()).to_equal("host-enrollment-machine-parent-invalid")
+        changed = fixture.binding
+        changed.native_boot_id = "boot\nforged"
+        expect(host_enrollment_payload_bytes_v1(changed).unwrap_err()).to_equal("host-enrollment-native-identity-invalid")
+        changed = fixture.binding
+        changed.config_digest = "A".repeat(64)
+        expect(host_enrollment_payload_bytes_v1(changed).unwrap_err()).to_equal("host-enrollment-binding-digest-invalid")

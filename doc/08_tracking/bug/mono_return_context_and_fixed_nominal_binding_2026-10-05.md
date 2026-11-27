@@ -1,6 +1,6 @@
 # mono_return_context_and_fixed_nominal_binding_2026-10-05
 
-Status: OPEN. Workaround source prepared; native validation UNRUN.
+Status: CLOSED 2026-11-02 (stale, code path deleted): monomorphization was deleted by 200a05f5bc8 (`src/compiler/40.mono/` no longer exists; see monomorphization_deleted_2026-10-31.md), and this defect was reproduced only in the deleted module(s). `infer_call_type_args` and the E-MONO-032 gate no longer exist in src.
 
 P3 p3-stability30577-cranelift40 naturally terminated with exit 1 after 1142
 successful HIR modules and 1142 cold receipts. Worker stderr file
@@ -54,3 +54,70 @@ walk was added to the recursive binder. Actual memory/performance measurements
 and all new native execution remain UNRUN, not inferred PASS. General expected
 context propagation through untyped if/match/block expressions remains outside
 this narrow repair; existing checked expression metadata still applies.
+
+## 2026-10-25 argument-evidence candidate (OPEN)
+
+The existing checked-result-context repair did not infer the argument types of
+bare builtin Ok/Err calls or unresolved local inherent method calls. A guarded
+direct-pass baseline established four unresolved partial-Result calls and three
+unresolved impl-Result calls, with zero queued symbols/bodies. Every diagnostic
+reported missing concrete local argument evidence. The rejection is deliberate
+and remains unchanged; expected return context cannot authorize unknown input.
+
+The candidate assigns explicit serialized compiler-owned Result constructor tags
+only after lexical lookup misses. Mono derives a partial Result from one concrete
+payload of such a tagged call, and validates the whole partial shape and payload
+owner. User functions with the same printed name do not receive constructor
+identity. A second, local-only path recovers a concrete declared method result
+only from exact qualified lookup plus positive nongeneric inherent-impl ownership.
+Trait/unsupported associations poison that proof even if the same symbol also
+appears in an inherent impl. Imported and dynamic methods remain unanswered.
+
+Final bounded cycle: eight executed, six passed, two failed, zero skipped/dropped;
+peak RSS921,248KiB, raw status1, quiescent1, all recorded inputs unchanged. Six
+passing cases establish unknown-argument rejection, user-Ok shadow rejection,
+payload/context conflict rejection, exact local inherent method return evidence,
+trait-only rejection, and trait/inherent symbol collision rejection in both orders.
+The two original direct-pass examples encountered an rt_enum_id enum typed-ABI
+error before completed specialization/body evidence. Do not call those examples
+fixed or dismiss their failures as preexisting without an equivalent baseline.
+The same ABI error class was observed in separate earlier cases; that fact does
+not prove causation for these two changed paths. Six-cycle cap reached; no retries.
+
+Retained receipts in the review worktree:
+- generic-context-qualification-20261025-02:12executed8passed4failed.
+- generic-nominal-qualification-20261025-01:8executed8passed.
+- generic-context-direct-owner-diagnostic-20261025-01 and -02:2executed0passed.
+- generic-context-result-evidence-postfix-20261025-01:8executed6passed2failed.
+
+@workaround: the retained/local method-ownership proof is not serialized in the
+archive-facts transport; archive-restored workers without it fail closed. The
+portable-body validator's refusal of nonzero builtin tags remains intact, so the
+new Result tags are not a claim of portable/archive qualification. These are
+explicit compatibility limits pending separate native Phase3 evidence, not a
+reason to relax the validator. Both original source workarounds remain in place.
+No runtime, SFFI, fixed Phase2, Rust, or frozen-source changes were performed.
+
+## 2026-11-26 — Rust Seed Generic Identity Return Inference Fix (WA-P6, `ROOT-FIXED+SEED-GATED`)
+
+- Fixed Rust seed `generic_identity_param` inference across local, imported, aliased,
+  and flattened generic functions (such as `walk_hir_expr<C>(node, ctx: C, f) -> C`) in:
+  - `src/compiler_rust/compiler/src/hir/lower/lowerer.rs` (`GenericIdentityParamSpec`,
+    `register_generic_identity_param`, `record_generic_identity_param_alias`)
+  - `src/compiler_rust/compiler/src/hir/lower/module_lowering/module_pass.rs`
+  - `src/compiler_rust/compiler/src/hir/lower/import_loader.rs`
+  - `src/compiler_rust/compiler/src/hir/lower/expr/mod.rs`
+    (`lookup_generic_identity_param_spec`, `refine_generic_identity_return`)
+  - `src/compiler_rust/compiler/src/hir/lower/expr/calls.rs`
+  - `src/compiler_rust/compiler/src/hir/lower/expr/inference.rs` (`Expr::GenericInst` unwrap)
+- Added unit tests
+  `imported_generic_visitor_walk_hir_expr_infers_struct_return_without_type_annotation`
+  and `flattened_generic_identity_return_isolates_colliding_symbols_and_infers_struct`
+  in `src/compiler_rust/compiler/src/hir/lower/tests/seed_regression_tests.rs`.
+- Kept caller guard in `src/compiler/35.semantics/enum_contract/hir_match_coverage.spl:237`
+  with `@workaround bug=mono_return_context_and_fixed_nominal_binding_2026-10-05 recover=58246517a37 reason=ROOT-FIXED+SEED-GATED: ...`
+  until bootstrap seed artifacts incorporate this fix.
+- Verified:
+  - `cargo test -p simple-compiler --lib -j 4 hir::lower::tests`: `405 passed; 0 failed` (default & `--features llvm`)
+  - `test/01_unit/compiler/semantics/enum_contract_hir_wiring_spec.spl --mode=interpreter`: `10 passed, 0 failed`
+

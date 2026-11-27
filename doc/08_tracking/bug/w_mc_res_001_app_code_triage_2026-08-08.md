@@ -104,3 +104,30 @@ that sub-issue remains as the doc describes it. No source changes made (fix
 was already applied in a prior session). Status for the app-side TRUE
 finding: RESOLVED, re-confirmed by source inspection.
 
+
+## Mirror sub-issue re-verification 2026-11-25 (lane p3-bah, worktree D:\wt-p3-bah, release/1.0.0 @fcd95d41d60)
+
+The "Still open" mirror described above is now fixed in-tree:
+
+- `src/lib/nogc_sync_mut/debug/remote/dwarf.spl` no longer defines a
+  standalone `fn dwarf_load`; line ~124 carries the same deliberate-absence
+  comment as the app-side file ("There is deliberately no standalone
+  `dwarf_load` here (W-MC-RES-001 ...)"). Only the managed `DwarfInfo.load`
+  wrapper (via `sffi_dwarf_load`) and the paired `fn dwarf_free` remain.
+- `src/lib/nogc_sync_mut/debug/remote/__init__.spl:8` exports `dwarf_free`
+  only — `dwarf_load` is no longer re-exported.
+- The downstream mirrors were updated in the same sweep:
+  `src/lib/nogc_async_mut/debug/remote/dwarf.spl:8` imports
+  `DwarfInfo, dwarf_free, dwarf_addr_to_line, ...` (no `dwarf_load`) and
+  `src/lib/nogc_async_mut/debug/remote/__init__.spl:8` exports `dwarf_free`
+  only. The remaining `dwarf_load` references are the SFFI boundary
+  declarations themselves (`src/lib/nogc_sync_mut/sffi/debug.spl:295`,
+  imported by `src/lib/nogc_async_mut/sffi/debug.spl:20` and
+  `src/lib/nogc_sync_mut/ffi/debug.spl:10`), which are the legitimate FFI
+  edge, not unmanaged escapes.
+- Checker evidence: `SIMPLE_LIB=src bin/simple.exe lint
+  src/lib/nogc_sync_mut/debug/remote/dwarf.spl` → 0 errors, 8 warnings,
+  none from `unwrapped_foreign_resource` (COUNT=0, was COUNT=1).
+
+With the app-side fix (2026-08-08/2026-08-17) and the mirror retirement both
+confirmed, this entry is fully RESOLVED; nothing remains open.

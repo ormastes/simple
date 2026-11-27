@@ -1,0 +1,215 @@
+# Focused regression spec covering Simple GUI WM and SimpleOS WM rendering + event fixes.
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use common.io.window_event.{
+    WINDOW_ACTION_PRESS,
+    WINDOW_ACTION_RELEASE,
+    WINDOW_EVENT_POINTER_BUTTON,
+    WINDOW_EVENT_POINTER_MOVE,
+}
+use common.ui.builder.{build_tree, column, text_field, with_height}
+use common.ui.host_input_event.{
+    HostInputEvent,
+    HOST_BTN_LEFT,
+    HOST_BTN_NONE,
+    host_key_down,
+    host_pointer_down,
+    host_pointer_move,
+    host_pointer_up,
+    host_resize,
+}
+use common.ui.key_code.{CANON_A}
+use common.ui.layout.{compute_pixel_layout}
+use common.ui.widget_hit.{widget_dispatch_hover}
+use common.window_protocol.geometry.{Modifiers, Size, WmEventType}
+use nogc_sync_mut.ui.session.{UISession}
+use os.compositor.compositor.{Compositor}
+use os.compositor.display_backend.{CompositorBackend}
+use os.compositor.host_compositor_entry.{
+    HostCompositor,
+    HeadlessHostCompositorBackend,
+    host_compositor_left_button,
+    host_compositor_pointer_move,
+}
+use os.compositor.host_gui_event_router.{HostGuiEventRouter}
+use os.compositor.ps2_wm_key_decode.{ps2_wm_scancode_from_canon}
+use os.compositor.wm_action_applier.{
+    WmLifecycleWindowState,
+    WmPointerInteractionState,
+    wm_lifecycle_pointer_move,
+}
+use os.drivers.input.input_event.{InputEventQueue}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
+
+fn _new_test_compositor(w: i32, h: i32) -> Compositor:
+    val backend: CompositorBackend = HeadlessHostCompositorBackend.new(w, h)
+    Compositor.with_backends(backend, None, w, h)
+
+fn _host_pointer_wheel(x: i32, y: i32, wheel: i32) -> HostInputEvent:
+    HostInputEvent.Pointer(x, y, HOST_BTN_NONE, false, wheel)
+
+fn _wm_event_type_text_roundtrips() -> bool:
+    WmEventType.from_u32(WmEventType.Text.to_u32()) == WmEventType.Text
+
+describe "Simple GUI and OS WM event handling fixes":
+    it "never arms resize grip on occluded background window":
+        step("Hover over overlapped south-east grip where top window covers bottom window")
+        val bottom = WmLifecycleWindowState(
+            id: 1, owner_port: 1, title: "Bottom",
+            x: 100, y: 100, w: 200, h: 160,
+            content: "", process_id: 1, app_id: "/bottom",
+            minimized: false, focused: false
+        )
+        val top = WmLifecycleWindowState(
+            id: 2, owner_port: 2, title: "Top",
+            x: 150, y: 140, w: 240, h: 200,
+            content: "", process_id: 2, app_id: "/top",
+            minimized: false, focused: true
+        )
+        val probe = WmPointerInteractionState(
+            dragging: false, drag_window_id: 0, drag_offset_x: 0, drag_offset_y: 0,
+            resizing: false, resize_window_id: 0, resize_start_x: 0, resize_start_y: 0,
+            resize_start_w: 0, resize_start_h: 0
+        )
+        val moved = wm_lifecycle_pointer_move([bottom, top], 8, 800, 600, probe, 298, 258)
+        expect(moved.interaction.resize_window_id).to_equal(0)
+
+    it "handles left Aqua traffic light release-inside semantics for close minimize maximize":
+        step("Press inside close button, drag off before release: cancel close")
+        var comp = HostCompositor.new_headless(Size.wh(640, 480))
+        comp.apply_bridge_request(
+            1, 10, COMP_CREATE_WINDOW.to_i64(), 0,
+            "One", 100, 80, 240, 180, "", 1, "/sys/apps/one"
+        )
+        comp = host_compositor_pointer_move(comp, 118, 92)
+        comp = host_compositor_left_button(comp, true)
+        comp = host_compositor_pointer_move(comp, 220, 140)
+        comp = host_compositor_left_button(comp, false)
+        expect(comp.windows.len()).to_equal(1)
+
+        step("Press and release inside Aqua close traffic light closes window")
+        comp = host_compositor_pointer_move(comp, 118, 92)
+        comp = host_compositor_left_button(comp, true)
+        comp = host_compositor_left_button(comp, false)
+        expect(comp.windows.len()).to_equal(0)
+
+    it "minimizes and maximizes on left Aqua traffic lights":
+        step("Create window and click minimize then restore/maximize")
+        var comp = HostCompositor.new_headless(Size.wh(640, 480))
+        comp.apply_bridge_request(
+            1, 10, COMP_CREATE_WINDOW.to_i64(), 0,
+            "One", 100, 80, 240, 180, "", 1, "/sys/apps/one"
+        )
+        # Maximize button x = 100 + 56 = 156, y = 80 + 14 = 94
+        comp = host_compositor_pointer_move(comp, 156, 94)
+        comp = host_compositor_left_button(comp, true)
+        comp = host_compositor_left_button(comp, false)
+        expect(comp.windows[0].maximized).to_equal(true)
+
+        # Dragging maximized titlebar detaches into drag mode
+        val max_y = comp.windows[0].y
+        comp = host_compositor_pointer_move(comp, 300, max_y + 12)
+        comp = host_compositor_left_button(comp, true)
+        expect(comp.dragging).to_equal(true)
+        comp = host_compositor_left_button(comp, false)
+        expect(comp.dragging).to_equal(false)
+
+        # Minimize button x = x + 36, y = y + 14
+        val wx = comp.windows[0].x
+        val wy = comp.windows[0].y
+        comp = host_compositor_pointer_move(comp, wx + 36, wy + 14)
+        comp = host_compositor_left_button(comp, true)
+        comp = host_compositor_left_button(comp, false)
+        expect(comp.windows[0].minimized).to_equal(true)
+
+    it "subtracts browser toolbar height during captured pointer drag in HostGuiEventRouter":
+        step("Route press then move for browser window")
+        val tree = build_tree(column("root", [
+            with_height(text_field("url", "", "URL"), 24)
+        ]))
+        var session = UISession.new(tree)
+        var comp = HostCompositor.new_headless(Size.wh(400, 300))
+        comp.apply_bridge_request(
+            1, 10, COMP_CREATE_WINDOW.to_i64(), 0,
+            "Browser", 10, 20, 300, 220, "", 2, "browser"
+        )
+        var router = HostGuiEventRouter.new(1)
+        # Press inside browser content (y >= 20 + 32 + 44 = 96)
+        expect(router.route_scalar(
+            WINDOW_EVENT_POINTER_BUTTON,
+            0, WINDOW_ACTION_PRESS, 0,
+            40000, 100000, 0, 0,
+            comp, session
+        )).to_equal(true)
+        expect(router.route_scalar(
+            WINDOW_EVENT_POINTER_MOVE,
+            0, 0, 0,
+            60000, 120000, 0, 0,
+            comp, session
+        )).to_equal(true)
+        # Desktop 120 - win_y(20) - titlebar/pad(32) - toolbar(44) = 24
+        expect(router.last_local_y).to_equal(24)
+        expect(router.route_scalar(
+            WINDOW_EVENT_POINTER_BUTTON,
+            0, WINDOW_ACTION_RELEASE, 0,
+            60000, 120000, 0, 0,
+            comp, session
+        )).to_equal(true)
+
+    it "keeps queued pointer and resize events when dropping stale key events on focus":
+        step("Push key, pointer, resize and verify drop_key_events preserves non-key FIFO order")
+        var q = InputEventQueue.create()
+        q.push(host_key_down(CANON_A, "a", 0))
+        q.push(host_pointer_up(50, 60, HOST_BTN_LEFT))
+        q.push(host_key_down(CANON_A, "b", 0))
+        q.push(host_resize(800, 600))
+        q.drop_key_events()
+        expect(q.len()).to_equal(2)
+        val first = q.pop()
+        expect(first.is_some()).to_equal(true)
+        val second = q.pop()
+        expect(second.is_some()).to_equal(true)
+
+    it "supports HOST_BTN_NONE drag motion and GUI wheel scroll in SimpleOS Compositor":
+        step("Drive Compositor drag motion with HOST_BTN_NONE and wheel event")
+        var comp = _new_test_compositor(320, 240)
+        val tree = build_tree(column("scroll-root", [
+            with_height(text_field("tf", "hello", "Prompt"), 24)
+        ]))
+        val wid = comp.create_window_with_tree("Editor", 20, 20, 180, 140, tree)
+        comp.apply_polled_input_backend_event(host_pointer_down(110, 32, HOST_BTN_LEFT))
+        expect(comp.dragging).to_equal(true)
+        comp.apply_polled_input_backend_event(host_pointer_move(150, 72))
+        expect(comp.surfaces[0].x).to_equal(60)
+        expect(comp.surfaces[0].y).to_equal(60)
+        comp.apply_polled_input_backend_event(host_pointer_up(150, 72, HOST_BTN_LEFT))
+        expect(comp.dragging).to_equal(false)
+
+        # Chrome close button press does not arm titlebar drag
+        val win_x = comp.surfaces[0].x
+        val win_y = comp.surfaces[0].y
+        comp.apply_polled_input_backend_event(host_pointer_down(win_x + 16, win_y + 12, HOST_BTN_LEFT))
+        expect(comp.dragging).to_equal(false)
+
+        # Wheel scroll onto GUI session returns cleanly without crashing
+        comp.apply_polled_input_backend_event(_host_pointer_wheel(win_x + 50, win_y + 60, 2))
+        expect(wid.value > 0u64).to_equal(true)
+
+        # PS/2 scancode reverse lookup & wire enums round-trip cleanly
+        expect(ps2_wm_scancode_from_canon(CANON_A, "a")).to_equal(0x1E)
+        expect(_wm_event_type_text_roundtrips()).to_equal(true)
+        val mods = Modifiers.from_bits(5u32)
+        expect(mods.shift).to_equal(true)
+        expect(mods.alt).to_equal(true)
+        expect(mods.ctrl).to_equal(false)
+
+    it "dispatches hover over shared UI tree without redundant layout recomputation":
+        val tree = build_tree(column("hover-root", [
+            with_height(text_field("f1", "abc", "Name"), 24)
+        ]))
+        val state = UISession.new(tree).current_state()
+        val layout = compute_pixel_layout(state.tree.root_node(), 0, 0, 200, 100)
+        val hit_id = widget_dispatch_hover(state.tree.root_node(), 200, 100, 10, 10, layout)
+        expect(hit_id).to_equal("f1")
+        expect(state.tree.root_node().children().len()).to_equal(1)

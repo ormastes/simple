@@ -1,0 +1,145 @@
+# Per-bug shards of the bug database — doc/05_design/infra/tracking/bug_db_shards.md
+#
+# Red->green contract:
+#   * the loader returns the identical bug set with an (empty) shard dir and without;
+#   * a status change in shard mode writes ONLY that bug's shard and leaves the
+#     legacy file byte-identical (two parallel branches therefore touch disjoint
+#     files and merge with no conflict);
+#   * a shard whose rows carry another bug's id (a duplicate across shards) is
+#     rejected by the loader with the reason.
+
+use std.spec.*
+use std.env.{env_get}
+use std.io.file_ops.{secure_temp_dir}
+use std.io_runtime.{file_exists, read_file_text_result, dir_create_all}
+use std.nogc_sync_mut.database.core.{SdnDatabase, SdnTable, SdnRow}
+use std.nogc_sync_mut.database.bug.{Bug, BugSeverity, BugStatus, BugDatabase,
+    create_bug_database, load_bug_database, load_bug_database_checked, bug_shard_dir}
+
+fn shards_workspace() -> text:
+    var parent = env_get("TMPDIR")
+    if parent == "": parent = env_get("TEMP")
+    if parent == "": parent = env_get("TMP")
+    if parent == "": parent = "/tmp"
+    secure_temp_dir(parent, "bug-db-shards").unwrap()
+
+fn shard_bug(id: text, status: BugStatus) -> Bug:
+    Bug(id: id, severity: BugSeverity.P2, status: status,
+        title: "shard fixture {id}", description: ["description of {id}"],
+        file: "src/lib/nogc_sync_mut/database/bug.spl", line: 1,
+        reproducible_by: "test/01_unit/lib/database/bug_db_shards_spec.spl",
+        fix_strategy: ["none"], investigation_log: ["opened"],
+        created_at: "2026-11-09", updated_at: "2026-11-09", valid: true)
+
+fn read_text(path: text) -> text:
+    match read_file_text_result(path):
+        case Ok(content): content
+        case Err(_reason): ""
+
+# Legacy single-file registry with bugs a and b (no shard dir yet).
+fn seed_legacy(root: text) -> text:
+    val path = root + "/bug_db.sdn"
+    var database = create_bug_database(path)
+    expect(database.add_bug(shard_bug("shard_a", BugStatus.Open))).to_equal(true)
+    expect(database.add_bug(shard_bug("shard_b", BugStatus.Open))).to_equal(true)
+    expect(database.save()).to_equal(true)
+    path
+
+fn bug_ids(database: BugDatabase) -> [text]:
+    var ids: [text] = []
+    for bug in database.all_bugs():
+        ids.push(bug.id)
+    ids.sort()
+    ids
+
+fn status_of(database: BugDatabase, id: text) -> text:
+    match database.get_bug(id):
+        case Some(bug): "{bug.status}"
+        case None: "<missing>"
+
+describe "Bug database per-bug shards":
+    it "loads the identical bug set with an empty shard dir and without one":
+        val root = shards_workspace()
+        val path = seed_legacy(root)
+        val plain = load_bug_database(path).unwrap()
+        val before = bug_ids(plain)
+        expect(before.len()).to_equal(2)
+        expect(dir_create_all(bug_shard_dir(path))).to_equal(true)
+        val sharded = load_bug_database(path).unwrap()
+        expect(bug_ids(sharded)).to_equal(before)
+        expect(status_of(sharded, "shard_a")).to_equal(status_of(plain, "shard_a"))
+        expect(sharded.shard_dir).to_equal(bug_shard_dir(path))
+        expect(sharded.pending_shard_ids().len()).to_equal(0)
+
+    it "writes only the changed bug's shard and leaves the legacy file frozen":
+        val root = shards_workspace()
+        val path = seed_legacy(root)
+        val legacy_before = read_text(path)
+        expect(dir_create_all(bug_shard_dir(path))).to_equal(true)
+        var database = load_bug_database(path).unwrap()
+        var fixed = shard_bug("shard_b", BugStatus.Fixed)
+        fixed.updated_at = "2026-11-10"
+        expect(database.update_bug("shard_b", fixed)).to_equal(true)
+        expect(database.pending_shard_ids()).to_equal(["shard_b"])
+        expect(database.save()).to_equal(true)
+        expect(file_exists(bug_shard_dir(path) + "/shard_b.sdn")).to_equal(true)
+        expect(file_exists(bug_shard_dir(path) + "/shard_a.sdn")).to_equal(false)
+        expect(read_text(path)).to_equal(legacy_before)
+        val reloaded = load_bug_database(path).unwrap()
+        expect(bug_ids(reloaded)).to_equal(["shard_a", "shard_b"])
+        expect(status_of(reloaded, "shard_b")).to_equal("{BugStatus.Fixed}")
+        expect(status_of(reloaded, "shard_a")).to_equal("{BugStatus.Open}")
+        expect(reloaded.get_bug("shard_b").unwrap().updated_at).to_equal("2026-11-10")
+
+    it "lets two branches edit different bugs through disjoint files":
+        val root = shards_workspace()
+        val path = seed_legacy(root)
+        expect(dir_create_all(bug_shard_dir(path))).to_equal(true)
+        # branch 1 fixes shard_b
+        var branch_one = load_bug_database(path).unwrap()
+        expect(branch_one.update_bug("shard_b", shard_bug("shard_b", BugStatus.Fixed))).to_equal(true)
+        expect(branch_one.save()).to_equal(true)
+        val shard_b_after_one = read_text(bug_shard_dir(path) + "/shard_b.sdn")
+        # branch 2 (loaded independently) closes shard_a and adds shard_c
+        var branch_two = load_bug_database(path).unwrap()
+        expect(branch_two.update_bug("shard_a", shard_bug("shard_a", BugStatus.Closed))).to_equal(true)
+        expect(branch_two.add_bug(shard_bug("shard_c", BugStatus.Open))).to_equal(true)
+        expect(branch_two.save()).to_equal(true)
+        expect(read_text(bug_shard_dir(path) + "/shard_b.sdn")).to_equal(shard_b_after_one)
+        expect(file_exists(bug_shard_dir(path) + "/shard_a.sdn")).to_equal(true)
+        expect(file_exists(bug_shard_dir(path) + "/shard_c.sdn")).to_equal(true)
+        val merged = load_bug_database(path).unwrap()
+        expect(bug_ids(merged)).to_equal(["shard_a", "shard_b", "shard_c"])
+        expect(status_of(merged, "shard_a")).to_equal("{BugStatus.Closed}")
+        expect(status_of(merged, "shard_b")).to_equal("{BugStatus.Fixed}")
+
+    it "rejects a shard whose rows carry another bug's id":
+        val root = shards_workspace()
+        val path = seed_legacy(root)
+        val shard_dir = bug_shard_dir(path)
+        expect(dir_create_all(shard_dir)).to_equal(true)
+        # a sealed shard named shard_dup whose row is shard_b: duplicate across shards
+        var rogue = SdnDatabase.new(shard_dir + "/shard_dup.sdn")
+        var table = SdnTable.new("bugs", ["id", "severity", "status", "title", "file", "line", "reproducible_by", "created_at", "updated_at", "valid"])
+        val row = SdnRow.empty()
+        row.set("id", "shard_b")
+        row.set("severity", "P2")
+        row.set("status", "fixed")
+        row.set("title", "rogue")
+        row.set("file", "f")
+        row.set("line", "1")
+        row.set("reproducible_by", "")
+        row.set("created_at", "2026-11-09")
+        row.set("updated_at", "2026-11-09")
+        row.set("valid", "true")
+        table.add_row(row)
+        rogue.set_table("bugs", table)
+        expect(rogue.save()).to_equal(true)
+        val verdict = load_bug_database_checked(path)
+        var reason = ""
+        match verdict:
+            case Ok(_db): reason = "<accepted>"
+            case Err(message): reason = message
+        expect(reason.contains("shard_dup.sdn")).to_equal(true)
+        expect(reason.contains("does not match the shard id")).to_equal(true)
+        expect(load_bug_database(path).?).to_equal(false)

@@ -1,0 +1,57 @@
+# @cover src/os/apps/sshd/ssh_packet.spl 20%
+# Owner decision 2026-11-23: invalid UTF-8 in SSH textual fields (usernames,
+# method names, version string, SFTP paths) is a protocol error — never lossy,
+# never raw bytes. Valid UTF-8 is accepted unchanged.
+# Bug: doc/08_tracking/bug/bytes_to_text_rejects_invalid_utf8_2026-11-23.md
+use std.spipe.*
+use os.apps.sshd.ssh_packet.{ssh_get_text, ssh_put_string}
+use os.apps.sshd.ssh_transport.{ssh_parse_version_string}
+use os.apps.sshd.ssh_sftp_namespace_v3.{sftp_namespace_decode_v3}
+
+fn _sftp_frame(kind: u8, id: u8, path: [u8]) -> [u8]:
+    # uint32 len | byte kind | uint32 id | string path
+    val body_len: u8 = (9 + path.len()).to_u8()
+    var out: [u8] = [0u8, 0u8, 0u8, body_len, kind, 0u8, 0u8, 0u8, id]
+    out = ssh_put_string(out, path)
+    out
+
+describe "SSH textual fields reject invalid UTF-8":
+    it "rejects a username containing byte 0xFF":
+        val wire = ssh_put_string([], [114u8, 0xFFu8, 111u8, 116u8])
+        val got = ssh_get_text(wire, 0u64)
+        expect(got.is_err()).to_equal(true)
+        match got:
+            case Err(msg): expect(msg).to_contain("invalid UTF-8")
+            case Ok(_): expect(false).to_equal(true)
+
+    it "accepts a valid UTF-8 username":
+        val wire = ssh_put_string([], [114u8, 111u8, 111u8, 116u8])
+        val got = ssh_get_text(wire, 0u64)
+        expect(got.is_ok()).to_equal(true)
+        match got:
+            case Ok(r): expect(r.value).to_equal("root")
+            case Err(_): expect(false).to_equal(true)
+
+    it "rejects an SSH version string containing byte 0xFF":
+        # "SSH-2.0-a" 0xFF CR LF
+        val data: [u8] = [83u8, 83u8, 72u8, 45u8, 50u8, 46u8, 48u8, 45u8, 97u8, 0xFFu8, 13u8, 10u8]
+        expect(ssh_parse_version_string(data).is_err()).to_equal(true)
+
+    it "accepts a valid SSH version string":
+        val data: [u8] = [83u8, 83u8, 72u8, 45u8, 50u8, 46u8, 48u8, 45u8, 97u8, 13u8, 10u8]
+        val got = ssh_parse_version_string(data)
+        expect(got.is_ok()).to_equal(true)
+
+    it "rejects an SFTP REMOVE path containing byte 0xFF":
+        val got = sftp_namespace_decode_v3(_sftp_frame(13u8, 9u8, [47u8, 0xFFu8]))
+        expect(got.is_err()).to_equal(true)
+        match got:
+            case Err(msg): expect(msg).to_contain("UTF-8")
+            case Ok(_): expect(false).to_equal(true)
+
+    it "accepts a valid UTF-8 SFTP REMOVE path":
+        val got = sftp_namespace_decode_v3(_sftp_frame(13u8, 9u8, [47u8, 97u8]))
+        expect(got.is_ok()).to_equal(true)
+        match got:
+            case Ok(req): expect(req.path).to_equal("/a")
+            case Err(_): expect(false).to_equal(true)

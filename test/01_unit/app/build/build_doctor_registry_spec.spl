@@ -1,0 +1,85 @@
+# `simple build doctor` is driven by the unit registry (units_cli), not one dir = one unit.
+# @cover src/app/build/doctor_cli.spl
+# @cover src/app/build/units_cli.spl
+use std.spec
+use app.io.mod.{dir_create_all, dir_remove_all, file_write}
+use app.build.units_cli.{build_units_registry}
+use app.build.doctor_cli.{doctor_ownership_scan, run_build_doctor}
+
+val ROOT = "build/doctor_registry_fixture"
+
+fn manifest(name: text, deps: [text], extra: text) -> text:
+    var body = "project:\n  name: {name}\n  version: 1.0.0\n  type: library\n"
+    if deps.len() > 0:
+        body = body + "  dependencies:\n"
+        for d in deps:
+            body = body + "    - project: {d}\n"
+    body + extra
+
+fn mk(rel: text, files: [text], man: text):
+    dir_create_all("{ROOT}/{rel}")
+    file_write("{ROOT}/{rel}/simple.sdn", man)
+    for f in files:
+        file_write("{ROOT}/{rel}/{f}", "fn x() -> i64:\n    1\n")
+
+describe "build doctor driven by the unit registry":
+    it "exposes the dependency closure through units_cli (deps first)":
+        dir_remove_all(ROOT)
+        mk("a", ["a1.spl"], manifest("ua", ["../b"], ""))
+        mk("b", ["b1.spl"], manifest("ub", [], ""))
+        val us = build_units_registry("{ROOT}/a").unwrap()
+        expect(us.len()).to_equal(2)
+        expect(us[0].name).to_equal("ub")
+        expect(us[1].name).to_equal("ua")
+        dir_remove_all(ROOT)
+
+    it "scans every unit of the closure, each under its own dir prefix":
+        dir_remove_all(ROOT)
+        mk("a", ["a1.spl"], manifest("ua", ["../b"], ""))
+        mk("b", ["b1.spl"], manifest("ub", [], ""))
+        val scan = doctor_ownership_scan(["{ROOT}/a"]).unwrap()
+        expect(scan.units.len()).to_equal(2)
+        expect(scan.scanned.len()).to_equal(2)
+        expect(scan.scanned.contains("{ROOT}/b/b1.spl")).to_equal(true)
+        expect(run_build_doctor(["--source-ownership", "--robust", "{ROOT}/a"])).to_equal(0)
+        dir_remove_all(ROOT)
+
+    it "flags a dependency unit's file its own manifest does not own":
+        dir_remove_all(ROOT)
+        mk("a", ["a1.spl"], manifest("ua", ["../b"], ""))
+        mk("b", ["b1.spl", "b2.spl"], manifest("ub", [], "  sources:\n    include: [\"b1.spl\"]\n"))
+        expect(run_build_doctor(["--source-ownership", "--robust", "{ROOT}/a"])).to_equal(1)
+        dir_remove_all(ROOT)
+
+    it "does not double-count a unit reached from two roots":
+        dir_remove_all(ROOT)
+        mk("a", ["a1.spl"], manifest("ua", ["../c"], ""))
+        mk("b", ["b1.spl"], manifest("ub", ["../c"], ""))
+        mk("c", ["c1.spl"], manifest("uc", [], ""))
+        val scan = doctor_ownership_scan(["{ROOT}/a", "{ROOT}/b"]).unwrap()
+        expect(scan.units.len()).to_equal(3)
+        expect(scan.scanned.len()).to_equal(3)
+        dir_remove_all(ROOT)
+
+    it "keeps the single-dir fallback for a dir with no manifest":
+        dir_remove_all(ROOT)
+        dir_create_all("{ROOT}/bare")
+        file_write("{ROOT}/bare/x.spl", "fn x() -> i64:\n    1\n")
+        val scan = doctor_ownership_scan(["{ROOT}/bare"]).unwrap()
+        expect(scan.units.len()).to_equal(1)
+        expect(scan.scanned.len()).to_equal(1)
+        dir_remove_all(ROOT)
+
+    it "checks roles of every unit in the closure, not just the root":
+        dir_remove_all(ROOT)
+        mk("a", ["a1.spl"], manifest("ua", ["../b"], ""))
+        mk("b", ["b1.spl"], manifest("ub", [], "  roles:\n    declared: [sffi_boundary]\n"))
+        expect(run_build_doctor(["--roles", "--robust", "--today", "2026-11-22", "{ROOT}/a"])).to_equal(1)
+        dir_remove_all(ROOT)
+
+    it "passes roles when the dependency unit grants its role":
+        dir_remove_all(ROOT)
+        mk("a", ["a1.spl"], manifest("ua", ["../b"], ""))
+        mk("b", ["b1.spl"], manifest("ub", [], "  roles:\n    declared: [sffi_boundary]\n    grants:\n      - role: sffi_boundary\n"))
+        expect(run_build_doctor(["--roles", "--robust", "--today", "2026-11-22", "{ROOT}/a"])).to_equal(0)
+        dir_remove_all(ROOT)

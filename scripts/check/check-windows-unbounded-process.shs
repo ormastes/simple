@@ -1,0 +1,26 @@
+#!/bin/sh
+# Compile actual production owners; no stubs or extracted function bodies.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cc=${CC:-clang}
+case ${SIMPLE_PROCESS_PROBE_CASE-} in
+    ''|exit7|exit300|args|large|missing|inheritance) ;;
+    *) echo 'ERROR: unknown SIMPLE_PROCESS_PROBE_CASE; no checks executed' >&2; exit 2 ;;
+esac
+case $("$cc" -dumpmachine) in
+    *mingw*|*windows*) ;;
+    *) echo 'ERROR: Windows GNU compiler required; no checks executed' >&2; exit 2 ;;
+esac
+work=$(mktemp -d "${TMPDIR:-/tmp}/simple-unbounded-process.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+# Select wmain startup without changing the production owners' SDK macros.
+"$cc" -Os -ffunction-sections -fdata-sections -std=gnu11 -municode -UUNICODE -U_UNICODE \
+    -DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_MEMORY_OWNER=1 \
+    -I"$root/src/runtime" -I"$root/src/runtime/platform" \
+    "$root/test/runtime/windows_unbounded_process_test.c" \
+    "$root/src/runtime/runtime_native.c" "$root/src/runtime/runtime_legacy_core.c" \
+    "$root/src/runtime/runtime_process.c" "$root/src/runtime/runtime_memory.c" \
+    "$root/src/runtime/runtime_simd_dispatch.c" "$root/src/runtime/runtime_simd_utf8.c" \
+    "$root/src/runtime/runtime_process_owned.c" "$root/src/runtime/runtime_memtrack.c" \
+    -Wl,--gc-sections,--exclude-all-symbols -o "$work/probe.exe"
+"$work/probe.exe"

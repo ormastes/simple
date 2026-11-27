@@ -22,6 +22,7 @@ fn row_symbols(include_provider: bool) -> SymbolTable:
             kind: SymbolKind.Class, type_: nil, scope: ScopeId(id: 0), span: Span.empty(),
             visibility: Visibility.Public, is_public: true, is_mutable: false,
             defining_module: Some("src/provider.spl")))
+        symbols.bind_qualified_type("provider", "Row", SymbolId(id: 78))
     symbols
 
 fn array_row_owner(value: HirType?) -> i64:
@@ -56,23 +57,25 @@ describe "record array ownership across provider fields and loop bindings":
         expect(lowering.errors[0].message).to_contain("consumer_symbol=Row")
         expect(lowering.errors[0].message).to_contain("consumer_symbol_owner=src/decoy.spl")
 
-    it "rejects a named field element with no provider ownership key":
+    it "passes a named field element with no provider ownership key through un-rebound":
+        # rebind_record_element_owner: absent provider evidence keeps the
+        # consumer's own declared identity instead of failing the build.
         var lowering = MirLowering.new(row_symbols(true))
         val declared = row_type(HirTypeKind.Array(row_type(HirTypeKind.Named(SymbolId(id: 77), [])), nil))
         val rebound = lowering.declared_field_type_in_current_table("UnknownTable", 0, declared)
-        expect(array_row_owner(rebound)).to_equal(-1)
-        expect(lowering.errors.len()).to_be_greater_than(0)
-        expect(lowering.errors[0].fatal).to_equal(true)
+        expect(array_row_owner(rebound)).to_equal(77)
+        expect(lowering.errors.len()).to_equal(0)
 
-    it "rejects generic element arguments whose provider IDs cannot be relocated":
+    it "passes generic element instantiations through un-rebound":
+        # Name-only provider evidence cannot capture a generic layout; the
+        # consumer's Named(symbol, args) stays authoritative.
         var lowering = MirLowering.new(row_symbols(true))
         lowering.struct_field_type_ownership_key["Table"] = ["provider.Row"]
         val foreign_arg = row_type(HirTypeKind.Named(SymbolId(id: 77), []))
         val generic = row_type(HirTypeKind.Named(SymbolId(id: 78), [foreign_arg]))
         val rebound = lowering.declared_field_type_in_current_table("Table", 0, row_type(HirTypeKind.Slice(generic)))
-        expect(array_row_owner(rebound)).to_equal(-1)
-        expect(lowering.errors.len()).to_be_greater_than(0)
-        expect(lowering.errors[0].fatal).to_equal(true)
+        expect(array_row_owner(rebound)).to_equal(78)
+        expect(lowering.errors.len()).to_equal(0)
 
     it "retains the exact element declaration on an indexed for binding":
         var lowering = MirLowering.new(row_symbols(true))
@@ -87,7 +90,7 @@ describe "record array ownership across provider fields and loop bindings":
         lowering.remember_local_hir_type(collection.id, row_type(HirTypeKind.Array(element, nil)), 0, 0)
         val empty = HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: Span.empty())
         val body = HirBlock(stmts: [], has: false, value: empty, span: Span.empty())
-        lowering.lower_for_array_indexed(SymbolId(id: 21), collection, MirType.i64(), body, Span.empty())
+        lowering.lower_for_array_indexed(SymbolId(id: 21), collection, MirType.i64(), body, Span.empty(), Some(element), nil)
         val bound = lowering.symbol_bound_local(21)
         expect(bound.id).to_be_greater_than(-1)
         val binding_type = lowering.find_local_hir_type(bound.id)

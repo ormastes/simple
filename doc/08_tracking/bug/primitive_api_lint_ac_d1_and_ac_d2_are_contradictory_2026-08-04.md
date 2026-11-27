@@ -1,5 +1,5 @@
 # primitive_api lint: AC-D1 and AC-D2 assert opposite verdicts on the same signature shape
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-25 — body-aware extern pass-through discriminator landed (see dated verification at bottom)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -120,3 +120,47 @@ wins.
 
 Already marked ARCHITECTURAL-OPEN (a genuine spec/rule-design contradiction needing an owner to choose an AST/body-aware discriminator, not a code bug). No new evidence this pass. Leaving OPEN.
 
+
+## Triage 2026-11-04 (c28-w4)
+
+Triage 2026-11-04 (no change, lint rules owned by other lanes): still a spec/rule design contradiction (lint_primitive_api.spl:160 _all_same_primitive is a single-line text scan). Proposed resolution for owner: AC-D2 discriminator = body is a pass-through to an extern fn, implemented in the AST-driven primitive_api.spl check_call_site, leaving the EasyFix text rule to AC-D1 only. QUESTION: accept that split, or drop AC-D2?
+
+## Status 2026-11-10 — FIXED (source + regressions, seed-smoke only)
+
+Resolved on branch work/p2fix-compiler-batch-20261110 (commits 5c064c3b64ea
+fix, b901f6baa044 spec). The D-1 `_all_same_primitive` exemption is now
+refined by a body-aware extern pass-through discriminator in
+`check_primitive_api_with_lines` (and `primitive_api_audit_source`): an
+all-same-primitive `pub fn` whose entire body forwards its own params to an
+extern fn (declared `extern fn` in the same source or `rt_`-prefixed) is
+flagged (AC-D2), while math bodies, transformed args, and forwards to
+non-extern locals keep the exemption (AC-D1). Positive + negative wrapper
+regressions added to test/system/code_quality/primitive_api_lint_spec.spl.
+
+Seed-smoke (Rust seed bin/simple.exe, --mode=interpreter, mirror spec carrying
+identical examples): 13/13 green post-fix; pre-fix stash check: 10 passed /
+3 failed (all three AC-D2 wrapper examples red). Canonical spec not directly
+runnable under the seed: its module docstring trips a pre-existing seed lexer
+limitation at base (unrelated to this fix). Native/self-hosted qualification
+not claimed.
+
+## Verification 2026-11-25 (work/p3-bao-20261125) — CLOSED
+
+The 2026-11-10 fix is present on current release/1.0.0 source:
+`src/compiler/90.tools/fix/rules/impl_/lint_primitive_api.spl` now applies the
+body-aware discriminator `_extern_passthrough_body` (defined at line 414,
+applied at lines 61 and 187) on top of the `_all_same_primitive` exemption, in
+both `check_primitive_api_with_lines` and the audit path, exactly the split the
+2026-11-04 triage proposed. Executed the canonical spec on this host:
+`SIMPLE_LIB=src bin/simple.exe test test/system/code_quality/primitive_api_lint_spec.spl
+--mode=interpreter` => 13 examples, 0 failures (AC-D1 rows green, AC-D2
+extern-pass-through rows green). The "Open 2026-09-16" header is stale;
+closed.
+
+## Re-verification 2026-11-26 (`work/bf-1-compiler-hir-sem-20261126`)
+
+Re-executed both primitive-API lint system specs on `origin/release/1.0.0`
+(`SIMPLE_LIB=src`, `--mode=interpreter --timeout 60`):
+- `test/system/code_quality/primitive_api_lint_spec.spl`: 13 examples, 0 failures
+- `test/03_system/quality/code_quality/primitive_api_lint_spec.spl`: 9 examples, 0 failures
+Disposition: `ALREADY-FIXED-VERIFIED`.

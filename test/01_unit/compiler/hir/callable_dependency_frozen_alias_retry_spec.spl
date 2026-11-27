@@ -5,6 +5,7 @@
 # It does not reproduce how a genuine bootstrap acquired that negative carrier.
 use std.spec.{describe, it, expect}
 use std.spec.step
+use std.io_runtime.{file_read}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.parser_types.{ParserImport, ImportItem, Variant, VariantKind}
@@ -169,5 +170,62 @@ describe("callable dependency retry from an unresolved owner projection", fn():
         expect(retry_selected_target(lowering, "retry.owner")).to_equal(-2)
         expect(lowering.symbols.lookup_qualified_type_raw("retry.first.__init__", "Payload")).to_equal(-1)
         expect(lowering.symbols.lookup_qualified_type_raw("retry.second.__init__", "Payload")).to_equal(-1)
+    )
+
+    it("fails closed before mutating or freeing earlier surfaces and preserves post-freeze caller aliases", fn():
+        """Validate pre-freeze import projections across all surfaces before retiring carriers, and keep caller-owned surfaces readable."""
+        step("Reject misaligned trailing surface without mutating or retiring earlier surface arrays")
+        val provider = retry_provider("retry.provider.__init__", "Payload")
+        val valid_owner = retry_named_owner("retry.owner", "retry.provider")
+        var misaligned = retry_named_owner("retry.broken", "retry.provider")
+        misaligned.import_item_offsets = [0]
+        val failed = ModuleSurfacesByName.from_parts(
+            [provider, valid_owner, misaligned],
+            {"retry.provider.__init__": 0, "retry.owner": 1, "retry.broken": 2},
+            ["retry.provider.__init__", "retry.owner", "retry.broken"],
+            [0, 1, 2]
+        )
+        expect(failed.is_err()).to_be(true)
+        expect(failed.unwrap_err()).to_contain("pre-freeze import item projections are misaligned: 2")
+        expect(provider.enum_names).to_equal(["Payload"])
+        expect(valid_owner.import_target_indices).to_equal([-1])
+        expect(valid_owner.import_item_offsets).to_equal([0, 1])
+        expect(valid_owner.import_item_names).to_equal(["Payload"])
+
+        step("Preserve caller-owned pre-freeze surface arrays after from_parts including item-alias fallback projection")
+        var alias_owner = ModuleSurface.empty("retry.alias_owner")
+        alias_owner.preferred_registry_name = "retry.alias_owner"
+        alias_owner.imports = [ParserImport(
+            module: "retry.provider.Payload",
+            items: [ImportItem(name: "retry.provider.Payload", has_alias: true, alias: "LocalPayload")],
+            is_lazy: false,
+            span: Span.empty()
+        )]
+        alias_owner.import_target_indices = [-1]
+        alias_owner.import_target_names = [""]
+        alias_owner.import_item_offsets = [0, 1]
+        alias_owner.import_item_names = ["retry.provider.Payload"]
+        alias_owner.import_item_aliases = ["LocalPayload"]
+        alias_owner.import_item_has_alias = [true]
+        val registry = retry_registry(alias_owner, retry_provider("retry.provider.__init__", "Payload"))
+        expect(registry.frozen).to_be(true)
+        expect(registry.surfaces[1].import_target_indices).to_equal([0])
+        expect(registry.surfaces[1].import_item_names).to_equal(["Payload"])
+        val carrier = retry_unresolved_carrier(alias_owner)
+        expect(carrier.import_item_offsets).to_equal([0, 1])
+        expect(carrier.import_item_aliases).to_equal(["LocalPayload"])
+        expect(carrier.import_item_has_alias).to_equal([true])
+        expect(carrier.import_target_indices).to_equal([-1])
+
+        val freeze_src = file_read("src/compiler/20.hir/hir_lowering/module_surface_registry_index.spl")
+        val freeze_start = freeze_src.index_of("pub(package) fn module_surfaces_freeze(")
+        expect(freeze_start).to_be_greater_than(0)
+        val freeze_body = freeze_src.substring(freeze_start, freeze_src.len())
+        val misaligned_check = freeze_body.index_of("pre-freeze import item projections are misaligned")
+        val range_check = freeze_body.index_of("pre-freeze import item range is invalid")
+        val first_republish = freeze_body.index_of("surface.composite_names = []")
+        expect(misaligned_check).to_be_greater_than(0)
+        expect(range_check).to_be_greater_than(misaligned_check)
+        expect(first_republish).to_be_greater_than(range_check)
     )
 )

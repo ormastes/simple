@@ -5,6 +5,9 @@
 #
 # MDSOC: driver dimension, hardware layer
 
+@cfg(x86_64)
+use os.kernel.arch_adapt.x86_port_io.{x86_port_inb, x86_port_outb}
+@cfg(x86)
 use os.kernel.arch_adapt.x86_port_io.{x86_port_inb, x86_port_outb}
 use os.drivers.rtc.rtc_calendar_v1.{RtcRawCalendarV1, rtc_decode_utc_epoch_seconds_v1}
 use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
@@ -42,10 +45,34 @@ fn _rtc_try_enter_v1() -> bool:
 fn _rtc_exit_v1():
     _rtc_cmos_index_gate_v1.store(0, MemoryOrdering.Release)
 
+@cfg(x86_64)
 fn _rtc_read_register_owned_v1(reg: u8) -> u8:
     """Read a CMOS index/data pair while holding the RTC owner gate."""
     x86_port_outb(RTC_INDEX_PORT, reg)
     x86_port_inb(RTC_DATA_PORT)
+
+@cfg(x86)
+fn _rtc_read_register_owned_v1(reg: u8) -> u8:
+    """Read a CMOS index/data pair while holding the RTC owner gate."""
+    x86_port_outb(RTC_INDEX_PORT, reg)
+    x86_port_inb(RTC_DATA_PORT)
+
+# No CMOS RTC on non-x86 targets; rtc_read_utc_epoch_seconds_v1 returns Err first.
+@cfg(riscv64)
+fn _rtc_read_register_owned_v1(reg: u8) -> u8:
+    0u8
+
+@cfg(riscv32)
+fn _rtc_read_register_owned_v1(reg: u8) -> u8:
+    0u8
+
+@cfg(arm64)
+fn _rtc_read_register_owned_v1(reg: u8) -> u8:
+    0u8
+
+@cfg(arm32)
+fn _rtc_read_register_owned_v1(reg: u8) -> u8:
+    0u8
 
 fn _rtc_update_in_progress_owned_v1() -> bool:
     """Check whether an RTC update cycle is in progress.
@@ -96,8 +123,28 @@ pub fn rtc_read_utc_epoch_seconds_v1() -> Result<u64, text>:
     whose RTC uses UTC and exposes that century register (the x86 QEMU profile
     does); other hardware needs its own RTC provider/century address.
     """
+    if not _rtc_cmos_present_v1():
+        return Err("rtc-cmos-unsupported-arch")
     if not _rtc_try_enter_v1():
         return Err("rtc-index-busy")
     val result = _rtc_read_utc_epoch_seconds_owned_v1()
     _rtc_exit_v1()
     result
+
+@cfg(x86_64)
+fn _rtc_cmos_present_v1() -> bool: true
+
+@cfg(x86)
+fn _rtc_cmos_present_v1() -> bool: true
+
+@cfg(riscv64)
+fn _rtc_cmos_present_v1() -> bool: false
+
+@cfg(riscv32)
+fn _rtc_cmos_present_v1() -> bool: false
+
+@cfg(arm64)
+fn _rtc_cmos_present_v1() -> bool: false
+
+@cfg(arm32)
+fn _rtc_cmos_present_v1() -> bool: false

@@ -1,7 +1,11 @@
+#![allow(REQC004)]
 # Scheduler task lifecycle & dispatch — task creation/exit, block/unblock,
 # yield, schedule, timer tick, topology, and green-carrier scheduling methods.
 use os.kernel.scheduler.scheduler.*
-use os.kernel.scheduler.process_execution_observation.{scheduler_execution_observe_exit_v1}
+use os.kernel.scheduler.process_execution_observation.{
+    scheduler_execution_observe_exit_v1,
+    scheduler_execution_observe_reap_v1
+}
 # Preemptive Scheduler — Computation Dimension
 #
 # Priority-based preemptive scheduler with round-robin within same priority.
@@ -26,12 +30,13 @@ use os.kernel.types.task_types.{
     user_process_image_initial_stack_bytes
 }
 use os.kernel.types.capability_types.{CapabilitySet}
-use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.hal.arch_context.{Architecture}
 use os.kernel.loader.executable_source.{resolve_executable_bytes}
 use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.fd_io.{posix_close_task_fds_with_backends}
 use os.kernel.ipc.notif_global.{notification_clear_waiter_global}
 use os.kernel.replay.hooks.{replay_hook_schedule}
+use os.kernel.replay.divergence.{DivergenceKind, report_divergence}
 
 # Forward declaration: implemented by IpcManager wiring in kernel main.
 use os.kernel.scheduler.capability_bridge.{cap_init_task_record}
@@ -89,6 +94,9 @@ use os.kernel.scheduler.scheduler_exec.{
     sched_create_user_task_pid_impl,
     sched_create_user_task_from_bytes_pid_impl,
     sched_create_bootstrap_user_task_pid_impl,
+    sched_adopt_mapped_user_task_and_run_impl,
+    sched_prepare_reap_adopted_user_task_v1,
+    sched_reap_adopted_task_slot_v1,
     sched_clone_task_impl,
     sched_exec_image_impl
 }
@@ -136,6 +144,15 @@ impl Scheduler:
     static fn new_bootstrap() -> Scheduler:
         Scheduler.new_with_topology(scheduler_flat_topology(1u32))
 
+    static fn ensure_bootstrap_v1(sched: Scheduler) -> Scheduler:
+        var unready = false
+        unsafe:
+            if sched == nil or sched.tasks == nil:
+                unready = true
+        if unready or sched.tasks.len() == 0:
+            return Scheduler.new_bootstrap()
+        sched
+
     static fn new_with_topology(detected_topology: SchedulerTopology) -> Scheduler:
         sched_new_with_topology_impl(detected_topology)
 
@@ -171,6 +188,57 @@ impl Scheduler:
         if pid != 0:
             self._enqueue_ready_at_slot(TaskId(id: pid), 0)
         pid
+
+    @allow(primitive_api) # raw ELF entry/stack addresses for pre-mapped FS-exec ring-3 adoption
+    me adopt_mapped_user_task_and_run_v1(
+        name: text,
+        entry: u64,
+        user_stack_top: u64,
+        space: AddressSpace,
+        user_ctx: TaskContext,
+        caps: CapabilitySet
+    ) -> TaskId:
+        var tasks_nil = false
+        unsafe:
+            tasks_nil = (self.tasks == nil)
+        if tasks_nil or self.tasks.len() < MAX_TASKS:
+            return TaskId(id: 0u64)
+        val (pid, new_tasks, slot) = sched_adopt_mapped_user_task_and_run_impl(
+            self.tasks, self.current, name, entry, user_stack_top, space, user_ctx, caps)
+        if pid == 0u64 or slot < 0:
+            return TaskId(id: 0u64)
+        val id = TaskId(id: pid)
+        self.tasks = new_tasks
+        self.current = id
+        self.current_slot = slot
+        var cpus_ready = false
+        unsafe:
+            if self.current_by_cpu != nil and self.current_by_cpu.len() > 0:
+                cpus_ready = true
+        if cpus_ready:
+            self.current_by_cpu[0] = id
+        id
+
+    @allow(primitive_api) # matches exit_task_by_id i32 status code contract
+    me finish_adopted_user_task_v1(id: TaskId, prev_current: TaskId, exit_code: i32):
+        self.current = prev_current
+        val prev_slot = self._find_slot(prev_current)
+        self.current_slot = if prev_slot >= 0: prev_slot else: 0
+        var cpus_ready = false
+        unsafe:
+            if self.current_by_cpu != nil and self.current_by_cpu.len() > 0:
+                cpus_ready = true
+        if cpus_ready:
+            self.current_by_cpu[0] = prev_current
+        if id.id != 0u64:
+            self.exit_task_by_id(id, exit_code)
+            # Detach caller-owned space.phys_root before reaping so wait_for_collect
+            # frees the TCB slot without double-freeing space in destroy_user_address_space.
+            self.tasks = sched_prepare_reap_adopted_user_task_v1(self.tasks, id)
+            val collected = self.wait_for_collect(prev_current, id, false)
+            if collected.error != 0:
+                self.tasks = sched_reap_adopted_task_slot_v1(self.tasks, id)
+                _ = scheduler_execution_observe_reap_v1(id.id)
 
     me _enqueue_ready_at_slot(id: TaskId, slot: i32):
         if slot < 0:
@@ -213,7 +281,7 @@ impl Scheduler:
         if tcb == nil:
             return false
         var task = tcb
-        if not task.is_user or task.user_context == nil:
+        if not task.is_user or task.user_context.is_none():
             return false
         task.address_space = cr3_phys
         var ctx = task.context
@@ -324,9 +392,34 @@ impl Scheduler:
         val cpu = self._normalize_cpu(cpu_id)
         val next_id = self._pick_next_on_cpu(cpu)
         if next_id != nil:
-            val task_id = next_id
-            self._remove_ready(task_id)
-            val slot = self._find_slot(task_id)
+            var task_id = next_id
+            var slot = -1
+            val chosen = replay_hook_schedule(self.current.id as i64, task_id.id as i64, self.tick_count as i64)
+            if chosen == task_id.id as i64:
+                self._remove_ready(task_id)
+                slot = self._find_slot(task_id)
+            else:
+                # Replay follows the logged tid, never the live pick (which stays
+                # runnable). An exhausted log (chosen < 0, already reported) or a
+                # non-runnable logged tid fails closed: nothing is dispatched.
+                self._remove_ready(task_id)
+                self._enqueue_ready(task_id)
+                if chosen >= 0:
+                    val live_tid = task_id.id as i64
+                    task_id = TaskId(id: chosen as u64)
+                    val logged_slot = self._find_slot(task_id)
+                    var ready = false
+                    if logged_slot >= 0:
+                        val logged = self.tasks[logged_slot]
+                        if logged.is_some():
+                            ready = match logged.unwrap().state:
+                                case TaskState.Ready: true
+                                case _: false
+                    if ready:
+                        self._remove_ready(task_id)
+                        slot = logged_slot
+                    else:
+                        report_divergence(DivergenceKind.ScheduleMismatch, -1, chosen, live_tid)
             if slot >= 0:
                 val tcb = self.tasks[slot]
                 if tcb != nil:
@@ -334,12 +427,10 @@ impl Scheduler:
                     task.state = TaskState.Running
                     task.ticks_remaining = TIME_SLICE_TICKS
                     self.tasks[slot] = task
-                    val old_tid_v = self.current.id as i64
                     self.current = task_id
                     self.current_slot = slot
                     self.current_by_cpu[cpu as i64] = task_id
                     self.preempt_pending_by_cpu[cpu as i64] = nil
-                    replay_hook_schedule(old_tid_v, task_id.id as i64, self.tick_count as i64)
                     return task.context
         val idle_tcb = self.tasks[0]
         if idle_tcb != nil:
@@ -402,7 +493,7 @@ impl Scheduler:
             if tcb != nil:
                 val task = tcb
                 val wanted = if pid_hint == 0: true else: task.id.id == pid_hint
-                if wanted and task.is_user and task.user_context != nil:
+                if wanted and task.is_user and task.user_context.is_some():
                     if pid_hint != 0:
                         return task
                     if task.id.id > best_pid:

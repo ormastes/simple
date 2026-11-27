@@ -1,0 +1,33 @@
+# Closed-schema verification through an actual held machine storage owner.
+# Results are accounting data, never authority, custody or a reusable creator.
+use std.nogc_sync_mut.io.machine_storage_owner_v1.MachineStorageOwnerV1
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.*
+
+pub fn machine_fresh_epoch_read_initial_v1(storage: MachineStorageOwnerV1,
+        commit: text) -> Result<MachineFreshEpochRecordV1, text>:
+    if commit == "": return Err("machine-fresh-epoch-initial-commit-missing")
+    val revision = storage.wal_revision_v1(commit)?
+    if (revision.digest != commit or revision.parent != "" or revision.first_sequence != 1 or revision.last_sequence != 4):
+        return Err("machine-fresh-epoch-initial-history")
+    val rows = storage.wal_segment_v1(revision)?
+    if rows.len() != 4: return Err("machine-fresh-epoch-initial-record-count")
+    val record = machine_fresh_epoch_record_decode_v1(rows[0].data)?
+    val replayed = machine_fresh_epoch_replay_v1(rows, record)?
+    Ok(record)
+
+pub fn machine_fresh_epoch_verify_history_v1(storage: MachineStorageOwnerV1, record: MachineFreshEpochRecordV1,
+        initial: text, creator: text, template: text, deadline: i64, at: i64) -> Result<(), text>:
+    val expected_head = if creator == "": initial else: creator
+    if storage.wal_head_v1()? != expected_head: return Err("machine-fresh-epoch-writer-head-changed")
+    val original = machine_fresh_epoch_read_initial_v1(storage, initial)?
+    if machine_fresh_epoch_record_bytes_v1(original)? != machine_fresh_epoch_record_bytes_v1(record)?:
+        return Err("machine-fresh-epoch-initial-binding-changed")
+    if creator != "":
+        val revision = storage.wal_revision_v1(creator)?
+        if (revision.digest != creator or revision.parent != initial or
+                revision.first_sequence != 5 or revision.last_sequence != 6):
+            return Err("machine-fresh-epoch-creator-history")
+        val entries = storage.wal_segment_v1(revision)?
+        val replayed = machine_fresh_epoch_creator_replay_v1(entries, record, template, deadline, at)?
+    if storage.wal_head_v1()? != expected_head: return Err("machine-fresh-epoch-writer-head-changed")
+    Ok(())

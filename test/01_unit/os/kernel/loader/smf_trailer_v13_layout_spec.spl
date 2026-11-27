@@ -1,0 +1,219 @@
+"""
+## Purpose and audience
+Purpose: Prevent regressions in SMF v1.3 96-byte vs legacy 128-byte trailer layout parsing.
+Audience: kernel loader and toolchain engineers.
+## Operator workflow
+Run with `bin/simple test test/01_unit/os/kernel/loader/smf_trailer_v13_layout_spec.spl --mode=interpreter`.
+## Compatibility and limitations
+Covers kernel SMF trailer parsing, architecture/flag/platform decoding, and legacy fallback without invoking a guest runtime.
+"""
+# @manual: primary
+# @req REQ-OS-KERNEL-001
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.smf.{
+    SMF64_MAGIC_0, SMF64_MAGIC_1, SMF64_MAGIC_2, SMF64_MAGIC_3,
+    SMF_HEADER_TRAILER_SIZE,
+    SMF_ERR_MALFORMED, SMF_ERR_WRONG_ROLE, SMF_ERR_WRONG_ARCH, SMF_ERR_ABI_MISMATCH,
+    smf_header_offset,
+    smf_has_header,
+    smf_parse_header,
+    smf_extract_executable_stub_for_arch,
+    smf_extract_library_stub_for_arch,
+    smf_executable_entry_point_for_arch,
+    smf_admit_explicit_simpleos_executable
+}
+
+fn _push_u32_le(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out.push(((value >> 16) & 0xFF).to_u8())
+    out.push(((value >> 24) & 0xFF).to_u8())
+    out
+
+fn _push_u64_le(buf: [u8], value: i64) -> [u8]:
+    var out = _push_u32_le(buf, value & 0xFFFFFFFF)
+    _push_u32_le(out, (value >> 32) & 0xFFFFFFFF)
+
+fn _pad_zeros(buf: [u8], target: i64) -> [u8]:
+    var out = buf
+    while out.len() < target:
+        out.push(0u8)
+    out
+
+fn _elf_stub_for_machine(elf_class: i64, machine: i64, size: i64) -> [u8]:
+    var out: [u8] = []
+    out.push(0x7Fu8)
+    out.push(0x45u8)
+    out.push(0x4Cu8)
+    out.push(0x46u8)
+    out.push(elf_class.to_u8())
+    out.push(1u8) # little endian
+    out.push(1u8) # ELF version
+    out = _pad_zeros(out, 18)
+    out.push((machine & 0xFF).to_u8())
+    out.push(((machine >> 8) & 0xFF).to_u8())
+    _pad_zeros(out, size)
+
+fn _macho_stub(size: i64) -> [u8]:
+    var out: [u8] = [0xCFu8, 0xFAu8, 0xEDu8, 0xFEu8]
+    _pad_zeros(out, size)
+
+fn _v13_trailer(
+    version_minor: i64,
+    platform: i64,
+    arch_enum: i64,
+    flags: i64,
+    section_count: i64,
+    section_table_offset: i64,
+    entry_point: i64,
+    stub_size: i64,
+    smf_data_offset: i64
+) -> [u8]:
+    var t: [u8] = [SMF64_MAGIC_0, SMF64_MAGIC_1, SMF64_MAGIC_2, SMF64_MAGIC_3]
+    t.push(1u8)
+    t.push(version_minor.to_u8())
+    t.push(platform.to_u8())
+    t.push(arch_enum.to_u8())
+    t = _push_u32_le(t, flags)
+    t = _pad_zeros(t, 16)
+    t = _push_u32_le(t, section_count)
+    # [20..24] repr(C) alignment padding must stay zero
+    t = _pad_zeros(t, 24)
+    t = _push_u64_le(t, section_table_offset)
+    t = _pad_zeros(t, 48)
+    t = _push_u64_le(t, entry_point)
+    t = _push_u32_le(t, stub_size)
+    t = _push_u32_le(t, smf_data_offset)
+    _pad_zeros(t, 96)
+
+fn _legacy_128_trailer(
+    entry_point: i64,
+    stub_size: i64,
+    data_offset: i64,
+    role: i64,
+    arch: i64,
+    abi: i64
+) -> [u8]:
+    var t: [u8] = [SMF64_MAGIC_0, SMF64_MAGIC_1, SMF64_MAGIC_2, SMF64_MAGIC_3]
+    t.push(1u8)
+    t.push(1u8)
+    t = _pad_zeros(t, 44)
+    t = _push_u64_le(t, entry_point)
+    t = _push_u32_le(t, stub_size)
+    t = _push_u32_le(t, data_offset)
+    t.push(role.to_u8())
+    t.push(arch.to_u8())
+    t.push(abi.to_u8())
+    _pad_zeros(t, SMF_HEADER_TRAILER_SIZE)
+
+describe "SMF v1.3 96-byte trailer layout prevention":
+    it "reads v1.3 entry_point@48, stub_size@56, smf_data_offset@60 without skewing @60 into role/arch/abi":
+        step("Build a v1.3 96-byte executable envelope whose smf_data_offset places 0x02, 0x05, 0x09 at trailer bytes 60..62")
+        val stub_size: i64 = 0x00090502
+        val stub = _elf_stub_for_machine(2, 62, 72)
+        # Use normal stub_size=72 and also verify high-byte data_offset parsing directly on header parse
+        val raw = stub + _v13_trailer(3, 5, 0, 0x0011, 1, 72, 0x401234, 72, 72)
+        val parsed = smf_parse_header(raw)
+        expect(parsed.is_some()).to_equal(true)
+        val h = parsed.unwrap()
+        expect(h.header_offset).to_equal(72)
+        expect(h.entry_point).to_equal(0x401234)
+        expect(h.stub_size).to_equal(72)
+        expect(h.smf_data_offset).to_equal(72)
+        expect(h.role).to_equal(1)
+        expect(h.arch).to_equal(1)
+        expect(h.abi).to_equal(1)
+        # Ensure byte@60 = 0x48 (72) did not corrupt role/arch/abi gates
+        expect(smf_admit_explicit_simpleos_executable(raw).is_ok()).to_equal(true)
+        val extracted = smf_extract_executable_stub_for_arch(raw, Architecture.X86_64)
+        expect(extracted.is_ok()).to_equal(true)
+        expect(extracted.unwrap().len()).to_equal(72)
+
+        # Synthetic header with smf_data_offset = stub_size (0x00090502) proves @60..63 is read as u32 LE, never role=2/arch=5/abi=9
+        val skewed_probe = _pad_zeros([], 72) + _v13_trailer(3, 5, 0, 0x0001, 0, 0, 0x8000, 72, stub_size)
+        val skewed_hdr = smf_parse_header(skewed_probe).unwrap()
+        expect(skewed_hdr.smf_data_offset).to_equal(stub_size)
+        expect(skewed_hdr.role).to_equal(1)
+        expect(skewed_hdr.arch).to_equal(1)
+        expect(skewed_hdr.abi).to_equal(1)
+
+    it "maps all smf_enums.Arch values accurately and rejects unsupported architectures":
+        step("Check all 6 SimpleOS architectures from smf_enums.Arch at trailer byte 7")
+        val cases = [
+            (0, 2, 62, Architecture.X86_64, Architecture.Arm64),
+            (1, 2, 183, Architecture.Arm64, Architecture.X86_64),
+            (2, 1, 3, Architecture.X86, Architecture.X86_64),
+            (3, 1, 40, Architecture.Arm32, Architecture.Arm64),
+            (4, 2, 243, Architecture.Riscv64, Architecture.X86_64),
+            (5, 1, 243, Architecture.Riscv32, Architecture.Riscv64)
+        ]
+        for entry in cases:
+            val wire_arch = entry[0]
+            val elf_class = entry[1]
+            val machine = entry[2]
+            val good_arch = entry[3]
+            val bad_arch = entry[4]
+            val stub = _elf_stub_for_machine(elf_class, machine, 64)
+            val img = stub + _v13_trailer(3, 5, wire_arch, 0x0011, 1, 64, 0x2000, 64, 64)
+            expect(smf_extract_executable_stub_for_arch(img, good_arch).is_ok()).to_equal(true)
+            expect(smf_executable_entry_point_for_arch(img, good_arch).unwrap()).to_equal(0x2000)
+            val wrong = smf_extract_executable_stub_for_arch(img, bad_arch)
+            expect(wrong.is_err()).to_equal(true)
+            expect(wrong.unwrap_err()).to_equal(SMF_ERR_WRONG_ARCH)
+
+        val wasm_stub = _elf_stub_for_machine(2, 62, 64)
+        val wasm_img = wasm_stub + _v13_trailer(3, 5, 6, 0x0011, 1, 64, 0x2000, 64, 64)
+        expect(smf_extract_executable_stub_for_arch(wasm_img, Architecture.X86_64).unwrap_err()).to_equal(SMF_ERR_WRONG_ARCH)
+
+    it "separates executable vs reloadable library roles and SimpleOS vs host platforms in v1.3":
+        step("Check role=2 library vs role=1 executable and Platform ABI gating")
+        val lib_stub = _macho_stub(64)
+        val lib_img = lib_stub + _v13_trailer(3, 5, 1, 0x000A, 1, 64, 0x3000, 64, 64)
+        expect(smf_extract_library_stub_for_arch(lib_img, Architecture.Arm64).is_ok()).to_equal(true)
+        expect(smf_extract_executable_stub_for_arch(lib_img, Architecture.Arm64).unwrap_err()).to_equal(SMF_ERR_WRONG_ROLE)
+
+        val exec_img = _elf_stub_for_machine(2, 62, 64) + _v13_trailer(3, 5, 0, 0x0001, 1, 64, 0x4000, 64, 64)
+        expect(smf_extract_library_stub_for_arch(exec_img, Architecture.X86_64).unwrap_err()).to_equal(SMF_ERR_WRONG_ROLE)
+
+        # Platform.Linux (1) must fail closed with SMF_ERR_ABI_MISMATCH
+        val linux_img = _elf_stub_for_machine(2, 62, 64) + _v13_trailer(3, 1, 0, 0x0011, 1, 64, 0x4000, 64, 64)
+        expect(smf_extract_executable_stub_for_arch(linux_img, Architecture.X86_64).unwrap_err()).to_equal(SMF_ERR_ABI_MISMATCH)
+        expect(smf_admit_explicit_simpleos_executable(linux_img).unwrap_err()).to_equal(SMF_ERR_ABI_MISMATCH)
+
+        # Platform.Any (0) is allowed for extract_* (abi=0), but rejected by explicit SimpleOS admission (requires abi=1)
+        val any_img = _elf_stub_for_machine(2, 62, 64) + _v13_trailer(3, 0, 0, 0x0011, 1, 64, 0x4000, 64, 64)
+        expect(smf_extract_executable_stub_for_arch(any_img, Architecture.X86_64).is_ok()).to_equal(true)
+        expect(smf_admit_explicit_simpleos_executable(any_img).unwrap_err()).to_equal(SMF_ERR_ABI_MISMATCH)
+
+    it "supports Rust-seed 96-byte trailers, leading 96-byte headers, and legacy 128-byte trailers":
+        step("Verify dual-format trailer precedence and truncated header rejection")
+        # Rust-seed v1.1 96-byte trailer (section_count > 0, pad@20 == 0, section_table_offset != 0)
+        val seed_img = _elf_stub_for_machine(2, 62, 64) + _v13_trailer(1, 5, 0, 0x0001, 2, 64, 0x5500, 64, 64)
+        val seed_hdr = smf_parse_header(seed_img).unwrap()
+        expect(seed_hdr.header_offset).to_equal(64)
+        expect(seed_hdr.entry_point).to_equal(0x5500)
+        expect(seed_hdr.role).to_equal(1)
+
+        # Leading 96-byte v1.3 header at offset 0
+        val leading = _v13_trailer(3, 0, 1, 0x0002, 0, 0, 0x9900, 0, 96)
+        expect(smf_has_header(leading)).to_equal(true)
+        val leading_hdr = smf_parse_header(leading).unwrap()
+        expect(leading_hdr.header_offset).to_equal(0)
+        expect(leading_hdr.entry_point).to_equal(0x9900)
+        expect(leading_hdr.role).to_equal(2)
+        expect(leading_hdr.arch).to_equal(3)
+
+        # Legacy 128-byte v1.1 trailer remains intact
+        val legacy_img = _elf_stub_for_machine(2, 62, 64) + _legacy_128_trailer(0x7700, 64, 64, 1, 1, 1)
+        val legacy_hdr = smf_parse_header(legacy_img).unwrap()
+        expect(legacy_hdr.header_offset).to_equal(64)
+        expect(legacy_hdr.entry_point).to_equal(0x7700)
+        expect(smf_admit_explicit_simpleos_executable(legacy_img).is_ok()).to_equal(true)
+
+        # Truncated 80-byte blob with offset-0 magic (not v1.3 96B) still fails closed
+        val truncated = _pad_zeros([SMF64_MAGIC_0, SMF64_MAGIC_1, SMF64_MAGIC_2, SMF64_MAGIC_3, 1u8, 3u8], 80)
+        expect(smf_parse_header(truncated).is_none()).to_equal(true)

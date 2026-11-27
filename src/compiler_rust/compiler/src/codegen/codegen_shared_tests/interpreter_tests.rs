@@ -703,6 +703,7 @@ mod interpreter_branch_coverage {
                 return_type: TypeId::VOID,
                 args: vec![],
                 effect: crate::mir::Effect::Compute,
+                signature_declared: false,
             },
         )
         .unwrap();

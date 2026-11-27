@@ -51,16 +51,35 @@ typedef uint32_t SDL_AudioDeviceID;
 
 typedef struct { int x, y, w, h; } SDL_Rect;
 
+/* Pointer-size-dependent SDL_Surface layout (2.30). Real layout:
+ *   flags, format*, w, h, pitch, pixels*, userdata*, locked, list_blitmap*,
+ *   clip_rect(16), map*, refcount
+ * LP64:  format 8, w 16, h 20, pitch 24, pixels 32, size 96.
+ * ILP32: format 4, w 8,  h 12, pitch 16, pixels 20, size 60. */
+#if __SIZEOF_POINTER__ == 4
+#define RT_SDL2_SURFACE_SIZE    60
+#define RT_SDL2_SURFACE_W       8
+#define RT_SDL2_SURFACE_PITCH   16
+#define RT_SDL2_SURFACE_PIXELS  20
+#define RT_SDL2_AUDIOSPEC_SIZE  24
+#else
+#define RT_SDL2_SURFACE_SIZE    96
+#define RT_SDL2_SURFACE_W       16
+#define RT_SDL2_SURFACE_PITCH   24
+#define RT_SDL2_SURFACE_PIXELS  32
+#define RT_SDL2_AUDIOSPEC_SIZE  32
+#endif
+
 typedef struct {
     Uint32 flags;          /* 0 */
-    void*  format;         /* 8 */
-    int    w, h;           /* 16, 20 */
-    int    pitch;          /* 24 */
-    void*  pixels;         /* 32 */
+    void*  format;         /* 4 / 8 */
+    int    w, h;
+    int    pitch;
+    void*  pixels;
     /* remainder of SDL_Surface (userdata, locked, list_blitmap, clip_rect,
-       map, refcount) is never touched here; pad to the real 96 bytes so a
+       map, refcount) is never touched here; pad to the real size so a
        stack/array of SDL_Surface would still be correctly sized. */
-    char   _tail[96 - 40];
+    char   _tail[RT_SDL2_SURFACE_SIZE - (RT_SDL2_SURFACE_PIXELS + sizeof(void*))];
 } SDL_Surface;
 
 typedef struct {
@@ -141,8 +160,8 @@ typedef struct {
 /* Compile-time re-verification of the probed layout. */
 #define RT_SDL2_ASSERT(cond, tag) typedef char rt_sdl2_static_##tag[(cond) ? 1 : -1]
 RT_SDL2_ASSERT(sizeof(SDL_Event) == 56, event_size);
-RT_SDL2_ASSERT(sizeof(SDL_Surface) == 96, surface_size);
-RT_SDL2_ASSERT(sizeof(SDL_AudioSpec) == 32, audiospec_size);
+RT_SDL2_ASSERT(sizeof(SDL_Surface) == RT_SDL2_SURFACE_SIZE, surface_size);
+RT_SDL2_ASSERT(sizeof(SDL_AudioSpec) == RT_SDL2_AUDIOSPEC_SIZE, audiospec_size);
 RT_SDL2_ASSERT(sizeof(SDL_Rect) == 16, rect_size);
 RT_SDL2_ASSERT(sizeof(SDL_Keysym) == 16, keysym_size);
 RT_SDL2_ASSERT(offsetof(SDL_Event, key.keysym) == 16, key_keysym);
@@ -153,9 +172,9 @@ RT_SDL2_ASSERT(offsetof(SDL_Event, button.x) == 20, button_x);
 RT_SDL2_ASSERT(offsetof(SDL_Event, wheel.x) == 16, wheel_x);
 RT_SDL2_ASSERT(offsetof(SDL_Event, window.event) == 12, window_event);
 RT_SDL2_ASSERT(offsetof(SDL_Event, window.data1) == 16, window_data1);
-RT_SDL2_ASSERT(offsetof(SDL_Surface, w) == 16, surface_w);
-RT_SDL2_ASSERT(offsetof(SDL_Surface, pitch) == 24, surface_pitch);
-RT_SDL2_ASSERT(offsetof(SDL_Surface, pixels) == 32, surface_pixels);
+RT_SDL2_ASSERT(offsetof(SDL_Surface, w) == RT_SDL2_SURFACE_W, surface_w);
+RT_SDL2_ASSERT(offsetof(SDL_Surface, pitch) == RT_SDL2_SURFACE_PITCH, surface_pitch);
+RT_SDL2_ASSERT(offsetof(SDL_Surface, pixels) == RT_SDL2_SURFACE_PIXELS, surface_pixels);
 RT_SDL2_ASSERT(offsetof(SDL_AudioSpec, callback) == 16, audiospec_callback);
 
 /* ================================================================
@@ -185,6 +204,9 @@ static const char* const g_sdl2_candidates[] = {
     "SDL2.dll",
 #elif defined(__APPLE__)
     "libSDL2-2.0.0.dylib", "libSDL2-2.0.dylib", "libSDL2.dylib",
+    "/opt/homebrew/lib/libSDL2-2.0.0.dylib", "/opt/homebrew/lib/libSDL2-2.0.dylib", "/opt/homebrew/lib/libSDL2.dylib",
+    "/usr/local/lib/libSDL2-2.0.0.dylib", "/usr/local/lib/libSDL2-2.0.dylib", "/usr/local/lib/libSDL2.dylib",
+    "/Library/Frameworks/SDL2.framework/SDL2",
 #else
     "libSDL2-2.0.so.0", "libSDL2-2.0.so", "libSDL2.so.0", "libSDL2.so",
 #endif
@@ -723,20 +745,23 @@ bool rt_sdl2_destroy_window(int64_t handle) {
     return true;
 }
 
-int64_t rt_sdl2_get_window_width(int64_t handle) {
+static bool sdl2_window_size(int64_t handle, int* w, int* h) {
     SDL_Window* win = sdl2_window_get(handle);
-    if (!win) return -1;
-    int w = 0, h = 0;
-    SDL_GetWindowSize(win, &w, &h);
-    return (int64_t)w;
+    if (!win) return false;
+    *w = 0;
+    *h = 0;
+    SDL_GetWindowSize(win, w, h);
+    return true;
+}
+
+int64_t rt_sdl2_get_window_width(int64_t handle) {
+    int w, h;
+    return sdl2_window_size(handle, &w, &h) ? (int64_t)w : -1;
 }
 
 int64_t rt_sdl2_get_window_height(int64_t handle) {
-    SDL_Window* win = sdl2_window_get(handle);
-    if (!win) return -1;
-    int w = 0, h = 0;
-    SDL_GetWindowSize(win, &w, &h);
-    return (int64_t)h;
+    int w, h;
+    return sdl2_window_size(handle, &w, &h) ? (int64_t)h : -1;
 }
 
 bool rt_sdl2_set_window_title(int64_t handle, const char* title) {
@@ -930,28 +955,27 @@ int64_t rt_sdl2_wait_event(int64_t timeout_ms) {
     }
 }
 
-int64_t rt_sdl2_event_key_code(void) {
-    if (!g_last_event_valid) return 0;
+static const SDL_Keysym* sdl2_last_keysym(void) {
+    if (!g_last_event_valid) return NULL;
     if (g_last_event.type == SDL_KEYDOWN || g_last_event.type == SDL_KEYUP) {
-        return (int64_t)g_last_event.key.keysym.scancode;
+        return &g_last_event.key.keysym;
     }
-    return 0;
+    return NULL;
+}
+
+int64_t rt_sdl2_event_key_code(void) {
+    const SDL_Keysym* k = sdl2_last_keysym();
+    return k ? (int64_t)k->scancode : 0;
 }
 
 int64_t rt_sdl2_event_key_sym(void) {
-    if (!g_last_event_valid) return 0;
-    if (g_last_event.type == SDL_KEYDOWN || g_last_event.type == SDL_KEYUP) {
-        return (int64_t)g_last_event.key.keysym.sym;
-    }
-    return 0;
+    const SDL_Keysym* k = sdl2_last_keysym();
+    return k ? (int64_t)k->sym : 0;
 }
 
 int64_t rt_sdl2_event_key_mod(void) {
-    if (!g_last_event_valid) return 0;
-    if (g_last_event.type == SDL_KEYDOWN || g_last_event.type == SDL_KEYUP) {
-        return (int64_t)g_last_event.key.keysym.mod;
-    }
-    return 0;
+    const SDL_Keysym* k = sdl2_last_keysym();
+    return k ? (int64_t)k->mod : 0;
 }
 
 const char* rt_sdl2_event_text(void) {
@@ -1104,28 +1128,20 @@ bool rt_sdl2_clear_quit(void) {
  * Window Event Details
  * ================================================================ */
 
+static bool sdl2_last_is_window_event(void) {
+    return g_last_event_valid && g_last_event.type == SDL_WINDOWEVENT;
+}
+
 int64_t rt_sdl2_event_window_event_id(void) {
-    if (!g_last_event_valid) return 0;
-    if (g_last_event.type == SDL_WINDOWEVENT) {
-        return (int64_t)g_last_event.window.event;
-    }
-    return 0;
+    return sdl2_last_is_window_event() ? (int64_t)g_last_event.window.event : 0;
 }
 
 int64_t rt_sdl2_event_window_data1(void) {
-    if (!g_last_event_valid) return 0;
-    if (g_last_event.type == SDL_WINDOWEVENT) {
-        return (int64_t)g_last_event.window.data1;
-    }
-    return 0;
+    return sdl2_last_is_window_event() ? (int64_t)g_last_event.window.data1 : 0;
 }
 
 int64_t rt_sdl2_event_window_data2(void) {
-    if (!g_last_event_valid) return 0;
-    if (g_last_event.type == SDL_WINDOWEVENT) {
-        return (int64_t)g_last_event.window.data2;
-    }
-    return 0;
+    return sdl2_last_is_window_event() ? (int64_t)g_last_event.window.data2 : 0;
 }
 
 /* ================================================================
@@ -1159,71 +1175,53 @@ bool rt_sdl2_set_window_position(int64_t handle, int64_t x, int64_t y) {
     return true;
 }
 
-int64_t rt_sdl2_get_window_position_x(int64_t handle) {
-    SDL_Window* win = sdl2_window_get(handle);
-    if (!win) return INT64_MIN;
-    int x = 0, y = 0;
-    SDL_GetWindowPosition(win, &x, &y);
-    return (int64_t)x;
-}
-
-int64_t rt_sdl2_get_window_position_y(int64_t handle) {
-    SDL_Window* win = sdl2_window_get(handle);
-    if (!win) return INT64_MIN;
-    int x = 0, y = 0;
-    SDL_GetWindowPosition(win, &x, &y);
-    return (int64_t)y;
-}
-
-bool rt_sdl2_show_window(int64_t handle) {
+static bool sdl2_window_position(int64_t handle, int* x, int* y) {
     SDL_Window* win = sdl2_window_get(handle);
     if (!win) return false;
-    SDL_ShowWindow(win);
+    *x = 0;
+    *y = 0;
+    SDL_GetWindowPosition(win, x, y);
     return true;
 }
 
-bool rt_sdl2_hide_window(int64_t handle) {
+int64_t rt_sdl2_get_window_position_x(int64_t handle) {
+    int x, y;
+    return sdl2_window_position(handle, &x, &y) ? (int64_t)x : INT64_MIN;
+}
+
+int64_t rt_sdl2_get_window_position_y(int64_t handle) {
+    int x, y;
+    return sdl2_window_position(handle, &x, &y) ? (int64_t)y : INT64_MIN;
+}
+
+static bool sdl2_window_op(int64_t handle, void (*op)(SDL_Window*)) {
     SDL_Window* win = sdl2_window_get(handle);
     if (!win) return false;
-    SDL_HideWindow(win);
+    op(win);
+    return true;
+}
+
+bool rt_sdl2_show_window(int64_t handle) { return sdl2_window_op(handle, SDL_ShowWindow); }
+bool rt_sdl2_hide_window(int64_t handle) { return sdl2_window_op(handle, SDL_HideWindow); }
+bool rt_sdl2_minimize_window(int64_t handle) { return sdl2_window_op(handle, SDL_MinimizeWindow); }
+bool rt_sdl2_maximize_window(int64_t handle) { return sdl2_window_op(handle, SDL_MaximizeWindow); }
+bool rt_sdl2_restore_window(int64_t handle) { return sdl2_window_op(handle, SDL_RestoreWindow); }
+
+static bool sdl2_window_size_op(int64_t handle, int64_t width, int64_t height,
+                                void (*op)(SDL_Window*, int, int)) {
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win || width <= 0 || height <= 0 ||
+        width > INT_MAX || height > INT_MAX) return false;
+    op(win, (int)width, (int)height);
     return true;
 }
 
 bool rt_sdl2_set_window_minimum_size(int64_t handle, int64_t width, int64_t height) {
-    SDL_Window* win = sdl2_window_get(handle);
-    if (!win || width <= 0 || height <= 0 ||
-        width > INT_MAX || height > INT_MAX) return false;
-    SDL_SetWindowMinimumSize(win, (int)width, (int)height);
-    return true;
+    return sdl2_window_size_op(handle, width, height, SDL_SetWindowMinimumSize);
 }
 
 bool rt_sdl2_set_window_maximum_size(int64_t handle, int64_t width, int64_t height) {
-    SDL_Window* win = sdl2_window_get(handle);
-    if (!win || width <= 0 || height <= 0 ||
-        width > INT_MAX || height > INT_MAX) return false;
-    SDL_SetWindowMaximumSize(win, (int)width, (int)height);
-    return true;
-}
-
-bool rt_sdl2_minimize_window(int64_t handle) {
-    SDL_Window* win = sdl2_window_get(handle);
-    if (!win) return false;
-    SDL_MinimizeWindow(win);
-    return true;
-}
-
-bool rt_sdl2_maximize_window(int64_t handle) {
-    SDL_Window* win = sdl2_window_get(handle);
-    if (!win) return false;
-    SDL_MaximizeWindow(win);
-    return true;
-}
-
-bool rt_sdl2_restore_window(int64_t handle) {
-    SDL_Window* win = sdl2_window_get(handle);
-    if (!win) return false;
-    SDL_RestoreWindow(win);
-    return true;
+    return sdl2_window_size_op(handle, width, height, SDL_SetWindowMaximumSize);
 }
 
 bool rt_sdl2_set_window_bordered(int64_t handle, int64_t bordered) {
@@ -1349,40 +1347,33 @@ const char* rt_sdl2_get_display_name(int64_t index) {
     return name;
 }
 
-int64_t rt_sdl2_get_display_bounds_x(int64_t index) {
-    SDL2_REQUIRE(INT64_MIN);
+/* Shared by the display bounds accessors; false = caller returns its fail value. */
+static bool sdl2_display_rect(int64_t index, bool usable, SDL_Rect* r) {
+    if (!sdl2_load()) return false;
     if (!sdl2_on_owner_thread() ||
-        index < 0 || index > INT_MAX) return INT64_MIN;
+        index < 0 || index > INT_MAX) return false;
+    return (usable ? SDL_GetDisplayUsableBounds((int)index, r)
+                   : SDL_GetDisplayBounds((int)index, r)) == 0;
+}
+
+int64_t rt_sdl2_get_display_bounds_x(int64_t index) {
     SDL_Rect r;
-    if (SDL_GetDisplayBounds((int)index, &r) != 0) return INT64_MIN;
-    return (int64_t)r.x;
+    return sdl2_display_rect(index, false, &r) ? (int64_t)r.x : INT64_MIN;
 }
 
 int64_t rt_sdl2_get_display_bounds_y(int64_t index) {
-    SDL2_REQUIRE(INT64_MIN);
-    if (!sdl2_on_owner_thread() ||
-        index < 0 || index > INT_MAX) return INT64_MIN;
     SDL_Rect r;
-    if (SDL_GetDisplayBounds((int)index, &r) != 0) return INT64_MIN;
-    return (int64_t)r.y;
+    return sdl2_display_rect(index, false, &r) ? (int64_t)r.y : INT64_MIN;
 }
 
 int64_t rt_sdl2_get_display_bounds_w(int64_t index) {
-    SDL2_REQUIRE(-1);
-    if (!sdl2_on_owner_thread() ||
-        index < 0 || index > INT_MAX) return -1;
     SDL_Rect r;
-    if (SDL_GetDisplayBounds((int)index, &r) != 0) return -1;
-    return (int64_t)r.w;
+    return sdl2_display_rect(index, false, &r) ? (int64_t)r.w : -1;
 }
 
 int64_t rt_sdl2_get_display_bounds_h(int64_t index) {
-    SDL2_REQUIRE(-1);
-    if (!sdl2_on_owner_thread() ||
-        index < 0 || index > INT_MAX) return -1;
     SDL_Rect r;
-    if (SDL_GetDisplayBounds((int)index, &r) != 0) return -1;
-    return (int64_t)r.h;
+    return sdl2_display_rect(index, false, &r) ? (int64_t)r.h : -1;
 }
 
 double rt_sdl2_get_display_dpi(int64_t index) {
@@ -1395,39 +1386,23 @@ double rt_sdl2_get_display_dpi(int64_t index) {
 }
 
 int64_t rt_sdl2_get_display_usable_x(int64_t index) {
-    SDL2_REQUIRE(INT64_MIN);
-    if (!sdl2_on_owner_thread() ||
-        index < 0 || index > INT_MAX) return INT64_MIN;
     SDL_Rect r;
-    if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return INT64_MIN;
-    return (int64_t)r.x;
+    return sdl2_display_rect(index, true, &r) ? (int64_t)r.x : INT64_MIN;
 }
 
 int64_t rt_sdl2_get_display_usable_y(int64_t index) {
-    SDL2_REQUIRE(INT64_MIN);
-    if (!sdl2_on_owner_thread() ||
-        index < 0 || index > INT_MAX) return INT64_MIN;
     SDL_Rect r;
-    if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return INT64_MIN;
-    return (int64_t)r.y;
+    return sdl2_display_rect(index, true, &r) ? (int64_t)r.y : INT64_MIN;
 }
 
 int64_t rt_sdl2_get_display_usable_w(int64_t index) {
-    SDL2_REQUIRE(-1);
-    if (!sdl2_on_owner_thread() ||
-        index < 0 || index > INT_MAX) return -1;
     SDL_Rect r;
-    if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return -1;
-    return (int64_t)r.w;
+    return sdl2_display_rect(index, true, &r) ? (int64_t)r.w : -1;
 }
 
 int64_t rt_sdl2_get_display_usable_h(int64_t index) {
-    SDL2_REQUIRE(-1);
-    if (!sdl2_on_owner_thread() ||
-        index < 0 || index > INT_MAX) return -1;
     SDL_Rect r;
-    if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return -1;
-    return (int64_t)r.h;
+    return sdl2_display_rect(index, true, &r) ? (int64_t)r.h : -1;
 }
 
 /* ===== SDL editor-facing aliases ===== */

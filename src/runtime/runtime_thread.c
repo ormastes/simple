@@ -10,6 +10,7 @@
  */
 
 #include "runtime_thread.h"
+#include "xray/xray_startup_owned_threads_v1.h"
 #include "runtime_memtrack.h"
 #include "runtime_value.h"
 
@@ -29,6 +30,10 @@
  * ================================================================ */
 
 #if defined(_WIN32) || defined(_WIN64)
+    #if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600
+        #undef _WIN32_WINNT
+        #define _WIN32_WINNT 0x0600
+    #endif
     #define SPL_THREAD_WINDOWS
     #include <windows.h>
     #include <process.h>
@@ -42,6 +47,68 @@
     #if defined(__APPLE__) || defined(__MACH__)
         #include <sys/sysctl.h>
     #endif
+    #if defined(__APPLE__)
+        #include <mach/mach.h>
+        #include <mach/mach_vm.h>
+    #endif
+#endif
+
+/* XRay thread-context integration is opt-in for the source-built Linux GNU
+ * core-C runtime_thread object only. The adapter symbols are linked only by
+ * that XRay-enabled path; ordinary, Windows and nativeAll builds retain no
+ * dependency on them. */
+#if defined(SIMPLE_XRAY_CONTEXT_HOOKS_V1)
+#if !defined(__linux__) || !(defined(__GNUC__) || defined(__clang__)) || \
+        defined(_WIN32) || defined(_WIN64)
+#error "SIMPLE_XRAY_CONTEXT_HOOKS_V1 is supported only by Linux GNU C runtime_thread builds"
+#endif
+extern int64_t simple_xray_thread_attach_v1(void);
+extern int64_t simple_xray_thread_task_root_v1(void);
+extern void simple_xray_thread_detach_v1(void);
+
+typedef struct {
+    int attached;
+} RtXrayThreadAttachmentV1;
+
+static void rt_xray_thread_attachment_cleanup_v1(void *raw) {
+    RtXrayThreadAttachmentV1 *attachment = (RtXrayThreadAttachmentV1 *)raw;
+    if (attachment && attachment->attached) {
+        simple_xray_thread_detach_v1();
+        attachment->attached = 0;
+    }
+}
+
+static int64_t rt_xray_thread_task_root_v1(void) {
+    /* This is a cold scheduler boundary, not a traced callback. The provider
+     * is idempotent within a session and migrates stale per-thread TLS only at
+     * this controlled root. */
+    return simple_xray_thread_task_root_v1();
+}
+
+typedef struct {
+    void *(*entry_point)(void *);
+    void *argument;
+    RtXrayThreadAttachmentV1 attachment;
+} RtXrayThreadLaunchV1;
+
+static void rt_xray_thread_launch_cleanup_v1(void *raw) {
+    RtXrayThreadLaunchV1 *launch = (RtXrayThreadLaunchV1 *)raw;
+    if (!launch) return;
+    rt_xray_thread_attachment_cleanup_v1(&launch->attachment);
+    SPL_FREE(launch);
+}
+
+static void *rt_xray_thread_entry_v1(void *raw) {
+    RtXrayThreadLaunchV1 *launch = (RtXrayThreadLaunchV1 *)raw;
+    void *result = NULL;
+    launch->attachment.attached = simple_xray_thread_attach_v1() == 1;
+    pthread_cleanup_push(rt_xray_thread_launch_cleanup_v1, launch);
+    if (rt_xray_thread_task_root_v1() == 1)
+        launch->attachment.attached = 1;
+    result = launch->entry_point(launch->argument);
+    pthread_cleanup_pop(1);
+    return result;
+}
 #endif
 
 /* ================================================================
@@ -159,11 +226,13 @@ static void free_handle(int64_t handle) {
 }
 
 /* Scalar TLS has a raw i64 ABI, distinct from the tagged RuntimeValue TLS.
- * Each live handle owns one OS TLS key. Values are kept in the key itself,
- * without a heap allocation on the get/set path. Public handles combine a
- * monotonically increasing serial with a reusable table slot: stale handles
- * never address a recycled OS key, and table memory tracks peak live slots.
- * The table lock stays held across OS key access, so free cannot race it. */
+ * Each live handle owns one OS TLS/FLS key. 64-bit targets keep values in the
+ * slot itself without heap allocation; 32-bit targets (and SCALAR_TLS_FORCE_BOXED)
+ * keep a per-thread heap cell freed automatically on thread/fiber exit or key
+ * destruction. Public handles combine a monotonically increasing serial with a
+ * reusable table slot: stale handles never address a recycled OS key, and table
+ * memory tracks peak live slots. The table lock stays held across OS key
+ * access, so free cannot race it. */
 #define SCALAR_TLS_SLOT_BITS 20
 #define SCALAR_TLS_SLOT_COUNT (UINT64_C(1) << SCALAR_TLS_SLOT_BITS)
 #define SCALAR_TLS_SLOT_MASK (SCALAR_TLS_SLOT_COUNT - 1)
@@ -197,8 +266,88 @@ static SRWLOCK g_scalar_tls_lock = SRWLOCK_INIT;
 #define SCALAR_TLS_WRUNLOCK() ReleaseSRWLockExclusive(&g_scalar_tls_lock)
 #endif
 
-/* The hosted runtime represents i64 scalar values as pointer-sized TLS bits. */
-_Static_assert(sizeof(uintptr_t) == sizeof(int64_t), "scalar TLS requires 64-bit pointers");
+/* The hosted runtime stores i64 scalar values in TLS/FLS. 64-bit targets keep
+ * the bits in the pointer-sized slot; 32-bit targets (i686 Windows, armv7)
+ * keep a per-thread heap cell, allocated on first set and freed on thread exit
+ * or rt_thread_local_free. On Win32, FLS invokes the callback on thread/fiber
+ * exit and inside FlsFree() for every live non-NULL slot. */
+#ifdef SCALAR_TLS_FORCE_BOXED
+#define SCALAR_TLS_INLINE 0
+#else
+#define SCALAR_TLS_INLINE (sizeof(uintptr_t) >= sizeof(int64_t))
+#endif
+
+#ifndef SCALAR_TLS_CELL_ALLOC
+#define SCALAR_TLS_CELL_ALLOC() ((int64_t*)malloc(sizeof(int64_t)))
+#endif
+#ifndef SCALAR_TLS_CELL_FREE
+#define SCALAR_TLS_CELL_FREE(p) free(p)
+#endif
+
+#ifdef SIMPLE_SCALAR_TLS_SELFCHECK
+#ifdef SPL_THREAD_PTHREAD
+typedef long ScalarTlsCounter;
+static void scalar_tls_counter_inc(ScalarTlsCounter* c) { __atomic_add_fetch(c, 1, __ATOMIC_SEQ_CST); }
+static void scalar_tls_counter_dec(ScalarTlsCounter* c) { __atomic_sub_fetch(c, 1, __ATOMIC_SEQ_CST); }
+static int64_t scalar_tls_counter_load(ScalarTlsCounter* c) { return (int64_t)__atomic_load_n(c, __ATOMIC_SEQ_CST); }
+static void scalar_tls_counter_zero(ScalarTlsCounter* c) { __atomic_store_n(c, 0, __ATOMIC_SEQ_CST); }
+#else
+typedef volatile LONG ScalarTlsCounter;
+static void scalar_tls_counter_inc(ScalarTlsCounter* c) { InterlockedIncrement(c); }
+static void scalar_tls_counter_dec(ScalarTlsCounter* c) { InterlockedDecrement(c); }
+static int64_t scalar_tls_counter_load(ScalarTlsCounter* c) { return (int64_t)InterlockedExchangeAdd(c, 0); }
+static void scalar_tls_counter_zero(ScalarTlsCounter* c) { InterlockedExchange(c, 0); }
+#endif
+
+static ScalarTlsCounter g_scalar_tls_selfcheck_allocs = 0;
+static ScalarTlsCounter g_scalar_tls_selfcheck_frees = 0;
+static ScalarTlsCounter g_scalar_tls_selfcheck_live = 0;
+
+static int64_t* scalar_tls_cell_alloc(void) {
+    int64_t* cell = SCALAR_TLS_CELL_ALLOC();
+    if (cell) {
+        scalar_tls_counter_inc(&g_scalar_tls_selfcheck_allocs);
+        scalar_tls_counter_inc(&g_scalar_tls_selfcheck_live);
+    }
+    return cell;
+}
+
+static void scalar_tls_cell_free(void* cell) {
+    if (!cell) return;
+    scalar_tls_counter_inc(&g_scalar_tls_selfcheck_frees);
+    scalar_tls_counter_dec(&g_scalar_tls_selfcheck_live);
+    SCALAR_TLS_CELL_FREE(cell);
+}
+
+int64_t spl_scalar_tls_selfcheck_allocs(void) { return scalar_tls_counter_load(&g_scalar_tls_selfcheck_allocs); }
+int64_t spl_scalar_tls_selfcheck_frees(void) { return scalar_tls_counter_load(&g_scalar_tls_selfcheck_frees); }
+int64_t spl_scalar_tls_selfcheck_live(void) { return scalar_tls_counter_load(&g_scalar_tls_selfcheck_live); }
+void spl_scalar_tls_selfcheck_reset(void) {
+    scalar_tls_counter_zero(&g_scalar_tls_selfcheck_allocs);
+    scalar_tls_counter_zero(&g_scalar_tls_selfcheck_frees);
+    scalar_tls_counter_zero(&g_scalar_tls_selfcheck_live);
+}
+#else
+#define scalar_tls_cell_alloc() SCALAR_TLS_CELL_ALLOC()
+static void scalar_tls_cell_free(void* cell) {
+    if (cell) SCALAR_TLS_CELL_FREE(cell);
+}
+#endif
+
+#ifdef SPL_THREAD_PTHREAD
+#define SCALAR_TLS_RAW_GET(k) pthread_getspecific(k)
+#define SCALAR_TLS_RAW_SET(k, v) (pthread_setspecific((k), (v)) == 0)
+static void scalar_tls_pthread_free(void* cell) {
+    scalar_tls_cell_free(cell);
+}
+#else
+#define SCALAR_TLS_RAW_GET(k) FlsGetValue(k)
+#define SCALAR_TLS_RAW_SET(k, v) (FlsSetValue((k), (v)) != 0)
+/* FLS callbacks on 32-bit x86 use __stdcall (WINAPI), never raw __cdecl free. */
+static VOID WINAPI scalar_tls_fls_free(PVOID cell) {
+    scalar_tls_cell_free(cell);
+}
+#endif
 
 int64_t rt_thread_local_new(void) {
     SCALAR_TLS_WRLOCK();
@@ -229,13 +378,14 @@ int64_t rt_thread_local_new(void) {
     }
 
 #ifdef SPL_THREAD_PTHREAD
-    if (pthread_key_create(&g_scalar_tls_entries[index].key, NULL) != 0) {
+    if (pthread_key_create(&g_scalar_tls_entries[index].key,
+                           SCALAR_TLS_INLINE ? NULL : scalar_tls_pthread_free) != 0) {
         SCALAR_TLS_WRUNLOCK();
         return 0;
     }
 #else
-    DWORD key = TlsAlloc();
-    if (key == TLS_OUT_OF_INDEXES) {
+    DWORD key = FlsAlloc(SCALAR_TLS_INLINE ? NULL : scalar_tls_fls_free);
+    if (key == FLS_OUT_OF_INDEXES) {
         SCALAR_TLS_WRUNLOCK();
         return 0;
     }
@@ -254,54 +404,78 @@ int64_t rt_thread_local_new(void) {
     return handle;
 }
 
-int64_t rt_thread_local_get_i64(int64_t handle) {
-    if (handle <= 0) return 0;
+/* Live entry for `handle`, or NULL. Caller holds the table lock. */
+static ScalarTlsEntry* scalar_tls_live(int64_t handle, size_t* out_index) {
+    if (handle <= 0) return NULL;
     size_t index = (size_t)(((uint64_t)handle - 1) & SCALAR_TLS_SLOT_MASK);
-    SCALAR_TLS_RDLOCK();
+    if (index >= g_scalar_tls_used) return NULL;
+    ScalarTlsEntry* entry = &g_scalar_tls_entries[index];
+    if (!entry->active || entry->handle != handle) return NULL;
+    if (out_index) *out_index = index;
+    return entry;
+}
+
+int64_t rt_thread_local_get_i64(int64_t handle) {
     int64_t value = 0;
-    if (index < g_scalar_tls_used && g_scalar_tls_entries[index].active &&
-        g_scalar_tls_entries[index].handle == handle) {
-#ifdef SPL_THREAD_PTHREAD
-        uintptr_t bits = (uintptr_t)pthread_getspecific(g_scalar_tls_entries[index].key);
-#else
-        uintptr_t bits = (uintptr_t)TlsGetValue(g_scalar_tls_entries[index].key);
-#endif
-        memcpy(&value, &bits, sizeof(value));
+    SCALAR_TLS_RDLOCK();
+    ScalarTlsEntry* entry = scalar_tls_live(handle, NULL);
+    if (entry) {
+        void* raw = SCALAR_TLS_RAW_GET(entry->key);
+        if (SCALAR_TLS_INLINE) {
+            uintptr_t bits = (uintptr_t)raw;
+            memcpy(&value, &bits, sizeof(bits));
+        } else if (raw) {
+            memcpy(&value, raw, sizeof(value));
+        }
     }
     SCALAR_TLS_RDUNLOCK();
     return value;
 }
 
 void rt_thread_local_set_i64(int64_t handle, int64_t value) {
-    if (handle <= 0) return;
-    size_t index = (size_t)(((uint64_t)handle - 1) & SCALAR_TLS_SLOT_MASK);
     SCALAR_TLS_RDLOCK();
-    if (index < g_scalar_tls_used && g_scalar_tls_entries[index].active &&
-        g_scalar_tls_entries[index].handle == handle) {
-        uintptr_t bits;
-        memcpy(&bits, &value, sizeof(bits));
-#ifdef SPL_THREAD_PTHREAD
-        (void)pthread_setspecific(g_scalar_tls_entries[index].key, (void*)bits);
-#else
-        (void)TlsSetValue(g_scalar_tls_entries[index].key, (void*)bits);
-#endif
+    ScalarTlsEntry* entry = scalar_tls_live(handle, NULL);
+    if (entry) {
+        if (SCALAR_TLS_INLINE) {
+            uintptr_t bits = 0;
+            memcpy(&bits, &value, sizeof(bits));
+            (void)SCALAR_TLS_RAW_SET(entry->key, (void*)bits);
+        } else {
+            int64_t* cell = (int64_t*)SCALAR_TLS_RAW_GET(entry->key);
+            if (!cell) {
+                cell = scalar_tls_cell_alloc();
+                if (cell && !SCALAR_TLS_RAW_SET(entry->key, cell)) {
+                    scalar_tls_cell_free(cell);
+                    cell = NULL;
+                }
+            }
+            if (cell) *cell = value;
+        }
     }
     SCALAR_TLS_RDUNLOCK();
 }
 
 void rt_thread_local_free(int64_t handle) {
-    if (handle <= 0) return;
-    size_t index = (size_t)(((uint64_t)handle - 1) & SCALAR_TLS_SLOT_MASK);
+    size_t index = 0;
     SCALAR_TLS_WRLOCK();
-    if (index < g_scalar_tls_used && g_scalar_tls_entries[index].active &&
-        g_scalar_tls_entries[index].handle == handle) {
+    ScalarTlsEntry* entry = scalar_tls_live(handle, &index);
+    if (entry) {
 #ifdef SPL_THREAD_PTHREAD
-        (void)pthread_key_delete(g_scalar_tls_entries[index].key);
+        if (!SCALAR_TLS_INLINE) {
+            void* cell = SCALAR_TLS_RAW_GET(entry->key);
+            if (cell) {
+                (void)SCALAR_TLS_RAW_SET(entry->key, NULL);
+                scalar_tls_cell_free(cell); /* calling thread's cell */
+            }
+        }
+        (void)pthread_key_delete(entry->key);
 #else
-        (void)TlsFree(g_scalar_tls_entries[index].key);
+        /* FlsFree invokes scalar_tls_fls_free for every live thread/fiber
+         * with a non-NULL slot; freeing here first would double-free. */
+        (void)FlsFree(entry->key);
 #endif
-        g_scalar_tls_entries[index].active = false;
-        g_scalar_tls_entries[index].next_free = g_scalar_tls_free_head;
+        entry->active = false;
+        entry->next_free = g_scalar_tls_free_head;
         g_scalar_tls_free_head = index;
     }
     SCALAR_TLS_WRUNLOCK();
@@ -310,6 +484,22 @@ void rt_thread_local_free(int64_t handle) {
 /* ================================================================
  * Thread Management
  * ================================================================ */
+
+#ifdef SPL_THREAD_WINDOWS
+typedef struct {
+    void* (*entry_point)(void*);
+    void* arg;
+} SplWinThreadStart;
+
+static DWORD WINAPI spl_win_thread_trampoline(LPVOID raw) {
+    SplWinThreadStart* start = (SplWinThreadStart*)raw;
+    void* (*entry_point)(void*) = start->entry_point;
+    void* arg = start->arg;
+    SPL_FREE(start);
+    (void)entry_point(arg);
+    return 0;
+}
+#endif
 
 spl_thread_handle spl_thread_create(void* (*entry_point)(void*), void* arg) {
     if (!entry_point) {
@@ -324,24 +514,50 @@ spl_thread_handle spl_thread_create(void* (*entry_point)(void*), void* arg) {
 
     SPL_NOTE_USER_THREADS();
 
-    if (pthread_create(thread, NULL, entry_point, arg) != 0) {
+#if defined(SIMPLE_XRAY_CONTEXT_HOOKS_V1)
+    RtXrayThreadLaunchV1 *launch = (RtXrayThreadLaunchV1 *)SPL_MALLOC(
+        sizeof(RtXrayThreadLaunchV1), "xray_thread_launch");
+    if (!launch) {
         SPL_FREE(thread);
         return 0;
     }
+    launch->entry_point = entry_point;
+    launch->argument = arg;
+    launch->attachment.attached = 0;
+    if (SIMPLE_XRAY_STARTUP_PTHREAD_CREATE_V1(thread, NULL, rt_xray_thread_entry_v1, launch) != 0) {
+        SPL_FREE(launch);
+        SPL_FREE(thread);
+        return 0;
+    }
+#else
+    if (SIMPLE_XRAY_STARTUP_PTHREAD_CREATE_V1(thread, NULL, entry_point, arg) != 0) {
+        SPL_FREE(thread);
+        return 0;
+    }
+#endif
 
     return alloc_handle(HANDLE_THREAD, thread);
 
 #else  /* Windows */
+    SplWinThreadStart* start = (SplWinThreadStart*)SPL_MALLOC(
+        sizeof(SplWinThreadStart), "thread_start");
+    if (!start) {
+        return 0;
+    }
+    start->entry_point = entry_point;
+    start->arg = arg;
+
     HANDLE thread = CreateThread(
         NULL,           /* default security */
         0,              /* default stack size */
-        (LPTHREAD_START_ROUTINE)entry_point,
-        arg,
+        spl_win_thread_trampoline,
+        start,
         0,              /* run immediately */
         NULL            /* don't need thread ID */
     );
 
     if (thread == NULL) {
+        SPL_FREE(start);
         return 0;
     }
 
@@ -400,6 +616,8 @@ bool spl_thread_join(spl_thread_handle handle) {
 #if defined(SIMPLE_RUNTIME_THREAD_RUST_OWNER)
 #define rt_thread_spawn_isolated spl_c_thread_spawn_isolated
 #define rt_thread_spawn_isolated_with_args spl_c_thread_spawn_isolated_with_args
+#define rt_thread_spawn_isolated_kind spl_c_thread_spawn_isolated_kind
+#define rt_thread_spawn_isolated_with_args_kind spl_c_thread_spawn_isolated_with_args_kind
 #define rt_thread_join spl_c_thread_join
 #define rt_thread_is_done spl_c_thread_is_done
 #define rt_thread_id spl_c_thread_id
@@ -412,11 +630,20 @@ typedef int64_t (*rt_closure_record2_fn_t)(int64_t, int64_t, int64_t);
 
 #define RT_NATIVE_DIRECT_FUNCTION_RECORD_MARKER 0x5344495245435446LL
 
+/* Registered runtime closures (runtime_native.c). Twin of executor.rs
+ * native_callable (PR #8082). */
+extern int64_t rt_closure_func_ptr(int64_t closure_value);
+extern int64_t rt_closure_retain(int64_t closure_value);
+extern int64_t rt_closure_release(int64_t closure_value);
+
 typedef struct {
     rt_closure_fn_t  entry;
     rt_closure2_fn_t entry2;
     rt_closure_record2_fn_t entry_record2;
     int64_t          closure_ptr;
+    /* Tagged registered closure pinned for the worker (0 = none); released
+     * exactly once when td is freed. */
+    int64_t          pinned_closure;
     int64_t          data1;
     int64_t          data2;
     int              raw_worker_args;
@@ -443,16 +670,10 @@ static int rt_thread_data_release(RtThreadData* td) {
 #endif
 }
 
-static int rt_native_address_is_code(int64_t raw_addr);
-
-/* Twin of executor.rs native_closure_payload. */
-static int64_t rt_native_closure_payload(int64_t raw) {
-    uint64_t value = (uint64_t)raw;
-    if (value < 4096ULL) return 0;
-    if (rt_native_word_exceeds_user_va(value)) return (int64_t)(value >> 3);
-    /* TAG_HEAP record pointer; an odd raw code address stays as is. */
-    if ((value & TAG_MASK) == TAG_HEAP && !rt_native_address_is_code(raw)) return (int64_t)(value & ~TAG_MASK);
-    return raw;
+/* Frees td and drops the worker pin on its closure, exactly once. */
+static void spl_thread_data_free(RtThreadData* td) {
+    if (td->pinned_closure) rt_closure_release(td->pinned_closure);
+    SPL_FREE(td);
 }
 
 #if defined(SPL_THREAD_HAVE_PHDR_ITERATE)
@@ -477,25 +698,100 @@ static int spl_exec_segment_probe(struct dl_phdr_info* info, size_t size, void* 
 }
 #endif
 
-/* True only when raw_addr lies inside an executable PT_LOAD segment of a
- * loaded object. dladdr() alone is not evidence: it also resolves DATA
- * addresses (a static closure record in .data/.bss), and treating such a
- * record as code jumps into it. A TBI/MTE top-byte tag is stripped before
- * the range test. */
+/* True only when raw_addr lies inside an executable region/segment (Windows
+ * VirtualQuery, ELF dl_iterate_phdr PT_LOAD+PF_X, or Darwin
+ * mach_vm_region_recurse VM_PROT_EXECUTE). dladdr() alone is not evidence: it
+ * also resolves DATA addresses (a static closure record in .data/.bss/__DATA),
+ * and treating such a record as code jumps into it. A TBI/MTE top-byte tag is
+ * stripped before the range test. */
 static int rt_native_address_is_code(int64_t raw_addr) {
 #if defined(_WIN32) || defined(_WIN64)
-    (void)raw_addr;
-    return 0;
+    MEMORY_BASIC_INFORMATION region;
+    if (VirtualQuery((const void *)(uintptr_t)raw_addr, &region, sizeof(region)) == 0 ||
+        region.State != MEM_COMMIT || (region.Protect & (PAGE_GUARD | PAGE_NOACCESS))) {
+        return 0;
+    }
+    DWORD protection = region.Protect & 0xff;
+    return protection == PAGE_EXECUTE || protection == PAGE_EXECUTE_READ ||
+           protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY;
 #elif defined(SPL_THREAD_HAVE_PHDR_ITERATE)
     SplExecSegmentProbe probe;
     probe.addr = (uintptr_t)((uint64_t)raw_addr & ~RT_NATIVE_PTR_TAG_BITS);
     probe.found = 0;
     dl_iterate_phdr(spl_exec_segment_probe, &probe);
     return probe.found;
+#elif defined(__APPLE__)
+    uint64_t target = (uint64_t)raw_addr & ~RT_NATIVE_PTR_TAG_BITS;
+    if (target < 4096ULL) {
+        return 0;
+    }
+    natural_t depth = 0;
+    for (natural_t iter = 0; iter < 16; iter++) {
+        mach_vm_address_t addr = (mach_vm_address_t)target;
+        mach_vm_size_t size = 0;
+        vm_region_submap_short_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;
+        kern_return_t kr = mach_vm_region_recurse(
+            mach_task_self(),
+            &addr,
+            &size,
+            &depth,
+            (vm_region_recurse_info_t)&info,
+            &count
+        );
+        if (kr != KERN_SUCCESS || size == 0) {
+            return 0;
+        }
+        if (target < (uint64_t)addr || (target - (uint64_t)addr) >= (uint64_t)size) {
+            return 0;
+        }
+        if (info.is_submap) {
+            depth++;
+            continue;
+        }
+        return (info.protection & VM_PROT_EXECUTE) != 0;
+    }
+    return 0;
 #else
     Dl_info info;
     memset(&info, 0, sizeof(info));
     return dladdr((void *)(intptr_t)raw_addr, &info) != 0 && info.dli_fname != NULL;
+#endif
+}
+
+/* Explicit worker-closure ABI kind (RT_WORKER_CLOSURE_*), chosen by the
+ * SPAWNER from the static type of what it passes; never inferred from the
+ * word's value. The pure decode is rt_native_function_word_decode in
+ * runtime_value.h, shared with the pool submit (runtime_pool.c and the
+ * pool-v1 path below). ADDRESS worker arguments pass through unchanged;
+ * VALUE TAG_INT selects raw i64 args, TAG_HEAP RuntimeValue args. Any other
+ * kind or tag is rejected (spawn returns 0). */
+static int spl_worker_closure_word(int64_t kind, int64_t word, int64_t* payload, int* raw_worker_args) {
+    return rt_native_function_word_decode(kind, word, payload, raw_worker_args);
+}
+
+/* 1 when two machine words at addr are committed and readable, 0 when they
+ * provably are not, -1 when this host has no fault-free probe. Twin of
+ * executor.rs native_words_readable. */
+static int spl_native_record_readable(int64_t addr) {
+#if defined(_WIN32) || defined(_WIN64)
+    uintptr_t cur = (uintptr_t)addr;
+    uintptr_t end = cur + 2 * sizeof(int64_t);
+    if (end < cur) return 0;
+    while (cur < end) {
+        MEMORY_BASIC_INFORMATION region;
+        if (VirtualQuery((const void *)cur, &region, sizeof(region)) == 0 || region.State != MEM_COMMIT ||
+            region.Protect == 0 || (region.Protect & (PAGE_GUARD | PAGE_NOACCESS))) {
+            return 0;
+        }
+        uintptr_t region_end = (uintptr_t)region.BaseAddress + region.RegionSize;
+        if (region_end <= cur) return 0;
+        cur = region_end;
+    }
+    return 1;
+#else
+    (void)addr;
+    return -1;
 #endif
 }
 
@@ -506,8 +802,15 @@ static int64_t rt_native_worker_arg(int64_t value, int raw_worker_args) {
     return value;
 }
 
+#ifdef SPL_THREAD_PTHREAD
 static void* rt_isolated_wrapper(void* raw) {
     RtThreadData* td = (RtThreadData*)raw;
+#if defined(SIMPLE_XRAY_CONTEXT_HOOKS_V1)
+    RtXrayThreadAttachmentV1 attachment = {
+        .attached = simple_xray_thread_attach_v1() == 1};
+    pthread_cleanup_push(rt_xray_thread_attachment_cleanup_v1, &attachment);
+    if (rt_xray_thread_task_root_v1() == 1) attachment.attached = 1;
+#endif
     if (td->arity == 2) {
         int64_t arg1 = rt_native_worker_arg(td->data1, td->raw_worker_args);
         int64_t arg2 = rt_native_worker_arg(td->data2, td->raw_worker_args);
@@ -517,14 +820,18 @@ static void* rt_isolated_wrapper(void* raw) {
             td->result = td->entry2(arg1, arg2);
         }
     } else if (td->entry2) {
-        td->result = td->entry2(td->closure_ptr, td->data1);
+        td->result = td->entry2(td->closure_ptr, rt_native_worker_arg(td->data1, td->raw_worker_args));
     } else {
-        td->result = td->entry(td->data1);
+        td->result = td->entry(rt_native_worker_arg(td->data1, td->raw_worker_args));
     }
+#if defined(SIMPLE_XRAY_CONTEXT_HOOKS_V1)
+    pthread_cleanup_pop(1);
+#endif
     td->done = 1;
-    if (rt_thread_data_release(td)) SPL_FREE(td);
+    if (rt_thread_data_release(td)) spl_thread_data_free(td);
     return NULL;
 }
+#endif
 
 #ifdef SPL_THREAD_WINDOWS
 static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
@@ -538,12 +845,12 @@ static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
             td->result = td->entry2(arg1, arg2);
         }
     } else if (td->entry2) {
-        td->result = td->entry2(td->closure_ptr, td->data1);
+        td->result = td->entry2(td->closure_ptr, rt_native_worker_arg(td->data1, td->raw_worker_args));
     } else {
-        td->result = td->entry(td->data1);
+        td->result = td->entry(rt_native_worker_arg(td->data1, td->raw_worker_args));
     }
     td->done = 1;
-    if (rt_thread_data_release(td)) SPL_FREE(td);
+    if (rt_thread_data_release(td)) spl_thread_data_free(td);
     return 0;
 }
 #endif
@@ -554,125 +861,157 @@ static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
  *                         (closure, nil). nil is tagged (0x3), so it must
  *                         never be read as the closure. A legacy
  *                         (0, closure) caller is still accepted.
+ *   spawn_kind(kind, ..)  same, with the closure-word kind stated by the
+ *                         spawner (RT_WORKER_CLOSURE_*). The unsuffixed
+ *                         entries are the Simple-facing ones: kind VALUE.
  *   join(h)               waits once and returns the result; a repeat join
  *                         returns nil. The handle stays valid until free.
  *   free(h)               releases the handle (detaching an unjoined thread).
  *   id(h)                 C reports the OS thread id (0 after join on
  *                         Windows), Rust a spawn counter.
- * Known divergences: Rust deep-copies `data` (clone_for_isolated_thread) and
- * honours raw_worker_args; C shares `data` and passes it unchanged. Both
- * lanes decode the closure word alike (user-VA ceiling, TAG_HEAP strip,
- * executable-segment test). On Windows rt_native_address_is_code is a no-op
- * in both lanes, so a raw code pointer is read as a closure record; on macOS
- * it falls back to dladdr, which also resolves data addresses. */
-int64_t rt_thread_spawn_isolated(int64_t closure, int64_t data) {
-    int64_t data_value = data;
-    int64_t payload = rt_native_closure_payload(closure);
-    if (payload == 0) {
-        payload = rt_native_closure_payload(data);
-        data_value = (int64_t)RT_NIL;
-    }
-    if (!payload) return 0;
-
-    rt_closure_fn_t entry = NULL;
-    rt_closure2_fn_t entry_record = NULL;
-    int64_t closure_ptr = 0;
-    if (rt_native_address_is_code(payload) || ((uint64_t)payload & TAG_MASK) != 0) {
-        entry = (rt_closure_fn_t)(intptr_t)payload;
-    } else {
-        int64_t record_entry = *(int64_t *)(intptr_t)payload;
-        if (record_entry < 4096) return 0;
-        int64_t marker = *(((int64_t *)(intptr_t)payload) + 1);
-        if (marker == RT_NATIVE_DIRECT_FUNCTION_RECORD_MARKER) {
-            entry = (rt_closure_fn_t)(intptr_t)record_entry;
-        } else {
-            entry_record = (rt_closure2_fn_t)(intptr_t)record_entry;
-            closure_ptr = payload;
+ * Known divergence: Rust deep-copies `data` (clone_for_isolated_thread); C
+ * shares `data`. Both lanes decode the closure word by its declared kind and
+ * honour the resulting raw-argument ABI for one- and two-argument workers. */
+static int spl_worker_callable(int64_t kind, int64_t word, int64_t* entry, int64_t* closure_ptr, int* raw) {
+    /* Natively compiled Simple passes a non-capturing fn value (a lifted
+     * lambda or a direct function) through the generic VALUE slot as its BARE
+     * entry address -- no `<< 3`, no `| 1` (measured on the Windows Stage 2
+     * cranelift build of avx_server_loadgen: the word was
+     * &__lambda_lift_0 = 0x...37251). Tag-decoding that word is wrong for
+     * every alignment: an odd entry has TAG_HEAP's bit set and lost it
+     * (jumped to entry-1, SIGSEGV), an 8-aligned entry reads as TAG_INT and
+     * becomes entry>>3. Such a worker boxes/unboxes its own operands
+     * (rt_value_as_int_wide on entry), so its arguments are RuntimeValues and
+     * pass through unchanged (raw = 0). Not a value guess between the two
+     * VALUE encodings: an executable-image address is neither a heap record
+     * (TAG_HEAP) nor `addr << 3` of one, which lies far outside the image. */
+    /* A Simple closure value is a TAG_HEAP-tagged registered RtCoreClosure
+     * whose word 0 is the kind/scope header, not an entry. Its func_ptr is the
+     * boxed entry `(closure, tagged...) -> tagged`: the tagged closure word is
+     * the hidden first argument and worker arguments stay tagged.
+     * Registry-validated (rt_closure_func_ptr answers 0 for anything else), so
+     * a native record is never misread. Twin of executor.rs native_callable.
+     * bug: seed_jit_spawned_thread_never_runs_join_segv_2026-11-09 */
+    if (kind == RT_WORKER_CLOSURE_VALUE && (((uint64_t)word) & TAG_MASK) == TAG_HEAP) {
+        int64_t boxed = rt_closure_func_ptr(word);
+        if (boxed != 0) {
+            if (boxed < 4096) return 0;
+            *entry = boxed;
+            *closure_ptr = word;
+            *raw = 0;
+            return 1;
         }
     }
+    if (kind == RT_WORKER_CLOSURE_VALUE && rt_native_address_is_code(word)) {
+        *entry = word;
+        *closure_ptr = 0;
+        *raw = 0;
+        return 1;
+    }
+    int64_t payload = 0;
+    if (!spl_worker_closure_word(kind, word, &payload, raw)) return 0;
+    *closure_ptr = 0;
+    if (rt_native_address_is_code(payload) || ((uint64_t)payload & TAG_MASK) != 0) {
+        *entry = payload;
+        return 1;
+    }
+    if (spl_native_record_readable(payload) == 0) return 0;
+    int64_t record_entry = *(int64_t *)(intptr_t)payload;
+    if (record_entry < 4096) return 0;
+    int64_t marker = *(((int64_t *)(intptr_t)payload) + 1);
+    *entry = record_entry;
+    if (marker != RT_NATIVE_DIRECT_FUNCTION_RECORD_MARKER) *closure_ptr = payload;
+    return 1;
+}
 
-    RtThreadData* td = (RtThreadData*)SPL_MALLOC(sizeof(RtThreadData), "rt_thread");
-    if (!td) return 0;
-    td->entry       = entry;
-    td->entry2      = entry_record;
-    td->entry_record2 = NULL;
-    td->closure_ptr = closure_ptr;
-    td->data1       = data_value;
-    td->data2       = 0;
-    td->raw_worker_args = 0;
-    td->arity       = 1;
+/* A registered heap closure (tagged) is pinned until the worker is done, so
+ * the spawner's transient scope may end first (pool parity). On retain failure
+ * frees td and returns 0. */
+static int spl_thread_pin_closure(RtThreadData* td, int64_t closure_ptr) {
+    td->pinned_closure = 0;
+    if ((((uint64_t)closure_ptr) & TAG_MASK) == TAG_HEAP) {
+        if (!rt_closure_retain(closure_ptr)) {
+            SPL_FREE(td);
+            return 0;
+        }
+        td->pinned_closure = closure_ptr;
+    }
+    return 1;
+}
+
+static int64_t spl_thread_start(RtThreadData* td) {
     td->result      = 0;
     td->done        = 0;
     td->joined      = 0;
     td->refs        = 2;
-
 #ifdef SPL_THREAD_PTHREAD
     SPL_NOTE_USER_THREADS();
-    if (pthread_create(&td->thread, NULL, rt_isolated_wrapper, td) != 0) {
-        SPL_FREE(td);
+    if (SIMPLE_XRAY_STARTUP_PTHREAD_CREATE_V1(&td->thread, NULL, rt_isolated_wrapper, td) != 0) {
+        spl_thread_data_free(td);
         return 0;
     }
 #else
     td->thread = CreateThread(NULL, 0, rt_isolated_wrapper_win, td, 0, NULL);
     if (td->thread == NULL) {
-        SPL_FREE(td);
+        spl_thread_data_free(td);
         return 0;
     }
 #endif
     return alloc_handle(HANDLE_THREAD, td);
 }
 
-int64_t rt_thread_spawn_isolated_with_args(int64_t fn_ptr, int64_t data1, int64_t data2) {
-    int64_t payload = rt_native_closure_payload(fn_ptr);
-    if (!payload) return 0;
+int64_t rt_thread_spawn_isolated_kind(int64_t kind, int64_t closure, int64_t data) {
+    int64_t entry = 0, closure_ptr = 0;
+    int raw = 0;
+    if (!spl_worker_callable(kind, closure, &entry, &closure_ptr, &raw)) return 0;
 
-    rt_closure2_fn_t entry = NULL;
-    rt_closure_record2_fn_t entry_record = NULL;
-    int64_t closure_ptr = 0;
+    RtThreadData* td = (RtThreadData*)SPL_MALLOC(sizeof(RtThreadData), "rt_thread");
+    if (!td) return 0;
+    td->entry       = closure_ptr ? NULL : (rt_closure_fn_t)(intptr_t)entry;
+    td->entry2      = closure_ptr ? (rt_closure2_fn_t)(intptr_t)entry : NULL;
+    td->entry_record2 = NULL;
+    td->closure_ptr = closure_ptr;
+    /* A registered heap closure (tagged) is pinned until the worker is done,
+     * so the spawner's transient scope may end first (pool parity). */
+    if (!spl_thread_pin_closure(td, closure_ptr)) return 0;
+    td->data1       = data;
+    td->data2       = 0;
+    td->raw_worker_args = raw;
+    td->arity       = 1;
+    return spl_thread_start(td);
+}
 
-    if (rt_native_address_is_code(payload) || ((uint64_t)payload & TAG_MASK) != 0) {
-        entry = (rt_closure2_fn_t)(intptr_t)payload;
-    } else {
-        int64_t record_entry = *(int64_t *)(intptr_t)payload;
-        if (record_entry < 4096) return 0;
-        int64_t marker = *(((int64_t *)(intptr_t)payload) + 1);
-        if (marker == RT_NATIVE_DIRECT_FUNCTION_RECORD_MARKER) {
-            entry = (rt_closure2_fn_t)(intptr_t)record_entry;
-        } else {
-            entry_record = (rt_closure_record2_fn_t)(intptr_t)record_entry;
-            closure_ptr = payload;
-        }
+int64_t rt_thread_spawn_isolated(int64_t closure, int64_t data) {
+    if ((uint64_t)closure < 4096ULL) {
+        /* Legacy (0, closure) spelling. */
+        return rt_thread_spawn_isolated_kind(RT_WORKER_CLOSURE_VALUE, data, (int64_t)RT_NIL);
     }
+    return rt_thread_spawn_isolated_kind(RT_WORKER_CLOSURE_VALUE, closure, data);
+}
+
+int64_t rt_thread_spawn_isolated_with_args_kind(int64_t kind, int64_t fn_ptr, int64_t data1, int64_t data2) {
+    int64_t entry = 0, closure_ptr = 0;
+    int raw = 0;
+    if (!spl_worker_callable(kind, fn_ptr, &entry, &closure_ptr, &raw)) return 0;
 
     RtThreadData* td = (RtThreadData*)SPL_MALLOC(sizeof(RtThreadData), "rt_thread2");
     if (!td) return 0;
     td->entry       = NULL;
-    td->entry2      = entry;
-    td->entry_record2 = entry_record;
+    td->entry2      = closure_ptr ? NULL : (rt_closure2_fn_t)(intptr_t)entry;
+    td->entry_record2 = closure_ptr ? (rt_closure_record2_fn_t)(intptr_t)entry : NULL;
     td->closure_ptr = closure_ptr;
+    /* A registered heap closure (tagged) is pinned until the worker is done,
+     * so the spawner's transient scope may end first (pool parity). */
+    if (!spl_thread_pin_closure(td, closure_ptr)) return 0;
     td->data1       = data1;
     td->data2       = data2;
-    td->raw_worker_args = 1;
+    td->raw_worker_args = raw;
     td->arity       = 2;
-    td->result      = 0;
-    td->done        = 0;
-    td->joined      = 0;
-    td->refs        = 2;
+    return spl_thread_start(td);
+}
 
-#ifdef SPL_THREAD_PTHREAD
-    SPL_NOTE_USER_THREADS();
-    if (pthread_create(&td->thread, NULL, rt_isolated_wrapper, td) != 0) {
-        SPL_FREE(td);
-        return 0;
-    }
-#else
-    td->thread = CreateThread(NULL, 0, rt_isolated_wrapper_win, td, 0, NULL);
-    if (td->thread == NULL) {
-        SPL_FREE(td);
-        return 0;
-    }
-#endif
-    return alloc_handle(HANDLE_THREAD, td);
+int64_t rt_thread_spawn_isolated_with_args(int64_t fn_ptr, int64_t data1, int64_t data2) {
+    return rt_thread_spawn_isolated_with_args_kind(RT_WORKER_CLOSURE_VALUE, fn_ptr, data1, data2);
 }
 
 int64_t rt_thread_join(int64_t handle) {
@@ -718,12 +1057,14 @@ void rt_thread_free(int64_t handle) {
 #endif
     }
     /* An unjoined worker may still be running: it frees td on exit. */
-    if (rt_thread_data_release(td)) SPL_FREE(td);
+    if (rt_thread_data_release(td)) spl_thread_data_free(td);
 }
 
 #if defined(SIMPLE_RUNTIME_THREAD_RUST_OWNER)
 #undef rt_thread_spawn_isolated
 #undef rt_thread_spawn_isolated_with_args
+#undef rt_thread_spawn_isolated_kind
+#undef rt_thread_spawn_isolated_with_args_kind
 #undef rt_thread_join
 #undef rt_thread_is_done
 #undef rt_thread_id
@@ -767,6 +1108,22 @@ typedef struct RtPoolTask {
 #endif
 } RtPoolTask;
 
+static void rt_pool_task_lock(RtPoolTask* task) {
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&task->lock);
+#else
+    EnterCriticalSection(&task->lock);
+#endif
+}
+
+static void rt_pool_task_unlock(RtPoolTask* task) {
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_unlock(&task->lock);
+#else
+    LeaveCriticalSection(&task->lock);
+#endif
+}
+
 #define RT_POOL_V1_DIRECT_FUNCTION_MARKER INT64_C(0x5344495245435446)
 
 static int64_t rt_pool_v1_scalar_task_dispatch(int64_t raw_task) {
@@ -797,6 +1154,19 @@ static int64_t spl_pool_v1_boxed_task_dispatch(int64_t raw_task) {
     int64_t result = rt_value_unbox_int(task->boxed_entry(closure, rt_value_int(task->scalar_input)));
     /* The pin taken at submit ends with the run (exactly once: dispose skips a
      * task whose closure was already released here). */
+    task->boxed_closure = 0;
+    rt_closure_release(closure);
+    return result;
+}
+
+/* Zero-argument boxed dispatch for rt_pool_submit: a registered closure's
+ * func_ptr is the boxed entry `(closure) -> tagged`. */
+static int64_t spl_pool_boxed0_task_dispatch(int64_t raw_task) {
+    RtPoolTask* task = (RtPoolTask*)(intptr_t)raw_task;
+    if (!task || !task->boxed_entry) return 0;
+    int64_t closure = task->boxed_closure;
+    int64_t (*entry0)(int64_t) = (int64_t (*)(int64_t))(intptr_t)task->boxed_entry;
+    int64_t result = rt_value_unbox_int(entry0(closure));
     task->boxed_closure = 0;
     rt_closure_release(closure);
     return result;
@@ -979,9 +1349,16 @@ static int g_pool_blocked_workers = 0;
 static int64_t g_pool_submitted_tasks = 0;
 static int64_t g_pool_completed_tasks = 0;
 
+#if defined(_MSC_VER) && !defined(__clang__)
+#define RT_POOL_TLS __declspec(thread)
+#else
+/* clang targeting windows-gnu (llvm-mingw) ignores __declspec(thread) with a
+ * warning, silently making the variable process-global. */
+#define RT_POOL_TLS _Thread_local
+#endif
 #ifdef SPL_THREAD_WINDOWS
-__declspec(thread) static int g_pool_worker_tls = 0;
-__declspec(thread) static int g_pool_worker_blocked_tls = 0;
+static RT_POOL_TLS int g_pool_worker_tls = 0;
+static RT_POOL_TLS int g_pool_worker_blocked_tls = 0;
 #else
 static __thread int g_pool_worker_tls = 0;
 static __thread int g_pool_worker_blocked_tls = 0;
@@ -1003,17 +1380,7 @@ static int rt_pool_default_worker_count(void) {
     return (int)count;
 }
 
-static int rt_pool_clamp_worker_count(int64_t count) {
-    if (count < 1) return 1;
-    if (count > RT_POOL_MAX_WORKERS) return RT_POOL_MAX_WORKERS;
-    return (int)count;
-}
-
-static int rt_pool_effective_worker_count(void) {
-    return g_pool_configured_worker_count > 0
-        ? g_pool_configured_worker_count
-        : rt_pool_default_worker_count();
-}
+#include "rt_pool_core.h"
 
 static void* rt_pool_worker_main(void* raw);
 #ifdef SPL_THREAD_WINDOWS
@@ -1027,7 +1394,7 @@ static int rt_pool_spawn_worker(int worker_id) {
 #ifdef SPL_THREAD_PTHREAD
     pthread_t thread;
     SPL_NOTE_USER_THREADS();
-    if (pthread_create(&thread, NULL, rt_pool_worker_main, arg) == 0) {
+    if (SIMPLE_XRAY_STARTUP_PTHREAD_CREATE_V1(&thread, NULL, rt_pool_worker_main, arg) == 0) {
         pthread_detach(thread);
         return 1;
     }
@@ -1042,34 +1409,6 @@ static int rt_pool_spawn_worker(int worker_id) {
     SPL_FREE(arg);
     return 0;
 #endif
-}
-
-static int rt_pool_has_tasks_locked(void) {
-    int count = g_pool_worker_count > 0 ? g_pool_worker_count : rt_pool_effective_worker_count();
-    if (count > RT_POOL_MAX_WORKERS) count = RT_POOL_MAX_WORKERS;
-    for (int i = 0; i < count; i++) {
-        if (g_pool_queues[i].head != NULL) return 1;
-    }
-    return 0;
-}
-
-static RtPoolTask* rt_pool_queue_pop_head(RtPoolQueue* queue) {
-    RtPoolTask* task = queue->head;
-    if (!task) return NULL;
-    queue->head = task->next;
-    if (!queue->head) queue->tail = NULL;
-    task->next = NULL;
-    return task;
-}
-
-static void rt_pool_queue_push_tail(RtPoolQueue* queue, RtPoolTask* task) {
-    task->next = NULL;
-    if (queue->tail) {
-        queue->tail->next = task;
-    } else {
-        queue->head = task;
-    }
-    queue->tail = task;
 }
 
 static void rt_pool_state_v1_started(RtPoolTask* task) {
@@ -1108,12 +1447,8 @@ static void rt_pool_state_v1_completed(RtPoolTask* task) {
 #endif
 }
 
-static RtPoolTask* rt_pool_pop_task(int worker_id) {
-#ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_lock(&g_pool_lock);
-    while (!rt_pool_has_tasks_locked()) {
-        pthread_cond_wait(&g_pool_not_empty, &g_pool_lock);
-    }
+/* Caller holds g_pool_lock. */
+static RtPoolTask* rt_pool_take_task_locked(int worker_id) {
     int count = g_pool_worker_count > 0 ? g_pool_worker_count : 1;
     RtPoolTask* task = rt_pool_queue_pop_head(&g_pool_queues[worker_id % count]);
     for (int offset = 1; task == NULL && offset < count; offset++) {
@@ -1124,6 +1459,16 @@ static RtPoolTask* rt_pool_pop_task(int worker_id) {
         if (g_pool_pending_tasks > 0) g_pool_pending_tasks--;
         g_pool_busy_workers++;
     }
+    return task;
+}
+
+static RtPoolTask* rt_pool_pop_task(int worker_id) {
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&g_pool_lock);
+    while (!rt_pool_has_tasks_locked()) {
+        pthread_cond_wait(&g_pool_not_empty, &g_pool_lock);
+    }
+    RtPoolTask* task = rt_pool_take_task_locked(worker_id);
     pthread_mutex_unlock(&g_pool_lock);
     if (task != NULL) rt_pool_state_v1_started(task);
     return task;
@@ -1132,16 +1477,7 @@ static RtPoolTask* rt_pool_pop_task(int worker_id) {
     while (!rt_pool_has_tasks_locked()) {
         SleepConditionVariableCS(&g_pool_not_empty, &g_pool_lock, INFINITE);
     }
-    int count = g_pool_worker_count > 0 ? g_pool_worker_count : 1;
-    RtPoolTask* task = rt_pool_queue_pop_head(&g_pool_queues[worker_id % count]);
-    for (int offset = 1; task == NULL && offset < count; offset++) {
-        int victim = (worker_id + offset) % count;
-        task = rt_pool_queue_pop_head(&g_pool_queues[victim]);
-    }
-    if (task != NULL) {
-        if (g_pool_pending_tasks > 0) g_pool_pending_tasks--;
-        g_pool_busy_workers++;
-    }
+    RtPoolTask* task = rt_pool_take_task_locked(worker_id);
     LeaveCriticalSection(&g_pool_lock);
     if (task != NULL) rt_pool_state_v1_started(task);
     return task;
@@ -1181,14 +1517,25 @@ static void* rt_pool_worker_main(void* raw) {
     RtPoolWorkerArg* arg = (RtPoolWorkerArg*)raw;
     int worker_id = arg ? arg->worker_id : 0;
     if (arg) SPL_FREE(arg);
+#if defined(SIMPLE_XRAY_CONTEXT_HOOKS_V1)
+    RtXrayThreadAttachmentV1 attachment = {
+        .attached = simple_xray_thread_attach_v1() == 1};
+    pthread_cleanup_push(rt_xray_thread_attachment_cleanup_v1, &attachment);
+#endif
     g_pool_worker_tls = 1;
     g_pool_worker_blocked_tls = 0;
     for (;;) {
         RtPoolTask* task = rt_pool_pop_task(worker_id);
         if (task && task->entry) {
+#if defined(SIMPLE_XRAY_CONTEXT_HOOKS_V1)
+            if (rt_xray_thread_task_root_v1() == 1) attachment.attached = 1;
+#endif
             rt_pool_complete_task(task, task->entry(task->closure_ptr));
         }
     }
+#if defined(SIMPLE_XRAY_CONTEXT_HOOKS_V1)
+    pthread_cleanup_pop(1);
+#endif
     return NULL;
 }
 
@@ -1443,13 +1790,34 @@ int64_t rt_pool_safepoint(void) {
 int64_t rt_pool_submit(int64_t arg0, int64_t arg1) {
     int64_t closure_ptr = (arg1 != 0) ? arg1 : arg0;
     if (!closure_ptr) return 0;
-    rt_closure_fn_t fn_ptr = *(rt_closure_fn_t*)(intptr_t)closure_ptr;
-    if (!fn_ptr) return 0;
+    /* A native Simple closure value is a TAG_HEAP-tagged RtCoreClosure whose
+     * first word is not an entry: dispatch it boxed, pinned until it runs. */
+    int64_t boxed = rt_closure_func_ptr(closure_ptr);
+    rt_closure_fn_t fn_ptr = NULL;
+    if (boxed) {
+        if (!rt_closure_retain(closure_ptr)) return 0;
+    } else {
+        /* Legacy raw record: first word is `int64_t entry(record)`. */
+        if (((uint64_t)closure_ptr) & 7ULL) return 0;
+        fn_ptr = *(rt_closure_fn_t*)(intptr_t)closure_ptr;
+        if (!fn_ptr) return 0;
+    }
 
     RtPoolTask* task = (RtPoolTask*)SPL_MALLOC(sizeof(RtPoolTask), "rt_pool_task");
-    if (!task) return 0;
-    task->entry = fn_ptr;
-    task->closure_ptr = closure_ptr;
+    if (!task) {
+        if (boxed) rt_closure_release(closure_ptr);
+        return 0;
+    }
+    memset(task, 0, sizeof(*task));
+    if (boxed) {
+        task->boxed_entry = (int64_t (*)(int64_t, int64_t))(intptr_t)boxed;
+        task->boxed_closure = closure_ptr;
+        task->entry = spl_pool_boxed0_task_dispatch;
+        task->closure_ptr = (int64_t)(intptr_t)task;
+    } else {
+        task->entry = fn_ptr;
+        task->closure_ptr = closure_ptr;
+    }
     task->result = 0;
     task->done = 0;
     task->joined = 0;
@@ -1473,6 +1841,7 @@ int64_t rt_pool_submit(int64_t arg0, int64_t arg1) {
 #else
         DeleteCriticalSection(&task->lock);
 #endif
+        if (task->boxed_closure) rt_closure_release(task->boxed_closure);
         SPL_FREE(task);
         return 0;
     }
@@ -1550,9 +1919,13 @@ static void rt_pool_v1_task_dispose(RtPoolTask* task) {
     SPL_FREE(task);
 }
 
-static RtPoolTask* rt_pool_v1_scalar_task_create(int64_t function_value, int64_t input) {
-    int64_t payload = rt_native_closure_payload(function_value);
-    if (payload == 0) return NULL;
+static RtPoolTask* rt_pool_v1_scalar_task_create(int64_t kind, int64_t function_value, int64_t input) {
+    /* Decoded by the submitter's declared kind, never by the word's value
+     * (pool_native_function_payload_value_heuristic_2026-11-06). */
+    int64_t payload = 0;
+    int raw_record = 0;
+    if (!rt_native_function_word_decode(kind, function_value, &payload, &raw_record)) return NULL;
+    (void)raw_record; /* both encodings name the same task ABI: (i64) -> i64 */
     const int64_t* descriptor = (const int64_t*)(intptr_t)payload;
     int is_direct = descriptor[0] != 0 && descriptor[1] == RT_POOL_V1_DIRECT_FUNCTION_MARKER;
     /* Probed only after the direct-record test: a closure's word 1 is its
@@ -1615,10 +1988,19 @@ int64_t rt_pool_state_create_v1(int64_t capacity) {
     return handle;
 }
 
-int64_t rt_pool_state_try_submit_i64_v1(int64_t state_handle, int64_t entry_fn, int64_t input_i64) {
+/* Pool submit with an explicit function-value kind (RT_WORKER_CLOSURE_*),
+ * chosen by the submitter: ADDRESS for a machine-address record (runtime and
+ * test callers), VALUE for a tagged Simple function value. Unknown kinds and
+ * tags are rejected (-3). Twin of runtime_pool.c.
+ * Counter ordering is intentionally NOT shared (rt_pool_core.h): this lane
+ * decides rejection and bumps outstanding/pending in one locked step, then
+ * rolls back inline if the refcounted v1 handle alloc fails; runtime_pool.c
+ * rolls back through rt_pool_submit_rollback after a close-wait on its slot
+ * table. Keep each lane's sequence matched to its own handle table. */
+int64_t rt_pool_state_try_submit_i64_kind_v1(int64_t state_handle, int64_t kind, int64_t entry_fn, int64_t input_i64) {
     RtPoolStateV1* state = (RtPoolStateV1*)rt_pool_v1_handle_acquire(state_handle, RT_POOL_V1_STATE);
     if (!state) return -3;
-    RtPoolTask* task = rt_pool_v1_scalar_task_create(entry_fn, input_i64);
+    RtPoolTask* task = rt_pool_v1_scalar_task_create(kind, entry_fn, input_i64);
     if (!task) {
         rt_pool_v1_handle_release(state_handle);
         return -3;
@@ -1684,20 +2066,18 @@ int64_t rt_pool_state_try_submit_i64_v1(int64_t state_handle, int64_t entry_fn, 
     return task_handle;
 }
 
+/* Simple-facing legacy entry (extern name kept for deployed binaries): the
+ * Simple pool facade passes a tagged function value, so the kind is VALUE. */
+int64_t rt_pool_state_try_submit_i64_v1(int64_t state_handle, int64_t entry_fn, int64_t input_i64) {
+    return rt_pool_state_try_submit_i64_kind_v1(state_handle, RT_WORKER_CLOSURE_VALUE, entry_fn, input_i64);
+}
+
 int64_t rt_pool_task_status_i64_v1(int64_t task_handle) {
     RtPoolTask* task = (RtPoolTask*)rt_pool_v1_handle_acquire(task_handle, RT_POOL_V1_TASK);
     if (!task) return -1;
-#ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_lock(&task->lock);
-#else
-    EnterCriticalSection(&task->lock);
-#endif
+    rt_pool_task_lock(task);
     int64_t status = task->released ? 3 : (task->joined ? 2 : (task->done ? 1 : 0));
-#ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_unlock(&task->lock);
-#else
-    LeaveCriticalSection(&task->lock);
-#endif
+    rt_pool_task_unlock(task);
     rt_pool_v1_handle_release(task_handle);
     return status;
 }
@@ -1714,11 +2094,7 @@ int64_t rt_pool_task_join_i64_v1(int64_t task_handle) {
 #endif
     task->joined = 1;
     int64_t result = task->result;
-#ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_unlock(&task->lock);
-#else
-    LeaveCriticalSection(&task->lock);
-#endif
+    rt_pool_task_unlock(task);
     rt_pool_v1_handle_release(task_handle);
     return result;
 }
@@ -1727,18 +2103,10 @@ int64_t rt_pool_task_release_i64_v1(int64_t task_handle) {
     RtPoolTask* task = (RtPoolTask*)rt_pool_v1_handle_acquire(task_handle, RT_POOL_V1_TASK);
     if (!task || !task->state_v1) return -1;
     RtPoolStateV1* state = task->state_v1;
-#ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_lock(&task->lock);
-#else
-    EnterCriticalSection(&task->lock);
-#endif
+    rt_pool_task_lock(task);
     int rejection = !task->done ? -3 : (task->released ? -2 : 0);
     if (!rejection) task->released = 1;
-#ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_unlock(&task->lock);
-#else
-    LeaveCriticalSection(&task->lock);
-#endif
+    rt_pool_task_unlock(task);
     if (rejection) {
         rt_pool_v1_handle_release(task_handle);
         return rejection;
@@ -1991,6 +2359,17 @@ void spl_thread_yield(void) {
  * Mutex
  * ================================================================ */
 
+#ifdef SPL_THREAD_PTHREAD
+/* Resolves a pthread handle; NULL means invalid, and callers report failure. */
+static pthread_mutex_t* pthread_mutex_of(spl_mutex_handle handle) {
+    return (pthread_mutex_t*)get_handle(handle, HANDLE_MUTEX);
+}
+
+static pthread_cond_t* pthread_cond_of(spl_condvar_handle handle) {
+    return (pthread_cond_t*)get_handle(handle, HANDLE_CONDVAR);
+}
+#endif
+
 spl_mutex_handle spl_mutex_create(void) {
 #ifdef SPL_THREAD_PTHREAD
     pthread_mutex_t* mutex = (pthread_mutex_t*)SPL_MALLOC(sizeof(pthread_mutex_t), "mutex");
@@ -2018,12 +2397,8 @@ spl_mutex_handle spl_mutex_create(void) {
 
 bool spl_mutex_lock(spl_mutex_handle handle) {
 #ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_t* mutex = (pthread_mutex_t*)get_handle(handle, HANDLE_MUTEX);
-    if (!mutex) {
-        return false;
-    }
-
-    return (pthread_mutex_lock(mutex) == 0);
+    pthread_mutex_t* mutex = pthread_mutex_of(handle);
+    return mutex && (pthread_mutex_lock(mutex) == 0);
 
 #else  /* Windows */
     CRITICAL_SECTION* cs = (CRITICAL_SECTION*)get_handle(handle, HANDLE_MUTEX);
@@ -2038,12 +2413,8 @@ bool spl_mutex_lock(spl_mutex_handle handle) {
 
 bool spl_mutex_try_lock(spl_mutex_handle handle) {
 #ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_t* mutex = (pthread_mutex_t*)get_handle(handle, HANDLE_MUTEX);
-    if (!mutex) {
-        return false;
-    }
-
-    return (pthread_mutex_trylock(mutex) == 0);
+    pthread_mutex_t* mutex = pthread_mutex_of(handle);
+    return mutex && (pthread_mutex_trylock(mutex) == 0);
 
 #else  /* Windows */
     CRITICAL_SECTION* cs = (CRITICAL_SECTION*)get_handle(handle, HANDLE_MUTEX);
@@ -2057,12 +2428,8 @@ bool spl_mutex_try_lock(spl_mutex_handle handle) {
 
 bool spl_mutex_unlock(spl_mutex_handle handle) {
 #ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_t* mutex = (pthread_mutex_t*)get_handle(handle, HANDLE_MUTEX);
-    if (!mutex) {
-        return false;
-    }
-
-    return (pthread_mutex_unlock(mutex) == 0);
+    pthread_mutex_t* mutex = pthread_mutex_of(handle);
+    return mutex && (pthread_mutex_unlock(mutex) == 0);
 
 #else  /* Windows */
     CRITICAL_SECTION* cs = (CRITICAL_SECTION*)get_handle(handle, HANDLE_MUTEX);
@@ -2181,12 +2548,8 @@ bool spl_condvar_wait_timeout(spl_condvar_handle cv_handle, spl_mutex_handle mut
 
 bool spl_condvar_signal(spl_condvar_handle handle) {
 #ifdef SPL_THREAD_PTHREAD
-    pthread_cond_t* cond = (pthread_cond_t*)get_handle(handle, HANDLE_CONDVAR);
-    if (!cond) {
-        return false;
-    }
-
-    return (pthread_cond_signal(cond) == 0);
+    pthread_cond_t* cond = pthread_cond_of(handle);
+    return cond && (pthread_cond_signal(cond) == 0);
 
 #else  /* Windows */
     CONDITION_VARIABLE* cv = (CONDITION_VARIABLE*)get_handle(handle, HANDLE_CONDVAR);
@@ -2201,12 +2564,8 @@ bool spl_condvar_signal(spl_condvar_handle handle) {
 
 bool spl_condvar_broadcast(spl_condvar_handle handle) {
 #ifdef SPL_THREAD_PTHREAD
-    pthread_cond_t* cond = (pthread_cond_t*)get_handle(handle, HANDLE_CONDVAR);
-    if (!cond) {
-        return false;
-    }
-
-    return (pthread_cond_broadcast(cond) == 0);
+    pthread_cond_t* cond = pthread_cond_of(handle);
+    return cond && (pthread_cond_broadcast(cond) == 0);
 
 #else  /* Windows */
     CONDITION_VARIABLE* cv = (CONDITION_VARIABLE*)get_handle(handle, HANDLE_CONDVAR);
@@ -2327,32 +2686,50 @@ int64_t spl_thread_cpu_count(void) {
  * shared-library closure. */
 extern void worker_loop_entry(int64_t pool_id) __attribute__((weak_import));
 #elif defined(_MSC_VER)
-/* MSVC has no weak symbols and rejects __attribute__ outright, so this
- * declaration had never compiled under cl.exe. /alternatename is the supported
- * equivalent: the linker binds worker_loop_entry to the fallback below ONLY
- * when nothing else defines it, which is exactly the "optional provider"
- * contract the weak declaration expresses. The `if (worker_loop_entry)` guards
- * at the call sites stay correct -- they exist to avoid calling through a null
- * address, and here the address is a do-nothing stub with the same effect as
- * skipping the call. x64 C symbols are undecorated, so the name needs no
- * leading underscore. */
-void worker_loop_entry_default(int64_t pool_id) { (void)pool_id; }
+/* MSVC resolves an absent provider to a non-null fallback. Detect that
+ * fallback explicitly so an interpreter does not spawn a no-op worker.
+ * x64 C symbols are undecorated. */
+/* Keep the fallback distinct from a linked empty worker under /OPT:ICF. */
+static volatile unsigned char worker_loop_entry_fallback_marker;
+void worker_loop_entry_default(int64_t pool_id) {
+    (void)pool_id;
+    (void)worker_loop_entry_fallback_marker;
+}
 #pragma comment(linker, "/alternatename:worker_loop_entry=worker_loop_entry_default")
 extern void worker_loop_entry(int64_t pool_id);
 #else
 extern void worker_loop_entry(int64_t pool_id) __attribute__((weak));
 #endif
 
+static bool worker_loop_entry_available(void) {
+#if defined(_MSC_VER)
+    /* The linker alias is invisible to the optimizer. A volatile load keeps
+     * distinct declarations from being folded into an always-true comparison. */
+    void (*volatile entry)(int64_t) = worker_loop_entry;
+    return entry != worker_loop_entry_default;
+#else
+    return worker_loop_entry != NULL;
+#endif
+}
+
 /* Thread worker wrapper for pthread */
 #ifdef SPL_THREAD_PTHREAD
 static void* worker_thread_wrapper(void* arg) {
     int64_t pool_id = (int64_t)(intptr_t)arg;
+#if defined(SIMPLE_XRAY_CONTEXT_HOOKS_V1)
+    RtXrayThreadAttachmentV1 attachment = {
+        .attached = simple_xray_thread_attach_v1() == 1};
+    pthread_cleanup_push(rt_xray_thread_attachment_cleanup_v1, &attachment);
+#endif
 
     /* Call Simple worker function if linked */
-    if (worker_loop_entry) {
+    if (worker_loop_entry_available()) {
         worker_loop_entry(pool_id);
     }
 
+#if defined(SIMPLE_XRAY_CONTEXT_HOOKS_V1)
+    pthread_cleanup_pop(1);
+#endif
     return NULL;
 }
 #else  /* Windows */
@@ -2360,7 +2737,7 @@ static DWORD WINAPI worker_thread_wrapper(LPVOID arg) {
     int64_t pool_id = (int64_t)(intptr_t)arg;
 
     /* Call Simple worker function if linked */
-    if (worker_loop_entry) {
+    if (worker_loop_entry_available()) {
         worker_loop_entry(pool_id);
     }
 
@@ -2370,7 +2747,7 @@ static DWORD WINAPI worker_thread_wrapper(LPVOID arg) {
 
 spl_thread_handle spl_thread_pool_spawn_worker(int64_t pool_id) {
     /* Check if worker function is available (compiled mode only) */
-    if (!worker_loop_entry) {
+    if (!worker_loop_entry_available()) {
         return 0;  /* Not available in interpreter mode */
     }
 
@@ -2383,7 +2760,7 @@ spl_thread_handle spl_thread_pool_spawn_worker(int64_t pool_id) {
 
     SPL_NOTE_USER_THREADS();
 
-    int result = pthread_create(thread, NULL, worker_thread_wrapper,
+    int result = SIMPLE_XRAY_STARTUP_PTHREAD_CREATE_V1(thread, NULL, worker_thread_wrapper,
                                 (void*)(intptr_t)pool_id);
     if (result != 0) {
         SPL_FREE(thread);

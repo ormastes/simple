@@ -1,0 +1,393 @@
+# @req REQ-GEN-COV-MIRERASED
+"""
+# MC/DC coverage: function_lowering.spl — lower_function / lower_block_expected / lower_const
+
+Target: src/compiler/50.mir/_MirLowering/function_lowering.spl
+Each example parses a small module, lowers it to HIR, then to MIR. Shapes the
+parser cannot spell directly (GPU kernels, export attributes, receiverless
+methods, Ref / iso parameters) are produced by editing the lowered
+`HirFunction` and calling `MirLowering.lower_function` on it.
+
+## Decision inventory (this file)
+
+| Line | Decision | Covering its |
+|------|----------|--------------|
+| 230/231/232 | attr or fn GPU kernel, attr target / backends override | MIRERASED-210, 211 |
+| 286/290/297/299/575/895/899 | kernel target vulkan / cuda / host, backend order | MIRERASED-210, 211 |
+| 385/386 | instance method receiver check (c0, c1, c2) | MIRERASED-212 |
+| 435/446 | declared owner, export name | MIRERASED-201, 213 |
+| 459/479/481 | local / param loops | every lowering |
+| 496/498/500/559 | nogc_strict short-candidate param provenance | MIRERASED-214 |
+| 516/526 | resource-direct param | F only: needs a resource type registered on the lowering; gap |
+| 557 | `me` receiver (c0..c3) | MIRERASED-203 |
+| 560/561 | native trait value param | F only (no native trait registered in a unit module); gap |
+| 575 | array param on host vs kernel | MIRERASED-203, 210 |
+| 624/625 | iso Named param provenance | MIRERASED-214 |
+| 640 | Ref Named param provenance | MIRERASED-214 |
+| 655/673/683 | Named param: by value copy / mut / class / me / short | MIRERASED-203, 214 |
+| 739 | entry-module `main` (c0..c2) | MIRERASED-204 |
+| 775/785 | Optional tail conditional into scalar, Bool return | MIRERASED-202 |
+| 801/802/806 | explicit terminator, Unit return, missing return | MIRERASED-202, 205 |
+| 812/839/866 | erased decode of a `T` tail into a scalar return | MIRERASED-201 |
+| 912/914 | export attr C / non-C | MIRERASED-213 |
+| 922/927 | driver manifest / VHDL metadata | 922 F only (apply_synthetic_driver_codegen needs a manifest); 927 MIRERASED-213 |
+| 1050/1057/1091 | module constants | MIRERASED-206 |
+| 1507..1620 | lower_block_expected: trace gates | trace spec; F here |
+| 1514/1544/1554 | stmt loop, early terminator, block value | MIRERASED-202, 205 |
+| 1591/1612 | ExistsCheck tail in Bool position; typed tail value | MIRERASED-207, 217, 219 |
+| 65/66, 366/370/399, 1119 | tag-probe gate | F here; T in function_lowering_tag_probe_mcdc_spec.spl |
+| 368 | `probe_disc == -1` | T needs a zero/nil kind carrier; unreachable on the interpreter; gap |
+| 1155-1166, 1529-1535 | lower-type / stmt probe gates | trace spec (1529 T unreachable: a signature lower_type always caches the gate first) |
+| 481 F | parameter without an Arg local | unreachable: begin_function creates one Arg local per signature param; gap |
+| 775 c2 F | body.has with a nil value | not constructible without corrupting HIR; gap |
+| 812/866 F | Some tail with no body value | unreachable: lower_block returns Some only when body.has; gap |
+| 1754 | inline asm writeback loop | not driven (needs an asm block with outputs); gap |
+
+Bug suspects: none in this file.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+# @tag:generics
+# @tag:coverage
+
+use std.spec.*
+use compiler.common.config.Logger
+use compiler.common.diagnostics.span.Span
+use compiler.common.attributes.{ExportAttr}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+struct Lowered:
+    hir: HirModule
+    mir: MirModule
+    lowering: MirLowering
+
+fn lower_src(src: text, entry: bool, strict: bool) -> Lowered:
+    val file = "testdata/fl_body_cov.spl"
+    val parsed = parse_full_frontend(src, file, "fl_body_cov", Logger(level: 0))
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    lowering.lowering_entry_module = entry
+    lowering.nogc_strict = strict
+    val mir = lowering.lower_module(hir)
+    Lowered(hir: hir, mir: mir, lowering: lowering)
+
+fn mir_fn(l: Lowered, short: text) -> MirFunction?:
+    for f in l.mir.functions.values():
+        if f.name == short or f.name.ends_with("." + short):
+            return Some(f)
+    nil
+
+fn must_mir(l: Lowered, short: text) -> MirFunction:
+    """The named function; fails the example (and returns any function) when absent."""
+    for f in l.mir.functions.values():
+        if f.name == short or f.name.ends_with("." + short):
+            return f
+    expect("missing MIR fn " + short).to_equal("")
+    l.mir.functions.values()[0]
+
+fn must_hir(l: Lowered, short: text) -> HirFunction:
+    for f in l.hir.functions.values():
+        if f.name == short:
+            return f
+    expect("missing HIR fn " + short).to_equal("")
+    l.hir.functions.values()[0]
+
+fn callees(f: MirFunction) -> [text]:
+    var out: [text] = []
+    for b in f.blocks:
+        for i in b.instructions:
+            match i.kind:
+                case MirInstKind.Call(_, callee, _):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(name), _): out.push(name)
+                        case _: pass
+                case _: pass
+    out
+
+fn messages(l: MirLowering) -> text:
+    var all = ""
+    for e in l.errors:
+        all = all + e.message + "\n"
+    all
+
+fn ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn with_param_type(f: HirFunction, index: i64, t: HirType) -> HirFunction:
+    var g = f
+    var ps = g.params
+    var p = ps[index]
+    p.type_ = t
+    ps[index] = p
+    g.params = ps
+    g
+
+val GENERIC_SRC = "fn id<T>(x: T) -> T:\n    x\nfn to_i<T>(x: T) -> i64:\n    x\nfn anyf(a: Any) -> i64:\n    0\n"
+
+val TAIL_SRC = "fn ob(a: i64) -> i64?:\n    if a > 0:\n        a\n    else:\n        nil\nfn om(a: i64) -> i64?:\n    match a:\n        case 0: nil\n        case _: a\nfn ot(a: i64) -> text?:\n    if a > 0:\n        \"y\"\n    else:\n        nil\nfn op(a: i64) -> i64?:\n    a\nfn bb(a: i64) -> bool:\n    a > 0\nfn er(a: i64) -> i64:\n    return a\nfn un():\n    pass\nfn nr() -> i64:\n    val z = 1\n"
+
+val STRUCT_SRC = "struct P:\n    x: i64\n    y: i64\nclass C:\n    v: i64\nimpl P:\n    fn getx() -> i64:\n        self.x\n    me setx(v: i64):\n        self.x = v\n    static fn mk() -> P:\n        P(x: 1, y: 2)\nfn byval(p: P) -> i64:\n    p.y\nfn bymut(mut p: P) -> i64:\n    p.y\nfn bycls(c: C) -> i64:\n    c.v\nfn arr(ps: [P]) -> i64:\n    0\nfn ints(xs: [i64]) -> i64:\n    0\nfn k(xs: [u32], n: u32):\n    pass\nfn main():\n    val p = P(x: 1, y: 2)\n"
+
+describe "lower_function: erased generics":
+    # @req REQ-GEN-COV-MIRERASED-201
+    it "function_lowering.spl:812/839 T a T tail returned as i64 is decoded; T return stays boxed":
+        step("lower id<T>, to_i<T> and an Any parameter")
+        val l = lower_src(GENERIC_SRC, false, false)
+        expect(callees(must_mir(l, "to_i"))).to_contain("rt_value_as_int_wide")
+        step("id<T> returns the tagged word: no decode")
+        val id_fn = mir_fn(l, "id")
+        expect(id_fn.?).to_equal(true)
+        if val f = id_fn:
+            expect(callees(f).contains("rt_value_as_int_wide")).to_equal(false)
+            expect(f.signature.return_type.kind == MirTypeKind.I64).to_equal(true)
+        expect(mir_fn(l, "anyf").?).to_equal(true)
+
+describe "lower_function: tail shapes":
+    # @req REQ-GEN-COV-MIRERASED-202
+    it "function_lowering.spl:775/785/801/802/806 Optional, Bool, early return, Unit and missing return":
+        val l = lower_src(TAIL_SRC, false, false)
+        step("Optional conditional tails build Some/nil enums")
+        expect(callees(must_mir(l, "ob"))).to_contain("rt_enum_new")
+        expect(callees(must_mir(l, "om"))).to_contain("rt_enum_new")
+        expect(mir_fn(l, "ot").?).to_equal(true)
+        expect(mir_fn(l, "op").?).to_equal(true)
+        step("Bool return, explicit return, Unit return")
+        expect(must_mir(l, "bb").signature.return_type.kind == MirTypeKind.Bool).to_equal(true)
+        expect(mir_fn(l, "er").?).to_equal(true)
+        expect(must_mir(l, "un").signature.return_type.kind == MirTypeKind.Unit).to_equal(true)
+        step("806 F: a non-unit body without a value is fatal")
+        expect(messages(l.lowering)).to_contain("E-SFFI-016: missing return in non-unit function 'nr'")
+
+describe "lower_function: struct parameters":
+    # @req REQ-GEN-COV-MIRERASED-203
+    it "function_lowering.spl:557/575/655/673/683 by-value copy, mut, class, me receiver and arrays":
+        val l = lower_src(STRUCT_SRC, false, false)
+        for name in ["byval", "bymut", "bycls", "arr", "ints", "getx", "setx", "mk"]:
+            expect(mir_fn(l, name).?).to_equal(true)
+        expect(must_mir(l, "setx").signature.params.len()).to_equal(2)
+        expect(must_mir(l, "byval").signature.params.len()).to_equal(1)
+        expect(messages(l.lowering)).to_equal("")
+
+    # @req REQ-GEN-COV-MIRERASED-204
+    it "function_lowering.spl:739 c0 entry-module main and non-entry main both lower cleanly":
+        val entry = lower_src(STRUCT_SRC, true, false)
+        val plain = lower_src(STRUCT_SRC, false, false)
+        expect(must_mir(entry, "main").signature.params.len()).to_equal(0)
+        expect(must_mir(plain, "main").signature.params.len()).to_equal(0)
+        expect(messages(entry.lowering)).to_equal("")
+        step("c1 F: entry module, non-main functions; c2 F: an entry-module method named main")
+        expect(must_mir(entry, "getx").signature.params.len()).to_equal(1)
+
+    # @req REQ-GEN-COV-MIRERASED-205
+    it "function_lowering.spl:1544 T a return statement ends the block early":
+        val l = lower_src("fn er2(a: i64) -> i64:\n    return a\n    a\n", false, false)
+        expect(mir_fn(l, "er2").?).to_equal(true)
+        expect(messages(l.lowering)).to_equal("")
+
+describe "lower_const and Bool tails":
+    # @req REQ-GEN-COV-MIRERASED-206
+    it "function_lowering.spl:1050/1057/1091 module constants are registered":
+        val l = lower_src("val K = 3\nval S = \"s\"\nfn f() -> i64:\n    K\n", false, false)
+        expect(l.lowering.global_constants_by_id.len() + l.lowering.global_const_exprs.len()).to_be_greater_than(0)
+        expect(mir_fn(l, "f").?).to_equal(true)
+
+    # @req REQ-GEN-COV-MIRERASED-207
+    it "function_lowering.spl:1591/1612 an exists-check tail in Bool position":
+        val l = lower_src("fn has(o: i64?) -> bool:\n    o.?\nfn hv(o: i64?) -> i64:\n    0\n", false, false)
+        val f = mir_fn(l, "has")
+        expect(f.?).to_equal(true)
+        expect(must_mir(l, "has").signature.return_type.kind == MirTypeKind.Bool).to_equal(true)
+
+describe "lower_function on edited HIR":
+    # @req REQ-GEN-COV-MIRERASED-210
+    it "function_lowering.spl:230 c1 / 286 / 297 / 299 / 575 / 899 fn-level GPU kernels":
+        var l = lower_src(STRUCT_SRC, false, false)
+        var g = must_hir(l, "k")
+        g.is_gpu_kernel = true
+        g.gpu_target = "vulkan"
+        var low = l.lowering
+        val vk = low.lower_function(g)
+        expect(vk.is_kernel).to_equal(true)
+        expect(vk.gpu_target).to_equal("vulkan")
+        g.gpu_target = "cuda"
+        g.gpu_backend_order = "cuda"
+        val cu = low.lower_function(g)
+        expect(cu.gpu_target).to_equal("cuda")
+        expect(cu.gpu_backend_order).to_contain("cuda")
+        expect(messages(low)).to_equal("")
+
+    # @req REQ-GEN-COV-MIRERASED-211
+    it "function_lowering.spl:230 c0 / 231 / 232 attribute-level kernel target overrides the fn":
+        var l = lower_src(STRUCT_SRC, false, false)
+        var g = must_hir(l, "ints")
+        var fa = g.func_attr
+        fa.is_gpu_kernel = true
+        fa.gpu_target = "cuda"
+        fa.gpu_backends = "cuda"
+        g.func_attr = fa
+        g.gpu_target = "vulkan"
+        var low = l.lowering
+        val r = low.lower_function(g)
+        expect(r.is_kernel).to_equal(true)
+        expect(r.gpu_target).to_equal("cuda")
+
+    # @req REQ-GEN-COV-MIRERASED-212
+    it "function_lowering.spl:385/386 instance method without an ABI receiver is fatal":
+        var l = lower_src(TAIL_SRC + "fn two(x: i64) -> i64:\n    x\n", false, false)
+        var low = l.lowering
+        step("c1: no params")
+        var g = must_hir(l, "un")
+        g.is_method = true
+        low.lower_function(g)
+        expect(messages(low)).to_contain("instance method 'un' reached MIR without an ABI receiver")
+        step("c1 c2 T: first param is neither self nor me")
+        var h = must_hir(l, "two")
+        h.is_method = true
+        low.lower_function(h)
+        expect(messages(low)).to_contain("instance method 'two' reached MIR")
+        step("static methods are exempt")
+        h.is_static = true
+        val before = low.errors.len()
+        low.lower_function(h)
+        expect(low.errors.len()).to_equal(before)
+
+    # @req REQ-GEN-COV-MIRERASED-213
+    it "function_lowering.spl:446/912/914/927 export attribute and VHDL metadata":
+        var l = lower_src(TAIL_SRC, false, false)
+        var low = l.lowering
+        var g = must_hir(l, "bb")
+        g.has_export_attr = true
+        g.export_attr = ExportAttr(is_export_c: true, export_name: "bb_c")
+        val c = low.lower_function(g)
+        expect(c.is_export_c).to_equal(true)
+        expect(c.export_name).to_equal("bb_c")
+        g.export_attr = ExportAttr(is_export_c: false, export_name: "")
+        val n = low.lower_function(g)
+        expect(n.is_export_c).to_equal(false)
+        var v = must_hir(l, "un")
+        v.has_vhdl_metadata = true
+        val vh = low.lower_function(v)
+        expect(vh.has_vhdl_metadata).to_equal(true)
+
+    # @req REQ-GEN-COV-MIRERASED-214
+    it "function_lowering.spl:496/559/624/640/673 strict short Ref, iso and erased parameters":
+        var l = lower_src(STRUCT_SRC, false, true)
+        var low = l.lowering
+        step("lower_module copies the module's strictness; force strict for the edited calls")
+        low.nogc_strict = true
+        val byval = must_hir(l, "byval")
+        val p_type = byval.params[0].type_
+        step("Ref(P) under nogc_strict: short borrow, reference provenance")
+        val r = low.lower_function(with_param_type(byval, 0, ty(HirTypeKind.Ref(p_type, false))))
+        expect(r.signature.params.len()).to_equal(1)
+        expect(r.signature.params[0].kind == MirTypeKind.I64).to_equal(false)
+        step("iso P parameter")
+        val iso = low.lower_function(with_param_type(byval, 0, ty(HirTypeKind.Isolated(p_type))))
+        expect(iso.signature.params.len()).to_equal(1)
+        step("T parameter is a runtime value")
+        val t = low.lower_function(with_param_type(byval, 0, ty(HirTypeKind.TypeParam("T", []))))
+        expect(t.signature.params[0].kind == MirTypeKind.I64).to_equal(true)
+        step("by-value P under nogc_strict keeps the short path")
+        val s = low.lower_function(byval)
+        expect(s.signature.params.len()).to_equal(1)
+
+    # @req REQ-GEN-COV-MIRERASED-215
+    it "function_lowering.spl:624/625/640/655 c0 F parameters naming a type without a layout":
+        var l = lower_src(STRUCT_SRC, false, false)
+        var low = l.lowering
+        val byval = must_hir(l, "byval")
+        val bare = low.symbols.define("CovNoLayout", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, nil)
+        val no_layout = ty(HirTypeKind.Named(bare, []))
+        val unknown = ty(HirTypeKind.Named(SymbolId(id: 987654), []))
+        val i64_t = ty(HirTypeKind.Int(64, true))
+        expect(low.lower_function(with_param_type(byval, 0, ty(HirTypeKind.Isolated(no_layout)))).signature.params.len()).to_equal(1)
+        expect(low.lower_function(with_param_type(byval, 0, ty(HirTypeKind.Ref(no_layout, false)))).signature.params.len()).to_equal(1)
+        expect(low.lower_function(with_param_type(byval, 0, ty(HirTypeKind.Isolated(unknown)))).signature.params.len()).to_equal(1)
+        expect(low.lower_function(with_param_type(byval, 0, no_layout)).signature.params.len()).to_equal(1)
+        expect(low.lower_function(with_param_type(byval, 0, unknown)).signature.params.len()).to_equal(1)
+        expect(low.lower_function(with_param_type(byval, 0, ty(HirTypeKind.Any))).signature.params.len()).to_equal(1)
+        step("Ref/iso of a non-Named type")
+        expect(low.lower_function(with_param_type(byval, 0, ty(HirTypeKind.Isolated(i64_t)))).signature.params.len()).to_equal(1)
+        expect(low.lower_function(with_param_type(byval, 0, ty(HirTypeKind.Ref(i64_t, false)))).signature.params.len()).to_equal(1)
+
+    # @req REQ-GEN-COV-MIRERASED-216
+    it "function_lowering.spl:386 c2 / 557 c3 / 435 F / 739 receiver spelled me, ownerless symbol, main variants":
+        var l = lower_src(STRUCT_SRC, true, false)
+        var low = l.lowering
+        step("386 c2 F and 557 c3: a me-method whose receiver is spelled `me`")
+        var setx = must_hir(l, "setx")
+        var ps = setx.params
+        var p0 = ps[0]
+        p0.name = "me"
+        ps[0] = p0
+        setx.params = ps
+        val before = low.errors.len()
+        expect(low.lower_function(setx).signature.params.len()).to_equal(2)
+        expect(low.errors.len()).to_equal(before)
+        step("557 c2 c3 F: a me-method whose first param is neither self nor me is not a receiver (and is fatal)")
+        p0.name = "other"
+        ps[0] = p0
+        setx.params = ps
+        low.lower_function(setx)
+        expect(messages(low)).to_contain("instance method 'setx' reached MIR without an ABI receiver")
+        step("435 F: a function symbol with no defining module")
+        var mk = must_hir(l, "byval")
+        mk.symbol = low.symbols.define("cov_ownerless", SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, nil)
+        expect(low.lower_function(mk).signature.params.len()).to_equal(1)
+        step("739: main in a non-entry lowering, and main as a static method of an entry lowering")
+        var main_fn = must_hir(l, "main")
+        low.lowering_entry_module = false
+        expect(low.lower_function(main_fn).signature.params.len()).to_equal(0)
+        low.lowering_entry_module = true
+        main_fn.is_method = true
+        main_fn.is_static = true
+        expect(low.lower_function(main_fn).signature.params.len()).to_equal(0)
+
+    # @req REQ-GEN-COV-MIRERASED-217
+    it "function_lowering.spl:271 T / 775 c1 F / 1591 F array-move let, valueless Optional body, exists tail into i64":
+        val l = lower_src("fn mv() -> i64:\n    val a = [1, 2]\n    val b = a\n    0\nfn on(a: i64) -> i64?:\n    val z = 1\nfn hv(o: i64?) -> i64:\n    o.?\n", false, false)
+        expect(must_mir(l, "mv").signature.params.len()).to_equal(0)
+        expect(messages(l.lowering)).to_contain("missing return in non-unit function 'on'")
+        expect(must_mir(l, "hv").signature.params.len()).to_equal(1)
+
+    # @req REQ-GEN-COV-MIRERASED-219
+    it "function_lowering.spl:1612 T a typed tail value records its HIR type on the result local":
+        var l = lower_src("fn tv(a: i64) -> i64:\n    a\n", false, false)
+        var low = l.lowering
+        var g = must_hir(l, "tv")
+        var body = g.body
+        var value = body.value
+        value.has_type_ = true
+        value.type_ = ty(HirTypeKind.Int(64, true))
+        body.value = value
+        g.body = body
+        val r = low.lower_function(g)
+        expect(r.signature.return_type.kind == MirTypeKind.I64).to_equal(true)
+        expect(low.local_hir_type_ids.len()).to_be_greater_than(0)
+
+    # @req REQ-GEN-COV-MIRERASED-218
+    it "function_lowering.spl:1050/1057/1091 constants with no symbol and a Unit-typed binding":
+        var l = lower_src("val K = 3\nfn f() -> i64:\n    K\n", false, false)
+        var low = l.lowering
+        var c = l.hir.constants.values()[0]
+        step("1057 T: a Unit-typed binding stores its value expression only")
+        c.type_ = ty(HirTypeKind.Unit)
+        low.lower_const(c)
+        expect(low.global_const_exprs.contains(c.symbol.id)).to_equal(true)
+        step("1050/1091 F: a negative symbol registers nothing by id")
+        var neg = l.hir.constants.values()[0]
+        neg.symbol = SymbolId(id: -1)
+        val before = low.global_constants_by_id.len()
+        low.lower_const(neg)
+        expect(low.global_constants_by_id.len()).to_equal(before)

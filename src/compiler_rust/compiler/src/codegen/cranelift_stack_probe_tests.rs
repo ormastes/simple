@@ -79,7 +79,7 @@ fn win64_stack_probe_generated_frames() {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 #[test]
 fn win64_stack_probe_grows_fresh_thread_stack() {
     use std::ffi::c_void;

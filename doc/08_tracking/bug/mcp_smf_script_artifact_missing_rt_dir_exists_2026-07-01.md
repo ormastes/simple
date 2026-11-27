@@ -1,5 +1,5 @@
 # MCP SMF script artifact missing `rt_dir_exists`
-## Open 2026-09-16 — needs owner triage
+## Resolved — symbol exported; note 2026-11-25
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -8,7 +8,10 @@ Date: 2026-07-01
 
 ## Status
 
-Partially fixed in source; deploy still blocked.
+Resolved. `rt_dir_exists` is exported and registered (fix `cc7be21a66f`);
+the bug_db row is `closed`. The separate Stage 4 native-build redeploy
+blocker is tracked in
+`native_build_stage4_pre_object_spin_2026-07-13.md`.
 
 ## Symptom
 
@@ -73,3 +76,23 @@ env SIMPLE_MCP_TOOL_SET=core SIMPLE_LIB=src bin/simple build/mcp-script/simple_m
 MCP_SCRIPT_PERF_USE_SMF=1 MCP_SCRIPT_PERF_STRICT=1 sh scripts/check/check-mcp-script-mode-perf.shs
 ```
 
+
+## Verification 2026-11-25 (lane p2w3-ai)
+
+The title defect — SMF relocation failing on undefined `rt_dir_exists` — is
+fixed in tree: commit `cc7be21a66f` ("fix: export rt_dir_exists for MCP SMF
+path") landed the runtime export, and the symbol is registered in the Rust
+runtime symbol table (`src/compiler_rust/common/src/runtime_symbols.rs`) and
+the interpreter extern dispatch
+(`src/compiler_rust/compiler/src/interpreter_extern/file_io.rs`). The bug_db
+row has been `closed` since 2026-08-17. The doc's remaining blocker was never
+this symbol: it was the Stage 4 self-hosted native-build failure
+(`cannot parse '0.0' as i64`), owned by
+`native_build_stage4_pre_object_spin_2026-07-13.md` / TODO 535.
+
+A fresh run of the verification target (`bin/simple compile ... .smf` +
+`check-mcp-script-mode-perf.shs`) is environment-blocked in this lane: the
+pinned `bin/simple.exe` seed rejects `@representation_boundary` tree-wide at
+HEAD, so no compile/test command runs. Closure of THIS row rests on source
+inspection of the exported symbol plus the recorded bootstrap-SMF smoke
+results above (initialize/tools-list rc=0 for both servers).

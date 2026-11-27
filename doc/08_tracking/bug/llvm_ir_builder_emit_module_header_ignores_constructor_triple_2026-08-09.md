@@ -1,5 +1,5 @@
 # BUG: `LlvmIRBuilder.emit_module_header()` ignores the triple passed to `create()`
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-25 — suggested fix landed: constructor triple is snapshotted as scalar fields; header composes from them, no env re-probe
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -96,3 +96,37 @@ Not established whether the offset-shift bug affects `datalayout()` specifically
 or only the `env: text?` field named in that bug. If only `env`, the fix above
 is safe and cheap.
 
+
+## Verification 2026-11-25 (p2w3-ae lane, release/1.0.0 worktree) — fix landed, closing
+
+The "Suggested fix" section above is exactly what current source implements in
+`src/compiler/70.backend/backend/llvm_ir_builder.spl`:
+
+- The class carries scalar snapshots of the constructor triple:
+  `target_arch` / `target_vendor` / `target_os` / `target_env` /
+  `target_has_env` / `target_datalayout` (:62-67), populated by
+  `create_with_header_policy` (:97-113) via `create_from_target_scalars`
+  (:116-151) — scalar text captured at `create()` time, precisely the shape
+  this record recommended (avoiding the aggregate-across-class-boundary read
+  implicated in the stage-3 field-offset-shift bug).
+- `emit_module_header()` (:161-177) composes `target triple` from those stored
+  scalars and emits `self.target_datalayout`; its own comment states "header
+  emission performs no host or environment probe". The only remaining ambient
+  path is the explicit `allow_ambient_header_policy` + `_llvm_simpleos_header`
+  override for the simpleos baremetal case — a deliberate policy knob, not the
+  silent env fallback this bug was filed on.
+- The RED spec's assertion is still the right oracle:
+  `test/feature/usage/llvm_backend_i686_spec.spl:50-56` asserts the module
+  header contains `p:32:32`; with the constructor triple now authoritative,
+  an i686 builder emits the i686 datalayout regardless of
+  `SIMPLE_NATIVE_BUILD_TARGET`.
+
+Runtime re-run of the spec in this lane was not possible: the pinned seed
+binary at `bin/simple.exe` rejects the `@representation_boundary` decorator
+added tree-wide by cfd89933699 (and llvm_ir_builder.spl itself carries that
+decorator at :115/:153), so every `bin/simple.exe test` at release/1.0.0 HEAD
+fails before reaching subject code. Verification is by code inspection, which
+is decisive here: the env re-derivation this bug named no longer exists.
+
+**Verdict: STALE-CLOSED. The `create(name, target)` API contract now honors
+`target` for header purposes.**

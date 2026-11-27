@@ -26,12 +26,49 @@ extern fn rt_jit_has_function(handle: i64, name: text) -> bool
 extern fn rt_jit_cleanup(handle: i64) -> i64
 use std.nogc_sync_mut.io.time_ops.{time_now_micros}
 
+@always_inline
+fn _lib_jit_create_raw() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_jit_create()
+
+@always_inline
+fn _lib_jit_create_for_target_raw(arch: text) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_jit_create_for_target(arch)
+
+@always_inline
+fn _lib_jit_backend_name_raw(handle: i64) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_jit_backend_name(handle)
+
+@always_inline
+fn _lib_jit_compile_source_raw(handle: i64, source: text) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_jit_compile_source(handle, source)
+
+@always_inline
+fn _lib_jit_call_i64_raw(handle: i64, name: text, arg: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_jit_call_i64(handle, name, arg)
+
+@always_inline
+fn _lib_jit_has_function_raw(handle: i64, name: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_jit_has_function(handle, name)
+
+@always_inline
+fn _lib_jit_cleanup_raw(handle: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_jit_cleanup(handle)
+
 class HotFunction:
     name: text
     source: text
     call_count: i64
     threshold: i64
     compiled: bool
+    compile_failed: bool
+    last_error: text
     jit_handle: i64
 
     static fn create(name: text, source: text, threshold: i64) -> HotFunction:
@@ -41,6 +78,8 @@ class HotFunction:
             call_count: 0,
             threshold: threshold,
             compiled: false,
+            compile_failed: false,
+            last_error: "",
             jit_handle: 0
         )
 
@@ -50,29 +89,32 @@ class TieredJitManager:
     backend: text
     functions: [HotFunction]
     compile_count: i64
+    compile_failures: i64
     total_compile_us: i64
 
     static fn create() -> TieredJitManager:
-        val h = rt_jit_create()
-        val b = rt_jit_backend_name(h)
+        val h = _lib_jit_create_raw()
+        val b = _lib_jit_backend_name_raw(h)
         TieredJitManager(
             jit_handle: h,
             target_arch: "host",
             backend: b,
             functions: [],
             compile_count: 0,
+            compile_failures: 0,
             total_compile_us: 0
         )
 
     static fn create_for_target(arch: text) -> TieredJitManager:
-        val h = rt_jit_create_for_target(arch)
-        val b = rt_jit_backend_name(h)
+        val h = _lib_jit_create_for_target_raw(arch)
+        val b = _lib_jit_backend_name_raw(h)
         TieredJitManager(
             jit_handle: h,
             target_arch: arch,
             backend: b,
             functions: [],
             compile_count: 0,
+            compile_failures: 0,
             total_compile_us: 0
         )
 
@@ -81,32 +123,70 @@ class TieredJitManager:
         self.functions.push(hf)
 
     me try_compile(idx: i64) -> text:
-        val hf = self.functions[idx]
+        var hf = self.functions[idx]
         if hf.compiled:
             return ""
+        if hf.compile_failed:
+            return hf.last_error
         val t0 = time_now_micros()
-        val err = rt_jit_compile_source(self.jit_handle, hf.source)
+        val err = _lib_jit_compile_source_raw(self.jit_handle, hf.source)
         val t1 = time_now_micros()
         if err == "":
-            hf.compiled = true
-            hf.jit_handle = self.jit_handle
-            self.compile_count = self.compile_count + 1
-            self.total_compile_us = self.total_compile_us + (t1 - t0)
+            if _lib_jit_has_function_raw(self.jit_handle, hf.name):
+                hf.compiled = true
+                hf.compile_failed = false
+                hf.last_error = ""
+                hf.jit_handle = self.jit_handle
+                self.functions[idx] = hf
+                self.compile_count = self.compile_count + 1
+                self.total_compile_us = self.total_compile_us + (t1 - t0)
+                return ""
+            val missing_err = "E-JIT-MISSING-SYMBOL: compiled source did not export '" + hf.name + "'"
+            hf.compile_failed = true
+            hf.last_error = missing_err
+            self.functions[idx] = hf
+            self.compile_failures = self.compile_failures + 1
+            return missing_err
+        hf.compile_failed = true
+        hf.last_error = err
+        self.functions[idx] = hf
+        self.compile_failures = self.compile_failures + 1
         return err
 
     me call_i64(name: text, arg: i64) -> i64:
         val idx = self.find_function(name)
         if idx >= 0:
-            val hf = self.functions[idx]
+            var hf = self.functions[idx]
             hf.call_count = hf.call_count + 1
-            if hf.compiled == false:
+            self.functions[idx] = hf
+            if hf.compiled == false and hf.compile_failed == false:
                 if hf.call_count >= hf.threshold:
                     val err = self.try_compile(idx)
+                    hf = self.functions[idx]
                     if err != "":
                         print("JIT compile failed for " + name + ": " + err)
             if hf.compiled:
-                return rt_jit_call_i64(self.jit_handle, name, arg)
+                return _lib_jit_call_i64_raw(self.jit_handle, name, arg)
         return -1
+
+    me call_i64_checked(name: text, arg: i64) -> Result<i64, text>:
+        val idx = self.find_function(name)
+        if idx < 0:
+            return Err("E-JIT-UNREGISTERED: function '" + name + "' is not registered")
+        var hf = self.functions[idx]
+        hf.call_count = hf.call_count + 1
+        self.functions[idx] = hf
+        if hf.compiled == false and hf.compile_failed == false:
+            if hf.call_count >= hf.threshold:
+                val err = self.try_compile(idx)
+                hf = self.functions[idx]
+                if err != "":
+                    print("JIT compile failed for " + name + ": " + err)
+        if hf.compile_failed:
+            return Err("E-JIT-COMPILE-FAILED: " + hf.last_error)
+        if not hf.compiled:
+            return Err("E-JIT-NOT-NATIVE: function '" + name + "' is below threshold")
+        Ok(_lib_jit_call_i64_raw(self.jit_handle, name, arg))
 
     me find_function(name: text) -> i64:
         var i = 0
@@ -117,14 +197,21 @@ class TieredJitManager:
         return -1
 
     me is_compiled(name: text) -> bool:
-        return rt_jit_has_function(self.jit_handle, name)
+        return _lib_jit_has_function_raw(self.jit_handle, name)
 
     me stats() -> text:
         var msg = "TieredJIT[" + self.target_arch + "/" + self.backend + "] "
         msg = msg + "compiled=" + self.compile_count.to_text()
+        msg = msg + " failed=" + self.compile_failures.to_text()
         msg = msg + " compile_time=" + self.total_compile_us.to_text() + "us"
         msg = msg + " tracked=" + self.functions.length().to_text()
         return msg
 
     me cleanup():
-        rt_jit_cleanup(self.jit_handle)
+        _lib_jit_cleanup_raw(self.jit_handle)
+
+fn std_tiered_jit_manager_create() -> TieredJitManager:
+    TieredJitManager.create()
+
+fn std_tiered_jit_manager_create_for_target(arch: text) -> TieredJitManager:
+    TieredJitManager.create_for_target(arch)

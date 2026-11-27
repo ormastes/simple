@@ -1,0 +1,67 @@
+"""
+## Purpose and audience
+Pins the host-OS `# @platform:` tag rules (`windows`, `macos`, `linux`,
+`freebsd`, `unix`) the test runner uses to run a platform-specific spec only
+on its OS, and to COUNT and explain the skip everywhere else.
+## Operator workflow
+Run `bin/simple test test/01_unit/lib/spec/platform_os_tag_spec.spl`.
+## Compatibility and limitations
+Pure layer only (`src/lib/nogc_sync_mut/spec/platform_os.spl`); the host name
+is passed in, so every OS is exercised on any host. This spec carries no
+`@platform` header itself, so it runs everywhere.
+"""
+# @manual: primary
+
+use std.spec.{step}
+use std.spec.platform_os.{
+    PLATFORM_SKIP_MARKER, PLATFORM_SKIP_SUMMARY_MARKER,
+    is_os_platform_tag, os_platform_tag_matches, platform_os_tags,
+    platform_os_skip_reason, platform_skip_line, platform_skip_summary_line,
+    is_platform_skip_reason
+}
+
+describe "@platform host-OS tags":
+    it "skips a windows-only spec on a macos host with a stated reason (reproducer)":
+        step("Evaluate a windows tag against a macos host")
+        val reason = platform_os_skip_reason(["windows"], "macos")
+        expect(reason).to_contain("requires os=windows")
+        expect(reason).to_contain("host=macos")
+        assert_true(is_platform_skip_reason(reason))
+
+    it "runs a windows-only spec on a windows host":
+        expect(platform_os_skip_reason(["windows"], "windows")).to_equal("")
+
+    it "matches each named OS only on that host":
+        for os in ["windows", "macos", "linux", "freebsd"]:
+            assert_true(os_platform_tag_matches(os, os))
+        assert_false(os_platform_tag_matches("linux", "macos"))
+        assert_false(os_platform_tag_matches("macos", "freebsd"))
+
+    it "treats unix as every non-windows host":
+        assert_true(os_platform_tag_matches("unix", "linux"))
+        assert_true(os_platform_tag_matches("unix", "macos"))
+        assert_true(os_platform_tag_matches("unix", "freebsd"))
+        assert_false(os_platform_tag_matches("unix", "windows"))
+
+    it "runs when any of several OS tags matches, including comma lists":
+        expect(platform_os_skip_reason(["linux", "macos"], "macos")).to_equal("")
+        expect(platform_os_skip_reason(["linux, freebsd"], "freebsd")).to_equal("")
+        expect(platform_os_skip_reason(["linux, freebsd"], "macos")).to_contain("requires os=linux,freebsd")
+
+    it "ignores mode tags (they are filtered by execution mode, not host OS)":
+        assert_false(is_os_platform_tag("native"))
+        assert_false(is_os_platform_tag("interpreter"))
+        assert_true(is_os_platform_tag(" Linux "))
+        expect(platform_os_tags(["native", "linux"])).to_equal(["linux"])
+        expect(platform_os_skip_reason(["native"], "windows")).to_equal("")
+        expect(platform_os_skip_reason([], "windows")).to_equal("")
+
+    it "still requires the OS to match when mode tags are mixed in":
+        expect(platform_os_skip_reason(["native", "windows"], "linux")).to_contain("requires os=windows")
+
+    it "prints grep-anchored per-file and summary lines":
+        val line = platform_skip_line("test/x_spec.spl", platform_os_skip_reason(["linux"], "macos"))
+        expect(line).to_start_with(PLATFORM_SKIP_MARKER)
+        expect(line).to_contain("test/x_spec.spl")
+        expect(platform_skip_summary_line(2)).to_start_with(PLATFORM_SKIP_SUMMARY_MARKER)
+        assert_false(is_platform_skip_reason("hwir"))

@@ -1,0 +1,363 @@
+# @req HOST-EXEC-CONTROL-INSTALL-01 HOST-EXEC-CONTROL-INSTALL-02 HOST-EXEC-CONTROL-INSTALL-03
+# NOT_RUN: actual signatures, SAME WAL/native owned lock/private IO; prior
+# container/root observations are explicitly scripted trusted fixture facts.
+use std.spec.{describe, it, expect, fail, step}
+use test.fixtures.orchestration.host_exec_control_installation_fixture_v3.*
+use std.common.contracts.orchestration.host_exec_control_installation_v3.*
+use std.nogc_sync_mut.orchestration.host_exec_control_installation_owner_v3.*
+use std.nogc_sync_mut.orchestration.host_local_command_v1.host_local_command_v1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use test.fixtures.orchestration.host_owned_journal_fixture_v2.{host_owned_journal_ready_v2, host_owned_journal_closed_v2}
+use std.nogc_sync_mut.orchestration.host_exec_private_publication_v3.host_exec_private_publish_v3
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_admit_v2
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.common.contracts.orchestration.host_capacity_v1.host_available_capacity_v1
+use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_lookup_v2, distributed_operation_journal_recover_execution_v2, distributed_operation_journal_open_cleanup_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_bounded, secure_temp_dir}
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_sync_mut.io_runtime.{dir_create, dir_remove}
+
+# Deterministic trusted clock seam only; public command uses actual local clock.
+fn host_installation_clock_v3() -> HostReservationAuthorizationContextV1:
+    HostReservationAuthorizationContextV1(100, 10, 4, 2, 3)
+
+fn host_installation_expired_clock_v3() -> HostReservationAuthorizationContextV1:
+    HostReservationAuthorizationContextV1(190, 20, 4, 2, 3)
+
+describe "Signed exec-control configuration installation":
+    it "installs exact signed bytes in the same journal with no extra resource debit or native command":
+        step("installs exact signed bytes in the same journal with no extra resource debit or native command")
+        val fixture = host_installation_fixture_v3()
+        val sequence = fixture.local.capacity.journal.sequence
+        val capacity = host_available_capacity_v1(fixture.local.capacity.ledger).unwrap()
+        val cursor = host_installation_cursor_v3(fixture.local)
+        val packet = host_exec_control_installation_request_encode_v3(fixture.request).unwrap()
+        assert(host_exec_control_installation_load_v3(fixture.local).is_err())
+        val turn = host_exec_control_installation_install_v3(fixture.local, packet, fixture.context, host_installation_clock_v3)
+        expect(turn.error).to_equal("")
+        expect(turn.recovery_required).to_equal(false)
+        val installed = turn.installation.unwrap()
+        expect(installed.canonical_policy_bytes).to_equal(fixture.request.intent.control_policy_bytes)
+        expect(host_exec_control_installation_request_encode_v3(installed.request).unwrap()).to_equal(packet)
+        expect(installed.artifact_digest).to_equal(fixture.request.operation.payload_digest)
+        expect(turn.local.capacity.journal.sequence).to_equal(sequence + 3)
+        expect(turn.local.capacity.ledger.revision).to_equal(turn.local.capacity.journal.sequence + 1)
+        expect(turn.local.capacity.ledger.reservations.len()).to_equal(fixture.local.capacity.ledger.reservations.len())
+        expect(host_available_capacity_v1(turn.local.capacity.ledger).unwrap().cpu_millis).to_equal(capacity.cpu_millis)
+        expect(host_available_capacity_v1(turn.local.capacity.ledger).unwrap().memory_bytes).to_equal(capacity.memory_bytes)
+        expect(host_installation_cursor_v3(turn.local)).to_equal(cursor)
+        val row = distributed_operation_journal_lookup_v2(turn.local.capacity.journal, fixture.request.operation.id).unwrap()
+        expect(row.state).to_equal("completed")
+        expect(row.outcome_digest).to_equal(installed.artifact_digest)
+        expect(host_exec_control_installation_load_v3(turn.local).unwrap().artifact_digest).to_equal(installed.artifact_digest)
+        host_installation_dispose_v3(turn.local, fixture.auxiliary_root)
+
+    it "rejects malformed shared envelopes and strict policy or wire violations":
+        step("rejects malformed shared envelopes and strict policy or wire violations")
+        val fixture = host_installation_fixture_v3()
+        var operation = fixture.request.operation
+        operation.memory_bytes = 0
+        assert(host_exec_control_installation_match_operation_v3(fixture.request.intent, operation).is_err())
+        operation = fixture.request.operation
+        operation.duration_ms = 0
+        assert(host_exec_control_installation_match_operation_v3(fixture.request.intent, operation).is_err())
+        operation = fixture.request.operation
+        operation.id = "invalid id"
+        assert(host_exec_control_installation_match_operation_v3(fixture.request.intent, operation).is_err())
+        var intent = fixture.request.intent
+        intent.control_policy_digest = "e".repeat(64)
+        expect(host_exec_control_installation_intent_encode_v3(intent).unwrap_err()).to_equal("host-exec-install-policy-digest-mismatch")
+        intent = fixture.request.intent
+        intent.control_policy_bytes = "[1, 2]\n"
+        intent.control_policy_digest = sha256_text(intent.control_policy_bytes)
+        expect(host_exec_control_installation_intent_encode_v3(intent).unwrap_err()).to_equal("host-exec-install-policy-object-required")
+        intent = fixture.request.intent
+        intent.control_policy_bytes = "{fixtureOnly: true}\n\n"
+        intent.control_policy_digest = sha256_text(intent.control_policy_bytes)
+        expect(host_exec_control_installation_intent_encode_v3(intent).unwrap_err()).to_equal("host-exec-install-policy-noncanonical")
+        val bytes = host_exec_control_installation_intent_encode_v3(fixture.request.intent).unwrap()
+        expect(host_exec_control_installation_intent_decode_v3(bytes.replace("{", "{unknown: 1, ")).unwrap_err()).to_equal("host-exec-install-unknown-field:unknown")
+        expect(host_exec_control_installation_request_decode_v3("😀".repeat(1048577)).unwrap_err()).to_equal("host-exec-install-source-size")
+        expect(host_exec_control_installation_policy_v3("😀".repeat(262145)).unwrap_err()).to_equal("host-exec-install-policy-size")
+        host_installation_dispose_v3(fixture.local, fixture.auxiliary_root)
+
+    it "rejects actual signature corruption and stale root pins before journal mutation":
+        step("rejects actual signature corruption and stale root pins before journal mutation")
+        val fixture = host_installation_fixture_v3()
+        var request = fixture.request
+        request.approval.signature[0] = ((request.approval.signature[0] as i64 + 1) % 256) as u8
+        val rejected = host_exec_control_installation_install_v3(fixture.local, host_exec_control_installation_request_encode_v3(request).unwrap(),
+            fixture.context, host_installation_clock_v3)
+        expect(rejected.error).to_equal("APPROVAL_SIGNATURE_INVALID")
+        expect(rejected.recovery_required).to_equal(false)
+        expect(rejected.local.capacity.journal.sequence).to_equal(fixture.local.capacity.journal.sequence)
+        assert(not file_exists(fixture.local.capacity.journal.root + "/host-exec-control-installations"))
+        request = fixture.request
+        request.intent.enrollment_binding_digest = "e".repeat(64)
+        request = host_installation_resign_v3(request)
+        val stale = host_exec_control_installation_install_v3(fixture.local, host_exec_control_installation_request_encode_v3(request).unwrap(),
+            fixture.context, host_installation_clock_v3)
+        expect(stale.error).to_equal("host-exec-install-current-root-mismatch")
+        expect(stale.local.capacity.journal.sequence).to_equal(fixture.local.capacity.journal.sequence)
+        host_installation_dispose_v3(stale.local, fixture.auxiliary_root)
+
+    it "retains executing publication failure and reconciles exact retry without another begin or debit":
+        step("retains executing publication failure and reconciles exact retry without another begin or debit")
+        val fixture = host_installation_fixture_v3()
+        val directory = fixture.local.capacity.journal.root + "/host-exec-control-installation-artifacts"
+        assert(dir_create(directory, true))
+        val obstruction = directory + "/" + sha256_text(fixture.request.operation.id) + ".sdn"
+        assert(dir_create(obstruction, false))
+        val packet = host_exec_control_installation_request_encode_v3(fixture.request).unwrap()
+        val turn = host_exec_control_installation_install_v3(fixture.local, packet, fixture.context, host_installation_clock_v3)
+        assert(turn.error != "")
+        expect(turn.recovery_required).to_equal(true)
+        expect(turn.local.capacity.journal.operations[fixture.request.operation.id].state).to_equal("executing")
+        expect(turn.local.capacity.ledger.revision).to_equal(turn.local.capacity.journal.sequence + 1)
+        expect(turn.local.capacity.journal.sequence).to_equal(fixture.local.capacity.journal.sequence + 2)
+        assert(host_exec_control_installation_load_v3(turn.local).is_err())
+        assert(dir_remove(obstruction, false))
+        val retry = host_exec_control_installation_install_v3(turn.local, packet, fixture.context, host_installation_clock_v3)
+        expect(retry.error).to_equal("")
+        expect(retry.local.capacity.journal.sequence).to_equal(turn.local.capacity.journal.sequence + 1)
+        expect(host_installation_cursor_v3(retry.local)).to_equal(host_installation_cursor_v3(fixture.local))
+        expect(retry.local.capacity.ledger.reservations.len()).to_equal(fixture.local.capacity.ledger.reservations.len())
+        host_installation_dispose_v3(retry.local, fixture.auxiliary_root)
+
+    it "repairs completed missing index after old approval expiry and blocks second same-scope operation":
+        step("repairs completed missing index after old approval expiry and blocks second same-scope operation")
+        val fixture = host_installation_fixture_v3()
+        val directory = fixture.local.root + "/host-exec-control-installed-v3"
+        assert(dir_create(directory, true))
+        val obstruction = directory + "/" + container_scope_fence_id_v2(fixture.local.scope).unwrap() + ".sdn"
+        assert(dir_create(obstruction, false))
+        val packet = host_exec_control_installation_request_encode_v3(fixture.request).unwrap()
+        val turn = host_exec_control_installation_install_v3(fixture.local, packet, fixture.context, host_installation_clock_v3)
+        assert(turn.error != "")
+        expect(turn.recovery_required).to_equal(true)
+        expect(turn.local.capacity.journal.operations[fixture.request.operation.id].state).to_equal("completed")
+        assert(host_exec_control_installation_load_v3(turn.local).is_err())
+        var second = fixture.request
+        second.intent.operation_id = "control-install-2"
+        second = host_installation_resign_v3(second)
+        assert(distributed_verify_grant_approval_from_snapshot_v2(turn.local.policy.snapshot, second.signed, second.approval,
+            second.operation, fixture.context.grant_clock, turn.local.policy.snapshot.generation, 4, 2, 3).is_ok())
+        val refused = host_exec_control_installation_install_v3(turn.local, host_exec_control_installation_request_encode_v3(second).unwrap(),
+            fixture.context, host_installation_clock_v3)
+        expect(refused.error).to_equal("host-exec-install-scope-already-bound")
+        expect(refused.local.capacity.journal.sequence).to_equal(turn.local.capacity.journal.sequence)
+        assert(not refused.local.capacity.journal.operations.contains_key(second.operation.id))
+        assert(dir_remove(obstruction, false))
+        val expired = host_installation_expired_clock_v3()
+        val repaired = host_exec_control_installation_install_v3(turn.local, packet, expired, host_installation_expired_clock_v3)
+        expect(repaired.error).to_equal("")
+        expect(repaired.recovery_required).to_equal(false)
+        expect(repaired.local.capacity.journal.sequence).to_equal(turn.local.capacity.journal.sequence)
+        expect(host_exec_control_installation_load_v3(repaired.local).unwrap().canonical_policy_bytes).to_equal(fixture.request.intent.control_policy_bytes)
+        host_installation_dispose_v3(repaired.local, fixture.auxiliary_root)
+
+    it "keeps outcome-unknown retry marked recovery-required when its original proof has expired":
+        step("keeps outcome-unknown retry marked recovery-required when its original proof has expired")
+        val fixture = host_installation_fixture_v3()
+        val directory = fixture.local.capacity.journal.root + "/host-exec-control-installation-artifacts"
+        assert(dir_create(directory, true))
+        val obstruction = directory + "/" + sha256_text(fixture.request.operation.id) + ".sdn"
+        assert(dir_create(obstruction, false))
+        val packet = host_exec_control_installation_request_encode_v3(fixture.request).unwrap()
+        val turn = host_exec_control_installation_install_v3(fixture.local, packet, fixture.context, host_installation_clock_v3)
+        assert(turn.error != "")
+        var unknown = turn.local
+        unknown.capacity.journal = distributed_operation_journal_recover_execution_v2(unknown.capacity.journal, fixture.request.operation.id).unwrap()
+        unknown.capacity.ledger.revision = unknown.capacity.journal.sequence + 1
+        val expired = host_installation_expired_clock_v3()
+        val refused = host_exec_control_installation_install_v3(unknown, packet, expired, host_installation_expired_clock_v3)
+        expect(refused.error).to_equal("APPROVAL_EXPIRED")
+        expect(refused.recovery_required).to_equal(true)
+        expect(refused.local.capacity.journal.operations[fixture.request.operation.id].state).to_equal("outcome-unknown")
+        expect(refused.local.capacity.journal.sequence).to_equal(unknown.capacity.journal.sequence)
+        assert(host_exec_control_installation_load_v3(refused.local).is_err())
+        host_installation_dispose_v3(refused.local, fixture.auxiliary_root)
+
+    it "never overwrites archived changed proofs or promotes installation across changed current scope":
+        step("never overwrites archived changed proofs or promotes installation across changed current scope")
+        val fixture = host_installation_fixture_v3()
+        val packet = host_exec_control_installation_request_encode_v3(fixture.request).unwrap()
+        val turn = host_exec_control_installation_install_v3(fixture.local, packet, fixture.context, host_installation_clock_v3)
+        expect(turn.error).to_equal("")
+        var changed = fixture.request
+        changed.approval.signature[0] = ((changed.approval.signature[0] as i64 + 1) % 256) as u8
+        val refused = host_exec_control_installation_install_v3(turn.local, host_exec_control_installation_request_encode_v3(changed).unwrap(),
+            fixture.context, host_installation_clock_v3)
+        expect(refused.error).to_equal("host-exec-install-retained-conflict")
+        expect(refused.recovery_required).to_equal(true)
+        expect(refused.local.capacity.journal.sequence).to_equal(turn.local.capacity.journal.sequence)
+        val archive = turn.local.capacity.journal.root + "/host-exec-control-installations/" + sha256_text(fixture.request.operation.id) + ".sdn"
+        expect(file_read_regular_no_follow_bounded(archive, 4194304).unwrap()).to_equal(packet)
+        var new_scope = turn.local
+        new_scope.scope.boot_id = "different-native-boot"
+        new_scope.scope.continuity_id = "different-native-boot"
+        assert(host_exec_control_installation_load_v3(new_scope).is_err())
+        expect(host_exec_control_installation_load_v3(turn.local).unwrap().artifact_digest).to_equal(turn.installation.unwrap().artifact_digest)
+        host_installation_dispose_v3(turn.local, fixture.auxiliary_root)
+
+    it "rejects malformed and oversized public route packets before opening a journal":
+        step("rejects malformed and oversized public route packets before opening a journal")
+        val root = secure_temp_dir("/tmp", "exec-install-route").unwrap()
+        val packet_path = root + "/packet.sdn"
+        assert(file_atomic_write_mode(packet_path, "broken signed packet", 0o600))
+        val reply = host_local_command_v1(["host-exec-control-install", root, packet_path])
+        expect(reply.exit_code).to_equal(1)
+        assert(reply.journal_cleanup.is_none())
+        assert(not file_exists(root + "/journal/parent.lock"))
+        assert(file_atomic_write_mode(packet_path, "😀".repeat(1048577), 0o600))
+        val oversized = host_local_command_v1(["host-exec-control-install", root, packet_path])
+        expect(oversized.exit_code).to_equal(1)
+        assert(oversized.journal_cleanup.is_none())
+        assert(not file_exists(root + "/journal/parent.lock"))
+        assert(dir_remove(root, true))
+
+    it "rechecks exact expiry after stage IO before final policy publication":
+        step("rechecks exact expiry after stage IO before final policy publication")
+        val fixture = host_installation_fixture_v3()
+        val clock_path = fixture.local.root + "/installation-clock"
+        assert(file_atomic_write_mode(clock_path, "archive", 0o600))
+        val refresh = fn() -> HostReservationAuthorizationContextV1:
+            val phase = file_read_regular_no_follow_bounded(clock_path, 64).unwrap()
+            if phase == "archive":
+                assert(file_atomic_write_mode(clock_path, "admit", 0o600))
+                return host_installation_clock_v3()
+            if phase == "admit":
+                assert(file_atomic_write_mode(clock_path, "begin", 0o600))
+                return host_installation_clock_v3()
+            if phase == "begin":
+                assert(file_atomic_write_mode(clock_path, "artifact", 0o600))
+                return host_installation_clock_v3()
+            host_installation_expired_clock_v3()
+        val packet = host_exec_control_installation_request_encode_v3(fixture.request).unwrap()
+        val turn = host_exec_control_installation_install_v3(fixture.local, packet, fixture.context, refresh)
+        expect(turn.error).to_start_with("APPROVAL_EXPIRED:retainedStage=")
+        val retained_stage = turn.error.replace("APPROVAL_EXPIRED:retainedStage=", "")
+        expect(file_read_regular_no_follow_bounded(retained_stage + "/record.sdn", 4194304).unwrap()).to_equal(host_exec_control_installation_intent_encode_v3(fixture.request.intent).unwrap())
+        expect(turn.recovery_required).to_equal(true)
+        expect(turn.local.capacity.journal.operations[fixture.request.operation.id].state).to_equal("executing")
+        expect(turn.local.capacity.journal.sequence).to_equal(fixture.local.capacity.journal.sequence + 2)
+        expect(turn.local.capacity.ledger.revision).to_equal(turn.local.capacity.journal.sequence + 1)
+        val artifact = turn.local.capacity.journal.root + "/host-exec-control-installation-artifacts/" + sha256_text(fixture.request.operation.id) + ".sdn"
+        assert(not file_exists(artifact))
+        assert(host_exec_control_installation_load_v3(turn.local).is_err())
+        expect(host_installation_cursor_v3(turn.local)).to_equal(host_installation_cursor_v3(fixture.local))
+        host_installation_dispose_v3(turn.local, fixture.auxiliary_root)
+
+    it "reopens completed installation as metadata while retaining original charge and quarantining old scope":
+        step("reopens completed installation as metadata while retaining original charge and quarantining old scope")
+        val fixture = host_installation_fixture_v3()
+        val packet = host_exec_control_installation_request_encode_v3(fixture.request).unwrap()
+        val turn = host_exec_control_installation_install_v3(fixture.local, packet, fixture.context, host_installation_clock_v3)
+        expect(turn.error).to_equal("")
+        val capacity = turn.local.capacity.ledger.capacity
+        val available = host_available_capacity_v1(turn.local.capacity.ledger).unwrap()
+        host_owned_journal_closed_v2(turn.local.capacity)
+        val reopened = host_owned_journal_ready_v2(host_capacity_owner_open_owned_v2(turn.local.capacity.journal.root,
+            capacity, "e".repeat(64), 100, true))
+        expect(reopened.ledger.reservations.len()).to_equal(1)
+        expect(host_available_capacity_v1(reopened.ledger).unwrap().cpu_millis).to_equal(available.cpu_millis)
+        var current = turn.local
+        current.capacity = reopened
+        expect(host_exec_control_installation_load_v3(current).unwrap().artifact_digest).to_equal(turn.installation.unwrap().artifact_digest)
+        host_owned_journal_closed_v2(reopened)
+        var next_scope = current.scope
+        next_scope.boot_id = "next-native-boot"
+        next_scope.continuity_id = "next-native-boot"
+        next_scope.provider_generation = next_scope.provider_generation + 1
+        var next_capacity = capacity
+        next_capacity.boot_id = container_scope_fence_id_v2(next_scope).unwrap()
+        next_capacity.provider_generation = next_scope.provider_generation
+        val quarantined = host_owned_journal_ready_v2(host_capacity_owner_open_quarantined_owned_v2(current.capacity.journal.root,
+            next_capacity, "f".repeat(64), 100))
+        assert(not quarantined.ledger.continuity_proven)
+        expect(quarantined.ledger.reservations.len()).to_equal(1)
+        expect(host_available_capacity_v1(quarantined.ledger).unwrap().memory_bytes).to_equal(available.memory_bytes)
+        current.capacity = quarantined
+        current.scope = next_scope
+        assert(host_exec_control_installation_load_v3(current).is_err())
+        host_installation_dispose_v3(current, fixture.auxiliary_root)
+
+    it "refuses actual malformed packet and mismatched completed artifact on owned reopen":
+        step("refuses actual malformed packet and mismatched completed artifact on owned reopen")
+        for mode in ["packet", "artifact"]:
+            val fixture = host_installation_fixture_v3()
+            val packet = host_exec_control_installation_request_encode_v3(fixture.request).unwrap()
+            val turn = host_exec_control_installation_install_v3(fixture.local, packet, fixture.context, host_installation_clock_v3)
+            expect(turn.error).to_equal("")
+            val root = turn.local.capacity.journal.root
+            host_owned_journal_closed_v2(turn.local.capacity)
+            val directory = if mode == "packet": "host-exec-control-installations" else: "host-exec-control-installation-artifacts"
+            val path = root + "/" + directory + "/" + sha256_text(fixture.request.operation.id) + ".sdn"
+            val original = file_read_regular_no_follow_bounded(path, 4194304).unwrap()
+            val malformed = if mode == "packet": "{malformed: true}\n" else: host_exec_control_installation_intent_encode_v3(fixture.request.intent).unwrap() + "\n"
+            assert(file_atomic_write_mode(path, malformed, 0o600))
+            match host_capacity_owner_open_owned_v2(root, turn.local.capacity.ledger.capacity, "e".repeat(64), 100, true):
+                case HostCapacityOpenV2.Rejected(error): assert(error != "")
+                case HostCapacityOpenV2.CleanupRequired(cleanup, error):
+                    val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+                    expect(closed.error).to_equal("")
+                    fail("unexpected retained close after actual projection failure:" + error)
+                case HostCapacityOpenV2.Ready(owner):
+                    host_owned_journal_closed_v2(owner)
+                    fail("corrupt installation accepted on reopen")
+            assert(file_atomic_write_mode(path, original, 0o600))
+            val valid = host_owned_journal_ready_v2(host_capacity_owner_open_owned_v2(root, turn.local.capacity.ledger.capacity, "f".repeat(64), 100, true))
+            var current = turn.local
+            current.capacity = valid
+            expect(valid.ledger.reservations.len()).to_equal(1)
+            host_installation_dispose_v3(current, fixture.auxiliary_root)
+
+    it "rejects actual orphan admitted installation row without its retained signed packet":
+        step("rejects actual orphan admitted installation row without its retained signed packet")
+        val fixture = host_installation_fixture_v3()
+        val admitted = daemon_operation_admit_v2(fixture.local.capacity.journal, fixture.request.operation).unwrap()
+        var current = fixture.local
+        current.capacity.journal = admitted.journal
+        current.capacity.ledger.revision = admitted.journal.sequence + 1
+        host_owned_journal_closed_v2(current.capacity)
+        match host_capacity_owner_open_owned_v2(current.capacity.journal.root, current.capacity.ledger.capacity, "e".repeat(64), 100, true):
+            case HostCapacityOpenV2.Rejected(error): assert(error != "")
+            case HostCapacityOpenV2.CleanupRequired(cleanup, error):
+                val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+                expect(closed.error).to_equal("")
+                fail("unexpected cleanup after orphan projection rejection:" + error)
+            case HostCapacityOpenV2.Ready(owner):
+                host_owned_journal_closed_v2(owner)
+                fail("orphan metadata row accepted")
+        assert(not file_exists(current.capacity.journal.root + "/parent.lease"))
+        assert(dir_remove(current.root, true))
+        assert(dir_remove(fixture.auxiliary_root, true))
+
+    it "reports actual new existing and conflicting private publication without issuing authority":
+        step("reports actual new existing and conflicting private publication without issuing authority")
+        val fixture = host_installation_fixture_v3()
+        val guard = fn() -> Result<HostReservationAuthorizationContextV1, text>:
+            Ok(host_installation_clock_v3())
+        val name = "f".repeat(64) + ".sdn"
+        for invalid_name in ["A".repeat(64) + ".sdn", "😀".repeat(16) + ".sdn", "../record.sdn"]:
+            val invalid = host_exec_private_publish_v3(fixture.local.capacity.journal.root, "host-runtime-exec-delegations", invalid_name, "{fixture: true}\n", guard)
+            expect(invalid.error).to_equal("host-exec-private-name-or-size-invalid")
+            expect(invalid.published_new).to_equal(false)
+            expect(invalid.stage_path).to_equal("")
+        val first = host_exec_private_publish_v3(fixture.local.capacity.journal.root, "host-runtime-exec-delegations", name, "{fixture: true}\n", guard)
+        expect(first.error).to_equal("")
+        expect(first.published_new).to_equal(true)
+        val existing = host_exec_private_publish_v3(fixture.local.capacity.journal.root, "host-runtime-exec-delegations", name, "{fixture: true}\n", guard)
+        expect(existing.error).to_equal("")
+        expect(existing.published_new).to_equal(false)
+        val conflict = host_exec_private_publish_v3(fixture.local.capacity.journal.root, "host-runtime-exec-delegations", name, "{fixture: false}\n", guard)
+        expect(conflict.published_new).to_equal(false)
+        assert(conflict.error != "")
+        expect(conflict.recovery_required).to_equal(true)
+        assert(conflict.stage_path != "")
+        expect(file_read_regular_no_follow_bounded(fixture.local.capacity.journal.root + "/host-runtime-exec-delegations/" + name, 4096).unwrap()).to_equal("{fixture: true}\n")
+        host_installation_dispose_v3(fixture.local, fixture.auxiliary_root)

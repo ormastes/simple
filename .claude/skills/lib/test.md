@@ -73,6 +73,13 @@ See `doc/06_spec/FILE.md` for generated-vs-manual rules.
 
 ## Writing BDD Tests
 
+For a memory-bug regression, cover correctness and add a representative
+performance limit or benchmark where it can be measured reliably. For a
+performance regression, also cover peak memory or bounded growth. Record the
+workload, producer, host, baseline and threshold; use calibrated tolerances and
+dedicated benchmarks for noisy timing. If a reliable limit cannot yet be set,
+record that gap explicitly rather than inventing a threshold or claiming a pass.
+
 Tests in `test/` directory, use `*_spec.spl` naming. Use docstring markdown, NOT println().
 
 ```simple:skip

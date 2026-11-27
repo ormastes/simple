@@ -19,10 +19,10 @@ class WineKernel32ThreadWaitResult:
     last_error: text
     operations: text
 
-fn _result(ok: bool, error: text, table: WineNtThreadTable, handle: i64, wait_status: text, exit_code: i64, last_error: text, operations: text) -> WineKernel32ThreadWaitResult:
+fn _wine_kernel32_thread_wait_result(ok: bool, error: text, table: WineNtThreadTable, handle: i64, wait_status: text, exit_code: i64, last_error: text, operations: text) -> WineKernel32ThreadWaitResult:
     WineKernel32ThreadWaitResult(ok: ok, error: error, table: table, handle: handle, wait_status: wait_status, exit_code: exit_code, last_error: last_error, operations: operations)
 
-fn _sequence_gate(symbols: [text]) -> text:
+fn _wine_kernel32_thread_wait_sequence_gate(symbols: [text]) -> text:
     val dispatch_state = wine_nt_api_kernel32_thread_wait_dispatch_gate(symbols)
     if dispatch_state != "ready":
         return dispatch_state
@@ -36,21 +36,21 @@ fn _sequence_gate(symbols: [text]) -> text:
         return "kernel32-thread-wait-sequence-expected:GetLastError"
     "ready"
 
-fn _failure(symbol: text, step: WineNtThreadWaitResult, operations: text) -> WineKernel32ThreadWaitResult:
-    _result(false, symbol + ":" + step.state, step.table, step.handle, step.wait_status, step.exit_code, step.last_error, operations)
+fn _wine_kernel32_thread_wait_failure(symbol: text, step: WineNtThreadWaitResult, operations: text) -> WineKernel32ThreadWaitResult:
+    _wine_kernel32_thread_wait_result(false, symbol + ":" + step.state, step.table, step.handle, step.wait_status, step.exit_code, step.last_error, operations)
 
 pub fn wine_kernel32_execute_thread_wait(symbols: [text], table: WineNtThreadTable, entry: text, exit_code: i64, timeout_ms: i64) -> WineKernel32ThreadWaitResult:
-    val sequence_state = _sequence_gate(symbols)
+    val sequence_state = _wine_kernel32_thread_wait_sequence_gate(symbols)
     if sequence_state != "ready":
-        return _result(false, sequence_state, table, 0, "", -1, table.last_error, "")
+        return _wine_kernel32_thread_wait_result(false, sequence_state, table, 0, "", -1, table.last_error, "")
 
     val created = wine_nt_create_thread(table, entry, exit_code)
     if not created.ok:
-        return _failure("CreateThread", created, "")
+        return _wine_kernel32_thread_wait_failure("CreateThread", created, "")
 
     val waited = wine_nt_wait_for_single_object(created.table, created.handle, timeout_ms)
     if not waited.ok:
-        return _failure("WaitForSingleObject", waited, "CreateThread")
+        return _wine_kernel32_thread_wait_failure("WaitForSingleObject", waited, "CreateThread")
 
     val last_error = wine_nt_get_last_error(waited.table)
-    _result(true, "", waited.table, created.handle, waited.wait_status, waited.exit_code, last_error, "CreateThread WaitForSingleObject GetLastError")
+    _wine_kernel32_thread_wait_result(true, "", waited.table, created.handle, waited.wait_status, waited.exit_code, last_error, "CreateThread WaitForSingleObject GetLastError")

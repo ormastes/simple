@@ -1,0 +1,87 @@
+"""P2 exact and adjacent regressions for the real HM/check transport owner.
+
+The existing CLI contracts remain authoritative for parse/import/run output.
+These cases do not substitute help-only output for type-check execution.
+"""
+use std.spec
+use compiler.tools.lint.semantic_check.{simple_semantic_check_source, simple_check_is_clean}
+use compiler.tools.lint.check_diagnostic.{CheckDiagnostic, check_diagnostic_text, check_diagnostic_json}
+use std.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use std.common.string_core.{char_from_code}
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.types.{json_to_string}
+
+describe "p2_p3_bug_reproduction":
+    it "rejects the exact annotated initializer with its declared type first":
+        val checked = simple_semantic_check_source("fn main():\n    val x: i64 = \"text\"\n", "initializer.spl")
+        expect(simple_check_is_clean(checked)).to_equal(false)
+        expect(checked.diagnostic_records.len()).to_be_greater_than(0)
+        val record = checked.diagnostic_records[0]
+        expect(record.code).to_equal("E1003")
+        expect(record.expected).to_equal("i64")
+        expect(record.found).to_equal("text")
+        expect(check_diagnostic_text(record)).to_contain("= help: change the annotation or use a value with the declared type")
+
+    it "rejects the exact explicit return mismatch through inference":
+        val checked = simple_semantic_check_source("fn value() -> bool:\n    return 1\n", "return.spl")
+        expect(simple_check_is_clean(checked)).to_equal(false)
+        expect(checked.diagnostic_records.len()).to_be_greater_than(0)
+        val record = checked.diagnostic_records[0]
+        expect(record.expected).to_equal("bool")
+        expect(record.found).to_equal("i64")
+        expect(check_diagnostic_json(record)).to_contain("\"code\": \"E1003\"")
+        expect(check_diagnostic_json(record)).to_contain("\"expected\": \"bool\"")
+        expect(check_diagnostic_json(record)).to_contain("\"found\": \"i64\"")
+
+describe "p2_p3_adjacent_regression":
+    it "accepts matching initializer and explicit return types":
+        val checked = simple_semantic_check_source("fn value() -> bool:\n    val x: i64 = 1\n    return true\n", "valid.spl")
+        expect(simple_check_is_clean(checked)).to_equal(true)
+        expect(checked.diagnostic_records.len()).to_equal(0)
+
+    it "rejects a differently named bool initializer without fixture matching":
+        val checked = simple_semantic_check_source("fn main():\n    val enabled: bool = \"yes\"\n", "other.spl")
+        expect(simple_check_is_clean(checked)).to_equal(false)
+        expect(checked.diagnostic_records.len()).to_be_greater_than(0)
+        expect(checked.diagnostic_records[0].expected).to_equal("bool")
+        expect(checked.diagnostic_records[0].found).to_equal("text")
+
+    it "escapes user paths and messages in JSON diagnostics":
+        val record = CheckDiagnostic(path: "C:\\input\"name.spl", code: "semantic",
+            message: "line one\nline two\t\"quoted\"", help: "check \\ path")
+        val encoded = check_diagnostic_json(record)
+        expect(encoded).to_contain("C:\\\\input\\\"name.spl")
+        expect(encoded).to_contain("line one\\nline two\\t\\\"quoted\\\"")
+        expect(encoded).to_contain("check \\\\ path")
+
+    it "preserves non-mismatch inference diagnostics without assigning E1003":
+        val checked = simple_semantic_check_source("fn main():\n    missing_identifier\n", "undefined.spl")
+        expect(simple_check_is_clean(checked)).to_equal(false)
+        expect(checked.diagnostic_records.len()).to_be_greater_than(0)
+        expect(checked.diagnostic_records[0].code == "E1003").to_equal(false)
+        expect(checked.diagnostic_records[0].message).to_contain("undefined")
+
+    it "co-loads DiagnosticV1 without shadowing check_diagnostic_json escape_json":
+        val bs = char_from_code(8)
+        val ff = char_from_code(12)
+        val soh = char_from_code(1)
+        val uni = "한글 — é 🚀"
+        val diag_v1 = DiagnosticV1.error("E0002", "line\n\"quoted\"\\한글")
+        val v1_json = diag_v1.to_json()
+        expect(v1_json).to_contain("line\\n\\\"quoted\\\"\\\\한글")
+
+        val raw_path = "C:\\src\\한글\\\"file\".spl"
+        val raw_msg = "bad\t\"msg\"\r\n" + bs + ff + soh + " " + uni
+        val record = CheckDiagnostic(path: raw_path, code: "E1003",
+            message: raw_msg, help: "")
+        val encoded = check_diagnostic_json(record)
+
+        expect(encoded).to_contain("C:\\\\src\\\\한글\\\\\\\"file\\\".spl")
+        expect(encoded).to_contain("bad\\t\\\"msg\\\"\\r\\n\\b\\f\\u0001 " + uni)
+        expect(encoded).to_contain("\"help\": \"\"")
+
+        val parsed = json_parse(encoded)
+        expect(json_to_string(json_object_get(parsed, "file")) ?? "").to_equal(raw_path)
+        expect(json_to_string(json_object_get(parsed, "help")) ?? "MISSING").to_equal("")
+        expect(json_to_string(json_object_get(parsed, "code")) ?? "").to_equal("E1003")

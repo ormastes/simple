@@ -1,0 +1,48 @@
+# No-GC admission truth (memory hardening plan WP-01, §1.1 / §3.8).
+#
+# The ownership checker runs only for `@no_gc(strict)` modules. A module that
+# skips it is a compatibility bypass: it may compile, but it is never
+# "conforming no-GC". This file turns the per-module admission state into one
+# truthful report, the fatal policy for builds that require conforming no-GC,
+# and the non-fatal notes that keep an ordinary legacy skip from being silent.
+#
+# NOGC-POLICY-003: strict module reached admission without checked contracts.
+# NOGC-POLICY-004: unchecked legacy module inside a conforming no-GC build.
+# NOGC-POLICY-005: a conforming no-GC build checked nothing at all.
+# NOGC-NOTE-001:   legacy module skipped the checker (warning, not an error).
+use compiler.hir.hir_types.{HirModule}
+
+pub struct NogcAdmissionReportV1:
+    checked: i64
+    unchecked: [text]
+    incomplete: [text]
+
+pub fn nogc_admission_report_v1(modules: [HirModule]) -> NogcAdmissionReportV1:
+    var checked = 0
+    var unchecked: [text] = []
+    var incomplete: [text] = []
+    for module in modules:
+        if not module.nogc_strict:
+            unchecked.push(module.name)
+        elif module.nogc_param_effects_checked:
+            checked = checked + 1
+        else:
+            incomplete.push(module.name)
+    NogcAdmissionReportV1(checked: checked, unchecked: unchecked, incomplete: incomplete)
+
+pub fn nogc_admission_conforming_errors_v1(report: NogcAdmissionReportV1, require_strict: bool) -> [text]:
+    var errors: [text] = []
+    for name in report.incomplete:
+        errors.push("NOGC-POLICY-003: {name}: strict no-GC module was admitted without checked ownership contracts (checker bypassed)")
+    if not require_strict: return errors
+    for name in report.unchecked:
+        errors.push("NOGC-POLICY-004: {name}: module is not `@no_gc(strict)`; unchecked execution cannot be admitted as conforming no-GC")
+    if report.checked == 0 and report.unchecked.len() == 0 and report.incomplete.len() == 0:
+        errors.push("NOGC-POLICY-005: no module was ownership-checked; nothing checked cannot report conforming no-GC")
+    errors
+
+pub fn nogc_admission_truth_notes_v1(report: NogcAdmissionReportV1) -> [text]:
+    var notes: [text] = []
+    for name in report.unchecked:
+        notes.push("NOGC-NOTE-001: {name}: no-GC ownership checking skipped (module is not `@no_gc(strict)`); this module is not conforming no-GC")
+    notes

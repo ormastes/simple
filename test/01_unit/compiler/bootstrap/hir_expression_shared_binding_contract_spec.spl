@@ -8,6 +8,13 @@
 # `_hir_expr_symbol_or_invalid` sentinel (07d7a36c389). The pattern payload
 # keeps an Option slot but must wrap with explicit `Some(...)` (seed
 # bare->Some coercion drops array-payload enums; see expression_components.spl).
+#
+# Retargeted 2026-11-12: the If kind-disc dummy passes `None` not `nil`
+# (94aa0d6b804); the else block is rebound through `val else_opt: Block? = else_`
+# before the if-val destructure (b1ebad3f119); the field type comes from the
+# non-optional `field_type_for_hir_base(fld_lowered_base, ...) -> HirType`
+# (1743478250a); the EnumLit payload binding gained an explicit
+# `HirEnumPayload?` annotation but is still one value binding (9bb344bb1cf).
 
 use std.spec
 use std.spec.step
@@ -52,9 +59,10 @@ describe "HIR expression strict shared bindings":
         expect(source).to_contain("kind: HirExprKind.Error,")
         expect(source).to_contain("val kind_disc_dummy = Expr(kind: ExprKind.NilLit, span: e.span)")
         expect(source).to_contain("kind_disc_v == hir_expr_kind_disc(ExprKind.MethodCall(kind_disc_dummy, \"\", []))")
-        expect(source).to_contain("kind_disc_v == hir_expr_kind_disc(ExprKind.If(kind_disc_dummy, Block(stmts: [], span: e.span), nil))")
+        expect(source).to_contain("kind_disc_v == hir_expr_kind_disc(ExprKind.If(kind_disc_dummy, Block(stmts: [], span: e.span), None))")
         expect(source).to_contain("val rest_symbol: SymbolId? = match rest:")
-        expect(source).to_contain("if val else_block_src = else_:")
+        expect(source).to_contain("val else_opt: Block? = else_")
+        expect(source).to_contain("if val else_block_src = else_opt:")
         expect(source).to_contain("HirExprKind.If(hir_cond, hir_then, self.lower_hir_block(else_block_src))")
         expect(source.contains("val else_block: HirBlock? = match else_:")).to_equal(false)
         expect(source).to_contain("val else_opt: HirBlock? = else_block")
@@ -63,7 +71,8 @@ describe "HIR expression strict shared bindings":
         expect(source).to_contain("val fld_base_sym = _hir_expr_symbol_or_invalid(fld_lowered_base.kind)")
         expect(source).to_contain("if fld_base_sym.is_valid():")
         expect(source).to_contain("if val fld_base_symbol = self.symbols.get_symbol_raw(fld_base_sym.id):")
-        expect(source).to_contain("val fld_field_type = self.field_type_for_base_raw(fld_base_sym.id, fld_name_t)")
+        expect(source).to_contain("me field_type_for_hir_base(base: HirExpr, field_name: text) -> HirType:")
+        expect(source).to_contain("val fld_field_type = self.field_type_for_hir_base(fld_lowered_base, fld_name_t)")
         expect(source).to_not_contain("val fld_field_type: HirType? =")
         expect(source).to_not_contain("if val fld_base_sym = fld_module_base_sym:")
         expect(source).to_not_contain("if val fld_base_sym = fld_base_sym_opt:")
@@ -94,7 +103,7 @@ describe "HIR expression strict shared bindings":
         step("wraps enum pattern payloads in an explicit Some")
         val source = expression_lowering_source()
 
-        expect(source).to_contain("val hir_payload = match payload:")
+        expect(source).to_contain("val hir_payload: HirEnumPayload? = match payload:")
         expect(source).to_contain("hir_payload = Some(HirPatternPayload.Tuple(hir_patterns))")
         expect(source).to_contain("hir_payload = Some(HirPatternPayload.Struct(hir_fields))")
         expect(source).to_contain("HirPatternKind.Enum(hir_type, variant, hir_payload)")

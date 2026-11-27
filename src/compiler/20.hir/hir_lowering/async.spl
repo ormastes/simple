@@ -1,5 +1,4 @@
 use compiler.hir.hir_types.{SymbolId, HirType, HirTypeKind}
-use compiler.hir.hir_lowering.concat_copy_v1.{async_text_concat_copy_v1, async_error_concat_copy_v1}
 # HIR Lowering - Async/Await Support
 #
 # This module provides HIR integration for async/await features:
@@ -44,7 +43,7 @@ impl HirLowering:
                 match symbol_opt:
                     case Some(sym):
                         sym.name == "Future" and args.len() == 1
-                    case nil:
+                    case None:
                         false
             case _:
                 false
@@ -58,17 +57,17 @@ impl HirLowering:
                         if sym.name == "Future" and args.len() == 1:
                             Some(args[0])
                         else:
-                            nil
-                    case nil:
-                        nil
+                            None
+                    case None:
+                        None
             case _:
-                nil
+                None
 
     me make_future_type(inner: HirType, span: Span) -> HirType:
         # Look up Future symbol (should be defined in std.async.future)
-        val future_symbol_opt = self.symbols.lookup("Future")
+        val future_symbol = self.symbols.lookup_or_invalid("Future")
 
-        if val future_symbol = future_symbol_opt:
+        if future_symbol.is_valid():
             # Create Future<T> as Named type with type argument
             _hir_future_named_payload(future_symbol, inner, span)
         else:
@@ -89,7 +88,7 @@ impl HirLowering:
                 match symbol_opt:
                     case Some(sym):
                         sym.name == "Poll" and args.len() == 1
-                    case nil:
+                    case None:
                         false
             case _:
                 false
@@ -103,11 +102,11 @@ impl HirLowering:
                         if sym.name == "Poll" and args.len() == 1:
                             Some(args[0])
                         else:
-                            nil
-                    case nil:
-                        nil
+                            None
+                    case None:
+                        None
             case _:
-                nil
+                None
 
     me validate_async_fn(func: HirFunction):
         # Validate an async function, reporting errors through the lowering context
@@ -141,7 +140,7 @@ impl HirLowering:
             errors: [],
             detailed_errors: [],
             function_name: func.name,
-            inner_type: nil
+            inner_type: None
         )
 
         # Check 1: ParserFunction must return Future<T>
@@ -187,20 +186,16 @@ impl HirLowering:
             )
             if not poll_check.is_valid:
                 check.is_valid = false
-                # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-                check.errors = async_text_concat_copy_v1(check.errors, poll_check.errors)
-                # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-                check.detailed_errors = async_error_concat_copy_v1(check.detailed_errors, poll_check.detailed_errors)
+                check.errors = check.errors.concat(poll_check.errors)
+                check.detailed_errors = check.detailed_errors.concat(poll_check.detailed_errors)
 
         # Check 3: State enum validation (if present)
         if state_enum.?:
             val enum_check = self.check_state_enum_structure(state_enum, func.span)
             if not enum_check.is_valid:
                 check.is_valid = false
-                # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-                check.errors = async_text_concat_copy_v1(check.errors, enum_check.errors)
-                # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-                check.detailed_errors = async_error_concat_copy_v1(check.detailed_errors, enum_check.detailed_errors)
+                check.errors = check.errors.concat(enum_check.errors)
+                check.detailed_errors = check.detailed_errors.concat(enum_check.detailed_errors)
 
         check
 
@@ -335,7 +330,7 @@ impl HirLowering:
             errors: [],
             detailed_errors: [],
             function_name: state_enum.name,
-            inner_type: nil
+            inner_type: None
         )
 
         # Check has at least one variant (State0)
@@ -365,7 +360,7 @@ impl HirLowering:
 
 impl HirLowering:
     me types_equal(a: HirType, b: HirType) -> bool:
-        # Structural equality for HIR types (Phase 1B.4 - TODO #87).
+        # Structural equality for HIR types (Phase 1B.4).
         #
         # The comparison itself now lives in
         # `compiler.hir.hir_lowering.type_equality` so it is shared rather
@@ -438,7 +433,7 @@ impl HirLowering:
                         else:
                             val arg_strs = self.format_types(args)
                             "{sym.name}<{arg_strs.join(\", \")}>"
-                    case nil:
+                    case None:
                         "<?>"
 
             case HirTypeKind.Tuple(elements):

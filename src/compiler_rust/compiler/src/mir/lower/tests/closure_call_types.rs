@@ -38,15 +38,18 @@ fn indirect_call_types(source: &str) -> Vec<(Vec<TypeId>, TypeId)> {
 /// of the body expression.
 #[test]
 fn indirect_call_carries_the_lambda_result_type() {
+    // An unannotated parameter is an erased `ANY` (a tagged word), so
+    // arithmetic on it answers a tagged `ANY`; the call site keeps its OWN
+    // argument type (I64) for the slot, which is what it boxes by.
     assert_eq!(
         indirect_call_types("fn test() -> i64:\n    val f = \\x: x * 10\n    return f(32)\n"),
-        vec![(vec![TypeId::I64], TypeId::I64)]
+        vec![(vec![TypeId::I64], TypeId::ANY)]
     );
     // `x + 0.5` computes an f64 (codegen coerces a mixed int/float pair to
     // float) and must SAY f64 — the old `left_hir.ty` rule called it i64.
     assert_eq!(
         indirect_call_types("fn test() -> f64:\n    val f = \\x: x + 0.5\n    return f(32)\n"),
-        vec![(vec![TypeId::I64], TypeId::F64)]
+        vec![(vec![TypeId::I64], TypeId::ANY)]
     );
     assert_eq!(
         indirect_call_types("fn test() -> str:\n    val f = \\x: \"a\"\n    return f(32)\n"),
@@ -66,21 +69,21 @@ fn typed_predicate_parameter_carries_its_declared_signature() {
     );
 }
 
-/// The outlined body is compiled with the lambda's parameter types, so a call
-/// site that passes something ELSE must not be given a typed boundary — the
-/// backend would reinterpret the argument's bits. The commonest case is an
-/// untyped lambda parameter (HIR defaults it to I64) reached with an f64 or a
-/// text: measured pre-poison, `\x: "v" + x` called with `"a"` printed the raw
-/// string handle `v4483685820545` under the JIT instead of `va`.
+/// An unannotated lambda parameter is an erased `ANY`: it takes a tagged word
+/// of any type, and the call site boxes each argument by its OWN slot type.
+/// So a call passing an f64 or a text is compatible and keeps the caller's
+/// type for the slot. (When the parameter defaulted to I64 these sites had to
+/// be poisoned to `[ANY] -> ANY` and refused by the JIT: `\x: "v" + x` called
+/// with `"a"` printed the raw string handle otherwise.)
 #[test]
-fn a_call_site_that_disagrees_with_the_lambda_is_poisoned_to_any() {
+fn an_unannotated_lambda_accepts_any_caller_argument_type() {
     assert_eq!(
         indirect_call_types("fn test() -> f64:\n    val f = \\x: x * 1.5\n    return f(32.0)\n"),
-        vec![(vec![TypeId::ANY], TypeId::ANY)]
+        vec![(vec![TypeId::F64], TypeId::ANY)]
     );
     assert_eq!(
         indirect_call_types("fn test() -> str:\n    val f = \\x: \"v\" + x\n    return f(\"a\")\n"),
-        vec![(vec![TypeId::ANY], TypeId::ANY)]
+        vec![(vec![TypeId::STRING], TypeId::STRING)]
     );
 }
 
@@ -100,7 +103,8 @@ fn conflicting_closures_in_one_local_propagate_nothing() {
 /// disagreed with the value its `Return` produced.
 #[test]
 fn outlined_lambda_declares_its_real_return_type() {
-    let mir = compile_to_mir("fn test() -> f64:\n    val f = \\x: x * 1.5\n    return f(32.0)\n")
+    // The body's type must not depend on the (now erased) parameter.
+    let mir = compile_to_mir("fn test() -> f64:\n    val f = \\x: 1.5\n    return f(32.0)\n")
         .expect("mir lowering failed");
     let expanded = crate::codegen::shared::expand_with_outlined(&mir);
     let outlined = expanded
@@ -108,6 +112,231 @@ fn outlined_lambda_declares_its_real_return_type() {
         .find(|f| f.name.contains("_outlined_"))
         .expect("no outlined lambda function");
     assert_eq!(outlined.return_type, TypeId::F64);
+}
+
+/// A lambda whose result is `any` returns an ALREADY tagged word, so its
+/// outlined function must declare `ANY`, not I64: the boxed entry boxes an
+/// I64 result, which tagged the word a second time and made
+/// `[1, 2, 3].map(\\x: anyv(x))` answer `[8, 16, 24]`.
+#[test]
+fn outlined_any_result_lambda_declares_any_not_i64() {
+    let mir = compile_to_mir(
+        "fn anyv(x: i64) -> any:\n    x\n\nfn test() -> any:\n    val xs = [1, 2, 3]\n    return xs.map(\\x: anyv(x))\n",
+    )
+    .expect("mir lowering failed");
+    let lambda_result = mir
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flat_map(|b| b.instructions.iter())
+        .find_map(|inst| match inst {
+            MirInst::ClosureCreate { return_type, .. } => Some(*return_type),
+            _ => None,
+        })
+        .expect("no ClosureCreate");
+    assert_eq!(lambda_result, TypeId::ANY, "precondition: the lambda's result is `any`");
+    let expanded = crate::codegen::shared::expand_with_outlined(&mir);
+    let outlined = expanded
+        .iter()
+        .find(|f| f.name.contains("_outlined_"))
+        .expect("no outlined lambda function");
+    assert_eq!(outlined.return_type, TypeId::ANY);
+}
+
+/// A bool-result lambda is outlined as I64 (full-width body), so the outlined
+/// metadata must still say the result is a BOOL: the boxed entry uses it to
+/// answer a tagged bool. Without it `xs.map(\\x: x > 1)` printed `[0, 1, 1]`.
+#[test]
+fn outlined_bool_result_lambda_is_marked_for_bool_boxing() {
+    let returns_bool = |source: &str| {
+        let mir = compile_to_mir(source).expect("mir lowering failed");
+        let expanded = crate::codegen::shared::expand_with_outlined(&mir);
+        let outlined = expanded
+            .iter()
+            .find(|f| f.name.contains("_outlined_"))
+            .expect("no outlined lambda function");
+        assert_eq!(outlined.return_type, TypeId::I64, "body stays full-width");
+        outlined
+            .outlined_bodies
+            .get(&outlined.entry_block)
+            .expect("outlined lambda metadata")
+            .lambda_returns_bool
+    };
+    assert!(returns_bool(
+        "fn test() -> any:\n    val xs = [1, 2, 3]\n    return xs.map(\\x: x > 1)\n"
+    ));
+    assert!(!returns_bool(
+        "fn test() -> any:\n    val xs = [1, 2, 3]\n    return xs.map(\\x: x + 1)\n"
+    ));
+}
+
+/// An unannotated lambda passed to a METHOD's `fn(...)` parameter takes the
+/// declared callback parameter type, as for a free function. It used to
+/// default to I64, so `c.run_f(\\x: x * 2.0, 1.25)` decoded a boxed float as
+/// an integer; a generic `fn(T) -> T` slot is the erased `ANY`.
+#[test]
+fn method_call_lambda_takes_declared_callback_param_types() {
+    let lambda_param = |source: &str| {
+        let mir = compile_to_mir(source).expect("mir lowering failed");
+        mir.functions
+            .iter()
+            .flat_map(|f| f.blocks.iter())
+            .flat_map(|b| b.instructions.iter())
+            .find_map(|inst| match inst {
+                MirInst::ClosureCreate { lambda_params, .. } => Some(lambda_params[0].ty),
+                _ => None,
+            })
+            .expect("no ClosureCreate")
+    };
+    let class = "class Calc:\n    k: i64\n\n    fn run_f(f: fn(f64) -> f64, v: f64) -> f64:\n        f(v)\n\n    \
+                 fn with<T>(f: fn(T) -> T, v: T) -> T:\n        f(v)\n\n";
+    assert_eq!(
+        lambda_param(&format!(
+            "{class}fn test() -> f64:\n    val c = Calc(k: 1)\n    return c.run_f(\\x: x * 2.0, 1.25)\n"
+        )),
+        TypeId::F64
+    );
+    assert_eq!(
+        lambda_param(&format!(
+            "{class}fn test() -> any:\n    val c = Calc(k: 1)\n    return c.with(\\x: x, 1.25)\n"
+        )),
+        TypeId::ANY
+    );
+}
+
+/// An unannotated lambda parameter with NO expected type is an erased `ANY`
+/// (a tagged word), not I64. The I64 default made `val u = \\x: x` decode
+/// every argument as an integer, so `["a", "b"].map(u)` printed two garbage
+/// integers with no fallback.
+#[test]
+fn unannotated_lambda_param_without_expected_type_is_any() {
+    let mir = compile_to_mir("fn test() -> any:\n    val u = \\x: x\n    return [\"a\", \"b\"].map(u)\n")
+        .expect("mir lowering failed");
+    let param = mir
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flat_map(|b| b.instructions.iter())
+        .find_map(|inst| match inst {
+            MirInst::ClosureCreate { lambda_params, .. } => Some(lambda_params[0].ty),
+            _ => None,
+        })
+        .expect("no ClosureCreate");
+    assert_eq!(param, TypeId::ANY);
+}
+
+fn indirect_call_declared_flags(source: &str) -> Vec<(Vec<TypeId>, TypeId, bool)> {
+    let mir = compile_to_mir(source).expect("mir lowering failed");
+    mir.functions
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flat_map(|b| b.instructions.iter())
+        .filter_map(|inst| match inst {
+            MirInst::IndirectCall {
+                param_types,
+                return_type,
+                signature_declared,
+                ..
+            } => Some((param_types.clone(), *return_type, *signature_declared)),
+            _ => None,
+        })
+        .collect()
+}
+
+const GENERIC_APPLY: &str = "fn apply<T>(f: fn(T) -> T, v: T) -> T:\n    f(v)\n\n";
+
+/// A call through a parameter declared `fn(T) -> T` records the DECLARED
+/// signature: its erased `ANY` slots are tagged words, which the JIT closure
+/// ABI may carry. An `ANY` that is only a guess stays undeclared.
+#[test]
+fn indirect_call_records_whether_its_signature_is_declared() {
+    let declared = indirect_call_declared_flags(&format!(
+        "{GENERIC_APPLY}fn test() -> any:\n    return apply(\\x: x, 41)\n"
+    ));
+    assert_eq!(declared, vec![(vec![TypeId::ANY], TypeId::ANY, true)]);
+
+    // A callee that is only an `any` value has no declared function type:
+    // the signature is a guess from the argument types and stays undeclared.
+    let guessed = indirect_call_declared_flags("fn test(f: any) -> any:\n    return f(32)\n");
+    assert_eq!(guessed, vec![(vec![TypeId::I64], TypeId::ANY, false)]);
+
+    // A local closure's signature is stamped from the closure itself, so its
+    // erased result slot is declared too.
+    let stamped =
+        indirect_call_declared_flags("fn test() -> any:\n    val f = \\x: x * 10\n    return f(32)\n");
+    assert_eq!(stamped, vec![(vec![TypeId::I64], TypeId::ANY, true)]);
+}
+
+/// JIT admission: a declared `ANY` boundary is compiled, an undeclared one is
+/// still refused (naming the function), because no encoding is right for it.
+#[test]
+fn jit_admits_declared_any_closure_boundary_only() {
+    let refused = |source: &str| {
+        let mir = compile_to_mir(source).expect("mir lowering failed");
+        crate::codegen::JitCompiler::first_lambda_function_impl(&mir)
+    };
+    assert_eq!(
+        refused(&format!(
+            "{GENERIC_APPLY}fn test() -> any:\n    return apply(\\x: x, 41)\n"
+        )),
+        None,
+        "generic fn(T) -> T boundary must be admitted"
+    );
+    assert_eq!(
+        refused("fn call(f: any) -> any:\n    return f(32)\n\nfn test() -> any:\n    return call(\\x: x)\n"),
+        Some("call".to_string()),
+        "an undeclared ANY boundary must stay refused"
+    );
+}
+
+/// The LOCAL that holds a closure must be pointer-sized. HIR types a lambda as
+/// its body type, so `val f = \\x: x > 1` declared `f` as `bool`: codegen gave
+/// it an 8-bit slot and truncated the closure handle (`f(2)` crashed,
+/// `xs.filter(f)` answered `[]`). The `Store`/`Load` were already retyped; the
+/// slot itself was not.
+#[test]
+fn local_holding_a_bool_result_closure_is_pointer_sized() {
+    let mir = compile_to_mir("fn test() -> bool:\n    val f = \\x: x > 1\n    return f(2)\n")
+        .expect("mir lowering failed");
+    let test = mir.functions.iter().find(|f| f.name == "test").expect("test fn");
+    let closure_local = test
+        .blocks
+        .iter()
+        .flat_map(|b| b.instructions.iter())
+        .find_map(|inst| match inst {
+            MirInst::LocalAddr { local_index, .. } => Some(*local_index),
+            _ => None,
+        })
+        .expect("closure local");
+    let slot = &test.locals[closure_local - test.params.len()];
+    assert_eq!(slot.ty, TypeId::I64, "closure-holding local `{}` must be I64", slot.name);
+}
+
+/// A narrow integer PARAMETER (`fn(text, i32)`) is carryable: the call site
+/// widens and boxes it, the boxed entry decodes and narrows it to the type the
+/// body declares. It was refused only because `jit_closure_abi_supports`
+/// admits 64-bit register types, which de-JITed every module co-compiling
+/// `SimpleHttpServer.start_with_callback(.., on_ready: fn(text, i32))`.
+/// A narrow RESULT stays refused (the outlined body's sub-register return).
+#[test]
+fn jit_admits_narrow_integer_closure_parameters() {
+    let refused = |source: &str| {
+        let mir = compile_to_mir(source).expect("mir lowering failed");
+        crate::codegen::JitCompiler::first_lambda_function_impl(&mir)
+    };
+    let lambda = "fn test() -> i64:\n    val f = \\x: x\n    return f(1)\n";
+    for ty in ["i32", "i16", "i8", "u32", "u16", "u8"] {
+        assert_eq!(
+            refused(&format!("fn run(f: fn(text, {ty}), p: {ty}):\n    f(\"h\", p)\n\n{lambda}")),
+            None,
+            "a `{ty}` closure parameter must be admitted"
+        );
+    }
+    assert_eq!(
+        refused(&format!("fn run(f: fn(i64) -> i32) -> i32:\n    return f(1)\n\n{lambda}")),
+        Some("run".to_string()),
+        "a narrow closure RESULT stays refused"
+    );
 }
 
 /// Sub-register and untyped boundary types are not carryable by the unboxed

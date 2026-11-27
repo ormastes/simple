@@ -1,7 +1,8 @@
 # Bug: `ContractExprKind.Forall` (enum variant) and `ContractExpr.ge`/`.call` (static methods) report "not found" from outside the module even though they are defined in source, while sibling members (`.gt`, `.Ge`, etc.) resolve fine
 
 - **Date:** 2026-07-20
-- **Status:** open
+- **Status:** RESOLVED 2026-11-25 — does not reproduce on the pinned seed
+  v1.0.0-rc.1; see dated verification note at bottom.
 - **Area:** `src/compiler_rust/lib/std/src/verification/models/contracts.spl` (`enum ContractExprKind`, `class ContractExpr`), exercised via `test/00_formal_verification/compiler/unified_attrs_spec.spl`
 - **Binary:** reproduced on `bin/release/x86_64-unknown-linux-gnu/simple`, which currently prints the Rust-seed bootstrap warning — likely a seed-interpreter symbol-table/dispatch defect; not independently re-verified on a genuinely self-hosted binary.
 
@@ -62,3 +63,30 @@ Needs actual interpreter/semantic-checker instrumentation to compare symbol-tabl
 bin/release/x86_64-unknown-linux-gnu/simple test test/00_formal_verification/compiler/unified_attrs_spec.spl --no-session-daemon
 ```
 4/5 examples fail as above.
+
+## Verification 2026-11-25 (p2w1-ag lane, executed probe)
+
+STALE — does not reproduce. Probed with the currently pinned seed
+(`bin/simple.exe`, Rust seed v1.0.0-rc.1, Windows) via `simple run` on a
+probe performing the three failing accesses from outside the module:
+
+```
+import verification.models.contracts as contracts
+fn main():
+    print("forall_quant={contracts.ContractExprKind.Forall.is_quantifier()}")
+    val ge_expr = contracts.ContractExpr.ge(contracts.ContractExpr.variable("n"), contracts.ContractExpr.int_val(0))
+    print("ge_ok")
+    val call_expr = contracts.ContractExpr.call("read_file", [contracts.ContractExpr.variable("path")])
+    print("call_ok")
+```
+
+Output: `forall_quant=true`, `ge_ok`, `call_ok` — all three members
+(`ContractExprKind.Forall`, `ContractExpr.ge`, `ContractExpr.call`) resolve
+from external package-qualified access. This matches the entry's own suspicion
+that the 2026-07 failure was a stale-seed artifact: the failing binary was the
+2026-07-era Linux release seed, and the current pinned seed resolves the
+members correctly. The full spec could not be re-run end-to-end because spec
+execution at this HEAD is blocked repo-wide by the pinned seed rejecting
+`@representation_boundary` (release/1.0.0 source/binary inconsistency, known
+issue); the direct-execution probe above covers the exact three failing
+statements.

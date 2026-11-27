@@ -1,4 +1,16 @@
 # Metal GPU-only native readback collapses to one pixel
+
+## Triage 2026-11-25 (lane p2w3-aa)
+
+macOS/Apple-Silicon-hardware-only: every acceptance item requires a native
+Metal device readback cycle on a Mac host (`engine2d_cpu_metal_parity_run.spl`
+under `host-gpu`). No Metal device exists on this Windows lane, so neither
+reproduction nor verification is possible here; the prior sessions already
+hit their three-cycle caps with the cross-runtime array-ownership root cause
+(`rt_u32s_from_raw` registry split) fixed in Simple-core and acceptance items
+2–4 still open pending a fresh native macOS cycle. Left OPEN for a macOS
+lane; no change made.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

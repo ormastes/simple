@@ -336,3 +336,33 @@ board-proxy pipeline (`.claude/rules/board-runnable.md`) to re-verify — not a
 unit-spec-TDD-fixable defect in isolation, and well beyond this pass's
 per-bug budget (kernel + guest binary rebuild plus a boot cycle). Leaving
 OPEN as previously narrowed; no code change made this pass.
+
+## Triage 2026-11-04 (c28-w4)
+
+Triage 2026-11-04: root causes 1 and 2 fixed; open part is root cause 3 (in-guest hello.spl rc=70, str.clear receiver=0x0) which needs a rebuilt kernel plus guest simple through the OVMF-pflash board-proxy pipeline; not reproducible on this Windows host without that lane. Premise may be stale: the interpreter/seed was redeployed 2026-11-04 (0b2c3d015b7). QUESTION: is there a current SimpleOS guest image build to re-run the rc=70 probe on, or should this be set to verification-pending against the next kernel build?
+
+## BF-9 Update (2026-11-26) — RC1/RC2 contract verified; RC3 (`lexer.spl`) remains `open`
+
+- **Fixed-contract OS/loader portion (RC1/RC2)**: Kernel ELF64 admission and ELF32 / `W|X` / truncated-header rejection verified in `src/os/kernel/loader/elf_loader.spl` (`load_user_executable`, `elf_admit_executable`).
+- **Remaining open portion (RC3)**: In-guest `/usr/bin/simple hello.spl` (`rc=70`, `str.clear` receiver=0x0) in `src/compiler/10.frontend/core/lexer.spl` (outside BF-9 ownership) remains `open` until fixed and verified in an OVMF guest run.
+- **Host spec**: `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel_bf9/bf9_elf64_loader_contract_spec.spl --mode=interpreter` -> `3 examples, 0 failures`.
+- **QEMU/baremetal verification pending**:
+  ```sh
+  sh scripts/check/check-simpleos-x86-kernel-elf.shs && sh scripts/os/ssh_simple_hello_uefi.shs
+  ```
+
+## Wave 5 Update (2026-11-27) — `fix-implemented-verification-pending` (RC3 nil-receiver `.clear()` guards)
+
+- **Root Cause #3 diagnosis (`w5-2-simpleos-kernel-boot`)**: Under freestanding native-build (where module-level array/state globals can remain `nil` / `0x0` instead of initialized `[]`), unguarded `.len()`, `[0]`, and `.clear()` sequences (or `if X == nil: X = []` immediately followed by unconditional `X.clear()` when the runtime/optimizer treats `X` as nil) dispatch into `rt_clear(0x0)` -> `rt_refuse_non_text_receiver("clear", 0x0)` (`rc=70`).
+- **Fixes implemented across pure-Simple frontend/interpreter dispatch**:
+  - `src/compiler/10.frontend/core/lexer.spl`: guarded `bool_slot0_or`, `lex_source_byte_offset`, `lex_span_prefix_ensure`, `lex_source_char_offset`, `lex_init_with_path`, `lex_source_char_at`, `lex_source_slice`, `lex_source_set`, `lex_token_start_get`, `lex_token_end_get`, `lex_cur_no_interp_get`, `current_core_source_get`, `lex_next` (preserving `if lex_generic_close_pending[0]:` for `bootstrap_main_source_spec`), `lex_mark_current_token_as_generic_close`, live indent/paren accessors, `lex_snapshot_save`/`restore`, and converted `lex_tokenize_all` to `if X == nil: X = [] else: X.clear()`.
+  - `src/compiler/10.frontend/core/_AstExpr/nodes.spl`: nil-guarded `expr_lifetime_invalidate_v1`, `expr_attr_apply_config`, `expr_extra_load`, `expr_s_val_load`, `expr_i_val_load`, and converted all 25 array resets in `expr_reset()` to `if X == nil: X = [] else: X.clear()`.
+  - `src/compiler/10.frontend/core/ast_stmt.spl`: converted all 13 array resets in `stmt_reset()` to `if X == nil: X = [] else: X.clear()`.
+  - `src/compiler/10.frontend/core/_Ast/decl_nodes.spl`: converted `decl_metadata_pools_reset`, `macro_facts_reset`, and `decl_pools_clear_v1` (47 pools) to `if X == nil: X = [] else: X.clear()`, plus `decl_import_role_v1 == nil` guard in `decl_pools_ensure_v1`.
+  - `src/compiler/10.frontend/core/parser.spl`: nil-guarded `par_state` and `par_warnings` in `parser_init_with_path` and `parser_warnings_clear`.
+  - `src/compiler/10.frontend/core/interpreter/env.spl`: guarded `scope_hm_*` tables and row slots before `.clear()` in `env_push_scope()`.
+  - `src/compiler/30.types/units/unit_ops.spl`: guarded `unit_op_warnings` before `.clear()` in `unit_op_take_warnings()`.
+- **Host spec run post-edit (interpreter, 3-slot semaphore)**:
+  - `test/01_unit/compiler/bootstrap/frontend_clear_nil_guard_spec.spl` -> `3 examples, 0 failures`.
+- **Verification pending**: `waiting-for: SimpleOS in-guest /usr/bin/simple hello.spl verification`.
+

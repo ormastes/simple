@@ -1,47 +1,75 @@
 #!/bin/sh
 # Execute the actual runner against rejected and admitted files; never bypass cover validation.
 set -eu
-SIMPLE_BIN=${SIMPLE_BIN:-bin/simple}
+SIMPLE_BIN=${SIMPLE_BIN:?Set SIMPLE_BIN to a qualified self-hosted CLI}
 ROOT="build/cover-admission-contract.$$"
-mkdir -p "$ROOT/system/mixed" "$ROOT/system/rejected"
+mkdir -p "$ROOT/system/mixed" "$ROOT/system/rejected" "$ROOT/system/clean" "$ROOT/system/failing"
 cat > "$ROOT/system/mixed/admitted_spec.spl" <<'SPL'
 # @cover src/app/test_runner_new/cover_admission.spl 1%
 use std.spec.*
 use app.test_runner_new.cover_admission.{cover_admitted_files}
+use std.nogc_sync_mut.io.file_ops.{file_write}
 describe "admitted coverage contract":
     it "executes the real admission helper":
         print "COVER_CONTRACT_ADMITTED_BODY"
+        file_write("COVER_ADMITTED_MARKER", "executed")
         expect(cover_admitted_files(["good", "bad"], ["bad"])).to_equal(["good"])
 SPL
 cat > "$ROOT/system/mixed/rejected_spec.spl" <<'SPL'
 use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_write}
 describe "missing annotation contract":
     it "must never execute before admission":
         print "COVER_CONTRACT_REJECTED_BODY"
+        file_write("COVER_REJECTED_MARKER", "executed")
         expect(false).to_equal(true)
 SPL
+sed "s|COVER_ADMITTED_MARKER|$ROOT/admitted.marker|" "$ROOT/system/mixed/admitted_spec.spl" > "$ROOT/admitted.tmp"
+mv "$ROOT/admitted.tmp" "$ROOT/system/mixed/admitted_spec.spl"
+sed "s|COVER_REJECTED_MARKER|$ROOT/rejected.marker|" "$ROOT/system/mixed/rejected_spec.spl" > "$ROOT/rejected.tmp"
+mv "$ROOT/rejected.tmp" "$ROOT/system/mixed/rejected_spec.spl"
 cp "$ROOT/system/mixed/rejected_spec.spl" "$ROOT/system/rejected/rejected_spec.spl"
+cp "$ROOT/system/mixed/admitted_spec.spl" "$ROOT/system/clean/admitted_spec.spl"
+cp "$ROOT/system/mixed/rejected_spec.spl" "$ROOT/system/failing/rejected_spec.spl"
+sed 's/to_equal(\["good"\])/to_equal(["wrong"])/' "$ROOT/system/mixed/admitted_spec.spl" > "$ROOT/system/failing/admitted_spec.spl"
 run_case() {
     label=$1
     directory=$2
     shift 2
     status=0
+    rm -f "$ROOT/admitted.marker" "$ROOT/rejected.marker"
     env SIMPLE_TEST_DEPTH=0 "$SIMPLE_BIN" run src/app/test_runner_new/main.spl "$directory" --no-cache --no-db --no-session-daemon "$@" > "$ROOT/$label.log" 2>&1 || status=$?
-    test "$status" -eq 1
+    test "$status" -eq 2
     grep -q 'COVER ADMISSION FAILED' "$ROOT/$label.log"
-    grep -q 'executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=cover-admission-failed' "$ROOT/$label.log"
-    if grep -q 'COVER_CONTRACT_REJECTED_BODY' "$ROOT/$label.log"; then
+    grep -q 'COVER FILE VERDICT: .*executed=0 passed=0 failed=0 admission_failed=1' "$ROOT/$label.log"
+    grep -q 'Coverage gate: FAIL' "$ROOT/$label.log"
+    if test -e "$ROOT/rejected.marker"; then
         echo "Rejected test body ran: $ROOT/$label.log" >&2
         exit 1
     fi
 }
 run_case sequential "$ROOT/system/mixed" --unstable --sequential
-grep -q 'Results: 2 total, 1 passed, 1 failed' "$ROOT/sequential.log"
+grep -q 'Results: 1 total, 1 passed, 0 failed' "$ROOT/sequential.log"
+test -f "$ROOT/admitted.marker"
 run_case parallel "$ROOT/system/mixed" --unstable --parallel --max-workers=2
-grep -q 'Results: 2 total, 1 passed, 1 failed' "$ROOT/parallel.log"
+grep -q 'Results: 1 total, 1 passed, 0 failed' "$ROOT/parallel.log"
+test -f "$ROOT/admitted.marker"
 run_case stable "$ROOT/system/mixed" --no-unstable --sequential
-if grep -q 'COVER_CONTRACT_ADMITTED_BODY' "$ROOT/stable.log"; then exit 1; fi
-grep -q 'Results: 1 total, 0 passed, 1 failed' "$ROOT/stable.log"
+test -f "$ROOT/admitted.marker"
+grep -q 'Results: 1 total, 1 passed, 0 failed' "$ROOT/stable.log"
 run_case rejected "$ROOT/system/rejected" --unstable --sequential
-grep -q 'Results: 1 total, 0 passed, 1 failed' "$ROOT/rejected.log"
-printf 'PASS: cover admission continues independent files and retains rejected failures; logs %s\n' "$ROOT"
+grep -q 'ABORTED BEFORE EXECUTION' "$ROOT/rejected.log"
+if grep -q 'Results:' "$ROOT/rejected.log"; then exit 1; fi
+if test -e "$ROOT/admitted.marker"; then exit 1; fi
+
+status=0
+env SIMPLE_TEST_DEPTH=0 "$SIMPLE_BIN" run src/app/test_runner_new/main.spl "$ROOT/system/failing" --no-unstable --sequential --no-cache --no-db --no-session-daemon > "$ROOT/failing.log" 2>&1 || status=$?
+test "$status" -eq 1
+grep -q 'Results: 1 total, 0 passed, 1 failed' "$ROOT/failing.log"
+grep -q 'Coverage gate: FAIL' "$ROOT/failing.log"
+if test -e "$ROOT/rejected.marker"; then exit 1; fi
+
+env SIMPLE_TEST_DEPTH=0 "$SIMPLE_BIN" run src/app/test_runner_new/main.spl "$ROOT/system/clean" --no-unstable --sequential --no-cache --no-db --no-session-daemon > "$ROOT/clean.log" 2>&1
+grep -q 'Results: 1 total, 1 passed, 0 failed' "$ROOT/clean.log"
+if grep -q 'Coverage gate: FAIL' "$ROOT/clean.log"; then exit 1; fi
+printf 'PASS: coverage policy and executed test verdicts remain distinct; logs %s\n' "$ROOT"

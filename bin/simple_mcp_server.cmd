@@ -55,9 +55,12 @@ if not "%SIMPLE_BINARY%"=="" goto :runtime_resolved
 if exist "%SIMPLE_RUNTIME%" goto :runtime_resolved
 if exist "%~dp0release\x86_64-pc-windows-gnu\simple.exe" set "SIMPLE_RUNTIME=%~dp0release\x86_64-pc-windows-gnu\simple.exe"
 if exist "%SIMPLE_RUNTIME%" goto :runtime_resolved
-if exist "%~dp0..\src\compiler_rust\target\bootstrap\simple.exe" set "SIMPLE_RUNTIME=%~dp0..\src\compiler_rust\target\bootstrap\simple.exe"
-if exist "%SIMPLE_RUNTIME%" goto :runtime_resolved
+rem Same precedence as bin\simple.cmd: the committed bin\simple.exe matches
+rem the tree; a stale local target\bootstrap seed predating merged syntax
+rem (e.g. @when) must not shadow it.
 if exist "%~dp0simple.exe" set "SIMPLE_RUNTIME=%~dp0simple.exe"
+if exist "%SIMPLE_RUNTIME%" goto :runtime_resolved
+if exist "%~dp0..\src\compiler_rust\target\bootstrap\simple.exe" set "SIMPLE_RUNTIME=%~dp0..\src\compiler_rust\target\bootstrap\simple.exe"
 :runtime_resolved
 if not exist "%SIMPLE_RUNTIME%" (
     echo error: no admitted simple_mcp_server.exe and no runtime at %SIMPLE_RUNTIME% 1>&2
@@ -120,5 +123,10 @@ echo simple_mcp_server: no admitted native exe; serving src\app\mcp\main.spl on 
 "%SIMPLE_RUNTIME%" run "%~dp0..\src\app\mcp\main.spl" %* 2>>"%MCP_LOG%"
 set "MCP_RC=%ERRORLEVEL%"
 rem Startup errors live in the log, so name it on stderr when the server fails.
-if not "%MCP_RC%"=="0" 1>&2 echo simple_mcp_server: exited %MCP_RC%; stderr log: %MCP_LOG%
+rem Never write a JSON-RPC frame here: a response with "id":null answers no
+rem request, MCP clients reject it as a schema error and hide the real exit.
+rem stdout stays protocol-clean; stderr + a non-zero exit is the dead-server signal.
+if "%MCP_RC%"=="0" exit /b 0
+1>&2 echo simple_mcp_server: exited %MCP_RC%; stderr log: %MCP_LOG%
+1>&2 powershell -NoProfile -Command "Get-Content -LiteralPath $env:MCP_LOG -Tail 5" 2>nul
 exit /b %MCP_RC%

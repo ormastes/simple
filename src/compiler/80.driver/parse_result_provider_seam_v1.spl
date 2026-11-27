@@ -116,30 +116,30 @@ pub struct ParseResultProviderV1:
 
 # ---------------------------------------------------------------- digest material
 
-fn _push_u64(out: [i64], value: u64):
+fn _push_u64(out: [u8], value: u64):
     for shift in 0..8:
-        out.append(((value >> ((shift as u64) * 8u64)) & 255u64) as i64)
+        out.append(((value >> ((shift as u64) * 8u64)) & 255u64) as u8)
 
 # Length-prefixed so "ab" + "c" and "a" + "bc" cannot collide.
-fn _push_text(out: [i64], value: text):
+fn _push_text(out: [u8], value: text):
     val bytes = text_to_utf8_bytes(value)
     _push_u64(out, bytes.len() as u64)
     for b in bytes:
-        out.append(b as i64)
+        out.append(b)
 
-fn _read_u64(bytes: [i64], offset: i64) -> u64:
+fn _read_u64(bytes: [u8], offset: i64) -> u64:
     var value = 0u64
     for index in 0..8:
         value = value | ((bytes[offset + index] as u64) << ((index as u64) * 8u64))
     value
 
-fn _digest_of(material: [i64]) -> EnvironmentDigest256V1:
+fn _digest_of(material: [u8]) -> EnvironmentDigest256V1:
     val raw = sha256_bytes(material)
     EnvironmentDigest256V1(w0: _read_u64(raw, 0), w1: _read_u64(raw, 8),
         w2: _read_u64(raw, 16), w3: _read_u64(raw, 24))
 
 fn _label_digest(label: text) -> EnvironmentDigest256V1:
-    var material: [i64] = []
+    var material: [u8] = []
     _push_text(material, label)
     _digest_of(material)
 
@@ -147,7 +147,7 @@ fn _same_digest(a: EnvironmentDigest256V1, b: EnvironmentDigest256V1) -> bool:
     a.w0 == b.w0 and a.w1 == b.w1 and a.w2 == b.w2 and a.w3 == b.w3
 
 pub fn parse_result_source_identity_v1(source: text) -> EnvironmentDigest256V1:
-    var material: [i64] = []
+    var material: [u8] = []
     _push_text(material, "simple/parse-source/v1")
     _push_text(material, source)
     _digest_of(material)
@@ -166,7 +166,7 @@ pub fn parse_result_normalized_output_same_v1(
 # fresh `lex_init_with_path`, so it must be called after the module has been
 # extracted -- never between `parser_init_with_path` and `parse_module_body`.
 fn _token_digest(source: text, path: text) -> EnvironmentDigest256V1:
-    var material: [i64] = []
+    var material: [u8] = []
     _push_text(material, "simple/parse-tokens/v1")
     _push_text(material, path)
     lex_init_with_path(source, path)
@@ -196,7 +196,7 @@ fn _token_count(source: text, path: text) -> i64:
 # Spans come from the declaration order the parser retained, so the digest is
 # order-sensitive by construction rather than by sorting after the fact.
 fn _span_digest(module: ParserModule, path: text) -> EnvironmentDigest256V1:
-    var material: [i64] = []
+    var material: [u8] = []
     _push_text(material, "simple/parse-spans/v1")
     _push_text(material, path)
     for name in module.function_order:
@@ -211,7 +211,7 @@ fn _span_digest(module: ParserModule, path: text) -> EnvironmentDigest256V1:
             _push_text(material, f.span.file)
     _digest_of(material)
 
-fn _push_sorted_names(material: [i64], label: text, names: [text]):
+fn _push_sorted_names(material: [u8], label: text, names: [text]):
     _push_text(material, label)
     val sorted = names.sort()
     var count = 0
@@ -222,7 +222,7 @@ fn _push_sorted_names(material: [i64], label: text, names: [text]):
         _push_text(material, n)
 
 fn _node_digest(module: ParserModule) -> EnvironmentDigest256V1:
-    var material: [i64] = []
+    var material: [u8] = []
     _push_text(material, "simple/parse-nodes/v1")
     _push_text(material, module.name)
     _push_text(material, module.tagged_layer)
@@ -230,6 +230,8 @@ fn _node_digest(module: ParserModule) -> EnvironmentDigest256V1:
     # Only strict modules add material, so default-mode digests are unchanged.
     if module.nogc_strict:
         _push_text(material, "nogc_strict")
+    if module.required_init_mode != "":
+        _push_text(material, "required_init=" + module.required_init_mode)
     _push_u64(material, module.imports.len() as u64)
     _push_u64(material, module.exports.len() as u64)
     _push_u64(material, module.domain_blocks.len() as u64)
@@ -272,7 +274,7 @@ fn _node_digest(module: ParserModule) -> EnvironmentDigest256V1:
     _digest_of(material)
 
 fn _diagnostic_digest(diagnostics: [text]) -> EnvironmentDigest256V1:
-    var material: [i64] = []
+    var material: [u8] = []
     _push_text(material, "simple/parse-diagnostics/v1")
     _push_u64(material, diagnostics.len() as u64)
     for d in diagnostics:
@@ -494,7 +496,7 @@ pub fn parse_result_parity_evidence_v1(
     val legacy_identity = _label_digest(legacy_implementation_id)
     if _same_digest(legacy_identity, canonical.implementation_identity):
         return Err(ParseResultRefusalV1.InvalidRequest)
-    var coverage: [i64] = []
+    var coverage: [u8] = []
     _push_text(coverage, "simple/parse-coverage/v1")
     _push_u64(coverage, canonical.source_identity.w0)
     _push_u64(coverage, canonical.declaration_count)

@@ -1,0 +1,200 @@
+# @cover src/lib/common/elf/elf_image_v1.spl
+# @cover src/lib/common/binary_io.spl
+# @req REQ-XRAY-SHARED-ELF-IMAGE
+"""
+# Shared ELF64 little-endian image reader
+
+One pure reader replaces the three in-memory ELF64 walkers the XRay trace
+library, the XRay sled emitter and the linker inspector each carried. The
+golden image below is a hand-built ELF64 relocatable (AArch64, 2 content
+sections + .shstrtab, one PT_LOAD mapping file offset 0); every expected
+value is what those former walkers answered for the same bytes.
+"""
+use std.spec.*
+use std.common.binary_io.{bytes_read_le_at, bytes_push_le}
+use std.common.elf.elf_image_v1.*
+
+# ELF header (64) | PT_LOAD phdr (56) @64 | .shstrtab @120 (34) | .text @154 (8)
+# | .simple_xray_map @162 (4) | pad to 168 | 4 shdrs @168 (256) = 424 bytes.
+fn golden_elf64() -> [u8]:
+    var b: [u8] = [127u8, 69u8, 76u8, 70u8, 2u8, 1u8, 1u8, 0u8]
+    b = bytes_push_le(b, 0, 8)              # EI_PAD
+    b = bytes_push_le(b, 1, 2)              # e_type ET_REL
+    b = bytes_push_le(b, 183, 2)            # e_machine EM_AARCH64
+    b = bytes_push_le(b, 1, 4)              # e_version
+    b = bytes_push_le(b, 4096, 8)           # e_entry
+    b = bytes_push_le(b, 64, 8)             # e_phoff
+    b = bytes_push_le(b, 168, 8)            # e_shoff
+    b = bytes_push_le(b, 0, 4)              # e_flags
+    b = bytes_push_le(b, 64, 2)             # e_ehsize
+    b = bytes_push_le(b, 56, 2)             # e_phentsize
+    b = bytes_push_le(b, 1, 2)              # e_phnum
+    b = bytes_push_le(b, 64, 2)             # e_shentsize
+    b = bytes_push_le(b, 4, 2)              # e_shnum
+    b = bytes_push_le(b, 3, 2)              # e_shstrndx
+    # PT_LOAD: p_type, p_flags, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align
+    b = bytes_push_le(b, 1, 4)
+    b = bytes_push_le(b, 5, 4)
+    b = bytes_push_le(b, 0, 8)
+    b = bytes_push_le(b, 4194304, 8)        # 0x400000
+    b = bytes_push_le(b, 4194304, 8)
+    b = bytes_push_le(b, 424, 8)
+    b = bytes_push_le(b, 424, 8)
+    b = bytes_push_le(b, 4096, 8)
+    # .shstrtab: "\0.text\0.simple_xray_map\0.shstrtab\0"
+    b.push(0u8)
+    for name in [".text", ".simple_xray_map", ".shstrtab"]:
+        for ch in name.bytes():
+            b.push(ch)
+        b.push(0u8)
+    for byte in [31u8, 32u8, 3u8, 213u8, 192u8, 3u8, 95u8, 214u8]:   # nop; ret
+        b.push(byte)
+    for byte in [222u8, 173u8, 190u8, 239u8]:
+        b.push(byte)
+    b.push(0u8)
+    b.push(0u8)
+    b = shdr(b, 0, 0, 0, 0, 0, 0, 0)
+    b = shdr(b, 1, 1, 6, 4198400, 154, 8, 4)          # .text @ 0x401000
+    b = shdr(b, 7, 1, 2, 4202496, 162, 4, 1)          # .simple_xray_map @ 0x402000
+    b = shdr(b, 24, 3, 0, 0, 120, 34, 1)              # .shstrtab
+    b
+
+fn shdr(bytes: [u8], name: i64, kind: i64, flags: i64, addr: i64, offset: i64, size: i64, align: i64) -> [u8]:
+    var b = bytes
+    b = bytes_push_le(b, name as u64, 4)
+    b = bytes_push_le(b, kind as u64, 4)
+    b = bytes_push_le(b, flags as u64, 8)
+    b = bytes_push_le(b, addr as u64, 8)
+    b = bytes_push_le(b, offset as u64, 8)
+    b = bytes_push_le(b, size as u64, 8)
+    b = bytes_push_le(b, 0, 4)
+    b = bytes_push_le(b, 0, 4)
+    b = bytes_push_le(b, align as u64, 8)
+    b = bytes_push_le(b, 0, 8)
+    b
+
+describe "binary_io little-endian helpers at an offset":
+    it "round-trips widths 1, 2, 4 and 8 through push and read":
+        var b: [u8] = [9u8]
+        b = bytes_push_le(b, 171, 1)
+        b = bytes_push_le(b, 48879, 2)
+        b = bytes_push_le(b, 3735928559, 4)
+        b = bytes_push_le(b, 1311768467463790320, 8)
+        expect(b.len()).to_equal(16)
+        expect(b[1]).to_equal(171u8)
+        expect(b[2]).to_equal(239u8)
+        expect(b[3]).to_equal(190u8)
+        expect(bytes_read_le_at(b, 1, 1)).to_equal(171)
+        expect(bytes_read_le_at(b, 2, 2)).to_equal(48879)
+        expect(bytes_read_le_at(b, 4, 4)).to_equal(3735928559)
+        expect(bytes_read_le_at(b, 8, 8)).to_equal(1311768467463790320)
+
+    it "keeps only the low bytes of a wide value and sign-extends nothing":
+        val b = bytes_push_le([], 65535 + 65536 * 7, 2)
+        expect(b).to_equal([255u8, 255u8])
+        val all = bytes_read_le_at([255u8, 255u8, 255u8, 255u8, 255u8, 255u8, 255u8, 255u8], 0, 8)
+        expect(all as i64).to_equal(-1)
+
+describe "ELF64 LE image header":
+    it "recognises ELF64 little-endian and rejects anything else":
+        val elf = golden_elf64()
+        expect(elf.len()).to_equal(424)
+        expect(elf_image_is_elf64_le_v1(elf)).to_equal(true)
+        var elf32 = golden_elf64()
+        elf32[4] = 1u8
+        expect(elf_image_is_elf64_le_v1(elf32)).to_equal(false)
+        var big = golden_elf64()
+        big[5] = 2u8
+        expect(elf_image_is_elf64_le_v1(big)).to_equal(false)
+        expect(elf_image_is_elf64_le_v1([127u8, 69u8, 76u8])).to_equal(false)
+        expect(elf_image_header_v1([]).is_none()).to_equal(true)
+
+    it "reads every table field the walkers depend on":
+        val header = elf_image_header_v1(golden_elf64()).unwrap()
+        expect(header.e_type).to_equal(1)
+        expect(header.e_machine).to_equal(183)
+        expect(header.e_entry).to_equal(4096)
+        expect(header.e_phoff).to_equal(64)
+        expect(header.e_phnum).to_equal(1)
+        expect(header.e_phentsize).to_equal(56)
+        expect(header.e_shoff).to_equal(168)
+        expect(header.e_shnum).to_equal(4)
+        expect(header.e_shentsize).to_equal(64)
+        expect(header.e_shstrndx).to_equal(3)
+
+    it "exposes the fixed-width readers the linker inspector delegates to":
+        val elf = golden_elf64()
+        expect(elf_image_u16_le_v1(elf, 18)).to_equal(183)
+        expect(elf_image_u32_le_v1(elf, 20)).to_equal(1)
+        expect(elf_image_u64_le_v1(elf, 40)).to_equal(168)
+
+    it "places every byte of a field at its own lane (all 8 lanes distinct)":
+        val lanes: [u8] = [0x11u8, 0x22u8, 0x33u8, 0x44u8, 0x55u8, 0x66u8, 0x77u8, 0x08u8, 0x99u8]
+        expect(elf_image_u16_le_v1(lanes, 0)).to_equal(0x2211)
+        expect(elf_image_u16_le_v1(lanes, 7)).to_equal(0x9908)
+        expect(elf_image_u32_le_v1(lanes, 0)).to_equal(0x44332211)
+        expect(elf_image_u32_le_v1(lanes, 4)).to_equal(0x08776655)
+        expect(elf_image_u64_le_v1(lanes, 0)).to_equal(0x0877665544332211)
+
+describe "ELF64 LE section table":
+    it "iterates all section headers in order":
+        val elf = golden_elf64()
+        val sections = elf_image_sections_v1(elf, elf_image_header_v1(elf).unwrap())
+        expect(sections.len()).to_equal(4)
+        expect(sections[0].sh_type).to_equal(0)
+        expect(sections[1].sh_name).to_equal(1)
+        expect(sections[1].sh_flags).to_equal(6)
+        expect(sections[1].sh_addr).to_equal(4198400)
+        expect(sections[1].sh_offset).to_equal(154)
+        expect(sections[1].sh_size).to_equal(8)
+        expect(sections[1].sh_addralign).to_equal(4)
+        expect(sections[3].sh_type).to_equal(3)
+        expect(sections[3].sh_offset).to_equal(120)
+
+    it "returns no sections when the table runs past the image":
+        val elf = golden_elf64()
+        var header = elf_image_header_v1(elf).unwrap()
+        header = ElfImageHeaderV1(..header, e_shnum: 5)
+        expect(elf_image_sections_v1(elf, header).len()).to_equal(0)
+        header = ElfImageHeaderV1(..header, e_shnum: 0)
+        expect(elf_image_sections_v1(elf, header).len()).to_equal(0)
+
+    it "finds a section by name and gives its address, offset and size":
+        val elf = golden_elf64()
+        val map = elf_image_section_by_name_v1(elf, ".simple_xray_map").unwrap()
+        expect(map.sh_addr).to_equal(4202496)
+        expect(map.sh_offset).to_equal(162)
+        expect(map.sh_size).to_equal(4)
+        val text = elf_image_section_by_name_v1(elf, ".text").unwrap()
+        expect(text.sh_addr).to_equal(4198400)
+        expect(text.sh_size).to_equal(8)
+        expect(elf_image_section_by_name_v1(elf, ".tex").is_none()).to_equal(true)
+        expect(elf_image_section_by_name_v1(elf, ".text2").is_none()).to_equal(true)
+        expect(elf_image_section_by_name_v1(elf, ".rela.simple_xray_map").is_none()).to_equal(true)
+        expect(elf_image_section_by_name_v1([], ".text").is_none()).to_equal(true)
+
+    it "refuses a section table whose entry size is not 64":
+        var elf = golden_elf64()
+        elf[58] = 40u8
+        expect(elf_image_section_by_name_v1(elf, ".text").is_none()).to_equal(true)
+
+    it "copies a section's bytes and refuses one that runs past the image":
+        val elf = golden_elf64()
+        val map = elf_image_section_by_name_v1(elf, ".simple_xray_map").unwrap()
+        expect(elf_image_section_bytes_v1(elf, map)).to_equal(Some([222u8, 173u8, 190u8, 239u8]))
+        val text = elf_image_section_by_name_v1(elf, ".text").unwrap()
+        expect(elf_image_section_bytes_v1(elf, text).unwrap()[0]).to_equal(31u8)
+        expect(elf_image_section_bytes_v1(elf, ElfImageSectionV1(..map, sh_size: 400)).is_none()).to_equal(true)
+
+describe "ELF64 LE program headers":
+    it "answers the virtual address of the PT_LOAD that maps file offset 0":
+        expect(elf_image_first_load_vaddr_v1(golden_elf64())).to_equal(Some(4194304))
+
+    it "answers None without such a segment or on a malformed table":
+        var elf = golden_elf64()
+        elf[64] = 2u8                         # p_type PT_DYNAMIC
+        expect(elf_image_first_load_vaddr_v1(elf).is_none()).to_equal(true)
+        var bad = golden_elf64()
+        bad[54] = 32u8                        # e_phentsize != 56
+        expect(elf_image_first_load_vaddr_v1(bad).is_none()).to_equal(true)
+        expect(elf_image_first_load_vaddr_v1([]).is_none()).to_equal(true)

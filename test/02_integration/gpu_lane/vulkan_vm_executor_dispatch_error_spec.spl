@@ -1,0 +1,39 @@
+"""
+## Purpose and audience
+Purpose: Pin that a failed Vulkan lane dispatch is reported as a failed run.
+`VulkanVmExecutor.run_source` used to return `ok: true, exit_code: 0,
+records: []` for every dispatch error that was not a forced timeout, which a
+caller cannot tell apart from a program that exited 0 with no records.
+Audience: maintainers of the GPU lane executors and their callers.
+## Operator workflow
+Run with the test runner; pure outcome construction, no Vulkan device.
+## Compatibility and limitations
+Does not exercise a live dispatch; the device-backed vectors live in
+test/03_system/gpu_lane/vulkan_vm_executor_conformance_spec.spl.
+Bug record: doc/08_tracking/bug/vulkan_vm_lane_returns_exit0_after_cuda_lane_same_process_2026-08-25.md
+"""
+# @req: REQ-LIB-GC-ASYNC-MUT-001
+
+use std.spec.*
+use std.spec.step
+use std.gc_async_mut.gpu_lane.vulkan_vm_executor.{svmg_dispatch_error_outcome}
+use std.gc_async_mut.gpu_lane.vulkan_lane_session.{VULKAN_LANE_TIMEOUT_SENTINEL}
+
+describe "Vulkan VM executor dispatch-error outcome":
+    it "reports a non-timeout dispatch error as a failed run that names the error":
+        step("build the outcome for each session error that leaves the sentinel unset")
+        for reason in ["vulkan-lane-session-unavailable", "vulkan-lane-fenced-submit-unavailable", "vulkan-lane-descriptor-create-failed", "vulkan-lane-command-record-failed"]:
+            val outcome = svmg_dispatch_error_outcome(reason, 0)
+            expect(outcome.ok).to_equal(false)
+            expect(outcome.error).to_equal(reason)
+            expect(outcome.timed_out).to_equal(false)
+            expect(outcome.records.len()).to_equal(0)
+            expect(outcome.out_arena.len()).to_equal(0)
+
+    it "reports a forced timeout as a failed, timed-out run carrying the sentinel":
+        step("build the outcome for a dispatch whose fence wait was forced to the timeout sentinel")
+        val outcome = svmg_dispatch_error_outcome("vulkan-lane-submit-failed", VULKAN_LANE_TIMEOUT_SENTINEL)
+        expect(outcome.ok).to_equal(false)
+        expect(outcome.timed_out).to_equal(true)
+        expect(outcome.sentinel).to_equal(VULKAN_LANE_TIMEOUT_SENTINEL)
+        expect(outcome.error).to_equal("vulkan-lane-submit-failed")

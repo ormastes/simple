@@ -561,6 +561,42 @@ Or disable on-type checking:
 
 ---
 
+<!-- antigravity-early-defect-detection-2026-11-18 -->
+
+## Canonical LSP Diagnostics, Pull `resultId`, and Overlay Isolation (`WP-03`)
+
+See [early_defect_detection_2026-11-18.md](../../../03_plan/compiler/early_defect_detection_2026-11-18.md) (`ED-06`, `ED-07`, `ED-10`, `ED-T05`, `ED-T07`, `ED-T08`, `ED-T16`).
+
+### Canonical `DiagnosticBatchV1` Push and Pull Transport
+
+`src/lib/nogc_sync_mut/lsp/lsp_handlers.spl` and `src/lib/nogc_sync_mut/lsp/lsp_diag_action_store.spl` preserve canonical `DiagnosticBatchV1` completeness, snapshot identity, and `policy_digest` across both `textDocument/publishDiagnostics` (push) and LSP 3.17 `textDocument/diagnostic` (pull):
+
+- Diagnostics computed for an older document revision are dropped from active publication if a newer `didChange` revision has arrived (`ED-T07`); stale code actions are disabled immediately.
+- When source offsets shift while semantic facts remain reusable, spans must be rebound or recomputed against the current snapshot before publishing diagnostics or fixes (`ED-T16`).
+
+### Pull `resultId` Binding and `unchanged` Reuse
+
+For clients negotiating pull diagnostics, `resultId` deterministically binds the tuple:
+
+```text
+resultId = digest(snapshot, scope, completion, target, policy_digest)
+```
+
+The server responds with `kind: "unchanged"` **only** when all five tuple components match `previousResultId`. Any overlay/dependency change (`snapshot`), scope expansion (`file` vs `workspace`), completion transition (`incomplete` -> `complete`), target/ABI switch, or `DiagnosticRulePolicy` change (`policy_digest`) invalidates `previousResultId` and emits a fresh report.
+
+### No Empty `diagnostics: []` on Malformed JSON, Crash, or Timeout (`exit == 124`)
+
+Analyzer failures — malformed child JSON, non-zero process exit/crash, output-cap truncation, or watchdog timeout (`exit == 124`) — are **never** converted into an empty `diagnostics: []` full report (`ED-07`, `ED-T05`):
+
+- On pull requests, failure or timeout returns an explicit JSON-RPC error / cancelled-retrigger status without certifying clean code or overwriting valid retained diagnostics with `[]`.
+- Retained prior diagnostics, if kept for user context, are marked stale in the action store with all edits disabled until a `Complete` batch for the current snapshot succeeds.
+
+### Per-Client Overlay Isolation
+
+`src/lib/nogc_sync_mut/lsp/lsp_document_sync.spl` isolates open-document overlays (`uri`, integer `version`, `source_hash`, sync authority), target/profile selections, and cancellation handles per client session (`ED-06`, `ED-T08`). Two editors or LLM agents holding different unsaved text for the same URI never overwrite each other's semantic view; backend facts are shared solely by content-addressed `AnalysisKeyV1` identity.
+
+---
+
 ## Source Code
 
 - **LSP server**: `src/app/lsp/`

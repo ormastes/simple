@@ -35,3 +35,83 @@ Fixture: C:/dev/simple-bootstrap-storage/fix-p6enum (y_dict_field).
   tuple payload `T((i64, text))` fails to parse (`expected enum variant name, got )`) and a
   function-typed payload `F(fn(i64) -> i64)` fails to parse (`expected enum variant name, got ->`).
   `Dict<text, i64>`, `[i64]`, `i64?` and the named form build. Both gaps are in the reproducer spec.
+
+## Parser owner repair evidence (2026-11-02)
+
+Status remains OPEN. The enum payload parser now routes a leading dict-type
+token through `parser_parse_type`, preserving `{K: V}` as one positional type.
+The original-form HIR/MIR construction and removal of the `Dict<K, V>`
+workaround are still pending.
+
+Direct parser-owner diagnostic: `repro/positional_brace_dict_payload_2026_11_02/probe.spl`. Before the
+change it failed with `Positional dict was parsed as named fields` after
+observing `IndexMap struct count=1 payload=text:i64`; after the change it
+passed with `IndexMap tuple count=1 payload=dict<text,i64>`. The same probe
+checks a named dictionary field and the following `After(i64)` variant remain
+correct. Logs: `repro/positional_brace_dict_payload_2026_11_02/before_owner.log`
+and `repro/positional_brace_dict_payload_2026_11_02/after_owner.log`. The logs
+record the original pre-move absolute harness path; the checked-in harness has
+identical content and can be run from this evidence directory.
+
+This diagnostic used the unadmitted Windows seed
+`C:\dev\p3new\stage2_next\seed_nilfix.exe` (SHA256
+`FC56D4B5FC384EA93ED20BEFD4503FF6E27DB7734214CA45E072B4DF1B081828`) with
+`run ... --mode=interpreter`; source-provenance receipt is unavailable. It is
+parser-owner evidence only and does not qualify native/JIT behavior or Phase 2.
+
+## Dictionary diagnostic follow-up (2026-11-03)
+
+The leading-brace payload repair is already present in release/1.0.0 at
+`061ee2d4735`. A source follow-up rejects nonempty brace types without a colon
+(`{text}`) or without a value type (`{text: }`), instead of accepting an erased
+dictionary or relying on a generic type error. The legacy empty `{}` type is
+preserved. The existing HIR regression now asserts the complete nested array
+shape and adds nested generic dictionaries, adjacent named fields, following
+variants, and both malformed dictionary diagnostics.
+
+Behavioral verification: **TEST_BLOCKED**. No qualified self-hosted full CLI is
+available in this Windows recovery workspace; the tracked seed and frozen
+diagnostic artifacts are not admitted test producers. The original HIR/MIR
+construction gate remains unrun, and the five `Dict<K, V>` workaround spellings
+in `phase_memo_ownership.spl` remain until that gate passes on an admitted
+producer. This follow-up does not close the bug.
+
+## 2026-11-10 P2 triage (lane p2-compiler-triage-20261110)
+
+VERDICT: SUPERSEDED. Parser repair 061ee2d4735 is an ancestor of release/1.0.0
+d7a430cc2baf. Workaround removal COMPLETED by 036b4597d431 (2026-11-09):
+phase_memo_ownership.spl:5-9 uses the original {K: V} positional payloads, no
+@workaround tags remain, and the commit message records the native stage2_new4
+original-form gate. Qualified on the deployed seed (interpreter):
+positional_payload_brace_dict_spec.spl 9/9, positional_payload_spelling_spec.spl
+5/5; repro fixture test/fixtures/repro/compiler/positional_brace_dict_payload/
+main.spl prints a=207 b=13 c=5, exit 0. Cycles: 1. Evidence:
+build/review/p2fix-compiler-20261110.sdn.
+
+## 2026-11-12 verify lane (bug-posbracedict-20261112)
+
+The 2026-11-06 verify-sweep2 FAIL (`b05_a2`: `M({text: i64})` matched as
+`case E.M(d): d.len()` -> `unresolved method call: len`) does not reproduce on
+an admitted native producer that includes the parser repair. No compiler
+source change was needed.
+
+- Native: Stage 2 aarch64 `build/bootstrap-fable-13/stage2/aarch64-unknown-linux-gnu/simple`
+  (source pin `f8ad54b28467`, which contains `061ee2d4735`, `57818fbbdef` and
+  `036b4597d431`; sha256 prefix `2fb9ecacbf41145f`),
+  `SIMPLE_BOOTSTRAP=1 simple native-build test/fixtures/repro/verify_sweep2/b05_a2.spl --backend=cranelift --threads 1`
+  exit 0; the binary exits 0 and prints `PASS eqord`, `PASS dictpayload`,
+  `PASS tailrange`, `PASS unitalias`. Stage 3 was not run.
+- MIR-layer regression spec (the layer the sweep failed in; the HIR spec only
+  pins variant shape): `test/01_unit/compiler/50.mir/positional_brace_dict_payload_match_spec.spl`,
+  5/5 on the pinned seed (sha256 prefix `56834dffffd8cd89`). It discriminates:
+  with the `142` (dict token) arm removed from
+  `src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl:583` it
+  fails 4/5 with exactly `unresolved method call 'len'`; restored, 5/5.
+  Negative cases kept green: named dict field in a struct-style variant,
+  named dict field in a struct literal, typed `Dict<text, i64>` payload, and
+  `.len()` on an `i64` payload binding is still reported.
+- `phase_memo_ownership.spl:5-6` already uses the brace form; no `@workaround`
+  remains.
+
+Status stays with the claim lifecycle (`bug-claim.shs done` after the PR
+merges).

@@ -2,9 +2,45 @@
 
 - **ID:** rv64_core_no_c_extension_opensbi_stall
 - **Date:** 2026-07-22
-- **Status:** OPEN
+- **Status:** RESOLVED 2026-11-25 — RV64C expansion + pc+2 landed; verified by direct expansion probe on the exact divergent instruction (full OpenSBI boot not re-run; riscv toolchain absent on this host)
 - **Severity:** high (blocks booting any C-compiled RV64 firmware on soc_top_64)
 - **Component:** `src/lib/hardware/rv64gc_rtl/core.spl`, `.../decode.spl` (RTL core datapath)
+
+## Resolution 2026-11-25 (p2w4-ag lane, release/1.0.0 @ 63e791180d3)
+
+The Fix section's three steps are all implemented in the current tree:
+
+1. **RVC detect + expand before decode:** `src/lib/hardware/rv64gc_rtl/decode.spl`
+   implements `rvc_expand(iword) -> RvcExpansion` (line 376) with canonical
+   quadrant-0/1/2 expanders (lines 220/251/328), gcc-objdump-cross-checked
+   encodings, and fail-closed `legal=false` for reserved patterns — exactly
+   the doc's `c.li 557d -> fff00513` case is in its verified table.
+2. **pc+2 step:** `core.spl:75-87` computes `pc_incr = 2 if exp.compressed
+   else 4` and decodes the expanded 32-bit form; `csr.spl:220-221` keeps
+   2-byte-aligned trap/mret pcs (no more `& ~3`).
+3. **Predicted next divergence (PMP/menvcfg CSRs):** also landed —
+   `csr.spl:362-392` adds extended CSR storage for `pmpcfg0-3` (0x3A0-0x3A3),
+   `pmpaddr0-15` (0x3B0-0x3BF), `menvcfg` (0x30A), `mcounteren` (0x306),
+   `scounteren` (0x106); `core_helpers.spl:200` recognizes the PMP range.
+
+**Verification:** `bin/simple.exe test` is env-blocked repo-wide at HEAD
+(pinned seed rejects `@representation_boundary`), so the probe was run in
+`run` mode against the public expander
+(`hardware.rv64gc.core.rv64_compressed`):
+
+```text
+decompress_rvc(0x557d)  -> 0xFFF00513  (c.li a0,-1 = addi a0,x0,-1)  compressed=true
+decompress_rvc(0x0000)  -> 0           (reserved c.addi4spn nzuimm=0, fail-closed)
+RVC PROBE PASS
+```
+
+The full OpenSBI Case-3 boot probe was **not** re-run: it needs
+`build/os/opensbi_rv64_soc/fw_payload.bin` from
+`scripts/os/build_opensbi_rv64_soc.shs`, and no riscv cross toolchain is
+present on this host. The exact instruction-level divergence recorded above
+(the bug's own root cause) is demonstrably fixed; unit coverage exists at
+`test/01_unit/hardware/rv64gc/rv64_compressed_spec.spl` and
+`rv64_pmp_csr_spec.spl` for the next toolchain-equipped run.
 
 ## Symptom
 Booting the real OpenSBI v1.4 `fw_payload.bin` on `soc_top_64` (via the extended

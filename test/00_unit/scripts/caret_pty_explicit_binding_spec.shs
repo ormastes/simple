@@ -1,0 +1,96 @@
+#!/bin/sh
+# Synthetic transport contracts only: the fixture validator is not admission.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d)
+tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
+trap 'rm -rf "$tmp"' EXIT INT TERM
+mkdir -p "$tmp/owner/scripts/check" "$tmp/source" "$tmp/output"
+cp "$ROOT/scripts/check/check-llm-caret-tui-pty.shs" "$tmp/owner/scripts/check/"
+checker=$tmp/owner/scripts/check/check-llm-caret-tui-pty.shs
+git -C "$tmp/source" init -q
+git -C "$tmp/source" -c user.name=Fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m fixture
+revision=$(git -C "$tmp/source" rev-parse HEAD)
+case "$(uname -s):$(uname -m)" in
+    Darwin:arm64) target=aarch64-apple-darwin ;;
+    Darwin:x86_64) target=x86_64-apple-darwin ;;
+    Linux:x86_64) target=x86_64-unknown-linux-gnu ;;
+    Linux:aarch64) target=aarch64-unknown-linux-gnu ;;
+    *) echo 'SKIP synthetic PTY binding: unsupported fixture host'; exit 0 ;;
+esac
+hash() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+cat >"$tmp/caret" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$0 $*" >>"$FIXTURE_CALLS"
+echo 'Interactive LLM chat shell'
+EOF
+cat >"$tmp/runtime" <<'EOF'
+#!/bin/sh
+echo 'ERROR: fixture runtime must never execute' >&2
+exit 99
+EOF
+cat >"$tmp/owner/scripts/check/check-post-bootstrap-stage4-sspec.shs" <<'EOF'
+#!/bin/sh
+set -eu
+[ "$#" -eq 3 ]
+[ "$1" = "$FIXTURE_RUNTIME" ] && [ "$2" = "$FIXTURE_RUNTIME.provenance.env" ] && [ "$3" = "$FIXTURE_SOURCE" ]
+[ "$(cat "$2")" = synthetic-admission-accepted ]
+printf '%s\n' "$*" >>"$FIXTURE_ADMISSION_CALLS"
+EOF
+chmod +x "$tmp/caret" "$tmp/runtime" "$tmp/owner/scripts/check/check-post-bootstrap-stage4-sspec.shs"
+printf '%s\n' synthetic-admission-accepted >"$tmp/runtime.provenance.env"
+cat >"$tmp/caret.provenance" <<EOF
+source_commit=$revision
+binary_sha256=$(hash "$tmp/caret")
+runtime_sha256=$(hash "$tmp/runtime")
+runtime_path=$tmp/runtime
+runtime=pure-simple-self-hosted
+runtime_probe=pass
+rust_seed_used=false
+target=$target
+EOF
+cp "$tmp/caret.provenance" "$tmp/good-provenance"
+export FIXTURE_RUNTIME=$tmp/runtime FIXTURE_SOURCE=$tmp/source
+export FIXTURE_CALLS=$tmp/calls FIXTURE_ADMISSION_CALLS=$tmp/admission-calls
+# An ambient compiler must neither select an artifact nor launch source.
+export SIMPLE_BINARY=$tmp/runtime
+run() {
+    sh "$checker" --case prerequisites --caret-artifact "$tmp/caret" \
+        --stage4-runtime "$tmp/runtime" --stage4-provenance "$tmp/runtime.provenance.env" \
+        --source-root "$tmp/source" --artifact-root "$tmp/output" >"$tmp/result" 2>&1
+}
+reject() {
+    if run; then echo "FAIL: accepted $1" >&2; exit 1; fi
+    grep -F "failure_reason=$2" "$tmp/result" >/dev/null
+    [ "$(wc -l <"$tmp/calls" | tr -d ' ')" -eq 1 ]
+}
+run
+grep -Fx "$tmp/caret --help" "$tmp/calls" >/dev/null
+[ "$(wc -l <"$tmp/admission-calls" | tr -d ' ')" -eq 1 ]
+if sh "$checker" --case prerequisites --caret-artifact "$tmp/caret" >"$tmp/result" 2>&1; then exit 1; fi
+grep -F 'failure_reason=explicit_binding_incomplete' "$tmp/result" >/dev/null
+printf '%s\n' rejected >"$tmp/runtime.provenance.env"
+reject validator-failure explicit_stage4_admission_failed
+printf '%s\n' synthetic-admission-accepted >"$tmp/runtime.provenance.env"
+mv "$tmp/runtime.provenance.env" "$tmp/held-receipt"
+reject missing-receipt explicit_stage4_provenance_path_invalid
+mv "$tmp/held-receipt" "$tmp/runtime.provenance.env"
+sed "s|runtime_path=.*|runtime_path=$tmp/caret|" "$tmp/good-provenance" >"$tmp/caret.provenance"
+reject wrong-runtime explicit_runtime_provenance_mismatch
+sed 's/^runtime_sha256=.*/runtime_sha256=0000000000000000000000000000000000000000000000000000000000000000/' "$tmp/good-provenance" >"$tmp/caret.provenance"
+reject wrong-runtime-hash cached_caret_runtime_hash_mismatch
+sed 's/^source_commit=.*/source_commit=0000000000000000000000000000000000000000/' "$tmp/good-provenance" >"$tmp/caret.provenance"
+reject wrong-source cached_caret_source_commit_mismatch
+cp "$tmp/good-provenance" "$tmp/caret.provenance"
+touch "$tmp/source/dirty"
+reject dirty-source current_source_revision_not_clean_or_unavailable
+rm "$tmp/source/dirty"
+printf '%s\n' 'rust_seed_used=true' >>"$tmp/caret.provenance"
+reject duplicate-provenance provenance_rust_seed_used_missing_or_duplicate
+cp "$tmp/good-provenance" "$tmp/caret.provenance"
+ln -s "$tmp/caret" "$tmp/caret-link"
+if sh "$checker" --case prerequisites --caret-artifact "$tmp/caret-link" \
+    --stage4-runtime "$tmp/runtime" --stage4-provenance "$tmp/runtime.provenance.env" \
+    --source-root "$tmp/source" --artifact-root "$tmp/output" >"$tmp/result" 2>&1; then exit 1; fi
+grep -F 'failure_reason=explicit_caret_path_invalid' "$tmp/result" >/dev/null
+echo 'PASS: synthetic Caret PTY explicit-binding transport contracts (no native qualification)'

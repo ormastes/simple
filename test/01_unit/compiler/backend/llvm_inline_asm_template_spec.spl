@@ -1,16 +1,27 @@
 # @cover src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl
 
 use std.spec.*
+use compiler.frontend.parser_types_expr.{AsmConstraintKind, AsmLocation}
+use compiler.mir.mir_instruction_support.{MirAsmOperand, mir_operand_const_int}
 use compiler.backend._MirToLlvm.aggregate_intrinsics.{
     llvm_inline_asm_rewrite_template
 }
+
+fn asm_op(name: text, kind: AsmConstraintKind, idx: i64) -> MirAsmOperand:
+    MirAsmOperand(
+        name: name,
+        kind: kind,
+        location: AsmLocation.Reg,
+        operand: mir_operand_const_int(0),
+        constraint_index: idx
+    )
 
 describe "LLVM inline assembly template lowering":
     it "maps ARM64 syscall names with outputs before inputs":
         val lowered = llvm_inline_asm_rewrite_template(
             r"mov x8, {id}; mov x0, {arg0}; mov {out}, x0",
-            ["out"],
-            ["id", "arg0"]
+            [asm_op("out", AsmConstraintKind.Out, 0)],
+            [asm_op("id", AsmConstraintKind.In, 1), asm_op("arg0", AsmConstraintKind.In, 2)]
         )
 
         expect(lowered).to_equal("mov x8, $1; mov x0, $2; mov $0, x0")
@@ -21,7 +32,7 @@ describe "LLVM inline assembly template lowering":
         val lowered = llvm_inline_asm_rewrite_template(
             r"add {0}, {1}; add {0}, {1}",
             [],
-            ["lhs", "rhs"]
+            [asm_op("lhs", AsmConstraintKind.In, 0), asm_op("rhs", AsmConstraintKind.In, 1)]
         )
 
         expect(lowered).to_equal("add $0, $1; add $0, $1")
@@ -32,8 +43,8 @@ describe "LLVM inline assembly template lowering":
         # the template. LLVM numbers the output first, then both inputs.
         val lowered = llvm_inline_asm_rewrite_template(
             r"addi {dst}, {src}, {shift}",
-            ["dst"],
-            ["src", "shift"]
+            [asm_op("dst", AsmConstraintKind.Out, 0)],
+            [asm_op("src", AsmConstraintKind.In, 1), asm_op("shift", AsmConstraintKind.In, 2)]
         )
 
         expect(lowered).to_equal("addi $0, $1, $2")

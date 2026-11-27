@@ -1,0 +1,42 @@
+# Regression coverage for host-aware native-build worker binary admission.
+# doc/08_tracking/bug/macos_arm64_stale_test_runner_false_green_2026-09-26.md
+# ("Isolated bootstrap worker selection"): the launch guard used to accept any
+# nonempty existing file, so an isolated clone whose tracked bin/simple.exe is
+# a Windows PE image handed that PE to the worker spawn. macOS exec rejected it
+# with exit 126, and a seed runtime can collapse a spawn failure into a
+# successful-looking parent return with no artifact — the false-green mode.
+# @req REQ-SSPEC-UNIT
+
+use std.spec.{describe, it, expect, step}
+use std.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io.env_ops.{host_os}
+use std.io_runtime.{file_write, file_delete}
+use app.cli.native_build_main.{native_build_worker_binary_host_runnable,
+    native_build_worker_binary_valid}
+
+fn _windows_host() -> bool:
+    val os = host_os()
+    os == "windows" or os.contains("windows") or os.starts_with("mingw") or
+        os.starts_with("msys") or os.contains("msvc")
+
+describe "native-build worker binary host admission":
+    it "refuses the tracked Windows PE bin/simple.exe on non-Windows hosts":
+        step("a PE32+ image cannot be exec'd by a POSIX kernel; admission must refuse it")
+        if _windows_host():
+            expect(native_build_worker_binary_host_runnable("bin/simple.exe")).to_equal(true)
+        else:
+            expect(native_build_worker_binary_host_runnable("bin/simple.exe")).to_equal(false)
+
+    it "accepts a present non-PE file":
+        step("ordinary runnable files keep the prior accept behavior")
+        val path = get_temp_dir() + "/simple_worker_host_runnable_{rt_getpid()}.bin"
+        expect(file_write(path, "not an executable, just text")).to_equal(true)
+        expect(native_build_worker_binary_host_runnable(path)).to_equal(true)
+        expect(file_delete(path)).to_equal(true)
+
+    it "keeps the launch guard closed for a present but foreign worker binary":
+        step("the guard must not enter the timeout runner with a confirmed PE")
+        if _windows_host():
+            expect(native_build_worker_binary_valid("bin/simple.exe", true)).to_equal(true)
+        else:
+            expect(native_build_worker_binary_valid("bin/simple.exe", true)).to_equal(false)

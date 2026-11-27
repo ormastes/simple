@@ -1,0 +1,707 @@
+# Performance Analysis Safe Edit Service V1 (section 10, REQ-DIAG-011)
+#
+# Projects `PerfFindingRecordV1` + `LoopIdiomCandidateV1` onto the canonical
+# `DiagnosticV1` / `FixCandidate` / `DiagnosticBatchV1` / `EditTransaction`
+# infrastructure (`std.common.diagnostics.*`) and `source_parses` — zero
+# parallel edit subsystem.
+#
+# Enforces the 8-step safe edit lifecycle:
+#   1. Discover  — pure read-only extraction of `LoopIdiomCandidateV1`
+#   2. Resolve   — bind candidate against active `DocumentSnapshot` -> `FixCandidate`
+#   3. Validate  — verify applicability, 13 safety obligations, parse/type state,
+#                  callee semantic dependency fingerprint (`I02`), and ban `@allow`
+#   4. Preview   — build deterministic unified diff + resource tradeoff note
+#   5. Apply     — atomic revision-checked `EditTransaction` (`I01`, `I07`)
+#   6. Check     — re-parse every modified document via `source_parses` (`I05`)
+#   7. Record    — emit structured `PerfSafeEditRecordV1` audit trail
+#   8. Recover   — roll back to untouched snapshot if post-edit check fails (`I05`)
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.diagnostics.severity.{Severity}
+use std.common.diagnostics.span.{Span}
+use std.common.diagnostics.diagnostic_v1.{
+    DiagnosticFix, DiagnosticFixConfidence, DiagnosticV1, FixApplicability
+}
+use std.common.diagnostics.diagnostic_batch.{
+    BatchStatus, DiagnosticActionIndex, DiagnosticBatchV1, FixCandidate
+}
+use std.common.diagnostics.fix_transaction.{
+    ApplyStatus, DocumentSnapshot, EditTransaction, ExpectedDocumentRevision
+}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_exists, file_read}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use compiler.semantics.perf.perf_analysis_contracts_v1.{
+    LoopIdiomCandidateV1, PerfFindingRecordV1, PerfFixApplicability,
+    SafetyObligationStatusV1
+}
+use compiler.tools.fix.node_view_walk.{source_parses}
+
+pub enum PerfEditLifecycleStage:
+    Discover
+    Resolve
+    Validate
+    Preview
+    Apply
+    Check
+    Record
+    Recover
+
+pub enum PerfSafeEditStatus:
+    Applied
+    StaleVersion
+    StaleHash
+    SemanticDependencyChanged
+    ParseOrTypeFailure
+    PostApplyCheckFailed
+    SkippedReviewRequired
+    SkippedUnavailable
+    OverlappingConflict
+    SuppressionRejected
+    TransactionRejected
+
+impl PerfSafeEditStatus:
+    pub fn name() -> text:
+        match self:
+            case PerfSafeEditStatus.Applied: "applied"
+            case PerfSafeEditStatus.StaleVersion: "stale_version"
+            case PerfSafeEditStatus.StaleHash: "stale_hash"
+            case PerfSafeEditStatus.SemanticDependencyChanged: "semantic_dependency_changed"
+            case PerfSafeEditStatus.ParseOrTypeFailure: "parse_or_type_failure"
+            case PerfSafeEditStatus.PostApplyCheckFailed: "post_apply_check_failed"
+            case PerfSafeEditStatus.SkippedReviewRequired: "skipped_review_required"
+            case PerfSafeEditStatus.SkippedUnavailable: "skipped_unavailable"
+            case PerfSafeEditStatus.OverlappingConflict: "overlapping_conflict"
+            case PerfSafeEditStatus.SuppressionRejected: "suppression_rejected"
+            case PerfSafeEditStatus.TransactionRejected: "transaction_rejected"
+
+pub struct PerfEditPreviewV1:
+    action_id: text
+    rule_id: text
+    file: text
+    span: Span
+    before_snippet: text
+    after_snippet: text
+    unified_diff: text
+    tradeoff_note: text
+    applicability: PerfFixApplicability
+
+pub struct PerfSafeEditRecordV1:
+    action_id: text
+    rule_id: text
+    function_id: text
+    file: text
+    status: PerfSafeEditStatus
+    reached_stage: PerfEditLifecycleStage
+    reason: text
+    before_version: i64
+    before_hash: text
+    after_hash: text
+    dependency_fingerprint: text
+    obligations_checked: i64
+    rolled_back: bool
+
+pub struct PerfSafeEditRequestV1:
+    workspace_root: text
+    documents: [DocumentSnapshot]
+    expected_revisions: [ExpectedDocumentRevision]
+    findings: [PerfFindingRecordV1]
+    current_dep_fingerprints: Dict<text, text>
+    has_parse_or_type_errors: bool
+
+pub struct PerfSafeEditBatchResultV1:
+    initial_documents: [DocumentSnapshot]
+    final_documents: [DocumentSnapshot]
+    applied_action_ids: [text]
+    skipped_action_ids: [text]
+    previews: [PerfEditPreviewV1]
+    records: [PerfSafeEditRecordV1]
+    changed_files: [text]
+    rolled_back_count: i64
+
+fn _contains_suppression_annotation(text_val: text) -> bool:
+    text_val.contains("@allow(") or text_val.contains("#[allow(") or text_val.contains("#![allow(") or text_val.contains("#!allow(")
+
+fn _first_undischarged_reason(obligations: [SafetyObligationStatusV1]) -> text:
+    for ob in obligations:
+        if not ob.discharged:
+            return ob.kind.name() + ": " + ob.reason
+    ""
+
+fn _spans_overlap(a: Span, b: Span) -> bool:
+    if a.start == a.end or b.start == b.end:
+        return false
+    a.start < b.end and b.start < a.end
+
+fn _candidate_precedes(a: LoopIdiomCandidateV1, b: LoopIdiomCandidateV1) -> bool:
+    if a.file != b.file:
+        return a.file < b.file
+    if a.source_span.start != b.source_span.start:
+        return a.source_span.start < b.source_span.start
+    if a.source_span.end != b.source_span.end:
+        return a.source_span.end < b.source_span.end
+    a.action_id < b.action_id
+
+fn _sort_candidates_deterministic(candidates: [LoopIdiomCandidateV1]) -> [LoopIdiomCandidateV1]:
+    var sorted: [LoopIdiomCandidateV1] = []
+    for item in candidates:
+        var next: [LoopIdiomCandidateV1] = []
+        var placed = false
+        for existing in sorted:
+            if not placed and _candidate_precedes(item, existing):
+                next.push(item)
+                placed = true
+            next.push(existing)
+        if not placed:
+            next.push(item)
+        sorted = next
+    sorted
+
+# Step 1: Discover — pure extraction, zero source mutation.
+pub fn discover_perf_edit_candidates_v1(findings: [PerfFindingRecordV1]) -> [LoopIdiomCandidateV1]:
+    var raw: [LoopIdiomCandidateV1] = []
+    for f in findings:
+        for c in f.fix_candidates:
+            raw.push(c)
+    _sort_candidates_deterministic(raw)
+
+# Step 4: Preview — deterministic unified diff + resource tradeoff disclosure.
+pub fn preview_perf_edit_candidate_v1(candidate: LoopIdiomCandidateV1) -> PerfEditPreviewV1:
+    var diff_lines: [text] = [
+        "--- " + candidate.file,
+        "+++ " + candidate.file
+    ]
+    for old_ln in candidate.expected_old_text.split("\n"):
+        diff_lines.push("-" + old_ln)
+    for new_ln in candidate.replacement_preview.split("\n"):
+        diff_lines.push("+" + new_ln)
+    PerfEditPreviewV1(
+        action_id: candidate.action_id,
+        rule_id: candidate.rule_id,
+        file: candidate.file,
+        span: candidate.source_span,
+        before_snippet: candidate.expected_old_text,
+        after_snippet: candidate.replacement_preview,
+        unified_diff: diff_lines.join("\n"),
+        tradeoff_note: candidate.resource_tradeoff_note,
+        applicability: candidate.applicability
+    )
+
+# Step 2: Resolve — project onto canonical `FixCandidate` (`diagnostic_batch.spl`).
+# reason: document_version and parse/type error flag are canonical batch metadata scalars
+@allow(primitive_api)
+pub fn project_loop_candidate_to_fix_candidate_v1(
+    candidate: LoopIdiomCandidateV1,
+    document_version: i64,
+    has_parse_or_type_errors: bool
+) -> FixCandidate:
+    val title = candidate.fix_kind.name() + " (" + candidate.family.name() + ")"
+    val explanation = candidate.resource_tradeoff_note
+    if has_parse_or_type_errors:
+        return FixCandidate.new(
+            candidate.action_id, title, explanation,
+            DiagnosticFixConfidence.Uncertain, document_version
+        ).with_replacement(
+            candidate.file, candidate.source_span,
+            candidate.replacement_preview, candidate.expected_old_text
+        ).disabled("incomplete parse or type failure blocks automatic VerifiedSafe refactor")
+
+    if _contains_suppression_annotation(candidate.replacement_preview):
+        return FixCandidate.new(
+            candidate.action_id, title, explanation,
+            DiagnosticFixConfidence.Uncertain, document_version
+        ).disabled("inserting @allow suppressions is forbidden")
+
+    match candidate.applicability:
+        case PerfFixApplicability.VerifiedSafe:
+            val undischarged = _first_undischarged_reason(candidate.obligations)
+            if candidate.disabled_reason.?:
+                return FixCandidate.new(
+                    candidate.action_id, title, explanation,
+                    DiagnosticFixConfidence.Uncertain, document_version
+                ).with_replacement(
+                    candidate.file, candidate.source_span,
+                    candidate.replacement_preview, candidate.expected_old_text
+                ).disabled(candidate.disabled_reason.unwrap())
+            if undischarged != "" or candidate.replacement_preview == "":
+                val reason = if undischarged != "": undischarged else: "empty replacement preview"
+                return FixCandidate.new(
+                    candidate.action_id, title, explanation,
+                    DiagnosticFixConfidence.Uncertain, document_version
+                ).with_replacement(
+                    candidate.file, candidate.source_span,
+                    candidate.replacement_preview, candidate.expected_old_text
+                ).disabled(reason)
+            FixCandidate.new(
+                candidate.action_id, title, explanation,
+                DiagnosticFixConfidence.Safe, document_version
+            ).with_replacement(
+                candidate.file, candidate.source_span,
+                candidate.replacement_preview, candidate.expected_old_text
+            )
+        case PerfFixApplicability.ReviewRequired:
+            var rev_cand = FixCandidate.new(
+                candidate.action_id, title, explanation,
+                DiagnosticFixConfidence.Uncertain, document_version
+            )
+            if candidate.replacement_preview != "":
+                rev_cand = rev_cand.with_replacement(
+                    candidate.file, candidate.source_span,
+                    candidate.replacement_preview, candidate.expected_old_text
+                )
+            rev_cand
+        case PerfFixApplicability.Unavailable:
+            val unavail_reason = match candidate.disabled_reason:
+                case Some(r): r
+                case None:
+                    val u = _first_undischarged_reason(candidate.obligations)
+                    if u != "": u else: "preconditions not met"
+            FixCandidate.new(
+                candidate.action_id, title, explanation,
+                DiagnosticFixConfidence.Uncertain, document_version
+            ).disabled(unavail_reason)
+
+# Project a `PerfFindingRecordV1` onto canonical `DiagnosticV1` + `[FixCandidate]`.
+# reason: document_version and parse/type error flag are canonical batch metadata scalars
+@allow(primitive_api)
+pub fn project_perf_finding_to_diagnostic_v1(
+    finding: PerfFindingRecordV1,
+    severity: Severity,
+    document_version: i64,
+    has_parse_or_type_errors: bool
+) -> (DiagnosticV1, [FixCandidate]):
+    var diag = DiagnosticV1.new(severity, finding.rule_code, finding.message)
+        .with_file(finding.file)
+        .with_span(finding.primary_span)
+        .with_note("analysis_tier=" + finding.tier.name())
+        .with_note("semantic_fingerprint=" + finding.semantic_fingerprint)
+    for rel in finding.related_locations:
+        diag = diag.with_secondary_label(rel.file, rel.span, rel.role + ": " + rel.summary_line)
+    match finding.evidence:
+        case Some(ev):
+            diag = diag.with_note(
+                "bound=" + ev.rendered_expression + " (" + ev.resource.name() + ", " +
+                ev.relation.name() + ", " + ev.regime.name() + ", status=" + ev.status.name() +
+                ", origin=" + ev.origin.name() + ", model=" + ev.model_id + ")"
+            )
+            for assumption in ev.assumptions:
+                diag = diag.with_note("assumption: " + assumption)
+        case None:
+            val _ = 0
+    if has_parse_or_type_errors:
+        diag = diag.with_note("partial_recovery: automatic VerifiedSafe fixes disabled due to parse/type errors")
+
+    var fix_cands: [FixCandidate] = []
+    var ranked_fixes: [DiagnosticFix] = []
+    var rank = 1
+    for lc in finding.fix_candidates:
+        val fc = project_loop_candidate_to_fix_candidate_v1(lc, document_version, has_parse_or_type_errors)
+        fix_cands.push(fc)
+        ranked_fixes.push(fc.to_ranked_fix(rank))
+        rank = rank + 1
+    if ranked_fixes.len() > 0:
+        diag = diag.with_fixes(ranked_fixes)
+    (diag, fix_cands)
+
+fn _default_severity_for_perf_code(code: text) -> Severity:
+    if code == "PERF-STYLE-001" or code == "PERF-ALG-001" or code == "PERF-ANALYSIS-001" or code == "PERF-FIX-001":
+        return Severity.Info
+    Severity.Warning
+
+# Build canonical `DiagnosticBatchV1` + `DiagnosticActionIndex` for LSP/CLI/MCP parity.
+# reason: batch identity fields match DiagnosticBatchV1 constructor signature
+@allow(primitive_api)
+pub fn build_perf_diagnostic_batch_v1(
+    producer: text,
+    file_id: text,
+    uri: text,
+    document_version: i64,
+    source_hash: text,
+    findings: [PerfFindingRecordV1],
+    has_parse_or_type_errors: bool
+) -> (DiagnosticBatchV1, DiagnosticActionIndex):
+    var batch = if has_parse_or_type_errors:
+        DiagnosticBatchV1.incomplete(
+            producer, file_id, uri, document_version, source_hash, 1,
+            BatchStatus.PartialRecovery,
+            "source has parse or type errors; automatic VerifiedSafe fixes disabled"
+        )
+    else:
+        DiagnosticBatchV1.complete(producer, file_id, uri, document_version, source_hash, 1)
+    var index = DiagnosticActionIndex.new()
+    for finding in findings:
+        val diag_id = finding.rule_code + "@" + finding.stable_occurrence_id
+        val (diag, cands) = project_perf_finding_to_diagnostic_v1(
+            finding, _default_severity_for_perf_code(finding.rule_code),
+            document_version, has_parse_or_type_errors
+        )
+        batch = batch.push(diag_id, diag)
+        for c in cands:
+            index = index.add(diag_id, c)
+    (batch, index)
+
+fn _doc_for_file(docs: [DocumentSnapshot], file: text) -> Option<DocumentSnapshot>:
+    for d in docs:
+        if d.file == file:
+            return Some(d)
+    None
+
+fn _expected_version_for_file(revs: [ExpectedDocumentRevision], docs: [DocumentSnapshot], file: text) -> i64:
+    for r in revs:
+        if r.file == file:
+            return r.expected_version
+    match _doc_for_file(docs, file):
+        case Some(d): d.version
+        case None: 1
+
+fn _map_tx_status(status: ApplyStatus) -> PerfSafeEditStatus:
+    match status:
+        case ApplyStatus.Applied: PerfSafeEditStatus.Applied
+        case ApplyStatus.StaleVersion: PerfSafeEditStatus.StaleVersion
+        case ApplyStatus.StaleHash: PerfSafeEditStatus.StaleHash
+        case ApplyStatus.OverlappingEdits: PerfSafeEditStatus.OverlappingConflict
+        case _: PerfSafeEditStatus.TransactionRejected
+
+fn _build_base_transaction(req: PerfSafeEditRequestV1) -> EditTransaction:
+    val fallback_hash = if req.documents.len() > 0: req.documents[0].source_hash else: ""
+    var tx = EditTransaction.new(req.workspace_root, fallback_hash)
+    for d in req.documents:
+        tx = tx.with_document(d)
+    for exp in req.expected_revisions:
+        tx = tx.expect_document_revision(exp.file, exp.expected_version, exp.expected_source_hash)
+    tx
+
+# Full 8-step in-memory safe edit execution (`Discover -> Resolve -> Validate -> Preview -> Apply -> Check -> Record -> Recover`).
+pub fn apply_perf_safe_edits_in_memory_v1(req: PerfSafeEditRequestV1) -> PerfSafeEditBatchResultV1:
+    val sorted_candidates = discover_perf_edit_candidates_v1(req.findings)
+    val base_tx = _build_base_transaction(req)
+
+    var previews: [PerfEditPreviewV1] = []
+    var pending_records: [PerfSafeEditRecordV1] = []
+    var admitted_candidates: [LoopIdiomCandidateV1] = []
+    var admitted_fix_candidates: [FixCandidate] = []
+    var accepted_spans_by_file: Dict<text, [Span]> = {}
+    var accepted_ids_by_file: Dict<text, [text]> = {}
+    var skipped_ids: [text] = []
+
+    for cand in sorted_candidates:
+        previews.push(preview_perf_edit_candidate_v1(cand))
+        val doc_opt = _doc_for_file(req.documents, cand.file)
+        val before_ver = match doc_opt:
+            case Some(d): d.version
+            case None: 0
+        val before_hash = match doc_opt:
+            case Some(d): d.source_hash
+            case None: ""
+        val ob_count = cand.obligations.len()
+
+        # Validate 1: never insert `@allow(...)` suppressions (`I07`)
+        if _contains_suppression_annotation(cand.replacement_preview):
+            skipped_ids.push(cand.action_id)
+            pending_records.push(PerfSafeEditRecordV1(
+                action_id: cand.action_id, rule_id: cand.rule_id, function_id: cand.function_id,
+                file: cand.file, status: PerfSafeEditStatus.SuppressionRejected,
+                reached_stage: PerfEditLifecycleStage.Validate,
+                reason: "automatic safe fixing never inserts @allow suppressions",
+                before_version: before_ver, before_hash: before_hash, after_hash: before_hash,
+                dependency_fingerprint: cand.dependency_fingerprint, obligations_checked: ob_count,
+                rolled_back: false
+            ))
+            continue
+
+        # Validate 2: applicability gates (`ReviewRequired` / `Unavailable` / obligations)
+        if cand.applicability == PerfFixApplicability.ReviewRequired:
+            skipped_ids.push(cand.action_id)
+            pending_records.push(PerfSafeEditRecordV1(
+                action_id: cand.action_id, rule_id: cand.rule_id, function_id: cand.function_id,
+                file: cand.file, status: PerfSafeEditStatus.SkippedReviewRequired,
+                reached_stage: PerfEditLifecycleStage.Validate,
+                reason: "review-required fix (" + cand.fix_kind.name() + ") skipped in --fix-safe: " + cand.resource_tradeoff_note,
+                before_version: before_ver, before_hash: before_hash, after_hash: before_hash,
+                dependency_fingerprint: cand.dependency_fingerprint, obligations_checked: ob_count,
+                rolled_back: false
+            ))
+            continue
+
+        val undischarged = _first_undischarged_reason(cand.obligations)
+        if cand.applicability == PerfFixApplicability.Unavailable or cand.disabled_reason.? or undischarged != "" or cand.replacement_preview == "":
+            val unavail_msg = match cand.disabled_reason:
+                case Some(r): r
+                case None: if undischarged != "": undischarged else: "unavailable candidate"
+            skipped_ids.push(cand.action_id)
+            pending_records.push(PerfSafeEditRecordV1(
+                action_id: cand.action_id, rule_id: cand.rule_id, function_id: cand.function_id,
+                file: cand.file, status: PerfSafeEditStatus.SkippedUnavailable,
+                reached_stage: PerfEditLifecycleStage.Validate,
+                reason: unavail_msg,
+                before_version: before_ver, before_hash: before_hash, after_hash: before_hash,
+                dependency_fingerprint: cand.dependency_fingerprint, obligations_checked: ob_count,
+                rolled_back: false
+            ))
+            continue
+
+        # Validate 3 (`I05`): incomplete parse or type failure blocks `VerifiedSafe`
+        val initial_parses = match doc_opt:
+            case Some(d): source_parses(cand.file, d.body)
+            case None: true
+        if req.has_parse_or_type_errors or not initial_parses:
+            skipped_ids.push(cand.action_id)
+            pending_records.push(PerfSafeEditRecordV1(
+                action_id: cand.action_id, rule_id: cand.rule_id, function_id: cand.function_id,
+                file: cand.file, status: PerfSafeEditStatus.ParseOrTypeFailure,
+                reached_stage: PerfEditLifecycleStage.Validate,
+                reason: "source has parse or type errors; automatic VerifiedSafe fix withheld",
+                before_version: before_ver, before_hash: before_hash, after_hash: before_hash,
+                dependency_fingerprint: cand.dependency_fingerprint, obligations_checked: ob_count,
+                rolled_back: false
+            ))
+            continue
+
+        # Validate 4 (`I02`): callee semantic/effect dependency fingerprint check
+        if cand.dependency_fingerprint != "":
+            val actual_dep = if req.current_dep_fingerprints.contains_key(cand.function_id):
+                req.current_dep_fingerprints[cand.function_id]
+            else:
+                ""
+            if actual_dep != cand.dependency_fingerprint:
+                skipped_ids.push(cand.action_id)
+                pending_records.push(PerfSafeEditRecordV1(
+                    action_id: cand.action_id, rule_id: cand.rule_id, function_id: cand.function_id,
+                    file: cand.file, status: PerfSafeEditStatus.SemanticDependencyChanged,
+                    reached_stage: PerfEditLifecycleStage.Validate,
+                    reason: "callee dependency fingerprint changed for " + cand.function_id + ": expected " + cand.dependency_fingerprint + ", found " + actual_dep,
+                    before_version: before_ver, before_hash: before_hash, after_hash: before_hash,
+                    dependency_fingerprint: cand.dependency_fingerprint, obligations_checked: ob_count,
+                    rolled_back: false
+                ))
+                continue
+
+        # Resolve & pre-validate individual candidate through canonical `EditTransaction` (`I01`)
+        val req_ver = _expected_version_for_file(req.expected_revisions, req.documents, cand.file)
+        val single_fc = project_loop_candidate_to_fix_candidate_v1(cand, req_ver, false)
+        val probe_res = base_tx.apply(single_fc)
+        if not probe_res.applied():
+            skipped_ids.push(cand.action_id)
+            pending_records.push(PerfSafeEditRecordV1(
+                action_id: cand.action_id, rule_id: cand.rule_id, function_id: cand.function_id,
+                file: cand.file, status: _map_tx_status(probe_res.status),
+                reached_stage: PerfEditLifecycleStage.Apply,
+                reason: probe_res.reason,
+                before_version: before_ver, before_hash: before_hash, after_hash: before_hash,
+                dependency_fingerprint: cand.dependency_fingerprint, obligations_checked: ob_count,
+                rolled_back: false
+            ))
+            continue
+
+        # Overlap conflict detection (`I07`) against earlier accepted spans in the same file
+        var conflict_reason = ""
+        if accepted_spans_by_file.contains_key(cand.file):
+            val prior_spans = accepted_spans_by_file[cand.file]
+            val prior_ids = accepted_ids_by_file[cand.file]
+            var s_idx = 0
+            while s_idx < prior_spans.len():
+                if _spans_overlap(prior_spans[s_idx], cand.source_span):
+                    conflict_reason = "overlaps accepted candidate " + prior_ids[s_idx]
+                    break
+                s_idx = s_idx + 1
+        if conflict_reason != "":
+            skipped_ids.push(cand.action_id)
+            pending_records.push(PerfSafeEditRecordV1(
+                action_id: cand.action_id, rule_id: cand.rule_id, function_id: cand.function_id,
+                file: cand.file, status: PerfSafeEditStatus.OverlappingConflict,
+                reached_stage: PerfEditLifecycleStage.Apply,
+                reason: conflict_reason,
+                before_version: before_ver, before_hash: before_hash, after_hash: before_hash,
+                dependency_fingerprint: cand.dependency_fingerprint, obligations_checked: ob_count,
+                rolled_back: false
+            ))
+            continue
+
+        var next_spans: [Span] = if accepted_spans_by_file.contains_key(cand.file): accepted_spans_by_file[cand.file] else: []
+        var next_ids: [text] = if accepted_ids_by_file.contains_key(cand.file): accepted_ids_by_file[cand.file] else: []
+        next_spans.push(cand.source_span)
+        next_ids.push(cand.action_id)
+        accepted_spans_by_file[cand.file] = next_spans
+        accepted_ids_by_file[cand.file] = next_ids
+        admitted_candidates.push(cand)
+        admitted_fix_candidates.push(single_fc)
+
+    if admitted_candidates.len() == 0:
+        return PerfSafeEditBatchResultV1(
+            initial_documents: req.documents,
+            final_documents: req.documents,
+            applied_action_ids: [],
+            skipped_action_ids: skipped_ids,
+            previews: previews,
+            records: pending_records,
+            changed_files: [],
+            rolled_back_count: 0
+        )
+
+    # Apply non-overlapping validated candidates per file via canonical `EditTransaction`
+    var final_docs: [DocumentSnapshot] = []
+    var changed_files: [text] = []
+    var rolled_back_files: Dict<text, bool> = {}
+    var rolled_back_count = 0
+
+    for orig_doc in req.documents:
+        if not accepted_spans_by_file.contains_key(orig_doc.file):
+            final_docs.push(orig_doc)
+            continue
+        val req_ver = _expected_version_for_file(req.expected_revisions, req.documents, orig_doc.file)
+        var combined = FixCandidate.new(
+            "perf-safe-batch:" + orig_doc.file,
+            "Apply verified performance refactors",
+            "Atomic revision-checked batch refactor",
+            DiagnosticFixConfidence.Safe,
+            req_ver
+        )
+        var c_idx = 0
+        while c_idx < admitted_candidates.len():
+            val ac = admitted_candidates[c_idx]
+            if ac.file == orig_doc.file:
+                combined = combined.with_replacement(
+                    ac.file, ac.source_span, ac.replacement_preview, ac.expected_old_text
+                )
+            c_idx = c_idx + 1
+
+        val batch_apply = base_tx.apply(combined)
+        if not batch_apply.applied():
+            rolled_back_files[orig_doc.file] = true
+            rolled_back_count = rolled_back_count + 1
+            final_docs.push(orig_doc)
+            continue
+
+        val updated_body = batch_apply.text_of(orig_doc.file)
+        # Step 6 (`Check`) + Step 8 (`Recover`): re-parse updated document!
+        if not source_parses(orig_doc.file, updated_body) or _contains_suppression_annotation(updated_body) and not _contains_suppression_annotation(orig_doc.body):
+            rolled_back_files[orig_doc.file] = true
+            rolled_back_count = rolled_back_count + 1
+            final_docs.push(orig_doc)
+        else:
+            val new_hash = sha256_text(updated_body)
+            final_docs.push(DocumentSnapshot.new(orig_doc.file, orig_doc.version + 1, new_hash, updated_body))
+            changed_files.push(orig_doc.file)
+
+    var applied_ids: [text] = []
+    var all_records: [PerfSafeEditRecordV1] = pending_records
+    for ac in admitted_candidates:
+        val orig_opt = _doc_for_file(req.documents, ac.file)
+        val after_opt = _doc_for_file(final_docs, ac.file)
+        val b_ver = if orig_opt.?: orig_opt.unwrap().version else: 0
+        val b_hash = if orig_opt.?: orig_opt.unwrap().source_hash else: ""
+        val a_hash = if after_opt.?: after_opt.unwrap().source_hash else: b_hash
+        if rolled_back_files.contains_key(ac.file):
+            skipped_ids.push(ac.action_id)
+            all_records.push(PerfSafeEditRecordV1(
+                action_id: ac.action_id, rule_id: ac.rule_id, function_id: ac.function_id,
+                file: ac.file, status: PerfSafeEditStatus.PostApplyCheckFailed,
+                reached_stage: PerfEditLifecycleStage.Recover,
+                reason: "post-apply reparse check failed; transaction rolled back to original snapshot",
+                before_version: b_ver, before_hash: b_hash, after_hash: b_hash,
+                dependency_fingerprint: ac.dependency_fingerprint,
+                obligations_checked: ac.obligations.len(), rolled_back: true
+            ))
+        else:
+            applied_ids.push(ac.action_id)
+            all_records.push(PerfSafeEditRecordV1(
+                action_id: ac.action_id, rule_id: ac.rule_id, function_id: ac.function_id,
+                file: ac.file, status: PerfSafeEditStatus.Applied,
+                reached_stage: PerfEditLifecycleStage.Record,
+                reason: "verified safe refactor applied and re-parsed cleanly",
+                before_version: b_ver, before_hash: b_hash, after_hash: a_hash,
+                dependency_fingerprint: ac.dependency_fingerprint,
+                obligations_checked: ac.obligations.len(), rolled_back: false
+            ))
+
+    PerfSafeEditBatchResultV1(
+        initial_documents: req.documents,
+        final_documents: final_docs,
+        applied_action_ids: applied_ids,
+        skipped_action_ids: skipped_ids,
+        previews: previews,
+        records: all_records,
+        changed_files: changed_files,
+        rolled_back_count: rolled_back_count
+    )
+
+fn _workspace_root_for_path(file_path: text) -> text:
+    val norm = file_path.replace("\\", "/")
+    val slash = norm.find("/")
+    if norm.starts_with("/") and slash == 0:
+        val second = norm.slice(1, norm.byte_len()).find("/")
+        if second > 0:
+            return norm.slice(0, second + 1)
+        return "/"
+    if norm.byte_len() >= 3 and norm.slice(1, 3) == ":/":
+        return norm.slice(0, 3)
+    "."
+
+fn _canonical_tx_path(file_path: text) -> (text, text):
+    val norm = file_path.replace("\\", "/")
+    if norm.starts_with("/") or (norm.byte_len() >= 3 and norm.slice(1, 3) == ":/"):
+        return (_workspace_root_for_path(norm), norm)
+    val abs_opt = unsafe(capabilities: [ffi]):
+        path_absolute(file_path)
+    val abs_str = (abs_opt ?? "").replace("\\", "/")
+    if abs_str != "":
+        val last_slash = abs_str.rfind("/")
+        val parent = if last_slash > 0: abs_str.slice(0, last_slash) else: "."
+        return (parent, abs_str)
+    (".", "./" + norm)
+
+# Explicit disk-commit entry point invoked ONLY when `--fix-safe` is requested.
+# Re-verifies on-disk source equality before writing via `file_atomic_write`.
+# reason: CLI boundary helper taking analyzed file path and source text
+@allow(primitive_api)
+pub fn commit_perf_safe_edits_for_file_v1(
+    file_path: text,
+    analyzed_source: text,
+    findings: [PerfFindingRecordV1]
+) -> Result<PerfSafeEditBatchResultV1, text>:
+    if not file_exists(file_path):
+        return Err(file_path + ": file disappeared before --fix-safe commit")
+    val disk_before = file_read(file_path)
+    if disk_before != analyzed_source:
+        return Err(file_path + ": source changed on disk since analysis; rerun lint --fix-safe")
+
+    val (ws_root, tx_file) = _canonical_tx_path(file_path)
+    var remapped_findings: [PerfFindingRecordV1] = []
+    var deps: Dict<text, text> = {}
+    for f in findings:
+        var remapped_cands: [LoopIdiomCandidateV1] = []
+        for c in f.fix_candidates:
+            deps[c.function_id] = c.dependency_fingerprint
+            var rc = c
+            rc.file = tx_file
+            remapped_cands.push(rc)
+        var rf = f
+        rf.file = tx_file
+        rf.fix_candidates = remapped_cands
+        remapped_findings.push(rf)
+
+    val src_hash = sha256_text(analyzed_source)
+    val req = PerfSafeEditRequestV1(
+        workspace_root: ws_root,
+        documents: [DocumentSnapshot.new(tx_file, 1, src_hash, analyzed_source)],
+        expected_revisions: [ExpectedDocumentRevision(file: tx_file, expected_version: 1, expected_source_hash: src_hash)],
+        findings: remapped_findings,
+        current_dep_fingerprints: deps,
+        has_parse_or_type_errors: not source_parses(file_path, analyzed_source)
+    )
+    val batch_res = apply_perf_safe_edits_in_memory_v1(req)
+    if batch_res.applied_action_ids.len() == 0 or batch_res.changed_files.len() == 0:
+        return Ok(batch_res)
+
+    val updated_text = batch_res.final_documents[0].body
+    if file_read(file_path) != analyzed_source:
+        return Err(file_path + ": source changed concurrently before --fix-safe write; aborted")
+    if not file_atomic_write(file_path, updated_text):
+        return Err(file_path + ": atomic write failed during --fix-safe")
+    Ok(batch_res)
+
+export PerfEditLifecycleStage, PerfSafeEditStatus
+export PerfEditPreviewV1, PerfSafeEditRecordV1, PerfSafeEditRequestV1, PerfSafeEditBatchResultV1
+export discover_perf_edit_candidates_v1, preview_perf_edit_candidate_v1
+export project_loop_candidate_to_fix_candidate_v1, project_perf_finding_to_diagnostic_v1
+export build_perf_diagnostic_batch_v1, apply_perf_safe_edits_in_memory_v1
+export commit_perf_safe_edits_for_file_v1

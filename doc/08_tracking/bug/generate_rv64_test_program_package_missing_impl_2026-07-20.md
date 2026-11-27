@@ -1,6 +1,10 @@
 # Missing implementation: src/hardware/fpga_linux/generate_rv64_test_program_package.spl
 
-- **Status:** OPEN
+- **Status:** RESOLVED 2026-11-25 — the generator exists and its output matches
+  every spec assertion byte-for-byte (see "Verification 2026-11-25" below).
+  (Was: OPEN — filed 2026-07-20 when the file did not exist; it was added by
+  commit `caed58386e5` "fix(fpga): add generate_rv64_test_program_package
+  emitter for rv64 test program pkg".)
 - **Discovered:** 2026-07-20, whole-suite triage campaign
 - **Area:** `src/hardware/fpga_linux/` — RV64 FPGA test-program VHDL package
   generator
@@ -80,3 +84,38 @@ alongside: `bin/simple run` on an unreadable/missing entry file exits `0`
 despite printing `error: compile failed: ...` — callers that check only the
 exit code (like this spec's `shell()` helper) silently proceed past a real
 compile failure.
+
+## Verification 2026-11-25 (release/1.0.0, Windows lane)
+
+`src/hardware/fpga_linux/generate_rv64_test_program_package.spl` now exists
+(added by `caed58386e5`) and was exercised directly with the spec's exact
+fixture (9-byte firmware `\x01..\x09`, 4-byte payload `\xAA\xBB\xCC\xDD`):
+
+```
+SIMPLE_LIB=src bin/simple.exe run src/hardware/fpga_linux/generate_rv64_test_program_package.spl \
+  -- fw.bin fw.hex payload.bin payload.hex test_program.vhd    # rc=0
+```
+
+Outputs match every assertion in
+`test/01_unit/hardware/fpga_linux/generate_rv64_test_program_package_spec.spl`
+byte-for-byte:
+
+- `fw.hex` == `0807060504030201\n0000000000000009\n` (exact)
+- `payload.hex` == `00000000DDCCBBAA\n` (exact)
+- the `.vhd` contains all asserted constants: `HEX_WORD_BYTES := 8`,
+  `FW_SIZE_BYTES := 9`, `FW_HEX_PATH`, `PAYLOAD_SIZE_BYTES := 4`,
+  `PAYLOAD_HEX_PATH`, `FW_BYTES : byte_array_t(0 to 8)` with rows
+  `        x"01",` ... `        x"09"\n    );`, and
+  `PAYLOAD_BYTES : byte_array_t(0 to 3)` with `        x"AA",` ...
+  `        x"DD"\n    );`
+
+Limit: the spec itself could not be executed through `bin/simple.exe test`
+because release/1.0.0 HEAD carries `@representation_boundary` annotations
+(commit cfd89933699) that the pinned seed rejects repo-wide; the generator was
+therefore run directly and its outputs compared against the spec's literal
+oracles by hand. The generator's own run is unaffected (rc=0, no decorator in
+its import closure).
+
+The secondary issue noted above (`bin/simple run` exiting 0 on a missing entry
+file) is a separate CLI-behavior question and was not re-tested here; it does
+not affect this bug's closure, which is about the missing generator.

@@ -1,0 +1,86 @@
+# @req AT-CTR-03 HOST-CLEANUP-01
+# NOT_RUN: scripted engine only (pure command construction + verdict). The
+# live-engine counterpart is cleanup_scope_live_v1_spec.spl (env-gated).
+use std.spec.*
+use std.nogc_async_mut.container.providers.linux.cleanup_scope_v1.cleanup_destroy_scope_error_v1
+use test.fixtures.orchestration.cleanup_sentinel_fixture_v1.*
+use std.common.contracts.container.runtime_v1.*
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+
+describe "Exact cleanup preserves unrelated sentinel resources (AT-CTR-03)":
+    it "builds fixture-scoped sentinel network and volume commands carrying the fixture label":
+        val net = cleanup_sentinel_v1("network", "fx1", "a").unwrap()
+        val vol = cleanup_sentinel_v1("volume", "fx1", "b").unwrap()
+        expect(net.name).to_equal("simpleorch-sentinel-fx1-a")
+        val create = cleanup_sentinel_create_command_v1("podman", net).unwrap()
+        expect(create.args).to_equal(["network", "create", "--label", "io.simpleorch.sentinel=fx1", "simpleorch-sentinel-fx1-a"])
+        val vcreate = cleanup_sentinel_create_command_v1("podman", vol).unwrap()
+        expect(vcreate.args).to_equal(["volume", "create", "--label", "io.simpleorch.sentinel=fx1", "simpleorch-sentinel-fx1-b"])
+        expect(cleanup_sentinel_inspect_command_v1("docker", vol).unwrap().args).to_equal(["volume", "inspect", "simpleorch-sentinel-fx1-b"])
+        expect(cleanup_sentinel_remove_command_v1("docker", net).unwrap().args).to_equal(["network", "rm", "simpleorch-sentinel-fx1-a"])
+
+    it "refuses invalid kinds, names and engines":
+        expect(cleanup_sentinel_v1("image", "fx1", "a").is_err()).to_equal(true)
+        expect(cleanup_sentinel_v1("network", "fx 1", "a").is_err()).to_equal(true)
+        expect(cleanup_sentinel_v1("network", "fx1", "-a").is_err()).to_equal(true)
+        val net = cleanup_sentinel_v1("network", "fx1", "a").unwrap()
+        expect(cleanup_sentinel_create_command_v1("runc", net).is_err()).to_equal(true)
+
+    it "accepts the real destroy command for the run's own native id and nothing broader":
+        val id = "1".repeat(64)
+        for engine in ["podman", "docker", "runc"]:
+            for force in [false, true]:
+                val built = build_destroy_command(engine, "/state", id, force)
+                expect(built.0).to_equal("")
+                expect(cleanup_destroy_scope_error_v1(engine, built.1, id)).to_equal("")
+
+    it "rejects a destroy command that would remove networks, volumes or prune":
+        val id = "1".repeat(64)
+        val ok = build_destroy_command("podman", "/state", id, false).1
+        for extra in ["-v", "--volumes", "-a", "--all", "prune", "network", "volume", "--filter"]:
+            var wide = ok
+            wide.args = ["rm", extra, id]
+            expect(cleanup_destroy_scope_error_v1("podman", wide, id)).to_equal("cleanup-command-out-of-scope")
+        var prune = ok
+        prune.args = ["network", "prune", "--force"]
+        expect(cleanup_destroy_scope_error_v1("podman", prune, id)).to_equal("cleanup-command-out-of-scope")
+        var other = ok
+        other.args = ["rm", "2".repeat(64)]
+        expect(cleanup_destroy_scope_error_v1("podman", other, id)).to_equal("cleanup-command-out-of-scope")
+        var two = ok
+        two.args = ["rm", id, "3".repeat(64)]
+        expect(cleanup_destroy_scope_error_v1("podman", two, id)).to_equal("cleanup-command-out-of-scope")
+
+    it "refuses to destroy a sentinel as the run's own resource":
+        val sentinel = cleanup_sentinel_v1("volume", "fx1", "b").unwrap()
+        val cmd = build_destroy_command("podman", "/state", sentinel.name, false).1
+        expect(cleanup_destroy_scope_error_v1("podman", cmd, sentinel.name)).to_equal("cleanup-target-is-sentinel")
+
+    it "verdict passes only when every sentinel still inspects present":
+        val a = cleanup_sentinel_v1("network", "fx1", "a").unwrap()
+        val b = cleanup_sentinel_v1("volume", "fx1", "b").unwrap()
+        expect(cleanup_sentinels_intact_v1([a, b], [0, 0]).unwrap()).to_equal(true)
+        expect(cleanup_sentinels_intact_v1([a, b], [0, 1]).unwrap_err()).to_equal("cleanup-sentinel-removed:simpleorch-sentinel-fx1-b")
+        expect(cleanup_sentinels_intact_v1([a, b], [0]).unwrap_err()).to_equal("cleanup-sentinel-observation-count")
+        expect(cleanup_sentinels_intact_v1([], []).unwrap_err()).to_equal("cleanup-sentinel-required")
+
+    it "provider destroy refuses a sentinel target before any engine command (red if the wiring is removed)":
+        val sentinel = cleanup_sentinel_v1("volume", "fx1", "b").unwrap()
+        val r = LinuxOciRequestV1(pod_uid: "pod-1", attempt: 1, operation_id: "create-1",
+            image: "docker.io/library/busybox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            bundle_path: "", command: ["/bin/busybox", "echo"], args: ["x"], timeout_ms: 5000,
+            cpu_limit_millis: 1000, memory_limit_bytes: 268435456, pid_limit: 64,
+            network_policy: "bridge", filesystem_policy: "read-only")
+        val create_cmd = build_create_command(OCI_DEFAULT_ENGINE, "/var/lib/simpleorch", r, "create-1", 7, "boot-1").1
+        val destroy_cmd = build_destroy_command(OCI_DEFAULT_ENGINE, "/var/lib/simpleorch", sentinel.name, false).1
+        val provider = LinuxOciRuntimeProviderV1.scripted("linux", OCI_DEFAULT_ENGINE,
+            "/var/lib/simpleorch", "boot-1", 7,
+            [ScriptedCommandResultV1(operation: create_cmd.operation, program: create_cmd.program, args: create_cmd.args,
+                stdout: sentinel.name + "\n", stderr: "", exit_code: 0),
+             ScriptedCommandResultV1(operation: destroy_cmd.operation, program: destroy_cmd.program, args: destroy_cmd.args,
+                stdout: "", stderr: "", exit_code: 0)])
+        expect(provider.create(r).status).to_equal(RUNTIME_STATUS_OK)
+        val refused = provider.destroy(r)
+        expect(refused.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(refused.reason).to_equal("cleanup-target-is-sentinel")
+        expect(provider.state_for(r).phase).to_equal(RUNTIME_PHASE_CREATED)

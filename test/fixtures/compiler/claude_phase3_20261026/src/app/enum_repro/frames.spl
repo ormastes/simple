@@ -1,0 +1,56 @@
+# Repro module E: own enum whose payloads are imported nominal types; constructed
+# from match bindings, Option-unwrapped array reads, and nested enum payloads.
+use app.enum_repro.types.{Point, Label}
+use app.enum_repro.kinds.{ConstValue, NodeKind, Node}
+
+enum Frame:
+    Pt(node: Point)
+    Const(value: ConstValue, at: Point)
+    Lbl(node: Label)
+    Done
+
+class FrameSink:
+    frames: [Frame]
+
+    me push_frame(f: Frame):
+        self.frames = self.frames.push(f)
+
+    fn count() -> i64:
+        self.frames.len()
+
+fn expand_reverse(node: Node, sink: FrameSink):
+    if node == nil:
+        return
+    match node.kind:
+        case Leaf(_):
+            pass
+        case Call(b_callee, b_args):
+            sink.push_frame(Frame.Pt(b_callee))
+            var ri0 = b_args.len()
+            while ri0 > 0:
+                ri0 = ri0 - 1
+                val it0 = b_args[ri0]
+                sink.push_frame(Frame.Pt(it0))
+        case Text(b_label, b_extras):
+            sink.push_frame(Frame.Const(ConstValue.Str(b_label), Point(x: 0, y: 0)))
+            match b_extras:
+                case Some(opt1):
+                    var ri1 = opt1.len()
+                    while ri1 > 0:
+                        ri1 = ri1 - 1
+                        val it1 = opt1[ri1]
+                        sink.push_frame(Frame.Const(ConstValue.At(it1), it1))
+                case nil: pass
+        case Nothing:
+            sink.push_frame(Frame.Done)
+
+fn frame_weight(f: Frame) -> i64:
+    match f:
+        case Frame.Pt(p): p.x
+        case Frame.Const(c, at):
+            match c:
+                case ConstValue.Str(s): s.len() + at.y
+                case ConstValue.Int(i): i
+                case ConstValue.At(w): w.x + w.y
+        case Frame.Lbl(l): l.name.len()
+        case Frame.Done: 1

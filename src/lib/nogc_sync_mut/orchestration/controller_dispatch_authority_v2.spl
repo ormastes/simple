@@ -1,0 +1,44 @@
+# Internal controller admission. The command owner loads context from its
+# administrator-installed private root and supplies an actual Unix-ms clock.
+use std.common.contracts.orchestration.controller_dispatch_request_v2.{ControllerDispatchRequestV2, controller_dispatch_request_encode_v2}
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.ControllerDispatchContextV1
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+
+pub struct ControllerDispatchProofsV2:
+    assignment: ExecutionGrantV2
+    execution: ExecutionGrantV2
+
+fn dispatch_verify_action_v2(context: ControllerDispatchContextV1,
+        signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2,
+        original: OperationEnvelopeV2, action: text, now: i64) -> Result<ExecutionGrantV2, text>:
+    var request = original
+    request.operation = action
+    val snapshot = context.policy.snapshot
+    distributed_verify_grant_approval_from_snapshot_v2(snapshot, signed, approval, request,
+        now, snapshot.generation, snapshot.policy_revision, snapshot.revocation_epoch,
+        context.policy.session_generation)
+
+pub fn controller_dispatch_authorize_v2(context: ControllerDispatchContextV1,
+        request: ControllerDispatchRequestV2, now: i64) -> Result<ControllerDispatchProofsV2, text>:
+    """Verify four independent signed actions before backend validation and admission."""
+    if now <= 0: return Err("dispatch-wall-clock-unavailable")
+    val shape = controller_dispatch_request_encode_v2(request)?
+    if request.binding.controller_id != context.config.controller_id or
+            request.binding.controller_epoch != context.config.controller_epoch:
+        return Err("dispatch-controller-scope-mismatch")
+    if context.config.target != "local-inprocess" or
+            request.binding.host_intent.fence.authority_id != context.config.host_authority_id:
+        return Err("dispatch-host-route-mismatch")
+    # Actual backend semantic validation follows through host-validate under
+    # the configured Simple Container API owner, before capacity admission.
+    val assignment = dispatch_verify_action_v2(context, request.assignment_signed,
+        request.assignment_approval, request.operation, "controller_assignment_v1", now)?
+    val execution = dispatch_verify_action_v2(context, request.execution_signed,
+        request.execution_approval, request.operation, "controller_execute_v1", now)?
+    val prepared = dispatch_verify_action_v2(context, request.prepare_signed,
+        request.prepare_approval, request.binding.host_operation, "host_reservation_v1", now)?
+    val launched = dispatch_verify_action_v2(context, request.host_execution_signed,
+        request.host_execution_approval, request.binding.host_operation, "host_execute_v1", now)?
+    Ok(ControllerDispatchProofsV2(assignment: assignment, execution: execution))

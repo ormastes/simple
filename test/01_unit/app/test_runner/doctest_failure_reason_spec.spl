@@ -1,0 +1,50 @@
+# @req REQ-SSPEC-APP
+# Regression pin for doc/08_tracking/bug/
+# spl_doctest_composite_fails_wildcard_reexport_modes_2026-08-25.md
+# ("Secondary defect: the reason line loses the message").
+#
+# A failing SPL doctest's reported reason used to be a bare `--> <span>` line
+# (the continuation of an unrelated skipped warning) or a decoration remnant,
+# never the actual error. `_dt_failure_reason` must keep the MESSAGE:
+#   1. an `error:` line on stderr (bare compile error),
+#   2. else the failing example's detail on the child's spec stdout
+#      (`✗ <name>` + its indented `semantic: ...` line),
+#   3. else the last informative stderr line (never a `-->` span/gutter).
+use std.spec.*
+use std.nogc_sync_mut.test_runner.doctest_runner.{_dt_failure_reason}
+
+describe "spl doctest failure reason keeps the message":
+    it "returns the error message line, not a warning span":
+        val stderr = "WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool.\n" +
+            "Build and use the pure-Simple bin/simple instead.\n" +
+            "warning: W-STR-BRACE-001: `{print $1}` in string literal is not a valid interpolation expression\n" +
+            "  --> C:/repo/src/lib/nogc_sync_mut/io_runtime.spl:349:41\n" +
+            "   |\n" +
+            "349 |     shell_output(\"awk '{print $1}'\")\n" +
+            "   |                                         ^\n" +
+            "\n" +
+            "{{ and }}\n" +
+            "\n" +
+            "error: semantic: composite.spl:22:1: variable `undefined_name_here` not found\n"
+        expect(_dt_failure_reason(stderr, "")).to_contain("undefined_name_here")
+
+    it "prefers the failing example detail from the child's spec stdout":
+        val stdout = "probe\n" +
+            "  ✗ compile-errors\n" +
+            "    semantic: composite.spl:25:9: variable `undefined_name_here` not found\n" +
+            "\n" +
+            "1 example, 1 failure\n" +
+            "SPEC FILE VERDICT: composite.spl outcome=ERROR declared>=1 executed=1 passed=0 failed=1 skipped=0 blocked=0 dropped=0\n"
+        expect(_dt_failure_reason("noise\nspec failure: 1 of 1 example(s) failed (exit 1)\n", stdout)).to_contain("undefined_name_here")
+
+    it "falls back to the last informative stderr line, never a decoration span":
+        val stderr = "warning: W-STR-BRACE-001: `{print $1}` kept as literal\n" +
+            "  --> C:/repo/src/lib/nogc_sync_mut/io_runtime.spl:349:41\n" +
+            "   |\n" +
+            "349 |     code\n" +
+            "   |     ^\n" +
+            "spec failure: 1 of 1 example(s) failed (exit 1)\n"
+        expect(_dt_failure_reason(stderr, "")).to_contain("spec failure")
+
+    it "returns the exit-code sentence for empty streams":
+        expect(_dt_failure_reason("", "")).to_equal("Exit code non-zero")

@@ -120,3 +120,26 @@ separately measured.
 - **inferred**: this is a real language capability gap, not a stale report — there is no iterator protocol for user-defined structs, so the fix is compiler work (desugaring `for-in` to an `iter()`/`next()` protocol or equivalent). That lands in `src/compiler/**` or the Rust seed, both of which this session must not touch while a bootstrap runs concurrently.
 - Verdict: OPEN. The silent-zero-iterations behaviour is the dangerous part — a diagnostic on `for-in` over a type with no iterator would be a cheap partial mitigation.
 
+
+## Triage 2026-11-25 (p2w2-ab lane, Windows x86_64, pinned seed `bin/simple.exe` v1.0.0-rc.1, release/1.0.0 @ ead200cb544)
+
+- Re-measured the `Bag` fixture on the pinned Windows seed: still the silent
+  form — prints `for-in custom struct iterations=0`, no diagnostic. So the
+  2026-09-06 loud-error measurement was a newer aarch64 seed build; the pinned
+  rc.1 seed predates that diagnostic. Seed-side change is out of scope
+  (bootstrap-only).
+- The pure-Simple interpreter (unmeasured by the 2026-09-06 note) was checked
+  by code inspection and **already fails loudly**:
+  `eval_stmt_for` (`src/compiler/10.frontend/core/interpreter/eval_stmts.spl:475`)
+  dispatches range / array-or-`List` (`val_iterable_array`,
+  `value.spl:473-480`, which unwraps only real arrays and the `List` struct)
+  / text, and its fall-through is
+  `eval_set_error("cannot iterate over " + val_kind_name(...))`
+  (`eval_stmts.spl:604`; same shape at `eval.spl:977`). A user struct like
+  `Bag` or `ByteSpan` cannot silently zero-iterate on the self-hosted path —
+  the cheap diagnostic mitigation suggested above already exists there.
+- **Classification: SKIP (remains OPEN as a feature request).** The only
+  unclosed item is the iterator protocol itself (a `next()`/`iter()` trait
+  contract plus lowering in every engine) — a language-design program, not a
+  bounded bug fix, exactly as the 2026-09-06 note recommended. Re-triage
+  suggestion stands: re-file under language/type_system as a feature request.

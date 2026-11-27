@@ -1,0 +1,46 @@
+# Native compiled-bootstrap opt-in DATA. Old V1 codecs remain strict/unmodified.
+# The bootstrap consumes the explicit full V2 invocation manifest; independent
+# native V2 approval binds a distinct environment domain, never V1 permission.
+use std.common.contracts.orchestration.agent_workspace_invocation_v1.*
+use std.common.contracts.orchestration.agent_workspace_invocation_v2.*
+use std.common.contracts.orchestration.host_execute_request_v2.{HostExecuteRequestV2, host_execute_request_encode_v2, host_execute_request_decode_v2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_authority_codec_v2.{distributed_encode_signed_grant_v2, distributed_decode_signed_grant_v2,
+    distributed_encode_signed_approval_v2, distributed_decode_signed_approval_v2}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct AgentWorkspaceInvocationPacketV2:
+    host: HostExecuteRequestV2
+    manifest: AgentWorkspaceInvocationManifestV2
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+
+pub fn agent_workspace_invocation_packet_encode_v2(packet: AgentWorkspaceInvocationPacketV2) -> Result<text, text>:
+    val manifest = agent_workspace_invocation_manifest_encode_v2(packet.manifest)?
+    val host = host_execute_request_encode_v2(packet.host)?
+    val plan = packet.host.execution.plan
+    if (packet.manifest.base.operation_id != plan.operation_id or packet.manifest.base.task_use.session_uid != plan.workload_uid or
+            packet.manifest.base.task_use.attempt != plan.attempt or packet.manifest.base.workload_duration_ms != packet.host.operation.duration_ms):
+        return Err("agent-workspace-native-host-mismatch")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2),
+        "kind": SdnValue.String("agent-workspace-native-invocation-packet"), "nativeProfileVersion": SdnValue.Int(2),
+        "hostExecution": SdnValue.String(host), "manifest": SdnValue.String(manifest),
+        "signedGrant": SdnValue.String(distributed_encode_signed_grant_v2(packet.signed)?),
+        "signedApproval": SdnValue.String(distributed_encode_signed_approval_v2(packet.approval)?)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if bytes.byte_len() > 2097152: return Err("agent-workspace-native-packet-size")
+    Ok(bytes)
+
+pub fn agent_workspace_invocation_packet_decode_v2(source: text) -> Result<AgentWorkspaceInvocationPacketV2, text>:
+    val fields = agent_workspace_fields_v1(source, 2097152,
+        ["version", "kind", "nativeProfileVersion", "hostExecution", "manifest", "signedGrant", "signedApproval"])?
+    if (agent_workspace_int_v1(fields, "version")? != 2 or agent_workspace_int_v1(fields, "nativeProfileVersion")? != 2 or
+            agent_workspace_text_v1(fields, "kind")? != "agent-workspace-native-invocation-packet"):
+        return Err("agent-workspace-native-packet-version")
+    val packet = AgentWorkspaceInvocationPacketV2(host: host_execute_request_decode_v2(agent_workspace_text_v1(fields, "hostExecution")?)?,
+        manifest: agent_workspace_invocation_manifest_decode_v2(agent_workspace_text_v1(fields, "manifest")?)?,
+        signed: distributed_decode_signed_grant_v2(agent_workspace_text_v1(fields, "signedGrant")?)?,
+        approval: distributed_decode_signed_approval_v2(agent_workspace_text_v1(fields, "signedApproval")?)?)
+    if agent_workspace_invocation_packet_encode_v2(packet)? != source: return Err("agent-workspace-native-packet-noncanonical")
+    Ok(packet)

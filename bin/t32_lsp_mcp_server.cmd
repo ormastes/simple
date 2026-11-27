@@ -13,6 +13,10 @@ set "SEED=%~dp0..\src\compiler_rust\target"
 set "SIMPLE_RUNTIME=%SIMPLE_BINARY%"
 if not exist "%SIMPLE_RUNTIME%" set "SIMPLE_RUNTIME=%REL%\simple.exe"
 if not exist "%SIMPLE_RUNTIME%" set "SIMPLE_RUNTIME=%SEED%\release\simple.exe"
+rem Same precedence as bin\simple.cmd: the committed bin\simple.exe matches
+rem the tree; a stale local target\bootstrap seed predating merged syntax
+rem (e.g. @when) must not shadow it.
+if not exist "%SIMPLE_RUNTIME%" set "SIMPLE_RUNTIME=%~dp0simple.exe"
 if not exist "%SIMPLE_RUNTIME%" set "SIMPLE_RUNTIME=%SEED%\bootstrap\simple.exe"
 if not exist "%SIMPLE_RUNTIME%" (
     echo error: no t32_lsp_mcp_server.exe and no Simple runtime found. Tried: 1>&2
@@ -29,6 +33,7 @@ set "T32_LSP_MCP_TOOL_DAEMON=examples\10_tooling\trace32_tools\cmm_lsp\mcp_daemo
 if "%T32_LSP_MCP_TOOL_DAEMON_DIR%"=="" set "T32_LSP_MCP_TOOL_DAEMON_DIR=%TEMP%\t32_lsp_mcp_shared"
 if "%SIMPLE_LOG%"=="" set "SIMPLE_LOG=error"
 if "%RUST_LOG%"=="" set "RUST_LOG=error"
+if "%SIMPLE_EXECUTION_MODE%"=="" set "SIMPLE_EXECUTION_MODE=interpreter"
 rem The seed wall-clock-kills any entry under examples\ after 10s
 rem (driver/src/cli/examples_safety.rs); a long-lived stdio server must opt out.
 set "SIMPLE_TIMEOUT_SECONDS=0"

@@ -1,8 +1,14 @@
 # Imported primitive fields trigger false re-export advisories
 
-Status: OPEN. Severity: P2. Source repair and six compiled-only HIR cases are
-AUTHORED_UNEXECUTED; the three-module native fixture is UNEXECUTED. No release
-runtime admission or measured wall-time improvement is claimed.
+Status: FIXED (2026-11-04). Severity: P2. `imported_primitive_field_dependency_spec.spl`
+was 5/6 ("lowers real scalar array optional and nested primitive fields": expected 2 to equal 0
+reexport_chase_calls) and is now 6/6. Residual cause: the optional field `maybe: i64?` yields
+the dependency `Option`, which is not a primitive and so still entered the re-export chase.
+`materialize_imported_field_dependency_inner` now returns early for a builtin container
+spelling (Option/Result/Dict/Map/HashMap) when no module in the compilation declares it
+(`hir_dependency_is_builtin_container` + `hir_compilation_declares_nominal`), the same rule the
+callable/payload paths use; a declared `Option` still resolves. Other 20 related hir specs
+fail identically before and after the change (pre-existing).
 
 ## Actual evidence
 

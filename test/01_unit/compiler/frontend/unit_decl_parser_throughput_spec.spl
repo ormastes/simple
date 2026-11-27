@@ -1,0 +1,66 @@
+# @cover src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl 5%
+"""
+## Purpose and audience
+Parser-throughput sanity measurement for the contextual `unit` declaration
+arm (unified unit plan 2026-11-12, section 7: parser throughput budget <=1%).
+The arm is a one-character lookahead after an identifier spelled `unit`, so a
+module dense with `-> unit` return types and `unit` declarations must parse
+at the same order of cost as the same module without any unit declarations.
+## Operator workflow
+bin/simple test test/01_unit/compiler/frontend/unit_decl_parser_throughput_spec.spl
+## Compatibility and limitations
+Wall-clock on a shared host is noisy; this spec pins a coarse ratio (the
+unit-bearing module may cost at most 1.5x the control) and records the raw
+numbers as evidence. The <=1% budget is tracked by the perf lane's benchmark,
+not asserted here.
+## Verification guidance and troubleshooting
+A ratio blow-up means the contextual arm stopped being fixed-lookahead (for
+example, a snapshot/rollback per identifier).
+"""
+
+use std.spec
+use std.nogc_sync_mut.sffi.time.{time_now_ms}
+use compiler.core.types.{reset_all_pools, unit_decl_count}
+use compiler.core.parser.{parser_init_with_path, parser_has_errors}
+use compiler.core.parser_decls.{parse_module_body}
+
+fn gen_module(with_units: bool, fns: i64) -> text:
+    var src = ""
+    var i = 0
+    while i < fns:
+        if with_units and i % 8 == 0:
+            src = src + "unit U" + "{i}" + ": u64 as u" + "{i}" + "\n"
+        src = src + "fn f" + "{i}" + "(a: i64, b: i64) -> unit:\n    val c = a + b * 2\n    pass\n\n"
+        i = i + 1
+    src
+
+fn parse_ms(src: text, path: text) -> i64:
+    reset_all_pools()
+    val t0 = time_now_ms()
+    parser_init_with_path(src, path)
+    parse_module_body()
+    time_now_ms() - t0
+
+# @manual_section: parser throughput
+describe "unit declaration parser throughput":
+    it "a unit-dense module parses within 1.5x of the control module":
+        # @req REQ-UNIT-PERF-01
+        # @capture(statistics): control_ms, units_ms, ratio
+        step("parse the control module (no unit declarations) twice, keep the best")
+        val control = gen_module(false, 400)
+        val c1 = parse_ms(control, "throughput_control.spl")
+        val c2 = parse_ms(control, "throughput_control.spl")
+        val control_ms = if c1 < c2: c1 else: c2
+        expect(parser_has_errors()).to_equal(false)
+        step("parse the unit-dense module twice, keep the best")
+        val units = gen_module(true, 400)
+        val u1 = parse_ms(units, "throughput_units.spl")
+        val u2 = parse_ms(units, "throughput_units.spl")
+        val units_ms = if u1 < u2: u1 else: u2
+        expect(parser_has_errors()).to_equal(false)
+        expect(unit_decl_count()).to_equal(50)
+        step("record the measurement and pin the coarse ratio")
+        print "unit-parser-throughput control_ms={control_ms} units_ms={units_ms}"
+        # Guard against a zero control on a fast host: compare on a 1 ms floor.
+        val floor_control = if control_ms < 1: 1 else: control_ms
+        assert_true(units_ms * 2 <= floor_control * 3)

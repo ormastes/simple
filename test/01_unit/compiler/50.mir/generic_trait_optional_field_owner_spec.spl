@@ -1,0 +1,68 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# HIR/MIR: generic trait used as an optional field owner
+
+`trait AttrOwnerV1<T>` with `owner: AttrOwnerV1<T>?` on a generic class and an
+`impl AttrOwnerV1<i64> for Cells`, the shape of
+src/compiler/00.common/data/attribute_schema_v1.spl. The frozen Phase 2
+compiler lost the declaration owner (undefined owner_read/owner_write). Bug
+bootstrap_generic_optional_trait_field_owner_2026-11-14.
+
+Scope: this spec checks only that HIR and MIR lowering report no error and that
+`probe` is lowered. It does not link, so it does not observe the undefined
+symbols of the original report; it is a pin of current lowering behaviour.
+"""
+
+# @tag: unit, compiler, mir, hir, trait, stage2
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val owner_source = "trait Owner<T>:\n    fn owner_read(node: i64) -> T?\n    me owner_write(node: i64, value: T?)\n\nclass Cells:\n    cells: [i64?]\n\nimpl Owner<i64> for Cells:\n    fn owner_read(node: i64) -> i64?:\n        if node < 0 or node >= self.cells.len():\n            return None\n        self.cells[node]\n    me owner_write(node: i64, value: i64?):\n        while self.cells.len() <= node:\n            self.cells = self.cells.push(None)\n        self.cells[node] = value\n\nclass Store<T>:\n    owner: Owner<T>?\n    index_owner: Owner<i64>?\n\nimpl Store<T>:\n    fn read(node: i64) -> T?:\n        if val o = self.owner:\n            return o.owner_read(node)\n        None\n    me write(node: i64, value: T?):\n        if val o = self.owner:\n            o.owner_write(node, value)\n\nfn probe() -> i64:\n    val s = Store<i64>(owner: Some(Cells(cells: [])), index_owner: None)\n    s.write(0, Some(5))\n    s.read(0) ?? -1\n"
+
+fn lower_owner_errors(entry: text) -> text:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(owner_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: owner_source, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hir_lowering = hirlowering_for_module("app/main.spl", surfaces)
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["main_hir"] = hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "main_hir")
+    val mir = mir_lowering.lower_module(hir, [hir])
+    var out = ""
+    for e in hir_lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    # Non-vacuity: an empty error list only counts if the entry function was
+    # really lowered (a silently empty module also reports no error).
+    var entries = 0
+    for function in mir.functions.values():
+        if function.name == entry or function.name.ends_with("." + entry):
+            entries = entries + 1
+    if entries != 1:
+        out = out + "mir: expected 1 lowered fn " + entry + ", found " + entries.to_text() + "\n"
+    out
+
+describe "generic trait as an optional field owner":
+    it "lowers through HIR and MIR with no owner/arity/dispatch error":
+        val all = lower_owner_errors("probe")
+        expect(all.contains("expects 1 type arguments")).to_equal(false)
+        expect(all.contains("object-safe")).to_equal(false)
+        expect(all.contains("native implementation")).to_equal(false)
+        expect(all).to_equal("")

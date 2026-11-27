@@ -1,0 +1,87 @@
+# Actual canonical bundle packager and fetch-terminal reconstruction, no network model.
+use std.spec.*
+use app.scv.gateway_commands_v1.{scv_gateway_snapshot_package_v1}
+use app.scv.gateway_draft_store_v1.{ScvDraftBlobAdmittedScopeV1, scv_snapshot_offline_pin_import_v1, scv_draft_blob_get_v1}
+use std.scv.gateway_snapshot_replication_v1.*
+use std.scv.compile_snapshot_values_v1.*
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, file_write_bytes}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use app.io.mod.{dir_create}
+
+val GATEWAY_BUNDLE_BYTES = "fn sample(): 17\n"
+
+fn gateway_bundle_fixture(v2: bool) -> text:
+    expect(dir_create("build/test-artifacts", true)).to_equal(true)
+    val temporary = secure_temp_dir_raw("build/test-artifacts", "scv-gateway-bundle-")
+    expect(temporary == "").to_equal(false)
+    val root = path_final_existing(temporary).unwrap().path
+    expect(dir_create(root + "/src", true)).to_equal(true)
+    expect(file_write_bytes(root + "/src/a.spl", GATEWAY_BUNDLE_BYTES.bytes())).to_equal(true)
+    val inventory = "src/a.spl|sha256_{sha256_u8_hex(GATEWAY_BUNDLE_BYTES.bytes())}|{GATEWAY_BUNDLE_BYTES.bytes().len()}"
+    val digest = sha256_text(inventory)
+    val tree = "scv-tree-v1-" + digest
+    val commit_id = "scv-compile-v1-" + sha256_text("simple/scv-compile-commit/v1|{tree}|1")
+    val revision = if v2: scv_compile_snapshot_revision_id_v2(tree, digest) else: scv_compile_snapshot_revision_id_v1(tree, digest)
+    val provenance = if v2: scv_compile_snapshot_provenance_v2(revision, commit_id, tree, digest, 1) else: scv_compile_snapshot_provenance_v1(revision, commit_id, tree, digest, 1)
+    expect(file_write_bytes(root + "/SCV_COMPILE_INVENTORY", inventory.bytes())).to_equal(true)
+    expect(file_write_bytes(root + "/SCV_COMPILE_SNAPSHOT", provenance.bytes())).to_equal(true)
+    if v2:
+        expect(file_write_bytes(root + "/SCV_COMPILE_RECEIPT", scv_compile_snapshot_receipt_v1(provenance, revision).bytes())).to_equal(true)
+    root
+
+fn gateway_bundle_cleanup(root: text):
+    val parent = path_final_existing("build/test-artifacts").unwrap().path
+    expect(root.starts_with(parent + "/scv-gateway-bundle-")).to_equal(true)
+    expect(dir_remove_all(root)).to_equal(true)
+
+describe "canonical atomic bundle legacy gateway projection":
+    it "packages v2, roundtrips the wire and reconstructs the source through the actual fetch-terminal pin importer":
+        val root = gateway_bundle_fixture(true)
+        val package = scv_gateway_snapshot_package_v1(root, "repo-alpha", "principal-1", sha256_text("config")).unwrap()
+        val decoded = scv_gateway_snapshot_manifest_decode_v1(package.manifest_wire, "repo-alpha", "principal-1").unwrap()
+        expect(decoded).to_equal(package.manifest)
+        val check = scv_gateway_snapshot_manifest_validate_v1(decoded, "repo-alpha", "principal-1").unwrap()
+        expect(decoded.revision_id.starts_with("scv-revision-v1-")).to_equal(true)
+        expect(decoded.provenance.starts_with("simple-scv-compile-snapshot-v1\n")).to_equal(true)
+        expect(scv_gateway_snapshot_closure_verify_v1(decoded, package.objects).is_ok()).to_equal(true)
+        expect(dir_create(root + "/store", true)).to_equal(true)
+        val pin = scv_snapshot_offline_pin_import_v1(root + "/store", decoded, package.manifest_wire, package.objects).unwrap()
+        expect(pin.snapshot_id).to_equal(check.snapshot_pin_id)
+        val scope = ScvDraftBlobAdmittedScopeV1(repository_id: "repo-alpha", principal_id: "principal-1", can_read: true, can_write: true)
+        val restored = scv_draft_blob_get_v1(root + "/store", scope, decoded.objects[0].content_sha256).unwrap()
+        expect(restored).to_equal(GATEWAY_BUNDLE_BYTES.bytes())
+        gateway_bundle_cleanup(root)
+
+    it "preserves v1 transport identity for unchanged source content":
+        val legacy = gateway_bundle_fixture(false)
+        val bundle = gateway_bundle_fixture(true)
+        val old = scv_gateway_snapshot_package_v1(legacy, "repo-alpha", "principal-1", sha256_text("config")).unwrap()
+        val projected = scv_gateway_snapshot_package_v1(bundle, "repo-alpha", "principal-1", sha256_text("config")).unwrap()
+        expect(projected.manifest_wire).to_equal(old.manifest_wire)
+        gateway_bundle_cleanup(legacy)
+        gateway_bundle_cleanup(bundle)
+
+    it "refuses a partial authoritative local receipt":
+        val root = gateway_bundle_fixture(true)
+        expect(file_write_bytes(root + "/SCV_COMPILE_RECEIPT", "partial".bytes())).to_equal(true)
+        expect(scv_gateway_snapshot_package_v1(root, "repo-alpha", "principal-1", sha256_text("config")).is_err()).to_equal(true)
+        gateway_bundle_cleanup(root)
+
+    it "refuses a v2 header paired with a legacy revision":
+        val root = gateway_bundle_fixture(false)
+        val inventory = "src/a.spl|sha256_{sha256_u8_hex(GATEWAY_BUNDLE_BYTES.bytes())}|{GATEWAY_BUNDLE_BYTES.bytes().len()}"
+        val digest = sha256_text(inventory)
+        val tree = "scv-tree-v1-" + digest
+        val revision = scv_compile_snapshot_revision_id_v1(tree, digest)
+        val commit_id = "scv-compile-v1-" + sha256_text("simple/scv-compile-commit/v1|{tree}|1")
+        expect(file_write_bytes(root + "/SCV_COMPILE_SNAPSHOT", scv_compile_snapshot_provenance_v2(revision, commit_id, tree, digest, 1).bytes())).to_equal(true)
+        expect(scv_gateway_snapshot_package_v1(root, "repo-alpha", "principal-1", sha256_text("config")).is_err()).to_equal(true)
+        gateway_bundle_cleanup(root)
+
+    it "rejects altered source bytes before exporting a valid v2 receipt":
+        val root = gateway_bundle_fixture(true)
+        expect(file_write_bytes(root + "/src/a.spl", "changed".bytes())).to_equal(true)
+        expect(scv_gateway_snapshot_package_v1(root, "repo-alpha", "principal-1", sha256_text("config")).is_err()).to_equal(true)
+        gateway_bundle_cleanup(root)

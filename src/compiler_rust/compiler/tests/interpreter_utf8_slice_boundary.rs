@@ -44,27 +44,27 @@ fn slice_length_equals_the_byte_range_width_even_when_it_splits_a_codepoint() {
     // 4, 4 and 9 respectively (one U+FFFD, 3 bytes, replacing each bad byte).
     let code = format!(
         "fn main() -> i64:\n{PROBE}    \
-         if s.slice(0, 2).len() == 2 and s.substring(0, 2).len() == 2 \
-         and s.slice(4, 6).len() == 2 and s.slice(0, 8).len() == 8:\n        \
+         if s.slice(0, 2).byte_len() == 2 and s.substring(0, 2).byte_len() == 2 \
+         and s.slice(4, 6).byte_len() == 2 and s.slice(0, 8).byte_len() == 8:\n        \
          return 0\n    1\n\nmain = main()"
     );
     assert_eq!(run(&code), 0, "a split slice must keep the raw bytes of its range");
 }
 
-/// The same range spelled three ways must agree. This is the actual divergence
-/// the bug names: bracket slicing was raw on every engine while the METHOD
-/// spelling was lossy on this one, so the spelling changed the answer.
+/// The two METHOD spellings cut the same BYTE range and agree; the bracket
+/// operator is code-point indexed (ADR-005, owner decision 2026-11-07), so
+/// `s[0:2]` is the whole of "a\u{E9}" (3 bytes) and never splits a code point.
 #[test]
-fn bracket_slice_and_method_slice_agree_on_a_split_range() {
+fn method_slices_agree_on_a_split_range_and_bracket_slice_is_code_points() {
     let code = format!(
         "fn main() -> i64:\n{PROBE}    \
-         if s[0:2].len() == s.slice(0, 2).len() and s.slice(0, 2).len() == s.substring(0, 2).len():\n        \
+         if s[0:2].byte_len() == 3 and s.slice(0, 2).byte_len() == 2 and s.substring(0, 2).byte_len() == 2:\n        \
          return 0\n    1\n\nmain = main()"
     );
     assert_eq!(
         run(&code),
         0,
-        "s[0:2], s.slice(0,2) and s.substring(0,2) must have the same length"
+        "method slices are byte ranges; the bracket slice is code points"
     );
 }
 
@@ -101,8 +101,8 @@ fn stepped_slice_of_split_fragment_preserves_bytes_for_reassembly() {
 fn aligned_slices_are_unchanged() {
     let code = format!(
         "fn main() -> i64:\n{PROBE}    \
-         if s.slice(0, 1).len() == 1 and s.slice(1, 3).len() == 2 and s.slice(3, 6).len() == 3 \
-         and s.slice(6, 10).len() == 4 and s.slice(0, 11) == s:\n        return 0\n    1\n\nmain = main()"
+         if s.slice(0, 1).byte_len() == 1 and s.slice(1, 3).byte_len() == 2 and s.slice(3, 6).byte_len() == 3 \
+         and s.slice(6, 10).byte_len() == 4 and s.slice(0, 11) == s:\n        return 0\n    1\n\nmain = main()"
     );
     assert_eq!(run(&code), 0, "codepoint-aligned slices must be unchanged");
 }
@@ -113,8 +113,8 @@ fn aligned_slices_are_unchanged() {
 fn empty_and_overrun_ranges_are_clamped() {
     let code = format!(
         "fn main() -> i64:\n{PROBE}    \
-         if s.slice(3, 3).len() == 0 and s.slice(6, 99).len() == 5 and s.slice(99, 99).len() == 0 \
-         and s.slice(2, 1).len() == 0:\n        return 0\n    1\n\nmain = main()"
+         if s.slice(3, 3).byte_len() == 0 and s.slice(6, 99).byte_len() == 5 and s.slice(99, 99).byte_len() == 0 \
+         and s.slice(2, 1).byte_len() == 0:\n        return 0\n    1\n\nmain = main()"
     );
     assert_eq!(
         run(&code),

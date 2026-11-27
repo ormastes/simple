@@ -1,0 +1,73 @@
+use compiler.semantics.lint.sffi_abi_mismatch.{check_sffi_abi_mismatch, sffi_abi_deprecation_notes}
+use compiler.semantics.lint.sffi_preflight_facts_v1.{SffiPreflightReportV1, extract_sffi_preflight_report_v1}
+use compiler.tools.lint.lint_rule_api.{LintParamsV1, LintUnit, StaticLintCategory, StaticLintFinding, StaticLintLevel, StaticLintRule, lint_rule_provider_iface, static_lint_rule}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+use std.platform.{host_arch, host_os}
+
+# SPL-SFFI-ABI-001 & SPL-SFFI-RANGE-001 (config/policy/diagnostic_policy.sdn): deny.
+# reason: Target triple resolver maps CLI/env/platform strings into canonical triple
+@allow(primitive_api)
+pub fn sffi_abi_lint_triple(explicit: text, arch: text, os: text) -> text:
+    if explicit != "":
+        return explicit
+    if arch == "" or os == "":
+        return ""
+    if os == "freebsd":
+        if arch == "x86_64" or arch == "aarch64" or arch == "riscv64":
+            return arch + "-unknown-freebsd"
+        return ""
+    if os == "linux" and (arch == "arm" or arch == "armv7" or arch == "armv7l"):
+        return "armv7-unknown-linux-gnueabihf"
+    if arch != "x86_64" and arch != "aarch64" and arch != "riscv64" and arch != "i686":
+        return ""
+    if os == "linux":
+        return arch + "-unknown-linux-gnu"
+    if os == "macos" or os == "darwin":
+        return arch + "-apple-darwin"
+    if os == "windows":
+        return arch + "-pc-windows-msvc"
+    ""
+
+# reason: Rule helper evaluates LintUnit against canonical target triple string
+@allow(primitive_api)
+pub fn sffi_preflight_facts_for_unit_v1(unit: LintUnit, triple: text) -> SffiPreflightReportV1:
+    extract_sffi_preflight_report_v1(unit.content, unit.path, triple)
+
+# reason: Rule helper evaluates LintUnit against canonical target triple string
+@allow(primitive_api)
+pub fn sffi_abi_check_with_triple(unit: LintUnit, triple: text) -> [StaticLintFinding]:
+    var out: [StaticLintFinding] = []
+    val notes = sffi_abi_deprecation_notes(unit.content, unit.path)
+    var note_lines: [i64] = []
+    for n in notes:
+        note_lines.push(n.line_num)
+    var deny_lines: [i64] = []
+    for f in check_sffi_abi_mismatch(unit.content, unit.path, triple):
+        var msg = f.message
+        if note_lines.contains(f.line_num):
+            msg = msg + " (also: deprecated `@c_abi(Unit: \"ctype\")` form; declare the C type on the unit)"
+        out.push(StaticLintFinding(f.code, StaticLintLevel.Deny, StaticLintCategory.Safety, msg, "", f.line_num, 0))
+        deny_lines.push(f.line_num)
+    for n in notes:
+        if deny_lines.contains(n.line_num):
+            continue
+        out.push(StaticLintFinding(n.code, StaticLintLevel.Warn, StaticLintCategory.Safety, n.message, "", n.line_num, 0))
+    out
+
+# reason: Rule helper resolves explicit/host strings before running typed LintUnit check
+@allow(primitive_api)
+pub fn sffi_abi_row_findings(unit: LintUnit, explicit: text, arch: text, os: text) -> [StaticLintFinding]:
+    val triple = sffi_abi_lint_triple(explicit, arch, os)
+    if triple == "":
+        return []
+    sffi_abi_check_with_triple(unit, triple)
+
+fn sffi_abi_mismatch_check_rule(params: LintParamsV1, unit: LintUnit) -> [StaticLintFinding]:
+    val _ = params
+    if not unit.content.contains("@c_abi(") and not unit.content.contains("extern fn "):
+        return []
+    val explicit = env_get_nullable("SIMPLE_TARGET_TRIPLE") ?? ""
+    sffi_abi_row_findings(unit, explicit, host_arch(), host_os())
+
+pub fn sffi_abi_mismatch_lint_rule() -> StaticLintRule:
+    static_lint_rule("sffi_abi_mismatch", lint_rule_provider_iface("sffi_abi_mismatch"), sffi_abi_mismatch_check_rule)

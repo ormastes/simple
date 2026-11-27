@@ -1,0 +1,72 @@
+# TargetHIR cache feed: real guard-read constraints reach the HIR cache key.
+use std.spec.*
+use std.io_runtime.{file_write, env_set, env_get}
+use compiler.hir.target_hir.hir_target_constraints.{HirGuardRead, hir_target_constraints_capture, hir_target_constraints_digest}
+use compiler.hir.target_hir.hir_guard_read_scan.{hir_guard_conditions, hir_guard_reads_from_source}
+use compiler.driver.driver_hir_cache.{hir_cache_key}
+
+val GUARDED = "@when(feature = \"macho\")\nfn mach_only() -> i64:\n    1\n\nfn plain() -> i64:\n    2\n"
+val PLAIN = "fn plain() -> i64:\n    2\n"
+
+fn digest_of(src: text, features: [text]) -> text:
+    hir_target_constraints_digest(hir_target_constraints_capture("m", hir_guard_reads_from_source(src), features).unwrap())
+
+fn key_with(path: text, mode: text, features: text) -> text:
+    env_set("SIMPLE_TARGET_HIR_MODE", mode)
+    env_set("SIMPLE_FEATURES", features)
+    hir_cache_key(path, "c" * 64, false, "", "x86_64-unknown-linux-gnu")
+
+describe "TargetHIR cache feed":
+    it "extracts @when / @cfg / cfg-select guard conditions":
+        val src = "@when(os = \"macos\" or feature = \"macho\")\nfn a(): pass\n@cfg(target_arch = \"aarch64\")\nfn b(): pass\nif __cfg_when__(\"linux\"):\n    pass\n"
+        val conds = hir_guard_conditions(src)
+        expect(conds.len()).to_equal(3)
+        val reads = hir_guard_reads_from_source(src)
+        var keys: [text] = []
+        for r in reads:
+            keys.push(r.key + "=" + r.value)
+        expect(keys.contains("os=macos")).to_equal(true)
+        expect(keys.contains("feature=macho")).to_equal(true)
+        expect(keys.contains("arch=aarch64")).to_equal(true)
+        expect(keys.contains("os=linux")).to_equal(true)
+
+    it "a module with no target reads has a stable digest":
+        expect(hir_guard_reads_from_source(PLAIN).len()).to_equal(0)
+        expect(digest_of(PLAIN, [])).to_equal(digest_of(PLAIN, []))
+        expect(digest_of(PLAIN, []).len()).to_equal(64)
+
+    it "THIR-05 a negative feature read is recorded and separates the targets":
+        val old = env_get("SIMPLE_FEATURES")
+        env_set("SIMPLE_FEATURES", "")
+        val off = hir_guard_reads_from_source(GUARDED)
+        env_set("SIMPLE_FEATURES", "macho")
+        val on = hir_guard_reads_from_source(GUARDED)
+        env_set("SIMPLE_FEATURES", old)
+        expect(off.len()).to_equal(1)
+        expect(off[0].held).to_equal(false)
+        expect(on[0].held).to_equal(true)
+        val c_off = hir_target_constraints_capture("m", off, []).unwrap()
+        expect(c_off.negative_reads).to_equal(["feature=macho"])
+        val d_off = hir_target_constraints_digest(c_off)
+        val d_on = hir_target_constraints_digest(hir_target_constraints_capture("m", on, ["macho"]).unwrap())
+        expect(d_off == d_on).to_equal(false)
+
+    it "end to end: guarded feature splits shadow/typed keys, legacy unchanged by the feed":
+        val path = "/tmp/thir_cache_feed_spec_guarded.spl"
+        file_write(path, GUARDED)
+        val old_mode = env_get("SIMPLE_TARGET_HIR_MODE")
+        val old_feat = env_get("SIMPLE_FEATURES")
+        val legacy_off = key_with(path, "legacy", "")
+        val legacy_off2 = key_with(path, "legacy", "")
+        val shadow_off = key_with(path, "shadow", "")
+        val shadow_on = key_with(path, "shadow", "macho")
+        val typed_off = key_with(path, "typed", "")
+        val typed_on = key_with(path, "typed", "macho")
+        env_set("SIMPLE_TARGET_HIR_MODE", old_mode)
+        env_set("SIMPLE_FEATURES", old_feat)
+        expect(legacy_off.len()).to_equal(64)
+        expect(legacy_off).to_equal(legacy_off2)
+        expect(shadow_off == legacy_off).to_equal(false)
+        expect(shadow_off == shadow_on).to_equal(false)
+        expect(typed_off == typed_on).to_equal(false)
+        expect(shadow_off).to_equal(typed_off)

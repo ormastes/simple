@@ -1,0 +1,76 @@
+# JIT-vs-interpreter fixture for
+# doc/08_tracking/bug/erased_field_arg_into_scalar_param_tagged_seed_2026-10-31.md
+#
+# A generic type parameter `T` erases to `TypeId::ANY`, so a read of an
+# erased struct field (`Box<i64>.value`), a generic function's result
+# (`id(7)`) or an untyped local holding either is a TAGGED word. `val`
+# bindings, `return` and `if` merges decode that word into a raw slot, but a
+# CALL argument into a declared scalar parameter did not: `double_it(a.value)`
+# received `21 << 3 == 168` and returned 336, while `print "{a.value}"` and
+# `double_it(21)` were both right. A tagged `false` bound to a `bool`
+# parameter read as `true` (presence only). Fixed in
+# `coerce_args_for_param_slots` (mir/lower/lowering_expr_call.rs).
+#
+# Every line below is engine-independent ground truth; the interpreter was
+# already correct for all of them.
+
+struct Box<T>:
+    value: T
+
+struct Pair<T>:
+    inner: T
+    tag: text
+
+fn id<T>(x: T) -> T:
+    x
+
+fn double_it(x: i64) -> i64:
+    x * 2
+
+fn half(f: f64) -> f64:
+    f / 2.0
+
+fn wide(u: u64) -> u64:
+    u + 1
+
+fn flag(b: bool) -> text:
+    if b: "T" else: "F"
+
+class Acc:
+    base: i64
+    fn add(x: i64) -> i64:
+        self.base + x
+
+fn main():
+    val a: Box<i64> = Box(value: 21)
+    val direct = double_it(a.value)
+    print "direct={direct}"
+    val y = a.value
+    val untyped_local = double_it(y)
+    print "untyped_local={untyped_local}"
+    val generic_ret = double_it(id(7))
+    print "generic_ret={generic_ret}"
+    val bf: Box<bool> = Box(value: false)
+    val bt: Box<bool> = Box(value: true)
+    val bool_false = flag(bf.value)
+    val bool_true = flag(bt.value)
+    print "bool_false={bool_false}"
+    print "bool_true={bool_true}"
+    val ff: Box<f64> = Box(value: 1.5)
+    val float_arg = half(ff.value)
+    print "float_arg={float_arg}"
+    val bu: Box<u64> = Box(value: 8)
+    val u64_arg = wide(bu.value)
+    print "u64_arg={u64_arg}"
+    val acc = Acc(base: 21)
+    val method_arg = acc.add(a.value)
+    print "method_arg={method_arg}"
+    val p: Pair<Box<i64>> = Pair(inner: a, tag: "p")
+    val nested = double_it(p.inner.value)
+    print "nested={nested}"
+    val literal = double_it(21)
+    print "literal={literal}"
+    # Single-line summary for the differential harness, whose ground-truth
+    # comparison is one `contains` against `Fixture.expected`.
+    print "summary={direct}|{untyped_local}|{generic_ret}|{bool_false}|{bool_true}|{float_arg}|{u64_arg}|{method_arg}|{nested}|{literal}"
+main()

@@ -1,6 +1,6 @@
 # Stage 3 bootstrap real-LLVM entry IR loads imported globals it never declares
 
-- Status: OPEN
+- Status: CLOSED (2026-11-04) - fixed by ba645b426be (external rows now emit `@g_<name> = external global <ty>`, deduplicated, in emit_bootstrap_statics second pass)
 - Date: 2026-10-20
 - Platform: aarch64-unknown-linux-gnu
 - Severity: P2 (blocks any bootstrap entry that reads an imported `pub val`)

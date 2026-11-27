@@ -1,0 +1,273 @@
+"""Inspect registered trace facts through the real compiled CLI.
+
+Runs the query through a real process. By default that is the binary running
+this spec (SIMPLE_BINARY, exported by the runner) executing
+`run src/app/traceability/query_main.spl <args>` -- source-matched by
+construction. Overrides: SIMPLE_TRACE_QUERY_TEST_BINARY (an admitted Stage4
+CLI; the spec runs `<binary> trace <args>`) or SIMPLE_TRACE_QUERY_TEST_COMMAND
+(a whitespace separated command prefix that already routes to the query entry;
+the spec appends only `<args>`). Run from the repository root. No runtime at
+all fails explicitly; no fallback compiler or fake process result is used.
+The index scenario requires an externally prepared alternate GIT_INDEX_FILE
+under build/test-artifacts/trace_query_p0/ with a staged tree differing from HEAD.
+Its canonical declaration feature title must be "P0 staged feature title";
+no test edits the user's index or worktree.
+scripts/check/check-trace-query-p0.shs prepares that fixture and runs this spec.
+"""
+# @req REQ-TRC-021 REQ-TRC-023
+use std.spec.*
+use std.spec.step
+use app.io.minimal_runtime_ops.{env_get, process_run_timeout, cwd}
+use std.common.sdn.parser.{parse_with_spans_and_issues}
+use std.common.sdn.value.{SdnValue}
+use app.traceability.query_options_v1.{trace_query_options_parse_v1}
+use app.traceability.query_snapshot_v1.{trace_query_build_snapshot_v1}
+use app.traceability.extract.snapshot_pipeline.{TraceAdmissionEligibility}
+use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1, query_trace_nodes_v1}
+use app.traceability.snapshot.git_provider.{GitSnapshotRequest, snapshot_git_inputs}
+use app.traceability.snapshot.git_tree.{TraceGitEntryLimitV1}
+use app.traceability.snapshot.git_batch.{TraceGitByteLimitV1}
+use std.common.traceability.envelope_types_v1.*
+use std.common.traceability.trace_ids_v1.*
+
+fn actual_query_cli(args: [text]) -> (text, text, i32):
+    val command = env_get("SIMPLE_TRACE_QUERY_TEST_COMMAND")
+    if command.trim() != "":
+        # A prefix that already routes to the trace query entry; only args follow.
+        var parts: [text] = []
+        for part in command.split(" "):
+            if part != "": parts.push(part)
+        return process_run_timeout(parts[0], parts.slice(1, parts.len()) + args, 30000)
+    val binary = env_get("SIMPLE_TRACE_QUERY_TEST_BINARY")
+    if binary != "":
+        return process_run_timeout(binary, ["trace"] + args, 30000)
+    # Default: the binary running this spec (exported as SIMPLE_BINARY by the
+    # runner) executes the query entry from source -- source-matched by
+    # construction. No fallback compiler or fake process result exists.
+    val runner = env_get("SIMPLE_BINARY")
+    expect(runner != "").to_be(true)
+    if runner == "":
+        return ("", "SIMPLE_BINARY, SIMPLE_TRACE_QUERY_TEST_COMMAND or SIMPLE_TRACE_QUERY_TEST_BINARY is required", 2)
+    process_run_timeout(runner, ["run", "src/app/traceability/query_main.spl"] + args, 30000)
+
+# Exit 1 means "rendered, but the graph is incomplete"; a complete graph exits 0.
+# The page states which it is, so the expectation does not depend on how many
+# diagnostics a given checkout happens to carry.
+fn complete_graph_status(page: text) -> i32:
+    if page.contains("Graph complete: true"): 0 else: 1
+
+fn query_document(output: text) -> Dict<text, SdnValue>:
+    val parsed = parse_with_spans_and_issues(output).unwrap()
+    expect(parsed.2.len()).to_equal(0)
+    match parsed.0:
+        case SdnValue.Dict(fields): fields
+        case _:
+            expect(output).to_equal("a structured query dictionary was required")
+            {}
+
+fn git_object_oracle(args: [text]) -> text:
+    # Independent Git process output, not the query provider or emitted document.
+    val (output, errors, status) = process_run_timeout("git", args, 30000)
+    expect(status).to_equal(0)
+    val oid = output.trim()
+    expect(oid.len() == 40 or oid.len() == 64).to_be(true)
+    oid
+
+describe "Inspect registered facts from captured source":
+    it "lists the canonical feature with default worktree preview and exact captured identity":
+        # @ac AC-TRC-041
+        step("Capture the canonical declaration and its real locator closure")
+        val build = trace_query_build_snapshot_v1(trace_query_options_parse_v1(["list", "features"]).unwrap()).unwrap()
+        expect(build.graph.subject.kind).to_equal("worktree_preview")
+        expect(build.graph.subject.snapshot_id).to_start_with("worktree:sha256:")
+        # Default authored claims resolve against the policy-owned authority registry.
+        expect(build.graph.complete == TraceCompletenessV1.Complete).to_be(true)
+        expect(build.admission_eligible == TraceAdmissionEligibility.Eligible).to_be(false)
+        val page = query_trace_nodes_v1(build.graph, TraceNodeQueryV1(snapshot_id: build.graph.subject.snapshot_id,
+            operation: "show", kind: "features", selected_id: "feature:traceability")).unwrap()
+        expect(page.nodes.len()).to_equal(1)
+        expect(page.nodes[0].id).to_equal("feature:traceability")
+
+    it "executes real CLI dispatch and keeps structured stdout separate from qualification":
+        # @ac AC-TRC-041
+        step("Run simple trace list features through the admitted CLI")
+        # --bug-db=none keeps this scenario on the registered-declaration contract alone.
+        val (output, errors, status) = actual_query_cli(["list", "features", "--format=sdn", "--bug-db=none"])
+        expect(status).to_equal(0)
+        val fields = query_document(output)
+        expect(fields["snapshot_kind"]).to_equal(SdnValue.String("worktree_preview"))
+        expect(fields["ingestion"]).to_equal(SdnValue.String("registered-declarations-only"))
+        expect(fields["legacy_database_ingestion"]).to_equal(SdnValue.String("unavailable"))
+        expect(fields["qualification"]).to_equal(SdnValue.String("unverified"))
+        expect(fields["admission_eligible"]).to_equal(SdnValue.Bool(false))
+        expect(fields["graph_complete"]).to_equal(SdnValue.Bool(true))
+        expect(output).not_to_contain("TRACE-AUTHORITY-CONFLICT")
+
+    it "keeps table diagnostics on stderr and a single summary count on stdout":
+        step("Run the table form against a fixture declaration with a known authority conflict")
+        val (table, table_errors, table_status) = actual_query_cli(["list", "features", "--bug-db=none", "--declaration=test/03_system/app/traceability/feature/fixtures/authority_conflict_declaration.sdn"])
+        expect(table_status).to_equal(1)
+        expect(table).to_contain("Total selected:")
+        expect(table).to_contain("Diagnostics: 1 (details on stderr)")
+        expect(table.contains("TRACE-AUTHORITY-CONFLICT")).to_be(false)
+        expect(table_errors).to_contain("TRACE-AUTHORITY-CONFLICT")
+
+    it "prints no diagnostics line for the clean registered declaration":
+        step("Run the table form against the canonical declaration")
+        val (clean, clean_errors, clean_status) = actual_query_cli(["list", "features", "--bug-db=none"])
+        expect(clean_status).to_equal(0)
+        expect(clean).to_contain("Total selected:")
+        expect(clean.contains("Diagnostics:")).to_be(false)
+        expect(clean_errors.contains("TRACE-AUTHORITY-CONFLICT")).to_be(false)
+
+    it "answers list bugs from the legacy bug-DB sidecar without writing or claiming authority":
+        # @ac AC-TRC-041
+        step("List bugs through the CLI with the default sidecar (doc/08_tracking/bug/bug_db.sdn)")
+        val (output, errors, status) = actual_query_cli(["list", "bugs", "--format=sdn", "--limit", "2"])
+        expect(status).to_equal(0)
+        val fields = query_document(output)
+        expect(fields["legacy_database_ingestion"]).to_equal(SdnValue.String("bug-db/v1"))
+        expect(fields["ingestion"]).to_equal(SdnValue.String("registered-declarations+sidecar"))
+        expect(fields["admission_eligible"]).to_equal(SdnValue.Bool(false))
+        match fields["total_count"]:
+            case SdnValue.Int(count): expect(count > 0).to_be(true)
+            case _: fail("total_count must be an integer")
+        match fields["sidecar_sources"]:
+            case SdnValue.Array(sources): expect(sources.len()).to_equal(1)
+            case _: fail("sidecar_sources must be an array")
+        expect(output).to_contain("legacy: {")
+        step("The same page without the sidecar is empty: declarations declare no bug")
+        val (bare, bare_errors, bare_status) = actual_query_cli(["list", "bugs", "--format=sdn", "--bug-db=none"])
+        expect(bare_status).to_equal(0)
+        expect(query_document(bare)["total_count"]).to_equal(SdnValue.Int(0))
+        step("A status filter narrows before paging and is rejected outside list bugs")
+        val (filtered, filtered_errors, filtered_status) = actual_query_cli(["list", "bugs", "--status=open", "--limit", "1"])
+        expect(filtered_status).to_equal(0)
+        expect(filtered).to_contain("KIND\tID\tTITLE\tSTATUS\tSEVERITY\tLOCATION\n")
+        val (rejected, rejected_errors, rejected_status) = actual_query_cli(["list", "features", "--status=open"])
+        expect(rejected_status).to_equal(2)
+        expect(rejected).to_contain("TRACE-QUERY-INVALID")
+
+    it "answers which spec claims a requirement from @req headers under an explicit spec root":
+        # @ac AC-TRC-041
+        step("Scan this feature's own unit spec root and read a declared requirement's references")
+        val (output, errors, status) = actual_query_cli(["refs", "requirement", "req:REQ-TRC-015", "--spec-root=test/01_unit/app/traceability"])
+        expect(status).to_equal(0)
+        expect(output).to_contain("Selected: requirement req:REQ-TRC-015 ")
+        expect(output).to_contain("SIDECAR\tverified_by\ttest/01_unit/app/traceability/legacy_bugs_sidecar_spec.spl\theader\tannotation-claim\treq:REQ-TRC-015\n")
+        expect(output).to_contain("sidecar annotation-req/v1 test/01_unit/app/traceability rows=")
+        step("A requirement only spec headers name renders sidecar rows and no invented node")
+        val (undeclared, undeclared_errors, undeclared_status) = actual_query_cli(["refs", "requirement", "req:REQ-TRC-021", "--spec-root=test/01_unit/app/traceability", "--format=sdn"])
+        expect(undeclared_status).to_equal(0)
+        val fields = query_document(undeclared)
+        expect(fields["total_count"]).to_equal(SdnValue.Int(0))
+        expect(undeclared).to_contain("undeclared; sidecar references only")
+        expect(undeclared).to_contain("req:REQ-TRC-021")
+        val (absent, absent_errors, absent_status) = actual_query_cli(["refs", "requirement", "req:REQ-TRC-021"])
+        expect(absent_status).to_equal(1)
+        expect(absent).to_contain("TRACE-QUERY-NOT-FOUND")
+        step("refs file summarizes one path: claims, declared entities and sidecar rows")
+        val (file_page, file_errors, file_status) = actual_query_cli(["refs", "file", "src/app/traceability/main.spl"])
+        expect(file_status).to_equal(complete_graph_status(file_page))
+        expect(file_page).to_contain("Selected: source_file source:trace-cli src/app/traceability/main.spl")
+        expect(file_page).to_contain("incoming\timplemented_by\tfeature:traceability\t")
+        expect(file_page).to_contain("LOCATOR\tsrc/app/traceability/main.spl\tfile\t\tsource:trace-cli\n")
+        val (spec_page, spec_errors, spec_status) = actual_query_cli(["refs", "file", "test/01_unit/app/traceability/legacy_bugs_sidecar_spec.spl", "--spec-root=test/01_unit/app/traceability"])
+        expect(spec_status).to_equal(complete_graph_status(spec_page))
+        expect(spec_page).to_contain("SIDECAR\tverified_by\ttest/01_unit/app/traceability/legacy_bugs_sidecar_spec.spl\theader\tannotation-claim\treq:REQ-TRC-015\n")
+        val (none_page, none_errors, none_status) = actual_query_cli(["refs", "file", "src/app/does_not_exist.spl", "--bug-db=none"])
+        expect(none_status).to_equal(1)
+        expect(none_page).to_contain("TRACE-QUERY-NOT-FOUND")
+        step("Spec roots are a worktree-preview sidecar")
+        val (git_scan, git_errors, git_status) = actual_query_cli(["list", "requirements", "--snapshot=git:HEAD", "--spec-root=test/01_unit/app/traceability"])
+        expect(git_status).to_equal(2)
+
+    it "uses the selected immutable Git subject for requirement pages":
+        # @ac AC-TRC-041 AC-TRC-044
+        step("Resolve an immutable commit and tree independently through Git")
+        # `\{...\}` keeps Git's peel syntax out of string interpolation.
+        val commit = git_object_oracle(["rev-parse", "--verify", "HEAD^\{commit\}"])
+        val tree = git_object_oracle(["rev-parse", "--verify", commit + "^\{tree\}"])
+        step("Read one requirement page from that exact commit through the CLI")
+        val (output, errors, status) = actual_query_cli(["list", "requirements", "--snapshot=git:" + commit, "--limit", "1", "--format=sdn"])
+        expect(status).to_equal(0)
+        val fields = query_document(output)
+        expect(fields["snapshot_kind"]).to_equal(SdnValue.String("git_commit"))
+        expect(fields["revision"]).to_equal(SdnValue.String(commit))
+        expect(fields["tree"]).to_equal(SdnValue.String(tree))
+        expect(fields["page_complete"]).to_equal(SdnValue.Bool(false))
+        expect(fields["total_count"]).to_equal(SdnValue.Int(20))
+
+    it "queries the index tree without substituting HEAD or worktree content":
+        # @ac AC-TRC-041 AC-TRC-010
+        step("Freeze the owned index tree independently without editing index entries")
+        # The harness must retain exclusive ownership of this fixture's index.
+        # write-tree may add immutable Git objects; it changes no staged entries.
+        val owned_prefix = cwd().replace("\\", "/") + "/build/test-artifacts/trace_query_p0/"
+        expect(env_get("GIT_INDEX_FILE").replace("\\", "/")).to_start_with(owned_prefix)
+        val expected_tree = git_object_oracle(["write-tree"])
+        val head_tree = git_object_oracle(["rev-parse", "--verify", "HEAD^\{tree\}"])
+        if expected_tree == head_tree:
+            fail("The owned index fixture must differ from HEAD")
+        step("Show the independently staged feature title through the CLI index route")
+        val (output, errors, status) = actual_query_cli(["show", "feature", "feature:traceability", "--snapshot", "index", "--format=sdn"])
+        expect(status).to_equal(0)
+        val fields = query_document(output)
+        expect(fields["snapshot_kind"]).to_equal(SdnValue.String("git_index"))
+        expect(fields["revision"]).to_equal(SdnValue.String(""))
+        expect(fields["tree"]).to_equal(SdnValue.String(expected_tree))
+        expect(fields["total_count"]).to_equal(SdnValue.Int(1))
+        match fields["nodes"]:
+            case SdnValue.Array(nodes):
+                expect(nodes.len()).to_equal(1)
+                if nodes.len() != 1: fail("Expected one staged feature node")
+                match nodes[0]:
+                    case SdnValue.Dict(node):
+                        expect(node["id"]).to_equal(SdnValue.String("feature:traceability"))
+                        expect(node["title"]).to_equal(SdnValue.String("P0 staged feature title"))
+                    case _: fail("Expected a structured feature node")
+            case _: fail("Expected a structured node array")
+        expect(fields["qualification"]).to_equal(SdnValue.String("unverified"))
+
+    it "keeps parse errors structured for the separate format option form":
+        step("Request SDN with a separate value and an invalid page limit")
+        val (output, errors, status) = actual_query_cli(["list", "features", "--format", "sdn", "--limit", "0"])
+        expect(status).to_equal(2)
+        val fields = query_document(output)
+        expect(fields["code"]).to_equal(SdnValue.String("TRACE-QUERY-INVALID"))
+        expect(fields["status"]).to_equal(SdnValue.String("error"))
+        expect(fields["snapshot_available"]).to_equal(SdnValue.Bool(false))
+
+    it "reports unavailable groups and missing explicit declarations as nonzero errors":
+        step("Request unsupported groups without silently returning an empty inventory")
+        val (groups, group_errors, group_status) = actual_query_cli(["list", "feature-groups", "--format=sdn"])
+        expect(group_status).to_equal(2)
+        expect(query_document(groups)["status"]).to_equal(SdnValue.String("error"))
+        expect(query_document(groups)["code"]).to_equal(SdnValue.String("TRACE-QUERY-UNAVAILABLE"))
+        step("Request a missing registered declaration")
+        val (missing, missing_errors, missing_status) = actual_query_cli(["list", "features", "--declaration=doc/missing-p0-declaration.sdn", "--format=sdn"])
+        expect(missing_status).to_equal(2)
+        expect(query_document(missing)["snapshot_available"]).to_equal(SdnValue.Bool(false))
+
+    it "returns a negative-query status for missing or wrong-kind identities":
+        step("Show an absent feature in a successfully captured snapshot")
+        val (missing, errors, status) = actual_query_cli(["show", "feature", "feature:p0-absent", "--format=sdn"])
+        expect(status).to_equal(1)
+        expect(query_document(missing)["snapshot_available"]).to_equal(SdnValue.Bool(true))
+        expect(query_document(missing)["code"]).to_equal(SdnValue.String("TRACE-QUERY-NOT-FOUND"))
+        step("Show a requirement identity as a feature")
+        val (wrong, wrong_errors, wrong_status) = actual_query_cli(["show", "features", "req:REQ-TRC-001", "--format=sdn"])
+        expect(wrong_status).to_equal(1)
+        expect(query_document(wrong)["status"]).to_equal(SdnValue.String("error"))
+
+    it "rejects a real tree object mislabeled as a frozen commit":
+        step("Pin the real HEAD and canonical declaration tree")
+        val path = "doc/08_tracking/trace/features/simple_traceability_sdn_slop.sdn"
+        val initial = snapshot_git_inputs(GitSnapshotRequest(repository: ".", selector: "HEAD", paths: [path],
+            max_entries: TraceGitEntryLimitV1(value: 256), max_blob_bytes: TraceGitByteLimitV1(value: 1048576), max_total_bytes: TraceGitByteLimitV1(value: 2097152))).unwrap()
+        step("Use the existing tree OID as both tree and alleged commit")
+        # The tree exists and contains the selected path. ls-tree alone, or
+        # merely resolving revision^{tree}, would incorrectly accept this pair.
+        expect(snapshot_git_inputs(GitSnapshotRequest(repository: ".", selector: "HEAD", paths: [path],
+            max_entries: TraceGitEntryLimitV1(value: 256), max_blob_bytes: TraceGitByteLimitV1(value: 1048576), max_total_bytes: TraceGitByteLimitV1(value: 2097152),
+            frozen_tree: initial.subject.tree_id, frozen_revision: initial.subject.tree_id)).is_err()).to_be(true)

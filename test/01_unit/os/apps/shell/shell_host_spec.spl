@@ -1,0 +1,98 @@
+"""
+## Hosted shs reaches the host
+
+For maintainers of the Simple shell (shs) and the PTY default. Before hosts
+default panes to shs, the hosted shell must behave like a host shell: `ls`,
+`cat` and `cd` see the real filesystem, unknown commands run host programs
+with their output returned, and `$VAR` expands from the environment, which
+launched programs inherit.
+
+Design: doc/05_design/pty_shell_kinds_shs_default.md
+"""
+use std.spec
+use os.apps.shell.shell_app.{ShellApp}
+use std.nogc_sync_mut.io_runtime.{file_write, dir_create, cwd_process}
+
+fn _fixture_dir() -> text:
+    val dir = cwd_process() + "/build/shs_host_spec"
+    val _made = dir_create(dir, true)
+    val _w = file_write(dir + "/note.txt", "host-file-body\n")
+    dir
+
+fn _run(shell: ShellApp, line: text) -> text:
+    val _drain = shell.take_remote_output()
+    val _alive = shell.feed_remote_input(line + "\n")
+    shell.take_remote_output()
+
+describe "hosted shs":
+    context "host-backed VFS":
+        it "lists, reads and enters real host directories":
+            # @req: REQ-SHS-HOST-PARITY-VFS
+            step("point a hosted shell at a host fixture directory")
+            val dir = _fixture_dir()
+            var shell = ShellApp.hosted_on_host()
+            expect(shell.hosted).to_equal(true)
+            expect(shell.cwd).to_equal(cwd_process())
+            step("cd into it, list it, cat the file")
+            val _cd = _run(shell, "cd build/shs_host_spec")
+            expect(shell.cwd).to_equal(dir)
+            expect(_run(shell, "ls")).to_contain("note.txt")
+            expect(_run(shell, "cat note.txt")).to_contain("host-file-body")
+            step("cd back: hosted cd moves the real process cwd")
+            val _back = _run(shell, "cd ../..")
+            expect(cwd_process()).to_equal(shell.cwd)
+
+        it "refuses cd into a missing directory and keeps the cwd":
+            # @req: REQ-SHS-HOST-PARITY-VFS
+            var shell = ShellApp.hosted_on_host()
+            val before = shell.cwd
+            expect(_run(shell, "cd no_such_dir_shs_spec")).to_contain("cd: no such directory")
+            expect(shell.cwd).to_equal(before)
+            expect(shell.last_exit_code).to_equal(1)
+
+    context "host programs":
+        it "launches an unknown command as a host program and returns its output":
+            # @req: REQ-SHS-HOST-PARITY-PROCESS
+            var shell = ShellApp.hosted_on_host()
+            expect(_run(shell, "/bin/echo from-host-program")).to_contain("from-host-program")
+            expect(shell.last_exit_code).to_equal(0)
+
+        it "reports a host program's exit status":
+            # @req: REQ-SHS-HOST-PARITY-PROCESS
+            var shell = ShellApp.hosted_on_host()
+            val _x = _run(shell, "sh -c 'exit 3'")
+            expect(shell.last_exit_code).to_equal(3)
+
+        it "reports an unknown host command as not found and keeps running":
+            # @req: REQ-SHS-HOST-PARITY-PROCESS
+            var shell = ShellApp.hosted_on_host()
+            expect(_run(shell, "no_such_cmd_shs_spec_xyz")).to_contain("command not found")
+            expect(shell.last_exit_code).to_equal(127)
+            expect(shell.running).to_equal(true)
+
+        it "answers system questions from the host, not the SimpleOS guest":
+            # @req: REQ-SHS-HOST-PARITY-PROCESS
+            var shell = ShellApp.hosted_on_host()
+            val out = _run(shell, "uname -s")
+            expect(out.contains("SimpleOS")).to_equal(false)
+            expect(shell.last_exit_code).to_equal(0)
+
+        it "refuses pipelines, redirections and & cleanly instead of dying":
+            # @req: REQ-SHS-HOST-PARITY-PROCESS
+            var shell = ShellApp.hosted_on_host()
+            expect(_run(shell, "echo a | cat")).to_contain("not supported in hosted shs")
+            expect(_run(shell, "echo hi > x.txt")).to_contain("not supported in hosted shs")
+            expect(_run(shell, "sleep 1 &")).to_contain("not supported in hosted shs")
+            expect(shell.last_exit_code).to_equal(2)
+            expect(shell.running).to_equal(true)
+
+    context "environment":
+        it "expands $VAR from the host environment and exports to children":
+            # @req: REQ-SHS-HOST-PARITY-ENV
+            var shell = ShellApp.hosted_on_host()
+            val home = shell._get_env("HOME")
+            expect(home).to_start_with("/")
+            expect(_run(shell, "echo home=$HOME")).to_contain("home=" + home)
+            val _e = _run(shell, "export SHS_SPEC_VAR=exported-ok")
+            # No `$` reaches shs here: the child itself must see the variable.
+            expect(_run(shell, "sh -c 'printenv SHS_SPEC_VAR'")).to_contain("exported-ok")

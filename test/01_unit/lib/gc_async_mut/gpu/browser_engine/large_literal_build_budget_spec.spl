@@ -1,0 +1,61 @@
+# Purpose and audience: build-time budget guard for the 8K native renderer closure.
+# @req REQ-SSPEC-LIB
+# bug: doc/08_tracking/bug/gui_8k_native_renderer_artifact_build_timeout_2026-08-13.md
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_time_now_unix_micros() -> i64
+
+use std.spec.step
+use std.spec
+use std.gc_async_mut.gpu.browser_engine.html_named_character_references.{html_named_reference_names, html_named_reference_values}
+use common.web.public_suffix.{is_public_suffix}
+
+# Budget: one-entry-per-line quoted literal lines per module. Measured before fix:
+# html_named_character_references.spl = 4462, public_suffix_data.spl = 10700.
+# After fix both are 0; 64 leaves margin for small tables.
+val MAX_QUOTED_ENTRY_LINES: i64 = 64
+
+fn _quoted_entry_lines(path: text) -> i64:
+    val source = rt_file_read_text(path) ?? ""
+    var count: i64 = 0
+    for line in source.split("\n"):
+        val t = line.trim()
+        if t.starts_with("\"") and t.ends_with("\","):
+            count = count + 1
+    count
+
+describe "renderer-closure large literal build budget":
+    it "keeps html_named_character_references free of huge array literals":
+        step("count one-entry-per-line quoted literal lines")
+        expect(_quoted_entry_lines("src/lib/gc_async_mut/gpu/browser_engine/html_named_character_references.spl") <= MAX_QUOTED_ENTRY_LINES).to_equal(true)
+
+    it "keeps public_suffix_data free of huge array literals":
+        step("count one-entry-per-line quoted literal lines")
+        expect(_quoted_entry_lines("src/lib/common/web/public_suffix_data.spl") <= MAX_QUOTED_ENTRY_LINES).to_equal(true)
+
+    it "decodes the named reference tables identically and within 5 s":
+        step("decode names and values once")
+        val t0 = rt_time_now_unix_micros()
+        val names = html_named_reference_names()
+        val values = html_named_reference_values()
+        val elapsed_us = rt_time_now_unix_micros() - t0
+        expect(names.len()).to_equal(2231)
+        expect(values.len()).to_equal(2231)
+        expect(names[0]).to_equal("AElig")
+        expect(names[2230]).to_equal("zwnj;")
+        expect(values[0]).to_equal("Æ")
+        expect(elapsed_us < 5000000).to_equal(true)
+        var amp = -1
+        var i = 0
+        while i < names.len():
+            if names[i] == "amp;":
+                amp = i
+            i = i + 1
+        expect(values[amp]).to_equal("&")
+
+    it "keeps public suffix lookups correct":
+        step("exact, wildcard and exception rules")
+        expect(is_public_suffix("com")).to_equal(true)
+        expect(is_public_suffix("co.uk")).to_equal(true)
+        expect(is_public_suffix("example.com")).to_equal(false)
+        expect(is_public_suffix("foo.ck")).to_equal(true)
+        expect(is_public_suffix("www.ck")).to_equal(false)

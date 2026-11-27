@@ -12,7 +12,7 @@
 #endif
 
 int main(int argc, char **argv) {
-    if (argc != 2) return 2;
+    if (argc != 2) return 64; /* EX_USAGE: the harness selects the mode */
     if (strcmp(argv[1], "invalid-tag") == 0) {
         (void)rt_gui_present_html(RT_NIL_VALUE);
         return 3; /* The provider boundary must exit 70 first. */

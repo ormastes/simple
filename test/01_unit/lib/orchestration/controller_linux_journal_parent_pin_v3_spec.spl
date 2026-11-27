@@ -1,0 +1,41 @@
+"""
+## Purpose and audience
+P2 #18 (PR #10395 review R1 P2-1): on a Linux controller the journal child `<root>/journal` must be bound to the
+directory the root reader already admitted, so a path swap between reader admit and journal open is refused.
+Written for owners of the controller local root and the Linux protected journal factory.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`. Status: AUTHORED, NOT_RUN (no runnable
+binary when written, 2026-11-19).
+## Compatibility and limitations
+Source pins only: the live swap scenario needs a provisioned private root and is BLOCKED, recorded in
+test/02_integration/lib/orchestration/controller_linux_journal_swap_v3_spec.spl.
+The Windows path and the Host caller of `distributed_operation_journal_open_linux_v3` are unchanged.
+## Verification guidance and troubleshooting
+A failed pin names the hop that lost the parent identity: reader accessor, controller call site, factory sibling,
+health open, or the storage compare.
+"""
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+
+fn pin_src_v3(path: text) -> text:
+    file_read_regular_no_follow_bounded(path, 4194304).unwrap()
+
+describe "Linux controller journal parent identity pin (P2 #18)":
+    it "reads the reader root identity and passes it to a controller-only journal factory sibling":
+        step("controller_root_project_v3 pins the journal parent to the reader's held root directory")
+        val root = pin_src_v3("src/lib/nogc_sync_mut/orchestration/controller_local_root_v3.spl")
+        expect(root.contains("linux_protected_root_reader_root_identity_v1(")).to_equal(true)
+        expect(root.contains("distributed_operation_journal_open_linux_child_v3(")).to_equal(true)
+        expect(root.contains("distributed_operation_journal_open_linux_v3(")).to_equal(false)
+        expect(root.contains("not an fd-level parent proof")).to_equal(false)
+        val reader = pin_src_v3("src/lib/nogc_sync_mut/io/linux_protected_root_reader_v1.spl")
+        expect(reader.contains("pub fn linux_protected_root_reader_root_identity_v1(")).to_equal(true)
+
+    it "keeps one journal writer and compares the walked parent descriptor's identity before the lock":
+        step("the sibling shares the single-writer open body; the storage compare precedes parent.lock")
+        val journal = pin_src_v3("src/lib/common/task_runner/distributed_operation_journal_v2.spl")
+        expect(journal.contains("pub fn distributed_operation_journal_open_linux_child_v3(")).to_equal(true)
+        val storage = pin_src_v3("src/lib/nogc_sync_mut/io/linux_protected_storage_v1.spl")
+        val compare_at = storage.index_of("protected-storage-parent-identity-mismatch")
+        val lock_at = storage.index_of("anchored_linux_name_v1(\"parent.lock\")")
+        expect(compare_at >= 0 and lock_at > compare_at).to_equal(true)

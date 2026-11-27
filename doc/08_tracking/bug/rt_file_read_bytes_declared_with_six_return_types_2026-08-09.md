@@ -1,8 +1,10 @@
 # `rt_file_read_bytes` extern declared with SIX incompatible return types
 
 - **Filed:** 2026-08-09 (stream I3)
-- **Status:** PARTIALLY CONVERGED — six return types reduced to four. Guard spec
-  landed intentionally RED on the remainder.
+- **Status:** RESOLVED 2026-11-25 — declarations converged to the single
+  canonical return type `[u8]?` on release/1.0.0; the 2026-11-03 candidate
+  repair landed. Static census re-verified 2026-11-25 (see closure note at
+  end); guard-spec execution pending a runnable toolchain.
 - **Guard:** `test/01_unit/compiler/extern/rt_file_read_bytes_single_extern_signature_spec.spl`
 - **Layer above (already done, do not redo):** stream G2, commit `47adbf730ca`,
   `doc/08_tracking/bug/file_read_bytes_has_six_definitions_with_three_return_types_2026-08-09.md`
@@ -250,3 +252,67 @@ explicitly warns that converging only the in-scope sites would be
 change with the whole caller set in view, which exceeds this lane's
 per-item budget. Guard spec left RED as designed. Leaving OPEN.
 
+
+
+## Candidate repair 2026-11-03 — nullable packed-byte boundary
+
+The previous assertion that `[u8]?` invented an absence channel was incorrect.
+At release base `89d4e41ec88d781ec7191f2f3fe5b7334560ee21`,
+`runtime_native.c:17392` allocates with `rt_byte_array_new_len` and returns
+zero on open/seek/read/allocation failure. `simple_core/core_fs.spl:485`
+returns tagged nil on failure and a byte-array handle on success. Therefore
+`[u8]?` is the canonical Simple declaration; text decoding is not involved.
+A successful empty file has an empty array, distinct from nil.
+
+The remaining SFM container, persistent-cache regression helper, four image
+builder scripts and hosted FS example now use the existing io_runtime facade.
+The SFM wrapper directly decodes `[u8]` without an unnecessary i64 copy and
+preserves `sfm: empty or unreadable file PATH` for both empty/missing inputs.
+The cache helper explicitly requests the existing byte-to-i64 facade because
+its adjacent corruption/write helpers operate on i64 arrays.
+
+The strict signature guard still requires exactly one return type. Its oracle
+now states the actual nullable contract, and vendor exclusion occurs during
+traversal rather than after grep has discarded filenames. Historical backup
+files ending `.spl.pre-comments` / `.spl.pre-styles` are not executable source.
+
+Static evidence: an anchored owned-source census of all tracked `.spl` files
+under src/test/scripts/examples, overlaid with this candidate, found 79 raw
+declarations and exactly one return type `[u8]?`. The initial overbroad census
+also included those historical backup files; the corrected census uses the
+same executable `.spl` extension restriction as the guard. `git diff --check`
+passed. No vendor declarations or runtime providers were rewritten.
+
+Behavioral verification: TEST_BLOCKED; no admitted self-hosted full CLI is
+available on this Windows host. No Rust seed was used as normal test evidence.
+The SFM spec adds two executable regressions: file roundtrip of 0/127/128/255,
+and empty-success versus missing-error facade results with unchanged SFM error
+text. Required before admission: execute that spec, the signature guard and
+persistent-cache invalidation spec, plus core/lib/MCP runtime checks. This is
+an unverified candidate, not a closed bug or verification PASS.
+
+## Closure note 2026-11-25 (p2w4-ai lane, release/1.0.0 @ b1a2b76fb64)
+
+The 2026-11-03 candidate repair is landed and its static oracle property is
+now verified against the current tree. Repo-wide anchored census
+(`git grep -E "extern fn rt_file_read_bytes" -- '*.spl'`, the same
+declaration anchor the guard spec uses) finds **79 declaration sites and
+exactly one return type: `(path: text) -> [u8]?`**. The only other grep hits
+are string-literal fixtures inside the guard spec itself and the distinct
+`rt_file_read_bytes_range` symbol. The three formerly divergent sites are
+converged: `src/lib/nogc_sync_mut/io/file_ops.spl` and
+`src/lib/nogc_sync_mut/sfm/container.spl` no longer declare the extern (they
+use the io_runtime facade), and
+`src/lib/nogc_sync_mut/io/telnet_serial_bridge.spl:31` declares `-> [u8]?`.
+The guard spec's oracle was updated with the repair and now asserts exactly
+this contract (`decl_return_types() == "[u8]?"`, `decl_type_count() == 1`,
+`test/01_unit/compiler/extern/rt_file_read_bytes_single_extern_signature_spec.spl:123-124`),
+so the census above is the guard's own static check executed by hand.
+
+Execution limit: running the guard spec itself (and the SFM/cache behavioral
+specs) is blocked on this host — the pinned `bin/simple.exe` seed rejects
+`@representation_boundary` (cfd89933699), so no spec executes at HEAD. The
+defect this bug tracks — closure-dependent resolution across mutually
+incompatible extern declarations — is eliminated by the single-signature
+census; closing on that static verification with the execution caveat
+recorded.

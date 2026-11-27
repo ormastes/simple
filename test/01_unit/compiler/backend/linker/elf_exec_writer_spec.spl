@@ -16,6 +16,7 @@ use compiler.backend.linker.elf_parser.{ElfObject, ElfStringTable}
 use compiler.backend.linker.elf.merge_strings.{elf_merge_sections}
 use std.io_runtime.{file_read_bytes}
 use std.common.crypto.sha256.{sha256_u8_fast_hex}
+use std.string_core.{char_from_code}
 
 fn build_id_expected(preimage: [i64]) -> [i64]:
     """Independent build-id oracle: the first 20 bytes of SHA-256 over the
@@ -57,6 +58,39 @@ fn rd32(b: [i64], o: i64) -> i64:
 
 fn rd64(b: [i64], o: i64) -> i64:
     rd32(b, o) | (rd32(b, o + 4) << 32)
+
+fn cstr(b: [i64], o: i64) -> text:
+    var s = ""
+    var i = o
+    while b[i] != 0:
+        s = s + char_from_code(b[i])
+        i = i + 1
+    s
+
+fn shdr_by_name(b: [i64], name: text) -> i64:
+    val shoff = rd64(b, 0x28)
+    val shnum = rd16(b, 0x3c)
+    val shstr = shoff + rd16(b, 0x3e) * 64
+    val stroff = rd64(b, shstr + 24)
+    var i: i64 = 0
+    while i < shnum:
+        val h = shoff + i * 64
+        if cstr(b, stroff + rd32(b, h)) == name:
+            return h
+        i = i + 1
+    -1
+
+fn sec_addr(b: [i64], name: text) -> i64:
+    val h = shdr_by_name(b, name)
+    if h < 0: -1 else: rd64(b, h + 16)
+
+fn sec_off(b: [i64], name: text) -> i64:
+    val h = shdr_by_name(b, name)
+    if h < 0: -1 else: rd64(b, h + 24)
+
+fn link_no_gc(objs: [[i64]], target: RelocArch) -> Result<[i64], text>:
+    elf_link(ElfLinkRequest(objects: objs, archives: [], shared: [], entry: "_start",
+        target: target, mode: ELF_LINK_STATIC_EXEC, interp: "", gc_sections: false))
 
 fn s32(v: i64) -> i64:
     if v >= 0x80000000:
@@ -327,39 +361,28 @@ describe "elf_exec_writer - two-object static x86_64 exec":
         expect(rd32(b, text_o + 5)).to_equal(0xfffffff8)
 
     it "applies R_X86_64_TPOFF64 as a signed offset from the TLS block end":
-        val r = elf_static_link([load_fixture("tls_tpoff64_x64.o")], [], "_start", RelocArch.X86_64)
+        val r = link_no_gc([load_fixture("tls_tpoff64_x64.o")], RelocArch.X86_64)
         expect(r.is_ok()).to_equal(true)
         val b = r.unwrap()
         expect(count_bytes(b, [0xf8, 0xff, 0xff, 0xff,
             0xff, 0xff, 0xff, 0xff])).to_equal(1)
 
     it "applies R_X86_64_SIZE32 and SIZE64 from the resolved symbol extent":
-        val r = elf_static_link([load_fixture("symbol_size_x64.o"),
-            load_fixture("symbol_size_def_x64.o")], [], "_start", RelocArch.X86_64)
+        val r = link_no_gc([load_fixture("symbol_size_x64.o"),
+            load_fixture("symbol_size_def_x64.o")], RelocArch.X86_64)
         expect(r.is_ok()).to_equal(true)
         val b = r.unwrap()
         expect(count_bytes(b, [13, 0, 0, 0, 0, 0, 0, 0,
             13, 0, 0, 0, 0, 0, 0, 0])).to_equal(1)
 
     it "applies cross-object R_X86_64_PC64 as the full-width S plus A minus P delta":
-        val r = elf_static_link([load_fixture("pc64_x64.o"),
-            load_fixture("pc64_def_x64.o")], [], "_start", RelocArch.X86_64)
+        val r = link_no_gc([load_fixture("pc64_x64.o"),
+            load_fixture("pc64_def_x64.o")], RelocArch.X86_64)
         expect(r.is_ok()).to_equal(true)
         val b = r.unwrap()
-        var target_vaddr: i64 = -1
-        var slot_vaddr: i64 = -1
-        var slot_offset: i64 = -1
-        var i: i64 = 0
-        while i < rd16(b, 60):
-            val h = rd64(b, 40) + i * 64
-            val flags = rd64(b, h + 8)
-            val size = rd64(b, h + 32)
-            if flags == 2 and size == 1:
-                target_vaddr = rd64(b, h + 16)
-            if flags == 3 and size == 8:
-                slot_vaddr = rd64(b, h + 16)
-                slot_offset = rd64(b, h + 24)
-            i = i + 1
+        val target_vaddr = sec_addr(b, ".rodata")
+        val slot_vaddr = sec_addr(b, ".data")
+        val slot_offset = sec_off(b, ".data")
         expect(target_vaddr >= 0).to_equal(true)
         expect(slot_offset >= 0).to_equal(true)
         expect(rd64(b, slot_offset)).to_equal(target_vaddr - slot_vaddr)
@@ -368,20 +391,9 @@ describe "elf_exec_writer - two-object static x86_64 exec":
         val r = elf_static_link([load_fixture("gotpc32_x64.o")], [], "_start", RelocArch.X86_64)
         expect(r.is_ok()).to_equal(true)
         val b = r.unwrap()
-        var text_vaddr: i64 = -1
-        var text_offset: i64 = -1
-        var got_vaddr: i64 = -1
-        var i: i64 = 0
-        while i < rd16(b, 60):
-            val h = rd64(b, 40) + i * 64
-            val flags = rd64(b, h + 8)
-            val size = rd64(b, h + 32)
-            if flags == 6 and size == 5:
-                text_vaddr = rd64(b, h + 16)
-                text_offset = rd64(b, h + 24)
-            if flags == 3 and size == 24:
-                got_vaddr = rd64(b, h + 16)
-            i = i + 1
+        val text_vaddr = sec_addr(b, ".text")
+        val text_offset = sec_off(b, ".text")
+        val got_vaddr = sec_addr(b, ".got.plt")
         expect(got_vaddr >= 0).to_equal(true)
         expect(text_offset >= 0).to_equal(true)
         expect(s32(rd32(b, text_offset))).to_equal(got_vaddr - text_vaddr)
@@ -391,18 +403,9 @@ describe "elf_exec_writer - two-object static x86_64 exec":
             "_start", RelocArch.X86_64)
         expect(r.is_ok()).to_equal(true)
         val b = r.unwrap()
-        var text_offset: i64 = -1
-        var got_vaddr: i64 = -1
-        var gotplt_vaddr: i64 = -1
-        var i: i64 = 0
-        while i < rd16(b, 60):
-            val h = rd64(b, 40) + i * 64
-            val flags = rd64(b, h + 8)
-            val size = rd64(b, h + 32)
-            if flags == 6 and size == 5: text_offset = rd64(b, h + 24)
-            if flags == 3 and size == 8: got_vaddr = rd64(b, h + 16)
-            if flags == 3 and size == 24: gotplt_vaddr = rd64(b, h + 16)
-            i = i + 1
+        val text_offset = sec_off(b, ".text")
+        val got_vaddr = sec_addr(b, ".got")
+        val gotplt_vaddr = sec_addr(b, ".got.plt")
         expect(text_offset >= 0).to_equal(true)
         expect(got_vaddr >= 0).to_equal(true)
         expect(gotplt_vaddr >= 0).to_equal(true)
@@ -413,18 +416,9 @@ describe "elf_exec_writer - two-object static x86_64 exec":
             "_start", RelocArch.X86_64)
         expect(r.is_ok()).to_equal(true)
         val b = r.unwrap()
-        var text_offset: i64 = -1
-        var got_vaddr: i64 = -1
-        var gotplt_vaddr: i64 = -1
-        var i: i64 = 0
-        while i < rd16(b, 60):
-            val h = rd64(b, 40) + i * 64
-            val flags = rd64(b, h + 8)
-            val size = rd64(b, h + 32)
-            if flags == 6 and size == 9: text_offset = rd64(b, h + 24)
-            if flags == 3 and size == 8: got_vaddr = rd64(b, h + 16)
-            if flags == 3 and size == 24: gotplt_vaddr = rd64(b, h + 16)
-            i = i + 1
+        val text_offset = sec_off(b, ".text")
+        val got_vaddr = sec_addr(b, ".got")
+        val gotplt_vaddr = sec_addr(b, ".got.plt")
         expect(text_offset >= 0).to_equal(true)
         expect(got_vaddr >= 0).to_equal(true)
         expect(gotplt_vaddr >= 0).to_equal(true)
@@ -436,18 +430,9 @@ describe "elf_exec_writer - two-object static x86_64 exec":
         val r = elf_static_link([obj], [], "_start", RelocArch.X86_64)
         expect(r.is_ok()).to_equal(true)
         val b = r.unwrap()
-        var text_offset: i64 = -1
-        var got_vaddr: i64 = -1
-        var gotplt_vaddr: i64 = -1
-        var i: i64 = 0
-        while i < rd16(b, 60):
-            val h = rd64(b, 40) + i * 64
-            val flags = rd64(b, h + 8)
-            val size = rd64(b, h + 32)
-            if flags == 6 and size == 9: text_offset = rd64(b, h + 24)
-            if flags == 3 and size == 8: got_vaddr = rd64(b, h + 16)
-            if flags == 3 and size == 24: gotplt_vaddr = rd64(b, h + 16)
-            i = i + 1
+        val text_offset = sec_off(b, ".text")
+        val got_vaddr = sec_addr(b, ".got")
+        val gotplt_vaddr = sec_addr(b, ".got.plt")
         expect(text_offset >= 0).to_equal(true)
         expect(got_vaddr >= 0).to_equal(true)
         expect(gotplt_vaddr >= 0).to_equal(true)
@@ -480,19 +465,9 @@ describe "elf_exec_writer - two-object static x86_64 exec":
             "_start", RelocArch.X86_64)
         expect(r.is_ok()).to_equal(true)
         val b = r.unwrap()
-        var text_vaddr: i64 = -1
-        var text_offset: i64 = -1
-        var got_vaddr: i64 = -1
-        var i: i64 = 0
-        while i < rd16(b, 60):
-            val h = rd64(b, 40) + i * 64
-            val flags = rd64(b, h + 8)
-            val size = rd64(b, h + 32)
-            if flags == 6 and size == 5:
-                text_vaddr = rd64(b, h + 16)
-                text_offset = rd64(b, h + 24)
-            if flags == 3 and size == 8: got_vaddr = rd64(b, h + 16)
-            i = i + 1
+        val text_vaddr = sec_addr(b, ".text")
+        val text_offset = sec_off(b, ".text")
+        val got_vaddr = sec_addr(b, ".got")
         expect(text_offset >= 0).to_equal(true)
         expect(got_vaddr >= 0).to_equal(true)
         expect(rd32(b, text_offset)).to_equal(got_vaddr - text_vaddr)
@@ -529,19 +504,9 @@ describe "elf_exec_writer - two-object static x86_64 exec":
             "_start", RelocArch.X86_64)
         expect(r.is_ok()).to_equal(true)
         val b = r.unwrap()
-        var text_vaddr: i64 = -1
-        var text_offset: i64 = -1
-        var gotplt_vaddr: i64 = -1
-        var i: i64 = 0
-        while i < rd16(b, 60):
-            val h = rd64(b, 40) + i * 64
-            val flags = rd64(b, h + 8)
-            val size = rd64(b, h + 32)
-            if flags == 6 and size == 9:
-                text_vaddr = rd64(b, h + 16)
-                text_offset = rd64(b, h + 24)
-            if flags == 3 and size == 24: gotplt_vaddr = rd64(b, h + 16)
-            i = i + 1
+        val text_vaddr = sec_addr(b, ".text")
+        val text_offset = sec_off(b, ".text")
+        val gotplt_vaddr = sec_addr(b, ".got.plt")
         expect(text_offset >= 0).to_equal(true)
         expect(gotplt_vaddr >= 0).to_equal(true)
         expect(rd64(b, text_offset)).to_equal(gotplt_vaddr - text_vaddr)
@@ -551,19 +516,9 @@ describe "elf_exec_writer - two-object static x86_64 exec":
             "_start", RelocArch.X86_64)
         expect(r.is_ok()).to_equal(true)
         val b = r.unwrap()
-        var text_offset: i64 = -1
-        var data_vaddr: i64 = -1
-        var gotplt_vaddr: i64 = -1
-        var i: i64 = 0
-        while i < rd16(b, 60):
-            val h = rd64(b, 40) + i * 64
-            val flags = rd64(b, h + 8)
-            val size = rd64(b, h + 32)
-            val align = rd64(b, h + 48)
-            if flags == 6 and size == 9: text_offset = rd64(b, h + 24)
-            if flags == 3 and size == 8 and align == 1: data_vaddr = rd64(b, h + 16)
-            if flags == 3 and size == 24: gotplt_vaddr = rd64(b, h + 16)
-            i = i + 1
+        val text_offset = sec_off(b, ".text")
+        val data_vaddr = sec_addr(b, ".data")
+        val gotplt_vaddr = sec_addr(b, ".got.plt")
         expect(text_offset >= 0).to_equal(true)
         expect(data_vaddr >= 0).to_equal(true)
         expect(gotplt_vaddr >= 0).to_equal(true)
@@ -574,33 +529,23 @@ describe "elf_exec_writer - two-object static x86_64 exec":
             "_start", RelocArch.X86_64)
         expect(r.is_ok()).to_equal(true)
         val b = r.unwrap()
-        var text_vaddr: i64 = -1
-        var text_offset: i64 = -1
-        var gotplt_vaddr: i64 = -1
-        var i: i64 = 0
-        while i < rd16(b, 60):
-            val h = rd64(b, 40) + i * 64
-            val flags = rd64(b, h + 8)
-            val size = rd64(b, h + 32)
-            if flags == 6 and size == 10:
-                text_vaddr = rd64(b, h + 16)
-                text_offset = rd64(b, h + 24)
-            if flags == 3 and size == 24: gotplt_vaddr = rd64(b, h + 16)
-            i = i + 1
+        val text_vaddr = sec_addr(b, ".text")
+        val text_offset = sec_off(b, ".text")
+        val gotplt_vaddr = sec_addr(b, ".got.plt")
         expect(text_offset >= 0).to_equal(true)
         expect(gotplt_vaddr >= 0).to_equal(true)
         expect(rd64(b, text_offset)).to_equal(text_vaddr + 9 - gotplt_vaddr)
 
     it "applies checked cross-object R_X86_64_PC16 and PC8 deltas":
-        val r = elf_static_link([load_fixture("pc_narrow_x64.o"),
-            load_fixture("pc_narrow_def_x64.o")], [], "_start", RelocArch.X86_64)
+        val r = link_no_gc([load_fixture("pc_narrow_x64.o"),
+            load_fixture("pc_narrow_def_x64.o")], RelocArch.X86_64)
         expect(r.is_ok()).to_equal(true)
         val b = r.unwrap()
         expect(count_bytes(b, [3, 0, 1, 0x6b])).to_equal(1)
 
     it "applies checked cross-object R_X86_64_16 and R_X86_64_8 values":
-        val r = elf_static_link([load_fixture("abs_narrow_x64.o"),
-            load_fixture("abs_narrow_def_x64.o")], [], "_start", RelocArch.X86_64)
+        val r = link_no_gc([load_fixture("abs_narrow_x64.o"),
+            load_fixture("abs_narrow_def_x64.o")], RelocArch.X86_64)
         expect(r.is_ok()).to_equal(true)
         val b = r.unwrap()
         expect(count_bytes(b, [0x34, 0x12, 0x7f])).to_equal(1)

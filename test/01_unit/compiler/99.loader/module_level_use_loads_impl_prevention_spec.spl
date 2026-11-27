@@ -1,0 +1,31 @@
+# Prevention for doc/08_tracking/bug/function_local_use_leaves_impl_blocks_unloaded_2026-11-12.md
+# The tagged workaround: providers reach `TreeSitter.parse_outline` through
+# the free entry `treesitter_parse_outline_v1`, which lives in the module that
+# owns the impl block, so a module-level import of that module loads the
+# methods on every route (including the MCP source_open path).
+use std.spec
+use std.spec.step
+use compiler.frontend.treesitter.outline.{TreeSitter}
+use compiler.frontend.treesitter.outline_lexer.{treesitter_new}
+use compiler.frontend.treesitter.{treesitter_parse_outline_v1}
+use std.common.source.contracts.{SourceSnapshotV1}
+
+fn provider_outline_node_count(source: text) -> i64:
+    # Function-local use of the PROVIDER is the exact MCP shape; it must keep
+    # working because the provider itself imports the impl owner at module level.
+    use compiler.tools.source_outline_v1.{source_native_outline_v1}
+    match source_native_outline_v1(SourceSnapshotV1("sha256:spec", "spec.spl", source)):
+        Ok(outline): outline.nodes.len()
+        Err(_): -1
+
+describe "module-level import of the impl owner keeps methods loaded":
+    it "parses an outline through the free entry after a module-level use":
+        step("call parse_outline via treesitter_parse_outline_v1")
+        val module = treesitter_parse_outline_v1(treesitter_new("class A:\n    fn f(): 1\nfn g(): 2\n"))
+        expect(module.classes.len()).to_equal(1)
+        expect(module.functions.len()).to_equal(1)
+
+    it "serves the native outline provider imported function-locally (MCP shape)":
+        step("resolve the provider lazily and parse a two-declaration source")
+        val count = provider_outline_node_count("class A:\n    fn f(): 1\nfn g(): 2\n")
+        expect(count).to_equal(3)

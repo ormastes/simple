@@ -7,6 +7,7 @@
  * sysroot, and capsule builder from growing a parallel source roster. */
 #include "runtime_any_ops.c"
 #include "runtime_string_ffi.c"
+#include "runtime_scv_wasm_ffi.c"
 
 static const char* simple_contract_kind_name(int64_t kind) {
     switch (kind) {

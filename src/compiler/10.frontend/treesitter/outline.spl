@@ -22,10 +22,12 @@ use compiler.frontend.treesitter_types.*
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.block_types.{PreLexInfo, BlockSkipPolicy, BlockOutlineInfo, blockoutlineinfo_opaque, prelexinfo_empty, span_new}
 use compiler.frontend.treesitter.outline_lexer.{TreeSitter}
+# parse_outline calls TreeSitter.parse_outline_heuristic (impl in heuristic.spl);
+# import its owner here instead of relying on another facade to load it.
+use compiler.frontend.treesitter.heuristic.{HeuristicParseResult}
 use compiler.frontend.treesitter.outline_types.*
 use compiler.frontend.treesitter.outline_decls.*
 use compiler.frontend.treesitter.outline_members.*
-use compiler.frontend.parser_types.{Attribute}
 
 # Enum constructor helpers (legacy lowering expects free functions)
 fn toplevelitem_Import(item: ImportOutline) -> TopLevelItem: TopLevelItem.Import(item)
@@ -223,6 +225,9 @@ impl TreeSitter:
             static_asserts: [],
             inline_blocks: [],
             asm_blocks: [],
+            friends: [],
+            internal_exports: [],
+            authority_spans: [],
             errors: []
         )
 
@@ -337,7 +342,7 @@ impl TreeSitter:
     me parse_top_level_item() -> TopLevelItem:
         """Parse a top-level item."""
         # Parse attributes before the declaration (@repr, @packed, @align, etc.)
-        val attrs: [Attribute] = self.parse_attributes()
+        val attrs: [AttributeOutline] = self.parse_attributes()
 
         val doc = self.take_doc_comment()
         val visibility = self.parse_visibility()
@@ -365,13 +370,19 @@ impl TreeSitter:
                 span: merge_spans(ie_start, self.previous.span)
             ))
 
+        # Actor declarations lex `actor` as an identifier contextual keyword.
+        if self.check(TokenKind.Ident) and self.current.text == "actor":
+            return toplevelitem_ActorItem(self.parse_actor_outline(visibility, doc, attrs))
+
         val peeked = self.peek()
         match peeked:
-            case KwImport:
+            case TokenKind.KwUse:
+                toplevelitem_Import(self.parse_import())
+            case TokenKind.KwImport:
                 toplevelitem_Import(self.parse_import())
             case TokenKind.KwExport:
                 toplevelitem_Export(self.parse_export())
-            case KwFn:
+            case TokenKind.KwFn:
                 val f = self.parse_function_outline(visibility, false, doc)
                 # Check for @gpu or @gpu_kernel attribute
                 var has_gpu_attr = false
@@ -387,7 +398,7 @@ impl TreeSitter:
                     if attr.name == "gpu" or attr.name == "gpu_kernel":
                         has_gpu_attr = true
                 toplevelitem_Function(if has_gpu_attr: functionoutline_as_kernel(f) else: f)
-            case KwStatic:
+            case TokenKind.KwStatic:
                 self.advance()
                 if self.check(TokenKind.KwFn):
                     val f = self.parse_function_outline(visibility, false, doc)
@@ -403,7 +414,7 @@ impl TreeSitter:
                         span: self.current.span,
                         severity: ErrorSeverity.Error
                     ))
-            case KwAsync:
+            case TokenKind.KwAsync:
                 self.advance()
                 if self.check(TokenKind.KwFn):
                     val f = self.parse_function_outline(visibility, false, doc)
@@ -416,30 +427,30 @@ impl TreeSitter:
                         span: self.current.span,
                         severity: ErrorSeverity.Error
                     ))
-            case KwClass:
+            case TokenKind.KwClass:
                 toplevelitem_Class(self.parse_class_outline(visibility, doc, attrs))
             # KwActor arm removed 2026-10-17: TokenKind has no KwActor variant
             # (the lexer never emits an actor keyword), so `case KwActor:` was an
             # irrefutable binding rejected by the HIR match-arm strictness.
             # `case _:` below reports the unexpected token. Re-add as
             # `case TokenKind.KwActor:` if the lexer grows the keyword.
-            case KwStruct:
+            case TokenKind.KwStruct:
                 toplevelitem_Struct(self.parse_struct_outline(visibility, doc, attrs))
-            case KwEnum:
+            case TokenKind.KwEnum:
                 toplevelitem_Enum(self.parse_enum_outline(visibility, doc))
-            case KwBitfield:
+            case TokenKind.KwBitfield:
                 toplevelitem_Bitfield(self.parse_bitfield_outline(visibility, doc, attrs))
-            case KwTrait:
+            case TokenKind.KwTrait:
                 toplevelitem_Trait(self.parse_trait_outline(visibility, doc))
-            case KwImpl:
+            case TokenKind.KwImpl:
                 toplevelitem_Impl(self.parse_impl_outline())
-            case KwType:
+            case TokenKind.KwType:
                 toplevelitem_TypeAlias(self.parse_type_alias_outline(visibility))
-            case KwVal:
+            case TokenKind.KwVal:
                 toplevelitem_Const(self.parse_const_outline(visibility, attrs))
-            case KwVar:
+            case TokenKind.KwVar:
                 toplevelitem_Const(self.parse_const_outline(visibility, attrs))
-            case KwExtern:
+            case TokenKind.KwExtern:
                 self.advance()
                 if self.check(TokenKind.KwFn):
                     val f = self.parse_extern_function_outline(visibility, doc)
@@ -452,7 +463,7 @@ impl TreeSitter:
                         span: self.current.span,
                         severity: ErrorSeverity.Error
                     ))
-            case KwConst:
+            case TokenKind.KwConst:
                 self.advance()
                 if self.check(TokenKind.KwFn):
                     val f = self.parse_function_outline(visibility, false, doc)
@@ -470,6 +481,16 @@ impl TreeSitter:
             # an irrefutable binding rejected by the HIR match-arm strictness.
             # `case _:` below reports the unexpected token. Re-add as
             # `case TokenKind.KwKernel:` if the lexer grows the keyword.
+            case TokenKind.Dedent:
+                # Top-level stray Dedent (e.g. recovering from an unrecognized
+                # indented block): synchronize() intentionally leaves Dedent for
+                # enclosing block parsers, so advance past it at top level.
+                self.advance()
+                TopLevelItem.Error(ParseError(
+                    message: "unexpected dedent at top level",
+                    span: self.previous.span,
+                    severity: ErrorSeverity.Error
+                ))
             case _:
                 self.error("expected top-level declaration")
                 self.synchronize()
@@ -486,8 +507,8 @@ impl TreeSitter:
         self.advance()  # Consume 'import'
 
         # Check for 'use lazy' / 'import lazy' modifier
-        var is_lazy = false
-        if self.check(TokenKind.Ident):
+        var is_lazy = self.match_token(TokenKind.KwLazy)
+        if not is_lazy and self.check(TokenKind.Ident):
             if self.current.text == "lazy":
                 is_lazy = true
                 self.advance()
@@ -501,7 +522,13 @@ impl TreeSitter:
         # import foo.bar.{a, b, c}
         # import foo.bar as fb
 
-        if self.match_token(TokenKind.Dot):
+        # parse_module_path already consumes the dot before a group or star.
+        if self.match_token(TokenKind.LBrace):
+            items = self.parse_import_items()
+            self.expect(TokenKind.RBrace, "expected '}' after import items")
+        elif self.match_token(TokenKind.Star):
+            items = ["*"]
+        elif self.match_token(TokenKind.Dot):
             if self.match_token(TokenKind.LBrace):
                 items = self.parse_import_items()
                 self.expect(TokenKind.RBrace, "expected '}' after import items")
@@ -550,7 +577,17 @@ impl TreeSitter:
 
     me parse_module_path() -> text:
         """Parse a.b.c module path."""
-        var path = self.parse_identifier()
+        var prefix = ""
+        while self.check(TokenKind.Dot) or self.check(TokenKind.DotDot) or self.check(TokenKind.Ellipsis):
+            if self.match_token(TokenKind.Dot):
+                prefix = prefix + "."
+            elif self.match_token(TokenKind.DotDot):
+                prefix = prefix + ".."
+            elif self.match_token(TokenKind.Ellipsis):
+                prefix = prefix + "..."
+        if prefix != "" and (self.check(TokenKind.LBrace) or self.check(TokenKind.Star)):
+            return prefix
+        var path = prefix + self.parse_identifier()
 
         while self.match_token(TokenKind.Dot):
             if self.check(TokenKind.LBrace) or self.check(TokenKind.Star):
@@ -667,7 +704,7 @@ impl TreeSitter:
 
         while brace_depth > 0 and not self.is_at_end():
             match self.peek():
-                case LBrace:
+                case TokenKind.LBrace:
                     brace_depth = brace_depth + 1
                     self.advance()
                 case TokenKind.RBrace:
@@ -675,12 +712,12 @@ impl TreeSitter:
                     if brace_depth > 0:
                         self.advance()
                     # Don't consume final }
-                case BlockEnd:
+                case TokenKind.BlockEnd:
                     brace_depth = brace_depth - 1
                     if brace_depth > 0:
                         self.advance()
                     # Don't consume final BlockEnd
-                case BlockStart:
+                case TokenKind.BlockStart:
                     # Nested block - capture it
                     var nested = self.parse_block_outline()
                     nested = self.apply_outline_policy(nested)
@@ -711,7 +748,7 @@ impl TreeSitter:
         val handler = reg.lookup(block.kind)
         val h = match handler:
             case Some(found): found
-            case nil: return block
+            case None: return block
         val policy = h.skip_policy()
         val pre_lex = if block.has_pre_lex_info:
             block.pre_lex_info
@@ -756,6 +793,8 @@ impl TreeSitter:
 
     me parse_asm_braced_outline(start: LexSpan, is_volatile: bool) -> AsmBlockOutline:
         val open_span = self.current.span
+        if self.use_core_lexer:
+            return self.scan_raw_asm_braced_outline(start, is_volatile, open_span)
         self.advance()  # consume {
 
         var depth = 1
@@ -764,7 +803,7 @@ impl TreeSitter:
 
         while depth > 0 and not self.is_at_end():
             match self.peek():
-                case LBrace:
+                case TokenKind.LBrace:
                     depth = depth + 1
                     payload = treesitter_append_asm_payload(payload, "{")
                     self.advance()
@@ -774,13 +813,13 @@ impl TreeSitter:
                     if depth > 0:
                         payload = treesitter_append_asm_payload(payload, "}")
                     self.advance()
-                case Newline:
+                case TokenKind.Newline:
                     if payload != "" and not payload.ends_with("\n"):
                         payload = payload + "\n"
                     self.advance()
-                case Indent:
+                case TokenKind.Indent:
                     self.advance()
-                case Dedent:
+                case TokenKind.Dedent:
                     self.advance()
                 case _:
                     payload = treesitter_append_asm_payload(payload, self.current.text)
@@ -817,7 +856,7 @@ impl TreeSitter:
                     if depth > 0:
                         payload = treesitter_append_asm_payload(payload, ")")
                     self.advance()
-                case Newline:
+                case TokenKind.Newline:
                     if payload != "" and not payload.ends_with("\n"):
                         payload = payload + "\n"
                     self.advance()
@@ -915,6 +954,20 @@ impl TreeSitter:
 
     me skip_block():
         """Skip an indented body while collecting inline asm outlines."""
+        # An inline expression has no matching Dedent. Starting depth=1 in
+        # that case consumed subsequent declarations through EOF.
+        if not self.check(TokenKind.Indent):
+            while not self.check(TokenKind.Newline) and not self.is_at_end():
+                if self.check(TokenKind.KwAsm):
+                    val outline = self.parse_asm_outline()
+                    self.asm_blocks.push(outline)
+                elif self.check(TokenKind.BlockStart):
+                    var nested = self.parse_block_outline()
+                    nested = self.apply_outline_policy(nested)
+                    self.inline_blocks.push(nested)
+                else:
+                    self.advance()
+            return
         if self.check(TokenKind.Indent):
             self.advance()
 

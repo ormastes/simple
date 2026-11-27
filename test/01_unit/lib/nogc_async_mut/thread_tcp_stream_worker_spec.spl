@@ -1,0 +1,106 @@
+# @cover src/lib/nogc_sync_mut/concurrent/thread.spl 10%
+# @cover src/lib/nogc_sync_mut/io/tcp.spl 10%
+"""
+# An accepted TcpStream handed to a worker thread stays a live TcpStream
+
+Bug: `ui_web_ws_any_cast_fails_in_spawned_thread_2026-08-04`. The async web
+server hands each accepted WebSocket connection to a reader thread through
+`thread_spawn_with_args`. The first real client used to kill the server with
+`cannot cast object to TcpStream` inside that thread.
+
+Both scenarios use a real loopback socket pair. The worker must read the
+client's line on the stream it was given and write a reply the client can
+read back, so a stream that arrives as a dead boxed copy fails here.
+"""
+use std.spec.step
+use std.spec
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.nogc_async_mut.concurrent.thread.{thread_spawn_with_args}
+
+fn worker_echo_on_stream(stream: TcpStream, tag: i64) -> i64:
+    val line = match stream.read_line_bounded(256):
+        Err(e): return -1
+        Ok(l): l
+    if line != "ping\n":
+        return -2
+    match stream.write_all("pong\n".bytes()):
+        Err(e): return -3
+        Ok(_): pass
+    val _ = stream.flush()
+    tag
+
+fn worker_echo_on_fd(fd: i64, tag: i64) -> i64:
+    worker_echo_on_stream(TcpStream.from_accepted_fd(fd), tag)
+
+describe "TcpStream handed to a worker thread":
+    it "worker reads and replies on a stream object passed through thread_spawn_with_args":
+        # @req REQ-SSPEC-LIB
+        step("worker reads and replies on a stream object passed through thread_spawn_with_args")
+        var listener = match TcpListener.bind("127.0.0.1:0"):
+            Err(e): panic("bind failed: {e.message}")
+            Ok(l): l
+        val addr = match listener.local_addr():
+            Err(e): panic("local_addr failed: {e.message}")
+            Ok(a): a
+        var client = match TcpStream.connect(addr):
+            Err(e): panic("connect failed: {e.message}")
+            Ok(c): c
+        match client.write_all("ping\n".bytes()):
+            Err(e): panic("write failed: {e.message}")
+            Ok(_): pass
+        val _ = client.flush()
+        var server = match listener.accept():
+            Err(e): panic("accept failed: {e.message}")
+            Ok(s): s
+
+        var worker = thread_spawn_with_args(server, 7, \ws_stream, tag:
+            worker_echo_on_stream(ws_stream, tag)
+        )
+        val joined = worker.join()
+        expect(joined).to_equal(7)
+
+        val _ = client.set_read_timeout_status(5000)
+        val reply = match client.read_line_bounded(256):
+            Err(e): "read failed: {e.message}"
+            Ok(line): line
+        expect(reply).to_equal("pong\n")
+
+        val _ = server.close()
+        val _ = client.close()
+        val _ = listener.close()
+
+    it "worker reads and replies on a stream re-acquired from the accepted descriptor":
+        # @req REQ-SSPEC-LIB
+        step("worker reads and replies on a stream re-acquired from the accepted descriptor")
+        var listener = match TcpListener.bind("127.0.0.1:0"):
+            Err(e): panic("bind failed: {e.message}")
+            Ok(l): l
+        val addr = match listener.local_addr():
+            Err(e): panic("local_addr failed: {e.message}")
+            Ok(a): a
+        var client = match TcpStream.connect(addr):
+            Err(e): panic("connect failed: {e.message}")
+            Ok(c): c
+        match client.write_all("ping\n".bytes()):
+            Err(e): panic("write failed: {e.message}")
+            Ok(_): pass
+        val _ = client.flush()
+        val fd = listener.accept_fd_timeout(5000)
+        expect(fd >= 0).to_equal(true)
+
+        var worker = thread_spawn_with_args(fd, 9, \conn_fd, tag:
+            worker_echo_on_fd(conn_fd, tag)
+        )
+        val joined = worker.join()
+        expect(joined).to_equal(9)
+
+        val _ = client.set_read_timeout_status(5000)
+        val reply = match client.read_line_bounded(256):
+            Err(e): "read failed: {e.message}"
+            Ok(line): line
+        expect(reply).to_equal("pong\n")
+
+        var accepted = TcpStream.from_accepted_fd(fd)
+        val _ = accepted.close()
+        val _ = client.close()
+        val _ = listener.close()

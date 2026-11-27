@@ -1,0 +1,85 @@
+"""
+## Purpose and audience
+
+Pins `vulkan_font_promote_flushed_batch`
+(`src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl`): the fold that
+publishes a frame-batched Vulkan font dispatch's REAL completion (fence,
+wait, readback handle, byte count) into the `queued-packed-font-batch`
+evidence Engine2D saved before any submit. For engineers touching the
+Vulkan font lane (bug `macos_vulkan_2d_vector_font_empty_batch_native_fault_2026-07-26`).
+
+## Operator workflow
+
+`bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_flush_promotion_spec.spl`.
+No GPU needed: the function is pure.
+
+## Compatibility and limitations
+
+- Promotion is computed, never asserted: without CPU-oracle parity the
+  result is `executed`, not `promoted`.
+- Non-queued evidence (empty/rejected batches) passes through unchanged so
+  those paths stay fail-closed.
+
+## Verification guidance and troubleshooting
+
+A failing scenario names the field that stopped being published or a path
+that began promoting without parity.
+"""
+
+# @manual_section: vulkan-font-flush-promotion
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontCompositeEvidence}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{vulkan_font_promote_flushed_batch}
+
+fn _queued(reason: text, quads: i64) -> VulkanFontCompositeEvidence:
+    VulkanFontCompositeEvidence(status: "recorded", reason: reason,
+        artifact_mode: "precompiled-spirv", shader_handle: 7, pipeline_handle: 15,
+        atlas_buffer_handle: 2, params_buffer_handle: 3, descriptor_handle: 4,
+        descriptor_created: true, descriptor_destroyed: false, command_handle: 9,
+        quad_count: quads, dispatch_count: 1, submitted: false, completion_waited: false,
+        fence_handle: 0, fence_evidence_available: false, fence_destroyed: false,
+        device_name: "Apple M4", device_type: "integrated", driver_identity: "moltenvk",
+        readback_source: "unavailable", readback_buffer_handle: 0, readback_byte_count: 0,
+        device_checksum: 0, oracle_checksum: 0, parity: false, device_executed: false,
+        promotion_ready: false)
+
+describe "Vulkan font batched-flush evidence promotion":
+    it "publishes the real fence and device readback for a flushed queued batch":
+        # @req REQ-GPU-VKFONT-FLUSH-001
+        step("Fold a successful flush record and a 4-pixel device readback")
+        val r = vulkan_font_promote_flushed_batch(_queued("queued-packed-font-batch", 2),
+            1, 2, 77, true, true, 1000, 2000, "device_readback", 55,
+            [0u32, 0xffffffffu32, 0u32, 0x11u32])
+        expect(r.status).to_equal("executed")  # oracle: executed but not promoted without parity
+        expect(r.reason).to_equal("flushed-packed-font-batch")
+        expect(r.fence_handle).to_equal(77)
+        expect(r.fence_destroyed).to_be(true)
+        expect(r.completion_waited).to_be(true)
+        expect(r.readback_source).to_equal("device_readback")
+        expect(r.readback_buffer_handle).to_equal(55)
+        expect(r.readback_byte_count).to_equal(16)  # oracle: 4 pixels * 4 bytes
+        expect(r.readback_nonblank_pixels).to_equal(2)
+        expect(r.promotion_ready).to_be(false)  # oracle: no CPU-oracle parity, no promotion
+
+    it "fails closed when the flush did not complete":
+        # @req REQ-GPU-VKFONT-FLUSH-002
+        step("Fold a flush record with no fence")
+        val r = vulkan_font_promote_flushed_batch(_queued("queued-packed-font-batch", 2),
+            0, 2, 0, false, false, 0, 0, "device_readback", 55, [1u32])
+        expect(r.status).to_equal("failed")
+        expect(r.reason).to_equal("flushed-packed-font-completion-failed")
+        expect(r.readback_byte_count).to_equal(0)
+        expect(r.promotion_ready).to_be(false)
+
+    it "leaves non-queued and stale-record evidence unchanged":
+        # @req REQ-GPU-VKFONT-FLUSH-003
+        step("Rejected batch and a flush that carried no font glyphs")
+        val rejected = vulkan_font_promote_flushed_batch(_queued("invalid-font-batch", 0),
+            1, 2, 77, true, true, 1, 1, "device_readback", 55, [1u32])
+        expect(rejected.status).to_equal("recorded")
+        expect(rejected.reason).to_equal("invalid-font-batch")
+        val stale = vulkan_font_promote_flushed_batch(_queued("queued-packed-font-batch", 2),
+            1, 0, 77, true, true, 1, 1, "device_readback", 55, [1u32])
+        expect(stale.reason).to_equal("queued-packed-font-batch")
+        expect(stale.fence_handle).to_equal(0)

@@ -1,0 +1,113 @@
+use std.spec.{describe, it, expect, step}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{BuildTaskV1, BuildRunV1, BuildResultV1, BuildInputV1,
+    builder_task_identity_v1}
+use std.common.task_runner.scheduler.{task_runner_start, task_runner_dispatch,
+    task_runner_reap, task_runner_accept, task_runner_host_slots, task_runner_succeeded,
+    TaskRunnerV1}
+use test.support.buildrunner_recovery_capacity.{recovery_capacity_run}
+
+fn result_failure_task_run() -> BuildRunV1:
+    var run = recovery_capacity_run()
+    var task = run.tasks[0]
+    task.outputs = ["first.bin", "second.bin"]
+    run.tasks = [task]
+    run
+
+fn result_failure_reaped_state(run: BuildRunV1) -> TaskRunnerV1:
+    val task = run.tasks[0]
+    var state = task_runner_start(run)
+    state = task_runner_dispatch(state, 0, "local")
+    state = task_runner_reap(state, task.id, task.attempt)
+    state
+
+fn result_failure_receipt(task: BuildTaskV1, status: text,
+        outputs: [BuildInputV1]) -> BuildResultV1:
+    BuildResultV1(task_id: task.id, attempt: task.attempt,
+        identity_digest: builder_task_identity_v1(task), host_id: "local",
+        status: status, exit_code: if status == "OK": 0 elif status == "CRASHED": 139 else: 1,
+        outputs: outputs, cache_hits: -1, cache_misses: -1, cache_stores: -1)
+
+fn result_failure_outputs() -> [BuildInputV1]:
+    [BuildInputV1(path: "first.bin", digest: sha256_text("first")),
+        BuildInputV1(path: "second.bin", digest: sha256_text("second"))]
+
+describe "TaskRunner result failure contracts":
+    # @req REQ-001
+    it "should preserve a valid error receipt as failed work":
+        val run = result_failure_task_run()
+        val task = run.tasks[0]
+        var state = result_failure_reaped_state(run)
+        state = task_runner_accept(state, result_failure_receipt(task, "ERROR", []), [])
+        expect(state.error).to_equal("")
+        expect(state.statuses).to_equal(["FAILED"])
+        expect(task_runner_succeeded(state)).to_equal(false)
+        expect(task_runner_host_slots(state, "local")).to_equal(1)
+
+    # @req REQ-001
+    it "should reject a partial output receipt without releasing its reaped reservation":
+        step("Reject incomplete output evidence before reporting success")
+        val run = result_failure_task_run()
+        val task = run.tasks[0]
+        val outputs = result_failure_outputs()
+        val partial = [outputs[0]]
+        var state = result_failure_reaped_state(run)
+        state = task_runner_accept(state, result_failure_receipt(task, "OK", partial), partial)
+        expect(state.error).to_equal("incomplete output set")
+        expect(state.statuses).to_equal(["REAPED"])
+        expect(task_runner_succeeded(state)).to_equal(false)
+        expect(state.execution_host_active["local"] ?? 0).to_equal(1)
+
+    # @req REQ-001
+    it "should reject absent parent outputs and mismatched output digests":
+        val run = result_failure_task_run()
+        val task = run.tasks[0]
+        val outputs = result_failure_outputs()
+        var missing = result_failure_reaped_state(run)
+        missing = task_runner_accept(missing, result_failure_receipt(task, "OK", outputs), [])
+        expect(missing.error).to_equal("success requires every declared output and fresh parent digest")
+        expect(missing.statuses).to_equal(["REAPED"])
+        expect(task_runner_succeeded(missing)).to_equal(false)
+        expect(missing.execution_host_active["local"] ?? 0).to_equal(1)
+
+        var mismatched = result_failure_reaped_state(run)
+        val changed = [BuildInputV1(path: "first.bin", digest: sha256_text("different")), outputs[1]]
+        mismatched = task_runner_accept(mismatched, result_failure_receipt(task, "OK", outputs), changed)
+        expect(mismatched.error).to_equal("parent output digest does not match worker receipt")
+        expect(mismatched.statuses).to_equal(["REAPED"])
+        expect(task_runner_succeeded(mismatched)).to_equal(false)
+        expect(mismatched.execution_host_active["local"] ?? 0).to_equal(1)
+
+    # @req REQ-001
+    it "should report success only after every parent output digest matches":
+        val run = result_failure_task_run()
+        val task = run.tasks[0]
+        val outputs = result_failure_outputs()
+        var state = result_failure_reaped_state(run)
+        state = task_runner_accept(state, result_failure_receipt(task, "OK", outputs), outputs)
+        expect(state.error).to_equal("")
+        expect(state.statuses).to_equal(["SUCCEEDED"])
+        expect(task_runner_succeeded(state)).to_equal(true)
+        expect(task_runner_host_slots(state, "local")).to_equal(1)
+
+    # @req REQ-004
+    it "should stop crash recovery at the configured attempt bound":
+        var run = result_failure_task_run()
+        run.max_attempts = 2
+        val first_task = run.tasks[0]
+        var state = result_failure_reaped_state(run)
+        state = task_runner_accept(state, result_failure_receipt(first_task, "CRASHED", []), [])
+        expect(state.error).to_equal("")
+        expect(state.statuses).to_equal(["PENDING"])
+        expect(state.tasks[0].attempt).to_equal(2)
+        expect(task_runner_host_slots(state, "local")).to_equal(1)
+
+        state = task_runner_dispatch(state, 0, "local")
+        state = task_runner_reap(state, state.tasks[0].id, state.tasks[0].attempt)
+        val final_task = state.tasks[0]
+        state = task_runner_accept(state, result_failure_receipt(final_task, "CRASHED", []), [])
+        expect(state.error).to_equal("")
+        expect(state.statuses).to_equal(["FAILED"])
+        expect(state.tasks[0].attempt).to_equal(2)
+        expect(task_runner_succeeded(state)).to_equal(false)
+        expect(task_runner_host_slots(state, "local")).to_equal(1)

@@ -1,0 +1,68 @@
+# Real clang ARM C objects plus architecture-only assembly establish float ABI.
+# LLD positive oracles: soft+neutral e_flags=0x05000200, hard+neutral=0x05000400.
+# LLD accepts an omitted soft tag alongside hard C; Simple admission rejects
+# that known mixed calling convention instead of claiming runtime compatibility.
+# @cover src/compiler/70.backend/linker/elf/boot_target_policy.spl
+# @cover src/compiler/70.backend/linker/elf/arm_float_abi.spl
+use compiler.backend.linker.elf.boot_target_policy.{boot_target_validate_image32}
+use compiler.backend.linker.elf.elf_exec_writer.{ElfExecPlan, ElfExecSegment}
+use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link}
+use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest, ELF_LINK_STATIC_EXEC}
+use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes}
+
+val ABI_FIX: text = "test/fixtures/linker/elf/simpleos32"
+
+fn abi_read(name: text) -> [i64]:
+    var result: [i64] = []
+    for byte in file_read_bytes("{ABI_FIX}/{name}"): result.push(byte as i64)
+    result
+
+fn abi_u32(bytes: [i64], offset: i64) -> i64:
+    bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)
+
+fn abi_boot(objects: [[i64]], entry: text) -> Result<[i64], text>:
+    val script = "ENTRY({entry}) SECTIONS { . = 0x400000; .text : { *(.text*) } .ARM.exidx : { *(.ARM.exidx*) } }"
+    elf_boot_link(objects, boot_layout_from_text(script).unwrap(), RelocArch.Arm32)
+
+fn abi_static(objects: [[u8]], entry: text) -> Result<[i64], text>:
+    elf_link(ElfLinkRequest(objects: objects, archives: [], shared: [],
+        entry: entry, target: RelocArch.Arm32, mode: ELF_LINK_STATIC_EXEC,
+        interp: "", gc_sections: false))
+
+fn abi_segment_plan(physical: i64, virtual: i64, size: i64) -> ElfExecPlan:
+    val segment = ElfExecSegment(p_type: 1, p_flags: 5, p_offset: 0,
+        p_vaddr: virtual, p_paddr: physical, p_filesz: 0, p_memsz: size, p_align: 1)
+    ElfExecPlan(secs: [], offsets: [], vaddrs: [], segments: [segment], file_end: 52)
+
+describe "ELF32 boot physical extent admission":
+    it "allows a final physical byte at UINT32_MAX but rejects a crossing extent":
+        val boundary = abi_segment_plan(0xfffffff0, 0x1000, 16)
+        expect(boot_target_validate_image32(boundary, 0x1000, []).is_ok()).to_equal(true)
+        val crossing = abi_segment_plan(0xfffffff0, 0x1000, 32)
+        expect(boot_target_validate_image32(crossing, 0x1000, []).unwrap_err()).to_contain("segment")
+        val virtual_crossing = abi_segment_plan(0x1000, 0xfffffff0, 32)
+        expect(boot_target_validate_image32(virtual_crossing, 0x1000, []).is_err()).to_equal(true)
+
+describe "ARM float ABI shared by boot and static links":
+    it "derives soft and hard flags from real C attributes with equal ET_REL flags":
+        val soft = abi_read("arm_abi_soft.o")
+        val hard = abi_read("arm_abi_hard.o")
+        val neutral = abi_read("arm_abi_neutral.o")
+        expect(abi_u32(soft, 36)).to_equal(0x05000000)
+        expect(abi_u32(hard, 36)).to_equal(0x05000000)
+        expect(abi_u32(abi_boot([soft, neutral], "arm_soft_entry").unwrap(), 36)).to_equal(0x05000200)
+        expect(abi_u32(abi_boot([hard, neutral], "arm_hard_entry").unwrap(), 36)).to_equal(0x05000400)
+
+    it "rejects mixed soft and hard C calling conventions even when raw flags agree":
+        val result = abi_boot([abi_read("arm_abi_soft.o"), abi_read("arm_abi_hard.o")], "arm_soft_entry")
+        expect(result.unwrap_err()).to_contain("incompatible floating-point ABI")
+
+    it "uses the same checked ABI owner for static ELF32 user links":
+        val soft = file_read_bytes("{ABI_FIX}/arm_abi_soft.o")
+        val hard = file_read_bytes("{ABI_FIX}/arm_abi_hard.o")
+        val neutral = file_read_bytes("{ABI_FIX}/arm_abi_neutral.o")
+        expect(abi_u32(abi_static([soft, neutral], "arm_soft_entry").unwrap(), 36)).to_equal(0x05000200)
+        expect(abi_u32(abi_static([hard, neutral], "arm_hard_entry").unwrap(), 36)).to_equal(0x05000400)
+        expect(abi_static([soft, hard], "arm_soft_entry").unwrap_err()).to_contain("incompatible floating-point ABI")

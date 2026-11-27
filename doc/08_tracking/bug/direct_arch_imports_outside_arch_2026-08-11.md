@@ -1,7 +1,7 @@
 # 7 direct arch imports outside `arch/` (AC-3 violation)
 
 **Date:** 2026-08-11
-Status: OPEN (P2)
+Status: RESOLVED — measured 0 on 2026-11-25 (see bottom section).
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Severity:** Medium (portability contract)
 
@@ -93,3 +93,31 @@ display init, TCP boot policy, process-stdout capture, user-entry
 validation, page mapping, CR3 access) is a real HAL design task per symbol,
 not a mechanical import rewrite — out of this lane's per-bug budget. Left
 OPEN, no change made.
+
+## Verification 2026-11-25 (worktree work/p2w2-ah-20261125, Windows host, pinned seed `bin/simple.exe`)
+
+The drift this entry tracks is gone. Ran the real generator on this host:
+
+```
+$ bin/simple.exe run src/os/port/multiarch_audit_report.spl
+wrote build/multiarch/arch_loc_report.json
+```
+
+`build/multiarch/arch_loc_report.json` now reports
+`"direct_arch_imports_outside_arch": 0` with
+`"arch_import_files_scanned": 15496` and an empty
+`direct_arch_import_samples` — a real scan, not the old hardcoded literal.
+
+Independent cross-check: none of the 8 files flagged in the 2026-09-13
+re-check (`virtio_rng_mmio.spl`, `riscv_services.spl`,
+`tcp_baremetal_min.spl`, `riscv64_fs_exec_spawn.spl`,
+`x86_64_server_first_dispatch.spl`, `user_address_space.spl`,
+`vmm_core.spl`) contains a direct `use os.kernel.arch.*` import anymore
+(shell grep, 0 hits).
+
+Limit: the AC-3 spec `test/01_unit/os/multiarch/hal_trait_surface_spec.spl`
+could not be executed on this host — `bin/simple.exe test` fails repo-wide
+at release/1.0.0 HEAD with `unknown decorator '@representation_boundary'`
+(pinned seed predates commit cfd89933699). The generator measurement above
+is the direct evidence the spec asserts against; it reads 0. Closing as
+RESOLVED on that measurement.

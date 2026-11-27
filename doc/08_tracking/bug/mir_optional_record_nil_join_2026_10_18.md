@@ -22,3 +22,8 @@ Link-policy limitation: the canonical response file includes `/FORCE:MULTIPLE` (
 Intended compiler fix: a proven nil arm is neutral when joining one unique Optional-record provider. Unknown non-nil arms, incompatible providers and ambiguous layouts must remain rejected. Recovery reference: `4f00255ec1ee6908b81e4db1333d95f1a8d5d7c0`; restore the concise source form only after the compiler fix and native regression pass.
 
 Regression: `test/fixtures/compiler/optional_record_nil_branch_join/main.spl` checks present, absent and disabled branches and must compile natively and exit0. Add compiler-owner unit coverage for unique+nil success, unknown non-nil rejection and conflicting-owner rejection when implementing the compiler fix. Background compiler-fix owner: root compiler investigation lane. Evidence retained at `C:/dev/p4i3b/failure-matrix.json` and the full worker stderr identified there. No fourth producer bootstrap was launched.
+
+
+## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
+
+Compiler fix 622b92cae46 (nil arms neutral) is in tree; test/01_unit/compiler/optional_record_nil_join_spec.spl 10/10 green. The caller workaround in scv/compile_source_inventory.spl can be retired once a native build of the intended syntax passes.

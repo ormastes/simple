@@ -34,6 +34,9 @@ extern "C" {
 #error "selected SIMPLE_ABI_VERSION must be positive"
 #endif
 #include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <stdbool.h>
 
 /* Include threading library */
@@ -44,6 +47,9 @@ extern "C" {
 
 /* Include fork-without-exec support */
 #include "runtime_fork.h"
+
+/* Session-owned process trees (spawn/kill_tree, pdeathsig, birth identity) */
+#include "runtime_process_tree.h"
 
 /* ===== Runtime Configuration ===== */
 
@@ -56,6 +62,7 @@ int64_t rt_getauxval(int64_t key);
 bool rt_is_darwin_arm64(void);
 int32_t rt_sysctlbyname_i32(int64_t name);
 int32_t rt_riscv_read_vlenb(void);
+int32_t rt_sve_read_vl_bytes(void);
 bool rt_riscv_has_v_ext(void);
 int32_t rt_cuda_sm_version(int32_t device);
 
@@ -266,6 +273,11 @@ bool     rt_dir_remove_all(const uint8_t* path_ptr, uint64_t path_len);
 bool     rt_dir_remove_all_cpath(const char* path);
 int64_t  rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
                             const uint8_t* prefix_ptr, uint64_t prefix_len);
+/* Split ABI: each setter accepts ONE boxed text value; make consumes both
+ * thread-local slots and returns boxed text (empty text on refusal). */
+int64_t  rt_secure_temp_dir_set_parent(int64_t parent_value);
+int64_t  rt_secure_temp_dir_set_prefix(int64_t prefix_value);
+int64_t  rt_secure_temp_dir_make(void);
 /* 1=published, 0=destination exists, -1=operational failure. */
 int64_t  rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len,
                                    const uint8_t* destination_ptr, uint64_t destination_len);
@@ -286,6 +298,10 @@ void     rt_dir_list_free(const char** entries, int64_t count);
  * correct shape; this declaration was the stale one. */
 int64_t  rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs);
 bool     rt_file_unlock(int64_t handle);
+/* Opaque generation capability. All return/status words are signed i64. */
+int64_t rt_file_lock_owned_acquire_v2(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs);
+int64_t rt_file_lock_owned_state_v2(int64_t token);
+int64_t rt_file_lock_owned_release_v2(int64_t token);
 
 /* ===== Offset-based File I/O ===== */
 
@@ -325,6 +341,9 @@ int64_t  rt_call_ptr_1(int64_t addr, int64_t a1);
 int64_t  rt_call_ptr_2(int64_t addr, int64_t a1, int64_t a2);
 int64_t  rt_call_ptr_3(int64_t addr, int64_t a1, int64_t a2, int64_t a3);
 int64_t  rt_dyncall_3(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2);
+int64_t  rt_dyncall_4(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3);
+int64_t  rt_dyncall_5(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4);
+int64_t  rt_dyncall_6(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5);
 int64_t  rt_volatile_read_u16(int64_t addr);
 int64_t  rt_volatile_read_u32(int64_t addr);
 int64_t  rt_volatile_read_u64(int64_t addr);
@@ -363,6 +382,7 @@ int64_t  rt_time_ms(void);          /* Unix epoch milliseconds */
 /* ===== Stdin/Stdout I/O ===== */
 
 char*    rt_stdin_read_line(void);         /* reads line from stdin, NULL on EOF */
+int64_t  rt_read_stdin_line(void);         /* tagged UTF-8, strip LF/CRLF; empty EOF, NIL error */
 int64_t  rt_stdin_read_line_text(void);    /* reads line from stdin as tagged text, empty on EOF */
 int64_t  rt_stdin_read_chars_text(int64_t count); /* reads up to count bytes from stdin as tagged text */
 int64_t  stdin_read_char(void);            /* reads one byte from stdin as tagged text */
@@ -472,10 +492,17 @@ void*    copy_mem(void* dst, const void* src, int64_t n);
 void*    rt_memset(void* dst, int8_t val, int64_t n);
 void     rt_exit(int64_t code);
 void     rt_cli_exit(int64_t code);
+int64_t  rt_heap_alloc_count(void);       /* total successful heap registrations */
 int64_t  rt_heap_registry_count(void);
+int64_t  rt_heap_aux_live_bytes(void);      /* array+dict backing-buffer bytes */
+int64_t  rt_heap_array_capacity_bytes(void); /* array element-buffer capacity bytes */
 int8_t rt_transient_array_scope_begin(void);
 /* Read current scope:0 inactive,1 active/unpaused,2 active/paused. No lease. */
 int64_t rt_transient_array_scope_state_v1(void);
+/* Current owner's non-reused positive scope identity, or 0 inactive/foreign. */
+int64_t rt_transient_array_scope_identity_v1(void);
+/* 0 process, +u32 transient scope, -u32 session; observes actual allocation. */
+int64_t rt_allocation_owner_identity_v1(void);
 int8_t rt_transient_array_scope_pause(void);
 int8_t rt_transient_array_scope_end(void);
 /* Graph-operation success for a supported root in an active paused scope,
@@ -491,6 +518,35 @@ int8_t rt_transient_heap_promote(int64_t value);
  * whether a window was open. Promotion results are identical either way. */
 int8_t rt_transient_heap_promote_share_begin(void);
 int8_t rt_transient_heap_promote_share_end(void);
+/* Object-graph refcount (Build Session Memory Model v1 section 4, P4). An
+ * object is owned by exactly one of {transient scope, session, rc root,
+ * process (tag 0, rc 0)}; a sub-object shared by two rc roots must itself be an
+ * rc root retained by each parent. share: rc = 1 and the owned graph leaves
+ * scopes (idempotent; 0 for non-heap or, with SIMPLE_RC_CYCLE_CHECK=1, a
+ * cyclic graph). release at 0 frees the owned graph and releases rc-root
+ * children. count: -1 when not an rc root. graph_bytes: owned-graph bytes,
+ * rc-root children excluded; -1 on an invalid root. */
+int8_t rt_rc_share(int64_t value);
+int8_t rt_rc_retain(int64_t value);
+int8_t rt_rc_release(int64_t value);
+int64_t rt_rc_count(int64_t value);
+int64_t rt_heap_graph_bytes(int64_t value);
+/* Build session heap (BSM T1, doc/05_design/compiler/memory/
+ * build_session_memory_model_v1.md §4). One live session per thread; begin
+ * returns its id (0 on failure / while a module scope is active), end frees
+ * every object still tagged with it in one sweep (refused while a module scope
+ * is active or for a non-live id). alloc_begin/end are depth-counted: inside,
+ * new objects belong to the session even in a running module scope. adopt
+ * retags the ACTIVE paused module scope's part of v's graph to the session,
+ * pruning at any node with another tag. While a session is live, promote
+ * retags module nodes to the session (full walk) instead of making them
+ * permanent. */
+uint32_t rt_session_heap_begin(void);
+int8_t   rt_session_heap_end(uint32_t session);
+int8_t   rt_session_alloc_begin(void);
+int8_t   rt_session_alloc_end(void);
+int8_t   rt_transient_heap_adopt(int64_t value);
+uint32_t rt_session_heap_id(void);
 /* Raw-allocation owner bridge. runtime_native.c owns the one transient graph
  * registry; an alternate rt_alloc provider must register through this API. */
 int8_t rt_transient_raw_owner_register(void* ptr, uint64_t bytes);
@@ -527,8 +583,14 @@ int64_t  rt_string_free(int64_t value);
 int64_t  rt_string_new_literal(const uint8_t* bytes, uint64_t len);
 int64_t  rt_string_len(int64_t string);
 const uint8_t* rt_string_data(int64_t string);
+/* min(available physical, pagefile) bytes for admission; 0 if unavailable. */
+int64_t rt_host_memory_headroom_bytes_v1(void);
+/* Caller-available disk bytes for a boxed UTF-8 path; 0 if unavailable. */
+int64_t rt_host_disk_headroom_bytes_v1(int64_t path);
 const char* rt_interp_cstr(int64_t value);
 int64_t  rt_string_bytes(int64_t string);
+/* Tagged text -> canonical byte-array handle; length preserves embedded NUL. */
+int64_t  rt_text_to_bytes(int64_t text_value);
 int64_t  rt_string_chars(int64_t string);
 int64_t  rt_string_builder_new(void);
 int64_t  rt_string_builder_push(int64_t handle, int64_t string);
@@ -576,18 +638,20 @@ int64_t  rt_tagged_add(int64_t left, int64_t right);
 int64_t  rt_len(int64_t value);
 int64_t  rt_to_string(int64_t value);
 int64_t  rt_raw_u64_to_string(int64_t raw);
+int64_t  rt_i64_to_hex(int64_t raw);
 int64_t  rt_raw_i64_to_string(int64_t raw);
 /* P1 fix (2026-07-22): flat-optional print helpers, parity mirrors of the
  * Cranelift-path (compiler_rust) helpers of the same name. See
  * runtime_native.c for the definitions and rationale. */
 int64_t  rt_opt_i64_to_string(int64_t raw);
+int64_t  rt_opt_value_to_string(int64_t v);
 int64_t  rt_opt_bool_to_string(int64_t raw);
 int64_t  rt_opt_f64_to_string(int64_t raw);
 int64_t  rt_value_to_string(int64_t value);
 int64_t  rt_function_not_found(const uint8_t* name, uint64_t len);
 int64_t  rt_method_not_found(const uint8_t* type_name, uint64_t type_len,
                              const uint8_t* method_name, uint64_t method_len);
-int64_t  rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv);
+int64_t  rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, const uint64_t* argv);
 SplArray* rt_array_new(int64_t cap);
 SplArray* rt_f64_array_alloc(int64_t len);
 SplArray* rt_f32_array_alloc(int64_t len);
@@ -596,6 +660,12 @@ SplArray* rt_array_new_uninit(int64_t cap);
 /* 1 when the array is packed bytes ([u8]), 0 when tagged int64 slots. */
 int rt_array_is_byte_packed(SplArray* value);
 SplArray* rt_array_new_with_cap_u64(int64_t cap);
+/* Capacity-reserving constructors (len 0), C twins of the Rust runtime family. */
+SplArray* rt_array_new_with_cap(int64_t cap);
+SplArray* rt_array_new_with_cap_text(int64_t cap);
+SplArray* rt_array_new_with_cap_bool(int64_t cap);
+SplArray* rt_array_new_with_cap_i64(int64_t cap);
+SplArray* rt_array_new_with_cap_js_value(int64_t cap);
 void      rt_array_free(SplArray* array);  /* shallow: preserves element handles */
 /* Deep array free. Returns 1 only if the ENTIRE structure was reclaimed, 0 if
  * refused -- and a refusal frees nothing at all (all-or-nothing, so the result
@@ -618,10 +688,12 @@ int64_t   rt_free_deep(int64_t value);
 SplArray* rt_byte_array_new(uint64_t cap);
 SplArray* rt_byte_array_new_len(uint64_t len);
 int64_t   rt_random_bytes_c(uint64_t count);
+int64_t   rt_entropy_fill(uint64_t count);
 double    rt_random_random(void);
 SplArray* rt_bytes_alloc(int64_t len);
 int64_t  rt_tls13_sha256(int64_t data);
 int64_t  rt_sha512_digest(int64_t data);
+int64_t  rt_pbkdf2_hmac_sha512(int64_t password, int64_t salt, int64_t iterations, int64_t dk_len);
 int64_t  rt_sha384_digest(int64_t data);
 int64_t  rt_array_len(SplArray* array);
 int64_t  rt_array_len_safe(int64_t value);
@@ -641,11 +713,21 @@ int8_t   rt_array_clear(SplArray* array);
  * Returns count copied, -1 on out-of-bounds/invalid handle, 0 for count<=0. */
 int64_t  rt_array_write_span(SplArray* dst, SplArray* src, int64_t dst_off,
                              int64_t src_off, int64_t count);
+/* Bulk in-place VOLATILE fill: dst[dst_off..dst_off+count] = value, then a
+ * full fence. Twin of Array.fill_span; same contract shape as write_span. */
+int64_t  rt_array_fill_span(SplArray* dst, int64_t dst_off, int64_t count,
+                            int64_t value);
 int8_t   rt_array_push_i64_raw(SplArray* array, int64_t value);
 int64_t  spl_wffi_call_i64_checked(int64_t fptr, int64_t args_value,
                                     int64_t nargs);
 int64_t  spl_wffi_try_call_i64_out(int64_t fptr, int64_t args_value,
                                     int64_t nargs, int64_t* out_value);
+int64_t  spl_wffi_call_i64_with_bytes_checked(int64_t fptr, int64_t prefix_args,
+                                              int64_t bytes, int64_t offset,
+                                              int64_t length, int64_t suffix_args);
+int64_t  spl_wffi_call_i64_with_bytes(int64_t fptr, int64_t prefix_args,
+                                      int64_t bytes, int64_t offset,
+                                      int64_t length, int64_t suffix_args);
 int64_t  spl_wffi_call_bool0_checked(int64_t fptr, int8_t* out_value);
 int64_t  spl_wffi_call_bool1_checked(int64_t fptr, int64_t arg0,
                                      int8_t* out_value);
@@ -756,6 +838,7 @@ int8_t   rt_typed_words_u64_set(SplArray* array, int64_t idx, int64_t value);
 int64_t  rt_typed_words_i64_at(SplArray* array, int64_t idx);
 int8_t   rt_typed_words_i64_push(SplArray* array, int64_t value);
 int8_t   rt_typed_words_i64_set(SplArray* array, int64_t idx, int64_t value);
+void     rt_typed_words_byte_write_trap(void);
 int64_t  rt_typed_words_u64_raw_data_at(int64_t data_ptr, int64_t idx);
 int8_t   rt_typed_words_u64_store_known_data_at(
     int64_t header_ptr,
@@ -785,6 +868,7 @@ int64_t  rt_io_tcp_connect(int64_t addr);
 int64_t  rt_io_tcp_connect_timeout(int64_t addr, int64_t timeout_ms);
 int64_t  rt_io_tcp_read(int64_t fd, int64_t size);
 int64_t  rt_io_tcp_read_line(int64_t fd);
+int64_t  rt_io_tcp_drain_line(int64_t fd);
 int64_t  rt_io_tcp_write(int64_t fd, int64_t data);
 int64_t  rt_io_socket_send_nosigpipe(int64_t fd, int64_t data);
 int64_t  rt_io_tcp_write_text(int64_t fd, int64_t text);
@@ -845,6 +929,7 @@ int8_t   rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t 
 int8_t   rt_try_is_absent(int64_t value, int64_t expected_enum_id, int64_t err_discriminant);
 int64_t  rt_hash_text(int64_t value);
 int64_t  rt_index_get(int64_t collection, int64_t idx);
+int64_t  rt_get(int64_t collection, int64_t idx);
 int8_t   rt_index_set(int64_t collection, int64_t idx, int64_t value);
 int64_t  rt_string_eq(int64_t left, int64_t right);
 int64_t  rt_native_eq(int64_t left, int64_t right);
@@ -854,6 +939,7 @@ int64_t  rt_native_neq(int64_t left, int64_t right);
 int64_t  rt_native_cmp(int64_t left, int64_t right);
 /* OrderedMap key comparison: 2 means unsupported erased key representation. */
 int64_t  spl_ordered_key_cmp(int64_t left, int64_t right);
+int64_t  spl_erased_key_hash(int64_t value);
 int64_t  spl_collection_capture_begin(int64_t target);
 int64_t  spl_collection_capture_note_size(int64_t site, int64_t target, int64_t size);
 int64_t  spl_collection_capture_note_lookup(int64_t site, int64_t target, int64_t found);
@@ -865,6 +951,7 @@ int64_t  spl_collection_capture_finish(void);
 int64_t  spl_collection_capture_abort(void);
 int64_t  rt_text_eq_any(int64_t left, int64_t right);
 int64_t  rt_slice(int64_t value, int64_t start, int64_t end, int64_t step);
+int64_t  rt_slice_text_bytes(int64_t value, int64_t start, int64_t end, int64_t step);
 int64_t  rt_string_starts_with(int64_t value, int64_t prefix);
 int64_t  rt_string_ends_with(int64_t value, int64_t suffix);
 int64_t  rt_string_find(int64_t value, int64_t needle);
@@ -966,9 +1053,16 @@ void     rt_gui_end_session(void);
  * receiver or an out-of-range index; a negative index is out of range here,
  * it does NOT count from the end. */
 int64_t  rt_array_remove(int64_t array_value, int64_t index);
+int8_t   rt_array_insert(int64_t array_value, int64_t index, int64_t value);
 /* Tagged array index or dictionary key; returns the removed element/value. */
 int64_t  rt_collection_remove(int64_t receiver, int64_t key);
 int64_t  rt_dict_new(int64_t cap_hint);
+/* Borrowed scope Dict<text, nonnegative i64>; scalar errors are -1. */
+int64_t rt_dict_scope_read_bound_v1(void);
+int64_t rt_dict_scope_read_owner_v1(int64_t dict, int64_t fuel);
+int64_t rt_dict_scope_read_epoch_v1(int64_t dict, int64_t owner, int64_t fuel);
+int64_t rt_dict_scope_read_meta_v1(int64_t dict, int64_t owner, int64_t epoch, int64_t field, int64_t fuel);
+int64_t rt_dict_scope_read_slot_v1(int64_t dict, int64_t owner, int64_t epoch, int64_t slot, int64_t field, int64_t byte_index, int64_t fuel);
 int64_t  rt_dict_get(int64_t dict, int64_t key);
 int8_t   rt_dict_set(int64_t dict, int64_t key, int64_t value);
 int8_t   rt_dict_contains(int64_t dict, int64_t key);
@@ -983,6 +1077,7 @@ int64_t  rt_string_is_alpha(int64_t value);
 int64_t  rt_string_is_alnum(int64_t value);
 int64_t  rt_string_is_whitespace(int64_t value);
 int64_t  rt_string_char_count(int64_t value);
+int64_t  rt_string_to_digit(int64_t value);
 int64_t  rt_string_capitalize(int64_t value);
 int64_t  rt_string_swapcase(int64_t value);
 int64_t  rt_string_title(int64_t value);
@@ -1095,6 +1190,9 @@ typedef struct RtOwnedProcessCancelReceipt {
 /* Async identity-owned process lease.  The random token is authority; the
  * diagnostic PID fields returned after start/termination are not. */
 #define RT_OWNED_PROCESS_ASYNC_VERSION 2
+/* UCRT has no ESTALE. Windows lease receipts use this stable stale-authority
+ * error value; it is independent of native GetLastError values. */
+#define RT_OWNED_PROCESS_WINDOWS_STALE_ERROR 116
 #define RT_OWNED_PROCESS_INPUT_VERSION 3
 #define RT_OWNED_PROCESS_OPAQUE_V3_VERSION 1
 #define RT_OWNED_PROCESS_OBSERVATION_ADAPTER_VERSION 1
@@ -1206,11 +1304,17 @@ typedef struct RtOwnedProcessObservationV1 {
 int64_t  spl_shell(const char* cmd);
 char*    spl_shell_output(const char* cmd);  /* capture stdout */
 /* -> RuntimeValue (I64), per runtime_sffi.rs:1419. NOT a bare SplArray*. */
+/* Existing Windows PTY/Job registry is confined to one pinned native thread.
+ * A successful guard grants no process launch or cross-thread transfer. */
+int64_t   rt_windows_pty_owner_thread_guard_v1(void);
+int64_t   rt_windows_pipe_file_mode_v1(int64_t handle, int64_t storage, int64_t mode_out, int32_t operation);
 int64_t   rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args);
 int64_t   rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args);
 int64_t   rt_process_run_inherit_value(int64_t cmd, SplArray* args);
 int64_t   rt_process_spawn_guarded_value(int64_t cmd, SplArray* args);
 int64_t   rt_process_spawn_async_value(int64_t cmd, SplArray* args);
+/* Session-leader spawn for tree cleanup; see runtime_process_tree.h. */
+int64_t   rt_process_spawn_session_value(int64_t cmd, SplArray* args);
 /* -> RuntimeValue (I64), per runtime_sffi.rs:1423. NOT a bare SplArray*. */
 int64_t   rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms);
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
@@ -1243,10 +1347,33 @@ char* rt_windows_build_command_line(const char* cmd, const char** args, int64_t 
 
 /* ===== Process Async ===== */
 
+/* Darwin async children inherit only open, non-CLOEXEC stdin/out/err.
+ * Descriptors above stderr are closed; this API has no extra-fd handoff.
+ * Other platforms retain their existing descriptor inheritance policy. */
 int64_t  rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count);
+/* Admission-bounded synchronous capture. mode1=exact Windows child env;
+ * mode2=trusted inherited env (never an implicit empty Linux environment).
+ * Borrowed per-thread four-word receipt; flags extend the ordinary capture
+ * bits with32=confirmed expiry before workload entry,64=other confirmed
+ * pre-entry provider rejection. Postfork uncertainty carries neither bit. */
+int64_t* rt_process_run_bounded_admitted_tuple_v1(const char* cmd,uint64_t cmd_len,
+    SplArray* args,SplArray* environment,int64_t mode,int64_t timeout_ms,
+    int64_t max_output_bytes,int64_t expires_at_unix_ms);
+/* Ordinary bounded inherited-environment capture with authoritative limit
+ * flags. No deadline policy and no ProcessOwnedV4 lifetime assertion. */
+int64_t* rt_process_run_bounded_observed_tuple_v1(const char* cmd,uint64_t cmd_len,
+    SplArray* args,int64_t timeout_ms,int64_t max_output_bytes);
 #ifdef _WIN32
 /* Core-C PID/handle ownership shared with rt_process_wait. */
 int64_t  rt_process_spawn_async_owned_windows(const char* cmd, const char** args, int64_t arg_count);
+/* Native child-env v1: mode 0 overlays a copied parent environment; mode 1 is
+ * exact replacement. The four-word capture result is borrowed per-thread:
+ * text handles, untagged exit status, authoritative flags (timeout/output/error).
+ * Ordinary capture/async lifetime only: no ProcessOwnedV4 proof is implied. */
+int64_t* rt_process_run_bounded_environment_tuple_v1(const char* cmd,uint64_t cmd_len,
+    SplArray* args,SplArray* environment,int64_t mode,int64_t timeout_ms,int64_t max_output_bytes);
+int64_t rt_process_spawn_async_environment_v1(const char* cmd,uint64_t cmd_len,
+    SplArray* args,SplArray* environment,int64_t mode);
 #endif
 int64_t  rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg_count);
 /* Spawn the installed MCP wrapper with inherited stdio; result is waitable. */
@@ -1256,9 +1383,23 @@ bool     rt_process_is_running(int64_t pid);
 int64_t  rt_process_start_identity(int64_t pid);
 bool     rt_process_kill(int64_t pid);
 /* C lane of the rt_pty_* family's liveness probe. POSIX takes the pty MASTER
-   fd and answers from POLLHUP; Windows cannot resolve the Rust lane's session
-   handle and answers false. See runtime_process.c for the full contract. */
-bool     rt_pty_is_running(int64_t handle);
+   fd and answers from POLLHUP; Windows answers from this lane's own ConPTY
+   session table. See runtime_process.c for the full contract. */
+#if defined(_WIN32) || defined(__linux__)
+/* Hosted PTY owners use RuntimeValue strings. */
+int32_t  rt_pty_open(int32_t rows, int32_t cols);
+int64_t  rt_pty_spawn(int32_t handle, int64_t program);
+int64_t  rt_pty_read(int64_t handle, int64_t timeout_ms);
+int64_t  rt_pty_write(int64_t handle, int64_t data);
+int64_t  rt_pty_close(int64_t handle);
+#endif
+int64_t  rt_pty_is_running(int64_t handle);
+bool     rt_pty_resize(int64_t handle, int32_t rows, int32_t cols);
+bool     rt_pty_hangup(int64_t handle);
+int64_t  rt_pty_spawn_exec_v1(int32_t handle, const char* program, SplArray* args,
+                              const char* cwd, SplArray* env);
+int64_t  rt_pty_write_bytes_v1(int64_t handle, SplArray* data);
+int64_t  rt_pty_exit_code_v1(int64_t handle);
 bool     rt_process_owned_cancel(uint64_t slot, uint64_t generation,
                                  int64_t pid, uint64_t start_identity,
                                  RtOwnedProcessCancelReceipt* receipt);
@@ -1337,18 +1478,47 @@ SplArray* rt_process_owned_v3_input_value(int64_t handle);
 SplArray* rt_process_owned_v3_cancel_value(int64_t handle);
 SplArray* rt_process_owned_v3_result_value(int64_t handle);
 SplArray* rt_process_owned_v3_collect_value(int64_t handle);
-int       rt_process_owned_v3_release_value(int64_t handle);
+bool       rt_process_owned_v3_release_value(int64_t handle);
 
 /* Process Observation V4. The common Simple module owns the canonical request
  * codec and 64-word receipt schema. start_pinned is the sole spawning entry:
  * executable and cwd handles are opaque, separately supplied capabilities and
  * must match the canonical binding. Every operation result is
  * [stdout_bytes, stderr_bytes, binding_digest, receipt_words]. */
+/* Cooperative Darwin snapshots use a separate ABI and never advertise V4. */
+SplArray* rt_sosix_darwin_snapshot_v1_capabilities_value(void);
+SplArray* rt_sosix_darwin_snapshot_v1_start_value(int64_t profile, SplArray* invocation, SplArray* environment, SplArray* limits);
+SplArray* rt_sosix_darwin_bound_image_v1_start_value(int64_t expected_sha256, SplArray* invocation, SplArray* environment, SplArray* limits);
+SplArray* rt_sosix_darwin_snapshot_v1_poll_value(int64_t handle, int64_t wait_ns);
+SplArray* rt_sosix_darwin_snapshot_v1_cancel_value(int64_t handle);
+SplArray* rt_sosix_darwin_snapshot_v1_output_value(int64_t handle, int64_t stream);
+int64_t rt_sosix_darwin_snapshot_v1_ack_value(int64_t handle);
 SplArray* rt_process_observation_v4_capabilities_value(void);
 int64_t   rt_process_observation_v4_pin_cwd_value(const char* path_data,
                                                    uint64_t path_len);
 SplArray* rt_process_observation_v4_cwd_digest_value(int64_t handle);
 int       rt_process_observation_v4_close_cwd_value(int64_t handle);
+/* Reservation V4: scalar authority precedes child launch. NULL observations
+ * are errors with authority retained; explicit confirm releases a terminal slot. */
+int64_t rt_process_observation_v4_reserve_value(void);
+int64_t rt_process_observation_v4_reserved_matches_value(int64_t token,
+    int64_t rh, int64_t rl, int64_t th, int64_t tl);
+int64_t rt_process_observation_v4_reserved_state_value(int64_t token);
+int64_t rt_process_observation_v4_reserved_start_pinned_value(
+    int64_t token, int64_t executable, int64_t cwd, SplArray* binding);
+/* Additive submission-deadline admission. The same V4 reservation owns every
+ * outcome; expired/unknown pre-create attempts are consumed, never replayed. */
+int64_t rt_process_observation_v5_reserved_start_admitted_value(
+    int64_t token, int64_t executable, int64_t cwd, SplArray* binding,
+    int64_t expires_at_unix_ms);
+/* Additive Linux-only scalar launch progression; no V4 pending receipt. */
+int64_t rt_process_observation_v6_reserved_start_deferred_admitted_value(int64_t,int64_t,int64_t,SplArray*,int64_t);
+int64_t rt_process_observation_v6_reserved_poll_launch_value(int64_t,int64_t);
+
+SplArray* rt_process_observation_v4_reserved_observe_value(
+    int64_t token, int64_t wait_ns, int64_t retire);
+SplArray* rt_process_observation_v4_reserved_ack_value(int64_t token, SplArray* digest);
+int64_t rt_process_observation_v4_reserved_confirm_release_value(int64_t token);
 SplArray* rt_process_observation_v4_start_value(SplArray* binding);
 SplArray* rt_process_observation_v4_start_pinned_value(
               int64_t executable_handle, int64_t cwd_handle,
@@ -1377,26 +1547,103 @@ SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket);
  * cgroup memory.current while live and zero after the tree is reaped.
  * Unsupported hosts fail closed. */
 #ifdef __linux__
+/* Counted-byte group-stream profile; unsupported providers return explicit errors. */
+/* V3 numeric profile is exactly twelve tagged i64 words, as documented in
+ * piped_group_cpu_profile_v3.md. No new ABI alters a V2 entry point. */
+int64_t rt_linux_group_stream_admit_profiled_v3(const char*,int64_t,const char*,int64_t,const char*,int64_t,SplArray*);
+int64_t rt_linux_group_stream_verify_broker_profiled_v3(const char*,int64_t,const char*,int64_t,const char*,int64_t,SplArray*);
+SplArray* rt_linux_group_parent_acquire_profiled_at_v3(const char*,uint64_t,const char*,uint64_t,const char*,uint64_t);
+SplArray* rt_linux_group_launch_stream_broker_profiled_v3(const char*,int64_t,const char*,int64_t,
+    SplArray*,int64_t,const char*,int64_t,const char*,int64_t,const char*,int64_t,int64_t,
+    const char*,int64_t,const char*,int64_t,SplArray*);
+SplArray* rt_linux_group_start_stream_profiled_v3(const char*,int64_t,const char*,int64_t,
+    SplArray*,SplArray*,const char*,int64_t,const char*,int64_t,const char*,int64_t,int64_t,int64_t,int64_t,
+    const char*,int64_t,const char*,int64_t,SplArray*);
+int64_t rt_linux_group_stream_admit_v2(const char*,int64_t);
+SplArray* rt_linux_group_launch_stream_broker_v2(const char*,int64_t,const char*,int64_t,
+    SplArray*,int64_t,const char*,int64_t,const char*,int64_t,const char*,int64_t,int64_t);
+SplArray* rt_linux_group_start_stream_v2(const char*,int64_t,const char*,int64_t,
+    SplArray*,SplArray*,const char*,int64_t,const char*,int64_t,const char*,int64_t,int64_t,int64_t,int64_t);
+SplArray* rt_linux_group_collected_stream_v2(int64_t);
+int64_t rt_linux_group_stream_no_child_scope_v2(const char*,int64_t,const char*,int64_t);
+int64_t rt_linux_group_stream_collect_no_child_v2(const char*,int64_t,const char*,int64_t);
+int64_t rt_linux_group_stream_recover_lease_v2(const char*,int64_t,const char*,int64_t);
+int64_t rt_linux_group_stream_release_inherited_v2(void);
+#endif
+
+/* Generic callers can query the Linux group ABI on every provider. Unsupported
+ * providers return ENOTSUP, never a token, successful launch or cleanup claim.
+ * Capacity returns [error, available_memory_bytes, available_disk_bytes]; parent
+ * acquisition returns [error, token, device, inode]; start/broker [token, error].
+ * Poll/collect retain the ten-word observation shape described above; nonzero
+ * status makes the remaining placeholder fields unavailable, not observations. */
+SplArray* rt_linux_group_available_capacity_v1(const char* path, uint64_t path_len);
+SplArray* rt_linux_group_parent_acquire_v1(const char* attempt, uint64_t attempt_len,
+    const char* identity, uint64_t identity_len);
+SplArray* rt_linux_group_parent_acquire_at_v2(const char* path, uint64_t path_len,
+    const char* attempt, uint64_t attempt_len, const char* identity, uint64_t identity_len);
+int64_t rt_linux_group_parent_release_v1(int64_t token);
 SplArray* rt_linux_group_launch_broker_v1(const char* program,
-    uint64_t program_len, const char* digest, uint64_t digest_len,
-    SplArray* args);
+    uint64_t program_len, const char* digest, uint64_t digest_len, SplArray* args);
 SplArray* rt_linux_group_start_v1(const char* program, uint64_t program_len,
-    const char* digest, uint64_t digest_len, SplArray* args,
-    SplArray* environment, const char* directory, uint64_t directory_len,
-    const char* root, uint64_t root_len,
-    const char* identity, uint64_t identity_len,
-    int64_t memory_limit, int64_t timeout_ms,
-    const char* stdout_path, uint64_t stdout_len,
-    const char* stderr_path, uint64_t stderr_len);
+    const char* digest, uint64_t digest_len, SplArray* args, SplArray* environment,
+    const char* directory, uint64_t directory_len, const char* root, uint64_t root_len,
+    const char* identity, uint64_t identity_len, int64_t memory_limit, int64_t timeout_ms,
+    const char* stdout_path, uint64_t stdout_len, const char* stderr_path, uint64_t stderr_len);
 SplArray* rt_linux_group_poll_v1(int64_t token);
 int64_t rt_linux_group_cancel_v1(int64_t token);
 SplArray* rt_linux_group_collect_v1(int64_t token);
-SplArray* rt_linux_group_available_capacity_v1(const char* path, uint64_t path_len);
-#endif
 
 /* ===== Process Piped (editor LSP transport) ===== */
 
 int64_t     rt_process_spawn_piped(const char* cmd, SplArray* args);
+/* Additive v1 receipt [version=1, state=-1/0/1, actual_exit_code, native_error].
+ * Query only before close; success requires drained stdout and observed/reaped
+ * leader status. No status is fabricated from ECHILD or close success. */
+SplArray*   rt_process_piped_exit_status_value(int64_t pid);
+/* Ref V1: generation comes from the actual reserved spawn slot, never PID adoption.
+ * Scalar actions return -2 stale/invalid, -1 runtime failure; close 0 success,
+ * alive 0 stopped/1 running, write >=0 accepted. stdout state 0 deferred/1 EOF.
+ * Valid POSIX Ref liveness/close return -3 unsupported: no reap/signal/free.
+ * Reads use the same thread-local buffer and UTF-8 framing as legacy PID reads. */
+/* Group-stream V2 tickets and binding-aware stream actions. No language FD or
+ * pointer lease crosses this ABI. POSIX proof retirement uses the pinned root. */
+int64_t rt_process_stream_reserve_v2(void);
+int64_t rt_process_stream_bind_v2(int64_t,const char*,int64_t,const char*,int64_t);
+int64_t rt_process_stream_abandon_unlaunched_v2(int64_t,const char*,int64_t,const char*,int64_t);
+int64_t rt_process_stream_pid_v2(int64_t,const char*,int64_t,const char*,int64_t);
+int64_t rt_process_stream_retire_v2(int64_t,const char*,int64_t,const char*,int64_t,const char*,int64_t);
+const char* rt_process_read_stdout_owned_v2(int64_t,int64_t,const char*,int64_t,const char*,int64_t);
+int64_t rt_process_stdout_state_owned_v2(int64_t,int64_t,const char*,int64_t,const char*,int64_t);
+int64_t rt_process_validate_piped_owned_v2(int64_t,int64_t,const char*,int64_t,const char*,int64_t);
+/* Linux same-slot input revision barrier. NULL retains possible write outcome;
+ * all arrays are preallocated before effects. State is exactly268words. */
+SplArray* rt_process_input_enable_v1(int64_t pid,int64_t generation,const char* root,int64_t root_bytes,const char* identity,int64_t identity_bytes);
+SplArray* rt_process_input_install_v1(int64_t pid,int64_t generation,const char* root,int64_t root_bytes,const char* identity,int64_t identity_bytes,const char* target,int64_t target_bytes,const char* nonce,int64_t nonce_bytes,int64_t revision,int64_t expires_monotonic_ns);
+SplArray* rt_process_input_revoke_v1(int64_t pid,int64_t generation,const char* root,int64_t root_bytes,const char* identity,int64_t identity_bytes,const char* target,int64_t target_bytes,const char* nonce,int64_t nonce_bytes,int64_t revision);
+SplArray* rt_process_input_state_v1(int64_t pid,int64_t generation,const char* root,int64_t root_bytes,const char* identity,int64_t identity_bytes);
+SplArray* rt_process_input_write_some_v1(int64_t pid,int64_t generation,const char* root,int64_t root_bytes,const char* identity,int64_t identity_bytes,const char* target,int64_t target_bytes,const char* nonce,int64_t nonce_bytes,int64_t revision,int64_t attempt_sequence,const char* data,int64_t data_bytes,int64_t offset,int64_t maximum);
+int64_t rt_process_write_stdin_some_owned_v2(int64_t,int64_t,const char*,int64_t,const char*,int64_t,const char*,int64_t,int64_t,int64_t);
+/* Native-private explicit owned descriptor transfer, never a language API. */
+int rt_process_stream_claim_launch_v2(int64_t,const char*,int64_t,const char*,int64_t,int*,int*,int*);
+int rt_process_stream_launch_not_started_v2(int64_t,const char*,int64_t,const char*,int64_t);
+int rt_process_stream_publish_broker_v2(int64_t,const char*,int64_t,const char*,int64_t,int64_t);
+int64_t rt_process_spawn_piped_generation_v1(const char* cmd, int64_t cmd_len, SplArray* args);
+int64_t rt_process_piped_pid_for_generation_v1(int64_t generation);
+const char* rt_process_read_stdout_ref_v1(int64_t pid, int64_t generation);
+int64_t rt_process_stdout_state_ref_v1(int64_t pid, int64_t generation);
+/* Validation observes registry ownership only, never kernel liveness or I/O. */
+int64_t rt_process_validate_piped_ref_v1(int64_t pid, int64_t generation);
+/* Descriptor-only endpoint: no PID, process liveness, or cleanup authority. */
+int64_t rt_process_validate_byte_endpoint_v1(int64_t generation, const char* binding, int64_t binding_bytes);
+int64_t rt_process_byte_endpoint_state_v1(int64_t generation, const char* binding, int64_t binding_bytes);
+SplArray* rt_process_read_byte_endpoint_v1(int64_t generation, const char* binding, int64_t binding_bytes);
+SplArray* rt_process_close_byte_endpoint_v1(int64_t generation, const char* binding, int64_t binding_bytes);
+int64_t rt_process_write_stdin_some_ref_v1(int64_t pid, int64_t generation,
+    const char* data, int64_t data_len, int64_t offset, int64_t max_bytes);
+int64_t rt_process_is_piped_alive_ref_v1(int64_t pid, int64_t generation);
+int64_t rt_process_close_piped_ref_v1(int64_t pid, int64_t generation);
+
 int64_t     rt_process_pin_executable(const char* canonical_path);
 /* Separately named opaque owner for consumers that cannot safely retain a raw
  * descriptor.  It is acquired only through rt_process_acquire_pinned_executable. */
@@ -1418,6 +1665,11 @@ bool        rt_browser_renderer_sandbox_netns_active(void);
 const char* rt_browser_renderer_read_stdin_some(int64_t max_bytes);
 int64_t     rt_browser_renderer_write_stdout_some(const char* data, int64_t data_len, int64_t offset, int64_t max_bytes);
 int64_t     rt_browser_renderer_write_protocol_some(const char* data, int64_t data_len, int64_t offset, int64_t max_bytes);
+/* Explicit startup entry for lanes where the .preinit_array registration is
+   compiled out (core-C standalone archive). The generated native entry main
+   calls this before runtime init; no-op unless argv[0] is the renderer
+   worker marker ("simple-browser-renderer"). Idempotent once the jail is up. */
+void        rt_browser_renderer_preinit_enter(int argc, char** argv, char** envp);
 bool        rt_process_write_stdin(int64_t pid, const char* data);
 int64_t     rt_process_write_stdin_some(int64_t pid, const char* data, int64_t data_len, int64_t offset, int64_t max_bytes);
 const char* rt_process_read_stdout(int64_t pid);
@@ -1434,6 +1686,7 @@ bool        rt_editor_wait_simple_dap_stopped(int64_t pid);
 
 const char* spl_env_get(const char* key);
 int64_t     rt_env_get(const uint8_t* key, uint64_t key_len);
+int64_t     rt_env_get_raw(const uint8_t* key, uint64_t key_len);
 int64_t     rt_env_get_value(int64_t key);
 int64_t     rt_env_get_i64(const uint8_t* key, uint64_t key_len, int64_t default_value);
 void        spl_env_set(const char* key, const char* value);
@@ -1462,6 +1715,7 @@ int64_t  rt_time_now_unix_micros(void);
 
 int64_t  rt_signal_install(int64_t signal_num);
 int64_t  rt_signal_check(int64_t signal_num);
+int64_t  rt_install_crash_handler(void);
 int64_t  rt_atexit_install(void);
 int64_t  rt_atexit_check(void);
 
@@ -1481,8 +1735,13 @@ char*    spl_strdup(const char* s);
 
 /* ===== Atomic Handles ===== */
 
-/* CPU parallel raw-pointer atomics: valid aligned i64 storage, SeqCst,
- * previous-value returns (also on compare-exchange failure). */
+/* CPU parallel raw-pointer atomics: valid aligned i64 storage and SeqCst.
+ * RMW operations return the previous value (also on failed compare-exchange);
+ * load returns the observed scalar value. */
+/* Capability query accepts a live caller-owned atomic i64 cell. Returns 1
+ * only when the target's raw 8-byte cell layout is supported lock-free. */
+int64_t  rt_par_atomic_i64_is_lock_free(int64_t* ptr);
+int64_t  rt_par_atomic_load_i64(int64_t* ptr);
 int64_t  rt_par_atomic_add_i64(int64_t* ptr, int64_t value);
 int64_t  rt_par_atomic_sub_i64(int64_t* ptr, int64_t value);
 int64_t  rt_par_atomic_xchg_i64(int64_t* ptr, int64_t value);
@@ -1516,8 +1775,13 @@ void     rt_bdd_describe_start_rv(int64_t name_rv);
 void     rt_bdd_describe_end(void);
 void     rt_bdd_it_start_rv(int64_t name_rv);
 void     rt_bdd_it_end(int64_t passed);
+void     rt_bdd_record_result(int64_t passed);
+int64_t  rt_bdd_executed_total(void);
+int64_t  rt_bdd_failed_total(void);
 int64_t  rt_bdd_has_failure(void);
+void     rt_bdd_note_skip(void);
 void     rt_bdd_expect_fail(int64_t msg_ptr, int64_t msg_len);
+void     rt_bdd_fail_rv(int64_t msg_rv);
 void     rt_bdd_expect_eq_rv(int64_t actual, int64_t expected);
 void     rt_bdd_expect_truthy_rv(int64_t value);
 int64_t  rt_bdd_format_results(void);
@@ -1559,11 +1823,15 @@ int64_t     rt_file_read_regular_no_follow_bounded(
 /* Byte-array sibling for binary payloads (images/archives); identical
  * admission arms, no UTF-8 decode. Returns a [u8] RuntimeValue. */
 int64_t     rt_file_read_regular_no_follow_bounded_bytes(const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes);
+int64_t     rt_file_read_under_root_bytes(const uint8_t* root_ptr, uint64_t root_len, const uint8_t* rel_ptr, uint64_t rel_len, int64_t max_bytes);
+int8_t      rt_file_write_under_root_bytes(int64_t root, int64_t rel, int64_t data);
+int64_t     rt_file_read_text_raw(const uint8_t* path_ptr, uint64_t path_len);
+int64_t     rt_file_read_regular_no_follow_bounded_raw(const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes);
 /* Arm code of the last bounded no-follow read: 77 never called, 100 succeeded,
  * 1..10 a named rejection, 0 this extern unresolved in the reading lane. */
 int64_t     rt_file_read_regular_no_follow_last_failure(void);
 int64_t     rt_file_read_text_rv(int64_t path);
-int         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len);
+bool         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len);
 /* Failed-existence-probe measurement. begin returns a non-reusable monotonic
  * generation and end returns a nonnegative packed (total << 32) | failed
  * snapshot. Negative values are fail-closed errors. The counter observes this
@@ -1574,10 +1842,11 @@ int64_t     rt_file_exists_probe_end(int64_t token);
 int64_t     rt_file_exists_probe_test_seed_generation(int64_t generation);
 int64_t     rt_file_exists_probe_test_seed_counters(int64_t total, int64_t failed);
 #endif
-int         rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len);
+bool         rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_dir_is_real_no_follow(const uint8_t* path_ptr, uint64_t path_len);
+int32_t     rt_win_compare_object_handles(int64_t first, int64_t second);
 /* Encoded byte-array RuntimeValues, not semantic text pointer/length pairs. */
 int64_t     rt_sosix_directory_pair_open_v1(int64_t shared_bytes, int64_t private_bytes);
 int64_t     rt_sosix_directory_pair_check_v1(int64_t shared_bytes, int64_t private_bytes);
@@ -1588,10 +1857,11 @@ int64_t     rt_fd_stat_snapshot_v1(int64_t descriptor, int64_t out_addr, int64_t
 int64_t     rt_shared_parse_cell_read_v1(const uint8_t* path_ptr, uint64_t path_len, int64_t maximum);
 int         rt_file_write(const char* path, const char* content);
 int64_t     rt_file_atomic_write(int64_t path_value, int64_t content_value);
+int8_t      rt_file_atomic_write_bytes_array(int64_t path, int64_t data);
 int         rt_file_write_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len);
 int         rt_file_append(const char* path, const char* content);
 int         rt_file_append_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len);
-int         rt_file_delete(const uint8_t* path_ptr, uint64_t path_len);
+bool         rt_file_delete(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
                          const uint8_t* dst_ptr, uint64_t dst_len);
 bool        rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
@@ -1610,6 +1880,7 @@ int64_t     rt_file_size(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_fsync_cached(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_sync(const uint8_t* path_ptr, uint64_t path_len);
+int         rt_dir_sync(const uint8_t* path_ptr, uint64_t path_len);
 int64_t     rt_crc32_text(const char* text, int64_t text_len);
 int         rt_file_create_excl(const char* path, int64_t path_len,
                                 const char* content, int64_t content_len);
@@ -1653,9 +1924,11 @@ int         rt_mem_snapshot_record(int64_t fd, int64_t seq,
                     int64_t hir_functions, int64_t hir_constants,
                     int64_t hir_enums, int64_t hir_structs, int64_t hir_classes);
 int         rt_phase_profile_record(int64_t fd, int64_t seq, const char* message, int64_t message_len);
-int         rt_mem_snapshot_close(int64_t fd);
+bool         rt_mem_snapshot_close(int64_t fd);
 int64_t     rt_process_rss_kib(void);
 int64_t     rt_process_hwm_kib(void);
+int64_t     rt_process_last_child_peak_rss_kib(void);
+int64_t     rt_process_last_child_cpu_ms(void);
 int64_t     rt_heap_live_bytes(void);
 int64_t     rt_heap_peak_bytes(void);
 int64_t     rt_push(int64_t receiver, int64_t value);
@@ -1784,6 +2057,30 @@ bool        rt_socket_set_nonblocking(int64_t fd, bool enabled);
 int64_t     rt_socket_nonblock_prepare(int64_t fd, int64_t mode);
 int64_t     rt_socket_nonblock_commit(int64_t fd, int64_t flags);
 int64_t     rt_socket_nonblock_mask(void);
+/* Local Unix byte owner. All receipts are reserved before descriptor effects;
+ * read result [status,eof,count,padded byte capacity], connect has 7 words. */
+SplArray* rt_local_unix_connect_v1(const char*,int64_t,int64_t,int64_t);
+SplArray* rt_local_unix_read_v1(int64_t,int64_t,int64_t);
+SplArray* rt_local_unix_write_some_v1(int64_t,SplArray*,int64_t,int64_t,int64_t);
+SplArray* rt_local_unix_write_some_admitted_v1(int64_t,SplArray*,int64_t,int64_t,int64_t,int64_t);
+SplArray* rt_local_unix_close_v1(int64_t);
+/* Listener roles and zero-wait byte operations use the same local registry. */
+SplArray* rt_local_unix_listen_v1(const char*,int64_t,int64_t,int64_t);
+SplArray* rt_local_unix_accept_v1(int64_t,int64_t);
+SplArray* rt_local_unix_poll_v1(int64_t,int64_t,int64_t);
+SplArray* rt_local_unix_read_now_v1(int64_t,int64_t);
+SplArray* rt_local_unix_write_some_now_v1(int64_t,SplArray*,int64_t,int64_t);
+SplArray* rt_local_unix_listener_close_v1(int64_t);
+SplArray* rt_local_unix_peer_v1(int64_t);
+SplArray* rt_local_unix_shutdown_write_v1(int64_t);
+SplArray* rt_local_unix_claim_request_v1(int64_t,const char*,int64_t);
+SplArray* rt_local_unix_stage_stdout_v1(int64_t,int64_t,int64_t,const char*,int64_t,const char*,int64_t,const char*,int64_t);
+SplArray* rt_local_unix_read_handoff_now_v1(int64_t,int64_t);
+SplArray* rt_local_unix_adopt_byte_endpoint_v1(int64_t,const char*,int64_t);
+SplArray* rt_local_unix_handoff_state_v1(int64_t);
+
+
+
 
 /* ===== Raw 32-bit framebuffer operations ===== */
 
@@ -2203,12 +2500,109 @@ void     rt_rank_select_free(int64_t handle);
 
 /* ===== Reserved-Field Cache Helpers ===== */
 
+/* Workspace storage ABI: tagged text, scalar leases, no cleanup side effects. */
+#include "runtime_workspace_storage_v1.h"
+#include "runtime_retained_private_credential_v1.h"
+
 /* Forward decl: RtCoreString is defined in runtime_native.c */
 struct RtCoreString;
 void     rt_str_cache_cp_count(struct RtCoreString* s, uint64_t count);
 int64_t  rt_str_cached_cp_count(struct RtCoreString* s);
 void     rt_str_set_ascii_flag(struct RtCoreString* s, int is_ascii);
 int      rt_str_is_ascii_cached(struct RtCoreString* s);
+
+/* ---- Shared static-inline bodies (dedup of per-lane runtime copies) --------
+ * Several runtime TUs are compiled into different, mutually exclusive build
+ * lanes and each must keep defining its own exported symbols. The bodies that
+ * were byte-identical copies live here instead; each TU keeps a one-line
+ * wrapper so symbol provision per lane is unchanged. */
+
+/* Hex digit value, or -1. Used by runtime.c and runtime_tls_hosted.c. */
+static inline int rt__shared_hex_digit_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Decode 2*blen hex chars into out[blen]; 0 on success, -1 on a bad digit. */
+static inline int rt__shared_hex_decode_into(const char* hex, size_t blen, uint8_t* out) {
+    for (size_t i = 0; i < blen; i++) {
+        int hi = rt__shared_hex_digit_value(hex[2 * i]);
+        int lo = rt__shared_hex_digit_value(hex[2 * i + 1]);
+        if (hi < 0 || lo < 0) return -1;
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return 0;
+}
+
+/* Encode n bytes as lowercase hex plus NUL into out[2n+1]. */
+static inline void rt__shared_hex_encode_into(const uint8_t* data, size_t n, char* out) {
+    static const char digits[] = "0123456789abcdef";
+    for (size_t i = 0; i < n; i++) {
+        out[2 * i] = digits[(data[i] >> 4) & 0x0F];
+        out[2 * i + 1] = digits[data[i] & 0x0F];
+    }
+    out[2 * n] = '\0';
+}
+
+/* Little-endian u32 from 4 bytes (byte-wise: no alignment/endian assumption). */
+static inline uint32_t rt__shared_read_u32_le(const uint8_t* p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* FNV-1a 64-bit; NULL hashes to the offset basis. */
+static inline uint64_t rt__shared_str_hash(const char* s) {
+    uint64_t h = 14695981039346656037ULL;
+    if (!s) return h;
+    while (*s) {
+        h ^= (uint64_t)(unsigned char)*s++;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+/* Free a rt_dir_list result: each entry, then the array. */
+static inline void rt__shared_dir_list_free(const char** entries, int64_t count) {
+    if (!entries) return;
+    for (int64_t i = 0; i < count; i++) free((void*)entries[i]);
+    free((void*)entries);
+}
+
+/* Text bytes of a tagged heap string or a raw char* (> 4096); NULL otherwise. */
+static inline const char* rt__shared_file_text_at_string_data(int64_t value, int64_t* len_out) {
+    const uint64_t tag_mask = 0x7ULL;
+    const uint64_t heap_tag = 0x1ULL;
+    uint64_t raw = (uint64_t)value;
+    if ((raw & tag_mask) == heap_tag) {
+        const uint8_t* data = rt_string_data(value);
+        int64_t len = rt_string_len(value);
+        if (data) {
+            *len_out = len;
+            return (const char*)data;
+        }
+    }
+    if (raw > 4096) {
+        const char* s = (const char*)(uintptr_t)raw;
+        *len_out = (int64_t)strlen(s);
+        return s;
+    }
+    *len_out = 0;
+    return NULL;
+}
+
+#if defined(_WIN32)
+/* rt_secure_temp_dir failure diagnostic (stderr). Caller passes the Win32
+ * error captured at the failure site and whether the quiet env knob is set;
+ * each TU reads that knob its own way (getenv vs rt_env_present). */
+static inline void rt__shared_secure_temp_dir_diag(const char* stage, unsigned long err,
+                                                   int quiet, const char* detail) {
+    if (quiet) return;
+    fprintf(stderr, "rt_secure_temp_dir: %s failed (GetLastError=%lu) %s\n",
+            stage, err, detail ? detail : "");
+    fflush(stderr);
+}
+#endif
 
 #ifdef __cplusplus
 }

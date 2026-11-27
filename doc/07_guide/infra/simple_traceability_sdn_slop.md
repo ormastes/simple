@@ -69,3 +69,35 @@ Development intent is authored in
 requirements and 40 planned criteria, with explicit current artifact links.
 It contains no execution records. Native parser admission and registered
 authority remain pending; file presence is not traceability qualification.
+
+# Proposed trace/code/API and extreme-typing extension
+
+The 2026-11-01 [extension design](../../04_architecture/extreme_typing_traceability.md)
+and [phase plan](../../03_plan/agent_tasks/extreme_typing_traceability.md) extend
+the existing traceability roadmap. Proposed `simple trace` and `simple api`
+commands are not documented here as implemented. The selected public API rule
+for robust, critical and verified profiles forbids all bare builtins and requires
+domain-safe generic bounds; easy nominal construction must be demonstrated
+before completion. Existing
+traceability-check behavior and baseline qualification claims are unchanged.
+
+P0 now has a [source implementation candidate guide](trace_query_p0.md) for
+registered list/show queries. Runtime admission, execution and deployment remain
+pending; this does not change existing qualification claims.
+
+The 2026-11-02 E1 source candidate now captures bounded signature observations
+inside the retained production HIR typecheck consumer, preserving compiler type
+kinds and declaration owner plus module-local symbol IDs in flat records.
+CompileContext retains the current pass only. Export closure, generic guarantees,
+nominal public operations and generated/other-engine surfaces remain unknown;
+archive/no-op paths do not collect these facts. This is neither a new CLI nor
+fatal enforcement, and execution is unverified. See the
+[implementation status and bounds](../../05_design/extreme_typing_traceability.md#e1-retained-signature-observation-candidate-2026-11-02).
+
+The 2026-11-03 follow-up joins frozen export-origin/authority rows to those
+callable observations, carrying physical source identity and the current
+registry generation. Missing, stale and ambiguous joins remain Unknown.
+An identity match does not establish external visibility: ancestor module and
+directory policy is still uncollected. This remains an unexecuted compiler
+observation slice, with no new CLI or enforcement. See the
+[route-join contract](../../05_design/extreme_typing_traceability.md#e1-frozen-export-route-join-candidate-2026-11-03).

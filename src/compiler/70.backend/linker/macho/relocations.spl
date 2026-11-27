@@ -1,5 +1,5 @@
 # Mach-O implicit-addend decoding; shared ELF engine owns checked ISA formulas.
-use compiler.backend.linker.macho.input.{MachOInput, macho_read, macho_put, macho_sign}
+use compiler.backend.linker.macho.input.{MachOInput, macho_read, macho_sign}
 use compiler.backend.linker.macho.layout.{MachOLayout}
 use compiler.backend.linker.macho.symbols.{MachOBinding, macho_resolve_symbol}
 use compiler.backend.linker.macho_parser.{MachORelocationEntry, macho_parse_relocations}
@@ -81,8 +81,10 @@ fn macho_relocate(bytes: [u8], inputs: [MachOInput], definitions: {text: MachOBi
                                 if width != 8: return Err("hosted dyld bind requires a 64-bit pointer")
                                 value = 0
                             else:
-                                value = target.address + macho_sign(encoded, width * 8)
+                                value = target.address + macho_sign(encoded, width * 8) + explicit_addend
                                 if not relocation.r_extern: value = value - target.original
+                                if (section.flags & 255) == 19 and layout.has_local_tls:
+                                    value = value - layout.tls_template_address
                             if value < 0 or (width == 4 and value > 4294967295):
                                 return Err("Mach-O unsigned relocation overflow")
                         elif not arm:
@@ -151,7 +153,8 @@ fn macho_relocate(bytes: [u8], inputs: [MachOInput], definitions: {text: MachOBi
                                 value = (encoded & 0xffc003ff) | ((low >> scale) << 10)
                             else:
                                 return Err("unsupported ARM64 Mach-O relocation {kind} (GOT/TLV/auth requires loader support)")
-                        out = macho_put(out, offset, width, value)
+                        for byte_index in 0..width:
+                            out[offset + byte_index] = ((value >> (byte_index * 8)) & 255) as u8
                         index = index + 1
                 ordinal = ordinal + 1
         owner = owner + 1

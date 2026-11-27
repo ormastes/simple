@@ -101,3 +101,10 @@ PR #41's restore was incomplete and nothing detected that. A re-audit of
 `4edef8fab8e` against its parent — symbol-level, not file-level, since the file
 COUNT was never the signal here — would show whether anything else is still
 missing.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+restoration-in-progress record owned by the stale-snapshot restoration lane; not a bounded side-fix (docs survived, code did not - needs the original implementation context).

@@ -3,7 +3,8 @@
 # This module does not create, publish, attach, or admit a host image. It is the
 # shared byte contract consumed by the future provisioner and transport probe.
 
-use std.common.string_core.{text_to_bytes, bytes_to_text}
+use std.common.string_core.{text_to_bytes}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 
 pub val SERVER_DATA_ROLE_V1: text = "simpleos-server-data-v1"
 pub val SERVER_DATA_SERIAL_V1: text = "simpleos-server-data-v1"
@@ -104,13 +105,15 @@ fn _put_ascii(buf: [u8], offset: i64, width: i64, value: text) -> [u8]:
         i = i + 1
     out
 
-fn _read_ascii(buf: [u8], offset: i64, width: i64) -> text:
+fn _read_ascii(buf: [u8], offset: i64, width: i64) -> Result<text, text>:
     var out: [u8] = []
     var i = 0
     while i < width and buf[offset + i] != 0u8:
         out.push(buf[offset + i])
         i = i + 1
-    bytes_to_text(out)
+    match bytes_to_text_checked(out):
+        case Ok(t): Ok(t)
+        case Err(_): Err("identity text is not valid UTF-8")
 
 fn _bytes_equal(left: [u8], right: [u8]) -> bool:
     if left.len() != right.len():
@@ -155,8 +158,14 @@ pub fn validate_server_data_identity_sector_v1(bytes: [u8]) -> ServerDataImageVa
         return ServerDataImageValidationV1(accepted: false, reason: "identity magic/version mismatch", identity: _zero_identity())
     if _get_u32(bytes, 108) != _checksum(bytes, 108):
         return ServerDataImageValidationV1(accepted: false, reason: "identity checksum mismatch", identity: _zero_identity())
+    val role: text = match _read_ascii(bytes, 44, 32):
+        case Ok(t): t
+        case Err(e): return ServerDataImageValidationV1(accepted: false, reason: e, identity: _zero_identity())
+    val serial: text = match _read_ascii(bytes, 76, 32):
+        case Ok(t): t
+        case Err(e): return ServerDataImageValidationV1(accepted: false, reason: e, identity: _zero_identity())
     val identity = ServerDataImageIdentityV1(
-        role: _read_ascii(bytes, 44, 32), serial: _read_ascii(bytes, 76, 32),
+        role: role, serial: serial,
         uuid_hi: _get_u64(bytes, 8), uuid_lo: _get_u64(bytes, 16),
         sector_size: _get_u32(bytes, 24), block_count: _get_u64(bytes, 28),
         empty_root_generation: _get_u64(bytes, 36))

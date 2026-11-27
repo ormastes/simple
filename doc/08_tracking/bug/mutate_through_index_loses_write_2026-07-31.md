@@ -176,3 +176,9 @@ The tuple-field shape is deliberately left unasserted there — asserting either
 lane's answer would add a red or bless a defect — so it remains this record's one
 live item. Measured: 7/7 on the fresh seed; the three dict examples fail on the
 deployed seed.
+
+## 2026-11-06 native re-verify (p1w5, s3_fable46_w5)
+- `d["k"].push(x)` (dict value): native PASS.
+- `bags[0].items.push(5)` on `[Bag]`: native rc=4, so the write is LOST. Repro: `test/fixtures/compiler/mutate_index_struct_field_writeback/main.spl` (@tag:in-development).
+  - Hypothesis: in `method_calls_literals.spl` (~4392), the `Field(base=Index(bags,0), items)` write-back (wb_kind 2) sets the field on a by-value copy of `bags[0]`. The element is never stored back into the array, so the fix needs a nested Field-over-Index write-back.
+- `grid[1].push(7)` on `[[i64]]`: the compiler crashes. Filed separately as native_mir_nested_array_index_push_av_2026-11-06.

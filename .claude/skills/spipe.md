@@ -19,6 +19,9 @@ Keep tagged workarounds separate from permanent fixes; create a reproducing
 scenario and similar prevention scenarios, with authored tests clearly marked
 unexecuted until the real runner executes them.
 
+Stage 2 native miscompile classes seen in Phase 3 (symptoms, workarounds, status):
+[catalog](../../doc/07_guide/compiler/robustness/stage2_native_miscompile_classes.md).
+
 For bootstrap build/test sweeps, continue independent scenarios after failures
 and collect terminal results. A usable artifact plus minimum sanity permits
 diagnostic continuation; failed qualification still prevents admission and
@@ -157,6 +160,24 @@ The SPipe dev entrypoint lives at:
 Codex routes SPipe development work through `$sp_dev`:
 
 **[.codex/skills/sp_dev/SKILL.md](../../.codex/skills/sp_dev/SKILL.md)**
+
+### HAL tests through Simple
+
+Implement HAL/runtime behavior tests as modern SSpec `*_spec.spl` scenarios
+run through `simple test` wherever Simple can reach the contract. Prefer the
+production SOSIX/HAL facade; for a low-level ABI or provider contract, Simple
+can call backed `rt_*` symbols via explicit `extern fn` declarations. Verify
+the actual signature, linking/registration, and execution mode first. This is
+a focused test-boundary exception, not permission for product code to bypass
+its facade. C harnesses support only the portions Simple cannot exercise;
+record the limitation and keep reachable assertions in Simple.
+
+Native HAL acceptance requires the selected real provider on the required
+host, executed examples, and the exact compiler/runtime identity. Interpreter
+emulation, unsupported-host branches, missing externs, and zero executed
+examples cannot qualify it. Read the
+[HAL testing procedure](../../doc/07_guide/infra/testing.md#hal-and-runtime-tests-through-simple)
+for facade/FFI selection, host guards, and evidence accounting.
 
 ### MC/DC and RT/HAL evidence lane
 
@@ -2075,6 +2096,14 @@ defaults for the existing `SIMPLE_*CACHE*` vars; a spec that needs a specific
 cache state sets the consumer var explicitly (it always wins) and never relies
 on the host's user file. Use `host_config_cache_env(entries, env)` to test the
 mapping hermetically.
+Bootstrap tuning knobs live there too (2026-11-22): `mem_reserve_free_mib`,
+`stage3_tree_rss_cap_kib`, `stage3_threads`, `stage3_file_workers`
+default `SIMPLE_BUILD_MEMORY_RESERVE_BYTES`,
+`SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB`, `SIMPLE_NATIVE_BUILD_THREADS`,
+`SIMPLE_FILE_WORKERS` (env wins). Put host values in
+`config/host/<hostname>.sdn` via `sh scripts/setup/update-host-config.shs
+[--dry-run] [--set KEY=VALUE]`, not launcher env; table in
+`doc/07_guide/tooling/bootstrap_options.md` § Host settings.
 
 ## Running specs on a loaded box (harness truths, 2026-07-29)
 
@@ -2360,7 +2389,10 @@ Classify unavailable adapter, silent UART, all-zero/all-one scan, or missing
 provenance-admitted compiler as `BLOCKED` with exit 2 and a specific receipt
 reason. Classify wrong TAP, target-observed boot failure, malformed/missing
 evidence, forbidden flash command, or failed driver restoration as FAIL. An
-SSpec helper must translate BLOCKED to `pending("BLOCKED: ...")`; it must never
+SSpec helper must translate BLOCKED to `pending("BLOCKED: ...")` (or fail with
+`Err("precondition: ...")` when an env-supplied fixture is missing); the runner
+counts both as `blocked=<n>` / `outcome=BLOCKED` / exit 6, never PASS (see
+`doc/07_guide/infra/testing.md` § BLOCKED). It must never
 return early as success or assert that a blocked marker is a live PASS. Offline
 contract and negative self-tests validate policy only. Physical PASS requires
 the exact image/compiler hashes, load/entry and DTB contract, ordered target
@@ -2962,6 +2994,31 @@ Cap each live failure lane at three distinct fix/verify cycles. Do not repeat an
 identical failed command or promote executable existence, static checks, or
 frontier review to a false PASS.
 
+### Bootstrap Hello execution evidence
+
+The native Hello acceptance target has 16 individual cases: source, two-object,
+static-library, and shared-library forms, each built with LLVM and Cranelift
+and run by both the direct compiler path and BuildRunner. Keep one evidence
+row per `(form, backend, path)` with command, exact compiler identity, artifact
+hash, exit status, and observed `Hello, World!` output. Use `PASS`, `FAIL`,
+`UNRUN`, or `UNSUPPORTED`; missing evidence is `UNRUN`, and neither
+`UNSUPPORTED` nor a successful compile-only step is a pass.
+
+Current `scripts/bootstrap/hello-sanity-matrix.py` coverage is four direct
+cases for the selected backend per invocation. Optional one-source BuildRunner
+execution requires a qualified manager, manifest writer, worker template, and
+target, plus verified output and enforced-memory receipts. The other three
+BuildRunner forms remain `UNRUN`; without providers all four remain `UNRUN`.
+Pending required BuildRunner cells prevent overall `PASS`. Do not imply that
+one report proves the second backend or all BuildRunner cases. See
+[`bootstrap_parallel_handoff.md`](../../doc/07_guide/app/llm/bootstrap_parallel_handoff.md#hello-sanity-16-native-execution-cases-and-phase-interpreter-checks)
+for the full matrix and receipts. Track interpreter evidence separately:
+Phase 1 requires its own seed in interpreter mode; Phase 2 records
+`SKIPPED` because the minimal compiler has no `run`; Phase 3 requires a full
+CLI bound to that exact phase 3 producer, source, and runtime. An ambient CLI
+cannot qualify a phase. Do not call the phase gate complete while any required
+matrix or interpreter case is `UNRUN`, `UNSUPPORTED`, or `FAIL`.
+
 ## Host storage precondition (added 2026-08-11)
 
 **Before starting any gate, bootstrap, or evidence run, check host storage.**
@@ -3151,12 +3208,28 @@ pitfalls (fixed 64-bit hex rendering, no endianness conversion in
 
 ## Running spipe through a local LLM (caret + slang)
 
-A local GGUF model loaded via slang can drive the spipe flow itself through
-caret's TUI agent loop (bash/read/write tools): point `--workspace` at an
-isolated worktree, `--dangerously-allow-all` with that sandbox underneath,
-and prompt it to read this skill, run `bin/simple test <area>`, fix, and
-re-run — never to git commit. Full setup (model root, shim build, tmux
-headless recipe, prompt pattern):
+A local GGUF model can drive the spipe flow through caret's TUI agent loop
+(bash/read/write tools). Two lanes:
+
+- **In-process:** `--provider slang_local` with `SLANG_MODEL_ROOT=<model root>`; no server.
+- **Server:** run `src/app/slang_server/main.spl -- --plaintext-development
+  --models=<root> --port=8721 --n-ctx=32768`, then point caret at it with a
+  config (`defaults: provider: slang`, `slang: base_url`, `model`).
+
+Launch agents through the caret suite (`bin/cs`, inside tmux), one isolated
+worktree per agent:
+
+```
+/launch caret:slang/<model> --config <agent>.sdn --workspace <worktree> --dangerously-allow-all
+```
+
+Rules for local models: give a SHORT brief (file:line, repro spec, expected
+result, landing steps), for example `build/TASK.md` in the worktree. A 30B
+model cannot digest this skill file, so do not tell it to read it. Never
+`--dangerously-allow-all` without an isolated `--workspace`. Needs a current
+seed (HTTP and the memory gate are broken on seeds older than 2026-11-12).
+
+Full setup, caret suite commands and troubleshooting:
 `doc/07_guide/app/llm/local_llm_slang_caret_setup.md`.
 
 ## Spec-writing rules that cost a session (2026-09-27)

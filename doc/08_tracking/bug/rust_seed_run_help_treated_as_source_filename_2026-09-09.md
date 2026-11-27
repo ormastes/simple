@@ -2,7 +2,7 @@
 
 - **ID:** `rust_seed_run_help_treated_as_source_filename_2026-09-09`
 - **Date:** 2026-09-09
-- **Status:** OPEN
+- **Status:** FIXED (03b3450f299; handle_run_wrapper, src/compiler_rust/driver/src/main.rs:470; closed 2026-11-04)
 - **Severity:** P2
 - **Component:** `src/compiler_rust/driver/src/main.rs`
 

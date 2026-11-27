@@ -1,0 +1,144 @@
+# Compiler-owned observations of actual retained parsing. Not semantic admission.
+# Execution requires an admitted general runtime; source-authored TDD only.
+use std.spec.*
+use compiler.common.driver_compile_options.{CompileOptions}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1, semantic_query_read_manifest_valid_v1}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_source_parse_retained.*
+use compiler.driver.cache.retained_source_traversal_observation_v1.*
+
+fn observed_driver_v1() -> CompilerDriver:
+    val driver = CompilerDriver.create(CompileOptions.default())
+    driver.ctx.sources = [
+        SourceFile(path: "alpha.spl", module_name: "alpha",
+            content: "pub fn answer() -> i64:\n    41\n"),
+        SourceFile(path: "beta.spl", module_name: "beta",
+            content: "pub fn successor() -> i64:\n    42\n"),
+    ]
+    driver
+
+describe "Actual retained compiler source traversal observations V1":
+    it "observes the same parser outputs used by the retained compiler loop":
+        val driver = observed_driver_v1()
+        val receipt = driver.parse_all_with_source_observations_v1().unwrap()
+        val projection = receipt.projection_v1(driver).unwrap()
+        expect(driver.ctx.modules["alpha"].function_order).to_equal(["answer"])
+        expect(driver.ctx.modules["beta"].function_order).to_equal(["successor"])
+        expect(projection.observations.len()).to_equal(2)
+        expect(projection.observations[0].function_names).to_equal(["answer"])
+        expect(projection.observations[1].function_names).to_equal(["successor"])
+        expect(projection.subject.sources[0].path).to_equal("alpha.spl")
+        expect(projection.subject.sources[1].path).to_equal("beta.spl")
+        expect(projection.subject.driver_identity).to_equal(driver.identity_id)
+        expect(semantic_query_read_manifest_valid_v1(projection.query_reads)).to_equal(true)
+        expect(projection.query_reads.ordered_reads.len()).to_equal(2)
+        for index in 0..2:
+            val read = projection.query_reads.ordered_reads[index]
+            expect(read.ordinal).to_equal(index)
+            expect(read.consumed_fingerprint).to_equal(
+                projection.subject.sources[index].source_digest)
+            expect(read.completeness).to_equal(SemanticCoverageV1.Unknown)
+        expect(projection.semantic_authorized).to_equal(false)
+
+    it "selects observation through the existing compiler phase entrypoint":
+        val driver = observed_driver_v1()
+        driver.ctx.config["scv_source_observations_v1"] = "1"
+        val parsed = driver.parse_all_impl()
+        expect(parsed[1]).to_equal(true)
+        expect(driver.source_traversal_diagnostic_v1.is_some()).to_equal(true)
+        val projection = driver.source_traversal_diagnostic_v1.unwrap()
+        expect(projection.observations.len()).to_equal(2)
+        expect(driver.ctx.modules["alpha"].function_order).to_equal(["answer"])
+        expect(projection.semantic_authorized).to_equal(false)
+
+    it "keeps the default retained phase free of an observation subject":
+        val driver = observed_driver_v1()
+        val parsed = driver.parse_all_impl()
+        expect(parsed[1]).to_equal(true)
+        expect(driver.source_traversal_diagnostic_v1.is_none()).to_equal(true)
+        expect(driver.source_traversal_generation_v1).to_equal(1)
+        expect(driver.ctx.modules["alpha"].function_order).to_equal(["answer"])
+
+    it "refuses entry-selected closure instead of claiming the entire inventory":
+        val driver = observed_driver_v1()
+        driver.ctx.config["compiler_source_entry"] = "alpha.spl"
+        expect(driver.parse_all_with_source_observations_v1()).to_equal(
+            Err("source-traversal-unsupported-route"))
+        expect(driver.ctx.modules.len()).to_equal(0)
+
+    it "retains an immutable subject when a returned projection is edited":
+        val driver = observed_driver_v1()
+        val receipt = driver.parse_all_with_source_observations_v1().unwrap()
+        val original = receipt.projection_v1(driver).unwrap()
+        var changed = receipt.projection_v1(driver).unwrap()
+        changed.subject.sources[0].path = "substituted.spl"
+        changed.observations[0].function_names.push("invented")
+        val current = receipt.projection_v1(driver).unwrap()
+        expect(current.subject).to_equal(original.subject)
+        expect(current.observations).to_equal(original.observations)
+
+    it "refuses changed bytes and an omitted or additional source":
+        val driver = observed_driver_v1()
+        val receipt = driver.parse_all_with_source_observations_v1().unwrap()
+        val sources = driver.ctx.sources
+        driver.ctx.sources = [SourceFile(path: "alpha.spl", module_name: "alpha",
+            content: "pub fn answer() -> i64:\n    99\n"), sources[1]]
+        expect(receipt.projection_v1(driver)).to_equal(Err("source-traversal-subject-changed"))
+        driver.ctx.sources = [sources[0]]
+        expect(receipt.projection_v1(driver)).to_equal(Err("source-traversal-subject-changed"))
+        driver.ctx.sources = [sources[0], sources[1], SourceFile(path: "extra.spl",
+            module_name: "extra", content: "fn extra():\n    0\n")]
+        expect(receipt.projection_v1(driver)).to_equal(Err("source-traversal-subject-changed"))
+
+    it "rejects a foreign compiler instance or changed selected frontend context":
+        val driver = observed_driver_v1()
+        val receipt = driver.parse_all_with_source_observations_v1().unwrap()
+        val foreign = observed_driver_v1()
+        expect(receipt.projection_v1(foreign)).to_equal(Err("source-traversal-subject-changed"))
+        driver.ctx.native_target = "changed-target"
+        expect(receipt.projection_v1(driver)).to_equal(Err("source-traversal-subject-changed"))
+
+    it "retires an earlier receipt when the driver starts another traversal":
+        val driver = observed_driver_v1()
+        val first = driver.parse_all_with_source_observations_v1().unwrap()
+        val first_projection = first.projection_v1(driver).unwrap()
+        val first_subject = first_projection.subject
+        val second = driver.parse_all_with_source_observations_v1().unwrap()
+        val second_projection = second.projection_v1(driver).unwrap()
+        val second_subject = second_projection.subject
+        expect(second_subject.traversal_generation).to_equal(
+            first_subject.traversal_generation + 1)
+        expect(first.projection_v1(driver)).to_equal(Err("source-traversal-subject-changed"))
+
+    it "retires a receipt when the existing default compiler phase parses again":
+        val driver = observed_driver_v1()
+        val receipt = driver.parse_all_with_source_observations_v1().unwrap()
+        val parsed = driver.parse_all_impl()
+        expect(parsed[1]).to_equal(true)
+        expect(receipt.projection_v1(driver)).to_equal(Err("source-traversal-subject-changed"))
+
+    it "refuses duplicate source identity before parsing":
+        val driver = observed_driver_v1()
+        val source = driver.ctx.sources[0]
+        driver.ctx.sources = [source, source]
+        expect(driver.parse_all_with_source_observations_v1()).to_equal(
+            Err("source-traversal-duplicate-source"))
+        expect(driver.ctx.modules.len()).to_equal(0)
+
+    it "does not issue a successful traversal after actual parser rejection":
+        val driver = observed_driver_v1()
+        driver.ctx.sources = [SourceFile(path: "broken.spl", module_name: "broken",
+            content: "fn broken(\n")]
+        expect(driver.parse_all_with_source_observations_v1()).to_equal(
+            Err("source-traversal-parse-failed"))
+        expect(driver.ctx.errors.len()).to_be_greater_than(0)
+
+    it "revokes the retained receipt without reviving copied projections":
+        val driver = observed_driver_v1()
+        val receipt = driver.parse_all_with_source_observations_v1().unwrap()
+        expect(receipt.projection_v1(driver).is_ok()).to_equal(true)
+        expect(receipt.close_v1()).to_equal(Ok(()))
+        expect(receipt.projection_v1(driver)).to_equal(Err("source-traversal-closed"))
+        expect(receipt.close_v1()).to_equal(Err("source-traversal-closed"))

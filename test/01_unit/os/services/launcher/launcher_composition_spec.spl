@@ -11,6 +11,9 @@ use std.spec.step
 use std.nogc_sync_mut.composition.{parse_composition_source_v1, encode_composition_image_v1, decode_composition_image_v1}
 use os.services.launcher.launcher.{launcher_init}
 use os.services.launcher.launcher_composition.{launcher_load_composition_bytes_v1, composition_app_ids_v1}
+use os.services.launcher.launcher_catalog_projection.{launcher_reset_composition_policy_v1}
+use os.services.launcher.launcher_association_registry.{launcher_associations_authoritative_v1}
+use os.services.launcher.launcher_registry.{launcher_associated_app_for_path}
 use os.services.launcher.launcher_registry.{app_count, _app_index_by_name, _app_path, _app_key, _app_mod, MOD_META, MOD_CTRL}
 
 
@@ -95,13 +98,44 @@ describe "launcher SCI application projection":
         expect(result.code).to_equal("SCI_LAUNCHER_MANIFEST_CAPABILITY_PROJECTION_REQUIRED")
         expect(app_count).to_equal(before_count)
 
-    it "REQ-008 fails closed when the association owner has no projection API":
+    it "REQ-008 projects validated associations through the owner index":
         # @req REQ-SSPEC-OS
-        step("REQ-008 fails closed when the association owner has no projection API")
+        step("REQ-008 projects validated associations through the owner index")
         val association_image = _image("schema: simple.composition/1\napps:\n  - id: notes-association\n    name: Associated Notes\n    artifact: /sys/apps/associated_notes.smf\n    associations: [.notes]\n")
         launcher_init()
+        launcher_reset_composition_policy_v1()
         val before_count = app_count
         val result = launcher_load_composition_bytes_v1(association_image.bytes)
+        expect(result.ok).to_equal(true)
+        expect(result.code).to_equal("SCI_LAUNCHER_OK")
+        expect(app_count).to_equal(before_count + 1)
+        expect(launcher_associations_authoritative_v1()).to_equal(true)
+        expect(launcher_associated_app_for_path("/home/a.notes")).to_equal("/sys/apps/associated_notes.smf")
+        # SCI is authoritative: the legacy hard-coded table no longer wins.
+        expect(launcher_associated_app_for_path("/home/a.txt")).to_equal("")
+
+    it "REQ-008 rejects duplicate associations before mutation":
+        # @req REQ-SSPEC-OS
+        step("REQ-008 rejects duplicate associations before mutation")
+        val dup_image = _image("schema: simple.composition/1\napps:\n  - id: a\n    name: App A\n    artifact: /sys/apps/a.smf\n    associations: [.dup]\n  - id: b\n    name: App B\n    artifact: /sys/apps/b.smf\n    associations: [.dup]\n")
+        launcher_init()
+        launcher_reset_composition_policy_v1()
+        val before_count = app_count
+        val result = launcher_load_composition_bytes_v1(dup_image.bytes)
         expect(result.ok).to_equal(false)
-        expect(result.code).to_equal("SCI_LAUNCHER_ASSOCIATION_PROJECTION_REQUIRED")
+        expect(result.code).to_equal("SCI_LAUNCHER_ASSOCIATION_DUPLICATE")
+        expect(app_count).to_equal(before_count)
+        expect(launcher_associations_authoritative_v1()).to_equal(false)
+        expect(launcher_associated_app_for_path("/home/a.txt")).to_equal("/sys/apps/editor")
+
+    it "REQ-008 rejects a malformed association key before mutation":
+        # @req REQ-SSPEC-OS
+        step("REQ-008 rejects a malformed association key before mutation")
+        val bad_image = _image("schema: simple.composition/1\napps:\n  - id: a\n    name: App A\n    artifact: /sys/apps/a.smf\n    associations: [\"bad key\"]\n")
+        launcher_init()
+        launcher_reset_composition_policy_v1()
+        val before_count = app_count
+        val result = launcher_load_composition_bytes_v1(bad_image.bytes)
+        expect(result.ok).to_equal(false)
+        expect(result.code).to_equal("SCI_LAUNCHER_ASSOCIATION_INVALID")
         expect(app_count).to_equal(before_count)

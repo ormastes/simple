@@ -1,0 +1,50 @@
+# @cover src/app/cli/shard_mem_clamp.spl
+# Purpose: bug native_build_shard_estimate_exceeds_budget_unbounded_fallback_2026_11_09.
+# Stage3 attempt 1: per-worker static estimate 26 GiB (doubled to 52 GiB while
+# unmeasured) on a host with ~49 GB free; the MIR shard pass produced no
+# verdict and the build silently fell back to UNSHARDED in-process MIR, which
+# grew past 10.6 GB and was killed by the commit guard.
+use std.spec
+use app.cli.shard_mem_clamp.{shard_worker_estimate_clamped_kib_v1, shard_pool_workers_v1}
+use app.cli.shard_mem_clamp.{shard_commit_unmeasured_estimate_kib_v1, shard_commit_estimate_kib_v1}
+use app.cli.shard_mem_clamp.{native_mir_shard_fallback_action_v1}
+
+# Fake host: 49 GB free commit, 24 GiB reserve.
+val FREE_KIB: i64 = 49000000
+val RESERVE_KIB: i64 = 25165824
+val STATIC_26G: i64 = 27262976
+
+describe "per-worker estimate clamps to the available budget":
+    it "admits at least one worker when the unmeasured estimate exceeds the budget":
+        val raw = shard_commit_unmeasured_estimate_kib_v1(STATIC_26G, 0)
+        val est = shard_worker_estimate_clamped_kib_v1(raw, FREE_KIB - RESERVE_KIB)
+        expect(shard_pool_workers_v1(FREE_KIB - RESERVE_KIB, est) >= 1).to_equal(true)
+
+    it "prices from the measured previous-run peak, not the static default":
+        # build_tr.log: [mir-shard] measured worker peak commit=7364284 kB.
+        val est = shard_commit_unmeasured_estimate_kib_v1(STATIC_26G, 7364284)
+        expect(est).to_equal(9205355)
+        # 2 workers fit the 49 GB fake host without any SIMPLE_*_SHARD_WORKER_KB.
+        expect(shard_pool_workers_v1(FREE_KIB - RESERVE_KIB, est)).to_equal(2)
+        # Live observation in the run still raises it.
+        expect(shard_commit_estimate_kib_v1(est, 11000000)).to_equal(11000000)
+
+    it "keeps an estimate that already fits":
+        expect(shard_worker_estimate_clamped_kib_v1(8000000, 23834176)).to_equal(8000000)
+
+    it "leaves the estimate alone when the budget is unknown":
+        expect(shard_worker_estimate_clamped_kib_v1(54525952, -1)).to_equal(54525952)
+        expect(shard_worker_estimate_clamped_kib_v1(54525952, 0)).to_equal(54525952)
+
+describe "no-verdict MIR shard fallback is bounded and loud":
+    it "retries with one worker before anything else":
+        expect(native_mir_shard_fallback_action_v1(4, false, false)).to_equal("retry-serial")
+        expect(native_mir_shard_fallback_action_v1(2, false, true)).to_equal("retry-serial")
+
+    it "refuses the unsharded in-process lowering by default":
+        expect(native_mir_shard_fallback_action_v1(1, false, false)).to_equal("refuse")
+        expect(native_mir_shard_fallback_action_v1(4, true, false)).to_equal("refuse")
+
+    it "allows the in-process lowering only on explicit opt-in":
+        expect(native_mir_shard_fallback_action_v1(1, false, true)).to_equal("inprocess")
+        expect(native_mir_shard_fallback_action_v1(4, true, true)).to_equal("inprocess")

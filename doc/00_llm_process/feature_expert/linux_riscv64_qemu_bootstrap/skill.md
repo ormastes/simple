@@ -29,7 +29,7 @@ from a `release/*` (or `main`) snapshot, then Stage 3/4 when budget allows.
 # host (Debian/Ubuntu): qemu-system-riscv opensbi u-boot-qemu qemu-utils cloud-image-utils
 sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --smoke      # PASS line: arch=riscv64 nproc=20
 sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --provision  # rustup nightly + clang/lld in guest
-sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --sync origin/release/1.0
+sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --sync origin/release/1.0.0
 sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --stage2     # detached in guest, polls ~/stage2.rc
 ```
 

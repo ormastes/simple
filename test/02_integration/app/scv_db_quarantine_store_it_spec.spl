@@ -1,5 +1,6 @@
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, skip}
 use app.io.mod.{cwd, dir_create, file_write, file_write_bytes, process_run_bounded, host_os}
+use test.fixtures.scv.db_filesystem_fixture.{setup_item2_filesystem_link_supported}
 use app.scv.db.quarantine_store.*
 use app.scv.db.local_store.{db_store_read}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
@@ -149,19 +150,26 @@ describe "External signed patch quarantine":
         expect(dir_create("{checkout}/untrusted-store", false)).to_be(true)
         expect(db_quarantine_import(checkout, "{checkout}/untrusted-store", input, "scv-patch-bundle-v1", 1, quota)).to_equal(Err("SCVDB_STORE_SCOPE"))
 
-    it "rejects an actual input symlink without following its bytes":
-        val (checkout, external, input) = setup_item2_quarantine_paths()
-        val quota = setup_item2_quarantine_quota()
-        expect(file_write(input, db_quarantine_bundle_encode([setup_item2_quarantine_patch(1)], quota).unwrap())).to_be(true)
-        val alias = "{external}/alias.bundle"
-        var code = -1
-        if host_os() == "windows":
-            val script = "{external}/make-link.ps1"
-            expect(file_write(script, "param([string]$LinkPath,[string]$TargetPath)\n$ErrorActionPreference='Stop'\nNew-Item -ItemType SymbolicLink -Path $LinkPath -Target $TargetPath | Out-Null\n")).to_be(true)
-            val (_out, _err, status) = process_run_bounded("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-LinkPath", alias, "-TargetPath", input], 30000, 4096)
-            code = status
-        else:
-            val (_out, _err, status) = process_run_bounded("ln", ["-s", input, alias], 30000, 4096)
-            code = status
-        expect(code).to_equal(0)
-        expect(db_quarantine_import(checkout, external, alias, "scv-patch-bundle-v1", 1, quota)).to_equal(Err("SCVDB_QUARANTINE_INPUT"))
+    val file_links_unsupported = if not setup_item2_filesystem_link_supported():
+        "host capability: SymbolicLink creation requires administrator/developer mode on this Windows host"
+    else:
+        ""
+    if file_links_unsupported != "":
+        skip("rejects an actual input symlink without following its bytes", file_links_unsupported)
+    else:
+        it "rejects an actual input symlink without following its bytes":
+            val (checkout, external, input) = setup_item2_quarantine_paths()
+            val quota = setup_item2_quarantine_quota()
+            expect(file_write(input, db_quarantine_bundle_encode([setup_item2_quarantine_patch(1)], quota).unwrap())).to_be(true)
+            val alias = "{external}/alias.bundle"
+            var code = -1
+            if host_os() == "windows":
+                val script = "{external}/make-link.ps1"
+                expect(file_write(script, "param([string]$LinkPath,[string]$TargetPath)\n$ErrorActionPreference='Stop'\nNew-Item -ItemType SymbolicLink -Path $LinkPath -Target $TargetPath | Out-Null\n")).to_be(true)
+                val (_out, _err, status) = process_run_bounded("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-LinkPath", alias, "-TargetPath", input], 30000, 4096)
+                code = status
+            else:
+                val (_out, _err, status) = process_run_bounded("ln", ["-s", input, alias], 30000, 4096)
+                code = status
+            expect(code).to_equal(0)
+            expect(db_quarantine_import(checkout, external, alias, "scv-patch-bundle-v1", 1, quota)).to_equal(Err("SCVDB_QUARANTINE_INPUT"))

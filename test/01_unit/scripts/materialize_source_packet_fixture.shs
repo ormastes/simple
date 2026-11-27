@@ -1,0 +1,56 @@
+#!/bin/sh
+# Fixture builder for materialize_source_packet_spec.spl.
+# Usage: materialize_source_packet_fixture.shs <empty dir>
+# Builds a tiny repo, a deliberately imperfect archive (one omitted file, one
+# CRLF-transformed file), an approved empty candidate root and a request
+# packet. Prints the config path and its sha256 on one line.
+set -eu
+d=$1
+repo_root=$(pwd)
+mkdir -p "$d/seed" "$d/packet"
+cd "$d/seed"
+git init -q .
+git config user.email t@example.invalid
+git config user.name fixture
+git config core.autocrlf false
+for f in src/compiler/70.backend/backend_plugin/abi/simple_backend_plugin_v1.h \
+         tools/counterpart/sdk/c/simple_counterpart_abi.h src/app/t32_cli/mod.spl \
+         src/runtime/runtime_native.c src/runtime/runtime.h src/app/cli/interpreter_main.spl \
+         src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl \
+         scripts/bootstrap/bootstrap-logged-process.shs config/var.sdn \
+         scripts/resource/helper.sh; do
+    mkdir -p "$(dirname "$f")"
+    printf 'content of %s\n' "$f" > "$f"
+done
+git add -A
+alias_blob=$(printf '%s' 'runtime.h' | git hash-object -w --stdin)
+git update-index --add --cacheinfo "120000,$alias_blob,src/runtime/alias.h"
+git commit -q -m fixture
+head=$(git rev-parse HEAD)
+# Archive = exact tree minus config/var.sdn, with scripts/resource/helper.sh CRLF-transformed.
+git archive --format=tar HEAD > "$d/full.tar"
+mkdir "$d/unpack"
+tar --force-local -xf "$d/full.tar" -C "$d/unpack" --exclude=src/runtime/alias.h --exclude=pax_global_header
+rm -f "$d/unpack/config/var.sdn"
+printf 'content of scripts/resource/helper.sh\r\n' > "$d/unpack/scripts/resource/helper.sh"
+rm -f "$d/unpack/src/runtime/alias.h"
+(cd "$d/unpack" && find . -type f -o -type d | sed -e 's#^\./##' | grep -v '^\.$' | sort > "$d/members.txt")
+tar --force-local --no-recursion -cf "$d/archive.tar" -C "$d/unpack" -T "$d/members.txt"
+# Add the alias member as a real tar symlink via the git-produced archive.
+git archive --format=tar HEAD src/runtime/alias.h > "$d/alias.tar"
+tar --force-local -Af "$d/archive.tar" "$d/alias.tar"
+git clone -q --no-checkout "$d/seed" "$d/root"
+git -C "$d/root" read-tree HEAD
+cat > "$d/packet/config.json" <<CONFIG
+{
+  "schema": "bootstrap-materialization-request-v1",
+  "source_root": "$d/root",
+  "repository": "$d/seed",
+  "source_head": "$head",
+  "archive_source_head": "$head",
+  "archive_path": "$d/archive.tar",
+  "archive_sha256": "$(sha256sum "$d/archive.tar" | cut -d' ' -f1)",
+  "boundary_helper_sha256": "$(sha256sum "$repo_root/scripts/bootstrap/lib/materialization-path-boundary.shs" | cut -d' ' -f1)"
+}
+CONFIG
+printf '%s %s\n' "$d/packet/config.json" "$(sha256sum "$d/packet/config.json" | cut -d' ' -f1)"

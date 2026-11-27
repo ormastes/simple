@@ -1,0 +1,89 @@
+# @req REQ-SSPEC-UNIT
+"""
+# Native emission order determinism (stage4 == stage5 fixpoint)
+
+Two MirModules with the same functions inserted into `functions` in
+different orders must select into MachModules with byte-identical
+function order. On the native runtime `Dict<SymbolId, _>` iterates in
+key-address order, so any emitter walking `module.functions.keys()`
+permutes text layout between otherwise identical self-builds. The
+interpreter iterates in insertion order, so the two insertion orders
+here reproduce that permutation deterministically.
+
+Fixed sites: isel_x86_64 / isel_aarch64 / isel_riscv64 / isel_riscv32
+module loops, cranelift adapter declare/compile/statics, wasm adapter.
+"""
+
+# @tag: unit, compiler, backend, determinism
+
+use std.spec.*
+use compiler.mir.mir_data.*
+use compiler.backend.native.isel_x86_64.{isel_module}
+use compiler.backend.native.isel_aarch64.{isel_module_aarch64}
+use compiler.backend.native.mach_inst.{MachModule}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+
+fn det_const_function(id: i64, name: text, value: i64) -> MirFunction:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val sig = MirSignature(params: [], return_type: i64_type, is_variadic: false)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("v"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(value), i64_type), span: nil)
+        ],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+    )
+    MirFunction(
+        symbol: SymbolId.new(id),
+        name: name,
+        signature: sig,
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+
+fn det_id(name: text) -> i64:
+    # Ids anti-correlate with names so neither insertion order nor id/hash
+    # order coincides with the canonical name order.
+    if name == "alpha":
+        return 3
+    if name == "mid":
+        return 2
+    1
+
+fn det_module(order: [text]) -> MirModule:
+    var functions: Dict<SymbolId, MirFunction> = {}
+    for name in order:
+        val id = det_id(name)
+        functions[SymbolId.new(id)] = det_const_function(id, name, id * 10)
+    MirModule(name: "det", functions: functions, statics: {}, constants: {}, types: {})
+
+fn det_function_names(mach: MachModule) -> text:
+    var names: [text] = []
+    for f in mach.functions:
+        names.push(f.name)
+    names.join(",")
+
+describe "Native emission order determinism":
+    it "x86_64 isel orders functions canonically regardless of dict insertion order":
+        val forward = isel_module(det_module(["alpha", "mid", "zeta"]))
+        val reverse = isel_module(det_module(["zeta", "mid", "alpha"]))
+        expect(det_function_names(forward)).to_equal("alpha,mid,zeta")
+        expect(det_function_names(reverse)).to_equal("alpha,mid,zeta")
+
+    it "aarch64 isel orders functions canonically regardless of dict insertion order":
+        val forward = isel_module_aarch64(det_module(["mid", "alpha", "zeta"]))
+        val reverse = isel_module_aarch64(det_module(["zeta", "alpha", "mid"]))
+        expect(det_function_names(forward)).to_equal("alpha,mid,zeta")
+        expect(det_function_names(reverse)).to_equal("alpha,mid,zeta")

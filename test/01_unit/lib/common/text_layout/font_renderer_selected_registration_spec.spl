@@ -1,0 +1,35 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+"""
+## Purpose and audience
+Split out of `font_renderer_spec.spl` (2026-11-15): registering the exact
+bytes of every selected font identity hashes all 16 pinned faces (~52 MB)
+twice, which alone ran past the 900 s worker budget and hid every other row
+of the parent spec behind a timeout. Same assertions, own file and budget.
+Written for the text-layout owners.
+"""
+use std.spec.step
+use std.spec.{describe, it, expect}
+use common.text_layout.font_renderer.{FontRenderer}
+use std.nogc_sync_mut.text_layout.font_renderer.{font_renderer_register_selected_bytes}
+use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_identity}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+
+describe "selected font asset registration":
+    it "registers exact bytes for every selected identity and rejects corruption":
+        # @req REQ-SSPEC-LIB
+        # @capture(statistics): per-candidate registration and identity verdicts
+        step("registers exact bytes for every selected identity and rejects corruption")
+        val candidates = selected_font_asset_candidates()
+        expect(candidates.len()).to_equal(16)  # oracle: 16 — named expected value from the requirement
+        for candidate in candidates:
+            val blob = file_read_bytes(candidate.local_path)
+            var malformed = blob
+            malformed[malformed.len() - 1] = (malformed[malformed.len() - 1].to_i64() ^ 1).to_u8()
+            expect(font_renderer_register_selected_bytes(candidate.local_path, malformed)).to_be(false)
+            expect(font_renderer_register_selected_bytes(candidate.local_path, blob)).to_be(true)
+            var renderer = FontRenderer.new()
+            expect(renderer.try_load_registered_identity(selected_font_asset_identity(candidate))).to_be(true)
+            expect(renderer.current_font_identity()).to_equal(selected_font_asset_identity(candidate))
+            renderer.clear_ttf()
+

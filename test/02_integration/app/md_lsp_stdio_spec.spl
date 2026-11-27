@@ -1,0 +1,218 @@
+# Real native Markdown LSP stdio checks. Qualification pins the executable;
+# no interpreter, wrapper server, or protocol-repair bridge is substituted.
+use std.spec
+use std.common.json.serializer.{json_escape_string}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.env.platform.{get_temp_dir, is_windows}
+use std.env.variables.{env_get}
+
+fn md_stdio_string(value: text) -> text:
+    "\"" + json_escape_string(value) + "\""
+
+fn md_stdio_request(id_raw: text, method: text, params: text) -> text:
+    "{" + "\"jsonrpc\":\"2.0\",\"id\":" + id_raw + ",\"method\":" + md_stdio_string(method) + ",\"params\":" + params + "}"
+
+fn md_stdio_notification(method: text, params: text) -> text:
+    "{" + "\"jsonrpc\":\"2.0\",\"method\":" + md_stdio_string(method) + ",\"params\":" + params + "}"
+
+fn md_stdio_result(id_raw: text, result: text) -> text:
+    "{" + "\"jsonrpc\":\"2.0\",\"id\":" + id_raw + ",\"result\":" + result + "}"
+
+fn md_stdio_frame(body: text, type_first: bool = false) -> text:
+    val length_header = "Content-Length: " + str(body.len()) + "\r\n"
+    val type_header = "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n"
+    val headers = if type_first: type_header + length_header else: length_header + type_header
+    headers + "\r\n" + body
+
+fn md_stdio_document(uri: text) -> text:
+    "{" + "\"textDocument\":" + "{" + "\"uri\":" + md_stdio_string(uri) + "}" + "}"
+
+fn md_stdio_position(uri: text, line: i64) -> text:
+    val document = "{" + "\"uri\":" + md_stdio_string(uri) + "}"
+    val position = "{" + "\"line\":" + str(line) + ",\"character\":0" + "}"
+    "{" + "\"textDocument\":" + document + ",\"position\":" + position + "}"
+
+fn md_stdio_open(uri: text, content: text) -> text:
+    val document = "{" + "\"uri\":" + md_stdio_string(uri) + ",\"languageId\":\"markdown\",\"version\":1,\"text\":" + md_stdio_string(content) + "}"
+    md_stdio_notification("textDocument/didOpen", "{" + "\"textDocument\":" + document + "}")
+
+fn md_stdio_stdin_command(binary: text, input_path: text, windows: bool) -> text:
+    assert(binary != "" and input_path != "", "Pin a native Markdown LSP executable and input path")
+    assert(not binary.contains("\r") and not binary.contains("\n") and not input_path.contains("\r") and not input_path.contains("\n"), "Paths cannot contain line breaks")
+    if windows:
+        assert(not binary.contains("\"") and not binary.contains("%") and not input_path.contains("\"") and not input_path.contains("%"), "Windows stdin paths cannot contain command expansion")
+        return "\"\"" + binary + "\" < \"" + input_path + "\"\""
+    val quoted_binary = "'" + binary.replace("'", "'\"'\"'") + "'"
+    val quoted_input = "'" + input_path.replace("'", "'\"'\"'") + "'"
+    "exec " + quoted_binary + " < " + quoted_input
+
+fn md_stdio_send(messages: text) -> (text, text):
+    val binary = env_get("SIMPLE_MD_LSP_TEST_BINARY")
+    assert(binary != "", "Set SIMPLE_MD_LSP_TEST_BINARY to the receipt-bound native server")
+    val directory = secure_temp_dir(get_temp_dir(), "md-lsp-stdio-").unwrap()
+    val input_path = directory + "/input.txt"
+    assert(file_create_exclusive(input_path, messages), "Create private protocol input")
+    val windows = is_windows()
+    val command = md_stdio_stdin_command(binary, input_path, windows)
+    val configured_shell = env_get("ComSpec")
+    val shell = if windows: (if configured_shell == "": "cmd.exe" else: configured_shell) else: "/bin/sh"
+    val args = if windows: ["/d", "/v:off", "/s", "/c", command] else: ["-c", command]
+    val (stdout, stderr, status) = process_run_bounded(shell, args, 15000, 16777216)
+    val removed = dir_remove_all(directory)
+    step("check server exit")
+    expect(status).to_equal(0)
+    expect(removed).to_equal(true)
+    # Current server diagnostic lines are allowed only on stderr. A panic or
+    # unrelated launcher diagnostic must not turn into a passing wire check.
+    for line in stderr.split("\n"):
+        expect(line.trim() == "" or line.starts_with("[md-lsp] ")).to_equal(true)
+    (stdout, stderr)
+
+fn md_stdio_parse_length(value: text) -> i64:
+    if value == "": return -1
+    var result: i64 = 0
+    var i = 0
+    while i < value.len():
+        val digit = value.byte_at(i) - 48
+        if digit < 0 or digit > 9: return -1
+        if result > 922337203685477580 or (result == 922337203685477580 and digit > 7): return -1
+        result = result * 10 + digit
+        i = i + 1
+    result
+
+fn md_stdio_responses(output: text, expected_count: i64) -> [text]:
+    var remaining = output
+    var responses: [text] = []
+    while remaining != "":
+        assert(remaining.starts_with("Content-Length: "), "Native stdout must contain only complete LSP frames")
+        var header_end: i64 = -1
+        var i = 0
+        while i + 4 <= remaining.len():
+            if remaining.slice(i, i + 4) == "\r\n\r\n":
+                header_end = i
+                break
+            i = i + 1
+        assert(header_end >= 0, "Each frame has a complete header separator")
+        val header = remaining.slice(16, header_end)
+        val length = md_stdio_parse_length(header)
+        val start = header_end + 4
+        assert(length >= 2 and length <= remaining.len() - start, "Content-Length matches an available JSON body")
+        val finish = start + length
+        val body = remaining.slice(start, finish)
+        assert(body.starts_with("{") and body.ends_with("}"), "A reply frame contains a complete JSON object")
+        responses = responses.push(body)
+        remaining = remaining.slice(finish, remaining.len())
+    expect(responses.len()).to_equal(expected_count)
+    responses
+
+describe "Markdown LSP native stdio":
+    it "preserves numeric, escaped, Unicode and large IDs across both header orders":
+        step("Send correlated requests and a notification to the actual selected binary")
+        val ids = ["3", "\"string-id\"", "\"a\\\"b\\\\c\"", "9007199254740993", "\"한글🙂\""]
+        var wire = md_stdio_frame(md_stdio_request("0", "initialize", "{" + "}"))
+        var i = 0
+        for id in ids:
+            wire = wire + md_stdio_frame(md_stdio_request(id, "textDocument/documentSymbol", md_stdio_document("file:///not-open.md")), i % 2 == 0)
+            i = i + 1
+        wire = wire + md_stdio_frame(md_stdio_notification("initialized", "{" + "\"id\":99" + "}"))
+        wire = wire + md_stdio_frame(md_stdio_request("9", "shutdown", "{" + "}"))
+        wire = wire + md_stdio_frame(md_stdio_notification("exit", "{" + "}"))
+        val output = md_stdio_send(wire)
+        val replies = md_stdio_responses(output.0, 7)
+        expect(replies[0].contains("\"capabilities\":")).to_equal(true)
+        i = 0
+        while i < ids.len():
+            expect(replies[i + 1]).to_equal(md_stdio_result(ids[i], "[]"))
+            i = i + 1
+        expect(replies[6]).to_equal(md_stdio_result("9", "null"))
+
+    it "replaces and closes the same live document without stale headings":
+        step("Observe symbols before replacement, after replacement and after close")
+        val uri = "file:///md-state.md"
+        val document = md_stdio_document(uri)
+        var wire = md_stdio_frame(md_stdio_request("1", "initialize", "{" + "}"))
+        wire = wire + md_stdio_frame(md_stdio_open(uri, "# First\nbody"))
+        wire = wire + md_stdio_frame(md_stdio_request("2", "textDocument/documentSymbol", document))
+        val change = "{" + "\"textDocument\":" + "{" + "\"uri\":" + md_stdio_string(uri) + ",\"version\":2" + "}" + ",\"contentChanges\":[" + "{" + "\"text\":\"# Updated\\nbody\"" + "}" + "]" + "}"
+        wire = wire + md_stdio_frame(md_stdio_notification("textDocument/didChange", change))
+        wire = wire + md_stdio_frame(md_stdio_request("3", "textDocument/documentSymbol", document))
+        wire = wire + md_stdio_frame(md_stdio_notification("textDocument/didClose", document))
+        wire = wire + md_stdio_frame(md_stdio_request("4", "textDocument/documentSymbol", document))
+        val output = md_stdio_send(wire)
+        val replies = md_stdio_responses(output.0, 4)
+        expect(replies[1].contains("\"name\":\"First\"")).to_equal(true)
+        expect(replies[2].contains("\"name\":\"Updated\"")).to_equal(true)
+        expect(replies[2].contains("First")).to_equal(false)
+        expect(replies[3]).to_equal(md_stdio_result("4", "[]"))
+
+    it "keeps fenced headings out of symbols and folds adjacent examples separately":
+        step("Query symbols and folds for a document containing two adjacent fenced examples")
+        val uri = "file:///md-fences.md"
+        val document = md_stdio_document(uri)
+        val content = "# Visible\n```md\n# Hidden\n```\n```\nx\n```\n## Last"
+        val wire = md_stdio_frame(md_stdio_request("1", "initialize", "{" + "}")) + md_stdio_frame(md_stdio_open(uri, content)) + md_stdio_frame(md_stdio_request("2", "textDocument/documentSymbol", document)) + md_stdio_frame(md_stdio_request("3", "textDocument/foldingRange", document))
+        val output = md_stdio_send(wire)
+        val replies = md_stdio_responses(output.0, 3)
+        expect(replies[1].contains("\"name\":\"Visible\"")).to_equal(true)
+        expect(replies[1].contains("\"name\":\"Last\"")).to_equal(true)
+        expect(replies[1].contains("Hidden")).to_equal(false)
+        expect(replies[2].contains("\"startLine\":1,\"endLine\":3")).to_equal(true)
+        expect(replies[2].contains("\"startLine\":4,\"endLine\":6")).to_equal(true)
+        expect(replies[2].contains("\"startLine\":1,\"endLine\":6")).to_equal(false)
+
+    it "reports Unicode symbols and replacement edits in UTF-16 units":
+        step("Decode escaped source and use a supplementary character in an actual document")
+        val uri = "file:///md-utf16.md"
+        val document = md_stdio_document(uri)
+        val escaped_open = "{" + "\"textDocument\":" + "{" + "\"uri\":" + md_stdio_string(uri) + ",\"version\":1,\"languageId\":\"markdown\",\"text\":\"# \\ud55c\\uae00\\ud83d\\ude42\\n\\ud55c\\uae00\\ud83d\\ude42 []()\"" + "}" + "}"
+        val range = "{" + "\"textDocument\":" + "{" + "\"uri\":" + md_stdio_string(uri) + "}" + ",\"range\":" + "{" + "\"start\":" + "{" + "\"line\":1,\"character\":0" + "}" + ",\"end\":" + "{" + "\"line\":1,\"character\":9" + "}" + "}" + "}"
+        val wire = md_stdio_frame(md_stdio_request("1", "initialize", "{" + "}")) + md_stdio_frame(md_stdio_notification("textDocument/didOpen", escaped_open)) + md_stdio_frame(md_stdio_request("2", "textDocument/documentSymbol", document)) + md_stdio_frame(md_stdio_request("3", "textDocument/codeAction", range))
+        val output = md_stdio_send(wire)
+        val replies = md_stdio_responses(output.0, 3)
+        expect(replies[1].contains("\"name\":\"한글🙂\"")).to_equal(true)
+        expect(replies[1].contains("\"end\":" + "{" + "\"line\":0,\"character\":6" + "}")).to_equal(true)
+        expect(replies[2].contains("\"end\":" + "{" + "\"line\":1,\"character\":9" + "}")).to_equal(true)
+        expect(replies[2].contains("\"newText\":\"한글🙂 [text](url)\"")).to_equal(true)
+
+    it "does not hover, follow links or rewrite Markdown syntax inside code examples":
+        step("send Markdown request")
+        val uri = "file:///md-code-guards.md"
+        val content = "# Visible\n```md\n# Hidden\n[link](#visible)\n[]()\n```\n# Outside"
+        var wire = md_stdio_frame(md_stdio_request("1", "initialize", "{" + "}"))
+        wire = wire + md_stdio_frame(md_stdio_open(uri, content))
+        wire = wire + md_stdio_frame(md_stdio_request("2", "textDocument/hover", md_stdio_position(uri, 2)))
+        wire = wire + md_stdio_frame(md_stdio_request("3", "textDocument/definition", md_stdio_position(uri, 3)))
+        wire = wire + md_stdio_frame(md_stdio_request("4", "textDocument/codeAction", md_stdio_position(uri, 4)))
+        wire = wire + md_stdio_frame(md_stdio_request("5", "textDocument/hover", md_stdio_position(uri, 6)))
+        val output = md_stdio_send(wire)
+        step("check Markdown response")
+        val replies = md_stdio_responses(output.0, 5)
+        expect(replies[1]).to_equal(md_stdio_result("2", "null"))
+        expect(replies[2]).to_equal(md_stdio_result("3", "null"))
+        expect(replies[3]).to_equal(md_stdio_result("4", "[]"))
+        val contents = "{" + "\"contents\":" + "{" + "\"kind\":\"plaintext\",\"value\":\"Heading level 1\"" + "}" + "}"
+        expect(replies[4]).to_equal(md_stdio_result("5", contents))
+
+    it "reports malformed JSON and handles the next complete frame":
+        step("Send a malformed nested array before a valid correlated request")
+        val malformed = "{" + "\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":[1,]" + "}"
+        val wire = md_stdio_frame(malformed) + md_stdio_frame(md_stdio_request("2", "initialize", "{" + "}"))
+        val output = md_stdio_send(wire)
+        val replies = md_stdio_responses(output.0, 2)
+        val parse_error = "{" + "\"jsonrpc\":\"2.0\",\"id\":null,\"error\":" + "{" + "\"code\":-32700,\"message\":\"Parse error\"" + "}" + "}"
+        expect(replies[0]).to_equal(parse_error)
+        expect(replies[1].contains("\"id\":2,")).to_equal(true)
+        expect(replies[1].contains("\"capabilities\":")).to_equal(true)
+
+    it "refuses invalid and duplicate Content-Length headers before dispatch":
+        step("Send malformed transport lengths without accepting them as valid JSON requests")
+        val lengths = ["-1", "12junk", "9223372036854775808"]
+        for length in lengths:
+            val output = md_stdio_send("Content-Length: " + length + "\r\n\r\n")
+            expect(output.0).to_equal("")
+            expect(output.1.contains("invalid message headers")).to_equal(true)
+        val duplicate = md_stdio_send("Content-Length: 2\r\nContent-Length: 2\r\n\r\n" + "{" + "}")
+        expect(duplicate.0).to_equal("")
+        expect(duplicate.1.contains("duplicate Content-Length")).to_equal(true)

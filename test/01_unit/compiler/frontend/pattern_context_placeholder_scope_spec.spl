@@ -1,0 +1,223 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, frontend, parser, pattern
+
+use std.spec.{describe, it, expect}
+use compiler.core.ast.{
+    DECL_FN, EXPR_CALL, EXPR_IDENT, EXPR_LAMBDA, EXPR_METHOD_CALL, EXPR_TUPLE,
+    arm_get_guard, arm_get_pattern,
+    decl_get_body, decl_get_name, decl_get_tag,
+    expr_get_str, expr_get_tag,
+    module_get_decls,
+}
+use compiler.core.parser.{parse_module_silent_checked}
+use compiler.core.ast_traversal.{
+    flat_arm_child_stmts, flat_expr_child_arms, flat_expr_child_exprs,
+    flat_expr_child_stmts, flat_stmt_child_arms, flat_stmt_child_exprs,
+    flat_stmt_child_stmts,
+}
+use compiler.frontend.desugar.placeholder_lambda.{
+    placeholder_transform_suppressed, set_placeholder_transform_suppressed,
+}
+
+val pattern_scope_prelude =
+    "enum Probe:\n    Some((i64, i64))\n    Err(i64)\n    None\n\n" +
+    "enum Inner:\n    Value(i64)\n    Empty\n\n" +
+    "enum Outer:\n    Wrap(Inner)\n    Other\n\n"
+
+fn pattern_scope_collect_arm(arm: i64) -> [i64]:
+    var patterns: [i64] = [arm_get_pattern(arm)]
+    val guard = arm_get_guard(arm)
+    if guard >= 0: patterns = patterns + pattern_scope_collect_expr(guard)
+    for stmt in flat_arm_child_stmts(arm): patterns = patterns + pattern_scope_collect_stmt(stmt)
+    patterns
+
+fn pattern_scope_collect_expr(expression: i64) -> [i64]:
+    if expression < 0: return []
+    var patterns: [i64] = []
+    for arm in flat_expr_child_arms(expression): patterns = patterns + pattern_scope_collect_arm(arm)
+    for child in flat_expr_child_exprs(expression): patterns = patterns + pattern_scope_collect_expr(child)
+    for stmt in flat_expr_child_stmts(expression): patterns = patterns + pattern_scope_collect_stmt(stmt)
+    patterns
+
+fn pattern_scope_collect_stmt(stmt: i64) -> [i64]:
+    if stmt < 0: return []
+    var patterns: [i64] = []
+    for arm in flat_stmt_child_arms(stmt): patterns = patterns + pattern_scope_collect_arm(arm)
+    for expression in flat_stmt_child_exprs(stmt): patterns = patterns + pattern_scope_collect_expr(expression)
+    for child in flat_stmt_child_stmts(stmt): patterns = patterns + pattern_scope_collect_stmt(child)
+    patterns
+
+fn pattern_scope_expr_has_lambda(expression: i64) -> bool:
+    if expression < 0: return false
+    if expr_get_tag(expression) == EXPR_LAMBDA: return true
+    for child in flat_expr_child_exprs(expression):
+        if pattern_scope_expr_has_lambda(child): return true
+    for arm in flat_expr_child_arms(expression):
+        if pattern_scope_arm_has_lambda(arm): return true
+    for stmt in flat_expr_child_stmts(expression):
+        if pattern_scope_stmt_has_lambda(stmt): return true
+    false
+
+fn pattern_scope_arm_has_lambda(arm: i64) -> bool:
+    if pattern_scope_expr_has_lambda(arm_get_pattern(arm)): return true
+    if pattern_scope_expr_has_lambda(arm_get_guard(arm)): return true
+    for stmt in flat_arm_child_stmts(arm):
+        if pattern_scope_stmt_has_lambda(stmt): return true
+    false
+
+fn pattern_scope_stmt_has_lambda(stmt: i64) -> bool:
+    if stmt < 0: return false
+    for expression in flat_stmt_child_exprs(stmt):
+        if pattern_scope_expr_has_lambda(expression): return true
+    for arm in flat_stmt_child_arms(stmt):
+        if pattern_scope_arm_has_lambda(arm): return true
+    for child in flat_stmt_child_stmts(stmt):
+        if pattern_scope_stmt_has_lambda(child): return true
+    false
+
+fn pattern_scope_expr_lambda_count(expression: i64) -> i64:
+    if expression < 0: return 0
+    var count: i64 = 0
+    if expr_get_tag(expression) == EXPR_LAMBDA: count = count + 1
+    for child in flat_expr_child_exprs(expression): count = count + pattern_scope_expr_lambda_count(child)
+    for arm in flat_expr_child_arms(expression): count = count + pattern_scope_arm_lambda_count(arm)
+    for stmt in flat_expr_child_stmts(expression): count = count + pattern_scope_stmt_lambda_count(stmt)
+    count
+
+fn pattern_scope_arm_lambda_count(arm: i64) -> i64:
+    var count = pattern_scope_expr_lambda_count(arm_get_pattern(arm))
+    count = count + pattern_scope_expr_lambda_count(arm_get_guard(arm))
+    for stmt in flat_arm_child_stmts(arm): count = count + pattern_scope_stmt_lambda_count(stmt)
+    count
+
+fn pattern_scope_stmt_lambda_count(stmt: i64) -> i64:
+    if stmt < 0: return 0
+    var count: i64 = 0
+    for expression in flat_stmt_child_exprs(stmt): count = count + pattern_scope_expr_lambda_count(expression)
+    for arm in flat_stmt_child_arms(stmt): count = count + pattern_scope_arm_lambda_count(arm)
+    for child in flat_stmt_child_stmts(stmt): count = count + pattern_scope_stmt_lambda_count(child)
+    count
+
+fn pattern_scope_expr_has_name(expression: i64, wanted: text) -> bool:
+    if expression < 0: return false
+    if expr_get_tag(expression) == EXPR_IDENT and expr_get_str(expression) == wanted: return true
+    for child in flat_expr_child_exprs(expression):
+        if pattern_scope_expr_has_name(child, wanted): return true
+    false
+
+fn pattern_scope_expr_has_tag(expression: i64, wanted: i64) -> bool:
+    if expression < 0: return false
+    if expr_get_tag(expression) == wanted: return true
+    for child in flat_expr_child_exprs(expression):
+        if pattern_scope_expr_has_tag(child, wanted): return true
+    false
+
+fn pattern_scope_expr_has_nested_call(expression: i64) -> bool:
+    if expression < 0: return false
+    val tag = expr_get_tag(expression)
+    if tag == EXPR_CALL or tag == EXPR_METHOD_CALL:
+        for child in flat_expr_child_exprs(expression):
+            val child_tag = expr_get_tag(child)
+            if child_tag == EXPR_CALL or child_tag == EXPR_METHOD_CALL: return true
+    for child in flat_expr_child_exprs(expression):
+        if pattern_scope_expr_has_nested_call(child): return true
+    false
+
+fn pattern_scope_assert_source(source: text, function_name: text, require_tuple: bool, require_nested_call: bool, minimum_wildcards: i64, expected_lambdas: i64):
+    val failed = parse_module_silent_checked(source, "testdata/pattern_context.spl")
+    expect(failed).to_equal(false)
+    var patterns: [i64] = []
+    var lambda_count: i64 = 0
+    var found_function = false
+    for declaration in module_get_decls():
+        if decl_get_tag(declaration) == DECL_FN and decl_get_name(declaration) == function_name:
+            found_function = true
+            for stmt in decl_get_body(declaration):
+                patterns = patterns + pattern_scope_collect_stmt(stmt)
+                lambda_count = lambda_count + pattern_scope_stmt_lambda_count(stmt)
+    expect(found_function).to_equal(true)
+    expect(patterns.len()).to_be_greater_than(0)
+    expect(lambda_count).to_equal(expected_lambdas)
+    var wildcard_count: i64 = 0
+    var saw_tuple = false
+    var saw_nested_call = false
+    for pattern in patterns:
+        expect(pattern_scope_expr_has_lambda(pattern)).to_equal(false)
+        if pattern_scope_expr_has_name(pattern, "_"): wildcard_count = wildcard_count + 1
+        if pattern_scope_expr_has_tag(pattern, EXPR_TUPLE): saw_tuple = true
+        if pattern_scope_expr_has_nested_call(pattern): saw_nested_call = true
+    expect(wildcard_count).to_be_greater_than_or_equal(minimum_wildcards)
+    if require_tuple: expect(saw_tuple).to_equal(true)
+    if require_nested_call: expect(saw_nested_call).to_equal(true)
+
+fn pattern_scope_assert_hof_after_failure(source: text, function_name: text):
+    expect(parse_module_silent_checked(source, "testdata/pattern_after_failure.spl")).to_equal(false)
+    var found_function = false
+    var has_ordinary_lambda = false
+    for declaration in module_get_decls():
+        if decl_get_tag(declaration) == DECL_FN and decl_get_name(declaration) == function_name:
+            found_function = true
+            for stmt in decl_get_body(declaration):
+                if pattern_scope_stmt_has_lambda(stmt): has_ordinary_lambda = true
+    expect(found_function).to_equal(true)
+    expect(has_ordinary_lambda).to_equal(true)
+
+describe "pattern parse scopes preserve nested wildcard structure":
+    it "keeps nested wildcard pattern trees and parses ordinary HOF placeholders in the condition initializer and body":
+        val source = pattern_scope_prelude +
+            "fn route(value: Probe):\n" +
+            "    if val Probe.Some((_, bound)) = Probe.Some((0, [1].map(_ + 1)[0])):\n" +
+            "        val body = [bound].map(_ + 2)\n" +
+            "    else:\n        val fallback = [3].map(_ + 3)\n" +
+            "    val after = [4].map(_ + 4)\n"
+        pattern_scope_assert_source(source, "route", true, false, 1, 4)
+
+    it "inspects the real elif, while, expression-if, and receive pattern nodes":
+        val elif_source = pattern_scope_prelude +
+            "fn elif_route(value: Probe):\n" +
+            "    if val Probe.Some((_, bound)) = value:\n        pass\n" +
+            "    elif val Probe.Err(_) = value:\n        val body = [1].map(_ + 1)\n"
+        pattern_scope_assert_source(elif_source, "elif_route", true, false, 2, 1)
+        val while_source = pattern_scope_prelude +
+            "fn while_route(value: Probe):\n" +
+            "    while val Probe.Some((_, bound)) = value:\n        val body = [bound].map(_ + 1)\n        break\n"
+        pattern_scope_assert_source(while_source, "while_route", true, false, 1, 1)
+        val expression_source = pattern_scope_prelude +
+            "fn expression_route(value: Probe):\n" +
+            "    val result = if val Probe.Err(_) = value:\n        [1].map(_ + 1)\n    else:\n        [2].map(_ + 2)\n"
+        pattern_scope_assert_source(expression_source, "expression_route", false, false, 1, 2)
+        val receive_source = pattern_scope_prelude +
+            "fn receive_route():\n" +
+            "    receive:\n" +
+            "        case Probe.Some((_, bound)) if [1].map(_ > 0)[0]:\n            val body = [bound].map(_ + 1)\n" +
+            "        case Probe.Err(_) if [1].map(_ > 0)[0]:\n            val other = [2].map(_ + 2)\n" +
+            "        after 0:\n            pass\n"
+        pattern_scope_assert_source(receive_source, "receive_route", true, false, 2, 4)
+        val nested_source = pattern_scope_prelude +
+            "fn nested_route(value: Outer):\n" +
+            "    if val Outer.Wrap(Inner.Value(_)) = value:\n        val body = [1].map(_ + 1)\n"
+        pattern_scope_assert_source(nested_source, "nested_route", false, true, 1, 1)
+
+    it "restores an already-set suppression state around refutable val and after parse failure":
+        val source = pattern_scope_prelude +
+            "fn refutable(value: Probe) -> i64:\n" +
+            "    val Err(code) = value else:\n        return -1\n" +
+            "    return code\n"
+        val previous = set_placeholder_transform_suppressed(true)
+        expect(parse_module_silent_checked(source, "testdata/refutable_pattern.spl")).to_equal(false)
+        expect(placeholder_transform_suppressed()).to_equal(true)
+        var refutable_patterns: [i64] = []
+        for declaration in module_get_decls():
+            if decl_get_tag(declaration) == DECL_FN and decl_get_name(declaration) == "refutable":
+                for stmt in decl_get_body(declaration): refutable_patterns = refutable_patterns + pattern_scope_collect_stmt(stmt)
+        expect(refutable_patterns.len()).to_be_greater_than(0)
+        for pattern in refutable_patterns: expect(pattern_scope_expr_has_lambda(pattern)).to_equal(false)
+        set_placeholder_transform_suppressed(false)
+        val unsupported = pattern_scope_prelude +
+            "fn unsupported(value: Probe) -> i64:\n" +
+            "    val Some(Inner.Value(item)) = value else:\n        return -1\n"
+        expect(parse_module_silent_checked(unsupported, "testdata/unsupported_refutable_pattern.spl")).to_equal(true)
+        val after_failure = "fn after_failure():\n    val mapped = [1].map(_ + 1)\n"
+        pattern_scope_assert_hof_after_failure(after_failure, "after_failure")
+        set_placeholder_transform_suppressed(previous)
+        expect(placeholder_transform_suppressed()).to_equal(previous)

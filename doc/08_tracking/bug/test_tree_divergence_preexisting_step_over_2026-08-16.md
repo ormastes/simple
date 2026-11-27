@@ -1717,3 +1717,10 @@ unit:tools/cat_spec.spl
 unit:tools/simple_os_primary_spec.spl
 ```
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+pre-existing divergence stepped over; record only.

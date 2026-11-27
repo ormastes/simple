@@ -68,12 +68,22 @@ rc=$?
 
 # Structural read-back: a link that silently emitted a host-arch or empty image
 # must not report success.
-hdr=$(readelf -h "$KERNEL" 2>/dev/null) || fail "readelf could not parse $KERNEL"
+# readelf: binutils on Linux; macOS ships none, so fall back to llvm-readelf
+# (PATH, then Homebrew's keg-only llvm). Absent everywhere is a hard ERROR.
+READELF=${READELF:-}
+if [ -z "$READELF" ]; then
+    for c in readelf llvm-readelf /opt/homebrew/opt/llvm/bin/llvm-readelf \
+             /opt/homebrew/opt/llvm@23/bin/llvm-readelf /usr/local/opt/llvm/bin/llvm-readelf; do
+        if command -v "$c" >/dev/null 2>&1; then READELF=$(command -v "$c"); break; fi
+    done
+fi
+[ -n "$READELF" ] || fail "no readelf/llvm-readelf found (set READELF)"
+hdr=$("$READELF" -h "$KERNEL" 2>/dev/null) || fail "readelf could not parse $KERNEL"
 case "$hdr" in
     *AArch64*) ;;
     *) fail "$KERNEL is not an AArch64 ELF" ;;
 esac
-readelf -SW "$KERNEL" 2>/dev/null | grep -q ' \.text ' \
+"$READELF" -SW "$KERNEL" 2>/dev/null | grep -q ' \.text ' \
     || fail "$KERNEL has no .text section (empty-link false success)"
 
 size=$(wc -c <"$KERNEL")

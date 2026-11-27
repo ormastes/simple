@@ -1,0 +1,112 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# `val x = match find(...): Some(v): v / None: return` lowers as a typed Option match
+
+Bug sfnt_fvar_option_match_nil_baremetal_2026-08-04: on the freestanding
+native lane the val-assigned Option payload extraction in
+`parse_fvar_axes` (scrutinee: a direct `find_table(...)` call returning
+`Option<OtTable>`, a CLASS payload) matched NEITHER arm and the fall-through
+loaded the nil sentinel into `table`, so `table.offset` faulted. These specs
+pin, on the lowered MIR, that this exact shape is lowered as an Option enum
+match: the scrutinee's discriminant is read and normalized through the
+dual-ABI lane split (`ematch_opt_boxed` / `ematch_opt_flat`), each arm is a
+discriminant compare, and the no-arm-matched path is a diverging trap
+(`Abort`), never a silent placeholder that flows into the `val`.
+"""
+
+# @tag: unit, compiler, mir, enum, option
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+val prelude = "class OtTable:\n    tag: u32\n    offset: u32\n    length: u32\n\n" +
+    "fn find_table(tables: [OtTable], tag: u32) -> Option<OtTable>:\n" +
+    "    for table in tables:\n        if table.tag == tag: return Some(table)\n    None\n\n"
+
+fn lower_src(body: text) -> (MirModule, [text]):
+    val src = prelude + body
+    val parsed = parse_full_frontend(src, "testdata/fixture_option_class_match.spl", "fixture_option_class_match", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("testdata/fixture_option_class_match.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    val target_context = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+    val mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in lowering.errors:
+        messages = messages.push(e.message)
+    (mir, messages)
+
+fn find_function(mir: MirModule, name: text) -> MirFunction?:
+    for function in mir.functions.values():
+        if function.name == name or function.name.ends_with("." + name):
+            return Some(function)
+    nil
+
+fn joined(messages: [text]) -> text:
+    var out = ""
+    for m in messages:
+        out = out + m + "\n"
+    out
+
+fn label_count(function: MirFunction, needle: text) -> i64:
+    var n = 0
+    for block in function.blocks:
+        if (block.label ?? "").contains(needle):
+            n = n + 1
+    n
+
+fn abort_count(function: MirFunction) -> i64:
+    var n = 0
+    for block in function.blocks:
+        match block.terminator:
+            case MirTerminator.Abort(_):
+                n = n + 1
+            case _:
+                pass
+    n
+
+# The exact source shape the bug record names (sfnt.spl pre-workaround line 77),
+# with the scrutinee as a direct call rather than a val-bound local.
+val extract_body = "fn table_offset(tables: [OtTable]) -> i64:\n" +
+    "    val table = match find_table(tables, 1719034226):\n" +
+    "        Some(value): value\n" +
+    "        None: return -1\n" +
+    "    table.offset as i64\n"
+
+# Sibling: the val-assigned boolean match-EXPRESSION form (sfnt.spl has_fvar).
+val presence_body = "fn has_table(tables: [OtTable]) -> bool:\n" +
+    "    val present = match find_table(tables, 1719034226):\n" +
+    "        Some(_): true\n" +
+    "        None: false\n" +
+    "    present\n"
+
+describe "val-assigned Option<class> match lowering":
+    it "payload extraction: scrutinee is discriminated as a typed Option with a dual-ABI lane split":
+        val (mir, messages) = lower_src(extract_body)
+        print "mir errors: [{joined(messages)}]"
+        expect(messages.len()).to_equal(0)
+        val f = find_function(mir, "table_offset")
+        expect(f.?).to_be_true()
+        val function = f.unwrap()
+        expect(label_count(function, "ematch_opt_boxed")).to_equal(1)
+        expect(label_count(function, "ematch_opt_flat")).to_be_greater_than(0)
+        expect(label_count(function, "ematch_arm")).to_be_greater_than(0)
+
+    it "payload extraction: the no-arm-matched path is a diverging trap, not a nil placeholder":
+        val (mir, messages) = lower_src(extract_body)
+        val function = find_function(mir, "table_offset").unwrap()
+        expect(abort_count(function)).to_be_greater_than(0)
+
+    it "presence boolean: same typed Option discrimination and trap":
+        val (mir, messages) = lower_src(presence_body)
+        print "mir errors: [{joined(messages)}]"
+        expect(messages.len()).to_equal(0)
+        val function = find_function(mir, "has_table").unwrap()
+        expect(label_count(function, "ematch_opt_boxed")).to_equal(1)
+        expect(abort_count(function)).to_be_greater_than(0)

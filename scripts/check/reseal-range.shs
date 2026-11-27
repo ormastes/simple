@@ -1,0 +1,109 @@
+#!/bin/sh
+# reseal-range.shs -- reseal every sealed SDN file the outgoing range touches.
+#
+# Why: another session editing doc/08_tracking/bug/bug_db.sdn (or any sealed
+# *.sdn) without resealing leaves a stale `.csm` seal; the loader then reads the
+# file as nil and the seal gate fails. The AUTHORING path (land.shs, agents) runs
+# this before push so the range it sends is always sealed. It never rewrites
+# history: the reseal is a NEW commit on top of the tip ("chore(seal): ...").
+# Pre-push hooks must not mutate, so the hook/CI gate only PRINTS this command.
+#
+# A file is "touched" when its .sdn or any of its .csm sidecars changed in
+# <base>..HEAD and a sidecar (or legacy header) exists at HEAD.
+#
+# Verdict, always the last line of stdout:
+#   PASS -- <n> sealed file(s) touched, <k> resealed[ and committed <sha>]   exit 0
+#   ERROR -- nothing was checked (<reason>)                                  exit 2
+# Without --commit the files are resealed in the work tree only (no commit).
+#
+# Usage: sh scripts/check/reseal-range.shs --base <rev> [--commit] [--root <repo>]
+#        sh scripts/check/reseal-range.shs --selftest
+set -u
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+
+BASE=""; COMMIT=0; ROOT=""; SELFTEST=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --base) BASE=${2:-}; shift 2 ;;
+        --commit) COMMIT=1; shift ;;
+        --root) ROOT=${2:-}; shift 2 ;;
+        --selftest) SELFTEST=1; shift ;;
+        *) echo "ERROR -- nothing was checked (unknown argument $1)"; exit 2 ;;
+    esac
+done
+
+# run <root> <base> <commit 0|1> -> prints verdict, returns 0/2
+run() {
+    _root=$1; _base=$2; _commit=$3
+    git -C "$_root" rev-parse --verify --quiet "$_base^{commit}" >/dev/null 2>&1 ||
+        { echo "ERROR -- nothing was checked ($_base is not a commit in $_root)"; return 2; }
+    _tmp=$(mktemp) || { echo "ERROR -- nothing was checked (mktemp failed)"; return 2; }
+    git -C "$_root" diff --name-only --no-renames "$_base" HEAD > "$_tmp" 2>/dev/null ||
+        { rm -f "$_tmp"; echo "ERROR -- nothing was checked (cannot diff $_base..HEAD)"; return 2; }
+    # data files whose .sdn or .csm changed
+    _files=$(sed -n -e 's|^\(.*\)\.[^./]*_[^./]*\.csm$|\1.sdn|p' -e 's|\.sdn$|&|p' "$_tmp" | grep '\.sdn$' | LC_ALL=C sort -u)
+    rm -f "$_tmp"
+    _n=0; _k=0; _paths=""
+    for _f in $_files; do
+        [ -f "$_root/$_f" ] || continue
+        _stem=${_f%.sdn}
+        # sealed = has a sidecar or legacy header at HEAD
+        _has=0
+        for _c in "$_root/$_stem".*_*.csm; do [ -e "$_c" ] && _has=1; done
+        [ "$_has" -eq 1 ] || case "$(head -1 "$_root/$_f")" in '#sdn-crc32:'*) _has=1 ;; esac
+        [ "$_has" -eq 1 ] || continue
+        _n=$((_n + 1))
+        _r=$(sh "$HERE/reseal-sdn-crc32.shs" "$_root/$_f" 2>&1 | tail -1)
+        case "$_r" in
+            *"already sealed"*) ;;
+            PASS*) _k=$((_k + 1)); _paths="$_paths $_f" ;;
+            *) echo "ERROR -- nothing was checked (reseal failed for $_f: $_r)"; return 2 ;;
+        esac
+    done
+    _extra=""
+    if [ "$_k" -gt 0 ] && [ "$_commit" -eq 1 ]; then
+        for _f in $_paths; do
+            git -C "$_root" add -A -- "$_f" ":(glob)${_f%.sdn}.*_*.csm" || { echo "ERROR -- nothing was checked (git add failed for $_f)"; return 2; }
+        done
+        git -C "$_root" commit -q -m "chore(seal): reseal$_paths" || { echo "ERROR -- nothing was checked (git commit failed)"; return 2; }
+        _extra=" and committed $(git -C "$_root" rev-parse --short HEAD)"
+    fi
+    echo "PASS -- $_n sealed file(s) touched, $_k resealed$_extra"
+    return 0
+}
+
+selftest() {
+    . "$HERE/sdn-seal-lib.shs"
+    _t=$(mktemp -d) || return 1
+    _fails=0
+    git -C "$_t" init -q && git -C "$_t" config user.email s@t && git -C "$_t" config user.name s && git -C "$_t" config core.autocrlf false
+    mkdir -p "$_t/zz"
+    printf 'bugs |id|\n    a\n' > "$_t/zz/db.sdn"; csm_seal_file "$_t/zz/db.sdn" crc32 >/dev/null
+    printf 'bugs |id|\n    a\n' > "$_t/zz/other.sdn"; csm_seal_file "$_t/zz/other.sdn" crc32 >/dev/null
+    printf 'x\n' > "$_t/zz/plain.sdn"
+    git -C "$_t" add -A && git -C "$_t" commit -q -m base && _b=$(git -C "$_t" rev-parse HEAD)
+    # someone edits the sealed file WITHOUT resealing, and a plain unsealed file
+    printf 'bugs |id|\n    a\n    b\n' > "$_t/zz/db.sdn"; printf 'y\n' > "$_t/zz/plain.sdn"
+    git -C "$_t" commit -q -am "edit without reseal"; _e=$(git -C "$_t" rev-parse HEAD)
+    _out=$(run "$_t" "$_b" 0); _rc=$?
+    case "$_out" in "PASS -- 1 sealed file(s) touched, 1 resealed") ;; *) echo "selftest FAIL no-commit: rc=$_rc $_out"; _fails=$((_fails+1)) ;; esac
+    [ "$(git -C "$_t" rev-parse HEAD)" = "$_e" ] || { echo "selftest FAIL: --commit-less run moved HEAD"; _fails=$((_fails+1)); }
+    git -C "$_t" checkout -q -- . ; git -C "$_t" clean -qfd
+    _out=$(run "$_t" "$_b" 1); _rc=$?
+    case "$_out" in "PASS -- 1 sealed file(s) touched, 1 resealed and committed "*) ;; *) echo "selftest FAIL commit: rc=$_rc $_out"; _fails=$((_fails+1)) ;; esac
+    [ "$(git -C "$_t" rev-parse HEAD~1)" = "$_e" ] || { echo "selftest FAIL: reseal is not a NEW commit on top of the tip"; _fails=$((_fails+1)); }
+    [ -z "$(git -C "$_t" status --porcelain)" ] || { echo "selftest FAIL: tree not clean after commit"; _fails=$((_fails+1)); }
+    [ "$(git -C "$_t" show --stat --format= HEAD | grep -c 'other.sdn')" = 0 ] || { echo "selftest FAIL: untouched sealed file was resealed"; _fails=$((_fails+1)); }
+    _out=$(run "$_t" "$_b" 1); case "$_out" in "PASS -- 1 sealed file(s) touched, 0 resealed") ;; *) echo "selftest FAIL idempotent: $_out"; _fails=$((_fails+1)) ;; esac
+    _out=$(run "$_t" nosuchrev 1); _rc=$?; [ "$_rc" -eq 2 ] || { echo "selftest FAIL bad base rc=$_rc"; _fails=$((_fails+1)); }
+    rm -rf "$_t"
+    [ "$_fails" -eq 0 ] || { echo "selftest: $_fails fixture(s) failed"; return 1; }
+    echo "selftest: 7 checks passed"
+}
+
+if [ "$SELFTEST" -eq 1 ]; then selftest; exit $?; fi
+selftest >/dev/null 2>&1 || { echo "ERROR -- nothing was checked (selftest failed; run --selftest)"; exit 2; }
+[ -n "$BASE" ] || { echo "ERROR -- nothing was checked (--base <rev> is required)"; exit 2; }
+[ -n "$ROOT" ] || ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "ERROR -- nothing was checked (not in a git repo)"; exit 2; }
+run "$ROOT" "$BASE" "$COMMIT"
+exit $?

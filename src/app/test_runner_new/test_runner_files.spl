@@ -6,13 +6,16 @@ use std.test_runner.test_runner_types.{SkipFeatureInfo, TestExecutionMode, TestL
 use app.test_cache_shared.{TestCacheEntry}
 use std.nogc_sync_mut.io.sysinfo_ops.{path_basename}
 use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
+use std.nogc_sync_mut.path.{normalize_path}
+use std.spec.platform_os.{is_os_platform_tag}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.nogc_sync_mut.io.dir_ops.{dir_walk}
 use std.test_runner.test_manifest.{
     TestManifest, TestManifestEntry,
-    MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh
+    MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh, manifest_covers
 }
 use std.test_runner.test_manifest_scanner.{manifest_full_scan, manifest_incremental_update}
+use std.nogc_sync_mut.test_runner.{test_level_of_path}
 
 # =========================================================================
 # ANSI Stripping
@@ -22,6 +25,12 @@ fn strip_ansi(s: text) -> text:
     # Strip ANSI escape sequences by scanning for ESC[ ... m patterns.
     # ESC character is \x1b (27). We detect it by checking for the two-char
     # sequence that starts ANSI codes: ESC followed by '['.
+    # Fast path: the per-character scan below costs ~0.5 us/char in the
+    # interpreter, and callers strip every line of a captured output several
+    # times (extract_error_message and friends). Most lines carry no ESC, so
+    # return them unchanged with one native search instead of the scan.
+    if not s.contains("\u{1b}"):
+        return s
     var parts: [text] = []
     var i = 0
     var in_escape = false
@@ -68,6 +77,25 @@ fn is_test_file(path: text) -> bool:
         return false
     name.contains("_spec.") or name.contains("_test.")
 
+fn path_is_within_directory(path: text, directory: text) -> bool:
+    if directory == "":
+        return true
+    if has_parent_path_component(path) or has_parent_path_component(directory):
+        return false
+    val normalized_path = normalize_path(path)
+    val normalized_directory = normalize_path(directory)
+    if normalized_directory == ".":
+        return normalized_path != ".." and not normalized_path.starts_with("../") and not normalized_path.starts_with("/")
+    if normalized_directory == "/":
+        return normalized_path.starts_with("/")
+    normalized_path.starts_with(normalized_directory + "/")
+
+fn has_parent_path_component(path: text) -> bool:
+    for part in path.replace("\\", "/").split("/"):
+        if part == "..":
+            return true
+    false
+
 fn is_skip_marker_file(path: text) -> bool:
     val name = path_basename(path)
     name.ends_with(".spl.skip") and (name.contains("_spec.") or name.contains("_test."))
@@ -85,15 +113,25 @@ fn count_skip_marker_cases(path: text) -> i64:
     1
 
 fn matches_level(path: text, level: TestLevel) -> bool:
+    # Segment-based classification via std.test_runner.test_level_detect, so the
+    # maintained numbered tree (test/01_unit/, test/02_integration/,
+    # test/03_system/) matches as well as the legacy bare mirror
+    # (test/unit/, ...). Level codes: 1 = unit, 2 = integration, 3 = system,
+    # 4 = smoke (see test_level_detect.spl). Mirrors the std copy of this
+    # function; the previous substring form (`path.contains("/unit/")`) never
+    # matched the numbered directories. See
+    # doc/08_tracking/bug/test_level_filters_never_match_numbered_trees_2026-07-27.md
     match level:
         case TestLevel.All:
             true
         case TestLevel.Unit:
-            path.contains("/unit/") or path.contains("/shared/")
+            test_level_of_path(path) == 1
         case TestLevel.Integration:
-            path.contains("/integration/")
+            test_level_of_path(path) == 2
         case TestLevel.System:
-            path.contains("/system/") or path.contains("/feature/")
+            test_level_of_path(path) == 3
+        case TestLevel.Smoke:
+            test_level_of_path(path) == 4
 
 # =========================================================================
 # File Content Utilities
@@ -164,9 +202,10 @@ fn validate_system_test_covers(files: [text]) -> [text]:
     """Return system test files missing required # @cover annotations."""
     var missing: [text] = []
     for f in files:
-        if not f.contains("/system/"):
+        val norm = f.replace("\\", "/")
+        if not norm.contains("/system/"):
             continue
-        if f.contains("/helpers/") or f.contains("/fixtures/"):
+        if norm.contains("/helpers/") or norm.contains("/fixtures/"):
             continue
         val covers = extract_cover_annotations(f)
         if covers.len() == 0:
@@ -205,6 +244,13 @@ fn platform_tag_matches(tag: text, mode: TestExecutionMode) -> bool:
 # =========================================================================
 
 fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bool) -> [text]:
+    discover_test_files_fast_with_manifest_path(base_path, options, use_cache, MANIFEST_PATH)
+
+# Narrow injection point for isolated callers and tests. The runner continues
+# to use `MANIFEST_PATH` through `discover_test_files_fast` above.
+pub fn discover_test_files_fast_with_manifest_path(
+    base_path: text, options: TestOptions, use_cache: bool, manifest_path: text
+) -> [text]:
     # Normalize path separators for Windows compatibility
     var base_path = base_path.replace("\\", "/")
     # Single file — no manifest needed
@@ -215,16 +261,31 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
             return [base_path]
         return []
 
+    # Preserve filesystem `..` resolution across symlinks. A lexical manifest
+    # filter cannot determine which physical directory this path reaches.
+    if has_parent_path_component(base_path):
+        return discover_test_files_slow(base_path, options)
+
     if not use_cache:
         return discover_test_files_slow(base_path, options)
 
     # Try loading manifest
-    val manifest = manifest_load(MANIFEST_PATH)
-    if not manifest_is_fresh(manifest):
-        # Manifest missing or stale — fall back to full scan, then save
+    val manifest = manifest_load(manifest_path)
+    if not manifest_is_fresh(manifest) or not manifest_covers(manifest, base_path):
+        # Manifest missing, stale, or built from a walk that never visited
+        # `base_path` (e.g. a relative-root index asked for an absolute
+        # spelling of the same tree) — fall back to a full scan, then save.
+        # Filtering an index that never indexed this subtree yields zero files
+        # and reads as "No test files found" even when the directory is full
+        # of specs. Mirrors the std twin in
+        # src/lib/nogc_sync_mut/test_runner/test_runner_files.spl.
         val result = discover_test_files_slow(base_path, options)
-        # Build manifest in background for next run
-        save_manifest_from_discovery(base_path)
+        # Never cache a scan that found nothing: a manifest built from a
+        # degraded or mismatched walk would make the NEXT run take the fast
+        # branch below and silently return the under-collected set.
+        if result.len() > 0:
+            # Build manifest in background for next run
+            save_manifest_to_path(base_path, manifest_path)
         return result
 
     # Fast path: filter manifest entries in-memory
@@ -233,7 +294,7 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
 
     for entry in manifest.entries:
         # Path prefix filter
-        if not entry.path.starts_with(base_path):
+        if not path_is_within_directory(entry.path, base_path):
             continue
 
         # Level filter
@@ -266,10 +327,15 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
         if not explicit_target and entry.platform_tags != "":
             val ptags = entry.platform_tags.split(",")
             var tag_matched = false
+            var mode_tag_seen = false
+            # OS tags (windows/macos/linux/freebsd/unix) are NOT filtered here: a
+            # host-OS mismatch is a counted platform skip in the runner, never silent.
             for ptag in ptags:
-                if platform_tag_matches(ptag, options.mode):
-                    tag_matched = true
-            if not tag_matched:
+                if not is_os_platform_tag(ptag):
+                    mode_tag_seen = true
+                    if platform_tag_matches(ptag, options.mode):
+                        tag_matched = true
+            if mode_tag_seen and not tag_matched:
                 continue
 
         # Content-based filters (from manifest metadata, no file I/O)
@@ -311,6 +377,9 @@ fn manifest_entry_matches_level(entry: TestManifestEntry, level: TestLevel) -> b
         case TestLevel.System: entry.test_level == 3
 
 fn save_manifest_from_discovery(base_path: text):
+    save_manifest_to_path(base_path, MANIFEST_PATH)
+
+fn save_manifest_to_path(base_path: text, manifest_path: text):
     # Determine scan directories based on base_path
     var dirs: [text] = []
     if base_path == "test/" or base_path == "test":
@@ -319,13 +388,13 @@ fn save_manifest_from_discovery(base_path: text):
         dirs = [base_path]
     # Use incremental update when an existing manifest is available —
     # only re-reads files whose size or mtime changed.
-    val old = manifest_load(MANIFEST_PATH)
+    val old = manifest_load(manifest_path)
     var manifest = old
     if old.entries.len() > 0:
         manifest = manifest_incremental_update(old, dirs)
     else:
         manifest = manifest_full_scan(dirs)
-    manifest_save(manifest, MANIFEST_PATH)
+    manifest_save(manifest, manifest_path)
 
 # =========================================================================
 # Test File Discovery (original full-scan path)
@@ -388,10 +457,15 @@ fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]:
             val ptags = file_get_platform_tags(content)
             if ptags.len() > 0:
                 var tag_matched = false
+                var mode_tag_seen = false
+                # OS tags (windows/macos/linux/freebsd/unix) are NOT filtered here: a
+                # host-OS mismatch is a counted platform skip in the runner, never silent.
                 for ptag in ptags:
-                    if platform_tag_matches(ptag, options.mode):
-                        tag_matched = true
-                if not tag_matched:
+                    if not is_os_platform_tag(ptag):
+                        mode_tag_seen = true
+                        if platform_tag_matches(ptag, options.mode):
+                            tag_matched = true
+                if mode_tag_seen and not tag_matched:
                     continue
         # Content-based filters
         if needs_content:

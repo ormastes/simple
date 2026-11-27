@@ -1,0 +1,75 @@
+# Glob resolution for build-unit source inventory (slice F, plan section 4).
+#
+# Pure: resolves include/exclude globs against an already-scanned path list.
+# `*` matches within one path segment, `?` one non-separator char, `**` any
+# number of whole segments (including none). Output feeds
+# source_inventory_receipt_v1 after the caller attaches content digests.
+
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+
+fn _glob_segments_v1(s: text) -> [text]:
+    s.split("/")
+
+# Match one segment pattern against one segment, with `*` and `?`.
+fn _glob_seg_match_v1(pat: text, seg: text) -> bool:
+    val p = pat.chars()
+    val s = seg.chars()
+    var pi = 0
+    var si = 0
+    var star = -1
+    var mark = 0
+    while si < s.len():
+        if pi < p.len() and (p[pi] == "?" or p[pi] == s[si]) and p[pi] != "*":
+            pi = pi + 1
+            si = si + 1
+        elif pi < p.len() and p[pi] == "*":
+            star = pi
+            mark = si
+            pi = pi + 1
+        elif star >= 0:
+            pi = star + 1
+            mark = mark + 1
+            si = mark
+        else:
+            return false
+    while pi < p.len() and p[pi] == "*":
+        pi = pi + 1
+    pi == p.len()
+
+fn _glob_match_from_v1(ps: [text], pi: i64, ss: [text], si: i64) -> bool:
+    if pi == ps.len():
+        return si == ss.len()
+    if ps[pi] == "**":
+        var k = si
+        while k <= ss.len():
+            if _glob_match_from_v1(ps, pi + 1, ss, k):
+                return true
+            k = k + 1
+        return false
+    if si == ss.len():
+        return false
+    if not _glob_seg_match_v1(ps[pi], ss[si]):
+        return false
+    _glob_match_from_v1(ps, pi + 1, ss, si + 1)
+
+pub fn source_inventory_glob_match_v1(pattern: text, path: text) -> bool:
+    _glob_match_from_v1(_glob_segments_v1(pattern), 0, _glob_segments_v1(path), 0)
+
+fn _glob_any_v1(patterns: [text], path: text) -> bool:
+    for pat in patterns:
+        if source_inventory_glob_match_v1(pat, path):
+            return true
+    false
+
+# Paths matching any include and no exclude; sorted, exact duplicates dropped.
+pub fn source_inventory_resolve_unit_v1(includes: [text], excludes: [text],
+        scanned: [text]) -> [text]:
+    var seen: {text: bool} = {}
+    var kept: [text] = []
+    for path in scanned:
+        if seen.contains_key(path):
+            continue
+        seen[path] = true
+        if _glob_any_v1(includes, path) and not _glob_any_v1(excludes, path):
+            kept.push(path)
+    canonical_identity_sort_texts(kept)

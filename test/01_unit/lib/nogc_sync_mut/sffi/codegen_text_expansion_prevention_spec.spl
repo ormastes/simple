@@ -1,0 +1,26 @@
+# Prevention for codegen_isa_sffi_text_abi_misexpansion_2026_10_22.
+# Every hand text->(ptr,len) expansion in sffi/codegen.spl must bind the
+# rt_string_data/rt_string_len result to a typed i64 local before it reaches an
+# extern call (an inline nested call hands the seed InterpCall an untyped,
+# unboxed i64). Adding a new wrapper with the inline shape fails this spec.
+# Native verification (phase3): see the bug doc's seed-built-binary probe.
+# @tag:phase3
+
+extern fn rt_file_read_text(path: text) -> text?
+
+describe "sffi/codegen.spl text expansion shape":
+    it "never nests rt_string_data/rt_string_len inside another call":
+        val src = rt_file_read_text("src/lib/nogc_sync_mut/sffi/codegen.spl") ?? ""
+        expect(src.len() > 0).to_equal(true)
+        var bad: [text] = []
+        var expansions = 0
+        for line in src.split("\n"):
+            val t = line.trim()
+            if t.starts_with("#") or t.starts_with("extern fn "):
+                continue
+            if t.contains("rt_string_data(") or t.contains("rt_string_len("):
+                expansions = expansions + 1
+                if not t.starts_with("val "):
+                    bad.push(t)
+        expect(expansions > 10).to_equal(true)
+        expect(bad.len()).to_equal(0)

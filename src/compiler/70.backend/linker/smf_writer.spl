@@ -23,9 +23,8 @@ use compiler.common.assurance.policy_names.{normalize_profile_name}
 # here were dead (declared, never referenced), so removing them is the whole
 # fix. Use smf_header's definitions if this module ever needs them.
 # See doc/08_tracking/bug/native_build_broken_at_tip_cannot_convert_array_to_int_2026-08-25.md
-
-val SMF_VERSION_MAJOR: i64 = 1
-val SMF_VERSION_MINOR: i64 = 1
+# The same applied to SMF_VERSION_MAJOR / SMF_VERSION_MINOR (dead i64 copies
+# that shadowed smf_header's u8 definitions in co-compiled specs); removed.
 
 val SECTION_FLAG_READ: i64 = 0x1
 val SECTION_FLAG_WRITE: i64 = 0x2
@@ -78,6 +77,10 @@ enum SectionType:
     # Aspect-facet dynload design §12.1. Payload is an uncompressed SMFAPK1
     # container; wire byte 16 matches the authoritative runtime enum.
     AspectPackDirectory
+    # Interpreter fallback snapshot of a standalone SMF (UTF-8 JSON record
+    # `{"version":1,"path":..,"source":..}`); wire byte 17 matches the
+    # authoritative runtime enum at src/compiler_rust/common/src/smf/section.rs.
+    InterpSnapshot
 
 impl SectionType:
     fn name() -> text:
@@ -94,6 +97,7 @@ impl SectionType:
             case DrvManifest: ".drv_manifest"
             case LaunchMeta: ".launch_meta"
             case AspectPackDirectory: ".aspect_pack"
+            case InterpSnapshot: ".interp_snapshot"
 
     """Map to wire byte value (Rust-runtime compatible)."""
     fn to_wire_u8() -> u8:
@@ -110,6 +114,7 @@ impl SectionType:
             case DrvManifest: 14
             case LaunchMeta: 15
             case AspectPackDirectory: 16
+            case InterpSnapshot: 17
 
 enum SmfWriterSymbolBinding:
     Local
@@ -536,13 +541,14 @@ impl SmfWriter:
             buf.push(self.string_table[sti])
             sti = sti + 1
 
-        # 7. Header, written as a 128-byte trailer (v1.1 design, matches
-        # compiler.driver.smf_writer and _SmfReaderMemory's dual offset-0/
-        # trailer lookup).
-        var header: SmfHeader = SmfHeader.new_v1_1(
+        # 7. Header, written as a 96-byte v1.3 trailer (matches
+        # compiler.driver.smf_writer, the Rust seed's repr(C) layout and
+        # _SmfReaderMemory's offset-0/trailer lookup).
+        var header: SmfHeader = SmfHeader.new_v1_3(
             self.target_platform, self.target_arch)
-        if source_section_relocations:
-            header.version_minor = 2 as u8
+        # Reloc entries carry the 0xA2 source-section marker (formerly the
+        # "version_minor = 2" stamp; the minor now names the header layout).
+        header.set_source_relocs(source_section_relocations)
         var has_aspect_pack = false
         for written_section in self.sections:
             if written_section.section_type.to_wire_u8() as i64 == 16:
@@ -636,27 +642,14 @@ fn smf_aspect_pack_header_bytes(
     section_table_offset: i64,
     symbol_table_offset: i64
 ) -> [u8]:
-    var header: [u8] = [83u8, 77u8, 70u8, 0u8, 1u8, 1u8, 1u8, 0u8]
-    for byte in u32_to_bytes_u8(SMF_FLAG_ASPECT_PACK as i64):
-        header.push(byte)
-    # compression, compression_level, and two reserved compression bytes
-    for byte in u32_to_bytes_u8(0):
-        header.push(byte)
-    for byte in u32_to_bytes_u8(1):
-        header.push(byte)
-    for byte in u64_to_bytes_u8(section_table_offset):
-        header.push(byte)
-    for byte in u64_to_bytes_u8(symbol_table_offset):
-        header.push(byte)
-    for byte in u32_to_bytes_u8(0):
-        header.push(byte)
-    for byte in u32_to_bytes_u8(0):
-        header.push(byte)
-    for byte in u64_to_bytes_u8(0):
-        header.push(byte)
-    while header.len() < 128:
-        header.push(0)
-    header
+    # Same v1.3 96-byte trailer as SmfWriter.finalize; platform 1 / arch 0 as
+    # the pack container has always declared.
+    var header: SmfHeader = SmfHeader.new_v1_3(Platform.from_u8(1), Arch.from_u8(0))
+    header.set_aspect_pack(true)
+    header.section_count = 1
+    header.section_table_offset = section_table_offset as u64
+    header.symbol_table_offset = symbol_table_offset as u64
+    header.to_bytes()
 
 fn u32_to_bytes_u8(value: i64) -> [u8]:
     [

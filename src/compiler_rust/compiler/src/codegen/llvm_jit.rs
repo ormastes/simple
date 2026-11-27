@@ -56,6 +56,14 @@ pub struct LlvmJitCompiler {
 // while the compiler is alive.
 unsafe impl Send for LlvmJitCompiler {}
 
+#[allow(dead_code)]
+fn missing_llvm_target(name: &str) -> String {
+    format!(
+        "LLVM target {} is not available: the linked LLVM was built without it (llvm-config --targets-built)",
+        name
+    )
+}
+
 impl LlvmJitCompiler {
     /// Create a new LLVM JIT compiler targeting the host.
     pub fn new() -> Result<Self, String> {
@@ -72,15 +80,30 @@ impl LlvmJitCompiler {
             // those arches fall through to the native initializer instead.
             #[cfg(not(target_os = "freebsd"))]
             TargetArch::X86 | TargetArch::X86_64 => {
+                #[cfg(llvm_has_x86)]
                 inkwell::targets::Target::initialize_x86(&InitializationConfig::default());
+                #[cfg(not(llvm_has_x86))]
+                return Err(missing_llvm_target("X86"));
             }
             #[cfg(not(target_os = "freebsd"))]
-            TargetArch::Aarch64 | TargetArch::Arm => {
-                inkwell::targets::Target::initialize_arm(&InitializationConfig::default());
+            TargetArch::Aarch64 => {
+                #[cfg(llvm_has_aarch64)]
                 inkwell::targets::Target::initialize_aarch64(&InitializationConfig::default());
+                #[cfg(not(llvm_has_aarch64))]
+                return Err(missing_llvm_target("AArch64"));
+            }
+            #[cfg(not(target_os = "freebsd"))]
+            TargetArch::Arm => {
+                #[cfg(llvm_has_arm)]
+                inkwell::targets::Target::initialize_arm(&InitializationConfig::default());
+                #[cfg(not(llvm_has_arm))]
+                return Err(missing_llvm_target("ARM"));
             }
             TargetArch::Riscv32 | TargetArch::Riscv64 => {
+                #[cfg(llvm_has_riscv)]
                 inkwell::targets::Target::initialize_riscv(&InitializationConfig::default());
+                #[cfg(not(llvm_has_riscv))]
+                return Err(missing_llvm_target("RISCV"));
             }
             _ => {
                 inkwell::targets::Target::initialize_native(&InitializationConfig::default())
@@ -208,4 +231,29 @@ fn compile_functions_into_module(backend: &LlvmBackend, functions: &[MirFunction
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod target_availability_tests {
+    use super::*;
+    use simple_common::target::{Target, TargetArch};
+
+    // On a host LLVM built without RISCV, requesting it must be a clear error.
+    #[cfg(not(llvm_has_riscv))]
+    #[test]
+    fn missing_riscv_target_is_clear_error() {
+        let mut t = Target::host();
+        t.arch = TargetArch::Riscv64;
+        let err = LlvmJitCompiler::new_for_target(t).err().expect("must fail");
+        assert!(err.contains("LLVM target RISCV is not available"), "{err}");
+    }
+
+    #[cfg(not(llvm_has_arm))]
+    #[test]
+    fn missing_arm_target_is_clear_error() {
+        let mut t = Target::host();
+        t.arch = TargetArch::Arm;
+        let err = LlvmJitCompiler::new_for_target(t).err().expect("must fail");
+        assert!(err.contains("LLVM target ARM is not available"), "{err}");
+    }
 }

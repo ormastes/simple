@@ -119,24 +119,15 @@ pub fn spirv_khronos_candidate_module_text(bad_op: bool) -> text:
     builder.emit_extensions()
     builder.emit_memory_model()
 
-    # IMPORTANT, and a real defect this file's spec records
-    # (doc/08_tracking/bug/spirv_builder_emit_function_ignores_preallocated_
-    # entry_point_id_2026-08-11.md): `SpirvBuilder.emit_function()` always
-    # mints its OWN fresh id via `alloc_id()` — it has no variant that
-    # accepts a caller-supplied id. `OpEntryPoint` must reference the
-    # function's id, and SPIR-V's mandatory section order puts
-    # OpEntryPoint/OpExecutionMode BEFORE the type/function section, so the
-    # function's id has to be known and allocated up front. The only way to
-    # reconcile both constraints with the builder's current public API is
-    # exactly what the sibling `boundary_spirv_provider.spl` boundary
-    # already does: pre-allocate the id with `alloc_id()`, use it for
-    # `emit_entry_point`, and then emit the `OpFunction` line by hand via
-    # the raw `emit()` escape hatch instead of calling `emit_function()` (a
-    # call to `emit_function()` here would allocate a SECOND, unused id and
-    # leave `main_id` undefined at its use site — verified failing with
-    # spirv-val: "forward referenced IDs have not been defined" — a real
-    # bug this file's own construction hit and is recording, not silently
-    # working around).
+    # `OpEntryPoint` must reference the function's id, and SPIR-V's mandatory
+    # section order puts OpEntryPoint/OpExecutionMode BEFORE the type/function
+    # section, so the function's id has to be known and allocated up front.
+    # `emit_function()` always mints its OWN id via `alloc_id()`, which would
+    # leave `main_id` undefined at its use site (the defect recorded in
+    # doc/08_tracking/bug/spirv_builder_emit_function_ignores_preallocated_
+    # entry_point_id_2026-08-11.md, now fixed) — so the entry point's
+    # OpFunction is emitted against the pre-allocated id via
+    # `emit_function_with_id()`.
     val main_id = builder.alloc_id()
     builder.emit_entry_point("main", main_id, [])
     builder.emit_execution_mode(main_id, [1, 1, 1])
@@ -144,7 +135,7 @@ pub fn spirv_khronos_candidate_module_text(bad_op: bool) -> text:
     val void_id = builder.emit_type_void()
     val fn_type_id = builder.emit_type_function(void_id, [])
 
-    builder.emit("{builder.id_str(main_id)} = OpFunction {builder.id_str(void_id)} None {builder.id_str(fn_type_id)}")
+    builder.emit_function_with_id(main_id, void_id, fn_type_id, "None")
     builder.emit_label()
     if bad_op:
         # Deliberately malformed: not a real SPIR-V opcode. `spirv-as` must

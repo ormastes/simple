@@ -1,0 +1,62 @@
+# Purpose and audience: executable evidence for compiler engineers that a
+# module static named in its owner's `export` list lowers to a Public HirConst,
+# so the owner and every importer agree on its native linkage (owner emits an
+# accessor, importer binds it) instead of the importer's backend refusing an
+# "imported non-public module static".
+# Bug: doc/08_tracking/bug/export_list_static_visibility_not_lifted_2026-11-06.md
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.hirlowering_for_module
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.frontend.parser_types.ParserModule
+use compiler.common.dependency.visibility.{Visibility}
+
+val OWNER_SOURCE = "var EXPORTED_STATE = \"\"\nvar PRIVATE_STATE = 0\nval EXPORTED_CODE = \"T4010\"\npub(package) var PACKAGE_STATE = 0\nexport EXPORTED_STATE, EXPORTED_CODE, PACKAGE_STATE\n"
+
+fn owner_constant_visibility(name: text) -> text:
+    val log = Logger(level: 0)
+    val parsed = parse_full_frontend(OWNER_SOURCE, "src/app/owner_probe/state.spl", "app.owner_probe.state", log)
+    val no_modules: Dict<text, ParserModule> = {}
+    val surfaces: ModuleSurfacesByName = module_surfaces_from_modules(no_modules, []).unwrap()
+    var lowering = hirlowering_for_module("src/app/owner_probe/state.spl", surfaces)
+    val module = lowering.lower_module(parsed)
+    for key in module.constants.keys():
+        val constant = module.constants[key]
+        if constant.name == name:
+            return match constant.visibility:
+                case Visibility.Public: "public"
+                case Visibility.Private: "private"
+                case _: "scoped"
+    "missing"
+
+fn owner_constant_is_public(name: text) -> bool:
+    val log = Logger(level: 0)
+    val parsed = parse_full_frontend(OWNER_SOURCE, "src/app/owner_probe/state.spl", "app.owner_probe.state", log)
+    val no_modules: Dict<text, ParserModule> = {}
+    val surfaces: ModuleSurfacesByName = module_surfaces_from_modules(no_modules, []).unwrap()
+    var lowering = hirlowering_for_module("src/app/owner_probe/state.spl", surfaces)
+    val module = lowering.lower_module(parsed)
+    for key in module.constants.keys():
+        val constant = module.constants[key]
+        if constant.name == name:
+            return constant.is_public
+    false
+
+describe "export list lifts module static visibility":
+    it "makes an exported private var Public":
+        expect(owner_constant_visibility("EXPORTED_STATE")).to_equal("public")
+
+    it "marks the lifted var is_public for the interface digest":
+        expect(owner_constant_is_public("EXPORTED_STATE")).to_equal(true)
+
+    it "keeps a non-exported var Private":
+        expect(owner_constant_visibility("PRIVATE_STATE")).to_equal("private")
+
+    it "keeps an exported immutable literal on the private inline path":
+        expect(owner_constant_visibility("EXPORTED_CODE")).to_equal("private")
+
+    it "leaves an explicit scoped visibility unchanged":
+        expect(owner_constant_visibility("PACKAGE_STATE")).to_equal("scoped")

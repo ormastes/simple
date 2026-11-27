@@ -1,8 +1,78 @@
 # HTML/CSS rendering inventory lexical false pass
 
-Status: OPEN.
+Status: OPEN — re-confirmed LIVE (partially addressed) 2026-11-11 (lane ne11), see addendum.
 
 `scripts/check/check-html-css-rendering-manifest-traceability.shs:120-165` calls a tag/property rendered when its text appears in fixture HTML/CSS. It does not prove parsing, computed style, layout, Draw IR, device execution, or pixel effect. The checker’s CSS set also diverges from the 131-row executable inventory and contains claimed properties with no production owner.
 
 Owner: web renderer inventory lane. Unblock: land `WebRenderableFeatureInventory`, classify tag/property/value-family rows honestly, bind renderable rows to production owners and focused readback evidence, generate the showcase from that inventory, and replace lexical promotion logic.
 
+
+---
+
+## 2026-11-11 addendum — lane ne11 (P3 traverse, batch ne11)
+
+**Verdict: LIVE (partially addressed) — keep OPEN. The inventory landed; the
+lexical gate it was meant to replace is still the wired gate.**
+
+- **Landed:** `src/lib/gc_async_mut/gpu/browser_engine/web_renderable_feature_inventory.spl`
+  (arrived with PR #7597 merge `9e7e7a526edb`, 2026-11-07) — typed
+  fail-closed inventory whose header states "A row is never promoted by
+  lexical occurrence in a fixture", with `renderable`/`partial`/`nonpaint`/
+  `unsupported` classifications and `production_owner`/`test_owner` fields;
+  the chrome showcase is generated from it
+  (`src/app/ui/chrome_showcase/catalog.spl`, `main.spl`). Contract spec
+  `test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_renderable_feature_inventory_contract_spec.spl`
+  **13/13 PASS** (seed-smoke, fresh seed `46fe8f6b6def`).
+- **Still LIVE:** `scripts/check/check-html-css-rendering-manifest-traceability.shs`
+  still promotes by pure lexical occurrence — `has_html_tag` /
+  `has_css_property` regex scans over fixture HTML/CSS blobs (read this lane,
+  unchanged logic). Worse, that lexical checker is still invoked by three
+  aggregate gates: `check-gui-renderdoc-feature-coverage-status.shs:979-1039`,
+  `check-html-css-full-rendering-goal-status.shs:76`, and
+  `check-html-css-renderdoc-goal-status.shs:91-94`. The "replace lexical
+  promotion logic" half of the unblock is not done, so the false-pass class
+  this record exists to stop still gates those reports.
+- **Remaining work (owner: web renderer inventory lane):** rewire the three
+  aggregate gates to consume `WebRenderableFeatureInventory` rows (renderable
+  rows bound to production owners + focused readback evidence) instead of the
+  lexical manifest check, then delete the lexical promotion block. Not taken
+  on by this P3 lane: the rewired gates cannot be fully exercised here (their
+  downstream Electron/bitmap evidence lanes do not run on this host), and
+  landing an unverifiable gate replacement would repeat the false-evidence
+  pattern this doc condemns.
+
+## 2026-11-13 triage (UI batch B, Linux aarch64, release/1.0.0 @ 35144b7f5e93): LIVE, blocked on this host
+
+Unchanged since the 2026-11-11 addendum: the lexical checker
+`check-html-css-rendering-manifest-traceability.shs` is still what the three
+aggregate gates call. Rewiring those gates to `WebRenderableFeatureInventory`
+rows needs their downstream Electron and bitmap evidence lanes to run, and this
+host has no Chrome, Chromium or Electron. A gate replacement that cannot be
+executed end to end would repeat the false-pass class this record exists to
+stop, so none was landed. Row stays open. Grant: a Linux host with Electron.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: LIVE, unchanged from the 2026-11-11 ne11 triage.** Fresh source check
+at this tip: `scripts/check/check-html-css-rendering-manifest-traceability.shs`
+still promotes tags/properties by lexical occurrence (`has_html_tag` /
+`has_css_property` regex scans), and the lexical checker is still invoked by the
+same three aggregate gates: `check-gui-renderdoc-feature-coverage-status.shs`,
+`check-html-css-full-rendering-goal-status.shs`, and
+`check-html-css-renderdoc-goal-status.shs` (grep-confirmed all three still
+reference the lexical gate; `guard_wiring_optout.txt` also names it). The
+`WebRenderableFeatureInventory` landed earlier (per ne11) but the rewiring of
+these three consumers to inventory rows is still not done. Not attempted here:
+the downstream Electron/bitmap evidence lanes cannot run on this Windows host,
+so a rewired gate could not be honestly exercised; owner remains the web
+renderer inventory lane.
+
+
+---
+
+## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
+
+**Verdict: LIVE (deferred).** `check-html-css-rendering-manifest-traceability.shs` still promotes by lexical occurrence and is still invoked by the three aggregate gates; the rewired gates cannot be fully exercised on this host (downstream Electron/bitmap evidence lanes do not run here), and landing an unverifiable gate replacement would repeat the false-evidence pattern this doc condemns. Owner: web renderer inventory lane.

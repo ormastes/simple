@@ -1,6 +1,7 @@
 # Exclusive lifetime owner for one trusted scheduler journal root. Keep this
 # object alive across recovery, all transitions, and final close. The root and
 # its parent are trusted local directories; the file-lock facade follows paths.
+use app.build.host_path_policy.{build_host_path_parent_v1}
 use app.io.mod.{file_exists, dir_create_all, directory_fsync, file_lock,
     file_unlock}
 use app.build.scheduler.planner.{SchedulerActionV1}
@@ -20,22 +21,39 @@ fn _owner_error_state_v1(reason: text) -> SchedulerJournalStateV1:
         "scheduler-owner-error: " + reason)
 
 fn _owner_parent_v1(root: text) -> text:
-    var last: i64 = -1
-    var i: i64 = 0
-    while i < root.len():
-        if root[i:i + 1] == "/":
-            last = i
-        i = i + 1
-    if last < 0:
-        return "."
-    if last == 0:
-        return "/"
-    root[0:last]
+    build_host_path_parent_v1(root)
+
+var _scheduler_owner_held_roots_v1: [text] = []
+
+fn _owner_canonical_root_v1(root: text) -> text:
+    var out = root.replace("\\", "/")
+    while out.contains("//"):
+        out = out.replace("//", "/")
+    while out.byte_len() > 1 and out.ends_with("/"):
+        out = out.substring(0, out.byte_len() - 1)
+    out
+
+fn _owner_root_held_v1(canonical: text) -> bool:
+    for item in _scheduler_owner_held_roots_v1:
+        if item == canonical:
+            return true
+    false
+
+fn _owner_release_root_v1(canonical: text):
+    var next: [text] = []
+    var removed = false
+    for item in _scheduler_owner_held_roots_v1:
+        if not removed and item == canonical:
+            removed = true
+        else:
+            next.push(item)
+    _scheduler_owner_held_roots_v1 = next
 
 fn _owner_root_valid_v1(root: text) -> bool:
-    root != "" and root != "." and root != ".." and
+    val normalized = _owner_canonical_root_v1(root)
+    normalized != "" and normalized != "." and normalized != ".." and
         not root.contains("\n") and not root.contains("\r") and
-        not root.ends_with("/")
+        not root.ends_with("/") and not root.ends_with("\\")
 
 class SchedulerOwnerV1:
     root: text
@@ -116,6 +134,7 @@ class SchedulerOwnerV1:
         val released = file_unlock(self.lock_handle)
         self.lock_handle = -1
         self._closed = true
+        _owner_release_root_v1(_owner_canonical_root_v1(self.root))
         if not released:
             self.error = "scheduler-owner-error: unlock-failed"
         released
@@ -133,6 +152,10 @@ fn scheduler_owner_open_v1(root: text) -> SchedulerOwnerV1:
        (created and not directory_fsync(_owner_parent_v1(root))):
         val state = _owner_error_state_v1("directory-not-durable")
         return SchedulerOwnerV1(root, -1, state, state.error, true, false)
+    val canonical = _owner_canonical_root_v1(root)
+    if _owner_root_held_v1(canonical):
+        val state = _owner_error_state_v1("lock-unavailable")
+        return SchedulerOwnerV1(root, -1, state, state.error, true, false)
     # Positive timeout is bounded; zero means wait forever in this facade.
     val handle = file_lock(root + "/owner.lock", 1)
     if handle < 0:
@@ -142,6 +165,7 @@ fn scheduler_owner_open_v1(root: text) -> SchedulerOwnerV1:
     if opened.error != "":
         file_unlock(handle)
         return SchedulerOwnerV1(root, -1, opened, opened.error, true, false)
+    _scheduler_owner_held_roots_v1.push(canonical)
     SchedulerOwnerV1(root, handle, opened, "", false, true)
 
 fn scheduler_owner_admit_v1(owner: SchedulerOwnerV1,

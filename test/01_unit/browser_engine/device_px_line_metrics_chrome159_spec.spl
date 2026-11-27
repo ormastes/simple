@@ -1,0 +1,150 @@
+"""
+## Purpose and audience
+Purpose: Pin where text sits inside its line box at device scale 4, against
+Chrome 159. At `--force-device-scale-factor=4` Chrome lays out line metrics in
+DEVICE px: the strut ascent and descent come from the face at size x 4, each
+rounded on its own, and Blink's subpixel-positioning borrow moves 1 device px
+from ascent to descent when the rounded descent is below the raw one (DejaVu
+Sans at 64 device px: 59.41 / 15.09 -> 59 / 15 -> borrow -> 58 / 16). The
+half-leading is floored in device px. This engine lays out in CSS px and
+scales the Draw IR by 4, so a glyph landed at 4 x (CSS baseline) plus the
+painter's own rounded device ascent: 1-2 device px off Chrome.
+Audience: web renderer layout / Draw IR device-scale maintainers.
+
+Measured value: the glyph baseline row of an `H` (its last ink row + 1),
+relative to the top row of its own one-line block background, in device px.
+
+Chrome oracle (Chrome for Testing 159.0.8154.6 aarch64, `--headless
+--disable-gpu --hide-scrollbars --force-device-scale-factor=K
+--window-size=60,300 --screenshot`, fonts /usr/share/fonts/truetype/{dejavu,
+liberation}, black text on `#ffd0d0`, one `<div>` per case, body margin 0):
+
+| case                                         | K=4 | K=1 |
+|----------------------------------------------|-----|-----|
+| DejaVu Sans 16px                             | 58  | 15  |
+| DejaVu Sans 13px (52 device px, borrow)      | 47  | 12  |
+| DejaVu Sans 12px (48 device px, LCD)         | 44  | 11  |
+| Liberation Serif 16px                        | 58  | 14  |
+| Liberation Sans 11px (44 device px, borrow)  | 39  | 10  |
+| DejaVu 16px + 24px span (baseline from span) | 89  | 22  |
+| DejaVu 16px + span line-height:40px          | 101 | 25  |
+| DejaVu Sans 16px, line-height 23px (guard)   | 67  | 17  |
+| Liberation Sans 13px (guard)                 | 47  | 12  |
+
+Base (9368a4df112) at K=4: 59 48 45 57 40 87 99 67 47 — every K=1 row
+already equals Chrome. Line-box HEIGHTS (74 vs 76 device px for DejaVu 16px)
+are not pinned here; they need fractional line boxes (stage 2).
+Liberation Sans at 14/15/18/20px keeps a 1 px residual from the glyph raster
+anchoring (the painter's baseline for those faces sits one row above
+round(device ascent), at 1x 64px too) and is not pinned here.
+"""
+
+"""
+Traceability: REQ-WEB-DPR4-LINE-METRICS-001 — at device scale k>1 text is placed at Chrome's device-px strut baseline.
+"""
+# @tag: unit, browser_engine, text, layout, device_scale, chrome159
+# @cover src/lib/common/encoding/sfnt_kern.spl 1%
+# @cover src/lib/common/ui/draw_ir_device_scale.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 60
+val CSS_H: i32 = 48
+
+fn _page(div_style: text, content: text) -> text:
+    "<!doctype html><html><head><style>body{margin:0;background:#fff} div{margin:0;color:#000}</style></head>" +
+    "<body style=\"width:60px\"><div style=\"" + div_style + ";background:#ffd0d0\">" + content + "</div></body></html>"
+
+fn _chan(px: u32, shift: u32) -> i32:
+    ((px >> shift) & 0xFFu32) as i32
+
+fn _is_bg(px: u32) -> bool:
+    _chan(px, 16u32) > 240 and _chan(px, 8u32) > 190 and _chan(px, 8u32) < 220 and _chan(px, 0u32) > 190 and _chan(px, 0u32) < 220
+
+fn _is_ink(px: u32) -> bool:
+    _chan(px, 8u32) < 100 and _chan(px, 0u32) < 100
+
+# Glyph baseline row minus background top row, in device px; -1 when either
+# edge is missing. Ink is scanned in the first 10 CSS px, where only the `H`
+# is painted.
+fn _baseline_in_line(div_style: text, content: text, k: i32) -> i32:
+    val w = CSS_W * k
+    val h = CSS_H * k
+    val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_page(div_style, content), CSS_W, CSS_H, k, "cpu_simd")
+    if px.len() != (w * h) as i64:
+        return -1
+    var top = -1
+    var y = 0
+    while y < h and top < 0:
+        if _is_bg(px[y * w + w - 2]):
+            top = y
+        y = y + 1
+    var bottom = -1
+    y = 0
+    while y < h:
+        var x = 0
+        while x < 10 * k:
+            if _is_ink(px[y * w + x]):
+                bottom = y
+            x = x + 1
+        y = y + 1
+    if top < 0 or bottom < 0:
+        return -1
+    bottom + 1 - top
+
+describe "Device-px line metrics at device scale 4 (Chrome 159)":
+    it "AC-1: DejaVu Sans 16px sits on the borrowed 58 device px ascent":
+        expect(_baseline_in_line("font:16px 'DejaVu Sans'", "H", 4)).to_equal(58)
+
+    it "AC-2: DejaVu Sans 13px (52 device px) borrows: baseline 47":
+        expect(_baseline_in_line("font:13px 'DejaVu Sans'", "H", 4)).to_equal(47)
+
+    it "AC-3: DejaVu Sans 12px (48 device px, LCD text) baseline 44":
+        expect(_baseline_in_line("font:12px 'DejaVu Sans'", "H", 4)).to_equal(44)
+
+    it "AC-4: Liberation Serif 16px takes the floored device half-leading: baseline 58":
+        expect(_baseline_in_line("font:16px 'Liberation Serif'", "H", 4)).to_equal(58)
+
+    it "AC-5: Liberation Sans 11px (44 device px) borrows: baseline 39":
+        expect(_baseline_in_line("font:11px 'Liberation Sans'", "H", 4)).to_equal(39)
+
+    it "AC-6: a 24px span sets the line baseline in device px: 89":
+        expect(_baseline_in_line("font:16px 'DejaVu Sans'", "H<span style=\"font-size:24px\">B</span>", 4)).to_equal(89)
+
+    it "AC-7: an inline box with line-height:40px sets the line baseline in device px: 101":
+        expect(_baseline_in_line("font:16px 'DejaVu Sans'", "H<span style=\"line-height:40px\">x</span>", 4)).to_equal(101)
+
+    it "AC-8 (guard): line-height 23px on DejaVu Sans 16px keeps baseline 67":
+        expect(_baseline_in_line("font:16px 'DejaVu Sans';line-height:23px", "H", 4)).to_equal(67)
+
+    it "AC-9 (guard): Liberation Sans 13px keeps baseline 47":
+        expect(_baseline_in_line("font:13px 'Liberation Sans'", "H", 4)).to_equal(47)
+
+describe "Device-px line metrics leave scale 1 alone (Chrome 159 at 1x)":
+    it "AC-10: every case keeps its Chrome 1x baseline":
+        expect(_baseline_in_line("font:16px 'DejaVu Sans'", "H", 1)).to_equal(15)
+        expect(_baseline_in_line("font:13px 'DejaVu Sans'", "H", 1)).to_equal(12)
+        expect(_baseline_in_line("font:12px 'DejaVu Sans'", "H", 1)).to_equal(11)
+        expect(_baseline_in_line("font:16px 'Liberation Serif'", "H", 1)).to_equal(14)
+        expect(_baseline_in_line("font:11px 'Liberation Sans'", "H", 1)).to_equal(10)
+        expect(_baseline_in_line("font:16px 'DejaVu Sans'", "H<span style=\"font-size:24px\">B</span>", 1)).to_equal(22)
+        expect(_baseline_in_line("font:16px 'DejaVu Sans'", "H<span style=\"line-height:40px\">x</span>", 1)).to_equal(25)
+        expect(_baseline_in_line("font:16px 'DejaVu Sans';line-height:23px", "H", 1)).to_equal(17)
+        expect(_baseline_in_line("font:13px 'Liberation Sans'", "H", 1)).to_equal(12)
+
+    it "AC-11: a 4x render does not leak into a later 1x render of the same page":
+        val html = _page("font:16px 'DejaVu Sans'", "H<span style=\"font-size:24px\">B</span>")
+        val before = simple_web_layout_render_html_pixels_engine2d_at_device_scale(html, CSS_W, CSS_H, 1, "cpu_simd")
+        val scaled = simple_web_layout_render_html_pixels_engine2d_at_device_scale(html, CSS_W, CSS_H, 4, "cpu_simd")
+        val after = simple_web_layout_render_html_pixels_engine2d_at_device_scale(html, CSS_W, CSS_H, 1, "cpu_simd")
+        expect(scaled.len()).to_equal((CSS_W * CSS_H * 16).to_i64())
+        expect(after.len()).to_equal(before.len())
+        var same = true
+        var i = 0
+        while i < before.len():
+            if before[i] != after[i]:
+                same = false
+            i = i + 1
+        expect(same).to_be(true)

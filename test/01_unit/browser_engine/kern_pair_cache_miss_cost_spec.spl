@@ -1,0 +1,81 @@
+"""
+## Purpose and audience
+Purpose: Pin the cost of a kern-cache miss on the selected-blob lane, and that
+a run's exact width is still its advances plus the face's own kern pairs.
+
+Audience: text-layout / web-parity maintainers.
+
+Measured 2026-11-24 (interpreter, 1x css-layout catalog page): 514 kern-cache
+misses cost 432 ms of a 3.3 s style stage, 384 ms of it inside
+`sfnt_blob_kern_pair_milli_px`, which re-parsed the table directory twice
+(kern, then head) for every pair: 0.75 ms per pair. The face's kern index is
+now parsed once per face, with its glyph ids.
+"""
+
+"""
+Traceability: REQ-TEXT-LAYOUT-KERN-PAIR-001 — kern pair values in milli-pixels inside the cumulative pen, at a bounded per-pair cost.
+"""
+# @cover src/lib/common/encoding/sfnt_kern.spl 5%
+use std.spec.*
+use std.common.encoding.sfnt_glyf.{sfnt_blob_glyph_ids_into}
+use std.common.encoding.sfnt_kern.{sfnt_blob_kern_pair_milli_px}
+use std.nogc_sync_mut.io_runtime.{file_read_bytes, file_exists}
+use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer}
+use std.gc_async_mut.gpu.engine2d_host_clock.{time_now_unix_micros}
+
+val FACE: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val LETTERS: text = "AVTWYLPFaeoyrvw.,-"
+
+# Every ordered pair of LETTERS once, separated by spaces.
+fn pair_text() -> text:
+    val n = LETTERS.len()
+    var s = ""
+    var a = 0
+    while a < n:
+        var b = 0
+        while b < n:
+            s = s + LETTERS.substring(a, a + 1) + LETTERS.substring(b, b + 1) + " "
+            b = b + 1
+        a = a + 1
+    s
+
+fn gid(blob: [u8], codepoint: i64) -> i64:
+    var out: [i64] = [0]
+    sfnt_blob_glyph_ids_into(blob, [codepoint], out)
+    out[0]
+
+describe "kern pair cache misses":
+
+    it "measures a run of 324 distinct kern pairs within a time budget":
+        expect(file_exists(FACE)).to_be_true()
+        var renderer = FontRenderer.new()
+        expect(renderer.try_load_runtime_ttf(FACE)).to_be_true()
+        val s = pair_text()
+        val t0 = time_now_unix_micros()
+        val adv = renderer.measure_text_advances(s, 23)
+        val elapsed = time_now_unix_micros() - t0
+        print "kern_pair_cache_miss elapsed_us={elapsed} chars={adv.len()}"
+        expect(adv.len()).to_equal(972)
+        expect(elapsed < 200000).to_be_true()
+
+    it "keeps the run width equal to its advances plus the face's kern pairs":
+        expect(file_exists(FACE)).to_be_true()
+        var renderer = FontRenderer.new()
+        expect(renderer.try_load_runtime_ttf(FACE)).to_be_true()
+        val blob = file_read_bytes(FACE)
+        val s = pair_text()
+        val cps = s.bytes()
+        var want: i64 = 0
+        var kerned = 0
+        var i = 0
+        while i < cps.len():
+            val ch = s.substring(i, i + 1)
+            want = want + renderer.measure_text_width_milli(ch, 29)
+            if i > 0:
+                val k = sfnt_blob_kern_pair_milli_px(blob, gid(blob, cps[i - 1] as i64), gid(blob, cps[i] as i64), 29)
+                if k != 0:
+                    kerned = kerned + 1
+                want = want + k
+            i = i + 1
+        expect(kerned > 20).to_be_true()
+        expect(renderer.measure_text_width_milli(s, 29)).to_equal(want)

@@ -7,34 +7,53 @@
 # Transport implemented here via stdin_read_char and direct fd-backed stdout sinks.
 # This avoids loading the entire src/lib/ module tree (8GB+ RSS).
 
-use t32_mcp.json_helpers.{
+use std.io_runtime.{env_get_opt, process_run}
+use .json_helpers.{
     Q, LB, RB, SB_L, SB_R,
     escape_json, js, jp, jo1, jo2, jo3, jo4,
-    jsonrpc_result, jsonrpc_error
+    jsonrpc_result, jsonrpc_error, t32_extract_field_raw
 }
 
 extern fn stdin_read_char() -> text
 extern fn stdout_write(data: text) -> i64
-extern fn rt_stdout_flush() -> i64
+extern fn rt_stdout_flush() -> i64?
 extern fn rt_stderr_write(s: text)
 extern fn rt_stderr_flush()
-extern fn rt_env_get(name: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_append_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text?
+extern fn print_raw(msg: text)
+
+# Wire framing + server identity are owned HERE, not by main.spl: protocol.spl
+# is imported by main.spl, so main.spl cannot be their owner without a cycle,
+# and nothing else reads the JSON-Lines mode flag. Native HIR resolves names
+# per module (run-16 compiler_cli_build: `unresolved name: t32_nl /
+# t32_server_name / t32_server_version / T32_USE_JSON_LINES / rt_file_read_text
+# / print_raw` in protocol.spl); the interpreter's shared globals hid this.
+var T32_USE_JSON_LINES = false
+
+fn t32_nl() -> text:
+    return "\n"
+
+fn t32_server_name() -> text:
+    return "simple-mcp-t32"
+
+fn t32_server_version() -> text:
+    return "0.1.2"
 
 fn t32_stderr(message: text):
     rt_stderr_write("[t32-mcp] " + message + "\n")
     rt_stderr_flush()
 
 fn t32_protocol_debug_enabled() -> bool:
-    (rt_env_get("T32_MCP_DEBUG_LOG") ?? "1") != "0"
+    (env_get_opt("T32_MCP_DEBUG_LOG") ?? "1") != "0"
 
 fn t32_protocol_debug(message: text):
     if t32_protocol_debug_enabled():
         t32_stderr("proto: " + message)
 
 fn t32_protocol_trace(message: text):
-    val debug_path = rt_env_get("T32_MCP_DEBUG_FILE") ?? ""
+    val debug_path = env_get_opt("T32_MCP_DEBUG_FILE") ?? ""
     if debug_path != "":
         rt_file_append_text(debug_path, "protocol: " + message + "\n")
 
@@ -109,46 +128,15 @@ fn t32_has_method(msg: text, name: text) -> bool:
     return msg.contains("\"method\":\"" + name + "\"") or msg.contains("\"method\": \"" + name + "\"")
 
 fn t32_extract_request_id(msg: text) -> text:
-    # Extract numeric JSON-RPC id using only .contains() (avoids broken substring ==)
-    val prefix = "\"id\":"
-    val prefix_sp = "\"id\": "
-    var pfx = prefix
-    if msg.contains(prefix_sp):
-        pfx = prefix_sp
-    elif not msg.contains(prefix):
+    # JSON-RPC ids may be numbers OR strings ("id":"1"). The previous
+    # digit-probing loop only recognised numeric ids and echoed `"id":null`
+    # for every string id, so MCP clients could not correlate responses.
+    # Reuse the raw JSON field extractor, which preserves the value's own
+    # quoting (`"1"` stays `"1"`, `7` stays `7`).
+    val raw = t32_extract_field_raw(msg, "id")
+    if raw == "":
         return "null"
-    # Build id digit-by-digit using .contains() checks
-    var result = ""
-    var searching = true
-    while searching:
-        searching = false
-        var d = 0
-        while d <= 9:
-            val candidate = result + str(d)
-            val with_comma = pfx + candidate + ","
-            val with_close = pfx + candidate + "}"
-            val with_space = pfx + candidate + " "
-            if msg.contains(with_comma) or msg.contains(with_close) or msg.contains(with_space):
-                return candidate
-            # Check if candidate is a prefix of a longer number
-            var has_more = false
-            var e = 0
-            while e <= 9:
-                if msg.contains(pfx + candidate + str(e)):
-                    has_more = true
-                    break
-                e = e + 1
-            if has_more:
-                result = candidate
-                searching = true
-                break
-            d = d + 1
-    if result != "":
-        return result
-    # Check for "null" id
-    if msg.contains(pfx + "null"):
-        return "null"
-    return "null"
+    raw
 
 # --- JSON-RPC helpers (inlined) ---
 
@@ -315,7 +303,7 @@ fn t32_shell_cmd(command: text) -> (text, i64):
     var stdout = ""
     var stderr = ""
     var code: i64 = 0
-    (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "export NO_COLOR=1 TERM=dumb; " + command + " < /dev/null"])
+    (stdout, stderr, code) = process_run("/bin/sh", ["-c", "export NO_COLOR=1 TERM=dumb; " + command + " < /dev/null"])
     (stdout, code)
 
 fn t32_file_read(path: text) -> text:
@@ -671,3 +659,7 @@ fn t32_make_tool_schema(name: text, description: text) -> text:
         jp("annotations", annotations)
     )
     tool_obj
+
+export t32_validate_identifier, t32_is_all_digits, t32_is_hex_address, t32_has_shell_meta, t32_shell_escape
+export t32_make_tool_schema
+export t32_nl, t32_server_name, t32_server_version

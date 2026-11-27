@@ -5,15 +5,16 @@
 # store (scv_write_chunk_from_file), and once more for the CDC chunk payload
 # (scv_file_chunk_payload, files > 2 KiB). ScvFileBuffer reads the file ONCE
 # and derives all three — content id, chunk write, CDC chunk map — from that
-# single in-memory buffer via scv_write_file_object_from_bytes, whose payload
-# is byte-identical to the legacy path (same CDC loop, same rolling hash), so
-# existing repositories' object ids do not change.
+# single in-memory buffer via scv_write_file_object_from_bytes. New file objects
+# add a lossless structural root (or an explicitly opaque whole unit), retain
+# the full raw content ID, and do not create new CDC boundaries. Existing file
+# objects and their legacy CDC metadata remain readable without migration.
 #
 # Bounds: the file size is checked against SCV_MAX_OBJECT_BYTES BEFORE the
 # bytes are read, so an oversize file is rejected without allocating it.
 
 use app.io.mod (file_size)
-use std.nogc_sync_mut.io.file_ops.{file_read_bytes}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded_bytes}
 use std.scv.alloc_bounds.{SCV_MAX_OBJECT_BYTES}
 use std.scv.store.{scv_content_id_for_u8, scv_write_file_object_from_bytes}
 
@@ -25,20 +26,37 @@ struct ScvFileBuffer:
 
 fn scv_file_buffer_read_bounded(path: text, max_bytes: i64) -> ScvFileBuffer:
     val size = file_size(path)
+    if max_bytes < 0:
+        return ScvFileBuffer(path: path, bytes: [], size: size, error: "ERROR invalid file buffer bound: {max_bytes}\n")
+    if size < 0:
+        return ScvFileBuffer(path: path, bytes: [], size: size, error: "ERROR cannot stat file buffer: {path}\n")
     if size > max_bytes:
         return ScvFileBuffer(path: path, bytes: [], size: size, error: "ERROR file buffer over bound: {path} is {size} bytes (max {max_bytes})\n")
-    val bytes = file_read_bytes(path) ?? []
-    ScvFileBuffer(path: path, bytes: bytes, size: bytes.len(), error: "")
+    # The provider enforces the bound on the opened regular file. A pre-read
+    # stat alone cannot prevent a growing file from allocating past the limit.
+    match file_read_regular_no_follow_bounded_bytes(path, max_bytes):
+        Ok(bytes):
+            if bytes.len() > max_bytes:
+                return ScvFileBuffer(path: path, bytes: [], size: bytes.len(), error: "ERROR file buffer grew over bound: {path}\n")
+            if bytes.len() != size:
+                return ScvFileBuffer(path: path, bytes: [], size: bytes.len(), error: "ERROR file buffer changed during read: {path}\n")
+            ScvFileBuffer(path: path, bytes: bytes, size: bytes.len(), error: "")
+        Err(error):
+            ScvFileBuffer(path: path, bytes: [], size: size, error: "ERROR cannot read file buffer: {path}: {error}\n")
 
 fn scv_file_buffer_read(path: text) -> ScvFileBuffer:
     scv_file_buffer_read_bounded(path, SCV_MAX_OBJECT_BYTES)
 
-fn scv_file_buffer_content_id(buffer: ScvFileBuffer) -> text:
-    scv_content_id_for_u8(buffer.bytes)
+fn scv_file_buffer_content_id(buffer: ScvFileBuffer) -> Result<text, text>:
+    if buffer.error != "":
+        return Err(buffer.error)
+    Ok(scv_content_id_for_u8(buffer.bytes))
 
-# Writes chunk store entry, CDC sub-chunks, and the file object from the
-# buffer's bytes — zero additional disk reads. Returns (file_id, chunk_id).
-fn scv_file_buffer_write_objects(root: text, rel: text, buffer: ScvFileBuffer, mtime: i64) -> (text, text):
+# Writes retained raw bytes, structural byte nodes, and the file object from the
+# buffer's bytes — no additional source reads. Returns (file_id, chunk_id).
+fn scv_file_buffer_write_objects(root: text, rel: text, buffer: ScvFileBuffer, mtime: i64) -> Result<(text, text), text>:
+    if buffer.error != "":
+        return Err(buffer.error)
     scv_write_file_object_from_bytes(root, rel, buffer.bytes, mtime)
 
 export ScvFileBuffer, scv_file_buffer_read, scv_file_buffer_read_bounded

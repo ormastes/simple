@@ -1,98 +1,85 @@
 """
 ## Purpose and audience
-
-Executable specification for the `errdefer` and `defer` statement
-semantics, for compiler engineers changing parser statement handling or
-interpreter scope-exit execution. errdefer is a keyword that parses like
-defer but must run its body only when the enclosing scope exits with an
-error; defer must run unconditionally.
+Executable specification for `errdefer` and `defer` statement semantics across
+the pure-Simple core parser and tree-walking interpreter (`compiler.core.interpreter`).
+`errdefer` runs its deferred statement in LIFO order only when the enclosing
+function scope exits with an error; `defer` runs unconditionally on function exit.
 
 ## Operator workflow
-
-Run this spec with the repo test runner and confirm zero failed
-scenarios. Each scenario compiles and runs a probe function whose body
-carries the guarded statement, then asserts the observable side effect.
+1. Run `bin/simple test test/01_unit/compiler/parser/errdefer_spec.spl`.
+2. Confirm every scenario passes with 0 failures.
 
 ## Compatibility and limitations
-
-Coverage is interpreter semantics for single-statement errdefer/defer
-bodies on success and error paths, including LIFO ordering of stacked
-errdefers. Native-codegen parity and block-bodied forms are out of scope
-here.
-
-## Verification guidance and troubleshooting
-
-Re-run after any parser or interpreter change touching defer handling.
-A failure on the success-path scenario means errdefer bodies are running
-eagerly; a failure on the error-path scenario means scope-exit cleanup
-is being skipped; a failure on the LIFO scenario means registration
-order is inverted.
+Covers single-statement `defer expr` and `errdefer expr` in `core_jit_interpret`
+(tree-walk threshold); native codegen and block-form `defer:` are out of scope here.
 """
-# Lifecycle: doc/01_research/domain/parser_framework.md ;
-# doc/03_plan/agent_tasks/parser_framework.md ;
-# doc/04_architecture/parser_framework.md ;
-# doc/05_design/parser_framework.md
-# @manual_section: errdefer and defer semantics
 # @req: REQ-COMPILER-PARSER-001
+# @cover src/compiler/10.frontend/core/interpreter/eval.spl 80%
+# @cover src/compiler/10.frontend/core/interpreter/eval_calls.spl 80%
 
 use std.spec.{describe, it, expect, step}
+use compiler.core.parser.{parse_module, parser_has_errors, parser_set_had_error}
+use compiler.core.ast.{ast_reset}
+use compiler.core.ast_stmt.{stmt_get_tag, STMT_ERRDEFER}
+use compiler.frontend.core.interpreter.mod.{core_jit_interpret}
+use compiler.frontend.core.interpreter.eval.{eval_has_error}
+use compiler.frontend.core.interpreter.env.{env_lookup}
+use compiler.frontend.core.interpreter.value.{val_get_bool, val_get_int}
+
+fn run_core(source: text, path: text) -> i64:
+    core_jit_interpret(source, path, 999999)
 
 describe "Errdefer":
     describe "parsing":
-        it "parses an errdefer statement and leaves its body cold":
+        it "parses an errdefer statement into STMT_ERRDEFER without parse errors":
             # @req REQ-COMPILER-PARSER-001
-            step("Compile and run a probe fn that declares an errdefer")
-            # @capture(statistics): probe verdict for the parsed errdefer statement retained
-            fn parse_probe() -> bool:
-                var cleaned = ""
-                errdefer cleaned = cleaned + "r"
-                val x = 42
-                cleaned == ""
-            expect(parse_probe()).to_equal(true)  # oracle: the statement parses and its body stays cold on success
+            step("Parse a function declaring an errdefer statement")
+            val src = "fn parse_probe() -> i64:\n    var cleaned = 0\n    errdefer cleaned = 1\n    val x = 42\n    x\n"
+            ast_reset()
+            parser_set_had_error(false)
+            parse_module(src, "errdefer_parse.spl")
+            expect(parser_has_errors()).to_equal(false)
+
+            val res = run_core(src + "parse_probe()\n", "errdefer_parse_exec.spl")
+            expect(eval_has_error()).to_equal(false)
+            expect(val_get_int(res)).to_equal(42)
 
     describe "interpreter semantics":
         it "errdefer does NOT run on success":
             # @req REQ-COMPILER-PARSER-001
-            step("Run a success path guarded by an errdefer")
-            # @capture(statistics): guard-cold verdict retained
-            fn success_path() -> bool:
-                var ran = false
-                errdefer ran = true
-                val x = 42
-                ran
-            expect(success_path()).to_equal(false)  # oracle: the errdefer body must stay cold on the success path
+            step("Run a success path guarded by errdefer and confirm it stays cold")
+            val src = "var ran = false\nfn success_path() -> i64:\n    errdefer ran = true\n    42\nsuccess_path()\n"
+            val res = run_core(src, "errdefer_success.spl")
+            expect(eval_has_error()).to_equal(false)
+            expect(val_get_int(res)).to_equal(42)
+            expect(val_get_bool(env_lookup("ran"))).to_equal(false)
 
         it "errdefer runs on error":
             # @req REQ-COMPILER-PARSER-001
-            step("Error inside a guarded body and observe the cleanup")
-            # @capture(statistics): cleanup-ran verdict retained
-            var ran = false
-            fn error_path():
-                errdefer ran = true
-                val bad = 1 / 0  # triggers eval_had_error
-            error_path()
-            expect(ran).to_equal(true)  # oracle: the errdefer body must run when the body errors
+            step("Divide by zero inside a guarded fn and observe cleanup execution")
+            val src = "var ran = false\nfn error_path() -> i64:\n    errdefer ran = true\n    val bad = 1 / 0\n    0\nerror_path()\n"
+            run_core(src, "errdefer_error.spl")
+            expect(eval_has_error()).to_equal(true)
+            expect(val_get_bool(env_lookup("ran"))).to_equal(true)
 
-        it "defer always runs regardless of error":
+        it "defer always runs on success and error paths":
             # @req REQ-COMPILER-PARSER-001
-            step("Run a success path guarded by a plain defer")
-            # @capture(statistics): unconditional-run verdict retained
-            fn success_with_defer() -> bool:
-                var ran = false
-                defer ran = true
-                val x = 42
-                ran
-            expect(success_with_defer()).to_equal(true)  # oracle: defer runs on every path
+            step("Run both success and failing fns with defer and verify cleanup runs")
+            val ok_src = "var ran_ok = false\nfn ok_path() -> i64:\n    defer ran_ok = true\n    42\nok_path()\n"
+            val ok_res = run_core(ok_src, "defer_success.spl")
+            expect(eval_has_error()).to_equal(false)
+            expect(val_get_int(ok_res)).to_equal(42)
+            expect(val_get_bool(env_lookup("ran_ok"))).to_equal(true)
+
+            val err_src = "var ran_err = false\nfn fail_path() -> i64:\n    defer ran_err = true\n    val bad = 1 / 0\n    0\nfail_path()\n"
+            run_core(err_src, "defer_error.spl")
+            expect(eval_has_error()).to_equal(true)
+            expect(val_get_bool(env_lookup("ran_err"))).to_equal(true)
 
         it "multiple errdefers run in LIFO order on error":
             # @req REQ-COMPILER-PARSER-001
-            step("Stack three errdefers and error out")
-            # @capture(statistics): LIFO execution order retained
-            var order: [i64] = []
-            fn multi_errdefer():
-                errdefer order.push(1)
-                errdefer order.push(2)
-                errdefer order.push(3)
-                val bad = 1 / 0
-            multi_errdefer()
-            expect(order).to_equal([3, 2, 1])  # oracle: the last-registered errdefer runs first
+            step("Stack three errdefers and trigger division by zero")
+            val src = "var trace = 0\nfn multi_errdefer() -> i64:\n    errdefer trace = trace * 10 + 1\n    errdefer trace = trace * 10 + 2\n    errdefer trace = trace * 10 + 3\n    val bad = 1 / 0\n    0\nmulti_errdefer()\n"
+            run_core(src, "errdefer_lifo.spl")
+            expect(eval_has_error()).to_equal(true)
+            expect(val_get_int(env_lookup("trace"))).to_equal(321)

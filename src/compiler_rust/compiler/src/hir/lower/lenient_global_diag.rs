@@ -345,6 +345,7 @@ fn link_registry() -> &'static Mutex<LenientGlobalCollector> {
 ///
 /// Inserts directly rather than through `record`, because the owning `Lowerer`
 /// has already done the level-gated print for this entry.
+#[allow(dead_code)]
 pub(super) fn record_for_link_diagnostics(entry: &LenientGlobal) {
     let Ok(mut registry) = link_registry().lock() else {
         return;
@@ -353,6 +354,24 @@ pub(super) fn record_for_link_diagnostics(entry: &LenientGlobal) {
         return;
     }
     registry.entries.insert(entry.clone());
+}
+
+/// Mirror a completed `Lowerer`'s deduplicated attributions into the
+/// process-global registry in a single lock acquisition instead of taking
+/// the global mutex on every lenient identifier across worker threads.
+pub(super) fn record_batch_for_link_diagnostics(collector: &LenientGlobalCollector) {
+    if collector.is_empty() {
+        return;
+    }
+    let Ok(mut registry) = link_registry().lock() else {
+        return;
+    };
+    for entry in collector.entries() {
+        if registry.entries.len() >= LINK_REGISTRY_CAP {
+            break;
+        }
+        registry.entries.insert(entry.clone());
+    }
 }
 
 /// Consult the process-global registry for a link failure.

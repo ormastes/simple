@@ -1,0 +1,318 @@
+"""Stage 4 dual-mode build verification: release (--release --strip) AND debug+XRay (--debug -g --no-strip --xray)."""
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_exists, file_read, getpid, env_set_process, env_get_nullable}
+use std.nogc_sync_mut.io.env_ops.{host_os, host_arch}
+use app.cli.native_build_env_restore_v1.{native_build_env_saved_v1, native_build_env_restore_v1}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove}
+use app.io.process_ops.{process_run}
+use app.cli.bootstrap_focused_native_build.{
+    focused_native_build_error,
+    focused_native_build_profile_cache_dir_v1,
+    focused_native_build_strip,
+    focused_native_build_target_profile_v1
+}
+use app.io._CliCompile.compile_targets.{
+    cli_native_build_option_error,
+    cli_native_build_parse_options_v1
+}
+use compiler.driver.driver_xray_policy.{xray_policy_resolve}
+use compiler.common.driver_compile_options.{driver_core_compile_options_default}
+use compiler.driver.cache.native_noop_admission.{
+    native_noop_normalized_invocation_v1,
+    native_noop_request_v1
+}
+use compiler.backend.backend.backend_types.{BackendKind}
+use compiler.backend.codegen_types.{CodegenOutputKind}
+use compiler.backend.static_backend_registry.{
+    BackendLinkClass, install_k1_static_backend_table_v1,
+    install_host_only_static_backend_composition_v1, static_backend_entry_v1
+}
+use compiler.backend.static_backend_cranelift_port.{cranelift_backend_port_v1}
+use compiler.backend.static_backend_interpreter_port.{interpreter_backend_port_v1}
+use compiler.backend.static_backend_llvm_port.{llvm_backend_port_v1}
+use compiler.common.cuda_backend_policy.{install_cuda_backend_mode_v1}
+use compiler.common.driver_compile_result.{compile_result_is_success, compile_result_errors}
+use compiler.driver.bootstrap_api_fixed.{aot_native_project_with_backend_fixed_v2}
+
+fn _ensure_k1_llvm_installed() -> bool:
+    val ok1 = install_k1_static_backend_table_v1("llvm-cranelift", [
+        static_backend_entry_v1(BackendKind.Cranelift, BackendLinkClass.KernelLinked, cranelift_backend_port_v1(), CodegenOutputKind.ObjectCode),
+        static_backend_entry_v1(BackendKind.Interpreter, BackendLinkClass.KernelLinked, interpreter_backend_port_v1(), CodegenOutputKind.InterpretedResult),
+        static_backend_entry_v1(BackendKind.Llvm, BackendLinkClass.KernelLinked, llvm_backend_port_v1(), CodegenOutputKind.ObjectCode)
+    ])
+    val ok2 = install_cuda_backend_mode_v1("disabled")
+    val ok3 = install_host_only_static_backend_composition_v1("llvm-cranelift")
+    ok1 and ok2 and ok3
+
+fn _resolve_darwin_sdk() -> text:
+    val existing = env_get_nullable("SDKROOT") ?? ""
+    if existing != "" and file_exists(existing):
+        return existing
+    val (sdk_out, _sdk_err, sdk_rc) = process_run("xcrun", ["--sdk", "macosx", "--show-sdk-path"])
+    if sdk_rc == 0 and sdk_out.trim() != "":
+        return sdk_out.trim()
+    val clt_sdk = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+    if file_exists(clt_sdk):
+        return clt_sdk
+    ""
+
+fn _resolve_host_runtime_dir() -> text:
+    val candidates = [
+        "/private/tmp/simple-rc-build-20261117/seed/runtime",
+        "src/compiler_rust/target/bootstrap",
+        "src/compiler_rust/target/release"
+    ]
+    for candidate in candidates:
+        if file_exists("{candidate}/libsimple_runtime.a"):
+            return candidate
+    ""
+
+describe "Stage 4 dual-mode release and debug+XRay contract":
+    it "accepts both release/strip and debug/no-strip/xray modes in focused capsule and CLI parsers with isolated caches":
+        val rel_args = [
+            "simple", "native-build",
+            "--managed-build-phase=phase4",
+            "--profile=prod",
+            "--release",
+            "--strip",
+            "--mode", "one-binary",
+            "--entry", "src/app/cli/main.spl",
+            "-o", "build/full/simple"
+        ]
+        val dbg_args = [
+            "simple", "native-build",
+            "--managed-build-phase=phase4",
+            "--profile=dev",
+            "--debug",
+            "-g",
+            "--no-strip",
+            "--xray",
+            "--mode", "one-binary",
+            "--entry", "src/app/cli/main.spl",
+            "-o", "build/full/simple-debug"
+        ]
+        expect(focused_native_build_error(rel_args)).to_equal("")
+        expect(focused_native_build_error(dbg_args)).to_equal("")
+
+        val rel_prof = focused_native_build_target_profile_v1(rel_args).unwrap()
+        val dbg_prof = focused_native_build_target_profile_v1(dbg_args).unwrap()
+        expect(rel_prof.release).to_equal(true)
+        expect(rel_prof.profile).to_equal("prod")
+        expect(dbg_prof.release).to_equal(false)
+        expect(dbg_prof.profile).to_equal("dev")
+
+        expect(focused_native_build_strip(rel_args, true)).to_equal(true)
+        expect(focused_native_build_strip(dbg_args, true)).to_equal(false)
+
+        val rel_cache = focused_native_build_profile_cache_dir_v1(rel_args, "", rel_prof)
+        val dbg_cache = focused_native_build_profile_cache_dir_v1(dbg_args, "", dbg_prof)
+        val plain_dev_cache = focused_native_build_profile_cache_dir_v1(["--profile=dev"], "", dbg_prof)
+        expect(rel_cache).to_equal("build/native_cache/phase4-prod")
+        expect(dbg_cache).to_equal("build/native_cache/phase4-dev-xray")
+        expect(rel_cache == dbg_cache).to_equal(false)
+        expect(plain_dev_cache == dbg_cache).to_equal(false)
+
+        val cli_rel = ["native-build", "--release", "--strip", "--mode", "one-binary", "--backend", "llvm", "main.spl"]
+        val cli_dbg = ["native-build", "--debug", "-g", "--no-strip", "--xray", "--mode", "one-binary", "--backend", "llvm", "main.spl"]
+        expect(cli_native_build_option_error(cli_rel)).to_equal("")
+        expect(cli_native_build_option_error(cli_dbg)).to_equal("")
+
+        val parsed_rel = cli_native_build_parse_options_v1(cli_rel)
+        val parsed_dbg = cli_native_build_parse_options_v1(cli_dbg)
+        expect(parsed_rel.ok).to_equal(true)
+        expect(parsed_rel.release).to_equal(true)
+        expect(parsed_rel.debug_info).to_equal(false)
+        expect(parsed_rel.strip).to_equal(true)
+        expect(parsed_rel.xray_enabled).to_equal(false)
+
+        expect(parsed_dbg.ok).to_equal(true)
+        expect(parsed_dbg.release).to_equal(false)
+        expect(parsed_dbg.debug_info).to_equal(true)
+        expect(parsed_dbg.strip).to_equal(false)
+        expect(parsed_dbg.xray_enabled).to_equal(true)
+        expect(xray_policy_resolve(parsed_dbg.xray_enabled, "aot", "llvm", parsed_dbg.release, "native").is_ok()).to_equal(true)
+
+        # Zero-work noop cache separates --strip from --no-strip on identical release options.
+        var unstripped_opts = driver_core_compile_options_default()
+        unstripped_opts.release = true
+        unstripped_opts.strip_output = false
+        var stripped_opts = driver_core_compile_options_default()
+        stripped_opts.release = true
+        stripped_opts.strip_output = true
+        val inv_unstripped = native_noop_normalized_invocation_v1(unstripped_opts, "build/out/simple")
+        val inv_stripped = native_noop_normalized_invocation_v1(stripped_opts, "build/out/simple")
+        expect(inv_unstripped != "").to_equal(true)
+        expect(inv_stripped != "").to_equal(true)
+        expect(inv_unstripped == inv_stripped).to_equal(false)
+        val req_unstripped = native_noop_request_v1(
+            "/tmp/noop", "build/out/simple", "llvm", "aarch64-apple-darwin",
+            2, true, false, false, "prod", [], "", "rev", "tree", "inv",
+            "auth", "env", inv_unstripped, ["a.spl"], false
+        )
+        val req_stripped = native_noop_request_v1(
+            "/tmp/noop", "build/out/simple", "llvm", "aarch64-apple-darwin",
+            2, true, false, false, "prod", [], "", "rev", "tree", "inv",
+            "auth", "env", inv_stripped, ["a.spl"], true
+        )
+        expect(req_unstripped.identity == req_stripped.identity).to_equal(false)
+
+    it "wires dual-mode Stage 4 build, provenance attestation, local promoter, and 21-entry deploy transaction closure":
+        val bfs = file_read("scripts/bootstrap/bootstrap-from-scratch.sh")
+        val prov_sh = file_read("scripts/check/lib/stage4-candidate-provenance.shs")
+        val promoter = file_read("scripts/bootstrap/promote-stage4-local.shs")
+        val resume_sh = file_read("scripts/bootstrap/resume-stage4-from-admitted.sh")
+        val direct_sh = file_read("scripts/bootstrap/build-phase4-direct-product.shs")
+
+        expect(bfs).to_contain("stage4_dual_mode=\"${{SIMPLE_STAGE4_DUAL_MODE:-1}}\"")
+        expect(bfs).to_contain("simple-debug${{exe_suffix}}")
+        expect(bfs).to_contain("--profile=dev --debug --no-strip")
+        expect(bfs).to_contain("stage4-debug-native-build")
+        expect(bfs).to_contain("STAGE4_DEBUG_CANDIDATE_PATH=\"${{full_debug_bin}}\"")
+        expect(bfs).to_contain("stage4_debug_candidate_sha256=${{full_debug_manifest_hash}}")
+        expect(prov_sh).to_contain("stage4_debug_candidate_sha256=")
+        expect(promoter).to_contain("cli-debug")
+        expect(promoter).to_contain("simple_debug_sha256=")
+        expect(promoter.contains("simple-debug$suffix.sha256")).to_equal(false)
+        expect(resume_sh).to_contain("full_debug=\"$output/full/$platform/simple-debug\"")
+        expect(direct_sh).to_contain("dev-xray)")
+        expect(direct_sh).to_contain("receipt_trace_admission=xray-static-v1")
+
+        val probe_script = "set -eu; . scripts/bootstrap/bootstrap-deploy-transaction.shs; " +
+            "s=$(mktemp -d /tmp/s4_dual_tx.XXXXXX); trap 'rm -rf \"$s\"' EXIT; " +
+            "mkdir -p \"$s/release/test-platform\" \"$s/cand\" \"$s/gen.pending\"; " +
+            "bootstrap_deploy_tx_release_root=$(bootstrap_deploy_tx_canonical_dir \"$s/release\"); " +
+            "bootstrap_deploy_tx_platform=test-platform; " +
+            "bootstrap_deploy_tx_platform_path=\"$bootstrap_deploy_tx_release_root/test-platform\"; " +
+            "bootstrap_deploy_tx_dir=\"$s/gen.pending\"; " +
+            "bootstrap_deploy_tx_journal=\"$bootstrap_deploy_tx_dir/entries.tsv\"; : >\"$bootstrap_deploy_tx_journal\"; " +
+            "bootstrap_deploy_tx_final_dir=\"$s/gen\"; bootstrap_deploy_tx_active=1; bootstrap_deploy_tx_state=staging; " +
+            "req='simple simple-debug simple_seed simple_ui_backend simple_mcp_server simple_mcp_server.sha256 simple_lsp_mcp_server simple_lsp_mcp_server.sha256 launcher.simple launcher.simple-debug launcher.simple_seed launcher.simple_ui_backend launcher.simple_mcp_server launcher.simple_lsp_mcp_server authority.stage4-provenance.env authority.stage3-acceptance.env authority.kernel-policy.sdn authority.phase7.env authority.phase7-candidates.env authority.performance-baseline.env authority.performance-measurement.env'; " +
+            "for n in $req; do printf '%s\\n' \"$n\" >\"$s/cand/$n\"; bootstrap_deploy_tx_add \"$n\" \"$s/cand/$n\" \"$bootstrap_deploy_tx_platform_path/$n\" 644 ''; done; " +
+            "bootstrap_deploy_tx_verify_full_closure \"$bootstrap_deploy_tx_journal\" ''; " +
+            "grep -v '^launcher\\.simple-debug|' \"$bootstrap_deploy_tx_journal\" >\"$s/half.tsv\"; " +
+            "if bootstrap_deploy_tx_verify_full_closure \"$s/half.tsv\" ''; then exit 11; fi; " +
+            "bootstrap_deploy_tx_write_receipt_entries \"$s/entries.env\"; " +
+            "mv \"$bootstrap_deploy_tx_dir\" \"$bootstrap_deploy_tx_final_dir\"; " +
+            "bootstrap_deploy_tx_validate_entries \"$s/entries.env\" \"$bootstrap_deploy_tx_final_dir\"; " +
+            "printf 'DUAL_TX_OK\\n'"
+        val (tx_out, tx_err, tx_rc) = process_run("sh", ["-c", probe_script])
+        if tx_rc != 0:
+            print "tx_err={tx_err}"
+        expect(tx_rc).to_equal(0)
+        expect(tx_out.trim()).to_equal("DUAL_TX_OK")
+
+    it "compiles, links, inspects, isolates caches, and executes both release and debug+XRay Mach-O binaries on macOS":
+        val os_name = host_os()
+        if os_name != "macos" and os_name != "darwin":
+            expect(os_name != "").to_equal(true)
+            return ()
+        val raw_arch = host_arch()
+        val target = if raw_arch == "arm64" or raw_arch == "aarch64": "aarch64-apple-darwin" else: "x86_64-apple-darwin"
+        val rt_dir = _resolve_host_runtime_dir()
+        expect(rt_dir != "").to_equal(true)
+        val sdk_root = _resolve_darwin_sdk()
+        expect(sdk_root != "").to_equal(true)
+        expect(_ensure_k1_llvm_installed()).to_equal(true)
+
+        val work_root = "/tmp/stage4_dual_mode_spec_{getpid()}"
+        dir_remove(work_root, true)
+        expect(dir_create_all("{work_root}/cache/phase4-prod")).to_equal(true)
+        expect(dir_create_all("{work_root}/cache/phase4-dev-xray")).to_equal(true)
+
+        val old_target = native_build_env_saved_v1("SIMPLE_NATIVE_BUILD_TARGET")
+        val old_rt = native_build_env_saved_v1("SIMPLE_RUNTIME_PATH")
+        val old_bundle = native_build_env_saved_v1("SIMPLE_NATIVE_RUNTIME_BUNDLE")
+        val old_cache = native_build_env_saved_v1("SIMPLE_NATIVE_BUILD_CACHE_DIR")
+        val old_sdk = native_build_env_saved_v1("SDKROOT")
+        val old_dep = native_build_env_saved_v1("MACOSX_DEPLOYMENT_TARGET")
+        val old_mcdc = native_build_env_saved_v1("SIMPLE_MCDC_MODE")
+
+        val _es = env_set_process("SIMPLE_NATIVE_BUILD_TARGET", target)
+        val _es = env_set_process("SIMPLE_RUNTIME_PATH", rt_dir)
+        val _es = env_set_process("SIMPLE_NATIVE_RUNTIME_BUNDLE", "core-c-bootstrap")
+        val _es = env_set_process("SDKROOT", sdk_root)
+        val _es_mcdc = env_set_process("SIMPLE_MCDC_MODE", "off")
+        if (env_get_nullable("MACOSX_DEPLOYMENT_TARGET") ?? "") == "":
+            val _es = env_set_process("MACOSX_DEPLOYMENT_TARGET", "15.0")
+
+        val helper_src = "test/fixtures/xray/dual_mode_probe/helper.spl"
+        val rel_entry_src = "test/fixtures/xray/dual_mode_probe/main.spl"
+        val dbg_entry_src = "test/fixtures/xray/dual_mode_probe/xray_live_main.spl"
+        val rel_bin = "{work_root}/simple_probe_release"
+        val dbg_bin = "{work_root}/simple_probe_debug_xray"
+
+        val _es = env_set_process("SIMPLE_NATIVE_BUILD_CACHE_DIR", "{work_root}/cache/phase4-prod")
+        val rel_res = aot_native_project_with_backend_fixed_v2(
+            helper_src, "", "", "", "", "", 1,
+            rel_entry_src, rel_bin, "llvm",
+            true, true, 2, false, "phase4", "", false, false, 0
+        )
+        if not compile_result_is_success(rel_res):
+            print "release compile errors: {compile_result_errors(rel_res).join(\" || \").replace(\"\n\", \" | \")}"
+        expect(compile_result_is_success(rel_res)).to_equal(true)
+        expect(file_exists(rel_bin)).to_equal(true)
+
+        val _es = env_set_process("SIMPLE_NATIVE_BUILD_CACHE_DIR", "{work_root}/cache/phase4-dev-xray")
+        val dbg_res = aot_native_project_with_backend_fixed_v2(
+            helper_src, "", "", "", "", "", 1,
+            dbg_entry_src, dbg_bin, "llvm",
+            false, false, 0, false, "phase4", "", true, false, 1
+        )
+        if not compile_result_is_success(dbg_res):
+            print "debug+xray compile errors: {compile_result_errors(dbg_res).join(\" || \").replace(\"\n\", \" | \")}"
+        expect(compile_result_is_success(dbg_res)).to_equal(true)
+        expect(file_exists(dbg_bin)).to_equal(true)
+
+        # 1. Release Mach-O binary executes natively on macOS and prints 42 with exit 0.
+        val (rel_out, _rel_err, rel_rc) = process_run(rel_bin, [])
+        expect(rel_rc).to_equal(0)
+        expect(rel_out.trim()).to_equal("42")
+
+        # 2. Debug + XRay Mach-O binary executes LIVE runtime XRay activation on macOS arm64:
+        #    verifies 0 events while dormant, enables + patches __DATA,__xray_fn_slots,
+        #    captures real entry + exit events (> 0) for dual_mode_compute_sum,
+        #    disables + unpatches tracing, and verifies 0 events on subsequent call.
+        val (dbg_out, dbg_err, dbg_rc) = process_run(dbg_bin, [])
+        if dbg_rc != 0:
+            print "dbg_bin failed rc={dbg_rc} out={dbg_out} err={dbg_err}"
+        expect(dbg_rc).to_equal(0)
+        expect(dbg_out).to_contain("42")
+        expect(dbg_out).to_contain("XRAY_LIVE_OK ")
+
+        # 3. Release binary is stripped (0 DWARF OSO entries, no XRay symbols).
+        val (rel_nm_ap, _e1, _c1) = process_run("nm", ["-ap", rel_bin])
+        expect(rel_nm_ap.contains(" OSO ")).to_equal(false)
+        expect(rel_nm_ap.contains("___xray_set_handler")).to_equal(false)
+        expect(rel_nm_ap.contains("_simple_xray_llvm_")).to_equal(false)
+
+        # 4. Debug + XRay binary preserves DWARF OSO debug info + Darwin XRay runtime + __DATA,__xray_fn_slots.
+        val (dbg_nm_ap, _e2, nm_rc) = process_run("nm", ["-ap", dbg_bin])
+        expect(nm_rc).to_equal(0)
+        expect(dbg_nm_ap).to_contain(" OSO ")
+        expect(dbg_nm_ap).to_contain("___xray_set_handler")
+        expect(dbg_nm_ap).to_contain("_simple_xray_llvm_patch_function")
+        expect(dbg_nm_ap).to_contain("_simple_xray_llvm_max_function_id")
+        expect(dbg_nm_ap).to_contain("___simple_darwin_xray_edge_v1")
+
+        val (otool_out, _e3, otool_rc) = process_run("otool", ["-l", dbg_bin])
+        expect(otool_rc).to_equal(0)
+        expect(otool_out).to_contain("sectname __xray_fn_slots")
+
+        # 4. Cache scopes inside phase4-prod vs phase4-dev-xray are distinct.
+        val (scope_check, _e4, scope_rc) = process_run("sh", [
+            "-c",
+            "p=$(ls " + work_root + "/cache/phase4-prod | grep '^s' | head -n1); " +
+            "d=$(ls " + work_root + "/cache/phase4-dev-xray | grep '^s' | head -n1); " +
+            "[ -n \"$p\" ] && [ -n \"$d\" ] && [ \"$p\" != \"$d\" ] && printf '%s!=%s\\n' \"$p\" \"$d\""
+        ])
+        expect(scope_rc).to_equal(0)
+        expect(scope_check).to_contain("!=")
+
+        native_build_env_restore_v1("SIMPLE_NATIVE_BUILD_TARGET", old_target)
+        native_build_env_restore_v1("SIMPLE_RUNTIME_PATH", old_rt)
+        native_build_env_restore_v1("SIMPLE_NATIVE_RUNTIME_BUNDLE", old_bundle)
+        native_build_env_restore_v1("SIMPLE_NATIVE_BUILD_CACHE_DIR", old_cache)
+        native_build_env_restore_v1("SDKROOT", old_sdk)
+        native_build_env_restore_v1("MACOSX_DEPLOYMENT_TARGET", old_dep)
+        native_build_env_restore_v1("SIMPLE_MCDC_MODE", old_mcdc)
+        dir_remove(work_root, true)

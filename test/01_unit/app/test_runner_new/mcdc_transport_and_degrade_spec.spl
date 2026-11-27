@@ -1,0 +1,111 @@
+# @req REQ-MCDC-ENFORCEMENT-005
+"""
+# MC/DC manifest transport arguments and degrade tagging
+
+When MC/DC is degraded (instrumented compile failed, manifest absent) the
+runner must say so with a stable, whitespace-free token on the verdict line.
+When a manifest exists it must travel to the child with length and digest so a
+truncated or substituted manifest is detectable.
+"""
+
+use std.spec.*
+use std.test_runner.test_runner_execute.{
+    mcdc_manifest_transport_args,
+    smf_compile_degrade_token,
+    mcdc_manifest_absent_degrade_opted_in
+}
+use app.test_daemon.light_protocol.{aggregate_spec_file_verdict_line}
+
+describe "mcdc_manifest_transport_args":
+    it "returns no arguments when there is no manifest path":
+        expect(mcdc_manifest_transport_args("", "").len()).to_equal(0)
+        expect(mcdc_manifest_transport_args("", "orphan manifest body").len()).to_equal(0)
+
+    it "returns path, length and sha256 in a fixed order":
+        val args = mcdc_manifest_transport_args("/m.sdn", "abc")
+        expect(args.len()).to_equal(3)
+        expect(args[0]).to_equal("--simple-mcdc-manifest=/m.sdn")
+        expect(args[1]).to_equal("--simple-mcdc-manifest-length=3")
+        expect(args[2]).to_start_with("--simple-mcdc-manifest-sha256=")
+
+    it "uses the known sha256 of the manifest body":
+        val args = mcdc_manifest_transport_args("/m.sdn", "abc")
+        expect(args[2]).to_equal("--simple-mcdc-manifest-sha256=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+
+    it "changes the digest when a single byte changes":
+        val a = mcdc_manifest_transport_args("/m.sdn", "abc")
+        val b = mcdc_manifest_transport_args("/m.sdn", "abd")
+        expect(a[2] == b[2]).to_equal(false)
+        expect(a[1]).to_equal(b[1])
+
+    it "reports the byte length of an empty manifest as zero when a path is given":
+        val args = mcdc_manifest_transport_args("/m.sdn", "")
+        expect(args.len()).to_equal(3)
+        expect(args[1]).to_equal("--simple-mcdc-manifest-length=0")
+
+describe "smf_compile_degrade_token":
+    it "classifies the interpreter-only-construct diagnostic":
+        val t = smf_compile_degrade_token("error: x.spl: cannot compile to standalone SMF: 2 function(s) contain constructs that require the interpreter")
+        expect(t).to_start_with("smf-interpreter-only-constructs")
+
+    it "classifies every other diagnostic as smf-compile-error":
+        val t = smf_compile_degrade_token("error: compile failed (/tmp/a.spl): semantic: /tmp/a.spl: undefined identifier: print_raw")
+        expect(t).to_start_with("smf-compile-error")
+        expect(t).to_contain("print_raw")
+
+    it "falls back to the bare kind when the output is empty":
+        expect(smf_compile_degrade_token("")).to_equal("smf-compile-error")
+
+    it "never emits whitespace or quotes, so it parses as one verdict token":
+        val t = smf_compile_degrade_token("error: a.spl: some \"quoted\" cause with spaces")
+        expect(t.contains(" ")).to_equal(false)
+        expect(t.contains("\"")).to_equal(false)
+        expect(t.contains("\n")).to_equal(false)
+
+    it "bounds the token length even for a very long diagnostic":
+        var long_diag = "error: a.spl: "
+        var i = 0
+        while i < 2000:
+            long_diag = long_diag + "x"
+            i = i + 1
+        expect(smf_compile_degrade_token(long_diag).len() < 400).to_equal(true)
+
+    it "keeps the cause at the end of an over-long diagnostic":
+        var long_diag = "error: "
+        var i = 0
+        while i < 500:
+            long_diag = long_diag + "p"
+            i = i + 1
+        val t = smf_compile_degrade_token(long_diag + " the-real-cause")
+        expect(t).to_end_with("the-real-cause")
+
+describe "manifest-absent degrade opt-in":
+    it "is true only for the exact word degrade":
+        expect(mcdc_manifest_absent_degrade_opted_in("degrade")).to_equal(true)
+        for v in ["", "1", "true", "yes", "Degrade", "DEGRADE", " degrade", "degrade ", "on", "skip"]:
+            expect(mcdc_manifest_absent_degrade_opted_in(v)).to_equal(false)
+
+describe "degrade reaches the verdict line":
+    it "prints the degraded token when the file ran":
+        val line = aggregate_spec_file_verdict_line("a_spec.spl", 3, 0, 0, "", "smf-compile-error:boom", false, 10)
+        expect(line).to_contain("degraded=smf-compile-error:boom")
+        expect(line).to_contain("passed=3")
+
+    it "omits degraded= when nothing degraded":
+        val line = aggregate_spec_file_verdict_line("a_spec.spl", 3, 0, 0, "", "", false, 10)
+        expect(line.contains("degraded=")).to_equal(false)
+        expect(line).to_contain("outcome=OK")
+
+    it "never reports OK for a failing degraded file":
+        val line = aggregate_spec_file_verdict_line("a_spec.spl", 1, 2, 0, "", "smf-compile-error", false, 10)
+        expect(line).to_contain("outcome=ERROR")
+        expect(line).to_contain("failed=2")
+        expect(line).to_contain("degraded=smf-compile-error")
+
+    it "never reports OK when nothing executed":
+        val line = aggregate_spec_file_verdict_line("a_spec.spl", 0, 0, 0, "", "", false, 10)
+        expect(line.contains("outcome=OK")).to_equal(false)
+
+    it "reports a timeout as a timeout, not a pass":
+        val line = aggregate_spec_file_verdict_line("a_spec.spl", 5, 0, 0, "", "smf-compile-error", true, 999)
+        expect(line.contains("outcome=OK")).to_equal(false)

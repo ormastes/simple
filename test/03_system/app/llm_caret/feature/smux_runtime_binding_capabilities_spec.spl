@@ -1,0 +1,76 @@
+# Actual authenticated server-route checks; no positive runtime stream claimed.
+# @req REQ-SMUX-RUNTIME-BOUNDARY-001 REQ-SMUX-RUNTIME-BOUNDARY-002
+use std.spec.*
+use std.spec.step
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.value.SdnValue
+use os.apps.smux.server.smux_server_dispatch
+use os.apps.smux.smux_remote.smux_remote_dispatch
+use os.apps.smux.api.{smux_list_sessions, smux_configuration_revision}
+
+fn runtime_boundary_fields(reply: text) -> Dict<text, SdnValue>:
+    val parsed = sdn_parse_strict_v1(reply, SdnStrictLimitsV1(max_source_bytes: 4096,
+        max_depth: 4, max_nodes: 64, max_rows: 32, max_cells: 64, max_columns: 16))
+    if parsed.is_err():
+        fail("server runtime boundary did not return complete strict SDN")
+        return {}
+    match parsed.unwrap().value:
+        case SdnValue.Dict(fields): fields
+        case _:
+            fail("server runtime boundary returned a non-dictionary")
+            {}
+
+describe "smux authenticated runtime binding capability boundary":
+    it "authenticates before capability or binding dispatch":
+        step("Reject missing or wrong owner credentials for both negotiated commands")
+        for command in ["runtime-binding-capabilities-v1", "bind-existing-runtime-v3", "bind-existing-runtime-v3 payload"]:
+            expect(smux_server_dispatch(command, "owner-token")).to_equal("smux: unauthorized")
+            expect(smux_server_dispatch("wrong-token " + command, "owner-token")).to_equal("smux: unauthorized")
+            expect(smux_server_dispatch("owner-token " + command, "")).to_equal("smux: unauthorized")
+
+    it "reports the exact installed text compatibility capability":
+        step("Discover explicit unsupported runtime binding through the authenticated production route")
+        val reply = smux_server_dispatch("owner-token runtime-binding-capabilities-v1", "owner-token")
+        val fields = runtime_boundary_fields(reply)
+        expect(fields.len()).to_equal(7)
+        expect(fields["version"]).to_equal(SdnValue.Int(1))
+        expect(fields["kind"]).to_equal(SdnValue.String("smux-runtime-binding-capabilities"))
+        expect(fields["authenticationScope"]).to_equal(SdnValue.String("trusted-local-owner"))
+        expect(fields["transport"]).to_equal(SdnValue.String("smux-text-v1"))
+        expect(fields["bindExistingRuntime"]).to_equal(SdnValue.Bool(false))
+        expect(fields["framedCoreMux"]).to_equal(SdnValue.Bool(false))
+        expect(fields["reason"]).to_equal(SdnValue.String("runtime-binding-owner-not-installed"))
+        expect(reply.bytes().len()).to_be_less_than(4096)
+
+    it "refuses bind requests without registry or configuration effects":
+        step("Keep the existing owner state unchanged when no runtime binding owner is installed")
+        val before = smux_configuration_revision()
+        val sessions = smux_list_sessions().len()
+        for command in ["bind-existing-runtime-v3", "bind-existing-runtime-v3 payload", "bind-existing-runtime-v3 payload"]:
+            val fields = runtime_boundary_fields(smux_server_dispatch("owner-token " + command, "owner-token"))
+            expect(fields.len()).to_equal(6)
+            expect(fields["version"]).to_equal(SdnValue.Int(3))
+            expect(fields["kind"]).to_equal(SdnValue.String("smux-runtime-binding-result"))
+            expect(fields["status"]).to_equal(SdnValue.String("unsupported"))
+            expect(fields["code"]).to_equal(SdnValue.String("runtime-binding-owner-not-installed"))
+            expect(fields["committed"]).to_equal(SdnValue.Bool(false))
+            expect(fields["streamOwned"]).to_equal(SdnValue.Bool(false))
+        val after = smux_configuration_revision()
+        expect(after.value).to_equal(before.value)
+        expect(after.epoch).to_equal(before.epoch)
+        expect(after.valid).to_equal(before.valid)
+        expect(smux_list_sessions().len()).to_equal(sessions)
+
+    it "keeps the unauthenticated dispatcher outside the negotiated route":
+        step("Do not add structured runtime binding commands to direct remote dispatch")
+        for command in ["runtime-binding-capabilities-v1", "bind-existing-runtime-v3"]:
+            val reply = smux_remote_dispatch(command)
+            expect(reply.starts_with("smux:")).to_equal(true)
+            expect(reply.contains("smux-runtime-binding-")).to_equal(false)
+
+    it "retains existing oversized and multiline frame rejection":
+        step("Apply the server frame guard before processing binding requests")
+        val oversized = "owner-token bind-existing-runtime-v3 " + "x".repeat(4096)
+        expect(smux_server_dispatch(oversized, "owner-token")).to_equal("smux: invalid request")
+        expect(smux_server_dispatch("owner-token bind-existing-runtime-v3\npayload", "owner-token")).to_equal("smux: invalid request")

@@ -58,3 +58,16 @@ fn context_identifier_assignment_call_and_bare_tail_are_unchanged() {
     let Node::Function(function) = &module.items[0] else { panic!("expected function") };
     assert!(matches!(&function.body.statements[0], Node::Expression(Expr::Identifier(name)) if name == "context"));
 }
+
+#[test]
+fn context_arithmetic_and_logic_operators_continue_the_identifier_expression() {
+    // Sibling arms of the NotEq fix: every binary operator that cannot start a
+    // context DSL receiver must keep `context` an identifier at statement start.
+    for (operator, expected) in [("+", BinOp::Add), ("*", BinOp::Mul), ("/", BinOp::Div),
+        ("%", BinOp::Mod), ("and", BinOp::And), ("or", BinOp::Or)] {
+        let module = parse(&format!("fn tail(context: i64, other: i64) -> i64:\n    context {operator} other\n"));
+        let Node::Function(function) = &module.items[0] else { panic!("expected function") };
+        assert!(matches!(&function.body.statements[0], Node::Expression(Expr::Binary { op, left, .. })
+            if *op == expected && **left == Expr::Identifier("context".into())), "operator {operator}");
+    }
+}

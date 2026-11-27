@@ -1,0 +1,88 @@
+# Source cases NOT_RUN. Codec integrity does not authenticate a descriptor.
+use std.spec.{describe, it, expect}
+use std.common.contracts.container.stream_handoff_v1.*
+
+fn byte_handoff_fixture_v1() -> ContainerByteHandoffReceiptV1:
+    var value = ContainerByteHandoffReceiptV1(operation_id: "helper-output-1",
+        request_digest: "1".repeat(64), target_binding_digest: "2".repeat(64),
+        native_identity_digest: "3".repeat(64), handoff_nonce: "4".repeat(64),
+        gateway_incarnation_nonce: "5".repeat(64), provider_generation: 7,
+        source_generation: 11, binding_digest: "")
+    value.binding_digest = container_byte_handoff_digest_v1(value).unwrap()
+    value
+
+describe "Container byte handoff correlation codec":
+    it "roundtrips all metadata without constructing any live endpoint":
+        val source = container_byte_handoff_encode_v1(byte_handoff_fixture_v1()).unwrap()
+        val restored = container_byte_handoff_decode_v1(source).unwrap()
+        expect(container_byte_handoff_encode_v1(restored).unwrap()).to_equal(source)
+        expect(restored.provider_generation).to_equal(7)
+        expect(restored.source_generation).to_equal(11)
+        expect(restored.gateway_incarnation_nonce).to_equal("5".repeat(64))
+
+    it "binds every operation target native and gateway correlation field":
+        val original = byte_handoff_fixture_v1()
+        var changed = original
+        changed.operation_id = "helper-output-2"
+        assert(container_byte_handoff_validate_v1(changed).is_err())
+        changed = original
+        changed.request_digest = "6".repeat(64)
+        assert(container_byte_handoff_validate_v1(changed).is_err())
+        changed = original
+        changed.target_binding_digest = "6".repeat(64)
+        assert(container_byte_handoff_validate_v1(changed).is_err())
+        changed = original
+        changed.native_identity_digest = "6".repeat(64)
+        assert(container_byte_handoff_validate_v1(changed).is_err())
+        changed = original
+        changed.handoff_nonce = "6".repeat(64)
+        assert(container_byte_handoff_validate_v1(changed).is_err())
+        changed = original
+        changed.gateway_incarnation_nonce = "6".repeat(64)
+        assert(container_byte_handoff_validate_v1(changed).is_err())
+        changed = original
+        changed.provider_generation = 8
+        assert(container_byte_handoff_validate_v1(changed).is_err())
+        changed = original
+        changed.source_generation = 12
+        assert(container_byte_handoff_validate_v1(changed).is_err())
+
+    it "rejects unbound zero or negative generations":
+        var value = byte_handoff_fixture_v1()
+        value.provider_generation = 0
+        assert(container_byte_handoff_digest_v1(value).is_err())
+        value = byte_handoff_fixture_v1()
+        value.source_generation = -1
+        assert(container_byte_handoff_digest_v1(value).is_err())
+
+    it "rejects pathlike operation IDs and malformed nonce or digest":
+        var value = byte_handoff_fixture_v1()
+        value.operation_id = "../helper"
+        assert(container_byte_handoff_digest_v1(value).is_err())
+        value = byte_handoff_fixture_v1()
+        value.handoff_nonce = "A".repeat(64)
+        assert(container_byte_handoff_digest_v1(value).is_err())
+        value = byte_handoff_fixture_v1()
+        value.gateway_incarnation_nonce = "scope-continuity-id"
+        assert(container_byte_handoff_digest_v1(value).is_err())
+        value = byte_handoff_fixture_v1()
+        value.binding_digest = "0".repeat(64)
+        assert(container_byte_handoff_encode_v1(value).is_err())
+
+    it "rejects noncanonical padding trailing data and oversized input":
+        val source = container_byte_handoff_encode_v1(byte_handoff_fixture_v1()).unwrap()
+        assert(container_byte_handoff_decode_v1(" " + source).is_err())
+        assert(container_byte_handoff_decode_v1(source + "\n").is_err())
+        assert(container_byte_handoff_decode_v1(source + "other = 1\n").is_err())
+        assert(container_byte_handoff_decode_v1("x".repeat(4097)).is_err())
+
+    it "rejects missing unknown duplicate and wrong typed fields":
+        val source = container_byte_handoff_encode_v1(byte_handoff_fixture_v1()).unwrap()
+        assert(container_byte_handoff_decode_v1("{}\n").is_err())
+        assert(container_byte_handoff_decode_v1(source.replace("providerGeneration", "unknownGeneration")).is_err())
+        val wrong_type = source.replace("providerGeneration: 7", "providerGeneration: \"7\"")
+        expect(wrong_type == source).to_equal(false)
+        assert(container_byte_handoff_decode_v1(wrong_type).is_err())
+        val duplicate = source.replace("providerGeneration: 7", "providerGeneration: 7, providerGeneration: 7")
+        expect(duplicate == source).to_equal(false)
+        assert(container_byte_handoff_decode_v1(duplicate).is_err())

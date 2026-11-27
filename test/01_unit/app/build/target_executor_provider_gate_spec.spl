@@ -1,0 +1,86 @@
+"""
+## Purpose and audience
+Purpose: Prove the target executor really calls `select_backend_group` and
+`admit_provider_with_receipt` for opt-in backend group members, and that a
+missing or invalid provider descriptor fails closed with SPL-PROVIDER-ABI-001
+(plan §6 caller wiring). Non-backend targets are untouched.
+Audience: compiler and tooling engineers who maintain backend build groups.
+"""
+# @req: REQ-APP-BUILD-001 — executor provider gate (plan §6).
+
+use app.build.targets.build_targets.{parse_targets_text, find_target}
+use app.build.targets.provider_gate.{provider_gate_group, provider_sidecar_path, provider_gate}
+use std.nogc_sync_mut.io_runtime.{file_write, file_read, file_exists, file_delete, dir_create_all}
+use std.spec.step
+
+val HOST = "x86_64-unknown-linux-gnu"
+val ROOT = "build/tmp/target_executor_provider_gate_spec"
+val SRC = "group host:\n    default: true\n    members: compiler\n\ngroup backends_cuda:\n    default: false\n    members: //backend:cuda\n\ntarget compiler:\n    kind: binary\n    entry: src/main.spl\n\ntarget //backend:cuda:\n    kind: shared\n    entry: src/plugins/backend_cuda/cuda_backend.spl\n    output: build/backends/host/backend_cuda-v1.so\n"
+
+fn _sidecar(abi: text, group: text) -> text:
+    "schema: provider_descriptor_v1\ngroup: " + group + "\nabi_version: " + abi + "\nhost_triple: " + HOST + "\ncapabilities: [object_emit, optimization]\n"
+
+fn _setup(case_name: text, sidecar: text) -> text:
+    val dir = ROOT + "/" + case_name
+    dir_create_all(dir)
+    file_delete(dir + "/receipts/backends_cuda.sdn")
+    file_write(dir + "/backend.so", "provider-bytes")
+    if sidecar != "":
+        file_write(provider_sidecar_path(dir + "/backend.so"), sidecar)
+    dir
+
+fn _gate(dir: text) -> text:
+    val ts = parse_targets_text(SRC)
+    val t = ts.targets[find_target(ts, "//backend:cuda")]
+    provider_gate(ts, t, dir + "/backend.so", dir + "/backend.so", HOST, dir + "/receipts")
+
+describe "executor provider gate":
+    it "maps only opt-in backends_* members to a group":
+        val ts = parse_targets_text(SRC)
+        expect(provider_gate_group(ts, "//backend:cuda")).to_equal("backends_cuda")
+        expect(provider_gate_group(ts, "compiler")).to_equal("")
+
+    it "does not gate a non-backend target":
+        val ts = parse_targets_text(SRC)
+        val t = ts.targets[find_target(ts, "compiler")]
+        expect(provider_gate(ts, t, ROOT + "/none", ROOT + "/none", HOST, ROOT + "/r")).to_equal("")
+
+    it "fails closed when the provider descriptor is missing":
+        val dir = _setup("missing", "")
+        expect(_gate(dir)).to_start_with("SPL-PROVIDER-ABI-001: provider-missing: backends_cuda")
+
+    it "fails closed on an unparseable provider descriptor":
+        val dir = _setup("invalid", "not a descriptor {{{")
+        expect(_gate(dir)).to_start_with("SPL-PROVIDER-ABI-001: provider-invalid: backends_cuda")
+
+    it "refuses an ABI mismatch through select_backend_group":
+        val dir = _setup("abi", _sidecar("99", "backends_cuda"))
+        expect(_gate(dir)).to_start_with("SPL-PROVIDER-ABI-001: backend-admission: abi-mismatch")
+
+    it "refuses a descriptor that names another group":
+        val dir = _setup("group", _sidecar("1", "backends_vhdl"))
+        expect(_gate(dir)).to_start_with("SPL-PROVIDER-ABI-001: provider-not-selected")
+
+    it "admits a valid provider and writes a receipt":
+        val dir = _setup("ok", _sidecar("1", "backends_cuda"))
+        expect(_gate(dir)).to_equal("")
+        expect(file_exists(dir + "/receipts/backends_cuda.sdn")).to_equal(true)
+        step("Verify: rerun admits, tampered artifact is refused")
+        expect(_gate(dir)).to_equal("")
+        file_write(dir + "/backend.so", "tampered")
+        expect(_gate(dir)).to_start_with("SPL-PROVIDER-ABI-001: receipt-mismatch: artifact_sha256")
+
+    it "records descriptor-supplied identity and the selected targets in the receipt":
+        val dir = _setup("identity", _sidecar("1", "backends_cuda") + "semver: 1.2.3\nroles: codegen\n")
+        expect(_gate(dir)).to_equal("")
+        val rec = file_read(dir + "/receipts/backends_cuda.sdn")
+        expect(rec.contains("semver=1.2.3")).to_equal(true)
+        expect(rec.contains("targets=//backend:cuda")).to_equal(true)
+
+    it "refuses a non-string identity field":
+        val dir = _setup("badident", _sidecar("1", "backends_cuda") + "semver: [1, 2]\n")
+        expect(_gate(dir)).to_start_with("SPL-PROVIDER-ABI-001: provider-invalid: backends_cuda: mistyped identity field: semver")
+
+    it "is called from the executor action path":
+        val src = file_read("src/app/build/targets/target_executor.spl")
+        expect(src.contains("provider_gate(")).to_equal(true)

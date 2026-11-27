@@ -1,0 +1,56 @@
+# @cover src/lib/nogc_sync_mut/trace/xray_win_flag_leaf_v1.spl
+# @req REQ-XRAY-V1-API-01
+"""
+# Windows XRay ring v2: reader acquire ordering
+
+The ring writer publishes a slot with seq := claim + 1 (release). On a weakly
+ordered CPU (ARM64) the reader must load seq with acquire semantics before it
+reads the payload, and in wrap mode it must issue an acquire fence between the
+payload reads and the seq recheck, otherwise the payload loads may be satisfied
+after the recheck and a torn slot passes. On x86 both are plain loads, so the
+behaviour there is unchanged. This spec pins the reader code shape.
+"""
+use std.spec.*
+use std.io_runtime.{file_read}
+
+val LEAF_PATH = "src/lib/nogc_sync_mut/trace/xray_win_flag_leaf_v1.spl"
+
+fn leaf_fn_body(src: text, header: text) -> text:
+    val start = src.index_of(header) ?? -1
+    if start < 0: return ""
+    val rest = src.substring(start + header.len())
+    val stop = rest.index_of("\n    me ") ?? -1
+    if stop < 0: return rest
+    rest.substring(0, stop)
+
+describe "XRay ring v2 reader acquire ordering":
+
+    it "drop-mode drain loads seq with an acquire atomic load":
+        step("read the drop-mode drain body")
+        val body = leaf_fn_body(file_read(LEAF_PATH), "me drain() -> i64:")
+        assert_true(body.len() > 0)
+        step("seq is read through the acquire helper, never a plain read")
+        assert_true(body.contains("xray_ring_seq_acquire_v1(self.ring, rec + 16)"))
+        assert_false(body.contains("rt_ptr_read_i64(self.ring, rec + 16)"))
+
+    it "wrap-mode drain loads seq with acquire and fences before the recheck":
+        step("read the wrap-mode drain body")
+        val body = leaf_fn_body(file_read(LEAF_PATH), "me drain_wrap() -> i64:")
+        assert_true(body.len() > 0)
+        step("both seq reads go through the acquire helper")
+        assert_false(body.contains("rt_ptr_read_i64(self.ring, rec + 16)"))
+        val first = body.index_of("xray_ring_seq_acquire_v1(self.ring, rec + 16)") ?? -1
+        assert_true(first >= 0)
+        step("an acquire fence sits after the payload ts read and before the recheck")
+        val ts_at = body.index_of("rt_ptr_read_i64(self.ring, rec + 24)") ?? -1
+        val fence_at = body.index_of("rt_load_barrier()") ?? -1
+        val recheck_at = body.index_of("if xray_ring_seq_acquire_v1(self.ring, rec + 16) == expect_seq") ?? -1
+        assert_true(ts_at > first)
+        assert_true(fence_at > ts_at)
+        assert_true(recheck_at > fence_at)
+
+    it "the acquire helper is an atomic load on the slot address":
+        step("helper body uses the runtime atomic load")
+        val src = file_read(LEAF_PATH)
+        assert_true(src.contains("fn xray_ring_seq_acquire_v1(ring: i64, off: i64) -> i64:"))
+        assert_true(src.contains("rt_par_atomic_load_i64(ring + off)"))

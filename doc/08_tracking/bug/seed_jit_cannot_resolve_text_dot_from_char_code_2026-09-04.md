@@ -1,7 +1,7 @@
 # Seed JIT cannot resolve `text_dot_from_char_code`, killing any `simple run` that calls slang's manifest parser
 
 - **Filed:** 2026-09-04
-- **Status:** Open
+- **Status:** fixed (2026-11-06, branch `work/seed-jit-batch2-20261106`; see "Resolution 2026-11-06")
 - **Severity:** blocks `simple run` for any program whose call graph reaches
   `text.from_char_code`, including the whole slang model-loader path.
 - **Binary under test:** `src/compiler_rust/target/bootstrap/simple`
@@ -117,3 +117,34 @@ fn main():
 EOF
 src/compiler_rust/target/bootstrap/simple run /tmp/iso3.spl    # PANIC
 ```
+
+## Resolution 2026-11-06
+
+Re-check on a seed built from `origin/release/1.0.0` @ ecb705896a4 (Windows x86_64):
+
+- The slang shape (`parse_manifest("nonsense")`) no longer reaches the call. It
+  prints `parsed` on both that base binary and the fixed one.
+- The direct shape was still broken, and worse than before: the panic had become a silent crash.
+  `val s = text.from_char_code(65); print "fc {s}"` under `SIMPLE_EXECUTION_MODE=jit`
+  printed nothing and died with SIGSEGV (rc 139). The interpreter printed `fc A`.
+
+Root cause: Cranelift `codegen/instr/calls.rs::compile_call` has no arm for the
+builtin text statics. The call fell through with its dotted name, sanitized to
+`text_dot_from_char_code`. That is a legacy export deliberately absent from the
+static provider manifest (`codegen/jit_tests.rs::test_jit_integer_chr_uses_registered_runtime_symbol`).
+The LLVM backend had routed `text.from_char_code` / `text.from_bytes` to
+`rt_char_from_code` / `rt_bytes_to_text` since 2026-09-25. Cranelift had not.
+
+Fix: the same routing in Cranelift `compile_call`, ahead of the cross-module
+fallback.
+
+- Fixture: `test/fixtures/compiler/seed_jit_miscompiles/text_from_char_code_static.spl`
+  (JIT before: rc 139, no output; after: `fc A`, rc 0. Interpreter: `fc A`)
+- Rust test `compiler/tests/text_static_builtins_jit.rs::text_static_builtins_route_to_runtime_abi`
+  (before: test process died with `STATUS_ACCESS_VIOLATION`; after: ok). It covers
+  `from_char_code(65) == "A"`, `from_char_code(233)` (byte len 2, code 233, the
+  same as the interpreter) and `from_bytes([104u8, 105u8]) == "hi"`.
+
+Interpreter gap (not this lane): `text.from_bytes(...)` fails in the seed
+interpreter with `semantic: variable 'text' not found`. The compiled backends
+support it.

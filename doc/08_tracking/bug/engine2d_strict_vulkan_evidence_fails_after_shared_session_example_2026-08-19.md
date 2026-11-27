@@ -1,6 +1,6 @@
 # BUG: strict Vulkan fresh-device evidence fails after the shared-session WM example in the same process
 
-Status: OPEN (2026-08-19)
+Status: VERIFIED 2026-11-26 on Linux aarch64 (see end); remaining WM-example red split out
 Where: `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl`
 (`_engine2d_draw_ir_execute_strict_vulkan_primitives`, fallback reason
 `strict-vulkan-submit-evidence-required`),
@@ -58,3 +58,92 @@ Bisect which sub-state of the WM example (shared vulkan offscreen, shared
 metal session, or text/font evidence) flips the strict evidence, then either
 reset that state on engine shutdown or make the evidence check ignore
 process-level leftovers it should not depend on.
+
+## Triage addendum (2026-11-11, lane ne7)
+
+**Status: OPEN — reported mechanism no longer reproduces on the 2026-11-11
+seed; the spec remains red on two adjacent stale-oracle failures that need
+owner triage.**
+
+Seed-smoke run
+(`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe test test/02_integration/rendering/engine2d_embedded_surface_spec.spl --mode=interpreter --no-cache`,
+fresh seed 46fe8f6b6def, Windows lane): 10 executed, 8 passed, 2 failed
+(was 7 passed / 3 failed on 2026-08-19).
+
+Reported mechanism — FIXED in behavior:
+
+- "uses the Vulkan device path only for preflighted root and named-child
+  compositions" — PASS
+- "composites preflighted resolved text through checked Vulkan image
+  blending" — PASS
+- Both run AFTER the shared-session WM example in the same process and now
+  return `readback_source=device_readback`, `backend_handle>0`,
+  `skipped_command_count=0` (the spec asserts exactly this at lines 269-275
+  and 303-308). The 2026-08-19 signature — every fresh-device call coming
+  back `cpu_fallback`/`backend_handle=0` after the WM example — no longer
+  occurs.
+
+Remaining red (different defect, same spec):
+
+- "composites a canonical offset translucent WM window on shared Vulkan and
+  Metal sessions" — FAILS BEFORE any backend work, at stale canonical-scene
+  oracle constants from `shared_wm_scene_draw_ir_composition_with_content`:
+  actual window `embedding.x=14` (oracle 10), body alpha `0x28` (oracle
+  `0x33`), content command `112x44` kind `rect` (oracle `120x52` kind
+  `image`), content `y=68` (oracle 64). The WM scene chrome metrics changed
+  after this spec's oracles were written; whether the change is intentional
+  is an owner call, so the oracles were not rewritten here.
+- "opacity_milli=500 blends the embedded surface at ~50% over the background"
+  — FAILS on one off-by-one: actual red channel 126 vs oracle 127. Not one
+  of this bug's three examples; a blend integer-math rounding drift.
+
+Owner follow-up: confirm the canonical WM chrome change (4px inset, alpha
+0x28) is intended, then update the oracle constants under review; separately
+adjudicate the 126-vs-127 blend rounding oracle.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the 2026-11-11 (lane ne7) addendum stands — the
+recorded fresh-device `cpu_fallback` signature no longer occurs; the remaining
+red is canonical-scene oracle drift (4px inset, alpha 0x28) plus a 126-vs-127
+blend rounding oracle, both of which are owner calls, not P3 fixes.
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+On release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: test/02_integration/rendering/engine2d_embedded_surface_spec.spl 10 examples, 8 passed, 2 failed. The two Vulkan-evidence examples this record names pass (uses the Vulkan device path only for preflighted root and named-child compositions; composites preflighted resolved text through checked Vulkan image blending); whether their Ok(engine) arm or their Err arm ran was not instrumented, so this is not device evidence. Red: (1) the WM example, on fixture oracles that no longer match the product (expected 40 to equal 51: commands[0] is now the 0x28 shadow rect; content rect is 14,68 112x44 against a 120x52 fixture frame, so the fail-closed placeholder is drawn); (2) opacity_milli=500, 126 vs 127. Not changed here: correcting (1) rewrites six oracles and needs the spec owner to confirm the 4px content inset is intended.
+
+
+## Verification 2026-11-26 (Linux aarch64 GB10, real NVIDIA Vulkan) — VERIFIED
+
+release/1.0.0 79445b063c4, seed
+`/home/yoon/.cache/cargo-target-wr-seed1126b/release/simple`. Unmodified spec:
+10 executed, 9 passed, 1 failed (the WM example, on oracles only; the
+opacity 126-vs-127 example now passes). An instrumented copy (prints after
+every `engine2d_draw_ir_adv_fresh_device_composition_with_images` result, run
+in one process in spec order) shows the `Ok(engine)` arms ran on the device:
+
+```
+WM example (shared Vulkan session + child offscreen + text): src=device_readback handle=1 rendered=17 skipped=0
+preflighted root/named-child: device_readback handles 15,17,19,21,25, skipped=0
+  (opacity/first-transparent/partial: preflight_rejected, as specified)
+resolved text through image blending: src=device_readback handle=29 rendered=2 skipped=0
+```
+
+The 2026-08-19 signature (every fresh-device call after the WM example
+returning `cpu_fallback`/`backend_handle=0`) does not occur. The remaining
+WM-example red is a separate defect, filed as
+`engine2d_embedded_wm_example_stale_chrome_oracles_2026-11-26`.
+
+Reproduce the instrumented run (the copy lives under the gitignored `build/`):
+
+```sh
+awk '{ print }
+/^ +val [a-z_]*result = engine2d_draw_ir_adv_fresh_device_composition_with_images\(/ && /engine,|_engine,/ {
+  match($0, /^ +/); ind=substr($0, 1, RLENGTH); split($0, a, " "); v=a[2];
+  printf "%sprint \"probe line=%d var=%s src={%s.readback_source} handle={%s.backend_handle} rendered={%s.rendered_command_count} skipped={%s.skipped_command_count}\"\n", ind, NR, v, v, v, v, v }' \
+  test/02_integration/rendering/engine2d_embedded_surface_spec.spl > build/probe/instr_spec.spl
+systemd-run --user --scope -q -p MemoryMax=8G "$SEED" test build/probe/instr_spec.spl | grep '^probe'
+```
+
+(Insert the prints before the spec's own `expect(result...)` lines; the
+spec's soft expectations keep running after the WM example's oracle
+failures, so its device composition is reached.)

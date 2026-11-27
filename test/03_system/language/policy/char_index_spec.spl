@@ -1,0 +1,81 @@
+# Requirement: ADR-005 (s[i] returns char; code-point indexing)
+# ADR: doc/04_architecture/adr/ADR-005-text-index-yields-char.md
+# Scope: behaviour that is implemented today. Not-yet-implemented ADR-005
+# scenarios live in char_index_in_dev_spec.spl (@tag:in-development).
+# Engine parity: probes run on the interpreter lane and the JIT lane via $SIMPLE_BIN.
+use std.spec.*
+use std.nogc_sync_mut.io_runtime.{env_get, process_run}
+
+fn _lane(mode: text, probe: text) -> text:
+    val runner = env_get("SIMPLE_BIN")
+    val verb = if mode == "interpreter": "run " else: ""
+    val (out, err, code) = process_run("sh", ["-c", "SIMPLE_EXECUTION_MODE={mode} '{runner}' {verb}'{probe}' 2>&1"])
+    "{out}{err}\nexit={code}\n"
+
+fn _probe_lines(out: text) -> text:
+    var acc = ""
+    for line in out.split("\n"):
+        if line.starts_with("PROBE|"):
+            acc = acc + line + "\n"
+    acc
+
+describe "ADR-005 text index yields code points":
+    context "ASCII and multi-byte chars (in-process)":
+        it "indexes ASCII by code point":
+            val s = "abc"
+            expect(s[0].ord()).to_equal(97)
+            expect(s[2].ord()).to_equal(99)
+        it "indexes a 2-byte char as one element":
+            val s = "a\u{e9}b"
+            expect(s[1].ord()).to_equal(233)
+            expect(s[2].ord()).to_equal(98)
+        it "indexes a 3-byte char as one element":
+            val s = "a\u{20ac}b"
+            expect(s[1].ord()).to_equal(8364)
+            expect(s[2].ord()).to_equal(98)
+        it "indexes a 4-byte char as one element":
+            val s = "a\u{1F600}b"
+            expect(s[1].ord()).to_equal(128512)
+            expect(s[2].ord()).to_equal(98)
+        it "counts negative indices from the end in code points":
+            val s = "a\u{1F600}"
+            expect(s[-1].ord()).to_equal(128512)
+            expect(s[-2].ord()).to_equal(97)
+        it "casts an indexed char to its code point":
+            val s = "72"
+            expect(s[0] as i64).to_equal(55)
+        it "converts an indexed char to 1-character text":
+            val s = "7x"
+            expect(s[0].to_text()).to_equal("7")
+
+    context "iteration and byte APIs (in-process)":
+        it "chars() yields one element per code point":
+            val s = "a\u{e9}\u{20ac}\u{1F600}"
+            expect(s.chars().len()).to_equal(4)
+        it "char_count() counts code points":
+            expect("a\u{e9}\u{20ac}\u{1F600}".char_count()).to_equal(4)
+        it "byte_at() reads raw UTF-8 bytes":
+            val s = "a\u{e9}"
+            expect(s.byte_at(0)).to_equal(97)
+            expect(s.byte_at(1)).to_equal(195)
+            expect(s.byte_at(2)).to_equal(169)
+        it "char_code_at() reads the code point":
+            val s = "a\u{e9}\u{20ac}\u{1F600}"
+            expect(s.char_code_at(1)).to_equal(233)
+            expect(s.char_code_at(3)).to_equal(128512)
+        it "len() currently counts bytes (code-point switch is held, see in-dev spec)":
+            expect("abc".len()).to_equal(3)
+            expect("\u{e9}".len()).to_equal(2)
+
+    context "interpreter and JIT agree":
+        it "gives identical indexing output on both lanes":
+            val probe = "test/03_system/language/policy/probe/char_index.spl"
+            val i = _probe_lines(_lane("interpreter", probe))
+            val j = _probe_lines(_lane("jit", probe))
+            expect(i).to_contain("I0=97 I1=233 I2=8364 I3=128512 N1=128512")
+            expect(i).to_contain("BA=97 195 CCA=128512")
+            expect(j).to_equal(i)
+        it "reports out-of-range index as index out of bounds on the interpreter":
+            val i = _lane("interpreter", "test/03_system/language/policy/probe/char_oob.spl")
+            expect(i).to_contain("index out of bounds")
+            expect(i.contains("PROBE|OOB=")).to_be_false()

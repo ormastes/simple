@@ -1,5 +1,9 @@
 # SOSIX runtime library — TL;DR
 
+## 2026-10-29 host process handoff
+
+Follow the [integration workflow](sosix_runtime_library.md#host-process-integration-workflow--2026-10-29) before editing shared contracts or host adapters: isolated worktree, named owners, manual/SSpec RED then native GREEN, truthful missing-provider failure, exact evidence, independent review and PR merge. Mac snapshot V1 is an explicit trusted cooperative profile; sealed V4 and escaped-descendant containment remain unavailable. File-provider notes below are separate dated findings.
+
 `std.common.contracts.sosix.*` holds the pure contracts (operation lifecycle,
 completions, wait protocol, positioned descriptors, frozen IDs, typed errors);
 `std.nogc_async_mut.sosix` is the hosted composition (`fs` async over

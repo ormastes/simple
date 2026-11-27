@@ -1,8 +1,19 @@
 # JS VM DOM bridge retention is frame-linear and property-scan quadratic
-## Open 2026-09-16 — needs owner triage
+## Partially resolved — quadratic half merged and verified 2026-11-25; retention half open (owner-reserved, large program)
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+**Triage 2026-11-25 (release/1.0.0 @ a19165ae174, Windows, pinned
+`bin/simple.exe` Rust seed v1.0.0-rc.1, `--mode=interpreter`):** the
+2026-11-05 quadratic property-scan fix IS merged on release/1.0.0
+(`obj_slot_index`/`scan_ops` present in
+`src/lib/nogc_sync_mut/js/engine/vm_object_store.spl`) and its spec
+`test/01_unit/lib/nogc_sync_mut/js/engine/object_store_scan_bounds_spec.spl`
+passes 4/4 (`--no-cache --no-cover-check`; run with a temporary
+`@representation_boundary` strip to work around the separate pinned-binary
+decorator inconsistency, sources restored). The frame-linear retention half
+remains OPEN: it requires the scoped VM tracing reclamation prerequisite
+below, whose JsHeapHandle/JsExternalRootKey/JsTypedEdge ABI is frozen and
+owner-reserved ("Root Codex owns any future implementation merge") — not a
+bounded fix; skipped by the P2 fleet pass for that reason.
 
 ## Status
 
@@ -101,3 +112,47 @@ Use live-object/live-property metrics, not monotonic `next_id`. The current
 test that expects the cap to reject a second replacement is regression evidence
 for this bug, not proof of lifecycle correctness.
 
+
+## 2026-11-05 — quadratic property-scan half fixed on work/libbug-w6-jsbridge-20261105
+
+Scope: only the time-superlinear property-scan half of this bug. The
+frame-linear retention half (cumulative retained counters, no tracing
+reclamation) is unchanged and still needs the scoped VM tracing
+reclamation prerequisite above.
+
+Root cause found on `origin/release/1.0.0`: the interpreter write path
+(`JsInterpreter.set_object_property`) already used the (obj_id, key) slot
+index, but `ObjectStore` still performed whole-store linear scans in
+`set_property` (per write), `array_length` (per call, from for-of loops,
+spread, array natives), `remove_property` (per call, from CSS style
+writes), and `JsInterpreter.get_object_property_exact_key` (per require
+cache lookup). Against a store that grows monotonically with retained
+bridge generations, each operation scanned every stored slot:
+Theta(total properties) per operation.
+
+Fix: all four operations now resolve the object's slots through the
+existing `obj_slot_index` (`object_slots`, synced on entry) and touch only
+those slots. Whole-store scans remain only as counted fallbacks when the
+index is provably out of sync (`ObjectStore.scan_ops`). Correctness
+semantics are unchanged (first-match update for `set_property`,
+max-index-derived length, all-matches removal, exact-key last-match).
+
+Spec evidence: `test/01_unit/lib/nogc_sync_mut/js/engine/object_store_scan_bounds_spec.spl`
+bounds property work by `scan_ops == 0` (deterministic under the
+interpreter; no wall-clock gate): 1000 decoy slots from simulated prior
+bridge generations, then writes/reads/array lengths/removals/array
+creation on live objects must perform zero whole-store scans. RED before
+the fix measured ~0.5-0.6M whole-store scan iterations for these trivial
+workloads; GREEN after the fix is exactly 0. Pre-existing specs
+(`object_store_slot_index_spec`, `interpreter_object_single_owner_spec`,
+`promise_constructor_spec`, `regex_literal_replace_spec`,
+`object_property_write_budget_spec` in both async-mut variants, and the
+`test/01_unit/lib/js/` engine specs) pass identically before and after,
+except baseline failures unrelated to this change
+(`statement_dispatch_*`, `function_scope_chain_and_global_constructors`)
+which fail identically with and without the fix.
+
+Remaining: retention half (live-object plateau metrics, RSS receipt,
+256-frame rAF SSpec) still owned by the VM tracing reclamation
+prerequisite; `js_vm_reclamation_spec.spl` remains intentionally RED
+until the frozen JsHeapHandle/JsExternalRootKey/JsTypedEdge ABI lands.

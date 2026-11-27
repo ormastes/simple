@@ -4,8 +4,64 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN
+**Status:** verification-pending — library mitigation for `sha1_bytes` only (2026-11-14, below). The compiler root cause (untyped `list` returns on compiled engines) is NOT fixed and stays open.
+
+## 2026-11-25 — titled defect re-verified FIXED on the release/1.0.0 pinned seed
+
+Measured on `bin/simple.exe` (38,403,072 bytes, Rust seed v1.0.0-rc.1,
+Windows) at release/1.0.0 HEAD. The doc's exact repro
+(`sha1_bytes([97, 98, 99])`) under the default JIT lane prints the correct
+RFC 3174 digest:
+
+```
+raw_sha1abc=[169, 153, 62, 54, 71, 6, 129, 106, 186, 62, 37, 113, 120, 80, 194, 108, 156, 208, 216, 157]
+```
+
+= `a9993e364706816aba3e25717850c26c9cd0d89d`. No tag corruption, no wrong
+digest. This independently confirms the "Verified FIXED 2026-11-03" entry on
+the binary release/1.0.0 actually ships. The interpreter arm of the same probe
+could not be re-run in this lane: the pinned seed rejects the
+`@representation_boundary` decorator present at release/1.0.0 HEAD when it
+loads the stdlib source tree (`bin/simple.exe test`/`run` under
+`SIMPLE_EXECUTION_MODE=interpreter` fail repo-wide on it), a known
+source/binary inconsistency, not a sha1 regression — the interpreter was
+correct in every prior measurement and the 2026-11-14 library mitigation is
+engine-independent.
+
+The deliberately-retained residual stands unchanged: the compiler root cause
+(untyped `list` returns mis-tagged on compiled engines) and the
+`sha1_tuple_*`/x4 paths remain open as recorded above. The titled defect —
+`sha1_bytes` returning a corrupted `[i64]` under the JIT — is closed.
 **Found:** 2026-08-04
+
+## 2026-11-14 — also reproduces under `native-build` (AOT); library mitigation
+
+The same corruption reaches AOT binaries, so HMAC-SHA-1 and PBKDF2-HMAC-SHA-1
+were wrong in any native tool. Repro (seed build-commit `97728d94d5f1`, Windows,
+llvm-mingw): native-build a `main` that prints
+`bytes_to_hex(sha1_bytes(ascii("abc")))` and the RFC 2202 / RFC 6070 vectors
+(`test/fixtures/devhub/native_sha1_kat/main.spl`):
+
+```
+SIMPLE_NATIVE_BUILD_RUST=1 simple native-build test/fixtures/devhub/native_sha1_kat/main.spl -o build/nb/sha1kat.exe --cache-dir build/nb/cache
+```
+
+Before (native): `sha1_abc a21b7b11a21b79f1a21b7931a21b7d81a21b7a81`,
+`pbkdf2_sha1_c2 00069d4000069e900006a9500006ac000006abc0`
+(want `a9993e36…d0d89d`, `ea6c014d…de8957`). Before (`simple run`, JIT):
+`sha1_abc d447bfc1d44714e1d44716a1d447c521d447b1c1`. The interpreter was correct
+throughout, which is why every spec stayed green.
+
+Mitigation: `src/lib/common/crypto/sha1.spl` — `sha1_bytes` now runs through
+`sha1_finish`, whose pad / compress / emit helpers are typed `[i64]` and index
+with `[]`. After: native and JIT both print the published digests. Pinned by
+`test/01_unit/lib/crypto/sha1_compiled_engine_kat_fixture_spec.spl` (runs the
+fixture as a compiled program; `SHA1_KAT_NATIVE_BIN` points it at an AOT build).
+
+Not fixed: the tuple streaming API (`sha1_tuple_*`) and the x4 path in the same
+file still return untyped `list`, and the compiler still mis-tags such returns.
+The SQLCipher path (SHA-256/512, HMAC-SHA-512, PBKDF2-SHA-512, AES-256-CBC) was
+checked natively against published vectors and does not diverge.
 
 ## Symptom
 
@@ -246,3 +302,17 @@ Root cause is a Rust JIT codegen defect (`src/compiler_rust/compiler/src/codegen
 requiring a seed rebuild to fix and verify — out of scope for a pure-Simple
 shard fix. No change made. Leaving OPEN.
 
+**Revalidated 2026-11-02: still plausible because (superseded below): UNABLE-still-open — architecturally plausible per; no merged fix commit with a passing regression is cited in this doc.**
+
+## Verified FIXED 2026-11-03 (no code change in this lane)
+
+Seed built from release/1.0.0 source (`cargo build --release --bin simple`, own
+target dir, CC=clang-cl). Standalone copy of `sha1.spl` scalar path (no
+imports, so the JIT genuinely compiles it; the stdlib import path currently
+drops the module to the interpreter on unresolved `rt_text_eq_any` /
+`crypto_text_to_bytes`, which would mask the bug) prints
+`[169, 153, 62, 54, 71, 6, 129, 106, 186, 62, 37, 113, 120, 80, 194, 108, 156, 208, 216, 157]`
+(= a9993e36..., RFC 3174) under BOTH `SIMPLE_EXECUTION_MODE=interpret` and `jit`.
+Contributing fixes: wide-int unbox (value_ops.rs), tuple `.get()` typed unbox
+(ee815637f72). Separate observation: the full stdlib import path JIT-falls-back
+on unresolved externals (not this bug).

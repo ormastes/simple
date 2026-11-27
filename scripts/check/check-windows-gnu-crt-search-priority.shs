@@ -1,0 +1,128 @@
+#!/bin/sh
+# Fast contract regression for the production Windows GNU Cargo flag owners.
+# Real Cargo shadow/space-path evidence is retained with the filed CRT bug.
+set -eu
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+script="$here/../bootstrap/bootstrap-from-scratch.sh"
+case "$#" in
+  0) ;;
+  1) case "$1" in --script=*) script=${1#*=} ;; *) echo 'usage: --script PATH' >&2; exit 2 ;; esac ;;
+  2) [ "$1" = --script ] || exit 2; script=$2 ;;
+  *) exit 2 ;;
+esac
+[ -f "$script" ] || { echo "ERROR: missing bootstrap script: $script" >&2; exit 2; }
+tmp_base=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
+tmp=$(mktemp -d "$tmp_base/gnu-crt-priority.XXXXXX")
+case "$tmp" in "$tmp_base"/gnu-crt-priority.*) ;; *) exit 2 ;; esac
+: > "$tmp/.owned-fixture"
+cleanup() {
+  # The fresh owned fixture contains regular files only; never follow aliases.
+  case "$tmp" in "$tmp_base"/gnu-crt-priority.*)
+    [ ! -f "$tmp/.owned-fixture" ] || rm -rf "$tmp" ;;
+  esac
+}
+trap cleanup EXIT HUP INT TERM
+mkdir "$tmp/CRT libs"
+mkdir "$tmp/CC libs"
+printf crt > "$tmp/CRT libs/libmingw32.a"
+printf crt > "$tmp/CRT libs/libmingwex.a"
+printf incompatible-cc-crt > "$tmp/CC libs/libmingw32.a"
+printf incompatible-cc-crt > "$tmp/CC libs/libmingwex.a"
+awk '
+  /^  mingw_target=x86_64-w64-windows-gnu$/ { copy=1 }
+  copy && /^  export CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER=/ { exit }
+  copy { print }
+' "$script" > "$tmp/flags.sh"
+awk '
+  /^run_rust_authority_env\(\) \{/ { copy=1 }
+  copy { print }
+  copy && /^}$/ { exit }
+' "$script" > "$tmp/env.sh"
+grep -q 'mingw_encoded_rustflags=' "$tmp/flags.sh" || {
+  echo 'FAIL: production encoded flag owner missing' >&2; exit 1;
+}
+grep -Fq 'mingw_encoded_rustflags=${mingw_encoded_rustflags:-}' "$script" || {
+  echo 'FAIL: effective encoded flags missing from Cargo config identity' >&2; exit 1;
+}
+
+# The mock only supplies a query result. Real Cargo/Clang execution belongs to
+# the bounded Windows fixture, not this fast portable argument-contract check.
+if ! command -v cygpath >/dev/null 2>&1; then
+  cygpath() { [ "$1" = -m ] || return 1; printf '%s\n' "$2"; }
+fi
+fixture_cc() {
+  : > "$tmp/cc-was-queried"
+  printf '%s\n' "$tmp/CC libs/libmingw32.a"
+}
+fixture_linker() {
+  [ "$#" = 2 ] && [ "$1" = --target=x86_64-w64-windows-gnu ] &&
+    [ "$2" = --print-file-name=libmingw32.a ] || return 1
+  printf '%s\n' "$tmp/CRT libs/libmingw32.a"
+}
+mingw_cc=fixture_cc
+mingw_linker=fixture_linker
+mingw_ar=fixture-ar
+native_crt_dir=$(cygpath -m "$tmp/CRT libs")
+canonical=$(printf '%s\037%s\037%s\037%s\037%s' \
+  "-Lnative=$native_crt_dir" -C link-arg=--target=x86_64-w64-windows-gnu \
+  -C link-arg=-fuse-ld=lld)
+checks=1 # effective configuration-identity assertion above
+expect_flags() {
+  [ "$mingw_encoded_rustflags" = "$1" ] || {
+    echo "FAIL: $2" >&2; exit 1;
+  }
+  checks=$((checks + 1))
+}
+
+unset CARGO_ENCODED_RUSTFLAGS RUSTFLAGS
+. "$tmp/flags.sh"
+expect_flags "$canonical" 'linker-owned CRT identity, target/link tokens and spaced native path'
+[ ! -e "$tmp/cc-was-queried" ] || {
+  echo 'FAIL: CRT identity came from CC instead of the actual linker driver' >&2; exit 1;
+}
+checks=$((checks + 1))
+RUSTFLAGS=$(printf '  --cfg\tplain_ambient \n-Copt-level=1  ')
+. "$tmp/flags.sh"
+plain=$(printf '%s\037%s\037%s' --cfg plain_ambient -Copt-level=1)
+expect_flags "$canonical$(printf '\037')$plain" 'ordinary ambient flag tokenization'
+CARGO_ENCODED_RUSTFLAGS=$(printf '%s\037%s' --cfg encoded_ambient)
+. "$tmp/flags.sh"
+expect_flags "$canonical$(printf '\037')$CARGO_ENCODED_RUSTFLAGS" 'encoded ambient precedence'
+CARGO_ENCODED_RUSTFLAGS=
+. "$tmp/flags.sh"
+expect_flags "$canonical" 'explicitly empty encoded flags suppress ordinary flags'
+
+. "$tmp/env.sh"
+run_logged() { shift; printf '%s\n' "$@" > "$tmp/forwarded.env"; }
+os=windows PLATFORM_ABI=gnu rust_shared_cache_root=
+run_rust_authority_env fixture "PATH=$PATH" true
+forwarded=$(grep '^CARGO_ENCODED_RUSTFLAGS=' "$tmp/forwarded.env")
+[ "$forwarded" = "CARGO_ENCODED_RUSTFLAGS=$canonical" ] || {
+  echo 'FAIL: central Windows GNU environment forwarding' >&2; exit 1;
+}
+checks=$((checks + 1))
+RUSTFLAGS=unchanged
+os=linux
+run_rust_authority_env fixture "PATH=$PATH" true
+! grep -q '^CARGO_ENCODED_RUSTFLAGS=' "$tmp/forwarded.env" || exit 1
+grep -Fxq 'RUSTFLAGS=unchanged' "$tmp/forwarded.env" || exit 1
+checks=$((checks + 1))
+os=windows PLATFORM_ABI=msvc
+run_rust_authority_env fixture "PATH=$PATH" true
+! grep -q '^CARGO_ENCODED_RUSTFLAGS=' "$tmp/forwarded.env" || exit 1
+checks=$((checks + 1))
+
+# Source the real owner in subshells: invalid input must stop before forwarding.
+fixture_linker() { return 7; }
+if ( . "$tmp/flags.sh" ) > "$tmp/query-error.log" 2>&1; then
+  echo 'FAIL: failed driver CRT query was admitted' >&2; exit 1
+fi
+checks=$((checks + 1))
+fixture_linker() { printf '%s\n' "$tmp/missing/libmingw32.a"; }
+if ( . "$tmp/flags.sh" ) > "$tmp/archive-error.log" 2>&1; then
+  echo 'FAIL: missing CRT archives were admitted' >&2; exit 1
+fi
+grep -q 'did not resolve its MinGW CRT archives' "$tmp/archive-error.log" || exit 1
+checks=$((checks + 1))
+printf 'PASS — Windows GNU CRT search priority: %s contracts\n' "$checks"

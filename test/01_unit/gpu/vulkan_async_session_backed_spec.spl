@@ -1,0 +1,47 @@
+# Purpose and audience: executable specification evidence for the seed and Vulkan runtime owners.
+# @req REQ-SSPEC-GPU
+#
+# Device-free contract spec for the Vulkan async submission ring externs.
+#
+# Bug: doc/08_tracking/bug/
+# vulkan_no_wait_pending_submission_blocks_followup_compute_2026-09-09.md
+#
+# Two owners answer this family in the interpreter:
+#   - the ring itself (supported/create/acquire/command/submit/poll/retire/
+#     receipt/cancel/close/capacity/in_flight/published_sequence/recover) is
+#     served by the Vulkan bridge (interpreter_extern/gpu_vulkan_async_ring.rs);
+#   - snapshot, snapshot_word and abandon_device have no bridge handler and are
+#     resolved in the running seed with dlsym(RTLD_DEFAULT)
+#     (interpreter_extern/vulkan.rs). A seed linked without --export-dynamic
+#     has an empty dynamic symbol table, and such a call dies with "Vulkan
+#     runtime entry point ... is not linked into this binary". Measured on a
+#     Linux aarch64 seed built from the tracked cargo config on 2026-11-13.
+#
+# What this CAN prove without a GPU: both owners are reachable and answer the
+# documented concrete values for "no session".
+# What it CANNOT prove: any ring behaviour on a device. That is
+# test/02_integration/gpu_lane/vulkan_async_ring_live_device_spec.spl.
+
+use std.spec.step
+
+use std.spipe.*
+use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
+    vulkan_sffi_async_session_supported, vulkan_sffi_async_session_acquire,
+    vulkan_sffi_async_session_in_flight, vulkan_sffi_async_session_snapshot}
+
+describe "rt_vulkan_async_session device-free contract":
+    it "should answer the capability query with a concrete 0 or 1":
+        step("Ask whether this seed can open a ring")
+        val supported = vulkan_sffi_async_session_supported()
+        assert_true(supported == 0 or supported == 1)
+
+    it "should refuse the null session instead of fabricating a token":
+        step("Acquire from session handle 0")
+        expect(vulkan_sffi_async_session_acquire(0)).to_equal(-1)
+
+        step("An unknown session reports the -1 sentinel, not a count")
+        expect(vulkan_sffi_async_session_in_flight(0)).to_equal(-1)
+
+    it "should reach the dlsym-resolved runtime entry points":
+        step("Snapshot of an unknown session is unavailable, not a link error")
+        expect(vulkan_sffi_async_session_snapshot(0)).to_equal(-1)

@@ -1,6 +1,6 @@
 # Cranelift AOT "Verifier errors" in 7 phase-4 tool units (2026-10-20)
 
-- **Status:** fixed in source (branch `work/p4p2-cranelift-verifier`); takes
+- **Status:** fixed in source (branch `work/p4p2-cranelift-verifier`, merged as PR #3961, commit 1919f812dfe, ancestor of release/1.0.0, verified 2026-11-02; row closed); takes
   effect only after a producer rebuild. A1 verified end to end at the
   adapter level (two Cranelift objects linked and run, see below); the full
   phase-4 tool build has not been re-run.

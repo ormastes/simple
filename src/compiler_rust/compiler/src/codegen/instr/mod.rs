@@ -23,6 +23,29 @@ use super::types_util::{type_id_size, type_id_to_cranelift, type_to_cranelift};
 // Declare submodules
 pub mod actors;
 pub mod async_ops;
+
+/// Types whose `MirInst::Drop` is an intentional no-op (primitive scalars, void, nil).
+/// Strings (`TypeId::STRING`) and heap/RC values are released instead.
+#[inline]
+pub(crate) fn is_drop_scalar_type(ty: TypeId) -> bool {
+    matches!(
+        ty,
+        TypeId::VOID
+            | TypeId::BOOL
+            | TypeId::CHAR
+            | TypeId::I8
+            | TypeId::I16
+            | TypeId::I32
+            | TypeId::I64
+            | TypeId::U8
+            | TypeId::U16
+            | TypeId::U32
+            | TypeId::U64
+            | TypeId::F32
+            | TypeId::F64
+            | TypeId::NIL
+    )
+}
 pub mod basic_ops;
 pub mod body;
 pub mod calls;
@@ -116,7 +139,7 @@ use units::{compile_unit_bound_check, compile_unit_narrow, compile_unit_saturate
 /// Context for instruction compilation, holding all state needed to compile MIR instructions.
 pub struct InstrContext<'a, M: Module> {
     pub module: &'a mut M,
-    pub func_ids: &'a mut std::collections::BTreeMap<String, cranelift_module::FuncId>,
+    pub func_ids: &'a mut super::func_id_table::FuncIdTable,
     pub runtime_funcs: &'a HashMap<&'static str, cranelift_module::FuncId>,
     pub global_ids: &'a std::collections::BTreeMap<String, cranelift_module::DataId>,
     pub vreg_values: &'a mut HashMap<VReg, cranelift_codegen::ir::Value>,
@@ -135,6 +158,11 @@ pub struct InstrContext<'a, M: Module> {
     /// aliasing two distinct locals onto one Variable — see flat_ast_to_module
     /// stage4 SIGSEGV, 2026-06-10.)
     pub extra_var_base: u32,
+    /// `shared::implicit_local_param_slots(func)`, computed once per function.
+    /// `compile_store` needs it for every `Store` to a local; recomputing it
+    /// there walked every instruction of the function per store (quadratic in
+    /// function size -- the top frame of the 2026-10-30 seed JIT samples).
+    pub implicit_param_slots: usize,
     /// Reverse map: VReg → local_index, for VRegs produced by Load from a local.
     /// Used by push codegen to store the new array pointer back to the local Variable.
     pub vreg_from_local: &'a mut HashMap<VReg, usize>,
@@ -199,6 +227,8 @@ pub struct InstrContext<'a, M: Module> {
     pub nil_tainted_locals: &'a mut HashMap<usize, (BlockId, cranelift_codegen::ir::Value)>,
     /// Mangled function name → declared parameter count for cross-module free functions.
     pub fn_arities: &'a std::sync::Arc<std::collections::HashMap<String, usize>>,
+    /// Unqualified/raw symbols colliding across multiple modules in a native project.
+    pub ambiguous_names: &'a std::sync::Arc<std::collections::HashSet<String>>,
     /// Global enum definitions with payload field types.
     pub enum_defs:
         &'a std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>>,
@@ -258,8 +288,8 @@ impl<'a, M: Module> InstrContext<'a, M> {
         let runtime_funcs: &'static HashMap<&'static str, cranelift_module::FuncId> = Box::leak(Box::new(static_map));
 
         // Leak auxiliary maps so we can take &'a mut references
-        let func_ids: &'a mut std::collections::BTreeMap<String, cranelift_module::FuncId> =
-            Box::leak(Box::new(std::collections::BTreeMap::new()));
+        let func_ids: &'a mut super::func_id_table::FuncIdTable =
+            Box::leak(Box::new(super::func_id_table::FuncIdTable::new()));
         let global_ids: &'static std::collections::BTreeMap<String, cranelift_module::DataId> =
             Box::leak(Box::new(std::collections::BTreeMap::new()));
         let vreg_values: &'a mut HashMap<VReg, cranelift_codegen::ir::Value> = Box::leak(Box::new(HashMap::new()));
@@ -277,6 +307,8 @@ impl<'a, M: Module> InstrContext<'a, M> {
             Box::leak(Box::new(std::collections::HashMap::new()));
         let fn_arities: &'static std::sync::Arc<std::collections::HashMap<String, usize>> =
             Box::leak(Box::new(std::sync::Arc::new(std::collections::HashMap::new())));
+        let ambiguous_names: &'static std::sync::Arc<std::collections::HashSet<String>> =
+            Box::leak(Box::new(std::sync::Arc::new(std::collections::HashSet::new())));
         let enum_defs: &'static std::sync::Arc<
             std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>,
         > = Box::leak(Box::new(std::sync::Arc::new(std::collections::HashMap::new())));
@@ -312,6 +344,7 @@ impl<'a, M: Module> InstrContext<'a, M> {
             variables,
             extra_variables,
             extra_var_base: 1000,
+            implicit_param_slots: crate::codegen::shared::implicit_local_param_slots(func),
             vreg_from_local,
             func,
             entry_block,
@@ -328,6 +361,7 @@ impl<'a, M: Module> InstrContext<'a, M> {
             nil_tainted,
             nil_tainted_locals,
             fn_arities,
+            ambiguous_names,
             enum_defs,
             tag_runtime_pool_join_result: false,
             baremetal: false,
@@ -436,6 +470,7 @@ pub fn compile_instruction<M: Module>(
             // FR-DRIVER-0002b: pass VRegs through so compile_binop can read
             // operand signedness from `ctx.vreg_types` for sshr/ushr dispatch.
             let val = compile_binop(ctx, builder, *op, lhs, rhs, *left, *right)?;
+            let val = core::wrap_narrow_unsigned_arith(ctx, builder, *op, *dest, *right, rhs, val);
             ctx.vreg_values.insert(*dest, val);
         }
 
@@ -679,13 +714,27 @@ pub fn compile_instruction<M: Module>(
         }
 
         MirInst::InlineAsm {
-            instructions, volatile, ..
+            instructions,
+            volatile,
+            dialect,
+            constraints,
+            inputs,
+            outputs,
         } => {
-            // Cranelift has no inline asm: blocks go to a C sidecar TU with no
-            // operand binding (inline_asm_emit.rs). Operand-bound blocks keep
-            // their `$N` placeholders and are skipped there exactly as the
-            // `{name}` form was before; only `--backend llvm` binds operands.
-            let symbol = crate::codegen::inline_asm::register_inline_asm(instructions, *volatile);
+            // Cranelift has no inline asm: raw blocks go to a C sidecar TU,
+            // which cannot bind operands or preserve LLVM register constraints.
+            // Volatile raw blocks lower to the memory clobber only; allow that
+            // one sidecar-equivalent constraint and reject all other bindings.
+            if !inputs.is_empty() || !outputs.is_empty() || {
+                let constraints = constraints.trim();
+                !constraints.is_empty() && constraints != "~{memory}"
+            } {
+                return Err(
+                    "E-ASM-OPERANDS-UNSUPPORTED: Cranelift C sidecar cannot preserve inline asm inputs, outputs, or register constraints; use the LLVM backend"
+                        .to_string(),
+                );
+            }
+            let symbol = crate::codegen::inline_asm::register_inline_asm(instructions, *volatile, *dialect);
             let func_id = if let Some(func_id) = ctx.func_ids.get(&symbol).copied() {
                 func_id
             } else {
@@ -905,6 +954,7 @@ pub fn compile_instruction<M: Module>(
             return_type,
             args,
             effect: _,
+            ..
         } => {
             compile_indirect_call(ctx, builder, dest, *callee, param_types, *return_type, args);
         }
@@ -1122,18 +1172,20 @@ pub fn compile_instruction<M: Module>(
         MirInst::EnumUnit {
             dest,
             enum_name,
-            variant_name,
+            discriminant,
+            ..
         } => {
-            compile_enum_unit(ctx, builder, *dest, enum_name, variant_name);
+            compile_enum_unit(ctx, builder, *dest, enum_name, *discriminant);
         }
 
         MirInst::EnumWith {
             dest,
             enum_name,
-            variant_name,
+            discriminant,
             payload,
+            ..
         } => {
-            compile_enum_with(ctx, builder, *dest, enum_name, variant_name, *payload);
+            compile_enum_with(ctx, builder, *dest, enum_name, *discriminant, *payload);
         }
 
         // Union type instructions - reuse enum runtime functions with type index
@@ -1470,41 +1522,7 @@ pub fn compile_instruction<M: Module>(
 
         // Memory safety instructions
         MirInst::Drop { value, ty } => {
-            // Drop is a no-op for primitive types
-            // Primitive types: void, bool, integers (i8-i64, u8-u64), floats (f32, f64), string, nil
-            let is_primitive = matches!(
-                *ty,
-                crate::hir::TypeId::VOID
-                    | crate::hir::TypeId::BOOL
-                    | crate::hir::TypeId::I8
-                    | crate::hir::TypeId::I16
-                    | crate::hir::TypeId::I32
-                    | crate::hir::TypeId::I64
-                    | crate::hir::TypeId::U8
-                    | crate::hir::TypeId::U16
-                    | crate::hir::TypeId::U32
-                    | crate::hir::TypeId::U64
-                    | crate::hir::TypeId::F32
-                    | crate::hir::TypeId::F64
-                    | crate::hir::TypeId::STRING
-                    | crate::hir::TypeId::NIL
-            );
-
-            if !is_primitive {
-                // Non-primitive types may need destructor calls
-                // For now, we don't have a Drop trait in Simple, so this is a no-op
-                // Future enhancement: look up Drop trait implementation in trait registry
-                // and generate: call drop_fn(value)
-                //
-                // Implementation steps when Drop trait is added:
-                // 1. Check if type implements Drop trait via ctx.module.trait_impls
-                // 2. If yes, get the drop method function pointer
-                // 3. Generate: builder.ins().call(drop_fn, &[value])
-                //
-                // For reference-counted types (Rc, Arc), the ref-count decrement
-                // is handled by MirInst::RcDecrement / MirInst::WeakDecrement
-                let _ = value; // Suppress unused warning
-            }
+            compile_drop(ctx, builder, *value, *ty)?;
         }
 
         MirInst::EndScope { local_index } => {
@@ -1694,6 +1712,28 @@ pub fn compile_instruction<M: Module>(
             let unboxed = builder.ins().select(is_nil, nil_f, unboxed);
             ctx.vreg_values.insert(*dest, unboxed);
         }
+    }
+    Ok(())
+}
+
+/// Emit `rt_string_free` or `rt_rc_release` for non-scalar `MirInst::Drop` targets.
+pub(crate) fn compile_drop<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    value: VReg,
+    ty: TypeId,
+) -> InstrResult<()> {
+    let helper = if ty == TypeId::STRING {
+        "rt_string_free"
+    } else if !is_drop_scalar_type(ty) {
+        "rt_rc_release"
+    } else {
+        return Ok(());
+    };
+    if let Some(&func_id) = ctx.runtime_funcs.get(helper) {
+        let val = ctx.get_vreg(&value)?;
+        let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+        helpers::adapted_call(builder, func_ref, &[val]);
     }
     Ok(())
 }

@@ -1,10 +1,10 @@
 # Seed interpreter rebuilds the whole callee env per call (O(module globals))
 
 ## Status
-PARTIALLY RESOLVED — 408fb57b109 landed the initial mitigation (misses down 6.5x, wall still far above target); superseded by e73a0bec647 (scope-chain CowEnv replaces per-call env clone). OPEN: confirm wall-clock now meets target on the original repro.
+LIVE (triaged 2026-11-11, lanes interp12/int11) — 408fb57b109 landed the initial mitigation (misses down 6.5x, wall still far above target); superseded by e73a0bec647 (scope-chain CowEnv replaces per-call env clone; ancestry re-verified by int11). Wall-clock on the original repro CONFIRMED FAILING 2026-11-11 (lane interp12): `check-lint-cost-budget.shs` on `driver_types.spl` exceeded even a 240 s probe budget (gate budget is 60 s) under fresh seed 46fe8f6b6def. Fix is structural `src/compiler_rust` work that requires a seed rebuild — BLOCKED on interpreter lanes (no cargo/rustc); owner seed-fix lane. See "Addendum 2026-11-11" for the grant command.
 
 
-Status: PARTIALLY FIXED (2026-08-21) — misses down 6.5x, wall still far above target.
+Status: LIVE (triaged 2026-11-11, lanes interp12/int11) — partial mitigation only (2026-08-21: misses down 6.5x); wall still far above target, confirmed failing 2026-11-11.
 Area: Rust seed interpreter (`src/compiler_rust/compiler/src/interpreter_call/**`, `interpreter_state.rs`)
 Blocks: stage1 `native-build` of `src/app/cli/bootstrap_main.spl` (phase2 parse 20-50 s/file, 7200 s worker timeout expires)
 
@@ -89,3 +89,201 @@ miss count is the load-independent signal.
   exact file (`COMPILER_FIXTURE_DEFAULT=src/compiler/80.driver/driver_types.spl`,
   budget 60 s) and is RED today. No new row was added; the existing row is the
   guard for this defect.
+
+## 2026-11-07 — OPEN item answered (wall does NOT meet target); where the per-call cost sits now, measured
+
+Host: Windows 11. Binaries built from `origin/release/1.0.0` tip
+`4eb1de2ecbd` with the bootstrap profile (`opt-level = "z"`, same for every
+arm): `simple-base.exe` = pure tip (17883136 B, sha256 `c0c47b2cdd6cd6ee…`);
+`simple-timers.exe` = tip + round-15 profiler tooling + phase timers
+(behaviour-identical with the env vars unset).
+
+**Wall on the original repro:** `lint src/compiler/80.driver/driver_types.spl`
+= 162 s on the release seed (`D:/dev/wt/seed/simple.exe`, 2026-11-06), 124 s
+on `simple-base.exe`, against the 60 s budget of
+`check-lint-cost-budget.shs` and the 5 s target above. Not met. (The
+any-rules `check` child exits 1 on this host, so these exclude that lane;
+same in every arm.)
+
+**The scope chain works; the remaining cost is elsewhere.** Micro-benchmarks
+(`SIMPLE_EXECUTION_MODE=interpret`, 20,000 iterations each, `simple-base.exe`):
+
+| call shape | ns / iteration |
+|---|---|
+| loop body `acc = acc + i` | 6-9 |
+| same-file `fn local_fn(x) = x + 1` | 35 (first loop 290) |
+| same-file fn whose body calls builtin `math_min_i64(a, b)` | 13,707 |
+| builtin `math_min_i64(i, 7)` called directly from `main` | 6,609 |
+| imported `std.common.math.min_i64(i, 7)` (module-owned, no globals) | 14,337-15,543 |
+| imported `compiler.core.parser.par_kind_get()` | 12,113-16,241 |
+| imported `compiler.core.lexer_chars.is_ident_char("a")` | 100,990 |
+| inline module-global array read `g_slot[0]` from `main` | 2,369 |
+| same-file fn that reads one module-global slot | 7,413 |
+| local `arr[0] = arr[0] + arr[1]` | 2,602-2,789 |
+
+So a call is cheap (35 ns) until its body contains a *call* or touches a
+*module global*: then it costs 7-16 us, and a builtin call alone is 6.6 us.
+Per-owned-call phase timers (`SIMPLE_PERF_COUNTERS=1`, OWNED_* / BODY_*,
+120,005 owned calls in the `min_i64`/`abs_i64`/`is_digit`/`is_alpha` bench):
+
+| phase (ns per owned call) | |
+|---|---|
+| publish_and_repoint | 186 |
+| captured_env_with_live_globals (scope attach) | 795 |
+| capture_argument_places | 127 |
+| bind_args_with_values_named | 409 |
+| park_written_back_arguments + release_scope | 245 |
+| **execute_function_body** | **15,757** |
+| sync_owned_captured_globals | 375 |
+| write_back_mutable_arguments | 1,001 |
+| restore_parked_arguments / write_back_borrow_arguments | 39 / 42 |
+| body prelude (coverage/mem/sampler frames, CONST_NAMES swap, owner swap) | 925 |
+| mark_block_locals | 108 |
+| body epilogue (return contract, unsigned coerce, async wrap) | 242 |
+
+The call-path WRAPPER (everything this record's earlier fixes targeted) is
+~3.2 us; the body of a one-statement function is 15.7 us, i.e. the cost is
+in evaluating the statement — the `evaluate_call` priority ladder and the
+extern dispatch for `math_min_i64`. Per-rung timers (EVALCALL_* /
+EXTERN_*) are in the tree; their numbers follow in the next note.
+
+Lint's lexer calls across modules several times per character
+(`is_ident_char` -> `is_alpha`/`is_digit` -> `char_code`), so at 10-100 us
+per such call the 82 KB file's 124 s is accounted for by call count times
+this constant, not by any superlinear term.
+
+### 2026-11-07 (later) — the ladder numbers, and the two rungs that stopped paying
+
+`SIMPLE_PERF_COUNTERS=1` on the same bench (`simple-timers2.exe`, 100,009
+identifier calls; `math_min_i64` is a Simple fn in `std.common.math`, so
+EXTERN_CALLS=5 — the "builtin" above was never an extern):
+
+| evaluate_call rung (ns per identifier call) | before | after |
+|---|---|---|
+| P1 extern check (EXTERN_FUNCTIONS + has_local_def + shadows) | 423 | **149** |
+| P2 `eval_builtin` string match (miss) | 644 | 572 |
+| P3 `eval_bdd_builtin` string match (miss) | 378 | — |
+| P3.9 local callable | 101 | — |
+| P4 overloads | 252 | — |
+| P4.5 decorated sentinel (`format!` + env cascade) | 502 | **52** |
+| P4.9 env shadow check | 242 | 267 |
+| P5 flat exec (inclusive of the callee) | 16,564 | — |
+
+Landed: P4.5 gated on `decorator_apply::any_decorated_fn_bound()` (set by
+all three sentinel writers), and `local_callable_shadows` evaluated only on
+the extern/builtin branches. ~0.7 us per call off a ~7 us fixed cost; the
+end-to-end bench swung 6.6-13.3 us for the UNCHANGED binary between runs as
+other lanes loaded the host, so the claim rests on the per-rung counters,
+not on wall. Prevention:
+`test/01_unit/interpreter/call_ladder_miss_path_prevention_spec.spl`.
+
+What is left per call, in cost order, each a separate change: P2/P3 are
+sequential string matches over every builtin arm (a miss walks them all —
+a name-keyed pre-check must be derived from the arms, not hand-copied);
+the body prelude (925 ns: two TLS `take`s, owner swap, per-param
+`mark_local` String clones); `captured_env_with_live_globals` (795 ns: three
+SipHash lookups keyed by the ~70-byte owner path); `write_back_mutable_arguments`
+(1.0 us on calls with no mutable args). None of these is O(globals); the
+per-call cost is now a sum of constant rungs, which is why the 60 s lint
+budget on `driver_types.spl` is still missed (124 s).
+
+
+## Addendum 2026-11-11 (lane interp12) — still LIVE; wall confirmed far above target
+
+**Verification actually run** (worktree simple-p3-interp12-20261111, fresh seed
+46fe8f6b6def, seed-smoke):
+
+```
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe sh scripts/check/check-lint-cost-budget.shs \
+  --fixture src/compiler/80.driver/driver_types.spl --budget 240 \
+  --simple-bin "$PWD/bin/simple.exe"
+# selftest: 4 fixture(s) passed
+# FAIL — 1 fixture(s) checked, lint exceeded its 240s budget on src/compiler/80.driver/driver_types.spl
+#        (load=10.29, concurrent simple=0)
+```
+
+Wall is not merely above the 60 s gate budget — it did not finish inside a 240 s
+probe budget on this seed. (2026-11-07 measured 124 s on `simple-base.exe`;
+box load differs, but any reading is an order of magnitude over the 5 s target
+and over the 60 s gate.) The remaining per-call cost is the sum of constant
+rungs documented above (P2/P3 builtin string matches, body prelude TLS takes,
+SipHash-keyed scope attach, mutable-arg writeback), i.e. structural
+`src/compiler_rust` work.
+
+**Disposition: LIVE + BLOCKED.** This lane is forbidden cargo/rustc, so the seed
+cannot be rebuilt to land or verify a Rust-side fix; no pure-Simple change can
+move this number.
+
+**Grant command for the owning lane:**
+
+```
+# seed-source lane, authorized for cargo:
+# 1. implement the next structural step in
+#    src/compiler_rust/compiler/src/interpreter_call/** (scope-chain env /
+#    name-keyed builtin pre-check / body-prelude trimming), then
+cargo build --release --bin simple   # in src/compiler_rust, opt-level=z bootstrap profile
+# 3. verify the gate that pins this exact defect:
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe sh scripts/check/check-lint-cost-budget.shs \
+  --fixture src/compiler/80.driver/driver_types.spl --budget 60 \
+  --simple-bin "$PWD/bin/simple.exe"
+```
+
+## Addendum 2026-11-11 (lane int11) — Status consolidated to LIVE; ancestry + gate script source-checked
+
+Sweep consolidation. interp12's same-day addendum recorded the verified
+disposition (wall CONFIRMED FAILING over a 240 s probe on the tracked seed;
+structural `src/compiler_rust` fix BLOCKED, no cargo/rustc); the header still
+carried the 2026-08-21 "PARTIALLY FIXED" text. int11 quick re-verify at base
+`84f5076db138` (source checks only, no re-measure — the >240 s interpreted
+driver lint is budget-forbidden to re-run per the campaign grant): the
+CowEnv absorber `e73a0bec647` is an ancestor of this base, and the pinning
+gate `scripts/check/check-lint-cost-budget.shs` is in-tree. Owner: seed-fix
+lane with the cargo rebuild grant recorded verbatim above. Status flipped to
+LIVE.
+
+## Addendum 2026-11-11 (lane seedB) — BLOCKED confirmed; grant re-verified, no re-measure
+
+Source checks at base 79d5af6723f6 (worktree simple-p3-seedB-20261111),
+same scope as int11's same-day consolidation (no re-run of the >240 s
+measured lint — budget-forbidden per the campaign grant):
+
+- CowEnv scope-chain absorber `e73a0bec647` is an ancestor of this base.
+- Pinning gate `scripts/check/check-lint-cost-budget.shs` is in-tree.
+- The cargo-grant addendum (interp12) is present verbatim above.
+
+Reach assessment by this (cargo-authorized) lane: the named next steps
+from the 2026-11-07 measurement (P2/P3 name-keyed builtin pre-check,
+body-prelude trimming, SipHash-keyed scope attach, mutable-arg writeback
+early-exit) together cover only the ~3.2 us call-wrapper portion of a
+~7-16 us per-owned-call cost whose dominant term is the interpreted body
+itself (`execute_function_body` 15.7 us, the `evaluate_call` ladder /
+nested owned calls). Even a complete wrapper-side fix projects to
+~90-100 s against the 60 s gate budget — still RED. Passing the gate
+requires interpreter-core re-engineering (per-node eval cost), which is
+multi-lane structural work, not a bounded row fix; a partial wrapper
+tweak would be a half-fix on a red gate. Per campaign rule: BLOCKED,
+grant intact.
+
+Verbatim grant (unchanged, from interp12):
+
+```
+# seed-source lane, authorized for cargo:
+# 1. implement the next structural step in
+#    src/compiler_rust/compiler/src/interpreter_call/** (scope-chain env /
+#    name-keyed builtin pre-check / body-prelude trimming), then
+cargo build --release --bin simple   # in src/compiler_rust, opt-level=z bootstrap profile
+# 3. verify the gate that pins this exact defect:
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe sh scripts/check/check-lint-cost-budget.shs \
+  --fixture src/compiler/80.driver/driver_types.spl --budget 60 \
+  --simple-bin "$PWD/bin/simple.exe"
+```
+
+Disposition: **BLOCKED** (structural interpreter-core work; cargo grant
+recorded verbatim; gate expected RED until then).
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+Not pursued in this lane: structural src/compiler_rust CowEnv follow-up; confirmed still wall-failing 2026-11-11. Requires cargo/rustc + seed rebuild - not available on this Windows lane (seed-only binary). Owner: seed-fix lane.

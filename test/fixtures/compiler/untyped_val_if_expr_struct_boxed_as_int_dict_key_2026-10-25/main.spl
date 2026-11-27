@@ -1,0 +1,31 @@
+# Repro: an UNANNOTATED `val k = if c: <struct> else: <struct>` must stay a struct
+# when used as a Dict key. Stage 2 typed it i64 and int-boxed the key
+# (rt_value_int_wide), so copying the key back out SEGVed.
+# Pattern variants: if/else with struct on both arms, used as Dict key (A),
+# as Dict value (B), and the annotated control (C).
+struct Key:
+    id: i64
+
+fn pick(valid: bool, a: Key, b: Key) -> Key:
+    val k = if valid: a else: b
+    k
+
+fn main() -> i64:
+    var d: Dict<Key, i64> = {}
+    val ok = Key(id: 7)
+    val fb = Key(id: 9)
+    # A: untyped if-expr struct as dict key
+    val ka = if ok.id > 0: ok else: fb
+    d[ka] = 1
+    # C: annotated control
+    val kc: Key = if ok.id < 0: ok else: fb
+    d[kc] = 2
+    var total = 0
+    for k in d.keys():
+        val back: Key = k
+        total = total + back.id
+    # B: struct from helper that returns an untyped if-expr binding
+    val kb = pick(true, ok, fb)
+    print(total)      # expect 16 (7 + 9)
+    print(kb.id)      # expect 7
+    if total == 16 and kb.id == 7: 0 else: 1

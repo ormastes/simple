@@ -3,6 +3,14 @@
 
 **Status:** proposed integration architecture, 2026-09-13
 
+> Superseded 2026-10-25: no longer only "proposed". The integration contracts
+> (`ParserProviderV1`, `StartupPlanV1`, `ProcessLaunchSpecV1`, SimpleOS image
+> manifest, release evidence, environment-variant selector) are source-landed on
+> `origin/release/1.0.0` @ `57a129fb2b9`. Execution evidence is still open: legacy
+> parser is the only executable provider, normal QEMU launch is not cut over, and
+> no per-host release/boot receipts exist. Status table:
+> `doc/03_plan/agent_tasks/simple_platform_unification.md` § "Status update 2026-10-25".
+
 ## Decision
 
 SimpleOS is a provider-backed target of one Simple platform. The normative

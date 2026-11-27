@@ -3,6 +3,7 @@
 
 pub mod arena;
 pub mod capture_write_check;
+pub mod nil_outside_unsafe;
 pub mod cond_compile;
 pub mod ast;
 pub mod diagnostic;
@@ -65,7 +66,12 @@ mod lambda_multiline_inline_body_test;
 mod if_expr_multiline_condition_test;
 #[cfg(test)]
 mod if_expr_cast_else_test;
+mod placeholder_innermost_call_test;
 mod try_probe_test;
+mod char_literal_parse_test;
+mod friend_module_decl_test;
 mod pipe_lambda_typed_param_test;
 mod nogc_sigil_new_test;
 mod inline_if_as_cast_else_test;
+#[cfg(test)]
+mod if_expr_newline_arm_trailing_else_test;

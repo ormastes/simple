@@ -41,3 +41,60 @@ body-archive storage, and registration validation. Introduce a single owned
 encoded-body receipt if measurements show those copies dominate. The next full
 bootstrap must demonstrate both tool producers inside their 3,600 second bounds
 before Stage 3 resume or local deployment.
+
+## 2026-11-07 — encode-once receipt (fix-implemented-verification-pending)
+
+Branch `work/p2-hir-encode-once-20261107`. `HirEncodedBodyV1`
+(`driver_hir_cache.spl`) carries one complete-body encode, keyed by module
+name + path + the digest of its own bytes, as scratch of the caller's owned
+scope. The shard transaction builds it once and passes it to both
+`hir_cache_store_in_owned_scope` and `hir_body_archive_store_in_owned_scope_v1`;
+`mir_hir_project_module_in_owned_scope_v1` accepts the caller's bytes and
+rechecks their digest without re-encoding (shard export, archive-borrowed
+reader). A receipt for another module, or whose bytes no longer match its
+digest, is invalidated and re-encoded.
+
+Measured with `hir_module_encode_calls()` on seed `4efe643ae90e1a85…`
+(17,847,296 B, 2026-11-06 15:11): per registered module 3 -> 1; archive
+publication 2 -> 1; projection with caller bytes 1 -> 0. Unchanged on purpose:
+the sampled store self-check (decode + re-encode, every 8th bootstrap store)
+and the lease-load `sha256(encode(decoded)) == body_digest` recheck.
+
+Specs: `test/01_unit/compiler/driver/hir_registration_encode_count_spec.spl`
+(repro, RED 2 -> GREEN 1), `test/01_unit/compiler/driver/hir_encode_once_prevention_spec.spl`.
+
+Verification pending (Windows host, admitted Stage 2 + phase-verification matrix):
+
+```bash
+. scripts/setup/windows-gitbash-bootstrap-env.shs
+SIMPLE_COMPILER_PHASE_PROFILE=1 sh scripts/bootstrap/bootstrap-windows.sh --full-bootstrap --stop-after-stage2
+# Linux x86_64 (where the 3,601 s timeout was measured):
+SIMPLE_COMPILER_PHASE_PROFILE=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage2
+```
+
+Pass bar: `compiler_cli_build` and `test_runner_build` both complete inside
+their 3,600 s bounds.
+
+## 2026-11-07 — content-bound snapshot correction (Astra re-review pending)
+
+Astra held the first encode-once candidate because a receipt sealed only its
+own bytes and name/path: a same-identity mutable `HirModule` could change after
+receipt creation while consumers continued using stale bytes. An empty refused
+receipt could likewise remain reusable after the module became encodable, and
+the production-global encode counter mutated on every hot-path encode.
+
+The corrected API separates two type states:
+
+- generic cache/archive/projection entry points always encode the current
+  module and accept no optional receipt;
+- encode-once entry points accept only a sealed encoded snapshot, never a
+  separately mutable module. They verify the byte digest, decode those exact
+  bytes, and use the decoded graph for validation/projection.
+
+The old `hir_encoded_body_for_v1(receipt, module)` and raw
+`caller_complete + module` combinations are removed. Same-name/path mutation
+and refused-then-encodable regressions require a fresh snapshot. The encode
+counter is now inert unless the explicit test-only
+`SIMPLE_HIR_ENCODE_COUNT_DIAGNOSTIC=1` gate is active. Production workers do
+not mutate it. Status remains fix-implemented-verification-pending until Astra
+re-review and an admitted Stage 2 run satisfy the pass bar above.

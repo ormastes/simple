@@ -21,8 +21,7 @@ use std.gc_async_mut.crypto_accel.cuda_session.{CryptoCudaSession}
 use std.gc_async_mut.cuda.{cuda_available, cuda_init, cuda_device_count,
     cuda_module_get_function, CUDA_SUCCESS}
 use std.nogc_sync_mut.test_runner.gpu_mailbox.{
-    ARENA_SIZE, OFF_RAM_SENTINEL, SENTINEL_TIMEOUT,
-    decode_sentinel, SentinelState, zero_bytes}
+    ARENA_SIZE, OFF_RAM_SENTINEL, SENTINEL_TIMEOUT, zero_bytes}
 
 extern fn rt_alloc(size: i64) -> i64
 extern fn rt_free(ptr: i64)
@@ -99,6 +98,32 @@ fn lane_scratch_alloc(size: i64) -> i64:
 
 fn lane_scratch_free(ptr: i64):
     rt_free(ptr)
+
+# Classify one launch after its device sync has reported. Factored out of
+# `launch_once` so the budget-sentinel vs device-timeout distinction is
+# unit-testable without a CUDA device (bug doc:
+# cuda_lane_conflates_svmg_budget_sentinel_with_device_timeout_2026-08-09.md).
+#
+# `sentinel_raw` is only trustworthy when `launch_completed` is true; on a
+# launch that failed to complete the caller forces SENTINEL_TIMEOUT because
+# the arena word cannot be read back.
+#
+# Returns (error_code, completion_unknown, release_pending). A non-empty
+# error code is what latches the session into cleanup-pending state; the
+# completion latch is deliberately NOT a function of the sentinel value.
+fn classify_launch_outcome(launch_completed: bool, sentinel_raw: u32) -> (text, bool, bool):
+    if not launch_completed:
+        # A launch that never provably completed may still be using the
+        # arena/module: force the timeout sentinel, keep the completion
+        # latch ON, and never release resources.
+        return ("cuda-lane-sync-completion-unknown", true, true)
+    # The launch provably completed (fence/sync succeeded), so the kernel
+    # wrote its final arena word BEFORE returning normally. SENTINEL_TIMEOUT
+    # (0xDEAD0000) written by a completed launch is the SVM-G VM
+    # budget-exhaustion sentinel -- a normal, expected SVM-G outcome that the
+    # CALLER decodes from the arena -- never a device hang. Report success so
+    # the arena (and the DBG-1 block inside it) is read back.
+    ("", false, false)
 
 # `CudaLaneSession` — one crypto-owned CUDA context (via CryptoCudaSession),
 # one combined device allocation shaped [guard|ARENA_SIZE data|guard], and
@@ -294,6 +319,12 @@ class CudaLaneSession:
     # the device stopped using the arena/module, so it is treated exactly
     # like the Vulkan lane's fence timeout -- force the GMB-1 timeout
     # sentinel, mark completion unknown, and never release resources.
+    #
+    # A COMPLETED launch is never a device timeout, whatever the arena word
+    # says: the kernel writes SENTINEL_TIMEOUT before returning normally on
+    # VM budget exhaustion, so after a successful sync that word is a budget
+    # expiry the caller decodes from the readback -- not a hang (bug doc:
+    # cuda_lane_conflates_svmg_budget_sentinel_with_device_timeout_2026-08-09.md).
     me launch_once(grid_x: i64, block_x: i64, args_ptr: i64) -> text:
         if not self.initialized or self.completion_unknown or self.release_pending:
             return self._fail("cuda-lane-session-unavailable")
@@ -306,17 +337,18 @@ class CudaLaneSession:
         if launch_rc != CUDA_SUCCESS:
             return self._fail("cuda-lane-launch-failed")
         val sync_rc = self.session.sync()
-        if sync_rc != CUDA_SUCCESS:
-            self.completion_unknown = true
-            self.release_pending = true
-            self.last_dispatch_sentinel = SENTINEL_TIMEOUT as i64
-            return self._fail("cuda-lane-sync-completion-unknown")
-        val sentinel_raw = self._read_arena_sentinel()
+        val completed = sync_rc == CUDA_SUCCESS
+        # The arena sentinel is only trustworthy when the launch provably
+        # completed; otherwise force the GMB-1 timeout sentinel.
+        val sentinel_raw = if completed: self._read_arena_sentinel() else: SENTINEL_TIMEOUT
         self.last_dispatch_sentinel = sentinel_raw as i64
-        if decode_sentinel(sentinel_raw) == SentinelState.Timeout:
+        val (outcome_err, completion_unknown, release_pending) =
+            classify_launch_outcome(completed, sentinel_raw)
+        if completion_unknown:
             self.completion_unknown = true
             self.release_pending = true
-            return self._fail("cuda-lane-device-timeout-sentinel")
+        if outcome_err != "":
+            return self._fail(outcome_err)
         ""
 
     me shutdown() -> text:
@@ -341,3 +373,4 @@ export CudaLaneSession, GUARD_BYTES, GUARD_CANARY_BYTE
 export canary_bytes, bytes_match_canary
 export read_bytes_from_ptr, write_bytes_to_ptr
 export lane_scratch_alloc, lane_scratch_free
+export classify_launch_outcome

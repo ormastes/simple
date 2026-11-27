@@ -22,6 +22,9 @@ use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
 use compiler.frontend.core.flat_pool_codec.*
 use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_get_i64_process, env_set, env_remove_process}
 
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+extern fn rt_array_free<T>(array: [T])
+
 @always_inline
 fn _env_get(key: text) -> text?:
     env_get_nullable(key)
@@ -279,6 +282,8 @@ var decl_field_names: [[text]] = []
 var decl_field_types: [[i64]] = []
 var decl_field_defaults: [[i64]] = []
 var decl_field_bits: [[i64]] = []
+var decl_field_visibility: [[text]] = []
+var decl_field_array_sizes: [[i64]] = []  # per-field fixed `[T; N]` size, -1 = none
 var decl_imports: [[text]] = []
 var decl_visibility: [text] = []
 var decl_is_async: [i64] = []
@@ -302,6 +307,7 @@ var decl_derives: [[text]] = []      # @derive(Eq, Hash, Debug) trait list
 # that parse_impl_decl otherwise drops -- without it, un-overridden trait
 # default methods never resolve on the native build path.
 var decl_impl_trait: [text] = []
+var decl_import_role_v1: [text] = []
 # 1 if this struct-shaped decl is actually a `trait` declaration (#157). A trait
 # is parsed via the struct-body path (parse_struct_or_trait_decl) and stored as a
 # DECL_STRUCT node; this marker lets module_assembly route it into module.traits
@@ -339,6 +345,21 @@ var decl_param_mut_text: [text] = []
 # trailing default reached codegen with fewer args than params: the callee then
 # read an UNINITIALIZED register/stack slot for the missing parameter.
 var decl_param_default_text: [text] = []
+# Macro facts (plan 2026-10-24 §6, P5): one row per `macro NAME(...)` module
+# declaration and per `name!(...)` invocation outside macro bodies. Flat
+# [text]/[i64] rows (lists comma-joined) so the cache codec never round-trips
+# nested arrays. Consumed by cache_artifact/macro_source_from_parse_v1.spl.
+var macro_def_name: [text] = []
+var macro_def_params: [text] = []     # comma-joined parameter names (`n=const` for CTFE params)
+var macro_def_contract: [text] = []   # raw `-> ( ... )` contract source
+var macro_def_body: [text] = []       # raw indented body source
+var macro_def_nested: [text] = []     # comma-joined `n!(` names in the body
+var macro_def_line: [i64] = []
+var macro_def_visibility: [text] = []
+var macro_use_name: [text] = []
+var macro_use_args: [text] = []       # raw source between the call parens
+var macro_use_line: [i64] = []
+var macro_use_col: [i64] = []
 var decl_empty_i64: [i64] = []
 var decl_empty_text: [text] = []
 var decl_empty_text_lists: [[text]] = []
@@ -349,21 +370,103 @@ var decl_empty_text_lists: [[text]] = []
 pub fn decl_metadata_pools_reset():
     if decl_asm_placement == nil:
         decl_asm_placement = []
+    else:
+        decl_asm_placement.clear()
     if decl_unroll_factor == nil:
         decl_unroll_factor = []
+    else:
+        decl_unroll_factor.clear()
     if decl_pipeline_ii == nil:
         decl_pipeline_ii = []
+    else:
+        decl_pipeline_ii.clear()
     if decl_memory_banks == nil:
         decl_memory_banks = []
+    else:
+        decl_memory_banks.clear()
     if decl_param_default_text == nil:
         decl_param_default_text = []
-    decl_asm_placement.clear()
-    decl_unroll_factor.clear()
-    decl_pipeline_ii.clear()
-    decl_memory_banks.clear()
-    decl_param_default_text.clear()
+    else:
+        decl_param_default_text.clear()
+    macro_facts_reset()
 
-fn decl_count() -> i64:
+pub fn macro_facts_reset():
+    if macro_def_name == nil:
+        macro_def_name = []
+    else:
+        macro_def_name.clear()
+    if macro_def_params == nil:
+        macro_def_params = []
+    else:
+        macro_def_params.clear()
+    if macro_def_contract == nil:
+        macro_def_contract = []
+    else:
+        macro_def_contract.clear()
+    if macro_def_body == nil:
+        macro_def_body = []
+    else:
+        macro_def_body.clear()
+    if macro_def_nested == nil:
+        macro_def_nested = []
+    else:
+        macro_def_nested.clear()
+    if macro_def_line == nil:
+        macro_def_line = []
+    else:
+        macro_def_line.clear()
+    if macro_def_visibility == nil:
+        macro_def_visibility = []
+    else:
+        macro_def_visibility.clear()
+    if macro_use_name == nil:
+        macro_use_name = []
+    else:
+        macro_use_name.clear()
+    if macro_use_args == nil:
+        macro_use_args = []
+    else:
+        macro_use_args.clear()
+    if macro_use_line == nil:
+        macro_use_line = []
+    else:
+        macro_use_line.clear()
+    if macro_use_col == nil:
+        macro_use_col = []
+    else:
+        macro_use_col.clear()
+
+pub fn macro_fact_def_push(name: text, params: text, contract: text, body: text,
+        nested: text, line: i64, visibility: text):
+    macro_def_name.push(name)
+    macro_def_params.push(params)
+    macro_def_contract.push(contract)
+    macro_def_body.push(body)
+    macro_def_nested.push(nested)
+    macro_def_line.push(line)
+    macro_def_visibility.push(visibility)
+
+pub fn macro_fact_use_push(name: text, args: text, line: i64, col: i64):
+    macro_use_name.push(name)
+    macro_use_args.push(args)
+    macro_use_line.push(line)
+    macro_use_col.push(col)
+
+pub fn macro_fact_def_count() -> i64: macro_def_name.len()
+pub fn macro_fact_def_name_at(i: i64) -> text: macro_def_name[i]
+pub fn macro_fact_def_params_at(i: i64) -> text: macro_def_params[i]
+pub fn macro_fact_def_contract_at(i: i64) -> text: macro_def_contract[i]
+pub fn macro_fact_def_body_at(i: i64) -> text: macro_def_body[i]
+pub fn macro_fact_def_nested_at(i: i64) -> text: macro_def_nested[i]
+pub fn macro_fact_def_line_at(i: i64) -> i64: macro_def_line[i]
+pub fn macro_fact_def_visibility_at(i: i64) -> text: macro_def_visibility[i]
+pub fn macro_fact_use_count() -> i64: macro_use_name.len()
+pub fn macro_fact_use_name_at(i: i64) -> text: macro_use_name[i]
+pub fn macro_fact_use_args_at(i: i64) -> text: macro_use_args[i]
+pub fn macro_fact_use_line_at(i: i64) -> i64: macro_use_line[i]
+pub fn macro_fact_use_col_at(i: i64) -> i64: macro_use_col[i]
+
+pub fn decl_count() -> i64:
     ast_decl_count_get()
 
 fn decl_push_default_slot(tag: i64, span_id: i64):
@@ -386,6 +489,8 @@ fn decl_push_default_slot(tag: i64, span_id: i64):
     decl_field_types.push(decl_empty_i64)
     decl_field_defaults.push(decl_empty_i64)
     decl_field_bits.push(decl_empty_i64)
+    decl_field_visibility.push(decl_empty_text)
+    decl_field_array_sizes.push(decl_empty_i64)
     decl_imports.push(decl_empty_text)
     decl_visibility.push("private")
     decl_is_async.push(0)
@@ -404,6 +509,7 @@ fn decl_push_default_slot(tag: i64, span_id: i64):
     decl_is_packed.push(0)
     decl_derives.push(decl_empty_text)
     decl_impl_trait.push("")
+    decl_import_role_v1.push("")
     decl_is_trait.push(0)
     decl_is_hardware.push(0)
     decl_clocked_args.push(decl_empty_text)
@@ -438,6 +544,8 @@ fn decl_ensure_slot(idx: i64, tag: i64, span_id: i64):
     decl_field_types[idx] = decl_empty_i64
     decl_field_defaults[idx] = decl_empty_i64
     decl_field_bits[idx] = decl_empty_i64
+    decl_field_visibility[idx] = decl_empty_text
+    decl_field_array_sizes[idx] = decl_empty_i64
     decl_imports[idx] = decl_empty_text
     decl_visibility[idx] = "private"
     decl_is_async[idx] = 0
@@ -456,6 +564,7 @@ fn decl_ensure_slot(idx: i64, tag: i64, span_id: i64):
     decl_is_packed[idx] = 0
     decl_derives[idx] = decl_empty_text
     decl_impl_trait[idx] = ""
+    decl_import_role_v1[idx] = ""
     decl_is_trait[idx] = 0
     decl_is_hardware[idx] = 0
     decl_clocked_args[idx] = decl_empty_text
@@ -468,7 +577,7 @@ fn decl_ensure_slot(idx: i64, tag: i64, span_id: i64):
     decl_param_mut_text[idx] = ""
     decl_param_default_text[idx] = ""
 
-fn decl_alloc(tag: i64, span_id: i64) -> i64:
+pub fn decl_alloc(tag: i64, span_id: i64) -> i64:
     if decl_tag == nil:
         decl_tag = []
     val idx = ast_decl_count_get()
@@ -483,7 +592,7 @@ fn decl_alloc(tag: i64, span_id: i64) -> i64:
 
 # ===== Declaration Constructors =====
 
-fn decl_fn(name: text, param_names: [text], param_types: [i64], ret_type: i64, body: [i64], is_async: i64, type_params: [text], span_id: i64) -> i64:
+pub fn decl_fn(name: text, param_names: [text], param_types: [i64], ret_type: i64, body: [i64], is_async: i64, type_params: [text], span_id: i64) -> i64:
     val idx = decl_alloc(1, span_id)
     if not ast_decl_prefer_arena():
         ast_decl_direct_set(ast_decl_tag_key(idx), "1")
@@ -507,7 +616,7 @@ fn decl_fn(name: text, param_names: [text], param_types: [i64], ret_type: i64, b
     decl_type_params[idx] = type_params
     idx
 
-fn decl_extern_fn(name: text, param_names: [text], param_types: [i64], ret_type: i64, type_params: [text], span_id: i64) -> i64:
+pub fn decl_extern_fn(name: text, param_names: [text], param_types: [i64], ret_type: i64, type_params: [text], span_id: i64) -> i64:
     val idx = decl_alloc(2, span_id)
     if not ast_decl_prefer_arena():
         ast_decl_direct_set(ast_decl_tag_key(idx), "2")
@@ -525,7 +634,7 @@ fn decl_extern_fn(name: text, param_names: [text], param_types: [i64], ret_type:
     decl_type_params[idx] = type_params
     idx
 
-fn decl_struct_def(name: text, field_names: [text], field_types: [i64], field_defaults: [i64], field_bits: [i64], span_id: i64) -> i64:
+pub fn decl_struct_def(name: text, field_names: [text], field_types: [i64], field_defaults: [i64], field_bits: [i64], span_id: i64) -> i64:
     val idx = decl_alloc(DECL_STRUCT, span_id)
     if not ast_decl_prefer_arena():
         ast_decl_direct_set(ast_decl_tag_key(idx), "3")
@@ -544,7 +653,7 @@ fn decl_struct_def(name: text, field_names: [text], field_types: [i64], field_de
     decl_field_bits[idx] = field_bits
     idx
 
-fn decl_set_is_value_type(idx: i64, value: i64):
+pub fn decl_set_is_value_type(idx: i64, value: i64):
     """Tag a struct-tagged decl's value/reference semantics: 1 = struct
     (value type, copy on param bind), 0 = class/actor (reference type,
     mutations share the same instance). Defaults to 1 (struct) so existing
@@ -552,63 +661,63 @@ fn decl_set_is_value_type(idx: i64, value: i64):
     if idx >= 0 and idx < decl_is_value_type.len():
         decl_is_value_type[idx] = value
 
-fn decl_get_is_value_type(idx: i64) -> i64:
+pub fn decl_get_is_value_type(idx: i64) -> i64:
     if idx >= 0 and idx < decl_is_value_type.len():
         return decl_is_value_type[idx]
     1
 
-fn decl_set_packed(idx: i64, value: i64):
+pub fn decl_set_packed(idx: i64, value: i64):
     """Mark a struct-tagged decl as packed (bitfield). The flat-AST bridge
     routes packed struct decls into Module.bitfields instead of
     Module.structs (see _FlatAstBridge/module_assembly.spl tag "3")."""
     if idx >= 0 and idx < decl_is_packed.len():
         decl_is_packed[idx] = value
 
-fn decl_set_hardware(idx: i64, value: i64):
+pub fn decl_set_hardware(idx: i64, value: i64):
     """Mark a fn decl @hardware (VHDL synthesis entity)."""
     if idx >= 0 and idx < decl_is_hardware.len():
         decl_is_hardware[idx] = value
 
-fn decl_get_is_hardware(idx: i64) -> i64:
+pub fn decl_get_is_hardware(idx: i64) -> i64:
     if idx >= 0 and idx < decl_is_hardware.len():
         decl_is_hardware[idx]
     else:
         0
 
-fn decl_set_clocked_args(idx: i64, args: [text]):
+pub fn decl_set_clocked_args(idx: i64, args: [text]):
     """Record @clocked(clk, reset_n) signal names for a fn decl."""
     if idx >= 0 and idx < decl_clocked_args.len():
         decl_clocked_args[idx] = args
 
-fn decl_get_clocked_args(idx: i64) -> [text]:
+pub fn decl_get_clocked_args(idx: i64) -> [text]:
     if idx >= 0 and idx < decl_clocked_args.len():
         decl_clocked_args[idx]
     else:
         []
 
-fn decl_set_vhdl_generic_args(idx: i64, args: [i64]):
+pub fn decl_set_vhdl_generic_args(idx: i64, args: [i64]):
     """Record @generic(...) expression ids for a fn decl."""
     if idx >= 0 and idx < decl_vhdl_generic_args.len():
         decl_vhdl_generic_args[idx] = args
 
-fn decl_get_vhdl_generic_args(idx: i64) -> [i64]:
+pub fn decl_get_vhdl_generic_args(idx: i64) -> [i64]:
     if idx >= 0 and idx < decl_vhdl_generic_args.len():
         decl_vhdl_generic_args[idx]
     else:
         []
 
-fn decl_set_flatten_struct_output(idx: i64, value: i64):
+pub fn decl_set_flatten_struct_output(idx: i64, value: i64):
     """Mark a fn decl @flatten_struct_output for VHDL output ABI lowering."""
     if idx >= 0 and idx < decl_flatten_struct_output.len():
         decl_flatten_struct_output[idx] = value
 
-fn decl_get_flatten_struct_output(idx: i64) -> i64:
+pub fn decl_get_flatten_struct_output(idx: i64) -> i64:
     if idx >= 0 and idx < decl_flatten_struct_output.len():
         decl_flatten_struct_output[idx]
     else:
         0
 
-fn decl_val_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
+pub fn decl_val_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
     val idx = decl_alloc(DECL_VAL, span_id)
     if not ast_decl_prefer_arena():
         ast_decl_direct_set(ast_decl_tag_key(idx), "4")
@@ -623,7 +732,7 @@ fn decl_val_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> 
     decl_body_stmts_flat[idx] = ast_i64_list_join([init_expr])
     idx
 
-fn decl_lazy_val_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
+pub fn decl_lazy_val_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
     val idx = decl_alloc(DECL_LAZY_VAL, span_id)
     if not ast_decl_prefer_arena():
         ast_decl_direct_set(ast_decl_tag_key(idx), "12")
@@ -640,7 +749,7 @@ fn decl_lazy_val_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64
     decl_is_lazy[idx] = 1
     idx
 
-fn decl_var_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
+pub fn decl_var_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
     val idx = decl_alloc(DECL_VAR, span_id)
     if not ast_decl_prefer_arena():
         ast_decl_direct_set(ast_decl_tag_key(idx), "5")
@@ -655,7 +764,16 @@ fn decl_var_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> 
     decl_body_stmts_flat[idx] = ast_i64_list_join([init_expr])
     idx
 
-fn decl_type_alias(name: text, aliased_type_tag: i64, span_id: i64) -> i64:
+fn decl_set_var_init(idx: i64, init_expr: i64):
+    """Replace the initializer of a DECL_VAR/DECL_VAL binding (same storage as
+    decl_var_binding). Used by the end-of-module no-initializer resolution."""
+    if not ast_decl_prefer_arena():
+        ast_decl_text_set(idx, "BODY", int_to_str(init_expr))
+        ast_decl_direct_set(ast_decl_body_key(idx), int_to_str(init_expr))
+    decl_body_stmts[idx] = [init_expr]
+    decl_body_stmts_flat[idx] = ast_i64_list_join([init_expr])
+
+pub fn decl_type_alias(name: text, aliased_type_tag: i64, span_id: i64) -> i64:
     """type NAME = TYPE -- name + aliased type tag only (TAL1 lane: pure
     capture, no semantic alias registry). Modeled on decl_val_binding's
     name/type_tag shape; there is no init expr so decl_body_stmts stays
@@ -671,7 +789,31 @@ fn decl_type_alias(name: text, aliased_type_tag: i64, span_id: i64) -> i64:
     decl_ret_type[idx] = aliased_type_tag
     idx
 
-fn decl_use_import(module_path: text, imported_names: [text], span_id: i64) -> i64:
+# Parser-owned role, distinct from source-spelled identifiers and ordinary use.
+# The pool is serialized, aligned, and validated with the complete AST pools.
+# @allow(primitive_api) core-parser AST arena handle: decl ids are raw i64 across the whole core frontend
+pub fn decl_set_manifest_role_v1(idx: i64, role: text):
+    if idx < 0 or idx >= decl_import_role_v1.len(): return
+    decl_import_role_v1[idx] = role
+
+pub fn decl_manifest_roles_refuse_v1():
+    for role_index in 0..decl_import_role_v1.len():
+        decl_import_role_v1[role_index] = ""
+
+# @allow(primitive_api) core-parser AST arena handle: decl ids are raw i64 across the whole core frontend
+pub fn decl_get_manifest_role_v1(idx: i64) -> text:
+    if idx < 0 or idx >= decl_import_role_v1.len(): return ""
+    decl_import_role_v1[idx]
+
+# @allow(primitive_api) core-parser AST arena handle: decl ids are raw i64 across the whole core frontend
+pub fn decl_set_manifest_facts_v1(idx: i64, facts: [text]):
+    if idx < 0 or idx >= decl_imports.len(): return
+    if not ast_decl_prefer_arena():
+        ast_decl_text_set(idx, "IMPORTS", ast_text_list_join(facts))
+        ast_decl_direct_set(ast_decl_imports_key(idx), ast_text_list_join(facts))
+    decl_imports[idx] = facts
+
+pub fn decl_use_import(module_path: text, imported_names: [text], span_id: i64) -> i64:
     val idx = decl_alloc(DECL_USE, span_id)
     if not ast_decl_prefer_arena():
         ast_decl_direct_set(ast_decl_tag_key(idx), "6")
@@ -683,7 +825,7 @@ fn decl_use_import(module_path: text, imported_names: [text], span_id: i64) -> i
     decl_imports[idx] = imported_names
     idx
 
-fn decl_export_names(names: [text], span_id: i64) -> i64:
+pub fn decl_export_names(names: [text], span_id: i64) -> i64:
     val idx = decl_alloc(7, span_id)
     if not ast_decl_prefer_arena():
         ast_decl_direct_set(ast_decl_tag_key(idx), "7")
@@ -692,7 +834,7 @@ fn decl_export_names(names: [text], span_id: i64) -> i64:
     decl_imports[idx] = names
     idx
 
-fn decl_enum_payload_unnamed_marker() -> text:
+pub fn decl_enum_payload_unnamed_marker() -> text:
     """Sentinel stored in the enum payload field-NAME list for a POSITIONAL
     payload field (S1 lane, hardening plan §15 Phase 4).
 
@@ -704,7 +846,7 @@ fn decl_enum_payload_unnamed_marker() -> text:
     identifier, so it can never collide with a real field name."""
     "#"
 
-fn decl_enum_def(name: text, variant_names: [text], variant_discriminants: [i64], variant_payload_types_flat: [i64], variant_payload_counts: [i64], variant_payload_field_names_flat: [text], span_id: i64) -> i64:
+pub fn decl_enum_def(name: text, variant_names: [text], variant_discriminants: [i64], variant_payload_types_flat: [i64], variant_payload_counts: [i64], variant_payload_field_names_flat: [text], span_id: i64) -> i64:
     """EPA1 (bug enum_payload_multi_arity, extends EPC1's single-payload
     capture to full arity): `variant_payload_counts` is parallel to
     `variant_names` -- one entry per variant giving how many payload fields
@@ -759,7 +901,7 @@ fn decl_enum_def(name: text, variant_names: [text], variant_discriminants: [i64]
     decl_param_names[idx] = variant_payload_field_names_flat
     idx
 
-fn decl_impl_block(target_name: text, method_decl_ids: [i64], span_id: i64) -> i64:
+pub fn decl_impl_block(target_name: text, method_decl_ids: [i64], span_id: i64) -> i64:
     decl_impl_block_typed(target_name, method_decl_ids, span_id, -1)
 
 fn decl_impl_block_typed(target_name: text, method_decl_ids: [i64], span_id: i64, target_type: i64) -> i64:
@@ -783,7 +925,7 @@ fn decl_impl_block_typed(target_name: text, method_decl_ids: [i64], span_id: i64
 # Record the trait NAME for an `impl Trait for Type:` block (#157). Called in a
 # separate step after decl_impl_block (never a push in the same call as the
 # index-assign -- see the decl_param_mut_text pool note) so the value persists.
-fn decl_set_impl_trait(idx: i64, trait_name: text):
+pub fn decl_set_impl_trait(idx: i64, trait_name: text):
     if idx >= 0 and idx < decl_impl_trait.len():
         decl_impl_trait[idx] = trait_name
     if not ast_decl_prefer_arena():
@@ -793,21 +935,43 @@ fn decl_set_impl_trait(idx: i64, trait_name: text):
 # the IMPL_TRAIT slot with a `with:` prefix so the flat-pool layout is
 # unchanged; decl_get_impl_trait never reports it as an `impl Trait for`.
 val DECL_IMPL_WITH_PREFIX = "with:"
+val DECL_IMPL_TRAIT_TYPE_MARKER = "#"
 
-fn decl_set_impl_with_trait(idx: i64, trait_name: text):
+pub fn decl_set_impl_with_trait(idx: i64, trait_name: text):
     decl_set_impl_trait(idx, DECL_IMPL_WITH_PREFIX + trait_name)
 
-fn decl_get_impl_with_trait(idx: i64) -> text:
+pub fn decl_get_impl_with_trait(idx: i64) -> text:
     val stored = decl_get_impl_trait_raw(idx)
     if stored.starts_with(DECL_IMPL_WITH_PREFIX):
-        return stored.substring(DECL_IMPL_WITH_PREFIX.len(), stored.len())
+        return stored.substring(DECL_IMPL_WITH_PREFIX.len(), stored.byte_len())
     ""
 
-fn decl_get_impl_trait(idx: i64) -> text:
+pub fn decl_get_impl_trait(idx: i64) -> text:
     val stored = decl_get_impl_trait_raw(idx)
     if stored.starts_with(DECL_IMPL_WITH_PREFIX):
         return ""
+    val marker = stored.find(DECL_IMPL_TRAIT_TYPE_MARKER)
+    if marker >= 0:
+        return stored[0:marker]
     stored
+
+# `impl Owner<i64> for X:` -- the applied trait's parsed type tag, appended to
+# the IMPL_TRAIT text as `Owner#<tag>` so the flat-pool layout is unchanged.
+# A bare `impl Trait for X:` stores no tag (-1).
+pub fn decl_set_impl_trait_type(idx: i64, trait_name: text, type_tag: i64):
+    if type_tag < 0:
+        decl_set_impl_trait(idx, trait_name)
+        return
+    decl_set_impl_trait(idx, trait_name + DECL_IMPL_TRAIT_TYPE_MARKER + int_to_str(type_tag))
+
+pub fn decl_get_impl_trait_type_tag(idx: i64) -> i64:
+    val stored = decl_get_impl_trait_raw(idx)
+    if stored.starts_with(DECL_IMPL_WITH_PREFIX):
+        return -1
+    val marker = stored.find(DECL_IMPL_TRAIT_TYPE_MARKER)
+    if marker < 0:
+        return -1
+    ast_parse_i64(stored[marker + 1:])
 
 fn decl_get_impl_trait_raw(idx: i64) -> text:
     if ast_decl_prefer_arena():
@@ -824,7 +988,7 @@ fn decl_get_impl_trait_raw(idx: i64) -> text:
 # Mark a struct-shaped decl as a `trait` (#157) and carry its method decl ids in
 # the shared BODY slot so module_assembly can rebuild the trait's method list
 # (including un-overridden default-method bodies) into module.traits.
-fn decl_set_trait(idx: i64, method_decl_ids: [i64]):
+pub fn decl_set_trait(idx: i64, method_decl_ids: [i64]):
     if idx >= 0 and idx < decl_is_trait.len():
         decl_is_trait[idx] = 1
     if not ast_decl_prefer_arena():
@@ -836,7 +1000,7 @@ fn decl_set_trait(idx: i64, method_decl_ids: [i64]):
     if idx >= 0 and idx < decl_body_stmts_flat.len():
         decl_body_stmts_flat[idx] = ast_i64_list_join(method_decl_ids)
 
-fn decl_get_is_trait(idx: i64) -> i64:
+pub fn decl_get_is_trait(idx: i64) -> i64:
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_is_trait.len():
             return decl_is_trait[idx]
@@ -848,7 +1012,7 @@ fn decl_get_is_trait(idx: i64) -> i64:
         return 0
     decl_is_trait[idx]
 
-fn decl_cli_def(name: text, field_names: [text], field_types: [i64], field_defaults: [i64], body_stmts: [i64], imports: [text], span_id: i64) -> i64:
+pub fn decl_cli_def(name: text, field_names: [text], field_types: [i64], field_defaults: [i64], body_stmts: [i64], imports: [text], span_id: i64) -> i64:
     # cli Name: block — name = struct name for parsed args,
     # field_names = option metadata as "name|type_char|default|short|doc" strings,
     # field_types = type tags for each option,
@@ -868,7 +1032,7 @@ fn decl_cli_def(name: text, field_names: [text], field_types: [i64], field_defau
     decl_imports[idx] = imports
     idx
 
-fn decl_ce_block(builder_name: text, body_stmts: [i64], span_id: i64) -> i64:
+pub fn decl_ce_block(builder_name: text, body_stmts: [i64], span_id: i64) -> i64:
     # ce NAME: block — builder_name = computation expression builder name,
     # body_stmts = list of statement indices in ce body
     val idx = decl_alloc(DECL_CE, span_id)
@@ -889,6 +1053,13 @@ fn decl_aop_advice(pointcut: text, handler: text, form: text, priority_text: tex
     decl_imports[idx] = [pointcut, form, priority_text]
     idx
 
+# @allow(primitive_api) core-parser AST arena handle: decl ids and span ids are raw i64 across the whole core frontend
+pub fn decl_aop_advice_owned(pointcut: text, handler: text, form: text, priority_text: text, aspect_name: text, span_id: i64) -> i64:
+    val idx = decl_aop_advice(pointcut, handler, form, priority_text, span_id)
+    # Append lexical ownership; the module authority is attached after restore.
+    decl_imports[idx] = [pointcut, form, priority_text, aspect_name]
+    idx
+
 fn decl_arch_rule(kind: text, pointcut: text, message: text, span_id: i64) -> i64:
     # forbid/allow pc{pointcut} "message"
     # name = kind ("forbid"|"allow"), imports[0] = pointcut, imports[1] = message
@@ -901,7 +1072,7 @@ fn decl_arch_rule(kind: text, pointcut: text, message: text, span_id: i64) -> i6
 
 # ===== Declaration Accessors =====
 
-fn decl_get_tag(idx: i64) -> i64:
+pub fn decl_get_tag(idx: i64) -> i64:
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_tag.len():
             return decl_tag[idx]
@@ -930,7 +1101,7 @@ fn decl_get_tag(idx: i64) -> i64:
         return env_value
     decl_tag[idx]
 
-fn decl_get_span(idx: i64) -> i64:
+pub fn decl_get_span(idx: i64) -> i64:
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_span.len():
             return decl_span[idx]
@@ -947,7 +1118,7 @@ fn decl_set_span(idx: i64, span_id: i64):
     if not ast_decl_prefer_arena():
         ast_decl_i64_set(idx, "SPAN", span_id)
 
-fn decl_get_name(idx: i64) -> text:
+pub fn decl_get_name(idx: i64) -> text:
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_name.len():
             return decl_name[idx]
@@ -962,7 +1133,7 @@ fn decl_get_name(idx: i64) -> text:
         return ""
     decl_name[idx]
 
-fn decl_get_param_names(idx: i64) -> [text]:
+pub fn decl_get_param_names(idx: i64) -> [text]:
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_param_names.len():
             return decl_param_names[idx]
@@ -974,7 +1145,7 @@ fn decl_get_param_names(idx: i64) -> [text]:
         return []
     decl_param_names[idx]
 
-fn decl_get_param_types(idx: i64) -> [i64]:
+pub fn decl_get_param_types(idx: i64) -> [i64]:
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_param_types.len():
             return decl_param_types[idx]
@@ -986,7 +1157,7 @@ fn decl_get_param_types(idx: i64) -> [i64]:
         return []
     decl_param_types[idx]
 
-fn decl_get_ret_type(idx: i64) -> i64:
+pub fn decl_get_ret_type(idx: i64) -> i64:
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_ret_type.len():
             return decl_ret_type[idx]
@@ -1001,7 +1172,7 @@ fn decl_get_ret_type(idx: i64) -> i64:
         return -1
     decl_ret_type[idx]
 
-fn decl_get_body(idx: i64) -> [i64]:
+pub fn decl_get_body(idx: i64) -> [i64]:
     # Read from the flat [text] mirror (see decl_body_stmts_flat above), same
     # treatment as arm_get_body: decoding a fresh [i64] from text sidesteps
     # the native-build/cranelift-compiled runtime's nested-[[i64]] corruption
@@ -1021,7 +1192,7 @@ fn decl_get_body(idx: i64) -> [i64]:
         return []
     decl_body_stmts[idx]
 
-fn decl_get_fields(idx: i64) -> [text]:
+pub fn decl_get_fields(idx: i64) -> [text]:
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_field_names.len():
             return decl_field_names[idx]
@@ -1036,7 +1207,7 @@ fn decl_get_fields(idx: i64) -> [text]:
         return []
     decl_field_names[idx]
 
-fn decl_get_field_types(idx: i64) -> [i64]:
+pub fn decl_get_field_types(idx: i64) -> [i64]:
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_field_types.len():
             return decl_field_types[idx]
@@ -1051,7 +1222,7 @@ fn decl_get_field_types(idx: i64) -> [i64]:
         return []
     decl_field_types[idx]
 
-fn decl_get_field_defaults(idx: i64) -> [i64]:
+pub fn decl_get_field_defaults(idx: i64) -> [i64]:
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_field_defaults.len():
             return decl_field_defaults[idx]
@@ -1066,7 +1237,7 @@ fn decl_get_field_defaults(idx: i64) -> [i64]:
 # Per-parameter default-value expr indices (parallel to PARAM_NAMES; -1 = no
 # default). Stored via the same decl text-field store the flat bridge reads
 # through flat_decl_field_text("PARAM_DEFAULTS").
-fn decl_set_param_defaults(idx: i64, defaults: [i64]):
+pub fn decl_set_param_defaults(idx: i64, defaults: [i64]):
     # Arena pool first (the only store that persists under arena mode); the
     # legacy text-field store is still written in non-arena mode so any reader
     # that goes through ast_decl_text_get keeps working.
@@ -1075,7 +1246,7 @@ fn decl_set_param_defaults(idx: i64, defaults: [i64]):
     if not ast_decl_prefer_arena():
         ast_decl_text_set(idx, "PARAM_DEFAULTS", ast_i64_list_join(defaults))
 
-fn decl_get_param_defaults(idx: i64) -> [i64]:
+pub fn decl_get_param_defaults(idx: i64) -> [i64]:
     if idx >= 0 and idx < decl_param_default_text.len():
         val pooled = decl_param_default_text[idx]
         if pooled != "":
@@ -1109,16 +1280,38 @@ fn decl_get_param_defaults(idx: i64) -> [i64]:
 # growing up front (in the slot-management functions) and assigning the real
 # value later in a separate call, with no preceding push in that call, is the
 # pattern every other pool here already relies on.
-fn decl_set_param_muts(idx: i64, muts: [i64]):
+pub fn decl_set_param_muts(idx: i64, muts: [i64]):
     if idx >= 0 and idx < decl_param_mut_text.len():
         decl_param_mut_text[idx] = ast_i64_list_join(muts)
 
-fn decl_get_param_muts(idx: i64) -> [i64]:
+pub fn decl_get_param_muts(idx: i64) -> [i64]:
     if idx >= 0 and idx < decl_param_mut_text.len():
         return ast_i64_list_split(decl_param_mut_text[idx])
     []
 
-fn decl_get_field_bits(idx: i64) -> [i64]:
+pub fn decl_set_field_visibility(idx: i64, visibilities: [text]):
+    if idx >= 0 and idx < decl_field_visibility.len():
+        decl_field_visibility[idx] = visibilities
+
+# Per-field visibility text codes ("public"|"peer"|"up"|"internal"|"package"|"private"),
+# parallel to decl_get_fields(idx). Out of range -> [] (callers default to private).
+pub fn decl_get_field_visibility(idx: i64) -> [text]:
+    if idx >= 0 and idx < decl_field_visibility.len():
+        return decl_field_visibility[idx]
+    []
+
+pub fn decl_set_field_array_sizes(idx: i64, sizes: [i64]):
+    if idx >= 0 and idx < decl_field_array_sizes.len():
+        decl_field_array_sizes[idx] = sizes
+
+# Per-field fixed array size `[T; N]` (integer-literal N), parallel to
+# decl_get_fields(idx); -1 = not a sized array. Out of range -> [].
+pub fn decl_get_field_array_sizes(idx: i64) -> [i64]:
+    if idx >= 0 and idx < decl_field_array_sizes.len():
+        return decl_field_array_sizes[idx]
+    []
+
+pub fn decl_get_field_bits(idx: i64) -> [i64]:
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_field_bits.len():
             return decl_field_bits[idx]
@@ -1130,7 +1323,7 @@ fn decl_get_field_bits(idx: i64) -> [i64]:
         return []
     decl_field_bits[idx]
 
-fn decl_get_imports(idx: i64) -> [text]:
+pub fn decl_get_imports(idx: i64) -> [text]:
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_imports.len():
             return decl_imports[idx]
@@ -1145,10 +1338,10 @@ fn decl_get_imports(idx: i64) -> [text]:
         return []
     decl_imports[idx]
 
-fn decl_get_is_pub(idx: i64) -> bool:
+pub fn decl_get_is_pub(idx: i64) -> bool:
     decl_get_visibility_text(idx) == "public"
 
-fn decl_get_visibility_text(idx: i64) -> text:
+pub fn decl_get_visibility_text(idx: i64) -> text:
     if idx < 0:
         return "private"
     if ast_decl_prefer_arena():
@@ -1165,12 +1358,12 @@ fn decl_get_visibility_text(idx: i64) -> text:
         return "private"
     stored
 
-fn decl_set_visibility_text(idx: i64, visibility: text):
+pub fn decl_set_visibility_text(idx: i64, visibility: text):
     if not ast_decl_prefer_arena():
         ast_decl_text_set(idx, "VIS", visibility)
     decl_visibility[idx] = visibility
 
-fn decl_get_is_async(idx: i64) -> i64:
+pub fn decl_get_is_async(idx: i64) -> i64:
     if idx < 0: return 0
     if ast_decl_prefer_arena():
         if idx < decl_is_async.len(): return decl_is_async[idx]
@@ -1182,17 +1375,17 @@ fn decl_get_is_async(idx: i64) -> i64:
     if idx >= decl_is_async.len(): return 0
     decl_is_async[idx]
 
-fn decl_get_is_gpu_kernel(idx: i64) -> i64:
+pub fn decl_get_is_gpu_kernel(idx: i64) -> i64:
     if idx < 0: return 0
     if decl_is_gpu_kernel == nil: return 0
     if idx >= decl_is_gpu_kernel.len(): return 0
     decl_is_gpu_kernel[idx]
 
-fn decl_set_rt_hal_flags(idx: i64, flags: i64):
+pub fn decl_set_rt_hal_flags(idx: i64, flags: i64):
     if idx >= 0 and idx < decl_rt_hal_flags.len():
         decl_rt_hal_flags[idx] = flags
 
-fn decl_get_rt_hal_flags(idx: i64) -> i64:
+pub fn decl_get_rt_hal_flags(idx: i64) -> i64:
     if idx < 0 or decl_rt_hal_flags == nil or idx >= decl_rt_hal_flags.len(): return 0
     decl_rt_hal_flags[idx]
 
@@ -1201,15 +1394,15 @@ fn decl_get_rt_hal_flags(idx: i64) -> i64:
 # `@noreturn` / `@entry` / `@interrupt` spellings recorded for a function
 # declaration, "|"-joined, so the flat-AST bridge can rebuild real
 # Attribute nodes (the parser otherwise keeps only rt/gpu/vhdl flags).
-fn decl_set_asm_placement(idx: i64, spellings: text):
+pub fn decl_set_asm_placement(idx: i64, spellings: text):
     if idx >= 0 and idx < decl_asm_placement.len():
         decl_asm_placement[idx] = spellings
 
-fn decl_get_asm_placement(idx: i64) -> text:
+pub fn decl_get_asm_placement(idx: i64) -> text:
     if idx < 0 or decl_asm_placement == nil or idx >= decl_asm_placement.len(): return ""
     decl_asm_placement[idx]
 
-fn decl_get_type_params(idx: i64) -> [text]:
+pub fn decl_get_type_params(idx: i64) -> [text]:
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_type_params.len():
             return decl_type_params[idx]
@@ -1221,17 +1414,17 @@ fn decl_get_type_params(idx: i64) -> [text]:
         return []
     decl_type_params[idx]
 
-fn decl_set_type_params(idx: i64, params: [text]):
+pub fn decl_set_type_params(idx: i64, params: [text]):
     if not ast_decl_prefer_arena():
         ast_decl_text_set(idx, "TYPE_PARAMS", ast_text_list_join(params))
     decl_type_params[idx] = params
 
-fn decl_get_type_param_constraints(idx: i64) -> [[text]]:
+pub fn decl_get_type_param_constraints(idx: i64) -> [[text]]:
     if idx >= decl_type_param_constraints.len():
         return []
     decl_type_param_constraints[idx]
 
-fn decl_set_type_param_constraints(idx: i64, constraints: [[text]]):
+pub fn decl_set_type_param_constraints(idx: i64, constraints: [[text]]):
     decl_type_param_constraints[idx] = constraints
 
 fn decl_get_type_param_constraint_mode(idx: i64) -> [text]:
@@ -1240,12 +1433,12 @@ fn decl_get_type_param_constraint_mode(idx: i64) -> [text]:
 fn decl_set_type_param_constraint_mode(idx: i64, modes: [text]):
     decl_type_param_constraint_mode[idx] = modes
 
-fn decl_set_comptime(idx: i64):
+pub fn decl_set_comptime(idx: i64):
     if not ast_decl_prefer_arena():
         ast_decl_i64_set(idx, "COMPTIME", 1)
     decl_is_comptime[idx] = 1
 
-fn decl_get_is_comptime(idx: i64) -> bool:
+pub fn decl_get_is_comptime(idx: i64) -> bool:
     if idx < 0: return false
     if ast_decl_prefer_arena():
         if idx < decl_is_comptime.len(): return decl_is_comptime[idx] == 1
@@ -1254,12 +1447,12 @@ fn decl_get_is_comptime(idx: i64) -> bool:
     if idx >= decl_is_comptime.len(): return false
     decl_is_comptime[idx] == 1
 
-fn decl_set_lazy(idx: i64):
+pub fn decl_set_lazy(idx: i64):
     if not ast_decl_prefer_arena():
         ast_decl_i64_set(idx, "LAZY", 1)
     decl_is_lazy[idx] = 1
 
-fn decl_get_is_lazy(idx: i64) -> i64:
+pub fn decl_get_is_lazy(idx: i64) -> i64:
     if idx < 0: return 0
     if ast_decl_prefer_arena():
         if idx < decl_is_lazy.len(): return decl_is_lazy[idx]
@@ -1269,49 +1462,49 @@ fn decl_get_is_lazy(idx: i64) -> i64:
     if idx >= decl_is_lazy.len(): return 0
     decl_is_lazy[idx]
 
-fn decl_set_gpu_target_text(idx: i64, target: text):
+pub fn decl_set_gpu_target_text(idx: i64, target: text):
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_gpu_target_text.len():
             decl_gpu_target_text[idx] = target
         return
     ast_decl_text_set(idx, "GPU_TARGET", target)
 
-fn decl_get_gpu_target_text(idx: i64) -> text:
+pub fn decl_get_gpu_target_text(idx: i64) -> text:
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_gpu_target_text.len():
             return decl_gpu_target_text[idx]
         return ""
     ast_decl_text_get(idx, "GPU_TARGET")
 
-fn decl_set_gpu_target_arg_name_text(idx: i64, arg_name: text):
+pub fn decl_set_gpu_target_arg_name_text(idx: i64, arg_name: text):
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_gpu_target_arg_name_text.len():
             decl_gpu_target_arg_name_text[idx] = arg_name
         return
     ast_decl_text_set(idx, "GPU_TARGET_ARG_NAME", arg_name)
 
-fn decl_get_gpu_target_arg_name_text(idx: i64) -> text:
+pub fn decl_get_gpu_target_arg_name_text(idx: i64) -> text:
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_gpu_target_arg_name_text.len():
             return decl_gpu_target_arg_name_text[idx]
         return ""
     ast_decl_text_get(idx, "GPU_TARGET_ARG_NAME")
 
-fn decl_set_gpu_backends_text(idx: i64, backends: text):
+pub fn decl_set_gpu_backends_text(idx: i64, backends: text):
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_gpu_backends_text.len():
             decl_gpu_backends_text[idx] = backends
         return
     ast_decl_text_set(idx, "GPU_BACKENDS", backends)
 
-fn decl_get_gpu_backends_text(idx: i64) -> text:
+pub fn decl_get_gpu_backends_text(idx: i64) -> text:
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_gpu_backends_text.len():
             return decl_gpu_backends_text[idx]
         return ""
     ast_decl_text_get(idx, "GPU_BACKENDS")
 
-fn decl_set_unroll_factor(idx: i64, n: i64):
+pub fn decl_set_unroll_factor(idx: i64, n: i64):
     """@unroll(n) structural unroll factor for a kernel fn decl."""
     if idx >= 0 and idx < decl_unroll_factor.len():
         decl_unroll_factor[idx] = n
@@ -1322,7 +1515,7 @@ fn decl_get_unroll_factor(idx: i64) -> i64:
         return decl_unroll_factor[idx]
     ast_decl_i64_get(idx, "UNROLL_FACTOR")
 
-fn decl_set_pipeline_ii(idx: i64, n: i64):
+pub fn decl_set_pipeline_ii(idx: i64, n: i64):
     """@pipeline(ii=n) initiation interval for a kernel fn decl."""
     if idx >= 0 and idx < decl_pipeline_ii.len():
         decl_pipeline_ii[idx] = n
@@ -1333,7 +1526,7 @@ fn decl_get_pipeline_ii(idx: i64) -> i64:
         return decl_pipeline_ii[idx]
     ast_decl_i64_get(idx, "PIPELINE_II")
 
-fn decl_set_memory_banks(idx: i64, n: i64):
+pub fn decl_set_memory_banks(idx: i64, n: i64):
     """@memory(banks=n) bank count for a kernel fn decl."""
     if idx >= 0 and idx < decl_memory_banks.len():
         decl_memory_banks[idx] = n
@@ -1344,12 +1537,12 @@ fn decl_get_memory_banks(idx: i64) -> i64:
         return decl_memory_banks[idx]
     ast_decl_i64_get(idx, "MEMORY_BANKS")
 
-fn decl_get_derives(idx: i64) -> [text]:
+pub fn decl_get_derives(idx: i64) -> [text]:
     if idx < 0: return []
     if idx >= decl_derives.len(): return []
     decl_derives[idx]
 
-fn decl_set_derives(idx: i64, derives: [text]):
+pub fn decl_set_derives(idx: i64, derives: [text]):
     decl_derives[idx] = derives
 
 # ===== Match Arm Arena =====
@@ -1368,7 +1561,7 @@ var arm_body_flat: [text] = []
 var arm_binding: [text] = []
 var arm_rationale: [text] = []
 
-fn arm_new(pattern: i64, guard: i64, body: [i64]) -> i64:
+pub fn arm_new(pattern: i64, guard: i64, body: [i64]) -> i64:
     val idx = arm_pattern.len()
     arm_pattern.push(pattern)
     arm_guard.push(guard)
@@ -1378,7 +1571,7 @@ fn arm_new(pattern: i64, guard: i64, body: [i64]) -> i64:
     arm_rationale.push("")
     idx
 
-fn arm_new_with_binding(pattern: i64, guard: i64, body: [i64], binding: text) -> i64:
+pub fn arm_new_with_binding(pattern: i64, guard: i64, body: [i64], binding: text) -> i64:
     val idx = arm_pattern.len()
     arm_pattern.push(pattern)
     arm_guard.push(guard)
@@ -1388,7 +1581,7 @@ fn arm_new_with_binding(pattern: i64, guard: i64, body: [i64], binding: text) ->
     arm_rationale.push("")
     idx
 
-fn arm_new_with_binding_and_rationale(pattern: i64, guard: i64, body: [i64], binding: text, rationale: text) -> i64:
+pub fn arm_new_with_binding_and_rationale(pattern: i64, guard: i64, body: [i64], binding: text, rationale: text) -> i64:
     val idx = arm_pattern.len()
     arm_pattern.push(pattern)
     arm_guard.push(guard)
@@ -1398,23 +1591,23 @@ fn arm_new_with_binding_and_rationale(pattern: i64, guard: i64, body: [i64], bin
     arm_rationale.push(rationale)
     idx
 
-fn arm_get_pattern(idx: i64) -> i64:
+pub fn arm_get_pattern(idx: i64) -> i64:
     arm_pattern[idx]
 
-fn arm_get_guard(idx: i64) -> i64:
+pub fn arm_get_guard(idx: i64) -> i64:
     arm_guard[idx]
 
-fn arm_get_body(idx: i64) -> [i64]:
+pub fn arm_get_body(idx: i64) -> [i64]:
     # Read from the flat [text] mirror (see arm_body_flat above): decoding a
     # fresh [i64] from text sidesteps the seed's nested-[[i64]] element erasure.
     if idx >= 0 and idx < arm_body_flat.len():
         return ast_i64_list_split(arm_body_flat[idx])
     arm_body[idx]
 
-fn arm_get_binding(idx: i64) -> text:
+pub fn arm_get_binding(idx: i64) -> text:
     arm_binding[idx]
 
-fn arm_get_rationale(idx: i64) -> text:
+pub fn arm_get_rationale(idx: i64) -> text:
     if idx < 0:
         return ""
     if idx >= arm_rationale.len():
@@ -1446,23 +1639,23 @@ fn elif_arena_clear():
     elif_body = []
     elif_else = []
 
-fn elif_new(cond: i64, body: [i64], else_body: [i64]) -> i64:
+pub fn elif_new(cond: i64, body: [i64], else_body: [i64]) -> i64:
     val idx = elif_cond.len()
     elif_cond.push(cond)
     elif_body.push(body)
     elif_else.push(else_body)
     idx
 
-fn elif_count() -> i64:
+pub fn elif_count() -> i64:
     elif_cond.len()
 
-fn elif_get_cond(idx: i64) -> i64:
+pub fn elif_get_cond(idx: i64) -> i64:
     elif_cond[idx]
 
-fn elif_get_body(idx: i64) -> [i64]:
+pub fn elif_get_body(idx: i64) -> [i64]:
     elif_body[idx]
 
-fn elif_get_else(idx: i64) -> [i64]:
+pub fn elif_get_else(idx: i64) -> [i64]:
     elif_else[idx]
 
 # ===== Module (Top-Level AST) =====
@@ -1574,13 +1767,79 @@ fn ast_decl_env_mirror_clear():
 var lexer_state_core_pos_slot: [text] = ["0"]
 var lexer_state_core_line_slot: [text] = ["1"]
 
+
+# Transient-scope owner promotion (peer of type_pools_promote_hir_owners):
+# the decl pools back the flat-AST module graph read by the bridge, desugar,
+# and cache capture after the per-file transient parse scope ends. Promote
+# their backing allocations into persistent storage before scope teardown.
+fn _decl_pool_promote_i64(root: [[i64]]) -> bool:
+    val promoted = rt_transient_heap_promote(root)
+    rt_array_free(root)
+    promoted
+
+fn _decl_pool_promote_text(root: [[text]]) -> bool:
+    val promoted = rt_transient_heap_promote(root)
+    rt_array_free(root)
+    promoted
+
+pub fn decl_pools_promote_transient_owners() -> bool:
+    var promoted = true
+    promoted = _decl_pool_promote_i64([ast_decl_mirror_high_slot]) and promoted
+    promoted = _decl_pool_promote_i64([ast_module_decl_mirror_high_slot]) and promoted
+    promoted = _decl_pool_promote_i64([ast_decl_count_slot]) and promoted
+    promoted = _decl_pool_promote_i64([ast_module_decl_count_slot]) and promoted
+    promoted = _decl_pool_promote_i64([decl_tag]) and promoted
+    promoted = _decl_pool_promote_i64([decl_span]) and promoted
+    promoted = _decl_pool_promote_i64([decl_ret_type]) and promoted
+    promoted = _decl_pool_promote_i64([decl_is_async]) and promoted
+    promoted = _decl_pool_promote_i64([decl_is_comptime]) and promoted
+    promoted = _decl_pool_promote_i64([decl_is_lazy]) and promoted
+    promoted = _decl_pool_promote_i64([decl_is_gpu_kernel]) and promoted
+    promoted = _decl_pool_promote_i64([decl_rt_hal_flags]) and promoted
+    promoted = _decl_pool_promote_i64([decl_is_simd]) and promoted
+    promoted = _decl_pool_promote_i64([decl_is_packed]) and promoted
+    promoted = _decl_pool_promote_i64([decl_is_trait]) and promoted
+    promoted = _decl_pool_promote_i64([decl_is_hardware]) and promoted
+    promoted = _decl_pool_promote_i64([decl_flatten_struct_output]) and promoted
+    promoted = _decl_pool_promote_i64([decl_unroll_factor]) and promoted
+    promoted = _decl_pool_promote_i64([decl_pipeline_ii]) and promoted
+    promoted = _decl_pool_promote_i64([decl_memory_banks]) and promoted
+    promoted = _decl_pool_promote_i64([decl_is_value_type]) and promoted
+    promoted = _decl_pool_promote_i64([decl_empty_i64]) and promoted
+    promoted = _decl_pool_promote_i64([arm_pattern]) and promoted
+    promoted = _decl_pool_promote_i64([arm_guard]) and promoted
+    promoted = _decl_pool_promote_i64([elif_cond]) and promoted
+    promoted = _decl_pool_promote_i64([module_decls]) and promoted
+    promoted = _decl_pool_promote_i64([module_decl_slots]) and promoted
+    promoted = _decl_pool_promote_text([decl_name]) and promoted
+    promoted = _decl_pool_promote_text([decl_body_stmts_flat]) and promoted
+    promoted = _decl_pool_promote_text([decl_visibility]) and promoted
+    promoted = _decl_pool_promote_text([decl_asm_placement]) and promoted
+    promoted = _decl_pool_promote_text([decl_gpu_target_text]) and promoted
+    promoted = _decl_pool_promote_text([decl_gpu_target_arg_name_text]) and promoted
+    promoted = _decl_pool_promote_text([decl_gpu_backends_text]) and promoted
+    promoted = _decl_pool_promote_text([decl_impl_trait]) and promoted
+    promoted = _decl_pool_promote_text([decl_import_role_v1]) and promoted
+    promoted = _decl_pool_promote_text([decl_param_mut_text]) and promoted
+    promoted = _decl_pool_promote_text([decl_param_default_text]) and promoted
+    promoted = _decl_pool_promote_text([decl_empty_text]) and promoted
+    promoted = _decl_pool_promote_text([arm_body_flat]) and promoted
+    promoted = _decl_pool_promote_text([arm_binding]) and promoted
+    promoted = _decl_pool_promote_text([arm_rationale]) and promoted
+    promoted = _decl_pool_promote_text([module_path_slot]) and promoted
+    promoted = _decl_pool_promote_text([lexer_state_core_pos_slot]) and promoted
+    promoted = _decl_pool_promote_text([lexer_state_core_line_slot]) and promoted
+    promoted
+
 # --- flat-AST pool codec: flat_decl ------------------------------
 #
-# Dump/restore for this file's 55 pools, in a FIXED SORTED ORDER that
+# Dump/restore for this file's pools: the original 55 in a FIXED SORTED ORDER that
 # dump and restore share. Order is the whole contract: the blob carries no
 # pool names, so a reordering on one side silently pairs each pool with its
 # neighbour's data. Sorting by name keeps the two sides in step without
-# anyone having to maintain a hand-written order.
+# anyone having to maintain a hand-written order. The macro fact pools
+# (macro_def_* / macro_use_*) are appended AFTER the sorted block instead, so
+# the positions of every earlier pool (and packed section) stay stable.
 #
 # Completeness is enforced by scripts/check/check-flat-ast-codec-complete.shs,
 # which derives the pool list from this file and fails when one is not both
@@ -1612,8 +1871,10 @@ pub fn flat_decl_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_i64(arm_pattern))
     parts = parts.push(flat_pool_enc_text(arm_rationale))
     parts = parts.push(flat_pool_enc_i64(ast_decl_count_slot))
+    flat_pool_type_trace_clear_next_v1()
     parts = parts.push(flat_pool_enc_i64(ast_decl_mirror_high_slot))
     parts = parts.push(flat_pool_enc_i64(ast_module_decl_count_slot))
+    flat_pool_type_trace_clear_next_v1()
     parts = parts.push(flat_pool_enc_i64(ast_module_decl_mirror_high_slot))
     parts = parts.push(flat_pool_enc_text(decl_asm_placement))
     # Same erasure dodge, without changing the pool owner or its children.
@@ -1625,6 +1886,8 @@ pub fn flat_decl_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_text_list(decl_clocked_args))
     parts = parts.push(flat_pool_enc_text_list(decl_derives))
     parts = parts.push(flat_pool_enc_i64_list(decl_field_bits))
+    parts = parts.push(flat_pool_enc_text_list(decl_field_visibility))
+    parts = parts.push(flat_pool_enc_i64_list(decl_field_array_sizes))
     parts = parts.push(flat_pool_enc_i64_list(decl_field_defaults))
     parts = parts.push(flat_pool_enc_text_list(decl_field_names))
     parts = parts.push(flat_pool_enc_i64_list(decl_field_types))
@@ -1633,6 +1896,7 @@ pub fn flat_decl_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_text(decl_gpu_target_arg_name_text))
     parts = parts.push(flat_pool_enc_text(decl_gpu_target_text))
     parts = parts.push(flat_pool_enc_text(decl_impl_trait))
+    parts = parts.push(flat_pool_enc_text(decl_import_role_v1))
     parts = parts.push(flat_pool_enc_text_list(decl_imports))
     parts = parts.push(flat_pool_enc_i64(decl_is_async))
     parts = parts.push(flat_pool_enc_i64(decl_is_comptime))
@@ -1669,6 +1933,19 @@ pub fn flat_decl_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_i64(module_decl_slots))
     parts = parts.push(flat_pool_enc_i64(module_decls))
     parts = parts.push(flat_pool_enc_text(module_path_slot))
+    # Macro fact pools: appended at the END of this family (packed section
+    # order follows dump order, so existing pool positions stay stable).
+    parts = parts.push(flat_pool_enc_text(macro_def_name))
+    parts = parts.push(flat_pool_enc_text(macro_def_params))
+    parts = parts.push(flat_pool_enc_text(macro_def_contract))
+    parts = parts.push(flat_pool_enc_text(macro_def_body))
+    parts = parts.push(flat_pool_enc_text(macro_def_nested))
+    parts = parts.push(flat_pool_enc_i64(macro_def_line))
+    parts = parts.push(flat_pool_enc_text(macro_def_visibility))
+    parts = parts.push(flat_pool_enc_text(macro_use_name))
+    parts = parts.push(flat_pool_enc_text(macro_use_args))
+    parts = parts.push(flat_pool_enc_i64(macro_use_line))
+    parts = parts.push(flat_pool_enc_i64(macro_use_col))
     parts.join("")
 
 # Returns false when the blob ran short or was malformed; the caller must
@@ -1690,6 +1967,8 @@ pub fn flat_decl_pools_restore(r: FlatPoolReader) -> bool:
     decl_clocked_args = flat_pool_dec_text_list_into(decl_clocked_args, r)
     decl_derives = flat_pool_dec_text_list_into(decl_derives, r)
     decl_field_bits = flat_pool_dec_i64_list_into(decl_field_bits, r)
+    decl_field_visibility = flat_pool_dec_text_list_into(decl_field_visibility, r)
+    decl_field_array_sizes = flat_pool_dec_i64_list_into(decl_field_array_sizes, r)
     decl_field_defaults = flat_pool_dec_i64_list_into(decl_field_defaults, r)
     decl_field_names = flat_pool_dec_text_list_into(decl_field_names, r)
     decl_field_types = flat_pool_dec_i64_list_into(decl_field_types, r)
@@ -1698,6 +1977,7 @@ pub fn flat_decl_pools_restore(r: FlatPoolReader) -> bool:
     decl_gpu_target_arg_name_text = flat_pool_dec_text_into(decl_gpu_target_arg_name_text, r)
     decl_gpu_target_text = flat_pool_dec_text_into(decl_gpu_target_text, r)
     decl_impl_trait = flat_pool_dec_text_into(decl_impl_trait, r)
+    decl_import_role_v1 = flat_pool_dec_text_into(decl_import_role_v1, r)
     decl_imports = flat_pool_dec_text_list_into(decl_imports, r)
     decl_is_async = flat_pool_dec_i64_into(decl_is_async, r)
     decl_is_comptime = flat_pool_dec_i64_into(decl_is_comptime, r)
@@ -1734,9 +2014,26 @@ pub fn flat_decl_pools_restore(r: FlatPoolReader) -> bool:
     module_decl_slots = flat_pool_dec_i64(r)
     module_decls = flat_pool_dec_i64_into(module_decls, r)
     module_path_slot = flat_pool_dec_text_into(module_path_slot, r)
+    macro_def_name = flat_pool_dec_text_into(macro_def_name, r)
+    macro_def_params = flat_pool_dec_text_into(macro_def_params, r)
+    macro_def_contract = flat_pool_dec_text_into(macro_def_contract, r)
+    macro_def_body = flat_pool_dec_text_into(macro_def_body, r)
+    macro_def_nested = flat_pool_dec_text_into(macro_def_nested, r)
+    macro_def_line = flat_pool_dec_i64_into(macro_def_line, r)
+    macro_def_visibility = flat_pool_dec_text_into(macro_def_visibility, r)
+    macro_use_name = flat_pool_dec_text_into(macro_use_name, r)
+    macro_use_args = flat_pool_dec_text_into(macro_use_args, r)
+    macro_use_line = flat_pool_dec_i64_into(macro_use_line, r)
+    macro_use_col = flat_pool_dec_i64_into(macro_use_col, r)
     r.ok
 
-export flat_decl_pools_dump, flat_decl_pools_restore
+# Live line chunks of this family's CLEAR pools, in dump order, for the
+# packed-blob line adapter (flat_pool_packed_v1.spl): process-local values are
+# never read back from a blob.
+pub fn flat_decl_pools_clear_chunks_v1() -> [text]:
+    [ flat_pool_enc_i64(ast_decl_mirror_high_slot), flat_pool_enc_i64(ast_module_decl_mirror_high_slot)]
+
+export flat_decl_pools_dump, flat_decl_pools_restore, flat_decl_pools_clear_chunks_v1
 # Strict frontend cache admission calls this after every pool is restored.
 # The count slots are scalar arrays; an empty pristine slot means zero.
 # module_decls is a legacy compatibility pool: module_add_decl writes the
@@ -1770,6 +2067,8 @@ pub fn flat_decl_pools_consistent() -> bool:
     if decl_field_types.len() != count: return false
     if decl_field_defaults.len() != count: return false
     if decl_field_bits.len() != count: return false
+    if decl_field_visibility.len() != count: return false
+    if decl_field_array_sizes.len() != count: return false
     if decl_imports.len() != count: return false
     if decl_visibility.len() != count: return false
     if decl_is_async.len() != count: return false
@@ -1788,6 +2087,14 @@ pub fn flat_decl_pools_consistent() -> bool:
     if decl_is_packed.len() != count: return false
     if decl_derives.len() != count: return false
     if decl_impl_trait.len() != count: return false
+    if decl_import_role_v1.len() != count: return false
+    for role_index in 0..count:
+        val role = decl_import_role_v1[role_index]
+        if role == "child" or role == "child-invalid":
+            if decl_tag[role_index] != DECL_USE: return false
+        elif role == "domain":
+            if decl_tag[role_index] != DECL_VAL: return false
+        elif role != "": return false
     if decl_is_trait.len() != count: return false
     if decl_is_hardware.len() != count: return false
     if decl_clocked_args.len() != count: return false
@@ -1799,4 +2106,564 @@ pub fn flat_decl_pools_consistent() -> bool:
     if decl_is_value_type.len() != count: return false
     if decl_param_mut_text.len() != count: return false
     if decl_param_default_text.len() != count: return false
+    val macro_defs = macro_def_name.len()
+    if macro_def_params.len() != macro_defs or macro_def_contract.len() != macro_defs or
+            macro_def_body.len() != macro_defs or macro_def_nested.len() != macro_defs or
+            macro_def_line.len() != macro_defs or macro_def_visibility.len() != macro_defs:
+        return false
+    val macro_uses = macro_use_name.len()
+    if macro_use_args.len() != macro_uses or macro_use_line.len() != macro_uses or
+            macro_use_col.len() != macro_uses:
+        return false
     true
+export decl_pools_promote_transient_owners
+export macro_facts_reset, macro_fact_def_push, macro_fact_use_push
+export macro_fact_def_count, macro_fact_def_name_at, macro_fact_def_params_at
+export macro_fact_def_contract_at, macro_fact_def_body_at, macro_fact_def_nested_at
+export macro_fact_def_line_at, macro_fact_def_visibility_at
+export macro_fact_use_count, macro_fact_use_name_at, macro_fact_use_args_at
+export macro_fact_use_line_at, macro_fact_use_col_at
+
+# ===== DeclStoreState snapshot (ParseContext stage 1) =====
+# See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
+# take moves this file's parse state out and installs fresh initial
+# owners; install makes a taken snapshot active again.
+pub struct DeclStoreState:
+    module_decl_slots: [i64]
+    ast_module_decl_mirror_high_slot: [i64]
+    ast_decl_mirror_high_slot: [i64]
+    ast_decl_count_slot: [i64]
+    ast_module_decl_count_slot: [i64]
+    decl_tag: [i64]
+    decl_span: [i64]
+    decl_name: [text]
+    decl_params: [[i64]]
+    decl_param_names: [[text]]
+    decl_param_types: [[i64]]
+    decl_ret_type: [i64]
+    decl_body_stmts: [[i64]]
+    decl_body_stmts_flat: [text]
+    decl_field_names: [[text]]
+    decl_field_types: [[i64]]
+    decl_field_defaults: [[i64]]
+    decl_field_bits: [[i64]]
+    decl_field_visibility: [[text]]
+    decl_field_array_sizes: [[i64]]
+    decl_imports: [[text]]
+    decl_visibility: [text]
+    decl_is_async: [i64]
+    decl_is_comptime: [i64]
+    decl_type_params: [[text]]
+    decl_type_param_constraints: [[[text]]]
+    decl_type_param_constraint_mode: [[text]]
+    decl_is_lazy: [i64]
+    decl_is_gpu_kernel: [i64]
+    decl_rt_hal_flags: [i64]
+    decl_asm_placement: [text]
+    decl_gpu_target_text: [text]
+    decl_gpu_target_arg_name_text: [text]
+    decl_gpu_backends_text: [text]
+    decl_is_simd: [i64]
+    decl_is_packed: [i64]
+    decl_derives: [[text]]
+    decl_impl_trait: [text]
+    decl_import_role_v1: [text]
+    decl_is_trait: [i64]
+    decl_is_hardware: [i64]
+    decl_clocked_args: [[text]]
+    decl_vhdl_generic_args: [[i64]]
+    decl_flatten_struct_output: [i64]
+    decl_unroll_factor: [i64]
+    decl_pipeline_ii: [i64]
+    decl_memory_banks: [i64]
+    decl_is_value_type: [i64]
+    decl_param_mut_text: [text]
+    decl_param_default_text: [text]
+    macro_def_name: [text]
+    macro_def_params: [text]
+    macro_def_contract: [text]
+    macro_def_body: [text]
+    macro_def_nested: [text]
+    macro_def_line: [i64]
+    macro_def_visibility: [text]
+    macro_use_name: [text]
+    macro_use_args: [text]
+    macro_use_line: [i64]
+    macro_use_col: [i64]
+    arm_pattern: [i64]
+    arm_guard: [i64]
+    arm_body: [[i64]]
+    arm_body_flat: [text]
+    arm_binding: [text]
+    arm_rationale: [text]
+    elif_cond: [i64]
+    elif_body: [[i64]]
+    elif_else: [[i64]]
+    module_path_slot: [text]
+    module_decls: [i64]
+    lexer_state_core_pos_slot: [text]
+    lexer_state_core_line_slot: [text]
+
+pub fn decl_store_state_take() -> DeclStoreState:
+    val s = DeclStoreState(
+        module_decl_slots: module_decl_slots,
+        ast_module_decl_mirror_high_slot: ast_module_decl_mirror_high_slot,
+        ast_decl_mirror_high_slot: ast_decl_mirror_high_slot,
+        ast_decl_count_slot: ast_decl_count_slot,
+        ast_module_decl_count_slot: ast_module_decl_count_slot,
+        decl_tag: decl_tag,
+        decl_span: decl_span,
+        decl_name: decl_name,
+        decl_params: decl_params,
+        decl_param_names: decl_param_names,
+        decl_param_types: decl_param_types,
+        decl_ret_type: decl_ret_type,
+        decl_body_stmts: decl_body_stmts,
+        decl_body_stmts_flat: decl_body_stmts_flat,
+        decl_field_names: decl_field_names,
+        decl_field_types: decl_field_types,
+        decl_field_defaults: decl_field_defaults,
+        decl_field_bits: decl_field_bits,
+        decl_field_visibility: decl_field_visibility,
+        decl_field_array_sizes: decl_field_array_sizes,
+        decl_imports: decl_imports,
+        decl_visibility: decl_visibility,
+        decl_is_async: decl_is_async,
+        decl_is_comptime: decl_is_comptime,
+        decl_type_params: decl_type_params,
+        decl_type_param_constraints: decl_type_param_constraints,
+        decl_type_param_constraint_mode: decl_type_param_constraint_mode,
+        decl_is_lazy: decl_is_lazy,
+        decl_is_gpu_kernel: decl_is_gpu_kernel,
+        decl_rt_hal_flags: decl_rt_hal_flags,
+        decl_asm_placement: decl_asm_placement,
+        decl_gpu_target_text: decl_gpu_target_text,
+        decl_gpu_target_arg_name_text: decl_gpu_target_arg_name_text,
+        decl_gpu_backends_text: decl_gpu_backends_text,
+        decl_is_simd: decl_is_simd,
+        decl_is_packed: decl_is_packed,
+        decl_derives: decl_derives,
+        decl_impl_trait: decl_impl_trait,
+        decl_import_role_v1: decl_import_role_v1,
+        decl_is_trait: decl_is_trait,
+        decl_is_hardware: decl_is_hardware,
+        decl_clocked_args: decl_clocked_args,
+        decl_vhdl_generic_args: decl_vhdl_generic_args,
+        decl_flatten_struct_output: decl_flatten_struct_output,
+        decl_unroll_factor: decl_unroll_factor,
+        decl_pipeline_ii: decl_pipeline_ii,
+        decl_memory_banks: decl_memory_banks,
+        decl_is_value_type: decl_is_value_type,
+        decl_param_mut_text: decl_param_mut_text,
+        decl_param_default_text: decl_param_default_text,
+        macro_def_name: macro_def_name,
+        macro_def_params: macro_def_params,
+        macro_def_contract: macro_def_contract,
+        macro_def_body: macro_def_body,
+        macro_def_nested: macro_def_nested,
+        macro_def_line: macro_def_line,
+        macro_def_visibility: macro_def_visibility,
+        macro_use_name: macro_use_name,
+        macro_use_args: macro_use_args,
+        macro_use_line: macro_use_line,
+        macro_use_col: macro_use_col,
+        arm_pattern: arm_pattern,
+        arm_guard: arm_guard,
+        arm_body: arm_body,
+        arm_body_flat: arm_body_flat,
+        arm_binding: arm_binding,
+        arm_rationale: arm_rationale,
+        elif_cond: elif_cond,
+        elif_body: elif_body,
+        elif_else: elif_else,
+        module_path_slot: module_path_slot,
+        module_decls: module_decls,
+        lexer_state_core_pos_slot: lexer_state_core_pos_slot,
+        lexer_state_core_line_slot: lexer_state_core_line_slot
+    )
+    ast_decl_count_slot = [0]
+    ast_module_decl_count_slot = [0]
+    decl_tag = []
+    decl_span = []
+    decl_name = []
+    decl_params = []
+    decl_param_names = []
+    decl_param_types = []
+    decl_ret_type = []
+    decl_body_stmts = []
+    decl_body_stmts_flat = []
+    decl_field_names = []
+    decl_field_types = []
+    decl_field_defaults = []
+    decl_field_bits = []
+    decl_field_visibility = []
+    decl_field_array_sizes = []
+    decl_imports = []
+    decl_visibility = []
+    decl_is_async = []
+    decl_is_comptime = []
+    decl_type_params = []
+    decl_type_param_constraints = []
+    decl_type_param_constraint_mode = []
+    decl_is_lazy = []
+    decl_is_gpu_kernel = []
+    decl_rt_hal_flags = []
+    decl_asm_placement = []
+    decl_gpu_target_text = []
+    decl_gpu_target_arg_name_text = []
+    decl_gpu_backends_text = []
+    decl_is_simd = []
+    decl_is_packed = []
+    decl_derives = []
+    decl_impl_trait = []
+    decl_import_role_v1 = []
+    decl_is_trait = []
+    decl_is_hardware = []
+    decl_clocked_args = []
+    decl_vhdl_generic_args = []
+    decl_flatten_struct_output = []
+    decl_unroll_factor = []
+    decl_pipeline_ii = []
+    decl_memory_banks = []
+    decl_is_value_type = []
+    decl_param_mut_text = []
+    decl_param_default_text = []
+    macro_def_name = []
+    macro_def_params = []
+    macro_def_contract = []
+    macro_def_body = []
+    macro_def_nested = []
+    macro_def_line = []
+    macro_def_visibility = []
+    macro_use_name = []
+    macro_use_args = []
+    macro_use_line = []
+    macro_use_col = []
+    arm_pattern = []
+    arm_guard = []
+    arm_body = []
+    arm_body_flat = []
+    arm_binding = []
+    arm_rationale = []
+    elif_cond = []
+    elif_body = []
+    elif_else = []
+    module_path_slot = [""]
+    module_decls = []
+    lexer_state_core_pos_slot = ["0"]
+    lexer_state_core_line_slot = ["1"]
+    ast_decl_mirror_high_slot = [0]
+    ast_module_decl_mirror_high_slot = [0]
+    var fresh_decl_slots: [i64] = []
+    for _ in 0..128:
+        fresh_decl_slots.push(0)
+    module_decl_slots = fresh_decl_slots
+    s
+
+pub fn decl_store_state_install(s: DeclStoreState):
+    module_decl_slots = s.module_decl_slots
+    ast_module_decl_mirror_high_slot = s.ast_module_decl_mirror_high_slot
+    ast_decl_mirror_high_slot = s.ast_decl_mirror_high_slot
+    ast_decl_count_slot = s.ast_decl_count_slot
+    ast_module_decl_count_slot = s.ast_module_decl_count_slot
+    decl_tag = s.decl_tag
+    decl_span = s.decl_span
+    decl_name = s.decl_name
+    decl_params = s.decl_params
+    decl_param_names = s.decl_param_names
+    decl_param_types = s.decl_param_types
+    decl_ret_type = s.decl_ret_type
+    decl_body_stmts = s.decl_body_stmts
+    decl_body_stmts_flat = s.decl_body_stmts_flat
+    decl_field_names = s.decl_field_names
+    decl_field_types = s.decl_field_types
+    decl_field_defaults = s.decl_field_defaults
+    decl_field_bits = s.decl_field_bits
+    decl_field_visibility = s.decl_field_visibility
+    decl_field_array_sizes = s.decl_field_array_sizes
+    decl_imports = s.decl_imports
+    decl_visibility = s.decl_visibility
+    decl_is_async = s.decl_is_async
+    decl_is_comptime = s.decl_is_comptime
+    decl_type_params = s.decl_type_params
+    decl_type_param_constraints = s.decl_type_param_constraints
+    decl_type_param_constraint_mode = s.decl_type_param_constraint_mode
+    decl_is_lazy = s.decl_is_lazy
+    decl_is_gpu_kernel = s.decl_is_gpu_kernel
+    decl_rt_hal_flags = s.decl_rt_hal_flags
+    decl_asm_placement = s.decl_asm_placement
+    decl_gpu_target_text = s.decl_gpu_target_text
+    decl_gpu_target_arg_name_text = s.decl_gpu_target_arg_name_text
+    decl_gpu_backends_text = s.decl_gpu_backends_text
+    decl_is_simd = s.decl_is_simd
+    decl_is_packed = s.decl_is_packed
+    decl_derives = s.decl_derives
+    decl_impl_trait = s.decl_impl_trait
+    decl_import_role_v1 = s.decl_import_role_v1
+    decl_is_trait = s.decl_is_trait
+    decl_is_hardware = s.decl_is_hardware
+    decl_clocked_args = s.decl_clocked_args
+    decl_vhdl_generic_args = s.decl_vhdl_generic_args
+    decl_flatten_struct_output = s.decl_flatten_struct_output
+    decl_unroll_factor = s.decl_unroll_factor
+    decl_pipeline_ii = s.decl_pipeline_ii
+    decl_memory_banks = s.decl_memory_banks
+    decl_is_value_type = s.decl_is_value_type
+    decl_param_mut_text = s.decl_param_mut_text
+    decl_param_default_text = s.decl_param_default_text
+    macro_def_name = s.macro_def_name
+    macro_def_params = s.macro_def_params
+    macro_def_contract = s.macro_def_contract
+    macro_def_body = s.macro_def_body
+    macro_def_nested = s.macro_def_nested
+    macro_def_line = s.macro_def_line
+    macro_def_visibility = s.macro_def_visibility
+    macro_use_name = s.macro_use_name
+    macro_use_args = s.macro_use_args
+    macro_use_line = s.macro_use_line
+    macro_use_col = s.macro_use_col
+    arm_pattern = s.arm_pattern
+    arm_guard = s.arm_guard
+    arm_body = s.arm_body
+    arm_body_flat = s.arm_body_flat
+    arm_binding = s.arm_binding
+    arm_rationale = s.arm_rationale
+    elif_cond = s.elif_cond
+    elif_body = s.elif_body
+    elif_else = s.elif_else
+    module_path_slot = s.module_path_slot
+    module_decls = s.module_decls
+    lexer_state_core_pos_slot = s.lexer_state_core_pos_slot
+    lexer_state_core_line_slot = s.lexer_state_core_line_slot
+
+export DeclStoreState, decl_store_state_take, decl_store_state_install
+
+# Raw owner accessors (ParseContext stage 2): other modules index the decl
+# pools only through these. Unlike decl_get_*, they never fall back to env.
+pub fn decl_tag_at(idx: i64) -> i64: decl_tag[idx]
+pub fn decl_name_at(idx: i64) -> text: decl_name[idx]
+pub fn decl_param_names_at(idx: i64) -> [text]: decl_param_names[idx]
+pub fn decl_param_types_at(idx: i64) -> [i64]: decl_param_types[idx]
+pub fn decl_ret_type_at(idx: i64) -> i64: decl_ret_type[idx]
+pub fn decl_body_stmts_at(idx: i64) -> [i64]: decl_body_stmts[idx]
+pub fn decl_field_names_at(idx: i64) -> [text]: decl_field_names[idx]
+pub fn decl_field_types_at(idx: i64) -> [i64]: decl_field_types[idx]
+pub fn decl_field_defaults_at(idx: i64) -> [i64]: decl_field_defaults[idx]
+pub fn decl_imports_at(idx: i64) -> [text]: decl_imports[idx]
+pub fn decl_visibility_at(idx: i64) -> text: decl_visibility[idx]
+pub fn decl_visibility_len() -> i64: decl_visibility.len()
+pub fn decl_is_async_at(idx: i64) -> i64: decl_is_async[idx]
+pub fn decl_is_lazy_at(idx: i64) -> i64: decl_is_lazy[idx]
+# @allow(primitive_api) flat AST arena slot accessor paired with decl_is_gpu_kernel_set_at
+pub fn decl_is_gpu_kernel_at(idx: i64) -> i64: decl_is_gpu_kernel[idx]
+pub fn decl_is_gpu_kernel_set_at(idx: i64, value: i64):
+    decl_is_gpu_kernel[idx] = value
+pub fn decl_is_simd_set_at(idx: i64, value: i64):
+    decl_is_simd[idx] = value
+pub fn decl_is_packed_at(idx: i64) -> i64: decl_is_packed[idx]
+pub fn decl_is_packed_len() -> i64: decl_is_packed.len()
+pub fn decl_is_packed_set_at(idx: i64, value: i64):
+    decl_is_packed[idx] = value
+pub fn decl_derives_set_at(idx: i64, value: [text]):
+    decl_derives[idx] = value
+pub fn arm_pattern_at(idx: i64) -> i64: arm_pattern[idx]
+pub fn arm_pattern_len() -> i64: arm_pattern.len()
+
+# Pool lifecycle owned here (ParseContext stage 2). ast_reset in
+# module_state.spl calls these instead of nil-guarding and clearing these
+# pools itself: a cross-module whole-var assignment or .clear() hits a copy
+# in the seed and was silently dropped.
+fn decl_pools_ensure_v1():
+    if decl_tag == nil:
+        decl_tag = []
+    if decl_span == nil:
+        decl_span = []
+    if decl_name == nil:
+        decl_name = []
+    if decl_params == nil:
+        decl_params = []
+    if decl_param_names == nil:
+        decl_param_names = []
+    if decl_param_types == nil:
+        decl_param_types = []
+    if decl_ret_type == nil:
+        decl_ret_type = []
+    if decl_body_stmts == nil:
+        decl_body_stmts = []
+    if decl_body_stmts_flat == nil:
+        decl_body_stmts_flat = []
+    if decl_field_names == nil:
+        decl_field_names = []
+    if decl_field_types == nil:
+        decl_field_types = []
+    if decl_field_defaults == nil:
+        decl_field_defaults = []
+    if decl_field_bits == nil:
+        decl_field_bits = []
+    if decl_field_visibility == nil:
+        decl_field_visibility = []
+    if decl_field_array_sizes == nil:
+        decl_field_array_sizes = []
+    if decl_imports == nil:
+        decl_imports = []
+    if decl_visibility == nil:
+        decl_visibility = []
+    if decl_is_async == nil:
+        decl_is_async = []
+    if decl_is_comptime == nil:
+        decl_is_comptime = []
+    if decl_type_params == nil:
+        decl_type_params = []
+    if decl_type_param_constraints == nil:
+        decl_type_param_constraints = []
+    if decl_type_param_constraint_mode == nil:
+        decl_type_param_constraint_mode = []
+    if decl_is_lazy == nil:
+        decl_is_lazy = []
+    if decl_is_gpu_kernel == nil:
+        decl_is_gpu_kernel = []
+    if decl_rt_hal_flags == nil:
+        decl_rt_hal_flags = []
+    if decl_gpu_target_text == nil:
+        decl_gpu_target_text = []
+    if decl_gpu_target_arg_name_text == nil:
+        decl_gpu_target_arg_name_text = []
+    if decl_gpu_backends_text == nil:
+        decl_gpu_backends_text = []
+    if decl_is_simd == nil:
+        decl_is_simd = []
+    if decl_is_packed == nil:
+        decl_is_packed = []
+    if decl_derives == nil:
+        decl_derives = []
+    if decl_impl_trait == nil:
+        decl_impl_trait = []
+    unsafe:
+        if decl_import_role_v1 == nil:
+            decl_import_role_v1 = []
+    if decl_is_trait == nil:
+        decl_is_trait = []
+    if decl_is_hardware == nil:
+        decl_is_hardware = []
+    if decl_clocked_args == nil:
+        decl_clocked_args = []
+    if decl_vhdl_generic_args == nil:
+        decl_vhdl_generic_args = []
+    if decl_flatten_struct_output == nil:
+        decl_flatten_struct_output = []
+    if decl_is_value_type == nil:
+        decl_is_value_type = []
+    if decl_param_mut_text == nil:
+        decl_param_mut_text = []
+    if arm_pattern == nil:
+        arm_pattern = []
+    if arm_guard == nil:
+        arm_guard = []
+    if arm_body == nil:
+        arm_body = []
+    if arm_body_flat == nil:
+        arm_body_flat = []
+    if arm_binding == nil:
+        arm_binding = []
+    if arm_rationale == nil:
+        arm_rationale = []
+    if elif_cond == nil:
+        elif_cond = []
+    if elif_body == nil:
+        elif_body = []
+    if elif_else == nil:
+        elif_else = []
+    if module_decls == nil:
+        module_decls = []
+
+fn decl_pools_clear_v1():
+    unsafe:
+        if decl_tag == nil: decl_tag = [] else: decl_tag.clear()
+        if decl_span == nil: decl_span = [] else: decl_span.clear()
+        if decl_name == nil: decl_name = [] else: decl_name.clear()
+        if decl_params == nil: decl_params = [] else: decl_params.clear()
+        if decl_param_names == nil: decl_param_names = [] else: decl_param_names.clear()
+        if decl_param_types == nil: decl_param_types = [] else: decl_param_types.clear()
+        if decl_ret_type == nil: decl_ret_type = [] else: decl_ret_type.clear()
+        if decl_body_stmts == nil: decl_body_stmts = [] else: decl_body_stmts.clear()
+        if decl_body_stmts_flat == nil: decl_body_stmts_flat = [] else: decl_body_stmts_flat.clear()
+        if decl_field_names == nil: decl_field_names = [] else: decl_field_names.clear()
+        if decl_field_types == nil: decl_field_types = [] else: decl_field_types.clear()
+        if decl_field_defaults == nil: decl_field_defaults = [] else: decl_field_defaults.clear()
+        if decl_field_bits == nil: decl_field_bits = [] else: decl_field_bits.clear()
+        if decl_field_visibility == nil: decl_field_visibility = [] else: decl_field_visibility.clear()
+        if decl_field_array_sizes == nil: decl_field_array_sizes = [] else: decl_field_array_sizes.clear()
+        if decl_imports == nil: decl_imports = [] else: decl_imports.clear()
+        if decl_visibility == nil: decl_visibility = [] else: decl_visibility.clear()
+        if decl_is_async == nil: decl_is_async = [] else: decl_is_async.clear()
+        if decl_is_comptime == nil: decl_is_comptime = [] else: decl_is_comptime.clear()
+        if decl_type_params == nil: decl_type_params = [] else: decl_type_params.clear()
+        if decl_type_param_constraints == nil: decl_type_param_constraints = [] else: decl_type_param_constraints.clear()
+        if decl_type_param_constraint_mode == nil: decl_type_param_constraint_mode = [] else: decl_type_param_constraint_mode.clear()
+        if decl_is_lazy == nil: decl_is_lazy = [] else: decl_is_lazy.clear()
+        if decl_is_gpu_kernel == nil: decl_is_gpu_kernel = [] else: decl_is_gpu_kernel.clear()
+        if decl_rt_hal_flags == nil: decl_rt_hal_flags = [] else: decl_rt_hal_flags.clear()
+        if decl_gpu_target_text == nil: decl_gpu_target_text = [] else: decl_gpu_target_text.clear()
+        if decl_gpu_target_arg_name_text == nil: decl_gpu_target_arg_name_text = [] else: decl_gpu_target_arg_name_text.clear()
+        if decl_gpu_backends_text == nil: decl_gpu_backends_text = [] else: decl_gpu_backends_text.clear()
+        if decl_is_simd == nil: decl_is_simd = [] else: decl_is_simd.clear()
+        if decl_is_packed == nil: decl_is_packed = [] else: decl_is_packed.clear()
+        if decl_derives == nil: decl_derives = [] else: decl_derives.clear()
+        if decl_impl_trait == nil: decl_impl_trait = [] else: decl_impl_trait.clear()
+        if decl_import_role_v1 == nil: decl_import_role_v1 = [] else: decl_import_role_v1.clear()
+        if decl_is_trait == nil: decl_is_trait = [] else: decl_is_trait.clear()
+        if decl_is_hardware == nil: decl_is_hardware = [] else: decl_is_hardware.clear()
+        if decl_clocked_args == nil: decl_clocked_args = [] else: decl_clocked_args.clear()
+        if decl_vhdl_generic_args == nil: decl_vhdl_generic_args = [] else: decl_vhdl_generic_args.clear()
+        if decl_flatten_struct_output == nil: decl_flatten_struct_output = [] else: decl_flatten_struct_output.clear()
+        if decl_is_value_type == nil: decl_is_value_type = [] else: decl_is_value_type.clear()
+        if decl_param_mut_text == nil: decl_param_mut_text = [] else: decl_param_mut_text.clear()
+        if arm_pattern == nil: arm_pattern = [] else: arm_pattern.clear()
+        if arm_guard == nil: arm_guard = [] else: arm_guard.clear()
+        if arm_body == nil: arm_body = [] else: arm_body.clear()
+        if arm_body_flat == nil: arm_body_flat = [] else: arm_body_flat.clear()
+        if arm_binding == nil: arm_binding = [] else: arm_binding.clear()
+        if arm_rationale == nil: arm_rationale = [] else: arm_rationale.clear()
+        if module_decls == nil: module_decls = [] else: module_decls.clear()
+
+# Nil-guards for the decl_nodes-owned lexer/module slots (ParseContext stage 2).
+fn decl_slots_ensure_v1():
+    if module_path_slot == nil:
+        module_path_slot = [""]
+    if lexer_state_core_pos_slot == nil:
+        lexer_state_core_pos_slot = ["0"]
+    if lexer_state_core_line_slot == nil:
+        lexer_state_core_line_slot = ["1"]
+
+# Raw owner accessors used by module_state.spl (ParseContext stage 2).
+fn decl_tag_len() -> i64: decl_tag.len()
+fn decl_span_at(idx: i64) -> i64: decl_span[idx]
+fn decl_field_bits_at(idx: i64) -> [i64]: decl_field_bits[idx]
+fn decl_type_params_at(idx: i64) -> [text]: decl_type_params[idx]
+fn module_path_slot_at(idx: i64) -> text: module_path_slot[idx]
+fn module_path_slot_set_at(idx: i64, value: text):
+    module_path_slot[idx] = value
+fn lexer_state_core_pos_slot_at(idx: i64) -> text: lexer_state_core_pos_slot[idx]
+fn lexer_state_core_pos_slot_set_at(idx: i64, value: text):
+    lexer_state_core_pos_slot[idx] = value
+fn lexer_state_core_line_slot_at(idx: i64) -> text: lexer_state_core_line_slot[idx]
+fn lexer_state_core_line_slot_set_at(idx: i64, value: text):
+    lexer_state_core_line_slot[idx] = value
+
+# Raw owner mutators for validating flat_decl_pools_consistent() across
+# module boundaries (cross-module array writes copy in interpreter mode).
+# @allow(primitive_api) core-parser AST arena test mutator: raw i64 pool value matches flat AST arena storage
+pub fn decl_memory_banks_push_raw_for_test(value: i64):
+    decl_memory_banks.push(value)
+
+# @allow(primitive_api) core-parser AST arena test mutator: raw i64 slot index matches flat AST arena storage
+pub fn module_decl_slots_push_raw_for_test(value: i64):
+    module_decl_slots.push(value)
+
+# @allow(primitive_api) core-parser AST arena test mutator: raw i64 index/slot matches flat AST arena storage
+pub fn module_decl_slots_set_raw_for_test(idx: i64, value: i64):
+    module_decl_slots[idx] = value
+
+# @allow(primitive_api) core-parser AST arena test mutator: raw i64 count matches flat AST arena storage
+pub fn ast_module_decl_count_set_raw_for_test(value: i64):
+    ast_module_decl_count_slot[0] = value

@@ -386,15 +386,17 @@ impl Worker:
     # ========================================================================
 
     pub(package) me release_fd_operations(fd: i64):
-        """Cancel socket work and release all per-connection state.
+        """Release all per-connection state after socket cancellation.
 
-        The socket and the sendfile handle have different ownership domains:
-        cancelling the socket does not close an already-open file handle.
-        Queue the file close before dropping the tracking row so terminal
-        shutdown can drain those close operations before the driver itself is
+        Socket cancellation (driver.cancel_fd) is the close path's job —
+        close_connection owns it for H1, close_h2_connection for H2 — so
+        this helper never cancels the fd itself. The socket and the
+        sendfile handle have different ownership domains: cancelling the
+        socket does not close an already-open file handle. Queue the file
+        close before dropping the tracking row so terminal shutdown can
+        drain those close operations before the driver itself is
         destroyed.
         """
-        self.driver.cancel_fd(fd)
         val op_ids = self.op_to_fd.keys()
         for oid in op_ids:
             if self.op_to_fd[oid] == fd:
@@ -414,16 +416,6 @@ impl Worker:
             self.close_h2_connection(fd)
         else:
             self.close_connection(fd)
-
-    pub(package) me close_connection(fd: i64):
-        """Close a connection and remove from tracking (including TLS state)."""
-        if not self.connections.contains_key(fd):
-            return
-        self.release_fd_operations(fd)
-        tcp_backend_close(fd)
-        self.connections.remove(fd)
-        if self.active_count > 0:
-            self.active_count = self.active_count - 1
 
     pub(package) me drain_file_close_operations(close_ops: [i64]):
         """Run bounded completion passes for file handles closed at shutdown."""
@@ -449,35 +441,6 @@ impl Worker:
                     j = j + 1
                 i = i + 1
             pass_index = pass_index + 1
-
-    pub(package) me close_all_connections():
-        """Close all active connections during shutdown."""
-        # Snapshot and close open sendfile handles before connection teardown;
-        # close_connection then only owns the socket and cancellation maps.
-        val open_file_clients = self.sendfile_open_files.keys()
-        var file_close_ops: [i64] = []
-        for client_fd in open_file_clients:
-            val open_file = self.sendfile_open_files[client_fd]
-            file_close_ops.push(self.driver.submit_close(open_file))
-        self.sendfile_open_files = {}
-
-        val fds = self.connections.keys()
-        for fd in fds:
-            self.close_connection(fd)
-        # Close H2 connections
-        val h2_fds = self.h2_connections.keys()
-        for fd in h2_fds:
-            self.close_h2_connection(fd)
-        self.drain_file_close_operations(file_close_ops)
-        self.connections = {}
-        self.h2_connections = {}
-        self.op_to_fd = {}
-        self.op_type = {}
-        self.sendfile_pending = {}
-        self.sendfile_open_files = {}
-        self.tls_sessions = {}
-        self.tls_rx_streams = {}
-        self.active_count = 0
 
     # ========================================================================
     # HTTP/2 Connection Handling
@@ -576,6 +539,8 @@ impl Worker:
         """Close an H2 connection and clean up tracking state."""
         if not self.h2_connections.contains_key(fd):
             return
+        self.cancel_async_handler(fd)
+        self.driver.cancel_fd(fd)
         self.release_fd_operations(fd)
         tcp_backend_close(fd)
         self.h2_connections.remove(fd)

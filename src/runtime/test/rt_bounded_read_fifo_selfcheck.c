@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_bounded_read_fifo_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 /* Link the actual C provider, never a copied reader. TEXT_ONLY selects runtime.c;
  * the default selects runtime_native.c's text and byte-array entry points.
  * Usage: rt_bounded_read_fifo_selfcheck SCRATCH_PARENT
@@ -180,3 +185,5 @@ cleanup:
     if (rmdir(root) != 0) result = 2;
     return result;
 }
+
+#endif /* !_WIN32 */

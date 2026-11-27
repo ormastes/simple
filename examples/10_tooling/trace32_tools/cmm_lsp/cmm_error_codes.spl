@@ -1,0 +1,130 @@
+# CMM error codes — registry entries and the DiagnosticV1 bridge.
+#
+# One place that (a) explains every CMM1xxx code in the shared compiler
+# ErrorRegistry (its own namespace, never touching E-codes) and (b) projects a
+# CmmDiagnostic onto the canonical `DiagnosticV1` record so the T32 MCP tools
+# and the LSP speak the same diagnostics_v1 shape as the Simple compiler
+# (REQ-DIAG-004, REQ-DIAG-007).
+
+use cmm_ast.{CmmProgram}
+use cmm_diagnostics.{CmmDiagnostic, CmmDiagnosticKind, CmmRelatedInfo, CMM_CODE_UNCLASSIFIED}
+use cmm_source_index.{CmmSourceIndex, build_source_index}
+use compiler.common.error_explanations.{ErrorRegistry, ErrorExplanation}
+use std.common.diagnostics.diagnostic_v1.{DiagnosticV1, render_diagnostic_v1_json}
+use std.common.diagnostics.span.{Span}
+use std.common.diagnostics.severity.{Severity}
+
+export register_cmm_explanations, cmm_explanation_rows
+export cmm_to_diagnostic_v1, cmm_diagnostics_v1_json, cmm_batch_status
+
+# (code, title, description, fix) — the single table behind the registry.
+struct CmmExplanationRow:
+    code: text
+    title: text
+    description: text
+    fix: text
+
+fn cmm_explanation_rows() -> [CmmExplanationRow]:
+    [
+        CmmExplanationRow(code: "CMM1000", title: "CMM syntax error",
+            description: "The parser could not make sense of this statement.",
+            fix: "Check the statement against the PRACTICE command reference."),
+        CmmExplanationRow(code: "CMM1001", title: "Unexpected token",
+            description: "A token appears where no statement can start, e.g. a closing ) with no open block.",
+            fix: "Remove the stray token or open the block it was meant to close."),
+        CmmExplanationRow(code: "CMM1002", title: "Unterminated block",
+            description: "A ( block reached the end of the file without its closing ).",
+            fix: "Add the missing ) after the last statement of the block."),
+        CmmExplanationRow(code: "CMM1003", title: "Missing body",
+            description: "A control-flow statement (IF/WHILE/RePeaT) has no body before the end of the file.",
+            fix: "Add a statement or a ( ... ) block after the condition."),
+        CmmExplanationRow(code: "CMM1004", title: "Expected macro name",
+            description: "LOCAL, GLOBAL, PRIVATE and ENTRY need at least one &macro name.",
+            fix: "Write the macro names after the keyword, e.g. LOCAL &result."),
+        CmmExplanationRow(code: "CMM1101", title: "ELSE without IF",
+            description: "An ELSE appears without a preceding IF on the previous statement.",
+            fix: "Move the ELSE directly after the IF body, or delete it."),
+        CmmExplanationRow(code: "CMM1102", title: "Undefined label",
+            description: "GOTO or GOSUB targets a label that is not defined in this script.",
+            fix: "Define the label at column 1 as name: or fix the target spelling."),
+        CmmExplanationRow(code: "CMM1103", title: "JUMPTO label not found in this file",
+            description: "JUMPTO may target a label in another module, so this is only a warning.",
+            fix: "Define the label here or confirm the cross-module target exists."),
+        CmmExplanationRow(code: "CMM1200", title: "CMM lint",
+            description: "Family code for analyzer lints (CMM12xx).",
+            fix: "See the specific CMM12xx code."),
+        CmmExplanationRow(code: "CMM1201", title: "Unused macro",
+            description: "A macro is declared but never referenced.",
+            fix: "Delete the declaration or use the macro."),
+        CmmExplanationRow(code: "CMM1202", title: "Macro redeclared",
+            description: "A macro is declared twice in the same scope.",
+            fix: "Remove the second declaration."),
+        CmmExplanationRow(code: "CMM1203", title: "Unreachable code",
+            description: "Statements follow an unconditional exit (END, ENDDO, GOTO).",
+            fix: "Delete the dead statements or add a label so they can be reached."),
+        CmmExplanationRow(code: "CMM1204", title: "Dynamic DO/RUN target",
+            description: "The script target is an expression and cannot be validated statically.",
+            fix: "No action needed; use a literal path when static checking matters."),
+        CmmExplanationRow(code: "CMM1205", title: "Duplicate dialog label",
+            description: "Two DIALOG items declare the same label.",
+            fix: "Rename one of the dialog labels."),
+        CmmExplanationRow(code: "CMM1206", title: "Dialog label not found",
+            description: "A DIALOG.* command references a label no DIALOG block declares.",
+            fix: "Declare the label in a DIALOG block or fix the reference."),
+        CmmExplanationRow(code: CMM_CODE_UNCLASSIFIED, title: "Unclassified CMM finding",
+            description: "A legacy producer created this finding without a specific code.",
+            fix: "Report it; every CMM producer is expected to assign a specific code.")
+    ]
+
+# Register every CMM code in `reg`. Only CMM* keys are written.
+fn register_cmm_explanations(reg: ErrorRegistry):
+    for row in cmm_explanation_rows():
+        var exp = ErrorExplanation.create(row.code, row.title)
+        exp.description = row.description
+        exp.fixes = [row.fix]
+        reg.register(exp)
+
+fn severity_of(kind: CmmDiagnosticKind) -> Severity:
+    match kind:
+        case CmmDiagnosticKind.Error: Severity.Error
+        case CmmDiagnosticKind.Warning: Severity.Warning
+        case CmmDiagnosticKind.Info: Severity.Info
+        case CmmDiagnosticKind.Hint: Severity.Help
+
+fn span_of(index: CmmSourceIndex, line: i64, col: i64, end_line: i64, end_col: i64) -> Span:
+    val start = index.byte_offset(line, col)
+    var end = index.byte_offset(end_line, end_col)
+    if end < start:
+        end = start
+    Span.new(start, end, line, col)
+
+# Project one CMM finding onto the canonical record. `file` is the primary
+# file for every label; `index` turns (line, col) into byte offsets.
+fn cmm_to_diagnostic_v1(d: CmmDiagnostic, file: text, index: CmmSourceIndex) -> DiagnosticV1:
+    val primary = span_of(index, d.line, d.column, d.end_line, d.end_column)
+    var v1 = DiagnosticV1.new(severity_of(d.kind), d.code, d.message)
+    v1 = v1.with_file(file)
+    v1 = v1.with_span(primary)
+    v1 = v1.with_label(file, primary, d.message)
+    for info in d.related:
+        v1 = v1.with_secondary_label(file, span_of(index, info.line, info.column, info.end_line, info.end_column), info.message)
+    if d.expected.len() > 0:
+        v1 = v1.with_help("expected: " + d.expected.join(", "))
+    v1
+
+# JSON array of DiagnosticV1 records for `diags` over `source`.
+fn cmm_diagnostics_v1_json(diags: [CmmDiagnostic], file: text, source: text) -> text:
+    val index = build_source_index(source)
+    var items: [text] = []
+    for d in diags:
+        items = items.push(render_diagnostic_v1_json(cmm_to_diagnostic_v1(d, file, index)))
+    "[" + items.join(",") + "]"
+
+# Batch status of a parse: "complete" when the parser recorded no error
+# finding, otherwise "partial_recovery" (the AST still holds every statement
+# it could recover; see program.parse_diagnostics for what it could not).
+fn cmm_batch_status(program: CmmProgram) -> text:
+    for d in program.parse_diagnostics:
+        if d.kind == CmmDiagnosticKind.Error:
+            return "partial_recovery"
+    "complete"

@@ -1,0 +1,35 @@
+# Drives http_sffi_server_fixture.spl. Usage: http_sffi_client_fixture.spl PORT UPLOAD_FILE MODE
+# MODE `native` sends the custom header through a configured client
+# (http_client_new/http_client_set_header/http_client_request; the configured
+# client handle is C-runtime only). MODE `interp` sends the headers recorded by
+# rt_http_client_set_header through http_request, since rt_http_client_create
+# has no interpreter backing.
+use std.nogc_async_mut.io_runtime.{get_args}
+use std.nogc_sync_mut.io.http_sffi.{HttpMethod, HttpResponse, http_get, http_request, http_upload, http_client_new, http_client_set_header, http_client_request, http_client_destroy, http_client_default_headers, rt_http_client_set_header}
+
+fn show(label: text, r: HttpResponse):
+    print "{label}: status={r.status_code} body={r.body.replace("\r", "").replace("\n", "|")}"
+
+fn main():
+    val args = get_args()
+    val n = args.len()
+    val base = "http://127.0.0.1:{args[n - 3]}"
+    val upload_file = args[n - 2]
+    val mode = args[n - 1]
+    show("hello", http_get(base + "/hello"))
+    show("static", http_get(base + "/static/page.txt"))
+    show("missing", http_get(base + "/static/none.txt"))
+    if mode == "native":
+        val client = http_client_new()
+        print "client_valid: {client.is_valid}"
+        print "set_header: {http_client_set_header(client, "X-Lane-Probe", "probe-42")}"
+        show("header", http_client_request(client, HttpMethod.GET, base + "/echo", [], ""))
+        http_client_destroy(client)
+    else:
+        val ok = unsafe(capabilities: [ffi]):
+            rt_http_client_set_header(7, "X-Lane-Probe", "probe-42")
+        print "set_header: {ok}"
+        show("header", http_request(HttpMethod.GET, base + "/echo", http_client_default_headers(7), ""))
+    show("upload", http_upload(base + "/upload", upload_file, "attachment"))
+
+main()

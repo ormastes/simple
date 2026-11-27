@@ -289,8 +289,33 @@ impl Lowerer {
                 if name == "Self" {
                     return self.resolve_self_type();
                 }
+                if let Some(assoc) = name.strip_prefix("Self.") {
+                    if let Some(bound_ty) = self.active_self_assoc_types.get(assoc).cloned() {
+                        if !matches!(&bound_ty, Type::Simple(s) if s == name) {
+                            return self.resolve_type(&bound_ty);
+                        }
+                    }
+                    return Ok(TypeId::ANY);
+                }
                 if let Some(id) = self.module.types.lookup(name) {
                     return Ok(id);
+                }
+                if let Some((ns, member)) = name.split_once('.') {
+                    if self.active_fn_generic_params.iter().any(|p| p == ns)
+                        || self.active_impl_generic_params.iter().any(|p| p == ns)
+                        || (ns.len() == 1 && ns.chars().all(|ch| ch.is_ascii_uppercase()))
+                    {
+                        return Ok(TypeId::ANY);
+                    }
+                    if let Some((_, ty_id)) = self.resolve_flatten_namespace_type(ns, member) {
+                        return Ok(ty_id);
+                    }
+                }
+                if self.active_fn_generic_params.iter().any(|p| p == name)
+                    || self.active_impl_generic_params.iter().any(|p| p == name)
+                    || (!name.is_empty() && name.chars().all(|ch| ch.is_ascii_digit()))
+                {
+                    return Ok(TypeId::ANY);
                 }
                 if name.len() == 1 && name.chars().all(|ch| ch.is_ascii_uppercase()) {
                     return Ok(TypeId::ANY);
@@ -500,11 +525,7 @@ impl Lowerer {
             }
             Type::Optional(inner) => {
                 let inner_id = self.resolve_type(inner)?;
-                Ok(self.module.types.register(HirType::Pointer {
-                    kind: PointerKind::Shared,
-                    capability: ReferenceCapability::Shared, // Default capability
-                    inner: inner_id,
-                }))
+                Ok(self.module.types.register_optional(inner_id))
             }
             Type::SelfType => self.resolve_self_type(),
             Type::Union(types) => {
@@ -622,17 +643,29 @@ impl Lowerer {
                     }) = family_type
                     {
                         let mut type_bindings = std::collections::HashMap::new();
+                        let mut const_bindings = std::collections::HashMap::new();
                         for (param, arg) in generic_params.iter().zip(args.iter()) {
+                            if let Type::Simple(arg_str) = arg {
+                                if let Ok(const_val) = arg_str.parse::<i64>() {
+                                    const_bindings.insert(param.clone(), const_val);
+                                    type_bindings.insert(param.clone(), TypeId::I64);
+                                    continue;
+                                }
+                            }
                             type_bindings.insert(param.clone(), self.resolve_type(arg)?);
                         }
-                        return Ok(self.module.types.register(HirType::Struct {
+                        let struct_id = self.module.types.register(HirType::Struct {
                             name,
                             fields,
                             has_snapshot,
                             generic_params,
                             is_generic_template: false,
                             type_bindings,
-                        }));
+                        });
+                        if !const_bindings.is_empty() {
+                            self.module.types.record_const_generic_bindings(struct_id, const_bindings);
+                        }
+                        return Ok(struct_id);
                     }
                 }
                 // Handle common generic types used in stdlib
@@ -659,8 +692,18 @@ impl Lowerer {
                     "Result" if args.len() == 1 || args.len() == 2 => self
                         .instantiate_builtin_generic_enum("Result", args)
                         .expect("Result arity checked above"),
-                    // List<T> - same as array
-                    "List" if args.len() == 1 => {
+                    // List<T> / list<T> - same as array. Lowercase `list` must
+                    // resolve identically: the bare-name fallback above already
+                    // maps bare `list` to Array, and stdlib sources spell the
+                    // generic lowercase almost everywhere. Leaving lowercase
+                    // `list<T>` on the `_ => ANY` fallthrough erased every
+                    // list-typed local/field/param to ANY at HIR, which made
+                    // `self.entries + [item]` degrade to a native integer add
+                    // (codegen/instr BinOp) instead of rt_array_concat -- the
+                    // me-method store then wrote a garbage handle and the next
+                    // element read trapped in-guest on riscv64 freestanding
+                    // (doc/08_tracking/bug/riscv64_freestanding_me_method_invocation_traps_2026-08-31.md).
+                    "List" | "list" if args.len() == 1 => {
                         let elem = self.resolve_type(&args[0])?;
                         Ok(self.module.types.register(HirType::Array {
                             element: elem,

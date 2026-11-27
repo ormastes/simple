@@ -1,0 +1,837 @@
+use std.nogc_async_mut.container.providers.linux.fresh_epoch_workload_v2.*
+use std.nogc_async_mut.container.providers.linux.workspace_root_borrow_v3.LinuxWorkspaceRootBorrowV3
+use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentityBorrowV3
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.MachineFreshEpochRecordV1
+use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
+use std.common.contracts.container.execution_stats_v1.ContainerExecutionStatsObservationV1
+use std.nogc_sync_mut.container.machine_fresh_probe_owner_v3.{MachineFreshProbeCallV3,
+    MachineFreshProbeReplyV3, machine_fresh_probe_rejected_v3}
+use std.nogc_async_mut.container.providers.linux.workspace_source_loan_v3.LinuxWorkspaceSourceLoanV3
+use std.nogc_async_mut.container.shared.logs_capture_v1.*
+# Linux leaf adapter for the common container API. Its callers serialize access
+# to the retained provider; this module is not another scheduler or grant verifier.
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerActionProjectionV2, ContainerMountProjectionV2,
+    ContainerExecutionRequestV2, ContainerRequestProjectionV2, ContainerHostObservationV2, container_scope_fence_id_v2, container_host_scope_bytes_v2}
+use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
+use std.common.contracts.container.settled_workspace_read_v3.{ContainerSettledWorkspaceBoundsV3, ContainerSettledWorkspaceReadV3}
+use std.common.contracts.container.workspace_action_v3.ContainerWorkspaceActionV3
+use std.common.contracts.container.control_deadline_v1.ContainerControlDeadlineV1
+use std.common.contracts.container.runtime_v1.{RuntimeOperationV1, RuntimeIntentV1, RuntimeIdentityV1,
+    RUNTIME_STATUS_REJECTED, RUNTIME_PHASE_CREATED, RUNTIME_PHASE_RUNNING,
+    RUNTIME_PHASE_EXITED, RUNTIME_PHASE_STOPPED,
+    runtime_command_empty, runtime_state_empty}
+use std.common.contracts.container.execution_evidence_v2.{ContainerAbsenceReceiptV2,
+    ContainerExecutionUserReceiptV2, container_execution_user_receipt_encode_v2,
+    container_runtime_query_digest_v2, container_runtime_observation_digest_v2,
+    container_absence_receipt_encode_v2}
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.LinuxOciRuntimeProviderV1
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_decode_v1
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{LinuxOciEngineObservationV1,
+    linux_oci_engine_policy_decode_v1, linux_oci_engine_policy_digest_v1}
+use std.nogc_async_mut.container.providers.linux.engine_observer_v1.linux_oci_engine_observe_v1
+use std.nogc_sync_mut.sffi.linux_uname_v1.linux_native_uname_architecture_v1
+use std.sffi.platform.platform_name_raw
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.io.retained_file.retained_directory_open_trusted_v1
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.contracts.container.command_v1.oci_command_parts_v1
+use std.nogc_async_mut.container.providers.linux.user_mapping_v3.LinuxOciUserMappingOutcomeV3
+use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, ContainerOutputResourcesV2,
+    ContainerStreamPolicyV2, ContainerOutputPlanV2, ContainerHelperAdmissionV2,
+    container_stream_policy_digest_v2, container_output_plan_digest_v2, container_output_admission_validate_v2}
+use std.nogc_async_mut.container.providers.linux.output_session_v2.linux_oci_output_launch_template_v2
+use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedSpawnV2, PipedProcessOwnedTransferV2}
+use std.nogc_sync_mut.container.machine_fresh_workspace_primary_v3.ContainerPrimaryOpenResultV1
+use std.common.contracts.container.primary_open_refusal_v1.ContainerPrimaryOpenRefusalV1
+use std.nogc_async_mut.container.terminal_session_v1.ContainerPrimaryAttachSessionV1
+use std.nogc_async_mut.container.workspace_primary_retirement_v3.{ContainerPrimaryTransportRetirementV3, ContainerPrimarySessionBindingV3}
+use std.common.contracts.container.output_capabilities_v2.ContainerOutputCapabilitiesV2
+use std.nogc_sync_mut.io.linux_process_owner.linux_process_stream_template_admit_v3
+use std.nogc_async_mut.container.providers.linux.output_session_v2.linux_oci_output_command_v2
+use std.nogc_async_mut.container.providers.linux.primary_attach_v1.linux_oci_primary_attach_launch_template_v1
+use std.common.contracts.container.primary_attach_v1.{ContainerPrimaryAttachPlanV1,
+    container_primary_attach_plan_digest_v1, container_primary_attach_plan_encode_v1,
+    container_primary_attach_admission_validate_v1}
+use std.common.contracts.container.exec_installed_v3.{ContainerExecInstalledV3, container_exec_installed_match_v3}
+use std.common.contracts.container.exec_admission_v3.ContainerExecAdmissionV3
+use std.common.contracts.container.exec_control_v3.ContainerExecControlObservationV3
+use std.nogc_async_mut.container.providers.linux.installed_policy_v3.{LinuxOciInstalledPolicyV3, linux_oci_installed_policy_decode_v3}
+use std.nogc_async_mut.container.providers.linux.engine_exec_owner_v3.{LinuxOciEngineExecOwnerV3, LinuxOciEngineExecTurnV3}
+use std.nogc_async_mut.container.providers.linux.installed_containment_policy_v1.linux_oci_installed_containment_policy_decode_v1
+use std.nogc_async_mut.container.providers.linux.containment_observer_v1.{LinuxOciContainmentObservationV1,
+    linux_oci_containment_observe_v1}
+use std.nogc_async_mut.container.providers.linux.containment_v1.LinuxOciContainmentOutcomeV1
+
+use std.nogc_async_mut.container.providers.linux.host_observation_v2.{LINUX_SIMPLE_CONTAINER_BACKEND_V2,
+    _linux_container_observation_v2, linux_container_host_observe_v2}
+export LINUX_SIMPLE_CONTAINER_BACKEND_V2
+
+pub struct LinuxOciContainmentHostObservationV1:
+    host: ContainerHostObservationV2
+    profile_digest: text
+    runtime_digest: text
+    containment_identity_digest: text
+
+# milestone_0022 N3 (17(B)): an adapter return BEFORE the provider call. Nothing was
+# spawned and no provider custody exists, so the refusal is typed NoCustody.
+fn primary_open_no_custody_v1(reason: text) -> ContainerPrimaryOpenResultV1:
+    ContainerPrimaryOpenResultV1(PipedProcessOwnedSpawnV2.Rejected(reason),
+        refusal: ContainerPrimaryOpenRefusalV1.NoCustody)
+
+fn _linux_container_scope_error_v2(scope: ContainerHostScopeV2) -> text:
+    match container_host_scope_bytes_v2(scope):
+        case Err(reason): return reason
+        case Ok(_): pass
+    if scope.continuity_mode != "native-boot-incarnation-v1":
+        return "container-adapter-continuity-mode-unsupported"
+    if scope.boot_id != scope.continuity_id: return "container-adapter-continuity-id-mismatch"
+    ""
+
+fn _linux_container_adapter_refused_v2(action: text, reason: text) -> RuntimeOperationV1:
+    RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED, operation: action,
+        command: runtime_command_empty(), state: runtime_state_empty(), exit_code: -1,
+        stdout: "", stderr: "", reason: reason)
+
+fn _linux_container_intent_identity_equal_v2(left: RuntimeIntentV1, right: RuntimeIntentV1) -> bool:
+    left.pod_uid == right.pod_uid and left.attempt == right.attempt and
+        left.provider_generation == right.provider_generation and left.operation_id == right.operation_id and
+        left.engine == right.engine and left.native_id == right.native_id and
+        left.node_boot_id == right.node_boot_id
+
+fn _linux_container_recovery_phase_allowed_v2(retained: text, expected: text) -> bool:
+    expected == RUNTIME_PHASE_CREATED and (retained == RUNTIME_PHASE_RUNNING or
+        retained == RUNTIME_PHASE_EXITED or retained == RUNTIME_PHASE_STOPPED)
+
+pub class LinuxSimpleContainerAdapterV2:
+    scope: ContainerHostScopeV2
+    provider: LinuxOciRuntimeProviderV1
+    _observed_host: ContainerHostObservationV2
+    _duration_cap_ms: i64
+    _fresh: Option<LinuxFreshWorkloadOwnerV2> = None
+
+impl LinuxSimpleContainerAdapterV2:
+    # Borrows a genuine fresh owner. The factory caller retains it on Err;
+    # these metadata checks acquire no new native resource or second journal.
+    pub static fn open_fresh_v2(owner: LinuxFreshWorkloadOwnerV2) -> Result<LinuxSimpleContainerAdapterV2, text>:
+        val scope = owner.scope_v2()?
+        val observed = owner.observation_v2()?
+        val fence = container_scope_fence_id_v2(scope)?
+        val provider = LinuxOciRuntimeProviderV1.new("linux", "podman", "", fence, scope.provider_generation, false, 30000)
+        Ok(LinuxSimpleContainerAdapterV2(scope: scope, provider: provider, _observed_host: observed,
+            _duration_cap_ms: 30000, _fresh: Some(owner)))
+
+    pub fn workspace_source_open_installed_v3(request: ContainerExecutionRequestV2) -> LinuxWorkspaceSourceTurnV3:
+        var retained = self
+        if self._fresh.is_none(): return LinuxWorkspaceSourceTurnV3(retained, nil, false, "linux-workspace-fresh-root-required")
+        val opened = self._fresh.unwrap().workspace_source_open_installed_v3(request)
+        retained._fresh = Some(opened.owner)
+        LinuxWorkspaceSourceTurnV3(retained, opened.source, opened.pending, opened.error)
+
+    pub fn cleanup_workspace_source_v3() -> LinuxWorkspaceSourceCleanupTurnV3:
+        var retained = self
+        if self._fresh.is_none(): return LinuxWorkspaceSourceCleanupTurnV3(retained, false, false, "linux-workspace-fresh-root-required")
+        val closed = self._fresh.unwrap().cleanup_workspace_source_v3()
+        retained._fresh = Some(closed.owner)
+        LinuxWorkspaceSourceCleanupTurnV3(retained, closed.source_returned, closed.pending, closed.error)
+
+    pub fn enable_workspace_v3(request: ContainerExecutionRequestV2, manifest_bytes: text,
+            invocation_digest: text, full_invocation_source: text) -> LinuxWorkspaceEnableTurnV3:
+        var retained = self
+        if self._fresh.is_none(): return LinuxWorkspaceEnableTurnV3(retained, "linux-workspace-fresh-root-required", "")
+        val enabled = self._fresh.unwrap().enable_workspace_v3(request, manifest_bytes, invocation_digest, full_invocation_source)
+        retained._fresh = Some(enabled.owner)
+        LinuxWorkspaceEnableTurnV3(retained, enabled.error, enabled.binding_digest)
+
+    pub fn workspace_primary_observe_v3(request: ContainerExecutionRequestV2) -> LinuxWorkspacePrimaryObserveTurnV3:
+        var retained = self
+        if self._fresh.is_none(): return LinuxWorkspacePrimaryObserveTurnV3(retained, nil, false, "linux-workspace-fresh-root-required")
+        val actual = self._fresh.unwrap().workspace_primary_observe_v3(request)
+        retained._fresh = Some(actual.owner)
+        LinuxWorkspacePrimaryObserveTurnV3(retained, actual.observation, actual.pending, actual.error)
+
+    pub fn probe_v3(request: ContainerExecutionRequestV2,
+            call: MachineFreshProbeCallV3) -> MachineFreshProbeReplyV3:
+        var retained = self
+        if self._fresh.is_none():
+            return machine_fresh_probe_rejected_v3(call, "machine-probe-original-owner-required")
+        val fresh = self._fresh.unwrap()
+        val result = fresh.probe_v3(request, call)
+        retained._fresh = Some(fresh)
+        result
+
+    pub fn workspace_begin_v3(action: ContainerWorkspaceActionV3, request: ContainerExecutionRequestV2,
+            deadline: Option<ContainerEffectDeadlineV1> = None) -> LinuxWorkspaceActionTurnV3:
+        var retained = self
+        if self._fresh.is_none(): return LinuxWorkspaceActionTurnV3(retained, nil, false, "linux-workspace-fresh-root-required")
+        val begun = self._fresh.unwrap().workspace_begin_v3(action, request, deadline)
+        retained._fresh = Some(begun.owner)
+        LinuxWorkspaceActionTurnV3(retained, begun.operation, begun.pending, begun.error)
+
+    pub fn workspace_step_v3(request: ContainerExecutionRequestV2) -> LinuxWorkspaceActionTurnV3:
+        var retained = self
+        if self._fresh.is_none(): return LinuxWorkspaceActionTurnV3(retained, nil, false, "linux-workspace-fresh-root-required")
+        val stepped = self._fresh.unwrap().workspace_step_v3(request)
+        retained._fresh = Some(stepped.owner)
+        LinuxWorkspaceActionTurnV3(retained, stepped.operation, stepped.pending, stepped.error)
+
+    pub fn workspace_cancel_pending_v3(request: ContainerExecutionRequestV2) -> LinuxWorkspaceActionTurnV3:
+        var retained = self
+        if self._fresh.is_none(): return LinuxWorkspaceActionTurnV3(retained, nil, false, "linux-workspace-fresh-root-required")
+        val cancelled = self._fresh.unwrap().workspace_cancel_pending_v3(request)
+        retained._fresh = Some(cancelled.owner)
+        LinuxWorkspaceActionTurnV3(retained, cancelled.operation, cancelled.pending, cancelled.error)
+
+    # ---- milestone_0021 V4 agent forwards (3.3): each delegates to the fresh owner's twin and retains it. ----
+    pub fn epoch_current_v3() -> Result<MachineFreshEpochRecordV1, text>:
+        if self._fresh.is_none(): return Err("linux-workspace-fresh-root-required")
+        self._fresh.unwrap().epoch_current_v3()
+
+    pub fn helper_dirs_v3() -> Result<[text], text>:
+        if self._fresh.is_none(): return Err("linux-workspace-fresh-root-required")
+        self._fresh.unwrap().helper_dirs_v3()
+
+    pub fn validate_helper_template_v3(template: GroupProcessStreamLaunchV2) -> Result<(), text>:
+        if self._fresh.is_none(): return Err("linux-workspace-fresh-root-required")
+        self._fresh.unwrap().validate_helper_template_v3(template)
+
+    pub fn settle_workspace_v3() -> Result<(), text>:
+        if self._fresh.is_none(): return Err("linux-workspace-fresh-root-required")
+        self._fresh.unwrap().settle_workspace_v3()
+
+    pub fn released_charge_digest_v3() -> Result<text, text>:
+        if self._fresh.is_none(): return Err("linux-workspace-fresh-root-required")
+        self._fresh.unwrap().released_charge_digest_v3()
+
+    pub fn return_settled_workspace_source_v3() -> Result<bool, text>:
+        if self._fresh.is_none(): return Err("linux-workspace-fresh-root-required")
+        self._fresh.unwrap().return_settled_workspace_source_v3()
+
+    # milestone_0030 op (ii). Err-first `_fresh` guard; there is NO fallthrough to self.provider
+    # (unlike `read`), so a non-fresh adapter is refused and a fresh one never reaches the provider.
+    pub fn read_settled_workspace_v3(bounds: ContainerSettledWorkspaceBoundsV3) -> Result<ContainerSettledWorkspaceReadV3, text>:
+        if self._fresh.is_none(): return Err("linux-workspace-fresh-root-required")
+        self._fresh.unwrap().read_settled_workspace_v3(bounds)
+
+    pub fn close_workload_v3() -> Result<(), text>:
+        if self._fresh.is_none(): return Err("linux-workspace-fresh-root-required")
+        self._fresh.unwrap().close_workload_v3()
+
+    # `kind` selects one owner-changing twin; root/native/text are its only inputs. One switch keeps the
+    # retain-before-result discipline of the forwards above in a single place.
+    pub fn agent_step_v3(kind: text, root: Option<LinuxWorkspaceRootBorrowV3> = None,
+            native: Option<LinuxServiceNativeIdentityBorrowV3> = None, value: text = "") -> LinuxAdapterAgentTurnV3:
+        var retained = self
+        if self._fresh.is_none(): return LinuxAdapterAgentTurnV3(owner: retained, root: root, native: native, error: "linux-workspace-fresh-root-required")
+        val fresh = self._fresh.unwrap()
+        var turn = LinuxFreshAgentTurnV3(owner: fresh, root: root, native: native, error: "linux-agent-step-unknown")
+        if kind == "take-root": turn = fresh.take_workspace_root_v3()
+        elif kind == "end-root" and root.is_some(): turn = fresh.end_workspace_root_loan_v3(root.unwrap())
+        elif kind == "end-service" and native.is_some(): turn = fresh.end_service_loan_v3(native.unwrap())
+        elif kind == "adopt-reader": turn = fresh.adopt_lent_workspace_reader_v3()
+        elif kind == "advance": turn = fresh.advance_workload_v3()
+        elif kind == "lifecycle-root": turn = fresh.set_lifecycle_root_v3(value)
+        retained._fresh = Some(turn.owner)
+        LinuxAdapterAgentTurnV3(owner: retained, root: turn.root, native: turn.native, error: turn.error)
+
+    pub fn close_fresh_v2() -> LinuxFreshAdapterCloseV2:
+        if self._fresh.is_none(): return LinuxFreshAdapterCloseV2(Some(self), false, "container-adapter-lifecycle-retained")
+        val original = self._fresh.unwrap()
+        val closed = original.close_v2()
+        var retained = self
+        if closed.owner.is_some(): retained._fresh = closed.owner
+        if not closed.closed or closed.owner.is_some(): return LinuxFreshAdapterCloseV2(Some(retained), false, closed.error)
+        retained._fresh = nil
+        LinuxFreshAdapterCloseV2(nil, true, closed.error)
+
+    # Protected local configuration, not a wire endpoint. The actual retained
+    # provider baseline is correlated again against Engine info by the owner.
+    pub fn primary_geometry_context_v1(plan: ContainerPrimaryAttachPlanV1,
+            policy_bytes: text) -> Result<(LinuxOciInstalledPolicyV3, LinuxOciEngineObservationV1), text>:
+        if (self.provider.scripted or self.provider.containment_policy.is_some() or
+                self.provider.engine_policy.is_none() or self.provider.engine_baseline.is_none() or
+                plan.terminal_mode != "tty" or plan.workload.backend != "linux-podman"):
+            return Err("primary-geometry-managed-podman-tty-required")
+        val policy = linux_oci_installed_policy_decode_v3(policy_bytes)?
+        if linux_oci_engine_policy_digest_v1(policy.cli_policy)? != linux_oci_engine_policy_digest_v1(self.provider.engine_policy.unwrap())?:
+            return Err("primary-geometry-cli-policy-mismatch")
+        val baseline = self.provider.engine_baseline.unwrap()
+        if (plan.provider_identity_digest != baseline.identity_digest or
+                plan.provider_identity_digest != self._observed_host.provider_identity_digest):
+            return Err("primary-geometry-provider-changed")
+        Ok((policy, baseline))
+
+    pub static fn observe_containment_v1(policy_bytes: text) -> Result<LinuxOciContainmentHostObservationV1, text>:
+        val policy = linux_oci_installed_containment_policy_decode_v1(policy_bytes)?
+        val actual = linux_oci_containment_observe_v1(policy, 5000)?
+        val host = _linux_container_observation_v2(actual.cli_observation)?
+        Ok(LinuxOciContainmentHostObservationV1(host: host, profile_digest: actual.profile_digest,
+            runtime_digest: actual.runtime_digest, containment_identity_digest: actual.identity_digest))
+
+    # Internal leaf constructor. The common route first matches the protected
+    # completed installation carrier; caller expected strings alone confer none.
+    pub static fn open_containment_v1(policy_bytes: text, state_root: text, scope: ContainerHostScopeV2,
+            expected_provider_identity_digest: text, expected_containment_identity_digest: text,
+            timeout_ms: i64) -> Result<LinuxSimpleContainerAdapterV2, text>:
+        val scope_error = _linux_container_scope_error_v2(scope)
+        if scope_error != "": return Err(scope_error)
+        if (not builder_digest_valid_v1(expected_provider_identity_digest) or
+                not builder_digest_valid_v1(expected_containment_identity_digest)):
+            return Err("container-adapter-provider-identity-invalid")
+        if timeout_ms <= 0: return Err("container-adapter-timeout-invalid")
+        if not state_root.starts_with("/") or state_root.len() > 4096 or state_root.contains("\0"):
+            return Err("container-adapter-state-root-invalid")
+        val directory = retained_directory_open_trusted_v1(state_root)?
+        if not directory.close(): return Err("container-adapter-state-root-close-failed")
+        val policy = linux_oci_installed_containment_policy_decode_v1(policy_bytes)?
+        val provider = LinuxOciRuntimeProviderV1.new_with_containment_policy_v1(state_root,
+            container_scope_fence_id_v2(scope)?, scope.provider_generation, policy, timeout_ms)?
+        val actual = provider.containment_baseline.unwrap()
+        val host = _linux_container_observation_v2(actual.cli_observation)?
+        if (host.provider_identity_digest != expected_provider_identity_digest or
+                actual.identity_digest != expected_containment_identity_digest):
+            return Err("container-adapter-containment-identity-mismatch")
+        if host.native_boot_id != scope.boot_id: return Err("container-adapter-boot-mismatch")
+        if host.native_machine_id != scope.native_machine_id: return Err("container-adapter-native-machine-mismatch")
+        Ok(LinuxSimpleContainerAdapterV2(scope: scope, provider: provider,
+            _observed_host: host, _duration_cap_ms: timeout_ms))
+
+    pub fn retained_containment_observation_v1() -> Result<LinuxOciContainmentObservationV1, text>:
+        match self.provider.containment_baseline:
+            case Some(value): Ok(value)
+            case None: Err("containment-profile-not-installed")
+
+    pub me capture_containment_v1(request: ContainerExecutionRequestV2,
+            expected: RuntimeIdentityV1) -> LinuxOciContainmentOutcomeV1:
+        val checked = match self._checked_request_v2(request):
+            case Ok(value): value
+            case Err(reason): return LinuxOciContainmentOutcomeV1.Rejected(reason)
+        match self._set_duration_v2(checked.0):
+            case Err(reason): return LinuxOciContainmentOutcomeV1.Rejected(reason)
+            case Ok(_): pass
+        val actual = match self.retained_containment_observation_v1():
+            case Ok(value): value
+            case Err(reason): return LinuxOciContainmentOutcomeV1.Rejected(reason)
+        self.provider.capture_containment_v1(self.scope, checked.0, expected,
+            self._observed_host.provider_identity_digest, actual.identity_digest)
+
+    pub static fn observe(policy_bytes: text) -> Result<ContainerHostObservationV2, text>:
+        linux_container_host_observe_v2(policy_bytes)
+
+    pub static fn open(policy_bytes: text, state_root: text, scope: ContainerHostScopeV2,
+            expected_provider_identity_digest: text, timeout_ms: i64) -> Result<LinuxSimpleContainerAdapterV2, text>:
+        val scope_error = _linux_container_scope_error_v2(scope)
+        if scope_error != "": return Err(scope_error)
+        if not builder_digest_valid_v1(expected_provider_identity_digest):
+            return Err("container-adapter-provider-identity-invalid")
+        if timeout_ms <= 0: return Err("container-adapter-timeout-invalid")
+        if not state_root.starts_with("/") or state_root.len() > 4096 or state_root.contains("\0"):
+            return Err("container-adapter-state-root-invalid")
+        # Reuse the canonical no-follow parent owner; no local ownership guess.
+        val directory = retained_directory_open_trusted_v1(state_root)?
+        if not directory.close(): return Err("container-adapter-state-root-close-failed")
+        val policy = linux_oci_engine_policy_decode_v1(policy_bytes)?
+        val provider_fence = container_scope_fence_id_v2(scope)?
+        val provider = LinuxOciRuntimeProviderV1.new_with_engine_policy("linux", "podman", state_root,
+            provider_fence, scope.provider_generation, policy, true, timeout_ms)?
+        val engine = provider.retained_engine_observation_v1()?
+        val observation = _linux_container_observation_v2(engine)?
+        if observation.provider_identity_digest != expected_provider_identity_digest:
+            return Err("container-adapter-provider-identity-mismatch")
+        if observation.native_boot_id != scope.boot_id: return Err("container-adapter-boot-mismatch")
+        if observation.native_machine_id != scope.native_machine_id: return Err("container-adapter-native-machine-mismatch")
+        Ok(LinuxSimpleContainerAdapterV2(scope: scope, provider: provider,
+            _observed_host: observation, _duration_cap_ms: timeout_ms))
+
+    # Explicit fixture-only construction: a real open never accepts a supplied
+    # observation or chooses scripted execution from user configuration.
+    pub static fn scripted_fixture_v2(scope: ContainerHostScopeV2,
+            provider: LinuxOciRuntimeProviderV1, observed: ContainerHostObservationV2,
+            timeout_ms: i64) -> Result<LinuxSimpleContainerAdapterV2, text>:
+        if not provider.scripted: return Err("container-adapter-fixture-requires-scripted-provider")
+        val scope_error = _linux_container_scope_error_v2(scope)
+        if scope_error != "": return Err(scope_error)
+        if provider.platform != "linux" or provider.engine != "podman" or not provider.engine_policy.?:
+            return Err("container-adapter-fixture-provider-unsupported")
+        val provider_fence = container_scope_fence_id_v2(scope)?
+        if provider.node_boot_id != provider_fence or provider.provider_generation != scope.provider_generation:
+            return Err("container-adapter-fixture-provider-scope-mismatch")
+        val engine = provider.retained_engine_observation_v1()?
+        if observed.backend != LINUX_SIMPLE_CONTAINER_BACKEND_V2 or observed.native_boot_id != scope.boot_id or
+                observed.native_machine_id != scope.native_machine_id or
+                observed.continuity_assurance != scope.continuity_mode or observed.boot_observation != scope.continuity_id or
+                observed.provider_identity_digest != engine.identity_digest or
+                not builder_digest_valid_v1(observed.provider_identity_digest) or timeout_ms <= 0:
+            return Err("container-adapter-fixture-observation-invalid")
+        Ok(LinuxSimpleContainerAdapterV2(scope: scope, provider: provider,
+            _observed_host: observed, _duration_cap_ms: timeout_ms))
+
+    pub fn is_scripted_fixture_v2() -> bool:
+        self.provider.scripted
+
+    pub fn observation() -> ContainerHostObservationV2:
+        self._observed_host
+
+    fn _checked_request_v2(request: ContainerExecutionRequestV2) -> Result<(LinuxOciRequestV1, ContainerRequestProjectionV2), text>:
+        if self._fresh.is_some(): return Err("linux-fresh-workload-legacy-operation-unavailable")
+        val plan = request.plan
+        if plan.backend != LINUX_SIMPLE_CONTAINER_BACKEND_V2: return Err("container-adapter-backend-mismatch")
+        if plan.physical_host_id != self.scope.physical_host_id or plan.service_scope_id != self.scope.service_scope_id or
+                plan.boot_id != self.scope.boot_id or plan.provider_generation != self.scope.provider_generation or
+                plan.native_machine_id != self.scope.native_machine_id or plan.continuity_mode != self.scope.continuity_mode or
+                plan.continuity_id != self.scope.continuity_id:
+            return Err("container-adapter-request-scope-mismatch")
+        if not builder_identifier_valid_v1(plan.workload_uid) or plan.attempt <= 0 or
+                not builder_identifier_valid_v1(plan.operation_id) or not builder_digest_valid_v1(plan.request_digest):
+            return Err("container-adapter-plan-identity-invalid")
+        val decoded = linux_oci_retained_request_decode_v1(request.request_bytes)?
+        val digest = linux_oci_request_digest_v1(decoded)?
+        if digest != plan.request_digest: return Err("container-adapter-request-digest-mismatch")
+        if decoded.pod_uid != plan.workload_uid or decoded.attempt != plan.attempt or decoded.operation_id != plan.operation_id:
+            return Err("container-adapter-request-identity-mismatch")
+        val projection = ContainerRequestProjectionV2(workload_uid: decoded.pod_uid, attempt: decoded.attempt,
+            operation_id: decoded.operation_id, request_digest: digest, cpu_millis: decoded.cpu_limit_millis,
+            memory_bytes: decoded.memory_limit_bytes, timeout_ms: decoded.timeout_ms, has_devices: false,
+            has_workspace: decoded.bundle_path != "" or decoded.build_input_root != "" or decoded.build_output_root != "" or decoded.mounts.len() > 0)
+        Ok((decoded, projection))
+
+    pub fn project(request: ContainerExecutionRequestV2) -> Result<ContainerRequestProjectionV2, text>:
+        if val fresh = self._fresh: return fresh.project_v2(request)
+        val checked = self._checked_request_v2(request)?
+        Ok(checked.1)
+
+    pub fn validate(request: ContainerExecutionRequestV2) -> Result<bool, text>:
+        if val fresh = self._fresh:
+            val projected = fresh.project_v2(request)?
+            return Ok(true)
+        val checked = self._checked_request_v2(request)?
+        val valid = self.provider.validate(checked.0)
+        if not valid.accepted: return Err(valid.reason)
+        Ok(true)
+
+    fn _exec_configuration_v3(parent: ContainerExecutionRequestV2, installed: ContainerExecInstalledV3,
+            admission: ContainerExecAdmissionV3, operation: text) -> Result<bool, text>:
+        if self.provider.containment_policy.?: return Err("containment-exec-control-not-installed")
+        if self.provider.scripted: return Err("container-exec-scripted-owner-unsupported")
+        val checked = self._checked_request_v2(parent)?
+        # This private routing selector is fixed by the two owner methods;
+        # it is not a caller-supplied mount grant. Inspect keeps its existing
+        # known-birth recovery route without allowing a new exec effect.
+        if operation == "begin" and checked.0.mounts.len() > 0:
+            return Err("linux-mount-native-admission-not-installed")
+        val matched = container_exec_installed_match_v3(installed, admission)?
+        if (self.provider.engine != "podman" or not self.provider.engine_policy.? or
+                not self.provider.engine_baseline.?): return Err("container-exec-managed-podman-required")
+        if (container_host_scope_bytes_v2(installed.intent.scope)? != container_host_scope_bytes_v2(self.scope)? or
+                installed.intent.provider_identity_digest != self._observed_host.provider_identity_digest):
+            return Err("container-exec-installed-owner-mismatch")
+        val policy = linux_oci_installed_policy_decode_v3(installed.intent.control_policy_bytes)?
+        if linux_oci_engine_policy_digest_v1(policy.cli_policy)? != linux_oci_engine_policy_digest_v1(self.provider.engine_policy.unwrap())?:
+            return Err("container-exec-installed-cli-policy-mismatch")
+        Ok(true)
+
+    # Only the common API's trusted Host composition calls these ports. The
+    # journal root is retained factory configuration, never exec request data.
+    pub me exec_begin_v3(parent: ContainerExecutionRequestV2, installed: ContainerExecInstalledV3,
+            admission: ContainerExecAdmissionV3, observed: ContainerExecControlObservationV3,
+            action: text) -> LinuxOciEngineExecTurnV3:
+        match self._exec_configuration_v3(parent, installed, admission, "begin"):
+            case Err(reason):
+                return LinuxOciEngineExecTurnV3(owner: nil, birth: nil, inspection: nil, phase: "rejected", error: reason)
+            case Ok(_): pass
+        LinuxOciEngineExecOwnerV3.begin(self.provider.state_dir, parent, installed, admission, observed, action)
+
+    pub me exec_inspect_v3(parent: ContainerExecutionRequestV2, installed: ContainerExecInstalledV3,
+            admission: ContainerExecAdmissionV3) -> LinuxOciEngineExecTurnV3:
+        match self._exec_configuration_v3(parent, installed, admission, "inspect"):
+            case Err(reason):
+                return LinuxOciEngineExecTurnV3(owner: nil, birth: nil, inspection: nil, phase: "rejected", error: reason)
+            case Ok(_): pass
+        # Known-birth recovery may outlive the launch grant or parent process.
+        # The leaf still checks retained identity and fresh installed service.
+        LinuxOciEngineExecOwnerV3.inspect(self.provider.state_dir, parent, installed, admission)
+
+    pub fn action_project(request: ContainerExecutionRequestV2) -> Result<ContainerActionProjectionV2, text>:
+        if val actual = self._fresh:
+            match actual.probe_v3(request, MachineFreshProbeCallV3.Projection):
+                case MachineFreshProbeReplyV3.Projection(projected): return projected
+                case _: return Err("machine-probe-projection-turn-mismatch")
+        val checked = self._checked_request_v2(request)?
+        val decoded = checked.0
+        val valid = self.provider.validate(decoded)
+        if not valid.accepted: return Err(valid.reason)
+        if decoded.bundle_path != "": return Err("container-action-workspace-unsupported")
+        val build_mode = decoded.build_input_root != "" or decoded.build_output_root != ""
+        if not decoded.replace_entrypoint and not build_mode: return Err("container-action-entrypoint-unresolved")
+        if decoded.working_directory == "": return Err("container-action-working-directory-unresolved")
+        val parts = oci_command_parts_v1(decoded.command, decoded.args, true)?
+        var argv: [text] = [decoded.command[0]]
+        for argument in parts.arguments: argv.push(argument)
+        var mounts: [ContainerMountProjectionV2] = []
+        if build_mode:
+            mounts.push(ContainerMountProjectionV2(host_root: decoded.build_input_root,
+                guest_root: "/simple-build/inputs", read_only: true))
+            mounts.push(ContainerMountProjectionV2(host_root: decoded.build_output_root,
+                guest_root: "/simple-build/outputs", read_only: false))
+        Ok(ContainerActionProjectionV2(argv: argv, working_directory: decoded.working_directory, mounts: mounts))
+
+    fn _set_duration_v2(request: LinuxOciRequestV1) -> Result<(), text>:
+        val timeout = if request.timeout_ms < self._duration_cap_ms: request.timeout_ms else: self._duration_cap_ms
+        self.provider.set_operation_timeout_v1(timeout)
+
+    pub me logs_capture_begin_v1(request: ContainerExecutionRequestV2) -> ContainerRuntimeLogsCaptureTurnV1:
+        val inspected = self.read("inspect", request)
+        if inspected.status != "ok": return container_runtime_logs_capture_refused_v1(inspected.reason)
+        val decoded = match self._checked_request_v2(request):
+            case Ok(value): value.0
+            case Err(reason): return container_runtime_logs_capture_refused_v1(reason)
+        self.provider.logs_capture_begin_v1(decoded)
+
+    pub fn stats_v1(request: ContainerExecutionRequestV2) -> Result<ContainerExecutionStatsObservationV1, text>:
+        if val fresh = self._fresh: return fresh.stats_v1(request)
+        Err("container-stats-retained-subject-required")
+
+    pub me read(action: text, request: ContainerExecutionRequestV2) -> RuntimeOperationV1:
+        if val fresh = self._fresh: return fresh.read_v2(action, request)
+        if action != "inspect" and action != "logs" and action != "wait" and action != "configuration" and action != "input-configuration":
+            return _linux_container_adapter_refused_v2(action, "container-adapter-read-action-unsupported")
+        val checked = match self._checked_request_v2(request):
+            case Ok(value): value
+            case Err(reason): return _linux_container_adapter_refused_v2(action, reason)
+        val decoded = checked.0
+        val valid = self.provider.validate(decoded)
+        if not valid.accepted: return _linux_container_adapter_refused_v2(action, valid.reason)
+        match self._set_duration_v2(decoded):
+            case Err(reason): return _linux_container_adapter_refused_v2(action, reason)
+            case Ok(_): pass
+        if action == "input-configuration": return self.provider.input_configuration_v1(decoded, self.scope)
+        if action == "configuration": return self.provider.configuration_v1(decoded, self.scope)
+        if action == "inspect":
+            # Typed local receiver: the pinned Cranelift bootstrap compiler binds
+            # `self.provider.inspect(..)` to the imported static
+            # LinuxOciEngineExecOwnerV3.inspect by bare name and then rejects the
+            # conflicting signature. Written back so a provider mutation is kept.
+            var provider: LinuxOciRuntimeProviderV1 = self.provider
+            val inspected = provider.inspect(decoded)
+            self.provider = provider
+            return inspected
+        if action == "logs": return self.provider.logs(decoded)
+        self.provider.wait(decoded, true)
+
+    pub me apply(action: text, request: ContainerExecutionRequestV2,
+            deadline: ContainerEffectDeadlineV1) -> RuntimeOperationV1:
+        if val fresh = self._fresh: return fresh.apply_v2(action, request, Some(deadline))
+        if action == "inspect" or action == "logs" or action == "wait" or action == "configuration" or action == "input-configuration": return self.read(action, request)
+        if action != "prepare" and action != "create" and action != "start" and action != "stop" and action != "destroy":
+            return _linux_container_adapter_refused_v2(action, "container-adapter-action-unsupported")
+        val checked = match self._checked_request_v2(request):
+            case Ok(value): value
+            case Err(reason): return _linux_container_adapter_refused_v2(action, reason)
+        val decoded = checked.0
+        val valid = self.provider.validate(decoded)
+        if not valid.accepted: return _linux_container_adapter_refused_v2(action, valid.reason)
+        match self._set_duration_v2(decoded):
+            case Err(reason): return _linux_container_adapter_refused_v2(action, reason)
+            case Ok(_): pass
+        if action == "create" or action == "start":
+            match self.provider.set_effect_deadline_v1(deadline):
+                case Err(reason): return _linux_container_adapter_refused_v2(action, reason)
+                case Ok(_): pass
+        if action == "prepare": return self.provider.prepare_pod(decoded)
+        if action == "create": return self.provider.create(decoded)
+        if action == "start": return self.provider.start(decoded)
+        if action == "stop": return self.provider.stop(decoded)
+        self.provider.destroy(decoded, false)
+
+    pub me control(action: text, request: ContainerExecutionRequestV2,
+            deadline: ContainerControlDeadlineV1) -> RuntimeOperationV1:
+        if val fresh = self._fresh: return fresh.apply_v2(action, request)
+        if action != "stop" and action != "destroy":
+            return _linux_container_adapter_refused_v2(action, "container-adapter-control-action-unsupported")
+        val checked = match self._checked_request_v2(request):
+            case Ok(value): value
+            case Err(reason): return _linux_container_adapter_refused_v2(action, reason)
+        if not self.provider.engine_policy.?:
+            return _linux_container_adapter_refused_v2(action, "container-adapter-control-managed-policy-required")
+        val valid = self.provider.validate(checked.0)
+        if not valid.accepted: return _linux_container_adapter_refused_v2(action, valid.reason)
+        match self._set_duration_v2(checked.0):
+            case Err(reason): return _linux_container_adapter_refused_v2(action, reason)
+            case Ok(_): pass
+        if action == "stop": return self.provider.stop(checked.0, Some(deadline))
+        self.provider.destroy(checked.0, false, Some(deadline))
+
+    pub fn intent(request: ContainerExecutionRequestV2) -> Result<RuntimeIntentV1, text>:
+        if val fresh = self._fresh: return fresh.intent_v2(request)
+        val checked = self._checked_request_v2(request)?
+        self.provider.retained_intent_v1(checked.0, true)
+
+    pub me absence(request: ContainerExecutionRequestV2,
+            expected: RuntimeIdentityV1) -> Result<ContainerAbsenceReceiptV2, text>:
+        val checked = self._checked_request_v2(request)?
+        val decoded = checked.0
+        val valid = self.provider.validate(decoded)
+        if not valid.accepted: return Err(valid.reason)
+        self._set_duration_v2(decoded)?
+        val observed = self.provider.observe_absence_v2(decoded, expected)?
+        val receipt = ContainerAbsenceReceiptV2(backend: LINUX_SIMPLE_CONTAINER_BACKEND_V2,
+            scope: self.scope, identity: expected, request_digest: checked.1.request_digest,
+            provider_identity_digest: observed.provider_identity_digest, observed_unix_ms: observed.observed_unix_ms,
+            query_digest: container_runtime_query_digest_v2(observed.operation.command)?,
+            evidence_digest: container_runtime_observation_digest_v2(observed.operation)?,
+            proof_kind: "exact-native-object-absence-v1")
+        # Integrity/shape validation is not producer authentication or host
+        # acceptance. No lifecycle tombstone or budget state is changed here.
+        val canonical = container_absence_receipt_encode_v2(receipt)?
+        Ok(receipt)
+
+    pub me execution_user(request: ContainerExecutionRequestV2,
+            expected: RuntimeIdentityV1) -> Result<ContainerExecutionUserReceiptV2, text>:
+        val checked = self._checked_request_v2(request)?
+        val valid = self.provider.validate(checked.0)
+        if not valid.accepted: return Err(valid.reason)
+        self._set_duration_v2(checked.0)?
+        val observed = self.provider.observe_execution_user_v2(checked.0, expected)?
+        val receipt = ContainerExecutionUserReceiptV2(backend: LINUX_SIMPLE_CONTAINER_BACKEND_V2,
+            scope: self.scope, identity: expected, request_digest: checked.1.request_digest,
+            provider_identity_digest: observed.provider_identity_digest, selected_user: observed.selected_user,
+            observed_unix_ms: observed.observed_unix_ms,
+            query_digest: container_runtime_query_digest_v2(observed.operation.command)?,
+            evidence_digest: container_runtime_observation_digest_v2(observed.operation)?,
+            proof_kind: "exact-native-execution-user-v1")
+        val canonical = container_execution_user_receipt_encode_v2(receipt)?
+        Ok(receipt)
+
+    pub me primary_attach_plan_v1(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+            identity: ContainerOutputIdentityV2, policy: ContainerStreamPolicyV2,
+            resources: ContainerOutputResourcesV2, terminal_mode: text) -> Result<ContainerPrimaryAttachPlanV1, text>:
+        if val actual = self._fresh: return actual.primary_attach_plan_v3(request, expected, identity, policy, resources, terminal_mode)
+        val checked = self._checked_request_v2(request)?
+        if checked.0.containment_profile_digest != "": return Err("primary-attach-containment-not-admitted")
+        val policy_digest = container_stream_policy_digest_v2(policy)?
+        self._set_duration_v2(checked.0)?
+        val pin = self._observed_host.provider_identity_digest
+        val observed = self.provider.primary_attach_observation_v1(checked.0, expected, pin, terminal_mode)?
+        val launch = linux_oci_primary_attach_launch_template_v1(policy, identity, resources, expected,
+            self.scope.provider_generation, self.provider.engine_policy.unwrap(), observed)?
+        var plan = ContainerPrimaryAttachPlanV1(workload: request.plan, runtime: expected,
+            identity: identity, resources: resources, provider_identity_digest: pin,
+            policy_digest: policy_digest, terminal_mode: terminal_mode,
+            launch_template: launch, request_digest: "")
+        plan.request_digest = container_primary_attach_plan_digest_v1(plan)?
+        Ok(plan)
+
+    # milestone_0022 N3 (17(B)): typed reply. Every return before the provider call
+    # is NoCustody (nothing spawned, no custody); the legacy OCI provider result is
+    # untyped (NotRefused) and never authorizes the Host refusal record.
+    pub me open_primary_attach_v1(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+            plan: ContainerPrimaryAttachPlanV1, helper: ContainerHelperAdmissionV2,
+            policy: ContainerStreamPolicyV2) -> ContainerPrimaryOpenResultV1:
+        if val actual = self._fresh: return actual.open_primary_attach_v3(request, expected, plan, helper, policy)
+        if plan.containment_profile_digest != "" or plan.containment_identity_digest != "":
+            return primary_open_no_custody_v1("primary-attach-containment-not-admitted")
+        val original = match container_primary_attach_plan_encode_v1(plan):
+            case Ok(value): value
+            case Err(reason): return primary_open_no_custody_v1(reason)
+        val current = match self.primary_attach_plan_v1(request, expected, plan.identity, policy,
+                plan.resources, plan.terminal_mode):
+            case Ok(value): value
+            case Err(reason): return primary_open_no_custody_v1(reason)
+        val canonical = match container_primary_attach_plan_encode_v1(current):
+            case Ok(value): value
+            case Err(reason): return primary_open_no_custody_v1(reason)
+        if original != canonical: return primary_open_no_custody_v1("primary-attach-plan-changed")
+        match container_primary_attach_admission_validate_v1(current, helper):
+            case Err(reason): return primary_open_no_custody_v1(reason)
+            case Ok(_): pass
+        val checked = match self._checked_request_v2(request):
+            case Ok(value): value
+            case Err(reason): return primary_open_no_custody_v1(reason)
+        var launch = current.launch_template
+        var child = launch.request
+        child.launch_deadline_unix_ms = helper.deadline.expires_at_unix_ms
+        launch.request = child
+        ContainerPrimaryOpenResultV1(self.provider.open_primary_attach_v1(checked.0, expected,
+            current.provider_identity_digest, current.terminal_mode, launch),
+            refusal: ContainerPrimaryOpenRefusalV1.NotRefused)
+
+    pub fn primary_session_handoff_v3(session: ContainerPrimaryAttachSessionV1) -> Result<(), text>:
+        if val actual = self._fresh: return actual.primary_session_handoff_v3(session)
+        Ok(())
+
+    pub fn primary_construction_failed_v3(transfer: PipedProcessOwnedTransferV2) -> Result<(), text>:
+        if val actual = self._fresh: return actual.primary_construction_failed_v3(transfer)
+        Ok(())
+
+    pub fn primary_session_return_v3(session: ContainerPrimaryAttachSessionV1) -> Result<(), text>:
+        if val actual = self._fresh: return actual.primary_session_return_v3(session)
+        Err("container-primary-workspace-owner-required")
+
+    pub fn primary_session_binding_v3(session: ContainerPrimaryAttachSessionV1) -> Result<ContainerPrimarySessionBindingV3, text>:
+        if val actual = self._fresh: return actual.primary_session_binding_v3(session)
+        Err("container-primary-workspace-owner-required")
+
+    pub fn primary_retirement_v3() -> Result<ContainerPrimaryTransportRetirementV3, text>:
+        if val actual = self._fresh: return actual.primary_retirement_v3()
+        Err("container-primary-workspace-owner-required")
+
+    pub fn primary_attach_cleanup_v3() -> Result<(), text>:
+        if val actual = self._fresh: return actual.primary_attach_cleanup_v3()
+        Err("container-primary-workspace-owner-required")
+
+    pub fn output_plan(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+            identity: ContainerOutputIdentityV2, policy: ContainerStreamPolicyV2,
+            resources: ContainerOutputResourcesV2) -> Result<ContainerOutputPlanV2, text>:
+        val checked = self._checked_request_v2(request)?
+        val policy_digest = container_stream_policy_digest_v2(policy)?
+        val pin = self._observed_host.provider_identity_digest
+        val observed = self.provider.output_engine_observation_v2(checked.0, expected, pin)?
+        val launch = linux_oci_output_launch_template_v2(policy, identity, resources, expected,
+            self.scope.provider_generation, self.provider.engine_policy.unwrap(), observed)?
+        var plan = ContainerOutputPlanV2(mode: "output-follow", workload: request.plan,
+            runtime: expected, identity: identity, resources: resources,
+            provider_identity_digest: pin, policy_digest: policy_digest,
+            launch_template: launch, request_digest: "")
+        plan.request_digest = container_output_plan_digest_v2(plan)?
+        Ok(plan)
+
+    pub fn output_capabilities(plan: ContainerOutputPlanV2) -> ContainerOutputCapabilitiesV2:
+        match self._output_capability_observe_v2(plan):
+            case Ok(_): ContainerOutputCapabilitiesV2(output_follow_supported: true,
+                reason: "container-output-plan-native-admission-observed")
+            case Err(reason): ContainerOutputCapabilitiesV2(output_follow_supported: false, reason: reason)
+
+    fn _output_capability_observe_v2(plan: ContainerOutputPlanV2) -> Result<bool, text>:
+        if plan.request_digest != container_output_plan_digest_v2(plan)?:
+            return Err("container-output-plan-digest-mismatch")
+        val workload = plan.workload
+        val scope = ContainerHostScopeV2(physical_host_id: workload.physical_host_id,
+            service_scope_id: workload.service_scope_id, boot_id: workload.boot_id,
+            provider_generation: workload.provider_generation, native_machine_id: workload.native_machine_id,
+            continuity_mode: workload.continuity_mode, continuity_id: workload.continuity_id)
+        if container_host_scope_bytes_v2(scope)? != container_host_scope_bytes_v2(self.scope)? or
+                workload.backend != LINUX_SIMPLE_CONTAINER_BACKEND_V2:
+            return Err("container-output-plan-owner-mismatch")
+        if plan.provider_identity_digest != self._observed_host.provider_identity_digest:
+            return Err("container-output-plan-provider-mismatch")
+        if plan.launch_template.profile_v3.unwrap().child_image_mode != "trusted-local-admin-image-fd-v1":
+            return Err("container-output-engine-image-mode-unsupported")
+        # Scripted observations cannot advertise actual native availability.
+        if self.provider.scripted: return Err("container-output-scripted-capability-unavailable")
+        if not self.provider.live_enabled: return Err("container-output-provider-unavailable")
+        val current = self.provider.engine_observation_v1()?
+        if current.identity_digest != plan.provider_identity_digest:
+            return Err("container-output-plan-provider-changed")
+        val policy = match self.provider.engine_policy:
+            case Some(value): value
+            case None: return Err("container-output-managed-policy-required")
+        val command = linux_oci_output_command_v2(policy, plan.runtime)?
+        val child = plan.launch_template.request
+        if child.program != command.program or child.args != command.args or
+                child.producer_digest != current.executable_digest:
+            return Err("container-output-plan-engine-route-mismatch")
+        # Current kernel and enrolled broker/cgroup admission observation,
+        # using the canonical pregrant template. This does not inspect the
+        # current container or prove attach readiness. Open does that work.
+        # No fake deadline, claim, reservation or fork is created here.
+        linux_process_stream_template_admit_v3(plan.launch_template)?
+        Ok(true)
+
+    pub me open_output_session(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+            identity: ContainerOutputIdentityV2, helper: ContainerHelperAdmissionV2,
+            policy: ContainerStreamPolicyV2) -> PipedProcessOwnedSpawnV2:
+        val resources = ContainerOutputResourcesV2(cpu_millis: helper.cpu_millis, memory_bytes: helper.memory_bytes)
+        val plan = match self.output_plan(request, expected, identity, policy, resources):
+            case Ok(value): value
+            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+        match container_output_admission_validate_v2(plan, helper):
+            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+            case Ok(_): pass
+        val checked = match self._checked_request_v2(request):
+            case Ok(value): value
+            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+        match self._set_duration_v2(checked.0):
+            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+            case Ok(_): pass
+        var launch = plan.launch_template
+        var child = launch.request
+        child.launch_deadline_unix_ms = helper.deadline.expires_at_unix_ms
+        launch.request = child
+        self.provider.open_output_session_v2(checked.0, expected, plan.provider_identity_digest, launch)
+
+    pub me user_mapping(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1) -> LinuxOciUserMappingOutcomeV3:
+        val checked = match self._checked_request_v2(request):
+            case Ok(value): value
+            case Err(reason): return LinuxOciUserMappingOutcomeV3.Rejected(reason)
+        match self._set_duration_v2(checked.0):
+            case Err(reason): return LinuxOciUserMappingOutcomeV3.Rejected(reason)
+            case Ok(_): pass
+        self.provider.observe_execution_user_mapping_v3(checked.0, expected, self._observed_host.provider_identity_digest)
+
+    pub me recover(request: ContainerExecutionRequestV2, expected: RuntimeIntentV1) -> RuntimeOperationV1:
+        if val fresh = self._fresh: return fresh.recover_v2(request, expected)
+        val checked = match self._checked_request_v2(request):
+            case Ok(value): value
+            case Err(reason): return _linux_container_adapter_refused_v2("recover", reason)
+        val decoded = checked.0
+        val retained = match self.provider.retained_intent_v1(decoded, true):
+            case Ok(value): value
+            case Err(reason): return _linux_container_adapter_refused_v2("recover", reason)
+        if not _linux_container_intent_identity_equal_v2(retained, expected):
+            return _linux_container_adapter_refused_v2("recover", "container-adapter-retained-intent-mismatch")
+        if retained.phase != expected.phase:
+            if not _linux_container_recovery_phase_allowed_v2(retained.phase, expected.phase) or
+                    not builder_digest_valid_v1(retained.native_id) or not builder_digest_valid_v1(expected.native_id):
+                return _linux_container_adapter_refused_v2("recover", "container-adapter-recovery-phase-mismatch")
+            # Relax only a proven V2 binding. Existing exact-phase legacy and
+            # uncertain PREPARED recovery keep their original admission path.
+            val bound = match self.provider.retained_intent_v1(decoded):
+                case Ok(value): value
+                case Err(reason): return _linux_container_adapter_refused_v2("recover", reason)
+            if not _linux_container_intent_identity_equal_v2(bound, retained) or bound.phase != retained.phase:
+                return _linux_container_adapter_refused_v2("recover", "container-adapter-retained-intent-mismatch")
+        match self._set_duration_v2(decoded):
+            case Err(reason): return _linux_container_adapter_refused_v2("recover", reason)
+            case Ok(_): pass
+        self.provider.recover(decoded)
+
+# An actual fresh close may remain pending; callers retain this exact adapter.
+pub struct LinuxAdapterAgentTurnV3:
+    owner: LinuxSimpleContainerAdapterV2
+    root: Option<LinuxWorkspaceRootBorrowV3> = None
+    native: Option<LinuxServiceNativeIdentityBorrowV3> = None
+    error: text = ""
+
+pub struct LinuxFreshAdapterCloseV2:
+    owner: Option<LinuxSimpleContainerAdapterV2>
+    closed: bool
+    error: text
+
+pub struct LinuxWorkspaceSourceTurnV3:
+    owner: LinuxSimpleContainerAdapterV2
+    source: Option<LinuxWorkspaceSourceLoanV3>
+    pending: bool
+    error: text
+
+pub struct LinuxWorkspaceEnableTurnV3:
+    owner: LinuxSimpleContainerAdapterV2
+    error: text
+    binding_digest: text
+
+pub struct LinuxWorkspaceSourceCleanupTurnV3:
+    owner: LinuxSimpleContainerAdapterV2
+    source_returned: bool
+    pending: bool
+    error: text
+
+pub struct LinuxWorkspaceActionTurnV3:
+    owner: LinuxSimpleContainerAdapterV2
+    operation: Option<RuntimeOperationV1>
+    pending: bool
+    error: text
+
+pub struct LinuxWorkspacePrimaryObserveTurnV3:
+    owner: LinuxSimpleContainerAdapterV2
+    observation: Option<ContainerWorkspacePrimaryObservationV3>
+    pending: bool
+    error: text

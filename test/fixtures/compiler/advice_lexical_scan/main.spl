@@ -1,0 +1,42 @@
+# @req REQ-WORKER-ADVICE-LEXICAL-SCAN
+use compiler.driver.driver_advice_scan_v1.{advice_source_may_declare_v1}
+use std.io_runtime.{file_read}
+
+fn check_case(label: text, source: text, expected: bool) -> i64:
+    val actual = advice_source_may_declare_v1(source)
+    if actual != expected:
+        print("FAIL {label}: expected={expected} actual={actual}")
+        return 1
+    print("PASS {label}")
+    0
+
+fn main() -> i64:
+    val advice = r"on pc{call(*)} use hook before"
+    val q = "\""
+    val triple = q + q + q
+    var failures = 0
+    failures = failures + check_case("real advice", advice, true)
+    failures = failures + check_case("tab whitespace", advice.replace("on ", "on\t"), true)
+    failures = failures + check_case("indented advice", "    " + advice, true)
+    failures = failures + check_case("UTF8 preceding comment", "# λ\n" + advice, true)
+    failures = failures + check_case("ordinary identifier", "fn f(on: bool):\n    on\n", false)
+    failures = failures + check_case("line comment", "# " + advice, false)
+    failures = failures + check_case("inline comment", "val x = 1 # " + advice, false)
+    failures = failures + check_case("double string", "val x = " + q + advice + q, false)
+    failures = failures + check_case("single string", "val x = '" + advice + "'", false)
+    failures = failures + check_case("raw string", "val x = r" + q + advice + q, false)
+    failures = failures + check_case("triple double", triple + "\n" + advice + "\n" + triple, false)
+    failures = failures + check_case("triple single", "'''\n" + advice + "\n'''", false)
+    failures = failures + check_case("raw triple", "r" + triple + "\n" + advice + "\n" + triple, false)
+    failures = failures + check_case("escaped quote", "val x = " + q + "prefix\\" + q + " " + advice + q, false)
+    failures = failures + check_case("identifier boundary", advice.replace("on ", "onward "), false)
+    failures = failures + check_case("no whitespace", advice.replace("on ", "on"), false)
+    failures = failures + check_case("newline separates", advice.replace("on ", "on\n"), false)
+    failures = failures + check_case("space before brace", advice.replace("pc{", "pc {"), false)
+    failures = failures + check_case("comment separates", advice.replace("on ", "on # comment\n"), false)
+    failures = failures + check_case("lexical error stays conservative", "` " + advice, true)
+    val own_source = file_read("src/compiler/80.driver/driver_advice_scan_v1.spl")
+    if own_source == "": return 99
+    failures = failures + check_case("scanner source", own_source, false)
+    print("assertions=21 failures={failures}")
+    failures

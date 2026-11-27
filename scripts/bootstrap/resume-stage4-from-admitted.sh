@@ -64,20 +64,17 @@ resume_stage4_prepare() {
     "$(bootstrap_stage3_manifest_value runtime_path "$manifest")") || return 1
   SIMPLE_RUNTIME_PATH=$bootstrap_runtime_authority_path
   export SIMPLE_RUNTIME_PATH
-  planner_sha=$(bootstrap_stage3_hash_file "$planner_receipt") || return 1
-  candidate_sha=$(bootstrap_stage3_hash_file "$candidate") || return 1
   source_sha=$(bootstrap_stage3_manifest_value source_fingerprint "$manifest") || return 1
-  expected_binding=$(printf '%s\n' \
-    "planner_sha256=$planner_sha" \
-    "candidate_sha256=$candidate_sha" \
-    "source_fingerprint=$source_sha" \
-    "backend=$backend" | bootstrap_stage3_hash_stdin) || return 1
+  expected_binding=$(bootstrap_stage3_stage4_binding_sha256 \
+    "$planner_receipt" "$candidate" "$manifest" "$backend") || return 1
   [ "${SIMPLE_BOOTSTRAP_STAGE4_BINDING_SHA256:-}" = "$expected_binding" ] || {
     echo "error: Stage 4 planner/candidate/source/backend binding mismatch" >&2; return 1;
   }
   full="$output/full/$platform/simple"
-  case "$platform" in *windows*) full="${full}.exe" ;; esac
+  full_debug="$output/full/$platform/simple-debug"
+  case "$platform" in *windows*) full="${full}.exe"; full_debug="${full_debug}.exe" ;; esac
   [ ! -e "$full" ] && [ ! -L "$full" ] &&
+    [ ! -e "$full_debug" ] && [ ! -L "$full_debug" ] &&
     [ ! -e "${full}.provenance.env" ] && [ ! -L "${full}.provenance.env" ] || {
     echo "error: Stage 4 resume output collision" >&2; return 1;
   }
@@ -154,6 +151,11 @@ resume_stage4_finalize() {
     echo stage4_provenance_sha256="$(bootstrap_stage3_hash_file "${full_bin}.provenance.env")"
     echo stage4_output_path="$full_bin"
     echo stage4_provenance_path="${full_bin}.provenance.env"
+    if [ "${stage4_dual_mode:-1}" -eq 1 ] && [ -n "${full_debug_bin:-}" ] && [ -e "${full_debug_bin}" ]; then
+      [ -f "$full_debug_bin" ] && [ ! -L "$full_debug_bin" ] && [ -x "$full_debug_bin" ] || exit 1
+      echo stage4_debug_output_path="$full_debug_bin"
+      echo stage4_debug_output_sha256="$(bootstrap_stage3_hash_file "$full_debug_bin")"
+    fi
   } >>"$tmp" || return 1
   if [ "${SIMPLE_BOOTSTRAP_STAGE4_QUARANTINE:-0}" = 1 ]; then
     [ "${deploy:-0}" -eq 0 ] || return 1

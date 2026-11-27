@@ -21,7 +21,7 @@ impl MirLowering:
             emitted_name_counts[name] = if emitted_name_counts.has(name): emitted_name_counts[name] + 1 else: 1
         if module.nogc_strict:
             if not module.nogc_param_effects_checked or module.nogc_param_effect_symbol_ids.len() != module.nogc_param_effects.len():
-                self.error_fatal("NOGC-POLICY-002: strict MIR module has no verified parameter-effect rows", nil)
+                self.error_fatal("NOGC-POLICY-002: strict MIR module has no verified parameter-effect rows", None)
             else:
                 var seen: Dict<i64, bool> = {}
                 var duplicate: Dict<i64, bool> = {}
@@ -54,11 +54,19 @@ impl MirLowering:
                     row = row + 1
         # Explicit owner writeback: every body carries this consumer's strict
         # policy and the same checked local-call map, regardless of iteration order.
-        for key in functions.keys():
-            var function: MirFunction = functions[key]
+        # Index with the keys() element itself: a `for key in functions.keys()`
+        # binding of a SymbolId is a native struct COPY under the frozen Phase 2
+        # pin, and struct dict keys hash by address in the C runtime, so
+        # `functions[key]` missed and the field store faulted (0xC0000005 in the
+        # MIR shard worker). Same idiom as module_lowering.spl composite_struct_keys.
+        val function_keys: [SymbolId] = functions.keys()
+        var function_i = 0
+        while function_i < function_keys.len():
+            var function: MirFunction = functions[function_keys[function_i]]
             function.nogc_strict = module.nogc_strict
             function.short_call_contracts = contracts
-            functions[key] = function
+            functions[function_keys[function_i]] = function
+            function_i = function_i + 1
         output.functions = functions
         var builder = self.builder
         builder.module = output

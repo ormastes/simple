@@ -74,7 +74,46 @@ probably not new.
 # Stage 3 self-host: 1,088 HIR `unresolved type` fatals across 538 files, including builtins
 
 - **Filed:** 2026-08-31
-- **Status:** OPEN — first observation; Stage 3 had not been reachable before today
+- **Status:** OPEN — triaged 2026-11-11 (lane boot14). **Root A (truncated entry closure):
+  fix implemented and interpreter-verified** — closure loading now dedups by physical source,
+  every previously-silent skip emits a receipt, and `closure:done` logs scanned/logical/added;
+  the Root-A regression tests in `entry_closure_physical_source_dedup_spec.spl` pass (seed-smoke).
+  **Root B (glob-only visibility) + full Stage-3 closure confirmation: BLOCKED (stage-chain
+  probe)** — needs a stage-3 run (not runnable on this Windows host; known native-build hang).
+
+## Triage 2026-11-11 (lane boot14) — Root A fix verified in-tree; Root B + end-to-end BLOCKED
+
+Verdict: **Root A = fix implemented + interpreter-verified; Root B and the full Stage-3
+closure confirmation = BLOCKED** (stage-chain probe). Kept OPEN.
+
+Evidence gathered this session (seed-smoke, build-commit `46fe8f6b6def`):
+- The closure-loading code this record cites (`driver_source_pipeline_loading.spl:313-333`)
+  has been reworked and now lives at :1024-1247. The silent "already satisfied" skip is gone:
+  - Dedup is **by physical file, never by spelling** (:1184-1185 comment), closing the
+    "two physical files normalise to one logical name ⇒ second never loaded" gap this record
+    flagged as the next step.
+  - The `closure_loaded_mods.contains_key` branch now logs
+    `phase1:load_sources:closure:already-loaded` (:1190) and a distinct `spelling-collision`
+    receipt (:1194-1195) instead of silently `continue`-ing; the empty/excluded collect exit
+    logs `closure:excluded` (:1206-1207).
+  - `closure:done` now reports `scanned` / `logical` / `added` (:1246-1247), so the
+    `logical > physical` gap that hid the 203-module hole is directly visible.
+- Regression spec `test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl`:
+  the Root-A-relevant tests pass — "normalizes aliases to one physical parse source",
+  "registers every logical alias from one cached module result", "uses bucket sets for every
+  phase-one closure membership role". (Full file 13/14; the single failure is an **unrelated**
+  stale import-scanner text assertion — the source later switched `content.index_of` →
+  `_driver_text_index_of` under the `text_method_arg_copied_through_extern_abi_per_call_2026-10-25`
+  workaround — not a closure-loading regression. Left unfixed as out-of-lane per policy.)
+
+Still OPEN / BLOCKED: Root B (glob-only visibility, 253 fatals) has no in-tree fix confirmed
+here, and confirming the full Stage-3 closure now loads `hir_operators.spl` et al. requires a
+stage-3 run:
+```
+sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage3 --mode=dynload --output=build/bootstrap
+```
+then check the stage-3 log for zero `unresolved type:`/`unresolved name:`/`missing importing
+module surface` fatals and that `closure:done scanned == logical == added`.
 - **Blocks:** Stage 3 self-host, therefore Stages 4 and 5
 - **Platform:** aarch64-apple-darwin. **NOT shown to be macOS-specific.**
 - **Reached via:** Stage 2 admission (`8cef6333ac8`) + planner-admission-v2 receipt

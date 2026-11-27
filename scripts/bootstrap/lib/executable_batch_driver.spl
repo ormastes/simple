@@ -1,0 +1,273 @@
+# Pure decision/decoding helpers of the adaptive executable batch driver
+# (scripts/bootstrap/adaptive-executable-batch.spl). Everything here is free of
+# process and file effects so the driver's state machine is covered by
+# test/01_unit/scripts/executable_batch_driver_spec.spl. Policy verdicts
+# (may_start, outcome, identity, ...) live in executable_batch_policy.spl.
+
+use std.common.json.value.{JsonValue, json_value_field, json_value_has, json_value_items, json_value_keys, json_value_is_null, json_value_object_from, json_value_object_set, json_value_text_or, json_value_as_i64, json_value_as_bool}
+use std.common.char_from_code_pure.{char_from_code}
+use scripts.bootstrap.lib.executable_batch_policy.{BatchConfig, RssReceipt, ChildResult, OptionPair, Target, EnvPair, PreflightRequest, OwnerConfig, OwnerLaunch, OwnerReservation, OwnerRequest, ProcessRow, closed_rss, outcome}
+
+# ---- JSON field readers (absent / wrong type read back as the default) ----
+
+pub fn jtext(v: JsonValue, key: text) -> text:
+    json_value_text_or(json_value_field(v, key), "")
+
+pub fn jint(v: JsonValue, key: text) -> i64:
+    json_value_as_i64(json_value_field(v, key)) ?? 0
+
+pub fn jtexts(v: JsonValue, key: text) -> [text]:
+    var out: [text] = []
+    for item in json_value_items(json_value_field(v, key)):
+        out.push(json_value_text_or(item, ""))
+    out
+
+pub fn jenv(v: JsonValue, key: text) -> [EnvPair]:
+    val obj = json_value_field(v, key)
+    var out: [EnvPair] = []
+    for k in json_value_keys(obj):
+        out.push(EnvPair(key: k, value: jtext(obj, k)))
+    out
+
+# ---- decoders for the policy structs ----
+
+pub fn batch_config_of(config: JsonValue) -> BatchConfig:
+    BatchConfig(max_executables: jint(config, "max_executables"), headroom_bytes: jint(config, "headroom_bytes"), minimum_estimate_bytes: jint(config, "minimum_estimate_bytes"), rss_to_commit_safety_factor: jint(config, "rss_to_commit_safety_factor"))
+
+pub fn options_of(target: JsonValue) -> [OptionPair]:
+    val obj = json_value_field(target, "options")
+    var out: [OptionPair] = []
+    for k in json_value_keys(obj):
+        out.push(OptionPair(key: k, value: jint(obj, k)))
+    out
+
+pub fn policy_target_of(target: JsonValue) -> Target:
+    Target(producer_sha256: jtext(target, "producer_sha256"), source: jtext(target, "source"), backend: jtext(target, "backend"), entry: jtext(target, "entry"), options: options_of(target))
+
+pub fn preflight_request_of(request: JsonValue) -> PreflightRequest:
+    PreflightRequest(command: jtexts(request, "command"), has_preflight_command: json_value_has(request, "preflight_command"), preflight_command: jtexts(request, "preflight_command"), cwd: jtext(request, "cwd"), environment: jenv(request, "environment"))
+
+pub fn owner_config_of(config: JsonValue) -> OwnerConfig:
+    val collector = json_value_field(config, "collector")
+    OwnerConfig(global_job_budget: jint(config, "global_job_budget"), admission_root: jtext(config, "admission_root"), parent_collector_receipt: jtext(config, "parent_collector_receipt"), collector_path: jtext(collector, "path"), collector_sha256: jtext(collector, "sha256"))
+
+pub fn owner_launch_of(launch: JsonValue) -> OwnerLaunch:
+    OwnerLaunch(owner_pid: jint(launch, "owner_pid"), collector_pid: jint(launch, "collector_pid"), threads: jint(launch, "threads"), reservation: jtext(launch, "reservation"), request: jtext(launch, "request"), request_sha256: jtext(launch, "request_sha256"))
+
+pub fn owner_reservation_of(r: JsonValue) -> OwnerReservation:
+    OwnerReservation(owner_pid: jint(r, "owner_pid"), owner_start_utc: jtext(r, "owner_start_utc"), threads: jint(r, "threads"), schema: jtext(r, "schema"), total_job_budget: jint(r, "total_job_budget"), receipt_path: jtext(r, "receipt_path"), helper_sha256: jtext(r, "helper_sha256"))
+
+pub fn owner_request_of(request: JsonValue) -> OwnerRequest:
+    OwnerRequest(threads: jint(request, "threads"), command: jtexts(request, "command"), config_json_sha256: jtext(json_value_field(request, "files"), "config.json"))
+
+pub fn process_rows_of(rows: JsonValue) -> [ProcessRow]:
+    var out: [ProcessRow] = []
+    for r in json_value_items(rows):
+        out.push(ProcessRow(pid: jint(r, "pid"), parent_pid: jint(r, "parent_pid"), start_utc: jtext(r, "start_utc"), command_line: jtext(r, "command_line")))
+    out
+
+# ---- child result and receipts ----
+
+# Python truthiness: None and {} are both "no result".
+pub fn child_result_of(result: JsonValue) -> ChildResult:
+    val present = json_value_keys(result).len() > 0
+    ChildResult(has_result: present, has_compile_exit: present and not json_value_is_null(json_value_field(result, "compile_exit")), terminal_status: jtext(result, "terminal_status"), sanity_pass: (json_value_as_bool(json_value_field(result, "sanity_pass")) ?? false))
+
+# A sanity run exists when result.sanity_exit is present and not null.
+pub fn has_sanity_exit(result: JsonValue) -> bool:
+    json_value_keys(result).len() > 0 and not json_value_is_null(json_value_field(result, "sanity_exit"))
+
+# `key=value` lines; split on the first `=` only (Python x.split('=', 1)).
+pub fn parse_env_receipt(raw: text) -> [EnvPair]:
+    var out: [EnvPair] = []
+    for line in raw.replace("\r", "").split("\n"):
+        val at = line.index_of("=") ?? -1
+        if at >= 0:
+            out.push(EnvPair(key: line.substring(0, at), value: line.substring(at + 1, line.len())))
+    out
+
+pub fn env_lookup(pairs: [EnvPair], key: text, default_value: text) -> text:
+    for p in pairs:
+        if p.key == key:
+            return p.value
+    default_value
+
+pub fn rss_receipt_of(pairs: [EnvPair]) -> RssReceipt:
+    RssReceipt(quiescent: env_lookup(pairs, "quiescent", ""), observer_errors: env_lookup(pairs, "observer_errors", ""), status: env_lookup(pairs, "status", ""))
+
+fn all_digits(s: text) -> bool:
+    if s.len() == 0:
+        return false
+    var i = 0
+    while i < s.len():
+        val c = s.substring(i, i + 1)
+        if c < "0" or c > "9":
+            return false
+        i = i + 1
+    true
+
+# Largest int(peak_rss_kib) * 1024 over the receipts; a malformed number is an
+# Err because the Python driver died on int() there rather than guessing.
+pub fn observed_peak_bytes(receipts: [[EnvPair]]) -> Result<i64, text>:
+    var peak = 0
+    for pairs in receipts:
+        val raw = env_lookup(pairs, "peak_rss_kib", "0")
+        if not all_digits(raw):
+            return Err("peak_rss_kib is not an unsigned integer: {raw}")
+        val bytes = raw.to_i64() * 1024
+        if bytes > peak:
+            peak = bytes
+    Ok(peak)
+
+# ---- per-child settlement (the driver's reap branch) ----
+
+struct Settlement:
+    verdict: text
+    closure: text
+    observed_bytes: i64
+    state: text
+
+# state == "" means the driver state is unchanged.
+pub fn settle_child(exit_code: i64, result: JsonValue, receipts: [[EnvPair]], cache_lease_retained: bool) -> Result<Settlement, text>:
+    var rss: [RssReceipt] = []
+    for pairs in receipts:
+        rss.push(rss_receipt_of(pairs))
+    val verdict = outcome(exit_code, child_result_of(result), rss)
+    if verdict != "CONTINUE":
+        return Ok(Settlement(verdict: verdict, closure: "UNVERIFIED", observed_bytes: 0, state: "BLOCKED_CHILD_CLOSURE_DRAINING"))
+    var observed = 0
+    var state = ""
+    if receipts.len() > 0:
+        observed = observed_peak_bytes(receipts)?
+        # The shell releases only its own lease after quiescent receipt validation.
+        if cache_lease_retained:
+            state = "BLOCKED_RETAINED_CACHE_LEASE"
+    Ok(Settlement(verdict: verdict, closure: "CLOSED", observed_bytes: observed, state: state))
+
+pub fn blocks_admission(s: Settlement) -> bool:
+    s.state != ""
+
+pub fn final_state(blocked: bool) -> text:
+    if blocked:
+        return "BLOCKED_UNVERIFIED_CLOSURE"
+    "COMPLETE_PER_TARGET_RESULTS"
+
+pub fn exit_code_for(blocked: bool) -> i64:
+    if blocked:
+        return 1
+    0
+
+# First pending target (by index) whose cache lease file is absent, else -1.
+pub fn first_unleased(lease_present: [bool]) -> i64:
+    var i = 0
+    while i < lease_present.len():
+        if not lease_present[i]:
+            return i
+        i = i + 1
+    -1
+
+# ---- preflight shape checks (Python asserts) ----
+
+pub fn preflight_manifest_error(config: JsonValue, targets: [JsonValue]) -> text:
+    if targets.len() == 0:
+        return "Empty target manifest is not executable"
+    val maximum = jint(config, "max_executables")
+    if jint(config, "aggregate_jobs") != 20 or maximum < 1 or maximum > 20:
+        return "aggregate_jobs must be 20 and max_executables within 1..20"
+    var packets: [text] = []
+    for t in targets:
+        val p = jtext(t, "packet")
+        if packets.contains(p):
+            return "Duplicate target packet: {p}"
+        packets.push(p)
+    for t in targets:
+        if not options_are_reviewed(options_of(t)):
+            return "Target options differ from threads=1,hir_sharding=0,parse_sharding=0,streaming_surfaces=1"
+    ""
+
+fn option_is(opts: [OptionPair], key: text, value: i64) -> bool:
+    for o in opts:
+        if o.key == key:
+            return o.value == value
+    false
+
+pub fn options_are_reviewed(opts: [OptionPair]) -> bool:
+    opts.len() == 4 and option_is(opts, "threads", 1) and option_is(opts, "hir_sharding", 0) and option_is(opts, "parse_sharding", 0) and option_is(opts, "streaming_surfaces", 1)
+
+# A request-bound input leaf must be a bare file name.
+pub fn is_leaf_name(name: text) -> bool:
+    name.len() > 0 and not name.contains("/") and not name.contains("\\") and name != "." and name != ".."
+
+# ---- UTC timestamp, byte-compatible with Python datetime.isoformat() ----
+
+fn pad(n: i64, width: i64) -> text:
+    var s = "{n}"
+    while s.len() < width:
+        s = "0" + s
+    s
+
+# Days since 1970-01-01 -> (year, month, day), proleptic Gregorian.
+fn civil_from_days(days: i64) -> (i64, i64, i64):
+    val z = days + 719468
+    var era = z / 146097
+    if z < 0:
+        era = (z - 146096) / 146097
+    val doe = z - era * 146097
+    val yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    val y = yoe + era * 400
+    val doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    val mp = (5 * doy + 2) / 153
+    val d = doy - (153 * mp + 2) / 5 + 1
+    var m = mp + 3
+    if mp >= 10:
+        m = mp - 9
+    var year = y
+    if m <= 2:
+        year = y + 1
+    (year, m, d)
+
+# datetime.now(timezone.utc).isoformat(): the fraction is omitted when zero.
+pub fn iso_utc_from_unix_micros(micros: i64) -> text:
+    val secs = micros / 1000000
+    val frac = micros - secs * 1000000
+    val days = secs / 86400
+    val rem = secs - days * 86400
+    val (y, mo, d) = civil_from_days(days)
+    var out = "{pad(y, 4)}-{pad(mo, 2)}-{pad(d, 2)}T{pad(rem / 3600, 2)}:{pad((rem % 3600) / 60, 2)}:{pad(rem % 60, 2)}"
+    if frac != 0:
+        out = out + ".{pad(frac, 6)}"
+    out + "+00:00"
+
+# ---- batch-state.json rows ----
+
+pub fn closed_row(entry: text, backend: text, identity: text, packet: text, child_exit: i64, closure: text, result: JsonValue) -> JsonValue:
+    var row = json_value_object_from([("entry", JsonValue.Str(entry)), ("backend", JsonValue.Str(backend)), ("identity", JsonValue.Str(identity)), ("packet", JsonValue.Str(packet)), ("child_exit", JsonValue.Int(child_exit)), ("closure", JsonValue.Str(closure)), ("result", result)])
+    if json_value_keys(result).len() > 0:
+        for key in ["binary_linked", "binary_sha256", "sanity_pass"]:
+            row = json_value_object_set(row, key, json_value_field(result, key))
+    row
+
+pub fn skipped_row(entry: text, backend: text, identity: text) -> JsonValue:
+    json_value_object_from([("entry", JsonValue.Str(entry)), ("backend", JsonValue.Str(backend)), ("status", JsonValue.Str("SKIPPED_EXACT_VERIFIED_SUCCESS")), ("identity", JsonValue.Str(identity))])
+
+# ---- paths ----
+
+# Directory part of a path (either separator); "." when there is none.
+pub fn dir_of(path: text) -> text:
+    var i = path.len() - 1
+    while i >= 0:
+        val c = path.substring(i, i + 1)
+        if c == "/" or c == "\\":
+            if i == 0:
+                return "/"
+            return path.substring(0, i)
+        i = i - 1
+    "."
+
+# Drop the UTF-8 BOM Python utf-8-sig accepted. replace() not substring(): the
+# seed interpreter mixes char len() with byte substring() on non-ASCII text.
+pub fn strip_bom(raw: text) -> text:
+    val bom = char_from_code(65279)
+    if raw.starts_with(bom):
+        return raw.replace(bom, "")
+    raw

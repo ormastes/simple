@@ -47,3 +47,16 @@ that can queue it. POSIX retains the explicit leaf import and original export.
 Broad --source src/lib supplies resolver roots, not a forced full scan, under
 --entry-closure. This is exact source-callgraph evidence, not native-positive
 execution.
+
+## 2026-11-06 re-verification (fixed)
+
+Premise re-checked on release/1.0.0: the seed preprocessor limitation is gone.
+`pipeline/cfg_strip.rs::strip_os_when_blocks` now delegates to
+`simple_parser::cond_compile::select_branches`, which accepts any OS atom
+(linux/freebsd/macos/windows) including nested `@when/@else/@end`. Evidence on
+Windows (CC=clang-cl, own target dir):
+`cargo test --lib -p simple-compiler -- os_when_path_identity os_when_blocks_select`
+-> both pass (`os_when_path_identity_selects_nested_platform_owner` covers the
+exact path_identity_abi errno chain for all four OSes). The leaf-module import
+workaround (`io/_PathIdentityPosix/errno_abi.spl`) is behaviour-identical and is
+left in place; retiring it is cosmetic, not a defect.

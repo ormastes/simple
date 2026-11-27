@@ -137,3 +137,9 @@ Option B should follow as a correctness fix for the interpreter.
 ## Host-environment classification (2026-09-18)
 
 Audited by the fix-pipeline classification review: **seed-owned** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Re-verification — 2026-11-05
+
+Both crypto specs re-run on an aarch64 Linux host under the seed interpreter:
+lowering_aarch64_crypto_spec.spl 24/24 PASS (including crypto_aes_inv_round,
+the originally-failing case) and encode_aarch64_crypto_spec.spl 15/15 PASS.

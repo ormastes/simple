@@ -1,5 +1,16 @@
 # Bug: `expect(n).to_equal(0)` mis-reports the integer `0` as falsy
 
+## Verification 2026-11-25 — closure confirmed on pinned binary
+
+- **measured** Binary: pinned tracked `bin/simple.exe` (Rust seed
+  v1.0.0-rc.1, 38,403,072 bytes), worktree `wt-p2w5-al` at release/1.0.0
+  HEAD (`ae1572aeb67`), Windows host, `SIMPLE_LIB=src bin/simple.exe run`.
+- **measured** Probe exercising the entry's exact repro family —
+  `expect(0).to_equal(0)`, `expect(n).to_equal(0)` with `val n = 0`, and a
+  non-zero control `expect(5).to_equal(5)` — completes and prints the
+  probe's success marker; no `expected call result to be truthy, got 0`
+  failure. The 2026-09-13 closure below is confirmed at this HEAD.
+
 ## Closed 2026-09-13 — `to_equal(0)` on a falsy value passes
 
 - **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.

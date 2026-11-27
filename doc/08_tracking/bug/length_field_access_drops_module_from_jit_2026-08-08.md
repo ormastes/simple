@@ -121,3 +121,19 @@ it**. (Note: nothing binds at all — this is NOT a wrong-binding-to-a-same-name
 symbol defect.) Its `Environment` is now structurally identical to the live
 `backend/env.spl` `Environment`, so deletion loses nothing.
 
+
+## Triage 2026-11-25 (lane p2w3-ak) — root cause is Rust-seed HIR; left OPEN
+
+- The lowering gap lives in the Rust seed
+  (`src/compiler_rust/compiler/src/hir/lower/expr/access.rs:398`,
+  `LowerError::Unsupported` for paren-less field access on builtin
+  containers). Fixing it requires a seed rebuild, which is out of scope for
+  pure-Simple lanes (no cargo builds; the tracked `bin/simple.exe` is pinned).
+- The alternative pure-Simple route — rewriting the ~384 field-style
+  `.length` sites — is explicitly warned against by this record (Dict
+  receivers change semantics under native codegen; genuine struct `length`
+  fields are not statically distinguishable by grep), so it was not attempted.
+- The recommended fence (`SIMPLE_JIT_STRICT=1` build/check gate or a
+  `[jit-fallback]` stderr grep in `scripts/check/`) remains the correct
+  owner-level next step. Severity stays perf-only and silent for `.length`;
+  left OPEN for the seed/compiler owner.

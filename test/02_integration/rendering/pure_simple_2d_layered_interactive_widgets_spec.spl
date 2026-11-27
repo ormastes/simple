@@ -1,0 +1,349 @@
+# @cover src/lib/common/ui/interactive_desktop_scene.spl 80%
+# @cover src/lib/common/ui/widget_draw_ir.spl 80%
+# @cover src/lib/common/ui/widget_hit.spl 80%
+# @cover src/lib/common/ui/builder.spl 80%
+"""Integration spec for Pure-Simple layered, transparent, interactive 2D widgets.
+
+Covers Software + Vulkan Engine2D rendering parity, translucent alpha layer
+compositing, Draw-IR overlay batches (dropdown/context menu/internal windows/UTF-8
+caret), and step-by-step stateful + visual buffer verification across all 6
+interactions:
+  1. Button click counter & label
+  2. Draggable floating card (pointer down -> move -> up)
+  3. Layered internal windows (z-order raise, focus border, titlebar drag)
+  4. Dropdown (open popup, select item, close)
+  5. Context menu (right-click open at (x, y), select action, close)
+  6. Text field (focus border, UTF-8 codepoint insert & backspace + caret)
+"""
+
+use std.spec.step
+use std.spec.{describe, context, it, expect}
+use common.ui.builder.{
+    column, button, dropdown, text_field,
+    context_menu, internal_window, with_width, with_height, with_open
+}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU}
+use common.ui.widget.{WidgetNode}
+use common.ui.widget_draw_ir.{widget_tree_to_draw_ir}
+use common.ui.widget_hit.{
+    widget_dispatch_pointer_down,
+    widget_dispatch_pointer_move,
+    widget_dispatch_pointer_up,
+    widget_dispatch_context_menu,
+    widget_dispatch_key_input
+}
+use common.ui.interactive_desktop_scene.{
+    InteractiveDesktopScene,
+    render_interactive_desktop
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.color.{color_r, color_g, color_b}
+
+val SCENE_W: i32 = 640
+val SCENE_H: i32 = 420
+
+fn _render_software(scene: InteractiveDesktopScene) -> [u32]:
+    var engine = Engine2D.create_with_backend(SCENE_W, SCENE_H, "software")
+    render_interactive_desktop(scene, engine)
+    val rb = engine.read_pixels_with_source()
+    expect(rb.source).to_equal("cpu_mirror")
+    engine.present()
+    val pixels = rb.pixels
+    engine.shutdown()
+    pixels
+
+fn _render_vulkan_checked(scene: InteractiveDesktopScene) -> [u32]:
+    val created = Engine2D.create_with_backend_strict(SCENE_W, SCENE_H, "vulkan")
+    expect(created.is_ok()).to_equal(true)
+    var engine = created.unwrap()
+    render_interactive_desktop(scene, engine)
+    # Must read pixels BEFORE present() so device_readback runs against the live GPU framebuffer.
+    val rb = engine.read_pixels_with_source()
+    expect(rb.source).to_equal("device_readback")
+    expect(rb.backend_handle).to_be_greater_than(0)
+    expect(engine.vulkan_cpu_fallback_reason()).to_equal("")
+    var vk_fallback = false
+    if val Some(vk) = engine.vulkan_backend:
+        vk_fallback = vk.cpu_fallback_used
+        expect(vk.cpu_fallback_used).to_equal(false)
+    if val Some(receipt) = engine.latest_vulkan_frame_receipt():
+        expect(receipt.cpu_fallback_used).to_equal(false)
+    print("VULKAN_WIDGETS source={rb.source} backend_handle={rb.backend_handle} cpu_fallback_used={vk_fallback}")
+    engine.present()
+    val pixels = rb.pixels
+    engine.shutdown()
+    pixels
+
+fn _mismatch_count(a: [u32], b: [u32]) -> i64:
+    if a.len() != b.len():
+        return -1
+    var bad: i64 = 0
+    var i: i64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            bad = bad + 1
+        i = i + 1
+    bad
+
+fn _region_diff_count(a: [u32], b: [u32], width: i32, x0: i32, y0: i32, x1: i32, y1: i32) -> i64:
+    if a.len() != b.len():
+        return -1
+    var diff: i64 = 0
+    var py: i32 = y0
+    while py < y1:
+        var px: i32 = x0
+        while px < x1:
+            val idx: i64 = (py as i64) * (width as i64) + (px as i64)
+            if idx >= 0 and idx < a.len() and a[idx] != b[idx]:
+                diff = diff + 1
+            px = px + 1
+        py = py + 1
+    diff
+
+fn _has_cmd_id(comp_cmds: [text], target: text) -> bool:
+    for id in comp_cmds:
+        if id == target:
+            return true
+    false
+
+describe "Pure-Simple 2D layered, translucent & interactive widgets (Software + Vulkan)":
+
+    it "Draw-IR projects layered internal windows, open dropdowns, open context menus, and UTF-8 caret":
+        step("Build WidgetNode tree with internal windows, UTF-8 textfield, dropdown, and context menu")
+        var drop = with_height(with_width(dropdown("ir_drop", ["Glass", "Tinted"]), 140), 28)
+        var tf = with_height(with_width(text_field("ir_tf", "Café", "Name"), 180), 30)
+        tf = tf.set_prop("ui_focus", "true")
+        tf = tf.set_prop("caret", "4")
+        var ctx = context_menu("ir_ctx", ["Pin", "Reset"], 220, 140)
+        var w1 = internal_window("ir_w1", "Notes", 20, 20, 220, 140, 1, 820, [])
+        var w2 = internal_window("ir_w2", "Inspector", 100, 60, 220, 140, 2, 820, [])
+        val root = column("ir_root", [w1, w2, drop, tf, ctx])
+
+        step("Verify closed dropdown keeps 0 popup batches and closed context menu stays hidden")
+        val closed_comp = widget_tree_to_draw_ir(root, SCENE_W, SCENE_H, DRAW_IR_BACKEND_CPU)
+        expect(closed_comp.batches.len()).to_equal(3)
+
+        step("Open dropdown and context menu and verify high-z translucent overlay batches + focus border + UTF-8 caret")
+        drop = with_open(drop, true)
+        ctx = with_open(ctx, true)
+        val open_comp = widget_tree_to_draw_ir(root, SCENE_W, SCENE_H, DRAW_IR_BACKEND_CPU)
+        expect(open_comp.batches.len()).to_equal(5)
+        expect(open_comp.batches[3].embedding.layer).to_be_greater_than(99)
+        expect(open_comp.batches[3].embedding.opacity_milli).to_be_less_than(1000)
+        expect(open_comp.batches[4].embedding.layer).to_be_greater_than(199)
+        expect(open_comp.batches[4].embedding.opacity_milli).to_be_less_than(1000)
+
+        var main_ids: [text] = []
+        for cmd in open_comp.batches[0].commands:
+            main_ids.push(cmd.component_id)
+        expect(_has_cmd_id(main_ids, "ir_tf-focus-border")).to_equal(true)
+        expect(_has_cmd_id(main_ids, "ir_tf-caret")).to_equal(true)
+
+    it "widget_hit dispatches pointer drag, window z-order raise, dropdown select, context menu, and UTF-8 typing":
+        step("Build WidgetNode tree and dispatch all interactive event primitives")
+        var drop = with_height(with_width(dropdown("hit_drop", ["Glass", "Tinted"]), 140), 28)
+        var tf = with_height(with_width(text_field("hit_tf", "", "Type"), 180), 30)
+        var btn = with_height(with_width(button("hit_btn", "Go", "go"), 120), 30)
+        var ctx = context_menu("hit_ctx", ["Pin", "Reset"], 10, 10)
+        var w1 = internal_window("hit_w1", "Back", 30, 30, 200, 140, 1, 820, [])
+        var w2 = internal_window("hit_w2", "Front", 120, 60, 200, 140, 2, 820, [])
+        val root = column("hit_root", [btn, drop, tf, w1, w2, ctx])
+
+        step("Click back window to raise z-order above front window and drag titlebar")
+        val raised = widget_dispatch_pointer_down(root, SCENE_W, SCENE_H, 50, 42)
+        expect(raised).to_equal("hit_w1")
+        expect(WidgetNode(id: "hit_w1").get_prop("z_order")).to_equal("3")
+        widget_dispatch_pointer_move(root, SCENE_W, SCENE_H, 80, 62)
+        widget_dispatch_pointer_up(root, SCENE_W, SCENE_H, 80, 62)
+        expect(WidgetNode(id: "hit_w1").get_prop("x")).to_equal("60")
+        expect(WidgetNode(id: "hit_w1").get_prop("y")).to_equal("50")
+
+        step("Open context menu at (280, 160) and trigger item 0")
+        val opened_ctx = widget_dispatch_context_menu(root, SCENE_W, SCENE_H, 280, 160)
+        expect(opened_ctx).to_equal("hit_ctx")
+        expect(WidgetNode(id: "hit_ctx").get_prop("open")).to_equal("true")
+        val picked_ctx = widget_dispatch_pointer_down(root, SCENE_W, SCENE_H, 300, 172)
+        expect(picked_ctx).to_equal("hit_ctx_item_0")
+        expect(WidgetNode(id: "hit_ctx").get_prop("open")).to_equal("false")
+        expect(WidgetNode(id: "hit_ctx").get_prop("last_action")).to_equal("Pin")
+
+        step("Open dropdown, select option, focus textfield, and edit UTF-8 text via widget_hit")
+        widget_dispatch_pointer_down(root, SCENE_W, SCENE_H, 20, 44)
+        expect(WidgetNode(id: "hit_drop").get_prop("open")).to_equal("true")
+        widget_dispatch_pointer_down(root, SCENE_W, SCENE_H, 20, 92)
+        expect(WidgetNode(id: "hit_drop").get_prop("open")).to_equal("false")
+        expect(WidgetNode(id: "hit_drop").get_prop("value")).to_equal("Tinted")
+
+        widget_dispatch_pointer_down(root, SCENE_W, SCENE_H, 20, 73)
+        expect(WidgetNode(id: "hit_tf").get_prop("ui_focus")).to_equal("true")
+        widget_dispatch_key_input(root, "C")
+        widget_dispatch_key_input(root, "a")
+        widget_dispatch_key_input(root, "f")
+        widget_dispatch_key_input(root, "é")
+        expect(WidgetNode(id: "hit_tf").get_prop("value")).to_equal("Café")
+        expect(WidgetNode(id: "hit_tf").get_prop("caret")).to_equal("4")
+        widget_dispatch_key_input(root, "Backspace")
+        expect(WidgetNode(id: "hit_tf").get_prop("value")).to_equal("Caf")
+        expect(WidgetNode(id: "hit_tf").get_prop("caret")).to_equal("3")
+
+    it "composites translucent overlapping layers differently from opaque and achieves Software vs Vulkan parity":
+        step("Render translucent desktop scene on Software and Vulkan backends")
+        var translucent_scene = InteractiveDesktopScene.create(SCENE_W, SCENE_H)
+        val sw_trans = _render_software(translucent_scene)
+        val vk_trans = _render_vulkan_checked(translucent_scene)
+        expect(sw_trans.len()).to_equal((SCENE_W * SCENE_H) as i64)
+        expect(vk_trans.len()).to_equal((SCENE_W * SCENE_H) as i64)
+        expect(_mismatch_count(sw_trans, vk_trans)).to_equal(0)
+
+        step("Render opaque version of the same scene and confirm overlap pixels blend when alpha < 255")
+        var opaque_scene = InteractiveDesktopScene.create(SCENE_W, SCENE_H)
+        opaque_scene.set_layers_opacity(1000)
+        val sw_opaque = _render_software(opaque_scene)
+        val vk_opaque = _render_vulkan_checked(opaque_scene)
+        expect(_mismatch_count(sw_opaque, vk_opaque)).to_equal(0)
+
+        # Pixel (200, 140) lies in the overlap of win_back (coral) and win_front (cyan)
+        val overlap_idx: i64 = (140 as i64) * (SCENE_W as i64) + (200 as i64)
+        val trans_px = vk_trans[overlap_idx]
+        val opaque_px = vk_opaque[overlap_idx]
+        expect(trans_px != opaque_px).to_equal(true)
+        # Coral win_back contributes noticeable Red through translucent cyan win_front
+        expect(color_r(trans_px)).to_be_greater_than(color_r(opaque_px))
+
+    it "executes all 6 interactive events and updates rendered Software + Vulkan buffers at each step":
+        var scene = InteractiveDesktopScene.create(SCENE_W, SCENE_H)
+        var prev_sw = _render_software(scene)
+        var prev_vk = _render_vulkan_checked(scene)
+        expect(_mismatch_count(prev_sw, prev_vk)).to_equal(0)
+
+        step("1) Button click increments counter and updates button pixels")
+        scene.pointer_down(100, 288)
+        scene.pointer_up(100, 288)
+        expect(scene.button.click_count).to_equal(1)
+        expect(scene.button.active_label).to_equal("clicks: 1")
+        var next_sw = _render_software(scene)
+        var next_vk = _render_vulkan_checked(scene)
+        expect(_mismatch_count(next_sw, next_vk)).to_equal(0)
+        expect(_region_diff_count(prev_sw, next_sw, SCENE_W, 40, 270, 180, 306)).to_be_greater_than(15)
+        expect(_region_diff_count(prev_vk, next_vk, SCENE_W, 40, 270, 180, 306)).to_be_greater_than(15)
+        prev_sw = next_sw
+        prev_vk = next_vk
+
+        step("2) Dragging floating card repositions (x, y) and updates both old and new card regions")
+        val old_card_y = scene.card.y
+        scene.pointer_down(480, 80)
+        scene.pointer_move(480, 175)
+        scene.pointer_up(480, 175)
+        expect(scene.card.y).to_be_greater_than(old_card_y + 80)
+        next_sw = _render_software(scene)
+        next_vk = _render_vulkan_checked(scene)
+        expect(_mismatch_count(next_sw, next_vk)).to_equal(0)
+        expect(_region_diff_count(prev_sw, next_sw, SCENE_W, 430, 50, 600, 140)).to_be_greater_than(200)
+        expect(_region_diff_count(prev_vk, next_vk, SCENE_W, 430, 145, 600, 235)).to_be_greater_than(200)
+        prev_sw = next_sw
+        prev_vk = next_vk
+
+        step("3) Internal window click raises z-order above sibling and titlebar drag moves window")
+        scene.pointer_down(70, 95)
+        scene.pointer_up(70, 95)
+        expect(scene.win_back.focused).to_equal(true)
+        expect(scene.win_front.focused).to_equal(false)
+        expect(scene.win_back.z_order).to_be_greater_than(scene.win_front.z_order)
+        next_sw = _render_software(scene)
+        next_vk = _render_vulkan_checked(scene)
+        expect(_mismatch_count(next_sw, next_vk)).to_equal(0)
+        expect(_region_diff_count(prev_vk, next_vk, SCENE_W, 150, 80, 300, 210)).to_be_greater_than(500)
+        prev_sw = next_sw
+        prev_vk = next_vk
+
+        val prev_wx = scene.win_back.x
+        val prev_wy = scene.win_back.y
+        scene.pointer_down(80, 52)
+        scene.pointer_move(115, 72)
+        scene.pointer_up(115, 72)
+        expect(scene.win_back.x).to_equal(prev_wx + 35)
+        expect(scene.win_back.y).to_equal(prev_wy + 20)
+        next_sw = _render_software(scene)
+        next_vk = _render_vulkan_checked(scene)
+        expect(_mismatch_count(next_sw, next_vk)).to_equal(0)
+        expect(_region_diff_count(prev_vk, next_vk, SCENE_W, 40, 40, 340, 240)).to_be_greater_than(500)
+        prev_sw = next_sw
+        prev_vk = next_vk
+
+        step("4) Dropdown click opens popup menu -> clicking option updates value & closes")
+        scene.pointer_down(250, 286)
+        scene.pointer_up(250, 286)
+        expect(scene.dropdown.open).to_equal(true)
+        next_sw = _render_software(scene)
+        next_vk = _render_vulkan_checked(scene)
+        expect(_mismatch_count(next_sw, next_vk)).to_equal(0)
+        expect(_region_diff_count(prev_vk, next_vk, SCENE_W, 200, 304, 360, 384)).to_be_greater_than(500)
+        prev_sw = next_sw
+        prev_vk = next_vk
+
+        scene.pointer_down(250, 336)
+        scene.pointer_up(250, 336)
+        expect(scene.dropdown.open).to_equal(false)
+        expect(scene.dropdown_value()).to_equal("Tinted")
+        next_sw = _render_software(scene)
+        next_vk = _render_vulkan_checked(scene)
+        expect(_mismatch_count(next_sw, next_vk)).to_equal(0)
+        expect(_region_diff_count(prev_vk, next_vk, SCENE_W, 200, 270, 360, 302)).to_be_greater_than(15)
+        expect(_region_diff_count(prev_vk, next_vk, SCENE_W, 200, 304, 360, 384)).to_be_greater_than(500)
+        prev_sw = next_sw
+        prev_vk = next_vk
+
+        step("5) Context menu right-click opens at (290, 170) -> item click dispatches action & closes")
+        scene.context_menu_at(290, 170)
+        expect(scene.context_menu.open).to_equal(true)
+        expect(scene.context_menu.anchor_x).to_equal(290)
+        expect(scene.context_menu.anchor_y).to_equal(170)
+        next_sw = _render_software(scene)
+        next_vk = _render_vulkan_checked(scene)
+        expect(_mismatch_count(next_sw, next_vk)).to_equal(0)
+        expect(_region_diff_count(prev_vk, next_vk, SCENE_W, 290, 170, 450, 250)).to_be_greater_than(500)
+        prev_sw = next_sw
+        prev_vk = next_vk
+
+        scene.pointer_down(340, 186)
+        scene.pointer_up(340, 186)
+        expect(scene.context_menu.open).to_equal(false)
+        expect(scene.context_menu.last_action).to_equal("Pin Layer")
+        next_sw = _render_software(scene)
+        next_vk = _render_vulkan_checked(scene)
+        expect(_mismatch_count(next_sw, next_vk)).to_equal(0)
+        expect(_region_diff_count(prev_vk, next_vk, SCENE_W, 290, 170, 450, 250)).to_be_greater_than(500)
+        prev_sw = next_sw
+        prev_vk = next_vk
+
+        step("6) Text field click focuses -> UTF-8 chars & Backspace update value, caret & pixels")
+        scene.pointer_down(430, 286)
+        scene.pointer_up(430, 286)
+        expect(scene.textfield.focused).to_equal(true)
+        next_sw = _render_software(scene)
+        next_vk = _render_vulkan_checked(scene)
+        expect(_mismatch_count(next_sw, next_vk)).to_equal(0)
+        expect(_region_diff_count(prev_vk, next_vk, SCENE_W, 380, 270, 600, 304)).to_be_greater_than(50)
+        prev_sw = next_sw
+        prev_vk = next_vk
+
+        scene.key_input("C")
+        scene.key_input("a")
+        scene.key_input("f")
+        scene.key_input("é")
+        expect(scene.textfield.value).to_equal("Café")
+        expect(scene.textfield.caret).to_equal(4)
+        next_sw = _render_software(scene)
+        next_vk = _render_vulkan_checked(scene)
+        expect(_mismatch_count(next_sw, next_vk)).to_equal(0)
+        expect(_region_diff_count(prev_vk, next_vk, SCENE_W, 382, 274, 598, 300)).to_be_greater_than(30)
+        prev_sw = next_sw
+        prev_vk = next_vk
+
+        scene.key_input("Backspace")
+        expect(scene.textfield.value).to_equal("Caf")
+        expect(scene.textfield.caret).to_equal(3)
+        next_sw = _render_software(scene)
+        next_vk = _render_vulkan_checked(scene)
+        expect(_mismatch_count(next_sw, next_vk)).to_equal(0)
+        expect(_region_diff_count(prev_vk, next_vk, SCENE_W, 382, 274, 598, 300)).to_be_greater_than(10)

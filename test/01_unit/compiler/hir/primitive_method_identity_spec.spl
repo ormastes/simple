@@ -1,0 +1,61 @@
+# @req REQ-PRIMITIVE-TRAIT-IDENTITY
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable, SymbolKind}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.primitive_method_identity.{hir_primitive_owner_name, hir_primitive_impl_method_name}
+
+describe "primitive method declaration identity":
+    it "preserves each primitive kind, integer width and signedness":
+        step("Build canonical owners from settled HIR primitive kinds")
+        expect(hir_primitive_owner_name(HirTypeKind.Int(8, true))).to_equal("i8")
+        expect(hir_primitive_owner_name(HirTypeKind.Int(32, true))).to_equal("i32")
+        expect(hir_primitive_owner_name(HirTypeKind.Int(64, true))).to_equal("i64")
+        expect(hir_primitive_owner_name(HirTypeKind.Int(32, false))).to_equal("u32")
+        expect(hir_primitive_owner_name(HirTypeKind.Int(64, false))).to_equal("u64")
+        expect(hir_primitive_owner_name(HirTypeKind.Float(32))).to_equal("f32")
+        expect(hir_primitive_owner_name(HirTypeKind.Float(64))).to_equal("f64")
+        expect(hir_primitive_owner_name(HirTypeKind.Bool)).to_equal("bool")
+        expect(hir_primitive_owner_name(HirTypeKind.Char)).to_equal("char")
+        expect(hir_primitive_owner_name(HirTypeKind.Str)).to_equal("text")
+        expect(hir_primitive_owner_name(HirTypeKind.Unit)).to_equal("unit")
+        expect(hir_primitive_owner_name(HirTypeKind.Infer(0, 0))).to_equal("")
+
+    it "uses canonical trait declarations rather than alias spellings or symbol numbers":
+        step("Bind an imported trait alias and a second trait over the same primitive")
+        var symbols = SymbolTable.new()
+        val alias = symbols.define("Alias", SymbolKind.Trait, nil,
+            Span.empty(), Visibility.Public, false, Some("src/provider.spl"))
+        symbols.rename_symbol(alias, "Marker")
+        val other = symbols.define("Other", SymbolKind.Trait, nil,
+            Span.empty(), Visibility.Public, false, Some("src/provider.spl"))
+        val scalar = HirType(kind: HirTypeKind.Int(32, true), span: Span.empty())
+        val trait_type = HirType(kind: HirTypeKind.Named(alias, []), span: Span.empty())
+        val other_type = HirType(kind: HirTypeKind.Named(other, []), span: Span.empty())
+        expect(hir_primitive_impl_method_name(symbols, scalar, trait_type, true,
+            "src/consumer.spl", "mark")).to_equal("consumer.i32::provider.Marker::mark")
+        expect(hir_primitive_impl_method_name(symbols, scalar, other_type, true,
+            "src/consumer.spl", "mark")).to_equal("consumer.i32::provider.Other::mark")
+        expect(hir_primitive_impl_method_name(symbols, scalar, trait_type, true,
+            "src/other_consumer.spl", "mark")).to_equal("other_consumer.i32::provider.Marker::mark")
+        expect(hir_primitive_impl_method_name(symbols, scalar, trait_type, false,
+            "", "mark")).to_equal("i32::mark")
+
+    it "does not invent primitive identities for nominal or unresolved trait owners":
+        step("Leave unsupported owner kinds to their existing lowering paths")
+        var symbols = SymbolTable.new()
+        val invalid = HirType(kind: HirTypeKind.Error, span: Span.empty())
+        val nominal = HirType(kind: HirTypeKind.Named(SymbolId(id: 7), []), span: Span.empty())
+        val scalar = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        expect(hir_primitive_impl_method_name(symbols, nominal, invalid, false,
+            "src/probe.spl", "mark")).to_equal("")
+        expect(hir_primitive_impl_method_name(symbols, scalar, invalid, true,
+            "src/probe.spl", "mark")).to_equal("")
+        expect(hir_primitive_impl_method_name(symbols, scalar, nominal, true,
+            "src/probe.spl", "mark")).to_equal("")
+        val record = symbols.define("Record", SymbolKind.Struct, nil,
+            Span.empty(), Visibility.Public, false, Some("src/probe.spl"))
+        val record_type = HirType(kind: HirTypeKind.Named(record, []), span: Span.empty())
+        expect(hir_primitive_impl_method_name(symbols, scalar, record_type, true,
+            "src/probe.spl", "mark")).to_equal("")

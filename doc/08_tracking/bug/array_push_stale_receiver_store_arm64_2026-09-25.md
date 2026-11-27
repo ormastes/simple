@@ -109,3 +109,34 @@ Note: the same boot shows the leak shape is not payload-specific — any
 push loop past its created capacity on this lane leaks at ~16 KB per
 element until exhaustion. The kernel survives only because every existing
 push loop either stays under the created capacity or pre-sizes correctly.
+
+## Current-source negative repro — 2026-11-05
+
+The stale-receiver store no longer reproduces at current release/1.0.0
+source. A minimal growth-shape method (`var row: [i64] = []; row.push(id);
+row.push(id+1); row.push(id+2); self.mounts.push(row)`, i.e. pushes past
+default capacity plus a nested-array push) was compiled for
+aarch64-unknown-none with the seed cranelift backend (--opt-level=aggressive,
+same flags as scripts/qemu/check_simpleos_arm64_clang_compile.shs) and
+disassembled (aarch64-linux-gnu-objdump):
+
+- every `rt_array_push` call's returned x0 header is captured into a
+  callee-saved register and chained into the next call's argument, so the
+  value pushed is always the current header, never the stale pre-call one;
+- the outer `self.mounts.push(row)` emits `blr rt_array_push` immediately
+  followed by `str x0, [x23]` where x23 is the receiver slot address loaded
+  fresh after the pushes — the RETURNED (possibly moved) header is stored
+  back, which is exactly the fix shape (the 2026-09-25 bytes stored the stale
+  pre-call register instead);
+- zero `udf` instructions in the object.
+
+Repro recipe: minimal entry under test/_probe_root_tmp, native-build
+--target aarch64-unknown-none --backend cranelift --opt-level=aggressive
+--entry-closure --source src/os --source src/lib
+--source examples/09_embedded/simple_os, disassemble the kept objects on the
+expected freestanding link failure.
+
+Remaining acceptance NOT claimed: element-count preservation across a real
+growth boot on the lane-C1 target (the freestanding realloc still always
+moves; the in-place-mutation assumption elsewhere in the compiler is a
+separate ABI contract question) and re-running the MountTable boot path.

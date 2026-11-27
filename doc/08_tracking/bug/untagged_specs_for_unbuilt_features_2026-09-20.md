@@ -76,3 +76,10 @@ is why this is a record rather than a patch.
   surface that appears maintained and is not.
 - `std_suite_failures_are_unbuilt_features_2026-09-20` — the per-suite detail
   for `01_unit/std`, including the one genuine concurrency defect in it.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+fix is a tagging/roadmap decision, not a code change. Owner: test-infra decision.

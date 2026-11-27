@@ -1,0 +1,51 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# mir_class_identity_raw: scalar-accessor class identity
+
+Stage3 AV (s3_fable39): mir_class_identity(HirSymbol) faulted at +0xd1 when a
+HirSymbol crossed the call by value. All callers now use
+mir_class_identity_raw(SymbolTable, raw id), which reads name and owner via
+scalar accessors. Parts: (1) repro of the identity contract (owner, no owner,
+missing id), (2) sibling prevention: the by-value function is gone from
+src/compiler (guard script), (3) coverage of the separator arms.
+"""
+
+# @tag: unit, compiler, mir, stage3-workaround
+
+use std.spec
+use std.io_runtime.{file_read}
+use compiler.hir.hir_types.{SymbolTable, SymbolKind, SymbolId}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.mir._MirLowering.provider_metadata.{mir_class_identity_raw}
+
+fn mcir_span() -> Span:
+    Span.new(1, 2, 1, 1)
+
+describe "mir_class_identity_raw":
+    it "qualifies a symbol that has an owner module":
+        var t = SymbolTable.new()
+        val id = t.define("Widget", SymbolKind.Class, nil, mcir_span(), Visibility.Public, false, Some("mcir_mod"))
+        assert_eq(mir_class_identity_raw(t, id.id), "mcir_mod.Widget")
+
+    it "returns the bare name for a symbol without an owner":
+        var t = SymbolTable.new()
+        val id = t.define("Bare", SymbolKind.Class, nil, mcir_span(), Visibility.Public, false, nil)
+        assert_eq(mir_class_identity_raw(t, id.id), "Bare")
+
+    it "returns empty text for a missing id":
+        val t = SymbolTable.new()
+        assert_eq(mir_class_identity_raw(t, 99999), "")
+
+    it "qualifies a nested module path by its logical owner":
+        var t = SymbolTable.new()
+        val id = t.define("Deep", SymbolKind.Struct, nil, mcir_span(), Visibility.Public, false, Some("mcir_pkg.mcir_inner"))
+        val key = mir_class_identity_raw(t, id.id)
+        assert_true(key.ends_with(".Deep"))
+
+describe "by-value mir_class_identity stays removed (similar-pattern prevention)":
+    it "no mir_class_identity( site remains under src/compiler/50.mir":
+        for f in ["_MirLowering/provider_metadata.spl", "_MirLowering/declaration_providers_v1.spl", "_MirLowering/module_lowering.spl", "_MirLowering/function_lowering.spl", "_MirLoweringExpr/expr_dispatch.spl", "_MirLoweringExpr/method_calls_literals.spl", "_MirLoweringExpr/switch_operators_calls.spl"]:
+            val src = file_read("src/compiler/50.mir/{f}") ?? ""
+            assert_true(src.len() > 0)
+            assert_false(src.contains("mir_class_identity("))

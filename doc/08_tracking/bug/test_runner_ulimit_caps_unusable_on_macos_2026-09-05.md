@@ -1,4 +1,8 @@
 # Test runner's ulimit caps make `simple test <dir>` unusable on macOS (2026-09-05)
+
+> **Triage 2026-11-05 (release/1.0.0 worktree):** source fix verified on the
+> native macOS seed lane per the 2026-11-04 acceptance below; nothing
+> source-level remains reproducible here. Not selected for this pass.
 ## Update 2026-09-21 — process-policy source fix, native verification pending
 
 Status: fix-implemented-verification-pending
@@ -180,3 +184,14 @@ Blockers 3, then 2, then (already done) 1. Fixing 1 alone does not move the
 ## Related
 Matches the previously recorded "Memory limit 16GB lie" class -- a per-UID
 `ulimit` misfire being reported as a memory/compilation problem.
+
+## 2026-11-04 native macOS acceptance (lane 4)
+
+Host: macOS 26 (Darwin 25.5.0) arm64. Tree: release/1.0.0 `63f61763a3f`.
+Binary: `/Users/ormastes/.local/share/simple-seeds/release100-7a0e6fe516f-20261031/simple` (Rust bootstrap seed, `SIMPLE_LIB=src`).
+All four focused specs pass on the native macOS host:
+macos_process_policy 4/4, safe_mode_caps 3/3, args 98/98,
+single_lane_arg_parsing_neighbors 24/24.
+Source-matched Phase 2 full-CLI re-run remains pending (no admitted macOS
+full-CLI deploy exists for this tree; bootstrap lane owns that).
+Status: VERIFIED on macOS (seed lane); full-CLI acceptance pending.

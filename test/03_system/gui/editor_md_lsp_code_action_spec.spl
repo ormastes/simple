@@ -1,27 +1,89 @@
-# @cover src/lib/nogc_async_mut_noalloc/baremetal/test/interrupt_policy_spec.spl 0%
-# editor_md_lsp_code_action_spec
-#
-# Markdown LSP quick-fix code action support.
+# @cover src/app/md_lsp/md_lsp_handler.spl 60%
+"""
+## Purpose and audience
+Markdown LSP `textDocument/codeAction` returns quick fixes built from typed
+FixReplacement byte spans, ranked by the shared `ranked_candidates_for` and
+validated through `EditTransaction` before advertisement. Audience: the
+md_lsp maintainer.
+## Operator workflow
+bin/simple test test/03_system/gui/editor_md_lsp_code_action_spec.spl
+## Compatibility and limitations
+In-process: requests are driven through the handler with hand-built params
+JSON; root is `file:///ws`.
+## Verification guidance and troubleshooting
+A RED on `character` means a byte column leaked to the wire (UTF-16 mapping
+broken); a whole-line range means the old line-rewrite path is back.
+"""
+# Lifecycle: doc/03_plan/release/1.0.0/inputs_2026-11-12/unified_diagnostics_parser_recovery_fix_suggestions_plan_2026-11-12.md (REQ-DIAG-009)
 
 use std.spec
-use app.io.mod.{file_read_text}
+use app.md_lsp.md_lsp_workspace.{MdWorkspace}
+use app.md_lsp.md_lsp_handler.{md_lsp_handle_notification_publishing, md_lsp_handle_request_raw}
 
-fn read_text(path: text) -> text:
-    file_read_text(path) ?? ""
+val URI = "file:///ws/a.md"
 
-describe "Markdown LSP — code actions":
+fn opened(content_json: text) -> MdWorkspace:
+    var ws = MdWorkspace.new()
+    md_lsp_handle_request_raw("initialize", "{\"rootUri\":\"file:///ws\"}", "1", ws)
+    md_lsp_handle_notification_publishing("textDocument/didOpen", "{\"textDocument\":{\"uri\":\"" + URI + "\",\"languageId\":\"markdown\",\"version\":3,\"text\":\"" + content_json + "\"}}", ws)
+    ws
 
-    it "advertises codeActionProvider":
-        val src = read_text("src/app/md_lsp/md_lsp_handler.spl")
-        expect(src.contains("codeActionProvider")).to_equal(true)
+fn code_action(ws: MdWorkspace, line: i64) -> text:
+    val pos = "{\"line\":" + line.to_text() + ",\"character\":0}"
+    md_lsp_handle_request_raw("textDocument/codeAction", "{\"textDocument\":{\"uri\":\"" + URI + "\"},\"range\":{\"start\":" + pos + ",\"end\":" + pos + "}}", "7", ws)
 
-    it "dispatches textDocument/codeAction":
-        val src = read_text("src/app/md_lsp/md_lsp_handler.spl")
-        expect(src.contains("fn md_lsp_code_action(params_json: text, req_id: i64, workspace: MdWorkspace) -> text")).to_equal(true)
-        expect(src.contains("if method == \"textDocument/codeAction\"")).to_equal(true)
+fn range_json(line: i64, from_ch: i64, to_ch: i64) -> text:
+    val l = line.to_text()
+    "\"range\":{\"start\":{\"line\":" + l + ",\"character\":" + from_ch.to_text() + "},\"end\":{\"line\":" + l + ",\"character\":" + to_ch.to_text() + "}}"
 
-    it "builds quickfix actions for markdown warnings":
-        val src = read_text("src/app/md_lsp/md_lsp_handler.spl")
-        expect(src.contains("Apply Markdown quick fix")).to_equal(true)
-        expect(src.contains("\"quickfix\"")).to_equal(true)
-        expect(src.contains("_md_lsp_quickfix_line")).to_equal(true)
+describe "Markdown LSP — typed code actions":
+
+    # @req REQ-DIAG-009
+    it "advertises codeActionProvider in the initialize result":
+        var ws = MdWorkspace.new()
+        step("initialize")
+        val resp = md_lsp_handle_request_raw("initialize", "{}", "1", ws)
+        expect(resp).to_contain("\"codeActionProvider\"")
+
+    # @req REQ-DIAG-009
+    it "deletes exactly the single trailing space byte span":
+        val ws = opened("# T\n\nHello \n")
+        step("codeAction on line 2")
+        val resp = code_action(ws, 2)
+        expect(resp).to_contain(range_json(2, 5, 6))
+        expect(resp).to_contain("\"newText\":\"\"")
+        expect(resp).to_contain("\"quickfix\"")
+        expect(resp).to_contain("Remove trailing space")
+
+    # @req REQ-DIAG-009
+    it "maps a trailing space after non-ASCII text to UTF-16 columns":
+        val ws = opened("# T\n\ncafé \n")
+        step("codeAction on line 2")
+        val resp = code_action(ws, 2)
+        expect(resp).to_contain(range_json(2, 4, 5))
+
+    # @req REQ-DIAG-009
+    it "inserts the missing heading space as a zero-width edit":
+        val ws = opened("##Title\n")
+        step("codeAction on line 0")
+        val resp = code_action(ws, 0)
+        expect(resp).to_contain(range_json(0, 2, 2))
+        expect(resp).to_contain("\"newText\":\" \"")
+
+    # @req REQ-DIAG-009
+    it "replaces only the empty link token":
+        val ws = opened("# T\n\nsee []() now\n")
+        step("codeAction on line 2")
+        val resp = code_action(ws, 2)
+        expect(resp).to_contain(range_json(2, 4, 8))
+        expect(resp).to_contain("\"newText\":\"[text](url)\"")
+
+    # @req REQ-DIAG-009
+    it "offers no action on a clean line":
+        val ws = opened("# T\n\nclean line\n")
+        expect(code_action(ws, 2)).to_contain("\"result\":[]")
+
+    # @req REQ-DIAG-009
+    it "offers no action inside a fenced code block":
+        val ws = opened("# T\n\n```\n#x \n```\n")
+        expect(code_action(ws, 3)).to_contain("\"result\":[]")

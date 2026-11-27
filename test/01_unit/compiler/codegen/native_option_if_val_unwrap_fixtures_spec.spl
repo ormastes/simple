@@ -1,0 +1,61 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Option unwrap fixtures (`if val`, `match Some(..)`, `?? 0`) executed for real.
+#
+# `test/fixtures/native_option_if_val_unwrap/{int_main,text_main}.spl` were filed
+# for doc/08_tracking/bug/native_inlined_option_return_representation_mismatch_2026-08-02.md
+# with no spec running them. Each fixture is run as a subprocess under the
+# interpreter and the JIT and asserted against ABSOLUTE literals (never "the
+# engines agree", which passes when both are wrong the same way). The native
+# lane is not covered here: `native-build` is the open part of that bug.
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+
+val INT_FIXTURE: text = "test/fixtures/native_option_if_val_unwrap/int_main.spl"
+val TEXT_FIXTURE: text = "test/fixtures/native_option_if_val_unwrap/text_main.spl"
+
+fn simple_bin() -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    bin
+
+fn run_fixture(path: text, mode: text) -> text:
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        simple_bin() + " run " + path + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "native_option_if_val_unwrap fixtures execute with correct values":
+    # @manual scenario evidence
+    it "unwraps an i64? via if val, match and ?? under the interpreter":
+        # @req REQ-SSPEC-COMPILER
+        step("unwraps an i64? via if val, match and ?? under the interpreter")
+        val out = run_fixture(INT_FIXTURE, "interpreter")
+        step("Expected lines in order: u == 42, u + 1, match Some(m), ?? 0")
+        expect(out).to_contain("true\n43\ntrue\ntrue")
+
+    it "unwraps an i64? via if val, match and ?? under the JIT":
+        # @req REQ-SSPEC-COMPILER
+        step("unwraps an i64? via if val, match and ?? under the JIT")
+        val out = run_fixture(INT_FIXTURE, "jit")
+        expect(out).to_contain("true\n43\ntrue\ntrue")
+
+    it "unwraps a text Option returned from a class method under the interpreter":
+        # @req REQ-SSPEC-COMPILER
+        step("unwraps a text Option returned from a class method under the interpreter")
+        val out = run_fixture(TEXT_FIXTURE, "interpreter")
+        step("The fixture returns 1/2 on a wrong or missing payload, so reaching the print proves the unwrap")
+        expect(out).to_contain("option-struct-method-ok")
+
+    it "unwraps a text Option returned from a class method under the JIT":
+        # @req REQ-SSPEC-COMPILER
+        step("unwraps a text Option returned from a class method under the JIT")
+        val out = run_fixture(TEXT_FIXTURE, "jit")
+        expect(out).to_contain("option-struct-method-ok")

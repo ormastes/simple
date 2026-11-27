@@ -1,0 +1,110 @@
+"""
+## Purpose and audience
+Purpose: Pin that an `<input>` whose value is wider than its content box
+paints the WHOLE value, start-aligned, clipped at the content box — not a
+glyph-count prefix. `input_text_paint_plan` used to cap the painted text at
+`content_w / advance + 1` glyphs, so an 11-character value lost its tail
+in Draw IR and in both pixel painters.
+Audience: browser-engine form-control paint and Draw IR maintainers.
+
+Chrome oracle (Chrome 159, `--headless --dump-dom` + `--screenshot`,
+900x2000 / 300x200, 2026-11-16). Each input is
+`display:block;box-sizing:border-box;width:60px;height:16px;
+padding:2px 20px 2px 2px;border:1px solid;font:8px Arial`,
+value `ABCDEFGHIJK` (11 chars):
+
+| input            | content box (x,y,w,h) | scrollWidth | ink columns | ink in padding (x>=39) |
+|------------------|-----------------------|-------------|-------------|------------------------|
+| `#q` start       | 3,3,36,10             | 56          | 3..38       | none                   |
+| `#c` center      | 3,19,36,10            | 56          | 3..38       | none (same as `#q`)    |
+| `#p` password    | 3,35,36,10            | 36          | 4..33       | none, 11 U+2022 discs  |
+
+scrollWidth 56 > content width 36: Chrome keeps the full value, overflows it
+on the end side and clips it at the content box. An overflowing centered
+value is start-aligned (`#c` paints the same columns as `#q`; CSS Text 3
+§6.1). box-sizing is authored explicitly. Chrome 159's UA default for `<input>` is
+also border-box, and since 2026-11-16 the engine's is too
+(`input_ua_box_sizing_chrome159_spec`).
+
+Filed in doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(`paint_input_text_glyph_cap`).
+"""
+
+"""
+Traceability: REQ-WEB-RENDER-001 — input value paints whole, clipped at the content box.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_raster.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir,
+    simple_web_layout_render_html_software_pixels
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels
+}
+
+val PAGE: text = "<html><head><style>html,body{{margin:0;padding:0;background:#fff}}" +
+    " input{{display:block;box-sizing:border-box;width:60px;height:16px;padding:2px 20px 2px 2px;" +
+    "border:1px solid #111827;color:#22c55e;background:#fff;font-family:Arial;font-size:8px;outline:none}}" +
+    " #c{{text-align:center}}</style></head><body>" +
+    "<input id=q value='ABCDEFGHIJK'><input id=c value='ABCDEFGHIJK'>" +
+    "<input id=p type=password value='ABCDEFGHIJK'></body></html>"
+
+fn _value_summary(id: text) -> text:
+    val composition = simple_web_layout_render_html_draw_ir(PAGE, 900, 200)
+    val commands = composition.batches[0].commands
+    var i = 0
+    while i < commands.len():
+        if commands[i].component_id == id + "_value":
+            val q = commands[i]
+            if not q.clip_rect.present:
+                return q.text_value + "|x=" + q.x.to_text() + "|clip=absent"
+            return q.text_value + "|x=" + q.x.to_text() + "|clip=" +
+                q.clip_rect.x.to_text() + "," + q.clip_rect.y.to_text() + "," +
+                q.clip_rect.width.to_text() + "," + q.clip_rect.height.to_text()
+        i = i + 1
+    "missing " + id + "_value"
+
+# Text-colored (green-dominant) pixels of the input row starting at y0,
+# restricted to columns [x0, x1).
+fn _ink(pixels: [u32], width: i32, y0: i32, x0: i32, x1: i32) -> i32:
+    var count = 0
+    var y = y0 + 1
+    while y < y0 + 15:
+        var x = x0
+        while x < x1:
+            val p = pixels[y * width + x]
+            val r = ((p >> 16) & 0xFFu32).to_i64()
+            val g = ((p >> 8) & 0xFFu32).to_i64()
+            if g > r + 40:
+                count = count + 1
+            x = x + 1
+        y = y + 1
+    count
+
+describe "input text overflow is clipped, not truncated (Chrome 159)":
+    it "AC-1: Draw IR emits the full 11-glyph value with a content-box clip":
+        step("Chrome 159: content box 3,3,36,10; scrollWidth 56 > 36; full value kept")
+        expect(_value_summary("q")).to_equal("ABCDEFGHIJK|x=3|clip=3,3,36,10")
+
+    it "AC-2: an overflowing centered value is start-aligned":
+        step("Chrome 159: #c ink columns 3..38 identical to the start-aligned #q")
+        expect(_value_summary("c")).to_equal("ABCDEFGHIJK|x=3|clip=3,19,36,10")
+
+    it "AC-3: a password value masks every character":
+        step("Chrome 159: value.length 11, 11 U+2022 discs (-webkit-text-security: disc)")
+        expect(_value_summary("p")).to_equal("•••••••••••|x=3|clip=3,35,36,10")
+
+    it "AC-4: the software painter clips the overflow at the content box":
+        step("Chrome 159: ink 3..38, none in the 20px right padding (x 39..58)")
+        val pixels = simple_web_layout_render_html_software_pixels(PAGE, 64, 48)
+        expect(_ink(pixels, 64, 0, 3, 39)).to_be_greater_than(0)
+        expect(_ink(pixels, 64, 0, 39, 59)).to_equal(0)  # oracle: Chrome paints no ink in the padding
+        expect(_ink(pixels, 64, 16, 39, 59)).to_equal(0)  # oracle: Chrome paints no ink in the padding
+
+    it "AC-5: the Engine2D path honours the Draw IR clip_rect":
+        step("Chrome 159: ink 3..38, none in the 20px right padding (x 39..58)")
+        val pixels = simple_web_render_html_to_pixels(PAGE, 64, 48)
+        expect(_ink(pixels, 64, 0, 3, 39)).to_be_greater_than(0)
+        expect(_ink(pixels, 64, 0, 39, 59)).to_equal(0)  # oracle: Chrome paints no ink in the padding
+        expect(_ink(pixels, 64, 16, 39, 59)).to_equal(0)  # oracle: Chrome paints no ink in the padding

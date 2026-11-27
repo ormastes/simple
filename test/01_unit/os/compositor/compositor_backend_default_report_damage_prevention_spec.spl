@@ -1,0 +1,92 @@
+"""
+# Compositor Backend Single-Owner & report_damage Prevention Specification
+
+Prevention tests for bug #191 (`compositor_backend_duplicate_trait_owner_2026-11-07`).
+Verifies that `os.compositor.display_backend.{CompositorBackend}` and
+`common.ui.compositor_backend_core.{CompositorBackend}` resolve to the same trait
+definition, `HeadlessHostCompositorBackend` satisfies both aliases including
+`report_damage`, and `os/compositor/display_backend.spl` owns no duplicate trait.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use os.compositor.display_backend.{CompositorBackend as OsCompositorBackend, CompositorGlassCapable as OsGlassCapable}
+use os.compositor.headless_host_backend.{HeadlessHostCompositorBackend}
+use common.ui.compositor_backend_core.{CompositorBackend as CoreCompositorBackend}
+
+class MinimalDisplayBackend with OsCompositorBackend:
+    w: i32
+    h: i32
+    filled: i32
+    presented: i32
+    damage_calls: i32
+    last_color: u32
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        self.last_color = color
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        self.filled = self.filled + 1
+        self.last_color = color
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        pass_dn
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        pass_dn
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        pass_dn
+
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        pass_dn
+
+    me present():
+        self.presented = self.presented + 1
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        self.presented = self.presented + 1
+
+    fn as_glass_capable() -> OsGlassCapable?:
+        nil
+
+    me report_damage(x: i32, y: i32, w: i32, h: i32):
+        self.damage_calls = self.damage_calls + 1
+
+fn drive_via_core_trait(backend: CoreCompositorBackend) -> i32:
+    backend.report_damage(0, 0, 64, 48)
+    backend.fill_rect(0, 0, 64, 48, 0xFF112233u32)
+    backend.present_rect(0, 0, 64, 48)
+    backend.width() + backend.height()
+
+fn drive_via_os_trait(backend: OsCompositorBackend) -> i32:
+    backend.report_damage(2, 2, 16, 16)
+    backend.width() + backend.height()
+
+describe "compositor_backend single trait owner & report_damage prevention":
+    """Verifies unified trait ownership between os.compositor and common.ui."""
+
+    it "accepts OS-imported implementor and HeadlessHostCompositorBackend through both trait aliases":
+        var backend = MinimalDisplayBackend(w: 128, h: 96, filled: 0, presented: 0, damage_calls: 0, last_color: 0u32)
+        expect(drive_via_core_trait(backend)).to_equal(224)
+        expect(drive_via_os_trait(backend)).to_equal(224)
+        expect(backend.as_glass_capable()).to_be_nil()
+
+        var headless = HeadlessHostCompositorBackend.new(64, 48)
+        expect(drive_via_core_trait(headless)).to_equal(112)
+        expect(drive_via_os_trait(headless)).to_equal(112)
+
+    it "keeps single canonical CompositorBackend owner with default report_damage in common.ui":
+        val disp = file_read("src/os/compositor/display_backend.spl")
+        val core = file_read("src/lib/common/ui/compositor_backend_core.spl")
+        expect(disp).to_contain("export use common.ui.compositor_backend_core.")
+        expect(disp.contains("trait CompositorBackend")).to_equal(false)
+        expect(core).to_contain("trait CompositorBackend:")
+        expect(core).to_contain("me report_damage(")
+

@@ -1,0 +1,50 @@
+"""
+## Purpose and audience
+`native-build` runs its worker through `process_run_timeout_live`, and its
+failure reporter classifies the returned status. A worker killed by a POSIX
+signal must come back as `-(128 + signo)`, never as a bare `-1`: the bare `-1`
+was rendered as "worker wrapper exited abnormally (signal or wait failure,
+code -1)" and hid which signal killed the worker
+(doc/08_tracking/bug/coverage_native_build_worker_abnormal_exit_2026-08-31.md).
+These examples run the real live wrapper (`sh` + `setsid` + `stdbuf` chain)
+on a child that kills itself, then feed the status to the real classifier.
+"""
+# @manual_section: Live worker signal status
+use std.spec.*
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout_live}
+use std.platform.{is_windows}
+use app.cli.native_build_exit_status.{native_build_posix_signal, native_build_signal_name}
+
+fn run_self_signal(signal_name: text) -> (text, text, i64):
+    val (out, err, code) = process_run_timeout_live("/bin/sh", ["-c", "printf started; kill -{signal_name} $$; exit 3"], 30000)
+    (out, err, code as i64)
+
+describe "process_run_timeout_live signal status":
+    it "reports a normal non-zero exit unchanged":
+        if not is_windows():
+            step("Run a child that exits 7 through the live wrapper")
+            val (out, err, code) = process_run_timeout_live("/bin/sh", ["-c", "printf ok; exit 7"], 30000)
+            expect(code as i64).to_equal(7)
+            expect(out).to_contain("ok")
+            expect(err.contains("[TIMEOUT:")).to_be(false)
+            expect(native_build_posix_signal(code as i64)).to_equal(0)
+
+    it "reports SIGTERM death as -(128+15) and the classifier names it":
+        if not is_windows():
+            step("Run a child that sends itself SIGTERM through the live wrapper")
+            val (out, err, code) = run_self_signal("TERM")
+            expect(out).to_contain("started")
+            expect(code).to_equal(-143)
+            expect(err.contains("[TIMEOUT:")).to_be(false)
+            expect(native_build_posix_signal(code)).to_equal(15)
+            expect(native_build_signal_name(native_build_posix_signal(code))).to_equal("SIGTERM")
+
+    it "reports SIGKILL death as -(128+9), not the bare -1 wait-failure sentinel":
+        if not is_windows():
+            step("Run a child that sends itself SIGKILL through the live wrapper")
+            val (out, err, code) = run_self_signal("KILL")
+            expect(out).to_contain("started")
+            expect(code).to_equal(-137)
+            expect(code == -1).to_be(false)
+            expect(err.contains("[TIMEOUT:")).to_be(false)
+            expect(native_build_signal_name(native_build_posix_signal(code))).to_equal("SIGKILL")

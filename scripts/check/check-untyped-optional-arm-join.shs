@@ -1,0 +1,50 @@
+#!/bin/sh
+# Similar-pattern sweep for bug untyped_optional_arm_join_typed_as_i64_2026-11-06.
+# Lists UNTYPED `val|var x = if ...` / `= match ...` bindings whose arms mix
+# `nil` / `Some(` / `None` (T?) with other values -- the shape whose merge slot
+# native codegen used to type as i64 / bare T (fixed at the MIR join,
+# join_untyped_optional_arms). Advisory census (exit 0) unless --max <n> is
+# given, in which case more than <n> sites FAILs (exit 1).
+# Usage: sh scripts/check/check-untyped-optional-arm-join.shs [--root DIR] [--max N]
+root="src/compiler"; max=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --root) root="$2"; shift 2 ;;
+    --max) max="$2"; shift 2 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+[ -d "$root" ] || { echo "ERROR — nothing was checked (no dir $root)"; exit 2; }
+list=$(mktemp); out=$(mktemp)
+find "$root" -name '*.spl' -not -path '*/vendor/*' | sort > "$list"
+nfiles=$(wc -l < "$list" | tr -d ' ')
+[ "$nfiles" -gt 0 ] || { rm -f "$list" "$out"; echo "ERROR — nothing was checked (no .spl under $root)"; exit 2; }
+# One awk process over every file (per-file spawning is minutes on Windows).
+tr '\n' '\0' < "$list" | xargs -0 awk '
+  function ind(s) { match(s, /^ */); return RLENGTH }
+  function flush() { if (open && opt) print FILENAME0 ":" start ": " head; open = 0; opt = 0 }
+  FNR == 1 { flush(); FILENAME0 = FILENAME }
+  {
+    line = $0
+    if (open) {
+      if (line ~ /^ *$/) next
+      if (ind(line) <= base) flush()
+      else if (line ~ /(=>|:)[ ]*(nil|None|Some\()/ || line ~ /^ *(nil|None)[ ]*$/ || line ~ /^ *Some\(/) opt = 1
+    }
+    if (!open && line ~ /^ *(val|var) [A-Za-z_][A-Za-z_0-9]* = (if|match) /) {
+      open = 1; opt = 0; base = ind(line); start = FNR; head = line
+      sub(/^ +/, "", head)
+      if (line ~ /(:|else:)[ ]*(nil|None|Some\()/) opt = 1
+      if (line !~ /:[ ]*$/) flush()
+    }
+  }
+  END { flush() }
+' > "$out"
+count=$(wc -l < "$out" | tr -d ' ')
+cat "$out"; rm -f "$list" "$out"
+if [ -n "$max" ] && [ "$count" -gt "$max" ]; then
+  echo "FAIL — $nfiles file(s) checked, $count untyped optional-arm join site(s) > max $max"
+  exit 1
+fi
+echo "PASS — $nfiles file(s) checked, $count untyped optional-arm join site(s) listed (advisory census)"
+exit 0

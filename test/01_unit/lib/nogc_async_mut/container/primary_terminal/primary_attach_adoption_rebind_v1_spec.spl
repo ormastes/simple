@@ -1,0 +1,45 @@
+# AUTHORED SOURCE-ONLY NOT_RUN. milestone_0022 N4: an adopted session cannot be rebound.
+# REGRESSION PIN: pins pre-existing port behaviour and passes without N4 (review-n4-r1 P3-4).
+# fixture_session is copy-pasted across six specs; the duplication is accepted.
+use std.spec.*
+use test.fixtures.orchestration.container_primary_attach_fixture_v1.container_primary_attach_fixture_v1
+use std.nogc_async_mut.container.terminal_session_v1.{ContainerPrimaryAttachSessionV1, ContainerPrimaryAttachAdoptionV1}
+use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedTransferV2, PipedProcessRefV1}
+use std.nogc_sync_mut.io.group_process_owner.GroupProcessStreamOwnerV2
+use std.common.build_manager.group_process_stream_protocol_v2.group_process_stream_identity_profiled_v3
+use std.nogc_async_mut.container.terminal_session_v1.{container_primary_attach_adopt_v1,
+    container_primary_attach_adoption_v1}
+
+# Metadata-only session (tests may set private fields). pid 71 is never a live
+# admitted child: every scenario here must refuse before any native IO.
+fn fixture_session(adoption: ContainerPrimaryAttachAdoptionV1?, cleaned: bool) -> ContainerPrimaryAttachSessionV1:
+    val plan = container_primary_attach_fixture_v1()
+    var launch = plan.launch_template
+    launch.transport_generation = 1
+    launch.request.launch_deadline_unix_ms = 1
+    val identity = group_process_stream_identity_profiled_v3(launch)
+    val owner = GroupProcessStreamOwnerV2(launch: launch, identity_digest: identity)
+    val transfer = PipedProcessOwnedTransferV2(owner: owner, reference: PipedProcessRefV1(pid: 71,
+        generation: launch.transport_generation, group_root: launch.root, group_identity: identity))
+    ContainerPrimaryAttachSessionV1(plan: plan, transfer: transfer, identity_fingerprint: "c".repeat(64),
+        adoption: adoption, native_cleaned: cleaned)
+
+fn fixture_adoption(pane: text, child_incarnation: i64) -> ContainerPrimaryAttachAdoptionV1:
+    ContainerPrimaryAttachAdoptionV1(binding_uid: "binding-a", service_incarnation: "f".repeat(32),
+        session_id: "session-a", window_id: "window-a", pane_id: pane, service_epoch: 1,
+        child_incarnation: child_incarnation)
+
+describe "Primary attach adoption rebind":
+    it "refuses a different pane before native validation and keeps the first adoption":
+        step("Adopt for pane-a, then try pane-b; the rebind check runs before any native state query")
+        val session = fixture_session(Some(fixture_adoption("pane-a", 2)), false)
+        val turn = container_primary_attach_adopt_v1(session, fixture_adoption("pane-b", 2))
+        expect(turn.error).to_equal("container-terminal-adoption-rebind")
+        expect(container_primary_attach_adoption_v1(turn.session).unwrap().pane_id).to_equal("pane-a")
+
+    it "refuses a newer child incarnation as a rebind":
+        step("A later lease epoch is a different adoption, never a silent upgrade")
+        val session = fixture_session(Some(fixture_adoption("pane-a", 2)), false)
+        val turn = container_primary_attach_adopt_v1(session, fixture_adoption("pane-a", 3))
+        expect(turn.error).to_equal("container-terminal-adoption-rebind")
+        expect(container_primary_attach_adoption_v1(turn.session).unwrap().child_incarnation).to_equal(2)

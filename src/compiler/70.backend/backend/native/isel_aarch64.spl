@@ -1,3 +1,4 @@
+use compiler.mir.mir_data.{MirCallOrigin}
 # AArch64 Instruction Selection
 #
 # Translates MIR instructions to AArch64 MachInst sequences.
@@ -13,25 +14,17 @@
 #
 # Pipeline: MIR -> ISel (this module) -> RegAlloc -> Encode -> ELF
 
+use compiler.mir.mir_instruction_graph.{mir_module_functions_sorted}
+use compiler.mir.mir_json.{serialize_binop}
 use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind, MirBinOp, MirUnaryOp, MirOperand, MirOperandKind, MirConstValue, MirTerminator, MirType, MirTypeKind, MirStatic, LocalId, LocalKind, BlockId, SwitchCase}
 use compiler.backend.native.mach_inst.{MachReg, virtual_reg, physical_reg, reg_id, Operand, OperandKind, op_reg, op_phys, op_virt, op_imm, op_mem, op_label, op_sym, operand_get_reg, MachInst, new_mach_inst, MachBlock, new_mach_block, mach_block_add_inst, MachFunction, new_mach_function, mach_func_add_block, mach_func_set_frame_size, MachModule, DataEntry, new_mach_module, mach_module_add_func, mach_module_add_data, mach_module_add_extern}
 use compiler.backend.common.isel_common.{LoweredOperand, ISelFuncResult, ISelBlockResult, ISelInstResult, local_to_vreg, local_vreg_op, isel_fresh_dest, isel_emit_one}
 use compiler.backend.native.mach_inst.{AARCH64_X0, AARCH64_X1, AARCH64_X2, AARCH64_X3, AARCH64_X4, AARCH64_X5, AARCH64_X6, AARCH64_X7, AARCH64_X8, AARCH64_X9, AARCH64_X16, AARCH64_X29, AARCH64_X30, AARCH64_SP}
 use compiler.backend.native.mach_inst.{AARCH64_ARG_REGS, AARCH64_CALLEE_SAVED}
 use compiler.backend.native.mach_inst.{A64_OP_MOV, A64_OP_MOVZ, A64_OP_MOVK, A64_OP_ADD, A64_OP_SUB, A64_OP_MUL, A64_OP_SDIV, A64_OP_AND, A64_OP_ORR, A64_OP_EOR, A64_OP_LSL, A64_OP_ASR, A64_OP_LSR, A64_OP_NEG, A64_OP_CMP, A64_OP_CSET, A64_OP_B, A64_OP_BEQ, A64_OP_BNE, A64_OP_BLT, A64_OP_BGE, A64_OP_BGT, A64_OP_BLE, A64_OP_BL, A64_OP_RET, A64_OP_LDR, A64_OP_STR, A64_OP_LDR_W, A64_OP_STR_W, A64_OP_STP, A64_OP_LDP, A64_OP_ADRP, A64_OP_ADD_IMM, A64_OP_SUB_IMM, A64_OP_NOP, A64_OP_BRK, A64_OP_CBZ, A64_OP_CBNZ, A64_OP_RBIT, A64_OP_CLZ, A64_OP_REV}
-use compiler.backend.common.isel_context.{ISelContext, new_isel_context, isel_alloc_vreg, isel_get_vreg, isel_alloc_frame_slot, isel_frame_offset, isel_add_extern, isel_add_string_data, isel_last_string_label}
+use compiler.backend.native.mach_inst.{A64_COND_EQ, A64_COND_NE, A64_COND_HS, A64_COND_LO, A64_COND_HI, A64_COND_LS, A64_COND_GE, A64_COND_LT, A64_COND_GT, A64_COND_LE}
+use compiler.backend.common.isel_context.{ISelContext, new_isel_context, isel_alloc_vreg, isel_get_vreg, isel_alloc_frame_slot, isel_frame_offset, isel_add_extern, isel_add_string_data, isel_last_string_label, isel_definition_symbol, isel_call_symbol, isel_module_context}
 use compiler.backend.common.ascii_utils.{char_to_ascii}
-
-# ============================================================================
-# Condition code constants for CSET
-# ============================================================================
-
-val COND_EQ: i64 = 0
-val COND_NE: i64 = 1
-val COND_LT: i64 = 2
-val COND_LE: i64 = 3
-val COND_GT: i64 = 4
-val COND_GE: i64 = 5
 
 # ============================================================================
 # Operand Lowering
@@ -44,9 +37,9 @@ fn a64_lower_operand(ctx: ISelContext, operand: MirOperand) -> LoweredOperand:
         case Move(local):
             LoweredOperand(insts: [], result: local_vreg_op(local.id), ctx: ctx)
         case Const(const_value, const_type):
-            a64_lower_const(ctx, const_value, const_type)
+            a64_lower_const(ctx, const_value, const_type, operand.call_origin)
 
-fn a64_lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType) -> LoweredOperand:
+fn a64_lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType, call_origin: MirCallOrigin = MirCallOrigin.Source) -> LoweredOperand:
     match value:
         case Int(v):
             a64_lower_const_int(ctx, v)
@@ -54,6 +47,15 @@ fn a64_lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType) -> Lo
             val imm_val = if v: 1 else: 0
             isel_emit_one(ctx, A64_OP_MOVZ, [op_imm(imm_val)])
         case Str(s):
+            match type_.kind:
+                case FuncPtr(_):
+                    val symbol = isel_call_symbol(ctx, s, call_origin)
+                    val symbol_ctx = isel_add_extern(ctx, symbol)
+                    val low = isel_fresh_dest(symbol_ctx)
+                    val high = new_mach_inst(A64_OP_ADRP, [low.result, op_sym(symbol)])
+                    val low_bits = new_mach_inst(A64_OP_ADD_IMM, [low.result, low.result, op_sym(symbol)])
+                    return LoweredOperand(insts: [high, low_bits], result: low.result, ctx: low.ctx)
+                case _: ()
             var new_ctx = isel_add_string_data(ctx, s, char_to_ascii)
             val label = isel_last_string_label(new_ctx)
             val low = isel_fresh_dest(new_ctx)
@@ -62,6 +64,11 @@ fn a64_lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType) -> Lo
             LoweredOperand(insts: [adrp_inst, add_inst], result: low.result, ctx: low.ctx)
         case Zero:
             isel_emit_one(ctx, A64_OP_MOVZ, [op_imm(0)])
+        case Float(_) | FloatLexeme(_):
+            # Defense in depth: module validation (a64_module_float_rejections)
+            # rejects these before lowering; an operand-carried float constant
+            # that bypasses that scan must still fail loudly, not lower as 0.
+            panic("aarch64 native: floating-point constant has no lowering in the direct backend")
         case _:
             isel_emit_one(ctx, A64_OP_MOVZ, [op_imm(0)])
 
@@ -137,9 +144,15 @@ fn a64_alloc_temp(ctx: ISelContext) -> LoweredOperand:
 # Instruction Selection - Core
 # ============================================================================
 
-fn isel_module_aarch64(module: MirModule) -> MachModule:
+pub fn isel_module_aarch64(module: MirModule) -> MachModule:
+    # Reject floating-point programs up front: lowering them would silently
+    # emit integer ops and zero constants (see a64_module_float_rejections).
+    val float_rejections = a64_module_float_rejections(module)
+    if float_rejections.len() > 0:
+        panic(float_rejections[0])
+
     var mach_module = new_mach_module(module.name)
-    var ctx = new_isel_context()
+    var ctx = isel_module_context(module)
 
     var static_ids: [i64] = []
     var static_by_id: Dict<i64, MirStatic> = {}
@@ -168,11 +181,11 @@ fn isel_module_aarch64(module: MirModule) -> MachModule:
         mutability[symbol_id] = static_.is_mutable
     ctx = ISelContext(next_vreg: 0, frame_slots: {}, next_frame_offset: 0,
         extern_symbols: static_externs, data_entries: entries, string_counter: 0,
-        global_names: names, global_sizes: sizes, global_signed: {}, global_mutable: mutability)
+        global_names: names, global_sizes: sizes, global_signed: {}, global_mutable: mutability, function_names: ctx.function_names)
 
-    val func_keys = module.functions.keys()
-    for key in func_keys:
-        val func = module.functions[key]
+    # Canonical (name-sorted) order: Dict<SymbolId,_> iterates in key-address
+    # order on native, which permuted text layout between identical builds.
+    for func in mir_module_functions_sorted(module):
         var result = a64_isel_function(ctx, func)
         ctx = result.ctx
         mach_module = mach_module_add_func(mach_module, result.func)
@@ -193,7 +206,7 @@ fn a64_static_size(static_: MirStatic) -> i64:
         case Ptr(_, _) | Ref(_, _) | FuncPtr(_): 8
         case _: panic("aarch64 native static '{static_.name}' has unsupported non-u32/pointer object type")
 
-fn a64_static_type_supported(type_: MirType) -> bool:
+pub fn a64_static_type_supported(type_: MirType) -> bool:
     match type_.kind:
         case I32 | U32 | Ptr(_, _) | Ref(_, _) | FuncPtr(_): true
         case _: false
@@ -206,12 +219,12 @@ fn a64_is_power_of_two(value: i64) -> bool:
         remaining = remaining / 2
     true
 
-fn a64_static_alignment_valid(natural: i64, explicit_alignment: i64) -> bool:
+pub fn a64_static_alignment_valid(natural: i64, explicit_alignment: i64) -> bool:
     if explicit_alignment < 0: return false
     val effective = if explicit_alignment > 0: explicit_alignment else: natural
     a64_is_power_of_two(effective) and effective >= natural
 
-fn a64_static_write_admitted(is_mutable: bool, requests_write: bool) -> bool:
+pub fn a64_static_write_admitted(is_mutable: bool, requests_write: bool) -> bool:
     not requests_write or is_mutable
 
 fn a64_static_integer_bytes(value: i64, size: i64) -> [i64]:
@@ -225,7 +238,7 @@ fn a64_static_integer_bytes(value: i64, size: i64) -> [i64]:
     bytes
 
 fn a64_static_initializer_bytes(static_: MirStatic, size: i64) -> [i64]:
-    if static_.init == nil: return a64_static_integer_bytes(0, size)
+    if static_.init.is_none(): return a64_static_integer_bytes(0, size)
     if not a64_static_initializer_supported(static_.init.unwrap().value):
         panic("aarch64 native static '{static_.name}' initializer is not an integer/zero constant")
     match static_.init.unwrap().value:
@@ -233,13 +246,75 @@ fn a64_static_initializer_bytes(static_: MirStatic, size: i64) -> [i64]:
         case Zero: a64_static_integer_bytes(0, size)
         case _: a64_static_integer_bytes(0, size)
 
-fn a64_static_initializer_supported(value: MirConstValue) -> bool:
+pub fn a64_static_initializer_supported(value: MirConstValue) -> bool:
     match value:
         case Int(_) | Zero: true
         case _: false
 
+# ============================================================================
+# Floating-Point Rejection
+# ============================================================================
+# The direct AArch64 backend has no scalar floating-point support: every
+# binop lowers as an integer op (a64_isel_binop) and float constants lower
+# as zero. Until FP registers, the FP ABI and FP instruction encodings
+# exist, every float site must be rejected with an explicit diagnostic
+# instead of silently miscompiling (bug native_aarch64_scalar_float_
+# silent_integer_lowering_2026_11_03).
+
+fn a64_is_float_type(type_: MirType) -> bool:
+    match type_.kind:
+        case F32 | F64: true
+        case _: false
+
+fn a64_const_is_float(value: MirConstValue) -> bool:
+    match value:
+        case Float(_) | FloatLexeme(_): true
+        case _: false
+
+fn a64_operand_is_float_const(operand: MirOperand) -> bool:
+    match operand.kind:
+        case Const(value, _): a64_const_is_float(value)
+        case _: false
+
+pub fn a64_module_float_rejections(module: MirModule) -> [text]:
+    var rejections: [text] = []
+    for func in mir_module_functions_sorted(module):
+        if a64_is_float_type(func.signature.return_type):
+            rejections.push("aarch64 native: function '{func.name}' has unsupported floating-point return type; the direct backend only supports integer scalar code")
+        for param_type in func.signature.params:
+            if a64_is_float_type(param_type):
+                rejections.push("aarch64 native: function '{func.name}' has an unsupported floating-point parameter type; the direct backend only supports integer scalar code")
+        for local in func.locals:
+            if a64_is_float_type(local.type_):
+                rejections.push("aarch64 native: function '{func.name}' local {local.id.id} has unsupported floating-point type; the direct backend only supports integer scalar code")
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case Const(_, value, _):
+                        if a64_const_is_float(value):
+                            rejections.push("aarch64 native: function '{func.name}' has an unsupported floating-point constant; the direct backend only supports integer scalar code")
+                    case BinOp(_, op, left, right):
+                        # Operand-carried float constants bypass the Const scan
+                        # above; reject them up front, naming the operation,
+                        # instead of reaching a64_lower_const during lowering.
+                        if a64_operand_is_float_const(left):
+                            rejections.push("aarch64 native: function '{func.name}' has an unsupported floating-point constant operand in '{serialize_binop(op)}'; the direct backend only supports integer scalar code")
+                        if a64_operand_is_float_const(right):
+                            rejections.push("aarch64 native: function '{func.name}' has an unsupported floating-point constant operand in '{serialize_binop(op)}'; the direct backend only supports integer scalar code")
+                    case UnaryOp(_, _, operand):
+                        if a64_operand_is_float_const(operand):
+                            rejections.push("aarch64 native: function '{func.name}' has an unsupported floating-point constant operand in a unary operation; the direct backend only supports integer scalar code")
+                    case _: ()
+    rejections
+
 fn a64_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
-    var mach_func = new_mach_function(func.name)
+    var mach_func = new_mach_function(isel_definition_symbol(func))
+
+    # Unsigned integer locals pick LO/LS/HI/HS condition codes (x86_64/LLVM/Cranelift parity).
+    var unsigned_locals: Dict<i64, bool> = {}
+    for local in func.locals:
+        if a64_type_is_unsigned(local.type_):
+            unsigned_locals[local.id.id] = true
 
     # Reset vreg counter - use local IDs directly, start high for temps
     var local_ctx = ISelContext(
@@ -252,7 +327,9 @@ fn a64_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
         global_names: ctx.global_names,
         global_sizes: ctx.global_sizes,
         global_signed: ctx.global_signed,
-        global_mutable: ctx.global_mutable
+        global_mutable: ctx.global_mutable,
+        function_names: ctx.function_names,
+        unsigned_locals: unsigned_locals
     )
 
     # Allocate frame slots for locals that need stack space
@@ -324,13 +401,14 @@ fn a64_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
         global_names: local_ctx.global_names,
         global_sizes: local_ctx.global_sizes,
         global_signed: local_ctx.global_signed,
-        global_mutable: local_ctx.global_mutable
+        global_mutable: local_ctx.global_mutable,
+        function_names: local_ctx.function_names
     )
 
     ISelFuncResult(func: mach_func, ctx: out_ctx)
 
 fn a64_isel_block(ctx: ISelContext, block: MirBlock, unwind_trampoline_id: i64) -> ISelBlockResult:
-    val label = if block.label != nil: block.label else: "bb{block.id.id}"
+    val label = if block.label.is_some(): block.label else: "bb{block.id.id}"
     var mach_block = new_mach_block(label, block.id.id)
     var current_ctx = ctx
 
@@ -398,7 +476,7 @@ fn a64_isel_inst(ctx: ISelContext, inst: MirInst) -> ISelInstResult:
             ISelInstResult(insts: [new_mach_inst(A64_OP_NOP, [])], ctx: ctx)
 
 fn a64_isel_const(ctx: ISelContext, dest: LocalId, value: MirConstValue, type_: MirType) -> ISelInstResult:
-    val lowered = a64_lower_const(ctx, value, type_)
+    val lowered = a64_lower_const(ctx, value, type_, MirCallOrigin.Source)
     val dest_op = local_vreg_op(dest.id)
     # Move the const result to the destination vreg
     var insts = lowered.insts
@@ -417,7 +495,7 @@ fn a64_global_size(ctx: ISelContext, symbol_id: i64) -> i64:
     if not ctx.global_sizes.contains(symbol_id): panic("aarch64 native global has no storage width for MIR symbol {symbol_id}")
     ctx.global_sizes[symbol_id]
 
-fn a64_global_metadata_present(ctx: ISelContext, symbol_id: i64) -> bool:
+pub fn a64_global_metadata_present(ctx: ISelContext, symbol_id: i64) -> bool:
     ctx.global_names.contains(symbol_id) and ctx.global_sizes.contains(symbol_id) and ctx.global_mutable.contains(symbol_id)
 
 fn a64_global_address(ctx: ISelContext, dest: Operand, symbol_id: i64) -> [MachInst]:
@@ -448,7 +526,7 @@ fn a64_isel_store_global(ctx: ISelContext, symbol_id: i64, value: MirOperand) ->
     insts.push(new_mach_inst(opcode, [lowered.result, op_mem(operand_get_reg(addr.result), 0)]))
     ISelInstResult(insts: insts, ctx: addr.ctx)
 
-fn a64_select_scalar_bitmanip(ctx: ISelContext, dest: Operand, name: text, src: Operand) -> ISelInstResult:
+pub fn a64_select_scalar_bitmanip(ctx: ISelContext, dest: Operand, name: text, src: Operand) -> ISelInstResult:
     var insts: [MachInst] = []
 
     if name == "bit_clz":
@@ -467,7 +545,8 @@ fn a64_select_scalar_bitmanip(ctx: ISelContext, dest: Operand, name: text, src: 
             global_names: ctx.global_names,
             global_sizes: ctx.global_sizes,
             global_signed: ctx.global_signed,
-            global_mutable: ctx.global_mutable
+            global_mutable: ctx.global_mutable,
+            function_names: ctx.function_names
         )
         insts.push(new_mach_inst(A64_OP_RBIT, [tmp, src]))
         insts.push(new_mach_inst(A64_OP_CLZ, [dest, tmp]))
@@ -568,6 +647,8 @@ fn a64_isel_binop(ctx: ISelContext, dest: LocalId, op: MirBinOp, left: MirOperan
         insts.push(ai)
     for ai in right_low.insts:
         insts.push(ai)
+    # Same rule as x86_64/LLVM/Cranelift: either operand unsigned makes compare unsigned.
+    val is_unsigned = a64_operand_is_unsigned(current_ctx, left) or a64_operand_is_unsigned(current_ctx, right)
 
     match op:
         case Add:
@@ -596,28 +677,40 @@ fn a64_isel_binop(ctx: ISelContext, dest: LocalId, op: MirBinOp, left: MirOperan
         case Shr:
             insts.push(new_mach_inst(A64_OP_ASR, [dest_op, left_low.result, right_low.result]))
         case Eq:
-            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_EQ):
+            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, A64_COND_EQ):
                 insts.push(ai)
         case Ne:
-            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_NE):
+            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, A64_COND_NE):
                 insts.push(ai)
         case Lt:
-            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_LT):
+            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, if is_unsigned: A64_COND_LO else: A64_COND_LT):
                 insts.push(ai)
         case Le:
-            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_LE):
+            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, if is_unsigned: A64_COND_LS else: A64_COND_LE):
                 insts.push(ai)
         case Gt:
-            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_GT):
+            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, if is_unsigned: A64_COND_HI else: A64_COND_GT):
                 insts.push(ai)
         case Ge:
-            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_GE):
+            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, if is_unsigned: A64_COND_HS else: A64_COND_GE):
                 insts.push(ai)
         case _:
             # Unsupported binop - zero result
             insts.push(new_mach_inst(A64_OP_MOVZ, [dest_op, op_imm(0)]))
 
     ISelInstResult(insts: insts, ctx: current_ctx)
+
+fn a64_type_is_unsigned(ty: MirType) -> bool:
+    match ty.kind:
+        case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: true
+        case _: false
+
+fn a64_operand_is_unsigned(ctx: ISelContext, operand: MirOperand) -> bool:
+    match operand.kind:
+        case Copy(local): ctx.unsigned_locals.contains(local.id)
+        case Move(local): ctx.unsigned_locals.contains(local.id)
+        case Const(_, type_): a64_type_is_unsigned(type_)
+        case _: false
 
 fn a64_isel_comparison(dest: Operand, left: Operand, right: Operand, cond: i64) -> [MachInst]:
     # CMP left, right (alias: SUBS xzr, left, right)
@@ -734,7 +827,7 @@ fn a64_isel_cast(ctx: ISelContext, dest: LocalId, operand: MirOperand, target: M
 # Function Calls
 # ============================================================================
 
-fn a64_isel_call(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, args: [MirOperand]) -> ISelInstResult:
+pub fn a64_isel_call(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, args: [MirOperand]) -> ISelInstResult:
     var insts: [MachInst] = []
     var current_ctx = ctx
 
@@ -765,8 +858,9 @@ fn a64_isel_call(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, args: [M
             match const_value:
                 case Str(name):
                     # Direct call to named function: BL symbol
-                    current_ctx = isel_add_extern(current_ctx, name)
-                    insts.push(new_mach_inst(A64_OP_BL, [op_sym(name)]))
+                    val symbol = isel_call_symbol(current_ctx, name, func_op.call_origin)
+                    current_ctx = isel_add_extern(current_ctx, symbol)
+                    insts.push(new_mach_inst(A64_OP_BL, [op_sym(symbol)]))
                 case _:
                     # A non-symbol constant callee has no call lowering.
                     # Emitting a NOP here would silently drop the call and

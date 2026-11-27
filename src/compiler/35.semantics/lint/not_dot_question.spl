@@ -1,0 +1,119 @@
+# `not <expr>.?` Lint
+#
+# NDQ001: `not <expr>.?`                                                WARNING
+#
+# Why this exists
+# ---------------
+# On a collection-typed optional, `xs.?` means "present AND non-empty", so
+# `not xs.?` means "absent OR empty" and is NOT `xs.is_none()`. Confusing the
+# two caused the #10717 regression (fixed at 11 sites in #10743); the seed and
+# Stage 2 also disagree on it. Bug:
+#   doc/08_tracking/bug/seed_stage2_optional_dot_question_collection_semantics_divergence_2026-11-22.md
+# Reference: doc/07_guide/quick_reference/syntax_quick_reference.md (`.?`).
+#
+# Lint has no type information, so every syntactic `not <expr>.?` is flagged
+# and the message tells the author to check which meaning was intended.
+#
+# Text-heuristic (no AST dependency), like leading_operator.spl.
+
+pub struct NotDotQuestionFinding:
+    code: text
+    severity: text
+    message: text
+    expr: text
+    note: text
+    line_num: i64
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.message} — {self.note}"
+
+fn _ndq_is_ident_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+
+fn _ndq_triple_quote_count(line: text) -> i64:
+    var count = 0
+    var i = 0
+    val len = line.byte_len()
+    while i + 3 <= len:
+        if line.substring(i, i + 3) == "\"\"\"":
+            count = count + 1
+            i = i + 3
+        else:
+            i = i + 1
+    count
+
+# Length of the `<expr>.?` operand starting at `start` (0 when it is not one).
+fn _ndq_operand_len(line: text, start: i64) -> i64:
+    val len = line.byte_len()
+    var i = start
+    var depth = 0
+    while i < len:
+        val ch = line.substring(i, i + 1)
+        if ch == "(" or ch == "[":
+            depth = depth + 1
+        elif ch == ")" or ch == "]":
+            if depth == 0:
+                break
+            depth = depth - 1
+        elif depth == 0 and not _ndq_is_ident_char(ch) and ch != "." and ch != "?":
+            break
+        i = i + 1
+    val operand = line.substring(start, i)
+    if operand.len() > 2 and operand.ends_with(".?"):
+        return i - start
+    0
+
+pub fn check_not_dot_question_lines(
+    lines: [text], file_path: text
+) -> [NotDotQuestionFinding]:
+    """Flag every `not <expr>.?` (NDQ001); see the file header."""
+    var findings: [NotDotQuestionFinding] = []
+    var in_doc = false
+    var line_num = 0
+    for line in lines:
+        line_num = line_num + 1
+        val quotes = _ndq_triple_quote_count(line)
+        if in_doc:
+            if quotes > 0 and quotes % 2 == 1:
+                in_doc = false
+            continue
+        if quotes > 0 and quotes % 2 == 1:
+            in_doc = true
+            continue
+        if line.trim().starts_with("#"):
+            continue
+        val len = line.byte_len()
+        var in_str = false
+        var i = 0
+        while i < len:
+            val ch = line.substring(i, i + 1)
+            if ch == "\\" and in_str:
+                i = i + 2
+                continue
+            if ch == "\"":
+                in_str = not in_str
+            elif ch == "#" and not in_str:
+                break
+            elif not in_str and ch == "n" and i + 4 <= len and line.substring(i, i + 4) == "not ":
+                val boundary = i == 0 or not _ndq_is_ident_char(line.substring(i - 1, i))
+                if boundary:
+                    val operand_len = _ndq_operand_len(line, i + 4)
+                    if operand_len > 0:
+                        val operand = line.substring(i + 4, i + 4 + operand_len)
+                        val expr = operand.substring(0, operand.byte_len() - 2)
+                        findings.push(NotDotQuestionFinding(
+                            code: "NDQ001",
+                            severity: "WARNING",
+                            message: "`not {operand}` is \"absent OR empty\" for a collection optional, which is not `{expr}.is_none()`; check intent",
+                            expr: expr,
+                            note: "use `{expr}.is_none()` when only absence is meant, or `{expr}.is_none() or {expr}.unwrap().is_empty()` when absent-or-empty is meant",
+                            line_num: line_num
+                        ))
+                        i = i + 4 + operand_len
+                        continue
+            i = i + 1
+    findings
+
+pub fn check_not_dot_question(source: text, file_path: text) -> [NotDotQuestionFinding]:
+    """Compatibility entrypoint for callers that do not own a line snapshot."""
+    check_not_dot_question_lines(source.split("\n"), file_path)

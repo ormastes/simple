@@ -1,0 +1,150 @@
+# @req REQ-MEM-1-1
+# @req REQ-MEM-3-8
+# @req AC-GATE-01
+"""
+## Purpose and audience
+Strict no-GC bypass policy and diagnostics truth (memory hardening plan WP-01,
+§1.1 "Ownership safety: mandatory in every admitted execution route" and §3.8
+"compatibility mode cannot label unchecked execution as conforming no-GC").
+A module without `@no_gc(strict)` skips the ownership checker today. This spec
+pins that the skip is never silent (one truth warning per unchecked module),
+that a strict module which somehow reached admission without checked contracts
+is a detected bypass, and that a build asking for conforming no-GC
+(`nogc_require_strict`) rejects unchecked modules and a zero-checked closure.
+Category: Compiler.
+## Operator workflow
+bin/simple test test/01_unit/compiler/semantics/param_effects/nogc_admission_truth_spec.spl
+## Compatibility and limitations
+Source-to-HIR through the production driver admission gate; native execution
+of the admitted modules is covered by the route matrix, not here.
+## Verification guidance and troubleshooting
+RED usually means the driver stopped publishing NOGC-NOTE-001 for legacy
+modules, or `nogc_require_strict` no longer rejects an unchecked module.
+"""
+# Lifecycle: doc/03_plan/release/1.0.0/inputs_2026-11-06/simple_nogc_ownership_memory_hardening_plan.md ;
+# doc/02_requirements/feature/release100_memory_mcp_lsp.md
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surface_from_owner, ModuleSurfaceParserOwner}
+use compiler.driver.driver_hir_pipeline_support.{driver_admit_nogc_param_effects_v1}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.semantics.param_effects.nogc_admission_verdict.{nogc_admission_report_v1,
+    nogc_admission_conforming_errors_v1, nogc_admission_truth_notes_v1}
+
+val INSPECT = "fn inspect(n: Node) -> i64:\n    n.v\n"
+
+fn truth_context(body: text, strict: bool, require_strict: bool = false) -> CompileContext:
+    val path = "testdata/admission_truth.spl"
+    val source_text = "class Node:\n    v: i64\n\n" + body
+    var parsed = parse_full_frontend(source_text, path, "admission_truth", Logger(level: 0))
+    parsed.nogc_strict = strict
+    val source = SourceFile(path: path, content: source_text, module_name: "admission_truth")
+    val surface = module_surface_from_owner(ModuleSurfaceParserOwner.new(parsed), source, 0).unwrap()
+    var lowering = HirLowering.with_filename(path)
+    val actual: HirModule = lowering.lower_module(parsed)
+    var options = driver_core_compile_options_default()
+    options.nogc_require_strict = require_strict
+    val ctx = CompileContext.create(options)
+    ctx.hir_modules["admission_truth"] = actual
+    ctx.validation_module_array = [actual]
+    ctx.bootstrap_entry_hir = actual
+    driver_admit_nogc_param_effects_v1(ctx, [surface])
+    ctx
+
+fn admitted_module(ctx: CompileContext) -> HirModule:
+    val actual: HirModule = ctx.hir_modules["admission_truth"]
+    actual
+
+fn unadmitted_strict_module() -> HirModule:
+    val path = "testdata/admission_truth.spl"
+    var parsed = parse_full_frontend("class Node:\n    v: i64\n\n" + INSPECT, path, "admission_truth", Logger(level: 0))
+    parsed.nogc_strict = true
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_module(parsed)
+
+fn contains_code(lines: [text], code: text) -> bool:
+    for line in lines:
+        if line.contains(code): return true
+    false
+
+describe "no-GC admission verdicts":
+    it "classifies an admitted strict module as checked":
+        val report = nogc_admission_report_v1([admitted_module(truth_context(INSPECT, true))])
+        expect(report.checked).to_equal(1)
+        expect(report.unchecked.len()).to_equal(0)
+        expect(report.incomplete.len()).to_equal(0)
+
+    it "classifies a legacy module as unchecked by name":
+        val module = admitted_module(truth_context(INSPECT, false))
+        val report = nogc_admission_report_v1([module])
+        expect(report.checked).to_equal(0)
+        expect(report.unchecked).to_equal([module.name])
+        expect(module.name.contains("admission_truth")).to_equal(true)
+
+    it "treats a strict module without checked contracts as a detected bypass":
+        val module = unadmitted_strict_module()
+        val report = nogc_admission_report_v1([module])
+        expect(report.incomplete).to_equal([module.name])
+        expect(module.name.contains("admission_truth")).to_equal(true)
+        val errors = nogc_admission_conforming_errors_v1(report, false)
+        expect(contains_code(errors, "NOGC-POLICY-003")).to_equal(true)
+        expect(contains_code(errors, "admission_truth")).to_equal(true)
+
+describe "conforming no-GC policy":
+    it "never reports conforming when nothing was checked":
+        val report = nogc_admission_report_v1([])
+        expect(contains_code(nogc_admission_conforming_errors_v1(report, true), "NOGC-POLICY-005")).to_equal(true)
+        expect(nogc_admission_conforming_errors_v1(report, false).len()).to_equal(0)
+
+    it "rejects an unchecked legacy module by name when strict is required":
+        val report = nogc_admission_report_v1([admitted_module(truth_context(INSPECT, false))])
+        val errors = nogc_admission_conforming_errors_v1(report, true)
+        expect(contains_code(errors, "NOGC-POLICY-004")).to_equal(true)
+        expect(contains_code(errors, "admission_truth")).to_equal(true)
+
+    it "admits a fully checked strict closure when strict is required":
+        val report = nogc_admission_report_v1([admitted_module(truth_context(INSPECT, true))])
+        expect(nogc_admission_conforming_errors_v1(report, true).len()).to_equal(0)
+        expect(nogc_admission_truth_notes_v1(report).len()).to_equal(0)
+
+    it "emits exactly one truth note per unchecked legacy module":
+        val report = nogc_admission_report_v1([admitted_module(truth_context(INSPECT, false))])
+        val notes = nogc_admission_truth_notes_v1(report)
+        expect(notes.len()).to_equal(1)
+        expect(notes[0].contains("NOGC-NOTE-001")).to_equal(true)
+        expect(notes[0].contains("admission_truth")).to_equal(true)
+        expect(notes[0].contains("not conforming")).to_equal(true)
+
+describe "driver admission publishes the truth":
+    it "warns instead of staying silent for a legacy module":
+        val ctx = truth_context(INSPECT, false)
+        expect(ctx.error_count_value).to_equal(0)
+        expect(contains_code(ctx.warnings, "NOGC-NOTE-001")).to_equal(true)
+
+    it "stays quiet for an admitted strict module":
+        val ctx = truth_context(INSPECT, true)
+        expect(ctx.error_count_value).to_equal(0)
+        expect(contains_code(ctx.warnings, "NOGC-NOTE-001")).to_equal(false)
+
+    it "rejects a legacy module when the build requires conforming no-GC":
+        val ctx = truth_context(INSPECT, false, true)
+        expect(ctx.error_count_value).to_be_greater_than(0)
+        expect(contains_code(ctx.errors, "NOGC-POLICY-004")).to_equal(true)
+
+    it "admits a strict checked module when the build requires conforming no-GC":
+        val ctx = truth_context(INSPECT, true, true)
+        expect(ctx.error_count_value).to_equal(0)
+        expect(ctx.nogc_ownership_required).to_equal(true)
+
+    it "rejects an empty closure when the build requires conforming no-GC":
+        var options = driver_core_compile_options_default()
+        options.nogc_require_strict = true
+        val ctx = CompileContext.create(options)
+        driver_admit_nogc_param_effects_v1(ctx, [])
+        expect(contains_code(ctx.errors, "NOGC-POLICY-005")).to_equal(true)

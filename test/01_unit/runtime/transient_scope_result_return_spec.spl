@@ -1,0 +1,74 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, runtime, transient, regression
+# Behavioral regression for s3_parse_selected_result_freed_by_transient_scope_2026-11-02.
+# Reproduces the ORIGINAL (pre-#5818) parse_full_frontend_selected_v1 shape without the re-box:
+# begin scope -> build Result<SomeStruct, text> inside it -> pause -> rt_transient_heap_promote(result)
+# -> end scope -> return the same Result. Under the runtime promote rules (runtime_native.c
+# rt_transient_heap_promote: an RT_VALUE_HEAP_ENUM root is classified RT_CORE_TRANSIENT_ENUM, the
+# root is promoted and its payload is walked), the box and payload must survive scope end.
+# If this passes on a correctly compiled runner, the source pattern is sound and the stage3
+# failure is a stage2 miscompile.
+use std.spec
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+
+struct ScopedPayload:
+    name: text
+    items: [text]
+    count: i64
+
+fn build_in_scope(ok: bool) -> Result<ScopedPayload, text>:
+    if ok:
+        var items: [text] = []
+        items.push("alpha_" + "one")
+        items.push("beta_" + "two")
+        Ok(ScopedPayload(name: "mod_" + "main", items: items, count: 2))
+    else:
+        Err("rejected_" + "target")
+
+fn scoped_result(ok: bool) -> Result<ScopedPayload, text>:
+    val began = rt_transient_array_scope_begin()
+    val parsed = build_in_scope(ok)
+    val paused = rt_transient_array_scope_pause()
+    val promoted = if began and paused: rt_transient_heap_promote(parsed) else: true
+    val ended = if began: rt_transient_array_scope_end() else: true
+    if not (promoted and ended):
+        return Err("scope ownership failed")
+    parsed
+
+fn churn():
+    # Reuse freed transient memory so a freed box would show a garbage tag.
+    var junk: [text] = []
+    var i = 0
+    while i < 64:
+        junk.push("junk_{i}")
+        i = i + 1
+
+describe "Result returned out of a transient scope":
+    it "keeps the Ok tag and payload fields after scope end":
+        val r = scoped_result(true)
+        churn()
+        expect(r.is_ok()).to_equal(true)
+        expect(r.is_err()).to_equal(false)
+        match r:
+            case Ok(p):
+                expect(p.name).to_equal("mod_main")
+                expect(p.count).to_equal(2)
+                expect(p.items.len()).to_equal(2)
+                expect(p.items[0]).to_equal("alpha_one")
+                expect(p.items[1]).to_equal("beta_two")
+            case Err(e):
+                fail("expected Ok, got Err({e})")
+
+    it "keeps the Err tag and message after scope end":
+        val r = scoped_result(false)
+        churn()
+        expect(r.is_err()).to_equal(true)
+        match r:
+            case Ok(_):
+                fail("expected Err, got Ok")
+            case Err(e):
+                expect(e).to_equal("rejected_target")

@@ -1,0 +1,47 @@
+"""
+Pane input throughput budget (bug smux_pty_input_throughput_wide_line_2026-11-04).
+A wide shell command line must traverse enqueue -> remaining -> UTF-8 prefix
+-> advance in well under a second of pure CPU; the real-PTY lane reported
+~100 s for 300 chars. Budgets are explicit wall-clock seconds.
+# @manual: primary
+"""
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{time_now_unix_micros}
+use os.apps.smux.input_queue.{pane_input_new, pane_input_enqueue,
+    pane_input_remaining, pane_input_advance}
+use std.sys.pty_input_codec.{pty_input_prefix}
+
+fn wide_line(n: i64) -> text:
+    var s = "echo "
+    var i = 0
+    while i < n:
+        s = s + "a"
+        i = i + 1
+    return s + "\r"
+
+# Drain exactly as _flush_input does when the provider accepts everything.
+fn drain_seconds(n: i64) -> f64:
+    val t0 = time_now_unix_micros()
+    var q = pane_input_new()
+    val e = pane_input_enqueue(q, wide_line(n))
+    q = e.unwrap()
+    var guard = 0
+    while q.bytes.len() > 0 and guard < 10000:
+        val bytes = pane_input_remaining(q)
+        val p = pty_input_prefix(bytes)
+        val accepted = p.unwrap().accepted
+        q = pane_input_advance(q, accepted).unwrap()
+        guard = guard + 1
+    return (time_now_unix_micros() - t0) as f64 / 1000000.0
+
+describe "smux pane input throughput":
+    it "drains a 300 char wide line within 2 s of CPU":
+        step("300 chars")
+        val s = drain_seconds(300)
+        print "wide300 seconds=" + s.to_string()
+        expect(s < 2.0).to_equal(true)
+    it "drains a 4000 char line within 10 s (linear, not quadratic)":
+        step("4000 chars")
+        val s = drain_seconds(4000)
+        print "wide4000 seconds=" + s.to_string()
+        expect(s < 10.0).to_equal(true)

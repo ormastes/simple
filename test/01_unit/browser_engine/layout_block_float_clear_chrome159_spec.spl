@@ -1,0 +1,422 @@
+"""
+## Purpose and audience
+Purpose: Pin `layout.spl`'s block layout (`layout_tree` -> `_layout_block_node`,
+the path used by `browser_renderer` and `engine_merge`) to Chrome 159 for
+floats and `clear`: clearance (CSS 2.2 §9.5.2) and its interaction with margin
+collapsing, float placement (§9.5.1: left/right stacking, wrapping, a float's
+top never above an earlier float), a block formatting context root narrowed
+beside floats (§9.5), and floats/abs boxes after an empty self-collapsing block.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle: Chrome for Testing 159 (`chromium-1255`, `--headless
+--no-sandbox --dump-dom`, 2026-11-17). Page: `html,body` margin 0, every `div`
+margin 0, each case inside a `<div style="display:flow-root;width:300px">`
+wrapper W (mirrored by `_w`: the layout root is a BFC root, 300px wide);
+geometry is `getBoundingClientRect()` relative to W. Every value is quoted on
+its row as `id x=.. y=.. w=.. h=..`. `FL(w,h)` is `float:left;width:w;height:h`.
+
+Red before the 2026-11-17 fix (27 of 40): cl-1, cl-3, cl-4, cl-5, cl-8, cl-10,
+cl-11, cl-12, cl-13, cl-d2, cl-d3, cl-h2, every `fp-*` row (each float landed at the
+left content edge at its static y, overlapping the previous one) and every
+`bfc-*` row (a BFC root ignored floats). Guards that already passed: cl-2,
+cl-6, cl-7, cl-9, cl-d1, cl-d4 (no clearance needed), cl-h1, cl-h3 (a
+display:none float is no float; red on this lane's first head) and the `ef-*` rows (a
+float or abs box after an empty block already took the whole collapsed set,
+CSS 2.2 §8.3.1).
+
+Model limits (open): floats are not shrink-to-fit (an auto-width float fills
+the line here, every row uses an explicit width); a BFC root tests the float
+band at its top edge only; this path has no inline layout, so line boxes beside
+a float are not shortened (the HTML renderer path does that in
+`compute_style_wrap_ranges_float_band`); clearance decided across a parent
+boundary follows the rule pinned by cl-8/cl-12/cl-d2/cl-d3/cl-d4 only.
+"""
+
+"""
+Traceability: REQ-SSPEC-BROWSER_ENGINE — layout_tree float and clearance geometry matches Chrome 159.
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_tree}
+
+fn _block(style_pairs: [text]) -> BeDomNode:
+    var d = BeDomNode.element("div")
+    var i = 0
+    while i + 1 < style_pairs.len():
+        d.set_style(style_pairs[i], style_pairs[i + 1])
+        i = i + 2
+    d
+
+fn _fl(side: text, w: text, h: text) -> BeDomNode:
+    _block(["float", side, "width", w, "height", h])
+
+fn _w(kids: [BeDomNode]) -> BeLayoutBox:
+    var w = BeDomNode.element("div")
+    w.set_style("width", "300px")
+    for k in kids:
+        w.add_child(k)
+    layout_tree(w, 900.0, 2000.0)
+
+fn _in(parent: BeDomNode, kids: [BeDomNode]) -> BeDomNode:
+    var p = parent
+    for k in kids:
+        p.add_child(k)
+    p
+
+describe "layout_tree clearance (Chrome 159, CSS 2.2 §9.5.2)":
+    it "cl-1: clear:left moves the block's border edge below a left float":
+        # Chrome: c1_f x=0 y=0 w=50 h=40 | c1_c x=0 y=40 w=300 h=10 | c1_w h=50
+        val w = _w([_fl("left", "50px", "40px"), _block(["clear", "left", "height", "10px"])])
+        expect(w.children[1].y).to_equal(40.0)
+        expect(w.children[1].width).to_equal(300.0)
+        expect(w.height).to_equal(50.0)
+
+    it "cl-2: clear:right ignores a left float (guard)":
+        # Chrome: c2_c x=0 y=0 w=300 h=10 | c2_w h=40
+        val w = _w([_fl("left", "50px", "40px"), _block(["clear", "right", "height", "10px"])])
+        expect(w.children[1].y).to_equal(0.0)
+        expect(w.height).to_equal(40.0)
+
+    it "cl-3: clear:both clears a right float":
+        # Chrome: c3_f x=250 y=0 w=50 h=30 | c3_c x=0 y=30 w=300 h=10 | c3_w h=40
+        val w = _w([_fl("right", "50px", "30px"), _block(["clear", "both", "height", "10px"])])
+        expect(w.children[0].x).to_equal(250.0)
+        expect(w.children[1].y).to_equal(30.0)
+        expect(w.height).to_equal(40.0)
+
+    it "cl-4: clearance replaces the collapsed margin; the next sibling collapses with the cleared block's bottom":
+        # Chrome: c4_a y=0 h=10 | c4_f y=20 h=40 | c4_c y=60 h=10 (mb5) | c4_s y=78 (mt8) | c4_w h=83
+        val w = _w([
+            _block(["height", "10px", "margin-bottom", "10px"]),
+            _fl("left", "50px", "40px"),
+            _block(["clear", "left", "margin-top", "20px", "height", "10px", "margin-bottom", "5px"]),
+            _block(["height", "5px", "margin-top", "8px"])
+        ])
+        expect(w.children[1].y).to_equal(20.0)
+        expect(w.children[2].y).to_equal(60.0)
+        expect(w.children[3].y).to_equal(78.0)
+        expect(w.height).to_equal(83.0)
+
+    it "cl-5: a negative top margin does not lift a cleared block above the float":
+        # Chrome: c5_f y=20 h=5 | c5_c y=25 h=10 | c5_w h=35
+        val w = _w([
+            _block(["height", "10px", "margin-bottom", "10px"]),
+            _fl("left", "50px", "5px"),
+            _block(["clear", "left", "margin-top", "-5px", "height", "10px"])
+        ])
+        expect(w.children[2].y).to_equal(25.0)
+        expect(w.height).to_equal(35.0)
+
+    it "cl-6: no clearance when the margin already places the block below the float (guard)":
+        # Chrome: c6_f y=0 h=5 | c6_c y=20 h=10 | c6_w h=30
+        val w = _w([_fl("left", "50px", "5px"), _block(["clear", "left", "margin-top", "20px", "height", "10px"])])
+        expect(w.children[1].y).to_equal(20.0)
+        expect(w.height).to_equal(30.0)
+
+    it "cl-7: the hypothetical position (collapsed margin 30) is already past the float, so no clearance":
+        # Chrome: c7_f y=20 h=15 | c7_c y=40 h=10 | c7_w h=50
+        val w = _w([
+            _block(["height", "10px", "margin-bottom", "10px"]),
+            _fl("left", "50px", "15px"),
+            _block(["clear", "left", "margin-top", "30px", "height", "10px"])
+        ])
+        expect(w.children[1].y).to_equal(20.0)
+        expect(w.children[2].y).to_equal(40.0)
+        expect(w.height).to_equal(50.0)
+
+    it "cl-8: a cleared first child's margin does not collapse through its parent":
+        # Chrome: c8_p y=0 h=50 | c8_f y=0 h=40 | c8_c y=40 h=10 | c8_w h=50
+        val p = _in(_block([]), [_fl("left", "50px", "40px"), _block(["clear", "left", "margin-top", "10px", "height", "10px"])])
+        val w = _w([p])
+        expect(w.children[0].y).to_equal(0.0)
+        expect(w.children[0].height).to_equal(50.0)
+        expect(w.children[0].children[1].y).to_equal(40.0)
+        expect(w.height).to_equal(50.0)
+
+    it "cl-9: with no float, a clear:left first child still collapses through its parent (guard)":
+        # Chrome: c9_p y=10 h=10 | c9_c y=10 h=10 | c9_w h=20
+        val p = _in(_block(["margin-top", "10px"]), [_block(["clear", "left", "height", "10px"])])
+        val w = _w([p])
+        expect(w.children[0].y).to_equal(10.0)
+        expect(w.children[0].children[0].y).to_equal(10.0)
+        expect(w.height).to_equal(20.0)
+
+    it "cl-10: clear sees a float inside an earlier sibling's subtree (same BFC)":
+        # Chrome: c10_p y=0 h=0 | c10_f y=0 h=40 | c10_c y=40 h=10 | c10_w h=50
+        val p = _in(_block([]), [_fl("left", "50px", "40px")])
+        val w = _w([p, _block(["clear", "left", "height", "10px"])])
+        expect(w.children[0].height).to_equal(0.0)
+        expect(w.children[1].y).to_equal(40.0)
+        expect(w.height).to_equal(50.0)
+
+    it "cl-11: clearfix: an empty clear:both child makes its parent wrap the float":
+        # Chrome: c11_p y=0 h=40 | c11_x y=40 h=0 | c11_s y=40 h=10 | c11_w h=50
+        val p = _in(_block([]), [_fl("left", "50px", "40px"), _block(["clear", "both"])])
+        val w = _w([p, _block(["height", "10px"])])
+        expect(w.children[0].height).to_equal(40.0)
+        expect(w.children[0].children[1].y).to_equal(40.0)
+        expect(w.children[1].y).to_equal(40.0)
+        expect(w.height).to_equal(50.0)
+
+    it "cl-12: the parent keeps only its own top margin when its first child is cleared":
+        # Chrome: c12_p y=10 h=50 | c12_f y=10 h=40 | c12_c y=50 h=10 | c12_w h=60
+        val p = _in(_block(["margin-top", "10px"]), [_fl("left", "50px", "40px"), _block(["clear", "left", "margin-top", "20px", "height", "10px"])])
+        val w = _w([p])
+        expect(w.children[0].y).to_equal(10.0)
+        expect(w.children[0].height).to_equal(50.0)
+        expect(w.children[0].children[0].y).to_equal(10.0)
+        expect(w.children[0].children[1].y).to_equal(50.0)
+        expect(w.height).to_equal(60.0)
+
+    it "cl-13: a cleared block's bottom margin collapses with the next sibling's top":
+        # Chrome: c13_c y=60 h=10 (mb20) | c13_s y=90 (mt5) | c13_w h=95
+        val w = _w([
+            _block(["height", "10px", "margin-bottom", "10px"]),
+            _fl("left", "50px", "40px"),
+            _block(["clear", "left", "margin-top", "20px", "height", "10px", "margin-bottom", "20px"]),
+            _block(["height", "5px", "margin-top", "5px"])
+        ])
+        expect(w.children[2].y).to_equal(60.0)
+        expect(w.children[3].y).to_equal(90.0)
+        expect(w.height).to_equal(95.0)
+
+    it "cl-d1: a clear child with no float anywhere collapses its 20px through the parent (guard)":
+        # Chrome: d1_p y=20 h=10 | d1_c y=20 | d1_w h=30
+        val w = _w([_in(_block([]), [_block(["clear", "left", "margin-top", "20px", "height", "10px"])])])
+        expect(w.children[0].y).to_equal(20.0)
+        expect(w.height).to_equal(30.0)
+
+    it "cl-d2: a short leading float still stops the collapse; the child sits at the float bottom":
+        # Chrome: d2_p y=0 h=15 | d2_f y=0 h=5 | d2_c y=5 h=10 | d2_w h=15
+        val w = _w([_in(_block([]), [_fl("left", "50px", "5px"), _block(["clear", "left", "margin-top", "20px", "height", "10px"])])])
+        expect(w.children[0].y).to_equal(0.0)
+        expect(w.children[0].height).to_equal(15.0)
+        expect(w.children[0].children[1].y).to_equal(5.0)
+        expect(w.height).to_equal(15.0)
+
+    it "cl-d3: an outer float the collapsed margin does not pass stops the collapse":
+        # Chrome: d3_f y=0 h=40 | d3_p y=0 h=50 | d3_c y=40 h=10 | d3_w h=50
+        val w = _w([_fl("left", "50px", "40px"), _in(_block([]), [_block(["clear", "left", "margin-top", "20px", "height", "10px"])])])
+        expect(w.children[1].y).to_equal(0.0)
+        expect(w.children[1].height).to_equal(50.0)
+        expect(w.children[1].children[0].y).to_equal(40.0)
+        expect(w.height).to_equal(50.0)
+
+    it "cl-d4: an outer float the collapsed margin passes leaves the collapse alone":
+        # Chrome: d4_f y=0 h=5 | d4_p y=20 h=10 | d4_c y=20 h=10 | d4_w h=30
+        val w = _w([_fl("left", "50px", "5px"), _in(_block([]), [_block(["clear", "left", "margin-top", "20px", "height", "10px"])])])
+        expect(w.children[1].y).to_equal(20.0)
+        expect(w.children[1].children[0].y).to_equal(20.0)
+        expect(w.height).to_equal(30.0)
+
+    it "cl-h1: a display:none float is no float to clear, so the collapse goes through":
+        # Chrome: h1_p y=20 h=10 | h1_c y=20 h=10 | h1_w h=30
+        val f = _block(["float", "left", "display", "none", "width", "50px", "height", "40px"])
+        val w = _w([_in(_block([]), [f, _block(["clear", "left", "margin-top", "20px", "height", "10px"])])])
+        expect(w.children[0].y).to_equal(20.0)
+        expect(w.children[0].children[0].y).to_equal(20.0)
+        expect(w.height).to_equal(30.0)
+
+    it "cl-h2: a parent holding only an empty clear:both is not empty when an outer float is cleared":
+        # Chrome: h2_f y=0 h=40 | h2_p y=0 h=40 | h2_x y=40 h=0 | h2_s y=40 h=10 | h2_w h=50
+        val p = _in(_block([]), [_block(["clear", "both"])])
+        val w = _w([_fl("left", "50px", "40px"), p, _block(["height", "10px"])])
+        expect(w.children[1].height).to_equal(40.0)
+        expect(w.children[2].y).to_equal(40.0)
+        expect(w.height).to_equal(50.0)
+
+    it "cl-h3: an empty clear:both after a display:none float still self-collapses":
+        # Chrome: h3_p y=10 h=0 | h3_x y=10 h=0 | h3_s y=10 h=10 | h3_w h=20
+        val f = _block(["float", "left", "display", "none", "width", "50px", "height", "40px"])
+        val p = _in(_block([]), [f, _block(["clear", "both", "margin-top", "10px"])])
+        val w = _w([p, _block(["height", "10px"])])
+        expect(w.children[0].height).to_equal(0.0)
+        expect(w.children[1].y).to_equal(10.0)
+        expect(w.height).to_equal(20.0)
+
+describe "layout_tree float placement (Chrome 159, CSS 2.2 §9.5.1)":
+    it "fp-1: left floats stack side by side; a right float takes the right edge":
+        # Chrome: f1_a x=0 y=0 | f1_b x=100 y=0 | f1_c x=250 y=0 | f1_w h=30
+        val w = _w([_fl("left", "100px", "20px"), _fl("left", "100px", "30px"), _fl("right", "50px", "10px")])
+        expect(w.children[0].x).to_equal(0.0)
+        expect(w.children[1].x).to_equal(100.0)
+        expect(w.children[1].y).to_equal(0.0)
+        expect(w.children[2].x).to_equal(250.0)
+        expect(w.children[2].y).to_equal(0.0)
+        expect(w.height).to_equal(30.0)
+
+    it "fp-2: a float that does not fit wraps down; a later float never goes higher":
+        # Chrome: f2_a x=0 y=0 w=250 | f2_b x=0 y=20 | f2_c x=100 y=20 | f2_w h=30
+        val w = _w([_fl("left", "250px", "20px"), _fl("left", "100px", "10px"), _fl("left", "20px", "10px")])
+        expect(w.children[1].x).to_equal(0.0)
+        expect(w.children[1].y).to_equal(20.0)
+        expect(w.children[2].x).to_equal(100.0)
+        expect(w.children[2].y).to_equal(20.0)
+        expect(w.height).to_equal(30.0)
+
+    it "fp-3: right floats stack leftwards":
+        # Chrome: f3_a x=200 y=0 | f3_b x=100 y=0 | f3_w h=20
+        val w = _w([_fl("right", "100px", "20px"), _fl("right", "100px", "10px")])
+        expect(w.children[0].x).to_equal(200.0)
+        expect(w.children[1].x).to_equal(100.0)
+        expect(w.children[1].y).to_equal(0.0)
+        expect(w.height).to_equal(20.0)
+
+    it "fp-4: float margins are part of the margin box that stacks":
+        # Chrome: f4_a x=5 y=5 | f4_b x=62 y=0 | f4_w h=25
+        val w = _w([
+            _block(["float", "left", "width", "50px", "height", "20px", "margin-top", "5px", "margin-left", "5px"]),
+            _block(["float", "left", "width", "50px", "height", "20px", "margin-left", "7px"])
+        ])
+        expect(w.children[0].x).to_equal(5.0)
+        expect(w.children[0].y).to_equal(5.0)
+        expect(w.children[1].x).to_equal(62.0)
+        expect(w.children[1].y).to_equal(0.0)
+        expect(w.height).to_equal(25.0)
+
+    it "fp-5: floats after a block start at its bottom, on both sides":
+        # Chrome: f5_a x=0 y=10 | f5_b x=250 y=10 | f5_w h=30
+        val w = _w([_block(["height", "10px"]), _fl("left", "50px", "20px"), _fl("right", "50px", "10px")])
+        expect(w.children[1].y).to_equal(10.0)
+        expect(w.children[2].x).to_equal(250.0)
+        expect(w.children[2].y).to_equal(10.0)
+        expect(w.height).to_equal(30.0)
+
+    it "fp-6: a right float too wide beside a left float drops below it":
+        # Chrome: f6_b x=150 y=20 w=150 | f6_w h=30
+        val w = _w([_fl("left", "200px", "20px"), _fl("right", "150px", "10px")])
+        expect(w.children[1].x).to_equal(150.0)
+        expect(w.children[1].y).to_equal(20.0)
+        expect(w.height).to_equal(30.0)
+
+    it "fp-7: a wrapped float drops only to the first float bottom that frees room":
+        # Chrome: f7_a x=0 y=0 h=40 | f7_b x=100 y=0 | f7_c x=100 y=10 | f7_w h=40
+        val w = _w([_fl("left", "100px", "40px"), _fl("left", "150px", "10px"), _fl("left", "100px", "10px")])
+        expect(w.children[1].x).to_equal(100.0)
+        expect(w.children[2].x).to_equal(100.0)
+        expect(w.children[2].y).to_equal(10.0)
+        expect(w.height).to_equal(40.0)
+
+describe "layout_tree block formatting context beside floats (Chrome 159, CSS 2.2 §9.5)":
+    it "bfc-1: an overflow:hidden block narrows to sit beside a left float":
+        # Chrome: b1_b x=100 y=0 w=200 h=10 | b1_w h=40
+        val w = _w([_fl("left", "100px", "40px"), _block(["overflow", "hidden", "height", "10px"])])
+        expect(w.children[1].x).to_equal(100.0)
+        expect(w.children[1].y).to_equal(0.0)
+        expect(w.children[1].width).to_equal(200.0)
+        expect(w.height).to_equal(40.0)
+
+    it "bfc-2: a flow-root wider than the room beside the float moves below it":
+        # Chrome: b2_b x=0 y=40 w=250 h=10 | b2_w h=50
+        val w = _w([_fl("left", "100px", "40px"), _block(["display", "flow-root", "width", "250px", "height", "10px"])])
+        expect(w.children[1].x).to_equal(0.0)
+        expect(w.children[1].y).to_equal(40.0)
+        expect(w.height).to_equal(50.0)
+
+    it "bfc-normal: a normal block overlaps the float; a later BFC root narrows at its own y":
+        # Chrome: b3_n x=0 y=0 w=300 | b3_b x=100 y=10 w=200 | b3_w h=40
+        val w = _w([_fl("left", "100px", "40px"), _block(["height", "10px"]), _block(["overflow", "hidden", "height", "10px"])])
+        expect(w.children[1].x).to_equal(0.0)
+        expect(w.children[1].width).to_equal(300.0)
+        expect(w.children[2].x).to_equal(100.0)
+        expect(w.children[2].y).to_equal(10.0)
+        expect(w.children[2].width).to_equal(200.0)
+
+    it "bfc-margin: a margin-left smaller than the float overlaps it; a larger one wins":
+        # Chrome: b4_b x=100 y=0 w=200 (ml20) | b4_c x=120 y=10 w=180 (ml120)
+        val w = _w([
+            _fl("left", "100px", "40px"),
+            _block(["overflow", "hidden", "margin-left", "20px", "height", "10px"]),
+            _block(["overflow", "hidden", "margin-left", "120px", "height", "10px"])
+        ])
+        expect(w.children[1].x).to_equal(100.0)
+        expect(w.children[1].width).to_equal(200.0)
+        expect(w.children[2].x).to_equal(120.0)
+        expect(w.children[2].width).to_equal(180.0)
+
+    it "bfc-right: a right float narrows the BFC root from the right":
+        # Chrome: b5_f x=200 | b5_b x=0 y=0 w=200 h=10
+        val w = _w([_fl("right", "100px", "40px"), _block(["overflow", "hidden", "height", "10px"])])
+        expect(w.children[1].x).to_equal(0.0)
+        expect(w.children[1].width).to_equal(200.0)
+
+    it "bfc-drop: a following block continues below a BFC root that dropped under the float":
+        # Chrome: b6_b x=0 y=20 w=250 | b6_c y=30 | b6_w h=35
+        val w = _w([
+            _fl("left", "100px", "20px"),
+            _block(["overflow", "hidden", "width", "250px", "height", "10px"]),
+            _block(["height", "5px"])
+        ])
+        expect(w.children[1].y).to_equal(20.0)
+        expect(w.children[2].y).to_equal(30.0)
+        expect(w.height).to_equal(35.0)
+
+    it "bfc-tall: a BFC root taller than the float stays beside it":
+        # Chrome: b7_b x=100 y=0 w=200 h=50 | b7_w h=50
+        val w = _w([_fl("left", "100px", "20px"), _block(["overflow", "hidden", "height", "50px"])])
+        expect(w.children[1].x).to_equal(100.0)
+        expect(w.children[1].width).to_equal(200.0)
+        expect(w.height).to_equal(50.0)
+
+    it "bfc-fits: an explicit-width flow-root that fits sits beside the float":
+        # Chrome: b8_b x=100 y=0 w=150 h=10 | b8_w h=20
+        val w = _w([_fl("left", "100px", "20px"), _block(["display", "flow-root", "width", "150px", "height", "10px"])])
+        expect(w.children[1].x).to_equal(100.0)
+        expect(w.children[1].y).to_equal(0.0)
+        expect(w.children[1].width).to_equal(150.0)
+
+describe "layout_tree float and abs box after an empty block (Chrome 159)":
+    it "ef-1: a float after an empty block takes the whole collapsed set (10, 20, 5)":
+        # Chrome: e1_e y=30 h=0 | e1_f y=30 | e1_b y=30 | e1_w h=40
+        val w = _w([
+            _block(["height", "10px", "margin-bottom", "10px"]),
+            _block(["margin-top", "20px", "margin-bottom", "5px"]),
+            _fl("left", "50px", "5px"),
+            _block(["height", "10px"])
+        ])
+        expect(w.children[2].y).to_equal(30.0)
+        expect(w.children[3].y).to_equal(30.0)
+        expect(w.height).to_equal(40.0)
+
+    it "ef-2: an absolute box after an empty block takes the same static position":
+        # Chrome: e2_f y=30 | e2_b y=30 | e2_w h=40
+        val w = _w([
+            _block(["height", "10px", "margin-bottom", "10px"]),
+            _block(["margin-top", "20px", "margin-bottom", "5px"]),
+            _block(["position", "absolute", "width", "50px", "height", "5px"]),
+            _block(["height", "10px"])
+        ])
+        expect(w.children[2].y).to_equal(30.0)
+        expect(w.children[3].y).to_equal(30.0)
+        expect(w.height).to_equal(40.0)
+
+    it "ef-3: an empty block's large bottom margin (30) places a following float":
+        # Chrome: e3_e y=20 | e3_f y=40 | e3_b y=40 (mt5) | e3_w h=50
+        val w = _w([
+            _block(["height", "10px", "margin-bottom", "10px"]),
+            _block(["margin-top", "5px", "margin-bottom", "30px"]),
+            _fl("left", "50px", "5px"),
+            _block(["height", "10px", "margin-top", "5px"])
+        ])
+        expect(w.children[2].y).to_equal(40.0)
+        expect(w.children[3].y).to_equal(40.0)
+        expect(w.height).to_equal(50.0)
+
+    it "ef-4: an absolute box after the same empty block":
+        # Chrome: e4_f y=40 | e4_b y=40 | e4_w h=50
+        val w = _w([
+            _block(["height", "10px", "margin-bottom", "10px"]),
+            _block(["margin-top", "5px", "margin-bottom", "30px"]),
+            _block(["position", "absolute", "width", "50px", "height", "5px"]),
+            _block(["height", "10px", "margin-top", "5px"])
+        ])
+        expect(w.children[2].y).to_equal(40.0)
+        expect(w.children[3].y).to_equal(40.0)
+        expect(w.height).to_equal(50.0)
+
+    it "ef-5: a float after a leading empty block in a BFC root sits at its margin":
+        # Chrome: e5_e y=20 | e5_f y=20 | e5_b y=20 | e5_w h=30
+        val w = _w([_block(["margin-top", "20px"]), _fl("left", "50px", "5px"), _block(["height", "10px"])])
+        expect(w.children[1].y).to_equal(20.0)
+        expect(w.children[2].y).to_equal(20.0)
+        expect(w.height).to_equal(30.0)

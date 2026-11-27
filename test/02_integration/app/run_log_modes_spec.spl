@@ -1,19 +1,23 @@
 use std.spec.{describe, it, expect}
-
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, secure_temp_dir}
+use test.helpers.simple_cli_spawn_fixture.{simple_cli_run}
 
 fn _run_run(args: [text]) -> (text, text, i64):
-    val joined = args.join(" ")
-    rt_process_run("/bin/sh", [
-        "-c",
-        "REPO=$(pwd); SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/run/main.spl\" " + joined
-    ])
+    simple_cli_run(["src/app/run/main.spl"] + args, 120000)
 
 fn _run_run_temp_script() -> (text, text, i64):
-    rt_process_run("/bin/sh", [
-        "-c",
-        "TMP=/tmp/simple_run_delegate_$$.spl; printf 'print \"run-delegate-ok\"\\n' > \"$TMP\"; REPO=$(pwd); SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/run/main.spl\" \"$TMP\"; CODE=$?; rm -f \"$TMP\"; exit $CODE"
-    ])
+    val scope = match secure_temp_dir(get_temp_dir(), "run-delegate-script-"):
+        Ok(path): path.replace("\\", "/")
+        Err(reason): return ("", "error: script scope: " + reason, 125)
+    val script_path = scope + "/probe.spl"
+    if not file_create_exclusive(script_path, "print \"run-delegate-ok\"\n"):
+        val _removed = dir_remove_all(scope)
+        return ("", "error: script fixture creation failed", 125)
+    val (out, err, code) = simple_cli_run(["src/app/run/main.spl", script_path], 120000)
+    val _removed = dir_remove_all(scope)
+    (out, err, code)
 
 describe "run log mode CLI options":
     # @manual scenario evidence

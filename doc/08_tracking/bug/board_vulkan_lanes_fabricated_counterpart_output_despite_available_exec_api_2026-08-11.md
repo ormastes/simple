@@ -1,6 +1,11 @@
 # Board-Vulkan lanes compared against fabricated counterpart output while a process-exec API existed
+## Closed 2026-11-11 — FIXED (all four unblock items verified at tip; fresh evidence below)
 
-Status: OPEN (P2)
+All four unblock items are closed in source at release/1.0.0 tip and the
+three quoted gate specs pass under the seed binary. Dated verification
+addendum at the bottom of this file.
+
+> Status: FIXED — was OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 **Filed:** 2026-08-11
@@ -276,3 +281,67 @@ across 8 parallel boundary lanes to fix the fabricated-comparator
 pattern -- a GPU/hardware verification gap, not reachable from a unit
 spec here. Leaving OPEN.
 
+## Triage 2026-11-11 (p3fix-p2a-20261111 lane) — FIXED, verified at tip
+
+Re-verified every unblock item against source at release/1.0.0 (worktree
+@ 79d5af6723f6) and ran the three specs this doc quotes, under the tracked
+seed binary (`SIMPLE_LIB=src bin/simple.exe test <spec> --mode=interpreter
+--no-cache`, Windows host):
+
+1. **SPIR-V** — `boundary_spirv_khronos_provider.spl` calls
+   `process_run_bounded` against the pinned Khronos tools and fails closed
+   to `ProviderStatus.unavailable` when they are absent. Not fabricated. ✅
+2. **Enumeration** — `boundary_enumeration_provider.spl` shells out to
+   `vulkaninfo` under the pinned lavapipe ICD and parses the real
+   transcript (`parse_vulkaninfo_lavapipe`, fails closed to nil). ✅
+3. **Readback** — `boundary_readback_lavapipe_provider.spl` now launches an
+   admitted cached readback worker through `process_run_bounded` and
+   projects the capture through `ExecCapture`/`exec_to_evidence`
+   (imports confirmed at lines 34-36, 58-68); missing workers, empty
+   output, incomplete transcripts, and nonzero exits stay
+   `unavailable`/`crashed` and are rejected. ✅
+4. **Independence groups** — `provider_nvidia.spl` keys
+   `independence_gate_executed_group_count` on
+   `SourceResult.independence_group` (Mesa family collapses to one group;
+   empty candidate group skipped), and the previously-reported
+   `provider_id` grouping fail-open is gone.
+
+Spec evidence (all PASS, this pass):
+- `independence_group_key_regression_spec.spl` — 3/3
+- `independence_gate_key_confusion_detection_spec.spl` — 3/3
+- `nvidia_independent_reference_gate_spec.spl` — 5/5
+
+Status flipped open → fixed. No code change in this lane.
+
+
+## Fleet verification note (2026-11-25, worktree wt-p2w1-ae, branch work/p2w1-ae-20261125)
+
+Re-verified at `origin/release/1.0.0` HEAD (`38265c7f249`) by code inspection:
+the 2026-11-11 FIXED closure stands.
+
+- Independence gate keys on `independence_group`, never `provider_id`:
+  `src/os/drivers/gpu/board_vulkan/provider_nvidia.spl:206-221` (with the
+  empty-group skip at line 215).
+- Enumeration provider runs the real tool:
+  `src/os/drivers/gpu/board_vulkan/boundary_enumeration_provider.spl:218,293`
+  (`parse_vulkaninfo_lavapipe` over captured `vulkaninfo` stdout).
+- All three quoted regression specs exist at HEAD:
+  `test/01_unit/os/vulkan/independence_group_key_regression_spec.spl`,
+  `independence_gate_key_confusion_detection_spec.spl`,
+  `nvidia_independent_reference_gate_spec.spl`.
+- Spec re-run is environment-blocked on this host: the pinned Rust seed
+  v1.0.0-rc.1 rejects `@representation_boundary` decorators present at HEAD
+  (repo-wide source/binary inconsistency, unrelated to this bug). The runnable
+  3/3, 3/3, 5/5 PASS evidence in the 2026-11-11 triage section stands.
+
+No code change needed; doc header "Closed 2026-11-11 — FIXED" is accurate.
+
+
+## BF-10 Re-Verification & Boundary Hardening (2026-11-26)
+
+- **Code hardening:** Replaced unguarded `shell(...)` in `src/os/drivers/gpu/board_vulkan/boundary_enumeration_provider.spl` (`lavapipe_reference_enumeration`) with `process_run_bounded("/usr/bin/env", ["VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json", "vulkaninfo"], LAVAPIPE_ENUMERATION_TIMEOUT_MS, LAVAPIPE_ENUMERATION_MAX_OUTPUT_BYTES)` (`15000ms`, `1048576` bytes), matching `boundary_readback_lavapipe_provider.spl`.
+- **Host specs re-verified (`SIMPLE_LIB=src`, `--mode=interpreter`):**
+  - `test/01_unit/os/vulkan/provider_inventory_spec.spl`: `10 passed, 0 failed` (`outcome=OK`)
+  - `test/01_unit/os/vulkan/independence_group_key_regression_spec.spl`: `3 passed, 0 failed` (`outcome=OK`)
+  - `test/01_unit/os/vulkan/readback_boundary_gate_spec.spl`: `14 passed, 0 failed` (`outcome=OK`)
+- Status remains `FIXED`.

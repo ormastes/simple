@@ -1,35 +1,159 @@
-use compiler.backend.linker.macho.input.{macho_put}
-use compiler.backend.linker.macho.layout.{MachOLayout, macho_align, macho_segment}
+use compiler.backend.linker.macho.input.{MachOInput, macho_put}
+use compiler.backend.linker.macho.layout.{MachOLayout, macho_align, macho_segment, macho_section_header_64, macho_section_ignored}
 use compiler.backend.linker.macho.provider_types.{MachOProviderV1}
 use compiler.backend.linker.macho.hosted_fixups.{MachOHostedFixups, macho_hosted_bind_stream, macho_hosted_rebase_stream}
 use compiler.backend.linker.macho.hosted_signature.{macho_hosted_sign, macho_hosted_signature_size}
+use compiler.backend.linker.macho.symbols.{MachOBinding}
+use compiler.backend.linker.macho.relocation_pairs.{macho_relocation_pair_v1}
+use compiler.backend.linker.macho_parser.{macho_parse_relocations}
 use compiler.backend.linker.reloc_engine.{reloc_apply_aarch64}
-use std.common.crypto.sha256.{sha256_bytes}
+use std.common.crypto.sha256.{sha256_u8_fast_hex}
+
+fn _macho_image_hex_nibble(ch: u8) -> i64:
+    if ch >= 48u8 and ch <= 57u8:
+        return (ch - 48u8) as i64
+    if ch >= 97u8 and ch <= 102u8:
+        return (ch - 87u8) as i64
+    (ch - 55u8) as i64
+
+fn _macho_put_u32(bytes: [u8], at: i64, value: i64) -> [u8]:
+    var out = bytes
+    out[at] = (value & 255) as u8
+    out[at + 1] = ((value >> 8) & 255) as u8
+    out[at + 2] = ((value >> 16) & 255) as u8
+    out[at + 3] = ((value >> 24) & 255) as u8
+    out
+
+fn macho_hosted_section_dead_strippable(segname: text) -> bool:
+    segname == "__TEXT" or segname == "__DATA" or segname == "__DATA_CONST"
+
+fn _macho_hosted_mark_reloc_target(inputs: [MachOInput], definitions: {text: MachOBinding},
+        owner: i64, r_extern: bool, r_symbolnum: i64, ignored: [[bool]], mut live: [[bool]]) -> bool:
+    var changed = false
+    if not r_extern:
+        if r_symbolnum > 0 and owner >= 0 and owner < live.len():
+            val si = r_symbolnum - 1
+            if si >= 0 and si < live[owner].len() and not ignored[owner][si] and not live[owner][si]:
+                live[owner][si] = true
+                changed = true
+        return changed
+    if r_symbolnum < 0 or r_symbolnum >= inputs[owner].object.symbols.len():
+        return false
+    val symbol = inputs[owner].object.symbols[r_symbolnum]
+    if (symbol.n_type & 1) == 0:
+        if (symbol.n_type & 14) == 14 and symbol.n_sect > 0:
+            val si = symbol.n_sect - 1
+            if si >= 0 and si < live[owner].len() and not ignored[owner][si] and not live[owner][si]:
+                live[owner][si] = true
+                changed = true
+    elif definitions.has(symbol.name):
+        val binding = definitions[symbol.name]
+        if (binding.symbol.n_type & 14) == 14 and binding.symbol.n_sect > 0:
+            val si = binding.symbol.n_sect - 1
+            if binding.owner >= 0 and binding.owner < live.len() and si >= 0 and si < live[binding.owner].len():
+                if not ignored[binding.owner][si] and not live[binding.owner][si]:
+                    live[binding.owner][si] = true
+                    changed = true
+    changed
+
+fn macho_hosted_dead_strip_live(inputs: [MachOInput], definitions: {text: MachOBinding},
+        entry: text, retained_symbols: [text], arm: bool,
+        allow_darwin_abi: bool = false) -> Result<[[bool]], text>:
+    var live: [[bool]] = []
+    var ignored: [[bool]] = []
+    for input in inputs:
+        var input_live: [bool] = []
+        var input_ignored: [bool] = []
+        for segment in input.object.segments:
+            for section in segment.sections:
+                val sec_ignored = macho_section_ignored(section.segname, section.sectname, allow_darwin_abi)
+                input_ignored = input_ignored.push(sec_ignored)
+                val sec_init_root = not sec_ignored and (section.flags & 255) == 9
+                val sec_live = (not sec_ignored) and (sec_init_root or not macho_hosted_section_dead_strippable(section.segname))
+                input_live = input_live.push(sec_live)
+        ignored = ignored.push(input_ignored)
+        live = live.push(input_live)
+    var roots: [text] = [entry]
+    for retained in retained_symbols:
+        if retained != "" and not roots.contains(retained):
+            roots = roots.push(retained)
+    for root in roots:
+        if definitions.has(root):
+            val binding = definitions[root]
+            if (binding.symbol.n_type & 14) == 14 and binding.symbol.n_sect > 0:
+                val si = binding.symbol.n_sect - 1
+                if binding.owner >= 0 and binding.owner < live.len() and si >= 0 and si < live[binding.owner].len():
+                    if not ignored[binding.owner][si]:
+                        live[binding.owner][si] = true
+    var changed = true
+    while changed:
+        changed = false
+        var owner: i64 = 0
+        for input in inputs:
+            var si: i64 = 0
+            for segment in input.object.segments:
+                for section in segment.sections:
+                    if si < live[owner].len() and live[owner][si] and not ignored[owner][si]:
+                        val relocations = macho_parse_relocations(input.object.raw, section, input.object.byte_order)
+                        var index: i64 = 0
+                        while index < relocations.len():
+                            val pair = macho_relocation_pair_v1(relocations, index, arm, input.name)?
+                            val reloc = pair.relocation
+                            if _macho_hosted_mark_reloc_target(inputs, definitions, owner, reloc.r_extern, reloc.r_symbolnum, ignored, live):
+                                changed = true
+                            index = index + pair.consumed
+                    si = si + 1
+            owner = owner + 1
+    Ok(live)
 
 fn macho_hosted_text(bytes: [u8], at: i64, value: text) -> [u8]:
     var out = bytes
     for index in 0..value.len(): out[at + index] = value.byte_at(index) as u8
     out
 
-fn macho_hosted_stubs(bytes: [u8], got: i64, stubs: i64, values: [i64], arm: bool) -> Result<[u8], text>:
+fn macho_hosted_stubs(bytes: [u8], got: i64, stubs: i64, values: [i64], arm: bool,
+        weak_slots: [bool] = []) -> Result<[u8], text>:
     var out = bytes
     for index in 0..values.len():
         val at = stubs + index * 16
         val slot = got + index * 8
-        out = macho_put(out, slot, 8, values[index])
-        if arm:
+        val val_i = values[index]
+        for b_idx in 0..8:
+            out[slot + b_idx] = ((val_i >> (b_idx * 8)) & 255) as u8
+        val is_weak_stub = index < weak_slots.len() and weak_slots[index]
+        if is_weak_stub:
+            if arm:
+                var trap_idx = 0
+                while trap_idx < 4:
+                    val insn_at = at + trap_idx * 4
+                    out[insn_at] = 0x20u8
+                    out[insn_at + 1] = 0x00u8
+                    out[insn_at + 2] = 0x20u8
+                    out[insn_at + 3] = 0xd4u8
+                    trap_idx = trap_idx + 1
+            else:
+                out[at] = 0x0fu8
+                out[at + 1] = 0x0bu8
+                for pad in 2..16: out[at + pad] = 0xccu8
+        elif arm:
             val page = reloc_apply_aarch64([], 0, 275, 0x100000000 + slot, 0, 0x100000000 + at)
             if not page.success: return Err(page.error)
-            out = macho_put(out, at, 4, 0x90000010 | ((page.value & 3) << 29) | (((page.value >> 2) & 0x7ffff) << 5))
-            out = macho_put(out, at + 4, 4, 0xf9400210 | (((slot & 4095) / 8) << 10))
-            out = macho_put(out, at + 8, 4, 0xd61f0200)
-            out = macho_put(out, at + 12, 4, 0xd503201f)
+            val w0 = 0x90000010 | ((page.value & 3) << 29) | (((page.value >> 2) & 0x7ffff) << 5)
+            val w1 = 0xf9400210 | (((slot & 4095) / 8) << 10)
+            val w2 = 0xd61f0200
+            val w3 = 0xd503201f
+            for b_idx in 0..4:
+                out[at + b_idx] = ((w0 >> (b_idx * 8)) & 255) as u8
+                out[at + 4 + b_idx] = ((w1 >> (b_idx * 8)) & 255) as u8
+                out[at + 8 + b_idx] = ((w2 >> (b_idx * 8)) & 255) as u8
+                out[at + 12 + b_idx] = ((w3 >> (b_idx * 8)) & 255) as u8
         else:
             val displacement = slot - at - 6
             if displacement < -2147483648 or displacement > 2147483647: return Err("hosted x64 stub GOT displacement overflow")
             out[at] = 0xffu8
             out[at + 1] = 0x25u8
-            out = macho_put(out, at + 2, 4, displacement)
+            for b_idx in 0..4:
+                out[at + 2 + b_idx] = ((displacement >> (b_idx * 8)) & 255) as u8
             for pad in 6..16: out[at + pad] = 0x90u8
     Ok(out)
 
@@ -43,8 +167,7 @@ fn macho_hosted_image(payload: [u8], layout: MachOLayout, libraries: [MachOProvi
     val bind_offset = linkedit + rebases.len()
     if binds.len() > limit - bind_offset: return Err("hosted bind stream exceeds image budget")
     val export_offset = bind_offset + binds.len()
-    # Deliberately no dynamic exports in this first executable request contract.
-    # A valid empty trie is not a substitute for a future explicit exports API.
+    if 2 > limit - export_offset: return Err("hosted export trie exceeds image budget")
     val signature_offset = macho_align(export_offset + 2, 16)
     val signature_size = macho_hosted_signature_size(signature_offset, identifier)
     if signature_offset > limit or signature_size > limit - signature_offset: return Err("hosted signature exceeds image budget")
@@ -54,7 +177,15 @@ fn macho_hosted_image(payload: [u8], layout: MachOLayout, libraries: [MachOProvi
         if library.install_name == "/usr/lib/libSystem.B.dylib": system_declared = true
     val system_name = "/usr/lib/libSystem.B.dylib"
     val system_size = if system_declared: 0 else: macho_align(24 + system_name.len() + 1, 8)
-    var command_size: i64 = 288 + 48 + 24 + 32 + 24 + 16 + 24 + system_size
+    var data_sect_count: i64 = 0
+    if layout.mod_init_size > 0:
+        data_sect_count = data_sect_count + 1
+    if layout.has_local_tls:
+        if layout.tls_vars_size > 0: data_sect_count = data_sect_count + 1
+        if layout.tls_data_size > 0: data_sect_count = data_sect_count + 1
+        if layout.tls_bss_size > 0: data_sect_count = data_sect_count + 1
+    val data_cmd_size = 72 + data_sect_count * 80
+    var command_size: i64 = 288 + data_sect_count * 80 + 48 + 24 + 32 + 24 + 16 + 24 + system_size
     for library in libraries: command_size = command_size + macho_align(24 + library.install_name.len() + 1, 8)
     for path in rpaths: command_size = command_size + macho_align(12 + path.len() + 1, 8)
     if command_size > 0x4000 - 32: return Err("hosted load commands exceed reserved header")
@@ -66,14 +197,39 @@ fn macho_hosted_image(payload: [u8], layout: MachOLayout, libraries: [MachOProvi
     out = macho_put(out, 12, 4, 2)
     out = macho_put(out, 16, 4, 10 + libraries.len() + rpaths.len() + (if system_declared: 0 else: 1))
     out = macho_put(out, 20, 4, command_size)
-    out = macho_put(out, 24, 4, 0x200085)
+    out = macho_put(out, 24, 4, if layout.has_local_tls: 0xa00085 else: 0x200085)
     out = macho_segment(out, 32, "__PAGEZERO", 0, 0x100000000, 0, 0, 0)
     out = macho_segment(out, 104, "__TEXT", 0x100000000, layout.data_offset, 0, layout.data_offset, 5)
+    val data_vm_end = macho_align(if layout.size > linkedit: layout.size else: linkedit, 0x4000)
     out = macho_segment(out, 176, "__DATA", 0x100000000 + layout.data_offset,
-        linkedit - layout.data_offset, layout.data_offset, linkedit - layout.data_offset, 3)
-    out = macho_segment(out, 248, "__LINKEDIT", 0x100000000 + linkedit,
+        data_vm_end - layout.data_offset, layout.data_offset, linkedit - layout.data_offset, 3,
+        data_sect_count, data_cmd_size)
+    var sect_at: i64 = 248
+    if layout.mod_init_size > 0:
+        out = macho_section_header_64(out, sect_at, "__mod_init_func", "__DATA",
+            0x100000000 + layout.mod_init_offset, layout.mod_init_size,
+            layout.mod_init_offset, layout.mod_init_align, 0x09)
+        sect_at = sect_at + 80
+    if layout.has_local_tls:
+        if layout.tls_vars_size > 0:
+            out = macho_section_header_64(out, sect_at, "__thread_vars", "__DATA",
+                0x100000000 + layout.tls_vars_offset, layout.tls_vars_size,
+                layout.tls_vars_offset, layout.tls_vars_align, 0x13)
+            sect_at = sect_at + 80
+        if layout.tls_data_size > 0:
+            out = macho_section_header_64(out, sect_at, "__thread_data", "__DATA",
+                0x100000000 + layout.tls_data_offset, layout.tls_data_size,
+                layout.tls_data_offset, layout.tls_data_align, 0x11)
+            sect_at = sect_at + 80
+        if layout.tls_bss_size > 0:
+            out = macho_section_header_64(out, sect_at, "__thread_bss", "__DATA",
+                0x100000000 + layout.tls_bss_offset, layout.tls_bss_size,
+                0, layout.tls_bss_align, 0x12)
+            sect_at = sect_at + 80
+    val linkedit_cmd_at = 176 + data_cmd_size
+    out = macho_segment(out, linkedit_cmd_at, "__LINKEDIT", 0x100000000 + data_vm_end,
         macho_align(image_size - linkedit, 0x4000), linkedit, image_size - linkedit, 1)
-    var at: i64 = 320
+    var at: i64 = linkedit_cmd_at + 72
     out = macho_put(out, at, 4, 0x80000022)
     out = macho_put(out, at + 4, 4, 48)
     out = macho_put(out, at + 8, 4, linkedit)
@@ -132,12 +288,14 @@ fn macho_hosted_image(payload: [u8], layout: MachOLayout, libraries: [MachOProvi
     for index in 0..binds.len(): out[bind_offset + index] = binds[index]
     # Content-derived UUID is fixed before hashing signed pages. This digest is
     # over the unsigned image with the UUID bytes initially zero, avoiding a cycle.
-    var identity_bytes: [i64] = [0; signature_offset]
-    for index in 0..signature_offset: identity_bytes[index] = out[index] as i64
-    val identity = sha256_bytes(identity_bytes)
-    for index in 0..16: out[uuid + 8 + index] = identity[index] as u8
+    val identity_hex = sha256_u8_fast_hex(out[0:signature_offset])
+    for index in 0..16:
+        val hi = _macho_image_hex_nibble(identity_hex.byte_at(index * 2))
+        val lo = _macho_image_hex_nibble(identity_hex.byte_at(index * 2 + 1))
+        out[uuid + 8 + index] = ((hi << 4) | lo) as u8
     out[uuid + 14] = ((out[uuid + 14] & 15) | 0x50) as u8
     out[uuid + 16] = ((out[uuid + 16] & 63) | 0x80) as u8
     macho_hosted_sign(out, signature_offset, layout.data_offset, identifier)
 
 export macho_hosted_stubs, macho_hosted_image
+export macho_hosted_section_dead_strippable, macho_hosted_dead_strip_live

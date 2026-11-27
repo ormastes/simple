@@ -1,0 +1,44 @@
+# Simple Web CPU raster parity adapter: render fixture to RGBA8 and exact-compare.
+# @req REQ-SSPEC-LIB
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.rendering_parity_adapter.{
+    SIMPLE_WEB_SOFTWARE_ALPHA_MODE, simple_web_rendering_parity_render_rgba8,
+    simple_web_rendering_parity_check
+}
+
+describe "Simple Web rendering parity CPU render":
+    it "renders a fixture to tightly packed RGBA8 with the page background bytes":
+        val html = "<style>body{margin:0;background:#102030}</style><div></div>"
+        val rgba = simple_web_rendering_parity_render_rgba8(html, 8, 4, SIMPLE_WEB_SOFTWARE_ALPHA_MODE).unwrap()
+        expect(rgba.len()).to_equal(8 * 4 * 4)
+        expect(rgba[0]).to_equal(0x10u8)
+        expect(rgba[1]).to_equal(0x20u8)
+        expect(rgba[2]).to_equal(0x30u8)
+        expect(rgba[3]).to_equal(0xFFu8)
+
+    it "rejects a non-positive viewport":
+        expect(simple_web_rendering_parity_render_rgba8("<div></div>", 0, 4, SIMPLE_WEB_SOFTWARE_ALPHA_MODE).is_err()).to_be(true)
+
+    it "rejects an unknown alpha mode":
+        expect(simple_web_rendering_parity_render_rgba8("<div></div>", 4, 4, "bogus").is_err()).to_be(true)
+
+    it "passes against its own frame and fails against a perturbed frame":
+        val html = "<style>body{margin:0;background:#102030}#b{width:4px;height:4px;background:#abcdef}</style><div id=\"b\"></div>"
+        val frame = simple_web_rendering_parity_render_rgba8(html, 8, 8, SIMPLE_WEB_SOFTWARE_ALPHA_MODE).unwrap()
+        val same = simple_web_rendering_parity_check(html, frame, 8, 8, SIMPLE_WEB_SOFTWARE_ALPHA_MODE)
+        expect(same.status).to_equal("pass")
+        var bad = frame
+        bad[0] = (frame[0] + 1u8)
+        val diff = simple_web_rendering_parity_check(html, bad, 8, 8, SIMPLE_WEB_SOFTWARE_ALPHA_MODE)
+        expect(diff.status).to_equal("fail")
+        expect(diff.reason).to_contain("differ")
+
+    it "fails with the comparator error when the expected frame has the wrong length":
+        val v = simple_web_rendering_parity_check("<div></div>", [0u8, 0u8, 0u8, 0u8], 4, 4, SIMPLE_WEB_SOFTWARE_ALPHA_MODE)
+        expect(v.status).to_equal("fail")
+        expect(v.reason.len()).to_be_greater_than(0)
+
+    it "reports unsupported with a reason when the render cannot run":
+        val v = simple_web_rendering_parity_check("<div></div>", [], 0, 4, SIMPLE_WEB_SOFTWARE_ALPHA_MODE)
+        expect(v.status).to_equal("unsupported")
+        expect(v.reason).to_contain("viewport")

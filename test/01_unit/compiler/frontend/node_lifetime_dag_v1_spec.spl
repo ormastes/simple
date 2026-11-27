@@ -1,0 +1,152 @@
+# @req REQ-004
+# @req REQ-005
+# UNEXECUTED: admitted self-hosted runtime qualification is pending.
+# This validates current owner graphs without retaining a proof cache or
+# assuming that the executing engine has conforming array value semantics.
+use std.spec.{describe, it, expect}
+use compiler.core.ast.{ast_reset, expr_int_lit, expr_binary, expr_unary,
+    expr_array_lit, expr_block, expr_get_args, expr_get_left, expr_get_right,
+    stmt_if_stmt, stmt_expr_stmt}
+use compiler.frontend.core._AstExpr.nodes.{expr_count, expr_owner_left_set}
+use compiler.core.ast_stmt.{stmt_store_state_take, stmt_store_state_install}
+use compiler.frontend.node_lifetime_v1.*
+use compiler.frontend.node_lifetime_dag_v1.{node_lifetime_dag_error_v1}
+
+fn dag_handle_v1(node: i64) -> AstExprHandleV1:
+    node_lifetime_expr_handle_v1(node).unwrap()
+
+fn dag_expect_rejected_v1(parent: i64, child: i64, before_left: i64, before_right: i64):
+    val before = expr_count()
+    val result = node_lifetime_binary_set_left_v1(dag_handle_v1(parent), dag_handle_v1(child))
+    expect(result.is_err()).to_equal(true)
+    expect(expr_get_left(parent)).to_equal(before_left)
+    expect(expr_get_right(parent)).to_equal(before_right)
+    expect(expr_count()).to_equal(before)
+
+describe "checked binary edges admit complete child DAGs":
+    it "rejects an existing child self-cycle that does not reach the parent":
+        ast_reset()
+        val leaf = expr_int_lit(1, 0)
+        val parent = expr_binary(60, leaf, leaf, 0)
+        val own_index = expr_count()
+        val child = expr_binary(60, own_index, leaf, 0)
+        dag_expect_rejected_v1(parent, child, leaf, leaf)
+
+    it "rejects an indirect child cycle that is independent of the parent":
+        ast_reset()
+        val leaf = expr_int_lit(1, 0)
+        val parent = expr_binary(60, leaf, leaf, 0)
+        val child = expr_unary(61, leaf, 0)
+        val descendant = expr_unary(61, child, 0)
+        expr_owner_left_set(child, descendant)
+        dag_expect_rejected_v1(parent, child, leaf, leaf)
+
+    it "rejects a raw binary child with an uninitialized required edge":
+        ast_reset()
+        val leaf = expr_int_lit(1, 0)
+        val parent = expr_binary(60, leaf, leaf, 0)
+        dag_expect_rejected_v1(parent, expr_binary(60, -1, leaf, 0), leaf, leaf)
+
+    it "rejects a future child reference before any checked write":
+        ast_reset()
+        val leaf = expr_int_lit(1, 0)
+        val parent = expr_binary(60, leaf, leaf, 0)
+        val child = expr_binary(60, expr_count() + 1, leaf, 0)
+        dag_expect_rejected_v1(parent, child, leaf, leaf)
+
+    it "validates the unchanged sibling graph before replacing the left edge":
+        ast_reset()
+        val old_left = expr_int_lit(1, 0)
+        val new_left = expr_int_lit(2, 0)
+        val own_index = expr_count()
+        val bad_right = expr_binary(60, own_index, old_left, 0)
+        val parent = expr_binary(60, old_left, bad_right, 0)
+        dag_expect_rejected_v1(parent, new_left, old_left, bad_right)
+
+    it "validates the unchanged sibling graph before replacing the right edge":
+        ast_reset()
+        val old_right = expr_int_lit(1, 0)
+        val new_right = expr_int_lit(2, 0)
+        val own_index = expr_count()
+        val bad_left = expr_binary(60, own_index, old_right, 0)
+        val parent = expr_binary(60, bad_left, old_right, 0)
+        val result = node_lifetime_binary_set_right_v1(dag_handle_v1(parent), dag_handle_v1(new_right))
+        expect(result.is_err()).to_equal(true)
+        expect(expr_get_left(parent)).to_equal(bad_left)
+        expect(expr_get_right(parent)).to_equal(old_right)
+
+    it "accepts a legitimate newer shared DAG instead of imposing slot order":
+        ast_reset()
+        val leaf = expr_int_lit(1, 0)
+        val parent = expr_binary(60, leaf, leaf, 0)
+        val shared = expr_unary(61, leaf, 0)
+        val newer = expr_binary(60, shared, shared, 0)
+        expect(node_lifetime_binary_set_left_v1(dag_handle_v1(parent), dag_handle_v1(newer)).unwrap()).to_equal(true)
+        expect(expr_get_left(parent)).to_equal(newer)
+        expect(expr_get_right(parent)).to_equal(leaf)
+
+    it "can repair a legacy defect in the replaced edge while preserving the valid sibling":
+        ast_reset()
+        val leaf = expr_int_lit(1, 0)
+        val own_index = expr_count()
+        val parent = expr_binary(60, own_index, leaf, 0)
+        expect(node_lifetime_binary_set_left_v1(dag_handle_v1(parent), dag_handle_v1(leaf)).unwrap()).to_equal(true)
+        expect(node_lifetime_validate_dag_v1(dag_handle_v1(parent)).unwrap()).to_equal(parent)
+
+    it "checks elif bounds before calling the canonical child projection":
+        ast_reset()
+        val leaf = expr_int_lit(1, 0)
+        val parent = expr_binary(60, leaf, leaf, 0)
+        val invalid = stmt_if_stmt(leaf, [], 99999, 0)
+        dag_expect_rejected_v1(parent, expr_block([invalid], -1, 0), leaf, leaf)
+
+describe "DAG validation never retains proofs across owner changes":
+    it "rechecks a previously valid node after a raw mutation introduces a cycle":
+        ast_reset()
+        val leaf = expr_int_lit(1, 0)
+        val child = expr_unary(61, leaf, 0)
+        val parent = expr_binary(60, leaf, leaf, 0)
+        expect(node_lifetime_validate_dag_v1(dag_handle_v1(child)).unwrap()).to_equal(child)
+        expr_owner_left_set(child, child)
+        dag_expect_rejected_v1(parent, child, leaf, leaf)
+
+    it "observes actual owner state even on an engine that aliases returned arrays":
+        ast_reset()
+        val leaf = expr_int_lit(1, 0)
+        val old_right = expr_int_lit(2, 0)
+        val child = expr_array_lit([leaf], 0)
+        val parent = expr_binary(60, child, old_right, 0)
+        expect(node_lifetime_validate_dag_v1(dag_handle_v1(child)).unwrap()).to_equal(child)
+        var returned = expr_get_args(child)
+        returned[0] = child
+        val actual = expr_get_args(child)
+        val result = node_lifetime_binary_set_right_v1(dag_handle_v1(parent), dag_handle_v1(leaf))
+        if actual[0] == child:
+            # A nonconforming engine changed the owner through an alias. A
+            # fresh structural check must still refuse its newly cyclic graph.
+            expect(result.is_err()).to_equal(true)
+            expect(expr_get_right(parent)).to_equal(old_right)
+        else:
+            expect(actual).to_equal([leaf])
+            expect(result.unwrap()).to_equal(true)
+            expect(expr_get_right(parent)).to_equal(leaf)
+
+    it "rechecks statement bounds after the dependent arena is taken":
+        ast_reset()
+        val leaf = expr_int_lit(1, 0)
+        val parent = expr_binary(60, leaf, leaf, 0)
+        val child = expr_block([stmt_expr_stmt(leaf, 0)], -1, 0)
+        expect(node_lifetime_validate_dag_v1(dag_handle_v1(child)).unwrap()).to_equal(child)
+        val snapshot = stmt_store_state_take()
+        dag_expect_rejected_v1(parent, child, leaf, leaf)
+        stmt_store_state_install(snapshot)
+        expect(node_lifetime_binary_set_left_v1(dag_handle_v1(parent), dag_handle_v1(child)).unwrap()).to_equal(true)
+
+    it "fails an exhausted traversal explicitly without allocating or changing nodes":
+        ast_reset()
+        val leaf = expr_int_lit(1, 0)
+        val child = expr_unary(61, leaf, 0)
+        val before = expr_count()
+        expect(node_lifetime_dag_error_v1(child, 1)).to_equal("AST topology validation resource limit")
+        expect(expr_count()).to_equal(before)
+        expect(expr_get_left(child)).to_equal(leaf)

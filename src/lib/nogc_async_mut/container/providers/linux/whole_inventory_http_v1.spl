@@ -1,0 +1,212 @@
+# Data-only service-backed inventory codec. No decoded value mints authority.
+# AUTHORED_NOT_RUN: pinned Podman 5.2.5 wire integration remains unqualified.
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_get}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.base_encoding.utilities.validated_utf8_bytes_to_text_linear
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.LinuxOciEnginePolicyV1
+use std.nogc_async_mut.container.providers.linux.engine_exec_http_v3.linux_engine_http_frame_decode_v3
+
+pub const LINUX_INVENTORY_BODY_LIMIT_V1: i64 = 1048576
+pub const LINUX_INVENTORY_WIRE_LIMIT_V1: i64 = 2113536
+pub const LINUX_INVENTORY_AGGREGATE_WIRE_LIMIT_V1: i64 = 12681216
+pub const LINUX_INVENTORY_ROW_LIMIT_V1: i64 = 4096
+
+pub struct LinuxProviderInventoryResourceV1:
+    resource_class: text
+    native_identity: text
+    quarantined: bool = true
+
+pub struct LinuxProviderServiceStoreV1:
+    store_digest: text
+    graph_root: text
+    run_root: text
+    storage_driver: text
+    api_version: text
+
+# Data-only lifecycle reducer. Only the actual native owner may apply a native
+# disposition to its own acquired component; these values cannot mint an owner.
+pub enum LinuxInventoryCleanupComponentV1:
+    Reader
+    Socket
+
+pub struct LinuxInventoryCleanupProgressV1:
+    reader_consumed: bool = true
+    socket_consumed: bool = true
+    first_diagnostic: text = ""
+
+pub fn linux_inventory_cleanup_record_v1(progress: LinuxInventoryCleanupProgressV1,
+        component: LinuxInventoryCleanupComponentV1, disposition: text,
+        diagnostic: text) -> LinuxInventoryCleanupProgressV1:
+    val consumed = if component == LinuxInventoryCleanupComponentV1.Reader: progress.reader_consumed
+        else: progress.socket_consumed
+    if consumed: return progress
+    var next = progress
+    if diagnostic != "" and next.first_diagnostic == "": next.first_diagnostic = diagnostic
+    # Generic stale/foreign/retained is never evidence of native consumption.
+    if disposition != "released" and disposition != "consumed-error": return next
+    if component == LinuxInventoryCleanupComponentV1.Reader: next.reader_consumed = true
+    else: next.socket_consumed = true
+    if disposition == "consumed-error" and next.first_diagnostic == "":
+        next.first_diagnostic = "inventory-cleanup-consumed-error"
+    next
+
+pub fn linux_whole_inventory_classes_v1() -> [text]:
+    ["containers", "pods", "images", "volumes", "networks", "secrets"]
+
+# No caller filter, scope, labels, page, limit, last, since or before parameter.
+# external=true includes containers in shared storage made by other tools.
+pub fn linux_whole_inventory_request_v1(resource_class: text) -> Result<[u8], text>:
+    if not linux_whole_inventory_classes_v1().contains(resource_class):
+        return Err("inventory-incomplete-resource-class")
+    val query = if resource_class == "containers": "?all=true&external=true"
+        elif resource_class == "images": "?all=true"
+        else: ""
+    Ok(("GET /v5.2.5/libpod/" + resource_class + "/json" + query +
+        " HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nConnection: close\r\nContent-Length: 0\r\n\r\n").bytes())
+
+pub fn linux_whole_inventory_info_request_v1() -> [u8]:
+    ("GET /v5.2.5/libpod/info HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\n" +
+        "Connection: close\r\nContent-Length: 0\r\n\r\n").bytes()
+
+# Bound work BEFORE the generic JSON tokenizer allocates its token array.
+fn inventory_json_v1(source: text) -> Result<JsonValue, text>:
+    if source.byte_len() < 1 or source.byte_len() > LINUX_INVENTORY_BODY_LIMIT_V1:
+        return Err("inventory-incomplete-json-byte-bound")
+    var depth = 0
+    var nodes = 0
+    var quoted = false
+    var escaped = false
+    for byte in source.bytes():
+        if quoted:
+            if escaped: escaped = false
+            elif byte == 92: escaped = true
+            elif byte == 34: quoted = false
+        else:
+            if byte == 34: quoted = true
+            elif byte == 123 or byte == 91:
+                depth = depth + 1
+                nodes = nodes + 1
+                if depth > 16: return Err("inventory-incomplete-json-depth-bound")
+            elif byte == 125 or byte == 93:
+                depth = depth - 1
+                if depth < 0: return Err("inventory-incomplete-json-shape")
+            elif byte == 44 or byte == 58: nodes = nodes + 1
+        if nodes > 65536: return Err("inventory-incomplete-json-node-bound")
+    if quoted or escaped or depth != 0: return Err("inventory-incomplete-json-shape")
+    match json_parse_value_strict(source):
+        case Ok(value): Ok(value)
+        case Err(_): Err("inventory-incomplete-json-syntax")
+
+fn inventory_body_v1(wire: [u8]) -> Result<JsonValue, text>:
+    if wire.len() > LINUX_INVENTORY_WIRE_LIMIT_V1:
+        return Err("inventory-incomplete-http-byte-bound")
+    val framed = match linux_engine_http_frame_decode_v3(wire, 200):
+        case Ok(value): value
+        case Err(reason): return Err("inventory-incomplete-http:" + reason)
+    # The pinned list APIs are unpaginated. An unexpected continuation header
+    # must not turn the first bounded page into a whole-store observation.
+    var header_end = -1
+    var cursor = 0
+    while cursor + 3 < wire.len() and cursor < 16384:
+        if wire[cursor] == 13 and wire[cursor + 1] == 10 and wire[cursor + 2] == 13 and wire[cursor + 3] == 10:
+            header_end = cursor
+            break
+        cursor = cursor + 1
+    if header_end < 0: return Err("inventory-incomplete-http-header")
+    val header = validated_utf8_bytes_to_text_linear(wire[0:header_end])?
+    for line in header.lower().split("\r\n"):
+        if line.starts_with("link:") or line.starts_with("x-next-") or line.starts_with("next-page:") or
+                line.starts_with("x-continuation-"):
+            return Err("inventory-incomplete-unexpected-pagination")
+    if framed.content_type != "application/json" or framed.api_version != "5.2.5":
+        return Err("inventory-incomplete-http-type-or-version")
+    inventory_json_v1(framed.body)
+
+fn inventory_member_v1(value: JsonValue, key: text) -> Result<JsonValue, text>:
+    match json_value_get(value, key):
+        case Some(member): Ok(member)
+        case _: Err("inventory-incomplete-missing-field:" + key)
+
+fn inventory_text_v1(value: JsonValue, key: text) -> Result<text, text>:
+    match inventory_member_v1(value, key)?:
+        case JsonValue.Str(member): Ok(member)
+        case _: Err("inventory-incomplete-field-type:" + key)
+
+pub fn linux_whole_inventory_response_v1(resource_class: text,
+        wire: [u8]) -> Result<[LinuxProviderInventoryResourceV1], text>:
+    if not linux_whole_inventory_classes_v1().contains(resource_class):
+        return Err("inventory-incomplete-resource-class")
+    val values = match inventory_body_v1(wire)?:
+        case JsonValue.Array(rows): rows
+        case _: return Err("inventory-incomplete-array-required")
+    if values.len() > LINUX_INVENTORY_ROW_LIMIT_V1:
+        return Err("inventory-incomplete-row-bound")
+    val key = if resource_class == "networks": "id"
+        elif resource_class == "volumes": "Name"
+        elif resource_class == "secrets": "ID"
+        else: "Id"
+    var rows: [LinuxProviderInventoryResourceV1] = []
+    var identities: Dict<text, bool> = {}
+    for value in values:
+        val identity = inventory_text_v1(value, key)?
+        if identity.byte_len() < 1 or identity.byte_len() > 1024 or identities.contains_key(identity):
+            return Err("inventory-incomplete-native-identity")
+        for byte in identity.bytes():
+            if byte < 32 or byte == 127: return Err("inventory-incomplete-native-identity")
+        identities[identity] = true
+        rows.push(LinuxProviderInventoryResourceV1(resource_class: resource_class, native_identity: identity))
+    Ok(rows)
+
+# Service-backed store observation, never the CLI executable observation type.
+# Digest covers precisely the matched store/driver/options/version metadata.
+# The native owner, separately, binds the real peer to the actual supervisor.
+pub fn linux_whole_inventory_info_v1(policy: LinuxOciEnginePolicyV1,
+        wire: [u8]) -> Result<LinuxProviderServiceStoreV1, text>:
+    val info = inventory_body_v1(wire)?
+    val host = inventory_member_v1(info, "host")?
+    if inventory_member_v1(host, "serviceIsRemote")? != JsonValue.Bool(false):
+        return Err("inventory-incomplete-local-service-required")
+    val security = inventory_member_v1(host, "security")?
+    if inventory_member_v1(security, "rootless")? != JsonValue.Bool(true):
+        return Err("inventory-incomplete-rootless-service-required")
+    val store = inventory_member_v1(info, "store")?
+    if inventory_text_v1(store, "graphRoot")? != policy.expected_graph_root or
+            inventory_text_v1(store, "runRoot")? != policy.expected_run_root or
+            inventory_text_v1(store, "graphDriverName")? != policy.expected_storage_driver:
+        return Err("inventory-incomplete-service-store-mismatch")
+    val graph = inventory_member_v1(store, "graphOptions")?
+    val graph_keys = match graph:
+        case JsonValue.Object(keys: keys, values: ignored): keys
+        case _: return Err("inventory-incomplete-store-options-object")
+    if graph_keys.len() != policy.storage_options.len():
+        return Err("inventory-incomplete-store-options-mismatch")
+    var options: Dict<text, SdnValue> = {}
+    for option in policy.storage_options:
+        val key = option.split("=")[0]
+        val expected = option.substring(key.byte_len() + 1, option.byte_len())
+        val actual = inventory_member_v1(graph, key)?
+        match actual:
+            case JsonValue.Str(value):
+                if value != expected: return Err("inventory-incomplete-store-options-mismatch")
+                options[key] = SdnValue.String(value)
+            case JsonValue.Object(keys: fields, values: ignored):
+                if key != "overlay.mount_program" or fields.len() != 3:
+                    return Err("inventory-incomplete-store-option-unsupported")
+                val executable = inventory_text_v1(actual, "Executable")?
+                if executable != expected: return Err("inventory-incomplete-store-options-mismatch")
+                val mount_program: Dict<text, SdnValue> = {"Executable": SdnValue.String(executable),
+                    "Version": SdnValue.String(inventory_text_v1(actual, "Version")?),
+                    "Package": SdnValue.String(inventory_text_v1(actual, "Package")?)}
+                options[key] = SdnValue.Dict(mount_program)
+            case _: return Err("inventory-incomplete-store-option-unsupported")
+    val version = inventory_text_v1(inventory_member_v1(info, "version")?, "Version")?
+    if version != "5.2.5": return Err("inventory-incomplete-engine-version")
+    val identity: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-provider-service-store-v1"),
+        "graphRoot": SdnValue.String(policy.expected_graph_root), "runRoot": SdnValue.String(policy.expected_run_root),
+        "storageDriver": SdnValue.String(policy.expected_storage_driver), "options": SdnValue.Dict(options),
+        "apiVersion": SdnValue.String(version), "uid": SdnValue.Int(policy.expected_uid)}
+    Ok(LinuxProviderServiceStoreV1(store_digest: sha256_text(sdn_encode_canonical(SdnValue.Dict(identity))),
+        graph_root: policy.expected_graph_root, run_root: policy.expected_run_root,
+        storage_driver: policy.expected_storage_driver, api_version: version))

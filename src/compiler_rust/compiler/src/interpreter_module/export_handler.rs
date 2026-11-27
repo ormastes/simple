@@ -13,7 +13,7 @@ use simple_parser::ast::{ClassDef, EnumDef, ExportUseStmt, ImportTarget, UseStmt
 
 use crate::error::CompileError;
 use crate::interpreter::module_cache::module_exports_owner;
-use crate::value::Value;
+use crate::value::{DictMap, Value};
 
 use super::module_loader::load_and_merge_module;
 
@@ -27,30 +27,22 @@ pub fn load_export_source(
     functions: &mut HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
     classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &mut Enums,
-) -> Result<(Arc<HashMap<String, Value>>, Option<Arc<str>>), CompileError> {
+) -> Result<(Arc<DictMap>, Option<Arc<str>>), CompileError> {
     trace!(path = ?export_stmt.path.segments, target = ?export_stmt.target, "Loading export source");
 
     // Skip if path is empty - this happens with bare exports like `export X`
     // which mark local symbols for export, not re-exports from other modules
     if export_stmt.path.segments.is_empty() {
         trace!("Skipping export with empty path (bare export)");
-        return Ok((Arc::new(HashMap::new()), None));
+        return Ok((Arc::new(DictMap::new()), None));
     }
 
     // Build a UseStmt to load the source module. This always loads the full
     // module regardless of target (see the `requested_names`/"Keep the full
     // module" comment in `load_and_merge_module`) — callers here re-filter
-    // the returned dict by `export_stmt.target` themselves. But the target
-    // ALSO feeds the file-vs-same-named-package precedence decision
-    // (`prefer_package_init_for_member_import`), which needs the real
-    // requested names to avoid redirecting a `Group` re-export away from a
-    // sibling FILE that defines them into a same-named PACKAGE that doesn't
-    // (see
-    // doc/08_tracking/bug/std_spec_package_shadows_file_print_summary_2026-07-17.md:
-    // `export use std.nogc_sync_mut.spec.{.., print_summary, ..}` was
-    // hardcoding `Glob` here, discarding the specific names before that
-    // precedence check ever saw them). Preserve `Group` targets so that
-    // check works; keep every other target forced to `Glob` exactly as
+    // the returned dict by `export_stmt.target` themselves. `Group` targets
+    // are preserved so the loader sees the requested names (sibling-preload
+    // filtering); keep every other target forced to `Glob` exactly as
     // before (`Single`/`Aliased` in particular must stay `Glob` — those
     // extract a single value rather than a `Dict`, which would break the
     // `Ok(Value::Dict(dict))` match below).
@@ -64,6 +56,7 @@ pub fn load_export_source(
         target: use_target,
         is_type_only: false, // Runtime export loading is never type-only
         is_lazy: false,
+        attributes: vec![],
     };
 
     match load_and_merge_module(&use_stmt, current_file, functions, classes, enums) {
@@ -72,10 +65,11 @@ pub fn load_export_source(
             let Value::Dict(dict) = value else { unreachable!() };
             Ok((dict, owner))
         }
-        Ok(_) => Ok((Arc::new(HashMap::new()), None)),
+        Ok(_) => Ok((Arc::new(DictMap::new()), None)),
+        Err(e) if super::module_loader::is_unprovided_use_error(&e) => Err(e),
         Err(e) => {
             warn!(error = %e, "Failed to load export source");
-            Ok((Arc::new(HashMap::new()), None))
+            Ok((Arc::new(DictMap::new()), None))
         }
     }
 }

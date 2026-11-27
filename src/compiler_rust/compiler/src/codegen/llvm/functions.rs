@@ -428,15 +428,8 @@ impl LlvmBackend {
             _ => f64_type.const_zero(),
         };
 
-        // `rt_box_float` NEVER EXISTED in any runtime (2026-08-01): there is no
-        // `pub extern "C" fn rt_box_float` under src/compiler_rust/runtime and no
-        // `rt_box_float(` definition in src/runtime/runtime_native.c — only a
-        // stale comment mentions the name. The real f64 tagging helper is
-        // `rt_value_float`, which IS defined in BOTH runtimes. Same defect and
-        // same fix as the Cranelift `wrap_value` path (see
-        // codegen/instr/methods.rs), where emitting the nonexistent
-        // `rt_box_int`/`rt_box_float` made the JIT report "unresolved external
-        // symbol" and silently drop the whole module to the interpreter.
+        // Freestanding 32-bit RuntimeValue (`i32`) cannot inline-tag a 64-bit
+        // IEEE double; delegate to `rt_value_float` (`rt_box_float` never existed).
         let fn_type = rv_type.fn_type(&[f64_type.into()], false);
         let func = module
             .get_function("rt_value_float")
@@ -560,12 +553,8 @@ impl LlvmBackend {
                 .into_float_value());
         }
 
-        // `rt_unbox_float` never existed either — sibling of the `rt_box_float`
-        // defect above. It has ZERO mentions anywhere under
-        // src/compiler_rust/runtime or src/runtime. The real untagging helper is
-        // `rt_value_as_float`, defined in BOTH runtimes
-        // (`rt_value_as_float(RuntimeValue) -> f64` / `double
-        // rt_value_as_float(int64_t)`), matching this `(rv) -> f64` shape.
+        // Freestanding 32-bit RuntimeValue (`i32`) delegates float untagging to
+        // `rt_value_as_float` (`rt_unbox_float` never existed).
         let fn_type = f64_type.fn_type(&[rv_type.into()], false);
         let func = module
             .get_function("rt_value_as_float")
@@ -587,6 +576,7 @@ impl LlvmBackend {
         &self,
         instructions: &[String],
         constraints: &str,
+        dialect: crate::hir::AsmDialect,
         builder: &inkwell::builder::Builder<'static>,
     ) -> Result<(), CompileError> {
         let fn_type = self.context_ref().void_type().fn_type(&[], false);
@@ -596,7 +586,10 @@ impl LlvmBackend {
             constraints.to_string(),
             true,
             false,
-            Some(InlineAsmDialect::ATT),
+            Some(match dialect {
+                crate::hir::AsmDialect::Default | crate::hir::AsmDialect::Att => InlineAsmDialect::ATT,
+                crate::hir::AsmDialect::Intel => InlineAsmDialect::Intel,
+            }),
             false,
         );
         builder
@@ -624,6 +617,7 @@ impl LlvmBackend {
             for inst in &block.instructions {
                 match inst {
                     crate::mir::MirInst::InlineAsm {
+                        dialect,
                         instructions,
                         constraints,
                         inputs,
@@ -646,7 +640,7 @@ impl LlvmBackend {
                                 func.name, constraints
                             )));
                         }
-                        self.emit_raw_asm_block(instructions, "~{memory}", builder)?;
+                        self.emit_raw_asm_block(instructions, "~{memory}", *dialect, builder)?;
                         asm_blocks += 1;
                     }
                     other => {
@@ -923,46 +917,24 @@ impl LlvmBackend {
                 .find(|meta| meta.is_lambda && !meta.lambda_capture_local_indices.is_empty())
             {
                 if let Some(ctx_param) = function.get_nth_param(0) {
-                    let i8_type = self.context_ref().i8_type();
-                    let i8_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
-                    let i64_type = self.runtime_int_type();
-                    let ctx_ptr = match ctx_param {
-                        inkwell::values::BasicValueEnum::PointerValue(ptr) => builder
-                            .build_pointer_cast(ptr, i8_ptr_type, "lambda_ctx_ptr")
-                            .map_err(|e| crate::error::factory::llvm_cast_failed("cast lambda ctx", &e))?,
-                        inkwell::values::BasicValueEnum::IntValue(iv) => builder
-                            .build_int_to_ptr(iv, i8_ptr_type, "lambda_ctx_ptr")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("lambda ctx int_to_ptr", &e))?,
-                        _ => {
-                            return Err(crate::error::factory::llvm_build_failed(
-                                "lambda ctx",
-                                &"unsupported ctx parameter kind",
-                            ))
-                        }
-                    };
+                    let rv_type = self.runtime_int_type();
+                    let ctx_rv = self.coerce_value_to_type(ctx_param.into(), Some(rv_type.into()), builder)?;
+                    let get_capture = self.declare_rt_closure_get_capture(module);
 
                     for (capture_index, local_index) in meta.lambda_capture_local_indices.iter().enumerate() {
                         let Some(&alloca) = local_allocas.get(local_index) else {
                             continue;
                         };
-                        // Match the reserved kind word in compile_closure_create.
-                        let offset = 16 + (capture_index as u64 * 8);
-                        let offset_val = self.context_ref().i32_type().const_int(offset, false);
-                        let field_ptr = unsafe {
-                            builder
-                                .build_gep(i8_type, ctx_ptr, &[offset_val], "lambda_capture_ptr")
-                                .map_err(|e| crate::error::factory::llvm_build_failed("lambda capture gep", &e))?
-                        };
-                        let typed_ptr = builder
-                            .build_pointer_cast(
-                                field_ptr,
-                                self.context_ref().ptr_type(inkwell::AddressSpace::default()),
-                                "lambda_capture_typed_ptr",
+                        let idx_rv = rv_type.const_int(capture_index as u64, false);
+                        let cap_call = builder
+                            .build_call(get_capture, &[ctx_rv.into(), idx_rv.into()], "lambda_capture")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_closure_get_capture", &e))?;
+                        let loaded = cap_call.try_as_basic_value().basic().ok_or_else(|| {
+                            crate::error::factory::llvm_build_failed(
+                                "rt_closure_get_capture",
+                                &"rt_closure_get_capture returned void",
                             )
-                            .map_err(|e| crate::error::factory::llvm_cast_failed("cast lambda capture ptr", &e))?;
-                        let loaded = builder
-                            .build_load(i64_type, typed_ptr, "lambda_capture")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("load lambda capture", &e))?;
+                        })?;
                         builder
                             .build_store(alloca, loaded)
                             .map_err(|e| crate::error::factory::llvm_build_failed("store lambda capture", &e))?;
@@ -1297,13 +1269,14 @@ impl LlvmBackend {
                 self.compile_call(*dest, target, args, vreg_map, vreg_types, builder, module)?;
             }
             MirInst::InlineAsm {
+                dialect,
                 instructions,
                 volatile,
                 constraints,
                 inputs,
                 outputs,
             } => {
-                self.compile_inline_asm(instructions, *volatile, constraints, inputs, outputs, vreg_map, builder)?;
+                self.compile_inline_asm(instructions, *dialect, *volatile, constraints, inputs, outputs, vreg_map, builder)?;
                 self.emit_no_reorder_fence(builder)?;
             }
             MirInst::IndirectCall {
@@ -1314,7 +1287,7 @@ impl LlvmBackend {
                 args,
                 ..
             } => {
-                self.compile_indirect_call(*dest, *callee, param_types, return_type, args, vreg_map, builder)?;
+                self.compile_indirect_call(*dest, *callee, param_types, return_type, args, vreg_map, builder, module)?;
             }
             MirInst::InterpCall {
                 dest, func_name, args, ..
@@ -1544,10 +1517,35 @@ impl LlvmBackend {
                 vreg_map.insert(*dest, default_val.into());
             }
 
-            // Memory safety instructions (not yet implemented)
-            MirInst::Drop { .. } | MirInst::EndScope { .. } => {
-                // Drop and scope tracking not yet implemented
+            // Memory safety instructions
+            MirInst::Drop { value, ty } => {
+                let helper = if *ty == crate::hir::TypeId::STRING {
+                    Some("rt_string_free")
+                } else if !crate::codegen::instr::is_drop_scalar_type(*ty) {
+                    Some("rt_rc_release")
+                } else {
+                    None
+                };
+                if let Some(helper) = helper {
+                    if let Some(&val) = vreg_map.get(value) {
+                        if matches!(val, inkwell::values::BasicValueEnum::IntValue(_)) {
+                            let i64_type = self.runtime_int_type();
+                            let fn_val = module.get_function(helper).unwrap_or_else(|| {
+                                let ret_type = if helper == "rt_string_free" {
+                                    i64_type
+                                } else {
+                                    self.context_ref().i8_type()
+                                };
+                                module.add_function(helper, ret_type.fn_type(&[i64_type.into()], false), None)
+                            });
+                            builder
+                                .build_call(fn_val, &[val.into()], helper)
+                                .map_err(|e| crate::error::factory::llvm_build_failed(helper, &e))?;
+                        }
+                    }
+                }
             }
+            MirInst::EndScope { .. } => {}
 
             // Pattern matching
             MirInst::PatternTest { dest, subject, pattern } => {
@@ -1614,20 +1612,14 @@ impl LlvmBackend {
                                     "str_ptr",
                                 )
                                 .map_err(|e| format!("pattern str ptr: {e}"))?;
-                            let str_ptr_int = builder
-                                .build_ptr_to_int(str_ptr, i64_type, "str_ptr_int")
-                                .map_err(|e| format!("pattern ptrtoint: {e}"))?;
                             let str_len = i64_type.const_int(bytes.len() as u64, false);
                             // rt_string_new_literal(ptr, len) -> RuntimeValue.
                             // Interned: this pattern test re-executes per match
                             // evaluation; per-eval rt_string_new leaked one
                             // registered string per execution on the no-GC tier.
-                            let rt_string_new = module.get_function("rt_string_new_literal").unwrap_or_else(|| {
-                                let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-                                module.add_function("rt_string_new_literal", fn_type, None)
-                            });
+                            let rt_string_new = self.declare_rt_string_new_literal(module);
                             let lit_str = builder
-                                .build_call(rt_string_new, &[str_ptr_int.into(), str_len.into()], "lit_str")
+                                .build_call(rt_string_new, &[str_ptr.into(), str_len.into()], "lit_str")
                                 .map_err(|e| format!("pattern string_new: {e}"))?
                                 .try_as_basic_value()
                                 .basic()
@@ -1662,9 +1654,7 @@ impl LlvmBackend {
                         }
                     },
                     crate::mir::MirPattern::Variant {
-                        enum_name,
-                        variant_name,
-                        ..
+                        enum_name, discriminant, ..
                     } => {
                         // Runtime type and discriminant must both match.
                         let rt_enum_disc = module.get_function("rt_enum_discriminant").unwrap_or_else(|| {
@@ -1689,13 +1679,8 @@ impl LlvmBackend {
                             .basic()
                             .unwrap_or_else(|| i64_type.const_int(u64::MAX, false).into())
                             .into_int_value();
-                        let expected = {
-                            use std::collections::hash_map::DefaultHasher;
-                            use std::hash::{Hash, Hasher};
-                            let mut hasher = DefaultHasher::new();
-                            variant_name.hash(&mut hasher);
-                            (hasher.finish() & 0xFFFFFFFF) as u64
-                        };
+                        // Owning enum's declared index from MIR (#6953).
+                        let expected = u64::from(*discriminant);
                         let expected_val = i64_type.const_int(expected, false);
                         let disc_cmp = builder
                             .build_int_compare(inkwell::IntPredicate::EQ, disc, expected_val, "pat_var_eq")
@@ -1820,18 +1805,13 @@ impl LlvmBackend {
             MirInst::EnumUnit {
                 dest,
                 enum_name,
-                variant_name,
+                discriminant,
+                ..
             } => {
                 // rt_enum_new(enum_id: u32, discriminant: u32, payload: RuntimeValue) -> RuntimeValue
                 let i64_t = self.runtime_int_type();
                 let i32_t = self.context_ref().i32_type();
-                let disc = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    variant_name.hash(&mut hasher);
-                    (hasher.finish() & 0xFFFFFFFF) as u32
-                };
+                let disc = *discriminant;
                 let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
                     module.add_function("rt_enum_new", fn_type, None)
@@ -1858,18 +1838,13 @@ impl LlvmBackend {
             MirInst::EnumWith {
                 dest,
                 enum_name,
-                variant_name,
+                discriminant,
                 payload,
+                ..
             } => {
                 let i64_t = self.runtime_int_type();
                 let i32_t = self.context_ref().i32_type();
-                let disc = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    variant_name.hash(&mut hasher);
-                    (hasher.finish() & 0xFFFFFFFF) as u32
-                };
+                let disc = *discriminant;
                 let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
                     module.add_function("rt_enum_new", fn_type, None)
@@ -1970,19 +1945,23 @@ impl LlvmBackend {
                 let default_val = self.runtime_int_type().const_int(0, false);
                 vreg_map.insert(*dest, default_val.into());
             }
+            // A Yield must suspend a generator and preserve its yielded value.
+            // Until LLVM has that lowering, fail closed even when a caller
+            // bypasses the native-build generator compilability gate.
+            MirInst::Yield { .. } => {
+                return Err(CompileError::Codegen(
+                    "generators unsupported on LLVM backend: Yield requires generator lowering".to_string(),
+                ));
+            }
             // Async instructions without dest vreg
-            MirInst::ActorSend { .. } | MirInst::ActorReply { .. } | MirInst::Yield { .. } => {}
+            MirInst::ActorSend { .. } | MirInst::ActorReply { .. } => {}
 
             // Error handling instructions — use rt_enum_new for proper enum representation
             MirInst::OptionSome { dest, value } => {
                 let i64_t = self.runtime_int_type();
                 let i32_t = self.context_ref().i32_type();
                 let disc = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut h = DefaultHasher::new();
-                    "Some".hash(&mut h);
-                    (h.finish() & 0xFFFFFFFF) as u32
+                    simple_runtime::value::hash_variant_discriminant("Some") as u32
                 };
                 let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
@@ -2010,11 +1989,7 @@ impl LlvmBackend {
                 let i64_t = self.runtime_int_type();
                 let i32_t = self.context_ref().i32_type();
                 let disc = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut h = DefaultHasher::new();
-                    "None".hash(&mut h);
-                    (h.finish() & 0xFFFFFFFF) as u32
+                    simple_runtime::value::hash_variant_discriminant("None") as u32
                 };
                 let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
@@ -2041,11 +2016,7 @@ impl LlvmBackend {
                 let i64_t = self.runtime_int_type();
                 let i32_t = self.context_ref().i32_type();
                 let disc = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut h = DefaultHasher::new();
-                    "Ok".hash(&mut h);
-                    (h.finish() & 0xFFFFFFFF) as u32
+                    simple_runtime::value::hash_variant_discriminant("Ok") as u32
                 };
                 let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
@@ -2073,11 +2044,7 @@ impl LlvmBackend {
                 let i64_t = self.runtime_int_type();
                 let i32_t = self.context_ref().i32_type();
                 let disc = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut h = DefaultHasher::new();
-                    "Err".hash(&mut h);
-                    (h.finish() & 0xFFFFFFFF) as u32
+                    simple_runtime::value::hash_variant_discriminant("Err") as u32
                 };
                 let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
@@ -2314,10 +2281,7 @@ impl LlvmBackend {
                 let i64_type = self.runtime_int_type();
 
                 // Declare runtime functions — all i64 to match tagged-value ABI
-                let string_new = module.get_function("rt_string_new").unwrap_or_else(|| {
-                    let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-                    module.add_function("rt_string_new", fn_type, None)
-                });
+                let string_new = self.declare_rt_string_new(module);
                 let string_concat = module.get_function("rt_string_concat").unwrap_or_else(|| {
                     let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
                     module.add_function("rt_string_concat", fn_type, None)
@@ -2330,7 +2294,7 @@ impl LlvmBackend {
                 // Start with empty string (ptr=0, len=0)
                 let zero = i64_type.const_int(0, false);
                 let empty_call = builder
-                    .build_call(string_new, &[zero.into(), zero.into()], "empty_str")
+                    .build_call(string_new, &[self.context_ref().ptr_type(inkwell::AddressSpace::default()).const_null().into(), zero.into()], "empty_str")
                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?;
                 let mut result = empty_call
                     .try_as_basic_value()
@@ -2349,20 +2313,13 @@ impl LlvmBackend {
                             global.set_constant(true);
                             global.set_linkage(inkwell::module::Linkage::Private);
                             let str_ptr = global.as_pointer_value();
-                            // Convert ptr to i64 to match ABI
-                            let str_ptr_int = builder
-                                .build_ptr_to_int(str_ptr, i64_type, "fstr_ptr_int")
-                                .map_err(|e| crate::error::factory::llvm_build_failed("ptrtoint", &e))?;
                             let str_len = i64_type.const_int(s.len() as u64, false);
                             // Interned: static fstring literal part re-executes
                             // per format evaluation (no-GC tier, see
                             // rt_string_new_literal).
-                            let lit_new = module.get_function("rt_string_new_literal").unwrap_or_else(|| {
-                                let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-                                module.add_function("rt_string_new_literal", fn_type, None)
-                            });
+                            let lit_new = self.declare_rt_string_new_literal(module);
                             let call = builder
-                                .build_call(lit_new, &[str_ptr_int.into(), str_len.into()], "lit_str")
+                                .build_call(lit_new, &[str_ptr.into(), str_len.into()], "lit_str")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new_literal", &e))?;
                             call.try_as_basic_value()
                                 .basic()
@@ -2576,12 +2533,40 @@ impl LlvmBackend {
                     };
                     if let Some(d) = dest {
                         if let Some(ret_val) = call_site.try_as_basic_value().basic() {
-                            vreg_map.insert(*d, ret_val);
+                            vreg_map.insert(*d, self.ptr_result_to_word(ret_val, builder)?);
                         } else {
                             vreg_map.insert(*d, i64_type.const_int(0, false).into());
                         }
                     }
                     return Ok(());
+                }
+
+                // A BARE `byte_len` (no `str.`/`text.` owner) is the text
+                // byte-length builtin unless the module defines a user `byte_len`
+                // (Cranelift codegen/instr/calls.rs maps the bare leaf to
+                // `rt_string_len`). Without this the leaf fell through to an
+                // undefined `byte_len` extern at the stage2 link
+                // (stage2_byte_len_unresolved_symbol_2026-11-08).
+                // Gated like #7873's owner check: only when the module defines no
+                // user `byte_len` and the receiver is text/erased; otherwise the
+                // call falls through to normal resolution.
+                let bare_byte_len = method == "byte_len"
+                    && !func_name.replace("_dot_", ".").contains('.')
+                    && !calls::module_has_user_byte_len(module)
+                    && calls::byte_len_receiver_is_text_or_erased(vreg_types.get(receiver).copied());
+                let text_byte_len =
+                    bare_byte_len || super::resolved_text_runtime_method(func_name) == Some("rt_string_len");
+                if text_byte_len {
+                    if !args.is_empty() {
+                        return Err(CompileError::semantic("text.byte_len expects no arguments"));
+                    }
+                    if vreg_types.get(receiver).is_some_and(|ty| {
+                        *ty != crate::hir::TypeId::STRING
+                            && *ty != crate::hir::TypeId::ANY
+                            && *ty != crate::hir::TypeId::UNKNOWN
+                    }) {
+                        return Err(CompileError::semantic("text.byte_len requires a text receiver"));
+                    }
                 }
 
                 // Builtin-receiver methods that today resolve ONLY through the
@@ -2621,9 +2606,13 @@ impl LlvmBackend {
                         let recv_val = self.get_vreg(receiver, vreg_map)?;
                         let recv_casted = self.coerce_value_to_type(recv_val, Some(i64_type.into()), builder)?;
                         let rt_fn_type = i64_type.fn_type(&[i64_type.into()], false);
-                        let rt_func = module
-                            .get_function(rt_name)
-                            .unwrap_or_else(|| module.add_function(rt_name, rt_fn_type, None));
+                        let rt_func = if rt_name == "rt_string_data" {
+                            self.declare_rt_string_data(module)
+                        } else {
+                            module
+                                .get_function(rt_name)
+                                .unwrap_or_else(|| module.add_function(rt_name, rt_fn_type, None))
+                        };
                         let rt_call = builder
                             .build_call(rt_func, &[recv_casted.into()], "builtin_method")
                             .map_err(|e| crate::error::factory::llvm_build_failed("builtin method redirect", &e))?;
@@ -2631,6 +2620,12 @@ impl LlvmBackend {
                             .try_as_basic_value()
                             .basic()
                             .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                        if result.is_pointer_value() {
+                            result = builder
+                                .build_ptr_to_int(result.into_pointer_value(), i64_type, "builtin_ptr")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("ptr method ptrtoint", &e))?
+                                .into();
+                        }
                         if compare_zero {
                             let as_int = self
                                 .coerce_value_to_type(result, Some(i64_type.into()), builder)?
@@ -2650,23 +2645,15 @@ impl LlvmBackend {
                     }
                 }
 
-                // Special case: substring(start) → rt_slice(receiver, start, rt_len(receiver), 1)
+                // Special case: substring(start) → rt_slice_text_bytes(receiver, start, i64::MAX, 1)
                 if method == "substring" && args.len() == 1 {
                     let recv_val = self.get_vreg(receiver, vreg_map)?;
                     let recv_casted = self.coerce_value_to_type(recv_val, Some(i64_type.into()), builder)?;
                     let start_val = self.get_vreg(&args[0], vreg_map)?;
                     let start_casted = self.coerce_value_to_type(start_val, Some(i64_type.into()), builder)?;
-                    let len_fn_type = i64_type.fn_type(&[i64_type.into()], false);
-                    let len_func = module
-                        .get_function("rt_len")
-                        .unwrap_or_else(|| module.add_function("rt_len", len_fn_type, None));
-                    let len_call = builder
-                        .build_call(len_func, &[recv_casted.into()], "text_len")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("rt_len for substring", &e))?;
-                    let end_val = len_call
-                        .try_as_basic_value()
-                        .basic()
-                        .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                    // Open end: BYTE offsets (owner decision 2026-11-07); the runtime
+                    // clamps i64::MAX to `byte_len()`. `rt_len` counts code points.
+                    let end_val = i64_type.const_int(i64::MAX as u64, false);
                     let step_val = i64_type.const_int(1, false);
                     // rt_slice(collection, start, end, step) takes 4 args
                     let slice_fn_type = i64_type.fn_type(
@@ -2674,8 +2661,8 @@ impl LlvmBackend {
                         false,
                     );
                     let slice_func = module
-                        .get_function("rt_slice")
-                        .unwrap_or_else(|| module.add_function("rt_slice", slice_fn_type, None));
+                        .get_function("rt_slice_text_bytes")
+                        .unwrap_or_else(|| module.add_function("rt_slice_text_bytes", slice_fn_type, None));
                     let slice_args = &[recv_casted.into(), start_casted.into(), end_val.into(), step_val.into()];
                     let declared_params = slice_func.get_type().get_param_types().len();
                     let slice_call = if declared_params != 4 {
@@ -3108,6 +3095,7 @@ impl LlvmBackend {
                     // Copied verbatim from Cranelift lines 3163-3200
                     "contains" | "contains_key" | "has_key" | "has" => Some("rt_contains"),
                     "len" | "length" => Some("rt_len"),
+                    "byte_len" if text_byte_len => Some("rt_string_len"),
                     "starts_with" => Some("rt_string_starts_with"),
                     "ends_with" => Some("rt_string_ends_with"),
                     "concat" => Some("rt_string_concat"),
@@ -3125,6 +3113,7 @@ impl LlvmBackend {
                     "char_count" => Some("rt_string_char_count"),
                     "push" => Some("rt_array_push"),
                     "write_span" => Some("rt_array_write_span"),
+                    "fill_span" => Some("rt_array_fill_span"),
                     "pop" => Some("rt_array_pop"),
                     // Keep the LLVM bootstrap table synchronized with the
                     // Cranelift and pure-Simple lowerers. `write_span` is an
@@ -3133,7 +3122,9 @@ impl LlvmBackend {
                     // is correct; interpreter write-back remains owned by its
                     // dedicated mutating-method channel.
                     "write_span" => Some("rt_array_write_span"),
+                    "fill_span" => Some("rt_array_fill_span"),
                     "clear" => Some("rt_array_clear"),
+                    "reserve" => Some("rt_array_reserve"),
                     "enumerate" => Some("rt_array_enumerate"),
                     "join" => Some("rt_string_join"),
                     // "strip"/"trimmed" synonyms for "trim" (this table's own
@@ -3188,8 +3179,8 @@ impl LlvmBackend {
                     "find" | "find_str" => Some("rt_string_find"),
                     "rfind" | "last_index_of" => Some("rt_string_rfind"),
                     "to_string" | "to_text" | "str" => Some("rt_to_string"),
-                    "slice" | "substring" => Some("rt_slice"),
-                    "get" => Some("rt_index_get"),
+                    "slice" | "substring" => Some("rt_slice_text_bytes"),
+                    "get" => Some("rt_get"),
                     "keys" => Some("rt_dict_keys"),
                     "values" => Some("rt_dict_values"),
                     // The name-only fallback is safe only for the exact Dict
@@ -3217,7 +3208,11 @@ impl LlvmBackend {
                     "all" => Some("rt_array_all"),
                     // LLVM-specific mappings (not in Cranelift, verified to exist)
                     "repeat" => Some("lib__common__string_core__str_repeat"),
-                    "map" => Some("rt_option_map"),
+                    // Route every `.map` through `rt_map` (matching `emitter.rs`):
+                    // `rt_map` dispatches array receivers to `rt_array_map` and
+                    // Option/Result receivers to `rt_option_map`. Using
+                    // `rt_option_map` here dropped Array.map into Option map.
+                    "map" => Some("rt_map"),
                     // Option/Result methods (LLVM-specific)
                     // `.unwrap()` must use the trap helper, NOT the raw payload reader.
                     // `rt_enum_payload` returns NIL for any receiver that is not a boxed
@@ -3252,7 +3247,7 @@ impl LlvmBackend {
                     // rt_slice requires exactly 4 args: (collection, start, end, step).
                     // Handle it specially to pad missing optional args with defaults
                     // (matching Cranelift behavior in try_compile_builtin_method_call).
-                    if rt_name == "rt_slice" {
+                    if rt_name == "rt_slice_text_bytes" {
                         let coll = self.get_vreg(receiver, vreg_map)?;
                         let coll_i64 = self.coerce_value_to_type(coll, Some(i64_type.into()), builder)?;
                         let start_val = if !args.is_empty() {
@@ -3278,8 +3273,8 @@ impl LlvmBackend {
                             false,
                         );
                         let slice_fn = module
-                            .get_function("rt_slice")
-                            .unwrap_or_else(|| module.add_function("rt_slice", slice_fn_type, None));
+                            .get_function("rt_slice_text_bytes")
+                            .unwrap_or_else(|| module.add_function("rt_slice_text_bytes", slice_fn_type, None));
                         let call_site = builder
                             .build_call(
                                 slice_fn,
@@ -3355,7 +3350,9 @@ impl LlvmBackend {
                         } else if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                             let ret_val = if returns_bool {
                                 self.coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?
-                            } else if rt_name == "rt_array_write_span" && ret_val.is_int_value() {
+                            } else if (rt_name == "rt_array_write_span" || rt_name == "rt_array_fill_span")
+                                && ret_val.is_int_value()
+                            {
                                 // Raw i64 count from both runtimes; this result is
                                 // consumed as a tagged value, so tag it like
                                 // `rt_value_int`: `(v << 3) | INT(0)`. Same as the
@@ -3451,6 +3448,21 @@ impl LlvmBackend {
                                 if !owner_ok {
                                     matches.clear();
                                 }
+                            } else if !dotted_name.contains('.')
+                                && vreg_types.get(receiver).copied().map_or(true, |t| {
+                                    t == crate::hir::TypeId::ANY || t == crate::hir::TypeId::UNKNOWN
+                                })
+                            {
+                                // A BARE leaf on an ERASED receiver carries no owner
+                                // proof at all: neither the name nor the type names a
+                                // class. Binding the sole same-leaf/same-arity user
+                                // method made a text/array receiver run as that class
+                                // (c01 AV reading 0x48 in `StrictSdnReaderV1.byte_at`).
+                                // Fail closed: the call falls through to the bare
+                                // extern below, which links only if a real `leaf`
+                                // symbol exists, never to a guessed method.
+                                // doc/08_tracking/bug/llvm_suffix_match_fallback_binds_untyped_receiver_to_user_method_2026-11-08.md
+                                matches.clear();
                             }
                         }
                         match matches.len() {
@@ -3619,6 +3631,7 @@ impl LlvmBackend {
                             .get(i)
                             .copied()
                             .and_then(|ty| ty.try_into().ok())
+                            .filter(|ty: &inkwell::types::BasicTypeEnum| !ty.is_pointer_type() && func.get_call_conventions() != 64)
                             .or_else(|| Some(i64_type.into()));
                         let casted = self.coerce_value_to_type(val, target_ty, builder)?;
                         raw_arg_vals.push(casted.into_int_value());
@@ -3630,19 +3643,11 @@ impl LlvmBackend {
                         .map(|(indices, _)| indices)
                         .or_else(|| crate::codegen::instr::calls::text_arg_indices(runtime_name));
                     if let Some(boxed_indices) = boxed_indices {
-                        let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| {
-                            module.add_function("rt_string_data", i64_type.fn_type(&[i64_type.into()], false), None)
-                        });
+                        let rt_string_data = self.declare_rt_string_data(module);
                         let rt_string_len = module.get_function("rt_string_len").unwrap_or_else(|| {
                             module.add_function("rt_string_len", i64_type.fn_type(&[i64_type.into()], false), None)
                         });
-                        let rt_string_new = module.get_function("rt_string_new").unwrap_or_else(|| {
-                            module.add_function(
-                                "rt_string_new",
-                                i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
-                                None,
-                            )
-                        });
+                        let rt_string_new = self.declare_rt_string_new(module);
                         for (i, val) in raw_arg_vals.iter().enumerate() {
                             if boxed_indices.contains(&i) {
                                 let ptr = builder
@@ -3669,10 +3674,7 @@ impl LlvmBackend {
                             }
                         }
                     } else if let Some(text_indices) = text_indices {
-                        let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| {
-                            let fn_type = i64_type.fn_type(&[i64_type.into()], false);
-                            module.add_function("rt_string_data", fn_type, None)
-                        });
+                        let rt_string_data = self.declare_rt_string_data(module);
                         let rt_string_len = module.get_function("rt_string_len").unwrap_or_else(|| {
                             let fn_type = i64_type.fn_type(&[i64_type.into()], false);
                             module.add_function("rt_string_len", fn_type, None)
@@ -3705,19 +3707,25 @@ impl LlvmBackend {
                         );
                     }
                     let declared_params = func.get_type().get_param_types().len();
-                    let call_site = if declared_params != arg_vals.len() {
+                    let typed = Self::ptr_arg_needs_typed_call(&func.get_type().get_param_types(), &arg_vals);
+                    let call_site = if func.get_call_conventions() == 64 {
+                        self.build_system_abi_call(func, &arg_vals, builder, "mcall")?
+                    } else if declared_params != arg_vals.len() || typed {
                         let fn_ptr = func.as_global_value().as_pointer_value();
+                        let call_ty = if typed { self.call_type_from_args(func.get_type(), &arg_vals) } else { fallback_fn_type };
                         builder
-                            .build_indirect_call(fallback_fn_type, fn_ptr, &arg_vals, "mcall")
+                            .build_indirect_call(call_ty, fn_ptr, &arg_vals, "mcall")
                             .map_err(|e| crate::error::factory::llvm_build_failed("method call", &e))?
                     } else {
+                        self.words_to_declared_ptrs(&func.get_type().get_param_types(), &mut arg_vals, builder)?;
                         builder
                             .build_call(func, &arg_vals, "mcall")
                             .map_err(|e| crate::error::factory::llvm_build_failed("method call", &e))?
                     };
                     if let Some(d) = dest {
                         if let Some(ret_val) = call_site.try_as_basic_value().basic() {
-                            vreg_map.insert(*d, ret_val);
+                            let ret_val = self.widen_system_abi_return(&func, ret_val, builder)?;
+                            vreg_map.insert(*d, self.ptr_result_to_word(ret_val, builder)?);
                         } else {
                             vreg_map.insert(*d, i64_type.const_int(0, false).into());
                         }
@@ -3734,6 +3742,19 @@ impl LlvmBackend {
             } => {
                 // Map builtin method calls to runtime functions (matching Cranelift backend)
                 let i64_type = self.runtime_int_type();
+                if method == "byte_len" {
+                    if !matches!(receiver_type.as_str(), "str" | "text" | "String" | "string") {
+                        return Err(CompileError::semantic("byte_len requires a text receiver"));
+                    }
+                    if !args.is_empty() {
+                        return Err(CompileError::semantic("text.byte_len expects no arguments"));
+                    }
+                    if vreg_types.get(receiver).is_some_and(|ty| {
+                        *ty != crate::hir::TypeId::STRING && *ty != crate::hir::TypeId::ANY
+                    }) {
+                        return Err(CompileError::semantic("text.byte_len requires a text receiver"));
+                    }
+                }
                 let receiver_val = self.get_vreg(receiver, vreg_map)?;
                 let receiver_i64 = self.coerce_value_to_type(receiver_val, Some(i64_type.into()), builder)?;
 
@@ -3741,11 +3762,13 @@ impl LlvmBackend {
                 let rt_name: Option<&str> = match (receiver_type.as_str(), method.as_str()) {
                     ("Array" | "array", "push") => Some("rt_array_push"),
                     ("Array" | "array", "len") => Some("rt_array_len"),
-                    ("Array" | "array", "get") => Some("rt_index_get"),
+                    ("Array" | "array", "get") => Some("rt_get"),
                     ("Array" | "array", "set") => Some("rt_index_set"),
                     ("Array" | "array", "pop") => Some("rt_array_pop"),
                     ("Array" | "array", "clear") => Some("rt_array_clear"),
+                    ("Array" | "array", "reserve") => Some("rt_array_reserve"),
                     ("String" | "string", "len") => Some("rt_string_len"),
+                    ("str" | "text" | "String" | "string", "byte_len") => Some("rt_string_len"),
                     ("String" | "string", "concat") => Some("rt_string_concat"),
                     ("String" | "string", "starts_with") => Some("rt_string_starts_with"),
                     ("String" | "string", "ends_with") => Some("rt_string_ends_with"),
@@ -3755,7 +3778,7 @@ impl LlvmBackend {
                     | ("String" | "string", "has")
                     | ("Array" | "array", "has")
                     | ("Dict" | "dict", "has") => Some("rt_contains"),
-                    ("String" | "string", "substring") => Some("rt_slice"),
+                    ("String" | "string", "substring") => Some("rt_slice_text_bytes"),
                     ("String" | "string", "split") => Some("rt_string_split"),
                     ("String" | "string" | "str" | "text", "trim" | "trimmed" | "strip") => {
                         Some("rt_string_trim")
@@ -3785,7 +3808,7 @@ impl LlvmBackend {
                     ("Tuple" | "tuple", "get") => Some("rt_tuple_get"),
                     ("Tuple" | "tuple", "len") => Some("rt_tuple_len"),
                     ("Tuple" | "tuple", "set") => Some("rt_tuple_set"),
-                    ("Array" | "array", "slice") | ("String" | "string", "slice") => Some("rt_slice"),
+                    ("Array" | "array", "slice") | ("String" | "string", "slice") => Some("rt_slice_text_bytes"),
                     ("Array" | "array", "join") => Some("rt_array_join"),
                     ("Array" | "array", "sort") => Some("rt_array_sort"),
                     ("Array" | "array", "reverse") => Some("rt_array_reverse"),
@@ -3801,7 +3824,7 @@ impl LlvmBackend {
 
                 if let Some(rt_fn_name) = rt_name {
                     // rt_slice: handle specially to pad missing optional args
-                    if rt_fn_name == "rt_slice" {
+                    if rt_fn_name == "rt_slice_text_bytes" {
                         let start_val = if !args.is_empty() {
                             let v = self.get_vreg(&args[0], vreg_map)?;
                             self.coerce_value_to_type(v, Some(i64_type.into()), builder)?
@@ -3825,8 +3848,8 @@ impl LlvmBackend {
                             false,
                         );
                         let slice_fn = module
-                            .get_function("rt_slice")
-                            .unwrap_or_else(|| module.add_function("rt_slice", slice_fn_type, None));
+                            .get_function("rt_slice_text_bytes")
+                            .unwrap_or_else(|| module.add_function("rt_slice_text_bytes", slice_fn_type, None));
                         let call_site = builder
                             .build_call(
                                 slice_fn,
@@ -3859,7 +3882,7 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_build_failed("builtin call", &e))?;
                     if let Some(d) = dest {
                         if let Some(ret_val) = call_site.try_as_basic_value().basic() {
-                            vreg_map.insert(*d, ret_val);
+                            vreg_map.insert(*d, self.ptr_result_to_word(ret_val, builder)?);
                         } else {
                             vreg_map.insert(*d, i64_type.const_int(0, false).into());
                         }
@@ -3987,12 +4010,19 @@ impl LlvmBackend {
                         .map(|s| s.as_str())
                         .unwrap_or(global_name.as_str());
                     let resolved_dotted = resolved_name.replace("_dot_", ".");
-                    let func = module
+                    let boxed_fn = module
+                        .get_function(&crate::codegen::boxed_entry_name(global_name))
+                        .or_else(|| module.get_function(&crate::codegen::boxed_entry_name(resolved_name)))
+                        .or_else(|| module.get_function(&crate::codegen::boxed_entry_name(&resolved_dotted)));
+
+                    if let Some(boxed_fn) = boxed_fn {
+                        let closure_rv = self.build_zero_capture_boxed_closure(boxed_fn, builder, module)?;
+                        vreg_map.insert(*dest, closure_rv);
+                    } else if let Some(func) = module
                         .get_function(resolved_name)
                         .or_else(|| module.get_function(&resolved_dotted))
-                        .or_else(|| module.get_function(global_name));
-
-                    if let Some(func) = func {
+                        .or_else(|| module.get_function(global_name))
+                    {
                         let alloc_fn_type = i64_type.fn_type(&[i64_type.into()], false);
                         let alloc_fn = module
                             .get_function("rt_alloc")
@@ -4144,6 +4174,331 @@ mod tests {
     use crate::mir::{CallTarget, LocalKind, MirInst, MirLocal, Terminator, VReg};
     use simple_common::target::{Target, TargetArch, TargetOS};
     use std::collections::HashMap;
+
+    /// MIR callers must not silently discard Yield when they bypass fallback selection.
+    #[test]
+    fn llvm_yield_refusal_errors_on_x86_and_x64() {
+        use crate::hir::TypeId;
+        use crate::mir::{MirFunction, MirInst, Terminator, VReg};
+        use simple_parser::ast::Visibility;
+
+        for arch in [TargetArch::X86_64, TargetArch::X86] {
+            let backend = LlvmBackend::new(Target::new(arch, TargetOS::Linux)).unwrap();
+            backend.create_module("yield_refusal").unwrap();
+            let mut func = MirFunction::new("yield_value".to_string(), TypeId::I64, Visibility::Public);
+            func.blocks[0].instructions.push(MirInst::ConstInt {
+                dest: VReg(0),
+                value: 42,
+            });
+            func.blocks[0].instructions.push(MirInst::Yield { value: VReg(0) });
+            func.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+
+            let error = backend.compile_function(&func).expect_err("Yield must not compile as a no-op");
+            assert!(
+                error.to_string().contains("generators unsupported on LLVM backend"),
+                "unexpected failure instead of the generator refusal: {error}"
+            );
+        }
+    }
+
+    /// The refusal is specific to Yield, not ordinary MIR value production/return.
+    #[test]
+    fn llvm_yield_refusal_preserves_ordinary_return() {
+        use crate::hir::TypeId;
+        use crate::mir::{MirFunction, MirInst, Terminator, VReg};
+        use simple_parser::ast::Visibility;
+
+        let backend = LlvmBackend::new(Target::new(TargetArch::X86_64, TargetOS::Linux)).unwrap();
+        backend.create_module("ordinary_return_control").unwrap();
+        let mut func = MirFunction::new("ordinary_return".to_string(), TypeId::I64, Visibility::Public);
+        func.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 42,
+        });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+
+        backend.compile_function(&func).unwrap();
+        // MIR vregs initially live in allocas. The real object-emission path
+        // runs LLVM optimization before the constant-return oracle is valid.
+        let object = backend.emit_object(&crate::mir::MirModule::default()).unwrap();
+        assert!(!object.is_empty(), "ordinary MIR must emit actual object bytes");
+        backend.verify().unwrap();
+        let optimized_ir = backend.get_ir().unwrap();
+        assert!(optimized_ir.contains("ret i64 42"), "{optimized_ir}");
+    }
+
+
+
+    #[test]
+    fn checked_typed_word_reads_use_layout_aware_runtime_getters() {
+        for name in ["rt_typed_words_u32_at", "rt_typed_words_u64_at"] {
+            let mut backend = LlvmBackend::new(Target::host()).unwrap();
+            backend.create_module("checked_word_getter").unwrap();
+            let mut function = MirFunction::new(
+                "probe".to_string(), crate::hir::TypeId::I64,
+                simple_parser::ast::Visibility::Public,
+            );
+            function.params.push(MirLocal {
+                name: "array".to_string(), ty: crate::hir::TypeId::ANY,
+                kind: LocalKind::Parameter, is_ghost: false,
+            });
+            function.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(1), value: 0 });
+            function.blocks[0].instructions.push(MirInst::Call {
+                dest: Some(VReg(2)), target: CallTarget::from_name(name),
+                args: vec![VReg(0), VReg(1)],
+            });
+            function.blocks[0].terminator = Terminator::Return(Some(VReg(2)));
+            backend.compile_function(&function).unwrap();
+            backend.verify().unwrap();
+            let ir = backend.get_ir().unwrap();
+            assert!(ir.contains(&format!("call i64 @{name}(")), "{ir}");
+        }
+    }
+
+    fn byte_len_dispatch_ir(inst: MirInst, receiver_type: crate::hir::TypeId) -> Result<String, CompileError> {
+        let backend = LlvmBackend::new(Target::host())?;
+        backend.create_module("byte_len_dispatch")?;
+        let mut function = MirFunction::new(
+            "probe".to_string(), crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        function.params.push(MirLocal {
+            name: "receiver".to_string(), ty: receiver_type,
+            kind: LocalKind::Parameter, is_ghost: false,
+        });
+        function.blocks[0].instructions.push(inst);
+        function.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+        backend.compile_function(&function)?;
+        backend.verify()?;
+        backend.get_ir()
+    }
+
+    #[test]
+    fn text_byte_len_dispatch_uses_one_argument_byte_abi_for_every_text_alias() {
+        for owner in ["str", "text", "String", "string", "lib__common__string_core__str"] {
+            for separator in [".", "_dot_"] {
+                let name = format!("{owner}{separator}byte_len");
+                for inst in [
+                    MirInst::Call {
+                        dest: Some(VReg(1)), target: CallTarget::from_name(&name), args: vec![VReg(0)],
+                    },
+                    MirInst::MethodCallStatic {
+                        dest: Some(VReg(1)), receiver: VReg(0), func_name: name.clone(), args: vec![],
+                    },
+                ] {
+                    let ir = byte_len_dispatch_ir(inst, crate::hir::TypeId::STRING).unwrap();
+                    assert!(ir.contains("call i64 @rt_string_len(i64 "), "{name}: {ir}");
+                    assert!(ir.contains("declare i64 @rt_string_len(i64)"), "{name}: {ir}");
+                    assert!(!ir.contains("rt_string_char_count"), "{name}: {ir}");
+                }
+            }
+        }
+        for owner in ["str", "text", "String", "string"] {
+            let inst = MirInst::BuiltinMethod {
+                dest: Some(VReg(1)), receiver: VReg(0), receiver_type: owner.to_string(),
+                method: "byte_len".to_string(), args: vec![],
+            };
+            let ir = byte_len_dispatch_ir(inst, crate::hir::TypeId::STRING).unwrap();
+            assert!(ir.contains("call i64 @rt_string_len(i64 "), "{owner}: {ir}");
+            assert!(ir.contains("declare i64 @rt_string_len(i64)"), "{owner}: {ir}");
+        }
+    }
+
+    /// stage2 link `Unresolved symbol preview: byte_len`: MIR hands the LLVM
+    /// backend a BARE `byte_len` (no `str.`/`text.` owner) for a `.byte_len()`
+    /// whose receiver is proven text or erased. `byte_len` is a compiler
+    /// builtin with no user definition anywhere, and Cranelift already maps
+    /// the bare leaf to `rt_string_len`; LLVM must not declare an undefined
+    /// `byte_len` extern instead.
+    #[test]
+    fn bare_byte_len_dispatches_to_text_byte_abi_for_text_and_erased_receivers() {
+        for receiver_type in [crate::hir::TypeId::STRING, crate::hir::TypeId::ANY, crate::hir::TypeId::UNKNOWN] {
+            for inst in [
+                MirInst::Call {
+                    dest: Some(VReg(1)), target: CallTarget::from_name("byte_len"), args: vec![VReg(0)],
+                },
+                MirInst::MethodCallStatic {
+                    dest: Some(VReg(1)), receiver: VReg(0), func_name: "byte_len".to_string(), args: vec![],
+                },
+            ] {
+                let ir = byte_len_dispatch_ir(inst, receiver_type).unwrap();
+                assert!(ir.contains("call i64 @rt_string_len(i64 "), "{receiver_type:?}: {ir}");
+                assert!(ir.contains("declare i64 @rt_string_len(i64)"), "{receiver_type:?}: {ir}");
+                assert!(!ir.contains("@byte_len("), "bare extern leaked: {receiver_type:?}: {ir}");
+            }
+        }
+        // A proven non-text receiver is NOT a text byte_len: it falls through
+        // to normal resolution (no rt_string_len rebinding, no build error).
+        for inst in [
+            MirInst::Call { dest: Some(VReg(1)), target: CallTarget::from_name("byte_len"), args: vec![VReg(0)] },
+            MirInst::MethodCallStatic { dest: Some(VReg(1)), receiver: VReg(0), func_name: "byte_len".to_string(), args: vec![] },
+        ] {
+            match byte_len_dispatch_ir(inst, crate::hir::TypeId::I64) {
+                Ok(ir) => assert!(!ir.contains("@rt_string_len("), "non-text receiver rebound to text builtin: {ir}"),
+                // Normal resolution may still reject it, but NOT via the text-builtin guard.
+                Err(e) => assert!(!e.to_string().contains("text receiver"), "text guard hijacked a non-text receiver: {e}"),
+            }
+        }
+    }
+
+    /// Module with a USER byte_len (`name`), then a caller of bare `byte_len`
+    /// on a receiver of `receiver_type`. Returns the IR.
+    fn bare_byte_len_with_user_def_ir(user_name: &str, receiver_type: crate::hir::TypeId, call_route: bool) -> String {
+        let backend = LlvmBackend::new(Target::host()).unwrap();
+        backend.create_module("user_byte_len_gate").unwrap();
+        let mut user = MirFunction::new(user_name.to_string(), crate::hir::TypeId::I64, simple_parser::ast::Visibility::Public);
+        user.params.push(MirLocal { name: "data".to_string(), ty: crate::hir::TypeId::I64, kind: LocalKind::Parameter, is_ghost: false });
+        user.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+        backend.compile_function(&user).unwrap();
+        let mut caller = MirFunction::new("caller".to_string(), crate::hir::TypeId::I64, simple_parser::ast::Visibility::Public);
+        caller.params.push(MirLocal { name: "recv".to_string(), ty: receiver_type, kind: LocalKind::Parameter, is_ghost: false });
+        caller.blocks[0].instructions.push(if call_route {
+            MirInst::Call { dest: Some(VReg(1)), target: CallTarget::from_name("byte_len"), args: vec![VReg(0)] }
+        } else {
+            MirInst::MethodCallStatic { dest: Some(VReg(1)), receiver: VReg(0), func_name: "byte_len".to_string(), args: vec![] }
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+        backend.compile_function(&caller).unwrap();
+        backend.verify().unwrap();
+        backend.get_ir().unwrap()
+    }
+
+    /// src/os/kernel/loader/byte_utils.spl defines `fn byte_len(data: [u8])`.
+    /// A bare free call must keep binding to it, never `rt_string_len`.
+    #[test]
+    fn bare_byte_len_free_call_still_binds_user_function() {
+        for receiver_type in [crate::hir::TypeId::I64, crate::hir::TypeId::ANY, crate::hir::TypeId::UNKNOWN] {
+            let ir = bare_byte_len_with_user_def_ir("byte_len", receiver_type, true);
+            assert!(ir.contains("call i64 @byte_len("), "{receiver_type:?}: {ir}");
+            assert!(!ir.contains("@rt_string_len("), "{receiver_type:?}: {ir}");
+        }
+    }
+
+    /// An ERASED receiver must not be silently rebound to the text builtin
+    /// when a user `byte_len` (free or method) exists in the module.
+    #[test]
+    fn erased_receiver_bare_byte_len_not_rebound_when_user_byte_len_exists() {
+        for user_name in ["byte_len", "ByteBuf.byte_len"] {
+            for call_route in [true, false] {
+                let ir = bare_byte_len_with_user_def_ir(user_name, crate::hir::TypeId::ANY, call_route);
+                assert!(!ir.contains("@rt_string_len("), "{user_name} call_route={call_route}: {ir}");
+            }
+        }
+    }
+
+    #[test]
+    fn text_byte_len_rejects_extra_or_missing_arguments_and_nontext_receivers() {
+        let malformed = [
+            MirInst::Call { dest: Some(VReg(1)), target: CallTarget::from_name("str.byte_len"), args: vec![] },
+            MirInst::Call { dest: Some(VReg(1)), target: CallTarget::from_name("str_dot_byte_len"), args: vec![VReg(0), VReg(0)] },
+            MirInst::MethodCallStatic { dest: Some(VReg(1)), receiver: VReg(0), func_name: "str.byte_len".to_string(), args: vec![VReg(0)] },
+            MirInst::BuiltinMethod { dest: Some(VReg(1)), receiver: VReg(0), receiver_type: "text".to_string(), method: "byte_len".to_string(), args: vec![VReg(0)] },
+        ];
+        for inst in malformed {
+            let error = byte_len_dispatch_ir(inst, crate::hir::TypeId::STRING).unwrap_err();
+            assert!(error.to_string().contains("byte_len"), "{error}");
+        }
+        for owner in ["str", "Array", "i64"] {
+            for inst in [
+                MirInst::Call { dest: Some(VReg(1)), target: CallTarget::from_name(&format!("{owner}.byte_len")), args: vec![VReg(0)] },
+                MirInst::MethodCallStatic { dest: Some(VReg(1)), receiver: VReg(0), func_name: format!("{owner}.byte_len"), args: vec![] },
+                MirInst::BuiltinMethod { dest: Some(VReg(1)), receiver: VReg(0), receiver_type: owner.to_string(), method: "byte_len".to_string(), args: vec![] },
+            ] {
+                assert!(byte_len_dispatch_ir(inst, crate::hir::TypeId::I64).is_err(), "nontext {owner}.byte_len must fail closed");
+            }
+        }
+        let unknown = MirInst::MethodCallStatic {
+            dest: Some(VReg(1)), receiver: VReg(0), func_name: "str.byte_length".to_string(), args: vec![],
+        };
+        assert!(byte_len_dispatch_ir(unknown, crate::hir::TypeId::STRING).is_err());
+    }
+
+    #[test]
+    fn text_byte_len_keeps_codepoint_and_existing_len_dispatch_separate() {
+        let char_count = MirInst::MethodCallStatic {
+            dest: Some(VReg(1)), receiver: VReg(0), func_name: "str.char_count".to_string(), args: vec![],
+        };
+        let ir = byte_len_dispatch_ir(char_count, crate::hir::TypeId::STRING).unwrap();
+        assert!(ir.contains("call i64 @rt_string_char_count("), "{ir}");
+        assert!(!ir.contains("@rt_string_len("), "{ir}");
+        let len = MirInst::MethodCallStatic {
+            dest: Some(VReg(1)), receiver: VReg(0), func_name: "str.len".to_string(), args: vec![],
+        };
+        let ir = byte_len_dispatch_ir(len, crate::hir::TypeId::STRING).unwrap();
+        assert!(ir.contains("len_string_or_array"), "existing len must keep its inline path: {ir}");
+        assert!(!ir.contains("@rt_string_len("), "byte_len redirect must not replace len: {ir}");
+    }
+
+    #[test]
+    fn byte_len_named_user_methods_keep_their_exact_callee() {
+        for (name, call_route) in [
+            ("UserText.byte_len", true), ("UserText.byte_len", false),
+            ("User__String.byte_len", true), ("User__String.byte_len", false),
+            ("custom.str.byte_len", true), ("custom.str.byte_len", false),
+        ] {
+            let backend = LlvmBackend::new(Target::host()).unwrap();
+            backend.create_module("user_byte_len").unwrap();
+            let mut user = MirFunction::new(name.to_string(), crate::hir::TypeId::I64, simple_parser::ast::Visibility::Public);
+            user.params.push(MirLocal { name: "self".to_string(), ty: crate::hir::TypeId::I64, kind: LocalKind::Parameter, is_ghost: false });
+            user.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+            backend.compile_function(&user).unwrap();
+            let mut caller = MirFunction::new("caller".to_string(), crate::hir::TypeId::I64, simple_parser::ast::Visibility::Public);
+            caller.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(0), value: 41 });
+            caller.blocks[0].instructions.push(if call_route {
+                MirInst::Call { dest: Some(VReg(1)), target: CallTarget::from_name(name), args: vec![VReg(0)] }
+            } else {
+                MirInst::MethodCallStatic { dest: Some(VReg(1)), receiver: VReg(0), func_name: name.to_string(), args: vec![] }
+            });
+            caller.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+            backend.compile_function(&caller).unwrap();
+            backend.verify().unwrap();
+            let ir = backend.get_ir().unwrap();
+            assert!(ir.lines().any(|line| line.contains("call i64") && line.contains(name)), "{name}: {ir}");
+            assert!(!ir.contains("@rt_string_len("), "{ir}");
+        }
+    }
+
+    #[test]
+    fn text_byte_len_source_materializes_the_byte_runtime_call() {
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../test/fixtures/native/text_byte_len_dispatch/main.spl"));
+        let ast = simple_parser::Parser::new(source).parse().unwrap();
+        let hir = crate::hir::lower(&ast).unwrap();
+        let mir = crate::mir::lower_to_mir(&hir).unwrap();
+        let mut backend = LlvmBackend::new(Target::host()).unwrap();
+        backend.create_module("byte_len_source").unwrap();
+        backend.compile(&mir).unwrap();
+        backend.verify().unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("call i64 @rt_string_len(i64 "), "{ir}");
+        assert!(ir.contains("call i64 @rt_string_char_count("), "{ir}");
+        assert!(!ir.lines().any(|line| line.contains("call") && line.contains("str.byte_len")), "unresolved source method leaked: {ir}");
+    }
+
+    #[test]
+    fn rt_pool_join_result_is_not_shifted() {
+        let backend = LlvmBackend::new(Target::new(TargetArch::X86_64, TargetOS::Linux)).unwrap();
+        backend.create_module("pool_join_raw").unwrap();
+        let mut func = MirFunction::new(
+            "join".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        func.params.push(MirLocal {
+            name: "handle".to_string(), ty: crate::hir::TypeId::I64,
+            kind: LocalKind::Parameter, is_ghost: false,
+        });
+        func.blocks[0].instructions.push(MirInst::Call {
+            dest: Some(VReg(1)),
+            target: CallTarget::from_name("rt_pool_join"),
+            args: vec![VReg(0)],
+        });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+        backend.compile_function(&func).unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("@rt_pool_join("), "{ir}");
+        assert!(!ir.contains("rt_pool_join_tagged") && !ir.contains(" shl "), "rt_pool_join result must stay raw: {ir}");
+        backend.verify().unwrap();
+    }
 
     #[test]
     fn boolean_constants_match_unboxed_payloads_in_both_dispatch_paths() {
@@ -4953,9 +5308,10 @@ mod tests {
                 .and_then(|(_, args)| args.rsplit_once(')'))
                 .map(|(args, _)| args)
                 .expect("malformed rt_process_run call");
-            assert_eq!(call_args.matches("i64 ").count(), 3, "{call}\n{ir}");
+            assert_eq!(call_args.matches("ptr ").count(), 1, "{call}\n{ir}");
+            assert_eq!(call_args.matches("i64 ").count(), 2, "{call}\n{ir}");
         }
-        assert!(ir.contains("call i64 @rt_string_data("), "{ir}");
+        assert!(ir.contains("call ptr @rt_string_data("), "{ir}");
         assert!(ir.contains("call i64 @rt_string_len("), "{ir}");
         assert!(!ir.contains("process_args_raw_ptr"), "{ir}");
         backend.verify().unwrap();
@@ -5198,15 +5554,10 @@ mod tests {
         backend.verify().unwrap();
     }
 
-    /// REPLACED 2026-08-01. The previous body of this test asserted
-    /// `call i32 @rt_box_float(double` and `call double @rt_unbox_float(i32` —
-    /// i.e. it PINNED a defect: neither `rt_box_float` nor `rt_unbox_float` is
-    /// defined in either runtime (no `pub extern "C" fn` under
-    /// src/compiler_rust/runtime, no definition in src/runtime/runtime_native.c),
-    /// so on every 32-bit target the LLVM backend emitted calls to symbols that
-    /// do not exist. The assertions were not relaxed — they were replaced with
-    /// assertions naming the helpers that DO exist in both runtimes, plus
-    /// explicit negative assertions so the dead names can never come back.
+    /// Freestanding 32-bit targets (`Riscv32` + `SimpleOS`) use a 32-bit `i32`
+    /// RuntimeValue, so 64-bit IEEE doubles cannot be bitcast inline to `i32`
+    /// and must route through `rt_value_float` / `rt_value_as_float` (never the
+    /// nonexistent `rt_box_float` / `rt_unbox_float`).
     #[test]
     fn test_riscv32_float_boxing_uses_runtime_helpers() {
         let target = Target::new(TargetArch::Riscv32, TargetOS::SimpleOS);
@@ -5218,48 +5569,84 @@ mod tests {
             let module = module_ref.as_ref().unwrap();
             let builder_ref = backend.builder.borrow();
             let builder = builder_ref.as_ref().unwrap();
-            let fn_type = backend.context_ref().void_type().fn_type(&[], false);
+            let f64_type = backend.context_ref().f64_type();
+            let fn_type = backend.context_ref().void_type().fn_type(&[f64_type.into()], false);
             let func = module.add_function("test", fn_type, None);
             let block = backend.context_ref().append_basic_block(func, "entry");
             builder.position_at_end(block);
 
-            let float_val = backend.context_ref().f64_type().const_float(1.5);
-            let boxed = backend
-                .build_box_float_value(float_val.into(), builder, module)
-                .unwrap();
+            let float_val = func.get_nth_param(0).unwrap();
+            let boxed = backend.build_box_float_value(float_val, builder, module).unwrap();
             let unboxed = backend.build_unbox_float_value(boxed.into(), builder, module).unwrap();
             let _ = unboxed;
             builder.build_return(None).unwrap();
         }
 
         let ir = backend.get_ir().unwrap();
-        // Positive artifacts: the 32-bit boxing path must call the helpers that
-        // are actually EXPORTED by the runtimes.
         assert!(
             ir.contains("call i32 @rt_value_float(double"),
-            "32-bit float boxing must call rt_value_float; IR was:\n{}",
+            "freestanding 32-bit float boxing must call rt_value_float; IR was:\n{}",
             ir
         );
         assert!(
             ir.contains("call double @rt_value_as_float(i32"),
-            "32-bit float unboxing must call rt_value_as_float; IR was:\n{}",
+            "freestanding 32-bit float unboxing must call rt_value_as_float; IR was:\n{}",
             ir
         );
-        // Negative artifacts: these two symbols do not exist in ANY runtime.
-        // Emitting them is what this test previously asserted.
-        assert!(
-            !ir.contains("rt_box_float"),
-            "rt_box_float does not exist in any runtime"
-        );
-        assert!(
-            !ir.contains("rt_unbox_float"),
-            "rt_unbox_float does not exist in any runtime"
-        );
+        assert!(!ir.contains("rt_box_float"), "rt_box_float does not exist in any runtime");
+        assert!(!ir.contains("rt_unbox_float"), "rt_unbox_float does not exist in any runtime");
         assert!(!ir.contains("bitcast i32"));
         backend.verify().unwrap();
     }
 
-    /// True-positive control for the test above: on a 64-bit target the float
+    /// Hosted 32-bit targets (such as `i686-pc-windows-gnu`) link the standard
+    /// C runtime where `RuntimeValue` is `uint64_t` (`i64`), so float boxing is
+    /// inline `i64` bitcast/shift/or with no runtime call.
+    #[test]
+    fn test_i686_hosted_float_boxing_is_inline_i64() {
+        let target = Target::parse("i686-pc-windows-gnu").unwrap();
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("i686_float_boxing").unwrap();
+
+        {
+            let module_ref = backend.module.borrow();
+            let module = module_ref.as_ref().unwrap();
+            let builder_ref = backend.builder.borrow();
+            let builder = builder_ref.as_ref().unwrap();
+            let f64_type = backend.context_ref().f64_type();
+            let fn_type = backend.context_ref().void_type().fn_type(&[f64_type.into()], false);
+            let func = module.add_function("test", fn_type, None);
+            let block = backend.context_ref().append_basic_block(func, "entry");
+            builder.position_at_end(block);
+
+            let float_val = func.get_nth_param(0).unwrap();
+            let boxed = backend.build_box_float_value(float_val, builder, module).unwrap();
+            let unboxed = backend.build_unbox_float_value(boxed.into(), builder, module).unwrap();
+            let _ = unboxed;
+            builder.build_return(None).unwrap();
+        }
+
+        let ir = backend.get_ir().unwrap();
+        assert!(
+            ir.contains("%f2i = bitcast double %0 to i64"),
+            "hosted 32-bit float boxing must bitcast to the i64 RuntimeValue; IR was:\n{}",
+            ir
+        );
+        assert!(ir.contains("%box_float = or i64 %shl, 2"), "IR was:\n{}", ir);
+        assert!(
+            ir.contains("%i2f = bitcast i64 %shl") && ir.contains(" to double"),
+            "hosted 32-bit float unboxing must bitcast from the i64 RuntimeValue; IR was:\n{}",
+            ir
+        );
+        assert!(!ir.contains("rt_value_float"), "boxing must stay inline; IR was:\n{}", ir);
+        assert!(!ir.contains("rt_value_as_float"), "unboxing must stay inline; IR was:\n{}", ir);
+        assert!(!ir.contains("rt_box_float"), "rt_box_float does not exist in any runtime");
+        assert!(!ir.contains("rt_unbox_float"), "rt_unbox_float does not exist in any runtime");
+        assert!(!ir.contains("bitcast i32"));
+        backend.verify().unwrap();
+    }
+
+    /// 64-bit sibling of the test above: on a 64-bit target the float
     /// boxing path is INLINE (shift/or + bitcast) and must emit no runtime call
     /// at all. Without this control, "no rt_box_float in the IR" could be
     /// satisfied by the boxing path going silent rather than by it being fixed.
@@ -5641,4 +6028,106 @@ mod tests {
         );
         backend.verify().unwrap();
     }
+    #[test]
+    fn explicit_asm_dialect_reaches_normal_generic_and_naked_emitters() {
+        use crate::hir::AsmDialect;
+        for dialect in [AsmDialect::Default, AsmDialect::Att, AsmDialect::Intel] {
+            let backend = LlvmBackend::new(Target::new(TargetArch::X86_64, TargetOS::Linux)).unwrap();
+            backend.create_module("asm_dialect_transport").unwrap();
+            {
+                let module_ref = backend.module.borrow();
+                let module = module_ref.as_ref().unwrap();
+                let builder_ref = backend.builder.borrow();
+                let builder = builder_ref.as_ref().unwrap();
+                let ty = backend.context_ref().void_type();
+                let function = module.add_function("emit", ty.fn_type(&[], false), None);
+                builder.position_at_end(backend.context_ref().append_basic_block(function, "entry"));
+                let instructions = vec!["nop".to_string()];
+                backend.compile_inline_asm(&instructions, dialect, true, "~{memory}", &[], &[], &mut HashMap::new(), builder).unwrap();
+                backend.emit_raw_asm_block(&instructions, "~{memory}", dialect, builder).unwrap();
+                backend.compile_emitter_simd_instruction(
+                    &MirInst::InlineAsm {
+                        dialect,
+                        instructions,
+                        volatile: true,
+                        constraints: "~{memory}".to_string(),
+                        inputs: vec![],
+                        outputs: vec![],
+                    },
+                    &mut HashMap::new(), &HashMap::new(), builder, module,
+                ).unwrap();
+                builder.build_return(None).unwrap();
+            }
+            backend.verify().unwrap();
+            let ir = backend.get_ir().unwrap();
+            assert_eq!(ir.matches("inteldialect").count(), if dialect == AsmDialect::Intel { 3 } else { 0 }, "{ir}");
+            assert_eq!(ir.matches("asm sideeffect").count(), 3, "{ir}");
+        }
+    }
+
+    /// llvm_suffix_match_fallback_binds_untyped_receiver_to_user_method_2026-11-08:
+    /// compiles a user method `lib__x__Reader.peek_word(self, offset)` and a
+    /// probe calling `func_name` on a receiver of type `ty`; returns the IR.
+    fn leaf_call_on_receiver_ir(ty: crate::hir::TypeId, func_name: &str) -> Result<String, CompileError> {
+        let backend = LlvmBackend::new(Target::host()).unwrap();
+        backend.create_module("suffix_owner_gate").unwrap();
+        let mut user = MirFunction::new(
+            "lib__x__Reader.peek_word".to_string(), crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        for name in ["self", "offset"] {
+            user.params.push(MirLocal {
+                name: name.to_string(), ty: crate::hir::TypeId::I64,
+                kind: LocalKind::Parameter, is_ghost: false,
+            });
+        }
+        user.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+        backend.compile_function(&user).unwrap();
+        let mut probe = MirFunction::new(
+            "probe".to_string(), crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        probe.params.push(MirLocal {
+            name: "receiver".to_string(), ty,
+            kind: LocalKind::Parameter, is_ghost: false,
+        });
+        probe.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(1), value: 0 });
+        probe.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(2)), receiver: VReg(0), func_name: func_name.to_string(), args: vec![VReg(1)],
+        });
+        probe.blocks[0].terminator = Terminator::Return(Some(VReg(2)));
+        backend.compile_function(&probe)?;
+        backend.get_ir()
+    }
+
+    fn probe_body(ir: &str) -> &str {
+        &ir[ir.find("@probe(").expect("probe emitted")..]
+    }
+
+    #[test]
+    fn erased_receiver_bare_leaf_is_not_bound_to_sole_user_method() {
+        for ty in [crate::hir::TypeId::ANY, crate::hir::TypeId::UNKNOWN] {
+            let ir = leaf_call_on_receiver_ir(ty, "peek_word").unwrap();
+            assert!(
+                !probe_body(&ir).contains("lib__x__Reader.peek_word"),
+                "erased receiver ({ty:?}) must not be statically bound by leaf+arity:\n{ir}"
+            );
+        }
+    }
+
+    #[test]
+    fn primitive_receiver_bare_leaf_is_not_bound_to_user_method() {
+        // A typed builtin receiver fails the build loudly (pre-existing gate).
+        match leaf_call_on_receiver_ir(crate::hir::TypeId::STRING, "peek_word") {
+            Ok(ir) => assert!(!probe_body(&ir).contains("lib__x__Reader.peek_word"), "{ir}"),
+            Err(e) => assert!(format!("{e:?}").contains("peek_word"), "{e:?}"),
+        }
+    }
+
+    #[test]
+    fn owner_qualified_name_still_binds_the_user_method() {
+        let ir = leaf_call_on_receiver_ir(crate::hir::TypeId::ANY, "lib__x__Reader.peek_word").unwrap();
+        assert!(probe_body(&ir).contains("lib__x__Reader.peek_word"), "{ir}");
+    }
+
 }

@@ -1,0 +1,215 @@
+# Per-file lane (default Stage 3 route) fails before any real HIR: unit child's MIR gate wants HIR for the whole inventory
+
+- Status: fix-implemented-verification-pending (2026-11-27; waiting-for: native Stage 3 per-file lane build verification; 2026-11-22 default `stage3_file_workers: 1` cutover landed)
+- Severity: P1 (blocks the DEFAULT Stage 3 route; workaround exists)
+- Found: 2026-11-12 (early Phase 3 census lane)
+- Component: compiler driver, per-file unit pipeline
+  (`SIMPLE_FILE_WORKERS` unset => `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"`,
+  `src/compiler/80.driver/driver_build/native_file_worker_v1.spl:55`)
+- Binary: run 15 admitted Stage 2, sha256 `43d4627b7d555758…`
+  (`build/bootstrap-fable-15/stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`,
+  source `bfe789dd411`, aarch64, cranelift)
+
+## Observation
+
+### A. Stage 3 shape (bootstrap_main closure, 1623 modules)
+
+Exact Stage 3 argv and env (`bootstrap-from-scratch.sh` ~5862-5926:
+`SIMPLE_BOOTSTRAP=` empty, `SIMPLE_BOOTSTRAP_STAGE3=1`, 5 `--source` roots,
+`--entry-closure --mode dynload`), `--threads 4`. Took 6 min and failed with exit 1:
+
+```
+[file-worker] owner=0/2@0 unit exit=1 hir_claimed=1 mir_claimed=0 closure_incomplete=false orphan_picks=0
+[file-worker] no MIR module verdict; per-file pool selected, no in-process fallback
+error: MIR shard aggregate failure; link and artifact publication blocked
+```
+
+Both first units fail on LEAF modules that import nothing:
+`src/lib/common/plugin/iface_id.spl` and `src/compiler/00.common/driver_core_modes.spl`
+(`[hir-shard] done ... lowered=0 claimed=1`, terminal `FAILED`). Each of these
+units also prints an impossible re-export chase. Neither file has any `use`,
+and no file in `src/lib/common/plugin/` names `CompileOptions`:
+
+```
+[hir-reexport-chase-unresolved] facade=lib.common.plugin.aspect_params item=CompileOptions importer=src/lib/common/plugin/iface_id.spl
+[hir-reexport-chase-unresolved] facade=compiler.common.driver_core_types item=CompileOptions importer=src/compiler/00.common/driver_core_modes.spl
+```
+
+### B. Minimal repro (3 files, under 1 min)
+
+You need a git checkout because SCV admission requires `git ls-files`. Commit
+these three files locally under `src/app/p3rp/`:
+
+```
+# aa.spl
+pub fn leaf_a() -> i64:
+    2
+# bb.spl
+pub fn leaf_b() -> i64:
+    3
+# main.spl
+use app.p3rp.aa.{leaf_a}
+use app.p3rp.bb.{leaf_b}
+
+fn main():
+    print "{leaf_a() + leaf_b()}"
+```
+
+```
+<stage2> native-build --target aarch64-unknown-linux-gnu --backend cranelift \
+  --runtime-bundle core-c-bootstrap --source src/app --source src/lib --entry-closure \
+  --threads 2 --cache-dir <d> --mode one-binary --runtime-path <stage2-runtime-authority> \
+  --entry src/app/p3rp/main.spl -o <out>
+```
+
+| variant | result |
+|---|---|
+| default (unset) / `SIMPLE_FILE_WORKERS=1` | rc=1, `[ERROR] MIR shard error: MIR physical ownership missing HIR for app.p3rp.main` |
+| `SIMPLE_UNIT_TLDR_IMPORTS=0` | rc=1, same error |
+
+The unit child lowers HIR only for its picked leaf (`lowered=1 claimed=1`).
+Its MIR step then enters the physical-ownership block in
+`src/compiler/80.driver/driver_pipeline_lowering.spl:840-861`. That block
+requires `hir_modules` to contain EVERY module in `source_module_names_owner`
+(the whole frozen inventory). It has no exemption for the module-scoped unit
+lane (`file_worker_module_scoped_selected_v1`), so the gate cannot pass in a
+unit that holds only its batch. This is the same family as
+`stage2_compiler_mcp_entry_native_build_blocked_2026-11-11.md` item 1, where the
+unit holds only its batch and the entry is in no unit's subset. There it fails
+at the cold-HIR receipt gate. Here it fails at the MIR physical-ownership gate.
+
+## Impact
+
+- The Stage 3 default route cannot build bootstrap_main.
+  `.claude/rules/bootstrap.md` already says "Stage 3 run of the per-file lane
+  is not yet proven". This report is the first measured run.
+- Workaround (no code change): run Stage 3 / `resume-stage3-from-admitted.sh`
+  with `SIMPLE_FILE_WORKERS=0`. Both scripts pass the value through and hash it
+  into the args receipt. Verified: with FW=0 the Stage 3 capsule takes the
+  `[capsule-shard] hir shards=N` route and HIR proceeds normally.
+
+## Secondary finding (FW=0, non-capsule coordinator, `--threads >= 2`)
+
+The plain `native-build` coordinator's HIR worker profile
+(`src/app/cli/worker_hir_profile_v1.spl:21-61, 64-91`) rejects:
+- the `--mode` flag: `unsupported HIR worker option: --mode`
+- any environment key outside its literal list, including `SIMPLE_FILE_WORKERS`
+  itself and `RUST_LOG`: `unsupported HIR worker environment key: SIMPLE_FILE_WORKERS`
+
+So `SIMPLE_FILE_WORKERS=0 native-build ... --threads 2` fails for every
+non-capsule build whose host bound allows 2 or more shard threads. The Stage 3
+capsule is not affected. Run 13's `test_runner_build` passed only because its
+shard threads resolved to 1 (in-process). A Phase 4 / phase C tool build at
+`--threads >= 2` hits this.
+
+## Fix direction
+
+1. The per-file unit's MIR step must scope physical ownership to the unit's
+   admitted targets (the module-scoped MIR shard path), not the whole inventory.
+   Then re-prove the default lane on the 3-file repro before relying on it for
+   Stage 3.
+2. Explain the leaf-unit `CompileOptions` chase. A leaf with no imports must not
+   register any re-export chase. Suspect surfaces registered from the wrong
+   module (TLDR surface registration) or a Stage 2 miscompile.
+3. HIR worker profile: admit `--mode <v>`. Decide the environment policy for
+   inherited knobs (`SIMPLE_FILE_WORKERS`, `RUST_LOG`, ...). Either admit them
+   or strip them before the child spawn. Do not let them fail the build.
+
+## 2026-11-13: layer 1 fixed, two further layers found
+
+Fix (branch `work/stage3-per-file-route-fix-20261113`): in a module-scoped
+unit (`worker_hir_loads_restricted_v1()`), both MIR ownership gates
+(physical inventory, and the checked entry-alias projection taken under
+`SIMPLE_BOOTSTRAP=1`) keep an unheld NON-target row as a placeholder
+(`driver_mir_owner_disposition_v1`, like a go-to-end exclusion). An unheld
+target still fails closed; outside a scoped unit nothing changes. The MIR
+ledger schedule names unheld rows by their canonical logical module
+(`driver_mir_schedule_name_v1`) so every unit publishes the same must-match
+inventory, and the only-paths skip now runs before the per-row HIR name read.
+Spec: `test/01_unit/compiler/driver/mir_physical_owners_spec.spl` (seed, red
+14/20 -> green 20/20).
+
+Native evidence: a Stage 2 built from the fix worktree by run 20's pinned
+seed (1638 files, 790 s). 3-file repro, default route: both leaf units now
+run HIR -> MIR -> object (`[mir-shard] done ... claimed=1 passed=1`); the
+"MIR physical ownership missing HIR" error is gone on both `SIMPLE_BOOTSTRAP`
+settings. Run 20's own Stage 2 still shows the original error, because its
+binary predates the fix.
+
+The first IMPORTING unit (`main`) still fails, differently per TLDR setting:
+
+- Layer 2 (default, unit TLDR imports on):
+  `FILE-WORKER-E-CLOSURE-INCOMPLETE: import-closure surface missing for <snapshot>/src/app/p3rp/main.spl`.
+  `SIMPLE_COMPILER_PHASE_PROFILE=1` shows
+  `phase2:surface:missing-direct-edge ... source=<scv snapshot>/src/app/p3rp/main.spl target=<checkout>/app/p3rp/aa.spl`.
+  main's import edges point at surface rows whose canonical path is
+  `<checkout root>/app/p3rp/aa.spl`, which has no `src/` and no SCV snapshot
+  prefix. They do not point at the summary-built surfaces registered under the
+  snapshot path, so `surface_built` is false for both imports.
+- Layer 3 (`SIMPLE_UNIT_TLDR_IMPORTS=0`): the closure loads (`modules=3 of=3`).
+  Phase 3 then fails `HIR completion receipt publication failed`
+  (`driver_hir_pipeline_lowering.spl` ~1496) right after `aa` loads from the
+  cache. Suspect: an unclaimed import that missed the cache is lowered
+  in-process, and the unconditional `hir_shard_finish(path, "PASS")` is then
+  refused because another unit already owns that row.
+
+Also observed: under a 12G cgroup the pool refuses ("need >= 2", 9 GB per
+worker). `file_worker_pool_refusal_v1` does not apply the guarded >= 2 floor
+(`shard_threads_guarded_floor_v1`). The probes needed
+`SIMPLE_{HIR,MIR}_SHARD_WORKER_KB=2000000`.
+
+Review follow-ups (LAND-WITH-NITS, both fail closed today):
+- Entry-closure alias rows (`driver_source_pipeline_loading.spl:1253`, which
+  takes `module_name` from the import spelling) are probably the next
+  blocker. In a unit that does not hold the file, the placeholder
+  `canonical(logical)` differs from the path-derived `HirModule.name` that
+  another unit uses. The result is "conflicting owners" or a ledger
+  row-count refusal. Candidate fix: name the placeholder by the path-derived
+  module name.
+- Placeholders are safe only because the only-paths skip runs, and that skip
+  requires an active MIR shard queue. Tie the disposition to the queue being
+  active.
+
+## 2026-11-18: Layer 2/3 logical identity, owner terminal receipt, and `worker=1` low-memory slice (`C5`)
+
+Status remains **OPEN / verification-pending** (`config/bootstrap.sdn` keeps `stage3_file_workers: 0` until native Stage-3 self-rebuild and overlap gate `G-FILE` pass; no native bootstrap PASS is claimed here).
+
+Source and unit-spec progress on `release/1.0.0` (`312a78d4d15` + Wave D4 / `C5`, tracked in `doc/03_plan/compiler/phase3_first_dynlib_architecture_bootstrap_2026-11-18.md` §9.2):
+
+1. **Prior landed prerequisites (`828de0817c4`, `3d784bec66f`, `d1acc111b99`, `8084b46ebdd`):** bound `unit_tldr` summary row identity in `driver_unit_tldr_imports_v1.spl`, added `hir_shard_row_terminal_due_v1` in the streaming HIR loop (`driver_hir_pipeline_lowering.spl`), and introduced `native_file_worker_serial_low_memory_admitted_v1`.
+2. **Layer 2 repair — canonical logical source identity (`module_surface_source_identity.spl`, `driver_unit_tldr_imports_v1.spl`, `driver_source_parse_streaming.spl`):**
+   - `unit_tldr_module_paths_v1` / `unit_tldr_module_path_for_v1` now index path-derived canonical logical module names (`module_logical_name_from_path`) alongside `source_module_names[i]` and `std.`/`common.` aliases so SCV snapshot paths (`<scv>/src/app/p3rp/aa.spl`), checkout paths (`<checkout>/app/p3rp/aa.spl`), and entry-closure alias spellings map to the same canonical logical module.
+   - `driver_source_parse_streaming.spl` adds logical-module surface readiness fallback alongside `ready_canonical` when SCV snapshot and checkout paths denote the same admitted logical module.
+3. **Layer 3 repair — owner-verified terminal receipt in non-streaming HIR (`driver_hir_pipeline_lowering.spl`, `driver_hir_cache.spl`):**
+   - Extended `hir_shard_owner_terminal_due_v1` + ledger claim-owner verification (`hir_shard_owner_claimed_path_v1` / `hir_shard_current_owner_claimed_v1`) to the non-streaming HIR loop (`driver_hir_pipeline_lowering.spl:2350-2405`) so an unclaimed imported module never publishes or collides with another worker's `hir_shard_finish` terminal receipt.
+4. **Low-memory `worker=1` per-file admission (`native_file_worker_v1.spl`, `bootstrap_main.spl`):**
+   - Added `native_file_worker_single_unit_low_memory_admitted_v1` / `native_file_worker_single_unit_low_memory_admitted_from_env_v1` (`SIMPLE_FILE_WORKER_SINGLE_LOW_MEMORY` / explicit single-worker per-file unit mode, wired into `bootstrap_main.spl`) so memory-bounded `worker=1` builds can run per-file units without requiring `>= 2` workers or falling back to a whole-program HIR/MIR barrier.
+
+Specs: `test/01_unit/compiler/driver/mir_physical_owners_spec.spl`, `test/01_unit/compiler/driver/native_file_worker_v1_spec.spl`, `test/01_unit/compiler/80.driver/per_file_logical_identity_terminal_spec.spl` (`in-progress / unit-verified`).  
+Remaining gate to close `#8504`: rebuild Stage 2/Stage 3 natively with these fixes, pass the 3-file import repro natively under checkout + SCV snapshot (`G-FILE-SERIAL` / `G-FILE-PARALLEL`), verify `scripts/check/check-per-file-overlap-receipt.shs`, and only then remove `stage3_file_workers: 0` (`G-FILE`).
+
+## 2026-11-22: Final Layer 2/AOP/Sibling-Chase/Coordinator Fixes & Per-File Default Cutover
+
+Closed the remaining per-file unit and coordinator gaps and enabled `stage3_file_workers: 1` by default across `config/bootstrap.sdn` and `scripts/bootstrap/**` (`SIMPLE_FILE_WORKERS=0` retained strictly as an explicit caller opt-out):
+
+1. **`--source <root>/src/<pkg>` + nested `src/` + `SIMPLE_SCV_SNAPSHOT_ROOT` root canonicalization (`module_surface_source_identity.spl`, `driver_unit_tldr_imports_v1.spl`, `driver_source_parse_streaming.spl`):**
+   - Stopped `module_surface_admitted_roots_v1` from registering `<repo>/src` or package subdirectories inside `src/`/`examples/`/`test/` (e.g., `/repo/src/app` or relative `src/app`) ahead of `<repo>`, preserving nested `src/` segments (such as `src/app/vscode_extension/src/...`) and checkout `app/` prefixes (`app.p3rp.aa`) 1:1 with SCV snapshot paths. Canonicalized `SIMPLE_SCV_SNAPSHOT_ROOT` via `module_surface_canonical_path` so symlinked snapshot roots (`/tmp/...` vs `/private/tmp/...`) match.
+2. **AOP advice closure under unit TLDR imports + comment-safe multiline `pub use` summaries (`driver_source_parse_streaming.spl`, `tldr_summary_v1.spl`):**
+   - Seeded `unit_tldr_plan_v1` with `mir_targets + mir_advice_paths` so AOP advice modules close their import surfaces in `unit_tldr_on` mode without failing `FILE-WORKER-E-CLOSURE-INCOMPLETE`, and stripped `#` line comments outside string literals before counting `{`/`}` when collecting multiline `use` / `pub use` / `export use` statements in `tldr_summary_entries_v1`.
+3. **Direct target-placeholder detection on package-sibling re-exports (`module_import_resolution.spl`):**
+   - Resolved sibling re-export targets across both dot-qualified `export` routes and braced `pub use` / `export use` import items, skipping implicit sibling re-export chasing if and only if the resolved target surface is an empty worker placeholder (`_hir_surface_is_empty_placeholder_v1`). Built sibling re-exports still resolve for zero-import leaves, `>= 1`-import siblings skip unbuilt placeholders, and genuine broken sibling re-exports on built targets still emit `[E-HIR-UNDECL-IMPORT-001]`.
+4. **Coordinator HIR worker profile & presealed-ledger skip (`worker_hir_profile_v1.spl`, `native_build_main.spl`):**
+   - Admitted `--no-borrow-check` and `--emit-*` switches in `worker_hir_argument_error_v1`, and skipped duplicate parse/HIR/MIR shard pools in `run_native_build_worker_inner` when `SIMPLE_MIR_SHARD_LINK` is already sealed by the per-file worker pool.
+5. **Bootstrap default cutover (`config/bootstrap.sdn`, `scripts/bootstrap/**`):**
+   - Switched `stage3_file_workers` to `1` and updated `phase-c-backend-commands.shs`, `p3-targeted-stage2-build.shs`, `p3-entry-groups.shs` (`${P3G_FILE_WORKERS:-${SIMPLE_FILE_WORKERS:-1}}`), and `produce-bootstrap-planner-admission-v2.shs` (with targeted retry/recovery on prebuilt Stage 2 `llc-no-object` spawn no-ops) to default `SIMPLE_FILE_WORKERS` to `1` while honoring explicit `SIMPLE_FILE_WORKERS=0` opt-out.
+
+## 2026-11-27 P1-1 Host Spec Audit & Regression Parity
+
+- Audited `src/compiler/80.driver/driver_pipeline_lowering.spl`, `src/compiler/80.driver/driver_unit_tldr_imports_v1.spl`, `src/compiler/20.hir/hir_lowering/module_surface_source_identity.spl`, `src/compiler/20.hir/hir_lowering/module_surface_types.spl`, and `src/app/cli/worker_hir_profile_v1.spl` against `origin/release/1.0.0` (`b6d78c690b2`): Layer 1 (physical-ownership gate), Layer 2 (canonical logical source identity across checkout / SCV snapshot / `--source <pkg>` roots), Layer 3 (owner-verified terminal receipt), and `worker_hir_profile_v1` `--mode` / `SIMPLE_FILE_WORKERS` / `RUST_LOG` admission are all present in tree.
+- Added focused Layer 2 surface parity spec `test/01_unit/compiler/driver/per_file_lane_layer2_surface_parity_spec.spl` and ran host interpreter specs sequentially:
+  - `test/01_unit/compiler/driver/per_file_lane_layer2_surface_parity_spec.spl`: `6/6` passed (`0` failed)
+  - `test/01_unit/compiler/driver/mir_physical_owners_spec.spl`: `31/31` passed (`0` failed)
+  - `test/01_unit/compiler/80.driver/per_file_logical_identity_terminal_spec.spl`: `9/9` passed (`0` failed)
+  - `test/01_unit/app/cli/worker_hir_profile_v1_spec.spl`: `46/46` passed (`0` failed)
+  - `test/01_unit/compiler/driver/per_file_bootstrap_default_spec.spl`: `5/6` passed (`1` pre-existing failure on `builds 1:1 summary surfaces for a 4-file closure with cross-file use and facade re-export` due to `.hirkey` `LeafZeroTag` fallback)
+- Status recorded as `fix-implemented-verification-pending` (`waiting-for: native Stage 3 per-file lane build verification`, since native bootstrap/Stage-3 builds do not run in this host interpreter lane).

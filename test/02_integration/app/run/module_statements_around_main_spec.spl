@@ -1,0 +1,58 @@
+"""
+## Purpose and audience
+Regression guard for `simple run` on a file that defines `fn main` AND has
+module-level statements before/after a top-level `main()` call. The JIT entry
+path used to call `main` only and silently drop those statements; the
+interpreter runs them in source order. Both engines must print the same lines.
+Bug: doc/08_tracking/bug/seed_interp_module_var_mut_array_param_write_back_lost_2026-11-04.md
+## Operator workflow
+`bin/simple test test/02_integration/app/run/module_statements_around_main_spec.spl`
+(set `SIMPLE_BINARY` to pick the binary under test). Each example spawns
+`<binary> run <fixture>` with `SIMPLE_EXECUTION_MODE` set to `jit` or `interpret`.
+"""
+# @manual: primary
+# @timeout_secs 300
+
+use std.spec.{step}
+use std.io.{file_write, dir_create_all, file_exists}
+use std.io.{env_get, env_set}
+use std.io_runtime.{getpid, time_now_unix_micros}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+val FIXTURE: text = "print \"MARK-before\"\nfn main():\n    print \"MARK-in-main\"\nmain()\nprint \"MARK-after\"\n"
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY") ?? ""
+    if configured != "" and file_exists(configured):
+        return configured
+    "bin/simple"
+
+fn fixture_path() -> text:
+    val d = "build/test_fixtures/module_stmts_main_{getpid()}_{time_now_unix_micros()}"
+    dir_create_all(d)
+    val p = d + "/around_main.spl"
+    file_write(p, FIXTURE)
+    p
+
+fn run_in_mode(mode: text) -> text:
+    val previous = env_get("SIMPLE_EXECUTION_MODE") ?? ""
+    env_set("SIMPLE_EXECUTION_MODE", mode)
+    val (out, err, code) = process_run_bounded(simple_binary(), ["run", fixture_path()], 240000, 1000000)
+    env_set("SIMPLE_EXECUTION_MODE", previous)
+    out
+
+describe "simple run: module statements around main()":
+    it "jit mode runs statements before and after the main() call":
+        step("Run the fixture under SIMPLE_EXECUTION_MODE=jit")
+        val out = run_in_mode("jit")
+        step("Verify all three markers print, main exactly once")
+        expect(out).to_contain("MARK-before\nMARK-in-main\nMARK-after")
+        expect(out.split("MARK-in-main").len()).to_equal(2)
+
+    it "interpret mode prints the same lines as jit":
+        step("Run the fixture under both engines")
+        val jit_out = run_in_mode("jit")
+        val interp_out = run_in_mode("interpret")
+        step("Verify identical marker sequence")
+        expect(interp_out).to_contain("MARK-before\nMARK-in-main\nMARK-after")
+        expect(jit_out).to_contain("MARK-before\nMARK-in-main\nMARK-after")

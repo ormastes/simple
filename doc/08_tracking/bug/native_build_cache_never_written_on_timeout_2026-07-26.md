@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-26
 - **Lane:** `native-build --cache-dir` (both backends; observed on SimpleOS WM harness kernel builds)
-- **Status:** root-caused (read-only analysis); fix set described below
+- **Status:** fixed — items 1-3 implemented same-day (2026-07-26) and still present in current source (incremental cache checkpoint every 32 capsules + `phase.marker`; verified 2026-11-25, see end of file)
 
 ## Symptom
 SimpleOS WM harness runs 5-7 each burned 2h+ compiling the kernel closure and timed
@@ -70,3 +70,32 @@ seed invocation its own cache scope — seed-lane reruns can never warm regardle
 of the fixes above. The deployed-binary lane hashes `argv[0]` and should scope
 stably; if a harness cache stays cold after redeploy, check this identity path
 first.
+
+## Verification 2026-11-25 (p2w3-ae lane, release/1.0.0 worktree)
+
+The all-or-nothing cache defect this record describes is fixed in current
+source (the driver file has since been reworked into the capsule architecture,
+so the original function names no longer appear, but the fix's substance is
+present and stronger):
+
+- **Incremental index persistence** (fix 1): the Phase-2 collect loop
+  checkpoints the cache every 32 completed capsules —
+  `driver_aot_native_output.spl:1702-1703`
+  (`persist_now = (_g_capsule_batch_collect_seq % 32) == 0` →
+  `_driver_native_collect_capsule_persist_v1(...)`), with the owner-only
+  authenticated checkpoint at :1583-1586 and the final `build_cache.save()` at
+  :3507. A kill mid-codegen now leaves a valid, populated index; the comment at
+  :3323 states the 32-module bound exists exactly to bound crash-recovery loss.
+- **Early on-disk phase marker** (fix 2): `phase.marker` is written at
+  cache-scope creation, `driver_aot_native_output.spl:2689`.
+- Fix 3 (SIGTERM grace) was corrected by the original author in the 2026-07-26
+  fix-status note: the kill was already two-stage; incremental persistence is
+  the effective fix.
+
+A live native-build timeout/warm-rerun experiment was not possible in this
+lane (Windows host, pinned seed binary rejects the `@representation_boundary`
+decorator added tree-wide by cfd89933699, and no stage4 redeploy is in scope).
+Verification is by code inspection of the checkpoint/marker paths cited above.
+
+**Verdict: STALE-CLOSED.** The "rerun after timeout is always cold" behavior
+is no longer predicted by the code.

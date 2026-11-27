@@ -6,13 +6,16 @@
 # thread-safety issues with global compiler state.
 
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
+use std.io_runtime.{time_now_monotonic_ms}
+use std.nogc_sync_mut.io.process_ops.{process_wait, process_kill_tree, process_is_running}
 use compiler.driver.driver_build.build_outcome.{
     BuildOutcomeKind, BuildUnitOutcome, BuildOutcomeSet,
-    build_outcome_kind_label}
+    build_outcome_kind_label, build_outcome_capture_worker_stderr_v1,
+    build_outcome_unit_attribution_v1}
 
 @unsafe(reason: "native CPU-count ABI", capabilities: [ffi])
 extern fn spl_thread_cpu_count() -> i64
-extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_spawn_async_value(cmd: text, args: [text]) -> i64
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 extern fn rt_process_is_running(pid: i64) -> bool
 extern fn rt_process_kill(pid: i64) -> bool
@@ -20,6 +23,7 @@ extern fn rt_process_kill(pid: i64) -> bool
 extern fn rt_thread_sleep(millis: i64)
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_time_now_monotonic_ms() -> i64
+extern fn rt_process_last_child_peak_rss_kib() -> i64
 
 # ============================================================================
 # Unstable ("separate process") mode
@@ -81,6 +85,15 @@ fn parallel_supervised_cmd() -> text:
 # Configuration
 # ============================================================================
 
+# Per-unit wall budget predicate shared by build_parallel's wait: a child
+# started at `started_ms` has expired at `now_ms` once a POSITIVE budget has
+# elapsed; 0 (or less) keeps the documented "0 disables the budget" meaning.
+pub fn parallel_unit_budget_expired_v1(started_ms: i64, now_ms: i64, budget_ms: i64) -> bool:
+    budget_ms > 0 and now_ms - started_ms >= budget_ms
+
+# Exit code build_parallel's wait returns for a child it killed at the budget.
+pub const PARALLEL_UNIT_TIMEOUT_CODE_V1: i64 = -2
+
 struct ParallelBuildConfig:
     num_threads: i64            # 0 = use all available CPUs
     parallel_threshold: i64     # Min modules to enable parallelism
@@ -128,14 +141,12 @@ impl ParallelBuildConfig:
 
     @unsafe(reason: "calls native CPU-count ABI", capabilities: [ffi])
     fn effective_threads() -> i64:
-        """Resolve num_threads: 0 means auto-detect from CPU count, capped at 8."""
+        """Resolve num_threads: 0 means auto-detect from CPU count."""
         if self.num_threads > 0:
             return self.num_threads
         val cpus = spl_thread_cpu_count()
         if cpus < 1:
             return 4
-        if cpus > 8:
-            return 8
         cpus
 
 # ============================================================================
@@ -174,7 +185,7 @@ impl BuildGraph:
         self.next_id = self.next_id + 1
         val build_unit = BuildUnit(id: id, path: path, dependencies: dependencies,
                              dependents: [], status: BuildUnitStatus.Pending,
-                             output: nil)
+                             output: None)
         self.units[id] = build_unit
 
         # Update dependents
@@ -301,18 +312,7 @@ impl BuildGraph:
                 # arm is taken (only when the condition is an `if val` binding).
                 # The loop guard above already ensures the stack is non-empty, so
                 # unwrap directly.
-                # Read the top by INDEX and truncate; do not pop-and-unwrap.
-                # `rt_array_pop` returns the element RAW (never a `Some` enum,
-                # runtime/src/value/collections.rs:1752), while `.unwrap()` lowers to
-                # `rt_enum_payload`, which answers nil for anything that is not an Enum
-                # heap object (objects.rs:519). Measured in the LLVM lane that compiles
-                # Stage 2: `val (n, f) = a.pop().unwrap()` on `[(i64, bool)]` yields nil
-                # for BOTH fields, so nothing is ever marked visited and the DFS
-                # re-expands forever (site 10). See
-                # stage2_unwrap_on_array_pop_yields_nil_2026-09-13.md.
-                val top_index = stack.len() - 1
-                val (node, expanded) = stack[top_index]
-                stack = stack[:top_index]
+                val (node, expanded) = stack.pop().unwrap()
                 if expanded:
                     order = order.push(node)
                     continue
@@ -364,7 +364,9 @@ class ParallelBuilder:
     stats: BuildStats
     # Owner-thread completion hook. Compile callbacks never receive shared
     # cache authority; the orchestrator invokes this after each successful unit.
-    owner_collect_fn: Option<fn(text, text) -> text>
+    # stage2 workaround: Option<fn> unwrap + _N placeholder closure miscompile (sweep 2026-11-04)
+    owner_collect_fn: fn(text, text) -> text
+    has_owner_collect: bool
     # Process-spawn dispatcher for build()'s "parallel" branch. nil (the
     # default) preserves today's exact in-process, one-at-a-time behaviour --
     # every existing caller of build(compile_fn) that never calls
@@ -373,21 +375,32 @@ class ParallelBuilder:
     # collect_fn) instead of the serial `while chunk_idx < chunk_end:
     # compile_fn(...)` loop, so units genuinely run in concurrent OS
     # processes. See doc/08_tracking/bug/native_build_step5_serial_threads_ignored_2026-09-04.md.
-    spawn_dispatch_fn: Option<fn(text) -> i64>
-    spawn_collect_fn: Option<fn(i64, text) -> Result<text, text>>
+    # stage2 workaround: Option<fn> unwrap + _N placeholder closure miscompile (sweep 2026-11-04)
+    spawn_dispatch_fn: fn(text) -> i64
+    has_spawn_dispatch: bool
+    spawn_collect_fn: fn(i64, text) -> Result<text, text>
 
-# @workaround bug=native_optional_fn_payload_binding_arity_mir_2026_10_20 recover=35123ed70c0 reason=declared_fn_parameter_gives_the_indirect_call_its_proven_signature
-fn _parallel_owner_collect_call(collect: fn(text, text) -> text, path: text, output: text) -> text:
-    collect(path, output)
+# stage2 workaround: Option<fn> unwrap + _N placeholder closure miscompile (sweep 2026-11-04)
+fn _parallel_owner_collect_none(path: text, output: text) -> text:
+    ""
+
+fn _parallel_spawn_dispatch_none(path: text) -> i64:
+    -1
+
+fn _parallel_spawn_collect_none(exit_code: i64, path: text) -> Result<text, text>:
+    Ok("")
 
 impl ParallelBuilder:
     static fn create(config: ParallelBuildConfig) -> ParallelBuilder:
         ParallelBuilder(config: config, graph: BuildGraph.empty(),
-                        stats: BuildStats.empty(), owner_collect_fn: nil,
-                        spawn_dispatch_fn: nil, spawn_collect_fn: nil)
+                        stats: BuildStats.empty(), owner_collect_fn: _parallel_owner_collect_none, has_owner_collect: false,
+                        spawn_dispatch_fn: _parallel_spawn_dispatch_none, has_spawn_dispatch: false,
+                        spawn_collect_fn: _parallel_spawn_collect_none)
 
     me set_owner_collect(collect_fn: fn(text, text) -> text):
-        self.owner_collect_fn = Some(collect_fn)
+        # stage2 workaround: Option<fn> unwrap + _N placeholder closure miscompile (sweep 2026-11-04)
+        self.owner_collect_fn = collect_fn
+        self.has_owner_collect = true
 
     # Configure real process-based dispatch for the "parallel" branch of
     # build(). spawn_fn/collect_fn have exactly build_parallel()'s own
@@ -396,13 +409,21 @@ impl ParallelBuilder:
     # below-threshold builds are NOT affected -- they keep the sequential
     # path unconditionally, per build()'s own gating.
     me set_spawn_dispatch(spawn_fn: fn(text) -> i64, collect_fn: fn(i64, text) -> Result<text, text>):
-        self.spawn_dispatch_fn = Some(spawn_fn)
-        self.spawn_collect_fn = Some(collect_fn)
+        # stage2 workaround: Option<fn> unwrap + _N placeholder closure miscompile (sweep 2026-11-04)
+        self.spawn_dispatch_fn = spawn_fn
+        self.has_spawn_dispatch = true
+        self.spawn_collect_fn = collect_fn
 
-    fn wait_for_finished_process(live_pid: [i64]) -> (i64, i64):
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in wait_for_finished_process", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+    fn wait_for_finished_process(live_pid: [i64], live_start: [i64], budget_ms: i64) -> (i64, i64):
         """Wait for any in-flight process to finish using bounded polling.
 
-        Returns: (pid, exit_code), or (-1, -1) if no process is in flight.
+        Returns: (pid, exit_code), or (-1, -1) if no process is in flight, or
+        (pid, PARALLEL_UNIT_TIMEOUT_CODE_V1) for a child that outlived
+        `budget_ms` (index-aligned `live_start`; 0 = no budget) and was killed
+        here. Until 2026-11-13 this loop was `while true` with no deadline:
+        ParallelBuildConfig.unit_timeout_ms was honoured by build_supervised
+        only, so one hung child parked the whole process-parallel build.
 
         `live_pid` is a plain `[i64]` ARRAY, not a pid-keyed Dict. This is not
         a style choice: measured 2026-09-14 running this function for the
@@ -421,16 +442,37 @@ impl ParallelBuilder:
         var poll_iteration = 0
         while true:
             for pid in live_pid:
-                if not rt_process_is_running(pid):
-                    val exit_code = rt_process_wait(pid, 1)
-                    if exit_code != -2:
-                        return (pid, exit_code)
+                # Wait directly without pre-probing rt_process_is_running: on
+                # hosted C runtime waitpid(WNOHANG) reaps and discards status.
+                var exit_code = rt_process_wait(pid, 1)
+                if exit_code > 2147483647:
+                    exit_code = exit_code - 4294967296
+                if exit_code != -2:
+                    return (pid, exit_code)
+            var at = 0
+            while at < live_pid.len() and at < live_start.len():
+                if parallel_unit_budget_expired_v1(live_start[at], time_now_monotonic_ms(), budget_ms):
+                    val pid = live_pid[at]
+                    # Kill the whole tree (a compile unit may have shelled out),
+                    # then CHECK the reap: sign-restore the re-wait (an i32
+                    # crosses the wrapper zero-extended) and probe liveness.
+                    val killed = process_kill_tree(pid)
+                    var reaped = process_wait(pid, 5000)
+                    if reaped > 2147483647:
+                        reaped = reaped - 4294967296
+                    val stopped = reaped != -2 and not process_is_running(pid)
+                    if not stopped:
+                        eprint "[PARALLEL] pid={pid} killed at unit_timeout_ms={budget_ms} but NOT confirmed stopped (kill={killed} rewait={reaped}); its outputs are untrusted"
+                    return (pid, PARALLEL_UNIT_TIMEOUT_CODE_V1)
+                at = at + 1
 
-            var sleep_ms = 10
-            if poll_iteration >= 50:
-                sleep_ms = 100
-            elif poll_iteration >= 10:
-                sleep_ms = 25
+            var sleep_ms = 5
+            if poll_iteration >= 60:
+                sleep_ms = 50
+            elif poll_iteration >= 20:
+                sleep_ms = 15
+            elif poll_iteration >= 6:
+                sleep_ms = 10
 
             unsafe(capabilities: [ffi]):
                 rt_thread_sleep(sleep_ms)
@@ -438,6 +480,62 @@ impl ParallelBuilder:
 
     me add_unit(path: text, dependencies: [i64]) -> i64:
         self.graph.add_unit(path, dependencies)
+
+    # Shared result accounting and diagnostic capture between `--threads 1`
+    # in-process compilation and batch compilation so both paths emit
+    # identical module attribution and capture failure details in `diagnostics/`.
+    me _record_compile_outcome(build_unit: BuildUnit, result: Result<text, text>,
+                               errors: [(text, text)], outputs: [text]) -> ([(text, text)], [text]):
+        var next_errors = errors
+        var next_outputs = outputs
+        match result:
+            case Ok(output):
+                var collect_error: text = ""
+                # stage2 workaround: Option<fn> unwrap + _N placeholder closure miscompile (sweep 2026-11-04)
+                if self.has_owner_collect:
+                    # Bind the closure-valued field to a local before
+                    # calling it. Invoking the field directly on the
+                    # receiver is resolved as a METHOD call on
+                    # ParallelBuilder and fails the multi-module native
+                    # build on both backends with "method
+                    # `owner_collect_fn` not found on class
+                    # `ParallelBuilder`". See
+                    # doc/08_tracking/bug/native_build_closure_field_call_resolved_as_method_2026-08-17.md
+                    val owner_collect = self.owner_collect_fn
+                    collect_error = owner_collect(build_unit.path, output)
+                if collect_error != "":
+                    val diag_path = build_outcome_capture_worker_stderr_v1(
+                        build_unit.path, build_unit.id, 1, false, collect_error, "")
+                    eprint(build_outcome_unit_attribution_v1(
+                        build_unit.id, build_unit.path, 1, false, diag_path, collect_error))
+                    self.graph.mark_failed(build_unit.id, collect_error)
+                    next_errors = next_errors.push((build_unit.path, collect_error))
+                    self.stats = BuildStats(total_units: self.stats.total_units,
+                        completed: self.stats.completed,
+                        failed: self.stats.failed + 1,
+                        skipped: self.stats.skipped,
+                        parallel_batches: self.stats.parallel_batches)
+                else:
+                    self.graph.mark_completed(build_unit.id, Some(output))
+                    next_outputs = next_outputs.push(output)
+                    self.stats = BuildStats(total_units: self.stats.total_units,
+                        completed: self.stats.completed + 1,
+                        failed: self.stats.failed,
+                        skipped: self.stats.skipped,
+                        parallel_batches: self.stats.parallel_batches)
+            case Err(msg):
+                val diag_path = build_outcome_capture_worker_stderr_v1(
+                    build_unit.path, build_unit.id, 1, false, msg, "")
+                eprint(build_outcome_unit_attribution_v1(
+                    build_unit.id, build_unit.path, 1, false, diag_path, msg))
+                self.graph.mark_failed(build_unit.id, msg)
+                next_errors = next_errors.push((build_unit.path, msg))
+                self.stats = BuildStats(total_units: self.stats.total_units,
+                    completed: self.stats.completed,
+                    failed: self.stats.failed + 1,
+                    skipped: self.stats.skipped,
+                    parallel_batches: self.stats.parallel_batches)
+        (next_errors, next_outputs)
 
     me build(compile_fn: fn(text) -> Result<text, text>) -> BuildResult:
         """Execute the build using the provided compile function.
@@ -492,44 +590,9 @@ impl ParallelBuilder:
 
                 self.graph.mark_in_progress(id)
                 val result = compile_fn(build_unit.path)
-                match result:
-                    case Ok(output):
-                        var collect_error: text = ""
-                        if val owner_collect = self.owner_collect_fn:
-                            # Bind the closure-valued field to a local before
-                            # calling it. Invoking the field directly on the
-                            # receiver is resolved as a METHOD call on
-                            # ParallelBuilder and fails the multi-module native
-                            # build on both backends with "method
-                            # `owner_collect_fn` not found on class
-                            # `ParallelBuilder`". See
-                            # doc/08_tracking/bug/native_build_closure_field_call_resolved_as_method_2026-08-17.md
-                            # @workaround bug=native_optional_fn_payload_binding_arity_mir_2026_10_20 recover=35123ed70c0 reason=if_val_bound_option_fn_payload_loses_function_type_so_indirect_call_has_no_arity
-                            collect_error = _parallel_owner_collect_call(owner_collect, build_unit.path, output)
-                        if collect_error != "":
-                            self.graph.mark_failed(id, collect_error)
-                            errors = errors.push((build_unit.path, collect_error))
-                            self.stats = BuildStats(total_units: self.stats.total_units,
-                                completed: self.stats.completed,
-                                failed: self.stats.failed + 1,
-                                skipped: self.stats.skipped,
-                                parallel_batches: self.stats.parallel_batches)
-                        else:
-                            self.graph.mark_completed(id, Some(output))
-                            outputs = outputs.push(output)
-                            self.stats = BuildStats(total_units: self.stats.total_units,
-                                completed: self.stats.completed + 1,
-                                failed: self.stats.failed,
-                                skipped: self.stats.skipped,
-                                parallel_batches: self.stats.parallel_batches)
-                    case Err(msg):
-                        self.graph.mark_failed(id, msg)
-                        errors = errors.push((build_unit.path, msg))
-                        self.stats = BuildStats(total_units: self.stats.total_units,
-                            completed: self.stats.completed,
-                            failed: self.stats.failed + 1,
-                            skipped: self.stats.skipped,
-                            parallel_batches: self.stats.parallel_batches)
+                val (next_errors, next_outputs) = self._record_compile_outcome(build_unit, result, errors, outputs)
+                errors = next_errors
+                outputs = next_outputs
         else:
             # Real dispatch: when the caller has configured a process spawn
             # dispatcher (set_spawn_dispatch), route straight through
@@ -540,9 +603,9 @@ impl ParallelBuilder:
             # capsules, which cannot cross a process boundary -- see the
             # comment in build() above) falls through to the exact same
             # serial loop as before.
-            if val dispatch_spawn = self.spawn_dispatch_fn:
-                if val dispatch_collect = self.spawn_collect_fn:
-                    return self.build_parallel(dispatch_spawn, dispatch_collect)
+            # stage2 workaround: Option<fn> unwrap + _N placeholder closure miscompile (sweep 2026-11-04)
+            if self.has_spawn_dispatch:
+                return self.build_parallel(self.spawn_dispatch_fn, self.spawn_collect_fn)
 
             # "Batch-concurrent" here means the ready set is CHUNKED by
             # max_workers -- it does NOT mean the chunk runs concurrently. The
@@ -593,38 +656,9 @@ impl ParallelBuilder:
                     while chunk_idx < chunk_end:
                         val build_unit = ready[chunk_idx]
                         val result = compile_fn(build_unit.path)
-                        match result:
-                            case Ok(output):
-                                var collect_error: text = ""
-                                if val owner_collect = self.owner_collect_fn:
-                                    # Same closure-field-call defect as above;
-                                    # bind to a local before invoking.
-                                    # @workaround bug=native_optional_fn_payload_binding_arity_mir_2026_10_20 recover=35123ed70c0 reason=if_val_bound_option_fn_payload_loses_function_type_so_indirect_call_has_no_arity
-                                    collect_error = _parallel_owner_collect_call(owner_collect, build_unit.path, output)
-                                if collect_error != "":
-                                    self.graph.mark_failed(build_unit.id, collect_error)
-                                    errors = errors.push((build_unit.path, collect_error))
-                                    self.stats = BuildStats(total_units: self.stats.total_units,
-                                        completed: self.stats.completed,
-                                        failed: self.stats.failed + 1,
-                                        skipped: self.stats.skipped,
-                                        parallel_batches: self.stats.parallel_batches)
-                                else:
-                                    self.graph.mark_completed(build_unit.id, Some(output))
-                                    outputs = outputs.push(output)
-                                    self.stats = BuildStats(total_units: self.stats.total_units,
-                                        completed: self.stats.completed + 1,
-                                        failed: self.stats.failed,
-                                        skipped: self.stats.skipped,
-                                        parallel_batches: self.stats.parallel_batches)
-                            case Err(msg):
-                                self.graph.mark_failed(build_unit.id, msg)
-                                errors = errors.push((build_unit.path, msg))
-                                self.stats = BuildStats(total_units: self.stats.total_units,
-                                    completed: self.stats.completed,
-                                    failed: self.stats.failed + 1,
-                                    skipped: self.stats.skipped,
-                                    parallel_batches: self.stats.parallel_batches)
+                        val (next_errors, next_outputs) = self._record_compile_outcome(build_unit, result, errors, outputs)
+                        errors = next_errors
+                        outputs = next_outputs
                         chunk_idx = chunk_idx + 1
 
                     batch_idx = chunk_end
@@ -671,6 +705,8 @@ impl ParallelBuilder:
         var live_pid: [i64] = []
         var live_unit: [i64] = []
         var live_path: [text] = []
+        var live_start: [i64] = []
+        val budget = self.config.unit_timeout_ms
 
         while not self.graph.is_complete():
             # Fill worker slots with ready units
@@ -711,6 +747,7 @@ impl ParallelBuilder:
                 live_pid = live_pid.push(pid)
                 live_unit = live_unit.push(build_unit.id)
                 live_path = live_path.push(build_unit.path)
+                live_start = live_start.push(time_now_monotonic_ms())
                 if self.config.verbose:
                     print "[PARALLEL] spawned pid={pid} for {build_unit.path}"
 
@@ -736,7 +773,7 @@ impl ParallelBuilder:
                 break
 
             # Wait for one process to finish before recomputing ready work.
-            val (finished_pid, finished_exit_code) = self.wait_for_finished_process(live_pid)
+            val (finished_pid, finished_exit_code) = self.wait_for_finished_process(live_pid, live_start, budget)
             if finished_pid < 0:
                 break
 
@@ -756,18 +793,28 @@ impl ParallelBuilder:
             var next_pid: [i64] = []
             var next_unit: [i64] = []
             var next_path: [text] = []
+            var next_start: [i64] = []
             var keep_idx = 0
             while keep_idx < live_pid.len():
                 if keep_idx != found_idx:
                     next_pid = next_pid.push(live_pid[keep_idx])
                     next_unit = next_unit.push(live_unit[keep_idx])
                     next_path = next_path.push(live_path[keep_idx])
+                    next_start = next_start.push(live_start[keep_idx])
                 keep_idx = keep_idx + 1
             live_pid = next_pid
             live_unit = next_unit
             live_path = next_path
+            live_start = next_start
 
-            val result = collect_fn(finished_exit_code, unit_path)
+            # A killed-at-budget child never reaches collect_fn (that callback
+            # interprets EXIT codes); the unit is recorded as a timeout error
+            # explicitly, never silently absent (R3).
+            var result: Result<text, text> = Err("unit timeout: exceeded unit_timeout_ms={budget}; killed")
+            if finished_exit_code == PARALLEL_UNIT_TIMEOUT_CODE_V1:
+                eprint "[PARALLEL] unit {unit_path} pid={finished_pid} exceeded unit_timeout_ms={budget}; killed"
+            else:
+                result = collect_fn(finished_exit_code, unit_path)
             match result:
                 case Ok(output):
                     self.graph.mark_completed(unit_id, Some(output))
@@ -813,6 +860,7 @@ impl ParallelBuilder:
     # Unstable mode: one child process per unit, supervised
     # ========================================================================
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in build_supervised", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     me build_supervised(spawn_fn: fn(text) -> i64, artifact_fn: fn(text) -> text) -> BuildOutcomeSet:
         """Compile every unit in its OWN CHILD PROCESS and classify each fate.
 
@@ -885,7 +933,7 @@ impl ParallelBuilder:
                 live_pid = live_pid.push(pid)
                 live_unit = live_unit.push(id)
                 live_path = live_path.push(unit_path)
-                live_start = live_start.push(rt_time_now_monotonic_ms())
+                live_start = live_start.push(time_now_monotonic_ms())
                 if self.config.verbose:
                     print "[SUPERVISED] spawned pid={pid} for {unit_path}"
 
@@ -937,6 +985,12 @@ impl ParallelBuilder:
 
                 reaped = reaped + 1
                 val wall_ms = rt_time_now_monotonic_ms() - started
+                # R5: the runtime records the reaped child's own peak RSS (wait4
+                # ru_maxrss / PeakWorkingSetSize) inside the rt_process_wait that
+                # returned `status`; read it before any other wait. A budget kill
+                # reaps inside rt_process_kill, which measures nothing: 0.
+                val measured_kib = if timed_out: -1 else: rt_process_last_child_peak_rss_kib()
+                val peak_kb = if measured_kib > 0: measured_kib else: 0
 
                 if status == 0 and not timed_out:
                     # OK requires exit 0 AND the declared artifact on disk. A
@@ -945,19 +999,23 @@ impl ParallelBuilder:
                     val declared = artifact_fn(unit_path)
                     if declared != "" and not rt_file_exists(declared):
                         outcomes.record(BuildUnitOutcome.from_status(
-                            unit_id, unit_path, 1, false, wall_ms, 0,
+                            unit_id, unit_path, 1, false, wall_ms, peak_kb,
                             "exit 0 but declared artifact is missing: {declared}"))
                         self.graph.mark_failed(unit_id, "declared artifact missing")
                     else:
-                        outcomes.record(BuildUnitOutcome.ok(unit_id, unit_path, wall_ms, 0))
+                        outcomes.record(BuildUnitOutcome.ok(unit_id, unit_path, wall_ms, peak_kb))
                         self.graph.mark_completed(unit_id, Some(declared))
                 else:
+                    val diag_path = build_outcome_capture_worker_stderr_v1(
+                        unit_path, unit_id, status, timed_out, "", "")
                     val record = BuildUnitOutcome.from_status(
-                        unit_id, unit_path, status, timed_out, wall_ms, 0, "")
+                        unit_id, unit_path, status, timed_out, wall_ms, peak_kb, "")
                     outcomes.record(record)
                     # The graph tracks "did not produce an artifact"; the OUTCOME
                     # set is what preserves the failed / unverified distinction.
                     self.graph.mark_failed(unit_id, build_outcome_kind_label(record.kind))
+                    eprint(build_outcome_unit_attribution_v1(
+                        unit_id, unit_path, status, timed_out, diag_path, record.attribution_line()))
                     if self.config.verbose:
                         print record.attribution_line()
 

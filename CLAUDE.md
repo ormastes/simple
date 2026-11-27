@@ -52,14 +52,14 @@ Ubuntu riscv64 cloud image (OpenSBI -> U-Boot, 20 vCPU TCG, SSH port `2223`);
 - **Never use GCC.** Toolchain is clang + lld (mold where the target format supports it: ELF on Linux/FreeBSD/SimpleOS hosts; lld for Windows PE/COFF — mold has no COFF/PE support; Mach-O uses ld64.lld/system ld). Windows default = GitHub llvm-mingw UCRT (mstorsjo/llvm-mingw under `~/.simple/toolchains/llvm-mingw-*-ucrt-x86_64`, installed by `scripts/setup/bootstrap-prereqs.shs install`); MSVC (clang-cl) is the optional `--msvc` lane. If Rust windows-gnu wants `-lgcc`/`-lgcc_eh`, serve them from compiler-rt/libunwind (shim dir or `x86_64-pc-windows-gnullvm`) — never install GCC.
 - **jj** for VCS — commit: `jj commit -m "msg"` (git fallback: `git commit` when jj is absent)
 - **Land via PR, never direct push** — `main` is ruleset-protected (since 2026-09-05: PR required, 2 required checks; since 2026-09-28 the owner may force-land a reviewed PR with `gh pr merge <n> --admin --merge` — PR-only bypass, direct push still rejected). Push to a short-lived `work/<topic>` branch, `gh pr create`, `gh pr merge --merge`, delete the branch. Topic branches exist ONLY to carry a PR — no long-lived feature branches. Canonical policy is `.spipe/policy/vcs.sdn` (`branch_pattern: work/*`, `unique_workspace: required`, `main_worktree: read_only`); see `.claude/rules/vcs.md`
-- **ALL code in `.spl`/`.shs`** — no Python/Bash (except 3 bootstrap scripts)
+- **ALL code in `.spl`/`.shs`** — no Python/Bash (except the sanctioned bootstrap `.sh` scripts listed in `.claude/rules/bootstrap.md` and pre-p2 bootstrap trust gates, which keep a Simple twin for p3+)
 - **NO inheritance** — use composition, traits, mixins. **Generics:** `<>` not `[]`
 - **NEVER skip** failing tests without approval. **NEVER convert TODO to NOTE** — implement or delete
 - When a short, safe grammar or compact expression form fails, compiles too slowly, or forces a workaround, fix it or record a concrete bug/feature request instead of silently normalizing the workaround
 - When you hit a meaningful perf regression during implementation or verification, either fix it in the same change or record it as a concrete bug/todo before moving on
 - **NEVER over-engineer.** **DO NOT ADD REPORT TO GIT** unless requested
 - **Default tooling = pure-Simple self-hosted binary, not the Rust seed.** `test`/`lint`/`fmt`/`build`/`run`/MCP/LSP all run on `bin/release/<triple>/simple` (built via bootstrap). Seed is bootstrap-only. If the self-hosted binary is slow/unstable, fix it in pure-Simple and re-deploy or file a bug — don't fall back to the seed. See `.claude/rules/bootstrap.md`
-- **MDSOC+ by default** — use MDSOC outer + ECS business layer for userland services/apps; kernel/drivers stay MDSOC-only. See `doc/04_architecture/compiler/mdsoc_architecture_tobe.md` (MDSOC+ section)
+- **MDSOC+ by default** — use MDSOC outer + ECS business layer for userland services/apps; kernel/drivers stay MDSOC-only. See `doc/04_architecture/compiler/mdsoc_architecture_tobe.md` (MDSOC+ section). Concurrency is **lockless by default** (immutable/CAS/message passing; locks only by documented exception): `doc/04_architecture/language/concurrency/concurrency_architecture.md`
 
 ## No external SQLite — use Simple's embedded SQL
 

@@ -1,0 +1,118 @@
+# @req HOST-SERVICE-ENROLLMENT-01 HOST-SERVICE-BROKER-PARTITION-01 HOST-SERVICE-ENGINE-PIN-01
+# NOT_RUN. Actual Ed25519 checks; no native observation or ready capability claim.
+use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.*
+use test.fixtures.orchestration.host_enrollment_native_probe.*
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.verification_seed
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.distributed_approval_signature_message_v2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+fn service_binding_fixture_v2() -> HostServiceEnrollmentBindingV2:
+    HostServiceEnrollmentBindingV2(physical_host_id: "worker_1", service_scope_id: "service_1",
+        config_digest: "b".repeat(64), policy_digest: "c".repeat(64), policy_revision: 4,
+        native_machine_id: "windows-machine-guid-v1:12345678-1234-1234-1234-123456789abc", provider_identity_digest: "a".repeat(64), engine_policy_digest: sha256_text("raw installed engine policy bytes"),
+        machine_parent: "/var/lib/simple/hosts", backend: "windows-docker-process",
+        broker_policy_digest: "d".repeat(64), physical_cpu_millis: 2000, physical_memory_bytes: 512,
+        reserved_cpu_millis: 100, reserved_memory_bytes: 128)
+
+fn service_signed_fixture_v2(binding: HostServiceEnrollmentBindingV2) -> HostEnrollmentFixtureV1:
+    var fixture = host_enrollment_fixture_v1()
+    fixture.credential.operation.payload_digest = host_service_enrollment_payload_digest_v2(binding).unwrap()
+    fixture.credential.approval.request_digest = sha256_text(distributed_encode_operation_v2(fixture.credential.operation).unwrap())
+    fixture.credential.approval.signature = pure_ed25519_sign_from_seed_v1(verification_seed(65),
+        distributed_approval_signature_message_v2(fixture.credential.approval).unwrap()).signature
+    fixture
+
+describe "Signed static service enrollment and one broker partition":
+    it "verifies real signatures and derives allocatable capacity by exact subtraction":
+        step("verifies real signatures and derives allocatable capacity by exact subtraction")
+        val binding = service_binding_fixture_v2()
+        val fixture = service_signed_fixture_v2(binding)
+        val grant = host_service_enrollment_authorize_v2(binding, fixture.credential, fixture.policy, fixture.context).unwrap()
+        expect(grant.id).to_equal("grant_1")
+        val capacity = host_service_allocatable_v2(binding).unwrap()
+        expect(capacity.cpu_millis).to_equal(1900)
+        expect(capacity.memory_bytes).to_equal(384)
+        val bytes = host_service_enrollment_payload_bytes_v2(binding).unwrap()
+        expect(host_service_enrollment_payload_bytes_v2(host_service_enrollment_payload_decode_v2(bytes).unwrap()).unwrap()).to_equal(bytes)
+        assert(not bytes.contains("nativeBootId"))
+        assert(not bytes.contains("continuityId"))
+
+    it "rejects changing the engine pin, broker partition or broker policy after signing":
+        step("rejects changing the engine pin, broker partition or broker policy after signing")
+        val binding = service_binding_fixture_v2()
+        val fixture = service_signed_fixture_v2(binding)
+        var changed = binding
+        changed.engine_policy_digest = "e".repeat(64)
+        expect(host_service_enrollment_authorize_v2(changed, fixture.credential, fixture.policy, fixture.context).unwrap_err()).to_equal("host-service-enrollment-signed-binding-mismatch")
+        changed = binding
+        changed.reserved_cpu_millis = 101
+        expect(host_service_enrollment_authorize_v2(changed, fixture.credential, fixture.policy, fixture.context).unwrap_err()).to_equal("host-service-enrollment-signed-binding-mismatch")
+        changed = binding
+        changed.reserved_memory_bytes = 129
+        assert(host_service_enrollment_authorize_v2(changed, fixture.credential, fixture.policy, fixture.context).is_err())
+        changed = binding
+        changed.broker_policy_digest = "e".repeat(64)
+        assert(host_service_enrollment_authorize_v2(changed, fixture.credential, fixture.policy, fixture.context).is_err())
+
+    it "refuses zero negative exhausted and overflow-shaped partitions before subtraction":
+        step("refuses zero negative exhausted and overflow-shaped partitions before subtraction")
+        for cpu in [0, -1, 2000, 9223372036854775807]:
+            var changed = service_binding_fixture_v2()
+            changed.reserved_cpu_millis = cpu
+            expect(host_service_allocatable_v2(changed).unwrap_err()).to_equal("host-service-broker-partition-invalid")
+        for memory in [0, -1, 512, 9223372036854775807]:
+            var changed = service_binding_fixture_v2()
+            changed.reserved_memory_bytes = memory
+            assert(host_service_allocatable_v2(changed).is_err())
+
+    it "refuses actual signature corruption expiry and policy revision drift":
+        step("refuses actual signature corruption expiry and policy revision drift")
+        val binding = service_binding_fixture_v2()
+        var fixture = service_signed_fixture_v2(binding)
+        fixture.credential.approval.signature[0] = ((fixture.credential.approval.signature[0] as i64 + 1) % 256) as u8
+        expect(host_service_enrollment_authorize_v2(binding, fixture.credential, fixture.policy, fixture.context).unwrap_err()).to_equal("APPROVAL_SIGNATURE_INVALID")
+        fixture = service_signed_fixture_v2(binding)
+        fixture.context.grant_clock = fixture.credential.approval.expires_at
+        assert(host_service_enrollment_authorize_v2(binding, fixture.credential, fixture.policy, fixture.context).is_err())
+        fixture = service_signed_fixture_v2(binding)
+        fixture.context.policy_revision = 5
+        expect(host_service_enrollment_authorize_v2(binding, fixture.credential, fixture.policy, fixture.context).unwrap_err()).to_equal("host-service-enrollment-authority-context-mismatch")
+
+    it "rejects noncanonical oversized unknown and wrong-backend data":
+        step("rejects noncanonical oversized unknown and wrong-backend data")
+        val bytes = host_service_enrollment_payload_bytes_v2(service_binding_fixture_v2()).unwrap()
+        assert(host_service_enrollment_payload_decode_v2(bytes + "\n").is_err())
+        expect(host_service_enrollment_payload_decode_v2("😀".repeat(5000)).unwrap_err()).to_equal("host-service-enrollment-size")
+        assert(host_service_enrollment_payload_decode_v2(bytes + "nativeBootId: invented\n").is_err())
+        var changed = service_binding_fixture_v2()
+        changed.backend = "linux-docker"
+        expect(host_service_enrollment_payload_bytes_v2(changed).unwrap_err()).to_equal("host-service-enrollment-mode-invalid")
+
+    it "rejects relative or traversing installed parents without inferring filesystem ownership":
+        step("rejects relative or traversing installed parents without inferring filesystem ownership")
+        for path in ["relative", "/var/lib/../hosts", "/var//hosts", "C:/Simple/../Hosts", "C:\\Simple\\Hosts"]:
+            var changed = service_binding_fixture_v2()
+            changed.machine_parent = path
+            expect(host_service_enrollment_payload_bytes_v2(changed).unwrap_err()).to_equal("host-service-enrollment-parent-invalid")
+        var windows = service_binding_fixture_v2()
+        windows.machine_parent = "C:/ProgramData/Simple/Hosts"
+        val bytes = host_service_enrollment_payload_bytes_v2(windows).unwrap()
+        expect(host_service_enrollment_payload_decode_v2(bytes).unwrap().machine_parent).to_equal(windows.machine_parent)
+
+    it "requires canonical bounded engine policy pin and rejects an actually missing wire field":
+        step("requires canonical bounded engine policy pin and rejects an actually missing wire field")
+        val binding = service_binding_fixture_v2()
+        val bytes = host_service_enrollment_payload_bytes_v2(binding).unwrap()
+        val decoded = host_service_enrollment_payload_decode_v2(bytes).unwrap()
+        expect(decoded.engine_policy_digest).to_equal(sha256_text("raw installed engine policy bytes"))
+        val field = ", enginePolicyDigest: " + sdn_encode_canonical(SdnValue.String(binding.engine_policy_digest))
+        assert(bytes.contains(field))
+        expect(host_service_enrollment_payload_decode_v2(bytes.replace(field, "")).unwrap_err()).to_equal("host-service-enrollment-missing-field:enginePolicyDigest")
+        for pin in ["", "a".repeat(63), "A".repeat(64), "😀".repeat(16), "f".repeat(65)]:
+            var changed = binding
+            changed.engine_policy_digest = pin
+            expect(host_service_enrollment_payload_bytes_v2(changed).unwrap_err()).to_equal("host-service-enrollment-digest-invalid")

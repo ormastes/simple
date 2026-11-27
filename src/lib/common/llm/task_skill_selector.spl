@@ -1,0 +1,538 @@
+"""Pure goal-start task-skill selection over the `task_skills` table of the
+canonical knowledge registry (`doc/00_llm_process/knowledge_registry.sdn`).
+
+The caller reads the registry; this module does no I/O. Selection is
+fail-closed: the whole table is validated (malformed rows, duplicate ids,
+ambiguous aliases or task classes, missing or cyclic dependencies) before the
+requested task class is resolved for the provider. Every outcome yields a
+`GoalSkillSelectionV1` that carries the registry version and SHA-256 digest.
+"""
+
+use std.common.crypto.sha256.{sha256_text}
+
+pub enum GoalTaskClass:
+    Setup
+    Dev
+    Debug
+    Research
+    Design
+    Impl
+    Refactor
+    Verify
+    Release
+    Other
+
+pub enum SkillProvider:
+    Claude
+    Codex
+    Gemini
+    Kimi
+    Unknown
+
+pub enum GoalSkillOutcome:
+    Selected
+    FallbackAsk
+    Rejected
+
+pub enum TaskSkillErrorKind:
+    MalformedRow
+    RegistryVersionMissing
+    TaskSkillsSectionMissing
+    DuplicateSkillId
+    AmbiguousAlias
+    AmbiguousTaskClass
+    DependencyMissing
+    SkillMissing
+    NotEnabledForProvider
+    CyclicDependency
+
+pub struct TaskSkillId:
+    value: text
+
+pub struct SkillAlias:
+    value: text
+
+pub struct SkillDocPath:
+    value: text
+
+pub struct TaskSkillVersion:
+    value: text
+
+pub struct RegistryVersion:
+    value: text
+
+pub struct RegistryDigest:
+    value: text
+
+pub struct SkillSubject:
+    value: text
+
+pub struct GoalSkillReceiptText:
+    value: text
+
+pub struct TaskSkillIssue:
+    kind: TaskSkillErrorKind
+    subject: SkillSubject
+
+pub struct TaskSkillRow:
+    id: TaskSkillId
+    task_class: GoalTaskClass
+    version: TaskSkillVersion
+    canonical_path: SkillDocPath
+    claude: SkillDocPath?
+    codex: SkillDocPath?
+    gemini: SkillDocPath?
+    kimi: SkillDocPath?
+    aliases: [SkillAlias]
+    depends_on: [TaskSkillId]
+
+pub struct TaskSkillTable:
+    version: RegistryVersion
+    rows: [TaskSkillRow]
+
+pub struct TaskSkillTableParse:
+    table: TaskSkillTable?
+    issue: TaskSkillIssue?
+
+pub struct SelectedTaskSkill:
+    id: TaskSkillId
+    path: SkillDocPath
+    canonical_path: SkillDocPath
+    version: TaskSkillVersion
+
+pub struct GoalSkillSelectionV1:
+    registry_version: RegistryVersion?
+    registry_digest: RegistryDigest
+    provider: SkillProvider
+    task_class: GoalTaskClass
+    outcome: GoalSkillOutcome
+    error: TaskSkillIssue?
+    primary: SelectedTaskSkill?
+    dependencies: [SelectedTaskSkill]
+    fallback_candidates: [SelectedTaskSkill]
+
+val _TASK_SKILL_KEYS = ["skill_id", "task_class", "version", "canonical_path", "claude",
+    "codex", "gemini", "kimi", "aliases", "depends_on", "fallback"]
+
+fn _task_class_text(value: GoalTaskClass) -> text:
+    match value:
+        case GoalTaskClass.Setup: "setup"
+        case GoalTaskClass.Dev: "dev"
+        case GoalTaskClass.Debug: "debug"
+        case GoalTaskClass.Research: "research"
+        case GoalTaskClass.Design: "design"
+        case GoalTaskClass.Impl: "impl"
+        case GoalTaskClass.Refactor: "refactor"
+        case GoalTaskClass.Verify: "verify"
+        case GoalTaskClass.Release: "release"
+        case GoalTaskClass.Other: "other"
+
+fn _task_class_from_text(value: text) -> GoalTaskClass?:
+    for candidate in [GoalTaskClass.Setup, GoalTaskClass.Dev, GoalTaskClass.Debug,
+            GoalTaskClass.Research, GoalTaskClass.Design, GoalTaskClass.Impl,
+            GoalTaskClass.Refactor, GoalTaskClass.Verify, GoalTaskClass.Release,
+            GoalTaskClass.Other]:
+        if _task_class_text(candidate) == value:
+            return Some(candidate)
+    None
+
+pub fn parse_goal_task_class(value: text) -> GoalTaskClass?:
+    _task_class_from_text(value)
+
+fn _provider_text(value: SkillProvider) -> text:
+    match value:
+        case SkillProvider.Claude: "claude"
+        case SkillProvider.Codex: "codex"
+        case SkillProvider.Gemini: "gemini"
+        case SkillProvider.Kimi: "kimi"
+        case SkillProvider.Unknown: "unknown"
+
+fn _outcome_text(value: GoalSkillOutcome) -> text:
+    match value:
+        case GoalSkillOutcome.Selected: "selected"
+        case GoalSkillOutcome.FallbackAsk: "fallback-ask"
+        case GoalSkillOutcome.Rejected: "rejected"
+
+fn _error_text(value: TaskSkillErrorKind) -> text:
+    match value:
+        case TaskSkillErrorKind.MalformedRow: "malformed-row"
+        case TaskSkillErrorKind.RegistryVersionMissing: "registry-version-missing"
+        case TaskSkillErrorKind.TaskSkillsSectionMissing: "task-skills-section-missing"
+        case TaskSkillErrorKind.DuplicateSkillId: "duplicate-skill-id"
+        case TaskSkillErrorKind.AmbiguousAlias: "ambiguous-alias"
+        case TaskSkillErrorKind.AmbiguousTaskClass: "ambiguous-task-class"
+        case TaskSkillErrorKind.DependencyMissing: "dependency-missing"
+        case TaskSkillErrorKind.SkillMissing: "skill-missing"
+        case TaskSkillErrorKind.NotEnabledForProvider: "not-enabled-for-provider"
+        case TaskSkillErrorKind.CyclicDependency: "cyclic-dependency"
+
+fn _issue(kind: TaskSkillErrorKind, subject: text) -> TaskSkillIssue:
+    TaskSkillIssue(kind: kind, subject: SkillSubject(value: subject))
+
+fn _parse_failed(kind: TaskSkillErrorKind, subject: text) -> TaskSkillTableParse:
+    TaskSkillTableParse(table: None, issue: Some(_issue(kind, subject)))
+
+fn _contains_text(values: [text], value: text) -> bool:
+    for item in values:
+        if item == value:
+            return true
+    false
+
+fn _registry_version(lines: [text]) -> text?:
+    var in_header = false
+    for line in lines:
+        if line == "knowledge_registry:":
+            in_header = true
+        elif in_header:
+            if not line.starts_with(" "):
+                return None
+            val trimmed = line.trim()
+            if trimmed.starts_with("version:"):
+                val version = trimmed.slice(8).trim()
+                if version == "":
+                    return None
+                return Some(version)
+    None
+
+fn _list_value(value: text) -> [text]?:
+    var out: [text] = []
+    if value == "none":
+        return Some(out)
+    for part in value.split(","):
+        val item = part.trim()
+        if item == "":
+            return None
+        out.push(item)
+    Some(out)
+
+fn _provider_value(value: text) -> SkillDocPath?:
+    if value == "disabled":
+        return None
+    Some(SkillDocPath(value: value))
+
+fn _field(keys: [text], values: [text], key: text) -> text:
+    var i = 0
+    while i < keys.len():
+        if keys[i] == key:
+            return values[i]
+        i = i + 1
+    ""
+
+struct _TaskSkillRowParse:
+    row: TaskSkillRow?
+    issue: TaskSkillIssue?
+
+fn _row_failed(subject: text) -> _TaskSkillRowParse:
+    _TaskSkillRowParse(row: None, issue: Some(_issue(TaskSkillErrorKind.MalformedRow, subject)))
+
+fn _build_row(keys: [text], values: [text], row_label: text) -> _TaskSkillRowParse:
+    for key in _TASK_SKILL_KEYS:
+        if not _contains_text(keys, key):
+            return _row_failed(row_label + ":missing-" + key)
+    for key in _TASK_SKILL_KEYS:
+        if _field(keys, values, key) == "":
+            return _row_failed(row_label + ":empty-" + key)
+    val label = _field(keys, values, "skill_id")
+    if _field(keys, values, "fallback") != "ask":
+        return _row_failed(label + ":fallback")
+    val task_class = _task_class_from_text(_field(keys, values, "task_class"))
+    val aliases = _list_value(_field(keys, values, "aliases"))
+    val depends = _list_value(_field(keys, values, "depends_on"))
+    match task_class:
+        case None:
+            return _row_failed(label + ":task_class")
+        case Some(task):
+            match aliases:
+                case None:
+                    return _row_failed(label + ":aliases")
+                case Some(alias_names):
+                    match depends:
+                        case None:
+                            return _row_failed(label + ":depends_on")
+                        case Some(dep_names):
+                            var alias_values: [SkillAlias] = []
+                            for name in alias_names:
+                                alias_values.push(SkillAlias(value: name))
+                            var dep_values: [TaskSkillId] = []
+                            for name in dep_names:
+                                dep_values.push(TaskSkillId(value: name))
+                            val built = TaskSkillRow(
+                                id: TaskSkillId(value: label),
+                                task_class: task,
+                                version: TaskSkillVersion(value: _field(keys, values, "version")),
+                                canonical_path: SkillDocPath(value: _field(keys, values, "canonical_path")),
+                                claude: _provider_value(_field(keys, values, "claude")),
+                                codex: _provider_value(_field(keys, values, "codex")),
+                                gemini: _provider_value(_field(keys, values, "gemini")),
+                                kimi: _provider_value(_field(keys, values, "kimi")),
+                                aliases: alias_values,
+                                depends_on: dep_values)
+                            return _TaskSkillRowParse(row: Some(built), issue: None)
+
+fn _finish_row(rows: [TaskSkillRow], keys: [text], values: [text], row_number: i64) -> TaskSkillIssue?:
+    val built = _build_row(keys, values, "row" + row_number.to_text())
+    match built.row:
+        case Some(row):
+            rows.push(row)
+            return None
+        case None:
+            return built.issue
+
+pub fn parse_task_skill_table(registry_text: text) -> TaskSkillTableParse:
+    val lines = registry_text.split("\n")
+    val version = _registry_version(lines)
+    var version_value = ""
+    match version:
+        case None:
+            return _parse_failed(TaskSkillErrorKind.RegistryVersionMissing, "knowledge_registry.version")
+        case Some(found):
+            version_value = found
+    var in_section = false
+    var seen_section = false
+    var rows: [TaskSkillRow] = []
+    var keys: [text] = []
+    var values: [text] = []
+    var row_number = 0
+    for line in lines:
+        if line == "task_skills:":
+            in_section = true
+            seen_section = true
+            continue
+        if not in_section:
+            continue
+        if line.trim() == "":
+            continue
+        if not line.starts_with(" "):
+            in_section = false
+            continue
+        var entry = line.trim()
+        if entry.starts_with("- "):
+            if row_number > 0:
+                val issue = _finish_row(rows, keys, values, row_number)
+                match issue:
+                    case Some(found_issue):
+                        return TaskSkillTableParse(table: None, issue: Some(found_issue))
+                    case None:
+                        pass
+            row_number = row_number + 1
+            keys = []
+            values = []
+            entry = entry.slice(2).trim()
+        elif row_number == 0:
+            return _parse_failed(TaskSkillErrorKind.MalformedRow, "row0")
+        if not entry.contains(":"):
+            return _parse_failed(TaskSkillErrorKind.MalformedRow, "row" + row_number.to_text() + ":" + entry)
+        val colon = entry.find(":")
+        val key = entry.slice(0, colon).trim()
+        if not _contains_text(_TASK_SKILL_KEYS, key) or _contains_text(keys, key):
+            return _parse_failed(TaskSkillErrorKind.MalformedRow, "row" + row_number.to_text() + ":" + key)
+        keys.push(key)
+        values.push(entry.slice(colon + 1).trim())
+    if row_number > 0:
+        val last_issue = _finish_row(rows, keys, values, row_number)
+        match last_issue:
+            case Some(found_issue):
+                return TaskSkillTableParse(table: None, issue: Some(found_issue))
+            case None:
+                pass
+    if not seen_section or rows.len() == 0:
+        return _parse_failed(TaskSkillErrorKind.TaskSkillsSectionMissing, "task_skills")
+    TaskSkillTableParse(table: Some(TaskSkillTable(version: RegistryVersion(value: version_value), rows: rows)),
+        issue: None)
+
+fn _row_ids(rows: [TaskSkillRow]) -> [text]:
+    var out: [text] = []
+    for row in rows:
+        out.push(row.id.value)
+    out
+
+fn _find_row(rows: [TaskSkillRow], id: text) -> TaskSkillRow?:
+    for row in rows:
+        if row.id.value == id:
+            return Some(row)
+    None
+
+# Depth-first walk; `path` is the current dependency chain, `done` holds ids
+# already proven acyclic. Returns the id that closes a cycle.
+fn _cycle_from(rows: [TaskSkillRow], id: text, path: [text], done: [text]) -> text?:
+    if _contains_text(path, id):
+        return Some(id)
+    if _contains_text(done, id):
+        return None
+    val chain = path + [id]
+    match _find_row(rows, id):
+        case Some(row):
+            for dep in row.depends_on:
+                val found = _cycle_from(rows, dep.value, chain, done)
+                match found:
+                    case Some(cycle_id):
+                        return Some(cycle_id)
+                    case None:
+                        pass
+        case None:
+            pass
+    done.push(id)
+    None
+
+fn _validate_table(rows: [TaskSkillRow]) -> TaskSkillIssue?:
+    var ids: [text] = []
+    var classes: [text] = []
+    for row in rows:
+        if _contains_text(ids, row.id.value):
+            return Some(_issue(TaskSkillErrorKind.DuplicateSkillId, row.id.value))
+        ids.push(row.id.value)
+        val class_name = _task_class_text(row.task_class)
+        if _contains_text(classes, class_name):
+            return Some(_issue(TaskSkillErrorKind.AmbiguousTaskClass, class_name))
+        classes.push(class_name)
+    var aliases: [text] = []
+    for row in rows:
+        for alias in row.aliases:
+            if _contains_text(aliases, alias.value) or (_contains_text(ids, alias.value) and alias.value != row.id.value):
+                return Some(_issue(TaskSkillErrorKind.AmbiguousAlias, alias.value))
+            aliases.push(alias.value)
+    for row in rows:
+        for dep in row.depends_on:
+            if not _contains_text(ids, dep.value):
+                return Some(_issue(TaskSkillErrorKind.DependencyMissing, dep.value))
+    var done: [text] = []
+    for id in _row_ids(rows):
+        val cycle = _cycle_from(rows, id, [], done)
+        match cycle:
+            case Some(cycle_id):
+                return Some(_issue(TaskSkillErrorKind.CyclicDependency, cycle_id))
+            case None:
+                pass
+    None
+
+# Post-order dependency closure; only called on a validated (acyclic) table.
+fn _collect_dependencies(rows: [TaskSkillRow], id: text, out: [text]):
+    match _find_row(rows, id):
+        case Some(row):
+            for dep in row.depends_on:
+                if not _contains_text(out, dep.value):
+                    _collect_dependencies(rows, dep.value, out)
+                    if not _contains_text(out, dep.value):
+                        out.push(dep.value)
+        case None:
+            pass
+
+fn _adapter_path(row: TaskSkillRow, provider: SkillProvider) -> SkillDocPath?:
+    match provider:
+        case SkillProvider.Claude: row.claude
+        case SkillProvider.Codex: row.codex
+        case SkillProvider.Gemini: row.gemini
+        case SkillProvider.Kimi: row.kimi
+        case SkillProvider.Unknown: None
+
+fn _selected(row: TaskSkillRow, path: SkillDocPath) -> SelectedTaskSkill:
+    SelectedTaskSkill(id: row.id, path: path, canonical_path: row.canonical_path, version: row.version)
+
+fn _rejected(version: RegistryVersion?, digest: RegistryDigest, provider: SkillProvider,
+        task_class: GoalTaskClass, issue: TaskSkillIssue) -> GoalSkillSelectionV1:
+    GoalSkillSelectionV1(registry_version: version, registry_digest: digest, provider: provider,
+        task_class: task_class, outcome: GoalSkillOutcome.Rejected, error: Some(issue),
+        primary: None, dependencies: [], fallback_candidates: [])
+
+pub fn select_goal_skills(registry_text: text, task_class: GoalTaskClass,
+        provider: SkillProvider) -> GoalSkillSelectionV1:
+    val digest = RegistryDigest(value: sha256_text(registry_text))
+    val parsed = parse_task_skill_table(registry_text)
+    var version: RegistryVersion? = None
+    match _registry_version(registry_text.split("\n")):
+        case Some(found):
+            version = Some(RegistryVersion(value: found))
+        case None:
+            pass
+    match parsed.issue:
+        case Some(issue):
+            return _rejected(version, digest, provider, task_class, issue)
+        case None:
+            pass
+    var rows: [TaskSkillRow] = []
+    match parsed.table:
+        case Some(table):
+            rows = table.rows
+        case None:
+            return _rejected(version, digest, provider, task_class,
+                _issue(TaskSkillErrorKind.TaskSkillsSectionMissing, "task_skills"))
+    match _validate_table(rows):
+        case Some(issue):
+            return _rejected(version, digest, provider, task_class, issue)
+        case None:
+            pass
+    var primary_rows: [TaskSkillRow] = []
+    for row in rows:
+        if row.task_class == task_class:
+            primary_rows.push(row)
+    if primary_rows.len() == 0:
+        return _rejected(version, digest, provider, task_class,
+            _issue(TaskSkillErrorKind.SkillMissing, _task_class_text(task_class)))
+    val primary_row = primary_rows[0]
+    var dep_ids: [text] = []
+    _collect_dependencies(rows, primary_row.id.value, dep_ids)
+    var dep_rows: [TaskSkillRow] = []
+    for dep_id in dep_ids:
+        match _find_row(rows, dep_id):
+            case Some(dep_row):
+                dep_rows.push(dep_row)
+            case None:
+                return _rejected(version, digest, provider, task_class,
+                    _issue(TaskSkillErrorKind.DependencyMissing, dep_id))
+    if provider == SkillProvider.Unknown:
+        var candidates: [SelectedTaskSkill] = [_selected(primary_row, primary_row.canonical_path)]
+        for dep_row in dep_rows:
+            candidates.push(_selected(dep_row, dep_row.canonical_path))
+        return GoalSkillSelectionV1(registry_version: version, registry_digest: digest,
+            provider: provider, task_class: task_class, outcome: GoalSkillOutcome.FallbackAsk,
+            error: None, primary: None, dependencies: [], fallback_candidates: candidates)
+    var primary_selected: SelectedTaskSkill? = None
+    match _adapter_path(primary_row, provider):
+        case Some(path):
+            primary_selected = Some(_selected(primary_row, path))
+        case None:
+            return _rejected(version, digest, provider, task_class,
+                _issue(TaskSkillErrorKind.NotEnabledForProvider, primary_row.id.value))
+    var dependencies: [SelectedTaskSkill] = []
+    for dep_row in dep_rows:
+        match _adapter_path(dep_row, provider):
+            case Some(path):
+                dependencies.push(_selected(dep_row, path))
+            case None:
+                return _rejected(version, digest, provider, task_class,
+                    _issue(TaskSkillErrorKind.NotEnabledForProvider, dep_row.id.value))
+    GoalSkillSelectionV1(registry_version: version, registry_digest: digest, provider: provider,
+        task_class: task_class, outcome: GoalSkillOutcome.Selected, error: None,
+        primary: primary_selected, dependencies: dependencies, fallback_candidates: [])
+
+fn _skill_line(key: text, skill: SelectedTaskSkill) -> text:
+    key + "=" + skill.id.value + "|" + skill.path.value + "|version=" + skill.version.value + "\n"
+
+pub fn goal_skill_selection_receipt(selection: GoalSkillSelectionV1) -> GoalSkillReceiptText:
+    var version_text = "missing"
+    match selection.registry_version:
+        case Some(version):
+            version_text = version.value
+        case None:
+            pass
+    var out = "schema=GoalSkillSelectionV1\n" +
+        "registry_version=" + version_text + "\n" +
+        "registry_digest=sha256:" + selection.registry_digest.value + "\n" +
+        "provider=" + _provider_text(selection.provider) + "\n" +
+        "task_class=" + _task_class_text(selection.task_class) + "\n" +
+        "outcome=" + _outcome_text(selection.outcome) + "\n"
+    match selection.error:
+        case Some(issue):
+            out = out + "error=" + _error_text(issue.kind) + ":" + issue.subject.value + "\n"
+        case None:
+            pass
+    match selection.primary:
+        case Some(skill):
+            out = out + _skill_line("primary", skill)
+        case None:
+            pass
+    for skill in selection.dependencies:
+        out = out + _skill_line("dependency", skill)
+    for skill in selection.fallback_candidates:
+        out = out + _skill_line("fallback_candidate", skill)
+    GoalSkillReceiptText(value: out)

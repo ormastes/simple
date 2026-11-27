@@ -1,0 +1,60 @@
+# Regression for doc/08_tracking/bug/file_write_bytes_truncates_to_3_bytes_under_codegen_2026-08-27.
+#
+# Symptom: a codegen-compiled call site of `file_write_bytes(path, [u8])`
+# silently wrote 3 garbage bytes (08 00 00) regardless of input length, while
+# reporting true. Root cause per the bug doc is the Rust seed's extern
+# array-argument marshalling on the compiled path (src/compiler_rust, outside
+# this lane); the C runtime writer (rt_file_write_bytes_array) is correct.
+#
+# This spec pins the facade contract that any fixed marshalling must satisfy:
+# N bytes in -> exactly N bytes on disk, byte-identical, success reported once.
+# Interpreted run: full pass/fail evidence on the seed interpreter.
+# Codegen/native run of this same spec is the pending producer-rebuild check.
+# Files live under /tmp and are removed after each example.
+
+use std.spec.{describe, it, expect, is_windows}
+use std.io_runtime.{file_write_bytes, file_read_bytes, file_delete, file_exists, getpid}
+
+fn probe_path(tag: text) -> text:
+    "/tmp/simple_file_write_bytes_rt_spec_{getpid()}_{tag}.bin"
+
+describe "file_write_bytes writes the full byte extent":
+    it "5-byte array round-trips byte-identically":
+        if is_windows():
+            return
+        val path = probe_path("five")
+        val _ = file_delete(path)
+        expect(file_exists(path)).to_equal(false)
+        expect(file_write_bytes(path, [1u8, 2u8, 3u8, 4u8, 5u8])).to_equal(true)
+        expect(file_read_bytes(path) ?? [0u8]).to_equal([1u8, 2u8, 3u8, 4u8, 5u8])
+        val _done = file_delete(path)
+
+    it "256-byte array with high-bit bytes round-trips byte-identically":
+        if is_windows():
+            return
+        val path = probe_path("highbit")
+        val _ = file_delete(path)
+        var data: [u8] = []
+        var i = 0
+        while i < 256:
+            data.push((i % 256).to_u8())
+            i = i + 1
+        expect(data.len()).to_equal(256)
+        expect(file_write_bytes(path, data)).to_equal(true)
+        expect(file_read_bytes(path) ?? [0u8]).to_equal(data)
+        val _done = file_delete(path)
+
+    it "overwrite truncates a previously longer file to the new extent":
+        if is_windows():
+            return
+        val path = probe_path("truncate")
+        val _ = file_delete(path)
+        var big: [u8] = []
+        var i = 0
+        while i < 100:
+            big.push(7u8)
+            i = i + 1
+        expect(file_write_bytes(path, big)).to_equal(true)
+        expect(file_write_bytes(path, [9u8, 8u8])).to_equal(true)
+        expect(file_read_bytes(path) ?? [0u8]).to_equal([9u8, 8u8])
+        val _done = file_delete(path)

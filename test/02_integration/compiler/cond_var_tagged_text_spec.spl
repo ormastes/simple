@@ -1,0 +1,73 @@
+# @req REQ-SSPEC-INTEGRATION
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl
+# @cover src/compiler/50.mir/mir_lowering_types.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/builtin_method_extras.spl
+"""
+Native regression spec for conditional `var` reassignment between raw
+`char*` text (`parts[parts.len() - 1]`) and tagged `RtCoreString* | 1`
+(`name.substring(1)`).
+"""
+
+use std.spec.{describe, it, expect}
+
+fn check_symbol_row(parts: [text], kind: text, mut d: {text: bool}) -> bool:
+    var name = parts[parts.len() - 1]
+    if name.starts_with("_"):
+        name = name.substring(1)
+    if kind == "T" and d.has(name):
+        d[name] = true
+    d["rt_tagged_add"]
+
+describe "conditional var tagged-text reassignment":
+    it "matches non-underscore and underscore keys through dict.has and dict[k] = true":
+        var d1: {text: bool} = {"rt_tagged_add": false}
+        val parts_elf = ["0000000000000000", "T", "rt_tagged_add"]
+        var name1 = parts_elf[parts_elf.len() - 1]
+        if name1.starts_with("_"):
+            name1 = name1.substring(1)
+        expect(d1.has(name1)).to_equal(true)
+        d1[name1] = true
+        expect(d1["rt_tagged_add"]).to_equal(true)
+
+        var d2: {text: bool} = {"rt_tagged_add": false}
+        val parts_macho = ["0000000000000000", "T", "_rt_tagged_add"]
+        var name2 = parts_macho[parts_macho.len() - 1]
+        if name2.starts_with("_"):
+            name2 = name2.substring(1)
+        expect(d2.has(name2)).to_equal(true)
+        d2[name2] = true
+        expect(d2["rt_tagged_add"]).to_equal(true)
+
+    it "handles mixed if/elif/else and while loop stripping across both branches":
+        var d_elf: {text: bool} = {"rt_tagged_add": false}
+        expect(check_symbol_row(["0", "T", "rt_tagged_add"], "T", d_elf)).to_equal(true)
+
+        var d_macho: {text: bool} = {"rt_tagged_add": false}
+        expect(check_symbol_row(["0", "T", "_rt_tagged_add"], "T", d_macho)).to_equal(true)
+
+        var d_loop: {text: bool} = {"rt_tagged_add": false}
+        val loop_parts = ["0", "T", "rt_tagged_add"]
+        var loop_name = loop_parts[loop_parts.len() - 1]
+        while loop_name.starts_with("_"):
+            loop_name = loop_name.substring(1)
+        expect(d_loop.has(loop_name)).to_equal(true)
+        d_loop[loop_name] = true
+        expect(d_loop["rt_tagged_add"]).to_equal(true)
+
+    it "keeps tagged-text vars valid when conditionally reassigned a literal":
+        val src = "_rt_tagged_add"
+        var d_true: {text: bool} = {"rt_tagged_add": false}
+        var a = src.substring(1)
+        if true:
+            a = "rt_tagged_add"
+        expect(d_true.has(a)).to_equal(true)
+        d_true[a] = true
+        expect(d_true["rt_tagged_add"]).to_equal(true)
+
+        var d_false: {text: bool} = {"rt_tagged_add": false}
+        var b = src.substring(1)
+        if false:
+            b = "other"
+        expect(d_false.has(b)).to_equal(true)
+        d_false[b] = true
+        expect(d_false["rt_tagged_add"]).to_equal(true)

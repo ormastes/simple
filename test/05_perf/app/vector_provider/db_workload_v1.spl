@@ -1,0 +1,85 @@
+# Shared measured PureDatabase workload. Construction/admission stays in adapters.
+use nogc_sync_mut.database.pure_sql.database.{PureDatabase, PureDatabaseBitmapReducerV1}
+use nogc_sync_mut.database.sql.types.{DbRow}
+use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
+
+# Follow the production PureDatabase owner slot: Option<trait> is not a
+# supported native MIR boundary (puresql_native_mir_failures_2026-10-25).
+class Item5DbReducerSlotV1:
+    reducer: PureDatabaseBitmapReducerV1
+
+fn item5_db_workload_v1(count: i64, initial: Item5DbReducerSlotV1?) -> i32:
+    if count != 1025 and count != 65536: return 1
+    var db = PureDatabase.memory().unwrap()
+    db.exec_sql("CREATE TABLE messages (message_id INTEGER, room_id TEXT, room_seq INTEGER)").unwrap()
+    var row = 0
+    while row < count:
+        val room = if row % 4 == 0: "room-a" else: "room-b"
+        db.exec_sql("INSERT INTO messages (message_id, room_id, room_seq) VALUES ({row + 1}, '{room}', {row + 1})").unwrap()
+        row = row + 1
+    # Both APIs cache only the last SQL text per table. Distinct consecutive
+    # thresholds exercise the same uncached production path without cache edits.
+    var queries: [text] = []
+    var query_index = 0
+    while query_index < 32:
+        val threshold = count / 2 + query_index
+        queries.push("SELECT message_id, room_seq FROM messages WHERE room_id = 'room-a' AND room_seq > {threshold} ORDER BY room_seq")
+        query_index = query_index + 1
+    var reducer = initial
+    val vector = reducer != nil
+    var batch = 0
+    while batch < 4:
+        var results: [[DbRow]] = []
+        var calls: [i64] = []
+        var used: [bool] = []
+        query_index = 0
+        val started = time_now_nanos()
+        while query_index < 32:
+            if val owner = reducer:
+                val result = db.query_with_bitmap_reducer_owned_v1(queries[query_index], [], owner.reducer)
+                reducer = Some(Item5DbReducerSlotV1(reducer: result.reducer))
+                results.push(result.query.unwrap())
+                calls.push(result.provider_and_calls)
+                used.push(result.provider_used)
+            else:
+                results.push(db.query(queries[query_index], []).unwrap())
+                calls.push(0)
+                used.push(false)
+            query_index = query_index + 1
+        val elapsed = time_now_nanos() - started
+        if elapsed <= 0: return 2
+        # Complete validation is after the measured interval, equally in both lanes.
+        var checksum: i64 = 0
+        var total_rows: i64 = 0
+        var provider_calls: i64 = 0
+        query_index = 0
+        while query_index < 32:
+            if vector and (not used[query_index] or calls[query_index] != 1): return 3
+            if not vector and (used[query_index] or calls[query_index] != 0): return 4
+            provider_calls = provider_calls + calls[query_index]
+            val rows = results[query_index]
+            val threshold = count / 2 + query_index
+            var expected_index = 0
+            row = 0
+            while row < count:
+                val seq = row + 1
+                if row % 4 == 0 and seq > threshold:
+                    if expected_index >= rows.len(): return 5
+                    if rows[expected_index].values.len() != 2: return 6
+                    if rows[expected_index].values[0].to_text() != seq.to_text() or rows[expected_index].values[1].to_text() != seq.to_text(): return 7
+                    checksum = checksum + seq
+                    expected_index = expected_index + 1
+                row = row + 1
+            if rows.len() != expected_index: return 8
+            total_rows = total_rows + expected_index
+            query_index = query_index + 1
+        if batch == 3:
+            println("ITEM5_PERF_V1 kind=db size={count} operations=32 ns={elapsed} checksum={checksum} results={total_rows} provider_calls={provider_calls} warmups=3")
+        batch = batch + 1
+    if val owner = reducer:
+        val closed = owner.reducer.close_owned_v1()
+        if closed.status != 0: return 9
+    val _ = db.close()
+    0
+
+export item5_db_workload_v1, Item5DbReducerSlotV1

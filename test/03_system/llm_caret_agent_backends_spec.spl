@@ -14,7 +14,9 @@
 ## Purpose and Audience
 
 Proves the LLM Caret agent manager can launch, poll, and stop an agent process
-through the Claude, Codex, Gemini, and Kimi CLI wrapper contracts.
+through the Claude and Codex CLI wrapper contracts, and that Gemini and Kimi
+launches are refused before any spawn until a provider-specific adapter lands
+(REQ-CARET-LAUNCH-002, `doc/05_design/caret_provider_launch_guard.md`).
 Audience: anyone changing `agent_plan.spl` argv construction or
 `agent_runtime.spl` spawn/status/kill paths.
 
@@ -62,6 +64,16 @@ fn launch_poll_stop(agent_id: text, provider: text, claude_path: text,
     val stopped = stop_agent_process(proc)
     assert_true(stopped.status == "stopped" or stopped.status == "error")
 
+fn refuse_before_spawn(agent_id: text, provider: text, claude_path: text,
+        codex_path: text, gemini_path: text, kimi_path: text):
+    step("Build the plan and confirm the launch guard refuses it before any spawn")
+    val plan = build_agent_launch_plan(backend_request(provider))
+    val proc = launch_agent_plan_with_all(agent_id, plan, claude_path,
+        codex_path, gemini_path, kimi_path, "")
+    expect(proc.status).to_equal("not_started")
+    expect(proc.reason).to_equal("provider_adapter_required:" + provider)
+    expect(proc.pid).to_equal(-1)
+
 # @manual_section: Backend Contracts
 describe "LLM Caret agent backends (claude + codex + gemini + kimi)":
     it "builds the claude argv contract":
@@ -91,12 +103,14 @@ describe "LLM Caret agent backends (claude + codex + gemini + kimi)":
         step("launches, polls, and stops a codex-backed agent process")
         launch_poll_stop("sys-codex", "codex", "", "/bin/echo", "", "")
 
-    it "launches, polls, and stops a gemini-backed agent process":
+    it "refuses a gemini launch before spawn until a gemini adapter exists":
         # @req REQ-SSPEC-SYSTEM
-        step("launches, polls, and stops a gemini-backed agent process")
-        launch_poll_stop("sys-gemini", "gemini", "", "", "/bin/echo", "")
+        # @req REQ-CARET-LAUNCH-002
+        step("refuses a gemini launch before spawn until a gemini adapter exists")
+        refuse_before_spawn("sys-gemini", "gemini", "", "", "/bin/echo", "")
 
-    it "launches, polls, and stops a kimi-backed agent process":
+    it "refuses a kimi launch before spawn until a kimi adapter exists":
         # @req REQ-SSPEC-SYSTEM
-        step("launches, polls, and stops a kimi-backed agent process")
-        launch_poll_stop("sys-kimi", "kimi", "", "", "", "/bin/echo")
+        # @req REQ-CARET-LAUNCH-002
+        step("refuses a kimi launch before spawn until a kimi adapter exists")
+        refuse_before_spawn("sys-kimi", "kimi", "", "", "", "/bin/echo")

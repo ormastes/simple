@@ -1,0 +1,180 @@
+# @req REQ-AGENT-TERMINAL-CONTEXT REQ-AGENT-CANONICAL-CUSTODY
+# AUTHORED/NOT_RUN. Actual shared journal + explicitly scripted Windows fixture
+# supplies a genuine NON-native V4 continuation for rejection/custody tests.
+# No native source, selection, slot or successful terminal context is fabricated.
+use test.fixtures.orchestration.host_execution_windows_progress_v4.*
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.windows_adapter_consumed_fixture_v2
+use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.*
+use std.nogc_sync_mut.orchestration.host_agent_workspace_execution_v2.host_agent_terminal_retained_operation_v2
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.host_capacity_owner_close_v1
+use std.common.contracts.orchestration.host_execute_request_v2.host_execute_request_encode_v2
+use std.nogc_async_mut.container.api_v2.{simple_container_scope_v2, simple_container_backend_v2}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+
+fn terminal_non_native_begin_v2(fixture: HostWindowsProgressFixtureV4) -> HostExecutionProgressTurnV4:
+    val payload = host_execute_request_encode_v2(fixture.envelope)
+    if payload.is_err(): return HostExecutionProgressTurnV4(fixture.owner, fixture.container, nil, nil, false, payload.unwrap_err())
+    host_authorized_execution_begin_v4(fixture.owner, fixture.container,
+        payload.unwrap(), fixture.policy,
+        fixture.provider_digest, "service-a", fixture.context, host_windows_progress_clock_v4)
+
+# Fixture-only recovery carrier; unresolved custody prevents close AND root sweep.
+var terminal_retained_cleanup_v2: Option<HostExecutionProgressTurnV4> = nil
+
+fn terminal_cleanup_complete_v2(current: HostExecutionProgressTurnV4) -> bool:
+    current.continuation.is_none() and not current.recovery_required and (current.error == "" or current.error == "host-execution-cancelled")
+
+fn terminal_generic_cleanup_v2(original: HostExecutionProgressTurnV4, limit: i64 = 16) -> HostExecutionProgressTurnV4:
+    var current = original
+    terminal_retained_cleanup_v2 = Some(current)
+    for index in 0..limit:
+        if terminal_cleanup_complete_v2(current): break
+        if current.continuation.is_none() or current.recovery_required or current.error != "": return current
+        current = host_authorized_execution_step_v4(current.owner, current.container, current.continuation.unwrap(),
+            host_windows_progress_clock_v4(), true)
+        terminal_retained_cleanup_v2 = Some(current)
+    if not terminal_cleanup_complete_v2(current): return current
+    val closed = host_capacity_owner_close_v1(current.owner)
+    if closed.is_err() or not closed.unwrap(): return current
+    terminal_retained_cleanup_v2 = nil
+    current
+
+describe "actual canonical Host terminal-context boundary":
+    after_each:
+        if terminal_retained_cleanup_v2.is_none(): host_windows_progress_sweep_v4()
+
+    it "rejects a genuine non-native continuation and returns its actual owner container and usable handle":
+        step("Keep a non-native caller's actual custody after rejection")
+        if terminal_retained_cleanup_v2.is_some():
+            expect(terminal_retained_cleanup_v2.is_none()).to_equal(true)
+            return
+        val fixture = host_windows_progress_fixture_v4()
+        val beginning = terminal_non_native_begin_v2(fixture)
+        expect(beginning.error).to_equal("")
+        if beginning.error != "" or beginning.continuation.is_none():
+            terminal_retained_cleanup_v2 = Some(beginning)
+            return
+        terminal_retained_cleanup_v2 = Some(beginning)
+        val handle = beginning.continuation.unwrap()
+        val turn = host_authorized_agent_workspace_terminal_context_v2(beginning.owner, beginning.container, handle,
+            fixture.policy, fixture.context)
+        terminal_retained_cleanup_v2 = Some(HostExecutionProgressTurnV4(turn.owner, turn.container, Some(turn.continuation), nil, false, turn.error))
+        expect(turn.error).to_equal("host-agent-native-continuation-owner-mismatch")
+        if turn.error != "host-agent-native-continuation-owner-mismatch":
+            return
+        expect(turn.operation_template.is_none()).to_equal(true)
+        expect(turn.principal).to_equal("")
+        expect(turn.invocation_digest).to_equal("")
+        expect(turn.manifest_digest).to_equal("")
+        expect(turn.owner.journal.lease_digest).to_equal(beginning.owner.journal.lease_digest)
+        expect(turn.owner.journal.revision).to_equal(beginning.owner.journal.revision)
+        expect(simple_container_scope_v2(turn.container)).to_equal(simple_container_scope_v2(beginning.container))
+        expect(simple_container_backend_v2(turn.container)).to_equal("windows-docker-process")
+        expect(windows_adapter_consumed_fixture_v2(turn.container)).to_equal(0)
+        val continued = host_authorized_execution_step_v4(turn.owner, turn.container, turn.continuation,
+            fixture.context, false)
+        terminal_retained_cleanup_v2 = Some(continued)
+        expect(continued.error).to_equal("")
+        expect(continued.continuation.is_some()).to_equal(true)
+        if continued.error != "":
+            terminal_retained_cleanup_v2 = Some(continued)
+            return
+        val cleaned = terminal_generic_cleanup_v2(continued)
+        expect(terminal_retained_cleanup_v2.is_none()).to_equal(true)
+        if terminal_retained_cleanup_v2.is_some(): return
+
+    it "derives principal from the actual retained operation and rejects principal or operation substitution":
+        step("Read the exact executing journal envelope rather than TaskUse data")
+        if terminal_retained_cleanup_v2.is_some():
+            expect(terminal_retained_cleanup_v2.is_none()).to_equal(true)
+            return
+        val fixture = host_windows_progress_fixture_v4()
+        terminal_retained_cleanup_v2 = Some(HostExecutionProgressTurnV4(fixture.owner, fixture.container, nil, nil, false, ""))
+        val admitted = host_agent_terminal_retained_operation_v2(fixture.owner, fixture.envelope.operation)
+        expect(admitted.is_err()).to_equal(true)
+        if admitted.is_ok(): return
+        expect(admitted.unwrap_err()).to_equal("host-agent-terminal-retained-invocation-not-active")
+        if admitted.unwrap_err() != "host-agent-terminal-retained-invocation-not-active": return
+        val beginning = terminal_non_native_begin_v2(fixture)
+        expect(beginning.error).to_equal("")
+        if beginning.error != "" or beginning.continuation.is_none():
+            terminal_retained_cleanup_v2 = Some(beginning)
+            return
+        terminal_retained_cleanup_v2 = Some(beginning)
+        val looked_up = host_agent_terminal_retained_operation_v2(beginning.owner, fixture.envelope.operation)
+        expect(looked_up.is_ok()).to_equal(true)
+        if looked_up.is_err(): return
+        val actual = looked_up.unwrap()
+        expect(actual.principal).to_equal(fixture.envelope.operation.principal)
+        if actual.principal != fixture.envelope.operation.principal: return
+        var substituted = fixture.envelope.operation
+        substituted.principal = "different-principal"
+        expect(host_agent_terminal_retained_operation_v2(beginning.owner, substituted).is_err()).to_equal(true)
+        substituted = fixture.envelope.operation
+        substituted.id = "missing-operation"
+        expect(host_agent_terminal_retained_operation_v2(beginning.owner, substituted).is_err()).to_equal(true)
+        expect(windows_adapter_consumed_fixture_v2(beginning.container)).to_equal(0)
+        val cleaned = terminal_generic_cleanup_v2(beginning)
+        expect(terminal_retained_cleanup_v2.is_none()).to_equal(true)
+        if terminal_retained_cleanup_v2.is_some(): return
+
+    it "routes every native step cancel and query through the same ticketed reserve and publish":
+        step("Keep canonical busy and returned-custody ordering explicit")
+        val source = file_read_regular_no_follow_bounded("src/lib/nogc_sync_mut/orchestration/host_authorized_execution_v2.spl", 262144).unwrap()
+        for name in ["host_authorized_agent_workspace_step_v2", "host_authorized_agent_workspace_cancel_v2", "host_authorized_agent_workspace_terminal_context_v2"]:
+            val after = source.split("pub fn " + name + "(")
+            expect(after.len()).to_equal(2)
+            val body = after[1].split("\nfn ")[0].split("\npub ")[0]
+            expect(body.contains("host_agent_native_reserve_v2(")).to_equal(true)
+            expect(body.contains("host_agent_native_publish_v2(")).to_equal(true)
+        val publish = source.split("fn host_agent_native_publish_v2(")[1].split("pub struct HostAgentTerminalContextTurnV2")[0]
+        expect(publish.contains("active.unwrap().agent_native_turn != original.agent_native_turn")).to_equal(true)
+        val before_clear = publish.split("state.agent_native_busy = false")[0]
+        expect(before_clear.contains("state.agent_native_current = Some(HostAgentNativeCurrentPairV2(owner, turn.container))")).to_equal(true)
+        expect(before_clear.contains("host_execution_progress_slots_v4[handle.slot] = Some(state)")).to_equal(true)
+
+    it "prevents generic finish quarantine and step from retiring a native slot":
+        step("Close old alias paths before any native slot retirement")
+        val source = file_read_regular_no_follow_bounded("src/lib/nogc_sync_mut/orchestration/host_authorized_execution_v2.spl", 262144).unwrap()
+        for name in ["host_execution_progress_finish_v4", "host_execution_progress_quarantine_v4", "host_authorized_execution_step_v4"]:
+            val after = source.split("fn " + name + "(")
+            expect(after.len()).to_equal(2)
+            val body = after[1].split("\nfn ")[0].split("\npub ")[0]
+            expect(body.contains("agent_native.is_some()")).to_equal(true)
+            expect(body.contains("host-agent-native-versioned-route-required")).to_equal(true)
+
+    it "admits native begin origin before any journal or shared registry access":
+        step("Reject wrong-origin callers before shared-state admission")
+        val source = file_read_regular_no_follow_bounded("src/lib/nogc_sync_mut/orchestration/host_authorized_execution_v2.spl", 262144).unwrap()
+        val body = source.split("fn host_agent_native_begin_installed_v2(")[1].split("fn host_agent_native_slot_v2(")[0]
+        val guard = body.split("    val origin = host_agent_workspace_origin_v2()")
+        expect(guard.len()).to_equal(2)
+        expect(guard[0].contains("host_execution_progress_slots_v4")).to_equal(false)
+        expect(guard[0].contains("host_execution_current_v2")).to_equal(false)
+        val refusal = guard[1].split("    if not host_execution_current_v2(owner)")[0]
+        expect(refusal.contains("if origin.is_err(): return HostAgentWorkspaceProgressTurnV2(owner, container, lease, None, None, None, true, origin.unwrap_err())")).to_equal(true)
+        expect(refusal.contains("host_execution_progress_slots_v4")).to_equal(false)
+
+    it "retains an exhausted cleanup carrier without closing or sweeping its actual journal":
+        step("Keep bounded cleanup exhaustion recoverable with the original writer")
+        if terminal_retained_cleanup_v2.is_some():
+            expect(terminal_retained_cleanup_v2.is_none()).to_equal(true)
+            return
+        val fixture = host_windows_progress_fixture_v4()
+        val beginning = terminal_non_native_begin_v2(fixture)
+        expect(beginning.error).to_equal("")
+        if beginning.error != "" or beginning.continuation.is_none():
+            terminal_retained_cleanup_v2 = Some(beginning)
+            return
+        val retained = terminal_generic_cleanup_v2(beginning, 0)
+        expect(terminal_retained_cleanup_v2.is_some()).to_equal(true)
+        expect(retained.continuation.is_some()).to_equal(true)
+        expect(retained.owner.journal.lease_digest).to_equal(beginning.owner.journal.lease_digest)
+        expect(retained.owner.journal.sequence).to_equal(beginning.owner.journal.sequence)
+        val still_live = host_agent_terminal_retained_operation_v2(retained.owner, fixture.envelope.operation)
+        expect(still_live.is_ok()).to_equal(true)
+        if still_live.is_err(): return
+        expect(windows_adapter_consumed_fixture_v2(retained.container)).to_equal(0)
+        val recovered = terminal_generic_cleanup_v2(terminal_retained_cleanup_v2.unwrap())
+        expect(terminal_retained_cleanup_v2.is_none()).to_equal(true)
+        if terminal_retained_cleanup_v2.is_some(): return

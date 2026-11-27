@@ -1,0 +1,120 @@
+#!/bin/sh
+# Builds the slang whisper shim into build/sffi/slang_whisper.dll
+# (build/sffi/libslang_whisper.so on Linux).
+#
+# whisper.cpp is built STATICALLY (BUILD_SHARED_LIBS=OFF) and linked into the
+# shim, so its vendored ggml can never collide with llama.cpp's ggml.dll
+# (design doc/05_design/ml/slang/slang_pluggable_modalities.md section 3.4).
+# Windows lane = llvm-mingw clang only (never GCC, never MSVC).
+#
+# WHISPER_ROOT must hold a whisper.cpp checkout (default /c/dev/tools/whisper.cpp
+# on Windows, else $HOME/whisper.cpp); it stays outside this repo. The static
+# build lands in $WHISPER_ROOT/build-mingw (build-static elsewhere) and is
+# reused when libwhisper.a is already there.
+#
+# Verdict is the last line of stdout, same convention as scripts/check/*:
+#   PASS  -- <n> symbol(s) exported, <path>        exit 0
+#   FAIL  -- <reason>                              exit 1
+#   ERROR -- nothing was built (<reason>)          exit 2
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+OUT_DIR=${SLANG_SHIM_OUT_DIR:-$ROOT/build/sffi}
+SRC=$ROOT/src/runtime/slang_whisper_shim.c
+
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=1; WHISPER_ROOT=${WHISPER_ROOT:-/c/dev/tools/whisper.cpp}; BUILD_NAME=build-mingw; OUT=$OUT_DIR/slang_whisper.dll ;;
+    *) IS_WINDOWS=0; WHISPER_ROOT=${WHISPER_ROOT:-$HOME/whisper.cpp}; BUILD_NAME=build-static; OUT=$OUT_DIR/libslang_whisper.so ;;
+esac
+BUILD_DIR=${WHISPER_BUILD_DIR:-$WHISPER_ROOT/$BUILD_NAME}
+
+[ -f "$SRC" ] || { echo "ERROR -- nothing was built (missing $SRC)"; exit 2; }
+[ -f "$WHISPER_ROOT/include/whisper.h" ] || { echo "ERROR -- nothing was built (no whisper.h under WHISPER_ROOT=$WHISPER_ROOT)"; exit 2; }
+
+if [ "$IS_WINDOWS" -eq 1 ]; then
+    if [ -z "${CC:-}" ]; then
+        if [ -n "${SIMPLE_MINGW_ROOT:-}" ] && [ -x "$SIMPLE_MINGW_ROOT/bin/clang.exe" ]; then
+            CC=$SIMPLE_MINGW_ROOT/bin/clang.exe
+        else
+            for cand in $(ls -d "$HOME"/.simple/toolchains/llvm-mingw-*-ucrt-x86_64/bin 2>/dev/null | sort -r); do
+                CC=$cand/clang.exe
+                break
+            done
+        fi
+    fi
+    CC=${CC:-clang}
+    command -v "$CC" >/dev/null 2>&1 || { echo "ERROR -- nothing was built (no llvm-mingw clang: $CC)"; exit 2; }
+    MINGW_BIN=$(CDPATH= cd -- "$(dirname "$(command -v "$CC")")" && pwd -P)
+    case "$("$CC" -dumpmachine 2>/dev/null)" in
+        *-w64-mingw32*|*-windows-gnu*) ;;
+        *) echo "ERROR -- nothing was built ($CC does not target mingw; set SIMPLE_MINGW_ROOT or CC to llvm-mingw clang)"; exit 2 ;;
+    esac
+    CXX=$MINGW_BIN/clang++.exe
+    MINGW_RT_DIR=$MINGW_BIN/../x86_64-w64-mingw32/bin
+    PATH="$MINGW_BIN:$PATH"; export PATH
+    winpath() { cygpath -m "$1" 2>/dev/null || printf '%s' "$1"; }
+else
+    CC=${CC:-clang}
+    CXX=${CXX:-clang++}
+    command -v "$CC" >/dev/null 2>&1 || { echo "ERROR -- nothing was built (no C compiler: $CC)"; exit 2; }
+    winpath() { printf '%s' "$1"; }
+fi
+command -v "$CXX" >/dev/null 2>&1 || { echo "ERROR -- nothing was built (no C++ compiler: $CXX)"; exit 2; }
+
+LIBS="$BUILD_DIR/src/libwhisper.a $BUILD_DIR/ggml/src/ggml.a $BUILD_DIR/ggml/src/ggml-cpu.a $BUILD_DIR/ggml/src/ggml-base.a"
+mkdir -p "$OUT_DIR"
+if [ ! -f "$BUILD_DIR/src/libwhisper.a" ]; then
+    command -v cmake >/dev/null 2>&1 || { echo "ERROR -- nothing was built (no libwhisper.a under $BUILD_DIR and no cmake)"; exit 2; }
+    cmake -S "$WHISPER_ROOT" -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
+        -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_EXAMPLES=OFF -DWHISPER_BUILD_TESTS=OFF \
+        -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON >"$OUT_DIR/whisper_build.log" 2>&1 \
+        && cmake --build "$BUILD_DIR" -j 8 >>"$OUT_DIR/whisper_build.log" 2>&1 || {
+        cat "$OUT_DIR/whisper_build.log" >&2
+        echo "FAIL -- whisper.cpp static build failed"
+        exit 1
+    }
+fi
+for lib in $LIBS; do
+    [ -f "$lib" ] || { echo "ERROR -- nothing was built (missing static library $lib)"; exit 2; }
+done
+
+# Status is captured with `|| cc_rc=$?`, never through a pipe.
+cc_rc=0
+obj=$OUT_DIR/slang_whisper.o
+"$CC" -O2 -fPIC -c -o "$(winpath "$obj")" "$(winpath "$SRC")" \
+    -I"$(winpath "$WHISPER_ROOT/include")" -I"$(winpath "$WHISPER_ROOT/ggml/include")" >"$OUT_DIR/whisper_shim_build.log" 2>&1 || cc_rc=$?
+if [ "$cc_rc" -eq 0 ]; then
+    "$CXX" -shared -o "$(winpath "$OUT")" "$(winpath "$obj")" \
+        $(for l in $LIBS; do winpath "$l"; printf ' '; done) >>"$OUT_DIR/whisper_shim_build.log" 2>&1 || cc_rc=$?
+fi
+if [ "$cc_rc" -eq 0 ] && [ "$IS_WINDOWS" -eq 1 ]; then
+    for rt in libwinpthread-1.dll libunwind.dll libc++.dll; do
+        [ -f "$MINGW_RT_DIR/$rt" ] && cp -f "$MINGW_RT_DIR/$rt" "$OUT_DIR/$rt"
+    done
+fi
+if [ "$cc_rc" -ne 0 ]; then
+    cat "$OUT_DIR/whisper_shim_build.log" >&2
+    echo "FAIL -- compile or link failed (exit $cc_rc)"
+    exit 1
+fi
+[ -f "$OUT" ] || { echo "ERROR -- nothing was built (the linker reported success but $OUT is absent)"; exit 2; }
+
+if [ "$IS_WINDOWS" -eq 1 ]; then
+    list_exports() { "$MINGW_BIN/llvm-readobj.exe" --coff-exports "$1" 2>/dev/null | sed -n 's/^ *Name: \(.*\)$/0 T \1/p'; }
+else
+    list_exports() { nm -D --defined-only "$1" 2>/dev/null; }
+fi
+symbols=$OUT_DIR/slang_whisper_symbols.txt
+list_exports "$OUT" >"$symbols"
+n_sym=$(grep -c ' T slang_whisper_' "$symbols" || true)
+[ "$n_sym" -gt 0 ] || { echo "FAIL -- built $OUT but it exports 0 slang_whisper_* symbols"; exit 1; }
+for required in slang_whisper_abi slang_whisper_init slang_whisper_transcribe slang_whisper_text_into slang_whisper_free; do
+    grep -q " T $required\$" "$symbols" || { echo "FAIL -- built $OUT but required symbol $required is absent"; exit 1; }
+done
+# One-ggml rule: ggml must be inside this library, not imported from a ggml.dll.
+if [ "$IS_WINDOWS" -eq 1 ] && "$MINGW_BIN/llvm-readobj.exe" --coff-imports "$OUT" 2>/dev/null | grep -qi 'Name: ggml'; then
+    echo "FAIL -- $OUT imports a ggml DLL; ggml must be linked statically"
+    exit 1
+fi
+echo "PASS -- $n_sym symbol(s) exported, $OUT"

@@ -1,8 +1,70 @@
 # `parse_claude_json_response` likely global-registry name collision (2 modules, same name)
 ## Open 2026-09-16 — needs owner triage
 
+## 2026-11-03: library JSON search consumer repair, verification pending
+
+Current source inspection identifies an independent concrete defect in the
+NoGC async library parser's JSON helpers: all three text-search consumers pass
+the raw `text.index_of` integer result to a `Some`/`nil` matcher. The current
+string interpreter owner (`src/compiler_rust/compiler/src/interpreter_method/string.rs`)
+returns a byte offset or `-1`; this is also the contract recorded in
+`divergence_byte_char_find_option_sweep_2026-08-01`. Treating that integer as an
+Option can lose found fields without any cross-module name collision.
+
+The candidate consumes offsets directly in `extract_json_string`,
+`extract_json_value`, and `extract_nested_string`. The sibling-imported
+`_unwrap_idx` compatibility helper now has an explicit `i64 -> i64` contract;
+no library-family selection or parser symbol names change. Five authored
+regression scenarios cover zero/positive/missing offsets, actual extraction,
+integer/boolean/nested controls, and the library's response/error/stream parser.
+
+This does **not** prove or repair the original global-registry collision
+hypothesis. The app parser now uses structured JSON, and the canonical
+`test/01_unit/app/llm_caret/claude_cli_spec.spl` explicitly imports its production
+owner (contract restoration `9bb1acec43b`), unlike the legacy inline-copy spec
+cited below. The original record remains open pending a faithful current
+cross-module reproducer.
+
+Runtime verification is **TEST_BLOCKED**: no qualified self-hosted CLI/test
+runner is available; tracked `bin/simple.exe` is the Rust seed and was not used
+as a substitute. Authored tests are not a PASS. Resume with an admitted runtime:
+`<runtime> test test/01_unit/lib/nogc_async_mut/llm/claude_json_index_contract_spec.spl --mode=interpreter`,
+then the canonical app spec and a cross-module owner-isolation reproducer.
+Bind producer/source/backend/runtime/cache identities and keep this bug open
+until those boundaries are demonstrated.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+
+## Status 2026-11-05 — not reproducible on release/1.0.0 @ c3b2271c310
+
+Runtime: committed `bin/simple.exe` (bootstrap seed, expected warning),
+`--mode=interpreter`, Windows Git Bash.
+
+- The original colliding name is gone: the library owner is now
+  `lib_parse_claude_json_response` (rename landed in 59e35ae6eec), and the app
+  owner uses structured JSON (`std.common.json.*`). No source-level duplicate
+  of `parse_claude_json_response` remains.
+- Canonical production-owner spec
+  `test/01_unit/app/llm_caret/claude_cli_spec.spl`: 85/85 PASS (interpreter).
+  The 8 historical failures do not reproduce.
+- New faithful cross-module reproducer
+  `test/01_unit/app/llm_caret/claude_cli_cross_module_owner_spec.spl`
+  co-compiles `app.llm_caret.claude_cli` and `std.nogc_async_mut.llm.claude_cli`
+  (which still share `parse_claude_stream_line`, `build_claude_args`,
+  `CliResponse`, `CliStreamEvent`, `claude_cli_send`, `claude_cli_stream`) and
+  asserts each module's own semantics win on both sides of the boundary:
+  4/4 PASS (interpreter). No `compiler_cross_module_private_symbol_collision`
+  warning names any claude symbol in that co-compile.
+- Library search-offset contract spec
+  `test/01_unit/lib/nogc_async_mut/llm/claude_json_index_contract_spec.spl`:
+  5/5 PASS.
+
+Conclusion: the global-registry mis-dispatch hypothesis is not reproducible on
+this branch; the historical 8-example failure was repaired by earlier
+contract-restoration work (9bb1acec43b, 59e35ae6eec). The new owner-isolation
+spec keeps the co-compile boundary covered. Closing as not reproducible; reopen
+only with a failing run of the new spec.
 
 **Date:** 2026-07-20
 **Severity:** medium
@@ -96,3 +158,26 @@ still an unimplemented `501` stub) is stale requires knowing the current
 `/v1/chat/completions` handler contract — left unclassified, not attempted as
 a mechanical fix.
 
+
+## Canonical database reconciliation — 2026-11-03
+
+OPEN original name-collision hypothesis; PR #6300 MERGED at a1b0b7bb79421b7d835054fd9d3ae89cc3ee34a4 and addresses a distinct integer search-offset consumer defect. TEST_BLOCKED: five authored JSON scenarios and canonical app/cross-module reproductions UNRUN without a qualified self-hosted runtime. Even a verified search-offset fix would not establish or close the historical collision hypothesis.
+
+## 2026-11-09 — closed (owner decision 2026-11-09 item 15: close after fresh-seed run)
+Seed `bin/simple.exe test` on origin/release/1.0.0 @1cc167e37fd: `claude_json_index_contract_spec` 5/5, `app/llm_caret/claude_cli_spec` 85/85, `claude_cli_cross_module_owner_spec` 4/4, all PASS. Collision not reproducible.
+
+## Verification note (2026-11-25, P2 ledger sweep)
+
+STALE-CLOSED confirmed by code inspection. The collision-removing rename is
+in current `release/1.0.0` source: the library owner is
+`lib_parse_claude_json_response`
+(`src/lib/nogc_async_mut/llm/claude_cli.spl:103`) while the app owner keeps
+`parse_claude_json_response` (`src/app/llm_caret/claude_cli.spl:247`), and the
+JSON search consumers now use the byte-offset `index_of` contract
+(`src/lib/nogc_async_mut/llm/json_helpers.spl:106-170`). The named specs
+(`claude_cli_cross_module_owner_spec.spl`, `claude_cli_spec.spl`,
+`claude_json_index_contract_spec.spl`) exist. A fresh seed re-run at HEAD is
+blocked: the pinned binary aborts with `unknown decorator
+'@representation_boundary'` (commit cfd89933699) before any spec runs, so this
+note rests on the 2026-11-09 seed-run closure evidence (5/5, 85/85, 4/4 PASS
+at @1cc167e37fd) plus the source check above. Kept closed.

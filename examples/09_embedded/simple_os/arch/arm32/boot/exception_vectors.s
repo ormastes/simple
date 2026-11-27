@@ -29,11 +29,9 @@ rt_arm32_svc_vector:
     /* Preserve the complete volatile user register set and exception LR.
      * r7 carries the syscall id; r0 carries its first argument. */
     push {r0-r12, lr}
-    mov r2, lr
-    mov r1, r0
-    mov r0, r7
-    mrs r3, spsr
-    bl rt_arm32_svc_dispatch
+    mov r0, sp
+    mrs r1, spsr
+    bl rt_arm32_svc_dispatch_frame_v1
     cmp r0, #1
     beq .Larm32_svc_exit
     cmp r0, #0

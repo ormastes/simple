@@ -1,6 +1,20 @@
 # `VulkanFfi` rejection ledger never accumulates under the spec harness (works under `bin/simple run`)
 ## Open 2026-09-16 — needs owner triage
 
+## Triage 2026-11-25
+
+Still open; the 2026-09-13 triage below stands. Re-checked on a Windows
+worktree at release/1.0.0 HEAD (`f3fb8f24dc9`): the deliberately-RED case
+("starts empty, then counts and names each rejected operation",
+`test/01_unit/lib/gpu/engine2d/ffi_vulkan_spec.spl:61`) is still present, and
+the spec is currently UNRUNNABLE with the tracked seed — it fails to load
+with `unknown decorator '@representation_boundary'` (the known release/1.0.0
+source/binary inconsistency; the decorator arrives via the spec's import
+chain), so the ledger-accumulation behavior could not be re-probed on this
+host. The bisection the doc calls for (cheapest discriminator: add a
+`DynLib?` field to the minimal repro) remains undone; root cause still not
+isolated. Left open as characterized.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 

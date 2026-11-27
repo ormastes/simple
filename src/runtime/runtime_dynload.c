@@ -8,10 +8,13 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include "platform/spl_win_utf16_private.h"
 #else
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <sched.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #if defined(__linux__)
@@ -23,6 +26,8 @@
 #include "runtime.h"
 #include "simple_gpu_provider_abi_v1.h"
 #include "simple_gpu_provider_identity_v1.h"
+#include "simple_gpu_provider_receipt_v1.h"
+#include "runtime_dynload_snapshot_private.h"
 
 #include <stdatomic.h>
 #include <limits.h>
@@ -32,7 +37,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef _WIN32
+#if defined(_MSC_VER) && !defined(__clang__)
 #define SIMPLE_GPU_THREAD_LOCAL __declspec(thread)
 #else
 #define SIMPLE_GPU_THREAD_LOCAL _Thread_local
@@ -57,6 +62,7 @@ typedef struct SimpleGpuProviderState {
     int64_t backend_bit;
     const char *path_env;
     const char *digest_env;
+    const char *receipt_env;
     void *handle;
     int64_t abi_version;
     int64_t backend_bits;
@@ -72,6 +78,12 @@ typedef struct SimpleGpuProviderState {
     const SimpleGpuProviderAbiV1 *api;
     int authenticated;
     SimpleGpuProviderPhaseV1 phase;
+    /* Thread that set LOADING; meaningful only while phase == LOADING. */
+#ifdef _WIN32
+    DWORD loader_thread;
+#else
+    pthread_t loader_thread;
+#endif
 } SimpleGpuProviderState;
 
 typedef struct SimpleGpuCallPinV1 {
@@ -84,13 +96,16 @@ typedef struct SimpleGpuCallPinV1 {
 static SimpleGpuProviderState simple_gpu_providers[] = {
     {.backend_bit = SIMPLE_GPU_BACKEND_CUDA,
         .path_env = "SIMPLE_CUDA_PROVIDER_PATH",
-        .digest_env = "SIMPLE_CUDA_PROVIDER_SHA256", .snapshot_fd = -1},
+        .digest_env = "SIMPLE_CUDA_PROVIDER_SHA256",
+        .receipt_env = "SIMPLE_CUDA_PROVIDER_RECEIPT", .snapshot_fd = -1},
     {.backend_bit = SIMPLE_GPU_BACKEND_VULKAN,
         .path_env = "SIMPLE_VULKAN_PROVIDER_PATH",
-        .digest_env = "SIMPLE_VULKAN_PROVIDER_SHA256", .snapshot_fd = -1},
+        .digest_env = "SIMPLE_VULKAN_PROVIDER_SHA256",
+        .receipt_env = "SIMPLE_VULKAN_PROVIDER_RECEIPT", .snapshot_fd = -1},
     {.backend_bit = SIMPLE_GPU_BACKEND_METAL,
         .path_env = "SIMPLE_METAL_PROVIDER_PATH",
-        .digest_env = "SIMPLE_METAL_PROVIDER_SHA256", .snapshot_fd = -1}
+        .digest_env = "SIMPLE_METAL_PROVIDER_SHA256",
+        .receipt_env = "SIMPLE_METAL_PROVIDER_RECEIPT", .snapshot_fd = -1}
 };
 static atomic_flag simple_gpu_provider_lock = ATOMIC_FLAG_INIT;
 #if defined(__linux__)
@@ -109,6 +124,41 @@ static void simple_gpu_lock(void) {
 static void simple_gpu_unlock(void) {
     atomic_flag_clear_explicit(&simple_gpu_provider_lock, memory_order_release);
 }
+
+#ifdef _WIN32
+static void simple_gpu_mark_loader(SimpleGpuProviderState *state) {
+    state->loader_thread = GetCurrentThreadId();
+}
+static int simple_gpu_is_loader(const SimpleGpuProviderState *state) {
+    return state->loader_thread == GetCurrentThreadId();
+}
+static void simple_gpu_yield(void) { SwitchToThread(); }
+#else
+static void simple_gpu_mark_loader(SimpleGpuProviderState *state) {
+    state->loader_thread = pthread_self();
+}
+static int simple_gpu_is_loader(const SimpleGpuProviderState *state) {
+    return pthread_equal(state->loader_thread, pthread_self());
+}
+static void simple_gpu_yield(void) { sched_yield(); }
+
+/* A fork child has only the forking thread: a load another thread had in
+ * flight can never finish there, and the lock may be held by a thread that
+ * no longer exists. Release the lock and fail any in-flight load so the
+ * child's callers see "unavailable" instead of waiting forever. */
+static void simple_gpu_atfork_child(void) {
+    size_t i;
+    atomic_flag_clear_explicit(&simple_gpu_provider_lock, memory_order_release);
+    for (i = 0; i < sizeof(simple_gpu_providers) / sizeof(simple_gpu_providers[0]); i++) {
+        if (simple_gpu_providers[i].phase == SIMPLE_GPU_PROVIDER_LOADING_V1)
+            simple_gpu_providers[i].phase = SIMPLE_GPU_PROVIDER_FAILED_V1;
+    }
+}
+
+__attribute__((constructor)) static void simple_gpu_register_atfork(void) {
+    (void)pthread_atfork(NULL, NULL, simple_gpu_atfork_child);
+}
+#endif
 
 #if defined(__linux__)
 /* dlopen caches loaded objects by pathname even after a caller closes its
@@ -133,20 +183,12 @@ static int simple_dynload_unique_snapshot_linux_v1(int snapshot) {
 /* Shared UTF-8 loader belongs to both the registry and legacy wrappers. */
 #ifdef _WIN32
 static HMODULE runtime_dynload_open_utf8(const char *path) {
-    int wide_len;
     wchar_t *wide_path;
     HMODULE handle;
     if (!path || !path[0]) return NULL;
-    wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-        path, -1, NULL, 0);
-    if (wide_len <= 0) return NULL;
-    wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    wide_path = spl_win_utf8_to_wide(path, -1, MB_ERR_INVALID_CHARS,
+        malloc, free, NULL);
     if (!wide_path) return NULL;
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-            path, -1, wide_path, wide_len) != wide_len) {
-        free(wide_path);
-        return NULL;
-    }
     handle = LoadLibraryW(wide_path);
     free(wide_path);
     return handle;
@@ -280,56 +322,45 @@ static int simple_gpu_digest_matches_expected(
 
 #if defined(__linux__)
 static int simple_gpu_snapshot_linux_v1(const char *path) {
-    int source, snapshot;
-    struct stat source_stat;
-    uint8_t buffer[65536];
-    uint64_t total = 0;
-    source = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-    if (source < 0 || fstat(source, &source_stat) != 0 ||
-            !S_ISREG(source_stat.st_mode) || source_stat.st_size < 0 ||
-            (uint64_t)source_stat.st_size > UINT64_C(1073741824)) {
-        if (source >= 0) close(source);
-        return -1;
-    }
-    snapshot = (int)syscall(SYS_memfd_create, "simple-gpu-provider-v1",
-        MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if (snapshot < 0) { close(source); return -1; }
-    for (;;) {
-        ssize_t got = read(source, buffer, sizeof(buffer));
-        ssize_t offset = 0;
-        if (got == 0) break;
-        if (got < 0) {
-            if (errno == EINTR) continue;
-            close(source); close(snapshot); return -1;
-        }
-        if ((uint64_t)got > UINT64_C(1073741824) - total) {
-            close(source); close(snapshot); return -1;
-        }
-        total += (uint64_t)got;
-        while (offset < got) {
-            ssize_t put = write(snapshot, buffer + offset, (size_t)(got - offset));
-            if (put < 0 && errno == EINTR) continue;
-            if (put <= 0) { close(source); close(snapshot); return -1; }
-            offset += put;
-        }
-    }
-    if (total != (uint64_t)source_stat.st_size || close(source) != 0 ||
-            lseek(snapshot, 0, SEEK_SET) < 0 ||
-            fcntl(snapshot, F_ADD_SEALS,
-                F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0) {
-        close(snapshot); return -1;
-    }
+    int snapshot = simple_dynload_snapshot_memfd_linux_v1(path, "simple-gpu-provider-v1");
+    if (snapshot < 0) return -1;
     return simple_dynload_unique_snapshot_linux_v1(snapshot);
 }
 #endif
 
+/* Reads the admission receipt named by SIMPLE_<BACKEND>_PROVIDER_RECEIPT and
+ * takes the expected artifact digest from it (simple_gpu_provider_receipt_v1.h).
+ * Returns 0 when the receipt is unreadable, oversized, carries no valid digest,
+ * or disagrees with the digest env: the caller must then refuse the load. */
+static int simple_gpu_receipt_digest_v1(const char *receipt_path,
+        const char *digest_env_value, char out_hex[65]) {
+    char text[16384];
+    size_t length;
+    FILE *file = fopen(receipt_path, "rb");
+    out_hex[0] = '\0';
+    if (!file) return 0;
+    length = fread(text, 1, sizeof(text) - 1, file);
+    if (length == sizeof(text) - 1 && fgetc(file) != EOF) length = 0;
+    fclose(file);
+    if (length == 0) return 0;
+    text[length] = '\0';
+    return simple_gpu_receipt_expected_digest_v1(text, digest_env_value, out_hex);
+}
+
 static void *simple_gpu_open_with_authentication_v1(
-        const char *path, const char *digest_env, uint8_t digest[32],
-        int *authenticated, int *retained_snapshot_fd) {
+        const char *path, const char *digest_env, const char *receipt_env,
+        uint8_t digest[32], int *authenticated, int *retained_snapshot_fd) {
     const char *expected = digest_env ? getenv(digest_env) : NULL;
+    const char *receipt_path = receipt_env ? getenv(receipt_env) : NULL;
+    char receipt_hex[65];
     void *handle;
     *authenticated = 0;
     *retained_snapshot_fd = -1;
+    if (receipt_path && receipt_path[0]) {
+        if (!simple_gpu_receipt_digest_v1(receipt_path, expected, receipt_hex))
+            return NULL;
+        expected = receipt_hex;
+    }
     if (!expected || !expected[0]) return simple_gpu_open(path);
 #if defined(__linux__)
     {
@@ -436,6 +467,20 @@ static int simple_gpu_load_v1(SimpleGpuProviderState *state) {
     int snapshot_fd = -1;
 
     simple_gpu_lock();
+    /* A concurrent first call must not report "unavailable" while another
+     * thread is still loading: yield and re-check the lock-guarded phase until
+     * the loader publishes ACTIVE or a terminal state. A re-entrant call from
+     * the loader itself (e.g. a provider constructor calling back) cannot wait
+     * on itself, so it reports "unavailable" as before. */
+    while (state->phase == SIMPLE_GPU_PROVIDER_LOADING_V1) {
+        if (simple_gpu_is_loader(state)) {
+            simple_gpu_unlock();
+            return 0;
+        }
+        simple_gpu_unlock();
+        simple_gpu_yield();
+        simple_gpu_lock();
+    }
     if (state->phase == SIMPLE_GPU_PROVIDER_ACTIVE_V1) {
         simple_gpu_unlock();
         return 1;
@@ -445,6 +490,7 @@ static int simple_gpu_load_v1(SimpleGpuProviderState *state) {
         return 0;
     }
     state->phase = SIMPLE_GPU_PROVIDER_LOADING_V1;
+    simple_gpu_mark_loader(state);
     simple_gpu_unlock();
 
     path = getenv(state->path_env);
@@ -453,8 +499,8 @@ static int simple_gpu_load_v1(SimpleGpuProviderState *state) {
         if (path_copy) memcpy(path_copy, path, strlen(path) + 1);
     }
     handle = path_copy ? simple_gpu_open_with_authentication_v1(
-        path_copy, state->digest_env, artifact_digest, &authenticated,
-        &snapshot_fd) : NULL;
+        path_copy, state->digest_env, state->receipt_env, artifact_digest,
+        &authenticated, &snapshot_fd) : NULL;
     if (handle) valid = simple_gpu_validate_surface(
         state->backend_bit, handle, &abi_version, &backend_bits);
     if (handle && authenticated)
@@ -1711,26 +1757,181 @@ GPU_CALL2(double, rt_cuda_event_elapsed_ms, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_ev
 GPU_CALL4(int64_t, rt_cuda_memcpy_htod_async, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memcpy_htod_async", -3, int64_t, int64_t, int64_t, int64_t)
 GPU_CALL4(int64_t, rt_cuda_memcpy_dtoh_async, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memcpy_dtoh_async", -3, int64_t, int64_t, int64_t, int64_t)
 
-/* 12 C-ABI params (module, (func_name_ptr, func_name_len) for the Simple
- * `text` arg, then grid/block/shared_bytes/stream/args_ptr) matching
- * rt_cuda_launch_kernel_ex's Rust signature exactly — too wide for the
+/* 11 C-ABI params (module, the Simple `text` func_name as ONE NUL-terminated
+ * C string, then grid/block/shared_bytes/stream/args_ptr) matching
+ * rt_cuda_launch_kernel_ex's Rust signature exactly. The name has no
+ * text_extern_abi.spl row, so native codegen passes the rt_interp_cstr word
+ * (cuda_launch_kernel_ex_text_abi_unregistered_2026-11-26). Too wide for the
  * GPU_CALLn macros above, so written out directly. */
-int64_t rt_cuda_launch_kernel_ex(int64_t module, const uint8_t *func_name_ptr, uint64_t func_name_len,
+int64_t rt_cuda_launch_kernel_ex(int64_t module, const char *func_name,
                                   int64_t grid_x, int64_t grid_y, int64_t grid_z,
                                   int64_t block_x, int64_t block_y, int64_t block_z,
                                   int64_t shared_bytes, int64_t stream, int64_t args_ptr) {
-    typedef int64_t (*Fn)(int64_t, const uint8_t *, uint64_t, int64_t, int64_t, int64_t,
+    typedef int64_t (*Fn)(int64_t, const char *, int64_t, int64_t, int64_t,
                            int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
     SimpleGpuCallPinV1 pin;
     int64_t result;
     if (!simple_gpu_call_acquire_v1(
             SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_launch_kernel_ex", &pin))
         return -3;
-    result = ((Fn)pin.symbol)(module, func_name_ptr, func_name_len,
+    result = ((Fn)pin.symbol)(module, func_name,
         grid_x, grid_y, grid_z, block_x, block_y, block_z,
         shared_bytes, stream, args_ptr);
     simple_gpu_call_release_v1(&pin);
     return result;
+}
+
+/* Device query, context, memory, module, launch and f64-kernel surface: the
+ * rest of `src/lib/nogc_sync_mut/cuda/sffi.spl`. Same contract as E2 above —
+ * symbol names and ABI match cuda_runtime.rs 1:1, and the unavailable values
+ * are the Rust `not(feature = "cuda")` twins' (-3, except device_compute_
+ * capability/device_identity 0 and device_name "No CUDA"). Without these a
+ * native program that queries a device does not link
+ * (native_c_runtime_missing_cuda_provider_forwarders_2026-11-22). */
+#define GPU_CALL5(ret, name, bit, provider_name, unavailable, t1, t2, t3, t4, t5) \
+    ret name(t1 a1, t2 a2, t3 a3, t4 a4, t5 a5) { typedef ret (*Fn)(t1,t2,t3,t4,t5); SimpleGpuCallPinV1 pin; ret result; \
+        if (!simple_gpu_call_acquire_v1(bit, provider_name, &pin)) return unavailable; \
+        result = ((Fn)pin.symbol)(a1,a2,a3,a4,a5); simple_gpu_call_release_v1(&pin); return result; }
+GPU_CALL1(int64_t, rt_cuda_device_get, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_device_get", -3, int64_t)
+GPU_CALL1(int64_t, rt_cuda_device_compute_capability, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_device_compute_capability", 0, int64_t)
+GPU_CALL1(int64_t, rt_cuda_device_identity, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_device_identity", 0, int64_t)
+GPU_CALL1(int64_t, rt_cuda_ctx_create, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_ctx_create", -3, int64_t)
+GPU_CALL1(int64_t, rt_cuda_ctx_set_current, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_ctx_set_current", -3, int64_t)
+GPU_CALL1(int64_t, rt_cuda_ctx_destroy, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_ctx_destroy", -3, int64_t)
+GPU_CALL0(int64_t, rt_cuda_ctx_synchronize, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_ctx_synchronize", -3)
+GPU_CALL1(int64_t, rt_cuda_mem_free, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_mem_free", -3, int64_t)
+GPU_CALL3(int64_t, rt_cuda_memcpy_htod, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memcpy_htod", -3, int64_t, int64_t, int64_t)
+GPU_CALL3(int64_t, rt_cuda_memcpy_dtod, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memcpy_dtod", -3, int64_t, int64_t, int64_t)
+GPU_CALL3(int64_t, rt_cuda_memset, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memset", -3, int64_t, int64_t, int64_t)
+GPU_CALL5(int64_t, rt_cuda_f64_binary_op, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_f64_binary_op", -3, int64_t, int64_t, int64_t, int64_t, int64_t)
+GPU_CALL3(int64_t, rt_cuda_f64_sum, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_f64_sum", -3, int64_t, int64_t, int64_t)
+GPU_CALL4(int64_t, rt_cuda_f64_minmax, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_f64_minmax", -3, int64_t, int64_t, int64_t, int64_t)
+GPU_CALL5(int64_t, rt_cuda_f64_sum_axis, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_f64_sum_axis", -3, int64_t, int64_t, int64_t, int64_t, int64_t)
+GPU_CALL4(int64_t, rt_cuda_f64_scalar_div, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_f64_scalar_div", -3, int64_t, int64_t, int64_t, int64_t)
+GPU_CALL5(int64_t, rt_cuda_f64_slice_1d, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_f64_slice_1d", -3, int64_t, int64_t, int64_t, int64_t, int64_t)
+GPU_CALL2(int64_t, rt_cuda_module_load_data_bytes, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_module_load_data_bytes", -3, int64_t, int64_t)
+GPU_CALL1(int64_t, rt_cuda_module_unload, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_module_unload", -3, int64_t)
+GPU_CALL0(int64_t, rt_cuda_sync, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_sync", -3)
+/* A Simple `text` argument is (bytes, byte length) here: these names have
+ * text_extern_abi.spl rows. */
+GPU_CALL2(int64_t, rt_cuda_module_load, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_module_load", -3, const uint8_t *, uint64_t)
+GPU_CALL2(int64_t, rt_cuda_module_load_data, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_module_load_data", -3, const uint8_t *, uint64_t)
+#undef GPU_CALL5
+
+int64_t rt_cuda_f64_slice_2d(int64_t dst, int64_t src, int64_t source_cols,
+                             int64_t row_start, int64_t row_step, int64_t row_count,
+                             int64_t col_start, int64_t col_step, int64_t col_count) {
+    typedef int64_t (*Fn)(int64_t, int64_t, int64_t, int64_t, int64_t,
+                          int64_t, int64_t, int64_t, int64_t);
+    SimpleGpuCallPinV1 pin;
+    int64_t result;
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_f64_slice_2d", &pin))
+        return -3;
+    result = ((Fn)pin.symbol)(dst, src, source_cols, row_start, row_step, row_count,
+        col_start, col_step, col_count);
+    simple_gpu_call_release_v1(&pin);
+    return result;
+}
+
+/* The provider's name pointer is provider-owned and may be unmapped once the
+ * pin is released (unload/reload), so copy it while pinned into a per-thread
+ * runtime-owned buffer. Valid until this thread's next call; 256 bytes is
+ * cuDeviceGetName's buffer in cuda_runtime.rs. */
+#if defined(_MSC_VER)
+#define SIMPLE_GPU_THREAD_LOCAL __declspec(thread)
+#else
+#define SIMPLE_GPU_THREAD_LOCAL _Thread_local
+#endif
+const char *rt_cuda_device_name(int64_t device) {
+    typedef const char *(*Fn)(int64_t);
+    static SIMPLE_GPU_THREAD_LOCAL char name_copy[256];
+    SimpleGpuCallPinV1 pin;
+    const char *name;
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_device_name", &pin))
+        return "No CUDA";
+    name = ((Fn)pin.symbol)(device);
+    if (name) {
+        strncpy(name_copy, name, sizeof(name_copy) - 1);
+        name_copy[sizeof(name_copy) - 1] = '\0';
+    } else {
+        name_copy[0] = '\0';
+    }
+    simple_gpu_call_release_v1(&pin);
+    return name ? name_copy : "No CUDA";
+}
+#undef SIMPLE_GPU_THREAD_LOCAL
+
+/* `func_name: text` arrives as ONE C string. Scope: the pure-Simple
+ * compiler, literal names. Its native codegen splits a text argument into
+ * (bytes, len) only for names listed in src/compiler/50.mir/text_extern_abi.spl,
+ * and this one is not, so it gets the single-word rt_interp_cstr form.
+ * The Rust seed's native codegen passes the tagged value word for unlisted
+ * text args. Both pure-Simple lanes, --runtime-path included, link the C
+ * runtime's NUL-terminated rt_interp_cstr. The Rust rt_interp_cstr is not
+ * terminated (rt_interp_cstr_built_name_unterminated_runtime_path_2026-11-26).
+ * The Rust provider reads a C string. */
+int64_t rt_cuda_module_get_function(int64_t module, const char *func_name) {
+    typedef int64_t (*Fn)(int64_t, const char *);
+    SimpleGpuCallPinV1 pin;
+    int64_t result;
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_module_get_function", &pin))
+        return -3;
+    result = ((Fn)pin.symbol)(module, func_name);
+    simple_gpu_call_release_v1(&pin);
+    return result;
+}
+
+/* `func_name: text` is (bytes, byte length): rt_cuda_launch_kernel has a
+ * text_extern_abi.spl row, so native codegen splits it. */
+int64_t rt_cuda_launch_kernel(int64_t module, const uint8_t *func_name_ptr, uint64_t func_name_len,
+                              int64_t grid_x, int64_t grid_y, int64_t grid_z,
+                              int64_t block_x, int64_t block_y, int64_t block_z,
+                              int64_t args_ptr) {
+    typedef int64_t (*Fn)(int64_t, const uint8_t *, uint64_t, int64_t, int64_t,
+                          int64_t, int64_t, int64_t, int64_t, int64_t);
+    SimpleGpuCallPinV1 pin;
+    int64_t result;
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_launch_kernel", &pin))
+        return -3;
+    result = ((Fn)pin.symbol)(module, func_name_ptr, func_name_len,
+        grid_x, grid_y, grid_z, block_x, block_y, block_z, args_ptr);
+    simple_gpu_call_release_v1(&pin);
+    return result;
+}
+
+int64_t rt_cuda_launch_kernel_name(int64_t module, int64_t func_name_ptr, int64_t func_name_len,
+                                   int64_t grid_x, int64_t grid_y, int64_t grid_z,
+                                   int64_t block_x, int64_t block_y, int64_t block_z,
+                                   int64_t args_ptr) {
+    typedef int64_t (*Fn)(int64_t, int64_t, int64_t, int64_t, int64_t,
+                          int64_t, int64_t, int64_t, int64_t, int64_t);
+    SimpleGpuCallPinV1 pin;
+    int64_t result;
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_launch_kernel_name", &pin))
+        return -3;
+    result = ((Fn)pin.symbol)(module, func_name_ptr, func_name_len,
+        grid_x, grid_y, grid_z, block_x, block_y, block_z, args_ptr);
+    simple_gpu_call_release_v1(&pin);
+    return result;
+}
+
+/* Pure code -> name table, identical to cuda_runtime.rs's (it needs no
+ * driver), so it answers the same with or without a provider. */
+const char *rt_cuda_get_error_string(int64_t error_code) {
+    switch (error_code) {
+    case 0: return "CUDA_SUCCESS";
+    case -1: return "CUDA_ERROR_INVALID_VALUE";
+    case -2: return "CUDA_ERROR_OUT_OF_MEMORY";
+    case -3: return "CUDA_ERROR_NOT_INITIALIZED";
+    case -100: return "CUDA_ERROR_NO_DEVICE";
+    case -200: return "CUDA_ERROR_INVALID_IMAGE";
+    case -218: return "CUDA_ERROR_INVALID_PTX";
+    case -301: return "CUDA_ERROR_FILE_NOT_FOUND";
+    case -500: return "CUDA_ERROR_NOT_FOUND";
+    case -700: return "CUDA_ERROR_ILLEGAL_ADDRESS";
+    case -701: return "CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES";
+    default: return "CUDA_ERROR_UNKNOWN";
+    }
 }
 
 GPU_CALL0(int64_t, rt_vulkan_is_available, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_provider_is_available", 0)
@@ -1896,14 +2097,41 @@ static int simple_gpu_array_to_bytes(int64_t array_value, uint8_t **bytes, int64
     return 1;
 }
 
+/* Pin a Metal provider symbol together with a Simple string's bytes. */
+static int simple_gpu_metal_acquire_string(int64_t str, const char *name,
+        SimpleGpuCallPinV1 *pin, const uint8_t **data, int64_t *len) {
+    *data = rt_string_data(str);
+    *len = rt_string_len(str);
+    return *data && *len >= 0 &&
+        simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_METAL, name, pin);
+}
+
+/* Copy a Simple byte array and pin a Metal provider symbol.  check_len=0
+ * skips the requested_len check.  On failure nothing is left allocated. */
+static int simple_gpu_metal_acquire_bytes(int64_t array_value, int check_len, int64_t requested_len,
+        const char *name, SimpleGpuCallPinV1 *pin, uint8_t **bytes, int64_t *len) {
+    *bytes = NULL;
+    *len = 0;
+    if (!simple_gpu_array_to_bytes(array_value, bytes, len) ||
+            (check_len && requested_len != *len)) {
+        free(*bytes);
+        return 0;
+    }
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_METAL, name, pin)) {
+        free(*bytes);
+        return 0;
+    }
+    return 1;
+}
+
 int64_t rt_metal_compile_shader(int64_t device, int64_t source) {
     typedef int64_t (*Fn)(int64_t,int64_t,int64_t);
     SimpleGpuCallPinV1 pin;
-    const uint8_t *data = rt_string_data(source);
-    int64_t len = rt_string_len(source);
+    const uint8_t *data;
+    int64_t len;
     int64_t result;
-    if (!data || len < 0 || !simple_gpu_call_acquire_v1(
-            SIMPLE_GPU_BACKEND_METAL, "rt_metal_compile_shader_raw", &pin))
+    if (!simple_gpu_metal_acquire_string(source, "rt_metal_compile_shader_raw",
+            &pin, &data, &len))
         return 0;
     result = ((Fn)pin.symbol)(device, (int64_t)(intptr_t)data, len);
     simple_gpu_call_release_v1(&pin);
@@ -1913,11 +2141,11 @@ int64_t rt_metal_compile_shader(int64_t device, int64_t source) {
 int64_t rt_metal_create_compute_pipeline(int64_t device, int64_t shader, int64_t entry) {
     typedef int64_t (*Fn)(int64_t,int64_t,int64_t,int64_t);
     SimpleGpuCallPinV1 pin;
-    const uint8_t *data = rt_string_data(entry);
-    int64_t len = rt_string_len(entry);
+    const uint8_t *data;
+    int64_t len;
     int64_t result;
-    if (!data || len < 0 || !simple_gpu_call_acquire_v1(
-            SIMPLE_GPU_BACKEND_METAL, "rt_metal_create_compute_pipeline_raw", &pin))
+    if (!simple_gpu_metal_acquire_string(entry, "rt_metal_create_compute_pipeline_raw",
+            &pin, &data, &len))
         return 0;
     result = ((Fn)pin.symbol)(device, shader, (int64_t)(intptr_t)data, len);
     simple_gpu_call_release_v1(&pin);
@@ -1928,12 +2156,9 @@ int64_t rt_metal_load_library_array(int64_t device, int64_t array_value) {
     typedef int64_t (*Fn)(int64_t,int64_t,int64_t);
     SimpleGpuCallPinV1 pin;
     uint8_t *bytes = NULL; int64_t len = 0; int64_t result;
-    if (!simple_gpu_array_to_bytes(array_value, &bytes, &len)) return 0;
-    if (!simple_gpu_call_acquire_v1(
-            SIMPLE_GPU_BACKEND_METAL, "rt_metal_load_library_raw", &pin)) {
-        free(bytes);
+    if (!simple_gpu_metal_acquire_bytes(array_value, 0, 0,
+            "rt_metal_load_library_raw", &pin, &bytes, &len))
         return 0;
-    }
     result = ((Fn)pin.symbol)(device, (int64_t)(intptr_t)bytes, len);
     simple_gpu_call_release_v1(&pin);
     free(bytes);
@@ -1944,16 +2169,9 @@ int64_t rt_metal_buffer_upload(int64_t buffer, int64_t array_value, int64_t requ
     typedef int64_t (*Fn)(int64_t,int64_t,int64_t);
     SimpleGpuCallPinV1 pin;
     uint8_t *bytes = NULL; int64_t len = 0; int64_t result;
-    if (!simple_gpu_array_to_bytes(array_value, &bytes, &len) ||
-            requested_len != len) {
-        free(bytes);
+    if (!simple_gpu_metal_acquire_bytes(array_value, 1, requested_len,
+            "rt_metal_buffer_upload_raw", &pin, &bytes, &len))
         return 0;
-    }
-    if (!simple_gpu_call_acquire_v1(
-            SIMPLE_GPU_BACKEND_METAL, "rt_metal_buffer_upload_raw", &pin)) {
-        free(bytes);
-        return 0;
-    }
     result = ((Fn)pin.symbol)(buffer, (int64_t)(intptr_t)bytes, len);
     simple_gpu_call_release_v1(&pin);
     free(bytes);
@@ -1984,16 +2202,9 @@ int64_t rt_metal_set_bytes(int64_t encoder, int64_t array_value, int64_t request
     typedef int64_t (*Fn)(int64_t,int64_t,int64_t,int64_t);
     SimpleGpuCallPinV1 pin;
     uint8_t *bytes = NULL; int64_t len = 0; int64_t result;
-    if (!simple_gpu_array_to_bytes(array_value, &bytes, &len) ||
-            requested_len != len) {
-        free(bytes);
+    if (!simple_gpu_metal_acquire_bytes(array_value, 1, requested_len,
+            "rt_metal_set_bytes_raw", &pin, &bytes, &len))
         return 0;
-    }
-    if (!simple_gpu_call_acquire_v1(
-            SIMPLE_GPU_BACKEND_METAL, "rt_metal_set_bytes_raw", &pin)) {
-        free(bytes);
-        return 0;
-    }
     result = ((Fn)pin.symbol)(encoder, (int64_t)(intptr_t)bytes, len, index);
     simple_gpu_call_release_v1(&pin);
     free(bytes);
@@ -2006,45 +2217,8 @@ int64_t spl_dynlib_snapshot_linux(int64_t path_value) {
 #if defined(__linux__)
     const char* path = rt_interp_cstr(path_value);
     if (!path) return -1;
-    int source = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-    if (source < 0) return -1;
-    struct stat source_stat;
-    if (fstat(source, &source_stat) != 0 || !S_ISREG(source_stat.st_mode) ||
-        source_stat.st_size < 0 || (uint64_t)source_stat.st_size > UINT64_C(1073741824)) {
-        close(source);
-        return -1;
-    }
-    int snapshot = (int)syscall(SYS_memfd_create, "simple-sffi-provider",
-                                MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if (snapshot < 0) { close(source); return -1; }
-    uint8_t buffer[65536];
-    uint64_t total = 0;
-    for (;;) {
-        ssize_t got = read(source, buffer, sizeof(buffer));
-        if (got == 0) break;
-        if (got < 0) {
-            if (errno == EINTR) continue;
-            close(source); close(snapshot); return -1;
-        }
-        if ((uint64_t)got > UINT64_C(1073741824) - total) {
-            close(source); close(snapshot); return -1;
-        }
-        total += (uint64_t)got;
-        ssize_t offset = 0;
-        while (offset < got) {
-            ssize_t put = write(snapshot, buffer + offset, (size_t)(got - offset));
-            if (put < 0 && errno == EINTR) continue;
-            if (put <= 0) { close(source); close(snapshot); return -1; }
-            offset += put;
-        }
-    }
-    if (total != (uint64_t)source_stat.st_size || close(source) != 0 ||
-        lseek(snapshot, 0, SEEK_SET) < 0 ||
-        fcntl(snapshot, F_ADD_SEALS,
-              F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0) {
-        close(snapshot);
-        return -1;
-    }
+    int snapshot = simple_dynload_snapshot_memfd_linux_v1(path, "simple-sffi-provider");
+    if (snapshot < 0) return -1;
     return (int64_t)simple_dynload_unique_snapshot_linux_v1(snapshot);
 #else
     (void)path_value;

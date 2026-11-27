@@ -33,7 +33,7 @@ Reproduction after applying the repair:
 
 ```sh
 sh scripts/check/check-bootstrap-windows-authority-paths.shs
-python scripts/check/check-bootstrap-path-access.py \
+python scripts/check/check-bootstrap-path-access.py [deleted 2026-11-26] \
   --script scripts/bootstrap/bootstrap-from-scratch.sh \
   --output build/windows-path-contract-fresh
 ```

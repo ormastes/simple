@@ -1,0 +1,41 @@
+# Bug: interpreter_val_decl_in_loop_body_declines_every_matcher_2026-09-13
+# (also the loop-body shapes of interpreter_per_call_cost_dominates_loop_bodies,
+# interpreter_owned_method_call_component_attribution and
+# engine2d_interpreter_span_kernel_marshalling_perf_gap).
+#
+# One block-local integer `val` in a while-loop body used to decline every
+# native matcher (271x slower). The inline-int matcher now splices the pure
+# `val` into the target expression. Results must be identical to the closed
+# form AND identical between the interpreter and the default (JIT) engine.
+# Needs the fixed seed for the speed claim only; the values hold on any seed.
+use std.spec.{describe, it, expect}
+use std.io_runtime.{write_file, file_exists, env_get, env_set_process}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use app.io.process_ops.{process_run_timeout}
+
+fn binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "": return env_bin
+    if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+
+val PROGRAM = "fn sum_mod(n: i64) -> i64:\n    var acc = 0\n    var i = 0\n    while i < n:\n        val t = i % 7\n        acc = acc + t\n        i = i + 1\n    acc\n\nfn sum_sq(n: i64) -> i64:\n    var acc = 0\n    var i = 0\n    while i < n:\n        val t = i * 2 + 1\n        acc = acc + t * t\n        i = i + 1\n    acc\n\nfn main():\n    print sum_mod(100000)\n    print sum_sq(1000)\nmain()\n"
+
+fn run_in_mode(mode: text) -> text:
+    val file = get_temp_dir().replace("\\", "/") + "/while_local_val_parity_fx.spl"
+    val _w = write_file(file, PROGRAM)
+    val _e = env_set_process("SIMPLE_EXECUTION_MODE", mode)
+    val (out, err, rc) = process_run_timeout(binary(), [file], 300000)
+    val _r = env_set_process("SIMPLE_EXECUTION_MODE", "")
+    out
+
+describe "while loop with a block-local integer val":
+    it "matches the closed form in the interpreter":
+        val out = run_in_mode("interpreter")
+        expect(out.contains("299995")).to_equal(true)
+        expect(out.contains("1333333000")).to_equal(true)
+    it "gives the same output in the interpreter and the default engine":
+        val interp = run_in_mode("interpreter")
+        val jit = run_in_mode("jit")
+        expect(interp).to_equal(jit)
+        expect(jit.contains("299995")).to_equal(true)
+        expect(jit.contains("1333333000")).to_equal(true)

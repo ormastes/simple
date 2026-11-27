@@ -1,6 +1,6 @@
 # `?` on a Result inside a one-line wrapper yields a value matching neither Ok nor Err (interpreter)
 
-Status: OPEN. Found 2026-09-01 while landing the strict HWIR ECC offload equivalence spec.
+Status: SUPERSEDED. Found 2026-09-01 while landing the strict HWIR ECC offload equivalence spec.
 
 ## Symptom
 
@@ -49,3 +49,27 @@ The interpreter's `?` must unwrap `Ok` and early-return `Err` when the result
 of `?` is immediately method-called and returned as the function's tail
 expression. Once fixed, `hwir_host_evaluator_spec` should return 9/9 with no
 spec edit.
+
+
+## 2026-11-09 — DOCUMENTED + pinned (work/p3-subj4-seed-20261109)
+
+Root cause is lexical, not a `?`-lowering defect: `f()?.m()` lexes as the
+SAFE-NAVIGATION operator `?.` (Err/None -> nil), so a Result-returning
+one-line wrapper written that way returns nil, which matches neither Ok nor
+Err at the caller. The try-then-call form is `(f()?).m()`: Ok unwraps and
+Err early-returns through the method receiver.
+
+Pinned by `test/01_unit/compiler/95.interp/interpreter/result_try_receiver_prevention_spec.spl`
+(commit a0486f1b7e8, in release/1.0.0). Verified on the deployed seed under
+`SIMPLE_EXECUTION_MODE=interpreter`: 4/4 GREEN. Manually re-verified both
+shapes: unparenthesised `prep(h)?.get()` returns nil and falls through both
+match arms; parenthesised `(prep(h)?).get()` returns the payload. Status
+open -> documented.
+
+## 2026-11-10 triage — SUPERSEDED/documented (seed-smoke, lane p3-interp4 row 21)
+
+Documented as lexical (not a `?`-lowering defect) by bdcbec5bd33d (in branch):
+`f()?.m()` lexes as safe-navigation; `(f()?).m()` is the try-then-call form.
+Pinned by test/01_unit/compiler/95.interp/interpreter/result_try_receiver_prevention_spec.spl
+— re-verified this lane: 4 total, 4 passed, 0 failed on the worktree seed
+under SIMPLE_EXECUTION_MODE=interpreter. No code change.

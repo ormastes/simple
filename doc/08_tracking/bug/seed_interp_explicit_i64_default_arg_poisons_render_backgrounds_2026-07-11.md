@@ -131,3 +131,24 @@ The only difference is the i64 value at the call boundary. White pixels (0xFFFFF
 
 Tracked in `doc/08_tracking/bug/bug_db.sdn` as `seed_interp_explicit_i64_default_arg_poisons_render_backgrounds`.
 
+**Revalidated 2026-11-02: still plausible because the report title (Passing explicit i64 budget_ms arg to software_pixels renderer paints all backg) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 — deferred (not reproducible on this host)
+
+Measured on aarch64 macOS with the browser-engine renderer; this Windows lane
+has no such repro. A reduced `fn f(a, b, budget: i64 = 5)` default-vs-explicit
+call is not enough evidence without the renderer. Needs the macOS repro.
+
+## 2026-11-03 - CLOSED (not reproducible; evidence)
+
+Re-ran the exact repro on the current seed (`bin/simple.exe run`, Windows) against
+the real `simple_web_layout_render_html_software_pixels` with the report's HTML
+(200x80 `#ff6600` table): default arg, explicit `30000` and explicit `120000`
+all painted the same `#ff6600` pixel count (5964 / 5964 / 5964; the report's
+aarch64 absolute count differs by renderer drift, the default-vs-explicit parity
+is what the bug claimed broken). The signature also no longer defaults to a
+module-private constant: it is the literal `budget_ms: i64 = 10000`, and the seed
+now materialises omitted/typed defaults (0b5c4ee8a1a, f30afdccc93). The original
+macOS aarch64 symptom is attributed to the pre-fix cross-module default-arg fill
+(white backgrounds = budget guard path with an unfilled default). Reopen with a
+fresh aarch64 repro if it recurs.

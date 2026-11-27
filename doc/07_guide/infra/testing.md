@@ -18,6 +18,7 @@ Complete guide to testing in Simple: the SPipe BDD framework, matchers, mocking,
 10. [Mocking](#mocking)
 11. [Test Helpers](#test-helpers)
 12. [Test Policy and Levels](#test-policy-and-levels)
+    - [HAL and Runtime Tests through Simple](#hal-and-runtime-tests-through-simple)
 13. [Test Database](#test-database)
 14. [Platform Organization](#platform-organization)
 15. [Runner and CLI](#runner-and-cli)
@@ -141,6 +142,10 @@ branches.
 
 Optional metadata fields `**Artifacts:**`, `**Screenshots:**`, `**TUI Captures:**`, and `**Logs:**` let a spec publish evidence links into the generated markdown. List multiple items inline with `;` or `,`, or place them on bullet lines directly below the field.
 UI-facing specs must capture visible state when practical: GUI screenshots or rendered-image captures go under `doc/06_spec/image/<spec-relative-path>/`; TUI text/ANSI captures, logs, JSON summaries, and other non-image artifacts go under `build/test-artifacts/<spec-relative-path>/`.
+The Rust diagnostic driver's scenario directories retain short readable names.
+Long names use a bounded readable prefix plus a digest; consult the manifest
+for complete group and scenario names. A warning that artifact writing failed
+does not explain or replace the recorded test assertion outcomes.
 Interactive GUI specs must also use actual GUI access when available. Prefer `ui_access_snapshot`, `ui_access_surface`, `ui_access_find`, `ui_access_act`, `ui_access_history`, `ui_access_observe`, `ui_access_state`, or adapter wrappers such as `simple play wm-text-*` and `play_wm_text_*` to locate a real surface, perform the action, and assert the resulting state. Screenshots prove visual evidence; they do not replace interaction coverage.
 SGTTI evidence is test/debug-only. Production entrypoints must not import `std.ui_test.sgtti`, `SgttiTestDriver`, or SGTTI capture builders unless the feature is explicitly a debug/test surface. When SGTTI is compile-time disabled or absent, the normal product path must have no snapshot construction, polling, capture allocation, or dispatch overhead. Add an import-boundary system spec beside any new SGTTI-backed UI evidence.
 After adding or moving a UI-facing app feature spec, run `test/03_system/app/testing/feature/ui_sspec_evidence_audit_spec.spl`. That audit verifies the critical UI SSPEC lane has executable specs, mirrored generated manuals under `doc/06_spec/03_system/app/...`, and concrete UI evidence markers.
@@ -488,6 +493,41 @@ The distinction in one line: **in-development means the code is missing;
 everything else means the test or the environment is wrong.** Only the first is
 this tag's business.
 
+### `BLOCKED` — the environment is missing (2026-11-12)
+
+An example that cannot run on this host because a server, fixture config,
+helper binary or credential is absent is **BLOCKED**: counted, visible, never a
+pass, never `OK`, and never a bare failure. Two authored forms are recognised:
+
+| Spec writes | Child prints | Counted as |
+|---|---|---|
+| `pending("BLOCKED: <reason>")` | `it BLOCKED: <reason> ... pending` | blocked |
+| an example that fails with `Err("precondition: <reason>")` | `✗ <name>` then `precondition: <reason>` | blocked |
+
+Use the `precondition:` prefix **only** when the real cause is a missing
+environment (unset/relative `SMUX_*_TEST_CONFIG`, no `/bin/sh`, no live server).
+A malformed fixture the operator did provide, or a product defect, is a plain
+failure.
+
+File verdict rules (`verdict_outcome_token`, `src/app/test_daemon/light_protocol.spl`):
+
+- any real failure → `outcome=ERROR` (a blocked example never hides a failure);
+- otherwise any blocked example → `outcome=BLOCKED`, also when other examples passed;
+- the verdict line carries `blocked=<n>` beside `in_development=<n>`, and a
+  `SPEC FILE BLOCKED: <path> blocked=<n> reason=<first reason>` line follows it;
+- `Results:` appends `, <n> blocked` and the summary prints `Blocked: <n>` and
+  `BLOCKED <path>: <reason>` instead of `PASS`;
+- **exit code 6** (`TestRunOutcome.BlockedScenario`) — distinct from pass (0),
+  failure (1) and unverified (5), so each gate decides how to treat it;
+- `test_db.sdn` records the row as status `blocked` and `test_result.md` has a
+  `Blocked (environment missing)` row.
+
+The Rust seed's single-file runner prints the same field
+(`... skipped=<n> blocked=<n> dropped=<n>`, `outcome=BLOCKED`, exit 6). When an
+older seed child prints no `outcome=BLOCKED`, the pure-Simple runner adds its
+own BLOCKED verdict line after the child's, and the last verdict line is the
+authoritative one. Pinned by `test/01_unit/app/test_daemon/blocked_outcome_spec.spl`.
+
 ---
 ## Gherkin-Style Syntax
 
@@ -691,6 +731,76 @@ testing.assert_called_with(spy, ["arg1", "arg2"])
 | **System** | No mocks | Public class/struct touch | 100% |
 | **Environment** | HAL/External/Lib mocks | Branch, Condition | 100% |
 
+### HAL and Runtime Tests through Simple
+
+Write HAL behavior tests in Simple wherever the contract is reachable, using
+modern SSpec (`use std.spec.*`, outcome-named `it`, `step`, direct `expect`
+assertions, and scenario documentation). Run the focused `*_spec.spl` through
+the selected self-hosted `simple test` runner. A HAL implementation written in
+C does not by itself require a C test harness.
+
+Choose the boundary according to what the scenario proves:
+
+| Contract under test | Preferred Simple boundary |
+|---------------------|---------------------------|
+| Application-visible host behavior | Import the production SOSIX/HAL facade used by its callers. |
+| Runtime ABI, provider error, or low-level operation absent from the facade | Import the existing FFI owner, or declare the exact backed `extern fn rt_*` in the focused test. |
+| Private C state, unsafe fault injection, or target behavior unavailable through Simple | Use a bounded supporting C/target harness for that gap, with its limitation recorded. |
+
+For a facade example, inspect
+[`time_spec.spl`](../../../test/01_unit/lib/nogc_async_mut/sosix/time_spec.spl):
+it calls production SOSIX time operations and asserts clock ordering and
+deadline values. For provider selection, inspect
+[`io_uring_file_driver_spec.spl`](../../../test/01_unit/lib/nogc_async_mut/sosix/io_uring_file_driver_spec.spl):
+it requires Linux and the selected `io_uring` backend before checking native
+I/O. These are source examples, not claims that those tests passed on the
+current machine. Hosted `std.*.sosix` modules and SimpleOS-internal
+`src/os/sosix/**` are different execution environments; select the one the
+production caller actually uses.
+
+**Direct runtime FFI is available from Simple.** For example, the existing
+runtime integration spec declares
+`extern fn rt_file_copy_create_excl_no_follow(source: text, destination: text) -> bool`.
+Before using any `rt_*`, inspect its authoritative declaration and provider,
+including integer widths, text/byte representation, ownership and cleanup.
+Confirm that the exact selected runtime exports/links it in native mode or
+registers it in interpreter mode; a declaration alone does not provide an
+implementation. Keep this exception inside the focused test/FFI owner; it does
+not relax the product-code facade rule. Assert observable results such as
+returned errors, bytes, handle lifetime, and effects; importing a symbol or
+matching its source text does not prove the HAL behavior.
+
+**Make host and mode requirements explicit.** Select native execution for a
+native-provider claim (for a runner supporting it, `<runtime> test <spec>
+--mode=native`). Confirm the actual backend and linked provider rather than
+inferring them from the flag. Interpreter emulation can supply diagnostic or
+interpreter-contract evidence, but cannot qualify a native HAL implementation.
+Put host/capability admission before the affected operations. An unavailable
+host is an explicit `UNRUN`/`UNSUPPORTED` matrix row; a required row remains
+incomplete. If a selected supported-host acceptance cannot obtain its required
+provider, fail that acceptance. Never return early, print `SKIP`, substitute a
+fallback provider, or assert a constant while allowing the enclosing example
+to count as a native PASS. A printed skip message does not update runner counts.
+
+**Retain execution evidence.** Record the source revision, command, host/target,
+mode/provider, resolved compiler and runtime capsule/library paths and hashes,
+and exit status with the final executed/passed/failed/skipped counts. Check
+artifact identity before and after the run. Require the intended examples to
+execute, with nonzero counts and no hidden matcher failure; file loading,
+compilation, or exit zero alone is insufficient. Missing externs, runner
+crashes, absent summaries, or identity drift leave the lane unverified. When
+the spec launches another compiler, honor `SIMPLE_SPEC_COMPILER` and
+`SIMPLE_SPEC_RUNTIME_PATH`; record the artifact actually launched. Diagnose
+with the existing qualified runtime and bounded probes; this procedure does
+not require a bootstrap rebuild.
+
+Keep C-harness receipts separate from Simple example counts. Document the
+specific inaccessible contract, retain the harness command/artifact/result,
+and leave any required Simple integration coverage unverified until it runs.
+A wrapper that merely shells out to a C probe is supporting evidence, not
+proof that Simple called the HAL correctly. When the boundary becomes
+reachable, add the behavioral assertion to the Simple scenario.
+
 ### Coverage Data Strategy
 
 - **Overall (UT)**: Merges all levels (UT+IT+ST+ENV) for branch/condition metrics
@@ -776,6 +886,35 @@ Tests are classified by platform compatibility:
 ### Shared Test Requirements
 
 A test is shared (`# @platform: all`) when it has zero imports, uses only built-in `describe`/`context`/`it`/`expect` matchers, uses only core language features, and does NOT use file I/O, networking, threading, or timers.
+
+### Host-OS Platform Tags
+
+A spec that can only run on one host OS declares it in its header:
+
+| Tag | Runs on host |
+|-----|--------------|
+| `# @platform: windows` | Windows |
+| `# @platform: macos` | macOS |
+| `# @platform: linux` | Linux |
+| `# @platform: freebsd` | FreeBSD |
+| `# @platform: unix` | any non-Windows host |
+
+- Several OS tags (separate lines or `linux, freebsd`): runs if ANY matches.
+- Mixed with mode tags (`native`, `interpreter`, ...): BOTH must match. Mode
+  tags filter at discovery; OS tags never filter silently.
+- On a non-matching host the file is NOT run and is COUNTED: per-file
+  `PLATFORM SKIP <path> (platform: requires os=..., host=...)`, a
+  `skipped=1 reason=platform-os-mismatch` suffix on its `SPEC FILE VERDICT:`
+  line, and a `Platform-skipped: <n> file(s)` summary row. An explicitly named
+  file on the wrong host is skipped the same way and exits 0.
+- Host name comes from `std.io_runtime.host_os()`; rules live in
+  `src/lib/nogc_sync_mut/spec/platform_os.spl`
+  (spec: `test/01_unit/lib/spec/platform_os_tag_spec.spl`).
+- Do not tag specs that pick a shell per host and pass everywhere.
+- Implemented identically in every lane: the full runner
+  (`test_runner_main.spl`), the single-file/directory lane `bin/simple test
+  <file>` dispatches to (`test_runner_single.spl`), and the Rust seed runner
+  (`SIMPLE_TEST_RUNNER_RUST=1`, `driver/src/cli/test_runner/runner.rs`).
 
 ### Runtime Skip Helpers
 
@@ -1082,6 +1221,46 @@ bin/simple test test/03_system/gui/ui/shared_ui_contract_spec.spl --tag slow
 
 ---
 
+
+### Pixel-compare resolution rule (owner, 2026-11-15)
+
+- **Never lower resolution to meet a perf budget or to make a compare pass.**
+  Low resolution itself is the problem, on BOTH sides: the Simple render AND
+  the reference capture (Chrome, Skia). A low-res reference is as invalid as a
+  low-res Simple render. Downscaling, a smaller viewport, a lower DPI, blur or
+  widened tolerance that
+  hides a real difference is a defect, not a fix. Fix the renderer or the perf.
+- **Text compares:** a rasterized vector (outline) font must be rendered at
+  **300 DPI or more** (CSS device scale >= 3.125, i.e. 16px text >= 50 device px)
+  so glyph shape, not hinting noise, is compared. Otherwise use a
+  **pixel-based (bitmap) font** at its native size, where every pixel is exact
+  and tolerance can be 0.
+- A text compare must assert a pass bar (differing pixels / max channel delta).
+  A diagnostic that only checks "it ran" is not a compare.
+- Inspect pairs with `SIMPLE_COMPARE_VIEW=stay|auto` (A / B / DIFF panes).
+
+Current gap (checked 2026-11-15):
+`test/03_system/gui/pixel_compare/chromium_vs_simple_text_spec.spl` renders a
+vector font (Liberation Mono 16px, smoothing off) at 1x / 96 DPI into 320x240
+and only asserts `diff >= 0` — it violates both rules. Its Chrome capture
+`build/pixel_compare/electron_simple_text.json` is also absent on Windows, so it
+cannot run here. Fix: capture at device scale >= 3.125 (or switch the fixture
+to a bitmap font) and assert a real threshold.
+## Markdown Doctests on Path Runs
+
+`config/sdoctest.sdn` controls whether a path-scoped `bin/simple test <path>`
+also executes the configured markdown corpus (`sources:`):
+
+```
+sdoctest:
+  path_runs: include   # include | exclude (default exclude)
+```
+
+- `exclude` (default): only markdown under `<path>` is discovered.
+- `include`: files under `<path>` plus every configured source, deduplicated.
+- An explicit `--sdoctest` run or a `.md` target always stays narrow.
+- Per-file `ignore:` paths/tags in the same config still apply.
+
 ## Best Practices
 
 ### Do
@@ -1158,6 +1337,32 @@ mock.was_called_with(["123", "Alice"])   # Match strings
 2. Run on idle machine
 3. Use median instead of mean for skewed distributions
 
+### Preprocess fault boundary (`SIMPLE_TEST_PREPROCESS_BOUNDARY`)
+
+The runner lexes a spec's source in its own process before spawning the spec
+child. A hard fault there (stack overflow, segfault) would kill the whole
+sweep, so a spec that could defeat the lexer is lexed first in an isolated
+child (`src/app/test_runner_new/preprocess_probe.spl`) and a crash is reported
+as one FAIL for that file while the sweep continues.
+
+The child is only started when a cheap string scan says it is needed: file
+larger than 1,000,000 bytes, or more than 2,000 consecutive blank lines (the
+lexer recurses once per newline inside an open bracket). Ordinary specs pay
+nothing. It applies to every lane (interpreter, SMF, native, mcdc fallback,
+safe mode). `source_has_bdd_structure` on the `--spl-doctest` path is a
+read-only text scan and is not covered.
+
+| value | behaviour |
+|---|---|
+| unset | heuristic (default) |
+| `0` | boundary off (escape hatch; a hostile spec can kill the sweep) |
+| `always` | probe every spec (measurement / paranoia) |
+
+The probe script is located from the spec path (`.../test/...` prefix), then
+`SIMPLE_REPO_ROOT`, then the cwd. If a spec needs isolation and the probe
+cannot be found, the file FAILs closed with a message naming
+`SIMPLE_REPO_ROOT`; it is never silently skipped.
+
 ## Troubleshooting: runner-level failures (the specs are fine)
 
 ### Every spec fails `unresolved name: describe` / parser error on `describe "...":`
@@ -1206,3 +1411,99 @@ The exact candidate runs `test/03_system/check/post_bootstrap_stage4_acceptance_
 with absolute `STAGE4_POST_BOOTSTRAP_BINARY` and adjacent
 `STAGE4_POST_BOOTSTRAP_PROVENANCE`. Use interpreter, no daemon/database/cache,
 `--assert-ran`, and `--fail-fast`. Retained smoke is hash-verified, not rerun.
+
+
+---
+
+## TestDB Read-Only Query: `test query` / `test explain`
+
+Purpose: look at recorded attempt rows for exactly one case without touching
+the test database (no cold-start create, no save, no migration).
+
+```bash
+bin/simple test query   <path>::<case> [--run <id>] [--limit N] [--cursor C] [--format table|sdn]
+bin/simple test query   --bug <id> | --requirement <id> [--levels unit,system] [--run <id>] [--limit N] [--cursor C]
+bin/simple test explain <path>::<case> | --bug <id> | --requirement <id> [--levels ...] [--run <id>]
+# direct form: bin/simple run src/app/test_runner_new/main.spl query ...
+```
+
+`--cursor` takes only the opaque token printed as `next cursor: <token>` of a
+previous page. The token is bound to the case, `--run`, `--limit` and the result
+rows it was issued over; a plain integer, an edited token, a token from another
+query, or one issued before a new attempt was recorded is rejected with exit 2
+(`invalid query`). Restart without `--cursor` to re-page.
+
+Scoped queries (TESTDB-010): `--bug <id>` resolves the bug's `reproducible_by` spec path in
+`doc/08_tracking/bug/bug_db.sdn` (an unknown bug, or one with no reproducer path, is a usage
+error, not an empty result); `--requirement <id>` resolves the spec files whose `# @req` header
+claims it, among the spec paths the TestDB has planned cases for. Every recorded case under the
+resolved paths is returned, attempts kept separate. `--levels unit,integration,system,smoke,perf,security,other`
+narrows by the `test/NN_<level>/` tree of the path (`--levels` needs `--bug` or `--requirement`;
+scope flags exclude a `<path>::<case>`). Each row carries `case` and `level`; the cursor is bound
+to the scope, levels and run. A requirement no recorded spec claims is exit 1 (no rows).
+Per-attempt facts (plan 3.5), appended after `provenance` in table, sdn and MCP output and
+shown by `explain`: `started_at_micros`, `duration_micros` (finished minus started event time),
+`host` (`<arch>-<os>`), `backend` (runtime mode of the test process) and `failure` (the failed
+attempt's error summary, clipped to 240 bytes). The runner records them on each trace case event
+(`SIMPLE_TRACE_CASE_EVENTS=1`) and the TestDB keeps them in the sidecar table
+`trace_case_event_facts`; `-` marks a fact that was not recorded (events written before this, or a
+clock that failed), never zero. **Open gap:** `simple test` currently exits 2 when `SIMPLE_TRACE_CASE_EVENTS=1` (`src/app/test_runner_new/test_runner_main.spl:1578-1583`, frozen source bytes and effective options are not yet bound to preparation), so facts are today recorded only through the buildrunner path (`remote_test_runner_v1.spl`) or direct `record_trace_case_events` calls, not by a local `simple test`. Unblock: bind the frozen source bytes and worker options to the preparation receipt and lift that gate. Three more cells follow `failure`: `failure_code` (`assertion`, `panic`, `timeout`, `unknown`; classified at the emission site from the failure message, `unknown` when no signal), `definition_digest` (sha256 of the spec file bytes) and `binary_digest` (sha256 of the recording process's executable (the recorder child resolved via `self_exe_path`, never argv[0], which is the `.spl` script under the interpreter; absent when no real executable resolves)). The digests are stamped by the parent runner when it records events (`src/lib/nogc_sync_mut/test_runner/trace_digests.spl`): once per spec path and once per process, never per event. The new cells ride the same `simple.trace.case-event/v1` schema string (no version bump), and decoders reject unknown fields, so a mixed-version parent/child pair gets `Err` on the first event carrying them. Still not recorded, so not returned: artifact refs (the runner has no per-case artifact path; see `doc/08_tracking/bug/trace_plan_2026_11_14_remaining_gaps_2026-11-16.md` section 4).
+
+Defaults: table format, `--limit 50` (explain 1000). The database path is fixed
+at `doc/08_tracking/test/test_db.sdn`.
+
+Exit codes: 0 rows found, 1 no rows, 2 usage error, unknown run, or missing /
+corrupt / unsealed database.
+
+Verified output (seed `bin/simple.exe`, release tip `75d3cba7d16`; both the
+`test query` and direct forms behave the same):
+
+```text
+$ bin/simple test query test/01_unit/app/traceability/trace_matrix_spec.spl::x
+no rows: no recorded attempts for test/01_unit/app/traceability/trace_matrix_spec.spl::x
+(exit 1)
+
+$ bin/simple test query nocolon
+usage: simple test query (<path>::<case> | --bug <id> | --requirement <id> [--levels unit,integration,...]) [--run <id>] [--limit N] [--cursor C] [--format table|sdn]
+       simple test explain <path>::<case> [--run <id>]
+exit codes: 0 rows found, 1 no rows, 2 usage error or unreadable/corrupt test database
+(exit 2)
+```
+
+The committed `test_db.sdn` holds no trace-case event tables, so a rows-found
+example could not be produced from the repo DB. When rows exist, the source
+(`src/app/test_runner_new/test_query_cli.spl`) renders one
+`attempt <n> of <case> in run <id>: status=<s>` line per attempt, then
+`partial: truncated, more rows exist` and `next cursor: <token>` when paged, or
+`partial: some attempts are unfinished or have missing identity`. `explain`
+adds a reason per status (skipped, cached, blocked and unknown never qualify as
+a pass) and an `identity missing:` line. Rows are unverified framework
+observations, not admitted evidence. MCP twin: `simple_test_query`.
+
+<!-- wave-f-perf-analysis-collection-refactoring-2026-11-19 -->
+
+## Performance Analysis and Collection Refactoring SSpec Methodology (2026-11-18)
+
+Canonical plan: [Simple Performance Analysis and Collection Refactoring](../../03_plan/compiler/performance_analysis_and_collection_refactoring_2026-11-18.md) (§14, §15, §16.2).
+
+Reference system and overhead specs:
+- Executable system spec: `test/03_system/app/compiler/feature/perf_analysis_collection_refactoring_spec.spl`
+- Scenario manual: `doc/06_spec/03_system/app/compiler/feature/perf_analysis_collection_refactoring_spec.md`
+- Analyzer overhead & feature-off guard: `test/05_perf/compiler/perf_analyzer_overhead_guard_spec.spl`
+
+### Required Fixture Matrix per `PERF-*` Rule (§15.1–§15.4)
+
+Every symbolic complexity, resource-contract, or collection-refactoring rule requires modern SSpec coverage (`use std.spec.*`, triple-quoted `"""` docstrings, built-in matchers only, zero `pass_todo` or tautological assertions) spanning:
+
+1. **Positive and negative recognition fixtures (`C01..C16`, `S01`, `S13`):** Verify that sequential scans add (`O(n)`), fixed small bounds (`<= 16`) stay `O(n)`, independent traversals retain `n*m` (`PERF-COST-001`), grouped traversals retain `AggregateSize(group_count, total_elements)`, loose quadratic upper bounds yield `Unproved` rather than `Refuted` for linear contracts (`C15`), and user-defined `append`/`sum` lookalikes are never matched by method spelling alone (`S13`).
+2. **13-point legality precondition fixtures (`S01..S18`):** Pair each `VerifiedSafe` local refactor (`Map`, `Filter`, `FilterMap`, `OrderedFold`, `Any`/`All`, `Find`) with negative fixtures that must downgrade to `PERF-FIX-001` (`Unavailable`) or `ReviewRequired` when input/output alias (`S03`), callbacks observe partial prefixes (`S04`) or fail mid-loop (`S05`), external references observe builder identity (`S06`), or I/O/MMIO/lock/async effects are present (`S11`).
+3. **Behavioral trace comparison tests:** Compare before-and-after execution traces across:
+   - final output values and visible state mutations;
+   - exact callback invocation order and count;
+   - short-circuit iterator consumption (`any`, `all`, `find` stopping immediately on match, `S12`);
+   - empty-input behavior with non-identity `fold` seeds (`S07`);
+   - non-associative recurrence order (e.g., left-to-right subtraction `fold` vs invalid reassociation, `S08`, and cancellation-sensitive floating-point order, `S09`);
+   - mid-loop error propagation and scope cleanup (`S05`, `S18`).
+   Tests validate the rule implementation; passing tests alone never promote an unproved patch to `VerifiedSafe` (`D10`).
+4. **Cardinality, duplicate-key, and memory-growth validation (`C10`, `C12`, `S16`, `S17`):** Algorithmic redesign fixtures (`PERF-ALG-001`, `PERF-ALLOC-001`) must test duplicate-heavy and collision-sensitive keys (where all-pairs matches yield `k = n*m`), verify `group_join` per-key collection shape vs flat `join`, and track auxiliary memory growth separately from unique-key happy paths.
+5. **Revision, cache, and analyzer overhead guards (`I01..I12`):** Exercise stale `EditTransaction` rejection (`StaleVersion`, `StaleHash`, `OverlappingEdits`), callee/plugin `implementation_digest` invalidation, CLI/LSP/MCP agreement on the same snapshot, single-pass linear `nodes_scanned` scaling on nested HIR without subtree re-walking (`I11`), and `T0` feature-off zero-side-table isolation (`D11`, `D12`, `I10`).

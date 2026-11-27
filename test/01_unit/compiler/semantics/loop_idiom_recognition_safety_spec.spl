@@ -1,0 +1,523 @@
+"""
+## Purpose and audience
+Executable unit specification for Wave F2 loop-idiom recognition (`§6`, `D01`,
+`D05`, `D06`, `D09`) and 13-point refactoring safety verification (`§7.2`,
+`D06`, `D10`) covering acceptance scenarios `S01..S15` and `S18`.
+Audience: maintainers of `src/compiler/35.semantics/perf/`.
+
+## Operator workflow
+Run with `SIMPLE_LIB=C:/dev/wt/wave2-lanes/src` via the Simple test runner on
+`test/01_unit/compiler/semantics/loop_idiom_recognition_safety_spec.spl`.
+
+## Compatibility and limitations
+Exercises both typed HIR loop functions and source-anchored loop region trees
+against `CollectionOperationRegistry` symbol identities without mutating HIR.
+
+## Verification guidance and troubleshooting
+Any failure indicates either a loop family recognition regression, a violation
+of resolved `SymbolId` matching (`S13`), missing eager `.collect()` or neutral
+tradeoff disclosure (`S02`, `S14`), quadratic subtree rescanning, or an
+unsoundly discharged safety obligation among the 13 `SafetyObligationKind` gates.
+"""
+
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{
+    FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind,
+    vhdl_hardware_metadata_default
+}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, MethodResolution}
+use compiler.hir.hir_definitions.{
+    HirFunction, HirParam, HirBlock, HirStmt, HirStmtKind,
+    HirExpr, HirExprKind, HirCallArg, HirBinOp, HirUnaryOp, HirAssignOp
+}
+use compiler.semantics.perf_facts.types.{
+    CollectionOperationRegistry, CollectionOperationSummary,
+    HirPerfReceiverKind, HirPerfOperationKind, HirPerfCostClass,
+    HirPerfCardinality, HirPerfEnumerationClass, HirPerfAllocationClass,
+    HirPerfEffectFacts
+}
+use compiler.semantics.perf.perf_analysis_contracts_v1.{
+    LoopIdiomFamily, SafetyObligationKind, SafetyObligationStatusV1,
+    PerfFixKind, PerfFixApplicability, LoopIdiomCandidateV1, PerfFindingRecordV1
+}
+use compiler.semantics.perf.loop_idiom_recognizer_v1.{
+    SourceLoopBodyShapeV1, SourceLoopRegionNodeV1,
+    RecognizedLoopIdiomV1, LoopRecognitionReportV1,
+    eager_equivalent_tradeoff_note_v1, perf_style_default_severity_v1,
+    recognize_source_loop_tree_v1,
+    recognize_hir_block_loop_idioms_v1,
+    recognize_hir_function_loop_idioms_v1
+}
+use compiler.semantics.perf.loop_refactor_safety_v1.{
+    RecurrenceAlgebraKind, NumericDomainKind,
+    LoopRuntimeEffectFactsV1, SourceEditIntegrityFactsV1,
+    ResourceAndDestructorFactsV1, LoopSafetyFactsV1,
+    SafetyEvaluationResultV1, OrderedFoldSafetyAssessmentV1,
+    loop_runtime_effects_clean_v1, source_edit_integrity_clean_v1,
+    resource_and_destructor_clean_v1, loop_safety_facts_fail_closed_v1,
+    loop_safety_facts_verified_local_v1, derive_hir_loop_safety_facts_v1,
+    evaluate_loop_refactor_safety_v1, assess_ordered_fold_and_reduction_v1
+}
+
+val APPEND_SYM_ID: i64 = 501
+val USER_FAKE_APPEND_SYM_ID: i64 = 999
+val USER_FAKE_SUM_SYM_ID: i64 = 998
+
+fn ls_span(line: i64) -> Span:
+    Span.new(line * 10, line * 10 + 8, line, 1)
+
+fn ls_unit_t() -> HirType:
+    HirType(kind: HirTypeKind.Unit, span: ls_span(1))
+
+fn ls_bool_t() -> HirType:
+    HirType(kind: HirTypeKind.Bool, span: ls_span(1))
+
+fn ls_i64_t() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: ls_span(1))
+
+fn ls_array_i64_t() -> HirType:
+    HirType(kind: HirTypeKind.Array(ls_i64_t(), None), span: ls_span(1))
+
+fn ls_expr(kind: HirExprKind, t: HirType, line: i64) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: t, span: ls_span(line))
+
+fn ls_unit_expr() -> HirExpr:
+    ls_expr(HirExprKind.UnitLit, ls_unit_t(), 1)
+
+fn ls_var(id: i64, name: text, t: HirType, line: i64) -> HirExpr:
+    ls_expr(HirExprKind.NamedVar(SymbolId(id: id), name), t, line)
+
+fn ls_int(v: i64, line: i64) -> HirExpr:
+    ls_expr(HirExprKind.IntLit(v, None), ls_i64_t(), line)
+
+fn ls_admitted_registry() -> CollectionOperationRegistry:
+    var reg = CollectionOperationRegistry.new("stdlib-perf-v1")
+    reg.register(CollectionOperationSummary(
+        symbol_id: APPEND_SYM_ID, stable_name: "Array.append",
+        operation: HirPerfOperationKind.Append, cost: HirPerfCostClass.AmortizedConstant,
+        output_cardinality: HirPerfCardinality.SameAsReceiver,
+        enumeration: HirPerfEnumerationClass.None, expected_receiver: HirPerfReceiverKind.Array,
+        signature_fingerprint: "Array<T>.append(T)->Unit", explicit_argument_count: 1,
+        effects: HirPerfEffectFacts(
+            reads: true, writes: true, allocates: true, throws: false,
+            suspends: false, observable: false, unknown: false),
+        allocation: HirPerfAllocationClass.BoundedPool, preserves_order: true,
+        materializes: false, metadata_version: "stdlib-perf-v1",
+        provenance: "stdlib verified contract", evidence_receipt: "receipt-array-append-v1"
+    ))
+    reg
+
+fn ls_wrap_function(name: text, body: HirBlock) -> HirFunction:
+    HirFunction(
+        symbol: SymbolId(id: 70), name: name, type_params: [], params: [],
+        return_type: ls_array_i64_t(), body: body, effects: [],
+        visibility: Visibility.Private, is_async: false, is_static: false,
+        is_public: false, is_method: false, is_mutable: false, is_const: false,
+        is_extern: false, func_attr: FunctionAttr.default(), has_export_attr: false,
+        export_attr: ExportAttr(is_export_c: false, export_name: ""),
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: DriverManifestAttr(kind: DriverManifestAttrKind.Driver, driver_class: 0, vendor: 0, device_ids: []),
+        has_suspension: false, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_doc_comment: false,
+        doc_comment: "", span: ls_span(1), is_gpu_kernel: false, gpu_target: "",
+        gpu_backend_order: "", verification_contract: None, is_generic_template: false
+    )
+
+fn ls_append_call(builder_id: i64, arg_expr: HirExpr, method_name: text, resolution: MethodResolution, line: i64) -> HirExpr:
+    val recv = ls_var(builder_id, "result", ls_array_i64_t(), line)
+    ls_expr(HirExprKind.MethodCall(
+        recv, method_name,
+        [HirCallArg(has_name: false, name: "", value: arg_expr, span: ls_span(line))],
+        resolution
+    ), ls_unit_t(), line)
+
+fn ls_builder_loop_fn(fn_name: text, builder_id: i64, body_stmt: HirStmt) -> HirFunction:
+    val items_expr = ls_var(11, "items", ls_array_i64_t(), 2)
+    val loop_e = ls_expr(HirExprKind.For(
+        SymbolId(id: 12), items_expr,
+        HirBlock(stmts: [body_stmt], has: false, value: ls_unit_expr(), span: ls_span(3)),
+        None
+    ), ls_unit_t(), 2)
+    ls_wrap_function(fn_name, HirBlock(
+        stmts: [
+            HirStmt(kind: HirStmtKind.Let(SymbolId(id: builder_id), ls_array_i64_t(), ls_expr(HirExprKind.ArrayLit([], None), ls_array_i64_t(), 1)), span: ls_span(1)),
+            HirStmt(kind: HirStmtKind.Expr(loop_e), span: ls_span(2))
+        ],
+        has: true, value: ls_var(builder_id, "result", ls_array_i64_t(), 5), span: ls_span(1)
+    ))
+
+fn ls_source_node(
+    region_id: text, fn_id: text, rev: text, dep: text, line: i64, old_text: text,
+    src_expr: text, ind_var: text, recv_kind: HirPerfReceiverKind, method_name: text,
+    sym_opt: Option<i64>, shape: SourceLoopBodyShapeV1, children: [SourceLoopRegionNodeV1]
+) -> SourceLoopRegionNodeV1:
+    SourceLoopRegionNodeV1(
+        region_id: region_id, function_id: fn_id, semantic_revision: rev,
+        dependency_fingerprint: dep, file: "src/spec_fixture.spl", source_span: ls_span(line),
+        expected_old_text: old_text, iterator_source_expr: src_expr, induction_var: ind_var,
+        receiver_kind: recv_kind, operation_method_name: method_name,
+        resolved_operation_symbol_id: sym_opt, is_loop_region: true,
+        body_shape: shape, children: children
+    )
+
+fn ls_find_obligation(obligations: [SafetyObligationStatusV1], target: SafetyObligationKind) -> SafetyObligationStatusV1:
+    for item in obligations:
+        if item.kind == target:
+            return item
+    SafetyObligationStatusV1(kind: target, discharged: false, reason: "missing obligation")
+
+describe "Wave F2 Loop-Idiom Recognizer and 13-Point Refactoring Safety":
+    """Verifies bounded bottom-up recognition of the 6 conservative loop families and all 13 safety proof obligations (S01..S15, S18)."""
+
+    context "Six conservative loop families across typed HIR and source-anchored descriptors":
+        """Checks recognition, terminal consumption (S02), resolved symbol identity (S13), and neutral tradeoff wording (S14)."""
+
+        it "recognizes Map, Filter, and FilterMap builder loops on typed HIR with terminal .collect() and neutral tradeoff note (S01, S02, S14)":
+            """Verifies Map, Filter, and FilterMap HIR loops emit PERF-STYLE-001, terminal .collect(), and exact neutral resource_tradeoff_note."""
+            val reg = ls_admitted_registry()
+            val resolved_append = MethodResolution.InstanceMethod(SymbolId(id: 10), SymbolId(id: APPEND_SYM_ID))
+            val item_var = ls_var(12, "item", ls_i64_t(), 3)
+            val doubled = ls_expr(HirExprKind.Binary(HirBinOp.Mul, item_var, ls_int(2, 3)), ls_i64_t(), 3)
+            val positive_pred = ls_expr(HirExprKind.Binary(HirBinOp.Gt, item_var, ls_int(0, 3)), ls_bool_t(), 3)
+
+            val map_fn = ls_builder_loop_fn("map_example", 13, HirStmt(kind: HirStmtKind.Expr(ls_append_call(13, doubled, "append", resolved_append, 3)), span: ls_span(3)))
+            val map_report = recognize_hir_function_loop_idioms_v1(map_fn, "rev-1", "dep-1", "src/example.spl", reg)
+            expect(map_report.candidates.len()).to_equal(1)
+            expect(map_report.candidates[0].family).to_equal(LoopIdiomFamily.Map)
+            expect(map_report.candidates[0].replacement_preview).to_contain(".iter().map(")
+            expect(map_report.candidates[0].replacement_preview).to_end_with(".collect()")
+            expect(map_report.candidates[0].resource_tradeoff_note).to_equal(
+                "Equivalent refactor available; modeled traversal cost unchanged; result materialization still required; runtime improvement has not been established."
+            )
+            expect(map_report.findings.len()).to_equal(1)
+            expect(map_report.findings[0].rule_code).to_equal("PERF-STYLE-001")
+            expect(perf_style_default_severity_v1()).to_equal("hint")
+
+            val filter_then = HirBlock(stmts: [HirStmt(kind: HirStmtKind.Expr(ls_append_call(23, item_var, "append", resolved_append, 4)), span: ls_span(4))], has: false, value: ls_unit_expr(), span: ls_span(4))
+            val filter_fn = ls_builder_loop_fn("filter_example", 23, HirStmt(kind: HirStmtKind.Expr(ls_expr(HirExprKind.If(positive_pred, filter_then, None), ls_unit_t(), 3)), span: ls_span(3)))
+            val filter_report = recognize_hir_function_loop_idioms_v1(filter_fn, "rev-1", "dep-1", "src/example.spl", reg)
+            expect(filter_report.candidates.len()).to_equal(1)
+            expect(filter_report.candidates[0].family).to_equal(LoopIdiomFamily.Filter)
+            expect(filter_report.candidates[0].replacement_preview).to_contain(".iter().filter(")
+            expect(filter_report.candidates[0].replacement_preview).to_end_with(".collect()")
+
+            val fm_then = HirBlock(stmts: [HirStmt(kind: HirStmtKind.Expr(ls_append_call(33, doubled, "append", resolved_append, 4)), span: ls_span(4))], has: false, value: ls_unit_expr(), span: ls_span(4))
+            val fm_fn = ls_builder_loop_fn("filter_map_example", 33, HirStmt(kind: HirStmtKind.Expr(ls_expr(HirExprKind.If(positive_pred, fm_then, None), ls_unit_t(), 3)), span: ls_span(3)))
+            val fm_report = recognize_hir_function_loop_idioms_v1(fm_fn, "rev-1", "dep-1", "src/example.spl", reg)
+            expect(fm_report.candidates.len()).to_equal(1)
+            expect(fm_report.candidates[0].family).to_equal(LoopIdiomFamily.FilterMap)
+            expect(fm_report.candidates[0].replacement_preview).to_contain(".iter().filter(")
+            expect(fm_report.candidates[0].replacement_preview).to_contain(".map(")
+            expect(fm_report.candidates[0].replacement_preview).to_end_with(".collect()")
+
+        it "recognizes OrderedFold (including conditional count increment), AnySearch, AllSearch, and FindSearch preserving fallback":
+            """Verifies families 4, 5, and 6 across HIR and source-anchored descriptors, preserving seed and miss fallback."""
+            val reg = ls_admitted_registry()
+            val items_expr = ls_var(11, "items", ls_array_i64_t(), 2)
+            val item_var = ls_var(12, "item", ls_i64_t(), 3)
+            val acc_var = ls_var(40, "acc", ls_i64_t(), 3)
+            val positive_pred = ls_expr(HirExprKind.Binary(HirBinOp.Gt, item_var, ls_int(0, 3)), ls_bool_t(), 3)
+
+            val count_then = HirBlock(stmts: [HirStmt(kind: HirStmtKind.Assign(acc_var, Some(HirAssignOp.Add), ls_int(1, 4)), span: ls_span(4))], has: false, value: ls_unit_expr(), span: ls_span(4))
+            val count_loop = ls_expr(HirExprKind.For(
+                SymbolId(id: 12), items_expr,
+                HirBlock(stmts: [HirStmt(kind: HirStmtKind.Expr(ls_expr(HirExprKind.If(positive_pred, count_then, None), ls_unit_t(), 3)), span: ls_span(3))], has: false, value: ls_unit_expr(), span: ls_span(3)),
+                None
+            ), ls_unit_t(), 2)
+            val count_fn = ls_wrap_function("count_positive", HirBlock(
+                stmts: [
+                    HirStmt(kind: HirStmtKind.Let(SymbolId(id: 40), ls_i64_t(), ls_int(0, 1)), span: ls_span(1)),
+                    HirStmt(kind: HirStmtKind.Expr(count_loop), span: ls_span(2))
+                ],
+                has: true, value: acc_var, span: ls_span(1)
+            ))
+            val fold_report = recognize_hir_function_loop_idioms_v1(count_fn, "rev-1", "dep-1", "src/fold.spl", reg)
+            expect(fold_report.candidates.len()).to_equal(1)
+            expect(fold_report.candidates[0].family).to_equal(LoopIdiomFamily.OrderedFold)
+            expect(fold_report.candidates[0].replacement_preview).to_contain(".iter().fold(0,")
+
+            val any_node = ls_source_node(
+                "r-any", "has_negative", "rev-1", "dep-1", 10,
+                "for item in items:\n    if item < 0:\n        return true\nreturn false",
+                "items", "item", HirPerfReceiverKind.Array, "", None,
+                SourceLoopBodyShapeV1.EarlyReturnBool(predicate_expr: "item < 0", early_return_value: true, fallback_value: false, predicate_is_negated: false), []
+            )
+            val any_report = recognize_source_loop_tree_v1(any_node, reg)
+            expect(any_report.candidates.len()).to_equal(1)
+            expect(any_report.candidates[0].family).to_equal(LoopIdiomFamily.AnySearch)
+            expect(any_report.candidates[0].replacement_preview).to_contain("items.iter().any(item -> item < 0)")
+
+            val all_node = ls_source_node(
+                "r-all", "all_positive", "rev-1", "dep-1", 20,
+                "for item in items:\n    if not (item > 0):\n        return false\nreturn true",
+                "items", "item", HirPerfReceiverKind.Array, "", None,
+                SourceLoopBodyShapeV1.EarlyReturnBool(predicate_expr: "item > 0", early_return_value: false, fallback_value: true, predicate_is_negated: true), []
+            )
+            val all_report = recognize_source_loop_tree_v1(all_node, reg)
+            expect(all_report.candidates.len()).to_equal(1)
+            expect(all_report.candidates[0].family).to_equal(LoopIdiomFamily.AllSearch)
+            expect(all_report.candidates[0].replacement_preview).to_contain("items.iter().all(item -> item > 0)")
+
+            val find_node = ls_source_node(
+                "r-find", "find_or_fallback", "rev-1", "dep-1", 30,
+                "for item in items:\n    if item > 100:\n        return item\nreturn -1",
+                "items", "item", HirPerfReceiverKind.Array, "", None,
+                SourceLoopBodyShapeV1.EarlyReturnFind(predicate_expr: "item > 100", hit_expr: "item", fallback_expr: "-1"), []
+            )
+            val find_report = recognize_source_loop_tree_v1(find_node, reg)
+            expect(find_report.candidates.len()).to_equal(1)
+            expect(find_report.candidates[0].family).to_equal(LoopIdiomFamily.FindSearch)
+            expect(find_report.candidates[0].replacement_preview).to_contain("items.iter().find(item -> item > 100)")
+            expect(find_report.candidates[0].replacement_preview).to_contain("-1")
+
+        it "rejects user-defined append and sum lookalikes when SymbolId is unresolved or unadmitted in CollectionOperationRegistry (S13)":
+            """Ensures operation recognition checks resolved SymbolId in CollectionOperationRegistry, never method spelling alone."""
+            val reg = ls_admitted_registry()
+            val item_var = ls_var(12, "item", ls_i64_t(), 3)
+            val fake_resolution = MethodResolution.InstanceMethod(SymbolId(id: 88), SymbolId(id: USER_FAKE_APPEND_SYM_ID))
+            val fake_fn = ls_builder_loop_fn("user_append_lookalike", 13, HirStmt(kind: HirStmtKind.Expr(ls_append_call(13, item_var, "append", fake_resolution, 3)), span: ls_span(3)))
+            val hir_fake_report = recognize_hir_function_loop_idioms_v1(fake_fn, "rev-1", "dep-1", "src/fake.spl", reg)
+            expect(hir_fake_report.candidates.len()).to_equal(0)
+            expect(hir_fake_report.rejected_reasons.len()).to_be_greater_than(0)
+
+            val source_fake_sum = ls_source_node(
+                "r-fake-sum", "custom_sum_method", "rev-1", "dep-1", 12,
+                "for item in items:\n    ledger.sum(item)",
+                "items", "item", HirPerfReceiverKind.Named(88), "sum", Some(USER_FAKE_SUM_SYM_ID),
+                SourceLoopBodyShapeV1.BuilderAppend(builder_var: "ledger", transform_expr: "item", is_identity_item: true), []
+            )
+            val sum_report = recognize_source_loop_tree_v1(source_fake_sum, reg)
+            expect(sum_report.candidates.len()).to_equal(0)
+            expect(sum_report.rejected_reasons.len()).to_be_greater_than(0)
+
+        it "traverses deeply nested loop regions in a single bottom-up pass with exact linear node visits (D01, I11)":
+            """Confirms nodes_visited equals exact tree node count without quadratic rescanning of nested loop subtrees."""
+            val reg = ls_admitted_registry()
+            var current = ls_source_node(
+                "leaf-loop", "deep_nested", "rev-1", "dep-1", 50,
+                "res = []\nfor x in inner:\n    res.append(x + 1)",
+                "inner", "x", HirPerfReceiverKind.Array, "append", Some(APPEND_SYM_ID),
+                SourceLoopBodyShapeV1.BuilderAppend(builder_var: "res", transform_expr: "x + 1", is_identity_item: false), []
+            )
+            var depth = 0
+            while depth < 14:
+                current = ls_source_node(
+                    "outer-{depth}", "deep_nested", "rev-1", "dep-1", depth + 1, "for row in matrix:",
+                    "matrix", "row", HirPerfReceiverKind.Array, "", None,
+                    SourceLoopBodyShapeV1.Unsupported("nested outer driver"), [current]
+                )
+                depth = depth + 1
+
+            val report = recognize_source_loop_tree_v1(current, reg)
+            expect(report.nodes_visited).to_equal(15)
+            expect(report.loop_regions_summarized).to_equal(15)
+            expect(report.candidates.len()).to_equal(1)
+            expect(report.candidates[0].family).to_equal(LoopIdiomFamily.Map)
+
+    context "13-point refactoring safety obligations (S01..S12, S15, S18)":
+        """Exercises every SafetyObligationKind and verifies VerifiedSafe, ReviewRequired, and Unavailable + PERF-FIX-001 transitions."""
+
+        it "discharges all 13 obligations to VerifiedSafe for a fresh local non-escaping builder with clean sync callbacks (S01, S02)":
+            """Verifies S01 produces PerfFixApplicability.VerifiedSafe and 13 discharged obligations, while missing eager .collect() fails TimingEagerness (S02)."""
+            val reg = ls_admitted_registry()
+            val node = ls_source_node(
+                "s01", "clean_map", "rev-7", "dep-7", 10,
+                "out = []\nfor x in items:\n    out.append(x * 2)",
+                "items", "x", HirPerfReceiverKind.Array, "append", Some(APPEND_SYM_ID),
+                SourceLoopBodyShapeV1.BuilderAppend(builder_var: "out", transform_expr: "x * 2", is_identity_item: false), []
+            )
+            val idiom = recognize_source_loop_tree_v1(node, reg).raw_idioms[0]
+            val clean_facts = loop_safety_facts_verified_local_v1("rev-7", "dep-7")
+            val ok_eval = evaluate_loop_refactor_safety_v1(idiom, clean_facts)
+
+            expect(ok_eval.all_discharged).to_equal(true)
+            expect(ok_eval.candidate.obligations.len()).to_equal(13)
+            expect(ok_eval.candidate.applicability).to_equal(PerfFixApplicability.VerifiedSafe)
+            expect(ok_eval.candidate.fix_kind).to_equal(PerfFixKind.Refactor)
+            expect(ok_eval.candidate.disabled_reason.?).to_equal(false)
+
+            var missing_terminal = clean_facts
+            missing_terminal.has_eager_terminal_consumer = false
+            val s02_eval = evaluate_loop_refactor_safety_v1(idiom, missing_terminal)
+            expect(s02_eval.candidate.applicability).to_equal(PerfFixApplicability.Unavailable)
+            expect(ls_find_obligation(s02_eval.candidate.obligations, SafetyObligationKind.TimingEagerness).discharged).to_equal(false)
+            expect(s02_eval.candidate.disabled_reason.unwrap()).to_contain("PERF-FIX-001")
+
+        it "blocks conversion with Unavailable and PERF-FIX-001 on input/output aliasing (S03), partial-output observation (S04), fallible prefix (S05), and external identity observation (S06)":
+            """Verifies S03, S04, S05, and S06 each reject automatic conversion with PERF-FIX-001 and pinpoint the violated obligation."""
+            val reg = ls_admitted_registry()
+            val node = ls_source_node(
+                "s03-06", "hazards", "rev-2", "dep-2", 12,
+                "out = []\nfor x in items:\n    out.append(f(x))",
+                "items", "x", HirPerfReceiverKind.Array, "append", Some(APPEND_SYM_ID),
+                SourceLoopBodyShapeV1.BuilderAppend(builder_var: "out", transform_expr: "f(x)", is_identity_item: false), []
+            )
+            val idiom = recognize_source_loop_tree_v1(node, reg).raw_idioms[0]
+            val base = loop_safety_facts_verified_local_v1("rev-2", "dep-2")
+
+            var s03_facts = base
+            s03_facts.input_aliases_output = true
+            val s03 = evaluate_loop_refactor_safety_v1(idiom, s03_facts)
+            expect(s03.candidate.applicability).to_equal(PerfFixApplicability.Unavailable)
+            expect(ls_find_obligation(s03.candidate.obligations, SafetyObligationKind.Aliasing).discharged).to_equal(false)
+            expect(s03.candidate.disabled_reason.unwrap()).to_contain("PERF-FIX-001")
+
+            var s04_facts = base
+            s04_facts.callback_observes_partial_output = true
+            val s04 = evaluate_loop_refactor_safety_v1(idiom, s04_facts)
+            expect(s04.candidate.applicability).to_equal(PerfFixApplicability.Unavailable)
+            expect(ls_find_obligation(s04.candidate.obligations, SafetyObligationKind.Aliasing).discharged).to_equal(false)
+            expect(s04.candidate.disabled_reason.unwrap()).to_contain("PERF-FIX-001")
+
+            var s05_facts = base
+            s05_facts.callback_may_fail = true
+            s05_facts.partial_prefix_observable_on_failure = true
+            val s05 = evaluate_loop_refactor_safety_v1(idiom, s05_facts)
+            expect(s05.candidate.applicability).to_equal(PerfFixApplicability.Unavailable)
+            expect(ls_find_obligation(s05.candidate.obligations, SafetyObligationKind.FailurePrefixCleanup).discharged).to_equal(false)
+            expect(s05.candidate.disabled_reason.unwrap()).to_contain("PERF-FIX-001")
+
+            var s05_safe_facts = base
+            s05_safe_facts.callback_may_fail = true
+            s05_safe_facts.partial_prefix_observable_on_failure = false
+            s05_safe_facts.cleanup_order_preserved_on_failure = true
+            s05_safe_facts.error_order_preserved = true
+            expect(evaluate_loop_refactor_safety_v1(idiom, s05_safe_facts).candidate.applicability).to_equal(PerfFixApplicability.VerifiedSafe)
+
+            var s06_facts = base
+            s06_facts.external_ref_observes_builder_identity = true
+            s06_facts.in_place_collect_contract_proven = false
+            val s06 = evaluate_loop_refactor_safety_v1(idiom, s06_facts)
+            expect(s06.candidate.applicability).to_equal(PerfFixApplicability.Unavailable)
+            expect(ls_find_obligation(s06.candidate.obligations, SafetyObligationKind.CollectionIdentity).discharged).to_equal(false)
+            expect(s06.candidate.disabled_reason.unwrap()).to_contain("PERF-FIX-001")
+            expect(s06.finding.rule_code).to_equal("PERF-FIX-001")
+
+        it "enforces fold seed, non-associative subtraction, float cancellation, and checked-int overflow rules (S07, S08, S09, S10)":
+            """Verifies sequential OrderedFold is allowed while blind sum/min replacement and illegal parallel reassociation are rejected."""
+            val reg = ls_admitted_registry()
+            val fold_node = ls_source_node(
+                "s07-10", "fold_cases", "rev-3", "dep-3", 25,
+                "acc = 10\nfor x in items:\n    acc = acc - x",
+                "items", "x", HirPerfReceiverKind.Array, "", None,
+                SourceLoopBodyShapeV1.AccumulatorStep(acc_var: "acc", seed_expr: "10", step_expr: "acc - x"), []
+            )
+            val fold_idiom = recognize_source_loop_tree_v1(fold_node, reg).raw_idioms[0]
+            val base = loop_safety_facts_verified_local_v1("rev-3", "dep-3")
+
+            var s07_fold = base
+            s07_fold.proposed_named_aggregation = ""
+            s07_fold.seed_is_identity_for_named_agg = false
+            val s07_preserved = assess_ordered_fold_and_reduction_v1(fold_idiom, s07_fold)
+            expect(s07_preserved.ordered_fold_allowed).to_equal(true)
+            expect(s07_preserved.named_aggregation_allowed).to_equal(false)
+            expect(s07_preserved.evaluation.candidate.applicability).to_equal(PerfFixApplicability.VerifiedSafe)
+
+            var s07_blind_sum = base
+            s07_blind_sum.proposed_named_aggregation = "sum"
+            s07_blind_sum.seed_is_identity_for_named_agg = false
+            val s07_refused = assess_ordered_fold_and_reduction_v1(fold_idiom, s07_blind_sum)
+            expect(s07_refused.evaluation.candidate.applicability).to_equal(PerfFixApplicability.Unavailable)
+            expect(ls_find_obligation(s07_refused.evaluation.candidate.obligations, SafetyObligationKind.OutputShapeDuplicates).discharged).to_equal(false)
+            expect(s07_refused.evaluation.candidate.disabled_reason.unwrap()).to_contain("PERF-FIX-001")
+
+            var s08_seq = base
+            s08_seq.recurrence_algebra = RecurrenceAlgebraKind.NonAssociative
+            s08_seq.requests_parallel_or_reassociated_reduction = false
+            val s08_seq_res = assess_ordered_fold_and_reduction_v1(fold_idiom, s08_seq)
+            expect(s08_seq_res.ordered_fold_allowed).to_equal(true)
+            expect(s08_seq_res.parallel_reassociation_allowed).to_equal(false)
+            expect(s08_seq_res.evaluation.candidate.applicability).to_equal(PerfFixApplicability.VerifiedSafe)
+
+            var s08_par = s08_seq
+            s08_par.requests_parallel_or_reassociated_reduction = true
+            val s08_par_res = assess_ordered_fold_and_reduction_v1(fold_idiom, s08_par)
+            expect(s08_par_res.evaluation.candidate.applicability).to_equal(PerfFixApplicability.Unavailable)
+            expect(ls_find_obligation(s08_par_res.evaluation.candidate.obligations, SafetyObligationKind.NumericSemantics).discharged).to_equal(false)
+
+            var s09_std_float = base
+            s09_std_float.recurrence_algebra = RecurrenceAlgebraKind.AssociativeCommutative
+            s09_std_float.numeric_domain = NumericDomainKind.FloatStandard
+            s09_std_float.seed_is_identity_for_named_agg = true
+            val s09_seq_res = assess_ordered_fold_and_reduction_v1(fold_idiom, s09_std_float)
+            expect(s09_seq_res.ordered_fold_allowed).to_equal(true)
+            expect(s09_seq_res.parallel_reassociation_allowed).to_equal(false)
+            expect(s09_seq_res.evaluation.candidate.applicability).to_equal(PerfFixApplicability.VerifiedSafe)
+
+            var s09_fast_math = s09_std_float
+            s09_fast_math.numeric_domain = NumericDomainKind.FloatExplicitFastMath
+            expect(assess_ordered_fold_and_reduction_v1(fold_idiom, s09_fast_math).parallel_reassociation_allowed).to_equal(true)
+
+            var s10_checked = base
+            s10_checked.recurrence_algebra = RecurrenceAlgebraKind.AssociativeCommutative
+            s10_checked.numeric_domain = NumericDomainKind.CheckedInteger
+            s10_checked.seed_is_identity_for_named_agg = true
+            val s10_seq = assess_ordered_fold_and_reduction_v1(fold_idiom, s10_checked)
+            expect(s10_seq.ordered_fold_allowed).to_equal(true)
+            expect(s10_seq.parallel_reassociation_allowed).to_equal(false)
+            expect(s10_seq.evaluation.candidate.applicability).to_equal(PerfFixApplicability.VerifiedSafe)
+
+            var s10_reassoc = s10_checked
+            s10_reassoc.requests_parallel_or_reassociated_reduction = true
+            val s10_par = assess_ordered_fold_and_reduction_v1(fold_idiom, s10_reassoc)
+            expect(s10_par.evaluation.candidate.applicability).to_equal(PerfFixApplicability.Unavailable)
+            expect(ls_find_obligation(s10_par.evaluation.candidate.obligations, SafetyObligationKind.NumericSemantics).discharged).to_equal(false)
+
+        it "blocks conversion when runtime effects, short-circuit cleanup, source/macro integrity, nogc/destructor scope, or stale revisions intervene (S11, S12, S15, S18)":
+            """Verifies S11, S12, S15, S18, and RevisionCurrency obligations."""
+            val reg = ls_admitted_registry()
+            val any_node = ls_source_node(
+                "s11-18", "search_effects", "rev-9", "dep-9", 40,
+                "for item in stream:\n    if check(item):\n        return true\nreturn false",
+                "stream", "item", HirPerfReceiverKind.Array, "", None,
+                SourceLoopBodyShapeV1.EarlyReturnBool(predicate_expr: "check(item)", early_return_value: true, fallback_value: false, predicate_is_negated: false), []
+            )
+            val idiom = recognize_source_loop_tree_v1(any_node, reg).raw_idioms[0]
+            val base = loop_safety_facts_verified_local_v1("rev-9", "dep-9")
+
+            var s11_facts = base
+            s11_facts.runtime_effects.volatile_or_mmio = true
+            s11_facts.runtime_effects.async_or_suspension = true
+            val s11 = evaluate_loop_refactor_safety_v1(idiom, s11_facts)
+            expect(s11.candidate.applicability).to_equal(PerfFixApplicability.Unavailable)
+            expect(ls_find_obligation(s11.candidate.obligations, SafetyObligationKind.RuntimeEffects).discharged).to_equal(false)
+            expect(s11.candidate.disabled_reason.unwrap()).to_contain("PERF-FIX-001")
+
+            var s12_bad = base
+            s12_bad.short_circuit_consumption_exact = false
+            s12_bad.iterator_cleanup_preserved = false
+            val s12 = evaluate_loop_refactor_safety_v1(idiom, s12_bad)
+            expect(s12.candidate.applicability).to_equal(PerfFixApplicability.Unavailable)
+            expect(ls_find_obligation(s12.candidate.obligations, SafetyObligationKind.EvaluationOrder).discharged).to_equal(false)
+            expect(ls_find_obligation(s12.candidate.obligations, SafetyObligationKind.FailurePrefixCleanup).discharged).to_equal(false)
+
+            var s15_macro = base
+            s15_macro.source_edit.from_unmapped_macro_expansion = true
+            s15_macro.source_edit.loses_inner_comments = true
+            val s15 = evaluate_loop_refactor_safety_v1(idiom, s15_macro)
+            expect(s15.candidate.applicability).to_equal(PerfFixApplicability.Unavailable)
+            expect(ls_find_obligation(s15.candidate.obligations, SafetyObligationKind.CaptureLifetime).discharged).to_equal(false)
+            expect(s15.candidate.disabled_reason.unwrap()).to_contain("PERF-FIX-001")
+
+            var s18_review = base
+            s18_review.resources.in_nogc_or_noalloc_scope = true
+            s18_review.resources.strict_noalloc_enforcement = false
+            s18_review.resources.adapter_or_closure_allocates = true
+            val s18_rev_res = evaluate_loop_refactor_safety_v1(idiom, s18_review)
+            expect(s18_rev_res.candidate.applicability).to_equal(PerfFixApplicability.ReviewRequired)
+            expect(ls_find_obligation(s18_rev_res.candidate.obligations, SafetyObligationKind.ResourceRestrictions).discharged).to_equal(false)
+
+            var s18_drop = base
+            s18_drop.resources.destructor_or_drop_order_observable = true
+            s18_drop.resources.drop_order_preserved = false
+            val s18_drop_res = evaluate_loop_refactor_safety_v1(idiom, s18_drop)
+            expect(s18_drop_res.candidate.applicability).to_equal(PerfFixApplicability.Unavailable)
+            expect(ls_find_obligation(s18_drop_res.candidate.obligations, SafetyObligationKind.ResourceRestrictions).discharged).to_equal(false)
+
+            var stale_rev = base
+            stale_rev.current_dependency_fingerprint = "dep-10-changed-callee"
+            val stale_res = evaluate_loop_refactor_safety_v1(idiom, stale_rev)
+            expect(stale_res.candidate.applicability).to_equal(PerfFixApplicability.Unavailable)
+            expect(ls_find_obligation(stale_res.candidate.obligations, SafetyObligationKind.RevisionCurrency).discharged).to_equal(false)

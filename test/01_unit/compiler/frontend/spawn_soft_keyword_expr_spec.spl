@@ -1,0 +1,49 @@
+"""
+# `spawn` soft keyword in identifier and expression positions
+
+Reproducing spec for Wave A parser failure in
+`src/lib/nogc_sync_mut/orchestration/host_primary_attach_settlement_v1.spl` (`val held = match spawn:`).
+`spawn` must parse as an identifier in `match spawn:`, `val x = spawn`, and `Some(spawn)`,
+while `spawn(w)` and `spawn worker_call()` still parse as spawn calls.
+"""
+
+use std.spec.*
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.core.parser.{parser_has_errors}
+use compiler.frontend.parser_types_expr.*
+
+describe "spawn soft keyword parses as identifier in non-argument positions":
+    it "parses `match spawn:` parameter scrutinee without error":
+        val src = "fn check(spawn: i64?) -> i64:\n" +
+            "    val held = match spawn:\n" +
+            "        case Some(v): v\n" +
+            "        case nil: 0\n" +
+            "    held\n"
+        val parsed = parse_and_build_module(src, "spawn_match_scrutinee.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val f = parsed.functions["check"]
+        expect(f.params[0].name).to_equal("spawn")
+
+    it "parses `val x = spawn` and `Some(spawn)` as identifiers":
+        val src = "fn id_uses(spawn: i64) -> i64?:\n" +
+            "    val x = spawn\n" +
+            "    val opt = Some(spawn)\n" +
+            "    opt\n"
+        val parsed = parse_and_build_module(src, "spawn_ident_uses.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val f = parsed.functions["id_uses"]
+        expect(f.body.stmts.len()).to_equal(3)
+
+    it "preserves `spawn worker_call()` and `spawn(w)` expressions":
+        val src = "fn launch(w: i64):\n" +
+            "    spawn(w)\n" +
+            "    spawn worker_call(w)\n"
+        val parsed = parse_full_frontend(src, "testdata/spawn_call_forms.spl", "spawn_call_forms", Logger(level: 0))
+        expect(parser_has_errors()).to_equal(false)
+        val f = parsed.functions["launch"]
+        var count = -1
+        if f.?:
+            count = f!.body.stmts.len()
+        expect(count).to_equal(2)

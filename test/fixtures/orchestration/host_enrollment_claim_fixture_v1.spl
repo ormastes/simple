@@ -1,0 +1,101 @@
+# Real private directory, public policy, configuration and Ed25519 credential.
+# Synthetic native IDs are trusted fixture inputs, never production observations.
+use test.fixtures.orchestration.host_enrollment_native_probe.{HostEnrollmentFixtureV1, host_enrollment_fixture_v1}
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.verification_seed
+use std.nogc_sync_mut.orchestration.host_enrollment_v1.*
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.local_authority_policy_load_v1
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{DistributedAuthorityKeyV2, distributed_approval_signature_message_v2, distributed_grant_signature_message_v2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_encode_grant_v2}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.binary_inspect.bytes_to_hex_canonical
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+
+pub struct HostClaimFixtureV1:
+    parent: text
+    configuration_bytes: text
+    enrollment: HostEnrollmentFixtureV1
+
+pub fn host_claim_clock_v1() -> i64:
+    100
+
+pub fn host_claim_expired_clock_v1() -> i64:
+    190
+
+fn host_claim_key_fields_v1(key: DistributedAuthorityKeyV2) -> SdnValue:
+    var public_bytes: [i64] = []
+    for byte in key.public_key: public_bytes.push(byte as i64)
+    var operations: [SdnValue] = []
+    for operation in key.operations: operations.push(SdnValue.String(operation))
+    val fields: Dict<text, SdnValue> = {"identity": SdnValue.String(key.identity), "role": SdnValue.String(key.role),
+        "revision": SdnValue.Int(key.revision), "publicKeyHex": SdnValue.String(bytes_to_hex_canonical(public_bytes)),
+        "principal": SdnValue.String(key.principal), "project": SdnValue.String(key.project), "hostId": SdnValue.String(key.host_id),
+        "operations": SdnValue.Array(operations), "maximumMemoryBytes": SdnValue.Int(key.maximum_memory_bytes),
+        "maximumDurationMs": SdnValue.Int(key.maximum_duration_ms), "policyRevision": SdnValue.Int(key.policy_revision),
+        "revocationEpoch": SdnValue.Int(key.revocation_epoch), "expiresAt": SdnValue.Int(key.expires_at), "revoked": SdnValue.Bool(key.revoked)}
+    SdnValue.Dict(fields)
+
+pub fn host_claim_config_bytes_v1(name: text, physical_host_id: text = "worker_1") -> text:
+    val metadata: Dict<text, SdnValue> = {"name": SdnValue.String(name), "namespace": SdnValue.String("admin")}
+    val budget: Dict<text, SdnValue> = {"cpu": SdnValue.String("1000m"), "memory": SdnValue.String("512"),
+        "exclusiveDeviceIds": SdnValue.Array([])}
+    val spec: Dict<text, SdnValue> = {"physicalHostId": SdnValue.String(physical_host_id), "serviceScopeId": SdnValue.String("user_1"),
+        "controllerRef": SdnValue.String("issuer_1"), "enrollmentCredentialRef": SdnValue.String("enrollment"),
+        "runtimeClassRef": SdnValue.String("podman-rootless"), "journalRoot": SdnValue.String("journal"),
+        "workspaceRoots": SdnValue.Array([SdnValue.String("/work")]), "budget": SdnValue.Dict(budget),
+        "maintenanceIntervalMs": SdnValue.Int(100), "maximumJournalEvents": SdnValue.Int(100)}
+    val fields: Dict<text, SdnValue> = {"apiVersion": SdnValue.String("orchestration.simple/v1alpha1"),
+        "kind": SdnValue.String("HostConfig"), "metadata": SdnValue.Dict(metadata), "spec": SdnValue.Dict(spec)}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+pub fn host_claim_rebind_v1(fixture: HostClaimFixtureV1, configuration_bytes: text) -> HostClaimFixtureV1:
+    var updated = fixture
+    updated.configuration_bytes = configuration_bytes
+    updated.enrollment.binding.config_digest = sha256_text(configuration_bytes)
+    updated.enrollment.credential.operation.payload_digest = host_enrollment_payload_digest_v1(updated.enrollment.binding).unwrap()
+    updated.enrollment.credential.approval.request_digest = sha256_text(distributed_encode_operation_v2(updated.enrollment.credential.operation).unwrap())
+    updated.enrollment.credential.approval.signature = pure_ed25519_sign_from_seed_v1(verification_seed(65),
+        distributed_approval_signature_message_v2(updated.enrollment.credential.approval).unwrap()).signature
+    updated
+
+pub fn host_claim_fixture_v1() -> HostClaimFixtureV1:
+    val parent = secure_temp_dir("/tmp", "host-enrollment-claim").unwrap()
+    var enrollment = host_enrollment_fixture_v1()
+    val keys = enrollment.policy.snapshot.keys
+    val policy_fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "generation": SdnValue.Int(7),
+        "policyRevision": SdnValue.Int(4), "revocationEpoch": SdnValue.Int(2), "sessionGeneration": SdnValue.Int(3),
+        "keys": SdnValue.Array([host_claim_key_fields_v1(keys["grant-issuer/issuer_1"]),
+            host_claim_key_fields_v1(keys["human-approver/approver_1"])])}
+    val policy_bytes = sdn_encode_canonical(SdnValue.Dict(policy_fields)) + "\n"
+    assert(file_atomic_write_mode(parent + "/authority-policy.sdn", policy_bytes, 0o600))
+    enrollment.binding.machine_parent = parent
+    enrollment.binding.policy_digest = sha256_text(policy_bytes)
+    enrollment.policy = local_authority_policy_load_v1(parent, enrollment.binding.policy_digest).unwrap()
+    val fixture = HostClaimFixtureV1(parent: parent, configuration_bytes: "", enrollment: enrollment)
+    host_claim_rebind_v1(fixture, host_claim_config_bytes_v1("host"))
+
+# A second legitimately signed logical host alias shares the same observed
+# native machine. Replace only the fixture's installed public policy in its
+# own secure parent; the original enrolled child/claim are never modified.
+pub fn host_claim_native_alias_v1(fixture: HostClaimFixtureV1) -> HostClaimFixtureV1:
+    var alias = fixture
+    var issuer = alias.enrollment.policy.snapshot.keys["grant-issuer/issuer_1"]
+    var approver = alias.enrollment.policy.snapshot.keys["human-approver/approver_1"]
+    issuer.host_id = "worker_2"
+    approver.host_id = "worker_2"
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "generation": SdnValue.Int(8),
+        "policyRevision": SdnValue.Int(4), "revocationEpoch": SdnValue.Int(2), "sessionGeneration": SdnValue.Int(3),
+        "keys": SdnValue.Array([host_claim_key_fields_v1(issuer), host_claim_key_fields_v1(approver)])}
+    val policy_bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    assert(file_atomic_write_mode(alias.parent + "/authority-policy.sdn", policy_bytes, 0o600))
+    alias.enrollment.binding.policy_digest = sha256_text(policy_bytes)
+    alias.enrollment.policy = local_authority_policy_load_v1(alias.parent, alias.enrollment.binding.policy_digest).unwrap()
+    alias.enrollment.credential.operation.host_id = "worker_2"
+    alias.enrollment.credential.signed.grant.host_id = "worker_2"
+    alias.enrollment.credential.signed.signature = pure_ed25519_sign_from_seed_v1(verification_seed(1),
+        distributed_grant_signature_message_v2(alias.enrollment.credential.signed).unwrap()).signature
+    alias.enrollment.credential.approval.grant_digest = sha256_text(distributed_encode_grant_v2(alias.enrollment.credential.signed.grant).unwrap())
+    host_claim_rebind_v1(alias, host_claim_config_bytes_v1("host-alias", "worker_2"))

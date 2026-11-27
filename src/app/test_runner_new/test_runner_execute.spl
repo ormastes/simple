@@ -16,6 +16,7 @@ use std.test_runner.test_runner_types.{TestFileResult, TestOptions}
 export use std.nogc_sync_mut.test_runner.resource_policy.{safe_mode_caps}
 use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines}
 use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
+use std.test_runner.test_runner_execute.{compile_failure_message_v1}
 use std.test_runner.test_runner_fork.{run_test_file_fork}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
@@ -494,7 +495,18 @@ fn preprocess_spipe_file(file_path: text) -> text:
     val body = body_parts.join("\n")
     val helpers = if spipe_helpers_used(body, top_level): spipe_inline_helpers() else: ""
     val wrapped = imports + "\n" + helpers + "\n" + top_level + "\nfn main():\n" + body
-    val tmp_path = "/tmp/spipe_wrapped_" + file_path.replace("/", "_")
+    var tmp_dir = env_get("TEMP")
+    if tmp_dir == "":
+        tmp_dir = env_get("TMP")
+    if tmp_dir == "":
+        tmp_dir = env_get("TMPDIR")
+    if tmp_dir == "":
+        tmp_dir = "/tmp"
+    tmp_dir = tmp_dir.replace("\\", "/")
+    while tmp_dir.byte_len() > 1 and tmp_dir.ends_with("/"):
+        tmp_dir = tmp_dir.substring(0, tmp_dir.byte_len() - 1)
+    val safe_name = file_path.replace("\\", "_").replace("/", "_").replace(":", "_")
+    val tmp_path = tmp_dir + "/spipe_wrapped_" + safe_name
     file_write(tmp_path, wrapped)
     tmp_path
 
@@ -602,7 +614,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             )
         val end = time_now_unix_micros()
         val duration_ms = (end - start) / 1000
-        val error_msg = "Compilation failed: {compile_stderr}"
+        val error_msg = compile_failure_message_v1(compile_output, compile_stderr)
         if cleanup_path != "" and not options.keep_artifacts:
             if file_exists(cleanup_path):
                 file_delete(cleanup_path)

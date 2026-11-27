@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (2026-09-13)
+- Status: FIXED (2026-11-11, lane boot19 — harness fix d2735dfa69f8 verified in tree)
 - Found: bootstrap lane BOOT-6
 - Severity: the isolation the gate believes it has, it does not have. It turned
   a second-build defect into a verdict that named `SIMPLE_BOOTSTRAP` as the
@@ -50,3 +50,32 @@ attribute a difference between them to the variable it changed. Either forward
 `--cache-dir` into the in-process driver (or set
 `SIMPLE_NATIVE_BUILD_CACHE_DIR`), or give each pass its own `HOME`.
 
+
+## 2026-11-11 addendum (lane boot19) — FIXED
+
+Verdict: FIXED. The harness gap this record describes is closed on
+`origin/release/1.0.0`:
+
+- Fix commit `d2735dfa69f8` ("fix(stage2): isolate per-probe native build
+  cache in admission probes (shared object store)") is an ancestor of this
+  branch.
+- `scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs:776` now
+  sets `SIMPLE_NATIVE_BUILD_CACHE_DIR="$probe_dir/native-cache-hello-world-positional"`
+  on exactly the probe this record names (`--cache-dir
+  "$probe_dir/cache-hello-world-positional"`), and `:379`/`:409` give every
+  invocation a fresh `mktemp -d` probe dir — both mechanisms this record's
+  "Not fixed" section demanded ("forward `--cache-dir` into the in-process
+  driver (or set `SIMPLE_NATIVE_BUILD_CACHE_DIR`), or give each pass its own
+  `HOME`").
+- The in-process driver still reads that variable
+  (`src/compiler/80.driver/driver_aot_native_output.spl:897`), so the two
+  sanity passes no longer share
+  `$HOME/.cache/simple/v1/projects/<hash>/native-build/v1`.
+
+Verification actually run (2026-11-11, lane boot19): source inspection of the
+exact probe invocation and the driver's env read (line citations above). The
+2026-11-04 `bug_db.sdn` note on this row asked for a self-hosted stage3 replay;
+that replay would close the end-to-end two-pass *attribution* question, but
+the harness defect itself is demonstrably fixed in-tree and needs no candidate
+to confirm. The product defect BOOT-6 fixed (two builds of one module into
+one scope) remains independently correct.

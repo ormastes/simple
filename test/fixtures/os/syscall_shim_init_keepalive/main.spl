@@ -1,0 +1,23 @@
+# Native probe imports the production shim; it does not reproduce the fix in
+# a test-only callback. Check the emitted strong providers with the companion
+# check-syscall-shim-keepalive-symbols.shs gate before executing this binary.
+use os.kernel.abi.syscall_shim.{shim_init, g_shim_klog}
+use os.kernel.abi.syscall_shim_process.{spl_handle_getpid}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+
+fn main() -> i64:
+    val scheduler = Scheduler.new()
+    val expected = scheduler.get_current().id as i64
+    shim_init(scheduler, IpcManager.new(), KernelLog.new(16))
+    val first = spl_handle_getpid(0, 0, 0, 0, 0, 0)
+    if first != expected or g_shim_klog.capacity != 16u64:
+        print "FAIL: shim_init did not install the scheduler"
+        return 1
+    shim_init(Scheduler.new(), IpcManager.new(), KernelLog.new(32))
+    if spl_handle_getpid(0, 0, 0, 0, 0, 0) != expected or g_shim_klog.capacity != 32u64:
+        print "FAIL: shim_init is not repeatable"
+        return 2
+    print "SHIM_INIT_KEEPALIVE_PASS"
+    0

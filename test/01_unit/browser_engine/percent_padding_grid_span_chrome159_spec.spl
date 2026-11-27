@@ -1,0 +1,224 @@
+"""
+## Purpose and audience
+Purpose: Pin (1) percent PADDING, which resolves on all four sides against
+the containing block's INLINE size (CSS 2.2 8.4) -- the parent content width
+for block, inline-block, float and flex items, the grid AREA for a grid item,
+the padding box for an absolutely positioned box -- including
+`box-sizing:border-box`, nested percents and shrink-to-fit widths; and
+(2) a bare `grid-column: span N` / `grid-row: span N` (auto start), `span N /
+<line>`, sparse auto-placement around spans, and definite items claiming
+their cells before auto-placed ones.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159 headless, `--dump-dom` + getBoundingClientRect(),
+900x2000, `body{margin:0}`, `.w{width:400px;margin-bottom:10px}`,
+`.f{display:flex}`, `.g{display:grid}`, 2026-11-18). Every expected rect is
+"x y w h" relative to its `.w` container and is quoted in the `step` of its
+example. Each example lays out only its own container.
+
+Base (release/1.0.0 80438d57d6d): a `%` padding token rejected the whole
+declaration (padding 0 everywhere); bare `span N` normalized to "" (one
+track); auto-placement back-filled skipped cells; `grid-row` spans were not
+tracked in the occupancy grid.
+Not covered (open, see doc/08_tracking/bug/
+web_percent_padding_unparsed_and_grid_bare_span_2026-11-18.md): stretch in an
+implicit row, `grid-auto-rows`, fractional (sub-px) percent padding.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-PERCENT-PADDING-001 — percent padding resolves against the containing block inline size; REQ-BROWSER-ENGINE-GRID-BARE-SPAN-001 — bare `span N` grid placement.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val PRE: text = "<html><head><style>body{{margin:0}} .w{{width:400px;margin-bottom:10px}} .f{{display:flex}} .g{{display:grid}}</style></head><body>"
+val POST: text = "</body></html>"
+val PAGE_W1: text = PRE + "<div class=w id=w1><div id=k1 style=\"padding:10%\"><div id=k1c style=\"height:10px\"></div></div></div>" + POST
+val PAGE_W2: text = PRE + "<div class=w id=w2><div id=k2 style=\"padding:5% 10% 25% 2%;height:10px\"><div id=k2c style=\"height:10px\"></div></div></div>" + POST
+val PAGE_W3: text = PRE + "<div class=w id=w3><div id=k3 style=\"width:50%;padding:10%\"></div></div>" + POST
+val PAGE_W4: text = PRE + "<div class=w id=w4><div id=k4 style=\"width:50%;padding:10%;box-sizing:border-box;height:100px\"><div id=k4c style=\"height:10px\"></div></div></div>" + POST
+val PAGE_W5: text = PRE + "<div class=w id=w5><div id=k5 style=\"width:50%;padding:10%\"><div id=k5c style=\"padding:10%;height:10px\"></div></div></div>" + POST
+val PAGE_W6: text = PRE + "<div class=w id=w6><div id=k6 style=\"padding-left:25%;padding-top:5%;height:10px\"><div id=k6c style=\"height:10px\"></div></div></div>" + POST
+val PAGE_W7: text = PRE + "<div class=w id=w7><div id=i1 style=\"display:inline-block;width:100px;height:20px;padding:10%;vertical-align:top\"></div></div>" + POST
+val PAGE_F1: text = PRE + "<div class=\"w f\" id=f1><div id=x1 style=\"width:100px;height:20px;padding:10%\"></div><div id=x2 style=\"flex:1;padding:5%\"></div></div>" + POST
+val PAGE_F2: text = PRE + "<div class=\"w f\" id=f2 style=\"flex-direction:column\"><div id=y1 style=\"padding:10%;height:10px\"></div><div id=y2 style=\"padding-top:5%;padding-left:25%\"><div id=y2c style=\"height:10px\"></div></div></div>" + POST
+val PAGE_G1: text = PRE + "<div class=\"w g\" id=g1 style=\"grid-template-columns:100px 300px;align-items:start\"><div id=a1 style=\"padding:10%\"></div><div id=a2 style=\"padding:5%\"></div></div>" + POST
+val PAGE_G2: text = PRE + "<div class=\"w g\" id=g2 style=\"grid-template-columns:100px 300px\"><div id=b1 style=\"padding-top:25%;height:10px\"></div><div id=b2 style=\"padding:5% 10% 25% 2%;height:10px\"><div id=b2c style=\"height:10px\"></div></div></div>" + POST
+val PAGE_G3: text = PRE + "<div class=\"w g\" id=g3 style=\"grid-template-columns:100px 100px 100px;column-gap:20px;align-items:start\"><div id=c1 style=\"grid-column:1 / span 2;padding:10%\"></div><div id=c2 style=\"padding:10%;box-sizing:border-box;height:50px\"></div></div>" + POST
+val PAGE_W8: text = PRE + "<div class=w id=w8 style=\"position:relative;height:100px;padding:20px;width:360px\"><div id=p1 style=\"position:absolute;left:0;top:0;width:50px;height:10px;padding:10%\"></div></div>" + POST
+val PAGE_W9: text = PRE + "<div class=w id=w9 style=\"height:120px\"><div id=fl1 style=\"float:left;width:100px;height:10px;padding:10%\"></div></div>" + POST
+val PAGE_S1: text = PRE + "<div class=\"w g\" id=s1 style=\"grid-template-columns:100px 100px 100px;column-gap:20px\"><div id=sa style=\"grid-column:span 2;height:10px\"></div><div id=sb style=\"height:10px\"></div><div id=sc style=\"grid-column:span 3;height:10px\"></div><div id=sd style=\"height:10px\"></div></div>" + POST
+val PAGE_S2: text = PRE + "<div class=\"w g\" id=s2 style=\"grid-template-columns:100px 100px 100px;column-gap:20px\"><div id=se style=\"grid-column:span 2;margin:10%;height:10px\"></div><div id=sf style=\"height:10px\"></div></div>" + POST
+val PAGE_S3: text = PRE + "<div class=\"w g\" id=s3 style=\"grid-template-columns:100px 100px;grid-template-rows:30px 30px\"><div id=ra style=\"grid-row:span 2\"></div><div id=rb></div><div id=rc></div></div>" + POST
+val PAGE_S4: text = PRE + "<div class=\"w g\" id=s4 style=\"grid-template-columns:100px 100px 100px;column-gap:20px\"><div id=ta style=\"height:10px\"></div><div id=tb style=\"grid-column:span 3;height:10px\"></div><div id=tc style=\"height:10px\"></div><div id=td style=\"grid-column:span 2 / 4;height:10px\"></div></div>" + POST
+val PAGE_S5: text = PRE + "<div class=\"w g\" id=s5 style=\"grid-template-columns:100px 100px 100px;column-gap:20px\"><div id=ua style=\"grid-column:2 / span 2;height:10px\"></div><div id=ub style=\"grid-column:span 2;height:10px\"></div><div id=uc style=\"grid-column:span 2;padding:10%\"></div></div>" + POST
+val PAGE_S6: text = PRE + "<div class=\"w g\" id=s6 style=\"grid-template-columns:100px 100px;grid-template-rows:20px 20px 20px\"><div id=va></div><div id=vb style=\"grid-row:span 2\"></div><div id=vc></div><div id=vd style=\"grid-row:2 / span 2;grid-column:1\"></div></div>" + POST
+val PAGE_F3: text = PRE + "<div class=\"w f\" id=f3><div id=z1 style=\"padding:5% 10%\"><div id=z1c style=\"width:50px;height:10px\"></div></div><div id=z2 style=\"padding-left:25%;flex:none\"><div id=z2c style=\"width:50px;height:10px\"></div></div></div>" + POST
+val PAGE_W10: text = PRE + "<div class=w id=w10><div id=fl2 style=\"float:left;padding:5% 10%\"><div id=fl2c style=\"width:50px;height:10px\"></div></div><div style=\"clear:both\"></div></div>" + POST
+val PAGE_W11: text = PRE + "<div class=w id=w11 style=\"position:relative;height:60px\"><div id=p2 style=\"position:absolute;left:0;top:0;padding:5% 10%\"><div id=p2c style=\"width:50px;height:10px\"></div></div></div>" + POST
+
+fn _g(page: text, id: text, field: text) -> i32:
+    simple_web_layout_debug_layout_by_id(page, 900, 2000, id, field).to_i32()
+
+fn _size(page: text, id: text) -> text:
+    val w = _g(page, id, "w")
+    val h = _g(page, id, "h")
+    "{w} {h}"
+
+# "x y w h" of `id` relative to its container `box`.
+fn _rect(page: text, id: text, box: text) -> text:
+    val x = _g(page, id, "x") - _g(page, box, "x")
+    val y = _g(page, id, "y") - _g(page, box, "y")
+    val w = _g(page, id, "w")
+    val h = _g(page, id, "h")
+    "{x} {y} {w} {h}"
+
+describe "percent padding and bare grid span (Chrome 159)":
+    it "block: padding 10% of the 400 px containing block on all four sides":
+        step("Chrome 159: w1 400 x 90, k1 0 0 400 90, k1c 40 40 320 10")
+        expect(_size(PAGE_W1, "w1")).to_equal("400 90")
+        expect(_rect(PAGE_W1, "k1", "w1")).to_equal("0 0 400 90")
+        expect(_rect(PAGE_W1, "k1c", "w1")).to_equal("40 40 320 10")
+
+    it "block: four different percents all resolve against the WIDTH":
+        step("Chrome 159: w2 400 x 130, k2 0 0 400 130, k2c 8 20 352 10")
+        expect(_size(PAGE_W2, "w2")).to_equal("400 130")
+        expect(_rect(PAGE_W2, "k2", "w2")).to_equal("0 0 400 130")
+        expect(_rect(PAGE_W2, "k2c", "w2")).to_equal("8 20 352 10")
+
+    it "block: width 50% plus content-box percent padding":
+        step("Chrome 159: w3 400 x 80, k3 0 0 280 80")
+        expect(_size(PAGE_W3, "w3")).to_equal("400 80")
+        expect(_rect(PAGE_W3, "k3", "w3")).to_equal("0 0 280 80")
+
+    it "block: box-sizing border-box keeps the percent padding inside the width":
+        step("Chrome 159: w4 400 x 100, k4 0 0 200 100, k4c 40 40 120 10")
+        expect(_size(PAGE_W4, "w4")).to_equal("400 100")
+        expect(_rect(PAGE_W4, "k4", "w4")).to_equal("0 0 200 100")
+        expect(_rect(PAGE_W4, "k4c", "w4")).to_equal("40 40 120 10")
+
+    it "nested: a child's percent padding is of its parent's CONTENT width":
+        step("Chrome 159: w5 400 x 130, k5 0 0 280 130, k5c 40 40 200 50")
+        expect(_size(PAGE_W5, "w5")).to_equal("400 130")
+        expect(_rect(PAGE_W5, "k5", "w5")).to_equal("0 0 280 130")
+        expect(_rect(PAGE_W5, "k5c", "w5")).to_equal("40 40 200 50")
+
+    it "block: padding-left / padding-top longhands":
+        step("Chrome 159: w6 400 x 30, k6 0 0 400 30, k6c 100 20 300 10")
+        expect(_size(PAGE_W6, "w6")).to_equal("400 30")
+        expect(_rect(PAGE_W6, "k6", "w6")).to_equal("0 0 400 30")
+        expect(_rect(PAGE_W6, "k6c", "w6")).to_equal("100 20 300 10")
+
+    it "inline-block: percent padding around a fixed content box":
+        step("Chrome 159: w7 400 x 100, i1 0 0 180 100")
+        expect(_size(PAGE_W7, "w7")).to_equal("400 100")
+        expect(_rect(PAGE_W7, "i1", "w7")).to_equal("0 0 180 100")
+
+    it "flex row: percent padding of the container width; flex:1 takes the rest":
+        step("Chrome 159: f1 400 x 100, x1 0 0 180 100, x2 180 0 220 100")
+        expect(_size(PAGE_F1, "f1")).to_equal("400 100")
+        expect(_rect(PAGE_F1, "x1", "f1")).to_equal("0 0 180 100")
+        expect(_rect(PAGE_F1, "x2", "f1")).to_equal("180 0 220 100")
+
+    it "flex column: percent padding on stretched items":
+        step("Chrome 159: f2 400 x 120, y1 0 0 400 90, y2 0 90 400 30, y2c 100 110 300 10")
+        expect(_size(PAGE_F2, "f2")).to_equal("400 120")
+        expect(_rect(PAGE_F2, "y1", "f2")).to_equal("0 0 400 90")
+        expect(_rect(PAGE_F2, "y2", "f2")).to_equal("0 90 400 30")
+        expect(_rect(PAGE_F2, "y2c", "f2")).to_equal("100 110 300 10")
+
+    it "grid item: percent padding is of its own track (100 and 300), not the grid":
+        step("Chrome 159: g1 400 x 30, a1 0 0 100 20, a2 100 0 300 30")
+        expect(_size(PAGE_G1, "g1")).to_equal("400 30")
+        expect(_rect(PAGE_G1, "a1", "g1")).to_equal("0 0 100 20")
+        expect(_rect(PAGE_G1, "a2", "g1")).to_equal("100 0 300 30")
+
+    it "grid item: padding-top 25% of the 100 px track; four-value percent in the 300 px track":
+        step("Chrome 159: g2 400 x 100, b1 0 0 100 35, b2 100 0 300 100, b2c 106 15 264 10")
+        expect(_size(PAGE_G2, "g2")).to_equal("400 100")
+        expect(_rect(PAGE_G2, "b1", "g2")).to_equal("0 0 100 35")
+        expect(_rect(PAGE_G2, "b2", "g2")).to_equal("100 0 300 100")
+        expect(_rect(PAGE_G2, "b2c", "g2")).to_equal("106 15 264 10")
+
+    it "grid item: 1 / span 2 pads against the 220 px area; border-box item keeps its height":
+        step("Chrome 159: g3 400 x 50, c1 0 0 220 44, c2 240 0 100 50")
+        expect(_size(PAGE_G3, "g3")).to_equal("400 50")
+        expect(_rect(PAGE_G3, "c1", "g3")).to_equal("0 0 220 44")
+        expect(_rect(PAGE_G3, "c2", "g3")).to_equal("240 0 100 50")
+
+    it "absolute: percent padding is of the containing block PADDING box (400)":
+        step("Chrome 159: w8 400 x 140, p1 0 0 130 90")
+        expect(_size(PAGE_W8, "w8")).to_equal("400 140")
+        expect(_rect(PAGE_W8, "p1", "w8")).to_equal("0 0 130 90")
+
+    it "float: percent padding around a fixed content box":
+        step("Chrome 159: w9 400 x 120, fl1 0 0 180 90")
+        expect(_size(PAGE_W9, "w9")).to_equal("400 120")
+        expect(_rect(PAGE_W9, "fl1", "w9")).to_equal("0 0 180 90")
+
+    it "bare span: auto-placed span 2 and span 3 items":
+        step("Chrome 159: s1 400 x 30, sa 0 0 220 10, sb 240 0 100 10, sc 0 10 340 10, sd 0 20 100 10")
+        expect(_size(PAGE_S1, "s1")).to_equal("400 30")
+        expect(_rect(PAGE_S1, "sa", "s1")).to_equal("0 0 220 10")
+        expect(_rect(PAGE_S1, "sb", "s1")).to_equal("240 0 100 10")
+        expect(_rect(PAGE_S1, "sc", "s1")).to_equal("0 10 340 10")
+        expect(_rect(PAGE_S1, "sd", "s1")).to_equal("0 20 100 10")
+
+    it "bare span: span 2 with a 10% margin resolves against the 220 px area":
+        step("Chrome 159: s2 400 x 54, se 22 22 176 10, sf 240 0 100 10")
+        expect(_size(PAGE_S2, "s2")).to_equal("400 54")
+        expect(_rect(PAGE_S2, "se", "s2")).to_equal("22 22 176 10")
+        expect(_rect(PAGE_S2, "sf", "s2")).to_equal("240 0 100 10")
+
+    it "bare grid-row span: span 2 covers both explicit rows":
+        step("Chrome 159: s3 400 x 60, ra 0 0 100 60, rb 100 0 100 30, rc 100 30 100 30")
+        expect(_size(PAGE_S3, "s3")).to_equal("400 60")
+        expect(_rect(PAGE_S3, "ra", "s3")).to_equal("0 0 100 60")
+        expect(_rect(PAGE_S3, "rb", "s3")).to_equal("100 0 100 30")
+        expect(_rect(PAGE_S3, "rc", "s3")).to_equal("100 30 100 30")
+
+    it "bare span: sparse packing never back-fills; span 2 / 4 ends at line 4":
+        step("Chrome 159: s4 400 x 30, ta 0 0 100 10, tb 0 10 340 10, tc 0 20 100 10, td 120 20 220 10")
+        expect(_size(PAGE_S4, "s4")).to_equal("400 30")
+        expect(_rect(PAGE_S4, "ta", "s4")).to_equal("0 0 100 10")
+        expect(_rect(PAGE_S4, "tb", "s4")).to_equal("0 10 340 10")
+        expect(_rect(PAGE_S4, "tc", "s4")).to_equal("0 20 100 10")
+        expect(_rect(PAGE_S4, "td", "s4")).to_equal("120 20 220 10")
+
+    it "bare span: after 2 / span 2, and with percent padding of the spanned area":
+        step("Chrome 159: s5 400 x 64, ua 120 0 220 10, ub 0 10 220 10, uc 0 20 220 44")
+        expect(_size(PAGE_S5, "s5")).to_equal("400 64")
+        expect(_rect(PAGE_S5, "ua", "s5")).to_equal("120 0 220 10")
+        expect(_rect(PAGE_S5, "ub", "s5")).to_equal("0 10 220 10")
+        expect(_rect(PAGE_S5, "uc", "s5")).to_equal("0 20 220 44")
+
+    it "grid-row span with a definite item placed first, whatever the source order":
+        step("Chrome 159: s6 400 x 60, va 0 0 100 20, vb 100 0 100 40, vc 100 40 100 20, vd 0 20 100 40")
+        expect(_size(PAGE_S6, "s6")).to_equal("400 60")
+        expect(_rect(PAGE_S6, "va", "s6")).to_equal("0 0 100 20")
+        expect(_rect(PAGE_S6, "vb", "s6")).to_equal("100 0 100 40")
+        expect(_rect(PAGE_S6, "vc", "s6")).to_equal("100 40 100 20")
+        expect(_rect(PAGE_S6, "vd", "s6")).to_equal("0 20 100 40")
+
+    it "shrink-to-fit flex items add the resolved percent padding":
+        step("Chrome 159: f3 400 x 50, z1 0 0 130 50, z1c 40 20 50 10, z2 130 0 150 50, z2c 230 0 50 10")
+        expect(_size(PAGE_F3, "f3")).to_equal("400 50")
+        expect(_rect(PAGE_F3, "z1", "f3")).to_equal("0 0 130 50")
+        expect(_rect(PAGE_F3, "z1c", "f3")).to_equal("40 20 50 10")
+        expect(_rect(PAGE_F3, "z2", "f3")).to_equal("130 0 150 50")
+        expect(_rect(PAGE_F3, "z2c", "f3")).to_equal("230 0 50 10")
+
+    it "shrink-to-fit float adds the resolved percent padding":
+        step("Chrome 159: w10 400 x 50, fl2 0 0 130 50, fl2c 40 20 50 10")
+        expect(_size(PAGE_W10, "w10")).to_equal("400 50")
+        expect(_rect(PAGE_W10, "fl2", "w10")).to_equal("0 0 130 50")
+        expect(_rect(PAGE_W10, "fl2c", "w10")).to_equal("40 20 50 10")
+
+    it "shrink-to-fit absolute box adds the resolved percent padding":
+        step("Chrome 159: w11 400 x 60, p2 0 0 130 50, p2c 40 20 50 10")
+        expect(_size(PAGE_W11, "w11")).to_equal("400 60")
+        expect(_rect(PAGE_W11, "p2", "w11")).to_equal("0 0 130 50")
+        expect(_rect(PAGE_W11, "p2c", "w11")).to_equal("40 20 50 10")

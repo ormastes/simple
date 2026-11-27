@@ -1,0 +1,294 @@
+# @req DAE-01
+# Actual file-spool failure injection; no daemon process or remote endpoint.
+# Shared real file-spool regression cases; native entrypoint is diagnostic only.
+use std.nogc_sync_mut.daemon_sdk.daemon.{DaemonRunner, daemon_runner_start}
+use std.nogc_sync_mut.daemon_sdk.types.*
+use std.nogc_sync_mut.daemon_sdk.protocol.{write_daemon_request, daemon_request_path_for, read_daemon_response, write_daemon_response}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_atomic_write, file_read}
+use std.io_runtime.{file_exists, file_delete, mkdir_p}
+use std.nogc_sync_mut.sffi.cli_args.{cli_get_args}
+use std.nogc_sync_mut.io_runtime.dir_remove
+
+fn valid_handler(request: DaemonRequest) -> DaemonResponse:
+    val effect_path = request.get_field("effect_path")
+    val before = file_read(effect_path)
+    assert(file_atomic_write(effect_path, before + "effect\n") == true)
+    daemon_response_new(request.id, 0)
+
+fn forbidden_handler(request: DaemonRequest) -> DaemonResponse:
+    assert(false) # A blocked owner must never invoke this handler.
+    daemon_response_new(request.id, 1)
+
+fn mismatched_handler(request: DaemonRequest) -> DaemonResponse:
+    daemon_response_new("unrelated_request", 0)
+
+fn lost_request_handler(request: DaemonRequest) -> DaemonResponse:
+    # Deterministic acknowledgement race: an external consumer removed the
+    # claimed path. The runner must report failure rather than keep polling.
+    assert(file_delete(request.get_field("request_path")) == true)
+    daemon_response_new(request.id, 0)
+
+fn start_fixture(root: text) -> DaemonRunner:
+    val config = daemon_config_new(root + "/lock", root + "/requests", root + "/responses")
+    daemon_runner_start(config)
+
+pub fn daemon_publication_failure_case() -> i64:
+    val root = secure_temp_dir("build", "daemon-response-failure").unwrap()
+    var runner = start_fixture(root)
+    assert(runner.is_running() == true)
+    var request = daemon_request_new(1)
+    request.set_field("effect_path", root + "/effect")
+    val request_path = write_daemon_request(request, root + "/requests")
+    assert(request_path != "" == true)
+    val original_request = file_read(request_path)
+    # The final response path is a directory, forcing atomic replace to fail.
+    mkdir_p(root + "/responses/" + request.id + ".resp")
+    runner.run_poll_cycle(valid_handler)
+    val state = runner.get_state()
+    assert(state.status == DAEMON_PUBLICATION_BLOCKED)
+    assert(state.errors_count == 1)
+    assert(state.items_processed == 0)
+    assert(runner.is_running() == false)
+    assert(file_exists(request_path) == true)
+    assert(file_read(request_path) == original_request)
+    assert(file_read(root + "/effect") == "effect\n")
+    runner.run_poll_cycle(forbidden_handler)
+    assert(file_read(root + "/effect") == "effect\n")
+    runner.shutdown()
+    assert(dir_remove(root, true) == true)
+    0
+
+pub fn daemon_response_identity_case() -> i64:
+    val root = secure_temp_dir("build", "daemon-response-identity").unwrap()
+    var runner = start_fixture(root)
+    assert(runner.is_running() == true)
+    val request = daemon_request_new(1)
+    val request_path = write_daemon_request(request, root + "/requests")
+    runner.run_poll_cycle(mismatched_handler)
+    val state = runner.get_state()
+    assert(state.status == DAEMON_PUBLICATION_BLOCKED)
+    assert(file_exists(request_path) == true)
+    assert(file_exists(root + "/responses/unrelated_request.resp") == false)
+    runner.run_poll_cycle(forbidden_handler)
+    runner.shutdown()
+    assert(dir_remove(root, true) == true)
+    0
+
+pub fn daemon_publication_success_case() -> i64:
+    val root = secure_temp_dir("build", "daemon-response-success").unwrap()
+    var runner = start_fixture(root)
+    assert(runner.is_running() == true)
+    var request = daemon_request_new(1)
+    request.set_field("effect_path", root + "/effect")
+    val request_path = write_daemon_request(request, root + "/requests")
+    runner.run_poll_cycle(valid_handler)
+    val state = runner.get_state()
+    assert(state.status == DAEMON_IDLE)
+    assert(state.items_processed == 1)
+    assert(file_exists(request_path) == false)
+    assert(file_exists(root + "/responses/" + request.id + ".resp") == true)
+    runner.run_poll_cycle(forbidden_handler)
+    runner.shutdown()
+    assert(dir_remove(root, true) == true)
+    0
+
+pub fn daemon_ack_missing_case() -> i64:
+    val root = secure_temp_dir("build", "daemon-acknowledgement-failure").unwrap()
+    var runner = start_fixture(root)
+    assert(runner.is_running() == true)
+    var request = daemon_request_new(1)
+    request.set_field("request_path", daemon_request_path_for(request.id, root + "/requests"))
+    assert(write_daemon_request(request, root + "/requests") != "" == true)
+    runner.run_poll_cycle(lost_request_handler)
+    val state = runner.get_state()
+    assert(state.status == DAEMON_ACKNOWLEDGEMENT_BLOCKED)
+    assert(state.errors_count == 1)
+    assert(runner.is_running() == false)
+    assert(file_exists(root + "/responses/" + request.id + ".resp") == true)
+    runner.run_poll_cycle(forbidden_handler)
+    runner.shutdown()
+    assert(dir_remove(root, true) == true)
+    0
+
+fn prefix_handler(request: DaemonRequest) -> DaemonResponse:
+    val root = request.get_field("case_root")
+    val before = file_read(root + "/effects")
+    assert(file_atomic_write(root + "/effects", before + request.id + "\n"))
+    if before != "":
+        mkdir_p(root + "/responses/" + request.id + ".resp")
+    daemon_response_new(request.id, 0)
+
+pub fn daemon_publication_prefix_case() -> i64:
+    val root = secure_temp_dir("build", "daemon-publication-prefix").unwrap()
+    var runner = start_fixture(root)
+    for name in ["one", "two", "three"]:
+        var request = DaemonRequest(id: name, kind: 1, timestamp: 1, fields: {})
+        request.set_field("case_root", root)
+        assert(write_daemon_request(request, root + "/requests") != "")
+    runner.run_poll_cycle(prefix_handler)
+    val ids = file_read(root + "/effects").trim().split("\n")
+    assert(ids.len() == 2)
+    assert(runner.get_state().items_processed == 1)
+    assert(runner.get_state().status == DAEMON_PUBLICATION_BLOCKED)
+    assert(not file_exists(daemon_request_path_for(ids[0], root + "/requests")))
+    for name in ["one", "two", "three"]:
+        if name != ids[0]: assert(file_exists(daemon_request_path_for(name, root + "/requests")))
+    runner.run_poll_cycle(forbidden_handler)
+    assert(file_read(root + "/effects").trim().split("\n").len() == 2)
+    runner.shutdown()
+    assert(dir_remove(root, true))
+    0
+
+fn refusal_handler(request: DaemonRequest) -> DaemonResponse:
+    val path = request.get_field("request_path")
+    val original = file_read(path)
+    assert(file_delete(path))
+    mkdir_p(path)
+    assert(file_atomic_write(path + "/original-request", original))
+    daemon_response_new(request.id, 0)
+
+pub fn daemon_ack_refusal_case() -> i64:
+    val root = secure_temp_dir("build", "daemon-ack-refusal").unwrap()
+    var runner = start_fixture(root)
+    var request = daemon_request_new(1)
+    val path = daemon_request_path_for(request.id, root + "/requests")
+    request.set_field("request_path", path)
+    assert(write_daemon_request(request, root + "/requests") == path)
+    val original = file_read(path)
+    runner.run_poll_cycle(refusal_handler)
+    assert(runner.get_state().status == DAEMON_ACKNOWLEDGEMENT_BLOCKED)
+    assert(not runner.is_running())
+    assert(file_exists(path))
+    assert(file_read(path + "/original-request") == original)
+    assert(read_daemon_response(request.id, root + "/responses").request_id == request.id)
+    runner.run_poll_cycle(forbidden_handler)
+    runner.shutdown()
+    assert(dir_remove(root, true))
+    0
+
+pub fn daemon_envelope_injection_case() -> i64:
+    for header in ["id=other", "request_id=other", "kind=99", "status=99", "timestamp=1", "field.output=other"]:
+        val root = secure_temp_dir("build", "daemon-envelope-injection").unwrap()
+        var request = DaemonRequest(id: "request", kind: 1, timestamp: 1, fields: {})
+        request.set_field("output", "ok\nordinary\n  " + header + "\r")
+        assert(write_daemon_request(request, root + "/bad-requests") == "")
+        assert(not file_exists(root + "/bad-requests"))
+        var response = daemon_response_new("request", 0)
+        response.set_field("output", "ok\nordinary\n  " + header + "\r")
+        assert(not write_daemon_response(response, root + "/bad-responses"))
+        assert(not file_exists(root + "/bad-responses"))
+        assert(dir_remove(root, true))
+    for key in ["", "a=b", "output\nrequest_id", "output\rfield.other"]:
+        val root = secure_temp_dir("build", "daemon-key-injection").unwrap()
+        var response = daemon_response_new("request", 0)
+        response.set_field(key, "other")
+        assert(not write_daemon_response(response, root + "/responses"))
+        var request = DaemonRequest(id: "request", kind: 1, timestamp: 1, fields: {})
+        request.set_field(key, "other")
+        assert(write_daemon_request(request, root + "/requests") == "")
+        assert(dir_remove(root, true))
+    val root = secure_temp_dir("build", "daemon-handler-injection").unwrap()
+    var runner = start_fixture(root)
+    var request = daemon_request_new(1)
+    request.set_field("case_root", root)
+    # Handler constructs the injected bytes, rather than importing them through
+    # a request writer which now correctly rejects the same attack.
+    request.set_field("injection", "safe")
+    val path = write_daemon_request(request, root + "/requests")
+    val original = file_read(path)
+    runner.run_poll_cycle(header_injecting_handler)
+    assert(runner.get_state().status == DAEMON_PUBLICATION_BLOCKED)
+    assert(file_read(path) == original)
+    assert(file_read(root + "/effect") == "once")
+    assert(not file_exists(root + "/responses/" + request.id + ".resp"))
+    runner.run_poll_cycle(forbidden_handler)
+    runner.shutdown()
+    assert(dir_remove(root, true))
+    0
+
+fn header_injecting_handler(request: DaemonRequest) -> DaemonResponse:
+    val root = request.get_field("case_root")
+    assert(file_atomic_write(root + "/effect", "once"))
+    var response = daemon_response_new(request.id, 0)
+    response.set_field("output", "ok\nrequest_id=other")
+    response
+
+pub fn daemon_outer_loop_failure_case() -> i64:
+    val root = secure_temp_dir("build", "daemon-outer-loop-failure").unwrap()
+    var runner = start_fixture(root)
+    runner.state.cycle_count = 99
+    var request = daemon_request_new(1)
+    request.set_field("effect_path", root + "/effect")
+    val path = write_daemon_request(request, root + "/requests")
+    val original = file_read(path)
+    mkdir_p(root + "/responses/" + request.id + ".resp")
+    val old_response = root + "/responses/old.resp"
+    assert(file_atomic_write(old_response, "request_id=old\nstatus=0\ntimestamp=1\n"))
+    runner.run_loop(valid_handler)
+    assert(runner.get_state().cycle_count == 100)
+    assert(runner.get_state().status == DAEMON_PUBLICATION_BLOCKED)
+    assert(file_exists(old_response))
+    assert(file_read(path) == original)
+    assert(file_read(root + "/effect") == "effect\n")
+    runner.shutdown()
+    assert(dir_remove(root, true))
+    0
+
+fn error_status_handler(request: DaemonRequest) -> DaemonResponse:
+    var response = daemon_response_new(request.id, 42)
+    response.set_field("output", "first line\nordinary continuation")
+    response
+
+pub fn daemon_error_status_case() -> i64:
+    val root = secure_temp_dir("build", "daemon-error-status").unwrap()
+    var runner = start_fixture(root)
+    val request = daemon_request_new(1)
+    val path = write_daemon_request(request, root + "/requests")
+    runner.run_poll_cycle(error_status_handler)
+    assert(runner.is_running())
+    assert(not file_exists(path))
+    val response = read_daemon_response(request.id, root + "/responses")
+    assert(response.request_id == request.id)
+    assert(response.status == 42)
+    assert(response.get_field("output") == "first line")
+    # V1's ordinary multiline truncation is unchanged, not certified lossless.
+    runner.shutdown()
+    assert(dir_remove(root, true))
+    0
+
+pub fn daemon_publication_regressions() -> i64:
+    print "daemon-repro: publication failure"
+    daemon_publication_failure_case()
+    print "daemon-prevention: identity, success, missing acknowledgement"
+    daemon_response_identity_case()
+    print "daemon-prevention: success"
+    daemon_publication_success_case()
+    print "daemon-prevention: missing acknowledgement"
+    daemon_ack_missing_case()
+    print "daemon-prevention: prefix and deletion refusal"
+    daemon_publication_prefix_case()
+    daemon_ack_refusal_case()
+    print "daemon-prevention: envelope injection"
+    daemon_envelope_injection_case()
+    print "daemon-prevention: outer loop and error status"
+    daemon_outer_loop_failure_case()
+    daemon_error_status_case()
+    print "daemon publication regressions passed"
+    0
+
+fn main() -> i64:
+    val args = cli_get_args()
+    if args.len() == 1: return daemon_publication_regressions()
+    assert(args.len() == 2)
+    val name = args[1]
+    if name == "publication": return daemon_publication_failure_case()
+    if name == "identity": return daemon_response_identity_case()
+    if name == "success": return daemon_publication_success_case()
+    if name == "missing-ack": return daemon_ack_missing_case()
+    if name == "prefix": return daemon_publication_prefix_case()
+    if name == "refusal": return daemon_ack_refusal_case()
+    if name == "injection": return daemon_envelope_injection_case()
+    if name == "outer-loop": return daemon_outer_loop_failure_case()
+    if name == "error-status": return daemon_error_status_case()
+    assert(false) # Unknown diagnostic selection must fail, never skip.
+    1

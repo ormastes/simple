@@ -1,0 +1,88 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# E-RTI-003 on a generic free-function call falls through to the declared-return path
+
+Stage3 capmap t1_generic (s3_fable38, 2026-11-04): `Box<i64>(v: ident(3))`
+with `fn ident<T>(x: T) -> T` failed MIR lowering with
+E-RTI-003 "unsubstituted generic parameter in 'p0' reached a concrete
+consumer". rti_enum_match_subject_type treated only E-RTI-001 as "RTI cannot
+answer"; E-RTI-003 (RTI answered Decided(Param(0)) and require_concrete
+refused it) was raised fatally, although the caller has a generic-callee
+fallback (module_fn_declared_returns) built for exactly this case. The seed
+compiles and runs the program. RTI.instantiate has no callers yet, so the
+argument-driven substitution is not available; until it is, an unsubstituted
+answer is "cannot answer", honouring SIMPLE_RTI_STRICT like E-RTI-001.
+"""
+
+# @tag: unit, compiler, mir, generics, rti
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{env_set, env_get_nullable}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val generic_lib = "pub fn ident<T>(x: T) -> T:\n    return x\n\npub struct Box<T>:\n    v: T\n\npub fn plain(x: i64) -> i64:\n    return x\n"
+
+fn lower_app(body: text) -> text:
+    val app_source = "use lib.gen.{ident, Box, plain}\n\n" + body
+    val log = Logger(level: 0)
+    val lib_ast = parse_full_frontend(generic_lib, "lib/gen.spl", "lib.gen", log)
+    val app_ast = parse_full_frontend(app_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.gen"] = lib_ast
+    modules["app.main"] = app_ast
+    val sources = [SourceFile(path: "lib/gen.spl", content: generic_lib, module_name: "lib.gen"), SourceFile(path: "app/main.spl", content: app_source, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lib_lowering = hirlowering_for_module("lib.gen", surfaces)
+    var app_lowering = hirlowering_for_module("app.main", surfaces)
+    val lib_hir = lib_lowering.lower_module(lib_ast)
+    val app_hir = app_lowering.lower_module(app_ast)
+    var mir_lowering = MirLowering.new(app_hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["lib_hir"] = lib_hir
+    prescan_mods["app_hir"] = app_hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "lib_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "app_hir")
+    val mir = mir_lowering.lower_module(app_hir, [lib_hir, app_hir])
+    var out = ""
+    for e in app_lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    out
+
+describe "generic free-function call as a struct field initializer (t1_generic repro)":
+    it "REPRO: Box<i64>(v: ident(3)) lowers without E-RTI-003":
+        val out = lower_app("fn main() -> i64:\n    val b = Box<i64>(v: ident(3))\n    return b.v\n")
+        expect(out.contains("E-RTI-003")).to_equal(false)
+        expect(out.contains("unsubstituted generic parameter")).to_equal(false)
+
+describe "generic free-function call in other subject positions (similar-pattern prevention)":
+    it "a typed binding initialised from a generic call lowers without E-RTI-003":
+        val out = lower_app("fn main() -> i64:\n    val n: i64 = ident(7)\n    return n\n")
+        expect(out.contains("E-RTI-003")).to_equal(false)
+
+    it "a generic call passed straight to a plain function lowers without E-RTI-003":
+        val out = lower_app("fn main() -> i64:\n    return plain(ident(2))\n")
+        expect(out.contains("E-RTI-003")).to_equal(false)
+
+    it "a non-generic call keeps answering through RTI with no diagnostics":
+        val out = lower_app("fn main() -> i64:\n    val b = Box<i64>(v: plain(3))\n    return b.v\n")
+        expect(out.contains("E-RTI")).to_equal(false)
+
+describe "SIMPLE_RTI_STRICT keeps the unsubstituted answer fatal (coverage of the strict arm)":
+    it "strict mode still reports E-RTI-003 instead of falling through":
+        val previous = env_get_nullable("SIMPLE_RTI_STRICT") ?? ""
+        env_set("SIMPLE_RTI_STRICT", "1")
+        val out = lower_app("fn main() -> i64:\n    val b = Box<i64>(v: ident(3))\n    return b.v\n")
+        env_set("SIMPLE_RTI_STRICT", previous)
+        expect(out.contains("E-RTI-003")).to_equal(true)

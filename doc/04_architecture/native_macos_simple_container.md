@@ -62,6 +62,94 @@ macOS process handle. Both leaves return immutable common observations with
 exact attempt/generation/boot/native identity; the controller commits only a
 matching result. No VM path is a Simple Container backend.
 
+Darwin substrate for the separate custom-Seatbelt lane
+(`doc/05_design/simple_container_macos_seatbelt.md` §2.3, §9.1, §15.2; source
+only, NOT qualified on a Mac):
+
+- `local_ipc_v1` now has a Darwin implementation beneath the same owned
+  token/generation/close receipts (`src/runtime/runtime_local_unix_v1.h`).
+  Origin is the PID only (no PID namespace); paths are re-walked and compared
+  after connect/bind instead of `/proc/self/fd` anchoring; descriptor flags and
+  `SO_NOSIGPIPE` are applied right after creation/accept/receipt; peer identity
+  is `getpeereid` cross-checked against the `LOCAL_PEERTOKEN` audit token and
+  `LOCAL_PEERPID`. `local_unix_peer_identity_class_v1()` reports this as
+  `DarwinKernelObservedPeer`, weaker than Linux connect-time `SO_PEERCRED` and
+  never an incarnation credential. The process-pipe stdout handoff stays
+  Linux-only (unsupported on Darwin).
+- SOSIX owns the Seatbelt activation leaf
+  (`std.nogc_async_mut.sosix.darwin_sandbox_v1`, native call pair in
+  `src/runtime/runtime_sosix_darwin_sandbox_v1.h`): `sandbox_init(profile, 0,
+  &err)` + `sandbox_free_error`, a preallocated receipt, Simple-side profile
+  admission and error sanitization, no unrestricted fallback, and
+  `Unsupported` on every non-Darwin host without entering native code.
+- Mac-qualified 2026-11-14 (macOS 26.5, arm64; build recipe from
+  `doc/06_spec/01_unit/lib/io/local_ipc_v1_native_evidence.sdn` plus Darwin
+  `-Wl,-dead_strip -Wl,-undefined,dynamic_lookup`):
+  `local_unix_v1_selfcheck.c` prints `PASS Darwin local Unix
+  bytes/peer(getpeereid+audit token)/path/ancillary/shutdown/close/listener
+  contract; separate-UID accept NOT_RUN`. The disposable-child probe
+  `src/runtime/test/sosix_darwin_sandbox_v1_selfcheck.c <profile> <root> <key>`,
+  fed the exact text `seatbelt_profile_compile_v1(seatbelt_attempt_policy_v1(...,
+  "endpoint-v1"))` emits, passes 12/12: unconfined control reads host-scope;
+  after activation workspace read and output create are allowed, workspace
+  write, private/host-scope/sibling-attempt/`/private/etc` reads, loopback inet
+  connect and `fork` are denied, and only the attempt broker socket connects.
+  The probe now reports every `seatbelt_qualification_plan_v1` canary as
+  `canary <id> allow|deny` after an unconfined reachability control; on this
+  Mac all 23 match (incl. symlink/case-alias to protected roots, home sentinel,
+  IPv6/UDP/DNS/listen, other unix socket, mach-lookup, fork/posix_spawn/execve,
+  refused-profile reporting; `child-inherits-confinement` comes from a real
+  grandchild under the same profile plus `(allow process-fork)` only, and DNS
+  and mach-lookup have unconfined controls). `seatbelt_manifest_from_probe_v1` decodes that
+  transcript into a manifest that `seatbelt_capability_status_v1` reports
+  `qualified` for the observed build (checked under `bin/simple test`; the
+  seed `run` mode diverges, see
+  `doc/08_tracking/bug/seed_run_mode_or_compare_diverges_from_test_2026-11-14.md`).
+  Launch step 7 is therefore `qualified-darwin-native`; steps 2-6, 8-10 and
+  fresh-worker admission stay unsupported, so the adapter still blocks with
+  `darwin-worker-admission-unwired`. BSD: the probe is Darwin-only (exit 77
+  elsewhere); no FreeBSD path changes.
+
 Sources and code map:
 [domain research](../01_research/domain/native_macos_simple_container_2026-09-27.md),
 [local research](../01_research/local/native_macos_simple_container_2026-09-27.md).
+
+## Endpoint network core (`endpoint-v1`, pure layer)
+
+The emulated private network of the Seatbelt design
+(`doc/05_design/simple_container_macos_seatbelt.md` 11, 12.2) has a pure
+Simple decision core with no sockets and no host I/O:
+`src/lib/common/contracts/container/endpoint_frame_v1.spl` (bounded binary
+`endpoint-frame-v1` codec) and `src/lib/nogc_async_mut/container/network/`
+(identities, bounded logical IPAM, network-scoped service registry,
+default-deny `authorize_route`, policy revisions/revocation, per-session frame
+flow control, external-address policy). `endpoint-v1` is an application-visible
+endpoint fabric, not a kernel network namespace: logical addresses are never
+assigned to a process stack, and routes are keyed by network + endpoint
+identity + port + protocol + generation. `pod-ip-v1` is always rejected.
+The broker transport (open/connect/accept/poll/close) is unqualified and fails
+closed, so `endpoint-v1` admission stays blocked until a real macOS data plane
+records native evidence.
+## Separate direct-Seatbelt lane (2026-11-13)
+
+A second, independent macOS lane exists beside the signed-App-Sandbox route:
+backend `macos-seatbelt-process`, engine `macos-seatbelt-process-v1`
+(design: [simple_container_macos_seatbelt](../05_design/simple_container_macos_seatbelt.md)).
+It never aliases `docker`, `podman` or `macos-native-sandbox-v1`, and the
+signed-helper provider above is unchanged. Implemented as pure Simple under
+`src/lib/nogc_async_mut/container/providers/macos/`:
+
+- `seatbelt_profile_v1.spl` — deterministic SBPL emitter: fixed baseline
+  revision, `(deny default)`, separate read-data / read-metadata / write /
+  execute rules, strict literal escaping and byte limits, no user SBPL/regex/
+  import, direct network denied, one granted broker unix socket, digest.
+- `seatbelt_capabilities_v1.spl` — canary plan + qualification manifest; reports
+  `unqualified` until a Darwin probe records every canary for the exact OS
+  build, architecture, helper digest, runtime ABI and baseline revision.
+- `seatbelt_provider_v1.spl` — `MacOsSeatbeltAdapterV1` (facade function set),
+  §8.1 lifecycle mapping, §10.2 attempt directory plan and §8.2 launch steps.
+  Every native effect fails closed (`blocked`, `SCMAC-*` reason, lifecycle not
+  advanced) until the SOSIX Darwin sandbox owner exists and qualification
+  passes. Not yet wired into `SimpleContainerOwnerV2`.
+
+Nothing in this lane has been run on macOS; no enforcement is claimed.

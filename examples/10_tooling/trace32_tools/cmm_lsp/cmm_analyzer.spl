@@ -19,11 +19,24 @@
 
 use cmm_ast.{CmmProgram, CmmStmt, CmmExpr, CmmLiteral, CmmDialogItem, CmmSpan}
 use cmm_dialog_model.{cmm_dialog_declared_label}
-use cmm_diagnostics.{CmmDiagnostic, CmmDiagnosticKind, DiagnosticCollector, make_diagnostic}
+use cmm_diagnostics.{CmmDiagnostic, CmmDiagnosticKind, CmmRelatedInfo, DiagnosticCollector, make_diagnostic, make_coded_diagnostic, with_related}
 use cmm_version.{CmmParserConfig, default_config}
 
 export CmmSymbol, CmmSymbolKind, CmmSymbolTable
 export CmmAnalysisResult, analyze_program, analyze_program_with_config
+export CMM_UNDEFINED_LABEL, CMM_JUMPTO_LABEL_UNRESOLVED, CMM_UNUSED_MACRO, CMM_MACRO_REDECLARED
+export CMM_UNREACHABLE_CODE, CMM_DYNAMIC_TARGET, CMM_DUPLICATE_DIALOG_LABEL, CMM_DIALOG_LABEL_UNRESOLVED
+
+# Analyzer-owned CMM codes. CMM11xx = structural errors, CMM12xx = lints.
+# Assigned when the finding is created (never patched on later).
+val CMM_UNDEFINED_LABEL = "CMM1102"
+val CMM_JUMPTO_LABEL_UNRESOLVED = "CMM1103"
+val CMM_UNUSED_MACRO = "CMM1201"
+val CMM_MACRO_REDECLARED = "CMM1202"
+val CMM_UNREACHABLE_CODE = "CMM1203"
+val CMM_DYNAMIC_TARGET = "CMM1204"
+val CMM_DUPLICATE_DIALOG_LABEL = "CMM1205"
+val CMM_DIALOG_LABEL_UNRESOLVED = "CMM1206"
 
 # Default span for fallback values.
 val _default_sp = CmmSpan(start_line: 0, start_col: 0, end_line: 0, end_col: 0)
@@ -120,14 +133,40 @@ var _config: CmmParserConfig = default_config()
 fn _add_sym(sym: CmmSymbol):
     _syms.push(sym)
 
-fn _add_error(msg: text, line: i64, col: i64):
-    _diags.push(make_diagnostic(CmmDiagnosticKind.Error, msg, line, col))
+fn _add_error(code: text, msg: text, line: i64, col: i64):
+    _diags.push(make_coded_diagnostic(CmmDiagnosticKind.Error, code, msg, line, col, line, col))
 
-fn _add_warning(msg: text, line: i64, col: i64):
-    _diags.push(make_diagnostic(CmmDiagnosticKind.Warning, msg, line, col))
+fn _add_warning(code: text, msg: text, line: i64, col: i64):
+    _diags.push(make_coded_diagnostic(CmmDiagnosticKind.Warning, code, msg, line, col, line, col))
 
-fn _add_info(msg: text, line: i64, col: i64):
-    _diags.push(make_diagnostic(CmmDiagnosticKind.Info, msg, line, col))
+fn _add_info(code: text, msg: text, line: i64, col: i64):
+    _diags.push(make_coded_diagnostic(CmmDiagnosticKind.Info, code, msg, line, col, line, col))
+
+# Every label defined in the file, as related locations (bounded so a large
+# script cannot turn one finding into a wall of candidates).
+fn _label_candidates(limit: i64) -> [CmmRelatedInfo]:
+    var out: [CmmRelatedInfo] = []
+    var i = 0
+    while i < _syms.len() and out.len() < limit:
+        val sym = _syms[i]
+        if sym.kind == CmmSymbolKind.LabelSym:
+            out = out.push(CmmRelatedInfo(message: "label '" + sym.name + "' is defined here", line: sym.def_line,
+                                          column: sym.def_column, end_line: sym.def_line,
+                                          end_column: sym.def_column + sym.name.len()))
+        i = i + 1
+    out
+
+# Unresolved GOTO/GOSUB target: anchored on the target token (the statement
+# span ends at the end of the target), with the defined labels as candidates.
+fn _add_undefined_label(keyword: text, target: text, sp: CmmSpan):
+    val width = target.len()
+    val start_col = if sp.end_col - width > sp.start_col: sp.end_col - width else: sp.start_col
+    var d = make_coded_diagnostic(CmmDiagnosticKind.Error, CMM_UNDEFINED_LABEL,
+                                  "Undefined label '" + target + "' in " + keyword,
+                                  sp.end_line, start_col, sp.end_line, sp.end_col)
+    for info in _label_candidates(5):
+        d = with_related(d, info)
+    _diags.push(d)
 
 fn _add_macro_ref(name: text):
     _macro_refs.push(name)
@@ -149,9 +188,12 @@ fn analyze_program(program: CmmProgram) -> CmmAnalysisResult:
     analyze_program_with_config(program, default_config())
 
 fn analyze_program_with_config(program: CmmProgram, config: CmmParserConfig) -> CmmAnalysisResult:
-    # Reset module-level state
+    # Reset module-level state. Parser findings come first so one result
+    # carries every independent finding (REQ-DIAG-004, Journey B).
     _syms = []
     _diags = []
+    for pd in program.parse_diagnostics:
+        _diags.push(pd)
     _macro_refs = []
     _config = config
 
@@ -277,15 +319,15 @@ fn check_label_refs_stmt(stmt: CmmStmt):
     match stmt:
         case CmmStmt.Goto(target, sp):
             if not _has_label(target):
-                _add_error("Undefined label '{target}' in GOTO", sp.start_line, sp.start_col)
+                _add_undefined_label("GOTO", target, sp)
 
         case CmmStmt.Gosub(target, _, sp):
             if not _has_label(target):
-                _add_error("Undefined label '{target}' in GOSUB", sp.start_line, sp.start_col)
+                _add_undefined_label("GOSUB", target, sp)
 
         case CmmStmt.JumpTo(target, sp):
             if not _has_label(target):
-                _add_warning("Label '{target}' in JUMPTO not found in this file (may be cross-module)", sp.start_line, sp.start_col)
+                _add_warning(CMM_JUMPTO_LABEL_UNRESOLVED, "Label '{target}' in JUMPTO not found in this file (may be cross-module)", sp.start_line, sp.start_col)
 
         case CmmStmt.Block(stmts, _):
             check_label_refs(stmts)
@@ -467,7 +509,7 @@ fn check_macro_scopes():
     while mi < macros.len():
         val m = macros[mi]
         if not list_contains(_macro_refs, m.name):
-            _add_warning("Macro '&{m.name}' declared but never referenced", m.def_line, m.def_column)
+            _add_warning(CMM_UNUSED_MACRO, "Macro '&{m.name}' declared but never referenced", m.def_line, m.def_column)
         mi = mi + 1
 
     # Check for redeclared macros in the same scope
@@ -478,6 +520,7 @@ fn check_macro_scopes():
             if (macros[ai].name == macros[bi].name
                 and macros[ai].scope == macros[bi].scope):
                 _add_warning(
+                    CMM_MACRO_REDECLARED,
                     "Macro '&{macros[bi].name}' redeclared in '{macros[bi].scope}' scope (first declared at line {macros[ai].def_line})",
                     macros[bi].def_line, macros[bi].def_column
                 )
@@ -504,7 +547,7 @@ fn check_unreachable(stmts: [CmmStmt]):
                     ()
                 case _:
                     val warn_sp = stmt_span(stmt)
-                    _add_warning("Unreachable code after unconditional exit", warn_sp.start_line, warn_sp.start_col)
+                    _add_warning(CMM_UNREACHABLE_CODE, "Unreachable code after unconditional exit", warn_sp.start_line, warn_sp.start_col)
 
         match stmt:
             case CmmStmt.Goto(_, _):
@@ -554,12 +597,12 @@ fn check_do_targets_stmt(stmt: CmmStmt):
         case CmmStmt.DoCall(file_expr, _, sp):
             val file_name = extract_file_name(file_expr)
             if file_name == "":
-                _add_info("DO target is a dynamic expression; cannot validate statically", sp.start_line, sp.start_col)
+                _add_info(CMM_DYNAMIC_TARGET, "DO target is a dynamic expression; cannot validate statically", sp.start_line, sp.start_col)
 
         case CmmStmt.RunCall(file_expr, _, sp):
             val file_name = extract_file_name(file_expr)
             if file_name == "":
-                _add_info("RUN target is a dynamic expression; cannot validate statically", sp.start_line, sp.start_col)
+                _add_info(CMM_DYNAMIC_TARGET, "RUN target is a dynamic expression; cannot validate statically", sp.start_line, sp.start_col)
 
         case CmmStmt.Block(stmts, _):
             check_do_targets(stmts)
@@ -600,7 +643,7 @@ fn check_dialog_label_refs(stmts: [CmmStmt]):
     _collect_duplicate_dialog_labels(stmts, seen_labels, duplicate_labels)
     var di = 0
     while di < duplicate_labels.len():
-        _add_warning("Duplicate dialog label '" + duplicate_labels[di] + "' found in DIALOG blocks", 0, 0)
+        _add_warning(CMM_DUPLICATE_DIALOG_LABEL, "Duplicate dialog label '" + duplicate_labels[di] + "' found in DIALOG blocks", 0, 0)
         di = di + 1
     # If no dialog blocks found, skip reference checking
     if dialog_labels.len() == 0:
@@ -683,7 +726,7 @@ fn _check_dialog_refs_stmt(stmt: CmmStmt, dialog_labels: [text]):
                     val ref_label = _extract_ident_from_expr(args[0])
                     if ref_label != "" and not ref_label.starts_with("&"):
                         if not list_contains(dialog_labels, ref_label):
-                            _add_warning("Dialog label '" + ref_label + "' not found in any DIALOG block", sp.start_line, sp.start_col)
+                            _add_warning(CMM_DIALOG_LABEL_UNRESOLVED, "Dialog label '" + ref_label + "' not found in any DIALOG block", sp.start_line, sp.start_col)
             # Check EVAL DIALOG.BOOLEAN(x), etc. — EVAL with DIALOG function arg
             if upper == "EVAL" and args.len() > 0:
                 val arg_name = _extract_func_call_name(args[0])
@@ -693,7 +736,7 @@ fn _check_dialog_refs_stmt(stmt: CmmStmt, dialog_labels: [text]):
                     val ref_label = _extract_func_call_arg(args[0])
                     if ref_label != "" and not ref_label.starts_with("&"):
                         if not list_contains(dialog_labels, ref_label):
-                            _add_warning("Dialog label '" + ref_label + "' not found in any DIALOG block", sp.start_line, sp.start_col)
+                            _add_warning(CMM_DIALOG_LABEL_UNRESOLVED, "Dialog label '" + ref_label + "' not found in any DIALOG block", sp.start_line, sp.start_col)
         case CmmStmt.Block(stmts, _):
             _check_dialog_refs(stmts, dialog_labels)
         case CmmStmt.IfElse(_, then_body, else_body, _):

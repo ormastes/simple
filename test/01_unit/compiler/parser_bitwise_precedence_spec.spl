@@ -1,0 +1,65 @@
+# Lean parser bitwise operator precedence
+#
+# Reproduces doc/08_tracking/bug/lean_parser_bitwise_pipe_precedence_divergence_2026-06-11.md.
+# The lean parser (src/compiler/10.frontend/core/parser_expr.spl) consumed
+# `&` (120), `|` (121) and `^` (122) inside parse_multiplication, i.e. at the
+# SAME level as `*`, binding tighter than `+`. The Rust seed (and tok_precedence)
+# put them below `+`/`-` and above comparison, with `&` > `^` > `|`.
+#
+# The source-structure examples fail on any binary before the fix. The runtime
+# examples use SIMPLE_BIN and only discriminate on a binary built from the lean
+# parser (stage3 re-verify is verification-pending).
+
+use std.spec.*
+use std.io_runtime.{file_read, file_write, process_run, env_get}
+
+val PARSER_SRC: text = "src/compiler/10.frontend/core/parser_expr.spl"
+
+fn fn_body(src: text, header: text) -> text:
+    val parts = src.split(header)
+    if parts.len() < 2:
+        return ""
+    val rest = parts[1]
+    val next = rest.split("\nfn ")
+    next[0]
+
+fn run_expr(name: text, expr: text) -> text:
+    val path = "build/test-artifacts/bitwise_prec_" + name + ".spl"
+    file_write(path, "fn main():\n    print((" + expr + ").to_text())\n")
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val out = process_run("sh", ["-c", bin + " run " + path + " 2>&1"])
+    out.0
+
+describe "lean parser bitwise precedence":
+    it "keeps bitwise operators out of the multiplication level":
+        step("parse_multiplication must not consume 120/121/122")
+        val src = file_read(PARSER_SRC)
+        val body = fn_body(src, "fn parse_multiplication() -> i64:")
+        expect(body.contains("== 120")).to_equal(false)
+        expect(body.contains("== 121")).to_equal(false)
+        expect(body.contains("== 122")).to_equal(false)
+
+    it "keeps bitwise operators out of the parse_binary_from multiplication loop":
+        step("parse_binary_from handles them after the addition level")
+        val src = file_read(PARSER_SRC)
+        val body = fn_body(src, "fn parse_binary_from(base: i64) -> i64:")
+        val mul_part = body.split("# Addition level")[0]
+        expect(mul_part.contains("== 120")).to_equal(false)
+        expect(mul_part.contains("== 121")).to_equal(false)
+
+    it "defines separate or/xor/and levels":
+        step("parse_bit_or -> parse_bit_xor -> parse_bit_and -> parse_addition")
+        val src = file_read(PARSER_SRC)
+        expect(src.contains("fn parse_bit_or() -> i64:")).to_equal(true)
+        expect(src.contains("fn parse_bit_xor() -> i64:")).to_equal(true)
+        expect(src.contains("fn parse_bit_and() -> i64:")).to_equal(true)
+
+    it "binds & looser than +":
+        step("12 & 10 + 1 == 12 & 11 == 8")
+        expect(run_expr("and_add", "12 & 10 + 1").trim().ends_with("8")).to_equal(true)
+
+    it "binds & tighter than |":
+        step("1 | 2 & 0 == 1")
+        expect(run_expr("or_and", "1 | 2 & 0").trim().ends_with("1")).to_equal(true)

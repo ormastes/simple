@@ -1,0 +1,154 @@
+# Untrusted exec intent/packet integrity. Decoding verifies no signature and
+# grants no native effect. Host resolves retained parent/provider/control owners
+# and verifies the action-specific grant+approval before its existing journal begin.
+use std.common.contracts.container.exec_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.orchestration.assignment_v1.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.host_reservation_encode_intent_v1
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_authority_codec_v2.*
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct HostRuntimeExecIntentV3:
+    request: ContainerExecRequestV3
+    parent_operation_digest: text
+    parent_assignment_digest: text
+    parent_controller_operation_digest: text
+    parent_provider_identity_digest: text
+    exec_control_identity_digest: text
+
+pub struct HostRuntimeExecRequestV3:
+    intent: HostRuntimeExecIntentV3
+    parent_binding: ControllerAssignmentBindingV1
+    parent_controller_operation: OperationEnvelopeV2
+    operation: OperationEnvelopeV2
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+
+fn runtime_exec_fields_v3(source: text, maximum: i64, kind: text, names: [text]) -> Result<Dict<text, SdnValue>, text>:
+    if str_len(source) == 0 or str_len(source) > maximum: return Err("host-runtime-exec-source-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: maximum,
+            max_depth: 2, max_nodes: 32, max_rows: 0, max_cells: 0, max_columns: 12)):
+        case Ok(value): value
+        case Err(_): return Err("host-runtime-exec-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("host-runtime-exec-object-required")
+    for key in fields.keys():
+        if not names.contains(key): return Err("host-runtime-exec-unknown-field:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("host-runtime-exec-missing-field:" + key)
+    match fields["version"]:
+        case SdnValue.Int(value):
+            if value != 3: return Err("host-runtime-exec-version")
+        case _: return Err("host-runtime-exec-version")
+    if runtime_exec_text_v3(fields, "kind")? != kind: return Err("host-runtime-exec-kind")
+    Ok(fields)
+
+fn runtime_exec_text_v3(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-runtime-exec-text-required:" + key)
+
+pub fn host_runtime_exec_intent_encode_v3(intent: HostRuntimeExecIntentV3) -> Result<text, text>:
+    for digest in [intent.parent_operation_digest, intent.parent_assignment_digest, intent.parent_controller_operation_digest,
+            intent.parent_provider_identity_digest, intent.exec_control_identity_digest]:
+        if not builder_digest_valid_v1(digest): return Err("host-runtime-exec-intent-digest-invalid")
+    val request = container_exec_request_encode_v3(intent.request)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("host-runtime-exec-intent"),
+        "request": SdnValue.String(request), "parentOperationDigest": SdnValue.String(intent.parent_operation_digest),
+        "parentAssignmentDigest": SdnValue.String(intent.parent_assignment_digest),
+        "parentControllerOperationDigest": SdnValue.String(intent.parent_controller_operation_digest),
+        "parentProviderIdentityDigest": SdnValue.String(intent.parent_provider_identity_digest),
+        "execControlIdentityDigest": SdnValue.String(intent.exec_control_identity_digest)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > 2097152: return Err("host-runtime-exec-source-size")
+    Ok(source)
+
+pub fn host_runtime_exec_intent_digest_v3(intent: HostRuntimeExecIntentV3) -> Result<text, text>:
+    val source = host_runtime_exec_intent_encode_v3(intent)?
+    Ok(sha256_text(source))
+
+pub fn host_runtime_exec_intent_decode_v3(source: text) -> Result<HostRuntimeExecIntentV3, text>:
+    val fields = runtime_exec_fields_v3(source, 2097152, "host-runtime-exec-intent", ["version", "kind", "request",
+        "parentOperationDigest", "parentAssignmentDigest", "parentControllerOperationDigest", "parentProviderIdentityDigest", "execControlIdentityDigest"])?
+    val intent = HostRuntimeExecIntentV3(request: container_exec_request_decode_v3(runtime_exec_text_v3(fields, "request")?)?,
+        parent_operation_digest: runtime_exec_text_v3(fields, "parentOperationDigest")?,
+        parent_assignment_digest: runtime_exec_text_v3(fields, "parentAssignmentDigest")?,
+        parent_controller_operation_digest: runtime_exec_text_v3(fields, "parentControllerOperationDigest")?,
+        parent_provider_identity_digest: runtime_exec_text_v3(fields, "parentProviderIdentityDigest")?,
+        exec_control_identity_digest: runtime_exec_text_v3(fields, "execControlIdentityDigest")?)
+    if host_runtime_exec_intent_encode_v3(intent)? != source: return Err("host-runtime-exec-noncanonical")
+    Ok(intent)
+
+pub fn host_runtime_exec_match_operation_v3(intent: HostRuntimeExecIntentV3, operation: OperationEnvelopeV2) -> Result<bool, text>:
+    val encoded = distributed_encode_operation_v2(operation)?
+    if (operation.id != intent.request.operation_id or operation.operation != "host_runtime_exec_v3" or
+            operation.host_id != intent.request.parent.physical_host_id or
+            operation.payload_digest != host_runtime_exec_intent_digest_v3(intent)?):
+        return Err("host-runtime-exec-operation-mismatch")
+    Ok(true)
+
+# Integrity chain only; Host independently resolves the retained parent. This
+# does not assert the Host historically stored a controller assignment object.
+pub fn host_runtime_exec_match_parent_v3(packet: HostRuntimeExecRequestV3) -> Result<bool, text>:
+    val binding = packet.parent_binding
+    val matched = controller_assignment_match_v1(binding, packet.parent_controller_operation)?
+    val reference = controller_assignment_bytes_v1(binding)?
+    val parent = packet.intent.request.parent
+    val scope = ContainerHostScopeV2(physical_host_id: parent.physical_host_id, service_scope_id: parent.service_scope_id,
+        boot_id: parent.boot_id, provider_generation: parent.provider_generation, native_machine_id: parent.native_machine_id,
+        continuity_mode: parent.continuity_mode, continuity_id: parent.continuity_id)
+    if (packet.intent.parent_operation_digest != sha256_text(distributed_encode_operation_v2(binding.host_operation)?) or
+            packet.intent.parent_assignment_digest != sha256_text(reference) or
+            packet.intent.parent_controller_operation_digest != sha256_text(distributed_encode_operation_v2(packet.parent_controller_operation)?) or
+            parent.operation_id != binding.host_operation.id or parent.workload_uid != binding.workload_uid or
+            parent.physical_host_id != binding.host_intent.physical_host_id or
+            parent.service_scope_id != binding.host_intent.reservation.service_scope_id or
+            parent.provider_generation != binding.host_intent.fence.provider_generation or
+            container_scope_fence_id_v2(scope)? != binding.host_intent.fence.boot_id or
+            container_execution_plan_digest_v2(parent)? != binding.host_intent.plan_digest):
+        return Err("host-runtime-exec-parent-mismatch")
+    Ok(true)
+
+pub fn host_runtime_exec_request_encode_v3(request: HostRuntimeExecRequestV3) -> Result<text, text>:
+    val matched = host_runtime_exec_match_operation_v3(request.intent, request.operation)?
+    val parent_matched = host_runtime_exec_match_parent_v3(request)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("host-runtime-exec-request"),
+        "intent": SdnValue.String(host_runtime_exec_intent_encode_v3(request.intent)?),
+        "parentBinding": SdnValue.String(controller_assignment_bytes_v1(request.parent_binding)?),
+        "parentIntent": SdnValue.String(host_reservation_encode_intent_v1(request.parent_binding.host_intent)?),
+        "parentHostOperation": SdnValue.String(distributed_encode_operation_v2(request.parent_binding.host_operation)?),
+        "parentControllerOperation": SdnValue.String(distributed_encode_operation_v2(request.parent_controller_operation)?),
+        "operation": SdnValue.String(distributed_encode_operation_v2(request.operation)?),
+        "signedGrant": SdnValue.String(distributed_encode_signed_grant_v2(request.signed)?),
+        "signedApproval": SdnValue.String(distributed_encode_signed_approval_v2(request.approval)?)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > 4194304: return Err("host-runtime-exec-source-size")
+    Ok(source)
+
+pub fn host_runtime_exec_request_digest_v3(request: HostRuntimeExecRequestV3) -> Result<text, text>:
+    val source = host_runtime_exec_request_encode_v3(request)?
+    Ok(sha256_text(source))
+
+pub fn host_runtime_exec_request_decode_v3(source: text) -> Result<HostRuntimeExecRequestV3, text>:
+    val fields = runtime_exec_fields_v3(source, 4194304, "host-runtime-exec-request",
+        ["version", "kind", "intent", "parentBinding", "parentIntent", "parentHostOperation", "parentControllerOperation", "operation", "signedGrant", "signedApproval"])?
+    val reference = controller_assignment_decode_reference_v1(runtime_exec_text_v3(fields, "parentBinding")?)?
+    val parent_binding = controller_assignment_restore_v1(reference, runtime_exec_text_v3(fields, "parentIntent")?,
+        runtime_exec_text_v3(fields, "parentHostOperation")?)?
+    val request = HostRuntimeExecRequestV3(parent_binding: parent_binding,
+        parent_controller_operation: distributed_decode_operation_v2(runtime_exec_text_v3(fields, "parentControllerOperation")?)?, intent: host_runtime_exec_intent_decode_v3(runtime_exec_text_v3(fields, "intent")?)?,
+        operation: distributed_decode_operation_v2(runtime_exec_text_v3(fields, "operation")?)?,
+        signed: distributed_decode_signed_grant_v2(runtime_exec_text_v3(fields, "signedGrant")?)?,
+        approval: distributed_decode_signed_approval_v2(runtime_exec_text_v3(fields, "signedApproval")?)?)
+    if host_runtime_exec_request_encode_v3(request)? != source: return Err("host-runtime-exec-noncanonical")
+    Ok(request)

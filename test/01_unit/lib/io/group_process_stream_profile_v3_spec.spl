@@ -1,0 +1,161 @@
+# Pure canonical policy tests; no native cgroup admission is claimed.
+use std.spec.{describe, it, expect, fail}
+use std.common.build_manager.group_process_stream_profile_v3.{GroupProcessCpuQuotaV3, GroupProcessBrokerBudgetV3, GroupProcessStreamProfileV3, group_process_cpu_quota_v3, group_process_stream_profile_validate_v3, group_process_stream_profile_encode_v3, group_process_stream_profile_decode_v3, group_process_stream_resource_receipt_v3}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamRequestV2, GroupProcessStreamLaunchV2, group_process_child_argv_digest_v2, group_process_stream_launch_encode_v2, group_process_stream_launch_decode_v2, group_process_stream_launch_encode_v3, group_process_stream_launch_decode_v3, group_process_stream_launch_validate_profiled_v3, group_process_stream_template_encode_v3, group_process_stream_template_digest_v3, group_process_stream_apply_profile_v3}
+use std.common.build_manager.group_process_stream_protocol_v2.{group_process_stream_template_decode_v3}
+
+fn stream_profile_policy_v3() -> GroupProcessStreamProfileV3:
+    GroupProcessStreamProfileV3(helper_cpu: GroupProcessCpuQuotaV3(25, 2500, 100000),
+        broker: GroupProcessBrokerBudgetV3("/sys/fs/cgroup/service/broker", 11, 22, 3,
+            "c".repeat(64), 250000, 1000000, 250, 67108864, 134217728),
+        child_image_mode: "trusted-local-admin-image-fd-v1")
+
+fn stream_profile_launch_v3() -> GroupProcessStreamLaunchV2:
+    val program = "/opt/helper"
+    val args = ["--output"]
+    val request = GroupProcessStreamRequestV2(program: program, producer_digest: "a".repeat(64),
+        args: args, environment: [], directory: "/work", inputs: [], timeout_ms: 5000,
+        broker_program: "/opt/broker", broker_digest: "b".repeat(64),
+        child_argv_digest: group_process_child_argv_digest_v2(program, args), launch_deadline_unix_ms: 1900000000000)
+    GroupProcessStreamLaunchV2(root: "/work/owner", worker_id: "worker_1", generation: 7,
+        snapshot_digest: "d".repeat(64), cache_identity: "e".repeat(64), memory_limit_bytes: 1048576,
+        request: request, delegated_cgroup_path: "/sys/fs/cgroup/service", transport_generation: 34,
+        profile_v3: Some(stream_profile_policy_v3()))
+
+fn stream_profile_template_digest_v3(launch: GroupProcessStreamLaunchV2) -> text:
+    match group_process_stream_template_digest_v3(launch):
+        case Ok(value): value
+        case Err(reason):
+            fail("expected valid template: {reason}")
+            ""
+
+describe "canonical CPU resource profile V3":
+    it "restores only canonical zero-field templates and rejects launch or trailing bytes":
+        val actual = stream_profile_launch_v3()
+        val encoded = match group_process_stream_template_encode_v3(actual):
+            case Ok(value): value
+            case Err(reason):
+                fail("template encoding failed: {reason}")
+                ""
+        match group_process_stream_template_decode_v3(encoded):
+            case Ok(restored):
+                expect(restored.transport_generation).to_equal(0)
+                expect(restored.request.launch_deadline_unix_ms).to_equal(0)
+                expect(group_process_stream_launch_encode_v3(restored)).to_equal("")
+                match group_process_stream_template_encode_v3(restored):
+                    case Ok(value): expect(value).to_equal(encoded)
+                    case Err(reason): fail("restored template failed encoding: {reason}")
+            case Err(reason): fail("canonical template restore failed: {reason}")
+        val actual_wire = group_process_stream_launch_encode_v3(actual)
+        for invalid in [encoded + "trailing\n", actual_wire,
+                actual_wire.replace("SIMPLE-GROUP-STREAM-3\n", "SIMPLE-GROUP-STREAM-TEMPLATE-3\n"),
+                "x".repeat(16777217)]:
+            match group_process_stream_template_decode_v3(invalid):
+                case Err(_): ()
+                case Ok(_): fail("invalid template became restored metadata")
+
+    it "derives exact quota at low CPU boundary and rejects zero negative overflow":
+        for millis in [1, 9, 10, 25, 1000]:
+            match group_process_cpu_quota_v3(millis):
+                case Ok(quota):
+                    expect(quota.cpu_millis).to_equal(millis)
+                    expect(quota.period_us).to_equal(if millis < 10: 1000000 else: 100000)
+                    expect(quota.quota_us).to_equal(millis * (if millis < 10: 1000 else: 100))
+                case Err(reason): fail("exact quota rejected: {reason}")
+        for millis in [0, -1, 9223372036854775807]:
+            match group_process_cpu_quota_v3(millis):
+                case Err(_): ()
+                case Ok(_): fail("invalid CPU accepted")
+
+    it "rejects forged derivation finite budget overruns and unknown image modes":
+        val original = stream_profile_policy_v3()
+        expect(group_process_stream_profile_validate_v3(original)).to_equal("")
+        var policy = original
+        policy.helper_cpu.quota_us = 2499
+        expect(group_process_stream_profile_validate_v3(policy) != "").to_equal(true)
+        policy = original
+        policy.broker.cpu_quota_us = 250001
+        expect(group_process_stream_profile_validate_v3(policy) != "").to_equal(true)
+        policy = original
+        policy.broker.memory_limit_bytes = policy.broker.reserved_memory_bytes + 1
+        expect(group_process_stream_profile_validate_v3(policy) != "").to_equal(true)
+        policy = original
+        policy.child_image_mode = "fallback"
+        expect(group_process_stream_profile_validate_v3(policy) != "").to_equal(true)
+        policy = original
+        policy.broker.cgroup_path = "relative"
+        expect(group_process_stream_profile_validate_v3(policy) != "").to_equal(true)
+
+    it "roundtrips the profile and bounds percent-heavy resource receipts":
+        var policy = stream_profile_policy_v3()
+        policy.broker.cgroup_path = "/" + "%".repeat(4094)
+        val wire = group_process_stream_profile_encode_v3(policy)
+        expect(wire != "").to_equal(true)
+        match group_process_stream_profile_decode_v3(wire):
+            case Ok(decoded): expect(group_process_stream_profile_encode_v3(decoded)).to_equal(wire)
+            case Err(reason): fail("profile roundtrip failed: {reason}")
+        val receipt = group_process_stream_resource_receipt_v3("f".repeat(64), policy)
+        expect(receipt != "").to_equal(true)
+        expect(receipt.len() <= 4096).to_equal(true)
+        expect(receipt.contains(policy.broker.cgroup_path)).to_equal(false)
+
+    it "keeps strict V2 and V3 domains separate and forbids monitor under profile":
+        var launch = stream_profile_launch_v3()
+        val v3 = group_process_stream_launch_encode_v3(launch)
+        expect(v3.starts_with("SIMPLE-GROUP-STREAM-3\n")).to_equal(true)
+        expect(group_process_stream_launch_encode_v2(launch)).to_equal("")
+        match group_process_stream_launch_decode_v2(v3):
+            case Err(_): ()
+            case Ok(_): fail("V2 accepted V3")
+        match group_process_stream_launch_decode_v3(v3):
+            case Ok(decoded): expect(group_process_stream_launch_encode_v3(decoded)).to_equal(v3)
+            case Err(reason): fail("V3 roundtrip failed: {reason}")
+        launch.memory_policy = "monitor"
+        expect(group_process_stream_launch_validate_profiled_v3(launch) != "").to_equal(true)
+        launch = stream_profile_launch_v3()
+        launch.profile_v3 = nil
+        val v2 = group_process_stream_launch_encode_v2(launch)
+        expect(v2.starts_with("SIMPLE-GROUP-STREAM-2\n")).to_equal(true)
+        match group_process_stream_launch_decode_v3(v2):
+            case Err(_): ()
+            case Ok(_): fail("V3 accepted legacy V2")
+
+    it "normalizes only grant deadline and transport generation for planning":
+        val actual = stream_profile_launch_v3()
+        val digest = stream_profile_template_digest_v3(actual)
+        var template = actual
+        template.transport_generation = 0
+        template.request.launch_deadline_unix_ms = 0
+        expect(stream_profile_template_digest_v3(template)).to_equal(digest)
+        expect(group_process_stream_launch_encode_v3(template)).to_equal("")
+        match group_process_stream_template_encode_v3(template):
+            case Ok(wire):
+                expect(wire.starts_with("SIMPLE-GROUP-STREAM-TEMPLATE-3\n")).to_equal(true)
+                match group_process_stream_launch_decode_v3(wire):
+                    case Err(_): ()
+                    case Ok(_): fail("template became launch authority")
+            case Err(reason): fail("planning template rejected: {reason}")
+        var changed = template
+        changed.memory_limit_bytes = actual.memory_limit_bytes + 1
+        expect(stream_profile_template_digest_v3(changed) != digest).to_equal(true)
+        changed = template
+        changed.request.args = ["--other"]
+        changed.request.child_argv_digest = group_process_child_argv_digest_v2(changed.request.program, changed.request.args)
+        expect(stream_profile_template_digest_v3(changed) != digest).to_equal(true)
+        changed = template
+        changed.request.launch_deadline_unix_ms = -1
+        match group_process_stream_template_encode_v3(changed):
+            case Err(_): ()
+            case Ok(_): fail("negative template deadline accepted")
+
+    it "attaches policy before grant without inventing expiry or permitting launch":
+        var launch = stream_profile_launch_v3()
+        launch.transport_generation = 0
+        launch.request.launch_deadline_unix_ms = 0
+        launch.profile_v3 = nil
+        match group_process_stream_apply_profile_v3(launch, stream_profile_policy_v3()):
+            case Ok(attached):
+                expect(attached.request.launch_deadline_unix_ms).to_equal(0)
+                expect(group_process_stream_launch_encode_v3(attached)).to_equal("")
+                expect(stream_profile_template_digest_v3(attached) != "").to_equal(true)
+            case Err(reason): fail("pregrant attachment failed: {reason}")

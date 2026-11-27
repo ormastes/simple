@@ -27,3 +27,35 @@ incomplete_family.spl checks lifetime publication independently. Next bounded
 diagnostic validation should compile/run both with each actual backend using
 the current producer and private source overlay/cache; preserve all failed
 receipts. Do not restart ongoing bootstrap phases for this workaround.
+
+**Revalidated 2026-11-02: still plausible because OPEN. Source workaround authored; native validation UNRUN; no merged fix commit with a passing regression is cited in this doc.**
+
+**2026-11-03 (sonB): deferred, concrete blocker.** HIR Index typing already propagates Dict value types (`expression_core.spl` ~960-975 `case HirTypeKind.Dict(_, value)`, since 2026-08-21), so the erasure happens before that: the module-level `{text: [text]}` brace type or the module-var Var expr has no `type_` when `d[k]` is lowered. Need an HIR dump of `reverse_reference_facts.spl:36-44` on stage3 to see which; workaround ([text] locals) retained.
+
+**2026-11-03: fix-implemented-verification-pending.** Root cause: the parser's
+brace dictionary type branch (`src/compiler/10.frontend/core/parser.spl` ~1386-1398)
+discarded the parsed key/value tags and returned bare `TYPE_DICT`, so `{text: [text]}`
+lowered to `Dict<Any, Any>` and `d[k]` produced an Any/I64 value. Fixed by
+978e606e4a6 (`dict_type_register(key_tag, value_tag)`), which landed AFTER the
+failing producer 916be6c2061 (not an ancestor). Regression: 
+`test/01_unit/compiler/parser/dictionary_brace_type_identity_spec.spl` and
+`test/04_smoke/native_dictionary_array_direct.spl`. Repro: build a producer at or
+after 978e606e4a6, native-build `test/04_smoke/native_dictionary_array_direct.spl`
+with cranelift and llvm; expect no unresolved `contains` and no I64 for-in.
+The `[text]` local workaround in reverse_reference_facts.spl may then be removed.
+
+## Lane note 2026-11-03 (wl01 lane)
+Already fix-implemented-verification-pending; remaining step is a native trait-fixture run on a rebuilt producer. Nothing further to land from this lane.
+
+## Fix (2026-11-13) — regression spec oracle
+
+`916be6c2061` is the FAILING producer named above, not a fix; the parser fix is
+`978e606e4a6` (ancestor of origin/release/1.0.0). The one red scenario in
+`dictionary_brace_type_identity_spec.spl` ("retains the optional suffix around
+the whole dictionary") was a wrong oracle: the flat parser bridges `T?` to the
+canonical `Named("Option", [T])` shape (`convert_nodes.spl`
+`is_option_generic_tag`), never `TypeKind.Optional`; HIR lowers both to
+`HirTypeKind.Optional`. The oracle now checks `Option<Dict<text, [bool]>>`
+with the `[bool]` value intact. Seed run: 4/4 passed. Native re-run of
+`test/04_smoke/native_dictionary_array_direct.spl` on a rebuilt producer still
+pending.

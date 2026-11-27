@@ -1,4 +1,18 @@
 # ROOT CAUSE FOUND: `u8.to_i64()` mis-dispatches to `VfsFileSize.to_i64()` (method-name collision)
+
+**Status:** OPEN
+**Reconciled:** 2026-11-09
+
+## Corrective review of PR #8095
+
+The shard closure in PR #8095 relied on the September 16 normalization banner
+below. It missed the newer November 4 investigation and November 5 `mirp2-G`
+report, which explicitly leave the frontend method-name collision open and
+require an HIR method-resolution regression plus native evidence from the
+full freestanding closure. The shard is reopened without changing its
+severity or other bug-row fields. Historical entries are preserved; this
+correction supplies no new runtime result and makes no fix claim.
+
 ## Closed 2026-09-16 — ...init.VfsFileSize`, so `.to_i64()` resolved to the primitive conversion. The full sshd/OS c
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
@@ -104,3 +118,48 @@ safe again. The separately-retracted
 `x64_freestanding_chained_len_cast_miscompile.md` was a mis-attribution of THIS
 corruption to a chained cast.
 
+
+## mirp2-G 2026-11-05: left open
+
+Ledger row is `fixing`; doc banner says closed. The defect is a frontend
+method-name collision (`u8.to_i64()` bound to `VfsFileSize.to_i64()`), not
+extern ABI, and only reproduces in the full freestanding sshd closure. Not worked
+this session (freestanding x86_64 QEMU lane, out of family G scope). Next step:
+an HIR method-resolution spec where a user class defining `to_i64` is in scope and
+`u8.to_i64()` must stay the primitive conversion.
+
+## 2026-11-10: LLVM import resolver sibling repaired; native acceptance remains open
+
+The current LLVM native import resolver had a directly reproducible owner-loss
+path: `resolve_name_variants("u8.to_i64", ..., import_map)` discarded the
+numeric qualifier and accepted a bare `to_i64` import belonging to
+`VfsFileSize`. Its existing builtin-owner guard covered collections and text
+but omitted all ten canonical numeric owner names emitted by MIR.
+
+The guard now includes those numeric owners. Exact owner-qualified import
+spellings still resolve, as do authored nonnumeric receiver imports. Four
+unit tests in `pipeline/native_project/imports.rs` cover numeric collisions in
+both import maps, a legitimate numeric-owner import, an authored custom-owner
+import, and the existing collection-owner guard. HIR canonicalizes aliases
+such as `int`/`float` before MIR emits the owner name.
+
+On Windows, the exact production helper and resolver functions plus their
+unit tests were compiled with `rustc --test --edition 2021`, without replacing
+any helper dependency: before the guard change, 3 passed and the numeric
+collision test failed; afterward, all 4 passed. This is direct owner-level
+unit evidence. The full compiler crate and native freestanding closure were
+not built for this check.
+
+This patch repairs the LLVM sibling path, not proof of the original
+Cranelift/full-sshd acceptance. The original `.push` workaround remains in
+place. The record stays open for the rebuilt-producer HIR/native disassembly
+and full SSH byte-equality evidence described above.
+
+## BF-9 Update (2026-11-26) — OS-side `rt_push_byte` removal & verify waiting (`fix-implemented-verification-pending`)
+
+- **OS-side fix**: Removed all remaining `rt_push_byte(...)` reassignments and colliding `extern fn rt_push_byte` / `export use ... rt_push_byte` declarations across `src/os/apps/sshd/sshd.spl` (`_sshd_tokenize_command`), `src/os/apps/sshd/ssh_session.spl` (`_live_openssh_client_version_bytes`), `src/os/apps/sshd/ssh_session_helpers.spl` (`_copy_prefix_stable`, `_build_plain_packet_header`, `_push_u32_be_stable`, `_build_channel_*_stable`), and `src/os/apps/sshd/ssh_session_channel.spl` (`_build_channel_data_stable`, `_scp_*`), replacing them with direct `.push(... as u8)` calls preserving `BYTE_PACKED` layout.
+- **Host spec**: `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel_bf9/bf9_sshd_byte_pack_and_text_spec.spl --mode=interpreter` -> `3 examples, 0 failures`.
+- **QEMU/baremetal verification pending**:
+  ```sh
+  sh scripts/os/ssh_multi_cmd.shs && sh scripts/os/scp_retrieve_over_ssh_uefi.shs
+  ```

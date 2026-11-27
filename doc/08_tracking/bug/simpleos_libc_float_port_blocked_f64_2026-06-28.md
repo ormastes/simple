@@ -1,5 +1,20 @@
 # SimpleOS libc: float functions cannot be ported to pure Simple (f64 unreliable)
 
+## Triage 2026-11-25 (P2 sweep lane) — still OPEN; closure gated on admitted self-hosted compiler + SimpleOS QEMU
+
+Current state per the 2026-09-22/23 sections below: the decimal-only staging
+parser (`src/os/libc/simpleos_stdlib_float.spl`) and its correct-rounding
+follow-up are real progress, but the ticket's own acceptance — port
+`strtod`/`strtof`/`math` with KAT specs and delete the C twins — remains gated
+on (a) an admitted self-hosted phase compiler (the self-hosted f64
+call-result gate cannot run on the Rust seed) and (b) a SimpleOS QEMU
+environment for guest-side vectors and perf/RSS measurement. Neither exists in
+this sweep lane (Windows host, pinned seed that cannot run `test` at this HEAD
+due to the `@representation_boundary` inconsistency, no bootstrap allowed).
+The syscall/hardware-backed group remains correctly C per the doc. Left
+**OPEN**; the "needs owner triage" banner is bookkeeping — the 2026-09 triage
+and progress sections are the live state. No code or status change made.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

@@ -1,0 +1,22 @@
+#!/bin/sh
+# Exercise BuildRunner's copy -> publish -> execute path through both C owners.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/simple-file-copy-mode.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+case $(uname -s) in
+    Darwin) linker=-Wl,-dead_strip ;;
+    Linux|FreeBSD) linker=-Wl,--gc-sections ;;
+    *) echo "rt_file_copy_mode_selfcheck: SKIP (POSIX permissions required)"; exit 0 ;;
+esac
+failed=0
+for provider in runtime.c runtime_native.c; do
+    mkdir "$work/$provider"
+    "${CC:-cc}" -std=gnu11 -O0 -ffunction-sections -fdata-sections \
+        -I"$root/src/runtime" "$root/src/runtime/$provider" \
+        "$root/src/runtime/test/rt_file_copy_mode_selfcheck.c" \
+        "$linker" -lm -lpthread -o "$work/selfcheck"
+    echo "Checking $provider"
+    if ! "$work/selfcheck" "$work/$provider"; then failed=1; fi
+done
+exit "$failed"

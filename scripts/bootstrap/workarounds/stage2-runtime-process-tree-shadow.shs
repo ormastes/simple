@@ -1,0 +1,52 @@
+#!/bin/sh
+# @workaround bug=stage2_runtime_list_missing_process_tree_2026_11_01 recover=e2e83308682 reason=frozen stage2 ef0681fc0e1 predates runtime_process_tree in its baked runtime C source list
+#
+# Build a shadow runtime source root for a frozen stage2 whose baked runtime
+# source list lacks runtime_process_tree (any stage2 built before e2e83308682).
+# The shadow is a byte-identical copy of <checkout>/src/runtime (plus the two
+# out-of-tree header dirs it includes relatively) except that
+# runtime_process_owned.c, which the old list does compile, gets
+# `#include "runtime_process_tree.c"` appended. The resulting objects carry the
+# exact same process-tree definitions the current compiler links from its own
+# runtime_process_tree.o, so the workaround is semantics-neutral.
+#
+# The checkout is never modified. stage2 picks the shadow up through
+# SIMPLE_PROJECT_ROOT, which in that stage2 is read only by the runtime C
+# source lookup (runtime_compiler.spl find_runtime_source_dir).
+#
+# Usage: sh stage2-runtime-process-tree-shadow.shs <checkout_root> <shadow_root>
+# Then:  SIMPLE_PROJECT_ROOT=<shadow_root> stage2 native-build ...
+# Remove once stage2 is rebuilt from a commit containing e2e83308682.
+set -eu
+
+if [ "$#" -ne 2 ]; then
+    echo "usage: $0 <checkout_root> <shadow_root>" >&2
+    exit 2
+fi
+checkout=$1
+shadow=$2
+
+if [ ! -f "$checkout/src/runtime/runtime_process_tree.c" ] ||
+   [ ! -f "$checkout/src/runtime/runtime_process_owned.c" ]; then
+    echo "error: $checkout/src/runtime lacks runtime_process_tree.c or runtime_process_owned.c" >&2
+    exit 1
+fi
+case "$shadow" in
+    ""|"/"|"$checkout"|"$checkout/") echo "error: refusing shadow root '$shadow'" >&2; exit 1 ;;
+esac
+
+rm -rf "$shadow"
+mkdir -p "$shadow/src/compiler/70.backend/backend_plugin" "$shadow/tools/counterpart/sdk"
+cp -R "$checkout/src/runtime" "$shadow/src/runtime"
+# Relative includes that escape src/runtime (counterpart ABI, backend plugin ABI).
+cp -R "$checkout/src/compiler/70.backend/backend_plugin/abi" "$shadow/src/compiler/70.backend/backend_plugin/abi"
+cp -R "$checkout/tools/counterpart/sdk/c" "$shadow/tools/counterpart/sdk/c"
+
+cat >> "$shadow/src/runtime/runtime_process_owned.c" <<'EOF'
+
+/* @workaround bug=stage2_runtime_list_missing_process_tree_2026_11_01
+ * Shadow-only: the frozen stage2 never compiles runtime_process_tree.c. */
+#include "runtime_process_tree.c"
+EOF
+
+echo "SIMPLE_PROJECT_ROOT=$shadow"

@@ -23,6 +23,51 @@ fi
 SECTION_LIMIT="${NVME_RV32_MINIMAL_SECTIONS:-}"
 REAL_SECTIONS="${NVME_RV32_REAL_SECTIONS:-0}"
 
+# Cross-toolchain resolution for the rv32 start stub and soft-arithmetic link.
+# Canonical: riscv64-unknown-elf-gcc. Fallback: a clang with the RISC-V backend
+# (probed once, overridable via NVME_RV32_CROSS_CLANG) so LLVM-only hosts
+# (e.g. aarch64 boxes without a riscv gcc) can still assemble/link the stub.
+RV32_CC=""
+RV32_CC_FLAGS=""
+if command -v riscv64-unknown-elf-gcc >/dev/null 2>&1; then
+  RV32_CC="riscv64-unknown-elf-gcc"
+  RV32_CC_FLAGS="-march=rv32imac -mabi=ilp32"
+elif [ -n "${NVME_RV32_CROSS_CLANG:-}" ]; then
+  RV32_CC="$NVME_RV32_CROSS_CLANG"
+  RV32_CC_FLAGS="--target=riscv32-unknown-elf -march=rv32imac -mabi=ilp32"
+else
+  for cand in clang clang-18 clang-17 clang-16 clang-15 clang-14 clang-13 clang-12; do
+    if command -v "$cand" >/dev/null 2>&1 \
+      && printf 'int _rv32_probe;\n' | "$cand" --target=riscv32-unknown-elf -march=rv32imac -mabi=ilp32 -c -x c - -o /dev/null >/dev/null 2>&1; then
+      RV32_CC="$cand"
+      RV32_CC_FLAGS="--target=riscv32-unknown-elf -march=rv32imac -mabi=ilp32"
+      break
+    fi
+  done
+fi
+
+# Echo the rv32 i64 div/mod builtins archive (libgcc or compiler-rt), or
+# nothing when the host has neither; ld.lld then still links as long as the
+# objects reference no soft-arithmetic helper, and fails closed otherwise.
+rv32_softmath_archive() {
+  if [ "$RV32_CC" = "riscv64-unknown-elf-gcc" ]; then
+    riscv64-unknown-elf-gcc -march=rv32imac -mabi=ilp32 -print-libgcc-file-name
+    return
+  fi
+  if [ -n "$RV32_CC" ]; then
+    rv32_rd="$("$RV32_CC" $RV32_CC_FLAGS -print-resource-dir 2>/dev/null)"
+    for cand_arc in \
+      "$rv32_rd/lib/riscv32-unknown-unknown-elf/libclang_rt.builtins.a" \
+      "$rv32_rd/lib/baremetal/riscv32.a" \
+      "$rv32_rd/lib/riscv32.a"; do
+      if [ -f "$cand_arc" ]; then
+        echo "$cand_arc"
+        return
+      fi
+    done
+  fi
+}
+
 emit_minimal_logic_rain() {
   cat <<'EOF_RAIN'
 fn rv32_rain_selftest() -> i32:
@@ -727,11 +772,15 @@ done:
 1:  wfi
     j       1b
 EOF_START
+if [ -z "$RV32_CC" ]; then
+  echo "STATUS: FAIL nvme-rv32-minimal-live no rv32 cross assembler (tried riscv64-unknown-elf-gcc and clang --target=riscv32-unknown-elf); set NVME_RV32_CROSS_CLANG" >&2
+  exit 127
+fi
 # ilp32 (soft-float ABI): must match the object the Simple LLVM backend emits
 # for riscv32-unknown-none (soft-float since the FPU DI-toggle work); ilp32d
 # start.o vs ilp32 fw.o is an ld.lld hard error. Soft-float is also the safe
 # ABI for the integer-only rv32 board core.
-if ! riscv64-unknown-elf-gcc -march=rv32imac -mabi=ilp32 -c "$START_ASM" -o "$START_OBJ" >>"$BUILD_OUT" 2>>"$BUILD_ERR"; then
+if ! "$RV32_CC" $RV32_CC_FLAGS -c "$START_ASM" -o "$START_OBJ" >>"$BUILD_OUT" 2>>"$BUILD_ERR"; then
   echo "STATUS: FAIL nvme-rv32-minimal-live start-stub out=$BUILD_OUT err=$BUILD_ERR"
   tail -n 40 "$BUILD_ERR" || true
   exit 1
@@ -741,10 +790,14 @@ if ! llvm-objcopy --redefine-sym _start=__simple_unused_start "$OBJ" >>"$BUILD_O
   tail -n 40 "$BUILD_ERR" || true
   exit 1
 fi
-# libgcc supplies the i64 div/mod builtins (__divdi3/__moddi3) the rv32
-# soft-float objects reference; without it the link fails on any i64 division.
-NVME_RV32_LIBGCC="$(riscv64-unknown-elf-gcc -march=rv32imac -mabi=ilp32 -print-libgcc-file-name)"
-if ! ld.lld -m elf32lriscv -T src/os/kernel/arch/riscv32/linker.ld --no-relax --gc-sections -o "$OUT" "$START_OBJ" "$OBJ" "$NVME_RV32_LIBGCC" >>"$BUILD_OUT" 2>>"$BUILD_ERR"; then
+# libgcc/compiler-rt supplies the i64 div/mod builtins (__divdi3/__moddi3) the
+# rv32 soft-float objects may reference; without one the link fails only when a
+# builtin is actually referenced. Hosts with neither archive link without it
+# and ld.lld fails closed on a genuinely undefined soft-arithmetic symbol.
+NVME_RV32_LIBGCC="$(rv32_softmath_archive)"
+# Deliberately unquoted: empty when the host has no soft-arithmetic archive.
+# shellcheck disable=SC2086
+if ! ld.lld -m elf32lriscv -T src/os/kernel/arch/riscv32/linker.ld --no-relax --gc-sections -o "$OUT" "$START_OBJ" "$OBJ" $NVME_RV32_LIBGCC >>"$BUILD_OUT" 2>>"$BUILD_ERR"; then
   echo "STATUS: FAIL nvme-rv32-minimal-live link out=$BUILD_OUT err=$BUILD_ERR"
   tail -n 40 "$BUILD_ERR" || true
   exit 1

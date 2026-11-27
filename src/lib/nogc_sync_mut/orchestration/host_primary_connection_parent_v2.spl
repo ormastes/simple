@@ -1,0 +1,47 @@
+# Resolve the real executing parent from the same protected journal. No copied
+# RuntimeIntent creates provider authority; the retained adapter must still own it.
+use std.nogc_sync_mut.orchestration.host_windows_local_root_v3.HostWindowsLocalRootV3
+use std.nogc_sync_mut.orchestration.host_execution_envelope_v2.host_execution_decode_v2
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.host_execution_observation_decode_v2
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.nogc_async_mut.container.api_v2.simple_container_project_v2
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, container_host_scope_bytes_v2}
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_read_required_v3
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.crypto.sha256.sha256_text
+
+pub struct HostPrimaryConnectionParentV2:
+    execution: ContainerExecutionRequestV2
+    runtime: RuntimeIdentityV1
+
+pub fn host_primary_connection_parent_v2(local: HostWindowsLocalRootV3,
+        operation_id: text) -> Result<HostPrimaryConnectionParentV2, text>:
+    val current = local.current_v3()?
+    if not local.ready_v3(): return Err("host-primary-parent-startup-quarantine")
+    if not builder_identifier_valid_v1(operation_id): return Err("host-primary-parent-operation")
+    val journal = local.capacity_v3().journal
+    val packet = distributed_operation_journal_read_required_v3(journal,
+        "host-execute-packets/" + sha256_text(operation_id) + ".sdn", 2097152)?
+    val request = host_execution_decode_v2(packet, local.scope_v3())?
+    if request.operation.id != operation_id: return Err("host-primary-parent-operation-mismatch")
+    val retained = daemon_operation_exact_v2(journal, request.operation)?
+    if retained.state != "executing": return Err("host-primary-parent-executing-required")
+    val projection = simple_container_project_v2(local.container_v3(), request.execution)?
+    if (projection.operation_id != operation_id or projection.request_digest != request.execution.plan.request_digest or
+            projection.cpu_millis != request.intent.reservation.cpu_millis or
+            projection.memory_bytes != request.intent.reservation.memory_bytes or
+            request.execution.plan.service_scope_id != local.scope_v3().service_scope_id):
+        return Err("host-primary-parent-projection-mismatch")
+    val observation = host_execution_observation_decode_v2(distributed_operation_journal_read_required_v3(journal,
+        "host-execution-observations-v2/" + sha256_text(operation_id) + ".sdn", 65536)?)?
+    if (observation.operation_id != operation_id or
+            container_host_scope_bytes_v2(observation.scope)? != container_host_scope_bytes_v2(local.scope_v3())? or
+            observation.operation_digest != sha256_text(distributed_encode_operation_v2(request.operation)?) or
+            observation.plan_digest != request.intent.plan_digest or observation.request_digest != request.execution.plan.request_digest or
+            observation.grant_id != request.signed.grant.id or observation.principal != request.signed.grant.principal or
+            observation.issuer_id != request.signed.issuer_id or observation.approver_id != request.approval.approver_id or
+            observation.provider_identity_digest != local.binding_v3().provider_identity_digest):
+        return Err("host-primary-parent-observation-mismatch")
+    Ok(HostPrimaryConnectionParentV2(request.execution, observation.runtime))

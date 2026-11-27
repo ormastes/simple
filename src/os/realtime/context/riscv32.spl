@@ -25,7 +25,9 @@ extern fn rt_riscv_write_csr_mepc(val: u64)
 extern fn rt_riscv_read_csr_mscratch() -> u64
 extern fn rt_riscv_write_csr_mscratch(val: u64)
 
-use std.baremetal.interrupt (mem_read_u32, mem_write_u32)
+use std.baremetal.interrupt (mem_read_u32, mem_write_u32, plic_claim, plic_complete)
+use std.baremetal.riscv.csr (csr_read, CSR_MCAUSE)
+use os.realtime.irq.{irq_rv32_mcause_is_external, irq_dispatch_claimed}
 
 fn riscv_context_switch():
     """Called from trap handler. Saves current context, picks next, restores."""
@@ -63,8 +65,15 @@ fn riscv_init_task_stack(stack_top: u64, entry: u64) -> u64:
     sp
 
 fn riscv_trap_handler():
-    """Machine-mode trap handler entry. Routes timer to scheduler."""
-    timer_isr()
+    """Machine-mode trap handler entry. A machine external interrupt is
+    claimed from the PLIC, dispatched to its bound handler task, and
+    completed; every other cause routes to the timer as before."""
+    if irq_rv32_mcause_is_external(csr_read(CSR_MCAUSE).to_u32()):
+        val claim = plic_claim()
+        if irq_dispatch_claimed(claim):
+            plic_complete(claim)
+    else:
+        timer_isr()
 
     if sched_needs_switch():
         riscv_context_switch()

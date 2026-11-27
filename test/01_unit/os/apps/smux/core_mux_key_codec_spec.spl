@@ -1,0 +1,221 @@
+# REQ-CMUX-003/006/008. Production pure-code controls; AUTHORED / NOT_RUN.
+# codex-system-test
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.mux.core_v1.{MuxErrorV1, MuxErrorKindV1, MuxCommitStateV1}
+use std.common.contracts.mux.execution_v1.{MuxKeyV1, MuxNamedKeyV1}
+use os.apps.smux.core_mux_key_codec.{core_mux_keys_bytes_v1, core_mux_key_bytes_checked_v1}
+
+fn key_codec_bytes(key: MuxKeyV1, expected: [u8]):
+    expect(core_mux_keys_bytes_v1([key], false, 65536).unwrap()).to_equal(expected)
+
+fn key_codec_failure(failure: MuxErrorV1, kind: MuxErrorKindV1):
+    expect(failure.kind).to_equal(kind)
+    expect(failure.request_id).to_equal(0)
+    expect(failure.commit_state).to_equal(MuxCommitStateV1.NotApplied)
+    expect(failure.observed_revision).to_be_nil()
+    expect(failure.affected.len()).to_equal(0)
+    expect(failure.cleanup_pending).to_equal(false)
+
+fn key_codec_error(keys: [MuxKeyV1], budget: i64, kind: MuxErrorKindV1):
+    key_codec_failure(core_mux_keys_bytes_v1(keys, false, budget).unwrap_err(), kind)
+
+describe "Pure Smux xterm key codec":
+    it "should refuse missing shortened or oversized temporary encodings":
+        step("Call the production allocation admission seam with deterministic mismatches")
+        key_codec_failure(core_mux_key_bytes_checked_v1(1, []).unwrap_err(), MuxErrorKindV1.Unavailable)
+        key_codec_failure(core_mux_key_bytes_checked_v1(3, [27u8, 91u8]).unwrap_err(), MuxErrorKindV1.Unavailable)
+        key_codec_failure(core_mux_key_bytes_checked_v1(1, [27u8, 65u8]).unwrap_err(), MuxErrorKindV1.Unavailable)
+        key_codec_failure(core_mux_key_bytes_checked_v1(0, []).unwrap_err(), MuxErrorKindV1.Unavailable)
+        key_codec_failure(core_mux_key_bytes_checked_v1(-1, []).unwrap_err(), MuxErrorKindV1.Unavailable)
+        key_codec_failure(core_mux_key_bytes_checked_v1(8, [0u8; 8]).unwrap_err(), MuxErrorKindV1.Unavailable)
+
+    it "should admit exact nonempty temporary lengths including NUL":
+        step("Keep the production byte admission guard strict about length but encoding neutral")
+        for size in [1, 2, 3, 4, 5, 6, 7]:
+            val bytes = [0u8; size]
+            expect(core_mux_key_bytes_checked_v1(size, bytes).unwrap()).to_equal(bytes)
+        expect(core_mux_key_bytes_checked_v1(3, [27u8, 91u8, 65u8]).unwrap()).to_equal([27u8, 91u8, 65u8])
+
+    it "should encode fixed named keys identically in both cursor modes":
+        step("Encode named control and editing keys through the production codec")
+        val keys = [MuxKeyV1.Named(MuxNamedKeyV1.Enter), MuxKeyV1.Named(MuxNamedKeyV1.Escape),
+            MuxKeyV1.Named(MuxNamedKeyV1.Tab), MuxKeyV1.Named(MuxNamedKeyV1.Backspace),
+            MuxKeyV1.Named(MuxNamedKeyV1.Delete), MuxKeyV1.Named(MuxNamedKeyV1.PageUp),
+            MuxKeyV1.Named(MuxNamedKeyV1.PageDown)]
+        val expected = [13u8, 27u8, 9u8, 127u8, 27u8, 91u8, 51u8, 126u8,
+            27u8, 91u8, 53u8, 126u8, 27u8, 91u8, 54u8, 126u8]
+        expect(core_mux_keys_bytes_v1(keys, false, 16).unwrap()).to_equal(expected)
+        expect(core_mux_keys_bytes_v1(keys, true, 16).unwrap()).to_equal(expected)
+
+    it "should encode all six normal cursor keys with CSI":
+        step("Include Home and End in the selected xterm cursor profile")
+        key_codec_bytes(MuxKeyV1.Named(MuxNamedKeyV1.Up), [27u8, 91u8, 65u8])
+        key_codec_bytes(MuxKeyV1.Named(MuxNamedKeyV1.Down), [27u8, 91u8, 66u8])
+        key_codec_bytes(MuxKeyV1.Named(MuxNamedKeyV1.Right), [27u8, 91u8, 67u8])
+        key_codec_bytes(MuxKeyV1.Named(MuxNamedKeyV1.Left), [27u8, 91u8, 68u8])
+        key_codec_bytes(MuxKeyV1.Named(MuxNamedKeyV1.Home), [27u8, 91u8, 72u8])
+        key_codec_bytes(MuxKeyV1.Named(MuxNamedKeyV1.End), [27u8, 91u8, 70u8])
+
+    it "should encode all six application cursor keys with SS3":
+        step("Use the supplied pane mode without reading or mutating a VT owner")
+        val keys = [MuxKeyV1.Named(MuxNamedKeyV1.Up), MuxKeyV1.Named(MuxNamedKeyV1.Down),
+            MuxKeyV1.Named(MuxNamedKeyV1.Right), MuxKeyV1.Named(MuxNamedKeyV1.Left),
+            MuxKeyV1.Named(MuxNamedKeyV1.Home), MuxKeyV1.Named(MuxNamedKeyV1.End)]
+        expect(core_mux_keys_bytes_v1(keys, true, 18).unwrap()).to_equal([27u8, 79u8, 65u8,
+            27u8, 79u8, 66u8, 27u8, 79u8, 67u8, 27u8, 79u8, 68u8,
+            27u8, 79u8, 72u8, 27u8, 79u8, 70u8])
+
+    it "should encode each of F1 through F12 exactly":
+        step("Check fixed independent byte oracles for every base function key")
+        key_codec_bytes(MuxKeyV1.Function(1), [27u8, 79u8, 80u8])
+        key_codec_bytes(MuxKeyV1.Function(2), [27u8, 79u8, 81u8])
+        key_codec_bytes(MuxKeyV1.Function(3), [27u8, 79u8, 82u8])
+        key_codec_bytes(MuxKeyV1.Function(4), [27u8, 79u8, 83u8])
+        key_codec_bytes(MuxKeyV1.Function(5), [27u8, 91u8, 49u8, 53u8, 126u8])
+        key_codec_bytes(MuxKeyV1.Function(6), [27u8, 91u8, 49u8, 55u8, 126u8])
+        key_codec_bytes(MuxKeyV1.Function(7), [27u8, 91u8, 49u8, 56u8, 126u8])
+        key_codec_bytes(MuxKeyV1.Function(8), [27u8, 91u8, 49u8, 57u8, 126u8])
+        key_codec_bytes(MuxKeyV1.Function(9), [27u8, 91u8, 50u8, 48u8, 126u8])
+        key_codec_bytes(MuxKeyV1.Function(10), [27u8, 91u8, 50u8, 49u8, 126u8])
+        key_codec_bytes(MuxKeyV1.Function(11), [27u8, 91u8, 50u8, 51u8, 126u8])
+        key_codec_bytes(MuxKeyV1.Function(12), [27u8, 91u8, 50u8, 52u8, 126u8])
+
+    it "should encode each of F13 through F24 using xterm capabilities":
+        step("Verify every shifted function capability without keyboard negotiation")
+        key_codec_bytes(MuxKeyV1.Function(13), [27u8, 91u8, 49u8, 59u8, 50u8, 80u8])
+        key_codec_bytes(MuxKeyV1.Function(14), [27u8, 91u8, 49u8, 59u8, 50u8, 81u8])
+        key_codec_bytes(MuxKeyV1.Function(15), [27u8, 91u8, 49u8, 59u8, 50u8, 82u8])
+        key_codec_bytes(MuxKeyV1.Function(16), [27u8, 91u8, 49u8, 59u8, 50u8, 83u8])
+        key_codec_bytes(MuxKeyV1.Function(17), [27u8, 91u8, 49u8, 53u8, 59u8, 50u8, 126u8])
+        key_codec_bytes(MuxKeyV1.Function(18), [27u8, 91u8, 49u8, 55u8, 59u8, 50u8, 126u8])
+        key_codec_bytes(MuxKeyV1.Function(19), [27u8, 91u8, 49u8, 56u8, 59u8, 50u8, 126u8])
+        key_codec_bytes(MuxKeyV1.Function(20), [27u8, 91u8, 49u8, 57u8, 59u8, 50u8, 126u8])
+        key_codec_bytes(MuxKeyV1.Function(21), [27u8, 91u8, 50u8, 48u8, 59u8, 50u8, 126u8])
+        key_codec_bytes(MuxKeyV1.Function(22), [27u8, 91u8, 50u8, 49u8, 59u8, 50u8, 126u8])
+        key_codec_bytes(MuxKeyV1.Function(23), [27u8, 91u8, 50u8, 51u8, 59u8, 50u8, 126u8])
+        key_codec_bytes(MuxKeyV1.Function(24), [27u8, 91u8, 50u8, 52u8, 59u8, 50u8, 126u8])
+
+    it "should encode Unicode boundaries and NUL without text truncation":
+        step("Check UTF8 widths and the scalar boundaries surrounding surrogates")
+        key_codec_bytes(MuxKeyV1.Scalar(0, false, false, false), [0u8])
+        key_codec_bytes(MuxKeyV1.Scalar(127, false, false, false), [127u8])
+        key_codec_bytes(MuxKeyV1.Scalar(128, false, false, false), [194u8, 128u8])
+        key_codec_bytes(MuxKeyV1.Scalar(2047, false, false, false), [223u8, 191u8])
+        key_codec_bytes(MuxKeyV1.Scalar(2048, false, false, false), [224u8, 160u8, 128u8])
+        key_codec_bytes(MuxKeyV1.Scalar(55295, false, false, false), [237u8, 159u8, 191u8])
+        key_codec_bytes(MuxKeyV1.Scalar(57344, false, false, false), [238u8, 128u8, 128u8])
+        key_codec_bytes(MuxKeyV1.Scalar(65535, false, false, false), [239u8, 191u8, 191u8])
+        key_codec_bytes(MuxKeyV1.Scalar(65536, false, false, false), [240u8, 144u8, 128u8, 128u8])
+        key_codec_bytes(MuxKeyV1.Scalar(1114111, false, false, false), [244u8, 143u8, 191u8, 191u8])
+
+    it "should encode conventional Control letters and punctuation boundaries":
+        step("Check both letter cases and every ASCII control-range boundary")
+        key_codec_bytes(MuxKeyV1.Scalar(64, true, false, false), [0u8])
+        key_codec_bytes(MuxKeyV1.Scalar(65, true, false, false), [1u8])
+        key_codec_bytes(MuxKeyV1.Scalar(90, true, false, false), [26u8])
+        key_codec_bytes(MuxKeyV1.Scalar(91, true, false, false), [27u8])
+        key_codec_bytes(MuxKeyV1.Scalar(92, true, false, false), [28u8])
+        key_codec_bytes(MuxKeyV1.Scalar(93, true, false, false), [29u8])
+        key_codec_bytes(MuxKeyV1.Scalar(94, true, false, false), [30u8])
+        key_codec_bytes(MuxKeyV1.Scalar(95, true, false, false), [31u8])
+        key_codec_bytes(MuxKeyV1.Scalar(96, true, false, false), [0u8])
+        key_codec_bytes(MuxKeyV1.Scalar(97, true, false, false), [1u8])
+        key_codec_bytes(MuxKeyV1.Scalar(122, true, false, false), [26u8])
+        key_codec_bytes(MuxKeyV1.Scalar(123, true, false, false), [27u8])
+        key_codec_bytes(MuxKeyV1.Scalar(124, true, false, false), [28u8])
+        key_codec_bytes(MuxKeyV1.Scalar(125, true, false, false), [29u8])
+        key_codec_bytes(MuxKeyV1.Scalar(126, true, false, false), [30u8])
+
+    it "should encode every admitted Control alias":
+        step("Retain the explicit legacy aliases without a keyboard layout transform")
+        key_codec_bytes(MuxKeyV1.Scalar(32, true, false, false), [0u8])
+        key_codec_bytes(MuxKeyV1.Scalar(50, true, false, false), [0u8])
+        key_codec_bytes(MuxKeyV1.Scalar(51, true, false, false), [27u8])
+        key_codec_bytes(MuxKeyV1.Scalar(52, true, false, false), [28u8])
+        key_codec_bytes(MuxKeyV1.Scalar(53, true, false, false), [29u8])
+        key_codec_bytes(MuxKeyV1.Scalar(54, true, false, false), [30u8])
+        key_codec_bytes(MuxKeyV1.Scalar(55, true, false, false), [31u8])
+        key_codec_bytes(MuxKeyV1.Scalar(45, true, false, false), [31u8])
+        key_codec_bytes(MuxKeyV1.Scalar(47, true, false, false), [31u8])
+        key_codec_bytes(MuxKeyV1.Scalar(56, true, false, false), [127u8])
+        key_codec_bytes(MuxKeyV1.Scalar(63, true, false, false), [127u8])
+
+    it "should distinguish all eight modifier combinations on ASCII":
+        step("Encode A and Alt or Control variants but reject every Shift-A combination")
+        key_codec_bytes(MuxKeyV1.Scalar(65, false, false, false), [65u8])
+        key_codec_bytes(MuxKeyV1.Scalar(65, false, true, false), [27u8, 65u8])
+        key_codec_bytes(MuxKeyV1.Scalar(65, true, false, false), [1u8])
+        key_codec_bytes(MuxKeyV1.Scalar(65, true, true, false), [27u8, 1u8])
+        for control in [false, true]:
+            for alt in [false, true]:
+                key_codec_error([MuxKeyV1.Scalar(65, control, alt, true)], 16, MuxErrorKindV1.Unsupported)
+
+    it "should distinguish all eight modifier combinations on Unicode":
+        step("Preserve emoji and Alt while refusing modifier loss on Unicode")
+        key_codec_bytes(MuxKeyV1.Scalar(128512, false, false, false), [240u8, 159u8, 152u8, 128u8])
+        key_codec_bytes(MuxKeyV1.Scalar(128512, false, true, false), [27u8, 240u8, 159u8, 152u8, 128u8])
+        for alt in [false, true]:
+            key_codec_error([MuxKeyV1.Scalar(128512, true, alt, false)], 16, MuxErrorKindV1.Unsupported)
+            key_codec_error([MuxKeyV1.Scalar(128512, false, alt, true)], 16, MuxErrorKindV1.Unsupported)
+            key_codec_error([MuxKeyV1.Scalar(128512, true, alt, true)], 16, MuxErrorKindV1.Unsupported)
+
+    it "should handle all Tab modifier combinations explicitly":
+        step("Support legacy BackTab and Alt prefixes without accepting Control-Tab")
+        key_codec_bytes(MuxKeyV1.Scalar(9, false, false, false), [9u8])
+        key_codec_bytes(MuxKeyV1.Scalar(9, false, true, false), [27u8, 9u8])
+        key_codec_bytes(MuxKeyV1.Scalar(9, false, false, true), [27u8, 91u8, 90u8])
+        key_codec_bytes(MuxKeyV1.Scalar(9, false, true, true), [27u8, 27u8, 91u8, 90u8])
+        for alt in [false, true]:
+            for shift in [false, true]:
+                key_codec_error([MuxKeyV1.Scalar(9, true, alt, shift)], 16, MuxErrorKindV1.Unsupported)
+
+    it "should reject unsupported controls without remapping layout positions":
+        step("Refuse unchanged-Control fallbacks and guessed shifted punctuation")
+        for codepoint in [0u32, 13u32, 31u32, 33u32, 46u32, 48u32, 49u32, 57u32, 62u32, 127u32, 128u32]:
+            key_codec_error([MuxKeyV1.Scalar(codepoint, true, false, false)], 16, MuxErrorKindV1.Unsupported)
+        key_codec_error([MuxKeyV1.Scalar(13, false, false, true)], 16, MuxErrorKindV1.Unsupported)
+        key_codec_error([MuxKeyV1.Scalar(50, false, false, true)], 16, MuxErrorKindV1.Unsupported)
+
+    it "should reject invalid Unicode before interpreting modifiers":
+        step("Check both surrogate edges and scalars beyond Unicode under every flag set")
+        for codepoint in [55296u32, 57343u32, 1114112u32, 4294967295u32]:
+            for control in [false, true]:
+                for alt in [false, true]:
+                    for shift in [false, true]:
+                        key_codec_error([MuxKeyV1.Scalar(codepoint, control, alt, shift)], 16, MuxErrorKindV1.InvalidRequest)
+
+    it "should reject invalid function and key count bounds":
+        step("Apply the frozen request limits without inventing a TooLarge error kind")
+        for number in [-1, 0, 25, 9223372036854775807]:
+            key_codec_error([MuxKeyV1.Function(number)], 16, MuxErrorKindV1.InvalidRequest)
+        key_codec_error([], 16, MuxErrorKindV1.InvalidRequest)
+        key_codec_error([MuxKeyV1.Named(MuxNamedKeyV1.Enter); 257], 65536, MuxErrorKindV1.InvalidRequest)
+        expect(core_mux_keys_bytes_v1([MuxKeyV1.Named(MuxNamedKeyV1.Enter); 256], false, 256).unwrap()).to_equal([13u8; 256])
+
+    it "should enforce exact whole-request byte budgets":
+        step("Reserve the whole sequence including Alt and function modifiers")
+        val keys = [MuxKeyV1.Scalar(0, false, true, false), MuxKeyV1.Function(24)]
+        expect(core_mux_keys_bytes_v1(keys, false, 9).unwrap()).to_equal([27u8, 0u8,
+            27u8, 91u8, 50u8, 52u8, 59u8, 50u8, 126u8])
+        for budget in [-1, 0, 1, 8, 65537, 9223372036854775807]:
+            key_codec_error(keys, budget, MuxErrorKindV1.InvalidRequest)
+        expect(core_mux_keys_bytes_v1(keys, false, 65536).unwrap().len()).to_equal(9)
+
+    it "should return only typed errors for invalid or unsupported suffixes":
+        step("Refuse a late bad key without returning a successful encoded prefix")
+        val prefix = MuxKeyV1.Named(MuxNamedKeyV1.Enter)
+        key_codec_error([prefix, MuxKeyV1.Scalar(65, false, true, true)], 64, MuxErrorKindV1.Unsupported)
+        key_codec_error([prefix, MuxKeyV1.Function(0)], 64, MuxErrorKindV1.InvalidRequest)
+        key_codec_error([prefix, MuxKeyV1.Function(24)], 7, MuxErrorKindV1.InvalidRequest)
+        key_codec_bytes(prefix, [13u8])
+
+    it "should preserve mixed key order and exact maximum function payload":
+        step("Concatenate exact bytes without hidden state across successful calls")
+        val keys = [MuxKeyV1.Named(MuxNamedKeyV1.Enter), MuxKeyV1.Scalar(0, false, false, false),
+            MuxKeyV1.Scalar(65, true, true, false), MuxKeyV1.Named(MuxNamedKeyV1.Home)]
+        expect(core_mux_keys_bytes_v1(keys, true, 7).unwrap()).to_equal([13u8, 0u8, 27u8, 1u8, 27u8, 79u8, 72u8])
+        val maximum = core_mux_keys_bytes_v1([MuxKeyV1.Function(24); 256], false, 1792).unwrap()
+        expect(maximum.len()).to_equal(1792)
+        expect(maximum[0]).to_equal(27u8)
+        expect(maximum[1791]).to_equal(126u8)
+        key_codec_error([MuxKeyV1.Function(24); 256], 1791, MuxErrorKindV1.InvalidRequest)

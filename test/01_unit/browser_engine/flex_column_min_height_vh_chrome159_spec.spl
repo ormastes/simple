@@ -1,0 +1,45 @@
+"""
+## Purpose and audience
+Purpose: Pin `flex: 1` growth inside a column flex container whose height
+comes from `min-height: 100vh` against Chrome 159. The column's main size
+for flex distribution read only `height`, `max-height` and px `min-height`,
+so a vh min-height left every `flex: 1` descendant at its content height
+(44 px instead of the viewport's 300).
+Audience: maintainers of the web layout engine.
+"""
+
+"""
+Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(flex column min-height vh).
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_geometry.{
+    simple_web_layout_element_geometry_lines
+}
+
+fn fvh_rule(sel: text, body: text) -> text:
+    sel + "{" + body + "}"
+
+# #app (column, min-height: 100vh) > .wp#root > .pc > .wp > .pc > button.
+fn fvh_page(app: text, pc: text) -> text:
+    val css = fvh_rule("body", "margin:0") + fvh_rule("#app", "display:flex;flex-direction:column;" + app) + fvh_rule(".wp", "display:flex;flex-direction:column;flex:1;") + fvh_rule(".pc", "flex:1;display:flex;flex-direction:row;" + pc) + fvh_rule("button", "min-height:44px")
+    "<!DOCTYPE html><html><head><style>" + css + "</style></head><body><div id='app'><div class='wp'><div class='pc'><div class='wp'><div class='pc'><button>Files</button></div></div></div></div></div></body></html>"
+
+# "tag:y:h" for #app, the root panel and the button (480x300 viewport).
+fn fvh_boxes(page: text) -> text:
+    var out = ""
+    for line in simple_web_layout_element_geometry_lines(page, 480, 300):
+        val p = line.split("|")
+        if p[1] == "path:0" or p[1] == "path:0/0" or p[2] == "button":
+            out = out + p[2] + ":" + p[4] + ":" + p[6] + " "
+    out
+
+describe "flex column min-height: 100vh (Chrome 159)":
+    it "grows flex: 1 descendants to the viewport height":
+        expect(fvh_boxes(fvh_page("min-height:100vh", ""))).to_equal("div:0:300 div:0:300 button:0:300 ")
+
+    it "grows them inside padded flex rows":
+        expect(fvh_boxes(fvh_page("min-height:100vh", "padding:16px"))).to_equal("div:0:300 div:0:300 button:32:236 ")
+
+    it "adds a content-box container's padding outside the vh minimum":
+        expect(fvh_boxes(fvh_page("min-height:100vh;padding:10px 0 20px", ""))).to_equal("div:0:330 div:10:300 button:10:300 ")

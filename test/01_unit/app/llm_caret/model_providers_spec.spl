@@ -1,0 +1,76 @@
+# @req REQ-SSPEC-UNIT
+"""
+# Claude full model providers
+
+As a caret user, the API provider is chosen from environment flags and the
+base URL is recognised as first party only for the real Anthropic hosts.
+"""
+
+use std.spec.step
+use std.spec.*
+use app.llm_caret.claude_full.utils.model.providers.*
+
+describe "Claude full model providers":
+    it "defaults to the first party provider with no flags":
+        step("no env")
+        expect(getAPIProvider(nil, nil, nil)).to_equal("firstParty")
+        expect(getAPIProvider(Some("0"), Some("no"), Some(""))).to_equal("firstParty")
+
+    it "prefers bedrock over vertex over foundry":
+        step("priority")
+        expect(getAPIProvider(Some("1"), Some("1"), Some("1"))).to_equal("bedrock")
+        expect(getAPIProvider(nil, Some("true"), Some("1"))).to_equal("vertex")
+        expect(getAPIProvider(nil, nil, Some(" YES "))).to_equal("foundry")
+        expect(getAPIProviderForStatsig(nil, nil, Some("on"))).to_equal("foundry")
+
+    it "treats an empty base URL as first party":
+        step("empty")
+        expect(isFirstPartyAnthropicBaseUrl(nil, nil)).to_equal(true)
+        expect(isFirstPartyAnthropicBaseUrl(Some(""), nil)).to_equal(true)
+
+    it "accepts the production host and rejects others":
+        step("hosts")
+        expect(isFirstPartyAnthropicBaseUrl(Some("https://api.anthropic.com"), nil)).to_equal(true)
+        expect(isFirstPartyAnthropicBaseUrl(Some("https://API.Anthropic.com:443/v1"), nil)).to_equal(true)
+        expect(isFirstPartyAnthropicBaseUrl(Some("https://evil.example.com"), nil)).to_equal(false)
+        expect(isFirstPartyAnthropicBaseUrl(Some("https://api.anthropic.com.evil.com"), nil)).to_equal(false)
+
+    it "allows the staging host only for ant users":
+        step("staging")
+        expect(isFirstPartyAnthropicBaseUrl(Some("https://api-staging.anthropic.com"), Some("ant"))).to_equal(true)
+        expect(isFirstPartyAnthropicBaseUrl(Some("https://api-staging.anthropic.com"), Some("external"))).to_equal(false)
+        expect(isFirstPartyAnthropicBaseUrl(Some("https://api-staging.anthropic.com"), nil)).to_equal(false)
+
+    it "extracts and lowercases the host, dropping userinfo and default ports":
+        step("urlHost")
+        expect(urlHost("https://user:pw@Example.COM:443/path?q=1") ?? "none").to_equal("example.com")
+        expect(urlHost("http://example.com:8080/x") ?? "none").to_equal("example.com:8080")
+        expect(urlHost("http://example.com:80") ?? "none").to_equal("example.com")
+        expect(urlHost("wss://h:443") ?? "none").to_equal("h")
+        expect(urlHost("ftp://h:21") ?? "none").to_equal("h")
+        expect(urlHost("https://[::1]:99/") ?? "none").to_equal("[::1]:99")
+        expect(urlHost("https://example.com#frag") ?? "none").to_equal("example.com")
+
+    it "returns no host for malformed URLs":
+        step("malformed")
+        expect(urlHost("no-scheme").?).to_equal(false)
+        expect(urlHost("1http://x").?).to_equal(false)
+        expect(urlHost("https:///path").?).to_equal(false)
+        expect(urlHost("https://ex ample.com").?).to_equal(false)
+        expect(urlHost("https://h:abc").?).to_equal(false)
+        expect(urlHost("https://:80").?).to_equal(false)
+
+    it "keeps non-default ports even when zero padded":
+        step("ports")
+        expect(normalizeHostPort("h:0443", "https") ?? "none").to_equal("h")
+        expect(normalizeHostPort("h:", "https") ?? "none").to_equal("h")
+        expect(isDefaultPort("http", "443")).to_equal(false)
+        expect(trimLeadingZeroes("000")).to_equal("0")
+        expect(trimLeadingZeroes("007")).to_equal("7")
+        expect(allDigits("123")).to_equal(true)
+        expect(allDigits("12a")).to_equal(false)
+        expect(isUrlScheme("git+ssh")).to_equal(true)
+        expect(isUrlScheme("a_b")).to_equal(false)
+        expect(lastIndexOfText("a@b@c", "@")).to_equal(3)
+        expect(firstAuthorityEnd("host/x")).to_equal(4)
+        expect(authorityAfterUserinfo("u@h")).to_equal("h")

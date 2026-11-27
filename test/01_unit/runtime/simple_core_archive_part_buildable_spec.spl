@@ -1,0 +1,53 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+# Bug: simpleos_userland_lint_test_runner_xc_gaps_2026-11-15 (gap 3,
+# `archive_part_failed:core_any_ops`). Two independent causes:
+#
+# 1. `core_any_ops.spl` decoded float bits with `f64.from_bits(bits)`. The
+#    pure-Simple compiler does not resolve static calls on primitive types,
+#    so HIR failed with `unresolved name: f64 at core_any_ops.spl:12:5`.
+#    simple_core links no C runtime, so the fix is the same pure IEEE-754
+#    decoder core_string already uses (with distinct private names, since
+#    each part is a separate --no-mangle archive member).
+# 2. Each archive part was built with `--clean` on the default per-file
+#    route. `--clean` makes the shard prepass return no ledger, and the
+#    strict per-file route refuses that ("no sealed ledger"), masking the
+#    real HIR error for every part. In-process, `--clean` then failed with
+#    "failed to remove clean cache scope" on a not-yet-existing scope dir.
+#    A part's closure is one file, so it is built with `--threads 1`
+#    (in-process cc1 shape, no worker pool) and without `--clean`.
+#
+# simple_core is not executable under `bin/simple test`, so this is held
+# structurally; the native-build of the archive is the behavioural proof.
+
+fn primitive_static_call_count(src: text) -> i64:
+    var count = 0
+    for prim in ["f64.", "f32.", "i64.", "u64.", "i32.", "u32."]:
+        for name in ["from_bits(", "to_bits(", "max(", "min(", "from_str("]:
+            val needle = prim + name
+            var rest = src
+            while rest.contains(needle):
+                count = count + 1
+                val at = rest.index_of(needle) ?? 0
+                rest = rest.substring(at + needle.len())
+    count
+
+describe "simple_core archive parts are buildable":
+    it "core_any_ops has no primitive static calls":
+        val src = rt_file_read_text("src/runtime/simple_core/core_any_ops.spl") ?? ""
+        expect(src.len() > 0).to_equal(true)
+        expect(primitive_static_call_count(src)).to_equal(0)
+
+    it "core_any_ops decodes float bits in pure Simple, preserving -0.0":
+        val src = rt_file_read_text("src/runtime/simple_core/core_any_ops.spl") ?? ""
+        expect(src).to_contain("fn _sffi_core_any_ops_bits_to_f64(bits: i64) -> f64:")
+        expect(src).to_contain("fn _sffi_core_any_ops_pow2(n: i64) -> f64:")
+        expect(src).to_contain("return -0.0")
+
+    it "archive parts are built in-process, not via --clean on the worker pool":
+        val sh = rt_file_read_text("scripts/check/check-simple-core-runtime-smoke.shs") ?? ""
+        expect(sh).to_contain("--threads 1")
+        expect(sh.contains("--output \"$output\" \\\n        --threads 1\n")).to_equal(true)
+        expect(sh.contains("        --clean\n")).to_equal(false)

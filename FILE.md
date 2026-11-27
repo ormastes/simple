@@ -43,7 +43,7 @@ FILE.md files) are allowed.
 | `.codex` | Codex settings |
 | `.agents` | Agent definitions |
 | `.gemini` | Gemini settings |
-| `.kimi-code` | Kimi Code project MCP layer (`mcp.json`; shell-free spawn spellings, see `doc/07_guide/infra/model_providers/kimi.md`) |
+| `.kimi-code` | Kimi Code project MCP layer — Windows only, untracked: `mcp.json` is installed from `config/mcp/win/.kimi-code/` by `config/mcp/install.ps1` (shell-free spawn spellings, see `doc/07_guide/infra/model_providers/kimi.md`) |
 | `.github` | GitHub workflows and config |
 | `.spipe` | SPipe state files |
 | `.scv` | SCV workspace state; mutable quarantine lives under `.scv/quarantine/` (`scv/` packs, `jit/` notes, `root/` legacy root artifacts) |
@@ -54,7 +54,8 @@ FILE.md files) are allowed.
 | `.build` | Mutable local build cache and dashboard state |
 | `tmp` | Temporary files (mutable) |
 | `assets` | Fonts and other binary assets consumed by tests and packaging |
-| `plugins` | First-party plugin packages (llm_caret_messaging, ...) |
+| `cmake` | CMake modules (`SimpleClangPolicy.cmake`, clang policy stamps for the dist build scheduler; used by `scripts/check/check-clang-policy-native-dependency.shs`) |
+| `plugins` | First-party plugin packages (llm_caret_messaging, spipe, ...) |
 | `spec` | Compiler schema contracts (`spec/compiler_schema/`) |
 | `var` | Runtime sample state for web-stack integration specs |
 | `variants` | Platform variant overlays (see `variants/FILE.md`) |

@@ -1,0 +1,115 @@
+# @cover src/lib/nogc_sync_mut/io/ws_client_core.spl 70%
+"""
+# A WebSocket client can talk to a real loopback echo server
+
+Bug: `native_http_ws_sffi_unimplemented_2026-11-15`. `ws_connect`, `ws_send`,
+`ws_receive` and `ws_close` sat on `rt_ws_*` externs that nothing implemented,
+so any call aborted. The scenarios start a WebSocket echo server written in
+Simple on a loopback port, then drive the public client API against it.
+"""
+use std.spec.step
+use std.spec
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.nogc_sync_mut.io.http_sffi.{ws_connect, ws_send, ws_receive, ws_close}
+use std.nogc_sync_mut.io.ws_client_core.{ws_fd_read_frame, ws_fd_write_frame}
+use std.nogc_sync_mut.http.ws.ws_handshake.{ws_build_server_response}
+use std.nogc_sync_mut.http.request.{parse_request}
+use std.nogc_sync_mut.http.headers.{get_header}
+use std.nogc_async_mut.concurrent.thread.{thread_spawn_with_args}
+
+fn fixture_read_request(stream: TcpStream) -> text:
+    var request = ""
+    while true:
+        val line = match stream.read_line_bounded(1024):
+            Err(e): return ""
+            Ok(l): l
+        if line == "" or line == "\r\n":
+            return request
+        request = request + line
+
+fn fixture_key(request: text) -> text:
+    val parsed = parse_request(request + "\r\n")
+    match get_header(parsed[3], "Sec-WebSocket-Key"):
+        case Some(key): key.trim()
+        case None: ""
+
+fn fixture_echo_server(listen_fd: i64, ping_first: i64) -> i64:
+    """Accept one client, handshake, echo text frames until the client closes. Returns echoed count."""
+    val listener = TcpListener(fd: listen_fd, open: true)
+    val fd = listener.accept_fd_timeout(10000)
+    if fd < 0:
+        return -1
+    val stream = TcpStream.from_accepted_fd(fd)
+    val key = fixture_key(fixture_read_request(stream))
+    if key == "":
+        return -2
+    match stream.write_text(ws_build_server_response(key)):
+        Err(e): return -3
+        Ok(_): pass
+    var echoed = 0
+    while true:
+        val frame = ws_fd_read_frame(fd)
+        if frame.0 == 1:
+            if ping_first == 1:
+                val _p = ws_fd_write_frame(fd, 9, "hb".bytes(), false)
+            val _w = ws_fd_write_frame(fd, 1, frame.2, false)
+            echoed = echoed + 1
+        elif frame.0 == 10:
+            pass
+        elif frame.0 == 8:
+            val _c = ws_fd_write_frame(fd, 8, frame.2, false)
+            var s = stream
+            val _x = s.close()
+            return echoed
+        else:
+            return -4
+    -5
+
+fn start_fixture(ping_first: i64) -> (text, i64, TcpListener):
+    val listener = match TcpListener.bind("127.0.0.1:0"):
+        Err(e): panic("bind failed: {e.message}")
+        Ok(l): l
+    val addr = match listener.local_addr():
+        Err(e): panic("local_addr failed: {e.message}")
+        Ok(a): a
+    (addr, listener.fd, listener)
+
+describe "WebSocket client over loopback":
+    it "echoes a text message and closes cleanly":
+        # @req REQ-SSPEC-LIB
+        step("echoes a text message and closes cleanly")
+        val fx = start_fixture(0)
+        var server = thread_spawn_with_args(fx.1, 0, \lfd, ping:
+            fixture_echo_server(lfd, ping)
+        )
+        val ws = ws_connect("ws://{fx.0}/echo")
+        expect(ws.is_valid).to_equal(true)
+        expect(ws_send(ws, "hello websocket")).to_equal(true)
+        expect(ws_receive(ws)).to_equal("hello websocket")
+        expect(ws_close(ws)).to_equal(true)
+        expect(server.join()).to_equal(1)
+        var l = fx.2
+        val _ = l.close()
+
+    it "answers a server ping and still receives the echo":
+        # @req REQ-SSPEC-LIB
+        step("answers a server ping and still receives the echo")
+        val fx = start_fixture(1)
+        var server = thread_spawn_with_args(fx.1, 1, \lfd, ping:
+            fixture_echo_server(lfd, ping)
+        )
+        val ws = ws_connect("ws://{fx.0}/")
+        expect(ws.is_valid).to_equal(true)
+        val long_msg = "x" * 300
+        expect(ws_send(ws, long_msg)).to_equal(true)
+        expect(ws_receive(ws)).to_equal(long_msg)
+        expect(ws_close(ws)).to_equal(true)
+        expect(server.join()).to_equal(1)
+        var l = fx.2
+        val _ = l.close()
+
+    it "reports an invalid socket for a non-ws URL":
+        # @req REQ-SSPEC-LIB
+        step("reports an invalid socket for a non-ws URL")
+        val ws = ws_connect("http://127.0.0.1:1/")
+        expect(ws.is_valid).to_equal(false)

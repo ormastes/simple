@@ -1,0 +1,89 @@
+"""
+Regression: a nil-checked `T?` record passed where `T` is declared hands the
+callee the Option box (2026-11-13).
+
+MIR has no flow typing. After `if v == nil: return`, `v` keeps type
+`Optional(T)` and, on the native lane, holds the canonical Option box. The
+free-function and method call-argument paths only unwrapped scalar optionals,
+so `enc(v)` with `fn enc(x: T)` passed the box and the callee read the box
+header as the record (SIGSEGV on the run-26 Stage 2 candidate, in the
+generated AST semantic encoder). The argument now goes through
+rt_unwrap_or_self (what `if val` uses) when its optional payload is the
+declared record; a parameter declared `T?` keeps the box.
+Bug: doc/08_tracking/bug/optional_struct_payload_narrowing_native_2026_11_13.md
+Native end-to-end twin: test/01_unit/compiler/codegen/native_optional_record_argument_unwrap_spec.spl
+"""
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+fn lower_module_json(src: text) -> Dict<text, text>:
+    val module = parse_full_frontend(src, "opt_arg.spl", "opt_arg.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("opt_arg.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var out: Dict<text, text> = {}
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.byte_len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    out
+
+fn count_of(hay: text, needle: text) -> i64:
+    var n = 0
+    var i = 0
+    while i + needle.byte_len() <= hay.byte_len():
+        if hay.substring(i, i + needle.byte_len()) == needle:
+            n = n + 1
+            i = i + needle.byte_len()
+        else:
+            i = i + 1
+    n
+
+val SRC = (
+    "struct Sp:\n    a: i64\n\n" +
+    "struct E:\n    span: Sp\n    extras: [i64] = []\n\n" +
+    "struct F:\n    k: i64\n\n" +
+    "enum TK:\n    Named(text)\n    Arr(text, E?)\n\n" +
+    "class Enc:\n    base: i64\n    fn score(node: E) -> i64:\n        self.base + node.extras.len()\n\n" +
+    "fn enc(node: E) -> i64:\n    node.extras.len()\n\n" +
+    "fn keep(node: E?) -> i64:\n    if node == nil:\n        return 0\n    1\n\n" +
+    "fn other(f: F) -> i64:\n    f.k\n\n" +
+    "fn payload_arg(t: TK) -> i64:\n    match t:\n        case Named(_): return -2\n        case Arr(_, sz):\n            if sz == nil:\n                return -1\n            return enc(sz)\n    -3\n\n" +
+    "fn method_arg(e: Enc, sz: E?) -> i64:\n    if sz == nil:\n        return -1\n    e.score(sz)\n\n" +
+    "fn param_arg(sz: E?) -> i64:\n    if sz == nil:\n        return -1\n    enc(sz)\n\n" +
+    "fn optional_param(sz: E?) -> i64:\n    keep(sz)\n\n" +
+    "fn plain_arg(e: E, f: F) -> i64:\n    enc(e) + other(f)\n\n" +
+    "fn other_record(sz: E?) -> i64:\n    if sz == nil:\n        return -1\n    other(sz)\n"
+)
+
+describe "a nil-checked T? record passed as a declared T argument":
+    it "unwraps the Option box at free-function and method call arguments":
+        val fns = lower_module_json(SRC)
+        for name in ["payload_arg", "method_arg", "param_arg"]:
+            val j = fns[name] ?? ""
+            expect(j.byte_len() > 0).to_equal(true)
+            expect(count_of(j, "rt_unwrap_or_self") >= 1).to_equal(true)
+
+    it "keeps the box for a T? parameter and leaves plain records alone":
+        val fns = lower_module_json(SRC)
+        val keep_box = fns["optional_param"] ?? ""
+        expect(keep_box.byte_len() > 0).to_equal(true)
+        expect(count_of(keep_box, "rt_unwrap_or_self")).to_equal(0)
+        val plain = fns["plain_arg"] ?? ""
+        expect(plain.byte_len() > 0).to_equal(true)
+        expect(count_of(plain, "rt_unwrap_or_self")).to_equal(0)
+
+    it "keeps the box when the optional payload is a different record than the parameter":
+        # Defensive guard: lowering only, the type checker owns rejecting this
+        # program. A record of another symbol must never be reinterpreted.
+        val fns = lower_module_json(SRC)
+        val mismatched = fns["other_record"] ?? ""
+        expect(mismatched.byte_len() > 0).to_equal(true)
+        expect(count_of(mismatched, "rt_unwrap_or_self")).to_equal(0)

@@ -1,0 +1,419 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, mir, generics
+#
+# Regression suite for doc/08_tracking/bug/native_erased_generic_optional_return_2026-11-15.md
+# (items 2 & 3) and unannotated Future.from_value(task()) / match fut.poll()
+# lowering under cross-module HIR/MIR bootstrap lowering.
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use std.io_runtime.{env_set}
+
+fn lower_two_module_ir(tag: text, lib_src: text, main_src: text, bootstrap: bool) -> (text, [text]):
+    val lib_mod = "lib.{tag}"
+    val main_mod = "app.{tag}"
+    val lib_path = "lib/{tag}.spl"
+    val main_path = "app/{tag}.spl"
+    val lib_ast = parse_full_frontend(lib_src, lib_path, lib_mod, Logger(level: 0))
+    val main_ast = parse_full_frontend(main_src, main_path, main_mod, Logger(level: 0))
+    var modules: Dict<text, Module> = {}
+    modules[lib_mod] = lib_ast
+    modules[main_mod] = main_ast
+    val sources = [
+        SourceFile(path: lib_path, content: lib_src, module_name: lib_mod),
+        SourceFile(path: main_path, content: main_src, module_name: main_mod)
+    ]
+    var errs: [text] = []
+    val surfaces = match module_surfaces_from_modules(modules, sources):
+        case Ok(s): s
+        case Err(msg):
+            errs = errs.push("SURF: " + msg)
+            return ("", errs)
+    if bootstrap:
+        env_set("SIMPLE_BOOTSTRAP", "1")
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+    var lib_hl = hirlowering_for_module(lib_mod, surfaces)
+    var main_hl = hirlowering_for_module(main_mod, surfaces)
+    val lib_hir = lib_hl.lower_module(lib_ast)
+    val main_hir = main_hl.lower_module(main_ast)
+    if bootstrap:
+        env_set("SIMPLE_BOOTSTRAP", "")
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "")
+    for e in lib_hl.errors:
+        errs = errs.push("LHIR: " + e.message)
+    for e in main_hl.errors:
+        errs = errs.push("MHIR: " + e.message)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods[lib_mod] = lib_hir
+    prescan_mods[main_mod] = main_hir
+    var ml = MirLowering.new_for_target(main_hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    ml.trait_impl_closure_complete = true
+    ml.prescan_module_struct_names(prescan_mods, lib_mod)
+    ml.prescan_module_struct_names(prescan_mods, main_mod)
+    val mir = ml.lower_module(main_hir, [lib_hir, main_hir])
+    for e in ml.errors:
+        errs = errs.push("MIR: " + e.message)
+    val ir = MirToLlvm.create(main_mod, CodegenTarget.X86_64, nil).translate_module(mir).to_string()
+    (ir, errs)
+
+fn lower_single_module_ir(tag: text, src: text, bootstrap: bool) -> (text, [text]):
+    val mod_name = "one_{tag}"
+    val path = "{mod_name}.spl"
+    var errs: [text] = []
+    val parsed = parse_full_frontend(src, path, mod_name, Logger(level: 0))
+    if bootstrap:
+        env_set("SIMPLE_BOOTSTRAP", "1")
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+    var hl = HirLowering.with_filename(path)
+    val hir = hl.lower_module(parsed)
+    if bootstrap:
+        env_set("SIMPLE_BOOTSTRAP", "")
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "")
+    for e in hl.errors:
+        errs = errs.push("HIR: " + e.message)
+    var ml = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = ml.lower_module(hir)
+    for e in ml.errors:
+        errs = errs.push("MIR: " + e.message)
+    val ir = MirToLlvm.create(mod_name, CodegenTarget.X86_64, nil).translate_module(mir).to_string()
+    (ir, errs)
+
+fn extract_fn_body(ir: text, fn_name: text) -> [text]:
+    var out: [text] = []
+    var inside = false
+    for line in ir.split("\n"):
+        val l: text = line.trim()
+        if l.starts_with("define ") and (l.contains("." + fn_name + "(") or l.contains("@" + fn_name + "(")):
+            inside = true
+        if inside:
+            out = out.push(l)
+            if l == "}":
+                inside = false
+    out
+
+fn call_count(lines: [text], callee: text) -> i64:
+    var n = 0
+    for line in lines:
+        val l: text = line
+        if l.contains("call ") and l.contains("@" + callee + "("):
+            n = n + 1
+    n
+
+describe "unannotated Future.from_value(task()) / fut.poll() enum pattern ownership":
+    val fut_lib =
+        "pub enum Poll<T>:\n" +
+        "    Ready(T)\n" +
+        "    Pending\n" +
+        "pub class Future<T>:\n" +
+        "    poll_result: Poll<T>\n" +
+        "impl Future<T>:\n" +
+        "    pub static fn from_value(value: T) -> Future<T>:\n" +
+        "        Future(poll_result: Poll.Ready(value))\n" +
+        "    pub fn poll() -> Poll<T>:\n" +
+        "        self.poll_result\n"
+
+    it "lowers unannotated val fut = Future.from_value(task()) match without subject owner HIR error":
+        val main_src =
+            "use lib.fut_nolet.{{Future, Poll}}\n" +
+            "fn task() -> i64:\n" +
+            "    37\n" +
+            "fn exec_nolet() -> i64:\n" +
+            "    val fut = Future.from_value(task())\n" +
+            "    match fut.poll():\n" +
+            "        case Poll.Ready(v): v\n" +
+            "        case Poll.Pending: -1\n"
+        val (ir, errs) = lower_two_module_ir("fut_nolet", fut_lib, main_src, false)
+        expect(errs.join("\n")).to_equal("")
+        val body = extract_fn_body(ir, "exec_nolet").join("\n")
+        expect(body.contains("Future.from_value(")).to_equal(true)
+        expect(body.contains("Future.poll(")).to_equal(true)
+        expect(body.contains("rt_enum_payload(")).to_equal(true)
+
+    it "lowers chained match Future.from_value(task()).poll() without subject owner HIR error":
+        val main_src =
+            "use lib.fut_chain.{{Future, Poll}}\n" +
+            "fn task() -> i64:\n" +
+            "    42\n" +
+            "fn exec_chain() -> i64:\n" +
+            "    match Future.from_value(task()).poll():\n" +
+            "        case Poll.Ready(v): v\n" +
+            "        case Poll.Pending: -1\n"
+        val (ir, errs) = lower_two_module_ir("fut_chain", fut_lib, main_src, false)
+        expect(errs.join("\n")).to_equal("")
+        val body = extract_fn_body(ir, "exec_chain").join("\n")
+        expect(body.contains("Future.from_value(")).to_equal(true)
+        expect(body.contains("Future.poll(")).to_equal(true)
+
+    it "lowers unannotated val r = match ... / val sub = match r.subscribe(...) / TaskPollResult.Ready(outcome)":
+        val poll_lib =
+            "pub struct RingGen:\n" +
+            "    value: u64\n" +
+            "pub struct RingTok:\n" +
+            "    ring_id: u64\n" +
+            "    generation: RingGen\n" +
+            "pub enum PollErr:\n" +
+            "    InvalidReference\n" +
+            "pub enum TaskPollResult<T>:\n" +
+            "    Ready(T)\n" +
+            "    Pending(RingTok)\n" +
+            "pub struct SubHandle:\n" +
+            "    id: i64\n" +
+            "impl SubHandle:\n" +
+            "    pub fn poll() -> TaskPollResult<Result<i64, PollErr>>:\n" +
+            "        TaskPollResult.Pending(RingTok(ring_id: 1u64, generation: RingGen(value: 2u64)))\n" +
+            "pub struct RefHandle:\n" +
+            "    id: i64\n" +
+            "impl RefHandle:\n" +
+            "    pub fn subscribe(tok: RingTok) -> Result<SubHandle, PollErr>:\n" +
+            "        Ok(SubHandle(id: 1))\n" +
+            "pub class MapStore:\n" +
+            "    id: i64\n" +
+            "    pub fn request(k: i64) -> Result<RefHandle, i64>:\n" +
+            "        Ok(RefHandle(id: k))\n"
+        val poll_main =
+            "use lib.taskpoll.{{RingGen, RingTok, PollErr, TaskPollResult, SubHandle, RefHandle, MapStore}}\n" +
+            "fn run_poll(m: MapStore, tok: RingTok) -> i64:\n" +
+            "    val r = match m.request(0):\n" +
+            "        case Ok(v): v\n" +
+            "        case Err(_): return 1\n" +
+            "    val sub = match r.subscribe(tok):\n" +
+            "        case Ok(v): v\n" +
+            "        case Err(_): return 2\n" +
+            "    match sub.poll():\n" +
+            "        case TaskPollResult.Ready(outcome):\n" +
+            "            match outcome:\n" +
+            "                case Ok(v): v\n" +
+            "                case Err(_): -1\n" +
+            "        case TaskPollResult.Pending(ptok):\n" +
+            "            if ptok.ring_id == tok.ring_id: 0 else: -2\n"
+        val (ir, errs) = lower_two_module_ir("taskpoll", poll_lib, poll_main, false)
+        expect(errs.join("\n")).to_equal("")
+        val body = extract_fn_body(ir, "run_poll").join("\n")
+        expect(body.contains("SubHandle.poll(")).to_equal(true)
+
+describe "native erased generic class optional/result/field roundtrip (items 2 and 3)":
+    it "preserves f64 IEEE-754 bits and raw i64 across Box<T>.read(), ??, !, and put(v) in bootstrap":
+        val box_lib =
+            "pub class Box<T>:\n" +
+            "    v: T?\n" +
+            "impl Box<T>:\n" +
+            "    pub fn read() -> T?:\n" +
+            "        self.v\n" +
+            "    pub fn none_read() -> T?:\n" +
+            "        None\n" +
+            "    pub me put(value: T):\n" +
+            "        self.v = Some(value)\n"
+        val box_main =
+            "use lib.box.{{Box}}\n" +
+            "fn probe_box_i64() -> i64:\n" +
+            "    val b: Box<i64> = Box(v: Some(41))\n" +
+            "    b.put(99)\n" +
+            "    val x = match b.read(): case Some(v): v; case None: -1\n" +
+            "    val q = b.none_read() ?? -2\n" +
+            "    x + q + b.read()!\n" +
+            "fn probe_box_f64() -> f64:\n" +
+            "    var f: Box<f64> = Box(v: Some(1.5))\n" +
+            "    f.put(2.5)\n" +
+            "    val fv = match f.read(): case Some(v): v; case None: -1.0\n" +
+            "    val fq = f.none_read() ?? -2.0\n" +
+            "    val fu = f.read()!\n" +
+            "    fv + fq + fu\n" +
+            "fn probe_box_text() -> text:\n" +
+            "    val s: Box<text> = Box(v: Some(\"hi\"))\n" +
+            "    s.read() ?? \"miss\"\n" +
+            "fn probe_box_bool() -> bool:\n" +
+            "    val b: Box<bool> = Box(v: Some(true))\n" +
+            "    b.put(false)\n" +
+            "    b.read() ?? true\n"
+        val (ir, errs) = lower_two_module_ir("box", box_lib, box_main, true)
+        expect(errs.join("\n")).to_equal("")
+        val body_i = extract_fn_body(ir, "probe_box_i64")
+        expect(call_count(body_i, "rt_value_int_wide")).to_equal(0)
+        expect(call_count(body_i, "rt_value_as_int_wide")).to_equal(0)
+        val body_f = extract_fn_body(ir, "probe_box_f64")
+        val text_f = body_f.join("\n")
+        expect(call_count(body_f, "rt_value_int_wide")).to_equal(0)
+        expect(call_count(body_f, "rt_value_as_int_wide")).to_equal(0)
+        expect(text_f.contains("bitcast double")).to_equal(true)
+        expect(text_f.contains("bitcast i64")).to_equal(true)
+        expect(text_f.contains("fptosi")).to_equal(false)
+        expect(text_f.contains("sitofp")).to_equal(false)
+        val body_t = extract_fn_body(ir, "probe_box_text")
+        expect(call_count(body_t, "rt_value_as_int_wide")).to_equal(0)
+        val body_b = extract_fn_body(ir, "probe_box_bool")
+        expect(call_count(body_b, "rt_value_as_int_wide")).to_equal(0)
+
+    it "preserves f64 and i64 across G<T> Result<T, text> return and T param/field under bootstrap":
+        val g_lib =
+            "pub class G<T>:\n" +
+            "    v: T\n" +
+            "impl G<T>:\n" +
+            "    pub fn get() -> Result<T, text>:\n" +
+            "        Ok(self.v)\n" +
+            "    pub me set(x: T) -> Result<bool, text>:\n" +
+            "        self.v = x\n" +
+            "        Ok(true)\n"
+        val g_main =
+            "use lib.g.{{G}}\n" +
+            "fn probe_g_f64() -> f64:\n" +
+            "    var g: G<f64> = G(v: 1.5)\n" +
+            "    val _ok = g.set(2.5)\n" +
+            "    val a = match g.get(): case Ok(v): v; case Err(_): -1.0\n" +
+            "    val b = g.v\n" +
+            "    a + b\n"
+        val (ir, errs) = lower_two_module_ir("g", g_lib, g_main, true)
+        expect(errs.join("\n")).to_equal("")
+        val body = extract_fn_body(ir, "probe_g_f64")
+        val body_text = body.join("\n")
+        expect(call_count(body, "rt_value_int_wide")).to_equal(0)
+        expect(call_count(body, "rt_value_as_int_wide")).to_equal(0)
+        expect(body_text.contains("bitcast double")).to_equal(true)
+        expect(body_text.contains("bitcast i64")).to_equal(true)
+        expect(body_text.contains("fptosi")).to_equal(false)
+        expect(body_text.contains("sitofp")).to_equal(false)
+
+    it "keeps concrete Cell<f64> field writes (c.v = 3.5), set(x: T), get(), and c.v read bitcast-coherent":
+        val cell_lib =
+            "pub class Cell<T>:\n" +
+            "    v: T\n" +
+            "impl Cell<T>:\n" +
+            "    pub me set(x: T):\n" +
+            "        self.v = x\n" +
+            "    pub fn get() -> T:\n" +
+            "        self.v\n"
+        val cell_main =
+            "use lib.cell.{{Cell}}\n" +
+            "fn probe_cell_i64() -> i64:\n" +
+            "    var c: Cell<i64> = Cell(v: 8)\n" +
+            "    c.set(9)\n" +
+            "    c.v = 11\n" +
+            "    c.get() + c.v\n" +
+            "fn probe_cell_f64() -> f64:\n" +
+            "    var cf: Cell<f64> = Cell(v: 1.5)\n" +
+            "    cf.set(2.5)\n" +
+            "    cf.v = 3.5\n" +
+            "    cf.get() + cf.v\n"
+        val (ir, errs) = lower_two_module_ir("cell", cell_lib, cell_main, true)
+        expect(errs.join("\n")).to_equal("")
+        val body_i = extract_fn_body(ir, "probe_cell_i64")
+        expect(call_count(body_i, "rt_value_int_wide")).to_equal(0)
+        expect(call_count(body_i, "rt_value_as_int_wide")).to_equal(0)
+        val body_f = extract_fn_body(ir, "probe_cell_f64")
+        val text_f = body_f.join("\n")
+        expect(text_f.contains("bitcast double")).to_equal(true)
+        expect(text_f.contains("bitcast i64")).to_equal(true)
+        expect(text_f.contains("fptosi")).to_equal(false)
+        expect(text_f.contains("sitofp")).to_equal(false)
+
+    it "relocates provider SymbolIds in cross-module generic method Result and Poll returns":
+        val reloc_lib =
+            "pub struct PadA:\n" +
+            "    a: i64\n" +
+            "pub struct PadB:\n" +
+            "    b: i64\n" +
+            "pub enum PadE:\n" +
+            "    One(i64)\n" +
+            "    Two\n" +
+            "pub enum CustomErr:\n" +
+            "    Code(i64)\n" +
+            "    Missing\n" +
+            "pub enum CustomPoll<T>:\n" +
+            "    Ready(T)\n" +
+            "    Pending\n" +
+            "pub class RelocBox<T>:\n" +
+            "    item: T\n" +
+            "impl RelocBox<T>:\n" +
+            "    pub fn poll_val() -> CustomPoll<T>:\n" +
+            "        CustomPoll.Ready(self.item)\n" +
+            "    pub fn get_res() -> Result<T, CustomErr>:\n" +
+            "        Ok(self.item)\n"
+        val reloc_main =
+            "struct LocalOne:\n" +
+            "    x: i64\n" +
+            "enum DecoyPoll:\n" +
+            "    DecoyA(text)\n" +
+            "    DecoyB(bool)\n" +
+            "struct LocalTwo:\n" +
+            "    y: i64\n" +
+            "use lib.p1_reloc.{{RelocBox, CustomErr, CustomPoll}}\n" +
+            "fn probe_reloc_i64() -> i64:\n" +
+            "    val b: RelocBox<i64> = RelocBox(item: 42)\n" +
+            "    val p = b.poll_val()\n" +
+            "    val a = match p:\n" +
+            "        case CustomPoll.Ready(v): v\n" +
+            "        case CustomPoll.Pending: -1\n" +
+            "    val r = b.get_res()\n" +
+            "    val c = match r:\n" +
+            "        case Ok(v): v\n" +
+            "        case Err(e):\n" +
+            "            match e:\n" +
+            "                case CustomErr.Code(n): n\n" +
+            "                case CustomErr.Missing: -2\n" +
+            "    a + c\n" +
+            "fn probe_reloc_f64() -> f64:\n" +
+            "    val bf: RelocBox<f64> = RelocBox(item: 3.5)\n" +
+            "    val pf = bf.poll_val()\n" +
+            "    val af = match pf:\n" +
+            "        case CustomPoll.Ready(v): v\n" +
+            "        case CustomPoll.Pending: -1.0\n" +
+            "    val rf = bf.get_res()\n" +
+            "    val cf = match rf:\n" +
+            "        case Ok(v): v\n" +
+            "        case Err(_): -2.0\n" +
+            "    af + cf\n"
+        val (ir, errs) = lower_two_module_ir("p1_reloc", reloc_lib, reloc_main, true)
+        expect(errs.join("\n")).to_equal("")
+        val body_i = extract_fn_body(ir, "probe_reloc_i64")
+        expect(call_count(body_i, "rt_value_as_int_wide")).to_equal(0)
+        expect(body_i.join("\n").contains("rt_enum_payload(")).to_equal(true)
+        val body_f = extract_fn_body(ir, "probe_reloc_f64")
+        expect(call_count(body_f, "rt_value_as_int_wide")).to_equal(0)
+        expect(body_f.join("\n").contains("fptosi")).to_equal(false)
+        expect(body_f.join("\n").contains("sitofp")).to_equal(false)
+
+    it "does not shift static fn args past param 0 when trailing default param is omitted":
+        val factory_lib =
+            "pub enum FactoryPoll<T>:\n" +
+            "    Done(T)\n" +
+            "    Empty\n" +
+            "pub class DefaultBox<T>:\n" +
+            "    res: FactoryPoll<T>\n" +
+            "impl DefaultBox<T>:\n" +
+            "    pub static fn make(v: T, tag: i64 = 0) -> DefaultBox<T>:\n" +
+            "        DefaultBox(res: FactoryPoll.Done(v))\n" +
+            "    pub fn poll() -> FactoryPoll<T>:\n" +
+            "        self.res\n"
+        val factory_main =
+            "use lib.factory_def.{{DefaultBox, FactoryPoll}}\n" +
+            "fn probe_static_default() -> i64:\n" +
+            "    val d = DefaultBox.make(42)\n" +
+            "    match d.poll():\n" +
+            "        case FactoryPoll.Done(v): v\n" +
+            "        case FactoryPoll.Empty: -1\n" +
+            "fn probe_static_default_f64() -> f64:\n" +
+            "    val df = DefaultBox.make(3.5)\n" +
+            "    match df.poll():\n" +
+            "        case FactoryPoll.Done(v): v\n" +
+            "        case FactoryPoll.Empty: -1.0\n"
+        val (ir, errs) = lower_two_module_ir("factory_def", factory_lib, factory_main, true)
+        expect(errs.join("\n")).to_equal("")
+        val body_i = extract_fn_body(ir, "probe_static_default")
+        expect(call_count(body_i, "rt_value_as_int_wide")).to_equal(0)
+        expect(body_i.join("\n").contains("rt_enum_payload(")).to_equal(true)
+        val body_f = extract_fn_body(ir, "probe_static_default_f64")
+        expect(call_count(body_f, "rt_value_as_int_wide")).to_equal(0)
+        expect(body_f.join("\n").contains("fptosi")).to_equal(false)
+        expect(body_f.join("\n").contains("sitofp")).to_equal(false)

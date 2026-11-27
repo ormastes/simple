@@ -1,0 +1,75 @@
+# Repro/pin for bug lexer_imported_instance_methods_2026_10_06: the
+# imported-instance-method lookup (record_instance_method_scalar_raw /
+# binding_declared_record_owner_scalar_raw) reads one optional type and two
+# optional module-name fields. Each must answer deterministically for None and
+# Some, including an imported owner from another module (core lexer shape).
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, HirSymbol, SymbolId, SymbolKind, SymbolTable, ScopeId, MethodResolution}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_types.{MirType, MirSignature}
+use compiler.mir.mir_instructions.{MirConstValue}
+use compiler.mir.mir_serialization.{serialize_mir_function}
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
+
+fn opt_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn opt_symbol(id: i64, name: text, kind: SymbolKind, owner: text?, type_: HirType?) -> HirSymbol:
+    HirSymbol(id: SymbolId(id: id), name: name, kind: kind, type_: type_,
+        scope: ScopeId(id: 0), span: Span.empty(), visibility: Visibility.Public,
+        is_public: true, is_mutable: false, defining_module: owner)
+
+fn lexer_table(owner_module: text?, method_module: text?, method_name: text) -> SymbolTable:
+    var symbols = SymbolTable.new()
+    val receiver = opt_type(HirTypeKind.Named(SymbolId(id: 10), []))
+    symbols.register_preserved_symbol(opt_symbol(10, "CoreLexer", SymbolKind.Struct, owner_module, None))
+    symbols.register_preserved_symbol(opt_symbol(20, "lx", SymbolKind.Variable, None, Some(receiver)))
+    symbols.register_preserved_symbol(opt_symbol(21, "untyped", SymbolKind.Variable, None, None))
+    symbols.register_preserved_symbol(opt_symbol(22, "num", SymbolKind.Parameter, None, Some(opt_type(HirTypeKind.Int(64, true)))))
+    val signature = opt_type(HirTypeKind.Function([receiver], opt_type(HirTypeKind.Int(64, true)), []))
+    symbols.register_preserved_symbol(opt_symbol(30, method_name, SymbolKind.Method, method_module, Some(signature)))
+    symbols
+
+fn lower_next_token(symbols: SymbolTable) -> (i64, text):
+    var lowering = MirLowering.new(symbols)
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 90), "probe", MirSignature(params: [], return_type: MirType.i64(), is_variadic: false), Span.empty())
+    val local = builder.new_temp(MirType.i64())
+    builder.emit_const(local, MirConstValue.Int(0), MirType.i64())
+    lowering.builder = builder
+    lowering.bind_local(20, local)
+    lowering.remember_local_hir_type(local.id, opt_type(HirTypeKind.Named(SymbolId(id: 10), [])), 0, 0)
+    val receiver = HirExpr(kind: HirExprKind.Var(SymbolId(id: 20)), has_type_: false,
+        type_: opt_type(HirTypeKind.Unit), span: Span.empty())
+    val _result = lowering.lower_method_call(receiver, "next_token", [], MethodResolution.Unresolved, "", -1)
+    var finished = lowering.builder
+    val function = finished.end_function()
+    (lowering.errors.len(), serialize_mir_function(function))
+
+describe "imported instance method lookup with optional fields":
+    it "binding owner: type_ None answers -1, Some(Named) answers the owner, Some(Int) answers -1":
+        val symbols = lexer_table(Some("src/lexer_struct.spl"), Some("src/lexer_struct.spl"), "lexer_struct.CoreLexer::next_token")
+        expect(symbols.binding_declared_record_owner_scalar_raw(21)).to_equal(-1)
+        expect(symbols.binding_declared_record_owner_scalar_raw(20)).to_equal(10)
+        expect(symbols.binding_declared_record_owner_scalar_raw(22)).to_equal(-1)
+        expect(symbols.binding_declared_record_owner_scalar_raw(99999)).to_equal(-1)
+
+    it "imported owner Some + method module Some resolves and lowers to the exact method":
+        val symbols = lexer_table(Some("src/lexer_struct.spl"), Some("src/lexer_struct.spl"), "lexer_struct.CoreLexer::next_token")
+        expect(symbols.record_instance_method_scalar_raw(10, "next_token")).to_equal(30)
+        val (errors, mir) = lower_next_token(symbols)
+        expect(errors).to_equal(0)
+        expect(mir).to_contain("CoreLexer")
+
+    it "owner None + method None resolves the ownerless method":
+        val symbols = lexer_table(None, None, "CoreLexer::next_token")
+        expect(symbols.record_instance_method_scalar_raw(10, "next_token")).to_equal(30)
+
+    it "a module-name mismatch between owner and method (Some vs None) answers -1":
+        val owned = lexer_table(Some("src/lexer_struct.spl"), None, "lexer_struct.CoreLexer::next_token")
+        expect(owned.record_instance_method_scalar_raw(10, "next_token")).to_equal(-1)
+        val ownerless = lexer_table(None, Some("src/lexer_struct.spl"), "CoreLexer::next_token")
+        expect(ownerless.record_instance_method_scalar_raw(10, "next_token")).to_equal(-1)

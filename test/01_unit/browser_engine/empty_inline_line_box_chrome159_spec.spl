@@ -1,0 +1,58 @@
+"""
+## Purpose and audience
+Purpose: Pin that an inline element with no content does not open a line box
+(CSS 2.1 9.4.2), while non-zero inline padding/border does.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159 headless, getBoundingClientRect(), body{margin:0;
+font:16px Liberation Sans}, .w{width:400px}, 2026-11-19): empty span 0,
+whitespace-only span 0, padding-left:4px span 18, border-left:1px span 18,
+<b></b><i></i> 0, text span 18; empty div between two 20px-margin paragraphs
+self-collapses so y's top is 20px below x's bottom (56+18+20 = 94 vs x top 56).
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-EMPTY-INLINE-001 - empty inline creates no line box.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val PRE: text = "<html><head><style>body{{margin:0;font:16px Liberation Sans}} .w{{width:400px}}</style></head><body>"
+val POST: text = "</body></html>"
+val PAGE_A: text = PRE + "<div class=w id=a><span></span></div>" + POST
+val PAGE_B: text = PRE + "<div class=w id=b><span> </span></div>" + POST
+val PAGE_C: text = PRE + "<div class=w id=c><span style=\"padding-left:4px\"></span></div>" + POST
+val PAGE_D: text = PRE + "<div class=w id=d><span style=\"border-left:1px solid\"></span></div>" + POST
+val PAGE_E: text = PRE + "<div class=w id=e><b></b><i></i></div>" + POST
+val PAGE_F: text = PRE + "<div class=w id=f style=\"margin:0\"><p id=p1 style=\"margin:20px 0\">x</p><div id=g><span></span></div><p id=p2 style=\"margin:20px 0\">y</p></div>" + POST
+val PAGE_H: text = PRE + "<div class=w id=h><span>x</span></div>" + POST
+
+fn _g(page: text, id: text, field: text) -> i32:
+    simple_web_layout_debug_layout_by_id(page, 900, 2000, id, field).to_i32()
+
+describe "empty inline line box (Chrome 159)":
+    it "empty span makes a 0-height block":
+        step("Chrome 159: a h=0")
+        expect(_g(PAGE_A, "a", "h")).to_equal(0)
+    it "whitespace-only span makes a 0-height block":
+        step("Chrome 159: b h=0")
+        expect(_g(PAGE_B, "b", "h")).to_equal(0)
+    it "span with inline padding opens a line":
+        step("Chrome 159: c h=18")
+        expect(_g(PAGE_C, "c", "h")).to_equal(18)
+    it "span with inline border opens a line":
+        step("Chrome 159: d h=18")
+        expect(_g(PAGE_D, "d", "h")).to_equal(18)
+    it "several empty inlines make a 0-height block":
+        step("Chrome 159: e h=0")
+        expect(_g(PAGE_E, "e", "h")).to_equal(0)
+    it "empty div self-collapses so margins collapse through it":
+        step("Chrome 159: g h=0, p2 y - p1 y = 38 (18 line + 20 margin)")
+        expect(_g(PAGE_F, "g", "h")).to_equal(0)
+        expect(_g(PAGE_F, "p2", "y") - _g(PAGE_F, "p1", "y")).to_equal(38)
+    it "control: span with text is one line":
+        step("Chrome 159: h h=18")
+        expect(_g(PAGE_H, "h", "h")).to_equal(18)

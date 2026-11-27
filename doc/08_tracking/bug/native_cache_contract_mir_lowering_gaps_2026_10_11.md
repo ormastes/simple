@@ -1,6 +1,6 @@
 # Cache codec and TLD MIR lowering gaps
 
-Status: OPEN. Canonical ID: `native_cache_contract_mir_lowering_gaps_2026_10_11`. GitHub: https://github.com/ormastes/simple/issues/3054.
+Status: FIX-IMPLEMENTED-VERIFICATION-PENDING (2026-11-03; workarounds kept). Canonical ID: `native_cache_contract_mir_lowering_gaps_2026_10_11`. GitHub: https://github.com/ormastes/simple/issues/3054.
 
 C36 a9b actual canonical-cache-codec and physical-tld entries reach MIR then fail on Array.copy receiver, wrongly retained record operator owner and section iteration collection owner. Ranges are separately tracked by #3014; no root compiler repair proved.
 
@@ -13,3 +13,26 @@ Evidence: `/home/yoon/dev/simple-bootstrap-c06-20261011/build/native_probe/phase
 Removal: Repair native array copy dispatch and aggregate-field scalar/iterator owner propagation; restore original copy/field comparisons/section loops only after both actual entries pass HIR/MIR/object and byte/bounds/sorting/order regressions execute. Keep OPEN; no automatic retirement/admission. For #3014, original range forms and malformed/UTF8/page/section bounds also need qualified native controls. Neither issue is closed by this workaround.
 
 Regressions: `test/01_unit/compiler/cache/cache_contract_codec_spec.spl` and `test/01_unit/compiler/cache/package_init_tld_physical_binding_v1_spec.spl`; unexecuted.
+
+## 2026-11-03 triage (lane-bugs-a)
+
+DEFERRED. Blocker: the failing evidence is a native HIR/MIR run of the canonical-cache-codec and physical-tld entries on a Linux self-hosted producer (artifacts under /home/yoon/..., not present here); this Windows host has only the Rust seed, which cannot reproduce the MIR owner failures. Interpreter run: cache_contract_codec_spec 6/6 pass; package_init_tld_physical_binding_v1_spec 4/8 pass (4 failures are the #3054 original-form owner qualification examples). Next step: run the two entries through a deployed stage3 native-build and bisect the Array.copy receiver / record operator owner in 50.mir.
+
+## 2026-11-03 triage (stage3-free)
+
+- Array.copy receiver: root cause found in `.copy()/.clone()` arm (method_calls_literals.spl): `local_is_runtime_array` does not see a borrowed `Ref(Array)` parameter, so `values.copy()` fell through to the unresolved-method failure. Fix: `borrowed_runtime_array_inner_mir_type` (expr_dispatch.spl) lets the copy arm treat `Ref(Array|Slice)` as the same runtime handle. Narrow: other receivers unchanged; previously a hard failure.
+- Record operator owner and section iteration owner: no retained repro (evidence was under /home/yoon) and no native Simple MIR runnable in the seed lane; NOT fixed here. Workarounds kept.
+
+Stage3 verify: revert the two `_copy_*_entries_v1` workarounds in canonical_cache_codec_v1.spl to `values.copy()` and run `test/01_unit/compiler/cache/cache_contract_codec_spec.spl` on stage3.
+
+## 2026-11-07 m-misc: seed-interpreter root causes (partial)
+
+Measured with a seed built from release/1.0.0 at cf999844c18 plus this fix (Windows, interpreter mode):
+- The `package_init_tld_physical_binding_v1_spec` failures (4/8) came from the seed interpreter, not the codec:
+  (1) `u8 << 8` stayed u8 (fixed upstream in 8def57c3b55, but the deployed seed predates it);
+  (2) inside an imported module, `f(r.read_u8())` evaluated the `me` method argument twice, so the TLD1 role
+      byte was read from the wrong offset (`unknown_tld_role`). That is fixed in current source; the Nov 7 10:34 seed still has it;
+  (3) `i64 | u8` / `i64 ^ u8` narrowed to u8 (`300 | 80` came out as 124). Fixed in this PR (`uint_arith_wrap_width`).
+- Result: package_init_tld 8/8 PASS. semantic_scope_authority 3/10 (now fails with `PinOrClosureMismatch`, so the decode-level
+  failure is gone). cache_contract_codec_spec still runs past 600 s. Still OPEN.
+- Regression spec: test/01_unit/compiler/95.interp/mixed_width_bitwise_and_method_arg_spec.spl (3/6 on the old seed, 6/6 fixed).

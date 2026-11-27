@@ -1,0 +1,123 @@
+# Restrictive DATA projection only. No process creation, proof constructor or
+# durable admission. Actual epoch custody + private upper admission are required.
+use std.common.contracts.container.linux_fresh_epoch_v1.*
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, GroupProcessStreamRequestV2,
+    group_process_child_argv_digest_v2, group_process_stream_template_encode_v3}
+use std.common.build_manager.group_process_stream_profile_v3.{GroupProcessStreamProfileV3, GroupProcessBrokerBudgetV3,
+    group_process_cpu_quota_v3}
+use std.nogc_sync_mut.io.env_ops.env_vars
+
+pub struct LinuxFreshEpochBrokerDataV1:
+    device: i64
+    inode: i64
+    generation: i64
+    cpu_quota_us: i64
+    cpu_period_us: i64
+    memory_bytes: i64
+
+pub fn linux_fresh_epoch_broker_environment_v1(profile: LinuxFreshEpochProfileV1, pid: i64) -> Result<(), text>:
+    # The native broker inherits environ. Verify the actual full environment;
+    # an empty child environment is not broker sanitization. Concurrent env
+    # mutation by trusted Host code is outside this first synchronous profile.
+    val observed = env_vars()
+    if observed.is_none(): return Err("fresh-epoch-broker-environment-observation-unavailable")
+    val entries = observed.unwrap()
+    if entries.len() > 32: return Err("fresh-epoch-broker-environment-bound")
+    var seen: [text] = []
+    for pair in entries:
+        if seen.contains(pair.0): return Err("fresh-epoch-broker-environment-duplicate")
+        seen.push(pair.0)
+        val key = pair.0
+        val value = pair.1
+        var allowed = false
+        if key == "PATH": allowed = value == "/usr/bin:/bin"
+        elif key == "HOME": allowed = value == "/nonexistent"
+        elif key == "SHELL": allowed = value == "/usr/sbin/nologin" or value == "/sbin/nologin"
+        elif key == "USER" or key == "LOGNAME": allowed = value == profile.text_v1("serviceName")?
+        elif key == "LANG" or key == "LC_ALL": allowed = value == "C"
+        elif key == "XDG_RUNTIME_DIR": allowed = value == profile.text_v1("runRoot")?
+        elif key == "SYSTEMD_EXEC_PID": allowed = value == str(pid)
+        elif key == "INVOCATION_ID":
+            allowed = value.byte_len() == 32
+            for byte in value.bytes():
+                if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)): allowed = false
+        elif key == "JOURNAL_STREAM":
+            allowed = value.byte_len() > 0 and value.byte_len() <= 64
+            for byte in value.bytes():
+                if not ((byte >= 48 and byte <= 57) or byte == 58): allowed = false
+        if not allowed: return Err("fresh-epoch-inherited-broker-environment-unsupported:" + key)
+    Ok(())
+
+pub fn linux_fresh_epoch_project_launch_v1(profile: LinuxFreshEpochProfileV1,
+        broker: LinuxFreshEpochBrokerDataV1, template: GroupProcessStreamLaunchV2) -> Result<GroupProcessStreamLaunchV2, text>:
+    linux_fresh_epoch_profile_validate_v1(profile)?
+    if template.profile_v3.is_none(): return Err("fresh-epoch-launch-profile-required")
+    val requested = template.profile_v3.unwrap()
+    val usable_cpu = profile.number_v1("partitionCpuMillis")? - profile.number_v1("reservedCpuMillis")?
+    val usable_memory = profile.number_v1("partitionMemoryBytes")? - profile.number_v1("reservedMemoryBytes")?
+    if (requested.helper_cpu.cpu_millis <= 0 or requested.helper_cpu.cpu_millis > usable_cpu or
+            template.memory_limit_bytes <= 0 or template.memory_limit_bytes > usable_memory):
+        return Err("fresh-epoch-launch-budget")
+    val run = profile.text_v1("runRoot")?
+    if not linux_fresh_epoch_path_v1(template.root) or not template.root.starts_with(run + "/launch-"):
+        return Err("fresh-epoch-launch-private-root")
+    if template.root.substring(run.byte_len() + 1, template.root.byte_len()).contains("/"):
+        return Err("fresh-epoch-launch-root-component")
+    val prefix = ["--remote=false", "--cgroup-manager=cgroupfs", "--root", profile.text_v1("graphRoot")?,
+        "--runroot", run, "--storage-driver", "vfs", "--tmpdir", run + "/tmp"]
+    var operands = template.request.args
+    if operands.len() >= prefix.len():
+        var prefixed = true
+        for at in 0..prefix.len():
+            if operands[at] != prefix[at]: prefixed = false
+        if prefixed: operands = operands[prefix.len():operands.len()]
+    if operands.len() == 0 or operands.len() > 64: return Err("fresh-epoch-launch-argv-bound")
+    val create_flags = ["--cgroup-parent=" + profile.text_v1("delegatedCgroup")?, "--cgroups=enabled", "--cap-drop=ALL",
+        "--security-opt=no-new-privileges", "--network=none", "--cpu-period=100000",
+        "--cpu-quota=" + str(requested.helper_cpu.cpu_millis * 100), "--memory=" + str(template.memory_limit_bytes),
+        "--memory-swap=" + str(template.memory_limit_bytes)]
+    if operands[0] == "create" and operands.len() >= create_flags.len() + 1:
+        var normalized = true
+        for at in 0..create_flags.len():
+            if operands[at + 1] != create_flags[at]: normalized = false
+        if normalized: operands = ["create"] + operands[create_flags.len() + 1:operands.len()]
+    if not ["version", "info", "pull", "create", "start", "exec", "inspect", "stop", "rm", "images"].contains(operands[0]):
+        return Err("fresh-epoch-launch-operation-unsupported")
+    for arg in operands:
+        if arg.byte_len() > 4096 or arg.contains("\0"): return Err("fresh-epoch-launch-argument")
+        for flag in ["--remote", "--connection", "--url", "--identity", "--root", "--runroot", "--storage-driver", "--storage-opt",
+                "--tmpdir", "--cgroup-manager", "--cgroup-parent", "--cgroups", "--privileged", "--device", "--volume", "--mount",
+                "--volumes-from", "--cap-add", "--cap-drop", "--security-opt", "--network", "--net", "--pid", "--userns", "--env-host",
+                "--cpu-period", "--cpu-quota", "--cpus", "--memory", "--memory-swap", "--cpuset-cpus", "--cpuset-mems"]:
+            if arg == flag or arg.starts_with(flag + "="): return Err("fresh-epoch-launch-caller-security-override")
+        if arg.starts_with("-v"): return Err("fresh-epoch-launch-host-mount-unavailable")
+        if arg.starts_with("-"):
+            # A small positive option set also closes alternative module,
+            # runtime, hook, conmon and global-storage configuration routes.
+            val option = arg.split("=")[0]
+            if not ["--format", "--name", "--entrypoint", "--time", "--force", "--all", "--quiet", "--no-trunc",
+                    "--type", "--filter", "--interactive", "--tty", "--latest", "-f", "-a", "-q", "-i", "-t"].contains(option):
+                return Err("fresh-epoch-launch-option-unsupported")
+    var args = prefix
+    args.push(operands[0])
+    if operands[0] == "create":
+        args = args + create_flags
+    for at in 1..operands.len(): args.push(operands[at])
+    if args.len() > 64: return Err("fresh-epoch-launch-projected-argv-bound")
+    val provider = profile.text_v1("providerExecutable")?
+    val request = GroupProcessStreamRequestV2(program: provider,
+        producer_digest: profile.text_v1("providerExecutableSha256")?, args: args, environment: [], directory: run, inputs: [],
+        timeout_ms: template.request.timeout_ms, broker_program: profile.text_v1("brokerExecutable")?,
+        broker_digest: profile.text_v1("brokerExecutableSha256")?, child_argv_digest: group_process_child_argv_digest_v2(provider, args),
+        launch_deadline_unix_ms: template.request.launch_deadline_unix_ms)
+    val budget = GroupProcessBrokerBudgetV3(cgroup_path: "/sys/fs/cgroup" + profile.text_v1("supervisorCgroup")?, device: broker.device,
+        inode: broker.inode, generation: broker.generation, policy_digest: profile.text_v1("machinePolicyDigest")?,
+        cpu_quota_us: broker.cpu_quota_us, cpu_period_us: broker.cpu_period_us,
+        reserved_cpu_millis: profile.number_v1("reservedCpuMillis")?, memory_limit_bytes: broker.memory_bytes,
+        reserved_memory_bytes: profile.number_v1("reservedMemoryBytes")?)
+    Ok(GroupProcessStreamLaunchV2(root: template.root, worker_id: template.worker_id, generation: template.generation,
+        snapshot_digest: template.snapshot_digest, cache_identity: template.cache_identity, memory_limit_bytes: template.memory_limit_bytes,
+        request: request, delegated_cgroup_path: "/sys/fs/cgroup" + profile.text_v1("delegatedCgroup")?, memory_policy: "enforce",
+        transport_generation: template.transport_generation, profile_v3: Some(GroupProcessStreamProfileV3(
+            helper_cpu: group_process_cpu_quota_v3(requested.helper_cpu.cpu_millis)?, broker: budget,
+            child_image_mode: "trusted-local-admin-image-fd-v1"))))

@@ -1,0 +1,23 @@
+# Negative-only actual process fixture. Manifest gdb role MUST pin nonreader.c's
+# compiled shim, never a claimed real GDB. Server role pins this exact fixture.
+use app.io.mod.{time_now_monotonic_ms}
+use app.mcpgdb.native_runners_v1.{mcpgdb_bundle_prepare_v1}
+use app.mcpgdb.resident_mi_v1.{resident_gdb_create_v1, resident_gdb_index_v1, resident_gdb_command_v1, resident_gdb_retained_v1}
+
+fn main() -> i64:
+    mcpgdb_bundle_prepare_v1().unwrap()
+    val id = resident_gdb_create_v1("gdb", ".").unwrap()
+    val index = resident_gdb_index_v1(id).unwrap()
+    var command = ""
+    while command.len() < 65536:
+        command = command + "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    assert(command.len() == 65536)
+    val started = time_now_monotonic_ms()
+    match resident_gdb_command_v1(index, command, false):
+        Ok(_): assert(false)
+        Err(reason): assert(reason == "resident GDB MI stdin delivery deadline expired")
+    val elapsed = time_now_monotonic_ms() - started
+    assert(elapsed >= 0 and elapsed < 15000)
+    assert(not resident_gdb_retained_v1(index))
+    print "mcpgdb_full_stdin_deadline=PASS"
+    0

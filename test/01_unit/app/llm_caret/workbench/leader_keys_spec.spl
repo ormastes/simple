@@ -1,0 +1,88 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+
+"""
+Caret TUI workbench leader-key state machine (REQ-CARET-UI-004, CU-005).
+Pure (state, key) -> (state, action); Ctrl+G is the proposed default leader.
+"""
+
+use std.spec.*
+use app.llm_caret.workbench.leader_keys.{LeaderState, LeaderAction, LeaderOutcome, leader_step, new_leader_state, is_pending, LEADER_KEY}
+
+fn _press(keys: [text]) -> LeaderOutcome:
+    var st = new_leader_state()
+    var out = leader_step(st, keys[0])
+    var i = 1
+    while i < keys.len():
+        out = leader_step(out.state, keys[i])
+        i = i + 1
+    out
+
+describe "Caret TUI leader keys (CU-005)":
+    it "passes a plain key through in Idle and stays Idle":
+        # @req REQ-CARET-UI-004
+        step("Press 'x' with no leader pending")
+        val out = leader_step(new_leader_state(), "x")
+        expect(out.action).to_equal(LeaderAction.PassThrough)
+        expect(out.key).to_equal("x")
+        expect(is_pending(out.state)).to_equal(false)
+
+    it "passes Ctrl+B through unchanged so smux keeps its prefix":
+        # @req REQ-CARET-UI-004
+        val out = leader_step(new_leader_state(), "ctrl+b")
+        expect(out.action).to_equal(LeaderAction.PassThrough)
+        expect(out.key).to_equal("ctrl+b")
+
+    it "enters LeaderPending on the leader key and swallows it":
+        # @req REQ-CARET-UI-004
+        val out = leader_step(new_leader_state(), LEADER_KEY)
+        expect(out.action).to_equal(LeaderAction.AwaitingChord)
+        expect(is_pending(out.state)).to_equal(true)
+
+    it "maps each bound chord to its action and returns to Idle":
+        # @req REQ-CARET-UI-004
+        expect(_press([LEADER_KEY, "a"]).action).to_equal(LeaderAction.AgentNavigator)
+        expect(_press([LEADER_KEY, "n"]).action).to_equal(LeaderAction.NextAgent)
+        expect(_press([LEADER_KEY, "p"]).action).to_equal(LeaderAction.PrevAgent)
+        expect(_press([LEADER_KEY, "u"]).action).to_equal(LeaderAction.NextAttention)
+        expect(_press([LEADER_KEY, "m"]).action).to_equal(LeaderAction.ToggleComposerTerminal)
+        expect(_press([LEADER_KEY, "t"]).action).to_equal(LeaderAction.TraceView)
+        expect(_press([LEADER_KEY, "r"]).action).to_equal(LeaderAction.ReviewView)
+        expect(_press([LEADER_KEY, "f"]).action).to_equal(LeaderAction.FocusMode)
+        expect(_press([LEADER_KEY, "s"]).action).to_equal(LeaderAction.StatusInspector)
+        expect(_press([LEADER_KEY, "c"]).action).to_equal(LeaderAction.CreateAgent)
+        expect(_press([LEADER_KEY, "?"]).action).to_equal(LeaderAction.Help)
+        expect(is_pending(_press([LEADER_KEY, "a"]).state)).to_equal(false)
+
+    it "maps digits 1..9 to pinned slots":
+        # @req REQ-CARET-UI-004
+        val one = _press([LEADER_KEY, "1"])
+        expect(one.action).to_equal(LeaderAction.PinnedSlot)
+        expect(one.slot).to_equal(1)
+        expect(_press([LEADER_KEY, "9"]).slot).to_equal(9)
+        expect(_press([LEADER_KEY, "0"]).action).to_equal(LeaderAction.PassThroughChord)
+
+    it "returns an unknown chord as PassThroughChord (leader then key, distinct from Idle PassThrough)":
+        # @req REQ-CARET-UI-004
+        val out = _press([LEADER_KEY, "z"])
+        expect(out.action).to_equal(LeaderAction.PassThroughChord)
+        expect(out.key).to_equal("z")
+        expect(is_pending(out.state)).to_equal(false)
+        # Back in Idle; caller forwards leader then key, next key is ordinary input.
+        expect(leader_step(out.state, "q").action).to_equal(LeaderAction.PassThrough)
+
+    it "sends a literal leader to the CLI when the leader is pressed twice":
+        # @req REQ-CARET-UI-004
+        val out = _press([LEADER_KEY, LEADER_KEY])
+        expect(out.action).to_equal(LeaderAction.LiteralLeader)
+        expect(out.key).to_equal(LEADER_KEY)
+        expect(is_pending(out.state)).to_equal(false)
+
+    it "never yields PassThrough while a leader is pending":
+        # @req REQ-CARET-UI-004
+        val pending = leader_step(new_leader_state(), LEADER_KEY).state
+        val keys = ["a", "z", "ctrl+b", "esc", LEADER_KEY, "5", "?"]
+        var leaked = false
+        for k in keys:
+            if leader_step(pending, k).action == LeaderAction.PassThrough:
+                leaked = true
+        expect(leaked).to_equal(false)

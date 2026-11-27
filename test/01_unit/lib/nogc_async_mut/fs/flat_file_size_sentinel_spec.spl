@@ -1,0 +1,42 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# SPL-BOUND-001 (robust boundary census 2026-11-15): nogc_async_mut/fs/flat.spl
+# declared `rt_file_size -> usize?`, but the runtime reports failure as the -1
+# sentinel (the sync twin and io_runtime say `-> i64`). File.size must build
+# the Optional from the sentinel, exactly like nogc_sync_mut/fs/flat.spl.
+
+use std.spec
+use std.spec.step
+use std.nogc_async_mut.fs.flat.{File}
+use std.io_runtime.{file_write, file_delete, getpid}
+
+
+describe "nogc_async_mut fs flat File.size sentinel conversion":
+    # @manual scenario evidence
+
+    it "returns None for a missing file instead of a raw sentinel":
+        # @req REQ-SSPEC-UNIT
+        step("probe a path that does not exist")
+        val missing = File.size("/tmp/flat_file_size_missing_{getpid()}_nope")
+        expect(missing.?).to_equal(false)
+
+    it "returns Some(byte count) for an existing file":
+        # @req REQ-SSPEC-UNIT
+        val path = "/tmp/flat_file_size_spec_{getpid()}.txt"
+        step("write five bytes")
+        file_write(path, "hello")
+        val size = File.size(path) ?? 999
+        expect(size).to_equal(5)
+        file_delete(path)
+
+    it "keeps the async and sync rt_file_size extern signatures identical":
+        # @req REQ-SSPEC-UNIT
+        step("both twins declare the i64 sentinel ABI")
+        val decl = "extern fn rt_file_size(path: text) -> i64"
+        val async_src = rt_file_read_text("src/lib/nogc_async_mut/fs/flat.spl") ?? ""
+        val sync_src = rt_file_read_text("src/lib/nogc_sync_mut/fs/flat.spl") ?? ""
+        expect(async_src.contains(decl)).to_equal(true)
+        expect(sync_src.contains(decl)).to_equal(true)
+        expect(async_src.contains("rt_file_size(path: text) -> usize?")).to_equal(false)
+
+extern fn rt_file_read_text(path: text) -> text?

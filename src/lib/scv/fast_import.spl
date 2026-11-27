@@ -6,6 +6,8 @@ use std.common.string_core.{char_from_code}
 use std.scv.core.{scv_object_path, scv_chunk_path}
 use std.scv.integrity.{scv_current_tree_content}
 use std.scv.store.{scv_repo_exists, scv_read_workspace_commit, scv_workspace_parent_error, scv_commit_tree, scv_object_field, scv_create_parent_dir, scv_i64_bytes_to_u8, scv_write_text, scv_write_file_object_from_bytes, scv_write_tree_object, scv_write_commit, scv_write_commit_multi, scv_commit_parents, scv_write_tag_object, scv_write_operation, scv_current_op}
+use std.scv.file_buffer.{scv_file_buffer_read, scv_file_buffer_content_id}
+use std.io_runtime.{read_file_text_result}
 use std.scv.core.{scv_state_private}
 use std.scv.refs.{scv_tag_set, scv_tag_get, scv_tag_list, scv_tag_annotated_set, scv_tag_annotated_get, scv_tag_annotated_list, scv_bookmark_set}
 use std.scv.fast_import_format.{scv_git_ref_safe, scv_fast_import_path_safe, scv_fast_import_quote_path, scv_fast_import_split_command, scv_fast_import_bytes_line, scv_fast_import_next_line_pos, scv_fast_import_skip_data_payload, scv_fast_import_mark_seen, scv_fast_import_mark_ref_safe, scv_fast_import_commit_branch_error, scv_fast_import_parent_ref_error, scv_fast_import_reset_ref_error, scv_fast_import_tag_record_error, scv_fast_import_tag_ref_safe}
@@ -35,14 +37,19 @@ fn scv_fast_import_bytes_to_text(bytes: [u8]) -> text:
         i = i + 1
     result
 
-fn scv_fast_import_file_primary_bytes(root: text, file_id: text) -> [u8]:
+fn scv_fast_import_file_primary_bytes(root: text, file_id: text) -> Result<[u8], text>:
     val file_path = scv_object_path(root, "files", file_id)
     if not file_exists(file_path):
-        return []
-    val chunk = scv_object_field(file_read(file_path), "chunk")
+        return Err("ERROR missing file object: {file_id}\n")
+    val metadata = read_file_text_result(file_path)?
+    val chunk = scv_object_field(metadata, "chunk")
     if chunk == "":
-        return []
-    file_read_bytes(scv_chunk_path(root, chunk)) ?? []
+        return Err("ERROR missing file chunk: {file_id}\n")
+    val buffer = scv_file_buffer_read(scv_chunk_path(root, chunk))
+    val actual = scv_file_buffer_content_id(buffer)?
+    if actual != chunk:
+        return Err("ERROR corrupt file chunk: {chunk}\n")
+    Ok(buffer.bytes)
 
 fn scv_fast_import_commit_all_parents(root: text, commit: text) -> [text]:
     val path = scv_object_path(root, "commits", commit)
@@ -151,7 +158,8 @@ fn scv_fast_import_flush_commit(root: text, tree_lines: [text], current_from_mar
     val op = scv_write_operation(root, scv_current_op(root), new_commit, op_label)
     if op.starts_with("ERROR"):
         return ("", op, updated_ids)
-    scv_write_text("{root}/.scv/meta/status_index.sdn", file_read(scv_object_path(root, "trees", tree)))
+    if not scv_write_text("{root}/.scv/meta/status_index.sdn", file_read(scv_object_path(root, "trees", tree))):
+        return ("", "ERROR cannot publish imported status index\n", updated_ids)
     (new_commit, "", updated_ids)
 
 # Resolve a mark (:N) or commit_id to an SCV commit id using a mark→commit table
@@ -169,7 +177,9 @@ fn scv_fast_import_resolve_commit_ref(ref: text, commit_marks: [text], commit_id
     ""
 
 fn scv_fast_import_inline_blob(root: text, bytes: [u8], commit_seq: i64, file_seq: i64) -> text:
-    val (file_id, chunk) = scv_write_file_object_from_bytes(root, "inline-{commit_seq}-{file_seq}", bytes, 0)
+    val (file_id, chunk) = match scv_write_file_object_from_bytes(root, "inline-{commit_seq}-{file_seq}", bytes, 0):
+        Ok(ids): ids
+        Err(error): return error
     "inline-{commit_seq}-{file_seq}|{file_id}|{chunk}|{bytes.len()}|0"
 
 # DAG walk: collect commits from head back to (but not including) since, in reverse BFS order
@@ -260,7 +270,9 @@ fn scv_export_git_fast_import(root: text, stream_path: text, branch: text, since
                 if eid == file_id:
                     already_emitted = true
             if not already_emitted:
-                val bytes = scv_fast_import_file_primary_bytes(root, file_id)
+                val bytes = match scv_fast_import_file_primary_bytes(root, file_id):
+                    Ok(data): data
+                    Err(error): return error
                 stream = scv_fast_append_text_bytes(stream, "blob\nmark :{mark}\ndata {bytes.len()}\n")
                 stream = scv_fast_append_bytes(stream, bytes)
                 stream = scv_fast_append_text_bytes(stream, "\n")
@@ -518,7 +530,9 @@ fn scv_import_git_fast_import(root: text, stream_path: text) -> text:
                 if data_end > stream.len():
                     return "ERROR truncated inline blob payload\n"
                 val blob_bytes = stream[data_start:data_end]
-                val (file_id, chunk) = scv_write_file_object_from_bytes(root, rel, blob_bytes, 0)
+                val (file_id, chunk) = match scv_write_file_object_from_bytes(root, rel, blob_bytes, 0):
+                    Ok(ids): ids
+                    Err(error): return error
                 tree_lines = scv_fast_import_tree_without_path(tree_lines, rel)
                 tree_lines.push("{rel}|{file_id}|{chunk}|{blob_bytes.len()}|0")
                 imported = imported + 1
@@ -540,7 +554,9 @@ fn scv_import_git_fast_import(root: text, stream_path: text) -> text:
             val (payload, found) = scv_fast_import_blob_for_mark(marks, payloads, bmark)
             if not found:
                 return "ERROR missing blob mark: {bmark}\n"
-            val (file_id, chunk) = scv_write_file_object_from_bytes(root, rel, payload, 0)
+            val (file_id, chunk) = match scv_write_file_object_from_bytes(root, rel, payload, 0):
+                Ok(ids): ids
+                Err(error): return error
             tree_lines = scv_fast_import_tree_without_path(tree_lines, rel)
             tree_lines.push("{rel}|{file_id}|{chunk}|{payload.len()}|0")
             imported = imported + 1
@@ -576,8 +592,12 @@ fn scv_import_git_fast_import(root: text, stream_path: text) -> text:
             val old_file_id = scv_fast_import_tree_file_id_for_path(tree_lines, source)
             if old_file_id == "":
                 return "ERROR missing rename source: {source}\n"
-            val bytes = scv_fast_import_file_primary_bytes(root, old_file_id)
-            val (file_id, chunk) = scv_write_file_object_from_bytes(root, target, bytes, 0)
+            val bytes = match scv_fast_import_file_primary_bytes(root, old_file_id):
+                Ok(data): data
+                Err(error): return error
+            val (file_id, chunk) = match scv_write_file_object_from_bytes(root, target, bytes, 0):
+                Ok(ids): ids
+                Err(error): return error
             tree_lines = scv_fast_import_tree_without_path(tree_lines, source)
             tree_lines = scv_fast_import_tree_without_path(tree_lines, target)
             tree_lines.push("{target}|{file_id}|{chunk}|{bytes.len()}|0")
@@ -597,8 +617,12 @@ fn scv_import_git_fast_import(root: text, stream_path: text) -> text:
             val old_file_id = scv_fast_import_tree_file_id_for_path(tree_lines, source)
             if old_file_id == "":
                 return "ERROR missing copy source: {source}\n"
-            val bytes = scv_fast_import_file_primary_bytes(root, old_file_id)
-            val (file_id, chunk) = scv_write_file_object_from_bytes(root, target, bytes, 0)
+            val bytes = match scv_fast_import_file_primary_bytes(root, old_file_id):
+                Ok(data): data
+                Err(error): return error
+            val (file_id, chunk) = match scv_write_file_object_from_bytes(root, target, bytes, 0):
+                Ok(ids): ids
+                Err(error): return error
             tree_lines = scv_fast_import_tree_without_path(tree_lines, target)
             tree_lines.push("{target}|{file_id}|{chunk}|{bytes.len()}|0")
             copied = copied + 1
@@ -693,6 +717,8 @@ fn scv_import_git_fast_import(root: text, stream_path: text) -> text:
                 pos = scv_fast_import_next_line_pos(stream, tagger_end)
             # Write annotated tag object
             val tag_id = scv_write_tag_object(root, tag_name, target_commit, "commit", tagger, tag_message)
+            if tag_id.starts_with("ERROR"):
+                return tag_id
             # Store as lightweight tag pointing to the commit, plus annotated record
             val tag_result = scv_tag_set(root, tag_name, target_commit)
             if tag_result.starts_with("ERROR"):

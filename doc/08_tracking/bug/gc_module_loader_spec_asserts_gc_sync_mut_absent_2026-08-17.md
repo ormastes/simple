@@ -105,3 +105,21 @@ Results: 3 total, 3 passed, 0 failed
 ```
 
 Status: FIXED.
+
+## Verification 2026-11-25 — resolution re-confirmed by source inspection (stays RESOLVED)
+
+- The spec `test/feature/lib/gc_parity/gc_module_loader_spec.spl` in the
+  release/1.0.0 tree is the rewritten version described above:
+  `_has_gc_sync_mut_source_dir` is gone; `_spl_file_count` (returns -1 for a
+  missing directory) and the two replacement examples ("exposes gc_sync_mut
+  as a realized variant family", "mirrors gc_sync_mut into the std resolution
+  root") are present verbatim.
+- `src/lib/gc_sync_mut` currently holds 869 `.spl` files (> 100 gate).
+- `src/std/` is not a tracked directory in this tree (the mirror is produced
+  outside git), so the mirror example's green depends on the mirror having
+  been generated in the run environment, as in the 2026-09-13 evidence.
+- Execution limit: the spec could not be re-run on this host — the pinned
+  worktree binary (Rust seed v1.0.0-rc.1) rejects `@representation_boundary`,
+  which release/1.0.0 HEAD carries, so `bin/simple.exe test` fails before any
+  spec executes. The resolution itself is confirmed by the source state
+  above; no new failure was introduced by this pass.

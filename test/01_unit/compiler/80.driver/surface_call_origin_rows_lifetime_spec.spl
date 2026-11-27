@@ -1,0 +1,131 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+## Purpose and audience
+Pins the lifetime half of the PM3 unit-lane call-origin fix. PR #10534 read
+the module surfaces at MIR setup, but lower_and_check_retained_owner_impl
+releases them (`streaming_surface_owner_ready = false`) at the end of HIR
+lowering, so the step never ran natively (zero `surface_call_origins` lines,
+`callee=lib.common.string_core.str_len` still Unknown). The rows are now
+captured as flat scalars before the release and consumed by MIR setup.
+Audience: compiler engineers maintaining the driver HIR->MIR handoff.
+"""
+
+# @tag: unit, compiler, driver
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{SymbolTable, SymbolKind}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceCallable, ModuleSurfaceImpl}
+use compiler.frontend.parser_types_expr.{Type, TypeKind}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_instruction_support.{MirCallOrigin}
+use compiler.driver.driver_surface_call_origin_rows_v1.{SurfaceCallOriginRowsV1,
+    surface_call_origin_rows_empty_v1, surface_call_origin_rows_capture_v1}
+
+fn scor_line_of(source: text, needle: text) -> i64:
+    var n = 0
+    for line in source.split("\n"):
+        if line.contains(needle): return n
+        n = n + 1
+    -1
+
+describe "surface call-origin rows outlive the surface release":
+    it "captures before the HIR stage releases the surfaces":
+        val src = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        val capture = scor_line_of(src, "surface_call_origin_rows_capture_v1(self.streaming_module_surfaces_owner)")
+        val release = scor_line_of(src, "self.streaming_module_surfaces_owner = ModuleSurfacesByName.empty()")
+        expect(capture >= 0).to_equal(true)
+        expect(release > capture).to_equal(true)
+
+    it "MIR setup consumes the captured rows, not the released surfaces":
+        val src = file_read("src/compiler/80.driver/driver_pipeline_lowering.spl")
+        expect(scor_line_of(src, "self.surface_call_origin_rows_v1.names.len() > 0") >= 0).to_equal(true)
+        expect(scor_line_of(src, "self.streaming_module_surfaces_owner.surfaces") < 0).to_equal(true)
+
+    it "an empty surface set captures no rows":
+        val rows = surface_call_origin_rows_capture_v1(ModuleSurfacesByName.empty())
+        expect(rows.names.len()).to_equal(0)
+        expect(surface_call_origin_rows_empty_v1().owners.len()).to_equal(0)
+
+    it "captured rows prove origins through the MIR registry (text_bytes -> str_len)":
+        val rows = SurfaceCallOriginRowsV1(owners: ["lib.common.string_core", "lib.common.ffi"],
+            names: ["str_len", "rt_len"], externs: [false, true], methods: [false, false], statics: [false, false])
+        var symbols = SymbolTable.new()
+        val str_len = symbols.define("str_len", SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, Some("lib.common.string_core"))
+        val rt_len = symbols.define("rt_len", SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, Some("lib.common.ffi"))
+        var lowering = MirLowering.new(symbols)
+        lowering.current_module_id = "lib.common.text_bytes"
+        expect(lowering.provider_callable_call_origin_v1(str_len)).to_equal(MirCallOrigin.Unknown)
+        var i = 0
+        while i < rows.names.len():
+            val _n = lowering.register_surface_callable_origins_v1(rows.owners[i], [rows.names[i]],
+                [rows.externs[i]], [rows.methods[i]], [rows.statics[i]])
+            i = i + 1
+        expect(lowering.provider_callable_call_origin_v1(str_len)).to_equal(MirCallOrigin.Source)
+        expect(lowering.provider_callable_call_origin_v1(rt_len)).to_equal(MirCallOrigin.Foreign)
+
+    it "captures owner-qualified impl methods and static constructors from provider surfaces":
+        var provider = ModuleSurface.empty("lib.common.build_manager.codec")
+        val ret_ty = Type(kind: TypeKind.Named("BuilderWireReaderV1", []), span: Span.empty())
+        val str_ty = Type(kind: TypeKind.Named("text", []), span: Span.empty())
+        val create_fn = ModuleSurfaceCallable(name: "create", type_params: [], params: [],
+            has_return_type: true, return_type: ret_ty, return_type_name: "BuilderWireReaderV1",
+            return_array_element_name: "", visibility: Visibility.Public, is_async: false,
+            is_static: true, is_public: true, is_method: false, is_mutable: false,
+            is_const: false, is_kernel: false, is_extern: false, span: Span.empty())
+        val scalar_fn = ModuleSurfaceCallable(name: "scalar", type_params: [], params: [],
+            has_return_type: true, return_type: str_ty, return_type_name: "text",
+            return_array_element_name: "", visibility: Visibility.Public, is_async: false,
+            is_static: false, is_public: true, is_method: true, is_mutable: true,
+            is_const: false, is_kernel: false, is_extern: false, span: Span.empty())
+        val reader_impl = ModuleSurfaceImpl(type_: ret_ty, has_trait_: false, trait_: ret_ty,
+            methods: {"create": create_fn, "scalar": scalar_fn})
+        provider.impls = [reader_impl]
+        val surfaces = ModuleSurfacesByName(surfaces: [provider],
+            index_by_name: {"lib.common.build_manager.codec": 0},
+            ordered_names: ["lib.common.build_manager.codec"], ordered_indices: [0],
+            generation: 1, frozen: true)
+        val rows = surface_call_origin_rows_capture_v1(surfaces)
+        expect(rows.names.contains("BuilderWireReaderV1.create")).to_equal(true)
+        expect(rows.names.contains("BuilderWireReaderV1.scalar")).to_equal(true)
+        var symbols = SymbolTable.new()
+        val create_sym = symbols.define("lib.common.build_manager.codec.BuilderWireReaderV1::create",
+            SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, Some("lib.common.build_manager.codec"))
+        val scalar_sym = symbols.define("lib.common.build_manager.codec.BuilderWireReaderV1::scalar",
+            SymbolKind.Method, nil, Span.empty(), Visibility.Public, false, Some("lib.common.build_manager.codec"))
+        var lowering = MirLowering.new(symbols)
+        lowering.current_module_id = "lib.common.build_manager.group_process_protocol"
+        val _n = lowering.register_surface_callable_origin_rows_v1(rows.owners, rows.names,
+            rows.externs, rows.methods, rows.statics)
+        expect(lowering.provider_callable_call_origin_v1(create_sym)).to_equal(MirCallOrigin.Source)
+        expect(lowering.provider_callable_call_origin_v1(scalar_sym)).to_equal(MirCallOrigin.Source)
+
+    it "batched register_surface_callable_origin_rows_v1 registers multiple owners and preserves HIR rows":
+        val lowering_src = file_read("src/compiler/80.driver/driver_pipeline_lowering.spl")
+        expect(scor_line_of(lowering_src, "register_surface_callable_origin_rows_v1(") >= 0).to_equal(true)
+        var symbols = SymbolTable.new()
+        val f1 = symbols.define("f1", SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, Some("mod.a"))
+        val f2 = symbols.define("f2", SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, Some("mod.b"))
+        val bare_m = symbols.define("len", SymbolKind.Method, nil, Span.empty(), Visibility.Public, false, Some("mod.a"))
+        val qual_m = symbols.define("mod.a.Box::get", SymbolKind.Method, nil, Span.empty(), Visibility.Public, false, Some("mod.a"))
+        var lowering = MirLowering.new(symbols)
+        lowering.current_module_id = "mod.user"
+        # Pre-existing HIR-derived row must not be overwritten.
+        val _pre = lowering.register_surface_callable_origins_v1("mod.a", ["f1"], [true], [false], [false])
+        val added = lowering.register_surface_callable_origin_rows_v1(
+            ["mod.a", "mod.b", "mod.a", "mod.a", ""],
+            ["f1", "f2", "len", "Box.get", "ignored"],
+            [false, true, false, false, false],
+            [false, false, true, true, false],
+            [false, false, false, false, false])
+        expect(added).to_equal(2)
+        expect(lowering.provider_callable_call_origin_v1(f1)).to_equal(MirCallOrigin.Foreign)
+        expect(lowering.provider_callable_call_origin_v1(f2)).to_equal(MirCallOrigin.Foreign)
+        expect(lowering.provider_callable_call_origin_v1(bare_m)).to_equal(MirCallOrigin.Unknown)
+        expect(lowering.provider_callable_call_origin_v1(qual_m)).to_equal(MirCallOrigin.Source)

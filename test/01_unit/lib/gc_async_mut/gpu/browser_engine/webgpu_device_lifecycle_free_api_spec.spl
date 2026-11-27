@@ -1,0 +1,251 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/webgpu_context.spl 1%
+# @tag: unit, browser_engine, webgpu
+#
+# The free-function WebGPU entry points (`webgpu_request_adapter`,
+# `webgpu_request_device`, `webgpu_configure_canvas_with_alpha`,
+# `webgpu_present`, shader-module and pipeline creation). The method forms on
+# WebGPUContext are covered by the web_platform system specs; these free
+# functions had no executing spec. Each step of the WebGPU bring-up order
+# (secure context -> adapter -> device -> configure -> present) is asserted
+# both in order and out of order, with the exact error left in `last_error`.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.webgpu_types.{
+    GPUDeviceDescriptor, GPURequestAdapterOptions,
+    GPU_FEATURE_SHADER_F16, GPU_TEXTURE_FORMAT_BGRA8_UNORM, GPU_TEXTURE_FORMAT_RGBA8_UNORM
+}
+use std.gc_async_mut.gpu.browser_engine.webgpu_context.{
+    WebGPUContext, webgpu_create_context, webgpu_is_available,
+    webgpu_request_adapter, webgpu_request_device,
+    webgpu_supports_feature, webgpu_enabled_feature,
+    webgpu_adapter_status, webgpu_compatibility_mode,
+    webgpu_configure_canvas_with_alpha, webgpu_is_supported_canvas_format,
+    webgpu_is_supported_alpha_mode, webgpu_present, webgpu_preferred_canvas_format,
+    webgpu_create_shader_module, webgpu_create_render_pipeline,
+    webgpu_create_compute_pipeline
+}
+
+fn _vertex_wgsl() -> text:
+    "@vertex fn main() -> @builtin(position) vec4f {{ return vec4f(0.0, 0.0, 0.0, 1.0); }}"
+
+fn _fragment_wgsl() -> text:
+    "@fragment fn main() -> @location(0) vec4f {{ return vec4f(1.0, 0.0, 0.0, 1.0); }}"
+
+fn _compute_wgsl() -> text:
+    "@compute @workgroup_size(1) fn main() {{ }}"
+
+fn _ready() -> WebGPUContext:
+    var ctx = webgpu_create_context(true)
+    webgpu_request_adapter(ctx, GPURequestAdapterOptions.default_options())
+    webgpu_request_device(ctx, GPUDeviceDescriptor.create())
+    ctx
+
+describe "WebGPU free-function device lifecycle":
+
+    context "context and adapter":
+
+        it "starts unrequested and available only in a secure context":
+            val ctx = webgpu_create_context(true)
+            expect(webgpu_is_available(ctx)).to_equal(true)
+            expect(webgpu_adapter_status(ctx)).to_equal("not-requested")
+            expect(ctx.device_ready).to_equal(false)
+            expect(ctx.device_id).to_equal(-1)
+            expect(webgpu_is_available(webgpu_create_context(false))).to_equal(false)
+
+        it "grants an adapter in a secure context":
+            var ctx = webgpu_create_context(true)
+            expect(webgpu_request_adapter(ctx, GPURequestAdapterOptions.default_options())).to_equal(true)
+            expect(webgpu_adapter_status(ctx)).to_equal("available")
+            expect(webgpu_compatibility_mode(ctx)).to_equal(false)
+            expect(ctx.last_error).to_equal("")
+
+        it "records compatibility mode for a forced fallback adapter":
+            var ctx = webgpu_create_context(true)
+            expect(webgpu_request_adapter(ctx, GPURequestAdapterOptions.fallback())).to_equal(true)
+            expect(webgpu_compatibility_mode(ctx)).to_equal(true)
+
+        it "refuses an adapter outside a secure context":
+            var ctx = webgpu_create_context(false)
+            expect(webgpu_request_adapter(ctx, GPURequestAdapterOptions.default_options())).to_equal(false)
+            expect(webgpu_adapter_status(ctx)).to_equal("unavailable: secure context required")
+            expect(ctx.last_error).to_equal("WebGPU requires a secure context")
+            expect(ctx.adapter_requested).to_equal(true)
+            expect(ctx.adapter_available).to_equal(false)
+
+        it "refuses an adapter after device loss":
+            var ctx = webgpu_create_context(true)
+            ctx.device_lost = true
+            expect(webgpu_request_adapter(ctx, GPURequestAdapterOptions.default_options())).to_equal(false)
+            expect(webgpu_adapter_status(ctx)).to_equal("unavailable: device lost")
+            expect(ctx.last_error).to_equal("WebGPU device is lost")
+
+    context "device":
+
+        it "requires requestAdapter first":
+            var ctx = webgpu_create_context(true)
+            expect(webgpu_request_device(ctx, GPUDeviceDescriptor.create())).to_equal(false)
+            expect(ctx.last_error).to_equal("requestAdapter must succeed before requestDevice")
+            expect(ctx.device_ready).to_equal(false)
+
+        it "requires the adapter request to have succeeded":
+            var ctx = webgpu_create_context(false)
+            webgpu_request_adapter(ctx, GPURequestAdapterOptions.default_options())
+            expect(webgpu_request_device(ctx, GPUDeviceDescriptor.create())).to_equal(false)
+            expect(ctx.last_error).to_equal("requestAdapter did not provide an available adapter")
+
+        it "becomes ready with device id 1 and no enabled features by default":
+            val ctx = _ready()
+            expect(ctx.device_ready).to_equal(true)
+            expect(ctx.device_id).to_equal(1)
+            expect(ctx.last_error).to_equal("")
+            expect(webgpu_enabled_feature(ctx, GPU_FEATURE_SHADER_F16)).to_equal(false)
+
+        it "enables a supported required feature":
+            var ctx = webgpu_create_context(true)
+            webgpu_request_adapter(ctx, GPURequestAdapterOptions.default_options())
+            expect(webgpu_supports_feature(ctx, GPU_FEATURE_SHADER_F16)).to_equal(true)
+            expect(webgpu_request_device(ctx, GPUDeviceDescriptor.with_features([GPU_FEATURE_SHADER_F16]))).to_equal(true)
+            expect(webgpu_enabled_feature(ctx, GPU_FEATURE_SHADER_F16)).to_equal(true)
+
+        it "rejects an unsupported required feature by name":
+            var ctx = webgpu_create_context(true)
+            webgpu_request_adapter(ctx, GPURequestAdapterOptions.default_options())
+            expect(webgpu_supports_feature(ctx, "no-such-feature")).to_equal(false)
+            expect(webgpu_request_device(ctx, GPUDeviceDescriptor.with_features(["no-such-feature"]))).to_equal(false)
+            expect(ctx.last_error).to_equal("unsupported WebGPU feature: no-such-feature")
+            expect(ctx.device_ready).to_equal(false)
+
+    context "canvas configuration":
+
+        it "prefers bgra8unorm and accepts the two canvas formats":
+            expect(webgpu_preferred_canvas_format()).to_equal(GPU_TEXTURE_FORMAT_BGRA8_UNORM)
+            expect(webgpu_is_supported_canvas_format(GPU_TEXTURE_FORMAT_BGRA8_UNORM)).to_equal(true)
+            expect(webgpu_is_supported_canvas_format(GPU_TEXTURE_FORMAT_RGBA8_UNORM)).to_equal(true)
+            expect(webgpu_is_supported_canvas_format("rgba16float")).to_equal(false)
+
+        it "accepts opaque and premultiplied alpha only":
+            expect(webgpu_is_supported_alpha_mode("opaque")).to_equal(true)
+            expect(webgpu_is_supported_alpha_mode("premultiplied")).to_equal(true)
+            expect(webgpu_is_supported_alpha_mode("unpremultiplied")).to_equal(false)
+
+        it "requires a device":
+            var ctx = webgpu_create_context(true)
+            expect(webgpu_configure_canvas_with_alpha(ctx, GPU_TEXTURE_FORMAT_BGRA8_UNORM, 64, 32, "opaque")).to_equal(false)
+            expect(ctx.last_error).to_equal("requestDevice must succeed before configure")
+
+        it "stores format, size and alpha mode":
+            var ctx = _ready()
+            expect(webgpu_configure_canvas_with_alpha(ctx, GPU_TEXTURE_FORMAT_RGBA8_UNORM, 64, 32, "premultiplied")).to_equal(true)
+            expect(ctx.canvas_configured).to_equal(true)
+            expect(ctx.canvas_config.format).to_equal(GPU_TEXTURE_FORMAT_RGBA8_UNORM)
+            expect(ctx.canvas_config.width).to_equal(64)
+            expect(ctx.canvas_config.height).to_equal(32)
+            expect(ctx.canvas_config.alpha_mode).to_equal("premultiplied")
+
+        it "rejects a bad format, alpha mode or size without configuring":
+            var ctx = _ready()
+            expect(webgpu_configure_canvas_with_alpha(ctx, "rgba16float", 64, 32, "opaque")).to_equal(false)
+            expect(ctx.last_error).to_equal("unsupported WebGPU canvas format: rgba16float")
+            expect(webgpu_configure_canvas_with_alpha(ctx, GPU_TEXTURE_FORMAT_BGRA8_UNORM, 64, 32, "blend")).to_equal(false)
+            expect(ctx.last_error).to_equal("unsupported WebGPU alpha mode: blend")
+            expect(webgpu_configure_canvas_with_alpha(ctx, GPU_TEXTURE_FORMAT_BGRA8_UNORM, 0, 32, "opaque")).to_equal(false)
+            expect(ctx.last_error).to_equal("canvas size must be positive")
+            expect(ctx.canvas_configured).to_equal(false)
+
+    context "present":
+
+        it "requires a device and a configured canvas, in that order":
+            var ctx = webgpu_create_context(true)
+            expect(webgpu_present(ctx)).to_equal(false)
+            expect(ctx.last_error).to_equal("requestDevice must succeed before present")
+            var ready = _ready()
+            expect(webgpu_present(ready)).to_equal(false)
+            expect(ready.last_error).to_equal("configure must succeed before present")
+            expect(ready.present_count).to_equal(0)
+
+        it "counts each successful present":
+            var ctx = _ready()
+            webgpu_configure_canvas_with_alpha(ctx, GPU_TEXTURE_FORMAT_BGRA8_UNORM, 8, 8, "opaque")
+            expect(webgpu_present(ctx)).to_equal(true)
+            expect(webgpu_present(ctx)).to_equal(true)
+            expect(ctx.present_count).to_equal(2)
+
+        it "stops presenting after device loss":
+            var ctx = _ready()
+            webgpu_configure_canvas_with_alpha(ctx, GPU_TEXTURE_FORMAT_BGRA8_UNORM, 8, 8, "opaque")
+            ctx.device_lost = true
+            expect(webgpu_present(ctx)).to_equal(false)
+            expect(ctx.last_error).to_equal("device is lost")
+            expect(ctx.present_count).to_equal(0)
+
+    context "shader modules and pipelines":
+
+        it "numbers valid shader modules from 1 and detects their stage":
+            var ctx = _ready()
+            val vs = webgpu_create_shader_module(ctx, "vs", _vertex_wgsl())
+            val fs = webgpu_create_shader_module(ctx, "fs", _fragment_wgsl())
+            expect(vs.valid).to_equal(true)
+            expect(vs.id).to_equal(1)
+            expect(vs.stage).to_equal("vertex")
+            expect(vs.label).to_equal("vs")
+            expect(fs.id).to_equal(2)
+            expect(fs.stage).to_equal("fragment")
+
+        it "returns an invalid module without consuming an id":
+            var ctx = _ready()
+            val bad = webgpu_create_shader_module(ctx, "bad", "not wgsl at all")
+            expect(bad.valid).to_equal(false)
+            expect(bad.id).to_equal(-1)
+            expect(bad.error == "").to_equal(false)
+            expect(ctx.last_error).to_equal(bad.error)
+            expect(webgpu_create_shader_module(ctx, "vs", _vertex_wgsl()).id).to_equal(1)
+
+        it "refuses shader modules before the device is ready or after loss":
+            var ctx = webgpu_create_context(true)
+            expect(webgpu_create_shader_module(ctx, "vs", _vertex_wgsl()).error).to_equal("device is not ready")
+            var lost = _ready()
+            lost.device_lost = true
+            expect(webgpu_create_shader_module(lost, "vs", _vertex_wgsl()).error).to_equal("device is lost")
+
+        it "creates render pipelines with increasing ids":
+            var ctx = _ready()
+            val vs = webgpu_create_shader_module(ctx, "vs", _vertex_wgsl())
+            val fs = webgpu_create_shader_module(ctx, "fs", _fragment_wgsl())
+            val p1 = webgpu_create_render_pipeline(ctx, vs, fs)
+            val p2 = webgpu_create_render_pipeline(ctx, vs, fs)
+            expect(p1.valid).to_equal(true)
+            expect(p1.kind).to_equal("render")
+            expect(p1.id).to_equal(1)
+            expect(p2.id).to_equal(2)
+
+        it "requires the right stage in each render pipeline slot":
+            var ctx = _ready()
+            val vs = webgpu_create_shader_module(ctx, "vs", _vertex_wgsl())
+            val fs = webgpu_create_shader_module(ctx, "fs", _fragment_wgsl())
+            expect(webgpu_create_render_pipeline(ctx, fs, fs).error).to_equal("valid vertex shader required")
+            expect(webgpu_create_render_pipeline(ctx, vs, vs).error).to_equal("valid fragment shader required")
+            expect(webgpu_create_render_pipeline(ctx, vs, fs).id).to_equal(1)
+
+        it "creates a compute pipeline only from a compute shader":
+            var ctx = _ready()
+            val cs = webgpu_create_shader_module(ctx, "cs", _compute_wgsl())
+            val vs = webgpu_create_shader_module(ctx, "vs", _vertex_wgsl())
+            expect(cs.stage).to_equal("compute")
+            val ok = webgpu_create_compute_pipeline(ctx, cs)
+            expect(ok.valid).to_equal(true)
+            expect(ok.kind).to_equal("compute")
+            expect(webgpu_create_compute_pipeline(ctx, vs).error).to_equal("valid compute shader required")
+
+        it "refuses pipelines before the device is ready or after loss":
+            var ready = _ready()
+            val vs = webgpu_create_shader_module(ready, "vs", _vertex_wgsl())
+            val fs = webgpu_create_shader_module(ready, "fs", _fragment_wgsl())
+            val cs = webgpu_create_shader_module(ready, "cs", _compute_wgsl())
+            var fresh = webgpu_create_context(true)
+            expect(webgpu_create_render_pipeline(fresh, vs, fs).error).to_equal("device is not ready")
+            expect(webgpu_create_compute_pipeline(fresh, cs).error).to_equal("device is not ready")
+            ready.device_lost = true
+            expect(webgpu_create_render_pipeline(ready, vs, fs).error).to_equal("device is lost")
+            expect(webgpu_create_compute_pipeline(ready, cs).error).to_equal("device is lost")

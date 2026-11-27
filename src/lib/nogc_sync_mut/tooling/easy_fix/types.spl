@@ -54,9 +54,13 @@ pub class EasyFix:
     description: String
     replacements: [Replacement]
     confidence: FixConfidence
+    # rev-3 EditProposal binding: the SourceSnapshot version the proposal was
+    # computed against ("" = unbound, accepted only when the snapshot matches
+    # the analysed text, which the applier re-checks on disk anyway).
+    base_version: String
 
     static fn create(id: String, description: String, confidence: FixConfidence) -> EasyFix:
-        EasyFix(id: id, description: description, replacements: [], confidence: confidence)
+        EasyFix(id: id, description: description, replacements: [], confidence: confidence, base_version: "")
 
     me add_replacement(replacement: Replacement):
         self.replacements.push(replacement)
@@ -97,6 +101,22 @@ pub fn easyfix_description(fix: EasyFix) -> String:
 pub fn easyfix_replacements(fix: EasyFix) -> [Replacement]:
     return fix.replacements
 
+# Stable diagnostic code of a proposal: the id without its trailing ":<line>"
+# ("L:todo_format:12" -> "L:todo_format", "PANIC-W-INDEX:7" -> "PANIC-W-INDEX").
+pub fn easyfix_code(fix: EasyFix) -> String:
+    val id = fix.id
+    var i = id.len() - 1
+    while i >= 0 and id[i] >= "0" and id[i] <= "9":
+        i = i - 1
+    if i >= 0 and id[i] == ":" and i < id.len() - 1:
+        return id.slice(0, i)
+    id
+
+pub fn easyfix_with_base(fix: EasyFix, version: String) -> EasyFix:
+    var bound = fix
+    bound.base_version = version
+    bound
+
 # ============================================================================
 # FixReport: result of applying fixes
 # ============================================================================
@@ -106,9 +126,11 @@ pub class FixReport:
     skipped: Int
     modified_files: [String]
     details: [String]
+    # rev-3 ApplyResult receipts: "<file> <old_version> -> <new_version>" per write.
+    receipts: [String]
 
     static fn empty() -> FixReport:
-        FixReport(applied: 0, skipped: 0, modified_files: [], details: [])
+        FixReport(applied: 0, skipped: 0, modified_files: [], details: [], receipts: [])
 
     fn format(dry_run: Bool) -> String:
         val prefix = if dry_run: "Would apply" else: "Applied"
@@ -179,10 +201,10 @@ fn easyfix_replacement_ranges_fit_source(
 pub fn easyfix_apply_sorted_replacements(
     source: text, replacements: [Replacement]
 ) -> text:
-    if not easyfix_replacement_ranges_fit_source(replacements, source.len()):
+    if not easyfix_replacement_ranges_fit_source(replacements, source.byte_len()):
         var legacy_source = source
         for rep in replacements:
-            if rep.start <= legacy_source.len() and rep.end <= legacy_source.len():
+            if rep.start <= legacy_source.byte_len() and rep.end <= legacy_source.byte_len():
                 legacy_source = (
                     legacy_source.slice(0, rep.start) + rep.new_text +
                     legacy_source.slice(rep.end))
@@ -200,6 +222,23 @@ pub fn easyfix_apply_sorted_replacements(
     parts.push(source.slice(cursor))
     parts.join("")
 
+# A replacement is effective when applying it changes the text. Out-of-range
+# bounds are left to the applier (treated as effective here).
+pub fn easyfix_replacement_is_effective(rep: Replacement, source: text) -> bool:
+    if rep.start < 0 or rep.end < rep.start or rep.end > source.byte_len():
+        return true
+    source.slice(rep.start, rep.end) != rep.new_text
+
+# A fix is effective when at least one replacement changes its file. Files
+# missing from `sources` cannot be judged and count as effective.
+pub fn easyfix_is_effective(fix: EasyFix, sources: Dict<String, String>) -> bool:
+    for rep in fix.replacements:
+        if not sources.has(rep.file):
+            return true
+        if easyfix_replacement_is_effective(rep, sources[rep.file]):
+            return true
+    false
+
 pub class FixApplicator:
     static fn apply(fixes: [EasyFix], sources: Dict<String, String>) -> Result<Dict<String, String>, String>:
         # Group replacements by file
@@ -209,11 +248,19 @@ pub class FixApplicator:
         for fix in fixes:
             val replacements_for_fix: [Replacement] = easyfix_replacements(fix)
             for rep in replacements_for_fix:
+                if sources.has(rep.file) and not easyfix_replacement_is_effective(rep, sources[rep.file]):
+                    continue
                 if not file_bucket_index.has(rep.file):
                     file_bucket_index[rep.file] = replacement_buckets.len()
                     replacement_buckets.push([])
                 val bucket = file_bucket_index[rep.file]
-                replacement_buckets[bucket].push(rep)
+                # Identical edits from several fixes (e.g. one shared declaration) apply once.
+                var seen = false
+                for prev in replacement_buckets[bucket]:
+                    if prev.start == rep.start and prev.end == rep.end and prev.new_text == rep.new_text:
+                        seen = true
+                if not seen:
+                    replacement_buckets[bucket].push(rep)
 
         var results: Dict<String, String> = {}
 
@@ -316,7 +363,7 @@ pub class EasyFixLint:
     fn has_easy_fix() -> Bool:
         match self.easy_fix:
             case Some(_): true
-            case nil: false
+            case None: false
 
 # ============================================================================
 # EasyFixLintResult: diagnostic result with location
@@ -343,18 +390,18 @@ pub class EasyFixLintResult:
         match self.lint.fix_hint:
             case Some(hint):
                 output = output + "\n  hint: " + hint
-            case nil:
+            case None:
                 val _ = 0
 
         match self.lint.easy_fix:
             case Some(fix):
                 output = output + "\n  fix: available [{fix.id}] ({fix.confidence_str()})"
-            case nil:
+            case None:
                 val _ = 0
 
         output
 
     fn has_easy_fix() -> Bool:
-        self.lint.easy_fix.? == true
+        self.lint.has_easy_fix()
 
 # Export all types

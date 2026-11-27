@@ -1,0 +1,46 @@
+"""BufferedReader.read_line decodes strict UTF-8 across buffer refills.
+
+A multibyte scalar split across two fills must decode intact; truly invalid
+bytes must surface as IoErrorKind.InvalidData, never as a lossy '?'.
+"""
+use std.spec
+use std.io.traits.{Read}
+use std.io.types.{IoError, IoErrorKind}
+use std.nogc_sync_mut.io.buffer.{BufferedReader}
+
+class Utf8ChunkReader with Read:
+    data: [u8]
+    pos: i64
+
+    static fn new(data: [u8]) -> Utf8ChunkReader:
+        Utf8ChunkReader(data: data, pos: 0)
+
+    fn read(size: i64) -> Result<[u8], IoError>:
+        val end = if self.pos + size > self.data.len(): self.data.len() else: self.pos + size
+        val chunk = self.data.slice(self.pos, end)
+        self.pos = end
+        Ok(chunk)
+
+    fn read_exact(size: i64) -> Result<[u8], IoError>:
+        self.read(size)
+
+    fn read_all() -> Result<[u8], IoError>:
+        self.read(self.data.len() - self.pos)
+
+    fn read_text() -> Result<text, IoError>:
+        Ok("")
+
+    fn read_line() -> Result<text, IoError>:
+        Ok("")
+
+describe "BufferedReader.read_line strict UTF-8":
+    it "decodes a scalar split across two buffer fills":
+        # "a한\n" = 61 ED 95 9C 0A; capacity 2 splits the 3-byte scalar.
+        val reader = BufferedReader.with_capacity(Utf8ChunkReader.new([0x61u8, 0xEDu8, 0x95u8, 0x9Cu8, 0x0Au8]), 2)
+        expect(reader.read_line().unwrap()).to_equal("a한\n")
+
+    it "rejects truly invalid bytes with InvalidData":
+        val reader = BufferedReader.with_capacity(Utf8ChunkReader.new([0x61u8, 0xFFu8, 0x0Au8]), 2)
+        match reader.read_line():
+            case Ok(_): assert(false)
+            case Err(error): expect(error.kind).to_equal(IoErrorKind.InvalidData)

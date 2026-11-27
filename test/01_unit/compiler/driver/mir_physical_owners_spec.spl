@@ -1,5 +1,8 @@
 use std.spec.*
-use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1, driver_mir_feed_is_identity_v1}
+use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1, driver_mir_feed_is_identity_v1,
+    driver_mir_owner_disposition_v1, driver_mir_schedule_name_v1, driver_mir_placeholder_owner_v1,
+    driver_mir_unit_scoped_v1, driver_mir_excluded_owner_v1, driver_go_to_end_alias_rows_v1,
+    driver_mir_unit_provider_keys_v1}
 
 val MIR_ALIAS_DIGEST = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 val MIR_OTHER_DIGEST = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -100,3 +103,136 @@ describe "MIR work owns admitted physical surfaces":
         val malformed = driver_mir_physical_source_indices_v1(["provider.spl"],
             ["gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"], ["provider"])
         expect(malformed.is_err()).to_equal(true)
+
+# bug per_file_lane_unit_mir_physical_ownership_missing_hir_2026-11-12: a
+# per-file unit (module-scoped MIR) holds HIR only for its targets and their
+# load closure, so the ownership gate must not demand HIR for every row.
+describe "MIR physical ownership in a module-scoped per-file unit":
+    it "uses held HIR outside a scoped unit and for a scoped target":
+        expect(driver_mir_owner_disposition_v1(false, false, true)).to_equal("hir")
+        expect(driver_mir_owner_disposition_v1(true, false, true)).to_equal("placeholder")
+        expect(driver_mir_owner_disposition_v1(true, true, true)).to_equal("hir")
+
+    it "stands in an unheld non-target row of a scoped unit":
+        expect(driver_mir_owner_disposition_v1(true, false, false)).to_equal("placeholder")
+
+    it "still fails closed on an unheld target of a scoped unit":
+        expect(driver_mir_owner_disposition_v1(true, true, false)).to_equal("missing")
+
+    it "keeps the whole-inventory demand outside a scoped unit":
+        expect(driver_mir_owner_disposition_v1(false, false, false)).to_equal("missing")
+        expect(driver_mir_owner_disposition_v1(false, true, false)).to_equal("missing")
+
+    it "publishes the same ledger schedule from units holding different HIR":
+        # HirModule.name is the parsed file path. Unit A holds only the leaf;
+        # unit B holds the entry and the provider. Row 1 is an entry-closure
+        # alias row whose logical name is an import spelling ("provider"),
+        # which never canonicalises to the path-derived owner.
+        val paths = ["src/app/p3rp/aa.spl", "src/lib/common/provider.spl", "src/app/p3rp/main.spl"]
+        val logical = ["app.p3rp.aa", "provider", "app.p3rp.main"]
+        val held_a = [true, false, false]
+        val held_b = [false, true, true]
+        var schedule_a: [text] = []
+        var schedule_b: [text] = []
+        var index = 0
+        while index < paths.len():
+            schedule_a = schedule_a.push(driver_mir_schedule_name_v1(true, held_a[index],
+                if held_a[index]: paths[index] else: "", logical[index], paths[index]))
+            schedule_b = schedule_b.push(driver_mir_schedule_name_v1(true, held_b[index],
+                if held_b[index]: paths[index] else: "", logical[index], paths[index]))
+            index = index + 1
+        expect(schedule_a.join("|")).to_equal(schedule_b.join("|"))
+        expect(schedule_a[1]).to_equal("lib.common.provider")
+        expect(schedule_a[0]).to_equal("app.p3rp.aa")
+
+    it "leaves the unscoped unheld schedule name unchanged":
+        expect(driver_mir_schedule_name_v1(false, false, "", "std.common.provider", "src/lib/common/provider.spl")).to_equal("std.common.provider")
+        expect(driver_mir_schedule_name_v1(false, true, "std.common.provider", "x", "src/x.spl")).to_equal("lib.common.provider")
+
+    it "names a placeholder owner by its row path so alias rows dedup with the held row":
+        val result = driver_mir_physical_source_indices_v1(
+            ["src/lib/common/provider.spl", "src/lib/common/provider.spl"],
+            [MIR_ALIAS_DIGEST, MIR_ALIAS_DIGEST],
+            ["src/lib/common/provider.spl", driver_mir_placeholder_owner_v1("src/lib/common/provider.spl")])
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap().len()).to_equal(1)
+
+    it "only stands rows in while the unit's MIR shard queue is active":
+        expect(driver_mir_unit_scoped_v1(true, "/q")).to_equal(true)
+        expect(driver_mir_unit_scoped_v1(true, "")).to_equal(false)
+        expect(driver_mir_unit_scoped_v1(false, "/q")).to_equal(false)
+
+    # bug per_file_unit_imported_global_missing_provider_2026-11-21: the feed
+    # is the unit's target only; its import's held interface HIR must still
+    # reach lower_module's providers, once per owner (std./lib. alias rows).
+    it "keeps a held non-target import as a declaration provider of a scoped unit":
+        val keys = driver_mir_unit_provider_keys_v1(true, ["lib.common.gp.user"],
+            ["lib.common.gp.user", "std.common.gp.prov", "lib.common.gp.prov"],
+            ["lib.common.gp.user", "std.common.gp.prov", "lib.common.gp.prov"])
+        expect(keys.join("|")).to_equal("std.common.gp.prov")
+        expect(driver_mir_unit_provider_keys_v1(false, ["a"], ["a", "b"], ["a", "b"]).len()).to_equal(0)
+        expect(driver_mir_unit_provider_keys_v1(true, ["a"], ["a", "b"], ["a"]).len()).to_equal(0)
+
+describe "go-to-end excluded alias rows share one physical owner":
+    # `app.io` and `app.io.__init__` are two inventory rows of one file. Both
+    # were excluded as dependents of a module whose HIR failed.
+    it "conflicts when each excluded row stands its logical name in":
+        val result = driver_mir_physical_source_indices_v1(
+            ["src/app/io/__init__.spl", "src/app/io/__init__.spl", "src/app/main.spl"],
+            [MIR_ALIAS_DIGEST, MIR_ALIAS_DIGEST, MIR_OTHER_DIGEST],
+            ["app.io.__init__", "app.io", "src/app/main.spl"])
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("conflicting owners")
+
+    it "folds excluded alias rows onto the row path":
+        val path = "src/app/io/__init__.spl"
+        val owners = [driver_mir_excluded_owner_v1(path, "app.io.__init__"),
+            driver_mir_excluded_owner_v1(path, "app.io"), "src/app/main.spl"]
+        val result = driver_mir_physical_source_indices_v1(
+            [path, path, "src/app/main.spl"],
+            [MIR_ALIAS_DIGEST, MIR_ALIAS_DIGEST, MIR_OTHER_DIGEST], owners)
+        expect(result.is_ok()).to_equal(true)
+        val selected = result.unwrap()
+        expect(selected.len()).to_equal(2)
+        expect(selected[0]).to_equal(0)
+        expect(selected[1]).to_equal(2)
+
+    it "keeps the logical name when the row has no admitted path":
+        expect(driver_mir_excluded_owner_v1("", "app.io")).to_equal("app.io")
+
+describe "go-to-end HIR failure excludes every alias row of the failed file":
+    # `lib.X` failed at HIR; `std.X` names the same file. Left un-excluded it
+    # had no HIR and MIR setup stopped with "missing HIR for std.X".
+    it "returns the std alias of a failed lib row":
+        val aliases = driver_go_to_end_alias_rows_v1(
+            ["lib.nogc_sync_mut.sffi.dynamic_versioned", "std.nogc_sync_mut.sffi.dynamic_versioned", "app.main"],
+            ["src/lib/nogc_sync_mut/sffi/dynamic_versioned.spl", "src/lib/nogc_sync_mut/sffi/dynamic_versioned.spl", "src/app/main.spl"],
+            ["lib.nogc_sync_mut.sffi.dynamic_versioned"])
+        expect(aliases.len()).to_equal(1)
+        expect(aliases[0]).to_equal("std.nogc_sync_mut.sffi.dynamic_versioned")
+
+    it "returns the package row of a failed __init__ row":
+        val path = "src/app/p4probe/__init__.spl"
+        val aliases = driver_go_to_end_alias_rows_v1(
+            ["app.p4probe.__init__", "app.p4probe", "app.p4probe.good"],
+            [path, path, "src/app/p4probe/good.spl"], ["app.p4probe.__init__"])
+        expect(aliases.len()).to_equal(1)
+        expect(aliases[0]).to_equal("app.p4probe")
+
+    it "reports an alias once even when it appears in two inventories":
+        val path = "src/app/p4probe/__init__.spl"
+        val aliases = driver_go_to_end_alias_rows_v1(
+            ["app.p4probe.__init__", "app.p4probe", "app.p4probe.__init__", "app.p4probe"],
+            [path, path, path, path], ["app.p4probe.__init__"])
+        expect(aliases.len()).to_equal(1)
+        expect(aliases[0]).to_equal("app.p4probe")
+
+    it "returns nothing when the failed file has no alias row":
+        val aliases = driver_go_to_end_alias_rows_v1(
+            ["app.bad", "app.good"], ["src/app/bad.spl", "src/app/good.spl"], ["app.bad"])
+        expect(aliases.len()).to_equal(0)
+
+    it "never matches rows with an empty physical key":
+        val aliases = driver_go_to_end_alias_rows_v1(
+            ["app.bad", "gen.provider"], ["", ""], ["app.bad"])
+        expect(aliases.len()).to_equal(0)

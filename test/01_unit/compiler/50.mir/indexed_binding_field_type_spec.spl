@@ -1,0 +1,117 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# A `val` bound from an array/dict index is typed by the base's element type
+
+Bootstrap run 15 Stage 2 failed MIR lowering with `unresolved method call`
+(route=runtime-fallback, empty owner, receiver_has_type=false) at
+`src/compiler/90.tools/duplicate_check/_Detector/similarity_grouping.spl:84`
+(`(token_start + block.token_count).min(..)` after `val block =
+blocks_to_analyze[block_idx]`) and `src/os/smf/dynsmf_owned_v2.spl`
+749/1051/1067/1139 (`session._loaded_indices.has(..)` after `val session =
+_dynsmf_owned_sessions_v2[owner_index]`, an imported class).
+
+HIR typed an index expression only when its lowered base already carried a
+HIR type; a parameter / module-global base is a bare symbol reference, so the
+index stayed untyped and the binding's symbol type stayed unknown. A field read
+through that binding then had no owner. An annotated `val b: T = xs[i]` worked.
+The unannotated binding must now be typed from the base symbol's declared
+element type, exactly like the annotated one.
+"""
+
+# @tag: unit, compiler, mir, hir, stage2
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lines(xs: [text]) -> text:
+    xs.join("\n") + "\n"
+
+fn lower_closure(names: [text], srcs: [text]) -> text:
+    """Lower every module through HIR, prescan all, then MIR-lower the last one.
+    Returns the concatenated HIR/MIR diagnostics ("" when clean)."""
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var asts: [Module] = []
+    var i = 0
+    while i < names.len():
+        val path = names[i].replace(".", "/") + ".spl"
+        val ast = parse_full_frontend(srcs[i], path, names[i], log)
+        modules[names[i]] = ast
+        sources.push(SourceFile(path: path, content: srcs[i], module_name: names[i]))
+        asts.push(ast)
+        i = i + 1
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hirs: [HirModule] = []
+    var out = ""
+    i = 0
+    while i < names.len():
+        var hl = hirlowering_for_module(names[i], surfaces)
+        hirs.push(hl.lower_module(asts[i]))
+        for e in hl.errors:
+            out = out + "hir: " + e.message + "\n"
+        i = i + 1
+    val last = hirs.len() - 1
+    var ml = MirLowering.new(hirs[last].symbols)
+    var pre: Dict<text, HirModule> = {}
+    i = 0
+    while i < names.len():
+        pre["m" + i.to_text()] = hirs[i]
+        i = i + 1
+    i = 0
+    while i < names.len():
+        ml.prescan_module_struct_names(pre, "m" + i.to_text())
+        i = i + 1
+    val mir = ml.lower_module(hirs[last], hirs)
+    for e in ml.errors:
+        out = out + "mir: " + e.message + "\n"
+    print "diagnostics: [" + out + "]"
+    out
+
+val BLK = lines(["pub struct Blk:", "    name: text", "    count: i64", "", "pub class Ses:", "    sid: text", "    idx: Dict<text, i64>"])
+
+fn lower_main(body: [text]) -> text:
+    lower_closure(["lib.blk", "app.main"], [BLK, lines(["use lib.blk.{Blk, Ses}", ""] + body)])
+
+describe "indexed binding carries the element type into field reads":
+    it "struct element from a parameter array: binop field read dispatches min (similarity_grouping shape)":
+        val d = lower_main(["fn f(blks: [Blk], i: i64, n: i64) -> i64:", "    val b = blks[i]", "    (n + b.count).min(5)"])
+        expect(d).to_equal("")
+
+    it "field as the LEFT binop operand (exact similarity_grouping.spl:84 order)":
+        val d = lower_main(["fn f(blks: [Blk], i: i64, n: i64) -> i64:", "    val b = blks[i]", "    (b.count + n).min(5)"])
+        expect(d).to_equal("")
+
+    it "imported class element from a module global array: Dict field dispatches has (dynsmf_owned_v2 shape)":
+        val d = lower_main(["var g_s: [Ses] = []", "", "fn f(i: i64, k: text) -> bool:", "    val s = g_s[i]", "    s.idx.has(k)"])
+        expect(d).to_equal("")
+
+    it "var binding from a dict-of-class index dispatches has":
+        val d = lower_main(["fn f(m: Dict<text, Ses>, k: text) -> bool:", "    var s = m[k]", "    s.idx.has(k)"])
+        expect(d).to_equal("")
+
+    it "annotated binding (control) still lowers clean":
+        val d = lower_main(["fn f(blks: [Blk], i: i64, n: i64) -> i64:", "    val b: Blk = blks[i]", "    (n + b.count).min(5)"])
+        expect(d).to_equal("")
+
+    it "range index binding is a sub-array, not the element type":
+        val d = lower_main(["fn f(blks: [Blk], n: i64) -> i64:", "    val r = blks[1..]", "    (n + r.len()).min(5)"])
+        expect(d).to_equal("")
+
+    it "range index binding does not resolve element fields":
+        val d = lower_main(["fn f(blks: [Blk], n: i64) -> i64:", "    val r = blks[1..]", "    (n + r.count).min(5)"])
+        expect(d.contains("unresolved method call")).to_equal(true)
+
+    it "generic element type is not settled and is not propagated":
+        val d = lower_main(["fn f<T>(xs: [T], i: i64) -> i64:", "    val x = xs[i]", "    x.frob()"])
+        expect(d.contains("unresolved method call")).to_equal(true)

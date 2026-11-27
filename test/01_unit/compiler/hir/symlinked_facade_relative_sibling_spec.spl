@@ -1,0 +1,64 @@
+# A facade reached through a symlinked directory (src/app/t32_cli ->
+# examples/10_tooling/trace32_tools/t32_cli) registers under its LEXICAL
+# name while its canonical_path is the realpath. A relative import's physical
+# sibling derivation from that realpath names no registered spelling, and the
+# resolvers used to return "" there instead of splicing the logical sibling:
+# run-16 compiler_cli_build: ~60 of its 95 phase-3 errors are `missing module surface for .x`
+# (doc/08_tracking/bug/compiler_cli_build_run16_facade_brace_export_and_t32_relative_imports_2026-11-12.md).
+# The fixture is the tracked symlink itself with synthetic module text, so the
+# spec exercises module_surface_canonical_path's real realpath collapse.
+# @req REQ-COMPILER-HIR-001
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceBuilder}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+
+fn facade_source() -> text:
+    "use .types.\{T32Thing\}\n" +
+        "pub fn facade_main(value: T32Thing) -> i64:\n    value.size\n"
+
+fn types_source() -> text:
+    "pub class T32Thing:\n    size: i64\n"
+
+# Lexical spellings (what the driver registers) on the symlinked paths (whose
+# canonical_path collapses to examples/10_tooling/trace32_tools/t32_cli/...).
+fn symlinked_registry():
+    val log = Logger(level: 0)
+    val paths = ["src/app/t32_cli/mod.spl", "src/app/t32_cli/types.spl"]
+    val names = ["app.t32_cli.mod", "app.t32_cli.types"]
+    val texts = [facade_source(), types_source()]
+    var builder = ModuleSurfaceBuilder.new()
+    var index = 0
+    while index < paths.len():
+        val parsed = parse_full_frontend(texts[index], paths[index], names[index], log)
+        expect(builder.add_parsed(parsed,
+            SourceFile(path: paths[index], content: texts[index], module_name: names[index]),
+            index).is_ok()).to_equal(true)
+        index = index + 1
+    builder.finish().unwrap()
+
+describe "relative imports from a symlink-displaced facade":
+    it "freezes the lexical sibling when the realpath derivation names no surface":
+        step("Freeze a lexical registry whose facade carries a realpath canonical_path")
+        val registry = symlinked_registry()
+        val facade = registry.surfaces[registry.index_by_name["app.t32_cli.mod"]]
+        # The displacement under test: the tracked symlink collapses to examples/.
+        expect(facade.canonical_path.contains("/examples/10_tooling/trace32_tools/t32_cli/mod.spl")).to_equal(true)
+        expect(facade.import_target_names[0]).to_equal("app.t32_cli.types")
+
+    it "resolves the lexical sibling at lowering time and lowers the facade":
+        step("Resolve .types against the realpath-spelled importer, then lower it")
+        val registry = symlinked_registry()
+        val facade = registry.surfaces[registry.index_by_name["app.t32_cli.mod"]]
+        var lowering = hirlowering_for_module("app.t32_cli.mod", registry)
+        expect(lowering.resolve_module_key_relative(".types", "app.t32_cli.mod",
+            facade.canonical_path)).to_equal("app.t32_cli.types")
+        val module = parse_full_frontend(facade_source(), "src/app/t32_cli/mod.spl",
+            "app.t32_cli.mod", Logger(level: 0))
+        val hir = lowering.lower_module(module)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup("T32Thing") != nil).to_equal(true)

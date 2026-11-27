@@ -47,6 +47,13 @@ int main(void) {
         close(in_pipe[1]);
         close(out_pipe[0]);
         close(out_pipe[1]);
+        /* The real spawn path (rt_browser_renderer_spawn_sandboxed) closes
+           every inherited fd >= 3 before execve. Do the same with the
+           production helper: a stray fd inherited from the invoking shell,
+           IDE or agent harness would otherwise occupy fd 3, the landlock
+           ruleset fd would hit RLIMIT_NOFILE=4 (EMFILE), and the check would
+           falsely SKIP as "sandbox_enter unavailable" on a capable kernel. */
+        proc_close_inherited_fds_except(-1);
         /* Simulate the renderer-worker entry contract so the preinit
            hardening (no_new_privs + landlock + startup seccomp) runs. */
         char* fake_argv[] = { (char*)"simple-browser-renderer", NULL };

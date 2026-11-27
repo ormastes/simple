@@ -4,11 +4,13 @@ use compiler.hir.hir_types.{SymbolId, HirType, HirTypeKind, DimExpr,
     DimExprKind, DeviceType, Effect, EffectKind}
 use compiler.mir.mir_types.{MirTypeDef, MirTypeDefKind, LayoutPhase}
 use compiler.mir.mir_instruction_graph.{MirModule, MirFunction}
+use compiler.common.dependency.visibility.{Visibility}
 use compiler.common._Attributes.decl_attrs.{DriverManifestAttrKind,
     VhdlResetPolarity, VhdlResetSynchrony}
 use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type,
     serialize_const_value}
-use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.sha256.{sha256_text, Sha256StreamV1, sha256_stream_v1_new}
+use std.common.text_bytes.{text_to_utf8_bytes}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
     transient_scope_pause, transient_scope_end, transient_promote}
 
@@ -24,32 +26,64 @@ fn native_capsule_sorted_symbol_ids_v1(keys: [SymbolId]) -> [SymbolId]:
     # runtime_native.c:4002). So every swapped key used to come back as a fresh
     # object its own dict no longer resolved, and the caller's
     # `module.functions[symbol]` answered nil -- site 8's SEGV in
-    # serialize_mir_function. The comparison and the resulting permutation are
-    # the same as the bubble sort this replaces.
+    # serialize_mir_function.
     var ids: [i64] = []
-    var order: [i64] = []
     var i = 0
     while i < keys.len():
         ids.push(keys[i].id)
-        order.push(i)
-        i = i + 1
-    i = 0
-    while i < order.len():
-        var j = i + 1
-        while j < order.len():
-            if ids[j] < ids[i]:
-                val swapped_id = ids[i]
-                ids[i] = ids[j]
-                ids[j] = swapped_id
-                val swapped_index = order[i]
-                order[i] = order[j]
-                order[j] = swapped_index
-            j = j + 1
         i = i + 1
     var result: [SymbolId] = []
-    for index in order:
+    for index in native_capsule_sorted_order_v1(ids):
         result.push(keys[index])
     result
+
+# Ascending permutation of `ids`, ties kept in input order. This runs for every
+# function/constant/static/type map on each capsule MIR identity computation
+# (several times per module), so it is a bottom-up merge sort: O(n log n)
+# instead of the former O(n^2) exchange sort. For distinct ids (the normal case
+# for one module map) the permutation equals the exchange sort's; ties are stable.
+pub fn native_capsule_sorted_order_v1(ids: [i64]) -> [i64]:
+    val n = ids.len()
+    var order: [i64] = []
+    var scratch: [i64] = []
+    var i = 0
+    while i < n:
+        order.push(i)
+        scratch.push(i)
+        i = i + 1
+    var width = 1
+    while width < n:
+        var left = 0
+        while left < n:
+            var mid = left + width
+            if mid > n:
+                mid = n
+            var right = left + width + width
+            if right > n:
+                right = n
+            var a = left
+            var b = mid
+            var k = left
+            while k < right:
+                var take_left = false
+                if a < mid:
+                    if b >= right:
+                        take_left = true
+                    elif ids[order[a]] <= ids[order[b]]:
+                        take_left = true
+                if take_left:
+                    scratch[k] = order[a]
+                    a = a + 1
+                else:
+                    scratch[k] = order[b]
+                    b = b + 1
+                k = k + 1
+            left = right
+        val swapped = order
+        order = scratch
+        scratch = swapped
+        width = width + width
+    order
 
 pub fn native_capsule_type_def_identity_v1(type_def: MirTypeDef) -> text:
     var kind_identity = ""
@@ -84,6 +118,7 @@ fn native_capsule_hir_type_identity_v1(type_: HirType) -> text:
         case Char: "char"
         case Str: "str"
         case Unit: "unit"
+        case Nil: "nil"
         case Tuple(elements):
             var rows: [text] = []
             for element in elements: rows.push(native_capsule_hir_type_identity_v1(element))
@@ -91,10 +126,7 @@ fn native_capsule_hir_type_identity_v1(type_: HirType) -> text:
         case Array(element, size):
             var size_identity = "dynamic"
             if val fixed_size = size:
-                # Workaround GH-2983: retain the known i64 at MIR method dispatch.
-                # @workaround bug=native_identity_i64_receiver_type_loss_2026_10_11 reason=retain known i64 method receiver provenance without conversion
-                val typed_size: i64 = fixed_size
-                size_identity = typed_size.to_text()
+                size_identity = fixed_size.to_text()
             "array:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(element))}:{size_identity}"
         case Slice(element): "slice:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(element))}"
         case Dict(key, value): "dict:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(key))}:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(value))}"
@@ -150,13 +182,9 @@ fn native_capsule_dim_identity_v1(dim: DimExpr) -> text:
             var lo_identity = "none"
             var hi_identity = "none"
             if val lo_value = lo:
-                # @workaround bug=native_identity_i64_receiver_type_loss_2026_10_11 reason=retain known i64 method receiver provenance without conversion
-                val typed_lo: i64 = lo_value
-                lo_identity = typed_lo.to_text()
+                lo_identity = lo_value.to_text()
             if val hi_value = hi:
-                # @workaround bug=native_identity_i64_receiver_type_loss_2026_10_11 reason=retain known i64 method receiver provenance without conversion
-                val typed_hi: i64 = hi_value
-                hi_identity = typed_hi.to_text()
+                hi_identity = hi_value.to_text()
             "named:{storage_identity_text_v1(name)}:{lo_identity}:{hi_identity}"
         case Var(id): "var:{id}"
         case Dynamic: "dynamic"
@@ -181,6 +209,7 @@ fn native_capsule_effect_identity_v1(effect: Effect) -> text:
         case Mutates: "mutates"
         case Allocates: "allocates"
         case Custom(name): "custom:{storage_identity_text_v1(name)}"
+        case Unknown: "unknown"
 
 pub fn native_capsule_function_metadata_identity_v1(function: MirFunction) -> text:
     var generic_rows: [text] = []
@@ -230,9 +259,7 @@ pub fn native_capsule_function_metadata_identity_v1(function: MirFunction) -> te
         manifest_version = function.driver_manifest_attr.version
         manifest_abi = function.driver_manifest_attr.abi
         for device_id in function.driver_manifest_attr.device_ids:
-            # @workaround bug=native_identity_i64_receiver_type_loss_2026_10_11 reason=retain known i64 method receiver provenance without conversion
-            val typed_device_id: i64 = device_id
-            device_rows.push(typed_device_id.to_text())
+            device_rows.push(device_id.to_text())
     var vhdl_generic_rows: [text] = []
     for generic in function.vhdl_metadata.generics:
         vhdl_generic_rows.push("{storage_identity_text_v1(generic.name)}:{storage_identity_text_v1(generic.type_text)}:{storage_identity_text_v1(generic.default_text)}")
@@ -249,7 +276,64 @@ pub fn native_capsule_function_metadata_identity_v1(function: MirFunction) -> te
         case Async: "async"
         case Sync: "sync"
         case None_: "none"
-    "generic={storage_identity_text_v1(generic_rows.join(";"))}|template={function.is_generic_template}|specialization={specialization}|bindings={storage_identity_text_v1(binding_rows.join(";"))}|layout={layout_identity}|kernel={function.is_kernel}:{storage_identity_text_v1(function.gpu_target)}:{storage_identity_text_v1(function.gpu_backend_order)}|export={function.is_export_c}:{storage_identity_text_v1(function.export_name)}|manifest={function.has_driver_manifest_attr}:{manifest_kind}:{manifest_driver_class}:{manifest_vendor}:{storage_identity_text_v1(device_rows.join(";"))}:{storage_identity_text_v1(manifest_version)}:{storage_identity_text_v1(manifest_abi)}|vhdl={function.has_vhdl_metadata}:{function.vhdl_metadata.is_hardware}:{storage_identity_text_v1(vhdl_generic_rows.join(";"))}:{function.vhdl_metadata.has_clocked}:{storage_identity_text_v1(function.vhdl_metadata.clocked.clock_signal)}:{storage_identity_text_v1(function.vhdl_metadata.clocked.reset_signal)}:{function.vhdl_metadata.clocked.has_reset}:{reset_polarity}:{reset_synchrony}:{storage_identity_text_v1(function.vhdl_metadata.clocked.domain)}:{function.vhdl_metadata.clocked.is_valid}:{storage_identity_text_v1(validation_rows.join(";"))}:{storage_identity_text_v1(return_rows.join(";"))}:{function.vhdl_metadata.flatten_struct_output}|fast-math={function.has_fast_math}|fpga={function.unroll_factor}:{function.pipeline_ii}:{function.memory_banks}"
+    val identity = "generic={storage_identity_text_v1(generic_rows.join(";"))}|template={function.is_generic_template}|specialization={specialization}|bindings={storage_identity_text_v1(binding_rows.join(";"))}|layout={layout_identity}|kernel={function.is_kernel}:{storage_identity_text_v1(function.gpu_target)}:{storage_identity_text_v1(function.gpu_backend_order)}|export={function.is_export_c}:{storage_identity_text_v1(function.export_name)}|manifest={function.has_driver_manifest_attr}:{manifest_kind}:{manifest_driver_class}:{manifest_vendor}:{storage_identity_text_v1(device_rows.join(";"))}:{storage_identity_text_v1(manifest_version)}:{storage_identity_text_v1(manifest_abi)}|vhdl={function.has_vhdl_metadata}:{function.vhdl_metadata.is_hardware}:{storage_identity_text_v1(vhdl_generic_rows.join(";"))}:{function.vhdl_metadata.has_clocked}:{storage_identity_text_v1(function.vhdl_metadata.clocked.clock_signal)}:{storage_identity_text_v1(function.vhdl_metadata.clocked.reset_signal)}:{function.vhdl_metadata.clocked.has_reset}:{reset_polarity}:{reset_synchrony}:{storage_identity_text_v1(function.vhdl_metadata.clocked.domain)}:{function.vhdl_metadata.clocked.is_valid}:{storage_identity_text_v1(validation_rows.join(";"))}:{storage_identity_text_v1(return_rows.join(";"))}:{function.vhdl_metadata.flatten_struct_output}|fast-math={function.has_fast_math}|fpga={function.unroll_factor}:{function.pipeline_ii}:{function.memory_banks}"
+    # XRay sled intent changes emitted code; appended only when set so every
+    # static-off identity is unchanged.
+    val emission = native_capsule_function_emission_identity_v1(function)
+    if function.xray_mode != 0:
+        return identity + "|xray={function.xray_mode}" + emission
+    identity + emission
+
+# reason: canonical identity text of emitter attributes
+@allow(primitive_api)
+pub fn native_capsule_function_emission_identity_v1(function: MirFunction) -> text:
+    """Emitter-read function attributes that no other identity row carries:
+    naked, forced inline, section, alignment, unmangled linkage, comdat, the
+    SIMD requirement, strict no-GC and the short-call contracts
+    (_MirToLlvm/core_codegen.spl). A body instantiated from another module
+    brings these with it, and that module's interface slice drops bodies, so
+    they must be in the consumer's MIR identity. "" when every one is at its
+    default, so identities of ordinary functions are unchanged.
+    """
+    var contract_keys = function.short_call_contracts.keys()
+    var i = 0
+    while i < contract_keys.len():
+        var j = i + 1
+        while j < contract_keys.len():
+            if contract_keys[j] < contract_keys[i]:
+                val temporary = contract_keys[i]
+                contract_keys[i] = contract_keys[j]
+                contract_keys[j] = temporary
+            j = j + 1
+        i = i + 1
+    var contract_rows: [text] = []
+    for key in contract_keys:
+        var value_rows: [text] = []
+        for entry in function.short_call_contracts[key]:
+            value_rows.push(storage_identity_text_v1(entry))
+        contract_rows.push("{storage_identity_text_v1(key)}={storage_identity_text_v1(value_rows.join(","))}")
+    if not function.is_naked and not function.is_inline and function.section == "" and
+            function.align == 0 and not function.is_global and not function.is_comdat and
+            function.simd_req_level == "" and function.simd_req_backend == "" and
+            not function.simd_disabled and not function.nogc_strict and
+            contract_rows.len() == 0:
+        return ""
+    "|emit=naked:{function.is_naked}:inline:{function.is_inline}:section:{storage_identity_text_v1(function.section)}:align:{function.align}:global:{function.is_global}:comdat:{function.is_comdat}:simd:{storage_identity_text_v1(function.simd_req_level)}:{storage_identity_text_v1(function.simd_req_backend)}:{function.simd_disabled}:nogc-strict:{function.nogc_strict}:short-calls:{storage_identity_text_v1(contract_rows.join(";"))}"
+
+# reason: canonical identity text of emitter attributes
+@allow(primitive_api)
+pub fn native_capsule_static_emission_identity_v1(alignment: i64,
+        visibility: Visibility, is_external: bool) -> text:
+    """Emitter-read static attributes (alignment, hidden/default linkage,
+    external declaration). "" at the defaults, so ordinary statics keep their
+    identity. Visibility is folded exactly as llvm_static_linkage reads it.
+    """
+    val linkage = match visibility:
+        case Visibility.Public: "public"
+        case _: "hidden"
+    if alignment == 0 and linkage == "hidden" and not is_external:
+        return ""
+    "|emit=align:{alignment}:linkage:{linkage}:external:{is_external}"
 
 pub fn compute_native_capsule_mir_identity_v1(module: MirModule) -> text:
     # The immutable MIR predates this call. Serialization, metadata rows and
@@ -266,20 +350,93 @@ pub fn compute_native_capsule_mir_identity_v1(module: MirModule) -> text:
     if not retained or not ended: return ""
     digest
 
+class _MirIdentityStreamHasherV1:
+    """Bounded chunked incremental SHA-256 hasher avoiding giant row-join buffers."""
+    stream: Sha256StreamV1
+    has_row: bool
+    failed: bool
+
+    static fn create() -> _MirIdentityStreamHasherV1:
+        _MirIdentityStreamHasherV1(
+            stream: sha256_stream_v1_new(),
+            has_row: false,
+            failed: false
+        )
+
+    me feed_chunked(value: text):
+        if self.failed:
+            return
+        val raw = text_to_utf8_bytes(value)
+        val total = raw.len()
+        if total <= 4096:
+            if not self.stream.update(raw):
+                self.failed = true
+            return
+        var off = 0
+        while off < total:
+            val rem = total - off
+            val take = if rem < 4096: rem else: 4096
+            var chunk: [u8] = [0u8; take]
+            var i = 0
+            while i < take:
+                chunk[i] = raw[off + i]
+                i = i + 1
+            if not self.stream.update(chunk):
+                self.failed = true
+                return
+            off = off + take
+
+    me feed_row(row: text):
+        if self.failed:
+            return
+        if self.has_row:
+            if not self.stream.update_byte(10u8):
+                self.failed = true
+                return
+        else:
+            self.has_row = true
+        self.feed_chunked(row)
+
+    me finish_digest() -> text:
+        if self.failed:
+            return ""
+        self.stream.finish_hex() ?? ""
+
 fn native_capsule_mir_identity_unscoped_v1(module: MirModule) -> text:
-    var rows: [text] = ["module|{storage_identity_text_v1(module.name)}"]
-    for symbol in native_capsule_sorted_symbol_ids_v1(module.functions.keys()):
-        val function = module.functions[symbol]
-        rows.push("fn|{symbol.id}|{storage_identity_text_v1(serialize_mir_function(function))}|{storage_identity_text_v1(native_capsule_function_metadata_identity_v1(function))}")
-    for symbol in native_capsule_sorted_symbol_ids_v1(module.constants.keys()):
-        val constant = module.constants[symbol]
-        rows.push("const|{symbol.id}|{storage_identity_text_v1(constant.name)}|{serialize_mir_type(constant.type_)}|{storage_identity_text_v1(serialize_const_value(constant.value))}")
-    for symbol in native_capsule_sorted_symbol_ids_v1(module.statics.keys()):
-        val static_value = module.statics[symbol]
+    var hasher = _MirIdentityStreamHasherV1.create()
+    hasher.feed_row("module|{storage_identity_text_v1(module.name)}")
+    # Index each dict with the sorted keys() element itself: a `for symbol in`
+    # binding of a SymbolId is a native struct COPY under the frozen Phase 2
+    # pin, and struct dict keys hash by address in the C runtime, so the
+    # lookup missed and serialize_mir_function read a nil MirFunction
+    # (0xC0000005 reading 0x3 in the MIR shard worker).
+    val function_keys = native_capsule_sorted_symbol_ids_v1(module.functions.keys())
+    var function_i = 0
+    while function_i < function_keys.len():
+        val function = module.functions[function_keys[function_i]]
+        hasher.feed_row("fn|{function_keys[function_i].id}|{storage_identity_text_v1(serialize_mir_function(function))}|{storage_identity_text_v1(native_capsule_function_metadata_identity_v1(function))}")
+        function_i = function_i + 1
+    val constant_keys = native_capsule_sorted_symbol_ids_v1(module.constants.keys())
+    var constant_i = 0
+    while constant_i < constant_keys.len():
+        val constant = module.constants[constant_keys[constant_i]]
+        hasher.feed_row("const|{constant_keys[constant_i].id}|{storage_identity_text_v1(constant.name)}|{serialize_mir_type(constant.type_)}|{storage_identity_text_v1(serialize_const_value(constant.value))}")
+        constant_i = constant_i + 1
+    val static_keys = native_capsule_sorted_symbol_ids_v1(module.statics.keys())
+    var static_i = 0
+    while static_i < static_keys.len():
+        val static_value = module.statics[static_keys[static_i]]
         var init_identity = "none"
         if val init = static_value.init:
             init_identity = "{init.symbol.id}|{storage_identity_text_v1(init.name)}|{serialize_mir_type(init.type_)}|{storage_identity_text_v1(serialize_const_value(init.value))}"
-        rows.push("static|{symbol.id}|{storage_identity_text_v1(static_value.name)}|{serialize_mir_type(static_value.type_)}|{static_value.is_mutable}|{storage_identity_text_v1(init_identity)}")
-    for symbol in native_capsule_sorted_symbol_ids_v1(module.types.keys()):
-        rows.push("type|{native_capsule_type_def_identity_v1(module.types[symbol])}")
-    sha256_text(rows.join("\n"))
+        hasher.feed_row("static|{static_keys[static_i].id}|{storage_identity_text_v1(static_value.name)}|{serialize_mir_type(static_value.type_)}|{static_value.is_mutable}|{storage_identity_text_v1(init_identity)}" + native_capsule_static_emission_identity_v1(static_value.alignment, static_value.visibility, static_value.is_external))
+        static_i = static_i + 1
+    val type_keys = native_capsule_sorted_symbol_ids_v1(module.types.keys())
+    var type_i = 0
+    while type_i < type_keys.len():
+        hasher.feed_row("type|{native_capsule_type_def_identity_v1(module.types[type_keys[type_i]])}")
+        type_i = type_i + 1
+    # Read by the emitter (xray ring exports); a row only when set.
+    if module.xray_ring_wrap:
+        hasher.feed_row("xray-ring-wrap|true")
+    hasher.finish_digest()

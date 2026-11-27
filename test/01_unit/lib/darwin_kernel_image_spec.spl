@@ -1,0 +1,47 @@
+use std.spec
+use app.io.cli_ops.{cli_kernel_executable_path, cli_current_exe_path}
+use std.nogc_sync_mut.io.darwin_image_owner.{darwin_image_path, darwin_image_path_with_capacity}
+use std.nogc_sync_mut.io_runtime.{host_os}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+
+describe "Darwin kernel image owner (_NSGetExecutablePath)":
+    it "resolves current executable in-process on macOS without spawning ps":
+        if host_os() == "macos":
+            val res = darwin_image_path()
+            expect(res.is_ok()).to_equal(true)
+            val path = res.unwrap()
+            expect(path != "").to_equal(true)
+            expect(path.starts_with("/")).to_equal(true)
+            expect(path.ends_with(".spl")).to_equal(false)
+            expect(file_exists(path)).to_equal(true)
+
+            val kernel_exe = cli_kernel_executable_path()
+            expect(kernel_exe != "").to_equal(true)
+            expect(kernel_exe.starts_with("/")).to_equal(true)
+            expect(kernel_exe.ends_with(".spl")).to_equal(false)
+            expect(file_exists(kernel_exe)).to_equal(true)
+            expect(kernel_exe).to_equal(path)
+
+            val current_exe = cli_current_exe_path()
+            expect(current_exe).to_equal(kernel_exe)
+        else:
+            expect(darwin_image_path()).to_equal(Err("Darwin image query unavailable on this platform"))
+
+    it "rejects truncated and out-of-range capacities":
+        if host_os() == "macos":
+            val truncated = unsafe(capabilities: [ffi, raw_ptr]):
+                darwin_image_path_with_capacity(2)
+            expect(truncated.is_err()).to_equal(true)
+            expect(truncated).to_equal(Err("Darwin image query failed or truncated"))
+
+            val zero_cap = unsafe(capabilities: [ffi, raw_ptr]):
+                darwin_image_path_with_capacity(0)
+            expect(zero_cap).to_equal(Err("Darwin image query invalid capacity"))
+
+            val over_cap = unsafe(capabilities: [ffi, raw_ptr]):
+                darwin_image_path_with_capacity(32769)
+            expect(over_cap).to_equal(Err("Darwin image query invalid capacity"))
+        else:
+            val non_mac = unsafe(capabilities: [ffi, raw_ptr]):
+                darwin_image_path_with_capacity(32768)
+            expect(non_mac).to_equal(Err("Darwin image query unavailable on this platform"))

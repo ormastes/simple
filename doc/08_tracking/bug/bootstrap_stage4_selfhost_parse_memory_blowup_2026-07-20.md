@@ -1,7 +1,7 @@
 # Stage-4 self-host full-CLI build: parse-phase memory blowup (~160MB/file, killed at 64GB)
 
 - **ID:** bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20
-- **Status:** OPEN
+- **Status:** fix-implemented-verification-pending (2026-11-04): reclamation landed in a323583b0dc, 07d2ac8834d, e7380eaee50. Repro/verify on an admitted stage3: `sh scripts/check/check-stage4-selfhost-parse-memory-multifile.shs` (per-file rt_heap_registry_count must stay bounded) plus `sh scripts/check/check-stage4-selfhost-parse-memory.shs`; native RSS evidence still UNRUN.
 - **Severity:** high (blocks the stage3-compiled stage-4 lane entirely; seed-compiled fallback lane unaffected)
 - **Lane:** bootstrap `--full-bootstrap --mode=one-binary --backend=cranelift`, x86_64-linux
 
@@ -1998,3 +1998,37 @@ the loss is dominated by ordinary transient values that no eviction call would
 ever be handed. Whoever picks this up next should cost a reclamation strategy
 for `rt_core_*` allocations on the native lane first, and treat arena/eviction
 work as downstream of it.
+
+**Revalidated 2026-11-02: still plausible because localized, not fixed — a real fix here needs two more answers; no merged fix commit with a passing regression is cited in this doc.**
+
+## Analysis (2026-11-02, opf-5)
+
+Re-checked at `origin/release/1.0.0` (`8cb83fb9c14`). The bug is still OPEN.
+No commit since the 2026-09-22 audit shows native RSS staying flat across a
+full stage-4 closure. The cited path has changed: `frontend.spl:193` and
+`:220` now forward the caller's `streaming_scope` to
+`parse_and_build_module_scoped` (`_FlatAstBridge/module_assembly.spl:1617`),
+and that routes through `parse_and_build_module_with_scope_owner`. The only
+call that still hard-codes `false` is the plain `parse_and_build_module` wrapper at
+`module_assembly.spl:1837`. This is not the s2-rebuild "stage2_next worker AV
+after load_sources" symptom: this bug is RSS growth with no crash.
+
+This host can't reproduce it. Reproducing needs a stage-3 artifact driving a
+1777-file stage-4 build, and full bootstrap builds are barred while Phase 3
+runs. A fix isn't bounded without heap attribution.
+
+Invariant spec added:
+`test/01_unit/compiler/80.driver/stage4_parse_scope_wiring_invariant_spec.spl`
+(2 examples, 0 failures). It pins the scope-flag wiring only. It does not
+check RSS.
+
+TODO: once a phase-3 artifact is admitted, run the native scale probe with
+heap_registry attribution (per-file RSS over at least 400 files, on both seed
+and self-host lanes). Then decide whether to close this bug or fix the
+retention owner. Also audit the `parse_and_build_module` wrapper (`module_assembly.spl:1836-1837`).
+
+Checked against current policy/design: still valid, re-scoped to in-process
+multi-file parse loops. Under the one-process-per-file pipeline policy,
+per-process RSS is bounded by construction, but this report has no evidence
+that stage 4 runs that way yet. Erased generics, the nil/Any rules, SDN and
+target-neutral HIR don't affect it.

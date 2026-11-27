@@ -1,0 +1,31 @@
+# Shared fail-closed Graph pagination contract for both real transports.
+use std.common.json.value.{JsonValue, json_value_field, json_value_has, json_value_type, json_value_len, json_value_at}
+
+fn outlook_page_error(base_url: text, url: text, visited: [text]) -> text:
+    if base_url == "" or not (url == base_url or url.starts_with(base_url + "/") or url.starts_with(base_url + "?")):
+        return "Graph pagination URL is outside the configured endpoint"
+    if url.contains("\r") or url.contains("\n") or url.contains("\t") or url.contains("#"):
+        return "Graph pagination URL contains invalid control or fragment data"
+    if visited.len() >= 1000:
+        return "Graph pagination page limit exceeded"
+    for previous in visited:
+        if previous == url:
+            return "Graph pagination cycle detected"
+    ""
+
+fn outlook_page_response_error(parsed: JsonValue) -> text:
+    if json_value_type(parsed) != "object" or not json_value_has(parsed, "value"):
+        return "Graph response is missing the value array"
+    val rows = json_value_field(parsed, "value")
+    if json_value_type(rows) != "array":
+        return "Graph response value must be an array"
+    var index = 0
+    while index < json_value_len(rows):
+        if json_value_type(json_value_at(rows, index)) != "object":
+            return "Graph response value contains a non-object row"
+        index = index + 1
+    if json_value_has(parsed, "@odata.nextLink"):
+        val kind = json_value_type(json_value_field(parsed, "@odata.nextLink"))
+        if kind != "string" and kind != "null":
+            return "Graph pagination nextLink must be text"
+    ""

@@ -7,7 +7,7 @@ pub mod lenient_global_diag;
 mod lowerer;
 mod memory_check;
 pub mod memory_warning;
-mod module_lowering;
+pub(crate) mod module_lowering;
 pub(crate) mod option_pattern_shape_diag;
 pub mod parallel;
 mod stmt_lowering;
@@ -15,9 +15,9 @@ mod type_registration;
 mod type_resolver;
 
 pub use deprecation_warning::{DeprecationWarning, DeprecationWarningCollector};
-pub use error::{LowerError, LowerResult};
+pub use error::{LowerError, LowerResult, LOWERING_TYPE_ERROR_TAG};
 pub use memory_warning::{MemoryWarning, MemoryWarningCode, MemoryWarningCollector, WarningSummary};
-pub use lowerer::Lowerer;
+pub use lowerer::{take_private_ref_violations, Lowerer, PrivateRefViolation};
 pub use module_lowering::module_with_hoisted_defs;
 pub(crate) use module_lowering::dynamic_module_initializer_name;
 pub(crate) use module_lowering::block_uses_self;
@@ -212,7 +212,33 @@ pub fn lower_with_context_lenient_project_hint_and_duplicate_structs(
     lowerer.set_strict_mode(false);
     lowerer.set_lenient_types(true);
     lowerer.set_duplicate_global_struct_defs(std::sync::Arc::new(duplicate_struct_defs));
+    // This is the JIT run lane: product code must fail closed on a private fn
+    // of another directory here too. The caller drains the findings with
+    // `take_private_ref_violations` whether or not lowering succeeds.
+    lowerer::arm_private_ref_gate();
     lowerer.lower_module(module)
+}
+
+static DROPPED_UNSUPPORTED_EXPRS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Record an expression the lenient lowering replaced with `nil` because HIR
+/// has no lowering for it (e.g. list comprehensions).
+pub(crate) fn record_dropped_unsupported_expr(kind: &str) {
+    if let Ok(mut v) = DROPPED_UNSUPPORTED_EXPRS.lock() {
+        if !v.iter().any(|k| k == kind) {
+            v.push(kind.to_string());
+        }
+    }
+}
+
+/// Drain the kinds of expression the lenient lowering silently replaced with
+/// `nil` since the last call. A non-empty result means compiled code would
+/// compute the wrong value, so the caller must fall back to the interpreter.
+pub fn take_dropped_unsupported_exprs() -> Vec<String> {
+    DROPPED_UNSUPPORTED_EXPRS
+        .lock()
+        .map(|mut v| std::mem::take(&mut *v))
+        .unwrap_or_default()
 }
 
 /// Cached lookup for the `SIMPLE_TRACE_FIELD_GET` debug-trace gate.

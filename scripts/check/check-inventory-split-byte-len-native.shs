@@ -1,0 +1,115 @@
+#!/bin/sh
+# Bootstrap regression: JIT success does not qualify the LLVM inventory walk.
+# The caller reviews producer lineage; this gate binds execution to its exact bytes.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SELF="$ROOT/scripts/check/check-inventory-split-byte-len-native.shs"
+FIXTURE=test/01_unit/app/compiler_entrypoint/fixtures/inventory_split_line_byte_len_fixture.spl
+die() { echo "inventory-byte-len-native: $*" >&2; exit 2; }
+sha() { sha256sum "$1" | cut -d ' ' -f 1; }
+
+selftest() {
+    [ "$#" -eq 1 ] || die '--selftest requires a fresh evidence directory'
+    mkdir "$1" || die 'selftest evidence directory must be fresh'
+    controls=$(CDPATH= cd -- "$1" && pwd)
+    cat > "$controls/compiler" <<'FAKE'
+#!/bin/sh
+set -eu
+[ "$1" = native-build ] || exit 81
+shift
+case "$1" in */inventory_split_line_byte_len_fixture.spl) ;; *) exit 82 ;; esac
+shift
+[ "$1" = --backend ] && [ "$2" = llvm ] || exit 83
+[ "${SIMPLE_NO_STUB_FALLBACK:-}" = 1 ] || exit 84
+[ "${SIMPLE_NO_BOOTSTRAP_DELEGATE:-}" = 1 ] || exit 85
+[ "${SIMPLE_SCV_FREEZE_FALLBACK:-}" = 0 ] || exit 87
+out=
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = --output ]; then out=$2; shift; fi
+    shift
+done
+[ -n "$out" ] || exit 86
+case "${CONTROL_MODE:-good}" in
+    compile-fail) exit 42 ;;
+    no-artifact) exit 0 ;;
+    timeout) sleep 5 ;;
+    producer-drift) printf '\n# changed\n' >> "$0" ;;
+esac
+cat > "$out" <<'PROGRAM'
+#!/bin/sh
+case "${CONTROL_MODE:-good}" in
+    run-fail) exit 43 ;;
+    bad-output) echo 'lens=true,<value:0xe>, short=1' ;;
+    *) echo 'lens=11,14, short=0' ;;
+esac
+PROGRAM
+chmod +x "$out"
+FAKE
+    chmod +x "$controls/compiler"
+    pinned=$(sha "$controls/compiler")
+    for control in good wrong-sha missing-compiler inherited-snapshot compile-fail run-fail bad-output no-artifact timeout producer-drift; do
+        wanted=$pinned
+        candidate="$controls/compiler"
+        inherited=
+        limit=10
+        [ "$control" != wrong-sha ] || wanted=0000000000000000000000000000000000000000000000000000000000000000
+        [ "$control" != missing-compiler ] || candidate="$controls/missing"
+        [ "$control" != inherited-snapshot ] || inherited="$controls/unreviewed-snapshot"
+        [ "$control" != timeout ] || limit=1
+        status=0
+        CONTROL_MODE="$control" SIMPLE_SCV_SNAPSHOT_ROOT="$inherited" \
+            sh "$SELF" "$candidate" "$wanted" "$controls/$control" "$limit" \
+            > "$controls/$control.log" 2>&1 || status=$?
+        if [ "$control" = good ]; then
+            [ "$status" -eq 0 ] || die "selftest good rejected: $status"
+        else
+            [ "$status" -ne 0 ] || die "selftest $control falsely passed"
+        fi
+        printf 'control=%s exit=%s\n' "$control" "$status"
+    done
+    echo 'inventory-byte-len-native: harness controls PASS (10; no Simple compiler executed)'
+}
+
+if [ "${1:-}" = --selftest ]; then shift; selftest "$@"; exit 0; fi
+[ "$#" -ge 3 ] && [ "$#" -le 4 ] || die 'usage: <reviewed-compiler> <expected-sha256> <fresh-evidence-dir> [timeout-seconds]'
+compiler=$1 expected=$2 output=$3 budget=${4:-900}
+case "$expected" in *[!0-9a-f]*|'') die 'expected SHA-256 must be lowercase hex' ;; esac
+[ "${#expected}" -eq 64 ] || die 'expected SHA-256 must have 64 characters'
+case "$budget" in ''|*[!0-9]*|0) die 'timeout must be a positive integer' ;; esac
+[ -f "$compiler" ] && [ -x "$compiler" ] && [ ! -L "$compiler" ] || die 'reviewed compiler missing, non-executable, or symlink'
+compiler=$(CDPATH= cd -- "$(dirname -- "$compiler")" && pwd)/$(basename -- "$compiler")
+[ "$(sha "$compiler")" = "$expected" ] || die 'producer SHA-256 mismatch'
+[ -z "${SIMPLE_SCV_SNAPSHOT_ROOT:-}" ] || die 'inherited snapshot cannot qualify the current original-form fixture'
+[ -f "$ROOT/$FIXTURE" ] || die 'original-form fixture missing'
+command -v timeout >/dev/null 2>&1 || die 'timeout command missing'
+mkdir "$output" || die 'evidence directory must be fresh; stale binaries are not accepted'
+output=$(CDPATH= cd -- "$output" && pwd)
+mkdir "$output/cache"
+artifact="$output/probe.exe"
+printf 'evidence |field, value|\n    producer_sha256, %s\n    fixture_sha256, %s\n    backend, llvm\n' \
+    "$expected" "$(sha "$ROOT/$FIXTURE")" > "$output/evidence.sdn"
+
+compile_status=0
+(
+    cd "$ROOT"
+    SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 \
+    SIMPLE_NATIVE_BUILD_THREADS=1 SIMPLE_NATIVE_BUILD_CACHE_DIR="$output/cache" \
+    SIMPLE_SCV_FREEZE_FALLBACK=0 \
+        timeout "$budget" "$compiler" native-build "$FIXTURE" --backend llvm \
+        --runtime-bundle core-c-bootstrap --entry-closure --threads 1 \
+        --cache-dir "$output/cache" --output "$artifact"
+) > "$output/compile.log" 2>&1 || compile_status=$?
+printf '    compile_exit, %s\n' "$compile_status" >> "$output/evidence.sdn"
+[ "$compile_status" -eq 0 ] || die "LLVM compile failed ($compile_status); $output/compile.log"
+[ "$(sha "$compiler")" = "$expected" ] || die 'producer changed during compilation'
+[ -s "$artifact" ] && [ -x "$artifact" ] && [ ! -L "$artifact" ] || die 'LLVM compile produced no executable'
+run_status=0
+timeout "$budget" "$artifact" > "$output/stdout.log" 2> "$output/stderr.log" || run_status=$?
+printf '    artifact_sha256, %s\n    run_exit, %s\n' "$(sha "$artifact")" "$run_status" >> "$output/evidence.sdn"
+[ "$run_status" -eq 0 ] || die "native execution failed ($run_status); $output/stderr.log"
+tr -d '\r' < "$output/stdout.log" > "$output/stdout.normalized"
+printf 'lens=11,14, short=0\n' > "$output/expected.stdout"
+cmp -s "$output/expected.stdout" "$output/stdout.normalized" || die "native output mismatch; $output/stdout.log"
+printf '    status, PASS\n' >> "$output/evidence.sdn"
+echo "inventory-byte-len-native: PASS; evidence=$output/evidence.sdn"

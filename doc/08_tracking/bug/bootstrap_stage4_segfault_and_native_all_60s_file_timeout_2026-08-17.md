@@ -149,3 +149,95 @@ gate can only ever return ERROR on a real artifact, and hand-writing the
 manifest to satisfy it would be fabricating provenance. Either the admission
 producer ships, or the gate needs a documented way to grade an
 explicitly-declared hand-driven artifact.
+
+## Round-10 verdict note (2026-11-06)
+Defect 2 (native_all 60s default): ALREADY-FIXED - native_all/src/lib.rs no longer declares the 60s timeout; test native_build_provider_uses_compiler_sized_file_timeout pins the NativeBuildConfig default. Defect 1 (stage4 load_sources SEGV) and Defect 3 (generic-arg misparse, needs a bisect of data_ops.spl) are host-blocked / verification-pending: they need a Phase-3 stage3 binary. Command: bootstrap/stage3/<triple>/simple native-build --source src/compiler --source src/app --source src/lib --entry src/app/cli/main.spl --entry-closure --threads 4 -o build/stage4/simple
+
+## Triage 2026-11-10 (p3-boot3 lane, assignment row 22)
+
+**Verdict: Defect 2 SUPERSEDED (verified fixed-at-tip); Defects 1 and 3
+BLOCKED-needs-grant (heavy stage-3-binary repro, compiler owners).**
+
+Defect 2 (native_all 60s per-file timeout) — independently verified at this
+lane's base: `src/compiler_rust/native_all/src/lib.rs` no longer declares a 60s
+default; the embedded CLI inherits `DEFAULT_NATIVE_FILE_TIMEOUT_SECS = 300`
+(`src/compiler_rust/compiler/src/pipeline/native_project/mod.rs:720,728`), and
+the pinning test `native_build_provider_uses_compiler_sized_file_timeout`
+(native_all/src/lib.rs:1353) asserts `NativeBuildConfig::default().file_timeout
+== 300`. (Test execution requires a cargo build — heavy, not run in this lane;
+source assertions verified directly.)
+
+Defect 1 (stage-4 `load_sources` SEGV) and Defect 3 (`data_ops.spl:38`
+comparison misparsed as a generic-argument list) — both owners are
+`src/compiler` (outside this lane's bootstrap-script scope) and both need a
+Phase-3 stage-3 binary to reproduce or clear. The misleading-message half of
+Defect 3 is the diagnostic fix recorded in
+`const_generic_argument_rejected_in_constructor_call_2026-08-17.md`
+(RESOLUTION 2026-08-17); whether the `data_ops.spl` misparse itself persists on
+the current parser is exactly what the repro below decides. No seed/release
+binary exists on this Windows host to run a seed-smoke parse check without a
+heavy cargo build.
+
+Exact command for the granted lane:
+
+```sh
+bootstrap/stage3/<triple>/simple native-build --source src/compiler \
+  --source src/app --source src/lib --entry src/app/cli/main.spl \
+  --entry-closure --threads 4 -o build/stage4/simple
+```
+
+A clean build clears Defect 1's `load_sources` crash; a diagnostic (not SEGV)
+with `data_ops.spl` in the text keeps Defect 3 open for the parser lane.
+
+Also noted, NOT fixed here (out of lane scope): the stale ByteOrder KNOWN
+BLOCKER section in `.claude/rules/bootstrap.md` this doc says should be
+updated — `.claude/**` is write-protected for this lane.
+
+## Triage 2026-11-11 (P3 boot11 lane, work/p3-boot11-20261111)
+
+**Verdict: Defect 2 SUPERSEDED (source re-verified at this base); Defect 3
+FIXED-observed (misparse does not reproduce on the current parser, seed-smoke
+verified); Defect 1 BLOCKED-needs-grant — row status stays OPEN.**
+
+- Defect 2 (native_all 60s per-file timeout): re-verified in source at this
+  base — `src/compiler_rust/native_all/src/lib.rs:46` imports
+  `DEFAULT_NATIVE_FILE_TIMEOUT_SECS` from the compiler pipeline
+  (`src/compiler_rust/compiler/src/pipeline/native_project/mod.rs:720` = 300,
+  default applied at `:728`); pinning test
+  `native_build_provider_uses_compiler_sized_file_timeout`
+  (`native_all/src/lib.rs:1353`) asserts `file_timeout == 300`. No 60s
+  default remains. (Cargo test execution forbidden in this lane; source
+  assertions verified directly — same posture as prior lanes.)
+- Defect 3 (`data_ops.spl:38` comparison misparsed as a generic-argument
+  list): seed-smoke at this lane's base (fresh tracked seed, build-commit
+  46fe8f6b6def):
+  `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe compile
+  src/app/office/sheets/data_ops.spl -o build/p3boot11/data_ops.smf` —
+  **clean, rc=0**, no 38:18 generic-argument diagnostic; 119 KB artifact
+  emitted. The current parser accepts the exact file verbatim, so the
+  misparse itself is cleared on this base (the misleading-message half was
+  already resolved per the sibling bug's RESOLUTION 2026-08-17). Caveat: the
+  original repro was on the stage-3 self-hosted binary at a 1793-module
+  closure, so the seed-smoke clears the parse path but not the exact stage-3
+  scale conditions.
+- Defect 1 (stage-4 `load_sources` SEGV at the 1793-module closure): still
+  unverifiable here — it needs the stage-3 self-hosted binary on a POSIX
+  host; a full entry-closure native build is forbidden in this lane and the
+  Windows native-build hang is a known live defect (recorded, not retried).
+
+Exact command for the granted lane (clears Defect 1 if the build survives
+`load_sources`; keep Defect 3 reopened only if a `data_ops.spl` diagnostic
+reappears under stage-3 scale):
+
+```sh
+bootstrap/stage3/<triple>/simple native-build --source src/compiler \
+  --source src/app --source src/lib --entry src/app/cli/main.spl \
+  --entry-closure --threads 4 -o build/stage4/simple
+```
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**Mixed disposition (confirmed)** — Defect 2 SUPERSEDED (300s timeout in `src/compiler_rust/compiler/src/pipeline/native_project/mod.rs:720,728`, no 60s default); Defect 3 FIXED-observed per boot11 seed-smoke; Defect 1 (stage-4 `load_sources` SEGV at 1793-module closure) stays OPEN-BLOCKED, needs the stage-3 self-hosted binary on a POSIX host (exact command recorded in body).

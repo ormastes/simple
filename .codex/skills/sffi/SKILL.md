@@ -33,3 +33,13 @@ Database rule:
   including when the caller itself runs in interpreter mode.
 
 Detailed SFFI reference: `doc/07_guide/platform/ffi/sffi.md`.
+
+## rt_ mapping and pointer checks
+
+After changing an `rt_` extern, its C provider, or a Rust twin, run:
+
+- `python3 scripts/check/check-rt-pointer-ref-map.py`: pointer returns and parameters
+- `python3 scripts/check/check-rt-host-map.py`: per-host mapping
+- `python3 scripts/check/check-rt-c-contract-compile.py`: compiles Simple signatures against C (on demand)
+
+A C return that can be NULL must be `T?` in Simple. If the function has no error channel, fail closed in C with `SIMPLE_RT_NONNULL` (`src/runtime/runtime_nonnull.h`). Never change a return type on lint status alone. Change a width everywhere: `runtime.h`, every C provider and preprocessor branch, selfchecks, `runtime_sffi.rs` spec and tests, Rust twins, and LLVM declarations. UNKNOWN and UNTESTED are never PASS. Baselines only shrink. See `doc/05_design/compiler/rt_mapping_pointer_contract_design.md`.

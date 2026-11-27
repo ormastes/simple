@@ -1,0 +1,137 @@
+# `simple tldr [status] --out <dir> <file.spl>... [--receipt <rev> <tree>]`
+# `simple tldr history [--out <dir>] [-n N]`
+#
+# Emits each module's TLDR companion and fills the full-AST parse caches from
+# the same single parse (compiler.driver.cache.module_artifacts_v1). The test
+# runner's TLDR refresh invokes this same command, so producer and consumers
+# share one contract.
+#
+# `status` only verifies (no parse, no write): prints current/stale and exits 1
+# unless every companion is fresh. `--receipt <rev> <tree>` publishes the
+# immutable freshness receipt after an update, only when the result is current.
+
+use std.cli.cli_util (get_cli_args)
+use app.io.mod.{env_get}
+use compiler.driver.cache.source_reader_v1.{file_source_reader_v1}
+use compiler.driver.cache.tldr_freshness_v1.{tldr_freshness_verify_v1, tldr_freshness_current_v1,
+    tldr_freshness_receipt_render_v1, tldr_freshness_receipt_publish_v1,
+    tldr_freshness_receipt_path_v1, tldr_note_attach_v1, tldr_history_collect_v1,
+    tldr_history_render_row_v1}
+use compiler.driver.cache.postbuild_coordinator_v1.{postbuild_record_v1}
+use compiler.driver.cache.cache_root.{machine_cache_root}
+
+# PostBuildCoordinatorV1: settle this build's tldr kind (verified|stale|failed).
+# Generation is the frozen source inventory digest; unset means no build owns
+# this run, so nothing is recorded. Best effort: a refusal only warns.
+fn tldr_record_postbuild(state: text):
+    val generation = env_get("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? ""
+    if generation == "":
+        return
+    val err = postbuild_record_v1(machine_cache_root(), generation, generation, "tldr", state, "")
+    if err != "":
+        print "warning: tldr: {err}"
+
+fn tldr_history(out_root: text, n: i64) -> i64:
+    val rows = tldr_history_collect_v1(out_root, n)
+    if rows.len() == 0:
+        print "tldr: no git history available"
+        return 1
+    for r in rows:
+        print tldr_history_render_row_v1(r)
+    0
+
+fn tldr_usage() -> i64:
+    print "Usage: simple tldr history [--out <dir>] [-n N] | simple tldr [status] --out <dir> <file.spl> [more.spl...] [--receipt <rev> <tree>]"
+    1
+
+fn tldr_print_status(out_root: text, sources: [text]) -> i64:
+    val r = tldr_freshness_verify_v1(out_root, sources)
+    for p in r.stale:
+        print "stale: {p}"
+    for p in r.missing:
+        print "missing: {p}"
+    if tldr_freshness_current_v1(r):
+        tldr_record_postbuild("verified")
+        print "tldr: current {r.verified}/{r.expected} under {out_root}"
+        return 0
+    tldr_record_postbuild("stale")
+    print "tldr: not current {r.verified}/{r.expected} under {out_root}"
+    1
+
+fn main() -> i64:
+    val all_args = get_cli_args()
+    var out_root = ""
+    var sources: [text] = []
+    var status_only = false
+    var history_mode = false
+    var history_n = 10
+    var receipt_rev = ""
+    var receipt_tree = ""
+    var i = 0
+    while i < all_args.len():
+        val arg = all_args[i]
+        if arg.ends_with("tldr_entry.spl") or arg == "tldr":
+            i = i + 1
+            continue
+        if arg == "history":
+            history_mode = true
+            i = i + 1
+            continue
+        if arg == "-n" and i + 1 < all_args.len():
+            history_n = all_args[i + 1].to_int()
+            i = i + 2
+            continue
+        if arg == "status":
+            status_only = true
+            i = i + 1
+            continue
+        if arg == "--out" and i + 1 < all_args.len():
+            out_root = all_args[i + 1]
+            i = i + 2
+            continue
+        if arg == "--receipt" and i + 2 < all_args.len():
+            receipt_rev = all_args[i + 1]
+            receipt_tree = all_args[i + 2]
+            i = i + 3
+            continue
+        if arg.starts_with("--out="):
+            out_root = arg.substring(6)
+        elif arg == "--help" or arg == "-h":
+            return tldr_usage()
+        elif arg.ends_with(".spl"):
+            sources.push(arg)
+        i = i + 1
+    if history_mode:
+        return tldr_history(if out_root == "": (env_get("SIMPLE_TLDR_ROOT") ?? "build/tldr") else: out_root, history_n)
+    if out_root == "" or sources.len() == 0:
+        return tldr_usage()
+    if status_only:
+        return tldr_print_status(out_root, sources)
+    var failed = 0
+    for source in sources:
+        val error = file_source_reader_v1(out_root).update_tldr(source)
+        if error != "":
+            print "error: tldr: {error}"
+            failed = failed + 1
+    print "tldr: {sources.len() - failed}/{sources.len()} module(s) current under {out_root}"
+    if failed > 0:
+        tldr_record_postbuild("failed")
+        return 1
+    if receipt_tree != "":
+        val r = tldr_freshness_verify_v1(out_root, sources)
+        if not tldr_freshness_current_v1(r):
+            tldr_record_postbuild("stale")
+            print "error: tldr: not current, no receipt written"
+            return 1
+        val err = tldr_freshness_receipt_publish_v1(out_root, receipt_tree,
+            tldr_freshness_receipt_render_v1(r, receipt_rev, receipt_tree))
+        if err != "":
+            tldr_record_postbuild("failed")
+            print "error: tldr: {err}"
+            return 1
+        tldr_record_postbuild("verified")
+        print "tldr: receipt published for tree {receipt_tree}"
+        val warn = tldr_note_attach_v1(receipt_rev, tldr_freshness_receipt_path_v1(out_root, receipt_tree))
+        if warn != "":
+            print "warning: tldr: {warn}"
+    0

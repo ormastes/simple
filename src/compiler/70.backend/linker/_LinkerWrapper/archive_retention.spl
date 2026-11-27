@@ -9,6 +9,27 @@
 # MinGW currently has no equivalent runtime lookup owner, so it retains the
 # archive member without sending ELF-only export flags to the PE linker.
 
+fn _retained_is_32bit_x86_target(target_triple: text) -> bool:
+    val lower = target_triple.trim().lower()
+    if lower == "":
+        return false
+    val arch = if lower.contains("-"): lower.split("-")[0] else: lower
+    arch == "i686" or arch == "i386" or arch == "x86"
+
+fn _retained_cc_symbol(symbol: text, os: text, target_triple: text) -> text:
+    if os == "macos" or os == "darwin":
+        return "_" + symbol
+    if (os == "windows-mingw" or os == "windows") and _retained_is_32bit_x86_target(target_triple):
+        if not symbol.starts_with("?") and not symbol.starts_with("@"):
+            return "_" + symbol
+    symbol
+
+fn _retained_msvc_include_symbol(symbol: text, target_triple: text) -> text:
+    if _retained_is_32bit_x86_target(target_triple):
+        if not symbol.starts_with("?") and not symbol.starts_with("@"):
+            return "_" + symbol
+    symbol
+
 fn native_retained_symbol_direct_args(symbols: [text], os: text) -> [text]:
     var args: [text] = []
     var needs_darwin_export_dynamic = false
@@ -16,7 +37,7 @@ fn native_retained_symbol_direct_args(symbols: [text], os: text) -> [text]:
         if symbol == "":
             continue
         if os == "macos" or os == "darwin":
-            val linker_symbol = if symbol.starts_with("_"): symbol else: "_" + symbol
+            val linker_symbol = "_" + symbol
             args = args.push("-u")
             args = args.push(linker_symbol)
             needs_darwin_export_dynamic = true
@@ -27,18 +48,19 @@ fn native_retained_symbol_direct_args(symbols: [text], os: text) -> [text]:
         args = args.push("-export_dynamic")
     args
 
-fn native_retained_symbol_cc_args(symbols: [text], os: text) -> [text]:
+fn native_retained_symbol_cc_args_for_target(symbols: [text], os: text, target_triple: text) -> [text]:
     var args: [text] = []
     var needs_darwin_export_dynamic = false
     for symbol in symbols:
         if symbol == "":
             continue
         if os == "macos" or os == "darwin":
-            val linker_symbol = if symbol.starts_with("_"): symbol else: "_" + symbol
+            val linker_symbol = "_" + symbol
             args = args.push("-Wl,-u," + linker_symbol)
             needs_darwin_export_dynamic = true
         elif os == "windows-mingw":
-            args = args.push("-Wl,-u," + symbol)
+            val linker_symbol = _retained_cc_symbol(symbol, os, target_triple)
+            args = args.push("-Wl,-u," + linker_symbol)
         else:
             args = args.push("-Wl,--undefined=" + symbol)
             args = args.push("-Wl,--export-dynamic-symbol=" + symbol)
@@ -46,10 +68,18 @@ fn native_retained_symbol_cc_args(symbols: [text], os: text) -> [text]:
         args = args.push("-Wl,-export_dynamic")
     args
 
-fn native_retained_symbol_msvc_args(symbols: [text]) -> [text]:
+fn native_retained_symbol_cc_args(symbols: [text], os: text) -> [text]:
+    native_retained_symbol_cc_args_for_target(symbols, os, "")
+
+fn native_retained_symbol_msvc_args_for_target(symbols: [text], target_triple: text) -> [text]:
     var args: [text] = []
     for symbol in symbols:
         if symbol != "":
-            args = args.push("/INCLUDE:" + symbol)
+            # On 32-bit x86 COFF (m:x), /INCLUDE takes the object-level `_`-prefixed
+            # symbol while command-line /EXPORT: applies the x86 `_` prefix itself.
+            args = args.push("/INCLUDE:" + _retained_msvc_include_symbol(symbol, target_triple))
             args = args.push("/EXPORT:" + symbol)
     args
+
+fn native_retained_symbol_msvc_args(symbols: [text]) -> [text]:
+    native_retained_symbol_msvc_args_for_target(symbols, "")

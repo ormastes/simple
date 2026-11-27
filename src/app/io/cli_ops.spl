@@ -3,6 +3,7 @@
 
 use app.io.env_ops.{cwd}
 use std.nogc_sync_mut.io.windows_image_owner.{windows_image_path}
+use std.nogc_sync_mut.io.darwin_image_owner.{darwin_image_path}
 use app.io.process_ops.{process_run_direct, process_run_inherit, process_run_bounded}
 
 # Extern fn declarations (runtime resolves at file level)
@@ -23,7 +24,8 @@ use std.io_runtime.{mkdir_p}
 use std.io_runtime.{file_delete}
 use std.nogc_sync_mut.io.file_ops.{file_write_text_at}
 use std.nogc_sync_mut.sffi.io.{path_absolute}
-use std.nogc_sync_mut.io_runtime.{host_os}
+use std.nogc_sync_mut.sffi.platform.{platform_name_raw}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 extern fn print_raw(value: text) -> i64
 
 # --- Shell/file helpers (local copies to avoid circular imports) ---
@@ -50,11 +52,7 @@ fn cli_env_get(key: text) -> text:
     env_get(key)
 
 fn _cli_is_windows_platform() -> bool:
-    val os_env = cli_env_get("OS")
-    if os_env == nil:
-        false
-    else:
-        os_env.lower().contains("windows")
+    host_is_windows_host()
 
 pub struct _CliProcessResult:
     stdout: text
@@ -96,6 +94,7 @@ fn _cli_file_read_impl(path: text) -> text:
         case Ok(content): content
         case Err(_): ""
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _cli_file_write_impl", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn _cli_file_write_impl(path: text, content: text) -> bool:
     # rt_file_write_text is also mis-marshalled under the deployed JIT (4-arg
     # spec vs 2-arg C impl, seed runtime_sffi.rs:1548): delete + write-at-0.
@@ -107,6 +106,7 @@ fn _cli_file_write_impl(path: text, content: text) -> bool:
             file_write_text_at(path, 0, content)
         written >= 0
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _cli_file_copy_impl", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn _cli_file_copy_impl(src: text, dst: text) -> bool:
     # rt_file_copy is mis-marshalled under the deployed JIT
     # (seed runtime_sffi.rs:1557): stage via read + delete + write-at-0.
@@ -156,6 +156,7 @@ pub fn _cli_source_entry_executable(resolved_argv0: text, simple_binary: text, b
         return simple_binary
     resolved_argv0
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _cli_resolve_symlink", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn _cli_resolve_symlink(path: text) -> text:
     # rt_path_absolute is std::fs::canonicalize: it resolves symlink chains and
     # makes the path absolute IN-PROCESS, and falls back to a cwd-joined
@@ -186,8 +187,21 @@ fn _cli_resolve_symlink(path: text) -> text:
 # `ps -o comm= -p <our pid>` is safe here in a way `readlink -f /proc/self/exe`
 # is not: the trap those comments warn about is a spawned helper describing
 # ITSELF, and `ps` is asked about a PID we name, not about its own process.
+fn _cli_validated_image_path(result: Result<text, text>) -> text:
+    match result:
+        case Ok(path):
+            if path == "" or path.ends_with(".spl") or not _cli_file_exists_impl(path):
+                return ""
+            val resolved = _cli_resolve_symlink(path)
+            if resolved == "" or resolved.ends_with(".spl") or not _cli_file_exists_impl(resolved):
+                return ""
+            resolved
+        case Err(_):
+            ""
+
 fn _cli_self_exe_via_pid_query(require_absolute: bool = false) -> text:
-    val windows = if require_absolute: host_os() == "windows" else: _cli_is_windows_platform()
+    val windows = _cli_is_windows_platform()
+    val raw_platform = platform_name_raw()
     if windows:
         # Windows has neither /proc nor `ps`. Returning "" here left argv[0]
         # (the `.spl` entry) as the "executable": `simple test` spawned the
@@ -199,7 +213,14 @@ fn _cli_self_exe_via_pid_query(require_absolute: bool = false) -> text:
         if win_code != 0 or win_path == "" or win_path.ends_with(".spl") or not _cli_file_exists_impl(win_path):
             return ""
         return win_path
-    if host_os() == "freebsd":
+    if raw_platform == "macos":
+        # Prefer in-process dyld `_NSGetExecutablePath`: setuid `/bin/ps` is
+        # denied under macOS Seatbelt sandboxes. Fall through only on Err for
+        # older un-updated seed interpreters.
+        val darwin_path = _cli_validated_image_path(darwin_image_path())
+        if darwin_path != "":
+            return darwin_path
+    if raw_platform == "freebsd":
         # FreeBSD has no /proc/self/exe and `ps -o comm=` is the bare name;
         # `procstat -b <pid>` prints "PID COMM OSREL PATH" with the full path.
         val (ps_out, _ps_err, ps_code) = process_run_bounded("procstat", ["-h", "-b", "{getpid()}"], 2000, 65536)
@@ -233,13 +254,11 @@ fn _cli_self_exe_via_pid_query(require_absolute: bool = false) -> text:
 
 pub fn cli_kernel_executable_path() -> text:
     # Strict bootstrap lineage: query our own process image, never argv or env.
-    if host_os() == "windows":
-        match windows_image_path():
-            case Ok(path):
-                if path == "" or not _cli_file_exists_impl(path): return ""
-                return _cli_resolve_symlink(path)
-            case Err(_): return ""
-    if host_os() != "windows":
+    if _cli_is_windows_platform():
+        return _cli_validated_image_path(windows_image_path())
+    if platform_name_raw() == "macos":
+        return _cli_validated_image_path(darwin_image_path())
+    if not _cli_is_windows_platform():
         val proc_path = _cli_resolve_symlink("/proc/self/exe")
         if proc_path != "" and proc_path != "/proc/self/exe" and _cli_file_exists_impl(proc_path):
             return proc_path
@@ -249,6 +268,15 @@ pub fn cli_kernel_executable_path() -> text:
     _cli_resolve_symlink(reported)
 
 fn _cli_current_exe_path() -> text:
+    # The running image belongs to the kernel, independently of OS, argv0 or
+    # SIMPLE_BINARY. In particular, Windows _fullpath("/proc/self/exe") is
+    # lexical and can return a nonexistent path when OS is absent.
+    if _cli_is_windows_platform():
+        return cli_kernel_executable_path()
+    if platform_name_raw() == "macos":
+        val macos_path = cli_kernel_executable_path()
+        if macos_path != "":
+            return macos_path
     # Prefer the kernel's record of the real executable: argv0-based
     # resolution breaks under the bin/simple symlink (relative argv0 +
     # empty cwd in spawned runners yields an empty seed-sibling path, so
@@ -289,8 +317,8 @@ fn _cli_current_exe_path() -> text:
         return entry
     _cli_self_exe_via_pid_query()
 
-# Process-lifetime cache: the executable never changes, and on Windows the
-# lookup spawns PowerShell (~0.5-1.5s), so pay it at most once per process.
+# Process-lifetime cache: the executable never changes. Retain the validated
+# kernel image path so repeated Windows lookups need no query or allocation.
 var _cli_current_exe_cache = ""
 
 pub fn cli_current_exe_path() -> text:

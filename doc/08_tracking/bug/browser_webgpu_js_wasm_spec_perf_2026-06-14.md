@@ -44,3 +44,26 @@ integration spec while keeping the broad scenario manual intact.
 - **inferred**: the resolver's own help text points at `test/03_system/app/browser/feature\plugins`, a backslash-joined relative path, which suggests a Windows path-separator problem in relative import resolution rather than a genuinely missing module. Not confirmed, and not this bug.
 - Verdict: OPEN. The perf/splitting follow-up is still valid work, but on this host the spec has a harder problem than being slow.
 
+
+## Resolution 2026-11-13 — load blocker fixed; perf item still OPEN
+
+- **Root cause of the load failure (measured, Linux, seed `seed-whileval`):** not a
+  Windows path-separator problem. The spec imported
+  `plugins.backend_wasm.wasm_codegen_adapter`, a module that has never existed at
+  that path (the adapter lives at `src/compiler/70.backend/backend/wasm_codegen_adapter.spl`,
+  imported elsewhere as `compiler.backend.wasm_codegen_adapter`), and built a
+  `CompileOptions` struct that `backend_types.spl` no longer defines (it is
+  `BackendCompileOptions`, with three more fields). Red on `origin/release/1.0.0`:
+  `error: semantic: Cannot resolve module: plugins.backend_wasm.wasm_codegen_adapter`,
+  `outcome=ERROR declared>=127 executed=0`.
+- **Fix:** import `compiler.backend.wasm_codegen_adapter`, build wasm32 options from
+  `compileoptions_default_options()`. Once the spec loaded, three Simple-script cases
+  failed on `warnings.len() == 0`: the runtime always records the native-globals
+  diagnostic (`browser_session_runtime.spl`, also pinned by
+  `browser_script_execution_spec` and `browser_renderer_protocol_spec`). Those cases
+  now require exactly that one warning, with all three Node globals `undefined`.
+  The same stale import was fixed in `test/system/...` (twin) and
+  `test/02_integration/compiler/wasm_e2e_spec.spl`.
+- **Green:** `executed=127 passed=127 failed=0` (twin: 106/106; wasm_e2e: 4/4).
+- **Perf:** 130.5 s on the seed interpreter — not comparable to the 56 s figure above,
+  so the near-threshold item is not resolved; it needs a warmed-binary measurement.

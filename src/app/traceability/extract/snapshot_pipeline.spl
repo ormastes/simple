@@ -1,22 +1,43 @@
 # Exact selected-scope graph construction with content-derived identities.
 # This adapter binds inputs, but cannot authenticate a policy or admit evidence.
 use std.common.traceability.model.*
-use std.common.traceability.schema.{trace_path_valid}
+use std.common.traceability.trace_ids_v1.{TraceOverridePermissionV1}
+use std.common.traceability.schema.{trace_path_parse_v1}
 use std.common.traceability.resolve.{resolve_trace_graph}
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use app.traceability.extract.snapshot_facts.{extract_snapshot_trace_facts}
+use std.common.traceability.sidecar_v1.{TraceSidecarSourceV1, TraceSidecarReferenceV1}
+use std.common.traceability.legacy_bugs_v1.{LegacyBugRowV1}
 
 pub struct TraceSnapshotScope:
     selected_roots: [text]
     authority_id: text
     closure_kind: text
 
+pub enum TraceAdmissionEligibility:
+    Eligible
+    Ineligible
+
 pub struct TraceSnapshotBuild:
     graph: TraceGraph
     scope: TraceSnapshotScope
-    admission_eligible: bool
+    admission_eligible: TraceAdmissionEligibility
+    # Sidecar inventories: identity-bound, never graph claims/locators.
+    sidecar_sources: [TraceSidecarSourceV1] = []
+    sidecar_references: [TraceSidecarReferenceV1] = []
+    legacy_bugs: [LegacyBugRowV1] = []
+
+fn authority_review_wire(authority: TraceAuthority) -> text:
+    if authority.review_id.is_some():
+        return authority.review_id.unwrap().value
+    ""
+
+fn authority_expiry_wire(authority: TraceAuthority) -> text:
+    if authority.expires_snapshot_id.is_some():
+        return authority.expires_snapshot_id.unwrap().value
+    ""
 
 fn identity_texts(values: [text]) -> SdnValue:
     var items: [SdnValue] = []
@@ -56,21 +77,29 @@ fn scope_contains(roots: [text], path: text) -> bool:
 # turn its own scope label into an independently admitted repository closure.
 pub fn build_snapshot_trace_graph(snapshot: SnapshotInput, policy: TracePolicy,
     declarations: [text], scope: TraceSnapshotScope) -> Result<TraceSnapshotBuild, text>:
+    build_snapshot_trace_graph_with_sidecar_v1(snapshot, policy, declarations, scope, [], [], [])
+
+# Sidecar sources enter the input manifest (so generation and cursors bind
+# them); sidecar nodes join the facts before resolution; sidecar diagnostics
+# are warnings that never change completeness. No claim or locator is added.
+pub fn build_snapshot_trace_graph_with_sidecar_v1(snapshot: SnapshotInput, policy: TracePolicy,
+    declarations: [text], scope: TraceSnapshotScope, sources: [TraceSidecarSourceV1],
+    sidecar_nodes: [TraceNode], sidecar_diagnostics: [TraceDiagnostic]) -> Result<TraceSnapshotBuild, text>:
     if scope.closure_kind != "selected_scope" or scope.selected_roots.len() == 0 or scope.selected_roots.len() > 256:
         return Err("TRACE-SNAPSHOT-INCOMPLETE: explicit selected scope required")
-    if not snapshot.complete or snapshot.subject.snapshot_id == "" or snapshot.subject.repository_id == "":
+    if snapshot.complete == TraceCompletenessV1.Incomplete or snapshot.subject.snapshot_id == "" or snapshot.subject.repository_id == "":
         return Err("TRACE-SNAPSHOT-INCOMPLETE: immutable selected inventory required")
     if snapshot.artifacts.len() > 40000 or policy.conventions.len() > 4096 or policy.authorities.len() > 100000 or declarations.len() > 40000:
         return Err("TRACE-SNAPSHOT-INCOMPLETE: input manifest record budget exhausted")
     var roots: Dict<text, bool> = {}
     for root in scope.selected_roots:
-        if not trace_path_valid(root) or roots.contains_key(root):
+        if trace_path_parse_v1(root).is_none() or roots.contains_key(root):
             return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid or duplicate scope root")
         roots[root] = true
     var artifact_paths: Dict<text, bool> = {}
     var artifacts: [SdnValue] = []
     for artifact in snapshot.artifacts:
-        if not trace_path_valid(artifact.path) or artifact.blob_id == "" or artifact.visibility == "" or not scope_contains(scope.selected_roots, artifact.path) or artifact_paths.contains_key(artifact.path):
+        if trace_path_parse_v1(artifact.path).is_none() or artifact.blob_id == "" or artifact.visibility == "" or not scope_contains(scope.selected_roots, artifact.path) or artifact_paths.contains_key(artifact.path):
             return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid, duplicate or out-of-scope artifact")
         artifact_paths[artifact.path] = true
         artifacts.push(identity_record(["path", "blob_id", "content_sha256", "visibility"],
@@ -89,18 +118,18 @@ pub fn build_snapshot_trace_graph(snapshot: SnapshotInput, policy: TracePolicy,
     var rules: [SdnValue] = []
     for rule in policy.conventions:
         rules.push(identity_record(["id", "source_root", "target_root", "source_suffix", "target_suffix", "relation", "version"],
-            [rule.id, rule.source_root, rule.target_root, rule.source_suffix, rule.target_suffix, relation_name(rule.relation), rule.version]))
+            [rule.id.value, rule.source_root.value, rule.target_root.value, rule.source_suffix.value, rule.target_suffix.value, relation_name(rule.relation), rule.version.value]))
     var authorities: [SdnValue] = []
     for authority in policy.authorities:
         var fields: Dict<text, SdnValue> = {}
         fields["declaration"] = identity_record(["origin_id", "relation", "scope_id", "owner_path", "review_id", "reason", "expires_snapshot_id"],
-            [authority.origin_id, relation_name(authority.relation), authority.scope_id, authority.owner_path, authority.review_id, authority.reason, authority.expires_snapshot_id])
-        fields["allow_override"] = SdnValue.Bool(authority.allow_override)
+            [authority.origin_id.value, relation_name(authority.relation), authority.scope_id.value, authority.owner_path.value, authority_review_wire(authority), authority.reason, authority_expiry_wire(authority)])
+        fields["allow_override"] = SdnValue.Bool(authority.override_permission == TraceOverridePermissionV1.Allowed)
         authorities.push(SdnValue.Dict(fields))
     var policy_fields: Dict<text, SdnValue> = {}
-    policy_fields["id"] = SdnValue.String(policy.id)
-    policy_fields["max_nodes"] = SdnValue.Int(policy.max_nodes)
-    policy_fields["max_claims"] = SdnValue.Int(policy.max_claims)
+    policy_fields["id"] = SdnValue.String(policy.id.value)
+    policy_fields["max_nodes"] = SdnValue.Int(policy.max_nodes.value)
+    policy_fields["max_claims"] = SdnValue.Int(policy.max_claims.value)
     policy_fields["conventions"] = identity_rows(rules)
     policy_fields["authorities"] = identity_rows(authorities)
     var inputs: Dict<text, SdnValue> = {}
@@ -113,12 +142,34 @@ pub fn build_snapshot_trace_graph(snapshot: SnapshotInput, policy: TracePolicy,
     inputs["declarations"] = identity_texts(trace_sorted_ids(declarations))
     inputs["policy"] = SdnValue.Dict(policy_fields)
     inputs["artifacts"] = identity_rows(artifacts)
+    if sources.len() > 0:
+        if sources.len() > 64: return Err("TRACE-SNAPSHOT-INCOMPLETE: sidecar source budget exhausted")
+        var source_rows: [SdnValue] = []
+        for source in sources:
+            if trace_path_parse_v1(source.path).is_none() or source.content_sha256 == "" or source.kind == "":
+                return Err("TRACE-SNAPSHOT-INCOMPLETE: sidecar source needs kind, safe path and content identity")
+            var fields: Dict<text, SdnValue> = {}
+            fields["kind"] = SdnValue.String(source.kind)
+            fields["path"] = SdnValue.String(source.path)
+            fields["content_sha256"] = SdnValue.String(source.content_sha256)
+            fields["row_count"] = SdnValue.Int(source.row_count.value)
+            source_rows.push(SdnValue.Dict(fields))
+        inputs["sidecar_sources"] = identity_rows(source_rows)
     val manifest_id = "inputs:sha256:" + identity_digest(SdnValue.Dict(inputs))
     # Structural identity excludes the candidate tree, which may contain its
     # own generated page. Generation separately binds the entire exact subject.
     val generation = identity_record(["domain", "input_manifest_id", "snapshot_id", "kind", "revision_id", "tree_id"],
         ["simple.trace.graph-generation/v1", manifest_id, snapshot.subject.snapshot_id, snapshot.subject.kind, snapshot.subject.revision_id, snapshot.subject.tree_id])
     val generation_id = "generation:sha256:" + identity_digest(generation)
-    val facts = extract_snapshot_trace_facts(snapshot, policy, declarations, manifest_id, generation_id)
-    val graph = resolve_trace_graph(facts, policy)
-    Ok(TraceSnapshotBuild(graph: graph, scope: scope, admission_eligible: false))
+    var facts = extract_snapshot_trace_facts(snapshot, policy, declarations, manifest_id, generation_id)
+    if sidecar_nodes.len() > 0:
+        # A registered declaration keeps its node; the sidecar never overrides it.
+        var declared: Dict<text, bool> = {}
+        for node in facts.nodes: declared[node.id] = true
+        for node in sidecar_nodes:
+            if declared.contains_key(node.id): continue
+            declared[node.id] = true
+            facts.nodes.push(node)
+    var graph = resolve_trace_graph(facts, policy)
+    for diagnostic in sidecar_diagnostics: graph.diagnostics.push(diagnostic)
+    Ok(TraceSnapshotBuild(graph: graph, scope: scope, admission_eligible: TraceAdmissionEligibility.Ineligible, sidecar_sources: sources))

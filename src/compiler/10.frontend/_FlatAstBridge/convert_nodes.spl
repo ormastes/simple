@@ -1,6 +1,9 @@
 # Explicit payload owners survive import-surface projection.
+use compiler.frontend.core._AstExpr.nodes.{asm_arm_owner_abi, asm_arm_owner_archs, asm_arm_owner_asm_text, asm_arm_owner_backend, asm_arm_owner_error_msg, asm_arm_owner_is_compile_error, asm_arm_owner_is_wildcard, asm_arm_owner_os, asm_arm_owner_ver_ops, asm_arm_owner_ver_vals}
 use compiler.frontend.parser_types_expr.{Expr, ExprKind, Interpolation}
+use compiler.frontend.parser_types_utils.{parse_float_literal}
 use compiler.frontend.core.ast_expr.{expr_get_call_type_args}
+use compiler.core.unit_scope.{unit_suffix_scope_error}
 use compiler.core.ast_stmt.{STMT_USE_IMPORT}
 # Flat AST Bridge: flat expr/stmt/type/decl conversion helpers.
 use compiler.frontend.flat_ast_bridge.*
@@ -12,11 +15,13 @@ use compiler.frontend.trace_policy.{frontend_compiler_trace_enabled}
 # frontend path when the newer parser surface is unavailable.
 
 use compiler.core.parser.{parser_error, parser_error_at, parser_parse_type, parser_advance, par_kind_get}
-use compiler.frontend.core.lexer.{lex_init_with_path}
+use compiler.core.parser_expr.{expr_is_arrow_update}
+use compiler.frontend.core.lexer.{lex_init_with_path, lex_source_byte_offset, lex_source_char_offset, lexer_state_take,
+    lexer_state_install}
 use compiler.core.tokens.{TOK_EOF}
-use compiler.core.parser_decls.{parse_module_body}
+use compiler.core.parser_decls.{parse_module_body, parser_unsafe_annotation_present, parser_unsafe_annotation_caps, parser_unsafe_annotation_reason}
 use compiler.frontend.core.string_interpolation_expand.{
-    parse_interpolation_fragment, interpolation_literalize_region
+    parse_interpolation_fragment, parse_interpolation_fragment_at, interpolation_literalize_region, interpolation_note_malformed_region
 }
 use compiler.core.ast.*
 use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
@@ -25,7 +30,6 @@ use compiler.core.ast.{decl_get_is_async, decl_get_is_gpu_kernel, decl_get_rt_ha
 use compiler.core.ast.{decl_get_param_types, decl_get_ret_type, decl_get_visibility_text, module_decl_at, module_decl_count_get}
 use compiler.core.ast.{decl_get_gpu_target_text, decl_get_gpu_target_arg_name_text, decl_get_gpu_backends_text}
 use compiler.core.ast.{decl_get_is_hardware, decl_get_clocked_args, decl_get_vhdl_generic_args, decl_get_flatten_struct_output}
-use compiler.core.ast.{decl_is_packed}
 use compiler.core.ast.{elif_get_else}
 use compiler.core.ast_expr.*
 use compiler.frontend.core._AstExpr.accessors.*
@@ -102,7 +106,7 @@ fn flat_is_bootstrap_entry_path(path: text) -> bool:
         return path == native_entry or path.ends_with("/" + native_entry)
     path.ends_with("bootstrap_main.spl")
 
-fn flat_bootstrap_function_count() -> i64:
+pub fn flat_bootstrap_function_count() -> i64:
     if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and flat_bridge_trace_enabled():
         eprint("[flat-bridge] fn-count:start")
     var count = 0
@@ -117,7 +121,7 @@ fn flat_bootstrap_function_count() -> i64:
         eprint("[flat-bridge] fn-count:done {count}")
     count
 
-fn flat_bootstrap_function_at(index: i64) -> ParserFunction:
+pub fn flat_bootstrap_function_at(index: i64) -> ParserFunction:
     if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and flat_bridge_trace_enabled():
         eprint("[flat-bridge] fn-at:start {index}")
     var seen = 0
@@ -158,7 +162,7 @@ fn flat_bootstrap_function_at(index: i64) -> ParserFunction:
         make_span()
     )
 
-fn flat_bootstrap_function_decl_at(index: i64) -> i64:
+pub fn flat_bootstrap_function_decl_at(index: i64) -> i64:
     var seen = 0
     var i = 0
     val decl_count = module_decl_count_get()
@@ -177,14 +181,22 @@ fn flat_bootstrap_body_at(index: i64) -> Block:
 fn make_span() -> Span:
     Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0)
 
-fn flat_expr_span(idx: i64) -> Span:
-    val span_id = expr_get_span(idx)
+fn flat_span_from_id(span_id: i64) -> Span:
     if not span_is_valid(span_id):
         return make_span()
-    val start = span_start(span_id)
-    val end = span_end(span_id)
+    # Expression parsers record lexer CHAR offsets; declaration and import
+    # spans (and LexSpan) are UTF-8 BYTE offsets. Normalise here while the
+    # source lexer is still current.
+    val start = lex_source_byte_offset(span_start(span_id))
+    val end = lex_source_byte_offset(span_end(span_id))
     Span(start: start, end: end, line: span_line(span_id), col: span_col(span_id),
         file: module_get_path(), length: end - start)
+
+fn flat_expr_span(idx: i64) -> Span:
+    flat_span_from_id(expr_get_span(idx))
+
+fn flat_stmt_span(idx: i64) -> Span:
+    flat_span_from_id(stmt_get_span(idx))
 
 # Lane NIL1 (convert-nodes-loud-fallback, doc/08_tracking/bug/
 # spawn_call_expr_silently_becomes_nillit_2026-07-29.md): convert_flat_expr and
@@ -257,7 +269,9 @@ fn flat_empty_module(path: text) -> ParserModule:
     )
 
 fn convert_decl_visibility(idx: i64) -> Visibility:
-    val vis_text = decl_get_visibility_text(idx)
+    convert_visibility_text(decl_get_visibility_text(idx))
+
+fn convert_visibility_text(vis_text: text) -> Visibility:
     if vis_text == "public":
         return Visibility.Public
     if vis_text == "peer":
@@ -651,7 +665,7 @@ fn flat_compound_assign_op(kind: i64) -> AssignOp:
 # `-x` (Neg), kind == TOK_NOT (57) is `not x` (Not), kind 120 is `&x`
 # (Ref), kind -120 is `&mut x` (RefMut), and kind == TOK_TILDE (123) is
 # `~x` (BitNot). Mirrors op_kind_to_binop above.
-fn op_kind_to_unaryop(kind: i64) -> UnaryOp:
+pub fn op_kind_to_unaryop(kind: i64) -> UnaryOp:
     if kind == 57: return UnaryOp.Not
     if kind == 120: return UnaryOp.Ref
     if kind == -120: return UnaryOp.RefMut
@@ -660,13 +674,17 @@ fn op_kind_to_unaryop(kind: i64) -> UnaryOp:
     UnaryOp.Neg
 
 # Convert an expression-form if/else branch (stored as an EXPR id) into a Block.
-# Block-form branches are EXPR_BLOCK (tag 18) carrying STMTS; ternary/inline
+# Block-form branches are EXPR_BLOCK/EXPR_DO_BLOCK carrying STMTS; ternary/inline
 # branches are a bare expr wrapped as a single expression statement. Used by the
 # EXPR_IF bridge so expression-if then/else bodies are not dropped.
 fn flat_if_branch_block(branch_idx: i64, span: Span) -> Block:
     if branch_idx < 0:
         return Block(stmts: [], span: span)
-    if expr_get_tag(branch_idx) == 18:
+    val branch_tag = expr_get_tag(branch_idx)
+    if branch_tag == EXPR_BLOCK or branch_tag == EXPR_DO_BLOCK:
+        if branch_tag == EXPR_DO_BLOCK and expr_get_str(branch_idx) != "":
+            parser_error("ce builder expression is not supported by the flat AST bridge: " + expr_get_str(branch_idx))
+            return Block(stmts: [], span: span)
         val b_stmts = expr_get_stmts(branch_idx)
         var b_body: [Stmt] = []
         var bi = 0
@@ -677,7 +695,9 @@ fn flat_if_branch_block(branch_idx: i64, span: Span) -> Block:
                 b_body.push(expanded[bj])
                 bj = bj + 1
             bi = bi + 1
-        val tail_idx = expr_get_left(branch_idx)
+        # Only EXPR_BLOCK owns a separate LEFT tail. Do-block tails already
+        # live in STMTS; never interpret an unrelated slot as another child.
+        val tail_idx = if branch_tag == EXPR_BLOCK: expr_get_left(branch_idx) else: -1
         if tail_idx >= 0:
             b_body.push(Stmt(
                 kind: StmtKind.Expr(convert_flat_expr(tail_idx)),
@@ -746,7 +766,7 @@ fn flat_asm_expr_with_operands(idx: i64, span: Span) -> AsmExpr:
             kind: kind,
             location: location,
             value: convert_flat_expr(values[operand_index]),
-            output_value: if operand_index < outputs.len() and outputs[operand_index] >= 0: convert_flat_expr(outputs[operand_index]) else: nil,
+            output_value: if operand_index < outputs.len() and outputs[operand_index] >= 0: convert_flat_expr(outputs[operand_index]) else: None,
             span: span
         ))
         operand_index = operand_index + 1
@@ -762,35 +782,35 @@ fn flat_asm_expr_with_operands(idx: i64, span: Span) -> AsmExpr:
 
 fn flat_asm_spec_from_arm(arm_idx: i64, span: Span) -> AsmTargetSpec:
     var versions: [AsmVersionConstraint] = []
-    val ops = asm_arm_ver_ops[arm_idx]
-    val vals = asm_arm_ver_vals[arm_idx]
+    val ops = asm_arm_owner_ver_ops(arm_idx)
+    val vals = asm_arm_owner_ver_vals(arm_idx)
     var vi = 0
     while vi < ops.len() and vi < vals.len():
         versions.push(AsmVersionConstraint(op: ops[vi], version: vals[vi]))
         vi = vi + 1
     AsmTargetSpec(
-        archs: flat_copy_text_list(asm_arm_archs[arm_idx]),
-        has_os: asm_arm_os[arm_idx] != "",
-        os: asm_arm_os[arm_idx],
-        has_abi: asm_arm_abi[arm_idx] != "",
-        abi: asm_arm_abi[arm_idx],
-        has_backend: asm_arm_backend[arm_idx] != "",
-        backend: asm_arm_backend[arm_idx],
+        archs: flat_copy_text_list(asm_arm_owner_archs(arm_idx)),
+        has_os: asm_arm_owner_os(arm_idx) != "",
+        os: asm_arm_owner_os(arm_idx),
+        has_abi: asm_arm_owner_abi(arm_idx) != "",
+        abi: asm_arm_owner_abi(arm_idx),
+        has_backend: asm_arm_owner_backend(arm_idx) != "",
+        backend: asm_arm_owner_backend(arm_idx),
         version_constraints: versions,
         span: span
     )
 
 fn flat_asm_match_arm(arm_idx: i64, span: Span) -> AsmMatchArm:
-    val is_compile_error = asm_arm_is_compile_error[arm_idx]
-    val wildcard = asm_arm_is_wildcard[arm_idx]
+    val is_compile_error = asm_arm_owner_is_compile_error(arm_idx)
+    val wildcard = asm_arm_owner_is_wildcard(arm_idx)
     AsmMatchArm(
         has_spec: not wildcard,
         spec: flat_asm_spec_from_arm(arm_idx, span),
         is_wildcard: wildcard,
         has_asm_body: not is_compile_error,
-        asm_body: flat_asm_expr(asm_arm_asm_text[arm_idx], span),
+        asm_body: flat_asm_expr(asm_arm_owner_asm_text(arm_idx), span),
         is_compile_error: is_compile_error,
-        error_message: asm_arm_error_msg[arm_idx],
+        error_message: asm_arm_owner_error_msg(arm_idx),
         span: span
     )
 
@@ -820,13 +840,24 @@ fn flat_bridge_build_string_regions(value: text, span: Span) -> (text, [Interpol
     var copied_until = 0
     var region_start = 0
     var depth = 0
-    var inner_parts: [text] = []
+    # Source position of each region's first inner character, so the
+    # sub-parsed fragment's spans can be rebased onto the real source line
+    # (fragment-relative spans made every receiver at a region start `:1:1`).
+    # Only ordinary `"..."` literals interpolate (triple-quoted and `'`/r-prefixed
+    # ones are raw: lexer_struct.spl scan_string / primary_expr.spl), and an
+    # ordinary literal cannot contain a real newline, so every `\n` in the
+    # stored (escape-DECODED) value is an escape: the region is on the
+    # literal's own line. The column is exact when no escape precedes the
+    # region and short by the escapes' extra source bytes otherwise.
+    var region_line = 0
+    var region_col = 0
+    var region_offset = 0
     var i = 0
     val n = value.len()
     while i < n:
         val ch = value[i:i + 1]
         val ch_next = if i + 1 < n: value[i + 1:i + 2] else: ""
-        if depth == 0 and ch == "{" and ch_next == "{":
+        if depth == 0 and ch == "{{" and ch_next == "{{":
             # `{{` escape (Python f-string / Rust format! parity; doc
             # interp_brace_literal_collides_with_string_interpolation): a
             # literal `{` written doubled so it is never mistaken for the
@@ -835,24 +866,36 @@ fn flat_bridge_build_string_regions(value: text, span: Span) -> (text, [Interpol
             # doubled-brace skip so the literal-segment positions stay
             # aligned with this function's interps list.
             i = i + 1
-        elif depth == 0 and ch == "}" and ch_next == "}":
+        elif depth == 0 and ch == "}}" and ch_next == "}}":
             # `}}` escape, mirror of `{{` above.
             i = i + 1
-        elif depth == 0 and ch == "{":
+        elif depth == 0 and ch == "{{":
             depth = 1
             region_start = i
-            inner_parts = []
-        elif depth > 0 and ch == "{":
+            # span.start is a BYTE offset (a converted Span) and i a code-point
+            # index into the value; the span pool records CHAR offsets, which
+            # flat_expr_span converts to bytes once. Convert only the byte
+            # base, then add the code-point distance.
+            region_offset = lex_source_char_offset(span.start + 1) + i + 1
+            if span.line > 0:
+                region_line = span.line
+                region_col = span.col + 1 + i + 1
+        elif depth > 0 and ch == "{{":
             depth = depth + 1
-            inner_parts.push(ch)
-        elif depth > 0 and ch == "}":
+        elif depth > 0 and ch == "}}":
             depth = depth - 1
             if depth == 0:
-                val part_idx = parse_interpolation_fragment(inner_parts.join(""))
+                # Slice the region from its source bounds instead of retaining
+                # one text and array slot per character; nested braces stay in.
+                # Code-point indices, so code-point `[a:b]` cuts: byte-offset
+                # `substring` split a preceding multibyte character
+                # (nonascii_interpolation_byte_char_slice_cache_store_2026-11-13).
+                val part_idx = parse_interpolation_fragment_at(value[region_start + 1:i], region_offset, region_line, region_col)
                 if part_idx < 0:
-                    chunks.push(value.substring(copied_until, region_start))
+                    interpolation_note_malformed_region(value[region_start:i + 1])
+                    chunks.push(value[copied_until:region_start])
                     chunks.push(interpolation_literalize_region(
-                        value.substring(region_start, i + 1)))
+                        value[region_start:i + 1]))
                     copied_until = i + 1
                 else:
                     interps.push(Interpolation(
@@ -861,16 +904,13 @@ fn flat_bridge_build_string_regions(value: text, span: Span) -> (text, [Interpol
                         format: "",
                         span: span
                     ))
-            else:
-                inner_parts.push(ch)
-        elif depth > 0:
-            inner_parts.push(ch)
         i = i + 1
     if depth != 0:
+        interpolation_note_malformed_region(value[region_start:n])
         return (value, [])
     if copied_until == 0:
         return (value, interps)
-    chunks.push(value.substring(copied_until, n))
+    chunks.push(value[copied_until:n])
     (chunks.join(""), interps)
 
 fn flat_bridge_decode_brace_escapes(value: text) -> text:
@@ -897,16 +937,16 @@ fn flat_bridge_decode_brace_escapes(value: text) -> text:
     while i < n:
         val ch = value[i:i + 1]
         val ch_next = if i + 1 < n: value[i + 1:i + 2] else: ""
-        if ch == "{" and ch_next == "{":
+        if ch == "{{" and ch_next == "{{":
             if run_start < i:
                 parts.push(value[run_start:i])
-            parts.push("{")
+            parts.push("{{")
             i = i + 2
             run_start = i
-        elif ch == "}" and ch_next == "}":
+        elif ch == "}}" and ch_next == "}}":
             if run_start < i:
                 parts.push(value[run_start:i])
-            parts.push("}")
+            parts.push("}}")
             i = i + 2
             run_start = i
         else:
@@ -914,6 +954,17 @@ fn flat_bridge_decode_brace_escapes(value: text) -> text:
     if run_start < n:
         parts.push(value[run_start:n])
     parts.join("")
+
+# Float literals convert to the value form ExprKind.FloatLit(f64) by default.
+# Two contexts must instead keep the exact decimal spelling as
+# ExprKind.FloatLexeme(text): module-level const/val initializers (MIR folds
+# a negated float const by negating the lexeme text; unary_literal_module_
+# const_static_spec and imported_global_infer_storage_spec pin that) and
+# float literal match patterns (HIR/MIR match on the lexeme text;
+# float_literal_pattern_bridge_spec pins that). The owner module sets this
+# flag around those conversions; every other float literal rides the f64
+# value form.
+pub var flat_bridge_lexeme_float_literals: bool = false
 
 fn convert_flat_expr(idx: i64) -> Expr:
     if idx < 0:
@@ -926,14 +977,16 @@ fn convert_flat_expr(idx: i64) -> Expr:
     if tag == EXPR_INT_LIT:
         return Expr(kind: ExprKind.IntLit(expr_get_int(idx)), span: span)
     if tag == EXPR_FLOAT_LIT:
-        return Expr(kind: ExprKind.FloatLexeme(expr_get_float(idx)), span: span)
+        if flat_bridge_lexeme_float_literals:
+            return Expr(kind: ExprKind.FloatLexeme(expr_get_float(idx)), span: span)
+        return Expr(kind: ExprKind.FloatLit(parse_float_literal(expr_get_float(idx))), span: span)
     if tag == EXPR_STRING_LIT:
         val str_val = expr_get_str(idx)
         if expr_get_int(idx) != 0:
             return Expr(kind: ExprKind.StringLit(str_val, None), span: span)
         # Ordinary literals dominate this path. Avoid interpolation parsing and
         # brace-decoder allocation when no brace can affect either operation.
-        if not str_val.contains("{") and not str_val.contains("}"):
+        if not str_val.contains("{{") and not str_val.contains("}}"):
             return Expr(kind: ExprKind.StringLit(str_val, None), span: span)
         val (str_regions_val, str_interps) = flat_bridge_build_string_regions(str_val, span)
         if str_interps.len() > 0:
@@ -942,19 +995,47 @@ fn convert_flat_expr(idx: i64) -> Expr:
             # No real `{expr}` placeholder (str_interps is empty). Decode any
             # `{{`/`}}` escapes directly since nothing downstream will (see
             # flat_bridge_decode_brace_escapes).
-            if not str_val.contains("{{") and not str_val.contains("}}"):
-                return Expr(kind: ExprKind.StringLit(str_val, None), span: span)
-            return Expr(kind: ExprKind.StringLit(flat_bridge_decode_brace_escapes(str_val), None), span: span)
+            # Rejected regions have already been literalized in str_regions_val.
+            # Decode that representation so nested literal closers survive.
+            # Each '{{' / '}}' in a double-quoted literal decodes to one brace,
+            # so spell two consecutive braces as "{{{{" / "}}}}".
+            if not str_regions_val.contains("{{{{") and not str_regions_val.contains("}}}}"):
+                return Expr(kind: ExprKind.StringLit(str_regions_val, None), span: span)
+            return Expr(kind: ExprKind.StringLit(flat_bridge_decode_brace_escapes(str_regions_val), None), span: span)
     if tag == EXPR_BOOL_LIT:
         return Expr(kind: ExprKind.BoolLit(expr_get_int(idx) != 0), span: span)
     if tag == EXPR_NIL_LIT:
         return Expr(kind: ExprKind.NilLit, span: span)
-    if tag == EXPR_BLOCK:
+    if tag == EXPR_BLOCK or tag == EXPR_DO_BLOCK:
+        # Do blocks share ordinary statement-preserving lexical semantics.
+        # EXPR_DO_BLOCK stores its tail among STMTS; EXPR_BLOCK may also
+        # carry a separate LEFT tail. The common helper preserves both.
         # Blocks are general expression nodes, not only if/lambda helpers.
         # Route every standalone block through the same statement-preserving
         # conversion so a declaration-level initializer cannot fall into the
         # loud unsupported-node guard.
         return Expr(kind: ExprKind.Block(flat_if_branch_block(idx, span)), span: span)
+    if tag == EXPR_FOR or tag == EXPR_WHILE:
+        # Module-scope `for`/`while` (enum_module_body.spl `_expr_for_N` /
+        # `_expr_while_N`) arrive as expression nodes: S=iter var,
+        # LEFT=iterable/cond, STMTS=body. Wrap the loop statement in a block.
+        val loop_body_ids = expr_get_stmts(idx)
+        var loop_body: [Stmt] = []
+        var li = 0
+        while li < loop_body_ids.len():
+            val l_expanded = convert_flat_stmt_in_list(loop_body_ids[li], false)
+            var lk = 0
+            while lk < l_expanded.len():
+                loop_body.push(l_expanded[lk])
+                lk = lk + 1
+            li = li + 1
+        val loop_block = Block(stmts: loop_body, span: span)
+        val loop_head = convert_flat_expr(expr_get_left(idx))
+        val loop_stmt = if tag == EXPR_FOR:
+            Stmt(kind: StmtKind.For(expr_get_str(idx), loop_head, loop_block), span: span)
+        else:
+            Stmt(kind: StmtKind.While(loop_head, loop_block), span: span)
+        return Expr(kind: ExprKind.Block(Block(stmts: [loop_stmt], span: span)), span: span)
     if tag == EXPR_IDENT:
         var owner_types: [Type] = []
         for type_handle in expr_get_call_type_args(idx):
@@ -1019,7 +1100,7 @@ fn convert_flat_expr(idx: i64) -> Expr:
                 span: span
             ))
             mai = mai + 1
-        return Expr(kind: ExprKind.MethodCall(obj, method_name, m_args), span: span)
+        return Expr(kind: ExprKind.MethodCall(obj, method_name, m_args), span: span, arrow_update: expr_is_arrow_update(idx))
     if tag == EXPR_INDEX:
         val obj = convert_flat_expr(expr_get_left(idx))
         val index = convert_flat_expr(expr_get_right(idx))
@@ -1063,7 +1144,11 @@ fn convert_flat_expr(idx: i64) -> Expr:
         if expr_get_tag(end_idx) != EXPR_INT_LIT or expr_get_int(end_idx) != -1:
             val slice_end = convert_flat_expr(end_idx)
             slice_call_args.push(CallArg(has_name: false, name: "", value: slice_end, span: span))
-        return Expr(kind: ExprKind.MethodCall(slice_obj, "slice", slice_call_args), span: span)
+        # bracket_slice marks the bracket form: it resolves and types exactly
+        # as `.slice`, but MIR cuts a TEXT receiver by code point (s[a:b] is
+        # code points, .slice/.substring are bytes -- owner decision
+        # 2026-11-13; seed: lower_slice -> rt_slice).
+        return Expr(kind: ExprKind.MethodCall(slice_obj, "slice", slice_call_args), span: span, bracket_slice: true)
     if tag == EXPR_ARRAY_LIT:
         val elem_indices = expr_get_args(idx)
         var elems: [Expr] = []
@@ -1088,7 +1173,7 @@ fn convert_flat_expr(idx: i64) -> Expr:
                 span: span
             ))
             ii = ii + 1
-        return Expr(kind: ExprKind.StringLit(expr_get_str(idx), interpolations), span: span)
+        return flat_bridge_interpolated_string(expr_get_str(idx), interpolations, span)
     if tag == EXPR_IF:
         # Keep expression-form elif chains flat as well. Reconstructing nested
         # value-semantic ExprKind.If payloads copies the growing tail in no-GC
@@ -1253,7 +1338,10 @@ fn convert_flat_expr(idx: i64) -> Expr:
             dict_ei = dict_ei + 1
         return Expr(kind: ExprKind.DictLit(dict_entries), span: span)
     if tag == EXPR_UNIT:
-        return Expr(kind: ExprKind.NilLit, span: span)
+        # Source () is the empty tuple, matching its declared type and the
+        # canonical parser. Nil has its own literal and payload semantics.
+        var unit_elements: [Expr] = []
+        return Expr(kind: ExprKind.TupleLit(unit_elements), span: span)
     if tag == EXPR_PASS or tag == EXPR_PASS_DO_NOTHING or tag == EXPR_PASS_DN or tag == EXPR_PASS_TODO:
         return Expr(kind: ExprKind.NilLit, span: span)
     if tag == EXPR_EXISTS_CHECK:
@@ -1291,6 +1379,9 @@ fn convert_flat_expr(idx: i64) -> Expr:
                 return Expr(kind: ExprKind.Call(path_ctor, [path_arg]), span: span)
             val string_type = Type(kind: TypeKind.Named(string_suffix, []), span: span)
             return Expr(kind: ExprKind.Cast(string_value, string_type), span: span)
+        val suf_scope_err = unit_suffix_scope_error(expr_get_str(idx))
+        if suf_scope_err != "":
+            parser_error_at(span.line, span.col, suf_scope_err)
         val suf_type = Type(kind: TypeKind.Named(expr_get_str(idx), []), span: span)
         val suf_float_text = expr_get_float(idx)
         if suf_float_text != "":
@@ -1389,8 +1480,8 @@ fn convert_flat_expr(idx: i64) -> Expr:
         # (expr_range() takes no step argument), so step is always nil here.
         val range_start_idx = expr_get_left(idx)
         val range_end_idx = expr_get_right(idx)
-        val range_start: Expr? = if range_start_idx >= 0: convert_flat_expr(range_start_idx) else: nil
-        val range_end: Expr? = if range_end_idx >= 0: convert_flat_expr(range_end_idx) else: nil
+        val range_start: Expr? = if range_start_idx >= 0: convert_flat_expr(range_start_idx) else: None
+        val range_end: Expr? = if range_end_idx >= 0: convert_flat_expr(range_end_idx) else: None
         val range_inclusive = expr_get_int(idx) != 0
         return Expr(kind: ExprKind.Range(range_start, range_end, range_inclusive, None), span: span)
     if tag == EXPR_SPREAD:
@@ -1413,7 +1504,7 @@ fn convert_flat_expr(idx: i64) -> Expr:
         # native_build_fresh_seed_optionwrap_landmine_2026-07-18.md, "SCOPE
         # CORRECTION" section).
         val spread_inner_idx = expr_get_left(idx)
-        val spread_inner: Expr? = if spread_inner_idx >= 0: convert_flat_expr(spread_inner_idx) else: nil
+        val spread_inner: Expr? = if spread_inner_idx >= 0: convert_flat_expr(spread_inner_idx) else: None
         return Expr(kind: ExprKind.Range(None, spread_inner, false, None), span: span)
     if tag == EXPR_SPAWN:
         # `spawn <expr>` (EXPR_SPAWN, tag 39) -- built unconditionally by
@@ -1482,7 +1573,7 @@ fn convert_flat_expr(idx: i64) -> Expr:
         # `20.hir/hir_lowering/expressions.spl:954-960`. The operand slot is
         # optional here to match the enum's `Expr?` payload.
         val yield_inner_idx = expr_get_left(idx)
-        val yield_inner: Expr? = if yield_inner_idx >= 0: convert_flat_expr(yield_inner_idx) else: nil
+        val yield_inner: Expr? = if yield_inner_idx >= 0: convert_flat_expr(yield_inner_idx) else: None
         return Expr(kind: ExprKind.Yield(yield_inner), span: span)
     if tag == EXPR_DICT_COMP:
         val dc_args = expr_get_args(idx)
@@ -1605,7 +1696,9 @@ fn convert_flat_pattern(pat_eid: i64) -> Pattern:
         if nm == "_":
             return Pattern(kind: PatternKind.Wildcard, span: pspan)
         return Pattern(kind: PatternKind.Binding(nm, false), span: pspan)
-    elif ptag == EXPR_INT_LIT or ptag == EXPR_STRING_LIT or ptag == EXPR_BOOL_LIT or ptag == EXPR_NIL_LIT:
+    elif ptag == EXPR_INT_LIT or ptag == EXPR_FLOAT_LIT or ptag == EXPR_STRING_LIT or ptag == EXPR_BOOL_LIT or ptag == EXPR_NIL_LIT or ptag == EXPR_SUFFIXED_LIT:
+        # Suffixed literals retain their cast/type information. Treating 1u8
+        # as a wildcard made every tagged-byte decoder arm unconditional.
         # EXPR_NIL_LIT was NOT in this list and fell through to the Wildcard
         # catch-all below, so `case nil:` silently became an UNCONDITIONAL arm
         # matching every scrutinee -- the same class of defect the EXPR_BINARY
@@ -1613,6 +1706,15 @@ fn convert_flat_pattern(pat_eid: i64) -> Pattern:
         # literal test (`v == nil`), and over a union carrying a `nil` member
         # it is the arm that names that member (bug doc
         # union_narrowing_has_no_grammar_or_runtime_2026-08-21.md).
+        # Float literal patterns keep the exact decimal lexeme: HIR/MIR match
+        # on the lexeme text (float_literal_pattern_bridge_spec), so ride the
+        # lexeme-preserving bridge mode for the whole literal conversion.
+        if ptag == EXPR_FLOAT_LIT:
+            val saved_float_mode = flat_bridge_lexeme_float_literals
+            flat_bridge_lexeme_float_literals = true
+            val lexeme_literal = convert_flat_expr(pat_eid)
+            flat_bridge_lexeme_float_literals = saved_float_mode
+            return Pattern(kind: PatternKind.Literal(lexeme_literal), span: pspan)
         return Pattern(kind: PatternKind.Literal(convert_flat_expr(pat_eid)), span: pspan)
     elif ptag == EXPR_BINARY:
         # `1 | 2 | 3` (or-pattern) parses as a chain of EXPR_BINARY(BitOr)
@@ -1642,6 +1744,25 @@ fn convert_flat_pattern(pat_eid: i64) -> Pattern:
                     or_alts.push(pat_bin_right)
             return Pattern(kind: PatternKind.Or(or_alts), span: pspan)
         return Pattern(kind: PatternKind.Wildcard, span: pspan)
+    elif ptag == EXPR_ARRAY_LIT:
+        # match_array_literal_patterns_multiple_wildcard_arms_2026-10-24:
+        # `case [1, 0]:` / `case [a, b]:` fell through to the Wildcard
+        # catch-all, so every array arm became an unconditional default and
+        # MIR reported "multiple wildcard arms". HIR/MIR already test an
+        # Array pattern as length + per-element tests.
+        val arr_pat_indices = expr_get_args(pat_eid)
+        var arr_pat_elems: [Pattern] = []
+        var api = 0
+        while api < arr_pat_indices.len():
+            arr_pat_elems.push(convert_flat_pattern(arr_pat_indices[api]))
+            api = api + 1
+        return Pattern(kind: PatternKind.Array(arr_pat_elems, None), span: pspan)
+    elif ptag == EXPR_UNIT:
+        # The canonical parser represents () in pattern position as an empty
+        # tuple, not a nil literal or a wildcard. Preserve the enclosing enum
+        # payload slot and discriminant while introducing no child bindings.
+        var unit_pattern_elements: [Pattern] = []
+        return Pattern(kind: PatternKind.Tuple(unit_pattern_elements), span: pspan)
     elif ptag == EXPR_TUPLE:
         # `(a, b, ...)` tuple-destructure pattern. Before this case existed,
         # EXPR_TUPLE fell through to the Wildcard catch-all below, so
@@ -1663,8 +1784,8 @@ fn convert_flat_pattern(pat_eid: i64) -> Pattern:
         # Before this case existed, EXPR_RANGE fell through to Wildcard.
         val rp_start_idx = expr_get_left(pat_eid)
         val rp_end_idx = expr_get_right(pat_eid)
-        val rp_start: Expr? = if rp_start_idx >= 0: convert_flat_expr(rp_start_idx) else: nil
-        val rp_end: Expr? = if rp_end_idx >= 0: convert_flat_expr(rp_end_idx) else: nil
+        val rp_start: Expr? = if rp_start_idx >= 0: convert_flat_expr(rp_start_idx) else: None
+        val rp_end: Expr? = if rp_end_idx >= 0: convert_flat_expr(rp_end_idx) else: None
         val rp_inclusive = expr_get_int(pat_eid) != 0
         return Pattern(kind: PatternKind.Range(rp_start, rp_end, rp_inclusive), span: pspan)
     elif ptag == EXPR_UNARY:
@@ -1676,6 +1797,15 @@ fn convert_flat_pattern(pat_eid: i64) -> Pattern:
         # expression still falls through unchanged.
         val neg_operand_tag = expr_get_tag(expr_get_left(pat_eid))
         if expr_get_int(pat_eid) == 61 and (neg_operand_tag == EXPR_INT_LIT or neg_operand_tag == EXPR_FLOAT_LIT):
+            if neg_operand_tag == EXPR_FLOAT_LIT:
+                # Negative float literal pattern: the operand keeps its exact
+                # decimal lexeme (same contract as the float literal branch
+                # above); the unary minus wraps the lexeme form.
+                val saved_neg_float_mode = flat_bridge_lexeme_float_literals
+                flat_bridge_lexeme_float_literals = true
+                val neg_float_literal = convert_flat_expr(pat_eid)
+                flat_bridge_lexeme_float_literals = saved_neg_float_mode
+                return Pattern(kind: PatternKind.Literal(neg_float_literal), span: pspan)
             return Pattern(kind: PatternKind.Literal(convert_flat_expr(pat_eid)), span: pspan)
     # Every pattern shape that reaches this catch-all is silently degraded
     # to an UNCONDITIONAL wildcard -- it matches everything and binds nothing,
@@ -1743,6 +1873,14 @@ fn defer_unsupported_marker(span: Span) -> Stmt:
 # replays first); a group's OWN statements always replay in their original
 # top-to-bottom order, since only one defer body is unwinding at a time.
 var g_pending_defers: [[Stmt]] = []
+# Index of the first group owned by the function currently being converted.
+# convert_decl_fn mutates g_pending_defers IN PLACE (raise base, truncate back)
+# instead of swapping in a fresh array: under the stage-4 streaming parser scope
+# every array allocated during the parse is reclaimed at scope end, so a fresh
+# `[]` or saved copy stored here dangled into the next parse and the next
+# convert_decl_fn read it as `rejected invalid array handle`
+# (native_method_call_hir_lowering_invalid_array_handle_2026-11-07).
+var g_pending_defer_base: i64 = 0
 
 # '$' cannot occur in a source identifier, so these bridge-owned locals
 # cannot capture a user binding. The raw statement ID is unique per body.
@@ -1752,14 +1890,14 @@ fn defer_return_replay(value: Expr?, statement_id: i64, span: Span) -> [Stmt]:
     if val expression = value:
         result.push(Stmt(kind: StmtKind.Val(name, None, expression), span: span))
     var group_index = g_pending_defers.len() - 1
-    while group_index >= 0:
+    while group_index >= g_pending_defer_base:
         val group = g_pending_defers[group_index]
         var statement_index = 0
         while statement_index < group.len():
             result.push(group[statement_index])
             statement_index = statement_index + 1
         group_index = group_index - 1
-    if value != nil:
+    if value.is_some():
         val saved = Expr(kind: ExprKind.Ident(name), span: span)
         result.push(Stmt(kind: StmtKind.Return(saved), span: span))
     else:
@@ -1803,12 +1941,12 @@ fn convert_flat_stmt_in_list(idx: i64, is_top_level: bool) -> [Stmt]:
         # native path at all yet — refuse loudly everywhere, top-level or not.
         return [defer_unsupported_marker(make_span())]
     elif tag == STMT_RETURN:
-        if g_pending_defers.len() == 0:
+        if g_pending_defers.len() == g_pending_defer_base:
             return [convert_flat_stmt(idx)]
         val expression_id = stmt_get_expr(idx)
         if expression_id >= 0:
             return defer_return_replay(convert_flat_expr(expression_id), idx, make_span())
-        return defer_return_replay(nil, idx, make_span())
+        return defer_return_replay(None, idx, make_span())
     else:
         return [convert_flat_stmt(idx)]
 
@@ -1883,12 +2021,99 @@ fn convert_flat_if_stmt(root_idx: i64) -> Stmt:
     val chain_expr = Expr(kind: ExprKind.IfChain(arms, None), span: arms[0].span)
     Stmt(kind: StmtKind.Expr(chain_expr), span: arms[0].span)
 
+# Canonical `target.later(...) gpu \:` / `host \:` lane callback (host_gpu_lane
+# REQ-001). The core grammar parses the marker through the ordinary
+# trailing-lambda sugar as `gpu(target.later(...), \: block)`, so the lane
+# survives lexing/parsing but arrives here as a plain Expr statement. Recognize
+# exactly that canonical shape and lift it to StmtKind.TargetLater; anything
+# else (a real `gpu(...)` call, dynamic lane names, extra args) is left
+# untouched. Pinned by test/01_unit/compiler/frontend/host_gpu_lane_structural_bridge_spec.spl.
+fn convert_flat_target_later(e: Expr, span: Span) -> Stmt?:
+    val call_args: [CallArg] = match e.kind:
+        case ExprKind.Call(_, args): args
+        case _: return None
+    val callee: Expr = match e.kind:
+        case ExprKind.Call(c, _): c
+        case _: return None
+    val lane_name = target_later_callee_lane(callee)
+    if lane_name == "" or call_args.len() != 2:
+        return None
+    val arg0: CallArg = call_args[0]
+    val arg1: CallArg = call_args[1]
+    if arg0.has_name or arg1.has_name:
+        return None
+    val later_call: Expr = arg0.value
+    if not target_later_is_later_call(later_call):
+        return None
+    val block = target_later_lambda_block(arg1.value)
+    if block == None:
+        return None
+    val config = target_later_config(lane_name, later_call, span)
+    Some(Stmt(kind: StmtKind.TargetLater(config, block.unwrap()), span: span))
+
+fn target_later_callee_lane(callee: Expr) -> text:
+    match callee.kind:
+        case ExprKind.Ident(name):
+            if name == "gpu" or name == "host": name else: ""
+        case _:
+            ""
+
+fn target_later_is_later_call(later_call: Expr) -> bool:
+    match later_call.kind:
+        case ExprKind.MethodCall(receiver, name, _):
+            target_later_is_target_base(receiver) and name == "later"
+        case ExprKind.Call(callee, _):
+            # `target.later(...)` may also surface as a plain field call.
+            match callee.kind:
+                case ExprKind.Field(base, name):
+                    target_later_is_target_base(base) and name == "later"
+                case _:
+                    false
+        case _:
+            false
+
+fn target_later_is_target_base(base: Expr) -> bool:
+    match base.kind:
+        case ExprKind.Ident(name):
+            name == "target"
+        case _:
+            false
+
+fn target_later_lambda_block(body: Expr) -> Block?:
+    match body.kind:
+        case ExprKind.Lambda(_, lambda_body):
+            match lambda_body.kind:
+                case ExprKind.Block(b):
+                    Some(b)
+                case _:
+                    None
+        case ExprKind.Block(b):
+            Some(b)
+        case _:
+            None
+
+fn target_later_config(lane_name: text, later_call: Expr, span: Span) -> TargetLaterConfig:
+    var max_packet: i64? = None
+    val later_args: [CallArg] = match later_call.kind:
+        case ExprKind.MethodCall(_, _, args): args
+        case ExprKind.Call(_, args): args
+        case _: []
+    for a in later_args:
+        if a.has_name and a.name == "max_packet":
+            match a.value.kind:
+                case ExprKind.IntLit(v):
+                    max_packet = Some(v)
+                case _:
+                    ()
+    val lane = if lane_name == "gpu": TargetLane.Gpu else: TargetLane.Host
+    TargetLaterConfig(lane: lane, max_packet: max_packet, call: later_call, span: span)
+
 fn convert_flat_stmt(idx: i64) -> Stmt:
     if idx < 0:
         val nil_span = make_span()
         return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: nil_span)), span: nil_span)
     val tag = stmt_get_tag(idx)
-    val span = make_span()
+    val span = flat_stmt_span(idx)
     if tag <= 0:
         print "[flat-bridge] missing stmt tag idx={idx} tag={tag}"
         return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
@@ -1898,6 +2123,14 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
             decl_get_imports(import_decl), decl_get_is_lazy(import_decl) != 0), span: span)
     if tag == STMT_EXPR:
         val e = convert_flat_expr(stmt_get_expr(idx))
+        # host_gpu_lane REQ-001: `target.later(...) gpu \:` / `host \:` parses
+        # as an ordinary trailing-lambda call (`gpu(target.later(...), \:`block)`).
+        # Lift the canonical shape into StmtKind.TargetLater so the lane marker
+        # survives as rich AST metadata, not only a source-text check
+        # diagnostic. Any non-canonical shape stays a plain Expr statement.
+        val lane_stmt = convert_flat_target_later(e, span)
+        if lane_stmt != None:
+            return lane_stmt.unwrap()
         return Stmt(kind: StmtKind.Expr(e), span: span)
     elif tag == STMT_RETURN:
         val ret_idx = stmt_get_expr(idx)
@@ -1932,6 +2165,9 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
         # `None` too. Deliberately NOT a blanket unwrap at the MIR seam: there
         # `if val v = e:` and a hand-written `if v != nil:` are indistinguishable.
         # See doc/08_tracking/bug/native_if_val_binds_option_handle_not_payload_2026-08-24.md
+        val explicit_presence = match init_expr.kind:
+            case ExprKind.ExistsCheck(_): true
+            case _: false
         val bound_expr = if stmt_is_if_val_decl(idx):
             match init_expr.kind:
                 # Already `opt.?` in the source -- do not double-wrap.
@@ -1941,7 +2177,7 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
                     Expr(kind: ExprKind.ExistsCheck(init_expr), span: span)
         else:
             init_expr
-        return Stmt(kind: StmtKind.Val(name, type_, bound_expr), span: span, bind_optional_payload: stmt_is_if_val_decl(idx))
+        return Stmt(kind: StmtKind.Val(name, type_, bound_expr), span: span, bind_optional_payload: stmt_is_if_val_decl(idx), binding_explicit_presence: stmt_is_if_val_decl(idx) and explicit_presence)
     elif tag == STMT_VAR_DECL:
         val name = stmt_get_name(idx)
         val type_idx = stmt_get_type(idx)
@@ -2140,16 +2376,17 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
     if trace_reset and body.len() > 0 and body[body.len() - 1] >= stmt_count():
         print "[convert_decl_fn] STALE-BODY-SUSPECT name={name} body_len={body.len()} body_first={body[0]} body_last={body[body.len() - 1]} live_stmt_count={stmt_count()} reset_seq={ast_reset_seq_get()}"
     var stmts: [Stmt] = []
-    # Save/restore the pending-defer stack around this function's own body so
-    # a re-entrant conversion (if any future caller nests one) can't leak
-    # defers across function boundaries. See convert_flat_stmt_in_list above.
-    val saved_pending_defers: [[Stmt]] = g_pending_defers
-    g_pending_defers = []
+    # Scope the pending-defer stack to this function's own body so a
+    # re-entrant conversion can't leak defers across function boundaries.
+    # In place only -- never reassign g_pending_defers (see its declaration).
+    val outer_pending_defer_base = g_pending_defer_base
+    val pending_defer_base = g_pending_defers.len()
+    g_pending_defer_base = pending_defer_base
     var contract_preconditions: [ContractClause] = []
     var contract_invariants: [ContractClause] = []
     var contract_postconditions: [ContractClause] = []
     var contract_error_postconditions: [ContractClause] = []
-    var contract_decreases: ContractClause? = nil
+    var contract_decreases: ContractClause? = None
     var contract_post_binding = ""
     var contract_error_binding = ""
     var contract_proof_uses = ""
@@ -2198,7 +2435,7 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
                 k = k + 1
         si = si + 1
 
-    if g_pending_defers.len() > 0:
+    if g_pending_defers.len() > pending_defer_base:
         # Fall-off-the-end replay. Already safe to append when the function's
         # last raw top-level statement was `defer` itself (nothing trails it,
         # so the append is truly the new last statement with nothing to
@@ -2228,7 +2465,7 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
         val last_raw_tag = if body_len > 0: stmt_get_tag(body[body_len - 1]) else: -1
         if last_raw_tag == STMT_DEFER:
             var dj = g_pending_defers.len() - 1
-            while dj >= 0:
+            while dj >= pending_defer_base:
                 val dj_group = g_pending_defers[dj]
                 var dji = 0
                 while dji < dj_group.len():
@@ -2257,14 +2494,16 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
                     stmts.push(defer_unsupported_marker(make_span()))
             else:
                 var ej = g_pending_defers.len() - 1
-                while ej >= 0:
+                while ej >= pending_defer_base:
                     val ej_group = g_pending_defers[ej]
                     var eji = 0
                     while eji < ej_group.len():
                         stmts.push(ej_group[eji])
                         eji = eji + 1
                     ej = ej - 1
-    g_pending_defers = saved_pending_defers
+    while g_pending_defers.len() > pending_defer_base:
+        val _dropped_defer_group = g_pending_defers.pop()
+    g_pending_defer_base = outer_pending_defer_base
 
     val visibility = convert_decl_visibility(idx)
     val fn_params: [Param] = params
@@ -2317,7 +2556,7 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
                 var n: i64 = 0
                 var digit_i = 0
                 var all_digits = raw_arg.len() > 0
-                while digit_i < raw_arg.len():
+                while digit_i < raw_arg.byte_len():
                     val b = raw_arg.byte_at(digit_i)
                     if b < 48 or b > 57:
                         all_digits = false
@@ -2342,6 +2581,15 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
                 fn_attributes.push(Attribute(name: attr_name, args: export_args, span: span))
             else:
                 fn_attributes.push(Attribute(name: attr_name, args: [Expr(kind: ExprKind.StringLit(raw_arg, None), span: span)], span: span))
+    # Declaration-level `@unsafe(reason: "...", capabilities: [...])`: the
+    # parser records it against this decl index; rebuild it as an `unsafe`
+    # attribute (reason string first, then one Ident per capability) so HIR
+    # lowering carries it onto HirFunction.unsafe_reason / unsafe_caps.
+    if parser_unsafe_annotation_present(idx):
+        var unsafe_args: [Expr] = [Expr(kind: ExprKind.StringLit(parser_unsafe_annotation_reason(idx), None), span: span)]
+        for cap in parser_unsafe_annotation_caps(idx):
+            unsafe_args.push(Expr(kind: ExprKind.Ident(cap), span: span))
+        fn_attributes.push(Attribute(name: "unsafe", args: unsafe_args, span: span))
     val rt_hal_flags = decl_get_rt_hal_flags(idx)
     if (rt_hal_flags & 1) != 0:
         var rt_args: [Expr] = [Expr(kind: ExprKind.Ident("hal"), span: span)]
@@ -2420,7 +2668,7 @@ fn convert_decl_method_fn(idx: i64, target_name: text) -> ParserFunction:
     val method_mode = decl_get_is_async(idx)
     val prefix = target_name + "__"
     val method_name = if base.name.starts_with(prefix):
-        base.name.substring(prefix.len(), base.name.len())
+        base.name.substring(prefix.len(), base.name.byte_len())
     else:
         base.name
     parser_function_new(
@@ -2453,23 +2701,36 @@ fn convert_decl_function_type_params(idx: i64, span: Span) -> [ParserTypeParam]:
     var tpi = 0
     while tpi < tp_names.len():
         var bounds: [Type] = []
+        var has_default = false
+        var default_type = Type(kind: TypeKind.Infer, span: span)
         if tpi < bound_rows.len():
             for bound in bound_rows[tpi]:
+                # "=<type>" is the parser's default-type transport entry.
+                val is_default = bound.starts_with("=")
+                val type_text = if is_default: bound[1:] else: bound
                 # The enclosing parse is finished (as for interpolation fragments).
                 # Reuse its type grammar and arena; never flatten Named arguments.
-                lex_init_with_path(bound, "")
+                # Lend the module lexer out and take it back: later expression
+                # spans of this module convert to byte offsets through it.
+                val module_lexer = lexer_state_take()
+                lex_init_with_path(type_text, "")
                 parser_advance()
                 val bound_tag = parser_parse_type()
                 if par_kind_get() != TOK_EOF:
-                    parser_error_at(span.line, span.col, "invalid generic trait bound: " + bound)
+                    parser_error_at(span.line, span.col, "invalid generic trait bound: " + type_text)
                 var converted_bound = convert_flat_type(bound_tag)
+                lexer_state_install(module_lexer)
                 converted_bound.span = span
-                bounds.push(converted_bound)
+                if is_default:
+                    has_default = true
+                    default_type = converted_bound
+                else:
+                    bounds.push(converted_bound)
         fn_type_params.push(ParserTypeParam(
             name: tp_names[tpi],
             bounds: bounds,
-            has_default: false,
-            default: Type(kind: TypeKind.Infer, span: span),
+            has_default: has_default,
+            default: default_type,
             span: span
         ))
         tpi = tpi + 1
@@ -2514,9 +2775,12 @@ fn convert_decl_extern_fn(idx: i64) -> ParserFunction:
     var extern_inferred_ret: Type = Type(kind: TypeKind.Infer, span: span)
     if extern_has_ret:
         extern_inferred_ret = convert_flat_type(ret)
+    # Extern declarations bind their formal types just like ordinary functions.
+    # Dropping these names leaves a declared `-> T` without its binder in HIR.
+    val extern_type_params = convert_decl_function_type_params(idx, span)
     parser_function_new(
         name,
-        [],
+        extern_type_params,
         extern_params,
         extern_has_ret,
         extern_inferred_ret,
@@ -2563,3 +2827,36 @@ fn text_parse_int_simple(s: text) -> i64:
             result = result + 9
         i = i + 1
     result
+
+# ===== PendingDeferState snapshot (ParseContext stage 1) =====
+# See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
+# take moves this file's parse state out and installs fresh initial
+# owners; install makes a taken snapshot active again. Both mutate the
+# process-global array IN PLACE (copy out + truncate / truncate + push):
+# reassigning it would store a transient-scope array in a process global
+# (native_method_call_hir_lowering_invalid_array_handle_2026-11-07).
+pub struct PendingDeferState:
+    g_pending_defers: [[Stmt]]
+    g_pending_defer_base: i64
+
+pub fn pending_defer_state_take() -> PendingDeferState:
+    var groups: [[Stmt]] = []
+    for group in g_pending_defers:
+        groups.push(group)
+    val s = PendingDeferState(
+        g_pending_defers: groups,
+        g_pending_defer_base: g_pending_defer_base
+    )
+    while g_pending_defers.len() > 0:
+        val _taken_group = g_pending_defers.pop()
+    g_pending_defer_base = 0
+    s
+
+pub fn pending_defer_state_install(s: PendingDeferState):
+    while g_pending_defers.len() > 0:
+        val _replaced_group = g_pending_defers.pop()
+    for group in s.g_pending_defers:
+        g_pending_defers.push(group)
+    g_pending_defer_base = s.g_pending_defer_base
+
+export PendingDeferState, pending_defer_state_take, pending_defer_state_install

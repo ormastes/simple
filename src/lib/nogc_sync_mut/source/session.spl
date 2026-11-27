@@ -1,0 +1,61 @@
+# The authenticated host owns serialization and commits returned state.
+# IDs are bindings supplied by that host, never bearer credentials. These pure
+# transitions do not claim to authenticate a caller or provide a mutex.
+use std.common.source.contracts.{SourceViewSessionV1, SourceViewPreferencesV1, SourcePreferenceReceiptV1}
+
+pub fn source_view_session_new_v1(workspace_id: text,
+        authenticated_session_id: text) -> Result<SourceViewSessionV1, text>:
+    if workspace_id == "" or authenticated_session_id == "":
+        return Err("authenticated_session_binding_required")
+    Ok(SourceViewSessionV1(workspace_id, authenticated_session_id, 0,
+        SourceViewPreferencesV1(false, "important", false), false, true, 0, []))
+
+pub fn source_view_set_preferences_v1(session: SourceViewSessionV1,
+        request_sequence: i64, expected_version: i64,
+        setting: text, desired: text) -> Result<SourceViewSessionV1, text>:
+    """Idempotent desired-state update with bounded replay receipts.
+
+    Request sequences increase monotonically within an authenticated session.
+    Retries older than the retained 64 receipts explicitly expire. The host
+    must commit this transition atomically before acknowledging it.
+    """
+    if not session.active: return Err("session_expired")
+    if request_sequence <= 0: return Err("invalid_request_sequence")
+    for receipt in session.receipts:
+        if receipt.request_sequence == request_sequence:
+            if receipt.expected_version != expected_version or receipt.setting != setting or receipt.desired != desired:
+                return Err("request_payload_mismatch")
+            return Ok(session)
+    if request_sequence <= session.highest_request_sequence: return Err("request_receipt_expired")
+    if expected_version != session.preferences_version: return Err("stale_preferences")
+    if session.preferences_version == 9223372036854775807: return Err("session_version_exhausted")
+    var updated = session
+    if setting == "num":
+        if desired != "true" and desired != "false": return Err("invalid_preference_value")
+        updated.preferences.line_numbers = desired == "true"
+    elif setting == "hint":
+        if desired != "true" and desired != "false": return Err("invalid_preference_value")
+        updated.preferences.virtual_hints = desired == "true"
+    elif setting == "info":
+        if desired != "off" and desired != "important" and desired != "all": return Err("invalid_preference_value")
+        updated.preferences.inline_info = desired
+    else:
+        return Err("unsupported_preference")
+    var receipts: [SourcePreferenceReceiptV1] = []
+    var index = if session.receipts.len() >= 64: 1 else: 0
+    while index < session.receipts.len():
+        receipts.push(session.receipts[index])
+        index = index + 1
+    receipts.push(SourcePreferenceReceiptV1(request_sequence, expected_version, setting, desired))
+    updated.receipts = receipts
+    updated.preferences_version = session.preferences_version + 1
+    updated.highest_request_sequence = request_sequence
+    Ok(updated)
+
+pub fn source_view_commit_open_v1(session: SourceViewSessionV1,
+        successful: bool) -> Result<(SourceViewSessionV1, bool), text>:
+    if not session.active: return Err("session_expired")
+    var updated = session
+    val emit_help = successful and not session.help_seen
+    if emit_help: updated.help_seen = true
+    Ok((updated, emit_help))

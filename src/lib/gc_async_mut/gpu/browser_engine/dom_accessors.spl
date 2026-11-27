@@ -1,6 +1,6 @@
 use std.gc_async_mut.gpu.browser_engine.dom.{
     BeDomNode, BeDomEvent, BeDomEventDispatch, StyleProps,
-    normalize_dom_event_type
+    normalize_dom_event_type, be_dom_query_selector, be_dom_query_selector_all
 }
 use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
     DomIdentityIndex, DomNodeRoute, DomRadioGroupKey
@@ -73,7 +73,7 @@ fn be_dom_set_attr(mut node: BeDomNode, name: text, value: text):
 
 fn be_dom_get_attr(node: BeDomNode, name: text) -> text:
     """Get an attribute value, returning "" if absent."""
-    node.attributes.get(name) ?? ""
+    node.get_attr(name)
 
 fn be_dom_event_identity(node: BeDomNode) -> text:
     val author_id = be_dom_get_attr(node, "id")
@@ -88,7 +88,7 @@ fn be_dom_route_node_id(target_id: text) -> i64:
     val prefix = "\u{0000}route-node:"
     if not target_id.starts_with(prefix):
         return -1
-    target_id.substring(prefix.len(), target_id.len()).to_i64() ?? -1
+    target_id.substring(prefix.byte_len(), target_id.byte_len()).to_i64() ?? -1
 
 fn be_dom_matches_identity(node: BeDomNode, target_id: text) -> bool:
     val route_node_id = be_dom_route_node_id(target_id)
@@ -118,14 +118,14 @@ fn be_dom_event_identity_at_element_path(
         if wanted < 0:
             return ""
         var ordinal: i64 = 0
-        var found: BeDomNode? = nil
+        var found: BeDomNode? = None
         for child in current.children:
             if _be_dom_layout_element(child):
                 if ordinal == wanted:
                     found = Some(child)
                     break
                 ordinal = ordinal + 1
-        if found == nil:
+        if found.is_none():
             return ""
         current = found.unwrap()
     be_dom_event_identity(current)
@@ -312,21 +312,24 @@ fn _be_dom_open_html_node(
     if not state.can_push_length(open_tag_length):
         return false
     state.push_known_length("<" + node.tag_name, open_tag_length)
-    for name in node.attributes.keys():
+    for name in node.attr_names():
         if not name.starts_with("\u0000"):
             val authored_value = be_dom_get_attr(node, name)
             val render_value = if render_only and name == "src":
-                node.attributes.get(
-                    "\u0000simple-render-image-src"
-                ) ?? authored_value
+                if node.has_attr("\u0000simple-render-image-src"):
+                    node.get_attr("\u0000simple-render-image-src")
+                else:
+                    authored_value
             elif render_only and name == "poster":
-                node.attributes.get(
-                    "\u0000simple-render-image-poster"
-                ) ?? authored_value
+                if node.has_attr("\u0000simple-render-image-poster"):
+                    node.get_attr("\u0000simple-render-image-poster")
+                else:
+                    authored_value
             elif render_only and name == "style":
-                node.attributes.get(
-                    "\u0000simple-render-image-style"
-                ) ?? authored_value
+                if node.has_attr("\u0000simple-render-image-style"):
+                    node.get_attr("\u0000simple-render-image-style")
+                else:
+                    authored_value
             else:
                 authored_value
             _be_dom_push_html_attribute(state, name, render_value)
@@ -488,10 +491,10 @@ fn be_dom_find_by_node_id(root: BeDomNode, node_id: i64) -> BeDomNode?:
     val child_count = root.children.len()
     while i < child_count:
         val found = be_dom_find_by_node_id(root.children[i], node_id)
-        if found != nil:
+        if found.is_some():
             return found
         i = i + 1
-    nil
+    None
 
 fn be_dom_find_by_tag(root: BeDomNode, tag_name: text) -> [BeDomNode]:
     """Collect all descendant nodes with the given tag name."""
@@ -531,7 +534,7 @@ fn be_dom_get_tag(node: BeDomNode) -> text:
     node.tag_name
 
 fn be_dom_get_id(node: BeDomNode) -> text:
-    node.attributes.get("id") ?? ""
+    node.get_attr("id")
 
 fn be_dom_get_display(node: BeDomNode) -> text:
     if node.style.display == "":
@@ -539,13 +542,13 @@ fn be_dom_get_display(node: BeDomNode) -> text:
     node.style.display
 
 fn be_dom_get_classes(node: BeDomNode) -> [text]:
-    val class_text = node.attributes.get("class") ?? ""
+    val class_text = node.get_attr("class")
     if class_text == "":
         return []
     class_text.split(" ")
 
 fn be_dom_has_attr(node: BeDomNode, name: text) -> bool:
-    node.attributes.has(name)
+    node.has_attr(name)
 
 fn be_dom_get_visibility(node: BeDomNode) -> text:
     "visible"
@@ -587,13 +590,14 @@ fn be_dom_get_gradient_c2(node: BeDomNode) -> text:
     node.style.background_color
 
 fn be_dom_get_border_width(node: BeDomNode) -> f64:
-    node.style.border_width
+    """Used top border width (0 while the top style is none/hidden)."""
+    node.style.border_top()
 
 fn be_dom_get_border_color(node: BeDomNode) -> text:
     node.style.border_color
 
 fn be_dom_get_border_style(node: BeDomNode) -> text:
-    node.style.border_style
+    node.style.border_top_style
 
 fn be_dom_get_color(node: BeDomNode) -> text:
     node.style.color
@@ -603,17 +607,6 @@ fn be_dom_get_font_size(node: BeDomNode) -> f64:
 
 fn be_dom_get_text_decoration(node: BeDomNode) -> text:
     "none"
-
-fn be_dom_query_selector(node: BeDomNode, selector: text) -> BeDomNode?:
-    if selector.starts_with("#") and be_dom_get_id(node) == selector.substring(1, selector.len()):
-        return Some(node)
-    if node.tag_name == selector:
-        return Some(node)
-    for child in node.children:
-        val found = be_dom_query_selector(child, selector)
-        if found.?:
-            return found
-    nil
 
 fn be_dom_dispatch_event_actions(node: BeDomNode, event_type: text) -> [text]:
     val normalized = normalize_dom_event_type(event_type)
@@ -1023,7 +1016,7 @@ fn _be_dom_is_focusable_node(node: BeDomNode) -> bool:
     )
     val raw_tab_index = be_dom_get_attr(node, "tabindex").trim()
     if raw_tab_index != "":
-        if val Some(_) = raw_tab_index.to_i64():
+        if val Some(_) = raw_tab_index.parse_int():
             focusable = true
     focusable
 
@@ -1070,7 +1063,7 @@ fn _be_dom_collect_focus_order(
     var tab_index: i64 = 0
     val raw_tab_index = be_dom_get_attr(node, "tabindex").trim()
     if raw_tab_index != "":
-        if val Some(parsed_tab_index) = raw_tab_index.to_i64():
+        if val Some(parsed_tab_index) = raw_tab_index.parse_int():
             tab_index = parsed_tab_index
     if focusable:
         val target_id = if route_ids:
@@ -1235,7 +1228,7 @@ fn be_dom_dispatch_event_to_id(
 ) -> BeDomEventDispatch:
     val path = be_dom_find_path_to_id(root, target_id)
     if path.len() == 0:
-        val event = BeDomEvent.create(normalize_dom_event_type(event_type), "", "", "", "", bubbles, cancelable)
+        val event = BeDomEvent.create(normalize_dom_event_type(event_type), "", bubbles, cancelable)
         return _be_dom_empty_dispatch(event, "")
     _be_dom_dispatch_event_path_with_executor(
         path, event_type, bubbles, cancelable, include_inline_target, executor
@@ -1251,7 +1244,7 @@ fn be_dom_dispatch_keyboard_event_to_id(
     val path = be_dom_find_path_to_id(root, target_id)
     if path.len() == 0:
         var event = BeDomEvent.create(
-            normalize_dom_event_type(event_type), "", "", "", "", bubbles,
+            normalize_dom_event_type(event_type), "", bubbles,
             cancelable
         )
         event.key = key
@@ -1277,7 +1270,7 @@ fn be_dom_dispatch_input_event_to_id(
     val path = be_dom_find_path_to_id(root, target_id)
     if path.len() == 0:
         var event = BeDomEvent.create(
-            normalize_dom_event_type(event_type), "", "", "", "", bubbles,
+            normalize_dom_event_type(event_type), "", bubbles,
             cancelable
         )
         event.input_data = input_data
@@ -1314,7 +1307,7 @@ fn be_dom_apply_default_action(node: BeDomNode, action: text) -> BeDomNode:
         else:
             next.set_attr("open", "open")
     elif action.starts_with("navigate:"):
-        next.set_attr("data-navigation", action.substring(9, action.len()))
+        next.set_attr("data-navigation", action.substring(9, action.byte_len()))
     next
 
 fn _be_dom_radio_form_id(path: [BeDomNode]) -> i64:
@@ -1510,6 +1503,16 @@ fn be_dom_set_children(node: BeDomNode, children: [BeDomNode]) -> BeDomNode:
     BeDomNode(
         node_id: node.node_id,
         tag_name: node.tag_name,
+        attr_mask: node.attr_mask,
+        css_declared_mask: node.css_declared_mask,
+        id_attr: node.id_attr,
+        class_attr: node.class_attr,
+        style_attr: node.style_attr,
+        src_attr: node.src_attr,
+        role_attr: node.role_attr,
+        attr_keys: node.attr_keys,
+        attr_vals: node.attr_vals,
+        css_declared_extra: node.css_declared_extra,
         attributes: node.attributes,
         style: node.style,
         children: children,
@@ -1533,7 +1536,7 @@ fn be_dom_path_for_route(
         return []
     val ordinals = match index.path_for_route(route):
         Some(value): value
-        nil: return []
+        None: return []
     var current = root
     var path: [BeDomNode] = [current]
     for ordinal in ordinals:
@@ -1550,7 +1553,7 @@ fn be_dom_node_for_route(
 ) -> BeDomNode?:
     val path = be_dom_path_for_route(root, index, route)
     if path.len() == 0:
-        return nil
+        return None
     Some(path[path.len() - 1])
 
 fn be_dom_default_action_to_route(
@@ -1575,7 +1578,7 @@ fn _be_dom_empty_route_dispatch(
     BeDomRouteEventDispatch(
         event: event,
         target_route: target_route,
-        related_target_route: nil,
+        related_target_route: None,
         actions: [],
         phases: [],
         current_targets: [],
@@ -1799,7 +1802,7 @@ fn _be_dom_focused_route(
     for child in node.children:
         if val Some(found) = _be_dom_focused_route(child, index):
             return Some(found)
-    nil
+    None
 
 fn be_dom_focused_route(
     root: BeDomNode, index: DomIdentityIndex
@@ -1899,7 +1902,7 @@ fn _be_dom_collect_focus_route_order(
         var sequential = true
         val raw_tab_index = be_dom_get_attr(node, "tabindex").trim()
         if raw_tab_index != "":
-            if val Some(parsed_tab_index) = raw_tab_index.to_i64():
+            if val Some(parsed_tab_index) = raw_tab_index.parse_int():
                 tab_index = parsed_tab_index
                 sequential = parsed_tab_index >= 0
         var in_dom_order = sequential
@@ -1934,7 +1937,7 @@ fn be_dom_next_focus_route(
 ) -> DomNodeRoute?:
     if val Some(current) = current_route:
         if not index.contains_route(current):
-            return nil
+            return None
     val order = _BeDomFocusRouteOrder(
         positive_routes: [], positive_tab_indexes: [], regular_routes: [],
         dom_routes: []
@@ -1946,7 +1949,7 @@ fn be_dom_next_focus_route(
     for route in order.regular_routes:
         routes.push(route)
     if routes.len() == 0:
-        return nil
+        return None
     var current_index = -1
     if val Some(current) = current_route:
         var index_value = 0
@@ -1981,15 +1984,15 @@ fn be_dom_submit_form_owner_route(
 ) -> DomNodeRoute?:
     val target = match be_dom_node_for_route(root, index, route):
         Some(node): node
-        nil: return nil
+        None: return None
     if target.tag_name == "input":
         if be_dom_get_attr(target, "type").lower() != "submit":
-            return nil
+            return None
     elif target.tag_name == "button":
         if _be_dom_button_type(target) != "submit":
-            return nil
+            return None
     else:
-        return nil
+        return None
     index.form_owner_for_route(route)
 
 fn be_dom_reset_form_owner_route(
@@ -1997,15 +2000,15 @@ fn be_dom_reset_form_owner_route(
 ) -> DomNodeRoute?:
     val target = match be_dom_node_for_route(root, index, route):
         Some(node): node
-        nil: return nil
+        None: return None
     if target.tag_name == "input":
         if be_dom_get_attr(target, "type").lower() != "reset":
-            return nil
+            return None
     elif target.tag_name == "button":
         if _be_dom_button_type(target) != "reset":
-            return nil
+            return None
     else:
-        return nil
+        return None
     index.form_owner_for_route(route)
 
 class BeDomImplicitSubmitRouteResult:
@@ -2030,7 +2033,7 @@ fn _be_dom_scan_implicit_submit_routes(
                 owner.generation.value == form_route.generation.value
             ):
                 if (
-                    scan.default_submitter_route == nil and
+                    scan.default_submitter_route.is_none() and
                     not be_dom_has_attr(node, "disabled") and
                     ((node.tag_name == "button" and
                       _be_dom_button_type(node) == "submit") or
@@ -2048,15 +2051,15 @@ fn be_dom_implicit_submit_route_result(
 ) -> BeDomImplicitSubmitRouteResult:
     val form = match be_dom_node_for_route(root, index, form_route):
         Some(node): node
-        nil: return BeDomImplicitSubmitRouteResult(
-            default_submitter_route: nil, allows_direct_submit: false
+        None: return BeDomImplicitSubmitRouteResult(
+            default_submitter_route: None, allows_direct_submit: false
         )
     if form.tag_name != "form":
         return BeDomImplicitSubmitRouteResult(
-            default_submitter_route: nil, allows_direct_submit: false
+            default_submitter_route: None, allows_direct_submit: false
         )
     val scan = _BeDomImplicitSubmitRouteScan(
-        default_submitter_route: nil, blocker_count: 0
+        default_submitter_route: None, blocker_count: 0
     )
     _be_dom_scan_implicit_submit_routes(root, index, form_route, scan)
     BeDomImplicitSubmitRouteResult(
@@ -2069,12 +2072,12 @@ fn be_dom_checked_radio_route_for_target(
 ) -> DomNodeRoute?:
     val group = match index.radio_group_for_route(route):
         Some(value): value
-        nil: return nil
+        None: return None
     for member in index.radio_members(group):
         if val Some(node) = be_dom_node_for_route(root, index, member):
             if be_dom_has_attr(node, "checked"):
                 return Some(member)
-    nil
+    None
 
 fn be_dom_radio_group_for_route(
     index: DomIdentityIndex, route: DomNodeRoute
@@ -2112,11 +2115,11 @@ fn _be_dom_mutate_route(
     root: BeDomNode, index: DomIdentityIndex, route: DomNodeRoute,
     action: text, uncheck_radio: bool
 ) -> BeDomNode:
-    if be_dom_node_for_route(root, index, route) == nil:
+    if be_dom_node_for_route(root, index, route).is_none():
         return root
     val ordinals = match index.path_for_route(route):
         Some(value): value
-        nil: return root
+        None: return root
     _be_dom_mutate_at_ordinals(root, ordinals, 0, action, uncheck_radio)
 
 fn _be_dom_apply_default_action_to_route_with_focus_policy(
@@ -2214,7 +2217,7 @@ export be_dom_get_box_shadows, be_dom_get_backdrop_blur
 export be_dom_get_has_gradient, be_dom_get_gradient_c1, be_dom_get_gradient_c2
 export be_dom_get_border_width, be_dom_get_border_color, be_dom_get_border_style
 export be_dom_get_color, be_dom_get_font_size, be_dom_get_text_decoration
-export be_dom_query_selector, be_dom_dispatch_event_actions
+export be_dom_query_selector, be_dom_query_selector_all, be_dom_dispatch_event_actions
 export be_dom_get_event_listener_count
 export be_dom_input_blocks_implicit_submission
 export be_dom_apply_default_action

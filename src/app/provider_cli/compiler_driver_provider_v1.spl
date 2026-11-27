@@ -1,0 +1,94 @@
+# CompilerDriverV1 provider artifact entry.
+#
+# Built as a shared artifact (so/dylib/dll) this module is the independently
+# built compiler provider the bootstrap loader admits
+# (bug compiler_driver_v1_bootstrap_activation_blocked_on_callable_loader).
+# It owns the concrete driver import; the bootstrap client never does.
+# Exported boundaries carry only fixed-width scalars; variable data crosses in
+# packed byte arenas (`driver_provider_compile_wire_v1`).
+#
+#   simple_provider_query_v1(request, result) -> i32   stable query entry
+#   simple_compiler_driver_compile_v1(in, out, lens) -> i64   byte-slice ABI
+#     (`std.nogc_sync_mut.sffi.dyn_bytes_abi`): compile request in, result out.
+
+use os.smf.provider_query_wire.{
+    ProviderQueryWireWriteV1, ProviderQueryWireRequestReadV1,
+    decode_provider_query_request_v1, encode_provider_query_result_v1
+}
+use std.nogc_sync_mut.composition.provider_contract.{
+    SIMPLE_PROVIDER_OK, SIMPLE_PROVIDER_DESCRIPTOR_TOO_SHORT,
+    SimpleProviderQueryResultV1, simple_provider_query_error_v1
+}
+use std.nogc_sync_mut.sffi.dyn_bytes_abi.{
+    DYN_BYTES_ABI_ERR_ARGS, DYN_BYTES_ABI_ERR_CALLEE,
+    dyn_bytes_abi_read_input, dyn_bytes_abi_write_output
+}
+use compiler.driver.driver_provider_contract_v1.{simple_compiler_driver_query_v1}
+use compiler.driver.driver_provider_compile_wire_v1.{
+    DriverCompileResultV1, DRIVER_COMPILE_STATUS_OK_V1, DRIVER_COMPILE_STATUS_FAILED_V1,
+    decode_driver_compile_request_v1, encode_driver_compile_result_v1,
+    driver_compile_options_from_request_v1
+}
+use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
+use compiler.common.driver_core_types.{compile_result_is_success, compile_result_errors}
+
+@unsafe(reason: "foreign raw bytes require validated pointer, extent, and copy ownership", capabilities: [ffi, raw_ptr])
+extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
+@unsafe(reason: "nonnull raw store; loader allocation and bounds are caller-owned", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
+
+# Pure core of the query entry: 44 request bytes in, 88 result bytes out.
+fn compiler_driver_provider_query_bytes_v1(request_bytes: [u8]) -> [u8]:
+    val decoded: ProviderQueryWireRequestReadV1 = decode_provider_query_request_v1(request_bytes)
+    val result: SimpleProviderQueryResultV1 = if decoded.ok:
+        simple_compiler_driver_query_v1(decoded.value)
+    else:
+        simple_provider_query_error_v1(SIMPLE_PROVIDER_DESCRIPTOR_TOO_SHORT)
+    val encoded: ProviderQueryWireWriteV1 = encode_provider_query_result_v1(result)
+    if encoded.ok: encoded.bytes else: []
+
+# Pure core of the compile entry: a malformed request is a failed result with
+# one diagnostic, never a silent success.
+fn compiler_driver_provider_compile_bytes_v1(request_bytes: [u8]) -> [u8]:
+    val decoded = decode_driver_compile_request_v1(request_bytes)
+    if not decoded.ok:
+        return encode_driver_compile_result_v1(DriverCompileResultV1(
+            compile_status: DRIVER_COMPILE_STATUS_FAILED_V1,
+            diagnostics: ["compiler provider: " + decoded.diagnostic]))
+    val driver = compiler_driver_create(driver_compile_options_from_request_v1(decoded.value))
+    val result = compiler_driver_run_compile(driver)
+    if compile_result_is_success(result):
+        return encode_driver_compile_result_v1(DriverCompileResultV1(
+            compile_status: DRIVER_COMPILE_STATUS_OK_V1, diagnostics: []))
+    encode_driver_compile_result_v1(DriverCompileResultV1(
+        compile_status: DRIVER_COMPILE_STATUS_FAILED_V1, diagnostics: compile_result_errors(result)))
+
+@export("C")
+fn simple_provider_query_v1(request_address: i64, result_address: i64) -> i32:
+    if request_address <= 0 or result_address <= 0:
+        return SIMPLE_PROVIDER_DESCRIPTOR_TOO_SHORT
+    val bytes = unsafe(capabilities: [ffi, raw_ptr]):
+        compiler_driver_provider_query_bytes_v1(rt_bytes_from_raw(request_address, 44))
+    if bytes.len() == 0:
+        return SIMPLE_PROVIDER_DESCRIPTOR_TOO_SHORT
+    var i = 0
+    while i < bytes.len():
+        unsafe(capabilities: [ffi, raw_ptr]):
+            rt_ptr_write_u8(result_address, i, bytes[i] as i64)
+        i = i + 1
+    # Status lives at result offset 0 (u32 little-endian); the first byte is
+    # enough for the stable code range 0..255.
+    bytes[0] as i32
+
+@export("C")
+fn simple_compiler_driver_compile_v1(in_ptr: i64, out_ptr: i64, lens: i64) -> i64:
+    val input = unsafe(capabilities: [ffi, raw_ptr]): dyn_bytes_abi_read_input(in_ptr, lens)
+    if input.is_none():
+        return DYN_BYTES_ABI_ERR_ARGS
+    val output = compiler_driver_provider_compile_bytes_v1(input ?? [])
+    if output.len() == 0:
+        return DYN_BYTES_ABI_ERR_CALLEE
+    unsafe(capabilities: [ffi, raw_ptr]): dyn_bytes_abi_write_output(out_ptr, lens, output)
+
+export compiler_driver_provider_query_bytes_v1, compiler_driver_provider_compile_bytes_v1
+export simple_provider_query_v1, simple_compiler_driver_compile_v1

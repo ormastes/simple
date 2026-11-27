@@ -66,3 +66,69 @@ reports 0/2 as expected but is weak evidence since the spec already fails.
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Out of lane: needs a self-hosted non-seed runtime and a matching simple-core archive to run the native closure gate; this host only has the Rust seed. No change made.
+
+## 2026-11-04 dependencies
+
+Native closure admission cannot go green until the MIR/HIR closure failures are
+resolved: native_mir_lambda_and_enum_eq_block_caret_cs_2026_10_19 and
+caret_closure_enum_payload_binding_collection_gaps_2026_11_03. Both need a
+stage3 producer to enumerate remaining diagnostics (TEST_BLOCKED on seed).
+
+## 2026-11-05 note (mirp2-B)
+Misbucketed under "closures": this is native *link-closure admission* (runtime
+archive providers: tagged filesystem ABI, duplicate-safe thread callback), not
+lambda lowering. MIR lambda lowering itself is verified working natively
+(see native_mir_lambda_and_enum_eq_block_caret_cs_2026_10_19.md). Left OPEN;
+next step: admit a simple-core archive owning the tagged fs ABI and re-run the
+cache-preserving Caret closure probe.
+
+## Addendum 2026-11-11 — lane p3-caret1: BLOCKED (out of scope; grant intact)
+
+Traversed on work/p3-caret1-20261111 (origin/release/1.0.0 tip 79d5af6723f6).
+
+- Nothing about this row is fixable from a bug lane: admission requires a
+  self-hosted, non-seed runtime plus an admitted simple-core archive owning the
+  tagged filesystem ABI and a duplicate-safe thread callback provider, then a
+  cache-preserving entry-closure native build of src/app/llm_caret/main.spl.
+- Entry-closure native builds are forbidden in-lane (campaign rule). This host
+  only has the tracked Rust seed; the sanctioned path is the full bootstrap.
+- No commit at tip references this bug id with an absorber; the dependency
+  caret_closure_enum_payload_binding_collection_gaps_2026_11_03 fix
+  (00e1c8a97203) IS an ancestor of tip and verified separately by this lane.
+
+Verbatim grant (re-recorded intact): produce the self-hosted non-seed runtime
+and matching simple-core archive via the sanctioned bootstrap
+(`SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.shs
+--full-bootstrap --deploy`), then run
+`sh scripts/check/check-llm-caret-native-closure.shs --check`; when it exits 0
+with retained nm/provenance evidence, install the artifact for bin/caret,
+re-run the cached CLI + PTY TUI system checks, and only then close this row.
+
+Status stays OPEN.
+
+## Addendum 2026-11-11 — lane p3-caret2: BLOCKED kept; fresh native-build
+## attempt evidence at tip
+
+Traversed on work/p3-caret2-20261111 (origin/release/1.0.0 tip
+66506fda143ca).
+
+The conditional grant ("produce it with the Rust engine in a bounded time")
+was exercised and fails on this host: fresh cold-cache `native-build`
+(entry-closure, both the full Caret closure and a 3-import minimal repro)
+hangs — the build log freezes at the identical 9919-line/925656-byte
+preamble with zero cache objects and no binary. This is the known P1
+`seed_native_build_interpreted_startup_spin_2026-11-09` (BLOCKED at HEAD,
+root cause in the seed-interpreted pure-Simple driver; needs an aarch64
+cold-cache repro lane). The sanctioned path (full bootstrap to a self-hosted
+non-seed runtime + admitted simple-core archive) remains outside a bug lane.
+
+The verbatim caret1 grant is re-recorded intact: produce the self-hosted
+non-seed runtime and matching simple-core archive via the sanctioned
+bootstrap (`SIMPLE_NO_STUB_FALLBACK=1 sh
+scripts/bootstrap/bootstrap-from-scratch.shs --full-bootstrap --deploy`),
+then run `sh scripts/check/check-llm-caret-native-closure.shs --check`;
+when it exits 0 with retained nm/provenance evidence, install the artifact
+for bin/caret, re-run the cached CLI + PTY TUI system checks, and only then
+close this row.
+
+Status stays OPEN (BLOCKED on the sanctioned bootstrap).

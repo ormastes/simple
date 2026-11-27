@@ -1,0 +1,107 @@
+# @req REQ-SSPEC-COMPILER
+# native_mir_nested_array_index_push_av_2026-11-06
+# Run as native compiled code: the original defect transported the LocalId?
+# box, rather than its payload, in the compiler's own indexed-receiver path.
+# An interpreter-only pass does not qualify that transport boundary.
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+struct IndexedPushAudit:
+    diagnostics: [text]
+    functions: i64
+    getters: i64
+    connected_pushes: i64
+    connected_writes: i64
+    invalid_locals: i64
+
+fn indexed_push_operand_local(operand: MirOperand) -> i64:
+    match operand.kind:
+        case MirOperandKind.Copy(local) | MirOperandKind.Move(local): local.id
+        case _: -1
+
+fn indexed_push_callee_name(operand: MirOperand) -> text:
+    match operand.kind:
+        case MirOperandKind.Const(MirConstValue.Str(name), _): name
+        case _: ""
+
+fn indexed_push_audit(source: text) -> IndexedPushAudit:
+    val filename = "testdata/nested_array_index_push_identity.spl"
+    val ast = parse_full_frontend(source, filename, "nested_array_index_push_identity", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(ast)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var diagnostics: [text] = []
+    for error in hir_lowering.errors:
+        diagnostics.push("HIR: " + error.message)
+    for error in lowering.errors:
+        diagnostics.push("MIR: " + error.message)
+    var functions = 0
+    var getters = 0
+    var pushes = 0
+    var writes = 0
+    var invalid = 0
+    for function in mir.functions.values():
+        if function.name != "probe" and not function.name.ends_with(".probe"): continue
+        functions = functions + 1
+        var declared_ids: [i64] = []
+        for local in function.locals:
+            declared_ids.push(local.id.id)
+        var receiver_id = -1
+        var base_id = -1
+        var index_id = -1
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(destination, callee, arguments):
+                        if indexed_push_callee_name(callee) == "rt_array_get" and arguments.len() == 2:
+                            getters = getters + 1
+                            val result = destination ?? LocalId(id: -1)
+                            receiver_id = result.id
+                            base_id = indexed_push_operand_local(arguments[0])
+                            index_id = indexed_push_operand_local(arguments[1])
+                            if not declared_ids.contains(receiver_id): invalid = invalid + 1
+                    case _: ()
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, arguments):
+                        for argument in arguments:
+                            match argument.kind:
+                                case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                                    if not declared_ids.contains(local.id): invalid = invalid + 1
+                                case _: ()
+                        val name = indexed_push_callee_name(callee)
+                        if receiver_id >= 0 and name == "rt_array_push" and arguments.len() == 2:
+                            if indexed_push_operand_local(arguments[0]) == receiver_id:
+                                pushes = pushes + 1
+                        if receiver_id >= 0 and name == "rt_array_set" and arguments.len() == 3:
+                            if (indexed_push_operand_local(arguments[0]) == base_id and
+                                indexed_push_operand_local(arguments[1]) == index_id and
+                                indexed_push_operand_local(arguments[2]) == receiver_id):
+                                writes = writes + 1
+                    case _: ()
+    IndexedPushAudit(diagnostics: diagnostics, functions: functions, getters: getters,
+        connected_pushes: pushes, connected_writes: writes, invalid_locals: invalid)
+
+fn expect_indexed_push_identity(source: text):
+    val audit = indexed_push_audit(source)
+    expect(audit.diagnostics).to_equal([])
+    expect(audit.functions).to_equal(1)
+    expect(audit.getters).to_equal(1)
+    expect(audit.connected_pushes).to_equal(1)
+    expect(audit.connected_writes).to_equal(1)
+    expect(audit.invalid_locals).to_equal(0)
+
+describe "Native MIR indexed-array push keeps the loaded LocalId payload", tag: ["only-compiled"]:
+    it "connects an empty integer element's get result to push and the original slot":
+        expect_indexed_push_identity("fn probe():\n    var grid: [[i64]] = [[], []]\n    grid[1].push(7)\n")
+
+    it "keeps the same local identity for nested text array elements":
+        expect_indexed_push_identity("fn probe():\n    var grid: [[text]] = [[], []]\n    grid[0].push(\"retained\")\n")

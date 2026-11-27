@@ -1,0 +1,51 @@
+# Endpoint broker API surface (design 12.2). The pure decision core lives in
+# the sibling modules: ipam_v1 (addresses), service_registry_v1 (register /
+# resolve / unregister), route_authorization_v1 (authorize_route, policy
+# revisions, revoke) and frame_session_v1 (per-session frame state).
+# The I/O-bearing operations (open, connect, accept, poll, close) need a
+# qualified owned transport (Darwin local IPC, sosix byte endpoints) that is
+# not yet proven. They FAIL CLOSED here: they report an unqualified result and
+# never claim a stream, listener or cleanup outcome.
+
+pub const ENDPOINT_PROFILE_V1 = "endpoint-v1"
+pub const ENDPOINT_PROFILE_POD_IP_V1 = "pod-ip-v1"
+
+pub fn endpoint_broker_io_operations_v1() -> [text]:
+    ["endpoint_broker_open_v1", "endpoint_connect_v1", "endpoint_accept_v1",
+        "endpoint_poll_v1", "endpoint_close_v1"]
+
+pub enum EndpointBrokerIoResultV1:
+    Unqualified(operation: text, reason: text)
+
+pub struct EndpointBrokerCapabilityV1:
+    profile: text
+    pure_core: bool
+    data_plane_qualified: bool
+    unqualified_reasons: [text]
+
+pub fn endpoint_broker_capability_v1() -> EndpointBrokerCapabilityV1:
+    EndpointBrokerCapabilityV1(profile: ENDPOINT_PROFILE_V1, pure_core: true,
+        data_plane_qualified: false,
+        unqualified_reasons: ["endpoint-transport-unqualified", "endpoint-host-publication-unqualified",
+            "endpoint-native-evidence-missing"])
+
+# Network-profile admission for a provider using this broker. `pod-ip-v1` is
+# never translated into a proxy. `endpoint-v1` stays blocked until the data
+# plane carries native qualification evidence.
+pub fn endpoint_network_profile_admit_v1(profile: text) -> Result<bool, text>:
+    if profile == ENDPOINT_PROFILE_POD_IP_V1: return Err("endpoint-pod-ip-v1-unsupported")
+    if profile != ENDPOINT_PROFILE_V1: return Err("endpoint-network-profile-unknown")
+    if not endpoint_broker_capability_v1().data_plane_qualified:
+        return Err("endpoint-broker-data-plane-unqualified")
+    Ok(true)
+
+# Owner-bearing I/O turn placeholder: callers keep every handle they passed
+# in; nothing is acquired, so there is nothing to retain or clean up.
+pub fn endpoint_broker_io_v1(operation: text) -> EndpointBrokerIoResultV1:
+    if not endpoint_broker_io_operations_v1().contains(operation):
+        return EndpointBrokerIoResultV1.Unqualified(operation: operation, reason: "endpoint-broker-operation-unknown")
+    EndpointBrokerIoResultV1.Unqualified(operation: operation, reason: "endpoint-transport-unqualified")
+
+export EndpointBrokerIoResultV1, EndpointBrokerCapabilityV1
+export endpoint_broker_capability_v1, endpoint_network_profile_admit_v1, endpoint_broker_io_v1
+export ENDPOINT_PROFILE_V1, ENDPOINT_PROFILE_POD_IP_V1, endpoint_broker_io_operations_v1

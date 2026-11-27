@@ -27,9 +27,6 @@
 
 use lazy_val.{Lazy, LazyState, lazy}
 
-export LazySeq, LazySeqNode, SeqIterator
-export naturals, fibonacci, repeat, cycle, range_lazy
-export LazySeq__empty, LazySeq__single, LazySeq__cons, LazySeq__from_array, LazySeq__from_array_helper, LazySeq__iterate, LazySeq__unfold, LazySeq__generate, LazySeq__generate_helper, LazySeq__repeat_val, LazySeq__repeat_n, SeqIterator__new
 
 
 # ============================================================================
@@ -45,19 +42,19 @@ impl LazySeqNode:
     fn is_empty() -> bool:
         match self:
             case Empty: true
-            case _: false
+            case _("uncovered variants use the default handling"): false
     fn head() -> T?:
         match self:
             case Cons(h, _): Some(h)
-            case Empty: nil
+            case Empty: None
     fn tail() -> LazySeqNode<T>?:
         match self:
             case Cons(_, t):
                 var tail_lazy = t
                 match tail_lazy.force():
                     case Ok(node): Some(node)
-                    case Err(_): nil
-            case Empty: nil
+                    case Err(_): None
+            case Empty: None
 # ============================================================================
 # Lazy Sequence
 # ============================================================================
@@ -133,7 +130,7 @@ fn LazySeq__unfold<T><S>(seed: S, f: fn(S) -> (T, S)?) -> LazySeq<T>:
         case Some((value, new_state)):
             val tail = lazy(\: LazySeq__unfold(new_state, f).force_node())
             LazySeq(node: Lazy__of(LazySeqNode.Cons(value, tail)))
-        case nil:
+        case None:
             LazySeq__empty()
 
 fn LazySeq__generate<T>(f: fn(i64) -> T?) -> LazySeq<T>:
@@ -150,7 +147,7 @@ fn LazySeq__generate_helper<T>(f: fn(i64) -> T?, index: i64) -> LazySeq<T>:
         case Some(value):
             val tail = lazy(\: LazySeq__generate_helper(f, index + 1).force_node())
             LazySeq(node: Lazy__of(LazySeqNode.Cons(value, tail)))
-        case nil:
+        case None:
             LazySeq__empty()
 
 fn LazySeq__repeat_val<T>(value: T) -> LazySeq<T>:
@@ -195,7 +192,7 @@ impl LazySeq:
             case Cons(h, t):
                 Some((h, LazySeq(node: t)))
             case Empty:
-                nil
+                None
     fn map<U>(f: fn(T) -> U) -> LazySeq<U>:
         """Transform each element lazily."""
         val self_ref = self
@@ -314,7 +311,7 @@ impl LazySeq:
                         LazySeq(node: t1).zip(LazySeq(node: t2)).force_node()
                     )
                     LazySeqNode.Cons((h1, h2), new_tail)
-                case _:
+                case _("uncovered variants use the default handling"):
                     LazySeqNode.Empty
         )
         LazySeq(node: node)
@@ -380,7 +377,7 @@ impl LazySeq:
     fn reduce(f: fn(T, T) -> T) -> T?:
         """Reduce sequence to single value."""
         if self.is_empty():
-            return nil
+            return None
 
         var acc = self.head().unwrap()
         var current = self.tail()
@@ -409,15 +406,19 @@ impl LazySeq:
             if h.? and predicate(h.unwrap()):
                 return h
             current = current.tail()
-        nil
+        None
     fn any(predicate: fn(T) -> bool) -> bool:
         """Check if any element matches predicate."""
-        # `!= nil`, not `.?`: find returns `T?`, and for a falsy payload
+        # `.is_some()`, not `.?`: find returns `T?`, and for a falsy payload
         # (`Some(0)`, `Some("")`, `Some(false)`) `.?` reads as ABSENT, so
         # `any` answered false for an element that DID match. `.?` in tail
         # position of a `-> bool` fn is also not a bool -- see
         # doc/08_tracking/bug/declared_return_type_not_enforced_2026-08-09.md
-        self.find(predicate) != nil
+        # Bound to a local first: a method chained on the generic `T?` call
+        # result fails MIR lowering (E-RTI-003). See
+        # doc/08_tracking/bug/mir_lowering_e_rti_003_is_some_on_generic_optional_2026-11-24.md
+        val found = self.find(predicate)
+        found.is_some()
     fn all(predicate: fn(T) -> bool) -> bool:
         """Check if all elements match predicate.
 
@@ -473,7 +474,7 @@ fn sieve(seq: LazySeq<i64>) -> LazySeq<i64>:
             val filtered = rest.filter(\x: x % p != 0)
             val tail = lazy(\: sieve(filtered).force_node())
             LazySeq(node: Lazy__of(LazySeqNode.Cons(p, tail)))
-        case nil:
+        case None:
             LazySeq__empty()
 
 fn repeat<T>(value: T) -> LazySeq<T>:
@@ -536,8 +537,8 @@ impl SeqIterator:
             case Some((head, tail)):
                 self.current = tail
                 Some(head)
-            case nil:
-                nil
+            case None:
+                None
 # ============================================================================
 # Display
 # ============================================================================

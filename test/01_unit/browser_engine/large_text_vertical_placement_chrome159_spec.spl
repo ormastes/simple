@@ -1,0 +1,181 @@
+"""
+## Purpose and audience
+Purpose: Pin the vertical placement of large text against Chrome 159. Two
+defects put a big glyph up to two rows above Chrome:
+
+1. A floated or absolutely positioned inline element (`<span style="position:absolute">`)
+   is blockified, so its text sits in a line box with the strut's floored
+   half-leading. The text run skipped that half-leading because the element's
+   `display` still read `inline`: one row high wherever the face's rounded
+   line gap is 2 px or more (Liberation Serif from 40px, Sans from 48px).
+2. The grayscale raster (device size above 48 px, so every dpr4 glyph and
+   every 1x glyph from 49px) anchored each bitmap on its own ink TOP and
+   rounded the height up, so the ink bottom floated up to one row above the
+   baseline, by a different fraction per glyph. Chrome keeps the outline
+   unhinted there but puts the baseline on a whole row.
+Audience: web renderer text / glyph raster maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--hide-scrollbars --screenshot`), `H` in `color:#000` on white, Liberation
+Serif / Sans. dark = 765 - (r+g+b); an ink row has a pixel with dark > 380.
+
+Page `_page_1x()`, 560x100 at device scale 1, ink rows top..bottom:
+
+| span                | Chrome  | base    | head    |
+|---------------------|---------|---------|---------|
+| serif 40px          | 11..36  | 10..35  | 11..36  |
+| serif 48px          | 12..43  | 11..42  | 12..43  |
+| serif 60px          | 15..53  | 13..51  | 15..53  |
+| serif 72px          | 18..64  | 16..62  | 18..64  |
+| sans-serif 48px     | 11..43  | 10..42  | 11..43  |
+| sans-serif 60px     | 14..54  | 12..52  | 14..54  |
+| sans-serif 72px     | 16..65  | 15..64  | 16..65  |
+
+Page `_page_4x()`, 160x80 at device scale 4 (640x320 device px):
+
+| glyph                         | Chrome            | base              | head              |
+|-------------------------------|-------------------|-------------------|-------------------|
+| UA `<h1>` sans-serif, rows    | 115..202          | 114..201          | 115..202          |
+| serif 24px, rows              | 25..87            | 25..87            | 25..87            |
+| serif 24px, top / bottom dark | 561 / 765         | 765 / 573         | 573 / 765         |
+
+(The serif 24px rows already agreed; its coverage did not: the fractional row
+belongs at the cap top, the baseline row is solid.)
+
+Page `_page_blockified()`, 320x100 at device scale 1, default serif, top 10px:
+
+| span                                   | Chrome  | base    | head    |
+|----------------------------------------|---------|---------|---------|
+| `position:fixed` 48px                  | 22..53  | 21..52  | 22..53  |
+| `position:absolute` 16px / 40px line   | 24..34  | 13..23  | 24..34  |
+| `position:absolute` 48px / line 1      | 18..49  | 21..52  | 18..49  |
+| `float:left` 48px                      | 22..53  | 21..52  | 22..53  |
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-LARGE-VPLACE-001 — large text (grayscale raster, and text of an absolutely positioned inline element) sits on Chrome 159's baseline row.
+"""
+# @tag: unit, browser_engine, text, engine2d, chrome159
+# @cover src/lib/common/encoding/sfnt_glyf.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val SERIF: text = "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+
+fn _faces_present() -> bool:
+    file_exists(SERIF) and file_exists(SANS)
+
+fn _span(left: i32, family: text, size: i32) -> text:
+    "<span style=\"position:absolute;left:{left}px;top:0;font-family:{family};font-size:{size}px\">H</span>"
+
+fn _page_1x() -> text:
+    "<!doctype html><html><body style=\"margin:0;background:#fff;color:#000\">" + _span(0, "serif", 40) + _span(80, "serif", 48) + _span(160, "serif", 60) + _span(240, "serif", 72) + _span(320, "sans-serif", 48) + _span(400, "sans-serif", 60) + _span(480, "sans-serif", 72) + "</body></html>"
+
+fn _page_4x() -> text:
+    "<!doctype html><html><body style=\"margin:0;background:#fff;color:#000\"><h1 style=\"font-family:sans-serif\">H</h1>" + _span(80, "serif", 24) + "</body></html>"
+
+fn _page_blockified() -> text:
+    "<!doctype html><html><body style=\"margin:0;background:#fff;color:#000;font-size:48px\"><span style=\"position:fixed;left:0;top:10px\">H</span><span style=\"position:absolute;left:80px;top:10px;font-size:16px;line-height:40px\">H</span><span style=\"position:absolute;left:160px;top:10px;line-height:1\">H</span><div style=\"position:absolute;left:240px;top:10px;width:80px\"><span style=\"float:left\">H</span></div></body></html>"
+
+fn _dark(px: u32) -> i32:
+    765 - (((px >> 16) & 0xFFu32) + ((px >> 8) & 0xFFu32) + (px & 0xFFu32)).to_i32()
+
+# Darkest pixel of row y in columns x0..x1-1.
+fn _row_dark(px: [u32], w: i32, y: i32, x0: i32, x1: i32) -> i32:
+    var most = 0
+    var x = x0
+    while x < x1:
+        val d = _dark(px[y * w + x])
+        if d > most:
+            most = d
+        x = x + 1
+    most
+
+# First (want_last false) or last row with dark > 380 in columns x0..x1-1, or -1.
+fn _ink_row(px: [u32], w: i32, h: i32, x0: i32, x1: i32, want_last: bool) -> i32:
+    var found = -1
+    var y = 0
+    while y < h:
+        if _row_dark(px, w, y, x0, x1) > 380:
+            if not want_last:
+                return y
+            found = y
+        y = y + 1
+    found
+
+describe "large text vertical placement against Chrome 159":
+    it "AC-1: text of an absolutely positioned span keeps the strut half-leading (LCD sizes)":
+        if not _faces_present():
+            skip("no Liberation Serif / Sans on this host")
+            return
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_page_1x(), 560, 100, 1, "cpu_simd")
+        expect(px.len()).to_equal(56000)
+        step("serif 40px: Chrome rows 11..36")
+        expect(_ink_row(px, 560, 100, 0, 80, false)).to_equal(11)
+        expect(_ink_row(px, 560, 100, 0, 80, true)).to_equal(36)
+        step("serif 48px: Chrome rows 12..43")
+        expect(_ink_row(px, 560, 100, 80, 160, false)).to_equal(12)
+        expect(_ink_row(px, 560, 100, 80, 160, true)).to_equal(43)
+        step("sans-serif 48px: Chrome rows 11..43")
+        expect(_ink_row(px, 560, 100, 320, 400, false)).to_equal(11)
+        expect(_ink_row(px, 560, 100, 320, 400, true)).to_equal(43)
+
+    it "AC-2: a grayscale glyph (above 48px) ends on the baseline row":
+        if not _faces_present():
+            skip("no Liberation Serif / Sans on this host")
+            return
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_page_1x(), 560, 100, 1, "cpu_simd")
+        expect(px.len()).to_equal(56000)
+        step("serif 60px: Chrome rows 15..53")
+        expect(_ink_row(px, 560, 100, 160, 240, false)).to_equal(15)
+        expect(_ink_row(px, 560, 100, 160, 240, true)).to_equal(53)
+        step("serif 72px: Chrome rows 18..64")
+        expect(_ink_row(px, 560, 100, 240, 320, false)).to_equal(18)
+        expect(_ink_row(px, 560, 100, 240, 320, true)).to_equal(64)
+        step("sans-serif 60px: Chrome rows 14..54")
+        expect(_ink_row(px, 560, 100, 400, 480, false)).to_equal(14)
+        expect(_ink_row(px, 560, 100, 400, 480, true)).to_equal(54)
+        step("sans-serif 72px: Chrome rows 16..65")
+        expect(_ink_row(px, 560, 100, 480, 560, false)).to_equal(16)
+        expect(_ink_row(px, 560, 100, 480, 560, true)).to_equal(65)
+
+    it "AC-3: at device scale 4 the baseline row is solid and the fraction is at the cap top":
+        if not _faces_present():
+            skip("no Liberation Serif / Sans on this host")
+            return
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_page_4x(), 160, 80, 4, "cpu_simd")
+        expect(px.len()).to_equal(204800)
+        step("UA h1 sans-serif (128 device px): Chrome rows 115..202")
+        expect(_ink_row(px, 640, 320, 0, 320, false)).to_equal(115)
+        expect(_ink_row(px, 640, 320, 0, 320, true)).to_equal(202)
+        step("serif 24px (96 device px): Chrome rows 25..87")
+        expect(_ink_row(px, 640, 320, 320, 640, false)).to_equal(25)
+        expect(_ink_row(px, 640, 320, 320, 640, true)).to_equal(87)
+        step("serif 24px: Chrome bottom row dark 765 (solid), top row dark 561 (partial), top within 5%")
+        expect(_row_dark(px, 640, 87, 320, 640)).to_equal(765)
+        val top = _row_dark(px, 640, 25, 320, 640)
+        expect(top >= 533 and top <= 589).to_be(true)
+
+    it "AC-4: fixed, floated and explicit line-height blockified spans take the same half-leading":
+        if not _faces_present():
+            skip("no Liberation Serif / Sans on this host")
+            return
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_page_blockified(), 320, 100, 1, "cpu_simd")
+        expect(px.len()).to_equal(32000)
+        step("position:fixed 48px: Chrome rows 22..53")
+        expect(_ink_row(px, 320, 100, 0, 80, false)).to_equal(22)
+        expect(_ink_row(px, 320, 100, 0, 80, true)).to_equal(53)
+        step("position:absolute 16px / line-height 40px: Chrome rows 24..34")
+        expect(_ink_row(px, 320, 100, 80, 160, false)).to_equal(24)
+        expect(_ink_row(px, 320, 100, 80, 160, true)).to_equal(34)
+        step("position:absolute 48px / line-height 1: Chrome rows 18..49")
+        expect(_ink_row(px, 320, 100, 160, 240, false)).to_equal(18)
+        expect(_ink_row(px, 320, 100, 160, 240, true)).to_equal(49)
+        step("float:left 48px: Chrome rows 22..53")
+        expect(_ink_row(px, 320, 100, 240, 320, false)).to_equal(22)
+        expect(_ink_row(px, 320, 100, 240, 320, true)).to_equal(53)

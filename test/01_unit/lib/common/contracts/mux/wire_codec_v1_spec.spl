@@ -1,0 +1,367 @@
+# REQ-CMUX-001/002/003/006/007/008/011. NOT_RUN: no native/compiler run.
+# Pure production codec controls. Fixtures are typed values, not live providers.
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.mux.wire_envelope_v1.*
+use std.common.contracts.mux.wire_exchange_v1.*
+use std.common.contracts.mux.wire_primitives_v1.*
+use std.common.contracts.mux.wire_validation_v1.*
+use std.common.contracts.mux.wire_values_06_v1.{mux_wire_size_mux_wire_result_v1}
+use std.common.contracts.mux.wire_budget_03_v1.{mux_wire_nodes_mux_wire_result_v1}
+use std.common.sdn.strict_v1.{sdn_parse_strict_bytes_v1}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.common.sdn.value.{SdnValue}
+use std.common.text_bytes.{text_to_bytes}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+# Typed data fixtures only: no endpoint, process, authority or provider claim.
+use std.common.debug.capability.{CapLevel}
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.execution_v1.*
+use std.common.contracts.mux.observation_v1.*
+use std.common.contracts.mux.wire_types_v1.*
+
+pub fn wire_test_handle() -> MuxHandleV1:
+    MuxHandleV1(owner_id: "owner-a", owner_generation: 7, lease_id: "lease-a")
+
+pub fn wire_test_target(kind: MuxObjectKindV1, id: text) -> MuxObjectRefV1:
+    MuxObjectRefV1(owner_id: "owner-a", owner_generation: 7, kind: kind, object_id: id)
+
+pub fn wire_test_size() -> MuxCellSizeV1:
+    MuxCellSizeV1(columns: 80, rows: 24)
+
+pub fn wire_test_launch() -> MuxLaunchV1:
+    MuxLaunchV1(mode: MuxLaunchModeV1.Exec("child-program", ["literal arg", ""]),
+        cwd: Some("workspace"), environment: [MuxEnvironmentChangeV1.Set("MUX_TEST", "한😀")], size: wire_test_size())
+
+pub fn wire_test_command_request(command: MuxCommandV1) -> MuxRequestV1:
+    MuxRequestV1(handle: wire_test_handle(), request_id: 19,
+        deadline: MuxDeadlineV1(timeout_ms: 1000), expected_revision: Some(11), command: command)
+
+pub fn wire_test_limits() -> MuxCoreLimitsV1:
+    MuxCoreLimitsV1(discovery: MuxLimitsV1(max_sessions: 4, max_reply_bytes: 65536),
+        max_windows: 8, max_panes: 16, max_clients: 4, max_input_bytes: 4096,
+        max_capture_bytes: 4096, max_events: 32, max_request_timeout_ms: 1000)
+
+# Native here is untrusted descriptor data, not a provider or support assertion.
+pub fn wire_test_capability(operation: MuxOperationV1) -> MuxOperationCapabilityV1:
+    MuxOperationCapabilityV1(operation: operation, level: CapLevel.Native,
+        backend: MuxBackendV1.Smux, backend_version: "untrusted-test-descriptor",
+        owner_id: "owner-a", owner_generation: 7, limits: wire_test_limits(),
+        constraints: [], evidence: MuxEvidenceV1.NotRun)
+
+pub fn wire_test_capture() -> MuxCaptureV1:
+    MuxCaptureV1(pane: wire_test_target(MuxObjectKindV1.Pane, "p1"),
+        range: MuxCaptureRangeV1.Lines(-20, 10), join_wrapped: true, styled: false,
+        max_bytes: 4, continuation: nil)
+
+pub fn wire_test_receipt() -> MuxRequestReceiptV1:
+    MuxRequestReceiptV1(handle: wire_test_handle(), request_id: 19,
+        operation: Some(MuxOperationV1.SplitPane), knowledge: MuxRequestKnowledgeV1.Retained,
+        commit_state: MuxCommitStateV1.Partial, prior_revision: Some(11), observed_revision: Some(12),
+        affected: [wire_test_target(MuxObjectKindV1.Window, "w1")],
+        error_kind: Some(MuxErrorKindV1.PartialFailure), detail: "native operation failed after unzoom",
+        cleanup_pending: true)
+
+pub fn wire_test_commands() -> [MuxCommandV1]:
+    val session = wire_test_target(MuxObjectKindV1.Session, "s1")
+    val window = wire_test_target(MuxObjectKindV1.Window, "w1")
+    val pane = wire_test_target(MuxObjectKindV1.Pane, "p1")
+    val client = wire_test_target(MuxObjectKindV1.Client, "c1")
+    val commands: [MuxCommandV1] = [
+        MuxCommandV1.CreateSession(MuxCreateSessionV1(name: "session", first_window_name: "window", launch: wire_test_launch(), background: true)),
+        MuxCommandV1.RenameSession(session, "renamed"),
+        MuxCommandV1.TerminateSession(session),
+        MuxCommandV1.StopOwnedNamespace(MuxNamespaceStopV1(owner_id: "owner-a", owner_generation: 7, stop_token: "stop-authority")),
+        MuxCommandV1.CreateWindow(MuxCreateWindowV1(session: session, name: "window", launch: wire_test_launch())),
+        MuxCommandV1.RenameWindow(window, "renamed"),
+        MuxCommandV1.TerminateWindow(window),
+        MuxCommandV1.FocusWindow(client, window),
+        MuxCommandV1.LaunchPane(window, wire_test_launch()),
+        MuxCommandV1.SplitPane(MuxSplitPaneV1(pane: pane, direction: MuxSplitDirectionV1.Horizontal, size: MuxSplitSizeV1.Percent(40), launch: wire_test_launch())),
+        MuxCommandV1.TerminatePane(pane),
+        MuxCommandV1.FocusPane(client, pane),
+        MuxCommandV1.ResizePane(pane, wire_test_size()),
+        MuxCommandV1.ResizeWindow(window, wire_test_size()),
+        MuxCommandV1.SelectLayout(window, MuxLayoutKindV1.Tiled),
+        MuxCommandV1.ToggleZoom(window, pane),
+        MuxCommandV1.HidePane(pane),
+        MuxCommandV1.ShowPane(pane),
+        MuxCommandV1.Rebalance(window),
+        MuxCommandV1.SetPaneTitle(pane, "한😀"),
+        MuxCommandV1.SetPaneBorder(pane, MuxBorderV1.Single),
+        MuxCommandV1.SetPaneBorderStatus(pane, MuxBorderStatusV1.Top),
+        MuxCommandV1.AttachClient(MuxAttachClientV1(session: session, client_identity: "client", viewport: wire_test_size())),
+        MuxCommandV1.DetachClient(client),
+        MuxCommandV1.SetClientViewport(client, wire_test_size()),
+        MuxCommandV1.SendLiteral(pane, [0, 27, 255]),
+        MuxCommandV1.SendKeys(pane, [MuxKeyV1.Named(MuxNamedKeyV1.Enter)]),
+        MuxCommandV1.Paste(pane, MuxPasteV1(bytes: [65, 10], bracketed: true, append_enter: false)),
+        MuxCommandV1.SubmitShellCommand(pane, "echo literal"),
+        MuxCommandV1.Notify(MuxNotifyV1(recipient: MuxRecipientV1.Client(client), kind: MuxMessageKindV1.Info, literal_text: "hello", ttl_ms: 1000)),
+    ]
+    commands
+
+pub fn wire_test_capabilities() -> [MuxOperationCapabilityV1]:
+    var capabilities: [MuxOperationCapabilityV1] = []
+    for operation in mux_mandatory_operations_v1(): capabilities.push(wire_test_capability(operation))
+    capabilities
+
+pub fn wire_test_snapshot() -> MuxSnapshotV1:
+    val session = wire_test_target(MuxObjectKindV1.Session, "s1")
+    val window = wire_test_target(MuxObjectKindV1.Window, "w1")
+    val pane = wire_test_target(MuxObjectKindV1.Pane, "p1")
+    val client = wire_test_target(MuxObjectKindV1.Client, "c1")
+    val rectangle = MuxRectV1(x_cells: 0, y_cells: 0, width_cells: 80, height_cells: 24)
+    val layout = MuxLayoutStateV1(kind: MuxLayoutKindV1.Manual, canvas: wire_test_size(), rectangles: [MuxPaneRectV1(pane: pane, rectangle: rectangle)])
+    val context = MuxContextV1(client: Some(client), session: Some(session), window: Some(window), pane: Some(pane))
+    MuxSnapshotV1(backend: MuxBackendV1.Smux, namespace: "codec_values_only", handle: wire_test_handle(), revision: 11,
+        sessions: [MuxSessionStateV1(identity: session, name: "session", current_window: Some(window), background: true)],
+        windows: [MuxWindowStateV1(identity: window, session: session, name: "window", index: 0, active_pane: Some(pane), layout: layout, zoomed_pane: nil, restore_layout: nil)],
+        panes: [MuxPaneStateV1(identity: pane, session: session, window: window, legacy_id: "%1", index: 0,
+            child: MuxChildStateV1.Running(4242), title: "typed pane", current_command: "test-child",
+            rectangle: rectangle, focused: true, hidden: false, border: MuxBorderV1.Single,
+            border_status: MuxBorderStatusV1.Top, content_revision: 41)],
+        clients: [MuxClientStateV1(identity: client, context: context, viewport: wire_test_size(), attached: true)],
+        limits: wire_test_limits(), capabilities: wire_test_capabilities())
+
+pub fn wire_test_connection() -> MuxConnectionV1:
+    MuxConnectionV1(snapshot: wire_test_snapshot(), lease_terms: MuxLeaseTermsV1(lifetime_ms: 30000,
+        renew_after_ms: 10000, retained_receipt_ms: 60000, max_retained_receipts: 64))
+
+pub fn wire_test_request(call: MuxWireCallV1) -> MuxWireRequestV1:
+    MuxWireRequestV1(correlation: 18446744073709551615u64, auth_token: "0123456789abcdef0123456789abcdef", call: call)
+
+pub fn wire_test_response(result: MuxWireResultV1, tag: text) -> MuxWireResponseV1:
+    MuxWireResponseV1(correlation: 18446744073709551615u64, call_tag: tag, outcome: MuxWireOutcomeV1.Success(result))
+
+describe "CoreMux closed SDN wire codec":
+    it "round trips every command with exact fields and full u64 correlation":
+        step("Round trip all thirty typed command payloads")
+        val commands = wire_test_commands()
+        expect(commands.len()).to_equal(30)
+        for command in commands:
+            val request = wire_test_request(MuxWireCallV1.Execute(wire_test_command_request(command)))
+            val bytes = mux_wire_encode_request_v1(request, 4194304).unwrap()
+            val decoded = mux_wire_decode_request_v1(bytes, 4194304).unwrap()
+            expect(decoded).to_equal(request)
+            expect(decoded.correlation).to_equal(18446744073709551615u64)
+            expect(mux_wire_encode_request_v1(decoded, 4194304).unwrap()).to_equal(bytes)
+
+    it "preserves maximum u64 and rejects signed overflow and noncanonical spelling":
+        step("Check exact unsigned decimal wire identity")
+        expect(mux_wire_decode_u64_v1(mux_wire_encode_u64_v1(18446744073709551615u64)).unwrap()).to_equal(18446744073709551615u64)
+        expect(mux_wire_decode_u64_v1(SdnValue.String("0")).unwrap()).to_equal(0)
+        for spelling in ["", "00", "+1", "-1", " 1", "1.0", "18446744073709551616", "184467440737095516150"]:
+            expect(mux_wire_decode_u64_v1(SdnValue.String(spelling)).is_err()).to_equal(true)
+        expect(mux_wire_decode_u64_v1(SdnValue.Int(1)).is_err()).to_equal(true)
+
+    it "round trips binary NUL and high bytes and refuses noncanonical hex":
+        step("Preserve literal binary data without lossy text conversion")
+        val bytes: [u8] = [0, 10, 27, 127, 128, 255]
+        expect(mux_wire_encode_bytes_v1(bytes)).to_equal(SdnValue.String("000a1b7f80ff"))
+        expect(mux_wire_decode_bytes_v1(mux_wire_encode_bytes_v1(bytes)).unwrap()).to_equal(bytes)
+        for hex in ["f", "GG", "FF", "0x00", "00 "]:
+            expect(mux_wire_decode_bytes_v1(SdnValue.String(hex)).is_err()).to_equal(true)
+        expect(mux_wire_decode_bytes_v1(SdnValue.Array([])).is_err()).to_equal(true)
+        var large: [u8] = []
+        for index in 0..1048576: large.push((index % 256) as u8)
+        val request = wire_test_request(MuxWireCallV1.Execute(wire_test_command_request(MuxCommandV1.SendLiteral(wire_test_target(MuxObjectKindV1.Pane, "p1"), large))))
+        val encoded = mux_wire_encode_request_v1(request, 4194304).unwrap()
+        expect(encoded.len()).to_be_greater_than(2097152)
+        expect(mux_wire_decode_request_v1(encoded, 4194304).unwrap()).to_equal(request)
+
+    it "preserves Unicode and escapes through actual SDN envelope bytes":
+        step("Check UTF8 launch environment after strict decode")
+        val launch = wire_test_launch()
+        val request = wire_test_request(MuxWireCallV1.Execute(wire_test_command_request(MuxCommandV1.LaunchPane(wire_test_target(MuxObjectKindV1.Window, "w1"), launch))))
+        val decoded = mux_wire_decode_request_v1(mux_wire_encode_request_v1(request, 4194304).unwrap(), 4194304).unwrap()
+        val environment: [MuxEnvironmentChangeV1] = match decoded.call:
+            case MuxWireCallV1.Execute(value):
+                match value.command:
+                    case MuxCommandV1.LaunchPane(_, actual): actual.environment
+                    case _: []
+            case _: []
+        expect(environment.len()).to_equal(1)
+        val value = match environment[0]:
+            case MuxEnvironmentChangeV1.Set(_, actual): actual
+            case _: ""
+        expect(text_to_bytes(value)).to_equal([237, 149, 156, 240, 159, 152, 128])
+
+    it "rejects malformed UTF8 unknown variants wrong arity and dictionary bypasses":
+        step("Fail closed on malformed or invented wire shapes")
+        for bytes in [text_to_bytes("[]"), text_to_bytes("{}"), text_to_bytes("[coremux.v2, request]"), [255], text_to_bytes("[coremux.v1, request] trailing")]:
+            expect(mux_wire_decode_request_v1(bytes, 4194304).is_err()).to_equal(true)
+        val original = wire_test_request(MuxWireCallV1.Query(wire_test_handle(), MuxQueryV1.Capabilities, MuxDeadlineV1(timeout_ms: 1000)))
+        val body = mux_wire_encode_request_v1(original, 4194304).unwrap()
+        val text = match validated_utf8_bytes_to_text_linear(body):
+            case Ok(value): value
+            case Err(_): ""
+        expect(text.len()).to_be_greater_than(0)
+        expect(mux_wire_decode_request_v1(text_to_bytes(text.replace("Capabilities", "InventedOperation")), 4194304).is_err()).to_equal(true)
+        expect(mux_wire_decode_request_v1(text_to_bytes(text + " []"), 4194304).is_err()).to_equal(true)
+
+    it "checks length framing without allocating an oversized body":
+        step("Reject zero and oversized advertised lengths")
+        expect(mux_wire_frame_header_v1(65537, 4194304).unwrap()).to_equal([0, 1, 0, 1])
+        expect(mux_wire_frame_length_v1([0, 1, 0, 1], 4194304).unwrap()).to_equal(65537)
+        for header in [[0, 0, 0, 0], [255, 255, 255, 255], [0, 64, 0, 1], [0, 1]]:
+            expect(mux_wire_frame_length_v1(header, 4194304).is_err()).to_equal(true)
+        expect(mux_wire_frame_header_v1(4194305, 4194304).is_err()).to_equal(true)
+
+    it "preflights aggregate payload and capture hex expansion against frame budgets":
+        step("Refuse impossible sizes before frame construction")
+        val pane = wire_test_target(MuxObjectKindV1.Pane, "p1")
+        val command = MuxCommandV1.SetPaneTitle(pane, "x".repeat(257))
+        expect(mux_wire_encode_request_v1(wire_test_request(MuxWireCallV1.Execute(wire_test_command_request(command))), 4194304).is_err()).to_equal(true)
+        var capture = wire_test_capture()
+        capture.max_bytes = 1025
+        expect(mux_wire_encode_request_v1(wire_test_request(MuxWireCallV1.Query(wire_test_handle(), MuxQueryV1.Capture(capture), MuxDeadlineV1(timeout_ms: 1000))), 4096).is_err()).to_equal(true)
+        capture.max_bytes = 1024
+        expect(mux_wire_encode_request_v1(wire_test_request(MuxWireCallV1.Query(wire_test_handle(), MuxQueryV1.Capture(capture), MuxDeadlineV1(timeout_ms: 1000))), 4096).is_ok()).to_equal(true)
+        expect(mux_wire_sum_v1(4194304, 1).is_err()).to_equal(true)
+
+    it "round trips full connection state capabilities and lease terms without upgrading evidence":
+        step("Preserve full observations and NotRun descriptors")
+        val response = wire_test_response(MuxWireResultV1.Connection(wire_test_connection()), "connect")
+        val bytes = mux_wire_encode_response_v1(response, 4194304).unwrap()
+        val decoded = mux_wire_decode_response_v1(bytes, 4194304, response.correlation, "connect").unwrap()
+        expect(decoded).to_equal(response)
+        match decoded.outcome:
+            case MuxWireOutcomeV1.Success(MuxWireResultV1.Connection(connection)):
+                expect(connection.snapshot.capabilities.len()).to_equal(39)
+                expect(connection.snapshot.capabilities[0].evidence).to_equal(MuxEvidenceV1.NotRun)
+                expect(connection.lease_terms.renew_after_ms).to_equal(10000)
+            case _: expect(decoded.outcome).to_equal(response.outcome)
+        expect(mux_wire_decode_response_v1(bytes, 4194304, 1, "connect").is_err()).to_equal(true)
+        expect(mux_wire_decode_response_v1(bytes, 4194304, response.correlation, "execute").is_err()).to_equal(true)
+
+    it "round trips all six typed query result shapes and rejects mismatched queries":
+        step("Bind each query reply to its declared operation")
+        val snapshot = wire_test_snapshot()
+        val capture = MuxCapturedV1(pane: wire_test_target(MuxObjectKindV1.Pane, "p1"), observed_revision: 11,
+            content_revision: 41, ingestion: MuxIngestionV1.Ingested, bytes: [0, 255], byte_extent: 2,
+            truncated: false, continuation: nil)
+        val replies: [MuxQueryResultV1] = [MuxQueryResultV1.Snapshot(snapshot),
+            MuxQueryResultV1.ResolvedTarget(snapshot.panes[0].identity), MuxQueryResultV1.Captured(capture),
+            MuxQueryResultV1.Context(snapshot.clients[0].context), MuxQueryResultV1.RequestReceipt(wire_test_receipt()),
+            MuxQueryResultV1.Capabilities(snapshot.capabilities)]
+        for reply in replies:
+            val response = wire_test_response(MuxWireResultV1.Query(reply), "query")
+            expect(mux_wire_decode_response_v1(mux_wire_encode_response_v1(response, 4194304).unwrap(), 4194304, response.correlation, "query").unwrap()).to_equal(response)
+        val call = MuxWireCallV1.Query(wire_test_handle(), MuxQueryV1.Capabilities, MuxDeadlineV1(timeout_ms: 1000))
+        expect(mux_wire_validate_exchange_v1(call, MuxWireResultV1.Query(replies[0]), MuxBackendV1.Smux).is_err()).to_equal(true)
+
+    it "round trips mutation disconnect and events with explicit receipts and revisions":
+        step("Preserve effects and cleanup data without synthetic success")
+        val snapshot = wire_test_snapshot()
+        var receipt = wire_test_receipt()
+        receipt.observed_revision = Some(11)
+        val mutation = MuxMutationV1(receipt: receipt, revision: 11, created: [], changed: receipt.affected,
+            snapshot: snapshot, cleanup: MuxCleanupV1(pending: true, remaining: receipt.affected, detail: "pending"), notification: nil)
+        var disconnected_receipt = receipt
+        disconnected_receipt.operation = Some(MuxOperationV1.Disconnect)
+        val disconnected = MuxDisconnectV1(receipt: disconnected_receipt, already_disconnected: false,
+            released_clients: [snapshot.clients[0].identity], revision: 11, cleanup: mutation.cleanup)
+        val events = MuxEventBatchV1(owner_id: "owner-a", owner_generation: 7, from_cursor: 2, to_cursor: 3,
+            events: [MuxEventV1(cursor: 3, causal_request_id: Some(19), observed_revision: 11,
+                kind: MuxEventKindV1.ContentAvailable(snapshot.panes[0].identity, 41))], reconciliation_required: false)
+        for response in [wire_test_response(MuxWireResultV1.Mutation(mutation), "execute"),
+            wire_test_response(MuxWireResultV1.Disconnect(disconnected), "disconnect"),
+            wire_test_response(MuxWireResultV1.Events(events), "poll_events")]:
+            expect(mux_wire_decode_response_v1(mux_wire_encode_response_v1(response, 4194304).unwrap(), 4194304, response.correlation, response.call_tag).unwrap()).to_equal(response)
+
+    it "preserves Partial and Unknown errors and refuses false Unsupported effects":
+        step("Keep uncertainty in structured failures")
+        for commitment in [MuxCommitStateV1.Partial, MuxCommitStateV1.Unknown]:
+            val failure = MuxErrorV1(kind: MuxErrorKindV1.PartialFailure, detail: "operation incomplete",
+                request_id: 19, commit_state: commitment, observed_revision: Some(12),
+                affected: [wire_test_target(MuxObjectKindV1.Window, "w1")], cleanup_pending: true)
+            val response = MuxWireResponseV1(correlation: 7, call_tag: "execute", outcome: MuxWireOutcomeV1.Failure(failure))
+            expect(mux_wire_decode_response_v1(mux_wire_encode_response_v1(response, 4194304).unwrap(), 4194304, 7, "execute").unwrap()).to_equal(response)
+            var invalid = failure
+            invalid.kind = MuxErrorKindV1.Unsupported
+            expect(mux_wire_encode_response_v1(MuxWireResponseV1(correlation: 7, call_tag: "execute", outcome: MuxWireOutcomeV1.Failure(invalid)), 4194304).is_err()).to_equal(true)
+
+    it "rejects foreign owners duplicate IDs invalid geometry and out of order events":
+        step("Validate observation graph and event cursors")
+        var snapshot = wire_test_snapshot()
+        snapshot.sessions.push(snapshot.sessions[0])
+        expect(mux_wire_validate_snapshot_v1(snapshot).is_err()).to_equal(true)
+        var foreign = wire_test_snapshot()
+        foreign.panes[0].identity.owner_generation = 8
+        expect(mux_wire_validate_snapshot_v1(foreign).is_err()).to_equal(true)
+        var geometry = wire_test_snapshot()
+        geometry.windows[0].layout.rectangles[0].rectangle.width_cells = 81
+        expect(mux_wire_validate_snapshot_v1(geometry).is_err()).to_equal(true)
+        val event = MuxEventV1(cursor: 2, causal_request_id: nil, observed_revision: 11, kind: MuxEventKindV1.LeaseRevoked)
+        expect(mux_wire_validate_events_v1(MuxEventBatchV1(owner_id: "owner-a", owner_generation: 7,
+            from_cursor: 2, to_cursor: 3, events: [event], reconciliation_required: false)).is_err()).to_equal(true)
+
+
+    it "binds snapshot scope and visibility while permitting required ancestors":
+        step("Reject unrelated and filtered objects in a scoped reply")
+        val snapshot = wire_test_snapshot()
+        val visibility = MuxVisibilityV1(include_hidden: false, include_exited: false)
+        val scope = MuxScopeV1.Window(snapshot.windows[0].identity)
+        val call = MuxWireCallV1.Query(snapshot.handle, MuxQueryV1.Snapshot(scope, visibility), MuxDeadlineV1(timeout_ms: 1000))
+        expect(mux_wire_validate_exchange_v1(call, MuxWireResultV1.Query(MuxQueryResultV1.Snapshot(snapshot)), MuxBackendV1.Smux).is_ok()).to_equal(true)
+        var unrelated = snapshot
+        unrelated.sessions.push(MuxSessionStateV1(identity: wire_test_target(MuxObjectKindV1.Session, "s2"), name: "unrelated", current_window: nil, background: true))
+        expect(mux_wire_validate_snapshot_v1(unrelated).is_ok()).to_equal(true)
+        expect(mux_wire_validate_exchange_v1(call, MuxWireResultV1.Query(MuxQueryResultV1.Snapshot(unrelated)), MuxBackendV1.Smux).is_err()).to_equal(true)
+        var hidden = wire_test_snapshot()
+        hidden.panes[0].hidden = true
+        expect(mux_wire_validate_exchange_v1(call, MuxWireResultV1.Query(MuxQueryResultV1.Snapshot(hidden)), MuxBackendV1.Smux).is_err()).to_equal(true)
+        var exited = wire_test_snapshot()
+        exited.panes[0].child = MuxChildStateV1.Exited(4242, Some(0), nil)
+        expect(mux_wire_validate_exchange_v1(call, MuxWireResultV1.Query(MuxQueryResultV1.Snapshot(exited)), MuxBackendV1.Smux).is_err()).to_equal(true)
+        expect(mux_wire_validate_snapshot_scope_v1(exited, scope, MuxVisibilityV1(include_hidden: true, include_exited: true)).is_ok()).to_equal(true)
+
+    it "rejects dangling and inconsistent client context and restoration geometry":
+        step("Check same owner reference membership and ancestry")
+        var missing = wire_test_snapshot()
+        missing.clients[0].context.pane = Some(wire_test_target(MuxObjectKindV1.Pane, "missing"))
+        expect(mux_wire_validate_snapshot_v1(missing).is_err()).to_equal(true)
+        var wrong_client = wire_test_snapshot()
+        wrong_client.clients[0].context.client = Some(wire_test_target(MuxObjectKindV1.Client, "other"))
+        expect(mux_wire_validate_snapshot_v1(wrong_client).is_err()).to_equal(true)
+        var inconsistent = wire_test_snapshot()
+        val other_session = wire_test_target(MuxObjectKindV1.Session, "s2")
+        inconsistent.sessions.push(MuxSessionStateV1(identity: other_session, name: "second", current_window: nil, background: true))
+        inconsistent.clients[0].context.session = Some(other_session)
+        expect(mux_wire_validate_snapshot_v1(inconsistent).is_err()).to_equal(true)
+        var restored = wire_test_snapshot()
+        var layout = restored.windows[0].layout
+        layout.rectangles[0].pane = wire_test_target(MuxObjectKindV1.Pane, "missing")
+        restored.windows[0].restore_layout = Some(layout)
+        restored.windows[0].zoomed_pane = Some(restored.panes[0].identity)
+        expect(mux_wire_validate_snapshot_v1(restored).is_err()).to_equal(true)
+        var absent_context = wire_test_snapshot()
+        absent_context.clients[0].context = MuxContextV1(client: nil, session: nil, window: nil, pane: nil)
+        expect(mux_wire_validate_snapshot_v1(absent_context).is_ok()).to_equal(true)
+
+    it "rejects a byte fitting response above the parser node budget before SDN allocation":
+        step("Apply identical sender and receiver node ceilings")
+        var clients: [MuxObjectRefV1] = []
+        for index in 0..38:
+            clients.push(MuxObjectRefV1(owner_id: "a", owner_generation: 1, kind: MuxObjectKindV1.Client, object_id: "c" + (index + 1).to_text()))
+        val notification = MuxNotificationReceiptV1(notification_id: "a", state: MuxNotificationStateV1.Rendered(clients))
+        var events: [MuxEventV1] = []
+        for index in 0..1024:
+            events.push(MuxEventV1(cursor: (index + 1) as u64, causal_request_id: nil, observed_revision: 1, kind: MuxEventKindV1.Notification(notification)))
+        val result = MuxWireResultV1.Events(MuxEventBatchV1(owner_id: "a", owner_generation: 1,
+            from_cursor: 0, to_cursor: 1024, events: events, reconciliation_required: false))
+        expect(mux_wire_validate_result_v1(result).is_ok()).to_equal(true)
+        expect(mux_wire_size_mux_wire_result_v1(result).unwrap()).to_be_less_than(4194304)
+        expect(mux_wire_nodes_mux_wire_result_v1(result).is_err()).to_equal(true)
+        val failure = mux_wire_encode_response_v1(wire_test_response(result, "poll_events"), 4194304).unwrap_err()
+        expect(failure.code).to_equal("node_budget")
+
+    it "matches actual strict parser node accounting for an admitted full response":
+        step("Compare preflight node count with production parser observation")
+        val result = MuxWireResultV1.Connection(wire_test_connection())
+        val response = wire_test_response(result, "connect")
+        val bytes = mux_wire_encode_response_v1(response, 4194304).unwrap()
+        val parsed = sdn_parse_strict_bytes_v1(bytes, SdnStrictLimitsV1(max_source_bytes: 4194304,
+            max_depth: 64, max_nodes: 250000, max_rows: 0, max_cells: 0, max_columns: 0)).unwrap()
+        expect(parsed.nodes).to_equal(mux_wire_nodes_mux_wire_result_v1(result).unwrap() + 6)
+        expect(mux_wire_decode_response_v1(bytes, 4194304, response.correlation, "connect").unwrap()).to_equal(response)

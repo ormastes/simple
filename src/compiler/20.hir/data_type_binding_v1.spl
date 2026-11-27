@@ -1,0 +1,71 @@
+# Cold schema binding before bodies; all name/alias work stays in HIR owners.
+use compiler.common.data.data_semantic_type_identity_v1.{DataSemanticTypeIdentityV1, DATA_SEMANTIC_TYPE_MAX_BYTES_V1}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.parser_types_expr.{Type}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_checked_reference_v1}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.data_semantic_type_identity_v1.*
+
+pub fn data_parser_type_text_v1(spelling: text, source_path: text) -> Result<Type, text>:
+    if spelling == "" or spelling.bytes().len() > DATA_SEMANTIC_TYPE_MAX_BYTES_V1:
+        return Err("schema type spelling byte bound")
+    if spelling.contains("\0") or spelling.contains("\n") or spelling.contains("\r"):
+        return Err("schema type spelling must be one complete line")
+    # Reuse the full language parser. Never implement a schema-specific type
+    # grammar or accept extra declarations left over after a type expression.
+    val name = "__data_schema_type_v1"
+    val parsed = parse_and_build_module_checked_reference_v1("type {name} = {spelling}\n", source_path)?
+    if (parsed.type_aliases.len() != 1 or not parsed.type_aliases.has(name) or
+            parsed.imports.len() != 0 or parsed.exports.len() != 0 or
+            parsed.domain_blocks.len() != 0 or parsed.functions.len() != 0 or
+            parsed.classes.len() != 0 or parsed.actors.len() != 0 or parsed.structs.len() != 0 or
+            parsed.enums.len() != 0 or parsed.bitfields.len() != 0 or parsed.traits.len() != 0 or
+            parsed.impls.len() != 0 or parsed.constants.len() != 0 or parsed.static_asserts.len() != 0 or
+            parsed.aop_advices.len() != 0 or parsed.di_bindings.len() != 0 or
+            parsed.arch_rules.len() != 0 or parsed.mock_decls.len() != 0 or
+            parsed.friends.len() != 0 or parsed.internal_exports.len() != 0 or
+            parsed.tagged_layer != "" or parsed.layer_dag_edges != "" or parsed.nogc_strict):
+        return Err("schema type text contains declarations outside the type carrier")
+    val alias = parsed.type_aliases[name]
+    if alias.type_params.len() != 0: return Err("schema type carrier cannot declare parameters")
+    Ok(alias.type_)
+
+impl HirLowering:
+    me data_prepare_module_type_bindings_v1(module: ParserModule) -> Result<bool, text>:
+        if self.module_filename == "": return Err("schema type binding requires begin_module and retained module surfaces")
+        if self.errors.len() != 0: return Err("schema type owner already has unresolved diagnostics")
+        self.use_explicit_semantic_policy()
+        self.nogc_strict = module.nogc_strict
+        # Same owner order as lower_module, stopping before any body lowering.
+        self.registering_import_symbols = true
+        self.resolve_import_symbols(module)
+        self.resolve_package_sibling_symbols(module)
+        self.registering_import_symbols = false
+        self.declare_module_symbols(module)
+        if self.errors.len() != 0: return Err("schema declaration/import binding failed: {self.errors[0].message}")
+        # The legacy bootstrap shortcut may suppress declaration registration.
+        # A missing declaration is unsupported, not a successful empty setup.
+        var required: [text] = []
+        for name in module.classes.keys(): required = required.push(name)
+        for name in module.structs.keys(): required = required.push(name)
+        for name in module.enums.keys(): required = required.push(name)
+        for name in module.traits.keys(): required = required.push(name)
+        for name in module.type_aliases.keys(): required = required.push(name)
+        for name in required:
+            if self.symbols.local_type_binding_raw(name) < 0:
+                return Err("schema type declaration was not registered by its owner: {name}")
+        Ok(true)
+
+    me data_bind_type_identity_v1(value: Type) -> Result<DataSemanticTypeIdentityV1, text>:
+        if self.errors.len() != 0: return Err("schema type owner already has unresolved diagnostics")
+        val lowered = self.lower_type(value)
+        if self.errors.len() != 0: return Err("schema type binding failed: {self.errors[0].message}")
+        # Legacy lowering can erase an unbound name to Any without diagnostics.
+        # Managed schemas require concrete types at every semantic child; the
+        # representational transport API alone is not admission authority.
+        self.data_concrete_type_identity_v1(lowered)
+
+    me data_bind_type_text_identity_v1(spelling: text, source_path: text) -> Result<DataSemanticTypeIdentityV1, text>:
+        self.data_bind_type_identity_v1(data_parser_type_text_v1(spelling, source_path)?)

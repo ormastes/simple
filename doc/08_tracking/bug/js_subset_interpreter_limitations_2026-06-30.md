@@ -2,7 +2,7 @@
 
 - **Date:** 2026-06-30
 - **Component:** `src/lib/nogc_sync_mut/js/engine/` (interpreter_exec / interpreter_eval / parser)
-- **Status:** Open
+- **Status:** RESOLVED 2026-11-25 — all four defects fixed in the engine (see dated verification at bottom)
 - **Severity:** Medium — forces workarounds in the ES-module transform
   (`src/lib/gc_async_mut/web/browser_session_modules.spl`).
 
@@ -87,3 +87,22 @@ The module transform now emits only forms the subset supports:
 re-export would be wrongly overwritten by the dependency's value. The five system
 tests only exercise truthy export values, so they pass; a correct fix needs
 Defect 1 resolved so an `undefined`-guard can be used.
+
+## Verification 2026-11-25 (work/p3-bao-20261125) — all four defects FIXED
+
+All four defects were re-probed against current source with
+`SIMPLE_LIB=src bin/simple.exe test <probe> --mode=interpreter` (pinned
+tracked binary, worktree base fcd95d41d60), via `BrowserSession` exactly as
+the original repros, in two harness shapes (doc-exact single
+`eval_script("<expr>")` returning the value directly, and the repo's
+established open_html + `eval_script("out")` pattern):
+
+- Defect 1 `var o = {}; if (true) { o.a = 9; } o.a` => `9` (was `undefined`)
+- Defect 2 `class C { constructor(){ this.k = 7; } } var c = new C(); c.k` => `7` (was `undefined`)
+- Defect 3 `function g(n){ return n+1; } var x = g; x(4)` => `5` (was `undefined`)
+- Defect 4 `var t = {}; t.x = true ? 5 : 9; t.x` => `5` (was `true`)
+
+8/8 probe examples green. Status: RESOLVED in the engine. Follow-up not done
+here (transform cleanup, not an engine defect): the ES-module transform's
+`X = X || dep.X` star-export workaround noted above can now be revisited to
+restore strict falsy-local precedence semantics, since Defect 1 is fixed.

@@ -4,27 +4,27 @@ use compiler.backend.native.x86_64_avx512.{evex_encode_3op_zmm, evex_encode_mem_
 
 # These are machine operations, not runtime intrinsics. Register operands stay
 # visible to the GPR allocator; encoders never borrow an undeclared GPR.
-val X86_OP_AVX512_LOADU: i64 = 416
-val X86_OP_AVX512_STOREU: i64 = 417
-val X86_OP_AVX512_BINARY: i64 = 418
-val X86_OP_AVX512_TERNARY: i64 = 419
-val X86_OP_AVX512_UNARY: i64 = 420
-val X86_OP_AVX512_COMPARE: i64 = 421
-val X86_OP_AVX512_KLOAD: i64 = 422
-val X86_OP_AVX512_KSTORE: i64 = 423
-val X86_OP_AVX512_MASK: i64 = 424
-val X86_OP_AVX512_SELECT: i64 = 425
-val X86_OP_AVX512_SPLAT: i64 = 426
-val X86_OP_AVX512_REDUCE: i64 = 427
-val X86_OP_AVX512_COPY_LANE: i64 = 428
-val X86_OP_AVX512_BOUNDS: i64 = 429
-val X86_OP_AVX512_INDEXED: i64 = 430
-val X86_OP_AVX512_BROADCAST_LANE: i64 = 431
-val X86_OP_AVX512_MASK_CANONICAL: i64 = 432
-val X86_OP_AVX512_PERMUTE: i64 = 433
-val X86_OP_AVX512_GATHER: i64 = 434
-val X86_OP_AVX512_SHUFFLE: i64 = 435
-val X86_OP_AVX512_EXTRACT_I32: i64 = 436
+pub val X86_OP_AVX512_LOADU: i64 = 416
+pub val X86_OP_AVX512_STOREU: i64 = 417
+pub val X86_OP_AVX512_BINARY: i64 = 418
+pub val X86_OP_AVX512_TERNARY: i64 = 419
+pub val X86_OP_AVX512_UNARY: i64 = 420
+pub val X86_OP_AVX512_COMPARE: i64 = 421
+pub val X86_OP_AVX512_KLOAD: i64 = 422
+pub val X86_OP_AVX512_KSTORE: i64 = 423
+pub val X86_OP_AVX512_MASK: i64 = 424
+pub val X86_OP_AVX512_SELECT: i64 = 425
+pub val X86_OP_AVX512_SPLAT: i64 = 426
+pub val X86_OP_AVX512_REDUCE: i64 = 427
+pub val X86_OP_AVX512_COPY_LANE: i64 = 428
+pub val X86_OP_AVX512_BOUNDS: i64 = 429
+pub val X86_OP_AVX512_INDEXED: i64 = 430
+pub val X86_OP_AVX512_BROADCAST_LANE: i64 = 431
+pub val X86_OP_AVX512_MASK_CANONICAL: i64 = 432
+pub val X86_OP_AVX512_PERMUTE: i64 = 433
+pub val X86_OP_AVX512_GATHER: i64 = 434
+pub val X86_OP_AVX512_SHUFFLE: i64 = 435
+pub val X86_OP_AVX512_EXTRACT_I32: i64 = 436
 
 fn avx512_shape_code(shape: text) -> i64:
     if shape == "f32x16": 1
@@ -132,6 +132,12 @@ fn avx512_cmp_bytes(kdest: i64, lhs: i64, rhs: i64, shape: i64, op: i64) -> [i64
     val predicates = [0, 4, 1, 2, 14, 13]
     avx512_rr(kdest, lhs, rhs, 1, if shape == 2: 1 else: 0, if shape == 2: 1 else: 0, 0xC2) + [predicates[op]]
 
+fn avx512_select_bytes(dest: i64, yes: i64, kmask: i64, shape: i64) -> [i64]:
+    # VPBLENDMD/VPBLENDMQ dest{k}, dest(no), yes: a set mask bit takes `yes`.
+    # EVEX.512.66.0F38 64 /r -- map 0F38 (mm=2). It was emitted with mm=3
+    # (0F3A), an undefined opcode that raised #UD on every select.
+    evex_encode_3op_zmm(dest, dest, yes, kmask, false, 2, if shape == 2: 1 else: 0, 1, 0x64)
+
 fn avx512_mem_tail(reg: i64, base: i64, offset: i64) -> [i64]:
     if reg < 0 or reg > 15 or base < 0 or base > 15 or offset < -2147483648 or offset > 2147483647:
         panic("invalid AVX-512 scalar memory operand")
@@ -141,8 +147,10 @@ fn avx512_mem_tail(reg: i64, base: i64, offset: i64) -> [i64]:
 
 fn avx512_kmem_bytes(kreg: i64, base: i64, offset: i64, store: bool) -> [i64]:
     if kreg < 1 or kreg > 7: panic("AVX-512 mask scratch must be k1..k7")
-    # KMOVW is in AVX-512F. K byte/dword forms require extra subsets.
-    [0xC4, if base >= 8: 0xC1 else: 0xE1, 0x78, if store: 0x91 else: 0x90] + avx512_mem_tail(kreg, base, offset)
+    # KMOVW is in AVX-512F. K byte/dword forms require extra subsets. A low
+    # base takes the canonical two-byte VEX (C5 F8); R8..R15 need VEX.B.
+    val vex = if base >= 8: [0xC4, 0xC1, 0x78] else: [0xC5, 0xF8]
+    vex + [if store: 0x91 else: 0x90] + avx512_mem_tail(kreg, base, offset)
 
 fn avx512_kop_bytes(dest: i64, lhs: i64, rhs: i64, op: i64) -> [i64]:
     val code = if op == 7: 0x41 elif op == 8: 0x45 elif op == 9: 0x47 elif op == 10: 0x42 elif op == 14: 0x44 elif op == 15: 0x46 else: -1

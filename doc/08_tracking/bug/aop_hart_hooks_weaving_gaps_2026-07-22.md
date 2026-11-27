@@ -125,3 +125,23 @@ All 16 gates pass today: seam behavior (trace/halt-freeze/single-step/resume,
 rv64+rv32) green, weave accounting >0 via bare-name rule, tokenized
 execution-form rule pinned at 0/fail-closed, interp gap printed explicitly.
 
+
+## Triage 2026-11-25 (work/p2w1-ak-20261125)
+
+Re-checked on release/1.0.0 @ 3e04c857a56. Status is unchanged from the
+2026-07-22 Lane SS update and the "needs owner triage" header remains
+accurate only in the narrow sense that Gap 1 has no in-tree owner:
+
+- **Gap 2 — FIXED (.spl), still fixed.** `aop_pointcut_matches` is present in
+  `compiler.frontend.core.aop` and the parity probe
+  `test/01_unit/compiler/frontend/core/aop_pointcut_matcher_parity_probe.spl`
+  exists in tree. (Spec execution not re-run: `bin/simple.exe test` is
+  repo-wide blocked at this HEAD by the known
+  `unknown decorator '@representation_boundary'` seed/source inconsistency.)
+- **Gap 1 — OPEN, seed-side, not fixable in pure Simple.** The run-path
+  weaver is the Rust bootstrap seed's interpreter (entry-module-only
+  weaving baked into Rust). No `.spl` change can flip
+  `hart_dbg_step_hook_fires()` on the deployed binary; it requires the
+  self-hosted compiler deploy. Classified SKIP for the P2 doc-fix fleet:
+  Rust-seed-only, awaiting the self-hosted deploy tracked in the bootstrap
+  docs. No code change attempted.

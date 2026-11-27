@@ -1,15 +1,39 @@
 #!/bin/sh
 # Compile and run the real hosted C runtime's tagged-text concat contract.
-set -eu
+#
+# Verdict convention (repo guard standard):
+#   PASS — 1 concat-contract probe checked ...   (exit 0)
+#   FAIL — <what broke>                          (exit 1)
+#   ERROR — nothing was checked (<reason>)       (exit 2)
+# A compile error or a failing probe is a FAIL (the tree regressed); only an
+# unusable environment (missing compiler/source, unwritable out dir) is ERROR.
+set -u
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 out_dir=${SIMPLE_CONCAT_CHECK_OUT:-"$repo_root/build/native_probe/runtime-concat-nul"}
 cc_bin=${CC:-cc}
-mkdir -p "$out_dir"
-"$cc_bin" -std=c11 -O1 -g -pthread -D_GNU_SOURCE \
+
+probe_src="$repo_root/test/01_unit/runtime/runtime_concat_nul_test.c"
+runtime_src="$repo_root/src/runtime/runtime_native.c"
+[ -f "$probe_src" ] || { echo "ERROR — nothing was checked (probe source $probe_src missing)"; exit 2; }
+[ -f "$runtime_src" ] || { echo "ERROR — nothing was checked (runtime source $runtime_src missing)"; exit 2; }
+command -v "$cc_bin" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (C compiler '$cc_bin' not found)"; exit 2; }
+mkdir -p "$out_dir" || { echo "ERROR — nothing was checked (cannot create $out_dir)"; exit 2; }
+
+if ! "$cc_bin" -std=c11 -O1 -g -pthread -D_GNU_SOURCE \
     -ffunction-sections -fdata-sections -I"$repo_root/src/runtime" \
-    "$repo_root/test/01_unit/runtime/runtime_concat_nul_test.c" \
-    "$repo_root/src/runtime/runtime_native.c" \
+    "$probe_src" \
+    "$runtime_src" \
     -Wl,--gc-sections -ldl -lm -o "$out_dir/runtime_concat_nul_test" \
-    >"$out_dir/compile.log" 2>&1
-"$out_dir/runtime_concat_nul_test" >"$out_dir/run.log" 2>&1
+    >"$out_dir/compile.log" 2>&1; then
+    echo "FAIL — concat probe did not compile (cc=$cc_bin; log $out_dir/compile.log)" >&2
+    exit 1
+fi
+
+if ! "$out_dir/runtime_concat_nul_test" >"$out_dir/run.log" 2>&1; then
+    cat "$out_dir/run.log" >&2
+    echo "FAIL — tagged-text concat contract probe failed (see probe output above)" >&2
+    exit 1
+fi
 cat "$out_dir/run.log"
+echo "PASS — 1 concat-contract probe checked (compile + run; embedded NUL bytes and trailing terminators preserved)"
+exit 0

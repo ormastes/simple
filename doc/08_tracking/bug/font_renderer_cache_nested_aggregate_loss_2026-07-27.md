@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-27
 - **Lane:** SimpleOS-WM QEMU (cranelift native), font metric resolution
-- **Status:** root-caused (read-only analysis); fix direction described; NOT blocking the now-green SimpleOS-WM cell
+- **Status:** FIXED 2026-07-30 — the described flatten-the-aggregate workaround landed; verified present 2026-11-25 (see note at end)
 - **Family:** cranelift native aggregate-return nil-receiver (`cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md`)
 
 ## Symptom
@@ -65,3 +65,19 @@ Follow-up quality item; the SimpleOS-WM matrix cell already PASSES. The proper
 fix likely rides the cranelift aggregate-return fix (Codex #20 family) or a
 Simple-side flatten workaround; do NOT edit font_renderer.spl while rendering
 sessions are active without atomic-write coordination.
+
+## Verification note (2026-11-25, work/p2w2-aa-20261125)
+
+The Simple-side flatten workaround described above landed 2026-07-30 and is
+present at release/1.0.0 HEAD (`1861a186628`), verified by source inspection
+of `src/lib/nogc_sync_mut/text_layout/font_renderer.spl:699-713`: the
+`FLATTENED (2026-07-30, see doc/08_tracking/bug/
+font_renderer_cache_nested_aggregate_loss_2026-07-27.md)` comment documents
+that the cache no longer stores a whole `FontRenderer` by value; it caches
+flat `_browser_default_font_families` / `_browser_default_font_paths` text
+arrays and rebuilds via `_browser_default_font_rebuild_from_path` on each hit
+(lazy live-face arrays exist but the flat path is the documented invariant).
+The underlying cranelift aggregate store/read-back defect remains latent per
+that comment — this closes the call-site bug, not the compiler family bug.
+QEMU lane re-run not possible from this Windows host; closure is by
+inspection.

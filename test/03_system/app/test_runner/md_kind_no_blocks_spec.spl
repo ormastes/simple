@@ -1,0 +1,100 @@
+# @req REQ-TESTRUNNER-MD-KIND
+# @cover src/lib/nogc_sync_mut/test_runner/sdoctest/runner.spl 5%
+"""
+# Test runner md kind: a file with nothing to run fails closed
+
+**Feature IDs:** #test-runner-md-kind
+**Category:** Tooling
+
+## Overview
+
+Naming a Markdown file that holds no runnable simple fence must not look like
+a pass. The runner reports "no doctest blocks found" and exits 1. A missing
+file is also an error, never a silent success.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY")
+    if b != "":
+        return b
+    "bin/simple"
+
+fn write_md(name: text, lines: [text]) -> text:
+    val dir = "build/md_kind/no_blocks_" + name
+    process_run_bounded("rm", ["-rf", dir], 10000, 65536)
+    process_run_bounded("mkdir", ["-p", dir], 10000, 65536)
+    val path = dir + "/doc.md"
+    file_write(path, lines.join("\n") + "\n")
+    path
+
+fn run_md(md: text) -> (text, i64):
+    val (out, err, code) = process_run_bounded(real_binary(), ["test", "--no-session-daemon", md], 300000, 4194304)
+    (out + err, code)
+
+describe "md kind with no runnable fences":
+    # @capture(exec)
+    it "fails closed on prose only":
+        step("Write a markdown file with prose and no fence")
+        val md = write_md("prose", ["# Title", "", "Just words."])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(1)
+        expect(report).to_contain("no doctest blocks found")
+
+    # @capture(exec)
+    it "fails closed when the only fences are python":
+        val md = write_md("python_only", ["```python", "print(1)", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(1)
+        expect(report).to_contain("no doctest blocks found")
+
+    # @capture(exec)
+    it "fails closed when the only fence is untagged":
+        val md = write_md("untagged", ["```", "val a = 1", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(1)
+
+    # @capture(exec)
+    it "fails closed on an empty simple fence":
+        val md = write_md("empty_fence", ["```simple", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(1)
+        expect(report).to_contain("no doctest blocks found")
+
+    # @capture(exec)
+    it "fails closed on an unterminated simple fence":
+        val md = write_md("unterminated", ["```simple", "val a = 1"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(1)
+        expect(report).to_contain("no doctest blocks found")
+
+    # @capture(exec)
+    it "fails closed when every fence is ignored":
+        val md = write_md("all_ignored", ["<!--sdoctest:ignore-begin-->", "```simple", "val a = 1", "```", "<!--sdoctest:ignore-end-->"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(1)
+        expect(report).to_contain("no doctest blocks found")
+
+    # @capture(exec)
+    it "passes when the only fence is skipped":
+        step("A skipped fence is still a counted block")
+        val md = write_md("only_skipped", ["```simple:skip", "assert 1 == 2", "```"])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(0)
+        expect(report).to_contain("1 total, 0 passed, 0 failed, 1 skipped")
+
+    # @capture(exec)
+    it "fails closed on a missing markdown file":
+        val (report, code) = run_md("build/md_kind/no_blocks_missing/absent.md")
+        expect(code).to_equal(1)
+
+    # @capture(exec)
+    it "fails closed on an empty markdown file":
+        val md = write_md("empty_file", [""])
+        val (report, code) = run_md(md)
+        expect(code).to_equal(1)

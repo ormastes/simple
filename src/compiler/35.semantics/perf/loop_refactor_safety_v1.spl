@@ -1,0 +1,757 @@
+# 13-Point Loop Refactoring Safety Verifier V1 (§7.2, D06, D10, S01..S15, S18)
+#
+# Evaluates all 13 SafetyObligationKind proof obligations before authorizing a
+# loop-to-collection transformation as PerfFixApplicability.VerifiedSafe.
+# Separates recognition, semantic legality, and profitability: unknown or
+# violated obligations fail closed to Unavailable with PERF-FIX-001 (or
+# ReviewRequired for policy-only nogc tradeoffs per §10.4 / S18).
+
+use compiler.semantics.perf.perf_analysis_contracts_v1.{
+    PerfAnalysisTier, LoopIdiomFamily, SafetyObligationKind,
+    SafetyObligationStatusV1, PerfFixKind, PerfFixApplicability,
+    LoopIdiomCandidateV1, PerfFindingRecordV1
+}
+use compiler.semantics.perf.loop_idiom_recognizer_v1.{
+    RecognizedLoopIdiomV1, eager_equivalent_tradeoff_note_v1
+}
+
+enum RecurrenceAlgebraKind:
+    NotApplicable
+    AssociativeCommutative
+    AssociativeOnly
+    NonAssociative
+
+enum NumericDomainKind:
+    NotNumeric
+    WrappingOrUncheckedInt
+    CheckedInteger
+    FloatStandard
+    FloatExplicitFastMath
+
+struct LoopRuntimeEffectFactsV1:
+    reads_time: bool
+    reads_random: bool
+    volatile_or_mmio: bool
+    lock_or_sync: bool
+    async_or_suspension: bool
+    io_effect: bool
+    unknown_effect: bool
+
+struct SourceEditIntegrityFactsV1:
+    from_unmapped_macro_expansion: bool
+    loses_inner_comments: bool
+    has_uncapturable_scope_or_mutable_borrow: bool
+    requires_missing_import_or_unsupported_syntax: bool
+
+struct ResourceAndDestructorFactsV1:
+    in_nogc_or_noalloc_scope: bool
+    strict_noalloc_enforcement: bool
+    adapter_or_closure_allocates: bool
+    allocation_failure_observable: bool
+    destructor_or_drop_order_observable: bool
+    drop_order_preserved: bool
+
+struct LoopSafetyFactsV1:
+    builder_is_fresh_local: bool
+    external_ref_observes_builder_identity: bool
+    in_place_collect_contract_proven: bool
+    input_aliases_output: bool
+    captured_aliases_disjoint: bool
+    callback_observes_partial_output: bool
+    callback_mutates_iterated_source: bool
+    evaluation_order_preserved: bool
+    short_circuit_consumption_exact: bool
+    eager_execution_preserved: bool
+    has_eager_terminal_consumer: bool
+    callback_may_fail: bool
+    partial_prefix_observable_on_failure: bool
+    cleanup_order_preserved_on_failure: bool
+    error_order_preserved: bool
+    iterator_cleanup_preserved: bool
+    has_unmodeled_control_flow_exit: bool
+    source_edit: SourceEditIntegrityFactsV1
+    recurrence_algebra: RecurrenceAlgebraKind
+    numeric_domain: NumericDomainKind
+    requests_parallel_or_reassociated_reduction: bool
+    proposed_named_aggregation: text
+    seed_is_identity_for_named_agg: bool
+    input_proven_non_empty: bool
+    output_shape_and_duplicates_preserved: bool
+    fallback_preserved_on_empty_or_miss: bool
+    runtime_effects: LoopRuntimeEffectFactsV1
+    conversion_alters_effect_contract: bool
+    resources: ResourceAndDestructorFactsV1
+    expected_semantic_revision: text
+    current_semantic_revision: text
+    expected_dependency_fingerprint: text
+    current_dependency_fingerprint: text
+
+struct SafetyEvaluationResultV1:
+    candidate: LoopIdiomCandidateV1
+    finding: PerfFindingRecordV1
+    all_discharged: bool
+    failed_obligations: [SafetyObligationKind]
+
+struct OrderedFoldSafetyAssessmentV1:
+    ordered_fold_allowed: bool
+    named_aggregation_allowed: bool
+    parallel_reassociation_allowed: bool
+    parallel_rejection_reason: Option<text>
+    evaluation: SafetyEvaluationResultV1
+
+fn loop_runtime_effects_clean_v1() -> LoopRuntimeEffectFactsV1:
+    LoopRuntimeEffectFactsV1(
+        reads_time: false,
+        reads_random: false,
+        volatile_or_mmio: false,
+        lock_or_sync: false,
+        async_or_suspension: false,
+        io_effect: false,
+        unknown_effect: false
+    )
+
+fn source_edit_integrity_clean_v1() -> SourceEditIntegrityFactsV1:
+    SourceEditIntegrityFactsV1(
+        from_unmapped_macro_expansion: false,
+        loses_inner_comments: false,
+        has_uncapturable_scope_or_mutable_borrow: false,
+        requires_missing_import_or_unsupported_syntax: false
+    )
+
+fn resource_and_destructor_clean_v1() -> ResourceAndDestructorFactsV1:
+    ResourceAndDestructorFactsV1(
+        in_nogc_or_noalloc_scope: false,
+        strict_noalloc_enforcement: false,
+        adapter_or_closure_allocates: false,
+        allocation_failure_observable: false,
+        destructor_or_drop_order_observable: false,
+        drop_order_preserved: true
+    )
+
+fn loop_safety_facts_fail_closed_v1() -> LoopSafetyFactsV1:
+    LoopSafetyFactsV1(
+        builder_is_fresh_local: false,
+        external_ref_observes_builder_identity: true,
+        in_place_collect_contract_proven: false,
+        input_aliases_output: true,
+        captured_aliases_disjoint: false,
+        callback_observes_partial_output: true,
+        callback_mutates_iterated_source: true,
+        evaluation_order_preserved: false,
+        short_circuit_consumption_exact: false,
+        eager_execution_preserved: false,
+        has_eager_terminal_consumer: false,
+        callback_may_fail: true,
+        partial_prefix_observable_on_failure: true,
+        cleanup_order_preserved_on_failure: false,
+        error_order_preserved: false,
+        iterator_cleanup_preserved: false,
+        has_unmodeled_control_flow_exit: true,
+        source_edit: SourceEditIntegrityFactsV1(
+            from_unmapped_macro_expansion: true,
+            loses_inner_comments: true,
+            has_uncapturable_scope_or_mutable_borrow: true,
+            requires_missing_import_or_unsupported_syntax: true
+        ),
+        recurrence_algebra: RecurrenceAlgebraKind.NonAssociative,
+        numeric_domain: NumericDomainKind.CheckedInteger,
+        requests_parallel_or_reassociated_reduction: false,
+        proposed_named_aggregation: "",
+        seed_is_identity_for_named_agg: false,
+        input_proven_non_empty: false,
+        output_shape_and_duplicates_preserved: false,
+        fallback_preserved_on_empty_or_miss: false,
+        runtime_effects: LoopRuntimeEffectFactsV1(
+            reads_time: false,
+            reads_random: false,
+            volatile_or_mmio: false,
+            lock_or_sync: false,
+            async_or_suspension: false,
+            io_effect: false,
+            unknown_effect: true
+        ),
+        conversion_alters_effect_contract: true,
+        resources: ResourceAndDestructorFactsV1(
+            in_nogc_or_noalloc_scope: true,
+            strict_noalloc_enforcement: true,
+            adapter_or_closure_allocates: true,
+            allocation_failure_observable: true,
+            destructor_or_drop_order_observable: true,
+            drop_order_preserved: false
+        ),
+        expected_semantic_revision: "",
+        current_semantic_revision: "mismatch",
+        expected_dependency_fingerprint: "",
+        current_dependency_fingerprint: "mismatch"
+    )
+
+fn loop_safety_facts_verified_local_v1(
+    semantic_revision: text,
+    dependency_fingerprint: text
+) -> LoopSafetyFactsV1:
+    LoopSafetyFactsV1(
+        builder_is_fresh_local: true,
+        external_ref_observes_builder_identity: false,
+        in_place_collect_contract_proven: false,
+        input_aliases_output: false,
+        captured_aliases_disjoint: true,
+        callback_observes_partial_output: false,
+        callback_mutates_iterated_source: false,
+        evaluation_order_preserved: true,
+        short_circuit_consumption_exact: true,
+        eager_execution_preserved: true,
+        has_eager_terminal_consumer: true,
+        callback_may_fail: false,
+        partial_prefix_observable_on_failure: false,
+        cleanup_order_preserved_on_failure: true,
+        error_order_preserved: true,
+        iterator_cleanup_preserved: true,
+        has_unmodeled_control_flow_exit: false,
+        source_edit: source_edit_integrity_clean_v1(),
+        recurrence_algebra: RecurrenceAlgebraKind.NotApplicable,
+        numeric_domain: NumericDomainKind.NotNumeric,
+        requests_parallel_or_reassociated_reduction: false,
+        proposed_named_aggregation: "",
+        seed_is_identity_for_named_agg: false,
+        input_proven_non_empty: false,
+        output_shape_and_duplicates_preserved: true,
+        fallback_preserved_on_empty_or_miss: true,
+        runtime_effects: loop_runtime_effects_clean_v1(),
+        conversion_alters_effect_contract: false,
+        resources: resource_and_destructor_clean_v1(),
+        expected_semantic_revision: semantic_revision,
+        current_semantic_revision: semantic_revision,
+        expected_dependency_fingerprint: dependency_fingerprint,
+        current_dependency_fingerprint: dependency_fingerprint
+    )
+
+fn derive_hir_loop_safety_facts_v1(
+    idiom: RecognizedLoopIdiomV1,
+    function_is_nogc: bool,
+    current_revision: text,
+    current_dep_fingerprint: text
+) -> LoopSafetyFactsV1:
+    var facts = loop_safety_facts_verified_local_v1(idiom.semantic_revision, idiom.dependency_fingerprint)
+    facts.current_semantic_revision = current_revision
+    facts.current_dependency_fingerprint = current_dep_fingerprint
+    facts.input_aliases_output = idiom.source_aliases_target_binding
+    facts.has_eager_terminal_consumer = idiom.has_terminal_consumer
+    if idiom.requires_eager_collect and idiom.body_references_target_binding:
+        facts.callback_observes_partial_output = true
+    if idiom.has_throw_or_try:
+        facts.callback_may_fail = true
+        facts.partial_prefix_observable_on_failure = true
+    if idiom.has_break_or_continue:
+        facts.has_unmodeled_control_flow_exit = true
+    if idiom.has_await_or_yield:
+        facts.runtime_effects.async_or_suspension = true
+    if function_is_nogc:
+        facts.resources.in_nogc_or_noalloc_scope = true
+        facts.resources.adapter_or_closure_allocates = true
+    facts
+
+fn _is_search_family(family: LoopIdiomFamily) -> bool:
+    match family:
+        case LoopIdiomFamily.AnySearch: true
+        case LoopIdiomFamily.AllSearch: true
+        case LoopIdiomFamily.FindSearch: true
+        case _: false
+
+fn _is_builder_family(family: LoopIdiomFamily) -> bool:
+    match family:
+        case LoopIdiomFamily.Map: true
+        case LoopIdiomFamily.Filter: true
+        case LoopIdiomFamily.FilterMap: true
+        case _: false
+
+fn _has_any_runtime_effect(fx: LoopRuntimeEffectFactsV1) -> bool:
+    fx.reads_time or fx.reads_random or fx.volatile_or_mmio or fx.lock_or_sync or fx.async_or_suspension or fx.io_effect or fx.unknown_effect
+
+fn _check_parallel_reduction_legality(facts: LoopSafetyFactsV1) -> Option<text>:
+    match facts.recurrence_algebra:
+        case RecurrenceAlgebraKind.NonAssociative:
+            return Some("recurrence operator is non-associative (e.g. subtraction) and forbids parallel/reassociated reduction (S08)")
+        case RecurrenceAlgebraKind.NotApplicable:
+            return Some("recurrence algebra is not proven associative for parallel reduction")
+        case _:
+            pass_do_nothing
+    match facts.numeric_domain:
+        case NumericDomainKind.FloatStandard:
+            return Some("IEEE-754 floating-point fold is cancellation-sensitive without explicit fast-math/reassociation policy (S09)")
+        case NumericDomainKind.CheckedInteger:
+            return Some("checked integer intermediate overflow traps depend on sequential left-to-right order (S10)")
+        case _:
+            pass_do_nothing
+    if _has_any_runtime_effect(facts.runtime_effects):
+        return Some("runtime effects forbid parallel/reassociated reduction (S11)")
+    if facts.callback_may_fail:
+        return Some("fallible step callback forbids parallel/reassociated reduction")
+    None
+
+fn _eval_collection_identity(idiom: RecognizedLoopIdiomV1, facts: LoopSafetyFactsV1) -> SafetyObligationStatusV1:
+    if _is_builder_family(idiom.family):
+        if not facts.builder_is_fresh_local:
+            return SafetyObligationStatusV1(
+                kind: SafetyObligationKind.CollectionIdentity,
+                discharged: false,
+                reason: "builder is not a fresh local allocation (S06)"
+            )
+        if facts.external_ref_observes_builder_identity and not facts.in_place_collect_contract_proven:
+            return SafetyObligationStatusV1(
+                kind: SafetyObligationKind.CollectionIdentity,
+                discharged: false,
+                reason: "external reference may observe builder object identity; fresh .collect() changes object identity (S06)"
+            )
+    elif facts.external_ref_observes_builder_identity:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.CollectionIdentity,
+            discharged: false,
+            reason: "external reference observes accumulator object identity (S06)"
+        )
+    SafetyObligationStatusV1(
+        kind: SafetyObligationKind.CollectionIdentity,
+        discharged: true,
+        reason: "fresh non-escaping target identity verified"
+    )
+
+fn _eval_aliasing(idiom: RecognizedLoopIdiomV1, facts: LoopSafetyFactsV1) -> SafetyObligationStatusV1:
+    if idiom.source_aliases_target_binding or facts.input_aliases_output:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.Aliasing,
+            discharged: false,
+            reason: "iterated input aliases output builder/accumulator (S03)"
+        )
+    if facts.callback_observes_partial_output or (_is_builder_family(idiom.family) and idiom.body_references_target_binding):
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.Aliasing,
+            discharged: false,
+            reason: "callback observes partially built output during traversal (S04)"
+        )
+    if not facts.captured_aliases_disjoint:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.Aliasing,
+            discharged: false,
+            reason: "captured references may alias mutable iteration state"
+        )
+    SafetyObligationStatusV1(
+        kind: SafetyObligationKind.Aliasing,
+        discharged: true,
+        reason: "input, output, and captures proven non-interfering"
+    )
+
+fn _eval_mutation(facts: LoopSafetyFactsV1) -> SafetyObligationStatusV1:
+    if facts.callback_mutates_iterated_source:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.Mutation,
+            discharged: false,
+            reason: "callback mutates iterated collection or invalidates iterator state"
+        )
+    SafetyObligationStatusV1(
+        kind: SafetyObligationKind.Mutation,
+        discharged: true,
+        reason: "iterated source stable across traversal"
+    )
+
+fn _eval_evaluation_order(idiom: RecognizedLoopIdiomV1, facts: LoopSafetyFactsV1) -> SafetyObligationStatusV1:
+    if not facts.evaluation_order_preserved:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.EvaluationOrder,
+            discharged: false,
+            reason: "callback or iterator evaluation order not preserved"
+        )
+    if _is_search_family(idiom.family) and not facts.short_circuit_consumption_exact:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.EvaluationOrder,
+            discharged: false,
+            reason: "short-circuit search replacement does not preserve exact iterator consumption prefix (S12)"
+        )
+    if facts.requests_parallel_or_reassociated_reduction:
+        if val par_err = _check_parallel_reduction_legality(facts):
+            return SafetyObligationStatusV1(
+                kind: SafetyObligationKind.EvaluationOrder,
+                discharged: false,
+                reason: par_err
+            )
+    SafetyObligationStatusV1(
+        kind: SafetyObligationKind.EvaluationOrder,
+        discharged: true,
+        reason: "sequential evaluation and short-circuit consumption order preserved"
+    )
+
+fn _eval_timing_eagerness(idiom: RecognizedLoopIdiomV1, facts: LoopSafetyFactsV1) -> SafetyObligationStatusV1:
+    if (not facts.eager_execution_preserved) or (not facts.has_eager_terminal_consumer) or (not idiom.has_terminal_consumer):
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.TimingEagerness,
+            discharged: false,
+            reason: "eager loop replacement lacks terminal consumer at original execution point (S02)"
+        )
+    if idiom.requires_eager_collect and not idiom.replacement_preview.ends_with(".collect()"):
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.TimingEagerness,
+            discharged: false,
+            reason: "builder loop replacement must terminate with .collect() at eager point (S02)"
+        )
+    SafetyObligationStatusV1(
+        kind: SafetyObligationKind.TimingEagerness,
+        discharged: true,
+        reason: "terminal consumption stays at original eager execution point"
+    )
+
+fn _eval_failure_prefix_cleanup(idiom: RecognizedLoopIdiomV1, facts: LoopSafetyFactsV1) -> SafetyObligationStatusV1:
+    if facts.callback_may_fail or idiom.has_throw_or_try:
+        if facts.partial_prefix_observable_on_failure:
+            return SafetyObligationStatusV1(
+                kind: SafetyObligationKind.FailurePrefixCleanup,
+                discharged: false,
+                reason: "fallible callback can fail mid-loop while partial output prefix is externally observable (S05)"
+            )
+        if (not facts.cleanup_order_preserved_on_failure) or (not facts.error_order_preserved):
+            return SafetyObligationStatusV1(
+                kind: SafetyObligationKind.FailurePrefixCleanup,
+                discharged: false,
+                reason: "fallible callback error order or scope cleanup is not preserved (S05)"
+            )
+    if _is_search_family(idiom.family) and not facts.iterator_cleanup_preserved:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.FailurePrefixCleanup,
+            discharged: false,
+            reason: "short-circuit search alters observable iterator cleanup/finalization (S12)"
+        )
+    if facts.resources.destructor_or_drop_order_observable and not facts.resources.drop_order_preserved:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.FailurePrefixCleanup,
+            discharged: false,
+            reason: "observable destructor/drop order is altered by adapter/closure temporaries (S18)"
+        )
+    if facts.requests_parallel_or_reassociated_reduction and facts.numeric_domain == NumericDomainKind.CheckedInteger:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.FailurePrefixCleanup,
+            discharged: false,
+            reason: "reassociated reduction can alter checked integer overflow trap order (S10)"
+        )
+    SafetyObligationStatusV1(
+        kind: SafetyObligationKind.FailurePrefixCleanup,
+        discharged: true,
+        reason: "failure prefix visibility, error order, and cleanup semantics preserved"
+    )
+
+fn _eval_control_flow_exits(idiom: RecognizedLoopIdiomV1, facts: LoopSafetyFactsV1) -> SafetyObligationStatusV1:
+    if facts.has_unmodeled_control_flow_exit or idiom.has_break_or_continue:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.ControlFlowExits,
+            discharged: false,
+            reason: "loop contains unmodeled break, continue, or multi-exit control transfer"
+        )
+    if (not _is_search_family(idiom.family)) and idiom.has_inner_return:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.ControlFlowExits,
+            discharged: false,
+            reason: "non-search loop contains inner return statement"
+        )
+    SafetyObligationStatusV1(
+        kind: SafetyObligationKind.ControlFlowExits,
+        discharged: true,
+        reason: "all loop exits are modeled by target collection terminal"
+    )
+
+fn _eval_capture_lifetime(facts: LoopSafetyFactsV1) -> SafetyObligationStatusV1:
+    if facts.source_edit.from_unmapped_macro_expansion:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.CaptureLifetime,
+            discharged: false,
+            reason: "loop originates from unmapped macro expansion; declining unsafe source edit (S15)"
+        )
+    if facts.source_edit.loses_inner_comments:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.CaptureLifetime,
+            discharged: false,
+            reason: "inner loop comments cannot be preserved cleanly by rewrite (S15)"
+        )
+    if facts.source_edit.has_uncapturable_scope_or_mutable_borrow:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.CaptureLifetime,
+            discharged: false,
+            reason: "callback closure cannot legally capture local bindings or lifetimes (S15)"
+        )
+    if facts.source_edit.requires_missing_import_or_unsupported_syntax:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.CaptureLifetime,
+            discharged: false,
+            reason: "replacement requires unavailable import or unsupported syntax (S15)"
+        )
+    SafetyObligationStatusV1(
+        kind: SafetyObligationKind.CaptureLifetime,
+        discharged: true,
+        reason: "closure captures, lifetimes, comments, and source origin verified"
+    )
+
+fn _eval_numeric_semantics(facts: LoopSafetyFactsV1) -> SafetyObligationStatusV1:
+    if facts.requests_parallel_or_reassociated_reduction:
+        if val par_err = _check_parallel_reduction_legality(facts):
+            return SafetyObligationStatusV1(
+                kind: SafetyObligationKind.NumericSemantics,
+                discharged: false,
+                reason: par_err
+            )
+    SafetyObligationStatusV1(
+        kind: SafetyObligationKind.NumericSemantics,
+        discharged: true,
+        reason: "sequential numeric evaluation order, rounding, and overflow traps preserved"
+    )
+
+fn _eval_output_shape_duplicates(facts: LoopSafetyFactsV1) -> SafetyObligationStatusV1:
+    if (not facts.output_shape_and_duplicates_preserved) or (not facts.fallback_preserved_on_empty_or_miss):
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.OutputShapeDuplicates,
+            discharged: false,
+            reason: "output shape, duplicate handling, or empty-input fallback not preserved"
+        )
+    if facts.proposed_named_aggregation != "":
+        if not facts.seed_is_identity_for_named_agg:
+            return SafetyObligationStatusV1(
+                kind: SafetyObligationKind.OutputShapeDuplicates,
+                discharged: false,
+                reason: "non-identity seed cannot be replaced with identity-assuming '" + facts.proposed_named_aggregation + "' on empty input (S07)"
+            )
+        if (facts.proposed_named_aggregation == "min" or facts.proposed_named_aggregation == "max") and not facts.input_proven_non_empty:
+            return SafetyObligationStatusV1(
+                kind: SafetyObligationKind.OutputShapeDuplicates,
+                discharged: false,
+                reason: "named '" + facts.proposed_named_aggregation + "' changes empty-input behavior without non-empty proof (S07)"
+            )
+    SafetyObligationStatusV1(
+        kind: SafetyObligationKind.OutputShapeDuplicates,
+        discharged: true,
+        reason: "output type, order, duplicates, and empty/seed behavior preserved"
+    )
+
+fn _eval_runtime_effects(idiom: RecognizedLoopIdiomV1, facts: LoopSafetyFactsV1) -> SafetyObligationStatusV1:
+    val fx = facts.runtime_effects
+    if fx.unknown_effect:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.RuntimeEffects,
+            discharged: false,
+            reason: "unknown callback runtime effect blocks safe conversion (S11)"
+        )
+    if fx.async_or_suspension or idiom.has_await_or_yield:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.RuntimeEffects,
+            discharged: false,
+            reason: "async/await/yield suspension effect cannot cross synchronous closure adapter (S11)"
+        )
+    if fx.volatile_or_mmio:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.RuntimeEffects,
+            discharged: false,
+            reason: "volatile/MMIO access forbids iterator adapter conversion (S11)"
+        )
+    if fx.lock_or_sync:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.RuntimeEffects,
+            discharged: false,
+            reason: "lock/synchronization scope forbids closure-based loop conversion (S11)"
+        )
+    if facts.conversion_alters_effect_contract:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.RuntimeEffects,
+            discharged: false,
+            reason: "conversion alters time/random/I/O effect ordering or count (S11)"
+        )
+    if (fx.reads_time or fx.reads_random or fx.io_effect) and (facts.requests_parallel_or_reassociated_reduction or not facts.eager_execution_preserved):
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.RuntimeEffects,
+            discharged: false,
+            reason: "time/random/I/O effects forbid deferred or parallelized execution (S11)"
+        )
+    SafetyObligationStatusV1(
+        kind: SafetyObligationKind.RuntimeEffects,
+        discharged: true,
+        reason: "runtime effect contract preserved"
+    )
+
+fn _eval_resource_restrictions(facts: LoopSafetyFactsV1) -> SafetyObligationStatusV1:
+    val res = facts.resources
+    if res.destructor_or_drop_order_observable and not res.drop_order_preserved:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.ResourceRestrictions,
+            discharged: false,
+            reason: "destructor-observable scope has unpreserved drop order (S18)"
+        )
+    if res.allocation_failure_observable and res.adapter_or_closure_allocates:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.ResourceRestrictions,
+            discharged: false,
+            reason: "allocation failure is observable and adapter/closure allocates (S18)"
+        )
+    if res.in_nogc_or_noalloc_scope and res.adapter_or_closure_allocates:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.ResourceRestrictions,
+            discharged: false,
+            reason: "nogc/no-allocation scope restricts closure or adapter allocation (S18)"
+        )
+    SafetyObligationStatusV1(
+        kind: SafetyObligationKind.ResourceRestrictions,
+        discharged: true,
+        reason: "allocation, nogc, and destructor resource rules respected"
+    )
+
+fn _eval_revision_currency(facts: LoopSafetyFactsV1) -> SafetyObligationStatusV1:
+    if facts.expected_semantic_revision == "" or facts.expected_semantic_revision != facts.current_semantic_revision:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.RevisionCurrency,
+            discharged: false,
+            reason: "source semantic revision is stale relative to analyzed snapshot"
+        )
+    if facts.expected_dependency_fingerprint == "" or facts.expected_dependency_fingerprint != facts.current_dependency_fingerprint:
+        return SafetyObligationStatusV1(
+            kind: SafetyObligationKind.RevisionCurrency,
+            discharged: false,
+            reason: "callee/model dependency fingerprint changed since discovery"
+        )
+    SafetyObligationStatusV1(
+        kind: SafetyObligationKind.RevisionCurrency,
+        discharged: true,
+        reason: "source and semantic dependency revisions match current snapshot"
+    )
+
+fn evaluate_loop_refactor_safety_v1(
+    idiom: RecognizedLoopIdiomV1,
+    facts: LoopSafetyFactsV1
+) -> SafetyEvaluationResultV1:
+    val obligations: [SafetyObligationStatusV1] = [
+        _eval_collection_identity(idiom, facts),
+        _eval_aliasing(idiom, facts),
+        _eval_mutation(facts),
+        _eval_evaluation_order(idiom, facts),
+        _eval_timing_eagerness(idiom, facts),
+        _eval_failure_prefix_cleanup(idiom, facts),
+        _eval_control_flow_exits(idiom, facts),
+        _eval_capture_lifetime(facts),
+        _eval_numeric_semantics(facts),
+        _eval_output_shape_duplicates(facts),
+        _eval_runtime_effects(idiom, facts),
+        _eval_resource_restrictions(facts),
+        _eval_revision_currency(facts)
+    ]
+
+    var failed_kinds: [SafetyObligationKind] = []
+    var failed_reasons: [text] = []
+    for ob in obligations:
+        if not ob.discharged:
+            failed_kinds.push(ob.kind)
+            failed_reasons.push(ob.kind.name() + ": " + ob.reason)
+
+    val all_ok = failed_kinds.len() == 0
+    val is_policy_only_nogc_review = (
+        failed_kinds.len() == 1 and
+        failed_kinds[0] == SafetyObligationKind.ResourceRestrictions and
+        facts.resources.in_nogc_or_noalloc_scope and
+        facts.resources.adapter_or_closure_allocates and
+        (not facts.resources.strict_noalloc_enforcement) and
+        (not facts.resources.allocation_failure_observable) and
+        ((not facts.resources.destructor_or_drop_order_observable) or facts.resources.drop_order_preserved)
+    )
+
+    val applicability = if all_ok:
+        PerfFixApplicability.VerifiedSafe
+    elif is_policy_only_nogc_review:
+        PerfFixApplicability.ReviewRequired
+    else:
+        PerfFixApplicability.Unavailable
+
+    val rule_code = if applicability == PerfFixApplicability.Unavailable:
+        "PERF-FIX-001"
+    else:
+        "PERF-STYLE-001"
+
+    val disabled_reason: Option<text> = if applicability == PerfFixApplicability.Unavailable:
+        Some("PERF-FIX-001: " + failed_reasons.join("; "))
+    else:
+        None
+
+    val tradeoff_note = if is_policy_only_nogc_review:
+        eager_equivalent_tradeoff_note_v1() + " Resource review required: closure/adapter allocation inside nogc scope (S18)."
+    else:
+        eager_equivalent_tradeoff_note_v1()
+
+    val action_id = "perf.loop_idiom." + idiom.family.name() + ":" + idiom.function_id + ":" + idiom.region_id
+    val candidate = LoopIdiomCandidateV1(
+        rule_id: rule_code,
+        action_id: action_id,
+        function_id: idiom.function_id,
+        semantic_revision: facts.current_semantic_revision,
+        dependency_fingerprint: facts.current_dependency_fingerprint,
+        file: idiom.file,
+        source_span: idiom.source_span,
+        family: idiom.family,
+        replacement_preview: idiom.replacement_preview,
+        expected_old_text: idiom.expected_old_text,
+        applicability: applicability,
+        fix_kind: PerfFixKind.Refactor,
+        obligations: obligations,
+        resource_tradeoff_note: tradeoff_note,
+        disabled_reason: disabled_reason
+    )
+
+    val message = match disabled_reason:
+        case Some(reason): reason
+        case None: tradeoff_note
+
+    val finding = PerfFindingRecordV1(
+        rule_code: rule_code,
+        stable_occurrence_id: rule_code + ":" + idiom.function_id + ":" + idiom.region_id,
+        function_id: idiom.function_id,
+        file: idiom.file,
+        primary_span: idiom.source_span,
+        related_locations: [],
+        message: message,
+        evidence: None,
+        tier: PerfAnalysisTier.T1FastLocal,
+        semantic_fingerprint: facts.current_semantic_revision + ":" + facts.current_dependency_fingerprint,
+        fix_candidates: [candidate]
+    )
+
+    SafetyEvaluationResultV1(
+        candidate: candidate,
+        finding: finding,
+        all_discharged: all_ok,
+        failed_obligations: failed_kinds
+    )
+
+fn assess_ordered_fold_and_reduction_v1(
+    idiom: RecognizedLoopIdiomV1,
+    facts: LoopSafetyFactsV1
+) -> OrderedFoldSafetyAssessmentV1:
+    val eval_res = evaluate_loop_refactor_safety_v1(idiom, facts)
+
+    var seq_fold_facts = facts
+    seq_fold_facts.requests_parallel_or_reassociated_reduction = false
+    seq_fold_facts.proposed_named_aggregation = ""
+    val seq_eval = evaluate_loop_refactor_safety_v1(idiom, seq_fold_facts)
+    val ordered_allowed = seq_eval.all_discharged
+
+    val named_allowed = (
+        ordered_allowed and
+        facts.seed_is_identity_for_named_agg and
+        ((facts.proposed_named_aggregation != "min" and facts.proposed_named_aggregation != "max") or facts.input_proven_non_empty)
+    )
+
+    val par_rejection = _check_parallel_reduction_legality(facts)
+    val parallel_allowed = ordered_allowed and (not par_rejection.?)
+
+    OrderedFoldSafetyAssessmentV1(
+        ordered_fold_allowed: ordered_allowed,
+        named_aggregation_allowed: named_allowed,
+        parallel_reassociation_allowed: parallel_allowed,
+        parallel_rejection_reason: par_rejection,
+        evaluation: eval_res
+    )
+
+export RecurrenceAlgebraKind, NumericDomainKind
+export LoopRuntimeEffectFactsV1, SourceEditIntegrityFactsV1
+export ResourceAndDestructorFactsV1, LoopSafetyFactsV1
+export SafetyEvaluationResultV1, OrderedFoldSafetyAssessmentV1
+export loop_runtime_effects_clean_v1, source_edit_integrity_clean_v1
+export resource_and_destructor_clean_v1, loop_safety_facts_fail_closed_v1
+export loop_safety_facts_verified_local_v1, derive_hir_loop_safety_facts_v1
+export evaluate_loop_refactor_safety_v1, assess_ordered_fold_and_reduction_v1

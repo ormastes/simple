@@ -17,3 +17,21 @@ Source evidence: switch_operators_calls.spl enum-match binding3915 invokes decod
 The immediately preceding workaround tag identifies this bug and full recovery hash. Applied workaround commit is recorded in external cycle2 freeze metadata after commit. Removing the workaround requires fixing and qualifying the actual producer unwrap owner, not just fetching a patch. No automatic recovery/reset is authorized.
 
 Next attempt is NativeChar feature cycle2/3, SAME entry and cycle1 persistent cache with ordinary source invalidation, same exact producer/runtime/SDK lineage. Root must review frozen source/command before launch. No stale cache identity rewrite, foreign runtime, reader helper rerun, generated-codec consumer claim or exhausted-budget reset is permitted. Broad compiler/lib/MCP/LSP/BDD and whole-codec acceptance remain UNRUN.
+## 2026-11-03 — fix implemented, verification pending
+
+`lower_result_unwrap_core` gained a `HirTypeKind.Char` arm (no-default only,
+like Bool) typing the result `MirTypeKind.Char`; the payload word passes
+through `enum_payload_value` raw, matching the Ok(c) match binding.
+Spec: `test/01_unit/compiler/mir/result_char_unwrap_lowering_spec.spl`.
+Verification pending: rerun the NativeChar cycle with a stage3 compiler, then
+drop the fixture workaround. Siblings not changed: `result_optional_inner_supported`
+and the Result tuple element mapper also lack Char (`Result<char?,E>`, tuples).
+
+
+## 2026-11-26 WA-P8 Audit & Resolution (`BUG-NATIVE-RESULT-CHAR-UNWRAP-20261017`)
+
+- **Disposition**: Retired (`@workaround` removed from `test/01_unit/compiler/frontend/unicode_scalar_char_fixture.spl`).
+- **Root cause & verification**: `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:1310-1315` lowers `Result<char, text>.unwrap()` (`MirType(kind: MirTypeKind.Char)`), and `MirToLlvm` lowers `char` payloads and interpolation via `rt_strcat_tagged`.
+- **Changes made**:
+  - Removed `# @workaround bug=BUG-NATIVE-RESULT-CHAR-UNWRAP-20261017` and the outer `match converted:` workaround in `test/01_unit/compiler/frontend/unicode_scalar_char_fixture.spl`, restoring `if converted.is_err(): ...` and `val character: char = converted.unwrap()` (recovering `29ef54b368901bc27116320b57e13576c85db36c` while retaining `: {reason}` detail).
+  - Verified (`--mode=interpreter`): `test/01_unit/compiler/frontend/unicode_scalar_char_spec.spl` (1/1 pass) and `test/01_unit/compiler/wa_p8_test_workarounds_spec.spl` (runtime `unicode_scalar_to_char(cp).unwrap()` + two-module HIR/MIR/`mir_verify_module`/LLVM lowering `"hir=0 mir=0 mirv=0 llvm=0 void=0"` with `rt_strcat_tagged`). Note: native Stage2 execution of `unicode_scalar_char_native.spl` was not run in the `--mode=interpreter` seed environment (`native-build` disabled). `bug_db.sdn` left untouched to preserve `.sdn` CRC32 seals.

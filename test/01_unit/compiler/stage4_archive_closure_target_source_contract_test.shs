@@ -1,0 +1,84 @@
+#!/bin/sh
+# Keep Stage4's partial link on the same target driver as its archive producers.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+source=${1:-$root/src/compiler_rust/compiler/src/pipeline/native_project/tools.rs}
+
+perl - "$source" <<'PERL'
+use strict;
+use warnings;
+open my $file, '<', $ARGV[0] or die "cannot read $ARGV[0]: $!\n";
+local $/;
+my $source = <$file>;
+my ($closure) = $source =~ /^(fn project_stage4_archive_closure\([\s\S]*?^\})/m;
+defined $closure or die "FAIL: Stage4 archive closure owner is missing\n";
+my @required = (
+    'let target = effective_target();',
+    'let cc = target_c_compiler(target);',
+    'let mut closure_cmd = std::process::Command::new(&cc);',
+    'if let Some(flag) = windows_gnu_target_flag(target, &cc) {',
+    'closure_cmd.arg(flag);',
+    'let fuse_ld = super::linker::requested_linker_driver_name()?;',
+    'closure_cmd.arg(format!("-fuse-ld={linker}"));',
+    'closure_cmd.arg("-nostdlib").arg("-Wl,-r");',
+    'let objcopy = find_stage4_objcopy_tool(target)',
+    'let stage4_nm = find_stage4_nm_tool(target);',
+    'archive_weak_global_symbols_with_nm(&localized_object, stage4_nm.as_deref())',
+);
+my $previous = -1;
+for my $required (@required) {
+    my $position = index($closure, $required);
+    $position > $previous
+        or die "FAIL: missing or misordered target/linker setup: $required\n";
+    $previous = $position;
+}
+index($closure, 'find_c_compiler()') == -1
+    or die "FAIL: Stage4 closure still selects a host-only C driver\n";
+index($source, 'stdout.contains("GNU objcopy") || stdout.contains("GNU Binutils")') >= 0
+    or die "FAIL: Windows GNU objcopy selection does not verify GNU binutils\n";
+index($source, 'stdout.contains("GNU nm") || stdout.contains("GNU Binutils")') >= 0
+    or die "FAIL: Windows GNU nm selection does not verify GNU binutils\n";
+print "PASS: Stage4 closure uses target driver/Windows GNU flag and preserves explicit linker selection\n";
+PERL
+
+command -v clang >/dev/null 2>&1 || {
+    echo "SKIP: clang is required for the COFF localization fixture"
+    exit 0
+}
+objcopy_tool=
+for candidate in x86_64-w64-mingw32-objcopy objcopy; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        objcopy_tool=$candidate
+        break
+    fi
+done
+[ -n "$objcopy_tool" ] || {
+    echo "SKIP: GNU objcopy is required for the COFF localization fixture"
+    exit 0
+}
+
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+cat >"$fixture/closure.c" <<'EOF'
+__attribute__((visibility("default"))) int helper(void) { return 41; }
+__attribute__((visibility("default"))) int owner_fallback(void) { return 1; }
+__attribute__((visibility("default"))) int root(void) { return helper() + owner_fallback(); }
+EOF
+clang --target=x86_64-w64-windows-gnu -c "$fixture/closure.c" -o "$fixture/closure.o"
+printf '%s\n' helper >"$fixture/localize.syms"
+printf '%s\n' owner_fallback >"$fixture/weaken.syms"
+"$objcopy_tool" \
+    "--localize-symbols=$fixture/localize.syms" \
+    "--weaken-symbols=$fixture/weaken.syms" \
+    "$fixture/closure.o" "$fixture/localized.o"
+nm_tool=nm
+command -v x86_64-w64-mingw32-nm >/dev/null 2>&1 && nm_tool=x86_64-w64-mingw32-nm
+symbols=$($nm_tool "$fixture/localized.o")
+printf '%s\n' "$symbols" | grep -Eq '[[:space:]]T[[:space:]]+root$' \
+    || { echo "FAIL: retained COFF root is not global" >&2; exit 1; }
+printf '%s\n' "$symbols" | grep -Eq '[[:space:]]t[[:space:]]+helper$' \
+    || { echo "FAIL: retained COFF helper is not local" >&2; exit 1; }
+printf '%s\n' "$symbols" | grep -Eq '[[:space:]]W[[:space:]]+owner_fallback$' \
+    || { echo "FAIL: retained COFF owner fallback is not weak" >&2; exit 1; }
+echo "PASS: GNU binutils localizes a COFF helper, weakens an owner fallback, and preserves the root"

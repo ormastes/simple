@@ -1,5 +1,5 @@
 # @no_alloc
-# Core Simple — Monomorphized Runtime Types
+# Core Simple — Runtime Types
 #
 # Shared core library: type system, spans, tokens, symbols, scopes.
 # All operations are free functions — no generics, no me methods, no closures.
@@ -12,6 +12,7 @@
 # Call runtime externs directly to avoid method-dispatch recursion in compiled mode.
 
 use compiler.frontend.core.flat_pool_codec.*
+use compiler.core.unit_constraint.{UnitConstraintPoolSnapshot, unit_constraint_pool_reset, unit_constraint_pool_save, unit_constraint_pool_restore, unit_constraint_promote_transient_owner}
 
 extern fn rt_string_contains(s: text, substr: text) -> bool
 extern fn rt_string_len(s: text) -> i64
@@ -32,8 +33,9 @@ fn str_len(s: text) -> i64:
 fn str_eq(a: text, b: text) -> bool:
     a == b
 
+# @workaround bug=stage2_test_runner_libunit_project_name_missing_2026-11-27 reason=the Rust seed's Stage 2 producer rebinds every text `x.slice(a, b)` in the closure to this function (resolve_name_variants: `str.slice` -> lowercase-joined `str_slice`); `s[a:b]` counts code points while `.slice` takes byte offsets, so non-ASCII text ahead of the cut shifted it (00.common manifest: "project:" read as "ect:"); `substring` is byte-offset and lowers straight to rt_slice_text_bytes
 fn str_slice(s: text, start: i64, end_idx: i64) -> text:
-    s[start:end_idx]
+    s.substring(start, end_idx)
 
 fn str_char_at(s: text, idx: i64) -> text:
     s[idx]
@@ -58,7 +60,7 @@ fn str_replace(s: text, old_s: text, new_s: text) -> text:
 
 # ===== Integer/Text Conversion =====
 
-fn int_to_str(n: i64) -> text:
+pub fn int_to_str(n: i64) -> text:
     if n == 0:
         return "0"
     var neg: bool = false
@@ -129,7 +131,7 @@ fn span_end(span_id: i64) -> i64:
 fn span_line(span_id: i64) -> i64:
     span_pool_line[span_id]
 
-fn span_col(span_id: i64) -> i64:
+pub fn span_col(span_id: i64) -> i64:
     span_pool_col[span_id]
 
 fn span_is_valid(span_id: i64) -> bool:
@@ -140,6 +142,25 @@ fn span_is_valid(span_id: i64) -> bool:
 
 fn span_dummy() -> i64:
     flat_span_new(0, 0, 0, 0)
+
+fn flat_span_pool_mark() -> i64:
+    span_pool_start.len()
+
+fn flat_span_rebase_from(mark: i64, base_start: i64, base_line: i64, base_col: i64):
+    # A string-interpolation fragment is sub-parsed as its own source, so its
+    # spans are fragment-relative (line 1, col 1 at the fragment start). Shift
+    # every span registered since `mark` onto the enclosing literal's position
+    # so diagnostics name the real source line instead of `:1:1`.
+    var i = if mark < 1: 1 else: mark
+    while i < span_pool_start.len():
+        val rel_line = span_pool_line[i]
+        if rel_line > 0:
+            if rel_line == 1:
+                span_pool_col[i] = base_col + span_pool_col[i] - 1
+            span_pool_line[i] = base_line + rel_line - 1
+            span_pool_start[i] = base_start + span_pool_start[i]
+            span_pool_end[i] = base_start + span_pool_end[i]
+        i = i + 1
 
 # ===== Token =====
 # A token is (kind: i64, span: i64, text: text)
@@ -176,9 +197,9 @@ var sym_decl_ids: [i64] = []
 var sym_mutable: [i64] = []
 
 # Symbol type constants
-val SYM_VAR: i64 = 1
-val SYM_VAL: i64 = 2
-val SYM_FN: i64 = 3
+pub val SYM_VAR: i64 = 1
+pub val SYM_VAL: i64 = 2
+pub val SYM_FN: i64 = 3
 val SYM_STRUCT: i64 = 4
 val SYM_EXTERN_FN: i64 = 5
 val SYM_PARAM: i64 = 6
@@ -232,45 +253,45 @@ fn scope_depth() -> i64:
 # ===== Type Tags =====
 # Bootstrap uses integer tags for types instead of a full type system.
 
-val TYPE_VOID: i64 = 0
-val TYPE_BOOL: i64 = 1
-val TYPE_I64: i64 = 2
-val TYPE_F64: i64 = 3
-val TYPE_TEXT: i64 = 4
-val TYPE_ARRAY_I64: i64 = 5
-val TYPE_ARRAY_TEXT: i64 = 6
-val TYPE_ARRAY_BOOL: i64 = 7
-val TYPE_ARRAY_ANY: i64 = 8
-val TYPE_DICT: i64 = 9
-val TYPE_STRUCT: i64 = 10
-val TYPE_FN: i64 = 11
-val TYPE_ANY: i64 = 12
-val TYPE_NIL: i64 = 13
-val TYPE_OPTION: i64 = 14
-val TYPE_OPTION_I64: i64 = 15
-val TYPE_OPTION_F64: i64 = 16
-val TYPE_OPTION_TEXT: i64 = 17
-val TYPE_OPTION_BOOL: i64 = 18
-val TYPE_RESULT: i64 = 19
-val TYPE_FUTURE: i64 = 20
-val TYPE_POLL: i64 = 21
-val TYPE_TASK: i64 = 22
-val TYPE_GENERIC_ERASED: i64 = 23
-val TYPE_UNION: i64 = 24
-val TYPE_INTERSECTION: i64 = 25
-val TYPE_REFINEMENT: i64 = 26
+pub val TYPE_VOID: i64 = 0
+pub val TYPE_BOOL: i64 = 1
+pub val TYPE_I64: i64 = 2
+pub val TYPE_F64: i64 = 3
+pub val TYPE_TEXT: i64 = 4
+pub val TYPE_ARRAY_I64: i64 = 5
+pub val TYPE_ARRAY_TEXT: i64 = 6
+pub val TYPE_ARRAY_BOOL: i64 = 7
+pub val TYPE_ARRAY_ANY: i64 = 8
+pub val TYPE_DICT: i64 = 9
+pub val TYPE_STRUCT: i64 = 10
+pub val TYPE_FN: i64 = 11
+pub val TYPE_ANY: i64 = 12
+pub val TYPE_NIL: i64 = 13
+pub val TYPE_OPTION: i64 = 14
+pub val TYPE_OPTION_I64: i64 = 15
+pub val TYPE_OPTION_F64: i64 = 16
+pub val TYPE_OPTION_TEXT: i64 = 17
+pub val TYPE_OPTION_BOOL: i64 = 18
+pub val TYPE_RESULT: i64 = 19
+pub val TYPE_FUTURE: i64 = 20
+pub val TYPE_POLL: i64 = 21
+pub val TYPE_TASK: i64 = 22
+pub val TYPE_GENERIC_ERASED: i64 = 23
+pub val TYPE_UNION: i64 = 24
+pub val TYPE_INTERSECTION: i64 = 25
+pub val TYPE_REFINEMENT: i64 = 26
 # Fixed-width integer primitives. i64 already has TYPE_I64 (=2); these carry the
 # concrete bit width and signedness of u8/u16/u32/u64/i8/i16/i32 through the
 # flat parser -> AST bridge -> HIR Int(bits, signed) -> MIR I8..U64 -> backend
 # type mappers (e.g. VHDL unsigned/signed(W-1 downto 0)). Without them these
 # widths collapse to TYPE_I64 and every backend renders a 64-bit lane.
-val TYPE_U8: i64 = 27
-val TYPE_U16: i64 = 28
-val TYPE_U32: i64 = 29
-val TYPE_U64: i64 = 30
-val TYPE_I8: i64 = 31
-val TYPE_I16: i64 = 32
-val TYPE_I32: i64 = 33
+pub val TYPE_U8: i64 = 27
+pub val TYPE_U16: i64 = 28
+pub val TYPE_U32: i64 = 29
+pub val TYPE_U64: i64 = 30
+pub val TYPE_I8: i64 = 31
+pub val TYPE_I16: i64 = 32
+pub val TYPE_I32: i64 = 33
 # Encoded ranges: union/intersection/refinement IDs are encoded into type tags
 # TYPE_UNION_BASE + id => specific union, TYPE_INTERSECTION_BASE + id => specific intersection, etc.
 # Option<T> generic-arg specializations (bug:
@@ -285,8 +306,8 @@ val TYPE_I32: i64 = 33
 # gap below TYPE_UNION_BASE.
 val TYPE_OPTION_GENERIC_BASE: i64 = 300
 val TYPE_OPTION_GENERIC_LIMIT: i64 = 500
-val TYPE_UNION_BASE: i64 = 500
-val TYPE_INTERSECTION_BASE: i64 = 600
+pub val TYPE_UNION_BASE: i64 = 500
+pub val TYPE_INTERSECTION_BASE: i64 = 600
 val TYPE_REFINEMENT_BASE: i64 = 700
 # Dict<K,V> generic-arg specializations: bare TYPE_DICT (=9) has no room to
 # carry K/V, so a `Dict<text,i64>` annotation registers its two component
@@ -294,7 +315,7 @@ val TYPE_REFINEMENT_BASE: i64 = 700
 # refinement registries above (bug: dicttype -- generic args were silently
 # dropped, turning every dict-typed param/local into a plain TYPE_DICT with
 # no key/value info by the time it reached the AST bridge).
-val TYPE_DICT_BASE: i64 = 1000
+pub val TYPE_DICT_BASE: i64 = 1000
 val TYPE_RESULT_BASE: i64 = 2000
 val TYPE_RESULT_LIMIT: i64 = 3000
 # Tuple type annotations `(A, B, C)`: the flat tag lane previously collapsed
@@ -304,7 +325,7 @@ val TYPE_RESULT_LIMIT: i64 = 3000
 # defaulted every element local to i64 (parity case process_run_timeout:
 # text handles printed as decimal integers). Mirrors the Dict<K,V>/Result
 # registries directly above.
-val TYPE_TUPLE_BASE: i64 = 3000
+pub val TYPE_TUPLE_BASE: i64 = 3000
 val TYPE_TUPLE_LIMIT: i64 = 4000
 # Array element-type specializations for element types without their own
 # dedicated flat tag (bug: array-class-param-sigsegv). The array-type parser
@@ -361,30 +382,29 @@ val TYPE_WEAK_LIMIT: i64 = 9750
 # `fn(T, ...) -> R` annotations. The parser used to consume the shape and
 # answer the bare TYPE_FN tag, so HIR saw `Named("fn")` -> `Any` for every
 # callable parameter: a generic visitor's `f: fn(Node, C) -> C` could then
-# never bind `C` at a nested call and monomorphization refused the whole
-# body (E-MONO-032 x81 on hir_visitor.spl, phase 3, 2026-10-09). The range
+# never bind `C` at a nested call (hir_visitor.spl, phase 3, 2026-10-09). The range
 # is carved out of the weak-reference block (250 entries each).
-val TYPE_FUNCTION_BASE: i64 = 9750
-val TYPE_FUNCTION_LIMIT: i64 = 10000
-val TYPE_NAMED_BASE: i64 = 10000
+pub val TYPE_FUNCTION_BASE: i64 = 9750
+pub val TYPE_FUNCTION_LIMIT: i64 = 10000
+pub val TYPE_NAMED_BASE = 10000
 
 # Helper predicates for encoded type tags
-fn is_union_tag(tag: i64) -> bool:
+pub fn is_union_tag(tag: i64) -> bool:
     tag >= TYPE_UNION_BASE and tag < TYPE_INTERSECTION_BASE
 
-fn union_tag_to_id(tag: i64) -> i64:
+pub fn union_tag_to_id(tag: i64) -> i64:
     tag - TYPE_UNION_BASE
 
-fn is_intersection_tag(tag: i64) -> bool:
+pub fn is_intersection_tag(tag: i64) -> bool:
     tag >= TYPE_INTERSECTION_BASE and tag < TYPE_REFINEMENT_BASE
 
-fn intersection_tag_to_id(tag: i64) -> i64:
+pub fn intersection_tag_to_id(tag: i64) -> i64:
     tag - TYPE_INTERSECTION_BASE
 
-fn is_refinement_tag(tag: i64) -> bool:
+pub fn is_refinement_tag(tag: i64) -> bool:
     tag >= TYPE_REFINEMENT_BASE and tag < TYPE_DICT_BASE
 
-fn refinement_tag_to_id(tag: i64) -> i64:
+pub fn refinement_tag_to_id(tag: i64) -> i64:
     tag - TYPE_REFINEMENT_BASE
 
 fn is_dict_tag(tag: i64) -> bool:
@@ -562,7 +582,7 @@ fn fixed_type_tag_name(tag: i64) -> text:
 fn is_union_base_or_above(tag: i64) -> bool:
     tag >= TYPE_UNION_BASE
 
-fn type_tag_name(tag: i64) -> text:
+pub fn type_tag_name(tag: i64) -> text:
     if tag >= TYPE_NAMED_BASE:
         val nid = tag - TYPE_NAMED_BASE
         val nm = named_type_name(nid)
@@ -663,7 +683,7 @@ fn type_tag_name(tag: i64) -> text:
         return "fn"
     "unknown"
 
-fn type_tag_to_c(tag: i64) -> text:
+pub fn type_tag_to_c(tag: i64) -> text:
     if tag == TYPE_VOID:
         return "void"
     if tag == TYPE_BOOL:
@@ -767,11 +787,44 @@ var custom_primitive_names: [text] = []
 var custom_primitive_underlying_type_tags: [i64] = []
 var custom_primitive_symbol_ids: [i64] = []
 
-fn named_type_register(name: text, field_names: [text], field_types: [i64]) -> i64:
-    val existing = named_type_find(name)
+# Declaring-module ownership of each registry entry. The registry is NOT reset
+# between modules on the append-mode parse path (`parse_module_file`: core
+# interpreter module loader, legacy C driver), so a bare name alone is not a
+# key: two modules declaring the same struct name must get distinct ids, or the
+# second declaration's `named_type_update` clobbers the first module's layout
+# (bug bare_name_registry_collision_trigger_conditions_2026-07-30).
+# Carried by the flat-pool snapshot (FlatPoolState) with the registry it keys:
+# the public-summary validation parse takes fresh pools and reinstates the
+# caller's, which must come back with their ownership intact
+# (bug stage2_parse_shard_segv_named_type_find_2026-11-13).
+# `named_type_module_at` tolerates a shorter array from `named_type_apply`;
+# `flat_type_pools_restore` rebuilds `named_type_modules` to `named_type_names.len()`.
+var named_type_modules: [text] = []
+var named_type_current_module: text = ""
+
+fn named_type_set_current_module(path: text):
+    named_type_current_module = path
+    unit_decl_current_module = path
+
+fn named_type_module_at(type_id: i64) -> text:
+    if type_id < named_type_modules.len():
+        return named_type_modules[type_id]
+    ""
+
+pub fn named_type_register(name: text, field_names: [text], field_types: [i64]) -> i64:
+    var existing = named_type_find(name)
+    if existing >= 0 and named_type_module_at(existing) != named_type_current_module and
+            named_type_fields(existing).len() > 0:
+        # Another module already declared this bare name with a layout; a
+        # placeholder (empty layout, e.g. a forward type reference) is still
+        # adopted and claimed below, a declared type is never shared.
+        existing = -1
     if existing >= 0:
         if field_names.len() > 0 or field_types.len() > 0:
             named_type_update(existing, field_names, field_types)
+            while named_type_modules.len() <= existing:
+                named_type_modules.push("")
+            named_type_modules[existing] = named_type_current_module
         return existing
     val idx = named_type_names.len()
     named_type_names.push(name)
@@ -779,9 +832,12 @@ fn named_type_register(name: text, field_names: [text], field_types: [i64]) -> i
     named_type_layout_owners.push(idx)
     named_type_field_names.push(field_names)
     named_type_field_types.push(field_types)
+    while named_type_modules.len() < idx:
+        named_type_modules.push("")
+    named_type_modules.push(named_type_current_module)
     idx
 
-fn named_type_update(type_id: i64, field_names: [text], field_types: [i64]):
+pub fn named_type_update(type_id: i64, field_names: [text], field_types: [i64]):
     # Canonical owner indirection keeps layout updates and reads O(1).
     val owner = named_type_layout_owners[type_id]
     named_type_field_names[owner] = field_names
@@ -809,18 +865,24 @@ fn named_type_arguments_for_tag(tag: i64) -> [i64]:
         return named_type_arguments[index]
     []
 
-fn named_type_find(name: text) -> i64:
+pub fn named_type_find(name: text) -> i64:
+    # Precedence: the current module's own declaration, then the first
+    # registration of that bare name (the pre-fix behaviour for imports).
+    var first = -1
     var i = 0
     while i < named_type_names.len():
         if named_type_names[i] == name:
-            return i
+            if named_type_module_at(i) == named_type_current_module:
+                return i
+            if first < 0:
+                first = i
         i = i + 1
-    -1
+    first
 
-fn named_type_name(type_id: i64) -> text:
+pub fn named_type_name(type_id: i64) -> text:
     named_type_names[type_id]
 
-fn named_type_fields(type_id: i64) -> [text]:
+pub fn named_type_fields(type_id: i64) -> [text]:
     named_type_field_names[named_type_layout_owners[type_id]]
 
 fn named_type_field_type_tags(type_id: i64) -> [i64]:
@@ -891,7 +953,7 @@ fn primitive_backing_bits_from_name(type_name: text) -> i64:
         return 64
     0
 
-fn custom_primitive_find(name: text) -> i64:
+pub fn custom_primitive_find(name: text) -> i64:
     var i = 0
     while i < custom_primitive_names.len():
         if custom_primitive_names[i] == name:
@@ -923,7 +985,7 @@ var newunit_names: [text] = []
 var newunit_suffixes: [text] = []
 var newunit_underlying_type_tags: [i64] = []
 
-fn newunit_find(name: text) -> i64:
+pub fn newunit_find(name: text) -> i64:
     var i = 0
     while i < newunit_names.len():
         if newunit_names[i] == name:
@@ -931,7 +993,10 @@ fn newunit_find(name: text) -> i64:
         i = i + 1
     -1
 
-fn newunit_register(name: text, suffix: text, underlying_type_tag: i64) -> i64:
+pub fn newunit_register(name: text, suffix: text, underlying_type_tag: i64) -> i64:
+    # Legacy spelling: the canonical pool is the single source of truth for
+    # the unit registry; this view is kept for consumers of newunit_find.
+    unit_decl_register_origin(name, "nominal", suffix, underlying_type_tag, "", "newunit")
     val existing = newunit_find(name)
     if existing >= 0:
         newunit_suffixes[existing] = suffix
@@ -954,6 +1019,230 @@ fn newunit_suffix_at(idx: i64) -> text:
 
 fn newunit_underlying_tag_at(idx: i64) -> i64:
     newunit_underlying_type_tags[idx]
+
+# Canonical unit declaration pool (stronger types, wave 1).
+# `unit FullName: T as suffix` (nominal), `unit Alias = Target` (alias), and
+# zero-payload state markers are recorded here the way the parser records
+# newunits. The unit registry builder (compiler.types.units.unit_registry)
+# consumes this pool alongside the legacy newunit pool; roles beyond
+# nominal/alias/marker (measurement_family, refined) register through the same
+# path in later waves. Full name is the identity: re-registering a name
+# updates its row in place, mirroring newunit_register.
+var unit_decl_names: [text] = []
+var unit_decl_roles: [text] = []
+var unit_decl_short_symbols: [text] = []
+var unit_decl_underlying_type_tags: [i64] = []
+var unit_decl_alias_ofs: [text] = []
+var unit_decl_modules: [text] = []
+var unit_decl_current_module: text = ""
+var unit_decl_last_conflict_msg: text = ""
+# Origin syntax: "" for the canonical `unit` spelling, "newunit" / "newtype"
+# for the deprecated spellings that lower into the same record (SPL-UNIT-001 /
+# SPL-UNIT-003 are raised at the parse site, never here).
+var unit_decl_initialized: bool = false
+var unit_decl_legacy_origins: [text] = []
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_decl_set_current_module(path: text):
+    unit_decl_current_module = path
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_decl_get_current_module() -> text:
+    unit_decl_current_module
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_decl_last_conflict_error() -> text:
+    unit_decl_last_conflict_msg
+
+pub fn unit_decl_pool_reset():
+    unit_decl_names = []
+    unit_decl_roles = []
+    unit_decl_short_symbols = []
+    unit_decl_underlying_type_tags = []
+    unit_decl_alias_ofs = []
+    unit_decl_legacy_origins = []
+    unit_decl_modules = []
+    unit_decl_last_conflict_msg = ""
+    unit_decl_initialized = true
+    unit_constraint_pool_reset()
+
+# The unit decl pool is process-global and shared with the core interpreter.
+# A nested per-file reset (the flat AST bridge called from an interpreted
+# script) wipes it through reset_all_pools; the caller snapshots the pool
+# arrays before the reset and hands them back afterwards. The reset rebinds
+# the globals to fresh arrays, so the captured arrays keep their contents.
+pub struct UnitDeclPoolSnapshot:
+    initialized: bool
+    names: [text]
+    roles: [text]
+    short_symbols: [text]
+    underlying_type_tags: [i64]
+    alias_ofs: [text]
+    legacy_origins: [text]
+    modules: [text]
+    current_module: text
+    constraints: UnitConstraintPoolSnapshot
+
+pub fn unit_decl_pool_save() -> UnitDeclPoolSnapshot:
+    if not unit_decl_initialized:
+        return UnitDeclPoolSnapshot(initialized: false, names: [], roles: [],
+            short_symbols: [], underlying_type_tags: [], alias_ofs: [],
+            legacy_origins: [], modules: [], current_module: unit_decl_current_module,
+            constraints: unit_constraint_pool_save())
+    UnitDeclPoolSnapshot(initialized: true, names: unit_decl_names, roles: unit_decl_roles,
+        short_symbols: unit_decl_short_symbols,
+        underlying_type_tags: unit_decl_underlying_type_tags,
+        alias_ofs: unit_decl_alias_ofs, legacy_origins: unit_decl_legacy_origins,
+        modules: unit_decl_modules, current_module: unit_decl_current_module,
+        constraints: unit_constraint_pool_save())
+
+pub fn unit_decl_pool_restore(snap: UnitDeclPoolSnapshot):
+    unit_constraint_pool_restore(snap.constraints)
+    unit_decl_current_module = snap.current_module
+    unit_decl_last_conflict_msg = ""
+    if not snap.initialized:
+        unit_decl_initialized = false
+        return
+    unit_decl_names = snap.names
+    unit_decl_roles = snap.roles
+    unit_decl_short_symbols = snap.short_symbols
+    unit_decl_underlying_type_tags = snap.underlying_type_tags
+    unit_decl_alias_ofs = snap.alias_ofs
+    unit_decl_legacy_origins = snap.legacy_origins
+    unit_decl_modules = snap.modules
+    unit_decl_initialized = true
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_decl_module_at(idx: i64) -> text:
+    if idx >= 0 and idx < unit_decl_modules.len():
+        return unit_decl_modules[idx]
+    ""
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_decl_find_in_module(module_path: text, name: text) -> i64:
+    if not unit_decl_initialized:
+        return -1
+    var i = 0
+    while i < unit_decl_names.len():
+        if unit_decl_names[i] == name and unit_decl_module_at(i) == module_path:
+            return i
+        i = i + 1
+    -1
+
+pub fn unit_decl_find(name: text) -> i64:
+    if not unit_decl_initialized:
+        return -1
+    # Precedence: the current module's own declaration, then the first
+    # registration of that bare name (backward compatibility for unqualified callers).
+    var first = -1
+    var i = 0
+    while i < unit_decl_names.len():
+        if unit_decl_names[i] == name:
+            if unit_decl_module_at(i) == unit_decl_current_module:
+                return i
+            if first < 0:
+                first = i
+        i = i + 1
+    first
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_decl_find_by_suffix_in_module(module_path: text, suffix: text) -> i64:
+    if not unit_decl_initialized or suffix == "": return -1
+    var first = -1
+    var i = 0
+    while i < unit_decl_short_symbols.len():
+        if unit_decl_short_symbols[i] == suffix:
+            if unit_decl_module_at(i) == module_path:
+                return i
+            if first < 0:
+                first = i
+        i = i + 1
+    first
+
+# Row index of the unit declared `as suffix`, or -1 (suffix-less units and
+# unknown suffixes). Used by the literal checks for `70000_pt`.
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_decl_find_by_suffix(suffix: text) -> i64:
+    unit_decl_find_by_suffix_in_module(unit_decl_current_module, suffix)
+
+fn unit_decl_register(name: text, role: text, short_symbol: text, underlying_type_tag: i64, alias_of: text) -> i64:
+    unit_decl_register_origin(name, role, short_symbol, underlying_type_tag, alias_of, "")
+
+pub fn unit_decl_register_origin(name: text, role: text, short_symbol: text, underlying_type_tag: i64, alias_of: text, legacy_origin: text) -> i64:
+    if not unit_decl_initialized:
+        unit_decl_pool_reset()
+    unit_decl_last_conflict_msg = ""
+    val existing = unit_decl_find_in_module(unit_decl_current_module, name)
+    if existing >= 0:
+        val same_decl = (
+            unit_decl_roles[existing] == role and
+            unit_decl_short_symbols[existing] == short_symbol and
+            unit_decl_underlying_type_tags[existing] == underlying_type_tag and
+            unit_decl_alias_ofs[existing] == alias_of and
+            unit_decl_legacy_origins[existing] == legacy_origin
+        )
+        if same_decl:
+            return existing
+        # Derived unit parsing registers a placeholder nominal row first and
+        # immediately refines it to role "derived" with its formula.
+        val derived_refinement = (
+            unit_decl_roles[existing] == "nominal" and
+            role == "derived" and
+            unit_decl_underlying_type_tags[existing] == underlying_type_tag and
+            unit_decl_short_symbols[existing] == "" and
+            short_symbol == "" and
+            unit_decl_legacy_origins[existing] == legacy_origin
+        )
+        if derived_refinement:
+            unit_decl_roles[existing] = role
+            unit_decl_alias_ofs[existing] = alias_of
+            return existing
+        if legacy_origin == "newunit" and unit_decl_legacy_origins[existing] == "newunit":
+            unit_decl_roles[existing] = role
+            unit_decl_short_symbols[existing] = short_symbol
+            unit_decl_underlying_type_tags[existing] = underlying_type_tag
+            unit_decl_alias_ofs[existing] = alias_of
+            unit_decl_legacy_origins[existing] = legacy_origin
+            return existing
+        unit_decl_last_conflict_msg = "conflicting unit declaration `" + name + "` in module `" + unit_decl_current_module + "`"
+        return existing
+    val idx = unit_decl_names.len()
+    unit_decl_names.push(name)
+    unit_decl_roles.push(role)
+    unit_decl_short_symbols.push(short_symbol)
+    unit_decl_underlying_type_tags.push(underlying_type_tag)
+    unit_decl_alias_ofs.push(alias_of)
+    unit_decl_legacy_origins.push(legacy_origin)
+    while unit_decl_modules.len() < idx:
+        unit_decl_modules.push("")
+    unit_decl_modules.push(unit_decl_current_module)
+    idx
+
+pub fn unit_decl_count() -> i64:
+    if not unit_decl_initialized:
+        return 0
+    unit_decl_names.len()
+
+pub fn unit_decl_name_at(idx: i64) -> text:
+    unit_decl_names[idx]
+
+pub fn unit_decl_role_at(idx: i64) -> text:
+    unit_decl_roles[idx]
+
+pub fn unit_decl_short_symbol_at(idx: i64) -> text:
+    unit_decl_short_symbols[idx]
+
+pub fn unit_decl_underlying_tag_at(idx: i64) -> i64:
+    unit_decl_underlying_type_tags[idx]
+
+pub fn unit_decl_alias_of_at(idx: i64) -> text:
+    unit_decl_alias_ofs[idx]
+
+pub fn unit_decl_legacy_origin_at(idx: i64) -> text:
+    unit_decl_legacy_origins[idx]
+
+fn unit_decl_is_unit_name(name: text) -> bool:
+    unit_decl_find(name) >= 0
 
 fn custom_primitive_is_name(name: text) -> bool:
     custom_primitive_find(name) >= 0
@@ -978,7 +1267,7 @@ fn custom_primitive_underlying_name_by_name(name: text) -> text:
         return ""
     type_tag_name(tag)
 
-fn custom_primitive_abi_type_name(type_name: text) -> text:
+pub fn custom_primitive_abi_type_name(type_name: text) -> text:
     val inner = custom_primitive_underlying_name_by_name(type_name)
     if inner == "":
         return type_name
@@ -1059,7 +1348,7 @@ var fn_sig_param_types: [[i64]] = []
 var fn_sig_ret_types: [i64] = []
 var fn_sig_is_extern: [i64] = []
 
-fn fn_sig_register(name: text, param_names: [text], param_types: [i64], ret_type: i64, is_ext: i64) -> i64:
+pub fn fn_sig_register(name: text, param_names: [text], param_types: [i64], ret_type: i64, is_ext: i64) -> i64:
     val idx = fn_sig_names.len()
     fn_sig_names.push(name)
     fn_sig_param_names.push(param_names)
@@ -1068,7 +1357,7 @@ fn fn_sig_register(name: text, param_names: [text], param_types: [i64], ret_type
     fn_sig_is_extern.push(is_ext)
     idx
 
-fn fn_sig_find(name: text) -> i64:
+pub fn fn_sig_find(name: text) -> i64:
     var i = 0
     while i < fn_sig_names.len():
         if fn_sig_names[i] == name:
@@ -1079,19 +1368,19 @@ fn fn_sig_find(name: text) -> i64:
 fn fn_sig_name(sig_id: i64) -> text:
     fn_sig_names[sig_id]
 
-fn fn_sig_ret_type(sig_id: i64) -> i64:
+pub fn fn_sig_ret_type(sig_id: i64) -> i64:
     fn_sig_ret_types[sig_id]
 
-fn fn_sig_param_count(sig_id: i64) -> i64:
+pub fn fn_sig_param_count(sig_id: i64) -> i64:
     fn_sig_param_names[sig_id].len()
 
 fn fn_sig_is_extern_fn(sig_id: i64) -> bool:
     fn_sig_is_extern[sig_id] == 1
 
-fn fn_sig_get_param_names(sig_id: i64) -> [text]:
+pub fn fn_sig_get_param_names(sig_id: i64) -> [text]:
     fn_sig_param_names[sig_id]
 
-fn fn_sig_get_param_types(sig_id: i64) -> [i64]:
+pub fn fn_sig_get_param_types(sig_id: i64) -> [i64]:
     fn_sig_param_types[sig_id]
 
 # ===== Generic Parameter Registry =====
@@ -1203,7 +1492,7 @@ fn intersection_type_register(member_types: [i64]) -> i64:
     intersection_type_members.push(member_types)
     TYPE_INTERSECTION_BASE + idx
 
-fn intersection_type_get_members(inter_id: i64) -> [i64]:
+pub fn intersection_type_get_members(inter_id: i64) -> [i64]:
     if inter_id >= 0 and inter_id < intersection_type_members.len():
         return intersection_type_members[inter_id]
     []
@@ -1214,7 +1503,8 @@ fn intersection_type_get_members(inter_id: i64) -> [i64]:
 var refinement_base_types: [i64] = []
 var refinement_predicates: [text] = []
 
-fn refinement_type_register(base_type: i64, predicate: text) -> i64:
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn refinement_type_register(base_type: i64, predicate: text) -> i64:
     var existing = 0
     while existing < refinement_base_types.len():
         if refinement_base_types[existing] == base_type and refinement_predicates[existing] == predicate:
@@ -1227,7 +1517,7 @@ fn refinement_type_register(base_type: i64, predicate: text) -> i64:
     refinement_predicates.push(predicate)
     TYPE_REFINEMENT_BASE + idx
 
-fn refinement_type_base(ref_id: i64) -> i64:
+pub fn refinement_type_base(ref_id: i64) -> i64:
     if ref_id >= 0 and ref_id < refinement_base_types.len():
         return refinement_base_types[ref_id]
     TYPE_ANY
@@ -1343,7 +1633,7 @@ fn array_generic_type_get_elem(arr_id: i64) -> i64:
 # `b: Box<i64>` where `Box` is IMPORTED is absent from this file's named-type
 # registry, so the generic branch collapsed it to TYPE_ANY: the value carried
 # no class identity and no type arguments, MIR could not resolve `b.get()`,
-# and 40.mono had nothing to specialize. Each distinct instance gets its own
+# and the instance had no identity. Each distinct instance gets its own
 # named-type entry (keyed by base name + argument tags, so it never aliases
 # the base's own entry) and the base name and argument tags are recorded here
 # for the AST bridge, which rebuilds `Named(base, args)`.
@@ -1474,9 +1764,9 @@ var pointer_inner_tags: [i64] = []
 var pointer_mutable_flags: [i64] = []
 
 # Pointer registry flag: which `*` spelling was written.
-val POINTER_FLAG_SHARED: i64 = 0      # `*T`       shared (Rc) owner
-val POINTER_FLAG_RAW_MUT: i64 = 1     # `*mut T`   raw, mutable
-val POINTER_FLAG_RAW_CONST: i64 = 2   # `*const T` raw, immutable
+pub val POINTER_FLAG_SHARED: i64 = 0      # `*T`       shared (Rc) owner
+pub val POINTER_FLAG_RAW_MUT: i64 = 1     # `*mut T`   raw, mutable
+pub val POINTER_FLAG_RAW_CONST: i64 = 2   # `*const T` raw, immutable
 
 fn pointer_type_register(inner_tag: i64, mutable: bool) -> i64:
     val flag: i64 = if mutable: POINTER_FLAG_RAW_MUT else: POINTER_FLAG_SHARED
@@ -1620,7 +1910,7 @@ fn _type_pool_promote_root_arr_i64(root: [[[i64]]]) -> bool:
     rt_array_free(root)
     promoted
 
-# @workaround bug=phase3_global_pool_generic_inference_workaround_2026_10_10 reason=explicit declared pool T until global mono inference is repaired.
+# @workaround bug=phase3_global_pool_generic_inference_workaround_2026_10_10 recover=28df8ceac42095edcc1d37c53c127271ea938bcb reason=status=ROOT-FIXED+STAGE2-GATED; HM module-global constant inference fixed in 30.types/inference_control.spl (explicit <T> calls retired in 53afb8c62cb); keep concrete _type_pool_promote_root_{text,i64,arr_i64} helpers until frozen Stage 2 qualifies erased generic [T] promotion over global nested arrays
 pub fn type_pools_promote_hir_owners() -> bool:
     # The parser resets these module globals inside a per-file transient
     # scope, but HIR still reads them after that scope ends. Promote only the
@@ -1641,12 +1931,27 @@ pub fn type_pools_promote_hir_owners() -> bool:
     promoted = _type_pool_promote_root_arr_i64([union_type_members]) and promoted
     promoted = _type_pool_promote_root_i64([result_type_ok]) and promoted
     promoted = _type_pool_promote_root_i64([result_type_err]) and promoted
+    # Added for the public-summary validation parse, which now runs on its own
+    # fresh pools (project_public_summary_v1 takes/installs FlatPoolState) and
+    # no longer touches these owners. Kept: the retained parse's Option/array
+    # type tags index these registries.
+    promoted = _type_pool_promote_root_i64([option_generic_inner_tags]) and promoted
+    promoted = _type_pool_promote_root_i64([array_generic_elem_tags]) and promoted
+    if unit_decl_initialized:
+        promoted = _type_pool_promote_root_text([unit_decl_names]) and promoted
+        promoted = _type_pool_promote_root_text([unit_decl_roles]) and promoted
+        promoted = _type_pool_promote_root_text([unit_decl_short_symbols]) and promoted
+        promoted = _type_pool_promote_root_i64([unit_decl_underlying_type_tags]) and promoted
+        promoted = _type_pool_promote_root_text([unit_decl_alias_ofs]) and promoted
+        promoted = _type_pool_promote_root_text([unit_decl_legacy_origins]) and promoted
+        promoted = _type_pool_promote_root_text([unit_decl_modules]) and promoted
+    promoted = unit_constraint_promote_transient_owner() and promoted
     promoted
 
 # ===== Pool Reset =====
 # Call before parsing a new file to reset all pools.
 
-fn reset_all_pools():
+pub fn reset_all_pools():
     # These owners are process-global, but their backing may grow while a
     # transient parser scope is active. Scope teardown reclaims that backing.
     # Never inspect or clear the preceding file's possibly stale header; whole
@@ -1666,6 +1971,7 @@ fn reset_all_pools():
     scope_starts = []
     current_scope_depth = 0
     named_type_names = []
+    named_type_modules = []
     named_type_arguments = []
     named_type_layout_owners = []
     named_type_field_names = []
@@ -1675,6 +1981,9 @@ fn reset_all_pools():
     newunit_names = []
     newunit_suffixes = []
     newunit_underlying_type_tags = []
+    # Canonical unit declarations are per-file scratch for the same reason:
+    # the next file's dump must not carry this file's decl records.
+    unit_decl_pool_reset()
     custom_primitive_names = []
     custom_primitive_underlying_type_tags = []
     custom_primitive_symbol_ids = []
@@ -1750,15 +2059,21 @@ export TYPE_TUPLE_BASE, is_tuple_type_tag, tuple_type_tag_to_id
 export tuple_type_register, tuple_type_get_elems
 export union_type_register, union_type_get_members
 export named_type_field_type_tags
-export SYM_UNKNOWN, SYM_FN, SYM_VAL, SYM_VAR, SYM_STRUCT, SYM_ENUM, SYM_CLASS
+export named_type_set_current_module
+# SYM_ENUM/SYM_CLASS dropped 2026-11-14: declared and referenced nowhere (the
+# self-hosted re-export chase dead-ends on them; same class as 335af16de21's
+# SYM_UNKNOWN removal).
+export SYM_FN, SYM_VAL, SYM_VAR, SYM_STRUCT
 export scope_push, scope_pop, scope_depth
 
 # --- flat-AST pool codec: flat_type ------------------------------
 #
-# Dump/restore for this file's 52 pools, in a FIXED SORTED ORDER that
+# Dump/restore for this file's pools, in a FIXED SORTED ORDER that
 # dump and restore share. Order is the whole contract: the blob carries no
 # pool names, so a reordering on one side silently pairs each pool with its
-# neighbour's data. Sorting by name keeps the two sides in step.
+# neighbour's data. Sorting by name keeps the two sides in step. The canonical
+# unit-declaration block sits between union_type_members and weak_inner_tags;
+# FLAT_POOL_CODEC_VERSION bumps whenever a pool is added, moved, or retyped.
 #
 # current_scope_depth is scalar state that reset_all_pools also resets, so it
 # rides along at the end of the blob. It cannot appear in an array-derived
@@ -1774,6 +2089,9 @@ pub fn flat_type_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_i64(array_generic_elem_tags))
     parts = parts.push(flat_pool_enc_i64(atomic_inner_tags))
     parts = parts.push(flat_pool_enc_text(custom_primitive_names))
+    # HIR SymbolIds bound after the parse (custom_primitive_bind_symbol): always
+    # the -1 placeholder at capture and process-local once bound. Never stored.
+    flat_pool_type_trace_clear_next_v1()
     parts = parts.push(flat_pool_enc_i64(custom_primitive_symbol_ids))
     parts = parts.push(flat_pool_enc_i64(custom_primitive_underlying_type_tags))
     parts = parts.push(flat_pool_enc_i64(dict_type_keys))
@@ -1826,6 +2144,14 @@ pub fn flat_type_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_text(tok_pool_text))
     parts = parts.push(flat_pool_enc_i64_list(tuple_type_elem_tags))
     parts = parts.push(flat_pool_enc_i64_list(union_type_members))
+    # Canonical unit-declaration pool (stronger types wave 1); sorted block
+    # between union_type_members and weak_inner_tags. Codec version bumped.
+    parts = parts.push(flat_pool_enc_text(unit_decl_alias_ofs))
+    parts = parts.push(flat_pool_enc_text(unit_decl_names))
+    parts = parts.push(flat_pool_enc_text(unit_decl_roles))
+    parts = parts.push(flat_pool_enc_text(unit_decl_short_symbols))
+    parts = parts.push(flat_pool_enc_i64(unit_decl_underlying_type_tags))
+    parts = parts.push(flat_pool_enc_text(unit_decl_legacy_origins))
     parts = parts.push(flat_pool_enc_i64(weak_inner_tags))
     parts = parts.push(flat_pool_enc_scalar_i64(current_scope_depth))
     parts.join("")
@@ -1955,6 +2281,7 @@ pub fn flat_type_pools_restore(r: FlatPoolReader) -> bool:
     named_type_field_names = flat_pool_dec_text_list(r)
     named_type_field_types = flat_pool_dec_i64_list(r)
     named_type_names = flat_pool_dec_text(r)
+    named_type_modules = []
     named_type_arguments = flat_pool_dec_i64_list(r)
     named_type_layout_owners = flat_pool_dec_i64(r)
     newunit_names = flat_pool_dec_text(r)
@@ -1984,6 +2311,12 @@ pub fn flat_type_pools_restore(r: FlatPoolReader) -> bool:
     tok_pool_text = flat_pool_dec_text(r)
     tuple_type_elem_tags = flat_pool_dec_i64_list(r)
     union_type_members = flat_pool_dec_i64_list(r)
+    unit_decl_alias_ofs = flat_pool_dec_text(r)
+    unit_decl_names = flat_pool_dec_text(r)
+    unit_decl_roles = flat_pool_dec_text(r)
+    unit_decl_short_symbols = flat_pool_dec_text(r)
+    unit_decl_underlying_type_tags = flat_pool_dec_i64(r)
+    unit_decl_legacy_origins = flat_pool_dec_text(r)
     weak_inner_tags = flat_pool_dec_i64(r)
     current_scope_depth = r.next_i64()
     # The interned fn-type pools are parallel arrays; a length mismatch is a
@@ -2028,7 +2361,244 @@ pub fn flat_type_pools_restore(r: FlatPoolReader) -> bool:
         for argument in named_generic_instance_args[i]:
             if not named_type_argument_graph_valid(argument, owner_tag, imported_index_by_type):
                 return false
+    # Blobs represent a single module; rebuild per-row declaring-module
+    # ownership after layout-owner validation using `named_type_current_module`
+    # for owner rows (`owner == i`) and "" for `named_type_apply` instance rows,
+    # instead of serializing host paths in the flat pool.
+    var rebuilt_modules: [text] = []
+    for i in 0..named_type_names.len():
+        if named_type_layout_owners[i] == i:
+            rebuilt_modules.push(named_type_current_module)
+        else:
+            rebuilt_modules.push("")
+    named_type_modules = rebuilt_modules
+    var rebuilt_unit_modules: [text] = []
+    for _ in 0..unit_decl_names.len():
+        rebuilt_unit_modules.push(unit_decl_current_module)
+    unit_decl_modules = rebuilt_unit_modules
     true
 
-export flat_type_pools_dump, flat_type_pools_restore
+# Live line chunks of this family's CLEAR pools, in dump order (see
+# flat_decl_pools_clear_chunks_v1).
+pub fn flat_type_pools_clear_chunks_v1() -> [text]:
+    [flat_pool_enc_i64(custom_primitive_symbol_ids)]
+
+export flat_type_pools_dump, flat_type_pools_restore, flat_type_pools_clear_chunks_v1
 export named_type_apply, named_type_arguments_for_tag
+
+# ===== Flat-pool context snapshot (ParseContext stage 1) =====
+# See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
+# take moves the active pools out and leaves fresh empty ones; install
+# makes a taken snapshot active again. The globals stay the active context.
+pub struct FlatPoolState:
+    span_pool_start: [i64]
+    span_pool_end: [i64]
+    span_pool_line: [i64]
+    span_pool_col: [i64]
+    tok_pool_kind: [i64]
+    tok_pool_span: [i64]
+    tok_pool_text: [text]
+    sym_names: [text]
+    sym_types: [i64]
+    sym_depths: [i64]
+    sym_decl_ids: [i64]
+    sym_mutable: [i64]
+    scope_starts: [i64]
+    current_scope_depth: i64
+    named_type_names: [text]
+    named_type_modules: [text]
+    named_type_current_module: text
+    named_type_arguments: [[i64]]
+    named_type_layout_owners: [i64]
+    named_type_field_names: [[text]]
+    named_type_field_types: [[i64]]
+    custom_primitive_names: [text]
+    custom_primitive_underlying_type_tags: [i64]
+    custom_primitive_symbol_ids: [i64]
+    newunit_names: [text]
+    newunit_suffixes: [text]
+    newunit_underlying_type_tags: [i64]
+    unit_decl_names: [text]
+    unit_decl_roles: [text]
+    unit_decl_short_symbols: [text]
+    unit_decl_underlying_type_tags: [i64]
+    unit_decl_alias_ofs: [text]
+    unit_decl_legacy_origins: [text]
+    unit_decl_modules: [text]
+    unit_decl_current_module: text
+    fn_sig_names: [text]
+    fn_sig_param_names: [[text]]
+    fn_sig_param_types: [[i64]]
+    fn_sig_ret_types: [i64]
+    fn_sig_is_extern: [i64]
+    generic_param_names: [text]
+    generic_param_contexts: [text]
+    generic_param_ids: [i64]
+    union_type_members: [[i64]]
+    tuple_type_elem_tags: [[i64]]
+    intersection_type_members: [[i64]]
+    refinement_base_types: [i64]
+    refinement_predicates: [text]
+    dict_type_keys: [i64]
+    dict_type_values: [i64]
+    result_type_ok: [i64]
+    result_type_err: [i64]
+    array_generic_elem_tags: [i64]
+    option_generic_inner_tags: [i64]
+    named_generic_instance_ids: [i64]
+    named_generic_instance_bases: [text]
+    named_generic_instance_args: [[i64]]
+    isolated_inner_tags: [i64]
+    exclusive_inner_tags: [i64]
+    reference_inner_tags: [i64]
+    reference_mutable_flags: [i64]
+    pointer_inner_tags: [i64]
+    pointer_mutable_flags: [i64]
+    atomic_inner_tags: [i64]
+    weak_inner_tags: [i64]
+    function_param_tags: [[i64]]
+    function_ret_tags: [i64]
+
+pub fn flat_pool_state_take() -> FlatPoolState:
+    val s = FlatPoolState(
+        span_pool_start: span_pool_start,
+        span_pool_end: span_pool_end,
+        span_pool_line: span_pool_line,
+        span_pool_col: span_pool_col,
+        tok_pool_kind: tok_pool_kind,
+        tok_pool_span: tok_pool_span,
+        tok_pool_text: tok_pool_text,
+        sym_names: sym_names,
+        sym_types: sym_types,
+        sym_depths: sym_depths,
+        sym_decl_ids: sym_decl_ids,
+        sym_mutable: sym_mutable,
+        scope_starts: scope_starts,
+        current_scope_depth: current_scope_depth,
+        named_type_names: named_type_names,
+        named_type_modules: named_type_modules,
+        named_type_current_module: named_type_current_module,
+        named_type_arguments: named_type_arguments,
+        named_type_layout_owners: named_type_layout_owners,
+        named_type_field_names: named_type_field_names,
+        named_type_field_types: named_type_field_types,
+        custom_primitive_names: custom_primitive_names,
+        custom_primitive_underlying_type_tags: custom_primitive_underlying_type_tags,
+        custom_primitive_symbol_ids: custom_primitive_symbol_ids,
+        newunit_names: newunit_names,
+        newunit_suffixes: newunit_suffixes,
+        newunit_underlying_type_tags: newunit_underlying_type_tags,
+        unit_decl_names: unit_decl_names,
+        unit_decl_roles: unit_decl_roles,
+        unit_decl_short_symbols: unit_decl_short_symbols,
+        unit_decl_underlying_type_tags: unit_decl_underlying_type_tags,
+        unit_decl_alias_ofs: unit_decl_alias_ofs,
+        unit_decl_legacy_origins: unit_decl_legacy_origins,
+        unit_decl_modules: unit_decl_modules,
+        unit_decl_current_module: unit_decl_current_module,
+        fn_sig_names: fn_sig_names,
+        fn_sig_param_names: fn_sig_param_names,
+        fn_sig_param_types: fn_sig_param_types,
+        fn_sig_ret_types: fn_sig_ret_types,
+        fn_sig_is_extern: fn_sig_is_extern,
+        generic_param_names: generic_param_names,
+        generic_param_contexts: generic_param_contexts,
+        generic_param_ids: generic_param_ids,
+        union_type_members: union_type_members,
+        tuple_type_elem_tags: tuple_type_elem_tags,
+        intersection_type_members: intersection_type_members,
+        refinement_base_types: refinement_base_types,
+        refinement_predicates: refinement_predicates,
+        dict_type_keys: dict_type_keys,
+        dict_type_values: dict_type_values,
+        result_type_ok: result_type_ok,
+        result_type_err: result_type_err,
+        array_generic_elem_tags: array_generic_elem_tags,
+        option_generic_inner_tags: option_generic_inner_tags,
+        named_generic_instance_ids: named_generic_instance_ids,
+        named_generic_instance_bases: named_generic_instance_bases,
+        named_generic_instance_args: named_generic_instance_args,
+        isolated_inner_tags: isolated_inner_tags,
+        exclusive_inner_tags: exclusive_inner_tags,
+        reference_inner_tags: reference_inner_tags,
+        reference_mutable_flags: reference_mutable_flags,
+        pointer_inner_tags: pointer_inner_tags,
+        pointer_mutable_flags: pointer_mutable_flags,
+        atomic_inner_tags: atomic_inner_tags,
+        weak_inner_tags: weak_inner_tags,
+        function_param_tags: function_param_tags,
+        function_ret_tags: function_ret_tags
+    )
+    reset_all_pools()
+    s
+
+pub fn flat_pool_state_install(s: FlatPoolState):
+    span_pool_start = s.span_pool_start
+    span_pool_end = s.span_pool_end
+    span_pool_line = s.span_pool_line
+    span_pool_col = s.span_pool_col
+    tok_pool_kind = s.tok_pool_kind
+    tok_pool_span = s.tok_pool_span
+    tok_pool_text = s.tok_pool_text
+    sym_names = s.sym_names
+    sym_types = s.sym_types
+    sym_depths = s.sym_depths
+    sym_decl_ids = s.sym_decl_ids
+    sym_mutable = s.sym_mutable
+    scope_starts = s.scope_starts
+    current_scope_depth = s.current_scope_depth
+    named_type_names = s.named_type_names
+    named_type_modules = s.named_type_modules
+    named_type_current_module = s.named_type_current_module
+    named_type_arguments = s.named_type_arguments
+    named_type_layout_owners = s.named_type_layout_owners
+    named_type_field_names = s.named_type_field_names
+    named_type_field_types = s.named_type_field_types
+    custom_primitive_names = s.custom_primitive_names
+    custom_primitive_underlying_type_tags = s.custom_primitive_underlying_type_tags
+    custom_primitive_symbol_ids = s.custom_primitive_symbol_ids
+    newunit_names = s.newunit_names
+    newunit_suffixes = s.newunit_suffixes
+    newunit_underlying_type_tags = s.newunit_underlying_type_tags
+    unit_decl_names = s.unit_decl_names
+    unit_decl_roles = s.unit_decl_roles
+    unit_decl_short_symbols = s.unit_decl_short_symbols
+    unit_decl_underlying_type_tags = s.unit_decl_underlying_type_tags
+    unit_decl_alias_ofs = s.unit_decl_alias_ofs
+    unit_decl_legacy_origins = s.unit_decl_legacy_origins
+    unit_decl_modules = s.unit_decl_modules
+    unit_decl_current_module = s.unit_decl_current_module
+    fn_sig_names = s.fn_sig_names
+    fn_sig_param_names = s.fn_sig_param_names
+    fn_sig_param_types = s.fn_sig_param_types
+    fn_sig_ret_types = s.fn_sig_ret_types
+    fn_sig_is_extern = s.fn_sig_is_extern
+    generic_param_names = s.generic_param_names
+    generic_param_contexts = s.generic_param_contexts
+    generic_param_ids = s.generic_param_ids
+    union_type_members = s.union_type_members
+    tuple_type_elem_tags = s.tuple_type_elem_tags
+    intersection_type_members = s.intersection_type_members
+    refinement_base_types = s.refinement_base_types
+    refinement_predicates = s.refinement_predicates
+    dict_type_keys = s.dict_type_keys
+    dict_type_values = s.dict_type_values
+    result_type_ok = s.result_type_ok
+    result_type_err = s.result_type_err
+    array_generic_elem_tags = s.array_generic_elem_tags
+    option_generic_inner_tags = s.option_generic_inner_tags
+    named_generic_instance_ids = s.named_generic_instance_ids
+    named_generic_instance_bases = s.named_generic_instance_bases
+    named_generic_instance_args = s.named_generic_instance_args
+    isolated_inner_tags = s.isolated_inner_tags
+    exclusive_inner_tags = s.exclusive_inner_tags
+    reference_inner_tags = s.reference_inner_tags
+    reference_mutable_flags = s.reference_mutable_flags
+    pointer_inner_tags = s.pointer_inner_tags
+    pointer_mutable_flags = s.pointer_mutable_flags
+    atomic_inner_tags = s.atomic_inner_tags
+    weak_inner_tags = s.weak_inner_tags
+    function_param_tags = s.function_param_tags
+    function_ret_tags = s.function_ret_tags
+
+export FlatPoolState, flat_pool_state_take, flat_pool_state_install

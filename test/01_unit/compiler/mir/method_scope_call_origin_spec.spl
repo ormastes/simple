@@ -1,0 +1,106 @@
+"""
+Purpose: Pin that a bare free-function call made inside a class method lowers
+with a proven call origin when an enum declares a struct-variant payload field
+of the same name (`UIEvent.MouseEvent(button: text)` vs `fn button(...)`, the
+app.office.word.word_app shape that aborted run 13's compiler_cli_build with
+"MIR call target lacks proven source/runtime/foreign origin").
+Audience: compiler engineers maintaining HIR scoping and MIR callable authority.
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lower_function(src: text, target_name: text) -> text:
+    val filename = "method_scope_call_origin_" + target_name + ".spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var result = ""
+    for error in hir_lowering.errors:
+        result = result + "HIR_ERROR:" + error.message + "\n"
+    for error in mir_lowering.errors:
+        result = result + "MIR_ERROR:" + error.message + "\n"
+    for function in mir.functions.values():
+        if function.name == target_name or function.name.ends_with("." + target_name):
+            result = result + serialize_mir_function(function)
+    result
+
+val PAYLOAD_FIELD_NAMED_LIKE_FN_SRC = """
+enum Ev:
+    Action(name: text)
+    MouseEvent(x: f64, button: text)
+
+fn button(id: text, label_text: text) -> text:
+    id + label_text
+
+class Owner:
+    title: text
+
+    me build() -> text:
+        button("btn_save", self.title)
+"""
+
+val PAYLOAD_FIELD_DISTINCT_SRC = """
+enum Ev:
+    Action(name: text)
+    MouseEvent(x: f64, btn: text)
+
+fn button(id: text, label_text: text) -> text:
+    id + label_text
+
+class Owner:
+    title: text
+
+    me build() -> text:
+        button("btn_save", self.title)
+"""
+
+
+val PAYLOAD_FIELD_READ_SRC = """
+enum Ev:
+    Action(name: text)
+    MouseEvent(x: f64, button: text)
+
+fn button(id: text, label_text: text) -> text:
+    id + label_text
+
+class Owner:
+    title: text
+
+    me build() -> text:
+        val e = Ev.MouseEvent(x: 1.5, button: "left")
+        val picked = match e:
+            case Ev.MouseEvent(x, b): b
+            case _: ""
+        button(picked, self.title)
+"""
+
+describe "free-function call origin inside a class method":
+    it "is proven Source when an enum payload field shares the function's name":
+        val mir = lower_function(PAYLOAD_FIELD_NAMED_LIKE_FN_SRC, "build")
+        expect(mir.contains("MIR_ERROR:")).to_be(false)
+        expect(mir.contains("HIR_ERROR:")).to_be(false)
+        expect(mir).to_contain("method_scope_call_origin_build.button")
+        expect(mir.contains("\"call_origin\":\"unknown\"")).to_be(false)
+
+    it "is proven Source when no payload field collides":
+        val mir = lower_function(PAYLOAD_FIELD_DISTINCT_SRC, "build")
+        expect(mir.contains("MIR_ERROR:")).to_be(false)
+        expect(mir).to_contain("method_scope_call_origin_build.button")
+        expect(mir).to_contain("\"call_origin\":\"source\"")
+        expect(mir.contains("\"call_origin\":\"unknown\"")).to_be(false)
+
+    it "keeps named payload construction and positional destructure working":
+        val mir = lower_function(PAYLOAD_FIELD_READ_SRC, "build")
+        expect(mir.contains("MIR_ERROR:")).to_be(false)
+        expect(mir.contains("HIR_ERROR:")).to_be(false)
+        expect(mir).to_contain("method_scope_call_origin_build.button")
+        expect(mir).to_contain("\"call_origin\":\"source\"")
+        expect(mir.contains("\"call_origin\":\"unknown\"")).to_be(false)

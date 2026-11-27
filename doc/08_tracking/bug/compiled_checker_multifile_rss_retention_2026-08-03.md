@@ -1,7 +1,8 @@
 # Compiled checker per-file transient ownership
 
 - **Id:** `compiled_checker_multifile_rss_retention_2026-08-03`
-- **Status:** fixed for non-string transient parser objects; residual
+- **Status:** fixed for non-string transient parser objects (re-verified
+  2026-11-25 by source inspection — see note at bottom); residual
   process-persistent strings remain tracked separately as
   `compiled_checker_transient_string_retention_2026-08-03`
 - **Severity:** P1
@@ -76,3 +77,25 @@ therefore dominate the remaining slope even after non-string transient objects
 are reclaimed. Fixing string ownership safely is a runtime-wide lifetime change,
 not a checker-only cleanup, and is intentionally outside this pure-Simple lane.
 It remains open under `compiled_checker_transient_string_retention_2026-08-03`.
+
+## Re-verification 2026-11-25 (source inspection; spec run environment-blocked)
+
+Inspected at `release/1.0.0` tip `47d6c5eddd5`: the per-file transient
+lifecycle is present and converges every outcome on one cleanup path, with
+the documented load-bearing teardown order — `checker_begin_file_scope`
+(`src/app/check/main.spl:264`) runs `reset_all_pools()` + `ast_reset()`
+*before* `rt_transient_array_scope_begin()`, and `checker_end_file_scope`
+(`main.spl:272`) runs `rt_transient_array_scope_end()` →
+`lexer_release_parse_source_globals()` → `ast_reset()` only after the scope
+has ended, failing closed (poison flag) on begin/end failure. Regression
+spec `test/01_unit/app/check/check_multifile_transient_scope_spec.spl` is
+present with its examples intact.
+
+Limit: the spec could not be re-executed on this Windows host — the tracked
+`bin/simple.exe` (seed, last refreshed 2026-11-17 in `41dbae93225`) cannot
+compile the current test-runner/lib source at any recent tree (fails first
+on `@representation_boundary` at tip `cfd89933699`, and on unrelated
+private-visibility errors at both `cfd89933699^` and its own commit
+`41dbae93225`); fleet lanes that executed specs today used a locally
+rebuilt seed, which this lane is not permitted to build. Verification here
+is by code inspection only.

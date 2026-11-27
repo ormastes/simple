@@ -325,7 +325,8 @@ pub fn peak() -> usize {
     PEAK_BYTES.load(Ordering::Relaxed)
 }
 
-/// Resident set size in bytes, read from `/proc/self/statm` (Linux only).
+/// Resident set size in bytes: `/proc/self/statm` on Linux, the working set
+/// from `GetProcessMemoryInfo` on Windows, `0` elsewhere.
 pub fn rss_bytes() -> usize {
     #[cfg(target_os = "linux")]
     {
@@ -337,12 +338,94 @@ pub fn rss_bytes() -> usize {
             }
         }
     }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        // SAFETY: GetCurrentProcess is a pseudo-handle; `counters` is a valid,
+        // correctly sized out-buffer for the size passed.
+        if unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) } != 0 {
+            return counters.WorkingSetSize;
+        }
+    }
     0
 }
 
 // ---------------------------------------------------------------------------
 // Reporting gate
 // ---------------------------------------------------------------------------
+
+/// Hand the calling thread's freed heap pages back to the OS.
+///
+/// mimalloc parks a block freed by ANOTHER thread on the owning thread's page
+/// until that thread next allocates from it; a thread that goes idle keeps
+/// every such page resident. `native-build`'s parallel parse allocates each
+/// closure AST on a rayon worker and the builder thread frees them all —
+/// measured 2026-11-07 (Windows, 1598-module closure): tracked live heap
+/// 67 MB vs 1.1 GB resident right after `build_import_map` returned. Call
+/// this on each worker (`rayon::broadcast`) and on the freeing thread.
+/// A no-op under the `System` allocator.
+pub fn release_thread_heap() {
+    #[cfg(feature = "alloc-mimalloc")]
+    {
+        // The binding lives behind libmimalloc-sys's `extended` feature, whose
+        // `cty` dependency is not in the vendored registry; the symbol itself
+        // is always in the static library that crate links. The `use` keeps
+        // the crate (and its bundled library) on this crate's link line.
+        use libmimalloc_sys as _;
+        extern "C" {
+            fn mi_collect(force: bool);
+        }
+        // SAFETY: `mi_collect` only walks the calling thread's own heap and
+        // takes no pointers; it is safe to call from any thread at any time.
+        unsafe {
+            mi_collect(true);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "alloc-mimalloc", any(target_os = "linux", windows)))]
+mod cross_thread_free_tests {
+    use super::{release_thread_heap, rss_bytes};
+    use rayon::prelude::*;
+
+    // `#[global_allocator]` is per binary and the lib test binary has no
+    // driver, so install the production allocator here (cfg(test) only).
+    #[global_allocator]
+    static GLOBAL: super::TrackingAlloc<mimalloc::MiMalloc> = super::TrackingAlloc::new(mimalloc::MiMalloc);
+
+    const BLOCKS: usize = 64 * 1024;
+    const BLOCK: usize = 4096; // 256 MiB of small blocks, the AST shape
+
+    /// Replays the native-build shape: many small blocks allocated on pool
+    /// threads and all freed on the caller. The bound is that
+    /// `release_thread_heap` on every pool thread plus the caller hands at
+    /// least half of the freed bytes back to the OS.
+    #[test]
+    fn pool_allocated_blocks_freed_on_caller_leave_rss_after_release() {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let before = rss_bytes();
+        assert!(before > 0, "rss_bytes must be measurable on this platform");
+        let blocks: Vec<Vec<u8>> = pool.install(|| {
+            (0..BLOCKS).into_par_iter().map(|i| vec![((i & 0x7f) as u8) | 1; BLOCK]).collect()
+        });
+        let held = rss_bytes();
+        let total = BLOCKS * BLOCK;
+        assert!(held >= before + total / 2, "blocks not resident: before={before} held={held}");
+        drop(blocks);
+        let after_drop = rss_bytes();
+        pool.broadcast(|_| release_thread_heap());
+        release_thread_heap();
+        let after_release = rss_bytes();
+        eprintln!("rss before={before} held={held} after_drop={after_drop} after_release={after_release}");
+        assert!(
+            after_release + total / 2 <= held,
+            "release returned too little: held={held} after_drop={after_drop} after_release={after_release}"
+        );
+    }
+}
 
 /// True when `SIMPLE_MEM_TRACE=1` (or `true`).
 pub fn enabled() -> bool {

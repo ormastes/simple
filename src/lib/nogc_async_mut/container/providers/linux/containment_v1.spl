@@ -1,0 +1,68 @@
+# Association of exact provider observations with a retained native snapshot.
+# EmptySnapshot is not teardown evidence and never authorizes capacity release.
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeOperationV1}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2}
+use std.common.contracts.container.execution_evidence_v2.{container_runtime_query_digest_v2, container_runtime_observation_digest_v2}
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_sync_mut.io.linux_container_containment_v1.{LinuxContainerContainmentOwnerV1,
+    LinuxContainerContainmentSnapshotV1, linux_container_containment_close_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct LinuxOciContainmentFactsV1:
+    scope: ContainerHostScopeV2
+    runtime: RuntimeIdentityV1
+    request_digest: text
+    provider_identity_digest: text
+    profile_digest: text
+    containment_identity_digest: text
+    binding_digest: text
+    before: RuntimeOperationV1
+    after: RuntimeOperationV1
+
+pub enum LinuxOciContainmentOutcomeV1:
+    Associated(facts: LinuxOciContainmentFactsV1, native: LinuxContainerContainmentOwnerV1,
+        snapshot: LinuxContainerContainmentSnapshotV1)
+    CleanupRequired(native: LinuxContainerContainmentOwnerV1, reason: text)
+    Rejected(reason: text)
+
+pub fn linux_oci_containment_binding_v1(scope: ContainerHostScopeV2, request: LinuxOciRequestV1,
+        expected: RuntimeIdentityV1, cli_pin: text, containment_pin: text,
+        before: RuntimeOperationV1, pid: i64, cgroup_path: text) -> Result<text, text>:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-oci-containment-association-v1"),
+        "scope": SdnValue.String(container_host_scope_bytes_v2(scope)?),
+        "requestDigest": SdnValue.String(linux_oci_request_digest_v1(request)?),
+        "profileDigest": SdnValue.String(request.containment_profile_digest),
+        "nativeId": SdnValue.String(expected.native_id), "operation": SdnValue.String(expected.operation_id),
+        "podUid": SdnValue.String(expected.pod_uid), "attempt": SdnValue.Int(expected.attempt),
+        "providerGeneration": SdnValue.Int(expected.provider_generation), "scopeFence": SdnValue.String(expected.node_boot_id),
+        "engine": SdnValue.String(expected.engine), "providerIdentity": SdnValue.String(cli_pin),
+        "containmentIdentity": SdnValue.String(containment_pin), "pid": SdnValue.Int(pid),
+        "cgroupPath": SdnValue.String(cgroup_path),
+        "queryDigest": SdnValue.String(container_runtime_query_digest_v2(before.command)?),
+        "evidenceDigest": SdnValue.String(container_runtime_observation_digest_v2(before)?)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
+
+pub fn linux_oci_containment_reject_owned_v1(native: LinuxContainerContainmentOwnerV1,
+        reason: text) -> LinuxOciContainmentOutcomeV1:
+    val closed = linux_container_containment_close_v1(native)
+    if closed.owner.?:
+        return LinuxOciContainmentOutcomeV1.CleanupRequired(closed.owner.unwrap(), reason + "; " + closed.error)
+    if not closed.closed:
+        return LinuxOciContainmentOutcomeV1.CleanupRequired(native, reason + "; containment-close-unconfirmed")
+    LinuxOciContainmentOutcomeV1.Rejected(if closed.error == "": reason else: reason + "; " + closed.error)
+
+# The time and population may change; the pinned subject and association may not.
+pub fn linux_oci_containment_same_subject_v1(left: LinuxContainerContainmentSnapshotV1,
+        right: LinuxContainerContainmentSnapshotV1) -> bool:
+    left.binding_digest == right.binding_digest and left.capture_pid == right.capture_pid and
+        left.process_start_ticks == right.process_start_ticks and left.cgroup_path == right.cgroup_path and
+        left.cgroup_mount_id == right.cgroup_mount_id and left.cgroup_mount_device == right.cgroup_mount_device and
+        left.cgroup_mount_inode == right.cgroup_mount_inode and left.cgroup_device == right.cgroup_device and
+        left.cgroup_inode == right.cgroup_inode and left.target_pidns_device == right.target_pidns_device and
+        left.target_pidns_inode == right.target_pidns_inode and left.target_cgroupns_device == right.target_cgroupns_device and
+        left.target_cgroupns_inode == right.target_cgroupns_inode and left.observer_pidns_device == right.observer_pidns_device and
+        left.observer_pidns_inode == right.observer_pidns_inode and left.observer_cgroupns_device == right.observer_cgroupns_device and
+        left.observer_cgroupns_inode == right.observer_cgroupns_inode and left.observer_mountns_device == right.observer_mountns_device and
+        left.observer_mountns_inode == right.observer_mountns_inode

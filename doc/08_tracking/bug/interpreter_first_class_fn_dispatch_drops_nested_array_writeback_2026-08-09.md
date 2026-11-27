@@ -1,6 +1,18 @@
 # Interpreter: two mutating `me` calls inside one first-class-function-dispatched invocation drop the first write
 
-Status: OPEN (P1)
+## Verification 2026-11-25 (release/1.0.0, Windows host)
+
+- **verified fixed**: the doc's verbatim repro (bare top-level
+  `dispatch(route_create)` / `dispatch(route_execute)` /
+  `direct_events_check()`, old-style `print` statement) run on the pinned
+  Rust seed (`bin/simple.exe` v1.0.0-rc.1, 38,403,072 bytes, Windows) under
+  `SIMPLE_EXECUTION_MODE=interpreter` prints `events_len=2` — both
+  `push_event` writes land; the filed symptom was `events_len=1`.
+- Status remains **CLOSED** (2026-09-13 closure confirmed on a second host
+  and binary); no code change needed.
+
+Status: CLOSED 2026-09-13 (not reproducible; re-verified 2026-11-25 on the
+Windows pinned seed — see top section). Original filing header kept below.
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 (compiler/interpreter internals, out of scope for the application-level task
 that found it).

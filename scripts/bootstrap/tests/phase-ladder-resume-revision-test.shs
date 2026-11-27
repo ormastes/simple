@@ -1,0 +1,100 @@
+#!/bin/sh
+# Fixture test: phase-ladder-resume.shs must reuse a handoff artifact only when
+# the revision that built it is the target commit, or an ancestor of it with no
+# change to compiler/runtime inputs since. Unknown revision => rebuild fresh.
+# Fake `gh` stands in for the GitHub API; no network, no compiler.
+set -u
+here=$(cd "$(dirname "$0")" && pwd)
+script="$here/../phase-ladder-resume.shs"
+[ -f "$script" ] || { echo "FAIL - missing $script" >&2; exit 2; }
+base=$(mktemp -d) || exit 2
+trap 'rm -rf "$base"' EXIT
+fail=0
+checked=0
+platform=linux-x86_64
+target=bbbbbbbb
+
+# scenario|expect(reuse|rebuild)
+run_case() {
+  scenario=$1 expect=$2
+  root="$base/$scenario"
+  mkdir -p "$root/bin" "$root/in"
+  cat > "$root/bin/gh" <<'GH'
+#!/bin/sh
+set -eu
+if [ "$1" = api ]; then
+  case "$*" in
+    *actions/artifacts*)
+      case "$*" in
+        *-r3*) if [ "$SCENARIO" = newest-stale-older-match ]; then printf '200\n123\n'; else echo 123; fi ;;
+      esac
+      exit 0 ;;
+    *actions/runs/200*) echo aaaaaaaa; exit 0 ;;
+    *actions/runs/*)
+      case "$SCENARIO" in
+        unknown) exit 0 ;;
+        match|newest-stale-older-match) echo bbbbbbbb ;;
+        *) echo aaaaaaaa ;;
+      esac
+      exit 0 ;;
+    *compare/*)
+      case "$SCENARIO" in
+        stale|newest-stale-older-match) case "$*" in *status*) echo ahead ;; *) printf 'doc/x.md\nsrc/compiler/30.hir/a.spl\n' ;; esac ;;
+        docs-only) case "$*" in *status*) echo ahead ;; *) printf 'doc/x.md\nsrc/app/other/y.spl\n' ;; esac ;;
+        lib-change) case "$*" in *status*) echo ahead ;; *) echo src/lib/common/z.spl ;; esac ;;
+        diverged) case "$*" in *status*) echo diverged ;; *) echo doc/x.md ;; esac ;;
+        behind) case "$*" in *status*) echo behind ;; *) echo doc/x.md ;; esac ;;
+        compare-error) echo 'service unavailable' >&2; exit 1 ;;
+        too-many-files) case "$*" in *status*) echo ahead ;; *) i=0; while [ "$i" -lt 300 ]; do echo "doc/f$i.md"; i=$((i+1)); done ;; esac ;;
+      esac
+      exit 0 ;;
+  esac
+  exit 0
+fi
+[ "$1:$2" = 'run:download' ]
+shift 3
+while [ "$#" -gt 0 ]; do case "$1" in -D) d=$2; shift 2 ;; *) shift ;; esac; done
+mkdir -p "$d/$PLATFORM-p3"
+echo 3 > "$d/$PLATFORM-p3/PHASE"
+echo 'fixture, not a compiler' > "$d/$PLATFORM-p3/simple"
+GH
+  chmod +x "$root/bin/gh"
+  (cd "$root" && PATH="$root/bin:$PATH" SCENARIO=$scenario PLATFORM=$platform \
+    GITHUB_REPOSITORY=fixture/repo GITHUB_REF_NAME=fixture-branch GITHUB_SHA=$target \
+    sh "$script" in $platform > out.log 2> err.log)
+  rc=$?
+  checked=$((checked + 1))
+  if [ -f "$root/in/$platform-p3/simple" ]; then got=reuse; else got=rebuild; fi
+  if [ "$got" != "$expect" ]; then
+    echo "FAIL $scenario: expected $expect, got $got (rc=$rc)" >&2
+    cat "$root/err.log" >&2
+    fail=$((fail + 1))
+  elif [ "$got" = rebuild ] && [ "$rc" -ne 0 ]; then
+    echo "FAIL $scenario: rebuild-fresh must be a clean cold start, rc=$rc" >&2
+    fail=$((fail + 1))
+  fi
+}
+
+run_case match reuse
+run_case docs-only reuse
+run_case newest-stale-older-match reuse
+run_case stale rebuild
+run_case lib-change rebuild
+run_case unknown rebuild
+run_case compare-error rebuild
+run_case diverged rebuild
+run_case behind rebuild
+run_case too-many-files rebuild
+
+# Empty target commit: nothing can be proven, nothing is reused.
+root="$base/no-target"; mkdir -p "$root/in"
+cp -R "$base/match/bin" "$root/bin"
+(cd "$root" && PATH="$root/bin:$PATH" SCENARIO=match PLATFORM=$platform \
+  GITHUB_REPOSITORY=fixture/repo GITHUB_REF_NAME=fixture-branch GITHUB_SHA= \
+  sh "$script" in $platform > out.log 2> err.log)
+checked=$((checked + 1))
+[ ! -f "$root/in/$platform-p3/simple" ] || { echo "FAIL no-target: reused with empty target" >&2; fail=$((fail + 1)); }
+
+if [ "$checked" -eq 0 ]; then echo "ERROR - nothing was checked"; exit 2; fi
+if [ "$fail" -ne 0 ]; then echo "FAIL - $checked scenario(s) checked, $fail failed"; exit 1; fi
+echo "PASS - $checked scenario(s) checked, stale/unknown revisions rebuild, matching reuse"

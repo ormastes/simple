@@ -92,3 +92,19 @@ CPU fallback. Traced tall-page run with the hardening armed:
   the empty readback means the CPU fallback surface never got the frame;
   that secondary gap (fallback surface not populated on the demotion path)
   is the next thing to fix if this lane matters on this host class.
+
+## 2026-11-27 W5-3 Fix (`fix-implemented-verification-pending`)
+
+- **Source (`src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl`, `src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl`)**:
+  - Added `_demote_to_cpu_fallback_host(reason)` and `_prepare_host_fallback_op(...)` to flush pending GPU compute if queued, sync `host_buf` from `d_framebuffer` cleanly via `_fallback_ensure_host_buf_synced() -> bool`, and transition `cpu_fallback_host_surface = true`, `host_mirror_valid = true`, `host_mirror_frame_fresh = true`, and `dirty = false` ONLY when synced without `completion_unknown` or readback errors (failing closed otherwise without forging freshness or delegating `completion_unknown` when `d_framebuffer > 0`).
+  - Wired clean mid-frame demotion + `cpu_fallback_host_surface` gating across `clear` (ordering `cpu_fallback_host_surface = true` before `_fallback_clear_host` after pending flush), `draw_rect`, `draw_rect_filled` (`_draw_rect_filled_impl` via `_demote_to_cpu_fallback_host`), `draw_line`, `draw_circle_filled`, `draw_triangle_filled`, `draw_gradient_rect`, `draw_image`, `_draw_image_blend_impl` (`_fallback_image_blend_host`), `draw_image_scaled`, `draw_image_scaled_blend`, `draw_image_blend_checked`, `draw_affine_rect_coverage`, `draw_ir_apply_glass_material_device`, `_draw_blur_rect_device`/`draw_blur_rect`, `_draw_shadow_rect_device`/`draw_shadow_rect`, `draw_css_group_restore_device`, `draw_gradient_layer_device`, `draw_rect_blend`, `draw_rect_blend_mode`, and font-atlas routes (`_bitmap_text_atlas_path`, `_bitmap_text_bg_atlas_path`, `composite_font_batch`, `_composite_font_batch_impl`) so mixed-frame ops preserve earlier host-demoted pixels and return `w * h` pixels from `read_pixels_with_source()` with `source == "cpu_fallback"`.
+  - Guarded `_fallback_sync_device_from_host()` against redundant per-rect full-surface device uploads once `cpu_fallback_host_surface` is active, checking `completion_unknown` and `vulkan_sffi_copy_to_buffer`, updating `present()` to handle clean `cpu_fallback_host_surface` frames (`dirty == false`) without noop/clobber, and syncing once in `_present_device()` if swapchain-presented.
+- **Host verification (`SIMPLE_LIB=src`, `--mode=interpreter` on Windows)**:
+  - `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_demotion_recovery_spec.spl`: 7/7 PASS (covers mid-frame demotion, mixed-frame composite/blur/shadow/glass/gradient/font preservation, dirty readback / `completion_unknown` fail-closed, `present()` clean host-surface handling, and `_present_device()` `-host-upload-failed`).
+  - `test/01_unit/lib/gpu/engine2d/vulkan_fallback_read_pixels_spec.spl`: 4/4 PASS.
+  - `test/01_unit/lib/gpu/engine2d/backend_vulkan_text_fallback_spec.spl`: 4/4 PASS.
+  - `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_drawing_spec.spl`: 44/44 PASS.
+  - `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_bitmap_text_atlas_spec.spl`: 6/6 PASS.
+  - `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_batch_and_clip_boundary_spec.spl`: 7/7 PASS.
+  - `test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_clear_and_damage_readback_spec.spl`: 7/7 PASS.
+- **Pending**: live Linux Vulkan / lavapipe full-page run (`waiting-for: Linux Vulkan / lavapipe verification`).

@@ -100,6 +100,12 @@ pub(crate) fn decompose_si_prefix_user(suffix: &str) -> Option<(f64, String, Str
     })
 }
 
+/// A file-declared unit suffix, or an SI prefix on a file-declared base unit
+/// (`unit length(base: f64): m = 1.0` then `5_km`): in library-unit scope.
+pub(crate) fn unit_suffix_declared_in_file(suffix: &str) -> bool {
+    USER_UNIT_SUFFIX_TO_FAMILY.with(|c| c.borrow().contains_key(suffix)) || decompose_si_prefix_user(suffix).is_some()
+}
+
 /// Check if a type name is a registered unit family or compound unit
 /// Returns true if the type name refers to a unit type that can be used for type checking
 pub(crate) fn is_unit_type(type_name: &str) -> bool {
@@ -659,10 +665,163 @@ pub(crate) fn register_unit_family_locals(uf: &simple_parser::ast::UnitFamilyDef
 
 /// Register a standalone `unit Name: T as sfx` declaration's suffix.
 pub(crate) fn register_standalone_unit_locals(u: &simple_parser::ast::UnitDef) {
+    if u.suffix.is_empty() {
+        return;
+    }
     UNIT_SUFFIX_TO_FAMILY.with(|cell| {
         cell.borrow_mut().insert(u.suffix.clone(), u.name.clone());
     });
     USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| {
         cell.borrow_mut().insert(u.suffix.clone(), u.name.clone());
     });
+}
+
+/// Suffix of a program-declared standalone `unit Name: T as sfx`, or `None`
+/// when `name` is not such a unit. Family units (several suffixes mapping to
+/// one family name) are not standalone and also yield `None`.
+pub(crate) fn standalone_unit_suffix(name: &str) -> Option<String> {
+    USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+        let map = cell.borrow();
+        let mut found: Option<String> = None;
+        for (sfx, fam) in map.iter() {
+            if fam == name {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(sfx.clone());
+            }
+        }
+        found
+    })
+}
+
+/// Build a standalone unit value from a primitive: `Name(raw)` / `raw as Name`.
+/// Produces the same `Value::Unit` a `raw_sfx` literal does. A value already of
+/// this unit passes through; any non-numeric value is a type error.
+/// Bug: unit_from_primitive_construction_unsupported_runtime_2026-11-15.
+pub(crate) fn construct_standalone_unit(name: &str, suffix: &str, val: Value) -> Result<Value, String> {
+    match val {
+        Value::Unit { ref family, .. } if family.as_deref() == Some(name) => Ok(val),
+        Value::Int(_) | Value::UInt { .. } | Value::Float(_) | Value::Float32(_) => Ok(Value::Unit {
+            value: Box::new(val),
+            suffix: suffix.to_string(),
+            family: Some(name.to_string()),
+        }),
+        other => Err(format!(
+            "type mismatch: cannot construct unit {} from {}",
+            name,
+            other.type_name()
+        )),
+    }
+}
+
+thread_local! {
+    /// Names of the synthesized one-field `value` record classes made by `unit Name: T`
+    /// and numeric `newtype`. Ordinary classes that merely have a single `value`
+    /// field (e.g. `ByteSize`, which has methods) are NOT in this set, so they never
+    /// auto-unwrap to a scalar or take part in unit arithmetic rules.
+    static RECORD_UNIT_CLASSES: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Record that `name` is a `unit`/numeric-`newtype` record class.
+pub(crate) fn register_record_unit_class(name: &str) {
+    RECORD_UNIT_CLASSES.with(|s| {
+        s.borrow_mut().insert(name.to_string());
+    });
+}
+
+/// True when `name` was registered by `register_record_unit_class`.
+pub(crate) fn is_record_unit_class(name: &str) -> bool {
+    RECORD_UNIT_CLASSES.with(|s| s.borrow().contains(name))
+}
+
+/// Canonical `unit Name: T [as suffix]` is also a constructible one-field
+/// record `Name { value: T }` (same lowering as numeric `newtype`). Multi-base
+/// (`str | u32`) wrappers are literal-suffix only and yield `None`.
+pub(crate) fn unit_constructor_class(u: &simple_parser::ast::UnitDef) -> Option<simple_parser::ast::ClassDef> {
+    use simple_parser::ast::{ClassDef, Field, Mutability, Visibility};
+    if u.base_types.len() != 1 {
+        return None;
+    }
+    let field = Field {
+        span: u.span,
+        name: "value".to_string(),
+        ty: u.base_types[0].clone(),
+        default: None,
+        mutability: Mutability::Immutable,
+        visibility: Visibility::Public,
+        bit_width: None,
+    };
+    Some(ClassDef {
+        span: u.span,
+        name: u.name.clone(),
+        generic_params: Vec::new(),
+        where_clause: vec![],
+        fields: vec![field],
+        methods: vec![],
+        parent: None,
+        visibility: u.visibility,
+        effects: Vec::new(),
+        attributes: Vec::new(),
+        doc_comment: None,
+        invariant: None,
+        macro_invocations: vec![],
+        mixins: vec![],
+        is_generic_template: false,
+        specialization_of: None,
+        type_bindings: HashMap::new(),
+        is_value_type: false,
+    })
+}
+
+#[cfg(test)]
+mod standalone_unit_ctor_tests {
+    use super::*;
+
+    fn declare(name: &str, suffix: &str) {
+        USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+            cell.borrow_mut().insert(suffix.to_string(), name.to_string());
+        });
+    }
+
+    #[test]
+    fn standalone_unit_wraps_int_and_float() {
+        declare("FreeBytesT", "fbytes_t");
+        declare("RatioT", "ratio_t");
+        let sfx = standalone_unit_suffix("FreeBytesT").expect("registered");
+        match construct_standalone_unit("FreeBytesT", &sfx, Value::Int(5)).unwrap() {
+            Value::Unit { value, suffix, family } => {
+                assert!(matches!(*value, Value::Int(5)));
+                assert_eq!(suffix, "fbytes_t");
+                assert_eq!(family.as_deref(), Some("FreeBytesT"));
+            }
+            other => panic!("expected unit, got {}", other.type_name()),
+        }
+        let r = standalone_unit_suffix("RatioT").unwrap();
+        assert!(matches!(construct_standalone_unit("RatioT", &r, Value::Float(0.5)), Ok(Value::Unit { .. })));
+    }
+
+    #[test]
+    fn non_unit_name_is_not_a_standalone_unit() {
+        assert!(standalone_unit_suffix("NotAUnitName").is_none());
+    }
+
+    #[test]
+    fn non_numeric_raw_is_rejected() {
+        declare("FreeBytesR", "fbytes_r");
+        let err = construct_standalone_unit("FreeBytesR", "fbytes_r", Value::text("x")).unwrap_err();
+        assert!(err.contains("cannot construct unit FreeBytesR"), "{err}");
+    }
+
+    #[test]
+    fn si_prefix_on_file_declared_base_counts_as_declared() {
+        USER_SI_BASE_UNITS.with(|c| c.borrow_mut().insert("m".to_string(), "length".to_string()));
+        assert!(unit_suffix_declared_in_file("km"));
+        assert!(unit_suffix_declared_in_file("mm"));
+        assert!(!unit_suffix_declared_in_file("kmph_not_declared"));
+        crate::units::scope::unit_scope_reset();
+        assert_eq!(crate::units::scope::unit_suffix_scope_error("km", unit_suffix_declared_in_file("km")), None);
+        USER_SI_BASE_UNITS.with(|c| c.borrow_mut().remove("m"));
+    }
 }

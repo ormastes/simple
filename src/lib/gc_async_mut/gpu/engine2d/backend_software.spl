@@ -12,9 +12,9 @@
 # Usage:
 #   use std.gpu.engine2d.backend_software.{SoftwareBackend}
 
-use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_identity, ReadbackSource, readback_source_label}
+use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_identity, engine2d_readback_rows, ReadbackSource, readback_source_label}
 use std.gc_async_mut.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_software}
-use std.gpu.engine2d.color.{color_a, color_r, color_g, color_b, rgba, blend}
+use std.gpu.engine2d.color.{color_a, color_r, color_g, color_b, rgba, blend, blend_solid}
 use std.gpu.engine2d.backend_emu_math.{_emu_overlay_ch}
 use std.gpu.engine2d.helpers_text.{text_metrics, text_aa_blit_buffer}
 use common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
@@ -24,18 +24,18 @@ use common.gpu.engine2d.kernel_registry.{
     CpuKernelTable, SpanOpBatch,
     kernel_table_new, kernel_table_register, kernel_table_seal,
     span_batch_new, span_batch_push,
-    KERNEL_OP_FILL_CONST, KERNEL_OP_SRC_OVER_CONST, KERNEL_OP_SRC_OVER_IMAGE, KERNEL_OP_MASK_SRC_OVER,
+    KERNEL_OP_FILL_CONST, KERNEL_OP_COPY_SPAN, KERNEL_OP_SRC_OVER_CONST, KERNEL_OP_SRC_OVER_IMAGE, KERNEL_OP_MASK_SRC_OVER,
     KERNEL_FORMAT_ARGB8888_STRAIGHT,
     KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS,
     KERNEL_BUCKET_TINY, KERNEL_BUCKET_SMALL, KERNEL_BUCKET_MEDIUM, KERNEL_BUCKET_LARGE,
     KERNEL_PROVIDER_SIMD_ISA,
 }
 use std.nogc_sync_mut.gpu.engine2d.simd_isa_provider.{
-    simd_span_batch_execute, simd_isa_fill_const,
+    simd_span_batch_execute, simd_isa_fill_const, simd_isa_copy_span,
     simd_isa_src_over_const, simd_isa_src_over_image, simd_isa_mask_src_over,
 }
 use common.gpu.engine2d.scalar_oracle.{
-    oracle_fill_const, oracle_src_over_const, oracle_src_over_image, oracle_mask_src_over,
+    oracle_fill_const, oracle_copy_span, oracle_src_over_const, oracle_src_over_image, oracle_mask_src_over,
 }
 use std.gc_async_mut.gpu.engine2d_host_clock.{time_now_unix_micros}
 use std.gpu.engine2d.backend_emu.{
@@ -57,7 +57,8 @@ use std.gpu.engine2d.backend_emu.{
 # Constants
 # ============================================================================
 
-val TILE_SIZE: i32 = 64     # Tile width/height in pixels (fits in L1 cache)
+pub val TILE_SIZE: i32 = 64     # Tile width/height in pixels (fits in L1 cache)
+val SW_FILL_CONTIGUOUS_CHUNK_PIXELS: i32 = 262144   # 1 MiB scratch cap (262,144 * 4 B)
 
 # ============================================================================
 # Honest per-bucket kernel-table timing probe (fill_const)
@@ -83,26 +84,43 @@ val TILE_SIZE: i32 = 64     # Tile width/height in pixels (fits in L1 cache)
 val KERNEL_PROBE_FASTER: i64 = 1   # bit 0: SIMD measured faster than scalar
 val KERNEL_PROBE_EXACT: i64 = 2    # bit 1: SIMD output bit-exact vs the oracle
 
+var _session_kernel_slots: [i64] = []
+var _session_kernel_registrations: i64 = 0
+var _session_kernel_rejections: i64 = 0
+var _session_kernel_ready: bool = false
+
+# Each probe times the scalar oracle until it has run `iters` reps or this
+# window has passed, then times the SIMD kernel for the same rep count; both
+# loops read the clock once per rep, so the comparison stays fair. Under the
+# interpreter the scalar oracles are slow, and the fixed rep counts made the
+# 16 probes cost ~1.6 s on the first clear of every process (every web page
+# render); compiled code finishes the reps well inside the window. The blend
+# probes count their bit-exact pre-pass as the first rep of each side.
+val KERNEL_PROBE_WINDOW_US: i64 = 2000
+
 fn _kernel_probe_fill_bucket(n: i64, iters: i64) -> i64:
     """Measure scalar vs SIMD-ISA fill_const at `n` pixels x `iters` reps and
     return the KERNEL_PROBE_* verdict bitmask. fill_const is a verbatim store,
     bit-exact by construction, so KERNEL_PROBE_EXACT is always set."""
     var probe: [u32] = [0; n.to_i32()]
     val t0 = time_now_unix_micros()
+    var clock0 = t0
     var i0: i64 = 0
-    while i0 < iters:
+    while i0 < iters and clock0 - t0 < KERNEL_PROBE_WINDOW_US:
         _scalar_fill_row(probe, 0, n, 0xFF102030u32)
         i0 = i0 + 1
-    val t1 = time_now_unix_micros()
-    val scalar_us = t1 - t0
+        clock0 = time_now_unix_micros()
+    val scalar_us = clock0 - t0
     # Measure the actual SIMD-ISA fill_const kernel (the same function
     # simd_span_batch_execute calls when a slot resolves to SIMD_ISA).
-    val t2 = time_now_unix_micros()
-    var i2: i64 = 0
-    while i2 < iters:
+    val t1 = time_now_unix_micros()
+    var clock1 = t1
+    var i1: i64 = 0
+    while i1 < i0:
         simd_isa_fill_const(probe, 0, n, 0xFF102030)
-        i2 = i2 + 1
-    val simd_us = time_now_unix_micros() - t2
+        i1 = i1 + 1
+        clock1 = time_now_unix_micros()
+    val simd_us = clock1 - t1
     var verdict: i64 = KERNEL_PROBE_EXACT
     if simd_us < scalar_us:
         verdict = verdict + KERNEL_PROBE_FASTER
@@ -126,8 +144,12 @@ fn _kernel_probe_src_over_const_bucket(n: i64, iters: i64) -> i64:
     var simd_buf: [u32] = [0; n.to_i32()]
     oracle_fill_const(oracle_buf, 0, n, 0xFF404040)
     oracle_fill_const(simd_buf, 0, n, 0xFF404040)
+    # The bit-exact pre-pass is also the first timed rep of each side.
+    val tp0 = time_now_unix_micros()
     oracle_src_over_const(oracle_buf, 0, n, colour)
+    val tp1 = time_now_unix_micros()
     simd_isa_src_over_const(simd_buf, 0, n, colour)
+    val tp2 = time_now_unix_micros()
     var exact = true
     var k: i64 = 0
     while k < n:
@@ -135,17 +157,21 @@ fn _kernel_probe_src_over_const_bucket(n: i64, iters: i64) -> i64:
             exact = false
         k = k + 1
     val t0 = time_now_unix_micros()
-    var i0: i64 = 0
-    while i0 < iters:
+    var clock0 = t0
+    var i0: i64 = 1
+    while i0 < iters and (tp1 - tp0) + (clock0 - t0) < KERNEL_PROBE_WINDOW_US:
         oracle_src_over_const(oracle_buf, 0, n, colour)
         i0 = i0 + 1
-    val scalar_us = time_now_unix_micros() - t0
+        clock0 = time_now_unix_micros()
+    val scalar_us = (tp1 - tp0) + (clock0 - t0)
     val t1 = time_now_unix_micros()
-    var i1: i64 = 0
-    while i1 < iters:
+    var clock1 = t1
+    var i1: i64 = 1
+    while i1 < i0:
         simd_isa_src_over_const(simd_buf, 0, n, colour)
         i1 = i1 + 1
-    val simd_us = time_now_unix_micros() - t1
+        clock1 = time_now_unix_micros()
+    val simd_us = (tp2 - tp1) + (clock1 - t1)
     var verdict: i64 = 0
     if exact:
         verdict = verdict + KERNEL_PROBE_EXACT
@@ -163,8 +189,12 @@ fn _kernel_probe_src_over_image_bucket(n: i64, iters: i64) -> i64:
     var simd_buf: [u32] = [0; n.to_i32()]
     oracle_fill_const(oracle_buf, 0, n, 0xFF404040)
     oracle_fill_const(simd_buf, 0, n, 0xFF404040)
+    # The bit-exact pre-pass is also the first timed rep of each side.
+    val tp0 = time_now_unix_micros()
     oracle_src_over_image(oracle_buf, 0, src, 0, n)
+    val tp1 = time_now_unix_micros()
     simd_isa_src_over_image(simd_buf, 0, src, 0, n)
+    val tp2 = time_now_unix_micros()
     var exact = true
     var k: i64 = 0
     while k < n:
@@ -172,17 +202,64 @@ fn _kernel_probe_src_over_image_bucket(n: i64, iters: i64) -> i64:
             exact = false
         k = k + 1
     val t0 = time_now_unix_micros()
-    var i0: i64 = 0
-    while i0 < iters:
+    var clock0 = t0
+    var i0: i64 = 1
+    while i0 < iters and (tp1 - tp0) + (clock0 - t0) < KERNEL_PROBE_WINDOW_US:
         oracle_src_over_image(oracle_buf, 0, src, 0, n)
         i0 = i0 + 1
-    val scalar_us = time_now_unix_micros() - t0
+        clock0 = time_now_unix_micros()
+    val scalar_us = (tp1 - tp0) + (clock0 - t0)
     val t1 = time_now_unix_micros()
-    var i1: i64 = 0
-    while i1 < iters:
+    var clock1 = t1
+    var i1: i64 = 1
+    while i1 < i0:
         simd_isa_src_over_image(simd_buf, 0, src, 0, n)
         i1 = i1 + 1
-    val simd_us = time_now_unix_micros() - t1
+        clock1 = time_now_unix_micros()
+    val simd_us = (tp2 - tp1) + (clock1 - t1)
+    var verdict: i64 = 0
+    if exact:
+        verdict = verdict + KERNEL_PROBE_EXACT
+    if simd_us < scalar_us:
+        verdict = verdict + KERNEL_PROBE_FASTER
+    verdict
+
+fn _kernel_probe_copy_bucket(n: i64, iters: i64) -> i64:
+    """Measure oracle_copy_span vs simd_isa_copy_span at `n` pixels x `iters`
+    reps (same honest gate shape as the image probe, including the bit-exact
+    pre-pass counted as the first rep of each side). Returns the
+    KERNEL_PROBE_* verdict bitmask."""
+    var src: [u32] = [0; n.to_i32()]
+    oracle_fill_const(src, 0, n, 0x9033AA55)
+    var oracle_buf: [u32] = [0; n.to_i32()]
+    var simd_buf: [u32] = [0; n.to_i32()]
+    val tp0 = time_now_unix_micros()
+    oracle_copy_span(oracle_buf, 0, src, 0, n)
+    val tp1 = time_now_unix_micros()
+    simd_isa_copy_span(simd_buf, 0, src, 0, n)
+    val tp2 = time_now_unix_micros()
+    var exact = true
+    var k: i64 = 0
+    while k < n:
+        if oracle_buf[k.to_i32()] != simd_buf[k.to_i32()]:
+            exact = false
+        k = k + 1
+    val t0 = time_now_unix_micros()
+    var clock0 = t0
+    var i0: i64 = 1
+    while i0 < iters and (tp1 - tp0) + (clock0 - t0) < KERNEL_PROBE_WINDOW_US:
+        oracle_copy_span(oracle_buf, 0, src, 0, n)
+        i0 = i0 + 1
+        clock0 = time_now_unix_micros()
+    val scalar_us = (tp1 - tp0) + (clock0 - t0)
+    val t1 = time_now_unix_micros()
+    var clock1 = t1
+    var i1: i64 = 1
+    while i1 < i0:
+        simd_isa_copy_span(simd_buf, 0, src, 0, n)
+        i1 = i1 + 1
+        clock1 = time_now_unix_micros()
+    val simd_us = (tp2 - tp1) + (clock1 - t1)
     var verdict: i64 = 0
     if exact:
         verdict = verdict + KERNEL_PROBE_EXACT
@@ -206,8 +283,12 @@ fn _kernel_probe_mask_src_over_bucket(n: i64, iters: i64) -> i64:
     var simd_buf: [u32] = [0; n.to_i32()]
     oracle_fill_const(oracle_buf, 0, n, 0xFF404040)
     oracle_fill_const(simd_buf, 0, n, 0xFF404040)
+    # The bit-exact pre-pass is also the first timed rep of each side.
+    val tp0 = time_now_unix_micros()
     oracle_mask_src_over(oracle_buf, 0, colour, mask, 0, n)
+    val tp1 = time_now_unix_micros()
     simd_isa_mask_src_over(simd_buf, 0, colour, mask, 0, n)
+    val tp2 = time_now_unix_micros()
     var exact = true
     var k: i64 = 0
     while k < n:
@@ -215,17 +296,21 @@ fn _kernel_probe_mask_src_over_bucket(n: i64, iters: i64) -> i64:
             exact = false
         k = k + 1
     val t0 = time_now_unix_micros()
-    var i0: i64 = 0
-    while i0 < iters:
+    var clock0 = t0
+    var i0: i64 = 1
+    while i0 < iters and (tp1 - tp0) + (clock0 - t0) < KERNEL_PROBE_WINDOW_US:
         oracle_mask_src_over(oracle_buf, 0, colour, mask, 0, n)
         i0 = i0 + 1
-    val scalar_us = time_now_unix_micros() - t0
+        clock0 = time_now_unix_micros()
+    val scalar_us = (tp1 - tp0) + (clock0 - t0)
     val t1 = time_now_unix_micros()
-    var i1: i64 = 0
-    while i1 < iters:
+    var clock1 = t1
+    var i1: i64 = 1
+    while i1 < i0:
         simd_isa_mask_src_over(simd_buf, 0, colour, mask, 0, n)
         i1 = i1 + 1
-    val simd_us = time_now_unix_micros() - t1
+        clock1 = time_now_unix_micros()
+    val simd_us = (tp2 - tp1) + (clock1 - t1)
     var verdict: i64 = 0
     if exact:
         verdict = verdict + KERNEL_PROBE_EXACT
@@ -283,6 +368,10 @@ class SoftwareBackend:
     kernel_table: CpuKernelTable   # per-op provider table for simd_span_batch_execute
     kernel_table_ready: bool       # true once the honest timing gate has run and sealed the table
     simd_batch_hits: i64           # observable: ops the batch dispatcher actually routed to SIMD_ISA
+    # Last kernel-filled opaque span ([colour; count]) and the batch's
+    # non-scalar lookup count for it; see sw_fill_rect_rows.
+    _fill_memo_span: [u32]
+    _fill_memo_lookups: i64
 
     static fn create() -> SoftwareBackend:
         """Create an uninitialized software backend."""
@@ -307,7 +396,9 @@ class SoftwareBackend:
             mirror_valid: false,
             kernel_table: kernel_table_new(),
             kernel_table_ready: false,
-            simd_batch_hits: 0
+            simd_batch_hits: 0,
+            _fill_memo_span: [],
+            _fill_memo_lookups: 0
         )
 
     static fn create_cpu_simd() -> SoftwareBackend:
@@ -327,7 +418,12 @@ impl RenderBackend for SoftwareBackend:
         self.w = width
         self.h = height
         val total = width * height
-        self.buf = [0; total]
+        # Allocate already filled with the caller's initial color. init()
+        # passes opaque black; create_offscreen() passes transparent. This
+        # used to be `[0; total]` plus a per-pixel store loop, which the
+        # interpreter lane paid ~180 ms for on every 640x480 engine create
+        # (interpreted_engine2d_full_res_render_slow_2026-07-02.md).
+        self.buf = [initial_color; total]
 
         # Initialize tile tracking
         self.tiles_x = (width + TILE_SIZE - 1) / TILE_SIZE
@@ -338,14 +434,6 @@ impl RenderBackend for SoftwareBackend:
         # all-false here left an empty damage set over a fully written buffer,
         # which ships stale pixels to any damage-driven consumer on frame 1.
         self.dirty_tiles = [true; tile_count]
-
-        # Fill with the caller's initial color in one pass. init() passes
-        # opaque black; create_offscreen() passes transparent, which used to
-        # pay a second full-surface clear() immediately after this fill.
-        var i = 0
-        while i < total:
-            self.buf[i] = initial_color
-            i = i + 1
 
         self.clip_x = 0
         self.clip_y = 0
@@ -368,11 +456,8 @@ impl RenderBackend for SoftwareBackend:
         self.initialized = false
 
     me clear(color: u32):
-        var row = 0
-        # cpu-lane-loop-ok: framebuffer clear walks one scanline per row and delegates each row to sw_fill_raw_span; the per-row bulk fill is already the bulk idiom, a whole-buffer memset is blocked on N5
-        while row < self.h:
-            self.sw_fill_raw_span(row * self.w, self.w, color)
-            row = row + 1
+        if self.w > 0 and self.h > 0:
+            self.sw_fill_contiguous_range(0, self.w * self.h, color)
         val dirty_count = self.dirty_tiles.len()
         var dirty = 0
         while dirty < dirty_count:
@@ -393,14 +478,40 @@ impl RenderBackend for SoftwareBackend:
         emu_draw_rect(self, x, y, w, h, color)
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
-        val has_alpha = color_a(color) < 255
+        # color_a(color) < 255 without the cross-module call (~4 us a fill).
+        val has_alpha = color < 0xFF000000u32
         val row_end = y + h
         val clip_y_end = self.clip_y + self.clip_h
         val clip_x_end = self.clip_x + self.clip_w
         val mask_active = self.mask_buf.len() > 0
         if has_alpha:
-            var alpha_row = y
-            while alpha_row < row_end:
+            # Only rows inside the surface and the clip can blend (sw_hline_blend
+            # is a no-op elsewhere), so a box taller than the frame walks only
+            # its in-frame rows.
+            var alpha_row = if y > 0: y else: 0
+            var alpha_end = if row_end < self.h: row_end else: self.h
+            if self.clip_enabled:
+                if alpha_row < self.clip_y:
+                    alpha_row = self.clip_y
+                if alpha_end > clip_y_end:
+                    alpha_end = clip_y_end
+            if not mask_active and self.native_simd_spans and native_pixel_rows_enabled():
+                # The x clip _clip_span applies to every row, done once.
+                if w <= 0 or alpha_end <= alpha_row:
+                    return
+                var blend_x = if x > 0: x else: 0
+                var blend_end = if x + w < self.w: x + w else: self.w
+                if self.clip_enabled:
+                    if blend_x < self.clip_x:
+                        blend_x = self.clip_x
+                    if blend_end > clip_x_end:
+                        blend_end = clip_x_end
+                if blend_end <= blend_x:
+                    return
+                self._sw_blend_const_rect_rows(blend_x, alpha_row, alpha_end, blend_end - blend_x, color)
+                return
+            # cpu-lane-loop-ok: one blended span per in-frame row
+            while alpha_row < alpha_end:
                 self.sw_hline_blend(x, alpha_row, w, color)
                 alpha_row = alpha_row + 1
             return
@@ -427,17 +538,26 @@ impl RenderBackend for SoftwareBackend:
                 end_y = clip_y_end
         if end_x <= start_x or end_y <= start_y:
             return
+        if not mask_active and start_x == 0 and end_x == self.w:
+            self.sw_fill_contiguous_range(start_y * self.w, (end_y - start_y) * self.w, color)
+            val ty0 = start_y / TILE_SIZE
+            val ty1 = (end_y - 1) / TILE_SIZE
+            var ty = ty0
+            # cpu-lane-loop-ok: marks each touched tile row dirty once for full-width contiguous fill; bounded by tiles_y, not scanlines
+            while ty <= ty1:
+                self.mark_span_dirty(0, ty * TILE_SIZE, self.w)
+                ty = ty + 1
+            return
+        if not mask_active:
+            self.sw_fill_rect_rows(start_x, start_y, end_y, end_x - start_x, color)
+            return
         var row = start_y
+        # cpu-lane-loop-ok: masked slow path only: the mask test is a per-pixel predicate
         while row < end_y:
             var col = start_x
-            if mask_active:
-                while col < end_x:
-                    self.sw_set_pixel(col, row, color)
-                    col = col + 1
-            else:
-                val row_base = row * self.w
-                self.sw_fill_raw_span(row_base + start_x, end_x - start_x, color)
-                self.mark_span_dirty(start_x, row, end_x - start_x)
+            while col < end_x:
+                self.sw_set_pixel(col, row, color)
+                col = col + 1
             row = row + 1
 
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
@@ -586,7 +706,7 @@ impl RenderBackend for SoftwareBackend:
                     inside = w1 <= 0 and w2 <= 0 and w3 <= 0
                 if inside:
                     if has_alpha:
-                        self.sw_set_pixel_blend(px, py, color)
+                        self.sw_set_pixel_blend(px, py, color, true)
                     else:
                         self.sw_set_pixel(px, py, color)
                 px = px + 1
@@ -612,6 +732,10 @@ impl RenderBackend for SoftwareBackend:
         val advance = metrics.advance
         val text_len = text_val.len()
         val fast_direct = not self.clip_enabled and self.mask_buf.len() == 0
+        # `color: rgba(0,0,0,.5)` blends its glyphs, as Chrome does (it was
+        # written opaque). An alpha byte of 0 is a colour packed without one.
+        val text_alpha = color_a(color)
+        val translucent = text_alpha > 0 and text_alpha < 255
         var i: i64 = 0
         var cursor_x = x
         while i < text_len:
@@ -640,7 +764,10 @@ impl RenderBackend for SoftwareBackend:
                                         count = self.w - start_x
                                     if count > 0:
                                         val off = py * self.w + start_x
-                                        self.sw_fill_raw_span(off, count, color)
+                                        if translucent:
+                                            self.sw_blend_const_raw_span(off, count, color)
+                                        else:
+                                            self.sw_fill_raw_span(off, count, color)
                                         self.mark_span_dirty(start_x, py, count)
                                 sy = sy + 1
                         else:
@@ -649,7 +776,10 @@ impl RenderBackend for SoftwareBackend:
                                 val py = run_y + sy
                                 var sx = 0
                                 while sx < scale:
-                                    self.sw_set_pixel(run_x + sx, py, color)
+                                    if translucent:
+                                        self.sw_set_pixel_blend(run_x + sx, py, color, true)
+                                    else:
+                                        self.sw_set_pixel(run_x + sx, py, color)
                                     sx = sx + 1
                                 sy = sy + 1
                     gx = gx + 1
@@ -661,9 +791,32 @@ impl RenderBackend for SoftwareBackend:
         if w <= 0 or h <= 0:
             return
         val pixels_len = pixels.len()
-        val slow_checked = self.clip_enabled or self.mask_buf.len() > 0
+        val mask_active = self.mask_buf.len() > 0
+        # A span write into the `self.buf` FIELD re-materializes the whole
+        # surface per call in the interpreter (1.4 ms a row at 3600 x 3040),
+        # and the clipped path used to go per pixel (22 us a pixel). Without a
+        # mask, the clip rect is a span clip, so every row is one span written
+        # into one local surface that is stored back once: a 2896-row band
+        # went from 4.2 s to 5 ms, a clipped 3600 x 3040 one from 239 s.
+        var buf: [u32] = []
+        if not mask_active:
+            # Take the field (leave it empty) so `buf` is the only owner and the
+            # first span write does not copy the whole surface either.
+            # bug=interpreter_field_array_write_span_copies_whole_array_2026-11-23
+            buf = self.buf
+            self.buf = []
+        # Rows in one tile row with the same span mark the same tiles: mark
+        # once (exact, ~29 tile stores a 3600-px row).
+        var marked_ty = -1
+        var marked_cs = -1
+        var marked_ce = -1
+        # Per-row helper calls cost ~2 us each on the interpreter lane: the SIMD
+        # row switch is read once, and `_span_copy_safe_count` is written out
+        # below (same clamps: both spans in range, count = the shortest).
+        val simd_rows = not mask_active and self.native_simd_spans and native_pixel_rows_enabled()
+        val buf_len = buf.len()
         var row = 0
-        # cpu-lane-loop-ok: one iteration per source image row while blitting; each row body delegates to sw_copy_raw_span, so the per-pixel work is already bulk
+        # cpu-lane-loop-ok: one iteration per source image row while blitting; each unmasked row is one bulk span
         while row < h:
             val py = y + row
             if py >= 0 and py < self.h:
@@ -679,17 +832,45 @@ impl RenderBackend for SoftwareBackend:
                     count = self.w - start_x
                 if count > 0 and src_row_base + src_x + count <= pixels_len:
                     val src_off = src_row_base + src_x
-                    if slow_checked:
+                    if mask_active:
                         var col = 0
-                        # cpu-lane-loop-ok: clipped/masked slow path only (slow_checked): per-pixel sw_set_pixel is required because clip and mask tests are per-pixel predicates
+                        # cpu-lane-loop-ok: masked slow path only: per-pixel sw_set_pixel is required because the mask test is a per-pixel predicate
                         while col < count:
                             self.sw_set_pixel(start_x + col, py, pixels[src_off + col])
                             col = col + 1
                     else:
-                        val dst_off = py * self.w + start_x
-                        self.sw_copy_raw_span(dst_off, pixels, src_off, count)
-                        self.mark_span_dirty(start_x, py, count)
+                        var cs = start_x
+                        var ce = start_x + count
+                        if self.clip_enabled:
+                            if py < self.clip_y or py >= self.clip_y + self.clip_h:
+                                ce = cs
+                            if cs < self.clip_x:
+                                cs = self.clip_x
+                            if ce > self.clip_x + self.clip_w:
+                                ce = self.clip_x + self.clip_w
+                        if ce > cs:
+                            val dst_off = (py * self.w + cs).to_i64()
+                            val src_at = (src_off + cs - start_x).to_i64()
+                            var safe_count: i64 = 0
+                            if buf_len > 0 and dst_off >= 0 and dst_off < buf_len and pixels_len > 0 and src_at >= 0 and src_at < pixels_len:
+                                safe_count = (ce - cs).to_i64()
+                                if buf_len - dst_off < safe_count:
+                                    safe_count = buf_len - dst_off
+                                if pixels_len - src_at < safe_count:
+                                    safe_count = pixels_len - src_at
+                            if safe_count > 0:
+                                if simd_rows:
+                                    record_simd_copy_hit()
+                                buf.write_span(pixels, dst_off, src_at, safe_count)
+                            val ty = py / TILE_SIZE
+                            if ty != marked_ty or cs != marked_cs or ce != marked_ce:
+                                self.mark_span_dirty(cs, py, ce - cs)
+                                marked_ty = ty
+                                marked_cs = cs
+                                marked_ce = ce
             row = row + 1
+        if not mask_active:
+            self.buf = buf
 
     me blit_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         """Compatibility alias used by SIMD integration tests."""
@@ -735,8 +916,8 @@ impl RenderBackend for SoftwareBackend:
         _sw_snapshot_buffer(self.buf, self.w * self.h)
 
     me read_pixels_with_source() -> Engine2DReadback:
-        engine2d_readback(_sw_snapshot_buffer(self.buf, self.w * self.h),
-                          readback_source_label(ReadbackSource.CpuMirror))
+        engine2d_readback_rows(_sw_snapshot_buffer(self.buf, self.w * self.h), self.w.to_i64(),
+                               readback_source_label(ReadbackSource.CpuMirror), 0, 0)
 
     me read_pixels_region(x: i32, y: i32, width: i32, height: i32) -> Engine2DReadback:
         """Native region read (D9): copies exactly the requested rows out of
@@ -745,24 +926,38 @@ impl RenderBackend for SoftwareBackend:
         whole-frame read + host crop. An invalid/oversized region yields
         empty pixels (fail closed), matching the default's [] contract.
         """
+        engine2d_readback(self.read_pixels_region_raw(x, y, width, height),
+                          readback_source_label(ReadbackSource.CpuMirror))
+
+    me read_pixels_region_raw(x: i32, y: i32, width: i32, height: i32) -> [u32]:
+        # The rows alone. The readback checksum is an interpreted per-pixel
+        # sum: 4.1 s for one 3582 x 3007 shadow band at device scale 4, which
+        # only wants the pixels.
         var region: [u32] = []
         val total = width.to_i64() * height.to_i64()
         if width > 0 and height > 0 and total > 0 and total <= 2147483647:
             region = [0u32; total.to_i32()]
+            # Clip the column range once; every row then copies one in-bounds
+            # span in bulk. Out-of-bounds columns stay 0u32 as before.
+            var col0 = 0
+            if x < 0:
+                col0 = 0 - x
+            var col1 = width
+            if self.w - x < col1:
+                col1 = self.w - x
             var row = 0
+            # cpu-lane-loop-ok: one iteration per region row; each row body is a
+            # single clipped write_span bulk copy, so the per-pixel work is bulk
             while row < height:
                 val source_y = y + row
-                if source_y >= 0 and source_y < self.h:
+                if source_y >= 0 and source_y < self.h and col1 > col0:
                     val row_base = source_y.to_i64() * self.w.to_i64()
-                    var col = 0
-                    while col < width:
-                        val source_x = x + col
-                        if source_x >= 0 and source_x < self.w:
-                            region[row.to_i64() * width.to_i64() + col.to_i64()] =
-                                self.buf[row_base + source_x.to_i64()]
-                        col = col + 1
+                    region.write_span(self.buf,
+                        row.to_i64() * width.to_i64() + col0.to_i64(),
+                        row_base + (x + col0).to_i64(),
+                        (col1 - col0).to_i64())
                 row = row + 1
-        engine2d_readback(region, readback_source_label(ReadbackSource.CpuMirror))
+        region
 
     me scale_alpha_in_place(opacity_milli: i32):
         """Scale every pixel's alpha by opacity_milli/1000 IN PLACE.
@@ -797,10 +992,10 @@ impl RenderBackend for SoftwareBackend:
         no GPU-accelerated ops (everything runs on the software path)."""
         backend_capability_software()
 
-    me width() -> i32:
+    fn width() -> i32:
         self.w
 
-    me height() -> i32:
+    fn height() -> i32:
         self.h
 
     me draw_ellipse(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
@@ -895,23 +1090,32 @@ impl RenderBackend for SoftwareBackend:
         val alpha = color_a(color)
         if alpha == 0:
             return
-        if alpha == 255:
-            self.draw_rect_filled(x, y, w, h, color)
-            return
-        var row = 0
-        # Route each clipped row through the backend's constant-colour span
-        # owner.  The mask-off path blends in place with the native
-        # AVX2/SSE2/NEON/RVV primitive; clipped and masked rows retain the
-        # exact per-pixel fallback owned by sw_hline_blend.
-        while row < h:
-            self.sw_hline_blend(x, y + row, w, color)
-            row = row + 1
+        # Opaque is a plain fill; a translucent draw_rect_filled is the same
+        # per-row sw_hline_blend walk (clipped to the frame rows first, where
+        # sw_hline_blend is a no-op anyway) and its mask-off SIMD path blends
+        # the rect in one call.
+        self.draw_rect_filled(x, y, w, h, color)
 
     me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         if w <= 0 or h <= 0:
             return
         val pixels_len = pixels.len()
-        val slow_checked = self.clip_enabled or self.mask_buf.len() > 0
+        val masked = self.mask_buf.len() > 0
+        val clip_x1 = self.clip_x + self.clip_w
+        val clip_y1 = self.clip_y + self.clip_h
+        # Unmasked rows blend into the surface taken once per call (a span
+        # write into the `self.buf` field copies the whole surface, and a
+        # per-row take plus method calls cost ~80 us a row: a 4-px border side
+        # of a box taller than the frame was ~0.3 s).
+        # bug=interpreter_field_array_write_span_copies_whole_array_2026-11-23
+        var b: [u32] = []
+        if not masked:
+            b = self.buf
+            self.buf = []
+        # Rows in one tile row with the same span mark the same tiles.
+        var marked_ty = -1
+        var marked_x0 = -1
+        var marked_x1 = -1
         var row = 0
         # cpu-lane-loop-ok: one iteration per source image row while alpha-blitting; each row body delegates to the SIMD row blend or its scalar fallback below
         while row < h:
@@ -929,28 +1133,91 @@ impl RenderBackend for SoftwareBackend:
                     count = self.w - start_x
                 if count > 0 and src_row_base + src_x + count <= pixels_len:
                     var col = 0
-                    if slow_checked:
-                        # cpu-lane-loop-ok: clipped/masked slow path only (slow_checked): per-pixel sw_set_pixel_blend is required because clip and mask tests are per-pixel predicates
+                    if masked:
+                        # cpu-lane-loop-ok: masked slow path only: per-pixel sw_set_pixel_blend is required because the mask test is a per-pixel predicate
                         while col < count:
-                            self.sw_set_pixel_blend(start_x + col, py, pixels[src_row_base + src_x + col])
+                            self.sw_set_pixel_blend(start_x + col, py, pixels[src_row_base + src_x + col], false)
                             col = col + 1
+                    elif self.clip_enabled:
+                        # The clip is a rectangle, so it cuts this row to one
+                        # span. Same scalar `blend` and per-pixel tile marks
+                        # as sw_set_pixel_blend (which cost ~38 us/px for
+                        # clipped text quads); the SIMD kernel is not used
+                        # here because it differs from `blend` on translucent
+                        # destinations. sa 255 / 0 are blend's own shortcuts.
+                        var cx0 = start_x
+                        var cx1 = start_x + count
+                        if cx0 < self.clip_x:
+                            cx0 = self.clip_x
+                        if cx1 > clip_x1:
+                            cx1 = clip_x1
+                        if py >= self.clip_y and py < clip_y1 and cx1 > cx0:
+                            val src_off = src_row_base + src_x + (cx0 - start_x)
+                            val dst_off = py * self.w + cx0
+                            val n = cx1 - cx0
+                            # blend(src, d) memo: exact, glyph rows repeat both
+                            var last_src = 0u32
+                            var last_dst = 0u32
+                            var last_out = blend(0u32, 0u32)
+                            # cpu-lane-loop-ok: clipped span blend; one pass over the in-clip part of this row
+                            while col < n:
+                                val src = pixels[src_off + col]
+                                val sa = (src >> 24) & 0xFFu32
+                                if sa == 255u32:
+                                    b[dst_off + col] = src
+                                elif sa != 0u32:
+                                    val d = b[dst_off + col]
+                                    if src != last_src or d != last_dst:
+                                        last_src = src
+                                        last_dst = d
+                                        if (d >> 24) == 0xFFu32:
+                                            # blend()'s opaque-destination
+                                            # image rule, inlined
+                                            val a = sa.to_i64()
+                                            val inv = 255 - a
+                                            val vr = ((d >> 16) & 0xFFu32).to_i64() * inv + 128
+                                            val vg = ((d >> 8) & 0xFFu32).to_i64() * inv + 128
+                                            val vb = (d & 0xFFu32).to_i64() * inv + 128
+                                            val r = (((src >> 16) & 0xFFu32).to_i64() * a + 127) / 255 + (vr + vr / 256) / 256
+                                            val g = (((src >> 8) & 0xFFu32).to_i64() * a + 127) / 255 + (vg + vg / 256) / 256
+                                            val bl = ((src & 0xFFu32).to_i64() * a + 127) / 255 + (vb + vb / 256) / 256
+                                            last_out = 0xFF000000u32 | (r.to_u32() << 16) | (g.to_u32() << 8) | bl.to_u32()
+                                        else:
+                                            last_out = blend(src, d)
+                                    b[dst_off + col] = last_out
+                                col = col + 1
+                            self.mark_span_dirty(cx0, py, n)
                     else:
                         val dst_off = py * self.w + start_x
                         val src_off = src_row_base + src_x
                         if self.native_simd_spans and native_pixel_rows_enabled():
                             record_simd_alpha_hit()
-                            self.buf = rt_engine2d_simd_blend_span_u32(
-                                self.buf, dst_off.to_i64(), pixels,
-                                src_off.to_i64(), count.to_i64())
+                            # Same kernel on span-sized scratch (sw_span_scratch):
+                            # the extern unpacks BOTH array arguments whole, so
+                            # the src row is windowed too.
+                            var dst_span: [u32] = [0u32; count]
+                            dst_span.write_span(b, 0, dst_off.to_i64(), count.to_i64())
+                            var src_span: [u32] = [0u32; count]
+                            src_span.write_span(pixels, 0, src_off.to_i64(), count.to_i64())
+                            dst_span = rt_engine2d_simd_blend_span_u32(
+                                dst_span, 0, src_span, 0, count.to_i64())
+                            b.write_span(dst_span, dst_off.to_i64(), 0, count.to_i64())
                         else:
                             # cpu-lane-loop-ok: scalar fallback taken when SIMD spans are unavailable on this arch; this is the reference blend body the SIMD path is checked against
                             while col < count:
                                 val src = pixels[src_off + col]
                                 if color_a(src) > 0:
-                                    self.buf[dst_off + col] = blend(src, self.buf[dst_off + col])
+                                    b[dst_off + col] = blend(src, b[dst_off + col])
                                 col = col + 1
-                        self.mark_span_dirty(start_x, py, count)
+                        val ty = py / TILE_SIZE
+                        if ty != marked_ty or start_x != marked_x0 or count != marked_x1:
+                            self.mark_span_dirty(start_x, py, count)
+                            marked_ty = ty
+                            marked_x0 = start_x
+                            marked_x1 = count
             row = row + 1
+        if not masked:
+            self.buf = b
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
         val src_count = src_w.to_i64() * src_h.to_i64()
@@ -1247,12 +1514,6 @@ impl SoftwareBackend:
             return
         self.draw_image(x, y, text_buf.width, text_buf.height, text_buf.pixels)
 
-    me draw_ellipse(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
-        emu_draw_ellipse(self, cx, cy, rx, ry, color)
-
-    me draw_ellipse_filled(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
-        emu_draw_ellipse_filled(self, cx, cy, rx, ry, color)
-
 # ============================================================================
 # Pixel and Line Helpers — me methods to avoid mutation-loss bug
 #
@@ -1321,6 +1582,16 @@ impl SoftwareBackend:
         the expected) outcome; the deliverable of this table is complete
         MEASUREMENT coverage, not SIMD wins."""
         if self.kernel_table_ready:
+            return
+        if _session_kernel_ready:
+            self.kernel_table = CpuKernelTable(
+                slots: _session_kernel_slots,
+                sealed: true,
+                registrations: _session_kernel_registrations,
+                rejections: _session_kernel_rejections,
+                lookups: 0
+            )
+            self.kernel_table_ready = true
             return
         # (representative span length, iterations) per bucket. Small spans get
         # more iterations so the wall-clock measurement window is large
@@ -1407,8 +1678,24 @@ impl SoftwareBackend:
                               KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_LARGE,
                               KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
         kernel_table_seal(table)
+        _session_kernel_slots = table.slots
+        _session_kernel_registrations = table.registrations
+        _session_kernel_rejections = table.rejections
+        _session_kernel_ready = true
         self.kernel_table = table
         self.kernel_table_ready = true
+
+    me sw_fill_contiguous_range(start_offset: i32, total_count: i32, color: u32):
+        var remaining = _span_safe_count(self.buf.len(), start_offset, total_count)
+        if remaining <= 0:
+            return
+        var pos = start_offset
+        # cpu-lane-loop-ok: chunks contiguous fill into 262144-pixel (1 MiB) bulk spans; bounded by ceil(pixels / 262144), not scanlines or pixels
+        while remaining > 0:
+            val chunk = if remaining > SW_FILL_CONTIGUOUS_CHUNK_PIXELS: SW_FILL_CONTIGUOUS_CHUNK_PIXELS else: remaining
+            self.sw_fill_raw_span(pos, chunk, color)
+            pos = pos + chunk
+            remaining = remaining - chunk
 
     me sw_fill_raw_span(offset: i32, raw_count: i32, color: u32):
         val count = _span_safe_count(self.buf.len(), offset, raw_count)
@@ -1418,22 +1705,27 @@ impl SoftwareBackend:
             self.ensure_kernel_table()
             record_simd_fill_hit()
             var batch = span_batch_new(1)
-            span_batch_push(batch, KERNEL_OP_FILL_CONST, offset as i64, 0, count as i64, color as i64, 0)
+            span_batch_push(batch, KERNEL_OP_FILL_CONST, 0, 0, count as i64, color as i64, 0)
             val empty_u32: [u32] = []
-            # Local-var binding + write-back: passing self.buf directly hands the
-            # executor a field-read COPY under the interpreter (same pitfall as the
-            # scalar fallback below), which left the SIMD lane's fills invisible —
-            # "readback center mismatch for cpu_simd" in the backend matrix spec.
-            var work_buf = self.buf
+            # The kernel runs on a span-sized scratch that is written back with
+            # write_span (see sw_span_scratch). Handing it the whole surface
+            # (`var work_buf = self.buf`) shared the Arc, so the kernel's first
+            # store deep-copied the ENTIRE framebuffer once per span — O(surface)
+            # per scanline, ~k^3 at device scale k. A fill_const store depends on
+            # nothing but (count, colour), so the scratch's initial content is
+            # irrelevant and the written span is byte-identical.
+            var work_buf: [u32] = [0u32; count]
             val executed = simd_span_batch_execute(batch, work_buf, empty_u32, empty_u32, self.kernel_table,
                                                    KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS)
             self.simd_batch_hits = self.simd_batch_hits + batch.non_scalar_lookups
             if executed == batch.length:
-                self.buf = work_buf
+                self.sw_buf_write_span(work_buf, offset as i64, 0, count as i64)
                 return
             # Batch dispatcher refused (shouldn't happen for a single valid op) —
             # fall back to the direct native call rather than leave the span unfilled.
-            self.buf = rt_engine2d_simd_fill_span_u32(self.buf, offset as i64, count as i64, color)
+            var fill_span = self.sw_span_scratch(offset, count)
+            fill_span = rt_engine2d_simd_fill_span_u32(fill_span, 0, count as i64, color)
+            self.sw_buf_write_span(fill_span, offset as i64, 0, count as i64)
             return
         # Scalar fallback writes through self.buf DIRECTLY (same idiom as
         # sw_copy_raw_span below). Passing the field to _scalar_fill_row(mut
@@ -1452,7 +1744,7 @@ impl SoftwareBackend:
         # cost that the row allocation does not amortise below ~32 pixels.
         if count >= 32:
             val fill_row: [u32] = [color; count]
-            self.buf.write_span(fill_row, offset as i64, 0, count as i64)
+            self.sw_buf_write_span(fill_row, offset as i64, 0, count as i64)
             return
         var i = 0
         # cpu-lane-loop-ok: scalar fallback inside sw_fill_raw_span itself, taken only when SIMD spans are unavailable; this IS the bulk span primitive
@@ -1460,17 +1752,178 @@ impl SoftwareBackend:
             self.buf[offset + i] = color
             i = i + 1
 
+    # The unmasked rows of one opaque draw_rect_filled are all the same span.
+    # It is produced once, by the same fill kernel sw_fill_raw_span runs (its
+    # hit counters still advance once per row), and written per row into the
+    # taken surface; dirty tiles are marked once per tile row (the same tile
+    # set). Per row this was a kernel call plus one mark_dirty call per 64 px:
+    # ~450 us a row at 3600 x 3040, ~2.6 s for one box taller than the frame.
+    me sw_fill_rect_rows(start_x: i32, start_y: i32, end_y: i32, count: i32, color: u32):
+        if count <= 0 or end_y <= start_y:
+            return
+        var span: [u32] = []
+        if self.native_simd_spans and native_pixel_rows_enabled():
+            # The kernel's span is [colour; count] whichever provider ran, so
+            # the last one is reused for the same (colour, count): dash runs
+            # repeat it, and the span-batch dispatch cost ~68 us a call for an
+            # 8 px span. Counters advance per row as before, with the batch's
+            # recorded non-scalar lookup count.
+            val memo = self._fill_memo_span
+            if memo.len() == count and memo[0] == color:
+                var memo_row = start_y
+                # cpu-lane-loop-ok: counter bookkeeping only, one increment per row the old per-row kernel call made
+                while memo_row < end_y:
+                    record_simd_fill_hit()
+                    memo_row = memo_row + 1
+                self.simd_batch_hits = self.simd_batch_hits + self._fill_memo_lookups * ((end_y - start_y) as i64)
+                self._sw_write_rect_rows(memo, start_x, start_y, end_y, count)
+                return
+            self.ensure_kernel_table()
+            var batch = span_batch_new(1)
+            span_batch_push(batch, KERNEL_OP_FILL_CONST, 0, 0, count as i64, color as i64, 0)
+            val empty_u32: [u32] = []
+            var work_buf: [u32] = [0u32; count]
+            val executed = simd_span_batch_execute(batch, work_buf, empty_u32, empty_u32, self.kernel_table,
+                                                   KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS)
+            if executed != batch.length:
+                # The dispatcher refused: keep the per-row primitive (and its
+                # own fallback) for every row.
+                var fallback_row = start_y
+                # cpu-lane-loop-ok: refused-dispatch fallback, one bulk span per row
+                while fallback_row < end_y:
+                    self.sw_fill_raw_span(fallback_row * self.w + start_x, count, color)
+                    self.mark_span_dirty(start_x, fallback_row, count)
+                    fallback_row = fallback_row + 1
+                return
+            var hit_row = start_y
+            # cpu-lane-loop-ok: counter bookkeeping only, one increment per row the old per-row kernel call made
+            while hit_row < end_y:
+                record_simd_fill_hit()
+                self.simd_batch_hits = self.simd_batch_hits + batch.non_scalar_lookups
+                hit_row = hit_row + 1
+            span = work_buf
+            self._fill_memo_span = work_buf
+            self._fill_memo_lookups = batch.non_scalar_lookups
+        else:
+            span = [color; count]
+        self._sw_write_rect_rows(span, start_x, start_y, end_y, count)
+
+    # Writes `span[0, count)` to rows [start_y, end_y) at start_x of the taken
+    # surface and marks the touched tiles dirty.
+    me _sw_write_rect_rows(span: [u32], start_x: i32, start_y: i32, end_y: i32, count: i32):
+        var surface = self.buf
+        self.buf = []
+        var row = start_y
+        # cpu-lane-loop-ok: one bulk span write per row into the taken surface
+        while row < end_y:
+            surface.write_span(span, (row * self.w + start_x) as i64, 0, count as i64)
+            row = row + 1
+        self.buf = surface
+        self._sw_mark_rect_dirty(start_x, start_y, end_y, count)
+
+    # The tiles mark_span_dirty(start_x, tile_row * TILE_SIZE, count) marks
+    # per tile row, in one call: a mark_span_dirty call per tile row was
+    # ~10 us for a one-tile span.
+    me _sw_mark_rect_dirty(start_x: i32, start_y: i32, end_y: i32, count: i32):
+        val tx0 = start_x / TILE_SIZE
+        val tx1 = (start_x + count - 1) / TILE_SIZE
+        val tile_count = self.dirty_tiles.len()
+        var tile_row = start_y / TILE_SIZE
+        val last_tile_row = (end_y - 1) / TILE_SIZE
+        # cpu-lane-loop-ok: one dirty mark per touched tile, bounded by tiles_x * tiles_y
+        while tile_row <= last_tile_row:
+            var tx = tx0
+            # cpu-lane-loop-ok: tiles of one tile row, bounded by tiles_x
+            while tx <= tx1:
+                val idx = tile_row * self.tiles_x + tx
+                if idx >= 0 and idx < tile_count:
+                    self.dirty_tiles[idx] = true
+                tx = tx + 1
+            tile_row = tile_row + 1
+
+    # One translucent constant-colour rect, rows [start_y, end_y) x
+    # [start_x, start_x + count), already clipped to the frame and the clip
+    # rect, mask off, SIMD spans on. Byte-identical to sw_hline_blend per row:
+    # the blend-const kernel is per pixel, so the rows are gathered into one
+    # scratch (at most SW_FILL_CONTIGUOUS_CHUNK_PIXELS), blended by ONE extern
+    # call and written back. Per row this was a clip, a scratch, an extern, a
+    # write-back and a dirty walk: ~60 us a row.
+    me _sw_blend_const_rect_rows(start_x: i32, start_y: i32, end_y: i32, count: i32, color: u32):
+        var rows_per_chunk = SW_FILL_CONTIGUOUS_CHUNK_PIXELS / count
+        if rows_per_chunk < 1:
+            rows_per_chunk = 1
+        val stride = self.w
+        var surface = self.buf
+        self.buf = []
+        var row = start_y
+        # cpu-lane-loop-ok: one extern blend per chunk of rows, bounded by ceil(pixels / chunk)
+        while row < end_y:
+            val chunk_end = if row + rows_per_chunk < end_y: row + rows_per_chunk else: end_y
+            val n = (chunk_end - row) * count
+            var scratch: [u32] = [0u32; n]
+            var r = row
+            var so: i64 = 0
+            # cpu-lane-loop-ok: one bulk span gather per row of the chunk
+            while r < chunk_end:
+                scratch.write_span(surface, so, (r * stride + start_x) as i64, count as i64)
+                so = so + count as i64
+                r = r + 1
+            scratch = rt_engine2d_simd_blend_const_span_u32(scratch, 0, n.to_i64(), color.to_i64())
+            r = row
+            so = 0
+            # cpu-lane-loop-ok: one bulk span write-back per row of the chunk
+            while r < chunk_end:
+                record_simd_alpha_hit()
+                surface.write_span(scratch, (r * stride + start_x) as i64, so, count as i64)
+                so = so + count as i64
+                r = r + 1
+            row = chunk_end
+        self.buf = surface
+        self._sw_mark_rect_dirty(start_x, start_y, end_y, count)
+
+    # `self.buf.write_span(...)` on the FIELD copies the whole surface per call
+    # in the interpreter (1.8 ms at 3600 x 3040, against 4 us here): the field
+    # read shares the array, so the in-place write copies it first. Taking the
+    # field (leaving it empty for the duration of the one write) makes the
+    # local the only owner, so the write is O(count). Same values written, so
+    # the surface is byte-identical. An aliased `src` still holds its own
+    # reference and is snapshotted by that copy, as before.
+    # bug=interpreter_field_array_write_span_copies_whole_array_2026-11-23
+    me sw_buf_write_span(src: [u32], dst_offset: i64, src_offset: i64, count: i64):
+        var surface = self.buf
+        self.buf = []
+        surface.write_span(src, dst_offset, src_offset, count)
+        self.buf = surface
+
+    # Span-sized copy of self.buf[offset, offset+count) for an extern span
+    # kernel. Interpreter externs unpack their array argument into a fresh
+    # Vec<u32> and repack the result (rt_engine2d_simd_* in the seed's
+    # interpreter_extern/simd.rs), so passing `self.buf` costs O(surface) per
+    # call. Measured 2026-11-16: a 3600x3040 (device scale 4) tab-bar paint
+    # spent minutes re-copying the frame once per scanline. The caller runs the
+    # SAME kernel on this scratch and writes it back with write_span, so the
+    # pixels are byte-identical and the cost is O(count).
+    me sw_span_scratch(offset: i32, count: i32) -> [u32]:
+        var scratch: [u32] = [0u32; count]
+        scratch.write_span(self.buf, 0, offset as i64, count as i64)
+        scratch
+
     me sw_copy_raw_span(dst_offset: i32, src: [u32], src_offset: i32, count: i32):
         val safe_count = _span_copy_safe_count(self.buf.len(), dst_offset, src.len(), src_offset, count)
         if safe_count <= 0:
             return
         if self.native_simd_spans and native_pixel_rows_enabled():
             record_simd_copy_hit()
-            self.buf = rt_engine2d_simd_copy_span_u32(self.buf, dst_offset as i64, src, src_offset as i64, safe_count as i64)
+            # A span copy is exactly what write_span does (memmove semantics
+            # included: an aliased src is snapshotted before the write, as the
+            # extern's unpacked copy was). The extern unpacked and repacked the
+            # whole surface AND the whole src per call — O(surface) per row.
+            # The hit counter now records this write_span copy, not SIMD work.
+            self.sw_buf_write_span(src, dst_offset as i64, src_offset as i64, safe_count as i64)
             return
         # Bulk channel first — same rationale as sw_fill_raw_span above.
         if safe_count >= 32:
-            self.buf.write_span(src, dst_offset as i64, src_offset as i64, safe_count as i64)
+            self.sw_buf_write_span(src, dst_offset as i64, src_offset as i64, safe_count as i64)
             return
         var i = 0
         # cpu-lane-loop-ok: scalar fallback inside sw_copy_raw_span itself, taken only when rt_engine2d_simd_copy_span_u32 is unavailable; this IS the bulk span primitive
@@ -1484,13 +1937,27 @@ impl SoftwareBackend:
             return
         if self.native_simd_spans and native_pixel_rows_enabled():
             record_simd_alpha_hit()
-            self.buf = rt_engine2d_simd_blend_const_span_u32(
-                self.buf, offset.to_i64(), safe_count.to_i64(), color.to_i64())
+            var blend_span = self.sw_span_scratch(offset, safe_count)
+            blend_span = rt_engine2d_simd_blend_const_span_u32(
+                blend_span, 0, safe_count.to_i64(), color.to_i64())
+            self.sw_buf_write_span(blend_span, offset.to_i64(), 0, safe_count.to_i64())
             return
+        # The blend depends only on (color, dst): a destination equal to the
+        # previous one reuses its result. `blend_solid` is ~60 us a pixel in
+        # the interpreter; a fill over a uniform background now pays it once
+        # per run of equal pixels (4.5 s -> ~0.1 s for a 24 x 3040 strip).
+        var last_dst = 0u32
+        var last_out = 0u32
+        var have_last = false
         var i = 0
         # cpu-lane-loop-ok: scalar fallback inside sw_blend_const_raw_span when SIMD spans are unavailable; this IS the bulk span primitive
         while i < safe_count:
-            self.buf[offset + i] = blend(color, self.buf[offset + i])
+            val dst = self.buf[offset + i]
+            if not have_last or dst != last_dst:
+                last_dst = dst
+                last_out = blend_solid(color, dst)
+                have_last = true
+            self.buf[offset + i] = last_out
             i = i + 1
 
     me mark_dirty(tx: i32, ty: i32):
@@ -1512,9 +1979,14 @@ impl SoftwareBackend:
         val tx0 = x / TILE_SIZE
         val tx1 = (x + length - 1) / TILE_SIZE
         val ty = y / TILE_SIZE
+        # mark_dirty inlined: a method call per tile cost ~6 us, 308 us for one
+        # 3312 px row.
+        val tile_count = self.dirty_tiles.len()
         var tx = tx0
         while tx <= tx1:
-            self.mark_dirty(tx, ty)
+            val idx = ty * self.tiles_x + tx
+            if idx >= 0 and idx < tile_count:
+                self.dirty_tiles[idx] = true
             tx = tx + 1
 
     # ========================================================================
@@ -1608,7 +2080,7 @@ impl SoftwareBackend:
         var bx1 = out[0] + out[2]
         var by1 = out[1] + out[3]
         var r = 1
-        while r < rect_count:
+        while r < rect_count:  # cpu-lane-loop-ok: walks the damage-rect list (4 ints per rect), bounded by rect count, not pixels
             val o = r * 4
             if out[o] < bx0:
                 bx0 = out[o]
@@ -1687,14 +2159,14 @@ impl SoftwareBackend:
         val rects = self.damage_rects(max_rects)
         val rect_count = rects.len() / 4
         var r = 0
-        while r < rect_count:
+        while r < rect_count:  # cpu-lane-loop-ok: walks the damage-rect list (4 ints per rect), bounded by rect count, not pixels
             val o = r * 4
             val rx = rects[o]
             val ry = rects[o + 1]
             val rw = rects[o + 2]
             val rh = rects[o + 3]
             var row = 0
-            while row < rh:
+            while row < rh:  # cpu-lane-loop-ok: one iteration per damaged-rect row; the per-row span copy is the annotated bulk body
                 val base = (ry + row) * self.w + rx
                 var c = 0
                 # cpu-lane-loop-ok: per-damaged-row span copy; this IS the bulk
@@ -1725,7 +2197,7 @@ impl SoftwareBackend:
         var total: i64 = 0
         var r = 0
         val rect_count = rects.len() / 4
-        while r < rect_count:
+        while r < rect_count:  # cpu-lane-loop-ok: walks the damage-rect list (4 ints per rect), bounded by rect count, not pixels
             val o = r * 4
             val rx = rects[o]
             val ry = rects[o + 1]
@@ -1744,14 +2216,14 @@ impl SoftwareBackend:
         var packed: [u32] = [0u32; total.to_i32()]
         var write = 0
         r = 0
-        while r < rect_count:
+        while r < rect_count:  # cpu-lane-loop-ok: walks the damage-rect list (4 ints per rect), bounded by rect count, not pixels
             val o = r * 4
             val rx = rects[o]
             val ry = rects[o + 1]
             val rw = rects[o + 2]
             val rh = rects[o + 3]
             var row = 0
-            while row < rh:
+            while row < rh:  # cpu-lane-loop-ok: one iteration per damaged-rect row; the per-row span copy is the annotated bulk body
                 val base = (ry + row) * self.w + rx
                 var col = 0
                 # cpu-lane-loop-ok: this is the packed sparse transport copy;
@@ -1789,7 +2261,7 @@ impl SoftwareBackend:
         # endpoint sums below cannot overflow i32.
         var total: i64 = 0
         var r = 0
-        while r < rect_count:
+        while r < rect_count:  # cpu-lane-loop-ok: walks the damage-rect list (4 ints per rect), bounded by rect count, not pixels
             val o = r * 4
             val rx = rects[o]
             val ry = rects[o + 1]
@@ -1803,7 +2275,7 @@ impl SoftwareBackend:
                 return SoftwareBackendPackedDamage(rects: [], pixels: [], valid: false)
             total = total + area
             var q = 0
-            while q < r:
+            while q < r:  # cpu-lane-loop-ok: pairwise rect-overlap check, bounded by rect count squared, not pixels
                 val qo = q * 4
                 if (rx < rects[qo] + rects[qo + 2] and
                     rects[qo] < rx + rw and
@@ -1816,14 +2288,14 @@ impl SoftwareBackend:
         var packed: [u32] = [0u32; total.to_i32()]
         var write = 0
         r = 0
-        while r < rect_count:
+        while r < rect_count:  # cpu-lane-loop-ok: walks the damage-rect list (4 ints per rect), bounded by rect count, not pixels
             val o = r * 4
             val rx = rects[o]
             val ry = rects[o + 1]
             val rw = rects[o + 2]
             val rh = rects[o + 3]
             var row = 0
-            while row < rh:
+            while row < rh:  # cpu-lane-loop-ok: one iteration per damaged-rect row; the per-row span copy is the annotated bulk body
                 val base = (ry + row) * self.w + rx
                 var col = 0
                 # cpu-lane-loop-ok: packed sparse transport copy; boxed [u32]
@@ -1859,7 +2331,9 @@ impl SoftwareBackend:
         self.buf[idx] = color
         self.mark_pixel_dirty(x, y)
 
-    me sw_set_pixel_blend(x: i32, y: i32, color: u32):
+    me sw_set_pixel_blend(x: i32, y: i32, color: u32, solid: bool):
+        # `solid`: a solid colour fill (Chrome's SkPMSrcOver rule,
+        # color.blend_solid); otherwise an image pixel (color.blend).
         if x < 0 or y < 0 or x >= self.w or y >= self.h:
             return
         if self.clip_enabled:
@@ -1869,7 +2343,7 @@ impl SoftwareBackend:
         if _sw_mask_blocks(self, x, y):
             return
         val idx = y * self.w + x
-        self.buf[idx] = blend(color, self.buf[idx])
+        self.buf[idx] = if solid: blend_solid(color, self.buf[idx]) else: blend(color, self.buf[idx])
         self.mark_pixel_dirty(x, y)
 
     me sw_hline(x: i32, y: i32, length: i32, color: u32):
@@ -1897,7 +2371,7 @@ impl SoftwareBackend:
         if mask_active:
             var xoff = 0
             while xoff < count:
-                self.sw_set_pixel_blend(clipped.0 + xoff, y, color)
+                self.sw_set_pixel_blend(clipped.0 + xoff, y, color, true)
                 xoff = xoff + 1
             return
         val off = y * self.w + clipped.0

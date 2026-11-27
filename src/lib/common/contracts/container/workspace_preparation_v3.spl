@@ -1,0 +1,143 @@
+# Workspace preparation stage integrity only, never storage or execution authority.
+# Host must resolve every retained digest to actual owners and sign/admit a fresh
+# workspace_prepare_v1 operation in the SAME journal. Only its completed retained
+# stage permits exec start. An authorized exec birth may already exist.
+use std.common.contracts.container.exec_v3.*
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct ContainerWorkspaceExecutableV3:
+    relative_path: text
+    digest: text
+
+pub struct ContainerWorkspacePreparationRequestV3:
+    operation_id: text
+    exec_request: ContainerExecRequestV3
+    exec_birth: ContainerExecBirthReceiptV3
+    # Resolve and recompute from the SAME journal's original HostRuntimeExecIntentV3.
+    exec_intent_digest: text
+    parent_operation_digest: text
+    parent_assignment_digest: text
+    storage_reservation_digest: text
+    workspace_binding_digest: text
+    # native_binding_digest from the resolved full mapping receipt.
+    mapping_binding_digest: text
+    # container_user_mapping_receipt_digest_v3(full receipt), NOT native evidence alone.
+    mapping_receipt_digest: text
+    mount_profile: text
+    input_relative_root: text
+    output_relative_root: text
+    executables: [ContainerWorkspaceExecutableV3]
+
+fn workspace_relative_v3(value: text) -> bool:
+    if (str_len(value) == 0 or str_len(value) > 4095 or value.starts_with("/") or
+            value.ends_with("/") or value.contains("//") or value.contains("\\") or
+            value.contains("\0") or value.contains("\n") or value.contains("\r")):
+        return false
+    for part in value.split("/"):
+        if part == "." or part == "..": return false
+    # Drive-rooted spellings are absolute on Windows, never relative roots.
+    if value.len() >= 2 and value.substring(1, 2) == ":": return false
+    true
+
+pub fn container_workspace_preparation_encode_v3(request: ContainerWorkspacePreparationRequestV3) -> Result<text, text>:
+    if (not builder_identifier_valid_v1(request.operation_id) or
+            request.operation_id == request.exec_request.operation_id or
+            request.operation_id == request.exec_request.parent.operation_id):
+        return Err("container-workspace-stage-operation-invalid")
+    if (request.mount_profile != "linux-build-input-output-v1" or
+            request.exec_request.parent.backend != "linux-podman"):
+        return Err("container-workspace-mount-profile-unsupported")
+    for digest in [request.exec_intent_digest, request.parent_operation_digest, request.parent_assignment_digest, request.storage_reservation_digest,
+            request.workspace_binding_digest, request.mapping_binding_digest, request.mapping_receipt_digest]:
+        if not builder_digest_valid_v1(digest): return Err("container-workspace-binding-digest-invalid")
+    val input = request.input_relative_root
+    val output = request.output_relative_root
+    if (not workspace_relative_v3(input) or not workspace_relative_v3(output) or input == output or
+            input.starts_with(output + "/") or output.starts_with(input + "/")):
+        return Err("container-workspace-relative-roots-invalid")
+    if request.executables.len() < 1 or request.executables.len() > 2: return Err("container-workspace-manifest-count")
+    var seen: [text] = []
+    var manifest: [SdnValue] = []
+    for executable in request.executables:
+        if (not ["producer.exe", "tools/simple"].contains(executable.relative_path) or
+                seen.contains(executable.relative_path) or not builder_digest_valid_v1(executable.digest)):
+            return Err("container-workspace-manifest-entry-invalid")
+        seen.push(executable.relative_path)
+        val fields: Dict<text, SdnValue> = {"relativePath": SdnValue.String(executable.relative_path), "digest": SdnValue.String(executable.digest)}
+        manifest.push(SdnValue.Dict(fields))
+    val matched = container_exec_birth_match_v3(request.exec_birth, request.exec_request)?
+    val exec_bytes = container_exec_request_encode_v3(request.exec_request)?
+    val birth_bytes = container_exec_birth_encode_v3(request.exec_birth)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("container-workspace-preparation"),
+        "operationId": SdnValue.String(request.operation_id), "execRequest": SdnValue.String(exec_bytes), "execBirth": SdnValue.String(birth_bytes),
+        "execIntentDigest": SdnValue.String(request.exec_intent_digest),
+        "parentOperationDigest": SdnValue.String(request.parent_operation_digest), "parentAssignmentDigest": SdnValue.String(request.parent_assignment_digest),
+        "storageReservationDigest": SdnValue.String(request.storage_reservation_digest), "workspaceBindingDigest": SdnValue.String(request.workspace_binding_digest),
+        "mappingBindingDigest": SdnValue.String(request.mapping_binding_digest), "mappingReceiptDigest": SdnValue.String(request.mapping_receipt_digest),
+        "mountProfile": SdnValue.String(request.mount_profile), "inputRelativeRoot": SdnValue.String(input),
+        "outputRelativeRoot": SdnValue.String(output), "executables": SdnValue.Array(manifest)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > 2097152: return Err("container-workspace-source-size")
+    Ok(source)
+
+pub fn container_workspace_preparation_digest_v3(request: ContainerWorkspacePreparationRequestV3) -> Result<text, text>:
+    val source = container_workspace_preparation_encode_v3(request)?
+    Ok(sha256_text(source))
+
+fn workspace_fields_v3(fields: Dict<text, SdnValue>, names: [text]) -> Result<bool, text>:
+    for key in fields.keys():
+        if not names.contains(key): return Err("container-workspace-unknown-field:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("container-workspace-missing-field:" + key)
+    Ok(true)
+
+fn workspace_text_v3(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("container-workspace-text-required:" + key)
+
+pub fn container_workspace_preparation_decode_v3(source: text) -> Result<ContainerWorkspacePreparationRequestV3, text>:
+    if str_len(source) == 0 or str_len(source) > 2097152: return Err("container-workspace-source-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 2097152,
+            max_depth: 4, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 20)):
+        case Ok(value): value
+        case Err(_): return Err("container-workspace-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("container-workspace-object-required")
+    val known = workspace_fields_v3(fields, ["version", "kind", "operationId", "execRequest", "execBirth", "execIntentDigest", "parentOperationDigest",
+        "parentAssignmentDigest", "storageReservationDigest", "workspaceBindingDigest", "mappingBindingDigest", "mappingReceiptDigest",
+        "mountProfile", "inputRelativeRoot", "outputRelativeRoot", "executables"])?
+    match fields["version"]:
+        case SdnValue.Int(value):
+            if value != 3: return Err("container-workspace-version")
+        case _: return Err("container-workspace-version")
+    if workspace_text_v3(fields, "kind")? != "container-workspace-preparation": return Err("container-workspace-kind")
+    var executables: [ContainerWorkspaceExecutableV3] = []
+    match fields["executables"]:
+        case SdnValue.Array(values):
+            if values.len() < 1 or values.len() > 2: return Err("container-workspace-manifest-count")
+            for item in values:
+                val entry = match item:
+                    case SdnValue.Dict(value): value
+                    case _: return Err("container-workspace-manifest-type")
+                val valid = workspace_fields_v3(entry, ["relativePath", "digest"])?
+                executables.push(ContainerWorkspaceExecutableV3(relative_path: workspace_text_v3(entry, "relativePath")?, digest: workspace_text_v3(entry, "digest")?))
+        case _: return Err("container-workspace-manifest-type")
+    val request = ContainerWorkspacePreparationRequestV3(operation_id: workspace_text_v3(fields, "operationId")?,
+        exec_request: container_exec_request_decode_v3(workspace_text_v3(fields, "execRequest")?)?,
+        exec_birth: container_exec_birth_decode_v3(workspace_text_v3(fields, "execBirth")?)?,
+        exec_intent_digest: workspace_text_v3(fields, "execIntentDigest")?,
+        parent_operation_digest: workspace_text_v3(fields, "parentOperationDigest")?, parent_assignment_digest: workspace_text_v3(fields, "parentAssignmentDigest")?,
+        storage_reservation_digest: workspace_text_v3(fields, "storageReservationDigest")?, workspace_binding_digest: workspace_text_v3(fields, "workspaceBindingDigest")?,
+        mapping_binding_digest: workspace_text_v3(fields, "mappingBindingDigest")?, mapping_receipt_digest: workspace_text_v3(fields, "mappingReceiptDigest")?,
+        mount_profile: workspace_text_v3(fields, "mountProfile")?, input_relative_root: workspace_text_v3(fields, "inputRelativeRoot")?,
+        output_relative_root: workspace_text_v3(fields, "outputRelativeRoot")?, executables: executables)
+    if container_workspace_preparation_encode_v3(request)? != source: return Err("container-workspace-noncanonical")
+    Ok(request)

@@ -198,3 +198,52 @@ Paired compiler-lowering probe (same fixture and seed-hosted compiler modules,
 diagnostic only): baseline 9814.3 ms / 1,185,054,720-byte peak working set;
 repair 7859.8 ms / 1,186,283,520-byte peak working set. The 0.10% RSS delta and
 timing variation support no performance claim.
+
+## Fix verification
+
+2026-11-12, worktree `/home/yoon/dev/simple-lfix-any-slot-20261112` (branch
+`work/lfix-any-slot-20261112` off `origin/release/1.0.0`).
+
+Remaining pure-Simple gap found and fixed: plain **re-assignment** into an
+`Any`-typed local (`var ai: Any = 42; ai = 43`) stored the RAW scalar and let
+the assigned value's concrete HIR type overwrite the var's declared `Any`
+identity. Two arms added in `src/compiler/50.mir/mir_lowering_stmts.spl`
+`lower_assign_var` (plain-assign path): (1) a `case HirTypeKind.Any |
+HirTypeKind.TypeParam(_, _):` arm calling the proven `box_runtime_value`
+(mirroring the Let-site arm), and (2) the declared-`Any` type is kept across
+the re-assignment instead of adopting the scalar's type, so `to_text`/eq
+consumers keep routing through the tagged RuntimeValue ABI.
+
+Repro (hosted, seed-hosted pure-Simple backend LLVM inspection): pre-fix,
+`ab = false` stored raw zext 0 into the Any slot and
+`ab == any_identity(false)` compared tagged-int 0 against SPECIAL_FALSE 19
+(pure-Simple false; seed JIT oracle true). Post-fix the store is
+`0 * -8 + 19 = 19` and the comparison is `rt_native_eq(19, 19)`; LLVM for
+`ai = 43` stores `rt_value_int_wide(43)`; `af.to_text()` after re-assignment
+routes through `rt_value_to_string`.
+
+Spec results (seed hosted, worktree cwd):
+- `test/01_unit/compiler/mir/any_runtime_value_consumer_spec.spl` 8/8 PASS
+  (2 new examples: interpreter re-assignment oracle + MIR pins).
+- Neighbors: `assign_eval_order_lowering_spec.spl` 2/2,
+  `tagged_text_concat_reassignment_spec.spl` 10/10,
+  `compound_plus_assign_call_rhs_spec.spl` 6/6;
+  `scalar_compound_reassign_not_array_merge_spec.spl` 2/3 with the SAME
+  failure on the pristine base (pre-existing, unrelated).
+- Native/JIT behavioral admission still pending a self-hosted rebuild (as
+  before for this row); interpreter + MIR/LLVM-text pins are the hosted
+  evidence.
+
+## Triage 2026-11-25 (work/p2w1-aj-20261125) — SKIP, status OPEN remains accurate
+
+No code change this pass. The 2026-11-12 fix-verification section above is the
+current state: storage-side (Let/call-arg/re-assignment) boxing is fixed in
+pure-Simple, but (a) the consumer-side gaps (type-directed comparison boxing in
+`expr_dispatch.spl`'s Binary case; `is_text_conversion` render routing in
+`method_calls_literals.spl`) are still open and are a design task, not a
+surgical port — the 2026-09-13 triage's assessment stands; and (b) native/JIT
+behavioral admission requires a self-hosted Stage 2+ rebuild, which this
+Windows host cannot produce (pinned Rust seed rejects
+`@representation_boundary` repo-wide at HEAD, so even interpreter specs cannot
+run). Closing or fixing here would be claiming evidence nobody has; leaving
+OPEN with the header as-is.

@@ -1,0 +1,218 @@
+"""
+## Purpose and audience
+
+Executable unit and CLI contract for per-run lint budget propagation, child
+timeout classification (`exit == 124`), honest rule execution/skip/exemption
+receipts under `--fast` and `@allow`, and non-zero SHA-256 kernel receipt
+digests (`[C05]`, `[C06]`, `ED-T04`, `ED-T05`, `ED-T30`). Audience: lint CLI
+and lint-kernel maintainers.
+"""
+# @cover src/app/io/cli_lint_commands.spl
+# @cover src/compiler/90.tools/lint/_LintMain/legacy_adapter.spl
+# @cover src/lib/common/lint_kernel/model.spl
+# @req REQ-KPF-009
+
+use std.spec.*
+use app.io.cli_ops.{cli_kernel_executable_path, _cli_process_run}
+use common.kernel_plugin.ids.{kpf_digest256_is_zero, kpf_digest256_equal}
+use common.lint_kernel.model.{LintVerdict, lint_sha256_kpf_digest}
+use compiler.tools.lint.main.{
+    LintCliPolicy, LintConfig,
+    SimpleLintReceiptInputV1, simple_lint_adapter_result,
+    simple_lint_adapter_result_with_receipt_v1, simple_lint_verdict_name,
+    LintRunBudgetV1, lint_collect_exempted_rule_masks_v1
+}
+use app.io.cli_lint_commands.{
+    cli_lint_evaluate_run_receipt_v1, cli_lint_parse_child_stats_v1
+}
+
+val FX_CLEAN_A = "test/01_unit/app/fixtures/lint_fanout/a_clean.spl"
+val FX_CLEAN_C = "test/01_unit/app/fixtures/lint_fanout/c_clean.spl"
+
+fn bool_word(flag: bool) -> text:
+    if flag: "yes" else: "no"
+
+fn run_lint_cli(args: [text]) -> (text, text, i64):
+    _cli_process_run(cli_kernel_executable_path(), args)
+
+describe "Lint budget propagation, timeout classification, and honest rule receipts":
+    """Covers ED-T04, ED-T05, and ED-T30 across pure receipt evaluation, KPF SHA-256 digests, and CLI JSON summaries."""
+
+    context "Per-run LintRunBudgetV1 and child exit 124 timeout classification (ED-T04, ED-T30)":
+        """Ensures wall-clock, max-files, and supervisor exit-124 timeouts propagate to completeness and never yield pass or clean."""
+
+        it "parses CLI and environment budget bounds and detects deadline or file exhaustion":
+            """Verifies --budget-ms, --max-files, and --child-timeout-s configure LintRunBudgetV1 accurately."""
+            val budget = LintRunBudgetV1.from_cli_and_env(
+                ["lint", "--budget-ms=250", "--max-files=2", "--child-timeout-s=30", FX_CLEAN_A],
+                "", "", "", 1000
+            )
+            expect(budget.max_wall_ms).to_equal(250)
+            expect(budget.max_files).to_equal(2)
+            expect(budget.child_timeout_s).to_equal(30)
+            expect(bool_word(budget.wall_exhausted_at(1249))).to_equal("no")
+            expect(bool_word(budget.wall_exhausted_at(1250))).to_equal("yes")
+            expect(bool_word(budget.files_exhausted_at(2, 3))).to_equal("yes")
+            expect(bool_word(budget.files_exhausted_at(2, 2))).to_equal("no")
+
+        it "classifies child exit 124 as timed_out with budget_exhausted rather than pass or generic fail":
+            """Distinguishes GNU timeout exit 124 from non-timeout child crashes during fan-out aggregation."""
+            val timeout_parsed = cli_lint_parse_child_stats_v1("", 124)
+            expect(bool_word(timeout_parsed.timed_out)).to_equal("yes")
+            expect(bool_word(timeout_parsed.crashed)).to_equal("no")
+
+            val crash_parsed = cli_lint_parse_child_stats_v1("", 139)
+            expect(bool_word(crash_parsed.timed_out)).to_equal("no")
+            expect(bool_word(crash_parsed.crashed)).to_equal("yes")
+
+            val policy = LintCliPolicy.from_args(["lint"])
+            val receipt = cli_lint_evaluate_run_receipt_v1(
+                policy, false, 2u32, 1u32, 1u32, 1u32, 0u32,
+                0u32, 0u32, 0u32, 0, 0, true, "rev:timeout"
+            )
+            expect(receipt.completeness).to_equal("timed_out")
+            expect(bool_word(receipt.budget_exhausted)).to_equal("yes")
+            expect(receipt.timed_out_files).to_equal(1u32)
+            expect(receipt.status).to_equal("partial")
+            expect(receipt.exit_code).to_equal(1)
+
+        it "marks wall-clock budget exhaustion on otherwise clean files as incomplete and partial":
+            """Prevents clean-looking runs whose wall-clock budget expired from reporting pass or clean."""
+            val policy = LintCliPolicy.from_args(["lint"])
+            val receipt = cli_lint_evaluate_run_receipt_v1(
+                policy, false, 2u32, 2u32, 0u32, 0u32, 0u32,
+                0u32, 0u32, 0u32, 0, 0, true, "rev:wall-budget"
+            )
+            expect(receipt.completeness).to_equal("incomplete")
+            expect(receipt.status).to_equal("partial")
+            expect(receipt.exit_code).to_equal(1)
+
+        it "parses both legacy 7-field and extended 11-field child stats lines":
+            """Preserves backward compatibility for 7-field child lines while reading extended exemption and timeout fields."""
+            val legacy = cli_lint_parse_child_stats_v1("@@LINT-CHILD-STATS 2 1 1 1 0 1 1\n", 1)
+            expect(bool_word(legacy.has_stats)).to_equal("yes")
+            expect(legacy.completed_files).to_equal(1u32)
+            expect(legacy.error_files).to_equal(1u32)
+            expect(legacy.exempt_mask_lo).to_equal(0)
+
+            val extended = cli_lint_parse_child_stats_v1("@@LINT-CHILD-STATS 0 0 0 1 0 0 0 5 0 0 1\n", 0)
+            expect(bool_word(extended.has_stats)).to_equal("yes")
+            expect(extended.exempt_mask_lo).to_equal(5)
+            expect(bool_word(extended.budget_exhausted)).to_equal("yes")
+
+    context "Honest rule execution, skip, exemption, unsupported counts and SHA-256 digests (ED-T05)":
+        """Proves --fast, @allow exemptions, and unsupported flags report exact rule partitions and real SHA-256 digests."""
+
+        it "reports cost-skipped Medium and High rules honestly under --fast instead of 100 percent completion":
+            """Verifies --fast sets skipped_rules > 0, completed_rules < requested_rules, completeness incomplete, and status partial."""
+            val default_policy = LintCliPolicy.from_args(["lint"])
+            val fast_policy = LintCliPolicy.from_args(["lint", "--fast"])
+            val full_receipt = cli_lint_evaluate_run_receipt_v1(
+                default_policy, false, 1u32, 1u32, 0u32, 0u32, 0u32,
+                0u32, 0u32, 0u32, 0, 0, false, "rev:full"
+            )
+            val fast_receipt = cli_lint_evaluate_run_receipt_v1(
+                fast_policy, false, 1u32, 1u32, 0u32, 0u32, 0u32,
+                0u32, 0u32, 0u32, 0, 0, false, "rev:fast"
+            )
+            expect(full_receipt.requested_rules).to_equal(fast_receipt.requested_rules)
+            expect(full_receipt.completed_rules).to_equal(full_receipt.requested_rules)
+            expect(full_receipt.skipped_rules).to_equal(0u32)
+            expect(full_receipt.status).to_equal("clean")
+            expect(full_receipt.completeness).to_equal("pass")
+
+            expect(fast_receipt.skipped_rules as i64).to_be_greater_than(0)
+            expect(fast_receipt.completed_rules as i64).to_be_less_than(fast_receipt.requested_rules as i64)
+            expect(fast_receipt.completed_rules + fast_receipt.skipped_rules).to_equal(fast_receipt.requested_rules)
+            expect(fast_receipt.status).to_equal("partial")
+            expect(fast_receipt.completeness).to_equal("incomplete")
+            expect(fast_receipt.exit_code).to_equal(0)
+
+        it "tracks @allow exemptions and unsupported rules with exact rule-count conservation":
+            """Counts scoped @allow rules in exempted_rules and --mcp-perf in unsupported_rules without fabricating execution."""
+            val src = "# reason: FFI test fixture\n@allow(primitive_api)\npub fn f(x: i64) -> i64:\n    x\n"
+            val cfg = LintConfig.new()
+            val (mask_lo, mask_hi) = lint_collect_exempted_rule_masks_v1(cfg, cfg, src, false)
+            val policy = LintCliPolicy.from_args(["lint"])
+            val receipt = cli_lint_evaluate_run_receipt_v1(
+                policy, false, 1u32, 1u32, 0u32, 0u32, 0u32,
+                0u32, 0u32, 0u32, mask_lo, mask_hi, false, "rev:exempt"
+            )
+            expect(receipt.exempted_rules).to_equal(1u32)
+            expect(receipt.completed_rules + receipt.exempted_rules).to_equal(receipt.requested_rules)
+            expect(receipt.status).to_equal("clean")
+
+            val unsupported_receipt = cli_lint_evaluate_run_receipt_v1(
+                policy, true, 1u32, 1u32, 0u32, 0u32, 0u32,
+                0u32, 0u32, 0u32, 0, 0, false, "rev:mcp-perf"
+            )
+            expect(unsupported_receipt.unsupported_rules).to_equal(1u32)
+            expect(unsupported_receipt.status).to_equal("partial")
+            expect(unsupported_receipt.completeness).to_equal("unsupported")
+            expect(unsupported_receipt.exit_code).to_equal(1)
+
+        it "computes non-zero SHA-256 provider_receipt_digest and input_revision_digest and honors cancellation":
+            """Replaces hardcoded zero digests and cancelled=false in legacy_adapter with real SHA-256 digests and receipt flags."""
+            val legacy_res = simple_lint_adapter_result(1, 1, 0, 4, 4, 0, 0, 0)
+            expect(bool_word(kpf_digest256_is_zero(legacy_res.kernel_result.coverage.provider_receipt_digest))).to_equal("no")
+            expect(bool_word(kpf_digest256_is_zero(legacy_res.kernel_result.coverage.input_revision_digest))).to_equal("no")
+
+            val cancelled_input = SimpleLintReceiptInputV1(
+                requested_units: 2u32,
+                completed_units: 1u32,
+                not_analyzed_units: 1u32,
+                requested_rules: 10u32,
+                completed_rules: 8u32,
+                skipped_rules: 2u32,
+                exempted_rules: 0u32,
+                unsupported_rules: 0u32,
+                timed_out_rules: 0u32,
+                diagnostic_count: 0u32,
+                error_count: 0u32,
+                warning_count: 0u32,
+                budget_exhausted: false,
+                timed_out: false,
+                cancelled: true,
+                infrastructure_failed: false,
+                provider_identity: "simple-lint-cli",
+                input_revision_seed: "rev-a"
+            )
+            val cancelled_res = simple_lint_adapter_result_with_receipt_v1(cancelled_input)
+            expect(simple_lint_verdict_name(cancelled_res.kernel_result)).to_equal("cancelled")
+            expect(cancelled_res.exit_code).to_equal(1)
+
+            val d_a = lint_sha256_kpf_digest("seed-a")
+            val d_b = lint_sha256_kpf_digest("seed-b")
+            expect(bool_word(kpf_digest256_equal(d_a, d_b))).to_equal("no")
+
+    context "CLI end-to-end --fast and --max-files JSON receipt emission (ED-T04, ED-T05, ED-T30)":
+        """Executes the real simple lint CLI to verify JSON lint-summary carries honest rule counts and budget flags."""
+
+        it "emits partial status and non-zero skipped_rules for simple lint --fast --json on a clean file":
+            """Proves the CLI no longer fabricates clean/pass or 100 percent rule completion under --fast."""
+            val fast_policy = LintCliPolicy.from_args(["lint", "--fast"])
+            val expected = cli_lint_evaluate_run_receipt_v1(
+                fast_policy, false, 1u32, 1u32, 0u32, 0u32, 0u32,
+                0u32, 0u32, 0u32, 0, 0, false, FX_CLEAN_A
+            )
+            val (stdout, _stderr, code) = run_lint_cli(["lint", FX_CLEAN_A, "--fast", "--json", "--jobs", "1"])
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("\"type\":\"lint-summary\"")
+            expect(stdout).to_contain("\"status\":\"partial\"")
+            expect(stdout).to_contain("\"completeness\":\"incomplete\"")
+            expect(stdout).to_contain("\"requested_rules\":" + expected.requested_rules.to_text())
+            expect(stdout).to_contain("\"completed_rules\":" + expected.completed_rules.to_text())
+            expect(stdout).to_contain("\"skipped_rules\":" + expected.skipped_rules.to_text())
+
+        it "stops at --max-files=1 and reports budget_exhausted true with incomplete completeness":
+            """Proves run-level file budget enforcement halts before full coverage and fails closed with exit 1."""
+            val (stdout, _stderr, code) = run_lint_cli(
+                ["lint", FX_CLEAN_A, FX_CLEAN_C, "--max-files=1", "--jobs", "1", "--json"]
+            )
+            expect(code).to_equal(1)
+            expect(stdout).to_contain("\"type\":\"lint-summary\"")
+            expect(stdout).to_contain("\"status\":\"partial\"")
+            expect(stdout).to_contain("\"completed_files\":1")
+            expect(stdout).to_contain("\"not_linted_files\":1")
+            expect(stdout).to_contain("\"completeness\":\"incomplete\"")
+            expect(stdout).to_contain("\"budget_exhausted\":true")

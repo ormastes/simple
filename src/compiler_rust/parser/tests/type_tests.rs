@@ -275,3 +275,25 @@ fn test_fixed_size_array_type() {
         panic!("Expected let statement");
     }
 }
+
+#[test]
+fn test_unit_without_suffix() {
+    // Canonical suffix-less form: unit BitCount: u64
+    let module = parse("unit BitCount: u64").unwrap();
+    assert_eq!(module.items.len(), 1);
+
+    if let Node::Unit(u) = &module.items[0] {
+        assert_eq!(u.name, "BitCount");
+        assert_eq!(u.suffix, "");
+        assert_eq!(u.base_types.len(), 1);
+        assert!(matches!(&u.base_types[0], Type::Simple(n) if n == "u64"));
+    } else {
+        panic!("Expected unit definition");
+    }
+}
+
+#[test]
+fn test_unit_without_suffix_then_next_decl() {
+    let module = parse("unit BitCount: u64\nunit ByteCount: u64 as Bc\n").unwrap();
+    assert_eq!(module.items.len(), 2);
+}

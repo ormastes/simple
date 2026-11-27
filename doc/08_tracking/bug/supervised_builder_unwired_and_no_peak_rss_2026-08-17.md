@@ -1,8 +1,16 @@
 # Supervised builder: not yet wired to a front end, and peak RSS is always 0
 
 - **Filed:** 2026-08-17
-- **Status:** OPEN (all four gaps re-confirmed 2026-08-17 by an independent lane —
-  see *Re-confirmation* at the bottom; no code change made)
+- **Status:** FIX IMPLEMENTED, VERIFICATION PENDING (2026-11-03, branch work/mem-child-rusage).
+  Extern `rt_process_last_child_peak_rss_kib() -> i64` (-1 = not measured) added in the C runtime
+  (`runtime_process.c`: POSIX wraps `rt_fork_parent_peak_rss_bytes` = wait4 `ru_maxrss`; Windows reads
+  `PeakWorkingSetSize` from the child handle before close) and the Rust twins
+  (`runtime/src/child_peak_rss.rs`, interpreter `system.rs` bounded/timeout loops use `wait4` on unix and
+  `GetProcessMemoryInfo` on Windows). Simple API: `process_last_child_peak_rss_kib()` in `process_ops.spl`.
+  Spec: `test/01_unit/lib/nogc_sync_mut/io/process_child_peak_rss_spec.spl` (200 MB child -> [180,400) MB).
+  Verify after a seed redeploy: `bin/simple test test/01_unit/lib/nogc_sync_mut/io/process_child_peak_rss_spec.spl`.
+  NOT done here: threading `peak_rss_kib` into `TestFileResult` / `BuildUnitOutcome` (R6/R5 reporting), builder
+  front-end wiring (Gap 1), Win32 owned-observation rusage (still ENOTSUP in `runtime_process_owned.c`).
 - **Domain:** compiler / driver
 - **Severity:** P2
 
@@ -141,3 +149,49 @@ child's `ru_maxrss` needs a new `rt_process_*` primitive in the C/Rust runtime,
 which cannot be picked up without a bootstrap. Deliberately not attempted.
 Gaps 1, 3 and 4 are unchanged, and the "do not wire `spawn_fn` to a full
 rebuild" warning above still applies.
+
+## Gap 2 closed in source (2026-11-07, work/mem-supervised-peak-rss)
+
+Root cause of the constant 0: the 2026-11-03 extern only recorded a peak inside
+`process_run_bounded`/`run_timeout`. The supervisor reaps with the async
+`rt_process_wait(pid, 1)`, which used `try_wait`/`waitpid` and kept no rusage,
+and `build_supervised()` passed a literal `0` at all three record sites.
+
+Fix:
+- `rt_process_wait` now reaps through `child_peak_rss::reap` (Rust runtime
+  `env_process.rs` + interpreter `system.rs`, reset at entry) and through
+  `wait4` / `K32GetProcessMemoryInfo` in the C runtime (`runtime_process.c`;
+  POSIX keeps a "latest reap" flag so a later `run_bounded` still reports its own child).
+- `parallel.spl` reads `rt_process_last_child_peak_rss_kib()` immediately after
+  the reaping wait and records it (budget-killed units: 0, they are reaped inside
+  `rt_process_kill`, which measures nothing).
+- `BuildOutcomeSet.peak_rss_kb_of(path)` (-1 = no record).
+
+Spec: `test/01_unit/compiler/driver/supervised_build_peak_rss_spec.spl` (200 MB unit
+in [180, 400) MB, light unit in (0, 150) MB). Measured on the deployed seed
+(`bin/simple.exe`, 40739328 B, 2026-11-04): RED, fat unit reads 0 — the deployed seed
+predates the runtime half. Tagged `@tag:in-development` until the seed is redeployed;
+neighbour specs `supervised_build_survives_worker_death_spec` (4/4) and
+`supervised_build_outcome_class_guard_spec` (5/5) stay green with the Simple half.
+C half: `clang -fsyntax-only` clean for x86_64-w64-mingw32 (llvm-mingw) and
+x86_64-linux-musl. Rust half: not compiled in this lane (host disk at 100%, no
+cargo build possible) — the redeploy verifies it. Gaps 1, 3, 4 unchanged.
+
+## Windows investigation (2026-11-13, lane n3)
+
+- `supervised_build_survives_worker_death_spec.spl` "kills a unit that exceeds
+  its budget": `after_slow.spl` (`true`) was ALSO recorded TIMEOUT. The spec's
+  300 ms budget assumes POSIX `sh` start-up. The `/bin/sh -c "/bin/sh -c ..."`
+  wrapper under MSYS took 4.2-7.1 s for `true` on this host (one `sh -c true`
+  level is 1.6-2.7 s; `true.exe` direct is 32 ms). This is host timing, not a builder
+  defect. Fixed in the spec: the budget is 20000 ms on Windows and 300 ms elsewhere
+  (`sleep 30` stays above both). Windows seed: `passed=4 failed=0`.
+- `supervised_build_peak_rss_spec.spl` (still `@tag:in-development`) is NOT
+  fixed. The seed DOES record a peak on Windows, but the wrong one: 10-11 MiB for
+  the 200 MB awk unit. `child_peak_rss.rs::windows_peak_working_set_kib` and the C
+  twin (`runtime_process.c` ~line 700) read `PeakWorkingSetSize` of the DIRECT
+  child, which is the MSYS `sh.exe` wrapper. POSIX `wait4` `ru_maxrss` includes
+  reaped descendants. Parity needs the runtime (both twins) to put the child in a
+  Job object and report the job's per-process peak
+  (`JOBOBJECT_EXTENDED_LIMIT_INFORMATION.PeakProcessMemoryUsed`, which is commit,
+  not working set). That is a seed/runtime change that needs a seed rebuild. Owner decision.

@@ -3,10 +3,77 @@ use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical}
 use std.common.sdn.parser.{parse_with_spans_and_issues}
 
+# Per-event facts the runner can record cheaply. All optional: events written
+# before these existed decode with every fact absent (never a guessed value).
+pub struct TestEventAtMicros:
+    value: i64
+
+pub struct TestFailureSummary:
+    value: text
+
+pub struct TestHostTriple:
+    value: text
+
+pub struct TestBackendName:
+    value: text
+
+pub struct TestDefinitionDigest:
+    value: text
+
+pub struct TestBinaryDigest:
+    value: text
+
+# Structured class of a failed attempt, from signals the runner really has.
+pub enum TestFailureCode:
+    Assertion
+    Panic
+    Timeout
+    Unknown
+
+pub fn test_failure_code_name(code: TestFailureCode) -> text:
+    match code:
+        case TestFailureCode.Assertion: "assertion"
+        case TestFailureCode.Panic: "panic"
+        case TestFailureCode.Timeout: "timeout"
+        case TestFailureCode.Unknown: "unknown"
+
+# Unrecognised wire text is rejected, never mapped to Unknown.
+pub fn parse_test_failure_code(name: text) -> TestFailureCode?:
+    if name == "assertion": return Some(TestFailureCode.Assertion)
+    if name == "panic": return Some(TestFailureCode.Panic)
+    if name == "timeout": return Some(TestFailureCode.Timeout)
+    if name == "unknown": return Some(TestFailureCode.Unknown)
+    None
+
+# Everything in the spec framework's failure list comes from fail_assertion, so a
+# message with no other marker is an assertion. The pending-rejected message is
+# not an assertion and stays Unknown; an empty message has no signal at all.
+pub fn classify_test_failure_code(failure: text) -> TestFailureCode:
+    if failure == "":
+        return TestFailureCode.Unknown
+    val lower = failure.lower()
+    if lower.starts_with("panic") or lower.contains("panicked at"):
+        return TestFailureCode.Panic
+    if lower.starts_with("timed out") or lower.starts_with("timeout"):
+        return TestFailureCode.Timeout
+    if lower.starts_with("pending rejected"):
+        return TestFailureCode.Unknown
+    TestFailureCode.Assertion
+
+pub struct TraceCaseFacts:
+    at: TestEventAtMicros? = None
+    failure: TestFailureSummary? = None
+    host: TestHostTriple? = None
+    backend: TestBackendName? = None
+    failure_code: TestFailureCode? = None
+    definition_digest: TestDefinitionDigest? = None
+    binary_digest: TestBinaryDigest? = None
+
 pub struct TraceCaseEvent:
     case_name: text
     phase: text
     outcome: text
+    facts: TraceCaseFacts? = None
 
 pub fn encode_trace_case_event(event: TraceCaseEvent) -> text:
     var fields: Dict<text, SdnValue> = {}
@@ -14,6 +81,30 @@ pub fn encode_trace_case_event(event: TraceCaseEvent) -> text:
     fields["case_name"] = SdnValue.String(event.case_name)
     fields["phase"] = SdnValue.String(event.phase)
     fields["outcome"] = SdnValue.String(event.outcome)
+    match event.facts:
+        case Some(facts):
+            match facts.at:
+                case Some(at): fields["at_micros"] = SdnValue.Int(at.value)
+                case None: pass
+            match facts.failure:
+                case Some(failure): fields["failure"] = SdnValue.String(failure.value)
+                case None: pass
+            match facts.host:
+                case Some(host): fields["host"] = SdnValue.String(host.value)
+                case None: pass
+            match facts.backend:
+                case Some(backend): fields["backend"] = SdnValue.String(backend.value)
+                case None: pass
+            match facts.failure_code:
+                case Some(code): fields["failure_code"] = SdnValue.String(test_failure_code_name(code))
+                case None: pass
+            match facts.definition_digest:
+                case Some(digest): fields["definition_digest"] = SdnValue.String(digest.value)
+                case None: pass
+            match facts.binary_digest:
+                case Some(digest): fields["binary_digest"] = SdnValue.String(digest.value)
+                case None: pass
+        case None: pass
     sdn_encode_canonical(SdnValue.Dict(fields))
 
 # Canonical SDN payload is single-line even when case names contain newlines.
@@ -23,7 +114,7 @@ pub fn collect_trace_case_events(output: text) -> text:
     val marker = "SIMPLE_TRACE_CASE_EVENT "
     for line in output.split("\n"):
         if line.starts_with(marker):
-            records.push(line.substring(marker.len(), line.len()).trim())
+            records.push(line.substring(marker.len(), line.byte_len()).trim())
     if records.len() == 0:
         return ""
     "[" + records.join(", ") + "]"
@@ -46,6 +137,62 @@ fn event_text(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
         case SdnValue.String(value): Ok(value)
         case _: Err("case-event field must be text: " + name)
 
+fn event_optional_text(fields: Dict<text, SdnValue>, name: text) -> Result<text?, text>:
+    if not fields.contains_key(name):
+        return Ok(None)
+    Ok(Some(event_text(fields, name)?))
+
+# Optional facts: only the known extra keys are accepted; a wrong type is an
+# error, an absent key is an absent fact.
+fn decode_event_facts(fields: Dict<text, SdnValue>) -> Result<TraceCaseFacts?, text>:
+    for key in fields.keys():
+        if key != "schema" and key != "case_name" and key != "phase" and key != "outcome" and key != "at_micros" and key != "failure" and key != "host" and key != "backend" and key != "failure_code" and key != "definition_digest" and key != "binary_digest":
+            return Err("unsupported case-event field: " + key)
+    var at: TestEventAtMicros? = None
+    if fields.contains_key("at_micros"):
+        match fields["at_micros"]:
+            case SdnValue.Int(micros):
+                if micros < 0:
+                    return Err("case-event at_micros must not be negative")
+                at = Some(TestEventAtMicros(value: micros))
+            case _: return Err("case-event field must be an integer: at_micros")
+    var failure: TestFailureSummary? = None
+    val failure_raw = event_optional_text(fields, "failure")?
+    match failure_raw:
+        case Some(text_value): failure = Some(TestFailureSummary(value: text_value))
+        case None: pass
+    var host: TestHostTriple? = None
+    val host_raw = event_optional_text(fields, "host")?
+    match host_raw:
+        case Some(text_value): host = Some(TestHostTriple(value: text_value))
+        case None: pass
+    var backend: TestBackendName? = None
+    val backend_raw = event_optional_text(fields, "backend")?
+    match backend_raw:
+        case Some(text_value): backend = Some(TestBackendName(value: text_value))
+        case None: pass
+    var failure_code: TestFailureCode? = None
+    val code_raw = event_optional_text(fields, "failure_code")?
+    match code_raw:
+        case Some(code_text):
+            match parse_test_failure_code(code_text):
+                case Some(code): failure_code = Some(code)
+                case None: return Err("unknown case-event failure_code: " + code_text)
+        case None: pass
+    var definition_digest: TestDefinitionDigest? = None
+    val definition_raw = event_optional_text(fields, "definition_digest")?
+    match definition_raw:
+        case Some(text_value): definition_digest = Some(TestDefinitionDigest(value: text_value))
+        case None: pass
+    var binary_digest: TestBinaryDigest? = None
+    val binary_raw = event_optional_text(fields, "binary_digest")?
+    match binary_raw:
+        case Some(text_value): binary_digest = Some(TestBinaryDigest(value: text_value))
+        case None: pass
+    if fields.len() == 4:
+        return Ok(None)
+    Ok(Some(TraceCaseFacts(at: at, failure: failure, host: host, backend: backend, failure_code: failure_code, definition_digest: definition_digest, binary_digest: binary_digest)))
+
 pub fn decode_trace_case_events(source: text) -> Result<[TraceCaseEvent], text>:
     if source == "" or source.len() > 4194304:
         return Err("case-event evidence absent or exceeds 4 MiB")
@@ -62,11 +209,12 @@ pub fn decode_trace_case_events(source: text) -> Result<[TraceCaseEvent], text>:
         val fields = match value:
             case SdnValue.Dict(items): items
             case _: return Err("case-event must be a dictionary")
-        if fields.len() != 4 or event_text(fields, "schema")? != "simple.trace.case-event/v1":
+        if event_text(fields, "schema")? != "simple.trace.case-event/v1":
             return Err("unsupported case-event schema")
         val name = event_text(fields, "case_name")?
         val phase = event_text(fields, "phase")?
         val outcome = event_text(fields, "outcome")?
+        val facts = decode_event_facts(fields)?
         if name == "":
             return Err("case-event name is empty")
         if phase == "started":
@@ -77,7 +225,7 @@ pub fn decode_trace_case_events(source: text) -> Result<[TraceCaseEvent], text>:
                 return Err("unknown case outcome")
         else:
             return Err("unknown case-event phase")
-        events.push(TraceCaseEvent(name, phase, outcome))
+        events.push(TraceCaseEvent(case_name: name, phase: phase, outcome: outcome, facts: facts))
     Ok(events)
 
 pub fn trace_case_events_completed(events: [TraceCaseEvent]) -> Result<[TraceCaseEvent], text>:

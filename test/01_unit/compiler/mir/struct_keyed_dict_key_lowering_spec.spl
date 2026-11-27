@@ -1,0 +1,477 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+Struct-keyed Dict operations must use a canonical key word natively.
+
+A native struct value is a headerless rt_alloc field block. Passed verbatim as
+a dict key, both runtimes hash and compare it by ADDRESS, so a separately built
+equal key (or a copy of the stored one) misses: Stage 3's
+`forward_join_points_for_module_v1` (`Dict<SymbolId, HirFunction>`) got nil
+and SIGSEGVed. The seed interpreter compares struct keys by value.
+
+Contract pinned here:
+- a single-field struct over an integer word (`SymbolId`) is keyed by its
+  field's boxed integer (`rt_value_int_wide`), on every key-in path;
+- every key-out path (`keys()`, `for k in d`, `items()`) rebuilds a real struct
+  block (an `Aggregate(Struct)`) from that integer;
+- any other struct key type is refused at compile time with an error naming
+  the type -- never a silent address-compared miss;
+- generics are one erased body that keys by the raw word, so every place a
+  value-keyed struct meets a type parameter used as a Dict key (a generic
+  call's argument, a dict declared `Dict<K, _>`) is refused with
+  `E-MIR-STRUCT-DICT-KEY`; a generic dict that never crosses stays raw.
+
+Native oracle: test/fixtures/native_struct_keyed_dict/main.spl.
+"""
+
+use std.spec
+use std.io_runtime.{env_set}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir._MirLowering.module_lowering.*
+
+class LoweredKeys:
+    functions: Dict<text, MirFunction>
+    errors: [text]
+
+fn lower_keys(src: text, bootstrap_hir: bool) -> LoweredKeys:
+    val module = parse_full_frontend(src, "structkey.spl", "structkey.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("structkey.spl")
+    if bootstrap_hir:
+        env_set("SIMPLE_BOOTSTRAP", "1")
+    val hir = hir_lowering.lower_module(module)
+    if bootstrap_hir:
+        env_set("SIMPLE_BOOTSTRAP", "")
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errors: [text] = []
+    for e in mir_lowering.errors:
+        errors.push(e.message)
+    var out: Dict<text, MirFunction> = {}
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.len()) else: function.name
+        out[short] = function
+    LoweredKeys(functions: out, errors: errors)
+
+fn lower_imported_keys(provider_source: text, consumer_source: text) -> LoweredKeys:
+    """`Sid` declared in another module, as SymbolId is in every consumer."""
+    val log = Logger(level: 0)
+    val provider_ast = parse_full_frontend(provider_source, "lib/ids.spl", "lib.ids", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.ids"] = provider_ast
+    val sources = [SourceFile(path: "lib/ids.spl", content: provider_source, module_name: "lib.ids")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var provider_lowering = hirlowering_for_module("lib/ids.spl", surfaces)
+    var consumer_lowering = hirlowering_for_module("app/main.spl", surfaces)
+    val provider_hir = provider_lowering.lower_module(provider_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["provider_hir"] = provider_hir
+    prescan_mods["consumer_hir"] = consumer_hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "provider_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
+    val mir = mir_lowering.lower_module(consumer_hir)
+    var errors: [text] = []
+    for e in consumer_lowering.errors:
+        errors.push("hir: {e}")
+    for e in mir_lowering.errors:
+        errors.push(e.message)
+    var out: Dict<text, MirFunction> = {}
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.len()) else: function.name
+        out[short] = function
+    LoweredKeys(functions: out, errors: errors)
+
+fn operand_local_id(operand: MirOperand) -> i64:
+    match operand.kind:
+        case MirOperandKind.Copy(local): return local.id
+        case MirOperandKind.Move(local): return local.id
+        case _: return -1
+
+fn callee_name(func: MirOperand) -> text:
+    match func.kind:
+        case MirOperandKind.Const(MirConstValue.Str(name), _): return name
+        case _: return ""
+
+fn definer_of(function: MirFunction, local_id: i64) -> text:
+    """What defines `local_id`: `call:<name>`, `aggregate`, `param`, or `other`."""
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(dest, func, args):
+                    if val d = dest:
+                        if d.id == local_id:
+                            val name = callee_name(func)
+                            # An integer box says nothing by itself: boxing the
+                            # struct POINTER also calls rt_value_int_wide. Name
+                            # what was boxed.
+                            if name == "rt_value_int_wide" and args.len() == 1:
+                                return "call:rt_value_int_wide(" + definer_of(function, operand_local_id(args[0])) + ")"
+                            return "call:" + name
+                case MirInstKind.Load(dest, _):
+                    if dest.id == local_id: return "load"
+                case MirInstKind.GetField(dest, _, _):
+                    if dest.id == local_id: return "getfield"
+                case MirInstKind.Cast(dest, operand, _):
+                    if dest.id == local_id: return definer_of(function, operand_local_id(operand))
+                case MirInstKind.Aggregate(dest, _, _):
+                    if dest.id == local_id: return "aggregate"
+                case MirInstKind.Copy(dest, src):
+                    if dest.id == local_id: return definer_of(function, src.id)
+                case MirInstKind.Move(dest, src):
+                    if dest.id == local_id: return definer_of(function, src.id)
+                case _: ()
+    for local in function.locals:
+        if local.id.id == local_id:
+            match local.kind:
+                case LocalKind.Arg(_): return "param"
+                case _: ()
+    "other"
+
+fn dict_key_definers(function: MirFunction) -> [text]:
+    """Definer of the key argument of every keyed rt_dict_* call."""
+    var out: [text] = []
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, func, args):
+                    val name = callee_name(func)
+                    if name == "rt_dict_get" or name == "rt_dict_set" or name == "rt_dict_contains" or name == "rt_dict_contains_key" or name == "rt_dict_remove":
+                        if args.len() >= 2:
+                            out.push(name + "<-" + definer_of(function, operand_local_id(args[1])))
+                case _: ()
+    out
+
+fn rebuilt_key_count(function: MirFunction) -> i64:
+    """Struct aggregates built from an UNBOXED runtime word: only the key-out
+    rebuild emits these (a constructor's field operand is a source value)."""
+    var n = 0
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Aggregate(_, kind, operands):
+                    match kind:
+                        case AggregateKind.Struct(_):
+                            if operands.len() == 1 and definer_of(function, operand_local_id(operands[0])) == "call:rt_value_as_int_wide":
+                                n = n + 1
+                        case _: ()
+                case _: ()
+    n
+
+fn expect_key_definers(function: MirFunction?, suffix: text):
+    expect(function.?).to_equal(true)
+    if val f = function:
+        val definers = dict_key_definers(f)
+        expect(definers.len() > 0).to_equal(true)
+        for d in definers:
+            expect(d).to_end_with(suffix)
+
+fn expect_canonical_keys(function: MirFunction?):
+    # The boxed word must be the struct's FIELD, not its pointer or a copy of it.
+    expect_key_definers(function, "<-call:rt_value_int_wide(getfield)")
+
+val NEWTYPE_SOURCE: text = "struct Sid:\n    id: i64\n\n" +
+    "fn get_one(d: Dict<Sid, i64>) -> i64:\n    d[Sid(id: 1)] ?? -1\n\n" +
+    "fn put_one(d: Dict<Sid, i64>):\n    d[Sid(id: 1)] = 7\n\n" +
+    "fn has_one(d: Dict<Sid, i64>) -> bool:\n    d.contains_key(Sid(id: 1))\n\n" +
+    "fn drop_one(d: Dict<Sid, i64>):\n    d.remove(Sid(id: 1))\n\n" +
+    "fn set_one(d: Dict<Sid, i64>):\n    d.set(Sid(id: 1), 7)\n\n" +
+    "fn lit_one() -> Dict<Sid, i64>:\n    {{Sid(id: 1): 7}}\n\n" +
+    "fn get_k(d: Dict<Sid, i64>, k: Sid) -> i64:\n    d[k] ?? -1\n\n" +
+    "fn key_ids(d: Dict<Sid, i64>) -> i64:\n    var s = 0\n    for k in d.keys():\n        s = s + k.id\n    s\n\n" +
+    "fn loop_ids(d: Dict<Sid, i64>) -> i64:\n    var s = 0\n    for k in d:\n        s = s + k.id\n    s\n\n" +
+    "fn item_ids(d: Dict<Sid, i64>) -> i64:\n    var s = 0\n    for (k, v) in d.items():\n        s = s + k.id + v\n    s\n"
+
+val PAIR_SOURCE: text = "struct Pair:\n    a: i64\n    b: i64\n\n" +
+    "fn get_pair(d: Dict<Pair, i64>, k: Pair) -> i64:\n    d[k] ?? -1\n"
+
+val INT_SOURCE: text = "fn get_int(d: Dict<i64, i64>, k: i64) -> i64:\n    d[k] ?? -1\n"
+
+describe "struct-keyed Dict key lowering (native)":
+    it "keys a single-field integer struct by its boxed field on get/set/contains/remove":
+        val lowered = lower_keys(NEWTYPE_SOURCE, false)
+        expect(lowered.errors.len()).to_equal(0)
+        for name in ["get_one", "put_one", "has_one", "drop_one", "set_one", "lit_one", "get_k"]:
+            expect_canonical_keys(lowered.functions.get(name))
+
+    it "rebuilds struct keys on keys(), for-in and items()":
+        val lowered = lower_keys(NEWTYPE_SOURCE, false)
+        for name in ["key_ids", "loop_ids", "item_ids"]:
+            val f = lowered.functions.get(name)
+            expect(f.?).to_equal(true)
+            if val present = f:
+                expect(rebuilt_key_count(present) > 0).to_equal(true)
+
+    it "refuses an unsupported struct key type at compile time, naming it":
+        val lowered = lower_keys(PAIR_SOURCE, false)
+        var named = false
+        for e in lowered.errors:
+            if e.contains("Pair") and e.contains("dict key"):
+                named = true
+        expect(named).to_equal(true)
+
+    it "keys and rebuilds a struct declared in another module":
+        val provider = "pub struct Sid:\n    id: i64\n"
+        val consumer = "use lib.ids.\{Sid\}\n\n" +
+            "fn get_k(d: Dict<Sid, i64>, k: Sid) -> i64:\n    d[k] ?? -1\n\n" +
+            "fn key_ids(d: Dict<Sid, i64>) -> i64:\n    var s = 0\n    for k in d.keys():\n        s = s + k.id\n    s\n"
+        val lowered = lower_imported_keys(provider, consumer)
+        expect(lowered.errors).to_equal([])
+        expect_canonical_keys(lowered.functions.get("get_k"))
+        val keys_fn = lowered.functions.get("key_ids")
+        expect(keys_fn.?).to_equal(true)
+        if val present = keys_fn:
+            expect(rebuilt_key_count(present) > 0).to_equal(true)
+
+    it "leaves integer keys unchanged":
+        val lowered = lower_keys(INT_SOURCE, false)
+        expect(lowered.errors.len()).to_equal(0)
+        expect_key_definers(lowered.functions.get("get_int"), "<-call:rt_value_int_wide(param)")
+
+# A struct key held in an Optional local (`var dk: SymbolId? = nil` then
+# `f_functions[dk] = ..`, 8 sites in generated/hir_codec.spl) is a `T?` word:
+# the canonical Option box or a raw record pointer. Not recognized as a struct,
+# it was keyed by that POINTER, and keys()/for-(k, v) then rebuilt the pointer
+# as the id field (native `a -1 -1 3 / b 588132720154563`, seed `a 70 71 3 /
+# b 24`). Contract: unwrap (rt_unwrap_or_self, both lanes) behind a Some test
+# that panics on None, then key by the field like a plain struct.
+val OPTIONAL_KEY_SOURCE: text = "struct Sid:\n    id: i64\n\n" +
+    "fn opt_put(d: Dict<Sid, i64>, k: Sid?):\n    d[k] = 7\n\n" +
+    "fn opt_get(d: Dict<Sid, i64>, k: Sid?) -> i64:\n    d[k] ?? -1\n\n" +
+    "fn opt_get_method(d: Dict<Sid, i64>, k: Sid?) -> i64:\n    d.get(k) ?? -1\n\n" +
+    "fn opt_has(d: Dict<Sid, i64>, k: Sid?) -> bool:\n    d.contains_key(k)\n\n" +
+    "fn opt_contains(d: Dict<Sid, i64>, k: Sid?) -> bool:\n    d.contains(k)\n\n" +
+    "fn opt_drop(d: Dict<Sid, i64>, k: Sid?):\n    d.remove(k)\n\n" +
+    "fn opt_set(d: Dict<Sid, i64>, k: Sid?):\n    d.set(k, 7)\n\n" +
+    "fn opt_local(d: Dict<Sid, i64>, n: i64) -> i64:\n    var dk: Sid? = nil\n    if n >= 0:\n        dk = Sid(id: n)\n    d[dk] = 70\n    d[dk] ?? -1\n"
+
+fn key_field_bases(function: MirFunction) -> [text]:
+    """Definer of the record each canonical key word's GetField reads."""
+    var out: [text] = []
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, func, args):
+                    val name = callee_name(func)
+                    if name == "rt_dict_get" or name == "rt_dict_set" or name == "rt_dict_contains" or name == "rt_dict_contains_key" or name == "rt_dict_remove":
+                        if args.len() >= 2:
+                            out.push(key_field_base_of(function, operand_local_id(args[1])))
+                case _: ()
+    out
+
+fn key_field_base_of(function: MirFunction, key_id: i64) -> text:
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(dest, func, args):
+                    if val d = dest:
+                        if d.id == key_id and callee_name(func) == "rt_value_int_wide" and args.len() == 1:
+                            return key_field_base_of(function, operand_local_id(args[0]))
+                case MirInstKind.GetField(dest, base, _):
+                    if dest.id == key_id: return definer_of(function, operand_local_id(base))
+                case MirInstKind.Cast(dest, operand, _):
+                    if dest.id == key_id: return key_field_base_of(function, operand_local_id(operand))
+                case MirInstKind.Copy(dest, src):
+                    if dest.id == key_id: return key_field_base_of(function, src.id)
+                case MirInstKind.Move(dest, src):
+                    if dest.id == key_id: return key_field_base_of(function, src.id)
+                case _: ()
+    "none"
+
+describe "struct key held in an Optional local":
+    it "unwraps a Some-checked Sid? key and keys it by its field on every key-in path":
+        val lowered = lower_keys(OPTIONAL_KEY_SOURCE, false)
+        expect(lowered.errors).to_equal([])
+        for name in ["opt_put", "opt_get", "opt_get_method", "opt_has", "opt_contains", "opt_drop", "opt_set", "opt_local"]:
+            val f = lowered.functions.get(name)
+            expect_canonical_keys(f)
+            if val present = f:
+                for base in key_field_bases(present):
+                    expect(base).to_equal("call:rt_unwrap_or_self")
+                val called = called_names(present)
+                expect(called.contains("rt_is_some")).to_equal(true)
+                expect(called.contains("rt_panic")).to_equal(true)
+
+    it "refuses a multi-field struct held in an Optional local, naming it":
+        val src = "struct Pair:\n    a: i64\n    b: i64\n\n" +
+            "fn opt_pair(d: Dict<Pair, i64>, k: Pair?) -> i64:\n    d[k] ?? -1\n"
+        val lowered = lower_keys(src, false)
+        var named = false
+        for e in lowered.errors:
+            if e.contains("E-MIR-STRUCT-DICT-KEY") and e.contains("Pair"):
+                named = true
+        expect(named).to_equal(true)
+
+# Generics are ONE erased body: a `K`-typed slot holds the caller's word, so an
+# erased body keys a `Dict<K, _>` by the struct POINTER while concrete code keys
+# the same dict by the struct's FIELD. Every place where a word-struct binding
+# meets a type parameter used as a Dict key must be refused; generic code whose
+# dict never crosses (a local `Dict<T, _>`) stays consistently raw.
+val GENERIC_HEADER: text = "struct Sid:\n    id: i64\n\n" +
+    "fn gget<K>(d: Dict<K, i64>, k: K) -> i64:\n    d[k] ?? -1\n\n" +
+    "fn gkeys<K>(d: Dict<K, i64>) -> [K]:\n    d.keys()\n\n" +
+    "fn gmake<K>(k: K) -> Dict<K, i64>:\n    var d: Dict<K, i64> = {{}}\n    d[k] = 1\n    d\n\n" +
+    "fn gfirst<K>(ks: [K]) -> Dict<K, i64>:\n    var d: Dict<K, i64> = {{}}\n    d[ks[0]] = 1\n    d\n\n" +
+    "class GBox<K>:\n    d: Dict<K, i64>\n\n" +
+    "fn gcount<T>(xs: [T]) -> i64:\n    var seen: Dict<T, bool> = {{}}\n    for x in xs:\n        seen[x] = true\n    seen.len()\n\n" +
+    "fn gpick<T>(a: T, b: T) -> T:\n    a\n\n"
+
+fn expect_generic_refusal(body: text):
+    val lowered = lower_keys(GENERIC_HEADER + body, false)
+    var refused = false
+    for e in lowered.errors:
+        if e.contains("E-MIR-STRUCT-DICT-KEY") and e.contains("Sid"):
+            refused = true
+    expect(refused).to_equal(true)
+
+describe "struct-keyed Dict across generic (erased) boundaries":
+    it "refuses a concrete struct-keyed dict passed to a generic Dict<K, _> parameter":
+        expect_generic_refusal("fn use_get(d: Dict<Sid, i64>) -> i64:\n    gget(d, Sid(id: 1))\n")
+
+    it "refuses reading keys of a concrete struct-keyed dict through a generic body":
+        expect_generic_refusal("fn use_keys(d: Dict<Sid, i64>) -> i64:\n    var n = 0\n    for k in gkeys(d):\n        n = n + k.id\n    n\n")
+
+    it "refuses binding a struct to K of a generic that returns Dict<K, _>":
+        expect_generic_refusal("fn use_make() -> i64:\n    val d = gmake(Sid(id: 1))\n    d[Sid(id: 1)] ?? -1\n")
+
+    it "refuses a struct array bound to [K] of a generic that returns Dict<K, _>":
+        expect_generic_refusal("fn use_first(ks: [Sid]) -> i64:\n    val d = gfirst(ks)\n    d[Sid(id: 1)] ?? -1\n")
+
+    it "refuses a struct key on a generic class field declared Dict<K, _>":
+        expect_generic_refusal("fn use_field(b: GBox<Sid>) -> i64:\n    b.d[Sid(id: 1)] ?? -1\n")
+
+    it "refuses a generic class method exposing Dict<K, _> on a struct-instantiated receiver":
+        expect_generic_refusal("class HBox<K>:\n    d: Dict<K, i64>\n\n    fn dict_of() -> Dict<K, i64>:\n        self.d\n\n" +
+            "fn use_method(b: HBox<Sid>) -> i64:\n    b.dict_of()[Sid(id: 1)] ?? -1\n")
+
+    it "refuses a generic class with a Dict<K, _> field instantiated with a struct wherever it is typed":
+        expect_generic_refusal("fn mk_box() -> GBox<Sid>:\n    GBox<Sid>(d: {{}})\n")
+        expect_generic_refusal("fn takes(d: Dict<Sid, i64>) -> i64:\n    d[Sid(id: 1)] ?? -1\n\n" +
+            "fn pass_field(b: GBox<Sid>) -> i64:\n    takes(b.d)\n")
+
+    it "does not refuse generic dict calls whose key binding is provably not a struct":
+        val body = "fn mk_text() -> Dict<text, i64>:\n    var d: Dict<text, i64> = {{}}\n    d[\"a\"] = 1\n    d\n\n" +
+            "fn use_text_first() -> i64:\n    gfirst([\"a\"]).len()\n\n" +
+            "fn use_text_keys() -> i64:\n    gkeys(mk_text()).len()\n"
+        val lowered = lower_keys(GENERIC_HEADER + body, false)
+        expect(lowered.errors).to_equal([])
+
+    it "keeps generic-local dicts and opaque T bindings legal, and concrete sites canonical":
+        val body = "fn use_count(xs: [Sid]) -> i64:\n    gcount(xs)\n\n" +
+            "fn use_pick(a: Dict<Sid, i64>, b: Dict<Sid, i64>) -> i64:\n    gpick(a, b)[Sid(id: 1)] ?? -1\n\n" +
+            "fn use_ident(d: Dict<Sid, i64>, s: Sid) -> i64:\n    d[gpick(s, s)] ?? -1\n"
+        val lowered = lower_keys(GENERIC_HEADER + body, false)
+        expect(lowered.errors).to_equal([])
+        expect_canonical_keys(lowered.functions.get("use_ident"))
+        val count_fn = lowered.functions.get("gcount")
+        expect(count_fn.?).to_equal(true)
+        if val present = count_fn:
+            # An erased body never sees a struct: its keys stay raw words.
+            for d in dict_key_definers(present):
+                expect(d.contains("getfield")).to_equal(false)
+
+fn called_names(function: MirFunction) -> [text]:
+    var out: [text] = []
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, func, _): out.push(callee_name(func))
+                case _: ()
+    out
+
+# A dict passed through a bare `T` (`fn pick<T>(a: T, b: T) -> T`) is one
+# opaque word to the erased body, so the binding is legal -- but the call
+# site must still type its result as that dict. Untyped, `pick(d, d)[k]`
+# fell to the array index path and `pick(d, d).len()` to a generic len:
+# natively `t ` (empty) and `0` where the seed interpreter gives `90` and `3`.
+describe "dict returned through a bare generic T":
+    it "types the call result as the argument's dict, keying struct and int keys like a declared dict":
+        val body = "fn use_pick(a: Dict<Sid, i64>, b: Dict<Sid, i64>) -> i64:\n    gpick(a, b)[Sid(id: 1)] ?? -1\n\n" +
+            "fn use_pick_bound(a: Dict<Sid, i64>) -> i64:\n    val p = gpick(a, a)\n    p[Sid(id: 1)] ?? -1\n\n" +
+            "fn use_pick_int(a: Dict<i64, i64>) -> i64:\n    gpick(a, a)[3] ?? -1\n\n" +
+            "fn use_pick_len(a: Dict<Sid, i64>) -> i64:\n    val p = gpick(a, a)\n    p.len()\n"
+        val lowered = lower_keys(GENERIC_HEADER + body, false)
+        expect(lowered.errors).to_equal([])
+        expect_canonical_keys(lowered.functions.get("use_pick"))
+        expect_canonical_keys(lowered.functions.get("use_pick_bound"))
+        val int_fn = lowered.functions.get("use_pick_int")
+        expect(int_fn.?).to_equal(true)
+        if val present = int_fn:
+            expect(dict_key_definers(present).len() > 0).to_equal(true)
+        val len_fn = lowered.functions.get("use_pick_len")
+        expect(len_fn.?).to_equal(true)
+        if val present = len_fn:
+            expect(called_names(present).contains("rt_dict_len")).to_equal(true)
+
+    it "types the result when another binder of the same call is bound to a record":
+        val body = "fn gleft<T, U>(a: T, u: U) -> T:\n    a\n\n" +
+            "fn use_left(a: Dict<Sid, i64>) -> i64:\n    gleft(a, Sid(id: 2))[Sid(id: 1)] ?? -1\n"
+        val lowered = lower_keys(GENERIC_HEADER + body, false)
+        expect(lowered.errors).to_equal([])
+        expect_canonical_keys(lowered.functions.get("use_left"))
+
+    it "types the result of a [T] -> T generic over an array of dicts":
+        val body = "fn gfirst_of<T>(xs: [T]) -> T:\n    xs[0]\n\n" +
+            "fn use_first_of(ds: [Dict<Sid, i64>]) -> i64:\n    gfirst_of(ds)[Sid(id: 1)] ?? -1\n"
+        val lowered = lower_keys(GENERIC_HEADER + body, false)
+        expect(lowered.errors).to_equal([])
+        expect_canonical_keys(lowered.functions.get("use_first_of"))
+
+# Struct canonicalization belongs to dict KEY sites only. A struct that is a
+# dict VALUE, an Option payload, a plain parameter or a generic `T` argument
+# is a record pointer and must pass untouched: work/integ5 merged this lane
+# with a call-boundary boxer for `Any`/`T` arguments that reused the key
+# boxer, so `gen_opt(hit, F(..))` refused a multi-field `F`
+# (test/fixtures/native_option_none_equality) and a single-field `Sid` would
+# silently have become its boxed field word inside an erased body.
+val VALUE_SIDE_SOURCE: text = "struct F:\n    id: i64\n    name: text\n\n" +
+    "struct Sid:\n    id: i64\n\n" +
+    "fn gopt<T>(hit: bool, v: T) -> T?:\n    if hit:\n        return Some(v)\n    None\n\n" +
+    "fn gid<T>(v: T) -> T:\n    v\n\n" +
+    "fn is_none_f(o: F?) -> bool:\n    o == None\n\n" +
+    "fn use_value_dict(hit: bool) -> bool:\n    var d: Dict<text, F> = {{}}\n    d[\"a\"] = F(id: 5, name: \"f\")\n    d.set(\"b\", F(id: 6, name: \"g\"))\n" +
+    "    val k = if hit: \"a\" else: \"zz\"\n    val o: F? = d[k]\n    val p: F? = d.get(k)\n    val g: F? = gopt(hit, F(id: 7, name: \"h\"))\n" +
+    "    is_none_f(o) and p == None and g == None and is_none_f(gid(p))\n\n" +
+    "fn pass_sid(s: Sid) -> i64:\n    val back = gid(s)\n    val o: Sid? = gopt(true, s)\n    back.id + (o ?? s).id\n"
+
+fn canonicalized_struct_words(function: MirFunction) -> i64:
+    """rt_value_int_wide calls boxing a struct FIELD -- the key canonicalizer."""
+    var n = 0
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, func, args):
+                    if callee_name(func) == "rt_value_int_wide" and args.len() == 1 and definer_of(function, operand_local_id(args[0])) == "getfield":
+                        n = n + 1
+                case _: ()
+    n
+
+describe "struct values are not dict keys":
+    it "lowers a text-keyed dict of multi-field structs passed through params, Options and generics":
+        val lowered = lower_keys(VALUE_SIDE_SOURCE, false)
+        expect(lowered.errors).to_equal([])
+        val f = lowered.functions.get("use_value_dict")
+        expect(f.?).to_equal(true)
+        if val present = f:
+            expect(canonicalized_struct_words(present)).to_equal(0)
+
+    it "passes a single-field struct to a generic T as the record, not its field word":
+        val lowered = lower_keys(VALUE_SIDE_SOURCE, false)
+        expect(lowered.errors).to_equal([])
+        val f = lowered.functions.get("pass_sid")
+        expect(f.?).to_equal(true)
+        if val present = f:
+            expect(canonicalized_struct_words(present)).to_equal(0)

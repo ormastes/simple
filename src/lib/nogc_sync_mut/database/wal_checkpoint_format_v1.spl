@@ -1,0 +1,48 @@
+# Canonical generic checkpoint control revision, not an operation state machine.
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct DatabaseWalCheckpointMarkerV1:
+    database_identity: text
+    base_commit: text
+    base_sequence: i64
+    checkpoint_digest: text
+
+pub fn database_wal_checkpoint_marker_encode_v1(marker: DatabaseWalCheckpointMarkerV1) -> text:
+    val fields: Dict<text, SdnValue> = {
+        "version": SdnValue.Int(1),
+        "kind": SdnValue.String("SimpleDatabaseWalCheckpoint"),
+        "database_identity": SdnValue.String(marker.database_identity),
+        "base_commit": SdnValue.String(marker.base_commit),
+        "base_sequence": SdnValue.Int(marker.base_sequence),
+        "checkpoint_digest": SdnValue.String(marker.checkpoint_digest)
+    }
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+pub fn database_wal_checkpoint_marker_decode_v1(payload: text) -> Result<DatabaseWalCheckpointMarkerV1, text>:
+    if payload.byte_len() > 1048576: return Err("WAL checkpoint revision size exceeded")
+    val parsed = sdn_parse_strict_v1(payload, SdnStrictLimitsV1(
+        max_source_bytes: 1048576, max_depth: 4, max_nodes: 32,
+        max_rows: 16, max_cells: 32, max_columns: 8))
+    if parsed.is_err(): return Err("invalid WAL checkpoint syntax")
+    val value = parsed.unwrap().value
+    if sdn_encode_canonical(value) + "\n" != payload: return Err("noncanonical WAL checkpoint")
+    val decoded = value.as_dict()
+    if decoded.is_none(): return Err("invalid WAL checkpoint schema")
+    val fields = decoded.unwrap()
+    if fields.len() != 6: return Err("invalid WAL checkpoint schema")
+    for key in ["version", "kind", "database_identity", "base_commit", "base_sequence", "checkpoint_digest"]:
+        if not fields.contains_key(key): return Err("invalid WAL checkpoint schema")
+    if fields["version"].as_i64() != Some(1) or fields["kind"].as_str() != Some("SimpleDatabaseWalCheckpoint"):
+        return Err("unsupported WAL checkpoint revision")
+    val identity = fields["database_identity"].as_str()
+    val parent = fields["base_commit"].as_str()
+    val sequence = fields["base_sequence"].as_i64()
+    val checkpoint = fields["checkpoint_digest"].as_str()
+    if identity.is_none() or parent.is_none() or sequence.is_none() or checkpoint.is_none():
+        return Err("invalid WAL checkpoint values")
+    if sequence.unwrap() < 1 or sequence.unwrap() > 10000000:
+        return Err("invalid WAL checkpoint sequence")
+    Ok(DatabaseWalCheckpointMarkerV1(identity.unwrap(), parent.unwrap(), sequence.unwrap(), checkpoint.unwrap()))

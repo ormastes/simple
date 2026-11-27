@@ -10,6 +10,7 @@
 # The level system ensures we only generalize variables that are
 # local to the current binding, not those from outer scopes.
 
+use compiler.types.type_infer.core.*
 use compiler.hir.hir.*
 use compiler.frontend.core.lexer.*
 use type_infer_types.*
@@ -65,13 +66,35 @@ impl HmInferContext:
         match ty.kind:
             case Infer(id, level):
                 vars = vars.push((id, level))
-            case Function(params, ret, _):
+            case Function(params, ret, effects):
                 for p in params:
                     self.collect_free_vars(p, vars)
                 self.collect_free_vars(ret, vars)
+                # A `Throws(T)` effect carries a type: a variable free only
+                # there must still be quantified (packet E2, F05). Walked
+                # after the return so quantifier order stays
+                # params, return, effects (first encounter).
+                for effect in effects:
+                    match effect.kind:
+                        case Throws(thrown): self.collect_free_vars(thrown, vars)
+                        case _: ()
             case Tuple(elements):
                 for e in elements:
                     self.collect_free_vars(e, vars)
+            case Union(members):
+                for m in members:
+                    self.collect_free_vars(m, vars)
+            case Isolated(inner):
+                self.collect_free_vars(inner, vars)
+            case Projection(base, _):
+                self.collect_free_vars(base, vars)
+            case TypeParam(_, bounds):
+                for b in bounds:
+                    self.collect_free_vars(b, vars)
+            case Tensor(element, _, _):
+                # `apply`, `occurs` and `instantiate_type` all walk the
+                # element; this walker dropped it to `case _`.
+                self.collect_free_vars(element, vars)
             case Array(element, _) | Slice(element):
                 self.collect_free_vars(element, vars)
             case Dict(key, value):
@@ -88,19 +111,45 @@ impl HmInferContext:
             case _:
                 pass
 
+    me _append_scheme_free_vars(scheme: TypeScheme, vars: Dict<i64, bool>) -> Dict<i64, bool>:
+        """Collect unbound free type variable IDs from a scheme into vars."""
+        val ty_vars = self.free_vars_with_levels(scheme.ty)
+        if ty_vars.is_empty():
+            return vars
+        var out: Dict<i64, bool> = vars
+        if scheme.vars.is_empty():
+            for (id, _) in ty_vars:
+                out[id] = true
+            return out
+        var bound_vars: Dict<i64, bool> = {}
+        for bound_id in scheme.vars:
+            bound_vars[bound_id] = true
+        for (id, _) in ty_vars:
+            if not bound_vars.has(id):
+                out[id] = true
+        out
+
     me env_free_var_ids() -> Dict<i64, bool>:
         """Collect free type variable IDs in the environment."""
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
         var vars: Dict<i64, bool> = {}
         for name in self.env.keys():
             val scheme: TypeScheme = self.env[name]
-            var bound_vars: Dict<i64, bool> = {}
-            for bound_id in scheme.vars:
-                bound_vars[bound_id] = true
-            val ty_vars = self.free_vars_with_levels(scheme.ty)
-            for (id, _) in ty_vars:
-                if not bound_vars.has(id):
-                    vars[id] = true
+            vars = self._append_scheme_free_vars(scheme, vars)
+        vars
+
+    me _incremental_env_free_var_ids() -> Dict<i64, bool>:
+        """Seed from module snapshot and inspect only names added on the env trail."""
+        var vars: Dict<i64, bool> = {}
+        for id in self.module_env_vars.keys():
+            vars[id] = true
+        var visited_trail: Dict<text, bool> = {}
+        for name in self.env_trail_names:
+            if not visited_trail.has(name):
+                visited_trail[name] = true
+                if self.env.contains_key(name):
+                    val scheme: TypeScheme = self.env[name]
+                    vars = self._append_scheme_free_vars(scheme, vars)
         vars
 
     # =========================================================================
@@ -112,7 +161,18 @@ impl HmInferContext:
         Only variables at level > current env level are generalized."""
         val resolved = self.resolve(ty)
         val free_vars = self.free_vars_with_levels(resolved)
-        val env_vars = self.env_free_var_ids()
+        var has_candidate = false
+        for (_, var_level) in free_vars:
+            if var_level > self.level:
+                has_candidate = true
+                break
+        if not has_candidate:
+            return TypeScheme(vars: [], ty: resolved)
+
+        val env_vars = if self.module_env_vars_ready:
+            self._incremental_env_free_var_ids()
+        else:
+            self.env_free_var_ids()
 
         # Variables to quantify: free in ty, not in env, at level > current
         var to_generalize: [i64] = []
@@ -129,7 +189,9 @@ impl HmInferContext:
         """Generalize all variables (ignore levels) - for top-level definitions."""
         val resolved = self.resolve(ty)
         val free_vars = self.free_vars_with_levels(resolved)
-        val env_vars = self.env_free_var_ids()
+        # Module-level definitions only add already-quantified (or already
+        # counted) variables to the env, so the per-module snapshot stays exact.
+        val env_vars = if self.module_env_vars_ready and self.level == 0: self.module_env_vars else: self.env_free_var_ids()
 
         var to_generalize: [i64] = []
         var seen: Dict<i64, bool> = {}

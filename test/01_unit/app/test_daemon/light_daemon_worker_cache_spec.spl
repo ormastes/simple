@@ -1,0 +1,157 @@
+"""
+# Light Daemon Compiled Worker Cache & Setup-Cost Regression Spec
+
+Guards doc/08_tracking/bug/test_invocation_fixed_setup_cost_caps_every_sweep_2026-08-17.md:
+- `worker_cache.spl` keys compiled single-file worker `.smf` artifacts by
+  compiler binary fingerprint, worker source/dep digests, SIMPLE_LIB, and
+  daemon environment digest.
+- Warm cache hits reuse the compiled `.smf` without re-compiling; load or
+  relocation failures poison that key cleanly and fall back to source without
+  masking child test failures.
+- `test_runner_single.spl` strips cached `test_runner_single_*.smf` args, and
+  `test_runner_client.spl` skips `ensure_dirs()` / full environment hashing when
+  a static direct-lane bypass applies.
+"""
+
+use std.spec.*
+use std.io_runtime.{
+    dir_create_all, dir_remove_all, file_exists,
+    file_write, getpid, read_file_text, time_now_unix_micros
+}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.spec.engine_probe.{simple_binary}
+use app.test_daemon.worker_cache.{
+    WORKER_SOURCE_PATH, WorkerExitClass, WorkerLaunchKind, WorkerSmfProbeStatus,
+    worker_cache_build_args, worker_cache_classify_failure, worker_cache_default_deps,
+    worker_cache_key, worker_cache_kind_label, worker_cache_poison,
+    worker_cache_probe_status_label, worker_cache_resolve_or_compile, worker_cache_target
+}
+
+fn _make_temp_work(tag: text) -> text:
+    val base = get_temp_dir()
+    val path = "{base}/w4_9_worker_cache_{tag}_{getpid()}_{time_now_unix_micros()}"
+    dir_create_all(path)
+    path
+
+describe "Light daemon compiled worker cache":
+    it "invalidates cache key on binary, source, dependency, lib, or env changes":
+        val work = _make_temp_work("keys")
+        val src = "{work}/worker.spl"
+        val dep = "{work}/dep.spl"
+        expect(file_write(src, "fn main():\n    print \"v1\"\n")).to_equal(true)
+        expect(file_write(dep, "val DEP_VER = 1\n")).to_equal(true)
+
+        val k_base = worker_cache_key("/bin/simple-a", src, "envA", "/lib/a", [dep])
+        val k_same = worker_cache_key("/bin/simple-a", src, "envA", "/lib/a", [dep])
+        expect(k_base).to_equal(k_same)
+        expect(k_base.byte_len()).to_equal(24)
+
+        val k_bin = worker_cache_key("/bin/simple-b", src, "envA", "/lib/a", [dep])
+        val k_env = worker_cache_key("/bin/simple-a", src, "envB", "/lib/a", [dep])
+        val k_lib = worker_cache_key("/bin/simple-a", src, "envA", "/lib/b", [dep])
+        expect(k_bin == k_base).to_equal(false)
+        expect(k_env == k_base).to_equal(false)
+        expect(k_lib == k_base).to_equal(false)
+
+        expect(file_write(dep, "val DEP_VER = 2\n")).to_equal(true)
+        val k_dep = worker_cache_key("/bin/simple-a", src, "envA", "/lib/a", [dep])
+        expect(k_dep == k_base).to_equal(false)
+
+        expect(file_write(src, "fn main():\n    print \"v2\"\n")).to_equal(true)
+        val k_src = worker_cache_key("/bin/simple-a", src, "envA", "/lib/a", [dep])
+        expect(k_src == k_dep).to_equal(false)
+
+        val _ = dir_remove_all(work)
+
+    it "reuses warm .smf cache and cleanly poisons on relocation failure without hiding spec errors":
+        val work = _make_temp_work("poison")
+        val cache_dir = "{work}/cache"
+        val src = "{work}/worker.spl"
+        expect(file_write(src, "fn main():\n    print \"ok\"\n")).to_equal(true)
+        dir_create_all(cache_dir)
+
+        val base = worker_cache_target(cache_dir, "/nonexistent/simple", src, "env1", "/src", [])
+        expect(file_write(base.smf_path, "SMF_STUB")).to_equal(true)
+
+        val warm = worker_cache_resolve_or_compile("/nonexistent/simple", cache_dir, src, "env1", "/src", [])
+        expect(worker_cache_kind_label(warm.kind)).to_equal("cached-smf")
+        expect(warm.reason).to_equal("cache-hit")
+        expect(warm.launch_path).to_equal(base.smf_path)
+
+        val args = worker_cache_build_args(warm, "test/sample_spec.spl", "45")
+        expect(args[0]).to_equal("run")
+        expect(args[1]).to_equal(base.smf_path)
+        expect(args[2]).to_equal("test/sample_spec.spl")
+        expect(args[3]).to_equal("--no-session-daemon")
+        expect(args[4]).to_equal("--sequential")
+        expect(args[5]).to_equal("--timeout")
+        expect(args[6]).to_equal("45")
+
+        val real_spec_fail = worker_cache_classify_failure(
+            "SPEC FILE VERDICT: test/sample_spec.spl outcome=ERROR\n",
+            "",
+            WorkerExitClass.NonZeroExit
+        )
+        expect(worker_cache_probe_status_label(real_spec_fail)).to_equal("usable")
+
+        val reloc_fail = worker_cache_classify_failure(
+            "",
+            "error: load failed: relocation failed: Undefined symbol: rt_text_is_ascii",
+            WorkerExitClass.NonZeroExit
+        )
+        expect(worker_cache_probe_status_label(reloc_fail)).to_equal("load-or-relocation-failed")
+
+        worker_cache_poison(warm, "relocation failed")
+        expect(file_exists(base.smf_path)).to_equal(false)
+        expect(file_exists(base.disabled_path)).to_equal(true)
+
+        val after_poison = worker_cache_resolve_or_compile("/nonexistent/simple", cache_dir, src, "env1", "/src", [])
+        expect(worker_cache_kind_label(after_poison.kind)).to_equal("source-fallback")
+        expect(after_poison.reason).to_equal("poisoned")
+        expect(after_poison.launch_path).to_equal(src)
+
+        val _ = dir_remove_all(work)
+
+    it "micro-benchmark compiles a synthetic worker to .smf once and hits warm cache in sub-second lookup":
+        val work = _make_temp_work("bench")
+        val cache_dir = "{work}/cache"
+        val src = "{work}/mini_worker.spl"
+        expect(file_write(src, "fn main():\n    print \"mini-worker-ok\"\n")).to_equal(true)
+
+        val bin = simple_binary()
+        val deps = worker_cache_default_deps()
+        val cold_start = time_now_unix_micros()
+        val compiled = worker_cache_resolve_or_compile(bin, cache_dir, src, "bench-env", "/src", deps)
+        val cold_ms = (time_now_unix_micros() - cold_start) / 1000
+        expect(worker_cache_kind_label(compiled.kind)).to_equal("cached-smf")
+        expect(compiled.reason).to_equal("compiled")
+        expect(file_exists(compiled.smf_path)).to_equal(true)
+
+        val warm_start = time_now_unix_micros()
+        var i = 0
+        while i < 10:
+            val hit = worker_cache_resolve_or_compile(bin, cache_dir, src, "bench-env", "/src", deps)
+            expect(worker_cache_kind_label(hit.kind)).to_equal("cached-smf")
+            expect(hit.reason).to_equal("cache-hit")
+            i = i + 1
+        val warm_total_ms = (time_now_unix_micros() - warm_start) / 1000
+        print "worker_cache micro-bench: cold_compile_ms={cold_ms} warm_10x_resolve_ms={warm_total_ms}"
+        expect(warm_total_ms < 5000).to_equal(true)
+
+        val _ = dir_remove_all(work)
+
+    it "wires worker_cache into light_daemon, single clean_args, and client static bypass":
+        val daemon_src = read_file_text("src/app/test_daemon/light_daemon.spl")
+        expect(daemon_src).to_contain("worker_cache_resolve_or_compile(")
+        expect(daemon_src).to_contain("worker_cache_build_args(")
+        expect(daemon_src).to_contain("worker_cache_classify_failure(")
+        expect(daemon_src).to_contain("worker_cache_poison(")
+        expect(daemon_src).to_contain("WORKER_SOURCE_PATH")
+
+        val single_src = read_file_text("src/app/test_runner_new/test_runner_single.spl")
+        expect(single_src).to_contain("is_worker_smf")
+        expect(single_src).to_contain("test_runner_single_")
+
+        val client_src = read_file_text("src/app/test_runner_new/test_runner_client.spl")
+        expect(client_src).to_contain("if not static_bypass:")
+        expect(client_src).to_contain("caller_environment = test_daemon_environment_identity_v1()")

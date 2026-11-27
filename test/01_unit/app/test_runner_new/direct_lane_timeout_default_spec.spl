@@ -1,0 +1,68 @@
+# Reproducing/pinning spec for
+# doc/08_tracking/bug/fetch_wasm_chain_spec_runner_premature_child_termination_2026-06-30.md
+#
+# The runner used to kill the long-running
+# test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl child
+# prematurely: the client path's default budget was raised 120 -> 900 on
+# 2026-08-17 (timeout_budget.spl), but the direct-dispatch TestOptions default
+# (std.test_runner.test_runner_args) and the single-file lane's
+# parse_child_run default (app + std twins of test_runner_single) still
+# hardcoded 120s. A spec whose honest interpreter run exceeds 120s
+# (browser_session_fetch_wasm_chain_spec needs ~590s under the seed on this
+# host) was therefore killed at the budget with no BDD summary -- a
+# deterministic file-level false RED that read as a defect in the spec.
+use std.spec.step
+
+use std.spec.*
+use std.test_runner.test_runner_args.{parse_test_args}
+use std.test_runner.native_owned_process.{scoped_cpu_budget_ms}
+use std.io_runtime.{file_read}
+
+describe "per-child default wall-clock budget on the direct and single-file lanes":
+    it "parse_test_args defaults the per-file child budget to 900s, not 120s":
+        # @req REQ-SSPEC-UNIT
+        step("parse_test_args defaults the per-file child budget to 900s, not 120s")
+        val opts = parse_test_args([])
+        expect(opts.timeout).to_equal(900)
+
+    it "an explicit --timeout flag still wins over the 900s default":
+        # @req REQ-SSPEC-UNIT
+        step("an explicit --timeout flag still wins over the 900s default")
+        val opts = parse_test_args(["some_spec.spl", "--timeout", "45"])
+        expect(opts.timeout).to_equal(45)
+
+describe "single-file lane default stays in sync with the client budget":
+    it "app single lane derives its default from client_default_timeout_secs()":
+        # @req REQ-SSPEC-UNIT
+        step("app single lane derives its default from client_default_timeout_secs()")
+        val src = file_read("src/app/test_runner_new/test_runner_single.spl") ?? ""
+        expect(src.contains("var timeout_secs = client_default_timeout_secs()")).to_equal(true)
+        expect(src.contains("var timeout_secs = 120")).to_equal(false)
+
+    it "std single-lane twin carries the same 900s default":
+        # @req REQ-SSPEC-UNIT
+        step("std single-lane twin carries the same 900s default")
+        val src = file_read("src/lib/nogc_sync_mut/test_runner/test_runner_single.spl") ?? ""
+        expect(src.contains("var timeout_secs = 900")).to_equal(true)
+        expect(src.contains("var timeout_secs = 120")).to_equal(false)
+
+describe "scoped child CPU grant stays consistent with the wall grant":
+    it "a 900s per-file wall budget raises the unit-class 600s CPU cap to 900s":
+        # @req REQ-SSPEC-UNIT
+        step("a 900s per-file wall budget raises the unit-class 600s CPU cap to 900s")
+        # run_scoped_child overwrites the class wall budget with the per-file
+        # timeout; before the scoped_cpu_budget_ms fix the CPU budget kept the
+        # smaller class default, so a single-threaded child legally using its
+        # full wall grant died as "Declared resource budget exceeded"
+        # (browser_session_fetch_wasm_chain_spec, ~600s CPU vs 600s cap).
+        expect(scoped_cpu_budget_ms(900000, 600000)).to_equal(900000)
+
+    it "a wall budget below the class CPU cap leaves the cap unchanged":
+        # @req REQ-SSPEC-UNIT
+        step("a wall budget below the class CPU cap leaves the cap unchanged")
+        expect(scoped_cpu_budget_ms(120000, 600000)).to_equal(600000)
+
+    it "a disabled CPU cap (inherit) stays disabled":
+        # @req REQ-SSPEC-UNIT
+        step("a disabled CPU cap (inherit) stays disabled")
+        expect(scoped_cpu_budget_ms(900000, 0)).to_equal(0)

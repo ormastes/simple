@@ -3,6 +3,8 @@
 export use std.nogc_sync_mut.io.http_get_core.{rt_http_get}
 export use std.nogc_sync_mut.io.http_client_types.{HttpMethod, HttpStatus, HttpResponse, method_to_string, status_to_code, code_to_status, make_http_response}
 export use std.nogc_sync_mut.http.url.{url_encode, url_decode}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.nogc_sync_mut.io.external_text_io.{io_legacy_utf8}
 
 # Advanced request with headers
 @unsafe(reason: "raw method/URL/header-array/body ABI and runtime-owned response tuple", capabilities: [ffi])
@@ -30,6 +32,7 @@ extern fn rt_http_request_v2(
 extern fn rt_http_download(url: text, output_path: text) -> (i64, i64, text)  # (status, bytes, error)
 
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in http_request_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn http_request_raw(method: text, url: text, headers_text: text, body: text) -> (i64, text, text):
     """Perform an HTTP request with newline-delimited headers and return the raw runtime tuple."""
     var headers: [text] = []
@@ -38,14 +41,51 @@ fn http_request_raw(method: text, url: text, headers_text: text, body: text) -> 
     unsafe(capabilities: [ffi]):
         rt_http_request(method, url, headers, body)
 
+# Cross-engine timeout classification. The self-hosted runtime reports a
+# deadline expiry as "HTTP request timed out" (src/runtime/runtime_native.c);
+# the seed transport surfaces the raw OS timeout instead (Windows
+# WSAETIMEDOUT / "os error 10060", POSIX ETIMEDOUT, ureq "timed out"). This
+# boundary is the typed failure point for every timeout-capable request, so
+# normalize known timeout transport errors to the self-hosted classification
+# rather than leaking engine-specific text to callers. Non-timeout errors
+# pass through unchanged.
+fn _timeout_transport_error(raw: text) -> text:
+    val lower = raw.lower()
+    if lower.contains("timed out") or lower.contains("timeout") or
+            lower.contains("wsaetimedout") or lower.contains("etimedout") or
+            lower.contains("10060") or lower.contains("deadline exceeded"):
+        return "HTTP request timed out"
+    raw
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in http_request_v2_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn http_request_v2_raw(method: text, url: text, headers: [text], body: [u8],
                        timeout_ms: i64) -> (i64, text, text, [u8], text):
     """Lossless raw request tuple; callers must lift status/error and parse headers."""
     if timeout_ms < 0:
         return (-1, "", "", [], "HTTP timeout cannot be negative")
-    unsafe(capabilities: [ffi]):
+    val response = unsafe(capabilities: [ffi]):
         rt_http_request_v2(method, url, headers, body, timeout_ms)
+    if response.0 == -1 and response.4 != "":
+        return (response.0, response.1, response.2, response.3,
+            _timeout_transport_error(response.4))
+    response
 
+pub fn http_request_raw_timeout(method: text, url: text, headers_text: text, body: text,
+                            timeout_ms: i64) -> (i64, text, text):
+    """Text request with an explicit millisecond deadline; zero is unbounded."""
+    if timeout_ms < 0:
+        return (-1, "", "HTTP timeout cannot be negative")
+    var headers: [text] = []
+    if headers_text != "":
+        headers = headers_text.split("\n")
+    val response = http_request_v2_raw(method, url, headers, text_to_utf8_bytes(body), timeout_ms)
+    if response.4 != "":
+        return (response.0, "", response.4)
+    match io_legacy_utf8(response.3):
+        case Ok(decoded): (response.0, decoded, "")
+        case Err(error): (-1, "", error)
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in http_get", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn http_get(url: text) -> HttpResponse:
     """
     Perform HTTP GET request.
@@ -58,6 +98,7 @@ fn http_get(url: text) -> HttpResponse:
     unsafe(capabilities: [ffi]):
         make_http_response(rt_http_get(url))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in http_post", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn http_post(url: text, body: text) -> HttpResponse:
     """
     Perform HTTP POST request with JSON body.
@@ -69,6 +110,7 @@ fn http_post(url: text, body: text) -> HttpResponse:
     unsafe(capabilities: [ffi]):
         make_http_response(rt_http_request("POST", url, ["Content-Type: application/json"], body))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in http_post_form", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn http_post_form(url: text, body: text) -> HttpResponse:
     """
     Perform HTTP POST request with form data.
@@ -80,26 +122,31 @@ fn http_post_form(url: text, body: text) -> HttpResponse:
     unsafe(capabilities: [ffi]):
         make_http_response(rt_http_request("POST", url, ["Content-Type: application/x-www-form-urlencoded"], body))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in http_put", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn http_put(url: text, body: text) -> HttpResponse:
     """Perform HTTP PUT request."""
     unsafe(capabilities: [ffi]):
         make_http_response(rt_http_request("PUT", url, ["Content-Type: application/json"], body))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in http_delete", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn http_delete(url: text) -> HttpResponse:
     """Perform HTTP DELETE request."""
     unsafe(capabilities: [ffi]):
         make_http_response(rt_http_request("DELETE", url, [], ""))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in http_patch", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn http_patch(url: text, body: text) -> HttpResponse:
     """Perform HTTP PATCH request."""
     unsafe(capabilities: [ffi]):
         make_http_response(rt_http_request("PATCH", url, ["Content-Type: application/json"], body))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in http_head", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn http_head(url: text) -> HttpResponse:
     """Perform HTTP HEAD request (headers only)."""
     unsafe(capabilities: [ffi]):
         make_http_response(rt_http_request("HEAD", url, [], ""))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in http_request", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn http_request(method: HttpMethod, url: text, headers: [text], body: text) -> HttpResponse:
     """
     Perform HTTP request with custom method and headers.
@@ -112,6 +159,7 @@ fn http_request(method: HttpMethod, url: text, headers: [text], body: text) -> H
     unsafe(capabilities: [ffi]):
         make_http_response(rt_http_request(method_str, url, headers, body))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in http_download", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn http_download(url: text, output_path: text) -> HttpResponse:
     """
     Download file from URL to local path.
@@ -137,12 +185,12 @@ fn http_download(url: text, output_path: text) -> HttpResponse:
 
 fn http_get_json(url: text) -> HttpResponse:
     """GET request expecting JSON response."""
-    val headers = ["Accept: application/json"]
+    val headers: [text] = ["Accept: application/json"]
     http_request(HttpMethod.GET, url, headers, "")
 
 fn http_post_json(url: text, json: text) -> HttpResponse:
     """POST request with JSON body."""
-    val headers = ["Content-Type: application/json"]
+    val headers: [text] = ["Content-Type: application/json"]
     http_request(HttpMethod.POST, url, headers, json)
 
 fn http_is_success(response: HttpResponse) -> bool:

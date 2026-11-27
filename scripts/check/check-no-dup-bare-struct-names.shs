@@ -1,0 +1,99 @@
+#!/bin/sh
+# check-no-dup-bare-struct-names.shs
+# The seed's mir-lower keeps a bare-name struct/class table; the same bare name
+# declared with DIFFERENT field lists in the compiler closure prints
+# "[mir-lower] WARNING: struct/class name 'X' re-registered with a DIFFERENT
+# field list". This guard ratchets that: a name declared in >1 place with >1
+# distinct field list is allowed only for (Name|fields) pairs in the baseline
+# scripts/check/dup_bare_struct_names_baseline.txt. Rename the narrower type.
+# Verdict is the last stdout line: PASS / FAIL (exit 1) / ERROR (exit 2).
+# Usage: check-no-dup-bare-struct-names.shs [--root DIR] [--baseline FILE]
+#        [--generate-baseline] [--selftest]
+set -u
+ROOT=.
+BASE=
+GEN=0
+SELF=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --root) ROOT=$2; shift ;;
+    --baseline) BASE=$2; shift ;;
+    --generate-baseline) GEN=1 ;;
+    --selftest) SELF=1 ;;
+    *) echo "ERROR - unknown arg $1"; exit 2 ;;
+  esac
+  shift
+done
+
+# emit "Name|file|f1,f2,..." for each struct/class declaration under ROOT
+scan() {
+  find "$1/src/compiler" "$1/src/app" "$1/src/lib" -name '*.spl' 2>/dev/null |
+  xargs awk '
+      function flush() { if (name != "") { print name "|" fn "|" sig; name = "" } }
+      FNR == 1 { flush() }
+      /^(export )?(struct|class) [A-Za-z_][A-Za-z0-9_]*/ {
+        flush(); fn = FILENAME
+        s = $0; sub(/^(export )?(struct|class) /, "", s); sub(/[^A-Za-z0-9_].*$/, "", s)
+        name = s; sig = ""; next
+      }
+      name != "" && /^[^ \t#]/ { flush(); next }
+      name != "" && /^    (val |var )?[a-z_][A-Za-z0-9_]*[ ]*:/ {
+        t = $0; sub(/^    (val |var )?/, "", t); sub(/[ ]*:.*$/, "", t)
+        sig = (sig == "" ? t : sig "," t)
+      }
+      END { flush() }' /dev/null
+}
+
+# stdin: scan output. stdout: "Name|fields" lines for names with >1 distinct field list
+offenders() {
+  awk -F'|' '{ k = $1 "|" $3; if (!(k in seen)) { seen[k] = 1; n[$1]++; ks[$1] = ks[$1] "\n" k } }
+             END { for (x in n) if (n[x] > 1) { m = split(ks[x], a, "\n"); for (i = 2; i <= m; i++) print a[i] } }' | sort
+}
+
+run() { # $1 root $2 baseline
+  tmp=${TMPDIR:-/tmp}/dupbare.$$
+  scan "$1" > "$tmp.scan"
+  total=$(wc -l < "$tmp.scan" | tr -d ' ')
+  if [ "$total" -eq 0 ]; then rm -f "$tmp.scan"; echo "ERROR - nothing was checked (0 declarations)"; return 2; fi
+  offenders < "$tmp.scan" > "$tmp.off"
+  if [ "$GEN" -eq 1 ]; then cp "$tmp.off" "$2"; echo "PASS - baseline written: $(wc -l < "$tmp.off" | tr -d ' ') pair(s) from $total declaration(s)"; rm -f "$tmp.scan" "$tmp.off"; return 0; fi
+  [ -f "$2" ] || { rm -f "$tmp.scan" "$tmp.off"; echo "ERROR - baseline $2 missing"; return 2; }
+  sort "$2" > "$tmp.base"
+  new=$(comm -23 "$tmp.off" "$tmp.base")
+  rm -f "$tmp.scan" "$tmp.off" "$tmp.base"
+  if [ -n "$new" ]; then
+    echo "$new" | sed 's/^/  new duplicate: /'
+    echo "FAIL - $total declaration(s) checked, $(echo "$new" | wc -l | tr -d ' ') new bare-name duplicate(s) with differing fields; rename the narrower type"
+    return 1
+  fi
+  echo "PASS - $total declaration(s) checked, 0 new bare-name duplicates with differing fields"
+  return 0
+}
+
+selftest() {
+  d=${TMPDIR:-/tmp}/dupbare.self.$$
+  mkdir -p "$d/src/compiler" "$d/src/app" "$d/src/lib"
+  printf 'struct Foo:\n    a: i64\n    b: text\n' > "$d/src/compiler/a.spl"
+  printf 'struct Foo:\n    a: i64\n    b: text\n' > "$d/src/app/b.spl"
+  : > "$d/base.txt"
+  out=$(GEN=0; run "$d" "$d/base.txt"); rc=$?
+  [ $rc -eq 0 ] || { echo "ERROR - selftest: identical dups must PASS ($out)"; rm -rf "$d"; return 2; }
+  printf 'struct Foo:\n    a: i64\n    c: text\n' > "$d/src/lib/c.spl"
+  out=$(run "$d" "$d/base.txt"); rc=$?
+  [ $rc -eq 1 ] || { echo "ERROR - selftest: differing dup must FAIL ($out)"; rm -rf "$d"; return 2; }
+  offenders_line=$(scan "$d" | offenders | sort)
+  printf '%s\n' "$offenders_line" > "$d/base.txt"
+  out=$(run "$d" "$d/base.txt"); rc=$?
+  [ $rc -eq 0 ] || { echo "ERROR - selftest: baselined dup must PASS ($out)"; rm -rf "$d"; return 2; }
+  rm -rf "$d/src"; mkdir -p "$d/src/compiler"
+  out=$(run "$d" "$d/base.txt"); rc=$?
+  [ $rc -eq 2 ] || { echo "ERROR - selftest: empty tree must ERROR ($out)"; rm -rf "$d"; return 2; }
+  rm -rf "$d"
+  return 0
+}
+
+( GEN=0; selftest ) || exit 2
+[ "$SELF" -eq 1 ] && { echo "PASS - selftest ok (4 fixtures)"; exit 0; }
+[ -n "$BASE" ] || BASE=$ROOT/scripts/check/dup_bare_struct_names_baseline.txt
+run "$ROOT" "$BASE"
+exit $?

@@ -87,3 +87,40 @@ private body change rebuilds only affected objects; imported signature, field
 layout, enum, trait/default changes invalidate all actual dependents; adding an
 ambiguous resolution candidate invalidates consumers. Compare native outputs,
 peak RSS and elapsed/CPU time. These new qualification cases are UNRUN.
+
+**Revalidated 2026-11-02: still plausible because OPEN performance limitation; no cache correctness weakening proposed; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 update: pre-compile diagnostic landed (first step only)
+
+Source re-read: the whole-build fingerprint key no longer folds `layout`
+(per-module interface slices decide, see `InterfaceSliceIndex`), so the
+"layout/signature => full rebuild" premise above is partly superseded.
+Landed the diagnostic step: under the existing `[native-rust-trace]` flag the
+seed now prints, BEFORE compilation, `step 4 global fingerprint: <changed
+component | layout changed | unchanged | no previous manifest> (dirty N/M)`
+(`GlobalBuildFingerprint::describe_change`, native_project/mod.rs). Cache keys
+are unchanged. Test:
+`test_global_build_fingerprint_describe_change_names_component`.
+Remaining (open): dependency-safe per-module interface fingerprints for a real
+latency reduction; a measured before/after needs a ~30 min native build.
+
+## 2026-11-03 status: fix already landed (115692d2b4e, a0bc4efc782); budget spec added, verification-pending
+
+The whole-project `layout` digest was removed from every object key on
+2026-10-20 (per-module `InterfaceSliceIndex`); body-only/leaf edits recompile
+only the edited module (`object_cache_slice_tests.rs`, linux-only specs).
+Added `leaf_edit_recompile_count_and_time_budget` (no cfg gate): no-edit rebuild
+= 0 compiled / 3 cached; leaf edit compiled <= 1; both warm builds <= 30 s.
+NOT RUN: host disk had < 15 GB free, so no test-only cargo build was possible.
+Repro: `cd src/compiler_rust && cargo test -p simple-compiler --lib leaf_edit_recompile_count -- --nocapture`
+(prints `[iface-cache-budget] cold/nochange/leaf_edit` seconds). Sibling search:
+no other whole-project term remains in `object_cache_key` (content, backend, opt,
+cpu, simd, compiler fp, lane only).
+
+## 2026-11-03 triage: status fix-implemented-verification-pending
+
+Fix = 115692d2b4e + a0bc4efc782 (per-module InterfaceSliceIndex; `layout` no
+longer in any object key). Budget spec = f4a432c56d9
+`leaf_edit_recompile_count_and_time_budget` (no-edit rebuild 0 compiled; leaf
+edit <= 1 compiled; warm builds <= 30 s). Spec not yet executed (seed cargo test
+build deferred); run the Repro command above and record numbers, then close.

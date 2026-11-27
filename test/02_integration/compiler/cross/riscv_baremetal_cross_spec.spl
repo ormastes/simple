@@ -1,0 +1,108 @@
+"""
+## Purpose and audience
+For firmware and board developers targeting bare-metal RISC-V. I want
+`native-build --target riscv64-unknown-none-elf` (and `riscv32-unknown-none-elf`)
+to give me a freestanding ELF executable, an object and a static archive,
+built with clang + ld.lld only (no riscv*-gcc).
+## Operator workflow
+From the repository root: `SIMPLE_XC_BIN=<compiler> bin/simple test
+test/02_integration/compiler/cross/riscv_baremetal_cross_spec.spl`.
+## Compatibility and limitations
+Shared libraries are unsupported on bare metal: there is no dynamic loader,
+no ELF interpreter and no OS to map a `.so`, so nothing could consume one.
+The driver must reject `--emit-shared` for a `-none-` target with a clear
+diagnostic; that rejection is checked here rather than omitted. Running the
+exe uses `qemu-system-riscv64 -M virt` with OpenSBI firmware (real-firmware
+proxy; never `-kernel` pass-through or isa-debug-exit). Without QEMU the run
+row reports BLOCKED and fails.
+## Verification guidance and troubleshooting
+Matrix, evidence and board path: doc/03_plan/compiler/cross_compile_matrix_plan.md.
+"""
+# @manual_section: cross-compile-riscv-baremetal
+# @req: REQ-XC-002
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use .cross_matrix_helpers.{xc_fixture, xc_out, xc_build, xc_check_format, xc_check_symbol, xc_check_entry, xc_runner}
+
+const RV64: text = "riscv64-unknown-none-elf"
+const RV32: text = "riscv32-unknown-none-elf"
+
+fn shared_rejection(target: text) -> text:
+    """"" when --emit-shared is refused with a bare-metal diagnostic."""
+    val reason = xc_build(target, "so", xc_fixture("lib"), xc_out(target, "so"), "")
+    if reason == "":
+        return "--emit-shared unexpectedly produced an artifact for " + target
+    if reason.contains("bare") or reason.contains("unsupported"):
+        return ""
+    "rejected for the wrong reason: " + reason
+
+describe "riscv64 bare-metal cross-compile":
+    it "links a freestanding RV64 ELF executable with an entry point":
+        # NOTE: RED — BUG-XC-CROSS-EXE-LINK.
+        step("build fixture")
+        val out = xc_out(RV64, "elf")
+        expect(xc_build(RV64, "exe", xc_fixture("hello"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "elf64-littleriscv", "EM_RISCV")).to_equal("")
+        expect(xc_check_entry(out)).to_equal("")
+
+    it "boots the RV64 executable under OpenSBI on QEMU virt":
+        step("find runner")
+        expect(xc_runner("qemu-system-riscv64")).to_equal("")
+
+    it "emits an RV64 ELF object that defines xc_add":
+        step("build fixture")
+        val out = xc_out(RV64, "o")
+        expect(xc_build(RV64, "obj", xc_fixture("lib"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "elf64-littleriscv", "EM_RISCV")).to_equal("")
+        expect(xc_check_symbol(out, "xc_add")).to_equal("")
+
+    it "emits an RV64 static archive that defines xc_add":
+        step("build fixture")
+        val out = xc_out(RV64, "a")
+        expect(xc_build(RV64, "ar", xc_fixture("lib"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "elf64-littleriscv", "EM_RISCV")).to_equal("")
+        expect(xc_check_symbol(out, "xc_add")).to_equal("")
+
+    it "rejects shared-library output because bare metal has no dynamic loader":
+        # NOTE: RED — BUG-XC-BAREMETAL-SHARED-DIAG (today it fails inside lld-link, not with a bare-metal diagnostic).
+        step("request --emit-shared")
+        expect(shared_rejection(RV64)).to_equal("")
+
+describe "riscv32 bare-metal cross-compile":
+    it "links a freestanding RV32 ELF executable with an entry point":
+        # NOTE: RED — BUG-XC-RV32-GCC (link spawns riscv64-unknown-elf-gcc via the SimpleOS RV32 stub route).
+        step("build fixture")
+        val out = xc_out(RV32, "elf")
+        expect(xc_build(RV32, "exe", xc_fixture("hello"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "elf32-littleriscv", "EM_RISCV")).to_equal("")
+        expect(xc_check_entry(out)).to_equal("")
+
+    it "boots the RV32 executable under OpenSBI on QEMU virt":
+        step("find runner")
+        expect(xc_runner("qemu-system-riscv32")).to_equal("")
+
+    it "emits an RV32 ELF object that defines xc_add":
+        step("build fixture")
+        val out = xc_out(RV32, "o")
+        expect(xc_build(RV32, "obj", xc_fixture("lib"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "elf32-littleriscv", "EM_RISCV")).to_equal("")
+        expect(xc_check_symbol(out, "xc_add")).to_equal("")
+
+    it "emits an RV32 static archive that defines xc_add":
+        step("build fixture")
+        val out = xc_out(RV32, "a")
+        expect(xc_build(RV32, "ar", xc_fixture("lib"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "elf32-littleriscv", "EM_RISCV")).to_equal("")
+        expect(xc_check_symbol(out, "xc_add")).to_equal("")
+
+    it "rejects shared-library output because bare metal has no dynamic loader":
+        # NOTE: RED — BUG-XC-BAREMETAL-SHARED-DIAG.
+        step("request --emit-shared")
+        expect(shared_rejection(RV32)).to_equal("")

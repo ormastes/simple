@@ -1,0 +1,137 @@
+#!/bin/sh
+# arm64 (aarch64) fs-exec kernel gate, linked by the Pure Simple linker.
+#
+# Builds the kernel objects exactly as check-simpleos-arm64-user-elf-link.shs
+# does (that script is run as the ld.lld reference, with
+# SIMPLE_KEEP_NATIVE_OBJS=1), then relinks the very objects, script, defsyms
+# and --gc-sections of the seed's freestanding_link.rsp with elf_boot_link
+# (scripts/check/baremetal-simple-link.spl) instead of ld.lld.
+#
+#   sh scripts/check/check-simpleos-arm64-simple-link.shs --link-only
+#
+# Env: SIMPLE_BIN (seed with --features llvm, required; also runs the Simple
+#      linker), OUT (default build/verify/simpleos-arm64-simple-link),
+#      SIMPLE_LINK_BIN (binary for `run`, default SIMPLE_BIN),
+#      REF_OUT (ld.lld reference OUT, default $OUT/lld; reuse it to keep its cache),
+#      REF_REUSE=1 (skip the reference rebuild when REF_OUT already holds one).
+# Needs llvm-nm and llvm-readelf on PATH.
+#
+# Undefined symbols are counted from the Simple linker's own
+# "simple-link: undefined symbol: <name>" lines, and the output ELF is
+# re-checked with llvm-nm (no strong undefined) and llvm-readelf (entry equal
+# to the ld.lld build).
+#
+# Last stdout line is the verdict:
+#   PASS - kernel linked (<bytes> bytes), 0 undefined symbols      (exit 0)
+#   FAIL - <n> undefined symbol(s): <names>                        (exit 1)
+#   ERROR - nothing was checked (<reason>)                         (exit 2)
+set -eu
+
+verdict_error() { echo "ERROR - nothing was checked ($*)"; exit 2; }
+verdict_fail() { echo "FAIL - $*"; exit 1; }
+
+MODE=${1:-}
+[ "$MODE" = "--link-only" ] || verdict_error "only --link-only is implemented"
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+SIMPLE_BIN=${SIMPLE_BIN:-}
+[ -n "$SIMPLE_BIN" ] && [ -x "$SIMPLE_BIN" ] || verdict_error "SIMPLE_BIN not set to an executable seed"
+SIMPLE_LINK_BIN=${SIMPLE_LINK_BIN:-$SIMPLE_BIN}
+for tool in llvm-nm llvm-readelf od grep sed sort tr wc; do
+    command -v "$tool" >/dev/null 2>&1 || verdict_error "missing tool: $tool"
+done
+
+OUT=${OUT:-$ROOT/build/verify/simpleos-arm64-simple-link}
+REF=${REF_OUT:-$OUT/lld}
+mkdir -p "$OUT"
+
+# 1. ld.lld reference build; keeps the objects and the link response file.
+if [ "${REF_REUSE:-0}" = 1 ] && [ -s "$REF/kernel.elf" ]; then
+    ref_verdict="reused $REF/kernel.elf"
+else
+    # Preserve the producer's status: a pipeline ending in tail masks failure.
+    if SIMPLE_KEEP_NATIVE_OBJS=1 OUT="$REF" \
+        sh scripts/check/check-simpleos-arm64-user-elf-link.shs --link-only > "$OUT/reference.log" 2>&1; then
+        ref_verdict=$(tail -1 "$OUT/reference.log")
+    else
+        tail -20 "$OUT/reference.log" >&2
+        verdict_error "ld.lld reference failed; see $OUT/reference.log"
+    fi
+fi
+echo "lld reference: $ref_verdict"
+objdir=$(sed -n 's/^\(Keeping native object files in\|Objects kept at:\) *//p' "$REF/kernel-build.log" | tail -1 | tr -d '\r')
+[ -n "$objdir" ] || verdict_error "reference build kept no objects, log $REF/kernel-build.log"
+objdir=$(printf '%s' "$objdir" | tr '\\' '/' | sed 's|^//?/||')   # Windows \\?\ prefix
+RSP=$objdir/freestanding_link.rsp
+[ -f "$RSP" ] || verdict_error "no freestanding_link.rsp in $objdir"
+
+# 2. The reference link's inputs: posix-quoted args, one per line.
+ARGS=$OUT/link-args.txt
+sed 's/" "/"\n"/g' "$RSP" | sed 's/^ *"//; s/" *$//; s/\\\\/\//g' > "$ARGS"
+LIST=$OUT/objects.txt
+grep '\.o$' "$ARGS" > "$LIST" || true
+nobj=$(wc -l < "$LIST" | tr -d ' ')
+# Reused reference objects can predate the no-fallback policy. A linked image
+# with generated symbol providers cannot prove runtime closure.
+if grep -E '(^|[/\\])_stubs_freestanding\.o$' "$LIST" > "$OUT/forbidden-inputs.txt"; then
+    verdict_fail "generated freestanding stub provider in reference inputs; rebuild the strict reference"
+fi
+# ponytail: the reference link passes -z muldefs because
+# _boot_freestanding_runtime.o re-defines rt_dma_* that _boot_baremetal_stubs.o
+# (earlier on the line) already defines; ld.lld keeps the first. elf_boot_link
+# has no muldefs mode, so that one object goes in as an archive: only members
+# that resolve a still-undefined symbol are pulled, which keeps the same
+# (first) definitions. Upgrade path: a muldefs flag in sym_resolver.
+FRT=$(grep '/_boot_freestanding_runtime\.o$' "$LIST" || true)
+set --
+if [ -n "$FRT" ]; then
+    grep -qx -- '-Wl,-z,muldefs' "$ARGS" || verdict_error "runtime object without -z muldefs; the archive stand-in no longer matches"
+    command -v llvm-ar >/dev/null 2>&1 || verdict_error "missing tool: llvm-ar"
+    grep -v '/_boot_freestanding_runtime\.o$' "$LIST" > "$LIST.tmp" && mv "$LIST.tmp" "$LIST"
+    rm -f "$OUT/freestanding_runtime.a"
+    llvm-ar rcsD "$OUT/freestanding_runtime.a" "$FRT"
+    set -- --archive "$OUT/freestanding_runtime.a"
+fi
+[ "$nobj" -gt 0 ] || verdict_error "no objects in $RSP"
+LDS=$(sed -n 's/^-T//p' "$ARGS" | head -1)
+[ -f "$LDS" ] || verdict_error "linker script '$LDS' from $RSP not found"
+grep -qx -- '-Wl,--gc-sections' "$ARGS" && set -- "$@" --gc-sections
+for d in $(sed -n 's/^-Wl,--defsym=//p' "$ARGS" | sort -u); do
+    set -- "$@" --defsym "$d"
+done
+
+# 3. Link with the Pure Simple linker.
+KERNEL=$OUT/kernel.elf
+LOG=$OUT/simple-link.log
+rm -f "$KERNEL"
+set +e
+"$SIMPLE_LINK_BIN" run scripts/check/baremetal-simple-link.spl -- aarch64 "$LDS" "$KERNEL" \
+    "$@" --objects-list "$LIST" >"$LOG" 2>&1
+rc=$?
+set -e
+
+undef=$(sed -n 's/^simple-link: undefined symbol: //p' "$LOG" | tr -d '\r' | sort -u)
+if [ -n "$undef" ]; then
+    n=$(printf '%s\n' "$undef" | wc -l | tr -d ' ')
+    printf '%s\n' "$undef" > "$OUT/undefined.txt"
+    verdict_fail "$n undefined symbol(s): $(printf '%s' "$undef" | tr '\n' ' ')"
+fi
+[ "$rc" -eq 0 ] && [ -s "$KERNEL" ] || { tail -20 "$LOG" >&2; verdict_error "Simple linker failed (rc=$rc), log $LOG"; }
+magic=$(od -An -tx1 -N4 "$KERNEL" | tr -d ' \n')
+[ "$magic" = "7f454c46" ] || verdict_error "kernel output is not an ELF (magic $magic)"
+
+# 4. Re-check the image itself.
+nm_undef=$(llvm-nm -u "$KERNEL" | awk '$1 == "U" {print $2}' | sort -u)
+if [ -n "$nm_undef" ]; then
+    n=$(printf '%s\n' "$nm_undef" | wc -l | tr -d ' ')
+    verdict_fail "$n undefined symbol(s) in the image (llvm-nm): $(printf '%s' "$nm_undef" | tr '\n' ' ')"
+fi
+entry() { llvm-readelf -h "$1" | sed -n 's/^ *Entry point address: *//p' | tr -d '\r'; }
+[ -s "$REF/kernel.elf" ] || verdict_error "no ld.lld kernel to compare the entry with ($ref_verdict)"
+e_simple=$(entry "$KERNEL")
+e_lld=$(entry "$REF/kernel.elf")
+[ -n "$e_simple" ] || verdict_error "llvm-readelf read no entry from $KERNEL"
+[ "$e_simple" = "$e_lld" ] || verdict_fail "entry $e_simple differs from the ld.lld build's $e_lld"
+echo "entry $e_simple matches ld.lld; $nobj objects"
+echo "PASS - kernel linked ($(wc -c < "$KERNEL") bytes), 0 undefined symbols"

@@ -94,3 +94,29 @@ the same path with the same byte count. Differences not yet eliminated:
 - `doc/08_tracking/bug/examples_isolation_buffers_output_lost_on_timeout_2026-07-25.md`
   — the two *earlier* obstacles on this same lane (output buffering, 10s
   watchdog). All three had to be cleared in order before this one became visible.
+
+## 2026-11-25 diagnostics landed (P2 fleet, release/1.0.0) — recommended steps 1-2 done; root cause still OPEN
+
+Implemented the two "Recommended next steps" from this entry in
+`examples/06_io/ui/wm_widget_showcase_gui.spl` (`run_headless_capture`):
+
+1. `dir_create_all(tmp_root)`'s return is now checked; failure emits a
+   distinct `reason=tmp-root-create-failed` plus `tmp_root=<path>` instead of
+   being absorbed into `ppm-write-failed`. Safe on the passing path:
+   `rt_dir_create_all` is `fs::create_dir_all`
+   (`src/compiler_rust/compiler/src/interpreter_extern/file_io.rs:3348`), which
+   returns success when the directory already exists.
+2. The `ppm-write-failed` branch now prints `ppm_path=<resolved path>` and
+   `ppm_bytes=<payload length>`, so the next reproduction shows the actual
+   path and payload size at failure time instead of requiring external
+   reconstruction.
+
+Verification: `bin/simple.exe check` on the modified file produces output
+byte-identical to the unmodified baseline (same 294 lines, same exit code;
+only a nondeterministic symbol-ordering line differs), so the change
+introduces no new diagnostics. The failure itself is NOT reproduced or fixed
+here: the repro lane is Linux + session-built full CLI + headless GUI host,
+none of which is available on this Windows host with the pinned seed binary —
+the root cause remains OPEN, now with the instrumentation this entry asked
+for to make the next failure self-describing. Step 3 (concurrent-writer
+interaction) is untouched.

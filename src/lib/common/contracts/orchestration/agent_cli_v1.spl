@@ -1,0 +1,86 @@
+# Version-specific argv construction. Caller owns installed-binary probing,
+# provenance and authorization. These values never launch or authenticate a CLI.
+use std.common.build_manager.contracts.builder_digest_valid_v1
+
+pub struct AgentCliCapabilityV1:
+    provider: text
+    version: text
+    executable_digest: text
+
+pub struct AgentCliRequestV1:
+    mode: text
+    prompt: text
+    model: text
+    resume_id: text
+
+pub struct AgentCliInvocationV1:
+    provider: text
+    version: text
+    executable_digest: text
+    argv: [text]
+    output_format: text
+
+# Exact observed interface versions, not an open-ended semver compatibility
+# claim. Unknown versions require new help and runtime conformance evidence.
+pub fn agent_cli_capability_v1(provider: text, version_output: text,
+        executable_digest: text) -> Result<AgentCliCapabilityV1, text>:
+    if not builder_digest_valid_v1(executable_digest): return Err("agent-cli-executable-digest-invalid")
+    val version = version_output.trim()
+    if provider == "codex" and version == "codex-cli 0.167.0":
+        return Ok(AgentCliCapabilityV1(provider: provider, version: "0.167.0", executable_digest: executable_digest))
+    if provider == "claude" and version == "2.1.318 (Claude Code)":
+        return Ok(AgentCliCapabilityV1(provider: provider, version: "2.1.318", executable_digest: executable_digest))
+    if provider == "kimi" and version == "2.5.0":
+        return Ok(AgentCliCapabilityV1(provider: provider, version: "2.5.0", executable_digest: executable_digest))
+    Err("agent-cli-interface-unsupported")
+
+fn cli_token_valid(value: text) -> bool:
+    value.len() <= 256 and not value.starts_with("-") and not value.contains("\0") and not value.contains("\n") and not value.contains("\r") and not value.contains("\t") and value.trim() == value
+
+pub fn agent_cli_invocation_v1(capability: AgentCliCapabilityV1,
+        request: AgentCliRequestV1) -> Result<AgentCliInvocationV1, text>:
+    if not builder_digest_valid_v1(capability.executable_digest): return Err("agent-cli-executable-digest-invalid")
+    val provider = capability.provider
+    if not ((provider == "codex" and capability.version == "0.167.0") or
+            (provider == "claude" and capability.version == "2.1.318") or
+            (provider == "kimi" and capability.version == "2.5.0")):
+        return Err("agent-cli-interface-unsupported")
+    if request.mode != "interactive" and request.mode != "noninteractive": return Err("agent-cli-mode-unsupported")
+    if request.prompt.len() == 0 or request.prompt.len() > 65536 or request.prompt.contains("\0"):
+        return Err("agent-cli-prompt-invalid")
+    # Observed Codex exec/resume treats a lone '-' as a stdin selector even
+    # after option termination. This argv-only adapter cannot supply its bytes.
+    if provider == "codex" and request.prompt == "-":
+        return Err("agent-cli-stdin-prompt-unsupported")
+    if not cli_token_valid(request.model) or not cli_token_valid(request.resume_id): return Err("agent-cli-option-value-invalid")
+    var args: [text] = []
+    var format = "terminal"
+    if provider == "codex":
+        if request.mode == "noninteractive":
+            args.push("exec")
+            format = "jsonl"
+        if request.resume_id != "": args.push("resume")
+        if request.model != "": args = args + ["--model", request.model]
+        if request.mode == "noninteractive": args.push("--json")
+        args.push("--")
+        if request.resume_id != "": args.push(request.resume_id)
+        args.push(request.prompt)
+    elif provider == "claude":
+        if request.mode == "noninteractive":
+            args = ["--print", "--output-format", "json"]
+            format = "json"
+        if request.model != "": args = args + ["--model", request.model]
+        if request.resume_id != "": args = args + ["--resume", request.resume_id]
+        args = args + ["--", request.prompt]
+    else:
+        # Installed Kimi --prompt selects noninteractive mode. Do not pretend
+        # it injects a task into an interactive terminal session.
+        if request.mode == "interactive": return Err("agent-cli-interactive-task-unsupported")
+        args = ["--output-format", "stream-json"]
+        if request.model != "": args = args + ["--model", request.model]
+        if request.resume_id != "": args = args + ["--session", request.resume_id]
+        # Bind arbitrary task text to one option value, including leading '-'.
+        args.push("--prompt=" + request.prompt)
+        format = "jsonl"
+    Ok(AgentCliInvocationV1(provider: provider, version: capability.version,
+        executable_digest: capability.executable_digest, argv: args, output_format: format))

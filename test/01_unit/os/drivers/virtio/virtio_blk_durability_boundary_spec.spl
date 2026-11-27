@@ -3,6 +3,19 @@ use std.io_runtime.{read_file}
 use os.drivers.virtio._VirtioBlk.driver_class.{virtio_blk_validate_completion, virtio_blk_flush_transition, virtio_blk_request_owner_transition, virtio_blk_reset_acknowledged, virtio_blk_descriptor_tail, virtio_blk_dma_transfer_len, virtio_blk_next_write_epoch}
 
 describe "ARM64 VirtIO-BLK durability boundary":
+    it "keeps both initialization routes in 512-byte protocol sector units":
+        step("inspect initialization without treating a device block-size hint as a transfer unit")
+        # Structural evidence only: real MMIO initialization and durable
+        # write/FLUSH/reboot acceptance still require the ARM target lane.
+        val operations = read_file("src/os/drivers/virtio/_VirtioBlk/driver_operations.spl")
+        val owner = read_file("src/os/drivers/virtio/_VirtioBlk/driver_class.spl")
+        expect(operations.contains("self.sector_size = 512")).to_equal(true)
+        expect(owner.contains("driver.sector_size = 512")).to_equal(true)
+        expect(operations.contains("self.sector_size = blk_size")).to_equal(false)
+        expect(owner.contains("driver.sector_size = blk_size")).to_equal(false)
+        expect(operations.contains("_virtio_blk_reg_read32(blk_off)")).to_equal(false)
+        expect(owner.contains("_virtio_blk_reg_read32(276)")).to_equal(false)
+
     it "quarantines device-owned write descriptors after an indeterminate completion":
         step("inspect the write timeout ownership transition")
         val source = read_file("src/os/drivers/virtio/_VirtioBlk/block_device_impl.spl")

@@ -1,7 +1,9 @@
 # Un-annotated module-level `val x = false` is stored tag-boxed (19) and reads TRUTHY
 
 - **ID:** cranelift_unannotated_module_bool_global_tagbox_truthy_2026-07-27
-- **Status:** OPEN — root-caused, reproduced at object level, not fixed
+- **Status:** RESOLVED 2026-11-25 — producer-side fix landed 2026-07-27
+  (`1d5ec1235f1`, HIR bakes raw 0/1) and verified live at object level in the
+  pinned seed on `release/1.0.0` (see "Resolution verified — 2026-11-25" below)
 - **Severity:** high (silent wrong-branch; no diagnostic, no crash)
 - **Backend:** Cranelift. LLVM backend not tested (see Unverified).
 - **Trigger config:** `--entry-closure --mode dynload --emit-archive --target x86_64-unknown-none --opt-level=none`
@@ -216,3 +218,47 @@ objdump -s -j .rodata.subsection mod_0.o     # _B slot reads 13 (=19), not 00
 - `doc/08_tracking/bug/llvm_backend_missing_module_init_heap_globals_2026-06-15.md`
   — the LLVM-side analogue of the heap/text module-init mechanism.
 - Memory topic `project_module_global_mir_lowering_2026-07-25`.
+
+## Resolution verified — 2026-11-25
+
+**Status: RESOLVED (stale-OPEN).** The producer-side fix this doc's "Proper
+fix" section asked for landed the same day the doc was filed:
+`1d5ec1235f1` ("fix(hir): bake module-global bool literals raw, not tag-boxed",
+2026-07-27) changed `src/compiler_rust/compiler/src/hir/lower/module_lowering/module_pass.rs`
+to emit raw `0`/`1` for bool literal global initializers instead of the
+tag-boxed `TAG_SPECIAL 0b011 | payload<<3` encoding, fixing every backend at
+once. The comment block documenting the old hazard is still present at
+`module_pass.rs:154-164`.
+
+**Object-level evidence (2026-11-25, worktree `/d/wt-p1w1-ae` at
+`origin/release/1.0.0` HEAD `0819b116ecb`, tracked `bin/simple.exe`
+38,403,072 bytes, Rust seed v1.0.0-rc.1, pinned 2026-11-17 — the fix commit is
+an ancestor of the pin commit, verified with `git merge-base --is-ancestor`).**
+Oracle: this doc's own repro recipe (cranelift, `--entry-closure
+--emit-archive --target x86_64-unknown-none --opt-level=none`, fresh cache)
+over `val _A: bool = false` / `val _B = false` / `val _C = true` (the seed
+notes `E-SEED-NATIVE-BUILD-MODE-DYNLOAD-UNSUPPORTED` and emits the
+one-binary-style archive instead; the `declare_globals` baking path under test
+is the same). `objdump -s -j .rodata.subsection mod_0.o`, in symbol order:
+
+| symbol | bytes | value | correct? |
+|---|---|---|---|
+| `_A` (`: bool = false`) | `00` | 0 | YES |
+| `_B` (bare `= false`) | `00` | 0 | **YES — was `13` (19, truthy) when filed** |
+| `_C` (bare `= true`) | `01` | 1 | YES — was `0b` (11) |
+
+The broken shape from the field report (un-annotated `val x = false` reading
+truthy) now bakes `00`. The narrow `TypeId::BOOL`-gated untag in
+`common_backend.rs` (now line 2329) is still present but is no longer
+load-bearing for literal initializers, since the producer no longer emits
+tag-boxed bools.
+
+**Scope of this closure:** the tag-boxed initializer defect (this doc's title
+bug and its 38 `src/lib` `var ... = false` blast-radius entries) is fixed and
+verified. The doc's "Secondary hazard" (empty `__simple_call_module_inits` in
+`src/os/libc/simpleos_simple_runtime.c` shadowing the archive's init caller at
+link time) was explicitly INFERRED/unverified when filed and is NOT closed by
+this note; if it is real it is a separate link-order defect. LLVM-backend and
+non-x86_64 spot checks from the "Unverified" section were also not re-run —
+the fix is in target-independent HIR, but only the cranelift x86_64 object
+bytes above were measured.

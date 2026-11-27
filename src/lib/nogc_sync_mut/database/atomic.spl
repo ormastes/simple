@@ -17,31 +17,24 @@
 # INCORRECT USAGE (from application code):
 #   use std.database.atomic (atomic_write)      // ❌ Internal API
 
-# Direct extern declarations for bootstrap runtime compatibility
-# (use app.io wildcard import brings in timestamp_now/sleep_ms which
-#  are not available in the bootstrap runtime)
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
+# Host access goes through the SOSIX fs facade (no direct rt_* here).
 use std.io_runtime.{file_rename}
-extern fn rt_file_create_excl(path: text, content: text) -> bool
-extern fn rt_file_sync(path: text) -> bool
+use std.nogc_sync_mut.sosix.fs_v1.{file_create_excl, file_sync, file_write_text, file_publish_noreplace_raw, secure_temp_dir_raw}
+export use std.nogc_sync_mut.sosix.fs_v1.{file_exists, file_delete}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes, secure_temp_dir, file_lock, file_unlock, file_modified_time}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.path.{dirname}
 use std.io_runtime.{getpid}
 use std.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{thread_sleep}
 use std.io_runtime.{process_is_running}
-
-fn file_read(path: text) -> text:
-    # Bootstrap runtime wraps rt_file_read_text result in Option
-    val result = rt_file_read_text(path)
-    result ?? ""
+use std.io_runtime.{dir_exists}
+# Canonical text read: std.io_runtime's single blessed `pub fn file_read`; absent
+# or unreadable still yields "" for this module's callers. Not redefined here
+# (doc/08_tracking/bug/file_read_has_23_definitions_with_two_return_types_2026-08-16.md).
+use std.io_runtime.{file_read}
 fn file_write(path: text, content: text) -> bool:
-    rt_file_write_text(path, content)
-fn file_exists(path: text) -> bool:
-    rt_file_exists(path)
-fn file_delete(path: text) -> bool:
-    rt_file_delete(path)
+    file_write_text(path, content)
 
 fn get_timestamp() -> i64:
     time_now_unix_micros()
@@ -100,6 +93,15 @@ class FileLock:
                 self.acquired = true
                 return true
 
+            # Fail fast when the lock file's parent directory does not exist:
+            # create_lock_file cannot ever succeed there, and polling until
+            # the timeout (or forever, for the no-timeout acquire) turns a
+            # missing-directory publisher bug into a hang. Measured 2026-11-12:
+            # scv structural publish into a missing .scv/objects/syntax dir
+            # hung the spec child for its full budget.
+            if not dir_exists(dirname(self.lock_path)):
+                return false
+
             # Check timeout
             val elapsed = get_timestamp() - start_time
             if elapsed > timeout_us:
@@ -110,62 +112,72 @@ class FileLock:
 
         false
 
-    # Try to create lock file (atomic via O_EXCL)
+    # Try to create lock file (atomic via O_EXCL). A lock that exists is only
+    # ever removed by break_stale(), under the kernel .break lock.
     me try_create_lock() -> bool:
-        # Check if lock file exists and is stale
-        if file_exists(self.lock_path):
-            if self.is_stale_lock():
-                # Force remove stale lock
-                file_delete(self.lock_path)
-            else:
-                return false
+        if self.create_lock_file():
+            return true
+        val judged = file_read(self.lock_path)
+        if not self.is_stale_content(judged):
+            return false
+        # The break outcome IS the acquire outcome: break_stale recreates the
+        # lock under the .break kernel lock, so returning anything else drops
+        # a successful acquisition and sends the caller back into the poll.
+        self.break_stale(judged)
 
-        # Atomically create lock file with PID (O_EXCL prevents TOCTOU race)
+    fn create_lock_file() -> bool:
         val pid = getpid()
         val lock_content = "{pid}\n{get_timestamp()}"
-        rt_file_create_excl(self.lock_path, lock_content)
+        file_create_excl(self.lock_path, lock_content)
 
-    # Check if lock is stale (>2 hours old or process dead)
-    fn is_stale_lock() -> bool:
-        if not file_exists(self.lock_path):
+    # Break a lock previously judged stale (`judged` is the content that was
+    # seen). Breakers are serialized by a kernel lock; under it the lock is
+    # re-read and deleted ONLY if it is still byte-identical to `judged` and
+    # still stale, so a live lock created after the judgement is never removed.
+    me break_stale(judged: text) -> bool:
+        val handle = file_lock(self.lock_path + ".break", 5)
+        if handle < 0:
             return false
+        var created = false
+        val current = file_read(self.lock_path)
+        if current == judged and self.is_stale_content(current):
+            file_delete(self.lock_path)
+            created = self.create_lock_file()
+        elif not file_exists(self.lock_path):
+            created = self.create_lock_file()
+        file_unlock(handle)
+        created
 
-        val content: text = file_read(self.lock_path)
-        if content == "":
-            return true
-
+    # Stale means: complete content ("<pid>\n<timestamp>") whose pid is dead.
+    # Empty or partial content is a lock still being written, and a live pid
+    # is never stale regardless of age. A never-completed lock file (crash
+    # between create and write) is stale only after a 10 s mtime grace.
+    fn is_stale_content(content: text) -> bool:
         val lines: [text] = content.split("\n")
-        if lines.len() < 2:
-            return true
+        if lines.len() < 2 or lines[1].trim() == "":
+            return self.is_incomplete_lock_abandoned()
+        val pid = lines[0].trim().to_int() ?? 0
+        if pid <= 0:
+            return false
+        not is_process_alive(pid)
 
-        # Parse PID and timestamp
-        val pid_str = lines[0].trim()
-        val pid = pid_str.to_int() ?? 0
+    fn is_incomplete_lock_abandoned() -> bool:
+        val mtime = file_modified_time(self.lock_path)
+        if mtime <= 0:
+            return false
+        val now_secs = get_timestamp() / 1000000
+        now_secs - mtime > 10
 
-        val timestamp_str = lines[1].trim()
-        val timestamp = timestamp_str.to_int() ?? 0
-
-        # Check if process is still alive
-        if pid > 0 and not is_process_alive(pid):
-            return true  # Process died, lock is stale
-
-        # Check if >2 hours old (fallback timeout)
-        val now = get_timestamp()
-        val age = now - timestamp
-        val two_hours = 2 * 60 * 60 * 1000000  # 2 hours in microseconds
-
-        if age > two_hours:
-            return true
-
-        false
-
-    # Release lock
+    # Release lock: only if the lock file still names our own pid.
     me release():
         if not self.acquired:
             return
 
         if file_exists(self.lock_path):
-            file_delete(self.lock_path)
+            val lines: [text] = file_read(self.lock_path).split("\n")
+            val owner = lines[0].trim().to_int() ?? 0
+            if owner == getpid():
+                file_delete(self.lock_path)
 
         self.acquired = false
 
@@ -177,11 +189,11 @@ class FileLock:
 fn atomic_read(path: text) -> text?:
     # Fast path: if file doesn't exist, no need to acquire lock
     if not file_exists(path):
-        return nil
+        return None
 
     var lock = FileLock.for_file(path)
     if not lock.acquire():
-        return nil
+        return None
 
     val content = if file_exists(path):
         Some(file_read(path))
@@ -209,7 +221,7 @@ fn atomic_write(path: text, content: text) -> bool:
         return false
 
     # Flush to durable storage before rename (crash safety)
-    if not rt_file_sync(temp_path):
+    if not file_sync(temp_path):
         lock.release()
         return false
 
@@ -217,6 +229,67 @@ fn atomic_write(path: text, content: text) -> bool:
     val success = file_rename(temp_path, path)
 
     lock.release()
+    success
+
+# Create a database only when the destination is absent. The stage directory
+# lives beside the destination so publication stays on one filesystem, and
+# publish_noreplace treats every existing directory entry (including a
+# dangling symlink) as occupied. A failed stage is cleaned only from the
+# private directory this call created.
+fn atomic_write_exclusive(path: text, content: text) -> bool:
+    if path == "" or content == "":
+        return false
+    val separator = path.rfind("/")
+    val parent = if separator < 0: "." else if separator == 0: "/" else: path[0:separator]
+    val stage_dir = secure_temp_dir_raw(parent, ".sdn-create")
+    if stage_dir.len() <= 0:
+        return false
+    val staged_path = stage_dir + "/database.sdn"
+    if not file_create_excl(staged_path, content):
+        # A provider may have created the private stage file before a partial
+        # write failed. Remove only this attempt's stage entry.
+        file_delete(staged_path)
+        dir_remove(stage_dir, false)
+        return false
+    if not file_sync(staged_path):
+        file_delete(staged_path)
+        dir_remove(stage_dir, false)
+        return false
+    val status = file_publish_noreplace_raw(staged_path, path)
+    # Native and interpreter no-replace providers consume the stage on success;
+    # also remove it here in case a provider reports success with a hard-link
+    # fallback whose source unlink failed.
+    file_delete(staged_path)
+    dir_remove(stage_dir, false)
+    status == 1
+
+# Byte-exact replacement for arbitrary user destinations. The secure-temp
+# owner exclusively creates a private directory on the destination filesystem;
+# only our exclusively-created payload is written, synced, renamed or removed.
+# Never borrow destination.tmp or destination.lock: those may be user files.
+# Whole-payload replacement needs no shared read/modify lock. Concurrent writers
+# retain ordinary atomic-replace semantics. This does not claim directory fsync.
+fn atomic_write_bytes(path: text, content: [u8]) -> bool:
+    val parent = dirname(path)
+    val staging = match secure_temp_dir(parent, ".simple-atomic-bytes-"):
+        Ok(directory): directory
+        Err(error): return false
+    val temp_path = "{staging}/payload"
+    if not file_create_excl(temp_path, ""):
+        dir_remove(staging, false)
+        return false
+    if not file_write_bytes(temp_path, content):
+        file_delete(temp_path)
+        dir_remove(staging, false)
+        return false
+    if not file_sync(temp_path):
+        file_delete(temp_path)
+        dir_remove(staging, false)
+        return false
+    val success = file_rename(temp_path, path)
+    if not success:
+        file_delete(temp_path)
+    dir_remove(staging, false)
     success
 
 # Write multiple files atomically: acquire all locks, write via temp, rename all, release all.
@@ -276,7 +349,7 @@ fn atomic_write_batch(paths: [text], contents: [text]) -> bool:
     # Flush all temp files to durable storage before rename (crash safety)
     for idx in sorted_indices:
         val temp_path = atomic_temp_path(paths[idx])
-        if not rt_file_sync(temp_path):
+        if not file_sync(temp_path):
             var ri: i64 = 0
             while ri < locks.len():
                 locks[ri].release()
@@ -322,7 +395,7 @@ fn atomic_append(path: text, content: text) -> bool:
         return false
 
     # Flush to durable storage before rename (crash safety)
-    if not rt_file_sync(temp_path):
+    if not file_sync(temp_path):
         lock.release()
         return false
 
@@ -351,7 +424,7 @@ fn atomic_append_framed(path: text, content: text, header: text) -> bool:
     if not file_write(temp_path, existing + content):
         lock.release()
         return false
-    if not rt_file_sync(temp_path):
+    if not file_sync(temp_path):
         lock.release()
         return false
     val success = file_rename(temp_path, path)

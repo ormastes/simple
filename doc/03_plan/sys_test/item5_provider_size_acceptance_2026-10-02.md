@@ -43,12 +43,27 @@ Mandatory subcases within these eight rows:
 - V06/V08: final bootstrap/compiler/core/lib/MCP/LSP and real app gates bind the actual producer; no source-only marker, cross-link or C microbenchmark substitutes for application execution or physical-target performance.
 
 Status: planned, not executed. Requirements remain the user-selected 2026-09-02
+
+Superseded 2026-10-25: P01-P07 specs exist as `@tag:in-development` scaffolds (`9a970f7051d`); no case has executed on an admitted self-hosted runtime. Still not executed.
 contract; no budgets or supported hosts are removed.
 
 Each executable SSpec scenario uses step descriptions, REQ/NFR tags, real
 production calls and built-in matchers. Source substring checks are auxiliary
 architecture checks. Missing native artifacts or receipts block acceptance.
 Existing synthetic BS7 receipts verify their checker only.
+
+BS7 authority update (2026-11-07): both canonical cohort entrypoints require
+`--stage4-receipt "$STAGE4_COMPILER.provenance.env"`,
+`--stage4-compiler "$STAGE4_COMPILER"` and
+`--stage4-source-root "$STAGE4_SOURCE_ROOT"` in addition to existing inputs.
+Use the actual adjacent `simple-bootstrap-stage4-provenance-v1` sidecar for a
+`pure-simple-full-cli` candidate; the existing verifier checks the full Stage3
+dependency chain. Do not synthesize a two-field Stage4 label or promote Phase2
+Hello evidence. The updated unit contract uses an unmodified Stage4 verifier
+with a private test-only deep Stage3 stub; its PASS is not native admission.
+Real startup/RSS, build/runtime bindings, NoGC inspection and no-demand
+observation acquisition remain OPEN. Empty supplied traces do not close I5-01,
+and supplied samples do not establish actual interpreter measurements.
 
 | Case | Requirement | Setup, action and observable assertion |
 |---|---|---|

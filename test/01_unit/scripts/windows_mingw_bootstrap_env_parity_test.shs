@@ -1,0 +1,249 @@
+#!/bin/sh
+# Unit tests for Windows MinGW/GNU bootstrap & setup script parity:
+#   1. scripts/bootstrap/lib/admit-stage2-toolchain-env.shs (gnu branch)
+#   2. scripts/setup/platform-detect.shs & scripts/setup/windows-gitbash-bootstrap-env.shs
+#   3. Dynamic llvm-mingw discovery in scripts/bootstrap/p3-*.shs
+#   4. scripts/bootstrap/bootstrap-phase-toolchain.shs (gnu CC derivation from SIMPLE_LLVM_MINGW_ROOT)
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-mingw-parity.XXXXXX")
+scratch=$(CDPATH= cd -- "$scratch" && pwd -P)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+
+checked=0
+fail() { printf 'FAIL — %s\n' "$1" >&2; exit 1; }
+want() {
+    if [ "$1" != "$2" ]; then
+        fail "$3: got '$1', want '$2'"
+    fi
+    checked=$((checked + 1))
+}
+
+mk_mingw() {
+    # DIR [complete|no-unwind|no-lld]
+    _dir=$1
+    _mode=${2:-complete}
+    mkdir -p "$_dir/bin" "$_dir/x86_64-w64-mingw32/lib"
+    printf '#!/bin/sh\necho "clang version 23.1.1"\necho "Target: x86_64-w64-windows-gnu"\n' >"$_dir/bin/clang.exe"
+    printf '#!/bin/sh\nexit 0\n' >"$_dir/bin/llvm-ar.exe"
+    printf '#!/bin/sh\nexit 0\n' >"$_dir/bin/llvm-nm.exe"
+    chmod +x "$_dir/bin/clang.exe" "$_dir/bin/llvm-ar.exe" "$_dir/bin/llvm-nm.exe"
+    if [ "$_mode" != no-lld ]; then
+        printf '#!/bin/sh\nexit 0\n' >"$_dir/bin/ld.lld.exe"
+        chmod +x "$_dir/bin/ld.lld.exe"
+    fi
+    if [ "$_mode" != no-unwind ]; then
+        : >"$_dir/x86_64-w64-mingw32/lib/libunwind.a"
+    fi
+}
+
+# ---- 1. admit-stage2-toolchain-env.shs (gnu branch) -----------------------
+. "$repo/scripts/bootstrap/lib/admit-stage2-toolchain-env.shs"
+
+mw_old="$scratch/home/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64"
+mw_new="$scratch/home/.simple/toolchains/llvm-mingw-20261015-ucrt-x86_64"
+mw_bad="$scratch/home/.simple/toolchains/llvm-mingw-20261201-ucrt-x86_64"
+mw_host="$scratch/host-mingw"
+mw_nolld="$scratch/nolld-mingw"
+mk_mingw "$mw_old" complete
+mk_mingw "$mw_new" complete
+mk_mingw "$mw_bad" no-unwind
+mk_mingw "$mw_host" complete
+mk_mingw "$mw_nolld" no-lld
+
+# Stub MSYS2 clang.exe so we prove llvm-mingw/bin is prepended ahead of it.
+fake_msys="$scratch/fake-msys/bin"
+mkdir -p "$fake_msys"
+printf '#!/bin/sh\nexit 0\n' >"$fake_msys/clang.exe"
+chmod +x "$fake_msys/clang.exe"
+
+admit_probe() {
+    _plat=$1
+    _src=$2
+    shift 2
+    (
+        unset SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR LLVM_SYS_231_PREFIX SIMPLE_LLVM_WIN_ROOT_23 \
+            SIMPLE_LLVM_MINGW_ROOT SIMPLE_MINGW_ROOT SIMPLE_HOST_MINGW_ROOT SIMPLE_HOST_CONFIG CC
+        PATH="$fake_msys:$PATH"
+        export PATH
+        for _kv in "$@"; do
+            case "$_kv" in *=*) export "$_kv" ;; esac
+        done
+        _rc=0
+        admit_stage2_toolchain_env "$_plat" "$_src" 2>/dev/null || _rc=$?
+        printf '%s|%s|%s|%s|%s|%s|%s\n' \
+            "$_rc" "${SIMPLE_WINDOWS_ABI:-}" "${SIMPLE_LINKER_FLAVOR:-}" \
+            "${SIMPLE_MINGW_ROOT:-}" "${SIMPLE_LLVM_MINGW_ROOT:-}" \
+            "${CC:-}" "${PATH%%:*}"
+    )
+}
+
+want "$(admit_probe x86_64-pc-windows-gnu "$scratch/no-src" SIMPLE_LLVM_MINGW_ROOT="$mw_old")" \
+    "0|gnu|gnu|$mw_old|$mw_old|$mw_old/bin/clang.exe|$mw_old/bin" \
+    "admit gnu from SIMPLE_LLVM_MINGW_ROOT"
+
+want "$(admit_probe x86_64-pc-windows-gnu "$scratch/no-src" SIMPLE_MINGW_ROOT="$mw_old" SIMPLE_LINKER_FLAVOR=mingw)" \
+    "0|gnu|mingw|$mw_old|$mw_old|$mw_old/bin/clang.exe|$mw_old/bin" \
+    "admit gnu from SIMPLE_MINGW_ROOT with mingw flavor"
+
+want "$(admit_probe x86_64-pc-windows-gnu "$repo" SIMPLE_HOST_MINGW_ROOT="$mw_host" SIMPLE_HOST_CONFIG="$scratch/no-host.sdn" HOME="$scratch/empty-home")" \
+    "0|gnu|gnu|$mw_host|$mw_host|$mw_host/bin/clang.exe|$mw_host/bin" \
+    "admit gnu from host-env.shs --get mingw_root"
+
+# Pinned discovery skips newest incomplete (no libunwind.a) and chooses newest valid (20261015 > 20260922).
+want "$(admit_probe x86_64-pc-windows-gnu "$scratch/no-src" HOME="$scratch/home")" \
+    "0|gnu|gnu|$mw_new|$mw_new|$mw_new/bin/clang.exe|$mw_new/bin" \
+    "admit gnu pinned discovery chooses newest valid toolchain"
+
+want "$(admit_probe x86_64-pc-windows-gnu "$scratch/no-src" SIMPLE_LLVM_MINGW_ROOT="$mw_bad" | cut -d'|' -f1)" \
+    "1" "admit gnu refuses missing libunwind.a"
+
+want "$(admit_probe x86_64-pc-windows-gnu "$scratch/no-src" SIMPLE_LLVM_MINGW_ROOT="$mw_nolld" | cut -d'|' -f1)" \
+    "1" "admit gnu refuses missing ld.lld.exe"
+
+want "$(admit_probe x86_64-pc-windows-gnu "$scratch/no-src" SIMPLE_LLVM_MINGW_ROOT="$mw_old" SIMPLE_LINKER_FLAVOR=msvc | cut -d'|' -f1)" \
+    "1" "admit gnu refuses conflicting msvc flavor"
+
+# ---- 2. platform-detect.shs & windows-gitbash-bootstrap-env.shs -----------
+fake_uname="$scratch/fake-uname"
+mkdir -p "$fake_uname"
+cat >"$fake_uname/uname" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+    -m) echo x86_64 ;;
+    *) echo MINGW64_NT-10.0 ;;
+esac
+EOF
+chmod +x "$fake_uname/uname"
+
+pd_out=$(
+    unset SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR SIMPLE_MINGW_ROOT SIMPLE_LLVM_MINGW_ROOT CC
+    PATH="$fake_uname:$PATH"
+    HOME="$scratch/home"
+    SIMPLE_TOOLCHAINS_ROOT="$scratch/home/.simple/toolchains"
+    export PATH HOME SIMPLE_TOOLCHAINS_ROOT
+    . "$repo/scripts/setup/platform-detect.shs"
+    # Note: platform-detect checks clang/ld.lld/llvm-ar, so mw_bad has those 3 and is newest by name;
+    # test with an isolated toolchains root containing only mw_old and mw_new below too.
+    printf '%s|%s|%s|%s\n' "$SIMPLE_MINGW_ROOT" "$SIMPLE_LLVM_MINGW_ROOT" "$SIMPLE_LINKER_FLAVOR" "$CC"
+)
+# Isolate clean toolchains dir for exact newest assertion.
+clean_tc="$scratch/clean-tc"
+mk_mingw "$clean_tc/llvm-mingw-20260922-ucrt-x86_64" complete
+mk_mingw "$clean_tc/llvm-mingw-20261015-ucrt-x86_64" complete
+want_tc="$clean_tc/llvm-mingw-20261015-ucrt-x86_64"
+
+pd_clean=$(
+    unset SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR SIMPLE_MINGW_ROOT SIMPLE_LLVM_MINGW_ROOT CC
+    PATH="$fake_uname:$PATH"
+    SIMPLE_TOOLCHAINS_ROOT="$clean_tc"
+    export PATH SIMPLE_TOOLCHAINS_ROOT
+    . "$repo/scripts/setup/platform-detect.shs"
+    printf '%s|%s|%s|%s|%s\n' \
+        "$PLATFORM_TRIPLE" "$SIMPLE_MINGW_ROOT" "$SIMPLE_LLVM_MINGW_ROOT" \
+        "$SIMPLE_LINKER_FLAVOR" "$CC"
+)
+want "$pd_clean" "x86_64-pc-windows-gnu|$want_tc|$want_tc|gnu|$want_tc/bin/clang.exe" \
+    "platform-detect exports dual roots, linker flavor, and CC"
+
+pd_reverse=$(
+    unset SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR SIMPLE_MINGW_ROOT CC
+    PATH="$fake_uname:$PATH"
+    SIMPLE_LLVM_MINGW_ROOT="$mw_old"
+    SIMPLE_TOOLCHAINS_ROOT="$scratch/empty-tc"
+    export PATH SIMPLE_LLVM_MINGW_ROOT SIMPLE_TOOLCHAINS_ROOT
+    . "$repo/scripts/setup/platform-detect.shs"
+    printf '%s|%s|%s|%s\n' "$SIMPLE_MINGW_ROOT" "$SIMPLE_LLVM_MINGW_ROOT" "$SIMPLE_LINKER_FLAVOR" "$CC"
+)
+want "$pd_reverse" "$mw_old|$mw_old|gnu|$mw_old/bin/clang.exe" \
+    "platform-detect honors pre-set SIMPLE_LLVM_MINGW_ROOT"
+
+wgb_out=$(
+    unset SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR SIMPLE_MINGW_ROOT SIMPLE_LLVM_MINGW_ROOT CC
+    PATH="$fake_uname:$PATH"
+    SIMPLE_TOOLCHAINS_ROOT="$clean_tc"
+    export PATH SIMPLE_TOOLCHAINS_ROOT
+    . "$repo/scripts/setup/windows-gitbash-bootstrap-env.shs" 2>/dev/null
+    _has_core_perl=no
+    if [ -d /usr/bin/core_perl ]; then
+        case ":$PATH:" in *:/usr/bin/core_perl:*) _has_core_perl=yes ;; esac
+    else
+        _has_core_perl=na
+    fi
+    printf '%s|%s|%s|%s|%s|%s\n' \
+        "$SIMPLE_WINDOWS_ABI" "$SIMPLE_MINGW_ROOT" "$SIMPLE_LLVM_MINGW_ROOT" \
+        "$SIMPLE_LINKER_FLAVOR" "$CC" "$_has_core_perl"
+)
+if [ -d /usr/bin/core_perl ]; then
+    want_perl=yes
+else
+    want_perl=na
+fi
+want "$wgb_out" "gnu|$want_tc|$want_tc|gnu|$want_tc/bin/clang.exe|$want_perl" \
+    "windows-gitbash-bootstrap-env exports dual roots, flavor, CC, and core_perl"
+
+# ---- 3. Dynamic llvm-mingw discovery in p3-*.shs --------------------------
+for _p3 in \
+    scripts/bootstrap/p3-entry-groups.shs \
+    scripts/bootstrap/p3-manual-link-stage3.shs \
+    scripts/bootstrap/p3-selfbuild-stage3.shs \
+    scripts/bootstrap/p3-smoke-stage3.shs \
+    scripts/bootstrap/p3-targeted-stage2-build.shs; do
+    sh -n "$repo/$_p3" || fail "sh -n failed on $_p3"
+    if grep -q 'C:/Users/user/.simple/toolchains/llvm-mingw-20260922' "$repo/$_p3"; then
+        fail "$_p3 still hardcodes C:/Users/user/.simple/toolchains/llvm-mingw-20260922"
+    fi
+    checked=$((checked + 1))
+done
+
+# Runtime discovery proof on p3-manual-link-stage3.shs: unset SIMPLE_LLVM_MINGW_ROOT,
+# point HOME at clean_tc's parent, and verify clang is found (fails later at "no aot objects",
+# NOT at "llvm-mingw clang not found").
+p3_home="$scratch/p3-home"
+mkdir -p "$p3_home/.simple/toolchains" "$scratch/empty-objs"
+mk_mingw "$p3_home/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64" complete
+mk_mingw "$p3_home/.simple/toolchains/llvm-mingw-20261015-ucrt-x86_64" complete
+p3_err=$(
+    unset SIMPLE_LLVM_MINGW_ROOT SIMPLE_MINGW_ROOT
+    HOME="$p3_home" SIMPLE_ALLOW_LEGACY_P3_SCRIPT=1 \
+        sh "$repo/scripts/bootstrap/p3-manual-link-stage3.shs" \
+        "$scratch/empty-objs" "$scratch" "$scratch/out.exe" 2>&1 || true
+)
+case "$p3_err" in
+    *"no aot objects selected"*) checked=$((checked + 1)) ;;
+    *) fail "p3-manual-link-stage3.shs dynamic HOME discovery failed: $p3_err" ;;
+esac
+
+# Verify SIMPLE_MINGW_ROOT is honored by p3-manual-link-stage3.shs when SIMPLE_LLVM_MINGW_ROOT is unset.
+p3_err2=$(
+    unset SIMPLE_LLVM_MINGW_ROOT
+    HOME="$scratch/empty-home" SIMPLE_MINGW_ROOT="$mw_old" SIMPLE_ALLOW_LEGACY_P3_SCRIPT=1 \
+        sh "$repo/scripts/bootstrap/p3-manual-link-stage3.shs" \
+        "$scratch/empty-objs" "$scratch" "$scratch/out.exe" 2>&1 || true
+)
+case "$p3_err2" in
+    *"no aot objects selected"*) checked=$((checked + 1)) ;;
+    *) fail "p3-manual-link-stage3.shs did not honor SIMPLE_MINGW_ROOT: $p3_err2" ;;
+esac
+
+# ---- 4. bootstrap-phase-toolchain.shs syntax + gnu root derivation --------
+sh -n "$repo/scripts/bootstrap/bootstrap-phase-toolchain.shs" || fail "sh -n failed on bootstrap-phase-toolchain.shs"
+checked=$((checked + 1))
+
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+        bpt_got=$(
+            unset CC SIMPLE_MINGW_ROOT
+            SIMPLE_WINDOWS_ABI=gnu SIMPLE_LLVM_MINGW_ROOT="$mw_old"
+            export SIMPLE_WINDOWS_ABI SIMPLE_LLVM_MINGW_ROOT
+            . "$repo/scripts/check/lib/bootstrap-stage3/authority.shs"
+            . "$repo/scripts/bootstrap/bootstrap-phase-toolchain.shs"
+            bootstrap_phase_c_compiler_path
+        )
+        bpt_want=$(cygpath -am "$mw_old/bin/clang.exe")
+        want "$bpt_got" "$bpt_want" "bootstrap-phase-toolchain derives gnu CC from SIMPLE_LLVM_MINGW_ROOT"
+        ;;
+esac
+
+printf 'PASS — %s Windows MinGW bootstrap parity case(s) checked\n' "$checked"

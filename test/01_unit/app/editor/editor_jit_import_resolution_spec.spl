@@ -1,0 +1,76 @@
+"""
+# Editor JIT Import & Private-Helper Resolution Regression Spec
+
+Guards the pure-Simple app.editor import fixes for
+doc/08_tracking/bug/editor_jit_run_route_blockers_2026-05-28.md:
+- selective imports resolve cross-module md_* collisions (`md_dispatch_motion`,
+  `md_apply_result`, `md_diagnose`, `md_buffer_content`, `md_compute_stats`)
+- `app.editor.editor_jit_helpers` avoids private `std.editor.*` calls under JIT
+- `src/app/editor/md_dispatch.spl` preserves its public markdown dispatch contract
+"""
+
+use std.spec.*
+use std.io_runtime.{read_file_text}
+use std.editor.services.command_palette.{PaletteEntry, PaletteState}
+use std.editor.services.md_lsp_config.{md_lsp_state_new}
+use std.editor.view.layout.{EditorGroup, GroupTab, layout_new, editor_layout_group_at}
+use app.editor.editor_jit_helpers.*
+
+# @engine-reach: interpreter-only — unit tests pure-Simple app.editor import bindings and helper dispatch; strict-JIT execution verified separately via `simple run src/app/editor/main.spl --version`
+describe "Editor JIT import and helper resolution":
+    it "updates layout groups via public std.editor.view.layout fields without private helper":
+        val base_layout = layout_new()
+        val updated_group = EditorGroup(id: 1, tabs: [GroupTab(doc_id: 42)], active_tab_index: 0)
+        val next_layout = app_editor_layout_with_group(base_layout, 0, updated_group)
+        val stored = editor_layout_group_at(next_layout, 0)
+        expect(stored.tabs.len()).to_equal(1)
+        expect(stored.tabs[0].doc_id).to_equal(42)
+
+    it "drives command palette visibility and selection without private std.editor helpers":
+        val e1 = PaletteEntry(description: "First", name: "first", command_name: "cmd-one", command_payload: "p1")
+        val e2 = PaletteEntry(description: "Second", name: "second", command_name: "cmd-two", command_payload: "p2")
+        val initial = PaletteState(entries: [e1, e2], filtered: [e1, e2], query: "old", selected_index: 1, visible: false)
+
+        val shown = app_palette_show(initial)
+        expect(shown.visible).to_equal(true)
+        expect(shown.query).to_equal("")
+        expect(app_palette_selected(shown).command_name).to_equal("cmd-one")
+
+        val next_sel = app_palette_select_next(shown)
+        expect(app_palette_selected(next_sel).command_name).to_equal("cmd-two")
+        val clamped_next = app_palette_select_next(next_sel)
+        expect(app_palette_selected(clamped_next).command_name).to_equal("cmd-two")
+
+        val prev_sel = app_palette_select_prev(clamped_next)
+        expect(app_palette_selected(prev_sel).command_name).to_equal("cmd-one")
+        val clamped_prev = app_palette_select_prev(prev_sel)
+        expect(app_palette_selected(clamped_prev).command_name).to_equal("cmd-one")
+
+    it "returns inactive MdLspState unchanged in app_md_lsp_change_active":
+        val state = md_lsp_state_new(".")
+        expect(state.running).to_equal(false)
+        val next = app_md_lsp_change_active(state, "README.md", "# Title\n")
+        expect(next.running).to_equal(false)
+        expect(next.version).to_equal(0)
+
+    it "keeps selective imports in editor_ctrl_core and preserves md_dispatch contract":
+        val ctrl_core_src = read_file_text("src/app/editor/editor_ctrl_core.spl")
+        expect(ctrl_core_src).to_contain("use std.editor.view.md_editing.{md_dispatch_motion, md_apply_result}")
+        expect(ctrl_core_src).to_contain("use app.editor.md_dispatch.{md_update_preview, md_update_preview_with_wiki}")
+        expect(ctrl_core_src.contains("use app.editor.md_dispatch.*")).to_equal(false)
+        expect(ctrl_core_src).to_contain("app_editor_layout_with_group(")
+        expect(ctrl_core_src.contains("= editor_layout_with_group(")).to_equal(false)
+        expect(ctrl_core_src).to_contain("app_palette_show(")
+        expect(ctrl_core_src.contains("= palette_show(")).to_equal(false)
+
+        val ctrl_src = read_file_text("src/app/editor/editor_controller.spl")
+        expect(ctrl_src).to_contain("use app.editor.md_dispatch.{md_buffer_content, md_update_preview}")
+        expect(ctrl_src.contains("use app.editor.md_dispatch.*")).to_equal(false)
+        expect(ctrl_src).to_contain("app_md_lsp_change_active(")
+        expect(ctrl_src.contains("= md_lsp_change_active(")).to_equal(false)
+
+        val md_dispatch_src = read_file_text("src/app/editor/md_dispatch.spl")
+        expect(md_dispatch_src).to_contain("fn md_apply_result(")
+        expect(md_dispatch_src).to_contain("fn md_buffer_content(")
+        expect(md_dispatch_src).to_contain("fn md_dispatch_motion(")
+        expect(md_dispatch_src).to_contain("fn md_update_preview(")

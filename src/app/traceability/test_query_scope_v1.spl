@@ -1,0 +1,88 @@
+# Bug- and requirement-scoped TestDB queries, shared by `simple test query` and
+# the `simple_test_query` MCP tool. Read-only; nothing here writes anything.
+# Linkage comes from data that already exists: a bug's `reproducible_by` column
+# in the legacy bug DB, and `# @req` spec-header annotations. A requirement is
+# resolved only against spec paths the TestDB has planned cases for (the test
+# tree is far too large to scan for headers); an unlinked scope is a typed
+# error or an explicit empty result, never a fabricated row.
+# @req TESTDB-010
+use std.common.traceability.test_query.{TestCasePath, TestRunId, TestQueryScope, TestScopedQuery, TestQueryPage, TestQueryError, TestQueryErrorKind}
+use std.common.traceability.annotations_v1.{parse_req_annotations_v1}
+use std.common.traceability.schema.{trace_entity_id_parse_v1}
+use std.common.string_core.{string_from_byte_array, text_validate_utf8}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded_bytes, file_is_regular_no_follow}
+use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
+use app.traceability.snapshot.legacy_bug_db_v1.{trace_legacy_bug_db_capture_v1, TraceBugDbPathModeV1}
+
+pub struct TestScopeBugDbPath:
+    value: text
+
+fn _invalid(detail: text) -> TestQueryError:
+    TestQueryError(kind: TestQueryErrorKind.InvalidQuery, detail: detail)
+
+# The legacy column is free text (`NONE`, `released`, `a + b`, a command line); only
+# one relative `test/...spl` path (a `test/` segment) with no whitespace is a link.
+fn _is_single_spec_path(value: text) -> bool:
+    if not (value.starts_with("test/") or value.contains("/test/")) or not value.ends_with(".spl"):
+        return false
+    for ch in value.chars():
+        if ch == " " or ch == "\t" or ch == "\n":
+            return false
+    true
+
+fn _bug_paths(id: text, bug_db: TestScopeBugDbPath) -> Result<[TestCasePath], TestQueryError>:
+    val captured = match trace_legacy_bug_db_capture_v1(bug_db.value, TraceBugDbPathModeV1.Default):
+        case Ok(found): found
+        case Err(reason): return Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: reason))
+    val source = match captured:
+        case Some(value): value
+        case None: return Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: "bug database not found: " + bug_db.value))
+    for row in source.rows:
+        if row.id == id or row.db_id == id:
+            if row.reproducible_by == "":
+                return Err(_invalid("bug " + id + " records no reproducible_by test path, so no test is linked to it"))
+            if not _is_single_spec_path(row.reproducible_by):
+                return Err(_invalid("bug " + id + " reproducible_by is not a single test spec path: " + row.reproducible_by))
+            return Ok([TestCasePath(value: row.reproducible_by)])
+    Err(_invalid("unknown bug id: " + id))
+
+fn _spec_header(path: text) -> text:
+    if not file_is_regular_no_follow(path):
+        return ""
+    val bytes = match file_read_regular_no_follow_bounded_bytes(path, 65536):
+        case Ok(value): value
+        case Err(_): return ""
+    val content = string_from_byte_array(bytes)
+    if not text_validate_utf8(content):
+        return ""
+    content
+
+fn _requirement_paths(owner: RunnerTestDb, id: text, run_id: TestRunId?) -> Result<[TestCasePath], TestQueryError>:
+    val wanted = if id.starts_with("req:"): id else: "req:" + id
+    var paths: [TestCasePath] = []
+    for candidate in owner.scope_candidate_paths(run_id)?:
+        val content = _spec_header(candidate.value)
+        if content == "":
+            continue
+        for reference in parse_req_annotations_v1(content, candidate.value):
+            if reference.from_id == wanted:
+                paths.push(candidate)
+                break
+    Ok(paths)
+
+pub fn resolve_test_scope_paths(owner: RunnerTestDb, scoped: TestScopedQuery, bug_db: TestScopeBugDbPath) -> Result<[TestCasePath], TestQueryError>:
+    match scoped.scope:
+        case TestQueryScope.Bug(id):
+            if id.value == "":
+                return Err(_invalid("bug id must not be empty"))
+            _bug_paths(id.value, bug_db)
+        case TestQueryScope.Requirement(id):
+            if id.value == "":
+                return Err(_invalid("requirement id must not be empty"))
+            if trace_entity_id_parse_v1("req:" + id.value).is_none():
+                return Err(_invalid("requirement id is not a valid identifier: " + id.value))
+            _requirement_paths(owner, id.value, scoped.run_id)
+
+pub fn run_scoped_test_query(owner: RunnerTestDb, scoped: TestScopedQuery, bug_db: TestScopeBugDbPath) -> Result<TestQueryPage, TestQueryError>:
+    val paths = resolve_test_scope_paths(owner, scoped, bug_db)?
+    owner.query_scoped_attempts(scoped, paths)

@@ -65,7 +65,7 @@ struct RtHalIsolatedTask:
     generation: i64
     host_handle: i64
 
-var rt_hal_host: RtHalIsolatedHostPort? = nil
+var rt_hal_host: RtHalIsolatedHostPort? = None
 var rt_hal_installer_owner_id = -1
 var rt_hal_controller_owner_id = -1
 var rt_hal_adapters: [RtHalProcessAdapter] = []
@@ -140,16 +140,14 @@ pub fn rt_hal_unavailable_isolated_host() -> RtHalIsolatedHostPort:
         shutdown_fn: unavailable_shutdown
     )
 
-# @workaround bug=runner_callback_field_owner_2026_10_11 reason=all host callback fields use explicit value-call syntax and declared owner locals.
 fn installer_ok() -> bool:
-    if rt_hal_host == nil or rt_hal_installer_owner_id <= 0:
+    if rt_hal_host.is_none() or rt_hal_installer_owner_id <= 0:
         return false
     val host: RtHalIsolatedHostPort = rt_hal_host ?? rt_hal_unavailable_isolated_host()
     (host.current_owner_fn)() == rt_hal_installer_owner_id
 
-# @workaround bug=runner_callback_field_owner_2026_10_11 reason=preserve function-field call ownership and declared host type until native callback lowering is repaired
 fn controller_ok() -> bool:
-    if rt_hal_host == nil or rt_hal_controller_owner_id <= 0:
+    if rt_hal_host.is_none() or rt_hal_controller_owner_id <= 0:
         return false
     val host: RtHalIsolatedHostPort = rt_hal_host ?? rt_hal_unavailable_isolated_host()
     (host.current_owner_fn)() == rt_hal_controller_owner_id
@@ -157,9 +155,8 @@ fn controller_ok() -> bool:
 # Called by the non-RT boundary drain. Installation/configuration ownership and
 # controller ownership are deliberately distinct; dispatch producers never
 # acquire this capability implicitly.
-# @workaround bug=runner_callback_field_owner_2026_10_11 reason=preserve function-field call ownership and declared host type until native callback lowering is repaired
 pub fn rt_hal_process_controller_claim() -> text:
-    if rt_hal_host == nil:
+    if rt_hal_host.is_none():
         return "RTHAL-W-PARALLEL-UNSUPPORTED"
     val host: RtHalIsolatedHostPort = rt_hal_host ?? rt_hal_unavailable_isolated_host()
     val owner = (host.current_owner_fn)()
@@ -231,7 +228,6 @@ fn release_slot(slot: i64):
     val task = rt_hal_tasks[slot]
     rt_hal_tasks[slot] = RtHalIsolatedTask(active: false, generation: task.generation, host_handle: -1)
 
-# @workaround bug=runner_callback_field_owner_2026_10_11 reason=preserve function-field call ownership and declared host type until native callback lowering is repaired
 fn cancel(task_handle: i64) -> bool:
     if not controller_ok():
         return false
@@ -244,7 +240,6 @@ fn cancel(task_handle: i64) -> bool:
     if cancelled and closed: release_slot(slot)
     cancelled and closed
 
-# @workaround bug=runner_callback_field_owner_2026_10_11 reason=preserve function-field call ownership and declared host type until native callback lowering is repaired
 fn spawn_exact(adapter_handle: i64, request: RtHalExactRequest, receipt: RtHalCanonicalReceipt, replay: bool) -> i64:
     if not controller_ok():
         return -1
@@ -279,7 +274,6 @@ fn spawn_replay_exact(adapter_handle: i64, request: RtHalExactRequest, receipt: 
     spawn_exact(adapter_handle, request, receipt, true)
 
 fn join_exact_until(task_handle: i64, deadline_ticks: i64) -> RtHalExactJoin:
-    # @workaround bug=runner_callback_field_owner_2026_10_11 reason=explicit field calls retain the installed host callback.
     if not controller_ok() or deadline_ticks <= 0:
         return unavailable_exact_join(-1, deadline_ticks)
     val slot = task_slot(task_handle)
@@ -315,13 +309,12 @@ pub fn rt_hal_process_adapter_error(adapter: RtHalProcessAdapter) -> text:
     ""
 
 pub fn rt_hal_process_host_install(port: RtHalIsolatedHostPort, queue_capacity: i64) -> text:
-    # @workaround bug=runner_callback_field_owner_2026_10_11 reason=explicit field call retains the installing port's owner callback.
     val problem = host_error(port)
     if problem != "":
         return problem
     if queue_capacity <= 0 or queue_capacity > RT_HAL_ARENA_MAX_TASKS:
         return "RTHAL-E-BOUND"
-    if rt_hal_host != nil:
+    if rt_hal_host.is_some():
         return "RTHAL-E-ARENA-BUSY"
     val owner = (port.current_owner_fn)()
     if owner <= 0:
@@ -336,7 +329,6 @@ pub fn rt_hal_process_host_install(port: RtHalIsolatedHostPort, queue_capacity: 
         slot = slot + 1
     ""
 
-# @workaround bug=runner_callback_field_owner_2026_10_11 reason=preserve function-field call ownership and declared host type until native callback lowering is repaired
 pub fn rt_hal_process_adapter_register(adapter: RtHalProcessAdapter) -> text:
     if not installer_ok():
         return "RTHAL-E-OWNER"
@@ -358,9 +350,8 @@ pub fn rt_hal_process_adapter_register(adapter: RtHalProcessAdapter) -> text:
     rt_hal_adapters.push(adapter)
     ""
 
-# @workaround bug=runner_callback_field_owner_2026_10_11 reason=preserve function-field call ownership and declared host type until native callback lowering is repaired
 pub fn rt_hal_process_arena_shutdown() -> text:
-    if rt_hal_host == nil:
+    if rt_hal_host.is_none():
         return ""
     if not installer_ok() and not controller_ok():
         return "RTHAL-E-OWNER"
@@ -385,7 +376,7 @@ pub fn rt_hal_process_arena_shutdown() -> text:
 pub fn rt_hal_process_arena_reset() -> text: rt_hal_process_arena_shutdown()
 
 pub fn rt_hal_process_exact_arena() -> RtHalExactArenaPort:
-    val available = rt_hal_host != nil
+    val available = rt_hal_host.is_some()
     RtHalExactArenaPort(
         capabilities: RtHalTaskArenaCapabilities(
             available: available, bounded_queue: available,
@@ -422,7 +413,7 @@ fn exact_registry(comparison: RtHalComparison) -> RtHalProviderRegistry:
     RtHalProviderRegistry(providers: providers)
 
 pub fn rt_hal_process_exact_ready(comparison: RtHalComparison) -> bool:
-    rt_hal_host != nil and exact_registry(comparison).providers.len() == comparison.providers.len()
+    rt_hal_host.is_some() and exact_registry(comparison).providers.len() == comparison.providers.len()
 
 pub fn rt_hal_process_compare_observed_exact(comparison: RtHalComparison, requests: [RtHalExactRequest], receipts: [RtHalCanonicalReceipt]) -> RtHalExactReport:
     if not rt_hal_process_exact_ready(comparison):

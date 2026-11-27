@@ -1,8 +1,6 @@
 # Deployed self-hosted binary: interpret-mode extern registration + baked module table constraints
-## Open 2026-09-16 — needs owner triage
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+**Status:** Documented platform facts (not a single fixable bug). Example (a) partially outdated as of 2026-11-25 — see verification note at bottom.
 
 ## Status
 Documented (platform facts, not a single fixable bug) — informs how new
@@ -86,3 +84,18 @@ the same change.
   `SIMPLE_ONE_CALL_UPLOAD` split-gate fix and the inline `spl_gpu_transfer`
   bridge live here.
 
+
+## Verification 2026-11-25 (P3 ledger lane, Windows host)
+
+SKIP (informational platform-facts doc; nothing bounded to fix), but one
+concrete example is now outdated. Probe against the current tracked
+`bin/simple.exe` (38,403,072 bytes): an interpreted script declaring
+`extern fn rt_array_data_ptr(arr: [u32]) -> i64` and calling it **resolves
+and returns a live pointer** (`ptr=5944100632032`) — the "unknown extern
+function: rt_array_data_ptr" hard-error recorded in probe (a) no longer
+reproduces on this binary, i.e. that extern has since been registered in the
+interpret dispatch table. The doc's central working rule is unaffected and
+still correct: registration is per-extern and per-binary, so each new
+extern/module must be verified against the actual deployed binary rather
+than inferred from source. Constraint (b) (build-time module table) was not
+re-probed; the inline-into-deployed-module shipping rule stands.

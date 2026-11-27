@@ -218,3 +218,71 @@ fn test_nested_indent() {
     );
 }
 
+
+// `s{` set-literal opener (bug set_literal_s_brace_unparsed_2026-09-06).
+#[test]
+fn test_set_literal_prefix_tokenizes_only_when_adjacent() {
+    assert_eq!(
+        tokenize("s{1}"),
+        vec![TokenKind::SetLitStart, TokenKind::Integer(1), TokenKind::RBrace, TokenKind::Eof]
+    );
+    // A plain identifier `s` keeps lexing as an identifier.
+    assert!(matches!(tokenize("s + 1")[0], TokenKind::Identifier { .. }));
+    assert!(matches!(tokenize("s {")[0], TokenKind::Identifier { .. }));
+    assert!(matches!(tokenize("sx{")[0], TokenKind::Identifier { .. }));
+}
+
+// OPUS-REVIEW (PR #7960, changes 718204635d5): the `s{` branch consumed `{`
+// without bracket_depth += 1 while the matching `}` decrements via
+// saturating_sub, corrupting bracket-depth tracking (newline suppression and
+// outer-bracket depth) for everything lexed after a set literal.
+#[test]
+fn test_set_literal_tracks_bracket_depth() {
+    // Multi-line set literal: no Newline/Indent/Dedent inside the braces.
+    assert_eq!(
+        tokenize("val x = s{\n1\n}"),
+        vec![
+            TokenKind::Val,
+            TokenKind::Identifier { name: "x".to_string(), pattern: NamePattern::Immutable },
+            TokenKind::Assign,
+            TokenKind::SetLitStart,
+            TokenKind::Integer(1),
+            TokenKind::RBrace,
+            TokenKind::Eof,
+        ]
+    );
+    // `s{}` nested in `(...)`: the inner `}` must not end the outer bracket's
+    // depth early; the newline after the comma stays suppressed and the `)`
+    // still balances.
+    assert_eq!(
+        tokenize("f(s{},\n2)"),
+        vec![
+            TokenKind::Identifier { name: "f".to_string(), pattern: NamePattern::Immutable },
+            TokenKind::LParen,
+            TokenKind::SetLitStart,
+            TokenKind::RBrace,
+            TokenKind::Comma,
+            TokenKind::Integer(2),
+            TokenKind::RParen,
+            TokenKind::Eof,
+        ]
+    );
+    // A `{` block containing a set literal: the outer `{` keeps its depth
+    // across the `s{}`, so newlines inside the block stay suppressed.
+    assert_eq!(
+        tokenize("if a {\nval y = s{1}\n}"),
+        vec![
+            TokenKind::If,
+            TokenKind::Identifier { name: "a".to_string(), pattern: NamePattern::Immutable },
+            TokenKind::LBrace,
+            TokenKind::Val,
+            TokenKind::Identifier { name: "y".to_string(), pattern: NamePattern::Immutable },
+            TokenKind::Assign,
+            TokenKind::SetLitStart,
+            TokenKind::Integer(1),
+            TokenKind::RBrace,
+            TokenKind::RBrace,
+            TokenKind::Eof,
+        ]
+    );
+}

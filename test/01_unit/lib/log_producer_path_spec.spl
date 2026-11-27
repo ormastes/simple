@@ -1,0 +1,37 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# Plan D14 (producer-path rules) first step, see
+# doc/03_plan/compiler/aspect_dynload/optimized_observability_aspects_2026-10-28.md:
+# the text producer path must not perform per-call environment reads (each
+# `rt_env_get` allocates a fresh text) -- the bootstrap skip switch is a
+# process-lifetime property and is resolved once.
+
+use std.spec.step
+use std.spec.{describe, it, assert_true, assert_eq}
+use std.log.{
+    LOG_TRACE, log_set_level, log_register_backend, log_remove_backend,
+    ring_backend_new, ring_backend_clear, ring_backend_count, info
+}
+use std.nogc_sync_mut.env.variables.{env_set}
+
+describe "log facade producer path", fn():
+    # @manual scenario evidence
+
+    it "resolves the bootstrap skip switch once, not on every producer call", fn():
+        # @req REQ-SSPEC-UNIT
+        step("skip switch is read once per process")
+        log_set_level(LOG_TRACE)
+        val sink = ring_backend_new(8)
+        val id = log_register_backend(sink.ops)
+        ring_backend_clear(sink)
+        assert_true(env_set("SIMPLE_BOOTSTRAP_SKIP_LOG_DISPATCH", ""))
+        info("producer", "first")
+        assert_eq(ring_backend_count(sink), 1)
+        # Flipping the switch after the first dispatch must be invisible to
+        # the producer path: it was resolved once and is never re-read.
+        assert_true(env_set("SIMPLE_BOOTSTRAP_SKIP_LOG_DISPATCH", "1"))
+        info("producer", "second")
+        assert_eq(ring_backend_count(sink), 2)
+        assert_true(env_set("SIMPLE_BOOTSTRAP_SKIP_LOG_DISPATCH", ""))
+        log_remove_backend(id)

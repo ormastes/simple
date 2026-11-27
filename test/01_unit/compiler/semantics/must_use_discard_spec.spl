@@ -1,0 +1,234 @@
+"""
+## Purpose and audience
+Purpose: ROB-USE-01/02/03. A typed-HIR check is the single authority for
+discarded results: an expression statement whose callee returns Result/Option,
+or is marked @must_use, and whose value is dropped is a finding with a stable
+code. Severity is error in compiled code and warning in scripts.
+Audience: compiler engineers maintaining must_use enforcement.
+## Operator workflow
+Run with the test runner and read the per-scenario verdict lines.
+"""
+# @req: ROB-USE-01, ROB-USE-02, ROB-USE-03
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, HirImport, HirImportItem}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.config.{Logger}
+use compiler.semantics.must_use_discard.{must_use_discard_scan}
+use compiler.common.must_use_policy.{must_use_finding_severity, must_use_r9_marked_lines, must_use_r9_critical_lines, MUST_USE_CODE_RESULT, MUST_USE_CODE_MARKED}
+
+val PRELUDE = "fn risky() -> Result<i64, text>:\n    Ok(1)\nfn maybe() -> i64?:\n    Some(1)\nfn quiet():\n    val q = 1\nfn plain() -> i64:\n    2\n"
+
+fn scan(body: text, marked: [text]) -> [text]:
+    val src = PRELUDE + "fn caller():\n" + body
+    val parsed = parse_full_frontend(src, "mu.spl", "mu", Logger(level: 0))
+    var lowering = HirLowering.with_filename("mu.spl")
+    val hir = lowering.lower_module(parsed)
+    val modules = {"mu": hir}
+    var out: [text] = []
+    for f in must_use_discard_scan(modules, marked):
+        out = out.push(f.code + ":" + f.function + ":" + f.callee)
+    out
+
+fn scan_mods(srcs: [text]) -> [text]:
+    var modules: Dict<text, HirModule> = {}
+    var i = 0
+    for src in srcs:
+        val mname = "m{i}"
+        val parsed = parse_full_frontend(src, mname + ".spl", mname, Logger(level: 0))
+        var lowering = HirLowering.with_filename(mname + ".spl")
+        modules[mname] = lowering.lower_module(parsed)
+        i = i + 1
+    var out: [text] = []
+    for f in must_use_discard_scan(modules, []):
+        out = out.push(f.code + ":" + f.function + ":" + f.callee)
+    out
+
+describe "ROB-USE must_use discard check":
+    it "a discarded Result is flagged":
+        expect(scan("    risky()\n", [])).to_equal(["SPL-USE-001:caller:risky"])
+
+    it "a discarded Option is flagged":
+        expect(scan("    maybe()\n", [])).to_equal(["SPL-USE-001:caller:maybe"])
+
+    it "an explicit `_ =` discard is not flagged":
+        expect(scan("    _ = risky()\n", []).len()).to_equal(0)
+
+    it "a `val _ =` discard is not flagged":
+        expect(scan("    val _ = risky()\n", []).len()).to_equal(0)
+
+    it "a bound value is not flagged":
+        expect(scan("    val r = risky()\n", []).len()).to_equal(0)
+
+    it "a unit-returning call is not flagged":
+        expect(scan("    quiet()\n", []).len()).to_equal(0)
+
+    it "a plain value return is not flagged":
+        expect(scan("    plain()\n", []).len()).to_equal(0)
+
+    it "a @must_use function is flagged even with a plain return":
+        expect(scan("    plain()\n", ["plain"])).to_equal(["SPL-USE-002:caller:plain"])
+
+    it "a discard nested in an if body is flagged":
+        expect(scan("    if true:\n        risky()\n", [])).to_equal(["SPL-USE-001:caller:risky"])
+
+    it "severity is error compiled and warning in script mode":
+        expect(must_use_finding_severity(false)).to_equal("error")
+        expect(must_use_finding_severity(true)).to_equal("warning")
+
+    it "shared R9 policy lines format marked and critical diagnostics":
+        expect(must_use_r9_marked_lines("risky", "")).to_equal([
+            "error[R9]: return value of function 'risky' must be used",
+            "  = help: assign to variable or use 'val _ = ...' to discard"
+        ])
+        expect(must_use_r9_marked_lines("risky", "check err")).to_equal([
+            "error[R9]: return value of function 'risky' must be used",
+            "  = note: check err",
+            "  = help: assign to variable or use 'val _ = ...' to discard"
+        ])
+        expect(must_use_r9_critical_lines("risky", "i64")).to_equal([
+            "error[R9]: return value of 'risky' (i64) discarded in @profile(critical)",
+            "  = help: assign to variable or use 'val _ = ...' to discard"
+        ])
+
+    it "an else branch discard is flagged":
+        expect(scan("    if false:\n        quiet()\n    else:\n        risky()\n", [])).to_equal(["SPL-USE-001:caller:risky"])
+
+    it "a while body discard is flagged":
+        expect(scan("    while false:\n        risky()\n", [])).to_equal(["SPL-USE-001:caller:risky"])
+
+    it "a for body discard is flagged":
+        expect(scan("    for i in 0..2:\n        risky()\n", [])).to_equal(["SPL-USE-001:caller:risky"])
+
+    it "a match arm discard is flagged":
+        expect(scan("    val k = 1\n    match k:\n        case 1:\n            risky()\n        case _:\n            quiet()\n", [])).to_equal(["SPL-USE-001:caller:risky"])
+
+    it "a nested block discard is flagged":
+        expect(scan("    if true:\n        while false:\n            if true:\n                risky()\n", [])).to_equal(["SPL-USE-001:caller:risky"])
+
+    it "a discard inside an unsafe block is flagged":
+        expect(scan("    unsafe:\n        risky()\n", [])).to_equal(["SPL-USE-001:caller:risky"])
+
+    it "an impl method discard is flagged":
+        val src = PRELUDE + "struct S:\n    a: i64\nimpl S:\n    fn go(self):\n        risky()\n"
+        expect(scan_mods([src])).to_equal(["SPL-USE-001:go:risky"])
+
+    it "a unit f is not flagged because another module's f returns Result":
+        val a = "fn f():\n    val q = 1\nfn caller():\n    f()\n"
+        val b = "fn f() -> Result<i64, text>:\n    Ok(1)\n"
+        expect(scan_mods([a, b]).len()).to_equal(0)
+        expect(scan_mods([b, a]).len()).to_equal(0)
+
+# Cross-module HIR without a module loader: lower `a_src` with a local stub of
+# `stub` so the call resolves to a named callee, then turn that stub into an
+# import of `stub` (optionally aliased) from module "m1" holding `b_src`.
+fn scan_import(a_src: text, stub: text, b_src: text, alias: text?) -> [text]:
+    val pa = parse_full_frontend(a_src, "m0.spl", "m0", Logger(level: 0))
+    var la = HirLowering.with_filename("m0.spl")
+    var ha = la.lower_module(pa)
+    var kept: Dict<SymbolId, HirFunction> = {}
+    for fkey in ha.functions.keys():
+        if ha.functions[fkey].name != stub:
+            kept[fkey] = ha.functions[fkey]
+    ha.functions = kept
+    ha.imports = [HirImport(module_path: "m1", items: [HirImportItem(name: stub, alias: alias, resolved: nil)], is_lazy: false, span: Span.empty())]
+    val pb = parse_full_frontend(b_src, "m1.spl", "m1", Logger(level: 0))
+    var lb = HirLowering.with_filename("m1.spl")
+    val hb = lb.lower_module(pb)
+    val modules = {"m0": ha, "m1": hb}
+    var out: [text] = []
+    for fd in must_use_discard_scan(modules, []):
+        out = out.push(fd.code + ":" + fd.function + ":" + fd.callee)
+    out
+
+describe "ROB-USE @must_use attribute and imported callees":
+    it "a function carrying @must_use is flagged without a supplied name set":
+        val src = "@must_use\nfn plain() -> i64:\n    2\nfn caller():\n    plain()\n"
+        expect(scan_mods([src])).to_equal(["SPL-USE-002:caller:plain"])
+
+    it "an unmarked sibling is still not flagged":
+        val src = "@must_use\nfn plain() -> i64:\n    2\nfn other() -> i64:\n    3\nfn caller():\n    other()\n"
+        expect(scan_mods([src]).len()).to_equal(0)
+
+    it "@must_use on one module does not leak into another or mutate caller marked":
+        val a_src = "@must_use\nfn secret() -> i64:\n    2\nfn a_caller():\n    secret()\n"
+        val b_src = "fn secret() -> i64:\n    3\nfn b_caller():\n    secret()\n"
+        val pa = parse_full_frontend(a_src, "a.spl", "a", Logger(level: 0))
+        var la = HirLowering.with_filename("a.spl")
+        val ha = la.lower_module(pa)
+        val pb = parse_full_frontend(b_src, "b.spl", "b", Logger(level: 0))
+        var lb = HirLowering.with_filename("b.spl")
+        val hb = lb.lower_module(pb)
+        val marked: [text] = ["seed_only"]
+        val findings = must_use_discard_scan({"a": ha, "b": hb}, marked)
+        expect(marked).to_equal(["seed_only"])
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].function).to_equal("a_caller")
+
+    it "an imported Result-returning function is flagged":
+        val a = "fn risky():\n    val q = 1\nfn caller():\n    risky()\n"
+        val b = "fn risky() -> Result<i64, text>:\n    Ok(1)\n"
+        expect(scan_import(a, "risky", b, nil)).to_equal(["SPL-USE-001:caller:risky"])
+
+    it "an imported @must_use function is flagged":
+        val a = "fn plain():\n    val q = 1\nfn caller():\n    plain()\n"
+        val b = "@must_use\nfn plain() -> i64:\n    2\n"
+        expect(scan_import(a, "plain", b, nil)).to_equal(["SPL-USE-002:caller:plain"])
+
+    it "an import of a name the module does not define is not flagged":
+        val a = "fn missing():\n    val q = 1\nfn caller():\n    missing()\n"
+        val b = "fn risky() -> Result<i64, text>:\n    Ok(1)\n"
+        expect(scan_import(a, "missing", b, nil).len()).to_equal(0)
+
+    it "an imported plain unit function is not flagged":
+        val a = "fn quiet():\n    val q = 1\nfn caller():\n    quiet()\n"
+        val b = "fn quiet():\n    val z = 2\n"
+        expect(scan_import(a, "quiet", b, nil).len()).to_equal(0)
+
+# Module-key resolution fixture: `m0` imports `risky` from `path`; the scanned
+# set holds `others` (key -> source) alongside `m0`.
+fn scan_import_keys(path: text, keys: [text], srcs: [text]) -> [text]:
+    val pa = parse_full_frontend("fn risky():\n    val q = 1\nfn caller():\n    risky()\n", "m0.spl", "m0", Logger(level: 0))
+    var la = HirLowering.with_filename("m0.spl")
+    var ha = la.lower_module(pa)
+    var kept: Dict<SymbolId, HirFunction> = {}
+    for fkey in ha.functions.keys():
+        if ha.functions[fkey].name != "risky":
+            kept[fkey] = ha.functions[fkey]
+    ha.functions = kept
+    ha.imports = [HirImport(module_path: path, items: [HirImportItem(name: "risky", alias: nil, resolved: nil)], is_lazy: false, span: Span.empty())]
+    var modules: Dict<text, HirModule> = {"m0": ha}
+    var i = 0
+    for key in keys:
+        val pb = parse_full_frontend(srcs[i], key + ".spl", key, Logger(level: 0))
+        var lb = HirLowering.with_filename(key + ".spl")
+        modules[key] = lb.lower_module(pb)
+        i = i + 1
+    var out: [text] = []
+    for fd in must_use_discard_scan(modules, []):
+        out = out.push(fd.code + ":" + fd.function + ":" + fd.callee)
+    out
+
+describe "ROB-USE imported module resolution is exact or unambiguous, never guessed":
+    val risky_src = "fn risky() -> Result<i64, text>:\n    Ok(1)\n"
+    val quiet_src = "fn risky():\n    val z = 2\n"
+
+    it "an exact key beats a shorter suffix key":
+        expect(scan_import_keys("pkg.util", ["util", "pkg.util"], [quiet_src, risky_src])).to_equal(["SPL-USE-001:caller:risky"])
+        expect(scan_import_keys("pkg.util", ["pkg.util", "util"], [risky_src, quiet_src])).to_equal(["SPL-USE-001:caller:risky"])
+
+    it "a single segment-boundary suffix candidate resolves":
+        expect(scan_import_keys("a.pkg.util", ["myutil", "pkg.util"], [quiet_src, risky_src])).to_equal(["SPL-USE-001:caller:risky"])
+
+    it "a partial-segment suffix does not match":
+        expect(scan_import_keys("pkg.myutil", ["util"], [risky_src]).len()).to_equal(0)
+
+    it "two suffix candidates are ambiguous and yield no finding in either key order":
+        expect(scan_import_keys("a.pkg.util", ["util", "pkg.util"], [quiet_src, risky_src]).len()).to_equal(0)
+        expect(scan_import_keys("a.pkg.util", ["pkg.util", "util"], [risky_src, quiet_src]).len()).to_equal(0)
+        expect(scan_import_keys("a.pkg.util", ["util", "pkg.util"], [risky_src, risky_src]).len()).to_equal(0)

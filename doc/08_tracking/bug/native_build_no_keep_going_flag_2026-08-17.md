@@ -1,9 +1,10 @@
 # Feature bug: `native-build` has no --keep-going / --error-limit flag
 
 - **Date:** 2026-08-17
-- Status: OPEN (P3)
+- Status: RESOLVED 2026-11-25 (`--keep-going` implemented and wired in the
+  pure-Simple driver; verified below. `--error-limit=N` from the proposed
+  shape was not implemented — the primary ask is delivered.)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
-- **Status:** OPEN (feature request)
 - **Component:** `src/app/cli/native_build_main.spl`, pure-Simple driver
   (`src/compiler/80.driver/`), Rust seed `native_project` pipeline
 
@@ -35,3 +36,33 @@ collisions) be fixed in a single batch.
 
 Implementing is out of scope for this filing; needs driver-loop changes in both
 the pure-Simple path and (for parity) the seed's `native_project` pipeline.
+
+## Verification 2026-11-25 (lane p3-baw, release/1.0.0 @ 1301149fa3f) — RESOLVED
+
+`--keep-going` now exists in the pure-Simple driver and is wired end to end:
+
+- `src/compiler/80.driver/compile_failure_policy.spl:3` —
+  `compile_fail_fast_requested(args, env_value, ci_value)` maps
+  `--keep-going` → collect-all (fail-fast off) and `--fail-fast` → stop at
+  first failure, with `SIMPLE_COMPILE_FAIL_FAST` env fallback; CLI order wins.
+- Wired into the native-build driver at
+  `src/app/cli/native_build_main.spl:1378` and `:2663`, plus
+  `driver_types.spl:1426` and `driver_build/native_mir_fork_v1.spl:307`.
+  The MIR-shard path documents "keep-going reports every one"
+  (`native_build_main.spl:1743`).
+- Landed by `d346dad423d` ("collect host failures with bounded HIR recovery")
+  and `6cf7657a80c` ("default to full collection ...").
+
+Executable evidence on this host (seed binary, fixture run — `test` subcommand
+is blocked by the known `@representation_boundary` seed limitation, so the
+policy fixture was executed directly):
+
+```
+$ SIMPLE_LIB=src bin/simple.exe run test/fixtures/compiler/compile_failure_policy/main.spl
+PASS compile failure policy
+```
+
+The fixture asserts both flag orders, the env fallback, and CI independence.
+`--error-limit=N` from the "Proposed shape" section was not implemented; the
+filed use case (bootstrap phase census of all failing modules in one pass) is
+served by `--keep-going`. Status → RESOLVED.

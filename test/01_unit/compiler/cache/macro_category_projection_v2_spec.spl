@@ -1,0 +1,274 @@
+# @req REQ-DTA-A1 REQ-DTA-B3
+# Pure production projector tests. The driver still owns real parse provenance.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.directory_source_epoch_v2.{DirectorySourceEpochV2}
+use compiler.frontend.parser.macro_registry.{MacroDef}
+use compiler.frontend.cache_artifact.macro_reference_projector.{MacroModuleSourceV1,
+    MacroSourceDefV1, MacroSourceInvocationV1}
+use compiler.frontend.cache_artifact.macro_category_projection_v2.{MacroCategoryInputV2, MacroCategoryImportV2, MacroCategoryImportNameV2, macro_category_project_all_v2, macro_category_capture_v2, MacroCategoryDraftV2, macro_category_complete_v2}
+
+fn category_def(name: text, body: text = "x + x", nested: [text] = [], effects: [text] = []) -> MacroSourceDefV1:
+    MacroSourceDefV1(def: MacroDef(name: name, params: ["x"], contract_intros: [], contract_injects: []),
+        namespace: "macro", body_text: body, nested_macro_names: nested,
+        declared_effects: effects, guard_ids: [], is_public: true)
+
+fn category_use(name: text) -> MacroSourceInvocationV1:
+    MacroSourceInvocationV1(region_id: "call#0", stable_invocation_id: "call#0", requested_name: name,
+        invocation_text: name + "!(1)", args_text: "1", hygiene_scope_id: "fixture",
+        active_guard_id: "", active: true)
+
+fn category_input(name: text, defs: [MacroSourceDefV1] = [], uses: [MacroSourceInvocationV1] = [],
+        imports: [text] = [], generation: i64 = 1, provider: text = "compiler") -> MacroCategoryInputV2:
+    var bindings: [MacroCategoryImportV2] = []
+    for source_id in imports: bindings = bindings.push(MacroCategoryImportV2(source_id: source_id, import_all: true, names: []))
+    MacroCategoryInputV2(source: MacroModuleSourceV1(package: "fixture", module: name,
+        source_id: name + ".spl", defs: defs, invocations: uses), guards: [],
+        source_identity: "fixture/" + name, source_digest: sha256_text(name),
+        target_triple: "aarch64-unknown-linux-gnu", preprocessed_digest: sha256_text(name),
+        cfg_decision_digest: sha256_text("no cfg decisions"),
+        environment_policy_digest: sha256_text("policy"), executing_image_digest: sha256_text(provider),
+        source_epoch: DirectorySourceEpochV2(driver_identity: 1, generation: generation), imports: bindings)
+
+describe "current target macro category graph":
+    it "represents actual captured empty facts without an absent-record shortcut":
+        val result = macro_category_project_all_v2([category_input("empty")])
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()[0].projection.def_table.entries.len()).to_equal(0)
+        expect(result.unwrap()[0].input_root.starts_with("sha256:")).to_equal(true)
+        expect(macro_category_project_all_v2([]).is_err()).to_equal(true)
+
+    it "resolves current imported definitions independently of input order":
+        val a = category_input("a", [category_def("double")])
+        val b = category_input("b", [], [category_use("double")], ["a.spl"])
+        val first = macro_category_project_all_v2([a, b])
+        val second = macro_category_project_all_v2([b, a])
+        expect(first.is_ok()).to_equal(true)
+        expect(second.is_ok()).to_equal(true)
+        expect(first.unwrap()[1].projection.use_table.uses[0].coverage).to_equal("complete")
+        expect(first.unwrap()[1].category_root).to_equal(second.unwrap()[1].category_root)
+
+    it "propagates real macro definition body edits into consumer input roots":
+        val b = category_input("b", [], [category_use("double")], ["a.spl"])
+        val before = macro_category_project_all_v2([category_input("a", [category_def("double", "x + x")]), b]).unwrap()
+        val after = macro_category_project_all_v2([category_input("a", [category_def("double", "x * 2")]), b]).unwrap()
+        expect(before[0].definition_root == after[0].definition_root).to_equal(false)
+        expect(before[1].input_root == after[1].input_root).to_equal(false)
+
+    it "refuses needed missing imports and exported nested reads":
+        expect(macro_category_project_all_v2([category_input("b", [], [category_use("double")], ["a.spl"])]).is_err()).to_equal(true)
+        expect(macro_category_project_all_v2([category_input("b", [category_def("quad", "double!(x)", ["double"])], [], ["a.spl"])]).is_err()).to_equal(true)
+
+    it "refuses cycles and duplicate source module identities":
+        val a = category_input("a", [], [category_use("other")], ["b.spl"])
+        val b = category_input("b", [], [category_use("other")], ["a.spl"])
+        expect(macro_category_project_all_v2([a, b]).unwrap_err()).to_equal("macro-category-import-cycle")
+        expect(macro_category_project_all_v2([a, a]).unwrap_err()).to_equal("macro-category-duplicate-module")
+
+    it "refuses mixed epochs and compiler image identities":
+        expect(macro_category_project_all_v2([category_input("a"), category_input("b", [], [], [], 2)]).is_err()).to_equal(true)
+        expect(macro_category_project_all_v2([category_input("a"), category_input("b", [], [], [], 1, "other compiler")]).is_err()).to_equal(true)
+
+    it "does not admit placeholder CTFE read closures":
+        val input = category_input("a", [category_def("constant", "x", [], ["ctfe:const-eval"])])
+        expect(macro_category_project_all_v2([input]).unwrap_err()).to_equal("macro-category-ctfe-read-closure-unavailable")
+
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{FrontendCfgDecisionReceiptV1, frontend_cfg_decision_digest_v1}
+use compiler.frontend.core.parser_preprocessor.{PreprocessorState, preprocessor_state_take,
+    preprocessor_state_install, _pp_preprocess_conditionals_target_receipted_v1}
+
+describe "macro category target evaluator ownership":
+    it "captures a real target parse and restores borrowed preprocessor state":
+        val source = "@when(windows)\nmacro double(x: Int) -> (returns result: Int):\n    emit result:\n        x + x\n@end\n"
+        val processed = _pp_preprocess_conditionals_target_receipted_v1(source, "windows", "x86_64").unwrap()
+        val receipt = FrontendCfgDecisionReceiptV1(source_identity: "fixture/windows", source_digest: sha256_text(source),
+            target_triple: "x86_64-pc-windows-msvc", target_os: "windows", target_arch: "x86_64",
+            preprocessed_digest: sha256_text(processed.source), decisions: processed.decisions,
+            decision_digest: frontend_cfg_decision_digest_v1(processed.decisions))
+        val parsed = parse_full_frontend(processed.source, "windows.spl", "windows", Logger(level: 0))
+        val previous = preprocessor_state_take()
+        preprocessor_state_install(PreprocessorState(_pp_tokens: ["retained"], _pp_pos: 1,
+            _pp_target_mode: false, _pp_target_os: "", _pp_target_arch: "",
+            _pp_target_error: "prior marker", _pp_target_decisions: []))
+        val result = macro_category_capture_v2("fixture", "windows", "windows.spl", "fixture/windows",
+            source, receipt, "x86_64-pc-windows-msvc", sha256_text("policy"), sha256_text("compiler"),
+            DirectorySourceEpochV2(driver_identity: 1, generation: 1), [])
+        val restored = preprocessor_state_take()
+        preprocessor_state_install(previous)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap().source.defs.len()).to_equal(1)
+        expect(result.unwrap().guards[0].active).to_equal(true)
+        expect(restored._pp_tokens).to_equal(["retained"])
+        expect(restored._pp_pos).to_equal(1)
+        expect(restored._pp_target_error).to_equal("prior marker")
+
+    it "restores state when strict target reevaluation rejects a condition":
+        # Deliberately malformed caller evidence exercises refusal, not valid
+        # full-parse admission. A real parent rejects this before capture.
+        val source = "@when(unknown_target_flag)\n@end\n"
+        val receipt = FrontendCfgDecisionReceiptV1(source_identity: "fixture/bad", source_digest: sha256_text(source),
+            target_triple: "x86_64-pc-windows-msvc", target_os: "windows", target_arch: "x86_64",
+            preprocessed_digest: sha256_text(source), decisions: [], decision_digest: frontend_cfg_decision_digest_v1([]))
+        val previous = preprocessor_state_take()
+        preprocessor_state_install(PreprocessorState(_pp_tokens: ["retained"], _pp_pos: 1,
+            _pp_target_mode: false, _pp_target_os: "", _pp_target_arch: "",
+            _pp_target_error: "prior marker", _pp_target_decisions: []))
+        val result = macro_category_capture_v2("fixture", "bad", "bad.spl", "fixture/bad", source,
+            receipt, "x86_64-pc-windows-msvc", sha256_text("policy"), sha256_text("compiler"),
+            DirectorySourceEpochV2(driver_identity: 1, generation: 1), [])
+        val restored = preprocessor_state_take()
+        preprocessor_state_install(previous)
+        expect(result.is_err()).to_equal(true)
+        expect(restored._pp_tokens).to_equal(["retained"])
+        expect(restored._pp_target_error).to_equal("prior marker")
+
+fn capture_inactive_fixture(source: text) -> Result<MacroCategoryInputV2, text>:
+    val processed = _pp_preprocess_conditionals_target_receipted_v1(source, "linux", "aarch64").unwrap()
+    val receipt = FrontendCfgDecisionReceiptV1(source_identity: "fixture/inactive", source_digest: sha256_text(source),
+        target_triple: "aarch64-unknown-linux-gnu", target_os: "linux", target_arch: "aarch64",
+        preprocessed_digest: sha256_text(processed.source), decisions: processed.decisions,
+        decision_digest: frontend_cfg_decision_digest_v1(processed.decisions))
+    val parsed = parse_full_frontend(processed.source, "inactive.spl", "inactive", Logger(level: 0))
+    macro_category_capture_v2("fixture", "inactive", "inactive.spl", "fixture/inactive", source,
+        receipt, "aarch64-unknown-linux-gnu", sha256_text("policy"), sha256_text("compiler"),
+        DirectorySourceEpochV2(driver_identity: 1, generation: 1), [])
+
+describe "inactive macro coverage is derived from the actual scan":
+    it "retains a supported inactive definition from the target scan":
+        val result = capture_inactive_fixture("@when(false)\nmacro hidden(x: Int) -> (returns result: Int):\n    emit result:\n        x\n@end\n")
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap().source.defs.len()).to_equal(1)
+        expect(result.unwrap().guards[0].active).to_equal(false)
+
+    it "refuses an unrepresented multiline inactive macro header":
+        val result = capture_inactive_fixture("@when(false)\nmacro hidden(\n    x: Int\n) -> (returns result: Int):\n    emit result:\n        x\n@end\n")
+        expect(result.unwrap_err()).to_equal("macro-category-inactive-syntax-unavailable")
+
+use compiler.common.cache_contract.macro_reference_manifest_v1.{macro_def_id_canonical_v1, macro_use_status_tag_v1}
+
+describe "explicit macro import names and aliases":
+    it "resolves an alias to the unchanged canonical origin":
+        val a = category_input("a", [category_def("double")])
+        var b = category_input("b", [], [category_use("twice")])
+        b.imports = [MacroCategoryImportV2(source_id: "a.spl", import_all: false,
+            names: [MacroCategoryImportNameV2(origin_name: "double", visible_name: "twice")])]
+        val rows = macro_category_project_all_v2([b, a]).unwrap()
+        val origin = rows[0].projection.def_table.entries[0]
+        expect(origin.macro_name).to_equal("double")
+        expect(rows[1].projection.use_table.uses[0].resolved_def_id).to_equal(macro_def_id_canonical_v1(origin.def_id))
+        expect(rows[1].projection.use_table.uses[0].requested_scoped_name).to_equal("twice")
+
+    it "does not expose unselected macro definitions or ordinary selections":
+        val a = category_input("a", [category_def("double")])
+        var b = category_input("b", [], [category_use("double")])
+        b.imports = [MacroCategoryImportV2(source_id: "a.spl", import_all: false,
+            names: [MacroCategoryImportNameV2(origin_name: "ordinary_function", visible_name: "ordinary_function")])]
+        val rows = macro_category_project_all_v2([a, b]).unwrap()
+        expect(macro_use_status_tag_v1(rows[1].projection.use_table.uses[0].status)).to_equal("unresolved")
+        expect(rows[1].projection.use_table.uses[0].has_absence_witness).to_equal(true)
+
+    it "binds a changed visible namespace into negative lookup evidence":
+        val a = category_input("a", [category_def("double")])
+        var b = category_input("b", [], [category_use("missing")])
+        b.imports = [MacroCategoryImportV2(source_id: "a.spl", import_all: false,
+            names: [MacroCategoryImportNameV2(origin_name: "double", visible_name: "twice")])]
+        val before = macro_category_project_all_v2([a, b]).unwrap()
+        b.imports = [MacroCategoryImportV2(source_id: "a.spl", import_all: false,
+            names: [MacroCategoryImportNameV2(origin_name: "double", visible_name: "other_name")])]
+        val after = macro_category_project_all_v2([a, b]).unwrap()
+        expect(before[1].input_root == after[1].input_root).to_equal(false)
+
+    it "refuses two different origins exposed under one visible name":
+        val a = category_input("a", [category_def("double")])
+        val c = category_input("c", [category_def("double")])
+        val b = category_input("b", [], [category_use("double")], ["a.spl", "c.spl"])
+        expect(macro_category_project_all_v2([c, b, a]).unwrap_err()).to_equal("macro-binding-ambiguous")
+
+use compiler.frontend.cache_artifact.macro_reference_projector.{MacroImportBindingV2,
+    project_macro_module_v1, project_macro_module_bound_v2}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{macro_content_digest_v1}
+
+describe "legacy macro projection compatibility":
+    it "keeps explicit same-name bindings equivalent to the original public lookup":
+        val a_input = category_input("a", [category_def("double")])
+        val b_input = category_input("b", [], [category_use("double")])
+        val a = project_macro_module_v1(a_input.source, [])
+        val legacy = project_macro_module_v1(b_input.source, [a])
+        val bound = project_macro_module_bound_v2(b_input.source, [a],
+            [MacroImportBindingV2(visible_name: "double", origin_def_id: macro_def_id_canonical_v1(a.def_table.entries[0].def_id))],
+            macro_content_digest_v1("macro-profile/default"), []).unwrap()
+        expect(bound.use_table.uses[0].resolved_def_id).to_equal(legacy.use_table.uses[0].resolved_def_id)
+        expect(bound.use_table.uses[0].resolved_def_key).to_equal(legacy.use_table.uses[0].resolved_def_key)
+        expect(bound.use_table.uses[0].expand_key).to_equal(legacy.use_table.uses[0].expand_key)
+        expect(bound.use_table.uses[0].resolution_candidate_root).to_equal(legacy.use_table.uses[0].resolution_candidate_root)
+
+use compiler.frontend.cache_artifact.macro_reference_projector.{macro_bound_projection_work_v2}
+
+describe "V2 legacy-projector work admission":
+    it "refuses deep local nested reads before recursive key projection":
+        var definitions: [MacroSourceDefV1] = []
+        var index = 0
+        while index < 40:
+            val nested: [text] = if index == 0: [] else: ["m{index - 1}"]
+            definitions = definitions.push(category_def("m{index}", "x", nested))
+            index = index + 1
+        val input = category_input("deep", definitions)
+        expect(macro_category_project_all_v2([input]).unwrap_err()).to_equal("macro-binding-local-depth")
+
+    it "refuses a large visible namespace before quadratic name indexing":
+        var bindings: [MacroImportBindingV2] = []
+        var index = 0
+        while index < 257:
+            bindings = bindings.push(MacroImportBindingV2(visible_name: "m{index}", origin_def_id: "origin{index}"))
+            index = index + 1
+        expect(macro_bound_projection_work_v2(category_input("empty").source, [], bindings).unwrap_err()).to_equal("macro-binding-work-limit")
+
+    it "refuses a multiline inactive contract despite a complete parameter list":
+        val result = capture_inactive_fixture("@when(false)\nmacro hidden(x: Int) -> (\n    returns result: Int\n):\n    emit result:\n        x\n@end\n")
+        expect(result.unwrap_err()).to_equal("macro-category-inactive-syntax-unavailable")
+
+describe "captured macro visibility":
+    it "keeps actual private definitions hidden from imported consumers":
+        val source = "macro hidden(x: Int) -> (returns result: Int):\n    emit result:\n        x\npub macro visible(x: Int) -> (returns result: Int):\n    emit result:\n        x\n"
+        val captured = capture_inactive_fixture(source).unwrap()
+        expect(captured.source.defs.len()).to_equal(2)
+        expect(captured.source.defs[0].is_public).to_equal(false)
+        expect(captured.source.defs[1].is_public).to_equal(true)
+        var hidden_use = category_use("hidden")
+        var visible_use = category_use("visible")
+        visible_use.region_id = "call#1"
+        visible_use.stable_invocation_id = "call#1"
+        val consumer = category_input("user", [], [hidden_use, visible_use], ["inactive.spl"])
+        val rows = macro_category_project_all_v2([captured, consumer]).unwrap()
+        val uses = rows[1].projection.use_table.uses
+        expect(macro_use_status_tag_v1(uses[0].status)).to_equal("unresolved")
+        expect(macro_use_status_tag_v1(uses[1].status)).to_equal("resolved")
+
+    it "refuses inactive prefixed declarations the scanner cannot retain":
+        val public_result = capture_inactive_fixture("@when(false)\npub macro hidden(x: Int) -> (returns result: Int):\n    emit result:\n        x\n@end\n")
+        val private_result = capture_inactive_fixture("@when(false)\npri macro hidden(x: Int) -> (returns result: Int):\n    emit result:\n        x\n@end\n")
+        expect(public_result.unwrap_err()).to_equal("macro-category-inactive-syntax-unavailable")
+        expect(private_result.unwrap_err()).to_equal("macro-category-inactive-syntax-unavailable")
+
+
+describe "macro draft completion requires explicit resolved bindings":
+    it "retains provenance and exact alias bindings when completing a draft":
+        val source = category_input("consumer", [], [category_use("local")])
+        val draft = MacroCategoryDraftV2(source: source.source, guards: source.guards,
+            source_identity: source.source_identity, source_digest: source.source_digest,
+            target_triple: source.target_triple, preprocessed_digest: source.preprocessed_digest,
+            cfg_decision_digest: source.cfg_decision_digest,
+            environment_policy_digest: source.environment_policy_digest,
+            executing_image_digest: source.executing_image_digest, source_epoch: source.source_epoch)
+        val bindings = [MacroCategoryImportV2(source_id: "origin.spl", import_all: false,
+            names: [MacroCategoryImportNameV2(origin_name: "double", visible_name: "local")])]
+        val completed = macro_category_complete_v2(draft, bindings).unwrap()
+        expect(completed.imports[0].names[0].visible_name).to_equal("local")
+        expect(completed.source_epoch).to_equal(source.source_epoch)
+        expect(completed.executing_image_digest).to_equal(source.executing_image_digest)
+        # Completing the type does not pretend the dependency graph exists.
+        expect(macro_category_project_all_v2([completed]).is_err()).to_equal(true)
+        val invalid = MacroCategoryDraftV2(..draft, executing_image_digest: "")
+        expect(macro_category_complete_v2(invalid, bindings).is_err()).to_equal(true)

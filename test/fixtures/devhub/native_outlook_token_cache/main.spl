@@ -1,0 +1,66 @@
+# Real production cache persistence check; no network or alternative parser.
+use app.devhub.adapter_outlook_curl.{outlook_curl_token_cache_save, outlook_curl_token_cache_load}
+use std.oauth2.{oauth2_token_cache_save, oauth2_token_cache_load, oauth2_client_credentials_request}
+use std.sosix.host_facade.{sosix_env_get_opt, sosix_file_read, sosix_file_exists}
+use std.io_runtime.{file_delete, file_write}
+use app.devhub.outlook_pagination.{outlook_page_error, outlook_page_response_error}
+use std.common.json.value.{json_value_parse_opt}
+
+fn main() -> i64:
+    val root = sosix_env_get_opt("DEVHUB_TOKEN_CACHE_PROBE_DIR") ?? ""
+    assert(root != "")
+    val request: (text, text, text, text) = oauth2_client_credentials_request("fixture-tenant", "fixture-client", "café +", "scope/read")
+    assert(request.0 == "POST")
+    assert(request.1 == "https://login.microsoftonline.com/fixture-tenant/oauth2/v2.0/token")
+    assert(request.2.contains("Content-Type: application/x-www-form-urlencoded"))
+    assert(request.3.contains("client_secret=caf%C3%A9%20%2B"))
+    assert(request.3.contains("scope=scope%2Fread"))
+    print "PASS production OAuth request is an encoded form POST"
+    val path = root + "/outlook-cache.sdn"
+    val missing: (text, i64) = outlook_curl_token_cache_load(root + "/absent-cache.sdn")
+    assert(missing.0 == "" and missing.1 == 0)
+    val missing_oauth: (text, i64) = oauth2_token_cache_load(root + "/absent-cache.sdn")
+    assert(missing_oauth.0 == "" and missing_oauth.1 == 0)
+    assert(outlook_curl_token_cache_save(path, "synthetic-outlook-fixture", 4102444800))
+    assert(sosix_file_exists(path))
+    val actual = sosix_file_read(path)
+    assert(actual.contains("synthetic-outlook-fixture"))
+    val loaded: (text, i64) = outlook_curl_token_cache_load(path)
+    assert(loaded.0 == "synthetic-outlook-fixture" and loaded.1 == 4102444800)
+    print "PASS production Outlook cache persists and reloads actual bytes"
+    assert(oauth2_token_cache_save(path, "synthetic-oauth-fixture", 4102444801))
+    val oauth_loaded: (text, i64) = oauth2_token_cache_load(path)
+    assert(oauth_loaded.0 == "synthetic-oauth-fixture" and oauth_loaded.1 == 4102444801)
+    assert(not sosix_file_read(path).contains("synthetic-outlook-fixture"))
+    assert(not sosix_file_exists(path + ".tmp"))
+    print "PASS production OAuth cache atomically replaces actual bytes"
+    val opaque = "café日本🙂 \"quote\" \\slash\nexpires_at: 1\t\r"
+    assert(outlook_curl_token_cache_save(path, opaque, 4102444802))
+    val escaped_outlook: (text, i64) = outlook_curl_token_cache_load(path)
+    assert(escaped_outlook.0 == opaque and escaped_outlook.1 == 4102444802)
+    assert(oauth2_token_cache_save(path, opaque, 4102444803))
+    val escaped_oauth: (text, i64) = oauth2_token_cache_load(path)
+    assert(escaped_oauth.0 == opaque and escaped_oauth.1 == 4102444803)
+    print "PASS production token caches preserve Unicode and escaped payloads"
+    assert(file_write(path, "malformed cache fixture\n"))
+    val malformed: (text, i64) = outlook_curl_token_cache_load(path)
+    assert(malformed.0 == "" and malformed.1 == 0)
+    val malformed_oauth: (text, i64) = oauth2_token_cache_load(path)
+    assert(malformed_oauth.0 == "" and malformed_oauth.1 == 0)
+    assert(file_write(path, "access_token: first\naccess_token: second\nexpires_at: 4102444800\n"))
+    val duplicate: (text, i64) = outlook_curl_token_cache_load(path)
+    assert(duplicate.0 == "" and duplicate.1 == 0)
+    print "PASS production token caches reject absent and malformed payloads"
+    assert(not outlook_curl_token_cache_save("", "synthetic-fixture", 4102444800))
+    assert(not oauth2_token_cache_save("", "synthetic-fixture", 4102444800))
+    assert(file_delete(path))
+    print "PASS production token caches reject absent destinations"
+    val base = "https://graph.microsoft.com/v1.0"
+    val page = base + "/users/fixture/messages?$skiptoken=next"
+    assert(outlook_page_error(base, page, []) == "")
+    assert(outlook_page_error(base, "https://graph.microsoft.com.evil.test/v1.0/messages", []) != "")
+    assert(outlook_page_error(base, page, [page]) != "")
+    assert(outlook_page_response_error(json_value_parse_opt("{\"value\":[]}").unwrap()) == "")
+    assert(outlook_page_response_error(json_value_parse_opt("{\"value\":{},\"@odata.nextLink\":7}").unwrap()) != "")
+    print "PASS production Graph pagination guards reject foreign cycles and malformed pages"
+    0

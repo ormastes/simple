@@ -19,3 +19,13 @@ The temporary fixture workaround replaces ONLY bytes[index].to_i64() with (bytes
 External cycle3/source-freeze preserves the original fixture, raw COFF excerpt and inverse proof: undoing this one expression and tag restores the complete previous fixture byte-for-byte, with no other check edits. The actual full disassembly and input object hashes remain in cycle2/strict-link. Applied workaround SHA is recorded in final freeze metadata; recovery does not authorize reset or deletion of prior evidence.
 
 Next attempt, only after root source/command/resource approval, is FINAL NativeChar feature cycle3/3 using the SAME cycle1 persistent cache with ordinary invalidation, exact0CD6 producer and own D9 runtime/header lineage. No automatic fourth attempt or feature-budget relabel. Cycle1 compile failure and cycle2 actual runtime failure remain immutable. BDD, doctest, complete Unicode primitive qualification, generated-codec/reader consumer and broader compiler/lib/MCP/LSP/admission gates remain UNRUN.
+## Triage 2026-11-04 (opus-n88b)
+
+Commit c026ee991d5 ("retain optional collection and tagged byte owners") added, in
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` (erased-receiver text-builtin arm,
+~line 2676), a `to_i64` arm for runtime-value receivers that calls `rt_any_to_int` instead of text
+`rt_string_to_int_lenient`, so an indexed byte is no longer parsed as text. Status:
+fix-implemented-verification-pending (no new compiler edit in this PR). Repro (stage3 native):
+`bin/simple native-build --entry test/04_smoke/u8_index_to_i64_native.spl --output build/u8_i64 && build/u8_i64`
+-> `65` then `U8_TO_I64_OK`. After that passes, the `(bytes[index] as i64)` workaround in
+`test/01_unit/compiler/frontend/unicode_scalar_char_fixture.spl` can be reverted.

@@ -1,0 +1,91 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/native_call_result_f64_to_int_conversion_bits_2026-11-23.md -- green once the deployed seed includes the body.rs decode_float_call_result fix; remove the tag after redeploy
+
+"""Compiled `f64_call(...).to_iN()` converts the value, not the float bits.
+
+Bug: doc/08_tracking/bug/native_call_result_f64_to_int_conversion_bits_2026-11-23.md
+
+A conversion method called directly on a call that returns f64
+(`floor_f64(x).to_i32()`) printed 0 when compiled, because the call result
+travels as raw IEEE-754 bits in an i64 register and the cast reduced the
+bits. The spec body itself runs in the interpreter, which was always right,
+so the program is compiled and run as a child process: once through the
+JIT (`run`) and once as a native-build binary.
+
+`SIMPLE_BIN` selects the compiler under test (default `bin/simple`).
+`env -u SIMPLE_EXECUTION_MODE -u SIMPLE_RUNTIME_MODE` is load-bearing: the
+test runner exports interpreter mode and the child would inherit it.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{dir_create_all, file_write, remove_file_if_exists, shell}
+
+val BUILD_DIR = "build/native_f64_call_result_cast_regression"
+val SOURCE_PATH = BUILD_DIR + "/main.spl"
+val BINARY_PATH = BUILD_DIR + "/main"
+val COMPILER = r"${SIMPLE_BIN:-bin/simple}"
+val EXPECTED = "47\n241\n47\n47\n-4\n200\n3.5\n-3.0\n24\n"
+
+fn write_program() -> bool:
+    dir_create_all(BUILD_DIR) and file_write(
+        SOURCE_PATH,
+        r"use std.common.numeric_round.{ceil_f64, floor_f64}" + "\n" +
+        "\n" +
+        "fn local_floor(x: f64) -> f64:\n" +
+        "    val t = x as i64 as f64\n" +
+        "    if t > x: t - 1.0 else: t\n" +
+        "\n" +
+        "fn neg(x: f64) -> f64:\n" +
+        "    0.0 - x\n" +
+        "\n" +
+        "fn main():\n" +
+        "    val x = 47.26617698462807\n" +
+        "    print(floor_f64(x).to_i32())\n" +
+        "    print(ceil_f64(240.3).to_i32())\n" +
+        "    print(floor_f64(x).to_i64())\n" +
+        "    print(local_floor(x).to_i32())\n" +
+        "    print(local_floor(-3.5).to_i32())\n" +
+        "    print(local_floor(200.9).to_u8())\n" +
+        "    print(neg(3.5).abs())\n" +
+        "    print(neg(2.5).floor())\n" +
+        "    print((local_floor(12.75).to_f32() * 2.0).to_i64())\n"
+    )
+
+describe "compiled conversion of an f64 call result":
+    # @manual: show
+    it "converts the value through the JIT":
+        # @req REQ-SSPEC-SYSTEM
+        step("Write a program that casts f64 call results directly")
+        expect(write_program()).to_equal(true)
+
+        step("Run it through the JIT, not the interpreter")
+        val ran = shell(
+            "env -u SIMPLE_EXECUTION_MODE -u SIMPLE_RUNTIME_MODE " +
+            COMPILER + " run " + SOURCE_PATH + " 2>/dev/null"
+        )
+        expect(ran.exit_code).to_equal(0)
+        expect(ran.stdout).to_equal(EXPECTED)
+
+    # @manual: show
+    it "converts the value in a native-build binary":
+        # @req REQ-SSPEC-SYSTEM
+        step("Write the same program")
+        expect(write_program()).to_equal(true)
+        expect(remove_file_if_exists(BINARY_PATH)).to_equal(true)
+
+        step("Build it natively")
+        val built = shell(
+            "env -u SIMPLE_EXECUTION_MODE -u SIMPLE_RUNTIME_MODE SIMPLE_NATIVE_BUILD_RUST=1 " +
+            COMPILER + " native-build --entry " + SOURCE_PATH + " -o " + BINARY_PATH + " >/dev/null 2>&1"
+        )
+        expect(built.exit_code).to_equal(0)
+
+        step("Run the binary and require the converted values")
+        val ran = shell(BINARY_PATH)
+        expect(ran.exit_code).to_equal(0)
+        expect(ran.stdout).to_equal(EXPECTED)

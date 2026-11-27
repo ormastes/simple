@@ -1,0 +1,74 @@
+"""
+## Purpose and audience
+Purpose: Prove that SPL-BOUND-002 foreign origin crosses a module boundary: a
+`pub fn` in module A that returns a raw extern value unconverted is exported in
+A's raw-boundary-return summary, and a late unit cast of its result in module B
+(which imports it with `use`) is reported.
+Audience: compiler and tooling engineers maintaining robust-boundary lints.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Text-level summaries (slice B2 cross-file step). Only `use <module>.{...}`
+imports of summarised modules are seeded; typed-HIR summaries remain open.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use compiler.semantics.lint.bound_late_cast.{check_bound_late_casts, check_bound_late_casts_cross, bound_raw_return_summary, bound_raw_return_summary_cross, BoundModuleSummary}
+
+val MOD_A = "extern fn c_read_distance() -> i32\npub fn read_distance() -> i32:\n    c_read_distance()\npub fn read_twice() -> i32:\n    val r = read_distance()\n    return r\nfn hidden() -> i32:\n    c_read_distance()\n@unsafe(reason: \"adapter\", capabilities: [ffi])\npub fn read_adapter() -> i32:\n    c_read_distance()\npub fn sane() -> i32:\n    c_read_distance() + 1\n"
+
+fn mod_a_summary() -> BoundModuleSummary:
+    BoundModuleSummary(module: "app.sensor", raw_fns: bound_raw_return_summary(MOD_A, "app/sensor.spl"))
+
+# @manual_section: bound_cross_file
+describe "SPL-BOUND-002: cross-file raw boundary return":
+    """A raw extern value returned by a pub fn keeps its foreign origin in importers."""
+
+    it "summarises pub fns returning a raw extern value":
+        # @req: REQ-DIAG-POLICY-001
+        step("Summarise module A")
+        val names = bound_raw_return_summary(MOD_A, "app/sensor.spl")
+        expect(names.contains("read_distance")).to_equal(true)
+        expect(names.contains("read_twice")).to_equal(true)
+        expect(names.contains("hidden")).to_equal(false)
+        expect(names.contains("read_adapter")).to_equal(false)
+        expect(names.contains("sane")).to_equal(false)
+
+    it "reports a late cast in an importing file":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint module B importing read_distance from A")
+        val b = "use app.sensor.{{read_distance}\nunit Km: i32 as km\nfn get() -> Km:\n    val d = read_distance()\n    return Km(d)\n"
+        val fs = check_bound_late_casts_cross(b, "app/client.spl", [mod_a_summary()])
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].code).to_equal("SPL-BOUND-002")
+        expect(fs[0].line_num).to_equal(5)
+
+    it "follows an import alias and an as-cast":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint module B importing read_twice under an alias")
+        val b = "use app.sensor.{{read_twice as rt}\nunit Km: i32 as km\nfn get() -> Km:\n    rt() as Km\n"
+        val fs = check_bound_late_casts_cross(b, "app/client.spl", [mod_a_summary()])
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].code).to_equal("SPL-BOUND-002")
+
+    it "stays silent without the summary or for non-raw imports":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint importers of the adapter and of an unsummarised module")
+        val b1 = "use app.sensor.{{read_distance}\nunit Km: i32 as km\nfn get() -> Km:\n    Km(read_distance())\n"
+        expect(check_bound_late_casts(b1, "app/client.spl").len()).to_equal(0)
+        val b2 = "use app.sensor.{{read_adapter, sane}\nunit Km: i32 as km\nfn get() -> Km:\n    Km(read_adapter() + sane())\n"
+        expect(check_bound_late_casts_cross(b2, "app/client.spl", [mod_a_summary()]).len()).to_equal(0)
+        val b3 = "use app.other.{{read_distance}\nunit Km: i32 as km\nfn get() -> Km:\n    Km(read_distance())\n"
+        expect(check_bound_late_casts_cross(b3, "app/client.spl", [mod_a_summary()]).len()).to_equal(0)
+
+    it "chains through a re-exporting pub fn in B":
+        # @req: REQ-DIAG-POLICY-001
+        step("Summarise module B that wraps A's raw fn, then lint module C")
+        val b = "use app.sensor.{{read_distance}\npub fn fetch() -> i32:\n    read_distance()\n"
+        val b_names = bound_raw_return_summary_cross(b, "app/mid.spl", [mod_a_summary()])
+        expect(b_names.contains("fetch")).to_equal(true)
+        val c = "use app.mid.{{fetch}\nunit Km: i32 as km\nfn get() -> Km:\n    Km(fetch())\n"
+        val fs = check_bound_late_casts_cross(c, "app/c.spl", [BoundModuleSummary(module: "app.mid", raw_fns: b_names)])
+        expect(fs.len()).to_equal(1)

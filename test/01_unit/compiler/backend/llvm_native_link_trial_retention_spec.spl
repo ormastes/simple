@@ -1,0 +1,44 @@
+"""
+# LLVM Native Link Trial Input Retention
+
+Unit tests verifying that `.go-to-end-trial` native links retain runtime
+objects, bootstrap support objects, and the generated entry object (when not in
+strict Stage4 mode) so `<output>.go-to-end-trial.link.rsp` remains directly
+replayable, while ordinary successful links and managed Stage4 links continue
+cleaning up their intermediate objects.
+"""
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io_runtime.{file_read}
+use compiler.backend.llvm_native_link_orchestrator.{llvm_should_retain_link_inputs_v1}
+use compiler.driver.driver_build.go_to_end_trial_link_v1.{GO_TO_END_TRIAL_SUFFIX_V1, go_to_end_trial_output_v1}
+
+describe "llvm_should_retain_link_inputs_v1":
+    it "retains inputs on successful .go-to-end-trial links when not Stage4":
+        expect(llvm_should_retain_link_inputs_v1("build/app" + GO_TO_END_TRIAL_SUFFIX_V1, true, false)).to_equal(true)
+        expect(llvm_should_retain_link_inputs_v1("C:/build/simple.exe" + GO_TO_END_TRIAL_SUFFIX_V1, true, false)).to_equal(true)
+        expect(llvm_should_retain_link_inputs_v1(go_to_end_trial_output_v1("build/simple.exe"), true, false)).to_equal(true)
+
+    it "cleans up inputs on ordinary successful links":
+        expect(llvm_should_retain_link_inputs_v1("build/app", true, false)).to_equal(false)
+        expect(llvm_should_retain_link_inputs_v1("C:/build/simple.exe", true, false)).to_equal(false)
+        expect(llvm_should_retain_link_inputs_v1("build/app.go-to-end-trial.bak", true, false)).to_equal(false)
+
+    it "retains inputs on failed non-Stage4 links for replay":
+        expect(llvm_should_retain_link_inputs_v1("build/app", false, false)).to_equal(true)
+        expect(llvm_should_retain_link_inputs_v1("C:/build/simple.exe", false, false)).to_equal(true)
+        expect(llvm_should_retain_link_inputs_v1("build/app" + GO_TO_END_TRIAL_SUFFIX_V1, false, false)).to_equal(true)
+
+    it "preserves strict Stage4 cleanup policy regardless of outcome or trial suffix":
+        expect(llvm_should_retain_link_inputs_v1("build/app", true, true)).to_equal(false)
+        expect(llvm_should_retain_link_inputs_v1("build/app", false, true)).to_equal(false)
+        expect(llvm_should_retain_link_inputs_v1("build/app" + GO_TO_END_TRIAL_SUFFIX_V1, true, true)).to_equal(false)
+        expect(llvm_should_retain_link_inputs_v1("build/app" + GO_TO_END_TRIAL_SUFFIX_V1, false, true)).to_equal(false)
+
+    it "wires runtime, bootstrap support, and entry cleanup through llvm_should_retain_link_inputs_v1":
+        val source = file_read("src/compiler/70.backend/backend/llvm_native_link_orchestrator.spl")
+        val call_pos = source.index_of("val retain_link_inputs = llvm_should_retain_link_inputs_v1(output, link_result.is_ok(), stage4_requested)") ?? -1
+        expect(call_pos).to_be_greater_than(-1)
+        val tail = source.substring(call_pos, source.len())
+        expect(tail).to_contain("if not retain_link_inputs:\n        cleanup_runtime_objects(runtime_objects)\n        if bootstrap_support_obj != \"\":\n            file_delete(bootstrap_support_obj)")
+        expect(tail).to_contain("elif not retain_link_inputs:\n        file_delete(entry_obj_path)")

@@ -46,3 +46,40 @@ Not touched: `test/unit/hardware/rv64gc/rv64_memory_ops_spec.spl` left as-is (no
 implementation exists to rename the import to; also note the file has a stray
 `# tag: only-compiled` **comment**, not an actual `tag:` clause on `describe`,
 so that comment plays no role in the failure and was left alone).
+
+## 2026-11-05 — Verification (work branch work/riscv-rtl-infra-20261105)
+
+Status: **already fixed at tip of release/1.0.0** (base c909eb427c3). No code
+change needed in this lane; this section is the re-verification evidence.
+
+- `Rv64Ram` is now implemented at `src/hardware/rv64gc/mem/rv64_ram.spl`
+  (`class Rv64Ram` with `create(size_bytes)`, `read8/16/32/64` returning
+  `MemResult` with `.value`/`.ok`, plus `write8/16/32/64`) — exactly the API
+  shape the spec imports via `use hardware.rv64gc.mem.rv64_ram.Rv64Ram`. The
+  spec now lives at `test/01_unit/hardware/rv64gc/rv64_memory_ops_spec.spl`.
+- Exact command (Rust seed binary, aarch64 host, interpreter mode):
+
+  ```
+  SIMPLE_RUST_SEED_WARNING=0 timeout 120 \
+    /home/yoon/dev/simple/src/compiler_rust/target/bootstrap/simple test \
+    test/01_unit/hardware/rv64gc/rv64_memory_ops_spec.spl --mode=interpreter
+  ```
+
+  Outcome: `SPEC FILE VERDICT ... outcome=OK declared>=33 executed=33 passed=33 failed=0`.
+  **33/33 examples pass.** The original `Cannot resolve module` error is gone.
+
+## Verification 2026-11-25 (work/p2w4-ak-20261125, release/1.0.0)
+
+Stale — the 2026-11-05 "already fixed" section is confirmed at release/1.0.0
+HEAD by source inspection:
+
+- `src/hardware/rv64gc/mem/rv64_ram.spl` exists and defines `class Rv64Ram`
+  (line 10), matching the spec's
+  `use hardware.rv64gc.mem.rv64_ram.Rv64Ram` import.
+- The spec lives at `test/01_unit/hardware/rv64gc/rv64_memory_ops_spec.spl`.
+- Execution limit: could not re-run the spec on this Windows host — the
+  pinned seed binary (Rust v1.0.0-rc.1) rejects the tree-wide
+  `@representation_boundary` decorator (cfd89933699), which blocks
+  `bin/simple.exe test` repo-wide at this HEAD. The 2026-11-05 run
+  (33/33 PASS on an aarch64 seed) plus the source evidence above stand;
+  header flipped open → resolved.

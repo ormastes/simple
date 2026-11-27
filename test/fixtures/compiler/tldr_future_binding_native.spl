@@ -1,0 +1,58 @@
+# Native semantic oracle for the real TLDR table's typed future factories.
+use std.async.future.{Future}
+use std.async.poll.{Poll}
+use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1}
+
+fn tldr_future_value(future: Future<text?>) -> text:
+    val state: Poll<text?> = future.poll()
+    match state:
+        case Poll.Ready(value):
+            match value:
+                case Some(value): value
+                case nil: "<nil>"
+        case Poll.Pending: "<pending>"
+
+fn tldr_future_binding_check() -> i64:
+    val table = TldrTableV1.create()
+    val first = table.handle("module-a", "First")
+    val alias = table.handle("module-a", "Second")
+    val other = table.handle("module-b", "Other")
+    if table.loaded_count() != 0: return 11
+    if table.take_fill_requests().len() != 0: return 12
+    val inflight = table.deref(first)
+    if tldr_future_value(inflight) != "<pending>": return 13
+    if tldr_future_value(table.deref(alias)) != "<pending>": return 14
+    val requests = table.take_fill_requests()
+    if requests.len() != 1: return 15
+    if requests[0] != "module-a": return 16
+    if table.take_fill_requests().len() != 0: return 17
+    if tldr_future_value(table.deref(first)) != "<pending>": return 18
+    if table.take_fill_requests().len() != 0: return 19
+    if table.publish("", "invalid"): return 20
+    if table.publish("module-a", ""): return 21
+    if table.loaded_count() != 0: return 22
+    if not table.publish("module-a", "summary A"): return 23
+    if table.loaded_count() != 1: return 24
+    if tldr_future_value(table.deref(first)) != "summary A": return 25
+    if tldr_future_value(table.deref(alias)) != "summary A": return 26
+    # A previously returned pending snapshot remains pending; a fresh deref
+    # observes publication, matching the existing non-waking Future contract.
+    if tldr_future_value(inflight) != "<pending>": return 27
+    if not table.publish("module-a", "summary A"): return 28
+    if table.publish("module-a", "conflicting"): return 29
+    if tldr_future_value(table.deref(first)) != "summary A": return 30
+    if table.take_fill_requests().len() != 0: return 31
+    if tldr_future_value(table.deref(other)) != "<pending>": return 32
+    val other_requests = table.take_fill_requests()
+    if other_requests.len() != 1: return 33
+    if other_requests[0] != "module-b": return 34
+    if table.loaded_count() != 1: return 35
+    0
+
+fn main() -> i64:
+    val result = tldr_future_binding_check()
+    if result != 0:
+        print "TLDR future binding failed: {result}"
+        return result
+    print "TLDR future binding: PASS"
+    0

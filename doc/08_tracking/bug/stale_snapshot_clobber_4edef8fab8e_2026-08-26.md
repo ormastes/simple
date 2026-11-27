@@ -228,3 +228,10 @@ Verify every batch before landing: `cargo check --release --bin simple`,
 `sh scripts/check/check-c-runtime-compiles-push.shs`, and
 `bin/simple test test/unit/compiler`. Restores are entangled — expect a batch to
 surface a missing companion rather than to apply cleanly.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+partially repaired per in-file status; remainder needs the restoration lane with compiler/spec verification authority (seed cannot reach a verdict).

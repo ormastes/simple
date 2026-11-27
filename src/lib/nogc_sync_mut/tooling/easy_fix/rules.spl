@@ -31,7 +31,7 @@ use std.nogc_sync_mut.io_runtime.{env_get, time_now_unix_micros}
 
 use std.tooling.easy_fix.types.{EasyFix, FixConfidence, Replacement}
 use std.tooling.easy_fix.rules_helpers.{
-    LineContext, EasyFixSourceView, line_contexts, easy_fix_source_view,
+    LineContext, EasyFixSourceView, line_contexts, line_contexts_from_lines, easy_fix_source_view,
     _split_top_level_csv, _find_top_level_colon, _find_matching_paren_on_line,
     easy_fix_contains_plain_identifier, easy_fix_replace_plain_identifier,
     easy_fix_replace_interpolation_identifier,
@@ -70,6 +70,11 @@ struct DuplicateTypedArgSignature:
     has_decl_rewrite: bool
     can_rewrite_calls: bool
 
+struct IndexedDuplicateCallReplacement:
+    sig_index: i64
+    sequence: i64
+    replacement: Replacement
+
 struct ShortGrammarMethodRefCandidate:
     method: text
     end_offset: i64
@@ -88,13 +93,18 @@ struct ShortGrammarPlaceholderCandidate:
 # Confidence: Uncertain
 # ============================================================================
 
-fn check_unnamed_duplicate_typed_args(source: String, file: String) -> [EasyFix]:
-    var _rt = _ez_prof_now()
-    val signatures = _collect_duplicate_typed_arg_signatures(source: source)
-    _rt = _ez_prof_mark("dup_args:collect_signatures", _rt)
-    var fixes: [EasyFix] = []
+pub fn check_unnamed_duplicate_typed_args(source: String, file: String) -> [EasyFix]:
+    val lines = source.split("\n")
+    check_unnamed_duplicate_typed_args_with_view(file, lines, line_contexts_from_lines(lines))
 
-    for sig in signatures:
+pub fn check_unnamed_duplicate_typed_args_with_view(file: String, lines: [String], contexts: [LineContext]) -> [EasyFix]:
+    val signatures = _collect_duplicate_typed_arg_signatures_from_contexts(contexts)
+    val indexed_calls = _collect_indexed_call_replacements(lines, file, signatures)
+    var fixes: [EasyFix] = []
+    var call_cursor = 0
+
+    for sig_index in 0..signatures.len():
+        val sig = signatures[sig_index]
         var replacements: [Replacement] = []
 
         if sig.has_decl_rewrite:
@@ -107,10 +117,9 @@ fn check_unnamed_duplicate_typed_args(source: String, file: String) -> [EasyFix]
                 new_text: sig.new_params_text
             ))
 
-        if sig.can_rewrite_calls and _is_unique_call_target(signatures: signatures, sig: sig):
-            val call_replacements = _collect_call_replacements_for_signature(source: source, file: file, sig: sig)
-            for rep in call_replacements:
-                replacements.push(rep)
+        while call_cursor < indexed_calls.len() and indexed_calls[call_cursor].sig_index == sig_index:
+            replacements.push(indexed_calls[call_cursor].replacement)
+            call_cursor = call_cursor + 1
 
         if not replacements.is_empty():
             val description = if sig.has_decl_rewrite:
@@ -126,42 +135,131 @@ fn check_unnamed_duplicate_typed_args(source: String, file: String) -> [EasyFix]
                 fix.add_replacement(rep)
             fixes.push(fix)
 
-    _rt = _ez_prof_mark("dup_args:fix_loop", _rt)
     fixes
 
-fn _collect_duplicate_typed_arg_signatures(source: text) -> [DuplicateTypedArgSignature]:
+fn _duplicate_call_key(name: text, arg_count: i64) -> text:
+    "{name}#{arg_count}"
+
+fn _collect_indexed_call_replacements(
+    lines: [text], file: text, signatures: [DuplicateTypedArgSignature]
+) -> [IndexedDuplicateCallReplacement]:
+    var key_counts: Dict<text, i64> = {}
+    var eligible_names: Dict<text, bool> = {}
+    for sig in signatures:
+        if not sig.can_rewrite_calls:
+            continue
+        val key = _duplicate_call_key(sig.name, sig.arg_count)
+        key_counts[key] = (key_counts[key] ?? 0) + 1
+        eligible_names[sig.name] = true
+
+    var target_by_key: Dict<text, i64> = {}
+    for sig_index in 0..signatures.len():
+        val sig = signatures[sig_index]
+        if not sig.can_rewrite_calls:
+            continue
+        val key = _duplicate_call_key(sig.name, sig.arg_count)
+        if key_counts[key] == 1:
+            target_by_key[key] = sig_index
+
+    var indexed: [IndexedDuplicateCallReplacement] = []
+    var sequence = 0
+    for ctx in line_contexts_from_lines(lines):
+        val line = ctx.line
+        var i = 0
+        while i < line.len():
+            val ch = line.slice(i, i + 1)
+            if not _is_identifier_char(ch) or _is_digit_char(ch):
+                i = i + 1
+                continue
+            val token_start = i
+            i = i + 1
+            while i < line.len() and _is_identifier_char(line.slice(i, i + 1)):
+                i = i + 1
+            val name = line.slice(token_start, i)
+            if not eligible_names.has(name) or _is_definition_context(line, token_start):
+                continue
+            val open_paren = _find_call_open_paren(line, i)
+            if open_paren < 0:
+                continue
+            val close_paren = _find_matching_paren_on_line(line, open_paren)
+            if close_paren <= open_paren:
+                continue
+            val args = _split_top_level_csv(line.slice(open_paren + 1, close_paren))
+            if _args_have_named_entries(args):
+                i = close_paren + 1
+                continue
+            val key = _duplicate_call_key(name, args.len())
+            if not target_by_key.has(key):
+                i = close_paren + 1
+                continue
+            val sig_index = target_by_key[key]
+            val sig = signatures[sig_index]
+            var named_args: [text] = []
+            for arg_index in 0..args.len():
+                named_args.push("{sig.param_names[arg_index]}: {args[arg_index].trim()}")
+            indexed.push(IndexedDuplicateCallReplacement(
+                sig_index: sig_index,
+                sequence: sequence,
+                replacement: Replacement.create(
+                    file: file,
+                    start: ctx.byte_offset + open_paren + 1,
+                    end: ctx.byte_offset + close_paren,
+                    line: ctx.line_num,
+                    column: open_paren + 2,
+                    new_text: named_args.join(", ")
+                )
+            ))
+            sequence = sequence + 1
+            i = close_paren + 1
+    # Stable insertion sort by (sig_index, sequence). `array.sort_by` is a
+    # seed builtin that the interpreter engine does not implement
+    # ("method `sort_by` not found on type `array`"), so the rule failed on
+    # every unit that reached this point; see
+    # doc/08_tracking/bug/seed_interpreter_array_sort_by_missing_2026-11-04.md
+    var ordered: [IndexedDuplicateCallReplacement] = []
+    for item in indexed:
+        var pos = ordered.len()
+        while pos > 0:
+            val prev: IndexedDuplicateCallReplacement = ordered[pos - 1]
+            val after = prev.sig_index < item.sig_index or (prev.sig_index == item.sig_index and prev.sequence <= item.sequence)
+            if after: break
+            pos = pos - 1
+        ordered.insert(pos, item)
+    ordered
+
+fn _collect_duplicate_typed_arg_signatures_from_contexts(contexts: [LineContext]) -> [DuplicateTypedArgSignature]:
     var signatures: [DuplicateTypedArgSignature] = []
-    for raw_ctx in line_contexts(source):
+    for raw_ctx in contexts:
         val ctx: LineContext = raw_ctx
         val sig = _parse_duplicate_typed_arg_signature(ctx)
         match sig:
             case Some(found):
                 signatures.push(found)
-            case nil:
+            case None:
                 pass
     signatures
 
 fn _parse_duplicate_typed_arg_signature(ctx: LineContext) -> DuplicateTypedArgSignature?:
-    if not _dup_is_fn_sig(trimmed: ctx.trimmed):
-        return nil
+    if not _is_fn_sig(ctx.trimmed):
+        return None
     if not ctx.trimmed.contains("("):
-        return nil
+        return None
 
-    val paren_start = _short_find_text_from(line: ctx.trimmed, needle: "(", search_from: 0)
+    val paren_start = ctx.trimmed.find("(")
     if paren_start < 0:
-        return nil
-    val paren_end = _find_matching_paren_on_line(text: ctx.trimmed, open_paren: paren_start)
+        return None
+    val paren_end = _find_matching_paren_on_line(ctx.trimmed, paren_start)
     if paren_end <= paren_start:
-        return nil
+        return None
 
-    val name = _extract_sig_name(trimmed: ctx.trimmed, paren_start: paren_start)
+    val name = _extract_sig_name(ctx.trimmed, paren_start)
     if name == "":
-        return nil
+        return None
 
     val params_str = ctx.trimmed.slice(paren_start + 1, paren_end)
-    val params = _split_top_level_csv(text: params_str)
+    val params = _split_top_level_csv(params_str)
     if params.is_empty():
-        return nil
+        return None
 
     var raw_names: [text] = []
     var raw_types: [text] = []
@@ -172,7 +270,7 @@ fn _parse_duplicate_typed_arg_signature(ctx: LineContext) -> DuplicateTypedArgSi
         val trimmed_param = param.trim()
         if trimmed_param == "":
             continue
-        val colon_pos = _find_top_level_colon(text: trimmed_param)
+        val colon_pos = _find_top_level_colon(trimmed_param)
         if colon_pos >= 0:
             raw_names.push(trimmed_param.slice(0, colon_pos).trim())
             raw_types.push(trimmed_param.slice(colon_pos + 1).trim())
@@ -180,10 +278,10 @@ fn _parse_duplicate_typed_arg_signature(ctx: LineContext) -> DuplicateTypedArgSi
             raw_names.push("")
             raw_types.push(trimmed_param)
             has_unnamed = true
-        normalized_types.push(raw_types[raw_types.len() - 1].trim())
+        normalized_types.push(_normalize_type_name(raw_types[raw_types.len() - 1]))
 
     if raw_types.len() < 2:
-        return nil
+        return None
 
     var type_counts: Dict<text, i64> = {}
     var has_duplicate_types = false
@@ -193,13 +291,12 @@ fn _parse_duplicate_typed_arg_signature(ctx: LineContext) -> DuplicateTypedArgSi
         if count + 1 >= 2:
             has_duplicate_types = true
     if not has_duplicate_types:
-        return nil
+        return None
 
     var resolved_names: [text] = []
     var rewritten_params: [text] = []
     var generated_counts: Dict<text, i64> = {}
-    var i = 0
-    while i < raw_types.len():
+    for i in 0..raw_types.len():
         val param_name = raw_names[i]
         val param_type = raw_types[i]
         var resolved_name = param_name
@@ -207,24 +304,27 @@ fn _parse_duplicate_typed_arg_signature(ctx: LineContext) -> DuplicateTypedArgSi
             val key = normalized_types[i]
             val next_count = (generated_counts[key] ?? 0) + 1
             generated_counts[key] = next_count
-            resolved_name = "{_type_name_to_identifier(text: param_type)}{next_count}"
+            resolved_name = "{_type_name_to_identifier(param_type)}{next_count}"
         rewritten_params.push("{resolved_name}: {param_type}")
         resolved_names.push(resolved_name)
-        i = i + 1
 
     var stable_names = true
     var seen_names: Dict<text, bool> = {}
-    i = 0
-    while i < resolved_names.len():
-        if type_counts[normalized_types[i]] >= 2:
-            val name_i = resolved_names[i]
-            if name_i == "" or name_i == "_" or name_i.starts_with("_"):
+    for i in 0..resolved_names.len():
+        if type_counts[normalized_types[i]] < 2:
+            continue
+        val name_i = resolved_names[i]
+        if name_i == "" or name_i == "_" or name_i.starts_with("_"):
+            stable_names = false
+            continue
+        if seen_names.has(name_i):
+            stable_names = false
+        else:
+            seen_names[name_i] = true
+    if stable_names:
+        for name in resolved_names:
+            if name == "":
                 stable_names = false
-            elif seen_names.has(name_i):
-                stable_names = false
-            else:
-                seen_names[name_i] = true
-        i = i + 1
 
     Some(DuplicateTypedArgSignature(
         name: name,
@@ -239,73 +339,7 @@ fn _parse_duplicate_typed_arg_signature(ctx: LineContext) -> DuplicateTypedArgSi
         can_rewrite_calls: stable_names
     ))
 
-fn _collect_call_replacements_for_signature(source: text, file: text, sig: DuplicateTypedArgSignature) -> [Replacement]:
-    var replacements: [Replacement] = []
-
-    for raw_ctx in line_contexts(source):
-        val ctx: LineContext = raw_ctx
-        val line_replacements = _collect_line_call_replacements(line: ctx.line, file: file, sig: sig, line_num: ctx.line_num, byte_offset: ctx.byte_offset)
-        for rep in line_replacements:
-            replacements.push(rep)
-
-    replacements
-
-fn _collect_line_call_replacements(line: text, file: text, sig: DuplicateTypedArgSignature, line_num: i64, byte_offset: i64) -> [Replacement]:
-    var replacements: [Replacement] = []
-    # Fast reject: most lines never mention the signature name at all.
-    if not line.contains(sig.name):
-        return replacements
-    var i = 0
-    while i < line.len():
-        if not _matches_identifier_at(line: line, start: i, name: sig.name):
-            # Jump to the next occurrence natively instead of stepping one
-            # character at a time through an interpreted loop.
-            val _tail: text = line.slice(i + 1)
-            val rel = _tail.find(sig.name)
-            if rel < 0:
-                break
-            i = i + 1 + rel
-            continue
-        if _is_definition_context(line: line, token_start: i):
-            i = i + sig.name.len()
-            continue
-        val open_paren = _find_call_open_paren(line: line, start: i + sig.name.len())
-        if open_paren < 0:
-            i = i + sig.name.len()
-            continue
-        val close_paren = _find_matching_paren_on_line(text: line, open_paren: open_paren)
-        if close_paren <= open_paren:
-            i = i + sig.name.len()
-            continue
-        val args_str = line.slice(open_paren + 1, close_paren)
-        val args = _split_top_level_csv(text: args_str)
-        if args.len() != sig.arg_count or _args_have_named_entries(args: args):
-            i = close_paren + 1
-            continue
-        var named_args: [text] = []
-        var arg_index = 0
-        while arg_index < args.len():
-            named_args.push("{sig.param_names[arg_index]}: {args[arg_index].trim()}")
-            arg_index = arg_index + 1
-        replacements.push(Replacement.create(
-            file: file,
-            start: byte_offset + open_paren + 1,
-            end: byte_offset + close_paren,
-            line: line_num,
-            column: open_paren + 2,
-            new_text: named_args.join(", ")
-        ))
-        i = close_paren + 1
-    replacements
-
-fn _is_unique_call_target(signatures: [DuplicateTypedArgSignature], sig: DuplicateTypedArgSignature) -> bool:
-    var matches = 0
-    for candidate in signatures:
-        if candidate.can_rewrite_calls and candidate.name == sig.name and candidate.arg_count == sig.arg_count:
-            matches = matches + 1
-    matches == 1
-
-fn _dup_is_fn_sig(trimmed: text) -> bool:
+fn _is_fn_sig(trimmed: text) -> bool:
     (trimmed.starts_with("fn ")
         or trimmed.starts_with("me ")
         or trimmed.starts_with("static fn ")
@@ -319,6 +353,9 @@ fn _extract_sig_name(trimmed: text, paren_start: i64) -> text:
     if parts.is_empty():
         return ""
     parts[parts.len() - 1].trim()
+
+fn _normalize_type_name(text: text) -> text:
+    text.trim()
 
 fn _type_name_to_identifier(text: text) -> text:
     var out = ""
@@ -336,24 +373,12 @@ fn _type_name_to_identifier(text: text) -> text:
     while out.starts_with("_"):
         out = out.slice(1)
     while out.ends_with("_"):
-        out = out.slice(0, out.len() - 1)
+        out = out.slice(0, out.byte_len() - 1)
     if out == "":
         return "arg"
     if _is_digit_char(out.slice(0, 1)):
         return "arg_{out}"
     out
-
-fn _matches_identifier_at(line: text, start: i64, name: text) -> bool:
-    if start < 0 or start + name.len() > line.len():
-        return false
-    if line.slice(start, start + name.len()) != name:
-        return false
-    if start > 0 and _is_identifier_char(line.slice(start - 1, start)):
-        return false
-    val end = start + name.len()
-    if end < line.len() and _is_identifier_char(line.slice(end, end + 1)):
-        return false
-    true
 
 fn _is_definition_context(line: text, token_start: i64) -> bool:
     val before = line.slice(0, token_start).trim()
@@ -373,9 +398,10 @@ fn _find_call_open_paren(line: text, start: i64) -> i64:
 
 fn _args_have_named_entries(args: [text]) -> bool:
     for arg in args:
-        if _find_top_level_colon(text: arg.trim()) >= 0:
+        if _find_top_level_colon(arg.trim()) >= 0:
             return true
     false
+
 
 # ============================================================================
 # Rule 12: stub_impl (text-scanning)
@@ -392,7 +418,7 @@ fn _stub_trivial() -> [text]:
 fn check_stub_impl_text(source: text, file: text) -> [EasyFix]:
     check_stub_impl_text_with_view(file, easy_fix_source_view(source.split("\n")))
 
-fn check_stub_impl_text_with_view(file: text, view: EasyFixSourceView) -> [EasyFix]:
+pub fn check_stub_impl_text_with_view(file: text, view: EasyFixSourceView) -> [EasyFix]:
     var fixes: [EasyFix] = []
     val lines = view.lines
 
@@ -487,10 +513,15 @@ fn _stub_is_trivial(body: text) -> bool:
 # Confidence: Safe
 # ============================================================================
 
-fn check_short_grammar_refactor(source: text, file: text) -> [EasyFix]:
+pub fn easy_fix_check_short_grammar_refactor(source: text, file: text) -> [EasyFix]:
+    easy_fix_check_short_grammar_refactor_with_contexts(file: file, contexts: line_contexts(source))
+
+# Single owner of the short-grammar rule. The compiler fix registry calls this
+# with the per-line contexts it already built, so no rule re-splits the source.
+pub fn easy_fix_check_short_grammar_refactor_with_contexts(file: text, contexts: [LineContext]) -> [EasyFix]:
     var fixes: [EasyFix] = []
     var in_multiline_string = false
-    for raw_ctx in line_contexts(source):
+    for raw_ctx in contexts:
         val ctx: LineContext = raw_ctx
         val starts_inside = in_multiline_string
         val quote_count = _short_count_triple_quotes(line: ctx.line)
@@ -516,12 +547,19 @@ fn _short_count_triple_quotes(line: text) -> i64:
 
 fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
     var fixes: [EasyFix] = []
+    val lambda_starts = _short_lambda_starts(line: ctx.line)
+    val functional_update_start = if lambda_starts.len() > 0:
+        _short_first_functional_update_start(line: ctx.line)
+    else:
+        -1
+    var candidate_index = 0
     var search_from = 0
-    while search_from < ctx.line.len():
-        val lambda_start = _find_next_collection_lambda_start(line: ctx.line, search_from: search_from)
-        if lambda_start < 0:
-            return fixes
-        if _short_line_has_functional_update_before(line: ctx.line, pos: lambda_start):
+    while candidate_index < lambda_starts.len():
+        val lambda_start = lambda_starts[candidate_index]
+        candidate_index = candidate_index + 1
+        if lambda_start < search_from:
+            continue
+        if functional_update_start >= 0 and functional_update_start < lambda_start:
             search_from = lambda_start + 1
             continue
         if _short_line_has_pipe_parenthesized_lambda_before(line: ctx.line, pos: lambda_start):
@@ -548,7 +586,7 @@ fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
                 ))
                 fixes.push(fix)
                 search_from = candidate.end_offset
-            case nil:
+            case None:
                 val function_ref = _parse_function_ref_candidate(line: ctx.line, lambda_start: lambda_start)
                 match function_ref:
                     case Some(candidate):
@@ -567,12 +605,12 @@ fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
                         ))
                         fixes.push(fix)
                         search_from = candidate.end_offset
-                    case nil:
+                    case None:
                         var placeholder = _parse_compact_placeholder_candidate(line: ctx.line, lambda_start: lambda_start)
                         match placeholder:
                             case Some(_candidate):
                                 pass
-                            case nil:
+                            case None:
                                 placeholder = _parse_placeholder_candidate(line: ctx.line, lambda_start: lambda_start)
                         match placeholder:
                             case Some(candidate):
@@ -591,7 +629,7 @@ fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
                                 ))
                                 fixes.push(fix)
                                 search_from = candidate.end_offset
-                            case nil:
+                            case None:
                                 val ignored = _parse_ignored_param_candidate(line: ctx.line, lambda_start: lambda_start)
                                 match ignored:
                                     case Some(candidate):
@@ -610,41 +648,37 @@ fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
                                         ))
                                         fixes.push(fix)
                                         search_from = candidate.end_offset
-                                    case nil:
+                                    case None:
                                         search_from = lambda_start + 1
     fixes
 
-fn _find_next_collection_lambda_start(line: text, search_from: i64) -> i64:
-    val candidate = _short_find_text_from(line: line, needle: "\\", search_from: search_from)
-    if candidate < 0:
-        return -1
-    if _short_line_has_comment_before(line: line, pos: candidate) or _short_position_is_inside_string(line: line, pos: candidate):
-        return _find_next_collection_lambda_start(line: line, search_from: candidate + 1)
-    if candidate + 1 >= line.len():
-        return -1
-    val next = line.slice(candidate + 1, candidate + 2)
-    if _short_is_identifier_start(next) or next == "(":
-        return candidate
-    _find_next_collection_lambda_start(line: line, search_from: candidate + 1)
-
-fn _short_line_has_comment_before(line: text, pos: i64) -> bool:
+fn _short_lambda_starts(line: text) -> [i64]:
+    var result: [i64] = []
     var i = 0
-    while i < pos:
-        if line.slice(i, i + 1) == "#":
-            return true
+    var in_string = false
+    while i < line.len():
+        val ch = line.slice(i, i + 1)
+        if ch == "#":
+            return result
+        if ch == "\"":
+            in_string = not in_string
+        elif not in_string and ch == "\\" and i + 1 < line.len():
+            val next = line.slice(i + 1, i + 2)
+            if _short_is_identifier_start(next) or next == "(":
+                result.push(i)
         i = i + 1
-    false
+    result
 
-fn _short_line_has_functional_update_before(line: text, pos: i64) -> bool:
+fn _short_first_functional_update_start(line: text) -> i64:
     var search_from = 0
-    while search_from < pos:
+    while search_from < line.len():
         val arrow = _short_find_text_from(line: line, needle: "->", search_from: search_from)
-        if arrow < 0 or arrow >= pos:
-            return false
+        if arrow < 0:
+            return -1
         if not _short_arrow_is_function_type_return(line: line, arrow_pos: arrow):
-            return true
+            return arrow
         search_from = arrow + 2
-    false
+    -1
 
 fn _short_line_has_pipe_parenthesized_lambda_before(line: text, pos: i64) -> bool:
     var before = pos - 1
@@ -694,75 +728,65 @@ fn _short_arrow_is_function_type_return(line: text, arrow_pos: i64) -> bool:
         i = i - 1
     false
 
-fn _short_position_is_inside_string(line: text, pos: i64) -> bool:
-    var i = 0
-    var in_string = false
-    while i < pos:
-        val ch = line.slice(i, i + 1)
-        if ch == "\"":
-            in_string = not in_string
-        i = i + 1
-    in_string
-
 fn _parse_method_ref_candidate(line: text, lambda_start: i64) -> Option<ShortGrammarMethodRefCandidate>:
     val colon_abs = _short_find_text_from(line: line, needle: ":", search_from: lambda_start)
     if colon_abs < 0:
-        return nil
+        return None
     val colon_rel = colon_abs - lambda_start
 
     val raw_param = line.slice(lambda_start, colon_abs).trim()
     if raw_param.len() < 2:
-        return nil
+        return None
     val introducer = raw_param.slice(0, 1)
     if _short_is_identifier_char(introducer):
-        return nil
-    val param = raw_param.slice(1, raw_param.len()).trim()
+        return None
+    val param = raw_param.slice(1, raw_param.byte_len()).trim()
     if not _short_is_plain_identifier(param):
-        return nil
+        return None
 
     var body_start = lambda_start + colon_rel + 1
     while body_start < line.len() and line.slice(body_start, body_start + 1) == " ":
         body_start = body_start + 1
 
     val receiver_prefix = param + "."
-    val body_tail = line.slice(body_start, line.len())
+    val body_tail = line.slice(body_start, line.byte_len())
     if not body_tail.starts_with(receiver_prefix):
-        return nil
+        return None
 
     val method_start = body_start + receiver_prefix.len()
     val method_end = _short_scan_identifier_end(line: line, start: method_start)
     if method_end <= method_start:
-        return nil
+        return None
 
     val method = line.slice(method_start, method_end)
     if method.starts_with("_"):
-        return nil
+        return None
 
     val call_end = method_end + 2
     if call_end > line.len() or line.slice(method_end, call_end) != "()":
-        return nil
+        return None
 
-    val suffix = line.slice(call_end, line.len()).trim()
+    val suffix = line.slice(call_end, line.byte_len()).trim()
     if suffix != "" and not suffix.starts_with(")") and not suffix.starts_with(","):
-        return nil
+        return None
 
     Some(ShortGrammarMethodRefCandidate(method: method, end_offset: call_end))
 
 fn _parse_function_ref_candidate(line: text, lambda_start: i64) -> Option<ShortGrammarFunctionRefCandidate>:
     val colon_abs = _short_find_text_from(line: line, needle: ":", search_from: lambda_start)
     if colon_abs < 0:
-        return nil
+        return None
     val colon_rel = colon_abs - lambda_start
 
     val raw_param = line.slice(lambda_start, colon_abs).trim()
     if raw_param.len() < 2:
-        return nil
+        return None
     val introducer = raw_param.slice(0, 1)
     if _short_is_identifier_char(introducer):
-        return nil
-    val param = raw_param.slice(1, raw_param.len()).trim()
+        return None
+    val param = raw_param.slice(1, raw_param.byte_len()).trim()
     if not _short_is_plain_identifier(param):
-        return nil
+        return None
 
     var body_start = lambda_start + colon_rel + 1
     while body_start < line.len() and line.slice(body_start, body_start + 1) == " ":
@@ -770,48 +794,48 @@ fn _parse_function_ref_candidate(line: text, lambda_start: i64) -> Option<ShortG
 
     val fn_end = _short_scan_identifier_end(line: line, start: body_start)
     if fn_end <= body_start:
-        return nil
+        return None
     val function_name = line.slice(body_start, fn_end)
     if function_name.starts_with("_"):
-        return nil
+        return None
 
     if fn_end >= line.len() or line.slice(fn_end, fn_end + 1) != "(":
-        return nil
+        return None
     val close = _find_matching_paren_on_line(text: line, open_paren: fn_end)
     if close < 0:
-        return nil
+        return None
     val arg_text = line.slice(fn_end + 1, close).trim()
     if arg_text != param:
-        return nil
+        return None
 
     val call_end = close + 1
-    val suffix = line.slice(call_end, line.len()).trim()
+    val suffix = line.slice(call_end, line.byte_len()).trim()
     if suffix != "" and not suffix.starts_with(")") and not suffix.starts_with(","):
-        return nil
+        return None
 
     Some(ShortGrammarFunctionRefCandidate(function_name: function_name, end_offset: call_end))
 
 fn _parse_placeholder_candidate(line: text, lambda_start: i64) -> Option<ShortGrammarPlaceholderCandidate>:
     val colon_abs = _short_find_text_from(line: line, needle: ":", search_from: lambda_start)
     if colon_abs < 0:
-        return nil
+        return None
     val colon_rel = colon_abs - lambda_start
 
     val raw_param = line.slice(lambda_start, colon_abs).trim()
     if raw_param.len() < 2:
-        return nil
+        return None
     val tuple_candidate = _parse_tuple_placeholder_candidate(line: line, lambda_start: lambda_start, colon_abs: colon_abs)
     match tuple_candidate:
         case Some(candidate):
             return Some(candidate)
-        case nil:
+        case None:
             pass
     val introducer = raw_param.slice(0, 1)
     if _short_is_identifier_char(introducer):
-        return nil
-    val param = raw_param.slice(1, raw_param.len()).trim()
+        return None
+    val param = raw_param.slice(1, raw_param.byte_len()).trim()
     if not _short_is_plain_identifier(param):
-        return nil
+        return None
 
     var body_start = lambda_start + colon_rel + 1
     while body_start < line.len() and line.slice(body_start, body_start + 1) == " ":
@@ -819,96 +843,96 @@ fn _parse_placeholder_candidate(line: text, lambda_start: i64) -> Option<ShortGr
 
     val expr_end = _short_scan_simple_lambda_expr_end(line: line, start: body_start)
     if expr_end <= body_start:
-        return nil
+        return None
     val expr = line.slice(body_start, expr_end).trim()
     if expr.starts_with("match "):
-        return nil
+        return None
     val value_prefix = param + " "
     val member_prefix = param + "."
     if not expr.starts_with(value_prefix) and not expr.starts_with(member_prefix) and not _short_expr_contains_plain_identifier(expr: expr, param: param):
-        return nil
+        return None
     if not _short_placeholder_expr_is_interpolation(expr: expr, param: param) and not _short_placeholder_brackets_are_param_free(expr: expr, param: param):
         if not _short_placeholder_expr_is_array_literal(expr: expr, param: param):
-            return nil
+            return None
     if not _short_placeholder_quotes_are_safe(expr: expr, param: param):
-        return nil
+        return None
     if expr.contains("(") and not _short_placeholder_calls_are_safe(expr: expr, param: param):
-        return nil
+        return None
     val replacement = "_1"
     if _short_placeholder_expr_is_unary_not_safe(expr: expr, param: param):
         val unary_new_text = _short_replace_plain_identifier(expr: expr, param: param, replacement: replacement)
         if unary_new_text == expr:
-            return nil
+            return None
         return Some(ShortGrammarPlaceholderCandidate(new_text: unary_new_text, end_offset: expr_end))
     if not _short_placeholder_expr_is_safe_identity(line: line, lambda_start: lambda_start, expr: expr, param: param) and not _short_placeholder_expr_is_safe(expr) and not _short_placeholder_expr_is_single_param_call(expr: expr, param: param) and not _short_placeholder_expr_is_param_cast(expr: expr, param: param) and not _short_placeholder_expr_is_call_with_safe_args(expr: expr, param: param) and not _short_placeholder_expr_is_field_access(expr: expr, param: param) and not _short_placeholder_expr_is_presence_check(expr: expr, param: param) and not _short_placeholder_expr_is_unary_not_safe(expr: expr, param: param) and not _short_placeholder_expr_is_array_literal(expr: expr, param: param) and not _short_placeholder_expr_is_interpolation(expr: expr, param: param):
-        return nil
+        return None
 
     val new_text = if _short_placeholder_expr_is_interpolation(expr: expr, param: param):
         _short_replace_interpolation_identifier(expr: expr, param: param, replacement: replacement)
     else:
         _short_replace_plain_identifier(expr: expr, param: param, replacement: replacement)
     if new_text == expr:
-        return nil
+        return None
     Some(ShortGrammarPlaceholderCandidate(new_text: new_text, end_offset: expr_end))
 
 fn _parse_ignored_param_candidate(line: text, lambda_start: i64) -> Option<ShortGrammarPlaceholderCandidate>:
     val colon_abs = _short_find_text_from(line: line, needle: ":", search_from: lambda_start)
     if colon_abs < 0:
-        return nil
+        return None
     val raw_param = line.slice(lambda_start, colon_abs).trim()
     if raw_param.len() < 2:
-        return nil
+        return None
     val introducer = raw_param.slice(0, 1)
     if _short_is_identifier_char(introducer):
-        return nil
-    val param = raw_param.slice(1, raw_param.len()).trim()
+        return None
+    val param = raw_param.slice(1, raw_param.byte_len()).trim()
     if param == "_" or not _short_is_plain_identifier(param):
-        return nil
+        return None
 
     var body_start = colon_abs + 1
     while body_start < line.len() and line.slice(body_start, body_start + 1) == " ":
         body_start = body_start + 1
     val expr_end = _short_scan_simple_lambda_expr_end(line: line, start: body_start)
     if expr_end <= body_start:
-        return nil
+        return None
     val expr = line.slice(body_start, expr_end).trim()
     if expr == "" or _short_expr_contains_plain_identifier(expr: expr, param: param):
-        return nil
+        return None
     Some(ShortGrammarPlaceholderCandidate(new_text: "\\_: " + expr, end_offset: expr_end))
 
 fn _parse_compact_placeholder_candidate(line: text, lambda_start: i64) -> Option<ShortGrammarPlaceholderCandidate>:
     val colon_abs = _short_find_text_from(line: line, needle: ":", search_from: lambda_start)
     if colon_abs < 0:
-        return nil
+        return None
     val raw_param = line.slice(lambda_start, colon_abs).trim()
     if raw_param.len() < 2:
-        return nil
+        return None
     val introducer = raw_param.slice(0, 1)
     if _short_is_identifier_char(introducer):
-        return nil
-    val param = raw_param.slice(1, raw_param.len()).trim()
+        return None
+    val param = raw_param.slice(1, raw_param.byte_len()).trim()
     if not _short_is_plain_identifier(param):
-        return nil
+        return None
 
     var body_start = colon_abs + 1
     while body_start < line.len() and line.slice(body_start, body_start + 1) == " ":
         body_start = body_start + 1
     val expr_end = _short_scan_simple_lambda_expr_end(line: line, start: body_start)
     if expr_end <= body_start:
-        return nil
+        return None
     val expr = line.slice(body_start, expr_end).trim()
     if not expr.starts_with(param):
-        return nil
-    val tail = expr.slice(param.len(), expr.len()).trim()
+        return None
+    val tail = expr.slice(param.len(), expr.byte_len()).trim()
     if not _short_placeholder_tail_starts_with_operator(tail):
-        return nil
+        return None
     if not _short_placeholder_brackets_are_param_free(expr: expr, param: param):
-        return nil
+        return None
     if not _short_placeholder_quotes_are_safe(expr: expr, param: param):
-        return nil
+        return None
     val new_text = _short_replace_plain_identifier(expr: expr, param: param, replacement: "_1")
     if new_text == expr:
-        return nil
+        return None
     Some(ShortGrammarPlaceholderCandidate(new_text: new_text, end_offset: expr_end))
 
 fn _short_placeholder_tail_starts_with_operator(tail: text) -> bool:
@@ -920,19 +944,19 @@ fn _short_placeholder_tail_starts_with_operator(tail: text) -> bool:
 fn _parse_tuple_placeholder_candidate(line: text, lambda_start: i64, colon_abs: i64) -> Option<ShortGrammarPlaceholderCandidate>:
     val raw_param = line.slice(lambda_start, colon_abs).trim()
     if not raw_param.starts_with("\\(") or not raw_param.ends_with(")"):
-        return nil
-    val inner = raw_param.slice(2, raw_param.len() - 1).trim()
+        return None
+    val inner = raw_param.slice(2, raw_param.byte_len() - 1).trim()
     if inner == "":
-        return nil
+        return None
 
     val params = inner.split(",")
     if params.len() < 2:
-        return nil
+        return None
     var clean_params: [text] = []
     for param in params:
         val clean = param.trim()
         if not _short_is_plain_identifier(clean):
-            return nil
+            return None
         clean_params.push(clean)
 
     var body_start = colon_abs + 1
@@ -941,12 +965,12 @@ fn _parse_tuple_placeholder_candidate(line: text, lambda_start: i64, colon_abs: 
 
     val expr_end = _short_scan_simple_lambda_expr_end(line: line, start: body_start)
     if expr_end <= body_start:
-        return nil
+        return None
     val expr = line.slice(body_start, expr_end).trim()
     if expr == "":
-        return nil
+        return None
     if expr.contains("\""):
-        return nil
+        return None
 
     var new_text = expr
     var replaced = false
@@ -960,9 +984,9 @@ fn _parse_tuple_placeholder_candidate(line: text, lambda_start: i64, colon_abs: 
         idx = idx + 1
 
     if not replaced or new_text == expr:
-        return nil
+        return None
     if new_text.contains("\\(") or new_text.contains("\\)"):
-        return nil
+        return None
     Some(ShortGrammarPlaceholderCandidate(new_text: new_text, end_offset: expr_end))
 
 fn _short_scan_simple_lambda_expr_end(line: text, start: i64) -> i64:
@@ -1078,11 +1102,11 @@ fn _short_placeholder_quotes_are_safe(expr: text, param: text) -> bool:
         return true
     if _short_placeholder_expr_is_interpolation(expr: expr, param: param):
         return true
-    if expr == "\"{" + param + "}\"":
+    if expr == "\"{{" + param + "}\"":
         return true
     if not expr.contains(param):
         return true
-    if not expr.contains("\"" + param + "\"") and not expr.contains("{" + param + "}"):
+    if not expr.contains("\"" + param + "\"") and not expr.contains("{{" + param + "}"):
         return true
     var i = 0
     while i < expr.len():
@@ -1094,9 +1118,9 @@ fn _short_placeholder_quotes_are_safe(expr: text, param: text) -> bool:
 fn _short_placeholder_expr_is_interpolation(expr: text, param: text) -> bool:
     if not expr.starts_with("\"") or not expr.ends_with("\""):
         return false
-    if not expr.contains("{" + param):
+    if not expr.contains("{{" + param):
         return false
-    expr.contains("{" + param + "}") or expr.contains("{" + param + ".") or expr.contains("{" + param + "[") or expr.contains("{" + param + ":")
+    expr.contains("{{" + param + "}") or expr.contains("{{" + param + ".") or expr.contains("{{" + param + "[") or expr.contains("{{" + param + ":")
 
 fn _short_placeholder_expr_is_safe_identity(line: text, lambda_start: i64, expr: text, param: text) -> bool:
     if expr != param:
@@ -1108,7 +1132,7 @@ fn _short_placeholder_expr_is_field_access(expr: text, param: text) -> bool:
     val prefix = param + "."
     if not expr.starts_with(prefix):
         return false
-    val field = expr.slice(prefix.len(), expr.len())
+    val field = expr.slice(prefix.len(), expr.byte_len())
     _short_is_plain_identifier(field)
 
 fn _short_placeholder_expr_is_presence_check(expr: text, param: text) -> bool:
@@ -1124,7 +1148,7 @@ fn _short_placeholder_expr_is_index_access(expr: text, param: text) -> bool:
 fn _short_placeholder_expr_is_array_literal(expr: text, param: text) -> bool:
     if not expr.starts_with("[") or not expr.ends_with("]"):
         return false
-    val inner = expr.slice(1, expr.len() - 1).trim()
+    val inner = expr.slice(1, expr.byte_len() - 1).trim()
     if inner == "":
         return true
     _short_placeholder_call_args_are_safe(inner: inner, param: param)
@@ -1142,18 +1166,18 @@ fn _short_placeholder_expr_is_param_cast(expr: text, param: text) -> bool:
     val prefix = param + " as "
     if not expr.starts_with(prefix):
         return false
-    _short_is_simple_type_name(expr.slice(prefix.len(), expr.len()).trim())
+    _short_is_simple_type_name(expr.slice(prefix.len(), expr.byte_len()).trim())
 
 fn _short_placeholder_expr_is_unary_not_safe(expr: text, param: text) -> bool:
     val prefix = "not "
     if not expr.starts_with(prefix):
         return false
-    val inner = expr.slice(prefix.len(), expr.len()).trim()
+    val inner = expr.slice(prefix.len(), expr.byte_len()).trim()
     if inner == "":
         return false
     val field_prefix = param + "."
     if inner.starts_with(field_prefix):
-        return _short_is_plain_identifier(inner.slice(field_prefix.len(), inner.len()))
+        return _short_is_plain_identifier(inner.slice(field_prefix.len(), inner.byte_len()))
     _short_placeholder_expr_is_safe(inner) or _short_placeholder_expr_is_single_param_call(expr: inner, param: param) or _short_placeholder_expr_is_receiver_no_arg_method_call(expr: inner, param: param) or _short_placeholder_expr_is_call_with_safe_args(expr: inner, param: param) or _short_placeholder_expr_is_field_access(expr: inner, param: param) or _short_placeholder_expr_is_presence_check(expr: inner, param: param)
 
 fn _short_placeholder_position_is_inside_brackets(expr: text, pos: i64) -> bool:
@@ -1308,8 +1332,8 @@ fn check_all_rules(source: String, file: String) -> [EasyFix]:
     for f in fixes9:
         all_fixes.push(f)
 
-    val fixes10 = check_short_grammar_refactor(source: source, file: file)
-    _rt = _ez_prof_mark("check_short_grammar_refactor", _rt)
+    val fixes10 = easy_fix_check_short_grammar_refactor(source: source, file: file)
+    _rt = _ez_prof_mark("easy_fix_check_short_grammar_refactor", _rt)
     for f in fixes10:
         all_fixes.push(f)
 

@@ -5,15 +5,36 @@
 use std.spec.step
 
 use std.spec
+use std.spec.{skip}
 use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
 use app.portal.server.{PortalServer}
+
+# Fixture roots must live where BOTH the POSIX fixture shell and the Simple
+# filesystem APIs can address them: the runtime does not translate a POSIX
+# "/tmp" prefix on Windows, so anchor under the host temp dir instead.
+fn _fixture_base() -> text:
+    get_temp_dir().replace("\\", "/")
+
+fn _git_available() -> bool:
+    val (_, _, code) = process_run("/bin/sh", ["-c", "git --version >/dev/null 2>&1"])
+    code == 0
+
+# Gate every fixture-backed example: without a working `git` the POSIX fixture
+# cannot be built, and a failed fixture would otherwise surface as a false
+# product RED ("Unknown repository"), not an infrastructure miss.
+fn it_git(name: text, block: fn()):
+    if not _git_available():
+        skip(name, "host has no working git for the portal fixture")
+    else:
+        it(name, block)
 
 fn _fixture_repo_root() -> text:
     """Create a throwaway git repo with a README, a subdirectory, two
     commits, a slash-containing branch, and a fake submodule gitlink, and
     return its parent directory (the PORTAL_REPO_ROOT)."""
     val script = "set -eu\n" +
-        "ROOT=$(mktemp -d /tmp/portal-git-fixture.XXXXXX)\n" +
+        "ROOT=$(mktemp -d " + _fixture_base() + "/portal-git-fixture.XXXXXX)\n" +
         "REPO=\"$ROOT/demo\"\n" +
         "mkdir -p \"$REPO/src\"\n" +
         "cd \"$REPO\"\n" +
@@ -47,7 +68,7 @@ fn _fixture_repo_root_is_itself_a_repo() -> text:
     one. This reproduces the shape used in production (`PORTAL_REPO_ROOT`
     defaults to `.`, and `.` is a repo)."""
     val script = "set -eu\n" +
-        "REPO=$(mktemp -d /tmp/portal-git-fixture-self.XXXXXX)\n" +
+        "REPO=$(mktemp -d " + _fixture_base() + "/portal-git-fixture-self.XXXXXX)\n" +
         "cd \"$REPO\"\n" +
         "git init -q -b main\n" +
         "git config user.email test@example.invalid\n" +
@@ -61,124 +82,124 @@ fn _fixture_repo_root_is_itself_a_repo() -> text:
 
 describe "portal server":
     # @manual scenario evidence
-    it "serves the home page through the shared layout":
+    it_git("serves the home page through the shared layout", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("serves the home page through the shared layout")
         val resp = _server().route_request("GET", "/", "", "")
         expect(resp).to_start_with("HTTP/1.1 200 OK")
         expect(resp).to_contain("Simple Portal")
         expect(resp).to_contain("Content-Security-Policy:")
-
-    it "serves the app stylesheet":
+    )
+    it_git("serves the app stylesheet", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("serves the app stylesheet")
         val resp = _server().route_request("GET", "/css/app.css", "", "")
         expect(resp).to_start_with("HTTP/1.1 200 OK")
         expect(resp).to_contain("Content-Type: text/css")
-
-    it "lists the fixture repository":
+    )
+    it_git("lists the fixture repository", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("lists the fixture repository")
         val resp = _server().route_request("GET", "/repos", "", "")
         expect(resp).to_start_with("HTTP/1.1 200 OK")
         expect(resp).to_contain("/repos/demo")
-
-    it "renders the repo landing page with the README":
+    )
+    it_git("renders the repo landing page with the README", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("renders the repo landing page with the README")
         val resp = _server().route_request("GET", "/repos/demo", "", "")
         expect(resp).to_start_with("HTTP/1.1 200 OK")
         expect(resp).to_contain("Demo Repo")
-
-    it "lists the tree at the default ref":
+    )
+    it_git("lists the tree at the default ref", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("lists the tree at the default ref")
         val resp = _server().route_request("GET", "/repos/demo/tree/main", "", "")
         expect(resp).to_start_with("HTTP/1.1 200 OK")
         expect(resp).to_contain("src")
         expect(resp).to_contain("README.md")
-
-    it "lists a nested directory":
+    )
+    it_git("lists a nested directory", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("lists a nested directory")
         val resp = _server().route_request("GET", "/repos/demo/tree/main/src", "", "")
         expect(resp).to_start_with("HTTP/1.1 200 OK")
         expect(resp).to_contain("main.spl")
-
-    it "shows a blob's content with the latest revision":
+    )
+    it_git("shows a blob's content with the latest revision", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("shows a blob's content with the latest revision")
         val resp = _server().route_request("GET", "/repos/demo/blob/main/src/main.spl", "", "")
         expect(resp).to_start_with("HTTP/1.1 200 OK")
         expect(resp).to_contain("print 2")
-
-    it "lists commit history newest first":
+    )
+    it_git("lists commit history newest first", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("lists commit history newest first")
         val resp = _server().route_request("GET", "/repos/demo/commits/main", "", "")
         expect(resp).to_start_with("HTTP/1.1 200 OK")
         expect(resp).to_contain("second commit")
         expect(resp).to_contain("first commit")
-
-    it "renders a commit diff":
+    )
+    it_git("renders a commit diff", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("renders a commit diff")
         val resp = _server().route_request("GET", "/repos/demo/commits/main", "", "")
         expect(resp).to_contain("commit/")
-
-    it "returns a styled 404 for an unknown repository":
+    )
+    it_git("returns a styled 404 for an unknown repository", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("returns a styled 404 for an unknown repository")
         val resp = _server().route_request("GET", "/repos/does-not-exist", "", "")
         expect(resp).to_start_with("HTTP/1.1 404 Not Found")
         expect(resp).to_contain("Back to home")
-
-    it "returns a styled 404 for an unknown top-level page":
+    )
+    it_git("returns a styled 404 for an unknown top-level page", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("returns a styled 404 for an unknown top-level page")
         val resp = _server().route_request("GET", "/nope", "", "")
         expect(resp).to_start_with("HTTP/1.1 404 Not Found")
-
-    it "rejects a repository name attempting path traversal":
+    )
+    it_git("rejects a repository name attempting path traversal", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("rejects a repository name attempting path traversal")
         val resp = _server().route_request("GET", "/repos/../../etc", "", "")
         expect(resp).to_start_with("HTTP/1.1 400 Bad Request")
-
-    it "rejects a path-traversal attempt inside a tree route":
+    )
+    it_git("rejects a path-traversal attempt inside a tree route", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("rejects a path-traversal attempt inside a tree route")
         val resp = _server().route_request("GET", "/repos/demo/tree/main/../../../etc", "", "")
         expect(resp).to_start_with("HTTP/1.1 400 Bad Request")
-
-    it "rejects unsupported HTTP methods":
+    )
+    it_git("rejects unsupported HTTP methods", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("rejects unsupported HTTP methods")
         val resp = _server().route_request("POST", "/repos", "", "")
         expect(resp).to_start_with("HTTP/1.1 405 Method Not Allowed")
-
-    it "resolves a branch ref containing a slash for the tree view":
+    )
+    it_git("resolves a branch ref containing a slash for the tree view", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("resolves a branch ref containing a slash for the tree view")
         val resp = _server().route_request("GET", "/repos/demo/tree/feature/x", "", "")
         expect(resp).to_start_with("HTTP/1.1 200 OK")
         expect(resp).to_contain("href=\"/repos/demo/tree/feature/x/src\"")
-
-    it "resolves a blob under a branch ref containing a slash":
+    )
+    it_git("resolves a blob under a branch ref containing a slash", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("resolves a blob under a branch ref containing a slash")
         val resp = _server().route_request("GET", "/repos/demo/blob/feature/x/src/feature.spl", "", "")
         expect(resp).to_start_with("HTTP/1.1 200 OK")
         expect(resp).to_contain("print 3")
-
-    it "resolves commits for a branch ref containing a slash":
+    )
+    it_git("resolves commits for a branch ref containing a slash", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("resolves commits for a branch ref containing a slash")
         val resp = _server().route_request("GET", "/repos/demo/commits/feature/x", "", "")
         expect(resp).to_start_with("HTTP/1.1 200 OK")
         expect(resp).to_contain("feature branch commit")
-
-    it "does not double-list the repo when PORTAL_REPO_ROOT points directly at it":
+    )
+    it_git("does not double-list the repo when PORTAL_REPO_ROOT points directly at it", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("does not double-list the repo when PORTAL_REPO_ROOT points directly at it")
         val repo_root = _fixture_repo_root_is_itself_a_repo()
@@ -188,8 +209,8 @@ describe "portal server":
         expect(resp.contains("href=\"/repos/\"")).to_equal(false)
         val repo_link_count = resp.split("<a href=\"/repos/").len() - 1
         expect(repo_link_count).to_equal(1)
-
-    it "renders a submodule tree entry as non-link text instead of a 404 link":
+    )
+    it_git("renders a submodule tree entry as non-link text instead of a 404 link", fn():
         # @req REQ-SSPEC-INTEGRATION
         step("renders a submodule tree entry as non-link text instead of a 404 link")
         val resp = _server().route_request("GET", "/repos/demo/tree/main", "", "")
@@ -197,3 +218,4 @@ describe "portal server":
         expect(resp).to_contain("submodule")
         expect(resp).to_contain("vendor")
         expect(resp.contains("href=\"/repos/demo/tree/main/vendor\"")).to_equal(false)
+    )

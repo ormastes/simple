@@ -1,5 +1,14 @@
 # Project Statistics — TLDR
 
+Latest [checkout LOC report, 2026-11-24](project_loc_2026-11-24.md): **84,587
+files**, **25,736,032 code/data lines**, **2,385,390 comments**, and **1,685,357
+blank lines**, totaling **29,806,779 physical lines**. Includes tracked Simple,
+SHS, SDN, C/headers, Rust, and Python files, submodules, vendored code, tests,
+and fixtures. SDN lines are data. This is not a build/test qualification.
+
+The following owned-code portfolio is the **historical 2026-08-13 inventory**;
+its vendor-excluding scope differs from the November report.
+
 | Portfolio | Value |
 |---|---:|
 | Owned source/test files | 41,544 |

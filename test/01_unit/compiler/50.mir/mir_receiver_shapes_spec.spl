@@ -1,0 +1,61 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR receiver shapes: me/fn instance methods on struct/class receivers
+
+Bug: mir_class_me_method_dict_field_put_unresolved_2026-11-05 -- a class `me`
+method named `put` whose body writes a Dict field (`self.names[k] = v`) failed
+native MIR as `unresolved method call: put route=runtime-fallback`.
+Prevention: sibling receiver shapes (struct/class, me/fn, self-call,
+field-of-field, dict/array fields) must lower with zero HIR/MIR errors.
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn rs_lower(src: text) -> text:
+    val file = "testdata/fixture_recv_shapes.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_recv_shapes", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    val target_context = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+    val mir = lowering.lower_module(hir)
+    var out = ""
+    for e in hir_lowering.errors:
+        out = out + "HIR: " + e.message + "\n"
+    for e in lowering.errors:
+        out = out + "MIR: " + e.message + "\n"
+    out
+
+val reg_src = "class Reg:\n    names: Dict<text, i64>\n    order: [text]\n\n    me put(k: text, v: i64):\n        if v > 0:\n            self.names[k] = v\n            self.order.push(k)\n    fn get_or(k: text, d: i64) -> i64:\n        if self.names.contains_key(k):\n            return self.names[k]\n        d\n\n"
+
+describe "class me method writing a dict field":
+    it "resolves r.put on a class local (w4_dictfield repro)":
+        expect(rs_lower(reg_src + "fn f() -> i64:\n    var r = Reg(names: {}, order: [])\n    r.put(\"a\", 5)\n    r.names.len()\n")).to_equal("")
+
+    it "resolves fn method with args on a class local":
+        expect(rs_lower(reg_src + "fn f() -> i64:\n    var r = Reg(names: {}, order: [])\n    r.get_or(\"a\", 1)\n")).to_equal("")
+
+    it "resolves self.put inside another me method":
+        expect(rs_lower("class Reg:\n    names: Dict<text, i64>\n    me put(k: text, v: i64):\n        self.names[k] = v\n    me put2(k: text):\n        self.put(k, 2)\n\nfn f() -> i64:\n    var r = Reg(names: {})\n    r.put2(\"x\")\n    0\n")).to_equal("")
+
+    it "resolves field-of-field me and fn calls":
+        expect(rs_lower(reg_src + "class Outer:\n    reg: Reg\n    me add(k: text, v: i64):\n        self.reg.put(k, v)\n    fn look(k: text) -> i64:\n        self.reg.get_or(k, -1)\n\nfn f() -> i64:\n    var o = Outer(reg: Reg(names: {}, order: []))\n    o.add(\"a\", 5)\n    o.reg.put(\"c\", 1)\n    o.look(\"a\")\n")).to_equal("")
+
+    it "resolves a class method passed as a parameter receiver":
+        expect(rs_lower(reg_src + "fn g(r: Reg) -> i64:\n    r.put(\"q\", 3)\n    r.get_or(\"q\", 0)\n")).to_equal("")
+
+describe "struct fn instance methods with arguments":
+    it "resolves fn methods on a struct with array and scalar fields":
+        expect(rs_lower("struct Bag:\n    items: [i64]\n    base: i64\n\nimpl Bag:\n    fn has(x: i64) -> bool:\n        for it in self.items:\n            if it + self.base == x:\n                return true\n        false\n    fn pick(i: i64, j: i64) -> i64:\n        self.items[i] + self.items[j] + self.base\n\nfn f() -> i64:\n    val b = Bag(items: [1, 2], base: 10)\n    if b.has(11):\n        return b.pick(0, 1)\n    0\n")).to_equal("")
+
+    it "resolves me method on a struct with a dict field":
+        expect(rs_lower("struct Tally:\n    m: Dict<text, i64>\n\nimpl Tally:\n    me put(k: text):\n        self.m[k] = 1\n\nfn f() -> i64:\n    var t = Tally(m: {})\n    t.put(\"z\")\n    t.m.len()\n")).to_equal("")

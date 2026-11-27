@@ -1,7 +1,8 @@
 # `cli_help_alignment_spec` is RED — help text and dispatch have drifted by 18 commands
 
 Date: 2026-08-09
-Status: OPEN (P2)
+Status: RESOLVED 2026-09-13 (spec 9/9 green — see the BUGFIX-7 section at the
+end; header corrected 2026-11-25)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 the unblock condition (the `val`/`push` spec defect) is FIXED as of 2026-08-10;
 items 2-4 (the real 25-command help/dispatch gap, `check-capsule`, and the
@@ -217,3 +218,15 @@ the assertion), the latter is a parse error in a file this change never
 touched.
 
 Status: RESOLVED (2026-09-13) — spec green.
+
+## Verification 2026-11-25 (p2w1-ab lane, release/1.0.0 @ 38265c7f249) — resolution confirmed present
+
+The 2026-09-13 fix is present at the release/1.0.0 tip:
+`src/app/cli/_CliMain/main_and_help.spl` dispatches `tags` (:825) and `cs`
+(:827) and handles `build-progress` (:378); `src/app/cli/cli_helpers.spl`
+prints help lines for `tags` (:115) and `build-progress` (:116); and
+`src/app/cli/command_registry.spl` carries registry rows for `tags` (:66),
+`build-progress` (:67), and `cs` (:70). The status header still said OPEN;
+corrected. Spec execution is blocked in this lane by the pinned seed's
+`@representation_boundary` rejection (cfd89933699, repo-wide), so this
+confirmation is by source inspection.

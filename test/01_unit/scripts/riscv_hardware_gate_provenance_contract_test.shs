@@ -1,0 +1,75 @@
+#!/bin/sh
+# Isolated owner-script behavior: fixture tools are never hardware evidence.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+mkdir -p "$fixture/scripts/check" "$fixture/tools" "$fixture/src/lib/hardware/debug"
+cp "$ROOT/scripts/check/check-riscv-hardware-gates.shs" "$fixture/scripts/check/"
+for unit in jtag_tap dmi_bus debug_registers riscv_dtm riscv_debug_module sba_test_mem \
+    tb_jtag_dtm_dmi tb_debug_module tb_abstract_cmds tb_debug_csrs tb_sba; do
+    : >"$fixture/src/lib/hardware/debug/$unit.vhd"
+done
+sed -n '/^PROBES="/,/"$/p' "$fixture/scripts/check/check-riscv-hardware-gates.shs" |
+    cut -d '|' -f 2 | while IFS= read -r path; do
+        mkdir -p "$fixture/$(dirname "$path")"
+        : >"$fixture/$path"
+    done
+cat >"$fixture/tools/ghdl" <<'TOOL'
+#!/bin/sh
+[ "$1" = -r ] || exit 0
+case "$*" in
+    *tb_jtag_dtm_dmi*) echo 'JTAG STAGE1 PASS' ;;
+    *tb_debug_module*) echo 'JTAG STAGE2 PASS' ;;
+    *tb_abstract_cmds*) echo 'JTAG STAGE3 PASS' ;;
+    *tb_debug_csrs*) echo 'JTAG STAGE4 PASS' ;;
+    *tb_sba*) echo 'JTAG STAGE5 PASS' ;;
+    *) exit 1 ;;
+esac
+TOOL
+cat >"$fixture/tools/compiler" <<'TOOL'
+#!/bin/sh
+if [ "$1" = --version ]; then
+    printf '%s\n' "$FIXTURE_VERSION"
+    exit 0
+fi
+printf 'invoked\n' >>"$FIXTURE_EXECUTIONS"
+echo 'ALL PASS'
+TOOL
+chmod +x "$fixture/tools/ghdl" "$fixture/tools/compiler"
+run_case() {
+    label=$1
+    version=$2
+    binary=$3
+    rm -f "$fixture/executions"
+    set +e
+    PATH="$fixture/tools:$PATH" FIXTURE_VERSION="$version" \
+        FIXTURE_EXECUTIONS="$fixture/executions" SIMPLE_BIN="$binary" \
+        sh "$fixture/scripts/check/check-riscv-hardware-gates.shs" >"$fixture/$label.log" 2>&1
+    status=$?
+    set -e
+    [ "$status" = 2 ] || { cat "$fixture/$label.log"; exit 1; }
+    tail -n 1 "$fixture/$label.log" | grep '^ERROR ' >/dev/null
+}
+run_case seed 'WARNING: this Rust-built Simple binary is a bootstrap seed only' "$fixture/tools/compiler"
+[ ! -e "$fixture/executions" ]
+grep 'engine=rust-seed, qualification=unavailable' "$fixture/seed.log" >/dev/null
+run_case unknown 'some unrelated command version 9' "$fixture/tools/compiler"
+[ ! -e "$fixture/executions" ]
+grep 'unrecognized --version output' "$fixture/unknown.log" >/dev/null
+run_case diagnostic 'Simple Language v1.0.0-RC' "$fixture/tools/compiler"
+[ -s "$fixture/executions" ]
+grep '0 failed; producer admission unavailable (engine=unverified-simple, qualification=diagnostic-only)' "$fixture/diagnostic.log" >/dev/null
+mkdir -p "$fixture/bin"
+cp "$fixture/tools/compiler" "$fixture/bin/simple"
+rm -f "$fixture/executions"
+set +e
+PATH="$fixture/tools:$PATH" FIXTURE_VERSION='Simple Language v1.0.0-RC' \
+    FIXTURE_EXECUTIONS="$fixture/executions" SIMPLE_BIN="$fixture/missing-explicit-tool" \
+    sh "$fixture/scripts/check/check-riscv-hardware-gates.shs" >"$fixture/missing.log" 2>&1
+missing_status=$?
+set -e
+[ "$missing_status" = 1 ]
+[ ! -e "$fixture/executions" ]
+grep 'blocked: no simple binary' "$fixture/missing.log" >/dev/null
+echo 'PASS — RISC-V provenance rejection and unqualified green measurements'

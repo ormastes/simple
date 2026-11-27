@@ -19,6 +19,7 @@ use std.nogc_sync_mut.io.external_text_io.{io_text_error_message}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded, _resolve_posix_tool}
 use std.nogc_sync_mut.fs.host_path.{host_path_native}
 use std.nogc_sync_mut.sffi.file_bytes.{file_write_bytes_tagged_native}
+use std.nogc_sync_mut.sffi.cli_args.{cli_arg_count, cli_arg_at}
 # HOST-OS DETECTOR CONSOLIDATION (2026-09-14): the single canonical
 # rt_platform_name wrapper, not a locally re-declared extern. See
 # doc/08_tracking/bug/win_host_os_detector_disagreement_2026-09-14.md.
@@ -40,6 +41,7 @@ extern fn rt_process_kill(pid: i64) -> bool
 @unsafe(reason: "raw timed process capture; exit code -1 is the failure-or-timeout sentinel", capabilities: [ffi])
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _io_runtime_process_run_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn _io_runtime_process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
     # Windows: the C rt_process_run reports exit 0 for every command (see
     # doc/08_tracking/bug/windows_rt_process_run_always_exit_zero_2026-09-26.md);
@@ -54,19 +56,23 @@ fn _io_runtime_process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
     unsafe(capabilities: [ffi]):
         rt_process_run(rcmd, rargs)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _io_runtime_process_spawn_async_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn _io_runtime_process_spawn_async_raw(cmd: text, args: [text]) -> i64:
     val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
     unsafe(capabilities: [ffi]):
         rt_process_spawn_async_value(rcmd, rargs)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _io_runtime_process_is_running_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn _io_runtime_process_is_running_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
         rt_process_is_running(pid)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _io_runtime_process_kill_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn _io_runtime_process_kill_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
         rt_process_kill(pid)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _io_runtime_process_run_timeout_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn _io_runtime_process_run_timeout_raw(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
     unsafe(capabilities: [ffi]):
@@ -84,8 +90,8 @@ extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_copy(src: text, dst: text) -> bool
 @unsafe(reason: "raw nullable byte-array read; nil is invalid path, unreadable input, allocation, or runtime failure", capabilities: [ffi])
 extern fn rt_file_read_bytes(path: text) -> [u8]?
-@unsafe(reason: "raw file digest; non-64-byte text is the unreadable or provider-failure sentinel", capabilities: [ffi])
-extern fn rt_file_hash_sha256(path: text) -> text
+@unsafe(reason: "raw nullable file digest; nil is the missing, unreadable, or runtime-failure result", capabilities: [ffi])
+extern fn rt_file_hash_sha256(path: text) -> text?
 @unsafe(reason: "raw nullable environment lookup; wrapper normalizes absence", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text?
 @unsafe(reason: "raw environment integer lookup uses the caller default as its failure sentinel", capabilities: [ffi])
@@ -240,6 +246,7 @@ pub fn read_file_text(path: text) -> text:
 pub fn read_file_text_result(path: text) -> Result<text, text>:
     file_read_result(path)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_write", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn file_write(path: text, content: text) -> bool:
     val codec = match file_default_text_codec():
         case Ok(item): item
@@ -256,10 +263,17 @@ pub fn file_write(path: text, content: text) -> bool:
     # Writing into a nonexistent directory otherwise no-ops silently
     # (bug interp_examples_dir_f64_zero_and_write_noop_2026-07-03):
     # create the missing parent directory and retry once.
-    val sep_idx = path.rfind("/")
+    val is_win = host_is_windows_host()
+    val fwd_idx = native_path.rfind("/")
+    val back_idx = if is_win: native_path.rfind("\\") else: -1
+    val sep_idx = if back_idx > fwd_idx: back_idx else: fwd_idx
     if sep_idx <= 0:
         return false
-    val parent = path.substring(0, sep_idx)
+    var parent = native_path.substring(0, sep_idx)
+    if is_win and sep_idx == 2 and native_path.byte_len() >= 3 and native_path.substring(1, 2) == ":":
+        parent = native_path.substring(0, 3)
+    elif is_win and sep_idx == 6 and native_path.starts_with("\\\\?\\") and native_path.substring(5, 6) == ":":
+        parent = native_path.substring(0, 7)
     var parent_exists = false
     unsafe(capabilities: [ffi]):
         parent_exists = rt_file_exists(host_path_native(parent))
@@ -278,21 +292,33 @@ pub fn write_file(path: text, content: text) -> bool:
 pub fn file_write_exact(path: text, content: text) -> bool:
     val codec = match file_default_text_codec():
         case Ok(item): item
-        case Err(_): return false
+        case Err(_):
+            if (env_get_opt("SIMPLE_STOREDBG") ?? "") == "1":
+                eprint("[storedbg] file_write_exact codec failed: {path}\n")
+            return false
     val bytes = match file_session_encode(content, codec, 0):
         case Ok(item): item
-        case Err(_): return false
-    file_write_bytes(path, bytes)
+        case Err(_):
+            if (env_get_opt("SIMPLE_STOREDBG") ?? "") == "1":
+                eprint("[storedbg] file_write_exact encode failed: {path}\n")
+            return false
+    val wrote = file_write_bytes(path, bytes)
+    if not wrote and (env_get_opt("SIMPLE_STOREDBG") ?? "") == "1":
+        eprint("[storedbg] file_write_exact write failed: {path} bytes={bytes.len()}\n")
+    wrote
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_exists", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 pub fn file_exists(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_file_exists(host_path_native(path))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_delete", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn file_delete(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_file_delete(host_path_native(path))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in remove_file_if_exists", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn remove_file_if_exists(path: text) -> bool:
     # Idempotent delete: true when the file was removed or did not exist.
     var exists = false
@@ -303,17 +329,19 @@ pub fn remove_file_if_exists(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_file_delete(host_path_native(path))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_copy", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn file_copy(src: text, dst: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_file_copy(host_path_native(src), host_path_native(dst))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_read_bytes_result", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn file_read_bytes_result(path: text) -> Result<[u8], text>:
     val bytes = unsafe(capabilities: [ffi]):
         rt_file_read_bytes(host_path_native(path))
     if bytes == nil:
         Err("file byte read failed: {path}")
     else:
-        Ok(bytes ?? [])
+        Ok(bytes.unwrap())
 
 pub fn file_read_bytes(path: text) -> [u8]:
     match file_read_bytes_result(path):
@@ -333,19 +361,25 @@ pub fn file_read_bytes_i64(path: text) -> [i64]:
 pub fn file_write_bytes(path: text, bytes: [u8]) -> bool:
     file_write_bytes_tagged_native(host_path_native(path), bytes)
 
-pub fn file_hash_sha256(path: text) -> text:
+pub fn file_hash_sha256_or_shell(path: text) -> text:
     val hash = file_hash_sha256_or_empty(path)
     if hash.len() == 64:
         return hash
-    shell_output("sha256sum '" + path + "' 2>/dev/null | awk '{print $1}'")
+    shell_output("sha256sum '" + path + "' 2>/dev/null | awk '{{print $1}}'")
 
 # Exact one-call cache-key contract: invalid/unavailable digest is an empty
-# miss sentinel. Unlike file_hash_sha256, this never shells out.
+# miss sentinel. Unlike file_hash_sha256_or_shell, this never shells out.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_hash_sha256_or_empty", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn file_hash_sha256_or_empty(path: text) -> text:
-    val hash = unsafe(capabilities: [ffi]):
+    val hash_opt = unsafe(capabilities: [ffi]):
         rt_file_hash_sha256(host_path_native(path))
-    if hash.len() == 64:
-        return hash
+    # The runtime returns nil, not text, for a missing or unreadable path.
+    if hash_opt == nil:
+        return ""
+    # Annotated rebind: methods on a plain optional val misbehave on the seed.
+    val digest: text = hash_opt ?? ""
+    if digest.len() == 64:
+        return digest
     ""
 
 # Read `size` bytes starting at `offset`. The only ranged read in this module:
@@ -358,7 +392,7 @@ pub fn file_read_text_at_nullable(path: text, offset: i64, size: i64) -> text?:
     val codec = match file_default_text_codec():
         case Ok(item): item
         case Err(_): return nil
-    if size > codec.input_byte_limit(): return nil
+    if size > codec.input_byte_limit(): return None
     val bytes = match external_file_read_bytes_at(path, offset, size):
         case Ok(item): item
         case Err(_): return nil
@@ -366,6 +400,16 @@ pub fn file_read_text_at_nullable(path: text, offset: i64, size: i64) -> text?:
         case Ok(item): item
         case Err(_): nil
 
+# Raw-byte twin of file_read_text_at_nullable: up to `size` bytes at `offset`,
+# no text decoding (binary headers such as GGUF KV). None when the path is
+# unreadable or the range is invalid; a short read at EOF is returned as is.
+# @allow(primitive_api) offset and size are raw file-position octets, the same scalar shape as file_read_text_at_nullable
+pub fn file_read_bytes_at(path: text, offset: i64, size: i64) -> [u8]?:
+    match external_file_read_bytes_at(path, offset, size):
+        case Ok(item): Some(item)
+        case Err(_): None
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_size", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn file_size(path: text) -> i64:
     val size = unsafe(capabilities: [ffi]):
         rt_file_size(host_path_native(path))
@@ -375,6 +419,7 @@ pub fn file_size(path: text) -> i64:
 
 # Exact signed status for owners that must distinguish an empty file from an
 # unreadable/missing file. One runtime call; no normalization or retry.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_size_signed", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 pub fn file_size_signed(path: text) -> i64:
     unsafe(capabilities: [ffi]):
@@ -386,6 +431,7 @@ pub fn file_size_signed(path: text) -> i64:
 # `file_size_raw`. Under last-definition-wins fallback dispatch that pair is
 # unbounded mutual recursion. Inline the body (identical semantics to the
 # `file_size` directly above) so no ambiguous name is on the path.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_size_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn file_size_raw(path: text) -> i64:
     val size = unsafe(capabilities: [ffi]):
         rt_file_size(host_path_native(path))
@@ -409,22 +455,22 @@ pub fn process_run(cmd: text, args: [text]) -> (text, text, i64):
 # Environment
 # ============================================================================
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in env_get", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn env_get(key: text) -> text:
     val value = unsafe(capabilities: [ffi]):
         rt_env_get(key)
-    if value == nil:
-        ""
-    else:
-        value
+    value ?? ""
 
 # Exact nullable transport for compiler/runtime owners that must distinguish an
 # explicitly empty environment value from an absent/provider-failed value.
 # One direct ABI call; no allocation, normalization, lookup, or retry.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in env_get_nullable", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 pub fn env_get_nullable(key: text) -> text?:
     unsafe(capabilities: [ffi]):
         rt_env_get(key)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in env_get_i64_process", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 pub fn env_get_i64_process(key: text, default_value: i64) -> i64:
     unsafe(capabilities: [ffi]):
@@ -437,6 +483,7 @@ pub fn env_get_i64_process(key: text, default_value: i64) -> i64:
 # without touching ~680 call sites whose imports must each be checked, so the
 # correct-by-construction sibling lives here instead. Prefer it at every new site
 # that wants a default, and migrate old `?? default` sites to it.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in env_get_opt", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 pub fn env_get_opt(key: text) -> text?:
     """Environment lookup that is nil (not "") when the variable is unset.
@@ -448,15 +495,16 @@ pub fn env_get_opt(key: text) -> text?:
     val value = unsafe(capabilities: [ffi]):
         rt_env_get(key)
     if value == nil:
-        return nil
+        return None
     if value == "":
-        return nil
+        return None
     value
 
 pub fn env_get_or(key: text, default_value: text) -> text:
     """Environment lookup with an explicit default. Total, no `??` required."""
     env_get_opt(key) ?? default_value
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in env_set", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 pub fn env_set(key: text, value: text) -> bool:
     unsafe(capabilities: [ffi]):
@@ -469,16 +517,19 @@ pub fn env_set(key: text, value: text) -> bool:
 # rt_* thunks, NOT same-module forwarders: the tree-walk interpreter resolves
 # free functions by BARE NAME, so `cwd()` here would bind to env_ops.cwd ->
 # cwd_process -> ... (infinite recursion, verified core dump).
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in env_set_process", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 pub fn env_set_process(key: text, value: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_env_set(key, value)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in env_remove_process", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 pub fn env_remove_process(key: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_env_remove(key)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in cwd_process", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn cwd_process() -> text:
     val value = unsafe(capabilities: [ffi]):
         rt_env_cwd()
@@ -488,10 +539,12 @@ pub fn cwd_process() -> text:
 
 # Exact rename-only contract for wrappers that define their own
 # `file_rename` (nogc_sync_mut/io/file_ops.spl).
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in rename_path", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn rename_path(old_path: text, new_path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_file_rename(old_path, new_path)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in cwd", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn cwd() -> text:
     val value = unsafe(capabilities: [ffi]):
         rt_env_cwd()
@@ -509,6 +562,7 @@ pub fn home() -> text:
 # System
 # ============================================================================
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in getpid", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn getpid() -> i64:
     val pid = unsafe(capabilities: [ffi]):
         rt_getpid()
@@ -516,6 +570,7 @@ pub fn getpid() -> i64:
         panic("E-SFFI-SYSTEM-001: process identifier provider failed")
     pid
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in time_now_unix_micros", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn time_now_unix_micros() -> i64:
     val value = unsafe(capabilities: [ffi]):
         rt_time_now_unix_micros()
@@ -523,25 +578,17 @@ pub fn time_now_unix_micros() -> i64:
         panic("E-SFFI-TIME-001: wall clock provider failed")
     value
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in get_args", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn get_args() -> [text]:
     unsafe(capabilities: [ffi]):
         sys_get_args() ?? []
 
-pub fn cli_arg_count() -> i64:
-    unsafe(capabilities: [ffi]):
-        (sys_get_args() ?? []).len()
-
-pub fn cli_arg_at(index: i64) -> text:
-    val args = unsafe(capabilities: [ffi]):
-        sys_get_args() ?? []
-    if index >= 0 and index < args.len():
-        return args[index]
-    ""
-
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in exit", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn exit(code: i64):
     unsafe(capabilities: [ffi]):
         rt_exit(code)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in thread_sleep", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn thread_sleep(ms: i64):
     unsafe(capabilities: [ffi]):
         rt_thread_sleep(ms)
@@ -550,6 +597,7 @@ pub fn thread_sleep(ms: i64):
 # Directory Operations
 # ============================================================================
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in dir_create", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn dir_create(path: text, recursive: bool) -> bool:
     val native_path = host_path_native(path)
     if recursive:
@@ -559,14 +607,17 @@ pub fn dir_create(path: text, recursive: bool) -> bool:
         unsafe(capabilities: [ffi]):
             rt_dir_create(native_path, false)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in dir_create_all", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn dir_create_all(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_dir_create_all(host_path_native(path))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in mkdir_p", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn mkdir_p(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_dir_create_all(host_path_native(path))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in is_dir", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn is_dir(path: text) -> bool:
     # Was `shell_bool("test -d '{path}'")` -- an unsubstituted `{path}`
     # placeholder (Simple text literals do not interpolate) that always
@@ -580,8 +631,15 @@ pub fn is_dir(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_dir_exists(host_path_native(path))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in is_file", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn is_file(path: text) -> bool:
-    shell_bool("test -f '{path}'")
+    val native_path = host_path_native(path)
+    var exists = false
+    var is_d = false
+    unsafe(capabilities: [ffi]):
+        exists = rt_file_exists(native_path)
+        is_d = rt_dir_exists(native_path)
+    exists and not is_d
 
 ## No-shell stat(2) probe for whether `path` is a character device (e.g. a
 ## DRM render node). Unlike `is_dir`/`is_file` above, this does NOT shell
@@ -589,41 +647,37 @@ pub fn is_file(path: text) -> bool:
 ## like `os.compositor.vulkan_compositor_backend.detect_virtio_gpu_device()`
 ## don't need `/bin/sh` to be present (baremetal has none). See
 ## doc/08_tracking/bug/vulkan_detect_virtio_gpu_device_is_existence_check_not_device_probe_2026-08-07.md.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in is_char_device", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn is_char_device(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_file_is_char_device(host_path_native(path))
 
-## Prefer the native directory listing (works on hosts without /bin/sh,
-## e.g. Windows); fall back to the shell form only when the native probe
-## cannot read the directory.
+## Native directory listing (works on all hosts without /bin/sh, e.g. Windows).
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in list_dir", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn list_dir(path: text) -> [text]:
-    val native = unsafe(capabilities: [ffi]):
-        rt_dir_list(host_path_native(path))
-    if native != nil:
-        return native
-    val (stdout, _stderr, code) = _io_runtime_process_run_raw("/bin/sh", ["-c", "ls '{path}'"])
-    if code != 0:
-        return []
-    val trimmed = stdout.trim()
-    if trimmed == "":
-        return []
-    trimmed.split("\n")
+    unsafe(capabilities: [ffi]):
+        rt_dir_list(host_path_native(path)) ?? []
 
-pub fn dir_list(path: text) -> [text]:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in dir_list_or_empty", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn dir_list_or_empty(path: text) -> [text]:
+    # Contract: failure == empty; dir_list_optional below distinguishes them.
     unsafe(capabilities: [ffi]):
         rt_dir_list(host_path_native(path)) ?? []
 
 # Exact nullable result for recursive validators that must distinguish an
 # empty directory from provider/read/allocation failure.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in dir_list_optional", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 pub fn dir_list_optional(path: text) -> [text]?:
     unsafe(capabilities: [ffi]):
         rt_dir_list(host_path_native(path))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in dir_walk", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn dir_walk(path: text) -> [text]:
     unsafe(capabilities: [ffi]):
         rt_dir_walk(host_path_native(path))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in dir_remove", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn dir_remove(path: text, recursive: bool) -> bool:
     val native_path = host_path_native(path)
     if recursive:
@@ -633,6 +687,7 @@ pub fn dir_remove(path: text, recursive: bool) -> bool:
         unsafe(capabilities: [ffi]):
             rt_dir_remove(native_path, false)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in dir_remove_all", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn dir_remove_all(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_dir_remove_all(host_path_native(path))
@@ -643,6 +698,7 @@ pub fn file_append_text(path: text, content: text) -> bool:
         case Err(_): return false
     FileTextSession.write_file(path, content, FileMode.Append, codec).is_ok()
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in dir_exists", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn dir_exists(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_dir_exists(host_path_native(path))
@@ -663,8 +719,14 @@ pub fn process_kill(pid: i64) -> bool:
 # ============================================================================
 
 pub fn host_os() -> text:
+    # SINGLE CONSUMER of rt_platform_name (with env/platform.spl detect_os()):
+    # product code must branch on host_os()/detect_os(), never on the raw
+    # runtime string. All three owners (C runtime_native.c, Rust seed
+    # env_process.rs, pure-Simple core_process.spl) emit the same table:
+    # windows/macos/linux/freebsd/illumos/solaris/simpleos, else "unknown".
     # The runtime identifies the host independently of mutable OS/OSTYPE.
-    # BSD providers report "unix", so retain uname for their specific name.
+    # "unknown" (OpenBSD/NetBSD, or an owner built for an unlisted target)
+    # falls through to uname for the specific name.
     val runtime_os = platform_name_raw()
     if runtime_os == "windows" or runtime_os == "macos" or runtime_os == "linux" or runtime_os == "freebsd" or runtime_os == "illumos" or runtime_os == "solaris":
         return runtime_os
@@ -688,14 +750,17 @@ pub fn host_os() -> text:
 pub fn platform_name() -> text:
     platform_name_raw()
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in time_now_monotonic_ms", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn time_now_monotonic_ms() -> i64:
     unsafe(capabilities: [ffi]):
         rt_time_now_monotonic_ms()
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in shell_exec", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn shell_exec(cmd: text) -> text:
     unsafe(capabilities: [ffi]):
         rt_shell_exec(cmd)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_rename", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn file_rename(old_path: text, new_path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_file_rename(host_path_native(old_path), host_path_native(new_path))
@@ -703,6 +768,7 @@ pub fn file_rename(old_path: text, new_path: text) -> bool:
 # Preserve the runtime move contract used by compiler caches: rename first,
 # then copy+delete across filesystems. The unique semantic name also avoids the
 # flattened-unit `file_rename` collision without adding dispatch or lookup.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_move_cross_device", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn file_move_cross_device(old_path: text, new_path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_file_move(host_path_native(old_path), host_path_native(new_path))
@@ -711,6 +777,7 @@ pub fn file_move_cross_device(old_path: text, new_path: text) -> bool:
 pub fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     _io_runtime_process_run_timeout_raw(host_path_native(cmd), args, timeout_ms)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in hash_text", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 pub fn hash_text(s: text) -> i64:
     unsafe(capabilities: [ffi]):
@@ -747,10 +814,10 @@ pub fn host_arch() -> text:
 
 export shell, shell_output, shell_bool, shell_output_trimmed, ShellResult, ProcessResult
 export file_read, file_read_nullable, read_file, read_file_text, file_write, write_file, file_write_exact, file_exists
-export file_delete, file_copy, file_read_text_at_nullable, file_size, file_size_raw, file_size_signed, file_hash_sha256, file_hash_sha256_or_empty
+export file_delete, file_copy, file_read_text_at_nullable, file_read_bytes_at, file_size, file_size_raw, file_size_signed, file_hash_sha256_or_shell, file_hash_sha256_or_empty
 export file_read_bytes, file_read_bytes_i64, file_write_bytes, file_append_text, remove_file_if_exists
 export dir_create, dir_create_all, is_dir, is_file, is_char_device, list_dir, mkdir_p
-export dir_list, dir_list_optional, dir_walk, dir_remove, dir_remove_all, dir_exists
+export dir_list_or_empty, dir_list_optional, dir_walk, dir_remove, dir_remove_all, dir_exists
 export env_get, env_get_nullable, env_get_i64_process, env_set, env_remove_process
 export cwd, home, host_os, host_arch, platform_name, hash_text
 export getpid, process_kill, process_run, process_run_bounded, process_spawn_async, process_is_running

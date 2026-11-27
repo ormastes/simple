@@ -1,0 +1,119 @@
+# Purpose and audience: compiler engineers owning MIR enum-constructor payload admission
+# and the Phase 2 subsystem helper builds.
+# @req REQ-SSPEC-COMPILER
+"""
+# Enum optional payload slot rejects a bare `nil` literal (phase2 helper regression)
+
+Regression spec for phase2_subsystem_helper_mir_failures_2026-10-05. Rebuilding the
+Phase 2 main-verdict helper with the frozen pure-Simple stage2 (`stage2.ef0681fc0e1.exe`,
+2026-11-08) on current `release/1.0.0` failed MIR lowering at
+`src/lib/nogc_sync_mut/io/process_ops.spl` `process_spawn_piped_owned_v2`:
+
+    enum construction '...PipedProcessOwnedSpawnV2.CleanupRequired': payload type
+    mismatch at 1: nil outside unsafe into optional payload slot (declared
+    'PipedProcessRefV1?'); use None
+
+Two guards: the REAL `process_ops.spl` constructor sites carry no bare `nil`
+argument (source shape, the only thing the interpreter can pin for the native-only
+helper build), and the interpreter-run `50.mir` lowering enforces the same rule
+(`nil` literal rejected, `None` literal and a `T?` local both admitted).
+"""
+# @cover src/lib/nogc_sync_mut/io/process_ops.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val PROCESS_OPS = "src/lib/nogc_sync_mut/io/process_ops.spl"
+val CTOR = "PipedProcessOwnedSpawnV2."
+
+val enum_src = "struct Ref:\n    id: i64\n\nenum Spawn:\n    Ready(r: Ref)\n    CleanupRequired(reference: Ref?, reason: text)\n\n"
+
+# Lower one synthetic module through HIR and MIR; return every diagnostic.
+fn probe(body: text) -> text:
+    val log = Logger(level: 0)
+    val src = enum_src + body
+    val ast = parse_full_frontend(src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: src, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hl = hirlowering_for_module("app.main", surfaces)
+    val hir = hl.lower_module(ast)
+    var errors = ""
+    for e in hl.errors:
+        errors = errors + "hir: " + e.message + "\n"
+    var ml = MirLowering.new(hir.symbols)
+    ml.lower_module(hir, [])
+    for e in ml.errors:
+        errors = errors + "mir: " + e.message + "\n"
+    errors
+
+# Constructor call lines of the real enum that pass a bare `nil` argument.
+fn bare_nil_ctor_sites(src: text) -> text:
+    var out = ""
+    var n = 0
+    for line in src.split("\n"):
+        n = n + 1
+        if not line.contains(CTOR):
+            continue
+        if line.contains("(nil,") or line.contains(", nil,") or line.contains(", nil)"):
+            out = out + "{n}: " + line.trim() + "\n"
+    out
+
+# Module-level `var NAME: T? = None` declarations (CR-tolerant; `= nil` is the
+# shape the frozen stage2 lowers, see stage2_module_global_assign_no_binding_2026_11_01).
+fn none_initialized_optional_globals(src: text) -> text:
+    var out = ""
+    var n = 0
+    for raw in src.split("\n"):
+        n = n + 1
+        val line = raw.trim()
+        if not (line.starts_with("var ") or line.starts_with("pub var ")):
+            continue
+        if raw.starts_with(" ") or raw.starts_with("\t"):
+            continue
+        if line.ends_with("= None") and line.contains("? "):
+            out = out + "{n}: " + line + "\n"
+    out
+
+describe "enum optional payload slot vs bare nil (phase2 helper regression)":
+    """
+    Given the real process_ops.spl and a synthetic enum with a `T?` payload slot,
+    when the constructor sites are scanned and the synthetic module is lowered to MIR,
+    then no real site passes a bare nil, a nil literal is rejected with the
+    "use None" diagnostic, and None / a `T?` local lower clean.
+    """
+    it "process_ops PipedProcessOwnedSpawnV2 constructor sites pass no bare nil":
+        val src = file_read(PROCESS_OPS)
+        expect(src.contains(CTOR + "CleanupRequired(")).to_be_true()
+        expect(bare_nil_ctor_sites(src)).to_equal("")
+
+    it "collection_feedback optional module globals use the nil initializer the frozen stage2 lowers":
+        # Generator helper rebuild (frozen stage2, 2026-11-08) failed every
+        # assignment to `_parser_collection_site_labels` with "assignment target
+        # has no local binding": the frozen producer emits no static for a
+        # `var X: T? = None` module global (stage2_module_global_assign_no_binding_2026_11_01).
+        val src = file_read("src/compiler/10.frontend/core/collection_feedback.spl")
+        expect(none_initialized_optional_globals(src)).to_equal("")
+
+    it "MIR rejects a nil literal in an optional payload slot outside unsafe (non-vacuity)":
+        val errors = probe("fn main() -> Spawn:\n    Spawn.CleanupRequired(nil, \"x\")\n")
+        expect(errors.contains("nil outside unsafe into optional payload slot")).to_be_true()
+
+    it "MIR admits None literal and a T? local in the same slot":
+        val errors = probe("fn build(reference: Ref?) -> Spawn:\n    match reference:\n        case None: return Spawn.CleanupRequired(reference, \"x\")\n        case Some(exact): return Spawn.Ready(exact)\n\nfn main() -> Spawn:\n    Spawn.CleanupRequired(None, \"y\")\n")
+        expect(errors).to_equal("")

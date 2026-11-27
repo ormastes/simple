@@ -19,7 +19,7 @@ use os.tls13.handshake13.{
 }
 use os.tls13.record13.{
     RecordKey, RecordResult,
-    record13_decrypt_for_suite, record13_encrypt_for_suite
+    record13_decrypt_for_suite, record13_encrypt_for_suite, record13_encrypt_for_suite_checked
 }
 use os.tls13.server_types.{Tls13ServerContext}
 
@@ -78,6 +78,25 @@ pub class DbdTlsSessionV1:
         self.server_key = RecordKey(key: [], iv: [])
         self.cipher_suite = 0u16
         self.status = DbdTlsSessionStatusV1.Failed
+
+    pub me seal_application_checked(plaintext: [u8]) -> Result<[u8], text>:
+        """Return a record or an explicit failure before sequence commitment."""
+        if self.status != DbdTlsSessionStatusV1.Established:
+            return Err("dbd-tls-session-not-established")
+        if plaintext.len() == 0 or plaintext.len().to_i64() > TLS_MAX_FRAGMENT_LENGTH_V1:
+            return Err("dbd-tls-plaintext-invalid")
+        if not tls_application_record_sequence_can_advance_v1(self.server_sequence):
+            self.fail()
+            return Err("dbd-tls-sequence-exhausted")
+        val record = match record13_encrypt_for_suite_checked(
+            self.cipher_suite, self.server_key, self.server_sequence.to_u64(),
+            TLS_APPLICATION_DATA_TYPE_V1.to_u8(), plaintext):
+            case Ok(data): data
+            case Err(message):
+                self.fail()
+                return Err(message)
+        self.server_sequence = self.server_sequence + 1
+        Ok(record)
 
     pub me seal_application(plaintext: [u8]) -> [u8]:
         """Encrypt one response and commit its sequence only on success."""

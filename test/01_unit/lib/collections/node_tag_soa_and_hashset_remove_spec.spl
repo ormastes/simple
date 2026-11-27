@@ -1,0 +1,298 @@
+use std.spec.*
+use std.io_runtime.{hash_text}
+use std.nogc_async_immut.persistent_trie.{PersistentTrie}
+use std.nogc_async_immut.persistent_trie.trie_node.{
+    TRIE_TAG_NO_VAL, TRIE_TAG_HAS_VAL, TRIE_TAG_MASK,
+    trie_empty_node, trie_get, trie_set, trie_remove,
+    trie_contains, trie_count, trie_collect_entries,
+    trie_keys_with_prefix, trie_longest_prefix
+}
+use std.nogc_sync_mut.src.collections.ordered_text_set.OrderedTextSet
+use std.nogc_sync_mut.src.collections.hashset.{HashSet, hashset_with_capacity}
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{
+    AdaptiveSetAlgorithm, AdaptiveSetAttribute, AdaptiveSetProfile, AdaptiveTextSet
+}
+use std.nogc_sync_mut.src.collections.adaptive_text_map.AdaptiveTextMap
+
+describe "Node-tag packed PersistentTrie, SoA OrderedTextSet, in-place HashSet.remove, and lazy AdaptiveText containers":
+
+    describe "PersistentTrie flat 2-bit tag + child-count packed nodes":
+        it "packs NO_VAL and HAS_VAL headers into flat arrays without inner pair arrays":
+            val empty_node = trie_empty_node()
+            expect(empty_node.len()).to_equal(1)
+            expect(empty_node[0] & TRIE_TAG_MASK).to_equal(TRIE_TAG_NO_VAL)
+            expect(empty_node[0] >> 2).to_equal(0)
+            expect(trie_count(empty_node)).to_equal(0)
+            expect(trie_get(empty_node, "", 0)).to_be_nil()
+
+            # Single-character key: root is NO_VAL with 1 child -> [((1 << 2) | 1), "a", [2, 10]]
+            val n1 = trie_set(nil, "a", 10, 0)
+            expect(n1[0] & TRIE_TAG_MASK).to_equal(TRIE_TAG_NO_VAL)
+            expect(n1[0] >> 2).to_equal(1)
+            expect(n1.len()).to_equal(3)
+
+            # Second sibling key + empty-prefix value on root: HAS_VAL with 2 children -> 2 + 2*2 = 6 slots
+            val n2 = trie_set(n1, "b", 20, 0)
+            val n3 = trie_set(n2, "", 99, 0)
+            expect(n3[0] & TRIE_TAG_MASK).to_equal(TRIE_TAG_HAS_VAL)
+            expect(n3[0] >> 2).to_equal(2)
+            expect(n3.len()).to_equal(6)
+            expect(trie_get(n3, "", 0)).to_equal(99)
+            expect(trie_get(n3, "a", 0)).to_equal(10)
+            expect(trie_get(n3, "b", 0)).to_equal(20)
+            expect(trie_count(n3)).to_equal(3)
+
+            # Removing root value converts HAS_VAL back to NO_VAL while keeping 2 children (len == 5)
+            val n4 = trie_remove(n3, "", 0)
+            expect(n4[0] & TRIE_TAG_MASK).to_equal(TRIE_TAG_NO_VAL)
+            expect(n4[0] >> 2).to_equal(2)
+            expect(n4.len()).to_equal(5)
+            expect(trie_contains(n4, "", 0)).to_equal(false)
+            expect(trie_get(n4, "a", 0)).to_equal(10)
+            expect(trie_get(n4, "b", 0)).to_equal(20)
+
+        it "preserves PersistentTrie insert, overwrite, remove, prefix, and structural sharing":
+            val t0 = PersistentTrie.empty()
+            expect(t0.is_empty()).to_equal(true)
+            expect(t0.len()).to_equal(0)
+
+            val t1 = t0.set("app", 1).set("apple", 2).set("application", 3).set("apt", 4).set("", 0)
+            expect(t0.len()).to_equal(0)
+            expect(t1.len()).to_equal(5)
+            expect(t1.get("")).to_equal(0)
+            expect(t1.get("app")).to_equal(1)
+            expect(t1.get("apple")).to_equal(2)
+            expect(t1.get("application")).to_equal(3)
+            expect(t1.get("apt")).to_equal(4)
+            expect(t1.get("ap")).to_be_nil()
+
+            # Overwrite preserves size and older snapshot
+            val t2 = t1.set("apple", 22)
+            expect(t2.len()).to_equal(5)
+            expect(t2.get("apple")).to_equal(22)
+            expect(t1.get("apple")).to_equal(2)
+
+            # Prefix queries
+            val pref = t2.keys_with_prefix("app")
+            expect(pref.len()).to_equal(3)
+            expect(pref).to_contain("app")
+            expect(pref).to_contain("apple")
+            expect(pref).to_contain("application")
+            expect(t2.longest_prefix("applesauce")).to_equal("apple")
+            expect(t2.longest_prefix("apricot")).to_equal("")
+
+            # Remove internal prefix key, leaf key, and drain to empty
+            val t3 = t2.remove("app").remove("application")
+            expect(t3.len()).to_equal(3)
+            expect(t3.contains("app")).to_equal(false)
+            expect(t3.contains("application")).to_equal(false)
+            expect(t3.get("apple")).to_equal(22)
+            expect(t3.get("apt")).to_equal(4)
+            expect(t3.get("")).to_equal(0)
+
+            val drained = t3.remove("apple").remove("apt").remove("")
+            expect(drained.len()).to_equal(0)
+            expect(drained.is_empty()).to_equal(true)
+            expect(drained.entries().len()).to_equal(0)
+
+    describe "OrderedTextSet SoA arrays and packed 64-bit metadata":
+        it "maintains AVL rotations, sorted order, values, and free-list slot reuse":
+            var tree = OrderedTextSet.new()
+            expect(tree.len()).to_equal(0)
+            expect(tree.allocated_slots()).to_equal(0)
+            expect(tree.tree_height()).to_equal(0)
+
+            # Trigger LL, RR, LR, and RL rotations
+            for pair in [["m", "vm"], ["c", "vc"], ["t", "vt"], ["a", "va"], ["f", "vf"], ["e", "ve"], ["z", "vz"], ["p", "vp"], ["r", "vr"]]:
+                expect(tree.put_value(pair[0], pair[1])).to_be(true)
+
+            expect(tree.len()).to_equal(9)
+            expect(tree.allocated_slots()).to_equal(9)
+            expect(tree.node_meta.len()).to_equal(9)
+            expect(tree.tree_height()).to_be_less_than(6)
+            expect(tree.keys()).to_equal(["a", "c", "e", "f", "m", "p", "r", "t", "z"])
+
+            # Overwrite existing payload without allocating new slot
+            expect(tree.put_value("m", "vm_updated")).to_be(false)
+            expect(tree.allocated_slots()).to_equal(9)
+            expect(tree.get_value("m") ?? "").to_equal("vm_updated")
+
+            # Two-child root removal + one-child + leaf removals reuse slots on re-insert
+            expect(tree.remove("m")).to_be(true)
+            expect(tree.remove("a")).to_be(true)
+            expect(tree.remove("t")).to_be(true)
+            expect(tree.len()).to_equal(6)
+            expect(tree.allocated_slots()).to_equal(9)
+            expect(tree.get_value("m")).to_be_nil()
+
+            expect(tree.put_value("b", "vb")).to_be(true)
+            expect(tree.put_value("k", "vk")).to_be(true)
+            expect(tree.put_value("x", "vx")).to_be(true)
+            expect(tree.len()).to_equal(9)
+            expect(tree.allocated_slots()).to_equal(9)
+            expect(tree.keys()).to_equal(["b", "c", "e", "f", "k", "p", "r", "x", "z"])
+
+            val ents = tree.entries()
+            expect(ents.len()).to_equal(9)
+            expect(ents[0].key).to_equal("b")
+            expect(ents[0].value).to_equal("vb")
+            expect(ents[8].key).to_equal("z")
+            expect(ents[8].value).to_equal("vz")
+
+    describe "HashSet.empty() lazy backing and zero-alloc in-place remove":
+        it "starts at zero capacity in HashSet.empty() and allocates lazily on first insert":
+            var set = HashSet.empty()
+            expect(set.capacity).to_equal(0)
+            expect(set.slot_keys.len()).to_equal(0)
+            expect(set.slot_used.len()).to_equal(0)
+            expect(set.len()).to_equal(0)
+            expect(set.is_empty()).to_be(true)
+            expect(set.contains("alpha")).to_be(false)
+            expect(set.contains_observed("alpha").found).to_be(false)
+            expect(set.remove("alpha")).to_be(false)
+            expect(set.to_vec().len()).to_equal(0)
+            set.clear()
+            expect(set.capacity).to_equal(0)
+
+            expect(set.insert("alpha")).to_be(true)
+            expect(set.capacity).to_equal(16)
+            expect(set.contains("alpha")).to_be(true)
+
+            var set2 = HashSet.empty()
+            expect(set2.insert_known_new("beta")).to_be(true)
+            expect(set2.capacity).to_equal(16)
+            expect(set2.contains("beta")).to_be(true)
+
+        it "preserves wraparound and interleaved probe chains on remove without rebuilding":
+            var set = hashset_with_capacity(8)
+            expect(set.capacity).to_equal(8)
+
+            # Collect 3 keys hashing to bucket 7 (wrapping 7 -> 0 -> 1) and 2 keys hashing to bucket 0
+            var bucket7: [text] = []
+            var bucket0: [text] = []
+            var i = 0
+            while (bucket7.len() < 3 or bucket0.len() < 2) and i < 5000:
+                val cand = "probe_cand_{i}"
+                val b = hash_text(cand) & 7
+                if b == 7 and bucket7.len() < 3:
+                    bucket7.push(cand)
+                elif b == 0 and bucket0.len() < 2:
+                    bucket0.push(cand)
+                i = i + 1
+
+            expect(bucket7.len()).to_equal(3)
+            expect(bucket0.len()).to_equal(2)
+
+            # Insert 5 items into capacity 8 (5 * 4 = 20 <= 24, so zero resize)
+            for k in bucket7:
+                expect(set.insert(k)).to_be(true)
+            for k in bucket0:
+                expect(set.insert(k)).to_be(true)
+            expect(set.capacity).to_equal(8)
+            expect(set.len()).to_equal(5)
+
+            # Remove head of bucket-7 wraparound chain, then one bucket-0 key
+            expect(set.remove(bucket7[0])).to_be(true)
+            expect(set.capacity).to_equal(8)
+            expect(set.contains(bucket7[0])).to_be(false)
+            expect(set.contains(bucket7[1])).to_be(true)
+            expect(set.contains(bucket7[2])).to_be(true)
+            expect(set.contains(bucket0[0])).to_be(true)
+            expect(set.contains(bucket0[1])).to_be(true)
+
+            expect(set.remove(bucket0[0])).to_be(true)
+            expect(set.remove("missing_key")).to_be(false)
+            expect(set.len()).to_equal(3)
+            expect(set.capacity).to_equal(8)
+            expect(set.contains(bucket7[1])).to_be(true)
+            expect(set.contains(bucket7[2])).to_be(true)
+            expect(set.contains(bucket0[1])).to_be(true)
+
+            # Also verify remove from a 100%-full table (capacity == 4, size == 4) terminates cleanly
+            var full = hashset_with_capacity(4)
+            expect(full.insert_known_new_no_resize("f0")).to_be(true)
+            expect(full.insert_known_new_no_resize("f1")).to_be(true)
+            expect(full.insert_known_new_no_resize("f2")).to_be(true)
+            expect(full.insert_known_new_no_resize("f3")).to_be(true)
+            expect(full.capacity).to_equal(4)
+            expect(full.len()).to_equal(4)
+            expect(full.remove("f1")).to_be(true)
+            expect(full.len()).to_equal(3)
+            expect(full.contains("f0")).to_be(true)
+            expect(full.contains("f1")).to_be(false)
+            expect(full.contains("f2")).to_be(true)
+            expect(full.contains("f3")).to_be(true)
+
+    describe "AdaptiveTextSet and AdaptiveTextMap lazy inactive storage and SoA linear entries":
+        it "keeps inactive hash/ordered storage at zero capacity across AdaptiveTextSet transitions":
+            val policy = AdaptiveSetProfile(linear_size_limit: 4, lookup_promotion_count: 64, allow_hash: true)
+            var set = AdaptiveTextSet.with_profile(policy)
+            expect(set.hash_values.capacity).to_equal(0)
+            expect(set.ordered_values.allocated_slots()).to_equal(0)
+
+            expect(set.insert("b")).to_be(true)
+            expect(set.insert("a")).to_be(true)
+            expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+            expect(set.hash_values.capacity).to_equal(0)
+
+            # Promote by size (> 4)
+            expect(set.insert("c")).to_be(true)
+            expect(set.insert("d")).to_be(true)
+            expect(set.insert("e")).to_be(true)
+            expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+            expect(set.hash_values.capacity).to_be_greater_than(0)
+
+            # Promote to Ordered resets idle hash_values back to HashSet.empty()
+            set.set_attribute(AdaptiveSetAttribute.Ordered)
+            expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+            expect(set.hash_values.capacity).to_equal(0)
+            expect(set.snapshot_values()).to_equal(["a", "b", "c", "d", "e"])
+
+            # Demote to Linear resets both hash_values and ordered_values to zero
+            set.set_attribute(AdaptiveSetAttribute.Linear)
+            expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+            expect(set.hash_values.capacity).to_equal(0)
+            expect(set.ordered_values.allocated_slots()).to_equal(0)
+            expect(set.snapshot_values()).to_equal(["a", "b", "c", "d", "e"])
+
+        it "stores AdaptiveTextMap linear entries as SoA arrays and keeps inactive hash/ordered empty":
+            val policy = AdaptiveSetProfile(linear_size_limit: 4, lookup_promotion_count: 64, allow_hash: true)
+            var map = AdaptiveTextMap.with_profile(policy)
+            expect(map.hash_entries.capacity).to_equal(0)
+            expect(map.ordered_entries.allocated_slots()).to_equal(0)
+
+            expect(map.put("k2", "v2")).to_be(true)
+            expect(map.put("k1", "v1")).to_be(true)
+            expect(map.put("k2", "v2_new")).to_be(false)
+            expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+            expect(map.linear_keys.len()).to_equal(2)
+            expect(map.linear_values.len()).to_equal(2)
+            expect(map.hash_entries.capacity).to_equal(0)
+            expect(map.get("k2") ?? "").to_equal("v2_new")
+
+            # Promote to Hash, then Ordered, then back to Linear
+            expect(map.put("k3", "v3")).to_be(true)
+            expect(map.put("k4", "v4")).to_be(true)
+            expect(map.put("k5", "v5")).to_be(true)
+            expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+            expect(map.linear_keys.len()).to_equal(0)
+            expect(map.linear_values.len()).to_equal(0)
+
+            map.set_attribute(AdaptiveSetAttribute.Ordered)
+            expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+            expect(map.hash_entries.capacity).to_equal(0)
+            expect(map.get("k2") ?? "").to_equal("v2_new")
+
+            map.set_attribute(AdaptiveSetAttribute.Linear)
+            expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+            expect(map.hash_entries.capacity).to_equal(0)
+            expect(map.ordered_entries.allocated_slots()).to_equal(0)
+            expect(map.linear_keys.len()).to_equal(5)
+            expect(map.linear_values.len()).to_equal(5)
+            expect(map.remove("k4") ?? "").to_equal("v4")
+            expect(map.keys()).to_equal(["k1", "k2", "k3", "k5"])
+
+            val ents = map.entries()
+            expect(ents.len()).to_equal(4)
+            expect(ents[1].key).to_equal("k2")
+            expect(ents[1].value).to_equal("v2_new")

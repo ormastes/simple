@@ -3,7 +3,7 @@
 //! Handles all forms of function calls: user-defined, runtime SFFI, and built-in functions.
 
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
+use cranelift_codegen::ir::{types, Block, InstBuilder, MemFlags, Value};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
 
@@ -13,9 +13,9 @@ use crate::mir::{CallTarget, VReg};
 
 use super::core::{compile_builtin_io_call, vreg_is_signed};
 use super::helpers::{
-    adapted_call, array_cap_i64, array_items_base, array_len_i64, call_runtime_1, call_runtime_2, call_runtime_3,
-    create_cstring_constant, decode_byte_from_slot, get_vreg_or_default, inline_runtime_array_len_value,
-    inline_runtime_len_value, store_array_len,
+    adapted_call, array_cap_i64, array_items_base, array_len_i64, call_runtime_0, call_runtime_1, call_runtime_2,
+    call_runtime_3, create_cstring_constant, decode_byte_from_slot, get_vreg_or_default,
+    inline_runtime_array_len_value, inline_runtime_len_value, store_array_len, string_cp_len_ref, tuple_len_ref,
 };
 use super::{InstrContext, InstrResult};
 
@@ -61,7 +61,7 @@ fn has_defined_local_function<M: Module>(ctx: &InstrContext<'_, M>, name: &str) 
     let Some(&func_id) = ctx.func_ids.get(name) else {
         return false;
     };
-    linkage_is_defined_local(Some(ctx.module.declarations().get_function_decl(func_id).linkage))
+    linkage_is_defined_local(Some(crate::codegen::xlate_view::func_decl_linkage_params(&*ctx.module, func_id).0))
 }
 
 fn compile_user_function_call<M: Module>(
@@ -216,6 +216,7 @@ mod tests {
         assert_eq!(boxed_text_arg_indices("other.rt_file_atomic_write"), None);
         assert_eq!(boxed_text_arg_indices("other.rt_file_atomic_write_mode"), None);
         assert_eq!(boxed_text_arg_indices("rt_file_atomic_write_mode_extra"), None);
+        assert_eq!(boxed_text_arg_indices("rt_path_normalize"), Some(&[0][..]));
         assert_eq!(boxed_text_arg_indices("rt_string_builder_push"), Some(&[1][..]));
     }
 
@@ -256,6 +257,7 @@ mod tests {
     fn linux_owner_text_pairs_preserve_arrays_and_scalar_limits() {
         assert_eq!(text_arg_indices("rt_linux_group_available_capacity_v1"), Some(&[0][..]));
         assert_eq!(text_arg_indices("rt_linux_group_parent_acquire_v1"), Some(&[0, 1][..]));
+        assert_eq!(text_arg_indices("rt_linux_group_parent_acquire_at_v2"), Some(&[0, 1, 2][..]));
         assert_eq!(text_arg_indices("rt_linux_group_launch_broker_v1"), Some(&[0, 1][..]));
         assert_eq!(text_arg_indices("rt_linux_group_start_v1"), Some(&[0, 1, 4, 5, 6, 9, 10][..]));
         assert_eq!(text_arg_indices("rt_linux_group_poll_v1"), None);
@@ -311,6 +313,155 @@ mod tests {
     }
 
     #[test]
+    fn linux_parent_v2_generated_call_keeps_six_machine_arguments() {
+        use cranelift_codegen::{ir::{types, AbiParam, InstBuilder}, settings};
+        use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+        use cranelift_jit::{JITBuilder, JITModule};
+        use cranelift_module::Module;
+
+        extern "C" fn capture(path: i64, path_len: i64, attempt: i64, attempt_len: i64,
+                identity: i64, identity_len: i64) -> i64 {
+            i64::from([path, path_len, attempt, attempt_len, identity, identity_len] ==
+                [101, 7, 202, 9, 303, 64])
+        }
+
+        let isa = cranelift_native::builder().expect("host ISA")
+            .finish(settings::Flags::new(settings::builder())).expect("ISA flags");
+        let mut jit = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        jit.symbol("rt_linux_group_parent_acquire_at_v2", capture as *const u8);
+        let mut module = JITModule::new(jit);
+        let spec = crate::codegen::runtime_sffi::spec_for("rt_linux_group_parent_acquire_at_v2")
+            .expect("registered Linux owner machine signature");
+        let signature = spec.build_signature(module.make_signature().call_conv);
+        let owner = module.declare_function(spec.name, Linkage::Import, &signature).unwrap();
+        let mut context = module.make_context();
+        context.func.signature = module.make_signature();
+        context.func.signature.returns.push(AbiParam::new(types::I64));
+        let entry = module.declare_function("linux_parent_v2_abi_probe", Linkage::Export,
+            &context.func.signature).unwrap();
+        let mut frontend = FunctionBuilderContext::new();
+        {
+            let mut builder = FunctionBuilder::new(&mut context.func, &mut frontend);
+            let block = builder.create_block();
+            builder.switch_to_block(block);
+            builder.seal_block(block);
+            let target = module.declare_func_in_func(owner, builder.func);
+            let machine_args = [101, 7, 202, 9, 303, 64].into_iter()
+                .map(|value| builder.ins().iconst(types::I64, value)).collect();
+            let adapted = super::adapt_args_to_signature(&mut builder, target, machine_args);
+            assert_eq!(adapted.len(), 6, "three text arguments must retain all six ABI words");
+            let call = builder.ins().call(target, &adapted);
+            let result = builder.inst_results(call)[0];
+            builder.ins().return_(&[result]);
+            builder.finalize();
+        }
+        module.define_function(entry, &mut context).unwrap();
+        module.finalize_definitions().unwrap();
+        let compiled: extern "C" fn() -> i64 = unsafe {
+            std::mem::transmute(module.get_finalized_function(entry))
+        };
+        assert_eq!(compiled(), 1, "generated native call must deliver all six C ABI words");
+    }
+
+    /// doc/08_tracking/bug/file_write_bytes_truncates_to_3_bytes_under_codegen_2026-08-27.md:
+    /// a compiled call site for the Simple-facing `rt_file_write_bytes` spelling
+    /// must cross as exactly TWO owner words (path RuntimeValue, `[u8]` array
+    /// RuntimeValue) into the owner-preserving `rt_file_write_bytes_array`
+    /// adapter, which extracts the byte (ptr, len) pair itself. The historical
+    /// defect expanded only the path text to (ptr, len) and passed the array
+    /// handle as `data_ptr` with a stale register as `data_len`, silently
+    /// writing 3 garbage bytes while returning `true`.
+    #[test]
+    fn file_write_bytes_compiled_call_writes_every_byte_of_a_u8_array() {
+        use cranelift_codegen::{ir::{types, AbiParam, InstBuilder}, settings};
+        use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+        use cranelift_jit::{JITBuilder, JITModule};
+        use cranelift_module::Module;
+
+        // Table pins: the Simple-facing 4-arg C-ABI spelling binds to the
+        // 2-RuntimeValue adapter, and NEITHER adapter argument may be
+        // (ptr, len)-expanded at the call site — partial expansion of the
+        // path alone is exactly the misaligned-ABI shape that produced the
+        // 3-byte garbage write.
+        assert_eq!(
+            sffi_alias_target("rt_file_write_bytes"),
+            Some("rt_file_write_bytes_array"),
+            "Simple-facing spelling must bind to the owner-preserving byte adapter"
+        );
+        assert_eq!(text_arg_indices("rt_file_write_bytes_array"), None);
+        assert_eq!(boxed_text_arg_indices("rt_file_write_bytes_array"), None);
+        assert_eq!(super::text_cstr_arg_indices("rt_file_write_bytes_array"), None);
+
+        // End-to-end: JIT-compile `entry(path, data) = rt_file_write_bytes_array(path, data)`
+        // against the REAL runtime adapter and verify the full payload lands.
+        let isa = cranelift_native::builder().expect("host ISA")
+            .finish(settings::Flags::new(settings::builder())).expect("ISA flags");
+        let mut jit = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        jit.symbol(
+            "rt_file_write_bytes_array",
+            simple_runtime::value::rt_file_write_bytes_array as *const u8,
+        );
+        let mut module = JITModule::new(jit);
+        let spec = crate::codegen::runtime_sffi::spec_for("rt_file_write_bytes_array")
+            .expect("registered file-write byte adapter signature");
+        let signature = spec.build_signature(module.make_signature().call_conv);
+        assert_eq!(signature.params.len(), 2, "adapter takes exactly path + data owners");
+        let adapter = module.declare_function(spec.name, Linkage::Import, &signature).unwrap();
+
+        let mut context = module.make_context();
+        context.func.signature = module.make_signature();
+        context.func.signature.params.push(AbiParam::new(types::I64));
+        context.func.signature.params.push(AbiParam::new(types::I64));
+        context.func.signature.returns.push(AbiParam::new(types::I64));
+        let entry = module.declare_function("file_write_bytes_abi_probe", Linkage::Export,
+            &context.func.signature).unwrap();
+        let mut frontend = FunctionBuilderContext::new();
+        {
+            let mut builder = FunctionBuilder::new(&mut context.func, &mut frontend);
+            let block = builder.create_block();
+            builder.switch_to_block(block);
+            builder.seal_block(block);
+            let path_word = builder.append_block_param(block, types::I64);
+            let data_word = builder.append_block_param(block, types::I64);
+            let target = module.declare_func_in_func(adapter, builder.func);
+            let adapted = super::adapt_args_to_signature(&mut builder, target, vec![path_word, data_word]);
+            assert_eq!(adapted.len(), 2, "both owner words must reach the call, no truncation");
+            let call = builder.ins().call(target, &adapted);
+            let ok = builder.inst_results(call)[0];
+            let wide = builder.ins().uextend(types::I64, ok);
+            builder.ins().return_(&[wide]);
+            builder.finalize();
+        }
+        module.define_function(entry, &mut context).unwrap();
+        module.finalize_definitions().unwrap();
+        let compiled: extern "C" fn(i64, i64) -> i64 = unsafe {
+            std::mem::transmute(module.get_finalized_function(entry))
+        };
+
+        let out = std::env::temp_dir()
+            .join(format!("simple_fwbytes_abi_probe_{}.bin", std::process::id()));
+        let path_text = out.to_string_lossy().to_string();
+        let path_value = simple_runtime::value::rt_string_new(path_text.as_ptr(), path_text.len() as u64);
+        // 256-byte payload with the high bit set on every other byte: the
+        // observed failure wrote 3 header bytes, and a length taken from the
+        // wrong field (elements-of-something-else) or a pointer truncated to
+        // i32 cannot survive a full-content check at this size.
+        let payload: Vec<u8> = (0..256u32).map(|i| ((i * 37 + 11) & 0xff) as u8).collect();
+        assert!(payload.iter().any(|b| b & 0x80 != 0), "payload must exercise high bits");
+        let data_value = unsafe {
+            simple_runtime::value::rt_bytes_from_raw(payload.as_ptr() as i64, payload.len() as i64)
+        };
+
+        let ok = compiled(path_value.to_raw() as i64, data_value.to_raw() as i64);
+        assert_eq!(ok, 1, "adapter must report success");
+        let written = std::fs::read(&out).expect("adapter must create the file");
+        std::fs::remove_file(&out).ok();
+        assert_eq!(written.len(), payload.len(),
+            "byte length must be the full array length in bytes, not elements of another width");
+        assert_eq!(written, payload, "every byte incl. high-bit values must round-trip");
+    }
+
+    #[test]
     fn owned_process_v3_start_expands_only_command_text() {
         assert_eq!(
             super::process_c_runtime_arg_indices("rt_process_owned_v3_start_value"),
@@ -330,6 +481,7 @@ mod tests {
     #[test]
     fn owned_pinned_process_path_expands_to_ptr_len() {
         assert_eq!(text_arg_indices("rt_process_pin_executable_owned_value"), Some(&[0][..]));
+        assert_eq!(text_arg_indices("rt_process_observation_v4_pin_cwd_value"), Some(&[0][..]));
         assert_eq!(
             super::process_c_runtime_arg_indices("rt_process_owned_v3_start_pinned_value"),
             None
@@ -495,7 +647,9 @@ fn compile_inline_len<M: Module>(
     let result = if trusted_array {
         inline_runtime_array_len_value(builder, value, ctx.fam_arrays)
     } else {
-        inline_runtime_len_value(builder, value, ctx.baremetal, ctx.fam_arrays)
+        let cp_len = string_cp_len_ref(ctx, builder);
+        let tuple_len = tuple_len_ref(ctx, builder);
+        inline_runtime_len_value(builder, value, ctx.baremetal, ctx.fam_arrays, cp_len, tuple_len)
     };
     ctx.vreg_values.insert(*dest, result);
     Ok(true)
@@ -2024,7 +2178,16 @@ fn compile_inline_typed_words_at<M: Module>(
         let lt_len = builder.ins().icmp(IntCC::SignedLessThan, normalized_index, len);
         builder.ins().band(ge_zero, lt_len)
     };
-    builder.ins().brif(in_bounds, load_block, &[], done_block, &[zero]);
+    brif_word_path(
+        ctx,
+        builder,
+        in_bounds,
+        ptr_bits,
+        normalized_index,
+        load_block,
+        done_block,
+        zero,
+    );
     builder.seal_block(bounds_block);
 
     builder.switch_to_block(load_block);
@@ -2104,7 +2267,16 @@ fn compile_inline_typed_words_i64_at<M: Module>(
         let lt_len = builder.ins().icmp(IntCC::SignedLessThan, normalized_index, len);
         builder.ins().band(ge_zero, lt_len)
     };
-    builder.ins().brif(in_bounds, load_block, &[], done_block, &[zero]);
+    brif_word_path(
+        ctx,
+        builder,
+        in_bounds,
+        ptr_bits,
+        normalized_index,
+        load_block,
+        done_block,
+        zero,
+    );
     builder.seal_block(bounds_block);
 
     builder.switch_to_block(load_block);
@@ -2142,6 +2314,121 @@ fn compile_inline_typed_words_i64_at<M: Module>(
     builder.seal_block(done_block);
     ctx.vreg_values.insert(*dest, result);
     Ok(true)
+}
+
+/// A byte-packed `[u8]` has 1-byte elements, so the 8-byte slot loads of the
+/// typed word inliners would read past its data. Such an array only reaches a
+/// `[i64]`/`[u64]`/`[u32]` reader through an untyped caller; send it to the
+/// byte load (the value the runtime readers return). The current
+/// block continues on the word path. FAM targets never byte-pack.
+/// Bug: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27
+/// The bounds branch of a typed word reader, extended to a byte-packed `[u8]`
+/// (reached through an untyped caller): the word path is taken only when the
+/// index is in bounds AND the array holds word slots, and one cold block tells
+/// out-of-bounds (`oob`) from an in-bounds byte read. Folding the flag test
+/// into the existing branch matters: a separate never-taken flag branch made a
+/// `[u32]` read loop 2.9x slower (1.87 s -> 5.42 s for 1e9 reads, aarch64).
+/// FAM targets never byte-pack.
+/// Bug: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27
+#[allow(clippy::too_many_arguments)]
+fn brif_word_path<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    in_bounds: Value,
+    header_ptr: Value,
+    normalized_index: Value,
+    word_block: Block,
+    done_block: Block,
+    oob: Value,
+) {
+    if ctx.fam_arrays {
+        builder.ins().brif(in_bounds, word_block, &[], done_block, &[oob]);
+        return;
+    }
+    let is_bytes = byte_packed_condition(builder, header_ptr);
+    let word_path = builder.ins().band_not(in_bounds, is_bytes);
+    let other_block = builder.create_block();
+    builder.ins().brif(word_path, word_block, &[], other_block, &[]);
+    builder.set_cold_block(other_block);
+    builder.switch_to_block(other_block);
+    builder.seal_block(other_block);
+    let bytes_block = builder.create_block();
+    builder.ins().brif(in_bounds, bytes_block, &[], done_block, &[oob]);
+    builder.switch_to_block(bytes_block);
+    builder.seal_block(bytes_block);
+    let base = array_items_base(builder, header_ptr, false);
+    let byte_ptr = builder.ins().iadd(base, normalized_index);
+    let byte = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
+    let value = builder.ins().uextend(types::I64, byte);
+    builder.ins().jump(done_block, &[value]);
+}
+
+fn branch_byte_packed_to_byte_load<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    header_ptr: Value,
+    normalized_index: Value,
+    done_block: Block,
+) {
+    if ctx.fam_arrays {
+        return;
+    }
+    let bytes_block = builder.create_block();
+    let words_block = builder.create_block();
+    let is_bytes = byte_packed_condition(builder, header_ptr);
+    builder.ins().brif(is_bytes, bytes_block, &[], words_block, &[]);
+    builder.set_cold_block(bytes_block);
+    builder.switch_to_block(bytes_block);
+    builder.seal_block(bytes_block);
+    let data_ptr = array_items_base(builder, header_ptr, false);
+    let byte_ptr = builder.ins().iadd(data_ptr, normalized_index);
+    let byte = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
+    let value = builder.ins().uextend(types::I64, byte);
+    builder.ins().jump(done_block, &[value]);
+    builder.switch_to_block(words_block);
+    builder.seal_block(words_block);
+}
+
+/// Hoisted `_data_at` loop pointers carry bit 0 = byte-packed (set by the MIR
+/// loop hoist). Branch a tagged pointer to a 1-byte load; the current block
+/// continues on the word path with bit 0 clear.
+/// Bug: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27
+fn branch_tagged_byte_ptr_to_byte_load(
+    builder: &mut FunctionBuilder,
+    data_ptr: Value,
+    index: Value,
+    done_block: Block,
+) {
+    let bytes_block = builder.create_block();
+    let words_block = builder.create_block();
+    let tag = builder.ins().band_imm(data_ptr, 1);
+    let is_bytes = builder.ins().icmp_imm(IntCC::NotEqual, tag, 0);
+    builder.ins().brif(is_bytes, bytes_block, &[], words_block, &[]);
+    builder.set_cold_block(bytes_block);
+    builder.switch_to_block(bytes_block);
+    builder.seal_block(bytes_block);
+    let base = builder.ins().band_imm(data_ptr, !1i64);
+    let byte_ptr = builder.ins().iadd(base, index);
+    let byte = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
+    let value = builder.ins().uextend(types::I64, byte);
+    builder.ins().jump(done_block, &[value]);
+    builder.switch_to_block(words_block);
+    builder.seal_block(words_block);
+}
+
+/// Finish a straight-line reader that was split by a byte guard.
+fn finish_guarded_read(builder: &mut FunctionBuilder, done_block: Block, word: Value) -> Value {
+    builder.ins().jump(done_block, &[word]);
+    builder.switch_to_block(done_block);
+    builder.seal_block(done_block);
+    builder.block_params(done_block)[0]
+}
+
+fn byte_packed_condition(builder: &mut FunctionBuilder, header_ptr: Value) -> Value {
+    let flags = builder.ins().load(types::I8, MemFlags::new(), header_ptr, 1);
+    let flags64 = builder.ins().uextend(types::I64, flags);
+    let packed = builder.ins().band_imm(flags64, 0x08);
+    builder.ins().icmp_imm(IntCC::NotEqual, packed, 0)
 }
 
 fn u64_packed_condition(builder: &mut FunctionBuilder, header_ptr: Value) -> Value {
@@ -2195,11 +2482,15 @@ fn compile_inline_typed_words_unchecked<M: Module>(
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+    branch_byte_packed_to_byte_load(ctx, builder, ptr_bits, index, done_block);
     let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
     let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
     let word = maybe_packed_u64_load_word(builder, ptr_bits, raw, width);
+    let word = finish_guarded_read(builder, done_block, word);
     ctx.vreg_values.insert(*dest, word);
     Ok(true)
 }
@@ -2220,6 +2511,9 @@ fn compile_inline_typed_words_data_at<M: Module>(
 
     let data_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+    branch_tagged_byte_ptr_to_byte_load(builder, data_ptr, index, done_block);
     let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
@@ -2229,6 +2523,7 @@ fn compile_inline_typed_words_data_at<M: Module>(
     } else {
         int_payload
     };
+    let word = finish_guarded_read(builder, done_block, word);
     ctx.vreg_values.insert(*dest, word);
     Ok(true)
 }
@@ -2251,10 +2546,14 @@ fn compile_inline_typed_words_data_at_checked<M: Module>(
     let header_ptr = builder.ins().band(header_or_array, ptr_mask);
     let data_ptr = coerce_vreg_to_i64(ctx, builder, args[1]);
     let index = coerce_vreg_to_i64(ctx, builder, args[2]);
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+    branch_tagged_byte_ptr_to_byte_load(builder, data_ptr, index, done_block);
     let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
     let word = maybe_packed_u64_load_word(builder, header_ptr, raw, 8);
+    let word = finish_guarded_read(builder, done_block, word);
     ctx.vreg_values.insert(*dest, word);
     Ok(true)
 }
@@ -2274,9 +2573,13 @@ fn compile_inline_typed_words_raw_data_at<M: Module>(
 
     let data_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+    branch_tagged_byte_ptr_to_byte_load(builder, data_ptr, index, done_block);
     let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
+    let raw = finish_guarded_read(builder, done_block, raw);
     ctx.vreg_values.insert(*dest, raw);
     Ok(true)
 }
@@ -2329,6 +2632,23 @@ fn compile_inline_typed_words_u32_set<M: Module>(
     builder.seal_block(bounds_block);
 
     builder.switch_to_block(store_block);
+    if !ctx.fam_arrays {
+        // A byte-packed `[u8]` has no 8-byte slot: the store below wrote over
+        // the next 7 bytes. A typed word write into one is a runtime error
+        // (owner decision), as in rt_typed_words_u32_set.
+        // Bug: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27
+        let words_block = builder.create_block();
+        let trap_block = builder.create_block();
+        let is_bytes = byte_packed_condition(builder, ptr_bits);
+        builder.ins().brif(is_bytes, trap_block, &[], words_block, &[]);
+        builder.set_cold_block(trap_block);
+        builder.switch_to_block(trap_block);
+        builder.seal_block(trap_block);
+        call_runtime_0(ctx, builder, "rt_typed_words_byte_write_trap");
+        builder.ins().jump(done_block, &[false_value]);
+        builder.switch_to_block(words_block);
+        builder.seal_block(words_block);
+    }
     let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
     let slot_offset = builder.ins().imul_imm(normalized_index, 8);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
@@ -2394,7 +2714,16 @@ fn compile_inline_typed_words_push<M: Module>(
     if returns_value {
         builder.append_block_param(done_block, result_type);
     }
-    builder.ins().brif(has_capacity, store_block, &[], grow_block, &[]);
+    // A byte-packed `[u8]` has 1-byte elements; its capacity counts bytes, so
+    // the in-capacity 8-byte store overran it. The runtime push traps on it.
+    // Bug: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27
+    let can_store = if ctx.fam_arrays {
+        has_capacity
+    } else {
+        let is_bytes = byte_packed_condition(builder, ptr_bits);
+        builder.ins().band_not(has_capacity, is_bytes)
+    };
+    builder.ins().brif(can_store, store_block, &[], grow_block, &[]);
 
     builder.switch_to_block(store_block);
     let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
@@ -2991,11 +3320,11 @@ fn compile_known_enum_constructor_call<M: Module>(
         return true;
     };
 
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    variant_name.hash(&mut hasher);
-    let disc = (hasher.finish() & 0xFFFFFFFF) as i64;
+    // MIR did not resolve this constructor to an owning enum (it would have
+    // emitted EnumUnit/EnumWith with the declared index), and the global
+    // `enum_defs` row may be a merge of same-named enums -- so the owner is
+    // unknown here. Name-only, reported (#6953).
+    let disc = crate::hir::name_only_variant_discriminant("codegen enum constructor call", variant_name);
     let enum_id_val = builder.ins().iconst(
         types::I32,
         i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)),
@@ -3054,6 +3383,12 @@ fn needs_runtime_value_result_tagging<M: Module>(ctx: &InstrContext<'_, M>, func
 /// Every other `rt_*` text return is already a `RuntimeValue` (e.g.
 /// `rt_env_cwd`, which is why it was always correct on this lane) and must NOT
 /// be double-decoded — hence an explicit list rather than a prefix rule.
+///
+/// 2026-11-23: `rt_vulkan_selected_device_identity_v1` (added after the census)
+/// was missing, so the GB10 Engine2D capture split a raw pointer and reported
+/// "selected Vulkan physical device identity unavailable" (Blocker 9 in
+/// doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md).
+/// Re-run the census whenever a new `-> *const c_char` runtime export lands.
 pub(in crate::codegen) const C_STRING_RETURNING_RUNTIME_FNS: &[&str] = &[
     "rt_cuda_device_name",
     "rt_cuda_get_error_string",
@@ -3064,9 +3399,24 @@ pub(in crate::codegen) const C_STRING_RETURNING_RUNTIME_FNS: &[&str] = &[
     "rt_vulkan_device_type",
     "rt_vulkan_get_last_error",
     "rt_vulkan_selected_device_driver_identity",
+    "rt_vulkan_selected_device_identity_v1",
     "rt_vulkan_selected_device_name",
     "rt_vulkan_selected_device_type",
 ];
+
+/// Runtime entry points declared `-> bool` in Simple whose C ABI actually
+/// returns a tagged `RuntimeValue` boolean (`RuntimeValue::TRUE`/`FALSE`,
+/// where `FALSE` carries a nonzero tag word `SPECIAL_FALSE`) rather than a raw
+/// 0/1 scalar. Decode via `rt_value_as_bool` before storing into the MIR bool VReg.
+pub(in crate::codegen) const TAGGED_BOOL_RETURNING_RUNTIME_FNS: &[&str] = &[
+    "rt_pty_close",
+    "rt_pty_is_running",
+    "rt_pty_write",
+];
+
+pub(in crate::codegen) fn returns_tagged_bool(func_name: &str) -> bool {
+    TAGGED_BOOL_RETURNING_RUNTIME_FNS.contains(&func_name)
+}
 
 fn returns_c_string(func_name: &str) -> bool {
     C_STRING_RETURNING_RUNTIME_FNS.contains(&func_name)
@@ -3078,8 +3428,31 @@ fn returns_c_string(func_name: &str) -> bool {
 ///
 pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     match func_name {
+        // Cache authority text crosses the native ABI as pointer/length pairs.
+        // Keep in sync with runtime_sffi.rs and 50.mir/text_extern_abi.spl.
+        "rt_cache_host_open_root_v1" => Some(&[0]),
+        "rt_cache_host_open_read_v1" => Some(&[1]),
+        "rt_cache_host_open_child_v1" => Some(&[1]),
+        "rt_cache_host_open_cas_kind_v1" => Some(&[1]),
+        "rt_cache_host_open_cas_shard_v1" => Some(&[1]),
+        "rt_cache_host_open_cas_leaf_v1" => Some(&[1]),
+        "rt_cache_host_open_pinned_cas_v1" => Some(&[1, 2]),
+        "rt_cache_host_publish_noreplace_v1" => Some(&[1]),
+        "rt_cache_host_publish_retained_noreplace_v2" => Some(&[1]),
+        "rt_cache_host_quarantine_v1" => Some(&[2]),
+
+        // Host dynamic-library loader (runtime/src/value/wsffi_native.rs): the
+        // path and symbol name cross as (ptr, len). Absent here, the JIT passed
+        // the boxed text handle as path_ptr and `mode` as path_len, so every JIT
+        // `dynlib_open` returned 0 (`loader-failed`) while the interpreter
+        // loaded the same DLL. Twin: 50.mir/text_extern_abi.spl. See
+        // doc/08_tracking/bug/seed_jit_host_dynlib_open_text_arg_not_split_2026-11-06.md
+        "rt_host_dynlib_open" => Some(&[0]),
+        "rt_host_dynlib_symbol" => Some(&[1]),
+
         "rt_linux_group_available_capacity_v1" => Some(&[0]),
         "rt_linux_group_parent_acquire_v1" => Some(&[0, 1]),
+        "rt_linux_group_parent_acquire_at_v2" => Some(&[0, 1, 2]),
         "rt_linux_group_launch_broker_v1" => Some(&[0, 1]),
         "rt_linux_group_start_v1" => Some(&[0, 1, 4, 5, 6, 9, 10]),
         // Print/IO (text → ptr, len)
@@ -3167,6 +3540,7 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_fsync"
         | "rt_file_fsync_cached"
         | "rt_file_sync"
+        | "rt_dir_sync"
         | "rt_file_delete"
         | "rt_file_remove"
         | "rt_file_read_lines"
@@ -3179,7 +3553,7 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // (ptr, len) before the call, misaligning the (ptr, len, timeout)
         // ABI. Mirrors the LLVM backend fix in
         // codegen/llvm/functions/calls.rs.
-        | "rt_file_lock" => Some(&[0]),
+        | "rt_file_lock" | "rt_file_lock_owned_acquire_v2" => Some(&[0]),
         // File I/O (two text params: path + content, or src + dest)
         // rt_file_write_text / rt_file_append_text take (ptr,len) PAIRS
         // (see runtime file_ops.rs); they were wrongly in text_cstr_arg_indices,
@@ -3197,6 +3571,7 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // same (ptr, len) x2 shape, see runtime/src/value/sffi/file_io/file_ops.rs
         // and the pure-Simple twin table text_extern_abi.spl.
         | "rt_file_copy_create_excl_no_follow"
+        | "rt_file_read_under_root_bytes"
         | "rt_file_link_create_excl_no_follow" => Some(&[0, 1]),
         // Stage-3 memory-evidence sink (runtime.c rt_mem_snapshot_*): the C
         // ABI is (path_ptr, path_len) / (fd, seq, event_ptr, event_len,
@@ -3215,7 +3590,11 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // Length-safe pinning likewise takes (path_ptr, path_len), rejecting
         // embedded NUL in the native provider without requiring C-string text.
         "rt_process_run_with_limits" | "rt_process_run_bounded_bytes"
-        | "rt_process_pin_executable_owned_value" => Some(&[0]),
+        | "rt_process_pin_executable_owned_value"
+        // The V4 cwd pin is (path_ptr, path_len) too; the pure-Simple table
+        // (50.mir/text_extern_abi.spl) already lists it. Missing here, JIT
+        // passed the string handle as path_ptr and every cwd pin was refused.
+        | "rt_process_observation_v4_pin_cwd_value" => Some(&[0]),
         // rt_io_file_open/exists/delete take (path_ptr, path_len[, mode]) —
         // runtime/src/value/sffi/file_io/io_file.rs:82,331,340. They were absent
         // from every text-arg table, so JIT/native passed the RuntimeString
@@ -3318,9 +3697,11 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
 pub fn boxed_text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     match func_name {
         "rt_string_builder_push" => Some(&[1]),
+        "rt_pty_write" => Some(&[1]),
         // Both atomic runtime owners consume tagged path/content values;
         // mode remains a scalar argument at index 2.
-        "rt_file_atomic_write" | "rt_file_atomic_write_mode" => Some(&[0, 1]),
+        "rt_file_atomic_write" | "rt_file_atomic_write_mode" | "rt_file_write_under_root_bytes" => Some(&[0, 1]),
+        "rt_path_normalize" => Some(&[0]),
         _ => None,
     }
 }
@@ -3590,7 +3971,8 @@ pub(crate) fn adapt_args_to_signature_with_signedness(
                     let promoted = builder.ins().fpromote(types::F64, val);
                     adapted.push(builder.ins().bitcast(types::I64, MemFlags::new(), promoted));
                 } else {
-                    adapted.push(builder.ins().fcvt_to_sint(expected_ty, val));
+                    // Narrow int slot: saturate like an explicit cast, never trap.
+                    adapted.push(super::helpers::float_to_int_saturating(builder, val, expected_ty, true));
                 }
             } else if actual_ty.is_float() && expected_ty.is_float() {
                 // Float width conversion
@@ -3735,6 +4117,18 @@ pub fn is_inline_lowered_byte_accessor(name: &str) -> bool {
             | "rt_typed_words_u64_at"
             | "rt_typed_words_u32_unchecked"
             | "rt_typed_words_u64_unchecked"
+            // Layout probe the MIR emits ahead of every hoisted `[u8]` read
+            // (lowering_stmt.rs); `compile_inline_array_is_byte_packed` reads the
+            // gc_flags bit, and it is not in RUNTIME_SYMBOL_NAMES. Unlisted, the
+            // b52cbe7a2b7 resolver tightening de-JITted every module with a
+            // hoisted byte loop (pixel_diff.spl at 4x: <90 s -> >30 min, 4 GB).
+            | "rt_array_is_byte_packed"
+            // Float-bit reinterpretation intrinsics: a bare bitcast in
+            // `compile_simple_runtime_memory_intrinsic`. Unlisted, the driver spliced every
+            // caller through the interpreter bridge. See doc/08_tracking/bug/
+            // seed_jit_spl_f64_to_bits_miscompile_2026-07-23.md
+            | "spl_f64_to_bits"
+            | "spl_bits_to_f64"
     )
 }
 
@@ -3791,11 +4185,7 @@ pub fn compile_call<M: Module>(
         if let Some(d) = dest {
             // Use hashed discriminants consistently with pattern matching
             let disc = {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut hasher = DefaultHasher::new();
-                variant_name.hash(&mut hasher);
-                (hasher.finish() & 0xFFFFFFFF) as i64
+                simple_runtime::value::hash_variant_discriminant(variant_name) as i64
             };
             let enum_id_val = builder.ins().iconst(types::I32, builtin_enum_id);
             let disc_val = builder.ins().iconst(types::I32, disc);
@@ -4045,7 +4435,7 @@ pub fn compile_call<M: Module>(
         // does not yet carry call origin. For the ordinary SFFI path, a
         // source-defined body owns its name and ABI; empty extern declarations
         // remain imports and continue through the runtime path below.
-        let callee_id = ctx.func_ids[func_name];
+        let callee_id = *ctx.func_ids.get(func_name).expect("has_defined_local_function checked func_ids");
         compile_user_function_call(ctx, builder, dest, func_name, args, callee_id)?;
     } else if let Some(&runtime_id) = ctx.runtime_funcs.get(sffi_name) {
         // Runtime imports need SFFI-specific tagging and text expansion.
@@ -4143,6 +4533,19 @@ pub fn compile_call<M: Module>(
                     let decode_call = builder.ins().call(decode_ref, &[result]);
                     result = builder.inst_results(decode_call)[0];
                 }
+                if returns_tagged_bool(sffi_name) {
+                    let Some(&unbox_id) = ctx.runtime_funcs.get("rt_value_as_bool") else {
+                        return Err(format!(
+                            "{sffi_name} returns tagged RuntimeValue bool but rt_value_as_bool was not \
+                             declared; it is a codegen root in \
+                             codegen/common_backend.rs::runtime_symbol_is_codegen_root"
+                        ));
+                    };
+                    let unbox_ref = ctx.module.declare_func_in_func(unbox_id, builder.func);
+                    let unbox_call = builder.ins().call(unbox_ref, &[result]);
+                    let raw_i8 = builder.inst_results(unbox_call)[0];
+                    result = builder.ins().uextend(types::I64, raw_i8);
+                }
 
                 // Tag the result if needed.
                 let final_result = if needs_tagging {
@@ -4169,6 +4572,43 @@ pub fn compile_call<M: Module>(
             if compile_known_enum_constructor_call(ctx, builder, dest, enum_name, variant_name, args) {
                 return Ok(());
             }
+        }
+
+        // Builtin `text` statics. Without this the call fell through with its
+        // dotted name, sanitized to `text_dot_from_char_code`, a legacy
+        // export deliberately absent from the static provider manifest: the
+        // JIT panicked "can't resolve symbol" (2026-09-04) and later died with
+        // SIGSEGV. Route to the canonical runtime ABI, as the LLVM backend
+        // (codegen/llvm/functions/calls.rs) and the pure-Simple backend do.
+        // doc/08_tracking/bug/seed_jit_cannot_resolve_text_dot_from_char_code_2026-09-04.md
+        let text_static = match func_name {
+            "text.from_char_code" => Some("rt_char_from_code"),
+            "text.from_bytes" => Some("rt_bytes_to_text"),
+            _ => None,
+        };
+        if let (Some(rt_name), [arg]) = (text_static, args) {
+            let func_id = if let Some(&id) = ctx.runtime_funcs.get(rt_name) {
+                id
+            } else if let Some(&id) = ctx.func_ids.get(rt_name) {
+                id
+            } else {
+                let mut sig = ctx.module.make_signature();
+                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                let id = ctx
+                    .module
+                    .declare_function(rt_name, Linkage::Import, &sig)
+                    .map_err(|e| format!("declare {rt_name} for {func_name}: {e}"))?;
+                ctx.func_ids.insert(rt_name.to_string(), id);
+                id
+            };
+            let arg_val = get_vreg_or_default(ctx, builder, arg);
+            let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+            let call = adapted_call(builder, func_ref, &[arg_val]);
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, builder.inst_results(call)[0]);
+            }
+            return Ok(());
         }
 
         // Before falling through to cross-module import, check if this is a qualified
@@ -4221,6 +4661,10 @@ pub fn compile_call<M: Module>(
                 // Array-only name (no text/dict method shares it), so a plain
                 // mapping cannot mis-route another receiver.
                 "write_span" => Some("rt_array_write_span"),
+                // Bulk in-place volatile fill — JIT counterpart of the
+                // interpreter's `arr.fill_span(dst_off, count, value)` mutating
+                // method. Array-only name, same raw-count contract as write_span.
+                "fill_span" => Some("rt_array_fill_span"),
                 "clear" => Some("rt_clear"),
                 "join" => Some("rt_string_join"),
                 // `strip`/`trimmed` are interpreter-level aliases of `trim`
@@ -4232,10 +4676,28 @@ pub fn compile_call<M: Module>(
                 // `trim_start`/`trim_end` (interpreter_method/string.rs:118-119)
                 // but had no arm here, so they raised "Function 'str.trim_left'
                 // not found" on the JIT while working on the interpreter.
+                "trim_start" | "trim_left" if args.len() >= 2 => Some("rt_string_trim_start_matches"),
                 "trim_start" | "trim_left" => Some("rt_string_trim_start"),
+                "trim_end" | "trim_right" if args.len() >= 2 => Some("rt_string_trim_end_matches"),
                 "trim_end" | "trim_right" => Some("rt_string_trim_end"),
+                // Arity-aware, same as `substr` below and the
+                // `try_compile_builtin_method_call` table: a two-argument
+                // `split(sep, limit)` must reach `rt_string_split_limit` or the
+                // bound is silently dropped (the runtime never read the third
+                // arg). `args` here includes the receiver.
+                // doc/08_tracking/bug/text_split_limit_ignored_2026-07-20.md
+                "split" if args.len() >= 3 => Some("rt_string_split_limit"),
                 "split" => Some("rt_string_split"),
-                "bytes" => Some("rt_string_bytes"),
+                // `to_bytes` is the interpreter's alias of `bytes`
+                // (interpreter_method/string.rs: `"bytes" | "to_bytes"` and
+                // interpreter_helpers/method_dispatch.rs), and the LLVM lane
+                // maps it too (codegen/llvm/functions.rs). Only this JIT table
+                // lacked it, so `"ok".to_bytes()` raised
+                // "Function 'str.to_bytes' not found" under `run` while working
+                // on the interpreter. Text-only name (no array/dict `to_bytes`
+                // method exists), so the alias cannot mis-route another
+                // receiver. See doc/08_tracking/bug/text_to_bytes_method_missing_on_text_receiver_2026-09-06.md
+                "bytes" | "to_bytes" => Some("rt_string_bytes"),
                 "chars" => Some("rt_string_chars"),
                 "lines" | "split_lines" => Some("rt_string_lines"),
                 "replace" => Some("rt_string_replace"),
@@ -4264,6 +4726,8 @@ pub fn compile_call<M: Module>(
                 // plain text mapping cannot mis-route a non-text receiver the
                 // way `index_of` and `at` did.
                 "char_count" => Some("rt_string_char_count"),
+                "to_digit" => Some("rt_string_to_digit"),
+                "byte_len" => Some("rt_string_len"),
                 "capitalize" => Some("rt_string_capitalize"),
                 "swapcase" => Some("rt_string_swapcase"),
                 "title" | "titlecase" => Some("rt_string_title"),
@@ -4364,8 +4828,8 @@ pub fn compile_call<M: Module>(
                 "find_str" => Some("rt_string_find"),
                 "rfind" | "last_index_of" => Some("rt_string_rfind"),
                 "to_string" | "to_text" | "str" => Some("rt_to_string"),
-                "slice" | "substring" => Some("rt_slice"),
-                "get" => Some("rt_index_get"),
+                "slice" | "substring" => Some("rt_slice_text_bytes"),
+                "get" => Some("rt_get"),
                 "keys" => Some("rt_dict_keys"),
                 "values" => Some("rt_dict_values"),
                 "filter" => Some("rt_array_filter"),
@@ -4411,6 +4875,12 @@ pub fn compile_call<M: Module>(
                 // `arr.enumerate()` raised "Function 'Array.enumerate' not
                 // found" and still exited 0. It returns an array of
                 // (index, item) tuples, matching the interpreter.
+                "ptr"
+                    if args.len() == 1
+                        && ctx.vreg_types.get(&args[0]).copied() == Some(crate::hir::TypeId::STRING) =>
+                {
+                    Some("rt_string_data")
+                }
                 "enumerate" => Some("rt_array_enumerate"),
                 _ => None,
             };
@@ -4436,7 +4906,7 @@ pub fn compile_call<M: Module>(
                         .map(|fid| {
                             // Do not replace a local body with an on-demand
                             // runtime import before that body is compiled.
-                            ctx.func_ids.entry(rt_name.to_string()).or_insert(fid);
+                            ctx.func_ids.or_insert(rt_name.to_string(), fid);
                             fid
                         })
                 };
@@ -4449,7 +4919,7 @@ pub fn compile_call<M: Module>(
                         let results = builder.inst_results(call);
                         if !results.is_empty() {
                             let mut value = results[0];
-                            if rt_name == "rt_array_write_span" {
+                            if rt_name == "rt_array_write_span" || rt_name == "rt_array_fill_span" {
                                 // The runtimes return the RAW i64 count (C twin,
                                 // pure-Simple lowering and this seed's runtime all
                                 // agree). This erased-receiver path hands results on

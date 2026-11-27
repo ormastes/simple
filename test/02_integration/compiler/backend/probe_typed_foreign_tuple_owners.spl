@@ -1,0 +1,122 @@
+# Actual modified compiler-owner regression. Native only; no policy15 replay.
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types_expr.{Type, TypeKind, Expr, ExprKind, Stmt, StmtKind, Block}
+use compiler.frontend.parser_types_expr.{parser_type_kind_pointer_is_mutable, parser_type_kind_reference_is_mutable, parser_type_kind_pointer_inner, parser_type_kind_reference_inner, parser_type_kind_named_name}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.mir.mir_lowering.*
+use compiler.mir.mir_lowering_types.*
+use compiler.mir.mir_lowering_expr.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_types.{LocalId, MirType, MirConstValue}
+use compiler.mir.mir_instructions.{MirInst, MirInstKind}
+use compiler.backend.mir_to_llvm.*
+use compiler.backend.common.mir_text_codegen.{MirTextCodegen}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+var consumer_checks = 0
+
+fn consumer_check(condition: bool, label: text):
+    if not condition:
+        panic("typed consumer probe failed: " + label)
+    consumer_checks = consumer_checks + 1
+
+fn check_parser_slots():
+    print("CASE parser BEGIN")
+    val span = Span.empty()
+    val inner = Type(kind: TypeKind.Named("i64", []), span: span)
+    val fallback = Type(kind: TypeKind.Error, span: span)
+    consumer_check(not parser_type_kind_pointer_is_mutable(TypeKind.Pointer(inner, false)), "pointer false")
+    consumer_check(parser_type_kind_pointer_is_mutable(TypeKind.Pointer(inner, true)), "pointer true")
+    consumer_check(not parser_type_kind_reference_is_mutable(TypeKind.Reference(inner, false)), "reference false")
+    consumer_check(parser_type_kind_reference_is_mutable(TypeKind.Reference(inner, true)), "reference true")
+    val pointer_inner: Type = parser_type_kind_pointer_inner(TypeKind.Pointer(inner, true), fallback)
+    val reference_inner: Type = parser_type_kind_reference_inner(TypeKind.Reference(inner, false), fallback)
+    consumer_check(parser_type_kind_named_name(pointer_inner.kind) == "i64", "pointer inner identity")
+    consumer_check(parser_type_kind_named_name(reference_inner.kind) == "i64", "reference inner identity")
+    print("CASE parser END")
+
+fn return_block(value: Expr) -> Block:
+    val span = Span.empty()
+    val returned = Expr(kind: ExprKind.Return(Some(value)), span: span)
+    Block(stmts: [Stmt(kind: StmtKind.Expr(returned), span: span)], span: span)
+
+fn check_hir_if_slots():
+    print("CASE hir_if BEGIN")
+    val span = Span.empty()
+    val condition = Expr(kind: ExprKind.BoolLit(true), span: span)
+    val integer = Expr(kind: ExprKind.IntLit(41), span: span)
+    val boolean = Expr(kind: ExprKind.BoolLit(false), span: span)
+    val empty = Block(stmts: [], span: span)
+    val int_block = return_block(integer)
+    val bool_block = return_block(boolean)
+    var lowering = HirLowering.with_filename("typed_if_slots.spl")
+    val no_else: ReturnScan = lowering.scan_ast_expr_for_returns(Expr(kind: ExprKind.If(condition, int_block, nil), span: span), [])
+    consumer_check(no_else.found_value_return, "If nil else retains then return")
+    consumer_check(no_else.resolved_name == "i64", "If then type identity")
+    consumer_check(not no_else.ambiguous, "If nil else unambiguous")
+    val only_else: ReturnScan = lowering.scan_ast_expr_for_returns(Expr(kind: ExprKind.If(condition, empty, Some(int_block)), span: span), [])
+    consumer_check(only_else.found_value_return, "If present else found")
+    consumer_check(only_else.resolved_name == "i64", "If else type identity")
+    consumer_check(not only_else.ambiguous, "If sole else unambiguous")
+    val mixed: ReturnScan = lowering.scan_ast_expr_for_returns(Expr(kind: ExprKind.If(condition, int_block, Some(bool_block)), span: span), [])
+    consumer_check(mixed.found_value_return, "If mixed branches found")
+    consumer_check(mixed.ambiguous, "If present bool else changes inference")
+    val absent: ReturnScan = lowering.scan_ast_expr_for_returns(Expr(kind: ExprKind.If(condition, empty, nil), span: span), [])
+    consumer_check(not absent.found_value_return, "If empty then and absent else")
+    consumer_check(lowering.lowering_error_count() == 0, "If scanner diagnostics")
+    print("CASE hir_if END")
+
+fn check_mir_namedvar_slots():
+    print("CASE mir_namedvar BEGIN")
+    var lowering = MirLowering.new(SymbolTable.new())
+    var builder = lowering.builder
+    val _padding: LocalId = builder.new_temp(MirType.i64())
+    val expected: LocalId = builder.new_temp(MirType.i64())
+    val before = builder.locals.len()
+    lowering.builder = builder
+    lowering.bind_local(77, expected)
+    val span = Span.empty()
+    val type_ = HirType(kind: HirTypeKind.Int(64, true), span: span)
+    val expr = HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: 77), "bound_slot"), has_type_: true, type_: type_, span: span)
+    val observed: LocalId = lowering.lower_expr(expr)
+    consumer_check(observed.id == expected.id, "NamedVar SymbolId resolves registered LocalId")
+    val renamed = HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: 77), "same_symbol_other_name"), has_type_: true, type_: type_, span: span)
+    val observed_again: LocalId = lowering.lower_expr(renamed)
+    consumer_check(observed_again.id == expected.id, "NamedVar resolution uses preserved SymbolId")
+    consumer_check(lowering.errors.len() == 0, "NamedVar diagnostics")
+    consumer_check(lowering.builder.locals.len() == before, "NamedVar does not fabricate a temporary")
+    print("CASE mir_namedvar END")
+
+fn check_llvm_const_slots():
+    print("CASE llvm_const BEGIN")
+    var translator = MirToLlvm.create("typed_const_slots", CodegenTarget.X86_64, nil)
+    val instructions = [
+        MirInst(kind: MirInstKind.Const(LocalId(id: 37), MirConstValue.Int(-17), MirType.i64()), span: nil),
+        MirInst(kind: MirInstKind.Const(LocalId(id: 53), MirConstValue.Int(3), MirType.i64()), span: nil)
+    ]
+    translator.translate_instruction_at(instructions, 0, 0, 0)
+    translator.translate_instruction_at(instructions, 1, 0, 0)
+    consumer_check(translator.defined_locals.has(37) and translator.defined_locals[37], "LLVM first destination defined")
+    consumer_check(translator.defined_locals.has(53) and translator.defined_locals[53], "LLVM second destination defined")
+    consumer_check(translator.local_types[37] == "i64", "LLVM first destination type")
+    consumer_check(translator.local_types[53] == "i64", "LLVM second destination type")
+    consumer_check(translator.codegen_errors.len() == 0, "LLVM Const diagnostics")
+    val ir = translator.builder.build()
+    consumer_check(ir.contains("%l37 = add i64 -17, 0"), "LLVM negative payload and LocalId identity")
+    consumer_check(ir.contains("%l53 = add i64 3, 0"), "LLVM scalar3 distinct from nil")
+    print("CASE llvm_const END")
+
+fn main() -> i64:
+    print("BEGIN typed compiler consumers")
+    check_parser_slots()
+    check_hir_if_slots()
+    check_mir_namedvar_slots()
+    check_llvm_const_slots()
+    if consumer_checks != 27:
+        panic("typed compiler consumer check-count mismatch")
+    print("END typed compiler consumers completed={consumer_checks} checks")
+    0

@@ -1,5 +1,7 @@
+#![allow(REQC004)]
 # Part 2 of src/plugins/backend_c/c_backend_translate.spl
 use plugins.backend_c.c_backend_translate.*
+use compiler.mir.mir_instruction_support.{MirCallOrigin}
 # C Backend - MIR to C++20 Translation (MirToC class)
 #
 # Contains the MirToC class with core translation methods.
@@ -28,7 +30,13 @@ use compiler.hir.hir_definitions.{HirField}
 use compiler.hir.hir_types.{HirType}
 use compiler.common.diagnostics.span.{Span}
 use compiler.frontend.parser_types_expr.{AsmConstraintKind, AsmLocation}
+@unsafe(reason: "raw tagged-value discriminant ABI", capabilities: [ffi])
 extern fn rt_enum_discriminant<T>(value: T) -> i64
+
+@always_inline
+fn _sffi_enum_discriminant<T>(value: T) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant(value)
 
 # Lane C7: render a MIR instruction's source span for a loud backend
 # diagnostic, or a stable placeholder when the instruction carries none.
@@ -109,9 +117,9 @@ impl MirToC:
 
             # === Function Calls ===
             case Call(dest, func, args):
-                val func_val = self.translate_operand(func)
+                val func_val = self.translate_call_target(func)
                 # Try container call interception first
-                if self.translate_container_call(func_val, dest, args):
+                if func.call_origin == MirCallOrigin.Runtime and self.translate_container_call(func_val, dest, args):
                     pass_dn
                 else:
                     var arg_vals: [text] = []
@@ -272,8 +280,8 @@ impl MirToC:
                 var c_template = asm_template
                 var named_output_index = 0
                 for output in outputs:
-                    if output.name != "": c_template = c_template.replace("{" + output.name + "}", "%" + named_output_index.to_string())
-                    c_template = c_template.replace("{" + output.constraint_index.to_string() + "}", "%" + named_output_index.to_string())
+                    if output.name != "": c_template = c_template.replace("{{" + output.name + "}}", "%" + named_output_index.to_string())
+                    c_template = c_template.replace("{{" + output.constraint_index.to_string() + "}}", "%" + named_output_index.to_string())
                     named_output_index = named_output_index + 1
                 var named_input_index = 0
                 for input in inputs:
@@ -283,8 +291,8 @@ impl MirToC:
                         for output in outputs:
                             if output.constraint_index == input.constraint_index: operand_index = tied_index
                             tied_index = tied_index + 1
-                    if input.name != "": c_template = c_template.replace("{" + input.name + "}", "%" + operand_index.to_string())
-                    c_template = c_template.replace("{" + input.constraint_index.to_string() + "}", "%" + operand_index.to_string())
+                    if input.name != "": c_template = c_template.replace("{{" + input.name + "}}", "%" + operand_index.to_string())
+                    c_template = c_template.replace("{{" + input.constraint_index.to_string() + "}}", "%" + operand_index.to_string())
                     named_input_index = named_input_index + 1
 
                 # Build output constraints: "=r" (var), "=&r" (late_out_var)
@@ -622,7 +630,7 @@ impl MirToC:
                 # Not a variant: every MirInstKind now has an arm above, so this
                 # is reachable only by a NEW upstream variant with no arm here,
                 # or by a mis-decoded enum handle. Named and spanned either way.
-                val unknown_c_inst_disc = rt_enum_discriminant(inst.kind)
+                val unknown_c_inst_disc = _sffi_enum_discriminant(inst.kind)
                 eprint("[c-backend] E-BACKEND-C-INST-Unknown disc={unknown_c_inst_disc} at={c_backend_format_span(inst.span)}")
                 self.emit_unsupported_panic("E-BACKEND-C-INST-Unknown: no C backend arm for MIR instruction kind (discriminant {unknown_c_inst_disc}) at {c_backend_format_span(inst.span)}")
 
@@ -674,7 +682,7 @@ impl MirToC:
                 panic("E-BACKEND-C-TERM-Resume: C++ backend cannot safely longjmp across generated aggregate locals")
 
             case CallTerminator(dest, func, args, normal, unwind, _, _):
-                val func_val = self.translate_operand(func)
+                val func_val = self.translate_call_target(func)
                 var arg_vals: [text] = []
                 for arg in args:
                     arg_vals = arg_vals.push(self.translate_operand(arg))
@@ -691,6 +699,8 @@ impl MirToC:
                 else:
                     self.builder.emit(func_val + r"(" + args_str + r");")
                 self.builder.emit_goto(r"bb" + normal.id)
+            case _:
+                todo("handle remaining cases")
 
     # ================================================================
     # Shared Library Preamble

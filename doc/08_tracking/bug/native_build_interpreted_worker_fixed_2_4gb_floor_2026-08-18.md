@@ -1,7 +1,11 @@
 # native-build: interpreted worker carries a fixed ~2.4 GB RSS floor before it compiles anything
 
 - **Filed:** 2026-08-18
-- **Status:** OPEN — measured, not fixed
+- **Status:** LIVE (triaged 2026-11-11, lanes boot6/int10/int11) — measured, not
+  fixed; the interpreted-worker spawn shape and the process-lifetime
+  module-cache retention design are unchanged at this base (source-checked by
+  int11). Owner: seed-fix lane (retention census + rebuild grant) /
+  bootstrap redesign (compiled worker). See the 2026-11-10/11 addenda below.
 - **Severity:** HIGH — this is the mechanism by which `earlyoom` reaps the bootstrap
 - **Area:** `src/app/cli/native_build_worker.spl`, `src/app/io/_CliCompile/compile_targets.spl`,
   seed interpreter module loading
@@ -149,3 +153,122 @@ Any fix here requires rebuilding the Rust seed. Roughly 15 lanes depend on the
 current `bin/simple`, so **no rebuild was performed and no fix is verified.**
 Everything above the "Where the 2.4 GB is held" section is measured; that
 section is code reading only.
+
+## 2026-11-07 — re-measured on Windows (round 15); floor is 1.99 GB, and ~1.3 GB of it is already live after 100 module loads
+
+Binary: `simple-base.exe` built from `origin/release/1.0.0` tip `4eb1de2ecbd`
+(bootstrap profile, 17883136 B, sha256 `c0c47b2cdd6cd6ee…`), Windows 11,
+`SIMPLE_MEM_TRACE=1 SIMPLE_EXECUTION_MODE=interpret
+sh scripts/perf/measure-peak-rss.shs -- simple-base.exe run src/app/cli/native_build_worker.spl`
+(no args — compiles nothing, exactly the 2.37 GB case above).
+
+| quantity | 2026-08-18 (Linux) | 2026-11-07 (Windows) |
+|---|---|---|
+| peak RSS, no-arg worker | 2.37 GB | **1.99 GB** (`peak_kib=1993300`, wall 62.6 s, exit 1) |
+| live after 100 module loads | — | **1344.5 MB** (peak 1351.3 MB) |
+| live after 500 module loads | — | 1475.7 MB |
+| live after 1000 module loads | — | (see mem log) parse_retained=473.4MB eval_retained=299.5MB |
+| import_bindings / module_envs at 500 loads | — | 39,624 / 500 |
+
+Two things the earlier record could not see:
+
+1. **The floor is front-loaded, not accumulated.** 1.34 GB is live after the
+   first 100 of ~1000 module loads and the next 400 loads add only 130 MB.
+   `parse_retained + eval_retained` at 500 loads is 431 MB, so roughly 1 GB
+   of the live set is neither parse nor eval retention as the census
+   classifies it. That unattributed early gigabyte is the next thing to
+   attribute (the census prints its first line only at 100 loads; a
+   per-10-load or per-phase first report would say whether it is the runtime
+   symbol seeding, the prelude, or the first few large generated modules
+   such as `20.hir/generated/hir_codec.spl`, 10.2 MB self + 17.2 MB parse).
+2. `import_bindings=39,624` for 500 envs (79 per module) versus the 927,167
+   / 667 envs (1,390 per module) the 2026-08-21 shard census reported: the
+   per-importer copies named in memory_retention_compiler_and_interpreter
+   § "Open" are gone (`record_owner_binding_layer` shares the source table
+   by reference). That part of the mechanism is fixed; the floor that is
+   left is the early term above.
+
+No fix landed in this pass; the measurement harness is
+`scripts/perf/measure-peak-rss.shs` (ps-sample on Windows, exact
+PeakWorkingSet) and the numbers above are the baseline a budget gate on this
+host would be set against.
+
+## 2026-11-10 status — LIVE-blocked-by-scope (P3 bootstrap lane row 43, work/p3-boot6-20261110)
+
+Re-judged on this lane's base (`4343ce254922`): still LIVE. The 2026-11-07
+Windows re-measurement in this record (1.99 GB no-arg floor on
+`simple-base.exe` tip `4eb1de2ecbd`) stands as the current baseline; nothing
+in the 25 merges on this base changes the worker spawn shape
+(`bin/simple native-build` still spawns `run src/app/cli/native_build_worker.spl`
+interpreted) or the seed's module-cache retention design
+(`src/compiler_rust/compiler/src/module_cache.rs`, six process-lifetime
+thread_local maps, cleared only by the test runner). Both remedy directions
+named in this record are outside the bootstrap-tooling scope: (a) running a
+compiled `native_build_worker` is the self-host bootstrap redesign itself
+(chicken-and-egg by definition), and (b) per-`FunctionDef` AST density /
+`PARTIAL_MODULE_EXPORTS_CACHE` duplicate retention is `src/compiler_rust`
+(seed-fix lane, excluded) or `src/compiler` (agent-30 lane, excluded).
+
+Fix sketch for the owning lane: instrument the seed's interpreted module
+loader to census `PARTIAL_MODULE_EXPORTS_CACHE` vs `MODULE_EXPORTS_CACHE`
+live bytes after the no-arg worker run; if duplicate retention is confirmed,
+drop the partials table on successful module completion and re-measure the
+no-arg floor (must fall well below 1.99 GB). If it is not confirmed, the
+floor is intrinsic interpreter cost and the only honest fix is (a).
+
+BLOCKED-needs-grant (heavy build forbidden on this lane): seed rebuild to
+land/verify any retention fix —
+`(cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver && cargo build --profile bootstrap -p simple-native-all --features driver-compat)`
+— plus re-measure via
+`SIMPLE_MEM_TRACE=1 sh scripts/perf/measure-peak-rss.shs -- bin/simple.exe run src/app/cli/native_build_worker.spl`.
+No measurement re-run this pass: 2026-11-07 baseline on the same host shape is
+already in-record and a re-run would only re-print it (budget rule: no
+identical reruns).
+
+## 2026-11-11 status — LIVE (lane int10 concurrence; Status stays OPEN)
+
+int10 re-read this record and the boot6 2026-11-10 addendum at base
+`1771ca481337` and concurs: still LIVE, disposition unchanged. No merge on
+this base alters the two facts that fix the disposition — the worker spawn
+shape (`bin/simple native-build` still spawns `run
+src/app/cli/native_build_worker.spl` interpreted by the seed) and the
+module-cache retention design (`src/compiler_rust/compiler/src/module_cache.rs`,
+six process-lifetime thread_local maps, cleared only by the test runner).
+Both remedy directions remain outside this lane: (a) running a compiled
+worker is the self-host bootstrap redesign itself, (b) per-`FunctionDef`
+AST density / `PARTIAL_MODULE_EXPORTS_CACHE` census is seed-fix
+(`src/compiler_rust`, needs the cargo rebuild grant boot6 recorded verbatim
+above) or `src/compiler` (agent-30 lane). No re-measure: the 2026-11-07
+Windows baseline (1.99 GB no-arg floor) is already in-record and an
+identical re-run is budget-forbidden. Owner: seed-fix lane (retention
+census + rebuild) / bootstrap redesign (term 1).
+
+## 2026-11-11 triage (lane int11) — header flipped LIVE; disposition source-checked
+
+Sweep flip. boot6 (2026-11-10) and int10 (2026-11-11) addenda recorded the
+verified LIVE disposition with named owners; the header still read OPEN.
+int11 quick re-verify at base `84f5076db138` (source checks only, no
+re-measure — the 2026-11-07 1.99 GB no-arg floor baseline is in-record and an
+identical re-run is budget-forbidden): (1) the worker spawn shape is
+unchanged — `src/app/cli/bootstrap_main.spl:165` still calls
+`run_native_build_worker(worker_args)` (interpreted worker); (2)
+`src/compiler_rust/compiler/src/module_cache.rs` still holds the
+process-lifetime `thread_local` retention maps (8 `thread_local` hits,
+cleared only by the test runner). Both remedy directions remain outside this
+lane: compiled worker = bootstrap redesign; retention census = seed-fix lane
+(cargo rebuild grant). Header flipped to LIVE.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — boot6/int10/int11: measured, not fixed; worker spawn shape (interpreted run of native_build_worker.spl) and process-lifetime module-cache retention unchanged at this base. Owners: seed-fix lane (retention census + cargo rebuild grant) / bootstrap redesign (compiled worker).
+
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113 (worktree lp3-wt, base f790f7f266e = origin/release/1.0.0 tip, seed binary build-commit 46fe8f6b6def))
+
+Source re-check at this base: the interpreted-worker spawn shape
+(`native-build` spawns `bin/simple run src/app/cli/native_build_worker.spl`,
+so the pure-Simple compiler closure is materialised interpreted) and the
+process-lifetime module-cache retention design are unchanged. No new
+measurement: the record's owner split stands (seed-fix lane for the retention
+census + rebuild grant; bootstrap redesign for a compiled worker). Out of scope
+for a bounded P3 lane; not attempted.

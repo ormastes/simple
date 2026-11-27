@@ -1,0 +1,38 @@
+use app.check.main.{checker_begin_file_scope, checker_end_file_scope, checker_scope_owner_poisoned_v1}
+use compiler.core.parser.{parse_module_silent_checked}
+use compiler.frontend.layer_eq_registry.{layer_eq_registry_declare, layer_eq_is_declared, layer_eq_registry_target_of}
+use compiler.frontend.effect_registry.{effect_registry_declare, effect_is_declared, effect_registry_budget_of}
+use compiler.frontend.aspect_registry.{aspect_registry_declare, aspect_is_declared, aspect_registry_kind_of, aspect_registry_selector_of}
+
+fn scoped_module(path: text, with_claims: bool, budget: text) -> bool:
+    if not checker_begin_file_scope(): return false
+    val failed = parse_module_silent_checked("fn work() -> i64:\n    7\n", path)
+    if not failed and with_claims:
+        layer_eq_registry_declare(path, "View", "Target_" + budget, "")
+        effect_registry_declare(path, "work", budget, true)
+        aspect_registry_declare(path, "work", "before", "execution_" + budget, "", true, true, false)
+    val ended = checker_end_file_scope(true)
+    not failed and ended
+
+fn claims_match(path: text, budget: i64, suffix: text) -> bool:
+    layer_eq_is_declared(path, "View") and
+        layer_eq_registry_target_of(path, "View") == "Target_" + suffix and
+        effect_is_declared(path, "work") and
+        effect_registry_budget_of(path, "work") == budget and
+        aspect_is_declared(path, "work") and
+        aspect_registry_kind_of(path, "work") == "before" and
+        aspect_registry_selector_of(path, "work") == "execution_" + suffix
+
+fn main() -> i64:
+    val owner_a = "retained_owner_a.spl"
+    val owner_b = "retained_owner_b.spl"
+    if not scoped_module(owner_a, true, "17"): return 11
+    if not claims_match(owner_a, 17, "17"): return 12
+    if not scoped_module(owner_b, true, "23"): return 13
+    if not claims_match(owner_a, 17, "17") or not claims_match(owner_b, 23, "23"): return 14
+    if not scoped_module(owner_a, false, ""): return 15
+    if layer_eq_is_declared(owner_a, "View") or effect_is_declared(owner_a, "work") or aspect_is_declared(owner_a, "work"): return 16
+    if not claims_match(owner_b, 23, "23"): return 17
+    if checker_scope_owner_poisoned_v1(): return 18
+    print "native retained metadata owners PASS"
+    0

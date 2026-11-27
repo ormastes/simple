@@ -1,0 +1,121 @@
+# @req REQ-LOCKLESS-MAP-001
+# Fixed-capacity map boundaries preserve exact keys and stable result slots.
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_async_mut.concurrent.lockless_map_i64.{LocklessMapI64, MapError}
+use std.nogc_async_mut.async_ring.async_ref.{AsyncRefStateI64}
+
+fn boundary_contract_map(keys: i64, descriptors: i64, waiters: i64) -> LocklessMapI64:
+    unsafe(capabilities: [ffi]):
+        match LocklessMapI64.create(keys, descriptors, descriptors, waiters):
+            case Ok(map): map
+            case Err(error): fail("boundary contract map creation failed: {error}")
+
+fn close_boundary_contract_map(map: LocklessMapI64):
+    unsafe(capabilities: [ffi]): map.close_quiescent()
+
+describe "LocklessMapI64 boundary contract":
+    it "keeps a same-key request stable after the key directory is full":
+        step("Preserve exact keys at fixed capacity")
+        val map = boundary_contract_map(1, 2, 1)
+        unsafe(capabilities: [ffi]):
+            val first = map.request(-17, 1701).unwrap()
+            match map.request(29, 2901):
+                case Err(MapError.Full): ()
+                case Err(error): fail("wrong full-directory error: {error}")
+                case Ok(_): fail("full key directory admitted another key")
+            val repeated = map.request(-17, 1701).unwrap()
+            expect(repeated.same_reference(first)).to_equal(true)
+            expect(map.find(-17).unwrap().same_reference(first)).to_equal(true)
+            match map.request(-17, 1702):
+                case Err(MapError.RecipeConflict): ()
+                case Err(error): fail("wrong full-directory recipe error: {error}")
+                case Ok(_): fail("full directory changed an existing key's recipe")
+        close_boundary_contract_map(map)
+
+    it "does not recycle a descriptor after completion and distinguishes exhaustion":
+        val map = boundary_contract_map(4, 1, 1)
+        unsafe(capabilities: [ffi]):
+            val first = map.request(31, 3101).unwrap()
+            expect(first.try_start()).to_equal(true)
+            expect(first.complete(31001).unwrap()).to_equal(true)
+            expect(map.request(31, 3101).unwrap().same_reference(first)).to_equal(true)
+            match map.request(32, 3201):
+                case Err(MapError.DescriptorFull): ()
+                case Err(error): fail("wrong descriptor-exhaustion error: {error}")
+                case Ok(_): fail("terminal descriptor was recycled for a new key")
+            match first.try_ready():
+                case AsyncRefStateI64.Ready(value): expect(value).to_equal(31001)
+                case state: fail("descriptor exhaustion changed its published result: {state}")
+        close_boundary_contract_map(map)
+
+    it "probes colliding negative keys and preserves each exact signed result":
+        val map = boundary_contract_map(8, 8, 1)
+        val maximum = 9223372036854775807i64
+        val minimum = -9223372036854775807i64 - 1i64
+        unsafe(capabilities: [ffi]):
+            # -3, 5 and 13 all start at bucket 5 under an eight-cell directory.
+            val negative = map.request(-3, 301).unwrap()
+            val positive = map.request(5, 501).unwrap()
+            val later = map.request(13, 1301).unwrap()
+            expect(negative.same_reference(positive)).to_equal(false)
+            expect(positive.same_reference(later)).to_equal(false)
+            expect(map.find(-3).unwrap().same_reference(negative)).to_equal(true)
+            expect(map.find(5).unwrap().same_reference(positive)).to_equal(true)
+            expect(map.find(13).unwrap().same_reference(later)).to_equal(true)
+            expect(map.find(-11).is_none()).to_equal(true)
+            expect(negative.try_start()).to_equal(true)
+            expect(negative.complete(maximum).unwrap()).to_equal(true)
+            expect(positive.try_start()).to_equal(true)
+            expect(positive.complete(minimum).unwrap()).to_equal(true)
+            expect(later.try_start()).to_equal(true)
+            expect(later.complete(0).unwrap()).to_equal(true)
+            match map.find(-3).unwrap().try_ready():
+                case AsyncRefStateI64.Ready(value): expect(value).to_equal(maximum)
+                case state: fail("negative colliding key lost its exact result: {state}")
+            match map.find(5).unwrap().try_ready():
+                case AsyncRefStateI64.Ready(value): expect(value).to_equal(minimum)
+                case state: fail("positive colliding key lost its exact result: {state}")
+            match map.find(13).unwrap().try_ready():
+                case AsyncRefStateI64.Ready(value): expect(value).to_equal(0)
+                case state: fail("later colliding key lost its exact result: {state}")
+        close_boundary_contract_map(map)
+
+    it "keeps the original recipe slot usable after rejecting a conflict":
+        val map = boundary_contract_map(4, 4, 1)
+        unsafe(capabilities: [ffi]):
+            val original = map.request(-41, 4101).unwrap()
+            match map.request(-41, 4102):
+                case Err(MapError.RecipeConflict): ()
+                case Err(error): fail("wrong recipe-conflict error: {error}")
+                case Ok(_): fail("conflicting recipe replaced the original slot")
+            expect(map.find(-41).unwrap().same_reference(original)).to_equal(true)
+            expect(original.try_start()).to_equal(true)
+            expect(original.complete(41001).unwrap()).to_equal(true)
+            expect(map.request(-41, 4101).unwrap().same_reference(original)).to_equal(true)
+            match original.try_ready():
+                case AsyncRefStateI64.Ready(value): expect(value).to_equal(41001)
+                case state: fail("recipe conflict damaged the original result: {state}")
+        close_boundary_contract_map(map)
+
+    it "retains both signed i64 boundary keys with opposite boundary values":
+        val map = boundary_contract_map(2, 2, 1)
+        val minimum = -9223372036854775807i64 - 1i64
+        val maximum = 9223372036854775807i64
+        unsafe(capabilities: [ffi]):
+            val minimum_ref = map.request(minimum, 1).unwrap()
+            val maximum_ref = map.request(maximum, 2).unwrap()
+            expect(minimum_ref.same_reference(maximum_ref)).to_equal(false)
+            expect(minimum_ref.try_start()).to_equal(true)
+            expect(minimum_ref.complete(maximum).unwrap()).to_equal(true)
+            expect(maximum_ref.try_start()).to_equal(true)
+            expect(maximum_ref.complete(minimum).unwrap()).to_equal(true)
+            expect(map.find(minimum).unwrap().same_reference(minimum_ref)).to_equal(true)
+            expect(map.find(maximum).unwrap().same_reference(maximum_ref)).to_equal(true)
+            match minimum_ref.try_ready():
+                case AsyncRefStateI64.Ready(value): expect(value).to_equal(maximum)
+                case state: fail("minimum key lost maximum result value: {state}")
+            match maximum_ref.try_ready():
+                case AsyncRefStateI64.Ready(value): expect(value).to_equal(minimum)
+                case state: fail("maximum key lost minimum result value: {state}")
+        close_boundary_contract_map(map)

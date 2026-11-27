@@ -1,0 +1,32 @@
+# Must be REFUSED natively: a generic trait instantiated with a type whose `T?`
+# payload does not read back through the slot's declared `T?` (only i64, text
+# and f64 are admitted). Before the guard, native-build printed `b some 0`.
+# Spec guard (also covers Owner<[i64]> and Owner<Point>):
+# test/01_unit/compiler/mir/generic_trait_object_optional_slot_spec.spl
+# Build with `native-build main.spl --backend=<cranelift|llvm> --entry-closure`
+# from a directory outside test/. Expected: build fails (rc != 0) with
+#   incompatible native trait object signature: main::Owner for main::BCell:
+#   method owner_read: return type argument T=optional[bool] is not supported
+#   through a generic trait slot natively (only i64, text, f64)
+# The seed interpreter runs it and prints `b some false`.
+
+trait Owner<T>:
+    fn owner_read(node: i64) -> T?
+    me owner_write(node: i64, value: T?)
+
+class BCell:
+    cell: bool?
+
+impl Owner<bool> for BCell:
+    fn owner_read(node: i64) -> bool?:
+        if node == 1: self.cell else: None
+    me owner_write(node: i64, value: bool?):
+        self.cell = value
+
+class BStore:
+    owner: Owner<bool>?
+
+val bs = BStore(owner: Some(BCell(cell: Some(false))))
+if val o = bs.owner:
+    if val b = o.owner_read(1):
+        print "b some {b}"

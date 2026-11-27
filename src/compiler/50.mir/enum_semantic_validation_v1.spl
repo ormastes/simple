@@ -2,7 +2,6 @@
 # consumers must bind it to the actual module/function before interpreting it.
 use std.common.crypto.sha256.{sha256_text}
 use compiler.common.error.{CompileError}
-use compiler.hir.hir_types.{SymbolId}
 use compiler.core.interpreter.hashmap.{hm_hash_text}
 use compiler.mir.mir_types.{MirType, MirTypeKind, MirTypeDef, MirTypeDefKind,
     MirLocal, LocalId, MirSignature, MirConstValue}
@@ -291,10 +290,7 @@ impl EnumPhysicalValidatorV1:
         self.charge(self.module.name.len() + self.function.name.len())?
         self.charge(self.function.locals.len() +
             self.function.blocks.len() + self.function.enum_matches.len())?
-        # @workaround bug=dict_nominal_tuple_binders_any_bootstrap_2026_10_21 recover=0bfa8039acd reason=bootstrap dictionary tuple binders erase declared nominal K/V types
-        for raw_symbol, raw_declaration in self.module.types:
-            val symbol: SymbolId = raw_symbol
-            val declaration: MirTypeDef = raw_declaration
+        for symbol, declaration in self.module.types:
             self.charge(1)?
             if declaration.symbol.id != symbol.id or self.declarations.contains_key(symbol.id):
                 return Err("EE-E-DECLARATION: relocated or duplicate nominal owner")
@@ -311,9 +307,7 @@ impl EnumPhysicalValidatorV1:
             self.blocks[block.id.id] = id
         self.block(self.function.entry_block)?
         # Validate declarations before the declaration identity serializer runs.
-        # @workaround bug=dict_nominal_tuple_binders_any_bootstrap_2026_10_21 recover=0bfa8039acd reason=bootstrap dictionary value binder loses MirTypeDef identity
-        for _, raw_declaration in self.declarations:
-            val declaration: MirTypeDef = raw_declaration
+        for _, declaration in self.declarations:
             self.charge(declaration.name.len() + declaration.export_name.len() + 1)?
             match declaration.kind:
                 case MirTypeDefKind.Enum(variants):
@@ -396,10 +390,10 @@ impl EnumPhysicalValidatorV1:
                             names[name] = true
                         for slot in slots.slot_types: self.type_projection(slot, 0)?
                         if slots.slot_types.len() == 0:
-                            if variant.payload != nil:
+                            if variant.payload != None:
                                 return Err("EE-E-DECLARATION: nullary variant carries a payload")
                         else:
-                            if variant.payload == nil:
+                            if variant.payload == None:
                                 return Err("EE-E-DECLARATION: payload variant has no declared type")
                             val collapsed = if slots.slot_types.len() == 1 and slots.slot_names.len() == 0:
                                 slots.slot_types[0]
@@ -480,7 +474,7 @@ impl EnumPhysicalValidatorV1:
             case _: ()
         match instruction.kind:
             case MirInstKind.Call(destination, callee, args):
-                if destination == nil: return Err("EE-E-SITE: enum adapter has no destination")
+                if destination == None: return Err("EE-E-SITE: enum adapter has no destination")
                 val result_type = self.local_type(destination.unwrap())?
                 var name = ""
                 match callee.kind:
@@ -574,7 +568,7 @@ impl EnumPhysicalValidatorV1:
                     if (prior.pattern_failure_entry.id != arm.pattern_entry_block.id or
                             arm.pattern_entry_instruction_index != 0):
                         return Err("EE-E-EDGE: pattern failure does not enter the next actual expanded alternative")
-                if prior.guard_entry != nil:
+                if prior.guard_entry != None:
                     if (prior.guard_failure_entry.id != arm.pattern_entry_block.id or
                             arm.pattern_entry_instruction_index != 0):
                         return Err("EE-E-EDGE: guard failure does not enter the next actual expanded alternative")
@@ -586,18 +580,18 @@ impl EnumPhysicalValidatorV1:
             else:
                 self.block(arm.pattern_failure_entry)?
             if arm.guard_failure_entry.id == -1:
-                if arm.guard_entry != nil:
+                if arm.guard_entry != None:
                     return Err("EE-E-EDGE: guarded arm omits its actual false successor")
             else:
                 # Legacy unguarded variant rows retain the pattern target in
                 # this field; its membership is a fact, not a guard authority.
                 self.block(arm.guard_failure_entry)?
-            if arm.guard_entry == nil:
-                if arm.guard_result != nil:
+            if arm.guard_entry == None:
+                if arm.guard_result != None:
                     return Err("EE-E-METADATA: condition without an actual guard entry")
             else:
                 self.cursor(arm.guard_entry.unwrap(), arm.guard_entry_instruction_index)?
-                if arm.guard_result == nil:
+                if arm.guard_result == None:
                     return Err("EE-E-METADATA: guard entry without a condition")
                 val type_ = self.operand_type(arm.guard_result.unwrap())?
                 if not self.same_type(type_, MirType.bool())?:
@@ -633,7 +627,7 @@ impl EnumPhysicalValidatorV1:
         for site in semantic.sites: self.site(semantic, site)?
         for arm in semantic.arms:
             self.charge(1)?
-            if arm.guard_entry != nil:
+            if arm.guard_entry != None:
                 if not self.guard_sites.contains_key("{semantic.match_id}:{arm.pattern_root}"):
                     return Err("EE-E-SITE: guarded arm lacks exactly one actual guard site")
         val physical = enum_pattern_physical_plan_v1(self.function, semantic, self.blocks,

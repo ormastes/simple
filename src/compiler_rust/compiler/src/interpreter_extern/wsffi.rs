@@ -261,7 +261,9 @@ pub fn spl_backend_plugin_run_v1(args: &[Value]) -> Result<Value, CompileError> 
 /// Open a shared library and return its handle as i64.
 ///
 /// Callable from Simple as: `spl_dlopen(path: text) -> i64`
-/// Boundary failures are typed interpreter errors; they never become a handle.
+/// A load failure returns 0 (the C runtime's `spl_dlopen` contract; 0 is never a live handle),
+/// so callers observe the documented non-positive-handle failure instead of an abort.
+/// Malformed arguments (arity, non-text, interior NUL) remain typed errors.
 pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("spl_dlopen requires 1 argument (path)"));
@@ -287,7 +289,7 @@ pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
                 let err_str = unsafe { CStr::from_ptr(err) }.to_string_lossy();
                 tracing::warn!("spl_dlopen failed for '{}': {}", path, err_str);
             }
-            Err(CompileError::runtime(format!("spl_dlopen failed for '{path}'")))
+            Ok(Value::Int(0)) // load failure: C-runtime parity, 0 is the documented non-handle
         } else {
             Ok(Value::Int(handle as usize as i64))
         }
@@ -303,7 +305,7 @@ pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
         let handle = unsafe { LoadLibraryW(wide.as_ptr()) };
         if handle.is_null() {
             tracing::warn!("spl_dlopen failed for '{}'", path);
-            Err(CompileError::runtime(format!("spl_dlopen failed for '{path}'")))
+            Ok(Value::Int(0)) // load failure: C-runtime parity, 0 is the documented non-handle
         } else {
             Ok(Value::Int(handle as usize as i64))
         }
@@ -358,7 +360,9 @@ pub fn spl_dynlib_snapshot_linux(args: &[Value]) -> Result<Value, CompileError> 
 /// Look up a symbol in a loaded library by name.
 ///
 /// Callable from Simple as: `spl_dlsym(handle: i64, name: text) -> i64`
-/// Boundary failures are typed interpreter errors; they never become a symbol.
+/// Returns `0` when `name` is absent from a valid library handle (matching C
+/// `rt_dynlib_symbol`); invalid handles or malformed arguments raise typed
+/// interpreter errors.
 pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 2 {
         return Err(CompileError::runtime("spl_dlsym requires 2 arguments (handle, name)"));
@@ -387,7 +391,7 @@ pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
         let handle = handle_val as *mut libc::c_void;
         let sym = unsafe { libc::dlsym(handle, c_name.as_ptr()) };
         if sym.is_null() {
-            Err(CompileError::runtime(format!("spl_dlsym: unresolved symbol '{name}'")))
+            Ok(Value::Int(0))
         } else {
             Ok(Value::Int(sym as usize as i64))
         }
@@ -400,7 +404,7 @@ pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
         }
         let sym = unsafe { GetProcAddress(handle_val as isize, c_name.as_ptr() as *const u8) };
         if sym.is_null() {
-            Err(CompileError::runtime(format!("spl_dlsym: unresolved symbol '{name}'")))
+            Ok(Value::Int(0))
         } else {
             Ok(Value::Int(sym as usize as i64))
         }
@@ -669,22 +673,46 @@ pub fn spl_wffi_call_i32_i64_u32_u32_f64_bits(args: &[Value]) -> Result<Value, C
     }))
 }
 
+enum BoolOutTarget<'a> {
+    Borrow(&'a crate::value::BorrowMutValue),
+    Addr(*mut u8),
+}
+
+impl<'a> BoolOutTarget<'a> {
+    fn from_value(value: &'a Value) -> Option<Self> {
+        match value {
+            Value::BorrowMut(borrow) => Some(Self::Borrow(borrow)),
+            Value::Int(addr) if *addr > 0 => Some(Self::Addr(*addr as usize as *mut u8)),
+            _ => None,
+        }
+    }
+
+    fn write(&self, value: bool) {
+        match self {
+            Self::Borrow(borrow) => *borrow.inner_mut() = Value::Bool(value),
+            Self::Addr(ptr) => {
+                let raw = *ptr;
+                unsafe { raw.write(if value { 1 } else { 0 }) };
+            }
+        }
+    }
+}
+
 /// Allocation-free typed C-boolean call with no arguments.
 pub fn spl_wffi_call_bool0_checked(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 2 {
         return Ok(Value::Int(1));
     }
+    let Some(output) = BoolOutTarget::from_value(&args[1]) else {
+        return Ok(Value::Int(1));
+    };
+    output.write(false);
     let fptr = match args[0] {
         Value::Int(value) if value != 0 => value as usize,
         _ => return Ok(Value::Int(2)),
     };
-    let output = match &args[1] {
-        Value::BorrowMut(value) => value,
-        _ => return Ok(Value::Int(1)),
-    };
-    *output.inner_mut() = Value::Bool(false);
     let function: extern "C" fn() -> bool = unsafe { std::mem::transmute(fptr) };
-    *output.inner_mut() = Value::Bool(function());
+    output.write(function());
     Ok(Value::Int(0))
 }
 
@@ -693,6 +721,10 @@ pub fn spl_wffi_call_bool1_checked(args: &[Value]) -> Result<Value, CompileError
     if args.len() != 3 {
         return Ok(Value::Int(1));
     }
+    let Some(output) = BoolOutTarget::from_value(&args[2]) else {
+        return Ok(Value::Int(1));
+    };
+    output.write(false);
     let fptr = match args[0] {
         Value::Int(value) if value != 0 => value as usize,
         _ => return Ok(Value::Int(2)),
@@ -701,13 +733,8 @@ pub fn spl_wffi_call_bool1_checked(args: &[Value]) -> Result<Value, CompileError
         Value::Int(value) => value,
         _ => return Ok(Value::Int(1)),
     };
-    let output = match &args[2] {
-        Value::BorrowMut(value) => value,
-        _ => return Ok(Value::Int(1)),
-    };
-    *output.inner_mut() = Value::Bool(false);
     let function: extern "C" fn(i64) -> bool = unsafe { std::mem::transmute(fptr) };
-    *output.inner_mut() = Value::Bool(function(arg0));
+    output.write(function(arg0));
     Ok(Value::Int(0))
 }
 
@@ -1020,6 +1047,14 @@ mod tests {
         value
     }
 
+    extern "C" fn return_bool_true() -> bool {
+        true
+    }
+
+    extern "C" fn is_positive_bool(value: i64) -> bool {
+        value > 0
+    }
+
     extern "C" fn add_scaled(a: f64, b: f64, scale: f64) -> f64 {
         (a + b) * scale
     }
@@ -1042,6 +1077,12 @@ mod tests {
     }
 
     #[test]
+    fn dlopen_load_failure_returns_zero_not_abort() {
+        let r = spl_dlopen(&[Value::text("definitely_missing_provider_xyz.dll")]).expect("load failure must not abort");
+        assert!(matches!(r, Value::Int(0)));
+    }
+
+    #[test]
     fn dynload_rejects_interior_nul_instead_of_returning_zero() {
         assert!(spl_dlopen(&[Value::text("invalid\0library")]).is_err());
     }
@@ -1049,6 +1090,31 @@ mod tests {
     #[test]
     fn symbol_lookup_rejects_null_handle_instead_of_returning_zero() {
         assert!(spl_dlsym(&[Value::Int(0), Value::text("missing")]).is_err());
+    }
+
+    #[test]
+    fn symbol_lookup_missing_export_returns_zero_not_abort() {
+        #[cfg(target_os = "macos")]
+        let (lib_path, known_sym) = ("libSystem.B.dylib", "getpid");
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let (lib_path, known_sym) = ("libc.so.6", "getpid");
+        #[cfg(windows)]
+        let (lib_path, known_sym) = ("kernel32.dll", "GetCurrentProcessId");
+
+        let handle = match spl_dlopen(&[Value::text(lib_path)]).expect("dlopen platform libc") {
+            Value::Int(h) => h,
+            other => panic!("expected integer handle, got {other:?}"),
+        };
+        assert!(handle > 0, "expected live handle for {lib_path}, got {handle}");
+
+        let found = spl_dlsym(&[Value::Int(handle), Value::text(known_sym)]).expect("known symbol must resolve");
+        assert!(matches!(found, Value::Int(addr) if addr != 0));
+
+        let missing = spl_dlsym(&[Value::Int(handle), Value::text("NoSuchExport_dhr")])
+            .expect("unresolved symbol must return 0 instead of raising");
+        assert_eq!(missing, Value::Int(0));
+
+        let _ = spl_dlclose(&[Value::Int(handle)]);
     }
 
     #[test]
@@ -1114,5 +1180,54 @@ mod tests {
         };
         assert!(spl_f64_to_bits(&[wrapped]).is_err());
         assert!(spl_f64_to_bits(&[Value::Nil]).is_err());
+    }
+
+    #[test]
+    fn bool_checked_accepts_address_slot_and_borrow_mut() {
+        use crate::value::BorrowMutValue;
+
+        let mut slot: u64 = 0x0101_0101_0101_0101;
+        let slot_addr = (&mut slot as *mut u64) as usize as i64;
+        let rc0 = spl_wffi_call_bool0_checked(&[
+            Value::Int(return_bool_true as usize as i64),
+            Value::Int(slot_addr),
+        ])
+        .unwrap();
+        assert_eq!(rc0, Value::Int(0));
+        assert_eq!(slot as u8, 1);
+
+        let rc1 = spl_wffi_call_bool1_checked(&[
+            Value::Int(is_positive_bool as usize as i64),
+            Value::Int(-5),
+            Value::Int(slot_addr),
+        ])
+        .unwrap();
+        assert_eq!(rc1, Value::Int(0));
+        assert_eq!(slot as u8, 0);
+
+        slot = 0x01;
+        let rc_null = spl_wffi_call_bool0_checked(&[Value::Int(0), Value::Int(slot_addr)]).unwrap();
+        assert_eq!(rc_null, Value::Int(2));
+        assert_eq!(slot as u8, 0);
+
+        let rc_bad_addr = spl_wffi_call_bool1_checked(&[
+            Value::Int(is_positive_bool as usize as i64),
+            Value::Int(1),
+            Value::Int(0),
+        ])
+        .unwrap();
+        assert_eq!(rc_bad_addr, Value::Int(1));
+
+        let borrow = Value::BorrowMut(BorrowMutValue::new(Value::Bool(false)));
+        let rc_borrow = spl_wffi_call_bool0_checked(&[
+            Value::Int(return_bool_true as usize as i64),
+            borrow.clone(),
+        ])
+        .unwrap();
+        assert_eq!(rc_borrow, Value::Int(0));
+        match borrow {
+            Value::BorrowMut(b) => assert_eq!(*b.inner_mut(), Value::Bool(true)),
+            other => panic!("expected BorrowMut, got {other:?}"),
+        }
     }
 }

@@ -17,14 +17,14 @@
 #   rc == 0 AND no verdict line                   -> FAIL  (silent green)
 #   rc >= 128 (killed by a signal, e.g. the 60s
 #     kill-monitor SIGTERM) or rc == 124 (timeout)-> ERROR (nothing was checked)
-#   any other rc != 0                             -> counted as a real failure,
-#                                                    which is a legitimate,
-#                                                    loud result -> pass here
+#   rc != 0 with a verdict line or an explicit error line (^(ERROR|error)(:| —)) -> OK (loud)
+#   rc != 0 with NEITHER                                  -> FAIL (silent nonzero)
 #     (this guard checks the runner's HONESTY, not whether specs are green)
 #
 # Verdict is the LAST line of stdout:
 #   PASS  — <n> target(s) checked, 0 silent green
 #   FAIL  — <n> target(s) checked, <k> silent green: <names>
+#   FAIL  — ... <k> silent nonzero (no verdict, no error line): <names>
 #   ERROR — nothing was checked
 # Exit: 0 / 1 / 2. A run that checked 0 targets is ERROR, never a pass.
 #
@@ -36,7 +36,19 @@
 
 set -u
 
-VERDICT_RE='Results:|Test Summary|examples\?,|Passed:|Failed:|total,.*passed|ERROR — nothing was checked'
+VERDICT_RE='Results:|Test Summary|examples\?,|Passed:|Failed:|total,.*passed|ERROR — nothing was checked|SPEC FILE VERDICT:'
+# An explicit error line makes a non-zero exit loud and honest (e.g.
+# "ERROR: test file not found", "error: test-runner: ...").
+ERRLINE_RE='^(ERROR|error)(:| —)'
+
+# Default command: prefer the Windows binary when present.
+if [ -z "${SIMPLE_TEST_CMD:-}" ]; then
+    if [ -f bin/simple.exe ]; then
+        SIMPLE_TEST_CMD="bin/simple.exe test"
+    else
+        SIMPLE_TEST_CMD="bin/simple test"
+    fi
+fi
 
 # Run one target, print its classification token on stdout: OK | SILENT | ERROR
 classify_target() {
@@ -46,7 +58,7 @@ classify_target() {
     # pipeline's $? is the LAST element's status and has produced false greens
     # in this repo before (.claude/rules/testing.md, "a pipe launders the exit
     # code").
-    ${SIMPLE_TEST_CMD:-bin/simple test} "$_target" >"$_out" 2>&1
+    ${SIMPLE_TEST_CMD} "$_target" >"$_out" 2>&1
     _rc=$?
 
     if grep -Eq "$VERDICT_RE" "$_out"; then
@@ -54,20 +66,41 @@ classify_target() {
     else
         _has_verdict=0
     fi
+    if grep -Eq "$ERRLINE_RE" "$_out"; then
+        _has_errline=1
+    else
+        _has_errline=0
+    fi
+    # A verdict that exists but is followed by >5 non-blank lines of noise reads
+    # as NO verdict to any caller that tails the output (rv64_arch_import_closure
+    # spec on Windows: verdict at line 175/222 of 448, ~226 gc-warning lines
+    # after). The verdict must be among the last 5 non-blank lines.
+    _buried=0
+    if [ "$_has_verdict" -eq 1 ]; then
+        grep -v '^[[:space:]]*$' "$_out" >"$_out.nb"
+        if ! tail -n 5 "$_out.nb" | grep -Eq "$VERDICT_RE"; then
+            _buried=1
+        fi
+        rm -f "$_out.nb"
+    fi
     rm -f "$_out"
 
     if [ "$_rc" -ge 128 ] || [ "$_rc" -eq 124 ]; then
         echo ERROR
         return 0
     fi
+    if [ "$_rc" -lt 128 ] && [ "$_rc" -ne 124 ] && [ "$_buried" -eq 1 ]; then
+        echo BURIED
+        return 0
+    fi
     if [ "$_rc" -eq 0 ] && [ "$_has_verdict" -eq 0 ]; then
         echo SILENT
         return 0
     fi
-    if [ "$_rc" -ne 0 ] && [ "$_has_verdict" -eq 0 ]; then
-        # Non-zero with no verdict is loud enough to not be a silent green, but
-        # it is still not evidence of anything having run.
-        echo ERROR
+    if [ "$_rc" -ne 0 ] && [ "$_has_verdict" -eq 0 ] && [ "$_has_errline" -eq 0 ]; then
+        # Non-zero with neither a verdict line nor an explicit error line:
+        # nothing says WHY it failed. Silent non-zero is a FAIL.
+        echo SILENTNZ
         return 0
     fi
     echo OK
@@ -100,7 +133,36 @@ echo "Results: 4 total, 3 passed, 1 failed"
 exit 1
 EOF
 
-    for _f in ok:OK silent:SILENT killed:ERROR red:OK; do
+    # Fixture 5: exit 1, NO output at all -> SILENTNZ (loud rc but nothing says why)
+    printf "exit 1
+" >"$_d/silentnz.sh"
+    # Fixture 6: exit 1 with an explicit error line, no verdict -> OK (honest)
+    cat >"$_d/errline.sh" <<'EOF'
+echo "ERROR: test file not found: x.spl"
+exit 1
+EOF
+
+    # Fixture 7: verdict present but buried under 30 trailing warning lines ->
+    # BURIED (the rv64_arch_import_closure_spec Windows shape)
+    cat >"$_d/buried.sh" <<'EOF'
+echo "SPEC FILE VERDICT: x.spl outcome=ERROR executed=3 passed=1 failed=2"
+echo "Results: 3 total, 1 passed, 2 failed"
+i=0
+while [ $i -lt 30 ]; do echo "[gc-warning] Higher-layer module m$i imported in restricted context"; i=$((i + 1)); done
+exit 1
+EOF
+    # Fixture 8: same, but the runner re-emitted the verdict last -> OK
+    cat >"$_d/recap.sh" <<'EOF'
+echo "SPEC FILE VERDICT: x.spl outcome=ERROR executed=3 passed=1 failed=2"
+i=0
+while [ $i -lt 30 ]; do echo "[gc-warning] m$i"; i=$((i + 1)); done
+echo "--- verdict recap ---"
+echo "SPEC FILE VERDICT: x.spl outcome=ERROR executed=3 passed=1 failed=2"
+echo "Results: 3 total, 1 passed, 2 failed"
+exit 1
+EOF
+
+    for _f in ok:OK silent:SILENT killed:ERROR red:OK silentnz:SILENTNZ errline:OK buried:BURIED recap:OK; do
         _name=${_f%%:*}
         _want=${_f##*:}
         _got=$(SIMPLE_TEST_CMD="sh $_d/$_name.sh" classify_target dummy)
@@ -128,7 +190,7 @@ done
 
 [ "$DO_SELFTEST" -ge 1 ] && selftest
 if [ "$DO_SELFTEST" -eq 2 ] && [ -z "${TARGETS# }" ]; then
-    echo "PASS — selftest only, 4 fixture(s) checked"
+    echo "PASS — selftest only, 8 fixture(s) checked"
     exit 0
 fi
 
@@ -139,14 +201,17 @@ fi
 
 checked=0
 silent=0
+silentnz=0
 errored=0
 silent_names=""
+silentnz_names=""
 error_names=""
 for t in $TARGETS; do
     checked=$((checked + 1))
     v=$(classify_target "$t")
     case "$v" in
-        SILENT) silent=$((silent + 1)); silent_names="$silent_names $t" ;;
+        SILENT|BURIED) silent=$((silent + 1)); silent_names="$silent_names $t" ;;
+        SILENTNZ) silentnz=$((silentnz + 1)); silentnz_names="$silentnz_names $t" ;;
         ERROR)  errored=$((errored + 1)); error_names="$error_names $t" ;;
     esac
     echo "  $v  $t"
@@ -155,6 +220,10 @@ done
 if [ "$checked" -eq 0 ]; then
     echo "ERROR — nothing was checked"
     exit 2
+fi
+if [ "$silentnz" -gt 0 ]; then
+    echo "FAIL — $checked target(s) checked, $silentnz silent nonzero (no verdict, no error line):$silentnz_names"
+    exit 1
 fi
 if [ "$silent" -gt 0 ]; then
     echo "FAIL — $checked target(s) checked, $silent silent green:$silent_names"

@@ -15,11 +15,12 @@
 /// - 0: ReadOnly
 /// - 1: ReadWrite
 /// - 2: WriteOnly
+/// - 3: ReadWrite, created when missing, never truncated (positioned writes)
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_open(
     path_ptr: *const u8,
     path_len: u64,
-    mode: i32, // 0=ReadOnly, 1=ReadWrite, 2=WriteOnly
+    mode: i32, // 0=ReadOnly, 1=ReadWrite, 2=WriteOnly, 3=ReadWrite+create
 ) -> i32 {
     if path_ptr.is_null() {
         return -1;
@@ -41,19 +42,21 @@ pub unsafe extern "C" fn rt_file_open(
         const O_RDONLY: i32 = 0x0000;
         const O_WRONLY: i32 = 0x0001;
         const O_RDWR: i32 = 0x0002;
+        const O_CREAT: i32 = 0x0100;
         const O_NOINHERIT: i32 = 0x0080;
         const O_BINARY: i32 = 0x8000;
         let access = match mode {
             0 => O_RDONLY,
             1 => O_RDWR,
             2 => O_WRONLY,
+            3 => O_RDWR | O_CREAT,
             _ => return -1,
         };
         if path_str.contains('\0') {
             return -1;
         }
         let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
-        return _wopen(wide.as_ptr(), O_BINARY | O_NOINHERIT | access);
+        return _wopen(wide.as_ptr(), O_BINARY | O_NOINHERIT | access, 0x180);
     }
 
     #[cfg(unix)]
@@ -64,6 +67,7 @@ pub unsafe extern "C" fn rt_file_open(
             0 => OpenOptions::new().read(true).open(path_str),
             1 => OpenOptions::new().read(true).write(true).open(path_str),
             2 => OpenOptions::new().write(true).open(path_str),
+            3 => OpenOptions::new().read(true).write(true).create(true).open(path_str),
             _ => return -1,
         };
 
@@ -285,14 +289,14 @@ pub unsafe extern "C" fn rt_fd_pread(fd: i32, buffer: *mut u8, len: i64, offset:
             n as i64
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows_positioned::pread(fd, buffer, len, offset)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (fd, buffer, len, offset);
-        // ENOSYS. Spelled literally rather than as `libc::ENOSYS` so this
-        // non-unix branch does not depend on the libc crate exposing that
-        // constant for Windows targets, which cannot be verified on the
-        // aarch64 Linux host this landed from.
-        -38
+        -38 // ENOSYS
     }
 }
 
@@ -312,14 +316,14 @@ pub unsafe extern "C" fn rt_fd_pwrite(fd: i32, buffer: *const u8, len: i64, offs
             n as i64
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows_positioned::pwrite(fd, buffer, len, offset)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (fd, buffer, len, offset);
-        // ENOSYS. Spelled literally rather than as `libc::ENOSYS` so this
-        // non-unix branch does not depend on the libc crate exposing that
-        // constant for Windows targets, which cannot be verified on the
-        // aarch64 Linux host this landed from.
-        -38
+        -38 // ENOSYS
     }
 }
 
@@ -389,8 +393,8 @@ pub extern "C" fn rt_open_fd(path: crate::value::RuntimeValue, flags: i64, mode:
         const O_WRONLY: i32 = 0x0001;
         const O_RDWR: i32 = 0x0002;
         const O_APPEND: i32 = 0x0008;
-        const O_CREAT: i32 = 0x0100;
         const O_TRUNC: i32 = 0x0200;
+        const O_CREAT: i32 = 0x0100;
         const O_NOINHERIT: i32 = 0x0080;
         const O_BINARY: i32 = 0x8000;
         const S_IREAD: i32 = 0x0100;
@@ -467,5 +471,128 @@ mod open_fd_tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(rt_open_fd(boxed, 0x0, 0), -1, "missing file");
         assert_eq!(rt_close_fd(-1), -1);
+    }
+}
+
+/// Windows positioned I/O on a CRT descriptor (`pread`/`pwrite` equivalent).
+///
+/// Resolves the CRT fd to its OS handle and issues `ReadFile`/`WriteFile` with
+/// an `OVERLAPPED` carrying the 64-bit offset. On a synchronous handle the
+/// offset is honoured per call; the shared file cursor is left unspecified
+/// (callers of the ranged API never rely on it). Returns bytes transferred, or
+/// `-errno`-style codes: `-9` (EBADF) for a bad descriptor, `-5` (EIO) for an
+/// I/O failure other than end of file; end of file reads return 0.
+#[cfg(windows)]
+pub mod windows_positioned {
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+    extern "C" {
+        fn _get_osfhandle(fd: i32) -> isize;
+        #[cfg(target_env = "msvc")]
+        fn _set_thread_local_invalid_parameter_handler(
+            h: Option<InvalidParameterHandler>,
+        ) -> Option<InvalidParameterHandler>;
+    }
+    #[cfg(target_env = "msvc")]
+    type InvalidParameterHandler = unsafe extern "C" fn(*const u16, *const u16, *const u16, u32, usize);
+    #[cfg(target_env = "msvc")]
+    unsafe extern "C" fn ignore_invalid_parameter(_: *const u16, _: *const u16, _: *const u16, _: u32, _: usize) {}
+    const ERROR_HANDLE_EOF: u32 = 38;
+    const ERROR_BROKEN_PIPE: u32 = 109;
+
+    fn handle_of(fd: i32) -> Option<isize> {
+        if fd < 0 {
+            return None; // CRT would raise an invalid-parameter fault
+        }
+        // MSVC's CRT fails fast for a closed descriptor unless its invalid-
+        // parameter handler is neutralised. MinGW's msvcrt-compatible
+        // _get_osfhandle returns -1 directly and does not export the handler.
+        #[cfg(target_env = "msvc")]
+        let h = unsafe {
+            let old = _set_thread_local_invalid_parameter_handler(Some(ignore_invalid_parameter));
+            let h = _get_osfhandle(fd);
+            _set_thread_local_invalid_parameter_handler(old);
+            h
+        };
+        #[cfg(not(target_env = "msvc"))]
+        let h = unsafe { _get_osfhandle(fd) };
+        if h == -1 || h == 0 {
+            None
+        } else {
+            Some(h)
+        }
+    }
+
+    fn overlapped_at(offset: i64) -> OVERLAPPED {
+        let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
+        ov.Anonymous.Anonymous.Offset = (offset as u64 & 0xFFFF_FFFF) as u32;
+        ov.Anonymous.Anonymous.OffsetHigh = ((offset as u64) >> 32) as u32;
+        ov
+    }
+
+    /// # Safety
+    /// `buffer` must be valid for writes of `len` bytes.
+    pub unsafe fn pread(fd: i32, buffer: *mut u8, len: i64, offset: i64) -> i64 {
+        if buffer.is_null() || len < 0 || offset < 0 {
+            return -22; // EINVAL
+        }
+        let Some(h) = handle_of(fd) else { return -9 };
+        let want = len.min(i64::from(u32::MAX >> 1)) as u32;
+        let mut ov = overlapped_at(offset);
+        let mut got: u32 = 0;
+        if ReadFile(h as _, buffer, want, &mut got, &mut ov) == 0 {
+            return match GetLastError() {
+                ERROR_HANDLE_EOF | ERROR_BROKEN_PIPE => 0,
+                _ => -5,
+            };
+        }
+        i64::from(got)
+    }
+
+    /// # Safety
+    /// `buffer` must be valid for reads of `len` bytes.
+    pub unsafe fn pwrite(fd: i32, buffer: *const u8, len: i64, offset: i64) -> i64 {
+        if buffer.is_null() || len < 0 || offset < 0 {
+            return -22;
+        }
+        let Some(h) = handle_of(fd) else { return -9 };
+        let want = len.min(i64::from(u32::MAX >> 1)) as u32;
+        let mut ov = overlapped_at(offset);
+        let mut put: u32 = 0;
+        if WriteFile(h as _, buffer, want, &mut put, &mut ov) == 0 {
+            return -5;
+        }
+        i64::from(put)
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_positioned_tests {
+    use super::{rt_fd_pread, rt_fd_pwrite, rt_close_fd, rt_open_fd};
+    use crate::value::collections::rt_string_new;
+
+    /// Old code returned -38 (ENOSYS) for every call on Windows.
+    #[test]
+    fn pread_pwrite_honour_offsets_on_windows() {
+        let path = std::env::temp_dir().join(format!("rt_fd_pread_win_{}.tmp", std::process::id()));
+        let text = path.to_str().expect("utf8 temp path");
+        let boxed = rt_string_new(text.as_ptr(), text.len() as u64);
+        let fd = rt_open_fd(boxed, 0x2 | 0x40 | 0x200, 0o644) as i32;
+        assert!(fd >= 0);
+        let data = b"0123456789abcdef";
+        unsafe {
+            assert_eq!(rt_fd_pwrite(fd, data.as_ptr(), 16, 0), 16);
+            let mut buf = [0u8; 4];
+            assert_eq!(rt_fd_pread(fd, buf.as_mut_ptr(), 4, 10), 4);
+            assert_eq!(&buf, b"abcd");
+            assert_eq!(rt_fd_pread(fd, buf.as_mut_ptr(), 4, 2), 4);
+            assert_eq!(&buf, b"2345");
+            assert_eq!(rt_fd_pread(fd, buf.as_mut_ptr(), 4, 16), 0, "EOF");
+            assert_eq!(rt_fd_pread(fd, buf.as_mut_ptr(), 4, 14), 2, "short read");
+            assert!(rt_fd_pread(-1, buf.as_mut_ptr(), 4, 0) < 0);
+        }
+        assert_eq!(rt_close_fd(i64::from(fd)), 0);
+        let _ = std::fs::remove_file(&path);
     }
 }

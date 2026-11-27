@@ -1,0 +1,86 @@
+"""
+# JS exec_if Control-Flow Propagation & Subset Try/Throw/Break/Continue Spec
+
+Covers OtherFix-11 (#76) part 1:
+- `exec_if` must stop executing statements in BOTH `then_body` and `else_body`
+  when `control_return`, `control_thrown`, `control_break`, or `control_continue`
+  becomes true.
+- `execute` must break on `control_thrown` and clear stale control flags
+  between consecutive evaluations.
+- `parser.spl` must parse `break`, `continue`, `throw`, and `try/catch/finally`
+  statements inside loops and `if`/`else` blocks.
+"""
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.js.engine.runtime.{js_runtime_with_default_logger}
+use std.js.types.js_types.{JsValue}
+
+fn _js_num_text(n: f64) -> text:
+    val s = n.to_text()
+    if s.ends_with(".0"):
+        return s.slice(0, s.len() - 2)
+    s
+
+fn _eval_text(src: text) -> text:
+    var rt = js_runtime_with_default_logger("exec-if-spec")
+    match rt.eval(src):
+        Ok(v):
+            match v:
+                JsValue.String(v: s): s
+                JsValue.Number(v: n): _js_num_text(n)
+                JsValue.Boolean(v: b): if b: "true" else: "false"
+                JsValue.Null: "null"
+                JsValue.Undefined: "<undefined>"
+                _: "<other>"
+        Err(e):
+            "<err:" + e.message + ">"
+
+describe "JS exec_if break/continue/throw/return propagation":
+    it "stops then_body and enclosing loop body on break inside if":
+        step("Verify break inside if stops trailing statements in then_body and loop")
+        val src = "var hits = 0; var tail = 0; var i = 0; while (i < 5) { if (i == 2) { break; tail = tail + 100; } hits = hits + 1; i = i + 1; } hits + ',' + tail + ',' + i"
+        expect(_eval_text(src)).to_equal("2,0,2")
+
+    it "stops else_body and enclosing loop body on break inside else":
+        step("Verify break inside else stops trailing statements in else_body and loop")
+        val src = "var hits = 0; var tail = 0; var i = 0; while (i < 5) { if (i < 2) { hits = hits + 1; } else { break; tail = tail + 100; } i = i + 1; } hits + ',' + tail + ',' + i"
+        expect(_eval_text(src)).to_equal("2,0,2")
+
+    it "stops then_body and rest of iteration on continue inside if":
+        step("Verify continue inside if skips trailing statements in then_body and iteration")
+        val src = "var sum = 0; var branch_tail = 0; var i = 0; while (i < 4) { i = i + 1; if (i == 2) { continue; branch_tail = branch_tail + 1; } sum = sum + i; } sum + ',' + branch_tail"
+        expect(_eval_text(src)).to_equal("8,0")
+
+    it "stops else_body and rest of iteration on continue inside else":
+        step("Verify continue inside else skips trailing statements in else_body and iteration")
+        val src = "var kept = 0; var else_tail = 0; var i = 0; while (i < 4) { i = i + 1; if (i == 2) { kept = kept + 10; } else { continue; else_tail = else_tail + 1; } kept = kept + 1; } kept + ',' + else_tail"
+        expect(_eval_text(src)).to_equal("11,0")
+
+    it "stops then_body and else_body immediately on throw inside if/else":
+        step("Verify throw inside then_body and else_body transfers directly to catch")
+        val then_src = "var caught = ''; var after = 0; try { if (true) { throw 'boom-then'; after = 1; } after = 2; } catch (e) { caught = e; } caught + ':' + after"
+        expect(_eval_text(then_src)).to_equal("boom-then:0")
+
+        val else_src = "var caught = ''; var after = 0; try { if (false) { after = 9; } else { throw 'boom-else'; after = 1; } after = 2; } catch (e) { caught = e; } caught + ':' + after"
+        expect(_eval_text(else_src)).to_equal("boom-else:0")
+
+    it "propagates return from nested if in both then and else branches":
+        step("Verify return inside nested if/else unwinds cleanly without executing trailing code")
+        val src = "function f(x) { if (x) { if (true) { return 'then-early'; } return 'then-late'; } else { if (true) { return 'else-early'; } return 'else-late'; } } f(true) + '|' + f(false)"
+        expect(_eval_text(src)).to_equal("then-early|else-early")
+
+    it "clears stale throw flag across consecutive eval calls on the same runtime":
+        step("Verify uncaught throw in first eval does not poison second eval")
+        var rt = js_runtime_with_default_logger("exec-if-reset")
+        val first = rt.eval("if (true) { throw 'uncaught'; }")
+        var saw_err = false
+        match first:
+            Err(_): saw_err = true
+            Ok(_): saw_err = false
+        expect(saw_err).to_equal(true)
+
+        var ok_val = ""
+        match rt.eval("var x = 1; if (true) { x = 42; } x"):
+            Ok(JsValue.Number(v: n)): ok_val = _js_num_text(n)
+            _: ok_val = "fail"
+        expect(ok_val).to_equal("42")

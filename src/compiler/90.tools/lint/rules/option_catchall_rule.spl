@@ -1,0 +1,81 @@
+# OPT-CATCHALL-001: bare-identifier catch-all arm in a match over an Option.
+#
+# A match with a `case None:` arm is a match over an Option. A sibling arm
+# whose pattern is a bare identifier (`case value:`) binds the WHOLE Option,
+# not the inner value, so `value` is still `Some(x)` and its text leaks as
+# `Option::Some(x)` (seen in summary digests). Before the `None` arm it also
+# makes `None` unreachable. Write `case Some(value):` instead.
+#
+# Text scan: for every `case None:` line, its sibling `case` lines (same
+# indent, same block) are checked. `_`, `nil`, `true`, `false` and guarded
+# arms (`case x if ...:`) are not flagged.
+use compiler.tools.lint.lint_rule_api.{LintParamsV1, LintUnit, StaticLintCategory, StaticLintFinding, StaticLintLevel, StaticLintRule, lint_rule_provider_iface, static_lint_rule}
+
+fn opt_catchall_indent_of(line: text) -> i64:
+    var n = 0
+    while n < line.byte_len():
+        val ch = line.substring(n, n + 1)
+        if ch != " " and ch != "\t": break
+        n = n + 1
+    n
+
+fn opt_catchall_pattern_of(trimmed: text) -> text:
+    # `case P: body` -> `P`; "" when the line is not a case arm.
+    if not trimmed.starts_with("case "): return ""
+    val rest = trimmed.substring(5, trimmed.byte_len())
+    val colon = rest.index_of(":")
+    if colon < 0: return ""
+    rest.substring(0, colon).trim()
+
+fn opt_catchall_is_bare_ident(pat: text) -> bool:
+    if pat == "" or pat == "_" or pat == "nil" or pat == "true" or pat == "false": return false
+    val first = pat.substring(0, 1)
+    if not ((first >= "a" and first <= "z") or first == "_"): return false
+    var i = 0
+    while i < pat.byte_len():
+        val ch = pat.substring(i, i + 1)
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok: return false
+        i = i + 1
+    true
+
+pub fn check_option_catchall(content: text) -> [StaticLintFinding]:
+    val lines = content.split("\n")
+    var findings: [StaticLintFinding] = []
+    var flagged: [i64] = []
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val indent = opt_catchall_indent_of(line)
+        if opt_catchall_pattern_of(line.trim()) == "None":
+            # Walk the sibling arms of this match, both directions.
+            for dir in [-1, 1]:
+                var j = i + dir
+                while j >= 0 and j < lines.len():
+                    val other = lines[j]
+                    val t = other.trim()
+                    if t == "" or t.starts_with("#"):
+                        j = j + dir
+                        continue
+                    val oi = opt_catchall_indent_of(other)
+                    if oi < indent: break
+                    if oi == indent:
+                        val pat = opt_catchall_pattern_of(t)
+                        if pat == "": break
+                        if opt_catchall_is_bare_ident(pat) and not flagged.contains(j):
+                            flagged.push(j)
+                            findings.push(StaticLintFinding(
+                                "OPT-CATCHALL-001", StaticLintLevel.Warn, StaticLintCategory.Correctness,
+                                "`case {pat}:` next to `case None:` binds the whole Option, not the inner value",
+                                "write `case Some({pat}):`",
+                                j + 1, oi + 1))
+                    j = j + dir
+        i = i + 1
+    findings
+
+fn option_catchall_check_rule(params: LintParamsV1, unit: LintUnit) -> [StaticLintFinding]:
+    val _ = params
+    check_option_catchall(unit.content)
+
+pub fn option_catchall_lint_rule() -> StaticLintRule:
+    static_lint_rule("option_catchall", lint_rule_provider_iface("option_catchall"), option_catchall_check_rule)

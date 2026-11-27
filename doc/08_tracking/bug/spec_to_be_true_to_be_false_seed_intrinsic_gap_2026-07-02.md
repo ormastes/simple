@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
 fresh dated repro if the symptom returns.
 
-**Status:** PARTIALLY FIXED (Rust seed source patched; rebuild/deploy verification pending)
+**Status:** FIXED 2026-11-11 — runner8 triage; tracked seed binary verified to carry the `to_be_true`/`to_be_false` intrinsic fix (doc repro 4/4, in-tree matcher spec 2/2). See addendum at end.
 **Date:** 2026-07-02
 **Severity:** Medium (two documented BDD matchers are unusable under `bin/simple test`/`run`)
 
@@ -124,3 +124,25 @@ Before fix (current deployed binary): first two cases fail with
 latter two already pass (confirms no regression path — they hit a
 different, unmodified match arm).
 
+
+---
+
+## Addendum 2026-11-11 — runner8 P3 triage: FIXED (verified on tracked seed)
+
+Rebuild/deploy verification — the step this doc left pending — is now done
+for the tracked seed binary.
+
+Evidence on release/1.0.0 tip (worktree `simple-p3-runner8-20261111`, seed
+`bin/simple.exe` @ 46fe8f6b6def, `SIMPLE_LIB=src`, `--mode=interpreter
+--no-cache`):
+
+- Fix present in seed source: `src/compiler_rust/compiler/src/
+  interpreter_method/mod.rs` — `to_be_true`/`to_be_false` in the
+  BDD-matcher guard list (line 331), match arms at lines 791 and 805 with
+  the strict `Value::Bool(true/false)` equality the doc specified.
+- The tracked seed binary carries the fix (it post-dates the patch): the
+  doc's own verification spec passes 4/4 — to_be_true, to_be_false,
+  to_be_truthy, to_be_nil all green.
+- Committed regression coverage passes on the same lane:
+  `test/01_unit/std/spec_to_be_true_matcher_spec.spl` 2/2 OK (plus
+  `spec_to_be_true_in_it_block_spec.spl` in-tree).

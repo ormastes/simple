@@ -1,0 +1,95 @@
+# @gc — module uses GC runtime
+#
+# kv_cache — incremental KV cache for the pure-Simple Llama runner.
+#
+# A KvSession owns per-layer K/V row buffers plus the ids whose rows are
+# filled (`cached_ids`). Generating from a prompt re-uses the longest common
+# prefix with `cached_ids`, so a second request sharing a prefix evaluates only
+# its new positions. At least the last prompt token is always evaluated: its
+# hidden state is what produces the first generated token. Rows at or beyond a
+# position are never read before being rewritten (attention reads rows
+# [0, pos]), so stale rows left by a previous request are harmless.
+# `positions_evaluated` counts every llama_step call: the proof counter.
+
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_zeros, tensor_argmax}
+use std.gc_async_mut.slang.model_executor.pure.llama_forward.{LlamaModel, LlamaKvRows, llama_kv_rows_new, llama_step, llama_logits, llama_forward_logits}
+
+pub struct KvSession:
+    kv: LlamaKvRows
+    cached_ids: [i64]
+    hidden: PureTensor
+    positions_evaluated: i64
+
+pub struct KvGenResult:
+    session: KvSession
+    generated: [i64]
+    reused_positions: i64
+
+pub fn kv_session_new(m: LlamaModel) -> KvSession:
+    KvSession(kv: llama_kv_rows_new(m.config, m.config.max_pos), cached_ids: [], hidden: tensor_zeros([m.config.dim]), positions_evaluated: 0)
+
+fn _common_prefix(a: [i64], b: [i64]) -> i64:
+    var n: i64 = 0
+    while n < a.len() and n < b.len() and a[n] == b[n]:
+        n = n + 1
+    n
+
+# Positions of `prompt_ids` whose K/V rows can be reused from `cached_ids`:
+# the common prefix, but never the last prompt token (its hidden state yields
+# the first generated token). Shared with the ROCm session.
+# reason: KV-cache API over raw token ids and position counts; a token-id/position domain type does not exist in std.common.types yet
+# @allow(primitive_api)
+pub fn kv_reuse_len(cached_ids: [i64], prompt_ids: [i64]) -> i64:
+    val reuse = _common_prefix(cached_ids, prompt_ids)
+    if reuse >= prompt_ids.len():
+        return prompt_ids.len() - 1
+    reuse
+
+# Evaluate ids[reuse..] on top of the cached rows [0, reuse).
+fn _extend(m: LlamaModel, s: KvSession, ids: [i64], reuse: i64) -> KvSession:
+    var kv = s.kv
+    var hidden = s.hidden
+    var evaluated = s.positions_evaluated
+    var pos = reuse
+    while pos < ids.len():
+        val out = llama_step(m, kv, ids[pos], pos)
+        kv = out.kv
+        hidden = out.hidden
+        evaluated = evaluated + 1
+        pos = pos + 1
+    KvSession(kv: kv, cached_ids: ids, hidden: hidden, positions_evaluated: evaluated)
+
+# Greedy generation with the cache. Stops at EOS or when n_new tokens exist.
+# reason: KV-cache API over raw token ids and position counts; a token-id/position domain type does not exist in std.common.types yet
+# @allow(primitive_api)
+pub fn kv_generate_greedy(m: LlamaModel, session: KvSession, prompt_ids: [i64], n_new: i64) -> KvGenResult:
+    val reuse = kv_reuse_len(session.cached_ids, prompt_ids)
+    var s = _extend(m, session, prompt_ids, reuse)
+    var ids = prompt_ids
+    var generated: [i64] = []
+    while generated.len() < n_new and ids.len() < m.config.max_pos:
+        val next = tensor_argmax(llama_logits(m, s.hidden))
+        generated.push(next)
+        if next == m.config.eos_id:
+            break
+        ids.push(next)
+        if generated.len() < n_new and ids.len() < m.config.max_pos:
+            s = _extend(m, s, ids, ids.len() - 1)
+    KvGenResult(session: s, generated: generated, reused_positions: reuse)
+
+# Reference path with no cache: every new token re-runs the whole sequence.
+# Returns the generated ids and the number of positions evaluated.
+# reason: KV-cache API over raw token ids and position counts; a token-id/position domain type does not exist in std.common.types yet
+# @allow(primitive_api)
+pub fn kv_generate_greedy_nocache(m: LlamaModel, prompt_ids: [i64], n_new: i64) -> ([i64], i64):
+    var ids = prompt_ids
+    var generated: [i64] = []
+    var evaluated: i64 = 0
+    while generated.len() < n_new and ids.len() < m.config.max_pos:
+        val next = tensor_argmax(llama_forward_logits(m, ids))
+        evaluated = evaluated + ids.len()
+        generated.push(next)
+        if next == m.config.eos_id:
+            break
+        ids.push(next)
+    (generated, evaluated)

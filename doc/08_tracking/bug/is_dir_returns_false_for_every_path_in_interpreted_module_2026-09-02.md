@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-02
-- Status: OPEN
+- Status: FIXED (2026-11-11, lane interp9) — both defects verified fixed on deployed seed. See addendum below.
 - Severity: high (silently disables every `is_dir`-guarded code path)
 - Binary: `bin/simple.exe`, md5 `d52d770724a9f8797e98ac7819709ab9`, 16,347,136 bytes, mtime 2026-09-01 17:54
 - Platform observed: Windows 11 (x86_64-pc-windows-msvc)
@@ -74,4 +74,43 @@ is recorded as the first thing to check, not as a finding.
    and `file_exists` already accept forms `is_dir` rejects, so the three
    disagree today.
 3. Grep for `is_dir(` guards in tooling paths — each is a latent silent no-op.
+
+## 2026-11-11 addendum (lane interp9, work/p3-interp9-20261111) — FIXED, both defects verified on seed
+
+Verdict: FIXED (both defects).
+
+- Defect 1 (engine-dependent): `is_dir` in
+  `src/lib/nogc_sync_mut/io/dir_ops.spl:87` now forwards to the real
+  `rt_dir_exists` extern instead of the `_dir_shell_bool("test -d ...")` shell
+  placeholder that made every answer false interpreted (see the in-code comment
+  citing `is_dir_always_false_shell_dependency_2026-09-02.md`).
+- Defect 2 (separator-dependent): `rt_dir_exists` on the current seed answers
+  true for a genuine backslash-separated native path on Windows (verified
+  below). `dir_walk` canonicalises its emitted entries with
+  `host_path_canonical`, so the two now agree; the raw extern itself
+  (`rt_dir_exists` → `rt_is_dir` → `GetFileAttributesA` on Windows,
+  `std::path::Path::is_dir` in the seed's `interpreter_extern/file_io.rs`)
+  accepts both separator forms.
+
+Verification actually run (seed-smoke, tracked `bin/simple.exe` build-commit
+`46fe8f6b6def`, `SIMPLE_LIB=src`, interpreter lane AND default lane; the probe
+module dropped to the interpreter with the documented
+`compiler_cross_module_private_symbol_collision` jit-fallback on both lanes —
+exactly the interpreter-fallback condition this record was filed under):
+
+- `is_dir(cwd())` → true, `is_dir(cwd() + "/src/lib")` → true,
+  `file_exists(cwd())` → true, on BOTH lanes.
+- `is_dir` on the true native backslash form of the repo root (built with
+  `.replace("/", "\u{5C}")` — see the escape caveat below) → true on BOTH
+  lanes. The same string answers true at the raw `rt_dir_exists` extern.
+
+Probe-spelling caveat (recorded so the next verifier is not misled): in a
+Simple string literal, a backslash before an ordinary letter is consumed as an
+escape (`"\src"` collapses to `src`), so the literal `"C:\...\src\lib"` does
+NOT survive to the runtime. Build backslash paths with `.replace("/", "\u{5C}")`
+or the `host_path_native` facade — otherwise a probe of this defect reproduces
+as an apparent `is_dir` false for a path that never contained backslashes.
+
+Guard: `test/01_unit/app/doc_coverage/file_scanner_native_paths_spec.spl`
+already pins the native-separator classifier half of this family.
 

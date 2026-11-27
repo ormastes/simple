@@ -23,6 +23,7 @@ Build, audit, bootstrap, and utility scripts.
 | `scv-migration` | SCV migration acceptance step scripts (signature-gated by check-scv-migration-todo.shs) |
 | `setup` | Project setup and install scripts |
 | `smoke` | Protocol smoke test scripts |
+| `vcs` | Git merge drivers + PR sync (sdn-rows-merge.shs: sealed SDN row union + reseal; gh-pr-sdn-sync.shs: merge base into a PR with that driver and push) |
 | `check-workspace-root-guard.shs` | Workspace root guard |
 | `check-simpleos-native-surface.shs` | SimpleOS native-surface policy gate |
 | `gen_cm6_grammar.mjs` | Generates the JupyterLab labextension's CodeMirror 6 grammar from the Tree-sitter highlight queries (`tools/jupyter/labextension/src/generated/`) |

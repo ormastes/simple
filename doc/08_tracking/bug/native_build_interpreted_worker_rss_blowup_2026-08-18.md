@@ -1,10 +1,16 @@
 # Interpreted native-build worker blows up in RSS: two terms, one fixed (~2.7 GB) and one unbounded creep inside `parse`
 
 - **Filed:** 2026-08-18
-- **Status:** OPEN — **located, not fixed.** No fix is claimed and no perf claim
+- **Status:** LIVE (triaged 2026-11-11, lanes boot6/int10/int11) — located, not
+  fixed. No fix is claimed and no perf claim
   is made: the host was halted mid-measurement (see "Halt" below), so no
   before/after arm exists. This row records what was measured, what it means,
-  and exactly where the next owner should put a breakpoint.
+  and exactly where the next owner should put a breakpoint. Term 1 (fixed
+  ~2.7-3.1 GB import-closure load) is intrinsic to the interpreted-worker
+  spawn (unchanged at this base, source-checked by int11); term 2 (unbounded
+  creep inside the interpreted `parse` step) remains unattributed. Owner:
+  seed-fix lane (term 2 attribution, Linux gdb/sampler grant) / bootstrap
+  redesign (term 1). See the 2026-11-10/11 addenda below.
 - **Predecessor row:** `native_build_source_closure_zero_sources_2026-08-17.md`
   — that row fixed the *misattribution* (`-1` is a shared sentinel for deadline
   expiry AND abnormal child exit, so an allocator abort printed
@@ -189,3 +195,104 @@ would be a lower bound rather than a measurement.
 3. Only then decide between fixing the identified retention (term 2, small
    change, likely in the interpreted `parse_module` path) and filing term 1 as
    the redesign it is.
+
+## 2026-11-07 — term 1 re-measured on Windows: 3.09 GB before the build starts; term 2 not reproducible on this host
+
+Binary `simple-base.exe` (tip `4eb1de2ecbd`, bootstrap profile, sha256
+`c0c47b2cdd6cd6ee…`), Windows 11 with ~2.4 GB free of 64 GB (other lanes
+building), exact reproducer argv from above with the LLVM 23.1.1 PATH:
+
+```
+SIMPLE_BOOTSTRAP=1 sh scripts/perf/measure-peak-rss.shs -- simple-base.exe native-build \
+  --source test/fixtures/native_trailing_default_param \
+  --entry  test/fixtures/native_trailing_default_param/main.spl --entry-closure -o out.exe
+peak-rss: label=nb_fixture wall_ms=84223 peak_kib=3087468 exit=3 method=ps-sample
+error: build refused: 2477 MiB of RAM/commit headroom free, below the 24576 MiB reserve
+```
+
+- **Term 1 (fixed import-closure load) = 3.09 GB peak here**, reached in
+  84 s before any `[build]` step — higher than the 1.99 GB no-arg
+  `native_build_worker.spl` floor measured the same day, because the
+  `--source/--entry` form loads the full driver closure in the parent.
+- **Term 2 (creep inside `parse`) could not be exercised**: the build was
+  refused by the memory-reserve guard (`SIMPLE_BUILD_MEMORY_RESERVE_BYTES`,
+  24 GiB) before reaching `parse 0/2`, and lowering the reserve on a host at
+  2.4 GB free would reproduce the earlyoom conditions of the original halt
+  rather than the defect. No sampler on the parse step was taken.
+
+Verification pending, exact command and host: on a Linux box with >= 8 GB
+free and `gdb`, the "Next steps" item 2 above —
+`ulimit -v 6000000; gdb -q -batch -x cmds --args $(readlink -f bin/simple) run src/app/cli/native_build_worker.spl --source test/fixtures/native_trailing_default_param --entry test/fixtures/native_trailing_default_param/main.spl --entry-closure -o out.bin`
+with `break abort` / `break alloc::alloc::handle_alloc_error`, `bt 60` at the
+2^31-byte request. The in-process sampler now also runs on Windows
+(`SIMPLE_INTERP_SAMPLE=1`, round-15 seed change), so on a host that reaches
+`parse` the creep can be attributed to a Simple function without gdb.
+
+## 2026-11-10 status — LIVE-blocked-by-scope (P3 bootstrap lane row 44, work/p3-boot6-20261110)
+
+Re-judged on this lane's base (`4343ce254922`): still LIVE, two terms as
+recorded. Term 1 (fixed ~2.7-3.1 GB import-closure load) is intrinsic to
+spawning the interpreted worker and is the redesign item — same disposition
+as row 43 (`native_build_interpreted_worker_fixed_2_4gb_floor_2026-08-18`).
+Term 2 (unbounded creep inside the interpreted `parse` step, the guard-killer)
+was never attributed: the 2026-11-07 Windows pass could not reach `parse 0/2`
+because the memory-reserve guard refused the build on a loaded host. Both
+fix surfaces are excluded from this lane: term 2's retention lives in the
+pure-Simple `ast:parse_module` path interpreted under the seed
+(`src/compiler`, agent-30 lane) or in seed interpreter allocations
+(`src/compiler_rust`, seed-fix lane).
+
+Fix sketch for the owning lane: on a Linux host with >= 8 GB free, attribute
+term 2 with the in-process sampler now available on Windows too
+(`SIMPLE_INTERP_SAMPLE=1`, round-15 seed change) or, per this record's Next
+steps item 2, `ulimit -v 6000000; gdb -q -batch -x cmds --args bin/simple run src/app/cli/native_build_worker.spl --source test/fixtures/native_trailing_default_param --entry test/fixtures/native_trailing_default_param/main.spl --entry-closure -o out.bin`
+with `break abort` (NOT `rust_oom` — stays pending on the deployed binary)
+and `bt 60` at the 2^31-byte request; the 2^31 single allocation names one
+doubling buffer. Fix the identified retention in `parse_module` (term 2,
+small change); file term 1 as the redesign it is.
+
+BLOCKED-needs-grant (heavy/host-forbidden on this lane): the gdb attribution
+run above is Linux-only (this lane runs Windows; `ulimit`/`gdb` shape
+unavailable) and the fixture native-build run peaks ~3 GB against the
+24 GiB reserve guard on a loaded 64 GB host. Exact command recorded above;
+no re-measure this pass (2026-11-07 baseline already in-record).
+
+## 2026-11-11 status — LIVE (lane int10 concurrence; Status stays OPEN)
+
+int10 re-read this record and the boot6 2026-11-10 addendum at base
+`1771ca481337` and concurs: still LIVE, two terms as recorded. Term 1
+(fixed ~2.7-3.1 GB import-closure load) is intrinsic to spawning the
+interpreted worker — the bootstrap redesign item. Term 2 (unbounded creep
+inside the interpreted `parse` step) remains unattributed; both fix surfaces
+are outside this lane (`src/compiler` agent-30 lane; `src/compiler_rust`
+seed-fix lane, needs the Linux gdb / sampler attribution grant boot6 recorded
+verbatim above — this lane is also Windows, same host constraint). No
+re-measure: 2026-11-07 baseline in-record, identical re-run budget-forbidden.
+Owner: seed-fix lane (term 2 attribution) / bootstrap redesign (term 1).
+
+## 2026-11-11 triage (lane int11) — header flipped LIVE; disposition source-checked
+
+Sweep flip. boot6 (2026-11-10) and int10 (2026-11-11) addenda recorded the
+verified two-term LIVE disposition with named owners; the header still read
+OPEN. int11 quick re-verify at base `84f5076db138` (source checks only, no
+re-measure — same host constraint boot6 recorded verbatim above): the
+interpreted-worker spawn is unchanged (`src/app/cli/bootstrap_main.spl:165`
+`run_native_build_worker(worker_args)`; `src/compiler_rust/compiler/src/module_cache.rs`
+still carries the process-lifetime `thread_local` retention maps, 8 hits), so
+term 1's import-closure floor remains intrinsic to the spawn shape. Term 2
+(unbounded `parse`-step creep) remains unattributed; both fix surfaces are
+outside this lane (`src/compiler` agent-30 lane; `src/compiler_rust`
+seed-fix lane with the Linux gdb/sampler grant). Header flipped to LIVE.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lanes boot6/int10/int11: LIVE — located, not fixed (interpreted-worker RSS terms recorded there; one fixed ~2.7 GB term, one unbounded creep inside parse). Memory-retention work exceeds the per-bug timebox; disposition stands.
+
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113 (worktree lp3-wt, base f790f7f266e = origin/release/1.0.0 tip, seed binary build-commit 46fe8f6b6def))
+
+Source re-check at this base: unchanged from the 2026-11-10/11 triage —
+term 1 (fixed ~2.7 GB import-closure load intrinsic to the interpreted-worker
+spawn) and term 2 (unbounded creep inside the interpreted `parse` step,
+unattributed) both stand, same owner split (seed-fix lane for term 2 with a
+Linux gdb/sampler grant; bootstrap redesign for term 1). Not attempted here.

@@ -162,3 +162,37 @@ different sessions/commits over time, not one bulk artifact.
 
 Out of lane: 982-file test-tree divergence needs the check-test-tree-divergence.shs baseline machinery and careful reviewed diffing, well beyond a single-bug budget. No change made.
 
+
+## 2026-11-05 re-measurement (origin/release/1.0.0 4397a4ce3c6)
+
+The 982-vs-982 premise above is outdated. `check-test-tree-divergence.shs
+--ref origin/release/1.0.0` now reports: 873 diverged vs 455 baselined
+(421 new, 3 stale-baselined), 62 mirror-only (61 unallowlisted). The guard is
+RED with a much larger NEW-divergence backlog than the one diagnosed here.
+
+Slice fixed: the 3 stale baseline lines the guard named
+(`unit:lib/common/error_core_spec.spl`, `error_format_spec.spl`,
+`error_spec.spl`) were removed from the baseline (455 -> 452 entries).
+
+Remaining (kept open): 421 new diverged pairs and 61 unallowlisted mirror-only
+files. Each needs reviewed per-pair triage (canonical vs shadow); do NOT
+`--generate-baseline` over them without reading the diff.
+
+## 2026-11-25 verification (P2 fleet, release/1.0.0 @ d1b74b3fa1d) — RESOLVED
+
+The premise of this entry no longer exists: the duplicate shadow trees were
+consolidated into the canonical trees and the guard itself was retired.
+
+- `test/unit/` and `test/integration/` do not exist at HEAD (consolidated by
+  `df80cbb5939` "test: consolidate remaining test/unit -> test/01_unit
+  (squashed onto release/1.0.0)" and predecessors — both ancestors of HEAD).
+- `scripts/check/check-test-tree-divergence.shs` and
+  `scripts/check/test_tree_divergence_baseline.txt` were removed by
+  `abb2fe62cc6` "chore(check): retire test-tree divergence guard (legacy test
+  trees consolidated)" (2026-11-09, ancestor of HEAD).
+- The 2026-11-05 re-measurement above (421 new diverged / 61 mirror-only) is
+  therefore superseded: with the shadow trees gone there is nothing left to
+  diverge. Verified by inspection (`ls`, `git ls-tree`, `git merge-base`);
+  the guard script can no longer be run because it no longer exists.
+
+Status: RESOLVED (structural fix — tree consolidation), not merely diagnosed.

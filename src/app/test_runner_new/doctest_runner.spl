@@ -6,13 +6,17 @@
 use std.nogc_sync_mut.io.file_ops.{file_read, file_exists, file_atomic_write, file_remove}
 use std.nogc_sync_mut.io.process_ops.{process_run_timeout, process_run}
 use std.nogc_sync_mut.io.dir_ops.{dir_walk}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.test_runner.test_runner_types.TestFileResult
 use std.test_runner.test_runner_execute.find_simple_binary
 use std.test_runner.sdoctest.types.{SdoctestFileResult, SdoctestRunResult, SdoctestBlock, BlockResult, BlockStatus}
-use std.nogc_sync_mut.io.env_ops.{env_get}
+use app.io.env_ops.{env_get}
+use std.test_runner.doctest_runner.{extract_doctests as canonical_source_doctests}
 
-fn _dt_get_temp_dir() -> text:
+var _app_dt_temp_seq: i64 = 0
+
+fn _app_dt_get_temp_dir() -> text:
     val tmpdir = env_get("TMPDIR")
     if tmpdir != "" and tmpdir != nil:
         return tmpdir
@@ -40,55 +44,17 @@ struct Doctest:
     should_fail: bool
 
 fn extract_doctests(file_path: text) -> [Doctest]:
-    if not file_exists(file_path):
-        return []
-
-    val content = file_read(file_path)
-    val lines = content.split("\n")
+    # The canonical owner handles #/##//// fences and preserves code indentation.
+    # Keep this compatibility module's Doctest identity and execution API stable.
     var doctests: [Doctest] = []
-    var i = 0
-    var in_doc_block = false
-    var in_code_block = false
-    var code_lines: [text] = []
-    var start_line = 0
-    var should_fail = false
-
-    while i < lines.len():
-        val line = lines[i]
-        val trimmed = line.trim()
-
-        # Detect doc comments
-        if trimmed.starts_with("///") or trimmed.starts_with("##"):
-            val doc_content = if trimmed.starts_with("///"):
-                trimmed[3:].trim()
-            else:
-                trimmed[2:].trim()
-
-            if doc_content.starts_with("```simple") or doc_content.starts_with("```spl"):
-                in_code_block = true
-                code_lines = []
-                start_line = i + 1
-                should_fail = doc_content.contains("should_fail")
-            elif doc_content == "```" and in_code_block:
-                in_code_block = false
-                if code_lines.len() > 0:
-                    doctests.push(Doctest(
-                        source_file: file_path,
-                        line_number: start_line,
-                        code: code_lines.join("\n"),
-                        expected_output: "",
-                        should_fail: should_fail
-                    ))
-            elif in_code_block:
-                code_lines.push(doc_content)
-
-        else:
-            if in_code_block:
-                in_code_block = false
-                code_lines = []
-
-        i = i + 1
-
+    for source in canonical_source_doctests(file_path):
+        doctests.push(Doctest(
+            source_file: source.source_file,
+            line_number: source.line_number,
+            code: source.code,
+            expected_output: source.expected_output,
+            should_fail: source.should_fail
+        ))
     doctests
 
 # =========================================================================
@@ -172,8 +138,9 @@ fn run_doctests(file_path: text, timeout_ms: i64) -> TestFileResult:
     var total_duration = 0
 
     for dt in doctests:
-        # Write temp file
-        val temp_path = "{_dt_get_temp_dir()}/simple_doctest_{dt.line_number}.spl"
+        # Write unique temp file per process/sequence so parallel runners never collide
+        _app_dt_temp_seq = _app_dt_temp_seq + 1
+        val temp_path = "{_app_dt_get_temp_dir()}/simple_doctest_{getpid()}_{_app_dt_temp_seq}_{dt.line_number}.spl"
         file_atomic_write(temp_path, dt.code)
 
         val result = process_run_timeout(binary, [temp_path], timeout_ms)
@@ -227,7 +194,8 @@ fn run_md_doctests(file_path: text, timeout_ms: i64) -> TestFileResult:
     var failed = 0
 
     for dt in doctests:
-        val temp_path = "{_dt_get_temp_dir()}/simple_md_doctest_{dt.line_number}.spl"
+        _app_dt_temp_seq = _app_dt_temp_seq + 1
+        val temp_path = "{_app_dt_get_temp_dir()}/simple_md_doctest_{getpid()}_{_app_dt_temp_seq}_{dt.line_number}.spl"
         file_atomic_write(temp_path, dt.code)
 
         val result = process_run_timeout(binary, [temp_path], timeout_ms)
@@ -300,7 +268,8 @@ fn run_spl_doctests_same_file(file_path: text, timeout_ms: i64) -> SdoctestFileR
     for dt in doctests:
         # Build composite file: source + doctest code
         val composite_code = build_spl_doctest_code(source_content, dt)
-        val temp_path = "{_dt_get_temp_dir()}/spl_doctest_{dt.line_number}.spl"
+        _app_dt_temp_seq = _app_dt_temp_seq + 1
+        val temp_path = "{_app_dt_get_temp_dir()}/spl_doctest_{getpid()}_{_app_dt_temp_seq}_{dt.line_number}.spl"
         file_atomic_write(temp_path, composite_code)
 
         val start = time_now_unix_micros()

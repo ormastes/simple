@@ -1,0 +1,92 @@
+# Execution NOT_RUN. Real temporary filesystem, synthetic immutable plans only;
+# no Host admission, native owner, live session, or successful cleanup.
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.runtime_primary_request_v4.*
+use os.apps.smux.runtime_primary_store_v4.*
+use os.apps.smux.runtime_binding_request_v3.SmuxRuntimeBindRequestV3
+use os.apps.smux.runtime_binding_store_v3.{binding_artifact_path_v3, smux_binding_request_load_v3}
+use test.fixtures.orchestration.container_primary_attach_fixture_v1.container_primary_attach_fixture_v1
+use std.common.contracts.container.primary_attach_v1.*
+use std.nogc_sync_mut.sosix.test_process.sosix_test_temp_dir
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_exists, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io_runtime.dir_remove
+
+fn primary_store_request_v4() -> SmuxRuntimePrimaryRequestV4:
+    val plan = container_primary_attach_fixture_v1()
+    SmuxRuntimePrimaryRequestV4(terminal_mode: "stdin", target: SmuxRuntimeBindRequestV3(
+        binding_uid: "primary-store-a", workload_operation_id: plan.identity.parent_operation_id,
+        helper_operation_id: plan.identity.operation_id, parent_budget_digest: plan.identity.parent_budget_digest,
+        service_incarnation: "b".repeat(32), session_id: "s", window_id: "w", pane_id: "p",
+        expected_epoch: 1u64, expected_revision: 1u64, expected_child_incarnation: 0u64))
+
+fn primary_store_plan_v4(request: SmuxRuntimePrimaryRequestV4) -> ContainerPrimaryAttachPlanV1:
+    var plan = container_primary_attach_fixture_v1()
+    plan.terminal_mode = request.terminal_mode
+    plan.identity.binding_digest = smux_runtime_primary_request_digest_v4(request).unwrap()
+    plan.request_digest = container_primary_attach_plan_digest_v1(plan).unwrap()
+    plan
+
+describe "immutable smux primary plan storage V4":
+    it "round trips private request and primary plan archives in distinct namespaces":
+        step("round trips private request and primary plan archives in distinct namespaces")
+        val root = secure_temp_dir(sosix_test_temp_dir(), "smux-primary-store").unwrap()
+        for mode in ["stdin", "tty"]:
+            var request = primary_store_request_v4()
+            request.terminal_mode = mode
+            request.target.binding_uid = "primary-store-" + mode
+            val plan = primary_store_plan_v4(request)
+            expect(smux_primary_plan_match_v4(request, plan).is_ok()).to_equal(true)
+            expect(smux_primary_plan_store_v4(root, request, plan).is_ok()).to_equal(true)
+            expect(smux_primary_plan_store_v4(root, request, plan).is_ok()).to_equal(true)
+            val retained_request = smux_primary_request_load_v4(root, request.target.binding_uid).unwrap()
+            expect(smux_runtime_primary_request_encode_v4(retained_request).unwrap()).to_equal(smux_runtime_primary_request_encode_v4(request).unwrap())
+            val retained_plan = smux_primary_plan_load_v4(root, request).unwrap()
+            expect(container_primary_attach_plan_encode_v1(retained_plan).unwrap()).to_equal(container_primary_attach_plan_encode_v1(plan).unwrap())
+            val request_path = binding_artifact_path_v3(root, "primary-requests-v4", request.target.binding_uid).unwrap()
+            val plan_path = binding_artifact_path_v3(root, "primary-plans-v4", request.target.binding_uid).unwrap()
+            expect(file_read_regular_no_follow_bounded(request_path, 4096).unwrap()).to_equal(smux_runtime_primary_request_encode_v4(request).unwrap())
+            expect(file_read_regular_no_follow_bounded(plan_path, 2097152).unwrap()).to_equal(container_primary_attach_plan_encode_v1(plan).unwrap())
+            for category in ["requests", "plans", "receipts", "output-plans"]:
+                val output_path = binding_artifact_path_v3(root, category, request.target.binding_uid).unwrap()
+                expect(output_path == request_path or output_path == plan_path).to_equal(false)
+                expect(file_exists(output_path)).to_equal(false)
+            expect(smux_binding_request_load_v3(root, request.target.binding_uid).is_err()).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "preserves original bytes against changed request mode and valid plan digest conflicts":
+        step("preserves original bytes against changed request mode and valid plan digest conflicts")
+        val root = secure_temp_dir(sosix_test_temp_dir(), "smux-primary-conflict").unwrap()
+        val request = primary_store_request_v4()
+        val plan = primary_store_plan_v4(request)
+        smux_primary_plan_store_v4(root, request, plan).unwrap()
+        for field in ["revision", "mode", "planDigest"]:
+            var changed_request = request
+            if field == "revision": changed_request.target.expected_revision = 2u64
+            if field == "mode": changed_request.terminal_mode = "tty"
+            var changed_plan = primary_store_plan_v4(changed_request)
+            if field == "planDigest":
+                changed_plan.policy_digest = "9".repeat(64)
+                changed_plan.request_digest = container_primary_attach_plan_digest_v1(changed_plan).unwrap()
+            expect(smux_primary_plan_store_v4(root, changed_request, changed_plan).is_err()).to_equal(true)
+            if field != "planDigest": expect(smux_primary_plan_load_v4(root, changed_request).is_err()).to_equal(true)
+            expect(smux_runtime_primary_request_encode_v4(smux_primary_request_load_v4(root, request.target.binding_uid).unwrap()).unwrap()).to_equal(smux_runtime_primary_request_encode_v4(request).unwrap())
+            expect(container_primary_attach_plan_encode_v1(smux_primary_plan_load_v4(root, request).unwrap()).unwrap()).to_equal(container_primary_attach_plan_encode_v1(plan).unwrap())
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "rejects mutated primary correlation before creating request or plan records":
+        step("rejects mutated primary correlation before creating request or plan records")
+        val root = secure_temp_dir(sosix_test_temp_dir(), "smux-primary-correlation").unwrap()
+        val request = primary_store_request_v4()
+        val plan = primary_store_plan_v4(request)
+        for field in ["binding", "operation", "parent", "budget", "mode"]:
+            var changed = plan
+            if field == "binding": changed.identity.binding_digest = "0".repeat(64)
+            if field == "operation": changed.identity.operation_id = "other-helper"
+            if field == "parent": changed.identity.parent_operation_id = "other-parent"
+            if field == "budget": changed.identity.parent_budget_digest = "0".repeat(64)
+            if field == "mode": changed.terminal_mode = "tty"
+            expect(smux_primary_plan_match_v4(request, changed).is_err()).to_equal(true)
+            expect(smux_primary_plan_store_v4(root, request, changed).is_err()).to_equal(true)
+            expect(file_exists(binding_artifact_path_v3(root, "primary-requests-v4", request.target.binding_uid).unwrap())).to_equal(false)
+            expect(file_exists(binding_artifact_path_v3(root, "primary-plans-v4", request.target.binding_uid).unwrap())).to_equal(false)
+        expect(dir_remove(root, true)).to_equal(true)

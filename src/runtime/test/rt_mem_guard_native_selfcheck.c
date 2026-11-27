@@ -1,3 +1,10 @@
+/* Guard-page faults are SIGBUS on Darwin and SIGSEGV on Linux;
+ * both are real memory-fault deaths. Other signals remain failures. */
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_mem_guard_native_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 /* Sampled guard-page allocator self-check (native C mirror of mem_guard.rs).
  *
  * The core-C bootstrap runtime capsule compiles and runs this check.
@@ -48,7 +55,7 @@ static int child_segfaults(rt_mem_guard_touch_fn touch, volatile uint8_t* ptr) {
     }
     int status = 0;
     if (waitpid(pid, &status, 0) != pid) return -1;
-    return (WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV) ? 1 : 0;
+    return (WIFSIGNALED(status) && (WTERMSIG(status) == SIGSEGV || WTERMSIG(status) == SIGBUS)) ? 1 : 0;
 }
 
 static void touch_read(volatile uint8_t* ptr) {
@@ -79,9 +86,9 @@ int main(void) {
     /* --- 2. One byte past the end must SIGSEGV (right-aligned overflow
      *        placement: a[37] lands on the trailing guard page). --- */
     check(child_segfaults(touch_read, a + 37) == 1,
-          "one-byte read overflow on a guarded slot SIGSEGVs");
+          "one-byte read overflow on a guarded slot faults");
     check(child_segfaults(touch_write, a + 37) == 1,
-          "one-byte write overflow on a guarded slot SIGSEGVs");
+          "one-byte write overflow on a guarded slot faults");
 
     /* --- 3. After free, ANY access (even in-bounds) must SIGSEGV --
      *        guard_free_sampled PROT_NONEs the whole mapping, it does not
@@ -89,9 +96,9 @@ int main(void) {
      *        proof the M2 exit criteria call for on the malloc class. --- */
     rt_free(a);
     check(child_segfaults(touch_read, a) == 1,
-          "use-after-free read on a freed guarded slot SIGSEGVs");
+          "use-after-free read on a freed guarded slot faults");
     check(child_segfaults(touch_write, a) == 1,
-          "use-after-free write on a freed guarded slot SIGSEGVs");
+          "use-after-free write on a freed guarded slot faults");
 
     /* --- 4. Double free is refused, not acted on twice (no crash, no
      *        second mprotect/munmap of an already-unmapped region). --- */
@@ -131,3 +138,5 @@ int main(void) {
            failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }
+
+#endif /* !_WIN32 */

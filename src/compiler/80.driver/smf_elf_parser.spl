@@ -6,6 +6,7 @@
 # - Map ELF relocation types to SMF wire values
 
 use compiler.driver.smf_binary_helpers.{_read_u16_le, _read_u32_le, _read_u64_le}
+use std.common.string_core.{bytes_to_text}
 
 # Relocation entry extracted from ELF .rela.text section
 struct ElfRelocEntry:
@@ -247,3 +248,63 @@ fn elf_reloc_type_to_smf(elf_type: i64) -> i32:
         10: 5    # R_X86_64_32 -> Abs32
         11: 5    # R_X86_64_32S -> Abs32
         _: 1     # Default to Abs64
+
+# NUL-terminated section name at `name_off` inside the ELF string table.
+fn _elf_cstring_at(object_code: [u8], name_off: i64) -> text:
+    var out: [u8] = []
+    var i = name_off
+    while i >= 0 and i < object_code.len() and object_code[i] != 0:
+        out.push(object_code[i])
+        i = i + 1
+    bytes_to_text(out)
+
+"""Name of the first SHF_ALLOC, non-executable section that a SHT_RELA /
+SHT_REL section relocates, or "" when every relocated section is code.
+
+SMF relocations address the merged Code section only, and every SMF output
+mode drops the other allocated sections. A relocated constant placed by LLVM
+in `.data.rel.ro.<sym>` (a pointer table), `.rodata.*`, `.data.*` or
+`.init_array` would load as unrelocated garbage, so the driver refuses the
+object by name instead -- the same fail-closed verdict the seed's object
+parser gives ("relocation source section <name> is not executable code").
+`.eh_frame*` and `.note*` are dropped by design and never count.
+"""
+fn elf_relocated_non_code_section(object_code: [u8]) -> text:
+    if object_code.len() < 64:
+        return ""
+    if not (object_code[0] == 0x7F and object_code[1] == 0x45 and
+            object_code[2] == 0x4C and object_code[3] == 0x46):
+        return ""
+    if object_code[4] != 2:
+        return ""
+    val e_shoff = _read_u64_le(object_code, 40)
+    val e_shentsize = _read_u16_le(object_code, 58)
+    val e_shnum = _read_u16_le(object_code, 60)
+    val e_shstrndx = _read_u16_le(object_code, 62)
+    if e_shoff == 0 or e_shnum == 0 or e_shentsize < 64:
+        return ""
+    val shstrtab_off = e_shoff + (e_shstrndx * e_shentsize)
+    if shstrtab_off + 64 > object_code.len():
+        return ""
+    val strtab_offset = _read_u64_le(object_code, shstrtab_off + 24)
+    var i = 0
+    while i < e_shnum:
+        val sh_off = e_shoff + (i * e_shentsize)
+        if sh_off + 64 <= object_code.len():
+            val sh_type = _read_u32_le(object_code, sh_off + 4)
+            # SHT_RELA = 4, SHT_REL = 9; sh_info names the relocated section.
+            if sh_type == 4 or sh_type == 9:
+                val target = _read_u32_le(object_code, sh_off + 44)
+                val t_off = e_shoff + (target * e_shentsize)
+                if target != 0 and target < e_shnum and
+                        t_off + 64 <= object_code.len():
+                    val t_flags = _read_u64_le(object_code, t_off + 8)
+                    # SHF_ALLOC = 2, SHF_EXECINSTR = 4
+                    if (t_flags & 2) != 0 and (t_flags & 4) == 0:
+                        val name = _elf_cstring_at(object_code,
+                            strtab_offset + _read_u32_le(object_code, t_off))
+                        if not name.starts_with(".eh_frame") and
+                                not name.starts_with(".note"):
+                            return name
+        i = i + 1
+    ""

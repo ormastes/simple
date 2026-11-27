@@ -495,15 +495,28 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_typed_words_u64_set" => value::rt_typed_words_u64_set as *const () as usize,
         "rt_typed_words_i64_at" => value::rt_typed_words_i64_at as *const () as usize,
         "rt_typed_words_i64_set" => value::rt_typed_words_i64_set as *const () as usize,
+        "rt_typed_words_byte_write_trap" => value::rt_typed_words_byte_write_trap as *const () as usize,
         "rt_typed_words_i64_push" => value::rt_typed_words_i64_push as *const () as usize,
         "rt_array_pop" => simple_runtime::rt_array_pop as *const () as usize,
         "rt_array_clear" => value::rt_array_clear as *const () as usize,
+        "rt_array_reserve" => value::rt_array_reserve as *const () as usize,
         "rt_transient_array_scope_begin" => value::rt_transient_array_scope_begin as *const () as usize,
         "rt_transient_array_scope_pause" => value::rt_transient_array_scope_pause as *const () as usize,
         "rt_transient_heap_promote" => value::rt_transient_heap_promote as *const () as usize,
         "rt_transient_heap_promote_share_begin" => value::rt_transient_heap_promote_share_begin as *const () as usize,
         "rt_transient_heap_promote_share_end" => value::rt_transient_heap_promote_share_end as *const () as usize,
+        "rt_session_heap_begin" => value::rt_session_heap_begin as *const () as usize,
+        "rt_session_heap_end" => value::rt_session_heap_end as *const () as usize,
+        "rt_session_alloc_begin" => value::rt_session_alloc_begin as *const () as usize,
+        "rt_session_alloc_end" => value::rt_session_alloc_end as *const () as usize,
+        "rt_transient_heap_adopt" => value::rt_transient_heap_adopt as *const () as usize,
+        "rt_session_heap_id" => value::rt_session_heap_id as *const () as usize,
         "rt_transient_array_scope_end" => value::rt_transient_array_scope_end as *const () as usize,
+        "rt_rc_share" => value::rt_rc_share as *const () as usize,
+        "rt_rc_retain" => value::rt_rc_retain as *const () as usize,
+        "rt_rc_release" => value::rt_rc_release as *const () as usize,
+        "rt_rc_count" => value::rt_rc_count as *const () as usize,
+        "rt_heap_graph_bytes" => value::rt_heap_graph_bytes as *const () as usize,
         // Diagnostic heap counters. Registered here as well as in
         // codegen::runtime_sffi so a JIT-hosted call resolves to the real
         // counter instead of silently returning nil (which is
@@ -538,6 +551,11 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_dict_clear" => value::rt_dict_clear as *const () as usize,
         "rt_dict_keys" => value::rt_dict_keys as *const () as usize,
         "rt_dict_values" => value::rt_dict_values as *const () as usize,
+        "rt_dict_scope_read_bound_v1" => value::rt_dict_scope_read_bound_v1 as *const () as usize,
+        "rt_dict_scope_read_owner_v1" => value::rt_dict_scope_read_owner_v1 as *const () as usize,
+        "rt_dict_scope_read_epoch_v1" => value::rt_dict_scope_read_epoch_v1 as *const () as usize,
+        "rt_dict_scope_read_meta_v1" => value::rt_dict_scope_read_meta_v1 as *const () as usize,
+        "rt_dict_scope_read_slot_v1" => value::rt_dict_scope_read_slot_v1 as *const () as usize,
 
         // Host/GPU lane marker runtime bridge
         "rt_host_gpu_lane_event" => host_gpu_lane::rt_host_gpu_lane_event as *const () as usize,
@@ -595,6 +613,19 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "spl_fonts_call_init_path" => value::spl_fonts_call_init_path as *const () as usize,
         "spl_fonts_call_layout_text" => value::spl_fonts_call_layout_text as *const () as usize,
         "rt_file_write_bytes_array" => value::rt_file_write_bytes_array as *const () as usize,
+        "rt_file_atomic_write" => value::rt_file_atomic_write as *const () as usize,
+        "rt_file_atomic_write_mode" => value::rt_file_atomic_write_mode as *const () as usize,
+        "rt_file_atomic_write_bytes_array" => value::rt_file_atomic_write_bytes_array as *const () as usize,
+        "rt_pty_open" => value::pty::rt_pty_open as *const () as usize,
+        "rt_pty_spawn" => value::pty::rt_pty_spawn as *const () as usize,
+        "rt_pty_write" => value::pty::rt_pty_write as *const () as usize,
+        "rt_pty_read" => value::pty::rt_pty_read as *const () as usize,
+        "rt_pty_close" => value::pty::rt_pty_close as *const () as usize,
+        "rt_pty_is_running" => value::pty::rt_pty_is_running as *const () as usize,
+        "rt_pty_hangup" => value::pty::rt_pty_hangup as *const () as usize,
+        "rt_pty_write_bytes_v1" => value::pty::rt_pty_write_bytes_v1 as *const () as usize,
+        "rt_pty_exit_code_v1" => value::pty::rt_pty_exit_code_v1 as *const () as usize,
+        "rt_pty_resize" => value::pty::rt_pty_resize as *const () as usize,
         "rt_font_load_array" => simple_runtime::packed_byte_adapters::rt_font_load_array as *const () as usize,
         "rt_metal_load_library_array" => {
             simple_runtime::metal_graphics_runtime::rt_metal_load_library_array as *const () as usize
@@ -638,9 +669,11 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
 
         // Index/slice operations
         "rt_index_get" => simple_runtime::rt_index_get as *const () as usize,
+        "rt_get" => simple_runtime::rt_get as *const () as usize,
         "rt_index_set" => simple_runtime::rt_index_set as *const () as usize,
         "rt_collection_set" => simple_runtime::rt_collection_set as *const () as usize,
         "rt_slice" => simple_runtime::rt_slice as *const () as usize,
+        "rt_slice_text_bytes" => simple_runtime::rt_slice_text_bytes as *const () as usize,
         "rt_contains" => value::rt_contains as *const () as usize,
 
         // String operations
@@ -665,6 +698,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_value_bool" => simple_runtime::rt_value_bool as *const () as usize,
         "rt_value_nil" => simple_runtime::rt_value_nil as *const () as usize,
         "rt_value_as_int" => simple_runtime::rt_value_as_int as *const () as usize,
+        "rt_value_as_bool" => simple_runtime::rt_value_as_bool as *const () as usize,
         "rt_value_as_u64" => simple_runtime::rt_value_as_u64 as *const () as usize,
         "rt_value_as_float" => simple_runtime::rt_value_as_float as *const () as usize,
 
@@ -681,6 +715,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
 
         // Enum operations
         "rt_enum_new" => simple_runtime::rt_enum_new as *const () as usize,
+        "rt_enum_register_name" => simple_runtime::rt_enum_register_name as *const () as usize,
         "rt_enum_check_discriminant" => simple_runtime::rt_enum_check_discriminant as *const () as usize,
         "rt_enum_check_variant" => simple_runtime::rt_enum_check_variant as *const () as usize,
         "rt_try_is_absent" => simple_runtime::rt_try_is_absent as *const () as usize,
@@ -762,6 +797,15 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_eprintln_value" => value::rt_eprintln_value as *const () as usize,
         "rt_raw_u64_to_string" => value::rt_raw_u64_to_string as *const () as usize,
         "rt_raw_i64_to_string" => value::rt_raw_i64_to_string as *const () as usize,
+        // Flat-optional print helpers: emitted for `print opt` (e.g.
+        // `print s.parse_int()`). Without an explicit address here a Windows
+        // JIT cannot reach them (no dlsym fallback for exe symbols) and strict
+        // mode refuses the module. doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md
+        "rt_opt_i64_to_string" => simple_runtime::rt_opt_i64_to_string as *const () as usize,
+        "rt_i64_to_hex" => simple_runtime::rt_i64_to_hex as *const () as usize,
+        "rt_opt_value_to_string" => simple_runtime::rt_opt_value_to_string as *const () as usize,
+        "rt_opt_bool_to_string" => simple_runtime::rt_opt_bool_to_string as *const () as usize,
+        "rt_opt_f64_to_string" => simple_runtime::rt_opt_f64_to_string as *const () as usize,
         "rt_capture_stdout_start" => value::rt_capture_stdout_start as *const () as usize,
         "rt_capture_stderr_start" => value::rt_capture_stderr_start as *const () as usize,
         "rt_file_mmap_len" => value::rt_file_mmap_len as *const () as usize,
@@ -986,6 +1030,77 @@ mod tests {
         assert!(resolve_runtime_symbol("rt_array_free").unwrap_or(0) != 0);
     }
 
+    /// Every `.spl` extern with a definition in this table (the "runtime
+    /// definition" oracle) must pass the seed JIT's import check without
+    /// `dlsym`. Otherwise a seed linked without `--export-dynamic` routes every
+    /// call to it through the interpreter bridge (`hybrid-interp-splice`). A
+    /// MIR-emitted name with no declaration instead drops the whole module,
+    /// which is what happened with `rt_array_is_byte_packed`.
+    #[test]
+    fn declared_externs_with_a_runtime_definition_resolve_for_the_jit_without_dlsym() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "spl") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .expect("repo root")
+            .to_path_buf();
+        let mut files = Vec::new();
+        for sub in ["src/lib", "src/app", "src/compiler"] {
+            walk(&root.join(sub), &mut files);
+        }
+        assert!(
+            files.len() > 100,
+            "expected a populated .spl tree, found {}",
+            files.len()
+        );
+        let mut declared = std::collections::BTreeSet::new();
+        for file in files {
+            for line in std::fs::read_to_string(&file).unwrap_or_default().lines() {
+                if line.trim_start().starts_with('#') {
+                    continue;
+                }
+                if let Some(idx) = line.find("extern fn ") {
+                    let name: String = line[idx + "extern fn ".len()..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect();
+                    declared.insert(name);
+                }
+            }
+        }
+        let backed: Vec<&String> = declared
+            .iter()
+            .filter(|name| resolve_runtime_symbol(name).is_some())
+            .collect();
+        assert!(
+            backed.len() > 100,
+            "oracle intersection unexpectedly small: {}",
+            backed.len()
+        );
+        let provider = simple_native_loader::default_runtime_provider();
+        let missing: Vec<&String> = backed
+            .into_iter()
+            .filter(|name| {
+                !crate::codegen::jit::jit_import_resolves_without_dlsym(provider.as_ref(), name)
+                    && !crate::codegen::instr::calls::is_inline_lowered_byte_accessor(name)
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{} declared extern(s) with a runtime definition do not resolve for the JIT without dlsym: {missing:?}",
+            missing.len()
+        );
+    }
+
     #[test]
     fn resolves_call_scoped_packed_byte_runtime_symbols() {
         for symbol in [
@@ -994,6 +1109,7 @@ mod tests {
             "rt_cuda_memcpy_htod_array",
             "rt_font_load_array",
             "rt_file_write_bytes_array",
+            "rt_file_atomic_write_bytes_array",
             "rt_metal_load_library_array",
             "rt_vulkan_copy_to_buffer_array",
             "rt_vulkan_copy_from_buffer_array",

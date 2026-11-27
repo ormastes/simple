@@ -349,6 +349,7 @@ shared_module_test!(shared_indirect_call_void_return,
             dest: None, callee: closure,
             param_types: vec![TypeId::I64], return_type: TypeId::VOID,
             args: vec![arg], effect: crate::mir::Effect::Compute,
+            signature_declared: false,
         });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
         block.terminator = Terminator::Return(Some(ret));
@@ -371,6 +372,7 @@ shared_module_test!(shared_indirect_call_void_return,
             dest: None, callee: VReg(0),
             param_types: vec![TypeId::I64], return_type: TypeId::VOID,
             args: vec![VReg(1)], effect: crate::mir::Effect::Compute,
+            signature_declared: false,
         },
     ]
 );

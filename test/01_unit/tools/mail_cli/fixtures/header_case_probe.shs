@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Production MIME parser regression; no network or alternate parser.
+set -euo pipefail
+source "${1:?mail-cli library directory required}/format.bash"
+
+raw=$'FROM: sender@example.test\r\nTO: reader@example.test\r\nSUBJECT: Mixed case\r\nDATE: Mon, 1 Jan 2024 12:00:00 +0000\r\nMESSAGE-ID: <fixture@example.test>\r\nIN-REPLY-TO: <parent@example.test>\r\nREFERENCES: <parent@example.test>\r\n\r\nbody'
+headers=$(mail_format_parse_headers "$raw")
+test "$(jq -r .from <<< "$headers")" = sender@example.test
+test "$(jq -r .to <<< "$headers")" = reader@example.test
+test "$(jq -r .subject <<< "$headers")" = 'Mixed case'
+test "$(jq -r .message_id <<< "$headers")" = '<fixture@example.test>'
+test "$(jq -r .in_reply_to <<< "$headers")" = '<parent@example.test>'
+test "$(jq -r .references <<< "$headers")" = '<parent@example.test>'
+printf '%s\n' 'mail_header_case_insensitive_fields: PASS'
+
+raw=$'From: sender@example.test\nSubject: folded\n\tcontinuation\n\nContent-Transfer-Encoding: base64\nSGVsbG8='
+test "$(mail_format_parse_body "$raw")" = $'Content-Transfer-Encoding: base64\nSGVsbG8='
+headers=$(mail_format_parse_headers "$raw")
+test "$(jq -r .subject <<< "$headers")" = 'folded continuation'
+printf '%s\n' 'mail_body_header_text_is_not_metadata: PASS'
+
+raw=$'From: sender@example.test\nContent-Transfer-Encoding: base64\n\nSGVsbG8='
+test "$(mail_format_parse_body "$raw")" = Hello
+printf '%s\n' 'mail_actual_transfer_encoding_preserved: PASS'

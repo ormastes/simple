@@ -1,0 +1,52 @@
+"""for-in over an indexed nested array and over a field of an indexed struct."""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering.MirLowering
+
+fn module_mir_errors(source: text) -> text:
+    val path = "forin_nested_index_field_iterable_fixture.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    var report = ""
+    for error in hir_lowering.errors:
+        report = report + "hir:" + error.message + "\n"
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    for error in lowering.errors:
+        report = report + "mir:" + error.message + "\n"
+    report
+
+describe "for-in over nested indexed collections":
+    it "iterates an element of a repeat-initialized nested array":
+        val source = "fn total(n: i64) -> i64:\n    var rows: [[i32]] = []\n    rows = [[]; n]\n    var t = 0\n    var i = 0\n    while i < n:\n        for x in rows[i]:\n            t = t + x\n        i = i + 1\n    t\n"
+        expect(module_mir_errors(source)).to_equal("")
+
+    it "keeps the declared nested array type across reassignment to an empty literal":
+        val source = "fn total(n: i64) -> i64:\n    var rows: [[i32]] = []\n    rows = []\n    var t = 0\n    for x in rows[0]:\n        t = t + x\n    t\n"
+        expect(module_mir_errors(source)).to_equal("")
+
+    it "keeps the declared nested array type across a conditional repeat reassignment":
+        # Shape of simple_web_html_layout_renderer_paint_layout.spl:1482/1778.
+        val source = "fn total(n: i64, c: bool) -> i64:\n    var rows: [[i32]] = []\n    if c:\n        rows = [[]; n]\n    var t = 0\n    for x in rows[0]:\n        t = t + x\n    t\n"
+        expect(module_mir_errors(source)).to_equal("")
+
+    it "iterates an element of a declared nested array":
+        val source = "fn total(rows: [[i32]], i: i64) -> i64:\n    var t = 0\n    for x in rows[i]:\n        t = t + x\n    t\n"
+        expect(module_mir_errors(source)).to_equal("")
+
+    it "iterates a recursive struct field read from an indexed local":
+        val source = "struct Node:\n    tag: text\n    children: [Node]\n\nfn count(path: [Node], i: i64) -> i64:\n    var n = 0\n    while i > 0:\n        val node = path[i]\n        for child in node.children:\n            if child.tag == \"a\":\n                n = n + 1\n        return n\n    n\n"
+        expect(module_mir_errors(source)).to_equal("")
+
+    it "iterates a class field read from an element of a class-array parameter":
+        # dom_accessors.spl:782 shape; the importing-module variant (class
+        # declared in another module) is covered by the record owner key the
+        # parameter registers, which is module-qualified for classes.
+        val source = "class Node:\n    tag_name: text\n    children: [Node]\n\nfn count(path: [Node]) -> i64:\n    val details = path[0]\n    var n = 0\n    for child in details.children:\n        if child.tag_name == \"a\":\n            n = n + 1\n    n\n"
+        expect(module_mir_errors(source)).to_equal("")

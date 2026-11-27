@@ -2,10 +2,9 @@
 //!
 //! Runs each .spl file through the pipeline stages:
 //!   1. Parse  (simple_parser)
-//!   2. Monomorphize  (monomorphize_module)
-//!   3. HIR lower  (hir::lower)
-//!   4. MIR lower  (mir::lower_to_mir)
-//!   5. Codegen  (Cranelift AOT - optional, set BATCH_CODEGEN=1)
+//!   2. HIR lower  (hir::lower)
+//!   3. MIR lower  (mir::lower_to_mir)
+//!   4. Codegen  (Cranelift AOT - optional, set BATCH_CODEGEN=1)
 //!
 //! Environment variables:
 //! * `SRC_COMPILER_DIR` - directory to scan (default: src/compiler/)
@@ -16,7 +15,6 @@ use std::path::{Path, PathBuf};
 use simple_compiler::codegen::Codegen;
 use simple_compiler::hir::Lowerer;
 use simple_compiler::module_resolver::ModuleResolver;
-use simple_compiler::monomorphize::monomorphize_module;
 
 /// Stack size for pipeline threads (16 MB).
 const PIPELINE_STACK_SIZE: usize = 16 * 1024 * 1024;
@@ -79,10 +77,7 @@ fn run_pipeline(source: &str, file_path: &std::path::Path) -> (Stage, Option<Str
         }
     };
 
-    // 2. Monomorphize (infallible)
-    let ast_module = monomorphize_module(&ast_module);
-
-    // 3. HIR lower (lenient with project-level module resolver)
+    // 2. HIR lower (lenient with project-level module resolver)
     let root = project_root();
     let source_root = root.join("src");
     let module_resolver = ModuleResolver::new(root.clone(), source_root);
@@ -94,13 +89,13 @@ fn run_pipeline(source: &str, file_path: &std::path::Path) -> (Stage, Option<Str
         Err(e) => return (Stage::Hir, Some(format!("{e}"))),
     };
 
-    // 4. MIR lower
+    // 3. MIR lower
     let mir_module = match simple_compiler::mir::lower_to_mir(&hir_module) {
         Ok(m) => m,
         Err(e) => return (Stage::Mir, Some(format!("{e}"))),
     };
 
-    // 5. Codegen (Cranelift AOT) - only if BATCH_CODEGEN=1
+    // 4. Codegen (Cranelift AOT) - only if BATCH_CODEGEN=1
     //    Creating a Codegen per file is slow (~300ms each), so this is opt-in.
     if std::env::var("BATCH_CODEGEN").is_ok_and(|v| v == "1") {
         match Codegen::new() {

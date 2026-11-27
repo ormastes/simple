@@ -1,9 +1,20 @@
 # LLVM backend: narrow struct-field readback emits mistyped load → llc rejects
-## Closed 2026-09-16 — ...ots are uniformly 8 bytes). ## Resolution Commit `09bee48d1a5d` loads the physical native-
+## Closed 2026-09-16 — RESOLVED: commit `09bee48d1a5` loads the physical native-width slot, then truncates to the declared narrow width
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
 fresh dated repro if the symptom returns.
+
+## 2026-11-25 verification (work/p2w4-ae-20261125, origin/release/1.0.0 HEAD ef6a94f8a03)
+
+`git merge-base --is-ancestor 09bee48d1a5 HEAD` confirms the resolution
+commit (`fix(backend/llvm): trunc narrow struct-field loads to declared
+width; cache writer creates parent dirs`) is in release/1.0.0. End-to-end
+re-run of the llc lane was not attempted (interpreted native-build worker +
+llc lane, Linux/macOS-oriented; pinned seed cannot compile at this HEAD due
+to the repo-wide `@representation_boundary` rejection). Closure stands on the
+recorded IR-level evidence plus commit ancestry. (Header line repaired: the
+2026-09-16 normalization splice had mangled it.)
 
 **Filed:** 2026-07-19 · **Status:** SOURCE FIXED / FOCUSED LLVM-IR REGRESSION ADDED · **Area:** LLVM backend / struct field access
 **Lane:** interpreted native-build worker (`SIMPLE_NATIVE_BUILD_WORKER=1

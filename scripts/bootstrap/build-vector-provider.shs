@@ -1,0 +1,94 @@
+#!/bin/sh
+# Build the host's levelled vector provider DSO (all levels, no cap) for a
+# deployable runtime, and print its SHA-256 as the LAST stdout line.
+#
+#   build-vector-provider.shs OUT_DIR [TRIPLE]
+#
+# Output: OUT_DIR/simple_vector_provider_levelled.<dll|so|dylib> and a
+# one-line OUT_DIR/<artifact>.sha256. The bootstrap exports that digest as
+# SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256, so runtime_compiler.spl and the seed's
+# core-C bundle bake it (-DSIMPLE_VECTOR_PROVIDER_PIN_HEX) into
+# runtime_simd_utf8.c: the pin comes from THIS build's output, never from a
+# file found at run time. Flags, level table, identity header and link order
+# are those of scripts/check/check-vector-provider-levels.shs (uncapped DSO);
+# check-text-provider-route.shs proves the two artifacts are byte-identical.
+# Exit: 0 built, 1 build failed, 2 unsupported host/toolchain (no artifact).
+set -eu
+out=${1:?usage: build-vector-provider.shs OUT_DIR [TRIPLE]}
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+src=$root/src/runtime/providers/vector
+cc=${CLANG:-clang}
+command -v "$cc" >/dev/null 2>&1 || cc=/c/llvm/install/bin/clang
+command -v "$cc" >/dev/null 2>&1 || { echo "build-vector-provider: clang not found" >&2; exit 2; }
+t=${2:-}
+if [ -z "$t" ]; then
+    case $(uname -s):$(uname -m) in
+        MINGW*:*|MSYS*:*|CYGWIN*:*) t=x86_64-w64-windows-gnu;;
+        Linux:x86_64) t=x86_64-linux-gnu;;
+        Linux:aarch64) t=aarch64-linux-gnu;;
+        Linux:riscv64) t=riscv64-linux-gnu;;
+        Darwin:x86_64) t=x86_64-apple-darwin;;
+        FreeBSD:amd64) t=x86_64-unknown-freebsd;;
+        FreeBSD:arm64|FreeBSD:aarch64) t=aarch64-unknown-freebsd;;
+        Darwin:arm64) t=arm64-apple-darwin;;
+        *) echo "build-vector-provider: unsupported host $(uname -s)/$(uname -m)" >&2; exit 2;;
+    esac
+fi
+case $t in
+    x86_64*) arch=x86_64 base="-march=x86-64";;
+    aarch64*|arm64*) arch=aarch64 base="-march=armv8-a -mgeneral-regs-only";;
+    riscv64*) arch=riscv64 base="-march=rv64gc -mabi=lp64d";;
+    *) echo "build-vector-provider: unsupported triple $t" >&2; exit 2;;
+esac
+case $t in
+    *windows*) ext=dll;;
+    *apple*) ext=dylib;;
+    *) ext=so;;
+esac
+extra=""; case $t in *linux*) extra="--gcc-toolchain=/usr";; esac
+tf="--target=$t $extra"
+warn='-std=c11 -O2 -Wall -Wextra -Werror -fvisibility=hidden -DSIMPLE_VECTOR_ENABLE_HTTP -DSIMPLE_VECTOR_LEVELLED'
+novec='-fno-vectorize -fno-slp-vectorize'
+w=$out/.obj
+rm -rf "$w"; mkdir -p "$w"
+case $arch in
+    x86_64) rows='1 -march=x86-64 vector_level_portable.c -
+2 -march=x86-64-v2 vector_level_portable.c -
+3 -march=x86-64-v3 vector_level_portable.c -
+4 -march=x86-64 bitmap_avx512.c http_avx512.c';;
+    aarch64) rows='1 -march=armv8-a+simd bitmap_neon.c http_neon.c
+2 -march=armv8-a+sve bitmap_sve.c http_sve.c
+3 -march=armv8-a+sve2 bitmap_sve.c http_sve.c';;
+    riscv64) rows='1 -march=rv64gcv -mabi=lp64d bitmap_rvv.c http_rvv.c';;
+esac
+printf '%s\n' "$rows" | while read -r row; do
+    set -- $row
+    lv=$1; shift
+    mflags=""
+    while [ $# -gt 2 ]; do mflags="$mflags $1"; shift; done
+    ren="-Dsimple_bitmap_kernel=simple_bitmap_kernel_l$lv -Dsimple_http_kernel=simple_http_kernel_l$lv"
+    "$cc" $tf $warn $mflags $ren -c "$src/$1" -o "$w/l$lv-bitmap.o"
+    [ "$2" = - ] || "$cc" $tf $warn $mflags $ren -c "$src/$2" -o "$w/l$lv-http.o"
+    tm=$mflags; [ "$arch:$lv" = x86_64:4 ] && tm=-march=x86-64-v4
+    "$cc" $tf $warn $tm -Dsimple_text_kernel=simple_text_kernel_l$lv -c "$src/text_level_kernels.c" -o "$w/l$lv-text.o"
+done
+impl=$(cat "$src"/*.c "$src"/*.h | sha256sum | cut -c1-16)
+printf '#define SIMPLE_VECTOR_PROVIDER_ID UINT64_C(0x%s)\n#define SIMPLE_VECTOR_IMPLEMENTATION_ID UINT64_C(0x%s)\n' \
+    "$(printf '%s' "simple-vector-levelled-v1:$t" | sha256sum | cut -c1-16)" \
+    "$(printf '%s' "$impl:max-level=4" | sha256sum | cut -c1-16)" >"$w/provider_identity.h"
+"$cc" $tf $warn $base $novec -DSIMPLE_VECTOR_MAX_LEVEL=4 -c "$src/vector_level_dispatch.c" -o "$w/dispatch.o"
+"$cc" $tf $warn $base $novec -DSIMPLE_VECTOR_MAX_LEVEL=4 -c "$src/text_level_dispatch.c" -o "$w/textdispatch.o"
+"$cc" $tf $warn $base $novec -I"$w" -c "$src/bitmap_provider.c" -o "$w/provider.o"
+art=$out/simple_vector_provider_levelled.$ext
+rm -f "$art" "$art.sha256"
+case $t in
+    *windows*)
+        printf 'EXPORTS\nsimple_provider_query_v1\nsimple_vector_apply_v1\nsimple_vector_executed_iterations_v1\nsimple_vector_selected_level_v1\nsimple_vector_level_reason_v1\n' >"$w/provider.def"
+        "$cc" $tf -shared -fuse-ld=lld -Wl,--no-insert-timestamp "$w/provider.o" "$w/dispatch.o" "$w/textdispatch.o" "$w"/l*-*.o "$w/provider.def" -o "$art";;
+    *)
+        "$cc" $tf -shared -fuse-ld=lld "$w/provider.o" "$w/dispatch.o" "$w/textdispatch.o" "$w"/l*-*.o -o "$art";;
+esac
+rm -rf "$w"
+pin=$(sha256sum "$art" | cut -c1-64)
+printf '%s\n' "$pin" >"$art.sha256"
+echo "$pin"

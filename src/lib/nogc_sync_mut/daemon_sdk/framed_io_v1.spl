@@ -1,0 +1,58 @@
+# One-frame receiver over an owned bounded-read transport. Callback enforces
+# its own deadline/cancellation; no stream/descriptor is copied or serialized.
+use std.common.contracts.bounded_frame_v1.*
+
+fn framed_read_exact_v1(read: fn(i64) -> Result<[u8], text>, count: i64) -> Result<[u8], text>:
+    var result: [u8] = []
+    while result.len() < count:
+        val remaining = count - result.len()
+        val requested = if remaining > 8192: 8192 else: remaining
+        val chunk: [u8] = match read(requested):
+            case Ok(value): value
+            case Err(_): return Err("frame_read_failed")
+        if chunk.len() == 0: return Err("frame_truncated")
+        if chunk.len() > requested: return Err("frame_read_overflow")
+        for byte in chunk: result.push(byte)
+    Ok(result)
+
+# Length validation precedes body buffering. Reads never consume bytes from
+# the next frame. Any error invalidates this exchange; callers close/reconcile.
+pub fn daemon_read_frame_v1(read: fn(i64) -> Result<[u8], text>, limit: i64) -> Result<[u8], text>:
+    val valid = bounded_frame_limit_v1(limit)?
+    val header = framed_read_exact_v1(read, 4)?
+    val length = bounded_frame_length_v1(header, limit)?
+    framed_read_exact_v1(read, length)
+
+# reported_bytes counts successful local write returns, not remote receipt.
+# Even a failed first write may have transmitted a prefix.
+pub struct DaemonFrameWriteFailureV1:
+    code: text
+    may_have_written: bool
+    reported_bytes: i64
+
+fn framed_write_all_v1(write: fn([u8], i64, i64) -> Result<i64, text>,
+        bytes: [u8], prior_bytes: i64) -> Result<i64, DaemonFrameWriteFailureV1>:
+    var offset: i64 = 0
+    while offset < bytes.len():
+        val remaining = bytes.len() - offset
+        val count = if remaining > 8192: 8192 else: remaining
+        # Offset/count avoids reconstructing an 8192-byte suffix after every
+        # short write. The transport borrows the immutable byte range.
+        val written = match write(bytes, offset, count):
+            case Ok(value): value
+            case Err(_): return Err(DaemonFrameWriteFailureV1(code: "frame_write_failed",
+                may_have_written: true, reported_bytes: prior_bytes + offset))
+        if written <= 0 or written > count:
+            return Err(DaemonFrameWriteFailureV1(code: "frame_write_invalid_count",
+                may_have_written: true, reported_bytes: prior_bytes + offset))
+        offset = offset + written
+    Ok(prior_bytes + offset)
+
+pub fn daemon_write_frame_v1(write: fn([u8], i64, i64) -> Result<i64, text>,
+        body: [u8], limit: i64) -> Result<i64, DaemonFrameWriteFailureV1>:
+    val header = match bounded_frame_header_v1(body.len(), limit):
+        case Ok(value): value
+        case Err(reason): return Err(DaemonFrameWriteFailureV1(code: reason,
+            may_have_written: false, reported_bytes: 0))
+    val reported = framed_write_all_v1(write, header, 0)?
+    framed_write_all_v1(write, body, reported)

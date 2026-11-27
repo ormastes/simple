@@ -98,6 +98,17 @@ pub extern "C" fn rt_random_hex(len: i64) -> crate::value::RuntimeValue {
     value
 }
 
+/// Platform entropy owner ABI (`std.nogc_sync_mut.crypto.entropy_platform`):
+/// `count` fresh OS CSPRNG bytes, or nil on failure / request over 1 MiB.
+/// Second lane of the C `rt_entropy_fill` in `src/runtime/runtime_native.c`.
+#[no_mangle]
+pub extern "C" fn rt_entropy_fill(count: u64) -> crate::value::RuntimeValue {
+    if count > (1u64 << 20) {
+        return crate::value::RuntimeValue::NIL;
+    }
+    rt_random_bytes_c(count)
+}
+
 /// Second lane (rt-dual-implementation ratchet) of the C `rt_random_bytes_c` in
 /// `src/runtime/runtime_native.c`: fill a packed byte array with OS entropy.
 /// Entropy failure is reported as nil, never a zero-filled buffer that looks

@@ -172,6 +172,7 @@ fn expand_user_macro_inner(
                 } else {
                     // Not an inject block - apply hygiene and execute normally
                     let hygienic_block = apply_macro_hygiene_block(&expanded_block, &mut hygiene_ctx, false);
+                    let _expected_target_guard = crate::interpreter::push_expected_target_type(None);
                     exec_block_fn(&hygienic_block, &mut local_env, functions, classes, enums, impl_methods)?
                 };
 

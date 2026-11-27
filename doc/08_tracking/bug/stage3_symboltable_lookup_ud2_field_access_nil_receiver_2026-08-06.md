@@ -491,3 +491,5 @@ asserts the invariant across entry points (`declare` non-type path, `declare`
 type/first-write-wins path, `pop_scope` corrupted, `pop_scope` valid-pop
 non-regression, the `push_scope` insert-before-advance ordering, and the
 one-past-the-end id), so re-guarding a single function cannot make it pass.
+
+**Revalidated 2026-11-02: still plausible because FIX LANDED (interpreter-verified only, native-build unverifiable in; no merged fix commit with a passing regression is cited in this doc.**

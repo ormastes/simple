@@ -86,6 +86,9 @@ fn is_valid_runtime_bundle(value: &str) -> bool {
             | "host-gpu"
             | "host_gpu"
             | "gpu"
+            // Explicit vulkan native_all lane for ordinary GPU entries (Blocker 8).
+            | "host-gpu-native-all"
+            | "host_gpu_native_all"
             // Link the SHARED runtime (libsimple_runtime.so) rather than a
             // static archive. Accepted only for the Stage4 compiler entry --
             // `selected_runtime_library` refuses it for anything else -- so
@@ -128,6 +131,9 @@ fn normalize_backend(value: &str) -> Result<String, String> {
 }
 
 pub fn handle_native_build(args: &[String]) -> i32 {
+    // Enforce SIMPLE_MEMORY_LIMIT_MB: native compilation never polls the
+    // interpreter watchdog flag, so a runaway must be killed by the guard.
+    simple_compiler::watchdog::start_memory_guard("native-build");
     let mut source_dirs: Vec<PathBuf> = Vec::new();
     let mut output: Option<PathBuf> = None;
     let mut entry_file: Option<PathBuf> = None;
@@ -367,7 +373,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                     i += 2;
                 } else {
                     eprintln!(
-                        "error: --runtime-bundle requires a value (auto, simple-core, core-c-bootstrap, host-gpu, dynamic-runtime)"
+                        "error: --runtime-bundle requires a value (auto, simple-core, core-c-bootstrap, host-gpu, host-gpu-native-all, dynamic-runtime)"
                     );
                     return 1;
                 }
@@ -513,7 +519,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
             return 1;
         }
         eprintln!(
-            "error: invalid --runtime-bundle value '{}'. Expected one of: auto, simple-core, core-c-bootstrap, host-gpu, dynamic-runtime, runtime",
+            "error: invalid --runtime-bundle value '{}'. Expected one of: auto, simple-core, core-c-bootstrap, host-gpu, host-gpu-native-all, dynamic-runtime, runtime",
             runtime_bundle
         );
         return 1;
@@ -698,6 +704,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         simple_compiler::pipeline::native_project::set_target_override(*t);
     }
 
+    let planned_output = output.clone();
     let mut builder = NativeProjectBuilder::new(project_root, output).config(config);
     if let Some(entry) = entry_file {
         builder = builder.entry_file(entry);
@@ -706,8 +713,11 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         builder = builder.source_dir(dir);
     }
 
+    let absent_output = AbsentOutputProof::capture(&planned_output);
+    let build_start = std::time::SystemTime::now();
     match builder.build() {
         Ok(result) => {
+            let build_finish = std::time::SystemTime::now();
             println!(
                 "Build complete: {} compiled, {} cached, {} failed",
                 result.compiled, result.cached, result.failed
@@ -736,8 +746,28 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 }
             }
 
+            // Fail closed. Three independent conditions, every one of which
+            // used to be reported as SUCCESS by the unconditional `0` below:
+            //   1. one or more files failed to compile;
+            //   2. the declared artifact is missing, empty, or carries no code;
+            //   3. a link step ran but the artifact on disk is stale.
             if result.failed > 0 {
-                eprintln!("\nWarning: {} files failed to compile", result.failed);
+                eprintln!(
+                    "\nerror: {} file(s) failed to compile -- build did NOT succeed",
+                    result.failed
+                );
+                return 1;
+            }
+            if let ArtifactVerdict::Reject(why) = verify_build_artifact(
+                &result.output,
+                absent_output,
+                build_start,
+                build_finish,
+                result.link_time > std::time::Duration::ZERO,
+            )
+            {
+                eprintln!("\nerror: native-build reported success but {}", why);
+                return 1;
             }
 
             0
@@ -749,9 +779,387 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     }
 }
 
+/// Verdict from the emitted-artifact gate.
+///
+/// `native-build` used to return 0 on any `Ok(result)` from the builder, so a
+/// link that produced a function-less ELF (294 `FILE` symbols, 0 `FUNC`) was
+/// still reported as `Build complete`. A false green is worse than a failure:
+/// it destroys the evidence that something went wrong. See
+/// `doc/08_tracking/bug/native_build_reports_success_for_functionless_artifact_2026-08-10.md`.
+///
+/// This gate NEVER fabricates anything to make a check pass -- it only reads
+/// what was actually emitted and refuses to call an empty artifact a success.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ArtifactVerdict {
+    /// Artifact exists and carries real content.
+    Ok,
+    /// Artifact is missing, empty, or contains no code.
+    Reject(String),
+}
+
+fn rd_u16(b: &[u8], off: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(b.get(off..off + 2)?.try_into().ok()?))
+}
+fn rd_u32(b: &[u8], off: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(b.get(off..off + 4)?.try_into().ok()?))
+}
+fn rd_u64(b: &[u8], off: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(b.get(off..off + 8)?.try_into().ok()?))
+}
+
+/// Same verdict inputs as `elf64_code_census`, read from disk without loading
+/// the whole image: only the header, section table, .shstrtab and symbol
+/// tables are read (bounded chunks). A 207 MB debug-info kernel ELF failed
+/// `fs::read` under an 8 GB ulimit. The symbol scan stops at the first defined
+/// FUNC, so `funcs` is only meaningful as `> 0`; text bytes and saw_symtab are
+/// exact. `Ok(None)` = not an ELF64 LE image we can parse (bounds problems
+/// included; caller treats as non-ELF). `Err` = an I/O error while reading,
+/// which the caller rejects (fail closed, as the old whole-file read did).
+fn elf64_code_census_file(path: &std::path::Path) -> std::io::Result<Option<(usize, u64, bool)>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let file_len = f.metadata()?.len();
+    let mut read_at = |off: u64, len: u64| -> std::io::Result<Option<Vec<u8>>> {
+        match off.checked_add(len) {
+            Some(end) if end <= file_len => {}
+            _ => return Ok(None),
+        }
+        let Ok(n) = usize::try_from(len) else { return Ok(None) };
+        f.seek(SeekFrom::Start(off))?;
+        let mut v = vec![0u8; n];
+        f.read_exact(&mut v)?;
+        Ok(Some(v))
+    };
+    macro_rules! some_or_none {
+        ($e:expr) => {
+            match $e {
+                Some(v) => v,
+                None => return Ok(None),
+            }
+        };
+    }
+    let hdr = some_or_none!(read_at(0, 64)?);
+    if &hdr[0..4] != b"\x7fELF" || hdr[4] != 2 || hdr[5] != 1 {
+        return Ok(None);
+    }
+    let e_shoff = some_or_none!(rd_u64(&hdr, 0x28));
+    let e_shentsize = some_or_none!(rd_u16(&hdr, 0x3a)) as u64;
+    let e_shnum = some_or_none!(rd_u16(&hdr, 0x3c)) as u64;
+    let e_shstrndx = some_or_none!(rd_u16(&hdr, 0x3e)) as u64;
+    if e_shoff == 0 || e_shnum == 0 || e_shentsize < 64 || e_shstrndx >= e_shnum {
+        return Ok(None);
+    }
+    let shdrs = some_or_none!(read_at(e_shoff, e_shnum * e_shentsize)?);
+    let sh = |i: u64| -> Option<(u32, u32, u64, u64, u64)> {
+        let o = (i * e_shentsize) as usize;
+        Some((
+            rd_u32(&shdrs, o)?,
+            rd_u32(&shdrs, o + 4)?,
+            rd_u64(&shdrs, o + 0x18)?,
+            rd_u64(&shdrs, o + 0x20)?,
+            rd_u64(&shdrs, o + 0x38)?,
+        ))
+    };
+    const SHSTR_CAP: u64 = 16 << 20;
+    let (_, _, shstr_off, shstr_size, _) = some_or_none!(sh(e_shstrndx));
+    if shstr_size > SHSTR_CAP {
+        return Ok(None);
+    }
+    let shstr = some_or_none!(read_at(shstr_off, shstr_size)?);
+    let name_at = |n: u32| -> &str {
+        match shstr.get(n as usize..) {
+            Some(rest) => {
+                let end = rest.iter().position(|&c| c == 0).unwrap_or(rest.len());
+                std::str::from_utf8(&rest[..end]).unwrap_or("")
+            }
+            None => "",
+        }
+    };
+    let mut text_bytes: u64 = 0;
+    let mut func_syms: usize = 0;
+    let mut saw_symtab = false;
+    let mut symtabs = Vec::new();
+    for i in 0..e_shnum {
+        let Some((nm, sh_type, off, size, entsize)) = sh(i) else { continue };
+        let name = name_at(nm);
+        if name == ".text" || name.starts_with(".text.") {
+            text_bytes = text_bytes.saturating_add(size);
+        }
+        if sh_type == 2 || sh_type == 11 {
+            if sh_type == 2 {
+                saw_symtab = true;
+            }
+            if entsize >= 24 {
+                symtabs.push((off, size, entsize));
+            }
+        }
+    }
+    // Symbol scan in bounded chunks of whole entries; stop at the first FUNC.
+    // A table running past EOF is clamped to the entries that exist, like the
+    // buffer census, which scanned until `buf.get` ran out.
+    const CHUNK_ENTRIES: u64 = 4096;
+    'tables: for (off, size, entsize) in symtabs {
+        if off >= file_len {
+            continue;
+        }
+        let count = size.min(file_len - off) / entsize;
+        let mut k = 0u64;
+        while k < count {
+            let n = CHUNK_ENTRIES.min(count - k);
+            let chunk = some_or_none!(read_at(off + k * entsize, n * entsize)?);
+            for j in 0..n as usize {
+                let so = j * entsize as usize;
+                if (chunk[so + 4] & 0xf) == 2 && u16::from_le_bytes([chunk[so + 6], chunk[so + 7]]) != 0 {
+                    func_syms += 1;
+                    break 'tables;
+                }
+            }
+            k += n;
+        }
+    }
+    Ok(Some((func_syms, text_bytes, saw_symtab)))
+}
+
+/// Counts (defined FUNC symbols, total .text bytes) in an ELF64 LE image.
+/// Returns `None` when the image is not an ELF64 LE we can parse.
+#[cfg(test)]
+fn elf64_code_census(buf: &[u8]) -> Option<(usize, u64, bool)> {
+    if buf.len() < 64 || &buf[0..4] != b"\x7fELF" {
+        return None;
+    }
+    // EI_CLASS == ELFCLASS64, EI_DATA == ELFDATA2LSB
+    if buf[4] != 2 || buf[5] != 1 {
+        return None;
+    }
+    let e_shoff = rd_u64(buf, 0x28)? as usize;
+    let e_shentsize = rd_u16(buf, 0x3a)? as usize;
+    let e_shnum = rd_u16(buf, 0x3c)? as usize;
+    let e_shstrndx = rd_u16(buf, 0x3e)? as usize;
+    if e_shoff == 0 || e_shnum == 0 || e_shentsize < 64 || e_shstrndx >= e_shnum {
+        return None;
+    }
+    let sh = |i: usize| -> Option<(u32, u32, u64, u64, u64)> {
+        let o = e_shoff.checked_add(i.checked_mul(e_shentsize)?)?;
+        Some((
+            rd_u32(buf, o)?,          // sh_name
+            rd_u32(buf, o + 4)?,      // sh_type
+            rd_u64(buf, o + 0x18)?,   // sh_offset
+            rd_u64(buf, o + 0x20)?,   // sh_size
+            rd_u64(buf, o + 0x38)?,   // sh_entsize
+        ))
+    };
+    let (_, _, shstr_off, shstr_size, _) = sh(e_shstrndx)?;
+    let shstr = buf.get(shstr_off as usize..(shstr_off + shstr_size) as usize)?;
+    let name_at = |n: u32| -> &str {
+        let s = n as usize;
+        match shstr.get(s..) {
+            Some(rest) => {
+                let end = rest.iter().position(|&c| c == 0).unwrap_or(rest.len());
+                std::str::from_utf8(&rest[..end]).unwrap_or("")
+            }
+            None => "",
+        }
+    };
+
+    let mut text_bytes: u64 = 0;
+    let mut func_syms: usize = 0;
+    let mut saw_symtab = false;
+    for i in 0..e_shnum {
+        let (nm, sh_type, off, size, entsize) = match sh(i) {
+            Some(v) => v,
+            None => continue,
+        };
+        let name = name_at(nm);
+        // SHT_PROGBITS(1) with SHF_EXECINSTR is code; keep it simple and look
+        // at the canonical text sections the linker emits.
+        if name == ".text" || name.starts_with(".text.") {
+            text_bytes = text_bytes.saturating_add(size);
+        }
+        // SHT_SYMTAB == 2, SHT_DYNSYM == 11
+        if sh_type == 2 || sh_type == 11 {
+            if sh_type == 2 {
+                saw_symtab = true;
+            }
+            if entsize < 24 {
+                continue;
+            }
+            let count = (size / entsize) as usize;
+            for k in 0..count {
+                let so = off as usize + k * entsize as usize;
+                let st_info = match buf.get(so + 4) {
+                    Some(v) => *v,
+                    None => break,
+                };
+                let st_shndx = match rd_u16(buf, so + 6) {
+                    Some(v) => v,
+                    None => break,
+                };
+                // STT_FUNC == 2, defined means st_shndx != SHN_UNDEF(0)
+                if (st_info & 0xf) == 2 && st_shndx != 0 {
+                    func_syms += 1;
+                }
+            }
+        }
+    }
+    Some((func_syms, text_bytes, saw_symtab))
+}
+
+/// One-use evidence that this exact planned output did not exist before build.
+/// Metadata errors and dangling symlinks are never treated as absence.
+struct AbsentOutputProof {
+    path: std::path::PathBuf,
+}
+
+impl AbsentOutputProof {
+    fn capture(path: &std::path::Path) -> Option<Self> {
+        let path = absolute_output_path(path)?;
+        match std::fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Self { path }),
+            _ => None,
+        }
+    }
+}
+
+fn absolute_output_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    absolute.is_absolute().then_some(absolute)
+}
+
+/// A backwards wall clock cannot order a newly created output against start.
+/// Only a consumed absence proof for this exact path may waive that comparison;
+/// all existence, size and code-content checks remain in the artifact owner.
+fn verify_build_artifact(
+    path: &std::path::Path,
+    absent: Option<AbsentOutputProof>,
+    started: std::time::SystemTime,
+    finished: std::time::SystemTime,
+    link_ran: bool,
+) -> ArtifactVerdict {
+    match absolute_output_path(path) {
+        Some(actual_path) => {
+            verify_anchored_build_artifact(actual_path, absent, started, finished, link_ran)
+        }
+        // An anchor failure can never waive the original freshness floor.
+        None => verify_emitted_artifact(path, if link_ran { Some(started) } else { None }),
+    }
+}
+
+/// Compare proof and validate metadata/content through the SAME anchored path.
+/// No relative path survives this boundary, even if another thread changes CWD.
+fn verify_anchored_build_artifact(
+    actual_path: std::path::PathBuf,
+    absent: Option<AbsentOutputProof>,
+    started: std::time::SystemTime,
+    finished: std::time::SystemTime,
+    link_ran: bool,
+) -> ArtifactVerdict {
+    let new_output_after_rollback =
+        link_ran && finished < started && absent.is_some_and(|proof| proof.path == actual_path);
+    let floor = if link_ran && !new_output_after_rollback {
+        Some(started)
+    } else {
+        None
+    };
+    verify_emitted_artifact(&actual_path, floor)
+}
+
+/// Fail-closed check that a declared build artifact actually exists and is
+/// non-trivial. Never mutates or creates the artifact.
+/// `not_older_than`: when `Some(t)`, the artifact must have been written at
+/// or after `t`. Callers pass the build start time ONLY when a link step
+/// actually ran -- a link that ran must have rewritten its output, so an older
+/// mtime means the file on disk is a STALE artifact left by a previous run and
+/// an existence check on it is a false green. Cached, no-link builds pass
+/// `None` so they cannot be failed for not rewriting a file they never touched.
+pub(crate) fn verify_emitted_artifact(
+    path: &std::path::Path,
+    not_older_than: Option<std::time::SystemTime>,
+) -> ArtifactVerdict {
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) => {
+            return ArtifactVerdict::Reject(format!(
+                "declared output '{}' does not exist ({})",
+                path.display(),
+                e
+            ))
+        }
+    };
+    if meta.len() == 0 {
+        return ArtifactVerdict::Reject(format!("declared output '{}' is empty", path.display()));
+    }
+    if let Some(floor) = not_older_than {
+        match meta.modified() {
+            Ok(mtime) => {
+                // 2s slack for coarse filesystem timestamp granularity.
+                let floor = floor
+                    .checked_sub(std::time::Duration::from_secs(2))
+                    .unwrap_or(floor);
+                if mtime < floor {
+                    return ArtifactVerdict::Reject(format!(
+                        "declared output '{}' is STALE -- a link step ran but the file on disk predates this build",
+                        path.display()
+                    ));
+                }
+            }
+            Err(e) => {
+                return ArtifactVerdict::Reject(format!(
+                    "declared output '{}' has no readable mtime, cannot prove it is fresh ({})",
+                    path.display(),
+                    e
+                ))
+            }
+        }
+    }
+    let census = match elf64_code_census_file(path) {
+        Ok(c) => c,
+        Err(e) => {
+            return ArtifactVerdict::Reject(format!(
+                "declared output '{}' is unreadable ({})",
+                path.display(),
+                e
+            ))
+        }
+    };
+    match census {
+        // Not an ELF64 LE image (archive, wasm, mach-o, ELF32): the only claim
+        // we can make is non-emptiness, already established above.
+        None => ArtifactVerdict::Ok,
+        Some((funcs, text_bytes, saw_symtab)) => {
+            if funcs > 0 {
+                return ArtifactVerdict::Ok;
+            }
+            if !saw_symtab {
+                // Stripped image: fall back to "there is executable content".
+                if text_bytes > 0 {
+                    return ArtifactVerdict::Ok;
+                }
+                return ArtifactVerdict::Reject(format!(
+                    "declared output '{}' is a stripped ELF with an empty .text -- no code was emitted",
+                    path.display()
+                ));
+            }
+            ArtifactVerdict::Reject(format!(
+                "declared output '{}' has a symbol table with zero defined FUNC symbols (.text = {} bytes) -- no function was emitted",
+                path.display(),
+                text_bytes
+            ))
+        }
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
-    use super::{is_allowed_runtime_bundle, normalize_backend, seed_build_mode_notice, SEED_DEFAULT_BUILD_MODE};
+    use super::{
+        elf64_code_census, elf64_code_census_file, is_allowed_runtime_bundle, normalize_backend,
+        seed_build_mode_notice, verify_emitted_artifact,
+        ArtifactVerdict, SEED_DEFAULT_BUILD_MODE,
+    };
 
     #[test]
     fn seed_default_build_mode_is_not_dynload() {
@@ -770,6 +1178,139 @@ mod tests {
         );
         assert!(notice.contains("SKIPPED"), "{}", notice);
     }
+
+    /// Regression pins for
+    /// `doc/08_tracking/bug/native_build_reports_success_for_functionless_artifact_2026-08-10.md`.
+    /// Fixtures are real ELF images -- no stub or empty object is ever
+    /// fabricated to make a check pass.
+    fn fixture_dir() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("nb_gate_{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn rejects_missing_and_empty_artifacts() {
+        let d = fixture_dir();
+        let missing = d.join("no_such_file.out");
+        let _ = std::fs::remove_file(&missing);
+        assert!(matches!(
+            verify_emitted_artifact(&missing, None),
+            ArtifactVerdict::Reject(_)
+        ));
+
+        let empty = d.join("empty.out");
+        std::fs::write(&empty, b"").unwrap();
+        assert!(matches!(
+            verify_emitted_artifact(&empty, None),
+            ArtifactVerdict::Reject(_)
+        ));
+        let _ = std::fs::remove_file(&empty);
+    }
+
+    #[test]
+    fn accepts_real_binary_and_rejects_functionless_elf() {
+        let d = fixture_dir();
+        // Positive control: the test binary itself is a real ELF with
+        // functions, so no toolchain invocation is needed for this half.
+        let me = std::env::current_exe().unwrap();
+        assert_eq!(verify_emitted_artifact(&me, None), ArtifactVerdict::Ok);
+
+        // Negative control: an ELF64 with a symtab and zero defined FUNC
+        // symbols -- the shape the incident produced.
+        let asm = d.join("nofunc.s");
+        std::fs::write(&asm, ".section .data\n.globl datum\ndatum: .quad 42\n").unwrap();
+        let obj = d.join("nofunc.o");
+        let cc = std::process::Command::new("cc")
+            .arg("-c")
+            .arg(&asm)
+            .arg("-o")
+            .arg(&obj)
+            .status();
+        if !matches!(cc, Ok(st) if st.success()) {
+            eprintln!("SKIP: no working `cc` to build the 0-FUNC fixture");
+            return;
+        }
+        let out = d.join("nofunc.out");
+        let ld = std::process::Command::new("ld")
+            .arg(&obj)
+            .arg("-o")
+            .arg(&out)
+            .status();
+        if !matches!(ld, Ok(st) if st.success()) {
+            eprintln!("SKIP: no working `ld` to link the 0-FUNC fixture");
+            return;
+        }
+        match verify_emitted_artifact(&out, None) {
+            ArtifactVerdict::Reject(why) => {
+                assert!(why.contains("FUNC"), "unexpected reason: {}", why)
+            }
+            ArtifactVerdict::Ok => panic!("0-FUNC ELF was accepted -- the false green is back"),
+        }
+    }
+
+    #[test]
+    fn verifies_huge_elf_without_reading_it_whole() {
+        // Repro: a 207 MB riscv64 kernel ELF was rejected as "unreadable (out
+        // of memory)" under an 8 GB ulimit because the census fs::read the
+        // whole file. A real ELF padded to a 64 GiB sparse file must verify
+        // from its header, section table and symtab alone.
+        let d = fixture_dir();
+        let me = std::env::current_exe().unwrap();
+        let huge = d.join("huge.out");
+        std::fs::copy(&me, &huge).unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&huge).unwrap();
+        if f.set_len(64 << 30).is_err() {
+            eprintln!("SKIP: filesystem cannot hold a 64 GiB sparse fixture");
+            return;
+        }
+        drop(f);
+        assert_eq!(verify_emitted_artifact(&huge, None), ArtifactVerdict::Ok);
+        let _ = std::fs::remove_file(&huge);
+    }
+
+    #[test]
+    fn rejects_artifact_whose_read_fails_after_open() {
+        // A directory opens on Unix but read_exact fails (EISDIR): an I/O
+        // error after open must Reject, never fall through to the non-ELF Ok.
+        let d = fixture_dir();
+        let dir_artifact = d.join("dir_artifact");
+        std::fs::create_dir_all(&dir_artifact).unwrap();
+        match verify_emitted_artifact(&dir_artifact, None) {
+            ArtifactVerdict::Reject(_) => {}
+            ArtifactVerdict::Ok => panic!("an unreadable artifact was accepted"),
+        }
+    }
+
+    #[test]
+    fn streamed_census_matches_buffer_census() {
+        let me = std::env::current_exe().unwrap();
+        let buf = std::fs::read(&me).unwrap();
+        let full = elf64_code_census(&buf).map(|(f, t, s)| (f > 0, t, s));
+        let streamed = elf64_code_census_file(&me).unwrap().map(|(f, t, s)| (f > 0, t, s));
+        assert_eq!(full, streamed);
+    }
+
+    #[test]
+    fn rejects_stale_artifact_left_by_a_previous_run() {
+        let d = fixture_dir();
+        // A valid binary from a PREVIOUS run: it exists, is non-empty, and has
+        // functions, so an existence check passes it. Only the freshness floor
+        // catches that this build did not produce it.
+        let stale = d.join("stale.out");
+        std::fs::copy(std::env::current_exe().unwrap(), &stale).unwrap();
+        let floor = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        match verify_emitted_artifact(&stale, Some(floor)) {
+            ArtifactVerdict::Reject(why) => {
+                assert!(why.contains("STALE"), "unexpected reason: {}", why)
+            }
+            ArtifactVerdict::Ok => panic!("a stale artifact was accepted as a fresh build product"),
+        }
+        // Same file, no freshness claim (cached build, no link ran) -> accepted.
+        assert_eq!(verify_emitted_artifact(&stale, None), ArtifactVerdict::Ok);
+        let _ = std::fs::remove_file(&stale);
+    }
+
 
     #[test]
     fn permits_rust_hosted_only_for_bootstrap() {
@@ -858,4 +1399,206 @@ fn print_help() {
     println!("  simple native-build --verbose --threads 4");
     println!("  simple native-build --clean --verbose");
     println!("  simple native-build --no-incremental");
+}
+
+#[cfg(test)]
+mod clock_freshness_contracts {
+    use super::*;
+    use std::{
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicUsize, Ordering},
+        time::{Duration, SystemTime},
+    };
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "simple-clock-proof-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&p).unwrap();
+            Self(p)
+        }
+        fn path(&self, n: &str) -> PathBuf {
+            self.0.join(n)
+        }
+        fn binary(&self, n: &str) -> PathBuf {
+            let p = self.path(n);
+            std::fs::copy(std::env::current_exe().unwrap(), &p).unwrap();
+            p
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            for e in std::fs::read_dir(&self.0).unwrap() {
+                let p = e.unwrap().path();
+                let _ = std::fs::remove_file(p);
+            }
+            let _ = std::fs::remove_dir(&self.0);
+        }
+    }
+    fn times(p: &Path) -> (SystemTime, SystemTime) {
+        let t = std::fs::metadata(p).unwrap().modified().unwrap();
+        (t + Duration::from_secs(3600), t - Duration::from_secs(3600))
+    }
+    fn rejected(v: ArtifactVerdict, reason: &str) {
+        match v {
+            ArtifactVerdict::Reject(s) => assert!(s.contains(reason), "{s}"),
+            ArtifactVerdict::Ok => panic!("expected rejection: {reason}"),
+        }
+    }
+    #[test]
+    fn new_exact_output_survives_observed_rollback_without_touching_mtime() {
+        let f = Fixture::new();
+        let p = f.path("fresh.exe");
+        let proof = AbsentOutputProof::capture(&p);
+        assert!(proof.is_some());
+        f.binary("fresh.exe");
+        let before = std::fs::metadata(&p).unwrap().modified().unwrap();
+        let (start, end) = times(&p);
+        assert_eq!(
+            verify_build_artifact(&p, proof, start, end, true),
+            ArtifactVerdict::Ok
+        );
+        assert_eq!(std::fs::metadata(&p).unwrap().modified().unwrap(), before);
+    }
+    #[test]
+    fn preexisting_valid_output_is_still_stale_during_rollback() {
+        let f = Fixture::new();
+        let p = f.binary("old.exe");
+        let proof = AbsentOutputProof::capture(&p);
+        assert!(proof.is_none());
+        let (start, end) = times(&p);
+        rejected(verify_build_artifact(&p, proof, start, end, true), "STALE");
+    }
+    #[test]
+    fn wrong_output_cannot_spend_another_paths_absence() {
+        let f = Fixture::new();
+        let proof = AbsentOutputProof::capture(&f.path("planned.exe"));
+        let p = f.binary("other.exe");
+        let (start, end) = times(&p);
+        rejected(verify_build_artifact(&p, proof, start, end, true), "STALE");
+    }
+    #[test]
+    fn normal_clock_preserves_mtime_floor_even_for_absent_output() {
+        let f = Fixture::new();
+        let p = f.path("new.exe");
+        let proof = AbsentOutputProof::capture(&p);
+        f.binary("new.exe");
+        let (start, _) = times(&p);
+        rejected(
+            verify_build_artifact(&p, proof, start, start + Duration::from_secs(1), true),
+            "STALE",
+        );
+    }
+    #[test]
+    fn cached_no_link_keeps_existing_no_freshness_claim() {
+        let f = Fixture::new();
+        let p = f.binary("cached.exe");
+        let (start, end) = times(&p);
+        assert_eq!(
+            verify_build_artifact(&p, None, start, end, false),
+            ArtifactVerdict::Ok
+        );
+    }
+    #[test]
+    fn absent_output_and_rollback_do_not_accept_missing_file() {
+        let f = Fixture::new();
+        let p = f.path("missing.exe");
+        let proof = AbsentOutputProof::capture(&p);
+        let t = SystemTime::now();
+        rejected(
+            verify_build_artifact(&p, proof, t, t - Duration::from_secs(1), true),
+            "does not exist",
+        );
+    }
+    #[test]
+    fn absent_output_and_rollback_do_not_accept_empty_file() {
+        let f = Fixture::new();
+        let p = f.path("empty.exe");
+        let proof = AbsentOutputProof::capture(&p);
+        std::fs::write(&p, []).unwrap();
+        let (start, end) = times(&p);
+        rejected(verify_build_artifact(&p, proof, start, end, true), "empty");
+    }
+    #[test]
+    fn metadata_error_is_not_an_absence_proof() {
+        let path = Path::new("\0invalid-output");
+        let err = std::fs::symlink_metadata(path).unwrap_err();
+        assert_ne!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(AbsentOutputProof::capture(path).is_none());
+    }
+    #[test]
+    fn relative_absence_is_anchored_to_current_absolute_directory() {
+        let name = format!(
+            "simple-absent-proof-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let rel = Path::new(&name);
+        let proof = AbsentOutputProof::capture(rel).expect("unique absent relative path");
+        assert!(proof.path.is_absolute());
+        assert_eq!(proof.path, std::env::current_dir().unwrap().join(rel));
+    }
+    #[test]
+    fn rollback_does_not_bypass_real_functionless_elf_census() {
+        let f = Fixture::new();
+        let p = f.path("no-functions.elf");
+        let proof = AbsentOutputProof::capture(&p);
+        let mut b = vec![0u8; 192];
+        b[..6].copy_from_slice(b"\x7fELF\x02\x01");
+        b[0x28..0x30].copy_from_slice(&64u64.to_le_bytes());
+        b[0x3a..0x3c].copy_from_slice(&64u16.to_le_bytes());
+        b[0x3c..0x3e].copy_from_slice(&2u16.to_le_bytes());
+        b[128 + 4..128 + 8].copy_from_slice(&2u32.to_le_bytes());
+        std::fs::write(&p, b).unwrap();
+        let (start, end) = times(&p);
+        rejected(verify_build_artifact(&p, proof, start, end, true), "FUNC");
+    }
+    #[test]
+    fn anchored_validation_does_not_follow_a_cwd_change_to_another_output() {
+        struct RestoreCwdAndFiles {
+            original: PathBuf,
+            directories: [PathBuf; 2],
+        }
+        impl Drop for RestoreCwdAndFiles {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.original);
+                for dir in &self.directories {
+                    let _ = std::fs::remove_file(dir.join("output.exe"));
+                    let _ = std::fs::remove_dir(dir);
+                }
+            }
+        }
+        let fixture = Fixture::new();
+        let original = std::env::current_dir().unwrap();
+        let first = fixture.path("first");
+        let second = fixture.path("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let restore = RestoreCwdAndFiles {
+            original: original.clone(),
+            directories: [first.clone(), second.clone()],
+        };
+        std::env::set_current_dir(&first).unwrap();
+        let relative = Path::new("output.exe");
+        let proof = AbsentOutputProof::capture(relative);
+        assert!(proof.is_some());
+        let actual_path = absolute_output_path(relative).unwrap();
+        assert!(actual_path.is_absolute());
+        // The pinned output is empty; a different CWD holds a valid executable.
+        std::fs::write(&actual_path, []).unwrap();
+        let other = second.join("output.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &other).unwrap();
+        let (started, finished) = times(&other);
+        std::env::set_current_dir(&second).unwrap();
+        // Real verifier negative control: a relative lookup would accept OTHER.
+        assert_eq!(verify_emitted_artifact(relative, None), ArtifactVerdict::Ok);
+        let verdict = verify_anchored_build_artifact(actual_path, proof, started, finished, true);
+        drop(restore);
+        assert_eq!(std::env::current_dir().unwrap(), original);
+        rejected(verdict, "empty");
+    }
 }

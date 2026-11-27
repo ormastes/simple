@@ -13,6 +13,21 @@ related: src/os/kernel/log/klog_api.spl
 related: src/os/kernel/fs/fat32.spl
 ---
 
+## Triage 2026-11-25 — SKIP (host-blocked); fix confirmed still present in source
+- **measured** — the claimed linker fix is intact in current source:
+  `freestanding_qualified_to_bare_defsyms` (`linker.rs:931`, wired at `:3716`),
+  the hardened `freestanding_weak_boot_defsyms` (`linker.rs:851`, wired at
+  `:3707`), and the unit test
+  `test_freestanding_qualified_to_bare_alias_bridges_export_symbol`
+  (`tests.rs:8773`).
+- **measured** — the separate `parse_bpb` blocker stays fixed: the fat32
+  call site now uses the 1-arg form
+  (`src/os/kernel/fs/_Fat32Filesystem/mount_and_read.spl:95`).
+- **inferred** — end-to-end re-verification still requires
+  `bin/simple os build --scenario=rv64-base` (riscv64 LLVM cross-link), which
+  does not run from this Windows lane and exceeds the 10-minute probe bound.
+  Left OPEN, host-blocked, unchanged from the 2026-09-13 triage.
+
 ## Triage 2026-09-13 — STILL OPEN: host-blocked; the named `.spl` blocker is now resolved
 - **measured** — the concrete source defect this entry blames for fat32 being dropped (a
   2-arg `dev.read_sector(root_lba + sec_idx.to_u64(), sec_buf)` against a 1-arg trait) is
@@ -153,3 +168,5 @@ the line-245 call), and is outside this mangling fix's locus.
 
 - A separate, concurrent fix addresses `rt_bytes_alloc` in
   `freestanding_runtime.c`; that symbol is unrelated to this mangling bug.
+
+**Revalidated 2026-11-02: still plausible because the report title (rv64 cross-module calls reference os__kernel__ names while definitions emit bar) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

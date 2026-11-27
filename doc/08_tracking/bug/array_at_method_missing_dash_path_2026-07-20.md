@@ -73,3 +73,41 @@ creep beyond this campaign's mandate.
   (`val bytes: [i64] = [99, 111, 108]; bytes.at(1)`), confirming this is a
   missing builtin, not a test-vs-run evaluator divergence.
 
+
+## Evidence — 2026-11-05 (work/libbug-std-arrayat-20261105)
+
+Re-verified against seed binary `build/phase_snapshots/phase1_1793422538/simple`
+(Oct 31 build), cwd = this branch's worktree:
+
+**The `array.at(i)` method itself is FIXED on every lane compiled into this
+binary.** `handle_array_methods`
+(`src/compiler_rust/compiler/src/interpreter_method/collections.rs:377`) has
+the `at` arm (landed with interpreter fix `f18c5963132`, JIT fix `ceee960ca8e`,
+native fix per `array_at_native_llvm_lane_2026-08-01.md`, and the pure-Simple
+MIR arm at `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:5333`).
+Empirical results 2026-11-05:
+
+- `test/01_unit/lib/common/array_at_option_spec.spl` — 11/11 PASS
+- `test/01_unit/lib/blink/css_tokenizer_spec.spl` — 8/8 PASS (was 7/8 failing)
+- JIT probe (`simple run`, default engine): in-range/OOB/negative/empty all
+  correct Option results.
+- `test/01_unit/lib/skia/stroke_dash_spec.spl` — 4/5 PASS (was 4/5 failing);
+  no `method 'at' not found` errors remain anywhere.
+
+**Residual failure root cause (this change).** The one remaining red example,
+`"dash_path: pattern [0, 10] (all-off) produces empty path"`, failed with
+`expected false to equal true` — a DIFFERENT defect from the missing method:
+`dash_path` (`src/lib/skia/feature/stroke/dash.spl`) emitted a degenerate
+zero-length `move_to`/`line_to` pair whenever the dash pointer sat inside a
+zero-length "on" interval (pattern `[0, 10]` alternates a 0-length on-interval
+with the off-interval), so the output path was never empty. Fixed by skipping
+the emission when the sub-segment has zero length (an on-interval of length 0
+draws nothing, matching SkDashPathEffect). After the fix:
+`test/01_unit/lib/skia/stroke_dash_spec.spl` — 5/5 PASS.
+
+Regression checks (same binary, same run): `stroke_expand_spec` 5/5,
+`array_coverage_spec` 228/228, `array_list_ops_spec` 19/19 — all PASS.
+`array_set_method_spec` remains 2/7 on this binary for an unrelated reason:
+the binary (Oct 31) predates the Nov 4 `set` fix `adcb88151ce` (Rust-source
+only, not compiled into any available binary); its failures are all
+`method 'set' not found`, unchanged by this change.

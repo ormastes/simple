@@ -17,14 +17,7 @@
 # unrelated pre-existing breakage; this spec drives the same LLVM backend
 # module (compiler.backend.MirToLlvm) directly).
 #
-# Does NOT cover `.push()`/`.map()`/`.filter()` -- those emit an ORDINARY
-# MirInstKind.Call, byte-identical in shape to a genuine source call, so
-# they still collide with a same-named local body. Closing that gap was
-# attempted (a reserved marker prefix at the four compiler-generated
-# construction sites) and reverted: the marker is emitted into MIR every
-# backend consumes, but only LLVM/Cranelift were taught to strip it,
-# which would have broken ordinary `.push()` on the interpreter/C/native
-# backends. See mir_call_ownership.spl's "KNOWN OPEN GAP" note.
+# Normal Call operands carry explicit Source/Runtime/Foreign identity.
 
 use compiler.backend.{MirToLlvm}
 use compiler.backend.backend.backend_types.{CodegenTarget}
@@ -98,7 +91,10 @@ fn build_module() -> MirModule:
     val call = MirInst(kind: MirInstKind.Call(Some(dest), func_ref("rt_array_new", 1), [int_arg(0)]), span: nil)
     val agg_dest = LocalId(id: 11)
     val agg = MirInst(kind: MirInstKind.Aggregate(agg_dest, AggregateKind.Array(i64t()), [int_arg(7), int_arg(8)]), span: nil)
-    val main_fn = mk_fn(3, "main", [], [temp_local(10), temp_local(11)], [call, agg], Some(mir_operand_copy(dest)))
+    val runtime_new = MirInst(kind: MirInstKind.Call(Some(LocalId(id: 12)), mir_operand_with_call_origin(func_ref("rt_array_new", 1), MirCallOrigin.Runtime), [int_arg(4)]), span: nil)
+    val runtime_push = MirInst(kind: MirInstKind.Call(None, mir_operand_with_call_origin(func_ref("rt_array_push", 2), MirCallOrigin.Runtime), [mir_operand_copy(LocalId(id: 12)), int_arg(17)]), span: nil)
+    val foreign_new = MirInst(kind: MirInstKind.Call(Some(LocalId(id: 13)), mir_operand_with_call_origin(func_ref("rt_array_new", 1), MirCallOrigin.Foreign), [int_arg(6)]), span: nil)
+    val main_fn = mk_fn(3, "main", [], [temp_local(10), temp_local(11), temp_local(12), temp_local(13)], [call, agg, runtime_new, runtime_push, foreign_new], Some(mir_operand_copy(dest)))
 
     var functions: Dict<SymbolId, MirFunction> = {}
     functions[local_new.symbol] = local_new
@@ -127,3 +123,11 @@ describe "LLVM runtime call origin (rt_array_new/rt_array_push collision)":
         val output = translator.translate_module(build_module())
         expect(output).to_contain("call ptr @rt_array_new(i64 2)")
         expect(output).to_contain("call i8 @rt_array_push(ptr")
+
+    it "routes ordinary Runtime and Foreign calls past the same named source body":
+        val translator = MirToLlvm.create("test.llvm.runtime_call_origin", CodegenTarget.X86_64, nil)
+        val output = translator.translate_module(build_module())
+        expect(output).to_contain("@rt_array_new(i64 4)")
+        expect(output).to_contain("@rt_array_new(i64 6)")
+        expect(output.contains("@__simple_local_rt_array_new(i64 4)")).to_equal(false)
+        expect(output).to_contain("i64 17)")

@@ -19,7 +19,7 @@ that it is nonblank, and compares it against the text-tolerant PPM baseline.
 ## Evidence
 
 The live guest writes serial evidence to `build/os/engine2d_qemu_serial.log`.
-The capture is compared with `test/baselines/engine2d_in_qemu/verification_scene.ppm`;
+The capture is compared with `test/09_baselines/engine2d_in_qemu/verification_scene.ppm`;
 `UPDATE_BASELINE=1` rewrites that baseline after a nonblank capture.
 """
 
@@ -29,16 +29,15 @@ use os.qemu_runner.{OsTarget, build_os}
 use os.kernel.arch.arch_context.{Architecture}
 use os.compositor.qemu_capture.{capture_qemu_vm}
 use os.compositor.electron_capture.{CaptureResult}
-use os.compositor.screenshot_compare.{ComparisonResult, compare_with_profile}
-use os.compositor.tolerance_profile.{ToleranceProfile, profile_text_tolerant}
 use std.common.image.ppm_decode.{decode_ppm_to_argb, PpmImage}
+use std.nogc_sync_mut.io.{thread_sleep_ms}
 use std.nogc_sync_mut.ffi.io.{file_read_bytes, file_write_bytes, dir_create_all}
 
-use test.system.qemu.os.common.qemu_os_harness.{
+use test.fixtures.system_support.qemu.os.common.qemu_os_harness.{
     QemuGuestHandle, can_run_target, file_exists, spawn_guest_with_qmp,
     stop_guest, wait_for_serial_marker, read_serial_log}
 
-extern fn rt_env_get(name: text) -> text
+extern fn rt_env_get(name: text) -> text?
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
 # ===========================================================================
@@ -110,6 +109,51 @@ fn _read_baseline_ppm(path: text) -> (bool, [u32], i32, i32, text):
         Err(msg):
             return (false, [], 0, 0, "ppm decode failed: {msg}")
 
+fn _update_baseline_requested() -> bool:
+    val v = rt_env_get("UPDATE_BASELINE") ?? ""
+    v == "1" or v == "true"
+
+fn _capture_engine2d_ppm(qmp_socket: text, output_path: text) -> CaptureResult:
+    # The guest may still be flushing the first frame: retry the QMP
+    # screendump for up to 15 s (30 x 500 ms), like the old helper's poll.
+    var cap = capture_qemu_vm(qmp_socket, output_path)
+    var tries = 1
+    while not cap.success and tries < 30:
+        thread_sleep_ms(500)
+        cap = capture_qemu_vm(qmp_socket, output_path)
+        tries = tries + 1
+    if not cap.success:
+        print "[engine2d_in_qemu_spec] qmp capture failed after {tries} tries: {cap.error}"
+    cap
+
+# Exact-pixel match against the baseline: same dimensions and >= 95% of
+# pixels identical (RGB only, alpha ignored).
+fn _compare_baseline_ppm(cap: CaptureResult, baseline_path: text) -> bool:
+    val baseline = _read_baseline_ppm(baseline_path)
+    if not baseline[0]:
+        print "[engine2d_in_qemu_spec] {baseline[4]}"
+        return false
+    val bpix = baseline[1]
+    if baseline[2] != cap.width or baseline[3] != cap.height or bpix.len() != cap.pixels.len():
+        print "[engine2d_in_qemu_spec] baseline size {baseline[2]}x{baseline[3]} != capture {cap.width}x{cap.height}"
+        return false
+    val total = cap.pixels.len()
+    if total == 0:
+        return false
+    var same: i64 = 0
+    var i = 0
+    while i < total:
+        if (cap.pixels[i] & 0xFFFFFF) == (bpix[i] & 0xFFFFFF):
+            same = same + 1
+        i = i + 1
+    val pct = (same * 10000) / total
+    print "[engine2d_in_qemu_spec] baseline match={pct / 100}.{pct % 100}% {same}/{total}"
+    pct >= 9500
+
+# ===========================================================================
+# Spec
+# ===========================================================================
+
 describe "Engine2D in QEMU SimpleOS":
     # @manual scenario evidence
     it "should build the strict x86_64 Engine2D guest":
@@ -146,7 +190,7 @@ describe "Engine2D in QEMU SimpleOS":
         val qmp_socket = "/tmp/simpleos_engine2d_qmp.sock"
         val serial_log = "build/os/engine2d_qemu_serial.log"
         val capture_ppm = "/tmp/engine2d_capture.ppm"
-        val oracle_path = "test/baselines/engine2d_in_qemu/verification_scene.ppm"
+        val oracle_path = "test/09_baselines/engine2d_in_qemu/verification_scene.ppm"
         match spawn_guest_with_qmp(target, qmp_socket, serial_log):
             Ok(handle):
                 spawned = true
@@ -156,10 +200,11 @@ describe "Engine2D in QEMU SimpleOS":
                 val saw_painted = wait_for_serial_marker(
                     handle, "[E2D] Engine2D verification frame painted", 30000)
                 if saw_painted:
-                    val captured = _capture_engine2d_ppm_with_python(qmp_socket, capture_ppm)
+                    val cap = _capture_engine2d_ppm(qmp_socket, capture_ppm)
+                    val captured = cap.success
                     var nonblank = false
                     if captured:
-                        nonblank = _assert_nonblack_ppm_with_python(capture_ppm)
+                        nonblank = _non_black_count(cap.pixels) > 0
                     if _update_baseline_requested():
                         val cp_result = rt_process_run_timeout("cp", [capture_ppm, baseline_path], 5000)
                         val wrote = cp_result[2] == 0 and file_exists(baseline_path)
@@ -172,7 +217,7 @@ describe "Engine2D in QEMU SimpleOS":
                             stop_guest(handle)
                             expect(file_exists(baseline_path)).to_equal(true)
                         else:
-                            val compared = captured and nonblank and _compare_baseline_ppm_with_python(capture_ppm, baseline_path)
+                            val compared = captured and nonblank and _compare_baseline_ppm(cap, baseline_path)
                             stop_guest(handle)
                             expect(compared).to_equal(true)
                 else:
@@ -186,6 +231,6 @@ describe "Engine2D in QEMU SimpleOS":
         expect(spawned).to_equal(true)
 
     it "has a baseline directory for engine2d_in_qemu captures":
-        val baseline_dir = "test/baselines/engine2d_in_qemu"
+        val baseline_dir = "test/09_baselines/engine2d_in_qemu"
         dir_create_all(baseline_dir)
         expect(file_exists(baseline_dir)).to_equal(true)

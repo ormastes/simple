@@ -1,0 +1,67 @@
+use std.spec.*
+use std.scv.solver_contract_v1.*
+use std.scv.solver_source_v1.*
+use std.scv.solver_host_v1.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+fn setup_scv_fixture() -> SourceMergeInputV1:
+    val base = SourceFileV1(file_uid: "file-A", revision: "base-r1", path: "src/old.spl", kind: "regular", mode: "100644", bytes: [102u8, 110u8, 10u8])
+    var left = base
+    left.revision = "left-r2"
+    left.path = "src/new.spl"
+    var right = base
+    right.revision = "right-r2"
+    right.bytes = [102u8, 110u8, 32u8, 120u8, 10u8]
+    val move = SourceMoveEvidenceV1(operation_id: "move-A", producer_id: "verified-local-capture", file_uid: base.file_uid, base_revision: base.revision, side_revision: left.revision, from_path: base.path, to_path: left.path, expected_base_bytes_digest: sha256_u8_hex(base.bytes), expected_side_bytes_digest: sha256_u8_hex(left.bytes))
+    SourceMergeInputV1(base: base, left: left, right: right, moves: [move])
+
+fn freeze_scv_candidate(input: SourceMergeInputV1) -> SolveRequestV1:
+    val binding = SolveBindingV1(repository: "repository-A", namespace: "namespace-A", domain: "source.bytes", base_revision: input.base.revision, left_revision: input.left.revision, right_revision: input.right.revision, base_model_id: source_file_digest_v1(input.base), left_model_id: source_file_digest_v1(input.left), right_model_id: source_file_digest_v1(input.right), expected_root: source_file_digest_v1(input.base), schema_revision: "raw-bytes-v1", policy_revision: "previous-accepted-policy-A", routing_revision: "previous-accepted-route-A", identity_map_revision: "frozen-identity-map-A", parser_lock_digest: "accepted-raw-parser-pin-A", solver_lock_digest: "accepted-source-solver-pin-A", profile_digest: "conservative-source-profile-v1", configuration_digest: "accepted-config-A", operation_bundle_digest: source_operations_digest_v1(input.moves), authorization_scope: "draft-source-A")
+    SolveRequestV1(request_id: "request-A", binding: binding, logical_work_budget: 1000000, memory_budget: 1000000, cancelled: false)
+
+fn setup_scv_policy(binding: SolveBindingV1) -> SolverHostPolicyV1:
+    val ids = solver_builtin_ids_v1(binding.domain)
+    SolverHostPolicyV1(expected: binding, parser: ParserProvider(provider_id: ids[0], lock_digest: binding.parser_lock_digest), model: DomainModelProvider(provider_id: ids[1], lock_digest: "accepted-model-pin-A"), solver: SolverProvider(provider_id: ids[2], lock_digest: binding.solver_lock_digest), validators: [], publisher: Publisher(provider_id: "unavailable", lock_digest: ""))
+
+fn exercise_scv_operation(request: SolveRequestV1, policy: SolverHostPolicyV1, input: SourceMergeInputV1) -> SourceSolveV1:
+    solve_source_v1(request, policy, input)
+
+fn collect_scv_evidence(solved: SourceSolveV1) -> SolveResultV1:
+    expect(solved.result.required_checks.len()).to_be_greater_than(0)
+    expect(solved.result.validation_status).to_equal("external-validation-required")
+    solved.result
+
+fn check_exact_subject(result: SolveResultV1, request: SolveRequestV1, policy: SolverHostPolicyV1):
+    expect(solver_binding_bytes_v1(result.input_binding)).to_equal(solver_binding_bytes_v1(request.binding))
+    expect(result.input_binding_key).to_equal(solver_result_key_v1(request, policy))
+    expect(result.deterministic_result_key).to_equal("")
+    val subject = result.candidate_root.unwrap()
+    for check in result.required_checks:
+        expect(check.subject_digest).to_equal(subject)
+    expect(result.required_checks.len()).to_equal(10)
+
+fn check_byte_preservation(solved: SourceSolveV1, original: SourceMergeInputV1, expected: [u8]):
+    expect(solved.inputs.base.bytes).to_equal(original.base.bytes)
+    expect(solved.inputs.left.bytes).to_equal(original.left.bytes)
+    expect(solved.inputs.right.bytes).to_equal(original.right.bytes)
+    expect(solved.candidate.unwrap().bytes).to_equal(expected)
+
+fn check_expected_conflicts(result: SolveResultV1, expected: [text]):
+    var actual: [text] = []
+    for conflict in result.conflicts: actual.push(conflict.code)
+    expect(actual).to_equal(expected)
+    if expected.len() > 0:
+        expect(result.status).to_equal("needs_inputs")
+        expect(result.candidate_root).to_be_nil()
+
+fn check_cold_warm_equivalence(request: SolveRequestV1, policy: SolverHostPolicyV1, input: SourceMergeInputV1):
+    val cold = solve_source_v1(request, policy, input)
+    val warm = solve_source_v1(request, policy, input)
+    expect(cold.result.status).to_equal(warm.result.status)
+    expect(cold.result.input_binding_key).to_equal(warm.result.input_binding_key)
+    expect(cold.result.candidate_root).to_equal(warm.result.candidate_root)
+    expect(cold.candidate.unwrap().bytes).to_equal(warm.candidate.unwrap().bytes)
+
+export setup_scv_fixture, freeze_scv_candidate, setup_scv_policy, exercise_scv_operation
+export collect_scv_evidence, check_exact_subject, check_byte_preservation
+export check_expected_conflicts, check_cold_warm_equivalence

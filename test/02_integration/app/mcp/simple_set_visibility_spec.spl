@@ -1,0 +1,41 @@
+# @req REQ-PUBVIEW-010 REQ-PUBVIEW-011 REQ-PUBVIEW-012
+# simple-mcp `simple_set_visibility`: switches the shared per-session view
+# (same state as simple-lsp-mcp); source_open then serves the private level
+# and the countdown auto-reverts to public.
+use std.spec
+use std.spec.step
+use app.mcp.main_dispatch.{dispatch_tool}
+use app.simple_lsp_mcp.visibility_state.{lsp_mcp_view_reset, lsp_mcp_view_current}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_text_or, json_value_items}
+
+val X_CORE = "test/fixtures/mdsoc_pubview/feature_x/10.core/core.spl"
+
+fn blocks_of(reply: text) -> [text]:
+    val wire = json_parse_value_strict(reply).unwrap()
+    var out: [text] = []
+    for block in json_value_items(json_value_field(json_value_field(wire, "result"), "content")):
+        out.push(json_value_text_or(json_value_field(block, "text"), ""))
+    out
+
+fn open_blocks() -> [text]:
+    blocks_of(dispatch_tool("1", "source_open", "{\"path\":\"" + X_CORE + "\",\"mode\":\"outline\"}"))
+
+describe "simple_set_visibility":
+    it "switches to private and source_open auto-reverts after the countdown":
+        # @capture(countdown): view lines across the countdown
+        lsp_mcp_view_reset()
+        step("switch the session to layer_private")
+        val set = blocks_of(dispatch_tool("1", "simple_set_visibility", "{\"visibility\":\"layer_private\"}"))
+        expect(set[1]).to_contain("view: layer_private")
+        expect(lsp_mcp_view_current().level).to_equal("layer_private")
+        step("three private source_open requests, then public")
+        expect(open_blocks()[1]).to_contain("auto-revert in 2 requests")
+        expect(open_blocks()[1]).to_contain("auto-revert in 1 request;")
+        expect(open_blocks()[1]).to_contain("auto-reverts to public after this request")
+        expect(open_blocks()[1]).to_contain("view: public (reverted from layer_private")
+
+    it "rejects an invalid level and leaves the session public":
+        lsp_mcp_view_reset()
+        val reply = dispatch_tool("1", "simple_set_visibility", "{\"visibility\":\"secret\"}")
+        expect(reply).to_contain("visibility must be one of")
+        expect(lsp_mcp_view_current().level).to_equal("public")

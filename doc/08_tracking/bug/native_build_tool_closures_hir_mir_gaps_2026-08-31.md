@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-31
-**Status:** OPEN — measured, not yet fixed
+**Status:** SUPERSEDED — measured, not yet fixed
 **Lane:** Windows MSVC host, `bin/simple.exe native-build`
 
 ## Summary
@@ -77,3 +77,97 @@ None of the three is Windows-only in *cause*; defect 3 is Windows-only in
 *symptom* (the root-relative path happens to be writable on Unix, so the
 diagnostics survive there and the bug is invisible).
 
+
+## Round-10 verdict note (2026-11-06)
+Defect 3 (root-relative stderr spill path): ALREADY-FIXED - src/app/cli/native_build_main.spl (spill_root) uses SIMPLE_NATIVE_BUILD_CACHE_DIR/diagnostics, TMPDIR, TEMP or TMP before /tmp. Defects 1 (lint closure unresolved import names) and 2 (MIR lacks tuple-literal assignment-target lowering) are feature-sized; each repro is ~30 min of native-build. Verification-pending command: Phase-3 binary native-build --entry src/app/cli/lint_entry.spl and src/app/mcp/main.spl.
+
+---
+
+## Addendum 2026-11-11 (lane boot7) — SUPERSEDED (fix-implemented; one related live finding)
+
+All three defects are addressed on the release tip; per the bug DB row
+(`doc/08_tracking/bug/db/native_build_tool_closures_hir_mir_gaps_2026-08-31.sdn`,
+updated by d790c7102a30 / PR #8056) the row status is
+"fix-implemented-verification-pending … native lint-closure rerun pending".
+
+- **Defect 3 (root-relative stderr spill on Windows): FIXED.** Source-verified at
+  tip b364745fdbf8: `eprint_bounded` spill_root prefers
+  SIMPLE_NATIVE_BUILD_CACHE_DIR/diagnostics, then TMPDIR/TEMP/TMP, before /tmp
+  (native_build_main.spl:632-652). Confirmed again while triaging
+  native_build_stderr_spill_drops_fatal_error_2026-09-01 (same function).
+
+- **Defect 2 (MIR lacked tuple-literal assignment-target lowering): FIXED.**
+  `mir_lowering_stmts.spl` now has `case TupleLit(elements):
+  self.lower_tuple_destructuring_assign(elements, value_local, op)` at :2724-2725,
+  with a real implementation at :2431-2466 (emit_get_field per element +
+  lower_assign), introduced by merge 820631c6e5c7 (PR #7545). The reported
+  "unsupported MIR assignment target: TupleLit" no longer fires; a program using
+  `(c, d) = t` compiles and runs.
+
+- **Defect 1 (lint-closure unresolved import names): FIX IMPLEMENTED, closure
+  rerun pending.** Root cause per PR #8037 (0db8bd34d668, merged 14ef71e856eb):
+  the readers were file-private, "the same shape that made the native
+  lint-closure build fail with 'unresolved name: read_file' at the import site"
+  — made pub, with regression spec
+  test/01_unit/app/io/cli_lint_imports_pub_spec.spl.
+
+Seed-smoke verifications (2026-11-11, seed 0791c2b7f4a7, interpreter mode):
+- `bin/simple.exe test test/01_unit/app/io/cli_lint_imports_pub_spec.spl
+  --mode=interpreter --no-cache` — 3/3 PASSED (defect 1 regression).
+- `bin/simple.exe test <probe with (c,d) = t> --mode=interpreter --no-cache`
+  PASSED with correct values (defect 2 lowering accepted, correct on the
+  interpreter engine).
+- AOT end-to-end reruns (`native-build --entry src/app/cli/lint_entry.spl` and
+  `--entry src/app/mcp/main.spl`) remain PENDING — native/entry-closure builds
+  are forbidden in this lane; grant needed for those two commands.
+
+### Related live finding (not one of this doc's three defects)
+
+While probing defect 2, the SEED's JIT path (the default engine for
+`simple run`; selected by SIMPLE_EXECUTION_MODE, not by `--mode`) miscomputes
+the very construct defect 2 added: `(c, d) = (10, 20)` yields `80 160`
+(exactly `v << 3`, the raw TAG_INT word delivered un-untagged — same class as
+the FIXED `jit_tuple_get_returns_raw_tagged_word_to_i64_sink_2026-08-17`,
+fix ee815637f72, which typed `.get()` results but did not cover the
+destructuring-assign path). The interpreter engine
+(`SIMPLE_EXECUTION_MODE=interpret`, and `simple test --mode=interpreter`)
+computes `10 20` correctly, as do whole-tuple assign, array destructuring
+assign, and `t.0` reads on both engines. Fix site is the seed-side lowering of
+tuple destructuring assignment (unbox before the i64 store), not the
+pure-Simple MIR path this doc tracks. Recorded here for routing; the pure-Simple
+AOT path is unverified in-lane (blocked, see above).
+
+## 2026-11-11 — SUPERSEDED confirmed (lane p3-comp12, row 2)
+
+Independent fresh re-verification at this lane's base (6233df4b9f9ea, tracked
+seed 46fe8f6b6def), concurring with the boot7 addendum above (which ran on
+seed 0791c2b7f4a7, one refresh later than this lane's tracked seed — the
+regression spec was therefore re-run here, not trusted across the seed swap):
+
+- All three fix commits are ancestors of this base: PR #8037 root
+  0db8bd34d668 + merge 14ef71e856eb (pub lint readers), PR #7545 merge
+  820631c6e5c7 (tuple-literal assignment-target lowering), d790c7102a30
+  (PR #8056, per-row db status flip).
+- Defect 2 source at this base: `case TupleLit(elements):
+  self.lower_tuple_destructuring_assign(elements, value_local, op)` at
+  src/compiler/50.mir/mir_lowering_stmts.spl:2761-2762, implementation at
+  :2468 — the "unsupported MIR assignment target" failure shape is gone.
+- Defect 3 source at this base: eprint_bounded spill_root prefers
+  SIMPLE_NATIVE_BUILD_CACHE_DIR/diagnostics then TMPDIR/TEMP/TMP before /tmp
+  (src/app/cli/native_build_main.spl:632-650).
+- Fresh seed-smoke (tracked seed 46fe8f6b6def, interpreter, --no-cache):
+  test/01_unit/app/io/cli_lint_imports_pub_spec.spl outcome=OK executed=3
+  passed=3 failed=0 (defect 1 regression).
+- Ledger note: the per-row db file
+  (doc/08_tracking/bug/db/native_build_tool_closures_hir_mir_gaps_2026-08-31.sdn)
+  reads status=closed, but the master table doc/08_tracking/bug/bug_db.sdn row
+  still reads `open` (updated_at 2026-09-21) — a master/per-row sync gap for
+  the bookkeeping pass, not a live-defect signal.
+- Residuals unchanged: the AOT lint-closure and MCP-closure end-to-end reruns
+  are still pending (entry-closure native builds forbidden in-lane; grant
+  route). The related seed-JIT tuple-destructuring miscompute recorded by
+  boot7 routes to the seed-fix lane, not this row.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded SUPERSEDED disposition (boot6/boot7 concurrence): measured, not yet fixed; the two compiler gaps and the lost-diagnostics issue are tracked with the native-build-verification debt. No in-lane change.

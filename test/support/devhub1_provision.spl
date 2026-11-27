@@ -1,0 +1,265 @@
+# Lane devhub1 pure-Simple provisioner: builds the e2e / fresh plaintext
+# SQLite images with the repo's own writer (reserved = 80 so the image is the
+# exact plaintext the sqlcipher4_4k_sha512 profile decrypts to), encrypts
+# every page with the pure-Simple SQLCipher 4 codec under a CSPRNG salt +
+# passphrase, and writes ONLY ciphertext plus a non-secret SDN manifest.
+#
+# Replaces test/fixtures/database/sqlcipher4/devhub1_sqlite_e2e.py and
+# devhub1_provision_fresh.py (repo rule: no Python). The passphrase lives
+# only in the spec process environment (SIMPLE_SECRET_DEVHUB1_*), never on
+# disk. The plaintext image is returned in memory too, so a spec can assert
+# byte-level facts without re-reading a file this process just wrote (see
+# doc/08_tracking/bug/seed_file_read_bytes_nil_after_in_process_write_2026-11-12.md).
+
+use std.nogc_sync_mut.database.sqlite_format.wimage.{
+    sqlite_format_create_image_reserved, SqliteTableData
+}
+use std.nogc_sync_mut.database.sqlite_format.types.{SqliteError}
+use std.database.sql.types.{DbValue, DbRow}
+use std.env.{env_set, env_get}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.fs.{file_write_text}
+use nogc_sync_mut.database.codec.codec_registry.{CodecSessionV1}
+use nogc_sync_mut.database.codec.sqlcipher4_page.{
+    sqlcipher4_page_open_key, sqlcipher4_page_encode_with_session, sqlcipher4_page_close,
+    SQLCIPHER4_PAGE_BODY_BYTES, SQLCIPHER4_PAGE1_SALT_BYTES
+}
+
+use std.nogc_sync_mut.sffi.math.{random_i64_raw}
+
+pub val DEVHUB1_PAGE: i64 = 4096
+pub val DEVHUB1_RESERVE: i64 = 80
+pub val DEVHUB1_E2E_MARKER: text = "devhub1-e2e-marker-7f3a9c51"
+pub val DEVHUB1_E2E_REF: text = "secret://devhub1/e2e"
+pub val DEVHUB1_E2E_ENV: text = "SIMPLE_SECRET_DEVHUB1_E2E"
+pub val DEVHUB1_FRESH_REF: text = "secret://devhub1/fresh"
+pub val DEVHUB1_FRESH_ENV: text = "SIMPLE_SECRET_DEVHUB1_FRESH"
+
+# Result of one provisioning run. `stage` is "" on success, else the name of
+# the step that failed (the caller turns it into a spec failure).
+pub struct Devhub1Provisioned:
+    stage: text
+    dir: text
+    db_path: text
+    image: [u8]
+    encrypted: [u8]
+    page_count: i64
+    secret: text
+
+# WORKAROUND(bug: lambda_private_fn_visibility_at_callee_2026-11-12): a lambda passed into
+# sqlcipher4_page is visibility-checked against the CALLEE module, so the private
+# helper it calls is rejected; pub until the checker resolves lambdas at definition site.
+pub fn devhub1_csprng_bytes(n: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        var v = random_i64_raw() % 256
+        if v < 0:
+            v = v + 256
+        out.push(v.to_u8())
+        i = i + 1
+    out
+
+fn _hex(bytes: [u8]) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    for b in bytes:
+        out = out + digits[((b >> 4) & 0x0F) as i64] + digits[(b & 0x0F) as i64]
+    out
+
+# A fresh passphrase: `n` CSPRNG bytes rendered as hex (never persisted).
+fn devhub1_csprng_secret(n: i64) -> text:
+    _hex(devhub1_csprng_bytes(n))
+
+# Writable scratch root for a label: TEMP (or /tmp) + label.
+pub fn devhub1_scratch_dir(label: text) -> text:
+    var base = env_get("TEMP")
+    if base == "":
+        base = env_get("TMP")
+    if base == "":
+        base = "/tmp"
+    val dir = base.replace("\\", "/") + "/" + label
+    val _ = dir_create_all(dir)
+    dir
+
+fn _row(cols: [text], values: [DbValue]) -> DbRow:
+    DbRow(columns: cols, values: values)
+
+fn _ledger_cols() -> [text]:
+    ["id", "note", "amount", "flag", "payload"]
+
+# e2e image: the python driver's ledger table (3 rows, marker in row 1).
+pub fn devhub1_e2e_image() -> Result<[u8], SqliteError>:
+    val schema = "CREATE TABLE ledger (id INTEGER PRIMARY KEY, note TEXT NOT NULL, amount REAL NOT NULL, flag INTEGER NOT NULL, payload BLOB NOT NULL);"
+    var p1: [u8] = []
+    var i = 0
+    while i < 16:
+        p1.push(i.to_u8())
+        i = i + 1
+    val p2: [u8] = [0xFFu8, 0xFEu8, 0xFDu8, 0xFCu8, 0xFBu8, 0xFAu8, 0xF9u8, 0xF8u8]
+    val p3: [u8] = []
+    val c = _ledger_cols()
+    val rows = [
+        _row(c, [DbValue.Integer(value: 1), DbValue.Text(value: "opening " + DEVHUB1_E2E_MARKER), DbValue.Real(value: 100.25), DbValue.Integer(value: 1), DbValue.Blob(value: p1)]),
+        _row(c, [DbValue.Integer(value: 2), DbValue.Text(value: "unicode héllo ✓ 한글"), DbValue.Real(value: -55.5), DbValue.Integer(value: 0), DbValue.Blob(value: p2)]),
+        _row(c, [DbValue.Integer(value: 3), DbValue.Text(value: "third row"), DbValue.Real(value: 0.0), DbValue.Integer(value: 1), DbValue.Blob(value: p3)])
+    ]
+    sqlite_format_create_image_reserved(schema, [SqliteTableData(name: "ledger", columns: c, rows: rows)], DEVHUB1_RESERVE)
+
+fn _repeat(s: text, n: i64) -> text:
+    var out = ""
+    var i = 0
+    while i < n:
+        out = out + s
+        i = i + 1
+    out
+
+fn _msg(cols: [text], id: i64, room: i64, sender: i64, body: text, at: i64, seq: i64) -> DbRow:
+    _row(cols, [DbValue.Integer(value: id), DbValue.Integer(value: room), DbValue.Integer(value: sender),
+                DbValue.Text(value: body), DbValue.Integer(value: at), DbValue.Integer(value: seq), DbValue.Null])
+
+# fresh image: the caret1 acceptance messenger image (2 rooms, 3 members,
+# 46 messages incl. one overflowing body) in the reserved-80 layout.
+pub fn devhub1_fresh_image() -> Result<[u8], SqliteError>:
+    val schema = "CREATE TABLE room (id INTEGER PRIMARY KEY, title TEXT NOT NULL, created_at INTEGER NOT NULL);" +
+        "CREATE TABLE room_member (id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL, user_id INTEGER NOT NULL, joined_at INTEGER NOT NULL);" +
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL, sender_id INTEGER NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL, seq INTEGER NOT NULL, reply_to_id INTEGER);"
+    val rc = ["id", "title", "created_at"]
+    val rooms = [
+        _row(rc, [DbValue.Integer(value: 1), DbValue.Text(value: "fresh general ✓"), DbValue.Integer(value: 1700000000)]),
+        _row(rc, [DbValue.Integer(value: 2), DbValue.Text(value: "other room"), DbValue.Integer(value: 1700000100)])
+    ]
+    val mc = ["id", "room_id", "user_id", "joined_at"]
+    val members = [
+        _row(mc, [DbValue.Integer(value: 1), DbValue.Integer(value: 1), DbValue.Integer(value: 101), DbValue.Integer(value: 1700000001)]),
+        _row(mc, [DbValue.Integer(value: 2), DbValue.Integer(value: 1), DbValue.Integer(value: 102), DbValue.Integer(value: 1700000002)]),
+        _row(mc, [DbValue.Integer(value: 3), DbValue.Integer(value: 2), DbValue.Integer(value: 103), DbValue.Integer(value: 1700000003)])
+    ]
+    val gc = ["id", "room_id", "sender_id", "body", "created_at", "seq", "reply_to_id"]
+    val long_body = "overflow: 한글 ✓ " + _repeat("0123456789abcdef", 700)
+    val unicode_body = "unicode: 한글 héllo ✓ \"quoted\"\\path\nnext"
+    var msgs: [DbRow] = [
+        _msg(cols: gc, id: 11, room: 1, sender: 101, body: "late-source-first", at: 1700000011, seq: 30),
+        _msg(cols: gc, id: 12, room: 1, sender: 101, body: "tie-first", at: 1700000012, seq: 10),
+        _msg(cols: gc, id: 13, room: 1, sender: 102, body: "tie-second", at: 1700000013, seq: 10),
+        _msg(cols: gc, id: 14, room: 1, sender: 101, body: unicode_body, at: 1700000014, seq: 20),
+        _msg(cols: gc, id: 15, room: 1, sender: 102, body: long_body, at: 1700000015, seq: 50),
+        _msg(cols: gc, id: 16, room: 2, sender: 103, body: "other-room-only", at: 1700000016, seq: 1)
+    ]
+    var i = 17
+    while i < 57:
+        msgs.push(_msg(cols: gc, id: i, room: 2, sender: 103, body: "filler-{i}" + _repeat("x", 140), at: 1700000000 + i, seq: i))
+        i = i + 1
+    sqlite_format_create_image_reserved(schema, [
+        SqliteTableData(name: "room", columns: rc, rows: rooms),
+        SqliteTableData(name: "room_member", columns: mc, rows: members),
+        SqliteTableData(name: "messages", columns: gc, rows: msgs)
+    ], DEVHUB1_RESERVE)
+
+# Page `n` (1-based) body: the first 4016 plaintext bytes; page 1 carries the
+# file salt at virtual [0,16) in place of the sqlite magic.
+fn _page_body(image: [u8], n: i64, salt: [u8]) -> [u8]:
+    var out: [u8] = []
+    val off = (n - 1) * DEVHUB1_PAGE
+    var i = 0
+    while i < SQLCIPHER4_PAGE_BODY_BYTES:
+        if n == 1 and i < SQLCIPHER4_PAGE1_SALT_BYTES:
+            out.push(salt[i])
+        else:
+            out.push(image[off + i])
+        i = i + 1
+    out
+
+# Encrypt a reserved-80 plaintext image under `secret` (published to
+# `secret_env` so `secret_ref` resolves), CSPRNG salt + per-page IVs.
+# Returns ("", ciphertext) or (failed stage, []).
+pub fn devhub1_encrypt_image(image: [u8], secret_ref: text, secret_env: text, secret: text) -> (text, [u8]):
+    if image.len() == 0 or image.len() % DEVHUB1_PAGE != 0:
+        return ("image_geometry", [])
+    if (image[20] as i64) != DEVHUB1_RESERVE:
+        return ("image_reserved", [])
+    val _set = env_set(secret_env, secret)
+    val salt = devhub1_csprng_bytes(SQLCIPHER4_PAGE1_SALT_BYTES)
+    val session: CodecSessionV1 = match sqlcipher4_page_open_key(secret_ref, salt):
+        case Ok(s): s
+        case Err(_): return ("open_key", [])
+    val pages = image.len() / DEVHUB1_PAGE
+    var out: [u8] = []
+    var n = 1
+    while n <= pages:
+        val body = _page_body(image, n, salt)
+        val iv_rng = fn(k: i64) -> [u8]: devhub1_csprng_bytes(k)
+        match sqlcipher4_page_encode_with_session(n, body, session, iv_rng):
+            case Ok(page):
+                for b in page:
+                    out.push(b)
+            case Err(_):
+                val _c = sqlcipher4_page_close(session)
+                return ("encode_page_{n}", [])
+        n = n + 1
+    val _closed = sqlcipher4_page_close(session)
+    if out.len() != image.len():
+        return ("ciphertext_width", [])
+    ("", out)
+
+fn _failed(stage: text, dir: text) -> Devhub1Provisioned:
+    Devhub1Provisioned(stage: stage, dir: dir, db_path: "", image: [], encrypted: [], page_count: 0, secret: "")
+
+# Provision the e2e input: <dir>/e2e.sqlcipher4 + manifest.sdn.
+pub fn devhub1_provision_e2e(dir: text) -> Devhub1Provisioned:
+    val _d = dir_create_all(dir)
+    val image = match devhub1_e2e_image():
+        case Ok(img): img
+        case Err(_): return _failed("build_image", dir)
+    val secret = devhub1_csprng_secret(24)
+    val enc = devhub1_encrypt_image(image: image, secret_ref: DEVHUB1_E2E_REF, secret_env: DEVHUB1_E2E_ENV, secret: secret)
+    if enc.0 != "":
+        return _failed(enc.0, dir)
+    val db_path = dir + "/e2e.sqlcipher4"
+    if not file_write_bytes(db_path, enc.1):
+        return _failed("write_db", dir)
+    val pages = enc.1.len() / DEVHUB1_PAGE
+    val manifest = "# devhub1 sqlite e2e manifest (non-secret).\ndir: {dir}\ndb_file: e2e.sqlcipher4\npage_count: {pages}\nrows: 3\nmarker: {DEVHUB1_E2E_MARKER}\nencrypted_sha256: " + sha256_u8_hex(enc.1) + "\n"
+    if not file_write_text(dir + "/manifest.sdn", manifest):
+        return _failed("write_manifest", dir)
+    Devhub1Provisioned(stage: "", dir: dir, db_path: db_path, image: image, encrypted: enc.1, page_count: pages, secret: secret)
+
+# Provision the fresh inputs: <dir>/fresh.sqlcipher4, tamper_first.sqlcipher4
+# (byte 100 flipped), short.bin (100 zero bytes), manifest.sdn.
+pub fn devhub1_provision_fresh(dir: text) -> Devhub1Provisioned:
+    val _d = dir_create_all(dir)
+    val image = match devhub1_fresh_image():
+        case Ok(img): img
+        case Err(_): return _failed("build_image", dir)
+    val secret = devhub1_csprng_secret(32)
+    val enc = devhub1_encrypt_image(image: image, secret_ref: DEVHUB1_FRESH_REF, secret_env: DEVHUB1_FRESH_ENV, secret: secret)
+    if enc.0 != "":
+        return _failed(enc.0, dir)
+    val db_path = dir + "/fresh.sqlcipher4"
+    if not file_write_bytes(db_path, enc.1):
+        return _failed("write_db", dir)
+    var tampered: [u8] = []
+    var i = 0
+    while i < enc.1.len():
+        if i == 100:
+            tampered.push(((enc.1[i] as i64) ^ 1).to_u8())
+        else:
+            tampered.push(enc.1[i])
+        i = i + 1
+    if not file_write_bytes(dir + "/tamper_first.sqlcipher4", tampered):
+        return _failed("write_tampered", dir)
+    var short: [u8] = []
+    i = 0
+    while i < 100:
+        short.push(0u8)
+        i = i + 1
+    if not file_write_bytes(dir + "/short.bin", short):
+        return _failed("write_short", dir)
+    val pages = enc.1.len() / DEVHUB1_PAGE
+    val manifest = "# devhub1 fresh-provisioning manifest (non-secret).\ndir: {dir}\nfresh_file: fresh.sqlcipher4\ntamper_file: tamper_first.sqlcipher4\nshort_file: short.bin\npage_count: {pages}\nfile_bytes: {enc.1.len()}\nfresh_sha256: " + sha256_u8_hex(enc.1) + "\nimage_sha256: " + sha256_u8_hex(image) + "\n"
+    if not file_write_text(dir + "/manifest.sdn", manifest):
+        return _failed("write_manifest", dir)
+    Devhub1Provisioned(stage: "", dir: dir, db_path: db_path, image: image, encrypted: enc.1, page_count: pages, secret: secret)
+

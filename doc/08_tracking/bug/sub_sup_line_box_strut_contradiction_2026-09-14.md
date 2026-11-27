@@ -77,3 +77,10 @@ the child's `y` and is not applied to the line height.
    separates rows 2 and 3.
 2. `<sup>` measured at a second font size before any constant is written.
 3. `<small>` kept as the 0-delta control in every context.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+deliberately NOT fixed (round 23 of web-Chrome parity); owner decision recorded in-file. Left as recorded.

@@ -1,0 +1,40 @@
+# Launch-admission data constructed by a trusted consumer after verifying the
+# signed grant and approval. This value is not a signature or authorization
+# verifier. Its expiry never terminates an existing workload or frees capacity.
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_identifier_valid_v1}
+
+pub struct ContainerEffectDeadlineV1:
+    request_digest: text
+    operation_id: text
+    actions: [text]
+    expires_at_unix_ms: i64
+
+pub fn container_effect_deadline_v1(request_digest: text, operation_id: text,
+        actions: [text], expires_at_unix_ms: i64) -> Result<ContainerEffectDeadlineV1, text>:
+    if not builder_digest_valid_v1(request_digest): return Err("container-effect-request-digest-invalid")
+    if not builder_identifier_valid_v1(operation_id): return Err("container-effect-operation-id-invalid")
+    if expires_at_unix_ms <= 0: return Err("container-effect-expiry-invalid")
+    if actions.len() == 0 or actions.len() > 4: return Err("container-effect-actions-invalid")
+    var seen: [text] = []
+    for action in actions:
+        if action != "create" and action != "start" and action != "exec" and action != "attach":
+            return Err("container-effect-action-unsupported")
+        if seen.contains(action): return Err("container-effect-action-duplicate")
+        seen.push(action)
+    Ok(ContainerEffectDeadlineV1(request_digest: request_digest, operation_id: operation_id,
+        actions: actions, expires_at_unix_ms: expires_at_unix_ms))
+
+pub fn container_effect_remaining_ms_v1(value: ContainerEffectDeadlineV1,
+        request_digest: text, operation_id: text, action: text,
+        now_unix_ms: i64) -> Result<i64, text>:
+    # Revalidate public data rather than assuming it came from the constructor.
+    val validated = container_effect_deadline_v1(value.request_digest, value.operation_id,
+        value.actions, value.expires_at_unix_ms)?
+    if value.request_digest != request_digest: return Err("container-effect-request-mismatch")
+    if value.operation_id != operation_id: return Err("container-effect-operation-mismatch")
+    if not value.actions.contains(action): return Err("container-effect-action-not-authorized")
+    if now_unix_ms < 0: return Err("container-effect-clock-unavailable")
+    if now_unix_ms >= value.expires_at_unix_ms: return Err("container-effect-deadline-expired")
+    # Both operands are nonnegative and expiry is greater, so subtraction is
+    # bounded. This remaining launch window is NOT a running-process timeout.
+    Ok(value.expires_at_unix_ms - now_unix_ms)

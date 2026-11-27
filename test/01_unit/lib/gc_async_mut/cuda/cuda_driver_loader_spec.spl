@@ -1,0 +1,62 @@
+# @cover src/lib/gc_async_mut/cuda/driver_loader.spl 90%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# design: doc/05_design/lib/runtime/cuda_driver_dynamic_load.md
+#
+# The CUDA driver is loaded at first GPU use, never linked. Missing library and
+# missing symbol give named errors; a present driver resolves every symbol once.
+
+use std.spec.*
+use std.nogc_sync_mut.sffi.dynamic.{platform_name}
+use std.gc_async_mut.cuda.driver_loader.{
+    CUDA_DRIVER_SYMBOLS, cuda_driver_library_candidates, cuda_driver_resolve, cuda_driver
+}
+
+fn _system_lib() -> text:
+    val platform = platform_name()
+    if platform == "windows": return "kernel32.dll"
+    if platform == "macos": return "libSystem.B.dylib"
+    "libc.so.6"
+
+fn _driver_present() -> bool:
+    val r = unsafe(capabilities: [ffi, raw_ptr]):
+        cuda_driver_resolve(cuda_driver_library_candidates(platform_name()), CUDA_DRIVER_SYMBOLS)
+    r.is_ok()
+
+describe "CUDA driver dynamic load":
+    it "names nvcuda.dll on windows and libcuda on linux":
+        expect(cuda_driver_library_candidates("windows")).to_equal(["nvcuda.dll"])
+        expect(cuda_driver_library_candidates("linux")).to_equal(["libcuda.so.1", "libcuda.so"])
+        expect(cuda_driver_library_candidates("macos").len()).to_equal(0)
+
+    it "missing library gives CUDA-E001 naming every candidate":
+        val r = unsafe(capabilities: [ffi, raw_ptr]):
+            cuda_driver_resolve(["simple_no_such_cuda_a.dll", "simple_no_such_cuda_b.so"], CUDA_DRIVER_SYMBOLS)
+        expect(r.is_err()).to_equal(true)
+        val msg = r.unwrap_err()
+        expect(msg.contains("CUDA-E001")).to_equal(true)
+        expect(msg.contains("simple_no_such_cuda_a.dll")).to_equal(true)
+        expect(msg.contains("simple_no_such_cuda_b.so")).to_equal(true)
+
+    it "missing symbol gives CUDA-E002 naming library and symbol":
+        val r = unsafe(capabilities: [ffi, raw_ptr]):
+            cuda_driver_resolve([_system_lib()], ["cuInit"])
+        expect(r.is_err()).to_equal(true)
+        val msg = r.unwrap_err()
+        expect(msg.contains("CUDA-E002")).to_equal(true)
+        expect(msg.contains("cuInit")).to_equal(true)
+        expect(msg.contains(_system_lib())).to_equal(true)
+
+    if not _driver_present():
+        skip("present driver resolves every required symbol once", "no CUDA driver on this host")
+    else:
+        it "present driver resolves every required symbol once":
+            val a = unsafe(capabilities: [ffi, raw_ptr]):
+                cuda_driver()
+            val b = unsafe(capabilities: [ffi, raw_ptr]):
+                cuda_driver()
+            expect(a.is_ok()).to_equal(true)
+            val d = a.unwrap()
+            expect(d.symbols.len()).to_equal(CUDA_DRIVER_SYMBOLS.len())
+            for name in CUDA_DRIVER_SYMBOLS:
+                expect(d.symbol(name) > 0).to_equal(true)
+            expect(b.unwrap().symbol("cuInit")).to_equal(d.symbol("cuInit"))

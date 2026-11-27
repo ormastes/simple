@@ -1,9 +1,21 @@
 # Managed node attributes in Simple
 
+Implementation inventory update, 2026-11-07: the canonical owner is already
+`compiler.common.data` (#7220), not a second NodeAttribute schema resolver.
+The [V2 structural extension](../../05_design/compiler/data_schema_v2_contract_extension.md)
+adds explicit views and property contracts while preserving frozen V1. The
+[finite program matrix](../../08_tracking/data_attributes_program_progress_2026-11-07.md)
+distinguishes landed foundations, this authored extension, and remaining
+source/runtime integration. New-path inventories below retain their historical
+design context and do not authorize competing owners.
+
 Date: 2026-11-06. Status: architecture for implementation; no implementation PASS.
 Scope: [selected full requirements](../../02_requirements/feature/node_attributes.md).
 Evidence: [current source audit](../../01_research/local/node_attributes.md).
 Authority: [consolidated design](../../03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md).
+
+Implementation and PR base: `release/1.0.0`, per subsequent user direction.
+The release-specific source additions are recorded in the audit follow-up.
 
 ## Decision
 
@@ -138,6 +150,11 @@ are rejected. No raw XRay API in node owners, no schema lookup or strings in hot
 callbacks, no migration in observers. Default application is next build, instance
 or immutable snapshot. General shared live migration stays separately capability
 gated under the source plan's transactional and progress requirements.
+
+On the release baseline the shared trace facade already exists as `TraceObserverV1`
+in `src/lib/common/trace/observer_contract_v1.spl`, alongside its session/config,
+codec and map owners. Reuse that surface and its provider leaves; add data events
+through an explicitly versioned extension without changing existing event codes.
 
 ## Simple adoption and completion
 

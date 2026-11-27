@@ -325,6 +325,7 @@ fn direct_enum_with() {
             dest,
             enum_name: "Option".to_string(),
             variant_name: "Some".to_string(),
+            discriminant: simple_runtime::value::hash_variant_discriminant("Some"),
             payload,
         });
     });

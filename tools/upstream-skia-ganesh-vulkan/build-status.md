@@ -177,3 +177,14 @@ for upstream Skia and the existing Vulkan backend.
   receipt. All macOS device/scene/fault probes of this lane must run under
   this pin; the full live harness applies the identical pin in
   `scripts/check/check-macos-gpu-2d-live-evidence.shs`.
+
+- 2026-11-18 (physical Linux, NVIDIA GB10, aarch64): **Linux provider built**
+  from the pinned checkout with `build-linux.shs`, `affine_v3_enabled=1`,
+  provider sha256 `758f717f521fe4e996f41170a0cd70b53492c94df92d01d570f45f262605bc89`,
+  libskia.a `f368cf7b…f60a`, 45 attested deps (`28e98416…c666`). The script
+  now passes clang/clang++/llvm-ar to GN (GCC was the GN default), disables
+  fontconfig and uses bundled FreeType, compiles against Skia's in-tree Vulkan
+  headers and links `-l:libvulkan.so.1`. The receipt splits `gn_args` (pinned
+  by the runner, unchanged) from `gn_host_args` (recorded, not validated).
+  Device rows: still blocked on a native qualification executable — see
+  `doc/09_report/linux_gb10_skia_n2_qualification_2026-11-18.md`.

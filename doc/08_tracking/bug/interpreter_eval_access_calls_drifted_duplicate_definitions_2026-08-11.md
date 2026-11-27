@@ -1,5 +1,17 @@
 # Interpreter: 10 drifted duplicate function definitions — the STALE copies WIN
 
+## Triage 2026-11-25 (lane p2w3-aa)
+
+Re-verified by source inspection on release/1.0.0 tip: both duplicate modules
+still exist (`eval_access.spl` 582 lines, `eval_calls.spl` 538 lines) and the
+package-level divergence is unchanged. The `/core/interpreter/` build
+exclusion has MOVED since the doc's line citations: it now lives at
+`src/compiler/80.driver/driver_entry_closure_core.spl:2677` and `:2740`
+(no longer in `driver_source_loading.spl`). Classification unchanged: latent
+maintenance hazard needing a retire/reconnect owner decision in `10.frontend`
+(lane-reserved) — not a localized bug fixable from a bug lane. Left OPEN, no
+code change.
+
 Status: **OPEN (P2) — divergence confirmed still present; NOT a silent-wrong-result row**
 Re-verified 2026-08-17 (wave_01 lane B). All five implied user-facing defects were
 already probed and DISPROVED (see below); this pass found no new user-facing symptom

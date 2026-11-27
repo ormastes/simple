@@ -51,6 +51,7 @@
 #if defined(__APPLE__)
 #include <libproc.h>
 #include <crt_externs.h>
+#include "runtime_spawn_async_macos.h"
 #endif
 
 /* ----------------------------------------------------------------
@@ -137,9 +138,16 @@ const char** rt_dir_list_cpath(const char* path, int64_t* out_count) {
     }
     
     if (count == 0) {
+        const char** empty = malloc(sizeof(char*));
+        if (!empty) {
+            closedir(dir);
+            *out_count = 0;
+            return NULL;
+        }
+        empty[0] = NULL;
         closedir(dir);
         *out_count = 0;
-        return NULL;
+        return empty;
     }
     
     /* Allocate array (null-terminated) */
@@ -166,11 +174,7 @@ const char** rt_dir_list_cpath(const char* path, int64_t* out_count) {
 }
 
 void rt_dir_list_free(const char** entries, int64_t count) {
-    if (!entries) return;
-    for (int64_t i = 0; i < count; i++) {
-        free((void*)entries[i]);
-    }
-    free((void*)entries);
+    rt__shared_dir_list_free(entries, count);
 }
 
 /* C-string worker. The public rt_dir_* entry point lives in runtime.c and
@@ -197,7 +201,7 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t p
     if (fd < 0) return -1;
 
     if (timeout_secs <= 0) {
-        int result = flock(fd, LOCK_EX);
+        int result = flock(fd, LOCK_EX | LOCK_NB);
         if (result == 0) return fd;
         close(fd);
         return -1;
@@ -265,24 +269,7 @@ SPL_RUNTIME_NATIVE_TWIN const char* rt_file_read_text_at(const char* path, int64
 }
 
 static inline const char* rt_file_text_at_string_data(int64_t value, int64_t* len_out) {
-    const uint64_t tag_mask = 0x7ULL;
-    const uint64_t heap_tag = 0x1ULL;
-    uint64_t raw = (uint64_t)value;
-    if ((raw & tag_mask) == heap_tag) {
-        const uint8_t* data = rt_string_data(value);
-        int64_t len = rt_string_len(value);
-        if (data) {
-            *len_out = len;
-            return (const char*)data;
-        }
-    }
-    if (raw > 4096) {
-        const char* s = (const char*)(uintptr_t)raw;
-        *len_out = (int64_t)strlen(s);
-        return s;
-    }
-    *len_out = 0;
-    return NULL;
+    return rt__shared_file_text_at_string_data(value, len_out);
 }
 
 static inline int64_t rt_file_text_at_int(int64_t value) {
@@ -585,7 +572,7 @@ int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_c
     argv[0] = (char*)cmd;
     for (int64_t i = 0; i < arg_count; i++) argv[i + 1] = (char*)args[i];
     pid_t pid = -1;
-    int error = posix_spawnp(&pid, cmd, NULL, NULL, argv, *_NSGetEnviron());
+    int error = runtime_spawn_async_macos(&pid, cmd, argv);
     free(argv);
     return error == 0 ? (int64_t)pid : -1;
 #else
@@ -674,35 +661,49 @@ int64_t rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg
     }
 }
 
+static int64_t rt_unix_wait_status_to_code(int status) {
+    if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
+    /* Mirror runtime_process.c and env_process.rs: encode POSIX signal deaths
+     * as -(128 + signo) instead of collapsing them onto the -1 wait sentinel. */
+    if (WIFSIGNALED(status)) return (int64_t)(-(128 + WTERMSIG(status)));
+    return -1;
+}
+
 SPL_RUNTIME_NATIVE_TWIN int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     if (pid <= 0) return -1;
 
-    int status;
+    int status = 0;
     if (timeout_ms <= 0) {
-        /* No timeout - blocking wait */
-        if (waitpid((pid_t)pid, &status, 0) < 0) {
+        /* No timeout - blocking wait (retry on EINTR) */
+        pid_t waited;
+        do {
+            waited = waitpid((pid_t)pid, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        if (waited < 0) {
             return -1;
         }
-        return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        return rt_unix_wait_status_to_code(status);
     }
 
     /* With timeout - use WNOHANG and poll */
     int64_t elapsed_ms = 0;
-    while (elapsed_ms < timeout_ms) {
+    for (;;) {
         pid_t result = waitpid((pid_t)pid, &status, WNOHANG);
+        if (result < 0 && errno == EINTR) continue;
         if (result < 0) {
             return -1;  /* Error */
         }
         if (result > 0) {
             /* Process exited */
-            return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            return rt_unix_wait_status_to_code(status);
+        }
+        if (elapsed_ms >= timeout_ms) {
+            return -2;  /* Timeout */
         }
         /* Still running - sleep and retry */
         usleep(10000);  /* 10ms */
         elapsed_ms += 10;
     }
-
-    return -2;  /* Timeout */
 }
 
 bool rt_process_is_running(int64_t pid) {

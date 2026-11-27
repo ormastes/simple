@@ -1,0 +1,53 @@
+# Brace struct literal (`T { b: f(), a: g() }`) admission.
+# lower_struct_construct evaluates named fields in DECLARATION order, which is
+# the source order only for in-order literals. Rather than silently reorder side
+# effects (mir_struct_literal_kind_unimplemented_2026_10_12), an out-of-order
+# literal is accepted only when every field value is order-insensitive.
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.mir.mir_lowering_types.{MirLowering}
+
+# Literals, variable reads and field chains of those cannot observe ordering.
+fn struct_literal_value_is_order_insensitive(value: HirExpr) -> bool:
+    match value.kind:
+        case HirExprKind.IntLit(_, _): true
+        case HirExprKind.FloatLit(_, _): true
+        case HirExprKind.StringLit(_, interpolations):
+            if interpolations.? : false else: true
+        case HirExprKind.BoolLit(_): true
+        case HirExprKind.CharLit(_): true
+        case HirExprKind.UnitLit: true
+        case HirExprKind.NilLit: true
+        case HirExprKind.Var(_): true
+        case HirExprKind.NamedVar(_, _): true
+        case HirExprKind.Field(base, _, _): struct_literal_value_is_order_insensitive(base)
+        case _: false
+
+# Returns "" when the literal can be lowered in declaration order without
+# changing observable behaviour, otherwise a diagnostic.
+fn struct_literal_order_problem(fields: [(text, HirExpr)], declared: [text]) -> text:
+    var seen: [text] = []
+    var previous = -1
+    var reordered = false
+    var all_insensitive = true
+    for field in fields:
+        val name: text = field.0
+        for s in seen:
+            if s == name:
+                return "duplicate field '{name}' in struct literal"
+        seen.push(name)
+        var position = -1
+        var di = 0
+        while di < declared.len():
+            if declared[di] == name:
+                position = di
+            di = di + 1
+        if position < 0:
+            return "unknown field '{name}' in struct literal"
+        if position < previous:
+            reordered = true
+        previous = position
+        if not struct_literal_value_is_order_insensitive(field.1):
+            all_insensitive = false
+    if reordered and not all_insensitive:
+        return "struct literal fields are out of declaration order with side-effecting values; reorder fields to declaration order"
+    ""

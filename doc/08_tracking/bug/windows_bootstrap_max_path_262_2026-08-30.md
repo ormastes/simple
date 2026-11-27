@@ -2,7 +2,7 @@
 
 - **Date:** 2026-08-30
 - **Status:** RESOLVED (2026-09-10 structural fix; regression strengthened
-  2026-09-22)
+  2026-09-22; re-verified green 2026-11-11, lane boot16 — see addendum)
 - **Host:** Windows 11, MSVC 14.44.35207, clang-cl/cl via cc-rs
 
 ## Symptom
@@ -94,3 +94,35 @@ Focused Windows evidence on 2026-09-22: the regression reported legacy
 `runtime_backend_plugin.o` at 279 bytes and the Windows-safe target at 236;
 the current checkout measured 215. The lock-host policy regression also passed,
 showing that early shared authority ownership remains Windows-only.
+
+
+---
+
+## Triage addendum 2026-11-11 (lane boot16)
+
+**Verdict: FIXED (re-verified).**
+
+Re-ran the regression test on this checkout (origin/release/1.0.0 tip + ne13/boot11
+commits), Windows-native Git Bash host:
+
+    sh test/01_unit/scripts/bootstrap_windows_cargo_path_budget_test.shs
+    -> PASS: Windows Cargo path budget; mimalloc_old=264 mimalloc_new=169
+       runtime_backend_plugin_old=279 runtime_backend_plugin_new=184 prefix=67
+       reserved_max=187 configured_mimalloc=166 configured_runtime_backend_plugin=181
+
+The legacy deep layout still reproduces the over-MAX_PATH object path (264 and
+279 bytes, past the 260 limit); the shallow configuration-keyed target
+(`build/c/<12-hex config key>`, `bootstrap-authority-wiring.shs`
+`bootstrap_authority_rust_cargo_target`) keeps every object path under the
+240-byte conservative budget. Structural fix confirmed present and effective.
+
+**One stale assertion corrected** (test-only, no behavior change): the test's
+call-site contract check required the literal `cxx=${CXX` inside
+`bootstrap-from-scratch.sh`'s `rust_authority_toolchain_extra=` line. The call
+site now routes CXX through `rust_authority_cxx` (`rust_authority_cxx=${CXX:-}`,
+deliberately cleared on Windows where cc-rs/clang-cl ignores CXX — comment at
+`bootstrap-from-scratch.sh:3594`). Updated the required field to
+`cxx=${rust_authority_cxx` and added a derivation guard (`rust_authority_cxx=${CXX:-}`)
+so the test's intent — CXX must feed the cache-isolation config key — is
+preserved, not weakened. Before this correction the test failed at that
+assertion and never reached the path-budget fixtures.

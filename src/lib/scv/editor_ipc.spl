@@ -20,19 +20,20 @@
 # independent and moves unchanged.
 
 use app.io.mod (file_exists, file_read, file_write, file_append)
+use std.common.text_bytes.{bytes_to_text}
 
-struct ScvEditorEvent:
+pub struct ScvEditorEvent:
     kind: text
     path: text
     path2: text          # rename target / secondary path
     payload: text
     entities: [text]     # refactor_txn only: grouped entity descriptors
 
-struct ScvEditorBuffer:
+pub struct ScvEditorBuffer:
     path: text
     bytes: text
 
-struct EditorIpc:
+pub struct EditorIpc:
     spool_path: text
     offset: i64          # spool lines already consumed
     buffers: [ScvEditorBuffer]
@@ -82,7 +83,7 @@ fn scv_editor_ipc_send(spool_path: text, line: text) -> bool:
 
 # --- server side ---
 
-fn scv_editor_ipc_open(spool_path: text) -> EditorIpc:
+pub fn scv_editor_ipc_open(spool_path: text) -> EditorIpc:
     EditorIpc(spool_path: spool_path, offset: 0, buffers: [], expected_saves: [],
               refactor_active: false, refactor_tag: "", refactor_entities: [])
 
@@ -145,6 +146,111 @@ fn _scv_ipc_apply(ipc: EditorIpc, kind: text, path: text, path2: text, payload: 
         next.refactor_entities = []
     else:
         out.push(ScvEditorEvent(kind: kind, path: path, path2: path2, payload: payload, entities: []))
+    (next, out)
+
+# Strict, transport-independent record decoding used by the bounded V1
+# capture adapter. Legacy `scv_editor_ipc_poll` intentionally keeps its old
+# permissive behavior for compatibility; new capture callers must validate
+# records here before passing the exact stable prefix to apply_prefix.
+pub struct ScvEditorIpcRecordV1:
+    kind: text
+    path: text
+    path2: text
+    payload: text
+
+fn _scv_ipc_escape_valid_v1(value: text) -> bool:
+    val bytes = value.bytes()
+    var index = 0
+    while index < bytes.len():
+        if bytes[index] == 92:
+            if index + 1 >= bytes.len(): return false
+            val escaped = bytes[index + 1]
+            if escaped != 92 and escaped != 110 and escaped != 116: return false
+            index = index + 2
+        else:
+            index = index + 1
+    true
+
+fn _scv_ipc_unescape_valid_v1(value: text) -> text:
+    val bytes = value.bytes()
+    var output: [u8] = []
+    var index = 0
+    var segment_start = 0
+    while index < bytes.len():
+        if bytes[index] == 92:
+            # Append the unescaped run once; long UTF-8 payloads avoid
+            # repeated string concatenations and preserve exact byte order.
+            var start = segment_start
+            while start < index:
+                output = output.push(bytes[start])
+                start = start + 1
+            val escaped = bytes[index + 1]
+            if escaped == 110: output = output.push(10)
+            elif escaped == 116: output = output.push(9)
+            else: output = output.push(92)
+            index = index + 2
+            segment_start = index
+        else:
+            index = index + 1
+    var tail_start = segment_start
+    while tail_start < bytes.len():
+        output = output.push(bytes[tail_start])
+        tail_start = tail_start + 1
+    bytes_to_text(output)
+
+fn _scv_ipc_kind_known_v1(kind: text) -> bool:
+    kind == "buffer_open" or kind == "edit" or kind == "save_begin" or
+        kind == "save_end" or kind == "path_rename" or kind == "refactor_begin" or
+        kind == "refactor_entity" or kind == "refactor_end" or kind == "flush"
+
+pub fn scv_editor_ipc_decode_line_v1(line: text) -> Result<ScvEditorIpcRecordV1, text>:
+    val parts = line.split("\t")
+    if parts.len() != 4: return Err("editor-record-field-count")
+    for part in parts:
+        if not _scv_ipc_escape_valid_v1(part): return Err("editor-record-escape-invalid")
+    val kind = _scv_ipc_unescape_valid_v1(parts[0])
+    val path = _scv_ipc_unescape_valid_v1(parts[1])
+    val path2 = _scv_ipc_unescape_valid_v1(parts[2])
+    val payload = _scv_ipc_unescape_valid_v1(parts[3])
+    if not _scv_ipc_kind_known_v1(kind): return Err("editor-record-kind-unknown")
+    if (kind == "buffer_open" or kind == "edit" or kind == "save_begin" or
+            kind == "save_end" or kind == "path_rename" or kind == "refactor_begin" or
+            kind == "refactor_entity") and path == "":
+        return Err("editor-record-path-empty")
+    if kind == "path_rename" and path2 == "": return Err("editor-record-rename-target-empty")
+    Ok(ScvEditorIpcRecordV1(kind: kind, path: path, path2: path2, payload: payload))
+
+fn _scv_ipc_prefix_record_count_v1(prefix: text) -> i64:
+    var count = 0
+    for byte in prefix.bytes():
+        if byte == 10: count = count + 1
+    count
+
+# Apply only the supplied complete, validated prefix. This seam never reads
+# `ipc.spool_path`; callers own single-read/prefix identity checks and must
+# validate all new records first. It reuses the same decoder and state machine
+# as the legacy spool poll without reopening a mutable live spool.
+pub fn scv_editor_ipc_apply_prefix_v1(ipc: EditorIpc, complete_prefix: text) -> (EditorIpc, [ScvEditorEvent]):
+    if complete_prefix == "": return (ipc, [])
+    if not complete_prefix.ends_with("\n"): return (ipc, [])
+    val lines = complete_prefix.split("\n")
+    val record_count = _scv_ipc_prefix_record_count_v1(complete_prefix)
+    if lines.len() < record_count: return (ipc, [])
+    if ipc.offset < 0 or ipc.offset > record_count: return (ipc, [])
+    var records: [ScvEditorIpcRecordV1] = []
+    var cursor = ipc.offset
+    while cursor < record_count:
+        val decoded = scv_editor_ipc_decode_line_v1(lines[cursor])
+        if val Err(_) = decoded: return (ipc, [])
+        records.push(decoded.unwrap())
+        cursor = cursor + 1
+    var next = ipc
+    var out: [ScvEditorEvent] = []
+    for record in records:
+        val (applied, events) = _scv_ipc_apply(next, record.kind, record.path, record.path2, record.payload)
+        next = applied
+        for event in events: out.push(event)
+    next.offset = record_count
     (next, out)
 
 # Read spool lines past the consumed offset and run them through the state

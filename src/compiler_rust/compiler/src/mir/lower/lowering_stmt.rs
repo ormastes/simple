@@ -29,6 +29,10 @@ fn if_merge_tail_value_ty(stmts: &[HirStmt], depth: usize) -> Option<TypeId> {
         return None;
     }
     match stmts.last()? {
+        // The "no arm matched" tail of a statement match diverges: it leaves
+        // no value, exactly like the missing `else` it replaced. Counting its
+        // NIL type would demote a float merge slot to I64 and zero the value.
+        HirStmt::Expr(expr) if expr.is_match_exhausted_panic() => None,
         HirStmt::Expr(expr) => Some(expr.ty),
         HirStmt::If {
             then_block, else_block, ..
@@ -62,12 +66,23 @@ fn if_merge_tail_value_ty(stmts: &[HirStmt], depth: usize) -> Option<TypeId> {
 /// Narrow on purpose: only floats switch away from `I64`, and only when every
 /// value-producing arm agrees on the same float type. Every other shape keeps
 /// the previous `I64` slot, so this cannot perturb int/bool/heap merges.
+fn if_merge_is_int(ty: TypeId) -> bool {
+    matches!(
+        ty,
+        TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+    )
+}
+
 fn if_merge_local_ty(then_block: &[HirStmt], else_block: Option<&Vec<HirStmt>>) -> TypeId {
     let is_float = |ty: TypeId| matches!(ty, TypeId::F32 | TypeId::F64);
     let then_ty = if_merge_tail_value_ty(then_block, 0);
     let else_ty = else_block.and_then(|stmts| if_merge_tail_value_ty(stmts, 0));
     let merged = match (then_ty, else_ty) {
         (Some(a), Some(b)) if a == b => Some(a),
+        // One float arm + one plain integer arm (`1.5` vs the literal `2` in an
+        // f64 fn): merge as the float; the integer arm is converted at its store.
+        (Some(a), Some(b)) if is_float(a) && if_merge_is_int(b) => Some(a),
+        (Some(a), Some(b)) if is_float(b) && if_merge_is_int(a) => Some(b),
         (Some(a), None) => Some(a),
         (None, Some(b)) => Some(b),
         _ => None,
@@ -161,6 +176,7 @@ impl<'a> MirLowerer<'a> {
                 })?,
                 _ => raw_element,
             };
+            let element_reg = self.copy_if_value_type(element_reg, target.ty)?;
             let addr_reg = self.lower_lvalue(target)?;
             self.with_func(|func, current_block| {
                 func.block_mut(current_block)
@@ -340,9 +356,11 @@ impl<'a> MirLowerer<'a> {
                         }
                     }
 
-                    let vreg = self.lower_expr(val)?;
+                    let raw_vreg = self.lower_expr(val)?;
+                    // `val y: f64 = 3` — the literal is a float constant.
+                    let vreg = self.float_slot_from_int_literal(effective_declared_ty, val, raw_vreg)?;
                     let local_idx = *local_index;
-                    let value_ty = val.ty;
+                    let value_ty = if vreg != raw_vreg { effective_declared_ty } else { val.ty };
 
                     // Bug (seed_array_local_alias_cow_bypass_2026-07-17): `var c = arr`
                     // for an array-typed `arr` aliased the SAME rt_array heap handle
@@ -418,6 +436,17 @@ impl<'a> MirLowerer<'a> {
                     } else {
                         vreg
                     };
+                    // S1 block-end release: the register that holds a buffer
+                    // no other binding can reach (a fresh literal, or the
+                    // private copy just emitted). The slot is released only
+                    // if this exact register is what gets stored below.
+                    let fresh_array_vreg = (is_array_place_alias
+                        || matches!(val.kind, HirExprKind::Array(_) | HirExprKind::ArrayRepeat { .. }))
+                    .then_some(vreg);
+                    let fresh_string_vreg = (effective_declared_ty == TypeId::STRING
+                        && value_ty == TypeId::STRING
+                        && super::array_move::is_fresh_string_expr(val))
+                    .then_some(vreg);
 
                     // Wrap value in union if assigning to a union type
                     let vreg = self.emit_union_wrap_if_needed(effective_declared_ty, value_ty, vreg)?;
@@ -475,6 +504,13 @@ impl<'a> MirLowerer<'a> {
                         vreg
                     };
 
+                    if self.block_array_release
+                        && (fresh_array_vreg == Some(vreg) || fresh_string_vreg == Some(vreg))
+                        && self.array_move_sites.block_release_locals.contains(&local_idx)
+                    {
+                        self.block_release_ready.insert(local_idx, effective_declared_ty);
+                    }
+
                     self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
@@ -502,8 +538,22 @@ impl<'a> MirLowerer<'a> {
                     self.record_len_local_source(*local_index, None);
                     self.record_array_capacity_local_source(*local_index, None);
                 }
-                let val_reg = self.lower_expr(value)?;
-                let ty = value.ty;
+                let raw_val_reg = self.lower_expr(value)?;
+                // `z = 4` into an f32/f64 local or field is a float constant.
+                let val_reg = self.float_slot_from_int_literal(target.ty, value, raw_val_reg)?;
+                let ty = if val_reg != raw_val_reg { target.ty } else { value.ty };
+
+                // A tagged value (`any`, erased `T`) assigned to a RAW scalar
+                // field is decoded, as struct construction does. `p.x = v`
+                // with `v: any = 4` stored the tagged word (`p.x` read 32).
+                let val_reg = if matches!(target.kind, HirExprKind::FieldAccess { .. })
+                    && val_reg == raw_val_reg
+                    && !Self::is_raw_literal_typed_any(value)
+                {
+                    self.unbox_scalar_for_raw_slot(target.ty, value.ty, val_reg)?
+                } else {
+                    val_reg
+                };
 
                 // Emit unit bound check if assigning to a unit type with constraints
                 self.emit_unit_bound_check(ty, val_reg)?;
@@ -627,10 +677,7 @@ impl<'a> MirLowerer<'a> {
                             })?;
                         } else {
                             let byte_offset = (field_index as u32) * 8;
-                            let owner_name = self
-                                .type_registry
-                                .and_then(|registry| registry.get_type_name(receiver_ty))
-                                .map(str::to_owned);
+                            let owner_name = self.field_owner_name(receiver, receiver_ty);
                             // Native-project lowering replaces this with an
                             // authoritative module-qualified layout decision.
                             let owner_has_vtable = None;
@@ -645,7 +692,68 @@ impl<'a> MirLowerer<'a> {
                             } else {
                                 val_reg
                             };
+                            // Bug seed_jit_class_field_array_assign_aliases_local_2026-11-04:
+                            // `obj.buf = local_arr` stored the source's rt_array
+                            // handle into the slot, so later writes through the
+                            // field mutated the local too (the interpreter's
+                            // Arc clone + make_mut keeps value semantics). Same
+                            // rule as the `var c = arr` Let arm above: an array
+                            // PLACE gets a private `rt_array_copy`; a fresh
+                            // literal / call result transfers directly.
+                            // A `var` local proven uniquely owned and dead after
+                            // this store hands its buffer over instead
+                            // (`array_move.rs`): the JIT lane never frees the
+                            // copy, so `st.buf = o` in a loop retained one per
+                            // iteration (bug seed_jit_field_store_array_copy_never_freed_2026-11-04).
+                            let handed_over = matches!(&value.kind,
+                                HirExprKind::Local(o) if self.array_move_sites.field_store_locals.contains(o));
+                            let is_array_place = !handed_over
+                                && Self::hir_expr_is_place(&value.kind)
+                                && self
+                                    .type_registry
+                                    .and_then(|tr| tr.get_array_element(target.ty).or_else(|| tr.get_array_element(ty)))
+                                    .is_some();
+                            let val_reg = if is_array_place {
+                                self.with_func(|func, current_block| {
+                                    let dest = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::Call {
+                                        dest: Some(dest),
+                                        target: CallTarget::from_name("rt_array_copy"),
+                                        args: vec![val_reg],
+                                    });
+                                    dest
+                                })?
+                            } else {
+                                val_reg
+                            };
 
+                            // Free the replaced buffer when `array_move.rs`
+                            // proved the field is its only holder (bug
+                            // seed_jit_array_copy_never_freed_2026-10-19). The
+                            // new value is already materialised, so
+                            // `st.buf = st.buf` style copies read it first.
+                            let release_old = matches!(&receiver.kind,
+                                HirExprKind::Local(r) if self.array_move_sites.field_release_structs.contains(r))
+                                && self.type_registry.and_then(|tr| tr.get_array_element(target.ty)).is_some();
+                            let old_reg = if release_old {
+                                let owner_name = owner_name.clone();
+                                Some(self.with_func(|func, current_block| {
+                                    let dest = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::FieldGet {
+                                        dest,
+                                        object: receiver_reg,
+                                        owner_name,
+                                        owner_has_vtable,
+                                        byte_offset,
+                                        field_type: target.ty,
+                                    });
+                                    dest
+                                })?)
+                            } else {
+                                None
+                            };
                             self.with_func(|func, current_block| {
                                 let block = func.block_mut(current_block).unwrap();
                                 block.instructions.push(MirInst::FieldSet {
@@ -669,6 +777,16 @@ impl<'a> MirLowerer<'a> {
                                     value: val_reg,
                                 });
                             })?;
+                            if let Some(old_reg) = old_reg {
+                                self.with_func(|func, current_block| {
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::Call {
+                                        dest: None,
+                                        target: CallTarget::from_name("rt_array_free"),
+                                        args: vec![old_reg],
+                                    });
+                                })?;
+                            }
                         }
                     }
 
@@ -929,6 +1047,14 @@ impl<'a> MirLowerer<'a> {
                                     val_reg
                                 }
                             };
+                            // Bug jit_struct_assignment_aliases_not_copies: `arr[i] = s`
+                            // for an existing value-struct PLACE must snapshot it,
+                            // same rule as the Let (site G) and field (site H) arms.
+                            let boxed_val = if Self::hir_expr_is_place(&value.kind) {
+                                self.copy_if_value_type(boxed_val, value.ty)?
+                            } else {
+                                boxed_val
+                            };
 
                             // Use rt_index_set for array/dict index assignment (handles both types)
                             let target = crate::mir::CallTarget::from_name("rt_index_set");
@@ -1007,6 +1133,42 @@ impl<'a> MirLowerer<'a> {
                                 self.lower_array_destructuring_assign(nested, elem_reg, 1)?;
                                 continue;
                             }
+                            // `rt_tuple_get` returns the stored tagged
+                            // RuntimeValue verbatim, so storing `elem_reg` raw
+                            // fed `v << 3` into an int-typed sink (`10` read
+                            // back as `80` under JIT). Decode the leaf through
+                            // the same shared type-directed unbox tail as
+                            // tuple `.get(const)` / `d[k]` before the Store;
+                            // aggregate and erased (ANY) leaves pass through
+                            // unchanged. Same defect family as
+                            // jit_tuple_get_returns_raw_tagged_word_to_i64_sink_2026-08-17
+                            // — that fix (ee815637f72) typed only the `.get()`
+                            // path and missed this destructuring-assign site.
+                            let elem_reg = self.unbox_dict_read_result(elem_reg, elem.ty)?;
+                            // A global leaf has no addressable lvalue:
+                            // `lower_lvalue(Global)` is a dynamic value lookup,
+                            // not an address, so the generic Store below wrote
+                            // nowhere the global read path observes (the sink
+                            // kept its initial value under JIT). Mirror the
+                            // plain `g = v` arm: GlobalStore with the
+                            // tagged-slot boxing tail.
+                            if let HirExprKind::Global(global_name) = &elem.kind {
+                                let global_name = global_name.clone();
+                                let stored_val =
+                                    self.box_scalar_for_tagged_slot(elem.ty, elem.ty, elem_reg)?;
+                                let stored_ty =
+                                    if stored_val != elem_reg { TypeId::ANY } else { elem.ty };
+                                self.with_func(|func, current_block| {
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::GlobalStore {
+                                        global_name,
+                                        value: stored_val,
+                                        ty: stored_ty,
+                                    });
+                                })?;
+                                continue;
+                            }
+                            let elem_reg = self.copy_if_value_type(elem_reg, elem.ty)?;
                             let addr_reg = self.lower_lvalue(elem)?;
                             self.with_func(|func, current_block| {
                                 let block = func.block_mut(current_block).unwrap();
@@ -1036,6 +1198,11 @@ impl<'a> MirLowerer<'a> {
                         // Nullable scalar globals (`T?`) are tagged-value slots too,
                         // not just `Any` -- see `slot_holds_tagged_value`.
                         let stored_val = self.box_scalar_for_tagged_slot(target.ty, ty, val_reg)?;
+                        let stored_val = if Self::hir_expr_is_place(&value.kind) {
+                            self.copy_if_value_type(stored_val, ty)?
+                        } else {
+                            stored_val
+                        };
                         let stored_ty = if stored_val != val_reg { TypeId::ANY } else { ty };
                         self.with_func(|func, current_block| {
                             let block = func.block_mut(current_block).unwrap();
@@ -1114,15 +1281,45 @@ impl<'a> MirLowerer<'a> {
                         } else {
                             self.unbox_scalar_for_raw_slot(target.ty, ty, store_val)?
                         };
+                        // Bug jit_struct_assignment_aliases_not_copies: `b = a`
+                        // re-assignment of an existing value-struct PLACE must
+                        // copy, mirroring the Let arm's site G.
+                        let copy_ty = if target.ty == TypeId::ANY { ty } else { target.ty };
+                        let store_val = if Self::hir_expr_is_place(&value.kind) {
+                            self.copy_if_value_type(store_val, copy_ty)?
+                        } else {
+                            store_val
+                        };
 
+                        let release_old_string = self.block_array_release
+                            && matches!(&target.kind, HirExprKind::Local(local_idx)
+                                if self.array_move_sites.string_overwrite_locals.contains(local_idx));
                         let addr_reg = self.lower_lvalue(target)?;
                         self.with_func(|func, current_block| {
+                            let old_val = if release_old_string {
+                                Some(func.new_vreg())
+                            } else {
+                                None
+                            };
                             let block = func.block_mut(current_block).unwrap();
+                            if let Some(old) = old_val {
+                                block.instructions.push(MirInst::Load {
+                                    dest: old,
+                                    addr: addr_reg,
+                                    ty: TypeId::STRING,
+                                });
+                            }
                             block.instructions.push(MirInst::Store {
                                 addr: addr_reg,
                                 value: store_val,
                                 ty,
                             });
+                            if let Some(old) = old_val {
+                                block.instructions.push(MirInst::Drop {
+                                    value: old,
+                                    ty: TypeId::STRING,
+                                });
+                            }
                         })?;
                     }
                 }
@@ -1138,6 +1335,8 @@ impl<'a> MirLowerer<'a> {
                     // invalid tag, printed as `<value:0x7>` by rt_to_string and
                     // unwrapped to nil by `!`. Same rule as a `T?`/`Any` local.
                     let ret_ty = self.with_func(|func, _| func.return_type)?;
+                    // `-> f64` returning `3` returns a float constant.
+                    let reg = self.float_slot_from_int_literal(ret_ty, v, reg)?;
                     let reg = self.box_scalar_for_tagged_slot(ret_ty, v.ty, reg)?;
                     // ...and the mirror: a RAW scalar return slot fed by a
                     // TAGGED value (`-> i64` returning an `ANY` expression, e.g.
@@ -1356,6 +1555,8 @@ impl<'a> MirLowerer<'a> {
                 // pinned the defect to this path.
                 // See doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md
                 let ret_ty = self.expr_stmt_tail_ty()?;
+                // `fn tail3() -> f64: 3` — the tail literal is a float constant.
+                let vreg = self.float_slot_from_int_literal(ret_ty, expr, vreg)?;
                 let vreg = self.box_scalar_for_tagged_slot(ret_ty, expr.ty, vreg)?;
                 let vreg = self.unbox_scalar_for_raw_slot(ret_ty, expr.ty, vreg)?;
                 self.last_expr_value = Some(vreg);
@@ -1427,11 +1628,14 @@ impl<'a> MirLowerer<'a> {
                 for stmt in then_block {
                     self.lower_stmt(stmt, contract)?;
                 }
+                self.emit_block_array_releases(then_block)?;
                 let then_value = self.last_expr_value;
                 // Store then value in temp local BEFORE finalize (current block may be inner merge)
                 if let Some(tv) = then_value {
+                    let arm_ty = if_merge_tail_value_ty(then_block, 0);
                     self.with_func(|func, current_block| {
                         let addr = func.new_vreg();
+                        let tv = if_merge_int_arm_to_float(func, current_block, tv, arm_ty, merge_ty);
                         let block = func.block_mut(current_block).unwrap();
                         block.instructions.push(MirInst::LocalAddr {
                             dest: addr,
@@ -1453,12 +1657,15 @@ impl<'a> MirLowerer<'a> {
                     for stmt in else_stmts {
                         self.lower_stmt(stmt, contract)?;
                     }
+                    self.emit_block_array_releases(else_stmts)?;
                 }
                 let else_value = self.last_expr_value;
                 // Store else value in temp local BEFORE finalize
                 if let Some(ev) = else_value {
+                    let arm_ty = else_block.as_ref().and_then(|s| if_merge_tail_value_ty(s, 0));
                     self.with_func(|func, current_block| {
                         let addr = func.new_vreg();
+                        let ev = if_merge_int_arm_to_float(func, current_block, ev, arm_ty, merge_ty);
                         let block = func.block_mut(current_block).unwrap();
                         block.instructions.push(MirInst::LocalAddr {
                             dest: addr,
@@ -1530,6 +1737,7 @@ impl<'a> MirLowerer<'a> {
                         let packed_bit = func.new_vreg();
                         let slot_bit = func.new_vreg();
                         let u8_ptr = func.new_vreg();
+                        let word_ptr = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
                         block.instructions.push(MirInst::LocalAddr {
                             dest: addr,
@@ -1578,7 +1786,18 @@ impl<'a> MirLowerer<'a> {
                             left: data_ptr,
                             right: slot_bit,
                         });
-                        (data_ptr, u8_ptr)
+                        // Word readers (`[u32]`/`[u64]` `_data_at`) use the opposite
+                        // tag: bit 0 set = byte-packed. A `[u8]` can reach a word-typed
+                        // parameter through an untyped caller, and 8-byte loads over its
+                        // byte buffer read past it. Bug:
+                        // seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27.
+                        block.instructions.push(MirInst::BinOp {
+                            dest: word_ptr,
+                            op: BinOp::BitOr,
+                            left: data_ptr,
+                            right: packed_bit,
+                        });
+                        (word_ptr, u8_ptr)
                     })?)
                 } else {
                     None
@@ -1671,6 +1890,7 @@ impl<'a> MirLowerer<'a> {
                 for stmt in body {
                     self.lower_stmt(stmt, contract)?;
                 }
+                self.emit_block_array_releases(body)?;
                 if hoisted_append_ptrs.is_some() {
                     self.active_array_append_ptrs.pop();
                 }
@@ -1740,6 +1960,7 @@ impl<'a> MirLowerer<'a> {
                 for stmt in body {
                     self.lower_stmt(stmt, contract)?;
                 }
+                self.emit_block_array_releases(body)?;
                 self.finalize_block_jump(body_id)?;
 
                 // Pop loop context
@@ -1854,7 +2075,35 @@ impl<'a> MirLowerer<'a> {
                 // 3. Loop: check index < len, get element, execute body, increment index
 
                 // Lower the iterable expression
-                let collection_reg = self.lower_expr(iterable)?;
+                //
+                // A `List<T>` class value (std.common.core.collections.List) is
+                // not an array: its elements live in the `items` field. Iterate
+                // that payload, matching the interpreter
+                // (interp_for_over_list_generic_2026-07-02). Without this the
+                // loop treated the object handle as an empty array and ran
+                // ZERO times, silently.
+                let list_items_field = self
+                    .type_registry
+                    .and_then(|registry| registry.get(iterable.ty))
+                    .and_then(|ty| match ty {
+                        HirType::Struct { name, fields, .. } if name == "List" || name.starts_with("List<") => fields
+                            .iter()
+                            .position(|(fname, _)| fname == "items")
+                            .map(|idx| (idx, fields[idx].1)),
+                        _ => None,
+                    });
+                let collection_reg = if let Some((field_index, field_ty)) = list_items_field {
+                    let items_expr = crate::hir::HirExpr {
+                        kind: HirExprKind::FieldAccess {
+                            receiver: Box::new(iterable.clone()),
+                            field_index,
+                        },
+                        ty: field_ty,
+                    };
+                    self.lower_expr(&items_expr)?
+                } else {
+                    self.lower_expr(iterable)?
+                };
 
                 // Text iterables must yield one UTF-8 CODEPOINT per step, not
                 // one byte. `rt_for_iterable` cannot do this for us here: its
@@ -2114,8 +2363,14 @@ impl<'a> MirLowerer<'a> {
                 let typed_i64_read =
                     iterable_is_array && element_ty == crate::hir::TypeId::I64 && self.signed_word_lane;
                 let typed_word_read = typed_u64_read || typed_i64_read;
-                // FR-DRIVER-0002b: narrow after UnboxInt for [u8]/[u16]/[u32]/[i8]/[i16]/[i32]
-                // element types so the loop variable's value gets the correct narrow TypeId.
+                // Match lower_index_expr for `[u8]`: the typed accessor reads
+                // both packed bytes and tagged slots as a raw byte. The core-C
+                // rt_array_get returns packed bytes raw, so UnboxInt after it
+                // corrupts multiples of eight (e.g. 'p' = 112 becomes 14).
+                let typed_u8_read = iterable_is_array && element_ty == crate::hir::TypeId::U8;
+                let typed_raw_read = typed_word_read || typed_u8_read;
+                // Narrow raw byte reads or unboxed narrow integers so the
+                // loop variable's value gets the correct narrow TypeId.
                 let narrow_to_signed: Option<(u8, bool)> = match element_ty {
                     crate::hir::TypeId::U8 => Some((8, false)),
                     crate::hir::TypeId::U16 => Some((16, false)),
@@ -2133,14 +2388,16 @@ impl<'a> MirLowerer<'a> {
                     let current_idx = func.new_vreg();
                     let boxed_idx = func.new_vreg();
                     let raw_element = func.new_vreg();
-                    let element = if (needs_int_unbox || needs_float_unbox) && !typed_word_read {
+                    let element = if typed_u8_read || ((needs_int_unbox || needs_float_unbox) && !typed_raw_read) {
                         func.new_vreg()
                     } else {
                         raw_element
                     };
-                    // For narrow int element types, UnboxInt -> intermediate i64,
-                    // then UnitNarrow -> element so element gets the narrow TypeId.
-                    let unboxed_intermediate = if narrow_to_signed.is_some() {
+                    // A typed byte read is already raw; other narrow integers
+                    // first unbox into an intermediate i64 before UnitNarrow.
+                    let unboxed_intermediate = if typed_u8_read {
+                        raw_element
+                    } else if narrow_to_signed.is_some() {
                         func.new_vreg()
                     } else {
                         element
@@ -2171,6 +2428,8 @@ impl<'a> MirLowerer<'a> {
                                 "rt_typed_words_i64_at"
                             } else if typed_u64_read {
                                 "rt_typed_words_u64_at"
+                            } else if typed_u8_read {
+                                "rt_typed_bytes_u8_at"
                             } else {
                                 "rt_array_get"
                             }),
@@ -2191,12 +2450,14 @@ impl<'a> MirLowerer<'a> {
                         });
                     }
 
-                    // Unbox element if it's a native type (rt_index_get returns RuntimeValue)
+                    // Generic reads need unboxing; typed byte reads only narrow.
                     if needs_int_unbox && !typed_word_read {
-                        block.instructions.push(MirInst::UnboxInt {
-                            dest: unboxed_intermediate,
-                            value: raw_element,
-                        });
+                        if !typed_u8_read {
+                            block.instructions.push(MirInst::UnboxInt {
+                                dest: unboxed_intermediate,
+                                value: raw_element,
+                            });
+                        }
                         // FR-DRIVER-0002b: narrow to actual element width when needed.
                         if let Some((to_bits, signed)) = narrow_to_signed {
                             block.instructions.push(MirInst::UnitNarrow {
@@ -2232,6 +2493,7 @@ impl<'a> MirLowerer<'a> {
                 for stmt in body {
                     self.lower_stmt(stmt, contract)?;
                 }
+                self.emit_block_array_releases(body)?;
 
                 // Body falls through to increment block
                 self.finalize_block_jump(increment_id)?;
@@ -2337,6 +2599,7 @@ impl<'a> MirLowerer<'a> {
             }
 
             HirStmt::InlineAsm {
+                dialect,
                 instructions,
                 volatile,
                 operands,
@@ -2405,6 +2668,7 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::InlineAsm {
+                        dialect: *dialect,
                         instructions: rewritten,
                         volatile: *volatile,
                         constraints,
@@ -2481,8 +2745,63 @@ impl<'a> MirLowerer<'a> {
     ///
     /// This is called before return statements to ensure all locals are properly
     /// cleaned up. For scope-level drops (e.g., block exit), use emit_scope_drops.
+    /// S1 block-end release (`array_move.rs`, design doc
+    /// `doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md`):
+    /// called when the statement list `stmts` falls through. Frees each array
+    /// local declared DIRECTLY in `stmts` that the analysis proved unique
+    /// (`block_release_locals`) and whose `Let` stored a fresh buffer raw into
+    /// the slot (`block_release_ready`). The proof guarantees the `Let` ran on
+    /// this entry of the list and that nothing reads the slot afterwards.
+    ///
+    /// This is a release of a PROVEN-UNIQUE buffer, which is why a plain
+    /// `rt_array_free` is correct: no other name can hold it.
+    // TODO: [compiler][P2] if arrays become shared copy-on-write buffers,
+    // this call must become a counted release (decrement, free at zero);
+    // an unconditional free would then free a buffer another holder reads.
+    // doc/03_plan/compiler/memory_model/unified_memory_model_plan.md
+    pub(super) fn emit_block_array_releases(&mut self, stmts: &[HirStmt]) -> MirLowerResult<()> {
+        if !self.block_array_release || self.block_release_ready.is_empty() {
+            return Ok(());
+        }
+        for stmt in stmts {
+            let HirStmt::Let { local_index, .. } = stmt else {
+                continue;
+            };
+            let local_index = *local_index;
+            if !self.array_move_sites.block_release_locals.contains(&local_index) {
+                continue;
+            }
+            let Some(ty) = self.block_release_ready.get(&local_index).copied() else {
+                continue;
+            };
+            self.with_func(|func, current_block| {
+                let addr = func.new_vreg();
+                let value = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::LocalAddr {
+                    dest: addr,
+                    local_index,
+                });
+                block.instructions.push(MirInst::Load { dest: value, addr, ty });
+                if ty == TypeId::STRING {
+                    block.instructions.push(MirInst::Drop { value, ty });
+                } else {
+                    block.instructions.push(MirInst::Call {
+                        dest: None,
+                        target: CallTarget::from_name("rt_array_free"),
+                        args: vec![value],
+                    });
+                }
+            })?;
+        }
+        Ok(())
+    }
+
     pub(super) fn emit_function_drops(&mut self) -> MirLowerResult<()> {
-        // First, collect information about which locals need dropping
+        // First, collect information about which locals need dropping.
+        // Only emit return-edge drops for scalar primitives (which are codegen
+        // no-ops) until full value-escape ownership tracking covers non-scalars;
+        // otherwise returning or aliasing a string/object local double-frees it.
         let locals_to_drop: Vec<(usize, crate::hir::TypeId)> = self.with_func(|func, _| {
             let local_base = func.params.len();
             func.locals
@@ -2496,6 +2815,9 @@ impl<'a> MirLowerer<'a> {
                     }
                     // Skip parameters (not owned by this function)
                     if local.kind.is_parameter() {
+                        return None;
+                    }
+                    if !crate::codegen::instr::is_drop_scalar_type(local.ty) {
                         return None;
                     }
                     Some((local_base + idx, local.ty))
@@ -2556,11 +2878,26 @@ impl<'a> MirLowerer<'a> {
         use crate::hir::BinOp;
         use crate::mir::MirInst;
 
-        let loop_ty = range_counter_type(start_expr.ty, end_expr.ty);
+        // A range bound that is statically `ANY` is a tagged word; the
+        // counter is a raw integer. Decode the bound once (`for i in 0..v`
+        // with `v: any = 4` ran 32 iterations: the raw counter was compared
+        // with the tagged 4).
+        let raw_bound_ty = |ty: TypeId| if ty == TypeId::ANY { TypeId::I64 } else { ty };
+        let loop_ty = range_counter_type(raw_bound_ty(start_expr.ty), raw_bound_ty(end_expr.ty));
 
         // Lower start and end expressions
         let start_reg = self.lower_expr(start_expr)?;
         let end_reg = self.lower_expr(end_expr)?;
+        let start_reg = if start_expr.ty == TypeId::ANY && !Self::is_raw_literal_typed_any(start_expr) {
+            self.unbox_scalar_for_raw_slot(TypeId::I64, TypeId::ANY, start_reg)?
+        } else {
+            start_reg
+        };
+        let end_reg = if end_expr.ty == TypeId::ANY && !Self::is_raw_literal_typed_any(end_expr) {
+            self.unbox_scalar_for_raw_slot(TypeId::I64, TypeId::ANY, end_reg)?
+        } else {
+            end_reg
+        };
 
         // Bind the loop variable: prefer the exact HIR-allocated local index
         // (see HirStmt::For binder above — name search is ambiguous with
@@ -2681,6 +3018,7 @@ impl<'a> MirLowerer<'a> {
         for stmt in body {
             self.lower_stmt(stmt, contract)?;
         }
+        self.emit_block_array_releases(body)?;
 
         // Body falls through to increment block
         self.finalize_block_jump(increment_id)?;
@@ -2734,5 +3072,29 @@ fn range_counter_type(start_ty: TypeId, end_ty: TypeId) -> TypeId {
             TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 => start_ty,
             _ => TypeId::I64,
         },
+    }
+}
+
+/// Convert an integer-typed tail value to the float merge slot type (see
+/// `if_merge_local_ty`); any other combination passes the vreg through.
+fn if_merge_int_arm_to_float(
+    func: &mut crate::mir::function::MirFunction,
+    block: crate::mir::instructions::BlockId,
+    value: VReg,
+    arm_ty: Option<TypeId>,
+    merge_ty: TypeId,
+) -> VReg {
+    match arm_ty {
+        Some(ty) if matches!(merge_ty, TypeId::F32 | TypeId::F64) && if_merge_is_int(ty) => {
+            let dest = func.new_vreg();
+            func.block_mut(block).unwrap().instructions.push(MirInst::Cast {
+                dest,
+                source: value,
+                from_ty: ty,
+                to_ty: merge_ty,
+            });
+            dest
+        }
+        _ => value,
     }
 }

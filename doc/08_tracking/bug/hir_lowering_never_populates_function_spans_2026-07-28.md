@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-07-28
 - **Severity:** high — silently caps every downstream source-location feature
-- **Status:** open
+- **Status:** CLOSED 2026-11-06 — both `HirFunction(` sites in `_Items/declaration_lowering.spl` set `span` (`span: span` ~l.170, `span: fn_.span` ~l.624); guard spec `test/01_unit/compiler/hir/hir_function_span_populate_spec.spl`.
 - **Found via:** DS5 `mir-span-thread` lane, while proving MIR spans survive lowering
 
 ## Symptom
@@ -59,3 +59,36 @@ text and asserts a non-zero line, rather than one that hand-builds HIR.
 - `doc/08_tracking/bug/string_interpolation_silently_evaluates_literal_braces_2026-07-28.md`
   — same session, also a silent-degradation defect in the diagnostics path.
 - `.spipe/mission_critical_harden/state.md` — DS1/DS3/DS5 lane records.
+
+## Addendum 2026-11-11 — P3 lane compiler3 verdict: SUPERSEDED
+
+Triage on refreshed seed (build-commit 0791c2b7f4a7, bin/simple.exe 37577216 bytes)
+at release/1.0.0 tip 7d4140c1a6b3 (work/p3-compiler3-20261111).
+
+- Status confirmed: both `HirFunction(` construction sites in
+  `src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl` set `span`
+  (`span: span` at l.169, `span: fn_.span` at l.661). Fixing commit per bug_db:
+  4b88aebf00b (doc marked CLOSED 2026-11-06).
+- Seed-smoke verification (2026-11-11):
+  `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test test/01_unit/compiler/hir/hir_function_span_populate_spec.spl --mode=interpreter --no-cache`
+  → SPEC FILE VERDICT outcome=OK, declared>=2 executed=2 passed=2 failed=0.
+- Verdict: SUPERSEDED. No code change.
+
+---
+
+## 2026-11-11 (lane p3fix-comp7-20261111) — re-verified CLOSED/FIXED, no header change needed
+
+Independent re-verification of the compiler3 addendum on this lane's fresh
+worktree (base `a64cda1ee32d`, tracked seed `bin/simple.exe`,
+build-commit 46fe8f6b6def):
+
+- Both `HirFunction(` construction sites in
+  `src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl` set
+  `span`: site 1 at :146 sets `span: span` (:172); site 2 at :630 sets
+  `span: fn_.span` (:670).
+- Guard spec `test/01_unit/compiler/hir/hir_function_span_populate_spec.spl`
+  (`--mode=interpreter --no-cache`) → `outcome=OK, executed=2 passed=2 failed=0`.
+
+Disposition confirmed: FIXED by `4b88aebf00b` (doc marked CLOSED 2026-11-06)
+before this campaign; header already carried the CLOSED status, so no flip was
+required. This row was already resolved going into the P3 pass.

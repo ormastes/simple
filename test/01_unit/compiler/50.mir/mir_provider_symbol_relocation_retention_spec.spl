@@ -1,0 +1,218 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# @tag: unit, compiler, mir
+"""
+# MIR: relocated provider type copies are retracted from the consumer table at scope end
+
+Repro for doc/08_tracking/bug/stage2_compiler_cli_build_mir_shard_share_unbounded_2026-11-06.md
+("Not fixed" item 1). `relocate_provider_type_symbol` copies a provider
+class/struct/enum/trait into the consumer HIR module's own `SymbolTable`
+(`self.symbols = module.symbols`), which is persistent HIR, so the copy
+outlived the module's transient lowering scope. The per-consumer native-trait
+walk (`register_native_trait_declarations/implementations` over EVERY
+provider) relocates every type a provider trait signature names into EVERY
+consumer, so even a one-line facade retained ~725-870 symbols (~955 KiB) per
+module on the bootstrap_main closure (104 modules measured 2026-11-06).
+
+With `retract_provider_type_relocations` (env
+`SIMPLE_MIR_RETRACT_PROVIDER_TYPES=1`, default off) the scoped path retracts
+those copies AFTER the MirModule is promoted. These examples lower the same
+closure on fresh HIR with the knob off and on, in the Stage 2 direct-lane
+shape (`lower_module_transient_scoped(hir, providers, ...)` on one
+`MirLowering`): a provider first, then a facade, then a consumer that
+dispatches through the provider's trait. The MIR must not change; the tables
+must.
+
+MIR equality is checked over the serialized functions, statics, constants,
+type ids/names and enum records -- NOT `mir_module_canonical_fingerprint_v1`:
+its type row interpolates `{t.kind}` and the seed prints struct fields in
+hash order, so that fingerprint differs between two identical knob-off runs
+of a type-defining module (measured here 2026-11-14; see the bug record).
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type, serialize_const_value, serialize_mir_enum_declaration_v1}
+use compiler.mir.mir_instruction_graph.{mir_module_functions_sorted, mir_module_statics_sorted}
+
+val factor_src = "pub struct Factor:\n    k: i64\n\npub struct Offset:\n    d: i64\n"
+val shape_src = "use lib.factor.\{Factor, Offset\}\n\npub trait Shape:\n    fn area() -> i64\n    fn scaled(f: Factor) -> i64\n    fn shifted(o: Offset) -> Offset\n"
+
+fn impl_src(i: i64) -> text:
+    "use lib.shape.\{Shape\}\nuse lib.factor.\{Factor, Offset\}\n\npub struct Sq{i}:\n    side: i64\n\npub struct Tag{i}:\n    v: i64\n\nimpl Shape for Sq{i}:\n    fn area() -> i64:\n        self.side * {i + 1}\n    fn scaled(f: Factor) -> i64:\n        self.side * f.k\n    fn shifted(o: Offset) -> Offset:\n        Offset(d: o.d + self.side)\n"
+
+val facade_src = "fn run(n: i64) -> i64:\n    n\n"
+val user_src = "use lib.impl0.\{Sq0\}\nuse lib.factor.\{Factor\}\n\nfn run(n: i64) -> i64:\n    val sq = Sq0(side: n)\n    sq.area() + sq.scaled(Factor(k: 2))\n"
+
+struct ModuleRun:
+    name: text
+    growth: i64
+    next_id_growth: i64
+    type_rows_grown: i64
+    mir_text: text
+
+struct ClosureRun:
+    errors: i64
+    modules: [ModuleRun]
+
+fn module_run(run: ClosureRun, name: text) -> ModuleRun:
+    for m in run.modules:
+        if m.name == name:
+            return m
+    ModuleRun(name: name, growth: -1, next_id_growth: -1, type_rows_grown: -1, mir_text: "<missing>")
+
+fn mir_rows_text(lowered: MirModule) -> text:
+    """Deterministic MIR text: every row the canonical fingerprint covers,
+    minus its hash-ordered `{t.kind}` interpolation."""
+    var rows: [text] = []
+    for func in mir_module_functions_sorted(lowered):
+        rows.push("fn:" + serialize_mir_function(func))
+    for st in mir_module_statics_sorted(lowered):
+        rows.push("static:{st.symbol.id}|{st.name}|{serialize_mir_type(st.type_)}")
+    var const_rows: [text] = []
+    for csym in lowered.constants.keys():
+        val c = lowered.constants[csym]
+        const_rows.push("const:{csym.id}|{c.name}|{serialize_mir_type(c.type_)}|{serialize_const_value(c.value)}")
+    for row in const_rows.sorted():
+        rows.push(row)
+    var type_rows: [text] = []
+    for tsym in lowered.types.keys():
+        val t = lowered.types[tsym]
+        type_rows.push("type:{tsym.id}|{t.name}|{t.is_export_c}|{t.export_name}")
+    for row in type_rows.sorted():
+        rows.push(row)
+    for record in lowered.enum_semantic_declarations:
+        rows.push("enum:" + serialize_mir_enum_declaration_v1(record))
+    rows.join("\n")
+
+fn lower_closure(provider_count: i64, retract: bool) -> ClosureRun:
+    val log = Logger(level: 0)
+    var modules: Dict<text, ParserModule> = {}
+    var sources: [SourceFile] = []
+    modules["lib.factor"] = parse_full_frontend(factor_src, "lib/factor.spl", "lib.factor", log)
+    sources.push(SourceFile(path: "lib/factor.spl", content: factor_src, module_name: "lib.factor"))
+    modules["lib.shape"] = parse_full_frontend(shape_src, "lib/shape.spl", "lib.shape", log)
+    sources.push(SourceFile(path: "lib/shape.spl", content: shape_src, module_name: "lib.shape"))
+    var i = 0
+    while i < provider_count:
+        val src = impl_src(i)
+        modules["lib.impl{i}"] = parse_full_frontend(src, "lib/impl{i}.spl", "lib.impl{i}", log)
+        sources.push(SourceFile(path: "lib/impl{i}.spl", content: src, module_name: "lib.impl{i}"))
+        i = i + 1
+    modules["app.facade"] = parse_full_frontend(facade_src, "app/facade.spl", "app.facade", log)
+    sources.push(SourceFile(path: "app/facade.spl", content: facade_src, module_name: "app.facade"))
+    modules["app.user"] = parse_full_frontend(user_src, "app/user.spl", "app.user", log)
+    sources.push(SourceFile(path: "app/user.spl", content: user_src, module_name: "app.user"))
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var providers: [HirModule] = []
+    var factor_lowering = hirlowering_for_module("lib/factor.spl", surfaces)
+    providers.push(factor_lowering.lower_module(modules["lib.factor"]))
+    var shape_lowering = hirlowering_for_module("lib/shape.spl", surfaces)
+    providers.push(shape_lowering.lower_module(modules["lib.shape"]))
+    i = 0
+    while i < provider_count:
+        var impl_lowering = hirlowering_for_module("lib/impl{i}.spl", surfaces)
+        providers.push(impl_lowering.lower_module(modules["lib.impl{i}"]))
+        i = i + 1
+    var facade_lowering = hirlowering_for_module("app/facade.spl", surfaces)
+    providers.push(facade_lowering.lower_module(modules["app.facade"]))
+    var user_lowering = hirlowering_for_module("app/user.spl", surfaces)
+    providers.push(user_lowering.lower_module(modules["app.user"]))
+
+    val target = driver_mir_target_context(driver_core_compile_options_default())
+    val first: HirModule = providers[0]
+    var lowering = MirLowering.new_for_target(first.symbols, target)
+    lowering.provider_session_requested_key = mir_provider_session_content_key_v1(providers)
+    lowering.trait_impl_closure_complete = true
+    lowering.retract_provider_type_relocations = retract
+    var failed = 0
+    var runs: [ModuleRun] = []
+    # lib.impl0 (a provider the consumer dispatches through) is lowered and
+    # retracted BEFORE app.user reads it as a provider. Positional: the HIR
+    # module name is filename-derived, not the dotted module name.
+    val order = ["lib.impl0", "app.facade", "app.user"]
+    val positions = [2, provider_count + 2, provider_count + 3]
+    var oi = 0
+    while oi < order.len():
+        val wanted: text = order[oi]
+        val module: HirModule = providers[positions[oi]]
+        oi = oi + 1
+        val before = module.symbols.symbols.len()
+        val next_before = module.symbols.next_symbol_id
+        val mir = lowering.lower_module_transient_scoped(module, providers, oi == 1)
+        var mir_text = ""
+        if mir.is_err():
+            failed = failed + 1
+        else:
+            val lowered: MirModule = mir.unwrap()
+            mir_text = mir_rows_text(lowered)
+        # Type-kind rows issued during this module and still present.
+        var type_rows_grown = 0
+        var grown = next_before
+        while grown < module.symbols.next_symbol_id:
+            val optional_symbol: HirSymbol? = module.symbols.get_symbol_raw(grown)
+            if val present = optional_symbol:
+                val symbol: HirSymbol = present
+                match symbol.kind:
+                    case SymbolKind.Class | SymbolKind.Struct | SymbolKind.Enum | SymbolKind.Trait:
+                        type_rows_grown = type_rows_grown + 1
+                    case _: ()
+            grown = grown + 1
+        runs.push(ModuleRun(name: wanted,
+            growth: module.symbols.symbols.len() - before,
+            next_id_growth: module.symbols.next_symbol_id - next_before,
+            type_rows_grown: type_rows_grown,
+            mir_text: mir_text))
+    ClosureRun(errors: lowering.errors.len() + failed, modules: runs)
+
+fn report(label: text, run: ClosureRun):
+    for m in run.modules:
+        print("[reloc-retention] {label} module={m.name} growth={m.growth} next_id_growth={m.next_id_growth} type_rows_grown={m.type_rows_grown} mir_bytes={m.mir_text.len()}")
+
+describe "MIR provider type relocation retention":
+    it "retains every provider type a trait signature names when the knob is off (today's floor)":
+        val off = lower_closure(6, false)
+        report("off", off)
+        expect(off.errors).to_equal(0)
+        # 6 impl structs + Factor + Offset + the Shape trait, none named by the facade.
+        expect(module_run(off, "app.facade").type_rows_grown > 0).to_equal(true)
+        expect(module_run(off, "app.facade").growth).to_equal(module_run(off, "app.facade").type_rows_grown)
+        expect(module_run(off, "app.user").type_rows_grown > 0).to_equal(true)
+
+    it "retracts the relocated type copies at scope end, leaves other writers' rows, never rewinds next_symbol_id":
+        val off = lower_closure(6, false)
+        val on = lower_closure(6, true)
+        report("on", on)
+        expect(on.errors).to_equal(0)
+        expect(module_run(on, "app.facade").growth).to_equal(0)
+        expect(module_run(on, "app.user").growth).to_equal(0)
+        expect(module_run(on, "app.facade").type_rows_grown).to_equal(0)
+        expect(module_run(on, "app.user").type_rows_grown).to_equal(0)
+        expect(module_run(on, "lib.impl0").type_rows_grown).to_equal(0)
+        # lib.impl0's own impl Method rows are a different writer: untouched.
+        expect(module_run(on, "lib.impl0").growth).to_equal(module_run(off, "lib.impl0").growth)
+        # The ids were issued and stay issued: a stale holder can only miss.
+        expect(module_run(on, "app.facade").next_id_growth).to_equal(module_run(off, "app.facade").next_id_growth)
+        expect(module_run(on, "app.user").next_id_growth).to_equal(module_run(off, "app.user").next_id_growth)
+        expect(module_run(on, "app.facade").next_id_growth > 0).to_equal(true)
+
+    it "lowers identical MIR with and without retraction, including a consumer after a retracted provider":
+        val off = lower_closure(6, false)
+        val control = lower_closure(6, false)
+        val on = lower_closure(6, true)
+        expect(off.errors).to_equal(0)
+        expect(on.errors).to_equal(0)
+        for name in ["lib.impl0", "app.facade", "app.user"]:
+            val off_text = module_run(off, name).mir_text
+            expect(off_text.len() > 0).to_equal(true)
+            # The comparator itself is deterministic across two knob-off runs.
+            expect(module_run(control, name).mir_text == off_text).to_equal(true)
+            expect(module_run(on, name).mir_text == off_text).to_equal(true)

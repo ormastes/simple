@@ -1,0 +1,132 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+# Instance methods on an IMPORTED struct must resolve for every typed-receiver shape
+
+Bug lexer_imported_instance_methods_2026_10_06: `lexer.spl` imports `CoreLexer`
+from `lexer_struct.spl`, loads it from a module-level slot array
+(`val lx: CoreLexer = current_core_lexer_slot[0]`) and calls instance methods
+on that explicitly typed local (`lx.char_at_pos(p)`, `loaded.pop_indent()`).
+The stage3 generator rejected exactly those calls (`unresolved method call`)
+while the same calls on a receiver built in the consumer module resolved.
+
+Each example lowers a two-module closure (provider `lib.lexer_mod`, consumer
+`app.main`) the way the driver does and requires zero HIR and zero MIR
+diagnostics. The receiver shapes pinned are the ones `lexer.spl` uses plus
+their siblings: slot-array element, function parameter, constructor result,
+struct field, and a `me` mutator followed by a store back into the slot.
+"""
+
+# @tag: unit, compiler, mir, hir, imports, stage3
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val provider_source = "pub struct MiniLexer:\n" +
+    "    source_chars: [text]\n" +
+    "    indent_stack: [i64]\n" +
+    "    forced: i64\n" +
+    "\n" +
+    "impl MiniLexer:\n" +
+    "    fn char_at_pos(p: i64) -> text:\n" +
+    "        if p < 0:\n" +
+    "            return \"\"\n" +
+    "        if p >= self.source_chars.len():\n" +
+    "            return \"\"\n" +
+    "        self.source_chars[p]\n" +
+    "\n" +
+    "    fn char_slice(start: i64, end: i64) -> text:\n" +
+    "        var out: text = \"\"\n" +
+    "        var i: i64 = start\n" +
+    "        while i < end:\n" +
+    "            out = out + self.char_at_pos(i)\n" +
+    "            i = i + 1\n" +
+    "        out\n" +
+    "\n" +
+    "    me enable_forced_indentation():\n" +
+    "        self.forced = self.forced + 1\n" +
+    "\n" +
+    "    me disable_forced_indentation():\n" +
+    "        self.forced = self.forced - 1\n" +
+    "\n" +
+    "    me pop_indent():\n" +
+    "        if self.indent_stack.len() > 1:\n" +
+    "            self.indent_stack.pop()\n" +
+    "\n" +
+    "pub fn make_mini_lexer(src: text) -> MiniLexer:\n" +
+    "    MiniLexer(source_chars: [src], indent_stack: [0], forced: 0)\n"
+
+fn lower_consumer(body: text) -> text:
+    val consumer_source = "use lib.lexer_mod.\{MiniLexer, make_mini_lexer\}\n\n" + body
+    val log = Logger(level: 0)
+    val provider_ast = parse_full_frontend(provider_source, "lib/lexer_mod.spl", "lib.lexer_mod", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.lexer_mod"] = provider_ast
+    modules["app.main"] = consumer_ast
+    val sources = [SourceFile(path: "lib/lexer_mod.spl", content: provider_source, module_name: "lib.lexer_mod"), SourceFile(path: "app/main.spl", content: consumer_source, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var provider_lowering = hirlowering_for_module("lib.lexer_mod", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val provider_hir = provider_lowering.lower_module(provider_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["provider_hir"] = provider_hir
+    prescan_mods["consumer_hir"] = consumer_hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "provider_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
+    val mir = mir_lowering.lower_module(consumer_hir, [provider_hir, consumer_hir])
+    var out = ""
+    for e in provider_lowering.errors:
+        out = out + "hir(provider): " + e.message + "\n"
+    for e in consumer_lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    print "errors: [{out}]"
+    out
+
+describe "imported struct instance methods on a typed local loaded from a module slot array (bug lexer_imported_instance_methods_2026_10_06)":
+    it "read method on `val lx: MiniLexer = slot[0]` resolves":
+        val out = lower_consumer("var current_slot: [MiniLexer] = []\n\nfn read_at(pos: i64) -> text:\n    if current_slot.len() > 0:\n        val lx: MiniLexer = current_slot[0]\n        return lx.char_at_pos(pos)\n    \"\"\n")
+        expect(out).to_equal("")
+
+    it "two-arg read method `char_slice` on the slot-loaded local resolves":
+        val out = lower_consumer("var current_slot: [MiniLexer] = []\n\nfn slice_of(s: i64, e: i64) -> text:\n    val lx: MiniLexer = current_slot[0]\n    lx.char_slice(s, e)\n")
+        expect(out).to_equal("")
+
+    it "`me` mutator on `var loaded: MiniLexer = slot[0]` then store back resolves":
+        val out = lower_consumer("var current_slot: [MiniLexer] = []\n\nfn pop_indent():\n    if current_slot.len() == 0:\n        current_slot = [make_mini_lexer(\"\")]\n    var loaded: MiniLexer = current_slot[0]\n    loaded.pop_indent()\n    current_slot[0] = loaded\n")
+        expect(out).to_equal("")
+
+    it "paired `me` mutators enable/disable on the slot-loaded local resolve":
+        val out = lower_consumer("var current_slot: [MiniLexer] = []\n\nfn toggle():\n    var loaded: MiniLexer = current_slot[0]\n    loaded.enable_forced_indentation()\n    loaded.disable_forced_indentation()\n    current_slot[0] = loaded\n")
+        expect(out).to_equal("")
+
+describe "sibling receiver shapes for imported struct instance methods":
+    it "function parameter receiver resolves":
+        val out = lower_consumer("fn read_at(lx: MiniLexer, pos: i64) -> text:\n    lx.char_at_pos(pos)\n")
+        expect(out).to_equal("")
+
+    it "constructor-result receiver resolves":
+        val out = lower_consumer("fn read_first() -> text:\n    val lx: MiniLexer = make_mini_lexer(\"abc\")\n    lx.char_at_pos(0)\n")
+        expect(out).to_equal("")
+
+    it "struct-field receiver of the imported type resolves":
+        val out = lower_consumer("struct Holder:\n    lexer: MiniLexer\n\nfn read_held(h: Holder) -> text:\n    h.lexer.char_at_pos(0)\n")
+        expect(out).to_equal("")
+
+    it "`var` copy of a parameter followed by a `me` mutator resolves":
+        val out = lower_consumer("fn popped(lx: MiniLexer) -> MiniLexer:\n    var updated: MiniLexer = lx\n    updated.pop_indent()\n    updated\n")
+        expect(out).to_equal("")

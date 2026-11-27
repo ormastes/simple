@@ -111,10 +111,13 @@ describe "blend and composite math":
         expect(blend_opacity(0x00FF0000u32, 0x000000FFu32, 0)).to_equal(0x000000FFu32)
 
     it "blend_opacity mixes channels with rounding":
-        # 50% of ff and 00 rounds to 0x80 per channel; argb sets alpha FF
+        # Chrome solid rule at alpha round(0.5*255) = 128 (2026-11-17): the src
+        # term round(255*128/255) = 128, the dst term (255*128)>>8 = 127 -- the
+        # same split as Chrome's opacity:0.5 red over white = #ff7f7f. The dst
+        # channel was 128 before the change. argb sets alpha FF.
         val mixed = blend_opacity(0x00FF0000u32, 0x000000FFu32, 50)
         expect((mixed >> 16) & 255u32).to_equal(128u32)
-        expect(mixed & 255u32).to_equal(128u32)
+        expect(mixed & 255u32).to_equal(127u32)
 
     it "composite_over_base endpoints and midpoint":
         expect(composite_over_base(0x00FF0000u32, 255, 0x000000FFu32)).to_equal(0x00FF0000u32)
@@ -141,20 +144,22 @@ describe "rounded rect radius handling":
         expect(fb[7 * 8]).to_equal(0u32)      # bottom-left corner clipped
 
 describe "gradient math":
-    it "dither threshold is a 4x4 (plus px%8 tweak) matrix of 0..15":
+    it "dither threshold is Chrome's 8x8 ordered matrix of 0..63":
         var y = 0
         var bad = 0
         while y < 8:
             var x = 0
             while x < 8:
                 val t = gradient_dither_threshold(x, y)
-                if t < 0 or t > 15:
+                if t < 0 or t > 63:
                     bad = bad + 1
                 x = x + 1
             y = y + 1
         expect(bad).to_equal(0)
-        expect(gradient_dither_threshold(0, 0)).to_equal(7)
-        expect(gradient_dither_threshold(4, 2)).to_equal(3)
+        # Chrome 159: 4px #000->#fff row 0 at x=0 is 1F (M 0); #dc2626->#2563eb
+        # at (3,4) is #CD2C37 (M 62).
+        expect(gradient_dither_threshold(0, 0)).to_equal(0)
+        expect(gradient_dither_threshold(3, 4)).to_equal(62)
 
     it "mix_channel_gradient_centered hits endpoints and guards span<=0":
         expect(mix_channel_gradient_centered(10, 20, 0, 0, 0, 0)).to_equal(10)
@@ -282,8 +287,12 @@ describe "radial gradient stacks (tranche 4)":
 
     it "element opacity scales the radial falloff alpha":
         val raw = "radial-gradient(circle at 50% 50%, rgba(255,0,0,0.9), transparent 70%)"
-        val full = fb_background_radial_stack_clip(mkfb(20, 20), 20, 20, 0, 0, 20, 20, raw, 100, full_clip(20, 20))
-        val half = fb_background_radial_stack_clip(mkfb(20, 20), 20, 20, 0, 0, 20, 20, raw, 50, full_clip(20, 20))
+        # Over an opaque black backdrop (a real framebuffer is opaque). The
+        # stack now blends with Engine2D's straight-alpha `blend`, which over
+        # the transparent mkfb() keeps red at 255 whatever the alpha; the old
+        # painter treated the transparent fb as black.
+        val full = fb_background_radial_stack_clip(mkfb_color(20, 20, 0xFF000000u32), 20, 20, 0, 0, 20, 20, raw, 100, full_clip(20, 20))
+        val half = fb_background_radial_stack_clip(mkfb_color(20, 20, 0xFF000000u32), 20, 20, 0, 0, 20, 20, raw, 50, full_clip(20, 20))
         val fr = (full[10 * 20 + 10] >> 16) & 255u32
         val hr = (half[10 * 20 + 10] >> 16) & 255u32
         expect(hr < fr).to_equal(true)
@@ -360,7 +369,7 @@ describe "underline styles and clipped variant (tranche 4)":
 
 describe "glyph rendering paths (tranche 4)":
     it "scaled thin text paints pixels and respects the vertical guard":
-        val fb = fb_text_thin_scaled_clip_range(mkfb(24, 16), 24, 16, 1, 1, "A", 0, 1, 9u32, 2, 12, 6, false, full_clip(24, 16))
+        val fb = fb_text_thin_scaled_clip_range(mkfb(24, 16), 24, 16, 1, 1, "A", 0, 1, 9u32, 2, 12, 6, false, false, full_clip(24, 16))
         var painted = 0
         var i = 0
         while i < 24 * 16:
@@ -368,7 +377,7 @@ describe "glyph rendering paths (tranche 4)":
                 painted = painted + 1
             i = i + 1
         expect(painted > 0).to_equal(true)
-        val off = fb_text_thin_scaled_clip_range(mkfb(24, 16), 24, 16, 1, 99, "A", 0, 1, 9u32, 2, 12, 6, false, full_clip(24, 16))
+        val off = fb_text_thin_scaled_clip_range(mkfb(24, 16), 24, 16, 1, 99, "A", 0, 1, 9u32, 2, 12, 6, false, false, full_clip(24, 16))
         expect(off[0]).to_equal(0u32)
 
     it "sparse text paints a strict subset of checkerboard pixels":
@@ -384,8 +393,8 @@ describe "glyph rendering paths (tranche 4)":
         expect(off[0]).to_equal(0u32)
 
     it "italic shear shifts painted columns rightward on upper rows":
-        val up = fb_text_thin_scaled_clip_range(mkfb(24, 16), 24, 16, 1, 1, "H", 0, 1, 9u32, 2, 12, 6, false, full_clip(24, 16))
-        val it_fb = fb_text_thin_scaled_clip_range(mkfb(24, 16), 24, 16, 1, 1, "H", 0, 1, 9u32, 2, 12, 6, true, full_clip(24, 16))
+        val up = fb_text_thin_scaled_clip_range(mkfb(24, 16), 24, 16, 1, 1, "H", 0, 1, 9u32, 2, 12, 6, false, false, full_clip(24, 16))
+        val it_fb = fb_text_thin_scaled_clip_range(mkfb(24, 16), 24, 16, 1, 1, "H", 0, 1, 9u32, 2, 12, 6, true, false, full_clip(24, 16))
         var same = true
         var i = 0
         while i < 24 * 16:
@@ -610,7 +619,7 @@ describe "text primitive guards (tranche 5)":
         expect(b[0]).to_equal(0u32)
 
     it "thin scaled text stops at the right framebuffer edge mid-string":
-        val fb = fb_text_thin_scaled_clip_range(mkfb(24, 16), 24, 16, 20, 1, "AB", 0, 2, 9u32, 2, 12, 6, false, full_clip(24, 16))
+        val fb = fb_text_thin_scaled_clip_range(mkfb(24, 16), 24, 16, 20, 1, "AB", 0, 2, 9u32, 2, 12, 6, false, false, full_clip(24, 16))
         expect(fb.len()).to_equal(24 * 16)
 
     it "sparse text stops at the right framebuffer edge mid-string":

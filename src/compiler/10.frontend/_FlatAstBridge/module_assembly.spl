@@ -1,6 +1,14 @@
+use compiler.common.dependency.manifest_visibility_v1.{ParserManifestVisibilityV1}
+use compiler.core.ast.{decl_get_manifest_role_v1, decl_manifest_roles_refuse_v1}
 use compiler.frontend.core.parser_preprocessor.{preprocess_conditionals}
 # Flat AST Bridge: module assembly (flat_ast_to_module, parse_and_build_module).
 use compiler.frontend.flat_ast_bridge.*
+use compiler.frontend._FlatAstBridge.declaration_intent_v1.{flat_project_declaration_intents_v1}
+use compiler.frontend.core._ParserDecls.enum_module_body.{
+    parser_top_level_visibility_source_digest_v1,
+    parser_top_level_visibility_source_matches_digest_v1,
+    parser_top_level_visibility_admit_restored_bindings_v1,
+    parser_top_level_visibility_intent_clear_v1}
 use compiler.core.frontend.{ParserProviderV1, ParserProviderAdmissionV1, parser_provider_v1_admit, parser_provider_v1_default}
 use compiler.frontend.trace_policy.{
     frontend_compiler_trace_enabled,
@@ -12,28 +20,31 @@ use compiler.frontend.trace_policy.{
 # ParserModule shape expected by HIR lowering. This is used as the bootstrap-safe
 # frontend path when the newer parser surface is unavailable.
 
-use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path, parser_error, parser_error_at}
+use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path, parser_error, parser_error_at, parser_promote_transient_owners}
 use compiler.frontend.core.string_interpolation_expand.{expand_string_interpolations_with_placeholder_receipt}
 use compiler.frontend.core.string_interpolation_expand.{si_stats_reset, si_stats_report}
 use compiler.frontend.desugar.placeholder_lambda.{transform_placeholder_call_args_after_interpolation_known_present}
 use compiler.semantics.layer_dag_checker.{LayerDagRegistry, check_layer_dag}
-use compiler.core.parser_decls.{parse_module_body, parser_enum_attributes_for}
+use compiler.core.parser_decls.{parse_module_body, parser_enum_attributes_for, parser_class_attributes_for, parser_struct_attributes_for}
 use compiler.core.parser_decls.{parser_enum_open_regions_for}
 use compiler.core.parser_decls.{parser_extend_targets, parser_extend_closures, parser_extend_ctor_counts}
 use compiler.core.parser_decls.{parser_extend_ctor_providers, parser_extend_ctor_names}
 use compiler.core.parser_decls.{parser_extend_ctor_type_counts, parser_extend_ctor_type_ids}
 use compiler.common.dynamic_identity.closure.{Closure}
 use compiler.core.ast.*
-use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
-use compiler.core.ast.{decl_enum_payload_unnamed_marker, decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
+use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields, decl_get_field_visibility, decl_get_field_array_sizes}
+use compiler.core.unit_scope.{unit_scope_reset_from, unit_scope_record_use, unit_scope_save, unit_scope_restore, unit_scope_restore_keeping_constraints}
+use compiler.core.ast.{decl_enum_payload_unnamed_marker,decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
 use compiler.core.ast.{decl_get_param_types, decl_get_ret_type, decl_get_visibility_text, module_decl_at, module_decl_count_get}
-use compiler.core.ast.{decl_is_packed, decl_get_is_value_type}
+use compiler.core.ast.{decl_is_packed_at, decl_is_packed_len, decl_get_is_value_type}
 use compiler.core.ast_expr.*
 use compiler.core.ast_stmt.*
 use compiler.core.ast_stmt.{STMT_GPU_LAUNCH, stmt_get_gpu_grid, stmt_get_gpu_block}
 use compiler.core.ast_coverage_inventory.{compiler_coverage_inventory_record_module}
-use compiler.core.capture_write_check.{capture_write_check_module, capture_write_error_line, capture_write_error_col}
-use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY, TYPE_ANY, TYPE_NIL}
+use compiler.core.capture_write_check.{capture_write_check_module, capture_write_error_line, capture_write_error_col, capture_write_warnings}
+use compiler.frontend.core.static_lock_level.{check_lock_level_order, lock_level_error_line, lock_level_error_col}
+use compiler.frontend.core.static_lock_level_metadata.{flat_lock_level_pools_dump, flat_lock_level_pools_restore}
+use compiler.core.types.{type_pools_promote_hir_owners, TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY, TYPE_ANY, TYPE_NIL}
 use compiler.core.types.{TYPE_DICT, TYPE_FN, TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
 use compiler.core.types.{TYPE_RESULT, TYPE_FUTURE, TYPE_POLL, TYPE_TASK, TYPE_GENERIC_ERASED}
 use compiler.core.types.{TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NAMED_BASE, TYPE_UNION_BASE, type_tag_name, int_to_str, reset_all_pools}
@@ -56,8 +67,9 @@ use compiler.frontend.aspect_registry.{aspect_registry_declare}
 use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io_runtime.{env_get_opt, env_set}
-use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, FLAT_POOL_CODEC_VERSION}
-use compiler.core.types.{flat_type_pools_dump, flat_type_pools_restore}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, FLAT_POOL_CODEC_VERSION, flat_pool_capture_sanitize_arm_v1, flat_pool_capture_sanitize_disarm_v1, flat_pool_capture_poisoned_v1, flat_pool_type_trace_arm_v1, flat_pool_type_trace_take_v1, flat_pool_type_trace_family_v1}
+use compiler.frontend.core.flat_pool_packed_v1.{SpabViewV1, SpabImportRefV1, flat_packed_tokens_v1}
+use compiler.core.types.{flat_type_pools_dump, flat_type_pools_restore, flat_type_pools_clear_chunks_v1}
 use compiler.core.parser.{flat_parser_state_dump, flat_parser_state_restore}
 use compiler.core.parser_decls.{flat_extend_pools_dump, flat_extend_pools_restore}
 use compiler.core.parser_decls.{flat_pending_pools_dump, flat_pending_pools_restore}
@@ -104,6 +116,7 @@ extern fn rt_transient_heap_promote<T>(value: T) -> bool
 fn _sffi_env_get(key: text) -> text?:
     env_get_opt(key)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_time_now_unix_micros", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_time_now_unix_micros() -> i64:
     unsafe(capabilities: [ffi]):
@@ -113,16 +126,19 @@ fn _sffi_time_now_unix_micros() -> i64:
 fn _sffi_env_set(key: text, value: text) -> bool:
     env_set(key, value)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_transient_array_scope_begin", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_transient_array_scope_begin() -> bool:
     unsafe(capabilities: [ffi]):
         rt_transient_array_scope_begin()
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_transient_array_scope_pause", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_transient_array_scope_pause() -> bool:
     unsafe(capabilities: [ffi]):
         rt_transient_array_scope_pause()
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_transient_array_scope_end", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_transient_array_scope_end() -> bool:
     unsafe(capabilities: [ffi]):
@@ -226,12 +242,29 @@ fn flat_i64_list_at(raw: text, target: i64) -> i64:
 # following iteration lower them through conditional aggregate joins. Early
 # returns keep every aggregate branch local to this helper; the caller retains
 # only scalar ids and immediately pushes the completed ParserField.
+fn field_vis_text_at(codes: [text], fi: i64) -> text:
+    if fi >= 0 and fi < codes.len():
+        return codes[fi]
+    "private"
+
+fn flat_field_sized_type(declared: Type, array_size: i64) -> Type:
+    """Re-attach a struct field's literal `[T; N]` size (parser side pool
+    decl_field_array_sizes); the flat type tag alone drops N. HIR lowering
+    still lowers the array as dynamic, so only AST identity changes."""
+    if array_size < 0 or not parser_type_kind_is_array(declared.kind):
+        return declared
+    val element = parser_type_kind_array_element(declared.kind, declared)
+    val size_expr: Expr? = Some(Expr(kind: ExprKind.IntLit(array_size), span: declared.span))
+    Type(kind: TypeKind.Array(element, size_expr), span: declared.span)
+
 fn flat_parser_field_from_nodes(
     name: text,
     has_type_node: bool,
     type_node: i64,
     default_node: i64,
-    raw_bits: i64
+    raw_bits: i64,
+    vis_text: text,
+    array_size: i64
 ) -> ParserField:
     val has_default = default_node >= 0
     val has_bits = raw_bits > 0
@@ -242,20 +275,20 @@ fn flat_parser_field_from_nodes(
     if has_type_node:
         if has_default:
             val default_expr = convert_flat_expr(default_node)
-            val declared_type = convert_flat_type(type_node)
+            val declared_type = flat_field_sized_type(convert_flat_type(type_node), array_size)
             return ParserField(
                 name: name, type_: declared_type,
                 has_default: true, default: default_expr,
-                visibility: Visibility.Private, is_public: false,
+                visibility: convert_visibility_text(vis_text), is_public: vis_text == "public",
                 is_volatile: false, has_bits: has_bits, bits: bits,
                 has_fixed_address: false, fixed_address: 0,
                 span: make_span())
-        val declared_type = convert_flat_type(type_node)
+        val declared_type = flat_field_sized_type(convert_flat_type(type_node), array_size)
         return ParserField(
             name: name, type_: declared_type,
             has_default: false,
             default: Expr(kind: ExprKind.NilLit, span: make_span()),
-            visibility: Visibility.Private, is_public: false,
+            visibility: convert_visibility_text(vis_text), is_public: vis_text == "public",
             is_volatile: false, has_bits: has_bits, bits: bits,
             has_fixed_address: false, fixed_address: 0,
             span: make_span())
@@ -266,7 +299,7 @@ fn flat_parser_field_from_nodes(
             name: name,
             type_: Type(kind: TypeKind.Infer, span: make_span()),
             has_default: true, default: default_expr,
-            visibility: Visibility.Private, is_public: false,
+            visibility: convert_visibility_text(vis_text), is_public: vis_text == "public",
             is_volatile: false, has_bits: has_bits, bits: bits,
             has_fixed_address: false, fixed_address: 0,
             span: make_span())
@@ -276,7 +309,7 @@ fn flat_parser_field_from_nodes(
         type_: Type(kind: TypeKind.Infer, span: make_span()),
         has_default: false,
         default: Expr(kind: ExprKind.NilLit, span: make_span()),
-        visibility: Visibility.Private, is_public: false,
+        visibility: convert_visibility_text(vis_text), is_public: vis_text == "public",
         is_volatile: false, has_bits: has_bits, bits: bits,
         has_fixed_address: false, fixed_address: 0,
         span: make_span())
@@ -284,6 +317,15 @@ fn flat_parser_field_from_nodes(
 use compiler.frontend.core.representation_declarations_v1.{representation_parser_metadata_v1, representation_parser_has_metadata_v1, representation_parser_refuse_restored_metadata_v1}
 
 fn flat_ast_to_module(path: text) -> ParserModule:
+    # The unit suffix scope is process-global and shared with the core
+    # interpreter, which checks it at eval time: an interpreted script calling
+    # parse_and_build_module must get its own `use unit` scope back.
+    val saved_unit_scope = unit_scope_save()
+    val built = flat_ast_to_module_body(path)
+    unit_scope_restore(saved_unit_scope)
+    built
+
+fn flat_ast_to_module_body(path: text) -> ParserModule:
     val saved_compiler_trace_scope = frontend_compiler_trace_scope_enter()
     if flat_bridge_trace_enabled():
         print "[flat-bridge] path={path}"
@@ -305,6 +347,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     # parses all 88 decls); never truncate here.
     if flat_bootstrap_enabled() and flat_bridge_trace_enabled():
         eprint("[flat-bridge] decl_count {decl_count}")
+    var declaration_target_ids: Dict<text, i64> = {}
     var functions: Dict<text, ParserFunction> = {}
     var function_headers: Dict<text, ParserFunctionHeader> = {}
     var function_order: [text] = []
@@ -330,6 +373,8 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     var imports: [ParserImport] = []
     var exports: [Export] = []
     var domain_blocks: [DomainBlock] = []
+    var manifest_facts = ParserManifestVisibilityV1()
+    var manifest_child_ids: [i64] = []
     var impls: [Impl] = []
     var aop_advices: [AopAdvice] = []
     var di_bindings: [DiBinding] = []
@@ -360,9 +405,24 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     # the same-layer/downward call-direction check that CONSUMES this fact is
     # a separate, not-yet-landed effort (call-edge tracking).
     var module_tagged_layer = ""
+    var module_friends: [text] = []
+    var module_internal_exports: [text] = []
     # `@no_gc(strict)` marker (opt-in no-GC ownership-sigil mode, memory.md).
     var module_nogc_strict = false
+    # `@required_init(error|warning)` marker; "" = no module opt-in.
+    var module_required_init_mode = ""
     val span = make_span()
+
+    # Library unit suffix scope is per file: this file's `use unit...` items
+    # plus its own unit decls (the unit-decl pool is per-file scratch, so
+    # base 0). Recorded before any body converts; checked at EXPR_SUFFIXED_LIT.
+    unit_scope_reset_from(0)
+    var usi = 0
+    while usi < decl_count:
+        val use_idx = module_decl_at(usi)
+        if decl_get_tag(use_idx) == 6:
+            unit_scope_record_use(decl_get_name(use_idx), decl_get_imports(use_idx))
+        usi = usi + 1
 
     var di = 0
     while di < decl_count:
@@ -373,6 +433,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
         if tag_text == "1":
             val fn_: ParserFunction = convert_decl_fn(idx)
             flat_module_trace_function("before", fn_)
+            declaration_target_ids["function:" + fn_.name] = idx
             functions[fn_.name] = fn_
             function_headers[fn_.name] = parser_function_header(fn_)
             function_order.push(fn_.name)
@@ -381,6 +442,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
         elif tag_text == "2":
             val fn_: ParserFunction = convert_decl_extern_fn(idx)
             flat_module_trace_function("before", fn_)
+            declaration_target_ids["function:" + fn_.name] = idx
             functions[fn_.name] = fn_
             function_headers[fn_.name] = parser_function_header(fn_)
             function_order.push(fn_.name)
@@ -397,9 +459,10 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 var t_methods: [ParserFunction] = []
                 for t_method_id in decl_get_body(idx):
                     t_methods.push(convert_decl_method_fn(t_method_id, s_name))
+                declaration_target_ids["trait:" + s_name] = idx
                 traits[s_name] = ParserTrait(
                     name: s_name,
-                    type_params: [],
+                    type_params: convert_decl_function_type_params(idx, span),
                     super_traits: [],
                     where_clause: [],
                     methods: t_methods,
@@ -416,10 +479,12 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             val f_types = decl_get_field_types(idx)
             val f_bits = decl_get_field_bits(idx)
             val f_defaults = decl_get_field_defaults(idx)
+            val f_vis = decl_get_field_visibility(idx)
+            val f_sizes = decl_get_field_array_sizes(idx)
             val s_visibility = convert_decl_visibility(idx)
             var is_packed = false
-            if idx < decl_is_packed.len():
-                if decl_is_packed[idx] == 1:
+            if idx < decl_is_packed_len():
+                if decl_is_packed_at(idx) == 1:
                     is_packed = true
             if is_packed:
                 var bf_fields: [BitfieldField] = []
@@ -443,6 +508,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                         span: span
                     ))
                     fi = fi + 1
+                declaration_target_ids["bitfield:" + s_name] = idx
                 bitfields[s_name] = Bitfield(
                     name: s_name,
                     backing_type: Type(kind: TypeKind.Infer, span: span),
@@ -498,7 +564,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                         field_type_node = f_types[fi]
                     fields.push(flat_parser_field_from_nodes(
                         f_names[fi], fi < f_types.len(), field_type_node,
-                        fd_id, fb))
+                        fd_id, fb, field_vis_text_at(f_vis, fi), if fi < f_sizes.len(): f_sizes[fi] else: -1))
                     fi = fi + 1
                 # decl_get_type_params returns the struct/class's own `<T, U,
                 # ...>` names (threaded through by parse_struct_decl via
@@ -507,18 +573,18 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 # Build real [ParserTypeParam] so HIR lowering can register `T` as a
                 # genuine SymbolKind.TypeParam symbol instead of it falling
                 # through to the unrelated bareword-forward-declared-type path.
-                val s_tp_names = decl_get_type_params(idx)
-                var s_type_params: [ParserTypeParam] = []
-                var s_tpi = 0
-                while s_tpi < s_tp_names.len():
-                    s_type_params.push(ParserTypeParam(
-                        name: s_tp_names[s_tpi],
-                        bounds: [],
-                        has_default: false,
-                        default: Type(kind: TypeKind.Infer, span: span),
-                        span: span
-                    ))
-                    s_tpi = s_tpi + 1
+                # Bounds and `= Default` rows ride the same constraint side
+                # table as functions, so reuse the function converter.
+                val s_type_params = convert_decl_function_type_params(idx, span)
+                # The parser records the declaration's real span (start/end/line/col)
+                # via representation_declaration_end_v1; the module-wide `span` above
+                # is empty (line 0), so build the struct/class span from the decl.
+                val s_flat_span = decl_get_span(idx)
+                var s_span = make_span()
+                if span_is_valid(s_flat_span):
+                    val s_start = span_start(s_flat_span)
+                    val s_end = span_end(s_flat_span)
+                    s_span = Span(start: s_start, end: s_end, line: span_line(s_flat_span), col: span_col(s_flat_span), file: path, length: s_end - s_start)
                 if decl_get_is_value_type(idx) == 0:
                     # `class` decl (parse_struct_decl(is_class: true) ->
                     # decl_set_is_value_type(struct_d, 0)) -- route into the
@@ -528,6 +594,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     # `methods` stays empty: class methods are carried via the
                     # synthesized `impl` block (tag_text == "9" below), the
                     # same mechanism plain structs already use.
+                    declaration_target_ids["class:" + s_name] = idx
                     classes[s_name] = ParserClass(
                         name: s_name,
                         type_params: s_type_params,
@@ -537,20 +604,21 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                         is_public: decl_get_visibility_text(idx) == "public",
                         has_doc_comment: false,
                         doc_comment: "",
-                        attributes: [],
-                        span: span
+                        attributes: bridge_node_tree_attributes(parser_class_attributes_for(s_name), s_span),
+                        span: s_span
                     )
                 else:
+                    declaration_target_ids["struct:" + s_name] = idx
                     structs[s_name] = ParserStruct(
                         name: s_name,
                         type_params: s_type_params,
                         fields: fields,
                         visibility: s_visibility,
                         is_public: decl_get_visibility_text(idx) == "public",
-                        attributes: [],
+                        attributes: bridge_struct_embed_attributes(parser_struct_attributes_for(s_name), s_span),
                         has_doc_comment: false,
                         doc_comment: "",
-                        span: span
+                        span: s_span
                     )
         elif tag_text == "8":
             val e_name = decl_get_name(idx)
@@ -575,6 +643,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             # An entry equal to decl_enum_payload_unnamed_marker() means the
             # field was POSITIONAL. Absent (older flat AST) => all positional.
             val e_payload_field_names_flat = decl_get_param_names(idx)
+            val e_payload_defaults_flat = decl_get_param_defaults(idx)
             var e_vi = 0
             var e_type_offset = 0
             while e_vi < e_names.len():
@@ -588,12 +657,23 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 # staged bridge never copies a stale six-word aggregate.
                 var e_discriminant = Expr(kind: ExprKind.NilLit, span: make_span())
                 if e_has_discriminant:
+                    # Enum variant discriminants keep the exact decimal lexeme:
+                    # the enum-contract report folds discriminants through
+                    # hir_fold_literal_constant_v1 and classifies a float
+                    # discriminant as NonInteger from the lexeme form
+                    # (enum_discriminant_adapter_spec pins the float-lexeme HIR
+                    # kind), the third lexeme-preserving context alongside
+                    # module-level const initializers and float match patterns.
+                    val saved_disc_float_mode = flat_bridge_lexeme_float_literals
+                    flat_bridge_lexeme_float_literals = true
                     e_discriminant = convert_flat_expr(e_discriminant_id)
+                    flat_bridge_lexeme_float_literals = saved_disc_float_mode
                 var e_payload_count: i64 = 0
                 if e_vi < e_payload_counts.len():
                     e_payload_count = e_payload_counts[e_vi]
                 var e_variant_types: [Type] = []
                 var e_variant_field_names: [text] = []
+                var e_variant_field_defaults: [i64] = []
                 var e_variant_any_named = false
                 var e_ti = 0
                 while e_ti < e_payload_count and e_type_offset < e_payload_types_flat.len():
@@ -604,6 +684,10 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     if e_field_name != decl_enum_payload_unnamed_marker():
                         e_variant_any_named = true
                     e_variant_field_names.push(e_field_name)
+                    var e_default_id: i64 = -1
+                    if e_type_offset < e_payload_defaults_flat.len():
+                        e_default_id = e_payload_defaults_flat[e_type_offset]
+                    e_variant_field_defaults.push(e_default_id)
                     e_type_offset = e_type_offset + 1
                     e_ti = e_ti + 1
                 # A variant whose payload fields were DECLARED with names
@@ -627,11 +711,15 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                         # struct-field ParserField note above: the positional
                         # form misaligns the 12-field desugared struct and
                         # SIGSEGVs in lower_type.
+                        val e_default_id = e_variant_field_defaults[e_fi]
+                        var e_default = Expr(kind: ExprKind.NilLit, span: make_span())
+                        if e_default_id >= 0:
+                            e_default = convert_flat_expr(e_default_id)
                         e_variant_fields.push(ParserField(
                             name: e_fname,
                             type_: e_variant_types[e_fi],
-                            has_default: false,
-                            default: Expr(kind: ExprKind.NilLit, span: make_span()),
+                            has_default: e_default_id >= 0,
+                            default: e_default,
                             visibility: Visibility.Public,
                             is_public: true,
                             is_volatile: false,
@@ -652,24 +740,12 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 ))
                 e_vi = e_vi + 1
             val (e_complete_open, e_dyn_open) = parser_enum_open_regions_for(e_name)
-            # `enum Opt<T>:` -- decl_get_type_params returns the names threaded
-            # by parse_enum_decl (decl_set_type_params on the shared TYPE_PARAMS
-            # slot), the same slot and shape the struct/class arm above reads.
-            # Previously hardcoded `[]`, so HIR never bound `T` and the payload
-            # was erased to Any. See
-            # doc/08_tracking/bug/enum_payload_type_param_erased_to_any_in_flat_ast_2026-08-21.md
-            val e_tp_names = decl_get_type_params(idx)
-            var e_type_params: [ParserTypeParam] = []
-            var e_tpi = 0
-            while e_tpi < e_tp_names.len():
-                e_type_params.push(ParserTypeParam(
-                    name: e_tp_names[e_tpi],
-                    bounds: [],
-                    has_default: false,
-                    default: Type(kind: TypeKind.Infer, span: make_span()),
-                    span: make_span()
-                ))
-                e_tpi = e_tpi + 1
+            # Defaults and bounds use the same existing row conversion as
+            # functions, classes and aliases. Capture the declaration span
+            # before default fragments are parsed by that conversion.
+            val e_span = make_span()
+            val e_type_params = convert_decl_function_type_params(idx, e_span)
+            declaration_target_ids["enum:" + e_name] = idx
             enums[e_name] = ParserEnum(
                 name: e_name,
                 type_params: e_type_params,
@@ -678,7 +754,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 is_public: decl_get_visibility_text(idx) == "public",
                 has_doc_comment: false,
                 doc_comment: "",
-                span: make_span(),
+                span: e_span,
                 attributes: parser_enum_attributes_for(e_name),
                 complete_open: e_complete_open,
                 dyn_open: e_dyn_open
@@ -730,7 +806,11 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             # flat_ast_to_module+0x40b4 / 0x4d6264). Rebuild the empty span
             # after those safepoints, immediately before the impl aggregates.
             val impl_span = make_span()
-            val impl_trait_type = if impl_has_trait:
+            # `impl Owner<i64> for X:` keeps its trait arguments (parse_impl_decl).
+            val impl_trait_tag = decl_get_impl_trait_type_tag(idx)
+            val impl_trait_type = if impl_has_trait and impl_trait_tag >= 0:
+                convert_flat_type(impl_trait_tag)
+            elif impl_has_trait:
                 Type(kind: TypeKind.Named(impl_trait_name, []), span: impl_span)
             elif impl_with_candidate:
                 Type(kind: TypeKind.Named(impl_with_trait_name, []), span: impl_span)
@@ -765,19 +845,40 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             val body = decl_get_body(idx)
             var init = Expr(kind: ExprKind.NilLit, span: span)
             if body.len() > 0:
+                # Module-level const/val initializers keep exact float
+                # lexemes: MIR folds a negated float const by negating the
+                # lexeme text and derives imported-global storage from the
+                # folded lexeme (unary_literal_module_const_static_spec,
+                # imported_global_infer_storage_spec).
+                val saved_float_mode = flat_bridge_lexeme_float_literals
+                flat_bridge_lexeme_float_literals = true
                 init = convert_flat_expr(body[0])
+                flat_bridge_lexeme_float_literals = saved_float_mode
             val const_type_tag = decl_get_ret_type(idx)
             if c_name.starts_with("_expr_"):
                 match init.kind:
                     case ExprKind.Call(callee, args):
                         match callee.kind:
                             case ExprKind.Ident(helper_name):
-                                if helper_name == "__domain_block" and args.len() >= 2:
+                                if helper_name == "__domain_block" and args.len() >= 2 and decl_get_manifest_role_v1(idx) == "domain":
                                     match args[0].value.kind:
                                         case ExprKind.StringLit(kind, _):
                                             match args[1].value.kind:
                                                 case ExprKind.StringLit(payload, _):
                                                     domain_blocks.push(DomainBlock(kind, payload, "module", span))
+                                                    if kind == "arch":
+                                                        val fields = decl_get_imports(idx)
+                                                        if manifest_facts.has_arch or fields.len() < 3:
+                                                            manifest_facts.valid = false
+                                                        else:
+                                                            manifest_facts.valid = manifest_facts.valid and fields[0] == "valid"
+                                                            manifest_facts.dimension = fields[1]
+                                                            manifest_facts.layer = fields[2]
+                                                            var field_index = 3
+                                                            while field_index < fields.len():
+                                                                manifest_facts.expose_paths.push(fields[field_index])
+                                                                field_index = field_index + 1
+                                                        manifest_facts.has_arch = true
                                                     di = di + 1
                                                     continue
                                                 case _:
@@ -958,6 +1059,28 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                                     module_nogc_strict = true
                                     di = di + 1
                                     continue
+                                elif helper_name == "__module_required_init_error" or helper_name == "__module_required_init_warning":
+                                    # `@required_init(error|warning)` module
+                                    # marker: record the mode and drop it.
+                                    module_required_init_mode = if helper_name == "__module_required_init_error": "error" else: "warning"
+                                    di = di + 1
+                                    continue
+                                elif (helper_name == "__module_friend" or helper_name == "__module_internal_export") and args.len() >= 1:
+                                    # `friend PKG` / `internal_export NAME`
+                                    # directives: fold into the module facts,
+                                    # drop the marker.
+                                    match args[0].value.kind:
+                                        case ExprKind.StringLit(access_names, _):
+                                            for access_name in access_names.split(","):
+                                                if access_name != "":
+                                                    if helper_name == "__module_friend":
+                                                        module_friends.push(access_name)
+                                                    else:
+                                                        module_internal_exports.push(access_name)
+                                        case _:
+                                            pass
+                                    di = di + 1
+                                    continue
                                 elif helper_name == "__module_layer_tag" and args.len() >= 1:
                                     # M1 `@layer(NAME)` module tag (doc/03_plan/
                                     # compiler/forwarding/
@@ -998,6 +1121,13 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 span: span
             )
             if c_name.starts_with("_expr_"):
+                # Recovered module docstring (raw string literal: EXPR_STRING_LIT
+                # with I=1, see expr_raw_string_lit) must never become the
+                # synthetic script main that HIR lowers as executable source.
+                # Drop it entirely: no main entry, no restored constant.
+                if body.len() > 0 and expr_get_tag(body[0]) == EXPR_STRING_LIT and expr_get_int(body[0]) != 0:
+                    di = di + 1
+                    continue
                 # Bare top-level statement: defer. If the module has no `fn main`
                 # these become a synthetic main body; otherwise they are restored
                 # as constants (previous behavior).
@@ -1005,19 +1135,32 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 top_level_stmt_consts.push(decl_const)
                 top_level_stmts.push(Stmt(kind: StmtKind.Expr(init), span: span))
             else:
+                declaration_target_ids["constant:" + c_name] = idx
                 constants[c_name] = decl_const
                 # If this file is later recognized as a script (it has bare
                 # expressions and no explicit main), replay its bindings in
                 # the synthetic main too. That preserves source order and
                 # gives compound values normal local runtime metadata instead
                 # of forcing arrays/structs through scalar global constants.
-                val script_binding_type = Type(kind: TypeKind.Infer, span: span)
+                # Keep the declared annotation: an untyped replay of
+                # `var t: Tag = Alpha(..)` skipped the trait conversion.
+                val script_binding_type = decl_const.type_
                 if tag_text == "5":
                     top_level_stmts.push(Stmt(kind: StmtKind.Var(c_name, script_binding_type, init), span: span))
                 else:
                     top_level_stmts.push(Stmt(kind: StmtKind.Val(c_name, script_binding_type, init), span: span))
         elif tag_text == "6":
             val module_path = decl_get_name(idx)
+            if decl_get_manifest_role_v1(idx) == "child-invalid":
+                manifest_facts.valid = false
+            elif decl_get_manifest_role_v1(idx) == "child":
+                val child_name = if module_path.starts_with("."): module_path.substring(1) else: ""
+                if child_name == "" or manifest_facts.child_names.contains(child_name):
+                    manifest_facts.valid = false
+                else:
+                    manifest_facts.child_names.push(child_name)
+                    manifest_facts.child_visibilities.push(decl_get_visibility_text(idx))
+                    manifest_child_ids.push(idx)
             val items_list = decl_get_imports(idx)
             var import_items: [ImportItem] = []
             var ii = 0
@@ -1032,11 +1175,24 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     alias: import_alias
                 ))
                 ii = ii + 1
+            # parser_use_path records the import's original source range via
+            # decl_use_import(..., flat_span_new(...)); the module-wide `span`
+            # is empty (line 0), so build the import span from the decl like
+            # struct/class/const do. Reference facts v1 refuse a synthetic
+            # import span (hir_reference_snapshot_v1_spec).
+            val import_flat_span = decl_get_span(idx)
+            var import_span = make_span()
+            if span_is_valid(import_flat_span):
+                val import_start = span_start(import_flat_span)
+                val import_end = span_end(import_flat_span)
+                import_span = Span(start: import_start, end: import_end,
+                    line: span_line(import_flat_span), col: span_col(import_flat_span),
+                    file: path, length: import_end - import_start)
             imports.push(ParserImport(
                 module: module_path,
                 items: import_items,
                 is_lazy: decl_get_is_lazy(idx) != 0,
-                span: span
+                span: import_span
             ))
         elif tag_text == "7":
             val export_items = decl_get_imports(idx)
@@ -1052,12 +1208,17 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             var aop_priority_text = "0"
             if aop_data.len() > 2:
                 aop_priority_text = aop_data[2]
+            var aop_aspect_name = ""
+            if aop_data.len() > 3:
+                aop_aspect_name = aop_data[3]
             aop_advices.push(AopAdvice(
                 pointcut: aop_pointcut,
                 form: aop_form,
                 handler: decl_get_name(idx),
                 priority: text_parse_int_simple(aop_priority_text),
-                span: span
+                span: span,
+                aspect_name: aop_aspect_name,
+                aspect_module: ""
             ))
         elif tag_text == "15":
             val di_data = decl_get_imports(idx)
@@ -1084,14 +1245,14 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 span: span
             ))
         elif tag_text == "17":
-            # type X = Y (decl_type_alias). Pure capture: name + aliased type
-            # only -- no type_params/visibility recorded by the parser yet,
-            # so those are left at their defaults.
+            # Restore alias parameters through the same bounds/default
+            # conversion used by other generic declarations.
             val ta_name = decl_get_name(idx)
             val ta_type = convert_flat_type(decl_get_ret_type(idx))
+            declaration_target_ids["type_alias:" + ta_name] = idx
             type_aliases[ta_name] = ParserTypeAlias(
                 name: ta_name,
-                type_params: [],
+                type_params: convert_decl_function_type_params(idx, span),
                 type_: ta_type,
                 visibility: convert_decl_visibility(idx),
                 is_public: decl_get_visibility_text(idx) == "public",
@@ -1159,6 +1320,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     if top_level_stmt_names.len() > 0:
         if not functions.contains("main"):
             val main_span = make_span()
+            declaration_target_ids["function:main"] = -1
             functions["main"] = parser_function_new(
                 "main",
                 [],
@@ -1188,27 +1350,25 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             # `_expr_N` constants) to avoid any semantic change.
             var tsi = 0
             while tsi < top_level_stmt_names.len():
+                declaration_target_ids["constant:" + top_level_stmt_names[tsi]] = -1
                 constants[top_level_stmt_names[tsi]] = top_level_stmt_consts[tsi]
                 tsi = tsi + 1
 
     if flat_bridge_trace_enabled():
         print "[flat-bridge] building frontend module path={path}"
     # A typed parser decision, not a source scan: only modules whose retained
-    # FunctionAttr contains @rt(hal) acquire the runtime boundary dependency.
-    var has_rt_hal_boundary = false
+    # FunctionAttr contains @rt(hal, c|rust) acquire the runtime boundary dependency.
     var has_rt_hal_comparator = false
     for function in functions.values():
         val rt_hal_attr = parse_function_attrs(function.attributes)
         if rt_hal_attr.is_rt_hal:
-            has_rt_hal_boundary = true
             if rt_hal_attr.rt_hal_compare_c or rt_hal_attr.rt_hal_compare_rust:
                 has_rt_hal_comparator = true
-    if has_rt_hal_boundary:
+    if has_rt_hal_comparator:
         imports.push(ParserImport(
             module: "std.nogc_sync_mut.rt_hal.boundary",
             items: [], is_lazy: false, span: make_span()
         ))
-    if has_rt_hal_comparator:
         imports.push(ParserImport(
             module: "std.nogc_sync_mut.rt_hal.process_task_arena",
             items: [], is_lazy: false, span: make_span()
@@ -1257,12 +1417,43 @@ fn flat_ast_to_module(path: text) -> ParserModule:
         arch_rules: arch_rules,
         mock_decls: [],
         tagged_layer: module_tagged_layer,
-        layer_dag_edges: layer_dag_edges_text
+        layer_dag_edges: layer_dag_edges_text,
+        friends: module_friends,
+        internal_exports: module_internal_exports
     )
+    if parser_has_errors():
+        manifest_facts.valid = false
+        decl_manifest_roles_refuse_v1()
     built_module.function_headers = function_headers
     built_module.nogc_strict = module_nogc_strict
+    built_module.required_init_mode = module_required_init_mode
     built_module.extend_enums = build_parser_extend_enums()
     built_module.representation_declarations = representation_parser_metadata_v1()
+    built_module.source_declaration_intents_v1 = flat_project_declaration_intents_v1(declaration_target_ids)
+    built_module.source_declaration_digest_v1 = parser_top_level_visibility_source_digest_v1()
+    # Exact modifier comes from the source-bound raw declaration observation,
+    # not the legacy visibility string (private conflates omitted and pri).
+    var manifest_intent_rows: Dict<i64, i64> = {}
+    val manifest_intents = built_module.source_declaration_intents_v1
+    for row_index in 0..manifest_intents.len():
+        val raw_id = manifest_intents[row_index].raw_decl_id
+        if manifest_intent_rows.contains_key(raw_id):
+            manifest_intent_rows[raw_id] = -1
+        else:
+            manifest_intent_rows[raw_id] = row_index
+    for child_id in manifest_child_ids:
+        var modifier = "unknown"
+        var matched = false
+        if manifest_intent_rows.contains_key(child_id):
+            val row_index = manifest_intent_rows[child_id]
+            if row_index >= 0:
+                val observation = manifest_intents[row_index]
+                if observation.decl_kind == 6 and observation.decl_name == decl_get_name(child_id):
+                    modifier = observation.modifier
+                    matched = true
+        if not matched: manifest_facts.valid = false
+        manifest_facts.child_modifiers.push(modifier)
+    built_module.manifest_visibility_v1 = manifest_facts
     if flat_bridge_trace_enabled():
         print "[flat-bridge] built frontend module path={path}"
     frontend_compiler_trace_scope_exit(saved_compiler_trace_scope)
@@ -1282,6 +1473,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
 # scripts/check/check-flat-ast-roundtrip.shs, which drives the self-check
 # below over the whole src/app bootstrap closure.
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in flat_pools_dump_for_cache", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn flat_pools_dump_for_cache() -> text:
     # The input pools and retained ParserModule were born before this scope.
     # Only encoder temporary arrays/text belong to it. Retain the final blob
@@ -1307,14 +1499,36 @@ pub fn flat_pools_dump_all() -> text:
     if representation_parser_has_metadata_v1():
         return ""
     var out = FLAT_POOL_CODEC_VERSION + "\n"
+    flat_pool_type_trace_family_v1(1)
     out = out + flat_decl_pools_dump()
+    flat_pool_type_trace_family_v1(2)
     out = out + flat_expr_pools_dump()
+    flat_pool_type_trace_family_v1(3)
     out = out + flat_stmt_pools_dump()
+    flat_pool_type_trace_family_v1(4)
     out = out + flat_type_pools_dump()
+    flat_pool_type_trace_family_v1(5)
     out = out + flat_parser_state_dump()
+    flat_pool_type_trace_family_v1(6)
     out = out + flat_extend_pools_dump()
+    flat_pool_type_trace_family_v1(7)
     out = out + flat_pending_pools_dump()
+    out = out + flat_lock_level_pools_dump()
     out
+
+# Live line chunks of every CLEAR pool, in dump order (flat_pool_packed_v1.spl
+# renders them in place of the process-local values it never stores).
+pub fn flat_pools_clear_chunks_v1() -> [text]:
+    var chunks: [text] = []
+    for c in flat_decl_pools_clear_chunks_v1():
+        chunks.push(c)
+    for c in flat_expr_pools_clear_chunks_v1():
+        chunks.push(c)
+    for c in flat_stmt_pools_clear_chunks_v1():
+        chunks.push(c)
+    for c in flat_type_pools_clear_chunks_v1():
+        chunks.push(c)
+    chunks
 
 # Returns false when the blob is truncated, malformed, or written by a
 # different codec version. A false here MUST be treated as a cache miss and a
@@ -1325,8 +1539,14 @@ pub fn flat_pools_dump_all() -> text:
 # short-circuited: a restore that stops halfway leaves the pools in a torn
 # state that a later `and` would hide.
 pub fn flat_pools_restore_all(blob: text) -> bool:
+    flat_pools_restore_reader_v1(FlatPoolReader.new_canonical(blob))
+
+# Same restore over any cursor: the canonical line blob, or the typed token
+# stream of a packed .spab blob (FlatPoolReader.from_tokens).
+pub fn flat_pools_restore_reader_v1(r: FlatPoolReader) -> bool:
     representation_parser_refuse_restored_metadata_v1()
-    val r = FlatPoolReader.new_canonical(blob)
+    decl_manifest_roles_refuse_v1()
+    parser_top_level_visibility_intent_clear_v1()
     val version = r.next()
     if version != FLAT_POOL_CODEC_VERSION:
         return false
@@ -1337,8 +1557,20 @@ pub fn flat_pools_restore_all(blob: text) -> bool:
     val ok_par = flat_parser_state_restore(r)
     val ok_ext = flat_extend_pools_restore(r)
     val ok_pend = flat_pending_pools_restore(r)
-    (ok_decl and ok_expr and ok_stmt and ok_type and ok_par and ok_ext and ok_pend and
+    val ok_lock = flat_lock_level_pools_restore(r)
+    val restored = (ok_decl and ok_expr and ok_stmt and ok_type and ok_par and ok_ext and ok_pend and ok_lock and
         r.finish_canonical_frame() and flat_decl_pools_consistent())
+    if not restored:
+        reset_all_pools()
+        decl_manifest_roles_refuse_v1()
+        parser_top_level_visibility_intent_clear_v1()
+        return false
+    if not parser_top_level_visibility_admit_restored_bindings_v1():
+        reset_all_pools()
+        decl_manifest_roles_refuse_v1()
+        parser_top_level_visibility_intent_clear_v1()
+        return false
+    true
 
 var _fab_roundtrip_cached: i64 = -1
 fn flat_roundtrip_enabled() -> bool:
@@ -1387,10 +1619,76 @@ pub fn flat_parse_module_body_calls() -> i64:
 
 var _fab_capture_pools: i64 = 0
 var _fab_captured_blob: text = ""
+# Shape tag per pool of _fab_captured_blob (flat_pool_packed_v1.spl).
+var _fab_captured_trace: [i64] = []
+
+pub fn flat_pool_capture_take_trace() -> [i64]:
+    val trace = _fab_captured_trace
+    _fab_captured_trace = []
+    trace
+
+# Cross-module import references of the captured parse (packed 0x0104 table).
+var _fab_captured_refs: [SpabImportRefV1] = []
+
+pub fn flat_pool_capture_take_refs() -> [SpabImportRefV1]:
+    val refs = _fab_captured_refs
+    _fab_captured_refs = []
+    refs
+
+# One row per imported name of every top-level `use` declaration (DECL_USE = 6),
+# in module order; a `use` with no names (glob) yields one row with name "".
+pub fn flat_pool_import_refs_v1() -> [SpabImportRefV1]:
+    var refs: [SpabImportRefV1] = []
+    var k = 0
+    while k < module_decl_count_get():
+        val idx = module_decl_at(k)
+        if decl_get_tag(idx) == 6:
+            val names = decl_get_imports(idx)
+            if names.len() == 0:
+                refs.push(SpabImportRefV1(decl_index: idx, module_path: decl_get_name(idx), name: ""))
+            for name in names:
+                refs.push(SpabImportRefV1(decl_index: idx, module_path: decl_get_name(idx), name: name))
+        k = k + 1
+    refs
+# Source content a captured path was last dumped under, one row per
+# (path, content key) pair. The key is the frontend cache's private source key
+# (an xxh3 of the exact parse source): re-dumping the SAME path+key is always
+# redundant (the blob is content-identical) and each repeat dump re-exposes the
+# transient-scope reclaim window that poisons the capture (lane-48b trace: the
+# second unscoped dump of p2_add in one process is the one that hits dead pool
+# strings). The SAME PATH under a DIFFERENT key is different supplied source
+# bytes, so it must capture and store again -- keying this record by path alone
+# silently skipped the store for every supplied-source parse after the first
+# under one path (supplied_source_cache_key_spec: changed supplied bytes never
+# reached the cache and a same-source alias never hit). A disk-read path maps
+# 1:1 to content, so this never re-dumps there.
+# See doc/08_tracking/bug/stage2_mir_shard_flat_pool_text_len_minus1_2026-10-22.md.
+var _fab_captured_paths: [text] = []
+var _fab_captured_keys: [text] = []
+
+pub fn flat_pool_capture_already_captured(path: text, content_key: text) -> bool:
+    var i = 0
+    while i < _fab_captured_paths.len():
+        if _fab_captured_paths[i] == path and _fab_captured_keys[i] == content_key:
+            return true
+        i = i + 1
+    false
+
+pub fn flat_pool_capture_record(path: text, content_key: text):
+    if not flat_pool_capture_already_captured(path, content_key):
+        _fab_captured_paths = _fab_captured_paths.push(path)
+        _fab_captured_keys = _fab_captured_keys.push(content_key)
+
+var _fab_capture_arm_tag: text = ""
+
+pub fn flat_pool_capture_set_tag(tag: text):
+    _fab_capture_arm_tag = tag
 
 pub fn flat_pool_capture_arm():
     _fab_capture_pools = 1
     _fab_captured_blob = ""
+    if (_sffi_env_get("SIMPLE_CAPTURE_TRACE") ?? "") == "1":
+        eprint("[capture-trace] arm tag={_fab_capture_arm_tag}\n")
 
 # Reads AND disarms, so a blob can never be attributed to a later module: a
 # caller that forgets to re-arm gets "" (a store that does not happen), never
@@ -1399,6 +1697,8 @@ pub fn flat_pool_capture_take() -> text:
     val blob = _fab_captured_blob
     _fab_capture_pools = 0
     _fab_captured_blob = ""
+    if (_sffi_env_get("SIMPLE_CAPTURE_TRACE") ?? "") == "1":
+        eprint("[capture-trace] take bytes={blob.len()}\n")
     blob
 
 # Cache HIT path: rebuild the identical ParserModule from a stored blob without
@@ -1410,13 +1710,25 @@ pub fn flat_pool_capture_take() -> text:
 # restore is about to overwrite. The restore comes after it, so nothing init
 # sets can survive into the rebuilt module.
 pub fn build_module_from_flat_pool_blob(blob: text, source: text, path: text) -> ParserModule?:
+    if blob == "":
+        return None
+    _build_module_from_cache_v1(blob, nil, source, path)
+
+# Cache HIT from a validated packed .spab view (flat_pool_packed_v1.spl): the
+# pools are restored from typed tokens read straight out of the (mapped)
+# sections -- no line blob is built, split or re-parsed. The CLEAR pools keep
+# the values a fresh parse starts from (captured after reset + init).
+pub fn build_module_from_packed_view_v1(view: SpabViewV1, source: text, path: text) -> ParserModule?:
+    if not view.valid:
+        return None
+    _build_module_from_cache_v1("", Some(view), source, path)
+
+fn _build_module_from_cache_v1(blob: text, packed: SpabViewV1?, source: text, path: text) -> ParserModule?:
     val admission: ParserProviderAdmissionV1 = match parser_provider_v1_admit(parser_provider_v1_default()):
         case Err(reason): panic("flat AST cache provider admission failed: {reason}")
         case Ok(value): value
     if admission.provider != ParserProviderV1.LegacyReference:
         panic("flat AST cache admitted non-legacy provider: {admission.provider_id}")
-    if blob == "":
-        return nil
     # Hit-path profile, same gate as the miss path above
     # (SIMPLE_PARSE_PHASE_PROFILE=1). Without it a hit's cost was invisible:
     # the driver's per-file dt stamp brackets the whole parse_full_frontend
@@ -1429,8 +1741,17 @@ pub fn build_module_from_flat_pool_blob(blob: text, source: text, path: text) ->
     val saved_lex_path = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
     reset_all_pools()
     parser_init_with_path(source, path)
+    val expected_source_digest = parser_top_level_visibility_source_digest_v1()
     val _hp_t1 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
-    var blob_usable = flat_pools_restore_all(blob)
+    var blob_usable = false
+    if val view = packed:
+        val tokens = flat_packed_tokens_v1(view, flat_pools_clear_chunks_v1())
+        blob_usable = tokens.ok and flat_pools_restore_reader_v1(
+            FlatPoolReader.from_tokens(tokens.kinds, tokens.ints, tokens.texts))
+    else:
+        blob_usable = flat_pools_restore_all(blob)
+    if blob_usable and not parser_top_level_visibility_source_matches_digest_v1(expected_source_digest, path):
+        blob_usable = false
     # A blob stored at a permissive SIMPLE_CAPTURE_WRITE_CHECK level, or by a
     # compiler without the check (phase-2 import, shared store), must not come
     # back as a clean hit: treat it as a miss so the fresh parse reports it.
@@ -1438,6 +1759,8 @@ pub fn build_module_from_flat_pool_blob(blob: text, source: text, path: text) ->
     if blob_usable and flat_capture_write_level() == "error":
         if capture_write_check_module() != "":
             blob_usable = false
+    if blob_usable and check_lock_level_order() != "":
+        blob_usable = false
     if not blob_usable:
         # Leave nothing half-restored behind for the reparse that follows.
         reset_all_pools()
@@ -1447,8 +1770,8 @@ pub fn build_module_from_flat_pool_blob(blob: text, source: text, path: text) ->
         val path_restored = _sffi_env_set(
             "SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
         if not source_restored or not path_restored:
-            return nil
-        return nil
+            return None
+        return None
     val _hp_t2 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
     val built = flat_ast_to_module(path)
     val source_restored = _sffi_env_set(
@@ -1456,12 +1779,12 @@ pub fn build_module_from_flat_pool_blob(blob: text, source: text, path: text) ->
     val path_restored = _sffi_env_set(
         "SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
     if not source_restored or not path_restored:
-        return nil
+        return None
     if fab_phase_prof_enabled():
         val _hp_t3 = _sffi_time_now_unix_micros()
         print("PARSEHIT\tinit={(_hp_t1 - _hp_t0) / 1000}ms\trestore={(_hp_t2 - _hp_t1) / 1000}ms\tbridge={(_hp_t3 - _hp_t2) / 1000}ms\ttotal={(_hp_t3 - _hp_t0) / 1000}ms\tbytes={blob.len()}\tpath={path}")
     if parser_has_errors():
-        return nil
+        return None
     Some(built)
 
 pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: bool) -> ParserModule:
@@ -1493,6 +1816,7 @@ pub fn parse_and_build_module_checked_reference_v1(source: text, path: text) -> 
         return Err("parse: " + receipt.errors.join("\n"))
     Ok(receipt.module)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in parse_and_build_module_with_scope_owner", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn parse_and_build_module_with_scope_owner(source: text, path: text,
     streaming_scope: bool, borrowed_scope: bool, reference_checked: bool) -> FlatReferenceCheckedParseV1:
     val admission: ParserProviderAdmissionV1 = match parser_provider_v1_admit(parser_provider_v1_default()):
@@ -1508,6 +1832,11 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
         val _lx_tokens = lex_tokenize_all(source)
         val _lx_t1 = _sffi_time_now_unix_micros()
         print("LEXPHASE\ttokenize_all\t{_lx_t1 - _lx_t0}\ttokens\t{_lx_tokens}\tchars\t{source.len()}\tpath\t{path}")
+    # The unit suffix scope AND its unit decl pool are process-global and
+    # shared with the core interpreter (checked at eval time). reset_all_pools
+    # wipes the decl pool, so the snapshot must be taken here, before it, and
+    # handed back once the bridge is done with its own file.
+    val saved_unit_scope = unit_scope_save()
     reset_all_pools()
     parser_init_with_path(source, path)
     val reference_roundtrip = not reference_checked and flat_roundtrip_enabled()
@@ -1550,6 +1879,8 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
     val capture_write_level = flat_capture_write_level()
     if capture_write_level != "off":
         val capture_write_diagnostic = capture_write_check_module()
+        for capture_warning in capture_write_warnings():
+            eprint("{path}: {capture_warning}")
         if capture_write_diagnostic != "":
             val capture_write_line = capture_write_error_line()
             if capture_write_level == "warning":
@@ -1559,6 +1890,9 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
                 parser_error_at(capture_write_line, capture_write_error_col(), capture_write_diagnostic)
             else:
                 parser_error(capture_write_diagnostic)
+    val lock_error = check_lock_level_order()
+    if lock_error != "":
+        parser_error_at(lock_level_error_line(), lock_level_error_col(), lock_error)
     desugar_collections(0, 0)
     val _pp_t4 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
     compiler_coverage_inventory_record_module(path)
@@ -1581,15 +1915,30 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
     # Nor is a parse the captured-write check warned on: the stored tree is
     # post-desugar, where an `x = x + y` write is no longer visible to the
     # cache-hit re-check, and a warm hit would drop the warning.
+    if (_sffi_env_get("SIMPLE_CAPTURE_TRACE") ?? "") == "1":
+        eprint("[capture-trace] dump-gate path={path} armed={_fab_capture_pools} stream={streaming_scope} borrowed={borrowed_scope} refchk={reference_checked} errors={parser_has_errors()}\n")
     if _fab_capture_pools == 1 and not reference_checked and not parser_has_errors() and not capture_write_warned:
         val dump_t0 = if fab_cache_boundary_prof_enabled(): _sffi_time_now_unix_micros() else: 0
         # A parser-owned or caller-owned scope already contains the temporary
-        # encoder objects. Its owner controls promotion and reclamation. Only
-        # an unscoped caller opens a serialization-only scope here.
-        _fab_captured_blob = if transient_scope or borrowed_scope:
-            flat_pools_dump_all()
-        else:
-            flat_pools_dump_for_cache()
+        # encoder objects. Its owner controls promotion and reclamation.
+        # Both dump paths route through dump_all (lane 46 first blamed
+        # dump_for_cache's serialization scope, but the lane-47 trace shows
+        # the unscoped take reads bytes=-1 even via dump_all: the blob handle
+        # dies between build and take in the unscoped call context, while the
+        # borrowed gate produces a valid 4582-byte blob). Death localization
+        # is via the blob-built vs take capture-trace lines.
+        flat_pool_capture_sanitize_arm_v1()
+        flat_pool_type_trace_arm_v1()
+        _fab_captured_blob = flat_pools_dump_all()
+        _fab_captured_trace = flat_pool_type_trace_take_v1()
+        _fab_captured_refs = flat_pool_import_refs_v1()
+        if (_sffi_env_get("SIMPLE_CAPTURE_TRACE") ?? "") == "1":
+            eprint("[capture-trace] blob-built len={_fab_captured_blob.len()} poisoned={flat_pool_capture_poisoned_v1()}\n")
+        flat_pool_capture_sanitize_disarm_v1()
+        if flat_pool_capture_poisoned_v1():
+            # A dangling text handle must refuse the store (cache miss on the
+            # next build), never poison the compiler or the cache bytes.
+            _fab_captured_blob = ""
         if fab_cache_boundary_prof_enabled():
             val dump_t1 = _sffi_time_now_unix_micros()
             print("PARSECACHE\tdump_ms={(dump_t1 - dump_t0) / 1000}\tbytes={_fab_captured_blob.len()}\tpath={path}")
@@ -1613,6 +1962,23 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
             rt_transient_heap_promote(built_module)
         if not module_promoted:
             panic("transient parser graph promotion failed for {path}")
+        # The captured cache blob was joined inside this scope too; without
+        # promotion the scope-end reclaim frees it and the caller's take()
+        # reads a dead handle (take=-1 heisenbug, lane-44..50).
+        if _fab_captured_blob != "":
+            val blob_promoted = unsafe(capabilities: [ffi]):
+                rt_transient_heap_promote(_fab_captured_blob)
+            if not blob_promoted:
+                _fab_captured_blob = ""
+        # Pool-referenced-only strings escape a module-rooted promote plan and
+        # the scope-end reclaim frees them (lane-54 stream=true refusals at
+        # site=text.value item=0). Promote the pool families with the module
+        # while the scope is paused. Failures are logged, not fatal: the
+        # sanitize refusal remains the graceful fallback.
+        if not parser_promote_transient_owners():
+            eprint("[parse-scope] parser/decl/extend/pending pool promote incomplete for {path}\n")
+        if not type_pools_promote_hir_owners():
+            eprint("[parse-scope] type pool promote incomplete for {path}\n")
         # ORDER IS LOAD-BEARING: end the scope before replacing lexer or AST
         # owners. Both cleanup functions allocate fresh process-lifetime arrays;
         # inside the scope those replacements are stamped with its id and then
@@ -1628,6 +1994,9 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
             panic("failed to restore SIMPLE_BOOTSTRAP_LEX_SOURCE for {path}")
         if not _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path):
             panic("failed to restore SIMPLE_BOOTSTRAP_LEX_PATH for {path}")
+    # After the transient scope has ended: the snapshot arrays predate the
+    # scope, so rebinding the globals to them leaves nothing scope-stamped.
+    unit_scope_restore_keeping_constraints(saved_unit_scope)
     frontend_compiler_trace_scope_exit(saved_compiler_trace_scope)
     FlatReferenceCheckedParseV1(module: built_module, had_errors: reference_had_errors,
         errors: reference_errors)
@@ -1647,7 +2016,7 @@ pub fn parse_and_build_module_scoped_for_provider(
         return Err("parser_provider_admission_invalid: " + admission.provider_id)
     Ok(parse_and_build_module_scoped(source, path, streaming_scope))
 
-fn parse_and_build_module(source: text, path: text) -> ParserModule:
+pub fn parse_and_build_module(source: text, path: text) -> ParserModule:
     parse_and_build_module_scoped(source, path, false)
 
 
@@ -1700,4 +2069,135 @@ fn build_parser_extend_enums() -> [ParserExtendEnum]:
             span: span
         ))
         si = si + 1
+    out
+
+# ===== FabCaptureState snapshot (ParseContext stage 1) =====
+# See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
+# take moves this file's parse state out and installs fresh initial
+# owners; install makes a taken snapshot active again.
+pub struct FabCaptureState:
+    _fab_capture_pools: i64
+    _fab_captured_blob: text
+    _fab_captured_trace: [i64]
+    _fab_captured_refs: [SpabImportRefV1]
+    _fab_captured_paths: [text]
+    _fab_capture_arm_tag: text
+
+pub fn fab_capture_state_take() -> FabCaptureState:
+    val s = FabCaptureState(
+        _fab_capture_pools: _fab_capture_pools,
+        _fab_captured_blob: _fab_captured_blob,
+        _fab_captured_trace: _fab_captured_trace,
+        _fab_captured_refs: _fab_captured_refs,
+        _fab_captured_paths: _fab_captured_paths,
+        _fab_capture_arm_tag: _fab_capture_arm_tag
+    )
+    _fab_capture_pools = 0
+    _fab_captured_blob = ""
+    _fab_captured_trace = []
+    _fab_captured_refs = []
+    _fab_captured_paths = []
+    _fab_capture_arm_tag = ""
+    s
+
+pub fn fab_capture_state_install(s: FabCaptureState):
+    _fab_capture_pools = s._fab_capture_pools
+    _fab_captured_blob = s._fab_captured_blob
+    _fab_captured_trace = s._fab_captured_trace
+    _fab_captured_refs = s._fab_captured_refs
+    _fab_captured_paths = s._fab_captured_paths
+    _fab_capture_arm_tag = s._fab_capture_arm_tag
+
+export FabCaptureState, fab_capture_state_take, fab_capture_state_install
+
+
+fn bridge_embed_unquote(raw: text) -> text:
+    val trimmed = raw.trim()
+    val n = trimmed.byte_len()
+    if n >= 2 and trimmed.starts_with("\"") and trimmed.ends_with("\""):
+        return trimmed.substring(1, n - 1)
+    trimmed
+
+fn bridge_embed_arg_expr(raw_value: text, span: Span) -> Expr:
+    val unquoted = bridge_embed_unquote(raw_value)
+    val n = unquoted.byte_len()
+    var parsed_int: i64 = 0
+    var all_digits = n > 0
+    var i: i64 = 0
+    while i < n:
+        val b = unquoted.byte_at(i)
+        if b < 48 or b > 57:
+            all_digits = false
+            break
+        parsed_int = parsed_int * 10 + (b - 48)
+        i = i + 1
+    if all_digits:
+        return Expr(kind: ExprKind.IntLit(parsed_int), span: span)
+    Expr(kind: ExprKind.StringLit(unquoted, None), span: span)
+
+fn bridge_embed_attribute(spelling: text, span: Span) -> Attribute?:
+    if spelling == "embed":
+        return Some(Attribute(name: "embed", args: [], span: span))
+    if not (spelling.starts_with("embed(") and spelling.ends_with(")")):
+        return None
+    val inside = spelling.substring(6, spelling.byte_len() - 1).trim()
+    if inside == "":
+        return Some(Attribute(name: "embed", args: [], span: span))
+    var args: [Expr] = []
+    for raw_piece in inside.split(","):
+        val piece = raw_piece.trim()
+        if piece == "":
+            continue
+        val eq_idx = piece.index_of("=")
+        val colon_idx = piece.index_of(":")
+        val sep_idx = if eq_idx >= 0: eq_idx else: colon_idx
+        if sep_idx > 0:
+            val key = piece.substring(0, sep_idx).trim()
+            val rhs = bridge_embed_arg_expr(piece.substring(sep_idx + 1, piece.byte_len()), span)
+            args.push(Expr(kind: ExprKind.Assign(Expr(kind: ExprKind.Ident(key), span: span), None, rhs), span: span))
+        else:
+            args.push(bridge_embed_arg_expr(piece, span))
+    Some(Attribute(name: "embed", args: args, span: span))
+
+# Forward ONLY `@embed` / `@embed(...)` onto structs so 100% of existing
+# non-`@embed` struct ABIs remain unchanged.
+fn bridge_struct_embed_attributes(spellings: [text], span: Span) -> [Attribute]:
+    if spellings.len() == 0:
+        return []
+    var out: [Attribute] = []
+    for spelling in spellings:
+        if val embed_attr = bridge_embed_attribute(spelling, span):
+            out.push(embed_attr)
+    out
+
+# Forwarded onto a class: `@node_tree("tree")` (data plan W2b),
+# `@support_async_immutable` / `@support_async_immutable("f", ...)`
+# (immutable-views sub-plan P1), and `@embed` / `@embed(...)`. Every other class
+# decorator stays dropped on this path as before, so no existing layout/export
+# behavior changes.
+fn bridge_node_tree_attributes(spellings: [text], span: Span) -> [Attribute]:
+    var out: [Attribute] = []
+    for spelling in spellings:
+        if val embed_attr = bridge_embed_attribute(spelling, span):
+            out.push(embed_attr)
+        elif spelling.starts_with("node_tree(") and spelling.ends_with(")"):
+            var arg = spelling.substring(10, spelling.byte_len() - 1).trim()
+            if arg.len() >= 2 and arg.starts_with("\"") and arg.ends_with("\""):
+                arg = arg.substring(1, arg.byte_len() - 1)
+            out.push(Attribute(name: "node_tree",
+                args: [Expr(kind: ExprKind.StringLit(arg, None), span: span)], span: span))
+        elif spelling == "support_async_immutable":
+            # Sub-plan P1 (immutable_views_async_init_revisions_2026-11-13.md section 3.1):
+            # bare form authorizes every field for async initialization.
+            out.push(Attribute(name: "support_async_immutable", args: [], span: span))
+        elif spelling.starts_with("support_async_immutable(") and spelling.ends_with(")"):
+            # `support_async_immutable("f", "g")`: only the named fields.
+            var field_args: [Expr] = []
+            for raw_name in spelling.substring(24, spelling.byte_len() - 1).split(","):
+                var name = raw_name.trim()
+                if name.len() >= 2 and name.starts_with("\"") and name.ends_with("\""):
+                    name = name.substring(1, name.byte_len() - 1)
+                if name.len() > 0:
+                    field_args.push(Expr(kind: ExprKind.StringLit(name, None), span: span))
+            out.push(Attribute(name: "support_async_immutable", args: field_args, span: span))
     out

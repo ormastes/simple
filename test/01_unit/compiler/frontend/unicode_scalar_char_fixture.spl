@@ -3,29 +3,27 @@ use compiler.hir.hir_definitions.{HirExprKind}
 
 fn unicode_scalar_char_case_v1(codepoint: i64, expected_bytes: [i64], expected_text: text) -> text:
     val converted = unicode_scalar_to_char(codepoint)
-    # @workaround bug=BUG-NATIVE-RESULT-CHAR-UNWRAP-20261017 recover=29ef54b368901bc27116320b57e13576c85db36c reason=result-char-unwrap-unsupported-use-real-pattern
-    match converted:
-        case Ok(raw_character):
-            val character: char = raw_character
-            if (character as i64) != codepoint: return "native char conversion changed {codepoint}"
-            val kind: HirExprKind = HirExprKind.CharLit(character)
-            match kind:
-                case HirExprKind.CharLit(raw_payload):
-                    val payload: char = raw_payload
-                    if (payload as i64) != codepoint: return "real CharLit payload changed {codepoint}"
-                    val rendered: text = "{payload}"
-                    val bytes: [u8] = rendered.bytes()
-                    if bytes.len() != expected_bytes.len(): return "rendered byte length {codepoint}"
-                    var index: i64 = 0
-                    while index < bytes.len():
-                        # @workaround bug=BUG-NATIVE-U8-TO-I64-TEXT-DISPATCH-20261017 recover=ca73ab76f75ec720323869606777ee31bbfc0c7f reason=numeric-u8-to-i64-resolves-text-parser
-                        if (bytes[index] as i64) != expected_bytes[index]:
-                            return "rendered byte contents {codepoint}"
-                        index = index + 1
-                    if expected_text != "" and rendered != expected_text:
-                        return "rendered text contents {codepoint}"
-                case _: return "real CharLit variant lost {codepoint}"
-        case Err(reason): return "valid scalar conversion rejected {codepoint}: {reason}"
+    if converted.is_err():
+        val reason = converted.unwrap_err()
+        return "valid scalar conversion rejected {codepoint}: {reason}"
+    val character: char = converted.unwrap()
+    if (character as i64) != codepoint: return "native char conversion changed {codepoint}"
+    val kind: HirExprKind = HirExprKind.CharLit(character)
+    match kind:
+        case HirExprKind.CharLit(raw_payload):
+            val payload: char = raw_payload
+            if (payload as i64) != codepoint: return "real CharLit payload changed {codepoint}"
+            val rendered: text = "{payload}"
+            val bytes: [u8] = rendered.bytes()
+            if bytes.len() != expected_bytes.len(): return "rendered byte length {codepoint}"
+            var index: i64 = 0
+            while index < bytes.len():
+                if bytes[index].to_i64() != expected_bytes[index]:
+                    return "rendered byte contents {codepoint}"
+                index = index + 1
+            if expected_text != "" and rendered != expected_text:
+                return "rendered text contents {codepoint}"
+        case _: return "real CharLit variant lost {codepoint}"
     ""
 
 fn unicode_scalar_char_controls_v1() -> text:

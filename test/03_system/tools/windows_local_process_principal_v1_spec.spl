@@ -1,0 +1,119 @@
+# AUTHORED_NOT_RUN. Actual native Windows process/token fixtures required.
+# Unsupported hosts/runtime refuse; there is no skip or fabricated owner.
+# @req REQ-LOCAL-PROCESS-PRINCIPAL-001
+# @req REQ-LOCAL-PROCESS-PRINCIPAL-002
+# @req REQ-LOCAL-PROCESS-PRINCIPAL-003
+use std.spec.{describe, it, expect, step}
+use std.concurrent.thread.thread_spawn
+use std.nogc_sync_mut.io.windows_local_process_principal_v1.*
+
+var principal_fixture_owners_v1: [WindowsLocalProcessPrincipalV1] = []
+
+fn principal_fixture_open_v1() -> Result<WindowsLocalProcessPrincipalV1, text>:
+    match windows_local_process_principal_open_v1():
+        case WindowsLocalProcessPrincipalOpenV1.Ready(owner):
+            principal_fixture_owners_v1.push(owner)
+            Ok(owner)
+        case WindowsLocalProcessPrincipalOpenV1.CleanupRequired(owner, reason):
+            principal_fixture_owners_v1.push(owner)
+            val closed = owner.close_v1()
+            Err("actual principal fixture cleanup=" + closed + ":" + reason)
+        case WindowsLocalProcessPrincipalOpenV1.Rejected(reason): Err("actual native Windows principal fixture required: " + reason)
+
+@when(os="windows"):
+# Fixture-only context changes. Production never impersonates or reverts.
+@unsafe(reason: "isolated native fixture installs a real same-user thread impersonation token", capabilities: [ffi])
+extern fn ImpersonateSelf(level: i32) -> i32
+@unsafe(reason: "fixture restores only the impersonation context it created after successful zero-token owner admission", capabilities: [ffi])
+extern fn RevertToSelf() -> i32
+
+fn principal_fixture_impersonate_v1() -> bool:
+    unsafe(capabilities: [ffi]): ImpersonateSelf(2) != 0
+
+fn principal_fixture_restore_v1() -> bool:
+    unsafe(capabilities: [ffi]): RevertToSelf() != 0
+@else:
+fn principal_fixture_impersonate_v1() -> bool: false
+fn principal_fixture_restore_v1() -> bool: false
+@end
+
+describe "Actual Windows current-process principal owner V1":
+    it "reobserves exact process token identity and rejects copied ownership after close":
+        step("Open a zero-caller-identity native principal owner")
+        val owner = principal_fixture_open_v1().unwrap()
+        val copied = owner
+        val first = owner.current_v1()
+        val second = owner.current_v1()
+        step("Close before assertions and reject copied stale handles")
+        val closed = owner.close_v1()
+        val stale = copied.current_v1()
+        val repeated = copied.close_v1()
+        expect(closed).to_equal("released")
+        val one = first.unwrap()
+        val two = second.unwrap()
+        expect(one.platform).to_equal("windows")
+        expect(one.principal_id).to_start_with("windows:S-1-")
+        expect(one.authority_namespace_id).to_start_with("windows-boot:")
+        expect(one.process_id).to_be_greater_than(0)
+        expect(one.thread_id).to_be_greater_than(0)
+        expect(one.identity_digest).to_equal(two.identity_digest)
+        expect(one.principal_id).to_equal(two.principal_id)
+        expect(stale.is_err()).to_equal(true)
+        expect(repeated).to_equal("stale")
+
+    it "separates stable policy principal spelling from per-owner live identity":
+        step("Acquire two actual native owners without caller-supplied SID or PID")
+        val first = principal_fixture_open_v1().unwrap()
+        val second_result = principal_fixture_open_v1()
+        if second_result.is_err():
+            val closed = first.close_v1()
+            expect(closed).to_equal("released")
+            expect(second_result.is_ok()).to_equal(true)
+            return
+        val second = second_result.unwrap()
+        val first_snapshot = first.current_v1()
+        val second_snapshot = second.current_v1()
+        val first_closed = first.close_v1()
+        val second_closed = second.close_v1()
+        expect(first_closed).to_equal("released")
+        expect(second_closed).to_equal("released")
+        val one = first_snapshot.unwrap()
+        val two = second_snapshot.unwrap()
+        expect(one.principal_id).to_equal(two.principal_id)
+        expect(one.process_id).to_equal(two.process_id)
+        expect(one.authority_namespace_id).to_equal(two.authority_namespace_id)
+        expect(one.generation == two.generation).to_equal(false)
+        expect(one.identity_digest == two.identity_digest).to_equal(false)
+
+    it "refuses a real same-user impersonation token and keeps the quarantined owner":
+        step("Create an actual process-token owner before installing a thread token")
+        val owner = principal_fixture_open_v1().unwrap()
+        val installed = principal_fixture_impersonate_v1()
+        if not installed:
+            val closed = owner.close_v1()
+            expect(closed).to_equal("released")
+            expect(installed).to_equal(true)
+            return
+        expect(installed).to_equal(true)
+        step("Observe the real thread token; production refuses rather than reverting it")
+        val refused = owner.current_v1()
+        val restored = principal_fixture_restore_v1()
+        val after_restore = owner.current_v1()
+        val closed = owner.close_v1()
+        expect(restored).to_equal(true)
+        expect(refused.unwrap_err()).to_equal("windows-local-process-principal-impersonation-refused")
+        expect(after_restore.is_err()).to_equal(true)
+        expect(closed).to_equal("released")
+
+    it "retains cleanup on an actual wrong-thread attempt and releases on the owner thread":
+        step("Keep the native owner on its original thread while lending a checked handle")
+        val owner = principal_fixture_open_v1().unwrap()
+        val other_thread = thread_spawn(\:
+            if owner.close_v1() == "retained": 1 else: 0
+        )
+        val wrong_thread_retained = other_thread.join()
+        val still_current = owner.current_v1()
+        val closed = owner.close_v1()
+        expect(wrong_thread_retained).to_equal(1)
+        expect(still_current.is_ok()).to_equal(true)
+        expect(closed).to_equal("released")

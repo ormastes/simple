@@ -28,6 +28,12 @@ use crate::error::{codes, CompileError, ErrorContext};
 
 pub type SharedText = Arc<String>;
 
+/// Backing map of `Value::Dict` / `Value::FrozenDict`. Insertion-ordered:
+/// `Dict` iterates in insertion order on every engine
+/// (`doc/07_guide/language/dict_iteration_order.md`). Remove with
+/// `shift_remove` -- `swap_remove` (and the deprecated `remove`) reorder.
+pub type DictMap = indexmap::IndexMap<String, Value>;
+
 /// Frequently-used enum type and variant names as constants.
 /// Eliminates repeated string allocation at hot paths and establishes
 /// a single source of truth for these names.
@@ -390,13 +396,13 @@ impl<V> NameMemo<V> {
 /// closure. Immutable once built.
 pub struct ModuleTable {
     id: u32,
-    own: Arc<HashMap<String, Value>>,
+    own: Arc<DictMap>,
     layers: Vec<Arc<ModuleTable>>,
     /// Ids of every table reachable through `layers`, plus `id` itself.
     reach: SparseIdSet,
     /// `own` with `filter_functions_from_value` applied per entry, built on
     /// first use (the captured-env-stripped view a module env holds).
-    filtered_own: OnceLock<Arc<HashMap<String, Value>>>,
+    filtered_own: OnceLock<Arc<DictMap>>,
 }
 
 impl fmt::Debug for ModuleTable {
@@ -462,7 +468,7 @@ impl SparseIdSet {
 }
 
 impl ModuleTable {
-    pub fn new(own: Arc<HashMap<String, Value>>, layers: Vec<Arc<ModuleTable>>) -> Self {
+    pub fn new(own: Arc<DictMap>, layers: Vec<Arc<ModuleTable>>) -> Self {
         let id = NEXT_TABLE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut reach = SparseIdSet::single(id);
         for layer in &layers {
@@ -484,11 +490,11 @@ impl ModuleTable {
     }
 
     /// A table with no layers: exactly the given dict.
-    pub fn leaf(own: Arc<HashMap<String, Value>>) -> Self {
+    pub fn leaf(own: Arc<DictMap>) -> Self {
         Self::new(own, Vec::new())
     }
 
-    pub fn own(&self) -> &Arc<HashMap<String, Value>> {
+    pub fn own(&self) -> &Arc<DictMap> {
         &self.own
     }
 
@@ -497,7 +503,7 @@ impl ModuleTable {
     }
 
     /// `own` with every entry passed through `filter`, built once.
-    pub fn filtered_own(&self, filter: impl Fn(&Value) -> Value) -> &Arc<HashMap<String, Value>> {
+    pub fn filtered_own(&self, filter: impl Fn(&Value) -> Value) -> &Arc<DictMap> {
         self.filtered_own.get_or_init(|| {
             Arc::new(
                 self.own
@@ -651,7 +657,7 @@ impl TableView {
 /// A module export table under construction (see [`ModuleTable`]).
 #[derive(Debug, Default, Clone)]
 pub struct ExportTable {
-    own: HashMap<String, Value>,
+    own: DictMap,
     layers: Vec<Arc<ModuleTable>>,
 }
 
@@ -687,7 +693,7 @@ impl ExportTable {
     }
 
     /// Own entries only (the partial-export snapshot taken before imports).
-    pub fn own_snapshot(&self) -> HashMap<String, Value> {
+    pub fn own_snapshot(&self) -> DictMap {
         self.own.clone()
     }
 
@@ -863,21 +869,22 @@ impl ModuleBindings {
             None => {
                 // Resolve outside the memo: a layer's source is a different
                 // (earlier-finished) module's table with its own memo.
-                let resolved = self.layers.iter().rev().find_map(|layer| layer.resolve(local_name));
-                match self
-                    .memo
-                    .with(|memo| addr(memo.entry(local_name.to_owned()).or_insert(resolved.map(Box::new))))
-                {
+                // Resolved exactly ONCE. A non-owner thread used to resolve a
+                // second time after the memo refused it; every layer's source
+                // is itself a layered table, so that doubled the walk at each
+                // import level (2^depth) and a worker thread spent seconds per
+                // global lookup or overflowed its stack.
+                // doc/08_tracking/bug/seed_thread_shared_class_object_crash_2026-11-23.md
+                let mut resolved = Some(self.layers.iter().rev().find_map(|layer| layer.resolve(local_name)));
+                match self.memo.with(|memo| {
+                    addr(
+                        memo.entry(local_name.to_owned())
+                            .or_insert(resolved.take().flatten().map(Box::new)),
+                    )
+                }) {
                     Some(ptr) => ptr,
                     // Not the owning thread: hand the answer out by value.
-                    None => {
-                        return self
-                            .layers
-                            .iter()
-                            .rev()
-                            .find_map(|layer| layer.resolve(local_name))
-                            .map(Cow::Owned)
-                    }
+                    None => return resolved.flatten().map(Cow::Owned),
                 }
             }
         };
@@ -1297,6 +1304,53 @@ pub struct CowEnv {
     /// / `enter_block_local` so a genuine user declaration that shadows a
     /// field name is not misreported.
     field_prebinds: FrameSet<String>,
+    /// Declared sub-i64 SIGNED width (8/16/32) of frame-local integer
+    /// bindings: `val y: i32`, `val w = x as i32`, `fn f(x: i32)`.
+    ///
+    /// `Value::Int` carries no width (unlike `Value::UInt { width }`), and a
+    /// width-carrying signed variant would have to be honoured at every one of
+    /// the ~4,300 `Value::Int` match sites while `src/lib` alone declares
+    /// ~16,700 `i8/i16/i32` bindings — so the width is kept BESIDE the value,
+    /// the way the pure-Simple resolver keys `impl Trait for i32` on the
+    /// receiver's static `Int(bits, signed)` type
+    /// (`35.semantics/resolve_strategies.spl`), not on a runtime tag.
+    /// Consulted only by the trait-impl fallback of method dispatch for an
+    /// identifier receiver; arithmetic, equality and printing never read it.
+    /// Boxed and `None` until the first narrow binding in the frame, so the
+    /// common frame pays one pointer (an inline ahash `FrameMap` is 64 bytes,
+    /// measured +1.5 MB max RSS across the retained captured envs of a
+    /// stdlib-loading run). i64 is never recorded.
+    ///
+    /// INVARIANT: an entry belongs to exactly one binding of the name. Every
+    /// binder that introduces the name — `mark_local` (frame locals, function
+    /// and lambda params) and `enter_block_local` (block `val`s, `for` vars,
+    /// `if val`/`while val`, match arms) — clears it, and `exit_block_local`
+    /// restores the width the enclosing scope had, so a block-scoped
+    /// `val q: i32` never leaks onto the outer `q` and a `for y in ...` never
+    /// inherits the outer `y: i32`. Narrow Lets and params record AFTER that
+    /// clear.
+    /// Bug: doc/08_tracking/bug/primitive_receiver_trait_impl_dispatch_2026-08-07.md
+    declared_int_widths: Option<Box<DeclaredWidths>>,
+    /// Set only on the captured env of a lambda / block closure written in a
+    /// test file (`closure_created_in_test`); read when the closure body runs
+    /// so the private-fn call rule treats the test, not the invoking frame,
+    /// as the caller. Bug: test_private_access_closure_attribution_2026-11-14.
+    closure_in_test: bool,
+    /// Module that wrote the closure (`private_call_caller()` at capture);
+    /// installed as the caller while its body runs, so the call rule judges
+    /// the writer, not whoever invokes it. `None` = unstamped (strict).
+    /// Bug: private_call_gate_skips_import_bound_and_entry_calls_2026-11-14.
+    closure_caller: Option<Arc<str>>,
+}
+
+/// Payload of [`CowEnv::declared_int_widths`]: the live `name -> width` map
+/// plus the LIFO of per-block markers (`name`, width the enclosing scope had)
+/// pushed by `shadow_declared_int_width` on block entry and popped by the
+/// matching `unshadow_declared_int_width` on block exit.
+#[derive(Clone, Debug, Default)]
+pub struct DeclaredWidths {
+    map: FrameMap<String, u8>,
+    shadows: Vec<(String, Option<u8>)>,
 }
 
 impl CowEnv {
@@ -1354,6 +1408,9 @@ impl CowEnv {
             dirty_names: FrameSet::default(),
             uninit_names: FrameSet::default(),
             field_prebinds: FrameSet::default(),
+            declared_int_widths: None,
+            closure_in_test: false,
+            closure_caller: None,
         }
     }
 
@@ -1447,6 +1504,95 @@ impl CowEnv {
         self.uninit_names.contains(name)
     }
 
+    /// Sub-i64 signed width (8/16/32) of a declared integer type name, else
+    /// `None`. i64 is deliberately `None`: it is the untagged default and must
+    /// keep the existing `["i64", "i32", "int"]` dispatch order.
+    pub fn narrow_signed_width_of(ty: Option<&simple_parser::ast::Type>) -> Option<u8> {
+        match ty {
+            Some(simple_parser::ast::Type::Simple(name)) => match name.as_str() {
+                "i8" => Some(8),
+                "i16" => Some(16),
+                "i32" => Some(32),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Record (or, with `None`, forget) the declared narrow signed width of
+    /// a frame-local binding. A re-declaration without a narrow type clears
+    /// the entry so `val y: i32 = 1; val y = 2; y.m()` resolves as i64 again.
+    /// Allocates the table only on the first narrow binding of the frame.
+    pub fn set_declared_int_width(&mut self, name: &str, width: Option<u8>) {
+        match width {
+            Some(w) => {
+                let dw = self.declared_int_widths.get_or_insert_with(Default::default);
+                // A loop body re-executes its `val y: i32 = ...` every
+                // iteration: refresh in place rather than allocating a key.
+                match dw.map.get_mut(name) {
+                    Some(slot) => *slot = w,
+                    None => {
+                        dw.map.insert(name.to_string(), w);
+                    }
+                }
+            }
+            None => self.clear_declared_int_width(name),
+        }
+    }
+
+    /// Forget `name`'s declared width: every binder that introduces `name`
+    /// calls this (see the field's INVARIANT) before a narrow Let/param may
+    /// record a new one.
+    fn clear_declared_int_width(&mut self, name: &str) {
+        if let Some(dw) = self.declared_int_widths.as_mut() {
+            if !dw.map.is_empty() {
+                dw.map.remove(name);
+            }
+        }
+    }
+
+    /// The declared narrow signed width of `name` in this frame, if any.
+    pub fn declared_int_width(&self, name: &str) -> Option<u8> {
+        self.declared_int_widths.as_ref()?.map.get(name).copied()
+    }
+
+    /// Block entry for `name`: stash the enclosing scope's width (if any) so
+    /// `exit_block_local` can put it back, and clear the live entry.
+    pub(crate) fn shadow_declared_int_width(&mut self, name: &str) {
+        let Some(dw) = self.declared_int_widths.as_mut() else {
+            return;
+        };
+        let prior = dw.map.remove(name);
+        // One marker per enter, popped by the matching exit, so a nested
+        // block never pops an OUTER block's stash (block depth for a name is
+        // a single counter: the function body is depth 1, an `if` inside it
+        // depth 2, and the inner exit must restore the depth-1 state, not
+        // wait for depth 0). A marker is needed only while there is
+        // something to protect: a live width, or any stash at all (a `None`
+        // marker then keeps a deeper exit from popping a shallower entry).
+        // With nothing stashed and no width, exit's unconditional remove is
+        // already the right restore, so the common narrow-free block pays no
+        // allocation.
+        if prior.is_some() || !dw.shadows.is_empty() {
+            dw.shadows.push((name.to_string(), prior));
+        }
+    }
+
+    /// Block exit for `name`: drop the block's own entry and restore what the
+    /// matching `shadow_declared_int_width` stashed (if anything).
+    pub(crate) fn unshadow_declared_int_width(&mut self, name: &str) {
+        let Some(dw) = self.declared_int_widths.as_mut() else {
+            return;
+        };
+        dw.map.remove(name);
+        if let Some(pos) = dw.shadows.iter().rposition(|(n, _)| n == name) {
+            let (n, prior) = dw.shadows.remove(pos);
+            if let Some(w) = prior {
+                dw.map.insert(n, w);
+            }
+        }
+    }
+
     /// Record `name` as a method-entry field pre-bind. Call AFTER
     /// `mark_local`/`insert`, which clear the flag.
     pub fn mark_field_prebind(&mut self, name: impl Into<String>) {
@@ -1470,6 +1616,9 @@ impl CowEnv {
         }
         // Now local: it can never be published, so drop it from the superset.
         self.unnote_overlay_key(&name);
+        // A fresh frame-level binding (param, lambda param, frame local)
+        // starts without a declared width; a narrow one is recorded after.
+        self.clear_declared_int_width(&name);
         self.local_bindings.insert(name);
     }
 
@@ -1479,6 +1628,9 @@ impl CowEnv {
             self.field_prebinds.remove(&name);
         }
         self.unnote_overlay_key(&name);
+        // Block binder (`val` in a block, `for` var, `if val`, match arm):
+        // stash the enclosing width and start this binding without one.
+        self.shadow_declared_int_width(&name);
         *self.block_local_bindings.entry(name).or_default() += 1;
     }
 
@@ -1487,7 +1639,10 @@ impl CowEnv {
             return;
         };
         *depth -= 1;
-        if *depth == 0 {
+        // Every exit pairs with one enter: the block's own width goes with
+        // it and the enclosing scope's width returns, at ANY depth.
+        self.unshadow_declared_int_width(name);
+        if self.block_local_bindings.get(name).copied() == Some(0) {
             self.block_local_bindings.remove(name);
             // The name is publishable again unless the frame declares it.
             if self.overlay.contains_key(name) && !self.local_bindings.contains(name) {
@@ -1513,6 +1668,24 @@ impl CowEnv {
 
     pub fn scope(&self) -> Option<&GlobalScope> {
         self.scope.as_ref()
+    }
+
+    /// See [`CowEnv::closure_in_test`] (the field).
+    pub fn closure_in_test(&self) -> bool {
+        self.closure_in_test
+    }
+
+    pub fn set_closure_in_test(&mut self, in_test: bool) {
+        self.closure_in_test = in_test;
+    }
+
+    /// See [`CowEnv::closure_caller`] (the field).
+    pub fn closure_caller(&self) -> Option<&Arc<str>> {
+        self.closure_caller.as_ref()
+    }
+
+    pub fn set_closure_caller(&mut self, caller: Option<Arc<str>>) {
+        self.closure_caller = caller;
     }
 
     /// Re-point the scope at the current live stores. O(1): the frame keeps
@@ -1553,6 +1726,19 @@ impl CowEnv {
         // global they are redundant and only pin the collection.
         self.forwarded_globals
             .retain(|(owner, name), _| !crate::interpreter::owned_global_present(owner, name));
+    }
+
+    /// After a publish, a bound global still in the overlay (no scope binding to
+    /// read it through, so `drop_published_globals` kept it) equals the store but
+    /// is no longer this frame's own write. Mark it refreshed: reads go to the
+    /// store and no later publish can replay it over a newer value.
+    pub fn mark_published_globals_refreshed(&mut self) {
+        let names: Vec<String> = self
+            .nonlocal_overlay_entries()
+            .filter(|(name, _)| self.global_binding(name).is_some())
+            .map(|(name, _)| name.clone())
+            .collect();
+        self.refreshed_globals.extend(names);
     }
 
     pub fn refresh_scope(&mut self, globals: OwnedGlobals) {
@@ -2053,6 +2239,9 @@ impl CowEnv {
             dirty_names: FrameSet::default(),
             uninit_names: FrameSet::default(),
             field_prebinds: FrameSet::default(),
+            declared_int_widths: None,
+            closure_in_test: false,
+            closure_caller: None,
         }
     }
 
@@ -2072,6 +2261,9 @@ impl CowEnv {
             dirty_names: FrameSet::default(),
             uninit_names: FrameSet::default(),
             field_prebinds: FrameSet::default(),
+            declared_int_widths: None,
+            closure_in_test: false,
+            closure_caller: None,
         }
     }
 
@@ -2184,6 +2376,9 @@ impl Clone for CowEnv {
             dirty_names: self.dirty_names.clone(),
             uninit_names: self.uninit_names.clone(),
             field_prebinds: self.field_prebinds.clone(),
+            declared_int_widths: self.declared_int_widths.clone(),
+            closure_in_test: self.closure_in_test,
+            closure_caller: self.closure_caller.clone(),
         }
     }
 }
@@ -2507,6 +2702,23 @@ impl ClassInstance {
 
     pub fn fields_snapshot(&self) -> HashMap<String, Value> {
         self.fields.read().unwrap().clone()
+    }
+
+    /// Read the field table under the read lock without cloning it.
+    pub fn with_fields<R>(&self, f: impl FnOnce(&HashMap<String, Value>) -> R) -> R {
+        f(&self.fields.read().unwrap())
+    }
+
+    /// Swap a field's value, returning the old one; `None` (nothing swapped)
+    /// when the field does not exist. Lets a nested place write move the
+    /// field out, mutate it with NO lock held, and put it back
+    /// (`interpreter/place.rs::write_through`).
+    pub fn replace_field(&self, name: &str, value: Value) -> Option<Value> {
+        self.fields
+            .write()
+            .unwrap()
+            .get_mut(name)
+            .map(|slot| std::mem::replace(slot, value))
     }
 }
 
@@ -2923,10 +3135,10 @@ pub enum Value {
         labels: Vec<String>,
         values: Vec<Value>,
     },
-    /// Mutable dict (default for dict literals)
-    Dict(Arc<HashMap<String, Value>>),
+    /// Mutable dict (default for dict literals). Insertion-ordered.
+    Dict(Arc<DictMap>),
     /// Immutable frozen dict (created via freeze(), copy-on-freeze semantics)
-    FrozenDict(Arc<HashMap<String, Value>>),
+    FrozenDict(Arc<DictMap>),
     Lambda {
         params: Vec<String>,
         body: Box<Expr>,
@@ -3065,7 +3277,10 @@ impl Value {
     /// primary resolution paths plus an audit of the remaining `Value::Object`
     /// pattern matches in the interpreter. See
     /// `doc/08_tracking/bug/method_field_not_found_on_object_2026-08-18.md`.
-    pub fn aggregate(class: String, fields: HashMap<String, Value>, _is_value_type: bool) -> Self {
+    pub fn aggregate(class: String, fields: HashMap<String, Value>, is_value_type: bool) -> Self {
+        if !is_value_type && class_instance_storage_enabled() {
+            return Value::ClassInstance(Arc::new(ClassInstance::new(class, fields)));
+        }
         Value::Object {
             class,
             fields: Arc::new(fields),
@@ -3174,13 +3389,13 @@ impl Value {
     }
 
     /// Create a new mutable dict value (default for dict literals)
-    pub fn dict(map: HashMap<String, Value>) -> Self {
-        Value::Dict(Arc::new(map))
+    pub fn dict<M: IntoIterator<Item = (String, Value)>>(map: M) -> Self {
+        Value::Dict(Arc::new(map.into_iter().collect()))
     }
 
     /// Create a new frozen (immutable) dict value
-    pub fn frozen_dict(map: HashMap<String, Value>) -> Self {
-        Value::FrozenDict(Arc::new(map))
+    pub fn frozen_dict<M: IntoIterator<Item = (String, Value)>>(map: M) -> Self {
+        Value::FrozenDict(Arc::new(map.into_iter().collect()))
     }
 
     /// True if this value is "nil-like": either the bare `nil` literal
@@ -3278,3 +3493,15 @@ include!("value_pointers.rs");
 
 // Include tests from separate file
 include!("value_tests.rs");
+
+/// Reference-semantics `class` storage switch
+/// (doc/05_design/compiler/interpreter/class_instance_reference_storage_2026-11-03.md).
+/// ON by default since 2026-11-04: `Value::aggregate` yields
+/// `Value::ClassInstance` for `class` aggregates, so a class held in a field,
+/// an array element, or a local alias shares identity with its origin.
+/// `SIMPLE_INTERP_CLASS_REF=0` restores the legacy value-copy `Value::Object`
+/// storage (opt-out kept for bisection only).
+pub fn class_instance_storage_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SIMPLE_INTERP_CLASS_REF").map(|v| v != "0").unwrap_or(true))
+}

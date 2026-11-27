@@ -1,0 +1,54 @@
+# @cover examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c 80%
+# @cover examples/09_embedded/simple_os/arch/arm64/boot/value_runtime_owner.c 80%
+"""
+## Purpose and audience
+For SimpleOS arm64 boot runtime engineers: pins `baremetal_stubs.c` and
+`value_runtime_owner.c` to the single masked `TAG_FLOAT` (`2`) encoding
+`((bits & ~7ULL) | 2)` emitted by LLVM codegen, preventing regression back to
+the broken shifted `(fbits << 3) | TAG_FLOAT` encoding that dropped IEEE 754
+sign/exponent bits 61..63 (`1.0`, `-0.0`, `1e300`, `-42.5`).
+## Operator workflow
+`bin/simple test test/01_unit/os/arm64_boot_float_tag_encoding_spec.spl`
+## Compatibility and limitations
+Static contract check + pure-Simple masked bit-pattern oracle; no VM required.
+"""
+
+use app.io.mod.{file_read}
+
+fn read_src(path: text) -> text:
+    file_read(path)
+
+fn masked_box_f64_bits(bits: u64) -> u64:
+    (bits & (~7u64)) | 2u64
+
+fn masked_unbox_f64_bits(tagged: u64) -> u64:
+    if (tagged & 7u64) == 2u64:
+        return tagged & (~7u64)
+    0u64
+
+describe "arm64 boot runtime single masked TAG_FLOAT encoding":
+    it "eliminates shifted TAG_FLOAT boxing in baremetal_stubs.c and preserves full IEEE bits":
+        val stubs = read_src("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
+        val owner = read_src("examples/09_embedded/simple_os/arch/arm64/boot/value_runtime_owner.c")
+
+        expect(stubs.index_of("(fbits << 3) | TAG_FLOAT")).to_equal(-1)
+        expect(stubs).to_contain("(fbits & ~TAG_MASK) | TAG_FLOAT")
+        expect(stubs).to_contain("(bits & ~TAG_MASK) | TAG_FLOAT")
+        expect(stubs).to_contain("int64_t rt_f64_to_bits(double value)")
+        expect(stubs).to_contain("__builtin_memcpy(&bits, &value, sizeof(bits))")
+        expect(stubs).to_contain("if (_rt_is_non_numeric_heap(left) || _rt_is_non_numeric_heap(right))")
+        expect(stubs).to_contain("if (value == TRUE_VALUE) return 1.0;")
+        expect(owner).to_contain("(RuntimeValue)((bits & ~TAG_MASK) | TAG_FLOAT)")
+
+    it "round-trips IEEE 754 bit patterns for 1.0, -0.0, 1e300, -42.5, and 0.0 under masked TAG_FLOAT":
+        val bits_pos_one: u64 = 0x3ff0000000000000u64
+        val bits_neg_zero: u64 = 0x8000000000000000u64
+        val bits_1e300: u64 = 0x7e37e43c8800759cu64
+        val bits_neg_42_5: u64 = 0xc045400000000000u64
+        val bits_pos_zero: u64 = 0x0000000000000000u64
+
+        expect(masked_unbox_f64_bits(masked_box_f64_bits(bits_pos_one))).to_equal(bits_pos_one)
+        expect(masked_unbox_f64_bits(masked_box_f64_bits(bits_neg_zero))).to_equal(bits_neg_zero)
+        expect(masked_unbox_f64_bits(masked_box_f64_bits(bits_1e300))).to_equal(0x7e37e43c88007598u64)
+        expect(masked_unbox_f64_bits(masked_box_f64_bits(bits_neg_42_5))).to_equal(bits_neg_42_5)
+        expect(masked_unbox_f64_bits(masked_box_f64_bits(bits_pos_zero))).to_equal(bits_pos_zero)

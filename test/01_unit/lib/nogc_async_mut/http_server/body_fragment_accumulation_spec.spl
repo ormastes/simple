@@ -21,7 +21,6 @@ use std.spec.step
 
 use std.spec.*
 use std.http_server.parser.{HttpRequestParser}
-use std.nogc_sync_mut.io.byte_append.{io_append_chunk}
 
 
 fn _feed_one_byte_at_a_time(parser: HttpRequestParser, payload: text) -> i64:
@@ -88,40 +87,18 @@ describe "HTTP body accumulation under fragmentation":
 
 describe "accumulation work grows linearly, not quadratically":
 
-    it "copies O(n) bytes appending n one-byte chunks":
+    it "keeps body copy work linear as fragment count doubles":
         # @req REQ-SSPEC-UNIT
-        step("copies O(n) bytes appending n one-byte chunks")
-        # Pre-fix `buf = buf + chunk` copied the whole retained prefix per
-        # chunk: sum(1..n) = n*(n+1)/2. Amortized append copies each byte once.
-        var buf: [u8] = []
-        var copied: i64 = 0
-        var i: i64 = 0
-        val n: i64 = 64
-        while i < n:
-            copied = copied + io_append_chunk(buf, [7u8])
-            i = i + 1
-        expect(buf.len()).to_equal(n)
-        expect(copied).to_equal(n)
-        # Quadratic behavior would be 2080 for n=64.
-        expect(copied < (n * (n + 1)) / 2).to_equal(true)
-
-    it "keeps append work linear as fragment count doubles":
-        # @req REQ-SSPEC-UNIT
-        step("keeps append work linear as fragment count doubles")
-        var small: [u8] = []
-        var small_work: i64 = 0
-        var a: i64 = 0
-        while a < 32:
-            small_work = small_work + io_append_chunk(small, [1u8])
-            a = a + 1
-        var big: [u8] = []
-        var big_work: i64 = 0
-        var b: i64 = 0
-        while b < 64:
-            big_work = big_work + io_append_chunk(big, [1u8])
-            b = b + 1
+        step("keeps body copy work linear as fragment count doubles")
+        val small = HttpRequestParser.new()
+        val small_body = "01234567890123456789012345678901"
+        val _s = _feed_one_byte_at_a_time(small, "POST /u HTTP/1.1\r\nHost: h\r\nContent-Length: {small_body.len()}\r\n\r\n{small_body}")
+        val big = HttpRequestParser.new()
+        val big_body = small_body + small_body
+        val _b = _feed_one_byte_at_a_time(big, "POST /u HTTP/1.1\r\nHost: h\r\nContent-Length: {big_body.len()}\r\n\r\n{big_body}")
+        expect(big.to_request("t").body).to_equal(big_body)
         # Linear: doubling fragments doubles work. Quadratic would quadruple it.
-        expect(big_work).to_equal(small_work * 2)
+        expect(big.body_copy_work()).to_equal(small.body_copy_work() * 2)
 
     it "copies O(n) body bytes when the body is fed one byte at a time":
         # @req REQ-SSPEC-UNIT

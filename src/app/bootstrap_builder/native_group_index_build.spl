@@ -127,7 +127,7 @@ fn native_group_index_manager_context_v1(work_root: text,
         config_relative: text, receipt_template: text,
         config_path: text, diagnostic_partition: i64 = -1,
         diagnostic_partitions: i64 = 0) -> Result<RuntimeStdNativeActionBudgetV2, text>:
-    val attempt_root = work_root.substring(0, work_root.len() - 5)
+    val attempt_root = work_root.substring(0, work_root.byte_len() - 5)
     val request_path = attempt_root + "/request.sdn"
     if not file_is_regular_no_follow(request_path):
         return Err("index generic manager attempt request missing")
@@ -141,13 +141,15 @@ fn native_group_index_manager_context_v1(work_root: text,
     if task.memory_limit_bytes < 1 or
             task.memory_limit_bytes > BUILDER_MEMORY_LIMIT_MAX_V2:
         return Err("index generic manager memory cap invalid")
-    val config_digest = file_hash_sha256(config_path)
+    val config_digest_opt = file_hash_sha256(config_path)
+    if config_digest_opt.is_none(): return Err("cannot hash index config: " + config_path)
+    val config_digest = config_digest_opt.unwrap()
     val invalid = native_group_index_manager_task_valid_v1(task,
         config_relative, receipt_template, config_digest, diagnostic_partition, diagnostic_partitions)
     if invalid != "": return Err(invalid)
     val staged_image = attempt_root + "/producer.exe"
     if not file_is_regular_no_follow(staged_image) or
-            file_hash_sha256(staged_image) != task.producer_digest:
+            _native_group_index_build_sha_mismatch(staged_image, task.producer_digest):
         return Err("index generic manager staged image differs")
     Ok(RuntimeStdNativeActionBudgetV2(
         sha256_text(request_bytes), task.memory_limit_bytes))
@@ -165,14 +167,13 @@ fn native_group_source_admit_v1(config: NativeGroupIndexConfigV1,
             not artifact_root.replace("\\", "/").contains("/work/private/runtime-std-hir-artifacts"):
         return Err("index private roots were not resolved by manager adapter")
     if not file_is_regular_no_follow(config.producer_path) or
-            file_hash_sha256(config.producer_path) != config.producer_digest:
+            _native_group_index_build_sha_mismatch(config.producer_path, config.producer_digest):
         return Err("index producer image differs from pinned Phase2 executable")
     if not file_is_regular_no_follow(config.full_source_authority_path) or
-            file_hash_sha256(config.full_source_authority_path) !=
-                config.full_source_authority_digest:
+            _native_group_index_build_sha_mismatch(config.full_source_authority_path, config.full_source_authority_digest):
         return Err("index Stage2 full-source authority differs")
     if not file_is_regular_no_follow(config.scv_receipt_path) or
-            file_hash_sha256(config.scv_receipt_path) != config.scv_receipt_digest:
+            _native_group_index_build_sha_mismatch(config.scv_receipt_path, config.scv_receipt_digest):
         return Err("index SCV receipt differs")
     val snapshot = scv_compile_snapshot_open_v1(config.source_root,
         config.snapshot_root, config.scv_revision_id, config.scv_commit_id,
@@ -184,7 +185,7 @@ fn native_group_source_admit_v1(config: NativeGroupIndexConfigV1,
         config.source_root, config.snapshot_root, config.scv_revision_id)
     if inventory_cache == "": return Err("index SCV source-inventory cache root invalid")
     val source_inventory = compile_source_inventory_read_current_v1(inventory_cache)
-    if not source_inventory.valid or source_inventory.inventory == nil or
+    if not source_inventory.valid or source_inventory.inventory.is_none() or
             source_inventory.digest != config.source_inventory_digest:
         return Err("index typed source-inventory generation differs")
     if source_inventory.inventory!.generation != config.source_inventory_generation:
@@ -215,7 +216,7 @@ fn native_group_index_admit_v1(config: NativeGroupIndexConfigV1,
         return Ok(NativeGroupIndexAdmissionV1(config, sources, snapshot,
             inventory, "", artifact_root, budget))
     if not builder_digest_valid_v1(config.expected_current_digest) or
-            not current.valid or current.generation == nil or
+            not current.valid or current.generation.is_none() or
             current.digest != config.expected_current_digest:
         return Err("index expected CURRENT is absent, different, or not a complete graph")
     val generation = current.generation!
@@ -242,7 +243,7 @@ fn native_group_index_compiler_publish_v1(admitted: NativeGroupIndexAdmissionV1
             config.snapshot_inventory_digest,
             config.source_inventory_digest, config.scv_receipt_digest,
             config.expected_spl_count, admitted.artifact_root,
-            typed_variant.options))?
+            config.phase, typed_variant.variant))?
     val current = package_module_index_read_current_v1(
         config.index_cache_root)
     val pointer = config.index_cache_root +
@@ -327,3 +328,9 @@ export native_group_index_manager_task_valid_v1
 
 export native_group_source_admit_v1, native_group_index_work_root_v1
 export native_group_index_resolve_private_v1, native_group_index_manager_context_v1
+
+# Absent digest (missing/unreadable file) is a mismatch, never "".
+fn _native_group_index_build_sha_mismatch(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual != expected
+    true

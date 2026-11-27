@@ -1,12 +1,12 @@
 # T32 MCP — Window tool handlers
 # Handles: window_list, window_open, window_capture, window_describe, screenshot
 
-use app.t32_cli.error_codes.{T4030, T4082, t32_err_window_not_found, t32_err_missing_param, t32_err_no_session_mcp}
-use app.mcp_t32.session_state.{MCP_T32_CURRENT_CORE}
-use app.mcp_t32.session_tools.{t32_find_current_session, t32_run_remote, t32_add_history}
-use app.mcp_t32.catalog_key.{t32_key_before_pipe}
-use app.mcp_t32.diagnostics.{t32_stderr}
-use app.mcp_t32.json_helpers.{t32_LB, t32_RB, t32_SB_L, t32_SB_R, t32_js, t32_jp, t32_extract_field, t32_make_tool_result, t32_make_tool_error}
+use ..t32_cli.error_codes.{T4030, T4082, t32_err_window_not_found, t32_err_missing_param, t32_err_no_session_mcp}
+use .session_state.{MCP_T32_CURRENT_CORE}
+use .session_tools.{t32_find_current_session, t32_run_remote, t32_add_history}
+use .catalog_key.{t32_key_before_pipe}
+use .diagnostics.{t32_stderr}
+use .json_helpers.{t32_LB, t32_RB, t32_SB_L, t32_SB_R, t32_js, t32_jp, t32_extract_field, t32_make_tool_result, t32_make_tool_error}
 use std.io_runtime.{read_file}
 
 # --- Window catalog from SDN files (REQ-F5-003: no silent fallback) ---
@@ -160,8 +160,7 @@ fn t32_parse_catalog_entry_with_meta(entry: text) -> (text, text, text, text, te
 
 # --- Window action/field catalogs (REQ-F5-003: no silent fallback) ---
 
-fn t32_get_window_actions(window_key: text) -> [text]:
-    # Returns actions as "action_key|label|type|command_template"
+pub fn t32_get_action_catalog() -> [text]:
     val sdn_path = "config/t32/catalogs/actions.sdn"
     val sdn_content = read_file(sdn_path)
     if sdn_content == "":
@@ -169,9 +168,22 @@ fn t32_get_window_actions(window_key: text) -> [text]:
         var empty: [text] = []
         return empty
     val action_catalog: [text] = t32_parse_action_sdn(sdn_content)
+    if t32_text_list_len(action_catalog) == 0:
+        t32_stderr("[window_tools] ERROR: SDN action catalog parsed zero entries from: {sdn_path}")
+    action_catalog
+
+pub fn t32_find_action(action_key: text) -> text:
+    for entry in t32_get_action_catalog():
+        if t32_key_before_pipe(entry) == action_key:
+            return entry
+    ""
+
+pub fn t32_get_window_actions(window_key: text) -> [text]:
+    # Returns actions as "action_key|label|type|command_template"
+    val sdn_path = "config/t32/catalogs/actions.sdn"
     # Filter actions matching this window key (by target field or matching open_command)
     var actions: [text] = []
-    for entry in action_catalog:
+    for entry in t32_get_action_catalog():
         val parts = entry.split("|")
         if parts.len() >= 5:
             if parts[4] == window_key:
@@ -180,7 +192,7 @@ fn t32_get_window_actions(window_key: text) -> [text]:
         t32_stderr("[window_tools] WARNING: no actions found for window '{window_key}' in: {sdn_path}")
     actions
 
-fn t32_parse_action_sdn(content: text) -> [text]:
+pub fn t32_parse_action_sdn(content: text) -> [text]:
     # Returns "action_key|label|type|command|target_window" entries
     var catalog: [text] = []
     var key = ""
@@ -564,6 +576,6 @@ fn handle_t32_window_describe(id: text, body: text) -> text:
     r = r + t32_RB()
     t32_make_tool_result(id, r)
 
-export t32_get_window_catalog, t32_parse_window_sdn
-export t32_get_window_actions, t32_parse_action_sdn, t32_parse_catalog_entry, t32_parse_catalog_entry_with_meta
+export t32_get_window_catalog, t32_parse_window_sdn, t32_get_action_catalog, t32_find_action, t32_get_window_actions
+export t32_parse_action_sdn, t32_parse_catalog_entry, t32_parse_catalog_entry_with_meta
 export handle_t32_window_list, handle_t32_window_open, handle_t32_window_capture, handle_t32_window_describe

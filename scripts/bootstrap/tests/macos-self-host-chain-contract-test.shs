@@ -1,0 +1,389 @@
+#!/bin/sh
+# Exercise the real chain owner with distinct fake compiler producers. No Rust
+# seed, native compiler, or test-only production bypass is used.
+set -eu
+selection=${1:-all}
+case "$selection" in all|--ambient-only) ;; *) echo 'usage: macos-self-host-chain-contract-test.shs [--ambient-only]' >&2; exit 2;; esac
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+case "$(uname -s)" in Darwin) ;; *) echo 'SKIP: Darwin process-owner contract requires a Darwin host'; exit 0;; esac
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/macos-chain-contract.XXXXXX") || exit 1
+tmp=$(CDPATH= cd -- "$tmp" && pwd -P) || exit 1
+cleanup() {
+  cleanup_status=$?
+  if [ "$cleanup_status" -ne 0 ]; then
+    echo "contract failure evidence retained: $tmp" >&2
+  else
+    chmod -R u+w "$tmp" 2>/dev/null || :
+    rm -rf "$tmp"
+  fi
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+make_fixture() {
+  root=$1 fail_a_hello=$2
+  mkdir -p "$root/scripts/check/lib" "$root/scripts/bootstrap/lib" "$root/scripts/resource" "$root/sdk" \
+    "$root/scripts/bootstrap" \
+    "$root/src/app/cli" "$root/src/compositions/kernel_llvm_cranelift" \
+    "$root/src/compositions/cuda_disabled" "$root/src/compiler" "$root/src/app" \
+    "$root/src/lib" "$root/src/plugins" "$root/src/os" "$root/src/runtime" \
+    "$root/src/package_ownership" "$root/examples/10_tooling" \
+    "$root/test/03_system/app/bootstrap_builder/feature" \
+    "$root/test/fixtures/bootstrap_builder" "$root/runtime"
+  cp "$repo/scripts/check/lib/bootstrap-stage3-provenance.shs" "$root/scripts/check/lib/"
+  cp -R "$repo/scripts/check/lib/bootstrap-stage3" "$root/scripts/check/lib/"
+  cp "$repo/scripts/bootstrap/lib/tree-rss-policy.shs" "$root/scripts/bootstrap/lib/"
+  cp "$repo/scripts/bootstrap/run-process-group-timeout.shs" "$root/scripts/bootstrap/"
+  cp "$repo/scripts/resource/process-tree-rss-watchdog.pl" "$root/scripts/resource/"
+  cp "$repo/scripts/resource/macos-process-observer.c" "$root/scripts/resource/"
+  cp "$repo/scripts/bootstrap/bootstrap-session-exec.c" "$root/scripts/bootstrap/"
+  # Model the post-fix six-root capsule capability. The real checkout is
+  # separately asserted to refuse its current five-root bound below.
+  printf '%s\n' 'if sources.len() > 6: return error' >"$root/src/app/cli/bootstrap_focused_native_build.spl"
+  mkdir -p "$root/src/compositions/kernel_llvm_cranelift/compiler/driver"
+  printf 'fixture K1 composition\n' >"$root/src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl"
+  printf 'fixture\n' >"$root/examples/10_tooling/fixture.spl"
+  printf 'fixture\n' >"$root/test/03_system/app/bootstrap_builder/feature/fixture.spl"
+  printf 'fixture\n' >"$root/test/fixtures/bootstrap_builder/fixture.spl"
+  printf 'runtime-fixture\n' >"$root/runtime/libfixture.a"
+  cat >"$root/sdk/SDKSettings.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>CanonicalName</key><string>fixture-sdk</string></dict></plist>
+PLIST
+  cat >"$root/fake-template" <<'SH'
+#!/bin/sh
+set -eu
+role=ROLE_PLACEHOLDER
+fixture=FIXTURE_PLACEHOLDER
+fail_a_hello=FAIL_PLACEHOLDER
+if [ "${1-}" = --version ]; then
+  if [ "$role" = p4 ]; then printf 'Simple v1.0.0-beta\n'; else printf 'simple-bootstrap v1.0.0-beta\n'; fi
+  exit 0
+fi
+[ "${1-}" = native-build ] || exit 64
+if [ "$role" = p2 ] && [ -f "$fixture/block-p2" ]; then
+  sleep 300 &
+  echo "$!" >"$fixture/grandchild.pid"
+  wait
+fi
+shift
+entry= source= output=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --entry) entry=$2; shift 2;;
+    -o|--output) output=$2; shift 2;;
+    --source) shift 2;;
+    --threads|--target|--backend|--runtime-bundle|--cache-dir|--runtime-path|--mode) shift 2;;
+    --entry-closure) shift;;
+    *.spl) source=$1; shift;;
+    *) shift;;
+  esac
+done
+[ -n "$output" ] || exit 65
+printf 'role=%s entry=%s source=%s stage3=%s stage4=%s\n' "$role" "$entry" "$source" \
+  "${SIMPLE_BOOTSTRAP_STAGE3:-0}" "${SIMPLE_BOOTSTRAP_STAGE4:-0}" >>"$fixture/calls.log"
+if [ "$entry" = src/app/cli/bootstrap_main.spl ]; then
+  [ "${SIMPLE_BOOTSTRAP_STAGE3:-0}" = 1 ] || exit 66
+  case "$role" in
+    p2) producer=p3a;; p3a) producer=p3b;; *) exit 67;;
+  esac
+  cp "$fixture/$producer" "$output"
+  chmod +x "$output"
+  exit 0
+fi
+if [ "$entry" = src/app/cli/main.spl ]; then
+  [ "${SIMPLE_BOOTSTRAP_STAGE4:-0}" = 1 ] && [ "$role" = p3b ] || exit 68
+  cp "$fixture/p4" "$output"
+  chmod +x "$output"
+  exit 0
+fi
+case "$source:$role" in
+  *stage3-a.spl:p3a) [ "$fail_a_hello" != 1 ] || exit 17;;
+esac
+token=$(sed -n 's/.*print "\(chain-[^"]*\)".*/\1/p' "$source")
+[ -n "$token" ] || exit 69
+cat >"$output" <<HELLO
+#!/bin/sh
+printf '%s\\n' '$token'
+HELLO
+chmod +x "$output"
+SH
+  for role in p2 p3a p3b p4; do
+    fake="$root/$role"
+    fail=0
+    [ "$role" != p3a ] || fail=$fail_a_hello
+    sed -e "s|ROLE_PLACEHOLDER|$role|" -e "s|FIXTURE_PLACEHOLDER|$root|" \
+      -e "s|FAIL_PLACEHOLDER|$fail|" "$root/fake-template" >"$fake"
+    chmod +x "$fake"
+  done
+  rm "$root/fake-template"
+}
+
+run_chain() {
+  root=$1 p2=$2 output=$3 transcript=$4 build_log=$5 rss_receipt=$6
+  sh "$repo/scripts/bootstrap/continue-macos-self-host-chain.shs" \
+    --source-root "$root" --phase2 "$p2" --phase2-transcript "$transcript" \
+    --phase2-build-log "$build_log" --phase2-rss-receipt "$rss_receipt" \
+    --runtime-path "$root/runtime" --sdk-root "$root/sdk" --deployment-target 26.5 \
+    --output "$output" --backend llvm \
+    --jobs 1 --rss-cap-kib 5859375 --timeout-seconds 120
+}
+make_transcript() {
+  p2_arg=$1 transcript=$2
+  p2=$(CDPATH= cd -- "$(dirname -- "$p2_arg")" && pwd -P)/$(basename -- "$p2_arg")
+  case "$(uname -m)" in arm64|aarch64) target=aarch64-apple-darwin;; x86_64) target=x86_64-apple-darwin;; esac
+  {
+    printf 'schema=simple-bootstrap-command-transcript-v2\n'
+    fixture_path= old_ifs=$IFS; IFS=:
+    for fixture_entry in $PATH; do
+      [ -d "$fixture_entry" ] || continue
+      fixture_path=${fixture_path:+$fixture_path:}$fixture_entry
+    done
+    IFS=$old_ifs
+    path_row="PATH=$fixture_path"
+    printf 'explicit-env:%s:%s\n' "${#path_row}" "$path_row"
+    for arg in native-build --target "$target" --backend llvm --runtime-bundle core-c-bootstrap \
+      --source src/compositions/kernel_llvm_cranelift --source src/compositions/cuda_disabled \
+      --source src/compiler --source src/app --source src/lib --source src/plugins \
+      --entry-closure --threads 4 --cache-dir /fixture/cache --mode dynload \
+      --entry src/app/cli/bootstrap_main.spl --runtime-path /fixture/runtime -o "$p2"; do
+      printf 'argv:%s:%s\n' "${#arg}" "$arg"
+    done
+  } >"$transcript"
+}
+make_phase2_evidence() {
+  p2_arg=$1 build_log=$2 rss_receipt=$3
+  p2=$(CDPATH= cd -- "$(dirname -- "$p2_arg")" && pwd -P)/$(basename -- "$p2_arg")
+  printf 'Build complete: 1 compiled, 0 cached, 0 failed\nBinary: %s (1 KB)\n' "$p2" >"$build_log"
+  printf 'status=complete\nexit_status=0\nquiescent=1\nobserver_errors=0\nrss_cap_enforced=1\nrss_cap_mode=enforce\n' >"$rss_receipt"
+}
+
+# A nested public launch must reject inherited managed controls without
+# disturbing its caller. A clean launch ignores polluted group-only scope.
+ambient_owner_regression() {
+  ambient="$tmp/ambient"
+  make_fixture "$ambient" 0
+  touch "$ambient/block-p2"
+  make_transcript "$ambient/p2" "$tmp/ambient.transcript"
+  make_phase2_evidence "$ambient/p2" "$tmp/ambient-build.log" "$tmp/ambient-rss.env"
+  cat >"$tmp/ambient-parent.sh" <<'PARENT'
+#!/bin/sh
+set -eu
+repo=$1 fixture=$2 evidence=$3 mode=$4
+canary= chain=
+cleanup_parent() {
+  if [ -n "$chain" ]; then kill -TERM "$chain" 2>/dev/null || :; wait "$chain" 2>/dev/null || :; fi
+  if [ -n "$canary" ]; then kill -TERM "$canary" 2>/dev/null || :; wait "$canary" 2>/dev/null || :; fi
+}
+trap cleanup_parent EXIT
+trap 'exit 143' HUP INT TERM
+if [ "$mode" = reject ]; then
+  [ -n "$SIMPLE_BOOTSTRAP_SESSION_ID" ] && [ -x "$SIMPLE_BOOTSTRAP_SESSION_EXEC" ]
+  "$SIMPLE_BOOTSTRAP_SESSION_EXEC" --check
+else
+  [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" = "" ]
+fi
+sleep 300 &
+canary=$!
+SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP=1
+export SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP
+out="$evidence/ambient-$mode-output"
+sh "$repo/scripts/bootstrap/continue-macos-self-host-chain.shs" \
+  --source-root "$fixture" --phase2 "$fixture/p2" \
+  --phase2-transcript "$evidence/ambient.transcript" \
+  --phase2-build-log "$evidence/ambient-build.log" --phase2-rss-receipt "$evidence/ambient-rss.env" \
+  --runtime-path "$fixture/runtime" --sdk-root "$fixture/sdk" --deployment-target 26.5 \
+  --output "$out" --backend llvm --jobs 1 --rss-cap-kib 5859375 --timeout-seconds 120 \
+  >"$evidence/ambient-$mode.stdout" 2>"$evidence/ambient-$mode.stderr" &
+chain=$!
+if [ "$mode" = scope ]; then
+  for attempt in $(seq 1 200); do [ -s "$fixture/grandchild.pid" ] && break; sleep 0.05; done
+  [ -s "$fixture/grandchild.pid" ] || { echo 'FAIL: scope fixture grandchild absent' >&2; exit 1; }
+  grandchild=$(cat "$fixture/grandchild.pid")
+  kill -STOP "$grandchild"
+  kill -TERM "$chain"
+fi
+result=0
+wait "$chain" || result=$?
+chain=
+kill -0 "$canary"
+canary_state=$(ps -o stat= -p "$canary")
+case "$canary_state" in ''|Z*) echo 'FAIL: adapter affected caller canary' >&2; exit 1;; esac
+if [ "$mode" = reject ]; then
+  [ "$result" -eq 2 ]
+  grep -q 'inherited managed session controls are unsupported' "$evidence/ambient-reject.stderr"
+  [ ! -e "$out" ] && [ ! -e "$out.process.env" ] && [ ! -e "$fixture/grandchild.pid" ]
+  "$SIMPLE_BOOTSTRAP_SESSION_EXEC" --check
+  echo 'PASS: inherited managed launch rejected before work; parent session and canary survive'
+else
+  [ "$result" -eq 143 ] || { echo "FAIL: scope cancellation exit=$result" >&2; exit 1; }
+  for attempt in $(seq 1 100); do
+    state=$(ps -o stat= -p "$grandchild" 2>/dev/null || :)
+    case "$state" in ''|Z*) break;; esac
+    sleep 0.05
+  done
+  case "$state" in ''|Z*) ;; *) echo 'FAIL: scope cancellation left live grandchild' >&2; exit 1;; esac
+  receipt="$out.process.env"
+  grep -qx 'session_mode=new' "$receipt"
+  grep -qx 'scope_group=0' "$receipt"
+  grep -qx 'status=interrupted' "$receipt"
+  grep -qx 'exit_status=143' "$receipt"
+  grep -qx 'quiescent=1' "$receipt"
+  grep -qx 'observer_errors=0' "$receipt"
+  grep -qx 'rss_cap_enforced=1' "$receipt"
+  grep -qx 'status=interrupted' "$out/identity/chain.env"
+  echo 'PASS: scope pollution overridden; stopped grandchild reaped and caller canary survives'
+fi
+PARENT
+  (
+    unset SIMPLE_BOOTSTRAP_SESSION_ID SIMPLE_BOOTSTRAP_SESSION_EXEC SIMPLE_MACOS_CHAIN_OWNER_OUTPUT
+    SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP=0
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=5859375
+    SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS=1
+    SIMPLE_PROCESS_TREE_RSS_RECEIPT="$tmp/ambient-parent.process.env"
+    TMPDIR=$tmp
+    export SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+    export SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS SIMPLE_PROCESS_TREE_RSS_RECEIPT TMPDIR
+    sh "$repo/scripts/bootstrap/run-process-group-timeout.shs" 30 3 \
+      sh "$tmp/ambient-parent.sh" "$repo" "$ambient" "$tmp" reject
+  ) >"$tmp/ambient-parent.stdout" 2>"$tmp/ambient-parent.stderr" || {
+    cat "$tmp/ambient-parent.stderr" "$tmp/ambient-reject.stderr" >&2
+    return 1
+  }
+  grep -qx 'status=complete' "$tmp/ambient-parent.process.env"
+  grep -qx 'exit_status=0' "$tmp/ambient-parent.process.env"
+  grep -qx 'quiescent=1' "$tmp/ambient-parent.process.env"
+  grep -qx 'observer_errors=0' "$tmp/ambient-parent.process.env"
+  cat "$tmp/ambient-parent.stdout"
+  (
+    unset SIMPLE_BOOTSTRAP_SESSION_ID SIMPLE_BOOTSTRAP_SESSION_EXEC SIMPLE_MACOS_CHAIN_OWNER_OUTPUT
+    sh "$tmp/ambient-parent.sh" "$repo" "$ambient" "$tmp" scope
+  ) || { cat "$tmp/ambient-scope.stderr" >&2; return 1; }
+}
+if [ "$selection" = --ambient-only ]; then ambient_owner_regression; exit 0; fi
+
+good="$tmp/good"
+make_fixture "$good" 0
+good_p2="$good/p2"
+good_transcript="$tmp/good.transcript"
+make_transcript "$good_p2" "$good_transcript"
+good_log="$tmp/good-build.log" good_rss="$tmp/good-rss.env"
+make_phase2_evidence "$good_p2" "$good_log" "$good_rss"
+run_chain "$good" "$good_p2" "$tmp/good-output" "$good_transcript" "$good_log" "$good_rss" >"$tmp/good.stdout" 2>"$tmp/good.stderr" || {
+  cat "$tmp/good.stderr" >&2
+  exit 1
+}
+for role in p2 p3a p3b p4; do grep -q "role=$role" "$good/calls.log" || { echo "FAIL: missing producer $role" >&2; exit 1; }; done
+grep -q 'role=p2 entry=src/app/cli/bootstrap_main.spl source= stage3=1' "$good/calls.log"
+grep -q 'role=p3a entry=src/app/cli/bootstrap_main.spl source= stage3=1' "$good/calls.log"
+grep -q 'role=p3b entry=src/app/cli/main.spl source= stage3=0 stage4=1' "$good/calls.log"
+test -s "$tmp/good-output/stage3-a/stage3-a.command.transcript"
+test -s "$tmp/good-output/stage3-b/stage3-b.command.transcript"
+test -s "$tmp/good-output/stage4/stage4.command.transcript"
+stage2_pin="$tmp/good-output/identity/phase2.compiler"
+stage3a_bin="$tmp/good-output/stage3-a/simple"
+stage3b_bin="$tmp/good-output/stage3-b/simple"
+grep -F "executable:${#stage2_pin}:$stage2_pin" "$tmp/good-output/stage3-a/stage3-a.command.transcript" >/dev/null
+grep -F "executable:${#stage3a_bin}:$stage3a_bin" "$tmp/good-output/stage3-b/stage3-b.command.transcript" >/dev/null
+grep -F "executable:${#stage3b_bin}:$stage3b_bin" "$tmp/good-output/stage4/stage4.command.transcript" >/dev/null
+extract_sources() {
+  awk '/^argv:[0-9]+:/ { row=$0; sub(/^argv:/,"",row); sub(/:.*/,"",row); n=row+0; payload=$0; sub(/^argv:[0-9]+:/,"",payload); if (length(payload)!=n) exit 2; if (waiting) { print payload; waiting=0 }; if (payload=="--source") waiting=1 } END { if (waiting) exit 1 }' "$1"
+}
+extract_sources "$tmp/good-output/stage3-a/stage3-a.command.transcript" >"$tmp/stage3-a.sources"
+extract_sources "$tmp/good-output/stage3-b/stage3-b.command.transcript" >"$tmp/stage3-b.sources"
+cmp -s "$tmp/stage3-a.sources" "$tmp/stage3-b.sources"
+printf '%s\n' src/compositions/kernel_llvm_cranelift src/compositions/cuda_disabled src/compiler src/app src/lib src/plugins >"$tmp/expected.sources"
+cmp -s "$tmp/expected.sources" "$tmp/stage3-a.sources"
+grep -qx 'admitted=0' "$tmp/good-output/identity/chain.env"
+grep -qx 'status=complete' "$tmp/good-output.process.env"
+grep -qx 'exit_status=0' "$tmp/good-output.process.env"
+grep -qx 'quiescent=1' "$tmp/good-output.process.env"
+grep -qx 'observer_errors=0' "$tmp/good-output.process.env"
+grep -qx 'sdk_canonical_name=fixture-sdk' "$tmp/good-output/identity/sdk-profile.env"
+grep -qx 'sdkroot_origin=caller' "$tmp/good-output/identity/sdk-profile.env"
+grep -qx 'deployment_target_origin=caller' "$tmp/good-output/identity/sdk-profile.env"
+grep -qx 'compiler_sha256='"$(shasum -a 256 "$tmp/good-output/identity/phase2.compiler" | awk '{print $1}')" "$tmp/good-output/identity/phase2.hello.env"
+grep -q '^Simple v1.0.0-beta$' "$tmp/good-output/hello/stage4.version.stdout"
+
+bad="$tmp/bad"
+make_fixture "$bad" 1
+bad_p2="$bad/p2"
+bad_transcript="$tmp/bad.transcript"
+make_transcript "$bad_p2" "$bad_transcript"
+bad_log="$tmp/bad-build.log" bad_rss="$tmp/bad-rss.env"
+make_phase2_evidence "$bad_p2" "$bad_log" "$bad_rss"
+if run_chain "$bad" "$bad_p2" "$tmp/bad-output" "$bad_transcript" "$bad_log" "$bad_rss" >"$tmp/bad.stdout" 2>"$tmp/bad.stderr"; then
+  echo 'FAIL: failed P3a Hello did not stop the chain' >&2; exit 1
+fi
+test ! -e "$tmp/bad-output/stage3-b/stage3-b.command.transcript"
+if grep -q 'role=p3a entry=src/app/cli/bootstrap_main.spl' "$bad/calls.log"; then
+  echo 'FAIL: stage3 rebuild ran after P3a Hello failed' >&2; exit 1
+fi
+grep -q 'stage3-a Hello compile failed' "$tmp/bad.stderr"
+
+ # An isolated pre-fix producer remains a useful negative control after the real
+ # producer learns to accept the canonical six roots.
+five="$tmp/five"
+make_fixture "$five" 0
+printf '%s\n' 'if sources.len() > 5: return error' >"$five/src/app/cli/bootstrap_focused_native_build.spl"
+five_p2="$five/p2"
+five_transcript="$tmp/five.transcript"
+make_transcript "$five_p2" "$five_transcript"
+if sh "$repo/scripts/bootstrap/continue-macos-self-host-chain.shs" \
+  --source-root "$five" --phase2 "$five_p2" --phase2-transcript "$five_transcript" \
+  --runtime-path "$five/runtime" --sdk-root "$five/sdk" --deployment-target 26.5 \
+  --output "$tmp/five-output" --backend llvm --rss-cap-kib 5859375 --timeout-seconds 120 \
+  >"$tmp/five.stdout" 2>"$tmp/five.stderr"; then
+  echo 'FAIL: isolated five-root producer accepted six-root contract' >&2; exit 1
+fi
+grep -q 'fewer than six roots' "$tmp/five.stderr"
+
+# Cancellation must reach the real outer owner and reap both running and
+# stopped grandchildren; a shell status alone is not containment evidence.
+for cancel_mode in running stopped; do
+cancel="$tmp/cancel-$cancel_mode"
+make_fixture "$cancel" 0
+touch "$cancel/block-p2"
+cancel_p2="$cancel/p2"
+cancel_transcript="$tmp/cancel.transcript"
+make_transcript "$cancel_p2" "$cancel_transcript"
+make_phase2_evidence "$cancel_p2" "$tmp/cancel-build.log" "$tmp/cancel-rss.env"
+sh "$repo/scripts/bootstrap/continue-macos-self-host-chain.shs" \
+  --source-root "$cancel" --phase2 "$cancel_p2" --phase2-transcript "$cancel_transcript" \
+  --phase2-build-log "$tmp/cancel-build.log" --phase2-rss-receipt "$tmp/cancel-rss.env" \
+  --runtime-path "$cancel/runtime" --sdk-root "$cancel/sdk" --deployment-target 26.5 \
+  --output "$tmp/cancel-$cancel_mode-output" --backend llvm --jobs 1 \
+  --rss-cap-kib 5859375 --timeout-seconds 120 >"$tmp/cancel.stdout" 2>"$tmp/cancel.stderr" &
+chain_pid=$!
+for attempt in $(seq 1 200); do [ -s "$cancel/grandchild.pid" ] && break; sleep 0.05; done
+test -s "$cancel/grandchild.pid" || { kill -TERM "$chain_pid" 2>/dev/null || :; wait "$chain_pid" 2>/dev/null || :; echo 'FAIL: cancellation fixture did not start grandchild' >&2; exit 1; }
+grandchild_pid=$(cat "$cancel/grandchild.pid")
+[ "$cancel_mode" != stopped ] || kill -STOP "$grandchild_pid"
+kill -TERM "$chain_pid"
+cancel_status=0
+wait "$chain_pid" 2>/dev/null || cancel_status=$?
+[ "$cancel_status" -eq 143 ] || { echo "FAIL: cancelled chain exited $cancel_status, expected 143" >&2; exit 1; }
+for attempt in $(seq 1 100); do
+  child_state=$(ps -o stat= -p "$grandchild_pid" 2>/dev/null || :)
+  case "$child_state" in ''|Z*) break;; esac
+  sleep 0.05
+done
+child_state=$(ps -o stat= -p "$grandchild_pid" 2>/dev/null || :)
+case "$child_state" in ''|Z*) ;; *)
+  echo 'FAIL: watchdog left live grandchild after chain cancellation' >&2
+  ps -o pid,ppid,pgid,stat,command -p "$grandchild_pid" >&2 || :
+  cat "$tmp/cancel.stderr" >&2
+  cat "$tmp/cancel-$cancel_mode-output/identity/chain.env" >&2 || :
+  exit 1;; esac
+grep -qx 'status=interrupted' "$tmp/cancel-$cancel_mode-output/identity/chain.env"
+grep -qx 'status=interrupted' "$tmp/cancel-$cancel_mode-output.process.env"
+grep -qx 'exit_status=143' "$tmp/cancel-$cancel_mode-output.process.env"
+grep -qx 'quiescent=1' "$tmp/cancel-$cancel_mode-output.process.env"
+grep -qx 'observer_errors=0' "$tmp/cancel-$cancel_mode-output.process.env"
+grep -qx 'rss_cap_enforced=1' "$tmp/cancel-$cancel_mode-output.process.env"
+done
+ambient_owner_regression
+echo 'PASS: fake P2 -> P3a -> P3b -> P4, per-role version/Hello gates, six-root control, and cancellation containment'

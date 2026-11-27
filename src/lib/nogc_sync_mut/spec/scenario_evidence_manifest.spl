@@ -1,0 +1,520 @@
+# Versioned, fail-closed manifest for scenario evidence.
+
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.parser.{parse_with_issues}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.spec.scenario_evidence.{
+    ScenarioCaptureKind, ScenarioEvidenceArtifact, ScenarioHtmlCheckResult
+}
+use std.common.spec.scenario_text_evidence.{ScenarioTextMatchResult}
+use std.common.spec.scenario_motion_evidence.{
+    ScenarioArtifactIntegrity, ScenarioMotionEvidence,
+    scenario_artifact_integrity_validate,
+    scenario_motion_evidence_validate
+}
+use std.common.spec.scenario_protocol_evidence.{
+    ScenarioProtocolFieldEvidence, scenario_protocol_evidence_validate
+}
+use std.spec.evidence_receipt.{EvidenceReceipt}
+use std.spec.scenario_evidence_manifest_codec.{
+    evidence_codec_string_array, evidence_codec_artifacts_value,
+    evidence_codec_integrity_value, evidence_codec_text_results_value,
+    evidence_codec_motion_value, evidence_codec_protocol_value,
+    evidence_codec_html_value, evidence_codec_parse_artifacts,
+    evidence_codec_parse_integrity, evidence_codec_parse_text_results,
+    evidence_codec_parse_motion, evidence_codec_parse_protocol,
+    evidence_codec_parse_html
+}
+
+pub struct ScenarioEvidenceManifest:
+    schema_major: i64
+    schema_minor: i64
+    feature_id: text
+    requirement_ids: [text]
+    spec_path: text
+    generated_manual_path: text
+    scenario_id: text
+    step_id: text
+    required: bool
+    result: text
+    showcase_status: text
+    reason: text
+    source_revision: text
+    source_digest: text
+    command: text
+    producer: text
+    producer_version: text
+    host: text
+    target: text
+    backend: text
+    start_time: i64
+    duration_ms: i64
+    artifacts: [ScenarioEvidenceArtifact]
+    artifact_integrity: [ScenarioArtifactIntegrity]
+    text_results: [ScenarioTextMatchResult]
+    motion_evidence: [ScenarioMotionEvidence]
+    protocol_fields: [ScenarioProtocolFieldEvidence]
+    html_checks: [ScenarioHtmlCheckResult]
+    blocker_prerequisite: text
+    resume_command: text
+    owner: text
+    final_reviewer: text
+
+fn _manifest_status_valid(status: text) -> bool:
+    status == "live-pass" or status == "historical-pass" or
+        status == "contract-only" or status == "blocked" or
+        status == "unsupported" or status == "planned"
+
+fn _manifest_required_text(value: text, field: text) -> Result<text, text>:
+    if value.trim() == "":
+        Err("missing required field: " + field)
+    else:
+        Ok(value)
+
+fn _manifest_path_safe(path: text) -> bool:
+    if path == "" or path.starts_with("/") or path.starts_with("\\"):
+        return false
+    if path.len() >= 2 and path.substring(1, 2) == ":":
+        return false
+    if path.contains("://") or path.contains("?") or path.contains("#"):
+        return false
+    val normalized = path.replace("\\", "/")
+    if normalized.starts_with("//"):
+        return false
+    for part in normalized.split("/"):
+        if part == "" or part == "." or part == "..":
+            return false
+    true
+
+fn _manifest_artifact_path_safe(path: text) -> bool:
+    if not _manifest_path_safe(path):
+        return false
+    val normalized = path.replace("\\", "/")
+    normalized.starts_with("build/test-artifacts/") or
+        normalized.starts_with("doc/06_spec/image/")
+
+fn _manifest_suffix(path: text, suffix: text) -> bool:
+    path.lower().ends_with(suffix)
+
+fn _manifest_mime_suffix_valid(artifact: ScenarioEvidenceArtifact) -> bool:
+    val path = artifact.path.lower()
+    val mime = artifact.mime.lower()
+    match artifact.kind:
+        case ScenarioCaptureKind.tui:
+            (mime == "text/plain" and
+                (_manifest_suffix(path, ".txt") or _manifest_suffix(path, ".log"))) or
+                (mime == "text/x-ansi" and _manifest_suffix(path, ".ansi"))
+        case ScenarioCaptureKind.gui:
+            (mime == "image/png" and _manifest_suffix(path, ".png")) or
+                (mime == "image/webp" and _manifest_suffix(path, ".webp")) or
+                (mime == "image/svg+xml" and _manifest_suffix(path, ".svg")) or
+                (mime == "image/avif" and _manifest_suffix(path, ".avif"))
+        case ScenarioCaptureKind.motion:
+            (mime == "image/webp" and _manifest_suffix(path, ".webp")) or
+                (mime == "video/webm" and _manifest_suffix(path, ".webm"))
+        case ScenarioCaptureKind.html:
+            mime == "text/html" and
+                (_manifest_suffix(path, ".html") or _manifest_suffix(path, ".htm"))
+        case ScenarioCaptureKind.api:
+            (mime == "application/json" or mime == "message/json") and
+                _manifest_suffix(path, ".json")
+        case ScenarioCaptureKind.protocol:
+            ((mime == "application/octet-stream" and _manifest_suffix(path, ".bin")) or
+                ((mime == "application/json" or mime == "message/json") and
+                    _manifest_suffix(path, ".json")) or
+                (mime == "text/plain" and
+                    (_manifest_suffix(path, ".hex.txt") or _manifest_suffix(path, ".txt"))))
+        case ScenarioCaptureKind.text:
+            mime == "text/plain" and
+                (_manifest_suffix(path, ".txt") or _manifest_suffix(path, ".log"))
+        case ScenarioCaptureKind.exec:
+            mime == "text/plain" and
+                (_manifest_suffix(path, ".txt") or _manifest_suffix(path, ".log"))
+        case ScenarioCaptureKind.binary:
+            mime == "application/octet-stream" and _manifest_suffix(path, ".bin")
+        case ScenarioCaptureKind.log:
+            (mime == "text/plain" or mime == "text/x-log") and
+                (_manifest_suffix(path, ".log") or _manifest_suffix(path, ".txt"))
+        case ScenarioCaptureKind.artifact:
+            (mime == "application/json" and _manifest_suffix(path, ".json")) or
+                (mime == "application/octet-stream" and _manifest_suffix(path, ".bin")) or
+                (mime == "application/x-sdn" and _manifest_suffix(path, ".sdn")) or
+                (mime == "text/plain" and _manifest_suffix(path, ".txt")) or
+                (mime == "image/png" and _manifest_suffix(path, ".png")) or
+                (mime == "image/webp" and _manifest_suffix(path, ".webp")) or
+                (mime == "image/svg+xml" and _manifest_suffix(path, ".svg")) or
+                (mime == "image/avif" and _manifest_suffix(path, ".avif")) or
+                (mime == "video/webm" and _manifest_suffix(path, ".webm"))
+
+fn _manifest_duplicate_artifact(artifacts: [ScenarioEvidenceArtifact], index: i64) -> bool:
+    var i = 0
+    while i < index:
+        if artifacts[i].path == artifacts[index].path:
+            return true
+        i = i + 1
+    false
+
+fn _manifest_has_kind(
+    artifacts: [ScenarioEvidenceArtifact],
+    kind: ScenarioCaptureKind
+) -> bool:
+    for artifact in artifacts:
+        if artifact.kind == kind:
+            return true
+    false
+
+fn _manifest_has_artifact_path(
+    artifacts: [ScenarioEvidenceArtifact],
+    path: text
+) -> bool:
+    for artifact in artifacts:
+        if artifact.path == path:
+            return true
+    false
+
+fn _manifest_integrity_complete(manifest: ScenarioEvidenceManifest) -> bool:
+    if manifest.artifacts.len() == 0:
+        return false
+    for artifact in manifest.artifacts:
+        var covered = false
+        for integrity in manifest.artifact_integrity:
+            if integrity.path == artifact.path:
+                if scenario_artifact_integrity_validate(integrity) != "ok":
+                    return false
+                if integrity.required and not integrity.capture_ready:
+                    return false
+                val pixel_oracle = (
+                    integrity.format == "png" or
+                    integrity.format == "webp" or integrity.format == "svg" or
+                    integrity.format == "avif"
+                )
+                if integrity.required and pixel_oracle and
+                   integrity.comparison_result != "pass":
+                    return false
+                covered = true
+        if not covered:
+            return false
+    true
+
+fn _manifest_required_detail_valid(manifest: ScenarioEvidenceManifest) -> text:
+    if manifest.showcase_status == "live-pass" and (
+        _manifest_has_kind(manifest.artifacts, ScenarioCaptureKind.text) or
+        _manifest_has_kind(manifest.artifacts, ScenarioCaptureKind.tui) or
+        _manifest_has_kind(manifest.artifacts, ScenarioCaptureKind.log)
+    ) and manifest.text_results.len() == 0:
+        return "text artifact requires text_results"
+    for result in manifest.text_results:
+        if manifest.showcase_status == "live-pass" and not result.passed:
+            return "live-pass contains failed text result"
+    if manifest.showcase_status == "live-pass" and
+       _manifest_has_kind(manifest.artifacts, ScenarioCaptureKind.html) and
+       manifest.html_checks.len() == 0:
+        return "html artifact requires html_checks"
+    for check in manifest.html_checks:
+        if not _manifest_has_artifact_path(manifest.artifacts, check.artifact.path):
+            return "HTML check references unknown artifact: " + check.artifact.path
+        if manifest.showcase_status == "live-pass" and not check.passed:
+            return "live-pass contains failed HTML check"
+    if manifest.showcase_status == "live-pass" and
+       _manifest_has_kind(manifest.artifacts, ScenarioCaptureKind.protocol):
+        if manifest.protocol_fields.len() == 0:
+            return "protocol artifact requires protocol_fields"
+        val protocol_result = scenario_protocol_evidence_validate(
+            manifest.protocol_fields
+        )
+        if protocol_result != "ok":
+            return "invalid protocol fields: " + protocol_result
+    if manifest.showcase_status == "live-pass" and
+       _manifest_has_kind(manifest.artifacts, ScenarioCaptureKind.motion) and
+       manifest.motion_evidence.len() == 0:
+        return "motion artifact requires motion_evidence"
+    var still_paths: [text] = []
+    for artifact in manifest.artifacts:
+        if artifact.kind == ScenarioCaptureKind.gui:
+            still_paths.push(artifact.path)
+    for motion in manifest.motion_evidence:
+        val transcript_present = _manifest_has_artifact_path(
+            manifest.artifacts, motion.transcript_path
+        )
+        var review_media_size = 0
+        var integrity_index = 0
+        while integrity_index < manifest.artifact_integrity.len():
+            val integrity = manifest.artifact_integrity[integrity_index]
+            if integrity.path == motion.review_media_path:
+                review_media_size = integrity.byte_size
+            integrity_index = integrity_index + 1
+        val motion_result = scenario_motion_evidence_validate(
+            motion, transcript_present, review_media_size, still_paths
+        )
+        if motion_result != "ok":
+            return "invalid motion evidence: " + motion_result
+    ""
+
+fn _manifest_provenance_complete(manifest: ScenarioEvidenceManifest) -> bool:
+    (
+        manifest.source_revision != "" and manifest.source_revision != "unrecorded" and
+        manifest.source_digest != "" and manifest.source_digest != "unrecorded" and
+        manifest.command != "" and manifest.producer != "" and
+        manifest.producer_version != "" and manifest.host != "" and
+        manifest.target != "" and manifest.start_time > 0 and
+        manifest.duration_ms >= 0 and _manifest_integrity_complete(manifest)
+    )
+
+fn _manifest_derived_status(manifest: ScenarioEvidenceManifest) -> text:
+    val result = manifest.result.trim().lower()
+    val target = manifest.target.trim().lower()
+    if result == "unsupported" or target == "unsupported":
+        return "unsupported"
+    if result == "blocked" or result == "fail" or result == "failed" or
+       manifest.blocker_prerequisite != "":
+        return "blocked"
+    if result == "planned":
+        return "planned"
+    if result == "historical-pass":
+        return "historical-pass"
+    if result != "pass" and result != "live-pass":
+        return "contract-only"
+    if _manifest_provenance_complete(manifest):
+        return "live-pass"
+    "historical-pass"
+
+pub fn validate_scenario_evidence_manifest(
+    manifest: ScenarioEvidenceManifest
+) -> Result<ScenarioEvidenceManifest, text>:
+    if manifest.schema_major != 1:
+        return Err("unsupported schema major: " + manifest.schema_major.to_text())
+    if manifest.schema_minor < 0:
+        return Err("invalid schema minor")
+    _manifest_required_text(manifest.feature_id, "feature_id")?
+    if manifest.requirement_ids.len() == 0:
+        return Err("missing required field: requirement_ids")
+    for requirement_id in manifest.requirement_ids:
+        _manifest_required_text(requirement_id, "requirement_ids[]")?
+    _manifest_required_text(manifest.spec_path, "spec_path")?
+    _manifest_required_text(manifest.generated_manual_path, "generated_manual_path")?
+    _manifest_required_text(manifest.scenario_id, "scenario_id")?
+    _manifest_required_text(manifest.result, "result")?
+    _manifest_required_text(manifest.showcase_status, "showcase_status")?
+    _manifest_required_text(manifest.owner, "owner")?
+    _manifest_required_text(manifest.final_reviewer, "final_reviewer")?
+    if not _manifest_status_valid(manifest.showcase_status):
+        return Err("invalid showcase status: " + manifest.showcase_status)
+    if not _manifest_path_safe(manifest.spec_path):
+        return Err("invalid spec_path: " + manifest.spec_path)
+    if not _manifest_path_safe(manifest.generated_manual_path):
+        return Err("invalid generated_manual_path: " + manifest.generated_manual_path)
+    if manifest.duration_ms < 0:
+        return Err("duration_ms must be non-negative")
+    if manifest.showcase_status == "live-pass" and manifest.artifacts.len() == 0:
+        return Err("live-pass manifest has no artifacts")
+    var i = 0
+    while i < manifest.artifacts.len():
+        val artifact = manifest.artifacts[i]
+        if artifact.title.trim() == "":
+            return Err("artifact title is required")
+        if not _manifest_artifact_path_safe(artifact.path):
+            return Err("invalid artifact path: " + artifact.path)
+        if not _manifest_mime_suffix_valid(artifact):
+            return Err("artifact kind/MIME/suffix mismatch: " + artifact.path)
+        if _manifest_duplicate_artifact(manifest.artifacts, i):
+            return Err("duplicate artifact: " + artifact.path)
+        i = i + 1
+    for integrity in manifest.artifact_integrity:
+        if not _manifest_has_artifact_path(manifest.artifacts, integrity.path):
+            return Err("artifact integrity references unknown path: " + integrity.path)
+        val integrity_result = scenario_artifact_integrity_validate(integrity)
+        if integrity_result != "ok":
+            return Err("invalid artifact integrity: " + integrity_result)
+    if manifest.showcase_status == "live-pass" and
+       not _manifest_integrity_complete(manifest):
+        return Err("live-pass requires valid integrity for every artifact")
+    val detail_error = _manifest_required_detail_valid(manifest)
+    if detail_error != "":
+        return Err(detail_error)
+    val derived = _manifest_derived_status(manifest)
+    if manifest.showcase_status != derived:
+        return Err("showcase status mismatch: declared " + manifest.showcase_status +
+            ", derived " + derived)
+    Ok(manifest)
+
+pub fn scenario_evidence_manifest_to_sdn(
+    manifest: ScenarioEvidenceManifest
+) -> text:
+    var value: Dict<text, SdnValue> = {}
+    value["schema_major"] = SdnValue.Int(manifest.schema_major)
+    value["schema_minor"] = SdnValue.Int(manifest.schema_minor)
+    value["feature_id"] = SdnValue.String(manifest.feature_id)
+    value["requirement_ids"] = evidence_codec_string_array(manifest.requirement_ids)
+    value["spec_path"] = SdnValue.String(manifest.spec_path)
+    value["generated_manual_path"] = SdnValue.String(manifest.generated_manual_path)
+    value["scenario_id"] = SdnValue.String(manifest.scenario_id)
+    value["step_id"] = SdnValue.String(manifest.step_id)
+    value["required"] = SdnValue.Bool(manifest.required)
+    value["result"] = SdnValue.String(manifest.result)
+    value["showcase_status"] = SdnValue.String(manifest.showcase_status)
+    value["reason"] = SdnValue.String(manifest.reason)
+    value["source_revision"] = SdnValue.String(manifest.source_revision)
+    value["source_digest"] = SdnValue.String(manifest.source_digest)
+    value["command"] = SdnValue.String(manifest.command)
+    value["producer"] = SdnValue.String(manifest.producer)
+    value["producer_version"] = SdnValue.String(manifest.producer_version)
+    value["host"] = SdnValue.String(manifest.host)
+    value["target"] = SdnValue.String(manifest.target)
+    value["backend"] = SdnValue.String(manifest.backend)
+    value["start_time"] = SdnValue.Int(manifest.start_time)
+    value["duration_ms"] = SdnValue.Int(manifest.duration_ms)
+    value["artifacts"] = evidence_codec_artifacts_value(manifest.artifacts)
+    value["artifact_integrity"] = evidence_codec_integrity_value(manifest.artifact_integrity)
+    value["text_results"] = evidence_codec_text_results_value(manifest.text_results)
+    value["motion_evidence"] = evidence_codec_motion_value(manifest.motion_evidence)
+    value["protocol_fields"] = evidence_codec_protocol_value(manifest.protocol_fields)
+    value["html_checks"] = evidence_codec_html_value(manifest.html_checks)
+    value["blocker_prerequisite"] = SdnValue.String(manifest.blocker_prerequisite)
+    value["resume_command"] = SdnValue.String(manifest.resume_command)
+    value["owner"] = SdnValue.String(manifest.owner)
+    value["final_reviewer"] = SdnValue.String(manifest.final_reviewer)
+    sdn_encode_canonical(SdnValue.Dict(value))
+
+fn _manifest_get_text(value: SdnValue, field: text) -> Result<text, text>:
+    if val Some(item) = value.get(field):
+        if val Some(result) = item.as_str():
+            return Ok(result)
+        return Err("field must be text: " + field)
+    Err("missing required field: " + field)
+
+fn _manifest_get_i64(value: SdnValue, field: text) -> Result<i64, text>:
+    if val Some(item) = value.get(field):
+        if val Some(result) = item.as_i64():
+            return Ok(result)
+        return Err("field must be integer: " + field)
+    Err("missing required field: " + field)
+
+fn _manifest_get_bool(value: SdnValue, field: text) -> Result<bool, text>:
+    if val Some(item) = value.get(field):
+        if val Some(result) = item.as_bool():
+            return Ok(result)
+        return Err("field must be bool: " + field)
+    Err("missing required field: " + field)
+
+fn _manifest_get_text_array(value: SdnValue, field: text) -> Result<[text], text>:
+    if val Some(item) = value.get(field):
+        if val Some(items) = item.as_array():
+            var result: [text] = []
+            for entry in items:
+                if val Some(text_entry) = entry.as_str():
+                    result.push(text_entry)
+                else:
+                    return Err("field entries must be text: " + field)
+            return Ok(result)
+        return Err("field must be array: " + field)
+    Err("missing required field: " + field)
+
+pub fn scenario_evidence_manifest_from_sdn(
+    source: text
+) -> Result<ScenarioEvidenceManifest, text>:
+    val parsed = parse_with_issues(source)?
+    for issue in parsed.1:
+        if issue.kind == "duplicate_key":
+            return Err("duplicate SDN field: " + issue.path)
+    val value = parsed.0
+    if not value.is_dict():
+        return Err("manifest root must be a dict")
+    val manifest = ScenarioEvidenceManifest(
+        schema_major: _manifest_get_i64(value, "schema_major")?,
+        schema_minor: _manifest_get_i64(value, "schema_minor")?,
+        feature_id: _manifest_get_text(value, "feature_id")?,
+        requirement_ids: _manifest_get_text_array(value, "requirement_ids")?,
+        spec_path: _manifest_get_text(value, "spec_path")?,
+        generated_manual_path: _manifest_get_text(value, "generated_manual_path")?,
+        scenario_id: _manifest_get_text(value, "scenario_id")?,
+        step_id: _manifest_get_text(value, "step_id")?,
+        required: _manifest_get_bool(value, "required")?,
+        result: _manifest_get_text(value, "result")?,
+        showcase_status: _manifest_get_text(value, "showcase_status")?,
+        reason: _manifest_get_text(value, "reason")?,
+        source_revision: _manifest_get_text(value, "source_revision")?,
+        source_digest: _manifest_get_text(value, "source_digest")?,
+        command: _manifest_get_text(value, "command")?,
+        producer: _manifest_get_text(value, "producer")?,
+        producer_version: _manifest_get_text(value, "producer_version")?,
+        host: _manifest_get_text(value, "host")?,
+        target: _manifest_get_text(value, "target")?,
+        backend: _manifest_get_text(value, "backend")?,
+        start_time: _manifest_get_i64(value, "start_time")?,
+        duration_ms: _manifest_get_i64(value, "duration_ms")?,
+        artifacts: evidence_codec_parse_artifacts(value)?,
+        artifact_integrity: evidence_codec_parse_integrity(value)?,
+        text_results: evidence_codec_parse_text_results(value)?,
+        motion_evidence: evidence_codec_parse_motion(value)?,
+        protocol_fields: evidence_codec_parse_protocol(value)?,
+        html_checks: evidence_codec_parse_html(value)?,
+        blocker_prerequisite: _manifest_get_text(value, "blocker_prerequisite")?,
+        resume_command: _manifest_get_text(value, "resume_command")?,
+        owner: _manifest_get_text(value, "owner")?,
+        final_reviewer: _manifest_get_text(value, "final_reviewer")?
+    )
+    validate_scenario_evidence_manifest(manifest)
+
+pub fn manifest_from_evidence_receipt(
+    receipt: EvidenceReceipt,
+    artifacts: [ScenarioEvidenceArtifact]
+) -> Result<ScenarioEvidenceManifest, text>:
+    val result = receipt.result.lower()
+    var blocker = ""
+    if result == "blocked" or result == "fail" or result == "failed" or
+       receipt.machine_or_qemu == "blocked":
+        blocker = receipt.failure_reason
+        if blocker == "":
+            blocker = "receipt execution unavailable"
+    val command = "simple test " + receipt.test_id
+    var status = "contract-only"
+    if result == "unsupported" or receipt.machine_or_qemu == "unsupported":
+        status = "unsupported"
+    elif blocker != "":
+        status = "blocked"
+    elif result == "planned":
+        status = "planned"
+    elif result == "historical-pass":
+        status = "historical-pass"
+    elif result == "pass":
+        # A receipt alone cannot prove current artifact identity/freshness.
+        status = "historical-pass"
+    val manifest = ScenarioEvidenceManifest(
+        schema_major: 1,
+        schema_minor: 0,
+        feature_id: receipt.test_id,
+        requirement_ids: [receipt.test_id],
+        spec_path: "test/" + receipt.test_id + "_spec.spl",
+        generated_manual_path: "doc/06_spec/" + receipt.test_id + "_spec.md",
+        scenario_id: receipt.test_id,
+        step_id: "",
+        required: true,
+        result: receipt.result,
+        showcase_status: status,
+        reason: receipt.failure_reason,
+        source_revision: receipt.commit,
+        source_digest: receipt.source_digest,
+        command: command,
+        producer: "simple-test",
+        producer_version: receipt.test_version,
+        host: receipt.machine_or_qemu,
+        target: receipt.target,
+        backend: receipt.firmware,
+        start_time: receipt.start_time,
+        duration_ms: receipt.duration,
+        artifacts: artifacts,
+        artifact_integrity: [],
+        text_results: [],
+        motion_evidence: [],
+        protocol_fields: [],
+        html_checks: [],
+        blocker_prerequisite: blocker,
+        resume_command: command,
+        owner: receipt.test_id,
+        final_reviewer: receipt.test_id
+    )
+    validate_scenario_evidence_manifest(manifest)
+
+export ScenarioEvidenceManifest
+export scenario_evidence_manifest_to_sdn, scenario_evidence_manifest_from_sdn
+export validate_scenario_evidence_manifest, manifest_from_evidence_receipt

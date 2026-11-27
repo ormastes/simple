@@ -1,5 +1,7 @@
 # Vec Types Contract Specification
 
+> Two CUDA error-scenario corrections prepared on 2026-11-07. Spec execution, SPipe regeneration and sspec-maintain remain WAIT_VERIFY. The retained manual has 23 scenario sections versus 22 executable declarations; its inventory and separate vector-load oracle drift still require complete reconciliation. Counts below are retained manual metadata, not current execution evidence.
+
 > Tests covering vec_types — gpu_intrinsics recognition, vec_types contract — OpenCL backend vec4 load, vec_types contract — OpenCL backend vec4 store, vec_types contract — OpenCL backend vec2 load/store, vec_types contract — CUDA backend vec4 load, vec_types contract — CUDA backend vec4 store, vec_types contract — CUDA backend vec2 load, vec_types contract — CUDA backend vec2 store.
 
 | Tests | Active | Skipped | Pending |
@@ -16,10 +18,6 @@
 ### vec_types — gpu_intrinsics recognition
 
 #### recognizes gpu_vec4_load_f32 as a GPU intrinsic
-
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
 
 - recognizes gpu_vec4_load_f32 as a GPU intrinsic
 
@@ -398,26 +396,29 @@ expect(result.unwrap_err().message).to_contain("vector loads require MIR vector 
 
 </details>
 
-#### rejects gpu_vec4_load_f32 with bad arity
+#### rejects gpu_vec4_load_f32 with bad arity (CUDA)
 
-- rejects gpu_vec4_load_f32 with bad arity
-   - Expected: result.is_err() is true
-
+- Submit the CUDA MIR fixture with 1 arguments to gpu_vec4_load_f32.
+- Expected: compilation returns a structured CUDA error and no successful source artifact.
+- Check the backend phase and the canonical diagnostic: `CUDA intrinsic 'gpu_vec4_load_f32' requires exactly 2 arguments`.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-UNIT
-step("rejects gpu_vec4_load_f32 with bad arity")
+step("rejects gpu_vec4_load_f32 with bad arity (CUDA)")
 val func = make_cuda_vec_kernel("cuda_vec4_load_bad", 401, vec4_load_bad_args_block())
 val backend = CudaBackend.create((8, 6))
 val result = backend.compile(make_module_from(func))
 expect(result.is_err()).to_equal(true)
-expect(result.unwrap_err().message).to_contain("requires exactly 2 arguments")
+if result.is_err():
+    val error = result.unwrap_err()
+    expect(error.phase).to_contain(BackendKind.Cuda.to_text())
+    expect(error.message).to_contain("CUDA intrinsic 'gpu_vec4_load_f32' requires exactly 2 arguments")
 ```
 
 </details>
@@ -449,26 +450,29 @@ expect(ptx).to_contain("st.global.v4.f32")
 
 </details>
 
-#### rejects gpu_vec4_store_f32 with bad arity
+#### rejects gpu_vec4_store_f32 with bad arity (CUDA)
 
-- rejects gpu_vec4_store_f32 with bad arity
-   - Expected: result.is_err() is true
-
+- Submit the CUDA MIR fixture with 3 arguments to gpu_vec4_store_f32.
+- Expected: compilation returns a structured CUDA error and no successful source artifact.
+- Check the backend phase and the canonical diagnostic: `CUDA intrinsic 'gpu_vec4_store_f32' requires exactly 6 arguments`.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-UNIT
-step("rejects gpu_vec4_store_f32 with bad arity")
+step("rejects gpu_vec4_store_f32 with bad arity (CUDA)")
 val func = make_cuda_vec_kernel("cuda_vec4_store_bad", 411, vec4_store_bad_args_block())
 val backend = CudaBackend.create((8, 6))
 val result = backend.compile(make_module_from(func))
 expect(result.is_err()).to_equal(true)
-expect(result.unwrap_err().message).to_contain("requires exactly 6 arguments")
+if result.is_err():
+    val error = result.unwrap_err()
+    expect(error.phase).to_contain(BackendKind.Cuda.to_text())
+    expect(error.message).to_contain("CUDA intrinsic 'gpu_vec4_store_f32' requires exactly 6 arguments")
 ```
 
 </details>

@@ -1,3 +1,13 @@
+use compiler.common.cache_contract.directory_aspect_projection_v2.{DirectoryAspectSemanticV2, DirectoryAspectObjectV2}
+use compiler.common.cache_contract.directory_macro_projection_v2.{DirectoryMacroProjectionV2}
+use compiler.frontend.cache_artifact.macro_category_projection_v2.{MacroCategoryDraftV2}
+use compiler.common.cache_contract.directory_aspect_draft_v2.{DirectoryAspectDraftV2}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
+use compiler.common.cache_contract.directory_source_epoch_v2.{DirectorySourceEpochV2}
+use compiler.common.cache_contract.mir_initializer_plan_v1.{MirInitializerObjectReceiptV1, MirInitializerBuildReceiptV1}
+use compiler.common.cache_contract.directory_category_projection_v2.{DirectoryCategoryProjectionV2}
+use compiler.common.cache_contract.directory_tldr_snapshot_v2.{DirectoryTldrSourceSnapshotV2}
+use compiler.common.cache.visibility_manifest_read_v1.{VisibilityManifestEvidenceV1}
 # Driver Types - heavyweight driver-only types and context wiring.
 #
 # Lightweight public types now live in driver_core_types.spl so external
@@ -5,20 +15,27 @@
 # compiler graph.
 
 export use compiler.common.driver_core_types.*
-use compiler.common.driver_compile_options.{CompileOptions}
+use compiler.common.driver_compile_options.{CompileOptions, compileoptions_normalize_mir_optimization}
 use compiler.common.assurance.representation_context_v1.{RepresentationSourceContextV1, representation_contexts_identity_v1}
 use compiler.driver.native_aot_artifacts.{native_aot_object_path_v1}
+use compiler.driver.cache.native_object_source_key_v1.{native_object_source_key_v1}
 use compiler.driver.native_capsule_mir_identity.{native_capsule_type_def_identity_v1, native_capsule_function_metadata_identity_v1}
 use compiler.driver.cache.native_source_interface_index.{NativeSourceInterfaceIndexV1}
 use compiler.driver.cache.native_module_witness_facts.{NativeModuleCacheFactSetV1}
 
 use compiler.hir.hir.*
+use compiler.semantics.param_effects.ownership_source_authority.{OwnershipSourceAuthorityV1}
 use std.env.{env_get}
 use std.nogc_sync_mut.sffi.transient.{
     transient_scope_begin, transient_scope_pause, transient_scope_end,
     transient_promote}
 use compiler.driver.compile_failure_policy.{compile_fail_fast_requested}
+use compiler.driver.driver_xray_policy.{xray_policy_resolve, xray_observer_request_error_for_build, driver_target_profile_identity_v1, xray_startup_consumer_request_error_v1}
+use compiler.driver.session.build_session.{BuildSession, build_session_inactive}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io.kernel_image_digest_v1.{
+    KernelImageDigestV1, kernel_image_digest_v1
+}
 
 # Formation probe for the diagnostics array. `== nil` is NOT usable here: the
 # nil sentinel is raw 3, so a ZEROED array reports "present" to every `!= nil`
@@ -29,7 +46,7 @@ use compiler.frontend.core.lexer.*
 use compiler.frontend.parser_types.{ParserModule}
 use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner}
 use compiler.hir.archive.tldr_function_header_v1.{AdmittedTldrFunctionImportV1}
-use compiler.driver.driver_native_objectless_proof.{driver_native_parser_impls_are_enum_templates_v1}
+use compiler.driver.driver_native_objectless_proof.{driver_native_parser_impls_are_enum_templates_v1, driver_native_parser_classes_are_metadata_only_v1}
 use compiler.frontend.treesitter.*
 use compiler.common.config.*
 use compiler.common.config.{CompilerConfig}
@@ -47,6 +64,11 @@ use compiler.common.di.{DiContainer}
 use compiler.common.compiler_services.{CompilerServices, create_default_services}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
+use compiler.common.api_signature_facts_v1.{ApiSignatureFactsV1}
+use compiler.common.api_export_route_facts_v1.{ApiExportRouteFactsV1}
+use compiler.common.api_exposure_result_v1.{ApiModuleExposureV1}
+use compiler.common.api_export_closure_facts_v1.{ApiExportClosureFactsV1}
+use compiler.common.api_publication_decision_v1.{ApiPublicationDecisionV1}
 use compiler.driver.cache.cold_hir_semantic_seed_v1.{ColdHirTypedReceiptV1}
 use compiler.driver.smf.runtime_std_hir_emission_types_v1.{RuntimeStdHirModuleEmissionV1}
 use compiler.driver.smf.runtime_std_mir_emission_types_v1.{RuntimeStdMirModuleEmissionV1}
@@ -85,7 +107,7 @@ use compiler.mir_opt.typed_storage_view_producer.{
     MirTypedStorageViewEvidenceV1, MirTypedStorageViewProducerResultV1
 }
 use compiler.driver.native_capsule_mir_identity.{storage_identity_text_v1,
-    native_capsule_function_metadata_identity_v1, native_capsule_type_def_identity_v1}
+    compute_native_capsule_mir_identity_v1}
 export use compiler.driver.native_capsule_mir_identity.{native_capsule_sorted_symbol_ids_v1}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.mcdc.model.{McdcMode, mcdc_mode_from_text, mcdc_mode_name}
@@ -123,7 +145,7 @@ fn driver_native_parsed_module_has_no_runtime_body_v1(parsed: ParserModule) -> b
     # presence and the body/data guards remain mandatory, so missing lowering
     # output for a real definition is never silently accepted.
     (parsed.domain_blocks.len() == 0 and
-        only_extern_functions and parsed.classes.len() == 0 and parsed.actors.len() == 0 and
+        only_extern_functions and driver_native_parser_classes_are_metadata_only_v1(ModuleSurfaceParserOwner.new(parsed)) and parsed.actors.len() == 0 and
         driver_native_parser_impls_are_enum_templates_v1(ModuleSurfaceParserOwner.new(parsed)) and
         parsed.constants.len() == 0 and parsed.static_asserts.len() == 0 and
         parsed.aop_advices.len() == 0 and parsed.di_bindings.len() == 0 and
@@ -167,7 +189,7 @@ class FrozenNativeModuleCapsuleV1:
     reason: text
 
     fn expected_identity() -> text:
-        "native-capsule-v1|{storage_identity_text_v1(self.module_name)}|{storage_identity_text_v1(self.mir_identity)}|{storage_identity_text_v1(self.storage_snapshot.module_identity)}|{storage_identity_text_v1(self.cache_source)}|{storage_identity_text_v1(self.source_identity)}|{storage_identity_text_v1(self.module_witness)}|{storage_identity_text_v1(self.module_witness_reason)}|{storage_identity_text_v1(self.backend_name)}|{storage_identity_text_v1(self.provider_receipt_hash)}|{storage_identity_text_v1(self.target)}|{storage_identity_text_v1(self.target_cpu)}|{self.opt_level}|{self.is_release}|{storage_identity_text_v1(self.object_path)}"
+        "native-capsule-v1|{storage_identity_text_v1(self.module_name)}|{storage_identity_text_v1(self.mir_identity)}|{storage_identity_text_v1(self.storage_snapshot.module_identity)}|{storage_identity_text_v1(native_object_source_key_v1(self.cache_source))}|{storage_identity_text_v1(self.source_identity)}|{storage_identity_text_v1(self.module_witness)}|{storage_identity_text_v1(self.module_witness_reason)}|{storage_identity_text_v1(self.backend_name)}|{storage_identity_text_v1(self.provider_receipt_hash)}|{storage_identity_text_v1(self.target)}|{storage_identity_text_v1(self.target_cpu)}|{self.opt_level}|{self.is_release}|{storage_identity_text_v1(self.object_path)}"
 
     fn identity_valid() -> bool:
         self.ok and self.mir_identity != ""
@@ -184,98 +206,74 @@ class FrozenNativeModuleCapsuleBatchV1:
     ok: bool
     registry_identity: text
     capsules: [FrozenNativeModuleCapsuleV1]
+    capsule_index: {text: i64} = {}
     reason: text
 
     fn find(module_name: text) -> FrozenNativeModuleCapsuleV1:
-        var found = FrozenNativeModuleCapsuleV1(ok: false,
-            module_name: module_name, capsule_identity: "",
-            mir_identity: "",
-            mir_module: MirModule(name: "", functions: {}, statics: {},
-                constants: {}, types: {}),
-            storage_snapshot: FrozenStorageModuleSnapshotV1(ok: false,
-                module_name: module_name, registry_identity: "",
-                module_identity: "", sites: [], evidence: [],
-                reason: "capsule-not-found"),
-            cache_source: "", source_identity: "", module_witness: "",
-            module_witness_reason: "", output_base: "", object_path: "",
-            backend_name: "", provider_receipt_hash: "", target: "", target_cpu: "", opt_level: 0,
-            is_release: false,
-            reason: "capsule-not-found")
-        var count = 0
-        for capsule in self.capsules:
-            if capsule.module_name == module_name:
-                found = capsule
-                count = count + 1
-        if count != 1:
-            found.ok = false
-            found.reason = if count == 0: "capsule-not-found" else: "duplicate-capsule"
-            return found
-        found
+        frozen_native_capsule_batch_find_v1(self, module_name)
+
+fn _frozen_native_capsule_missing_v1(module_name: text, reason: text) -> FrozenNativeModuleCapsuleV1:
+    FrozenNativeModuleCapsuleV1(ok: false,
+        module_name: module_name, capsule_identity: "", mir_identity: "",
+        mir_module: MirModule(name: "", functions: {}, statics: {},
+            constants: {}, types: {}, external_layout_traces: [],
+            collection_plan_explanations: [], enum_semantic_declarations: [],
+            attr_sites: [], initializer_plan_v1: None, xray_ring_wrap: false),
+        storage_snapshot: FrozenStorageModuleSnapshotV1(ok: false,
+            module_name: module_name, registry_identity: "",
+            module_identity: "", sites: [], evidence: [],
+            reason: reason),
+        cache_source: "", source_identity: "", module_witness: "",
+        module_witness_reason: "", output_base: "", object_path: "",
+        backend_name: "", provider_receipt_hash: "", target: "", target_cpu: "", opt_level: 0,
+        is_release: false, reason: reason)
 
 # Keep capsule lookup available as a uniquely named free function.  Bootstrap
 # native lowering can erase a class receiver and bind the common method name
 # `find` to text.find; its integer result is then misread as a capsule pointer.
-# This cold O(n) lookup preserves the batch's deterministic duplicate check.
+# Uses the immutable `capsule_index` for O(1) zero-allocation lookup on hits,
+# failing closed on duplicate (-1), out-of-bounds, or stale index entries.
+# reason: module_name lookup key is a canonical driver module path text
+@allow(primitive_api)
 pub fn frozen_native_capsule_batch_find_v1(
     batch: FrozenNativeModuleCapsuleBatchV1, module_name: text
 ) -> FrozenNativeModuleCapsuleV1:
-    var found = FrozenNativeModuleCapsuleV1(ok: false,
-        module_name: module_name, capsule_identity: "", mir_identity: "",
-        mir_module: MirModule(name: "", functions: {}, statics: {},
-            constants: {}, types: {}),
-        storage_snapshot: FrozenStorageModuleSnapshotV1(ok: false,
-            module_name: module_name, registry_identity: "",
-            module_identity: "", sites: [], evidence: [],
-            reason: "capsule-not-found"),
-        cache_source: "", source_identity: "", module_witness: "",
-        module_witness_reason: "", output_base: "", object_path: "",
-        backend_name: "", provider_receipt_hash: "", target: "", target_cpu: "", opt_level: 0,
-        is_release: false, reason: "capsule-not-found")
+    if batch.capsule_index.contains_key(module_name):
+        val idx = batch.capsule_index[module_name]
+        if idx == -1:
+            return _frozen_native_capsule_missing_v1(module_name, "duplicate-capsule")
+        if idx < 0 or idx >= batch.capsules.len():
+            return _frozen_native_capsule_missing_v1(module_name, "capsule-index-invalid")
+        val indexed = batch.capsules[idx]
+        if indexed.module_name != module_name:
+            return _frozen_native_capsule_missing_v1(module_name, "capsule-index-invalid")
+        return indexed
+    if batch.capsule_index.keys().len() > 0 or batch.capsules.len() == 0:
+        return _frozen_native_capsule_missing_v1(module_name, "capsule-not-found")
     var count = 0
-    for capsule in batch.capsules:
-        if capsule.module_name == module_name:
-            found = capsule
+    var match_idx = 0
+    var i = 0
+    while i < batch.capsules.len():
+        if batch.capsules[i].module_name == module_name:
+            match_idx = i
             count = count + 1
-    if count != 1:
-        found.ok = false
-        found.reason = if count == 0: "capsule-not-found" else: "duplicate-capsule"
-    found
+        i = i + 1
+    if count == 0:
+        return _frozen_native_capsule_missing_v1(module_name, "capsule-not-found")
+    if count > 1:
+        return _frozen_native_capsule_missing_v1(module_name, "duplicate-capsule")
+    batch.capsules[match_idx]
 
 extern fn rt_string_free(value: text) -> i64
 
-# Preserve the driver entry point while the pure identity implementation remains
-# independently usable without importing CompileContext and all driver backends.
+# Preserve the driver entry point while delegating to the streaming chunked
+# SHA-256 implementation in native_capsule_mir_identity.spl (avoiding giant
+# contiguous rows.join("\n") buffers and preserving active caller scopes).
 pub fn native_capsule_mir_identity_v1(module: MirModule) -> text:
-    # Canonical serialization is scratch, not a retained build graph. Keep only
-    # the digest after releasing intermediate JSON/identity rows. Missing owner
-    # support is a build error, never an empty identity or a cache bypass.
-    if not transient_scope_begin():
-        panic("native capsule MIR identity scratch scope unavailable")
-    val digest = native_capsule_mir_identity_in_owned_scope_v1(module)
-    val paused = transient_scope_pause()
-    val promoted = paused and transient_promote(digest)
-    val ended = transient_scope_end()
-    if not paused or not promoted or not ended:
+    val digest = compute_native_capsule_mir_identity_v1(module)
+    if digest == "":
         panic("native capsule MIR identity scratch ownership failed")
     digest
-
-fn native_capsule_mir_identity_in_owned_scope_v1(module: MirModule) -> text:
-    var rows: [text] = ["module|{storage_identity_text_v1(module.name)}"]
-    for symbol in native_capsule_sorted_symbol_ids_v1(module.functions.keys()):
-        val function = module.functions[symbol]
-        rows.push("fn|{symbol.id}|{storage_identity_text_v1(serialize_mir_function(function))}|{storage_identity_text_v1(native_capsule_function_metadata_identity_v1(function))}")
-    for symbol in native_capsule_sorted_symbol_ids_v1(module.constants.keys()):
-        val constant = module.constants[symbol]
-        rows.push("const|{symbol.id}|{storage_identity_text_v1(constant.name)}|{serialize_mir_type(constant.type_)}|{storage_identity_text_v1(serialize_const_value(constant.value))}")
-    for symbol in native_capsule_sorted_symbol_ids_v1(module.statics.keys()):
-        val static_value = module.statics[symbol]
-        var init_identity = "none"
-        if val init = static_value.init:
-            init_identity = "{init.symbol.id}|{storage_identity_text_v1(init.name)}|{serialize_mir_type(init.type_)}|{storage_identity_text_v1(serialize_const_value(init.value))}"
-        rows.push("static|{symbol.id}|{storage_identity_text_v1(static_value.name)}|{serialize_mir_type(static_value.type_)}|{static_value.is_mutable}|{storage_identity_text_v1(init_identity)}")
-    for symbol in native_capsule_sorted_symbol_ids_v1(module.types.keys()):
-        rows.push("type|{native_capsule_type_def_identity_v1(module.types[symbol])}")
-    sha256_text(rows.join("\n"))
 
 fn frozen_storage_site_identity_v1(site: MirStorageViewSiteBindingV1,
                                    evidence: MirTypedStorageViewEvidenceV1) -> text:
@@ -375,8 +373,28 @@ struct RuntimeStdFullInventorySelectionV1:
     source_inventory_digest: text
 
 class CompileContext:
+    directory_source_generation_v2: i64 = 0
+    directory_source_epoch_v2: DirectorySourceEpochV2? = None
+    # Supplied only by the admitted full-inventory request, never inferred
+    # from absent cache metadata or unchecked environment configuration.
+    directory_semantic_variant_v3: ConfigVariantKeyV1? = None
+    directory_category_projections_v2: Dict<text, DirectoryCategoryProjectionV2> = {}
+    directory_aspect_objects_v2: Dict<text, DirectoryAspectObjectV2> = {}
+    directory_aspect_semantics_v2: Dict<text, DirectoryAspectSemanticV2> = {}
+    directory_aspect_drafts_v2: Dict<text, DirectoryAspectDraftV2> = {}
+    directory_macro_drafts_v2: Dict<text, MacroCategoryDraftV2> = {}
+    directory_macro_projections_v2: Dict<text, DirectoryMacroProjectionV2> = {}
+    initializer_object_receipts_v1: Dict<text, MirInitializerObjectReceiptV1> = {}
+    initializer_build_receipt_v1: MirInitializerBuildReceiptV1? = None
+    aop_source_epoch_v2: i64 = 0
+    aop_snapshot_captured_v2: bool = false
+    aop_directory_snapshots_v2: [DirectoryTldrSourceSnapshotV2] = []
     options: CompileOptions
     native_target: text
+    # Lazy current-host executable observation. Call only when an authoritative
+    # feature needs it; target and configured producer authority remain
+    # separately admitted.
+    kernel_image_digest_provider: fn() -> Result<KernelImageDigestV1, text>
     # Resolved once by the composition root. Per-source parsing consumes this
     # typed projection and never reconstructs CLI/environment precedence.
     frontend_advisory_policy: FrontendAdvisoryPreprocessPolicyV1
@@ -387,7 +405,7 @@ class CompileContext:
     environment_variant_frontend_cache_identity: text
     assurance_policy: ResolvedAssurancePolicyV1
     # Built once after source resolution, before HIR scratch scopes begin.
-    representation_context_index_v1: Dict<text, RepresentationSourceContextV1>? = nil
+    representation_context_index_v1: Dict<text, RepresentationSourceContextV1>? = None
     config: Dict<text, text>  # Using dict instead of Config to avoid interpreter issues
     backend: BackendPort       # Typed port: visible contract, replaces extensions.resolve("Backend")
     extensions: DiContainer    # Dynamic extension point for plugins (Feature 5)
@@ -397,6 +415,8 @@ class CompileContext:
     # invalidate SourceFile field handles across transient parser scopes; these
     # arrays are created with independent text storage during phase 1.
     source_paths_owner: [text]
+    source_resolution_roots_owner: [text]
+    source_manifest_evidence_owner_v1: [VisibilityManifestEvidenceV1] = []
     source_authored_paths_owner: [text]
     source_contents_owner: [text]
     # Scalar size accompanies source_identities_owner after low-memory text
@@ -421,11 +441,15 @@ class CompileContext:
     native_parsed_objectless_proofs: Dict<text, text>
     # Compact phase-1 source facts and phase-2 routed inputs survive eviction.
     # Raw body/surface owners are still released at their existing boundary.
-    native_source_interface_index_v1: NativeSourceInterfaceIndexV1? = nil
+    native_source_interface_index_v1: NativeSourceInterfaceIndexV1? = None
     native_module_input_fact_snapshots_v1: Dict<text, NativeModuleCacheFactSetV1> = {}
     modules: Dict<text, ParserModule>
     module_surfaces: ModuleSurfacesByName?
     hir_modules: Dict<text, HirModule>
+    # Successful typed admission makes ownership safety mandatory for this
+    # context, including after HIR eviction and across subsequent batches.
+    nogc_ownership_required: bool = false
+    nogc_source_authorities: Dict<text, OwnershipSourceAuthorityV1> = {}
     # Cycle-124: the MIR provider-module list lives on the context (the
     # cycle-105 owner-field transport). The local form in
     # lower_to_mir_with_target_context degraded between its birth and its
@@ -450,6 +474,8 @@ class CompileContext:
     native_prelower_hit_objects: Dict<text, text>
     cold_hir_native_object_artifacts: [ColdHirNativeObjectArtifactV1]
     hir_module_count_value: i64
+    # AOP advices captured from HIR before evict_hir() so weave_aop still sees them.
+    hir_aop_advices_saved: [HirAopAdvice] = []
     # Cycle-78: lowering-local HirModules captured for validation lanes whose
     # dict reads arrive erased (rt_criticality). Carried on self.ctx -- the
     # campaign's proven transport -- because a local var mutated across this
@@ -535,10 +561,35 @@ class CompileContext:
     # whole-program field inference failed to type the never-seeded inferred
     # field post-merge (2026-10-22). Defaults preserve the pre-existing
     # all-false runtime behavior (nothing in src/app writes these yet).
+    # Build session (BSM P2): opened by CompilerDriver.compile(); heap 0 = none.
+    session: BuildSession
     tldr_entry_only: bool = false
     tldr_imports: [AdmittedTldrFunctionImportV1] = []
+    # Observation only, current retained-pass generation. Missing = not collected.
+    # No archive/cache/activation decision may use these as admission evidence.
+    api_signature_facts: Dict<text, ApiSignatureFactsV1> = {}
+    api_signature_node_count: i64 = 0
+    api_signature_retention_exhausted: bool = false
+    api_export_route_facts: ApiExportRouteFactsV1? = None
+    api_export_closure_facts: ApiExportClosureFactsV1? = None
+    # Walker classification of api_signature_facts: same generation, same
+    # lifetime. Observation only; never a named-rule or admission decision.
+    api_exposure: Dict<text, ApiModuleExposureV1> = {}
+    # Last `extreme_public_api` guard decision of this compile; nil = not run.
+    api_publication_decision: ApiPublicationDecisionV1? = None
+    # Per-CompileContext O(1) projected frozen-source lookup cache (eliminates
+    # module-global cross-context staleness in driver_aot_native_output.spl).
+    frozen_source_lookup_key_v1: text = ""
+    frozen_source_lookup_owner_len_v1: i64 = 0
+    frozen_source_lookup_sources_len_v1: i64 = 0
+    frozen_source_lookup_known_len_v1: i64 = 0
+    frozen_source_lookup_frozen_flag_v1: bool = false
+    frozen_source_lookup_indices_v1: Dict<text, i64> = {}
+    frozen_source_lookup_paths_v1: Dict<text, text> = {}
+    frozen_source_lookup_identities_v1: Dict<text, text> = {}
 
     static fn create(options: CompileOptions) -> CompileContext:
+        val normalized_options = compileoptions_normalize_mir_optimization(options)
         # Load config
         var config: Dict<text, text> = {}
         # Keep the receiver layout explicit: the bootstrap producer can lose
@@ -551,21 +602,21 @@ class CompileContext:
         # CompileOptions is the real CLI-to-driver boundary. Apply its values
         # after environment loading so command-line authority wins without a
         # process-global env write that could leak into concurrent compiles.
-        if options.mcdc_mode_text != "":
-            if val cli_mcdc_mode = mcdc_mode_from_text(options.mcdc_mode_text):
+        if normalized_options.mcdc_mode_text != "":
+            if val cli_mcdc_mode = mcdc_mode_from_text(normalized_options.mcdc_mode_text):
                 compiler_config.mcdc_mode = cli_mcdc_mode
             else:
-                config["mcdc_config_error"] = "MCDC-E-MODE: unknown MC/DC mode '{options.mcdc_mode_text}'"
-        if options.mcdc_owner_bytes > 0:
-            compiler_config.mcdc_owner_bytes = options.mcdc_owner_bytes
-        if options.mcdc_global_bytes > 0:
-            if options.mcdc_global_bytes >= compiler_config.mcdc_owner_bytes:
-                compiler_config.mcdc_global_bytes = options.mcdc_global_bytes
+                config["mcdc_config_error"] = "MCDC-E-MODE: unknown MC/DC mode '{normalized_options.mcdc_mode_text}'"
+        if normalized_options.mcdc_owner_bytes > 0:
+            compiler_config.mcdc_owner_bytes = normalized_options.mcdc_owner_bytes
+        if normalized_options.mcdc_global_bytes > 0:
+            if normalized_options.mcdc_global_bytes >= compiler_config.mcdc_owner_bytes:
+                compiler_config.mcdc_global_bytes = normalized_options.mcdc_global_bytes
             else:
-                config["mcdc_config_error"] = "MC/DC global byte budget must be at least the owner byte budget (owner={compiler_config.mcdc_owner_bytes}, global={options.mcdc_global_bytes})"
+                config["mcdc_config_error"] = "MC/DC global byte budget must be at least the owner byte budget (owner={compiler_config.mcdc_owner_bytes}, global={normalized_options.mcdc_global_bytes})"
         if compiler_config.mcdc_global_bytes < compiler_config.mcdc_owner_bytes:
             config["mcdc_config_error"] = "MC/DC global byte budget must be at least the owner byte budget (owner={compiler_config.mcdc_owner_bytes}, global={compiler_config.mcdc_global_bytes})"
-        if compiler_config.coverage_enabled or options.coverage_enabled:
+        if compiler_config.coverage_enabled or normalized_options.coverage_enabled:
             config["coverage"] = "1"
         config["mcdc_mode"] = mcdc_mode_name(compiler_config.mcdc_mode)
         config["mcdc_owner_bytes"] = compiler_config.mcdc_owner_bytes.to_text()
@@ -577,9 +628,30 @@ class CompileContext:
         # Standalone native CLI transports its requested mode through the
         # stable text field because the enum field can be corrupted by the
         # aggregate argument copy into this function.
-        var selected_mode_text = options.mode.to_text()
-        if options.cli_mode_text != "":
-            selected_mode_text = options.cli_mode_text
+        var selected_mode_text = normalized_options.mode.to_text()
+        if normalized_options.cli_mode_text != "":
+            selected_mode_text = normalized_options.cli_mode_text
+        # Re-resolve requested target policy before cache/codegen admission.
+        match driver_target_profile_identity_v1(normalized_options):
+            case Ok(identity): config["target_profile_identity_v1"] = identity
+            case Err(reason): config["xray_config_error"] = reason
+        # XRay static switch: the single resolution point (driver_xray_policy).
+        # Off never writes a key, so the default config is unchanged.
+        if normalized_options.xray_enabled:
+            match xray_policy_resolve(true, selected_mode_text, normalized_options.backend, normalized_options.release, normalized_options.output_format.to_text()):
+                case Ok(_): config["xray"] = "on"
+                case Err(reason): config["xray_config_error"] = reason
+        if normalized_options.xray_startup_consumer_v1 and not config.contains_key("xray_config_error"):
+            val startup_error = xray_startup_consumer_request_error_v1(normalized_options)
+            if startup_error != "": config["xray_config_error"] = startup_error
+            else: config["xray_startup_consumer_v1"] = "on"
+        # Observer aspect-param request: same single decision point. Admitted
+        # (absent/explicit-Off) writes nothing, so the default config is unchanged.
+        if not config.contains_key("xray_config_error"):
+            val observer_error = xray_observer_request_error_for_build(normalized_options.aspect_params, normalized_options.native_target,
+                (config.get("xray") ?? "") == "on", normalized_options.backend)
+            if observer_error != "":
+                config["xray_config_error"] = observer_error
 
         # Build typed BackendPort from concrete implementation based on mode
         val backend = if selected_mode_text == "interpret" or selected_mode_text == "smf_exec":
@@ -599,7 +671,7 @@ class CompileContext:
                 target_triple_fn: fn(): "native-jit"
             )
         elif selected_mode_text == "aot":
-            val output = options.output_file ?? _driver_types_default_output(options.input_files)
+            val output = normalized_options.output_file ?? _driver_types_default_output(normalized_options.input_files)
             BackendPort(
                 name: "aot",
                 run_fn: fn(m): k1_jit_lane_process_hir_aot_v1(m, output),
@@ -623,17 +695,19 @@ class CompileContext:
             )
 
         # Setup extensions container for plugin/extension use (Feature 5)
-        val extensions = DiContainer(profile: options.profile, locked: false)
+        val extensions = DiContainer(profile: normalized_options.profile, locked: false)
 
         # Setup logger from env var (SIMPLE_LOG=debug|trace|info|warn|error)
-        val logger = if options.verbose:
+        val logger = if normalized_options.verbose:
             BootLogger(level: 10)  # verbose flag forces debug level
         else:
             BootLogger.from_env()
 
         CompileContext(
-            options: options,
-            native_target: options.native_target,
+            session: build_session_inactive(),
+            options: normalized_options,
+            native_target: normalized_options.native_target,
+            kernel_image_digest_provider: kernel_image_digest_v1,
             frontend_advisory_policy: FrontendAdvisoryPreprocessPolicyV1.Reference,
             environment_variant_policy_digest: "",
             environment_variant_frontend_owner_id: 0u64,
@@ -647,6 +721,7 @@ class CompileContext:
             logger: logger,
             sources: [],
             source_paths_owner: [],
+            source_resolution_roots_owner: [],
             source_authored_paths_owner: [],
             source_contents_owner: [],
             source_byte_lengths_owner: [],
@@ -657,8 +732,10 @@ class CompileContext:
             native_parsed_classifications: {},
             native_parsed_objectless_proofs: {},
             modules: {},
-            module_surfaces: nil,
+            module_surfaces: None,
             hir_modules: {},
+            nogc_ownership_required: false,
+            nogc_source_authorities: {},
             mir_feed_modules: [],
             cold_hir_typed_receipts: [],
             cold_hir_native_object_paths: {},
@@ -674,7 +751,7 @@ class CompileContext:
             validation_module_claim_counts: [],
             bootstrap_entry_hir: nil,
             mir_modules: {},
-            bootstrap_entry_mir: nil,
+            bootstrap_entry_mir: None,
             bootstrap_entry_mir_name: "",
             errors: [],
             error_count_value: 0,
@@ -693,21 +770,29 @@ class CompileContext:
             frozen_storage_sites: [],
             frozen_storage_evidence: [],
             frozen_storage_known_module_names: [],
-            demand_mir_input: nil,
-            demand_mir_admission: nil,
-            demand_compile_execution: nil,
-            demand_artifact_route: nil,
-            demand_scc_publication: nil,
+            demand_mir_input: None,
+            demand_mir_admission: None,
+            demand_compile_execution: None,
+            demand_artifact_route: None,
+            demand_scc_publication: None,
             demand_dirty_modules: [],
             archive_semantic_owner: SemanticContext([], []),
             archive_action_owner: CompileActionRegistry([], []),
-            runtime_std_full_inventory_selection: nil,
+            runtime_std_full_inventory_selection: None,
             runtime_std_cfg_decisions: {},
             runtime_std_cfg_source_identity_by_path: {},
             runtime_std_cfg_source_digest_by_path: {},
             runtime_std_hir_emissions: {},
             runtime_std_mir_emissions: {},
-            native_objectless_decl_proofs: {}
+            native_objectless_decl_proofs: {},
+            frozen_source_lookup_key_v1: "",
+            frozen_source_lookup_owner_len_v1: 0,
+            frozen_source_lookup_sources_len_v1: 0,
+            frozen_source_lookup_known_len_v1: 0,
+            frozen_source_lookup_frozen_flag_v1: false,
+            frozen_source_lookup_indices_v1: {},
+            frozen_source_lookup_paths_v1: {},
+            frozen_source_lookup_identities_v1: {}
         )
 
     fn storage_binding_rows_well_formed() -> bool:
@@ -946,6 +1031,7 @@ class CompileContext:
         self.frozen_storage_known_module_names = frozen_known_names
         if not self.frozen_storage_registry_well_formed(): return "invalid"
         self.storage_registry_frozen = true
+        self.frozen_source_lookup_key_v1 = ""
         self.storage_registry_frozen_identity
 
     # Staged native codegen freezes the registry at its FIRST batch, before
@@ -966,6 +1052,7 @@ class CompileContext:
                 known_seen[scheduled_name] = true
                 known_names.push(scheduled_name)
         self.frozen_storage_known_module_names = known_names
+        self.frozen_source_lookup_key_v1 = ""
         identity
 
     fn frozen_storage_module_snapshot(module_name: text) -> FrozenStorageModuleSnapshotV1:
@@ -1024,16 +1111,61 @@ class CompileContext:
                 result.push(module_name)
         result
 
+    fn _frozen_schedule_uniquely_selects_path_v1(module_name: text, candidate_path: text) -> bool:
+        if not self.storage_registry_frozen or candidate_path == "":
+            return false
+        if self.frozen_storage_known_module_names.len() == 0:
+            return false
+        val owners_aligned =
+            self.source_paths_owner.len() == self.source_identities_owner.len() and
+            self.source_paths_owner.len() == self.source_module_names_owner.len()
+        if not owners_aligned:
+            return false
+        var known_set: {text: bool} = {}
+        var known_mod_count = 0
+        for km in self.frozen_storage_known_module_names:
+            if km == module_name:
+                known_mod_count = known_mod_count + 1
+            known_set[km] = true
+        if known_mod_count != 1:
+            return false
+        var scheduled_on_path = 0
+        var matched_self = false
+        var expected_sha = ""
+        var i = 0
+        while i < self.source_module_names_owner.len():
+            if self.source_paths_owner[i] == candidate_path:
+                val row_sha = self.source_identities_owner[i]
+                if row_sha == "" or row_sha == sha256_text(""):
+                    return false
+                if expected_sha == "":
+                    expected_sha = row_sha
+                elif row_sha != expected_sha:
+                    return false
+                val row_mod = self.source_module_names_owner[i]
+                if known_set.contains_key(row_mod):
+                    scheduled_on_path = scheduled_on_path + 1
+                    if row_mod == module_name:
+                        matched_self = true
+            i = i + 1
+        scheduled_on_path == 1 and matched_self
+
     fn frozen_native_cache_source_v1(module_name: text) -> text:
         var found_path = ""
+        var mod_matches = 0
         for source in self.sources:
             if source.module_name == module_name:
+                mod_matches = mod_matches + 1
                 found_path = source.path
-        if found_path == "": return ""
+        if mod_matches != 1 or found_path == "": return ""
         var path_count = 0
         for source in self.sources:
             if source.path == found_path: path_count = path_count + 1
-        if path_count == 1: found_path else: ""
+        if path_count == 1:
+            return found_path
+        if path_count > 1 and self._frozen_schedule_uniquely_selects_path_v1(module_name, found_path):
+            return found_path
+        ""
 
     # Identity of the bytes source `index` actually compiled.
     #
@@ -1102,13 +1234,17 @@ class CompileContext:
                             alias_identity != owner_identity:
                         owner_alias_hashes_consistent = false
                 index = index + 1
+        val path_uniquely_selected = source_path_matches == 1 or (
+            source_path_matches > 1 and
+            self._frozen_schedule_uniquely_selects_path_v1(module_name, cache_source))
         if owners_aligned and source_module_matches == 1 and
-                source_path_matches == 1 and owner_module_matches == 1 and
+                path_uniquely_selected and owner_module_matches == 1 and
                 owner_path == cache_source and owner_path_matches >= 1 and
                 owner_alias_hashes_consistent and
                 owner_identity != "" and owner_identity != sha256_text(""):
-            # Full-inventory rows may alias this physical path only when their
-            # captured SHA agrees with the exact selected-module owner row.
+            # Full-inventory rows (and streaming-surface retained alias rows) may
+            # alias this physical path only when the frozen lowering schedule
+            # uniquely selects one module for it and all alias rows agree on SHA.
             return owner_identity
         ""
 
@@ -1123,30 +1259,30 @@ class CompileContext:
             or not self.frozen_storage_registry_well_formed():
             return FrozenNativeModuleCapsuleBatchV1(ok: false,
                 registry_identity: self.storage_binding_identity(), capsules: [],
-                reason: "storage-registry-not-frozen")
+                capsule_index: {}, reason: "storage-registry-not-frozen")
         var capsules: [FrozenNativeModuleCapsuleV1] = []
+        var capsule_index: {text: i64} = {}
         var index = 0
         while index < module_names.len():
             val module_name = module_names[index]
             if module_name == "":
                 return FrozenNativeModuleCapsuleBatchV1(ok: false,
                     registry_identity: self.storage_binding_identity(), capsules: [],
-                    reason: "invalid-capsule-module-name")
-            var prior = 0
-            while prior < index:
-                if module_names[prior] == module_name:
-                    return FrozenNativeModuleCapsuleBatchV1(ok: false,
-                        registry_identity: self.storage_binding_identity(), capsules: [],
-                        reason: "duplicate-capsule-module")
-                prior = prior + 1
+                    capsule_index: {}, reason: "invalid-capsule-module-name")
+            if capsule_index.contains_key(module_name):
+                return FrozenNativeModuleCapsuleBatchV1(ok: false,
+                    registry_identity: self.storage_binding_identity(), capsules: [],
+                    capsule_index: {}, reason: "duplicate-capsule-module")
             val snapshot = self.frozen_storage_module_snapshot(module_name)
             if not snapshot.ok:
                 return FrozenNativeModuleCapsuleBatchV1(ok: false,
                     registry_identity: self.storage_binding_identity(), capsules: [],
-                    reason: snapshot.reason)
+                    capsule_index: {}, reason: snapshot.reason)
             var module_found = false
             var module = MirModule(name: "", functions: {}, statics: {},
-                constants: {}, types: {})
+                constants: {}, types: {}, external_layout_traces: [],
+                collection_plan_explanations: [], enum_semantic_declarations: [],
+                attr_sites: [], initializer_plan_v1: None, xray_ring_wrap: false)
             if module_name == self.bootstrap_entry_mir_name
                 and self.bootstrap_entry_mir.?:
                 module = self.bootstrap_entry_mir.unwrap()
@@ -1157,11 +1293,11 @@ class CompileContext:
             if not module_found:
                 return FrozenNativeModuleCapsuleBatchV1(ok: false,
                     registry_identity: self.storage_binding_identity(), capsules: [],
-                    reason: "capsule-mir-module-missing")
+                    capsule_index: {}, reason: "capsule-mir-module-missing")
             if module.name != "" and module.name != module_name:
                 return FrozenNativeModuleCapsuleBatchV1(ok: false,
                     registry_identity: self.storage_binding_identity(), capsules: [],
-                    reason: "capsule-mir-module-name-mismatch")
+                    capsule_index: {}, reason: "capsule-mir-module-name-mismatch")
             val cache_source = self.frozen_native_cache_source_v1(module_name)
             val source_identity = self.frozen_native_cache_source_identity_v1(module_name)
             val module_witness = if module_witnesses.contains_key(module_name):
@@ -1177,7 +1313,7 @@ class CompileContext:
             if mir_identity == "":
                 return FrozenNativeModuleCapsuleBatchV1(ok: false,
                     registry_identity: self.storage_binding_identity(), capsules: [],
-                    reason: "capsule-mir-identity-unavailable")
+                    capsule_index: {}, reason: "capsule-mir-identity-unavailable")
             var capsule = FrozenNativeModuleCapsuleV1(ok: true,
                 module_name: module_name, capsule_identity: "",
                 mir_identity: mir_identity,
@@ -1191,11 +1327,12 @@ class CompileContext:
                 target: target, target_cpu: target_cpu, opt_level: opt_level,
                 is_release: is_release, reason: "ok")
             capsule.capsule_identity = capsule.expected_identity()
+            capsule_index[module_name] = capsules.len()
             capsules.push(capsule)
             index = index + 1
         FrozenNativeModuleCapsuleBatchV1(ok: true,
             registry_identity: self.storage_binding_identity(),
-            capsules: capsules, reason: "ok")
+            capsules: capsules, capsule_index: capsule_index, reason: "ok")
 
     me add_error(message: text):
         # Level-gated (SIMPLE_DUMP_COMPILE_ERRORS=1, default off). Phase 3 loses
@@ -1205,6 +1342,12 @@ class CompileContext:
         # way to read a phase-3 error; it recovered the mcp_server_init one.
         if (env_get("SIMPLE_DUMP_COMPILE_ERRORS")) == "1":
             eprint("[compile-error] {message}")
+        elif self.error_count_value == 0:
+            # The count can survive native CompileContext transport while the
+            # message array does not (stage-2 `phase 2 FAILED (1 recorded
+            # error(s))` followed by blank lines). Mirror the ROOT error once,
+            # while this frame still owns the text, so it is never swallowed.
+            eprint("[first-compile-error] {message}")
         self.errors.push(message)
         self.error_count_value = self.error_count_value + 1
 
@@ -1315,6 +1458,38 @@ class CompileContext:
         self.source_contents_owner = []
         reclaimed
 
+    # Free C-heap `.spl` source buffers for unloaded physical files in `worker_unit`
+    # children before HIR/MIR/LLVM begins. Keyed by `canonical_paths[idx]` so physical
+    # aliases (`lib` vs `std` twins or preclosed alias rows) of a kept module are never
+    # freed while `rt_string_free` safely deduplicates shared handles across dropped twins.
+    me reclaim_unloaded_streaming_sources_v1(kept_canonical_paths: Dict<text, bool>, canonical_paths: [text]) -> i64:
+        var reclaimed: i64 = 0
+        var idx: i64 = 0
+        while idx < self.sources.len():
+            val canon = if idx < canonical_paths.len(): canonical_paths[idx] else: ""
+            if canon != "" and not kept_canonical_paths.contains_key(canon):
+                val freed_src = rt_string_free(self.sources[idx].content)
+                if freed_src == 1:
+                    reclaimed = reclaimed + 1
+                if idx < self.source_contents_owner.len():
+                    val freed_owner = rt_string_free(self.source_contents_owner[idx])
+                    if freed_owner == 1:
+                        reclaimed = reclaimed + 1
+                    self.source_contents_owner[idx] = ""
+                val orig = self.sources[idx]
+                var trimmed = SourceFile(
+                    path: orig.path,
+                    authored_path: orig.authored_path,
+                    content: "",
+                    module_name: orig.module_name
+                )
+                if idx < self.source_manifest_evidence_owner_v1.len():
+                    trimmed = source_file_with_manifest_evidence_v1(trimmed,
+                        self.source_manifest_evidence_owner_v1[idx])
+                self.sources[idx] = trimmed
+            idx = idx + 1
+        reclaimed
+
     # Streaming parse reads the promoted SoA owners, not SourceFile.content.
     # After the AOT interface fingerprint has consumed the original records,
     # reclaim those independent buffers while preserving one metadata record
@@ -1349,6 +1524,7 @@ class CompileContext:
                 module_name: source.module_name
             ))
         self.sources = metadata
+        self.frozen_source_lookup_key_v1 = ""
         # The streaming owner has already been reclaimed on the successful HIR
         # path. Keep reused contexts fail-closed even when the array contained
         # physical aliases of the source allocations above.
@@ -1380,11 +1556,17 @@ class CompileContext:
     me evict_ast():
         self.modules = {}
 
-    # After MIR lowering, HIR modules are no longer needed.
+    # After MIR lowering, HIR modules and feed buffers are no longer needed.
     me evict_hir():
+        for hir_name in self.hir_modules.keys():
+            for advice in self.hir_modules[hir_name].aop_advices:
+                self.hir_aop_advices_saved.push(advice)
         self.hir_modules = {}
         self.hir_module_count_value = 0
         self.bootstrap_entry_hir = nil
+        self.mir_feed_modules = []
+        self.validation_module_array = []
+        self.validation_module_blobs = []
 
     # Register the entry MIR alias together with the `mir_modules` key it was
     # stored under, so eviction can clear both. Callers that set
@@ -1402,7 +1584,20 @@ class CompileContext:
     # alongside its dict entry, mirroring `evict_hir` above which already
     # clears its `bootstrap_entry_hir` twin.
     me evict_mir_module(name: text):
-        self.mir_modules.remove(name)
+        self.evict_mir_modules([name])
+
+    # Batch form: one pass over the storage rows for the whole batch, so
+    # evicting N modules costs O(rows) instead of O(N * rows).
+    me evict_mir_modules(names: [text]):
+        if names.len() == 0:
+            return
+        var evicted: Dict<text, bool> = {}
+        for name in names:
+            evicted[name] = true
+            self.mir_modules.remove(name)
+            if self.bootstrap_entry_mir_name != "" and self.bootstrap_entry_mir_name == name:
+                self.bootstrap_entry_mir = None
+                self.bootstrap_entry_mir_name = ""
         var kept_names: [text] = []
         var kept_bindings: [MirStorageViewSiteBindingV1] = []
         var kept_evidence_names: [text] = []
@@ -1410,7 +1605,7 @@ class CompileContext:
         if not self.storage_registry_frozen and self.storage_binding_rows_well_formed():
             var index = 0
             while index < self.storage_binding_module_names.len():
-                if self.storage_binding_module_names[index] != name:
+                if not evicted.contains_key(self.storage_binding_module_names[index]):
                     kept_names.push(self.storage_binding_module_names[index])
                     kept_bindings.push(self.storage_view_site_bindings[index])
                 index = index + 1
@@ -1420,7 +1615,7 @@ class CompileContext:
         if not self.storage_registry_frozen and self.storage_evidence_rows_well_formed():
             var evidence_index = 0
             while evidence_index < self.storage_evidence_module_names.len():
-                if self.storage_evidence_module_names[evidence_index] != name:
+                if not evicted.contains_key(self.storage_evidence_module_names[evidence_index]):
                     kept_evidence_names.push(self.storage_evidence_module_names[evidence_index])
                     kept_evidence.push(self.storage_view_evidence_rows[evidence_index])
                 evidence_index = evidence_index + 1
@@ -1429,17 +1624,16 @@ class CompileContext:
             self.storage_view_evidence_rows = kept_evidence
         # Frozen site/evidence rows remain the immutable build receipt/cache
         # authority; MIR eviction may reclaim payloads but not identity.
-        if self.bootstrap_entry_mir_name != "" and self.bootstrap_entry_mir_name == name:
-            self.bootstrap_entry_mir = nil
-            self.bootstrap_entry_mir_name = ""
 
 # ============================================================================
 # Compile Options Hash Helper
 # ============================================================================
 
 fn compute_options_hash(opts: CompileOptions) -> CompileOptionsHash:
-    val opt_level = compileoptions_effective_mir_opt_level(opts)
-    compile_options_hash_compute(opts.backend, opt_level, opts.release, opts.debug_info, opts.gc_off, opts.profile, opts.allowed_families, opts.native_libraries, opts.native_library_paths, opts.native_linker_flags, opts.collection_policy, opts.collection_memory_budget_bytes, opts.native_target, representation_contexts_identity_v1(opts.representation_sources))
+    val normalized = compileoptions_normalize_mir_optimization(opts)
+    val opt_level = compileoptions_effective_mir_opt_level(normalized)
+    val target_identity = driver_target_profile_identity_v1(normalized).unwrap_or("invalid-target-profile-v1")
+    compile_options_hash_compute(normalized.backend, opt_level, normalized.release, normalized.debug_info, normalized.gc_off, normalized.profile, normalized.allowed_families, normalized.native_libraries, normalized.native_library_paths, normalized.native_linker_flags, normalized.collection_policy, normalized.collection_memory_budget_bytes, normalized.native_target, representation_contexts_identity_v1(normalized.representation_sources), normalized.library_mode, normalized.xray_enabled, target_identity)
 
 # ============================================================================
 # Exports

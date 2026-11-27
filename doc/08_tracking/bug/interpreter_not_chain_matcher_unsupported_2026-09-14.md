@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN, thoroughly diagnosed, deliberately not fixed this round (see "Why not fixed" below)
+- Status: SUPERSEDED (2026-11-11, lane int9) — fixed on origin/release/1.0.0 by `9e7e7a526edb` (PR #7597); see addenda below
 - Binary: `d4c0779cef6cf0cc4054` / rebuilt `57761d4fbfed5e444a36` (neither carries a fix for this)
 - Base: `work/unit-p1-2026-09-13` at `d2887f81bf2`
 - Affects: **61 spec files, 244 call sites** across `test/01_unit` (exhaustive count:
@@ -138,3 +138,56 @@ enclosing `it` block. Not a data-loss-style silent-pass risk — it fails
 loudly, every time, at ERROR severity, exactly like the JavaNew case's
 diagnostic-quality standard.
 
+
+## Addendum 2026-11-11 (lane interp6) — SUPERSEDED
+
+**Verdict: SUPERSEDED — fixed on origin/release/1.0.0.**
+
+The interpreter's `Expr::MethodCall` arm in
+`src/compiler_rust/compiler/src/interpreter/expr/calls.rs:193-206` now peels
+the BDD negation link before generic dispatch: for `method.starts_with("to")`
+it calls `peel_bdd_matcher_receiver(receiver)` (handles both
+`FieldAccess { expect(x), "not" }` and paren `not(...)`/`not_(...)` method
+forms) and routes to `evaluate_negated_bdd_matcher` in
+`src/compiler_rust/compiler/src/interpreter_method/mod.rs:308-341`, which
+maps dedicated negated arms (`to_not_contain` etc.) and otherwise runs the
+positive matcher with suppressed failure state. This is exactly the fix
+location the bug doc prescribed.
+
+Fixing commit: `9e7e7a526edb43ab29171d920449367e5fd48127` (2026-11-07,
+squash-merge of PR #7597) — confirmed via
+`git log -S 'evaluate_negated_bdd_matcher'` and the commit diff.
+
+**Seed-smoke verification (refreshed seed, build-commit 0791c2b7f4a7):**
+scratch probe `build/p3fix-interp6/not_chain_seed_smoke_spec.spl` (build/,
+gitignored) runs the bug doc's minimal repro shape plus all three spellings in
+use across the tree (`.not.to_contain`, `.not.to_equal`, `.not.to_be_nil`):
+
+```
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe $PWD/bin/simple.exe test \
+  build/p3fix-interp6/not_chain_seed_smoke_spec.spl --mode=interpreter --no-cache
+SPEC FILE VERDICT ... outcome=OK declared>=3 executed=3 passed=3 failed=0
+Results: 3 total, 3 passed, 0 failed
+```
+
+Before the fix each assertion aborted with
+`semantic: undefined field: unknown property or method 'not' on String`.
+
+
+## Addendum 2026-11-11 (lane int9) — header flip; int9-firsthand seed-smoke confirms interp6 verdict
+
+Header Status flipped OPEN -> SUPERSEDED. Absorber unchanged:
+`9e7e7a526edb43ab29171d920449367e5fd48127` (2026-11-07, squash-merge of
+PR #7597) — the `peel_bdd_matcher_receiver` /
+`evaluate_negated_bdd_matcher` path the doc prescribed,
+`src/compiler_rust/compiler/src/interpreter/expr/calls.rs:193-206` and
+`src/compiler_rust/compiler/src/interpreter_method/mod.rs:308-341`
+(present in tree at HEAD `9f3df4c125ad`).
+
+int9 re-verified on this lane's tracked seed (`bin/simple.exe`,
+build-commit `46fe8f6b6def`, `--mode=interpreter --no-cache`), scratch spec
+`build/p3fix-int9/int9_seed_smoke_spec.spl` (build/, gitignored): all three
+spellings in use across the tree — `.not.to_contain`, `.not.to_equal`,
+`.not.to_be_nil` — 4/4 examples PASS (the not-chain example green; the other
+examples cover the sibling rows listed there). Before the fix each raised
+`semantic: undefined field: unknown property or method 'not' on String`.

@@ -633,6 +633,20 @@ impl Target {
         self.arch == TargetArch::host() && self.os == TargetOS::host()
     }
 
+    /// Whether libraries built for this compiler's host ABI may be reused.
+    /// A parsed Windows triple carries an ABI hint while `host()` deliberately
+    /// remains const and hint-free. Compare the effective ABI against the
+    /// compiler's build ABI, not an ambient override of the host target.
+    pub fn uses_host_runtime_abi(&self) -> bool {
+        if self.os != TargetOS::Windows {
+            return *self == Self::host();
+        }
+        self.is_host()
+            && self.wasm_runtime == Self::host().wasm_runtime
+            && self.linker_flavor()
+                == if cfg!(target_env = "gnu") { LinkerFlavor::Gnu } else { LinkerFlavor::Msvc }
+    }
+
     /// Parse a target triple string (e.g., "x86_64-linux", "aarch64-macos", "wasm32-wasi").
     pub fn parse(s: &str) -> Result<Self, TargetParseError> {
         let parts: Vec<&str> = s.split('-').collect();
@@ -683,6 +697,8 @@ impl Target {
                 "macos" | "darwin" | "apple" => TargetOS::MacOS,
                 "freebsd" => TargetOS::FreeBSD,
                 "none" | "bare" | "wasi" => TargetOS::None,
+                // llvm-mingw spelling: `<arch>-w64-mingw32` / `<arch>-w64-windows-gnu`.
+                "w64" => TargetOS::Windows,
                 "unknown" | "pc" => {
                     // Standard triple: arch-vendor-os or arch-vendor-os-env
                     // Check remaining parts for OS identification
@@ -706,7 +722,10 @@ impl Target {
         };
 
         let linker_flavor_hint = if os == TargetOS::Windows {
-            if os_joined.ends_with("-gnu") {
+            if os_joined.ends_with("-gnu")
+                || os_joined.ends_with("-gnullvm")
+                || os_joined.ends_with("-mingw32")
+            {
                 Some(LinkerFlavor::Gnu)
             } else if os_joined.ends_with("-msvc") {
                 Some(LinkerFlavor::Msvc)
@@ -771,6 +790,10 @@ impl Target {
             (TargetArch::Aarch64, TargetOS::MacOS) => "aarch64-apple-darwin",
             (TargetArch::Aarch64, TargetOS::FreeBSD) => "aarch64-unknown-freebsd",
             (TargetArch::Riscv64, TargetOS::Linux) => "riscv64gc-unknown-linux-gnu",
+            (TargetArch::X86, TargetOS::Windows) => match self.linker_flavor_hint {
+                Some(LinkerFlavor::Gnu) => "i686-pc-windows-gnu",
+                _ => "i686-pc-windows-msvc",
+            },
             _ => self.arch.triple_str(),
         }
     }
@@ -874,6 +897,18 @@ impl Target {
                 _ => {} // Fall through to auto-detection
             }
         }
+        // The bootstrap's Windows ABI selector (also read by the Simple-side
+        // runtime compiler / linker) must steer the Rust seed the same way, or
+        // the LLVM triple and the link driver can disagree.
+        if self.os == TargetOS::Windows {
+            if let Ok(abi) = std::env::var("SIMPLE_WINDOWS_ABI") {
+                match abi.to_lowercase().as_str() {
+                    "gnu" | "mingw" => return LinkerFlavor::Gnu,
+                    "msvc" => return LinkerFlavor::Msvc,
+                    _ => {}
+                }
+            }
+        }
         match self.os {
             TargetOS::Windows => {
                 // Detect MinGW environment: if gcc is available, use GNU linker flavor
@@ -944,6 +979,23 @@ impl FromStr for Target {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn windows_runtime_reuse_requires_compiler_host_abi_and_arch() {
+        use super::{LinkerFlavor, Target, TargetArch, TargetOS};
+        for flavor in [LinkerFlavor::Gnu, LinkerFlavor::Msvc] {
+            let target = Target { linker_flavor_hint: Some(flavor), ..Target::host() };
+            if cfg!(target_os = "windows") {
+                assert_eq!(target.uses_host_runtime_abi(),
+                    flavor == if cfg!(target_env = "gnu") { LinkerFlavor::Gnu } else { LinkerFlavor::Msvc });
+                let other_arch = if target.arch == TargetArch::X86_64 { TargetArch::Aarch64 } else { TargetArch::X86_64 };
+                assert!(!Target { arch: other_arch, ..target }.uses_host_runtime_abi());
+                assert!(!Target { os: TargetOS::Linux, ..target }.uses_host_runtime_abi());
+            } else {
+                // Preserve the old exact-target rule outside Windows.
+                assert!(!target.uses_host_runtime_abi());
+            }
+        }
+    }
     use super::*;
 
     #[test]
@@ -1006,6 +1058,24 @@ mod tests {
         let target = Target::parse("aarch64-macos").unwrap();
         assert_eq!(target.arch, TargetArch::Aarch64);
         assert_eq!(target.os, TargetOS::MacOS);
+    }
+
+    #[test]
+    fn parse_windows_arm64_mingw_triples_select_gnu_flavor() {
+        for triple in [
+            "aarch64-pc-windows-gnullvm",
+            "aarch64-pc-windows-gnu",
+            "aarch64-w64-mingw32",
+            "aarch64-w64-windows-gnu",
+        ] {
+            let target = Target::parse(triple).unwrap();
+            assert_eq!(target.arch, TargetArch::Aarch64, "{triple}");
+            assert_eq!(target.os, TargetOS::Windows, "{triple}");
+            assert_eq!(target.linker_flavor_hint, Some(LinkerFlavor::Gnu), "{triple}");
+        }
+        let x64 = Target::parse("x86_64-w64-mingw32").unwrap();
+        assert_eq!(x64.os, TargetOS::Windows);
+        assert_eq!(x64.linker_flavor_hint, Some(LinkerFlavor::Gnu));
     }
 
     #[test]
@@ -1218,6 +1288,10 @@ mod tests {
             Target::new(TargetArch::X86, TargetOS::SimpleOS).triple_str(),
             "i686-unknown-none-elf"
         );
+        // i686 Windows must keep its OS: the arch fallback is "i686-unknown-linux-gnu",
+        // which made LLVM emit ELF/Linux objects for i686-pc-windows-gnu.
+        assert_eq!(Target::parse("i686-pc-windows-gnu").unwrap().triple_str(), "i686-pc-windows-gnu");
+        assert_eq!(Target::parse("i686-pc-windows-msvc").unwrap().triple_str(), "i686-pc-windows-msvc");
         assert_eq!(
             Target::new(TargetArch::Arm, TargetOS::SimpleOS).triple_str(),
             "armv7a-unknown-none-eabihf"

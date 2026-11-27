@@ -171,6 +171,21 @@ stage4_write_candidate_provenance() (
       echo "stage4_continuation_sha256=$(bootstrap_stage3_hash_file "$continuation")"
       echo "planner_stage4_binding_sha256=$expected_binding"
     fi
+    # W24/W27 caller SIMPLE_FRONTEND_CACHE: written only when set, so an unset
+    # run keeps the previous provenance bytes (absent = pinned 1).
+    case "${STAGE4_FRONTEND_CACHE:-}" in
+      '') ;; 0|1) echo "stage4_frontend_cache=${STAGE4_FRONTEND_CACHE}" ;;
+      *) exit 1 ;;
+    esac
+    if [ -n "${STAGE4_DUAL_MODE:-}" ]; then
+      echo "stage4_dual_mode=${STAGE4_DUAL_MODE}"
+      if [ "${STAGE4_DUAL_MODE}" = 1 ]; then
+        [ -n "${STAGE4_DEBUG_CANDIDATE_PATH:-}" ] || exit 1
+        debug_candidate="$(bootstrap_stage3_canonical_file "$STAGE4_DEBUG_CANDIDATE_PATH")" || exit 1
+        echo "stage4_debug_output_path=$debug_candidate"
+        echo "stage4_debug_candidate_sha256=$(bootstrap_stage3_hash_file "$debug_candidate")"
+      fi
+    fi
   } >"$tmp" || exit 1
   mv "$tmp" "$provenance"
 )
@@ -234,6 +249,31 @@ stage4_verify_continuation_completion() (
   [ "$(bootstrap_stage3_manifest_value stage4_output_sha256 "$completion")" = "$(bootstrap_stage3_hash_file "$binary")" ] || exit 1
 )
 
+# W24/W27 Stage 4 SIMPLE_FRONTEND_CACHE binding. Prints the effective value
+# (0|1). Absent key = pinned 1 and the build log must carry no
+# stage4-frontend-cache line; present key must be 0|1 and the build log must
+# carry exactly one matching line and no other. A duplicated key is a hard
+# failure, never "absent".
+stage4_verify_frontend_cache_binding() (
+  provenance="$1" build_log="$2"
+  count=$(grep -c '^stage4_frontend_cache=' "$provenance") || count=0
+  log_lines=$(grep -c '^stage4-frontend-cache: ' "$build_log") || log_lines=0
+  case "$count" in
+    0)
+      [ "$log_lines" = 0 ] || exit 1
+      echo 1
+      ;;
+    1)
+      value="$(bootstrap_stage3_manifest_value stage4_frontend_cache "$provenance")" || exit 1
+      case "$value" in 0|1) ;; *) exit 1 ;; esac
+      [ "$log_lines" = 1 ] || exit 1
+      [ "$(grep -Fxc "stage4-frontend-cache: SIMPLE_FRONTEND_CACHE=$value" "$build_log")" = 1 ] || exit 1
+      echo "$value"
+      ;;
+    *) exit 1 ;;
+  esac
+)
+
 stage4_verify_candidate_provenance_generic() (
   provenance="$(bootstrap_stage3_canonical_file "$1")" || exit 1
   binary="$(bootstrap_stage3_canonical_file "$2")" || exit 1
@@ -274,9 +314,21 @@ stage4_verify_candidate_provenance_generic() (
   smoke_log="$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value essential_tools_log_path "$provenance")")" || exit 1
   [ "$(bootstrap_stage3_manifest_value essential_tools_log_sha256 "$provenance")" = "$(bootstrap_stage3_hash_file "$smoke_log")" ] || exit 1
   stage4_validate_candidate_lane "$binary" "$stage3_manifest" "$root" "$build_log" "$smoke_log" || exit 1
+  stage4_verify_frontend_cache_binding "$provenance" "$build_log" >/dev/null || exit 1
   [ "$(bootstrap_stage3_manifest_value completed_gate "$provenance")" = stage4-essential-tools-smoke ] || exit 1
   if bootstrap_stage3_manifest_value stage4_continuation_path "$provenance" >/dev/null 2>&1; then
     stage4_verify_continuation_binding "$provenance" || exit 1
+  fi
+  if bootstrap_stage3_manifest_value stage4_dual_mode "$provenance" >/dev/null 2>&1; then
+    dual_mode_val="$(bootstrap_stage3_manifest_value stage4_dual_mode "$provenance")" || exit 1
+    case "$dual_mode_val" in
+      0) ;;
+      1)
+        debug_bin="$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value stage4_debug_output_path "$provenance")")" || exit 1
+        [ "$(bootstrap_stage3_manifest_value stage4_debug_candidate_sha256 "$provenance")" = "$(bootstrap_stage3_hash_file "$debug_bin")" ] || exit 1
+        ;;
+      *) exit 1 ;;
+    esac
   fi
 )
 
@@ -284,7 +336,18 @@ stage4_verify_candidate_provenance() (
   [ "$#" -ge 3 ] && [ "$#" -le 4 ] || exit 1
   provenance="$1" binary="$2" root="$3" mode="${4:-generic}"
   case "$mode" in
-    generic) stage4_verify_candidate_provenance_generic "$provenance" "$binary" "$root" ;;
+    generic)
+      case "$(bootstrap_stage3_manifest_value schema "$provenance")" in
+        simple-stage4-retained-manual-provenance-v1)
+          manual_validator="$(dirname -- "$STAGE4_PROVENANCE_HELPER_PATH")/stage4-retained-manual.py"
+          [ "$(bootstrap_stage3_manifest_value validator_path "$provenance")" = "$manual_validator" ] || exit 1
+          [ "$(bootstrap_stage3_manifest_value validator_sha256 "$provenance")" = "$(bootstrap_stage3_hash_file "$manual_validator")" ] || exit 1
+          python3 "$manual_validator" verify-candidate "$provenance" "$binary" "$root"
+          ;;
+        simple-stage4-retained-self-provenance-v1) stage4_verify_retained_candidate_provenance "$provenance" "$binary" "$root" ;;
+        *) stage4_verify_candidate_provenance_generic "$provenance" "$binary" "$root" ;;
+      esac
+      ;;
     phase7-llvm)
       stage4_verify_phase7_llvm_binding "$provenance" "$root" || exit 1
       stage4_verify_candidate_provenance_generic "$provenance" "$binary" "$root"
@@ -295,4 +358,46 @@ stage4_verify_candidate_provenance() (
       ;;
     *) exit 1 ;;
   esac
+)
+
+# Explicit retained self-build lane. No canonical Stage3 manifest/lock is invented.
+stage4_verify_retained_self_result() (
+  [ "$#" -eq 5 ] || exit 1
+  result=$1 binary=$2 root=$3 original_runtime=$4 sanity=$5
+  validator="$(dirname -- "$STAGE4_PROVENANCE_HELPER_PATH")/stage4-retained-self-evidence.py"
+  python3 "$validator" verify-self "$result" "$binary" "$root" "$original_runtime" "$sanity" || exit 1
+  work=$(mktemp -d) || exit 1
+  trap 'rm -rf "$work"' EXIT INT TERM
+  bootstrap_stage3_source_snapshot "$work/source" "$root" || exit 1
+  [ "$(bootstrap_stage3_hash_file "$work/source")" = "$(bootstrap_stage3_manifest_value source_snapshot_sha256 "$result")" ] || exit 1
+  bootstrap_stage3_directory_snapshot "$work/runtime" "$original_runtime" || exit 1
+  [ "$(bootstrap_stage3_hash_file "$work/runtime")" = "$(bootstrap_stage3_manifest_value runtime_snapshot_sha256 "$result")" ] || exit 1
+)
+
+stage4_verify_retained_candidate_provenance() (
+  [ "$#" -eq 3 ] || exit 1
+  provenance=$1 binary=$2 root=$3
+  [ "$provenance" = "$binary.provenance.env" ] || exit 1
+  validator="$(dirname -- "$STAGE4_PROVENANCE_HELPER_PATH")/stage4-retained-self-evidence.py"
+  [ "$(bootstrap_stage3_manifest_value helper_path "$provenance")" = "$STAGE4_PROVENANCE_HELPER_PATH" ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value evidence_validator_path "$provenance")" = "$validator" ] || exit 1
+  python3 "$validator" verify-candidate "$provenance" "$binary" "$root" || exit 1
+  result=$(bootstrap_stage3_manifest_value self_result_path "$provenance") || exit 1
+  original_runtime=$(bootstrap_stage3_manifest_value original_runtime_path "$provenance") || exit 1
+  selected=$(bootstrap_stage3_manifest_value parent_compiler_path "$provenance") || exit 1
+  sanity=$(bootstrap_stage3_manifest_value selected_sanity_path "$provenance") || exit 1
+  stage4_verify_retained_self_result "$result" "$selected" "$root" "$original_runtime" "$sanity"
+)
+
+stage4_write_retained_candidate_provenance() (
+  [ "$#" -eq 3 ] || exit 1
+  request=$1 provenance=$2 root=$3
+  binary=$(bootstrap_stage3_manifest_value output_path "$request") || exit 1
+  [ "$provenance" = "$binary.provenance.env" ] || exit 1
+  [ ! -e "$provenance" ] && [ ! -L "$provenance" ] || exit 1
+  validator="$(dirname -- "$STAGE4_PROVENANCE_HELPER_PATH")/stage4-retained-self-evidence.py"
+  python3 "$validator" verify-candidate "$request" "$binary" "$root" || exit 1
+  (umask 077; set -C; cat "$request" >"$provenance") || exit 1
+  chmod 400 "$provenance" || exit 1
+  stage4_verify_retained_candidate_provenance "$provenance" "$binary" "$root"
 )

@@ -1,0 +1,58 @@
+"""Windows MinGW P3->P3 linker parity with MSVC (Lane 1).
+
+Verifies that Windows GNU (MinGW) links match MSVC / internal COFF parity on:
+1. 64 MiB default main-thread stack reserve (W51 deep MIR lowering recursion).
+2. Default Win32 system import libraries (including user32, advapi32, shell32, psapi).
+3. Stripping Unix `-rpath <dir>` and `-Wl,-rpath,<dir>` flags before PE/COFF lld.
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.backend.linker.linker_wrapper.{
+    NATIVE_MINGW_STACK_RESERVE_BYTES,
+    native_mingw_stack_reserve_args,
+    mingw_default_windows_libs_v1,
+    mingw_strip_unix_rpath_args
+}
+use compiler.backend.linker.msvc.{msvc_strip_unix_rpath_args}
+
+describe "Windows MinGW P3->P3 linker parity":
+    it "matches MSVC and internal COFF 64 MiB default stack reserve":
+        expect(NATIVE_MINGW_STACK_RESERVE_BYTES).to_equal(67108864)
+        expect(native_mingw_stack_reserve_args([])).to_equal(["-Wl,--stack,67108864"])
+        expect(native_mingw_stack_reserve_args(["-Wl,--gc-sections", "-municode"])).to_equal(["-Wl,--stack,67108864"])
+
+    it "respects an explicit caller stack reserve override":
+        expect(native_mingw_stack_reserve_args(["-Wl,--stack,33554432"])).to_equal([])
+        expect(native_mingw_stack_reserve_args(["-Wl,--stack=16777216"])).to_equal([])
+
+    it "returns the MSVC-parity default Windows system libraries":
+        val libs = mingw_default_windows_libs_v1()
+        expect(libs).to_equal([
+            "kernel32", "user32", "ws2_32", "winhttp", "mswsock", "bcrypt",
+            "advapi32", "userenv", "ntdll", "shell32", "psapi", "ole32",
+            "synchronization", "d3d11", "dxgi"
+        ])
+        expect(libs.contains("SDL2")).to_equal(false)
+
+    it "strips Unix -rpath pairs and -Wl,-rpath tokens while preserving MinGW flags":
+        val input = [
+            "-Wl,--gc-sections",
+            "-rpath", "$ORIGIN",
+            "-municode",
+            "-Wl,-rpath,C:/provider/lib",
+            "-Wl,--stack,33554432",
+            "-rpath", "/usr/local/lib",
+            "-L/custom/lib"
+        ]
+        val expected = [
+            "-Wl,--gc-sections",
+            "-municode",
+            "-Wl,--stack,33554432",
+            "-L/custom/lib"
+        ]
+        expect(mingw_strip_unix_rpath_args(input)).to_equal(expected)
+        expect(mingw_strip_unix_rpath_args(input)).to_equal(msvc_strip_unix_rpath_args(input))
+
+    it "handles empty input and trailing bare -rpath without error":
+        expect(mingw_strip_unix_rpath_args([])).to_equal([])
+        expect(mingw_strip_unix_rpath_args(["-Wl,-s", "-rpath"])).to_equal(["-Wl,-s"])

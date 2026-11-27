@@ -1,0 +1,117 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# `_checked` Result functions never define a word into a void slot
+
+Bug native_const_type_void_checked_join_host_facade_2026-11-07 (P1). Native
+build of `lib.nogc_async_mut.sosix.host_facade` failed with
+E-BACKEND-LLVM-CONST-TYPE "integer constant cannot define void" in
+`sosix_spawn_checked` / `sosix_run_bounded_checked`. Each case lowers `fn a`
+and counts Const/Copy defs into a Unit-typed MIR local (must be 0).
+"""
+
+# @tag: unit, compiler, mir, optional
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val data_source = "pub enum IoE:\n    Io(text)\n\npub struct Run:\n    out: text\n    code: i64\n\npub fn admit(s: text) -> Result<text, IoE>:\n    if s == \"x\": return Err(IoE.Io(\"bad\"))\n    Ok(s)\n\npub fn args_ok(xs: [text]) -> Result<(), IoE>:\n    Ok(())\n\npub fn which(s: text) -> Result<text?, IoE>:\n    if s == \"\": return Ok(nil)\n    Ok(Some(s))\n\npub fn spawn(s: text) -> i64:\n    s.len()\n"
+
+var last_void_word_defs = 0
+
+fn lower_errors(body: text) -> text:
+    val consumer_source = "use lib.data.*\n\n" + body
+    val log = Logger(level: 0)
+    val data_ast = parse_full_frontend(data_source, "lib/data.spl", "lib.data", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.data"] = data_ast
+    val sources = [SourceFile(path: "lib/data.spl", content: data_source, module_name: "lib.data")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var data_lowering = hirlowering_for_module("lib.data", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val data_hir = data_lowering.lower_module(data_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["data_hir"] = data_hir
+    prescan_mods["consumer_hir"] = consumer_hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "data_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
+    val _mir = mir_lowering.lower_module(consumer_hir, [data_hir, consumer_hir])
+    last_void_word_defs = 0
+    for function in _mir.functions.values():
+        if function.name == "a" or function.name.ends_with(".a"):
+            var unit_ids: Dict<i64, bool> = {}
+            for local in function.locals:
+                match local.type_.kind:
+                    case MirTypeKind.Unit: unit_ids[local.id.id] = true
+                    case _: pass
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Const(dest, _, _):
+                            if unit_ids.contains(dest.id): last_void_word_defs = last_void_word_defs + 1
+                        case MirInstKind.Copy(dest, _):
+                            if unit_ids.contains(dest.id): last_void_word_defs = last_void_word_defs + 1
+                        case _: pass
+    var out = ""
+    for e in consumer_lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    out
+
+fn void_word_defs(body: text) -> i64:
+    val errors = lower_errors(body)
+    if errors != "":
+        print("lower errors: " + errors)
+        return -1
+    last_void_word_defs
+
+val local_helpers = "enum LE:\n    Io(text)\n    Native(i64, text)\n\nstruct LRun:\n    out: text\n    err: text\n    code: i64\n\nfn ladmit(s: text, k: bool) -> Result<text, LE>:\n    if s == \"x\": return Err(LE.Io(\"bad\"))\n    Ok(s)\n\nfn lreq() -> Result<(), LE>:\n    Ok(())\n\nfn largs(xs: [text]) -> Result<(), LE>:\n    for x in xs:\n        val v: text = match ladmit(x, false):\n            case Ok(v): v\n            case Err(e): return Err(e)\n    Ok(())\n\nfn lwhich(s: text) -> Result<text?, LE>:\n    if s == \"\": return Ok(nil)\n    Ok(Some(s))\n\nfn lpath(s: text, xs: [text]) -> Result<LRun, LE>:\n    Ok(LRun(out: s, err: \"\", code: 0))\n\n"
+
+val spawn_body = "fn a(cmd: text, args: [text]) -> Result<i64, LE>:\n    val admitted: text = match ladmit(cmd, false):\n        case Ok(v): v\n        case Err(e): return Err(e)\n    lreq()?\n    if admitted == \"\": return Err(LE.Io(\"empty\"))\n    largs(args)?\n    var resolved = admitted\n    if not admitted.contains(\"/\"):\n        val found = lwhich(admitted)?\n        if val path = found: resolved = path\n        else: return Err(LE.Io(\"nf\"))\n    val pid = spawn(resolved)\n    if pid <= 0: return Err(LE.Io(\"fail\"))\n    Ok(pid)\n"
+
+val run_body = "fn a(cmd: text, args: [text], t: i64, m: i64) -> Result<LRun, LE>:\n    if t < 0 or m < 0 or m > 16:\n        return Err(LE.Io(\"invalid\"))\n    val admitted: text = match ladmit(cmd, false):\n        case Ok(v): v\n        case Err(e): return Err(e)\n    if admitted == \"\": return Err(LE.Io(\"empty\"))\n    largs(args)?\n    var resolved = admitted\n    if not admitted.contains(\"/\") and not (admitted.contains(\"\\\\\") or admitted.contains(\":\")):\n        val found = lwhich(admitted)?\n        if val path = found: resolved = path\n        else: return Ok(LRun(out: \"\", err: \"nf\", code: 127))\n    lpath(resolved, args)\n"
+
+describe "checked Result join: no word defined into a void slot":
+    it "typed match unwrap with an early-return Err arm":
+        expect(void_word_defs("fn a(c: text) -> Result<i64, IoE>:\n    val s: text = match admit(c):\n        case Ok(v): v\n        case Err(e): return Err(e)\n    Ok(s.len())\n")).to_equal(0)
+
+    it "unit Result try statement":
+        expect(void_word_defs("fn a(c: text, xs: [text]) -> Result<i64, IoE>:\n    args_ok(xs)?\n    Ok(c.len())\n")).to_equal(0)
+
+    it "try unwrap of a Result<text?, E> payload":
+        expect(void_word_defs("fn a(c: text) -> Result<i64, IoE>:\n    val found = which(c)?\n    if val p = found: return Ok(p.len())\n    Ok(0)\n")).to_equal(0)
+
+    it "if-val assign arm joined with an early-return Err arm":
+        expect(void_word_defs("fn a(c: text) -> Result<i64, IoE>:\n    var r = c\n    val found = which(c)?\n    if val p = found: r = p\n    else: return Err(IoE.Io(\"nf\"))\n    Ok(r.len())\n")).to_equal(0)
+
+    it "if-val assign arm joined with an early-return Ok(ctor) arm":
+        expect(void_word_defs("fn a(c: text) -> Result<Run, IoE>:\n    var r = c\n    val found = which(c)?\n    if val p = found: r = p\n    else: return Ok(Run(out: \"\", code: 127))\n    Ok(Run(out: r, code: 0))\n")).to_equal(0)
+
+    it "spawn_checked shape end to end":
+        expect(void_word_defs("fn a(cmd: text, xs: [text]) -> Result<i64, IoE>:\n    val s: text = match admit(cmd):\n        case Ok(v): v\n        case Err(e): return Err(e)\n    if s == \"\": return Err(IoE.Io(\"empty\"))\n    args_ok(xs)?\n    var r = s\n    if not s.contains(\"/\"):\n        val found = which(s)?\n        if val p = found: r = p\n        else: return Err(IoE.Io(\"nf\"))\n    val pid = spawn(r)\n    if pid <= 0: return Err(IoE.Io(\"fail\"))\n    Ok(pid)\n")).to_equal(0)
+
+describe "checked Result join with module-local helpers (host_facade shape)":
+    it "spawn_checked with helpers declared before":
+        expect(void_word_defs(local_helpers + spawn_body)).to_equal(0)
+
+    it "spawn_checked with helpers declared after":
+        expect(void_word_defs(spawn_body + "\n" + local_helpers)).to_equal(0)
+
+    it "run_bounded_checked with helpers declared before":
+        expect(void_word_defs(local_helpers + run_body)).to_equal(0)
+
+    it "run_bounded_checked with helpers declared after":
+        expect(void_word_defs(run_body + "\n" + local_helpers)).to_equal(0)

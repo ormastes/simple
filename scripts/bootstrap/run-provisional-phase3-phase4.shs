@@ -1,6 +1,21 @@
 #!/bin/sh
 # Diagnostic-only hello -> private images -> typed authority -> managed tasks.
 set -eu
+
+if [ "$#" -eq 0 ] && [ -t 0 ] && [ "${CI:-}" != "true" ] && [ "${SIMPLE_NONINTERACTIVE:-0}" != "1" ]; then
+  cat >&2 <<'EOF_DEPRECATED'
+DEPRECATED: Do not use scripts/bootstrap/run-provisional-phase3-phase4.shs interactively without arguments.
+Use 'scripts/bootstrap/build-phase3-phase4.sh' (or 'scripts/bootstrap/build-phase3-phase4.bat' on Windows; default --win-config=mingw):
+  Default / phased shard build: sh scripts/bootstrap/build-phase3-phase4.sh --phase=p3 --compile-mode=shard
+  File-based parallel build:    sh scripts/bootstrap/build-phase3-phase4.sh --phase=p3 --compile-mode=file
+  Phase 4 (release + xray):     sh scripts/bootstrap/build-phase3-phase4.sh --phase=p4
+  Windows (mingw default):      scripts\bootstrap\build-phase3-phase4.bat --win-config=mingw --phase=all
+EOF_DEPRECATED
+  printf 'Press Enter to return...' >&2
+  if read -r _; then :; fi
+  return 0 2>/dev/null || exit 0
+fi
+
 die() { echo "run-provisional-phase3-phase4: $*" >&2; exit 1; }
 regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
 absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
@@ -44,7 +59,7 @@ source_checkout=$(CDPATH= cd -- "$source_checkout" && pwd -P) || die "source che
 shared_parse_cas_root=$(CDPATH= cd -- "$shared_parse_cas_root" && pwd -P) ||
   die "shared parse CAS root unavailable"
 case "$(uname -s 2>/dev/null):$target" in
-  MINGW*:x86_64-pc-windows-msvc|MSYS*:x86_64-pc-windows-msvc|CYGWIN*:x86_64-pc-windows-msvc) suffix=.exe host=windows ;;
+  MINGW*:x86_64-pc-windows-msvc|MSYS*:x86_64-pc-windows-msvc|CYGWIN*:x86_64-pc-windows-msvc|MINGW*:x86_64-pc-windows-gnu|MSYS*:x86_64-pc-windows-gnu|CYGWIN*:x86_64-pc-windows-gnu) suffix=.exe host=windows ;;
   Linux*:x86_64-unknown-linux-gnu|Linux*:aarch64-unknown-linux-gnu) suffix= host=linux ;;
   *) die "diagnostic target must match the current host" ;;
 esac
@@ -78,7 +93,10 @@ case "$host" in
     set -- $(powershell.exe -NoProfile -Command '$o=Get-CimInstance Win32_OperatingSystem; "{0} {1} {2}" -f ([int64]$o.FreePhysicalMemory*1024),([int64]$o.FreeVirtualMemory*1024),([int64]$o.TotalVisibleMemorySize*1024)' | tr -d '\r') \
       || die "Windows memory probe failed" ;;
   linux)
-    set -- $(awk '$1=="MemTotal:" {t=$2*1024} $1=="MemAvailable:" {p=$2*1024} $1=="CommitLimit:" {l=$2*1024} $1=="Committed_AS:" {c=$2*1024} END {if(t>0&&p>0&&l>c) printf "%.0f %.0f %.0f\n",p,l-c,t; else exit 1}' /proc/meminfo) \
+    # CommitLimit binds only under strict overcommit (vm.overcommit_memory=2);
+    # in heuristic/always modes the kernel ignores it, so physical availability rules.
+    overcommit_mode=$(cat /proc/sys/vm/overcommit_memory 2>/dev/null || echo 2)
+    set -- $(awk -v strict="$overcommit_mode" '$1=="MemTotal:" {t=$2*1024} $1=="MemAvailable:" {p=$2*1024} $1=="CommitLimit:" {l=$2*1024} $1=="Committed_AS:" {c=$2*1024} END {h=(strict==2)?l-c:p; if(t>0&&p>0&&h>0) printf "%.0f %.0f %.0f\n",p,h,t; else exit 1}' /proc/meminfo) \
       || die "Linux memory probe failed" ;;
 esac
 [ "$#" -eq 3 ] || die "host memory observation incomplete"

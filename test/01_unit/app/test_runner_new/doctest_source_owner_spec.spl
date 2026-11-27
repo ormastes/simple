@@ -1,0 +1,39 @@
+use std.spec.*
+use app.test_runner_new.doctest_runner.{Doctest, extract_doctests}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_remove}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.io_runtime.{dir_create_all}
+
+fn compat_source_fixture(name: text, content: text) -> [Doctest]:
+    dir_create_all(".simple/test-fixtures")
+    val path = ".simple/test-fixtures/doctest-compat-{name}-{time_now_unix_micros()}.spl"
+    expect(file_write(path, content)).to_equal(true)
+    val blocks = extract_doctests(path)
+    expect(file_remove(path)).to_equal(true)
+    blocks
+
+describe "legacy source-doctest extraction delegates to its canonical owner":
+    it "extracts the original single-hash fence and preserves nested indentation":
+        val source = "# ```simple\n# fn answer():\n#     42\n# print answer()\n# ```\n"
+        val blocks = compat_source_fixture("hash", source)
+        expect(blocks.len()).to_equal(1)
+        expect(blocks[0].code).to_equal("fn answer():\n    42\nprint answer()")
+        expect(blocks[0].line_number).to_equal(1)
+        expect(blocks[0].expected_output).to_equal("")
+        expect(blocks[0].should_fail).to_equal(false)
+
+    it "retains double-hash should-fail metadata":
+        val blocks = compat_source_fixture("double-hash", "## ```spl:should_fail\n## assert false\n## ```\n")
+        expect(blocks.len()).to_equal(1)
+        expect(blocks[0].code).to_equal("assert false")
+        expect(blocks[0].should_fail).to_equal(true)
+
+    it "retains triple-slash source comments":
+        val blocks = compat_source_fixture("slash", "/// ```simple\n/// print 7\n/// ```\n")
+        expect(blocks.len()).to_equal(1)
+        expect(blocks[0].code).to_equal("print 7")
+        expect(blocks[0].should_fail).to_equal(false)
+
+    it "rejects an unclosed source fence":
+        val blocks = compat_source_fixture("unclosed", "# ```simple\n# print 7\n")
+        expect(blocks.len()).to_equal(0)

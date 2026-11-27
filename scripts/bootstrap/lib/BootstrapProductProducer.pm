@@ -3,6 +3,9 @@ use strict;
 use warnings;
 use Exporter 'import';
 use Digest::SHA qw(sha256_hex);
+use File::Basename ();
+use Cwd ();
+my $publication_guard = File::Basename::dirname(File::Basename::dirname(File::Basename::dirname(Cwd::abs_path(__FILE__)))) . '/check/check-stage2-publication-commit.shs';
 our @EXPORT_OK = qw(read_product_producer validate_product_resources product_resource_profile validate_product_resource_profile);
 
 sub validate_product_resources {
@@ -91,6 +94,7 @@ sub read_product_producer {
     equal(\%proof, 'candidate_sha256', $compiler_sha);
     digest($compiler) eq $compiler_sha or die "producer bytes changed\n";
     if ($mode eq 'qualified') {
+        system('sh', $publication_guard, $path) == 0 or die "producer publication commit required\n";
         equal(\%proof, 'schema', 'simple-bootstrap-stage2-admission-v2');
         equal(\%proof, 'status', 'admitted');
         return %proof;

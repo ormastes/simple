@@ -44,6 +44,21 @@ if CXX=/usr/bin/g++ bootstrap_stage3_target_c_compiler aarch64-apple-darwin > /d
     echo 'FAIL: macOS accepted g++' >&2
     exit 1
 fi
+# Windows CI exports CC as a native backslash path (D:\...\clang-cl.exe); the
+# MSVC admission must recognise its clang-cl basename, and still reject gcc.
+(
+    bootstrap_stage3_windows_runnable_compiler() { printf '%s\n' "$1"; }
+    CC='D:\a\simple\.toolchains\llvm-23.1.1\bin\clang-cl.exe'
+    [ "$(bootstrap_stage3_target_c_compiler x86_64-pc-windows-msvc)" = "$CC" ] || {
+        echo 'FAIL: Windows MSVC rejected backslash clang-cl CC path' >&2
+        exit 1
+    }
+    if CC='D:\mingw\bin\gcc.exe' bootstrap_stage3_target_c_compiler \
+        x86_64-pc-windows-msvc > /dev/null 2>&1; then
+        echo 'FAIL: Windows MSVC accepted backslash gcc CC path' >&2
+        exit 1
+    fi
+)
 sed -n '/^run_rust_authority_env() {/,/^}/p' \
     "$root/scripts/bootstrap/bootstrap-from-scratch.sh" > "$tmp/env-function.sh"
 . "$tmp/env-function.sh"
@@ -66,6 +81,8 @@ set -eu
 CARGO
 chmod +x "$tmp/cargo"
 prepare_rust_authority_workspace() { :; }
+bootstrap_acquire_shared_rust_cargo_cache() { :; }
+rust_shared_cache_root=
 absolute_path() { printf '%s\n' "$1"; }
 run_logged() { probe_log=$1; shift; "$@" > "$log_dir/$probe_log.log" 2>&1; }
 log_dir="$tmp"
@@ -97,5 +114,7 @@ for rust_llvm_status in enabled disabled; do
 done
 unset CXX AR LD LLVM_CONFIG RUSTFLAGS
 os=windows
-run_rust_authority_env windows-defaults /bin/sh -c 'test "${CXX-unset}" = unset && test "${AR-unset}" = unset && test "${RUSTFLAGS-unset}" = unset'
+for PLATFORM_ABI in msvc gnu; do
+    run_rust_authority_env windows-defaults /bin/sh -c 'test "${CXX-unset}" = unset && test "${AR-unset}" = unset && test "${RUSTFLAGS-unset}" = unset'
+done
 printf '%s\n' 'PASS: explicit Clang selected, gcc rejected, all four Cargo branches retain pins and scrub unrelated environment'

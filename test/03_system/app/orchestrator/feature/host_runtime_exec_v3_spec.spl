@@ -1,0 +1,182 @@
+# @req ORCH-02 HOST-02
+# Pure packet integrity. Existing real signed frames are shape data only:
+# they deliberately do NOT authorize this new host exec intent/action.
+# Execution NOT_RUN. Actual Host verifies current action-specific authority.
+use std.common.contracts.container.exec_v3.*
+use std.common.contracts.container.exec_admission_v3.*
+use std.common.contracts.orchestration.host_runtime_exec_v3.*
+use std.common.contracts.orchestration.assignment_v1.controller_assignment_bytes_v1
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_authority_codec_v2.*
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.string_core.str_len
+use test.fixtures.orchestrator_acceptance.controller_container_dispatch_v2.controller_container_wire_fixture_v2
+
+fn runtime_exec_admission_fixture_v3() -> ContainerExecAdmissionV3:
+    val scope = ContainerHostScopeV2(physical_host_id: "authorized-alias", service_scope_id: "service", boot_id: "boot",
+        provider_generation: 3, native_machine_id: "machine", continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot")
+    val parent = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: "workload", attempt: 1, operation_id: "parent-operation",
+        request_digest: "a".repeat(64), physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id,
+        boot_id: scope.boot_id, provider_generation: scope.provider_generation, native_machine_id: scope.native_machine_id,
+        continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id)
+    val runtime = RuntimeIdentityV1(pod_uid: parent.workload_uid, attempt: parent.attempt, operation_id: parent.operation_id,
+        provider_generation: parent.provider_generation, engine: "podman", native_id: "b".repeat(64), node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    val request = ContainerExecRequestV3(parent: parent, parent_runtime: runtime, operation_id: "exec-operation", nonce: "c".repeat(64),
+        argv: ["/usr/bin/agent", "--version"], environment: [], working_directory: "/workspace", selected_user: "1000:1000",
+        terminal_mode: "none", stdin_requested: false, timeout_ms: 1000)
+    val digest = container_exec_request_digest_v3(request).unwrap()
+    val intent = HostRuntimeExecIntentV3(request: request, parent_operation_digest: "e".repeat(64),
+        parent_assignment_digest: "f".repeat(64), parent_controller_operation_digest: "5".repeat(64), parent_provider_identity_digest: "3".repeat(64), exec_control_identity_digest: "1".repeat(64))
+    val operation = OperationEnvelopeV2(version: 2, id: request.operation_id, payload_digest: host_runtime_exec_intent_digest_v3(intent).unwrap(), principal: "user", project: "project",
+        host_id: parent.physical_host_id, operation: "host_runtime_exec_v3", environment_digest: "d".repeat(64), policy_revision: 1,
+        revocation_epoch: 0, session_generation: 1, memory_bytes: 4096, duration_ms: 1000)
+    ContainerExecAdmissionV3(intent: intent, request: request, operation: operation, parent_operation_digest: "e".repeat(64),
+        parent_assignment_digest: "f".repeat(64), provider_identity_digest: "1".repeat(64),
+        deadline: container_effect_deadline_v1(digest, request.operation_id, ["exec"], 1000).unwrap(),
+        grant_id: "grant", issuer_id: "issuer", approver_id: "approver", execution_proof_digest: "2".repeat(64))
+
+fn runtime_exec_packet_fixture_v3() -> HostRuntimeExecRequestV3:
+    val admission = runtime_exec_admission_fixture_v3()
+    val frames = controller_container_wire_fixture_v2("linux-podman").dispatch
+    var intent = admission.intent
+    intent.request.parent = frames.execution.plan
+    intent.request.parent_runtime.pod_uid = frames.execution.plan.workload_uid
+    intent.request.parent_runtime.attempt = frames.execution.plan.attempt
+    intent.request.parent_runtime.operation_id = frames.execution.plan.operation_id
+    intent.request.parent_runtime.provider_generation = frames.execution.plan.provider_generation
+    intent.request.parent_runtime.node_boot_id = frames.binding.host_intent.fence.boot_id
+    intent.parent_operation_digest = sha256_text(distributed_encode_operation_v2(frames.binding.host_operation).unwrap())
+    intent.parent_assignment_digest = sha256_text(controller_assignment_bytes_v1(frames.binding).unwrap())
+    intent.parent_controller_operation_digest = sha256_text(distributed_encode_operation_v2(frames.operation).unwrap())
+    var operation = admission.operation
+    operation.host_id = frames.execution.plan.physical_host_id
+    operation.payload_digest = host_runtime_exec_intent_digest_v3(intent).unwrap()
+    HostRuntimeExecRequestV3(intent: intent, parent_binding: frames.binding, parent_controller_operation: frames.operation,
+        operation: operation, signed: frames.host_execution_signed, approval: frames.host_execution_approval)
+
+fn runtime_exec_wire_v3(source: text, key: text, value: SdnValue) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    var fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+describe "original host runtime exec intent and signed frame integrity":
+    it "round trips intent packet and exact proof frames without claiming signature authority":
+        step("round trips intent packet and exact proof frames without claiming signature authority")
+        val packet = runtime_exec_packet_fixture_v3()
+        val intent = host_runtime_exec_intent_encode_v3(packet.intent).unwrap()
+        expect(host_runtime_exec_intent_encode_v3(host_runtime_exec_intent_decode_v3(intent).unwrap()).unwrap()).to_equal(intent)
+        val source = host_runtime_exec_request_encode_v3(packet).unwrap()
+        val decoded = host_runtime_exec_request_decode_v3(source).unwrap()
+        expect(host_runtime_exec_request_encode_v3(decoded).unwrap()).to_equal(source)
+        expect(host_runtime_exec_request_digest_v3(decoded).unwrap()).to_equal(host_runtime_exec_request_digest_v3(packet).unwrap())
+        expect(distributed_encode_signed_grant_v2(decoded.signed).unwrap()).to_equal(distributed_encode_signed_grant_v2(packet.signed).unwrap())
+        expect(distributed_encode_signed_approval_v2(decoded.approval).unwrap()).to_equal(distributed_encode_signed_approval_v2(packet.approval).unwrap())
+
+    it "binds each original parent and control digest into the signed intent domain":
+        step("binds each original parent and control digest into the signed intent domain")
+        val original = runtime_exec_packet_fixture_v3().intent
+        val digest = host_runtime_exec_intent_digest_v3(original).unwrap()
+        var changed = original
+        changed.parent_operation_digest = "4".repeat(64)
+        expect(host_runtime_exec_intent_digest_v3(changed).unwrap() == digest).to_equal(false)
+        changed = original
+        changed.parent_assignment_digest = "4".repeat(64)
+        expect(host_runtime_exec_intent_digest_v3(changed).unwrap() == digest).to_equal(false)
+        changed = original
+        changed.parent_controller_operation_digest = "4".repeat(64)
+        expect(host_runtime_exec_intent_digest_v3(changed).unwrap() == digest).to_equal(false)
+        changed = original
+        changed.parent_provider_identity_digest = "4".repeat(64)
+        expect(host_runtime_exec_intent_digest_v3(changed).unwrap() == digest).to_equal(false)
+        changed = original
+        changed.exec_control_identity_digest = "4".repeat(64)
+        expect(host_runtime_exec_intent_digest_v3(changed).unwrap() == digest).to_equal(false)
+        changed = original
+        changed.request.nonce = "4".repeat(64)
+        expect(host_runtime_exec_intent_digest_v3(changed).unwrap() == digest).to_equal(false)
+
+    it "refuses raw exec digest as operation payload and wrong child action or physical alias":
+        step("refuses raw exec digest as operation payload and wrong child action or physical alias")
+        val packet = runtime_exec_packet_fixture_v3()
+        expect(host_runtime_exec_match_operation_v3(packet.intent, packet.operation).unwrap()).to_equal(true)
+        var operation = packet.operation
+        operation.payload_digest = container_exec_request_digest_v3(packet.intent.request).unwrap()
+        expect(host_runtime_exec_match_operation_v3(packet.intent, operation).is_err()).to_equal(true)
+        operation = packet.operation
+        operation.id = packet.intent.request.parent.operation_id
+        expect(host_runtime_exec_match_operation_v3(packet.intent, operation).is_err()).to_equal(true)
+        operation = packet.operation
+        operation.operation = "host_execute_v1"
+        expect(host_runtime_exec_match_operation_v3(packet.intent, operation).is_err()).to_equal(true)
+        operation = packet.operation
+        operation.host_id = packet.intent.request.parent.native_machine_id
+        expect(host_runtime_exec_match_operation_v3(packet.intent, operation).is_err()).to_equal(true)
+
+    it "requires original assignment host envelope controller envelope and exact retained parent plan":
+        step("requires original assignment host envelope controller envelope and exact retained parent plan")
+        val original = runtime_exec_packet_fixture_v3()
+        expect(host_runtime_exec_match_parent_v3(original).unwrap()).to_equal(true)
+        for kind in ["host-digest", "assignment-digest", "controller-digest", "plan", "controller-operation"]:
+            var changed = original
+            if kind == "host-digest": changed.intent.parent_operation_digest = "9".repeat(64)
+            if kind == "assignment-digest": changed.intent.parent_assignment_digest = "9".repeat(64)
+            if kind == "controller-digest": changed.intent.parent_controller_operation_digest = "9".repeat(64)
+            if kind == "plan": changed.intent.request.parent.request_digest = "9".repeat(64)
+            if kind == "controller-operation": changed.parent_controller_operation.id = "other-controller-operation"
+            changed.operation.payload_digest = host_runtime_exec_intent_digest_v3(changed.intent).unwrap()
+            expect(host_runtime_exec_request_encode_v3(changed).is_err()).to_equal(true)
+
+    it "requires admission flat fields to match original intent and keeps deadline in raw request domain":
+        step("requires admission flat fields to match original intent and keeps deadline in raw request domain")
+        val original = runtime_exec_admission_fixture_v3()
+        expect(container_exec_admission_match_v3(original, original.request, original.provider_identity_digest, 100).unwrap()).to_equal(900)
+        var changed = original
+        changed.parent_operation_digest = "4".repeat(64)
+        expect(container_exec_admission_match_v3(changed, original.request, original.provider_identity_digest, 100).is_err()).to_equal(true)
+        changed = original
+        changed.provider_identity_digest = changed.intent.parent_provider_identity_digest
+        expect(container_exec_admission_match_v3(changed, original.request, changed.provider_identity_digest, 100).is_err()).to_equal(true)
+        changed = original
+        changed.deadline.request_digest = host_runtime_exec_intent_digest_v3(changed.intent).unwrap()
+        expect(container_exec_admission_match_v3(changed, original.request, original.provider_identity_digest, 100).is_err()).to_equal(true)
+        changed = original
+        changed.intent.request.parent_runtime.native_id = "4".repeat(64)
+        expect(container_exec_admission_match_v3(changed, original.request, original.provider_identity_digest, 100).is_err()).to_equal(true)
+
+    it "refuses unknown duplicate mistyped missing and noncanonical intent or packet fields":
+        step("refuses unknown duplicate mistyped missing and noncanonical intent or packet fields")
+        val packet = runtime_exec_packet_fixture_v3()
+        val intent = host_runtime_exec_intent_encode_v3(packet.intent).unwrap()
+        expect(host_runtime_exec_intent_decode_v3(runtime_exec_wire_v3(intent, "authorized", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(host_runtime_exec_intent_decode_v3(runtime_exec_wire_v3(intent, "parentOperationDigest", SdnValue.Int(1))).is_err()).to_equal(true)
+        expect(host_runtime_exec_intent_decode_v3(intent + "\n").is_err()).to_equal(true)
+        val head = intent.slice(0, intent.len() - 2)
+        expect(host_runtime_exec_intent_decode_v3(head + ", version: 3" + "}\n").is_err()).to_equal(true)
+        val source = host_runtime_exec_request_encode_v3(packet).unwrap()
+        expect(host_runtime_exec_request_decode_v3(runtime_exec_wire_v3(source, "intent", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(host_runtime_exec_request_decode_v3(runtime_exec_wire_v3(source, "kind", SdnValue.String("host-runtime-exec-intent"))).is_err()).to_equal(true)
+        expect(host_runtime_exec_request_decode_v3("version: 3\nkind: host-runtime-exec-request\n").is_err()).to_equal(true)
+        expect(host_runtime_exec_request_decode_v3(source + "\n").is_err()).to_equal(true)
+
+    it "refuses malformed digest and nested request sizes at exact byte bounded domains":
+        step("refuses malformed digest and nested request sizes at exact byte bounded domains")
+        var intent = runtime_exec_packet_fixture_v3().intent
+        intent.exec_control_identity_digest = "bad-pin"
+        expect(host_runtime_exec_intent_encode_v3(intent).is_err()).to_equal(true)
+        val too_large_intent = "é".repeat(1048577)
+        expect(str_len(too_large_intent)).to_equal(2097154)
+        expect(host_runtime_exec_intent_decode_v3(too_large_intent).is_err()).to_equal(true)
+        val too_large_packet = "é".repeat(2097153)
+        expect(str_len(too_large_packet)).to_equal(4194306)
+        expect(host_runtime_exec_request_decode_v3(too_large_packet).is_err()).to_equal(true)
+        intent = runtime_exec_packet_fixture_v3().intent
+        intent.request.argv = ["/usr/bin/agent", "x".repeat(1048577)]
+        expect(host_runtime_exec_intent_encode_v3(intent).is_err()).to_equal(true)

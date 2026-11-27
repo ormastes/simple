@@ -191,6 +191,11 @@ _mail_curl() {
   local max="${MAIL_CURL_MAX_RETRIES:-3}" delay="${MAIL_CURL_RETRY_DELAY:-1}"
   local attempt=1 rc tmp auth="" escaped recovered=0
   local -a args=()
+  # Schannel ignores CURL_CA_BUNDLE; use curl's explicit CA option so the
+  # caller's trust bundle has the same meaning across TLS backends.
+  if [ -n "${CURL_CA_BUNDLE:-}" ]; then
+    args+=(--cacert "$CURL_CA_BUNDLE")
+  fi
   # Use curl's config pipe for credentials; --user must never reach exec argv.
   while [ $# -gt 0 ]; do
     if [ "$1" = --user ]; then
@@ -354,13 +359,29 @@ _mail_config_valid_name() {
   [[ "$1" =~ ^[a-zA-Z0-9_.@+-]+$ ]]
 }
 
+# MSYS may leave shell-looking filenames unconverted when starting a native
+# executable. Translate the filename explicitly; it remains one literal argv.
+_mail_config_parse_document() {
+  local helper="$1" path="$2" resolved
+  resolved=$(command -v "$helper") || return 127
+  case "$resolved" in
+    *.[Ee][Xx][Ee])
+      if command -v cygpath >/dev/null 2>&1; then
+        path=$(cygpath -w -- "$path") || return $?
+        MSYS2_ARG_CONV_EXCL='*' "$helper" config-json "$path"
+        return $?
+      fi ;;
+  esac
+  "$helper" config-json "$path"
+}
+
 # Canonical Simple SDN parser; the installed helper never compiles at startup.
 _mail_config_query() {
   local mode="$1" name="${2:-}" key="${3:-}" helper document
   [ -f "$MAIL_CONFIG_FILE" ] || { echo "MAIL_CONFIG_MISSING" >&3; return 2; }
   helper=$(mail_expand_path "${MAIL_CONFIG_BIN:-${MAIL_CREDENTIAL_BIN:-simple-mail-credentials}}") || return $?
   command -v "$helper" >/dev/null 2>&1 || { echo "error: compiled shared SDN helper unavailable" >&3; return 2; }
-  document=$("$helper" config-json "$MAIL_CONFIG_FILE") || return $?
+  document=$(_mail_config_parse_document "$helper" "$MAIL_CONFIG_FILE") || return $?
   case "$mode" in
     list) printf '%s' "$document" | jq -r '.accounts | keys[]' ;;
     default) printf '%s' "$document" | jq -r '.default_account // empty' ;;
@@ -486,7 +507,7 @@ mail_config_set_account() (
   done
   local helper
   helper=$(mail_expand_path "${MAIL_CONFIG_BIN:-${MAIL_CREDENTIAL_BIN:-simple-mail-credentials}}") || return $?
-  "$helper" config-json "$tmp" >/dev/null || return $?
+  _mail_config_parse_document "$helper" "$tmp" >/dev/null || return $?
   chmod 600 "$tmp" && mv "$tmp" "$MAIL_CONFIG_FILE"
 )
 
@@ -548,21 +569,20 @@ mail_resolve_account() {
   fi
   [ "$provider" = outlook_imap ] && provider=outlook
   MAIL_ACCT_NAME="$name"
-  MAIL_ACCT_EMAIL=$(echo "$acc" | jq -r '.email')
-  MAIL_ACCT_USERNAME=$(echo "$acc" | jq -r '.username // .email')
-  MAIL_ACCT_DISPLAY=$(echo "$acc" | jq -r '.display_name // .email')
-  MAIL_ACCT_IMAP_SERVER=$(echo "$acc" | jq -r '.imap_server // empty')
-  MAIL_ACCT_IMAP_PORT=$(echo "$acc" | jq -r '.imap_port // empty')
-  MAIL_ACCT_SMTP_SERVER=$(echo "$acc" | jq -r '.smtp_server // empty')
-  MAIL_ACCT_SMTP_PORT=$(echo "$acc" | jq -r '.smtp_port // empty')
+  # One jq process for every account field (process spawns dominate on hosts
+  # where fork is slow). Unit separator keeps empty fields positional.
+  IFS=$'\x1f' read -r MAIL_ACCT_EMAIL MAIL_ACCT_USERNAME MAIL_ACCT_DISPLAY \
+    MAIL_ACCT_IMAP_SERVER MAIL_ACCT_IMAP_PORT MAIL_ACCT_SMTP_SERVER MAIL_ACCT_SMTP_PORT \
+    MAIL_ACCT_TLS MAIL_ACCT_PROTOCOL MAIL_ACCT_POP3_SERVER MAIL_ACCT_POP3_PORT < <(
+    printf '%s' "$acc" | jq -r '[(.email // "null"), (.username // .email // "null"), (.display_name // .email // "null"),
+      (.imap_server // ""), (.imap_port // ""), (.smtp_server // ""), (.smtp_port // ""),
+      (.tls // "implicit"), (.protocol // "imap"), (.pop3_server // ""), (.pop3_port // "")
+      | tostring] | join("\u001f")')
+  MAIL_ACCT_POP3_PORT=${MAIL_ACCT_POP3_PORT%$'\r'}  # jq on Windows ends lines with CRLF
   [ -n "$MAIL_ACCT_IMAP_SERVER" ] || MAIL_ACCT_IMAP_SERVER=$(mail_preset "$provider" imap)
   [ -n "$MAIL_ACCT_IMAP_PORT" ] || MAIL_ACCT_IMAP_PORT=$(mail_preset "$provider" imap_port)
   [ -n "$MAIL_ACCT_SMTP_SERVER" ] || MAIL_ACCT_SMTP_SERVER=$(mail_preset "$provider" smtp)
   [ -n "$MAIL_ACCT_SMTP_PORT" ] || MAIL_ACCT_SMTP_PORT=$(mail_preset "$provider" smtp_port)
-  MAIL_ACCT_TLS=$(echo "$acc" | jq -r '.tls // "implicit"')
-  MAIL_ACCT_PROTOCOL=$(printf '%s' "$acc" | jq -r '.protocol // "imap"')
-  MAIL_ACCT_POP3_SERVER=$(printf '%s' "$acc" | jq -r '.pop3_server // empty')
-  MAIL_ACCT_POP3_PORT=$(printf '%s' "$acc" | jq -r '.pop3_port // empty')
   if [ -z "$MAIL_ACCT_POP3_PORT" ]; then
     if [ "$MAIL_ACCT_TLS" = starttls ]; then MAIL_ACCT_POP3_PORT=110; else MAIL_ACCT_POP3_PORT=995; fi
   fi

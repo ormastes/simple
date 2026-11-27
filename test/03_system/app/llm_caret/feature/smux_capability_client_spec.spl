@@ -1,0 +1,73 @@
+# AUTHORED_UNRUN: production dispatch/classifier integration, not socket/CLI proof.
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.server.smux_server_dispatch
+use os.apps.smux.smux_remote.smux_remote_reply_ok
+use os.apps.smux.runtime_binding_protocol_v1.smux_runtime_binding_capabilities_decode_v1
+use app.hosted_apps.smux_client.smux_client_request_reply_ok
+
+fn capability_client_reply_source() -> text:
+    "version: 1\nkind: smux-runtime-binding-capabilities\nauthenticationScope: trusted-local-owner\ntransport: smux-text-v1\nbindExistingRuntime: false\nframedCoreMux: false\nreason: runtime-binding-owner-not-installed\n"
+
+describe "hosted smux capability client classification":
+    it "accepts the actual authenticated capability response as discovery only":
+        step("Pass the production authenticated dispatcher reply into the consumed client classifier")
+        val body = smux_server_dispatch("owner-token runtime-binding-capabilities-v1", "owner-token")
+        val decoded = smux_runtime_binding_capabilities_decode_v1(body)
+        expect(decoded.is_ok()).to_equal(true)
+        val capability = decoded.unwrap()
+        expect(capability.version).to_equal(1)
+        expect(capability.kind).to_equal("smux-runtime-binding-capabilities")
+        expect(capability.authentication_scope).to_equal("trusted-local-owner")
+        expect(capability.transport).to_equal("smux-text-v1")
+        expect(capability.bind_existing_runtime).to_equal(false)
+        expect(capability.framed_core_mux).to_equal(false)
+        expect(capability.reason).to_equal("runtime-binding-owner-not-installed")
+        expect(smux_client_request_reply_ok("runtime-binding-capabilities-v1", body)).to_equal(true)
+        expect(smux_remote_reply_ok(body)).to_equal(false)
+
+    it "rejects real unauthorized and unsupported bind replies":
+        step("Keep authentication errors and unavailable binding separate from successful discovery")
+        for token in ["wrong-token", ""]:
+            val body = smux_server_dispatch(token + " runtime-binding-capabilities-v1", "owner-token")
+            expect(smux_client_request_reply_ok("runtime-binding-capabilities-v1", body)).to_equal(false)
+        for command in ["bind-existing-runtime-v3", "bind-existing-runtime-v3 payload"]:
+            val body = smux_server_dispatch("owner-token " + command, "owner-token")
+            expect(smux_client_request_reply_ok(command, body)).to_equal(false)
+            expect(smux_client_request_reply_ok(command, "smux: sessions=0")).to_equal(false)
+
+    it "requires exact version kind scope transport and reason":
+        step("Reject protocol drift before classifying the response as successful discovery")
+        val valid = capability_client_reply_source()
+        for body in [valid.replace("version: 1", "version: 2"),
+                valid.replace("version: 1", "version: \"1\""),
+                valid.replace("smux-runtime-binding-capabilities", "other-kind"),
+                valid.replace("trusted-local-owner", "remote-anonymous"),
+                valid.replace("smux-text-v1", "framed-core-mux"),
+                valid.replace("runtime-binding-owner-not-installed", "ready")]:
+            expect(smux_client_request_reply_ok("runtime-binding-capabilities-v1", body)).to_equal(false)
+
+    it "refuses unsupported positive flags and wrongly typed booleans":
+        step("Do not manufacture installed binding or CoreMux support from claimed flags")
+        val valid = capability_client_reply_source()
+        for body in [valid.replace("bindExistingRuntime: false", "bindExistingRuntime: true"),
+                valid.replace("framedCoreMux: false", "framedCoreMux: true"),
+                valid.replace("bindExistingRuntime: false", "bindExistingRuntime: \"false\""),
+                valid.replace("framedCoreMux: false", "framedCoreMux: 0")]:
+            expect(smux_client_request_reply_ok("runtime-binding-capabilities-v1", body)).to_equal(false)
+
+    it "rejects duplicates extra fields missing fields and trailing authored tokens":
+        step("Require complete strict SDN with exactly the installed seven fields")
+        val valid = capability_client_reply_source()
+        for body in [valid + "version: 1\n", valid + "extra: false\n",
+                valid.replace("transport: smux-text-v1\n", ""), valid + "[]\n", "[]", ""]:
+            expect(smux_client_request_reply_ok("runtime-binding-capabilities-v1", body)).to_equal(false)
+        expect(smux_runtime_binding_capabilities_decode_v1("가".repeat(1500)).unwrap_err()).to_equal("runtime-capability-size")
+
+    it "keeps capability success operation-specific and preserves legacy classification":
+        step("Do not teach the generic legacy predicate to accept arbitrary SDN")
+        val valid = capability_client_reply_source()
+        for command in ["runtime-binding-capabilities-v1 extra", "list-sessions", "unknown"]:
+            expect(smux_client_request_reply_ok(command, valid)).to_equal(false)
+        expect(smux_client_request_reply_ok("list-sessions", "version: 1\nstatus: ok\n")).to_equal(false)
+        expect(smux_client_request_reply_ok("list-sessions", "smux: sessions=0")).to_equal(true)
+        expect(smux_client_request_reply_ok("runtime-binding-capabilities-v1", "smux: sessions=0")).to_equal(false)

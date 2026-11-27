@@ -96,3 +96,12 @@ struct used from a spec or cross-module fn.
 
 - `doc/08_tracking/bug/cross_module_struct_method_poisons_itblock_byte_ops_2026-06-15.md`
   — related cross-module interpreter issue with byte ops
+
+## Verification 2026-11-25 (P2 sweep lane) — closure re-confirmed
+
+Re-ran the minimal repro shape (module `modA.spl` defining `struct Pt` +
+`fn mk(v) -> Pt` returning `Pt(a: v, b: v * 2)`; importer builds
+`Pt(a: p.a, b: 9)` from a parameter) with the pinned seed on Windows:
+`SIMPLE_LIB=src bin/simple.exe run` (Rust seed v1.0.0-rc.1) prints `10` then
+`9`, rc=0 — no `semantic: unknown argument` error. Matches the 2026-09-13
+closure. Status: **CLOSED** (does not reproduce).

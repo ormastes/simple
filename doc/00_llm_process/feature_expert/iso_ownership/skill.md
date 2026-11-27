@@ -96,3 +96,14 @@ reachable from `bin/simple`), update this skill and its two linked layer
 experts (`mir_lowering`, `borrow_check`) together.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/feature_skill.md`
+
+## 2026-11-06 strict no-GC option policy
+
+The AOT bootstrap route now invokes the borrow checker. Historical bootstrap
+bypass and seed-based test instructions above describe their dated artifacts,
+not current admission. `CompileContext.nogc_ownership_required` is set only by
+successful typed HIR admission and survives HIR eviction; strict contexts reject
+`--no-borrow-check` with `NOGC-POLICY-002`. Legacy-only contexts keep their explicit
+diagnostic bypass. See `doc/07_guide/compiler/strict_nogc_ownership_gate.md`.
+The focused specs are authored but await an admitted full pure-Simple runtime;
+do not use the Rust seed or source inspection as production execution evidence.

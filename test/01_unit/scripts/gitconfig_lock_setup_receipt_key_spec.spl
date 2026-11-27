@@ -1,0 +1,42 @@
+"""
+# Setup-CI-Receipt-Key Local-Config Default Prevention Spec
+
+Prevention coverage for `simple_cli_invocation_attempts_user_gitconfig_lock_2026-09-09`:
+verifies `scripts/setup/setup-ci-receipt-key.shs` defaults to `--local-config`
+and leaves a locked, read-only user `.gitconfig` + `.gitconfig.lock` untouched.
+"""
+
+use std.spec.*
+use app.io.process_ops.{process_run}
+
+describe "setup-ci-receipt-key user gitconfig isolation":
+    """Prevents writes or lock creation against user-global ~/.gitconfig."""
+
+    it "passes the setup-ci-receipt-key --selftest suite":
+        val res = process_run("sh", ["-c",
+            "out=$(sh scripts/setup/setup-ci-receipt-key.shs --selftest 2>&1); rc=$?; printf 'RC=%s\\n%s' \"$rc\" \"$out\""])
+        val out: text = res.0
+        expect(out).to_contain("RC=0")
+        expect(out).to_contain("PASS")
+
+    it "initializes signing keys in a temp repo without altering HOME .gitconfig or .gitconfig.lock":
+        val script =
+            "set -u; " +
+            "REPO=$(pwd); T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; " +
+            "H=\"$T/home\"; mkdir -p \"$H/.ssh\" \"$T/repo\"; " +
+            "printf '[user]\\n\\tname = locked\\n' > \"$H/.gitconfig\"; " +
+            "printf 'held-by-someone-else\\n' > \"$H/.gitconfig.lock\"; " +
+            "chmod 444 \"$H/.gitconfig\"; " +
+            "(cd \"$T/repo\" && git init -q .); " +
+            "before=$(cksum \"$H/.gitconfig\" \"$H/.gitconfig.lock\" | tr '\\n' ' '); " +
+            "HOME=\"$H\" USERPROFILE=\"$H\" GIT_CONFIG_GLOBAL=\"$H/.gitconfig\" GIT_CONFIG_NOSYSTEM=1 " +
+            "sh \"$REPO/scripts/setup/setup-ci-receipt-key.shs\" init --principal fx@fixture --root \"$T/repo\" >/dev/null 2>&1; " +
+            "rc=$?; " +
+            "after=$(cksum \"$H/.gitconfig\" \"$H/.gitconfig.lock\" | tr '\\n' ' '); " +
+            "cfg=$(cd \"$T/repo\" && git config --local --get simple.ciReceiptIdentity 2>/dev/null || true); " +
+            "printf 'RC=%s\\nSAME=%s\\nCFG=%s\\n' \"$rc\" \"$([ \"$before\" = \"$after\" ] && echo yes || echo no)\" \"$cfg\""
+        val res = process_run("sh", ["-c", script])
+        val out: text = res.0
+        expect(out).to_contain("RC=0")
+        expect(out).to_contain("SAME=yes")
+        expect(out).to_contain("CFG=fx@fixture")

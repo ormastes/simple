@@ -1,0 +1,410 @@
+# @req REQ-GEN-COV-MIRERASED
+"""
+# MC/DC coverage: mir_lowering_types.spl (MirLowering local tables, TypeParam detection)
+
+Target: src/compiler/50.mir/mir_lowering_types.spl
+Each example drives one decision outcome / condition flip through the public
+`MirLowering` methods, with the table state set directly on the lowering.
+
+## Decision inventory
+
+| Line | Decision | Covering its |
+|------|----------|--------------|
+| 812 | `symbol_id < 0` | MIRERASED-001 T, all other slot its F |
+| 814/815 | empty index, ids present / absent | MIRERASED-002 |
+| 821 | probe loop bound | MIRERASED-003 (exhausted) |
+| 823 | empty bucket | MIRERASED-002, 004 |
+| 825 | `slot >= ids.len() or slot >= values.len()` | MIRERASED-005 (c0 T, c1 T, FF) |
+| 827 | id match | MIRERASED-003 (F), 004 (T) |
+| 835/836 | linear scan | MIRERASED-006 |
+| 843 | rebuild growth (skipped by the tool: multi-line `or`) | MIRERASED-007 |
+| 848/852/855 | rebuild fill, re-insert, collision | MIRERASED-007 |
+| 865/869/870 | free bucket: no index / free / full | MIRERASED-008 |
+| 880/881 | bind_local default frame hit / miss | MIRERASED-009 |
+| 887 | `symbol_id < 0 or local.id < 0` | MIRERASED-010 |
+| 889 | nominal profile receipt | F always; T needs SIMPLE_COMPILER_PHASE_PROFILE=1 at process start (documented gap) |
+| 894/897 | existing -2 / existing >= 0 | MIRERASED-011, 012 |
+| 900 | load-factor rebuild (skipped by the tool) | MIRERASED-012, 013 |
+| 904 | no free bucket -> rebuild | MIRERASED-013 |
+| 917/918 | find_local default frame hit / miss | MIRERASED-014 |
+| 922/924/926 | slot hit / -2 authoritative found / authoritative out of range | MIRERASED-015 |
+| 934 | `ty == nil` | MIRERASED-016 (unsafe nil) |
+| 940 | `info != nil and info.kind == TypeParam` | MIRERASED-017 (TT, c0 F, c1 F) |
+| 947/949/952 | Dict / Result / Function `or` chains | MIRERASED-018..020 |
+| 956/960 | any_*: nil list / element hit | MIRERASED-016, 021 |
+| 965/967/971 | isolation / resource normalization | MIRERASED-022 |
+| 973/974 | remember update vs append | MIRERASED-022 |
+| 993..1022 | copy_local_hir_type_metadata | MIRERASED-023, 024 |
+| 1011 | `source_type == nil or source_type == 0` | F only: a typed [HirType] cannot hold nil or 0 on the interpreter (documented gap) |
+| 1034/1039 | find_local_hir_type found / missing | MIRERASED-025; 1039 T same gap as 1011 |
+| 1055..1076 | isolation / resource state, forget | MIRERASED-025, 026 |
+| 1088/1100/1101 | runtime-value marks | MIRERASED-027 |
+| 1124 | unmark | MIRERASED-027 |
+| 1170..1183 | marker_map_without / text_map_without | MIRERASED-028 |
+| (match) | local_needs_erased_decode TypeParam / Any marked / Any unmarked / scalar | MIRERASED-029 |
+
+Bug suspects: none.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+# @tag:generics
+# @tag:coverage
+
+use std.spec.*
+use compiler.hir.hir_types.*
+use compiler.common.diagnostics.span.Span
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering_types.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn tp() -> HirType:
+    ty(HirTypeKind.TypeParam("T", []))
+
+fn i64_t() -> HirType:
+    ty(HirTypeKind.Int(64, true))
+
+fn bool_t() -> HirType:
+    ty(HirTypeKind.Bool)
+
+fn fresh() -> MirLowering:
+    MirLowering.new(SymbolTable.new())
+
+fn lid(n: i64) -> LocalId:
+    LocalId(id: n)
+
+describe "local_symbol_slot":
+    # @req REQ-GEN-COV-MIRERASED-001
+    it "mir_lowering_types.spl:812 c0 T negative symbol id is -1":
+        step("query a negative id")
+        val l = fresh()
+        expect(l.local_symbol_slot(-3)).to_equal(-1)
+
+    # @req REQ-GEN-COV-MIRERASED-002
+    it "mir_lowering_types.spl:814/815 empty index answers -2 with ids and -1 without":
+        step("empty index, no ids")
+        var l = fresh()
+        expect(l.local_symbol_slot(4)).to_equal(-1)
+        step("empty index, authoritative ids present")
+        l.local_symbol_ids = [4]
+        l.local_symbol_values = [lid(1)]
+        expect(l.local_symbol_slot(4)).to_equal(-2)
+        step("non-empty index with an empty bucket")
+        l.local_symbol_index_slots = [-1, -1]
+        expect(l.local_symbol_slot(4)).to_equal(-1)
+
+    # @req REQ-GEN-COV-MIRERASED-003
+    it "mir_lowering_types.spl:821/827 full chain without a match exhausts the probes":
+        step("every bucket points at an id that is not the query")
+        var l = fresh()
+        l.local_symbol_ids = [3]
+        l.local_symbol_values = [lid(1)]
+        l.local_symbol_index_slots = [0, 0]
+        expect(l.local_symbol_slot(4)).to_equal(-1)
+
+    # @req REQ-GEN-COV-MIRERASED-004
+    it "mir_lowering_types.spl:827 c0 T after one probe step":
+        step("query collides at bucket 0 and matches at bucket 1")
+        var l = fresh()
+        l.local_symbol_ids = [2, 4]
+        l.local_symbol_values = [lid(10), lid(11)]
+        l.local_symbol_index_slots = [0, 1]
+        expect(l.local_symbol_slot(4)).to_equal(1)
+
+    # @req REQ-GEN-COV-MIRERASED-005
+    it "mir_lowering_types.spl:825 c0 / c1 each flag a drifted index":
+        step("c0: slot beyond ids")
+        var a = fresh()
+        a.local_symbol_ids = [4]
+        a.local_symbol_values = [lid(1)]
+        a.local_symbol_index_slots = [5, -1]
+        expect(a.local_symbol_slot(4)).to_equal(-2)
+        step("c1: slot inside ids but beyond values")
+        var b = fresh()
+        b.local_symbol_ids = [7, 4]
+        b.local_symbol_values = [lid(1)]
+        b.local_symbol_index_slots = [1, -1]
+        expect(b.local_symbol_slot(4)).to_equal(-2)
+
+describe "linear scan, rebuild and free bucket":
+    # @req REQ-GEN-COV-MIRERASED-006
+    it "mir_lowering_types.spl:835/836 linear scan finds the last match or -1":
+        var l = fresh()
+        l.local_symbol_ids = [5, 9, 5]
+        expect(l.linear_local_symbol_slot(5)).to_equal(2)
+        expect(l.linear_local_symbol_slot(8)).to_equal(-1)
+
+    # @req REQ-GEN-COV-MIRERASED-007
+    it "mir_lowering_types.spl:843-855 rebuild grows and resolves collisions":
+        step("ids 1 and 17 collide in a 16-bucket table; min capacity 40 forces growth")
+        var l = fresh()
+        l.local_symbol_ids = [1, 33]
+        l.local_symbol_values = [lid(1), lid(2)]
+        l.rebuild_local_symbol_index(40)
+        expect(l.local_symbol_index_slots.len()).to_equal(64)
+        expect(l.local_symbol_slot(33)).to_equal(1)
+        step("small table: 1 and 17 share bucket 1")
+        var m = fresh()
+        m.local_symbol_ids = [1, 17]
+        m.local_symbol_values = [lid(1), lid(2)]
+        m.rebuild_local_symbol_index(0)
+        expect(m.local_symbol_index_slots.len()).to_equal(16)
+        expect(m.local_symbol_index_slots[2]).to_equal(1)
+
+    # @req REQ-GEN-COV-MIRERASED-008
+    it "mir_lowering_types.spl:865/869/870 free bucket: none / found / full":
+        var l = fresh()
+        expect(l.local_symbol_free_bucket(3)).to_equal(-1)
+        l.local_symbol_index_slots = [0, -1]
+        expect(l.local_symbol_free_bucket(2)).to_equal(1)
+        l.local_symbol_index_slots = [0, 0]
+        expect(l.local_symbol_free_bucket(2)).to_equal(-1)
+
+describe "bind_local":
+    # @req REQ-GEN-COV-MIRERASED-009
+    it "mir_lowering_types.spl:880/881 default frame hit rebinds only in that frame":
+        var l = fresh()
+        var frame: Dict<i64, LocalId> = {}
+        frame[5] = lid(1)
+        var other: Dict<i64, LocalId> = {}
+        l.verification_default_frames = [frame, other]
+        l.verification_default_depth = 2
+        step("frame 1 misses, frame 0 hits")
+        l.bind_local(5, lid(8))
+        expect(l.verification_default_frames[0][5].id).to_equal(8)
+        expect(l.local_symbol_ids.len()).to_equal(0)
+        step("no frame holds 6: falls through to the table")
+        l.bind_local(6, lid(9))
+        expect(l.local_symbol_ids.len()).to_equal(1)
+
+    # @req REQ-GEN-COV-MIRERASED-010
+    it "mir_lowering_types.spl:887 c0 / c1 each reject the binding":
+        var l = fresh()
+        l.bind_local(-1, lid(3))
+        l.bind_local(3, lid(-1))
+        expect(l.local_symbol_ids.len()).to_equal(0)
+        l.bind_local(3, lid(4))
+        expect(l.find_local(3).id).to_equal(4)
+
+    # @req REQ-GEN-COV-MIRERASED-011
+    it "mir_lowering_types.spl:894 T drifted index is rebuilt before rebinding":
+        var l = fresh()
+        l.local_symbol_ids = [3]
+        l.local_symbol_values = [lid(1)]
+        l.bind_local(3, lid(7))
+        expect(l.local_symbol_ids.len()).to_equal(1)
+        expect(l.local_symbol_values[0].id).to_equal(7)
+
+    # @req REQ-GEN-COV-MIRERASED-012
+    it "mir_lowering_types.spl:897/900 existing slot rebind and load-factor rebuild":
+        var l = fresh()
+        l.bind_local(2, lid(1))
+        expect(l.local_symbol_index_slots.len()).to_equal(16)
+        l.bind_local(2, lid(5))
+        expect(l.local_symbol_ids.len()).to_equal(1)
+        expect(l.find_local(2).id).to_equal(5)
+        var n = 3
+        while n < 15:
+            l.bind_local(n, lid(n))
+            n = n + 1
+        expect(l.local_symbol_index_slots.len()).to_equal(32)
+        expect(l.find_local(14).id).to_equal(14)
+
+    # @req REQ-GEN-COV-MIRERASED-013
+    it "mir_lowering_types.spl:904 T a full index below the load factor is rebuilt":
+        step("4 buckets all pointing at slot 0, one id: no free bucket for id 4")
+        var l = fresh()
+        l.local_symbol_ids = [3]
+        l.local_symbol_values = [lid(1)]
+        l.local_symbol_index_slots = [0, 0, 0, 0]
+        l.bind_local(4, lid(2))
+        expect(l.local_symbol_ids.len()).to_equal(2)
+        expect(l.find_local(4).id).to_equal(2)
+        expect(l.find_local(3).id).to_equal(1)
+
+describe "find_local":
+    # @req REQ-GEN-COV-MIRERASED-014
+    it "mir_lowering_types.spl:917/918 default frame hit and miss":
+        var l = fresh()
+        var frame: Dict<i64, LocalId> = {}
+        frame[5] = lid(4)
+        l.verification_default_frames = [frame]
+        l.verification_default_depth = 1
+        expect(l.find_local(5).id).to_equal(4)
+        expect(l.find_local(6).id).to_equal(-1)
+
+    # @req REQ-GEN-COV-MIRERASED-015
+    it "mir_lowering_types.spl:922/924/926 authoritative fallback c0 / c1":
+        step("-2 with the id present: authoritative answer")
+        var l = fresh()
+        l.local_symbol_ids = [9]
+        l.local_symbol_values = [lid(3)]
+        expect(l.find_local(9).id).to_equal(3)
+        step("c0 F: -2 but the id is absent")
+        expect(l.find_local(8).id).to_equal(-1)
+        step("c1 F: id present beyond the values array")
+        var m = fresh()
+        m.local_symbol_ids = [9]
+        expect(m.find_local(9).id).to_equal(-1)
+
+describe "hir_type_mentions_type_param":
+    # @req REQ-GEN-COV-MIRERASED-016
+    it "mir_lowering_types.spl:934/956 nil type and nil list are false":
+        val l = fresh()
+        val syms = SymbolTable.new()
+        unsafe:
+            val n: HirType = nil
+            val ns: [HirType] = nil
+            expect(l.hir_type_mentions_type_param(n, syms)).to_equal(false)
+            expect(l.any_hir_type_mentions_type_param(ns, syms)).to_equal(false)
+        expect(l.hir_type_mentions_type_param(tp(), syms)).to_equal(true)
+
+    # @req REQ-GEN-COV-MIRERASED-017
+    it "mir_lowering_types.spl:940 c0 / c1 Named spelling of a type parameter":
+        var syms = SymbolTable.new()
+        val t_id = syms.define("T", SymbolKind.TypeParam, nil, Span.empty(), Visibility.Public, false, nil)
+        val s_id = syms.define("S", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, nil)
+        val l = fresh()
+        step("TT: symbol is a TypeParam")
+        expect(l.hir_type_mentions_type_param(ty(HirTypeKind.Named(t_id, [])), syms)).to_equal(true)
+        step("c1 F: struct symbol, args scanned")
+        expect(l.hir_type_mentions_type_param(ty(HirTypeKind.Named(s_id, [])), syms)).to_equal(false)
+        expect(l.hir_type_mentions_type_param(ty(HirTypeKind.Named(s_id, [tp()])), syms)).to_equal(true)
+        step("c0 F: unknown symbol")
+        expect(l.hir_type_mentions_type_param(ty(HirTypeKind.Named(SymbolId(id: 999), [])), syms)).to_equal(false)
+
+    # @req REQ-GEN-COV-MIRERASED-018
+    it "mir_lowering_types.spl:947 Dict key / value / neither":
+        val l = fresh()
+        val syms = SymbolTable.new()
+        expect(l.hir_type_mentions_type_param(ty(HirTypeKind.Dict(tp(), i64_t())), syms)).to_equal(true)
+        expect(l.hir_type_mentions_type_param(ty(HirTypeKind.Dict(i64_t(), tp())), syms)).to_equal(true)
+        expect(l.hir_type_mentions_type_param(ty(HirTypeKind.Dict(i64_t(), bool_t())), syms)).to_equal(false)
+
+    # @req REQ-GEN-COV-MIRERASED-019
+    it "mir_lowering_types.spl:949 Result ok / err / neither":
+        val l = fresh()
+        val syms = SymbolTable.new()
+        expect(l.hir_type_mentions_type_param(ty(HirTypeKind.Result(tp(), i64_t())), syms)).to_equal(true)
+        expect(l.hir_type_mentions_type_param(ty(HirTypeKind.Result(i64_t(), tp())), syms)).to_equal(true)
+        expect(l.hir_type_mentions_type_param(ty(HirTypeKind.Result(i64_t(), bool_t())), syms)).to_equal(false)
+
+    # @req REQ-GEN-COV-MIRERASED-020
+    it "mir_lowering_types.spl:952 Function params / return / neither":
+        val l = fresh()
+        val syms = SymbolTable.new()
+        expect(l.hir_type_mentions_type_param(ty(HirTypeKind.Function([tp()], i64_t(), [])), syms)).to_equal(true)
+        expect(l.hir_type_mentions_type_param(ty(HirTypeKind.Function([i64_t()], tp(), [])), syms)).to_equal(true)
+        expect(l.hir_type_mentions_type_param(ty(HirTypeKind.Function([i64_t()], bool_t(), [])), syms)).to_equal(false)
+
+    # @req REQ-GEN-COV-MIRERASED-021
+    it "mir_lowering_types.spl:960 structural arms reach a nested type parameter":
+        val l = fresh()
+        val syms = SymbolTable.new()
+        expect(l.hir_type_mentions_type_param(ty(HirTypeKind.Tuple([i64_t(), tp()])), syms)).to_equal(true)
+        expect(l.hir_type_mentions_type_param(ty(HirTypeKind.Tuple([i64_t(), bool_t()])), syms)).to_equal(false)
+        expect(l.hir_type_mentions_type_param(ty(HirTypeKind.Optional(tp())), syms)).to_equal(true)
+        expect(l.hir_type_mentions_type_param(ty(HirTypeKind.Slice(tp())), syms)).to_equal(true)
+        expect(l.hir_type_mentions_type_param(bool_t(), syms)).to_equal(false)
+
+describe "local HIR type metadata":
+    # @req REQ-GEN-COV-MIRERASED-022
+    it "mir_lowering_types.spl:965/967/971/974 states normalize and updates replace":
+        var l = fresh()
+        l.remember_local_hir_type(1, tp(), 1, 1)
+        l.remember_local_hir_type(2, i64_t(), 2, 0)
+        l.remember_local_hir_type(3, i64_t(), 7, 5)
+        expect(l.local_hir_type_isolation_state(1)).to_equal(1)
+        expect(l.local_hir_type_isolation_state(2)).to_equal(2)
+        expect(l.local_hir_type_isolation_state(3)).to_equal(0)
+        expect(l.local_hir_type_resource_state(1)).to_equal(1)
+        expect(l.local_hir_type_resource_state(3)).to_equal(0)
+        step("update local 2 in place")
+        l.remember_local_hir_type(2, bool_t(), 1, 1)
+        expect(l.local_hir_type_ids.len()).to_equal(3)
+        expect(l.local_hir_type_isolation_state(2)).to_equal(1)
+
+    # @req REQ-GEN-COV-MIRERASED-023
+    it "mir_lowering_types.spl:993/1004/1022 copy: missing source, new destination":
+        var l = fresh()
+        l.exists_collection_locals[1] = true
+        l.copy_local_hir_type_metadata(1, 2)
+        expect(l.exists_collection_locals.contains(2)).to_equal(true)
+        expect(l.local_hir_type_ids.len()).to_equal(0)
+        l.remember_local_hir_type(1, tp(), 2, 1)
+        l.copy_local_hir_type_metadata(1, 3)
+        expect(l.local_hir_type_isolation_state(3)).to_equal(2)
+        expect(l.local_hir_type_resource_state(3)).to_equal(1)
+        expect(l.exists_collection_locals.contains(3)).to_equal(true)
+
+    # @req REQ-GEN-COV-MIRERASED-024
+    it "mir_lowering_types.spl:1022 T copy over an existing destination":
+        var l = fresh()
+        l.remember_local_hir_type(4, tp(), 1, 0)
+        l.remember_local_hir_type(5, i64_t(), 2, 1)
+        l.copy_local_hir_type_metadata(4, 5)
+        expect(l.local_hir_type_ids.len()).to_equal(2)
+        expect(l.local_hir_type_isolation_state(5)).to_equal(1)
+        expect(l.local_hir_type_resource_state(5)).to_equal(0)
+
+    # @req REQ-GEN-COV-MIRERASED-025
+    it "mir_lowering_types.spl:1034/1055/1063 lookups found and missing":
+        var l = fresh()
+        l.remember_local_hir_type(6, tp(), 1, 1)
+        val found = l.find_local_hir_type(6)
+        expect(found.?).to_equal(true)
+        expect(l.find_local_hir_type(7).?).to_equal(false)
+        expect(l.local_hir_type_isolation_state(7)).to_equal(0)
+        expect(l.local_hir_type_resource_state(7)).to_equal(0)
+
+    # @req REQ-GEN-COV-MIRERASED-026
+    it "mir_lowering_types.spl:1075/1076 forget keeps the others":
+        var l = fresh()
+        l.remember_local_hir_type(1, tp(), 1, 0)
+        l.remember_local_hir_type(2, i64_t(), 2, 0)
+        l.forget_local_hir_type(1)
+        expect(l.local_hir_type_ids).to_equal([2])
+        expect(l.local_hir_type_isolation_state(2)).to_equal(2)
+
+describe "runtime value marks and erased decode":
+    # @req REQ-GEN-COV-MIRERASED-027
+    it "mir_lowering_types.spl:1088/1100/1124 mark is idempotent and unmark removes":
+        var l = fresh()
+        l.mark_runtime_value_local(3)
+        l.mark_runtime_value_local(3)
+        l.mark_runtime_value_local(4)
+        expect(l.runtime_value_local_ids).to_equal([3, 4])
+        l.unmark_runtime_value_local(3)
+        expect(l.runtime_value_local_ids).to_equal([4])
+        expect(l.is_runtime_value_local(3)).to_equal(false)
+
+    # @req REQ-GEN-COV-MIRERASED-028
+    it "mir_lowering_types.spl:1170/1174/1179/1183 marker maps drop only the key":
+        var m: Dict<i64, bool> = {}
+        m[1] = true
+        m[2] = true
+        expect(marker_map_without(m, 9).len()).to_equal(2)
+        val kept = marker_map_without(m, 1)
+        expect(kept.len()).to_equal(1)
+        expect(kept.contains_key(2)).to_equal(true)
+        var t: Dict<i64, text> = {}
+        t[1] = "a"
+        t[2] = "b"
+        expect(text_map_without(t, 9).len()).to_equal(2)
+        val tk = text_map_without(t, 2)
+        expect(tk.len()).to_equal(1)
+        expect(tk[1]).to_equal("a")
+
+    # @req REQ-GEN-COV-MIRERASED-029
+    it "mir_lowering_types.spl local_needs_erased_decode: T always, Any only when marked":
+        var l = fresh()
+        expect(l.local_needs_erased_decode(1, tp())).to_equal(true)
+        expect(l.local_needs_erased_decode(1, ty(HirTypeKind.Any))).to_equal(false)
+        l.mark_runtime_value_local(1)
+        expect(l.local_needs_erased_decode(1, ty(HirTypeKind.Any))).to_equal(true)
+        expect(l.local_needs_erased_decode(1, i64_t())).to_equal(false)

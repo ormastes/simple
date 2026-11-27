@@ -1,0 +1,99 @@
+# @req REQ-SSPEC-COMPILER
+# Parse actual alias declarations and restore their existing flat-pool fields.
+use std.spec.{describe, it, expect, fail}
+use compiler.frontend.parser_types.{ParserModule, ParserTypeAlias, Type, TypeKind}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_checked_reference_v1,
+    parse_and_build_module_scoped, flat_pool_capture_arm, flat_pool_capture_take,
+    build_module_from_flat_pool_blob}
+use compiler.core.parser.parser_has_errors
+
+fn generic_alias_parse(source: text) -> ParserModule:
+    val result = parse_and_build_module_checked_reference_v1(source, "generic_alias.spl")
+    expect(result.is_ok()).to_equal(true)
+    result.unwrap()
+
+fn generic_alias_named(type_: Type, name: text, arity: i64) -> [Type]:
+    match type_.kind:
+        case TypeKind.Named(actual, args):
+            expect(actual).to_equal(name)
+            expect(args.len()).to_equal(arity)
+            return args
+        case _: fail("expected named alias type " + name)
+    []
+
+fn generic_alias_assert_template(alias: ParserTypeAlias):
+    expect(alias.name).to_equal("Registry")
+    expect(alias.is_public).to_equal(true)
+    expect(alias.type_params.len()).to_equal(2)
+    val first = alias.type_params[0]
+    expect(first.name).to_equal("T")
+    expect(first.bounds.len()).to_equal(1)
+    generic_alias_named(first.bounds[0], "Carrier", 0)
+    expect(first.has_default).to_equal(true)
+    generic_alias_named(first.default, "text", 0)
+    val second = alias.type_params[1]
+    expect(second.name).to_equal("U")
+    expect(second.bounds.len()).to_equal(0)
+    expect(second.has_default).to_equal(true)
+    match second.default.kind:
+        case TypeKind.Array(element, _): generic_alias_named(element, "T", 0)
+        case _: fail("lost dependent array default")
+    val target_args = generic_alias_named(alias.type_, "Dict", 2)
+    generic_alias_named(target_args[0], "T", 0)
+    generic_alias_named(target_args[1], "U", 0)
+
+val GENERIC_ALIAS_SOURCE = "pub type Registry<T: Carrier = text, U = [T]> = Dict<T, U>\ntype Plain = i64\n"
+
+describe "generic aliases through the canonical parser and flat AST bridge":
+    it "retains multiple parameters and the complete RHS from actual source":
+        val module = generic_alias_parse("type Rows<K, V> = Dict<K, [V]>\n")
+        expect(module.type_aliases.len()).to_equal(1)
+        val alias = module.type_aliases["Rows"]
+        expect(alias.type_params.len()).to_equal(2)
+        expect(alias.type_params[0].name).to_equal("K")
+        expect(alias.type_params[1].name).to_equal("V")
+        for parameter in alias.type_params:
+            expect(parameter.bounds.len()).to_equal(0)
+            expect(parameter.has_default).to_equal(false)
+        val target_args = generic_alias_named(alias.type_, "Dict", 2)
+        generic_alias_named(target_args[0], "K", 0)
+        match target_args[1].kind:
+            case TypeKind.Array(element, _): generic_alias_named(element, "V", 0)
+            case _: fail("lost generic array RHS")
+
+    it "retains inline bounds and structured defaults without leaking into the next alias":
+        val module = generic_alias_parse(GENERIC_ALIAS_SOURCE)
+        generic_alias_assert_template(module.type_aliases["Registry"])
+        val plain = module.type_aliases["Plain"]
+        expect(plain.type_params.len()).to_equal(0)
+        generic_alias_named(plain.type_, "i64", 0)
+
+    it "restores names bounds defaults and RHS after unrelated flat-pool reuse":
+        flat_pool_capture_arm()
+        val original = parse_and_build_module_scoped(GENERIC_ALIAS_SOURCE, "generic_alias_cache.spl", false)
+        expect(parser_has_errors()).to_equal(false)
+        generic_alias_assert_template(original.type_aliases["Registry"])
+        val blob = flat_pool_capture_take()
+        expect(blob.len()).to_be_greater_than(0)
+        val replacement = generic_alias_parse("type Different<W> = [W]\n")
+        expect(replacement.type_aliases.len()).to_equal(1)
+        val restored = build_module_from_flat_pool_blob(blob, GENERIC_ALIAS_SOURCE, "generic_alias_cache.spl")
+        val restored_present: bool = restored.?
+        expect(restored_present).to_equal(true)
+        val module = restored.unwrap()
+        expect(module.type_aliases.len()).to_equal(2)
+        generic_alias_assert_template(module.type_aliases["Registry"])
+        expect(module.type_aliases["Plain"].type_params.len()).to_equal(0)
+        expect(parser_has_errors()).to_equal(false)
+
+    it "rejects a missing alias assignment after generic parameters":
+        val parsed = parse_and_build_module_checked_reference_v1("type Missing<T>\n", "missing_alias_rhs.spl")
+        expect(parsed.is_err()).to_equal(true)
+
+    it "rejects a missing parameter default through the existing generic parser":
+        val parsed = parse_and_build_module_checked_reference_v1("type Broken<T = > = [T]\n", "bad_alias_default.spl")
+        expect(parsed.is_err()).to_equal(true)
+
+    it "reports the inherited unsupported parameterized inline bound instead of dropping it":
+        val parsed = parse_and_build_module_checked_reference_v1("type Items<T: Carrier<i64>> = [T]\n", "unsupported_inline_bound.spl")
+        expect(parsed.is_err()).to_equal(true)

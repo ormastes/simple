@@ -102,6 +102,17 @@ arguments, with separate cold and warm results. Failed builds do not count as
 speedups. A formal policy model is useful evidence but does not replace native
 concurrency, memory or compiler correctness tests.
 
+Fast/deep split (owner decision 2026-11-17): normal `build`/`check`/`run` run
+low-cost checks only; default `lint` and explicit diagnostic builds run medium
+and high analyses under declared budgets, reporting `incomplete`/`timed_out`
+distinctly. Mandatory soundness checks never move into optional lint. The
+existing `x->method(args)` operator keeps its original meaning,
+`x = x.method(args)` (single evaluation, place and type rules), disambiguated
+from return-type and match-arm arrows by grammar context; it is not an
+unrelated record-update syntax. Design:
+`doc/05_design/language/robust_types/robustness_effects_arrow_pin_design_2026-11-17.md`;
+plan: `doc/03_plan/release/1.0.0/robustness_completion_plan_2026-11-17.md`.
+
 ## Migration is observable
 
 The current truthiness implementation includes implicit enum truthiness, so the
@@ -110,3 +121,17 @@ language/condition-policy version, migration diagnostics and parity tests before
 switching defaults. Keep legacy `@cfg` compatibility during the documented
 migration; removal requires a separate release decision. Documentation must
 distinguish selected design, implemented capability and qualified default.
+
+<!-- wave-f-perf-analysis-collection-refactoring-2026-11-19 -->
+
+## Performance analysis, execution tiers, and first-class loops (2026-11-18)
+
+Canonical plan: [Simple Performance Analysis and Collection Refactoring](../../03_plan/compiler/performance_analysis_and_collection_refactoring_2026-11-18.md) (`D01`, `D05`, `D07`, `D09`, `D11`, `D12`, §8.3, §16.2).
+
+- **Low overhead in normal compilation (`T0`):** Normal `build`, `check`, and `run` reuse already-computed front-end/HIR facts (`T0`) without introducing mandatory symbolic solvers, whole-program alias/effect passes, new backends, or source/MIR collection rewrites (`D12`). When `T1..T4` performance analysis is disabled, the compiler allocates zero performance side tables (`src/compiler/35.semantics/perf/perf_analysis_contracts_v1.spl`) and initializes zero analyzer plugins.
+- **Tiered diagnostic and empirical profiles (`T1..T4`):**
+  - `T1` (fast local idiom recognition and known-library cost composition) runs in default `lint` and incremental LSP; compiler admission requires passing the 7-point measured wall/CPU/allocation/RSS gate (§8.4).
+  - `T2` (compositional caller cost propagation, multivariate size relationships, bounded alias/effect queries, and baseline regression comparison) runs in full-project `lint`, background/save LSP, and CI, never on the normal build critical path.
+  - `T3` (optional recurrence/bound solvers and deep equivalence) runs only in explicit diagnostic profiles (`--profile perf-deep`) or scheduled CI.
+  - `T4` (empirical operation counters, scaling observations, and `.sprof` measurements) is strictly opt-in (`D11`); running lint or editor diagnostics never injects runtime instrumentation or alters generated program behavior.
+- **First-class imperative loops alongside explicit collection operations (`D01`, `D05`, `D09`):** Imperative `for` and `while` loops remain valid first-class Simple constructs for state machines, hardware/MMIO control, early/irregular exits, and performance-critical paths. Collection pipelines (`iter()`, `view()`, `map`, `filter`, `fold`, `collect`) are preferred when clearer for transformations and queries, while cost analysis analyzes loops, callbacks, iterators, and pipelines uniformly rather than penalizing loop syntax as an error (`PERF-STYLE-001` is a contextual assist/hint, never a correctness failure).

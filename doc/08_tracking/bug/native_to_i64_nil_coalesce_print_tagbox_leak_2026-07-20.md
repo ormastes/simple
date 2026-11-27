@@ -244,3 +244,27 @@ point this bug's regression coverage
 (`test/03_system/native/option_nullcoalesce_i64_print_interp.spl`, expected
 rc 42) can finally be run.
 
+
+## Verification 2026-11-25 (p2w4-ad lane, release/1.0.0 @ ef6a94f8a03)
+
+The deployed pinned seed (`bin/simple.exe`, v1.0.0-rc.1) now runs the doc's
+exact repro correctly through the same `lowering_expr_builtin.rs` display
+path (cranelift JIT via `run`):
+`val n = "12345".to_i64() ?? -999; print "n={n}"` → `n=12345`;
+`.trim()` variant → `n2=12345`; arithmetic propagation case → `p=12346`.
+No `<value:0x...>` tag-box leak in any case. The source fix (Optional
+pointer-unwrap at both boxing-decision sites) is present at
+`src/compiler_rust/compiler/src/mir/lower/lowering_expr_builtin.rs:822`
+region.
+
+Limit: this is JIT `run` evidence, not the hosted native-build one-binary
+mode the original matrix used; `native-build` remains unexercised on this
+host (no admitted compiler; pinned seed cannot load the test runner at this
+HEAD due to the `@representation_boundary` source/binary inconsistency).
+The blocked-on-toolchain caveat below is thereby narrowed but the
+native-build regression case
+(`test/03_system/native/option_nullcoalesce_i64_print_interp.spl`) still
+awaits an admitted-compiler run.
+
+**Status: remains Closed** — now with deployed-binary runtime evidence for
+the display-path fix.

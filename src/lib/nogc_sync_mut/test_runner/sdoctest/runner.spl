@@ -4,43 +4,62 @@
 # Prepends init script content, sets up environment, enforces timeouts.
 
 use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
-use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_remove}
-use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.test_runner.doctest_child_execution.{execute_doctest_child_v1}
 use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.sffi.cli_args.{cli_get_args}
 use std.test_runner.test_executor_parsing.{find_simple_binary}
+use std.test_runner.compiler_select.{select_test_child_binary}
 use nogc_sync_mut.platform.{get_host_os, get_host_arch}
-use std.test_runner.test_runner_types.{TestOptions, TEST_OUTPUT_CAPTURE_BYTES, doctest_discovery_scope_path}
+use std.test_runner.test_runner_types.{TestOptions, doctest_discovery_scope_path}
 use std.test_runner.test_runner_files.{strip_ansi}
-use std.test_runner.sdoctest.types.{BlockResult, BlockStatus, SdoctestBlock, SdoctestConfig, SdoctestFileResult, SdoctestRunResult}
+use std.test_runner.sdoctest.types.{BlockResult, BlockStatus, SdoctestBlock, SdoctestConfig, SdoctestFileResult, SdoctestRunResult, should_fail_infra_reason}
 use std.test_runner.sdoctest.config.{find_init_script_file, find_env_timeout, find_env_vars, find_env_run_config}
-use std.test_runner.sdoctest.extractor.{extract_sdoctest_blocks, extract_reusable_lines}
-use std.test_runner.sdoctest.discovery.{discover_sdoctest_files, is_tag_ignored}
+use std.test_runner.sdoctest.extractor.{extract_sdoctest_blocks, build_accumulated_preambles}
+use std.nogc_sync_mut.test_runner.sdoctest.discovery.{discover_sdoctest_files_for_path_run, is_tag_ignored}
 use std.test_runner.sdoctest.transcript.{parse_sdoctest_transcript, sdoctest_output_matches}
 
 # =========================================================================
 # Top-Level Orchestrator
 # =========================================================================
 
-fn run_sdoctest_mode(options: TestOptions, config: SdoctestConfig) -> SdoctestRunResult:
+pub fn run_sdoctest_mode(options: TestOptions, config: SdoctestConfig) -> SdoctestRunResult:
     # Keep the conventional positional spec root out of release-wide Markdown
     # discovery. --whole consumes configured sources from sdoctest.sdn;
     # ordinary explicit --sdoctest targets remain narrowly scoped.
     val cli_path = doctest_discovery_scope_path(options)
-    val files = discover_sdoctest_files(config, cli_path)
+    # Config-driven: `path_runs: include` widens an implicit path-scoped run to
+    # the configured sources; an explicit --sdoctest or .md target stays narrow.
+    val widen = config.path_run_include_sources and not options.sdoctest and not cli_path.ends_with(".md")
+    val discovered = discover_sdoctest_files_for_path_run(config, cli_path, widen)
+    # Registration uses the same canonical extractor as execution
+    # (extract_sdoctest_blocks: closed, non-empty ```simple/spl/sdoctest
+    # fences — the contract test_manifest_scanner.count_sdoctest_blocks
+    # documents): a markdown file with zero extractable blocks is not a
+    # doctest file. It contributes zero tests and is skipped from the run
+    # count, never reported as a failure.
+    var files: [text] = []
+    for f in discovered:
+        if extract_sdoctest_blocks(f).len() > 0:
+            files.push(f)
+
+    # Fail-closed is reserved for an explicit doctest request: the --sdoctest
+    # flag or a directly named .md file. A directory positional target names
+    # specs — the markdown lane is a config-enabled complement of that run, so
+    # zero runnable blocks under it is a legal no-op, not an error.
+    val explicit_doc_target = options.sdoctest or cli_path.ends_with(".md")
 
     if options.list:
         print_sdoctest_list(files, config)
         return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
 
     if files.len() == 0:
-        if cli_path != "":
-            # Explicit target (a single .md file or directory the caller named
-            # directly) that produced zero matching files is a fail-closed
+        if explicit_doc_target:
+            # An explicit doctest request (a single .md file or a --sdoctest
+            # target) that produced zero runnable files is a fail-closed
             # error, not a silent no-op — mirrors the single-file spec
-            # arbiter's "no examples executed" contract. Config-driven sweeps
-            # (cli_path == "") keep their existing zero-is-ok semantics.
+            # arbiter's "no examples executed" contract. Config-driven and
+            # spec-directory sweeps keep their zero-is-ok semantics.
             print "error: test-runner: no doctest blocks found"
             return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 1, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
         print "No sdoctest files found."
@@ -78,12 +97,12 @@ fn run_sdoctest_mode(options: TestOptions, config: SdoctestConfig) -> SdoctestRu
     val run_end = time_now_unix_micros()
     val duration_ms = (run_end - run_start) / 1000
 
-    if cli_path != "" and total == 0:
-        # The explicit target resolved to a real file (or files), but none of
-        # them contained an extractable sdoctest block (e.g. markdown with no
-        # fences/markers). Fail-closed, matching the zero-files-found case
-        # above — an explicitly named target with nothing to run is an error,
-        # not a silent pass.
+    if explicit_doc_target and total == 0:
+        # The explicit doctest request resolved to real file(s), but every
+        # extracted block was ignored (or otherwise produced nothing to run).
+        # Fail-closed, matching the zero-files-found case above — an explicit
+        # request with nothing to run is an error, not a silent pass. Sweeps
+        # without an explicit request stay zero-is-ok.
         print "error: test-runner: no doctest blocks found"
         return SdoctestRunResult(files: file_results, total: 0, passed: 0, failed: 1, skipped: skipped, errors: errors, accepted: accepted, duration_ms: duration_ms)
 
@@ -102,7 +121,7 @@ fn run_sdoctest_mode(options: TestOptions, config: SdoctestConfig) -> SdoctestRu
 # Per-File Execution
 # =========================================================================
 
-fn run_sdoctest_file(file_path: text, config: SdoctestConfig, options: TestOptions) -> SdoctestFileResult:
+pub fn run_sdoctest_file(file_path: text, config: SdoctestConfig, options: TestOptions) -> SdoctestFileResult:
     val all_blocks = extract_sdoctest_blocks(file_path)
     # Ignored blocks are completely invisible — excluded from totals and results
     var blocks: [SdoctestBlock] = []
@@ -181,23 +200,14 @@ fn run_sdoctest_file(file_path: text, config: SdoctestConfig, options: TestOptio
 # Block Accumulation - Preamble Building
 # =========================================================================
 
-fn build_file_preambles(blocks: [SdoctestBlock]) -> [text]:
+pub fn build_file_preambles(blocks: [SdoctestBlock]) -> [text]:
     # Build accumulated preambles for each block.
     # Block N gets reusable definitions (use, struct, class, enum, fn, impl)
     # extracted from blocks 0..N-1.
-    var preambles: [text] = []
-    var acc_parts: [text] = []
-
+    var codes: [text] = []
     for block in blocks:
-        # This block's preamble is whatever we've accumulated so far
-        preambles.push(acc_parts.join("\n"))
-
-        # Extract reusable lines from this block and add to accumulator
-        val reusable = extract_reusable_lines(block.code)
-        if reusable != "":
-            acc_parts.push(reusable)
-
-    preambles
+        codes.push(block.code)
+    build_accumulated_preambles(codes)
 
 
 # =========================================================================
@@ -291,7 +301,7 @@ fn platform_binary_candidates() -> [text]:
 # Per-Block Execution
 # =========================================================================
 
-fn run_sdoctest_block(block: SdoctestBlock, config: SdoctestConfig, default_env_name: text, options: TestOptions, preamble: text) -> BlockResult:
+pub fn run_sdoctest_block(block: SdoctestBlock, config: SdoctestConfig, default_env_name: text, options: TestOptions, preamble: text) -> BlockResult:
     # Check if block should be skipped
     if block.has_modifier_skip():
         return BlockResult(
@@ -320,32 +330,49 @@ fn run_sdoctest_block(block: SdoctestBlock, config: SdoctestConfig, default_env_
     # Build code with init script and preamble prepended
     val code = build_temp_code(block, config, preamble)
 
-    # Write temp file
-    val temp_path = "/tmp/sdoctest_block_{block.line_number}.spl"
-    file_atomic_write(temp_path, code)
-
-    # Preserve argv boundaries through the native bounded process facade.
-    val binary = find_sdoctest_binary()
-    # Block-level @modifier takes priority over env-level run-config
+    # Keep the requested compiler's hash admission before either child route.
+    var binary = ""
+    match select_test_child_binary(options.compiler):
+        case Err(message):
+            return BlockResult(block: block, status: BlockStatus.Error,
+                duration_ms: 0, stdout: "", stderr: "", error: "test-runner: " + message)
+        case Ok(selected):
+            binary = if selected != "": selected else: find_sdoctest_binary()
     val block_run_config = block.get_run_config()
     val run_config = if block_run_config != "": block_run_config else: find_env_run_config(config, env_name)
-    val run_args = if run_config != "":
-        ["--run-config={run_config}", temp_path]
-    else:
-        [temp_path]
     val start = time_now_unix_micros()
-    val run_result = process_run_bounded(binary, run_args, timeout, TEST_OUTPUT_CAPTURE_BYTES)
-    val stdout = run_result.0
-    val stderr = run_result.1
-    val exit_code = run_result.2
-    val end = time_now_unix_micros()
-    val duration_ms = (end - start) / 1000
-
-    # Cleanup temp file
-    file_remove(temp_path)
+    val child = execute_doctest_child_v1(code, binary, timeout, Some(options), run_config)
+    val stdout = child.stdout
+    val stderr = child.stderr
+    val exit_code = child.exit_code
+    val duration_ms = (time_now_unix_micros() - start) / 1000
+    if child.infrastructure_error != "":
+        return BlockResult(block: block, status: BlockStatus.Error,
+            duration_ms: duration_ms, stdout: stdout, stderr: stderr,
+            error: child.infrastructure_error)
 
     # Determine status
     val should_fail = block.has_modifier_should_fail()
+
+    # A child that died abnormally (e.g. a top-level assert panics the
+    # interpreter) but reported why on stderr is a failed block, not an error.
+    if exit_code == -1 and stderr != "" and not stderr.contains("TIMEOUT") and not stderr.contains("timed out"):
+        if should_fail:
+            val infra = should_fail_infra_reason(exit_code, stderr)
+            if infra != "":
+                return BlockResult(
+                    block: block, status: BlockStatus.Error,
+                    duration_ms: duration_ms, stdout: stdout, stderr: stderr, error: infra
+                )
+            return BlockResult(
+                block: block, status: BlockStatus.Passed,
+                duration_ms: duration_ms, stdout: stdout, stderr: stderr, error: ""
+            )
+        return BlockResult(
+            block: block, status: BlockStatus.Failed,
+            duration_ms: duration_ms, stdout: stdout, stderr: stderr,
+            error: extract_block_error(stderr: stderr, stdout: stdout)
+        )
 
     if exit_code == -1:
         val process_error = if stderr.contains("TIMEOUT") or stderr.contains("timed out"):
@@ -361,6 +388,12 @@ fn run_sdoctest_block(block: SdoctestBlock, config: SdoctestConfig, default_env_
         )
 
     if should_fail:
+        val infra = should_fail_infra_reason(exit_code, stderr)
+        if exit_code != 0 and infra != "":
+            return BlockResult(
+                block: block, status: BlockStatus.Error,
+                duration_ms: duration_ms, stdout: stdout, stderr: stderr, error: infra
+            )
         if exit_code != 0:
             return BlockResult(
                 block: block, status: BlockStatus.Passed,
@@ -407,7 +440,7 @@ fn run_sdoctest_block(block: SdoctestBlock, config: SdoctestConfig, default_env_
 # Code Building (init script prepending)
 # =========================================================================
 
-fn build_temp_code(block: SdoctestBlock, config: SdoctestConfig, preamble: text) -> text:
+pub fn build_temp_code(block: SdoctestBlock, config: SdoctestConfig, preamble: text) -> text:
     var parts: [text] = []
 
     # 1. Init script (if configured)
@@ -429,13 +462,17 @@ fn build_temp_code(block: SdoctestBlock, config: SdoctestConfig, preamble: text)
     else:
         parts.push(block.code)
 
+    # A declarations-only fence (fn/struct/enum) is a valid doc example; give
+    # the module one top-level statement so running it is not rejected.
+    parts.push("val _sdoctest_done = 0")
+
     parts.join("\n\n")
 
 # =========================================================================
 # Error Extraction
 # =========================================================================
 
-fn extract_block_error(stderr: text, stdout: text) -> text:
+pub fn extract_block_error(stderr: text, stdout: text) -> text:
     val combined = stderr + "\n" + stdout
     val lines = combined.split("\n")
 

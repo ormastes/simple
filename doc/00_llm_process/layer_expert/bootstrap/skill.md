@@ -1,5 +1,96 @@
 # bootstrap Layer Expert
 
+## Unified Cross-Platform Phase 3 / Phase 4 Build, Seed-Skip & Protected Scripts (2026-11-22)
+
+See [`phase3_phase4_shared_build.md`](../../../07_guide/tooling/phase3_phase4_shared_build.md)
+and [`bootstrap_options.md`](../../../07_guide/tooling/bootstrap_options.md):
+
+1. **Shared Cross-Platform Phased Build (`scripts/bootstrap/build-phase3-phase4.sh` & `.bat`):**
+   One shared script across **Linux, macOS, FreeBSD, Windows (Git-Bash/MSYS2), and SimpleOS**.
+   Shows the **interactive Phased Build Menu** when invoked interactively without
+   `--phase=...` (or with `--menu`), and accepts non-interactive `--phase=p3a|p3|p4|all`.
+   Windows `scripts/bootstrap/build-phase3-phase4.bat` delegates to `.sh` with 2 configs:
+   **`mingw` DEFAULT** (`--win-config=mingw`, `llvm-mingw` clang + `ld.lld`) and
+   **`msvc` optional** (`--win-config=msvc`, `clang-cl`). Old standalone Phase 3/4 scripts
+   (`p3-selfbuild-stage3.shs`, `p3-manual-link-stage3.shs`, `p3-smoke-stage3.shs`,
+   `p3-targeted-stage2-build.shs`, `p3-entry-groups.shs`, etc.) are deprecated —
+   direct invocation pauses with migration instructions for `build-phase3-phase4.sh`
+   (including phased/shard mode) and returns without building.
+2. **Default Bootstrap Skips Phase 1 & Phase 2 Once Phase 3+ Exists:**
+   In `scripts/bootstrap/bootstrap-from-scratch.sh`, when a working native pure-Simple
+   Phase 3+ host compiler already exists (`bin/release/<triple>/simple` or `bin/simple`
+   without the Rust-seed banner), **default bootstrap skips Phase 1 (Cargo Rust seed)
+   and Phase 2 (`seed -> stage2`)** and delegates directly to
+   `scripts/bootstrap/build-phase3-phase4.sh` (`P3 -> P4`). Pass `--from-seed` /
+   `--cold-bootstrap` (or `--full-bootstrap` in CI) ONLY when intentionally rebuilding
+   Phase 1 & Phase 2 from the Rust seed; pass `--skip-seed` to require an existing
+   Phase 3+ compiler without seed fallback.
+3. **Compile Mode (`shard` Default, `file` Optional) & `native_host_match` Unit Link:**
+   `--compile-mode=shard` is **DEFAULT** in `build-phase3-phase4.sh`
+   (`SIMPLE_FILE_WORKERS=0`, `SIMPLE_HIR_SHARDING=1`, `SIMPLE_MIR_SHARDING=1`);
+   `--compile-mode=file` (`SIMPLE_FILE_WORKERS=1`) is optional.
+   `scripts/bootstrap/stage3-native-host-link-policy.{sdn,shs}` enforces mandatory
+   **`native_host_match` tag check** (`target (platform, cpu) == host (os, arch)`),
+   minimizing `simple` to link **only** thin entry + `(platform, cpu)` static primitive
+   archive (`libsimple-primitive-<platform>-<cpu>.a`) + dead-stripped primitive C core
+   statically, while linking `lib/libsimple-{std,compiler-common,compiler,app}.dylib`
+   (`.so`) dynamically. **Phase 3 builds ONLY native host targets** — non-native
+   backends (other CPUs, VHDL, GPU/CUDA/Vulkan, Wasm) are NOT built during Phase 3,
+   **but if a `.dylib` already exists on disk, `simple` can load and use it**
+   (`--backend-plugin <existing.dylib>`).
+4. **Phase 4 Dual-Mode Build (`--xray` + Optimized Release):**
+   Phase 4 builds **both** the optimized production binary
+   (`simple`: `--profile=prod --release --strip`) AND the XRay-instrumented debug binary
+   (`simple-debug`: `--profile=dev --debug --no-strip --xray`), plus Stage 5 essentials
+   (`simple_test_runner`, `simple_build_runner`, `simple_mcp_server`, `simple_lsp_mcp_server`).
+5. **Protected Script Guard & Zero-Compile `--path-check`:**
+   Every core bootstrap script carries a top-of-file
+   `PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER`
+   banner. Run `sh scripts/check/fast-verify-bootstrap-scripts.shs` for a sub-second
+   check of sealed `.sdn` SHA-256 digests, protected banners, syntax, and
+   `check-bootstrap-path-matrix-all.shs` across Unix/Windows/SimpleOS using extensible
+   `PATH_ACTION|...|status=ALIVE` superset records without running actual compilation.
+
+## Host-config bootstrap settings (2026-11-22)
+
+Host tuning (reserve, Stage 3 tree RSS cap, Stage 3 direct threads, Stage 3
+file workers) is read from host config keys `mem_reserve_free_mib`,
+`stage3_tree_rss_cap_kib`, `stage3_threads`, `stage3_file_workers`, and
+(2026-11-23, W27/W32/W36) the Stage 2 matrix / Stage 3 shard keys
+`frontend_cache` (on|off), `mir_sharding`, `mir_shard_count`,
+`mir_shard_worker_kib`, and `sanity_build_timeout_seconds`
+(`COMPILER_BUILD_TIMEOUT_SECONDS` for the sanity probes) (invalid = hard error; test
+`scripts/bootstrap/tests/host-config-matrix-shard-knobs-test.shs`)
+via `scripts/bootstrap/lib/host-bootstrap-settings.shs` and
+`bootstrap-jobs.shs`; env vars still win, absent keys change nothing. Update
+with `sh scripts/setup/update-host-config.shs --dry-run`. A user
+`~/.config/simple/host.sdn` value shadows `config/host/<hostname>.sdn`.
+Table + precedence: `doc/07_guide/tooling/bootstrap_options.md` § Host settings.
+
+## Phase 1 whole-test callback evidence (2026-10-27)
+
+For the configured Phase 1 whole-test callback, use
+[`bootstrap_phase1_whole_tests.md`](../../../07_guide/tooling/bootstrap_phase1_whole_tests.md)
+as the operator contract. Current callback candidate output is bounded human
+text (`--format=text`); an earlier `--json` attempt failed before tests because
+that option is retired. The callback remains diagnostic: two distinct public
+SDN gates remain open, current providers do not implement the required
+`ProcessObservationV4` process-group retirement contract, and aggregate output
+is capped at 1 MiB. Do not bypass either guard or claim complete inventory
+coverage from result counters. Retain per-file verdicts, dropped counts, all
+three test categories, and discovered/excluded/aborted accounting; overall
+coverage is NOT PROVEN absent independent reconciliation.
+
+Observed 2026-10-27: five parser checks passed; parser review remains open.
+Directory calibration failed before assertions because the old seed lacks
+`rt_io_file_open_read` and the structured BDD guard rejects the fixture. A fresh seed route must use the reviewed
+`--full-bootstrap --stop-after-seed` command and qualify the complete new
+Phase 1 tuple before any build/test PASS claim. The 7200-second canonical
+resource guard is this campaign's bound. The nested 20-GiB preflight applies to
+the full-bootstrap refresh, not the standalone callback. Do not alter `HOME`
+or reintroduce `SIMPLE_TEST_RUNNER_RUST`. Phase 2 starts after Phase 1 cleanup
+under this campaign's already-recorded direction.
+
 ## Bootstrap failure collection
 
 During diagnosis, a usable phase artifact plus minimum sanity permits the next diagnostic phase without waiting for formal admission or the full suite. Continue independent tool builds and test shards after errors; preserve lineage and strict promotion gates. Follow the
@@ -67,7 +158,31 @@ native sysroot/CRLF output before POSIX path validation and bind actual `.exe`
 files on Windows; retain strict policy/PATH checks. A successful focused
 resolver probe does not admit the seed generation or prove Stage 4 readiness.
 
-## Windows MSVC host: install, antivirus, traps (2026-09-24)
+## Windows default lane: MinGW clang (2026-10-25)
+
+**Default Windows build = llvm-mingw clang + ld.lld + compiler-rt/libunwind,
+Rust `x86_64-pc-windows-gnullvm`. Do not reach for MSVC** unless the user asks
+for `--msvc`. Setup and the full command are in
+`doc/07_guide/infra/toolchain/windows_install_deploy_antivirus_2026-09-24.md`
+§ "Default lane".
+
+- Install: `sh scripts/setup/bootstrap-prereqs.shs install-llvm-mingw`, then
+  `rustup set default-host x86_64-pc-windows-gnullvm` and install the pinned
+  channel. The bootstrap runs Cargo under `env -i`, so `RUSTUP_TOOLCHAIN` is
+  dropped; only rustup's `default_host_tuple` selects the host.
+- Entry: `bash scripts/bootstrap/bootstrap-windows.sh --full-bootstrap
+  --stop-after-stage2 --backend=cranelift`. Cranelift is needed unless a MinGW
+  LLVM 23 prefix with `lib/libLLVM-23.dll.a` exists.
+- What each failure means:
+  - `unable to find library -lgcc_eh`: the rustup host is still windows-gnu.
+  - `unable to find library -lunwind`: llvm-mingw is not installed.
+  - `bootstrap-cache-error ... producer_sha256`: the seed changed, so rerun
+    with `--invalidate-cache=stage2`.
+  - `disk-space(8GiB<20)`: C: is full, so move `SIMPLE_USER_STORAGE_ROOT`,
+    `TMPDIR`, `TMP` and `TEMP` to another drive.
+- Never fix `-lgcc` by putting a GCC (scoop `mingw-winlibs`) on PATH.
+
+## Windows MSVC host (opt-in `--msvc` lane): install, antivirus, traps (2026-09-24)
 
 The guide is
 `doc/07_guide/infra/toolchain/windows_install_deploy_antivirus_2026-09-24.md`.
@@ -287,6 +402,14 @@ the env var points to the correct seed target.
    stage2/stage3 round-trip + test subset). Gate failures are hard stops.
 3. **stage2 binary is ephemeral:** only used during bootstrap. After stage3
    succeeds, discard it — no production reliance on stage2 artifacts.
+4. **Seed sub-pattern semantics leak into Stage 2 logic (fixed 2026-11-12):**
+   the seed used to bind a bare unit variant inside a tuple/array/payload
+   sub-pattern (`case (Bool, Bool):`) as a catch-all, so every seed-compiled
+   Stage 2 answered `hir_types_equal` true for unrelated types. A Stage 2 vs
+   Stage 3 behaviour split in pure-Simple logic can be a SEED lowering bug —
+   probe the same source with the seed `run` (JIT, same HIR lowering) and a
+   no-`main` copy (tree-walk interpreter). Record:
+   `doc/08_tracking/bug/seed_tuple_pattern_bare_fieldless_variant_binds_hir_types_equal_true_2026-11-12.md`.
 
 ## Multi-Error Recovery Strategy
 
@@ -862,3 +985,55 @@ qualification or formal proof. See `doc/07_guide/tooling/native_incremental_adap
 `worker_mem_mib` (default 3300). Values come from `host-env.shs --get` in a
 child shell, so nothing new is exported into the `SIMPLE_*` native-build
 environment fingerprint. See `doc/00_llm_process/feature_expert/host_config/skill.md`.
+
+- 2026-10-25: Stage 3 runs from a frozen admitted Stage 2 (source fixes need a Stage 2 rebuild); #4498 closure-struct prescan, #4499 inner `/src/` naming, Windows `mswsock` link (#4430). Per-file src to obj is now the default; opt out with `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1`. Knobs and cache protocol: `doc/07_guide/tooling/bootstrap_options.md`.
+- 2026-10-25 (later): Per-file src to obj is the DEFAULT (#4525 compiler, #4542 guide, scripts PR 2026-10-25): each module lowers to its own `aot-<hash>.o` in the per-module object cache under `SIMPLE_NATIVE_BUILD_CACHE_DIR`, codegen fans out over `SIMPLE_NATIVE_BUILD_THREADS` (scripts: host.sdn `max_build_jobs`), then all objects link into one binary. Stage 3 scripts pass `SIMPLE_BOOTSTRAP=` empty so the bootstrap_fixed shortcut is not forced; `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` opts back into the whole-program lane (hashed into the Stage 3 args). First-object proof: 9-module closure, 9 objects, first at 160 s, last at 174 s, binary runs.
+
+- Default build mode (user policy 2026-11-04): unset `SIMPLE_FILE_WORKERS` resolves to `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"` (`native_file_worker_v1.spl`): file-based src → obj, one process per file (parse → HIR → MIR → obj), then link. Supersedes the 2026-10-26 opt-in. Opt-outs are per invocation only: `SIMPLE_FILE_WORKERS=0` (two-pass shard route), `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` (whole-program route), `SIMPLE_MIR_SHARDING=0`. Never flip a shared default (config, script-global env, constant) to suit one build; pass the option at the call site with a why-comment. Gap: per-package library archives are not yet the default link input. Runtime proof pending a stage3 binary: `sh scripts/check/check-per-file-overlap-receipt.shs <receipt dir>`. See `doc/07_guide/tooling/bootstrap_options.md` § Default build mode.
+- 2026-11-22 reconciliation: for Phase 3/4 bootstrap scripts (`scripts/bootstrap/build-phase3-phase4.sh`, `config/bootstrap.sdn` `stage3_file_workers: 0`), **`--compile-mode=shard` (`SIMPLE_FILE_WORKERS=0`, `SIMPLE_HIR_SHARDING=1`, `SIMPLE_MIR_SHARDING=1`) is the script DEFAULT** and `--compile-mode=file` (`SIMPLE_FILE_WORKERS=1`) is optional; old standalone `p3-*.shs` scripts (`p3-selfbuild-stage3.shs`, `p3-manual-link-stage3.shs`, `p3-smoke-stage3.shs`, `p3-targeted-stage2-build.shs`, `p3-entry-groups.shs`) are deprecated migration stubs delegating to `build-phase3-phase4.sh`.
+
+## BuildRunner collection identity (2026-10-29)
+
+Transport collection checks task name, attempt, host and immutable task digest
+before output handling, even for failures with no outputs. Later manager
+admission does not replace this boundary. See
+[collection guide](../../../07_guide/tooling/buildrunner_collection_identity.md).
+
+The native BuildRunner Hello fixture selects one-binary mode and versions its
+cache identity. Preserve Darwin SDKROOT/deployment target before manager launch;
+compiler exit zero, direct Hello and production worker admission are distinct
+gates. See the BuildRunner stage-trace guide's native Hello prerequisites.
+
+A source type annotation can preserve a frozen producer's imported optional
+class owner without removing its methods. The BuildRunner session probe
+requires a real state mutation and native42 result; keep compiler-inference
+status open until the unannotated source works with a rebuilt producer.
+
+### Linux native archiver preflight (2026-10-29)
+
+Canonical bootstrap now checks the strict native owner's working LLVM archiver
+before pure-stage source compilation on Linux. Seed-only preparation is separate;
+GNU ar or AR overrides do not satisfy this check. Candidate ordering and broken
+executable refusal are covered by `preflight-authority-milestone-test.shs`.
+This is availability evidence, not tool-byte authority or Stage2 admission.
+See [failure evidence](../../../08_tracking/bug/bootstrap_linux_archiver_late_failure_2026_10_29.md)
+and [native staging](../../../07_guide/tooling/bootstrap_native_staging.md).
+
+### Sanity memory reserve preservation (2026-10-30)
+
+The canonical sanity scrub preserves an explicitly configured positive canonical
+i64 `SIMPLE_BUILD_MEMORY_RESERVE_BYTES`; absence retains the compiler default
+(min(24 GiB, installed RAM / 2); 24 GiB when the total is unknown),
+and malformed values refuse before candidate execution. This does not change
+hard memory enforcement or admit a previously rejected compiler. See
+[reserve scrub evidence](../../../08_tracking/bug/bootstrap_sanity_memory_reserve_scrub_2026_10_30.md).
+
+## Phase 3 HIR `unresolved name: cpu_count_checked` (2026-11-22)
+
+integ25 Stage 2 -> Stage 3 (go-to-end) failed HIR on
+`compiler.backend.runtime_c_compile_pool_v1`: the name was imported through the
+`std.io_runtime` facade, which does not export it. Fixed import-only in #10770;
+`scripts/check/check-io-runtime-facade-imports.shs` (#10777) now catches the
+class statically. Details: [lib](../lib/skill.md) § "`std.io_runtime` facade
+imports" and
+`doc/08_tracking/bug/io_runtime_facade_unexported_import_hir_unresolved_2026-11-22.md`.

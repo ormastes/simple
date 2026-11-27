@@ -1,6 +1,10 @@
 # Docker Cross-Language Profile Native Link Blocker
 
-Status: Partially fixed.
+Status: STALE 2026-11-11 (lane ne6) — the June premise (checked-in single
+release wrapper + in-container glibc `__tls_get_addr` link failure) describes an
+artifact layout measured gone on 2026-09-13; the link-order fix survives in
+source; docker is unavailable on the triage host. Falsifiable re-run grant in
+the addendum.
 
 ## Status
 
@@ -227,3 +231,52 @@ Simple binary: `src/compiler_rust/target/debug/simple`
 This does not close the debug-native linker blocker for Docker contract reports;
 it only prevents an executable stale wrapper from being selected as if it were a
 runnable release path.
+
+---
+
+## Addendum 2026-11-11 (lane ne6, batch p3-ne6)
+
+**Verdict: STALE — premise superseded by the evolved artifact layout.**
+This is the oldest row in batch ne6; the docker lane has moved on since June.
+
+Evidence:
+
+1. The companion stale-wrapper record this doc leans on,
+   `multicore_green_release_binary_stale_2026-06-11.md`, was CLOSED 2026-09-13
+   with a measured finding: `bin/release/` is a per-triple tree
+   (`x86_64-pc-windows-msvc`, `aarch64-unknown-linux-gnu`, …), and the
+   single checked-in `bin/release/simple` wrapper-plus-delegate arrangement
+   this row's auto-selection logic probes "no longer exists as filed".
+   `bin/simple` now announces its own provenance (the seed warning is emitted
+   by the tracked binary itself — observed in every lane run).
+2. The link-order resolution this row credits survives in source:
+   `src/compiler_rust/compiler/src/linker/native.rs:342` keeps the
+   simple-runtime-archive-before-libc ordering for symbols "introduced by the
+   Rust runtime archive, such as `__tls_get_addr`", with tests
+   (`pipeline/native_project/tests.rs:7152`,
+   `pipeline/native_project/tools.rs:5103`). The pure-Simple linker has its
+   own TLS relaxation for the symbol (`src/compiler/70.backend/linker/elf/tls_relax.spl`).
+   The surrounding link target has been re-architected to a freestanding
+   sysroot (`libsimpleos_c.a`, crt0 — `pipeline/native_project/linker.rs:713-716`),
+   far from the June glibc-container state.
+3. `scripts/check/check-cross-language-perf.shs` still exists (118 KB) and its
+   docker isolation is intact (`PROFILE_DOCKER_ISOLATION` at :42,:171), but
+   its binary auto-selection is now a self-hosted identity gate: "the canonical
+   `require-self-hosted.shs` identity gate rejects Rust bootstrap seeds;
+   unavailable or stale release paths are untestable, never fallback evidence"
+   (:1572). The stale-wrapper-fallback class this row tracked is refused by
+   construction.
+4. Docker is NOT available on the triage host (Windows; `docker` not on PATH),
+   so the in-container profile cannot be re-run here and this classification
+   rests on 1-3 plus the 5-month-unmoved harness.
+
+Falsifiable re-run grant for a lane with Linux + docker (re-open this row if
+it fails): `PROFILE_DOCKER_ISOLATION=1 RUNS=1 CPU_WORKERS=2 OS_THREAD_WORKERS=2
+MULTICORE_GREEN_WORKERS=2 COOPERATIVE_GREEN_WORKERS=2 FANOUT_WORKERS=8
+FANOUT_MULTICORE_GREEN_WORKERS=8 FANOUT_COOPERATIVE_GREEN_WORKERS=8
+FANOUT_ITERS=1 FANOUT_STRESS_WORKERS=8 FANOUT_STRESS_ITERS=1 RUN_TIMEOUT=20
+BUILD_DIR=build/cross_lang_perf_ne6_rerun REPORT_PATH=build/review/ne6_docker_smoke.md
+PROFILE_DOCKER_MEMORY=2g PROFILE_DOCKER_CPUS=2.0
+sh scripts/check/check-cross-language-perf.shs` — expecting
+`profile_report_contract=true` or an honest "untestable" marker, never a
+stale-wrapper fallback.

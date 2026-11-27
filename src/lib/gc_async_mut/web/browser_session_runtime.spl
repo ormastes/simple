@@ -38,7 +38,8 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_input_blocks_implicit_submission
 }
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    BeDomRouteEventDispatch, be_dom_focused_route, be_dom_node_for_route,
+    BeDomRouteEventDispatch, _be_dom_default_listener_executor,
+    be_dom_focused_route, be_dom_node_for_route,
     be_dom_path_for_route, be_dom_dispatch_event_to_route,
     be_dom_dispatch_keyboard_event_to_route,
     be_dom_dispatch_input_event_to_route, be_dom_next_focus_route,
@@ -62,11 +63,15 @@ use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{ConsoleBuffer}
 use std.gc_async_mut.gpu.browser_engine.script.form_api.{
     form_capture_defaults, form_reset
 }
-use std.js.engine.runtime.{JsRuntime}
-use std.js.types.js_types.{JsValue}
-use std.gc_async_mut.web.browser_session.{BrowserRenderSnapshot, BrowserRenderRevisions, BrowserScriptBlock, _browser_dom_listener_bucket_key, _browser_dom_route_key, _browser_session_inline_fetch_url, _browser_session_inline_fetch_option, BrowserSession, BrowserRuntimeState, BrowserDomCallableListener, BrowserLoadState, BrowserRequest, BrowserHistoryEntry, BrowserOriginStorage, BrowserImageSource, browser_history_push_bounded}
+use std.nogc_sync_mut.js.engine.runtime.{JsRuntime}
+use std.common.js.engine.js_error.{JsError}
+use lib.js.types.js_types.{JsValue}
+
+fn _browser_js_err_msg(err: JsError) -> text:
+    err.message
+use std.gc_async_mut.web.browser_session.{BrowserDomSyncResult, BrowserRenderSnapshot, BrowserRenderRevisions, BrowserScriptBlock, _browser_dom_listener_bucket_key, _browser_dom_route_key, _browser_session_inline_fetch_url, _browser_session_inline_fetch_option, BrowserSession, BrowserRuntimeState, BrowserDomCallableListener, BrowserLoadState, BrowserRequest, BrowserHistoryEntry, BrowserOriginStorage, BrowserImageSource, browser_history_push_bounded}
 use std.gc_async_mut.web.browser_session_storage.{sync_storage_runtime_state, pair_value, upsert_pair, is_storage_api_property, is_storage_internal_property, storage_public_key_from_internal, js_value_to_storage_text}
-use std.js.types.pair.{Pair}
+use std.common.js.types.pair.{Pair}
 use std.gc_async_mut.web.browser_session_url.{
     resolve_relative_url,
     normalize_script_navigation_reference_url,
@@ -248,12 +253,12 @@ fn _browser_session_text_control_value(target: BeDomNode) -> text:
 fn _browser_session_parse_maxlength(raw: text) -> i64?:
     val value = raw.trim()
     if value == "":
-        return nil
+        return None
     var index: i64 = 0
     if value[0] == "+":
         index = 1
     elif value[0] == "-":
-        return nil
+        return None
     var parsed: i64 = 0
     var digits: i64 = 0
     while index < value.len():
@@ -261,15 +266,15 @@ fn _browser_session_parse_maxlength(raw: text) -> i64?:
         if digit < 0:
             break
         if parsed > 115292150460684697:
-            return nil
+            return None
         parsed = parsed * 10
         if parsed > 1152921504606846975 - digit:
-            return nil
+            return None
         parsed = parsed + digit
         digits = digits + 1
         index = index + 1
     if digits == 0:
-        return nil
+        return None
     parsed
 
 fn _browser_session_utf16_units(value: text) -> i64:
@@ -307,13 +312,13 @@ fn _browser_session_utf16_prefix(value: text, limit: i64) -> text:
 
 fn _browser_session_text_maxlength(target: BeDomNode) -> i64?:
     if not be_dom_has_attr(target, "maxlength"):
-        return nil
+        return None
     if target.tag_name == "textarea":
         return _browser_session_parse_maxlength(
             be_dom_get_attr(target, "maxlength")
         )
     if target.tag_name != "input":
-        return nil
+        return None
     val input_type = be_dom_get_attr(target, "type").lower()
     if not (
         input_type == "" or input_type == "text" or
@@ -321,7 +326,7 @@ fn _browser_session_text_maxlength(target: BeDomNode) -> i64?:
         input_type == "tel" or input_type == "email" or
         input_type == "password"
     ):
-        return nil
+        return None
     _browser_session_parse_maxlength(be_dom_get_attr(target, "maxlength"))
 
 pub fn dom_text_control_selectable(target: BeDomNode) -> bool:
@@ -544,6 +549,51 @@ fn _browser_session_js_bool(runtime: JsRuntime, object_id: i64, key: text) -> bo
         JsValue.Boolean(value): value
         _: false
 
+fn _browser_session_is_pointer_or_mouse_event(event_type: text) -> bool:
+    """Return true when event_type carries MouseEvent / PointerEvent coordinates."""
+    val normalized = normalize_dom_event_type(event_type)
+    (
+        normalized == "click" or normalized == "dblclick" or
+        normalized == "contextmenu" or normalized == "mousedown" or
+        normalized == "mouseup" or normalized == "mousemove" or
+        normalized == "mouseenter" or normalized == "mouseleave" or
+        normalized == "mouseover" or normalized == "mouseout" or
+        normalized == "pointerdown" or normalized == "pointerup" or
+        normalized == "pointermove" or normalized == "pointerenter" or
+        normalized == "pointerleave" or normalized == "pointerover" or
+        normalized == "pointerout"
+    )
+
+fn _browser_session_default_listener_control(
+    event: BeDomEvent, node: BeDomNode, action: text, phase: text
+) -> BeDomEvent:
+    """Apply listener control tokens locally without referencing dom_accessors private defaults."""
+    var next = event
+    if action == "prevent-default":
+        next.prevent_default()
+    elif action == "stop-propagation":
+        next.stop_propagation()
+    elif action == "stop-immediate-propagation":
+        next.stop_immediate_propagation()
+    next
+
+fn _browser_session_apply_pointer_payload(
+    event: BeDomEvent, has_pointer_payload: bool,
+    client_x: i32, client_y: i32, screen_x: i32, screen_y: i32,
+    button: i32, buttons: i32
+) -> BeDomEvent:
+    """Stamp pointer/mouse coordinates and button masks onto a BeDomEvent."""
+    if not has_pointer_payload:
+        return event
+    var next = event
+    next.client_x = client_x
+    next.client_y = client_y
+    next.screen_x = screen_x
+    next.screen_y = screen_y
+    next.button = button
+    next.buttons = buttons
+    next
+
 class BrowserDomEventExecutor:
     runtime: JsRuntime
     listeners: [BrowserDomCallableListener]
@@ -563,6 +613,17 @@ class BrowserDomEventExecutor:
     event_stop_immediate_propagation_fn_id: i64
     budget_remaining: i32
     document_replacement_requested: bool
+    has_pointer_payload: bool
+    client_x: i32
+    client_y: i32
+    page_x: i32
+    page_y: i32
+    screen_x: i32
+    screen_y: i32
+    offset_x: i32
+    offset_y: i32
+    button: i32
+    buttons: i32
     error: text
 
     fn route_for_object_id(object_id: i64) -> DomNodeRoute?:
@@ -746,8 +807,53 @@ class BrowserDomEventExecutor:
                 event_id, "isComposing",
                 JsValue.Boolean(v: event.is_composing)
             )
+        if (
+            self.has_pointer_payload or
+            _browser_session_is_pointer_or_mouse_event(event.event_type)
+        ):
+            val cx = if self.has_pointer_payload: self.client_x else: event.client_x
+            val cy = if self.has_pointer_payload: self.client_y else: event.client_y
+            val px = if self.has_pointer_payload: self.page_x else: event.client_x
+            val py = if self.has_pointer_payload: self.page_y else: event.client_y
+            val sx = if self.has_pointer_payload: self.screen_x else: event.screen_x
+            val sy = if self.has_pointer_payload: self.screen_y else: event.screen_y
+            val ox = if self.has_pointer_payload: self.offset_x else: event.client_x
+            val oy = if self.has_pointer_payload: self.offset_y else: event.client_y
+            val btn = if self.has_pointer_payload: self.button else: event.button
+            val btns = if self.has_pointer_payload: self.buttons else: event.buttons
+            self.runtime.set_host_property(
+                event_id, "clientX", JsValue.Number(v: cx.to_f64())
+            )
+            self.runtime.set_host_property(
+                event_id, "clientY", JsValue.Number(v: cy.to_f64())
+            )
+            self.runtime.set_host_property(
+                event_id, "pageX", JsValue.Number(v: px.to_f64())
+            )
+            self.runtime.set_host_property(
+                event_id, "pageY", JsValue.Number(v: py.to_f64())
+            )
+            self.runtime.set_host_property(
+                event_id, "screenX", JsValue.Number(v: sx.to_f64())
+            )
+            self.runtime.set_host_property(
+                event_id, "screenY", JsValue.Number(v: sy.to_f64())
+            )
+            self.runtime.set_host_property(
+                event_id, "offsetX", JsValue.Number(v: ox.to_f64())
+            )
+            self.runtime.set_host_property(
+                event_id, "offsetY", JsValue.Number(v: oy.to_f64())
+            )
+            self.runtime.set_host_property(
+                event_id, "button", JsValue.Number(v: btn.to_f64())
+            )
+            self.runtime.set_host_property(
+                event_id, "buttons", JsValue.Number(v: btns.to_f64())
+            )
         self.runtime.set_host_property(
-            event_id, "defaultPrevented", JsValue.Boolean(v: false)
+            event_id, "defaultPrevented",
+            JsValue.Boolean(v: event.default_prevented)
         )
         self.runtime.set_host_property(
             event_id, "propagationStopped", JsValue.Boolean(v: false)
@@ -798,6 +904,11 @@ class BrowserDomEventExecutor:
             return next
         if _browser_session_dom_action(action):
             return next
+        next = _browser_session_apply_pointer_payload(
+            next, self.has_pointer_payload,
+            self.client_x, self.client_y, self.screen_x, self.screen_y,
+            self.button, self.buttons
+        )
         self.ensure_event(next)
         var callable_index: i64 = -1
         if action.starts_with(BROWSER_DOM_CALLABLE_TOKEN):
@@ -841,12 +952,12 @@ class BrowserDomEventExecutor:
                         JsValue.Object(id: current_target_id)
                     )
                     if val Err(e) = invoked:
-                        self.error = e.message
+                        self.error = _browser_js_err_msg(e)
                     self.drain_listener_ops()
         else:
             val evaluated = self.runtime.eval(action)
             if val Err(e) = evaluated:
-                self.error = e.message
+                self.error = _browser_js_err_msg(e)
             self.drain_listener_ops()
         if (
             self.runtime.interpreter.host_body_inner_html_dirty or
@@ -1409,7 +1520,7 @@ impl BrowserSession:
     me eval_script(script: text) -> Result<JsValue, text>:
         if not self.csp_sandbox_policy.allow_scripts:
             return Err("CSP sandbox blocked script execution")
-        if self.runtime_state == nil:
+        if self.runtime_state.is_none():
             val _ = self._ensure_runtime_state()
         if val Some(state) = self.runtime_state:
             # Evaluation is tentative until its runtime/DOM mirrors publish as
@@ -1450,7 +1561,7 @@ impl BrowserSession:
                 Ok(value):
                     return Ok(value)
                 Err(e):
-                    return Err(e.message)
+                    return Err(_browser_js_err_msg(e))
         Err("no active page runtime")
 
     me advance_time(current_time_ms: i64) -> i64:
@@ -1756,11 +1867,43 @@ impl BrowserSession:
             control_route: control_route
         ))
 
+    me dispatch_dom_event_route_with_pointer(
+        route: DomNodeRoute, event_type: text, bubbles: bool, cancelable: bool,
+        client_x: i32, client_y: i32, page_x: i32, page_y: i32,
+        screen_x: i32, screen_y: i32, offset_x: i32, offset_y: i32,
+        button: i32, buttons: i32, allow_focus_default: bool
+    ) -> Result<BeDomRouteEventDispatch, text>:
+        """Dispatch a DOM event on route with explicit pointer/mouse coordinates."""
+        self._dispatch_dom_event_route_full(
+            route, event_type, bubbles, cancelable, "", "", false,
+            None, "", false, allow_focus_default,
+            true, client_x, client_y, page_x, page_y,
+            screen_x, screen_y, offset_x, offset_y, button, buttons
+        )
+
     me dispatch_dom_primary_pointer_down(
         route: DomNodeRoute
     ) -> Result<BrowserPrimaryPointerDownDispatch, text>:
-        val pointer_down = self.dispatch_dom_event_route(
-            route, "pointerdown", true, true
+        self._dispatch_dom_primary_pointer_down_impl(route, false, 0, 0, 0, 0)
+
+    me dispatch_dom_primary_pointer_down_at(
+        route: DomNodeRoute, client_x: i32, client_y: i32,
+        offset_x: i32, offset_y: i32
+    ) -> Result<BrowserPrimaryPointerDownDispatch, text>:
+        """Dispatch primary pointerdown/mousedown with client/page/screen/offset coordinates."""
+        self._dispatch_dom_primary_pointer_down_impl(
+            route, true, client_x, client_y, offset_x, offset_y
+        )
+
+    me _dispatch_dom_primary_pointer_down_impl(
+        route: DomNodeRoute, has_pointer: bool,
+        client_x: i32, client_y: i32, offset_x: i32, offset_y: i32
+    ) -> Result<BrowserPrimaryPointerDownDispatch, text>:
+        val pointer_down = self._dispatch_dom_event_route_full(
+            route, "pointerdown", true, true, "", "", false,
+            None, "", false, true,
+            has_pointer, client_x, client_y, client_x, client_y,
+            client_x, client_y, offset_x, offset_y, 0, 1
         )?
         if pointer_down.event.default_prevented:
             return Ok(BrowserPrimaryPointerDownDispatch(
@@ -1768,8 +1911,11 @@ impl BrowserSession:
                 default_prevented: true,
                 mouse_default_action_allowed: false
             ))
-        val mouse_down = self.dispatch_dom_event_route(
-            route, "mousedown", true, true
+        val mouse_down = self._dispatch_dom_event_route_full(
+            route, "mousedown", true, true, "", "", false,
+            None, "", false, true,
+            has_pointer, client_x, client_y, client_x, client_y,
+            client_x, client_y, offset_x, offset_y, 0, 1
         )?
         Ok(BrowserPrimaryPointerDownDispatch(
             suppress_compat_mouse: false,
@@ -1780,15 +1926,75 @@ impl BrowserSession:
     me dispatch_dom_primary_pointer_up(
         route: DomNodeRoute, suppress_compat_mouse: bool, activate_click: bool
     ) -> Result<bool, text>:
-        val _ = self.dispatch_dom_event_route(route, "pointerup", true, true)?
+        self._dispatch_dom_primary_pointer_up_impl(
+            route, false, 0, 0, 0, 0, suppress_compat_mouse, activate_click
+        )
+
+    me dispatch_dom_primary_pointer_up_at(
+        route: DomNodeRoute, client_x: i32, client_y: i32,
+        offset_x: i32, offset_y: i32,
+        suppress_compat_mouse: bool, activate_click: bool
+    ) -> Result<bool, text>:
+        """Dispatch primary pointerup/mouseup/click with client/page/screen/offset coordinates."""
+        self._dispatch_dom_primary_pointer_up_impl(
+            route, true, client_x, client_y, offset_x, offset_y,
+            suppress_compat_mouse, activate_click
+        )
+
+    me _dispatch_dom_primary_pointer_up_impl(
+        route: DomNodeRoute, has_pointer: bool,
+        client_x: i32, client_y: i32, offset_x: i32, offset_y: i32,
+        suppress_compat_mouse: bool, activate_click: bool
+    ) -> Result<bool, text>:
+        val _ = self._dispatch_dom_event_route_full(
+            route, "pointerup", true, true, "", "", false,
+            None, "", false, true,
+            has_pointer, client_x, client_y, client_x, client_y,
+            client_x, client_y, offset_x, offset_y, 0, 0
+        )?
         if not suppress_compat_mouse:
-            val _ = self.dispatch_dom_event_route(route, "mouseup", true, true)?
+            val _ = self._dispatch_dom_event_route_full(
+                route, "mouseup", true, true, "", "", false,
+                None, "", false, true,
+                has_pointer, client_x, client_y, client_x, client_y,
+                client_x, client_y, offset_x, offset_y, 0, 0
+            )?
         if activate_click:
-            val _ = self._dispatch_dom_event_route_with_payload(
+            val _ = self._dispatch_dom_event_route_full(
                 route, "click", true, true, "", "", false,
-                nil, "", false, not suppress_compat_mouse
+                None, "", false, not suppress_compat_mouse,
+                has_pointer, client_x, client_y, client_x, client_y,
+                client_x, client_y, offset_x, offset_y, 0, 0
             )?
         Ok(true)
+
+    me dispatch_dom_pointer_move_at(
+        route: DomNodeRoute, client_x: i32, client_y: i32,
+        offset_x: i32, offset_y: i32, buttons: i32
+    ) -> Result<bool, text>:
+        """Dispatch pointermove and mousemove events with coordinates and button mask."""
+        val _ = self.dispatch_dom_event_route_with_pointer(
+            route, "pointermove", true, false,
+            client_x, client_y, client_x, client_y,
+            client_x, client_y, offset_x, offset_y, -1, buttons, true
+        )?
+        val _ = self.dispatch_dom_event_route_with_pointer(
+            route, "mousemove", true, true,
+            client_x, client_y, client_x, client_y,
+            client_x, client_y, offset_x, offset_y, 0, buttons, true
+        )?
+        Ok(true)
+
+    me dispatch_dom_context_menu_at(
+        route: DomNodeRoute, client_x: i32, client_y: i32,
+        offset_x: i32, offset_y: i32
+    ) -> Result<BeDomRouteEventDispatch, text>:
+        """Dispatch a cancelable right-button contextmenu event with coordinates."""
+        self.dispatch_dom_event_route_with_pointer(
+            route, "contextmenu", true, true,
+            client_x, client_y, client_x, client_y,
+            client_x, client_y, offset_x, offset_y, 2, 2, true
+        )
 
     me _dispatch_dom_input_event_route(
         route: DomNodeRoute, event_type: text, bubbles: bool,
@@ -1822,6 +2028,21 @@ impl BrowserSession:
         input_data: text?, input_type: text, is_composing: bool,
         allow_focus_default: bool
     ) -> Result<BeDomRouteEventDispatch, text>:
+        self._dispatch_dom_event_route_full(
+            route, event_type, bubbles, cancelable, key, code, shift_key,
+            input_data, input_type, is_composing, allow_focus_default,
+            false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        )
+
+    me _dispatch_dom_event_route_full(
+        route: DomNodeRoute, event_type: text, bubbles: bool,
+        cancelable: bool, key: text, code: text, shift_key: bool,
+        input_data: text?, input_type: text, is_composing: bool,
+        allow_focus_default: bool,
+        has_pointer_payload: bool, client_x: i32, client_y: i32,
+        page_x: i32, page_y: i32, screen_x: i32, screen_y: i32,
+        offset_x: i32, offset_y: i32, button: i32, buttons: i32
+    ) -> Result<BeDomRouteEventDispatch, text>:
         val outermost = self.dom_dispatch_depth == 0
         if outermost:
             self.dom_dispatch_budget_remaining = (
@@ -1830,18 +2051,37 @@ impl BrowserSession:
         self.dom_dispatch_depth = self.dom_dispatch_depth + 1
         val result = self._dispatch_dom_event_route_with_payload_inner(
             route, event_type, bubbles, cancelable, key, code, shift_key,
-            input_data, input_type, is_composing, allow_focus_default
+            input_data, input_type, is_composing, allow_focus_default,
+            has_pointer_payload, client_x, client_y, page_x, page_y,
+            screen_x, screen_y, offset_x, offset_y, button, buttons
         )
         self.dom_dispatch_depth = self.dom_dispatch_depth - 1
         if outermost:
             self.dom_dispatch_budget_remaining = 0
+            self._reclaim_unreachable_event_objects()
         result
+
+    me _reclaim_unreachable_event_objects():
+        # Event-loop quiescence point for DOM event dispatch. The dispatch has
+        # fully unwound, so listener closures, pending callbacks, and the
+        # retained (reachable) event objects stay rooted while superseded
+        # event objects are reclaimed. Never run during dispatch itself.
+        if val Some(state) = self.runtime_state:
+            var runtime = state.runtime
+            var interpreter = runtime.interpreter
+            val _reclaimed = interpreter.collect_garbage()
+            runtime.interpreter = interpreter
+            state.runtime = runtime
+            self.runtime_state = Some(state)
 
     me _dispatch_dom_event_route_with_payload_inner(
         route: DomNodeRoute, event_type: text, bubbles: bool,
         cancelable: bool, key: text, code: text, shift_key: bool,
         input_data: text?, input_type: text, is_composing: bool,
-        allow_focus_default: bool
+        allow_focus_default: bool,
+        has_pointer_payload: bool, client_x: i32, client_y: i32,
+        page_x: i32, page_y: i32, screen_x: i32, screen_y: i32,
+        offset_x: i32, offset_y: i32, button: i32, buttons: i32
     ) -> Result<BeDomRouteEventDispatch, text>:
         var index = self._live_dom_index_for_route(route)?
         var target = match be_dom_node_for_route(self.current_dom, index, route):
@@ -1859,7 +2099,7 @@ impl BrowserSession:
             target, normalized_event_type
         )
         var checked_before = false
-        var checked_radio_before: DomNodeRoute? = nil
+        var checked_radio_before: DomNodeRoute? = None
         if checkable_action != "":
             # Reserve the preactivation write and both possible rollback writes
             # before changing checked state.
@@ -1938,18 +2178,24 @@ impl BrowserSession:
             be_dom_dispatch_input_event_to_route(
                 self.current_dom, index, route, event_type, bubbles,
                 cancelable, input_data, input_type, is_composing,
-                inline_allowed
+                inline_allowed, _browser_session_default_listener_control
             )
         elif key == "" and code == "":
             be_dom_dispatch_event_to_route(
                 self.current_dom, index, route, event_type, bubbles,
-                cancelable, inline_allowed
+                cancelable, inline_allowed,
+                _browser_session_default_listener_control
             )
         else:
             be_dom_dispatch_keyboard_event_to_route(
                 self.current_dom, index, route, event_type, bubbles,
-                cancelable, key, code, shift_key, inline_allowed
+                cancelable, key, code, shift_key, inline_allowed,
+                _browser_session_default_listener_control
             )
+        dispatch.event = _browser_session_apply_pointer_payload(
+            dispatch.event, has_pointer_payload,
+            client_x, client_y, screen_x, screen_y, button, buttons
+        )
         if val Some(state) = self.runtime_state:
             val _ = state.drain_dom_callable_listener_ops()
             val callable_root = _browser_session_callable_dispatch_root(
@@ -1986,6 +2232,17 @@ impl BrowserSession:
                     state.event_stop_immediate_propagation_fn_id,
                 budget_remaining: self.dom_dispatch_budget_remaining,
                 document_replacement_requested: false,
+                has_pointer_payload: has_pointer_payload,
+                client_x: client_x,
+                client_y: client_y,
+                page_x: page_x,
+                page_y: page_y,
+                screen_x: screen_x,
+                screen_y: screen_y,
+                offset_x: offset_x,
+                offset_y: offset_y,
+                button: button,
+                buttons: buttons,
                 error: ""
             )
             dispatch = if input_type != "":
@@ -2013,6 +2270,10 @@ impl BrowserSession:
                        phase: text) -> BeDomEvent:
                         executor.execute(event, node, action, phase)
                 )
+            dispatch.event = _browser_session_apply_pointer_payload(
+                dispatch.event, has_pointer_payload,
+                client_x, client_y, screen_x, screen_y, button, buttons
+            )
             executor.finish_event()
             state.runtime = executor.runtime
             state.dom_callable_listeners = executor.listeners
@@ -2568,12 +2829,11 @@ impl BrowserSession:
             elif start == end and input_type == "deleteContentForward":
                 end = _browser_session_next_utf8_boundary(current_value, end)
         val prefix = current_value.slice(0, start)
-        val suffix = current_value.slice(end, current_value.len())
+        val suffix = current_value.slice(end, current_value.byte_len())
         var accepted_insertion = insertion
         var next_value = prefix + insertion + suffix
         val maxlength = _browser_session_text_maxlength(target)
-        if maxlength != nil:
-            val limit = maxlength ?? 0
+        if val limit = maxlength:
             if replace_all:
                 val current_units = _browser_session_utf16_units(current_value)
                 val next_units = _browser_session_utf16_units(next_value)
@@ -2921,7 +3181,7 @@ impl BrowserSession:
         staged_storage.pending_content_security_policy = ""
         staged_storage._activate_storage_for_url(url)
         var native_globals_diagnostic = ""
-        var next_runtime_state: BrowserRuntimeState? = nil
+        var next_runtime_state: BrowserRuntimeState? = None
         if self.runtime_enabled and admitted_script_blocks.len() > 0:
             val cookie_text = staged_storage._script_cookie_for_url(url)
             var state = BrowserRuntimeState.create(
@@ -2949,7 +3209,7 @@ impl BrowserSession:
                 Err(error):
                     return Err(
                         "browser runtime initialization failed: " +
-                        error.message
+                        _browser_js_err_msg(error)
                     )
             state.runtime = runtime
             next_runtime_state = Some(state)
@@ -3065,7 +3325,7 @@ impl BrowserSession:
 
     me _ensure_runtime_state() -> BrowserRuntimeState?:
         if not self.runtime_enabled or not self.csp_sandbox_policy.allow_scripts:
-            return nil
+            return None
         if val Some(state) = self.runtime_state:
             return Some(state)
         val cookie_text = self._script_cookie_for_url(self.document_url)
@@ -3085,9 +3345,9 @@ impl BrowserSession:
         val published = self.publish_dom_snapshot(
             self.current_dom, false, self.runtime_state
         )
-        if published.? == false:
+        if published.is_err():
             self.runtime_state = nil
-            return nil
+            return None
         self.runtime_state
 
     me _sync_from_runtime(
@@ -3364,7 +3624,11 @@ impl BrowserSession:
             identity_changed: false,
             image_source_changed: false
         )
-        if dom_mutation_changed and not structural_changed:
+        # Attribute mutations (id/class/value/style) must publish even in the
+        # same task as a structural body.innerHTML/textContent write; the
+        # structural path only replaces body children, so sync_dom still has
+        # to apply per-element attribute diffs onto the candidate.
+        if dom_mutation_changed:
             if val Some(index) = self.current_dom_identity_index():
                 dom_sync = state.sync_dom(candidate_dom, index)
                 candidate_dom = dom_sync.root
@@ -3504,7 +3768,7 @@ impl BrowserSession:
             self._advance_ui_access_revision()
             self._mark_css_animation_reconcile(structural_changed)
             if (
-                self.active_load == nil and not self.is_loading and
+                self.active_load.is_none() and not self.is_loading and
                 (
                     (
                         structural_changed and

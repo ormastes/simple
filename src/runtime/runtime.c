@@ -34,7 +34,9 @@
 #endif
 
 #define SPL_LEGACY_VALUE_RUNTIME 1
+#define SIMPLE_RETAINED_PRIVATE_CREDENTIAL_IMPLEMENTATION
 #include "runtime.h"
+#include "runtime_nonnull.h"
 #if defined(__APPLE__)
 #include <sys/stdio.h>
 #endif
@@ -72,6 +74,7 @@ int64_t rt_simple_abi_version_deferred(void) {
  * fsync, publish) reuses the same include. This file used to carry its own
  * byte-identical copy defined further down. */
 #include "platform/runtime_win_long_path.h"
+#include "platform/runtime_win_excl_file.h"
 #endif
 
 #include <stdio.h>
@@ -153,179 +156,24 @@ typedef long long ssize_t;
 static bool spl_macro_trace_enabled = false;
 static bool spl_debug_mode_enabled = false;
 
-/*
- * Failed existence probes are measured at the rt_file_exists facade, never at
- * spl_file_exists or at a libc/syscall boundary.  A gate holds accepting and
- * in-flight leases; a separate monotonic generation is captured by each lease.
- * end() first closes the gate, then drains those leases before it snapshots.
- */
-#define RT_FILE_EXISTS_PROBE_ACCEPTING    (UINT64_C(1) << 63)
-#define RT_FILE_EXISTS_PROBE_TRANSITION   (UINT64_C(1) << 62)
-#define RT_FILE_EXISTS_PROBE_LEASE_MASK   (RT_FILE_EXISTS_PROBE_TRANSITION - 1)
-#define RT_FILE_EXISTS_PROBE_GENERATION_MAX UINT64_C(0x7fffffffffffffff)
-#define RT_FILE_EXISTS_PROBE_TOTAL_MAX    UINT64_C(0x7fffffff)
-
-static atomic_uint_fast64_t rt_file_exists_probe_state = 0;
-static atomic_uint_fast64_t rt_file_exists_probe_generation = 0;
-static atomic_uint_fast64_t rt_file_exists_probe_total = 0;
-static atomic_uint_fast64_t rt_file_exists_probe_failed = 0;
-
-/* Reserve one total slot. A failed slot is incremented only after this succeeds,
- * so concurrent records preserve failed <= total <= TOTAL_MAX. */
-static int rt_file_exists_probe_try_add_total(void) {
-    uint_fast64_t current = atomic_load_explicit(
-        &rt_file_exists_probe_total, memory_order_relaxed);
-    while (current < RT_FILE_EXISTS_PROBE_TOTAL_MAX) {
-        if (atomic_compare_exchange_weak_explicit(
-                &rt_file_exists_probe_total, &current, current + 1,
-                memory_order_relaxed, memory_order_relaxed)) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static uint_fast64_t rt_file_exists_probe_lease_admit(void) {
-    /* Disabled source path: one relaxed gate load, without assembly claims. */
-    uint_fast64_t state = atomic_load_explicit(
-        &rt_file_exists_probe_state, memory_order_relaxed);
-    if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0) return 0;
-
-    for (;;) {
-        if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0) return 0;
-        if ((state & RT_FILE_EXISTS_PROBE_LEASE_MASK) ==
-            RT_FILE_EXISTS_PROBE_LEASE_MASK) return 0;
-        if (atomic_compare_exchange_weak_explicit(
-                &rt_file_exists_probe_state, &state, state + UINT64_C(1),
-                memory_order_acquire, memory_order_relaxed)) {
-            uint_fast64_t generation = atomic_load_explicit(
-                &rt_file_exists_probe_generation, memory_order_acquire);
-            if (generation != 0) return generation;
-            atomic_fetch_sub_explicit(
-                &rt_file_exists_probe_state, UINT64_C(1), memory_order_release);
-            return 0;
-        }
-    }
-}
-
-static void rt_file_exists_probe_record(uint_fast64_t lease, int exists) {
-    if (lease != 0 && atomic_load_explicit(
-            &rt_file_exists_probe_generation, memory_order_acquire) == lease) {
-        if (rt_file_exists_probe_try_add_total() && !exists) {
-            uint_fast64_t failed = atomic_load_explicit(
-                &rt_file_exists_probe_failed, memory_order_relaxed);
-            while (failed < RT_FILE_EXISTS_PROBE_TOTAL_MAX) {
-                if (atomic_compare_exchange_weak_explicit(
-                        &rt_file_exists_probe_failed, &failed, failed + 1,
-                        memory_order_relaxed, memory_order_relaxed)) {
-                    break;
-                }
-            }
-        }
-    }
-    if (lease != 0) {
-        atomic_fetch_sub_explicit(
-            &rt_file_exists_probe_state, UINT64_C(1), memory_order_release);
-    }
-}
+/* Failed-existence-probe counter: one body shared with runtime_native.c. */
+#include "runtime_file_exists_probe_impl.h"
 
 SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_exists_probe_begin(void) {
-    uint_fast64_t idle = 0;
-    if (!atomic_compare_exchange_strong_explicit(
-            &rt_file_exists_probe_state, &idle, RT_FILE_EXISTS_PROBE_TRANSITION,
-            memory_order_acq_rel, memory_order_acquire)) {
-        return -1;
-    }
-    uint_fast64_t generation = atomic_load_explicit(
-        &rt_file_exists_probe_generation, memory_order_acquire);
-    if (generation >= RT_FILE_EXISTS_PROBE_GENERATION_MAX) {
-        atomic_store_explicit(&rt_file_exists_probe_state, 0, memory_order_release);
-        return -3;
-    }
-    generation += 1;
-    atomic_store_explicit(
-        &rt_file_exists_probe_generation, generation, memory_order_release);
-    atomic_store_explicit(&rt_file_exists_probe_total, 0, memory_order_relaxed);
-    atomic_store_explicit(&rt_file_exists_probe_failed, 0, memory_order_relaxed);
-    atomic_store_explicit(
-        &rt_file_exists_probe_state, RT_FILE_EXISTS_PROBE_ACCEPTING,
-        memory_order_release);
-    return (int64_t)generation;
+    return rt_file_exists_probe_begin_impl();
 }
 
 SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_exists_probe_end(int64_t token) {
-    if (token <= 0 || (uint_fast64_t)token > RT_FILE_EXISTS_PROBE_GENERATION_MAX ||
-        atomic_load_explicit(&rt_file_exists_probe_generation, memory_order_acquire) !=
-            (uint_fast64_t)token) return -2;
-
-    uint_fast64_t state = atomic_load_explicit(
-        &rt_file_exists_probe_state, memory_order_acquire);
-    for (;;) {
-        if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0 ||
-            atomic_load_explicit(&rt_file_exists_probe_generation, memory_order_acquire) !=
-                (uint_fast64_t)token) {
-            return -2;
-        }
-        uint_fast64_t closing =
-            (state & RT_FILE_EXISTS_PROBE_LEASE_MASK) |
-            RT_FILE_EXISTS_PROBE_TRANSITION;
-        if (atomic_compare_exchange_weak_explicit(
-                &rt_file_exists_probe_state, &state, closing,
-                memory_order_acq_rel, memory_order_acquire)) {
-            break;
-        }
-    }
-
-    do {
-        state = atomic_load_explicit(
-            &rt_file_exists_probe_state, memory_order_acquire);
-    } while ((state & RT_FILE_EXISTS_PROBE_LEASE_MASK) != 0);
-
-    uint_fast64_t total = atomic_load_explicit(
-        &rt_file_exists_probe_total, memory_order_acquire);
-    uint_fast64_t failed = atomic_load_explicit(
-        &rt_file_exists_probe_failed, memory_order_acquire);
-    if (total > RT_FILE_EXISTS_PROBE_TOTAL_MAX) total = RT_FILE_EXISTS_PROBE_TOTAL_MAX;
-    if (failed > RT_FILE_EXISTS_PROBE_TOTAL_MAX) {
-        failed = RT_FILE_EXISTS_PROBE_TOTAL_MAX;
-    }
-    atomic_store_explicit(
-        &rt_file_exists_probe_state,
-        0,
-        memory_order_release);
-    return (int64_t)((total << 32) | failed);
+    return rt_file_exists_probe_end_impl(token);
 }
 
 #if defined(SIMPLE_RUNTIME_TESTING)
 int64_t rt_file_exists_probe_test_seed_generation(int64_t generation) {
-    if (generation < 0 || (uint_fast64_t)generation >
-            RT_FILE_EXISTS_PROBE_GENERATION_MAX) return -3;
-    uint_fast64_t idle = 0;
-    if (!atomic_compare_exchange_strong_explicit(
-            &rt_file_exists_probe_state, &idle, RT_FILE_EXISTS_PROBE_TRANSITION,
-            memory_order_acq_rel, memory_order_acquire)) return -1;
-    atomic_store_explicit(
-        &rt_file_exists_probe_generation, (uint_fast64_t)generation,
-        memory_order_release);
-    atomic_store_explicit(&rt_file_exists_probe_total, 0, memory_order_relaxed);
-    atomic_store_explicit(&rt_file_exists_probe_failed, 0, memory_order_relaxed);
-    atomic_store_explicit(&rt_file_exists_probe_state, 0, memory_order_release);
-    return 0;
+    return rt_file_exists_probe_test_seed_generation_impl(generation);
 }
 
 int64_t rt_file_exists_probe_test_seed_counters(int64_t total, int64_t failed) {
-    if (total < 0 || failed < 0 || (uint_fast64_t)total >
-            RT_FILE_EXISTS_PROBE_TOTAL_MAX || (uint_fast64_t)failed >
-            (uint_fast64_t)total) return -3;
-    uint_fast64_t state = atomic_load_explicit(
-        &rt_file_exists_probe_state, memory_order_acquire);
-    if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0 ||
-        (state & RT_FILE_EXISTS_PROBE_LEASE_MASK) != 0) return -1;
-    atomic_store_explicit(
-        &rt_file_exists_probe_total, (uint_fast64_t)total, memory_order_relaxed);
-    atomic_store_explicit(
-        &rt_file_exists_probe_failed, (uint_fast64_t)failed, memory_order_relaxed);
-    return 0;
+    return rt_file_exists_probe_test_seed_counters_impl(total, failed);
 }
 #endif
 
@@ -632,14 +480,7 @@ char* spl_str_index_char(const char* s, int64_t idx) {
 }
 
 uint64_t spl_str_hash(const char* s) {
-    /* FNV-1a 64-bit */
-    uint64_t h = 14695981039346656037ULL;
-    if (!s) return h;
-    while (*s) {
-        h ^= (uint64_t)(unsigned char)*s++;
-        h *= 1099511628211ULL;
-    }
-    return h;
+    return rt__shared_str_hash(s); /* FNV-1a 64, NULL -> offset basis */
 }
 
 int64_t rt_str_hash(const char* s) {
@@ -725,26 +566,23 @@ int64_t spl_str_last_index_of(const char* s, const char* needle) {
     return -1;
 }
 
-char* spl_str_to_upper(const char* s) {
+static char* spl_str_map_case(const char* s, int (*fn)(int)) {
     if (!s) return SPL_STRDUP("", "str");
     size_t len = strlen(s);
     char* result = (char*)SPL_MALLOC(len + 1, "str");
     for (size_t i = 0; i < len; i++) {
-        result[i] = (char)toupper((unsigned char)s[i]);
+        result[i] = (char)fn((unsigned char)s[i]);
     }
     result[len] = '\0';
     return result;
 }
 
+char* spl_str_to_upper(const char* s) {
+    return spl_str_map_case(s, toupper);
+}
+
 char* spl_str_to_lower(const char* s) {
-    if (!s) return SPL_STRDUP("", "str");
-    size_t len = strlen(s);
-    char* result = (char*)SPL_MALLOC(len + 1, "str");
-    for (size_t i = 0; i < len; i++) {
-        result[i] = (char)tolower((unsigned char)s[i]);
-    }
-    result[len] = '\0';
-    return result;
+    return spl_str_map_case(s, tolower);
 }
 
 /* ================================================================
@@ -1182,22 +1020,21 @@ char* spl_file_read(const char* path) {
 #endif
 }
 
-int spl_file_write(const char* path, const char* content) {
+static int spl_file_put(const char* path, const char* content, const char* mode) {
     if (!path) return 0;
-    FILE* f = fopen(path, "wb");
+    FILE* f = fopen(path, mode);
     if (!f) return 0;
     if (content) fputs(content, f);
     fclose(f);
     return 1;
 }
 
+int spl_file_write(const char* path, const char* content) {
+    return spl_file_put(path, content, "wb");
+}
+
 int spl_file_append(const char* path, const char* content) {
-    if (!path) return 0;
-    FILE* f = fopen(path, "ab");
-    if (!f) return 0;
-    if (content) fputs(content, f);
-    fclose(f);
-    return 1;
+    return spl_file_put(path, content, "ab");
 }
 
 int spl_file_exists(const char* path) {
@@ -1246,53 +1083,15 @@ static int rt_text_arg_to_path(const uint8_t* ptr, uint64_t len, char* buf, size
     return 1;
 }
 
-SPL_RUNTIME_NATIVE_TWIN int rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
-    char path_buf[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path_buf, sizeof(path_buf))) return 0;
-    const char* path = path_buf;
-#if defined(_WIN32)
-    if (!path) return 0;
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) return 0;
-    wchar_t* wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
-    if (!wide_path) return 0;
-    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide_path, wide_len)) {
-        free(wide_path);
-        return 0;
-    }
-    DWORD attributes = GetFileAttributesW(wide_path);
-    free(wide_path);
-    return attributes != INVALID_FILE_ATTRIBUTES &&
-           (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0;
-#else
-    struct stat st;
-    return path && lstat(path, &st) == 0 && S_ISREG(st.st_mode);
-#endif
+/* No-shell stat probes: one body shared with runtime_native.c. */
+#include "runtime_file_stat_impl.h"
+
+SPL_RUNTIME_NATIVE_TWIN bool rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
+    return rt_file_is_regular_no_follow_impl(path_ptr, path_len);
 }
 
-/* rt_file_is_char_device: no-shell stat(2) probe for whether `path` is a
- * character device (e.g. a DRM render node). Added so callers like
- * os.compositor.vulkan_compositor_backend's detect_virtio_gpu_device() can
- * drop their `/bin/sh -c "test -c '...'"` shell-out entirely -- see
- * doc/08_tracking/bug/vulkan_detect_virtio_gpu_device_is_existence_check_not_device_probe_2026-08-07.md.
- * Symlinks are followed (stat, not lstat): the caller wants to know whether
- * the path ultimately resolves to a character device, not whether the leaf
- * entry itself is one. */
 SPL_RUNTIME_NATIVE_TWIN int rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len) {
-#if defined(_WIN32)
-    (void)path_ptr; (void)path_len;
-    return 0;
-#else
-    /* The compiler emits the two-argument (ptr, len) form for `text` externs
-     * (runtime_sffi.rs / src/compiler/50.mir/text_extern_abi.spl); a Simple
-     * `text` is NOT NUL-terminated, so the buffer must be copied. */
-    char buf[4096];
-    if (!path_ptr || path_len >= sizeof(buf)) return 0;
-    memcpy(buf, path_ptr, (size_t)path_len);
-    buf[(size_t)path_len] = '\0';
-    struct stat st;
-    return stat(buf, &st) == 0 && S_ISCHR(st.st_mode);
-#endif
+    return rt_file_is_char_device_impl(path_ptr, path_len);
 }
 
 int spl_file_delete(const char* path) {
@@ -1320,13 +1119,17 @@ int64_t spl_file_size(const char* path) {
  * Output
  * ================================================================ */
 
+/* Flush like rt_print_str: a native server redirected to a file must not
+ * hold its ready/stats lines in the stdio buffer while it blocks in accept. */
 void spl_print(const char* s) {
     if (s) fputs(s, stdout);
+    fflush(stdout);
 }
 
 void spl_println(const char* s) {
     if (s) fputs(s, stdout);
     putchar('\n');
+    fflush(stdout);
 }
 
 void spl_eprintln(const char* s) {
@@ -1452,6 +1255,7 @@ void spl_free(void* ptr) {
 }
 #endif
 
+/* Not shared with runtime_legacy_core.c: this one allocates via SPL_STRDUP (memtrack-tagged), the legacy lane via plain malloc (spl_str_new) and may return NULL on OOM. */
 char* spl_strdup(const char* s) {
     return SPL_STRDUP(s ? s : "", "user");
 }
@@ -1512,36 +1316,19 @@ bool rt_atomic_int_compare_exchange(int64_t handle, int64_t current, int64_t new
         memory_order_seq_cst
     );
 }
+#define SPL_ATOMIC_INT_FETCH_OP(name, op)                                         \
+    int64_t name(int64_t handle, int64_t value) {                                 \
+        SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);                \
+        if (!atomic) return 0;                                                    \
+        return op(&atomic->value, value, memory_order_seq_cst);                   \
+    }
 
-int64_t rt_atomic_int_fetch_add(int64_t handle, int64_t value) {
-    SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
-    if (!atomic) return 0;
-    return atomic_fetch_add_explicit(&atomic->value, value, memory_order_seq_cst);
-}
-
-int64_t rt_atomic_int_fetch_sub(int64_t handle, int64_t value) {
-    SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
-    if (!atomic) return 0;
-    return atomic_fetch_sub_explicit(&atomic->value, value, memory_order_seq_cst);
-}
-
-int64_t rt_atomic_int_fetch_and(int64_t handle, int64_t value) {
-    SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
-    if (!atomic) return 0;
-    return atomic_fetch_and_explicit(&atomic->value, value, memory_order_seq_cst);
-}
-
-int64_t rt_atomic_int_fetch_or(int64_t handle, int64_t value) {
-    SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
-    if (!atomic) return 0;
-    return atomic_fetch_or_explicit(&atomic->value, value, memory_order_seq_cst);
-}
-
-int64_t rt_atomic_int_fetch_xor(int64_t handle, int64_t value) {
-    SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
-    if (!atomic) return 0;
-    return atomic_fetch_xor_explicit(&atomic->value, value, memory_order_seq_cst);
-}
+SPL_ATOMIC_INT_FETCH_OP(rt_atomic_int_fetch_add, atomic_fetch_add_explicit)
+SPL_ATOMIC_INT_FETCH_OP(rt_atomic_int_fetch_sub, atomic_fetch_sub_explicit)
+SPL_ATOMIC_INT_FETCH_OP(rt_atomic_int_fetch_and, atomic_fetch_and_explicit)
+SPL_ATOMIC_INT_FETCH_OP(rt_atomic_int_fetch_or, atomic_fetch_or_explicit)
+SPL_ATOMIC_INT_FETCH_OP(rt_atomic_int_fetch_xor, atomic_fetch_xor_explicit)
+#undef SPL_ATOMIC_INT_FETCH_OP
 
 void rt_atomic_int_free(int64_t handle) {
     SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
@@ -1691,9 +1478,22 @@ int8_t rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t ex
     return expected_enum_id == 0 || enum_value->enum_id == 0 || enum_value->enum_id == (int32_t)expected_enum_id;
 }
 
-/* Standalone core-C requires the native BDD state and actual assertions.
- * The legacy hosted compatibility callbacks intentionally do nothing. */
-#if !defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)
+/* Cumulative example counters owned by the runtime. std.spec reads them through
+ * rt_bdd_executed_total / rt_bdd_failed_total (the interpreter bridge in
+ * interpreter_call/bdd.rs mirrors this contract).
+ * Standalone core-C and full bundles linking runtime_native.c use the native
+ * BDD state, cumulative counters, and actual assertions in runtime_native.c. */
+#if (!defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)) && \
+    !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+static _Atomic int64_t g_bdd_total_passed = 0;
+static _Atomic int64_t g_bdd_total_failed = 0;
+
+SPL_RUNTIME_NATIVE_TWIN void rt_bdd_record_result(int64_t passed) {
+    if (passed) atomic_fetch_add(&g_bdd_total_passed, 1); else atomic_fetch_add(&g_bdd_total_failed, 1);
+}
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_bdd_executed_total(void) { return atomic_load(&g_bdd_total_passed) + atomic_load(&g_bdd_total_failed); }
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_bdd_failed_total(void) { return atomic_load(&g_bdd_total_failed); }
+
 SPL_RUNTIME_NATIVE_TWIN void rt_bdd_describe_start_rv(int64_t name_rv) {
     (void)name_rv;
 }
@@ -1706,7 +1506,7 @@ SPL_RUNTIME_NATIVE_TWIN void rt_bdd_it_start_rv(int64_t name_rv) {
 }
 
 SPL_RUNTIME_NATIVE_TWIN void rt_bdd_it_end(int64_t passed) {
-    (void)passed;
+    rt_bdd_record_result(passed);
 }
 
 SPL_RUNTIME_NATIVE_TWIN void rt_bdd_expect_eq_rv(int64_t actual, int64_t expected) {
@@ -1817,7 +1617,7 @@ static HANDLE g_prefetch_thread = NULL;
 
 static DWORD WINAPI spl_prefetch_thread_func(LPVOID param) {
     const char* path = (const char*)param;
-    HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+    HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                                OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (hFile != INVALID_HANDLE_VALUE) {
         /* Read through the file to populate OS file cache */
@@ -1866,6 +1666,8 @@ void spl_prefetch_wait(void) {}
  * as a value with no string tag -- observed as `len=0`, indistinguishable from
  * an empty file or a missing one. The runtime's own handle validator prints
  * "probable compiler/FFI ABI mismatch" on it. */
+#include "runtime_file_slurp_impl.h"
+
 SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     /* RT_NIL: TAG_SPECIAL(0b011) with payload 0 == 3; matches
@@ -1877,37 +1679,12 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_text(const uint8_t* path_ptr, uint6
      * it cannot tell "missing" from "empty". The Rust definition returns NIL
      * for an unreadable path, and Simple callers spell `... ?? ""`, which only
      * fires on nil -- so probe openability first or the `??` arm is dead. */
-    /* Read to EOF into a growable buffer and keep the BYTE COUNT. strlen() on
-     * spl_file_read's result stopped at the first NUL, so a binary file came
-     * back as a NON-nil short text -- an ELF object's e_ident has a NUL at
-     * offset 7, so a 1080-byte aarch64 `.o` read back as 7 bytes, and
-     * FileFingerprint.from_file's sha256 fallback (which fires only on nil)
-     * became dead code. Identical defect and fix in the runtime_native.c lane;
-     * the two are paired by the push-rt-dual-implementation ratchet and must not
-     * diverge. Do NOT size from fseek/ftell -- procfs and sysfs report 0, which
-     * is the incident spl_file_read's own comment records. */
+    /* Byte-count read to EOF: see runtime_file_slurp_impl.h (shared with the
+     * runtime_native.c lane; the two are paired by the push-rt-dual-
+     * implementation ratchet and must not diverge). */
     FILE* f = fopen(path, "rb");
     if (!f) return rt_nil;
-    size_t cap = 4096;
-    size_t len = 0;
-    char* content = (char*)malloc(cap);
-    if (!content) { fclose(f); return rt_nil; }
-    for (;;) {
-        if (len >= cap) {
-            size_t new_cap = cap * 2;
-            char* grown = (char*)realloc(content, new_cap);
-            if (!grown) { free(content); fclose(f); return rt_nil; }
-            content = grown;
-            cap = new_cap;
-        }
-        size_t n = fread(content + len, 1, cap - len, f);
-        len += n;
-        if (n == 0) break;
-    }
-    fclose(f);
-    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)len);
-    free(content);
-    return result;
+    return rt_file_slurp_text_close(f);
 }
 
 /* Single-handle secret/config admission: no path predicate is separated from
@@ -1960,7 +1737,7 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_regular_no_follow_bounded(
 #if defined(_WIN32)
     wchar_t* wide_path = rt_widen_long_path_rc(path);
     if (!wide_path) { free(bytes); return RT_RNF_FAIL(4); }
-    HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
+    HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
         OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     free(wide_path);
     if (handle == INVALID_HANDLE_VALUE) { free(bytes); return RT_RNF_FAIL(4); }
@@ -2010,9 +1787,23 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_regular_no_follow_bounded(
     free(bytes);
     return result;
 }
+
+/* Raw pointer/length ABI twins for the low-level sffi tier
+ * (src/compiler/70.backend/sffi_minimal.spl): same behaviour, distinct names,
+ * so the raw `(ptr, len) -> i64?` view never shares a name with the typed
+ * `(text) -> text?` view (seed extern return types are keyed by bare name).
+ * See doc/08_tracking/bug/seed_jit_extern_return_type_last_wins_2026-11-27.md */
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_text_raw(const uint8_t* path_ptr, uint64_t path_len) {
+    return rt_file_read_text(path_ptr, path_len);
+}
+
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_regular_no_follow_bounded_raw(
+        const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
+    return rt_file_read_regular_no_follow_bounded(path_ptr, path_len, max_bytes);
+}
 /* (ptr, len): see rt_text_arg_to_path above -- a Simple `text` is not
  * NUL-terminated and the compiler passes it as a pair. */
-SPL_RUNTIME_NATIVE_TWIN int         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
+SPL_RUNTIME_NATIVE_TWIN bool         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
     uint_fast64_t lease = rt_file_exists_probe_lease_admit();
     char path[RT_TEXT_PATH_MAX];
     int exists = 0;
@@ -2067,35 +1858,38 @@ int         rt_file_append(const char* path, const char* content) {
  * dst_len); runtime_sffi.rs:1868 declares &[I64, I64, I64, I64]. The old
  * two-parameter form read BOTH paths past their ends. */
 SPL_RUNTIME_NATIVE_TWIN int         rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
-                         const uint8_t* dst_ptr, uint64_t dst_len) {
+                 const uint8_t* dst_ptr, uint64_t dst_len) {
     char src[RT_TEXT_PATH_MAX];
     char dst[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(src_ptr, src_len, src, sizeof(src))) return 0;
     if (!rt_text_arg_to_path(dst_ptr, dst_len, dst, sizeof(dst))) return 0;
     FILE* in = fopen(src, "rb");
     if (!in) return 0;
-    
+#if !defined(_WIN32)
+    struct stat source_stat;
+    if (fstat(fileno(in), &source_stat) != 0) { fclose(in); return 0; }
+#endif
     FILE* out = fopen(dst, "wb");
-    if (!out) {
-        fclose(in);
-        return 0;
+    if (!out) { fclose(in); return 0; }
+    uint8_t buf[65536];
+    int ok = 1;
+    size_t got;
+    while ((got = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, got, out) != got) { ok = 0; break; }
     }
-    
-    char buf[8192];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
-        if (fwrite(buf, 1, n, out) != n) {
-            fclose(in);
-            fclose(out);
-            return 0;
-        }
-    }
-    
-    fclose(in);
-    fclose(out);
-    return 1;
+    if (ferror(in) || fflush(out) != 0) ok = 0;
+#if !defined(_WIN32)
+    /* BuildRunner publishes this copy as the executable artifact. Preserve
+     * ordinary permissions from the opened source, independent of umask or
+     * an existing destination's mode; never propagate privilege bits. Apply
+     * only after the bytes are flushed, through the already-open destination. */
+    if (ok && fchmod(fileno(out), source_stat.st_mode & 0777) != 0) ok = 0;
+#endif
+    if (fclose(out) != 0) ok = 0;
+    if (fclose(in) != 0) ok = 0;
+    return ok;
 }
-SPL_RUNTIME_NATIVE_TWIN int rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
+SPL_RUNTIME_NATIVE_TWIN bool rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
     return spl_file_delete(path);
@@ -2105,75 +1899,53 @@ SPL_RUNTIME_NATIVE_TWIN int64_t     rt_file_size(const uint8_t* path_ptr, uint64
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return -1;
     return spl_file_size(path);
 }
-/* C-internal fsync worker: takes a genuine NUL-terminated C string. The rt_*
- * entry points below convert the compiler's (ptr, len) `text` pair into one of
- * these before calling it, so the conversion lives in exactly one place and
- * C-internal callers do not have to fake a pair. rt_widen_long_path_rc
- * (defined above) supplies the wide, extended-length-prefixed path. */
-static int rt_fsync_path(const char* path) {
-    if (!path) return 0;
-#if defined(_WIN32)
-    /* fopen()+fflush() was doubly wrong on Windows: fopen() is an ANSI/
-     * narrow-CRT entry point capped at MAX_PATH (260 chars) -- the same bug
-     * class as rt_file_create_excl below, and a bootstrap generation path
-     * routinely exceeds it -- and fflush() only empties the CRT's userspace
-     * buffer, it gives no OS-level durability guarantee at all. Use the wide,
-     * extended-length-prefixed CreateFileW + FlushFileBuffers pair instead,
-     * exactly like rt_file_create_excl's fix; fall back to the ANSI
-     * CreateFileA + FlushFileBuffers pair only when the path cannot be
-     * widened. GENERIC_WRITE is required for FlushFileBuffers to succeed
-     * (Windows refuses it on a read-only handle with ERROR_ACCESS_DENIED).
-     * FILE_FLAG_BACKUP_SEMANTICS is required too: callers durability-sync
-     * DIRECTORIES through this same worker (native_noop_admission.spl syncs
-     * "{root}/generations" after a rename, the POSIX fsync-the-parent-dir
-     * idiom), and CreateFile refuses to open a directory handle at all
-     * without that flag (ERROR_ACCESS_DENIED). It is harmless on a regular
-     * file -- the flag only widens what CreateFile will open, it does not
-     * change file semantics. */
-    wchar_t* wide_path = rt_widen_long_path_rc(path);
-    HANDLE file = INVALID_HANDLE_VALUE;
-    if (wide_path) {
-        file = CreateFileW(wide_path, GENERIC_READ | GENERIC_WRITE,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           NULL, OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
-        free(wide_path);
-    } else {
-        file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           NULL, OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
-    }
-    if (file == INVALID_HANDLE_VALUE) return 0;
-    int ok = FlushFileBuffers(file) != 0;
-    if (!CloseHandle(file)) ok = 0;
-    return ok ? 1 : 0;
-#else
-    FILE* file = fopen(path, "rb");
-    if (!file) return 0;
-    int ok = fsync(fileno(file)) == 0;
-    fclose(file);
-    return ok ? 1 : 0;
-#endif
+/* C-internal fsync worker rt_fsync_path (shared with runtime_native.c): takes a
+ * genuine NUL-terminated C string. The rt_* entry points below convert the
+ * compiler's (ptr, len) `text` pair into one of these before calling it, so the
+ * conversion lives in exactly one place and C-internal callers do not have to
+ * fake a pair. rt_widen_long_path_rc (defined above) supplies the wide,
+ * extended-length-prefixed path. */
+#include "runtime_file_fsync_impl.h"
+static int rt_fsync_text_path(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
+    return rt_fsync_path(path);
 }
 int         rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len) {
-    char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
-    return rt_fsync_path(path);
+    return rt_fsync_text_path(path_ptr, path_len);
 }
 int         rt_file_fsync_cached(const uint8_t* path_ptr, uint64_t path_len) {
-    char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
-    return rt_fsync_path(path);
+    return rt_fsync_text_path(path_ptr, path_len);
 }
 /* rt_file_sync already had the right ARITY -- which is why the signature gate
  * never flagged it -- but it DISCARDED path_len and passed the pointer on as a
  * C string, so it carried the identical defect invisibly. Same family, found
  * while converting its neighbours. */
 int         rt_file_sync(const uint8_t* path_ptr, uint64_t path_len) {
+    return rt_fsync_text_path(path_ptr, path_len);
+}
+/* rt_dir_sync(path) -> bool: make directory-entry changes (a no-replace
+ * rename/link into `path`) durable. POSIX: open the directory O_RDONLY|
+ * O_DIRECTORY and fsync it. Windows/NTFS has no portable directory fsync (a
+ * directory handle cannot be flushed) and its metadata is journaled, so a
+ * Windows build returns true when `path` is an existing directory. A missing
+ * path or a non-directory is false on every platform. */
+int         rt_dir_sync(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
-    return rt_fsync_path(path);
+#if defined(_WIN32)
+    DWORD attrs = GetFileAttributesA(path);
+    return (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) ? 1 : 0;
+#else
+#ifndef O_DIRECTORY
+#define O_DIRECTORY 0
+#endif
+    int fd = open(path, O_RDONLY | O_DIRECTORY);
+    if (fd < 0) return 0;
+    int ok = fsync(fd) == 0;
+    if (close(fd) != 0) ok = 0;
+    return ok ? 1 : 0;
+#endif
 }
 int64_t     rt_crc32_text(const char* text, int64_t text_len) {
     if (!text || text_len <= 0) return 0;
@@ -2233,7 +2005,13 @@ static char* rt_m3_owned_path(const char* path, int64_t path_len) {
 SPL_RUNTIME_NATIVE_TWIN int rt_file_copy_create_excl_no_follow(
         const char* source, int64_t source_len,
         const char* destination, int64_t destination_len) {
-#if defined(_WIN32) || !defined(O_NOFOLLOW)
+#if defined(_WIN32)
+    char* src = rt_m3_owned_path(source, source_len);
+    char* dst = rt_m3_owned_path(destination, destination_len);
+    int ok = src && dst && rt_win_file_copy_create_excl_no_follow(src, dst);
+    free(src); free(dst);
+    return ok;
+#elif !defined(O_NOFOLLOW)
     (void)source; (void)source_len; (void)destination; (void)destination_len;
     return 0;
 #else
@@ -2283,7 +2061,13 @@ SPL_RUNTIME_NATIVE_TWIN int rt_file_copy_create_excl_no_follow(
 SPL_RUNTIME_NATIVE_TWIN int rt_file_link_create_excl_no_follow(
         const char* source, int64_t source_len,
         const char* destination, int64_t destination_len) {
-#if defined(_WIN32) || !defined(O_NOFOLLOW)
+#if defined(_WIN32)
+    char* src = rt_m3_owned_path(source, source_len);
+    char* dst = rt_m3_owned_path(destination, destination_len);
+    int ok = src && dst && rt_win_file_link_create_excl_no_follow(src, dst);
+    free(src); free(dst);
+    return ok;
+#elif !defined(O_NOFOLLOW)
     (void)source; (void)source_len; (void)destination; (void)destination_len;
     return 0;
 #else
@@ -2344,11 +2128,18 @@ int64_t rt_mem_snapshot_open(const char* path_ptr, int64_t path_len) {
     wchar_t* wide = rt_win_long_path_widen(path);
     if (!wide) return -1;
     int valid_parent = rt_win_profile_path_parents_are_real(wide);
-    HANDLE file = valid_parent ? CreateFileW(wide, GENERIC_WRITE, 0, NULL,
-        CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL) :
-        INVALID_HANDLE_VALUE;
+    DWORD last_err = 0;
+    HANDLE file = INVALID_HANDLE_VALUE;
+    if (valid_parent) {
+        file = CreateFileW(wide, GENERIC_WRITE, 0, NULL,
+            CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+        if (file == INVALID_HANDLE_VALUE) last_err = GetLastError();
+    }
     free(wide);
-    return file == INVALID_HANDLE_VALUE ? -1 : (int64_t)(intptr_t)file;
+    if (file == INVALID_HANDLE_VALUE) {
+        return (valid_parent && (last_err == ERROR_FILE_EXISTS || last_err == ERROR_ALREADY_EXISTS)) ? -2 : -1;
+    }
+    return (int64_t)(intptr_t)file;
 #else
     char path[RT_TEXT_PATH_MAX];
     if (!path_ptr || path_len <= 0 || (uint64_t)path_len >= sizeof(path) ||
@@ -2365,8 +2156,9 @@ int64_t rt_mem_snapshot_open(const char* path_ptr, int64_t path_len) {
     flags |= O_CLOEXEC;
 #endif
     int fd = openat(parent_fd, leaf, flags, 0600);
+    int open_errno = fd < 0 ? errno : 0;
     close(parent_fd);
-    if (fd < 0) return -1;
+    if (fd < 0) return open_errno == EEXIST ? -2 : -1;
     struct stat opened;
     if (fstat(fd, &opened) != 0 || !S_ISREG(opened.st_mode)) { close(fd); return -1; }
     return (int64_t)fd;
@@ -2375,7 +2167,7 @@ int64_t rt_mem_snapshot_open(const char* path_ptr, int64_t path_len) {
 
 int rt_mem_snapshot_append_flush(int64_t fd64, const char* record, int64_t record_len) {
 #if defined(_WIN32)
-    if (fd64 == -1 || !record || record_len <= 0 || record_len > 65536 ||
+    if (fd64 <= 0 || !record || record_len <= 0 || record_len > 65536 ||
             record[record_len - 1] != '\n') return 0;
     HANDLE file = (HANDLE)(intptr_t)fd64;
     int64_t off = 0;
@@ -2469,9 +2261,9 @@ int rt_phase_profile_record(int64_t fd, int64_t seq, const char* message, int64_
     return n > 0 && (size_t)n < sizeof(line) && rt_mem_snapshot_append_flush(fd, line, n);
 }
 
-int rt_mem_snapshot_close(int64_t fd) {
+bool rt_mem_snapshot_close(int64_t fd) {
 #if defined(_WIN32)
-    return fd != -1 && CloseHandle((HANDLE)(intptr_t)fd) != 0;
+    return fd > 0 && CloseHandle((HANDLE)(intptr_t)fd) != 0;
 #else
     return fd >= 0 && fd <= INT_MAX && close((int)fd) == 0;
 #endif
@@ -2701,18 +2493,15 @@ int64_t rt_shell_output(int64_t cmd_value) {
  * link), but conflicting weak-external defaults are a separate, unforceable
  * rule.
  *
- * Making THIS file the strong owner on hosted Windows fixes it while leaving exactly
- * one weak external (runtime_native.c's), which resolves against a strong
- * definition normally. The reverse -- compiling runtime_native.c's copies out
- * under SIMPLE_CORE_C_STANDALONE -- was tried first and is WRONG: it leaves
- * only a weak definition, and a weak archive member is never pulled in to
- * satisfy a reference on PE/COFF (the hazard already documented at the
- * rt_set_args carve-out in runtime_native.c), so the frontend-smoke lane then
- * failed with `simple_runtime.lib(runtime_native.obj) : error LNK2019:
- * unresolved external symbol rt_cli_get_args`.
- *
- * Standalone core-C instead needs runtime_native.c's registered tagged argv;
- * its three definitions below are excluded from that composition.
+ * So exactly one STRONG owner must exist on Windows. Where this file is linked
+ * without runtime_native.c (no SIMPLE_RUNTIME_MEMORY_OWNER), the copies below
+ * are that owner. Where both files are bundled, the copies below are compiled
+ * out (guard below) and runtime_native.c's SPL_CORE_ARGV_OWNER copies are
+ * strong instead. Leaving only a WEAK copy is wrong on PE/COFF: a weak
+ * archive member is never pulled in to satisfy a reference (the hazard at the
+ * rt_set_args carve-out in runtime_native.c), which once failed the
+ * frontend-smoke lane with `simple_runtime.lib(runtime_native.obj) : error
+ * LNK2019: unresolved external symbol rt_cli_get_args`.
  * CROSS-PLATFORM: off Windows this macro expands to exactly the
  * `__attribute__((weak))` that was here before, so Linux, macOS and FreeBSD
  * are byte-identical. The mingw lane is COFF too and benefits identically. */
@@ -2724,8 +2513,23 @@ int64_t rt_shell_output(int64_t cmd_value) {
 
 /* Standalone core-C uses tagged, registered arrays and scalar words, whereas
  * these hosted helpers return legacy SplArray/SplValue layouts. Keep the
- * native core provider as the sole Windows standalone owner. */
-#if !defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)
+ * native core provider as the sole Windows standalone owner.
+ *
+ * Also omitted whenever runtime_native.c is in the same bundle, on every
+ * platform. SIMPLE_RUNTIME_MEMORY_OWNER is the marker for that: every full
+ * bundle composer that compiles this file passes it and always lists
+ * runtime_native (70.backend/backend/runtime_compiler.spl,
+ * scripts/bootstrap/prepare-runtime-owner.shs); the lanes that link runtime.c
+ * alone (80.driver/driver_api_project_build.spl,
+ * 90.tools/leak_check/external_runner.spl) do not. On ELF
+ * both files' copies were weak, so the first object in the link won, and the
+ * hosted bundle lists runtime.c first: rt_cli_get_args then returned a legacy
+ * spl_array_new() array that runtime_native.c's rt_array_len rejects as
+ * "rejected invalid array handle", and rt_cli_arg_at returned a SplValue
+ * struct where compiled code expects a tagged text word. See
+ * doc/08_tracking/bug/hosted_bundle_legacy_cli_args_wins_weak_tie_2026-11-07.md */
+#if (!defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)) && \
+    !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
 SPL_CLI_ARGS_WEAK SplArray* rt_cli_get_args(void) {
     SplArray* arr = spl_array_new();
     for (int i = 0; i < g_argc; i++) {
@@ -2857,17 +2661,23 @@ bool rt_dir_remove_all(const uint8_t* path_ptr, uint64_t path_len) {
  * and for a missing one alike. The worker is now rt_dir_list_cpath and this is
  * the entry point the compiler actually calls. */
 SPL_RUNTIME_NATIVE_TWIN int64_t rt_dir_list(const uint8_t* path_ptr, uint64_t path_len) {
-    int64_t result = (int64_t)(uintptr_t)rt_array_new(0);
+    const int64_t rt_nil = 3;
     char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return result;
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return rt_nil;
     int64_t count = 0;
     const char** entries = rt_dir_list_cpath(path, &count);
+    if (!entries) return rt_nil;
+    int64_t result = (int64_t)(uintptr_t)rt_array_new(0);
+    if (result == 0) {
+        rt_dir_list_free(entries, count);
+        return rt_nil;
+    }
     for (int64_t i = 0; i < count; i++) {
         const char* e = entries[i] ? entries[i] : "";
         rt_array_push((SplArray*)(uintptr_t)result,
                       rt_string_new((const uint8_t*)e, (uint64_t)strlen(e)));
     }
-    if (entries) rt_dir_list_free(entries, count);
+    rt_dir_list_free(entries, count);
     return result;
 }
 
@@ -2927,10 +2737,8 @@ int64_t spl_wffi_try_call_i64_c(void* fptr, const int64_t* args, int64_t nargs, 
  * the Win32 error instead; this runs only on a path that is already failing.
  * Set SIMPLE_QUIET_SECURE_TEMP_DIAG=1 to silence. */
 static void rt_secure_temp_dir_diag(const char* stage, const char* detail) {
-    if (getenv("SIMPLE_QUIET_SECURE_TEMP_DIAG")) return;
-    fprintf(stderr, "rt_secure_temp_dir: %s failed (GetLastError=%lu) %s\n",
-            stage, (unsigned long)GetLastError(), detail ? detail : "");
-    fflush(stderr);
+    unsigned long err = (unsigned long)GetLastError(); /* before the env probe can clobber it */
+    rt__shared_secure_temp_dir_diag(stage, err, getenv("SIMPLE_QUIET_SECURE_TEMP_DIAG") != NULL, detail);
 }
 #endif
 
@@ -3136,76 +2944,14 @@ static void _spl_atexit_handler(void) {
 
 /* ----------------------------------------------------------------
  * Crash Signal Handler (SIGSEGV / SIGBUS)
+ * Shared with runtime_native.c via runtime_crash_handler_impl.h
+ * (classifies siginfo_t.si_code via _spl_fault_class).
  * ---------------------------------------------------------------- */
-#ifndef _WIN32
-/* Classify a fault from siginfo_t.si_code.
- *
- * Phase 5 of doc/03_plan/infra/audit/serial_sigsegv_and_test_hardening.md:
- * si_addr alone cannot tell a wild-pointer dereference apart from a fault the
- * process brought on itself by exhausting a resource, and the two need
- * different operator responses (fix the pointer bug vs. raise the limit).
- * Pure lookup, no allocation, no locking — safe to call from a signal handler. */
-static const char* _spl_fault_class(int signum, int sicode) {
-    if (sicode == SI_USER) return "delivered by kill() — not a genuine fault";
-#ifdef SI_KERNEL
-    if (sicode == SI_KERNEL) return "kernel-raised fault";
-#endif
-    if (signum == SIGSEGV) {
-        if (sicode == SEGV_MAPERR) return "address not mapped — wild/null pointer";
-        /* A guard page (stack overflow, or an mmap'd region past a limit) is
-         * mapped but not accessible, so a resource-limit violation lands here
-         * rather than on SEGV_MAPERR. */
-        if (sicode == SEGV_ACCERR) return "permission denied on a mapped page — guard page / memory-limit violation";
-#ifdef SEGV_BNDERR
-        if (sicode == SEGV_BNDERR) return "bounds-check violation";
-#endif
-        return "unclassified segmentation fault";
-    }
-    if (sicode == BUS_ADRALN) return "misaligned address";
-    if (sicode == BUS_ADRERR) return "nonexistent physical address";
-    if (sicode == BUS_OBJERR) return "object-specific hardware error";
-    return "unclassified bus error";
+#include "runtime_crash_handler_impl.h"
+
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_install_crash_handler(void) {
+    return rt_install_crash_handler_impl();
 }
-
-static void _spl_crash_handler(int signum, siginfo_t *info, void *ucontext) {
-    (void)ucontext;
-    const char *signame = (signum == SIGSEGV) ? "SIGSEGV" : "SIGBUS";
-    int sicode = info->si_code;
-
-    /* Use write() not fprintf — async-signal-safe */
-    char buf[256];
-    int len = snprintf(buf, sizeof(buf),
-        "\n[simple-runtime] Fatal: %s at address %p (si_code=%d: %s)\n",
-        signame, info->si_addr, sicode, _spl_fault_class(signum, sicode));
-    if (len > 0) write(STDERR_FILENO, buf, (size_t)len);
-
-    /* Backtrace */
-    void *frames[32];
-    int nframes = backtrace(frames, 32);
-    if (nframes > 0) {
-        write(STDERR_FILENO, "Backtrace:\n", 11);
-        backtrace_symbols_fd(frames, nframes, STDERR_FILENO);
-    }
-
-    /* Exit with signal-appropriate code */
-    _exit(128 + signum);
-}
-
-int64_t rt_install_crash_handler(void) {
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_sigaction = _spl_crash_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
-
-    int ok = 1;
-    if (sigaction(SIGSEGV, &sa, NULL) == -1) ok = 0;
-    if (sigaction(SIGBUS, &sa, NULL) == -1) ok = 0;
-    return ok;
-}
-#else
-int64_t rt_install_crash_handler(void) { return 0; }
-#endif
 
 #ifndef _WIN32
 int64_t rt_signal_install(int64_t signal_num) {
@@ -3260,10 +3006,10 @@ const char* rt_byte_char(int64_t v) {
     /* Returns a malloc'd 2-byte buffer: [byte_value, '\0'].
      * Note: rt_byte_char(0) returns a string whose first byte is NUL,
      * so strlen() will report 0. This is intentional for binary wire use. */
-    char* buf = (char*)SPL_MALLOC(2, "str");
+    char* buf = SIMPLE_RT_NONNULL("rt_byte_char", SPL_MALLOC(2, "str"));
     buf[0] = (char)(unsigned char)(v & 0xFF);
     buf[1] = '\0';
-    return buf;
+    return SIMPLE_RT_NONNULL("rt_byte_char", buf);
 }
 
 /* ---- rt_time_now_seconds: Unix timestamp in seconds ---- */
@@ -3461,6 +3207,9 @@ const char* rt_sha1(const char* data) {
  * functions are thin wrappers that call strlen on each argument.
  * ================================================================ */
 
+/* EVP lengths are int-sized; validate before narrowing in either backend. */
+#include <limits.h>
+
 /* --- OpenSSL is opt-in only ---
  * Pass -DSPL_HAVE_OPENSSL and link -lssl -lcrypto to enable.
  * Without it, AES-128-GCM uses the from-scratch implementation below
@@ -3538,7 +3287,9 @@ const char* rt_aes_gcm_encrypt_with_len(const char* key, int64_t key_len,
                                          const char* aad, int64_t aad_len,
                                          int64_t* out_len) {
     if (out_len) *out_len = 0;
-    if (!key || !iv || !plaintext || key_len < 16 || iv_len < 12 || pt_len < 0)
+    if (!key || !iv || !plaintext || key_len < 16 || iv_len < 12 || iv_len > INT_MAX ||
+        pt_len < 0 || pt_len > INT_MAX - 16 || aad_len < 0 || aad_len > INT_MAX ||
+        (!aad && aad_len != 0))
         return SPL_STRDUP("", "str");
 
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
@@ -3593,16 +3344,6 @@ const char* rt_aes_gcm_encrypt_with_len(const char* key, int64_t key_len,
     return (const char*)result;
 }
 
-const char* rt_aes_gcm_encrypt(const char* key, const char* iv,
-                                const char* plaintext, const char* aad) {
-    if (!key || !iv || !plaintext) return SPL_STRDUP("", "str");
-    return rt_aes_gcm_encrypt_with_len(key, (int64_t)strlen(key),
-                                        iv, (int64_t)strlen(iv),
-                                        plaintext, (int64_t)strlen(plaintext),
-                                        aad, aad ? (int64_t)strlen(aad) : 0,
-                                        NULL);
-}
-
 /* ---- rt_aes_gcm_decrypt_with_len: binary-safe AES-128-GCM decrypt (OpenSSL) ---- */
 const char* rt_aes_gcm_decrypt_with_len(const char* key, int64_t key_len,
                                          const char* iv, int64_t iv_len,
@@ -3610,7 +3351,9 @@ const char* rt_aes_gcm_decrypt_with_len(const char* key, int64_t key_len,
                                          const char* aad, int64_t aad_len,
                                          int64_t* out_len) {
     if (out_len) *out_len = 0;
-    if (!key || !iv || !ciphertext || key_len < 16 || iv_len < 12 || ct_len < 16)
+    if (!key || !iv || !ciphertext || key_len < 16 || iv_len < 12 || iv_len > INT_MAX ||
+        ct_len < 16 || ct_len > INT_MAX || aad_len < 0 || aad_len > INT_MAX ||
+        (!aad && aad_len != 0))
         return SPL_STRDUP("", "str");
 
     int64_t actual_ct_len = ct_len - 16; /* last 16 bytes are the GCM tag */
@@ -3664,16 +3407,6 @@ const char* rt_aes_gcm_decrypt_with_len(const char* key, int64_t key_len,
     result[dec_len] = '\0';
     if (out_len) *out_len = (int64_t)dec_len;
     return (const char*)result;
-}
-
-const char* rt_aes_gcm_decrypt(const char* key, const char* iv,
-                                const char* ciphertext, const char* aad) {
-    if (!key || !iv || !ciphertext) return SPL_STRDUP("", "str");
-    return rt_aes_gcm_decrypt_with_len(key, (int64_t)strlen(key),
-                                        iv, (int64_t)strlen(iv),
-                                        ciphertext, (int64_t)strlen(ciphertext),
-                                        aad, aad ? (int64_t)strlen(aad) : 0,
-                                        NULL);
 }
 
 #else /* !SPL_HAVE_OPENSSL — from-scratch AES-128-GCM implementation */
@@ -3976,7 +3709,9 @@ const char* rt_aes_gcm_encrypt_with_len(const char* key, int64_t key_len,
                                          const char* aad, int64_t aad_len,
                                          int64_t* out_len) {
     if (out_len) *out_len = 0;
-    if (!key || !iv || !plaintext || key_len < 16 || iv_len < 12 || pt_len < 0)
+    if (!key || !iv || !plaintext || key_len < 16 || iv_len < 12 || iv_len > INT_MAX ||
+        pt_len < 0 || pt_len > INT_MAX - 16 || aad_len < 0 || aad_len > INT_MAX ||
+        (!aad && aad_len != 0))
         return SPL_STRDUP("", "str");
 
     uint8_t* ct_buf = (uint8_t*)SPL_MALLOC((size_t)pt_len + 16 + 1, "str");
@@ -3998,16 +3733,6 @@ const char* rt_aes_gcm_encrypt_with_len(const char* key, int64_t key_len,
     return (const char*)ct_buf;
 }
 
-const char* rt_aes_gcm_encrypt(const char* key, const char* iv,
-                                const char* plaintext, const char* aad) {
-    if (!key || !iv || !plaintext) return SPL_STRDUP("", "str");
-    return rt_aes_gcm_encrypt_with_len(key, (int64_t)strlen(key),
-                                        iv, (int64_t)strlen(iv),
-                                        plaintext, (int64_t)strlen(plaintext),
-                                        aad, aad ? (int64_t)strlen(aad) : 0,
-                                        NULL);
-}
-
 /* ---- rt_aes_gcm_decrypt_with_len: binary-safe (from-scratch fallback) ---- */
 const char* rt_aes_gcm_decrypt_with_len(const char* key, int64_t key_len,
                                          const char* iv, int64_t iv_len,
@@ -4015,7 +3740,9 @@ const char* rt_aes_gcm_decrypt_with_len(const char* key, int64_t key_len,
                                          const char* aad, int64_t aad_len,
                                          int64_t* out_len) {
     if (out_len) *out_len = 0;
-    if (!key || !iv || !ciphertext || key_len < 16 || iv_len < 12 || ct_len < 16)
+    if (!key || !iv || !ciphertext || key_len < 16 || iv_len < 12 || iv_len > INT_MAX ||
+        ct_len < 16 || ct_len > INT_MAX || aad_len < 0 || aad_len > INT_MAX ||
+        (!aad && aad_len != 0))
         return SPL_STRDUP("", "str");
 
     int64_t actual_ct_len = ct_len - 16;
@@ -4038,6 +3765,19 @@ const char* rt_aes_gcm_decrypt_with_len(const char* key, int64_t key_len,
     return (const char*)pt_buf;
 }
 
+#endif /* SPL_HAVE_OPENSSL */
+/* ---- shared AES-GCM text wrappers (both backends) ---- */
+
+const char* rt_aes_gcm_encrypt(const char* key, const char* iv,
+                                const char* plaintext, const char* aad) {
+    if (!key || !iv || !plaintext) return SPL_STRDUP("", "str");
+    return rt_aes_gcm_encrypt_with_len(key, (int64_t)strlen(key),
+                                        iv, (int64_t)strlen(iv),
+                                        plaintext, (int64_t)strlen(plaintext),
+                                        aad, aad ? (int64_t)strlen(aad) : 0,
+                                        NULL);
+}
+
 const char* rt_aes_gcm_decrypt(const char* key, const char* iv,
                                 const char* ciphertext, const char* aad) {
     if (!key || !iv || !ciphertext) return SPL_STRDUP("", "str");
@@ -4048,8 +3788,8 @@ const char* rt_aes_gcm_decrypt(const char* key, const char* iv,
                                         NULL);
 }
 
-#endif /* SPL_HAVE_OPENSSL */
 
+/* ---- end shared AES-GCM text wrappers ---- */
 /* ============================================================================
  * Hex-domain AES-GCM wrappers (binary-safe, NUL-transparent)
  *
@@ -4060,12 +3800,6 @@ const char* rt_aes_gcm_decrypt(const char* key, const char* iv,
  *   extern fn rt_aes_gcm_decrypt_hex(...) -> text
  * ========================================================================= */
 
-static int hex_char_val(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
 
 /* Decode hex string to binary buffer.  Caller must free().  Sets *out_len. */
 static uint8_t* hex_decode(const char* hex, int64_t* out_len) {
@@ -4075,12 +3809,7 @@ static uint8_t* hex_decode(const char* hex, int64_t* out_len) {
     size_t blen = slen / 2;
     uint8_t* buf = (uint8_t*)malloc(blen);
     if (!buf) { *out_len = 0; return NULL; }
-    for (size_t i = 0; i < blen; i++) {
-        int hi = hex_char_val(hex[2*i]);
-        int lo = hex_char_val(hex[2*i+1]);
-        if (hi < 0 || lo < 0) { free(buf); *out_len = 0; return NULL; }
-        buf[i] = (uint8_t)((hi << 4) | lo);
-    }
+    if (rt__shared_hex_decode_into(hex, blen, buf) != 0) { free(buf); *out_len = 0; return NULL; }
     *out_len = (int64_t)blen;
     return buf;
 }
@@ -4094,12 +3823,7 @@ static char* hex_encode(const uint8_t* data, int64_t len) {
     }
     char* hex = (char*)malloc((size_t)(len * 2 + 1));
     if (!hex) return NULL;
-    static const char digits[] = "0123456789abcdef";
-    for (int64_t i = 0; i < len; i++) {
-        hex[2*i]     = digits[(data[i] >> 4) & 0x0F];
-        hex[2*i + 1] = digits[data[i] & 0x0F];
-    }
-    hex[len * 2] = '\0';
+    rt__shared_hex_encode_into(data, (size_t)len, hex);
     return hex;
 }
 
@@ -4152,11 +3876,11 @@ const char* rt_aes_gcm_decrypt_hex(const char* key_hex, const char* iv_hex,
 /* Convert wire text (may contain NUL) to hex string, given explicit length. */
 const char* rt_wire_to_hex(const char* wire, int64_t wire_len) {
     if (!wire || wire_len <= 0) {
-        char* empty = (char*)malloc(1);
-        if (empty) empty[0] = '\0';
-        return empty;
+        char* empty = SIMPLE_RT_NONNULL("rt_wire_to_hex", malloc(1));
+        empty[0] = '\0';
+        return SIMPLE_RT_NONNULL("rt_wire_to_hex", empty);
     }
-    return hex_encode((const uint8_t*)wire, wire_len);
+    return SIMPLE_RT_NONNULL("rt_wire_to_hex", hex_encode((const uint8_t*)wire, wire_len));
 }
 
 /* Convert hex string back to wire text (binary, may contain NUL).
@@ -4166,39 +3890,28 @@ const char* rt_hex_to_wire(const char* hex_str) {
     int64_t len;
     uint8_t* buf = hex_decode(hex_str, &len);
     if (!buf) {
-        char* empty = (char*)malloc(1);
-        if (empty) empty[0] = '\0';
-        return empty;
+        char* empty = SIMPLE_RT_NONNULL("rt_hex_to_wire", malloc(1));
+        empty[0] = '\0';
+        return SIMPLE_RT_NONNULL("rt_hex_to_wire", empty);
     }
     /* Ensure NUL termination for C string safety */
-    uint8_t* result = (uint8_t*)realloc(buf, (size_t)(len + 1));
-    if (!result) { free(buf); return NULL; }
+    uint8_t* result = SIMPLE_RT_NONNULL("rt_hex_to_wire", realloc(buf, (size_t)(len + 1)));
     result[len] = 0;
-    return (const char*)result;
+    return (const char*)SIMPLE_RT_NONNULL("rt_hex_to_wire", result);
 }
 
+#include "runtime_utf8_strict_private.h"
 #if !defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)
-/* Standalone core-C instead selects runtime_native.c's tagged text/array ABI.
- * Keep these legacy hosted byte-buffer helpers out of that composition. */
-/* ---- Byte array handle for [u8] FFI ----
- * The [u8] type in Simple FFI maps to an opaque int64_t handle.
- * Internally: pointer to { uint8_t* data; int64_t len; int64_t cap; } */
-typedef struct {
-    uint8_t* data;
-    int64_t  len;
-    int64_t  cap;
-} rt_byte_buf;
-
-/* rt_text_to_bytes: create byte array handle from text string */
-SPL_RUNTIME_NATIVE_TWIN int64_t rt_text_to_bytes(const char* text) {
-    if (!text) text = "";
-    size_t len = strlen(text);
-    rt_byte_buf* bb = (rt_byte_buf*)SPL_MALLOC(sizeof(rt_byte_buf), "bytes");
-    bb->len = (int64_t)len;
-    bb->cap = (int64_t)len;
-    bb->data = (uint8_t*)SPL_MALLOC(len > 0 ? len : 1, "bytes");
-    if (len > 0) memcpy(bb->data, text, len);
-    return (int64_t)(uintptr_t)bb;
+/* Standalone Windows core-C selects runtime_native.c's text/array providers.
+ * Preserve that composition while keeping the hosted twins ABI-compatible. */
+/* Both hosted compositions use the tagged text/array ABI declared by
+ * std.common.text_bytes and the Rust runtime. Reuse the native packed-byte
+ * provider so either duplicate-symbol link order preserves embedded NUL and
+ * returns an array handle understood by rt_array_len/get. */
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_text_to_bytes(int64_t text_value) {
+    const uint8_t* bytes = rt_string_data(text_value);
+    int64_t len = rt_string_len(text_value);
+    return rt_bytes_from_raw((int64_t)(uintptr_t)bytes, len);
 }
 
 /* rt_bytes_to_text: byte-array RuntimeValue -> text RuntimeValue.
@@ -4213,16 +3926,15 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_text_to_bytes(const char* text) {
  * dereferenced as an rt_byte_buf and the process SIGSEGV'd, and any survivor
  * came back as an untagged address that reads as an empty string.
  *
- * The `rt_byte_buf` world below is reachable only through rt_text_to_bytes,
- * which has no RuntimeFuncSpec (the compiler never calls it) and no C-internal
- * caller of rt_bytes_to_text exists, so nothing was relying on the old
- * interpretation. */
+ * The hosted twin now shares that canonical tagged ABI in both directions;
+ * no private byte-buffer representation crosses the Simple extern boundary. */
 SPL_RUNTIME_NATIVE_TWIN int64_t rt_bytes_to_text(int64_t bytes_value) {
     int64_t len = rt_array_len_safe(bytes_value);
     if (bytes_value == 0 || len <= 0) return rt_string_new(NULL, 0);
     const uint8_t* data =
         (const uint8_t*)(uintptr_t)rt_array_data_ptr((SplArray*)(uintptr_t)bytes_value);
     if (!data) return rt_string_new(NULL, 0);
-    return rt_string_new(data, (uint64_t)len);
+    return spl_text_from_utf8_strict(data, (size_t)len);
 }
+
 #endif

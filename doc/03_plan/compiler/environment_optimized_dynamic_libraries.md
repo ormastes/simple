@@ -12,6 +12,22 @@ does not close a lane.
 (balanced production performance). Implementation may proceed in staged slices;
 no default selection or ABI publication occurs before its focused gates pass.
 
+## Status update 2026-10-25 (verified against `origin/release/1.0.0` @ `57a129fb2b9`)
+
+Seven-plan item 1 status, per source presence plus git log. Source presence is
+not acceptance; no host is certified by this note.
+
+| Area | Status | Evidence |
+|---|---|---|
+| Contracts (`ParserProviderV1`, `EnvironmentSnapshotV1`, `VariantDescriptorV1`, `BindingPlanV1`, `FrontendFacetV1`, `StartupPlanV1`, `ProcessLaunchSpecV1`, SimpleOS image manifest, release evidence) | DONE (source-landed) | `src/compiler/00.common/structural_contracts/environment_variant_*`, `src/lib/nogc_sync_mut/composition/environment_variants/`, `src/app/startup/contract/startup_plan_v1.spl`, `src/lib/common/contracts/execution/{process_launch_spec_v1,simpleos_image_manifest_v1}.spl` |
+| Shared parser ownership / parity across compiler, interpreter, tooling | PARTIAL | `ParserProviderV1` dispatch exists; legacy provider is still the only executable one; `FlatAstBridge` migration open (bug trail `6c70e0ecef9`, `f938c3d00a6`) |
+| Environment-optimized provider selection, ABI validation, fallback, cache invalidation | PARTIAL | contracts + selector landed; system spec `test/03_system/app/compiler/feature/environment_optimized_dynamic_libraries_spec.spl` still carries `fail(...)`/pending bodies (41 sites) |
+| Compile-mode dynload (per-module dynlibs, import library) | OPEN | `doc/08_tracking/bug/dynload_mode_emits_no_per_module_dynlibs_2026-10-24.md` (`507a75ce07a`); per-dynlib receipt record PR #4426 |
+| Immutable release candidates + per-host release/bootstrap execution | OPEN | release-evidence producer stopped after third rejected review; no admitted per-host receipts under `doc/03_plan/evidence/seven_plans/` for item 1 beyond Windows frozen-path parity (`windows/item1_frozen_path_2026-09-29.md`) |
+| Claimed SimpleOS target boot | OPEN for item 1 acceptance | umbrella scaffold `test/03_system/seven_items_pending/item01_platform_spec.spl` (last touched `0f20291900b`, 2026-10-03) remains NOT_IMPLEMENTED |
+
+Done gate (umbrella §1) is **not met**.
+
 ## Authoritative inputs
 
 - Research: `doc/01_research/compiler/simd/simple_environment_optimized_dynamic_libraries_2026-09-07.md`
@@ -508,3 +524,165 @@ does not implement the separate session authority or accepted-feature envelope.
 Cranelift confirmation follows only after it reports accepted versus ignored
 features. Required features must be explicitly accepted under the canonical
 registry; sorting/echoing the request is insufficient.
+
+## Levelled single-DSO vector provider (x86-64-v1..v4, NEON/SVE/SVE2, RVV) — 2026-10-24
+
+Scope: the runtime vector provider (`src/runtime/providers/vector/`, ABI
+`simple_vector_kernel_abi_v1.h`, admitted by path + SHA-256 in
+`src/os/smf/provider_loader.spl`, mapped by `src/os/posix/dynlib.spl`) has a
+**levelled** build (`-DSIMPLE_VECTOR_LEVELLED`): one DSO per OS/arch holding
+the baseline `bitmap_provider.c`, a baseline dispatcher
+(`vector_level_dispatch.c`), and one kernel object per SIMD level
+(`vector_level_portable.c` renamed per level, or the existing intrinsic TUs).
+The dispatcher probes once, caches the result, and forwards to the highest
+level the CPU *and* OS admit, capped by compile-time `SIMPLE_VECTOR_MAX_LEVEL`.
+Gate and bench: `scripts/check/check-vector-provider-levels.shs ABS_OUT
+[run|qemu|compile|all]` and `src/runtime/test/vector_level_bench.c`. The loader
+also accepts `/usr/local/lib/simple/providers/` (FreeBSD/macOS, no `/usr/lib`
+under SIP). Legacy single-kernel lanes (`check-vector-bitmap-targets`,
+`-http-targets`, `-bitmap-x86-avx512`, `-http-avx512`, `-bitmap-sve`) are
+unchanged and still pass. Detail: design § "Levelled single-DSO provider
+detail". This is a provider slice under Stage 6; it promotes no parser, JIT
+or GPU claim.
+
+### Level table (level 0 = provider refuses with `FEATURE_UNAVAILABLE`)
+
+| Arch | Level | Compile | Runtime admission (all required) | Kernel source |
+|---|---|---|---|---|
+| x86_64 | L1 | `-march=x86-64` (SSE2) | architectural | `vector_level_portable.c`, auto-vectorized |
+| x86_64 | L2 | `-march=x86-64-v2` | SSE3/SSSE3/CMPXCHG16B/SSE4.1/SSE4.2/POPCNT + LAHF-SAHF | same, auto-vectorized |
+| x86_64 | L3 | `-march=x86-64-v3` | L2 + FMA/MOVBE/XSAVE/OSXSAVE/AVX/F16C + BMI1/AVX2/BMI2 + LZCNT + XCR0 `0x06` | same, auto-vectorized |
+| x86_64 | L4 | intrinsic TUs | L3 + AVX512 F/DQ/CD/BW/VL + XCR0 `0xe6` (macOS: `hw.optional.avx512{f,bw,dq,vl,cd}`) | `bitmap_avx512.c`, `http_avx512.c` |
+| aarch64 | L1 | `-march=armv8-a+simd` | `HWCAP_ASIMD` on Linux/FreeBSD; architectural on macOS/Windows/SimpleOS | `*_neon.c` |
+| aarch64 | L2 | `-march=armv8-a+sve` (VLA) | + `HWCAP_SVE` | `*_sve.c` |
+| aarch64 | L3 | `-march=armv8-a+sve2` (VLA) | + `HWCAP2_SVE2` | `*_sve.c` |
+| riscv64 | L1 | `-march=rv64gcv` (VLA) | HWCAP `V` **and** `prctl(PR_RISCV_V_GET_CONTROL)` not OFF | `*_rvv.c` |
+| riscv64 | L0 | — | scalar rv64gc is never labelled SIMD: provider refuses | none |
+| other | L0 | — | refuses | none |
+
+"Highest admitted" is a *safety* order, not a measured speed order; a lower
+level is reached only by honest fallback or an explicit cap, never silently.
+
+### Per-OS probe matrix
+
+| OS \ arch | x86_64 | aarch64 | riscv64 |
+|---|---|---|---|
+| Windows | CPUID + XGETBV (user-mode legal) | NEON architectural → L1; SVE unprobed (scaffold) | n/a |
+| Linux | CPUID + XGETBV | `getauxval(AT_HWCAP=16 / AT_HWCAP2=26)`, declared `extern`, no headers | `getauxval` `V` + `prctl(70)`; current-state OFF → L0 (`riscv_hwprobe` not used) |
+| FreeBSD | CPUID + XGETBV | `elf_aux_info(25 / 26)`, no headers | `elf_aux_info(25)` `V` → L1 |
+| macOS | CPUID + XGETBV through L3; L4 via `sysctlbyname("hw.optional.avx512*")` because ZMM state is enabled lazily | NEON → L1 | n/a |
+| SimpleOS (`__simpleos__`) | CPUID.1:ECX.OSXSAVE before XGETBV, same masks; kernel sets only XCR0 bits it context-switches | L1 NEON (kernel enables FPEN for all userland) | L0 until the kernel exports hwcaps / enables VS |
+
+### Build/test status per cell (2026-10-24)
+
+| Target | Levels | Status |
+|---|---|---|
+| x86_64-w64-windows-gnu `.dll` | L1–L4 | **run, native** (Xeon W-2135, AVX-512): caps 0–4 parity + timing PASS |
+| x86_64-linux-gnu `.so` | L1–L4 | **run, native** (WSL): PASS |
+| aarch64-linux-gnu `.so` | L1–L3 | **run, qemu-user**: `-cpu neoverse-n1` → L1, `a64fx` → L2, `max` → L3 PASS |
+| riscv64-linux-gnu `.so` | L1 | **run, qemu-user**: `rva23u64` vlen 128 and 256 → L1, `max,v=false` → L0 PASS |
+| x86_64/aarch64/riscv64-unknown-freebsd | per arch | compile-only (freestanding, ISA gates) PASS |
+| x86_64/arm64-apple-darwin | L1–L4 / L1 | compile-only (ISA gates) PASS; macOS L4 sysctl path not executed here |
+| aarch64-w64-windows-gnu | L1 | compile-only PASS |
+| x86_64/aarch64/riscv64-unknown-none-elf (`-D__simpleos__`) | scaffold | compile-only PASS; refuses or L1 by construction |
+| SimpleOS `.smf` | — | packaging note only |
+
+52 ISA gates across the compile lane pass: baseline objects
+(`dispatch-cap4.o`, `provider-cap4.o`) carry no vector-extension
+instructions; each `lN` object carries its own level's registers and none
+above.
+
+### Measured native kernel ns/op (best of 7, bitmap AND 1 Mbit / HTTP FIND_CRLF 1 MiB)
+
+| Host | L1 | L2 | L3 | L4 | scalar reference |
+|---|---|---|---|---|---|
+| Windows, Xeon W-2135 | 6114 / 53230 | 5797 / 45592 | 4858 / 35596 | 4334 / 14939 | 12355 / 422540 |
+| Linux (WSL), same CPU | 5016 / 50755 | 5114 / 42179 | 4529 / 35901 | 4706 / 25466 | ~12000 / ~323000 |
+
+Scalar reference = the same loops in the bench harness at `-O2` with loop
+vectorization disabled, same machine. Bitmap AND is memory-bandwidth-bound
+(128 KiB working set), so levels differ by <2x; the byte scan scales with
+vector width (L4 is 2.4x L3 on Windows). Under WSL L4 did not beat L3 on
+bitmap AND — consistent with AVX-512 license downclock on Skylake-SP; the
+selection order is unchanged, the number is recorded.
+
+### Exit criteria
+
+| # | Criterion | State |
+|---|---|---|
+| 1 | Per-symbol ISA gate: baseline objects vector-free; L1/L2 `xmm` only; L3 `ymm` no `zmm`; L4 `zmm`; aarch64 L1 `v.16b/4s`, L2/L3 `z`-regs; riscv64 `vsetvli` | met (52 gates) |
+| 2 | All levels byte-identical to the scalar oracle for every tail length, CRLF across a block edge, max span | met — 2026-11-06 `vector_level_parity_selftest.c` per cap: lengths 0..131 (words/bytes), every start offset 0..63, spans ending at a guard page, CRLF/CR-CR-LF/lone-CR at every block edge, 1 GiB max span (reserved, first pages committed) + MAX+1 refused; 1,223,212 cases/cap PASS on Windows L0–L4. Mutation check: an L4 CRLF bound `>=64` (1-byte over-read) and a dropped bitmap tail word are both caught; the old bench missed the over-read |
+| 3 | Capped variants (`_cap0`..`_cap3`) report `min(cap, host)` and carry distinct implementation IDs and digests | met |
+| 4 | Simple-side db (`PureDatabase` RowBitmap AND) and web (HTTP `FIND_CRLF`) probes through the provider on the self-hosted chain, receipt names the executed level | **open** — not in this evidence set |
+| 5 | Below-max reason codes (`cpu-missing:` / `xcr0:` / `cap:` / `os:`) in receipts | met (2026-11-06) — additive export `int32_t simple_vector_level_reason_v1(char *buf, uint64_t size)`: stable code (0 max, 1 cpu-missing, 2 xcr0, 3 cap, 4 os, 5 build) + bounded NUL-terminated text; printed and asserted on every per-cap gate line (`cap0..3: reason=cap:N`, `cap4: reason=max` on Xeon W-2135); host level cross-checked against an independent CPUID decode (`uncapped L4 = CPUID-decoded L4`). `build:force-no-avx512` verified ad hoc. `cpu-missing`/`xcr0`/`os` text is exercised only by construction here (no CPU lacking a feature available; qemu lane expectations added, not run on this host) |
+| 6 | `.init_array` / `DT_INIT` / PE TLS-directory emptiness checked by the gate | met (2026-11-06) — `gate_init` (llvm-readobj, fail-closed on an unreadable table): every level/dispatcher/provider object free of ELF `.init_array .preinit_array .fini_array .ctors .dtors .init .fini .tdata .tbss`, COFF `.CRT$X* .tls$`, Mach-O `__mod_init_func __init_offsets __thread_*`, and TLS symbols; linked images' init-table / PT_TLS / PE TLS-directory footprint must equal the level-free cap0 image (`DT_INIT` and the mingw TLS directory exist post-link only and belong to the CRT). Fixtures per target: a constructor and a `_Thread_local` object must be rejected, a clean object accepted. The constructor fixture first passed vacuously (GlobalOpt folded a constant-store ctor) — now calls out |
+| 7 | Legacy lanes green; unknown arch refuses | met |
+
+### Risks found and mitigations
+
+| Risk | Mitigation (state) |
+|---|---|
+| Headline-bit admission (old `available()` = AVX512F only) while clang emits BMI2/LZCNT/MOVBE (v3) or BW/DQ/VL/CD (v4) | full per-level feature conjunction in `probe_level()` (done) |
+| CPUID advertises AVX-512 but OS/hypervisor masks XCR0 | XCR0 `0x06` for L3, `0xe6` for L4, after OSXSAVE (done) |
+| macOS Intel enables ZMM state lazily, XCR0 would deny | `hw.optional.avx512*` sysctls for L4 (done, untested here) |
+| `xgetbv` `#UD` when OSXSAVE is clear (SimpleOS, thin hypervisors) | OSXSAVE is part of the v3 conjunction tested first (done) |
+| RVV: HWCAP `V` set but per-process vector OFF | `prctl(PR_RISCV_V_GET_CONTROL)` current-state check (done) |
+| Hybrid cores / per-thread SVE VL / RVV VLEN | trust OS-normalised CPUID/hwcaps; SVE/RVV kernels are VLA; qemu vlen 128 and 256 both PASS (done) |
+| v4 code loaded on a v1 CPU | no constructors/static init/TLS in level TUs; only the dispatcher references `lN` symbols; ISA gate (done); init-section emptiness gate with must-reject fixtures (done) |
+| LTO / `always_inline` pulling wide code into the baseline TU | no LTO in the build; ISA gate on the baseline objects (done) |
+| Probe on every call | one probe, `atomic_int` cache (done) |
+| One digest for all levels hides the executed level | `simple_vector_selected_level_v1()` (done); `simple_vector_level_reason_v1()` reason codes (done) |
+| Capped build admitted under the production name | cap folded into implementation ID and `_capN` file name (done) |
+| Non-deterministic PE digest | `-Wl,--no-insert-timestamp`, lld, explicit `.def` exports (done) |
+| AVX-512 downclock makes L4 slower on short/bandwidth-bound spans | measured and recorded; selection stays safety-ordered; cap is the only override |
+| Linux-only `<asm/hwcap.h>` on FreeBSD | numeric aux keys, no headers (done) |
+
+## CPU-level SIMD out of the static runtime — staged (2026-11-06)
+
+Owner directive: SIMD code that is CPU-version specific (including what the
+compiler/runtime itself uses) is loaded from the per-level provider DSO above,
+never compiled into the binary with `target(...)` + in-process CPUID dispatch.
+The static runtime keeps a portable scalar baseline and fails closed to it.
+
+**Stage 1 — text kernels (landed on `work/text-simd-to-levelled-dll-20261106`).**
+- ABI: additive opcodes 5..12 (`SIMPLE_VECTOR_TEXT_*`: UTF-8 validate /
+  find-invalid / count, ASCII check / upper / lower, find / find-last), caps
+  `0xFF0`. The v1 description and digest are unchanged; a host requests the
+  text caps at query time and an older provider answers status 5.
+- Provider: `providers/vector/text_level_kernels.c` (one object per level,
+  `-march` selects SSE2 / AVX2 / AVX-512BW / NEON(+SVE count/ascii) / portable
+  for RVV), `text_level_dispatch.c` (baseline dispatcher + `simple_text_apply_v1`,
+  reached from `simple_vector_apply_v1`).
+- Runtime: `runtime_simd_{utf8,case,search}.c` hold scalar code only; first
+  use admits the provider once (path policy and SHA-256 pin as
+  `provider_loader.spl`, re-hash after open, interface + ABI digest + text caps,
+  level > 0, known-answer self-test), then routes spans >= 64 bytes.
+  `SIMPLE_VECTOR_PROVIDER_PATH` / `_SHA256` (or the build-time
+  `SIMPLE_VECTOR_PROVIDER_DEFAULT_*` pair) configure it;
+  `simd_text_provider_level()` / `_status()` report the route.
+- Gate: `check-vector-provider-levels.shs run` adds per-cap text parity
+  (`vector_text_level_parity.c`) and `check-text-provider-route.shs`
+  (baseline-only runtime objects, absent / refused / admitted routes).
+- Deployment: the bootstrap builds the host DSO first
+  (`scripts/bootstrap/build-vector-provider.shs`, byte-identical to the gated
+  uncapped DSO) and passes its SHA-256 to Stage 4 as
+  `SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256`; `runtime_compiler.spl` and the
+  seed's core-C bundle bake it into `runtime_simd_utf8.c` only
+  (`-DSIMPLE_VECTOR_PROVIDER_PIN_HEX`, folded into the object-cache keys).
+  The DLL is deployed content-addressed as
+  `<exe_dir>/providers/simple_vector_provider_levelled-<pin16>.<ext>` (the
+  one sub-directory class the deploy transaction admits; Windows also
+  publishes it beside `bin/simple.exe`). A deploy without it is refused
+  unless `SIMPLE_BOOTSTRAP_ALLOW_SCALAR_TEXT=1`. Without a pin the runtime
+  runs the scalar baseline (about 2.8x slower than old AVX2 on 1 MiB ASCII
+  validate). aarch64/RVV text objects are compile-gated only on Windows
+  hosts.
+
+**Stage 2 — crypto (planned).** AES-NI, SHA-NI and PCLMUL (GHASH, CRC32) from
+`runtime_simd_dispatch.c` / `g_simd_crypto` become provider opcodes behind a
+separate capability block; constant-time scalar stays static.
+
+**Stage 3 — ML-KEM NTT and parser lexical mask (planned).** The AVX2/NEON/RVV
+NTT batch (`rt_mlkem_ntt_simd_*`) and `rt_parser_*mask_call_u8x32` move the
+same way; the parser mask needs a batched wire op so per-token calls do not
+pay the ABI cost.

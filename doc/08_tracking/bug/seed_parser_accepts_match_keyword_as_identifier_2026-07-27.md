@@ -4,7 +4,11 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** open
+**Status:** FIXED (triage 2026-11-11, lane boot22; fix landed with PR #7597
+`9e7e526edb` — verified ancestor of HEAD) — the seed parser's `parse_val` now
+rejects `val match` bindings with `reserved keyword 'match' cannot be used as a
+val binding name`; verified live on the tracked seed binary; zero fatal-class
+instances in the tree; `var match` remains G33-sanctioned on both parsers.
 **Found:** 2026-07-27 (Simple RISC-V hardening campaign, Lane H bootstrap redeploy)
 **Area:** Rust seed parser (`src/compiler_rust/`) vs pure-Simple parser
 **Severity:** medium — lets invalid code land, then fails the full-CLI stage of every bootstrap
@@ -71,3 +75,33 @@ git only.
 - Same family (seed accepts / self-hosted rejects):
   `seed_parser_rejects_multiline_if_expression_chain_2026-07-27.md` (inverse direction)
 
+
+
+## 2026-11-11 P3-boot22 triage — FIXED (header flip)
+
+Row 7 of lane boot22 (bootstrap table, after #40). Re-verified FRESH at this
+lane's base (`79d5af6723f6`, tracked seed build `46fe8f6b6def`):
+
+- **Fix present in source.** `parse_val`
+  (`src/compiler_rust/parser/src/stmt_parsing/var_decl.rs:51-62`) opens with an
+  explicit `self.check(&TokenKind::Match)` rejection emitting exactly
+  `reserved keyword 'match' cannot be used as a val binding name`, with an
+  in-code comment citing the self-hosted divergence this record filed. It
+  landed with PR #7597 (`9e7e7a526edb`), confirmed an ancestor of HEAD.
+- **Verified live on the tracked seed binary.** Probe
+  (`bin/simple.exe run` on `val match = 1; print(match)`): seed rejects with
+  the reserved-keyword parse error — the Stage-4 detonator class can no longer
+  be admitted by the seed. (The expression-context
+  `TokenKind::Match => parse_keyword_identifier("match")` arm remains, but the
+  val-binding path — the filed divergence — now rejects first.)
+- **Tree census.** `git grep -E "(val|var) match *="` over src/ and test/:
+  zero `val match =` instances; the surviving `var match = true` uses
+  (e.g. `src/lib/blink/css_parser/selector.spl:95`) are the G33-sanctioned
+  form both parsers accept — the self-hosted front end documents the same at
+  `src/compiler/10.frontend/core/parser_stmts.spl:1022` ("G33: `match` may be
+  an identifier"). The two parsers now agree on both forms.
+- The interim grep guard (`scripts/check/check-keyword-identifier-bindings.shs`)
+  remains in place as the cheap tripwire.
+
+Residual: none for this row. A full Stage-1..4 bootstrap re-proof is the
+standing bootstrap-lane grant, not part of this row's acceptance.

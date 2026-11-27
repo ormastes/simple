@@ -1,0 +1,61 @@
+# @tag: unit, text, sfnt
+# @cover src/lib/common/encoding/sfnt_glyf.spl 1%
+#
+# The glyph entry points reuse the last parsed font directory and glyph
+# outlines while the blob stays byte-equal. A different font, and a blob of
+# the same length with one byte changed, must parse afresh: the second render
+# of the first font must equal its first, and the other blobs must differ.
+
+use std.spec.*
+use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, sfnt_glyf_parse_offset_table,
+    sfnt_glyf_find_table, sfnt_render_glyph_lcd, sfnt_measure_glyph_into}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+
+val FONT_A: text = "assets/fonts/google-fonts/ofl/nunito/Nunito[wght].ttf"
+val FONT_B: text = "assets/fonts/google-fonts/ofl/caveat/Caveat[wght].ttf"
+
+fn lcd_rgb(blob: [u8]) -> [u8]:
+    if val Some(g) = sfnt_render_glyph_lcd(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 103, 16, 1):
+        return g.slg_rgb
+    []
+
+fn measure(blob: [u8]) -> [i64]:
+    var meta: [i64] = [0; 20]
+    sfnt_measure_glyph_into(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 103, 16, meta)
+    meta
+
+# Font A with unitsPerEm (head + 18) raised by 100: same length, same table
+# directory, a different glyph scale.
+fn edited_upem(blob: [u8]) -> [u8]:
+    var out = blob
+    if val Some(font) = sfnt_glyf_parse_offset_table(blob):
+        if val Some(head) = sfnt_glyf_find_table(font, 1751474532):
+            val at = head.offset as i64 + 18
+            val upem = ((out[at] as i64) << 8) | (out[at + 1] as i64)
+            val raised = upem + 100
+            out[at] = ((raised >> 8) & 255) as u8
+            out[at + 1] = (raised & 255) as u8
+    out
+
+describe "sfnt glyph parse memo":
+    it "serves only a byte-equal blob":
+        val a = file_read_bytes(FONT_A)
+        val b = file_read_bytes(FONT_B)
+        val a_edit = edited_upem(a)
+        expect(a_edit.len()).to_equal(a.len())
+        expect(a_edit == a).to_equal(false)
+        val rgb_a1 = lcd_rgb(a)
+        val meta_a1 = measure(a)
+        val rgb_edit = lcd_rgb(a_edit)
+        val meta_edit = measure(a_edit)
+        val rgb_b = lcd_rgb(b)
+        val meta_b = measure(b)
+        val rgb_a2 = lcd_rgb(a)
+        val meta_a2 = measure(a)
+        expect(rgb_a1.len() > 0).to_equal(true)
+        expect(rgb_a2 == rgb_a1).to_equal(true)
+        expect(meta_a2 == meta_a1).to_equal(true)
+        expect(rgb_edit == rgb_a1).to_equal(false)
+        expect(meta_edit == meta_a1).to_equal(false)
+        expect(rgb_b == rgb_a1).to_equal(false)
+        expect(meta_b == meta_a1).to_equal(false)

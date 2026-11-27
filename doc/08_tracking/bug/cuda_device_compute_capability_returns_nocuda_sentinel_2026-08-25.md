@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN — `test/03_system/acceptance/gpu_cuda_programming_acceptance_spec.spl` is
+**Status (2026-11-22): FIXED — see the 2026-11-22 section at the end.** Original status: OPEN — LIVE, re-confirmed in source 2026-11-11 (lane ne5) — `test/03_system/acceptance/gpu_cuda_programming_acceptance_spec.spl` is
 deliberately RED on this (1 of 5 examples).
 **Binary:** deployed seed `bin/release/x86_64-unknown-linux-gnu/simple`. **Host:** 2 NVIDIA GPUs.
 
@@ -39,3 +39,113 @@ SIMPLE_CUDA_TEST=1 bin/simple test test/03_system/acceptance/gpu_cuda_programmin
 → `Results: 5 total, 4 passed, 1 failed`, failing example
 `discovers the machine's GPUs and what they are, with no CUDA toolkit installed`.
 
+
+## 2026-11-11 addendum (lane ne5)
+
+**Status: LIVE — confirmed in current source; keep OPEN.**
+
+Triage on release/1.0.0 tip:
+
+- `src/compiler_rust/compiler/src/interpreter_extern/gpu.rs:1382-1392`
+  (`rt_cuda_device_compute_capability_fn`): the `#[cfg(not(feature = "cuda"))]`
+  branch STILL returns the `-3` sentinel with no dlopen fallback, while its
+  siblings in the same file (`rt_cuda_device_get_fn`, `rt_cuda_device_name_fn`,
+  `rt_cuda_device_identity_fn`) all reach the real driver through
+  `get_cuda_dl()`. Exactly the gap named in this doc's "Where to look".
+- `get_cuda_dl()` (`gpu.rs:505`) and the `CudaFns` table (`gpu.rs:520`) already
+  carry the capability symbol, so the sibling-shaped fix is a few lines.
+- The pure-Simple runtime side lists `rt_cuda_device_compute_capability` in
+  its required CUDA-provider dynload table (`src/runtime/runtime_dynload.c:200`)
+  and `src/lib/gc_async_mut/cuda/mod.spl` re-exports it — the gap is the seed
+  interpreter's not-built-with-cuda path, which is what a deployed seed
+  answers.
+
+Not fixed here: this lane is barred from cargo/rustc and entry-closure native
+builds, so a `gpu.rs` edit cannot be rebuilt into the tracked seed binary, and
+this Windows host has no NVIDIA device to run the acceptance spec against in
+any case. Grant: add the `get_cuda_dl()` fallback for `device_compute_capability`
+in `gpu.rs` (mirror the sibling entries, mapping a failing call to a negative
+driver rc rather than the `-3` build-sentinel so the sentinel keeps meaning
+"built without cuda"), rebuild/redeploy the seed, then verify with
+`SIMPLE_CUDA_TEST=1 bin/simple test test/03_system/acceptance/gpu_cuda_programming_acceptance_spec.spl`
+on a CUDA host (expect 5/5).
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne5 source-checked: gpu.rs:1382-1392 cfg(not(cuda)) branch still returns the -3 sentinel with no get_cuda_dl() fallback while sibling fns dlopen. Sibling-shaped few-line fix, but seed-Rust-only: cannot rebuild (no cargo/rustc) or verify (no NVIDIA device) on this host; grant recorded.
+
+
+---
+
+## 2026-11-13 triage + fix (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**FIXED — dlopen fallback implemented in the seed interpreter extern (this lane).**
+
+Root cause: `rt_cuda_device_compute_capability_fn`
+(`src/compiler_rust/compiler/src/interpreter_extern/gpu.rs`) returned the `-3`
+build-sentinel from its `#[cfg(not(feature = "cuda"))]` arm unconditionally, while every
+sibling device extern in the same file reaches the real driver through `get_cuda_dl()`.
+
+Fix (mirrors the sibling entries and the grant recorded by the 2026-11-11 ne5 addendum):
+
+- New `CuDeviceGetAttribute` fn type + `CudaFns.device_get_attribute` loaded with
+  `sym_opt!("cuDeviceGetAttribute")` (optional, so a driver without the symbol does not
+  invalidate the whole table — same pattern as the events/streams arms).
+- The `cfg(not(feature = "cuda"))` arm now queries the driver via attributes
+  75 (`COMPUTE_CAPABILITY_MAJOR`) / 76 (`MINOR`) and returns the packed capability
+  (`major*10+minor`, e.g. 86 for sm_86) on success; on a failing driver call it returns the
+  driver's negative rc; with no driver / no symbol it returns `-1`. The `-3` sentinel is no
+  longer reachable on a host where the driver loads, so it keeps meaning "built without
+  cuda" only where no driver path exists.
+
+Build verification (this lane): `CC=<llvm-mingw clang> cargo +nightly-2026-09-15-x86_64-pc-windows-gnu
+build --profile bootstrap -p simple-driver` → `Finished 'bootstrap' profile [optimized] in 8m 31s`,
+no compiler errors (two pre-existing manifest warnings only).
+
+**Seed-refresh requirement:** the tracked seed `bin/simple.exe` must be rebuilt/redeployed from
+this source before the acceptance spec passes on a CUDA host. Runtime verification
+(`SIMPLE_CUDA_TEST=1 bin/simple test test/03_system/acceptance/gpu_cuda_programming_acceptance_spec.spl`,
+expect 5/5) needs an NVIDIA CUDA host — none is reachable from this Windows lane, and the
+rebuilt seed binary was NOT committed (per lane rules). The spec's "KNOWN RED" step text stays
+until the refreshed seed is deployed and the spec is re-run.
+
+---
+
+## 2026-11-22 verification + follow-up fix (work/cuda-runtime-bugs, base release/1.0.0 `3c2e4556b6d`)
+
+**Status: FIXED (seed interpreter path, runtime-verified on a live CUDA host).**
+
+Host: Linux aarch64, NVIDIA GB10 (sm_121, `nvidia-smi` compute_cap 12.1), driver at `/usr/local/cuda`.
+
+1. The `-3`-on-a-working-host symptom is gone. Fixture (`use std.cuda.{...}`; init, count,
+   name, capability of device 0), `SIMPLE_EXECUTION_MODE=interpret <seed> run main.spl`:
+   - seed `seed-tip-20261115/simple` (sha256 `5ef615e2b60a80fc`): `PROBE avail=true init=0 count=1` /
+     `PROBE name0=[NVIDIA GB10] cc0=121`.
+2. **The 2026-11-13 fallback had a silent-wrong-value hole.** It returned the raw CUresult on a
+   failing driver call, and CUresult codes are POSITIVE (3 = NOT_INITIALIZED, 101 =
+   INVALID_DEVICE), so a failure read as a plausible capability and passed the spec's `> 0`.
+   Failing-first fixture (`std.nogc_sync_mut.cuda.mod`; capability before `cuda_init`, then of
+   device 64), same seed `5ef615e2b60a80fc`:
+   `CC pre_init=3` / `CC init=0 count=1 dev0=121 dev64=101` / `FAIL failing driver call reported as positive capability`.
+3. Fix: `src/compiler_rust/compiler/src/interpreter_extern/gpu.rs` returns `-(CUresult)` on a
+   failing attribute query; the `cuda`-feature provider twin
+   (`src/compiler_rust/runtime/src/cuda_runtime.rs` `rt_cuda_device_compute_capability`) now checks
+   both `cuDeviceGetAttribute` results and returns `-(CUresult)` instead of a zero-initialised
+   `major*10+minor`. `cargo check -p simple-runtime --features cuda` clean.
+4. After, debug seed built from this worktree (`cargo build --bin simple -j4`, sha256
+   `cdc523be583e4c10`): `CC pre_init=-3` / `CC init=0 count=1 dev0=121 dev64=-101` / `OK`; through
+   `std.cuda` (the import the acceptance spec uses) `cuda_device_compute_capability(count + 63)` = `-101`; the
+   std.cuda fixture still prints `cc0=121`.
+
+Notes:
+- `-(NOT_INITIALIZED)` is numerically `-3`, the same value as the "built without cuda" sentinel;
+  both mean "no usable capability" and both are <= 0, which is the contract callers rely on.
+- `test/03_system/acceptance/gpu_cuda_programming_acceptance_spec.spl`: KNOWN RED step removed;
+  the example now also asserts a no-such-device query is `<= 0`. Not run: no full-CLI `simple test`
+  binary exists on this host.
+- Native lane is a different defect: a Stage 2 (integ25, sha256 `ef46f0d2ab4274c4`) native build of
+  the same query fails to LINK (`undefined symbol: rt_cuda_device_compute_capability`,
+  `rt_cuda_device_get`, `rt_cuda_get_error_string`) — filed as
+  `native_c_runtime_missing_cuda_provider_forwarders_2026-11-22.md`.
+- The seed's compiled `run` mode (no `SIMPLE_EXECUTION_MODE=interpret`) resolves CUDA externs to the
+  runtime's no-`cuda`-feature stubs and honestly reports `init=3 count=0` (no fake capability).

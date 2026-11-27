@@ -1,0 +1,133 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+## Purpose and audience
+Pins the Phase 3 class-5 producer: a closure module calls `env_get("KEY")`
+with no `env_get` import and no local declaration. The name binds through a
+leaked (sibling or glob) route rather than a proven provider, MIR records
+MirCallOrigin.Unknown, and native codegen aborts the whole serial build with
+`MIR call target lacks proven source/runtime/foreign origin: callee=env_get`.
+Observed 2026-11-13 on the run-21 serial bootstrap_main.spl build: SIGABRT at
+codegen of compiler.driver.driver_pipeline_lowering (ICE breadcrumb), after
+1h23m. compiler.backend.runtime_compiler carries the same shape and had not
+reached codegen yet. Every literal-key env read in these modules must go
+through an imported reader. The replacement readers must answer exactly
+what the old bare call answered (`env_get(K) ?? ""`, which in an unimported
+module binds the interpreter builtin): "" for an unset key, the value for a
+set one.
+Audience: compiler engineers maintaining the driver and backend.
+"""
+
+# @tag: unit, compiler, driver
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{file_read, env_get_nullable, env_set}
+use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
+
+fn ueg_use_lines(source: text) -> [text]:
+    var out: [text] = []
+    var pending = ""
+    var open = false
+    for line in source.split("\n"):
+        val trimmed = line.trim()
+        if open:
+            pending = pending + " " + trimmed
+            if trimmed.contains("}"):
+                out.push(pending)
+                open = false
+        elif trimmed.starts_with("use ") or trimmed.starts_with("pub use "):
+            if trimmed.contains("\{") and not trimmed.contains("}"):
+                pending = trimmed
+                open = true
+            else:
+                out.push(trimmed)
+    out
+
+fn ueg_imports_env_get(source: text) -> bool:
+    for line in ueg_use_lines(source):
+        if line.contains("\{env_get,") or line.contains("\{env_get}") or
+                line.contains(" env_get,") or line.contains(" env_get}") or
+                line.ends_with(".env_get"):
+            return true
+    false
+
+fn ueg_declares_env_get(source: text) -> bool:
+    for line in source.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("fn env_get(") or trimmed.starts_with("pub fn env_get(") or
+                trimmed.starts_with("extern fn env_get("):
+            return true
+    false
+
+# Count `env_get("` calls that are a bare name (not `x.env_get(` and not a
+# longer identifier such as `sosix_env_get_nullable("`), outside comments.
+fn ueg_bare_literal_calls(source: text) -> i64:
+    var count = 0
+    for line in source.split("\n"):
+        if line.trim().starts_with("#"):
+            continue
+        var rest = line
+        var at = rest.index_of("env_get(\"")
+        while at >= 0:
+            val before = if at == 0: "" else: rest.substring(at - 1, at)
+            val ident_char = before != "" and (before == "_" or before == "." or
+                (before >= "a" and before <= "z") or (before >= "A" and before <= "Z") or
+                (before >= "0" and before <= "9"))
+            if not ident_char:
+                count = count + 1
+            rest = rest.substring(at + 9)
+            at = rest.index_of("env_get(\"")
+    count
+
+fn ueg_unproven_env_get_calls(path: text) -> i64:
+    val source = file_read(path)
+    if ueg_imports_env_get(source) or ueg_declares_env_get(source):
+        return 0
+    ueg_bare_literal_calls(source)
+
+describe "literal-key env reads in closure modules":
+    it "driver_pipeline_lowering reads env through an imported reader":
+        step("No bare env_get(\"KEY\") without an env_get import")
+        expect(ueg_unproven_env_get_calls("src/compiler/80.driver/driver_pipeline_lowering.spl")).to_equal(0)
+
+    it "runtime_compiler reads env through an imported reader":
+        step("No bare env_get(\"KEY\") without an env_get import")
+        expect(ueg_unproven_env_get_calls("src/compiler/70.backend/backend/runtime_compiler.spl")).to_equal(0)
+
+    it "the scanner sees a bare call and honours an import":
+        step("Fixture texts")
+        expect(ueg_bare_literal_calls("    val a = env_get(\"K\") ?? \"\"\n")).to_equal(1)
+        expect(ueg_bare_literal_calls("    val a = sosix_env_get_nullable(\"K\") ?? \"\"\n")).to_equal(0)
+        expect(ueg_bare_literal_calls("    # env_get(\"K\")\n")).to_equal(0)
+        expect(ueg_imports_env_get("use std.nogc_sync_mut.io.env_ops.\{env_get}\n")).to_equal(true)
+        expect(ueg_imports_env_get("use std.io_runtime.\{env_get_nullable}\n")).to_equal(false)
+
+# The old call shape, kept verbatim: bare `env_get` with no import binds the
+# interpreter builtin here, the binding the patched modules used to reach.
+fn ueg_old_read(key: text) -> text:
+    env_get(key) ?? ""
+
+fn ueg_sosix_read(key: text) -> text:
+    sosix_env_get_nullable(key) ?? ""
+
+fn ueg_runtime_read(key: text) -> text:
+    env_get_nullable(key) ?? ""
+
+describe "replacement env readers match the old bare call":
+    it "an unset key reads as empty through every reader":
+        step("Key never set in this process")
+        val key = "SIMPLE_UEG_SPEC_UNSET_7F3A"
+        expect(ueg_old_read(key)).to_equal("")
+        expect(ueg_sosix_read(key)).to_equal(ueg_old_read(key))
+        expect(ueg_runtime_read(key)).to_equal(ueg_old_read(key))
+
+    it "a set key reads its value through every reader":
+        step("Set the key, then read it three ways")
+        val key = "SIMPLE_UEG_SPEC_SET_7F3A"
+        expect(env_set(key, "1")).to_equal(true)
+        expect(ueg_old_read(key)).to_equal("1")
+        expect(ueg_sosix_read(key)).to_equal(ueg_old_read(key))
+        expect(ueg_runtime_read(key)).to_equal(ueg_old_read(key))
+        expect((ueg_sosix_read(key)) == "1").to_equal(true)

@@ -1,4 +1,5 @@
 use compiler.mir.mir_enum_semantic_types.{MirEnumDeclarationIdentityV1}
+use compiler.mir.mir_target_hir_symbol_writes.{MirSymbolWriteLedger}
 use compiler.mir.enum_semantic_capture_types_v1.{MirEnumPendingMatchV1}
 use compiler.hir.hir_definitions.{HirParam}
 use compiler.mir.verification_call_manifest_finalizer.{ResolvedDirectCallCaptureV1}
@@ -14,6 +15,7 @@ use compiler.mir.nominal_owner_diagnostics.{mir_nominal_profile_take_receipt}
 use compiler.mir.mir_data.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
+use compiler.hir.return_type_interface_v1.{ReturnTypeInterfaceTable}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.mir_target_context.{MirTargetContext}
 use compiler.common.native_layout_trace.{MirExternalLayoutTraceV1}
@@ -31,11 +33,32 @@ struct MirAdaptedFileWriteBytesExternReceiptV1:
     link_name: text
     signature: MirSignature
 
+struct MirMutRefArgWriteback:
+    slot: LocalId
+    inner_mir_type: MirType
+    place_kind: i64        # 0 = none, 1 = var/named_var, 2 = field, 3 = runtime_array_index, 4 = runtime_dict_index, 5 = tuple/raw_gep_index
+    symbol_id: i64
+    base_local: LocalId
+    index_local: LocalId
+    field_idx: i64
+    target_span: Span
+
+struct MirMutRefArgPrepared:
+    matched: bool
+    slot: LocalId
+    inner_mir_type: MirType
+    operand: MirOperand
+    has_writeback: bool
+    writeback: MirMutRefArgWriteback
+
+struct MirMethodCallOperands:
+    operands: [MirOperand]
+    writebacks: [MirMutRefArgWriteback]
+
 struct MirLowering:
     """Lowers HIR to MIR."""
     builder: MirBuilder
     symbols: SymbolTable
-    local_map: Dict<i64, LocalId>
     # Native-safe authoritative bindings. Stage4 cannot reliably persist
     # mutations to a Dict stored inside MirLowering.
     local_symbol_ids: [i64]
@@ -213,6 +236,11 @@ struct MirLowering:
     struct_field_over_type_param: Dict<text, [bool]>
     generic_instance_field_types: Dict<i64, [MirType]>
     generic_instance_field_struct_names: Dict<i64, [text]>
+    # Call-site record identity of an erased callback binder: `T` ->
+    # struct layout key, bound from the sibling arguments of the call that
+    # passes a lambda into a `fn(T, ..)` slot (generics = one erased body:
+    # the generic callee stays erased, the lambda is the call site's own).
+    erased_callback_record_bindings: Dict<text, text>
     # Struct NAME -> ordered field representation markers. `"str"` marks a
     # declared `text` field whose projected MIR local must remain
     # Opaque("str"); leaving it as the generic i64 fallback breaks native
@@ -262,6 +290,9 @@ struct MirLowering:
     # Exact provider-owned Err record layout on a result or its extracted value.
     # Empty entries are invalidated/conflicting proof and must not fall back.
     optional_record_owners: Dict<i64, text>
+    # Exact record declaration of a `Some(<record>)` construction. Join-only
+    # agreement witness: never establishes an owner on its own.
+    optional_record_literal_owners: Dict<i64, text>
     result_err_record_owners: Dict<i64, text>
     # Semantic field snapshots; only Err-record admission uses this policy.
     result_err_layout_types: Dict<text, text>
@@ -281,6 +312,13 @@ struct MirLowering:
     # (register_owner_method); the unresolved-receiver dispatch reports them
     # instead of silently calling whichever module registered last.
     struct_method_ambiguous: Dict<text, bool>
+    # "{owner}::{method}" -> true when registered by an inherent impl or inline
+    # method (takes precedence over trait impls), false when seen only from a
+    # trait impl (`impl Trait for Struct`).
+    struct_inherent_method_syms: Dict<text, bool>
+    # "{owner}::{method}" -> true when multiple distinct trait impls declare
+    # the same method on `owner` without an inherent override.
+    struct_trait_method_ambiguous: Dict<text, bool>
     # "{struct NAME}::{method name}" -> the method's declared return type's
     # struct NAME ("" when not a known Named struct). Methchain lane fix: a
     # chained `obj.foo().bar()` needs to know foo()'s RESULT is a Pt so the
@@ -321,8 +359,13 @@ struct MirLowering:
     # Running count of trait-object calls this lowering DEVIRTUALIZED (direct
     # call to the single implementor). Never reset; the driver reads the delta
     # per module and refuses to archive a module whose delta is non-zero
-    # (post_mono_archive_admission_v1, E-MONO-038).
     devirtualized_calls: i64 = 0
+    # Registration counters, never reset (bug
+    # mir_in_process_per_consumer_provider_rebuild_quadratic_2026-10-20):
+    # whole-closure walks of provider impl tables, and provider impl methods
+    # relocated into a consumer table. Read by the MIR provider specs.
+    trait_impl_provider_index_builds: i64 = 0
+    trait_impl_provider_relocations: i64 = 0
     # Closure HIR modules consulted ONLY for trait-implementor registration
     # when lower_module receives no providers (the stage3 bootstrap-fixed
     # path lowers bootstrap_main alone; passing it full providers would also
@@ -360,6 +403,11 @@ struct MirLowering:
     enum_variant_payload_names: Dict<text, [text]>
     enum_variant_payload_kind: Dict<text, text>
     generic_enum_constructor_owners: Dict<text, bool>
+    # Declared type-parameter NAMES of each enum (bare and runtime_name
+    # keys), in declaration order, so a generic payload slot `T` can be
+    # substituted with the match subject's type argument (bug
+    # stage2_poll_payload_typeparam_match_2026-11-01).
+    enum_type_param_names: Dict<text, [text]>
     # "{enum}::{variant}::{slot}" -> true for tuple-payload slots observed
     # TEXT at the construction site (multi-field retag, agent_enumslots).
     enum_tuple_text_slots: Dict<text, bool>
@@ -412,14 +460,54 @@ struct MirLowering:
     # handle; this marker prevents later text lowering from treating that handle
     # as an ordinary numeric scalar and rendering its address again.
     tagged_text_locals: Dict<i64, bool>
+    # bug=native_dict_get_text_if_val_double_decode_2026-11-06: locals holding
+    # a `d.get(k)` text result that lower_dict_runtime_read ALREADY decoded
+    # (rt_interp_cstr on a hit, flat nil 3 on a miss). HIR still says
+    # Optional(Str), so a present-edge `if val` must not decode them again.
+    decoded_text_option_locals: Dict<i64, bool>
     # MIR locals that hold the canonical Option enum handle (enum id 1).
     # Kept separate from runtime_value_locals so other enum/boxed handles are
     # never mistaken for Option and an existing Option is not double-wrapped.
     # Only ExistsCheck-derived payload-or-nil collections may narrow on a present edge.
     exists_collection_locals: Dict<i64, bool>
+    # ExistsCheck (`.?`) results over a float/bool payload, and the if-val
+    # binders copied from them: a raw payload-or-nil word in an i64 slot.
+    # Only these may be nil despite a scalar HIR type; nil compares on them
+    # must stay runtime compares.
+    exists_scalar_word_locals: Dict<i64, bool>
+    # Payload-or-nil WORD local -> the Bool local that proves its presence
+    # (`rt_is_some` on the `.?` subject, the Result tag of `.ok`/`.err`, the
+    # dict-miss test of `d.get(k)`), and the if-val binders copied from them.
+    # A scalar payload word cannot answer presence by value (a present 3 is
+    # the nil word), so `x != nil` on such a word reads this bit instead.
+    # doc/08_tracking/bug/native_if_val_presence_test_dropped_2026-11-15.md
+    presence_word_locals: Dict<i64, i64>
+    # Value-position builtin `None` constructions: an absence witness for
+    # the T? join of value-position match/if arms (bug
+    # enum_payload_type_mismatch_untyped_option_match_2026-10-24).
+    option_none_locals: Dict<i64, bool>
+    # Context-free `[]` literals: they adopt the Array type of the other
+    # arms in a value-position join (bug
+    # enum_payload_type_mismatch_untyped_match_value_2026-10-24).
+    empty_array_lit_locals: Dict<i64, bool>
     option_value_locals: Dict<i64, bool>
+    # Generic trait dispatch results whose `T?` was substituted from the
+    # receiver instance: the payload is the impl's raw word, never erased-T
+    # tagged, so `if val` must not re-tag it. Per function.
+    native_trait_concrete_option_locals: Dict<i64, bool> = {}
     # Raw nil locals (0) that become tagged RuntimeValue nil (3) at collection boundaries.
     nil_locals: Dict<i64, bool>
+    # Locals produced by an untyped `Ok(..)` / `Err(..)` constructor (no
+    # retained Result HIR type). Lets an if/match merge adopt the Result
+    # type of its typed arms (remember_merged_arm_identity).
+    untyped_result_ctor_locals: Dict<i64, bool>
+    # Untyped `Ok(p)` / `Err(p)` constructor local -> its payload's witnessed
+    # HIR type (retained local type, expression type, declared struct field
+    # type, or a native text word). An if/elif join whose every arm is such a
+    # constructor owns `Result<ok, err>` from these
+    # (remember_all_untyped_result_ctor_join).
+    untyped_ok_ctor_payload_types: Dict<i64, HirType>
+    untyped_err_ctor_payload_types: Dict<i64, HirType>
     # Enum NAME -> ordered variant names. The variant's index is its runtime
     # discriminant (rt_enum_new / rt_enum_check_discriminant). Name-keyed for the
     # same symbol_id_value(-1) interpreter landmine as struct_field_order.
@@ -506,6 +594,14 @@ struct MirLowering:
     # lowered functions, which silently skipped the coercion. lower_function
     # has fn_.return_type in hand, so it records the answer here instead.
     current_fn_returns_bool: bool
+    # True while lowering a method body. A method of a generic class takes its
+    # `T` arguments plain (untyped symbol), a free generic fn takes them
+    # encoded; a `Dict<K, T>` read follows the body's convention.
+    current_fn_is_method: bool
+    # Declaration-owned binders of the active callable and exact method owner.
+    # Scoped across nested function lowering; RTI never discovers them from
+    # the explicit argument vector it is trying to validate.
+    current_rti_consumer_params: [text] = []
     # Compilation-wide identity for named types. HIR SymbolIds are local to
     # each module, so cross-module Struct/Enum references need one shared key.
     canonical_type_symbols: Dict<text, i64>
@@ -514,7 +610,6 @@ struct MirLowering:
     canonical_type_symbol_names: Dict<i64, text> = {}
     # Counts only legacy-map fallback rows, for differential work evidence.
     canonical_type_reverse_scan_rows: i64 = 0
-    next_canonical_type_symbol: i64
     # mutglobal2 lane (module-level `var`/`val` mutation end-to-end, see
     # scratchpad/mutglobal_plan.md + scratchpad/mutglobal2 report). Module
     # symbol id -> true, for EVERY module-level binding (`var` OR `val`).
@@ -589,6 +684,9 @@ struct MirLowering:
     # "mutable array global has no backing static" diagnostic is emitted once
     # per symbol instead of once per reference site.
     array_global_mutation_warned: Dict<i64, bool>
+    # P6 TargetHIR task overlay ledger for the eight symbol-writer rows
+    # (mir_target_hir_symbol_writes.spl); legacy mode records nothing.
+    symbol_write_ledger: MirSymbolWriteLedger
     target_context: MirTargetContext
     # Compiler-owned source compilation must not inherit bootstrap shortcuts
     # from the process environment. Legacy driver entrypoints leave this true.
@@ -615,6 +713,14 @@ struct MirLowering:
     # Complete text values at Simple declarations; C declarations retain the
     # existing pointer adaptation. Keys use the same canonical owner as links.
     callable_text_value_abi: Dict<text, bool> = {}
+    # Named-call parameter rows for providers held only as module surfaces
+    # (PM3 unit lane). Key: bare callable name and "{owner}.{name}"; value:
+    # "name1,name2|101" (param names, then one default flag char per param).
+    # HIR-prescan registry rows stay authoritative: these are consulted only
+    # when bootstrap_fn_param_defaults_lookup misses. Ambiguous keys (two
+    # surface providers, different shapes) refuse in surface_fn_param_ambig_v1.
+    surface_fn_param_rows_v1: Dict<text, text> = {}
+    surface_fn_param_ambig_v1: Dict<text, bool> = {}
     # is_entry_module of the lower_module call in progress. Threaded to the
     # per-function MIR naming fallback instead of relying on its default
     # argument (see function_lowering.spl).
@@ -622,6 +728,8 @@ struct MirLowering:
     # Reset at each module boundary; authority comes from local HirFunction
     # extern declarations, never a bare name or function-shaped value.
     exact_extern_signatures: Dict<i64, MirSignature> = {}
+    # Consumer-local symbol -> serialized declaration admission (0 is raw).
+    runtime_value_extern_abis: Dict<i64, i64> = {}
     # Exact semantic runtime facade declarations that use an adapted tagged
     # ABI. Kept separate from exact_extern_signatures, whose entries describe
     # raw fixed C ABI prototypes.
@@ -639,6 +747,13 @@ struct MirLowering:
     # SIMPLE_MIR_VERIFY_LEVELS resolved once per lowering (id -> level).
     mir_advisory_levels: Dict<text, text> = {}
     mir_advisory_levels_loaded: bool = false
+    # E-MATCH-NONEXHAUSTIVE-VALUE (35.semantics/value_match_exhaustiveness):
+    # mode ("" = not yet resolved), statement-position match keys (scrutinee
+    # span) and already-reported keys. Accumulated per lowering; keys carry
+    # file:line:col so they never collide across functions.
+    vm_mode: text = ""
+    vm_stmt_match_keys: Dict<text, bool> = {}
+    vm_reported: Dict<text, bool> = {}
     # 3a guard-count invariant (lower_match_case): guard branches the match
     # being lowered must emit / has emitted. Saved and restored around nested
     # matches. Level: advisory id E-MIR-MATCH-GUARD.
@@ -649,7 +764,7 @@ struct MirLowering:
     lambda_scan_loop_depth: i64 = 0
     # Only installed by the complete final-archive consumer, never inferred
     # from environment labels or a partial module graph.
-    declaration_repository: MirHirDeclarationRepositoryV1? = nil
+    declaration_repository: MirHirDeclarationRepositoryV1? = None
     # ID-free index into the retained body-free declaration repository.
     declaration_enum_provider_keys: Dict<text, text> = {}
     declaration_enum_positions: Dict<text, i64> = {}
@@ -676,6 +791,12 @@ struct MirLowering:
     # set with carriers born in the then-current scope). Holds no consumer
     # SymbolIds: rows name provider-table ids only.
     provider_session_names: [text] = []
+    # Immutable ordered-content authority supplied by the closure owner.
+    # provider_session_content_key names the rows currently installed;
+    # provider_session_requested_key names the provider snapshot a caller is
+    # about to lower. An empty requested key never authorizes reuse.
+    provider_session_content_key: text = ""
+    provider_session_requested_key: text = ""
     # Index-aligned with provider_session_names: `mir_provider_function_name`
     # link table per provider, valid only where provider_session_links_ready.
     provider_session_links: [Dict<i64, text>] = []
@@ -685,6 +806,7 @@ struct MirLowering:
     # used to register them. Rows are materialized into struct_method_* only
     # when the consumer looks the key up (provider_method_materialize_v1).
     provider_method_row_keys: Dict<text, [i64]> = {}
+    provider_session_trait_ambiguous_keys: Dict<text, bool> = {}
     provider_method_row_provider: [i64] = []
     # 0 = class-method row (register_provider_class), 1 = owner row
     # (register_provider_method_fields_v1).
@@ -692,6 +814,20 @@ struct MirLowering:
     provider_method_row_symbol: [i64] = []
     provider_method_row_class_symbol: [i64] = []
     provider_method_row_return_type: Dict<i64, HirType> = {}
+    # Current module function symbol id -> declared return type (generic
+    # templates included). Read only by enum_match_expr_type to own bare
+    # match arms over a call whose callee symbol carries no Function type.
+    module_fn_declared_returns: Dict<i64, HirType> = {}
+    module_fn_params: Dict<i64, [HirParam]> = {}
+    # Return-type interface v1 for declared callables, consumed by
+    # enum_match_expr_type before falling back to module_fn_declared_returns.
+    rti: ReturnTypeInterfaceTable = ReturnTypeInterfaceTable.new()
+    # Always-empty stand-in swapped into `rti` while lower_module_transient_scoped
+    # promotes the owner, when the module stored nothing into `rti`: the
+    # accumulated table is then not re-walked once per module.
+    rti_promote_spare_v1: ReturnTypeInterfaceTable = ReturnTypeInterfaceTable.new()
+    # Last RTI error message for enum_match_ambiguity_subject_hint context.
+    rti_last_error: text = ""
     # Per-module demand state: the borrowed driver HIR list, the consumer
     # module name, and the keys already materialized. All three are reset by
     # lower_module and emptied by lower_module_transient_scoped before the
@@ -720,6 +856,27 @@ struct MirLowering:
     provider_layout_row_provider: [i64] = []
     provider_layout_row_kind: [i64] = []
     provider_layout_row_position: [i64] = []
+    # Provider trait-impl index, same session/lifetime (provider-table data
+    # only; built by build_provider_trait_impl_index_v1). Owner rows: trait
+    # identity -> row ids naming a provider index and an owner identity.
+    # Method rows: "{trait}::{owner}::{method}" -> row ids naming a provider
+    # index and the impl method's PROVIDER SymbolId, relocated into a consumer
+    # table only when that consumer looks the key up. Scalar rows: trait
+    # identity -> method rows whose implementing type is a scalar (or a
+    # blanket Self), replayed only for traits the consumer can see.
+    provider_trait_owner_rows: Dict<text, [i64]> = {}
+    provider_trait_owner_row_provider: [i64] = []
+    provider_trait_owner_row_owner: [text] = []
+    provider_trait_method_rows: Dict<text, [i64]> = {}
+    provider_trait_scalar_rows: Dict<text, [i64]> = {}
+    provider_trait_method_row_provider: [i64] = []
+    provider_trait_method_row_symbol: [i64] = []
+    provider_trait_method_row_name: [text] = []
+    provider_trait_method_row_scalar_owner: [text] = []
+    provider_trait_method_row_scalar_settled: [bool] = []
+    # Per-module: true while this consumer reads provider trait rows from
+    # the index above instead of the eager per-consumer walk.
+    provider_trait_demand_active: bool = false
     # Provider enum rows, same session/lifetime: per provider index, the
     # first row and the row count of its `enums.values()` (imported copies
     # included); per row, the scalar facts enum_registration_is_current_v1
@@ -742,11 +899,34 @@ struct MirLowering:
     # become a promotion root (the key caches borrow driver HIR keys).
     # true keeps the eager whole-closure layout pass (A/B and spec checks).
     provider_layouts_eager: bool = false
+    # Raw ids of the provider class/struct/enum/trait copies
+    # relocate_provider_type_symbol defined in the ACTIVE consumer table during
+    # the current module (reset per lower_module_transient_scoped; a lifted
+    # lambda's nested lowerer hands its ids back). Those copies live in
+    # persistent HIR and outlived the module's scope (~955 KiB/module on the
+    # bootstrap_main closure, stage2_compiler_cli_build_mir_shard_share_unbounded
+    # _2026-11-06 item 1). With retract_provider_type_relocations (or
+    # SIMPLE_MIR_RETRACT_PROVIDER_TYPES=1) they are retracted from the table
+    # AFTER the MirModule is promoted and the scope has ended: MIR is
+    # byte-identical by construction (it already holds the ids), and
+    # next_symbol_id is never rewound, so a retracted id can only resolve to
+    # nil, never to another symbol. Opt-in, default off: the post-lowering
+    # reader audit is static (see the bug record); the flip needs a Stage 2 run.
+    provider_type_relocation_journal: [i64] = []
+    retract_provider_type_relocations: bool = false
+    # True only while a scoped lowering that will retract is running, so the
+    # default-off and unscoped paths journal nothing (no per-process growth).
+    journal_provider_type_relocations: bool = false
     provider_layout_demand_active: bool = false
     provider_layout_draining: bool = false
     provider_layout_materialized: Dict<text, bool> = {}
     provider_layout_pending: [text] = []
     provider_layout_consumer_names: Dict<text, bool> = {}
+    # Immutable literal provider constants keyed "<owner>::<name>"
+    # (mir_global_declaration_key); relocate_provider_default inlines them
+    # when a provider field default names one.
+    provider_default_literal_consts_v1: Dict<text, HirExpr> = {}
+    provider_default_literal_owners_v1: Dict<text, bool> = {}
     provider_layout_struct_keys: Dict<i64, [SymbolId]> = {}
     provider_layout_class_keys: Dict<i64, [SymbolId]> = {}
     # Consumer-module ownership policy. Reset on every lower_module call;
@@ -845,6 +1025,21 @@ impl MirLowering:
             probes = probes + 1
         -1
 
+    fn local_is_symbol_bound(local: LocalId) -> bool:
+        """True when some symbol of this function is already bound to `local`.
+        A Let must not alias such a local: the two names would share one slot,
+        so assigning either rebinds the other
+        (stage2_class_var_place_alias_clobbers_source_2026-11-16). Linear in
+        the function's bindings; called only on the record alias path."""
+        if local.id < 0:
+            return false
+        var slot = 0
+        while slot < self.local_symbol_values.len():
+            if self.local_symbol_values[slot].id == local.id:
+                return true
+            slot = slot + 1
+        false
+
     me bind_local(symbol_id: i64, local: LocalId):
         # A default parameter is a fresh invocation binding, not the caller's
         # own parameter even when a recursive call uses the same source ID.
@@ -858,6 +1053,10 @@ impl MirLowering:
             default_frame = default_frame - 1
         if symbol_id < 0 or local.id < 0:
             return
+        # A `var` bound straight to its initializer's local (struct/array
+        # paths) must not keep that local's presence bit.
+        if self.presence_word_locals.contains(local.id) and self.symbol_is_reassignable(symbol_id):
+            self.presence_word_locals[local.id] = -1
         if mir_nominal_profile_take_receipt():
             val binding_name = self.symbols.symbol_name_scalar_raw(symbol_id)
             val binding_owner = self.struct_value_syms.get(local.id) ?? ""
@@ -903,13 +1102,13 @@ impl MirLowering:
         """True when a type parameter occurs anywhere in `ty`, under either
         spelling (`TypeParam`, or `Named` of a symbol `symbols` declares as a
         type parameter)."""
-        if ty == nil:
+        if ty == None:
             return false
         match ty.kind:
             case HirTypeKind.TypeParam(_, _): true
             case HirTypeKind.Named(sym, args):
                 val info = symbols.get_symbol_raw(sym.id)
-                if info != nil and info.kind == SymbolKind.TypeParam:
+                if info != None and info.kind == SymbolKind.TypeParam:
                     return true
                 self.any_hir_type_mentions_type_param(args, symbols)
             case HirTypeKind.Array(elem, _): self.hir_type_mentions_type_param(elem, symbols)
@@ -925,11 +1124,57 @@ impl MirLowering:
             case _: false
 
     fn any_hir_type_mentions_type_param(types: [HirType], symbols: SymbolTable) -> bool:
-        if types == nil:
+        if types == None:
             return false
         for raw in types:
             val t: HirType = raw
             if self.hir_type_mentions_type_param(t, symbols):
+                return true
+        false
+
+    fn hir_type_param_names_into(ty: HirType, symbols: SymbolTable, names: [text]) -> [text]:
+        """`names` plus every type parameter `ty` mentions (either spelling,
+        same walk as hir_type_mentions_type_param), each once, in first
+        occurrence order."""
+        var out: [text] = names
+        match ty.kind:
+            case HirTypeKind.TypeParam(name, _):
+                if not self.text_list_has(out, name):
+                    out = out.push(name)
+            case HirTypeKind.Named(sym, args):
+                var param_name = ""
+                if val present = symbols.get_symbol_raw(sym.id):
+                    if present.kind == SymbolKind.TypeParam:
+                        param_name = present.name
+                if param_name != "":
+                    if not self.text_list_has(out, param_name):
+                        out = out.push(param_name)
+                else:
+                    out = self.hir_type_param_names_into_all(args, symbols, out)
+            case HirTypeKind.Array(elem, _): out = self.hir_type_param_names_into(elem, symbols, out)
+            case HirTypeKind.Slice(elem): out = self.hir_type_param_names_into(elem, symbols, out)
+            case HirTypeKind.Optional(inner): out = self.hir_type_param_names_into(inner, symbols, out)
+            case HirTypeKind.Dict(k, v):
+                out = self.hir_type_param_names_into(v, symbols, self.hir_type_param_names_into(k, symbols, out))
+            case HirTypeKind.Result(ok, err):
+                out = self.hir_type_param_names_into(err, symbols, self.hir_type_param_names_into(ok, symbols, out))
+            case HirTypeKind.Tuple(elems): out = self.hir_type_param_names_into_all(elems, symbols, out)
+            case HirTypeKind.Function(params, ret, _):
+                out = self.hir_type_param_names_into(ret, symbols, self.hir_type_param_names_into_all(params, symbols, out))
+            case _: ()
+        out
+
+    fn hir_type_param_names_into_all(types: [HirType], symbols: SymbolTable, names: [text]) -> [text]:
+        var out: [text] = names
+        for raw in types:
+            val t: HirType = raw
+            out = self.hir_type_param_names_into(t, symbols, out)
+        out
+
+    fn text_list_has(items: [text], name: text) -> bool:
+        for raw in items:
+            val item: text = raw
+            if item == name:
                 return true
         false
 
@@ -980,7 +1225,7 @@ impl MirLowering:
         # Match find_local_hir_type's fail-closed sentinel contract. A raw
         # staged-native zero is not valid HIR metadata and must not be copied
         # into a second local.
-        if source_type == nil or source_type == 0:
+        if source_type == None or source_type == 0:
             return
         val source_state = self.local_hir_type_isolation_states[source_index]
         val source_resource_state = self.local_hir_type_resource_states[source_index]
@@ -1008,11 +1253,11 @@ impl MirLowering:
                 val found_type = self.local_hir_type_values[i]
                 # A staged-native raw-zero sentinel is not a valid HirType and
                 # must never escape as Some(0) to consumers that inspect kind.
-                if found_type == nil or found_type == 0:
-                    return nil
+                if found_type == None or found_type == 0:
+                    return None
                 return Some(found_type)
             i = i - 1
-        nil
+        None
 
     fn local_hir_type_isolation_state(local_id: i64) -> i64:
         """Return scalar isolation state for one MIR local.
@@ -1067,6 +1312,27 @@ impl MirLowering:
     fn is_tagged_text_local(local_id: i64) -> bool:
         self.tagged_text_locals.contains(local_id)
 
+    me mark_decoded_text_option_local(local_id: i64):
+        self.decoded_text_option_locals[local_id] = true
+
+    fn is_decoded_text_option_local(local_id: i64) -> bool:
+        self.decoded_text_option_locals.contains(local_id)
+
+    fn presence_word_bit(local_id: i64) -> i64:
+        """Bool local proving `local_id`'s payload-or-nil word present, or -1."""
+        if self.presence_word_locals.contains(local_id):
+            return self.presence_word_locals[local_id]
+        -1
+
+    fn symbol_is_reassignable(symbol_id: i64) -> bool:
+        """A `var` binding. Its presence bit would be copied once, at the
+        binding, but a test lowered before a reassignment in a loop body runs
+        again after it, so a `var` never carries one (closures capture by
+        value and cannot assign it)."""
+        if val info = self.symbols.get_symbol_raw(symbol_id):
+            return info.is_mutable
+        false
+
     fn is_runtime_value_local(local_id: i64) -> bool:
         var i = self.runtime_value_local_ids.len() - 1
         while i >= 0:
@@ -1075,12 +1341,85 @@ impl MirLowering:
             i = i - 1
         false
 
+    fn local_needs_erased_decode(local_id: i64, hir: HirType) -> bool:
+        """A local that holds a TAGGED runtime word and is about to be used
+        as a declared scalar must be decoded (`decode_runtime_value`).
+
+        `Any` keeps its historical gate (the HIR type AND the runtime-value
+        mark, because legacy `Any` locals may still hold a raw literal).
+        An erased generic `T` fires on the HIR type ALONE: every producer
+        of a `T` value boxes (generics = one erased body, 2026-10-31), so a
+        `T`-typed local is tagged by contract and a missing mark must not
+        leak the tag into a scalar slot (the x8 class of PR #5661)."""
+        match hir.kind:
+            case HirTypeKind.TypeParam(_, _): true
+            case HirTypeKind.Any: self.is_runtime_value_local(local_id)
+            case _: false
+
     me unmark_runtime_value_local(local_id: i64):
         var ids: [i64] = []
         for id in self.runtime_value_local_ids:
             if id != local_id:
                 ids.push(id)
         self.runtime_value_local_ids = ids
+
+    fn snapshot_tagged_text_locals() -> Dict<i64, bool>:
+        mir_snapshot_bool_marks(self.tagged_text_locals)
+
+    fn snapshot_decoded_text_option_locals() -> Dict<i64, bool>:
+        mir_snapshot_bool_marks(self.decoded_text_option_locals)
+
+    fn snapshot_runtime_value_local_ids() -> [i64]:
+        var copy: [i64] = []
+        for id in self.runtime_value_local_ids:
+            copy.push(id)
+        copy
+
+    me restore_pre_branch_representation_marks(boundary_id: i64, pre_tagged: Dict<i64, bool>, pre_rv: [i64], pre_decoded_text_opt: Dict<i64, bool>):
+        """Restore tagged_text_locals, decoded_text_option_locals, and
+        runtime_value_local_ids for locals allocated before `boundary_id`,
+        keeping arm-local temps (>= boundary_id) intact for branch merges."""
+        self.tagged_text_locals = mir_restore_bool_marks(boundary_id, self.tagged_text_locals, pre_tagged)
+        self.decoded_text_option_locals = mir_restore_bool_marks(boundary_id, self.decoded_text_option_locals, pre_decoded_text_opt)
+
+        var next_rv: [i64] = []
+        for id in self.runtime_value_local_ids:
+            if id >= boundary_id:
+                next_rv.push(id)
+        for id in pre_rv:
+            if id < boundary_id:
+                next_rv.push(id)
+        self.runtime_value_local_ids = next_rv
+
+    me intersect_pre_branch_representation_marks(boundary_id: i64, alt_tagged: Dict<i64, bool>, alt_rv: [i64], alt_decoded_text_opt: Dict<i64, bool>):
+        """Keep a pre-branch local (< boundary_id) marked only when BOTH the
+        current path and the alternate path agree on the representation mark."""
+        self.tagged_text_locals = mir_intersect_bool_marks(boundary_id, self.tagged_text_locals, alt_tagged)
+        self.decoded_text_option_locals = mir_intersect_bool_marks(boundary_id, self.decoded_text_option_locals, alt_decoded_text_opt)
+
+        var next_rv: [i64] = []
+        for id in self.runtime_value_local_ids:
+            if id >= boundary_id or mir_id_list_contains(alt_rv, id):
+                next_rv.push(id)
+        self.runtime_value_local_ids = next_rv
+
+# One severity owner for lifted-body checks and the driver collector: the
+# site's own `fatal` flag or the legacy message-prefix allowlist.
+pub fn mir_legacy_message_is_fatal(message: text) -> bool:
+    message.starts_with("undefined variable") or
+        message.starts_with("unresolved method call:") or
+        message.starts_with("unsupported MIR expression:") or
+        message.starts_with("match guards (case x if cond:) are not supported") or
+        message.starts_with("B5b") or
+        message.starts_with("match default binding has no resolved symbol") or
+        message.starts_with("enum match:") or
+        message.starts_with("enum construction: unregistered enum") or
+        message.starts_with("unsupported struct field initializer") or
+        message.starts_with("unsupported Result unwrap payload type") or
+        message.starts_with("for-in over non-array iterables")
+
+pub fn mir_error_is_fatal(e: MirError) -> bool:
+    e.fatal or mir_legacy_message_is_fatal(e.message)
 
 struct MirError:
     """MIR lowering error.
@@ -1131,6 +1470,35 @@ fn marker_map_without(marks: Dict<i64, bool>, key: i64) -> Dict<i64, bool>:
         if k != key:
             kept[k] = marks[k]
     kept
+
+fn mir_id_list_contains(ids: [i64], target: i64) -> bool:
+    for id in ids:
+        if id == target:
+            return true
+    false
+
+fn mir_snapshot_bool_marks(marks: Dict<i64, bool>) -> Dict<i64, bool>:
+    var copy: Dict<i64, bool> = {}
+    for id in marks.keys():
+        copy[id] = marks[id]
+    copy
+
+fn mir_restore_bool_marks(boundary_id: i64, current: Dict<i64, bool>, pre: Dict<i64, bool>) -> Dict<i64, bool>:
+    var next: Dict<i64, bool> = {}
+    for id in current.keys():
+        if id >= boundary_id:
+            next[id] = current[id]
+    for id in pre.keys():
+        if id < boundary_id:
+            next[id] = pre[id]
+    next
+
+fn mir_intersect_bool_marks(boundary_id: i64, current: Dict<i64, bool>, alt: Dict<i64, bool>) -> Dict<i64, bool>:
+    var next: Dict<i64, bool> = {}
+    for id in current.keys():
+        if id >= boundary_id or alt.contains(id):
+            next[id] = current[id]
+    next
 
 fn text_map_without(marks: Dict<i64, text>, key: i64) -> Dict<i64, text>:
     if not marks.contains_key(key):

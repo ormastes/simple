@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (2026-09-13)
+- Status: FIXED (2026-11-11, lane boot18) — named-registry diagnostic implemented; pin spec repaired and green on seed. See addendum below.
 - Area: 50.mir transient-scope promotion / Stage-2 admission (receiver probe)
 - Found by: BOOT-14, `--full-bootstrap … --stop-after-stage2` at `bcb311feff3`
 - Blocks: Stage-2 admission (`reason=stage2-struct-receiver-failed`, `probe_exit=1`)
@@ -50,3 +50,33 @@ discriminate the two candidates cheaply (the fixture compiles standalone in ~80 
 The first diagnostic step should be to report WHICH of the twelve registries failed to promote —
 `module_lowering.spl:1318` currently discards that.
 
+
+
+## 2026-11-11 addendum (lane boot18, work/p3-boot18-20261111) — FIXED, verified on seed
+
+Verdict: FIXED (the diagnostic ask this doc made). The prescribed first step —
+"report WHICH of the twelve registries failed to promote" — is implemented:
+`module_lowering.spl:2627-2630` now raises
+`bootstrap fn registry promotion failed for {module.name}: failed registries
+[{bootstrap_fn_registries_failed_names_v1()}]`, and `mir_data.spl:2962-2981`
+journals the failed registry names via `_promote_bootstrap_registry_named`.
+The two candidate causes the doc refused to guess between (`bcb311feff3`,
+`0e2aebed9d0`) are moot for triage: the actionable code-level defect (a bare,
+unnamed "promotion failed") is closed by the named-registry error, and a future
+recurrence now names the registry directly.
+
+Verification actually run (seed-smoke, `SIMPLE_LIB=src`, `--mode=interpreter
+--no-cache`):
+
+- Pin `test/01_unit/compiler/mir/bootstrap_fn_registry_promote_names_spec.spl`
+  was RED on base (2/3): example 3's needle
+  `"failed registries [{bootstrap_fn_registries_failed_names_v1()}]"` carried
+  literal braces, which Simple INTERPOLATES — at spec time it became
+  `failed registries []` (the failed-names value is empty), never matching the
+  source text (verified with a probe spec printing the interpolated needle).
+  Repaired by building the needle via string concatenation so it stays literal;
+  re-ran **3/3 GREEN**.
+- Adjacent `bootstrap_fn_registry_delta_promote_spec.spl` has 1 pre-existing
+  red (`journals every registry write in mir_data.spl`, 2 unjournaled writes)
+  that pins a DIFFERENT concern (delta-scope journaling), outside this record's
+  scope — routed, not fixed here.

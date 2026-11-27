@@ -1,0 +1,80 @@
+#!/bin/sh
+# Production scheduling functions with explicit host fixtures; no native PASS.
+set -eu
+source_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$source_root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+. "$source_root/scripts/bootstrap/phase-c-backend-commands.shs"
+. "$source_root/scripts/bootstrap/lib/tree-rss-policy.shs"
+. "$source_root/scripts/bootstrap/lib/product-frontend-policy.shs"
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+uname() { printf '%s\n' MINGW64_NT; }
+export BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1 BOOTSTRAP_TREE_RSS_TEST_PLATFORM=MINGW64_NT
+export SIMPLE_BUILD_MEMORY_RESERVE_BYTES=10737418240 SIMPLE_FILE_WORKERS=1
+export SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+# Replace only the OS memory sensor for pure scheduling tests. No watchdog or
+# compiler is launched; production still refuses enforced memory fixtures.
+bootstrap_tree_rss_probe_host() {
+  bootstrap_tree_rss_host_total_kib=$(bootstrap_tree_rss_meminfo_total "$BOOTSTRAP_TREE_RSS_MEMINFO_PATH")
+  bootstrap_tree_rss_host_available_kib=$(bootstrap_tree_rss_meminfo_available "$BOOTSTRAP_TREE_RSS_MEMINFO_PATH")
+  bootstrap_tree_rss_host_total_source=fixture
+}
+unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB \
+  SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB \
+  SIMPLE_HIR_SHARD_WORKER_KB SIMPLE_PARSE_SHARD_WORKER_KB SIMPLE_PARSE_SHARD_MAX \
+  SIMPLE_MIR_SHARD_WORKER_KB SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE
+printf 'MemTotal: 33195332 kB\nMemAvailable: 25165824 kB\n' > "$scratch/fit"
+printf 'MemTotal: 33195332 kB\nMemAvailable: 19922944 kB\n' > "$scratch/busy"
+(
+  BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$scratch/fit"
+  bootstrap_tree_rss_whole_build_export 4 "$source_root"
+  [ "$BOOTSTRAP_VERIFY_BUILD_THREADS" = 2 ]
+  [ "$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB" = 10485760 ]
+  [ "$bootstrap_tree_rss_plan_bound" = windows-file-worker-floor ]
+  pure_tool_threads=$BOOTSTRAP_VERIFY_BUILD_THREADS
+  SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+  bootstrap_phase_c_apply_frontend_policy > "$scratch/fit.policy"
+  [ "$SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB" = 10485760 ]
+  [ "$SIMPLE_PARSE_SHARD_MAX" = 1 ]
+)
+(
+  BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$scratch/busy"
+  bootstrap_tree_rss_whole_build_export 4 "$source_root"
+  [ "$BOOTSTRAP_VERIFY_BUILD_THREADS" = 1 ]
+  pure_tool_threads=$BOOTSTRAP_VERIFY_BUILD_THREADS
+  if bootstrap_phase_c_apply_frontend_policy > "$scratch/busy.policy" 2>"$scratch/busy.error"; then exit 1; fi
+  grep -q 'require at least 2 workers' "$scratch/busy.error"
+  [ ! -s "$scratch/busy.policy" ]
+)
+(
+  BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$scratch/fit"
+  bootstrap_tree_rss_whole_build_export 1 "$source_root"
+  [ "$BOOTSTRAP_VERIFY_BUILD_THREADS" = 1 ]
+)
+(
+  BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$scratch/fit"
+  pure_tool_threads=2
+  SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=10485760
+  SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB=3000000
+  if bootstrap_phase_c_apply_frontend_policy > "$scratch/narrow.policy" 2>"$scratch/narrow.error"; then exit 1; fi
+  grep -q 'budget 3000000 KiB cannot fit' "$scratch/narrow.error"
+  [ ! -s "$scratch/narrow.policy" ]
+)
+(
+  SIMPLE_FILE_WORKERS=0
+  rows=$(bootstrap_product_frontend_policy qualified 10485760 enforce 10485760)
+  printf '%s\n' "$rows" | grep -qx SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=3000000
+)
+(
+  # The same preflight also serves serial module_compile_* object rows.
+  # Only full-tool rows explicitly select the per-file route before this call.
+  unset SIMPLE_FILE_WORKERS
+  BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$scratch/fit"
+  SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=10485760
+  pure_tool_threads=1
+  bootstrap_phase_c_apply_frontend_policy > "$scratch/module.policy"
+  [ "$SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB" = 3000000 ]
+)
+printf '%s\n' 'PASS Windows verification: real small-host plan, reserve retained, two unit workers, unchanged explicit one-worker/two-pass requests, early impossible-budget refusal'

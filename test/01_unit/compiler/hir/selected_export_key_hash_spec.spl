@@ -1,0 +1,39 @@
+# Regression spec for selected_key_hash_v1, SelectedExportBuildKeysV1, and
+# fail-closed lookup_rows bounds check in module_surface_selected_exports_v1.spl.
+# @cover src/compiler/20.hir/hir_lowering/module_surface_selected_exports_v1.spl
+
+use std.spec.*
+use compiler.hir.hir_lowering.module_surface_selected_exports_v1.{
+    SelectedExportBuildKeysV1, selected_key_hash_v1,
+    selected_key_put_v1, selected_key_position_v1
+}
+
+describe "selected export key hash and bucket lookup":
+    it "computes identical bucket hashes for literal and interpolated strings":
+        val literal_key = "0:0:function:5:alpha"
+        val surface = 0
+        val role = 0
+        val category = "function"
+        val name = "alpha"
+        val interp_key = "{surface}:{role}:{category}:{name.byte_len()}:{name}"
+        expect(selected_key_hash_v1(literal_key) & 4095).to_equal(selected_key_hash_v1(interp_key) & 4095)
+        expect(selected_key_hash_v1("0:0:function:5:alpha") == selected_key_hash_v1("0:1:function:4:beta")).to_equal(false)
+
+    it "resolves interpolated keys stored in SelectedExportBuildKeysV1 when queried via [text] elements":
+        var buckets: [i64] = []
+        var i = 0
+        while i < 4096:
+            buckets = buckets.push(-1)
+            i = i + 1
+        var keys = SelectedExportBuildKeysV1(names: [], rows: [], buckets: buckets, next: [])
+        val surface = 0
+        val role = 1
+        val cat = "function"
+        val fn_a = "main"
+        val fn_b = "helper"
+        selected_key_put_v1(keys, "{surface}:{role}:{cat}:{fn_a.byte_len()}:{fn_a}", 0)
+        selected_key_put_v1(keys, "{surface}:{role}:{cat}:{fn_b.byte_len()}:{fn_b}", 1)
+        val lookup_keys: [text] = ["0:1:function:4:main", "0:1:function:6:helper"]
+        expect(selected_key_position_v1(keys, lookup_keys[0])).to_equal(0)
+        expect(selected_key_position_v1(keys, lookup_keys[1])).to_equal(1)
+        expect(selected_key_position_v1(keys, "0:1:function:6:absent")).to_equal(-1)

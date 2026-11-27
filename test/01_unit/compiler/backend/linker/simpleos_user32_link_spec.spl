@@ -1,0 +1,345 @@
+# SimpleOS 32-bit user links through the internal (Simple) linker.
+#
+# Fixtures: test/fixtures/linker/elf/simpleos32/ (i686_start.s, main32.c ->
+# libi686_main32.a, simpleos_user32.ld). Every expected value is llvm-readelf of
+#   ld.lld -m elf_i386 -static -nostdlib --gc-sections --image-base=0x400000 \
+#     -T simpleos_user32.ld i686_start.o libi686_main32.a        (LLD 18.1.3)
+# 0x400000 is inside every 32-bit SimpleOS spawn window (x86_32 < 0xC0000000,
+# riscv32 4096..0x80000000).
+# Bug: doc/08_tracking/bug/simpleos_user_32bit_sysroot_crt0_missing_2026-11-19.md
+#
+# @cover src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl
+
+use std.spec.*
+use compiler.backend.linker.linker_wrapper.{link_simpleos_internal, NativeLinkConfig}
+use std.io_runtime.{file_read_bytes}
+use compiler.backend.linker.elf.elf_comment_section.{elf_merge_comment_strings, ELF_COMMENT_LINKER_IDENT}
+
+val S32_FIX: text = "test/fixtures/linker/elf/simpleos32"
+
+fn s32_u16(b: [u8], off: i64) -> i64:
+    (b[off] as i64) | ((b[off + 1] as i64) << 8)
+
+fn s32_u32(b: [u8], off: i64) -> i64:
+    s32_u16(b, off) | (s32_u16(b, off + 2) << 16)
+
+fn s32_phdr(b: [u8], idx: i64, field: i64) -> i64:
+    s32_u32(b, s32_u32(b, 28) + idx * 32 + field)
+
+fn s32_section_names(b: [u8]) -> [text]:
+    val shoff = s32_u32(b, 32)
+    val shnum = s32_u16(b, 48)
+    val str_off = s32_u32(b, shoff + s32_u16(b, 50) * 40 + 16)
+    var names: [text] = []
+    var i: i64 = 1
+    while i < shnum:
+        var p = str_off + s32_u32(b, shoff + i * 40)
+        var s = ""
+        while b[p] != 0:
+            s = s + (b[p] as i64).to_char()
+            p = p + 1
+        names = names.push(s)
+        i = i + 1
+    names
+
+fn s32_arm_movw_imm(w: i64) -> i64:
+    (((w >> 16) & 0xf) << 12) | (w & 0xfff)
+
+fn s32_cstr(b: [u8], at: i64) -> text:
+    var s = ""
+    var p = at
+    while b[p] != 0:
+        s = s + (b[p] as i64).to_char()
+        p = p + 1
+    s
+
+fn s32_sym_info(b: [u8], name: text) -> i64:
+    """st_info of the named .symtab entry, or -1."""
+    val shoff = s32_u32(b, 32)
+    var i: i64 = 1
+    while i < s32_u16(b, 48):
+        val sh = shoff + i * 40
+        if s32_u32(b, sh + 4) == 2:
+            val str_off = s32_u32(b, shoff + s32_u32(b, sh + 24) * 40 + 16)
+            var e = s32_u32(b, sh + 16)
+            val end = e + s32_u32(b, sh + 20)
+            while e < end:
+                if s32_cstr(b, str_off + s32_u32(b, e)) == name:
+                    return b[e + 12] as i64
+                e = e + 16
+        i = i + 1
+    -1
+
+fn s32_phdr_index(b: [u8], p_type: i64) -> i64:
+    var i: i64 = 0
+    while i < s32_u16(b, 44):
+        if s32_phdr(b, i, 0) == p_type:
+            return i
+        i = i + 1
+    -1
+
+fn s32_sec_field(b: [u8], name: text, field: i64) -> i64:
+    """Field (byte offset in the Shdr) of the named section, or -1."""
+    val shoff = s32_u32(b, 32)
+    val str_off = s32_u32(b, shoff + s32_u16(b, 50) * 40 + 16)
+    var i: i64 = 1
+    while i < s32_u16(b, 48):
+        if s32_cstr(b, str_off + s32_u32(b, shoff + i * 40)) == name:
+            return s32_u32(b, shoff + i * 40 + field)
+        i = i + 1
+    -1
+
+fn s32_link(arch: text, out: text) -> Result<text, text>:
+    var cfg = NativeLinkConfig.default()
+    cfg.runtime_path = "none"
+    cfg.libraries = ["{S32_FIX}/lib{arch}_main32.a"]
+    cfg.extra_flags = ["-T", "{S32_FIX}/simpleos_user32.ld", "-nostdlib", "-static",
+        "--gc-sections", "--start-group", "--end-group"]
+    link_simpleos_internal(["{S32_FIX}/{arch}_start.o"], out, "simpleos-{arch}", cfg)
+
+describe "SimpleOS 32-bit user link (internal linker vs ld.lld)":
+    it "applies wrap before extracting an ELF32 archive provider and relocating calls":
+        # Fixture: clang --target=i686-unknown-none-elf -march=i686 -fno-pic
+        # -ffreestanding -nostdlib -fno-stack-protector -fno-unwind-tables
+        # -fno-asynchronous-unwind-tables -O2 -Dmain=__wrap_main -c main32.c
+        # -o i686_wrap_main32.o; llvm-ar rcsD libi686_wrap_main32.a i686_wrap_main32.o
+        # Archive defines only __wrap_main, so this cannot link if --wrap is lost.
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = "none"
+        cfg.libraries = ["{S32_FIX}/libi686_wrap_main32.a"]
+        cfg.extra_flags = ["-T", "{S32_FIX}/simpleos_user32.ld", "-nostdlib", "-static",
+            "--gc-sections", "--wrap=main"]
+        val out = "build/simpleos_user32_i686_wrap.elf"
+        expect(link_simpleos_internal(["{S32_FIX}/i686_start.o"], out, "simpleos-i686", cfg).is_ok()).to_equal(true)
+        val b = file_read_bytes(out)
+        expect(s32_sym_info(b, "__wrap_main")).to_be_greater_than(-1)
+        expect(s32_sym_info(b, "main")).to_equal(-1)
+        val t = s32_phdr(b, 2, 4)
+        expect(b[t] as i64).to_equal(232) # CALL rel32 in _start
+        expect(s32_u32(b, t + 1)).to_equal(11) # resolves to the archive's wrapper
+
+    it "rejects a missing ELF32 wrapper rather than binding the original definition":
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = "none"
+        cfg.libraries = ["{S32_FIX}/libi686_main32.a"]
+        cfg.extra_flags = ["-T", "{S32_FIX}/simpleos_user32.ld", "-nostdlib", "-static", "--wrap=main"]
+        val r = link_simpleos_internal(["{S32_FIX}/i686_start.o"],
+            "build/simpleos_user32_i686_missing_wrap.elf", "simpleos-i686", cfg)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_contain("__wrap_main")
+
+    it "links an i686 user ELF32 with ld.lld's segments, entry and .text":
+        val out = "build/simpleos_user32_i686.elf"
+        val r = s32_link("i686", out)
+        expect(r.is_ok()).to_equal(true)
+        val b = file_read_bytes(out)
+        expect(b[4] as i64).to_equal(1)              # ELFCLASS32
+        expect(s32_u16(b, 16)).to_equal(2)           # ET_EXEC
+        expect(s32_u16(b, 18)).to_equal(3)           # EM_386
+        val text_v = s32_phdr(b, 2, 8)
+        val data_v = s32_phdr(b, 3, 8)
+        expect(s32_phdr(b, 0, 0)).to_equal(6)        # PT_PHDR first, as ld.lld
+        expect(s32_phdr(b, 0, 8)).to_equal(0x400034)
+        expect(text_v).to_equal(0x401120)              # exact lld .text vaddr
+        expect(s32_phdr(b, 1, 0)).to_equal(1)        # PT_LOAD R headers at the base
+        expect(s32_phdr(b, 1, 8)).to_equal(0x400000)
+        expect(s32_phdr(b, 1, 24)).to_equal(4)
+        expect(s32_phdr(b, 2, 24)).to_equal(5)       # RX
+        expect(s32_phdr(b, 3, 24)).to_equal(6)       # RW
+        expect(s32_phdr(b, 3, 28)).to_equal(0x1000)
+        expect(s32_u32(b, 24)).to_equal(text_v)      # _start opens .text
+        expect(data_v - text_v).to_equal(0x1020)     # lld: 0x402140 - 0x401120
+        # lld's .text: call main; movl %eax,%ebx; xorl %eax,%eax; int $0x80;
+        # pad; main loads `counter` (absolute, = .data vaddr) + 'h'.
+        val t = s32_phdr(b, 2, 4)
+        val lld_text = [232, 11, 0, 0, 0, 137, 195, 49, 192, 205, 128]
+        var i: i64 = 0
+        while i < lld_text.len():
+            expect(b[t + i] as i64).to_equal(lld_text[i])
+            i = i + 1
+        var g: i64 = 11                              # lld fills the .text gap with int3
+        while g < 16:
+            expect(b[t + g] as i64).to_equal(0xcc)
+            g = g + 1
+        expect(b[t + 16] as i64).to_equal(85)
+        expect(b[t + 19] as i64).to_equal(161)
+        expect(s32_u32(b, t + 20)).to_equal(data_v)
+        expect(b[t + 24] as i64).to_equal(131)
+
+    it "rejects a SECTIONS script on a 32-bit SimpleOS target, naming it":
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = "none"
+        cfg.extra_flags = ["-T", "test/fixtures/linker/elf/got_orphan/got_orphan.ld"]
+        val r = link_simpleos_internal(["{S32_FIX}/i686_start.o"],
+            "build/simpleos_user32_reject.elf", "simpleos-i686", cfg)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_contain("SECTIONS")
+
+    it "links a riscv32 user ELF32 with ld.lld's segments, flags and .text":
+        # lld oracle: ld.lld -m elf32lriscv --no-relax (same flags as i686), fixtures
+        # built with -march=rv32imac -mabi=ilp32 -mno-relax. All .text references
+        # are PC-relative, so the bytes are exact despite the PT_PHDR shift.
+        val out = "build/simpleos_user32_riscv32.elf"
+        val r = s32_link("riscv32", out)
+        expect(r.is_ok()).to_equal(true)
+        val b = file_read_bytes(out)
+        expect(b[4] as i64).to_equal(1)              # ELFCLASS32
+        expect(s32_u16(b, 16)).to_equal(2)           # ET_EXEC
+        expect(s32_u16(b, 18)).to_equal(243)         # EM_RISCV
+        expect(s32_u32(b, 36)).to_equal(1)           # e_flags: RVC, soft-float ABI
+        val text_v = s32_phdr(b, 2, 8)
+        val data_v = s32_phdr(b, 3, 8)
+        expect(s32_phdr(b, 0, 0)).to_equal(6)        # PT_PHDR first, as ld.lld
+        expect(s32_phdr(b, 0, 8)).to_equal(0x400034)
+        expect(text_v).to_equal(0x401138)              # exact lld .text vaddr
+        # PT_RISCV_ATTRIBUTES (last, as lld) covers the .riscv.attributes bytes.
+        val ai = s32_phdr_index(b, 0x70000003)
+        expect(ai).to_equal(s32_u16(b, 44) - 1)
+        expect(s32_phdr(b, ai, 4)).to_equal(s32_sec_field(b, ".riscv.attributes", 16))
+        expect(s32_phdr(b, ai, 16)).to_equal(s32_sec_field(b, ".riscv.attributes", 20))
+        expect(s32_phdr(b, ai, 8)).to_equal(0)
+        expect(s32_phdr(b, ai, 24)).to_equal(4)
+        expect(s32_phdr(b, ai, 28)).to_equal(1)
+        # Exact lld 18 payload (llvm-readelf -x): stack_align=16, then the arch
+        # union with no implied extensions and no tag 14/16.
+        var want: [i64] = [0x41, 0x2a, 0, 0, 0, 0x72, 0x69, 0x73, 0x63, 0x76, 0, 1, 0x20, 0, 0, 0, 4, 0x10, 5]
+        for ch in "rv32i2p1_m2p0_a2p1_c2p0".bytes(): want.push(ch as i64)
+        want.push(0)
+        val attr_off = s32_sec_field(b, ".riscv.attributes", 16)
+        expect(s32_sec_field(b, ".riscv.attributes", 20)).to_equal(want.len())
+        var got: [i64] = []
+        for k in 0..want.len(): got.push(b[attr_off + k] as i64)
+        expect(got).to_equal(want)
+        expect(s32_phdr(b, 1, 8)).to_equal(0x400000)
+        expect(s32_phdr(b, 1, 24)).to_equal(4)
+        expect(s32_phdr(b, 2, 24)).to_equal(5)
+        expect(s32_phdr(b, 3, 24)).to_equal(6)
+        expect(s32_u32(b, 24)).to_equal(text_v)
+        expect(data_v - text_v).to_equal(0x101c)     # lld: 0x402154 - 0x401138
+        val t = s32_phdr(b, 2, 4)
+        val lld_text = [151, 0, 0, 0, 231, 128, 224, 0, 129, 72, 115, 0, 0, 0,
+            23, 21, 0, 0, 3, 37, 229, 0, 19, 5, 133, 6, 130, 128]
+        var i: i64 = 0
+        while i < lld_text.len():
+            expect(b[t + i] as i64).to_equal(lld_text[i])
+            i = i + 1
+        # ld.lld keeps RISC-V small data as its own output section (`counter`
+        # lives in .sdata); __global_pointer$ is defined relative to it.
+        expect(s32_section_names(b)).to_contain(".sdata")
+        expect(s32_section_names(b)).not_to_contain(".data")
+
+    it "links an arm32 user ELF32 with ld.lld's segments, flags and .text":
+        # lld oracle: ld.lld -m armelf -z max-page-size=0x1000 (SimpleOS arm32 maps
+        # 4 KiB user pages), same flags as i686; fixtures built with
+        # --target=armv7a-none-eabi -marm -mfloat-abi=soft.
+        val out = "build/simpleos_user32_arm32.elf"
+        val r = s32_link("arm32", out)
+        expect(r.is_ok()).to_equal(true)
+        val b = file_read_bytes(out)
+        expect(b[4] as i64).to_equal(1)              # ELFCLASS32
+        expect(s32_u16(b, 16)).to_equal(2)           # ET_EXEC
+        expect(s32_u16(b, 18)).to_equal(40)          # EM_ARM
+        expect(s32_u32(b, 36)).to_equal(0x5000200)   # EABI5, soft-float
+        val text_v = s32_phdr(b, 2, 8)
+        val data_v = s32_phdr(b, 3, 8)
+        expect(s32_phdr(b, 0, 0)).to_equal(6)        # PT_PHDR first, as ld.lld
+        expect(s32_phdr(b, 0, 8)).to_equal(0x400034)
+        expect(text_v).to_equal(0x401148)              # exact lld .text vaddr
+        expect(s32_phdr(b, 1, 8)).to_equal(0x400000)
+        expect(s32_phdr(b, 1, 24)).to_equal(4)
+        expect(s32_phdr(b, 2, 24)).to_equal(5)
+        expect(s32_phdr(b, 3, 24)).to_equal(6)
+        expect(s32_phdr(b, 3, 28)).to_equal(0x1000)
+        # lld: .ARM.exidx = _start CANTUNWIND (synthesized, merged with main's
+        # CANTUNWIND) + the end-of-.text sentinel; PT_ARM_EXIDX covers it.
+        val xi = s32_phdr_index(b, 0x70000001)
+        expect(xi).to_equal(s32_u16(b, 44) - 1)
+        expect(s32_phdr(b, xi, 16)).to_equal(0x10)
+        expect(s32_sec_field(b, ".ARM.exidx", 20)).to_equal(0x10)
+        expect(s32_sec_field(b, ".ARM.exidx", 12)).to_equal(s32_phdr(b, xi, 8))
+        val xo = s32_sec_field(b, ".ARM.exidx", 16)
+        expect(s32_sec_field(b, ".ARM.exidx", 12) + s32_u32(b, xo)).to_equal(text_v)   # _start
+        expect(s32_u32(b, xo + 4)).to_equal(1)                         # EXIDX_CANTUNWIND
+        expect(s32_u32(b, xo + 12)).to_equal(1)                        # sentinel
+        expect(s32_sec_field(b, ".ARM.exidx", 12) + 8 + s32_u32(b, xo + 8)).to_equal(0x401168)
+        expect(s32_u32(b, 24)).to_equal(text_v)
+        expect(data_v - text_v).to_equal(0x1020)     # lld: 0x402168 - 0x401148
+        # _start: bl main; mov r7,#0; svc #0 (PC-relative, exact), then main
+        # builds &counter with movw/movt = the .data vaddr.
+        val t = s32_phdr(b, 2, 4)
+        val lld_text = [1, 0, 0, 235, 0, 112, 160, 227, 0, 0, 0, 239]
+        var i: i64 = 0
+        while i < lld_text.len():
+            expect(b[t + i] as i64).to_equal(lld_text[i])
+            i = i + 1
+        val lo = s32_arm_movw_imm(s32_u32(b, t + 12))
+        val hi = s32_arm_movw_imm(s32_u32(b, t + 16))
+        expect((hi << 16) | lo).to_equal(data_v)
+        expect(s32_u32(b, t + 28)).to_equal(0xe12fff1e)   # bx lr
+        expect(s32_sym_info(b, "__udivdi3")).to_equal(-1)  # dead section's UND omitted under --gc-sections
+
+    it "defines __bss_start at .bss as a GLOBAL symbol, as ld.lld does":
+        # lld oracle: __bss_start = .bss = 0x402124, GLOBAL DEFAULT; the weak
+        # reference in _start must resolve to it (the SimpleOS C start clears bss).
+        val out = "build/simpleos_user32_bss.elf"
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = "none"
+        cfg.extra_flags = ["-T", "{S32_FIX}/simpleos_user32.ld", "-nostdlib", "-static"]
+        val r = link_simpleos_internal(["{S32_FIX}/i686_bss.o"], out, "simpleos-i686", cfg)
+        expect(r.is_ok()).to_equal(true)
+        val b = file_read_bytes(out)
+        val bss_v = s32_phdr(b, 3, 8)
+        expect(s32_phdr(b, 3, 16)).to_equal(0)        # RW filesz 0: only .bss
+        expect(bss_v).to_equal(0x402124)              # lld .bss and __bss_start
+        expect(s32_u32(b, s32_phdr(b, 2, 4) + 1)).to_equal(bss_v)   # movl $__bss_start
+        expect(s32_sym_info(b, "__bss_start")).to_equal(0x10)       # STB_GLOBAL, NOTYPE
+
+    it "keeps the first input's .ARM.attributes verbatim, as ld.lld does":
+        # lld oracle (ssos_armattr.sh): output .ARM.attributes == arm32_start.o's
+        # (26 bytes, "A" + "aeabi" subsection ... 0x22 0x00); lld does not merge.
+        val out = "build/simpleos_user32_arm32_attr.elf"
+        expect(s32_link("arm32", out).is_ok()).to_equal(true)
+        val b = file_read_bytes(out)
+        expect(s32_sec_field(b, ".ARM.attributes", 4)).to_equal(0x70000003)
+        expect(s32_sec_field(b, ".ARM.attributes", 20)).to_equal(0x1a)
+        val off = s32_sec_field(b, ".ARM.attributes", 16)
+        expect(b[off] as i64).to_equal(0x41)
+        expect(b[off + 24] as i64).to_equal(0x22)
+        expect(b[off + 25] as i64).to_equal(0)
+
+    it "keeps the inputs' .comment strings plus its own identity, as ld.lld does":
+        # lld oracle (ssos_cm.sh): .comment PROGBITS, flags MS (0x30), entsize 1,
+        # size 0x42 = "\0" + "Ubuntu clang version 18.1.3 (1ubuntu1)\0"
+        # (from arm32_main32.o) + "Linker: Ubuntu LLD 18.1.3\0". The Simple
+        # linker writes its own identity, never lld's.
+        val out = "build/simpleos_user32_arm32_comment.elf"
+        expect(s32_link("arm32", out).is_ok()).to_equal(true)
+        val b = file_read_bytes(out)
+        expect(s32_sec_field(b, ".comment", 4)).to_equal(1)
+        expect(s32_sec_field(b, ".comment", 8)).to_equal(0x30)
+        expect(s32_sec_field(b, ".comment", 36)).to_equal(1)
+        val off = s32_sec_field(b, ".comment", 16)
+        val size = s32_sec_field(b, ".comment", 20)
+        expect(b[off] as i64).to_equal(0)
+        expect(s32_cstr(b, off + 1)).to_equal("Ubuntu clang version 18.1.3 (1ubuntu1)")
+        expect(s32_cstr(b, off + 40)).to_equal(ELF_COMMENT_LINKER_IDENT)
+        expect(size).to_equal(40 + ELF_COMMENT_LINKER_IDENT.len() + 1)
+
+    it "deduplicates .comment strings across inputs in first-seen order":
+        val a = "clang A\0shared\0".bytes()
+        val c = "shared\0clang C\0clang A\0".bytes()
+        var pa: [i64] = []
+        for x in a: pa.push(x as i64)
+        var pc: [i64] = []
+        for x in c: pc.push(x as i64)
+        val merged = elf_merge_comment_strings([pa, pc])
+        var want: [i64] = [0]
+        for x in "clang A\0shared\0clang C\0{ELF_COMMENT_LINKER_IDENT}\0".bytes(): want.push(x as i64)
+        expect(merged).to_equal(want)
+
+    it "keeps an unterminated trailing .comment string and keys dedup on bytes":
+        # [0xC3 0xA9] and [0xE9] must stay distinct; "tail" lacks its NUL.
+        val merged = elf_merge_comment_strings([[0xC3, 0xA9, 0, 0xE9, 0, 0xC3, 0xA9, 0], [0x74, 0x61, 0x69, 0x6C]])
+        var want: [i64] = [0, 0xC3, 0xA9, 0, 0xE9, 0, 0x74, 0x61, 0x69, 0x6C, 0]
+        for x in "{ELF_COMMENT_LINKER_IDENT}\0".bytes(): want.push(x as i64)
+        expect(merged).to_equal(want)

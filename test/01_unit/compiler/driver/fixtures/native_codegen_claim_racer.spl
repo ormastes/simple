@@ -1,0 +1,32 @@
+# Child process for native_codegen_claim_race_stress_spec.spl.
+# Races every other racer for the same modules in one shared codegen ledger
+# through the pool's claim primitive, then publishes the modules it won
+# (one per line) atomically. Inputs come from the environment the spec sets
+# before spawning: SIMPLE_CLAIM_RACE_QUEUE, SIMPLE_CLAIM_RACE_OWNER,
+# SIMPLE_CLAIM_RACE_COUNT, SIMPLE_CLAIM_RACE_OFFSET.
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+
+fn main() -> i64:
+    val queue = env_get_nullable("SIMPLE_CLAIM_RACE_QUEUE") ?? ""
+    val owner = env_get_nullable("SIMPLE_CLAIM_RACE_OWNER") ?? ""
+    val count = (env_get_nullable("SIMPLE_CLAIM_RACE_COUNT") ?? "").to_i64() ?? 0
+    val offset = (env_get_nullable("SIMPLE_CLAIM_RACE_OFFSET") ?? "").to_i64() ?? 0
+    if queue == "" or owner == "" or count <= 0:
+        return 2
+    var won = ""
+    var errors: i64 = 0
+    var step: i64 = 0
+    while step < count:
+        val module_index = (step + offset) % count
+        val name = "race.module_{module_index}"
+        val code = hir_shard_recovery_claim(queue, owner, name, "key-{module_index}")
+        if code == 1:
+            won = won + name + "\n"
+        elif code < 0:
+            errors = errors + 1
+        step = step + 1
+    if not file_atomic_write("{queue}/won-{owner}.txt", won):
+        return 3
+    if errors > 0: 4 else: 0

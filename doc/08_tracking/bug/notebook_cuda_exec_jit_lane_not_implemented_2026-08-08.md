@@ -1,8 +1,16 @@
 # CudaExec cannot back `jit(remote(cuda(...)))` cells yet — no per-cell PTX compile path
-## Open 2026-09-16 — needs owner triage
+## OPEN — triaged 2026-11-25: honest feature gap; blocked on CUDA hardware + a generalized per-cell PTX pipeline
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+
+**Triage 2026-11-25:** classification confirmed — this is a feature gap, not
+a silent-wrong-result defect (the jit lane returns explicit `blocked:` /
+`cell_result_error(...)` diagnostics naming this doc; see the 2026-08-17
+verification below). Closing it needs (a) a generalized Simple-source →
+validated-PTX compile path (a large compiler-pipeline program, not a bounded
+fix) and (b) CUDA hardware to exercise it — neither is available to the
+pure-Simple P3 lanes on this host. Left OPEN, no code change.
 
 Date: 2026-08-08
 Found by: Task K5 (`CudaExec` notebook lane)

@@ -64,7 +64,7 @@ compiled-Simple evidence. Fixture bundles remain explicitly
 `CONTRACT_ONLY`; no hardware, native compiler, or production rendering PASS
 is implied by this identity gate.
 
-GROUP, IMAGE, and TEXT commands are currently honest refusals; canonical
+Neutral batch GROUPs (no transform, clip, opacity or parent) are accepted as pure containers; stateful GROUP, IMAGE, and TEXT commands are currently honest refusals; canonical
 batches are not yet flattened count-first. The WM refusal fallback and RECT
 semantic rejection are implemented. Hosted Web production integration is not
 yet proven, and the bridge still allocates the adapted v3 scene and performs

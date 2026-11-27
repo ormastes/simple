@@ -1,22 +1,20 @@
 # Inputs are signed statuses after native_build_normalize_exit_code.
+# reason: internal CLI exit-status classification helper exported for unit specs
+@allow(primitive_api)
+pub fn native_build_is_dll_init_failed_v1(code: i64) -> bool:
+    code == -1073741502 or code == 3221225794
+
 pub fn native_build_windows_status_label(code: i64) -> text:
-    # @workaround bug=native_negative_literal_match_patterns_2026_10_10 reason=preserve exact signed NTSTATUS labels while MIR treats negative patterns as wildcards
-    if code == -1073741819:
-        "0xC0000005 (access violation)"
-    elif code == -1073741795:
-        "0xC000001D (illegal instruction)"
-    elif code == -1073741676:
-        "0xC0000094 (integer divide by zero)"
-    elif code == -1073741571:
-        "0xC00000FD (stack overflow)"
-    elif code == -1073741510:
-        "0xC000013A (control-C exit)"
-    elif code == -1073740940:
-        "0xC0000374 (heap corruption)"
-    elif code == -1073740791:
-        "0xC0000409 (fail-fast termination)"
-    else:
-        ""
+    match code:
+        case -1073741819: "0xC0000005 (access violation)"
+        case -1073741795: "0xC000001D (illegal instruction)"
+        case -1073741676: "0xC0000094 (integer divide by zero)"
+        case -1073741571: "0xC00000FD (stack overflow)"
+        case -1073741510: "0xC000013A (control-C exit)"
+        case -1073741502 | 3221225794: "0xC0000142 (STATUS_DLL_INIT_FAILED)"
+        case -1073740940: "0xC0000374 (heap corruption)"
+        case -1073740791: "0xC0000409 (fail-fast termination)"
+        case _: ""
 
 pub fn native_build_posix_signal(code: i64) -> i64:
     # rt_process_wait encodes a POSIX signal as -(128 + signal). Limit the
@@ -24,3 +22,31 @@ pub fn native_build_posix_signal(code: i64) -> i64:
     if code >= -255 and code <= -129:
         return 0 - code - 128
     0
+
+pub fn native_build_signal_name(signo: i64) -> text:
+    # Only numbers that mean the same signal on Linux, the BSDs and macOS;
+    # 7 and 10 (SIGBUS/SIGEMT/SIGUSR1) differ, so they stay numeric.
+    if signo == 1: "SIGHUP"
+    elif signo == 2: "SIGINT"
+    elif signo == 3: "SIGQUIT"
+    elif signo == 4: "SIGILL"
+    elif signo == 5: "SIGTRAP"
+    elif signo == 6: "SIGABRT"
+    elif signo == 8: "SIGFPE"
+    elif signo == 9: "SIGKILL"
+    elif signo == 11: "SIGSEGV"
+    elif signo == 13: "SIGPIPE"
+    elif signo == 14: "SIGALRM"
+    elif signo == 15: "SIGTERM"
+    else: "signal {signo}"
+
+pub fn native_build_exit_cause_field_v1(code: i64) -> text:
+    # ` signal=SIGABRT(6)` / ` ntstatus=<label>` for a worker that died, ""
+    # for an ordinary exit status or a wait sentinel.
+    val signo = native_build_posix_signal(code)
+    if signo > 0:
+        return " signal={native_build_signal_name(signo)}({signo})"
+    val windows_status = native_build_windows_status_label(code)
+    if windows_status != "":
+        return " ntstatus={windows_status}"
+    ""

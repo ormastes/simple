@@ -1,0 +1,163 @@
+"""
+## Purpose and audience
+Purpose: pin that a `<textarea>` clips a value taller than its rows at its
+padding box, at 1x and at 4x (384 dpi), the way Chrome 159 does.
+Audience: maintainers of paint clipping (ancestor clip cache, device-px clip
+edges) and textarea value painting.
+
+Chrome oracle (Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars`, window 400x300, `--force-device-scale-factor`
+1 and 4), 16px/1.5 Liberation Sans body, `label{display:block;margin:8px 0
+8px 10px}`, UA textarea (13.333px monospace, 20 cols, 2 rows) with
+`padding:8px; border:1px solid #94a3b8; border-radius:5px` after `Notes `,
+value `lllll` x 12 (4 wrapped lines; 2 fit).
+
+1. 1x: the bottom border row 55 stays (148,163,184) at columns 68-69, and
+   line 4 is not painted (row 63, columns 66-67 white). Base (e1e040faccd)
+   painted lines 3 and 4 over the border and below the control.
+2. 4x: line 4 is not painted (device row 256, columns 266-276 white), while
+   line 3's `l` stays visible inside the padding box (device rows 220-223,
+   column 273-276 black). The clip's bottom edge follows the textarea's
+   device-px height (`device-extra-height`), not k x its CSS height.
+
+Fix: a textarea counts as a clipping box in `build_ancestor_clip_cache`
+(paint_raster), and `_html_draw_ir_device_clip` (paint_layout) moves a
+clipping box's right / bottom edge by its device size delta.
+"""
+
+"""
+Traceability: REQ-WEB-FORM-CONTROL-TEXT-PEN-001 -- textarea value clipped at the padding box.
+"""
+# @tag: unit, browser_engine, form_controls, chrome159
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+
+val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;color:#000;font:16px/1.5 'Liberation Sans'}} label{{display:block;margin:8px 0 8px 10px}} textarea{{padding:8px;border:1px solid #94a3b8;border-radius:5px}}</style></head><body><label>Notes <textarea>lllll lllll lllll lllll lllll lllll lllll lllll lllll lllll lllll lllll</textarea></label></body></html>"
+
+fn _rgb(p: u32) -> [i32]:
+    [((p >> 16u32) & 0xFFu32) as i32, ((p >> 8u32) & 0xFFu32) as i32, (p & 0xFFu32) as i32]
+
+# Each column shown as Chrome's colour when within 8 per channel, else as
+# Simple's own colour, so a failure names the drifting pixel.
+fn _row_text(px: [u32], stride: i32, y: i32, cols: [i32], chrome: [i32]) -> text:
+    var s = ""
+    var i = 0
+    while i < cols.len():
+        val got = _rgb(px[y * stride + cols[i]])
+        var close = true
+        var ch = 0
+        while ch < 3:
+            val d = got[ch] - chrome[ch]
+            if d > 8 or d < -8:
+                close = false
+            ch = ch + 1
+        val shown = if close: chrome else: got
+        s = s + "{cols[i]}=({shown[0]},{shown[1]},{shown[2]}) "
+        i = i + 1
+    s
+
+fn _want_text(cols: [i32], chrome: [i32]) -> text:
+    var s = ""
+    var i = 0
+    while i < cols.len():
+        s = s + "{cols[i]}=({chrome[0]},{chrome[1]},{chrome[2]}) "
+        i = i + 1
+    s
+
+describe "A textarea value taller than its rows (Chrome 159)":
+    it "AC-1: 1x keeps the bottom border and paints nothing below the control":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 1, "cpu_simd")
+        val border: [i32] = [148, 163, 184]
+        val white: [i32] = [255, 255, 255]
+        val got = _row_text(px, CSS_W, 55, [68, 69], border) + _row_text(px, CSS_W, 63, [66, 67], white)
+        expect(got).to_equal(_want_text([68, 69], border) + _want_text([66, 67], white))
+
+    it "AC-2: 4x clips at the device-px padding box":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 4, "cpu_simd")
+        val stride = CSS_W * 4
+        val white: [i32] = [255, 255, 255]
+        val ink: [i32] = [0, 0, 0]
+        val cut = [266, 270, 276]
+        val kept = [273, 276]
+        val got = _row_text(px, stride, 256, cut, white) + _row_text(px, stride, 220, kept, ink) + _row_text(px, stride, 223, kept, ink)
+        expect(got).to_equal(_want_text(cut, white) + _want_text(kept, ink) + _want_text(kept, ink))
+
+    it "AC-3: the textarea stays on the label's first line after `Notes ` (Chrome x=56.25 y=8)":
+        step("its value's max-content (12 words on one line) is not its width: a textarea is cols wide")
+        val page = PAGE.replace("<textarea>", "<textarea id=\"t\">")
+        val got = simple_web_layout_debug_layout_by_id(page, CSS_W, CSS_H, "t", "x") + "," + simple_web_layout_debug_layout_by_id(page, CSS_W, CSS_H, "t", "y")
+        expect(got).to_equal("56,8")
+
+# A rows=10 textarea (no padding, 2px red bottom border, so its 1x box is 152
+# px) in an `overflow:hidden` wrapper 1px taller (153 px, yellow), then a
+# 20px blue bar; below it the same wrapper around a NON-textarea block with
+# the same 30 monospace lines (the guard).
+val WRAP_PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;color:#000;font:16px/1.5 'Liberation Sans'}} .w{{overflow:hidden;height:153px;background:#ff0}} .n{{height:20px;background:#00f}} textarea{{display:block;margin:0;padding:0;border:0;border-bottom:2px solid #f00}} .d{{font:13.333px monospace;white-space:pre;width:176px;background:#fff;border-bottom:2px solid #f00}}</style></head><body><div class=\"w\"><textarea rows=\"10\">\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll</textarea></div><div class=\"n\"></div><div class=\"w\"><div class=\"d\">\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll</div></div><div class=\"n\"></div></body></html>"
+
+# Class counts of one row over columns [x0, x1): B blue, R red, Y yellow,
+# W white, K ink (dark), o anything else; e.g. "B160" or "K5,W145,o10".
+fn _row_classes(px: [u32], stride: i32, y: i32, x0: i32, x1: i32) -> text:
+    var s = ""
+    for c in ["B", "K", "R", "W", "Y", "o"]:
+        var n = 0
+        var x = x0
+        while x < x1:
+            val v = _rgb(px[y * stride + x])
+            var k = "o"
+            if v[0] > 240 and v[1] > 240 and v[2] < 30:
+                k = "Y"
+            elif v[0] < 30 and v[1] < 30 and v[2] > 200:
+                k = "B"
+            elif v[0] > 200 and v[1] < 40 and v[2] < 40:
+                k = "R"
+            elif v[0] > 240 and v[1] > 240 and v[2] > 240:
+                k = "W"
+            elif v[0] < 128 and v[1] < 128 and v[2] < 128:
+                k = "K"
+            if k == c:
+                n = n + 1
+            x = x + 1
+        if n > 0:
+            s = s + (if s == "": "" else: ",") + c + "{n}"
+    s
+
+# The same textarea in an AUTO-height wrapper (padding-bottom:1px) with no bar
+# below it, so anything painted past the wrapper lands on the white body.
+val AUTO_WRAP_PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;color:#000;font:16px/1.5 'Liberation Sans'}}</style></head><body><div id=\"w\" style=\"overflow:hidden;padding-bottom:1px;background:#ff0\"><textarea rows=\"10\" style=\"display:block;margin:0;padding:0;border:0\">\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll</textarea></div></body></html>"
+
+describe "A textarea in an overflow:hidden wrapper 1px taller (Chrome 159)":
+    it "AC-4: 1x keeps the 2px border and the wrapper's 1px strip clean of the value":
+        step("Chrome: rows 150-151 red, 152 yellow, 153 blue across the textarea's 160 left columns. Base painted line 11 over the border and the strip")
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(WRAP_PAGE, CSS_W, 400, 1, "cpu_simd")
+        val got = _row_classes(px, CSS_W, 150, 0, 160) + " " + _row_classes(px, CSS_W, 151, 0, 160) + " " + _row_classes(px, CSS_W, 152, 0, 160) + " " + _row_classes(px, CSS_W, 153, 0, 160)
+        expect(got).to_equal("R160 R160 Y160 B160")
+
+    it "AC-5: 4x cuts the textarea at the wrapper's device edge, the same row as a non-textarea block":
+        step("Chrome: the device-taller textarea and the block both keep ink on the last row inside (611 / 1303) and the next row (612 / 1304) is the blue bar")
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(WRAP_PAGE, CSS_W, 400, 4, "cpu_simd")
+        val stride = CSS_W * 4
+        val ta_inside = _row_classes(px, stride, 611, 0, 640).contains("K")
+        val blk_inside = _row_classes(px, stride, 1303, 0, 640).contains("K")
+        val got = "{ta_inside} " + _row_classes(px, stride, 612, 0, 640) + " {blk_inside} " + _row_classes(px, stride, 1304, 0, 640)
+        expect(got).to_equal("true B640 true B640")
+
+    it "AC-6: 4x paints no value past the wrapper's own clip edge":
+        step("an overflow:hidden box clips every descendant at its padding edge (Chrome 159: no ink below the wrapper). The textarea's clip edge grows by its device height delta, clamped to the wrapper's applied edge; without the clamp line 11 painted rows 608-629 past the wrapper's 604")
+        val k = 4
+        val bottom = k * (simple_web_layout_debug_layout_by_id(AUTO_WRAP_PAGE, CSS_W, 400, "w", "y").to_int() + simple_web_layout_debug_layout_by_id(AUTO_WRAP_PAGE, CSS_W, 400, "w", "h").to_int())
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(AUTO_WRAP_PAGE, CSS_W, 400, k, "cpu_simd")
+        var inked = ""
+        var y = bottom
+        while y < bottom + 32:
+            if _row_classes(px, CSS_W * k, y, 0, 640).contains("K"):
+                inked = inked + "{y} "
+            y = y + 1
+        expect("inked=[{inked}]").to_equal("inked=[]")

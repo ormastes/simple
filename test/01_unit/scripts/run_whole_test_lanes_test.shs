@@ -1,0 +1,30 @@
+#!/bin/sh
+# Unit contract test for scripts/check/run-whole-test-lanes.shs and
+# .github/workflows/whole-test-lanes.yml.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+SCRIPT="$ROOT/scripts/check/run-whole-test-lanes.shs"
+WF="$ROOT/.github/workflows/whole-test-lanes.yml"
+
+[ -f "$SCRIPT" ] || { echo "FAIL: missing $SCRIPT"; exit 1; }
+[ -f "$WF" ] || { echo "FAIL: missing $WF"; exit 1; }
+
+# 1. POSIX sh syntax check
+sh -n "$SCRIPT"
+
+# 2. Built-in isolated fixture selftest (CLI, P3+ enforcement, dry-run, live SDN receipts)
+sh "$SCRIPT" --selftest
+
+# 3. Workflow contract checks (triggers, 4-lane matrix, security, P3+ floor, no Rust seed fallback)
+grep -q '^[[:space:]]*workflow_dispatch:' "$WF" || { echo "FAIL: workflow missing workflow_dispatch"; exit 1; }
+grep -q '^[[:space:]]*push:' "$WF" || { echo "FAIL: workflow missing push trigger"; exit 1; }
+grep -Fq "release/**" "$WF" || { echo "FAIL: workflow missing release/** push branch"; exit 1; }
+grep -q '^[[:space:]]*permissions:' "$WF" || { echo "FAIL: workflow missing permissions"; exit 1; }
+grep -q '^[[:space:]]*concurrency:' "$WF" || { echo "FAIL: workflow missing concurrency"; exit 1; }
+grep -Fq 'lane: [md, comment, unit, sspec]' "$WF" || { echo "FAIL: workflow missing 4-lane matrix"; exit 1; }
+grep -Fq 'compiler_phase_floor:' "$WF" || { echo "FAIL: workflow missing compiler_phase_floor input"; exit 1; }
+grep -Fq 'scripts/check/run-whole-test-lanes.shs' "$WF" || { echo "FAIL: workflow does not invoke run-whole-test-lanes.shs"; exit 1; }
+! grep -Eq 'cargo build|compiler_rust/target' "$WF" || { echo "FAIL: workflow must never build or reference Rust seed"; exit 1; }
+
+echo "PASS: run_whole_test_lanes_test"

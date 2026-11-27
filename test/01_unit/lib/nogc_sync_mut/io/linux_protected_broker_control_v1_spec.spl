@@ -1,0 +1,57 @@
+# AUTHORED_NOT_RUN. These are DATA boundary checks, not native custody proof.
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.linux_protected_broker_state_v1.*
+
+describe "Original protected broker transaction DATA boundaries":
+    it "admits only a positive bounded original monotonic deadline":
+        step("REQ-BROKER-01 preserves one original cleanup acceptance budget")
+        expect(linux_broker_control_deadline_valid_v1(100, 101)).to_equal(true)
+        expect(linux_broker_control_deadline_valid_v1(100, 86400100)).to_equal(true)
+        for deadline in [0, 99, 100, 86400101]:
+            expect(linux_broker_control_deadline_valid_v1(100, deadline)).to_equal(false)
+        expect(linux_broker_control_deadline_valid_v1(-1, 100)).to_equal(false)
+
+    it "refuses changed identity and later deadlines on the same transaction":
+        step("REQ-BROKER-02 exact replay never rearms the canonical transaction")
+        val identity = "a".repeat(64)
+        expect(linux_broker_control_replay_v1(BROKER_CONTROL_WAITING_V1, identity, 1000, identity, 1000)).to_equal("")
+        expect(linux_broker_control_replay_v1(BROKER_CONTROL_WAITING_V1, identity, 1000, identity, 1001)).to_equal("broker-control-replay-mismatch")
+        expect(linux_broker_control_replay_v1(BROKER_CONTROL_WAITING_V1, identity, 1000, "b".repeat(64), 1000)).to_equal("broker-control-replay-mismatch")
+
+    it "never restarts a reserved or uncertain publication":
+        step("REQ-BROKER-03 partial publication remains a retained obligation")
+        for phase in [BROKER_CONTROL_RESERVED_V1, BROKER_CONTROL_PREPARED_V1, BROKER_CONTROL_PUBLISHING_V1, BROKER_CONTROL_UNCERTAIN_V1]:
+            expect(linux_broker_control_replay_v1(phase, "id", 1, "id", 1)).to_equal("broker-control-publication-uncertain")
+
+    it "distinguishes consumed acknowledgement from durable proof and reap":
+        step("REQ-BROKER-04 acknowledgement does not release runtime or journal obligations")
+        expect(linux_broker_control_replay_v1(BROKER_CONTROL_CONSUMED_V1, "id", 1, "id", 1)).to_equal("broker-control-response-consumed")
+        expect(linux_broker_control_replay_v1(BROKER_CONTROL_DURABLE_V1, "id", 1, "id", 1)).to_equal("broker-control-durable-proof-required")
+        expect(linux_broker_control_replay_v1(BROKER_CONTROL_REAP_V1, "id", 1, "id", 1)).to_equal("broker-control-reap-consumed")
+
+    it "keeps expiry terminal for cancellation":
+        step("REQ-BROKER-05 a later caller cannot extend the original acceptance deadline")
+        expect(linux_broker_control_replay_v1(BROKER_CONTROL_EXPIRED_V1, "id", 1, "id", 1)).to_equal("broker-control-deadline-expired")
+        expect(linux_broker_control_replay_v1(BROKER_CONTROL_EXPIRED_V1, "id", 1, "id", 2)).to_equal("broker-control-replay-mismatch")
+
+    it "rejects unknown canonical phases":
+        step("REQ-BROKER-06 unknown state is never a successful pending result")
+        for phase in [-1, 10, 9223372036854775807]:
+            expect(linux_broker_control_phase_valid_v1(phase)).to_equal(false)
+            expect(linux_broker_control_replay_v1(phase, "id", 1, "id", 1)).to_equal("broker-control-phase-invalid")
+
+    it "reserves only the exact mutable control names":
+        step("REQ-BROKER-07 mutable responses bypass the immutable protected file cache")
+        for name in ["broker.control.request", "broker.control.response"]:
+            expect(linux_broker_control_mutable_name_v1(name)).to_equal(true)
+        for name in ["tree-reaped.sdn", "sub/broker.control.response", "../broker.control.response", "broker.control.response.tmp"]:
+            expect(linux_broker_control_mutable_name_v1(name)).to_equal(false)
+
+    it "never treats unknown-origin default fields as effect facts":
+        step("REQ-BROKER-08 a refusal without native currentness retains unknown facts")
+        val refused = LinuxProtectedBrokerStorageTurnV1(error: "origin-refused")
+        expect(refused.facts_known).to_equal(false)
+        expect(refused.pending).to_equal(false)
+        expect(refused.verified).to_equal(false)
+        expect(refused.observation.is_none()).to_equal(true)
+        expect(refused.error).to_equal("origin-refused")

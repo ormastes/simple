@@ -1,6 +1,18 @@
 # RV64 host-GPU runtime needs a real QEMU exit facade
 ## Closed 2026-09-16 — Resolved for RV64 via sbi_shutdown(); remaining TODO is x86/ARM64 follow-up
 
+Verification note 2026-11-25 (worktree wt-p3-bas, Windows x86_64, inspection
+only — no QEMU on this host): the SRST-based facade exists as
+`sbi_shutdown()` in `src/os/kernel/arch/riscv64/sbi.spl:109` (SBI extension
+0x53525354, reset_type=0 shutdown), and the freestanding runtime
+`src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` carries no
+exit-success stub. `rt_qemu_exit_success` has no references left under
+`src/os/kernel/arch/riscv64/`. Limit: a grep for direct in-tree callers of
+`sbi_shutdown` finds none outside its definition, so the exact probe-leaf
+call site could not be re-confirmed statically, and the QEMU dynamic re-run
+is host-blocked; the closed status is retained on the strength of the
+facade's presence and the absence of the legacy stub path.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
 fresh dated repro if the symptom returns.

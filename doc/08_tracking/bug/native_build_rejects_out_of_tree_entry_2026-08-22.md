@@ -55,3 +55,27 @@ seed.
   under a synthetic root (its parent directory), as the pre-registry loader
   did, instead of failing the HIR phase.
 
+
+## 2026-11-10 status — SUPERSEDED (P3 bootstrap lane row 47, work/p3-boot6-20261110)
+
+Fixed in-tree on this lane's base (`4343ce254922`). The exact emitting
+condition is gone: `src/compiler/20.hir/hir_lowering/_Items/
+module_import_resolution.spl:327-377` (`resolve_import_list`) no longer
+treats an absent importing-module surface as a hard error. A no-import
+module returns early (`imports.len() == 0`), which covers this record's
+three-line out-of-tree hello world verbatim; a with-import module whose own
+surface is unregistered (out-of-tree entry, unit fixtures, single-module
+embedders) falls back to re-deriving the import item rows from the live
+parser import decls (a verbatim flatten of `owner.value.imports` by
+construction), preserving semantics exactly. The in-code comment names this
+defect family explicitly. Landed via the #7463/#7492/#7545/#7597 merge chain
+(all ancestors of this base); the surface-miss diagnostic under
+`SIMPLE_BOOTSTRAP_DIAG=1` (`[surface-miss] ... registry_size=...`) is the
+fail-loud breadcrumb if it ever resurfaces. Pinned by
+`test/01_unit/compiler/hir/standalone_module_no_imports_needs_no_surface_spec.spl`,
+`test/01_unit/compiler/common/module_path_naming_spec.spl` (out-of-tree
+`entry_main_symbol=false` contract) and
+`test/01_unit/compiler/driver/dotted_source_entry_identity_spec.spl` —
+seed-smoke results in build/review/p3fix-boot6-20261110.sdn. The
+synthetic-root registration this record suggested is unnecessary given the
+fallback; no bootstrap-script workaround is needed any more.

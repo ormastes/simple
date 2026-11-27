@@ -178,3 +178,43 @@ The existing retained-artifact credential scan and destruction of every
 credential-bearing normal/crash image remain in force. This record is not
 closed until a freshly built ARM64 payload completes the QEMU gate and produces
 the signed target readback receipt.
+
+## 2026-11-05 — seed-interpreter evidence gap closed (work/libbug-std-credzero-20261105)
+
+**Gap.** The 2026-08-21/09-22 source corrections were verifiable only on a
+native build: `sha256_u8_hex_zeroizing` routed its message schedule and final
+projection through `secure_zero_i64_slots`, and boxed non-byte arrays answer
+`rt_array_data_ptr == 0` on the Rust seed interpreter (it only addresses
+packed `[u8]` storage). The wipe therefore failed closed there, the zeroizing
+hash returned nil, `register_authenticated_bytes` refused registration, and
+`test/01_unit/lib/database/server/credential_zeroization_spec.spl` could not
+pass under the seed — 3 of 7 examples failed
+(`authenticates the same wire credential…`, `leaves the caller's buffer
+wipeable…`, `accepts a digest only after its temporary hash workspace was
+wiped`). The boundary-vectors spec even documented nil-on-interpreter as
+expected, so the credential spec had no green path on the only runtime
+available to this lane.
+
+**Fix (src/lib/common/crypto/sha256.spl only).** `_sha256_u8_hex_owned` now
+keeps its 64-word message schedule and eight-word final projection in ONE
+reused packed `[u8]` buffer each (big-endian word layout, 256 and 32 bytes),
+wiped via `secure_zero_u8_slots` — the volatile overwrite/barrier/readback
+facade that every engine can address. Digest values are bit-identical
+(`sha256_text(s) == sha256_u8_hex(rt_text_to_bytes(s))` is preserved by
+construction; FIPS vectors still pin it). Word writes are inlined at each
+call site because Simple arrays are caller-owned values: a mutating helper
+would update only its copy. No immutable `text` copy of any credential is
+introduced; the fail-closed refusal on wipe failure is unchanged.
+
+**Evidence (Rust seed interpreter, aarch64 host, `--mode=interpreter`,
+bin/simple unavailable — phase-snapshot seed binary substituted):**
+
+- `test/01_unit/lib/database/server/credential_zeroization_spec.spl`:
+  before 4/7 passed, 3 failed; after 7 passed, 0 failed.
+- Full regression `test/01_unit/lib/database/server` (both specs):
+  24 passed, 0 failed.
+- `test/01_unit/lib/common/crypto/sha256_boundary_vectors_spec.spl`
+  (FIPS 180-4 vectors, streaming, zeroization): 7 passed, 0 failed.
+
+This is host/seed evidence; the ARM64 QEMU signed-receipt gate above remains
+the closing requirement for the live SimpleOS path.

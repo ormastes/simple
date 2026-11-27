@@ -1,7 +1,7 @@
 # Bug: `verification/lean/__init__.spl` bare `export Symbol, ...` lines never import the symbols they claim to re-export — package-level `use verification.lean.{X}` fails while direct submodule import works
 
 - **Date:** 2026-07-20
-- **Status:** open
+- **Status:** RESOLVED 2026-11-25 — `__init__.spl` now uses `export use module.*` throughout; see verification note at end
 - **Area:** `src/compiler_rust/lib/std/src/verification/lean/__init__.spl`
 - **Binary:** reproduced on `bin/release/x86_64-unknown-linux-gnu/simple`, which currently prints the Rust-seed bootstrap warning — this is an import/export-resolution defect, not obviously seed-specific, but not independently re-verified on a genuinely self-hosted binary.
 
@@ -44,3 +44,24 @@ Add the missing `use module.{Names...}` (or convert each bare `export Name, ...`
 bin/release/x86_64-unknown-linux-gnu/simple test test/00_formal_verification/compiler/lean_block_integration_spec.spl --no-session-daemon
 ```
 5/8 examples fail with `semantic: variable 'LeanCodegenOptions' not found` (or equivalent for other symbols reached the same way).
+
+## 2026-11-25 verification (release/1.0.0, worktree p2w6-ab) — STALE, closed
+
+The suggested fix landed exactly as recommended.
+`src/compiler_rust/lib/std/src/verification/lean/__init__.spl` no longer
+contains bare `export Name, ...` lines; every submodule re-export now uses
+the `export use <module>.*` form (e.g. lines ~59-80:
+`export use compiler_rust.lib.std.src.verification.lean.lean_block.*`,
+`...codegen.*`, `...contracts.*`, `...emitter.*`, ...), matching the
+already-correct `codegen.spl` pattern. `LeanCodegenOptions` is reachable
+through the package root: `__init__.spl` → `codegen.*` →
+`codegen.spl`'s `export use ..._Codegen.lean_codegen.*`, where the class is
+defined (`_Codegen/lean_codegen.spl`).
+
+Execution limit: the repro spec
+(`test/00_formal_verification/compiler/lean_block_integration_spec.spl`)
+could not be re-run on this host — `bin/simple.exe test` fails repo-wide at
+release/1.0.0 HEAD (`64dfa6d980f`) because the pinned Rust seed
+(v1.0.0-rc.1) rejects `@representation_boundary`
+(`src/app/test_runner_new/test_runner_client.spl:9:1`). Verified by code
+inspection; closing as STALE/RESOLVED.

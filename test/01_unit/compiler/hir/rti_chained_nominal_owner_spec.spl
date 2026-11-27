@@ -1,0 +1,411 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# RTI chained generic-factory / nominal owner receivers
+
+Repairs `receiver_owner_with_args` in `src/compiler/20.hir/return_type_interface_v1.spl`
+when a chained receiver's resolved RTI entry is `ReturnTypeEntry.Decided(RtType.Nominal(decl, args))`
+whose `args` still carry caller `Param`s (or nested parameter containers), e.g.:
+- `make_store<i64, T>(v).flag()` / `.get_res()` / `.get_opt().is_some()` in `<T>`
+- `make_bool_store<K>(true).remove(key)` in `<K>`
+- `inner.clone_store().remove(key)` inside `Facade<K>` (`inner: InnerStore<K, bool>`)
+
+Owner discovery returns `(decl, false, args)` directly for `Nominal(decl, args)`
+so `method_return` looks up `decl::method` and applies `args` in the caller's
+binder context (`consumer_params`). Bare `RtType.Param`, `Union`, and `AsyncRef`
+still pass through `require_concrete`, builtin heads still return `E-RTI-001`,
+and outer concrete consumers still enforce `require_concrete` on the result.
+"""
+
+# @tag: unit, compiler, hir, mir, generics, rti
+# @cover src/compiler/20.hir/return_type_interface_v1.spl
+
+use std.spec.*
+use std.io_runtime.{env_set, env_get_nullable}
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.return_type_interface_v1.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val PROVIDER_SRC = """
+pub struct Boxed<W>:
+    item: W
+
+    pub fn unbox() -> W:
+        self.item
+
+    pub fn label() -> text:
+        "boxed"
+
+pub struct Store<K, V>:
+    value: V
+
+    pub fn get() -> V:
+        self.value
+
+    pub fn get_opt() -> V?:
+        Some(self.value)
+
+    pub fn get_res() -> Result<V, text>:
+        Ok(self.value)
+
+    pub fn remove(key: K) -> V?:
+        Some(self.value)
+
+    pub fn flag() -> bool:
+        true
+
+    pub fn wrap() -> Boxed<V>:
+        Boxed(item: self.value)
+
+    pub fn clone_store() -> Store<K, V>:
+        Store(value: self.value)
+
+pub fn make_store<K, V>(v: V) -> Store<K, V>:
+    Store(value: v)
+
+pub fn make_bool_store<K>(v: bool) -> Store<K, bool>:
+    Store(value: v)
+
+pub fn ident<T>(x: T) -> T:
+    x
+"""
+
+val FACADE_SRC = """
+struct InnerStore<K, V>:
+    value: V
+
+    fn remove(key: K) -> V?:
+        Some(self.value)
+
+    fn clone_store() -> InnerStore<K, V>:
+        InnerStore(value: self.value)
+
+struct Facade<K>:
+    inner: InnerStore<K, bool>
+
+    me chained_pred(key: K) -> bool:
+        val inner = self.inner
+        inner.clone_store().remove(key).is_some()
+
+    fn chained_match(key: K) -> bool:
+        val inner = self.inner
+        match inner.clone_store().remove(key):
+            case Some(flag): flag
+            case None: false
+"""
+
+fn lower_pair_hirs(consumer_src: text) -> (HirModule, HirModule):
+    val full_consumer = "use lib.store.\{Boxed, Store, make_store, make_bool_store, ident\}\n\n" + consumer_src
+    val log = Logger(level: 0)
+    val prov_ast = parse_full_frontend(PROVIDER_SRC, "lib/store.spl", "lib.store", log)
+    val cons_ast = parse_full_frontend(full_consumer, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.store"] = prov_ast
+    modules["app.main"] = cons_ast
+    val sources = [
+        SourceFile(path: "lib/store.spl", content: PROVIDER_SRC, module_name: "lib.store"),
+        SourceFile(path: "app/main.spl", content: full_consumer, module_name: "app.main")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var prov_lowering = hirlowering_for_module("lib.store", surfaces)
+    var cons_lowering = hirlowering_for_module("app.main", surfaces)
+    (prov_lowering.lower_module(prov_ast), cons_lowering.lower_module(cons_ast))
+
+fn lower_single_hir(src: text, path: text) -> HirModule:
+    val ast = parse_full_frontend(src, path, path, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_module(ast)
+
+fn run_mir_pair(provider: HirModule, consumer: HirModule, strict: bool) -> text:
+    val previous = env_get_nullable("SIMPLE_RTI_STRICT") ?? ""
+    if strict:
+        env_set("SIMPLE_RTI_STRICT", "1")
+    var lowering = MirLowering.new(consumer.symbols)
+    var mods: Dict<text, HirModule> = {}
+    mods["lib.store"] = provider
+    mods["app.main"] = consumer
+    lowering.prescan_module_struct_names(mods, "lib.store")
+    lowering.prescan_module_struct_names(mods, "app.main")
+    lowering.prescan_module_functions_v1(mods, "lib.store", "lib.store", provider.symbols)
+    lowering.prescan_module_functions_v1(mods, "app.main", "app.main", consumer.symbols)
+    val _ = lowering.lower_module(consumer, [provider, consumer])
+    env_set("SIMPLE_RTI_STRICT", previous)
+    var out = ""
+    for e in lowering.errors:
+        out = out + e.message + "\n"
+    out
+
+fn run_mir_single(hir: HirModule, strict: bool) -> text:
+    val previous = env_get_nullable("SIMPLE_RTI_STRICT") ?? ""
+    if strict:
+        env_set("SIMPLE_RTI_STRICT", "1")
+    var lowering = MirLowering.new(hir.symbols)
+    val _ = lowering.lower_module(hir)
+    env_set("SIMPLE_RTI_STRICT", previous)
+    var out = ""
+    for e in lowering.errors:
+        out = out + e.message + "\n"
+    out
+
+fn fn_named(module: HirModule, name: text) -> HirFunction:
+    var found = module.functions.values()[0]
+    for f in module.functions.values():
+        if f.name == name:
+            found = f
+    found
+
+fn tail_expr(f: HirFunction) -> HirExpr:
+    f.body.value
+
+fn match_subject_expr(f: HirFunction) -> HirExpr:
+    var found = f.body.value
+    for st in f.body.stmts:
+        match st.kind:
+            case HirStmtKind.Expr(e):
+                match e.kind:
+                    case HirExprKind.MatchCase(scrutinee, _): found = scrutinee
+                    case _: ()
+            case _: ()
+    match f.body.value.kind:
+        case HirExprKind.MatchCase(scrutinee, _): found = scrutinee
+        case _: ()
+    found
+
+fn rti_table_of(modules: [HirModule]) -> ReturnTypeInterfaceTable:
+    var table = ReturnTypeInterfaceTable.new()
+    for m in modules:
+        table.register_hir_module(m).unwrap()
+    table
+
+fn err_code<T>(r: Result<T, RtiError>) -> text:
+    match r:
+        case Ok(_): "ok"
+        case Err(e): e.code
+
+fn err_message<T>(r: Result<T, RtiError>) -> text:
+    match r:
+        case Ok(_): ""
+        case Err(e): e.message
+
+fn entry_concrete_text(table: ReturnTypeInterfaceTable, res: Result<ReturnTypeEntry, RtiError>) -> text:
+    match res:
+        case Err(e): "err:" + e.code + ":" + e.message
+        case Ok(entry):
+            match table.resolve(entry):
+                case Err(e): "err:" + e.code + ":" + e.message
+                case Ok(resolved):
+                    match table.require_concrete(resolved):
+                        case Err(e): "err:" + e.code + ":" + e.message
+                        case Ok(term): rti_term_canonical_text(term)
+
+fn entry_raw_text(table: ReturnTypeInterfaceTable, res: Result<ReturnTypeEntry, RtiError>) -> text:
+    match res:
+        case Err(e): "err:" + e.code + ":" + e.message
+        case Ok(entry):
+            match table.resolve(entry):
+                case Err(e): "err:" + e.code + ":" + e.message
+                case Ok(ReturnTypeEntry.Decided(term)): rti_term_canonical_text(term)
+                case Ok(ReturnTypeEntry.Union(_)): "union"
+                case Ok(ReturnTypeEntry.AsyncRef(_)): "async"
+
+describe "RTI chained generic-factory nominal owner discovery":
+    it "resolves concrete, mixed, and erased-generic factory chains via RTI":
+        val src = """
+fn concrete_res() -> text:
+    match make_store<i64, text>("hi").get_res():
+        case Ok(s): s
+        case Err(e): e
+
+fn erased_bool_remove<K>(key: K) -> bool:
+    match make_bool_store<K>(true).remove(key):
+        case Some(flag): flag
+        case None: false
+
+fn erased_flag<T>(v: T) -> bool:
+    make_store<i64, T>(v).flag()
+
+fn erased_nested_label<T>(v: T) -> text:
+    make_store<i64, Result<T, text>>(Ok(v)).wrap().label()
+
+fn erased_res<T>(v: T) -> bool:
+    match make_store<i64, T>(v).get_res():
+        case Ok(_): true
+        case Err(_): false
+
+fn erased_nested_opt<T>(v: T) -> bool:
+    match make_store<i64, Option<T>>(Some(v)).wrap().unbox():
+        case Some(_): true
+        case None: false
+
+fn erased_opt_pred<T>(v: T) -> bool:
+    make_store<i64, T>(v).get_opt().is_some()
+
+fn erased_res_pred<T>(v: T) -> bool:
+    make_store<i64, T>(v).get_res().is_ok()
+"""
+        val (prov, cons) = lower_pair_hirs(src)
+        val table = rti_table_of([prov, cons])
+
+        expect(entry_concrete_text(table, table.callee_return(
+            match_subject_expr(fn_named(cons, "concrete_res")), cons.symbols, None, []))).to_equal("result(b:text,b:text)")
+
+        expect(entry_concrete_text(table, table.callee_return(
+            match_subject_expr(fn_named(cons, "erased_bool_remove")), cons.symbols, None, ["K"]))).to_equal("opt(b:bool)")
+
+        expect(entry_concrete_text(table, table.callee_return(
+            tail_expr(fn_named(cons, "erased_flag")), cons.symbols, None, ["T"]))).to_equal("b:bool")
+
+        expect(entry_concrete_text(table, table.callee_return(
+            tail_expr(fn_named(cons, "erased_nested_label")), cons.symbols, None, ["T"]))).to_equal("b:text")
+
+        val res_call = table.callee_return(match_subject_expr(fn_named(cons, "erased_res")), cons.symbols, None, ["T"])
+        expect(entry_raw_text(table, res_call)).to_equal("result(p0,b:text)")
+        expect(err_code(table.require_concrete(res_call.unwrap()))).to_equal("E-RTI-003")
+
+        val nested_call = table.callee_return(match_subject_expr(fn_named(cons, "erased_nested_opt")), cons.symbols, None, ["T"])
+        expect(entry_raw_text(table, nested_call)).to_equal("opt(p0)")
+        expect(err_code(table.require_concrete(nested_call.unwrap()))).to_equal("E-RTI-003")
+
+        val opt_pred = table.callee_return(tail_expr(fn_named(cons, "erased_opt_pred")), cons.symbols, None, ["T"])
+        expect(err_code(opt_pred)).to_equal("E-RTI-001")
+        expect(err_message(opt_pred)).to_contain("is not a struct/class")
+
+        val res_pred = table.callee_return(tail_expr(fn_named(cons, "erased_res_pred")), cons.symbols, None, ["T"])
+        expect(err_code(res_pred)).to_equal("E-RTI-001")
+        expect(err_message(res_pred)).to_contain("is not a struct/class")
+
+    it "lowers concrete chains under strict MIR and erased chains under non-strict MIR without E-RTI-003":
+        val strict_concrete_src = """
+fn concrete_res() -> text:
+    match make_store<i64, text>("hi").get_res():
+        case Ok(s): s
+        case Err(e): e
+"""
+        val (prov_c, cons_c) = lower_pair_hirs(strict_concrete_src)
+        expect(run_mir_pair(prov_c, cons_c, true)).to_equal("")
+
+        val erased_mir_src = """
+fn erased_bool_remove<K>(key: K) -> bool:
+    match make_bool_store<K>(true).remove(key):
+        case Some(flag): flag
+        case None: false
+
+fn erased_flag<T>(v: T) -> bool:
+    make_store<i64, T>(v).flag()
+
+fn erased_nested_label<T>(v: T) -> text:
+    make_store<i64, Result<T, text>>(Ok(v)).wrap().label()
+
+fn erased_opt_pred<T>(v: T) -> bool:
+    make_store<i64, T>(v).get_opt().is_some()
+
+fn erased_res_pred<T>(v: T) -> bool:
+    make_store<i64, T>(v).get_res().is_ok()
+"""
+        val (prov_e, cons_e) = lower_pair_hirs(erased_mir_src)
+        expect(run_mir_pair(prov_e, cons_e, false)).to_equal("")
+
+describe "Case B: Facade<K> inner: InnerStore<K, bool> chained receiver":
+    it "specializes concrete slot with consumer_params and lowers without E-RTI-003":
+        val hir = lower_single_hir(FACADE_SRC, "src/rti_facade/facade.spl")
+        val table = rti_table_of([hir])
+
+        val match_expr = match_subject_expr(fn_named(hir, "chained_match"))
+        expect(entry_concrete_text(table, table.callee_return(match_expr, hir.symbols, None, ["K"]))).to_equal("opt(b:bool)")
+
+        val omitted = table.callee_return(match_expr, hir.symbols, None, [])
+        expect(entry_raw_text(table, omitted)).to_equal("opt(p1)")
+        expect(err_code(table.require_concrete(omitted.unwrap()))).to_equal("E-RTI-003")
+
+        val pred_expr = tail_expr(fn_named(hir, "chained_pred"))
+        val pred_with_k = table.callee_return(pred_expr, hir.symbols, None, ["K"])
+        val pred_no_k = table.callee_return(pred_expr, hir.symbols, None, [])
+        expect(err_code(pred_with_k)).to_equal("E-RTI-001")
+        expect(err_code(pred_no_k)).to_equal("E-RTI-001")
+
+        expect(run_mir_single(hir, false)).to_equal("")
+
+describe "negative controls: unbound params, missing owners, bare Param, builtin heads, Union/AsyncRef":
+    it "rejects unbound caller params, missing nominal args, missing owner rows, and bare Param":
+        val src = """
+fn probe_unbound<T>(v: T) -> bool:
+    match make_store<i64, T>(v).get_res():
+        case Ok(_): true
+        case Err(_): false
+
+fn probe_bare<T>(v: T) -> bool:
+    ident<T>(v).flag()
+"""
+        val (prov, cons) = lower_pair_hirs(src)
+        val table = rti_table_of([prov, cons])
+
+        val unbound_expr = match_subject_expr(fn_named(cons, "probe_unbound"))
+        expect(err_code(table.callee_return(unbound_expr, cons.symbols, None, []))).to_equal("E-RTI-007")
+        expect(err_code(table.callee_return(unbound_expr, cons.symbols, None, ["Other"]))).to_equal("E-RTI-007")
+
+        val bare_expr = tail_expr(fn_named(cons, "probe_bare"))
+        expect(err_code(table.callee_return(bare_expr, cons.symbols, None, ["T"]))).to_equal("E-RTI-003")
+
+        val foreign_arg = HirType(kind: HirTypeKind.Named(SymbolId(id: -1), []), span: Span.empty())
+        val int_arg = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        val missing_arg_call = HirExpr(
+            kind: HirExprKind.Call(
+                HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: -1), "lib.store.make_store"), has_type_: false, type_: int_arg, span: Span.empty()),
+                [], [int_arg, foreign_arg]),
+            has_type_: false, type_: int_arg, span: Span.empty())
+        val chained_missing_arg = HirExpr(
+            kind: HirExprKind.MethodCall(missing_arg_call, "get_res", [], MethodResolution.Unresolved),
+            has_type_: false, type_: int_arg, span: Span.empty())
+        expect(err_code(table.callee_return(chained_missing_arg, cons.symbols, None, ["T"]))).to_equal("E-RTI-004")
+
+        val type_t = HirType(kind: HirTypeKind.TypeParam("T", []), span: Span.empty())
+        val valid_factory_call = HirExpr(
+            kind: HirExprKind.Call(
+                HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: -1), "lib.store.make_store"), has_type_: false, type_: int_arg, span: Span.empty()),
+                [], [int_arg, type_t]),
+            has_type_: false, type_: int_arg, span: Span.empty())
+        val missing_method = HirExpr(
+            kind: HirExprKind.MethodCall(valid_factory_call, "absent_method", [], MethodResolution.Unresolved),
+            has_type_: false, type_: int_arg, span: Span.empty())
+        expect(err_code(table.callee_return(missing_method, cons.symbols, None, ["T"]))).to_equal("E-RTI-001")
+
+    it "keeps builtin heads E-RTI-001 and Union/AsyncRef E-RTI-002 on chained receivers":
+        var table = ReturnTypeInterfaceTable.new()
+        val dummy = HirType(kind: HirTypeKind.Unit, span: Span.empty())
+        val type_t = HirType(kind: HirTypeKind.TypeParam("T", []), span: Span.empty())
+
+        val opt_decl = rti_fn_ref("m.neg", "ret_opt")
+        val union_decl = rti_fn_ref("m.neg", "ret_union")
+        val async_decl = rti_fn_ref("m.neg", "ret_async")
+        table.register_rows([
+            ReturnTypeRow(decl: opt_decl, key: CalleeKey(module_id: "m.neg", owner: None, name: "ret_opt", is_static: false),
+                type_param_count: 1, entry: ReturnTypeEntry.Decided(RtType.OptionalT(RtType.Param(0)))),
+            ReturnTypeRow(decl: union_decl, key: CalleeKey(module_id: "m.neg", owner: None, name: "ret_union", is_static: false),
+                type_param_count: 0, entry: ReturnTypeEntry.Union([RtType.Builtin("i32"), RtType.Builtin("i64")])),
+            ReturnTypeRow(decl: async_decl, key: CalleeKey(module_id: "m.neg", owner: None, name: "ret_async", is_static: false),
+                type_param_count: 0, entry: ReturnTypeEntry.AsyncRef(rti_fn_ref("m.neg", "unloaded")))
+        ]).unwrap()
+
+        val opt_recv = HirExpr(
+            kind: HirExprKind.Call(HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: -1), "m.neg.ret_opt"), has_type_: false, type_: dummy, span: Span.empty()), [], [type_t]),
+            has_type_: false, type_: dummy, span: Span.empty())
+        val union_recv = HirExpr(
+            kind: HirExprKind.Call(HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: -1), "m.neg.ret_union"), has_type_: false, type_: dummy, span: Span.empty()), [], []),
+            has_type_: false, type_: dummy, span: Span.empty())
+        val async_recv = HirExpr(
+            kind: HirExprKind.Call(HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: -1), "m.neg.ret_async"), has_type_: false, type_: dummy, span: Span.empty()), [], []),
+            has_type_: false, type_: dummy, span: Span.empty())
+
+        expect(err_code(table.method_return(opt_recv, "is_some", SymbolTable.new(), None, ["T"]))).to_equal("E-RTI-001")
+        expect(err_code(table.method_return(union_recv, "foo", SymbolTable.new(), None, []))).to_equal("E-RTI-002")
+        expect(err_code(table.method_return(async_recv, "foo", SymbolTable.new(), None, []))).to_equal("E-RTI-002")

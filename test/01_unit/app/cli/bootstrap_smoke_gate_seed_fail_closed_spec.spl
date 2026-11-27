@@ -19,19 +19,29 @@
 # This is the inverse of the usual assertion: a green from the gate is the
 # failure condition.
 
+use std.io_runtime.{env_get}
+use std.nogc_sync_mut.io.process_ops.{resolve_shell_argv, is_posix_shell_argv}
+
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_file_exists(path: text) -> bool
 
 val GATE = "scripts/check/check-bootstrap-essential-tools-smoke.shs"
 
+fn _smoke_gate_binary() -> text:
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    if rt_file_exists("bin/simple.exe"):
+        return "bin/simple.exe"
+    env_get("SIMPLE_BINARY") ?? "bin/simple"
+
 fn binary_is_rust_seed() -> bool:
-    val (out, err, _rc) = rt_process_run_timeout("bin/simple", ["--version"], 120000)
+    val (out, err, _rc) = rt_process_run_timeout(_smoke_gate_binary(), ["--version"], 120000)
     "{out}{err}".contains("bootstrap seed")
 
 describe "the bootstrap smoke gate fails closed on a Rust-seed binary":
     it "the gate script and the binary under test both exist (non-vacuity)":
         expect(rt_file_exists(GATE)).to_equal(true)
-        expect(rt_file_exists("bin/simple")).to_equal(true)
+        expect(rt_file_exists(_smoke_gate_binary())).to_equal(true)
 
     it "does not certify bootstrap while bin/simple is a seed":
         if not binary_is_rust_seed():
@@ -40,7 +50,13 @@ describe "the bootstrap smoke gate fails closed on a Rust-seed binary":
             # against. Do not weaken the branch below to make this case pass.
             expect(binary_is_rust_seed()).to_equal(false)
         else:
-            val (out, err, rc) = rt_process_run_timeout("sh", [GATE], 600000)
+            val cmd = "PATH=\"/usr/bin:$PATH\"; b=$(cygpath -u \"$1\" 2>/dev/null || printf '%s' \"$1\"); SIMPLE_BINARY=\"$b\" sh \"$2\""
+            val (sh_bin, sh_argv) = resolve_shell_argv(cmd)
+            val full_argv = if is_posix_shell_argv(sh_bin):
+                sh_argv + ["_", _smoke_gate_binary(), GATE]
+            else:
+                [GATE, _smoke_gate_binary()]
+            val (out, err, rc) = rt_process_run_timeout(sh_bin, full_argv, 600000)
             val combined = "{out}{err}"
             # rc is read directly from the process tuple, never through a pipe.
             expect(rc == 0).to_equal(false)

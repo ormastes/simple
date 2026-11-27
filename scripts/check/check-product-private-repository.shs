@@ -1,9 +1,13 @@
 #!/bin/sh
 # Actual Git/physical-copy controls; no compiler, seed or production snapshot.
+# Verdict is the last stdout line: PASS — <n> controls checked (0) /
+# FAIL — <what broke> (1) / ERROR — nothing was checked (<reason>) (2).
 set -eu
 root=$(CDPATH= cd -P -- "$(dirname "$0")/../.." && pwd -P)
-. "$root/scripts/bootstrap/lib/product-private-repository.shs"
-fixture=$(mktemp -d "${TMPDIR:-/tmp}/product-private-repository.XXXXXXXX")
+LIB="$root/scripts/bootstrap/lib/product-private-repository.shs"
+[ -f "$LIB" ] || { echo "ERROR — nothing was checked (missing $LIB)"; exit 2; }
+. "$LIB"
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/product-private-repository.XXXXXXXX") || { echo "ERROR — nothing was checked (mktemp)"; exit 2; }
 printf 'fixture=%s\n' "$fixture"
 source_repo="$fixture/source"
 git -c core.longpaths=true init -q "$source_repo"
@@ -16,20 +20,31 @@ git -C "$source_repo" add src/lib/value.spl
 git -C "$source_repo" commit -qm fixture
 head=$(git -C "$source_repo" rev-parse HEAD)
 index_before=$(git -C "$source_repo" write-tree)
+controls=0
 bootstrap_product_private_repository "$source_repo" "$fixture/valid" "$head"
-[ -d "$fixture/valid/.git" ] && [ ! -f "$fixture/valid/.git" ]
-[ "$(git -C "$source_repo" write-tree)" = "$index_before" ]
-[ "$(git -C "$source_repo" rev-parse HEAD)" = "$head" ]
-[ "$(git -C "$source_repo" worktree list --porcelain | sed -n '/^worktree /p' | wc -l | tr -d ' ')" = 1 ]
-printf 'PASS ordinary-private-index-no-source-mutation\n'
-if bootstrap_product_private_repository "$source_repo" "$fixture/valid" "$head"; then exit 1; fi
-printf 'PASS existing-destination-rejected\n'
-if bootstrap_product_private_repository "$source_repo" "$fixture/wrong" 0000000000000000000000000000000000000000; then exit 1; fi
-[ ! -e "$fixture/wrong" ]
-printf 'PASS wrong-source-head-rejected-before-copy\n'
+{ [ -d "$fixture/valid/.git" ] && [ ! -f "$fixture/valid/.git" ]; } || { echo "FAIL — control 1: private clone is not a real .git directory"; exit 1; }
+[ "$(git -C "$source_repo" write-tree)" = "$index_before" ] || { echo "FAIL — control 1: source index mutated by private clone"; exit 1; }
+[ "$(git -C "$source_repo" rev-parse HEAD)" = "$head" ] || { echo "FAIL — control 1: source HEAD moved by private clone"; exit 1; }
+[ "$(git -C "$source_repo" worktree list --porcelain | sed -n '/^worktree /p' | wc -l | tr -d ' ')" = 1 ] || { echo "FAIL — control 1: private clone registered as a git worktree"; exit 1; }
+controls=$((controls + 1))
+echo "control ok: ordinary-private-index-no-source-mutation"
+if bootstrap_product_private_repository "$source_repo" "$fixture/valid" "$head"; then
+    echo "FAIL — control 2: re-bootstrap into an existing destination was accepted"; exit 1
+fi
+controls=$((controls + 1))
+echo "control ok: existing-destination-rejected"
+if bootstrap_product_private_repository "$source_repo" "$fixture/wrong" 0000000000000000000000000000000000000000; then
+    echo "FAIL — control 3: wrong source head admitted before copy"; exit 1
+fi
+[ ! -e "$fixture/wrong" ] || { echo "FAIL — control 3: destination created despite wrong source head"; exit 1; }
+controls=$((controls + 1))
+echo "control ok: wrong-source-head-rejected-before-copy"
 # Break only this disposable clone's borrowed-object binding; source stays intact.
 printf '%s\n' "$fixture/absent-objects" >"$fixture/valid/.git/objects/info/alternates"
-if git -C "$fixture/valid" cat-file -e "$head^{commit}" 2>/dev/null; then exit 1; fi
-[ "$(git -C "$source_repo" rev-parse HEAD)" = "$head" ]
-printf 'PASS lost-borrowed-objects-fail-closed\n'
-printf 'PASS controls=4 retained_fixture=%s\n' "$fixture"
+if git -C "$fixture/valid" cat-file -e "$head^{commit}" 2>/dev/null; then
+    echo "FAIL — control 4: lost borrowed objects still resolve"; exit 1
+fi
+[ "$(git -C "$source_repo" rev-parse HEAD)" = "$head" ] || { echo "FAIL — control 4: source HEAD moved by broken clone"; exit 1; }
+controls=$((controls + 1))
+echo "control ok: lost-borrowed-objects-fail-closed"
+printf 'PASS — %s controls checked (ordinary private index, existing destination, wrong source head, lost borrowed objects); retained_fixture=%s\n' "$controls" "$fixture"

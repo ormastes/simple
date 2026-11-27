@@ -1,0 +1,93 @@
+"""
+# ELF Artifact Gate Negative Controls Prevention Specification
+
+Prevention tests for bug 5117 (`native_build_reports_success_for_functionless_artifact_2026-08-10`).
+Verifies negative and boundary controls in `elf64_defined_func_count` and
+`native_artifact_functionless_reason`: undefined `SHN_UNDEF` `STT_FUNC` symbols,
+object-only symbols (`STT_OBJECT`), local+global defined functions (`STT_FUNC`
+with nonzero section index), truncated ELF headers, nonexistent paths, and
+non-ELF PE/COFF headers.
+"""
+
+use std.spec.*
+use app.io.file_ops.{file_write_bytes, file_remove}
+use compiler.backend.introspection.elf_artifact_gate.{elf64_defined_func_count, native_artifact_functionless_reason}
+
+fn write_le(buf: [u8], off: i64, value: i64, width: i64) -> [u8]:
+    var out = buf
+    var i = 0
+    var cur = value
+    while i < width:
+        out[off + i] = (cur % 256) as u8
+        cur = cur / 256
+        i = i + 1
+    out
+
+fn build_minimal_elf64(infos: [i64], shndxs: [i64]) -> [u8]:
+    val sym_count = infos.len()
+    val ehdr_size = 64
+    val shdr_count = 3
+    val shdr_size = 64 * shdr_count
+    val symtab_off = ehdr_size + shdr_size
+    val symtab_size = sym_count * 24
+    val total_len = symtab_off + symtab_size
+    var buf: [u8] = []
+    var k = 0
+    while k < total_len:
+        buf.push(0u8)
+        k = k + 1
+    buf[0] = 0x7Fu8
+    buf[1] = 0x45u8
+    buf[2] = 0x4Cu8
+    buf[3] = 0x46u8
+    buf[4] = 2u8
+    buf[5] = 1u8
+    buf[6] = 1u8
+    buf = write_le(buf, 16, 2, 2)
+    buf = write_le(buf, 18, 62, 2)
+    buf = write_le(buf, 40, ehdr_size, 8)
+    buf = write_le(buf, 58, 64, 2)
+    buf = write_le(buf, 60, shdr_count, 2)
+    buf = write_le(buf, 62, 0, 2)
+
+    val sym_sh = ehdr_size + 128
+    buf = write_le(buf, sym_sh + 4, 2, 4)
+    buf = write_le(buf, sym_sh + 24, symtab_off, 8)
+    buf = write_le(buf, sym_sh + 32, symtab_size, 8)
+    buf = write_le(buf, sym_sh + 56, 24, 8)
+
+    var s = 0
+    while s < sym_count:
+        val base = symtab_off + s * 24
+        buf[base + 4] = infos[s] as u8
+        buf = write_le(buf, base + 6, shndxs[s], 2)
+        s = s + 1
+    buf
+
+describe "elf_artifact_gate negative controls (bug 5117)":
+    """Verifies ELF64 defined-function counting and non-ELF/functionless gate checks."""
+
+    it "ignores undefined SHN_UNDEF STT_FUNC and data-only STT_OBJECT symbols":
+        val undef_only = build_minimal_elf64([0x12, 0x11], [0, 1])
+        expect(elf64_defined_func_count(undef_only)).to_equal(0)
+
+    it "counts both STB_LOCAL and STB_GLOBAL defined STT_FUNC symbols":
+        val mixed = build_minimal_elf64([0x02, 0x12, 0x12, 0x11], [1, 0, 2, 1])
+        expect(elf64_defined_func_count(mixed)).to_equal(2)
+
+    it "rejects truncated ELF header and non-ELF headers cleanly":
+        expect(elf64_defined_func_count([0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8])).to_equal(-1)
+        expect(elf64_defined_func_count([0x4Du8, 0x5Au8, 0x90u8, 0x00u8])).to_equal(-1)
+
+    it "rejects undefined-only ELF file and ignores PE file in artifact gate":
+        val undef_path = "build/_wave_h1_g_gate_neg_undef.out"
+        file_write_bytes(undef_path, build_minimal_elf64([0x12, 0x11], [0, 1]))
+        val undef_reason = native_artifact_functionless_reason(undef_path)
+        file_remove(undef_path)
+        expect(undef_reason).to_contain("zero defined function")
+
+        val pe_path = "build/_wave_h1_g_gate_neg_pe.exe"
+        file_write_bytes(pe_path, [0x4Du8, 0x5Au8, 0x90u8, 0x00u8])
+        val pe_reason = native_artifact_functionless_reason(pe_path)
+        file_remove(pe_path)
+        expect(pe_reason).to_equal("")

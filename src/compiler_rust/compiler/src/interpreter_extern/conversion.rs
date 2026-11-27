@@ -113,11 +113,9 @@ pub fn rt_hash_text(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `rt_text_to_bytes(text)`
 pub fn rt_text_to_bytes_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let text = match args.first() {
-        Some(Value::Str(s)) => s.as_str(),
-        _ => "",
-    };
-    Ok(Value::byte_array(text.as_bytes().to_vec()))
+    // `StrBytes` (raw, non-UTF-8 text) yields its bytes verbatim.
+    let bytes = args.first().and_then(Value::text_bytes_view).unwrap_or_default();
+    Ok(Value::byte_array(bytes.to_vec()))
 }
 
 /// Read the raw BYTE at a BYTE index of `text`.
@@ -189,10 +187,32 @@ pub fn rt_bytes_to_text_fn(args: &[Value]) -> Result<Value, CompileError> {
             let Some(bytes) = value.try_array_bytes() else {
                 return Ok(Value::text(String::new()));
             };
-            let text = String::from_utf8_lossy(&bytes).into_owned();
-            Ok(Value::text(text))
+            // STRICT (owner decision 2026-11-23, utf8 rejection part 2):
+            // invalid UTF-8 is rejected with nil, exactly like the Rust and C
+            // runtimes. Exact-byte carriers use rt_tls_wire_from_bytes.
+            match String::from_utf8(bytes) {
+                Ok(s) => Ok(Value::text(s)),
+                Err(_) => Ok(Value::Nil),
+            }
         }
         _ => Ok(Value::text(String::new())),
+    }
+}
+
+/// Non-optional `[u8] -> text` facade (`rt_string_from_byte_array`,
+/// `bytes_to_string`): a rejected conversion falls back to empty text, like
+/// the Rust/C runtime `rt_string_from_byte_array`.
+pub fn rt_string_from_byte_array_fn(args: &[Value]) -> Result<Value, CompileError> {
+    match rt_bytes_to_text_fn(args)? {
+        Value::Nil => Ok(Value::text(String::new())),
+        text => Ok(text),
+    }
+}
+
+pub fn rt_tls_wire_from_bytes_fn(args: &[Value]) -> Result<Value, CompileError> {
+    match args.first().and_then(Value::try_array_bytes) {
+        Some(bytes) => Ok(Value::text_from_bytes(bytes)),
+        None => Ok(Value::text(String::new())),
     }
 }
 
@@ -272,6 +292,22 @@ pub fn rt_tuple_get_fn(args: &[Value]) -> Result<Value, CompileError> {
         Some(Value::LabeledTuple { values, .. }) => values,
         Some(Value::Array(arr)) => arr.as_ref(),
         Some(Value::FrozenArray(arr)) => arr.as_ref(),
+        // Raw runtime handle (from `rt_tuple_new_fn` / `rt_array_new_fn`):
+        // read the slot through the runtime and hand back the raw word, as the
+        // `rt_tuple_len_fn` Int arm does. Only a word that the runtime's heap
+        // registry recognises takes this path; any other `Int` keeps the
+        // historical "not a tuple -> Nil" contract relied on by HIR lowering.
+        // A negative index yields the nil word (the runtime's own refusal).
+        Some(Value::Int(raw))
+            if simple_runtime::value::RuntimeValue::from_raw(*raw as u64).heap_type().is_some() =>
+        {
+            let tuple = simple_runtime::value::RuntimeValue::from_raw(*raw as u64);
+            let word = match args.get(1) {
+                Some(Value::Int(i)) if *i >= 0 => simple_runtime::value::rt_tuple_get(tuple, *i as u64),
+                _ => simple_runtime::value::RuntimeValue::NIL,
+            };
+            return Ok(Value::Int(word.to_raw() as i64));
+        }
         _ => return Ok(Value::Nil),
     };
     let idx = match args.get(1) {
@@ -282,6 +318,89 @@ pub fn rt_tuple_get_fn(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::Nil);
     }
     Ok(items[idx as usize].clone())
+}
+
+/// Largest tuple length the interpreter will ask the runtime to allocate.
+///
+/// The runtime's `rt_tuple_new(len: u64)` computes `header + len * 16` and
+/// `unwrap()`s the `Layout`, so an absurd length (e.g. `-1` reinterpreted as
+/// `u64::MAX`) would panic the interpreter instead of failing closed. Anything
+/// above this cap is treated as an allocation failure (nil handle).
+const RT_TUPLE_MAX_LEN: i64 = i32::MAX as i64;
+
+/// Allocate a raw runtime tuple of `length` slots and return its handle word.
+///
+/// Mirrors the runtime ABI `rt_tuple_new(u64) -> RuntimeValue` (Rust runtime
+/// collections.rs, C runtime runtime_native.c, core_array.spl) using the same
+/// raw-handle convention as `sffi_array::rt_array_new_fn`: the handle is a
+/// `Value::Int` holding the packed `RuntimeValue`, and `rt_tuple_len_fn` /
+/// `rt_tuple_set_fn` / `rt_tuple_get_fn` accept it back. Caller:
+/// `enum_wire.spl` (`enum_wire_restore_nil` rebuilds a tuple payload), which
+/// checks `rt_tuple_len(payload) != arity` after this call -- so every failure
+/// (negative or oversized length, allocation failure) returns the nil word,
+/// never a panic. It was missing from the interpreter table, so interpreted
+/// tuple-payload restore died with "unknown extern function: rt_tuple_new".
+pub fn rt_tuple_new_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let length = args
+        .first()
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_tuple_new expects 1 argument".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+    if !(0..=RT_TUPLE_MAX_LEN).contains(&length) {
+        return Ok(Value::Int(simple_runtime::value::RuntimeValue::NIL.to_raw() as i64));
+    }
+    let handle = simple_runtime::value::rt_tuple_new(length as u64);
+    Ok(Value::Int(handle.to_raw() as i64))
+}
+
+/// Store the raw word `value` in slot `index` of a raw runtime tuple.
+///
+/// Mirrors the runtime ABI `rt_tuple_set(RuntimeValue, u64, RuntimeValue) ->
+/// bool`, reported as the `i8` the `.spl` extern declares (1 = written,
+/// 0 = refused) so `enum_wire.spl`'s `written == 0` check is exact. Refused
+/// without touching memory when the target is not a live tuple handle, the
+/// index is negative or out of range, or the arguments are not raw words.
+pub fn rt_tuple_set_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let arity_error = || {
+        CompileError::semantic_with_context(
+            "rt_tuple_set expects 3 arguments".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    };
+    let tuple_raw = args.first().ok_or_else(arity_error)?.as_int()?;
+    let index = args.get(1).ok_or_else(arity_error)?.as_int()?;
+    let value_raw = args.get(2).ok_or_else(arity_error)?.as_int()?;
+    if index < 0 {
+        return Ok(Value::Int(0));
+    }
+    let tuple = simple_runtime::value::RuntimeValue::from_raw(tuple_raw as u64);
+    let value = simple_runtime::value::RuntimeValue::from_raw(value_raw as u64);
+    let written = simple_runtime::value::rt_tuple_set(tuple, index as u64, value);
+    Ok(Value::Int(i64::from(written)))
+}
+
+/// Length of a tuple, or -1 when the argument is not a tuple.
+///
+/// Mirrors the runtime ABI `rt_tuple_len(RuntimeValue) -> i64` (Rust
+/// runtime collections.rs, C runtime runtime_native.c). Callers:
+/// `system_env_core.spl` (validates `rt_env_vars` pairs) and `enum_wire.spl`
+/// (distinguishes tuple payloads from arrays, relying on -1 for non-tuples).
+/// It was missing from the interpreter table, so every interpreted
+/// `env_vars_nilable()` died with "unknown extern function: rt_tuple_len".
+pub fn rt_tuple_len_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let len = match args.first() {
+        Some(Value::Tuple(arr)) => arr.len() as i64,
+        Some(Value::LabeledTuple { values, .. }) => values.len() as i64,
+        Some(Value::Int(raw)) => {
+            simple_runtime::value::rt_tuple_len(simple_runtime::value::RuntimeValue::from_raw(*raw as u64))
+        }
+        _ => -1,
+    };
+    Ok(Value::Int(len))
 }
 
 /// Assemble a [u8] array into a u32 (big-endian).
@@ -459,6 +578,54 @@ fn glyph_5x7_ascii(ch: u8) -> [u8; 7] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Owner decision 2026-11-23 (utf8 rejection part 2): rt_bytes_to_text is
+    /// STRICT. Invalid UTF-8 (including a split scalar fragment) is rejected
+    /// with nil, matching the Rust and C runtimes; exact-byte carriers use
+    /// rt_tls_wire_from_bytes. Supersedes the byte-preserving contract of
+    /// seed_rt_bytes_to_text_lossy_utf8_split_scalar_2026-10-31.
+    #[test]
+    fn bytes_to_text_rejects_invalid_utf8() {
+        let cases: &[&[u8]] = &[
+            &[0xc0, 0xaf],
+            &[0xe0, 0x80, 0xaf],
+            &[0xf0, 0x80, 0x80, 0xaf],
+            &[0x80],
+            &[b'a', 0xbf, b'b'],
+            &[0xed, 0xa0, 0x80],
+            &[0xed, 0xbf, 0xbf],
+            &[0xe2, 0x82],
+            &[0xf0, 0x9f, 0x98],
+            &[0, 0xff, 0],
+            &[0xf4, 0x90, 0x80, 0x80],
+        ];
+        for input in cases {
+            let out = rt_bytes_to_text_fn(&[Value::byte_array(input.to_vec())]).unwrap();
+            assert_eq!(out, Value::Nil, "{:x?} must be rejected", input);
+        }
+        let split = "界😀".as_bytes();
+        for fragment in [&split[0..1], &split[1..5], &split[5..]] {
+            let out = rt_bytes_to_text_fn(&[Value::byte_array(fragment.to_vec())]).unwrap();
+            assert_eq!(out, Value::Nil, "split scalar fragment must be rejected");
+        }
+        assert_eq!(
+            rt_bytes_to_text_fn(&[Value::byte_array("ok界".as_bytes().to_vec())]).unwrap(),
+            Value::text("ok界"),
+            "valid UTF-8 stays plain text"
+        );
+        assert_eq!(
+            rt_string_from_byte_array_fn(&[Value::byte_array(vec![0xc0, 0xaf])]).unwrap(),
+            Value::text(""),
+            "non-optional facade falls back to empty text"
+        );
+    }
+
+    #[test]
+    fn tls_wire_carrier_preserves_all_bytes() {
+        let all: Vec<u8> = (0..=255).collect();
+        let text = rt_tls_wire_from_bytes_fn(&[Value::byte_array(all.clone())]).unwrap();
+        assert_eq!(text.text_bytes_view(), Some(all.as_slice()));
+    }
 
     #[test]
     fn test_to_string() {

@@ -1,6 +1,22 @@
 # Stage4 Windows C ABI inference used the object suffix
 
 Status: FIXED (verified 2026-09-12 against the current tree)
+## Verified 2026-11-25 — fix evidence re-run green on release/1.0.0
+
+2026-11-25 re-verification (work/p3-baq-20261125): re-ran
+`SIMPLE_LIB=src bin/simple.exe test
+test/01_unit/compiler/backend/stage4_final_symbol_closure_spec.spl
+--mode=interpreter` on this Windows host. The example that carries this bug's
+fix evidence, "derives Windows object ABI from the selected C driver and
+linker contract" (13 assertions over `stage4_windows_c_object_uses_msvc_abi`),
+PASSES, and `stage4_windows_c_object_uses_msvc_abi` still classifies from the
+normalized driver basename with no object-suffix inference. The fix stands.
+
+Caveat recorded for honesty, not a re-open: the same spec file shows 14 other
+failing examples on release/1.0.0 in this environment (source-text marker
+scans returning -1, `variable 'barrier_pos'/'macho' not found`, dynload/time/
+fork contract rows). Those examples are outside this bug's scope, were already
+red before this pass, and are reported to the ledger owners separately.
 
 Verification: `stage4_windows_c_object_uses_msvc_abi`
 (`src/compiler/70.backend/backend/stage4_symbol_closure.spl:231-252`) classifies

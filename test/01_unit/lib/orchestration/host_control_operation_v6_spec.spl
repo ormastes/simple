@@ -1,0 +1,198 @@
+"""
+## Purpose and audience
+milestone_0046: the shared control exchange for controller-signed Host service actions. One authenticated V6 action,
+`host-control`, carries a canonical sub request whose closed table names the Host domain route (helper abandon and the
+OPS-01 handoff abandon, plus their read-only inspects). Written for owners of the V6 contract, the smux Host route and
+the controller `helper-abandon` / `handoff-abandon` commands.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`. Status: AUTHORED, NOT_RUN (no runnable
+binary when written, 2026-11-19).
+## Compatibility and limitations
+Pure codec scenarios plus source pins of the smux route (the native exchange needs an installed Host).
+## Verification guidance and troubleshooting
+A failed scenario names the moved contract: the sub table, canonical bytes, the V6 vocabulary or the smux gates.
+"""
+use std.spec.{describe, it, expect, fail}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.common.contracts.orchestration.host_control_operation_v6.{HostControlSubRequestV6, HOST_AGENT_CONTROL_SUBS_V6,
+    HOST_AGENT_PANE_SUBS_V6, HOST_AGENT_PANE_TARGET_SUB_V6, host_control_sub_domain_action_v6, host_control_sub_encode_v6, host_control_sub_decode_v6}
+use std.common.contracts.orchestration.host_agent_pane_stream_v6.*
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.contracts.orchestration.host_service_operation_v6.{HostServiceOperationRequestV6,
+    host_service_operation_validate_v6, host_service_operation_request_digest_v6}
+use std.common.contracts.orchestration.host_service_operation_reply_v6.{HostServiceOperationReplyV6,
+    host_service_operation_reply_validate_v6}
+
+fn control_source_v6(path: text) -> text:
+    file_read_regular_no_follow_bounded(path, 4194304).unwrap()
+
+fn control_fn_body_v6(source: text, header: text) -> text:
+    val start = source.index_of(header)
+    expect(start >= 0).to_equal(true)
+    val rest = source.substring(start + header.byte_len(), source.byte_len())
+    var end = rest.byte_len()
+    for marker in ["\nfn ", "\npub fn ", "\nstruct ", "\nclass ", "\nexport ", "\nvar ", "\nval "]:
+        val at = rest.index_of(marker)
+        if at >= 0 and at < end: end = at
+    rest.substring(0, end)
+
+describe "host-control sub request (milestone_0046)":
+    it "maps the administration and signed agent subs to their existing Host domain routes":
+        expect(host_control_sub_domain_action_v6("helper-inspect").unwrap()).to_equal("host-helper-inspect")
+        expect(host_control_sub_domain_action_v6("helper-abandon").unwrap()).to_equal("host-helper-abandon")
+        expect(host_control_sub_domain_action_v6("handoff-inspect").unwrap()).to_equal("host-service-handoff-inspect")
+        expect(host_control_sub_domain_action_v6("handoff-abandon").unwrap()).to_equal("host-service-handoff-abandon")
+        step("milestone_0045 retention release: the read-only inspect and the signed release")
+        expect(host_control_sub_domain_action_v6("retention-inspect").unwrap()).to_equal("host-retention-inspect")
+        expect(host_control_sub_domain_action_v6("retention-release").unwrap()).to_equal("host-retention-release")
+        step("Use only the existing signed agent operations and exact attachment inspection")
+        expect(HOST_AGENT_CONTROL_SUBS_V6).to_equal(["agent-invoke", "agent-cancel", "agent-attach", "agent-detach", "agent-inspect"])
+        for sub in HOST_AGENT_CONTROL_SUBS_V6:
+            expect(host_control_sub_domain_action_v6(sub).unwrap()).to_equal("host-" + sub)
+        step("Permit authenticated pane claim and read while preserving the closed input and geometry boundary")
+        expect(HOST_AGENT_PANE_SUBS_V6).to_equal(["agent-pane-claim", "agent-pane-read"])
+        for sub in HOST_AGENT_PANE_SUBS_V6:
+            expect(host_control_sub_domain_action_v6(sub).unwrap()).to_equal("host-" + sub)
+        expect(host_control_sub_domain_action_v6(HOST_AGENT_PANE_TARGET_SUB_V6).unwrap()).to_equal("host-agent-pane-target")
+        for sub in ["open", "remote-build-open", "service-handoff", "agent-pane-write", "agent-pane-resize", "", "helper-abandon "]:
+            expect(host_control_sub_domain_action_v6(sub).is_err()).to_equal(true)
+
+    it "round-trips canonical bytes and refuses non-canonical or unknown input":
+        val request = HostControlSubRequestV6(sub: "helper-inspect", frame: "helper_op_1")
+        val encoded = host_control_sub_encode_v6(request).unwrap()
+        val decoded = host_control_sub_decode_v6(encoded).unwrap()
+        expect(decoded.sub).to_equal("helper-inspect")
+        expect(decoded.frame).to_equal("helper_op_1")
+        expect(host_control_sub_decode_v6(encoded + " ").is_err()).to_equal(true)
+        expect(host_control_sub_encode_v6(HostControlSubRequestV6(sub: "helper-inspect", frame: "")).is_err()).to_equal(true)
+        expect(host_control_sub_encode_v6(HostControlSubRequestV6(sub: "build", frame: "x")).is_err()).to_equal(true)
+        val other = encoded.replace("host-control-sub", "host-remote-build-sub")
+        expect(host_control_sub_decode_v6(other).is_err()).to_equal(true)
+
+describe "V6 vocabulary carries host-control (milestone_0046)":
+    it "accepts a host-control request only with a payload bound by the request digest":
+        val payload = host_control_sub_encode_v6(HostControlSubRequestV6(sub: "handoff-inspect", frame: "pending")).unwrap()
+        val digest = host_service_operation_request_digest_v6("abandon_1", payload).unwrap()
+        val good = HostServiceOperationRequestV6("host-control", "a".repeat(32), "abandon_1", "b".repeat(64), digest, payload)
+        expect(host_service_operation_validate_v6(good).is_ok()).to_equal(true)
+        val unbound = HostServiceOperationRequestV6("host-control", "a".repeat(32), "abandon_1", "b".repeat(64), "c".repeat(64), payload)
+        expect(host_service_operation_validate_v6(unbound).unwrap_err()).to_equal("host-operation-request-digest-mismatch")
+        val empty = HostServiceOperationRequestV6("host-control", "a".repeat(32), "abandon_1", "b".repeat(64), digest, "")
+        expect(host_service_operation_validate_v6(empty).is_err()).to_equal(true)
+
+    it "binds an exact agent attach frame without interpreting its signable bytes":
+        val frame = "canonical signed packet bytes\n"
+        val source = host_control_sub_encode_v6(HostControlSubRequestV6("agent-attach", frame)).unwrap()
+        val digest = host_service_operation_request_digest_v6("agent_run", source).unwrap()
+        val request = HostServiceOperationRequestV6("host-control", "a".repeat(32), "agent_run", "b".repeat(64),
+            digest, source)
+        expect(host_service_operation_validate_v6(request).is_ok()).to_equal(true)
+        expect(host_control_sub_decode_v6(source).unwrap().frame).to_equal(frame)
+        val altered = host_control_sub_encode_v6(HostControlSubRequestV6("agent-attach", frame + "x")).unwrap()
+        val substitution = HostServiceOperationRequestV6("host-control", request.service_incarnation,
+            request.operation_id, request.scope_digest, request.request_digest, altered)
+        expect(host_service_operation_validate_v6(substitution).is_err()).to_equal(true)
+
+    it "accepts a host-control reply":
+        val reply = HostServiceOperationReplyV6("host-control", "a".repeat(32), "abandon_1", "b".repeat(64), "c".repeat(64),
+            false, 0, "x", "")
+        expect(host_service_operation_reply_validate_v6(reply).is_ok()).to_equal(true)
+
+describe "smux host-control route (milestone_0046)":
+    it "routes host-control through the same pending gates as remote-build":
+        val source = control_source_v6("src/os/apps/smux/runtime_host_continuation_v6.spl")
+        val query = control_fn_body_v6(source, "pub fn smux_host_continuation_query_v6(")
+        expect(query.contains("if request.action == \"host-control\": return host_control_query_v6(domain, state, request, context)")).to_equal(true)
+        val route = control_fn_body_v6(source, "fn host_control_query_v6(")
+        expect(route.contains("host_control_sub_decode_v6(request.payload)")).to_equal(true)
+        expect(route.contains("host_control_sub_domain_action_v6(")).to_equal(true)
+        for gate in ["runtime-controller-inspection-pending", "runtime-host-execution-pending", "runtime-connection-opening",
+                "runtime-geometry-pending"]:
+            expect(route.contains(gate)).to_equal(true)
+        val gates_at = route.index_of("runtime-geometry-pending")
+        val turn_at = route.index_of("host_service_domain_turn_v3(")
+        expect(gates_at >= 0 and turn_at > gates_at).to_equal(true)
+        step("The Host reply and actual owner are returned with the authenticated V6 payload")
+        expect(route.contains("state.execution =")).to_equal(false)
+        expect(route.contains("operation_reply_v6(turn.owner, state, request, false, turn.exit_code, turn.response,")).to_equal(true)
+
+
+    it "limits agent control to the Linux Service owner and shares existing lease supersession":
+        val source = control_source_v6("src/os/apps/smux/runtime_host_continuation_v6.spl")
+        val route = control_fn_body_v6(source, "fn host_control_query_v6(")
+        val gate = route.index_of("runtime-agent-control-requires-linux-service")
+        val effect = route.index_of("host_service_domain_turn_v3(domain, routed)")
+        expect(gate >= 0 and effect > gate).to_equal(true)
+        expect(route).to_contain("retain_agent_attach_state_v6(state, routed, turn.exit_code)")
+        expect(route).to_contain("operation_reply_v6(turn.owner, retained")
+        val original = control_fn_body_v6(source, "pub fn smux_host_continuation_begin_constrained_v6(")
+        expect(original).to_contain("retain_agent_attach_state_v6(state, request, turn.exit_code)")
+
+describe "Authenticated V6 agent pane frames":
+    it "uses the issued zero epoch and validates canonical claim and read cursors":
+        val digest = "a".repeat(64)
+        val claim = HostAgentPaneStreamRequestV6("pane_1", digest, 0, 0)
+        val read = HostAgentPaneStreamRequestV6("pane_1", digest, 0, 1)
+        val bad = HostAgentPaneStreamRequestV6("pane_1", digest, 1, 0)
+        val claim_frame = host_agent_pane_stream_request_encode_v6(claim)
+        val read_frame = host_agent_pane_stream_request_encode_v6(read)
+        expect(host_agent_pane_stream_request_matches_v6("agent-pane-claim",
+            host_agent_pane_stream_request_decode_v6(claim_frame).unwrap())).to_equal(true)
+        expect(host_agent_pane_stream_request_matches_v6("agent-pane-read",
+            host_agent_pane_stream_request_decode_v6(read_frame).unwrap())).to_equal(true)
+        expect(host_agent_pane_stream_request_matches_v6("agent-pane-read", claim)).to_equal(false)
+        expect(host_agent_pane_stream_request_decode_v6(host_agent_pane_stream_request_encode_v6(bad)).is_err()).to_equal(true)
+        expect(host_agent_pane_stream_request_decode_v6(read_frame + " ").is_err()).to_equal(true)
+
+    it "correlates the native bytes and rejects forged payloads and out-of-range byte values":
+        val digest = "b".repeat(64)
+        val request = HostAgentPaneStreamRequestV6("pane_1", digest, 0, 1)
+        val chunk: Dict<text, SdnValue> = {"stream": SdnValue.String("stdout"),
+            "bytes": SdnValue.Array([SdnValue.Int(0), SdnValue.Int(128), SdnValue.Int(255)])}
+        val read: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("host-agent-pane-read"),
+            "eof": SdnValue.Bool(false), "chunks": SdnValue.Array([SdnValue.Dict(chunk)])}
+        val payload = sdn_encode_canonical(SdnValue.Dict(read))
+        val receipt = HostAgentPaneStreamReceiptV6("run_1", "pane_1", digest, 0, 1, payload, sha256_text(payload))
+        val reply = host_agent_pane_stream_receipt_decode_v6(host_agent_pane_stream_receipt_encode_v6(receipt)).unwrap()
+        expect(host_agent_pane_stream_receipt_matches_v6("run_1", request, reply)).to_equal(true)
+        expect(host_agent_pane_stream_receipt_matches_v6("run_2", request, reply)).to_equal(false)
+        val corrupted = payload.replace("255", "256")
+        val forged = HostAgentPaneStreamReceiptV6("run_1", "pane_1", digest, 0, 1, corrupted, receipt.payload_digest)
+        expect(host_agent_pane_stream_receipt_decode_v6(host_agent_pane_stream_receipt_encode_v6(forged)).unwrap_err()).to_equal(
+            "host-agent-pane-stream-receipt-digest")
+        val malformed = HostAgentPaneStreamReceiptV6("run_1", "pane_1", digest, 0, 1, corrupted, sha256_text(corrupted))
+        expect(host_agent_pane_stream_receipt_decode_v6(host_agent_pane_stream_receipt_encode_v6(malformed)).unwrap_err()).to_equal(
+            "host-agent-pane-stream-read-byte")
+
+describe "Authenticated V6 agent pane target":
+    it "round-trips actual registry IDs with the native Host epoch":
+        val continuity = "a".repeat(32)
+        val invocation = "b".repeat(64)
+        val receipt = HostAgentPaneTargetReceiptV6("run_1", invocation, continuity, 7, "id1", "id2", "id3")
+        val source = host_agent_pane_target_receipt_encode_v6(receipt)
+        val target = host_agent_pane_target_receipt_decode_v6(source).unwrap()
+        expect(target.operation_id).to_equal("run_1")
+        expect(target.invoke_digest).to_equal(invocation)
+        expect(target.service_incarnation).to_equal(continuity)
+        expect(target.service_epoch).to_equal(7)
+        expect(target.session_id).to_equal("id1")
+        expect(target.window_id).to_equal("id2")
+        expect(target.pane_id).to_equal("id3")
+        expect(host_agent_pane_target_receipt_decode_v6(source + " ").is_err()).to_equal(true)
+        val bad = HostAgentPaneTargetReceiptV6("run_1", invocation, continuity, 0, "id1", "id2", "id3")
+        val bad_source = host_agent_pane_target_receipt_encode_v6(bad)
+        expect(host_agent_pane_target_receipt_decode_v6(bad_source).unwrap_err()).to_equal("host-agent-pane-target-fence")
+
+    it "gates creation and replay on live signed authority and retains exact IDs":
+        val source = control_source_v6("src/os/apps/smux/runtime_host_continuation_v6.spl")
+        val body = control_fn_body_v6(source, "fn remote_pane_target_v6(")
+        val authority = body.index_of("host_linux_service_agent_pane_target_authority_v4(")
+        val replay = body.index_of("if state.agent_pane_target_intent")
+        val intent = body.index_of("state.agent_pane_target_intent = name")
+        val create = body.index_of("smux_runtime_target_create_v3(")
+        expect(authority >= 0 and replay > authority and intent > replay and create > intent).to_equal(true)
+        expect(body).to_contain("runtime-agent-pane-target-name-collision")
+        expect(body).to_contain("state.agent_pane_target = Some(receipt)")
+        expect(body).to_contain("receipt.service_epoch != authority.service_epoch")

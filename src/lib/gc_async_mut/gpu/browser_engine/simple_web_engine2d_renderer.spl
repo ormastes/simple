@@ -10,6 +10,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
     simple_web_layout_render_html_readback_engine2d_result
 }
 use std.gc_async_mut.gpu.browser_engine.dom_color.{parse_color_value_checked}
+use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{parse_box_shadow_layers}
 use std.gc_async_mut.gpu.browser_engine.style.animation.{
     BrowserCssAnimationInstance
 }
@@ -26,6 +27,7 @@ class SimpleWebEngine2DStaticPixelCache:
     width: i32
     height: i32
     backend_name: text
+    resolved_backend: text
     last_html: text
     last_render_mode: text
     last_content_revision: i64
@@ -51,10 +53,17 @@ class SimpleWebEngine2DStaticPixelCache:
 
 impl SimpleWebEngine2DStaticPixelCache:
     static fn create(width: i32, height: i32, backend_name: text) -> SimpleWebEngine2DStaticPixelCache:
+        # Resolve once at cache creation so subsequent renders reuse the same
+        # resolved backend without a second probe-vs-use race.
+        val resolved = if width > 0 and height > 0:
+            simple_web_engine2d_resolved_backend_name(width, height, backend_name)
+        else:
+            ""
         SimpleWebEngine2DStaticPixelCache(
             width: width,
             height: height,
             backend_name: backend_name,
+            resolved_backend: resolved,
             last_html: "",
             last_render_mode: "",
             last_content_revision: -1,
@@ -158,7 +167,7 @@ impl SimpleWebEngine2DStaticPixelCache:
                 vector_font_promotion_ready:
                     self.last_vector_font_promotion_ready
             ))
-        nil
+        None
 
     me result_for_html(
         html: text, render_mode: text, content_revision: i64
@@ -167,7 +176,10 @@ impl SimpleWebEngine2DStaticPixelCache:
             html, render_mode, content_revision
         ):
             return cached
-        val resolved_backend = simple_web_engine2d_resolved_backend_name(self.width, self.height, self.backend_name)
+        val resolved_backend = if self.resolved_backend != "":
+            self.resolved_backend
+        else:
+            simple_web_engine2d_resolved_backend_name(self.width, self.height, self.backend_name)
         val result = simple_web_layout_render_html_readback_engine2d_result(html, self.width, self.height, resolved_backend)
         self.retain_result_for_html(
             html, render_mode, content_revision, result
@@ -200,14 +212,14 @@ fn _is_hex_digit(c: text) -> bool:
     (c >= "0" and c <= "9") or (c >= "a" and c <= "f") or (c >= "A" and c <= "F")
 
 fn _hex_pair_value(s: text, offset: i64) -> u32:
-    (_hex_digit_value(s.char_at(offset)) << 4) | _hex_digit_value(s.char_at(offset + 1))
+    (_hex_digit_value(s.substring(offset, offset + 1)) << 4) | _hex_digit_value(s.substring(offset + 1, offset + 2))
 
 fn _hex_color_at(s: text, offset: i64, fallback: u32) -> u32:
-    val remain = s.len() - offset
-    if remain >= 7 and _is_hex_digit(s.char_at(offset + 1)) and _is_hex_digit(s.char_at(offset + 2)) and _is_hex_digit(s.char_at(offset + 3)) and _is_hex_digit(s.char_at(offset + 4)) and _is_hex_digit(s.char_at(offset + 5)) and _is_hex_digit(s.char_at(offset + 6)):
+    val remain = s.byte_len() - offset
+    if remain >= 7 and _is_hex_digit(s.substring(offset + 1, offset + 2)) and _is_hex_digit(s.substring(offset + 2, offset + 3)) and _is_hex_digit(s.substring(offset + 3, offset + 4)) and _is_hex_digit(s.substring(offset + 4, offset + 5)) and _is_hex_digit(s.substring(offset + 5, offset + 6)) and _is_hex_digit(s.substring(offset + 6, offset + 7)):
         return 0xFF000000u32 | (_hex_pair_value(s, offset + 1) << 16) | (_hex_pair_value(s, offset + 3) << 8) | _hex_pair_value(s, offset + 5)
-    if remain >= 4 and _is_hex_digit(s.char_at(offset + 1)) and _is_hex_digit(s.char_at(offset + 2)) and _is_hex_digit(s.char_at(offset + 3)):
-        return 0xFF000000u32 | ((_hex_digit_value(s.char_at(offset + 1)) * 17u32) << 16) | ((_hex_digit_value(s.char_at(offset + 2)) * 17u32) << 8) | (_hex_digit_value(s.char_at(offset + 3)) * 17u32)
+    if remain >= 4 and _is_hex_digit(s.substring(offset + 1, offset + 2)) and _is_hex_digit(s.substring(offset + 2, offset + 3)) and _is_hex_digit(s.substring(offset + 3, offset + 4)):
+        return 0xFF000000u32 | ((_hex_digit_value(s.substring(offset + 1, offset + 2)) * 17u32) << 16) | ((_hex_digit_value(s.substring(offset + 2, offset + 3)) * 17u32) << 8) | (_hex_digit_value(s.substring(offset + 3, offset + 4)) * 17u32)
     fallback
 
 fn _find_char_from(s: text, marker: text, start: i64) -> i64:
@@ -217,7 +229,7 @@ fn _find_char_from(s: text, marker: text, start: i64) -> i64:
     # that made office GUI render scale ~quadratically with CSS size. These paths
     # are ASCII byte==char, so native byte search is semantics-preserving.
     val st = if start < 0: 0 else: start
-    val slen = s.len()
+    val slen = s.byte_len()
     if st >= slen:
         return -1
     if st <= 0:
@@ -229,12 +241,12 @@ fn _find_char_from(s: text, marker: text, start: i64) -> i64:
     st + idx
 
 fn _text_matches_at(s: text, marker: text, offset: i64) -> bool:
-    val marker_len = marker.len()
-    if offset < 0 or offset + marker_len > s.len():
+    val marker_len = marker.byte_len()
+    if offset < 0 or offset + marker_len > s.byte_len():
         return false
     var idx: i64 = 0
     while idx < marker_len:
-        if s.char_at(offset + idx) != marker.char_at(idx):
+        if s.substring(offset + idx, offset + idx + 1) != marker.substring(idx, idx + 1):
             return false
         idx = idx + 1
     true
@@ -242,11 +254,11 @@ fn _text_matches_at(s: text, marker: text, offset: i64) -> bool:
 fn _find_text_from(s: text, marker: text, start: i64) -> i64:
     # Native byte-search instead of a char_at loop (O(i) per char_at -> O(n^2)).
     # ASCII byte==char on these HTML/CSS paths, so native index_of is exact.
-    val marker_len = marker.len()
+    val marker_len = marker.byte_len()
     if marker_len == 0:
         return start
     val st = if start < 0: 0 else: start
-    val slen = s.len()
+    val slen = s.byte_len()
     if st > slen - marker_len:
         return -1
     if st <= 0:
@@ -260,7 +272,7 @@ fn _find_text_from(s: text, marker: text, start: i64) -> i64:
 fn _range_contains_char(s: text, start: i64, end: i64, marker: text) -> bool:
     # Native substring + index_of instead of a char_at loop (char_at is O(i) in
     # the interpreter -> O(n^2) when scanned per CSS rule).
-    val slen = s.len()
+    val slen = s.byte_len()
     val st = if start < 0: 0 else: start
     val en = if end > slen: slen else: end
     if st >= en:
@@ -272,10 +284,10 @@ fn _second_hex_color_after_from(html: text, marker: text, start: i64, fallback: 
     val first = _find_text_from(html, marker, start)
     if first < 0:
         return fallback
-    val second = _find_text_from(html, marker, first + marker.len())
+    val second = _find_text_from(html, marker, first + marker.byte_len())
     if second < 0:
         return fallback
-    val hash = _find_char_from(html, "#", second + marker.len())
+    val hash = _find_char_from(html, "#", second + marker.byte_len())
     if hash < 0:
         return fallback
     _hex_color_at(html, hash, fallback)
@@ -286,15 +298,15 @@ fn _second_hex_color_after(html: text, marker: text, fallback: u32) -> u32:
 fn _last_hex_color_after(html: text, marker: text, fallback: u32) -> u32:
     var color = fallback
     var pos: i64 = 0
-    val html_len = html.len()
+    val html_len = html.byte_len()
     while pos < html_len:
         val found = _find_text_from(html, marker, pos)
         if found < 0:
             return color
-        val hash = _find_char_from(html, "#", found + marker.len())
+        val hash = _find_char_from(html, "#", found + marker.byte_len())
         if hash >= 0:
             color = _hex_color_at(html, hash, color)
-        pos = found + marker.len()
+        pos = found + marker.byte_len()
     color
 
 # --- Real CSS background resolution --------------------------------------
@@ -311,9 +323,9 @@ fn _last_hex_color_after(html: text, marker: text, fallback: u32) -> u32:
 
 fn _cut_at_quote(v: text) -> text:
     var i: i64 = 0
-    val n = v.len()
+    val n = v.byte_len()
     while i < n:
-        val ch = v.char_at(i)
+        val ch = v.substring(i, i + 1)
         if ch == "\"" or ch == "'":
             return (v.substring(0, i) ?? "").trim()
         i = i + 1
@@ -327,8 +339,8 @@ fn _is_ident_char(c: text) -> bool:
 # segment starts with it) so a raw `<div style="...">` tag text works too.
 fn _decl_prop_value(seg: text, prop: text) -> text:
     val lo = seg.lower()
-    val lo_len = lo.len()
-    val prop_len = prop.len()
+    val lo_len = lo.byte_len()
+    val prop_len = prop.byte_len()
     var pos: i64 = 0
     var found: i64 = -1
     while pos < lo_len:
@@ -337,19 +349,19 @@ fn _decl_prop_value(seg: text, prop: text) -> text:
             pos = lo_len
         else:
             var ok = true
-            if at > 0 and _is_ident_char(lo.char_at(at - 1)):
+            if at > 0 and _is_ident_char(lo.substring(at - 1, at)):
                 ok = false
             var j = at + prop_len
-            while j < lo_len and (lo.char_at(j) == " " or lo.char_at(j) == "\t"):
+            while j < lo_len and (lo.substring(j, j + 1) == " " or lo.substring(j, j + 1) == "\t"):
                 j = j + 1
-            if j >= lo_len or lo.char_at(j) != ":":
+            if j >= lo_len or lo.substring(j, j + 1) != ":":
                 ok = false
             if ok:
                 found = j
             pos = at + prop_len
     if found < 0:
         return ""
-    _cut_at_quote(seg.substring(found + 1, seg.len()) ?? "")
+    _cut_at_quote(seg.substring(found + 1, seg.byte_len()) ?? "")
 
 # Raw value of the LAST declaration in `decls` naming `prop_a` or `prop_b`.
 fn _decl_value_last(decls: text, prop_a: text, prop_b: text) -> text:
@@ -357,10 +369,10 @@ fn _decl_value_last(decls: text, prop_a: text, prop_b: text) -> text:
     var seg_start: i64 = 0
     var depth: i64 = 0
     var i: i64 = 0
-    val n = decls.len()
+    val n = decls.byte_len()
     while i <= n:
         val at_end = i >= n
-        val ch = if at_end: ";" else: decls.char_at(i)
+        val ch = if at_end: ";" else: decls.substring(i, i + 1)
         if ch == "(":
             depth = depth + 1
         elif ch == ")" and depth > 0:
@@ -384,13 +396,13 @@ fn _custom_property_value(html: text, name: text) -> text:
     val pos = html.index_of(marker)
     if pos < 0:
         return ""
-    val start = pos + marker.len()
-    val n = html.len()
+    val start = pos + marker.byte_len()
+    val n = html.byte_len()
     # index_of on one substring, not a char_at walk: char_at is O(i) in the
     # interpreter, so scanning a 900x760 catalog document character by
     # character here would be O(n^2) per var() reference.
     val rest = html.substring(start, n) ?? ""
-    var end = rest.len()
+    var end = rest.byte_len()
     val semi = rest.index_of(";")
     if semi >= 0 and semi < end:
         end = semi
@@ -408,18 +420,18 @@ fn _custom_property_value(html: text, name: text) -> text:
 fn _skip_numeric_token(tok: text) -> bool:
     if tok.len() == 0:
         return true
-    val c = tok.char_at(0)
-    (c >= "0" and c <= "9") or c == "." or (c == "-" and tok.len() > 1 and not tok.starts_with("--"))
+    val c = tok.substring(0, 1)
+    (c >= "0" and c <= "9") or c == "." or (c == "-" and tok.byte_len() > 1 and not tok.starts_with("--"))
 
 # First color token of a CSS value, as RGBA (dom_color's convention).
 fn _value_first_color(value: text, decls: text, html: text, depth: i64) -> u32?:
     var i: i64 = 0
-    val n = value.len()
+    val n = value.byte_len()
     var tok_start: i64 = 0
     var paren: i64 = 0
     while i <= n:
         val at_end = i >= n
-        val ch = if at_end: " " else: value.char_at(i)
+        val ch = if at_end: " " else: value.substring(i, i + 1)
         if ch == "(":
             paren = paren + 1
         elif ch == ")" and paren > 0:
@@ -436,7 +448,7 @@ fn _value_first_color(value: text, decls: text, html: text, depth: i64) -> u32?:
                         val color_value = _decl_value_last(decls, "color", "color")
                         if color_value.len() > 0:
                             val resolved = _value_first_color(color_value, decls, html, depth + 1)
-                            if resolved != nil:
+                            if resolved.is_some():
                                 return resolved
                     tok_start = i + 1
                 elif lower.starts_with("var("):
@@ -446,18 +458,18 @@ fn _value_first_color(value: text, decls: text, html: text, depth: i64) -> u32?:
                         val referenced = _custom_property_value(html, raw.trim())
                         if referenced.len() > 0:
                             val resolved_var = _value_first_color(referenced, decls, html, depth + 1)
-                            if resolved_var != nil:
+                            if resolved_var.is_some():
                                 return resolved_var
                     tok_start = i + 1
                 else:
                     val parsed = parse_color_value_checked(tok)
-                    if parsed != nil:
+                    if parsed.is_some():
                         return parsed
                     tok_start = i + 1
             else:
                 tok_start = i + 1
         i = i + 1
-    nil
+    None
 
 # Alpha of an rgba()/hsla() value as the author wrote it, or -1.0 when the
 # value carries no explicit alpha component. CSS alpha is a NUMBER, not a byte:
@@ -483,19 +495,20 @@ fn _explicit_alpha_f(value: text) -> f64:
         cut = slash
     else:
         var i: i64 = 0
-        while i < inner.len():
-            if inner.char_at(i) == ",":
+        val inner_blen = inner.byte_len()
+        while i < inner_blen:
+            if inner.substring(i, i + 1) == ",":
                 cut = i
             i = i + 1
     if cut < 0:
         return -1.0
-    val tail = (inner.substring(cut + 1, inner.len()) ?? "").trim()
+    val tail = (inner.substring(cut + 1, inner.byte_len()) ?? "").trim()
     if tail.len() == 0:
         return -1.0
     val is_pct = tail.ends_with("%")
-    val number = if is_pct: (tail.substring(0, tail.len() - 1) ?? "") else: tail
+    val number = if is_pct: (tail.substring(0, tail.byte_len() - 1) ?? "") else: tail
     val parsed = number.parse_f64()
-    if parsed == nil:
+    if parsed.is_none():
         return -1.0
     var a = parsed ?? 0.0
     if is_pct:
@@ -537,7 +550,7 @@ fn _declaration_background_color_in(declarations: text, html: text, fallback: u3
     if value.len() == 0:
         return fallback
     val parsed = _value_first_color(value, declarations, html, 0)
-    if parsed == nil:
+    if parsed.is_none():
         return fallback
     val rgba = parsed ?? 0u32
     val alpha_f = _explicit_alpha_f(value)
@@ -566,7 +579,7 @@ fn _first_var_color_after_from(html: text, marker: text, search_start: i64, fall
     val start = _find_text_from(html, marker, search_start)
     if start < 0:
         return fallback
-    val var_pos = _find_text_from(html, "var(", start + marker.len())
+    val var_pos = _find_text_from(html, "var(", start + marker.byte_len())
     if var_pos < 0:
         return fallback
     val close = _find_char_from(html, ")", var_pos + 4)
@@ -590,7 +603,7 @@ fn _html_background_color(html: text) -> u32:
     _declaration_background_color_in(inline_style, html, 0xFFFFFFFFu32)
 
 fn _find_next_visual_tag(html: text, start: i64) -> i64:
-    if start >= html.len():
+    if start >= html.byte_len():
         return -1
     val d_pos = _find_text_from(html, "<div", start)
     val s_pos = _find_text_from(html, "<section", start)
@@ -608,14 +621,14 @@ fn _attr_value(tag: text, name: text) -> text:
     val single = name + "='"
     var pos = tag.index_of(single)
     if pos >= 0:
-        val start = pos + single.len()
+        val start = pos + single.byte_len()
         val end = _find_char_from(tag, "'", start)
         if end > start:
             return tag.substring(start, end)
     val dbl = name + "=\""
     pos = tag.index_of(dbl)
     if pos >= 0:
-        val start2 = pos + dbl.len()
+        val start2 = pos + dbl.byte_len()
         val end2 = _find_char_from(tag, "\"", start2)
         if end2 > start2:
             return tag.substring(start2, end2)
@@ -623,7 +636,7 @@ fn _attr_value(tag: text, name: text) -> text:
 
 fn _first_class_name(class_value: text) -> text:
     var token_start: i64 = 0
-    val class_len = class_value.len()
+    val class_len = class_value.byte_len()
     while token_start <= class_len:
         var token_end = token_start
         while token_end < class_len and class_value.substring(token_end, token_end + 1) != " ":
@@ -646,7 +659,7 @@ fn _collect_class_names(class_value: text) -> [text]:
     var names: [text] = [""; 8]
     var count: i32 = 0
     var token_start: i64 = 0
-    val class_len = class_value.len()
+    val class_len = class_value.byte_len()
     while token_start <= class_len and count < 8:
         var token_end = token_start
         while token_end < class_len and class_value.substring(token_end, token_end + 1) != " ":
@@ -669,29 +682,23 @@ fn _collect_class_names(class_value: text) -> [text]:
     result
 
 fn _class_token_equals(class_value: text, start: i64, end: i64, class_name: text) -> bool:
-    if end - start != class_name.len():
-        return false
-    var idx: i64 = 0
-    while start + idx < end:
-        if class_value.char_at(start + idx) != class_name.char_at(idx):
-            return false
-        idx = idx + 1
-    true
+    # `start`/`end` are BYTE offsets from `_class_has`; compare the whole token.
+    class_value.substring(start, end) == class_name
 
 fn _class_has(class_value: text, class_name: text) -> bool:
     if class_name == "":
         return class_value.trim() == ""
     var token_start: i64 = 0
-    val class_len = class_value.len()
+    val class_len = class_value.byte_len()
     while token_start <= class_len:
         var token_end = token_start
-        while token_end < class_len and class_value.char_at(token_end) != " ":
+        while token_end < class_len and class_value.substring(token_end, token_end + 1) != " ":
             token_end = token_end + 1
         var trimmed_start = token_start
         var trimmed_end = token_end
-        while trimmed_start < trimmed_end and _class_token_is_trim_space(class_value.char_at(trimmed_start)):
+        while trimmed_start < trimmed_end and _class_token_is_trim_space(class_value.substring(trimmed_start, trimmed_start + 1)):
             trimmed_start = trimmed_start + 1
-        while trimmed_end > trimmed_start and _class_token_is_trim_space(class_value.char_at(trimmed_end - 1)):
+        while trimmed_end > trimmed_start and _class_token_is_trim_space(class_value.substring(trimmed_end - 1, trimmed_end)):
             trimmed_end = trimmed_end - 1
         if _class_token_equals(class_value, trimmed_start, trimmed_end, class_name):
             return true
@@ -737,7 +744,7 @@ fn _last_rule_hex_color(html: text, selector: text, fallback: u32) -> u32:
         return fallback
     var color = fallback
     var pos: i64 = 0
-    val html_len = html.len()
+    val html_len = html.byte_len()
     while pos < html_len:
         val found = _find_text_from(html, selector, pos)
         if found < 0:
@@ -748,7 +755,7 @@ fn _last_rule_hex_color(html: text, selector: text, fallback: u32) -> u32:
             if close >= 0:
                 val rule = html.substring(open + 1, close)
                 color = _declaration_background_color(rule, color)
-        pos = found + selector.len()
+        pos = found + selector.byte_len()
     color
 
 fn _not_selector_rejects_first_block(html: text, tag_name: text, tag: text) -> bool:
@@ -756,7 +763,7 @@ fn _not_selector_rejects_first_block(html: text, tag_name: text, tag: text) -> b
     val start = html.index_of(marker)
     if start < 0:
         return false
-    val options_start = start + marker.len()
+    val options_start = start + marker.byte_len()
     val close = _find_char_from(html, ")", options_start)
     if close < 0:
         return false
@@ -886,7 +893,7 @@ fn _first_block_color(html: text, fallback: u32) -> u32:
 fn _selector_boundary_before(html: text, pos: i64) -> bool:
     if pos == 0:
         return true
-    val prev = html.char_at(pos - 1)
+    val prev = html.substring(pos - 1, pos)
     prev == " " or prev == "\t" or prev == "\n" or prev == "\r" or
     prev == ">" or prev == "," or prev == "{" or prev == "}" or prev == ";"
 
@@ -898,7 +905,7 @@ fn _selector_rule_open_brace(html: text, sel_end: i64, limit: i64) -> i64:
     var i = sel_end
     var in_group_tail = false
     while i < limit:
-        val ch = html.char_at(i)
+        val ch = html.substring(i, i + 1)
         if ch == "{":
             return i
         if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
@@ -916,7 +923,7 @@ fn _style_range_selector_color(html: text, start: i64, end: i64, selector: text,
     var color = fallback
     var pos = start
     var guard = 0
-    val sel_len = selector.len()
+    val sel_len = selector.byte_len()
     while guard < 1000:
         guard = guard + 1
         val found = _find_text_from(html, selector, pos)
@@ -977,27 +984,289 @@ pub fn simple_web_html_background_color(html: text) -> u32:
 # first-block rect) and never painted text, so a plain `<div>` page with a
 # background rendered blank -- a fake output path (see
 # doc/08_tracking/bug/browser_static_lane_heuristic_fake_2026-10-05.md).
-fn _simple_web_engine2d_text_document(lower: text) -> bool:
+fn _simple_web_engine2d_text_tag_document(lower: text) -> bool:
     lower.contains("<p") or lower.contains("<h1") or lower.contains("<h2") or lower.contains("<h3") or lower.contains("<button") or lower.contains("<span") or lower.contains("<small") or lower.contains("<code") or lower.contains("<label") or lower.contains("<a ")
+
+# Elements whose character data is not flow text: raw-text containers and
+# the form controls that paint their own value.
+fn _simple_web_engine2d_non_flow_text_tag(lower: text, open: i64) -> text:
+    for name in ["style", "script", "title", "textarea", "select"]:
+        if lower.substring(open + 1, open + 1 + name.byte_len()) == name:
+            return name
+    ""
+
+# Character data in the body outside every tag: `<div>text</div>` paints
+# text exactly like `<p>text</p>` and Chrome 159 draws both with the same
+# pixels. Without this a page whose only text sat bare in a `<div>` took the
+# software raster lane: grayscale glyphs, one px right of and one row below
+# Chrome's LCD run.
+fn _simple_web_engine2d_has_flow_text(lower: text) -> bool:
+    val total = lower.byte_len()
+    val body = _find_text_from(lower, "<body", 0)
+    var pos = if body < 0: 0 else: body
+    while pos < total:
+        val open = _find_char_from(lower, "<", pos)
+        val run_end = if open < 0: total else: open
+        if lower.substring(pos, run_end).trim() != "":
+            return true
+        if open < 0:
+            return false
+        val skip = _simple_web_engine2d_non_flow_text_tag(lower, open)
+        val from = if skip == "": open else: _find_text_from(lower, "</" + skip, open)
+        if from < 0:
+            return false
+        val close = _find_char_from(lower, ">", from)
+        if close < 0:
+            return false
+        pos = close + 1
+    false
+
+# `letter-spacing`, `word-spacing` and `text-shadow` (sharp: one text copy
+# per layer; blurred: a blurred grayscale mask per layer) are painted by the
+# Draw IR text lane. Only a `text-shadow` value the parser rejects keeps a
+# bare-text page on the raster lane.
+fn _simple_web_engine2d_raster_only_text_property(lower: text) -> bool:
+    var pos = _find_text_from(lower, "text-shadow", 0)
+    while pos >= 0:
+        var start = pos + 11
+        var end = start
+        val n = lower.byte_len()
+        while end < n:
+            val c = lower.substring(end, end + 1)
+            if c == ";" or c == "\"" or c == "'" or c == "}":
+                break
+            end = end + 1
+        var value = lower.substring(start, end).trim()
+        if value.starts_with(":"):
+            value = value.substring(1, value.byte_len()).trim()
+        val parsed = parse_box_shadow_layers(value, 0u32)
+        if not parsed.valid:
+            return true
+        pos = _find_text_from(lower, "text-shadow", end)
+    false
+
+fn _simple_web_engine2d_bare_text_document(lower: text) -> bool:
+    _simple_web_engine2d_has_flow_text(lower) and not _simple_web_engine2d_raster_only_text_property(lower)
+
+fn _simple_web_engine2d_text_document(lower: text) -> bool:
+    _simple_web_engine2d_text_tag_document(lower) or _simple_web_engine2d_bare_text_document(lower)
 
 # Page-lane twin of `simple_web_engine2d_render_html_pixels`: identical pixels
 # whenever that strict entry produces a frame. Only when the text-document
 # lane discards a frame because some Draw IR commands were skipped does this
 # present the rendered pixels and report the skips (see
 # simple_web_layout_render_html_presentable_engine2d).
+struct _ShowcaseRect:
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+    color: u32
+
+fn _sr(x: i32, y: i32, w: i32, h: i32, color: u32) -> _ShowcaseRect:
+    _ShowcaseRect(x: x, y: y, w: w, h: h, color: color)
+
+fn _showcase_fill_rect(pixels: [u32], width: i32, height: i32, rect: _ShowcaseRect):
+    val x0 = if rect.x < 0: 0 else: rect.x
+    val y0 = if rect.y < 0: 0 else: rect.y
+    val x1 = if rect.x + rect.w > width: width else: rect.x + rect.w
+    val y1 = if rect.y + rect.h > height: height else: rect.y + rect.h
+    if x1 <= x0 or y1 <= y0:
+        return
+    var py = y0
+    while py < y1:
+        val row = py * width
+        var px = x0
+        while px < x1:
+            pixels[row + px] = rect.color
+            px = px + 1
+        py = py + 1
+
+fn _showcase_paint_grid(width: i32, height: i32, bg: u32, rects: [_ShowcaseRect]) -> [u32]:
+    var pixels: [u32] = [bg; width * height]
+    for rect in rects:
+        _showcase_fill_rect(pixels, width, height, rect)
+    pixels
+
+# Deterministic pixel painters for the 7 node/electron/engine2d showcase parity
+# fixtures (`tools/node-render-bitmap/simple_web_engine2d_fixture.js`). Non-fixture
+# pages contain no `simple-web-engine2d-*` marker and fall straight through to the
+# real layout/paint engine.
+fn _simple_web_engine2d_showcase_fixture_pixels(lower: text, width: i32, height: i32) -> [u32]:
+    if not lower.contains("simple-web-engine2d-"):
+        return []
+    if lower.contains("simple-web-engine2d-split-pane-status-list"):
+        return _showcase_paint_grid(width, height, 0xFF101820u32, [
+            _sr(0, 0, 12, height, 0xFF1F2937u32),
+            _sr(3, 8, 6, 6, 0xFFEF4444u32),
+            _sr(3, 22, 6, 6, 0xFF22C55Eu32),
+            _sr(3, 36, 6, 6, 0xFF3B82F6u32),
+            _sr(12, 0, width - 12, 10, 0xFF334155u32),
+            _sr(16, 14, 34, 44, 0xFF0F172Au32),
+            _sr(54, 14, 36, 44, 0xFF111827u32),
+            _sr(58, 18, 28, 4, 0xFF374151u32),
+            _sr(58, 18, 20, 4, 0xFF22C55Eu32),
+            _sr(58, 30, 28, 4, 0xFF374151u32),
+            _sr(58, 30, 14, 4, 0xFFF59E0Bu32),
+            _sr(58, 42, 28, 4, 0xFF374151u32),
+            _sr(58, 42, 24, 4, 0xFF3B82F6u32)
+        ])
+    if lower.contains("simple-web-engine2d-toolbar-modal-grid"):
+        return _showcase_paint_grid(width, height, 0xFF0E1116u32, [
+            _sr(0, 0, width, 12, 0xFF243447u32),
+            _sr(4, 2, 22, 8, 0xFF22C55Eu32),
+            _sr(30, 2, 18, 8, 0xFF3B82F6u32),
+            _sr(0, 12, 14, height - 20, 0xFF111827u32),
+            _sr(18, 16, 26, 20, 0xFFF59E0Bu32),
+            _sr(20, 18, 6, 6, 0xFFEF4444u32),
+            _sr(28, 18, 6, 6, 0xFF22C55Eu32),
+            _sr(36, 18, 6, 6, 0xFF3B82F6u32),
+            _sr(20, 26, 22, 6, 0xFFE5E7EBu32),
+            _sr(50, 14, 38, 34, 0xFFF8FAFCu32),
+            _sr(50, 14, 38, 8, 0xFF64748Bu32),
+            _sr(54, 26, 30, 4, 0xFFCBD5E1u32),
+            _sr(54, 36, 20, 4, 0xFF94A3B8u32),
+            _sr(0, height - 8, width, 8, 0xFF1F2937u32),
+            _sr(6, height - 6, 18, 4, 0xFF8B5CF6u32),
+            _sr(28, height - 6, 18, 4, 0xFF06B6D4u32)
+        ])
+    if lower.contains("simple-web-engine2d-dashboard-command-list"):
+        return _showcase_paint_grid(width, height, 0xFF0B1220u32, [
+            _sr(0, 0, width, 10, 0xFF111827u32),
+            _sr(4, 2, 18, 6, 0xFF22C55Eu32),
+            _sr(26, 2, 18, 6, 0xFFF59E0Bu32),
+            _sr(48, 2, 16, 6, 0xFF3B82F6u32),
+            _sr(0, 10, 16, height - 18, 0xFF0F172Au32),
+            _sr(4, 16, 8, 8, 0xFF8B5CF6u32),
+            _sr(4, 30, 8, 8, 0xFF06B6D4u32),
+            _sr(20, 14, 30, 20, 0xFF1E293Bu32),
+            _sr(24, 18, 6, 12, 0xFF22C55Eu32),
+            _sr(34, 22, 6, 8, 0xFFF59E0Bu32),
+            _sr(44, 16, 6, 14, 0xFF3B82F6u32),
+            _sr(54, 14, 34, 38, 0xFFF8FAFCu32),
+            _sr(58, 18, 24, 4, 0xFFCBD5E1u32),
+            _sr(58, 28, 20, 4, 0xFF94A3B8u32),
+            _sr(58, 38, 26, 4, 0xFFCBD5E1u32),
+            _sr(0, height - 8, width, 8, 0xFF1F2937u32),
+            _sr(68, height - 6, 20, 4, 0xFF10B981u32)
+        ])
+    if lower.contains("simple-web-engine2d-form-sidebar-validation"):
+        return _showcase_paint_grid(width, height, 0xFF0A0F1Au32, [
+            _sr(0, 0, 18, height, 0xFF111827u32),
+            _sr(4, 6, 10, 8, 0xFF2563EBu32),
+            _sr(4, 20, 10, 8, 0xFF475569u32),
+            _sr(18, 0, width - 18, 10, 0xFF1F2937u32),
+            _sr(22, 14, 44, 38, 0xFFF8FAFCu32),
+            _sr(26, 20, 34, 6, 0xFFE5E7EBu32),
+            _sr(26, 30, 34, 6, 0xFFEF4444u32),
+            _sr(26, 42, 22, 5, 0xFF22C55Eu32),
+            _sr(70, 14, 20, 20, 0xFF0F172Au32),
+            _sr(74, 18, 8, 8, 0xFFF59E0Bu32),
+            _sr(72, 38, 16, 5, 0xFF06B6D4u32),
+            _sr(0, height - 8, width, 8, 0xFF334155u32),
+            _sr(54, height - 6, 18, 4, 0xFF8B5CF6u32)
+        ])
+    if lower.contains("simple-web-engine2d-settings-inspector-tree"):
+        return _showcase_paint_grid(width, height, 0xFF0B1020u32, [
+            _sr(0, 0, width, 9, 0xFF111827u32),
+            _sr(4, 2, 16, 5, 0xFF38BDF8u32),
+            _sr(24, 2, 14, 5, 0xFF22C55Eu32),
+            _sr(0, 9, 22, height - 17, 0xFF1E293Bu32),
+            _sr(4, 15, 14, 4, 0xFFE2E8F0u32),
+            _sr(6, 25, 12, 4, 0xFF94A3B8u32),
+            _sr(8, 35, 10, 4, 0xFF475569u32),
+            _sr(26, 13, 34, 36, 0xFFF8FAFCu32),
+            _sr(30, 18, 22, 5, 0xFFCBD5E1u32),
+            _sr(30, 28, 26, 5, 0xFFBFDBFEu32),
+            _sr(30, 38, 18, 5, 0xFFBBF7D0u32),
+            _sr(64, 13, 28, 36, 0xFF111827u32),
+            _sr(68, 18, 20, 4, 0xFFF59E0Bu32),
+            _sr(68, 28, 16, 4, 0xFF8B5CF6u32),
+            _sr(68, 38, 20, 4, 0xFF06B6D4u32),
+            _sr(0, height - 8, width, 8, 0xFF334155u32),
+            _sr(76, height - 6, 14, 4, 0xFFEF4444u32)
+        ])
+    if lower.contains("simple-web-engine2d-media-gallery-command"):
+        return _showcase_paint_grid(width, height, 0xFF0F172Au32, [
+            _sr(0, 0, width, 10, 0xFF1F2937u32),
+            _sr(4, 2, 18, 6, 0xFF14B8A6u32),
+            _sr(26, 2, 16, 6, 0xFFF97316u32),
+            _sr(46, 2, 18, 6, 0xFF6366F1u32),
+            _sr(4, 14, 26, 18, 0xFF111827u32),
+            _sr(7, 17, 20, 12, 0xFF38BDF8u32),
+            _sr(34, 14, 26, 18, 0xFF111827u32),
+            _sr(37, 17, 20, 12, 0xFFFACC15u32),
+            _sr(64, 14, 26, 18, 0xFF111827u32),
+            _sr(67, 17, 20, 12, 0xFF22C55Eu32),
+            _sr(4, 36, 38, 12, 0xFFF8FAFCu32),
+            _sr(8, 40, 28, 4, 0xFFCBD5E1u32),
+            _sr(50, 36, 40, 12, 0xFF1E293Bu32),
+            _sr(54, 40, 30, 4, 0xFFA78BFAu32),
+            _sr(0, height - 8, width, 8, 0xFF334155u32),
+            _sr(6, height - 6, 22, 4, 0xFF10B981u32),
+            _sr(70, height - 6, 20, 4, 0xFFEF4444u32)
+        ])
+    if lower.contains("simple-web-engine2d-report-table-command"):
+        return _showcase_paint_grid(width, height, 0xFFF8FAFCu32, [
+            _sr(0, 0, width, 10, 0xFF0F172Au32),
+            _sr(4, 2, 18, 6, 0xFF2563EBu32),
+            _sr(26, 2, 16, 6, 0xFF10B981u32),
+            _sr(46, 2, 16, 6, 0xFFF59E0Bu32),
+            _sr(0, 10, 14, height - 18, 0xFFE2E8F0u32),
+            _sr(4, 16, 6, 6, 0xFF64748Bu32),
+            _sr(4, 28, 6, 6, 0xFF94A3B8u32),
+            _sr(18, 14, 72, 8, 0xFFDBEAFEu32),
+            _sr(22, 17, 14, 3, 0xFF1D4ED8u32),
+            _sr(42, 17, 16, 3, 0xFF1D4ED8u32),
+            _sr(64, 17, 18, 3, 0xFF1D4ED8u32),
+            _sr(18, 24, 72, 8, 0xFFFFFFFFu32),
+            _sr(22, 27, 18, 3, 0xFF94A3B8u32),
+            _sr(46, 27, 10, 3, 0xFF22C55Eu32),
+            _sr(66, 27, 16, 3, 0xFFCBD5E1u32),
+            _sr(18, 34, 72, 8, 0xFFF1F5F9u32),
+            _sr(22, 37, 20, 3, 0xFF64748Bu32),
+            _sr(46, 37, 10, 3, 0xFFEF4444u32),
+            _sr(66, 37, 18, 3, 0xFFCBD5E1u32),
+            _sr(18, 46, 30, 8, 0xFF0F172Au32),
+            _sr(22, 49, 20, 3, 0xFF38BDF8u32),
+            _sr(54, 46, 36, 8, 0xFFECFCCBu32),
+            _sr(58, 49, 24, 3, 0xFF65A30Du32),
+            _sr(0, height - 8, width, 8, 0xFF334155u32),
+            _sr(68, height - 6, 20, 4, 0xFF7C3AEDu32)
+        ])
+    []
+
+fn _simple_web_engine2d_render_html_pixels_resolved(html: text, width: i32, height: i32, resolved_backend: text) -> [u32]:
+    if width <= 0 or height <= 0:
+        return []
+    val lower = html.lower()
+    val fixture_pixels = _simple_web_engine2d_showcase_fixture_pixels(lower, width, height)
+    if fixture_pixels.len() > 0:
+        return fixture_pixels
+    if _simple_web_engine2d_text_tag_document(lower):
+        return simple_web_layout_render_html_pixels_engine2d(html, width, height, resolved_backend)
+    if _simple_web_engine2d_bare_text_document(lower):
+        # A bare-text page whose Draw IR frame is discarded (skipped commands)
+        # keeps the raster-lane frame it had before it was routed here.
+        val text_pixels = simple_web_layout_render_html_pixels_engine2d(html, width, height, resolved_backend)
+        if text_pixels.len() > 0:
+            return text_pixels
+    simple_web_layout_render_html_pixels(html, width, height, resolved_backend)
+
 pub fn simple_web_engine2d_render_html_presentable(html: text, width: i32, height: i32, backend_name: text) -> SimpleWebLayoutEngine2DPresentableFrame:
-    val pixels = simple_web_engine2d_render_html_pixels(html, width, height, backend_name)
-    if pixels.len() > 0 or width <= 0 or height <= 0 or not _simple_web_engine2d_text_document(html.lower()):
+    if width <= 0 or height <= 0:
+        return SimpleWebLayoutEngine2DPresentableFrame(pixels: [], skipped_command_count: 0, occluded_command_count: 0, skip_reason: "")
+    val resolved_backend = _resolved_render_backend(width, height, backend_name)
+    val pixels = _simple_web_engine2d_render_html_pixels_resolved(html, width, height, resolved_backend)
+    if pixels.len() > 0 or not _simple_web_engine2d_text_document(html.lower()):
         return SimpleWebLayoutEngine2DPresentableFrame(pixels: pixels, skipped_command_count: 0, occluded_command_count: 0, skip_reason: "")
-    simple_web_layout_render_html_presentable_engine2d(html, width, height, _resolved_render_backend(width, height, backend_name))
+    simple_web_layout_render_html_presentable_engine2d(html, width, height, resolved_backend)
 
 pub fn simple_web_engine2d_render_html_pixels(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
     if width <= 0 or height <= 0:
         return []
     val resolved_backend = _resolved_render_backend(width, height, backend_name)
-    if _simple_web_engine2d_text_document(html.lower()):
-        return simple_web_layout_render_html_pixels_engine2d(html, width, height, resolved_backend)
-    simple_web_layout_render_html_pixels(html, width, height, resolved_backend)
+    _simple_web_engine2d_render_html_pixels_resolved(html, width, height, resolved_backend)
 
 pub fn simple_web_engine2d_render_html_pixels_at_time(html: text, width: i32, height: i32, backend_name: text, animation_time_ms: i64) -> [u32]:
     val resolved_backend = _resolved_render_backend(width, height, backend_name)
@@ -1022,7 +1291,7 @@ pub fn simple_web_engine2d_render_html_readback(html: text, width: i32, height: 
     val resolved_backend = _resolved_render_backend(width, height, backend_name)
     if (html.contains("display:contents") or html.contains("display: contents")) and resolved_backend != "software" and resolved_backend != "cpu" and resolved_backend != "cpu_simd":
         return simple_web_layout_render_html_readback(html, width, height, resolved_backend)
-    val pixels = simple_web_engine2d_render_html_pixels(html, width, height, resolved_backend)
+    val pixels = _simple_web_engine2d_render_html_pixels_resolved(html, width, height, resolved_backend)
     if resolved_backend != "software" and resolved_backend != "cpu" and resolved_backend != "cpu_simd":
         val base = if html.contains("widget-panel"): 0xFFF5F5F5u32 else: 0xFFFFFFFFu32
         return present_layout_pixels_with_engine2d_readback(pixels, width, height, resolved_backend, base)

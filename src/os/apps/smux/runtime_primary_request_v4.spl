@@ -1,0 +1,64 @@
+#![allow(REQC004)]
+# Immutable primary request bytes only. The V3 target codec validates retained
+# references; no root, grant, native observation, or authority is supplied here.
+use os.apps.smux.runtime_binding_request_v3.{SmuxRuntimeBindRequestV3, smux_runtime_bind_request_encode_v3, smux_runtime_bind_request_decode_v3}
+use std.common.base_encoding.base64.{base64url_encode, base64url_decode_strict}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.crypto.sha256.sha256_text
+
+pub struct SmuxRuntimePrimaryRequestV4:
+    target: SmuxRuntimeBindRequestV3
+    terminal_mode: text
+
+fn runtime_primary_text_v4(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("runtime-primary-request-text")
+
+pub fn smux_runtime_primary_request_encode_v4(request: SmuxRuntimePrimaryRequestV4) -> Result<text, text>:
+    if not ["stdin", "tty"].contains(request.terminal_mode): return Err("runtime-primary-request-mode")
+    val target_bytes = smux_runtime_bind_request_encode_v3(request.target)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4),
+        "kind": SdnValue.String("smux-primary-binding-request"),
+        "targetRequest": SdnValue.String(target_bytes), "terminalMode": SdnValue.String(request.terminal_mode)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields))
+    if bytes.bytes().len() > 4096: return Err("runtime-primary-request-size")
+    Ok(bytes)
+
+pub fn smux_runtime_primary_request_decode_v4(bytes: text) -> Result<SmuxRuntimePrimaryRequestV4, text>:
+    if bytes.bytes().len() == 0 or bytes.bytes().len() > 4096: return Err("runtime-primary-request-size")
+    val parsed = sdn_parse_strict_v1(bytes, SdnStrictLimitsV1(max_source_bytes: 4096,
+        max_depth: 2, max_nodes: 16, max_rows: 0, max_cells: 0, max_columns: 4))
+    if parsed.is_err(): return Err("runtime-primary-request-syntax")
+    val fields = match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: return Err("runtime-primary-request-object")
+    val keys = ["version", "kind", "targetRequest", "terminalMode"]
+    if fields.len() != keys.len(): return Err("runtime-primary-request-fields")
+    for key in keys:
+        if not fields.contains_key(key): return Err("runtime-primary-request-fields")
+    if fields["version"] != SdnValue.Int(4): return Err("runtime-primary-request-version")
+    if runtime_primary_text_v4(fields, "kind")? != "smux-primary-binding-request":
+        return Err("runtime-primary-request-kind")
+    val request = SmuxRuntimePrimaryRequestV4(
+        target: smux_runtime_bind_request_decode_v3(runtime_primary_text_v4(fields, "targetRequest")?)?,
+        terminal_mode: runtime_primary_text_v4(fields, "terminalMode")?)
+    if smux_runtime_primary_request_encode_v4(request)? != bytes: return Err("runtime-primary-request-noncanonical")
+    Ok(request)
+
+pub fn smux_runtime_primary_request_token_v4(request: SmuxRuntimePrimaryRequestV4) -> Result<text, text>:
+    Ok(base64url_encode(smux_runtime_primary_request_encode_v4(request)?))
+
+pub fn smux_runtime_primary_request_from_token_v4(token: text) -> Result<SmuxRuntimePrimaryRequestV4, text>:
+    if token.bytes().len() == 0 or token.bytes().len() > 5462: return Err("runtime-primary-request-token-size")
+    val decoded = base64url_decode_strict(token)
+    if decoded.is_err(): return Err("runtime-primary-request-base64")
+    val bytes = decoded.unwrap()
+    if base64url_encode(bytes) != token: return Err("runtime-primary-request-base64-noncanonical")
+    smux_runtime_primary_request_decode_v4(bytes)
+
+pub fn smux_runtime_primary_request_digest_v4(request: SmuxRuntimePrimaryRequestV4) -> Result<text, text>:
+    Ok(sha256_text(smux_runtime_primary_request_encode_v4(request)?))

@@ -120,3 +120,12 @@ No MinGW compiler was available. Root source review found no P0/P1 in arithmetic
 handle admission, cleanup, or result ownership; final acceptance remains bounded
 to the executed focused contract. The larger native-codegen OOM and cache-scope
 questions still require independent evidence after compiler qualification.
+
+**Revalidated 2026-11-02: still plausible because focused Linux owner1 repair qualified; compiler integration and the larger runner OOM remain OPEN; no merged fix commit with a passing regression is cited in this doc.**
+
+## Landed-fix evidence (2026-11-03)
+
+The handle-based reader is on `release/1.0.0` (`ff5cb92171f`): `rt_read_regular_no_follow_buffer` in `src/runtime/runtime_native.c` allocates observed size plus one sentinel byte, grows geometrically only up to the caller limit plus one, reads at most 1 MiB per call, and both `rt_file_read_regular_no_follow_bounded` and `..._bytes` use it (Windows and POSIX branches). Status moved to fix-implemented-verification-pending: the Linux-only `--wrap` selfcheck (`src/runtime/test/rt_bounded_read_allocation_selfcheck.c`) was not run on this Windows host. Repro: build per the commands above on Linux and run `selfcheck logic DIR bounded`, then `selfcheck bench`.
+
+## 2026-11-05 compiler-defects sweep (winboot-rel100 lane)
+Ancestor check: ff5cb92171f (handle-based `rt_read_regular_no_follow_buffer`, src/runtime/runtime_native.c) is an ancestor of tip 816655ee5cb. This lane may not modify src/runtime; the Linux `--wrap` selfcheck (42 cases) is not runnable on this Windows host. Compiler-side integration and the larger runner OOM remain open per the runtime lane.

@@ -1,0 +1,75 @@
+# Caret closure: enum payload, local binding, collection method HIR/MIR failures
+
+Status: fixed 2026-11-11 (lane p3-caret1) — interpreted regression spec verified 22/22 at release/1.0.0 tip; fix 00e1c8a97203 is an ancestor of tip.
+
+The parent bug covered missing leaf providers (file_read, print_raw, pane-manager
+adapters) and leaf type gaps (ModelProfileV1 import, SMTP `List` return types).
+Those are repaired and verified: test/01_unit/app/llm_caret/essential_leaf_provider_spec.spl 3/3 and
+test/01_unit/lib/smtp/recipient_array_type_spec.spl 3/3.
+
+The remaining Caret closure failures are three separate compiler classes, not
+missing providers:
+
+1. enum payload lowering diagnostics
+2. local binding (pattern/val) diagnostics
+3. collection method owner diagnostics (e.g. `then`, `is_open`, `close`, `trim`
+   owners reported by the CS fixture MIR failure)
+
+Enumerating the exact modules/lines needs a fresh Caret closure HIR run on a
+stage3 producer (323-module closure, ~240 s, 62 diagnostics in 14 files at the
+last run; evidence: /home/ormastes/simple-phase4-web-a0-parallel-20261010/caret/build/failure-summary.json).
+
+Repro: build the Caret essential closure with the stage3 producer and collect
+`failure-summary.json`; triage each diagnostic into the three classes above and
+file per-instance rows. No suppression of diagnostics.
+
+## 2026-11-04 triage note (cross-ref native_mir_lambda_and_enum_eq_block_caret_cs_2026_10_19)
+
+TEST_BLOCKED: no per-instance split is possible without a fresh Caret closure
+HIR/MIR run on a stage3 producer; the seed native-build path fails SCV
+admission in sparse worktrees and the 2026-10-10 failure-summary.json is not
+on this host. Source facts established today (release/1.0.0 80f074e5782):
+- `src/lib/nogc_async_mut/io/buffer.spl` has no lambda literals at all, so the
+  `E-MIR-EXPR-Lambda x21` sites cited for it in the 2026-10-19 bug no longer
+  exist in that file; lambda lifting for non-Let positions is implemented
+  (`expr_dispatch.spl` `case Lambda`, `lower_lambda_value`).
+- `close`/`is_open` in that file are now explicit forwards
+  (`buffer.spl:290-297`) from the stage2 workaround commits (290304c37e0,
+  515f96e824e), not unresolved methods.
+Next step: run the Caret closure HIR/MIR on stage3, one row per diagnostic.
+
+## 2026-11-10 fix (fix-implemented-verification-pending)
+
+Enumerated the three classes as 22 concrete shapes in
+`test/01_unit/compiler/50.mir/caret_closure_enum_payload_binding_collection_spec.spl`,
+each driving the pure-Simple HIR -> MIR lowering (the same lowering the caret
+lane runs) and asserting no diagnostic. On the release/1.0.0 tip one shape was
+red: class 3, a captured `Dict` read with `d.get(k)` inside a lifted lambda
+(`unresolved method call: get route=runtime-fallback owner=`, then `cannot
+materialize lambda for its declared function slot`). Root cause:
+`lower_lambda_value_for_type` loads every capture through
+`rt_closure_get_capture` as a bare i64 and carried only the HIR type and
+`struct_value_syms` into the lift, never the MIR `Dict`/`Array` type or the
+`runtime_dict_locals` / `runtime_array_locals` / `runtime_elem_value_type`
+markers the collection method routes key on. Fixed in the capture-load block of
+`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`. Classes 1
+and 2 (Option-parameter match, captured Option match, for-in over a captured
+array) were red on the older 27e65c24371 tip and already green on the release
+tip; they stay as prevention rows. Still open for verification: a native caret
+closure build on a stage3 producer.
+
+## Addendum 2026-11-11 — lane p3-caret1: verified fixed at tip
+
+Traversed on work/p3-caret1-20261111 (origin/release/1.0.0 tip 79d5af6723f6).
+
+- Fix commit 00e1c8a97203 ("fix(mir): carry Dict/Array capture type and
+  collection markers into lifted lambdas") IS an ancestor of tip.
+- Regression spec
+  test/01_unit/compiler/50.mir/caret_closure_enum_payload_binding_collection_spec.spl
+  (from the same fix) run with the tracked seed interpreter:
+  `Results: 22 total, 22 passed, 0 failed`, spec exit 0
+  (log: build/review/p3fix-caret1-20261111-logs/row6_mir_spec.log).
+- The row's remaining "stage3 native closure build" verification belongs to the
+  separate native-closure admission row (llm_caret_native_closure_admission),
+  which this lane traversed BLOCKED; the HIR->MIR diagnostic classes this bug
+  tracks are all green.

@@ -6,7 +6,8 @@
   property spec — including the structural CT check itself, so the
   underlying CT property of P-256 scalar-mul is currently **unverified**,
   not merely unverifiable-and-passing).
-- **Status:** OPEN.
+- **Status:** RESOLVED 2026-11-25 — `fe_from_bytes` for the P-256 field now
+  exists and the exact symptom no longer reproduces (probe below).
 
 ## Symptom
 
@@ -60,3 +61,26 @@ blocks the file, which is worse than a red test.
 
 - `test/unit/lib/crypto/p256_ct_property_spec.spl` (4 of 5 examples; the
   5th, structural source-inspection example was not exercised in this run)
+
+## Verification 2026-11-25 (p2w4-al lane, Windows host)
+
+The missing-function defect is gone at release/1.0.0 HEAD:
+
+- `src/os/crypto/ecdh_p256.spl:46-53` imports `fe_from_bytes, fe_to_bytes`
+  from `std.common.math.field.fe_p256`, and that module defines
+  `fn fe_from_bytes(bytes: [u8]) -> FeP256` at
+  `src/lib/common/math/field/fe_p256.spl:337` — the P-256-field
+  implementation whose absence this bug records.
+- Live probe (seed interpreter, `SIMPLE_LIB=src bin/simple.exe run`): a
+  driver calling `p256_keypair_pub` on scalar 0x00..0x01 printed
+  `pub len=65 deterministic=true` — the exact call path
+  (`fe_from_bytes(px_bytes)`/`(py_bytes)` inside `p256_keypair_pub`) executes
+  and yields a valid 65-byte SEC1 point, deterministically.
+
+The spec has moved to `test/01_unit/lib/crypto/p256_ct_property_spec.spl`;
+running it was environment-blocked (`bin/simple.exe test` cannot load the
+tree: `unknown decorator '@representation_boundary'` in
+`src/app/test_runner_new/test_runner_client.spl` — known release/1.0.0
+source/binary inconsistency). The constant-time property assertions
+themselves were not re-executed here; closure covers the filed defect
+(`fe_from_bytes` not found), which is verifiably fixed.

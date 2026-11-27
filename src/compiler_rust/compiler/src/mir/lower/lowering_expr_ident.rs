@@ -67,6 +67,7 @@ impl<'a> MirLowerer<'a> {
 
             if variant_exists || expr_ty == TypeId::ANY || name.contains("::") {
                 // Emit EnumUnit instruction for proper RuntimeEnum creation
+                let discriminant = self.owned_variant_discriminant(enum_name, variant, expr_ty);
                 return self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
@@ -74,6 +75,7 @@ impl<'a> MirLowerer<'a> {
                         dest,
                         enum_name: enum_name.to_string(),
                         variant_name: variant.to_string(),
+                        discriminant,
                     });
                     dest
                 });

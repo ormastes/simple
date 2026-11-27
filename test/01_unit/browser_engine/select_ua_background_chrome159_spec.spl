@@ -1,0 +1,109 @@
+"""
+`<select>` background against Chrome 159 (Chrome for Testing 159, Linux arm64,
+`--headless --force-device-scale-factor=1 --window-size=200,440 --screenshot`).
+
+Chrome's UA sheet gives `select` `background-color: ButtonFace`
+(getComputedStyle `rgb(239, 239, 239)`) on every select. What it PAINTS
+depends on `appearance: auto`:
+
+- An author-STYLED select -- any author `border*` (radius included),
+  `background*` or `box-shadow` declaration -- falls back to CSS painting and
+  shows the ButtonFace fill `#efefef`. The catalog's
+  `select { padding:8px; border:1px solid #94a3b8; border-radius:5px }` is
+  this case (forms-media "Choice" select).
+- `appearance` other than `auto` (incl. `-webkit-appearance:none`) also
+  drops the native look and paints ButtonFace.
+- An unstyled select keeps the native menulist look: a WHITE field. Padding,
+  `color` and `font-size` do not count as styling.
+- A listbox (`multiple`, or `size` > 1) is a white `Field` either way.
+
+Before this fix the engine painted no select background at all (the page
+showed through), so the catalog select was body-coloured where Chrome is
+grey.
+
+Every expected value below is a pixel read from Chrome's screenshot of the
+same fixture; boxes (getBoundingClientRect): a 0,0 73x35; b 0,43 31x19;
+c 0,80 73x35; d 0,120 73x35; e 0,160 47x35; f 0,203 31x19; g 0,244 11x17;
+h 0,283 31x19; i 0,323 31x19; j 0,360 30x70. Sample points sit in padding,
+clear of the label and the arrow, and inside the engine's box too (the
+engine lays g out 31x19 and j as a closed 31x19 select -- separate geometry
+gaps, not pinned here).
+
+Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+
+val W: i32 = 200
+val H: i32 = 440
+
+val PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#eef2ff;font:16px/1.5 sans-serif;color:#172033}}div{{height:40px;margin:0}}.k{{padding:8px;border:1px solid #94a3b8;border-radius:5px}}#c{{background:#fff}}#d{{background:transparent}}#e{{padding:8px}}#f{{border-radius:5px}}#g{{appearance:none}}#h{{box-shadow:0 0 0 #000}}#i{{color:red}}#j{{border:1px solid #94a3b8}}</style></head><body><div><select id=a class=k><option>Alpha</option></select></div><div><select id=b><option>A</option></select></div><div><select id=c class=k><option>Alpha</option></select></div><div><select id=d class=k><option>Alpha</option></select></div><div><select id=e><option>A</option></select></div><div><select id=f><option>A</option></select></div><div><select id=g><option>A</option></select></div><div><select id=h><option>A</option></select></div><div><select id=i><option>A</option></select></div><div><select id=j multiple><option>A</option><option>B</option></select></div></body></html>"
+
+# Largest channel difference between Simple's pixel and a Chrome colour.
+fn off(px: [u32], x: i32, y: i32, chrome: u32) -> i32:
+    val p = px[x + y * W]
+    var m = 0
+    for shift in [16u32, 8u32, 0u32]:
+        val a = ((p >> shift) & 255u32) as i32
+        val b = ((chrome >> shift) & 255u32) as i32
+        val d = if a > b: a - b else: b - a
+        if d > m:
+            m = d
+    m
+
+fn render() -> [u32]:
+    simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+
+describe "select background (Chrome 159)":
+    it "AC-1: an author-styled select paints ButtonFace #efefef":
+        val px = render()
+        expect(px.len()).to_equal(W * H)
+        step("Chrome 159: (4,17) (36,3) (36,31) (70,17) inside #a are #efefef")
+        expect(off(px, 4, 17, 0xefefefu32)).to_equal(0)
+        expect(off(px, 36, 3, 0xefefefu32)).to_equal(0)
+        expect(off(px, 36, 31, 0xefefefu32)).to_equal(0)
+        expect(off(px, 70, 17, 0xefefefu32)).to_equal(0)
+        step("Chrome 159: (100,17) beside the select is the body #eef2ff")
+        expect(off(px, 100, 17, 0xeef2ffu32)).to_equal(0)
+
+    it "AC-2: border-radius alone styles the select":
+        val px = render()
+        step("Chrome 159: (3,212) and (2,208) inside #f are #efefef")
+        expect(off(px, 3, 212, 0xefefefu32)).to_equal(0)
+        expect(off(px, 2, 208, 0xefefefu32)).to_equal(0)
+
+    it "AC-3: an unstyled select keeps the native white field":
+        val px = render()
+        step("Chrome 159: (2,48) and (2,52) inside UA-only #b are #ffffff")
+        expect(off(px, 2, 48, 0xffffffu32)).to_equal(0)
+        expect(off(px, 2, 52, 0xffffffu32)).to_equal(0)
+        step("Chrome 159: padding does not style it, (3,168) (3,177) inside #e are #ffffff")
+        expect(off(px, 3, 168, 0xffffffu32)).to_equal(0)
+        expect(off(px, 3, 177, 0xffffffu32)).to_equal(0)
+
+    it "AC-4: an author background still wins over the UA fill":
+        val px = render()
+        step("Chrome 159: background:#fff on #c gives #ffffff at (4,97) (36,83)")
+        expect(off(px, 4, 97, 0xffffffu32)).to_equal(0)
+        expect(off(px, 36, 83, 0xffffffu32)).to_equal(0)
+        step("Chrome 159: background:transparent on #d shows the body #eef2ff at (4,137) (36,123)")
+        expect(off(px, 4, 137, 0xeef2ffu32)).to_equal(0)
+        expect(off(px, 36, 123, 0xeef2ffu32)).to_equal(0)
+
+    it "AC-5: appearance:none and box-shadow style it, color does not":
+        val px = render()
+        step("Chrome 159: appearance:none #g is #efefef at (1,245) (1,259)")
+        expect(off(px, 1, 245, 0xefefefu32)).to_equal(0)
+        expect(off(px, 1, 259, 0xefefefu32)).to_equal(0)
+        step("Chrome 159: box-shadow #h is #efefef at (2,288) (2,298)")
+        expect(off(px, 2, 288, 0xefefefu32)).to_equal(0)
+        expect(off(px, 2, 298, 0xefefefu32)).to_equal(0)
+        step("Chrome 159: color:red #i keeps the native #ffffff at (2,328) (2,338)")
+        expect(off(px, 2, 328, 0xffffffu32)).to_equal(0)
+        expect(off(px, 2, 338, 0xffffffu32)).to_equal(0)
+
+    it "AC-6: a listbox select is a white Field even when author-styled":
+        val px = render()
+        step("Chrome 159: <select multiple> with an author border, #j, is #ffffff at (2,368) (2,378)")
+        expect(off(px, 2, 368, 0xffffffu32)).to_equal(0)
+        expect(off(px, 2, 378, 0xffffffu32)).to_equal(0)

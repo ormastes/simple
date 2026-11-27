@@ -1,0 +1,139 @@
+# @req REQ-001, REQ-013
+# Rich schemas consume semantic-owner identities; these transport fixtures do
+# not establish language name/alias binding (covered by the HIR adapter lane).
+use std.spec.*
+use compiler.common.data.data_schema_contracts.*
+use compiler.common.data.data_schema_contracts_v2.*
+use compiler.common.data.data_schema_contracts_v3.*
+use compiler.common.data.data_semantic_type_identity_v1.*
+use compiler.common.data.data_schema_resolver_v3.*
+use compiler.common.data.data_schema_sdn_v3.*
+
+fn rich_at(line: i64 = 1) -> DataDeclProvenanceV1:
+    data_decl_provenance_v1(DataDeclOriginV1.Spl, "rich.spl", line, "compiler.ast")
+
+fn rich_stored() -> DataPropertyContractV2:
+    DataPropertyContractV2(kind: DataPropertyKindV2.Stored, visibility: DataVisibilityV2.Public,
+        visibility_owner: "", writable: false, mutation_owner: "", getter: "", setter: "",
+        forward_attr: "", phase: "core", read_effects: [], write_effects: [], dependencies: [])
+
+fn rich_nominal(name: text, owner: text = "compiler.ids") -> DataSemanticTypeIdentityV1:
+    data_semantic_type_identity_v1(data_semantic_type_node_v1("named", [owner, name, "struct"], [])).unwrap()
+
+fn rich_nested(mutability: text) -> DataSemanticTypeIdentityV1:
+    val number = data_semantic_type_node_v1("int", ["64", "unsigned"], [])
+    val reference = data_semantic_type_node_v1("ref", [mutability], [number])
+    val boxed = data_semantic_type_node_v1("named", ["compiler.ids", "Box", "class"], [reference])
+    data_semantic_type_identity_v1(boxed).unwrap()
+
+fn rich_decl(name: text, type_identity: DataSemanticTypeIdentityV1, at: DataDeclProvenanceV1) -> DataAttrDeclV3:
+    DataAttrDeclV3(tree: "compiler.ast", view: "compiler.ast.Binary", name: name,
+        type_identity: type_identity, requiredness: DataRequirednessV1.Required,
+        default_value: "", provenance: at, property: rich_stored())
+
+fn rich_views() -> [DataViewDeclV2]:
+    [DataViewDeclV2(tree: "compiler.ast", name: "compiler.ast.Binary", provenance: rich_at())]
+
+fn rich_resolve(decls: [DataAttrDeclV3]) -> Result<DataSchemaSurfaceV3, [DataSchemaDiagnosticV1]>:
+    data_schema_resolve_v3(data_schema_authority_v1("compiler.ast", ["compiler.ast"]), rich_views(), decls)
+
+fn rich_sdn() -> text:
+    "data_policy:\n    schema: simple.data-policy/v3\n    declarations:\n        binary:\n" +
+    "            tree: compiler.ast\n            view: compiler.ast.Binary\n            attributes:\n" +
+    "                value:\n                    type: \"Result<compiler.Box<[i64]>, text>\"\n" +
+    "                    required: true\n                    property:\n" +
+    "                        kind: stored\n                        visibility: public\n" +
+    "                        writable: false\n                        phase: core\n" +
+    "                        read_effects: []\n                        write_effects: []\n"
+
+describe "Rich semantic type data schema resolver V3":
+    it "retains the complete nested structural identity and its version":
+        step("Declare explicit views and property contracts")
+        val key = rich_nested("mutable")
+        val surface = rich_resolve([rich_decl("value", key, rich_at())]).unwrap()
+        expect(surface.contract_version).to_equal(3)
+        expect(surface.tree).to_equal("compiler.ast")
+        expect(data_semantic_type_identity_equal_v1(surface.attrs[0].type_identity, key)).to_equal(true)
+        expect(surface.attrs[0].id.ordinal).to_equal(1)
+
+    it "rejects a nested reference qualifier disagreement with both origins":
+        val mutable = rich_decl("value", rich_nested("mutable"), rich_at(2))
+        val immutable = rich_decl("value", rich_nested("immutable"), rich_at(3))
+        val diagnostics = rich_resolve([mutable, immutable]).unwrap_err()
+        expect(diagnostics[0].kind == DataSchemaErrorKindV1.TypeConflict).to_equal(true)
+        expect(diagnostics[0].first.line).to_equal(2)
+        expect(diagnostics[0].second.line).to_equal(3)
+
+    it "keeps nominal types and declaring modules distinct despite common representation":
+        val region = rich_decl("value", rich_nominal("RegionId"), rich_at())
+        val object = rich_decl("value", rich_nominal("ObjId"), rich_at(2))
+        expect(rich_resolve([region, object]).is_err()).to_equal(true)
+        val other_module = rich_decl("value", rich_nominal("RegionId", "other.ids"), rich_at(3))
+        expect(rich_resolve([region, other_module]).is_err()).to_equal(true)
+
+    it "merges matching already-bound identities without consulting source spelling":
+        val key = rich_nested("immutable")
+        val first = rich_decl("value", key, rich_at())
+        var second = rich_decl("value", key, rich_at(9))
+        second.provenance = data_decl_provenance_v1(DataDeclOriginV1.Sdn, "rich.sdn", 9, "compiler.ast")
+        val surface = rich_resolve([first, second]).unwrap()
+        expect(surface.attrs[0].provenances.len()).to_equal(2)
+        expect(surface.schema_digest).to_equal(rich_resolve([first]).unwrap().schema_digest)
+
+    it "rejects forged identity length and unsupported identity versions":
+        val valid = rich_nominal("RegionId")
+        val bad_length = DataSemanticTypeIdentityV1(version: valid.version, canonical: valid.canonical, byte_len: 1)
+        expect(rich_resolve([rich_decl("value", bad_length, rich_at())]).is_err()).to_equal(true)
+        val bad_version = DataSemanticTypeIdentityV1(version: 99, canonical: valid.canonical, byte_len: valid.byte_len)
+        expect(rich_resolve([rich_decl("value", bad_version, rich_at())]).is_err()).to_equal(true)
+
+    it "binds forwarding to exact rich type equality and shared property rules":
+        val target = rich_decl("target", rich_nested("immutable"), rich_at())
+        var alias = rich_decl("alias", rich_nested("mutable"), rich_at(2))
+        alias.property.kind = DataPropertyKindV2.Forwarded
+        alias.property.forward_attr = "target"
+        expect(rich_resolve([target, alias]).unwrap_err()[0].message).to_contain("different exact type")
+        alias.type_identity = target.type_identity
+        val surface = rich_resolve([target, alias]).unwrap()
+        expect(surface.properties[0].property.dependencies).to_equal(["target"])
+
+    it "includes full type qualifiers and explicit empty views in the V3 digest":
+        step("Verify canonical identities")
+        val mutable = rich_resolve([rich_decl("value", rich_nested("mutable"), rich_at())]).unwrap()
+        val immutable = rich_resolve([rich_decl("value", rich_nested("immutable"), rich_at())]).unwrap()
+        expect(mutable.schema_digest == immutable.schema_digest).to_equal(false)
+        val views = rich_views() + [DataViewDeclV2(tree: "compiler.ast", name: "compiler.ast.Empty", provenance: rich_at())]
+        val fieldless = data_schema_resolve_v3(data_schema_authority_v1("compiler.ast", ["compiler.ast"]), views,
+            [rich_decl("value", rich_nested("mutable"), rich_at())]).unwrap()
+        expect(fieldless.schema_digest == mutable.schema_digest).to_equal(false)
+
+    it "preserves declaration order independence and canonical ordinal assignment":
+        val a = rich_decl("a", rich_nominal("RegionId"), rich_at())
+        val b = rich_decl("b", rich_nested("mutable"), rich_at(2))
+        val forward = rich_resolve([a, b]).unwrap()
+        val reverse = rich_resolve([b, a]).unwrap()
+        expect(forward.schema_digest).to_equal(reverse.schema_digest)
+        expect(reverse.attrs[0].name).to_equal("a")
+        expect(reverse.attrs[1].name).to_equal("b")
+
+    it "keeps full SDN type expressions explicitly unbound until the language owner binds":
+        step("Resolve equivalent SPL and SDN inputs")
+        val input = data_schema_unbound_from_sdn_v3(rich_sdn(), "rich.sdn", "compiler.ast").unwrap()
+        expect(input.decls[0].type_source).to_equal("Result<compiler.Box<[i64]>, text>")
+        expect(input.decls[0].provenance.path).to_equal("rich.sdn")
+        expect(input.decls[0].provenance.line).to_be_greater_than(0)
+        expect(input.views[0].name).to_equal("compiler.ast.Binary")
+
+    it "rejects legacy args and unknown keys in V3 input rather than inventing a nominal key":
+        val with_args = rich_sdn().replace("                    required: true", "                    args: [text]\n                    required: true")
+        expect(data_schema_unbound_from_sdn_v3(with_args, "rich.sdn", "compiler.ast").is_err()).to_equal(true)
+        expect(data_schema_unbound_from_sdn_v3(rich_sdn().replace("simple.data-policy/v3", "simple.data-policy/v2"),
+            "rich.sdn", "compiler.ast").is_err()).to_equal(true)
+
+    it "retains shared authority, applicability and dependency refusal":
+        var unauthorized = rich_decl("value", rich_nominal("RegionId"), rich_at())
+        unauthorized.provenance = data_decl_provenance_v1(DataDeclOriginV1.Sdn, "foreign.sdn", 1, "foreign.owner")
+        expect(rich_resolve([unauthorized]).unwrap_err()[0].kind == DataSchemaErrorKindV1.UnauthorizedInjection).to_equal(true)
+        var missing_dependency = rich_decl("value", rich_nominal("RegionId"), rich_at())
+        missing_dependency.property.dependencies = ["missing"]
+        expect(rich_resolve([missing_dependency]).unwrap_err()[0].message).to_contain("missing dependency")

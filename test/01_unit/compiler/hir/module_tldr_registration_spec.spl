@@ -1,0 +1,69 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# HIR TLDR import registration part-file is wired and registers admitted signatures
+
+Bug: orphaned_part_files_never_imported_2026-09-18
+`src/compiler/20.hir/hir_lowering/_Items/module_tldr_registration.spl` must be
+exported from `compiler.hir.hir_lowering.items` and cleanly define admitted
+function symbols into `SymbolTable` without referencing missing fields.
+"""
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types.{ParserImport, ImportItem}
+use compiler.hir.archive.tldr_function_header_v1.{
+    TldrFunctionHeaderAuthorityV1,
+    TldrFunctionSignatureV1,
+    AdmittedTldrFunctionImportV1
+}
+use compiler.hir.hir_types.{HirSymbol, HirTypeKind, SymbolKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
+fn sample_authority(module_name: text) -> TldrFunctionHeaderAuthorityV1:
+    TldrFunctionHeaderAuthorityV1(
+        module_name: module_name,
+        source_digest: "0000000000000000000000000000000000000000000000000000000000000000",
+        producer_digest: "1111111111111111111111111111111111111111111111111111111111111111",
+        variant_digest: "2222222222222222222222222222222222222222222222222222222222222222",
+        abi_digest: "3333333333333333333333333333333333333333333333333333333333333333",
+        payload_digest: "4444444444444444444444444444444444444444444444444444444444444444"
+    )
+
+describe "module_tldr_registration part-file":
+    it "is re-exported through hir_lowering.items and registers admitted imports idempotently":
+        val sig = TldrFunctionSignatureV1(
+            name: "add_one",
+            param_names: ["x"],
+            param_type_names: ["i64"],
+            return_type_name: "i64",
+            linkage_name: "demo__add_one"
+        )
+        val authority = sample_authority("demo.math")
+        val prepared = AdmittedTldrFunctionImportV1(
+            payload: "",
+            authority: authority,
+            admitted_signatures: Some([sig])
+        )
+        var hl = HirLowering.with_filename("consumer.spl")
+        hl.tldr_entry_only = true
+        hl.tldr_imports = [prepared]
+        val imported = ParserImport(
+            module: "demo.math",
+            items: [ImportItem(name: "add_one", has_alias: false, alias: "")],
+            is_lazy: false,
+            span: Span.empty()
+        )
+        val first_ok = hl.resolve_tldr_import_v1("consumer.spl", imported)
+        expect(first_ok).to_equal(true)
+        expect(hl.errors.len()).to_equal(0)
+        val sym_id = hl.symbols.lookup_or_invalid("add_one")
+        expect(sym_id.is_valid()).to_equal(true)
+        val sym: HirSymbol = hl.symbols.symbols[sym_id.id]
+        expect(sym.kind).to_equal(SymbolKind.Function)
+        expect(sym.name).to_equal("demo__add_one")
+        expect(sym.type_.?).to_equal(true)
+
+        # Re-registering the exact same signature is idempotent.
+        val second = hl.register_admitted_tldr_function_v1([sig], authority, "add_one", "add_one", Span.empty())
+        expect(second.is_ok()).to_equal(true)
+        expect(second.unwrap().id).to_equal(sym_id.id)

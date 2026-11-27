@@ -1,0 +1,98 @@
+"""Managed image authority hands adoption a host-arch, Ready load consumer.
+
+Defects pinned here: on arm64 the managed authority named the target "arm64",
+which the loader contract rejects (it accepts "aarch64"), and it returned an
+already-Validated consumer that image preparation re-plans and rejects as
+InvalidConsumer.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.arch.mod.{get_arch}
+use os.kernel.loader.managed_image_authority_v1.{managed_image_authority_issue_v1}
+use os.kernel.loader.executable_admission_pipeline.{
+    executable_loader_authority_owner_initialize}
+use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerStateV1}
+use test.helpers.host_arch_elf_fixture.{host_elf_machine, foreign_arch}
+
+fn _u16(buf: [u8], v: i64) -> [u8]:
+    var out = buf
+    out.push((v & 0xFF).to_u8())
+    out.push(((v >> 8) & 0xFF).to_u8())
+    out
+
+fn _u32(buf: [u8], v: i64) -> [u8]:
+    var out = _u16(buf, v & 0xFFFF)
+    _u16(out, (v >> 16) & 0xFFFF)
+
+fn _u64(buf: [u8], v: i64) -> [u8]:
+    _u32(_u32(buf, v & 0xFFFFFFFF), (v >> 32) & 0xFFFFFFFF)
+
+fn _elf_for(machine: i64) -> [u8]:
+    var b: [u8] = [0x7F.to_u8(), 0x45.to_u8(), 0x4C.to_u8(), 0x46.to_u8(),
+        2.to_u8(), 1.to_u8(), 1.to_u8()]
+    while b.len() < 16:
+        b.push(0.to_u8())
+    b = _u16(b, 2)
+    b = _u16(b, machine)
+    b = _u32(b, 1)
+    b = _u64(b, 0x400000)
+    b = _u64(b, 64)
+    b = _u64(b, 0)
+    b = _u32(b, 0)
+    b = _u16(b, 64)
+    b = _u16(b, 56)
+    b = _u16(b, 1)
+    b = _u16(b, 0)
+    b = _u16(b, 0)
+    b = _u16(b, 0)
+    b = _u32(b, 1)
+    b = _u32(b, 5)
+    b = _u64(b, 0x1000)
+    b = _u64(b, 0x400000)
+    b = _u64(b, 0x400000)
+    b = _u64(b, 4)
+    b = _u64(b, 4)
+    b = _u64(b, 0x1000)
+    while b.len() < 0x1000:
+        b.push(0.to_u8())
+    b.push(0xC3.to_u8())
+    b.push(0x90.to_u8())
+    b.push(0x90.to_u8())
+    b.push(0x90.to_u8())
+    b
+
+fn _expected_arch_text() -> text:
+    match get_arch():
+        Architecture.X86_64: "x86_64"
+        Architecture.Arm64: "aarch64"
+        Architecture.Riscv64: "riscv64"
+        _: ""
+
+fn _ensure_registry():
+    match executable_loader_authority_owner_initialize(8, 0x4D414E41474544u64):
+        case Ok(_): ()
+        case Err(_): ()
+
+describe "managed image authority on the host architecture":
+    # @req REQ-LOADER-MANAGED-HOST-ARCH
+    it "stages a host-arch image with the loader's canonical arch name":
+        _ensure_registry()
+        val staged = managed_image_authority_issue_v1(
+            _elf_for(host_elf_machine()), get_arch(), "managed-workload")
+        expect(staged.error_pid).to_equal(0)
+        expect(staged.staged).to_equal(true)
+        expect(staged.consumer.expected_arch).to_equal(_expected_arch_text())
+
+    it "hands adoption a Ready consumer that image preparation can plan":
+        _ensure_registry()
+        val staged = managed_image_authority_issue_v1(
+            _elf_for(host_elf_machine()), get_arch(), "managed-workload")
+        expect(staged.staged).to_equal(true)
+        expect(staged.consumer.state == ExecutableLoadConsumerStateV1.Ready).to_equal(true)
+
+    it "rejects an image whose ELF machine does not match the requested arch":
+        _ensure_registry()
+        val staged = managed_image_authority_issue_v1(
+            _elf_for(host_elf_machine()), foreign_arch(), "managed-workload")
+        expect(staged.staged).to_equal(false)

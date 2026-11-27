@@ -1,0 +1,42 @@
+# @cover src/lib/common/sdn/parser.spl
+use std.spec.*
+use std.spec.step
+use std.common.sdn.parser.{parse_with_issues, SdnIssue}
+use std.common.sdn.value.{SdnValue}
+
+describe "Nested SDN block payload ownership":
+    it "should retain an account mapping returned by a recursive block":
+        step("Parse a nested POP3 account through the canonical SDN parser")
+        val parsed = parse_with_issues("accounts:\n  work:\n    protocol: pop3\n").unwrap()
+        val root: SdnValue = parsed.0
+        val accounts: SdnValue = root.get("accounts") ?? SdnValue.Null
+        step("Check that both recursive dictionary values retain their type")
+        expect(accounts.is_dict()).to_equal(true)
+        val work: SdnValue = accounts.get("work") ?? SdnValue.Null
+        expect(work.is_dict()).to_equal(true)
+        val protocol: SdnValue = work.get("protocol") ?? SdnValue.Null
+        expect(protocol.as_str()).to_equal(Some("pop3"))
+
+    it "should resume at the following root key after consuming a nested block":
+        step("Parse root fields surrounding a nested account mapping")
+        val parsed = parse_with_issues("before: first\naccounts:\n  work:\n    protocol: pop3\nafter: last\n").unwrap()
+        val root: SdnValue = parsed.0
+        val before: SdnValue = root.get("before") ?? SdnValue.Null
+        val after: SdnValue = root.get("after") ?? SdnValue.Null
+        step("Check that the recursive next-line index preserves sibling fields")
+        expect(before.as_str()).to_equal(Some("first"))
+        expect(after.as_str()).to_equal(Some("last"))
+        expect((root.get("accounts") ?? SdnValue.Null).is_dict()).to_equal(true)
+
+    it "should keep separate account mappings and report no duplicate issue":
+        step("Parse two nested accounts using different protocols")
+        val parsed = parse_with_issues("accounts:\n  work:\n    protocol: pop3\n  archive:\n    protocol: imap\n").unwrap()
+        val root: SdnValue = parsed.0
+        val issues: [SdnIssue] = parsed.1
+        val accounts: SdnValue = root.get("accounts") ?? SdnValue.Null
+        val work: SdnValue = accounts.get("work") ?? SdnValue.Null
+        val archive: SdnValue = accounts.get("archive") ?? SdnValue.Null
+        step("Check that recursive results do not overwrite their sibling")
+        expect((work.get("protocol") ?? SdnValue.Null).as_str()).to_equal(Some("pop3"))
+        expect((archive.get("protocol") ?? SdnValue.Null).as_str()).to_equal(Some("imap"))
+        expect(issues.len()).to_equal(0)

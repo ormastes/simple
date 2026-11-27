@@ -21,3 +21,10 @@ feature text bytes -> existing facade
 owner inversion or direct rt_* -> fail closed
 ```
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+fail-closed review record; owner decision required.

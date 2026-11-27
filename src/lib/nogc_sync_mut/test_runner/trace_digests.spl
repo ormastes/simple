@@ -1,0 +1,81 @@
+# Plan 3.5 digests for recorded case events. Each digest is computed at most once:
+# the spec-file digest once per path per process, the executable digest once per
+# process. Events never trigger a hash on their own. The spec-digest cache is keyed
+# by path only, which is sound because the recording lane is a short-lived child
+# process (a spec file cannot change under it mid-run).
+use std.io_runtime.{file_exists, file_hash_sha256_or_empty}
+use std.nogc_sync_mut.spec.engine_probe.{self_exe_path}
+use std.common.traceability.case_events.{TraceCaseEvent, TraceCaseFacts, TestDefinitionDigest, TestBinaryDigest}
+
+pub struct TraceHashAttempts:
+    value: i64
+
+pub struct TraceDigestAttempts:
+    definition: TraceHashAttempts
+    binary: TraceHashAttempts
+
+var _definition_cache: Dict<text, text> = {}
+var _definition_attempts: i64 = 0
+var _binary_resolved: bool = false
+var _binary_cache: text = ""
+var _binary_attempts: i64 = 0
+
+pub fn trace_digest_attempts() -> TraceDigestAttempts:
+    TraceDigestAttempts(definition: TraceHashAttempts(value: _definition_attempts), binary: TraceHashAttempts(value: _binary_attempts))
+
+# Test hook: forget every cached digest and counter.
+pub fn trace_digests_reset():
+    _definition_cache = {}
+    _definition_attempts = 0
+    _binary_resolved = false
+    _binary_cache = ""
+    _binary_attempts = 0
+
+# sha256 of the spec file bytes; None when the file is missing or unreadable.
+pub fn trace_definition_digest(spec_path: text) -> TestDefinitionDigest?:
+    if spec_path == "":
+        return None
+    if _definition_cache.contains_key(spec_path):
+        val cached = _definition_cache[spec_path]
+        if cached == "":
+            return None
+        return Some(TestDefinitionDigest(value: cached))
+    var digest = ""
+    if file_exists(spec_path):
+        _definition_attempts = _definition_attempts + 1
+        digest = file_hash_sha256_or_empty(spec_path)
+    var next = _definition_cache
+    next[spec_path] = digest
+    _definition_cache = next
+    if digest == "":
+        return None
+    Some(TestDefinitionDigest(value: digest))
+
+# sha256 of the recording process's real executable (self_exe_path), never
+# argv[0]: under the interpreter argv[0] is the .spl script. None when no real
+# executable resolves.
+pub fn trace_binary_digest() -> TestBinaryDigest?:
+    if not _binary_resolved:
+        _binary_resolved = true
+        match self_exe_path():
+            case Some(exe):
+                _binary_attempts = _binary_attempts + 1
+                _binary_cache = file_hash_sha256_or_empty(exe)
+            case None: pass
+    if _binary_cache == "":
+        return None
+    Some(TestBinaryDigest(value: _binary_cache))
+
+# Stamp both digests onto every event's facts, keeping the facts already there.
+pub fn trace_events_with_digests(events: [TraceCaseEvent], spec_path: text) -> [TraceCaseEvent]:
+    val definition = trace_definition_digest(spec_path)
+    val binary = trace_binary_digest()
+    var out: [TraceCaseEvent] = []
+    for event in events:
+        var facts = TraceCaseFacts(definition_digest: definition, binary_digest: binary)
+        match event.facts:
+            case Some(found):
+                facts = TraceCaseFacts(at: found.at, failure: found.failure, host: found.host, backend: found.backend, failure_code: found.failure_code, definition_digest: definition, binary_digest: binary)
+            case None: pass
+        out.push(TraceCaseEvent(case_name: event.case_name, phase: event.phase, outcome: event.outcome, facts: Some(facts)))
+    out

@@ -19,7 +19,7 @@ The active attempt 2 was not modified. Its independent environment workaround
 removed only the protected directory after verifying cargo, rustc, clang-cl and
 Windows PowerShell remained discoverable. The source repair is for later runs.
 
-`scripts/check/check-bootstrap-path-access.py` executes the actual extracted
+`scripts/check/check-bootstrap-path-access.py [deleted 2026-11-26]` executes the actual extracted
 canonicalization block on ten independent cases: readable, missing, traversal
 denied before/after readable entries, canonical duplicates, spaces, empty PATH,
 only missing, only inaccessible, and launcher shim exclusion. A shell-local

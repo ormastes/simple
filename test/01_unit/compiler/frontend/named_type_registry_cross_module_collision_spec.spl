@@ -1,0 +1,61 @@
+# @tag: unit, compiler, frontend
+# Bug: bare_name_registry_collision_trigger_conditions_2026-07-30
+#
+# Trigger condition: the named-type registry (10.frontend/core/types.spl) is a
+# flat, bare-name keyed pool that is NOT reset between modules on the
+# append-mode parse path (`parse_module_file`, used by the core interpreter
+# module loader and the legacy C driver). A second module declaring the same
+# bare struct name used to be handed the FIRST module's registry id and then
+# `named_type_update` overwrote that module's field layout.
+
+use std.spec.{describe, it, expect}
+use compiler.core.ast.{ast_reset}
+use compiler.core.types.{
+    reset_all_pools, named_type_register, named_type_find, named_type_fields,
+    named_type_set_current_module, TYPE_I64, TYPE_TEXT
+}
+use compiler.frontend.core.parser.{parse_module, parse_module_file}
+
+describe "named-type registry keyed per declaring module":
+    it "two modules declaring the same bare struct name get distinct ids and keep their layouts":
+        reset_all_pools()
+        named_type_set_current_module("app/a.spl")
+        val a_id = named_type_register("ProcessResult", ["tag", "code"], [TYPE_TEXT, TYPE_I64])
+        named_type_set_current_module("std/process_ops/shell.spl")
+        val b_id = named_type_register("ProcessResult", ["stdout", "stderr", "exit_code"], [TYPE_TEXT, TYPE_TEXT, TYPE_I64])
+        expect(b_id).to_not_equal(a_id)
+        expect(named_type_fields(a_id)).to_equal(["tag", "code"])
+        expect(named_type_fields(b_id)).to_equal(["stdout", "stderr", "exit_code"])
+        # lookup precedence: the current module's own declaration wins
+        expect(named_type_find("ProcessResult")).to_equal(b_id)
+        named_type_set_current_module("app/a.spl")
+        expect(named_type_find("ProcessResult")).to_equal(a_id)
+        reset_all_pools()
+
+    it "a forward reference placeholder is claimed by the module that declares the type":
+        reset_all_pools()
+        named_type_set_current_module("app/a.spl")
+        # `fn f() -> Shape` in a.spl before any declaration: empty-layout placeholder
+        val placeholder = named_type_register("Shape", [], [])
+        named_type_set_current_module("lib/shape.spl")
+        val declared = named_type_register("Shape", ["w", "h"], [TYPE_I64, TYPE_I64])
+        expect(declared).to_equal(placeholder)
+        expect(named_type_fields(placeholder)).to_equal(["w", "h"])
+        # the same module re-registering (pre-register + update pattern) is idempotent
+        expect(named_type_register("Shape", [], [])).to_equal(declared)
+        reset_all_pools()
+
+    it "append-mode parse of a second module does not clobber the first module's struct layout":
+        reset_all_pools()
+        ast_reset()
+        parse_module("struct Pair:\n    left: i64\n    right: i64\n", "app/first.spl")
+        val first_id = named_type_find("Pair")
+        expect(first_id).to_be_greater_than(-1)
+        expect(named_type_fields(first_id)).to_equal(["left", "right"])
+        parse_module_file("struct Pair:\n    name: text\n    value: text\n    extra: bool\n", "lib/second.spl")
+        val second_id = named_type_find("Pair")
+        expect(second_id).to_not_equal(first_id)
+        expect(named_type_fields(first_id)).to_equal(["left", "right"])
+        expect(named_type_fields(second_id)).to_equal(["name", "value", "extra"])
+        reset_all_pools()
+        ast_reset()

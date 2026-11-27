@@ -24,7 +24,7 @@ use std.gc_async_mut.gpu.browser_engine.html_string_parser.{
 use std.gc_async_mut.gpu.browser_engine.browser_engine2d_bridge.{
     create_gpu_browser_renderer, create_gpu_browser_renderer_with_backend, create_software_browser_renderer}
 
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 
 val TEST_WIDTH: i32 = 32
 val TEST_HEIGHT: i32 = 24
@@ -46,6 +46,16 @@ fn _count_color(pixels: [u32], color: u32) -> i32:
         if pixels[idx] == color:
             count = count + 1
         idx = idx + 1
+    count
+
+fn _count_reddish(pixels: [u32]) -> i32:
+    var count: i32 = 0
+    for pixel in pixels:
+        val r = ((pixel >> 16) & 0xFF) as i32
+        val g = ((pixel >> 8) & 0xFF) as i32
+        val b = (pixel & 0xFF) as i32
+        if r - g > 100 and r - b > 100:
+            count = count + 1
     count
 
 fn _sum_red(pixels: [u32]) -> i64:
@@ -104,8 +114,8 @@ fn _scene_has_fill_color(html: text, color: u32) -> bool:
     false
 
 fn _html_compat_fixture(layer: text) -> text:
-    val html = rt_file_read_text("test/fixtures/html_compat/02_block_boxes.html")
-    val css = rt_file_read_text("test/fixtures/html_compat/{layer}.css")
+    val html = rt_file_read_text("test/fixtures/html_compat/02_block_boxes.html") ?? ""
+    val css = rt_file_read_text("test/fixtures/html_compat/{layer}.css") ?? ""
     html.replace("</head>", "<style>\n" + css + "</style>\n</head>")
 
 use std.spec.step
@@ -203,10 +213,30 @@ describe "BrowserRenderer HTML rendering":
         val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 10px; height: 10px; background-image: linear-gradient(#dc2626, #2563eb); }</style></head><body><div class='card'></div></body></html>"
         val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
 
-        expect(result.pixel_data[0]).to_equal(0xFFDC2626u32)
-        expect(result.pixel_data[9 * TEST_WIDTH]).to_equal(0xFF2563EBu32)
-        expect(_count_color(result.pixel_data, 0xFFDC2626u32)).to_be_greater_than(0)
-        expect(_count_color(result.pixel_data, 0xFF2563EBu32)).to_be_greater_than(0)
+        # Chrome 159 samples the ramp at pixel-row centres (t = (2*row+1)/(2*h)),
+        # so no row is an exact stop: row 0 = #D2292F, row 9 = #2E60E1, and
+        # neither stop colour appears anywhere (measured exact=0 for both).
+        expect(result.pixel_data[0]).to_equal(0xFFD2292Fu32)
+        # Chrome dithers per device pixel: (1,0) = #D32930.
+        expect(result.pixel_data[1]).to_equal(0xFFD32930u32)
+        expect(result.pixel_data[9 * TEST_WIDTH]).to_equal(0xFF2E60E1u32)
+        expect(_count_color(result.pixel_data, 0xFFDC2626u32)).to_equal(0)
+        expect(_count_color(result.pixel_data, 0xFF2563EBu32)).to_equal(0)
+
+    it "samples a vertical two-stop ramp at pixel-row centres like Chrome":
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
+        step("Verify: samples a vertical two-stop ramp at pixel-row centres like Chrome")
+        # Chrome 159: a 4px #000 -> #fff ramp paints rows 1F / 60 / 9F / DF and a
+        # 2px ramp paints 3F / BF -- t = (2*row+1)/(2*h), never an exact stop.
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .a { width: 8px; height: 4px; background-image: linear-gradient(#000000, #ffffff); } .b { width: 8px; height: 2px; background-image: linear-gradient(#000000, #ffffff); }</style></head><body><div class='a'></div><div class='b'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect(result.pixel_data[0]).to_equal(0xFF1F1F1Fu32)
+        expect(result.pixel_data[1 * TEST_WIDTH]).to_equal(0xFF606060u32)
+        expect(result.pixel_data[2 * TEST_WIDTH]).to_equal(0xFF9F9F9Fu32)
+        expect(result.pixel_data[3 * TEST_WIDTH]).to_equal(0xFFDFDFDFu32)
+        expect(result.pixel_data[4 * TEST_WIDTH]).to_equal(0xFF3F3F3Fu32)
+        expect(result.pixel_data[5 * TEST_WIDTH]).to_equal(0xFFBFBFBFu32)
 
     it "uses ordered fractional quantization for small no-repeat gradient tiles":
         # @req: REQ-LIB-GC-ASYNC-MUT-001
@@ -214,13 +244,14 @@ describe "BrowserRenderer HTML rendering":
         val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 20px; height: 20px; background-color: #e5e7eb; background-image: linear-gradient(#e5e7eb, #cbd5e1); background-size: 20px 20px; background-repeat: no-repeat; }</style></head><body><div class='card'></div></body></html>"
         val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
 
-        expect(result.pixel_data[0]).to_equal(0xFFE5E7EBu32)
-        expect(result.pixel_data[19 * TEST_WIDTH]).to_equal(0xFFCBD5E1u32)
-        expect(result.pixel_data[8 * TEST_WIDTH]).to_equal(0xFFDADFE7u32)
-        expect(result.pixel_data[1 + 8 * TEST_WIDTH]).to_equal(0xFFDADFE7u32)
-        expect(result.pixel_data[2 + 8 * TEST_WIDTH]).to_equal(0xFFDAE0E7u32)
-        expect(result.pixel_data[3 + 9 * TEST_WIDTH]).to_equal(0xFFD9DFE7u32)
-        expect(result.pixel_data[4 + 10 * TEST_WIDTH]).to_equal(0xFFD8DEE6u32)
+        # Chrome 159 measured values (row-centre sampling + ordered dither).
+        expect(result.pixel_data[0]).to_equal(0xFFE4E6EAu32)
+        expect(result.pixel_data[19 * TEST_WIDTH]).to_equal(0xFFCCD6E1u32)
+        expect(result.pixel_data[8 * TEST_WIDTH]).to_equal(0xFFD9DFE6u32)
+        expect(result.pixel_data[1 + 8 * TEST_WIDTH]).to_equal(0xFFDAE0E7u32)
+        expect(result.pixel_data[2 + 8 * TEST_WIDTH]).to_equal(0xFFDADFE6u32)
+        expect(result.pixel_data[3 + 9 * TEST_WIDTH]).to_equal(0xFFD9DEE6u32)
+        expect(result.pixel_data[4 + 10 * TEST_WIDTH]).to_equal(0xFFD7DDE5u32)
 
     it "clips gradient background images to background-size when repeat is disabled":
         # @req: REQ-LIB-GC-ASYNC-MUT-001
@@ -228,8 +259,9 @@ describe "BrowserRenderer HTML rendering":
         val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 12px; height: 12px; background-color: #16a34a; background-image: linear-gradient(#dc2626, #2563eb); background-size: 6px 6px; background-repeat: no-repeat; }</style></head><body><div class='card'></div></body></html>"
         val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
 
-        expect(result.pixel_data[0]).to_equal(0xFFDC2626u32)
-        expect(result.pixel_data[5 * TEST_WIDTH]).to_equal(0xFF2563EBu32)
+        # Chrome 159: 6px tile rows 0 / 5 = #CC2B36 / #345EDB (row-centre sampling).
+        expect(result.pixel_data[0]).to_equal(0xFFCC2B36u32)
+        expect(result.pixel_data[5 * TEST_WIDTH]).to_equal(0xFF345EDBu32)
         expect(result.pixel_data[6 * TEST_WIDTH]).to_equal(0xFF16A34Au32)
         expect(result.pixel_data[6]).to_equal(0xFF16A34Au32)
         expect(_count_region_changed(result.pixel_data, TEST_WIDTH, 0, 0, 6, 6, 0xFF16A34Au32)).to_equal(36)  # oracle: 36 — named expected value from the requirement
@@ -256,9 +288,11 @@ describe "BrowserRenderer HTML rendering":
         val padding_origin = render_html_to_pixels_with_viewport(padding_origin_html, 40, 32).pixel_data
         val content_origin = render_html_to_pixels_with_viewport(content_origin_html, 40, 32).pixel_data
 
-        expect(padding_origin[2 + 2 * 40]).to_equal(0xFF2563EBu32)
+        # Chrome 159: the 4px tile's row 0 is #3F6ACF (row-centre sampling), at
+        # (2,2) with padding origin and at (6,6) with content origin.
+        expect(padding_origin[2 + 2 * 40]).to_equal(0xFF3F6ACFu32)
         expect(content_origin[2 + 2 * 40]).to_equal(0xFF16A34Au32)
-        expect(content_origin[6 + 6 * 40]).to_equal(0xFF2563EBu32)
+        expect(content_origin[6 + 6 * 40]).to_equal(0xFF3F6ACFu32)
         expect(_pixels_equal(padding_origin, content_origin)).to_equal(false)
 
     it "positions no-repeat gradient background images within the background color layer":
@@ -268,8 +302,9 @@ describe "BrowserRenderer HTML rendering":
         val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
 
         expect(result.pixel_data[0]).to_equal(0xFF16A34Au32)
-        expect(result.pixel_data[3 + 4 * TEST_WIDTH]).to_equal(0xFFDC2626u32)
-        expect(result.pixel_data[3 + 9 * TEST_WIDTH]).to_equal(0xFF2563EBu32)
+        # Chrome 159: tile rows 0 / 5 at (3,4) / (3,9) = #CD2C37 / #345EDB.
+        expect(result.pixel_data[3 + 4 * TEST_WIDTH]).to_equal(0xFFCD2C37u32)
+        expect(result.pixel_data[3 + 9 * TEST_WIDTH]).to_equal(0xFF345EDBu32)
         expect(result.pixel_data[2 + 4 * TEST_WIDTH]).to_equal(0xFF16A34Au32)
         expect(result.pixel_data[3 + 10 * TEST_WIDTH]).to_equal(0xFF16A34Au32)
         expect(_count_region_changed(result.pixel_data, TEST_WIDTH, 3, 4, 6, 6, 0xFF16A34Au32)).to_equal(36)  # oracle: 36 — named expected value from the requirement
@@ -391,7 +426,9 @@ describe "BrowserRenderer HTML rendering":
         val upper = render_html_to_pixels_with_viewport(upper_html, 96, 32).pixel_data
         val transformed = render_html_to_pixels_with_viewport(transform_html, 96, 32).pixel_data
 
-        expect(_count_color(transformed, 0xFF111827u32)).to_be_greater_than(0)
+        # Chrome 159 draws this 8 px run with LCD coverage: 416 non-white pixels,
+        # none exactly #111827 (the raster lane painted 228, all exactly #111827).
+        expect(_count_region_changed(transformed, 96, 0, 0, 96, 32, WHITE_BG)).to_be_greater_than(380)
         expect(_pixels_equal(lower, transformed)).to_equal(false)
         expect(_pixels_equal(upper, transformed)).to_equal(true)
 
@@ -412,7 +449,10 @@ describe "BrowserRenderer HTML rendering":
         val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #2563eb; font-size: 8px; text-decoration-line: underline; text-decoration-color: #dc2626; }</style></head><body><div class='label'>UNDERLINE</div></body></html>"
         val result = render_html_to_pixels_with_viewport(html, 96, 32).pixel_data
 
-        expect(_count_color(result, 0xFF2563EBu32)).to_be_greater_than(0)
+        # Chrome 159: 311 non-white pixels, none exactly #2563eb (LCD glyphs), 45
+        # exactly #dc2626 (the underline). The raster lane painted 191 / 143 / 48.
+        expect(_count_region_changed(result, 96, 0, 0, 96, 32, WHITE_BG)).to_be_greater_than(280)
+        expect(_count_color(result, 0xFF2563EBu32)).to_equal(0)
         expect(_count_color(result, 0xFFDC2626u32)).to_be_greater_than(0)
 
     it "renders text-indent by shifting the first text line right":
@@ -430,7 +470,10 @@ describe "BrowserRenderer HTML rendering":
     it "renders letter-spacing by spreading glyph advances":
         # @req: REQ-LIB-GC-ASYNC-MUT-001
         step("Verify: renders letter-spacing by spreading glyph advances")
-        val plain_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; }</style></head><body><div class='label'>SPACING</div></body></html>"
+        # Both pages take the Draw IR text lane (LCD text, so no pixel is exactly
+        # #111827 or #dc2626). Chrome 159 measured at 96x32: plain ink 202 px,
+        # shadow ink 321, 23 red-dominant pixels (channel > both others by 100).
+        val plain_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; letter-spacing: 0px; }</style></head><body><div class='label'>SPACING</div></body></html>"
         val spaced_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; letter-spacing: 2px; }</style></head><body><div class='label'>SPACING</div></body></html>"
         val plain = render_html_to_pixels_with_viewport(plain_html, 128, 32).pixel_data
         val spaced = render_html_to_pixels_with_viewport(spaced_html, 128, 32).pixel_data
@@ -442,7 +485,10 @@ describe "BrowserRenderer HTML rendering":
     it "renders word-spacing by widening space advances":
         # @req: REQ-LIB-GC-ASYNC-MUT-001
         step("Verify: renders word-spacing by widening space advances")
-        val plain_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; }</style></head><body><div class='label'>WORD GAP TEST</div></body></html>"
+        # The plain page states the initial value so both renders take the raster
+        # lane: the Draw IR text lane does not paint this property yet (see
+        # doc/08_tracking/bug/draw_ir_text_lane_ignores_letter_word_spacing_text_shadow_2026-11-19.md).
+        val plain_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; word-spacing: 0px; }</style></head><body><div class='label'>WORD GAP TEST</div></body></html>"
         val spaced_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; word-spacing: 6px; }</style></head><body><div class='label'>WORD GAP TEST</div></body></html>"
         val plain = render_html_to_pixels_with_viewport(plain_html, 160, 32).pixel_data
         val spaced = render_html_to_pixels_with_viewport(spaced_html, 160, 32).pixel_data
@@ -463,9 +509,13 @@ describe "BrowserRenderer HTML rendering":
         expect(_count_region_changed(italic, 96, 1, 0, 40, 8, WHITE_BG)).to_be_greater_than(0)
         expect(_pixels_equal(plain, italic)).to_equal(false)
 
-    it "renders direction rtl by reversing simple text glyph order":
+    it "renders direction rtl Latin text in logical glyph order, end-anchored":
         # @req: REQ-LIB-GC-ASYNC-MUT-001
-        step("Verify: renders direction rtl by reversing simple text glyph order")
+        # Chrome 159 (2026-11-16, 96px div, 8px Arial): rtl `ABC` paints A at
+        # 79.55, B 84.88, C 90.22 (ink 79..95) — logical order, anchored at
+        # the right edge — not `CBA`. The row used to pin the reversal, which
+        # the owner rejected 2026-11-16 ("all same as chrome").
+        step("Verify: renders direction rtl Latin text in logical glyph order, end-anchored")
         val ltr_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; }</style></head><body><div class='label'>ABC</div></body></html>"
         val reversed_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; }</style></head><body><div class='label'>CBA</div></body></html>"
         val rtl_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; direction: rtl; }</style></head><body><div class='label'>ABC</div></body></html>"
@@ -473,20 +523,43 @@ describe "BrowserRenderer HTML rendering":
         val reversed = render_html_to_pixels_with_viewport(reversed_html, 96, 32).pixel_data
         val rtl = render_html_to_pixels_with_viewport(rtl_html, 96, 32).pixel_data
 
-        expect(_count_color(rtl, 0xFF111827u32)).to_equal(_count_color(reversed, 0xFF111827u32))
+        # Same glyphs at a different subpixel phase, so the non-white ink
+        # counts differ. Chrome 159 (LCD, same page and face): ltr 86, rtl 87,
+        # no pixel exactly #111827. The raster lane painted 51 / 49.
+        val rtl_ink = _count_region_changed(rtl, 96, 0, 0, 96, 32, WHITE_BG)
+        val ltr_ink = _count_region_changed(ltr, 96, 0, 0, 96, 32, WHITE_BG)
+        # Re-pinned 2026-11-23 for the Skia LCD path raster
+        # (glyph_raster_shape_chrome159_spec): 83 / 81 -> 85 / 87. 2026-11-24:
+        # Skia analytic AA LCD masks (lcd_round_glyph_aaa_chrome159_spec):
+        # ltr 85 -> 84.
+        expect(ltr_ink).to_equal(84)  # Chrome 159: 86
+        expect(rtl_ink).to_equal(87)  # Chrome 159: 87
+        # Extra Chrome-closeness check (not a substitute for the pins above):
+        # Chrome's rtl/ltr gap is 1 of 86 (~1 %); the engine's must stay
+        # within 10 % of its ltr ink.
+        val ink_gap = if rtl_ink > ltr_ink: rtl_ink - ltr_ink else: ltr_ink - rtl_ink
+        expect(ink_gap * 10 <= ltr_ink).to_equal(true)
         expect(_pixels_equal(ltr, rtl)).to_equal(false)
-        expect(_pixels_equal(reversed, rtl)).to_equal(true)
+        expect(_pixels_equal(reversed, rtl)).to_equal(false)
+        # Chrome 159 ink 79..95: nothing in the left half, all ink on the right.
+        expect(_count_region_changed(rtl, 96, 0, 0, 48, 32, 0xFFFFFFFFu32)).to_equal(0)
+        expect(_count_region_changed(rtl, 96, 48, 0, 48, 32, 0xFFFFFFFFu32)).to_be_greater_than(0)
 
     it "renders text-shadow behind foreground text glyphs":
         # @req: REQ-LIB-GC-ASYNC-MUT-001
         step("Verify: renders text-shadow behind foreground text glyphs")
-        val plain_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; }</style></head><body><div class='label'>SHADOW</div></body></html>"
+        # The plain page states the initial value so both renders take the raster
+        # lane: the Draw IR text lane does not paint this property yet (see
+        # doc/08_tracking/bug/draw_ir_text_lane_ignores_letter_word_spacing_text_shadow_2026-11-19.md).
+        val plain_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; text-shadow: none; }</style></head><body><div class='label'>SHADOW</div></body></html>"
         val shadow_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; text-shadow: 4px 3px #dc2626; }</style></head><body><div class='label'>SHADOW</div></body></html>"
         val plain = render_html_to_pixels_with_viewport(plain_html, 96, 32).pixel_data
         val shadow = render_html_to_pixels_with_viewport(shadow_html, 96, 32).pixel_data
 
-        expect(_count_color(shadow, 0xFF111827u32)).to_equal(_count_color(plain, 0xFF111827u32))
-        expect(_count_color(shadow, 0xFFDC2626u32)).to_be_greater_than(0)
+        expect(_count_region_changed(shadow, 96, 0, 0, 96, 32, WHITE_BG) - _count_region_changed(plain, 96, 0, 0, 96, 32, WHITE_BG)).to_be_greater_than(80)
+        expect(_count_reddish(shadow)).to_be_greater_than(14)
+        expect(_count_reddish(shadow)).to_be_less_than(31)
+        expect(_count_reddish(plain)).to_equal(0)
         expect(_pixels_equal(plain, shadow)).to_equal(false)
 
     it "renders text-overflow ellipsis for clipped nowrap text":
@@ -497,8 +570,11 @@ describe "BrowserRenderer HTML rendering":
         val clipped = render_html_to_pixels_with_viewport(clipped_html, 96, 32).pixel_data
         val ellipsis = render_html_to_pixels_with_viewport(ellipsis_html, 96, 32).pixel_data
 
-        expect(_count_color(ellipsis, 0xFF111827u32)).to_be_greater_than(0)
-        expect(_count_color(ellipsis, 0xFF111827u32)).to_be_less_than(_count_color(clipped, 0xFF111827u32))
+        # Chrome 159 (LCD): clipped 233 non-white pixels, ellipsis 177, none
+        # exactly #111827. The raster lane painted 114 / 68.
+        val ellipsis_ink = _count_region_changed(ellipsis, 96, 0, 0, 96, 32, WHITE_BG)
+        expect(ellipsis_ink).to_be_greater_than(100)
+        expect(ellipsis_ink).to_be_less_than(_count_region_changed(clipped, 96, 0, 0, 96, 32, WHITE_BG))
         expect(_pixels_equal(clipped, ellipsis)).to_equal(false)
 
     it "applies class rules over tag rules in fallback pixels":
@@ -1236,7 +1312,12 @@ describe "BrowserRenderer HTML rendering":
         step("Verify: renders CSS flex row fixture pixels through BrowserRenderer")
         val pixels = render_html_to_pixels_with_viewport(_html_compat_fixture("16_flex_row"), 125, 70).pixel_data
         expect(pixels.len()).to_equal(125 * 70)
-        expect(pixels[121 + 61 * 125]).to_equal(0xFF93C5FDu32)
+        # The middle row is display:flex with two 80px items in an ~81px content
+        # box. Blink parity (test/01_unit/lib/blink/flex_spec.spl "items with
+        # flex_shrink absorb overflow") and Chromium both shrink flex-shrink:1
+        # items to fit, so the right item lands at x 66..99, not overflowing to
+        # x=121. The previously pinned x=121 pixel predates shrink support.
+        expect(pixels[80 + 61 * 125]).to_equal(0xFF93C5FDu32)
         expect(pixels[27 + 61 * 125]).to_equal(0xFFBFDBFEu32)
 
     it "renders CSS flex column fixture pixels through BrowserRenderer":

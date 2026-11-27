@@ -1,0 +1,51 @@
+# HIR shard ownership is lockless (concurrency_architecture.md §3: a lock
+# needs a documented exception; none covers the HIR shard split).
+#
+# `hir_shard_owns` used to take `{SIMPLE_HIR_SHARD_QUEUE}/.lock` (flock, 30 s)
+# and write a `{hash}-{len}.claim` marker under it. That path was dead: the
+# only caller, `hir_shard_begin`, reaches `hir_shard_owns` ONLY when no queue
+# is published (a published queue goes to the O_EXCL ledger claim in
+# driver_hir_recovery). Dead or not, it was an undocumented lock whose failure
+# branch fell back to the static split -- two shards could own one module
+# (one by marker, one by hash). Ownership is now the static path-hash split
+# alone: idempotent for a path, and it writes nothing into the queue dir.
+use std.spec
+use app.io.env_ops.{env_get, env_set}
+use compiler.driver.driver_hir_cache.{hir_shard_owns, hir_shard_active}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_file_list_dir(path: text) -> [text]
+extern fn rt_getpid() -> i64
+
+describe "HIR shard ownership is lockless":
+    it "owns by static split, idempotently, and leaves no .lock or .claim in a published queue dir":
+        val queue = "build/hir_shard_owns_lockless_{rt_getpid()}"
+        expect(rt_dir_create_all(queue)).to_equal(true)
+        val saved_shard = env_get("SIMPLE_HIR_SHARD") ?? ""
+        val saved_queue = env_get("SIMPLE_HIR_SHARD_QUEUE") ?? ""
+        expect(env_set("SIMPLE_HIR_SHARD", "0/2")).to_be(true)
+        expect(env_set("SIMPLE_HIR_SHARD_QUEUE", queue)).to_be(true)
+        expect(hir_shard_active()).to_equal(true)
+
+        # Two paths, each asked twice. With the marker scheme the second ask of
+        # an owned path returned false (marker already present); the static
+        # split answers the same every time.
+        val paths = ["src/a_module.spl", "src/b_module.spl", "src/c_module.spl", "src/d_module.spl"]
+        var owned_any = false
+        for path in paths:
+            val first = hir_shard_owns(path)
+            val second = hir_shard_owns(path)
+            expect(second).to_equal(first)
+            if first: owned_any = true
+        # Four paths across a 2-way split: the shard owns at least one of them
+        # unless the hash degenerates, which would be its own defect.
+        expect(owned_any).to_equal(true)
+
+        # Nothing was written into the queue: no `.lock`, no `*.claim`.
+        val entries = rt_file_list_dir(queue)
+        expect(entries.len()).to_equal(0)
+
+        val _q = env_set("SIMPLE_HIR_SHARD_QUEUE", saved_queue)
+        val _s = env_set("SIMPLE_HIR_SHARD", saved_shard)
+        val _rm = rt_dir_remove_all(queue)

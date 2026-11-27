@@ -1,0 +1,113 @@
+# @cover src/lib/nogc_sync_mut/trace/bm_spy_drain_v1.spl
+# @session:mutating
+use std.spec
+use std.spy.bm_spy_emitter.{bm_spy_init, bm_spy_emit, bm_spy_pop, bm_spy_capacity, bm_spy_count}
+use std.nogc_sync_mut.trace.bm_spy_drain_v1.{BmSpyDrainV1}
+use std.common.trace.observer_contract_v1.{TraceEventV1, TraceEventKindV1, trace_event_kind_code_v1}
+use std.common.trace.observer_profile_v1.{trace_profile_fold_v1}
+
+fn code(kind: TraceEventKindV1) -> i64:
+    trace_event_kind_code_v1(kind) as i64
+
+fn fresh_drain() -> BmSpyDrainV1:
+    BmSpyDrainV1(generation: 7u64, module_instance: 3u64, context_id: 1u64, next_sequence: 1u64)
+
+fn fill_entries():
+    var i = 0
+    while i < bm_spy_capacity():
+        bm_spy_emit(code(TraceEventKindV1.Entry), i + 1, i)
+        i = i + 1
+
+fn drain_all(drain: BmSpyDrainV1) -> [TraceEventV1]:
+    var d = drain
+    match d.drain():
+        case Ok(events): events
+        case Err(_): []
+
+describe "bm_spy drain into TraceEventV1":
+    it "draining an empty ring yields nothing":
+        bm_spy_init()
+        var d = fresh_drain()
+        match d.drain():
+            case Ok(events): expect(events.len()).to_equal(0)
+            case Err(_): expect(true).to_equal(false)
+        expect(d.next_sequence).to_equal(1u64)
+
+    it "Entry, Exit and TailExit map 1:1 in order with the drain's scope":
+        bm_spy_init()
+        bm_spy_emit(code(TraceEventKindV1.Entry), 11, 100)
+        bm_spy_emit(code(TraceEventKindV1.Entry), 12, 110)
+        bm_spy_emit(code(TraceEventKindV1.TailExit), 12, 120)
+        bm_spy_emit(code(TraceEventKindV1.Exit), 11, 130)
+        val events = drain_all(fresh_drain())
+        expect(events.len()).to_equal(4)
+        expect(events[0].kind == TraceEventKindV1.Entry).to_equal(true)
+        expect(events[1].kind == TraceEventKindV1.Entry).to_equal(true)
+        expect(events[2].kind == TraceEventKindV1.TailExit).to_equal(true)
+        expect(events[3].kind == TraceEventKindV1.Exit).to_equal(true)
+        expect(events[0].function_id).to_equal(11u32)
+        expect(events[0].site_id).to_equal(11u32)
+        expect(events[2].function_id).to_equal(12u32)
+        expect(events[3].timestamp).to_equal(130u64)
+        expect(events[0].sequence).to_equal(1u64)
+        expect(events[3].sequence).to_equal(4u64)
+        expect(events[1].generation).to_equal(7u64)
+        expect(events[1].module_instance).to_equal(3u64)
+        expect(events[1].context_id).to_equal(1u64)
+        expect(events[1].payload0).to_equal(0u64)
+        expect(bm_spy_count()).to_equal(0)
+
+    it "a mid-stream gap appears as a disclosed Loss event with its count at the gap":
+        bm_spy_init()
+        fill_entries()
+        bm_spy_emit(code(TraceEventKindV1.Exit), 999, 999)
+        bm_spy_emit(code(TraceEventKindV1.Exit), 998, 998)
+        bm_spy_pop()
+        bm_spy_pop()
+        expect(bm_spy_emit(code(TraceEventKindV1.Exit), 50, 500)).to_equal(true)
+        val events = drain_all(fresh_drain())
+        val gap = bm_spy_capacity() - 2
+        expect(events.len()).to_equal(gap + 2)
+        expect(events[gap - 1].kind == TraceEventKindV1.Entry).to_equal(true)
+        expect(events[gap - 1].function_id).to_equal(bm_spy_capacity() as u32)
+        val loss = events[gap]
+        expect(loss.kind == TraceEventKindV1.Loss).to_equal(true)
+        expect(loss.payload0).to_equal(2u64)
+        expect(loss.function_id).to_equal(0u32)
+        expect(loss.site_id).to_equal(0u32)
+        expect(loss.timestamp).to_equal(500u64)
+        expect(loss.sequence).to_equal((gap + 1) as u64)
+        expect(events[gap + 1].kind == TraceEventKindV1.Exit).to_equal(true)
+        expect(events[gap + 1].function_id).to_equal(50u32)
+        expect(events[gap + 1].sequence).to_equal((gap + 2) as u64)
+
+    it "a gap still pending at the end of the drain is disclosed as a trailing Loss event":
+        bm_spy_init()
+        fill_entries()
+        bm_spy_emit(code(TraceEventKindV1.Exit), 999, 999)
+        bm_spy_emit(code(TraceEventKindV1.Exit), 998, 998)
+        bm_spy_emit(code(TraceEventKindV1.Exit), 997, 997)
+        val events = drain_all(fresh_drain())
+        expect(events.len()).to_equal(bm_spy_capacity() + 1)
+        val loss = events[events.len() - 1]
+        expect(loss.kind == TraceEventKindV1.Loss).to_equal(true)
+        expect(loss.payload0).to_equal(3u64)
+        expect(loss.function_id).to_equal(0u32)
+
+describe "drained bare-metal events reach the shared Spy profile fold":
+    it "trace_profile_fold_v1 (what XraySpyV1.profile folds) consumes the drained stream":
+        bm_spy_init()
+        bm_spy_emit(code(TraceEventKindV1.Entry), 21, 1000)
+        bm_spy_emit(code(TraceEventKindV1.Entry), 22, 1100)
+        bm_spy_emit(code(TraceEventKindV1.Exit), 22, 1400)
+        bm_spy_emit(code(TraceEventKindV1.Exit), 21, 2000)
+        val profile = trace_profile_fold_v1(drain_all(fresh_drain()))
+        expect(profile.events).to_equal(4u64)
+        expect(profile.functions.len()).to_equal(2)
+        expect(profile.functions[0].function_id).to_equal(21u32)
+        expect(profile.functions[0].calls).to_equal(1u64)
+        expect(profile.functions[0].inclusive_ns).to_equal(1000u64)
+        expect(profile.functions[0].exclusive_ns).to_equal(700u64)
+        expect(profile.functions[1].inclusive_ns).to_equal(300u64)
+        expect(profile.unmatched_exits).to_equal(0u64)
+        expect(profile.open_entries).to_equal(0u64)

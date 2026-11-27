@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-07-30
 - **Severity:** medium — deterministic false-red for any spec that wildcard-imports this module
-- **Status:** open (worked around in the one known-affected spec; root symbol collision not yet identified)
+- **Status:** RESOLVED (2026-11-26 — already fixed in `interpreter_eval.rs` glob `"main"` guard; live-verified on `release/1.0.0` via `bf4_interpreter_bugs`)
 - **Found via:** BCAP lane triage of `test/01_unit/compiler/backend/backend_capability_spec.spl`
 
 ## Symptom
@@ -304,3 +304,49 @@ modules (or, per the scale/depth theory above, any other module whose own
 
 - `doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md`
 - `reference_interpreter_dict_and_value_quirks` (session memory)
+
+## 2026-11-05 mirp2-E3 re-scope
+
+Not a seed JIT/cranelift defect: it is an interpreter semantic error on a
+wildcard import. The module moved to `plugins.backend_c.c_backend_stubs`
+(`src/compiler/70.backend/backend/c_backend_stubs.spl` no longer exists;
+`backend_capability_spec.spl:12` imports the new path). Re-scoped to the
+interpreter / C-backend plugin family; left open there.
+
+## 2026-11-25 triage (release/1.0.0, worktree p2w6-ab) — SKIP, stays open
+
+Confirmed at release/1.0.0 HEAD (`64dfa6d980f`):
+
+- The module move from the 2026-11-05 re-scope is real:
+  `src/compiler/70.backend/backend/c_backend_stubs.spl` no longer exists;
+  the module lives at `src/plugins/backend_c/c_backend_stubs.spl`.
+- `test/01_unit/compiler/backend/backend_capability_spec.spl:12` now
+  wildcard-imports the new path (`use plugins.backend_c.c_backend_stubs.*`),
+  i.e. the known-affected spec re-exposes the wildcard form under the new
+  module name. Whether the phantom "cannot convert function to int" red
+  still fires there is unverifiable on this host: `bin/simple.exe test`
+  fails repo-wide at this HEAD (pinned seed rejects
+  `@representation_boundary` in `src/app/test_runner_new/test_runner_client.spl:9:1`).
+
+Root cause is unchanged from the 2026-07-30 analysis: a flat-registry
+collision inside the Rust seed interpreter (`Value::as_int()` fallback,
+`value_impl.rs:137`) that requires instrumenting and rebuilding the seed —
+explicitly out of scope for source-only lanes and for this Windows host
+(no cargo builds permitted). Classification: SKIP (Rust-seed-only
+instrumentation needed); the 2026-11-05 re-scope to the interpreter /
+C-backend plugin family stands. Left open.
+
+## 2026-11-26 BF-4 (work/bf-4-rust-interp-semantics-20261126, release/1.0.0) — RESOLVED (verified already fixed in interpreter)
+
+On `release/1.0.0`, `src/compiler_rust/compiler/src/interpreter_eval.rs:1743-1799` already guards `ImportTarget::Glob` against leaking `Value::Function` entries named `"main"` (or binding `main.spl` namespace dicts under `"main"`) into `functions`, `env`, or `MODULE_GLOBALS`, eliminating the `"cannot convert function to int"` exit-code fallback poison. (The 2026-11-25 triage only skipped runtime proof because prebuilt `bin/simple.exe` lacked `@representation_boundary`.)
+
+Verified directly against current `release/1.0.0` via `cargo test -j 2 -p simple-compiler --test bf4_interpreter_bugs bug5_wildcard_import_does_not_leak_main_or_poison_session` (ok):
+- Inline `use plugins.backend_c.c_backend_translate.{MirToC}` + `use plugins.backend_c.c_backend_stubs.*` (no `main`): `Ok(0)`, 1/1 passed.
+- Inline `use plugins.backend_wasm.wasm_backend.*` (no `main`): `Ok(0)`, 1/1 passed.
+- `test/01_unit/compiler/backend/wildcard_import_backend_api_prevention_spec.spl`: `Ok(0)`, 1/1 passed.
+- `test/01_unit/compiler/backend/wildcard_import_backend_helpers_prevention_spec.spl`: `Ok(0)`, 1/1 passed.
+- `test/01_unit/compiler/backend/wildcard_import_codegen_factory_prevention_spec.spl`: `Ok(0)`, 1/1 passed.
+- `test/01_unit/compiler/backend/wildcard_import_common_type_mapper_prevention_spec.spl`: `Ok(0)`, 1/1 passed.
+- `test/01_unit/compiler/backend/c_backend_async_spec.spl`: `Ok(0)`, 3/3 passed.
+- `test/01_unit/compiler/backend/backend_capability_spec.spl`: `Ok(0)`, 21/21 passed.
+- `test/feature/usage/wasm_compile_spec.spl`: `Ok(0)`.

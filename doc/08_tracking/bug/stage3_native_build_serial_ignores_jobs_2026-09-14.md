@@ -131,3 +131,27 @@ provenance note describes (a docs-sync commit silently reverting a landed fix
 + deleting its record). Nothing in either existing record was edited by this
 lane.
 
+
+## Triage 2026-11-11 (lane boot20) — LIVE, kept OPEN (perf-lane handover)
+
+Verdict: **LIVE — owner decision required** (coordinator routing: perf lane,
+per this record's own Handover section). Root-cause re-check on current tip
+(`origin/release/1.0.0` worktree, source inspection only, no rebuild):
+
+- `src/compiler/80.driver/driver_build/parallel.spl` still exposes
+  `build_parallel` (`:663`, takes `spawn_fn`/`collect_fn`) and
+  `build_supervised`, and a repo-wide reference scan finds **zero product
+  callers** for either (only the unrelated
+  `build_parallel_transport_handoff_v1` in `src/app/build/scheduler/` matches
+  by name prefix) — the no-spawn defect this record confirms is unchanged
+  in-tree.
+- The three Handover next steps (one-module compile CLI to give
+  `spawn_fn` something to spawn; un-sharing the single mutable `MirLowering`
+  at `driver_pipeline_lowering.spl:262-311`; confirm/deny whether
+  `--entry-closure` bootstrap builds reach the parse-shard path) remain the
+  concrete work items; all are perf-lane scope, not essential-bug-fix scope.
+
+No code change attempted in this lane; no measurement re-run (the 14,340-file
+bootstrap-scale repro requires the admitted aarch64 Linux Stage-2 candidate
+named above). Kept OPEN for the perf lane with the user's ">=15 of 20 cores"
+requirement standing.

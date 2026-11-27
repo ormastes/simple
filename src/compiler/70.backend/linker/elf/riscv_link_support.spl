@@ -34,17 +34,24 @@ fn elf_riscv_validate_uleb(object: ElfObject) -> Result<bool, text>:
     Ok(true)
 
 fn elf_riscv_flags(objects: [ElfObject]) -> Result<i64, text>:
+    elf_riscv_flags_xlen(objects, 64)
+
+fn elf_riscv_flags_xlen(objects: [ElfObject], xlen: i64) -> Result<i64, text>:
+    # e_flags lives at offset 48 in an ELF64 header and 36 in an ELF32 one.
+    val elf_class: i64 = if xlen == 32: 1 else: 2
+    val header_size: i64 = if xlen == 32: 52 else: 64
+    val flags_offset: i64 = if xlen == 32: 36 else: 48
     var flags: i64 = 0
     var float_abi: i64 = -1
     var oi: i64 = 0
     for obj in objects:
         val valid_pairs = elf_riscv_validate_uleb(obj)?
-        if obj.raw.len() < 64 or obj.raw[4] != 2 or obj.raw[5] != 1:
-            return Err("RISC-V object {oi}: requires little-endian ELF64")
+        if obj.raw.len() < header_size or obj.raw[4] != elf_class or obj.raw[5] != 1:
+            return Err("RISC-V object {oi}: requires little-endian ELF{xlen} for RV{xlen}")
         var current: i64 = 0
         var i: i64 = 0
         while i < 4:
-            current = current | ((obj.raw[48 + i] as i64) << (i * 8))
+            current = current | ((obj.raw[flags_offset + i] as i64) << (i * 8))
             i = i + 1
         if (current & -24) != 0:
             return Err("RISC-V object {oi}: unsupported ABI e_flags {current}")
@@ -68,4 +75,4 @@ fn elf_riscv_hi_index(refs: [ElfScanRef], bases: [i64]) -> Result<{text: i64}, t
         i = i + 1
     Ok(index)
 
-export elf_riscv_flags, elf_riscv_hi_index
+export elf_riscv_flags, elf_riscv_flags_xlen, elf_riscv_hi_index

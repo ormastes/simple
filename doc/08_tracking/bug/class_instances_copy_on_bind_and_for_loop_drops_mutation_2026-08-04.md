@@ -72,7 +72,7 @@ but no longer a silent wrong answer on the default `simple run` path.
 
 Not fixed here — the interpreter is `src/compiler_rust/**`, off-limits during
 this pass (concurrent bootstrap).
-**Status:** OPEN
+**Status:** FIXED 2026-11-06 (see update at end)
 **Found:** 2026-08-04
 **Severity:** high — `doc/07_guide/language/syntax.md:460` documents `class` as a
 **reference type**; it behaves as a value type. Mutation through a `for` loop
@@ -207,3 +207,16 @@ correct against the documented reference-type contract; the runtime is not.
   a fix for the underlying copy-on-bind/for-loop mutation-drop defect
   documented here.
 
+
+## 2026-11-06 — fixed on the interpreter lane (owner decision: classes are reference types)
+
+Seed built from `origin/release/1.0.0` `f1390d48254`, tree-walk interpreter:
+the `for c in xs: c.bump()`, `xs[0].bump()` and `val a = c1; a.bump()`
+checkpoints all agree with the JIT (reference semantics) since the default
+flip `6c7b4db3d39` (2026-11-04). The record's harness repros:
+`test/01_unit/std/mock_phase5_spec.spl` 28/28 (27/28 with
+`SIMPLE_INTERP_CLASS_REF=0` — the verified `chains when with returns` case)
+and `test/01_unit/std/mock_phase6_spec.spl` 59/59 (55/59 with the flag off —
+the four aggregate cases, now attributable to this bug). Residual argument
+write-back shapes through class chains fixed in commit "fix(interp): argument write-back through class reference chains". Coordinator
+owns the bug_db status change.

@@ -1,0 +1,46 @@
+# AUTHORED_NOT_RUN. Calls the production verifier; no native timing claim.
+use std.common.contracts.orchestration.host_service_operation_v6.*
+use std.common.contracts.orchestration.host_service_operation_reply_v6.*
+use std.common.contracts.orchestration.host_service_auth_v6.*
+use std.spec.{describe, it, expect, step}
+
+fn mac_regression_request_v6() -> HostServiceOperationRequestV6:
+    HostServiceOperationRequestV6("status", "c".repeat(32), "", "", "", "")
+
+fn mac_regression_context_v6(request: HostServiceOperationRequestV6) -> HostServiceAuthContextV6:
+    HostServiceAuthContextV6(request.service_incarnation, "a".repeat(64), "b".repeat(64),
+        host_service_operation_command_digest_v6(request).unwrap())
+
+fn changed_mac_position_v6(tag: text, position: i64) -> text:
+    val replacement = if tag.substring(position, position + 1) == "0": "1" else: "0"
+    tag.substring(0, position) + replacement + tag.substring(position + 1, 64)
+
+describe "Production V6 request and reply MAC comparison regression":
+    it "accepts the exact request MAC and refuses every single-position valid-hex mutation":
+        step("Exercise the production request verifier rather than a replacement comparison helper")
+        val request = mac_regression_request_v6()
+        val context = mac_regression_context_v6(request)
+        val body = host_service_operation_encode_v6(request).unwrap()
+        val key = "19".repeat(32)
+        val tag = host_service_auth_tag_v6(key, "request", context, body).unwrap()
+        expect(host_service_auth_verify_v6(key, "request", context, body, tag).unwrap()).to_equal(true)
+        for position in 0..64:
+            val changed = changed_mac_position_v6(tag, position)
+            expect(changed == tag).to_equal(false)
+            expect(host_service_auth_verify_v6(key, "request", context, body, changed).unwrap()).to_equal(false)
+
+    it "accepts the exact failed reply MAC and refuses every single-position valid-hex mutation":
+        step("Authenticate the actual canonical error reply without promoting its operation status")
+        val request = mac_regression_request_v6()
+        val context = mac_regression_context_v6(request)
+        val reply = HostServiceOperationReplyV6("status", request.service_incarnation,
+            "", "", "", false, 2, "", "host-unavailable")
+        val body = host_service_operation_reply_encode_v6(reply).unwrap()
+        val key = "19".repeat(32)
+        val tag = host_service_auth_tag_v6(key, "reply", context, body).unwrap()
+        expect(host_service_auth_verify_v6(key, "reply", context, body, tag).unwrap()).to_equal(true)
+        expect(host_service_operation_reply_decode_v6(body).unwrap().exit_code).to_equal(2)
+        for position in 0..64:
+            val changed = changed_mac_position_v6(tag, position)
+            expect(changed == tag).to_equal(false)
+            expect(host_service_auth_verify_v6(key, "reply", context, body, changed).unwrap()).to_equal(false)

@@ -81,6 +81,7 @@ fn cfg_import_actual_release_os_owners_parse_for_each_target() {
     for name in [
         "src/app/cli/shard_mem_clamp.spl",
         "src/lib/nogc_sync_mut/io/windows_image_owner.spl",
+        "src/lib/nogc_sync_mut/io/darwin_image_owner.spl",
         "src/lib/nogc_sync_mut/io/path_identity.spl",
         "src/lib/nogc_sync_mut/io/path_identity_abi.spl",
         "src/lib/nogc_sync_mut/io/_PathIdentityPosix/errno_abi.spl",

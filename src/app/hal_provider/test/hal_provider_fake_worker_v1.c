@@ -19,33 +19,35 @@ static int isolated(void) {
     return 1;
 }
 
+static int read_request_line(char *request, size_t cap, size_t *size_out) {
+    size_t size = 0;
+    while (size + 1 < cap) {
+        ssize_t count = read(STDIN_FILENO, request + size, 1);
+        if (count < 0 && errno == EINTR) continue;
+        if (count != 1) return (int)count;
+        if (request[size++] == '\n') break;
+    }
+    *size_out = size;
+    return 1;
+}
+
 int main(int argc, char **argv) {
     char request[4096];
     size_t size = 0;
+    int status;
     long provider;
     if (argc == 2 && strcmp(argv[1], "session") == 0) {
         unsigned long long generation = 0, sequence = 0, invocation = 0;
         if (dprintf(STDOUT_FILENO, "HALWORKER1\n") < 0) return 84;
         for (;;) {
-            size = 0;
-            while (size + 1 < sizeof(request)) {
-                ssize_t count = read(STDIN_FILENO, request + size, 1);
-                if (count < 0 && errno == EINTR) continue;
-                if (count != 1) return count == 0 ? 0 : 85;
-                if (request[size++] == '\n') break;
-            }
+            status = read_request_line(request, sizeof(request), &size);
+            if (status != 1) return status == 0 ? 0 : 85;
             request[size] = 0;
             if (sscanf(request, "HALRESET1|%llu|%llu|%llu\n",
                        &generation, &sequence, &invocation) != 3) return 86;
             if (dprintf(STDOUT_FILENO, "HALRESETOK1|%llu|%llu|%llu\n",
                         generation, sequence, invocation) < 0) return 87;
-            size = 0;
-            while (size + 1 < sizeof(request)) {
-                ssize_t count = read(STDIN_FILENO, request + size, 1);
-                if (count < 0 && errno == EINTR) continue;
-                if (count != 1) return 88;
-                if (request[size++] == '\n') break;
-            }
+            if (read_request_line(request, sizeof(request), &size) != 1) return 88;
             if (size < 9 || memcmp(request, "HALREQ1|", 8) != 0) return 89;
             if (dprintf(STDOUT_FILENO,
                     "HALRES1|0|%llu|0|0|10|20|30|40|32|64|8|8|0|-1|0|5\n",
@@ -54,12 +56,7 @@ int main(int argc, char **argv) {
     }
     if (argc != 3 || !isolated()) return 80;
     provider = strtol(argv[1], NULL, 10);
-    while (size + 1 < sizeof(request)) {
-        ssize_t count = read(STDIN_FILENO, request + size, 1);
-        if (count < 0 && errno == EINTR) continue;
-        if (count != 1) return 81;
-        if (request[size++] == '\n') break;
-    }
+    if (read_request_line(request, sizeof(request), &size) != 1) return 81;
     if (size < 2 || request[size - 1] != '\n' ||
         memcmp(request, "HALREQ1|", 8) != 0) return 82;
     if (strcmp(argv[2], "slow") == 0) {

@@ -1,6 +1,16 @@
 # `Map.new()` resolves to a plain `dict` (not the `Map<K,V>` struct); `insert_if_absent` missing either way
 ## Obsolete 2026-09-16 — dupe of 2026-09-15 entry; insert_if_absent now exists at map.spl:325 (verified), old gap gone
 
+**Re-verified 2026-11-25** (release/1.0.0 @ a19165ae174, Windows, pinned
+`bin/simple.exe` Rust seed v1.0.0-rc.1, `--mode=interpreter`,
+`--no-cache --no-cover-check`, temporary `@representation_boundary` strip to
+work around the separate pinned-binary decorator inconsistency):
+`insert_if_absent` is present at `src/lib/nogc_sync_mut/src/map.spl:361`
+(`me insert_if_absent(self, key: K, value: V) -> bool`), `Map.new()` resolves
+to the `Map<K,V>` struct through the `std.nogc_async_mut.src.map` import, and
+the affected spec (now at
+`test/01_unit/lib/nogc_async_mut/map_insert_if_absent_spec.spl`) passes 1/1.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
 the subject is removed, superseded, or duplicated elsewhere in the ledger.
 

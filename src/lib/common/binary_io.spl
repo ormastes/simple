@@ -8,7 +8,7 @@
 # - BinaryReader: Read binary data from byte streams
 # - BinaryWriter: Write binary data to byte streams
 # - Serializable/Deserializable: Traits for custom types
-# - BufferedReader/BufferedWriter: Buffered I/O for efficiency
+# - BinaryBufferedReader/BinaryBufferedWriter: Buffered I/O for efficiency
 #
 # Usage:
 #   val reader = BinaryReader.new(data)
@@ -18,6 +18,8 @@
 # - Zero-copy when possible
 # - Endianness conversion on demand
 # - Buffering for small reads/writes
+
+use common.string_builder.{StringBuilder}
 
 # ============================================================================
 # ByteOrder - Endianness
@@ -126,7 +128,7 @@ class BinaryReader:
             Some(value) if successful, nil if at end
         """
         if self.position >= self.buffer.len():
-            return nil
+            return None
 
         val value = self.buffer[self.position]
         self.position = self.position + 1
@@ -142,7 +144,6 @@ class BinaryReader:
         match value:
             Some(raw):
                 Some(raw as i8)
-            # @workaround bug=BUG-MIR-OPTION-NIL-ARM-STALE-PRODUCER-20261010 recover=8df1d2dfab22df00c1a3e05adcc7f65b30f35ed0 reason=frozen-80030-nil-arm
             None:
                 nil
 
@@ -156,7 +157,7 @@ class BinaryReader:
             Some(value) if successful, nil if insufficient bytes
         """
         if self.remaining() < 2:
-            return nil
+            return None
 
         val b0 = self.buffer[self.position]
         val b1 = self.buffer[self.position + 1]
@@ -180,7 +181,6 @@ class BinaryReader:
         match value:
             Some(raw):
                 Some(raw as i16)
-            # @workaround bug=BUG-MIR-OPTION-NIL-ARM-STALE-PRODUCER-20261010 recover=8df1d2dfab22df00c1a3e05adcc7f65b30f35ed0 reason=frozen-80030-nil-arm
             None:
                 nil
 
@@ -194,9 +194,9 @@ class BinaryReader:
             Some(value) if successful, nil if insufficient bytes
         """
         if self.remaining() < 4:
-            return nil
+            return None
 
-        val bytes = [
+        val bytes: [u8] = [
             self.buffer[self.position],
             self.buffer[self.position + 1],
             self.buffer[self.position + 2],
@@ -222,7 +222,6 @@ class BinaryReader:
         match value:
             Some(raw):
                 Some(raw as i32)
-            # @workaround bug=BUG-MIR-OPTION-NIL-ARM-STALE-PRODUCER-20261010 recover=8df1d2dfab22df00c1a3e05adcc7f65b30f35ed0 reason=frozen-80030-nil-arm
             None:
                 nil
 
@@ -236,9 +235,9 @@ class BinaryReader:
             Some(value) if successful, nil if insufficient bytes
         """
         if self.remaining() < 8:
-            return nil
+            return None
 
-        val bytes = [
+        val bytes: [u8] = [
             self.buffer[self.position],
             self.buffer[self.position + 1],
             self.buffer[self.position + 2],
@@ -268,7 +267,6 @@ class BinaryReader:
         match value:
             Some(raw):
                 Some(raw as i64)
-            # @workaround bug=BUG-MIR-OPTION-NIL-ARM-STALE-PRODUCER-20261010 recover=8df1d2dfab22df00c1a3e05adcc7f65b30f35ed0 reason=frozen-80030-nil-arm
             None:
                 nil
 
@@ -285,7 +283,6 @@ class BinaryReader:
         match value:
             Some(raw):
                 Some(f32_from_bits(raw))
-            # @workaround bug=BUG-MIR-OPTION-NIL-ARM-STALE-PRODUCER-20261010 recover=8df1d2dfab22df00c1a3e05adcc7f65b30f35ed0 reason=frozen-80030-nil-arm
             None:
                 nil
 
@@ -302,7 +299,6 @@ class BinaryReader:
         match value:
             Some(raw):
                 Some(f64_from_bits(raw))
-            # @workaround bug=BUG-MIR-OPTION-NIL-ARM-STALE-PRODUCER-20261010 recover=8df1d2dfab22df00c1a3e05adcc7f65b30f35ed0 reason=frozen-80030-nil-arm
             None:
                 nil
 
@@ -316,7 +312,7 @@ class BinaryReader:
             Some(bytes) if successful, nil if insufficient bytes
         """
         if self.remaining() < count:
-            return nil
+            return None
 
         val bytes = self.buffer[self.position : self.position + count]
         self.position = self.position + count
@@ -335,7 +331,6 @@ class BinaryReader:
         match bytes:
             Some(raw):
                 Some(bytes_to_string(raw))
-            # @workaround bug=BUG-MIR-OPTION-NIL-ARM-STALE-PRODUCER-20261010 recover=8df1d2dfab22df00c1a3e05adcc7f65b30f35ed0 reason=frozen-80030-nil-arm
             None:
                 nil
 
@@ -581,20 +576,20 @@ trait Deserializable:
     static fn deserialize(reader: BinaryReader) -> Self?
 
 # ============================================================================
-# BufferedReader - Buffered Binary Reading
+# BinaryBufferedReader - Buffered Binary Reading
 # ============================================================================
 
-class BufferedReader:
+class BinaryBufferedReader:
     """Buffered binary reader for efficient small reads.
 
     Example:
-        val reader = BufferedReader.new(data, buffer_size: 4096)
+        val reader = BinaryBufferedReader.new(data, buffer_size: 4096)
         val value = reader.read_u32(ByteOrder.LittleEndian)
     """
     inner: BinaryReader
     buffer_size: usize
 
-    static fn new(data: [u8], buffer_size: usize) -> BufferedReader:
+    static fn new(data: [u8], buffer_size: usize) -> BinaryBufferedReader:
         """Create buffered reader.
 
         Args:
@@ -604,7 +599,7 @@ class BufferedReader:
         Returns:
             Buffered reader
         """
-        BufferedReader(
+        BinaryBufferedReader(
             inner: BinaryReader.new(data),
             buffer_size: buffer_size
         )
@@ -626,16 +621,16 @@ class BufferedReader:
         self.inner.remaining()
 
 # ============================================================================
-# BufferedWriter - Buffered Binary Writing
+# BinaryBufferedWriter - Buffered Binary Writing
 # ============================================================================
 
-class BufferedWriter:
+class BinaryBufferedWriter:
     """Buffered binary writer for efficient small writes.
 
     Buffers writes and flushes when buffer is full.
 
     Example:
-        val writer = BufferedWriter.new(buffer_size: 4096)
+        val writer = BinaryBufferedWriter.new(buffer_size: 4096)
         writer.write_u32(42, ByteOrder.LittleEndian)
         writer.flush()
     """
@@ -643,7 +638,7 @@ class BufferedWriter:
     buffer_size: usize
     unflushed: usize
 
-    static fn new(buffer_size: usize) -> BufferedWriter:
+    static fn new(buffer_size: usize) -> BinaryBufferedWriter:
         """Create buffered writer.
 
         Args:
@@ -652,7 +647,7 @@ class BufferedWriter:
         Returns:
             Buffered writer
         """
-        BufferedWriter(
+        BinaryBufferedWriter(
             inner: BinaryWriter.with_capacity(buffer_size),
             buffer_size: buffer_size,
             unflushed: 0
@@ -743,6 +738,21 @@ fn u64_to_bytes_le(value: u64) -> [u8]:
         ((value >> 56) & 0xFF) as u8
     ]
 
+# Little-endian unsigned read of `width` bytes (1..8) at `offset`. Indexes
+# directly: an out-of-range offset is the caller's bug, never a 0 sentinel.
+pub fn bytes_read_le_at(bytes: [u8], offset: i64, width: i64) -> u64:
+    var value: u64 = 0
+    for index in 0..width:
+        value = value | ((bytes[offset + index] as u64) << (index * 8))
+    value
+
+# Append the low `width` bytes (1..8) of `value` little-endian.
+pub fn bytes_push_le(bytes: [u8], value: u64, width: i64) -> [u8]:
+    var output = bytes
+    for index in 0..width:
+        output.push(((value >> (index * 8)) & 255) as u8)
+    output
+
 # Byte conversion (big-endian)
 # Pure-Simple (no native-build implementation exists for these `extern fn`s
 # anywhere in the tree; mirrors the bytes_to_u64_be pattern below).
@@ -826,7 +836,8 @@ fn _nan_f64() -> f64:
     val inf = 1.0e308 * 10.0
     inf - inf
 
-fn f64_from_bits(bits: u64) -> f64:
+# @allow(primitive_api) reason: raw IEEE-754 bit pattern; a domain type would hide the bit-cast
+pub fn f64_from_bits(bits: u64) -> f64:
     val sign_bit = (bits >> 63) & 1u64
     val exp = ((bits >> 52) & 0x7FFu64) as i64
     val frac = bits & 0xFFFFFFFFFFFFFu64
@@ -854,7 +865,8 @@ fn f64_from_bits(bits: u64) -> f64:
         return -result
     result
 
-fn f32_from_bits(bits: u32) -> f32:
+@allow(primitive_api)  # reason: IEEE-754 bit-pattern decode; the u32 bits and f32 value are the format itself, no domain type applies
+pub fn f32_from_bits(bits: u32) -> f32:
     val sign_bit = (bits >> 31) & 1u32
     val exp = ((bits >> 23) & 0xFFu32) as i64
     val frac = bits & 0x7FFFFFu32
@@ -876,10 +888,12 @@ fn f32_from_bits(bits: u32) -> f32:
 
 extern fn spl_f64_to_bits(value: f64) -> i64
 
-fn f64_to_bits(value: f64) -> u64:
+# @allow(primitive_api) reason: raw IEEE-754 bit pattern; a domain type would hide the bit-cast
+pub fn f64_to_bits(value: f64) -> u64:
     spl_f64_to_bits(value) as u64
 
-fn f32_to_bits(value: f32) -> u32:
+@allow(primitive_api)  # reason: IEEE-754 bit-pattern encode; the u32 bits and f32 value are the format itself, no domain type applies
+pub fn f32_to_bits(value: f32) -> u32:
     val bits64 = spl_f64_to_bits(value as f64) as u64
     val sign = ((bits64 >> 63) & 1u64) as u32
     val exp64 = ((bits64 >> 52) & 0x7FFu64) as i64
@@ -910,11 +924,17 @@ fn f32_to_bits(value: f32) -> u32:
 # String conversion.  The runtime ABI owns `rt_bytes_to_text`; there has never
 # been a native `bytes_to_string` symbol.  Keep the public library spelling as
 # a real Simple wrapper so imports remain source-compatible without asking the
-# native linker to fabricate an alias.
-extern fn rt_bytes_to_text(bytes: [u8]) -> text
+# native linker to fabricate an alias.  Freestanding array layouts differ by
+# provider; use the same typed-u8/raw-codepoint path proven by DBFS rather than
+# letting the C runtime reinterpret those layouts.
 fn bytes_to_string(bytes: [u8]) -> text:
-    rt_bytes_to_text(bytes)
-fn string_to_bytes(text: text) -> [u8]:
+    var out = StringBuilder.new()
+    var i: i64 = 0
+    while i < bytes.len() as i64:
+        out.push(bytes[i as i32].chr())
+        i = i + 1
+    out.to_text()
+pub fn string_to_bytes(text: text) -> [u8]:
     text.bytes()
 
 # Buffer allocation

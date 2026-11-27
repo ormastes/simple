@@ -111,3 +111,7 @@ already exists and is unaffected?) for whoever owns
 concern. Filed so the exported-set behaviour change introduced by the (still
 correct) `parse_binding` fix is visible before a real `Local` symbol reaches
 these paths.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded status: OPEN — the exported-set change for mixed-binding modules is real and intentional (it is the fix); the remaining question is consumer acceptance, an owner decision. No in-lane change.

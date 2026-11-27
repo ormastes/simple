@@ -1,0 +1,144 @@
+# @req REQ-SSPEC-UNIT
+"""
+# Claude full JWT utils and token refresh scheduler
+
+As a caret user on a long remote session, the bridge token must be refreshed
+before it expires, retried a bounded number of times, and never refreshed by a
+stale timer.
+"""
+
+use std.spec.step
+use std.spec.*
+use app.llm_caret.claude_full.bridge.jwtUtils.*
+
+# JWT whose payload decodes to {"exp":12345}
+fn tok() -> text:
+    "h.eyJleHAiOjEyMzQ1fQ.sig"
+
+describe "Claude full JWT utils":
+    it "formats durations in seconds and minutes":
+        step("formatDuration")
+        expect(formatDuration(45000)).to_equal("45s")
+        expect(formatDuration(500)).to_equal("1s")
+        expect(formatDuration(60000)).to_equal("1m")
+        expect(formatDuration(90000)).to_equal("1m 30s")
+
+    it "reads the expiry from a session-ingress prefixed token":
+        step("expiry")
+        expect(decodeJwtExpiry(tok())).to_equal(12345)
+        expect(decodeJwtExpiry("sk-ant-si-" + tok())).to_equal(12345)
+        expect(decodeJwtExpiry("h.eyJzdWIiOiJ1IiwiZXhwIjoxMjN9.s")).to_equal(123)
+
+    it "decodes the expiry of an arbitrary base64url payload, not just known fixtures":
+        step("real base64url decode")
+        expect(decodeJwtExpiry("h.eyJleHAiOjk5OX0.s")).to_equal(999)
+        expect(decodeJwtExpiry("h.eyJleHAiOjE3MDAwMDAwMDB9.s")).to_equal(1700000000)
+
+    it "returns zero for malformed tokens":
+        step("malformed")
+        expect(decodeJwtExpiry("not-a-jwt")).to_equal(0)
+        expect(decodeJwtExpiry("a..c")).to_equal(0)
+        expect(decodeJwtExpiry("a.b.c.d")).to_equal(0)
+        expect(jwtPayloadSegment("a.b")).to_equal("")
+        expect(stripSessionIngressPrefix("sk-ant-si-abc")).to_equal("abc")
+
+    it "extracts integer fields from JSON text":
+        step("json int")
+        expect(extractJsonInt("{\"exp\": 987,\"x\":1}", "exp")).to_equal(987)
+        expect(extractJsonInt("{\"exp\":\"abc\"}", "exp")).to_equal(0)
+        expect(extractJsonInt("{\"a\":1}", "exp")).to_equal(0)
+        expect(parseLeadingInt("  42abc")).to_equal(42)
+        expect(parseLeadingInt("x")).to_equal(0)
+        expect(trimLeft(" \t z")).to_equal("z")
+        expect(digitValue("7")).to_equal(7)
+        expect(maxInt(3, 9)).to_equal(9)
+
+    it "schedules a refresh buffer-before expiry":
+        step("schedule")
+        var s = createTokenRefreshScheduler("repl", 12000000)
+        s.schedule("sess", tok())
+        expect(s.timerDelay("sess")).to_equal(45000)
+        expect(s.timerGeneration("sess")).to_equal(1)
+        expect(s.logs[0]).to_equal("[repl:token] Scheduled token refresh for sessionId=sess in 45s")
+
+    it "refreshes immediately when the token expires within the buffer":
+        step("immediate")
+        var s = createTokenRefreshScheduler("repl", 12100000)
+        s.setOAuthToken("oauth-1")
+        s.schedule("sess", tok())
+        expect(s.refreshedToken("sess")).to_equal("oauth-1")
+        expect(s.timerDelay("sess")).to_equal(fallbackRefreshIntervalMs())
+        expect(s.analytics).to_equal(["tengu_bridge_token_refreshed"])
+
+    it "keeps the existing timer when the expiry cannot be decoded":
+        step("undecodable")
+        var s = createTokenRefreshScheduler("repl", 0)
+        s.schedule("sess", "garbage")
+        expect(s.hasTimer("sess")).to_equal(false)
+        expect(s.logs[0]).to_equal("[repl:token] Could not decode JWT expiry for sessionId=sess, keeping existing timer")
+
+    it "schedules from expires-in with a 30 second floor":
+        step("expires in")
+        var s = createTokenRefreshSchedulerWithBuffer("b", 0, 1000)
+        s.scheduleFromExpiresIn("a", 100)
+        expect(s.timerDelay("a")).to_equal(99000)
+        s.scheduleFromExpiresIn("b", 1)
+        expect(s.timerDelay("b")).to_equal(minExpiresFloor())
+
+    it "retries a missing OAuth token up to the failure cap then gives up":
+        step("failures")
+        var s = createTokenRefreshScheduler("repl", 0)
+        s.scheduleFromExpiresIn("sess", 1000)
+        val gen = s.timerGeneration("sess")
+        s.doRefresh("sess", gen)
+        expect(s.failureCount("sess")).to_equal(1)
+        expect(s.timerDelay("sess")).to_equal(refreshRetryDelayMs())
+        s.doRefresh("sess", gen)
+        s.doRefresh("sess", gen)
+        expect(s.failureCount("sess")).to_equal(maxRefreshFailures())
+        expect(s.hasTimer("sess")).to_equal(false)
+        expect(s.diagnostics.len()).to_equal(3)
+
+    it "clears failures once a token becomes available":
+        step("recovery")
+        var s = createTokenRefreshScheduler("repl", 0)
+        s.scheduleFromExpiresIn("sess", 1000)
+        val gen = s.timerGeneration("sess")
+        s.doRefresh("sess", gen)
+        s.setOAuthToken("tok")
+        s.doRefresh("sess", gen)
+        expect(s.failureCount("sess")).to_equal(0)
+        expect(s.refreshedToken("sess")).to_equal("tok")
+
+    it "logs when the token source throws":
+        step("throws")
+        var s = createTokenRefreshScheduler("repl", 0)
+        s.setOAuthThrows()
+        s.doRefresh("sess", 0)
+        expect(s.logs[0]).to_equal("[repl:token] getAccessToken threw for sessionId=sess")
+        expect(s.failureCount("sess")).to_equal(1)
+
+    it "ignores a stale refresh after cancel":
+        step("cancel")
+        var s = createTokenRefreshScheduler("repl", 0)
+        s.setOAuthToken("tok")
+        s.scheduleFromExpiresIn("sess", 1000)
+        val gen = s.timerGeneration("sess")
+        s.cancel("sess")
+        s.doRefresh("sess", gen)
+        expect(s.refreshedToken("sess")).to_equal("")
+        expect(s.logs[s.logs.len() - 1]).to_equal("[repl:token] doRefresh for sessionId=sess stale, skipping")
+
+    it "cancels every session at once":
+        step("cancelAll")
+        var s = createTokenRefreshScheduler("repl", 0)
+        s.scheduleFromExpiresIn("a", 1000)
+        s.scheduleFromExpiresIn("b", 1000)
+        s.cancelAll()
+        expect(s.hasTimer("a")).to_equal(false)
+        expect(s.hasTimer("b")).to_equal(false)
+        expect(s.generationFor("a")).to_equal(2)
+        expect(tokenRefreshBufferMs()).to_equal(300000)
+
+fn minExpiresFloor() -> i64:
+    30000

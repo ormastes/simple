@@ -1,5 +1,23 @@
 # Generated GUI Full Web CSS Evidence Timeout
 
+## Verification addendum 2026-11-25 (P3 ledger lane, Windows x86_64)
+
+- **measured**: the evidence fixture `examples/06_io/ui/generated_gui_web_parity_expected.spl`
+  no longer exists in the tree — removed by the 2026-09-29 tree transplant
+  (`88aac2ffe28`); `examples/06_io/ui/` is gone entirely. The 60 s-timeout
+  repro is therefore moot: there is no fixture left to time out, and the
+  2026-09-13 closure's "fixture switched to a compact subset" claim can no
+  longer be re-verified because the file itself is gone.
+- **measured**: `scripts/check/check-electron-generated-gui-web-parity-evidence.shs`
+  still exists and still hard-references the missing example at line 77
+  (`SIMPLE_SRC="examples/06_io/ui/generated_gui_web_parity_expected.spl"`),
+  so the evidence lane would fail on the missing input, not on the original
+  CSS-size timeout. Flagged here for the UI-evidence lane owner; not changed
+  in this lane (restoring or retiring that gate is its owner's call).
+- Verdict: stays closed — the defect as filed (full-CSS fixture blowing the
+  watchdog) cannot recur on a nonexistent fixture; the script/fixture skew is
+  a separate, recorded gap.
+
 ## Closed 2026-09-13 — Resolved by the fixture change recorded in the body: the evidence example no longer pulls full WM/web CSS
 
 - **inferred** The entry itself records the resolution: the evidence fixture was switched from `app.ui.web.html.generate_css("light")` to a compact production-widget CSS subset, so the ~38 KB artifact that blew the 60 s watchdog is no longer generated.

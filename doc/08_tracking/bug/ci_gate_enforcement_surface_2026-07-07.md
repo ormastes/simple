@@ -1,4 +1,23 @@
 # CI gate enforcement surface (task #34)
+
+## Verified still-closed 2026-11-25 (release/1.0.0, worktree wt-p3-baf)
+
+Code inspection confirms both wiring fixes and the enforcement lane are real
+at this tip:
+
+- `.github/workflows/repo-hygiene.yml:42` runs the corrected path
+  `sh scripts/check/check-repo-hygiene.shs` (no dead `scripts/check-repo-hygiene.shs`).
+- The green ratchet lane now lives in `.github/workflows/code-idiom-gates.yml`
+  (moved out of `repo-hygiene.yml` per the comment at `repo-hygiene.yml:65-66`)
+  and invokes all four gates: `check-cpu-hotloop-idiom.shs` (:604),
+  `check-ui-backend-isolation.shs` (:631), `check-tui-standalone-closure.shs`
+  (:639), `check-workspace-root-guard.shs` (:691).
+- The ripgrep flag fix is in place: `scripts/check/check-tui-standalone-closure.shs:45`
+  uses `rg -q --` (no `-E`), so the standalone-lane invariant is genuinely checked.
+
+Verification is by inspection of the workflow/gate sources on this branch; the
+CI jobs themselves were not re-triggered from this host.
+
 ## Closed 2026-09-16 — two wiring bugs fixed, gates now CI-enforced and verified fail-closed
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is

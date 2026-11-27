@@ -1,4 +1,17 @@
 # TLS chain-of-trust signature verification (`verify_signature`) has no implementation anywhere
+## Triage 2026-11-25 — gap confirmed unchanged; remains a deliberately deferred feature
+
+Re-checked at `origin/release/1.0.0` HEAD `0819b116ecb`: the state described
+below is unchanged. The only `verify_signature` under `src/lib` is still the
+JWT-compact-serialization one (`src/lib/common/jwt/verify.spl:10`), not
+reusable for raw X.509 TBS-bytes-vs-DER-signature verification; no
+RSA PKCS#1v1.5/PSS or ECDSA verify primitive exists anywhere in the tree;
+`validate_chain` remains deleted with its removal recorded in
+`src/lib/nogc_sync_mut/tls/validation.spl:6-13`. Closing this means
+implementing real multi-algorithm signature verification (follow-up steps
+below) — a feature-sized, owner-decision effort, not a bounded bug fix.
+Remains OPEN / deliberately deferred.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

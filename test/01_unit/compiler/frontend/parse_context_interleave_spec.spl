@@ -1,0 +1,62 @@
+use std.spec.{describe, it, expect}
+use compiler.frontend.core.parser.{parse_module_silent, parser_has_errors, parser_get_errors}
+use compiler.frontend.parse_context.{parse_context_take, parse_context_install}
+use compiler.frontend.core.lexer.{lexer_state_take, lexer_state_install}
+use std.io.{file_read}
+
+# Item 32: each parse owns its frontend state. Two parses advanced
+# alternately through ParseContext swaps must not see each other's state, and
+# every per-parse field must travel with its context (none left behind in a
+# module global that a swap would forget).
+describe "ParseContext interleaving":
+    it "two parses advanced alternately keep their own diagnostics":
+        val outer = parse_context_take()
+
+        parse_module_silent("fn broken(:\n", "a.spl")
+        val a_errors = parser_get_errors().len()
+        expect(a_errors > 0).to_equal(true)
+        val a = parse_context_take()
+
+        parse_module_silent("fn ok() -> i64:\n    1\n", "b.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val b = parse_context_take()
+
+        parse_context_install(a)
+        expect(parser_has_errors()).to_equal(true)
+        expect(parser_get_errors().len()).to_equal(a_errors)
+        parse_context_install(b)
+        expect(parser_has_errors()).to_equal(false)
+        expect(parser_get_errors().len()).to_equal(0)
+
+        parse_context_install(outer)
+
+    it "a context swap carries the lexer's dead-lexer latch":
+        val outer = lexer_state_take()
+        var dead = lexer_state_take()
+        expect(dead.lex_dead_reported[0]).to_equal(false)
+        dead.lex_dead_reported = [true]
+        lexer_state_install(dead)
+        val back = lexer_state_take()
+        expect(back.lex_dead_reported[0]).to_equal(true)
+        lexer_state_install(outer)
+
+    it "per-parse parser state lives only in the context slot":
+        val core = "src/compiler/10.frontend/core/"
+        val parser = file_read(core + "parser.spl")
+        expect(parser).to_contain("var par_state: ParserState = parser_state_fresh()")
+        expect(parser).to_not_contain("\nvar par_errors:")
+        expect(parser).to_not_contain("\nvar par_had_error:")
+        expect(parser).to_not_contain("\nvar par_kind_slot:")
+        val pp = file_read(core + "parser_preprocessor.spl")
+        expect(pp).to_contain("var pp_state: PreprocessorState = preprocessor_state_fresh()")
+        expect(pp).to_not_contain("\nvar _pp_")
+        val uses = file_read(core + "parser_decls_use.spl")
+        expect(uses).to_contain("var impl_target_state: ImplTargetState = impl_target_state_fresh()")
+        expect(uses).to_not_contain("\nvar par_impl_target_")
+        val fns = file_read(core + "parser_decls_fn.spl")
+        expect(fns).to_contain("var file_generic_constraint_state: FileGenericConstraintState = file_generic_constraint_state_fresh()")
+        expect(fns).to_not_contain("\nvar file_generic_constraints:")
+        expect(fns).to_not_contain("\nvar file_generic_constraint_modes:")
+        val exprs = file_read(core + "parser_expr.spl")
+        expect(exprs).to_contain("var expr_nest_state: ExprNestState = expr_nest_state_fresh()")
+        expect(exprs).to_not_contain("\nvar g_expr_nest_depth:")

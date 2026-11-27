@@ -1,0 +1,80 @@
+# @req REQ-PURE-LLVM-UNSIGNED-WRAP
+# Exercise the Pure-Simple LLVM translator, rather than matching its source.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.mir.mir_data.*
+
+fn integer_arithmetic_ir(kind: MirTypeKind, llvm_type: text, left_value: i64, right_value: i64) -> text:
+    val translator = MirToLlvm.create("test.llvm.integer_arithmetic_flags", CodegenTarget.X86_64, nil)
+    val type_ = MirType(kind: kind)
+    val left = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(left_value), type_))
+    val right = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(right_value), type_))
+    translator.local_types[0] = llvm_type
+    translator.local_types[1] = llvm_type
+    translator.local_types[2] = llvm_type
+    translator.translate_binop(LocalId(id: 0), MirBinOp.Add, left, right)
+    translator.translate_binop(LocalId(id: 1), MirBinOp.Sub, left, right)
+    translator.translate_binop(LocalId(id: 2), MirBinOp.Mul, left, right)
+    translator.builder.build()
+
+fn expect_wrapping_integer_ir(ir: text, llvm_type: text):
+    expect(ir).to_contain(" = add {llvm_type} ")
+    expect(ir).to_contain(" = sub {llvm_type} ")
+    expect(ir).to_contain(" = mul {llvm_type} ")
+    expect(ir.contains(" nsw ")).to_equal(false)
+    expect(ir.contains(" nuw ")).to_equal(false)
+
+fn expect_signed_integer_ir(ir: text, llvm_type: text):
+    expect(ir).to_contain(" = add nsw {llvm_type} ")
+    expect(ir).to_contain(" = sub nsw {llvm_type} ")
+    expect(ir).to_contain(" = mul nsw {llvm_type} ")
+    expect(ir.contains(" nuw ")).to_equal(false)
+
+fn float_arithmetic_ir() -> text:
+    val translator = MirToLlvm.create("test.llvm.float_arithmetic_flags", CodegenTarget.X86_64, nil)
+    val left = MirOperand(kind: MirOperandKind.Const(MirConstValue.Float(2.5), MirType.f64()))
+    val right = MirOperand(kind: MirOperandKind.Const(MirConstValue.Float(1.5), MirType.f64()))
+    translator.local_types[0] = "double"
+    translator.local_types[1] = "double"
+    translator.local_types[2] = "double"
+    translator.translate_binop(LocalId(id: 0), MirBinOp.Add, left, right)
+    translator.translate_binop(LocalId(id: 1), MirBinOp.Sub, left, right)
+    translator.translate_binop(LocalId(id: 2), MirBinOp.Mul, left, right)
+    translator.builder.build()
+
+describe "Pure-Simple LLVM unsigned arithmetic overflow flags":
+    it "keeps U32 arithmetic wrapping across the signed boundary":
+        step("Emit actual U32 Add/Sub/Mul IR with a signed-boundary operand")
+        val ir = integer_arithmetic_ir(MirTypeKind.U32, "i32", 2147483647, 1)
+        expect_wrapping_integer_ir(ir, "i32")
+
+    it "keeps U8 arithmetic wrapping at its own width":
+        step("Emit actual U8 Add/Sub/Mul IR")
+        expect_wrapping_integer_ir(integer_arithmetic_ir(MirTypeKind.U8, "i8", 200, 60), "i8")
+
+    it "keeps U16 arithmetic wrapping at its own width":
+        step("Emit actual U16 Add/Sub/Mul IR")
+        expect_wrapping_integer_ir(integer_arithmetic_ir(MirTypeKind.U16, "i16", 60000, 10000), "i16")
+
+    it "keeps U64 arithmetic outside signed no-wrap flags":
+        step("Emit actual U64 Add/Sub/Mul IR")
+        expect_wrapping_integer_ir(integer_arithmetic_ir(MirTypeKind.U64, "i64", 65536, 65536), "i64")
+
+    it "preserves signed I32 no-wrap flags":
+        step("Emit signed I32 Add/Sub/Mul controls")
+        expect_signed_integer_ir(integer_arithmetic_ir(MirTypeKind.I32, "i32", 7, 3), "i32")
+
+    it "preserves signed I64 no-wrap flags":
+        step("Emit signed I64 Add/Sub/Mul controls")
+        expect_signed_integer_ir(integer_arithmetic_ir(MirTypeKind.I64, "i64", 7, 3), "i64")
+
+    it "preserves floating arithmetic instruction selection":
+        step("Emit F64 Add/Sub/Mul controls")
+        val ir = float_arithmetic_ir()
+        expect(ir).to_contain(" = fadd double ")
+        expect(ir).to_contain(" = fsub double ")
+        expect(ir).to_contain(" = fmul double ")
+        expect(ir.contains(" nsw ")).to_equal(false)
+        expect(ir.contains(" nuw ")).to_equal(false)

@@ -21,6 +21,7 @@ use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
 use std.nogc_sync_mut.composition.native_build_argv_v1.{
     native_build_argv_encode_v1}
 use std.io_runtime.{time_now_monotonic_ms}
+use app.build.host_path_policy.{build_host_abs_path_valid_v1, build_host_paths_overlap_v1, build_host_path_normalize_v1}
 
 struct PreparedParallelTransportHandoffV1:
     valid: bool
@@ -38,32 +39,34 @@ fn _handoff_builder_batch_v1(root: text, relative_path: text,
         maximum: i64) -> ParallelTransportFileV1?:
     val expected_bytes = expected.bytes()
     if expected_bytes.len() == 0 or expected_bytes.len() > maximum:
-        return nil
+        return None
     val opened = read_only_file_view_open_v1(root, relative_path,
         snapshot_digest, FileReadPolicyV1.buffered)
-    if opened.is_err(): return nil
+    if opened.is_err(): return None
     var view = opened.unwrap()
     val size = view.identity.size
     if size == 0u64 or size > maximum.to_u64() or
        size != expected_bytes.len().to_u64():
         val _ = read_only_file_view_close_v1(view)
-        return nil
+        return None
     val read = read_only_file_view_read_v1(&view, 0u64, size,
         CancellationToken.new())
     val closed = read_only_file_view_close_v1(view)
-    if read.is_err() or closed.is_err(): return nil
+    if read.is_err() or closed.is_err(): return None
     val bytes = read.unwrap().bytes
     if bytes.len().to_u64() != size or bytes != expected_bytes:
-        return nil
+        return None
     Some(ParallelTransportFileV1(relative_path, bytes.len(),
         sha256_u8_hex(bytes)))
 
 fn _handoff_builder_path_v1(path: text, absolute: bool) -> bool:
+    if absolute:
+        return build_host_abs_path_valid_v1(path, true, true, 4096, 128)
     if path == "" or path.len() > 4096 or
-       path.starts_with("/") != absolute or path.ends_with("/"):
+       path.starts_with("/") or path.ends_with("/"):
         return false
     val parts = path.split("/")
-    var i: i64 = if absolute: 1 else: 0
+    var i: i64 = 0
     while i < parts.len():
         val part = parts[i]
         if part == "" or part == "." or part == ".." or
@@ -128,8 +131,8 @@ fn build_parallel_transport_handoff_v1(
     if now_tick < 0 or deadline_tick <= now_tick or
        deadline_tick > 1000000000000000:
         return _handoff_builder_reject_v1("handoff-deadline-invalid")
-    if not prepared_attempt.ready or prepared_attempt.prepared == nil or
-       prepared_attempt.request == nil or prepared_attempt.approved_node == nil:
+    if not prepared_attempt.ready or prepared_attempt.prepared.is_none() or
+       prepared_attempt.request.is_none() or prepared_attempt.approved_node.is_none():
         return _handoff_builder_reject_v1("prepared-attempt-invalid")
     val prepared = prepared_attempt.prepared.unwrap()
     val request = prepared_attempt.request.unwrap()
@@ -140,7 +143,7 @@ fn build_parallel_transport_handoff_v1(
         return _handoff_builder_reject_v1("approved-node-mismatch")
     val request_wire = encode_build_worker_request_v1(request)
     val parsed = parse_build_worker_request_v1(request_wire)
-    if request_wire == "" or parsed == nil or
+    if request_wire == "" or parsed.is_none() or
        encode_build_worker_request_v1(parsed.unwrap()) != request_wire or
        request.attempt.worker_id != approved_node.ssh.node.worker_id or
        prepared_attempt.request_digest != sha256_text(request_wire) or
@@ -157,7 +160,8 @@ fn build_parallel_transport_handoff_v1(
         request.action.output_paths.len() + 3 else: 4
     if max_output_files < required_files:
         return _handoff_builder_reject_v1("handoff-output-files-too-small")
-    if not prepared.root.starts_with(approved_node.local_state_dir + "/") or
+    if not build_host_path_normalize_v1(prepared.root).starts_with(
+           build_host_path_normalize_v1(approved_node.local_state_dir) + "/") or
        prepared.input_batch_path != prepared.root + "/inputs.batch" or
        prepared.control_batch_path != prepared.root + "/control.batch":
         return _handoff_builder_reject_v1("prepared-batch-path-invalid")
@@ -202,7 +206,7 @@ fn build_parallel_transport_handoff_v1(
         input_commands, prepared_attempt.request_digest, 65536)
     val control = _handoff_builder_batch_v1(prepared.root, "control.batch",
         control_commands, prepared_attempt.request_digest, 65536)
-    if input == nil or control == nil:
+    if input.is_none() or control.is_none():
         return _handoff_builder_reject_v1("prepared-batch-mismatch")
     handoff.input_batch = input
     handoff.control_batch = control
@@ -214,7 +218,7 @@ fn build_parallel_transport_handoff_v1(
         "request.wire", request_wire, digest, 262144)
     val pinned_ready = _handoff_builder_batch_v1(prepared.root, "ready",
         ready_wire, digest, BUILD_WORKER_READY_MARKER_MAX_BYTES_V1)
-    if pinned_request == nil or pinned_ready == nil:
+    if pinned_request.is_none() or pinned_ready.is_none():
         return _handoff_builder_reject_v1("prepared-control-mismatch")
     # Snapshot payloads were hashed during preparation and are checked again
     # by child_input before network. Pins here do not freeze later pathname

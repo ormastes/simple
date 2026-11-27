@@ -1,0 +1,225 @@
+use std.spec
+use std.io_runtime.{file_write, file_read, file_exists, getpid, rt_env_get, rt_env_set}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use compiler.driver.cache.tldr_summary_v1.{tldr_summary_fallback_count_v1, tldr_summary_path_v1,
+    tldr_summary_entries_v1, tldr_summary_produce_v1, tldr_summary_digest_v1, tldr_summary_parse_v1,
+    read_tldr,
+    tldr_summary_publish_v1, tldr_summary_ensure_v1}
+
+val SRC: text = "use std.x\n\npub struct Point:\n    x: i64\n    y: i64\n\n@when(os: \"linux\")\npub fn open_fd(p: text) -> i64:\n    1\n\n@when(os: \"windows\")\npub fn open_fd(p: text) -> i64:\n    2\n\nfn hidden() -> i64:\n    0\n\nexport helper\n"
+
+fn root_of(tag: text) -> text:
+    val r = "build/tmp/tldr_summary_spec_{getpid()}_{tag}"
+    val _d = dir_create_all(r)
+    r
+
+fn count_prefix(entries: [text], prefix: text) -> i64:
+    var n = 0
+    for e in entries:
+        if e.starts_with(prefix): n = n + 1
+    n
+
+describe "TLDR interface summary":
+    it "round-trips produce, publish and read_tldr":
+        val root = root_of("rt")
+        val got = tldr_summary_ensure_v1(root, "pkg.geo", SRC)
+        expect(got.is_some()).to_equal(true)
+        val read = read_tldr(root, "pkg.geo")
+        expect(read != nil).to_equal(true)
+        expect(read.unwrap().len()).to_equal(got.unwrap().len())
+        expect(read.unwrap().contains("layout|pub struct Point:\n    x: i64\n    y: i64")).to_equal(true)
+        expect(tldr_summary_digest_v1(file_read(tldr_summary_path_v1(root, "pkg.geo"))).starts_with("sha256:")).to_equal(true)
+
+    it "lists exported names for glob and bare imports":
+        val e = tldr_summary_entries_v1("pkg.geo", SRC)
+        expect(e.contains("export|Point")).to_equal(true)
+        expect(e.contains("export|open_fd")).to_equal(true)
+        expect(e.contains("export|helper")).to_equal(true)
+        expect(e.contains("export|hidden")).to_equal(false)
+
+    it "keeps every cfg variant":
+        val e = tldr_summary_entries_v1("pkg.geo", SRC)
+        var linux = false
+        var windows = false
+        for x in e:
+            if x.starts_with("decl|fn open_fd ") and x.contains("os: \"linux\""): linux = true
+            if x.starts_with("decl|fn open_fd ") and x.contains("os: \"windows\""): windows = true
+        expect(linux).to_equal(true)
+        expect(windows).to_equal(true)
+
+    it "flips the digest on a content change and on a field retype":
+        val base = tldr_summary_digest_v1(tldr_summary_produce_v1("pkg.geo", SRC))
+        val added = tldr_summary_digest_v1(tldr_summary_produce_v1("pkg.geo", SRC + "pub fn more() -> i64:\n    3\n"))
+        val retyped = tldr_summary_digest_v1(tldr_summary_produce_v1("pkg.geo", SRC.replace("    y: i64", "    y: f64")))
+        val body_only = tldr_summary_digest_v1(tldr_summary_produce_v1("pkg.geo", SRC.replace("    0\n", "    7\n")))
+        expect(added != base).to_equal(true)
+        expect(retyped != base).to_equal(true)
+        expect(body_only).to_equal(base)
+
+    it "rejects a summary whose digest does not verify":
+        val good = tldr_summary_produce_v1("pkg.geo", SRC)
+        expect(tldr_summary_parse_v1(good).is_some()).to_equal(true)
+        expect(tldr_summary_parse_v1(good.replace("x: i64", "x: i32")).is_none()).to_equal(true)
+
+    it "reports a failed publish":
+        val root = root_of("retry")
+        val blocked = root + "/blocked.tldrs"
+        val _d = dir_create_all(blocked + "/x")
+        expect(tldr_summary_publish_v1(blocked, "c")).to_equal(false)
+        expect(tldr_summary_publish_v1(root + "/ok.tldrs", "c")).to_equal(true)
+
+    it "emits pub use brace re-exports and captures multi-line headers":
+        val src = "pub use pkg.geo.{Point, open_fd as open}\n\npub fn wide(a: i64,\n        b: i64) -> i64:\n    a + b\n"
+        val e = tldr_summary_entries_v1("pkg.re", src)
+        expect(e.contains("export|Point")).to_equal(true)
+        expect(e.contains("export|open")).to_equal(true)
+        var full = false
+        for x in e:
+            if x.starts_with("decl|fn wide ") and x.ends_with("sig=pub fn wide(a: i64, b: i64) -> i64:"): full = true
+        expect(full).to_equal(true)
+        val narrow = tldr_summary_entries_v1("pkg.re", src.replace("        b: i64)", "        b: f64)"))
+        expect(narrow != e).to_equal(true)
+
+
+    it "serves the last complete summary while a publish is in flight":
+        val root = root_of("pub")
+        val path = tldr_summary_path_v1(root, "pkg.geo")
+        expect(tldr_summary_publish_v1(path, tldr_summary_produce_v1("pkg.geo", SRC))).to_equal(true)
+        val before = read_tldr(root, "pkg.geo").unwrap()
+        val torn = tldr_summary_produce_v1("pkg.geo", SRC + "pub fn more() -> i64:\n    3\n")
+        val _t = file_write(path + ".999.partial.tmp", torn.substring(0, torn.len() / 2))
+        expect(read_tldr(root, "pkg.geo").unwrap().len()).to_equal(before.len())
+        expect(tldr_summary_publish_v1(path, torn)).to_equal(true)
+        expect(read_tldr(root, "pkg.geo").unwrap().contains("export|more")).to_equal(true)
+
+    it "counts and records unsupported constructs":
+        val start = tldr_summary_fallback_count_v1()
+        val e = tldr_summary_entries_v1("pkg.mac", "macro twice(x):\n    x + x\n\nexport use pkg.geo.*\n")
+        expect(tldr_summary_fallback_count_v1() - start).to_equal(2)
+        expect(count_prefix(e, "fallback|")).to_equal(2)
+
+    it "records conditional block directives as fallback instead of per-decl attrs":
+        val src = "@when(os=\"linux\"):\npub fn path_errno_address() -> i64:\n    1\n@else:\npub fn path_errno_address() -> i64:\n    0\n@end\n"
+        val start = tldr_summary_fallback_count_v1()
+        val e = tldr_summary_entries_v1("pkg.cond", src)
+        expect(tldr_summary_fallback_count_v1() - start).to_equal(3)
+        expect(e.contains("fallback|conditional:@when(os=\"linux\"):")).to_equal(true)
+        expect(e.contains("fallback|conditional:@else:")).to_equal(true)
+        expect(e.contains("fallback|conditional:@end")).to_equal(true)
+
+    it "respects SIMPLE_CACHE_MIN_FREE_BYTES env setting":
+        val saved = rt_env_get("SIMPLE_CACHE_MIN_FREE_BYTES") ?? ""
+        rt_env_set("SIMPLE_CACHE_MIN_FREE_BYTES", "0")
+        val root = root_of("env")
+        val got = tldr_summary_ensure_v1(root, "pkg.test", SRC)
+        expect(got.is_some()).to_equal(true)
+        rt_env_set("SIMPLE_CACHE_MIN_FREE_BYTES", saved)
+
+    it "round-trips a module with impl blocks through read_tldr":
+        val root = root_of("impls")
+        val src = "pub struct P:\n    v: i64\n\nimpl P:\n    fn get(self) -> i64:\n        1\n\nextend P:\n    fn twice(self) -> i64:\n        2\n"
+        val got = tldr_summary_ensure_v1(root, "pkg.impls", src)
+        expect(got.is_some()).to_equal(true)
+        val read = read_tldr(root, "pkg.impls")
+        expect(read != nil).to_equal(true)
+        expect(read.unwrap().len()).to_equal(got.unwrap().len())
+        expect(count_prefix(read.unwrap(), "impls|")).to_equal(1)
+
+    it "skips top-level multi-line and single-line docstrings before pub fn":
+        val doc_multi = "\"\"\"\nModule overview.\nfn doc_example_ignored() -> i64:\n    0\n\"\"\"\n\npub fn greet(name: text) -> text:\n    name\n"
+        val doc_single = "\"\"\"Single line module doc.\"\"\"\npub fn ping() -> i64:\n    1\n"
+        val start = tldr_summary_fallback_count_v1()
+        val e_multi = tldr_summary_entries_v1("pkg.doc_multi", doc_multi)
+        val e_single = tldr_summary_entries_v1("pkg.doc_single", doc_single)
+        expect(tldr_summary_fallback_count_v1() - start).to_equal(0)
+        expect(count_prefix(e_multi, "fallback|")).to_equal(0)
+        expect(count_prefix(e_single, "fallback|")).to_equal(0)
+        expect(e_multi.contains("export|greet")).to_equal(true)
+        expect(e_multi.contains("export|doc_example_ignored")).to_equal(false)
+        expect(e_single.contains("export|ping")).to_equal(true)
+        var has_greet_decl = false
+        for x in e_multi:
+            if x.starts_with("decl|fn greet "):
+                has_greet_decl = true
+        expect(has_greet_decl).to_equal(true)
+
+    it "preserves declarations after top-level multi-line triple-quoted string literals":
+        val src = "val TEMPLATE: text = \"\"\"\n    indented\n\"\"\"\n\npub fn after() -> i64:\n    1\n"
+        val start = tldr_summary_fallback_count_v1()
+        val e = tldr_summary_entries_v1("pkg.tpl", src)
+        expect(tldr_summary_fallback_count_v1() - start).to_equal(1)
+        expect(e.contains("fallback|multiline-string")).to_equal(true)
+        expect(e.contains("export|after")).to_equal(true)
+        var has_after_decl = false
+        for x in e:
+            if x.starts_with("decl|fn after "):
+                has_after_decl = true
+        expect(has_after_decl).to_equal(true)
+
+    it "preserves declarations after indented function-body triple-quoted strings closed at column 0":
+        val src = "fn helper_tpl() -> text:\n    val s = \"\"\"\nline1\n\"\"\"\n    s\n\npub fn after2() -> i64:\n    2\n"
+        val start = tldr_summary_fallback_count_v1()
+        val e = tldr_summary_entries_v1("pkg.body_tpl", src)
+        expect(tldr_summary_fallback_count_v1() - start).to_equal(1)
+        expect(e.contains("fallback|multiline-string")).to_equal(true)
+        expect(e.contains("export|after2")).to_equal(true)
+        var has_after2_decl = false
+        for x in e:
+            if x.starts_with("decl|fn after2 "):
+                has_after2_decl = true
+        expect(has_after2_decl).to_equal(true)
+
+    it "records unclosed-docstring fallback when EOF is reached inside top-level docstring":
+        val src = "\"\"\"\nUnclosed module docstring\npub fn hidden_by_unclosed() -> i64:\n    1\n"
+        val start = tldr_summary_fallback_count_v1()
+        val e = tldr_summary_entries_v1("pkg.unclosed_doc", src)
+        expect(tldr_summary_fallback_count_v1() - start).to_equal(1)
+        expect(e.contains("fallback|unclosed-docstring")).to_equal(true)
+        expect(e.contains("export|hidden_by_unclosed")).to_equal(false)
+
+    it "handles escaped single quotes before triple-quoted blocks and header continuations":
+        val src = "val CH = '\\''\nval X = \"\"\"\n    indented\n\"\"\"\n\npub fn wide_str(\n    s: text = \"\"\"\n    body\n\"\"\") -> i64:\n    1\n\npub fn after3() -> i64:\n    3\n"
+        val start = tldr_summary_fallback_count_v1()
+        val e = tldr_summary_entries_v1("pkg.esc_sq", src)
+        expect(tldr_summary_fallback_count_v1() - start).to_equal(2)
+        expect(e.contains("fallback|multiline-string")).to_equal(true)
+        expect(e.contains("export|after3")).to_equal(true)
+        var has_after3_decl = false
+        for x in e:
+            if x.starts_with("decl|fn after3 "):
+                has_after3_decl = true
+        expect(has_after3_decl).to_equal(true)
+
+    it "ignores unbalanced parens inside string literals when scanning top-level headers":
+        val src = "val OPENERS = [\"@when(\", \"@cfg(\", \"__cfg_when__(\"]\n\nfn scan_guards(src: text) -> [text]:\n    []\n"
+        val e = tldr_summary_entries_v1("pkg.guard_scan", src)
+        var openers_decl = ""
+        var has_scan_decl = false
+        for x in e:
+            if x.starts_with("decl|const OPENERS "):
+                openers_decl = x
+            if x.starts_with("decl|fn scan_guards "):
+                has_scan_decl = true
+        expect(openers_decl != "").to_equal(true)
+        expect(openers_decl.contains("scan_guards")).to_equal(false)
+        expect(has_scan_decl).to_equal(true)
+
+    it "ignores unbalanced parens inside line comments when scanning top-level headers":
+        val src = "val LIMIT = 10 # keep open (\n\nfn after_comment(x: i64) -> i64:\n    x\n"
+        val e = tldr_summary_entries_v1("pkg.comment_paren", src)
+        var has_after_comment_decl = false
+        for x in e:
+            if x.starts_with("decl|fn after_comment "):
+                has_after_comment_decl = true
+        expect(has_after_comment_decl).to_equal(true)
+
+    it "keeps declarations after top-level headers containing single-quoted '#'":
+        val src = "pub fn split_hash(sep: text = '#') -> i64:\n    0\n\npub fn after_sq_hash(x: i64) -> i64:\n    x\n"
+        val e = tldr_summary_entries_v1("pkg.sq_hash", src)
+        expect(e.contains("export|split_hash")).to_equal(true)
+        expect(e.contains("export|after_sq_hash")).to_equal(true)
+        var has_after_sq_hash_decl = false
+        for x in e:
+            if x.starts_with("decl|fn after_sq_hash "):
+                has_after_sq_hash_decl = true
+        expect(has_after_sq_hash_decl).to_equal(true)

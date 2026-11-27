@@ -27,23 +27,61 @@ reproduce locally.
 
 use std.spec.{describe, it, expect}
 use std.spec.step
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.env.platform.{is_windows, get_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
+use std.env.variables.{env_get}
+use std.nogc_sync_mut.io.env_ops.{cwd}
 
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+val CLI_RUN_TIMEOUT_MS: i64 = 120000
+val CLI_RUN_MAX_OUT: i64 = 16777216
 
-val FIXTURE_DIR = "/tmp/simple_check_log_mode_fixture"
+fn _cli_repo_root() -> text:
+    cwd().replace("\\", "/")
+
+fn _spawn_cli(run_args: [text], work_dir: text, extra_env: [(text, text)]) -> (text, text, i64):
+    """Host-portable replacement for the old POSIX sh harness: runs
+    `bin/simple run <run_args...>` with SIMPLE_LIB bound to the repo src
+    tree, optionally under a different working directory and with extra
+    environment variables set for the child."""
+    val repo = _cli_repo_root()
+    val program = if is_windows(): repo + "/bin/simple.exe" else: repo + "/bin/simple"
+    val lib = repo + "/src"
+    val joined = run_args.join(" ")
+    val (shell, shell_args) = if is_windows():
+        val sh = env_get("ComSpec") ?? "cmd.exe"
+        var cmd = ""
+        if work_dir != "":
+            cmd = cmd + "cd /d " + work_dir + " && "
+        for (key, value) in extra_env:
+            cmd = cmd + "set \"" + key + "=" + value + "\" && "
+        cmd = cmd + "set \"SIMPLE_LIB=" + lib + "\" && " + program + " run " + joined
+        (sh, ["/d", "/c", cmd])
+    else:
+        var prefix = ""
+        if work_dir != "":
+            prefix = prefix + "cd \"" + work_dir + "\" && "
+        for (key, value) in extra_env:
+            prefix = prefix + key + "=\"" + value + "\" "
+        ("/bin/sh", ["-c", prefix + "SIMPLE_LIB=\"" + lib + "\" \"" + program + "\" run " + joined])
+    process_run_bounded(shell, shell_args, CLI_RUN_TIMEOUT_MS, CLI_RUN_MAX_OUT)
+
+val FIXTURE_DIR = get_temp_dir().replace("\\", "/") + "/simple_check_log_mode_fixture"
 
 fn _setup_fixture():
-    val (_out, _err, _code) = rt_process_run("/bin/sh", [
-        "-c",
-        "rm -rf " + FIXTURE_DIR + " && mkdir -p " + FIXTURE_DIR + " && cat > " + FIXTURE_DIR + "/sample.spl <<'EOF'\nfn answer() -> i64:\n    42\nEOF"
-    ])
+    val _removed = dir_remove_all(FIXTURE_DIR)
+    if not dir_create_all(FIXTURE_DIR + "/directory"):
+        fail("could not create fixture dir " + FIXTURE_DIR + "/directory")
+    if not file_create_exclusive(FIXTURE_DIR + "/directory/inner.spl", "fn inner() -> i64:\n    7\n"):
+        fail("could not write fixture file " + FIXTURE_DIR + "/directory/inner.spl")
+    if not file_create_exclusive(FIXTURE_DIR + "/sample.spl", "fn answer() -> i64:\n    42\n"):
+        fail("could not write fixture file " + FIXTURE_DIR + "/sample.spl")
+    if not file_create_exclusive(FIXTURE_DIR + "/sample_spec.spl", "use std.spec\ndescribe \"sample\":\n    it \"works\":\n        expect(1).to_equal(1)\n"):
+        fail("could not write fixture file " + FIXTURE_DIR + "/sample_spec.spl")
 
 fn _run_check(args: [text]) -> (text, text, i64):
-    val joined = args.join(" ")
-    rt_process_run("/bin/sh", [
-        "-c",
-        "REPO=$(pwd); cd " + FIXTURE_DIR + " && SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/check/main.spl\" " + joined
-    ])
+    _spawn_cli(["src/app/check/main.spl"] + args, FIXTURE_DIR, [])
 
 describe "check log mode CLI options":
     it "shows shared log options in help":
@@ -75,7 +113,7 @@ describe "check log mode CLI options":
         val (out, err, code) = _run_check(["--progress=dot", "missing.spl"])
         expect(code).to_equal(1)  # oracle: 1 is the CLI failure exit code for a missing target file
         expect(out).to_contain(".")
-        expect(out).to_contain("ERROR: file not found: missing.spl")
+        expect(out).to_contain("cannot read file: missing.spl")
 
     it "discovers source files when the target is a directory":
         # @req REQ-CHECK-LOGMODE-001
@@ -84,7 +122,7 @@ describe "check log mode CLI options":
         _setup_fixture()
         val (out, err, code) = _run_check([FIXTURE_DIR + "/directory"])
         expect(code).to_equal(0)  # oracle: 0 is the CLI success exit code when the discovered file checks clean
-        expect(out).to_contain("All checks passed (1 file(s))")
+        expect(out).to_contain("Semantic check passed with complete syntax and semantic coverage (1 file(s))")
 
     it "directs SSpec command blocks to the test runner before parsing":
         # @req REQ-CHECK-LOGMODE-001
@@ -104,8 +142,11 @@ describe "check log mode CLI options":
         _setup_fixture()
         val (out, err, code) = _run_check(["--json", "sample.spl", "sample_spec.spl"])
         expect(code).to_equal(1)  # oracle: 1 is the CLI failure exit code when one of two checked files errors
-        expect((out + err).contains("E-SSPEC-CHECK")).to_equal(false)
-        expect(out.trim()).to_equal("{\"command\":\"check\",\"status\":\"error\",\"checked\":2,\"files\":2,\"errors\":1,\"files_with_errors\":1}")
+        # The SSpec guidance (which legitimately names E-SSPEC-CHECK, pinned by
+        # test/01_unit/app/check/check_sspec_guidance_shared_lexer_spec.spl) is
+        # routed to stderr so stdout stays a single clean JSON summary object.
+        expect(out.contains("E-SSPEC-CHECK")).to_equal(false)
+        expect(out.trim()).to_equal("{\"command\":\"check\",\"status\":\"error\",\"coverage\":\"semantic\",\"semantic_complete\":false,\"checked\":2,\"files\":2,\"errors\":1,\"files_with_errors\":1}")
 
     it "does not classify prefixes, strings, or indented text as SSpec":
         # @req REQ-CHECK-LOGMODE-001

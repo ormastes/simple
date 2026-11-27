@@ -1,0 +1,111 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, backend, regression
+"""
+# Interpreter Value constructor retirement regression
+
+Verifies that after PR #11459 fixed imported enum static receiver resolution,
+the interpreter backend modules construct imported `Value.<Variant>(...)`
+directly without `imported_value_constructor_static_receiver_native_2026_10_16`
+workarounds, while retained `backend_value_*_v1` helpers stay compatible for
+external callers.
+"""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use compiler.backend.backend_types.{
+    Value,
+    FunctionValue,
+    ObjectValue,
+    backend_value_bool_v1,
+    backend_value_int_v1,
+    backend_value_float_v1,
+    backend_value_string_v1,
+    backend_value_array_v1,
+    backend_value_tuple_v1,
+    backend_value_dict_v1,
+    backend_value_struct_v1,
+    backend_value_function_v1,
+    backend_value_object_v1,
+    backend_value_runtime_value_v1
+}
+use compiler.backend.interpreter.{InterpreterBackendImpl}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir.{HirBinOp, HirUnaryOp}
+use compiler.hir.hir_types.{SymbolId}
+
+fn unwrap_int(v: Value) -> i64:
+    match v:
+        case Value.Int(n): n
+        case _: -999999
+
+fn unwrap_bool(v: Value) -> bool:
+    match v:
+        case Value.Bool(b): b
+        case _: false
+
+fn unwrap_string(v: Value) -> text:
+    match v:
+        case Value.String(s): s
+        case _: ""
+
+describe "interpreter Value constructor retirement":
+    it "direct Value constructors match retained backend_value_*_v1 helpers":
+        expect(unwrap_int(Value.Int(42))).to_equal(unwrap_int(backend_value_int_v1(42)))
+        expect(unwrap_bool(Value.Bool(true))).to_equal(unwrap_bool(backend_value_bool_v1(true)))
+        expect(unwrap_string(Value.String("ok"))).to_equal(unwrap_string(backend_value_string_v1("ok")))
+        val direct_arr = Value.Array([Value.Int(1), Value.Int(2)])
+        val helper_arr = backend_value_array_v1([backend_value_int_v1(1), backend_value_int_v1(2)])
+        expect(direct_arr.type_name()).to_equal(helper_arr.type_name())
+        val direct_tup = Value.Tuple([Value.Bool(false)])
+        val helper_tup = backend_value_tuple_v1([backend_value_bool_v1(false)])
+        expect(direct_tup.type_name()).to_equal(helper_tup.type_name())
+        val direct_dict = Value.Dict({"k": Value.Int(9)})
+        val helper_dict = backend_value_dict_v1({"k": backend_value_int_v1(9)})
+        expect(direct_dict.type_name()).to_equal(helper_dict.type_name())
+        val direct_struct = Value.Struct("Pt", {"x": Value.Int(3)})
+        val helper_struct = backend_value_struct_v1("Pt", {"x": backend_value_int_v1(3)})
+        expect(direct_struct.type_name()).to_equal(helper_struct.type_name())
+        val direct_fn = Value.Function(FunctionValue(symbol: SymbolId(id: 1), name: "f"))
+        val helper_fn = backend_value_function_v1(FunctionValue(symbol: SymbolId(id: 1), name: "f"))
+        expect(direct_fn.type_name()).to_equal(helper_fn.type_name())
+        val direct_obj = Value.Object(ObjectValue(class_name: "C", handle: 7))
+        val helper_obj = backend_value_object_v1(ObjectValue(class_name: "C", handle: 7))
+        expect(direct_obj.type_name()).to_equal(helper_obj.type_name())
+        val direct_rt = Value.RuntimeValue(0)
+        val helper_rt = backend_value_runtime_value_v1(0)
+        expect(direct_rt.type_name()).to_equal(helper_rt.type_name())
+        val direct_f = Value.Float(1.5)
+        val helper_f = backend_value_float_v1(1.5)
+        expect(direct_f.type_name()).to_equal(helper_f.type_name())
+
+    it "interpreter eval_binop, eval_unaryop, and builtins return direct Value variants":
+        val backend = InterpreterBackendImpl.new()
+        val span = Span.empty()
+        val sum = backend.eval_binop(HirBinOp.Add, Value.Int(19), Value.Int(23), span, false, false).unwrap()
+        expect(unwrap_int(sum)).to_equal(42)
+        val cmp = backend.eval_binop(HirBinOp.Gt, Value.Int(10), Value.Int(3), span, false, false).unwrap()
+        expect(unwrap_bool(cmp)).to_equal(true)
+        val neg = backend.eval_unaryop(HirUnaryOp.Neg, Value.Int(7), span).unwrap()
+        expect(unwrap_int(neg)).to_equal(-7)
+        val s_opt = backend.try_call_builtin("to_string", [Value.Int(123)])
+        expect(s_opt.?).to_equal(true)
+        expect(unwrap_string(s_opt.unwrap().unwrap())).to_equal("123")
+
+    it "retires all imported_value_constructor_static_receiver_native_2026_10_16 tags in the 5 src files":
+        val tag = "imported_value_constructor_static_receiver_native_2026_10_16"
+        val paths = [
+            "src/compiler/00.common/runtime_value_v1.spl",
+            "src/compiler/70.backend/backend/interpreter.spl",
+            "src/compiler/70.backend/backend/interpreter_binop.spl",
+            "src/compiler/70.backend/backend/interpreter_calls.spl",
+            "src/compiler/70.backend/backend/interpreter_expr.spl"
+        ]
+        for path in paths:
+            val content = file_read(path)
+            expect(content.contains(tag)).to_equal(false)
+        val binop_src = file_read("src/compiler/70.backend/backend/interpreter_binop.spl")
+        expect(binop_src.contains("Value.Int(l + r)")).to_equal(true)
+        expect(binop_src.contains("Value.Bool(l == r)")).to_equal(true)
+        val expr_src = file_read("src/compiler/70.backend/backend/interpreter_expr.spl")
+        expect(expr_src.contains("Value.Int(value)")).to_equal(true)
+        expect(expr_src.contains("Value.String(value)")).to_equal(true)

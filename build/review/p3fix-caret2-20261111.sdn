@@ -1,0 +1,163 @@
+# P3 caret-suite FIX lane caret2 — 2026-11-11
+# Worktree: C:/Users/yoon/dev/simple-p3-caret2-20261111
+# Branch:   work/p3-caret2-20261111 (cut from origin/release/1.0.0 tip 66506fda143ca)
+# Runtime:  tracked seed bin/simple.exe (git-clean; goldens assume-unchanged on
+#           the 4 wm_compare .ppm). Specs ran as
+#           SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe SIMPLE_TIMEOUT_SECONDS=300
+#           bin/simple.exe test <spec> --mode=interpreter --no-cache
+# Host:     Windows (Git Bash), llvm-mingw-20260922-ucrt-x86_64 on PATH.
+#           No push, no PR. Tracked bin/simple.exe untouched.
+# Note:     full per-run logs are gitignored and live under
+#           build/review/p3fix-caret2-20261111-logs/ in this worktree; the
+#           decisive excerpts are committed with this file.
+
+lane: p3fix-caret2-20261111
+date: 2026-11-11
+base_tip: 66506fda143ca
+rows_total: 7
+row_commits: per-row (5 commits, one per logical change)
+
+rows:
+  - id: caret_smux_multi_launch_adapter_missing_2026-08-21
+    verdict: FIXED
+    doc: doc/08_tracking/bug/caret_smux_multi_launch_adapter_missing_2026-08-21.md
+    commit: 0774348818a19
+    cycles_used: 4
+    summary: >-
+      os.apps.smux adapter implemented and bound into the manager. New
+      src/app/llm_caret/caret_smux_multi_launch.spl (one smux session per
+      manager, one pane + real PTY per child via smux_pane_spawn_pty through
+      the common std.sys.pty wrapper; launch/rollback, per-child cancel,
+      team stop, capture, resize, truthful PTY liveness probe).
+      multi_caret_manager.spl gains launch_multi_caret_manager_via_smux with
+      the piped path's bounded admission envelope; the manager team stays the
+      canonical child record; partial batches roll back fail-closed. The seed
+      std sys/pty wrapper is extended to the common interface (resize,
+      can_resize, cleanup_pending, exit_code).
+    spec: test/03_system/app/llm_caret/feature/caret_smux_multi_launch_spec.spl
+    spec_result: 6/6 PASS (Windows ConPTY host) — two concurrent PTY children
+      with per-pane nonce capture and cross-pane isolation, manager-driven
+      launch with adapter/team pid parity, observed child viewport resize
+      (mode con before/after), clean cancel of one child while the other
+      answers, over-capacity rejection before any smux session, rollback with
+      zero survivors and session removed
+    regressions: unit multi_caret_manager_spec 13/13 (unchanged); legacy
+      llm_caret_multi_manager_spec at its pre-existing 2/3 baseline
+    evidence: build/review/p3fix-caret2-20261111-logs/t1_smux_spec_excerpt.log
+    ledger_note: >-
+      caret-smux-multi-launch row intentionally left todo,never: promotion is
+      owned by the bootstrap must-check external-receipt path (caret gates
+      fail closed there by design until versioned validators + trusted
+      reviewer receipts land). Doc Status FIXED reflects the landed adapter +
+      executable evidence.
+
+  - id: llm_caret_parity_matrix_target_paths_use_hyphens_2026-08-24
+    verdict: FIXED
+    doc: doc/08_tracking/bug/llm_caret_parity_matrix_target_paths_use_hyphens_2026-08-24.md
+    commit: ea1d8334c88e6
+    cycles_used: 1
+    summary: >-
+      The 3 hyphenated decoy files (use-multi-select-state, use-select-
+      navigation, use-multiple-choice-state under claude_full/components) were
+      re-verified byte-identical to their snake_case twins (cmp), re-verified
+      unreferenced (content grep over src/ and test/ .spl files finds only the
+      decoys' own docstrings and the twins' parity-ledger comments; nothing in
+      scripts/config/tools references them; matrices point at snake_case
+      targets) and deleted with git rm.
+    gate: sh scripts/check/check-llm-caret-full-parity-implementation.shs
+    gate_result: >-
+      hyphenated_spl_files=0 (was 3), hyphenated_matrix_targets=0,
+      class_target_files_missing=0. The script still exits FAIL on the
+      pre-existing unimplemented porting surface (target_files_missing=1156)
+      owned by the parity porting program — outside this row per the doc's
+      own triage.
+    evidence: build/review/p3fix-caret2-20261111-logs/parity_gate_after_delete.log
+
+  - id: devhub_secured_db_key_session_open_failure_2026_10_27
+    verdict: OPEN (native-only residual; regression spec landed)
+    doc: doc/08_tracking/bug/devhub_secured_db_key_session_open_failure_2026_10_27.md
+    commit: d7cb8f8abf5b1
+    cycles_used: 2
+    summary: >-
+      The full fresh_secured_db fixture was EXECUTED here (provision.py's
+      canonical flow, fresh CSPRNG secret, interpreter): exit 0 end to end —
+      key session opens, 46 rows, rows[0].values[0].to_text() == "11" HOLDS,
+      overflow cell, all Messenger verbs + tamper/wrong-secret negatives. The
+      in-tree row-cell decode is correct; caret1's "storage first row value"
+      failure is native-codegen-only and could not be reproduced natively in
+      this lane: fresh cold-cache native-build hangs on this host (known P1
+      seed_native_build_interpreted_startup_spin_2026-11-09, reproduced on the
+      full closure and a 3-import minimal repro; no admitted native producer).
+    spec: test/01_unit/lib/database/sqlite_format/devhub_rowcell_value_spec.spl
+    spec_result: 2/2 PASS (interpreter) — exact devhub messages shape
+      (rowids 11..56, unicode body, >11000-char overflow) built via
+      sqlite_format_create_image; pins rows[0].values[0].to_text() == "11"
+      (INTEGER PRIMARY KEY as b-tree rowid text), 46 rows, rowid order,
+      unicode/overflow bodies through the same reader path the secured
+      fixture exercises
+    regressions: record_spec 11/11, read_table_spec 5/5, varint_spec 7/7
+    suspected_native_loci: (1) IPK alias step in sqlite_format_read_table_bytes
+      (values[def.ipk] = DbValue.Integer(raw.rowid)); (2) DbValue.Integer i64
+      match-payload interpolation in sql/types.spl to_text. Ready bisect repro:
+      build/review/p3fix-caret2-20261111-logs/rowcell_repro.spl (+ interpreter
+      oracle log alongside)
+    evidence: build/review/p3fix-caret2-20261111-logs/t3_fixture_run1_excerpt.log,
+      t3_regression_spec.log, t3_sibling_specs_results.log,
+      t3_rowcell_repro_interpreter.log, t3_native_build_hang_excerpt.log
+
+  - id: llm_caret_native_closure_admission_2026-08-11
+    verdict: BLOCKED (grant kept)
+    doc: doc/08_tracking/bug/llm_caret_native_closure_admission_2026-08-11.md
+    commit: 2181ab1e3af7c
+    cycles_used: 1
+    summary: >-
+      The conditional grant (produce the entry-closure native build with the
+      Rust engine in bounded time) was exercised and fails on this host:
+      fresh cold-cache native-build hangs (frozen 9919-line/925656-byte
+      preamble, zero cache objects) on both the full closure and a minimal
+      repro — the known P1 seed_native_build_interpreted_startup_spin_2026-11-09.
+      The sanctioned bootstrap path remains outside a bug lane. caret1's
+      verbatim grant re-recorded intact in the doc.
+
+  - id: caret_external_receipt_semantic_authenticity_2026-08-25
+    verdict: FIXED (quiet-host live re-run green)
+    doc: doc/08_tracking/bug/caret_external_receipt_semantic_authenticity_2026-08-25.md
+    commit: 2181ab1e3af7c
+    cycles_used: 1
+    summary: >-
+      Bounded single quiet-host attempt:
+      test/01_unit/scripts/caret_external_receipt_semantic_quarantine_test.shs
+      PASSED (exit 0) — "all five generic signed Caret receipts fail closed at
+      the semantic quarantine". Second independent live execution (lane ne3
+      same-day PASS + this lane) on top of caret1's source confirmation. The
+      five external rows remain deliberate TODO pending the versioned
+      validators, as the header states.
+    evidence: build/review/p3fix-caret2-20261111-logs/t4_quarantine_test.log
+
+  - id: llm_caret_http_attempt_timeout
+    verdict: FIXED (seed-side classification gap closed; live gate green on seed)
+    doc: doc/08_tracking/bug/llm_caret_http_attempt_timeout.md
+    commit: f27241c4a7896
+    cycles_used: 1
+    summary: >-
+      Seed-side workaround applied: http_request_v2_raw (the typed boundary
+      for every timeout-capable request) now normalizes known timeout
+      transport errors (timed out / timeout / WSAETIMEDOUT / ETIMEDOUT /
+      os error 10060 / deadline exceeded) to the self-hosted runtime's
+      classification "HTTP request timed out" instead of leaking engine-specific
+      raw text. Non-timeout failures unchanged; negative-timeout preflight
+      untouched.
+    gate: python scripts/check/check-caret-http-attempt-timeout.py --runtime bin/simple.exe
+    gate_result: exit 0 — spec 5/5 PASS (three stalled adapters interrupted
+      within budget, UTF8 echo, negative rejected before any request), server
+      ledger {"/slow": 3, "/echo": 1}
+    regressions: retry_timeout_spec 4/4
+    evidence: build/review/p3fix-caret2-20261111-logs/t4_http_gate_excerpt.log,
+      t4_retry_unit_excerpt.log
+
+  - id: parity_matrix_gate_note
+    verdict: INFO
+    summary: >-
+      The parity-matrix gate script's runtime (~23 min here) is dominated by
+      one wc subprocess per matrix row (1902 rows); a future lane may want it
+      batched. Not a defect against this lane's rows.

@@ -7,6 +7,7 @@
 use std.editor.services.md_wiki_index.*
 use std.editor.services.md_search.*
 use std.editor.services.md_diagnostics.*
+use std.editor.services.md_diagnostics.{md_diagnose}
 use std.editor.services.file_watcher.*
 use std.editor.services.command_palette.*
 use std.editor.services.diagnostics.{diagnostics_store_with_publish}
@@ -47,6 +48,7 @@ use app.editor.editor_ctrl_lsp.*
 use app.editor.editor_ctrl_wiki.*
 use app.editor.editor_json_helpers.*
 use app.editor.editor_path_text_helpers.*
+use app.editor.editor_jit_helpers.*
 use app.editor.editor_lsp_helpers.*
 use app.editor.editor_debug_helpers.*
 use app.editor.editor_markdown_helpers.*
@@ -54,59 +56,19 @@ use app.editor.editor_attachment_template.*
 use app.editor.editor_workspace_symbols.*
 use app.editor.editor_keymap_dispatch.*
 use app.editor.editor_layout.*
-use app.editor.md_dispatch.*
+use app.editor.md_dispatch.{md_buffer_content, md_update_preview}
 use app.editor.editor_extension_roots.*
 use app.editor.editor_controller_types.*
+use app.editor.trace_view_host.{TraceViewInput}
 
 use std.io_runtime.{file_exists}
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 use std.io_runtime.{read_file_text}
-use std.io_runtime.{file_write}
+use std.io_runtime.{file_write_exact}
 extern fn rt_file_read_bytes(path: text) -> [u8]?
 use std.io_runtime.{file_write_bytes}
 use std.io_runtime.{dir_create_all}
 use std.io_runtime.{dir_walk}
-
-struct EditorAction:
-    redraw: bool
-    quit: bool
-    status_msg: text
-
-struct NormalKeyResult:
-    message: text
-    quit: bool
-    enter_insert: bool
-    enter_command: bool
-
-struct InsertKeyResult:
-    message: text
-    exit_insert: bool
-
-struct CommandKeyResult:
-    commandline: text
-    done: bool
-    cancelled: bool
-
-struct EditorAppliedCodeAction:
-    applied: bool
-    content: text
-    line: i64
-    col: i64
-
-struct EditorPropertyPayload:
-    key: text
-    value: text
-
-struct EditorVaultPropertyPayload:
-    root: text
-    key: text
-    value: text
-    selected_paths: [text]
-
-struct EditorLocation:
-    path: text
-    line: i64
-    col: i64
 
 class EditorController:
     session: EditSession
@@ -119,6 +81,8 @@ class EditorController:
     running: bool
     config: EditorConfig
     settings_view: SettingsViewState?
+    trace_view_input: TraceViewInput?
+    trace_load_error: text
     palette_state: PaletteState?
     extension_host: ExtensionHost
     diagnostic_store: DiagnosticStore
@@ -186,8 +150,10 @@ impl EditorController:
             pending_prefix: "",
             running: true,
             config: editor_config_default(),
-            settings_view: nil,
-            palette_state: nil,
+            settings_view: None,
+            trace_view_input: None,
+            trace_load_error: "",
+            palette_state: None,
             extension_host: host,
             diagnostic_store: DiagnosticStore.new(),
             diagnostics_panel: diagnostics_panel_new(),
@@ -629,7 +595,7 @@ impl EditorController:
         val config = md_wiki_daily_note_config_with_title(folder, title_format, _editor_payload_part(payload, 4), template_body)
         val path = md_wiki_daily_note_path(config, date)
         val content = md_wiki_daily_note_content(config, date)
-        if not rt_file_write_text(path, content):
+        if not file_write_exact(path, content):
             me.status_msg = "failed to create daily note"
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
         var session_daily = me.session
@@ -663,10 +629,17 @@ impl EditorController:
         if template_path == "" or target_path == "":
             me.status_msg = "missing template or target path"
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        val rendered = _editor_apply_template_text(rt_file_read_text(template_path) ?? "", title, date)
-        val existing = rt_file_read_text(target_path) ?? ""
+        val template_text = rt_file_read_text(template_path)
+        if template_text.is_none():
+            me.status_msg = "failed to read template: " + template_path
+            return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
+        val rendered = _editor_apply_template_text(template_text.unwrap(), title, date)
+        var existing = ""
+        if val target_text = rt_file_read_text(target_path):
+            existing = target_text
+        # absent: a target that does not exist yet starts empty
         val sep = if existing == "" or existing.ends_with("\n") then "" else: "\n"
-        if not rt_file_write_text(target_path, existing + sep + rendered):
+        if not file_write_exact(target_path, existing + sep + rendered):
             me.status_msg = "failed to insert template"
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
         me.status_msg = "inserted template: " + template_path
@@ -995,7 +968,11 @@ impl EditorController:
         if launch_path == "":
             me.status_msg = "debug compound source not found: " + editor_debug_launch_config_name(compound_config)
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        val content = rt_file_read_text(launch_path) ?? ""
+        val content_opt = rt_file_read_text(launch_path)
+        if content_opt.is_none():
+            me.status_msg = "debug compound source unreadable: " + launch_path
+            return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
+        val content = content_opt.unwrap()
         val workspace = _editor_workspace_dir_from_launch_json(launch_path)
         val doc = me.session.active_document()
         val program = if doc == nil then "" else: doc.path()
@@ -1508,20 +1485,6 @@ impl EditorController:
     me _markdown_table_set_cell(line: i64, col: i64, value: text) -> EditorAction:
         ctrl_markdown_table_set_cell(me, line, col, value)
 
-    me _markdown_table_cell_nav(direction: text) -> EditorAction:
-        val doc = me.session.active_document()
-        var buffer = me.session.active_buffer()
-        if doc == nil or buffer == nil or doc.language_id != "markdown":
-            me.status_msg = "no markdown table"
-            return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        val nav = if direction == "prev" then md_table_prev_cell(buffer.to_text(), buffer.cursor_row, buffer.cursor_col) else: md_table_next_cell(buffer.to_text(), buffer.cursor_row, buffer.cursor_col)
-        if not nav.found:
-            me.status_msg = nav.message
-            return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        buffer.move_cursor(nav.line, nav.col)
-        me.session.update_active_buffer(buffer)
-        me.status_msg = nav.message
-        EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
 
     me _markdown_table_cell_nav(direction: text) -> EditorAction:
         ctrl_markdown_table_cell_nav(me, direction)
@@ -1602,14 +1565,17 @@ impl EditorController:
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
         val checked = mode == "done" or mode == "checked" or mode == "complete" or mode == "completed"
         var changed_count = 0
-        val files = rt_dir_walk(root)
+        val files = dir_walk(root)
         for file in files:
             if not _editor_is_markdown_path(file):
                 continue
-            val existing = rt_file_read_text(file) ?? ""
+            val existing_opt = rt_file_read_text(file)
+            if existing_opt.is_none():
+                continue
+            val existing = existing_opt.unwrap()
             val next = md_tasks_set_checked(existing, checked)
             if next != existing:
-                if rt_file_write_text(file, next):
+                if file_write_exact(file, next):
                     changed_count = changed_count + 1
                     me._refresh_open_document_from_disk_batch(file, next)
         val index = md_wiki_index_documents(_editor_markdown_vault_documents(root))
@@ -1660,16 +1626,19 @@ impl EditorController:
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
         me.wiki_property_vault_root = parsed.root
         var changed_count = 0
-        val files = rt_dir_walk(parsed.root)
+        val files = dir_walk(parsed.root)
         for file in files:
             if not _editor_is_markdown_path(file):
                 continue
             if not _editor_vault_property_path_selected(file, parsed.selected_paths):
                 continue
-            val existing = rt_file_read_text(file) ?? ""
+            val existing_opt = rt_file_read_text(file)
+            if existing_opt.is_none():
+                continue
+            val existing = existing_opt.unwrap()
             val next = _editor_markdown_property_content(existing, parsed.key, parsed.value)
             if next != existing:
-                if rt_file_write_text(file, next):
+                if file_write_exact(file, next):
                     changed_count = changed_count + 1
                     me._refresh_open_document_from_disk_batch(file, next)
         val index = md_wiki_index_documents(_editor_markdown_vault_documents(parsed.root))
@@ -1685,13 +1654,16 @@ impl EditorController:
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
         me.wiki_property_vault_root = parsed.root
         var rows: [WikiPanelRow] = []
-        val files = rt_dir_walk(parsed.root)
+        val files = dir_walk(parsed.root)
         for file in files:
             if not _editor_is_markdown_path(file):
                 continue
             if not _editor_vault_property_path_selected(file, parsed.selected_paths):
                 continue
-            val existing = rt_file_read_text(file) ?? ""
+            val existing_opt = rt_file_read_text(file)
+            if existing_opt.is_none():
+                continue
+            val existing = existing_opt.unwrap()
             val next = _editor_markdown_property_content(existing, parsed.key, parsed.value)
             if next != existing:
                 rows.push(WikiPanelRow(icon: "review", label: _editor_path_basename(file), detail: parsed.key + " -> " + parsed.value, path: file, line: 0))
@@ -1732,7 +1704,7 @@ impl EditorController:
                 val sep = _editor_find_text(trimmed, ":")
                 if sep > 0 and trimmed.slice(0, sep).trim() == schema_key:
                     found = true
-                    value = trimmed.slice(sep + 1, trimmed.len()).trim()
+                    value = trimmed.slice(sep + 1, trimmed.byte_len()).trim()
                     line_index = i
                     break
                 i = i + 1
@@ -2084,7 +2056,7 @@ impl EditorController:
         me.lsp_result_panel = lsp_result_panel_workspace_edit_preview(title, edit_json, 0)
         var rows: [LspResultRow] = []
         for row in me.lsp_result_panel.rows:
-            if row.path != "" and not rt_file_exists(row.path):
+            if row.path != "" and not file_exists(row.path):
                 rows.push(LspResultRow(
                     icon: "conflict",
                     label: row.label,
@@ -2116,7 +2088,7 @@ impl EditorController:
     me _mark_workspace_edit_preview_conflicts():
         var rows: [LspResultRow] = []
         for row in me.lsp_result_panel.rows:
-            if row.path != "" and not rt_file_exists(row.path):
+            if row.path != "" and not file_exists(row.path):
                 rows.push(LspResultRow(
                     icon: "conflict",
                     label: row.label,
@@ -2184,7 +2156,7 @@ impl EditorController:
             me.lsp_call_hierarchy_merge_index = me.lsp_result_panel.selected
         var payload = row.command_payload.trim()
         if payload == "":
-            payload = "{\"name\":\"" + row.label + "\",\"kind\":12,\"uri\":\"file://" + row.path + "\",\"range\":{\"start\":{\"line\":" + row.line.to_text() + ",\"character\":" + row.col.to_text() + "},\"end\":{\"line\":" + row.line.to_text() + ",\"character\":" + row.col.to_text() + "}},\"selectionRange\":{\"start\":{\"line\":" + row.line.to_text() + ",\"character\":" + row.col.to_text() + "},\"end\":{\"line\":" + row.line.to_text() + ",\"character\":" + row.col.to_text() + "}}}"
+            payload = "{{\"name\":\"" + row.label + "\",\"kind\":12,\"uri\":\"file://" + row.path + "\",\"range\":{{\"start\":{{\"line\":" + row.line.to_text() + ",\"character\":" + row.col.to_text() + "}},\"end\":{{\"line\":" + row.line.to_text() + ",\"character\":" + row.col.to_text() + "}}}},\"selectionRange\":{{\"start\":{{\"line\":" + row.line.to_text() + ",\"character\":" + row.col.to_text() + "}},\"end\":{{\"line\":" + row.line.to_text() + ",\"character\":" + row.col.to_text() + "}}}}}}"
         return me._request_active_call_hierarchy_direction(direction, payload)
 
     me _request_active_code_lens_resolve(item_json: text) -> EditorAction:
@@ -2350,7 +2322,7 @@ impl EditorController:
         if should_create:
             val heading = if title == "" then md_wiki_title_from_path(path) else: title
             val note_content = "# " + heading + "\n\n"
-            val written = rt_file_write_text(path, note_content)
+            val written = file_write_exact(path, note_content)
             if not written:
                 me.status_msg = "failed to create note: " + path
                 return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
@@ -2622,7 +2594,11 @@ impl EditorController:
             return LspResponse(id: 0, ok: false, result_json: "", error_text: "no active language server")
 
     me _notify_lsp_file_changed(path: text, change_type: i64) -> EditorAction:
-        me.vault_search_index = md_vault_search_index_apply_file_change(me.vault_search_index, path, rt_file_read_text(path) ?? "", change_type)
+        var changed_text = ""
+        if val read_text = rt_file_read_text(path):
+            changed_text = read_text
+        # absent: a deleted or unreadable file contributes no indexed text
+        me.vault_search_index = md_vault_search_index_apply_file_change(me.vault_search_index, path, changed_text, change_type)
         var notified = false
         if me.md_lsp_state.running:
             me.md_lsp_state = md_lsp_notify_watched_file(me.md_lsp_state, path, change_type)
@@ -2856,9 +2832,10 @@ impl EditorController:
         while i < events.len():
             val event = events[i]
             val path = event.path
-            val content = rt_file_read_text(path) ?? ""
             if event.change_type != 3:
-                me._refresh_open_document_from_disk_batch(path, content)
+                if val content = rt_file_read_text(path):
+                    me._refresh_open_document_from_disk_batch(path, content)
+                # absent: an unreadable file leaves the open buffer unchanged
             me._notify_lsp_file_changed(path, event.change_type)
             i = i + 1
         me.status_msg = "file changes notified: " + events.len().to_text()
@@ -2879,7 +2856,7 @@ impl EditorController:
         if me.session.dock_layout.active_right_panel() == "problems":
             me._refresh_diagnostics_panel_view()
         if doc.language_id == "markdown" and me.md_lsp_state.running:
-            me.md_lsp_state = md_lsp_change_active(me.md_lsp_state, doc.path(), content)
+            me.md_lsp_state = app_md_lsp_change_active(me.md_lsp_state, doc.path(), content)
         elif (doc.language_id == "simple" or doc.language_id == "shell") and me.simple_lsp_state.running:
             me.simple_lsp_state = simple_lsp_change_active(me.simple_lsp_state, doc.path(), content)
         if should_refresh_inlay_hints:
@@ -3090,12 +3067,12 @@ impl EditorController:
         buffer.clear_folds()
         var cursor = 0
         while cursor < result_json.len():
-            val slice = result_json.slice(cursor, result_json.len())
+            val slice = result_json.slice(cursor, result_json.byte_len())
             val relative = _editor_find_text(slice, "\"startLine\"")
             if relative < 0:
                 me.session.update_active_buffer(buffer)
                 return
-            val range_json = result_json.slice(cursor + relative, result_json.len())
+            val range_json = result_json.slice(cursor + relative, result_json.byte_len())
             val start_line = _editor_json_number_field(range_json, "\"startLine\"")
             val end_line = _editor_json_number_field(range_json, "\"endLine\"")
             buffer.fold_range(start_line, end_line)
@@ -3112,12 +3089,12 @@ impl EditorController:
         buffer.clear_inlay_hints()
         var cursor = 0
         while cursor < result_json.len():
-            val slice = result_json.slice(cursor, result_json.len())
+            val slice = result_json.slice(cursor, result_json.byte_len())
             val relative = _editor_find_text(slice, "\"position\"")
             if relative < 0:
                 me.session.update_active_buffer(buffer)
                 return
-            val hint_json = result_json.slice(cursor + relative, result_json.len())
+            val hint_json = result_json.slice(cursor + relative, result_json.byte_len())
             val line = _editor_json_number_field(hint_json, "\"line\"")
             val col = _editor_json_number_field(hint_json, "\"character\"")
             val label = _editor_json_string_field(hint_json, "\"label\"")

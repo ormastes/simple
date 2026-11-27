@@ -134,3 +134,46 @@ site rather than the runtime value's actual callable-ness. Not root-caused
 further (would require reading the placeholder-lambda desugaring/lowering
 code, out of scope for this triage pass — no Rust seed source fix per the
 fix-guide's scope).
+
+**Revalidated 2026-11-02: still plausible because open — historical interpreter/compiler defect; current admitted; no merged fix commit with a passing regression is cited in this doc.**
+
+## Triage 2026-11-03 — deferred (design decision), not fixed
+
+Re-probed on the seed: `val r = apply(_1 + 1, 41)` works (42), but
+`print(apply(_1 + 1, 41) + 0)` prints `<lambda>`. Cause: the outer call
+(`print`) owns the placeholder scope (`call_arg_depth > 0` skips nested call
+args in `parser/src/expressions/postfix.rs::transform_placeholder_args_for_call`;
+the pure-Simple twin uses `placeholder_enter_call_arg`), and only callees named
+as higher-order get forced transforms. Making a user free function's `fn`-typed
+parameter own the scope needs callee signature knowledge at parse time (not
+available in a single-pass parser) or a post-resolve desugar; that changes
+placeholder scoping semantics and needs an owner decision. Workaround: bind to
+a `val` first, or use an explicit lambda. Pure-Simple AST spec still passes.
+
+## Re-verification 2026-11-06 (Rust seed `simple-ref`, aarch64, release/1.0.0 a89f4c436db)
+NOT reproducible on this seed. Probe `apply(_1 + 1, 4)` (free fn calling its
+parameter) returns 5 bare, interpolated, and nested in `expect(...)`
+(`to_equal(5)`), same as the explicit-lambda control; `_1 * 3 + 0` gives 12.
+The four cluster specs pass: `test/01_unit/lib/gc_{async,sync}_immut/`
+`facade_resolution_spec` (2/2 each) and `native_combinators_spec` (1/1 each).
+Neither spec harness nor evaluator is at fault on this seed; the 2026-09-21
+Windows seed result is not carried over. Record stays open only for the
+native/pure-Simple callback-value regression named above.
+## 2026-11-06 — seed JIT root cause fixed (fix-implemented-verification-pending)
+
+Interpreter was already correct; the residual red was the seed **JIT**:
+`apply(_1 + 1, 4)` with `fn apply(f: fn(i64) -> i64, x)` printed 40 and
+`call_once(_1 + 1)` printed 88 (= tagged 11). Two causes:
+
+1. HIR `lower_call` never gave a lambda argument its callee's declared
+   callback param types, so placeholder params (`__p0`) defaulted to ANY while
+   the typed callee passed raw i64 (`hir/lower/expr/calls.rs`).
+2. `JitCompiler::first_unsupported_lambda` skipped every function that builds
+   no closure itself, so the untyped `IndirectCall` in `call_once` was never
+   refused (`codegen/jit.rs`); now every function is checked once the module
+   has a closure, and such modules defer to the interpreter.
+
+Regression: `src/compiler_rust/compiler/tests/placeholder_lambda_fn_param_jit.rs`
+(red pre-fix on both tests, green post-fix) and
+`test/01_unit/language/placeholder_lambda_fn_param_value_spec.spl` (7/7).
+Pending: seed redeploy + pure-Simple native requalification.

@@ -11,3 +11,26 @@ Producer: `5315b60ff617fd4595390609e89bcd8530204c4595fc7b2f28b32e5b7a40f235`. Ev
 Reproducing/prevention fixture: `test/fixtures/compiler/mir_ret_operand_owner/main.spl`. Four canonical `@workaround` markers already exist in the reviewed source commit; this registration does not change production code.
 
 Removal condition: Permanent optional/coalesce owner propagation repair plus original unannotated source regression and actual mir_verify HIR/MIR/native object PASS, with return-operand runtime controls. Keep OPEN while workaround active; no automatic retirement or admission.
+
+## 2026-11-03 lane s3g3: deferred (workaround active), concrete blocker
+- `test/fixtures/compiler/mir_ret_operand_owner/main.spl` passes on the seed (`mir-ret-operand-owner: pass`),
+  which only pins the workaround form (`val payload: MirOperand = value ?? ...`), not the unannotated one.
+- Permanent fix site: `NullCoalesce` in `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:~6302`. HIR
+  lowering (`20.hir/hir_lowering/_Expressions/expression_core.spl:980`) emits `NullCoalesce` with NO type, so
+  the MIR result type/owner is rebuilt from the left operand by several special cases (text, array, struct,
+  tuple); the enum-bearing record payload (`MirOperand` whose `kind` is an enum) falls through them.
+  Re-introducing the unannotated source needs a native `mir_verify` HIR/MIR replay to see which branch
+  drops the owner; the seed interpreter does not reproduce it (it is a native-lane owner-table defect).
+  Typing `NullCoalesce` at HIR lowering from the left's declared Optional inner is the candidate, but it
+  changes every `??` in the compiler and must not land unverified. Keep the 4 `@workaround` markers.
+
+## 2026-11-03 comp-retopt2: fix-implemented-verification-pending
+- Added `null_coalesce_default_owner_type` and a fallback in NullCoalesce lowering
+  (`expr_dispatch.spl`): when neither the declared Option inner type nor the
+  container-read type is recoverable, the default operand's resolved nominal
+  type is remembered on the merged temp, so `(value ?? default).kind` keeps an owner.
+- Spec: `test/01_unit/compiler/mir/ret_optional_operand_owner_spec.spl` (2/2 pass on interpreter; source contract + accessor projection).
+- Workarounds kept. Verify: revert the four `@workaround` locals in `mir_instruction_graph.spl` to untyped `value ?? ...`, native-compile `test/fixtures/compiler/mir_ret_operand_owner/main.spl` on a stage3 with this change, run mir_verify; expect zero MIR19 owner errors.
+
+## 2026-11-05 compiler-defects sweep (winboot-reldefects lane)
+Ancestor check: fix 02fca5e389f "fix(mir): null-coalesce result keeps default operand owner" (merge d5330d9ea26, PR #6264) is an ancestor of tip 816655ee5cb; `null_coalesce_default_owner_type` + fallback are present in expr_dispatch.spl. Host check: test/01_unit/compiler/mir/ret_optional_operand_owner_spec.spl 2/2 PASS (seed interpreter). The four @workaround markers in mir_instruction_graph.spl remain until native mir_verify HIR/MIR replay on a stage3 producer (still pending).

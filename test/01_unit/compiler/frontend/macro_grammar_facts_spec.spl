@@ -1,0 +1,58 @@
+# Purpose: pure-Simple parser records `macro` declarations and `name!(...)`
+# invocations in the flat macro fact pools; the facts round-trip through the
+# frontend pool codec and feed the macro reference projector (plan 2026-10-24
+# §6, P5).
+# @req M-01 M-02
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.core._Ast.decl_nodes.{macro_fact_def_count, macro_fact_def_name_at,
+    macro_fact_def_params_at, macro_fact_def_nested_at, macro_fact_use_count,
+    macro_fact_use_name_at, macro_fact_use_args_at, macro_facts_reset,
+    flat_decl_pools_dump, flat_decl_pools_restore}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{macro_use_status_tag_v1}
+use compiler.frontend.cache_artifact.macro_source_from_parse_v1.{macro_module_source_from_parse_v1,
+    macro_contract_intros_v1}
+use compiler.frontend.cache_artifact.macro_reference_projector.{project_macro_module_v1}
+
+val SRC = "macro double(x: Int) -> (returns result: Int):\n    emit result:\n        x + x\n\nmacro quad(x: Int) -> (returns result: Int):\n    emit result:\n        double!(double!(x))\n\nmacro make_adder(n: Int const) -> (\n    intro add_fn:\n        enclosing.module.fn \"" + 'add_{n}' + "\"(x: Int) -> Int\n):\n    emit add_fn:\n        fn add(x: Int) -> Int:\n            x + n\n\nfn user() -> i64:\n    val a = double!(21)\n    val b = quad!(2)\n    val c = missing!(1, (2))\n    a + b + c\n"
+
+describe "macro grammar facts":
+    it "records declarations, params, nested names and invocations":
+        val _m = parse_full_frontend(SRC, "macro_fixture.spl", "macro_fixture", Logger(level: 0))
+        expect(macro_fact_def_count()).to_equal(3)
+        expect(macro_fact_def_name_at(0)).to_equal("double")
+        expect(macro_fact_def_params_at(0)).to_equal("x")
+        expect(macro_fact_def_nested_at(1)).to_equal("double")
+        expect(macro_fact_use_count()).to_equal(3)
+        expect(macro_fact_use_name_at(0)).to_equal("double")
+        expect(macro_fact_use_args_at(0)).to_equal("21")
+        expect(macro_fact_use_name_at(2)).to_equal("missing")
+        expect(macro_fact_use_args_at(2)).to_equal("1, (2)")
+
+    it "macro fact pools round-trip through the decl pool codec":
+        val _m = parse_full_frontend(SRC, "macro_fixture.spl", "macro_fixture", Logger(level: 0))
+        val blob = flat_decl_pools_dump()
+        macro_facts_reset()
+        expect(macro_fact_def_count()).to_equal(0)
+        expect(flat_decl_pools_restore(FlatPoolReader.new(blob))).to_equal(true)
+        expect(macro_fact_def_count()).to_equal(3)
+        expect(macro_fact_use_args_at(2)).to_equal("1, (2)")
+
+    it "contract intros give the generated public names":
+        val intros = macro_contract_intros_v1("(\n    intro add_fn:\n        enclosing.module.fn \"" + 'add_{n}' + "\"(x: Int) -> Int\n)")
+        expect(intros.len()).to_equal(1)
+        expect(intros[0].name_pattern).to_equal('add_{n}')
+        expect(intros[0].kind).to_equal("fn")
+
+    it "the projector runs on real parse facts":
+        val _m = parse_full_frontend(SRC, "macro_fixture.spl", "macro_fixture", Logger(level: 0))
+        val p = project_macro_module_v1(macro_module_source_from_parse_v1("pkg", "macro_fixture",
+            "macro_fixture.spl"), [])
+        expect(p.def_table.entries.len()).to_equal(3)
+        expect(p.use_table.uses.len()).to_equal(3)
+        expect(macro_use_status_tag_v1(p.use_table.uses[0].status)).to_equal("resolved")
+        expect(p.use_table.uses[0].region_id).to_equal("double#0")
+        expect(macro_use_status_tag_v1(p.use_table.uses[1].status)).to_equal("unresolved")

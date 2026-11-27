@@ -1,0 +1,153 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Global pool generic inference and module constant binding in 30.types
+
+Regression spec for `phase3_global_pool_generic_inference_workaround_2026_10_10`
+(`src/compiler/30.types/type_infer/inference_control.spl`,
+`src/compiler/10.frontend/core/types.spl:1826`, and
+`test/fixtures/compiler/phase3_global_pool_typeargs_workaround_probe/`).
+"""
+
+# @tag: unit, compiler, types, frontend
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_read}
+use app.bug.workaround_index.{parse_workaround_source}
+use compiler.common.config.{Logger}
+use compiler.core.ast.{ast_reset}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir.{HirFunction}
+use compiler.hir.hir_types.{HirTypeKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.types.type_infer.*
+use compiler.types.type_infer_types.{HmInferContext}
+use compiler.driver.hir_typecheck_consumer_v1.{collect_module_typecheck_receipt_v1}
+use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity}
+
+fn infer_pool_module(source: text, name: text) -> HmInferContext:
+    ast_reset()
+    val filename = "testdata/" + name + ".spl"
+    val parsed = parse_full_frontend(source, filename, name, Logger(level: 0))
+    var lowering = HirLowering.with_filename(filename)
+    val hir = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    var ctx = HmInferContext.with_builtins()
+    ctx.infer_module(hir)
+    ctx
+
+val GLOBAL_POOL_GENERIC_SRC = """
+extern fn rt_promote<T>(value: T) -> bool
+
+var pool_text: [text] = []
+var pool_i64: [i64] = []
+var pool_nested: [[i64]] = []
+var pool_inferred = [1, 2, 3]
+
+fn promote_root<T>(root: [T]) -> bool:
+    rt_promote(root)
+
+fn driver() -> bool:
+    var ok = true
+    ok = promote_root([pool_text]) and ok
+    ok = promote_root([pool_i64]) and ok
+    ok = promote_root([pool_nested]) and ok
+    ok = promote_root([pool_inferred]) and ok
+    ok = promote_root<[i64]>([pool_i64]) and ok
+    ok
+"""
+
+val GLOBAL_POOL_MISMATCH_SRC = """
+var pool_i64: [i64] = []
+
+fn promote_root<T>(root: [T]) -> bool:
+    root.len() == 1
+
+fn bad_driver() -> bool:
+    promote_root<[text]>([pool_i64])
+"""
+
+describe "30.types module-global constant inference for generic pool calls":
+    """Verifies HM module-global constant binding and generic pool promotion inference in 30.types."""
+    it "infers both unannotated and explicit generic calls over module-global arrays":
+        step("run HmInferContext.infer_module on phase3_global_pool_typeargs_workaround_probe shape")
+        val ctx = infer_pool_module(GLOBAL_POOL_GENERIC_SRC, "global_pool_ok")
+        expect(ctx.errors.len()).to_equal(0)
+
+    it "surfaces zero typecheck receipt errors through collect_module_typecheck_receipt_v1":
+        step("run collect_module_typecheck_receipt_v1 at Deny severity")
+        ast_reset()
+        val parsed = parse_full_frontend(GLOBAL_POOL_GENERIC_SRC, "testdata/global_pool_receipt.spl", "global_pool_receipt", Logger(level: 0))
+        var lowering = HirLowering.with_filename("testdata/global_pool_receipt.spl")
+        val hir = lowering.lower_module(parsed)
+        val receipt = collect_module_typecheck_receipt_v1("global_pool_receipt", hir, TypecheckPassSeverity.Deny)
+        expect(receipt.errors.len()).to_equal(0)
+
+    it "still rejects concrete element mismatches on explicit generic pool calls":
+        step("verify _type_pool_promote_root<[text]>([pool_i64]) produces an HM error")
+        val ctx = infer_pool_module(GLOBAL_POOL_MISMATCH_SRC, "global_pool_bad")
+        expect(ctx.errors.len()).to_be_greater_than(0)
+
+    it "marks concrete pool helpers in types.spl as ROOT-FIXED+STAGE2-GATED":
+        step("preserve Stage-2 gate metadata alongside 53afb8c62cb and bug id")
+        val types_src = file_read("src/compiler/10.frontend/core/types.spl")
+        expect(types_src).to_contain("bug=phase3_global_pool_generic_inference_workaround_2026_10_10")
+        expect(types_src).to_contain("status=ROOT-FIXED+STAGE2-GATED")
+        expect(types_src).to_contain("recover=28df8ceac42095edcc1d37c53c127271ea938bcb")
+        expect(types_src).to_contain("53afb8c62cb")
+        val parsed_links = parse_workaround_source("src/compiler/10.frontend/core/types.spl", types_src)
+        expect(parsed_links.is_ok()).to_equal(true)
+        val links = parsed_links.unwrap()
+        var found_pool_link = false
+        for link in links:
+            if link.bug_id == "phase3_global_pool_generic_inference_workaround_2026_10_10":
+                expect(link.recover).to_equal("28df8ceac42095edcc1d37c53c127271ea938bcb")
+                expect(link.reason).to_contain("status=ROOT-FIXED+STAGE2-GATED")
+                found_pool_link = true
+        expect(found_pool_link).to_equal(true)
+
+    it "preserves builtin len when a module defines val len = 1":
+        step("verify _bind_module_constants does not overwrite pre-bound builtin env entries")
+        ast_reset()
+        val shadow_src = "val len = 1\nval print = 2\nval identity = 3\nfn local_const_user() -> i64:\n    len + 1\n"
+        val parsed_shadow = parse_full_frontend(shadow_src, "testdata/const_shadow_probe.spl", "const_shadow_probe", Logger(level: 0))
+        var lowering_shadow = HirLowering.with_filename("testdata/const_shadow_probe.spl")
+        val hir_shadow = lowering_shadow.lower_module(parsed_shadow)
+        if lowering_shadow.errors.len() > 0:
+            step("shadow hir err: {lowering_shadow.errors[0].message}")
+        expect(lowering_shadow.errors.len()).to_equal(0)
+        var ctx = HmInferContext.with_builtins()
+        ctx.infer_module(hir_shadow)
+        expect(ctx.errors.len()).to_equal(0)
+
+        val len_scheme = ctx.env["len"]
+        expect(len_scheme.?).to_equal(true)
+        val len_is_fn = match len_scheme.unwrap().ty.kind:
+            case HirTypeKind.Function(_, _, _): true
+            case _: false
+        expect(len_is_fn).to_equal(true)
+
+        ast_reset()
+        # Use a distinct symbol id range so `len` in caller resolves through the
+        # pre-bound `ctx.env["len"]` fallback rather than colliding on low raw ids
+        # across independent HirLowering tables.
+        val caller_src = "fn _pad1() -> i64:\n    1\nfn _pad2() -> i64:\n    2\nfn _pad3() -> i64:\n    3\nfn _pad4() -> i64:\n    4\nfn _pad5() -> i64:\n    5\nfn call_builtin_len() -> i64:\n    len([1, 2])\n"
+        val parsed_caller = parse_full_frontend(caller_src, "testdata/builtin_len_caller.spl", "builtin_len_caller", Logger(level: 0))
+        var lowering_caller = HirLowering.with_filename("testdata/builtin_len_caller.spl")
+        val hir_caller = lowering_caller.lower_module(parsed_caller)
+        expect(lowering_caller.errors.len()).to_equal(0)
+        var inferred_builtin_len = false
+        for ck in hir_caller.functions.keys():
+            val cfn: HirFunction = hir_caller.functions[ck]
+            if cfn.name == "call_builtin_len":
+                ctx.infer_function(cfn)
+                inferred_builtin_len = true
+        expect(inferred_builtin_len).to_equal(true)
+        val caller_err = if ctx.errors.len() > 0: "{ctx.errors[0]}" else: "ok"
+        expect(caller_err).to_equal("ok")
+
+    it "reports type errors for cyclic unannotated module constants":
+        step("verify Pass-2 unify errors from _bind_module_constants reach ctx.errors")
+        val cycle_src = "val a = [a]\nfn ok_fn() -> i64:\n    1\n"
+        val ctx = infer_pool_module(cycle_src, "phase3_const_cycle_probe")
+        expect(ctx.errors.len()).to_be_greater_than(0)

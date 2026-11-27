@@ -1,0 +1,122 @@
+# @req ORCH-02 HOST-02
+# Expected immutable association only; constructed plan is not a probe observation.
+# Execution NOT_RUN; no fake owner/provider or authorization success claimed.
+use std.common.contracts.orchestration.agent_preflight_binding_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.string_core.str_len
+
+fn preflight_expected_fixture_v1(windows: bool) -> AgentPreflightBindingV1:
+    val plan = ContainerExecutionPlanV2(backend: if windows: "windows-docker-process" else: "linux-podman",
+        workload_uid: "preflight-workload", attempt: 1, operation_id: "preflight-operation", request_digest: "a".repeat(64),
+        physical_host_id: "authorized-alias", service_scope_id: "service", boot_id: if windows: "" else: "boot",
+        provider_generation: 3, native_machine_id: "actual-machine", continuity_mode: if windows: "service-incarnation-v1" else: "native-boot-incarnation-v1",
+        continuity_id: if windows: "service-incarnation:new" else: "boot")
+    AgentPreflightBindingV1(controller_id: "controller", session_uid: "session", source_digest: "b".repeat(64),
+        catalog_digest: "c".repeat(64), task_digest: "d".repeat(64), image_digest: "e".repeat(64),
+        probe_producer_digest: "f".repeat(64), nonce: "1".repeat(64), preflight: plan, agent_provider: "codex",
+        executable_path: if windows: "C:/Agent/codex.exe" else: "/usr/bin/codex",
+        execution_os: if windows: "windows" else: "linux", architecture: "x86_64", selected_user: "1000:1000")
+
+fn preflight_expected_wire_v1(source: text, key: text, value: SdnValue) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    var fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+describe "expected AgentSession preflight immutable association":
+    it "round trips both execution platforms without claiming observed capability":
+        step("round trips both execution platforms without claiming observed capability")
+        for windows in [false, true]:
+            val binding = preflight_expected_fixture_v1(windows)
+            val source = agent_preflight_binding_encode_v1(binding).unwrap()
+            val decoded = agent_preflight_binding_decode_v1(source).unwrap()
+            expect(agent_preflight_binding_encode_v1(decoded).unwrap()).to_equal(source)
+            expect(decoded.preflight.workload_uid == decoded.session_uid).to_equal(false)
+            expect(decoded.selected_user).to_equal("1000:1000")
+
+    it "binds image nonce and exact scoped request plan into the payload digest":
+        step("binds image nonce and exact scoped request plan into the payload digest")
+        val binding = preflight_expected_fixture_v1(false)
+        val digest = agent_preflight_binding_digest_v1(binding).unwrap()
+        var changed = binding
+        changed.image_digest = "2".repeat(64)
+        expect(agent_preflight_binding_digest_v1(changed).unwrap() == digest).to_equal(false)
+        changed = binding
+        changed.nonce = "3".repeat(64)
+        expect(agent_preflight_binding_digest_v1(changed).unwrap() == digest).to_equal(false)
+        changed = binding
+        changed.preflight.request_digest = "4".repeat(64)
+        expect(agent_preflight_binding_digest_v1(changed).unwrap() == digest).to_equal(false)
+        changed = binding
+        changed.preflight.native_machine_id = "different-machine"
+        expect(agent_preflight_binding_digest_v1(changed).unwrap() == digest).to_equal(false)
+
+    it "keeps one operation id per controller session while refusing silent payload replacement":
+        step("keeps one operation id per controller session while refusing silent payload replacement")
+        val binding = preflight_expected_fixture_v1(false)
+        val first = agent_preflight_operation_v1(binding).unwrap()
+        var changed = binding
+        changed.nonce = "2".repeat(64)
+        val second = agent_preflight_operation_v1(changed).unwrap()
+        expect(first.id).to_equal(second.id)
+        expect(first.id).to_equal(agent_preflight_operation_id_v1(binding.controller_id, binding.session_uid).unwrap())
+        expect(first.payload_digest == second.payload_digest).to_equal(false)
+        expect(first.operation).to_equal("controller_agent_preflight_v1")
+        expect(first.host_id).to_equal(binding.controller_id)
+        expect(first.payload_digest).to_equal(agent_preflight_binding_digest_v1(binding).unwrap())
+        expect(agent_preflight_operation_id_v1("bad/controller", "session").is_err()).to_equal(true)
+        # Actual journal owner must reject conflicting payload; no journal is mocked.
+
+    it "refuses same session preflight identity and incompatible provider platform architecture":
+        step("refuses same session preflight identity and incompatible provider platform architecture")
+        val binding = preflight_expected_fixture_v1(false)
+        var changed = binding
+        changed.session_uid = changed.preflight.workload_uid
+        expect(agent_preflight_binding_encode_v1(changed).is_err()).to_equal(true)
+        changed = binding
+        changed.execution_os = "windows"
+        expect(agent_preflight_binding_encode_v1(changed).is_err()).to_equal(true)
+        changed = binding
+        changed.agent_provider = "unknown-agent"
+        expect(agent_preflight_binding_encode_v1(changed).is_err()).to_equal(true)
+        changed = binding
+        changed.architecture = "amd64"
+        expect(agent_preflight_binding_encode_v1(changed).is_err()).to_equal(true)
+        changed.architecture = "aarch64"
+        expect(agent_preflight_binding_encode_v1(changed).is_ok()).to_equal(true)
+        changed = binding
+        changed.probe_producer_digest = "not-observed"
+        expect(agent_preflight_binding_encode_v1(changed).is_err()).to_equal(true)
+
+    it "requires execution OS absolute executable paths and bounded selected user bytes":
+        step("requires execution OS absolute executable paths and bounded selected user bytes")
+        var binding = preflight_expected_fixture_v1(false)
+        for path in ["codex", "/", "/usr/../codex", "/usr/codex\n", "/usr/codex\0"]:
+            binding.executable_path = path
+            expect(agent_preflight_binding_encode_v1(binding).is_err()).to_equal(true)
+        binding = preflight_expected_fixture_v1(true)
+        binding.executable_path = "C:relative.exe"
+        expect(agent_preflight_binding_encode_v1(binding).is_err()).to_equal(true)
+        binding = preflight_expected_fixture_v1(false)
+        binding.selected_user = "é".repeat(128)
+        expect(str_len(binding.selected_user)).to_equal(256)
+        expect(agent_preflight_binding_encode_v1(binding).is_ok()).to_equal(true)
+        for user in ["", "é".repeat(129), "root\nother", "root\0other"]:
+            binding.selected_user = user
+            expect(agent_preflight_binding_encode_v1(binding).is_err()).to_equal(true)
+
+    it "refuses unknown duplicate mistyped noncanonical and oversized wire":
+        step("refuses unknown duplicate mistyped noncanonical and oversized wire")
+        val source = agent_preflight_binding_encode_v1(preflight_expected_fixture_v1(false)).unwrap()
+        expect(agent_preflight_binding_decode_v1(preflight_expected_wire_v1(source, "observed", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(agent_preflight_binding_decode_v1(preflight_expected_wire_v1(source, "nonce", SdnValue.Int(1))).is_err()).to_equal(true)
+        expect(agent_preflight_binding_decode_v1(preflight_expected_wire_v1(source, "version", SdnValue.String("1"))).is_err()).to_equal(true)
+        expect(agent_preflight_binding_decode_v1(source + "\n").is_err()).to_equal(true)
+        val head = source.slice(0, source.len() - 2)
+        expect(agent_preflight_binding_decode_v1(head + ", version: 1" + "}\n").is_err()).to_equal(true)
+        val oversized = "é".repeat(32769)
+        expect(str_len(oversized)).to_equal(65538)
+        expect(agent_preflight_binding_decode_v1(oversized).is_err()).to_equal(true)

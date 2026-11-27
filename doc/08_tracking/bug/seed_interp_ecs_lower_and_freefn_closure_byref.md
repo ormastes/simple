@@ -1,5 +1,19 @@
 # Two bootstrap-seed interpreter bugs (found by Lane H4 pseudo-fs work)
-## Open 2026-09-16 — needs owner triage
+
+## Triage 2026-11-25 — deferred to the bootstrap lane (status unchanged: OPEN)
+
+Triaged in the P2 ledger pass on worktree `wt-p2w5-al` (release/1.0.0 HEAD
+`ae1572aeb67`). Both defects live in the Rust seed interpreter/codegen
+(`Entity`/`ComponentStore<T>` lowering; by-reference mutation through a free
+function called inside a spec `it` closure). The pinned tracked
+`bin/simple.exe` cannot be patched from source, and the self-hosted fix path
+is gated on `bin/simple build bootstrap`, which this lane must not run.
+Neither bug is verifiable or fixable on this Windows host with the pinned
+binary, so both remain OPEN with the Lane H4 workarounds in place. The
+"needs owner triage" header is superseded by this note; the correct owner
+lane is the bootstrap/seed redeploy effort.
+
+## Open 2026-09-16 — needs owner triage (superseded by 2026-11-25 triage above)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.

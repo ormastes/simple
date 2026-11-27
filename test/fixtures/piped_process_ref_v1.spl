@@ -1,0 +1,119 @@
+# Actual facade scenarios; missing native-child fixture fails, never skips.
+use std.nogc_sync_mut.io.process_ops.{
+    PipedProcessRefV1, process_spawn_piped_ref_v1, process_read_stdout_ref_v1,
+    process_write_stdin_some_ref_v1, process_is_piped_alive_ref_v1, process_close_piped_ref_v1,
+    process_validate_piped_ref_v1
+}
+use std.common.text_bytes.{bytes_to_text}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+use std.io_runtime.{env_get, thread_sleep}
+
+fn piped_ref_error<T>(result: Result<T, text>) -> text:
+    match result:
+        case Ok(value):
+            assert(false) # Operation unexpectedly succeeded.
+            ""
+        case Err(reason): reason
+
+pub fn piped_ref_invalid_case() -> i64:
+    val zero = PipedProcessRefV1(pid: 0, generation: 0)
+    assert(piped_ref_error(process_validate_piped_ref_v1(zero)) == "invalid_process_reference")
+    assert(piped_ref_error(process_read_stdout_ref_v1(zero)) == "invalid_process_reference")
+    assert(piped_ref_error(process_write_stdin_some_ref_v1(zero, "x", 0, 1)) == "invalid_process_reference")
+    assert(piped_ref_error(process_is_piped_alive_ref_v1(zero)) == "invalid_process_reference")
+    assert(piped_ref_error(process_close_piped_ref_v1(zero)) == "invalid_process_reference")
+    val missing_generation = PipedProcessRefV1(pid: 1, generation: 0)
+    assert(piped_ref_error(process_validate_piped_ref_v1(missing_generation)) == "invalid_process_reference")
+    assert(piped_ref_error(process_read_stdout_ref_v1(missing_generation)) == "invalid_process_reference")
+    assert(piped_ref_error(process_write_stdin_some_ref_v1(missing_generation, "x", 0, 1)) == "invalid_process_reference")
+    assert(piped_ref_error(process_is_piped_alive_ref_v1(missing_generation)) == "invalid_process_reference")
+    assert(piped_ref_error(process_close_piped_ref_v1(missing_generation)) == "invalid_process_reference")
+    0
+
+pub fn piped_ref_input_case() -> i64:
+    assert(piped_ref_error(process_spawn_piped_ref_v1("", [])) == "empty_process_command")
+    assert(piped_ref_error(process_spawn_piped_ref_v1("relative-program", [])) == "process_command_not_absolute")
+    val nul = bytes_to_text([97u8, 0u8, 98u8])
+    assert(piped_ref_error(process_spawn_piped_ref_v1(nul, [])) == "process_input_contains_nul")
+    assert(piped_ref_error(process_spawn_piped_ref_v1("/unused", [nul])) == "process_input_contains_nul")
+    var excessive: [text] = []
+    for i in 0..65: excessive.push("argument")
+    assert(piped_ref_error(process_spawn_piped_ref_v1("/unused", excessive)) == "process_argv_too_large")
+    0
+
+pub fn piped_ref_live_stream_case() -> i64:
+    # Build the C selfcheck executable first and provide its absolute path.
+    val executable = env_get("SIMPLE_PIPED_REF_CHILD") ?? ""
+    assert(executable != "") # Missing actual native child is a failure, never a skip.
+    val process = process_spawn_piped_ref_v1(executable, ["--piped-ref-child"]).unwrap()
+    assert(process.pid > 0 and process.generation > 0)
+    val stale = PipedProcessRefV1(pid: process.pid, generation: process.generation + 100)
+    assert(piped_ref_error(process_validate_piped_ref_v1(stale)) == "stale_process_reference")
+    process_validate_piped_ref_v1(process).unwrap()
+    assert(piped_ref_error(process_read_stdout_ref_v1(stale)) == "stale_process_reference")
+    assert(piped_ref_error(process_write_stdin_some_ref_v1(stale, "BAD", 0, 3)) == "stale_process_reference")
+    assert(piped_ref_error(process_is_piped_alive_ref_v1(stale)) == "stale_process_reference")
+    assert(piped_ref_error(process_close_piped_ref_v1(stale)) == "stale_process_reference")
+    if host_is_windows_host():
+        assert(process_is_piped_alive_ref_v1(process).unwrap())
+    else:
+        assert(piped_ref_error(process_is_piped_alive_ref_v1(process)) == "process_liveness_unsupported")
+    assert(piped_ref_error(process_write_stdin_some_ref_v1(process, "éZ", 4, 1)) == "invalid_process_write_range")
+    if not host_is_windows_host():
+        assert(piped_ref_error(process_close_piped_ref_v1(process)) == "process_close_unsupported")
+        assert(piped_ref_error(process_is_piped_alive_ref_v1(process)) == "process_liveness_unsupported")
+
+    var output: text = ""
+    var reads = 0
+    while output == "" and reads < 1000:
+        val chunk = process_read_stdout_ref_v1(process).unwrap()
+        if val bytes = chunk: output = output + bytes
+        reads = reads + 1
+        if output == "": thread_sleep(1)
+    assert(output == "new")
+    assert(process_read_stdout_ref_v1(process).unwrap() == nil)
+    var offset: i64 = 0
+    var writes = 0
+    while offset < 3 and writes < 1000:
+        val progress = process_write_stdin_some_ref_v1(process, "éZ", offset, 1).unwrap()
+        assert(progress >= 0 and progress <= 1)
+        offset = offset + progress
+        writes = writes + 1
+        if progress == 0: thread_sleep(1)
+    assert(offset == 3)
+    if host_is_windows_host():
+        var alive = true
+        var probes = 0
+        while alive and probes < 1000:
+            alive = process_is_piped_alive_ref_v1(process).unwrap()
+            probes = probes + 1
+            if alive: thread_sleep(1)
+        assert(not alive)
+    else:
+        assert(piped_ref_error(process_is_piped_alive_ref_v1(process)) == "process_liveness_unsupported")
+    var eof = false
+    reads = 0
+    while not eof and reads < 1000:
+        match process_read_stdout_ref_v1(process):
+            case Ok(chunk):
+                if val bytes = chunk: output = output + bytes
+            case Err(reason):
+                assert(reason == "process_stdout_eof")
+                eof = true
+        reads = reads + 1
+        if not eof: thread_sleep(1)
+    assert(eof and output == "newéZ�")
+    if host_is_windows_host():
+        process_close_piped_ref_v1(process).unwrap()
+        assert(piped_ref_error(process_validate_piped_ref_v1(process)) == "stale_process_reference")
+        assert(piped_ref_error(process_close_piped_ref_v1(process)) == "stale_process_reference")
+        assert(piped_ref_error(process_read_stdout_ref_v1(process)) == "stale_process_reference")
+        assert(piped_ref_error(process_write_stdin_some_ref_v1(process, "x", 0, 1)) == "stale_process_reference")
+        assert(piped_ref_error(process_is_piped_alive_ref_v1(process)) == "stale_process_reference")
+    else:
+        assert(piped_ref_error(process_close_piped_ref_v1(process)) == "process_close_unsupported")
+        assert(piped_ref_error(process_close_piped_ref_v1(process)) == "process_close_unsupported")
+        assert(piped_ref_error(process_read_stdout_ref_v1(process)) == "process_stdout_eof")
+        process_validate_piped_ref_v1(process).unwrap() # retained/drained still valid, no I/O
+        # Intentionally retained until process exit: no raw PID cleanup fallback.
+    0

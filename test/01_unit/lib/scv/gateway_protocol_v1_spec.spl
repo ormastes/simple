@@ -1,0 +1,160 @@
+"""Native gateway envelope assertions; execution deferred by parent.
+Literal golden SDN, hashes and malformed fixtures are independent oracles.
+These tests perform no network, filesystem, credential or process operations.
+"""
+# @req REQ-SCV-GATEWAY-READONLY-PROTOCOL
+use std.spec.{describe, it, expect}
+use std.scv.gateway_protocol_v1.*
+
+fn gateway_request_fixture(method: text, selector: text) -> ScvGatewayRequestV1:
+    ScvGatewayRequestV1(version: 1, id: "req-1", repository: "repo-main", method: method, ref_or_oid: selector)
+
+fn gateway_oid_fixture() -> text:
+    "1111111111111111111111111111111111111111"
+
+describe "SCV gateway canonical request":
+    it "encodes capabilities as exact deterministic SDN and decodes empty selector":
+        val request = gateway_request_fixture("capabilities", "")
+        val expected = "version: 1\nid: req-1\nrepository: repo-main\nmethod: capabilities\nref_or_oid: \"\"\n"
+        expect(scv_gateway_request_encode_v1(request, "repo-main")).to_equal(Ok(expected))
+        expect(scv_gateway_request_decode_v1(expected, "repo-main")).to_equal(Ok(request))
+
+    it "rejects duplicate decoded keys including quoted spellings":
+        val wire = "version: 1\nid: req-1\n\"id\": req-2\nrepository: repo-main\nmethod: capabilities\nref_or_oid: \"\"\n"
+        expect(scv_gateway_request_decode_v1(wire, "repo-main")).to_equal(Err("gateway_sdn_duplicate_key"))
+
+    it "rejects ambient URL command token and unknown envelope fields":
+        val wire = "version: 1\nid: req-1\nrepository: repo-main\nmethod: capabilities\nref_or_oid: \"\"\n"
+        for extra in ["url: \"https://example.invalid/\"\n", "command: git\n", "token: hidden\n", "acceptance: true\n"]:
+            expect(scv_gateway_request_decode_v1(wire + extra, "repo-main")).to_equal(Err("gateway_unknown_field"))
+
+    it "rejects wrong field types versions repositories and write methods":
+        val wire = "version: \"1\"\nid: req-1\nrepository: repo-main\nmethod: capabilities\nref_or_oid: \"\"\n"
+        expect(scv_gateway_request_decode_v1(wire, "repo-main")).to_equal(Err("gateway_integer_required"))
+        var request = gateway_request_fixture("capabilities", "")
+        request.version = 2
+        expect(scv_gateway_request_encode_v1(request, "repo-main")).to_equal(Err("gateway_version"))
+        request.version = 1
+        expect(scv_gateway_request_encode_v1(request, "repo-other")).to_equal(Err("gateway_repository"))
+        request.method = "push"
+        expect(scv_gateway_request_encode_v1(request, "repo-main")).to_equal(Err("gateway_method"))
+
+    it "rejects malformed refs and permits full branch and tag names":
+        for name in ["refs/heads/../main", "refs/heads/a..b", "refs/heads//main", "refs/heads/.hidden", "refs/heads/-option", "refs/heads/a.lock", "refs/heads/a@{b", "refs/heads/a\\b", "refs/heads/a b", "refs/heads/a?b", "refs/heads/a:b", "refs/heads/%2e%2e/main", "refs/heads/a#b", "refs/heads/a&b", "refs/heads/", "main"]:
+            expect(scv_gateway_request_validate_v1(gateway_request_fixture("read_ref", name), "repo-main")).to_equal(Err("gateway_ref"))
+        expect(scv_gateway_ref_valid_v1("refs/heads/topic/main")).to_equal(true)
+        expect(scv_gateway_ref_valid_v1("refs/tags/v1.2")).to_equal(true)
+
+    it "rejects partial uppercase OIDs and nonempty capability selectors":
+        for oid in ["abc", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "111111111111111111111111111111111111111g"]:
+            expect(scv_gateway_request_validate_v1(gateway_request_fixture("read_blob", oid), "repo-main")).to_equal(Err("gateway_oid"))
+        expect(scv_gateway_request_validate_v1(gateway_request_fixture("read_commit", gateway_oid_fixture()), "repo-main")).to_equal(Ok(()))
+        expect(scv_gateway_request_validate_v1(gateway_request_fixture("capabilities", "main"), "repo-main")).to_equal(Err("gateway_selector"))
+
+describe "SCV gateway response subject and byte integrity":
+    it "preserves arbitrary binary bytes through lowercase hex and strict SDN":
+        val request = gateway_request_fixture("read_blob", gateway_oid_fixture())
+        val bytes: [u8] = [0u8, 255u8, 128u8, 10u8]
+        val response = scv_gateway_response_ok_v1(request, "repo-main", gateway_oid_fixture(), "blob", bytes).unwrap()
+        expect(response.payload).to_equal("00ff800a")
+        expect(response.publication).to_equal("not_publication")
+        val wire = scv_gateway_response_encode_v1(response, request, "repo-main").unwrap()
+        val decoded = scv_gateway_response_decode_v1(wire, request, "repo-main").unwrap()
+        expect(scv_gateway_response_payload_v1(decoded, request, "repo-main")).to_equal(Ok(bytes))
+        expect(scv_gateway_response_encode_v1(decoded, request, "repo-main")).to_equal(Ok(wire))
+        expect(scv_gateway_response_ok_encode_v1(request, "repo-main", gateway_oid_fixture(), "blob", bytes)).to_equal(Ok(wire))
+
+    it "keeps capability ref and commit method identities distinct":
+        val caps = gateway_request_fixture("capabilities", "")
+        expect(scv_gateway_response_ok_v1(caps, "repo-main", "", "capabilities", []).is_ok()).to_equal(true)
+        expect(scv_gateway_response_ok_v1(caps, "repo-main", gateway_oid_fixture(), "capabilities", [])).to_equal(Err("gateway_oid"))
+        val ref = gateway_request_fixture("read_ref", "refs/heads/main")
+        expect(scv_gateway_response_ok_v1(ref, "repo-main", gateway_oid_fixture(), "ref", []).is_ok()).to_equal(true)
+        val commit = gateway_request_fixture("read_commit", gateway_oid_fixture())
+        expect(scv_gateway_response_ok_v1(commit, "repo-main", "2222222222222222222222222222222222222222", "commit", [])).to_equal(Err("gateway_response_oid"))
+
+    it "binds empty files and abc to literal standard SHA256 payload identities":
+        val request = gateway_request_fixture("read_blob", gateway_oid_fixture())
+        val empty = scv_gateway_response_ok_v1(request, "repo-main", gateway_oid_fixture(), "blob", []).unwrap()
+        expect(empty.payload).to_equal("")
+        expect(empty.payload_id).to_equal("sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        val abc = scv_gateway_response_ok_v1(request, "repo-main", gateway_oid_fixture(), "blob", [97u8, 98u8, 99u8]).unwrap()
+        expect(abc.payload).to_equal("616263")
+        expect(abc.payload_id).to_equal("sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+
+    it "rejects any altered echoed request field":
+        val request = gateway_request_fixture("read_blob", gateway_oid_fixture())
+        val response = scv_gateway_response_ok_v1(request, "repo-main", gateway_oid_fixture(), "blob", []).unwrap()
+        var altered = response
+        altered.id = "req-2"
+        expect(scv_gateway_response_validate_v1(altered, request, "repo-main")).to_equal(Err("gateway_response_subject"))
+        altered = response
+        altered.repository = "repo-other"
+        expect(scv_gateway_response_validate_v1(altered, request, "repo-main")).to_equal(Err("gateway_response_subject"))
+        altered = response
+        altered.method = "read_commit"
+        expect(scv_gateway_response_validate_v1(altered, request, "repo-main")).to_equal(Err("gateway_response_subject"))
+        altered = response
+        altered.ref_or_oid = "2222222222222222222222222222222222222222"
+        expect(scv_gateway_response_validate_v1(altered, request, "repo-main")).to_equal(Err("gateway_response_subject"))
+        altered = response
+        altered.version = 2
+        expect(scv_gateway_response_validate_v1(altered, request, "repo-main")).to_equal(Err("gateway_response_subject"))
+
+    it "rejects wrong object OIDs kinds tampered payload and publication claims":
+        val request = gateway_request_fixture("read_blob", gateway_oid_fixture())
+        val response = scv_gateway_response_ok_v1(request, "repo-main", gateway_oid_fixture(), "blob", []).unwrap()
+        var altered = response
+        altered.oid = "2222222222222222222222222222222222222222"
+        expect(scv_gateway_response_validate_v1(altered, request, "repo-main")).to_equal(Err("gateway_response_oid"))
+        altered = response
+        altered.object_kind = "commit"
+        expect(scv_gateway_response_validate_v1(altered, request, "repo-main")).to_equal(Err("gateway_object_kind"))
+        altered = response
+        altered.payload = "61"
+        expect(scv_gateway_response_validate_v1(altered, request, "repo-main")).to_equal(Err("gateway_payload_digest"))
+        altered = response
+        altered.publication = "accepted"
+        expect(scv_gateway_response_validate_v1(altered, request, "repo-main")).to_equal(Err("gateway_publication_claim"))
+
+    it "rejects malformed noncanonical hex and digest algorithm substitution":
+        for value in ["0", "0A", "gg", "00 ff", "\\x00"]:
+            expect(scv_gateway_payload_hex_decode_v1(value)).to_equal(Err("gateway_payload_hex"))
+        val request = gateway_request_fixture("read_blob", gateway_oid_fixture())
+        var response = scv_gateway_response_ok_v1(request, "repo-main", gateway_oid_fixture(), "blob", []).unwrap()
+        response.payload_id = "sha1:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        expect(scv_gateway_response_validate_v1(response, request, "repo-main")).to_equal(Err("gateway_payload_id"))
+
+    it "keeps failed responses empty and restricts errors to redacted codes":
+        val request = gateway_request_fixture("read_blob", gateway_oid_fixture())
+        val response = scv_gateway_response_error_v1(request, "repo-main", "not_found", "object_missing").unwrap()
+        expect(scv_gateway_response_validate_v1(response, request, "repo-main")).to_equal(Ok(()))
+        expect(scv_gateway_response_payload_v1(response, request, "repo-main")).to_equal(Err("gateway_response_not_ok"))
+        expect(scv_gateway_response_error_v1(request, "repo-main", "error", "Authorization: secret")).to_equal(Err("gateway_error_code"))
+        var altered = response
+        altered.payload = "00"
+        expect(scv_gateway_response_validate_v1(altered, request, "repo-main")).to_equal(Err("gateway_failure_payload"))
+
+    it "rejects duplicate unknown and missing response fields before interpretation":
+        val request = gateway_request_fixture("read_blob", gateway_oid_fixture())
+        val response = scv_gateway_response_error_v1(request, "repo-main", "denied", "repository_denied").unwrap()
+        val wire = scv_gateway_response_encode_v1(response, request, "repo-main").unwrap()
+        expect(scv_gateway_response_decode_v1(wire + "status: ok\n", request, "repo-main")).to_equal(Err("gateway_sdn_duplicate_key"))
+        expect(scv_gateway_response_decode_v1(wire + "acceptance: landed\n", request, "repo-main")).to_equal(Err("gateway_unknown_field"))
+        expect(scv_gateway_response_decode_v1("version: 1\n", request, "repo-main")).to_equal(Err("gateway_missing_field"))
+
+    it "bounds request wire and decoded payload before parsing or expansion":
+        var large = "x"
+        for index in 0..13: large = large + large
+        expect(scv_gateway_request_decode_v1(large, "repo-main")).to_equal(Err("gateway_wire_limit"))
+        var bytes: [u8] = []
+        for index in 0..1048577: bytes.push(0u8)
+        expect(scv_gateway_payload_hex_encode_v1(bytes)).to_equal(Err("gateway_payload_limit"))
+        val exact = scv_gateway_payload_hex_encode_v1(bytes[0:1048576]).unwrap()
+        expect(exact.len()).to_equal(2097152)
+        val decoded_exact = scv_gateway_payload_hex_decode_v1(exact).unwrap()
+        expect(decoded_exact.len()).to_equal(1048576)
+        var hex = "00"
+        for index in 0..21: hex = hex + hex
+        expect(scv_gateway_payload_hex_decode_v1(hex)).to_equal(Err("gateway_payload_limit"))
+        expect(scv_gateway_response_decode_v1(hex, gateway_request_fixture("capabilities", ""), "repo-main")).to_equal(Err("gateway_wire_limit"))

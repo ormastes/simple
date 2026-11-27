@@ -26,23 +26,55 @@ and compare the captured stdout in the failing scenario to reproduce locally.
 
 use std.spec.{describe, it, expect}
 use std.spec.step
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.env.platform.{is_windows, get_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
+use std.env.variables.{env_get}
+use std.nogc_sync_mut.io.env_ops.{cwd}
 
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+val CLI_RUN_TIMEOUT_MS: i64 = 120000
+val CLI_RUN_MAX_OUT: i64 = 16777216
 
-val FIXTURE_DIR = "/tmp/simple_traceability_log_mode_fixture"
+fn _cli_repo_root() -> text:
+    cwd().replace("\\", "/")
+
+fn _spawn_cli(run_args: [text], work_dir: text, extra_env: [(text, text)]) -> (text, text, i64):
+    """Host-portable replacement for the old POSIX sh harness: runs
+    `bin/simple run <run_args...>` with SIMPLE_LIB bound to the repo src
+    tree, optionally under a different working directory and with extra
+    environment variables set for the child."""
+    val repo = _cli_repo_root()
+    val program = if is_windows(): repo + "/bin/simple.exe" else: repo + "/bin/simple"
+    val lib = repo + "/src"
+    val joined = run_args.join(" ")
+    val (shell, shell_args) = if is_windows():
+        val sh = env_get("ComSpec") ?? "cmd.exe"
+        var cmd = ""
+        if work_dir != "":
+            cmd = cmd + "cd /d " + work_dir + " && "
+        for (key, value) in extra_env:
+            cmd = cmd + "set \"" + key + "=" + value + "\" && "
+        cmd = cmd + "set \"SIMPLE_LIB=" + lib + "\" && " + program + " run " + joined
+        (sh, ["/d", "/c", cmd])
+    else:
+        var prefix = ""
+        if work_dir != "":
+            prefix = prefix + "cd \"" + work_dir + "\" && "
+        for (key, value) in extra_env:
+            prefix = prefix + key + "=\"" + value + "\" "
+        ("/bin/sh", ["-c", prefix + "SIMPLE_LIB=\"" + lib + "\" \"" + program + "\" run " + joined])
+    process_run_bounded(shell, shell_args, CLI_RUN_TIMEOUT_MS, CLI_RUN_MAX_OUT)
+
+val FIXTURE_DIR = get_temp_dir().replace("\\", "/") + "/simple_traceability_log_mode_fixture"
 
 fn _setup_fixture():
-    val (_out, _err, _code) = rt_process_run("/bin/sh", [
-        "-c",
-        "rm -rf " + FIXTURE_DIR + " && mkdir -p " + FIXTURE_DIR
-    ])
+    val _removed = dir_remove_all(FIXTURE_DIR)
+    if not dir_create_all(FIXTURE_DIR):
+        fail("could not create fixture dir " + FIXTURE_DIR)
 
 fn _run_traceability(args: [text]) -> (text, text, i64):
-    val joined = args.join(" ")
-    rt_process_run("/bin/sh", [
-        "-c",
-        "REPO=$(pwd); cd " + FIXTURE_DIR + " && SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/traceability/main.spl\" " + joined
-    ])
+    _spawn_cli(["src/app/traceability/main.spl"] + args, FIXTURE_DIR, [])
 
 describe "traceability log mode CLI options":
     it "shows shared log options in help":

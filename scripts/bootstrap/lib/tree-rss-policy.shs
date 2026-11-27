@@ -50,9 +50,11 @@
 # bootstrap_tree_rss_refusal.
 #
 # Result attribution: bootstrap_tree_rss_source says which layer chose the
-# numbers (explicit-env | env-knobs | host-config | default) and
+# numbers (explicit-env | env-knobs | host-config | default, plus the published
+# phase-policy and memory-admission labels, the latter being the Stage 3 resume
+# cap derived from the admitted MemoryHigh) and
 # bootstrap_tree_rss_bound which rule produced the final value (explicit |
-# budget | floor | host-fraction | hard-ceiling). Callers pass both to the
+# budget | floor | host-fraction | hard-ceiling | memory-high). Callers pass both to the
 # watchdog (--cap-source / --cap-bound) so the receipt records them.
 #
 # Test hook: BOOTSTRAP_TREE_RSS_MEMINFO_PATH substitutes host RAM, which can
@@ -96,7 +98,26 @@ BOOTSTRAP_TREE_RSS_FLOOR_KIB=5859375
 # Sixth widening 2026-10-16: cycle 49 serialized probe -- a single cli
 # closure build exceeds 24 GiB on the merged tree; 48 GiB measures the true
 # plateau before final tightening. Keep in sync with process-tree-rss-watchdog.pl.
-BOOTSTRAP_TREE_RSS_STATIC_CEILING_KIB=50331648
+# Seventh widening 2026-11-15 (doc/08_tracking/bug/
+# rss_static_ceiling_52gib_request_2026-11-14.md): the release/1.0.0 MSVC
+# receipt-authorized full run at corridor tip 189dabae8e3 was killed by the
+# watchdog at the 48 GiB ceiling while the tree plateaued at
+# peak_rss_kib=51551038 (50.34 GiB, MIR 1832/3148) -- a measured plateau, not
+# a leak. The host is a 64 GiB Hyper-V dynamic-memory guest whose balloon
+# under-reports free memory (24 GiB allocations succeed in <1 s while
+# GlobalMemoryStatusEx reports 3.7-14.5 GiB free), so ~1.7 GiB of headroom
+# over the plateau is real. 52 GiB admits the measured plateau. Keep in sync
+# with scripts/resource/process-tree-rss-watchdog.pl.
+# Eighth widening 2026-11-15: the corridor run at 189dabae8e3 + 52 GiB ceiling is
+# still in flight; the pre-widening plateau (50.34 GiB) was measured at MIR
+# 1832/3148, i.e. BEFORE the codegen phase that historically added the final
+# peak growth (cycles 9-11 were killed during codegen, after MIR). The row's
+# true peak is therefore not yet bracketed from above. The host runs no other
+# tenant (system processes sum to ~11 GiB; the Hyper-V balloon releases on
+# demand, proven by 24 GiB allocations succeeding in <1 s), so 56 GiB is a
+# safe kill threshold with ~5.7 GiB headroom over the measured plateau. Keep
+# in sync with scripts/resource/process-tree-rss-watchdog.pl.
+BOOTSTRAP_TREE_RSS_STATIC_CEILING_KIB=58720256
 BOOTSTRAP_TREE_RSS_RESERVE_KIB=3145728
 BOOTSTRAP_TREE_RSS_PER_JOB_CEILING_KIB=1048576
 BOOTSTRAP_TREE_RSS_BASE_MIB_DEFAULT=3072
@@ -107,7 +128,130 @@ case "$(uname -s 2>/dev/null || echo unknown)" in
   *) BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=5120 ;;
 esac
 BOOTSTRAP_TREE_RSS_HOST_PCT_DEFAULT=50
-BOOTSTRAP_TREE_RSS_HOST_PCT_MAX=75
+BOOTSTRAP_TREE_RSS_HOST_PCT_MAX=90
+# Host-scaled default (2026-10-25). When the job-priced budget is below the
+# need (bound floor or budget; Windows 96 MiB/job pricing: 27 workers = 5.59 GiB on a 128 GB host),
+# the cap is raised to what the workers really need, (base + jobs * worker_mem)
+# with worker_mem from SIMPLE_BOOTSTRAP_WORKER_MEM_MIB > SIMPLE_HOST_WORKER_MEM_MIB
+# > host config worker_mem_mib (the same knob that sizes the job count) > 3300,
+# bounded by this share of host RAM and then by the hard ceiling. Unknown host
+# RAM keeps the floor. Any tree_rss_* knob or explicit cap bypasses it.
+BOOTSTRAP_TREE_RSS_SCALE_PCT=60
+BOOTSTRAP_TREE_RSS_WORKER_MEM_MIB_DEFAULT=3300
+
+# Whole-build phase pricing (Stage 2 compiler tests, 2026-11-05). The phase
+# runs full-CLI closure builds whose WORKERS (pool HIR shard workers, or the
+# single in-process build when the pool is skipped) each need this FLOOR, KiB.
+# Measured:
+#   2026-11-05, 121 GiB aarch64 Linux host (MemTotal 127600812 KiB),
+#     release/1.0.0 0ff9a746185, cranelift, build-threads=8: three HIR shard
+#     workers (admission estimate 9,000,000 kB each) all finished load_sources
+#     (4437 files) at ~15.6 GiB EACH and the tree was killed at the 48 GiB cap
+#     before HIR began (peak_rss_kib=50366440, exit 88).
+#   2026-11-05, same host, build-threads=1 (in-process, no pool): the campaign
+#     cap sat at 5859375 KiB and the build was killed at HIR module 9/3005
+#     (peak_rss_kib=5860212) -- the compile-shard floor is below ONE worker.
+#   2026-10-13, x86_64 Windows, 2546-module closure, 1 thread (cycle 33):
+#     per-task peak 12591996 KiB at 73% HIR; cycles 44/46 (8 and 4 jobs):
+#     16.0 GiB plateau, killed at the then 16 GiB ceiling.
+#   2026-11-21, 60.5 GiB x86_64 Linux host (MemTotal 63449060 KiB),
+#     release/1.0.0 0d8a3269bec, llvm, build-threads=1 (in-process, 4415-module
+#     full CLI closure): plan "workers 1 (requested 8, host budget fits 1)",
+#     cap 29360128 KiB = base 4 GiB + 16 GiB x 150%; HIR finished and the tree
+#     was killed mid-MIR lowering (rss-cap-exceeded, exit 88,
+#     peak_rss_kib=29383332, cap_bound=worker-floor): ONE worker above
+#     floor x margin (> 24 GiB over the 4 GiB base, still growing). With the
+#     121 GiB aarch64 run-11 MIR workers (24.0 / 25.2 GiB, ~26 GiB per worker)
+#     this raised the floor 16 -> 18 GiB (x 150% = 27 GiB per worker; one
+#     worker 31 GiB, two 58 GiB, which is above the 56 GiB static ceiling so
+#     every two-worker plan now takes the elevated-ceiling admission).
+#     Bug record: doc/08_tracking/bug/tree_rss_floor_kills_stage2_compiler_tests_on_large_hosts_2026-10-15.md
+# 15.6 GiB is load_sources ALONE and HIR/MIR grow on top of it, so the floor
+# is a floor, never a cap: the cap is base + workers x floor x margin, and the
+# worker count is reduced to what the host budget holds at that price
+# (bootstrap_tree_rss_whole_build_plan) instead of capping below the floor.
+# A worker measured above floor x margin is evidence to raise the FLOOR here
+# (and in the bug record), not to widen the margin.
+BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB=18874368
+# Immutable defaults the env-resolution compares against, so repeated
+# resolutions in one shell stay anchored to the shipped policy.
+BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_DEFAULT_KIB=$BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB
+# Runaway margin over the floor, percent of the floor: a tree above
+# base + workers x floor x margin is a genuine runaway and is still killed
+# (exit 88); HIR growth over the post-load_sources floor stays admitted.
+BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT=150
+BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_DEFAULT_PCT=$BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT
+# Non-worker residue of the phase tree: build coordinator (measured 1.32 GiB,
+# 2026-10-27), verifier shell, campaign watchdog, interpreter test workers
+# (they run already-built binaries spec by spec; unmeasured, small).
+BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB=4194304
+BOOTSTRAP_TREE_RSS_PHASE_BASE_DEFAULT_KIB=$BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB
+# ponytail: TEMPORARY small-host headroom, KiB (4 GiB). The small-host
+# one-worker budget may be available - this instead of 3/4 x available, so a
+# host with other lanes resident (Windows, 2026-11-13: caps 18/24 GB vs the
+# 24.3 GB full-CLI HIR peak, exit 88) can still run the one worker. Remove,
+# with its use in bootstrap_tree_rss_whole_build_plan, once the full-CLI peak
+# RSS fix lands and is re-measured:
+# doc/08_tracking/bug/stage2_compiler_tests_rss_headroom_temp_2026-11-13.md
+BOOTSTRAP_TREE_RSS_SMALL_HOST_TEMP_HEADROOM_KIB=4194304
+# Upper bound on the whole-build phase timeout scale. The time budgets
+# (native internal 1800 s, row 3600 s, campaign 7200 s) were calibrated for the
+# REQUESTED worker count; when the plan fits fewer workers the same module
+# count takes proportionally longer, so the defaults are scaled by
+# ceil(requested / fitted), bounded here so nothing becomes unbounded.
+# Measured 2026-11-05 (bootstrap run 4, release/1.0.0 13a060d644e, 121 GiB
+# aarch64): 8 requested -> 2 fitted; both MIR shard workers were killed at the
+# 1800 s internal timeout with 596 of 3010 modules claimed (~0.68 modules/s
+# combined after ~900 s of pre-MIR setup), i.e. ~75 min of MIR alone. x4 gives
+# 7200 s internal / 14400 s row / 28800 s campaign; a hung worker is still
+# killed at the scaled limit.
+BOOTSTRAP_TREE_RSS_TIMEOUT_SCALE_MAX=4
+# compiler_cli_build ROW cap of the whole-build phase, KiB (60 GiB; owner
+# decision 2026-11-06). Applies to that one row only, when the plan runs
+# >= 2 workers below it; a host budget that holds those workers but not this
+# cap is refused up front, and the cap requires serial tool rows
+# (bootstrap_tree_rss_whole_build_plan). One worker / small hosts: plan cap.
+# Measured, run 11 (2026-11-06, release/1.0.0 e4c8830efc7, Stage 2 binary
+# sha256 7daae128..., 121 GiB aarch64, host budget 63800400 KiB): with
+# SIMPLE_MIR_SHARD_COUNT=8 the row was killed at the 54525952 KiB plan cap
+# (rss-cap-exceeded, peak_rss_kib=54579388) in native_compile of MIR shard 1
+# (20/382): two MIR shard workers sampled at 24.0 and 25.2 GiB plus a
+# ~1.1 GiB coordinator; host MemAvailable never fell below 35 GiB. Why a row
+# cap and not a higher worker FLOOR: the floor was measured for HIR
+# load_sources and prices every full-CLI row; raising it would also re-price
+# test_runner_build and the other rows, which did not exceed the plan. 60 GiB
+# leaves ~8.5 GiB over the measured 2 x 25.2 + 1.1 GiB. The rows run SERIALLY
+# here (BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1 in bootstrap-from-scratch.sh),
+# so the campaign envelope is the largest row cap, not a sum
+# (bootstrap_tree_rss_campaign_envelope). Record:
+# doc/08_tracking/bug/stage2_compiler_cli_build_mir_shard_share_unbounded_2026-11-06.md
+# Re-measured 2026-11-27 (lanes v7g/v7h, pin 967f9178950e, 121 GiB aarch64):
+# the compiler has since grown — two consecutive lanes were killed at this
+# 62914560 KiB cap with peaks 62960380 and 62995924 KiB (~50-80 MB over),
+# invariant to MIR shard count (8 vs 16) and build threads (8 vs 6): the two
+# shard workers now sample ~29 GiB each plus the coordinator. 64 GiB restores
+# ~2 GiB of headroom over the observed peak; the rows still run serially, so
+# the campaign envelope stays the single largest row cap.
+# doc/08_tracking/bug/stage2_cli_row_cap_stale_worker_measurement_2026-11-27.md
+BOOTSTRAP_TREE_RSS_PHASE_CLI_ROW_CAP_KIB=63500000
+
+# bootstrap_tree_rss_worker_mem_mib REPO_ROOT -> per-worker MiB (always valid).
+bootstrap_tree_rss_worker_mem_mib() {
+  btr_wm=${SIMPLE_BOOTSTRAP_WORKER_MEM_MIB:-${SIMPLE_HOST_WORKER_MEM_MIB:-}}
+  if [ -z "$btr_wm" ] && [ -n "${1:-}" ] && [ -f "$1/scripts/setup/host-env.shs" ]; then
+    btr_wm=$(sh "$1/scripts/setup/host-env.shs" --get worker_mem_mib 2>/dev/null | tail -n 1) || btr_wm=
+  fi
+  bootstrap_tree_rss_is_uint "$btr_wm" 7 || btr_wm=$BOOTSTRAP_TREE_RSS_WORKER_MEM_MIB_DEFAULT
+  printf '%s\n' "$btr_wm"
+}
+
+# bootstrap_tree_rss_workers_fit CAP_KIB WORKER_MEM_MIB [BASE_MIB] -> workers
+# the cap can hold (>= 1).
+bootstrap_tree_rss_workers_fit() {
+  btr_wf=$(( ($1 / 1024 - ${3:-$BOOTSTRAP_TREE_RSS_BASE_MIB_DEFAULT}) / $2 ))
+  [ "$btr_wf" -ge 1 ] || btr_wf=1
+  printf '%s\n' "$btr_wf"
+}
 
 # Decimal, non-zero, at most $2 digits (bounded so $(( )) cannot overflow).
 bootstrap_tree_rss_is_uint() {
@@ -137,11 +281,26 @@ bootstrap_tree_rss_meminfo_total() {
   printf '%s\n' "$btr_mt"
 }
 
-# Sets bootstrap_tree_rss_host_total_kib (may be empty) and
+# MemAvailable (KiB; MemFree when the kernel has no MemAvailable) of one
+# meminfo-format file, or empty. Only ever LOWERS a budget (whole-build plan),
+# so an absent line is "no headroom evidence", never a wider budget.
+bootstrap_tree_rss_meminfo_available() {
+  btr_ma=
+  [ ! -r "$1" ] || btr_ma=$(awk '
+    /^MemAvailable:/ { avail=$2 }
+    /^MemFree:/ { free=$2 }
+    END { if (avail != "") print avail; else if (free != "") print free }' "$1" 2>/dev/null) || btr_ma=
+  bootstrap_tree_rss_is_uint "$btr_ma" 15 || btr_ma=
+  printf '%s\n' "$btr_ma"
+}
+
+# Sets bootstrap_tree_rss_host_total_kib (may be empty),
+# bootstrap_tree_rss_host_available_kib (may be empty; never from sysctl) and
 # bootstrap_tree_rss_host_total_source. Returns 1 with a refusal when the
 # test fixture hook is present without its switch or while the cap is enforced.
 bootstrap_tree_rss_probe_host() {
   bootstrap_tree_rss_host_total_kib=
+  bootstrap_tree_rss_host_available_kib=
   if [ -n "${BOOTSTRAP_TREE_RSS_MEMINFO_PATH+x}" ]; then
     bootstrap_tree_rss_host_total_source=fixture
     [ "${BOOTSTRAP_TREE_RSS_TEST_FIXTURE:-}" = 1 ] || {
@@ -153,11 +312,15 @@ bootstrap_tree_rss_probe_host() {
       return 1
     }
     bootstrap_tree_rss_host_total_kib=$(bootstrap_tree_rss_meminfo_total "$BOOTSTRAP_TREE_RSS_MEMINFO_PATH")
+    bootstrap_tree_rss_host_available_kib=$(bootstrap_tree_rss_meminfo_available "$BOOTSTRAP_TREE_RSS_MEMINFO_PATH")
     return 0
   fi
   bootstrap_tree_rss_host_total_kib=$(bootstrap_tree_rss_meminfo_total /proc/meminfo)
   bootstrap_tree_rss_host_total_source=proc-meminfo
-  [ -z "$bootstrap_tree_rss_host_total_kib" ] || return 0
+  [ -z "$bootstrap_tree_rss_host_total_kib" ] || {
+    bootstrap_tree_rss_host_available_kib=$(bootstrap_tree_rss_meminfo_available /proc/meminfo)
+    return 0
+  }
   for btr_sysctl in hw.memsize hw.physmem; do
     btr_bytes=$(sysctl -n "$btr_sysctl" 2>/dev/null) || btr_bytes=
     if bootstrap_tree_rss_is_uint "$btr_bytes" 18; then
@@ -183,6 +346,38 @@ bootstrap_tree_rss_ceiling_kib() {
     [ "$btr_c_scaled" -le "$btr_c" ] || btr_c=$btr_c_scaled
   fi
   printf '%s\n' "$btr_c"
+}
+
+# bootstrap_tree_rss_stage3_default_cap_kib MEMORY_HIGH_MIB CEILING_KIB -> KiB
+# Default process-tree cap of the Stage 3 resume compiler when the caller set
+# no SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB pair: the cgroup MemoryHigh the
+# Stage 3 memory admission already reserved (SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB,
+# default 48 GiB of verified free host memory), clamped to the default hard
+# ceiling, so it never needs an elevated-ceiling ratchet. Without it the
+# serial resume took the compile-worker budget (3 GiB + 1 x 5 GiB = 8 GiB) and
+# was killed after HIR: measured Stage 3 self-builds peak at 16.8 GB (phase
+# route) to 36.5 GiB (doc/08_tracking/bug/stage3_selfbuild_memory_curve_cap_ratchet_2026-11-12.md).
+bootstrap_tree_rss_stage3_default_cap_kib() {
+  case "${1:-}:${2:-}" in 0*|*:0*) return 1 ;; esac
+  bootstrap_tree_rss_is_uint "${1:-}" 9 && bootstrap_tree_rss_is_uint "${2:-}" 15 || return 1
+  btr_s3_cap=$(($1 * 1024))
+  [ "$btr_s3_cap" -le "$2" ] || btr_s3_cap=$2
+  printf '%s\n' "$btr_s3_cap"
+}
+
+# bootstrap_tree_rss_stage3_default_cap_attributed MEMORY_HIGH_MIB CEILING_KIB
+#   -> CAP_KIB:memory-admission:(memory-high|hard-ceiling)
+# The transport form of the derived cap. The launcher hands it to the Stage 3
+# worker, which publishes SOURCE/BOUND as SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE/_BOUND
+# beside the cap, so bootstrap_tree_rss_published_attribution records the
+# receipt as this code default rather than an explicit-env pair the operator
+# hand-set (the mislabel a post-mortem would otherwise read as a 48 GiB
+# operator override). A bare CAP stays explicit-env/explicit.
+bootstrap_tree_rss_stage3_default_cap_attributed() {
+  btr_s3a_cap=$(bootstrap_tree_rss_stage3_default_cap_kib "$@") || return 1
+  btr_s3a_bound=memory-high
+  [ "$btr_s3a_cap" = "$(($1 * 1024))" ] || btr_s3a_bound=hard-ceiling
+  printf '%s:memory-admission:%s\n' "$btr_s3a_cap" "$btr_s3a_bound"
 }
 
 # Strict facts for an explicit elevated budget. This parser is also exercised
@@ -300,6 +495,32 @@ bootstrap_tree_rss_knob() {
   esac
 }
 
+# Receipt attribution spelling the watchdog accepts (it dies on anything else).
+bootstrap_tree_rss_attribution_valid() {
+  case "$1" in ''|[!a-z]*|*[!a-z-]*) return 1 ;; esac
+  [ "${#1}" -le 32 ]
+}
+
+# A cap the whole-build phase policy published arrives at every owner as the
+# same env var a user-set diagnostic pair uses, so by itself it would be
+# attributed explicit-env/explicit everywhere (campaign AND build rows), and
+# an admitted phase-policy elevation would be indistinguishable from a
+# diagnostic attempt. The publisher also sets
+# SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE/_BOUND; when both are present
+# they replace the explicit-env attribution in every owner's receipt. A
+# diagnostic pair (no attribution vars) stays explicit-env. A malformed
+# spelling is a refusal, never laundered to another label.
+bootstrap_tree_rss_published_attribution() {
+  [ -n "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE+x}${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND+x}" ] || return 0
+  bootstrap_tree_rss_attribution_valid "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE:-}" &&
+    bootstrap_tree_rss_attribution_valid "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND:-}" || {
+    bootstrap_tree_rss_refusal="tree RSS policy: invalid published cap attribution SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE='${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE:-}' _BOUND='${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND:-}' (want [a-z][a-z-]{0,31}, both set)"
+    return 1
+  }
+  bootstrap_tree_rss_source=$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE
+  bootstrap_tree_rss_bound=$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND
+}
+
 # bootstrap_tree_rss_resolve JOBS [REPO_ROOT]
 # Sets bootstrap_tree_rss_{cap_kib,ceiling_kib,host_total_kib,
 # host_total_source,source,bound,summary}.
@@ -342,6 +563,7 @@ bootstrap_tree_rss_resolve() {
     bootstrap_tree_rss_cap_kib=$btr_explicit
     bootstrap_tree_rss_source=explicit-env
     bootstrap_tree_rss_bound=explicit
+    bootstrap_tree_rss_published_attribution || return 1
   else
     bootstrap_tree_rss_source=default
     bootstrap_tree_rss_knob BASE_MIB tree_rss_base_mib "$BOOTSTRAP_TREE_RSS_BASE_MIB_DEFAULT" 7 "$btr_root" || return 1
@@ -368,13 +590,24 @@ bootstrap_tree_rss_resolve() {
         bootstrap_tree_rss_bound=host-fraction
       fi
     fi
+    if { [ "$bootstrap_tree_rss_bound" = floor ] || [ "$bootstrap_tree_rss_bound" = budget ]; } && [ "$btr_jobs" -gt 0 ] &&
+       [ "$bootstrap_tree_rss_source" = default ] && [ -n "$bootstrap_tree_rss_host_total_kib" ]; then
+      btr_wm=$(bootstrap_tree_rss_worker_mem_mib "$btr_root")
+      btr_scaled=$(((btr_base + btr_jobs * btr_wm) * 1024))
+      btr_scale_cap=$((bootstrap_tree_rss_host_total_kib / 100 * BOOTSTRAP_TREE_RSS_SCALE_PCT))
+      [ "$btr_scaled" -le "$btr_scale_cap" ] || btr_scaled=$btr_scale_cap
+      if [ "$btr_scaled" -gt "$btr_cap" ]; then
+        btr_cap=$btr_scaled
+        bootstrap_tree_rss_bound=host-scaled
+      fi
+    fi
     if [ "$btr_cap" -gt "$bootstrap_tree_rss_ceiling_kib" ]; then
       btr_cap=$bootstrap_tree_rss_ceiling_kib
       bootstrap_tree_rss_bound=hard-ceiling
     fi
     bootstrap_tree_rss_cap_kib=$btr_cap
   fi
-  bootstrap_tree_rss_summary="cap ${bootstrap_tree_rss_cap_kib} KiB (source: ${bootstrap_tree_rss_source}, bound: ${bootstrap_tree_rss_bound}, workers: ${btr_jobs}, hard ceiling: ${bootstrap_tree_rss_ceiling_kib} KiB, host RAM: ${bootstrap_tree_rss_host_total_kib:-unknown} KiB via ${bootstrap_tree_rss_host_total_source}; compiler ceiling admission: ${bootstrap_tree_rss_ceiling_admission}, requested: ${bootstrap_tree_rss_ceiling_request_kib}, previous: ${bootstrap_tree_rss_ceiling_previous_kib}, available: ${bootstrap_tree_rss_available_kib} via ${bootstrap_tree_rss_available_source})"
+  bootstrap_tree_rss_summary="cap ${bootstrap_tree_rss_cap_kib} KiB (source: ${bootstrap_tree_rss_source}, bound: ${bootstrap_tree_rss_bound}, workers: ${btr_jobs}, hard ceiling: ${bootstrap_tree_rss_ceiling_kib} KiB, host RAM: ${bootstrap_tree_rss_host_total_kib:-unknown} KiB via ${bootstrap_tree_rss_host_total_source}; compiler ceiling admission: ${bootstrap_tree_rss_ceiling_admission}, requested: ${bootstrap_tree_rss_ceiling_request_kib}, previous: ${bootstrap_tree_rss_ceiling_previous_kib}, available: $(if [ "${bootstrap_tree_rss_available_source}" = unknown ]; then printf unknown; else printf '%s KiB' "${bootstrap_tree_rss_available_kib}"; fi) via ${bootstrap_tree_rss_available_source})"
 }
 
 # Cap for a phase that wraps whole compiler builds (Stage 2 compiler tests:
@@ -396,6 +629,735 @@ bootstrap_tree_rss_phase_cap_kib() {
   fi
   [ "$btr_pc" -le "$bootstrap_tree_rss_ceiling_kib" ] || btr_pc=$bootstrap_tree_rss_ceiling_kib
   printf '%s\n' "$btr_pc"
+}
+
+# Per-worker reservation of the whole-build phase: floor x margin, KiB.
+bootstrap_tree_rss_phase_worker_kib() {
+  printf '%s\n' $((BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB * BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT / 100))
+}
+
+# bootstrap_tree_rss_timeout_scale REQUESTED FITTED -> min(ceil(R/F), MAX), >= 1.
+# Anything that is not a positive decimal pair (or F >= R) scales by 1.
+bootstrap_tree_rss_timeout_scale() {
+  btr_ts_r=$(bootstrap_tree_rss_canonical_uint "${1:-}" 3)
+  btr_ts_w=$(bootstrap_tree_rss_canonical_uint "${2:-}" 3)
+  btr_ts=1
+  if [ -n "$btr_ts_r" ] && [ -n "$btr_ts_w" ] && [ "$btr_ts_w" -ge 1 ] && [ "$btr_ts_r" -gt "$btr_ts_w" ]; then
+    btr_ts=$(((btr_ts_r + btr_ts_w - 1) / btr_ts_w))
+    [ "$btr_ts" -le "$BOOTSTRAP_TREE_RSS_TIMEOUT_SCALE_MAX" ] || btr_ts=$BOOTSTRAP_TREE_RSS_TIMEOUT_SCALE_MAX
+  fi
+  printf '%s\n' "$btr_ts"
+}
+
+# bootstrap_tree_rss_scaled_timeout VAR DEFAULT_SECONDS
+# Publishes the whole-build phase time budget VAR (an env var name): an
+# explicit, user-set non-empty VAR is honoured verbatim (it must still be a
+# positive decimal; the verifier's own policy refuses anything else); else
+# DEFAULT x bootstrap_tree_rss_plan_timeout_scale. Exports VAR and folds the
+# attribution into BOOTSTRAP_VERIFY_TIMEOUT_SOURCE (explicit | phase-policy |
+# phase-policy-scaled, comma-joined VAR:source) and BOOTSTRAP_VERIFY_TIMEOUT_SCALE
+# for the verification receipt. Returns 1 on a malformed DEFAULT.
+bootstrap_tree_rss_scaled_timeout() {
+  btr_sto_var=$1
+  btr_sto_default=$(bootstrap_tree_rss_canonical_uint "${2:-}" 6)
+  [ -n "$btr_sto_default" ] && [ "$btr_sto_default" -gt 0 ] || {
+    bootstrap_tree_rss_refusal="tree RSS policy: default timeout for $btr_sto_var must be a positive decimal, got '${2:-}'"
+    return 1
+  }
+  case "$btr_sto_var" in ''|*[!A-Z0-9_]*) bootstrap_tree_rss_refusal="tree RSS policy: bad timeout variable '$btr_sto_var'"; return 1 ;; esac
+  eval "btr_sto_explicit=\${$btr_sto_var:-}"
+  btr_sto_scale=${bootstrap_tree_rss_plan_timeout_scale:-1}
+  if [ -n "$btr_sto_explicit" ]; then
+    btr_sto_source=explicit
+  else
+    eval "$btr_sto_var=\$((btr_sto_default * btr_sto_scale))"
+    btr_sto_source=phase-policy
+    [ "$btr_sto_scale" -le 1 ] || btr_sto_source=phase-policy-scaled
+  fi
+  export "$btr_sto_var"
+  BOOTSTRAP_VERIFY_TIMEOUT_SOURCE="${BOOTSTRAP_VERIFY_TIMEOUT_SOURCE:+$BOOTSTRAP_VERIFY_TIMEOUT_SOURCE,}$btr_sto_var:$btr_sto_source"
+  BOOTSTRAP_VERIFY_TIMEOUT_SCALE=$btr_sto_scale
+  export BOOTSTRAP_VERIFY_TIMEOUT_SOURCE BOOTSTRAP_VERIFY_TIMEOUT_SCALE
+}
+# Apply lane-local overrides of the whole-build phase worker pricing
+# (SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB / _MARGIN_PCT / _BASE_KIB).
+# Defaults price a COLD full-CLI build and stay the small-host protection;
+# warm-cache lanes and larger hosts may LOWER them, never raise them (raising
+# the floor or margin is a policy change, not a lane tuning, and a typo must
+# not silently buy a bigger reservation than admission would grant).
+# Returns 1 with bootstrap_tree_rss_refusal on a malformed or raising value.
+bootstrap_tree_rss_phase_pricing_resolve() {
+  case ${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB:-} in
+    "") ;;
+    *[!0-9]*|0)
+      bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB must be a positive decimal KiB value, got '${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB}'"
+      return 1 ;;
+    *)
+      [ "$SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB" -le "$BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_DEFAULT_KIB" ] || {
+        bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB may lower the phase worker floor (<= default ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_DEFAULT_KIB}) but not raise it, got '${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB}'"
+        return 1
+      }
+      BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB=$SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB ;;
+  esac
+  case ${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT:-} in
+    "") ;;
+    *[!0-9]*|0)
+      bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT must be a positive decimal percent, got '${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT}'"
+      return 1 ;;
+    *)
+      [ "$SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT" -le "$BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_DEFAULT_PCT" ] || {
+        bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT may lower the phase worker margin (<= default ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_DEFAULT_PCT}) but not raise it, got '${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT}'"
+        return 1
+      }
+      BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT=$SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT ;;
+  esac
+  case ${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB:-} in
+    "") ;;
+    *[!0-9]*|0)
+      bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB must be a positive decimal KiB value, got '${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB}'"
+      return 1 ;;
+    *)
+      [ "$SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB" -le "$BOOTSTRAP_TREE_RSS_PHASE_BASE_DEFAULT_KIB" ] || {
+        bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB may lower the phase base (<= default ${BOOTSTRAP_TREE_RSS_PHASE_BASE_DEFAULT_KIB}) but not raise it, got '${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB}'"
+        return 1
+      }
+      BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB=$SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB ;;
+  esac
+}
+
+# bootstrap_tree_rss_host_reserve_kib HOST_TOTAL_KIB [REPO_ROOT] -> KiB, or
+# empty when an explicit reserve is malformed. Shell twin of
+# shard_tree_headroom_kib_v1 (src/app/cli/shard_mem_clamp.spl): the free
+# RAM/commit floor the build start guard and the worker pool keep.
+# Precedence: SIMPLE_BUILD_MEMORY_RESERVE_BYTES, then host config
+# mem_reserve_free_mib (SIMPLE_HOST_MEM_RESERVE_FREE_MIB > host config file),
+# then min(24 GiB, total / 2); an unknown total keeps 24 GiB (unknown never
+# shrinks the reserve). A malformed explicit bytes value (or one below 1 KiB)
+# yields empty: the two-worker floor then fails closed instead of guessing.
+bootstrap_tree_rss_host_reserve_kib() {
+  btr_hr_out=$(bootstrap_tree_rss_host_reserve_attributed "$@")
+  printf '%s\n' "${btr_hr_out%%|*}"
+}
+
+# bootstrap_tree_rss_host_reserve_attributed HOST_TOTAL_KIB [REPO_ROOT]
+#   -> "KIB|SOURCE" (KIB empty when malformed); same precedence as above.
+bootstrap_tree_rss_host_reserve_attributed() {
+  btr_hr_total=${1:-}
+  btr_hr_root=${2:-}
+  btr_hr_cap=25165824
+  case ${SIMPLE_BUILD_MEMORY_RESERVE_BYTES:-} in
+    "") ;;
+    *[!0-9]*|0*) printf '|SIMPLE_BUILD_MEMORY_RESERVE_BYTES malformed\n'; return 0 ;;
+    *) bootstrap_tree_rss_is_uint "$SIMPLE_BUILD_MEMORY_RESERVE_BYTES" 18 &&
+         [ "$SIMPLE_BUILD_MEMORY_RESERVE_BYTES" -ge 1024 ] || { printf '|SIMPLE_BUILD_MEMORY_RESERVE_BYTES malformed\n'; return 0; }
+       printf '%s|SIMPLE_BUILD_MEMORY_RESERVE_BYTES\n' $((SIMPLE_BUILD_MEMORY_RESERVE_BYTES / 1024)); return 0 ;;
+  esac
+  btr_hr_mib=${SIMPLE_HOST_MEM_RESERVE_FREE_MIB:-}
+  btr_hr_src=SIMPLE_HOST_MEM_RESERVE_FREE_MIB
+  if [ -z "$btr_hr_mib" ] && [ -n "$btr_hr_root" ] && [ -f "$btr_hr_root/scripts/setup/host-env.shs" ]; then
+    btr_hr_mib=$(sh "$btr_hr_root/scripts/setup/host-env.shs" --get mem_reserve_free_mib 2>/dev/null | tail -n 1) || btr_hr_mib=
+    btr_hr_src='host config mem_reserve_free_mib'
+  fi
+  btr_hr_mib=$(bootstrap_tree_rss_canonical_uint "$btr_hr_mib" 9)
+  if bootstrap_tree_rss_is_uint "$btr_hr_mib" 9 && [ "$btr_hr_mib" -gt 0 ]; then
+    printf '%s|%s\n' $((btr_hr_mib * 1024)) "$btr_hr_src"; return 0
+  fi
+  if bootstrap_tree_rss_is_uint "$btr_hr_total" 15 && [ "$btr_hr_total" -gt 1 ] &&
+     [ $((btr_hr_total / 2)) -lt "$btr_hr_cap" ]; then
+    printf '%s|default host RAM / 2\n' $((btr_hr_total / 2)); return 0
+  fi
+  printf '%s|default 24 GiB\n' "$btr_hr_cap"
+}
+
+# bootstrap_tree_rss_platform -> uname -s; BOOTSTRAP_TREE_RSS_TEST_PLATFORM is
+# honoured only with the BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1 test switch.
+bootstrap_tree_rss_platform() {
+  if [ "${BOOTSTRAP_TREE_RSS_TEST_FIXTURE:-}" = 1 ] && [ -n "${BOOTSTRAP_TREE_RSS_TEST_PLATFORM:-}" ]; then
+    printf '%s\n' "$BOOTSTRAP_TREE_RSS_TEST_PLATFORM"
+    return 0
+  fi
+  uname -s 2>/dev/null || printf 'unknown\n'
+}
+
+# bootstrap_tree_rss_cap_kill_line RECEIPT
+# Prints "<status> cap_kib=<n> peak_kib=<n>" and returns 0 when a watchdog
+# receipt records an RSS (or Darwin phys-footprint) cap kill; returns 1
+# otherwise (timeout, crash, clean exit, missing file). W21 (2026-11-22): a cap
+# kill reached the operator only as exit 88 + timeout_signal=job-terminate.
+bootstrap_tree_rss_cap_kill_line() {
+  [ -f "${1:-}" ] || return 1
+  awk -F= '
+    !($1 in v) { v[$1] = substr($0, length($1) + 2) }
+    END {
+      if (v["status"] == "rss-cap-exceeded") { cap = v["max_rss_kib"]; peak = v["peak_rss_kib"] }
+      else if (v["status"] == "phys-footprint-cap-exceeded") { cap = v["max_phys_footprint_kib"]; peak = v["peak_phys_footprint_kib"] }
+      else exit 1
+      if (cap == "") cap = "unknown"
+      if (peak == "") peak = "unknown"
+      printf "%s cap_kib=%s peak_kib=%s\n", v["status"], cap, peak
+    }' "$1"
+}
+
+# bootstrap_tree_rss_two_worker_floor REQUESTED FIT SMALL RSS_MODE AVAIL_KIB RESERVE_KIB CEILING_KIB
+# Guarded two-worker floor of the whole-build phase (owner rule 2026-11-13:
+# bootstrap builds run >= 2 workers even under resource limits, guarded by
+# the enforcing RSS watchdog). Run 20 (release/1.0.0 10223749f6c, busy
+# 121 GiB aarch64): "host budget fits 1" ran compiler_cli_build HIR serially
+# in-process, ~28 modules/min, ~2 h for HIR alone. Mirrors
+# shard_threads_guarded_floor_v1 (#8522, #8596 headroom precondition) clause
+# by clause; pure (numbers in, variables out) so every branch is testable.
+# Lifts a fitted 1 to 2 only when ALL hold:
+#   - REQUESTED >= 2 and FIT == 1 (a serial request stays serial; FIT >= 2 is
+#     never touched) and not small-host mode (one worker already exceeds the
+#     price there);
+#   - RSS_MODE is enforce: the watchdog kills the tree at the cap;
+#   - cap2 = base + 2 x worker floor fits inside AVAIL_KIB - RESERVE_KIB, so
+#     the watchdog, not the host, is the binding bound (#8596). The floor is
+#     the measured per-worker load_sources need (15.6 GiB, 2026-11-05); the
+#     150% runaway margin is what is traded for the second worker;
+#   - cap2 <= CEILING_KIB, the DEFAULT hard ceiling for two workers: the
+#     floor never asks for an elevated ceiling (whose 3/4-of-available
+#     admission would refuse it later).
+# Deliberately overrides the tree_rss_host_pct share and the 3/4-of-available
+# budget term (as the shard floor overrides its 60%/40% reserve): the binding
+# bounds are the enforced cap and MemAvailable - reserve above.
+# This is a REQUEST like the bootstrap-build-jobs-policy floor: the compiler's
+# shard pools re-admit it against the exported tree budget (their own guarded
+# floor needs 2 x worker estimate + coordinator inside the cap) and the live
+# commit admission gates every spawn. MIR is priced separately: run 10/11
+# measured compiler_cli_build MIR shard workers at 19-25 GiB each (each holds
+# the full HIR), which two of cannot share cap2. The compiler default carries
+# that price as the CEILING of a closure-scaled default (SHARD_MIR_WORKER_KB_V1
+# / file_worker_pool_mir_price_kb_v1, src/app/cli/file_worker_pool_refusal.spl, the single
+# owner; the ~1650-module Stage 3 closure reaches it, small closures keep 9 GB). For a floored plan
+# bootstrap_tree_rss_whole_build_export still publishes
+# SIMPLE_MIR_SHARD_WORKER_KB=BOOTSTRAP_TREE_RSS_FLOOR_MIR_WORKER_KB (the same
+# figure) so pinned stage binaries that predate that default re-admit exactly
+# one MIR worker too (the same MIR parallelism as the unfloored one-thread plan).
+# Sets bootstrap_tree_rss_floor_workers (FIT or 2), bootstrap_tree_rss_floor_cap_kib
+# (cap2 when applied, else 0) and bootstrap_tree_rss_floor_note: empty when
+# there was nothing to lift, else a greppable "build-threads floor applied: ..."
+# or "build-threads floor not applied: <reason>" line -- never silent.
+# Run 11 measured MIR shard worker peak (25.2 GiB), KiB; see the floor above.
+# Mirror of SHARD_MIR_WORKER_KB_V1 (src/app/cli/shard_mem_clamp.spl owns the
+# price); test/01_unit/compiler/driver/native_build_pool_refusal_spec.spl pins
+# the two equal.
+BOOTSTRAP_TREE_RSS_FLOOR_MIR_WORKER_KB=26424115
+bootstrap_tree_rss_two_worker_floor() {
+  btr_tf_requested=$1 btr_tf_fit=$2 btr_tf_small=$3 btr_tf_mode=$4
+  btr_tf_avail=$5 btr_tf_reserve=$6 btr_tf_ceiling=$7
+  bootstrap_tree_rss_floor_workers=$btr_tf_fit
+  bootstrap_tree_rss_floor_cap_kib=0
+  bootstrap_tree_rss_floor_note=
+  [ "$btr_tf_requested" -ge 2 ] && [ "$btr_tf_fit" -le 1 ] || return 0
+  btr_tf_cap=$((BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB + 2 * BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB))
+  btr_tf_price="base ${BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB} KiB + 2 x worker floor ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB} KiB"
+  btr_tf_no='build-threads floor not applied:'
+  if [ "$btr_tf_small" = 1 ]; then
+    bootstrap_tree_rss_floor_note="$btr_tf_no small-host single-worker mode (one worker already exceeds floor x margin)"
+  elif [ "$btr_tf_mode" != enforce ]; then
+    bootstrap_tree_rss_floor_note="$btr_tf_no RSS cap mode $btr_tf_mode, the watchdog does not enforce a two-worker cap"
+  elif ! bootstrap_tree_rss_is_uint "$btr_tf_avail" 15 || [ "$btr_tf_avail" -le 0 ]; then
+    bootstrap_tree_rss_floor_note="$btr_tf_no host available memory unknown"
+  elif ! bootstrap_tree_rss_is_uint "$btr_tf_reserve" 15; then
+    bootstrap_tree_rss_floor_note="$btr_tf_no host memory reserve unknown (SIMPLE_BUILD_MEMORY_RESERVE_BYTES malformed or below 1 KiB)"
+  elif [ "$btr_tf_avail" -le "$btr_tf_reserve" ] || [ "$btr_tf_cap" -gt $((btr_tf_avail - btr_tf_reserve)) ]; then
+    bootstrap_tree_rss_floor_note="$btr_tf_no two-worker cap ${btr_tf_cap} KiB (${btr_tf_price}) exceeds available ${btr_tf_avail} KiB - reserve ${btr_tf_reserve} KiB"
+  elif ! bootstrap_tree_rss_is_uint "$btr_tf_ceiling" 15 || [ "$btr_tf_cap" -gt "$btr_tf_ceiling" ]; then
+    bootstrap_tree_rss_floor_note="$btr_tf_no two-worker cap ${btr_tf_cap} KiB exceeds the default hard ceiling ${btr_tf_ceiling:-unknown} KiB (the floor never requests an elevated ceiling)"
+  else
+    bootstrap_tree_rss_floor_workers=2
+    bootstrap_tree_rss_floor_cap_kib=$btr_tf_cap
+    bootstrap_tree_rss_floor_note="build-threads floor applied: 2 workers (host budget fits 1) under the enforcing RSS guard, cap ${btr_tf_cap} KiB = ${btr_tf_price} (no runaway margin) <= available ${btr_tf_avail} KiB - reserve ${btr_tf_reserve} KiB; compiler pools re-admit each worker, MIR priced at ${BOOTSTRAP_TREE_RSS_FLOOR_MIR_WORKER_KB} kB per worker (run 11, = the compiler default SHARD_MIR_WORKER_KB_V1) so it stays at one"
+  fi
+}
+
+# bootstrap_tree_rss_whole_build_plan REQUESTED_WORKERS [REPO_ROOT]
+# Prices the Stage 2 compiler-tests phase by its real per-worker need
+# (BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB) instead of the compile-shard
+# budget or a host fraction clamped to the compile-worker ceiling, both of
+# which produced caps no worker count could pass (bug tree_rss_floor_kills_
+# stage2_compiler_tests_on_large_hosts_2026-10-15, data points 5 and 6):
+#     budget  = min(host_total x tree_rss_host_pct / 100, 3/4 x host_available)
+#     workers = min(REQUESTED, (budget - base) / (floor x margin))   >= 1
+#     cap     = base + workers x floor x margin
+# The 3/4-of-available term is the bound the elevated-ceiling admission
+# applies in both owners (bootstrap_tree_rss_admit_ceiling, the watchdog), so
+# the plan never asks for what admission would refuse. Sets:
+#     bootstrap_tree_rss_plan_workers      workers to run (REQUESTED is an upper bound)
+#     bootstrap_tree_rss_plan_cap_kib      the cap (kills a runaway above it)
+#     bootstrap_tree_rss_plan_ceiling_kib  cap when it exceeds the default hard
+#                                          ceiling for that worker count (needs
+#                                          the elevated-ceiling admission), else 0
+#     bootstrap_tree_rss_plan_budget_kib, bootstrap_tree_rss_plan_bound
+#     (worker-floor | worker-floor-elevated), bootstrap_tree_rss_plan_summary
+# Returns 1 with bootstrap_tree_rss_refusal naming the requirement when host
+# RAM is unknown or the budget cannot hold ONE worker. Never clamps below the
+# floor: fewer workers, or a refusal.
+bootstrap_tree_rss_whole_build_plan() {
+  btr_wb_requested=$(bootstrap_tree_rss_canonical_uint "${1:-}" 3)
+  btr_wb_root=${2:-}
+  bootstrap_tree_rss_refusal=
+  bootstrap_tree_rss_plan_workers=0
+  bootstrap_tree_rss_plan_cap_kib=0
+  bootstrap_tree_rss_plan_ceiling_kib=0
+  bootstrap_tree_rss_plan_budget_kib=0
+  bootstrap_tree_rss_plan_bound=refused
+  bootstrap_tree_rss_plan_timeout_scale=1
+  bootstrap_tree_rss_plan_summary=
+  bootstrap_tree_rss_plan_cli_row_cap_kib=0
+  bootstrap_tree_rss_plan_cli_row_ceiling_kib=0
+  bootstrap_tree_rss_plan_cli_row_bound=refused
+  bootstrap_tree_rss_source=default
+  [ -n "$btr_wb_requested" ] && [ "$btr_wb_requested" -ge 1 ] && [ "$btr_wb_requested" -le 128 ] || {
+    bootstrap_tree_rss_refusal="tree RSS policy: whole-build phase worker count must be a decimal 1..128, got '${1:-}'"
+    return 1
+  }
+  bootstrap_tree_rss_probe_host || return 1
+  bootstrap_tree_rss_phase_pricing_resolve || return 1
+  btr_wb_worker=$(bootstrap_tree_rss_phase_worker_kib)
+  btr_wb_one=$((BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB + btr_wb_worker))
+  btr_wb_price="base ${BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB} KiB + worker floor ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB} KiB x ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT}%"
+  [ -n "$bootstrap_tree_rss_host_total_kib" ] || {
+    bootstrap_tree_rss_refusal="tree RSS policy: whole-build phase needs host RAM evidence (host RAM unknown via ${bootstrap_tree_rss_host_total_source}): one full-CLI build worker requires ${btr_wb_one} KiB (${btr_wb_price}) and cannot be bounded without the host total"
+    return 1
+  }
+  bootstrap_tree_rss_knob HOST_PCT tree_rss_host_pct "$BOOTSTRAP_TREE_RSS_HOST_PCT_DEFAULT" 2 "$btr_wb_root" || return 1
+  btr_wb_pct=$btr_k_value
+  [ "$btr_wb_pct" -le "$BOOTSTRAP_TREE_RSS_HOST_PCT_MAX" ] || {
+    bootstrap_tree_rss_refusal="tree RSS policy: tree_rss_host_pct=$btr_wb_pct exceeds $BOOTSTRAP_TREE_RSS_HOST_PCT_MAX"
+    return 1
+  }
+  # W21 (2026-11-22, #8931): on a Hyper-V dynamic-memory Windows guest the
+  # instantaneous free RAM (MSYS /proc/meminfo MemFree, GlobalMemoryStatusEx)
+  # is the balloon, not the headroom: 15518280 KiB of a 66865260 KiB host
+  # priced the cap at 11638710 KiB and the campaign killed the full-CLI build
+  # at surface_freeze. When Windows reports less than half of physical RAM
+  # available, the budget uses physical RAM minus the host reserve (host
+  # config mem_reserve_free_mib first, see bootstrap_tree_rss_host_reserve_kib)
+  # instead, and says so. Concurrent heavy lanes, the real reason free RAM can
+  # also be low, are refused by the admission scan (W23), not priced here.
+  # The two-worker floor keeps the measured value: it only ever widens.
+  btr_wb_raw_avail=$bootstrap_tree_rss_host_available_kib
+  btr_wb_avail_label=available
+  btr_wb_avail_note=
+  case "$(bootstrap_tree_rss_platform)" in
+    MINGW*|MSYS*|CYGWIN*)
+      if [ -n "$btr_wb_raw_avail" ] && [ $((btr_wb_raw_avail * 2)) -lt "$bootstrap_tree_rss_host_total_kib" ]; then
+        btr_wb_res=$(bootstrap_tree_rss_host_reserve_attributed "$bootstrap_tree_rss_host_total_kib" "$btr_wb_root")
+        btr_wb_res_kib=${btr_wb_res%%|*}
+        if bootstrap_tree_rss_is_uint "$btr_wb_res_kib" 15 && [ "$btr_wb_res_kib" -lt "$bootstrap_tree_rss_host_total_kib" ]; then
+          bootstrap_tree_rss_host_available_kib=$((bootstrap_tree_rss_host_total_kib - btr_wb_res_kib))
+          btr_wb_avail_label="physical-minus-reserve"
+          btr_wb_avail_note="; Windows available ${btr_wb_raw_avail} KiB is below half of physical RAM (Hyper-V balloon, #8931): budget uses physical ${bootstrap_tree_rss_host_total_kib} KiB - reserve ${btr_wb_res_kib} KiB (${btr_wb_res#*|}) = ${bootstrap_tree_rss_host_available_kib} KiB"
+        else
+          btr_wb_avail_note="; Windows available ${btr_wb_raw_avail} KiB is below half of physical RAM but the host reserve is unusable (${btr_wb_res#*|}); measured available kept"
+        fi
+      fi ;;
+  esac
+  btr_wb_budget=$((bootstrap_tree_rss_host_total_kib / 100 * btr_wb_pct))
+  btr_wb_budget_bound="host RAM ${bootstrap_tree_rss_host_total_kib} KiB x ${btr_wb_pct}%"
+  if [ -n "$bootstrap_tree_rss_host_available_kib" ]; then
+    btr_wb_avail=$((bootstrap_tree_rss_host_available_kib / 4 * 3))
+    if [ "$btr_wb_avail" -lt "$btr_wb_budget" ]; then
+      btr_wb_budget=$btr_wb_avail
+      btr_wb_budget_bound="3/4 of ${btr_wb_avail_label} ${bootstrap_tree_rss_host_available_kib} KiB"
+    fi
+  fi
+  bootstrap_tree_rss_plan_budget_kib=$btr_wb_budget
+  btr_wb_fit=$(((btr_wb_budget - BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB) / btr_wb_worker))
+  btr_wb_small=0
+  if [ "$btr_wb_fit" -lt 1 ]; then
+    # Small-host single-worker mode (2026-11-06): the host cannot hold one
+    # worker at floor x margin (24 GiB macOS arm64: ~18 GiB at 75% vs ~28 GiB).
+    # Run exactly ONE worker under the host budget at the max host share
+    # (still bounded by 3/4 of available); a runaway above that is killed.
+    # Logged as small-host mode, never silent. Refused only when the budget
+    # cannot even hold the phase base.
+    btr_wb_sbudget=$((bootstrap_tree_rss_host_total_kib / 100 * BOOTSTRAP_TREE_RSS_HOST_PCT_MAX))
+    btr_wb_sbound="host RAM ${bootstrap_tree_rss_host_total_kib} KiB x ${BOOTSTRAP_TREE_RSS_HOST_PCT_MAX}% (small-host max)"
+    if [ -n "$bootstrap_tree_rss_host_available_kib" ] && [ "$btr_wb_avail" -lt "$btr_wb_sbudget" ]; then
+      btr_wb_sbudget=$btr_wb_avail
+      btr_wb_sbound="3/4 of ${btr_wb_avail_label} ${bootstrap_tree_rss_host_available_kib} KiB"
+    fi
+    # ponytail: TEMPORARY relaxation, remove with the full-CLI peak RSS fix
+    # (doc/08_tracking/bug/stage2_compiler_tests_rss_headroom_temp_2026-11-13.md).
+    # Old budget (above): min(total x 75%, 3/4 x available). Relaxed:
+    # min(total x 75%, available - BOOTSTRAP_TREE_RSS_SMALL_HOST_TEMP_HEADROOM_KIB,
+    # one-worker requirement), used only when it is LARGER than the old budget
+    # (never a new refusal). Still exactly one worker. Recorded in the receipt
+    # as bound small-host-one-worker-temp and in the budget text.
+    btr_wb_temp=0
+    if [ -n "$bootstrap_tree_rss_host_available_kib" ] &&
+       [ "$bootstrap_tree_rss_host_available_kib" -gt "$BOOTSTRAP_TREE_RSS_SMALL_HOST_TEMP_HEADROOM_KIB" ]; then
+      btr_wb_tbudget=$((bootstrap_tree_rss_host_available_kib - BOOTSTRAP_TREE_RSS_SMALL_HOST_TEMP_HEADROOM_KIB))
+      btr_wb_tmax=$((bootstrap_tree_rss_host_total_kib / 100 * BOOTSTRAP_TREE_RSS_HOST_PCT_MAX))
+      [ "$btr_wb_tbudget" -le "$btr_wb_tmax" ] || btr_wb_tbudget=$btr_wb_tmax
+      [ "$btr_wb_tbudget" -le "$btr_wb_one" ] || btr_wb_tbudget=$btr_wb_one
+      if [ "$btr_wb_tbudget" -gt "$btr_wb_sbudget" ]; then
+        btr_wb_sbudget=$btr_wb_tbudget
+        btr_wb_sbound="TEMPORARY ${btr_wb_avail_label} ${bootstrap_tree_rss_host_available_kib} KiB -${BOOTSTRAP_TREE_RSS_SMALL_HOST_TEMP_HEADROOM_KIB} KiB headroom, <= ${BOOTSTRAP_TREE_RSS_HOST_PCT_MAX}% of host RAM and the one-worker requirement (was 3/4 of available; bug stage2_compiler_tests_rss_headroom_temp_2026-11-13)"
+        btr_wb_temp=1
+      fi
+    fi
+    if [ "$btr_wb_sbudget" -gt "$BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB" ]; then
+      btr_wb_small=1
+      btr_wb_fit=1
+      btr_wb_budget=$btr_wb_sbudget
+      btr_wb_budget_bound=$btr_wb_sbound
+      bootstrap_tree_rss_plan_budget_kib=$btr_wb_budget
+    fi
+  fi
+  [ "$btr_wb_fit" -ge 1 ] || {
+    bootstrap_tree_rss_refusal="tree RSS policy: whole-build phase cannot fit one full-CLI build worker: host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}; host RAM via ${bootstrap_tree_rss_host_total_source}) is below the one-worker requirement ${btr_wb_one} KiB (${btr_wb_price}); free host memory (another lane?), raise tree_rss_host_pct (max ${BOOTSTRAP_TREE_RSS_HOST_PCT_MAX}), or lower the phase pricing for a warm-cache lane via SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB (<= ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB} KiB)"
+    return 1
+  }
+  bootstrap_tree_rss_plan_workers=$btr_wb_fit
+  [ "$bootstrap_tree_rss_plan_workers" -le "$btr_wb_requested" ] || bootstrap_tree_rss_plan_workers=$btr_wb_requested
+  bootstrap_tree_rss_plan_cap_kib=$((BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB + bootstrap_tree_rss_plan_workers * btr_wb_worker))
+  [ "$btr_wb_small" = 0 ] || bootstrap_tree_rss_plan_cap_kib=$btr_wb_budget
+  # Guarded two-worker floor (bootstrap_tree_rss_two_worker_floor): only a
+  # fitted 1 under a >= 2 request is ever considered; FIT >= 2 is untouched.
+  btr_wb_floored=0
+  btr_wb_floor_note=
+  if [ "$btr_wb_requested" -ge 2 ] && [ "$bootstrap_tree_rss_plan_workers" -eq 1 ]; then
+    bootstrap_tree_rss_two_worker_floor "$btr_wb_requested" 1 "$btr_wb_small" \
+      "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" "${btr_wb_raw_avail:-}" \
+      "$(bootstrap_tree_rss_host_reserve_kib "$bootstrap_tree_rss_host_total_kib" "$btr_wb_root")" \
+      "$(bootstrap_tree_rss_ceiling_kib 2 "$bootstrap_tree_rss_host_total_kib")"
+    btr_wb_floor_note="; $bootstrap_tree_rss_floor_note"
+    if [ "$bootstrap_tree_rss_floor_workers" -eq 2 ]; then
+      btr_wb_floored=1
+      bootstrap_tree_rss_plan_workers=2
+      bootstrap_tree_rss_plan_cap_kib=$bootstrap_tree_rss_floor_cap_kib
+      btr_wb_price="base ${BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB} KiB + worker floor ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB} KiB x 100% (guarded two-worker floor)"
+    fi
+  fi
+  btr_wb_default_ceiling=$(bootstrap_tree_rss_ceiling_kib "$bootstrap_tree_rss_plan_workers" "$bootstrap_tree_rss_host_total_kib")
+  bootstrap_tree_rss_plan_bound=worker-floor
+  [ "$btr_wb_floored" = 0 ] || bootstrap_tree_rss_plan_bound=two-worker-guarded-floor
+  if [ "$bootstrap_tree_rss_plan_cap_kib" -gt "$btr_wb_default_ceiling" ]; then
+    bootstrap_tree_rss_plan_ceiling_kib=$bootstrap_tree_rss_plan_cap_kib
+    bootstrap_tree_rss_plan_bound=worker-floor-elevated
+  fi
+  if [ "$btr_wb_small" = 1 ]; then
+    bootstrap_tree_rss_plan_bound=small-host-one-worker
+    [ "$btr_wb_temp" = 0 ] || bootstrap_tree_rss_plan_bound=small-host-one-worker-temp
+    [ "$bootstrap_tree_rss_plan_ceiling_kib" = 0 ] || bootstrap_tree_rss_plan_bound=small-host-one-worker-elevated
+    btr_wb_price="SMALL-HOST MODE: 1 worker under host budget (one-worker requirement $btr_wb_one KiB = $btr_wb_price exceeds it)"
+  fi
+  bootstrap_tree_rss_plan_timeout_scale=$(bootstrap_tree_rss_timeout_scale "$btr_wb_requested" "$bootstrap_tree_rss_plan_workers")
+  # compiler_cli_build row (BOOTSTRAP_TREE_RSS_PHASE_CLI_ROW_CAP_KIB): the
+  # plan cap by default (one worker, small host, or a plan already above it);
+  # the row cap when >= 2 workers run and it is above the plan cap. A host
+  # budget (same bound admission applies) that holds the 2-worker plan but
+  # not the row cap is REFUSED, never left at the plan cap run 11 died at;
+  # one build thread (one MIR worker) is the documented way through. The row
+  # cap is the campaign envelope (max, not sum) only for serial tool rows,
+  # so it also requires BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1.
+  bootstrap_tree_rss_plan_cli_row_cap_kib=$bootstrap_tree_rss_plan_cap_kib
+  bootstrap_tree_rss_plan_cli_row_ceiling_kib=$bootstrap_tree_rss_plan_ceiling_kib
+  bootstrap_tree_rss_plan_cli_row_bound=$bootstrap_tree_rss_plan_bound
+  btr_wb_cli=$BOOTSTRAP_TREE_RSS_PHASE_CLI_ROW_CAP_KIB
+  btr_wb_cli_note=
+  # A guarded-floor plan keeps the row at the plan cap, like one worker: the
+  # floor only applies where the budget cannot hold the 60 GiB row, and the
+  # compiler's MIR pool re-admits its second worker against this cap (run 11
+  # MIR workers ~25 GiB each stay at one), so the row is not refused here.
+  if [ "$btr_wb_small" = 0 ] && [ "$btr_wb_floored" = 0 ] && [ "$bootstrap_tree_rss_plan_workers" -ge 2 ] &&
+     [ "$btr_wb_cli" -gt "$bootstrap_tree_rss_plan_cap_kib" ]; then
+    if [ "$btr_wb_cli" -le "$btr_wb_budget" ]; then
+      bootstrap_tree_rss_plan_cli_row_cap_kib=$btr_wb_cli
+      bootstrap_tree_rss_plan_cli_row_ceiling_kib=0
+      [ "$btr_wb_cli" -le "$btr_wb_default_ceiling" ] || bootstrap_tree_rss_plan_cli_row_ceiling_kib=$btr_wb_cli
+      bootstrap_tree_rss_plan_cli_row_bound=cli-row-mir-shards
+      btr_wb_cli_note="; compiler_cli_build row cap ${btr_wb_cli} KiB (bound cli-row-mir-shards)"
+    else
+      bootstrap_tree_rss_refusal="tree RSS policy: compiler_cli_build row needs ${btr_wb_cli} KiB with ${bootstrap_tree_rss_plan_workers} MIR workers (run 11: ${bootstrap_tree_rss_plan_cap_kib} KiB is not enough) but the host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}) cannot hold it; free host memory, or pin the phase to one build thread (one MIR worker)"
+      bootstrap_tree_rss_plan_bound=refused
+      return 1
+    fi
+    [ "${BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY:-2}" = 1 ] || {
+      bootstrap_tree_rss_refusal="tree RSS policy: the compiler_cli_build row cap ${btr_wb_cli} KiB is the campaign envelope (the largest row cap, not a sum) and requires serial tool rows: BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1, got '${BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY:-unset (verifier default 2)}'"
+      bootstrap_tree_rss_plan_bound=refused
+      return 1
+    }
+  fi
+  bootstrap_tree_rss_plan_summary="whole-build phase: workers ${bootstrap_tree_rss_plan_workers} (requested ${btr_wb_requested}, host budget fits ${btr_wb_fit}, timeout scale x${bootstrap_tree_rss_plan_timeout_scale}), cap ${bootstrap_tree_rss_plan_cap_kib} KiB = ${btr_wb_price}$([ "$btr_wb_small" = 1 ] || printf ' x %s' "$bootstrap_tree_rss_plan_workers"), host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}; host RAM via ${bootstrap_tree_rss_host_total_source}), default ceiling ${btr_wb_default_ceiling} KiB, elevated ceiling ${bootstrap_tree_rss_plan_ceiling_kib} KiB, bound ${bootstrap_tree_rss_plan_bound}${btr_wb_avail_note}${btr_wb_cli_note}${btr_wb_floor_note}"
+}
+
+# bootstrap_tree_rss_whole_build_export REQUESTED_WORKERS [REPO_ROOT]
+# Plans the phase and publishes the plan the way the campaign and per-row
+# owners consume it:
+#   SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB      the cap
+#   SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB      only when the cap is above
+#       the default ceiling: both owners then admit it through the existing
+#       elevated-ceiling admission (3/4 of REAL total AND available host
+#       memory, enforce mode, declared workers, no fixture hooks) and record
+#       compiler_ceiling_admission=elevated in the receipt
+#   BOOTSTRAP_VERIFY_BUILD_THREADS                 the fitted worker count, so
+#       the compiler's own pool admission (cap x 60% / 9 GB) cannot start more
+#       workers than the cap was priced for
+#   SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE/_BOUND   receipt attribution
+#   bootstrap_tree_rss_plan_timeout_scale  ceil(requested / fitted) bounded by
+#       BOOTSTRAP_TREE_RSS_TIMEOUT_SCALE_MAX (1 for an explicit cap); callers
+#       publish their time budgets through bootstrap_tree_rss_scaled_timeout
+# An explicit SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB already in the
+# environment is kept untouched (a monitored diagnostic attempt, not policy).
+# Monitor mode enforces nothing, and the watchdog still refuses a cap above
+# its default ceiling there (the elevated admission requires enforce mode),
+# so in monitor mode the cap is clamped to the default ceiling and no ceiling
+# is requested; the plan's numbers stay in bootstrap_tree_rss_plan_*.
+# The published pair is then re-admitted through bootstrap_tree_rss_resolve
+# WORKERS so a refusal (host headroom consumed by another lane, fixture hooks
+# present, ...) is reported here with the owners' own reason, before the
+# phase starts, instead of as an exit-125 receipt minutes later.
+bootstrap_tree_rss_whole_build_export() {
+  btr_we_requested=$(bootstrap_tree_rss_canonical_uint "${1:-}" 3)
+  # Attribution is rebuilt by bootstrap_tree_rss_scaled_timeout per phase.
+  BOOTSTRAP_VERIFY_TIMEOUT_SOURCE=
+  bootstrap_tree_rss_plan_timeout_scale=1
+  # The compiler_cli_build row cap is published only by an admitted
+  # enforce-mode plan below; never inherited from a caller.
+  unset SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB \
+    SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND
+  if [ -n "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-}" ]; then
+    # Kept as-is, but admitted NOW (over-ceiling is refused here, not by the
+    # campaign minutes later) and the requested count is published unchanged
+    # so the verifier does not fall back to its own default.
+    bootstrap_tree_rss_refusal=
+    [ -n "$btr_we_requested" ] && [ "$btr_we_requested" -ge 1 ] && [ "$btr_we_requested" -le 128 ] || {
+      bootstrap_tree_rss_refusal="tree RSS policy: whole-build phase worker count must be a decimal 1..128, got '${1:-}'"
+      return 1
+    }
+    bootstrap_tree_rss_resolve "$btr_we_requested" "${2:-}" || return 1
+    bootstrap_tree_rss_plan_workers=$btr_we_requested
+    bootstrap_tree_rss_plan_cap_kib=$bootstrap_tree_rss_cap_kib
+    bootstrap_tree_rss_plan_ceiling_kib=0
+    bootstrap_tree_rss_plan_budget_kib=0
+    bootstrap_tree_rss_plan_bound=explicit
+    BOOTSTRAP_VERIFY_BUILD_THREADS=$btr_we_requested
+    export BOOTSTRAP_VERIFY_BUILD_THREADS
+    bootstrap_tree_rss_plan_summary="whole-build phase: explicit SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB} KiB kept, not policy-priced (${bootstrap_tree_rss_summary}); workers ${bootstrap_tree_rss_plan_workers} as requested"
+    return 0
+  fi
+  bootstrap_tree_rss_whole_build_plan "$@" || return 1
+  # Windows per-file verification uses module-scoped units, not the historical
+  # whole-closure MIR price. A 10 GiB enforced owner covers the measured
+  # 3.68 GiB coordinator plus two 3 GiB units. Never widen a requested count of
+  # one, relax a caller's cap, or use the balloon-adjusted availability here.
+  case "$(bootstrap_tree_rss_platform)" in
+    MINGW*|MSYS*|CYGWIN*)
+      if [ "${SIMPLE_FILE_WORKERS:-1}" = 1 ] &&
+         [ "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" = enforce ] &&
+         [ "$btr_we_requested" -ge 2 ] && [ "$bootstrap_tree_rss_plan_workers" -eq 1 ]; then
+        btr_we_reserve=$(bootstrap_tree_rss_host_reserve_kib "$bootstrap_tree_rss_host_total_kib" "${2:-}")
+        if bootstrap_tree_rss_is_uint "${btr_wb_raw_avail:-}" 15 &&
+           bootstrap_tree_rss_is_uint "$btr_we_reserve" 15 &&
+           [ "$bootstrap_tree_rss_plan_cap_kib" -ge 10485760 ] &&
+           [ "$((btr_wb_raw_avail - btr_we_reserve))" -ge 10485760 ]; then
+          bootstrap_tree_rss_plan_workers=2
+          bootstrap_tree_rss_plan_cap_kib=10485760
+          bootstrap_tree_rss_plan_ceiling_kib=0
+          bootstrap_tree_rss_plan_cli_row_cap_kib=10485760
+          bootstrap_tree_rss_plan_bound=windows-file-worker-floor
+          bootstrap_tree_rss_plan_timeout_scale=$(bootstrap_tree_rss_timeout_scale "$btr_we_requested" 2)
+          bootstrap_tree_rss_plan_summary="${bootstrap_tree_rss_plan_summary}; Windows per-file route: 2 unit workers under 10485760 KiB, measured available ${btr_wb_raw_avail} KiB minus reserve ${btr_we_reserve} KiB; compiler re-admission remains authoritative"
+        fi
+      fi ;;
+    *)
+      # POSIX (Linux/macOS) per-file verification uses module-scoped units too;
+      # on a 64 GB host the 50% whole-closure budget forces SMALL-HOST MODE (1
+      # worker), which Phase C then refuses when SIMPLE_FILE_WORKERS=1. Keep
+      # two-pass / explicit-1 requests untouched and cap at available - reserve
+      # and the two-worker default ceiling.
+      if [ "${SIMPLE_FILE_WORKERS:-1}" = 1 ] &&
+         [ "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" = enforce ] &&
+         [ "$btr_we_requested" -ge 2 ] && [ "$bootstrap_tree_rss_plan_workers" -eq 1 ]; then
+        btr_we_reserve=$(bootstrap_tree_rss_host_reserve_kib "$bootstrap_tree_rss_host_total_kib" "${2:-}")
+        if bootstrap_tree_rss_is_uint "${btr_wb_raw_avail:-}" 15 &&
+           bootstrap_tree_rss_is_uint "$btr_we_reserve" 15 &&
+           [ "$bootstrap_tree_rss_plan_cap_kib" -ge 10485760 ] &&
+           [ "$btr_wb_raw_avail" -gt "$btr_we_reserve" ]; then
+          btr_we_headroom=$((btr_wb_raw_avail - btr_we_reserve))
+          btr_we_cap=$bootstrap_tree_rss_plan_cap_kib
+          [ "$btr_we_cap" -le "$btr_we_headroom" ] || btr_we_cap=$btr_we_headroom
+          btr_we_def_ceil=$(bootstrap_tree_rss_ceiling_kib 2 "$bootstrap_tree_rss_host_total_kib")
+          [ "$btr_we_cap" -le "$btr_we_def_ceil" ] || btr_we_cap=$btr_we_def_ceil
+          if [ "$btr_we_cap" -ge 10485760 ]; then
+            bootstrap_tree_rss_plan_workers=2
+            bootstrap_tree_rss_plan_cap_kib=$btr_we_cap
+            bootstrap_tree_rss_plan_ceiling_kib=0
+            bootstrap_tree_rss_plan_cli_row_cap_kib=$btr_we_cap
+            bootstrap_tree_rss_plan_cli_row_ceiling_kib=0
+            bootstrap_tree_rss_plan_bound=posix-file-worker-floor
+            bootstrap_tree_rss_plan_cli_row_bound=posix-file-worker-floor
+            bootstrap_tree_rss_plan_timeout_scale=$(bootstrap_tree_rss_timeout_scale "$btr_we_requested" 2)
+            bootstrap_tree_rss_plan_summary="${bootstrap_tree_rss_plan_summary}; POSIX per-file route: 2 unit workers under ${btr_we_cap} KiB, measured available ${btr_wb_raw_avail} KiB minus reserve ${btr_we_reserve} KiB; compiler re-admission remains authoritative"
+          fi
+        fi
+      fi ;;
+  esac
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$bootstrap_tree_rss_plan_cap_kib
+  if [ "$bootstrap_tree_rss_plan_ceiling_kib" -gt 0 ]; then
+    if [ "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" = enforce ]; then
+      SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$bootstrap_tree_rss_plan_ceiling_kib
+      export SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
+    else
+      SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$(bootstrap_tree_rss_ceiling_kib "$bootstrap_tree_rss_plan_workers" "$bootstrap_tree_rss_host_total_kib")
+      bootstrap_tree_rss_plan_bound=worker-floor-monitor-clamped
+      bootstrap_tree_rss_plan_summary="${bootstrap_tree_rss_plan_summary}; monitor mode: cap clamped to the default ceiling ${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB} KiB, no elevated ceiling requested"
+    fi
+  fi
+  BOOTSTRAP_VERIFY_BUILD_THREADS=$bootstrap_tree_rss_plan_workers
+  # Guarded two-worker floor: pin MIR to one worker (see
+  # bootstrap_tree_rss_two_worker_floor). A caller-set value wins; a value
+  # this function published for an earlier floored plan is withdrawn when
+  # the new plan is not floored.
+  if [ "${bootstrap_tree_rss_floor_mir_published:-0}" = 1 ]; then
+    unset SIMPLE_MIR_SHARD_WORKER_KB
+    bootstrap_tree_rss_floor_mir_published=0
+  fi
+  if [ "$bootstrap_tree_rss_plan_bound" = two-worker-guarded-floor ]; then
+    if [ -n "${SIMPLE_MIR_SHARD_WORKER_KB:-}" ]; then
+      bootstrap_tree_rss_plan_summary="${bootstrap_tree_rss_plan_summary}; caller SIMPLE_MIR_SHARD_WORKER_KB=${SIMPLE_MIR_SHARD_WORKER_KB} kept"
+    else
+      SIMPLE_MIR_SHARD_WORKER_KB=$BOOTSTRAP_TREE_RSS_FLOOR_MIR_WORKER_KB
+      export SIMPLE_MIR_SHARD_WORKER_KB
+      bootstrap_tree_rss_floor_mir_published=1
+    fi
+  fi
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=$bootstrap_tree_rss_plan_bound
+  export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB BOOTSTRAP_VERIFY_BUILD_THREADS \
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND
+  # compiler_cli_build row cap: published for the row owner
+  # (bootstrap_tree_rss_row_cap_enter) and the campaign envelope only in
+  # enforce mode (monitor mode cannot admit an elevated ceiling), and
+  # re-admitted NOW through the same owner check as the phase pair, so a host
+  # that cannot hold it refuses the phase here instead of mid-row.
+  if [ "$bootstrap_tree_rss_plan_cli_row_cap_kib" -gt "$bootstrap_tree_rss_plan_cap_kib" ] &&
+     [ "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" = enforce ]; then
+    btr_we_cli_refusal=$(
+      SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$bootstrap_tree_rss_plan_cli_row_cap_kib
+      SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=$bootstrap_tree_rss_plan_cli_row_bound
+      if [ "$bootstrap_tree_rss_plan_cli_row_ceiling_kib" -gt 0 ]; then
+        SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$bootstrap_tree_rss_plan_cli_row_ceiling_kib
+        export SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
+      fi
+      bootstrap_tree_rss_resolve "$bootstrap_tree_rss_plan_workers" "${2:-}" || {
+        printf '%s' "${bootstrap_tree_rss_refusal:-refused}"
+        exit 1
+      }
+    ) || {
+      bootstrap_tree_rss_refusal="tree RSS policy: compiler_cli_build row cap $bootstrap_tree_rss_plan_cli_row_cap_kib KiB not admitted: $btr_we_cli_refusal"
+      return 1
+    }
+    SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=$bootstrap_tree_rss_plan_cli_row_cap_kib
+    SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB=$bootstrap_tree_rss_plan_cli_row_ceiling_kib
+    SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND=$bootstrap_tree_rss_plan_cli_row_bound
+    export SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB \
+      SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND
+  fi
+  bootstrap_tree_rss_resolve "$bootstrap_tree_rss_plan_workers" "${2:-}" || return 1
+}
+
+# Validate the published compiler_cli_build row cap against the published
+# phase pair. Sets btr_rc_cap/_ceiling/_bound; returns 1 with
+# bootstrap_tree_rss_refusal on anything malformed or incoherent (fail closed).
+bootstrap_tree_rss__cli_row_published() {
+  btr_rc_cap=$SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB
+  btr_rc_ceiling=${SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB:-}
+  btr_rc_bound=${SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND:-}
+  btr_rc_phase=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-}
+  case "$btr_rc_cap" in ''|0*|*[!0-9]*)
+    bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB must be a canonical positive decimal KiB value, got '$btr_rc_cap'"; return 1 ;;
+  esac
+  case "$btr_rc_ceiling" in 0) ;; ''|0*|*[!0-9]*)
+    bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB must be 0 or a canonical positive decimal KiB value, got '$btr_rc_ceiling'"; return 1 ;;
+  esac
+  [ "${#btr_rc_cap}" -le 15 ] && [ "${#btr_rc_ceiling}" -le 15 ] || {
+    bootstrap_tree_rss_refusal='tree RSS policy: compiler_cli_build row cap/ceiling is oversized'; return 1;
+  }
+  bootstrap_tree_rss_attribution_valid "$btr_rc_bound" || {
+    bootstrap_tree_rss_refusal="tree RSS policy: invalid SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND '$btr_rc_bound' (want [a-z][a-z-]{0,31})"; return 1;
+  }
+  case "$btr_rc_phase" in ''|0*|*[!0-9]*)
+    bootstrap_tree_rss_refusal="tree RSS policy: compiler_cli_build row cap $btr_rc_cap KiB published without a published phase cap"; return 1 ;;
+  esac
+  [ "${#btr_rc_phase}" -le 15 ] && [ "$btr_rc_cap" -gt "$btr_rc_phase" ] || {
+    bootstrap_tree_rss_refusal="tree RSS policy: compiler_cli_build row cap $btr_rc_cap KiB is at or below the phase cap $btr_rc_phase KiB"; return 1;
+  }
+  [ "$btr_rc_ceiling" = 0 ] || [ "$btr_rc_ceiling" -ge "$btr_rc_cap" ] || {
+    bootstrap_tree_rss_refusal="tree RSS policy: compiler_cli_build row cap $btr_rc_cap KiB is above its ceiling $btr_rc_ceiling KiB"; return 1;
+  }
+}
+
+# bootstrap_tree_rss_row_cap_enter TASK / bootstrap_tree_rss_row_cap_leave
+# Scope the published compiler_cli_build row cap (whole_build_export) around
+# that ONE row: the row owner then sees cap/ceiling/bound for the row, and
+# leave restores the phase pair exactly (set-ness included) for the next row.
+# Any other TASK, or no published row cap, is a no-op. Returns 1 with
+# bootstrap_tree_rss_refusal when the published row cap is malformed: the
+# caller must fail the row, never run it at the phase cap or a default.
+bootstrap_tree_rss_row_cap_enter() {
+  bootstrap_tree_rss_refusal=
+  btr_rc_active=0
+  [ "${1:-}" = compiler_cli_build ] || return 0
+  [ -n "${SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB+x}" ] || return 0
+  bootstrap_tree_rss__cli_row_published || return 1
+  [ "${BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY:-2}" = 1 ] || {
+    bootstrap_tree_rss_refusal="tree RSS policy: compiler_cli_build row cap $btr_rc_cap KiB requires serial tool rows (BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1, got '${BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY:-unset}'): the campaign envelope is the largest row cap, not a sum"
+    return 1
+  }
+  btr_rc_prev_cap=$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+  btr_rc_prev_bound_set=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND+x}
+  btr_rc_prev_bound=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND-}
+  btr_rc_prev_ceiling_set=${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB+x}
+  btr_rc_prev_ceiling=${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB-}
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$btr_rc_cap
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=$btr_rc_bound
+  export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND
+  if [ "$btr_rc_ceiling" != 0 ]; then
+    SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$btr_rc_ceiling
+    export SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
+  fi
+  btr_rc_active=1
+}
+
+bootstrap_tree_rss_row_cap_leave() {
+  [ "${btr_rc_active:-0}" = 1 ] || return 0
+  btr_rc_active=0
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$btr_rc_prev_cap
+  if [ -n "$btr_rc_prev_bound_set" ]; then
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=$btr_rc_prev_bound
+  else
+    unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND
+  fi
+  if [ -n "$btr_rc_prev_ceiling_set" ]; then
+    SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$btr_rc_prev_ceiling
+  else
+    unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
+  fi
+}
+
+# bootstrap_tree_rss_campaign_envelope
+# The campaign watchdog wraps every row of the phase, which run serially, so
+# its cap is the LARGEST published row cap: the compiler_cli_build row cap
+# when published (with its ceiling), else the phase pair. The receipt keeps
+# the phase's own bound (the row receipt carries cli-row-mir-shards). Sets
+# bootstrap_tree_rss_campaign_{cap_kib,ceiling_kib,bound}; ceiling_kib is
+# empty when no elevated ceiling is published. Returns 1 with
+# bootstrap_tree_rss_refusal on a malformed published row cap.
+bootstrap_tree_rss_campaign_envelope() {
+  bootstrap_tree_rss_refusal=
+  bootstrap_tree_rss_campaign_cap_kib=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}
+  bootstrap_tree_rss_campaign_ceiling_kib=${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-}
+  bootstrap_tree_rss_campaign_bound=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND:-unspecified}
+  [ -n "${SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB+x}" ] || return 0
+  bootstrap_tree_rss__cli_row_published || return 1
+  bootstrap_tree_rss_campaign_cap_kib=$btr_rc_cap
+  [ "$btr_rc_ceiling" = 0 ] || bootstrap_tree_rss_campaign_ceiling_kib=$btr_rc_ceiling
 }
 
 # Worker count of a compiler command line: the value of the last --threads /
@@ -424,12 +1386,39 @@ bootstrap_tree_rss__selftest() {
   btr_st_dir=$(mktemp -d "${TMPDIR:-/tmp}/tree-rss-policy.XXXXXX") || return 2
   btr_st_fail=0
   btr_st_n=0
+  # Stage 2 runs its tool rows serially (bootstrap-from-scratch.sh); the
+  # compiler_cli_build row cap requires it. Cases that need otherwise say so.
+  BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1
+  export BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY
   printf 'MemTotal:       134094232 kB\n' >"$btr_st_dir/big"
   printf 'MemTotal:        16000000 kB\n' >"$btr_st_dir/small"
+  printf 'MemTotal:        4000000 kB\n' >"$btr_st_dir/tiny"
   : >"$btr_st_dir/none"
+  # The 2026-11-05 incident host (121 GiB aarch64), idle and with another
+  # lane holding most of it (MemAvailable 44 GB), and a 64 GiB host.
+  printf 'MemTotal:       127600812 kB\nMemFree:        90000000 kB\nMemAvailable:   112044352 kB\n' >"$btr_st_dir/aarch64"
+  printf 'MemTotal:       127600812 kB\nMemFree:        30000000 kB\nMemAvailable:    44000000 kB\n' >"$btr_st_dir/aarch64-busy"
+  printf 'MemTotal:        66865260 kB\nMemAvailable:    60000000 kB\n' >"$btr_st_dir/host64"
+  # Same host, a lane holding ~38 GiB: 3/4 of 82000000 = 61500000 KiB still
+  # fits 2 workers (60817408) but not the 62914560 KiB compiler_cli_build row.
+  printf 'MemTotal:       127600812 kB\nMemFree:        70000000 kB\nMemAvailable:    82000000 kB\n' >"$btr_st_dir/aarch64-tight"
+  # TEMPORARY small-host headroom fixtures (bug stage2_compiler_tests_rss_
+  # headroom_temp_2026-11-13): a 128 GB host with other lanes resident,
+  # 31 GiB / 37 GiB / ~11 GiB available.
+  printf 'MemTotal:       133000000 kB\nMemFree:        32505856 kB\nMemAvailable:    32505856 kB\n' >"$btr_st_dir/win-busy"
+  printf 'MemTotal:       133000000 kB\nMemFree:        38797312 kB\nMemAvailable:    38797312 kB\n' >"$btr_st_dir/win-busy37"
+  printf 'MemTotal:       133000000 kB\nMemFree:        12000000 kB\nMemAvailable:    12000000 kB\n' >"$btr_st_dir/win-very-busy"
+  # W21: MSYS /proc/meminfo on the ballooned 64 GiB Hyper-V guest (no
+  # MemAvailable line), and the same host at more than half free.
+  printf 'MemTotal:        66865260 kB\nMemFree:         15518280 kB\n' >"$btr_st_dir/win-balloon"
+  printf 'MemTotal:        66865260 kB\nMemFree:         40000000 kB\n' >"$btr_st_dir/win-half"
+  # Fixtures are platform-neutral unless a case names a platform (the
+  # Windows balloon substitution is pinned by its own w21-* cases).
+  BOOTSTRAP_TREE_RSS_TEST_PLATFORM=Linux
+  export BOOTSTRAP_TREE_RSS_TEST_PLATFORM
   printf 'host_config:\n  schema: simple-host-config-v1\n  tree_rss_per_job_mib: 200\n' >"$btr_st_dir/good.sdn"
   printf 'host_config:\n  schema: simple-host-config-v1\n  tree_rss_per_job_mib: many\n' >"$btr_st_dir/bad.sdn"
-  printf 'host_config:\n  schema: simple-host-config-v1\n  tree_rss_host_pct: 90\n' >"$btr_st_dir/pct.sdn"
+  printf 'host_config:\n  schema: simple-host-config-v1\n  tree_rss_host_pct: 95\n' >"$btr_st_dir/pct.sdn"
   btr_st_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P) || btr_st_root=
   # expect LABEL MEMINFO JOBS EXPLICIT_CAP WANT [SETUP]
   #   WANT = cap:ceiling:bound:source, or REFUSED (a refusal WITH a reason)
@@ -439,7 +1428,9 @@ bootstrap_tree_rss__selftest() {
     btr_st_got=$(
       unset SIMPLE_BOOTSTRAP_TREE_RSS_BASE_MIB SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT
       unset SIMPLE_HOST_TREE_RSS_BASE_MIB SIMPLE_HOST_TREE_RSS_PER_JOB_MIB SIMPLE_HOST_TREE_RSS_HOST_PCT
+      unset SIMPLE_BOOTSTRAP_WORKER_MEM_MIB SIMPLE_HOST_WORKER_MEM_MIB
       unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+      unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND
       [ -z "$4" ] || SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$4
       unset BOOTSTRAP_TREE_RSS_MEMINFO_PATH BOOTSTRAP_TREE_RSS_TEST_FIXTURE SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE
       SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
@@ -465,40 +1456,53 @@ bootstrap_tree_rss__selftest() {
     fi
   }
   # Historical behaviour is unchanged while no worker count is declared.
-  btr_st_expect undeclared-keeps-floor big 0 '' 5859375:50331648:floor:default
+  btr_st_expect undeclared-keeps-floor big 0 '' 5859375:58720256:floor:default
   # HIR pricing (fanout host, 5120 MiB/job): 8 jobs = 3 GiB + 40 GiB, which the
   # compiler's clamp turns into exactly 8 admitted HIR workers (x60% / 3000000).
-  btr_st_expect eight-jobs-price-hir-workers big 8 '' 45088768:50331648:budget:default
+  btr_st_expect eight-jobs-price-hir-workers big 8 '' 45088768:58720256:budget:default
   # Windows pricing (frontend pinned, 96 MiB codegen shard): 8 jobs keep the floor.
-  btr_st_expect eight-jobs-windows-price-keep-floor big 8 '' 5859375:50331648:floor:default BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=96
+  # Windows pricing falls to the floor, which the host-scaled default lifts to
+  # (base + jobs * 3300 MiB) -- 3072 + 8 * 3300 MiB -- under 60% of host RAM.
+  btr_st_expect eight-jobs-windows-price-host-scaled big 8 '' 30179328:58720256:host-scaled:default BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=96
+  # The incident host (128 GB, 80 jobs, worker_mem_mib 1200): 60% of RAM, not 5.59 GiB.
+  btr_st_expect windows-128gb-80-jobs-host-scaled big 80 '' 80456520:87031808:host-scaled:default 'BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=96 SIMPLE_BOOTSTRAP_WORKER_MEM_MIB=1200'
+  btr_st_expect windows-16gb-80-jobs-small small 80 '' 8000000:58720256:host-fraction:default 'BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=96 SIMPLE_BOOTSTRAP_WORKER_MEM_MIB=1200'
+  btr_st_expect windows-unknown-host-keeps-budget none 80 '' 11010048:58720256:budget:default 'BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=96 SIMPLE_BOOTSTRAP_WORKER_MEM_MIB=1200'
+  btr_st_expect windows-explicit-cap-bypasses-scale big 80 20000000 20000000:87031808:explicit:explicit-env 'BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=96'
+  btr_st_expect windows-garbage-worker-mem-uses-default big 8 '' 30179328:58720256:host-scaled:default 'BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=96 SIMPLE_BOOTSTRAP_WORKER_MEM_MIB=lots'
   # Beyond that the host fraction and the hard ceiling bound the tree.
-  btr_st_expect nineteen-jobs-hit-ceiling big 19 '' 50331648:50331648:hard-ceiling:default
+  btr_st_expect nineteen-jobs-hit-ceiling big 19 '' 58720256:58720256:hard-ceiling:default
   # The incident: 80 jobs needs more than the old 6 GB / 7 GB pair.
   btr_st_expect eighty-jobs-scale big 80 '' 67047100:87031808:host-fraction:default
-  btr_st_expect forty-jobs-scale big 40 '' 50331648:50331648:hard-ceiling:default
+  btr_st_expect forty-jobs-scale big 40 '' 58720256:58720256:hard-ceiling:default
   # Monotone in the worker count.
   btr_st_expect hard-max-jobs big 128 '' 67047100:100570674:host-fraction:default
   # Host fraction: a 16 GB host never hands half its RAM plus to one tree.
-  btr_st_expect small-host-fraction small 80 '' 8000000:50331648:host-fraction:default
+  btr_st_expect small-host-fraction small 80 '' 8000000:58720256:host-fraction:default
   # Unknown host RAM is no evidence: the job-scaled budget applies, but nothing
   # widens the ceiling beyond the static value.
-  btr_st_expect unknown-host-fails-closed none 80 '' 50331648:50331648:hard-ceiling:default
+  btr_st_expect unknown-host-fails-closed none 80 '' 58720256:58720256:hard-ceiling:default
   # Explicit cap: honoured under the ceiling, refused (not clamped) above it.
   btr_st_expect explicit-under-ceiling big 80 20000000 20000000:87031808:explicit:explicit-env
   btr_st_expect explicit-over-ceiling-refused big 80 87031809 REFUSED
-  btr_st_expect explicit-over-static-refused big 0 51000000 REFUSED
+  # Each widening admits what the previous static refused (probes above the old
+  # statics, under the new one); over the new static it still refuses.
+  btr_st_expect explicit-over-old-static-admitted big 0 51000000 51000000:58720256:explicit:explicit-env
+  btr_st_expect explicit-over-52g-static-admitted big 0 55000000 55000000:58720256:explicit:explicit-env
+  btr_st_expect explicit-over-static-refused big 0 59000000 REFUSED
   btr_st_expect explicit-garbage-refused big 80 lots REFUSED
   # Knob overrides, and their fail-closed validation.
   btr_st_expect knob-per-job big 80 '' 19529728:87031808:budget:env-knobs SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB=200
   btr_st_expect knob-host-env big 80 '' 67047100:87031808:host-fraction:env-knobs SIMPLE_HOST_TREE_RSS_BASE_MIB=5120
-  btr_st_expect knob-host-env-base-few-jobs big 8 '' 47185920:50331648:budget:env-knobs SIMPLE_HOST_TREE_RSS_BASE_MIB=5120
+  btr_st_expect knob-host-env-base-few-jobs big 8 '' 47185920:58720256:budget:env-knobs SIMPLE_HOST_TREE_RSS_BASE_MIB=5120
   btr_st_expect knob-runaway-hits-ceiling big 80 '' 87031808:87031808:hard-ceiling:env-knobs 'SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB=4096 SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=75'
-  btr_st_expect knob-pct-over-max-refused big 80 '' REFUSED SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=90
+  btr_st_expect knob-pct-at-max-admitted big 80 '' 87031808:87031808:hard-ceiling:env-knobs 'SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB=4096 SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=90'
+  btr_st_expect knob-pct-over-max-refused big 80 '' REFUSED SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=95
   btr_st_expect knob-garbage-refused big 80 '' REFUSED SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB=many
   btr_st_expect jobs-out-of-range-refused big 129 '' REFUSED
   # Leading zeros: 08/09 used to crash $(( )) and 040 was read as octal 32.
-  btr_st_expect jobs-leading-zero-08 big 08 '' 45088768:50331648:budget:default
-  btr_st_expect jobs-leading-zero-040 big 040 '' 50331648:50331648:hard-ceiling:default
+  btr_st_expect jobs-leading-zero-08 big 08 '' 45088768:58720256:budget:default
+  btr_st_expect jobs-leading-zero-040 big 040 '' 58720256:58720256:hard-ceiling:default
   btr_st_expect jobs-leading-zero-0080 big 0080 '' 67047100:87031808:host-fraction:default
   btr_st_expect jobs-junk-refused big 8x '' REFUSED
   btr_st_expect jobs-negative-refused big -8 '' REFUSED
@@ -522,7 +1526,7 @@ bootstrap_tree_rss__selftest() {
   fi
   # Whole-build phase cap: host fraction clamped to the jobs-scaled ceiling on
   # a large host; a small host keeps its host-fraction bound.
-  for btr_st_pc in big:50331648 small:8000000; do
+  for btr_st_pc in big:58720256 small:8000000; do
     btr_st_n=$((btr_st_n + 1))
     btr_st_got=$(
       unset SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT SIMPLE_HOST_TREE_RSS_HOST_PCT SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE
@@ -533,6 +1537,26 @@ bootstrap_tree_rss__selftest() {
     )
     [ "$btr_st_got" = "${btr_st_pc#*:}" ] || {
       echo "selftest FAIL: phase-cap-${btr_st_pc%%:*}: want ${btr_st_pc#*:} got $btr_st_got" >&2
+      btr_st_fail=1
+    }
+  done
+  # Stage2 native-build at 16 workers uses the same phase pricing: a 128 GB
+  # host gets well above the floor (not the floor as ceiling); a 16 GB host
+  # stays within its host fraction.
+  for btr_st_pc in big:above small:bounded; do
+    btr_st_n=$((btr_st_n + 1))
+    btr_st_got=$(
+      unset SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT SIMPLE_HOST_TREE_RSS_HOST_PCT SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE
+      SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+      BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$btr_st_dir/${btr_st_pc%%:*}"
+      BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1
+      BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=96 bootstrap_tree_rss_resolve 16 '' && bootstrap_tree_rss_phase_cap_kib ''
+    )
+    case "${btr_st_pc#*:}" in
+      above) [ "${btr_st_got:-0}" -gt "$BOOTSTRAP_TREE_RSS_FLOOR_KIB" ] && [ "$btr_st_got" -le 58720256 ] ;;
+      *) [ "${btr_st_got:-0}" -ge "$BOOTSTRAP_TREE_RSS_FLOOR_KIB" ] && [ "$btr_st_got" -le 8000000 ] ;;
+    esac || {
+      echo "selftest FAIL: native-build-phase-cap-${btr_st_pc%%:*}: got $btr_st_got" >&2
       btr_st_fail=1
     }
   done
@@ -547,6 +1571,464 @@ bootstrap_tree_rss__selftest() {
     echo 'selftest FAIL: command worker count' >&2
     btr_st_fail=1
   }
+  # workers = cap / per-worker: 128 GB host fits >= 40 (full CPU use), 16 GB stays small.
+  btr_st_n=$((btr_st_n + 1))
+  [ "$(bootstrap_tree_rss_workers_fit 80456520 1200)" -ge 40 ] &&
+    [ "$(bootstrap_tree_rss_workers_fit 9600000 1200)" -le 8 ] || {
+    echo 'selftest FAIL: workers fit by cap' >&2
+    btr_st_fail=1
+  }
+  # Whole-build phase plan: priced per worker at the floor, workers reduced to
+  # fit, never capped below the floor, refused when one worker cannot fit.
+  # plan LABEL MEMINFO REQUESTED WANT [SETUP]
+  #   WANT = workers:cap:ceiling:bound, or REFUSED=<substring of the reason>
+  btr_st_plan() {
+    btr_st_n=$((btr_st_n + 1))
+    btr_st_got=$(
+      unset SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT SIMPLE_HOST_TREE_RSS_HOST_PCT SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+      unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE
+      SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+      BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$btr_st_dir/$2"
+      BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1
+      [ -z "${5:-}" ] || eval "$5"
+      if bootstrap_tree_rss_whole_build_plan "$3" ''; then
+        printf '%s:%s:%s:%s' "$bootstrap_tree_rss_plan_workers" "$bootstrap_tree_rss_plan_cap_kib" \
+          "$bootstrap_tree_rss_plan_ceiling_kib" "$bootstrap_tree_rss_plan_bound"
+      else
+        printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"
+      fi
+    )
+    case "$4" in
+      REFUSED=*) case "$btr_st_got" in REFUSED=*"${4#REFUSED=}"*) return 0 ;; esac ;;
+      *) [ "$btr_st_got" = "$4" ] && return 0 ;;
+    esac
+    echo "selftest FAIL: plan-$1: want $4 got $btr_st_got" >&2
+    btr_st_fail=1
+  }
+  # 121 GiB host, 8 build threads: 50% of RAM = 63800400 KiB holds 2 workers
+  # at 28311552 KiB each (18 GiB x 150%) over the 4 GiB base, so the plan runs
+  # 2 (not 8) and caps at 60817408 KiB (>= 18 GiB per worker: 27 GiB each).
+  # Since the 18 GiB floor (2026-11-21) that cap is above the 56 GiB static
+  # ceiling, so every two-worker plan needs the elevated-ceiling admission
+  # (3/4 of available: 84033264 KiB here); one worker stays plain worker-floor.
+  btr_st_plan aarch64-8-threads aarch64 8 2:60817408:60817408:worker-floor-elevated
+  # Runaway: the cap is base + workers x floor x margin, finite and strictly
+  # below the host budget (63800400 KiB), never the host total or fraction.
+  btr_st_n=$((btr_st_n + 1))
+  btr_st_got=$(
+    unset SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT SIMPLE_HOST_TREE_RSS_HOST_PCT SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+    unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+    BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$btr_st_dir/aarch64"
+    BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1
+    bootstrap_tree_rss_whole_build_plan 8 '' || exit 1
+    [ "$bootstrap_tree_rss_plan_cap_kib" -lt "$bootstrap_tree_rss_plan_budget_kib" ] &&
+      [ "$bootstrap_tree_rss_plan_cap_kib" -eq $((BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB + 2 * 28311552)) ] &&
+      printf 'cap-below-budget:%s<%s' "$bootstrap_tree_rss_plan_cap_kib" "$bootstrap_tree_rss_plan_budget_kib"
+  )
+  [ "$btr_st_got" = 'cap-below-budget:60817408<63800400' ] || {
+    echo "selftest FAIL: plan-aarch64-runaway-cap-is-finite: got $btr_st_got" >&2
+    btr_st_fail=1
+  }
+  # One requested worker keeps one worker, cap 32505856 KiB, under the default
+  # ceiling: no elevated ceiling needed (the 5859375 floor is gone).
+  btr_st_plan aarch64-1-thread aarch64 1 1:32505856:0:worker-floor
+  # Another lane holds the host: 3/4 of 44 GB available = 33000000 KiB fits
+  # exactly one worker -- workers reduced, cap still >= the floor.
+  btr_st_plan aarch64-busy-reduces-workers aarch64-busy 8 1:32505856:0:worker-floor
+  # W21 (2026-11-22): the 64 GiB Hyper-V Windows host reported 15518280 KiB
+  # free (balloon); the old plan priced 11638710 KiB (3/4 of it) and the
+  # campaign killed the full-CLI build. Windows below half of physical uses
+  # physical - reserve (2 GiB host-config reserve on that host): one plain
+  # worker at the 32505856 KiB floor price.
+  btr_st_plan w21-windows-balloon-physical-minus-reserve win-balloon 8 1:32505856:0:worker-floor \
+    'BOOTSTRAP_TREE_RSS_TEST_PLATFORM=MINGW64_NT-10.0-26300 SIMPLE_BUILD_MEMORY_RESERVE_BYTES=2147483648'
+  # The same reading on Linux is real headroom and keeps the old price.
+  btr_st_plan w21-linux-trusts-available win-balloon 8 1:11638710:0:small-host-one-worker \
+    'SIMPLE_BUILD_MEMORY_RESERVE_BYTES=2147483648'
+  # Windows at >= half of physical is not treated as ballooned.
+  btr_st_plan w21-windows-unballooned-trusts-available win-half 8 1:32505856:0:small-host-one-worker-temp \
+    'BOOTSTRAP_TREE_RSS_TEST_PLATFORM=MINGW64_NT-10.0-26300 SIMPLE_BUILD_MEMORY_RESERVE_BYTES=2147483648'
+  # No configured reserve: the default min(24 GiB, RAM / 2) reserve is used.
+  btr_st_plan w21-windows-balloon-default-reserve win-balloon 8 1:32505856:0:small-host-one-worker-temp \
+    'BOOTSTRAP_TREE_RSS_TEST_PLATFORM=MSYS_NT-10.0; unset SIMPLE_BUILD_MEMORY_RESERVE_BYTES SIMPLE_HOST_MEM_RESERVE_FREE_MIB'
+  # The summary names the substitution and the reserve source.
+  btr_st_n=$((btr_st_n + 1))
+  btr_st_summary=$(
+    unset SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT SIMPLE_HOST_TREE_RSS_HOST_PCT SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+    unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+    BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$btr_st_dir/win-balloon"
+    BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1 BOOTSTRAP_TREE_RSS_TEST_PLATFORM=CYGWIN_NT-10.0
+    SIMPLE_BUILD_MEMORY_RESERVE_BYTES=2147483648
+    bootstrap_tree_rss_whole_build_plan 8 '' || exit 1
+    printf '%s\n' "$bootstrap_tree_rss_plan_summary"
+  ) || btr_st_summary=""
+  btr_st_got=""
+  case "$btr_st_summary" in
+    *"3/4 of physical-minus-reserve 64768108 KiB"*|*"host RAM 66865260 KiB x 50%"*)
+      case "$btr_st_summary" in
+        *"Windows available 15518280 KiB is below half of physical RAM"*"reserve 2097152 KiB (SIMPLE_BUILD_MEMORY_RESERVE_BYTES)"*) btr_st_got=named ;;
+      esac
+      ;;
+  esac
+  [ "$btr_st_got" = named ] || {
+    echo "selftest FAIL: w21-summary-names-balloon-source: got '$btr_st_got'" >&2
+    btr_st_fail=1
+  }
+  # The platform hook is test-only: without the fixture switch it is ignored.
+  btr_st_n=$((btr_st_n + 1))
+  btr_st_got=$(unset BOOTSTRAP_TREE_RSS_TEST_FIXTURE; BOOTSTRAP_TREE_RSS_TEST_PLATFORM=MINGW-fake bootstrap_tree_rss_platform)
+  [ "$btr_st_got" = "$(uname -s 2>/dev/null || printf unknown)" ] || {
+    echo "selftest FAIL: w21-platform-hook-needs-fixture-switch: got $btr_st_got" >&2
+    btr_st_fail=1
+  }
+  # W21 (a): a cap kill is named with cap and peak; nothing else is.
+  printf 'status=rss-cap-exceeded\nexit_status=88\nmax_rss_kib=11638710\npeak_rss_kib=11689776\nstatus=nested\ntermination=job-terminate\ntimeout_signal=none\n' >"$btr_st_dir/kill.env"
+  # The pre-fix Windows receipt shape (timeout_signal=job-terminate).
+  printf 'status=rss-cap-exceeded\nexit_status=88\nmax_rss_kib=11638710\npeak_rss_kib=11689776\ntimeout_signal=job-terminate\n' >"$btr_st_dir/kill-old.env"
+  printf 'status=phys-footprint-cap-exceeded\nexit_status=88\nmax_rss_kib=9\nmax_phys_footprint_kib=4000\npeak_phys_footprint_kib=4100\n' >"$btr_st_dir/phys.env"
+  printf 'status=timeout\nexit_status=124\nmax_rss_kib=11638710\npeak_rss_kib=900\ntimeout_signal=job-terminate\n' >"$btr_st_dir/timeout.env"
+  for btr_st_kill in \
+      'kill.env|rss-cap-exceeded cap_kib=11638710 peak_kib=11689776' \
+      'kill-old.env|rss-cap-exceeded cap_kib=11638710 peak_kib=11689776' \
+      'phys.env|phys-footprint-cap-exceeded cap_kib=4000 peak_kib=4100' \
+      'timeout.env|NONE' 'missing.env|NONE'; do
+    btr_st_n=$((btr_st_n + 1))
+    btr_st_got=$(bootstrap_tree_rss_cap_kill_line "$btr_st_dir/${btr_st_kill%%|*}") || btr_st_got=NONE
+    [ "$btr_st_got" = "${btr_st_kill#*|}" ] || {
+      echo "selftest FAIL: w21-cap-kill-line ${btr_st_kill%%|*}: want ${btr_st_kill#*|} got $btr_st_got" >&2
+      btr_st_fail=1
+    }
+  done
+  # 64 GiB host (the 2026-10-15 incident host): 50% = 33432600 fits 1 worker.
+  btr_st_plan host64-one-worker host64 8 1:32505856:0:worker-floor
+  # 128 GB Windows host: 67047100 budget -> 2 workers, above the 56 GiB static
+  # ceiling since the 18 GiB floor, so elevated.
+  btr_st_plan big-two-workers big 12 2:60817408:60817408:worker-floor-elevated
+  # tree_rss_host_pct 75 on the 128 GB host: 100570650 -> 3 workers, elevated.
+  # (The 121 GiB aarch64 host at pct 75 is bound by 3/4 of available,
+  # 84033264 KiB, which holds only 2 workers at the 18 GiB floor.)
+  btr_st_plan big-pct75-three-workers big 8 3:89128960:89128960:worker-floor-elevated SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=75
+  # Tiny host: 16 GB x 50% = 8000000 KiB < one worker (32505856): fail closed,
+  # naming the requirement.
+  # Small host (16 GB): below one worker at floor x margin -> small-host
+  # single-worker mode at 90% of RAM (14400000 KiB), cap = that budget.
+  btr_st_plan small-host-one-worker small 8 1:14400000:0:small-host-one-worker
+  btr_st_plan small-host-ignores-default-pct small 1 1:14400000:0:small-host-one-worker SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=50
+  # TEMPORARY headroom (bug stage2_compiler_tests_rss_headroom_temp_2026-11-13):
+  # 31 GiB available: old 3/4 = 24379392 KiB; relaxed 32505856 - 4194304.
+  btr_st_plan small-host-temp-headroom win-busy 8 1:28311552:0:small-host-one-worker-temp
+  # 37 GiB available: relaxed budget clamped to the one-worker requirement.
+  btr_st_plan small-host-temp-headroom-clamped win-busy37 8 1:32505856:0:small-host-one-worker-temp
+  # ~11 GiB available: available - 4 GiB is below 3/4 x available; old kept.
+  btr_st_plan small-host-temp-never-tighter win-very-busy 8 1:9000000:0:small-host-one-worker
+  # An explicit cap still wins untouched (no plan, bound explicit).
+  btr_st_n=$((btr_st_n + 1))
+  btr_st_got=$(
+    unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$btr_st_dir/win-busy" BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=20000000
+    bootstrap_tree_rss_whole_build_export 1 '' >/dev/null 2>&1 || { printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"; exit 0; }
+    printf '%s:%s' "$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB" "$bootstrap_tree_rss_plan_bound"
+  )
+  [ "$btr_st_got" = '20000000:explicit' ] || {
+    echo "selftest FAIL: plan-small-host-temp-explicit-cap-wins: got $btr_st_got" >&2
+    btr_st_fail=1
+  }
+  # Even the max share cannot hold the 4 GiB phase base: still refused.
+  btr_st_plan tiny-host-fails-closed tiny 8 'REFUSED=cannot fit one full-CLI build worker'
+  btr_st_plan tiny-host-names-floor tiny 8 'REFUSED=worker floor 18874368 KiB x 150%'
+  # Unknown host RAM is no evidence: refused, not floored.
+  btr_st_plan unknown-host-fails-closed none 8 'REFUSED=needs host RAM evidence'
+  btr_st_plan junk-workers-refused aarch64 8x 'REFUSED=worker count must be a decimal 1..128'
+  btr_st_plan zero-workers-refused aarch64 0 'REFUSED=worker count must be a decimal 1..128'
+  btr_st_plan pct-over-max-refused aarch64 8 'REFUSED=exceeds 90' SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=95
+  # compiler_cli_build row cap (run 11, 2026-11-06): a 2-worker plan prices
+  # that ONE row at BOOTSTRAP_TREE_RSS_PHASE_CLI_ROW_CAP_KIB when the host
+  # budget holds it; every other row keeps the plan cap, and the plan cap
+  # itself is unchanged. cli-plan LABEL MEMINFO REQUESTED WANT [SETUP]
+  #   WANT = row_cap:row_ceiling:row_bound:plan_cap:plan_ceiling
+  btr_st_cli_plan() {
+    btr_st_n=$((btr_st_n + 1))
+    btr_st_got=$(
+      unset SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT SIMPLE_HOST_TREE_RSS_HOST_PCT SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+      unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE
+      SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+      BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$btr_st_dir/$2"
+      BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1
+      BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1
+      [ -z "${5:-}" ] || eval "$5"
+      bootstrap_tree_rss_whole_build_plan "$3" '' || { printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"; exit 0; }
+      printf '%s:%s:%s:%s:%s' "${bootstrap_tree_rss_plan_cli_row_cap_kib:-unset}" \
+        "${bootstrap_tree_rss_plan_cli_row_ceiling_kib:-unset}" "${bootstrap_tree_rss_plan_cli_row_bound:-unset}" \
+        "$bootstrap_tree_rss_plan_cap_kib" "$bootstrap_tree_rss_plan_ceiling_kib"
+    )
+    case "$4" in
+      REFUSED=*) case "$btr_st_got" in REFUSED=*"${4#REFUSED=}"*) return 0 ;; esac ;;
+      *) [ "$btr_st_got" = "$4" ] && return 0 ;;
+    esac
+    echo "selftest FAIL: cli-plan-$1: want $4 got $btr_st_got" >&2
+    btr_st_fail=1
+  }
+  # Run-11 host: 60 GiB row, admitted as an elevated ceiling; the 2-worker
+  # phase plan (58 GiB at the 18 GiB floor) is itself elevated.
+  btr_st_cli_plan aarch64-cli-row-60g aarch64 8 63500000:63500000:cli-row-mir-shards:60817408:60817408
+  btr_st_cli_plan big-cli-row-60g big 12 63500000:63500000:cli-row-mir-shards:60817408:60817408
+  # Budget 61500000 holds 2 workers (60817408) but not the 62914560 row that
+  # run 11 proved necessary: refused up front, naming the row and the budget
+  # (never silently the plan cap) ...
+  btr_st_cli_plan aarch64-tight-refused aarch64-tight 8 'REFUSED=compiler_cli_build row needs 63500000 KiB'
+  btr_st_cli_plan aarch64-tight-names-budget aarch64-tight 8 'REFUSED=host budget 61500000 KiB'
+  # ... unless the row is pinned to one MIR worker (one build thread).
+  btr_st_cli_plan aarch64-tight-one-worker aarch64-tight 1 32505856:0:worker-floor:32505856:0
+  # The campaign envelope is the max row cap, valid only for serial tool rows.
+  btr_st_cli_plan concurrent-tool-rows-refused aarch64 8 'REFUSED=BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1' BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=2
+  btr_st_cli_plan unset-concurrency-refused aarch64 8 'REFUSED=BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1' 'unset BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY'
+  btr_st_cli_plan concurrency-irrelevant-one-worker aarch64 1 32505856:0:worker-floor:32505856:0 BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=2
+  # One worker (no MIR shard pair) or a plan already above 60 GiB: unchanged.
+  btr_st_cli_plan one-worker-keeps-plan aarch64 1 32505856:0:worker-floor:32505856:0
+  btr_st_cli_plan host64-keeps-plan host64 8 32505856:0:worker-floor:32505856:0
+  btr_st_cli_plan pct75-keeps-plan big 8 89128960:89128960:worker-floor-elevated:89128960:89128960 SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=75
+  btr_st_cli_plan small-host-keeps-plan small 8 14400000:0:small-host-one-worker:14400000:0
+  # Row / campaign consumers of a PUBLISHED plan (enforce-mode values, no host
+  # probe): row-cap TASK SETUP -> cap:ceiling:bound inside, then restored.
+  btr_st_pub='SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=54525952 SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=54525952
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=worker-floor-elevated
+    SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=62914560 SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB=62914560
+    SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND=cli-row-mir-shards BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1'
+  btr_st_row() {
+    btr_st_n=$((btr_st_n + 1))
+    btr_st_got=$(
+      unset SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND \
+        BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY
+      eval "export $3"
+      bootstrap_tree_rss_row_cap_enter "$2" || { printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"; exit 0; }
+      btr_st_in="$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-unset}:$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND"
+      bootstrap_tree_rss_row_cap_leave
+      printf '%s|%s:%s:%s' "$btr_st_in" "$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB" \
+        "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-unset}" "$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND"
+    )
+    case "$4" in
+      REFUSED=*) case "$btr_st_got" in REFUSED=*"${4#REFUSED=}"*) return 0 ;; esac ;;
+      *) [ "$btr_st_got" = "$4" ] && return 0 ;;
+    esac
+    echo "selftest FAIL: row-cap-$1: want $4 got $btr_st_got" >&2
+    btr_st_fail=1
+  }
+  btr_st_back='54525952:54525952:worker-floor-elevated'
+  btr_st_row cli-gets-60g compiler_cli_build "$btr_st_pub" "62914560:62914560:cli-row-mir-shards|$btr_st_back"
+  btr_st_row runner-keeps-plan test_runner_build "$btr_st_pub" "$btr_st_back|$btr_st_back"
+  btr_st_row mcp-keeps-plan mcp_build "$btr_st_pub" "$btr_st_back|$btr_st_back"
+  btr_st_row cli-without-row-cap compiler_cli_build 'SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=54525952 SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=54525952 SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=worker-floor-elevated' \
+    "$btr_st_back|$btr_st_back"
+  btr_st_row malformed-row-cap-refused compiler_cli_build "$btr_st_pub SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=6x" 'REFUSED=CLI_ROW_CAP_KIB'
+  btr_st_row row-cap-below-phase-refused compiler_cli_build "$btr_st_pub SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=1000" 'REFUSED=below the phase cap'
+  btr_st_row concurrent-rows-refused compiler_cli_build "$btr_st_pub BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=2" 'REFUSED=BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1'
+  btr_st_row runner-ignores-concurrency test_runner_build "$btr_st_pub BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=2" "$btr_st_back|$btr_st_back"
+  btr_st_row row-cap-over-ceiling-refused compiler_cli_build "$btr_st_pub SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB=60000000" 'REFUSED=above its ceiling'
+  btr_st_row row-cap-without-phase-refused compiler_cli_build 'SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=62914560 SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB=62914560 SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND=cli-row-mir-shards' \
+    'REFUSED=without a published phase cap'
+  # The campaign watchdog encloses every (serial) row, so its envelope is the
+  # largest row cap; without a published row cap it is the phase pair.
+  btr_st_n=$((btr_st_n + 1))
+  btr_st_got=$(
+    eval "export $btr_st_pub"
+    bootstrap_tree_rss_campaign_envelope || { printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"; exit 0; }
+    printf '%s:%s:%s' "$bootstrap_tree_rss_campaign_cap_kib" "$bootstrap_tree_rss_campaign_ceiling_kib" "$bootstrap_tree_rss_campaign_bound"
+    unset SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND
+    bootstrap_tree_rss_campaign_envelope || exit 0
+    printf '|%s:%s:%s' "$bootstrap_tree_rss_campaign_cap_kib" "$bootstrap_tree_rss_campaign_ceiling_kib" "$bootstrap_tree_rss_campaign_bound"
+  )
+  [ "$btr_st_got" = "62914560:62914560:worker-floor-elevated|54525952:54525952:worker-floor-elevated" ] || {
+    echo "selftest FAIL: campaign envelope: got $btr_st_got" >&2
+    btr_st_fail=1
+  }
+  # Export under a fixture (monitor mode only, by the probe's own gate): a plan
+  # above the static ceiling is clamped to it (worker-floor-monitor-clamped),
+  # no ceiling env is set, the thread count is the fitted one, and the pair
+  # re-admits. pct75 on the 128 GB host fits 3 workers (plan 89128960 KiB over
+  # the 56 GiB static). Since the 18 GiB floor (2026-11-21) every plan of 2+
+  # workers (>= 60817408 KiB) is above the static ceiling and is clamped here.
+  btr_st_n=$((btr_st_n + 1))
+  btr_st_got=$(
+    unset SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT SIMPLE_HOST_TREE_RSS_HOST_PCT SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+    unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE BOOTSTRAP_VERIFY_BUILD_THREADS
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+    BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$btr_st_dir/big"
+    BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1
+    SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=75
+    bootstrap_tree_rss_whole_build_export 8 '' || { printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"; exit 0; }
+    printf '%s:%s:%s:%s:%s:%s' "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-}" "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-unset}" \
+      "${BOOTSTRAP_VERIFY_BUILD_THREADS:-}" "$bootstrap_tree_rss_plan_bound" "$bootstrap_tree_rss_cap_kib" "$bootstrap_tree_rss_source"
+    printf ':%s' "${SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB:-unset}"
+  )
+  [ "$btr_st_got" = '58720256:unset:3:worker-floor-monitor-clamped:58720256:phase-policy:unset' ] || {
+    echo "selftest FAIL: whole-build export under monitor fixture: got $btr_st_got" >&2
+    btr_st_fail=1
+  }
+  # Time budgets scale with the worker reduction: ceil(requested / fitted),
+  # bounded by BOOTSTRAP_TREE_RSS_TIMEOUT_SCALE_MAX (run 4, 2026-11-05: 8 -> 2
+  # workers, MIR workers killed at the unscaled 1800 s internal timeout).
+  for btr_st_ts in 8:2:4 8:1:4 8:8:1 1:1:1 3:2:2 8:3:3 128:1:4 2:4:1 x:2:1 8:0:1; do
+    btr_st_n=$((btr_st_n + 1))
+    btr_st_got=$(bootstrap_tree_rss_timeout_scale "${btr_st_ts%%:*}" "$(echo "$btr_st_ts" | cut -d: -f2)")
+    [ "$btr_st_got" = "${btr_st_ts##*:}" ] || {
+      echo "selftest FAIL: timeout-scale-$btr_st_ts: got $btr_st_got" >&2
+      btr_st_fail=1
+    }
+  done
+  # timeout-plan LABEL MEMINFO REQUESTED WANT [SETUP]: WANT = workers:scale:
+  # native:row:campaign:source after the export and the three published budgets
+  # (defaults 1800 / 3600 / 7200, the from-scratch Linux defaults).
+  btr_st_timeout_plan() {
+    btr_st_n=$((btr_st_n + 1))
+    btr_st_got=$(
+      unset SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT SIMPLE_HOST_TREE_RSS_HOST_PCT SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+      unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE BOOTSTRAP_VERIFY_BUILD_THREADS
+      unset BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT BOOTSTRAP_VERIFY_TIMEOUT_SECONDS BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS
+      unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND
+      BOOTSTRAP_VERIFY_TIMEOUT_SOURCE=stale-from-caller
+      SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+      BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$btr_st_dir/$2"
+      BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1
+      [ -z "${5:-}" ] || eval "$5"
+      bootstrap_tree_rss_whole_build_export "$3" '' || { printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"; exit 0; }
+      bootstrap_tree_rss_scaled_timeout BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT 1800 &&
+        bootstrap_tree_rss_scaled_timeout BOOTSTRAP_VERIFY_TIMEOUT_SECONDS 3600 &&
+        bootstrap_tree_rss_scaled_timeout BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS 7200 ||
+        { printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"; exit 0; }
+      printf '%s:%s:%s:%s:%s:%s' "$BOOTSTRAP_VERIFY_BUILD_THREADS" "$BOOTSTRAP_VERIFY_TIMEOUT_SCALE" \
+        "$BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT" "$BOOTSTRAP_VERIFY_TIMEOUT_SECONDS" \
+        "$BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS" "$BOOTSTRAP_VERIFY_TIMEOUT_SOURCE"
+    )
+    [ "$btr_st_got" = "$4" ] && return 0
+    echo "selftest FAIL: timeout-plan-$1: want $4 got $btr_st_got" >&2
+    btr_st_fail=1
+  }
+  btr_st_pp=BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:phase-policy-scaled,BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:phase-policy-scaled,BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS:phase-policy-scaled
+  # Run 4's shape: 8 requested, 2 fitted -> x4 on every default budget.
+  btr_st_timeout_plan aarch64-8-to-2-scales-x4 aarch64 8 "2:4:7200:14400:28800:$btr_st_pp"
+  # 8 requested, 1 fitted -> ceil 8, bounded to x4 (never unbounded).
+  btr_st_timeout_plan busy-8-to-1-bounded-x4 aarch64-busy 8 "1:4:7200:14400:28800:$btr_st_pp"
+  # No reduction -> budgets unchanged.
+  btr_st_timeout_plan no-reduction-unchanged aarch64 1 \
+    "1:1:1800:3600:7200:BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:phase-policy,BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:phase-policy,BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS:phase-policy"
+  # Explicit user timeouts are honoured verbatim even when workers shrink.
+  btr_st_timeout_plan explicit-timeouts-unchanged aarch64 8 \
+    "2:4:900:1000:5000:BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:explicit,BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:explicit,BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS:explicit" \
+    'BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT=900 BOOTSTRAP_VERIFY_TIMEOUT_SECONDS=1000 BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS=5000'
+  # An explicit cap is not policy-priced: workers as requested, no scaling.
+  btr_st_timeout_plan explicit-cap-unscaled aarch64 8 \
+    "8:1:1800:3600:7200:BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:phase-policy,BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:phase-policy,BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS:phase-policy" \
+    'unset BOOTSTRAP_TREE_RSS_MEMINFO_PATH BOOTSTRAP_TREE_RSS_TEST_FIXTURE; SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=12582912'
+  # A malformed default is refused, never substituted.
+  btr_st_n=$((btr_st_n + 1))
+  btr_st_got=$(bootstrap_tree_rss_scaled_timeout BOOTSTRAP_VERIFY_TIMEOUT_SECONDS 36x0 && printf ADMITTED || printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal")
+  case "$btr_st_got" in
+    'REFUSED=tree RSS policy: default timeout for BOOTSTRAP_VERIFY_TIMEOUT_SECONDS must be a positive decimal'*) ;;
+    *) echo "selftest FAIL: scaled-timeout malformed default: $btr_st_got" >&2; btr_st_fail=1 ;;
+  esac
+  # An explicit cap is kept as-is (a monitored diagnostic attempt, not policy):
+  # nothing is re-priced, but it is admitted up front, the requested thread
+  # count is published unchanged, and it keeps the explicit-env attribution.
+  btr_st_n=$((btr_st_n + 1))
+  btr_st_got=$(
+    unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB BOOTSTRAP_VERIFY_BUILD_THREADS
+    unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=12582912
+    bootstrap_tree_rss_whole_build_export 8 '' || { printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"; exit 0; }
+    printf '%s:%s:%s:%s:%s:%s' "$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB" "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-unset}" \
+      "${BOOTSTRAP_VERIFY_BUILD_THREADS:-unset}" "$bootstrap_tree_rss_plan_bound" "$bootstrap_tree_rss_source" "$bootstrap_tree_rss_bound"
+  )
+  [ "$btr_st_got" = '12582912:unset:8:explicit:explicit-env:explicit' ] || {
+    echo "selftest FAIL: whole-build export keeps an explicit cap: got $btr_st_got" >&2
+    btr_st_fail=1
+  }
+  # An explicit cap above the hard ceiling is refused by the export itself.
+  btr_st_n=$((btr_st_n + 1))
+  btr_st_got=$(
+    unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB BOOTSTRAP_VERIFY_BUILD_THREADS
+    unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=59000000
+    bootstrap_tree_rss_whole_build_export 8 '' && printf ADMITTED || printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"
+  )
+  case "$btr_st_got" in
+    'REFUSED=tree RSS policy: SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=59000000 KiB exceeds the hard ceiling'*) ;;
+    *) echo "selftest FAIL: whole-build export admitted an over-ceiling explicit cap: $btr_st_got" >&2; btr_st_fail=1 ;;
+  esac
+  # Attribution: a diagnostic pair (no attribution vars) is explicit-env in
+  # every owner; the published phase-policy attribution replaces it; a
+  # malformed spelling is refused, not laundered.
+  btr_st_expect diagnostic-pair-is-explicit-env big 8 12582912 12582912:58720256:explicit:explicit-env \
+    'unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND'
+  btr_st_expect published-attribution-wins big 8 12582912 12582912:58720256:worker-floor-elevated:phase-policy \
+    'SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=worker-floor-elevated'
+  btr_st_expect published-attribution-malformed-refused big 8 12582912 REFUSED \
+    'SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE="Phase Policy" SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=worker-floor'
+  btr_st_expect published-attribution-half-refused big 8 12582912 REFUSED \
+    'SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy; unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND'
+  # Attribution vars without an explicit cap change nothing (policy-priced).
+  btr_st_expect attribution-without-cap-ignored big 8 '' 45088768:58720256:budget:default \
+    'SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=worker-floor'
+  # The real host, enforce mode, no fixture: the published pair is admitted
+  # by the policy's own elevated-ceiling admission (real /proc/meminfo) when
+  # 3/4 of the host's current MemAvailable still covers the cap, and refused
+  # with the owners' reason otherwise; a host too small for one worker is
+  # refused naming the requirement. Every branch is asserted, none skipped.
+  btr_st_n=$((btr_st_n + 1))
+  btr_st_got=$(
+    unset SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT SIMPLE_HOST_TREE_RSS_HOST_PCT SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+    unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE BOOTSTRAP_VERIFY_BUILD_THREADS
+    unset BOOTSTRAP_TREE_RSS_MEMINFO_PATH BOOTSTRAP_TREE_RSS_TEST_FIXTURE
+    unset SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+    btr_st_avail=$(bootstrap_tree_rss_meminfo_available /proc/meminfo)
+    if bootstrap_tree_rss_whole_build_export 8 ''; then
+      btr_st_per=$((bootstrap_tree_rss_cap_kib / BOOTSTRAP_VERIFY_BUILD_THREADS))
+      if [ "$bootstrap_tree_rss_plan_ceiling_kib" -gt 0 ]; then
+        [ "$bootstrap_tree_rss_ceiling_admission" = elevated ] &&
+          [ "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-}" = "$bootstrap_tree_rss_cap_kib" ] || { printf 'elevated-not-admitted:%s' "$bootstrap_tree_rss_summary"; exit 0; }
+      else
+        [ -z "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB+x}" ] || { printf 'ceiling-set-without-need'; exit 0; }
+      fi
+      # Small-host one-worker mode (busy or small real host) runs ONE worker
+      # under the host budget, below the floor by design.
+      case "$bootstrap_tree_rss_plan_bound" in
+        # The leading `(` is REQUIRED: bash in POSIX mode mis-parses a case
+        # pattern without it inside $(...) ("syntax error near unexpected
+        # token `;;'"), which broke every `sh` consumer of this file.
+        (small-host-one-worker*)
+          if [ "$BOOTSTRAP_VERIFY_BUILD_THREADS" -eq 1 ]; then
+            btr_st_per=$BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB
+          fi
+          ;;
+        (posix-file-worker-floor*|windows-file-worker-floor*)
+          if [ "$BOOTSTRAP_VERIFY_BUILD_THREADS" -eq 2 ] && [ "$bootstrap_tree_rss_cap_kib" -ge 10485760 ]; then
+            btr_st_per=$BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB
+          fi
+          ;;
+      esac
+      [ "$bootstrap_tree_rss_cap_kib" -eq "$bootstrap_tree_rss_plan_cap_kib" ] &&
+        [ "$BOOTSTRAP_VERIFY_BUILD_THREADS" -ge 1 ] && [ "$BOOTSTRAP_VERIFY_BUILD_THREADS" -le 8 ] &&
+        [ "$btr_st_per" -ge "$BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB" ] &&
+        [ "$bootstrap_tree_rss_source" = phase-policy ] &&
+        [ "$bootstrap_tree_rss_bound" = "$bootstrap_tree_rss_plan_bound" ] && printf ADMITTED || printf 'wrong-export:%s' "$bootstrap_tree_rss_summary"
+    else
+      case "$bootstrap_tree_rss_refusal" in
+        (*'cannot fit one full-CLI build worker'*"worker floor ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB} KiB"*) printf TOO-SMALL ;;
+        (*'compiler ceiling '*' refused (previous='*'available_bound='*)
+          # Only a real headroom shortfall may refuse here: the plan was
+          # within 3/4 of MemAvailable at plan time, admission re-read it.
+          [ -n "$btr_st_avail" ] && printf HEADROOM-REFUSED || printf 'refused-without-headroom-evidence' ;;
+        (*) printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal" ;;
+      esac
+    fi
+  )
+  case "$btr_st_got" in
+    ADMITTED|TOO-SMALL|HEADROOM-REFUSED) ;;
+    *) echo "selftest FAIL: whole-build export on the real host: $btr_st_got" >&2; btr_st_fail=1 ;;
+  esac
   rm -rf "$btr_st_dir"
   if [ "$btr_st_fail" -ne 0 ]; then
     echo "FAIL — tree RSS policy selftest ($btr_st_n fixture(s))"
@@ -570,6 +2052,21 @@ case "${0##*/}" in
           echo "error: $bootstrap_tree_rss_refusal" >&2
           exit 1
         fi ;;
-      *) echo "usage: $0 --selftest | --resolve JOBS [REPO_ROOT]" >&2; exit 2 ;;
+      --whole-build-plan)
+        [ "$#" -ge 2 ] || { echo "usage: $0 --whole-build-plan WORKERS [REPO_ROOT]" >&2; exit 2; }
+        if bootstrap_tree_rss_whole_build_plan "$2" "${3:-}"; then
+          printf 'workers=%s\ncap_kib=%s\nceiling_kib=%s\nbudget_kib=%s\nbound=%s\ncli_row_cap_kib=%s\ncli_row_ceiling_kib=%s\ncli_row_bound=%s\nhost_total_kib=%s\nhost_available_kib=%s\nhost_total_source=%s\nsummary=%s\n' \
+            "$bootstrap_tree_rss_plan_workers" "$bootstrap_tree_rss_plan_cap_kib" \
+            "$bootstrap_tree_rss_plan_ceiling_kib" "$bootstrap_tree_rss_plan_budget_kib" \
+            "$bootstrap_tree_rss_plan_bound" "$bootstrap_tree_rss_plan_cli_row_cap_kib" \
+            "$bootstrap_tree_rss_plan_cli_row_ceiling_kib" "$bootstrap_tree_rss_plan_cli_row_bound" \
+            "$bootstrap_tree_rss_host_total_kib" \
+            "$bootstrap_tree_rss_host_available_kib" "$bootstrap_tree_rss_host_total_source" \
+            "$bootstrap_tree_rss_plan_summary"
+        else
+          echo "error: $bootstrap_tree_rss_refusal" >&2
+          exit 1
+        fi ;;
+      *) echo "usage: $0 --selftest | --resolve JOBS [REPO_ROOT] | --whole-build-plan WORKERS [REPO_ROOT]" >&2; exit 2 ;;
     esac ;;
 esac

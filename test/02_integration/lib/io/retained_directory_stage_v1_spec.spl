@@ -1,0 +1,49 @@
+# SOURCE_AUTHORED_NOT_RUN. Fixture is an independently provisioned empty private
+# directory; artifacts intentionally remain retained for operator inspection.
+use std.spec.{describe, it, expect, pending}
+use std.nogc_sync_mut.io.env_ops.{env_get, host_os}
+use std.nogc_sync_mut.io.retained_file.retained_directory_open_trusted_v1
+
+describe "Real anchored exclusive staging mechanism":
+    it "REQ-AGENT-STAGE-005 writes actual bytes and refuses duplicate adoption":
+        # Fixture-environment gate (owner decision 2026-11-16, OPEN_ISSUE B-10):
+        # report BLOCKED (counted, never a pass) and touch nothing when unset.
+        if (env_get("SIMPLE_AGENT_STAGE_PRIVATE_FIXTURE") ?? "") == "":
+            pending("BLOCKED: retained-directory staging fixture env unset: SIMPLE_AGENT_STAGE_PRIVATE_FIXTURE")
+            return
+        expect(host_os()).to_equal("linux")
+        val path = env_get("SIMPLE_AGENT_STAGE_PRIVATE_FIXTURE") ?? ""
+        expect(path != "").to_equal(true)
+        var root = retained_directory_open_trusted_v1(path).unwrap()
+        val opened = root.stage_directory_v1("exclusive-attempt", true)
+        if opened.is_err():
+            val consumed = root.close()
+            expect(opened.is_ok()).to_equal(true)
+        else:
+            var attempt = opened.unwrap()
+            val actual_child = root.stage_child_match_v1("exclusive-attempt", attempt)
+            val mismatched_child = root.stage_child_match_v1("exclusive-attempt", root)
+            val written = attempt.stage_file_v1("object", [97u8, 98u8, 99u8])
+            val duplicate_file = attempt.stage_file_v1("object", [120u8])
+            val opened_file = attempt.open_file("object", 128u64)
+            var bytes: Result<[u8], text> = Err("fixture-file-open")
+            var file_closed = false
+            if opened_file.is_ok():
+                var file = opened_file.unwrap()
+                bytes = file.read_stage_input_v1(128)
+                file_closed = file.close()
+            val duplicate_dir = root.stage_directory_v1("exclusive-attempt", true)
+            if duplicate_dir.is_ok():
+                var unexpected = duplicate_dir.unwrap()
+                val consumed_unexpected = unexpected.close()
+            val traversal = attempt.stage_file_v1("../outside", [120u8])
+            val attempt_closed = attempt.close()
+            val root_closed = root.close()
+            expect(actual_child.is_ok()).to_equal(true)
+            expect(mismatched_child.is_err()).to_equal(true)
+            expect(written.is_ok()).to_equal(true)
+            expect(duplicate_file.is_err()).to_equal(true)
+            expect(duplicate_dir.is_err()).to_equal(true)
+            expect(traversal.is_err()).to_equal(true)
+            expect(bytes.unwrap()).to_equal([97u8, 98u8, 99u8])
+            expect(file_closed and attempt_closed and root_closed).to_equal(true)

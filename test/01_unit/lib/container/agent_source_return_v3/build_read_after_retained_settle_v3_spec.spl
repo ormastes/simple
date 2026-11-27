@@ -1,0 +1,51 @@
+"""
+## Purpose and audience
+milestone_0030 integration, merge repair: release's retention settles a staged
+(written) root at SETTLE, so the custody is already `retained-returned` (and
+the build source `native-retired-retained`) when the executor's evidence read
+(op ii) runs. The read must still work there -- the root and its lease are held
+-- and must be gated at least as strictly as the return it precedes.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-19).
+## Compatibility and limitations
+Structural pins over committed source text (the genuine path needs native
+owners a data spec cannot construct). The agent arm is not touched.
+## Verification guidance and troubleshooting
+A failing pin names the read gate that would refuse a settled-and-retained build.
+"""
+use std.spec.step
+use std.io.file_read_text
+
+fn rs_from(source: text, start: text) -> text:
+    val at = source.index_of(start)
+    if at < 0: return ""
+    source.substring(at, source.byte_len())
+
+describe "the settled evidence read survives release's retention-at-settle":
+    it "lets the custody read a retained-returned source":
+        # @req M0030-INTEG-1 (read gate accepts the post-settle custody phase)
+        val custody = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workspace_source_custody_v3.spl")
+        val read = rs_from(custody, "    pub(package) fn read_settled_v3(")
+        expect(read.byte_len() > 0).to_equal(true)
+        expect(read).to_contain("if (self.phase != \"observed\" and not self.retained_returned_v3()) or self.source.is_none()")
+
+    it "lets the build source read after native retirement and still pins the staged binding":
+        # @req M0030-INTEG-1 (read gate accepts native-retired-retained, keeps the error/binding checks)
+        val owner = file_read_text("src/lib/nogc_async_mut/container/providers/linux/workspace_mount_owner_v1.spl")
+        val read = rs_from(owner, "    pub fn read_settled_build_v3(")
+        expect(read.byte_len() > 0).to_equal(true)
+        expect(read).to_contain("(state.build_stage_phase != \"staged\" and state.build_stage_phase != \"native-retired-retained\")")
+        expect(read).to_contain("state.build_stage_error != \"\"")
+        expect(read).to_contain("state.build_runtime_binding.is_none()")
+
+    it "gates the owner read on the current epoch like the return it precedes":
+        # @req M0030-INTEG-1 (no weaker than return_settled_workspace_source_v3)
+        val authority = file_read_text("src/lib/nogc_sync_mut/container/machine_authority_v1.spl")
+        val read = rs_from(authority, "    pub fn read_settled_workspace_v3(")
+        val ret = rs_from(authority, "    pub fn return_settled_workspace_source_v3()")
+        expect(read.byte_len() > 0 and ret.byte_len() > 0).to_equal(true)
+        val read_body = read.substring(0, read.index_of("\n\n"))
+        step("the return gate evaluates the epoch before the transition")
+        expect(ret).to_contain("val epoch = self.epoch_current_v3()?")
+        expect(read_body).to_contain("val epoch = self.epoch_current_v3()?")

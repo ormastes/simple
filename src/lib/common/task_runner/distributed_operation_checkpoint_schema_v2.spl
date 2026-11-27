@@ -1,0 +1,192 @@
+# Internal checkpoint schema helpers. No parser, storage or owner is introduced.
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.{sdn_encode_canonical, sdn_encoded_text_size_v1}
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.contracts.distributed_operation_state_v2.*
+use std.common.contracts.distributed_operation_history_v2.*
+use std.common.contracts.distributed_operation_retention_v2.*
+use std.common.build_manager.contracts.builder_digest_valid_v1
+
+pub val OPERATION_CHECKPOINT_OBJECT_LIMIT_V2: i64 = 1048576
+pub val OPERATION_CHECKPOINT_AGGREGATE_LIMIT_V2: i64 = 67108864
+
+# Compare UTF-8 bytes explicitly: native text < may compare pointer values.
+pub fn checkpoint_text_before_v2(a: text, b: text) -> bool:
+    var i = 0
+    while i < a.byte_len() and i < b.byte_len():
+        if a.byte_at(i) < b.byte_at(i): return true
+        if a.byte_at(i) > b.byte_at(i): return false
+        i = i + 1
+    a.byte_len() < b.byte_len()
+
+# Bounded O(n log n) merge sort; 100000 keys must not use insertion sorting.
+pub fn checkpoint_sorted_keys_v2(keys: [text]) -> [text]:
+    var ordered = keys
+    var width = 1
+    while width < ordered.len():
+        var merged: [text] = []
+        var start = 0
+        while start < ordered.len():
+            val middle = if start + width < ordered.len(): start + width else: ordered.len()
+            val end = if middle + width < ordered.len(): middle + width else: ordered.len()
+            var left = start
+            var right = middle
+            while left < middle or right < end:
+                if right == end:
+                    merged.push(ordered[left])
+                    left = left + 1
+                elif left == middle:
+                    merged.push(ordered[right])
+                    right = right + 1
+                elif checkpoint_text_before_v2(ordered[right], ordered[left]):
+                    merged.push(ordered[right])
+                    right = right + 1
+                else:
+                    merged.push(ordered[left])
+                    left = left + 1
+            start = end
+        ordered = merged
+        width = width * 2
+    ordered
+
+pub fn checkpoint_record_v2(value: SdnValue, fields: [text]) -> Result<Dict<text, SdnValue>, text>:
+    if not value.is_dict(): return Err("OPERATION_CHECKPOINT_SCHEMA_INVALID")
+    val record = value.as_dict().unwrap()
+    if record.len() != fields.len(): return Err("OPERATION_CHECKPOINT_SCHEMA_INVALID")
+    for field in fields:
+        if not record.contains_key(field): return Err("OPERATION_CHECKPOINT_SCHEMA_INVALID")
+    Ok(record)
+
+pub fn checkpoint_text_v2(value: SdnValue) -> Result<text, text>:
+    if not value.is_string(): return Err("OPERATION_CHECKPOINT_SCHEMA_INVALID")
+    Ok(value.as_str().unwrap())
+
+pub fn checkpoint_integer_v2(value: SdnValue) -> Result<i64, text>:
+    if not value.is_int(): return Err("OPERATION_CHECKPOINT_SCHEMA_INVALID")
+    Ok(value.as_i64().unwrap())
+
+pub fn checkpoint_array_v2(value: SdnValue) -> Result<[SdnValue], text>:
+    if not value.is_array(): return Err("OPERATION_CHECKPOINT_SCHEMA_INVALID")
+    Ok(value.as_array().unwrap())
+
+# Exact canonical size before the writer allocates escaped strings. Only the
+# checkpoint's fixed safe ASCII keys are accepted by callers of this helper.
+pub fn checkpoint_value_size_v2(value: SdnValue) -> Result<i64, text>:
+    match value:
+        case SdnValue.String(s):
+            if s.byte_len() > OPERATION_CHECKPOINT_OBJECT_LIMIT_V2:
+                return Err("OPERATION_CHECKPOINT_OBJECT_TOO_LARGE")
+            val size = sdn_encoded_text_size_v1(s)
+            if size > OPERATION_CHECKPOINT_OBJECT_LIMIT_V2:
+                return Err("OPERATION_CHECKPOINT_OBJECT_TOO_LARGE")
+            Ok(size)
+        case SdnValue.Int(number): Ok(number.to_text().byte_len())
+        case SdnValue.Array(items):
+            var size: i64 = 2
+            for i in 0..items.len():
+                val item_size = checkpoint_value_size_v2(items[i])?
+                val separator = if i == 0: 0 else: 2
+                if size > OPERATION_CHECKPOINT_OBJECT_LIMIT_V2 - item_size - separator:
+                    return Err("OPERATION_CHECKPOINT_OBJECT_TOO_LARGE")
+                size = size + item_size + separator
+            Ok(size)
+        case SdnValue.Dict(record):
+            var size: i64 = 2
+            var count = 0
+            for key in record.keys():
+                val item_size = checkpoint_value_size_v2(record[key])?
+                val separator = if count == 0: 0 else: 2
+                val overhead = key.byte_len() + 2 + separator
+                if size > OPERATION_CHECKPOINT_OBJECT_LIMIT_V2 - item_size - overhead:
+                    return Err("OPERATION_CHECKPOINT_OBJECT_TOO_LARGE")
+                size = size + item_size + overhead
+                count = count + 1
+            Ok(size)
+        case _: Err("OPERATION_CHECKPOINT_SCHEMA_INVALID")
+
+pub fn checkpoint_payload_v2(value: SdnValue) -> Result<text, text>:
+    val size = checkpoint_value_size_v2(value)?
+    if size >= OPERATION_CHECKPOINT_OBJECT_LIMIT_V2:
+        return Err("OPERATION_CHECKPOINT_OBJECT_TOO_LARGE")
+    val payload = sdn_encode_canonical(value) + "\n"
+    if payload.byte_len() != size + 1: return Err("OPERATION_CHECKPOINT_SIZE_INVALID")
+    Ok(payload)
+
+pub fn checkpoint_parse_v2(payload: text) -> Result<SdnValue, text>:
+    if payload.byte_len() > OPERATION_CHECKPOINT_OBJECT_LIMIT_V2:
+        return Err("OPERATION_CHECKPOINT_OBJECT_TOO_LARGE")
+    val limits = SdnStrictLimitsV1(max_source_bytes: OPERATION_CHECKPOINT_OBJECT_LIMIT_V2,
+        max_depth: 8, max_nodes: 131072, max_rows: 0, max_cells: 0, max_columns: 0)
+    val parsed = sdn_parse_strict_v1(payload, limits)
+    if parsed.is_err(): return Err("OPERATION_CHECKPOINT_SDN_INVALID")
+    val document = parsed.unwrap()
+    val value = document.value
+    if checkpoint_payload_v2(value)? != payload: return Err("OPERATION_CHECKPOINT_NONCANONICAL")
+    Ok(value)
+
+pub fn checkpoint_profile_value_v2(profile: DistributedOperationRetentionProfileV2) -> SdnValue:
+    SdnValue.Dict({"version": SdnValue.Int(profile.version),
+        "maximum_lifetime_events": SdnValue.Int(profile.maximum_lifetime_events),
+        "maximum_tail_events": SdnValue.Int(profile.maximum_tail_events)})
+
+pub fn checkpoint_profile_decode_v2(value: SdnValue) -> Result<DistributedOperationRetentionProfileV2, text>:
+    val record = checkpoint_record_v2(value, ["version", "maximum_lifetime_events", "maximum_tail_events"])?
+    val profile = DistributedOperationRetentionProfileV2(
+        checkpoint_integer_v2(record["version"])?,
+        checkpoint_integer_v2(record["maximum_lifetime_events"])?,
+        checkpoint_integer_v2(record["maximum_tail_events"])?)
+    val checked = distributed_operation_retention_profile_validate_v2(profile, profile.maximum_lifetime_events)?
+    Ok(profile)
+
+pub fn checkpoint_operation_value_v2(row: DistributedOperationStateV2,
+        history: DistributedOperationHistoryV2) -> SdnValue:
+    SdnValue.Dict({"operation_id": SdnValue.String(row.operation_id),
+        "envelope_digest": SdnValue.String(row.envelope_digest),
+        "envelope": SdnValue.String(row.envelope), "state": SdnValue.String(row.state),
+        "outcome_digest": SdnValue.String(row.outcome_digest),
+        "admitted_sequence": SdnValue.Int(history.admitted_sequence),
+        "last_from_state": SdnValue.String(history.last_from_state),
+        "last_to_state": SdnValue.String(history.last_to_state),
+        "last_outcome_digest": SdnValue.String(history.last_outcome_digest),
+        "last_sequence": SdnValue.Int(history.last_sequence),
+        "last_commit_digest": SdnValue.String(history.last_commit_digest)})
+
+pub struct CheckpointOperationPairV2:
+    row: DistributedOperationStateV2
+    history: DistributedOperationHistoryV2
+
+pub fn checkpoint_operation_decode_v2(value: SdnValue) -> Result<CheckpointOperationPairV2, text>:
+    val record = checkpoint_record_v2(value, ["operation_id", "envelope_digest", "envelope", "state",
+        "outcome_digest", "admitted_sequence", "last_from_state", "last_to_state",
+        "last_outcome_digest", "last_sequence", "last_commit_digest"])?
+    val row = DistributedOperationStateV2(checkpoint_text_v2(record["operation_id"])?,
+        checkpoint_text_v2(record["envelope_digest"])?, checkpoint_text_v2(record["envelope"])?,
+        checkpoint_text_v2(record["state"])?, checkpoint_text_v2(record["outcome_digest"])?)
+    val history = DistributedOperationHistoryV2(row.envelope_digest,
+        checkpoint_integer_v2(record["admitted_sequence"])?, checkpoint_text_v2(record["last_from_state"])?,
+        checkpoint_text_v2(record["last_to_state"])?, checkpoint_text_v2(record["last_outcome_digest"])?,
+        checkpoint_integer_v2(record["last_sequence"])?, checkpoint_text_v2(record["last_commit_digest"])?)
+    Ok(CheckpointOperationPairV2(row, history))
+
+pub fn checkpoint_operation_validate_v2(row: DistributedOperationStateV2,
+        history: DistributedOperationHistoryV2, sequence: i64) -> Result<bool, text>:
+    val initial = distributed_operation_initial_v2(row.envelope)?
+    if (initial.operation_id != row.operation_id or initial.envelope_digest != row.envelope_digest or
+            history.envelope_digest != row.envelope_digest or history.last_to_state != row.state or
+            history.last_outcome_digest != row.outcome_digest):
+        return Err("OPERATION_CHECKPOINT_IDENTITY_INVALID")
+    if (history.admitted_sequence < 1 or history.last_sequence < history.admitted_sequence or
+            history.last_sequence > sequence or not builder_digest_valid_v1(history.last_commit_digest)):
+        return Err("OPERATION_CHECKPOINT_HISTORY_INVALID")
+    if row.state == "admitted":
+        if (history.last_from_state != "" or row.outcome_digest != "" or
+                history.last_sequence != history.admitted_sequence):
+            return Err("OPERATION_CHECKPOINT_HISTORY_INVALID")
+    else:
+        if history.last_from_state == "" or history.last_sequence <= history.admitted_sequence:
+            return Err("OPERATION_CHECKPOINT_HISTORY_INVALID")
+        val prior = DistributedOperationStateV2(row.operation_id, row.envelope_digest,
+            row.envelope, history.last_from_state, "")
+        val checked = distributed_operation_transition_v2(prior, row.state, row.outcome_digest)?
+    Ok(true)

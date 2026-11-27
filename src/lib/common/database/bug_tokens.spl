@@ -1,0 +1,105 @@
+"""Pure completion token receipt types and helpers for bug databases.
+
+Canonical owner under common so both nogc_sync_mut and nogc_async_mut bug
+databases share one nominal layout for BugTokenReading and related types
+without duplicating declarations or crossing GC boundaries.
+"""
+
+# Cohort a bug's tokens are compared within; derived from the bug's file path.
+pub enum BugTokenCategory:
+    Compiler
+    Runtime
+    Library
+    Application
+    Os
+    Test
+    Other
+
+pub struct BugTokenCount:
+    value: i64
+
+# A provider-reported token count, or an explicit "unavailable".
+pub enum BugTokenReading:
+    Unavailable
+    Count(BugTokenCount)
+
+pub struct BugTokenProvider:
+    value: text
+
+pub struct BugTokenSource:
+    value: text
+
+# Repository knowledge artifact linked to a receipt (relative .md path).
+pub struct BugKnowledgeLink:
+    path: text
+
+pub struct BugTokenUsage:
+    category: BugTokenCategory
+    provider: BugTokenProvider
+    input: BugTokenReading
+    output: BugTokenReading
+    cache_read: BugTokenReading
+    cache_create: BugTokenReading
+    source: BugTokenSource
+    knowledge: BugKnowledgeLink?
+    recorded_at: text
+
+pub fn bug_token_usage_columns() -> [text]:
+    ["bug_id", "category", "provider", "input_tokens", "output_tokens",
+     "cache_read_tokens", "cache_create_tokens", "total_tokens",
+     "source", "knowledge", "recorded_at"]
+
+pub fn bug_token_category_to_string(category: BugTokenCategory) -> text:
+    match category:
+        BugTokenCategory.Compiler: "compiler"
+        BugTokenCategory.Runtime: "runtime"
+        BugTokenCategory.Library: "library"
+        BugTokenCategory.Application: "application"
+        BugTokenCategory.Os: "os"
+        BugTokenCategory.Test: "test"
+        BugTokenCategory.Other: "other"
+
+pub fn bug_token_category_for_path(path: text) -> BugTokenCategory:
+    if path.starts_with("src/compiler"):
+        return BugTokenCategory.Compiler
+    if path.starts_with("src/runtime"):
+        return BugTokenCategory.Runtime
+    if path.starts_with("src/lib"):
+        return BugTokenCategory.Library
+    if path.starts_with("src/app"):
+        return BugTokenCategory.Application
+    if path.starts_with("src/os"):
+        return BugTokenCategory.Os
+    if path.starts_with("test/"):
+        return BugTokenCategory.Test
+    BugTokenCategory.Other
+
+pub fn bug_token_reading_text(reading: BugTokenReading) -> text:
+    match reading:
+        case BugTokenReading.Unavailable: "unavailable"
+        case BugTokenReading.Count(count): "{count.value}"
+
+# Sum of the readings; Unavailable if any reading is, Err on i64 overflow.
+pub fn bug_token_total(readings: [BugTokenReading]) -> Result<BugTokenReading, text>:
+    var total: i64 = 0
+    for reading in readings:
+        match reading:
+            case BugTokenReading.Unavailable:
+                return Ok(BugTokenReading.Unavailable)
+            case BugTokenReading.Count(count):
+                if total > 9223372036854775807 - count.value:
+                    return Err("token total overflow")
+                total = total + count.value
+    Ok(BugTokenReading.Count(BugTokenCount(value: total)))
+
+# @allow(primitive_api): boolean presence predicate over BugTokenReading matching _bug_token_reading_known
+pub fn bug_token_reading_known(reading: BugTokenReading) -> bool:
+    match reading:
+        case BugTokenReading.Unavailable: false
+        case BugTokenReading.Count(_): true
+
+export BugTokenCategory, BugTokenCount, BugTokenReading
+export BugTokenProvider, BugTokenSource, BugKnowledgeLink, BugTokenUsage
+export bug_token_usage_columns, bug_token_category_to_string
+export bug_token_category_for_path, bug_token_reading_text
+export bug_token_total, bug_token_reading_known

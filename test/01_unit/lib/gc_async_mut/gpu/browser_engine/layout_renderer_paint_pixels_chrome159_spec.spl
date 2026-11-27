@@ -1,0 +1,126 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_raster.spl 1%
+# @tag: unit, browser_engine, paint, raster, chrome159
+#
+# Software raster of text-free pages: backgrounds, per-side borders,
+# outlines with offset, hard box-shadows, positioned boxes painted in
+# z-index and document order (CSS 2.2 Appendix E), relative offsets painting
+# over later in-flow boxes, visibility:hidden and overflow:hidden clipping.
+#
+# Oracle: Chrome 159.0.8154.6 headless shell, 200x120 window,
+# device-scale-factor 1, page `<html><head><style>body{margin:0;
+# background:#fff}</style></head><body>...`, screenshot pixel at each (x, y)
+# as RRGGBB, run 2026-11-15. Every colour is solid and every edge lands on a
+# whole pixel, so no row depends on antialiasing. No page holds text.
+#
+# Rows where this renderer disagrees with Chrome are filed, not asserted:
+# doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md.
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_software_result}
+
+fn _hex(v: u32) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    var shift = 20
+    while shift >= 0:
+        val d = ((v >> (shift as u32)) & 15u32) as i32
+        out = out + digits.substring(d, d + 1)
+        shift = shift - 4
+    out
+
+fn _px(body: text, x: i32, y: i32) -> text:
+    val page = "<html><head><style>body{{margin:0;background:#fff}}</style></head><body>" + body + "</body></html>"
+    val fb = simple_web_layout_render_html_software_result(page, 200, 120).pixels
+    _hex(fb[y * 200 + x])
+
+describe "Painted pixels":
+
+    it "solid box":
+        val page = "<div style=\"width:40px;height:30px;background:#ff0000\"></div>"
+        expect(_px(page, 5, 5)).to_equal("ff0000")
+        expect(_px(page, 39, 29)).to_equal("ff0000")
+        expect(_px(page, 40, 5)).to_equal("ffffff")
+        expect(_px(page, 5, 30)).to_equal("ffffff")
+
+    it "border box":
+        val page = "<div style=\"width:40px;height:30px;border:4px solid #0000ff;background:#00ff00\"></div>"
+        expect(_px(page, 1, 1)).to_equal("0000ff")
+        expect(_px(page, 10, 10)).to_equal("00ff00")
+        expect(_px(page, 47, 37)).to_equal("0000ff")
+        expect(_px(page, 48, 10)).to_equal("ffffff")
+
+    it "border sides":
+        val page = "<div style=\"width:40px;height:30px;border-top:3px solid #ff0000;border-left:5px solid #0000ff\"></div>"
+        expect(_px(page, 20, 1)).to_equal("ff0000")
+        expect(_px(page, 2, 20)).to_equal("0000ff")
+        expect(_px(page, 20, 20)).to_equal("ffffff")
+
+    it "outline box":
+        val page = "<div style=\"margin:10px;width:40px;height:30px;outline:3px solid #ff00ff\"></div>"
+        expect(_px(page, 8, 8)).to_equal("ff00ff")
+        expect(_px(page, 20, 20)).to_equal("ffffff")
+        expect(_px(page, 51, 20)).to_equal("ff00ff")
+        expect(_px(page, 53, 20)).to_equal("ffffff")
+
+    it "outline offset":
+        val page = "<div style=\"margin:10px;width:40px;height:30px;outline:2px solid #00ffff;outline-offset:4px\"></div>"
+        expect(_px(page, 5, 20)).to_equal("00ffff")
+        expect(_px(page, 7, 20)).to_equal("ffffff")
+        expect(_px(page, 8, 20)).to_equal("ffffff")
+
+    it "hard shadow":
+        val page = "<div style=\"margin:10px;width:40px;height:30px;background:#000000;box-shadow:6px 8px 0 #ff0000\"></div>"
+        expect(_px(page, 20, 20)).to_equal("000000")
+        expect(_px(page, 52, 45)).to_equal("ff0000")
+        expect(_px(page, 55, 20)).to_equal("ff0000")
+        expect(_px(page, 20, 47)).to_equal("ff0000")
+
+    it "z abs over":
+        val page = "<div style=\"position:relative;width:100px;height:60px\"><div style=\"position:absolute;z-index:2;left:20px;top:10px;width:40px;height:30px;background:#ff0000\"></div><div style=\"position:absolute;z-index:1;left:40px;top:20px;width:40px;height:30px;background:#0000ff\"></div></div>"
+        expect(_px(page, 30, 15)).to_equal("ff0000")
+        expect(_px(page, 50, 25)).to_equal("ff0000")
+        expect(_px(page, 70, 45)).to_equal("0000ff")
+        expect(_px(page, 10, 5)).to_equal("ffffff")
+
+    it "z abs order":
+        val page = "<div style=\"position:relative;width:100px;height:60px\"><div style=\"position:absolute;left:20px;top:10px;width:40px;height:30px;background:#ff0000\"></div><div style=\"position:absolute;left:40px;top:20px;width:40px;height:30px;background:#0000ff\"></div></div>"
+        expect(_px(page, 30, 15)).to_equal("ff0000")
+        expect(_px(page, 50, 25)).to_equal("0000ff")
+        expect(_px(page, 70, 45)).to_equal("0000ff")
+
+    it "rel over flow":
+        val page = "<div style=\"position:relative;top:10px;width:40px;height:30px;background:#ff0000\"></div><div style=\"width:40px;height:30px;background:#0000ff\"></div>"
+        expect(_px(page, 5, 35)).to_equal("ff0000")
+        expect(_px(page, 5, 5)).to_equal("ffffff")
+        expect(_px(page, 5, 45)).to_equal("0000ff")
+
+    it "z abs border":
+        val page = "<div style=\"position:relative;width:100px;height:60px\"><div style=\"position:absolute;z-index:3;left:10px;top:10px;width:30px;height:20px;border:2px solid #0000ff;background:#ffff00\"></div></div>"
+        expect(_px(page, 10, 10)).to_equal("0000ff")
+        expect(_px(page, 20, 20)).to_equal("ffff00")
+        expect(_px(page, 43, 33)).to_equal("0000ff")
+        expect(_px(page, 44, 20)).to_equal("ffffff")
+
+    it "z abs outline":
+        val page = "<div style=\"position:relative;width:100px;height:60px\"><div style=\"position:absolute;z-index:3;left:20px;top:20px;width:30px;height:20px;outline:3px solid #ff0000\"></div></div>"
+        expect(_px(page, 18, 30)).to_equal("ff0000")
+        expect(_px(page, 30, 30)).to_equal("ffffff")
+        expect(_px(page, 52, 30)).to_equal("ff0000")
+
+    it "z abs shadow":
+        val page = "<div style=\"position:relative;width:100px;height:60px\"><div style=\"position:absolute;z-index:3;left:10px;top:10px;width:30px;height:20px;background:#000000;box-shadow:5px 5px 0 #00ff00\"></div></div>"
+        expect(_px(page, 20, 20)).to_equal("000000")
+        expect(_px(page, 42, 33)).to_equal("00ff00")
+        expect(_px(page, 20, 33)).to_equal("00ff00")
+
+    it "visibility hidden":
+        val page = "<div style=\"width:40px;height:30px;background:#ff0000;visibility:hidden\"></div>"
+        expect(_px(page, 10, 10)).to_equal("ffffff")
+
+    it "overflow clip":
+        val page = "<div style=\"width:30px;height:20px;overflow:hidden\"><div style=\"width:80px;height:60px;background:#0000ff\"></div></div>"
+        expect(_px(page, 10, 10)).to_equal("0000ff")
+        expect(_px(page, 40, 10)).to_equal("ffffff")
+        expect(_px(page, 10, 30)).to_equal("ffffff")

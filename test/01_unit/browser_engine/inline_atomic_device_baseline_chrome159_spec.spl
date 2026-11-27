@@ -1,0 +1,79 @@
+"""
+Purpose: Pin the device rows of an atomic inline whose baseline is its bottom
+margin edge (an empty `inline-block`, an `<img>`) at device scale 1..4,
+against Chrome 159. Chrome lays the line out in device px: on a 16px/1.5
+Liberation Sans line the baseline is 17, 35, 51, 70 device px below the line
+top (not K x 17), and such a box sits ON that baseline.
+Audience: web renderer layout / Draw IR device-scale maintainers.
+
+Chrome oracle (headless shell 1255, Linux arm64, `--headless=new --disable-gpu
+--hide-scrollbars --force-device-scale-factor=K --window-size=400,300
+--screenshot`, Liberation Sans). Measured: the non-white runs of device
+column 1.5K, which crosses each line's box (the third line's blue
+`padding-left` of an inline-block that holds text). `getBoundingClientRect`
+of the 20x10 box on the first line: top 7 / 7.5 / 7.333 / 7.5 CSS px at K =
+1 / 2 / 3 / 4.
+
+Base (2ca16569863) kept these boxes at K x their CSS top, so they painted 1
+device row high at K=2, exactly at K=3 and 2 rows high at K=4 (K=4 `28-67
+152-191 248-343 400-439 524-563`). The inline-block holding text was already
+on Chrome's rows (its text carries the line's device baseline).
+"""
+
+"""
+Traceability: REQ-WEB-DPR4-ATOMIC-INLINE-BASELINE-001 — at device scale k>1 an empty inline-block or an image on a line sits on the line's device-px baseline.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+
+val PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans'}}div{{margin:0 0 7px 0}}.b{{display:inline-block;width:20px;height:10px;background:#000}}</style></head><body>" +
+    "<div><span class=\"b\"></span></div>" +
+    "<div><span class=\"b\"></span>x</div>" +
+    "<div><span style=\"display:inline-block;padding-left:4px;background:#00f;color:#fff\">Ab</span></div>" +
+    "<div><img width=\"20\" height=\"10\" style=\"background:#000\"></div>" +
+    "<div><img width=\"20\" height=\"10\" style=\"background:#000\">x</div>" +
+    "</body></html>"
+
+fn _is_white(px: u32) -> bool:
+    (px & 0xFFFFFFu32) == 0xFFFFFFu32
+
+# Non-white runs of device column 1.5K, as "first-last ...".
+fn _box_rows(k: i32) -> text:
+    val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, k, "cpu_simd")
+    val w = CSS_W * k
+    val h = CSS_H * k
+    if px.len() != (w * h) as i64:
+        return "size-mismatch"
+    val x = k + k / 2
+    var out = ""
+    var start = -1
+    var y = 0
+    while y <= h:
+        val ink = y < h and not _is_white(px[y * w + x])
+        if ink and start < 0:
+            start = y
+        if not ink and start >= 0:
+            out = out + (if out == "": "" else: " ") + start.to_text() + "-" + (y - 1).to_text()
+            start = -1
+        y = y + 1
+    out
+
+describe "Empty inline-block and <img> on a line at device scale 2..4 (Chrome 159)":
+    it "AC-1: scale 4 rows":
+        expect(_box_rows(4)).to_equal("30-69 154-193 248-343 402-441 526-565")
+
+    it "AC-2: scale 2 rows":
+        expect(_box_rows(2)).to_equal("15-34 77-96 124-171 201-220 263-282")
+
+    it "AC-3 (guard): scale 3 rows (the device baseline is 3 x 17)":
+        expect(_box_rows(3)).to_equal("21-50 114-143 186-257 300-329 393-422")
+
+describe "Empty inline-block and <img> on a line leave scale 1 alone":
+    it "AC-4 (guard): the 1x rows stay Chrome's":
+        expect(_box_rows(1)).to_equal("7-16 38-47 62-85 100-109 131-140")

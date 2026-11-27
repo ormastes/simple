@@ -1,0 +1,43 @@
+# Executable specification: CU-015 gate on the MCP bug-update writer. A status
+# transition to Fixed/Closed through update_bug_from_json must carry existing
+# reproducer and prevention specs in the JSON payload.
+# @req CU-015
+# @cover src/lib/nogc_async_mut/mcp/bugdb_resource.spl
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_async_mut.mcp.bugdb_resource.{update_bug_from_json}
+use std.database.bug.{create_bug_database, Bug, BugSeverity, BugStatus}
+
+extern fn rt_getpid() -> i64
+
+fn fixture_db(name: text) -> text:
+    val path = "/tmp/bugdb_close_gate_{name}_{rt_getpid()}.sdn"
+    var db = create_bug_database(path)
+    val bug = Bug(id: "b1", severity: BugSeverity.P2, status: BugStatus.Open, title: "t",
+        description: ["d"], file: "src/a.spl", line: 1, reproducible_by: "r",
+        fix_strategy: [], investigation_log: [], created_at: "2026-11-15",
+        updated_at: "2026-11-15", valid: true)
+    db.add_bug(bug)
+    db.save()
+    path
+
+describe "MCP bug update close gate":
+    it "rejects Closed and Fixed without evidence":
+        # @req CU-015
+        step("status-only transitions are refused")
+        val path = fixture_db("a")
+        expect(update_bug_from_json(path, "b1", "\{\"status\":\"Closed\"\}")).to_contain("close rejected")
+        expect(update_bug_from_json(path, "b1", "\{\"status\":\"Fixed\"\}")).to_contain("--reproducer=")
+
+    it "rejects evidence paths that do not exist":
+        # @req CU-015
+        step("nonexistent specs")
+        val path = fixture_db("b")
+        val body = "\{\"status\":\"Closed\",\"reproducer\":\"test/no_such_a_spec.spl\",\"prevention\":\"test/no_such_b_spec.spl\"\}"
+        expect(update_bug_from_json(path, "b1", body)).to_contain("reproducer spec not found")
+
+    it "still allows non-closing updates":
+        # @req CU-015
+        step("title edit passes")
+        val path = fixture_db("c")
+        expect(update_bug_from_json(path, "b1", "\{\"title\":\"new\"\}")).to_contain("success")

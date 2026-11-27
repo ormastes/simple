@@ -12,6 +12,7 @@
 #
 # Split from outline_decls.spl for modularity.
 
+use compiler.frontend.treesitter.outline.*
 use compiler.frontend.core.lexer.*
 use compiler.frontend.core.lexer_types.{TokenKind}
 use compiler.frontend.treesitter_types.*
@@ -37,9 +38,6 @@ fn variantpayload_Struct(fields: [FieldOutline]) -> VariantPayload:
 
 fn types_push(types: [TypeOutline], item: TypeOutline) -> [TypeOutline]:
         types.push(item)
-
-fn is_none<T>(v: T) -> bool:
-        v == nil
 use compiler.frontend.treesitter.outline_types.*
 use compiler.frontend.treesitter.outline_decls.*
 
@@ -74,7 +72,7 @@ fn _outline_parse_hex_digits(digits: text) -> i64:
     backend, instead of stubbing a runtime entry."""
     var value = 0
     var i = 0
-    while i < digits.len():
+    while i < digits.byte_len():
         val c = digits.char_code_at(i)
         if c >= 48 and c <= 57:
             value = value * 16 + (c - 48)
@@ -137,7 +135,17 @@ impl TreeSitter:
 
         self.expect(TokenKind.Colon, "expected ':' after enum name")
         self.skip_newlines()
-        self.expect(TokenKind.Indent, "expected indented enum body")
+        if not self.expect(TokenKind.Indent, "expected indented enum body"):
+            return EnumOutline(
+                name: name,
+                type_params: type_params,
+                variants: [],
+                visibility: visibility,
+                is_public: visibility == Visibility.Public,
+                has_doc_comment: doc.?,
+                doc_comment: doc ?? "",
+                span: merge_spans(start, self.previous.span)
+            )
 
         # Try to parse body docstring (triple-quoted string after indent)
         val body_doc = self.try_parse_body_docstring()
@@ -238,7 +246,18 @@ impl TreeSitter:
 
         self.expect(TokenKind.Colon, "expected ':' after bitfield declaration")
         self.skip_newlines()
-        self.expect(TokenKind.Indent, "expected indented bitfield body")
+        if not self.expect(TokenKind.Indent, "expected indented bitfield body"):
+            return BitfieldOutline(
+                name: name,
+                backing_type: backing_type,
+                fields: [],
+                visibility: visibility,
+                is_public: visibility == Visibility.Public,
+                has_doc_comment: doc.?,
+                doc_comment: doc ?? "",
+                attributes: attrs,
+                span: merge_spans(start, self.previous.span)
+            )
 
         # Try to parse body docstring
         val body_doc = self.try_parse_body_docstring()
@@ -354,7 +373,18 @@ impl TreeSitter:
 
         self.expect(TokenKind.Colon, "expected ':' after trait name")
         self.skip_newlines()
-        self.expect(TokenKind.Indent, "expected indented trait body")
+        if not self.expect(TokenKind.Indent, "expected indented trait body"):
+            return TraitOutline(
+                name: name,
+                type_params: type_params,
+                methods: [],
+                assoc_types: [],
+                visibility: visibility,
+                is_public: visibility == Visibility.Public,
+                has_doc_comment: doc.?,
+                doc_comment: doc ?? "",
+                span: merge_spans(start, self.previous.span)
+            )
 
         # Try to parse body docstring (triple-quoted string after indent)
         val body_doc = self.try_parse_body_docstring()
@@ -373,20 +403,20 @@ impl TreeSitter:
             val method_visibility = self.parse_visibility()
 
             match self.peek():
-                case KwFn:
-                    methods = methods_push(methods, self.parse_function_outline(method_visibility, false, method_doc))
+                case TokenKind.KwFn:
+                    methods = methods_push(methods, self.parse_trait_method_outline(method_visibility, false, method_doc))
                 case TokenKind.KwMe:
-                    methods = methods_push(methods, self.parse_function_outline(method_visibility, true, method_doc))
-                case KwVar:
+                    methods = methods_push(methods, self.parse_trait_method_outline(method_visibility, true, method_doc))
+                case TokenKind.KwVar:
                     # Check for deprecated 'var fn' syntax
                     self.advance()  # consume 'var'
                     if self.check(TokenKind.KwFn):
                         self.warning("Deprecated: Replace `var fn method()` with `me method()`")
-                        methods = methods_push(methods, self.parse_function_outline(method_visibility, true, method_doc))
+                        methods = methods_push(methods, self.parse_trait_method_outline(method_visibility, true, method_doc))
                     else:
                         self.error("expected method or type in trait")
                         self.synchronize()
-                case KwType:
+                case TokenKind.KwType:
                     assoc_types = assoc_types.push(self.parse_assoc_type_outline())
                 case _:
                     self.error("expected method or type in trait")
@@ -412,21 +442,35 @@ impl TreeSitter:
         val start = self.current.span
         self.advance()  # Consume 'impl'
 
-        val type_ = self.parse_type_outline()
+        val first_type = self.parse_type_outline()
 
+        var type_ = first_type
         var has_trait = false
         var trait_ = TypeOutline(kind: TypeOutlineKind.Infer, span: start)
-        if self.match_token(TokenKind.Colon):
-            # impl Type: Trait
-            if not self.check(TokenKind.Indent):
-                if not self.check(TokenKind.Newline):
-                    has_trait = true
-                    trait_ = self.parse_type_outline()
-
-        if not has_trait:
+        if self.match_token(TokenKind.KwFor):
+            # impl Trait for Type:
+            has_trait = true
+            trait_ = first_type
+            type_ = self.parse_type_outline()
+            self.expect(TokenKind.Colon, "expected ':' after impl target type")
+        elif self.match_token(TokenKind.Colon):
+            # impl Type: or impl Type: Trait (colon already consumed)
+            if not self.check(TokenKind.Indent) and not self.check(TokenKind.Newline):
+                has_trait = true
+                trait_ = self.parse_type_outline()
+                self.match_token(TokenKind.Colon)
+        else:
             self.expect(TokenKind.Colon, "expected ':' after impl type")
         self.skip_newlines()
-        self.expect(TokenKind.Indent, "expected indented impl body")
+        if not self.expect(TokenKind.Indent, "expected indented impl body"):
+            return ImplOutline(
+                type_: type_,
+                has_trait_: has_trait,
+                trait_: trait_,
+                methods: [],
+                assoc_types: [],
+                span: merge_spans(start, self.previous.span)
+            )
 
         # Skip optional body docstring (triple-quoted string after indent)
         # Note: impl blocks don't store doc comments, so we discard it
@@ -444,13 +488,13 @@ impl TreeSitter:
             val method_visibility = self.parse_visibility()
 
             match self.peek():
-                case KwFn:
+                case TokenKind.KwFn:
                     val m = self.parse_function_outline(method_visibility, false, method_doc)
                     methods = methods_push(methods, functionoutline_as_method(m))
                 case TokenKind.KwMe:
                     val m = self.parse_function_outline(method_visibility, true, method_doc)
                     methods = methods_push(methods, functionoutline_as_method(m))
-                case KwVar:
+                case TokenKind.KwVar:
                     # Check for deprecated 'var fn' syntax
                     self.advance()  # consume 'var'
                     if self.check(TokenKind.KwFn):
@@ -460,11 +504,11 @@ impl TreeSitter:
                     else:
                         self.error("expected method or type in impl")
                         self.synchronize()
-                case KwStatic:
+                case TokenKind.KwStatic:
                     self.advance()
                     val m = self.parse_function_outline(method_visibility, false, method_doc)
                     methods = methods_push(methods, functionoutline_as_static(m))
-                case KwType:
+                case TokenKind.KwType:
                     assoc_types = assoc_types.push(self.parse_assoc_type_outline())
                 case _:
                     self.error("expected method or type in impl")

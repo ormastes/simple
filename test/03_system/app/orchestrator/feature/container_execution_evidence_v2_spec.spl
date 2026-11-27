@@ -1,0 +1,278 @@
+# @req ORCH-02 HOST-02
+# Constructed observations are PURE integrity fixtures, never native proof/auth.
+# Step names are frozen as the exact case titles below. Execution NOT_RUN.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.execution_evidence_v2.*
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeCommandV1, RuntimeStateV1, RuntimeOperationV1}
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict, as_text}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+
+struct EvidenceIntegrityFixtureV2:
+    plan: ContainerExecutionPlanV2
+    wait: RuntimeOperationV1
+    absence: ContainerAbsenceReceiptV2
+
+fn evidence_integrity_fixture_v2(backend: text) -> EvidenceIntegrityFixtureV2:
+    val windows = backend == "windows-docker-process"
+    val scope = ContainerHostScopeV2(physical_host_id: "authorized-alias", service_scope_id: "service",
+        boot_id: if windows: "" else: "native-boot", provider_generation: 3,
+        native_machine_id: if windows: "windows-machine-guid-v1:abcd" else: "native-machine",
+        continuity_mode: if windows: "service-incarnation-v1" else: "native-boot-incarnation-v1",
+        continuity_id: if windows: "windows-service-incarnation-v1:beef" else: "native-boot")
+    val plan = ContainerExecutionPlanV2(backend: backend, workload_uid: "workload", attempt: 1,
+        operation_id: "operation", request_digest: "a".repeat(64), physical_host_id: scope.physical_host_id,
+        service_scope_id: scope.service_scope_id, boot_id: scope.boot_id, provider_generation: scope.provider_generation,
+        native_machine_id: scope.native_machine_id, continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id)
+    val identity = RuntimeIdentityV1(pod_uid: "workload", attempt: 1, provider_generation: 3,
+        operation_id: "operation", engine: if windows: "docker" else: "podman", native_id: "c".repeat(64),
+        node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    val program = if windows: "C:/Program Files/Docker/docker.exe" else: "/usr/bin/podman"
+    val wait = RuntimeOperationV1(status: "ok", operation: "wait",
+        command: RuntimeCommandV1(operation: "wait", program: program, args: ["wait", identity.native_id]),
+        state: RuntimeStateV1(phase: "exited", identity: identity, exit_code: 23, reason: "exited"),
+        exit_code: 0, stdout: "23\n", stderr: "", reason: "observed-exit")
+    val query = RuntimeCommandV1(operation: if windows: "inspect" else: "exists", program: program,
+        args: if windows: ["container", "inspect", identity.native_id] else: ["container", "exists", identity.native_id])
+    val absent_observation = RuntimeOperationV1(status: "ok", operation: "absence", command: query,
+        state: RuntimeStateV1(phase: "unknown", identity: identity, exit_code: -1, reason: "query-fixture"),
+        exit_code: 1, stdout: "", stderr: "fixture-only object missing", reason: "exact-query-fixture")
+    val absence = ContainerAbsenceReceiptV2(backend: backend, scope: scope, identity: identity,
+        request_digest: plan.request_digest, provider_identity_digest: "b".repeat(64), observed_unix_ms: 1000,
+        query_digest: container_runtime_query_digest_v2(query).unwrap(),
+        evidence_digest: container_runtime_observation_digest_v2(absent_observation).unwrap(),
+        proof_kind: "exact-native-object-absence-v1")
+    EvidenceIntegrityFixtureV2(plan: plan, wait: wait, absence: absence)
+
+fn evidence_integrity_wire_field_v2(source: text, key: text, value: SdnValue) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    var fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn evidence_integrity_wire_text_v2(source: text, key: text) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    val fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    as_text(fields[key], key, parsed.1).unwrap()
+
+fn evidence_integrity_observation_changed_v2(original: RuntimeOperationV1, changed: RuntimeOperationV1):
+    expect(container_runtime_observation_digest_v2(changed).unwrap() == container_runtime_observation_digest_v2(original).unwrap()).to_equal(false)
+
+describe "container execution evidence binds actual-shaped observation data only":
+    it "round trips both backend identities and their separate absence observations":
+        step("round trips both backend identities and their separate absence observations")
+        for backend in ["linux-podman", "windows-docker-process"]:
+            val fixture = evidence_integrity_fixture_v2(backend)
+            val absent = container_absence_receipt_encode_v2(fixture.absence).unwrap()
+            expect(container_absence_receipt_encode_v2(container_absence_receipt_decode_v2(absent).unwrap()).unwrap()).to_equal(absent)
+            expect(container_absence_receipt_digest_v2(fixture.absence).unwrap()).to_equal(sha256_text(absent))
+            val value = container_execution_evidence_v2(fixture.plan, fixture.wait, fixture.absence).unwrap()
+            val bytes = container_execution_evidence_encode_v2(value).unwrap()
+            val decoded = container_execution_evidence_decode_v2(bytes).unwrap()
+            expect(container_execution_evidence_encode_v2(decoded).unwrap()).to_equal(bytes)
+            expect(decoded.exit_code).to_equal(23)
+            expect(decoded.runtime.native_id).to_equal("c".repeat(64))
+            expect(decoded.absence.query_digest).to_equal(fixture.absence.query_digest)
+            expect(decoded.wait_observation_digest).to_equal(container_runtime_observation_digest_v2(fixture.wait).unwrap())
+
+    it "hashes canonical command argv boundaries rather than joined command text":
+        step("hashes canonical command argv boundaries rather than joined command text")
+        val command = RuntimeCommandV1(operation: "inspect", program: "C:/Program Files/Docker/docker.exe", args: ["a b", "c", ""])
+        val expected = SdnValue.Dict({"operation": SdnValue.String(command.operation), "program": SdnValue.String(command.program),
+            "args": SdnValue.Array([SdnValue.String("a b"), SdnValue.String("c"), SdnValue.String("")])})
+        val digest = container_runtime_query_digest_v2(command).unwrap()
+        expect(digest).to_equal(sha256_text(sdn_encode_canonical(expected) + "\n"))
+        var other = command
+        other.args = ["a", "b c", ""]
+        expect(container_runtime_query_digest_v2(other).unwrap() == digest).to_equal(false)
+        other = command
+        other.args = ["a b", "c"]
+        expect(container_runtime_query_digest_v2(other).unwrap() == digest).to_equal(false)
+        other = command
+        other.program = "/other/engine"
+        expect(container_runtime_query_digest_v2(other).unwrap() == digest).to_equal(false)
+        other = command
+        other.operation = "wait"
+        expect(container_runtime_query_digest_v2(other).unwrap() == digest).to_equal(false)
+        other = command
+        other.args = ["argument\0injection"]
+        expect(container_runtime_query_digest_v2(other).is_err()).to_equal(true)
+
+    it "binds every observation field and the complete runtime identity":
+        step("binds every observation field and the complete runtime identity")
+        val original = evidence_integrity_fixture_v2("linux-podman").wait
+        var changed = original
+        changed.status = "blocked"
+        evidence_integrity_observation_changed_v2(original, changed)
+        changed = original
+        changed.operation = "inspect"
+        evidence_integrity_observation_changed_v2(original, changed)
+        changed = original
+        changed.command.args = ["wait", "d".repeat(64)]
+        evidence_integrity_observation_changed_v2(original, changed)
+        changed = original
+        changed.exit_code = 9
+        evidence_integrity_observation_changed_v2(original, changed)
+        changed = original
+        changed.stdout = "24\n"
+        evidence_integrity_observation_changed_v2(original, changed)
+        changed = original
+        changed.stderr = "extra-stderr"
+        evidence_integrity_observation_changed_v2(original, changed)
+        changed = original
+        changed.reason = "changed-reason"
+        evidence_integrity_observation_changed_v2(original, changed)
+        changed = original
+        changed.state.phase = "stopped"
+        evidence_integrity_observation_changed_v2(original, changed)
+        changed = original
+        changed.state.exit_code = 24
+        evidence_integrity_observation_changed_v2(original, changed)
+        changed = original
+        changed.state.reason = "changed-state-reason"
+        evidence_integrity_observation_changed_v2(original, changed)
+        changed = original
+        changed.state.identity.native_id = "d".repeat(64)
+        evidence_integrity_observation_changed_v2(original, changed)
+        changed = original
+        changed.state.identity.pod_uid = "other-workload"
+        evidence_integrity_observation_changed_v2(original, changed)
+        changed = original
+        changed.state.identity.attempt = 2
+        evidence_integrity_observation_changed_v2(original, changed)
+        changed = original
+        changed.state.identity.operation_id = "other-operation"
+        evidence_integrity_observation_changed_v2(original, changed)
+        changed = original
+        changed.state.identity.provider_generation = 4
+        evidence_integrity_observation_changed_v2(original, changed)
+        changed = original
+        changed.state.identity.node_boot_id = "e".repeat(64)
+        evidence_integrity_observation_changed_v2(original, changed)
+        changed = original
+        changed.state.identity.engine = "docker"
+        evidence_integrity_observation_changed_v2(original, changed)
+
+    it "requires terminal wait with a nonblank query instead of cached tombstone state":
+        step("requires terminal wait with a nonblank query instead of cached tombstone state")
+        val fixture = evidence_integrity_fixture_v2("linux-podman")
+        var wait = fixture.wait
+        wait.command.program = ""
+        expect(container_execution_evidence_v2(fixture.plan, wait, fixture.absence).is_err()).to_equal(true)
+        wait = fixture.wait
+        wait.status = "blocked"
+        expect(container_execution_evidence_v2(fixture.plan, wait, fixture.absence).is_err()).to_equal(true)
+        wait = fixture.wait
+        wait.operation = "inspect"
+        expect(container_execution_evidence_v2(fixture.plan, wait, fixture.absence).is_err()).to_equal(true)
+        wait = fixture.wait
+        wait.command.operation = "inspect"
+        expect(container_execution_evidence_v2(fixture.plan, wait, fixture.absence).is_err()).to_equal(true)
+        wait = fixture.wait
+        wait.state.phase = "stopped"
+        expect(container_execution_evidence_v2(fixture.plan, wait, fixture.absence).is_err()).to_equal(true)
+        wait = fixture.wait
+        wait.state.exit_code = -1
+        expect(container_execution_evidence_v2(fixture.plan, wait, fixture.absence).is_err()).to_equal(true)
+        var absence = fixture.absence
+        absence.proof_kind = "destroyed-tombstone"
+        expect(container_absence_receipt_encode_v2(absence).is_err()).to_equal(true)
+        absence = fixture.absence
+        absence.observed_unix_ms = 0
+        expect(container_absence_receipt_encode_v2(absence).is_err()).to_equal(true)
+
+    it "rejects shortened native IDs and mismatched scope operation request or provider pin":
+        step("rejects shortened native IDs and mismatched scope operation request or provider pin")
+        val fixture = evidence_integrity_fixture_v2("linux-podman")
+        var absence = fixture.absence
+        absence.identity.native_id = "c".repeat(63)
+        expect(container_absence_receipt_encode_v2(absence).is_err()).to_equal(true)
+        absence = fixture.absence
+        absence.identity.node_boot_id = "d".repeat(64)
+        expect(container_absence_receipt_encode_v2(absence).is_err()).to_equal(true)
+        val original = container_execution_evidence_v2(fixture.plan, fixture.wait, fixture.absence).unwrap()
+        var changed = original
+        changed.runtime.native_id = "d".repeat(64)
+        expect(container_execution_evidence_encode_v2(changed).is_err()).to_equal(true)
+        changed = original
+        changed.runtime.operation_id = "other-operation"
+        expect(container_execution_evidence_encode_v2(changed).is_err()).to_equal(true)
+        changed = original
+        changed.runtime.pod_uid = "other-workload"
+        expect(container_execution_evidence_encode_v2(changed).is_err()).to_equal(true)
+        changed = original
+        changed.runtime.attempt = 2
+        expect(container_execution_evidence_encode_v2(changed).is_err()).to_equal(true)
+        changed = original
+        changed.runtime.provider_generation = 4
+        expect(container_execution_evidence_encode_v2(changed).is_err()).to_equal(true)
+        changed = original
+        changed.execution.request_digest = "e".repeat(64)
+        expect(container_execution_evidence_encode_v2(changed).is_err()).to_equal(true)
+        changed = original
+        changed.provider_identity_digest = "e".repeat(64)
+        expect(container_execution_evidence_encode_v2(changed).is_err()).to_equal(true)
+        changed = original
+        changed.absence.scope.physical_host_id = "other-alias"
+        expect(container_execution_evidence_encode_v2(changed).is_err()).to_equal(true)
+        changed = original
+        changed.absence.backend = "windows-docker-process"
+        expect(container_execution_evidence_encode_v2(changed).is_err()).to_equal(true)
+
+    it "keeps service incarnation distinct from native boot without treating either as observed proof":
+        step("keeps service incarnation distinct from native boot without treating either as observed proof")
+        val fixture = evidence_integrity_fixture_v2("windows-docker-process")
+        expect(fixture.absence.scope.boot_id).to_equal("")
+        expect(fixture.absence.scope.physical_host_id == fixture.absence.scope.native_machine_id).to_equal(false)
+        var service = fixture.absence.scope
+        service.continuity_id = "same-id"
+        var native = service
+        native.continuity_mode = "native-boot-incarnation-v1"
+        native.boot_id = "same-id"
+        expect(container_scope_fence_id_v2(service).unwrap() == container_scope_fence_id_v2(native).unwrap()).to_equal(false)
+        var changed = fixture.absence
+        changed.scope = native
+        expect(container_absence_receipt_encode_v2(changed).is_err()).to_equal(true)
+        changed = fixture.absence
+        changed.scope.boot_id = "invented-native-boot"
+        expect(container_absence_receipt_encode_v2(changed).is_err()).to_equal(true)
+
+    it "rejects strict wire unknown duplicate type and noncanonical nested records":
+        step("rejects strict wire unknown duplicate type and noncanonical nested records")
+        val fixture = evidence_integrity_fixture_v2("linux-podman")
+        val value = container_execution_evidence_v2(fixture.plan, fixture.wait, fixture.absence).unwrap()
+        val wire = container_execution_evidence_encode_v2(value).unwrap()
+        expect(container_execution_evidence_decode_v2(evidence_integrity_wire_field_v2(wire, "authenticated", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(container_execution_evidence_decode_v2(evidence_integrity_wire_field_v2(wire, "exitCode", SdnValue.String("23"))).is_err()).to_equal(true)
+        expect(container_execution_evidence_decode_v2(wire + "\n").is_err()).to_equal(true)
+        val head = wire.slice(0, wire.len() - 2)
+        expect(container_execution_evidence_decode_v2(head + ", version: 2" + "}\n").is_err()).to_equal(true)
+        val runtime = evidence_integrity_wire_text_v2(wire, "runtime")
+        expect(container_execution_evidence_decode_v2(evidence_integrity_wire_field_v2(wire, "runtime", SdnValue.String(runtime + "\n"))).is_err()).to_equal(true)
+        val absent_wire = container_absence_receipt_encode_v2(fixture.absence).unwrap()
+        expect(container_absence_receipt_decode_v2(evidence_integrity_wire_field_v2(absent_wire, "observedUnixMs", SdnValue.String("1000"))).is_err()).to_equal(true)
+        expect(container_absence_receipt_decode_v2(evidence_integrity_wire_field_v2(absent_wire, "unknown", SdnValue.Int(1))).is_err()).to_equal(true)
+        val absence_head = absent_wire.slice(0, absent_wire.len() - 2)
+        expect(container_absence_receipt_decode_v2(absence_head + ", version: 2" + "}\n").is_err()).to_equal(true)
+
+    it "enforces byte limits for query arguments observation capture and evidence source":
+        step("enforces byte limits for query arguments observation capture and evidence source")
+        val fixture = evidence_integrity_fixture_v2("linux-podman")
+        var query = fixture.wait.command
+        query.args = ["é".repeat(524289)]
+        expect(container_runtime_query_digest_v2(query).is_err()).to_equal(true)
+        query.args = ["x".repeat(600000), "y".repeat(600000)]
+        expect(container_runtime_query_digest_v2(query).is_err()).to_equal(true)
+        var observation = fixture.wait
+        observation.stdout = "é".repeat(1048577)
+        expect(container_runtime_observation_digest_v2(observation).is_err()).to_equal(true)
+        observation = fixture.wait
+        observation.stdout = "x".repeat(1048576)
+        observation.stderr = "y".repeat(1048576)
+        expect(container_runtime_observation_digest_v2(observation).is_err()).to_equal(true)
+        val oversized = "é".repeat(32769)
+        expect(str_len(oversized)).to_equal(65538)
+        expect(container_execution_evidence_decode_v2(oversized).is_err()).to_equal(true)
+        expect(container_absence_receipt_decode_v2(oversized).is_err()).to_equal(true)

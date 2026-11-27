@@ -1,0 +1,62 @@
+# HIR shard workers parse the whole closure to build import surfaces
+
+Status: Fixed for HIR shard workers (2026-10-25) and module-scoped MIR children (P-A); global-mono MIR shards open.
+
+## Symptom (measured)
+Every `--hir-shard` / `--mir-shard` / `--file-worker` child re-parsed the
+whole closure in phase 2 (1453 files x ~130 ms) only to build ModuleSurfaces
+for import resolution. That per-worker cost and RSS is why workers are capped
+at 12 and per-file parallelism cannot reach 80.
+
+## Fix (src/compiler/80.driver/driver_worker_surface_closure_v1.spl)
+In a HIR shard worker (`SIMPLE_HIR_SHARD` set; file-worker HIR children
+included), on the streaming-surface route:
+1. Seeds = the worker's static hash slice (`driver_parse_shard_hash`).
+2. Closure = seeds + `use`/`export use`/group-member targets resolved by
+   `resolve_module_path` (facades followed through their own imports).
+3. Closure modules get a real surface parsed from skeleton text: fresh `.tldr`
+   v6 `surface` section, else fresh `<root>/tldr/<rel>.surface` sidecar, else
+   `module_surface_skeleton_v1` published by temp file + atomic rename. One
+   set-once `TldrTableV1` entry per content key (single-flight in-process).
+4. Other modules get an empty-text placeholder surface; identity fields come
+   from the source, so `hir_cache_closure_digest` (the HIR cache key) and the
+   shard inventory are unchanged.
+5. After freeze, the worker claims only modules whose resolved
+   import/export-route closure is fully built (`worker_surface_ready_v1`,
+   checked in `hir_shard_begin`). Anything else stays unclaimed for another
+   worker or the parent, so the text closure is a heuristic, never a
+   correctness input.
+The done line now carries `surfaces_built= surfaces_loaded= skeleton_parses=`.
+Default ON; `SIMPLE_HIR_WORKER_SKELETON=0` restores the old whole-closure,
+full-source behaviour. Parent build unchanged.
+
+## Not covered
+- Global-mono `--mir-shard` children (no SIMPLE_MIR_SHARD_ONLY_PATHS +
+  SIMPLE_MONO_MODULE_SCOPED=1): they run mono over the whole program's HIR, so a
+  closure-only surface set is not sound there yet.
+- The retained (non-streaming) route never restricts MIR-child HIR loads
+  (whole-closure loading stays) and still builds every surface (skeleton
+  text in workers, but no closure restriction).
+
+## Evidence
+Spec: `test/01_unit/compiler/driver/worker_surface_differential_spec.spl`
+(+ `test/unit` mirror). Not run: on this Windows host the seed fails with
+`parse: in ...windows_redirected_process.spl: Unexpected token: expected Fn,
+found Colon`. No pass is claimed; no worker timing measured yet.
+
+## P-A: module-scoped MIR children (file-worker lane)
+A MIR child with `SIMPLE_MONO_MODULE_SCOPED=1` and `SIMPLE_MIR_SHARD_ONLY_PATHS`
+seeds the surface closure from its admitted targets (not the hash slice),
+then after freeze requires every target to be surface-ready; otherwise it
+publishes `<mir_queue>/<sha>.mono-pending` and fails closed. The HIR stage
+loads (cache hit or local lower) only the targets plus their frozen
+import/export-route closure (`worker_hir_load_allowed_v1`, set-once), plus
+every module whose source may declare AOP advice (`pc{` text superset of the
+parser rule) and its closure: the weave reads advice from all loaded HIR. A
+not-ready advice module fails closed (`aop advice outside import closure`).
+Logs:
+`[file-worker] mir-child hir closure modules=N of=M` and
+`[file-worker] mir-child hir_loaded= hir_skipped=`.
+Spec: `test/01_unit/compiler/driver/worker_mir_child_closure_spec.spl`
+(+ mirror). Not run on the Windows host: the seed fails with
+`semantic: unknown extern function: GetProcessHeap`.

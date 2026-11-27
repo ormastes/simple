@@ -1,0 +1,315 @@
+"""
+Regression and performance-invariant spec for Wave B2:
+1. Streaming `EXPR_RANGE` in `eval_for_expr` without allocating `[i64]` `VAL_ARRAY`.
+2. Per-site memoization of `infer_match_enum_type` / `check_match_exhaustive`
+   (`eid` / `sid`), per-`sid` deduplication of ignored-return warnings (cleared
+   in `eval_reset()`), and `rt_coverage_enabled()` gating of span/owner decodes.
+3. Direct 2D `fn_slot_*` reads without sub-array row clones, `fn_slot_*` reset
+   in `resolve_module_locals()`, `s_node.expr_idx` walk in `esc_walk_stmt` for
+   `STMT_VAL_DECL` / `STMT_VAR_DECL`, and `expr_owner_int(target_eid)` fast-slot
+   check first in `eval_stmt_assign`.
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.core.ast.{ast_reset, decl_get, elif_new, expr_array_lit, expr_binary, expr_for_expr, expr_ident, expr_int_lit, expr_owner_int, expr_range, stmt_assign_stmt, stmt_break_stmt, stmt_continue_stmt, stmt_get, stmt_if_stmt}
+use compiler.core.ast_stmt.{STMT_ASSIGN, STMT_WHILE}
+use compiler.core.frontend.{core_frontend_parse_reset}
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.eval.{eval_expr, eval_get_error, eval_has_error, eval_match_exhaustive_check_count, eval_warnings}
+use compiler.core.interpreter.eval_decls.{eval_init, eval_module}
+use compiler.core.interpreter.env.{env_define, env_lookup}
+use compiler.core.interpreter.resolve.{resolve_cached_local_count, resolve_is_fast_local, resolve_is_slot_shadowed, resolve_module_locals}
+use compiler.core.interpreter.value.{val_array_storage_count, val_get_int, val_is_nil, val_make_int}
+
+val OP_ADD: i64 = 60
+val OP_EQ: i64 = 80
+
+fn run_int(source: text, path: text) -> i64:
+    val result = core_interpret(source, path)
+    if eval_has_error() or result < 0:
+        print "core_interpret error ({path}): {eval_get_error()}"
+        return -9999991
+    val_get_int(result)
+
+fn count_warnings_containing(needle: text) -> i64:
+    var hits: i64 = 0
+    for w in eval_warnings:
+        if w.contains(needle):
+            hits = hits + 1
+    hits
+
+describe "Wave B2: core interpreter streaming range-for, match memo, and fast-local fixes":
+    describe "1. eval_for_expr streaming range-for":
+        it "streams EXPR_RANGE in eval_for_expr with zero VAL_ARRAY backing allocations":
+            eval_init()
+            ast_reset()
+            env_define("acc", val_make_int(0))
+            val start_eid = expr_int_lit(0, 0)
+            val end_eid = expr_int_lit(500, 0)
+            val range_eid = expr_range(start_eid, end_eid, 0, 0)
+            val sum_eid = expr_binary(OP_ADD, expr_ident("acc", 0), expr_ident("i", 0), 0)
+            val assign_sid = stmt_assign_stmt(expr_ident("acc", 0), sum_eid, 0)
+            val for_eid = expr_for_expr("i", range_eid, [assign_sid], 0)
+
+            val arrays_before = val_array_storage_count()
+            val last_vid = eval_expr(for_eid)
+            val arrays_after = val_array_storage_count()
+
+            expect(eval_has_error()).to_equal(false)
+            expect(val_get_int(last_vid)).to_equal(124750)
+            expect(val_get_int(env_lookup("acc"))).to_equal(124750)
+            expect(arrays_after - arrays_before).to_equal(0)
+
+        it "streams inclusive EXPR_RANGE and honors break/continue in eval_for_expr":
+            eval_init()
+            ast_reset()
+            env_define("incl_sum", val_make_int(0))
+            val incl_range = expr_range(expr_int_lit(0, 0), expr_int_lit(20, 0), 1, 0)
+            val incl_add = expr_binary(OP_ADD, expr_ident("incl_sum", 0), expr_ident("i", 0), 0)
+            val incl_assign = stmt_assign_stmt(expr_ident("incl_sum", 0), incl_add, 0)
+            val incl_for = expr_for_expr("i", incl_range, [incl_assign], 0)
+
+            val incl_before = val_array_storage_count()
+            val incl_last = eval_expr(incl_for)
+            val incl_after = val_array_storage_count()
+            expect(eval_has_error()).to_equal(false)
+            expect(val_get_int(incl_last)).to_equal(210)
+            expect(val_get_int(env_lookup("incl_sum"))).to_equal(210)
+            expect(incl_after - incl_before).to_equal(0)
+
+            eval_init()
+            ast_reset()
+            env_define("acc", val_make_int(0))
+
+            val range_eid = expr_range(expr_int_lit(0, 0), expr_int_lit(20, 0), 1, 0)
+
+            val cond_skip = expr_binary(OP_EQ, expr_ident("i", 0), expr_int_lit(3, 0), 0)
+            val cont_stmts = [stmt_continue_stmt(0)]
+            val skip_elif = elif_new(cond_skip, cont_stmts, [])
+            val if_skip_sid = stmt_if_stmt(cond_skip, cont_stmts, skip_elif, 0)
+
+            val cond_stop = expr_binary(OP_EQ, expr_ident("i", 0), expr_int_lit(11, 0), 0)
+            val brk_stmts = [stmt_break_stmt(0)]
+            val stop_elif = elif_new(cond_stop, brk_stmts, [])
+            val if_stop_sid = stmt_if_stmt(cond_stop, brk_stmts, stop_elif, 0)
+
+            val sum_eid = expr_binary(OP_ADD, expr_ident("acc", 0), expr_ident("i", 0), 0)
+            val assign_sid = stmt_assign_stmt(expr_ident("acc", 0), sum_eid, 0)
+
+            val for_eid = expr_for_expr("i", range_eid, [if_skip_sid, if_stop_sid, assign_sid], 0)
+
+            val arrays_before = val_array_storage_count()
+            val last_vid = eval_expr(for_eid)
+            val arrays_after = val_array_storage_count()
+
+            # 0+1+2 + 4+5+6+7+8+9+10 = 52 (break statement evaluates to nil), zero VAL_ARRAY allocations
+            expect(eval_has_error()).to_equal(false)
+            expect(val_is_nil(last_vid)).to_equal(true)
+            expect(val_get_int(env_lookup("acc"))).to_equal(52)
+            expect(arrays_after - arrays_before).to_equal(0)
+
+        it "preserves array iteration in eval_for_expr":
+            eval_init()
+            ast_reset()
+            env_define("sum", val_make_int(0))
+            val arr_eid = expr_array_lit([
+                expr_int_lit(4, 0),
+                expr_int_lit(7, 0),
+                expr_int_lit(9, 0),
+                expr_int_lit(12, 0)
+            ], 0)
+            val add_eid = expr_binary(OP_ADD, expr_ident("sum", 0), expr_ident("x", 0), 0)
+            val assign_sid = stmt_assign_stmt(expr_ident("sum", 0), add_eid, 0)
+            val for_eid = expr_for_expr("x", arr_eid, [assign_sid], 0)
+
+            val last_vid = eval_expr(for_eid)
+            expect(eval_has_error()).to_equal(false)
+            expect(val_get_int(last_vid)).to_equal(32)
+            expect(val_get_int(env_lookup("sum"))).to_equal(32)
+
+    describe "2. match exhaustiveness memo, ignored-return dedup, and coverage gating":
+        it "memoizes infer_match_enum_type and check_match_exhaustive once per match eid in loops":
+            val src = """
+enum Phase:
+    Init
+    Run
+    Done
+
+fn step_expr(p: Phase) -> i64:
+    match p:
+        case Phase.Init: 1
+        case Phase.Run: 2
+
+fn main() -> i64:
+    var acc = 0
+    for i in 0..150:
+        val v = step_expr(Phase.Run)
+        acc = acc + v
+    acc
+"""
+            expect(run_int(src, "match_expr_memo_loop.spl")).to_equal(300)
+            expect(eval_match_exhaustive_check_count()).to_equal(1)
+            expect(count_warnings_containing("non-exhaustive match on 'Phase'")).to_equal(1)
+
+        it "memoizes infer_match_enum_type and check_match_exhaustive once per match sid in loops":
+            val src = """
+enum Mode:
+    Fast
+    Safe
+    Debug
+
+fn step_stmt(m: Mode) -> i64:
+    var out = 0
+    match m:
+        case Mode.Fast:
+            out = 3
+        case Mode.Safe:
+            out = 5
+    out
+
+fn main() -> i64:
+    var acc = 0
+    for i in 0..120:
+        acc = acc + step_stmt(Mode.Fast)
+    acc
+"""
+            expect(run_int(src, "match_stmt_memo_loop.spl")).to_equal(360)
+            expect(eval_match_exhaustive_check_count()).to_equal(1)
+            expect(count_warnings_containing("non-exhaustive match on 'Mode'")).to_equal(1)
+
+        it "deduplicates ignored-return warnings per sid and clears memos on eval_reset":
+            val src = """
+fn compute_code(x: i64) -> i64:
+    x + 1
+
+fn main() -> i64:
+    var i = 0
+    while i < 100:
+        compute_code(i)
+        i = i + 1
+    i
+"""
+            expect(run_int(src, "ignored_return_dedup_run1.spl")).to_equal(100)
+            expect(count_warnings_containing("from function 'compute_code' is ignored")).to_equal(1)
+
+            # Second run resets memo state in eval_reset(), so the new run emits its warning once.
+            expect(run_int(src, "ignored_return_dedup_run2.spl")).to_equal(100)
+            expect(count_warnings_containing("from function 'compute_code' is ignored")).to_equal(1)
+
+        it "preserves guarded match and compound control semantics with gated coverage decodes":
+            val src = """
+enum Tag:
+    Alpha
+    Beta
+
+fn classify(t: Tag, n: i64) -> i64:
+    var bonus = if n > 2 and n < 10: 10 else: 1
+    var k = 0
+    while k < 3 and bonus > 0:
+        k = k + 1
+    match t:
+        case Tag.Alpha if n > 5:
+            bonus + k + 100
+        case Tag.Alpha:
+            bonus + k + 20
+        case Tag.Beta:
+            0
+
+fn main() -> i64:
+    classify(Tag.Alpha, 7) + classify(Tag.Alpha, 3)
+"""
+            # (10 + 3 + 100) + (10 + 3 + 20) = 113 + 33 = 146
+            expect(run_int(src, "coverage_gated_controls.spl")).to_equal(146)
+
+    describe "3. fast-local direct table lookup, module reset, escape walk, and stmt assign":
+        it "reads fn_slot_* without row-clone regressions and resets fn_slot_* in resolve_module_locals":
+            val src_many = """
+fn f0(a: i64) -> i64:
+    val b = a + 1
+    b
+
+fn f1(x: i64, y: i64) -> i64:
+    var z = x + y
+    z = z + 2
+    z
+
+fn main() -> i64:
+    var local_a = f0(3)
+    var local_b = f1(local_a, 5)
+    local_b
+"""
+            expect(run_int(src_many, "resolve_reset_many.spl")).to_equal(11)
+            expect(resolve_cached_local_count(2)).to_equal(2)
+            expect(resolve_is_fast_local(2, "local_a")).to_equal(0)
+            expect(resolve_is_fast_local(2, "local_b")).to_equal(1)
+            expect(resolve_is_slot_shadowed(2, 0)).to_equal(false)
+
+            val src_one = """
+fn main() -> i64:
+    val only_one = 42
+    only_one
+"""
+            expect(run_int(src_one, "resolve_reset_one.spl")).to_equal(42)
+            expect(resolve_cached_local_count(0)).to_equal(1)
+            # Stale decl_id 2 from the previous module must be cleared by resolve_module_locals().
+            expect(resolve_cached_local_count(2)).to_equal(0)
+            expect(resolve_is_fast_local(2, "local_a")).to_equal(-1)
+            expect(resolve_is_slot_shadowed(2, 0)).to_equal(true)
+
+        it "demotes locals mutated inside val/var initializer lambdas via esc_walk_stmt":
+            val src = """
+fn outer() -> i64:
+    var total = 10
+    var bonus = 20
+    val f1 = fn(x):
+        total = total + x
+    var f2 = fn(y):
+        bonus = bonus + y
+    f1(7)
+    f2(5)
+    total + bonus
+
+fn main() -> i64:
+    outer()
+"""
+            eval_init()
+            ast_reset()
+            val parsed_ok = core_frontend_parse_reset(src, "esc_walk_val_var_decl.spl")
+            expect(parsed_ok).to_equal(true)
+            resolve_module_locals()
+            # `outer` is decl_id 0; `total` (slot 0) and `bonus` (slot 1) must be demoted off LOAD_FAST.
+            expect(resolve_is_fast_local(0, "total")).to_equal(-1)
+            expect(resolve_is_fast_local(0, "bonus")).to_equal(-1)
+            expect(resolve_is_slot_shadowed(0, 0)).to_equal(true)
+            expect(resolve_is_slot_shadowed(0, 1)).to_equal(true)
+            val out_vid = eval_module()
+            expect(eval_has_error()).to_equal(false)
+            expect(val_get_int(out_vid)).to_equal(42)
+
+        it "updates pre-resolved expr_owner_int slots in eval_stmt_assign":
+            val src = """
+fn accumulate(limit: i64) -> i64:
+    var sum = 0
+    var cur = 1
+    while cur <= limit:
+        sum = sum + cur
+        cur = cur + 1
+    sum
+
+fn main() -> i64:
+    accumulate(10)
+"""
+            expect(run_int(src, "stmt_assign_fast_slot.spl")).to_equal(55)
+            expect(resolve_is_fast_local(0, "limit")).to_equal(0)
+            expect(resolve_is_fast_local(0, "sum")).to_equal(1)
+            expect(resolve_is_fast_local(0, "cur")).to_equal(2)
+            val d0 = decl_get(0)
+            var saw_assign_slot: bool = false
+            for sid in d0.body_stmts:
+                val s = stmt_get(sid)
+                if s.tag == STMT_WHILE:
+                    for bsid in s.body:
+                        val bs = stmt_get(bsid)
+                        if bs.tag == STMT_ASSIGN and expr_owner_int(bs.expr_idx) >= 0:
+                            saw_assign_slot = true
+            expect(saw_assign_slot).to_equal(true)

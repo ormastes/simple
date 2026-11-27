@@ -1,0 +1,167 @@
+use std.spec.{describe, it, expect, fail}
+# @req HOST-OWNER-CLEANUP-01 HOST-OWNER-CLEANUP-02 HOST-OWNER-CLEANUP-03
+# NOT_RUN: actual native lock, host journal and filesystem; no fake fault hooks.
+use test.fixtures.orchestration.host_owned_journal_fixture_v2.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_local_root_v1.*
+use std.nogc_sync_mut.orchestration.host_local_command_v1.*
+use std.common.task_runner.distributed_operation_journal_v2.*
+use std.nogc_sync_mut.io.file_lock_owned_v2.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_exists, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_sync_mut.io_runtime.{dir_create, dir_remove, file_delete}
+
+fn host_owned_assert_rejected_v2(opened: HostCapacityOpenV2) -> text:
+    match opened:
+        case HostCapacityOpenV2.Rejected(error): error
+        case HostCapacityOpenV2.CleanupRequired(cleanup, error):
+            val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+            expect(closed.error).to_equal("")
+            fail("unexpected retained close in ordinary error case:" + error)
+        case HostCapacityOpenV2.Ready(owner):
+            host_owned_journal_closed_v2(owner)
+            fail("invalid retained journal unexpectedly accepted")
+
+describe "Managed host owned journal and finite cleanup propagation":
+    it "uses actual owned lock and refuses a second writer without changing original lease":
+        val fixture = host_owned_journal_fixture_v2()
+        val owner = fixture.owner
+        assert(owner.journal.owned_lock.?)
+        expect(owner.journal.parent_lock).to_equal(-1)
+        val lease = file_read_regular_no_follow_bounded(owner.journal.root + "/parent.lease", 512).unwrap()
+        val rejected = host_owned_assert_rejected_v2(host_capacity_owner_open_owned_v2(owner.journal.root,
+            owner.ledger.capacity, "e".repeat(64), 50, true))
+        expect(rejected).to_equal("FILE_LOCK_ACQUISITION_REJECTED")
+        expect(file_read_regular_no_follow_bounded(owner.journal.root + "/parent.lease", 512).unwrap()).to_equal(lease)
+        assert(file_lock_owner_live_v2(owner.journal.owned_lock.unwrap()))
+        assert(host_capacity_owner_close_v1(owner).is_err())
+        assert(file_lock_owner_live_v2(owner.journal.owned_lock.unwrap()))
+        host_owned_journal_closed_v2(owner)
+        assert(dir_remove(fixture.original.root, true))
+
+    it "releases the real owned writer after actual reservation projection corruption":
+        val fixture = host_owned_journal_fixture_v2()
+        val owner = fixture.owner
+        val payload_path = owner.journal.root + "/reservation-payloads/" + fixture.original.envelope.operation.payload_digest + ".sdn"
+        val original = file_read_regular_no_follow_bounded(payload_path, 65536).unwrap()
+        host_owned_journal_closed_v2(owner)
+        assert(file_atomic_write_mode(payload_path, "broken retained reservation", 0o600))
+        val rejected = host_owned_assert_rejected_v2(host_capacity_owner_open_owned_v2(owner.journal.root,
+            owner.ledger.capacity, "e".repeat(64), 50, true))
+        assert(rejected != "")
+        assert(not file_exists(owner.journal.root + "/parent.lease"))
+        assert(file_atomic_write_mode(payload_path, original, 0o600))
+        val reopened = host_owned_journal_ready_v2(host_capacity_owner_open_owned_v2(owner.journal.root,
+            owner.ledger.capacity, "f".repeat(64), 50, true))
+        expect(host_available_capacity_v1(reopened.ledger).unwrap().cpu_millis).to_equal(1000)
+        host_owned_journal_closed_v2(reopened)
+        assert(dir_remove(fixture.original.root, true))
+
+    it "preserves actual WAL replay rejection while releasing the acquired native lock":
+        val fixture = host_owned_journal_fixture_v2()
+        val owner = fixture.owner
+        host_owned_journal_closed_v2(owner)
+        val current_path = owner.journal.root + "/database-wal/CURRENT"
+        val original = file_read_regular_no_follow_bounded(current_path, 4096).unwrap()
+        assert(file_atomic_write_mode(current_path, "broken\n", 0o600))
+        expect(host_owned_assert_rejected_v2(host_capacity_owner_open_owned_v2(owner.journal.root,
+            owner.ledger.capacity, "e".repeat(64), 50, true))).to_equal("invalid WAL CURRENT")
+        assert(not file_exists(owner.journal.root + "/parent.lease"))
+        assert(file_atomic_write_mode(current_path, original, 0o600))
+        val reopened = host_owned_journal_ready_v2(host_capacity_owner_open_owned_v2(owner.journal.root,
+            owner.ledger.capacity, "f".repeat(64), 50, true))
+        host_owned_journal_closed_v2(reopened)
+        assert(dir_remove(fixture.original.root, true))
+
+    it "retains actual lease-mismatch cleanup in finite reply and never upgrades failed command to success":
+        val fixture = host_owned_journal_fixture_v2()
+        val owner = fixture.owner
+        val lease_path = owner.journal.root + "/parent.lease"
+        val original = file_read_regular_no_follow_bounded(lease_path, 512).unwrap()
+        val replacement = "actual private fixture lease obstruction"
+        assert(file_atomic_write_mode(lease_path, replacement, 0o600))
+        val reply = host_local_finish_owned_v2(owner, "host-status", "", HostLocalCommandReplyV1(0, "retained result bytes"))
+        expect(reply.exit_code).to_equal(2)
+        expect(reply.journal_cleanup.is_some()).to_equal(true)
+        expect(reply.cleanup_state.unwrap()).to_equal(FileLockReleaseStateV2.Retained)
+        expect(file_read_regular_no_follow_bounded(lease_path, 512).unwrap()).to_equal(replacement)
+        assert(file_lock_owner_live_v2(owner.journal.owned_lock.unwrap()))
+        # Repair only exact fixture bytes, then retry the canonical generation
+        # capability with lease_published state retained by the failed close.
+        assert(file_atomic_write_mode(lease_path, original, 0o600))
+        val released = host_local_command_cleanup_v2(reply)
+        expect(released.journal_cleanup.is_none()).to_equal(true)
+        expect(released.cleanup_state.unwrap()).to_equal(FileLockReleaseStateV2.Released)
+        expect(released.exit_code).to_equal(2)
+        expect(released.output).to_equal(reply.output)
+        val reopened = host_owned_journal_ready_v2(host_capacity_owner_open_owned_v2(owner.journal.root,
+            owner.ledger.capacity, "e".repeat(64), 50, true))
+        val later_lease = file_read_regular_no_follow_bounded(lease_path, 512).unwrap()
+        val stale = host_local_command_cleanup_v2(reply)
+        expect(stale.exit_code).to_equal(2)
+        expect(stale.cleanup_state.unwrap()).to_equal(FileLockReleaseStateV2.Stale)
+        expect(stale.journal_cleanup.is_none()).to_equal(true)
+        assert(file_lock_owner_live_v2(reopened.journal.owned_lock.unwrap()))
+        expect(file_read_regular_no_follow_bounded(lease_path, 512).unwrap()).to_equal(later_lease)
+        host_owned_journal_closed_v2(reopened)
+        assert(dir_remove(fixture.original.root, true))
+
+    it "opens actual quarantined history without claiming continuity or freeing admitted capacity":
+        val fixture = host_owned_journal_fixture_v2()
+        host_owned_journal_closed_v2(fixture.owner)
+        val owner = host_owned_journal_ready_v2(host_capacity_owner_open_quarantined_owned_v2(fixture.owner.journal.root,
+            fixture.owner.ledger.capacity, "e".repeat(64), 50))
+        assert(not owner.ledger.continuity_proven)
+        expect(owner.ledger.reservations[0].state).to_equal(HostReservationStateV1.Uncertain)
+        expect(host_available_capacity_v1(owner.ledger).unwrap().cpu_millis).to_equal(1000)
+        host_owned_journal_closed_v2(owner)
+        assert(dir_remove(fixture.original.root, true))
+
+    it "rejects incomplete actual root before acquiring any journal or fabricating a local owner":
+        val root = secure_temp_dir("/tmp", "host-owned-root-rejected").unwrap()
+        match host_local_root_open_owned_v2(root, 30000):
+            case HostLocalRootOpenV2.Rejected(error): assert(error != "")
+            case HostLocalRootOpenV2.CleanupRequired(cleanup, error):
+                val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+                expect(closed.error).to_equal("")
+                fail("incomplete root acquired journal cleanup:" + error)
+            case HostLocalRootOpenV2.Ready(local):
+                host_owned_journal_closed_v2(local.capacity)
+                fail("incomplete root accepted")
+        assert(not file_exists(root + "/journal/parent.lock"))
+        assert(dir_remove(root, true))
+
+    it "releases latest acquired writer when actual recovery append reaches journal quota":
+        val fixture = host_owned_journal_fixture_v2()
+        val owner = fixture.owner
+        val envelope = fixture.original.envelope
+        val cap = owner.ledger.capacity
+        val fence = HostLedgerFenceV1(cap.authority_id, cap.boot_id, cap.provider_generation, owner.ledger.revision)
+        val executing = host_capacity_owner_begin_v1(owner, envelope.intent, envelope.operation, envelope.receipt,
+            fence, envelope.signed.grant, fixture.original.context).unwrap()
+        expect(executing.journal.sequence).to_equal(2)
+        assert(file_lock_owner_live_v2(executing.journal.owned_lock.unwrap()))
+        host_owned_journal_closed_v2(executing)
+        val rejected = host_owned_assert_rejected_v2(host_capacity_owner_open_owned_v2(executing.journal.root,
+            cap, "e".repeat(64), 2, true))
+        expect(rejected).to_equal("host-execution-recovery-failed:OPERATION_JOURNAL_FULL")
+        assert(not file_exists(executing.journal.root + "/parent.lease"))
+        val recovered = host_owned_journal_ready_v2(host_capacity_owner_open_owned_v2(executing.journal.root,
+            cap, "f".repeat(64), 50, true))
+        expect(recovered.journal.operations[envelope.operation.id].state).to_equal("outcome-unknown")
+        expect(host_available_capacity_v1(recovered.ledger).unwrap().cpu_millis).to_equal(1000)
+        assert(file_lock_owner_live_v2(recovered.journal.owned_lock.unwrap()))
+        host_owned_journal_closed_v2(recovered)
+        assert(dir_remove(fixture.original.root, true))
+
+    it "enforces actual compiled host prerequisite before POSIX private-policy runtime loading":
+        @when(os="linux"):
+        val root = secure_temp_dir("/tmp", "host-finite-linux-prerequisite").unwrap()
+        val rejected = host_local_runtime_open_v1(root, 30000)
+        assert(rejected.is_err())
+        assert(rejected.unwrap_err() != "host-local-native-runtime-host-unsupported")
+        assert(dir_remove(root, true))
+        @else:
+        expect(host_local_runtime_open_v1("", 30000).unwrap_err()).to_equal("host-local-native-runtime-host-unsupported")
+        @end

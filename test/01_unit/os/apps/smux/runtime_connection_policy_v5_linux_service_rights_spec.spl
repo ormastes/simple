@@ -1,0 +1,97 @@
+"""
+## Purpose and audience
+PR4: the LinuxService arm's agent-terminal rights. The fixed policy is the single Input right (a ceiling, never a
+grant); every control issue, pane Write and capabilities_v5 re-ask the controller-signed terminal-authority accessor.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary, 2026-11-18).
+## Compatibility and limitations
+Covers the fail-closed side and the pure shapes. The Ok-authority grant path (a started owner with a ready attach)
+needs the real fixture driver and is NOT_AUTHORED here, like the started owner of host_local_root_linux_service_v3_spec.
+## Verification guidance and troubleshooting
+Each refusal names the exact error string.
+"""
+use std.spec.step
+use std.common.contracts.mux.session_runtime_control_v1.SessionRuntimeControlKindV1
+use std.common.contracts.orchestration.host_agent_pane_v4.host_agent_pane_lease_v4
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.HostServiceDomainV3
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.HostServiceRequestV2
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{HostLinuxServiceCurrentV4,
+    host_linux_service_agent_pane_control_target_v4}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use os.apps.smux.runtime_connection_owner_v5.{SmuxRuntimeConnectionOwnerV5, smux_runtime_connection_open_v5,
+    smux_runtime_connection_capabilities_v5, smux_runtime_connection_host_v5}
+use os.apps.smux.runtime_connection_policy_v5.{smux_runtime_connection_policy_load_v5, linux_service_agent_pane_policy_v5}
+use os.apps.smux.runtime_control_policy_v1.smux_runtime_control_policy_validate_v1
+use os.apps.smux.smux_runtime_control_owner_v1.smux_runtime_control_owner_new_v1
+use os.apps.smux.runtime_host_continuation_v6.smux_host_continuation_new_v6
+
+fn unpublished_domain_v5() -> HostServiceDomainV3:
+    HostServiceDomainV3(HostLocalRootV3.LinuxService(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service")))
+
+fn unpublished_owner_v5() -> SmuxRuntimeConnectionOwnerV5:
+    val incarnation = "a".repeat(32)
+    val controls = smux_runtime_control_owner_new_v1(linux_service_agent_pane_policy_v5(), incarnation).unwrap()
+    SmuxRuntimeConnectionOwnerV5(unpublished_domain_v5(), incarnation, controls, [], smux_host_continuation_new_v6())
+
+fn write_request_v5(uid: text) -> HostServiceRequestV2:
+    val body: Dict<text, SdnValue> = {"bindingUid": SdnValue.String(uid), "attempt": SdnValue.Int(1),
+        "writeId": SdnValue.Int(1), "offset": SdnValue.Int(0), "maximum": SdnValue.Int(2), "data": SdnValue.String("hi")}
+    HostServiceRequestV2("host-agent-pane-write", "op_1", sdn_encode_canonical(SdnValue.Dict(body)))
+
+describe "LinuxService agent-terminal rights (PR4)":
+    it "fixes exactly the Input right with a bounded lease and no Geometry":
+        # @req PR4-RIGHTS-03
+        val fixed = linux_service_agent_pane_policy_v5()
+        expect(smux_runtime_control_policy_validate_v1(fixed).is_ok()).to_equal(true)
+        expect(fixed.allowed.len()).to_equal(1)
+        expect(fixed.allowed.contains(SessionRuntimeControlKindV1.Input)).to_equal(true)
+        expect(fixed.allowed.contains(SessionRuntimeControlKindV1.Geometry)).to_equal(false)
+        expect(fixed.max_lease_ms > 0 and fixed.max_lease_ms <= 15000).to_equal(true)
+
+    it "grants no right to an unpublished or unauthenticated service incarnation":
+        # @req PR4-RIGHTS-01
+        val loaded = smux_runtime_connection_policy_load_v5(unpublished_domain_v5().local)
+        expect(loaded.unwrap_err()).to_equal("linux-host-service-current-unpublished")
+        val opened = smux_runtime_connection_open_v5(unpublished_domain_v5(), "a".repeat(32))
+        expect(opened.owner.is_none()).to_equal(true)
+        expect(opened.retained.is_some()).to_equal(true)
+        expect(opened.error).to_equal("linux-host-service-current-unpublished")
+
+    it "offers no capability while the terminal authority does not verify":
+        # @req PR4-RIGHTS-04
+        val caps = smux_runtime_connection_capabilities_v5(unpublished_owner_v5())
+        expect(caps.available).to_equal(false)
+        expect(caps.input_allowed).to_equal(false)
+        expect(caps.geometry_allowed).to_equal(false)
+
+    it "yields no control target unless the terminal authority is Ok":
+        # @req PR4-RIGHTS-05
+        val service = HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service")
+        expect(host_linux_service_agent_pane_control_target_v4(service).unwrap_err()).to_equal("linux-host-service-current-unpublished")
+
+    it "refuses a pane Write with no claimed pane lease before any control lease is issued":
+        # @req PR4-WRITE-03
+        val turn = smux_runtime_connection_host_v5(unpublished_owner_v5(), write_request_v5("bind1"))
+        expect(turn.error).to_equal("runtime-agent-pane-not-claimed")
+        expect(turn.owner.controls.entries.len()).to_equal(0)
+
+    it "refuses a pane Write when authority no longer verifies, drops the lease and issues no control lease":
+        # @req PR4-WRITE-04
+        var owner = unpublished_owner_v5()
+        owner.host.agent_pane_lease = Some(host_agent_pane_lease_v4("op-1", 1, "digest"))
+        val turn = smux_runtime_connection_host_v5(owner, write_request_v5("bind1"))
+        expect(turn.error).to_equal("linux-host-service-current-unpublished")
+        expect(turn.owner.controls.entries.len()).to_equal(0)
+        expect(turn.owner.host.agent_pane_lease.is_none()).to_equal(true)
+        expect(turn.owner.host.agent_pane_revoked).to_equal(true)
+
+    it "refuses a malformed or foreign-field write body before reaching the service":
+        # @req PR4-WRITE-05
+        var owner = unpublished_owner_v5()
+        owner.host.agent_pane_lease = Some(host_agent_pane_lease_v4("op-1", 1, "digest"))
+        val bad = smux_runtime_connection_host_v5(owner, HostServiceRequestV2("host-agent-pane-write", "op_1", "not sdn"))
+        expect(bad.error).to_equal("runtime-agent-pane-write-payload")
+        expect(bad.owner.host.agent_pane_lease.is_some()).to_equal(true)

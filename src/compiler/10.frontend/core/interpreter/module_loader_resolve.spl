@@ -21,6 +21,7 @@ extern fn rt_path_join(base: text, rel: text) -> text
 @unsafe(reason: "raw platform dirname ABI", capabilities: [ffi])
 extern fn rt_path_dirname(path: text) -> text
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_path_join", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_path_join(base: text, rel: text) -> text:
     # rt_path_join (Rust's std::path::Path::join) inserts the PLATFORM
@@ -37,12 +38,13 @@ fn _sffi_path_join(base: text, rel: text) -> text:
             rt_path_join(base, rel)
     to_slash(joined)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_path_dirname", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_path_dirname(path: text) -> text:
     unsafe(capabilities: [ffi]):
         rt_path_dirname(path)
 
-use std.io_runtime.{dir_list, file_exists, dir_exists}
+use std.io_runtime.{dir_list_or_empty, file_exists, dir_exists}
 use std.io_runtime.{env_get_opt}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
@@ -68,7 +70,7 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 var _interp_module_cache: {text: text} = {}
 var _interp_module_uncached_count: i64 = 0
 
-fn module_resolve_cache_reset():
+pub fn module_resolve_cache_reset():
     _interp_module_cache = {}
     _interp_module_uncached_count = 0
 
@@ -137,6 +139,47 @@ fn _normalize_type_relative_path(module_name: text) -> text:
 
     ""
 
+# Unit library root. "" override = auto: `src/unit` under the cwd (repo root),
+# else derived from $SIMPLE_LIB, the same anchor stdlib resolution uses.
+# Unresolvable -> "" so callers fail closed instead of reading an empty
+# cwd-relative listing. Tests may set an explicit override.
+var unit_library_root_override: text = ""
+
+pub fn unit_library_root_from_simple_lib(simple_lib: text) -> text:
+    """Unit root for a $SIMPLE_LIB value: canonical `<root>/src` -> `<src>/unit`
+    (stdlib joins `lib/...` onto it); secondary `<src>/lib` -> sibling
+    `<src>/unit`. "" when neither exists."""
+    var lib = to_slash(simple_lib)
+    while lib.ends_with("/"):
+        lib = lib.substring(0, lib.byte_len() - 1)
+    if lib == "":
+        return ""
+    val direct = lib + "/unit"
+    if file_exists(direct):
+        return direct
+    if lib.ends_with("/lib"):
+        val sibling = _interp_path_parent(lib) + "/unit"
+        if file_exists(sibling):
+            return sibling
+    ""
+
+fn _unit_library_root_auto() -> text:
+    if file_exists("src/unit"):
+        return "src/unit"
+    unit_library_root_from_simple_lib(env_get_opt("SIMPLE_LIB") ?? "")
+
+pub fn unit_library_root_get() -> text:
+    """Existing unit library root, or "" when it cannot be found."""
+    if unit_library_root_override != "":
+        if file_exists(unit_library_root_override):
+            return unit_library_root_override
+        return ""
+    _unit_library_root_auto()
+
+pub fn unit_library_root_set(dir: text):
+    """Explicit root (tests); "" restores auto resolution."""
+    unit_library_root_override = dir
+
 fn resolve_unit_path(tail: [text]) -> text:
     """Resolve `unit.<...>` import tail to a concrete src/unit/ file path.
 
@@ -150,6 +193,9 @@ fn resolve_unit_path(tail: [text]) -> text:
     Returns the first existing path, or "" on miss."""
     if tail.len() == 0:
         return ""
+    val unit_root = unit_library_root_get()
+    if unit_root == "":
+        return ""
     var org: text = "simple-lang"
     var rest: [text] = tail
     val first = tail[0]
@@ -157,8 +203,8 @@ fn resolve_unit_path(tail: [text]) -> text:
         org = "simple-lang"
         rest = tail[1..]
     else:
-        val direct_dir = _sffi_path_join(_sffi_path_join("src", "unit"), first)
-        val com_dir = _sffi_path_join(_sffi_path_join("src", "unit"), first + ".com")
+        val direct_dir = _sffi_path_join(unit_root, first)
+        val com_dir = _sffi_path_join(unit_root, first + ".com")
         if file_exists(direct_dir) or file_exists(com_dir):
             org = first
             rest = tail[1..]
@@ -166,7 +212,14 @@ fn resolve_unit_path(tail: [text]) -> text:
     if rest.len() >= 1 and rest[0] == "com":
         rest = rest[1..]
 
-    val unit_root = _sffi_path_join("src", "unit")
+    val hit = _resolve_unit_in_org(unit_root, org, rest)
+    if hit != "" or org == "simple-lang":
+        return hit
+    # An org dir named like a simple-lang family: fall back to the family path
+    # (unit_scope reports the case where both exist as ambiguous).
+    _resolve_unit_in_org(unit_root, "simple-lang", tail)
+
+fn _resolve_unit_in_org(unit_root: text, org: text, rest: [text]) -> text:
     val org_bare = _sffi_path_join(unit_root, org)
     val org_com = _sffi_path_join(unit_root, org + ".com")
     val joined = rest.join("/")
@@ -265,6 +318,15 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
     if file_exists(src_path):
         return src_path
 
+    # Legacy bare imports may name a root stdlib facade (`import string`).
+    # Caller-relative/family owners above retain precedence; only a miss may
+    # use the actual root source file. Never synthesize a namespace from a
+    # facade's dependency or redirect explicitly qualified family imports.
+    if not is_global_namespace:
+        val bare_lib_path = _sffi_path_join(_sffi_path_join("src", "lib"), relative_path)
+        if file_exists(bare_lib_path):
+            return bare_lib_path
+
     # 4. Try lib subdirectory search (lib/*/X for use std.X / use lib.X)
     #    Default app mode is nogc_async_mut. Search order:
     #    nogc_async_mut (default) > nogc_async_immut > nogc_sync_immut
@@ -326,7 +388,7 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
         val rn = rel_parts.len()
         for rp in rel_parts:
             if ri < rn - 1:
-                rel_dirs = rel_dirs + [rp]
+                rel_dirs.push(rp)
             ri = ri + 1
         # a) relative to the importing file
         val ta = _resolve_transparent(current_dir, rel_dirs, t_name)
@@ -342,13 +404,13 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
             var si: i64 = 0
             for sp in rel_dirs:
                 if si >= 1:
-                    sub = sub + [sp]
+                    sub.push(sp)
                 si = si + 1
-            val fams = ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut", "common", "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut", "nogc_async_mut_noalloc"]
+            val fams: [text] = ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut", "common", "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut", "nogc_async_mut_noalloc"]
             for fam in fams:
                 var famparts: [text] = ["lib", fam]
                 for sp2 in sub:
-                    famparts = famparts + [sp2]
+                    famparts.push(sp2)
                 val tc = _resolve_transparent("src", famparts, t_name)
                 if tc != "":
                     return tc
@@ -357,29 +419,86 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
     relative_path
 
 fn resolve_with_numbered_dirs(base: text, parts: [text]) -> text:
-    """Walk path parts, resolving each segment with NN. prefix fallback."""
-    var current_dir = base
-    var pi: i64 = 0
-    val last_idx = parts.len() - 1
+    """Resolve dotted `parts` under `base` to an existing `.spl` file.
 
-    for part in parts:
-        if pi < last_idx:
-            # Intermediate segment — must be a directory
-            val direct = _sffi_path_join(current_dir, part)
-            if dir_exists(direct):
-                current_dir = direct
-            else:
-                # Try numbered directory
-                val numbered = find_numbered_dir_interp(current_dir, part)
-                if numbered != "":
-                    current_dir = numbered
-                else:
-                    return ""
-        else:
-            # Last segment — try as .spl file
-            val file_path = _sffi_path_join(current_dir, part + ".spl")
+    Each intermediate segment is tried as a direct child, as an `NN.segment`
+    numbered layer, and as a child nested inside a numbered layer
+    (`compiler.core.lexer` -> `src/compiler/10.frontend/core/lexer.spl`), with
+    backtracking. Returns "" when no candidate chain holds the file."""
+    val last_idx = parts.len() - 1
+    if last_idx < 0:
+        return ""
+    _resolve_dir_chain_leaf(base, parts, 0, last_idx, parts[last_idx], false)
+
+fn _numbered_dir_prefix_len(entry: text) -> i64:
+    """Length of the all-digit `NN` prefix of an `NN.name` entry, else 0."""
+    var dot_pos: i64 = -1
+    var ci: i64 = 0
+    for ch in entry:
+        if ch == "." and dot_pos == -1:
+            dot_pos = ci
+        ci = ci + 1
+    if dot_pos < 1 or dot_pos > 3:
+        return 0
+    for ch in entry.substring(0, dot_pos):
+        if ch < "0" or ch > "9":
+            return 0
+    dot_pos
+
+fn _segment_dirs_in_numbered_layers(parent: text, segment: text) -> [text]:
+    """Every `<parent>/NN.layer/<segment>` directory, sorted by path.
+
+    A package can live inside a numbered layer without being a layer itself:
+    `core` is `src/compiler/10.frontend/core`, not `src/compiler/NN.core`."""
+    var found: [text] = []
+    if not dir_exists(parent):
+        return found
+    for entry in dir_list_or_empty(parent):
+        if _numbered_dir_prefix_len(entry) > 0:
+            val nested = _sffi_path_join(_sffi_path_join(parent, entry), segment)
+            if dir_exists(nested):
+                # Insert in sorted position: directory listing order is not
+                # guaranteed, and the first layer must win deterministically.
+                var sorted: [text] = []
+                var placed = false
+                for existing in found:
+                    if not placed and nested < existing:
+                        sorted.push(nested)
+                        placed = true
+                    sorted.push(existing)
+                if not placed:
+                    sorted.push(nested)
+                found = sorted
+    found
+
+fn _resolve_dir_chain_leaf(current: text, parts: [text], depth: i64, dir_count: i64, name: text, transparent: bool) -> text:
+    """Walk `parts[depth..dir_count]` as directories under `current`, then
+    resolve `name` in the reached directory: as `name`.spl, or (when
+    `transparent`) inside its `_`-prefixed descendant folders. A candidate
+    directory whose subtree lacks the leaf is abandoned for the next one.
+    Returns an existing file path or ""."""
+    if depth >= dir_count:
+        if transparent:
+            return _find_transparent_file(current, name)
+        val file_path = _sffi_path_join(current, name + ".spl")
+        if file_exists(file_path):
             return file_path
-        pi = pi + 1
+        return ""
+    val part = parts[depth]
+    val direct = _sffi_path_join(current, part)
+    if dir_exists(direct):
+        val via_direct = _resolve_dir_chain_leaf(direct, parts, depth + 1, dir_count, name, transparent)
+        if via_direct != "":
+            return via_direct
+    val numbered = find_numbered_dir_interp(current, part)
+    if numbered != "":
+        val via_numbered = _resolve_dir_chain_leaf(numbered, parts, depth + 1, dir_count, name, transparent)
+        if via_numbered != "":
+            return via_numbered
+    for nested in _segment_dirs_in_numbered_layers(current, part):
+        val via_nested = _resolve_dir_chain_leaf(nested, parts, depth + 1, dir_count, name, transparent)
+        if via_nested != "":
+            return via_nested
     ""
 
 fn find_numbered_dir_interp(parent: text, segment: text) -> text:
@@ -387,30 +506,13 @@ fn find_numbered_dir_interp(parent: text, segment: text) -> text:
     if not dir_exists(parent):
         return ""
 
-    val entries = dir_list(parent)
+    val entries = dir_list_or_empty(parent)
     for entry in entries:
-        # Look for dot in entry name
-        var dot_pos: i64 = -1
-        var ci: i64 = 0
-        for ch in entry:
-            if ch == "." and dot_pos == -1:
-                dot_pos = ci
-            ci = ci + 1
-
-        if dot_pos >= 1 and dot_pos <= 3:
-            # Check if prefix is all digits
-            val prefix = entry.substring(0, dot_pos)
-            var all_digits = true
-            for ch in prefix:
-                if ch < "0" or ch > "9":
-                    all_digits = false
-
-            if all_digits:
-                val name = entry.substring(dot_pos + 1)
-                if name == segment:
-                    val full_path = _sffi_path_join(parent, entry)
-                    if dir_exists(full_path):
-                        return full_path
+        val dot_pos = _numbered_dir_prefix_len(entry)
+        if dot_pos > 0 and entry.substring(dot_pos + 1) == segment:
+            val full_path = _sffi_path_join(parent, entry)
+            if dir_exists(full_path):
+                return full_path
     ""
 
 fn _find_transparent_file(dir: text, name: text) -> text:
@@ -419,7 +521,7 @@ fn _find_transparent_file(dir: text, name: text) -> text:
     resolve as if they sat directly in `dir`. Returns path or ""."""
     if not dir_exists(dir):
         return ""
-    val entries = dir_list(dir)
+    val entries = dir_list_or_empty(dir)
     for entry in entries:
         if entry.starts_with("_"):
             val tdir = _sffi_path_join(dir, entry)
@@ -432,26 +534,8 @@ fn _find_transparent_file(dir: text, name: text) -> text:
                     return deeper
     ""
 
-fn _walk_dir_chain(base: text, parts: [text]) -> text:
-    """Resolve intermediate dir `parts` under `base` (direct child or NN.
-    numbered child). Returns concrete dir path, or "" if a segment is missing."""
-    var cur = base
-    for part in parts:
-        val direct = _sffi_path_join(cur, part)
-        if dir_exists(direct):
-            cur = direct
-        else:
-            val numbered = find_numbered_dir_interp(cur, part)
-            if numbered != "":
-                cur = numbered
-            else:
-                return ""
-    cur
-
 fn _resolve_transparent(base: text, dir_parts: [text], name: text) -> text:
-    """Walk `dir_parts` under `base`, then search `_`-transparent descendants
-    for `name`.spl. Empty `dir_parts` searches `base` itself."""
-    val dir = _walk_dir_chain(base, dir_parts)
-    if dir == "":
-        return ""
-    _find_transparent_file(dir, name)
+    """Walk `dir_parts` under `base` (same candidate chain as
+    resolve_with_numbered_dirs), then search `_`-transparent descendants for
+    `name`.spl. Empty `dir_parts` searches `base` itself."""
+    _resolve_dir_chain_leaf(base, dir_parts, 0, dir_parts.len(), name, true)

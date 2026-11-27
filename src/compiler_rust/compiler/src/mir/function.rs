@@ -68,6 +68,11 @@ pub struct OutlinedBody {
     pub frame_slots: Option<usize>,
     pub is_lambda: bool,
     pub lambda_capture_local_indices: Vec<usize>,
+    /// The lambda's result is `bool`. Its outlined function is declared I64
+    /// (a sub-register `i8` result is not carryable), so this is the only
+    /// record of the real result type: the boxed entry needs it to answer a
+    /// tagged BOOL instead of a tagged integer 0/1.
+    pub lambda_returns_bool: bool,
 }
 
 /// MIR function
@@ -208,10 +213,13 @@ impl MirFunction {
             live_out.insert(b.id, HashSet::new());
         }
 
+        // Backward problem: visit blocks last-to-first so a value live across
+        // a long straight-line chain converges in one pass, not one pass per
+        // block (the fixed point is the same in any order).
         let mut changed = true;
         while changed {
             changed = false;
-            for b in &self.blocks {
+            for b in self.blocks.iter().rev() {
                 let succs = b.terminator.successors();
                 let out_set = live_out.get_mut(&b.id).unwrap();
                 out_set.clear();
@@ -336,6 +344,9 @@ pub struct MirModule {
     /// These are globals that hold function pointers and need special handling
     /// in the codegen to initialize with the function's import address.
     pub extern_fn_names: std::collections::HashSet<String>,
+    /// `@abi("system")` externs: name -> (param types, return type). Declared
+    /// stdcall with real types by the LLVM backend on Windows x86 only.
+    pub extern_system_abi: std::collections::HashMap<String, (Vec<crate::hir::TypeId>, crate::hir::TypeId)>,
     /// Vtable impl records: one entry per `impl Trait for Struct` in this module.
     /// Each entry is (struct_type_id, struct_name, vtable_symbol,
     /// method_fns_by_slot, export_symbol).
@@ -381,6 +392,7 @@ impl MirModule {
             dynamic_init_globals: std::collections::HashSet::new(),
             local_globals: std::collections::HashSet::new(),
             extern_fn_names: std::collections::HashSet::new(),
+            extern_system_abi: std::collections::HashMap::new(),
             vtable_impls: Vec::new(),
             type_value_kinds: std::collections::HashMap::new(),
         }

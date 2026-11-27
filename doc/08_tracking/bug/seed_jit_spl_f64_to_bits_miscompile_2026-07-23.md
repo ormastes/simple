@@ -4,6 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
+- **Status:** fixed (Issue 1, JIT; re-verified 2026-11-06, see "Re-verification 2026-11-06"). Issue 2 (interpreter f64 div-by-zero) is out of the JIT lane and was not re-checked.
 - **Date:** 2026-07-23
 - **Component:** Rust bootstrap-seed `simple` binary (seed-only; not the self-hosted `bin/simple`)
 - **Severity:** Seed codegen bug — interpreter-workaroundable. Forces float-bit-reinterpretation models to run interpreter-only.
@@ -152,3 +153,25 @@ Both workarounds are already applied by `src/lib/hardware/rv64gc_rtl/fpu.spl`
 and its probe `test/01_unit/lib/hardware/rv64gc_rtl/fpu_probe.spl`: the FPU model
 runs interpreter-only (Issue 1) and guards divisors before dividing (Issue 2).
 
+
+## Re-verification 2026-11-06 (Issue 1)
+
+On a seed built from `origin/release/1.0.0` @ ecb705896a4 (Windows x86_64 host) the wrong-value defect no longer reproduces:
+`bits=4613937818241073152 readback=4613937818241073152 eq=true` on both engines.
+The JIT reached those values by splicing the call into the interpreter, though
+(`[engine-demotion] reason=hybrid-interp-splice detail=spl_f64_to_bits`). The
+driver's splice exemption `is_inline_lowered_byte_accessor`
+(`codegen/instr/calls.rs`) did not list the float-bit intrinsics, even though
+`compile_simple_runtime_memory_intrinsic` lowers both to a bitcast. So the
+compiled path was never exercised.
+
+Fix (branch `work/seed-jit-batch2-20261106`): `spl_f64_to_bits` and
+`spl_bits_to_f64` were added to that exemption. The JIT now compiles the call
+inline with no demotion line and prints the same correct values.
+
+- Fixture: `test/fixtures/compiler/seed_jit_miscompiles/f64_to_bits_roundtrip.spl`
+- Rust test `compiler/tests/f64_to_bits_inline_jit.rs`:
+  `float_bit_intrinsics_are_exempt_from_interpreter_splice` (before: FAILED;
+  after ok), `f64_to_bits_compiled_value_survives_array_and_equality` (ok before
+  and after: pins bits, `[i64]` readback, equality and `spl_bits_to_f64` on
+  the compiled path).

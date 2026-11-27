@@ -1,5 +1,25 @@
 # Class-in-array mutation drop in interpret mode — characterization (task #112)
 
+## Fix in progress 2026-11-03 (draft PR, last hunk unverified) — seed interpreter builds `class` as shared-identity ClassInstance
+
+Root cause: `Value::aggregate` (`src/compiler_rust/compiler/src/value.rs`) built
+every `class` as copy-on-write `Value::Object`, so any alias (`var c = arr[0]`,
+`var b = a`, `h.cell = c`) was a value copy and field writes through it were lost.
+Fix: `is_value_type == false` now builds `Value::ClassInstance` (fields behind a
+shared lock). Supporting arms: nested `self.field.method()` write-back on a
+ClassInstance receiver (`interpreter/expr/calls.rs`) and arbitrary-depth place
+writes through ClassInstance (`interpreter/place.rs` `write_into`).
+
+Verified on a test-only seed build (Windows, clang-cl), both
+`SIMPLE_EXECUTION_MODE=interpreter` and `jit`: the minimal repro prints `777`;
+`interp_value_semantics_b35_spec` Task 112 + two new direct-field-alias cases
+pass; `class_reference_semantics_spec` contract pins inverted, 6/6 pass.
+Latent app bug exposed and fixed: the JSON decoder's `_transition_copy` shared
+its `Sha256StreamV1`/`ProviderUtf8DecoderV1` class fields (now `snapshot()`).
+Two remaining b35 failures (`mut` struct param write-back, array append leak)
+fail identically on the pre-change seed and are unrelated.
+
+
 ## Re-verified 2026-09-13 — STILL REPRODUCES on the interpret lane (left open)
 
 Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
@@ -285,3 +305,52 @@ The coordinator rebuilds from main post-gate; once `bin/simple` runs cleanly:
    (grep was clean this session: only re-exports in `backend.spl`/`__init__.spl`).
 6. Companion defect (array-param `push` leaking to caller, item #4 above) is
    NOT addressed by this change and remains open.
+
+## 2026-11-03 — design + red spec landed; fix is seed value-model work (verification-pending)
+
+Design: `doc/05_design/compiler/interpreter/class_instance_reference_storage_2026-11-03.md`.
+Spec (RED on tree-walk, 2 of 4 fail; tagged in-development):
+`test/01_unit/compiler/interpreter/class_ref/class_element_reference_spec.spl`.
+No narrow fix: needs `Value::ClassInstance` producers in the Rust seed + redeploy. Stays OPEN.
+## 2026-11-03: REOPENED (stale-seed evidence)
+
+Retired by commit e21824a4ed4 on the verdict of a probe guard that hardcoded the stale
+`bin/simple` seed (see guards_hardcode_stale_seed_binary_census_2026-08-17.md). The
+retirement measured a binary older than the code, so it is not evidence. Re-retire only
+with a verdict from a fresh self-hosted build via `SIMPLE_BIN`.
+
+Open item (2026-11-03): 3-level receiver mutation through nested classes
+(`db.interner.strings.push(x)`) was dropped because `place_is_live` could not
+step through a ClassInstance (regressed `test/01_unit/app/tooling/test_db_compiled_spec.spl`).
+`projections_live` in `interpreter/place.rs` addresses it but was NOT built/verified:
+build halted because C: free space fell below the 15 GB lane floor.
+Collateral so far (100 class-heavy specs, base vs new seed, interpreter): only
+that one regression; 3 specs improved.
+
+## Verified FIXED 2026-11-25 (release/1.0.0 pinned seed)
+
+The 2026-11-03 REOPENED note asked for a verdict from a fresh binary, not the
+stale hardcoded seed. Measured on the release/1.0.0 pinned binary
+(`bin/simple.exe`, 38,403,072 bytes, Rust seed v1.0.0-rc.1, Windows), which
+contains the `Value::ClassInstance` shared-identity work: this doc's exact
+"no function-call boundary" minimal repro now prints **777 on BOTH engines**:
+
+```
+bin/simple.exe run repro.spl                              -> 777   (JIT)
+SIMPLE_EXECUTION_MODE=interpreter bin/simple.exe run ...  -> 777   (tree-walk, was 42)
+```
+
+The interpret-lane mutation drop this entry characterizes no longer
+reproduces on the current seed; the two lanes agree. Spec-route confirmation
+(`test/01_unit/compiler/interpreter/class_ref/class_element_reference_spec.spl`)
+was not possible in this lane — the pinned seed rejects the
+`@representation_boundary` decorator present at release/1.0.0 HEAD, so
+`bin/simple.exe test` fails repo-wide before reaching any spec — so this
+verdict rests on the direct both-engines probe of the doc's own repro, which
+is the defect's exact shape and lane. The self-hosted pure-Simple lane remains
+unverified on this host, as before. The 2026-11-03 open item (3-level nested
+receiver mutation, `projections_live` hunk never built) is NOT covered by this
+verdict and stays open as recorded above.
+
+**Status: RESOLVED (2026-11-25)** for the class-in-array interpret-mode
+mutation drop on the current release seed.

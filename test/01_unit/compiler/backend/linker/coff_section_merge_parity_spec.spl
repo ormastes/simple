@@ -1,0 +1,424 @@
+# COFF/PE section merging, folding, and single-.bss parity with lld.
+
+use std.spec.*
+use compiler.backend.linker.coff.coff_link.{
+    CoffLinkRequest, coff_link_amd64, coff_link_i386}
+use compiler.backend.linker.coff.coff_object.{
+    COFF_MACHINE_AMD64, COFF_MACHINE_I386,
+    COFF_REL_AMD64_ADDR64, COFF_REL_AMD64_ADDR32NB, COFF_REL_AMD64_REL32,
+    COFF_REL_AMD64_SECTION, COFF_REL_AMD64_SECREL,
+    COFF_REL_I386_DIR32, COFF_REL_I386_DIR32NB, COFF_REL_I386_REL32,
+    COFF_REL_I386_SECTION, COFF_REL_I386_SECREL,
+    COFF_STORAGE_CLASS_EXTERNAL, COFF_STORAGE_CLASS_STATIC}
+use compiler.backend.linker.coff.pe_image_writer.{
+    PE_AMD64_IMAGE_BASE, PE_I386_IMAGE_BASE}
+use compiler.backend.linker.pe_inspect.{PeSectionHeader, pe_inspect}
+
+struct PmSection:
+    name: text
+    data: [u8]
+    virtual_size: i64
+    characteristics: i64
+    relocations: [[i64]]
+
+struct PmSymbol:
+    name: text
+    value: i64
+    section_number: i64
+    storage_class: i64
+
+val PM_TEXT: i64 = 0x60300020
+val PM_RDATA: i64 = 0x40300040
+val PM_DATA: i64 = 0xc0300040
+val PM_BSS: i64 = 0xc0300080
+
+fn _pm_u16(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push((value & 0xff) as u8)
+    result.push(((value >> 8) & 0xff) as u8)
+
+fn _pm_u32(bytes: [u8], value: i64) -> [u8]:
+    var result = _pm_u16(bytes, value & 0xffff)
+    _pm_u16(result, (value >> 16) & 0xffff)
+
+fn _pm_text_fixed(bytes: [u8], value: text, width: i64) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < width:
+        result = result.push((if i < value.len(): value.byte_at(i) else: 0) as u8)
+        i = i + 1
+    result
+
+fn _pm_read_u32(bytes: [u8], offset: i64) -> i64:
+    ((bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8) |
+        ((bytes[offset + 2] as i64) << 16) | ((bytes[offset + 3] as i64) << 24))
+
+fn _pm_read_u16(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8)
+
+fn _pm_read_i32(bytes: [u8], offset: i64) -> i64:
+    val raw = _pm_read_u32(bytes, offset)
+    if raw >= 2147483648: raw - 4294967296 else: raw
+
+fn _pm_object(machine: i64, sections: [PmSection], symbols: [PmSymbol]) -> [u8]:
+    var strings: [u8] = []
+    var section_names: [text] = []
+    for section in sections:
+        if section.name.len() > 8:
+            section_names = section_names.push("/{strings.len() + 4}")
+            strings = _pm_text_fixed(strings, section.name, section.name.len()).push(0)
+        else:
+            section_names = section_names.push(section.name)
+    var symbol_offsets: [i64] = []
+    for symbol in symbols:
+        if symbol.name.len() > 8:
+            symbol_offsets = symbol_offsets.push(strings.len() + 4)
+            strings = _pm_text_fixed(strings, symbol.name, symbol.name.len()).push(0)
+        else:
+            symbol_offsets = symbol_offsets.push(0)
+    var cursor = 20 + 40 * sections.len()
+    var data_offsets: [i64] = []
+    var reloc_offsets: [i64] = []
+    for section in sections:
+        data_offsets = data_offsets.push(cursor)
+        cursor = cursor + section.data.len()
+        reloc_offsets = reloc_offsets.push(cursor)
+        cursor = cursor + 10 * section.relocations.len()
+    var bytes: [u8] = []
+    bytes = _pm_u16(bytes, machine)
+    bytes = _pm_u16(bytes, sections.len())
+    bytes = _pm_u32(bytes, 0)
+    bytes = _pm_u32(bytes, cursor)
+    bytes = _pm_u32(bytes, symbols.len())
+    bytes = _pm_u16(bytes, 0)
+    bytes = _pm_u16(bytes, 0)
+    var index: i64 = 0
+    for section in sections:
+        val raw_size = if section.data.len() > 0: section.data.len() else: section.virtual_size
+        val raw_ptr = if section.data.len() > 0: data_offsets[index] else: 0
+        bytes = _pm_text_fixed(bytes, section_names[index], 8)
+        bytes = _pm_u32(bytes, 0)
+        bytes = _pm_u32(bytes, 0)
+        bytes = _pm_u32(bytes, raw_size)
+        bytes = _pm_u32(bytes, raw_ptr)
+        bytes = _pm_u32(bytes, if section.relocations.len() > 0: reloc_offsets[index] else: 0)
+        bytes = _pm_u32(bytes, 0)
+        bytes = _pm_u16(bytes, section.relocations.len())
+        bytes = _pm_u16(bytes, 0)
+        bytes = _pm_u32(bytes, section.characteristics)
+        index = index + 1
+    for section in sections:
+        for b in section.data: bytes = bytes.push(b)
+        for reloc in section.relocations:
+            bytes = _pm_u32(bytes, reloc[0])
+            bytes = _pm_u32(bytes, reloc[1])
+            bytes = _pm_u16(bytes, reloc[2])
+    index = 0
+    for symbol in symbols:
+        if symbol_offsets[index] > 0:
+            bytes = _pm_u32(bytes, 0)
+            bytes = _pm_u32(bytes, symbol_offsets[index])
+        else:
+            bytes = _pm_text_fixed(bytes, symbol.name, 8)
+        bytes = _pm_u32(bytes, symbol.value)
+        bytes = _pm_u16(bytes, symbol.section_number)
+        bytes = _pm_u16(bytes, 0)
+        bytes = bytes.push(symbol.storage_class as u8)
+        bytes = bytes.push(0)
+        index = index + 1
+    bytes = _pm_u32(bytes, strings.len() + 4)
+    for b in strings: bytes = bytes.push(b)
+    bytes
+
+fn _pm_short_import(machine: i64, symbol: text, dll: text, flags: i64) -> [u8]:
+    var bytes: [u8] = []
+    bytes = _pm_u16(bytes, 0)
+    bytes = _pm_u16(bytes, 0xffff)
+    bytes = _pm_u16(bytes, 0)
+    bytes = _pm_u16(bytes, machine)
+    bytes = _pm_u32(bytes, 0)
+    bytes = _pm_u32(bytes, symbol.len() + dll.len() + 2)
+    bytes = _pm_u16(bytes, 0)
+    bytes = _pm_u16(bytes, flags)
+    bytes = _pm_text_fixed(bytes, symbol, symbol.len()).push(0)
+    _pm_text_fixed(bytes, dll, dll.len()).push(0)
+
+fn _pm_archive(member: [u8]) -> [u8]:
+    var bytes: [u8] = []
+    bytes = _pm_text_fixed(bytes, "!<arch>\n", 8)
+    bytes = _pm_text_fixed(bytes, "imp.obj/", 16)
+    bytes = _pm_text_fixed(bytes, "0", 12)
+    bytes = _pm_text_fixed(bytes, "0", 6)
+    bytes = _pm_text_fixed(bytes, "0", 6)
+    bytes = _pm_text_fixed(bytes, "100644", 8)
+    bytes = _pm_text_fixed(bytes, member.len().to_text(), 10)
+    bytes = bytes.push(0x60).push(0x0a)
+    for b in member: bytes = bytes.push(b)
+    if member.len() % 2 != 0: bytes = bytes.push(0x0a)
+    bytes
+
+fn _pm_section_names(image: [u8]) -> [text]:
+    val inspected = pe_inspect(image).unwrap()
+    var names: [text] = []
+    for sec in inspected.sections:
+        names = names.push(sec.name)
+    names
+
+fn _pm_find_section(image: [u8], wanted: text) -> PeSectionHeader:
+    val inspected = pe_inspect(image).unwrap()
+    for sec in inspected.sections:
+        if sec.name == wanted: return sec
+    inspected.sections[0]
+
+fn _pm_section_bytes(image: [u8], sec: PeSectionHeader) -> [u8]:
+    image.slice(sec.raw_pointer, sec.raw_pointer + sec.virtual_size)
+
+describe "COFF PE layout parity with lld":
+    it "orders dollar-grouped subsections with empty suffix first then lexicographically":
+        val obj_tail = _pm_object(COFF_MACHINE_AMD64, [
+            PmSection(name: ".text$zz", data: [0x22, 0x22], virtual_size: 0,
+                characteristics: PM_TEXT, relocations: []),
+            PmSection(name: ".text$", data: [0x11, 0x11], virtual_size: 0,
+                characteristics: PM_TEXT, relocations: [])],
+            [PmSymbol(name: "tail_sym", value: 0, section_number: 1,
+                storage_class: COFF_STORAGE_CLASS_EXTERNAL),
+             PmSymbol(name: "empty_dollar_sym", value: 0, section_number: 2,
+                storage_class: COFF_STORAGE_CLASS_EXTERNAL)])
+        val obj_head = _pm_object(COFF_MACHINE_AMD64, [
+            PmSection(name: ".text$aa", data: [0x33, 0x33], virtual_size: 0,
+                characteristics: PM_TEXT, relocations: []),
+            PmSection(name: ".text", data: [0xe8, 0, 0, 0, 0, 0xc3], virtual_size: 0,
+                characteristics: PM_TEXT, relocations: [[1, 1, COFF_REL_AMD64_REL32]])],
+            [PmSymbol(name: "_start", value: 0, section_number: 2,
+                storage_class: COFF_STORAGE_CLASS_EXTERNAL),
+             PmSymbol(name: "tail_sym", value: 0, section_number: 0,
+                storage_class: COFF_STORAGE_CLASS_EXTERNAL)])
+        val linked = coff_link_amd64(CoffLinkRequest(
+            objects: [obj_tail, obj_head], archives: [], entry: "_start"))
+        expect(linked.is_ok()).to_equal(true)
+        val image = linked.unwrap()
+        val names = _pm_section_names(image)
+        expect(names).to_equal([".text"])
+        val text_sec = _pm_find_section(image, ".text")
+        val text_bytes = _pm_section_bytes(image, text_sec)
+        # Layout order inside `.text` (4-byte aligned via PM_TEXT `ALIGN_4BYTES`):
+        # 0..5: bare `.text`, 8..9: `.text$`, 12..13: `.text$aa`, 16..17: `.text$zz`.
+        expect(text_sec.virtual_size).to_equal(18)
+        expect(text_bytes[5] as i64).to_equal(0xc3)
+        expect(text_bytes[8] as i64).to_equal(0x11)
+        expect(text_bytes[12] as i64).to_equal(0x33)
+        expect(text_bytes[16] as i64).to_equal(0x22)
+        # REL32 from offset 1 (next IP at offset 5) targeting `tail_sym` at offset 16 -> +11.
+        expect(_pm_read_i32(text_bytes, 1)).to_equal(11)
+
+    it "folds import thunks into .text instead of emitting .text$im for i386 and AMD64":
+        val i386_obj = _pm_object(COFF_MACHINE_I386, [
+            PmSection(name: ".text$aa", data: [0x90, 0x90], virtual_size: 0,
+                characteristics: PM_TEXT, relocations: []),
+            PmSection(name: ".text", data: [0xe8, 0, 0, 0, 0, 0xc3], virtual_size: 0,
+                characteristics: PM_TEXT, relocations: [[1, 1, COFF_REL_I386_REL32]])],
+            [PmSymbol(name: "_start", value: 0, section_number: 2,
+                storage_class: COFF_STORAGE_CLASS_EXTERNAL),
+             PmSymbol(name: "_ExitProcess@4", value: 0, section_number: 0,
+                storage_class: COFF_STORAGE_CLASS_EXTERNAL)])
+        val i386_imp = _pm_archive(_pm_short_import(COFF_MACHINE_I386, "_ExitProcess@4", "KERNEL32.dll", 12))
+        val linked = coff_link_i386(CoffLinkRequest(
+            objects: [i386_obj], archives: [i386_imp], entry: "_start"))
+        expect(linked.is_ok()).to_equal(true)
+        val image = linked.unwrap()
+        val names = _pm_section_names(image)
+        expect(names.contains(".text$im")).to_equal(false)
+        expect(names).to_equal([".text", ".idata", ".reloc"])
+        val text_sec = _pm_find_section(image, ".text")
+        val text_bytes = _pm_section_bytes(image, text_sec)
+        # `.text` at 0..5, `.text$aa` at 8..9 (4-byte aligned), 6-byte `ff 25 <iat_va>` thunk at 12..17.
+        expect(text_sec.virtual_size).to_equal(18)
+        expect(_pm_read_i32(text_bytes, 1)).to_equal(7)
+        expect(text_bytes[12] as i64).to_equal(0xff)
+        expect(text_bytes[13] as i64).to_equal(0x25)
+        # i386 thunk imm32 points into `.idata` (above image_base + 0x2000).
+        val idata_sec = _pm_find_section(image, ".idata")
+        val iat_target = _pm_read_u32(text_bytes, 14)
+        expect(iat_target >= PE_I386_IMAGE_BASE + idata_sec.virtual_address).to_equal(true)
+        # `.reloc` block starts at page 0x1000 for the thunk imm32 fixup at RVA 0x100e.
+        val reloc_sec = _pm_find_section(image, ".reloc")
+        val reloc_bytes = _pm_section_bytes(image, reloc_sec)
+        expect(_pm_read_u32(reloc_bytes, 0)).to_equal(0x1000)
+        expect(_pm_read_u16(reloc_bytes, 8) & 0x0fff).to_equal(14)
+
+    it "folds .rdata$*/.00cfg/.CRT$*/.gfids$*/.ctors*/.dtors* into read-only .rdata in lld order":
+        # Place `.data` and an empty 0-byte `.pdata` ahead of folded sections in input
+        # order to verify canonical section ordering, read-only `.rdata` (`0x40000040`),
+        # accurate SECREL offsets, and 1-based SECTION header indices.
+        val obj = _pm_object(COFF_MACHINE_AMD64, [
+            PmSection(name: ".text", data: [0xc3], virtual_size: 0,
+                characteristics: PM_TEXT, relocations: []),
+            PmSection(name: ".pdata", data: [], virtual_size: 0,
+                characteristics: PM_RDATA, relocations: []),
+            PmSection(name: ".data", data: [
+                0, 0, 0, 0,   # +0:  ADDR32NB -> crt_xia
+                0, 0, 0, 0,   # +4:  SECREL   -> gfids_sym (+2 inside .gfids$y)
+                0, 0],        # +8:  SECTION  -> gfids_sym
+                virtual_size: 0, characteristics: PM_DATA,
+                relocations: [
+                    [0, 1, COFF_REL_AMD64_ADDR32NB],
+                    [4, 2, COFF_REL_AMD64_SECREL],
+                    [8, 2, COFF_REL_AMD64_SECTION]]),
+            PmSection(name: ".dtors", data: [0x99, 0, 0, 0, 0, 0, 0, 0], virtual_size: 0,
+                characteristics: 0xc0400040, relocations: []),
+            PmSection(name: ".ctors.00100", data: [0x82, 0, 0, 0, 0, 0, 0, 0], virtual_size: 0,
+                characteristics: 0xc0400040, relocations: []),
+            PmSection(name: ".ctors", data: [0x81, 0, 0, 0, 0, 0, 0, 0], virtual_size: 0,
+                characteristics: 0xc0400040, relocations: []),
+            PmSection(name: ".gfids$y", data: [0x66, 0x66, 0x66, 0x66], virtual_size: 0,
+                characteristics: PM_RDATA, relocations: []),
+            PmSection(name: ".CRT$XIZ", data: [0x74, 0, 0, 0], virtual_size: 0,
+                characteristics: PM_RDATA, relocations: []),
+            PmSection(name: ".CRT$XIA", data: [0x73, 0, 0, 0], virtual_size: 0,
+                characteristics: PM_DATA, relocations: []),
+            PmSection(name: ".CRT$XCAA", data: [0x72, 0, 0, 0], virtual_size: 0,
+                characteristics: PM_RDATA, relocations: []),
+            PmSection(name: ".CRT$XCA", data: [0x71, 0, 0, 0], virtual_size: 0,
+                characteristics: PM_RDATA, relocations: []),
+            PmSection(name: ".00cfg", data: [0x55, 0, 0, 0], virtual_size: 0,
+                characteristics: PM_RDATA, relocations: []),
+            PmSection(name: ".rdata$r", data: [0x44, 0, 0, 0], virtual_size: 0,
+                characteristics: PM_RDATA, relocations: []),
+            PmSection(name: ".rdata", data: [0x33, 0, 0, 0], virtual_size: 0,
+                characteristics: PM_RDATA, relocations: []),
+            PmSection(name: ".xdata", data: [0xdd, 0, 0, 0], virtual_size: 0,
+                characteristics: PM_RDATA, relocations: [])],
+            [PmSymbol(name: "_start", value: 0, section_number: 1,
+                storage_class: COFF_STORAGE_CLASS_EXTERNAL),
+             PmSymbol(name: "crt_xia", value: 0, section_number: 9,
+                storage_class: COFF_STORAGE_CLASS_STATIC),
+             PmSymbol(name: "gfids_sym", value: 2, section_number: 7,
+                storage_class: COFF_STORAGE_CLASS_STATIC),
+             PmSymbol(name: "__CTOR_LIST__", value: 0, section_number: 0,
+                storage_class: COFF_STORAGE_CLASS_EXTERNAL),
+             PmSymbol(name: "__DTOR_LIST__", value: 0, section_number: 0,
+                storage_class: COFF_STORAGE_CLASS_EXTERNAL)])
+        val linked = coff_link_amd64(CoffLinkRequest(
+            objects: [obj], archives: [], entry: "_start"))
+        expect(linked.is_ok()).to_equal(true)
+        val image = linked.unwrap()
+        val names = _pm_section_names(image)
+        expect(names.contains(".00cfg")).to_equal(false)
+        expect(names.contains(".CRT")).to_equal(false)
+        expect(names.contains(".gfids")).to_equal(false)
+        expect(names.contains(".ctors")).to_equal(false)
+        expect(names.contains(".dtors")).to_equal(false)
+        expect(names).to_equal([".text", ".rdata", ".data", ".xdata"])
+        val rdata_sec = _pm_find_section(image, ".rdata")
+        expect(rdata_sec.characteristics).to_equal(0x40000040)
+        val rdata = _pm_section_bytes(image, rdata_sec)
+        # Subgroup layout inside `.rdata` (first 8 items = 32 bytes):
+        #  0: .rdata (0x33), 4: .rdata$r (0x44), 8: .00cfg (0x55), 12: .CRT$XCA (0x71),
+        # 16: .CRT$XCAA (0x72), 20: .CRT$XIA (0x73), 24: .CRT$XIZ (0x74), 28: .gfids$y (0x66).
+        # Aligned to 8 -> 32: .ctors$A (-1), 40: .ctors (0x81), 48: .ctors.00100 (0x82), 56: .ctors$z (0).
+        # 64: .dtors$A (-1), 72: .dtors (0x99), 80: .dtors$z (0). Total = 88 bytes.
+        expect(rdata_sec.virtual_size).to_equal(88)
+        expect(rdata[0] as i64).to_equal(0x33)
+        expect(rdata[4] as i64).to_equal(0x44)
+        expect(rdata[8] as i64).to_equal(0x55)
+        expect(rdata[12] as i64).to_equal(0x71)
+        expect(rdata[16] as i64).to_equal(0x72)
+        expect(rdata[20] as i64).to_equal(0x73)
+        expect(rdata[24] as i64).to_equal(0x74)
+        expect(rdata[28] as i64).to_equal(0x66)
+        expect(rdata[32] as i64).to_equal(0xff)
+        expect(rdata[40] as i64).to_equal(0x81)
+        expect(rdata[48] as i64).to_equal(0x82)
+        expect(rdata[56] as i64).to_equal(0)
+        expect(rdata[64] as i64).to_equal(0xff)
+        expect(rdata[72] as i64).to_equal(0x99)
+        expect(rdata[80] as i64).to_equal(0)
+        # Relocations in `.data` resolve accurately against merged `.rdata`.
+        val data_sec = _pm_find_section(image, ".data")
+        val data_bytes = _pm_section_bytes(image, data_sec)
+        expect(_pm_read_u32(data_bytes, 0)).to_equal(rdata_sec.virtual_address + 20)
+        expect(_pm_read_u32(data_bytes, 4)).to_equal(30)
+        expect(_pm_read_u16(data_bytes, 8)).to_equal(2)
+
+    it "keeps .tls separate while merging .tls$* subsections lexicographically":
+        var tls_dir: [u8] = []
+        var k: i64 = 0
+        while k < 40:
+            tls_dir = tls_dir.push(0)
+            k = k + 1
+        val obj = _pm_object(COFF_MACHINE_AMD64, [
+            PmSection(name: ".text", data: [0xc3], virtual_size: 0,
+                characteristics: PM_TEXT, relocations: []),
+            PmSection(name: ".rdata", data: tls_dir, virtual_size: 0,
+                characteristics: PM_RDATA, relocations: []),
+            PmSection(name: ".tls$ZZ", data: [0x22, 0, 0, 0], virtual_size: 0,
+                characteristics: PM_DATA, relocations: []),
+            PmSection(name: ".tls$AA", data: [0x11, 0, 0, 0], virtual_size: 0,
+                characteristics: PM_DATA, relocations: [])],
+            [PmSymbol(name: "_start", value: 0, section_number: 1,
+                storage_class: COFF_STORAGE_CLASS_EXTERNAL),
+             PmSymbol(name: "_tls_used", value: 0, section_number: 2,
+                storage_class: COFF_STORAGE_CLASS_EXTERNAL)])
+        val linked = coff_link_amd64(CoffLinkRequest(
+            objects: [obj], archives: [], entry: "_start"))
+        expect(linked.is_ok()).to_equal(true)
+        val image = linked.unwrap()
+        val names = _pm_section_names(image)
+        expect(names).to_equal([".text", ".rdata", ".tls"])
+        val tls_sec = _pm_find_section(image, ".tls")
+        val tls_bytes = _pm_section_bytes(image, tls_sec)
+        expect(tls_sec.virtual_size).to_equal(8)
+        expect(tls_bytes[0] as i64).to_equal(0x11)
+        expect(tls_bytes[4] as i64).to_equal(0x22)
+
+    it "merges input .bss, .bss$*, and common symbols into a single .bss output section":
+        val obj = _pm_object(COFF_MACHINE_I386, [
+            PmSection(name: ".text", data: [0xc3], virtual_size: 0,
+                characteristics: PM_TEXT, relocations: []),
+            PmSection(name: ".bss", data: [], virtual_size: 8,
+                characteristics: PM_BSS, relocations: []),
+            PmSection(name: ".bss$sub", data: [], virtual_size: 4,
+                characteristics: PM_BSS, relocations: []),
+            PmSection(name: ".data", data: [
+                0, 0, 0, 0,   # +0:  DIR32 -> bss_base
+                0, 0, 0, 0,   # +4:  DIR32 -> bss_sub
+                0, 0, 0, 0,   # +8:  DIR32 -> comm_big (size 16, 16-byte aligned)
+                0, 0, 0, 0],  # +12: DIR32 -> comm_small (size 4, 4-byte aligned)
+                virtual_size: 0, characteristics: PM_DATA,
+                relocations: [
+                    [0, 1, COFF_REL_I386_DIR32],
+                    [4, 2, COFF_REL_I386_DIR32],
+                    [8, 3, COFF_REL_I386_DIR32],
+                    [12, 4, COFF_REL_I386_DIR32]])],
+            [PmSymbol(name: "_start", value: 0, section_number: 1,
+                storage_class: COFF_STORAGE_CLASS_EXTERNAL),
+             PmSymbol(name: "bss_base", value: 0, section_number: 2,
+                storage_class: COFF_STORAGE_CLASS_STATIC),
+             PmSymbol(name: "bss_sub", value: 0, section_number: 3,
+                storage_class: COFF_STORAGE_CLASS_STATIC),
+             PmSymbol(name: "comm_big", value: 16, section_number: 0,
+                storage_class: COFF_STORAGE_CLASS_EXTERNAL),
+             PmSymbol(name: "comm_small", value: 4, section_number: 0,
+                storage_class: COFF_STORAGE_CLASS_EXTERNAL)])
+        val linked = coff_link_i386(CoffLinkRequest(
+            objects: [obj], archives: [], entry: "_start"))
+        expect(linked.is_ok()).to_equal(true)
+        val image = linked.unwrap()
+        val names = _pm_section_names(image)
+        var bss_count: i64 = 0
+        for name in names:
+            if name == ".bss": bss_count = bss_count + 1
+        expect(bss_count).to_equal(1)
+        expect(names).to_equal([".text", ".data", ".bss", ".reloc"])
+        val bss_sec = _pm_find_section(image, ".bss")
+        expect(bss_sec.raw_size).to_equal(0)
+        expect(bss_sec.raw_pointer).to_equal(0)
+        expect(bss_sec.characteristics).to_equal(0xc0000080)
+        # 8 (.bss) + 4 (.bss$sub) = 12, aligned to 16 -> 16, + 16 (comm_big) + 4 (comm_small) = 36.
+        expect(bss_sec.virtual_size).to_equal(36)
+        val data_sec = _pm_find_section(image, ".data")
+        val data_bytes = _pm_section_bytes(image, data_sec)
+        val bss_va = PE_I386_IMAGE_BASE + bss_sec.virtual_address
+        expect(_pm_read_u32(data_bytes, 0)).to_equal(bss_va)
+        expect(_pm_read_u32(data_bytes, 4)).to_equal(bss_va + 8)
+        expect(_pm_read_u32(data_bytes, 8)).to_equal(bss_va + 16)
+        expect(_pm_read_u32(data_bytes, 12)).to_equal(bss_va + 32)

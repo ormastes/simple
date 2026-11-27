@@ -1,0 +1,129 @@
+"""
+# Windows Release Session Authority Path Resolution Spec
+
+Pins native Windows path canonicalization and lexical normalization in
+`app.release.session_authority` so `_realpath` and `_lexical_absolute_path`
+do not invoke MSYS2 `realpath.exe` (which fails under sandboxed Win32 or returns
+`/c/...` POSIX paths that mismatch `git rev-parse --show-toplevel` and `C:/...`).
+"""
+
+use std.spec.{describe, it, expect}
+use app.release.policy.{ReleaseSession, validate_release_session}
+use app.release.session_authority.{_realpath, _lexical_absolute_path, _trim_trailing_slashes}
+use std.io_runtime.{env_get_opt, getpid, time_now_unix_micros, cwd}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host, host_path_canonical}
+
+fn _tmp_base() -> text:
+    val raw = env_get_opt("TEMP") ?? env_get_opt("TMP") ?? env_get_opt("TMPDIR") ?? "/tmp"
+    val clean = raw.replace("\\", "/")
+    if clean.byte_len() > 1 and clean.ends_with("/"):
+        return clean.substring(0, clean.byte_len() - 1)
+    clean
+
+describe "release session authority Windows native canonicalization":
+    it "resolves real directories to canonical forward-slash paths and fails closed on missing paths":
+        val tag = str(getpid()) + "_" + str(time_now_unix_micros())
+        val dir = _tmp_base() + "/simple_release_auth_" + tag
+        val created = dir_create_all(dir)
+        val resolved = if created: _realpath(dir) else: ""
+        val missing = if created: _realpath(dir + "/does_not_exist_12345") else: "SKIP"
+        val removed = if created: dir_remove_all(dir) else: false
+
+        expect(created).to_equal(true)
+        expect(resolved.contains("\\")).to_equal(false)
+        if host_is_windows_host():
+            expect(resolved.starts_with("/c/")).to_equal(false)
+            expect(resolved.substring(1, 3)).to_equal(":/")
+        expect(missing).to_equal("")
+        expect(removed).to_equal(true)
+
+    it "normalizes dot segments lexically without MSYS path translation":
+        val tag = str(getpid()) + "_" + str(time_now_unix_micros())
+        val raw_dir = _tmp_base() + "/simple_release_lex_" + tag
+        val created = dir_create_all(raw_dir + "/a/b")
+        val real_dir = if created: _realpath(raw_dir) else: ""
+        val canon_dir = if real_dir != "": real_dir else: raw_dir
+        val sub = canon_dir + "/a/b"
+        val dot_path = canon_dir + "/a/./b/../b"
+        val lex = if created: _lexical_absolute_path(dot_path) else: ""
+        val real_sub = if created: _realpath(sub) else: ""
+        val removed = if created: dir_remove_all(raw_dir) else: false
+
+        expect(created).to_equal(true)
+        expect(real_dir != "").to_equal(true)
+        expect(lex).to_equal(real_sub)
+        expect(removed).to_equal(true)
+
+    it "preserves Windows drive roots, rooted paths, drive-relative paths, UNC shares, and verbatim prefixes":
+        if host_is_windows_host():
+            expect(_trim_trailing_slashes("C:/")).to_equal("C:/")
+            expect(_trim_trailing_slashes("C:///")).to_equal("C:/")
+            expect(_trim_trailing_slashes("C:/foo///")).to_equal("C:/foo")
+            expect(_lexical_absolute_path("C:/")).to_equal("C:/")
+            expect(_lexical_absolute_path("C:/..")).to_equal("C:/")
+            expect(_lexical_absolute_path("/c/foo/../bar")).to_equal("C:/bar")
+            expect(_lexical_absolute_path("//?/c:/foo/./bar/../baz")).to_equal("C:/foo/baz")
+            expect(_lexical_absolute_path("//?/UNC/server/share/a/..")).to_equal("//server/share")
+            expect(_lexical_absolute_path("//server/share/a/../..")).to_equal("//server/share")
+            expect(_lexical_absolute_path("//server/share/a/b/../c")).to_equal("//server/share/a/c")
+
+            val cur = host_path_canonical(cwd())
+            if cur.byte_len() >= 3 and cur.substring(1, 3) == ":/":
+                val drv = cur.substring(0, 1).upper()
+                val cur_norm = drv + cur.substring(1)
+                val trimmed_cur = _trim_trailing_slashes(cur_norm)
+                expect(_lexical_absolute_path("/foo/bar")).to_equal(drv + ":/foo/bar")
+                expect(_lexical_absolute_path(drv + ":sub/./leaf")).to_equal(trimmed_cur + "/sub/leaf")
+                val other_drv = if drv == "Q": "R" else: "Q"
+                expect(_lexical_absolute_path(other_drv + ":sub")).to_equal("")
+
+    it "validates Windows drive-letter workspace paths while rejecting backslashes, bare roots, and traversal":
+        val sha64 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val valid_win = ReleaseSession(
+            session_id: "sess-win-1",
+            workspace_path: "C:/work/rc1",
+            main_workspace_path: "C:/repo",
+            work_branch: "work/release/rc1",
+            target_ref: "main",
+            base_sha: sha64,
+            expected_target_sha: sha64,
+            policy_sha256: sha64
+        )
+        expect(validate_release_session(valid_win).valid).to_equal(true)
+
+        val backslash_win = ReleaseSession(
+            session_id: "sess-win-1",
+            workspace_path: "C:\\work\\rc1",
+            main_workspace_path: "C:/repo",
+            work_branch: "work/release/rc1",
+            target_ref: "main",
+            base_sha: sha64,
+            expected_target_sha: sha64,
+            policy_sha256: sha64
+        )
+        expect(validate_release_session(backslash_win).valid).to_equal(false)
+
+        val bare_drive_win = ReleaseSession(
+            session_id: "sess-win-1",
+            workspace_path: "C:/",
+            main_workspace_path: "C:/repo",
+            work_branch: "work/release/rc1",
+            target_ref: "main",
+            base_sha: sha64,
+            expected_target_sha: sha64,
+            policy_sha256: sha64
+        )
+        expect(validate_release_session(bare_drive_win).valid).to_equal(false)
+
+        val traversal_win = ReleaseSession(
+            session_id: "sess-win-1",
+            workspace_path: "C:/work/../rc1",
+            main_workspace_path: "C:/repo",
+            work_branch: "work/release/rc1",
+            target_ref: "main",
+            base_sha: sha64,
+            expected_target_sha: sha64,
+            policy_sha256: sha64
+        )
+        expect(validate_release_session(traversal_win).valid).to_equal(false)

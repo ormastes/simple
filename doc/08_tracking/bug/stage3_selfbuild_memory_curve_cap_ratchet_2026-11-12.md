@@ -1,0 +1,200 @@
+# Stage 3 self-build memory curve and compiler-ceiling ratchet impasse (2026-11-12)
+
+Lane: goal-mode bootstrap lane, worktree /home/yoon/dev/simple-boot-s3gen-20261112
+(pinned source df719eff44cf, chase-fixed tip). Producer: s3gen stage2-admitted
+compiler (1643 modules, sha family 559d473d).
+
+## Measured per-phase memory curve (stage3 self-build, 1626-module closure)
+
+Single whole-program compiler process; RSS sampled from the process-tree
+watchdog receipt and live /proc:
+
+| Phase | Peak RSS | Cap that survived |
+|-------|----------|-------------------|
+| parse (incl. 606KB switch_operators_calls.spl, ~12 min pathological) | ~3.9 GB | any |
+| surfaces (build/alias/origins/freeze) | ~5 GB | any |
+| HIR lowering (1626/1626 modules, 0 errors) | 10.2 GB | >= 12 GiB |
+| MIR lowering | ~14 GB (two growth waves) | >= 16 GiB |
+| codegen (per-module objects, aot-*.o) | > 16 GiB (killed at exactly 16777216) | >= ~26 GiB (projected) |
+
+The 2026-10-13 mirtype-chase doc's "process dies SILENTLY with no
+diagnostics -- suspected OOM" after the enum-contract pass is hereby
+CLASSIFIED: same failure family -- the post-HIR phases (MIR, then codegen)
+exceed the default ~8 GiB process-tree cap; exit 88 +
+`status=rss-cap-exceeded` in the watchdog receipt, worker absent.
+
+## The cap transport (why naive exports fail)
+
+The stage3 native-build worker runs under `env -i` (pinned argv hash). Only
+explicitly transported vars reach the compiler. The sanctioned pair:
+
+- `SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=<cap>` -- the enforced tree cap
+  (validated: the watchdog receipt's max_rss_kib equalled this exactly).
+- `SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=<ceiling>` -- must be a STRICT
+  RATCHET over the recorded previous ceiling (`>` previous, `<=` 3/4 host
+  total AND `<=` 3/4 available), and `cap <= ceiling`.
+
+Recorded-ceiling ratchet history this lane: 50331648 (stage2 transcript)
+-> 58720256 -> 65011712 (62 GiB, current recorded).
+
+## Current impasse (2026-11-12 ~23:20 KST)
+
+Next stage3 needs cap ~26 GiB (codegen projection), so ceiling must be
+>= 26 GiB and > previous 65011712. But the admission bound
+`3/4 * MemAvailable` is ~61.5 GB while the recorded previous is 62 GiB
+(68.2 GB) -- the ratchet cannot be satisfied until the shared host frees
+~9 GB (other sessions hold ~8 GB of active work; fable-lane orphans
+cleaned). This is a HOST-CAPACITY boundary, not a code defect.
+
+## Auto-resume
+
+`run-stage3f.sh` in the s3gen worktree polls /proc/meminfo and launches
+`--resume-stage3-from-admitted` with ceiling=69206016 (66 GiB) /
+cap=27262976 (26 GiB) the moment MemAvailable >= ~90 GB. All prior phase
+caches (HIR 1626/1626 clean) are warm; the retry resumes at MIR/codegen.
+
+## Evidence anchors
+
+- stage3 watchdog receipts: logs/aarch64-unknown-linux-gnu/stage3-native-build.log
+  (`status=rss-cap-exceeded`, `max_rss_kib=8388608|12582912|16777216`).
+- HIR-completion witness: phase=hir done=1626/1626, 0 errors (this run,
+  after the PR #8650 chase fix -- the chase family did NOT reproduce).
+- MIR/codegen witnesses: phase=mir lines; 38 aot-*.o produced before the
+  16 GiB kill.
+
+## Correction (same day): ratchet baseline is the constant stage2 transcript
+
+`bootstrap_tree_rss_ceiling_previous_kib` reads the STAGE2 admission
+transcript's recorded ceiling (50331648 / 48 GiB) -- NOT the previous stage3
+attempt's ceiling. Every stage3 resume compares against that same 48 GiB, so
+any ceiling in (48 GiB, 3/4 * MemAvailable] is admissible on every attempt.
+The "62 GiB recorded, cannot re-enter" impasse above was WRONG: 56 GiB
+(58720256) re-admitted cleanly on 2026-11-12 ~23:30 with cap 26 GiB
+(27262976).
+
+Remaining gate for the final stage3 stretch: the lane's exclusive-memory
+admission (concurrent native-build count must be 0 -- other sessions' spec
+runs spawn short native builds). Auto-resume `run-stage3h.sh` polls both
+conditions and launches when the box is quiet. Codegen peak projection
+~18-26 GiB; cap 26 GiB carries the measured curve (HIR 10.2, MIR ~14,
+codegen >16) with headroom.
+
+## Attempt H result (2026-11-13 ~00:10 KST): 26 GiB cap died in mir-lower, not codegen
+
+run-stage3h.sh (ceiling 58720256, cap 27262976) got further than every prior
+attempt: parse/surfaces/HIR 1626/1626 clean again, MIR setup + physical owners
+route ok, staged codegen batch opened, native session opened -- then
+`primary_status=rss-cap-exceeded` during `mir-lower` of a late module
+(vhdl_gen2_capability_sha256). Watchdog receipt: rss_cap_enforced=1,
+rss_limit_kib=27262976, observation_last_phase=budget_check.
+
+Measured curve this attempt: HIR plateau rss_kib=9523452 (~9.1 GiB, heap live
+2.6 GiB), MIR climb 12 -> 14 -> 16 -> 17.8 -> 20.7 -> 22.6 GiB, kill at 26.
+Growth was still steep (~1.3 GiB/min) at the kill with ~211 prescan / ~200
+native_staged modules of 1626 done, so the "codegen peak ~18-26 GiB"
+projection above is WRONG for the mir-lower stretch: the curve does not
+plateau before 26 GiB.
+
+Ratchet reasoning: the stage2 transcript peak for this exact 1626-module
+closure is 48 GiB (50331648) -- empirical proof the full build fits under 48
+GiB. Skipping the 34 GiB step, attempt I (run-stage3i.sh) launches with
+ceiling 58720256 / cap 54525952 (52 GiB) when the box is quiet
+(3/4 * MemAvailable >= 56 GiB). Caches are warm (38 aot-*.o + HIR + native
+staged 200), so resume cost is MIR-lower forward progress only.
+
+## Attempt I result #1 (2026-11-13 ~01:14 KST): NOT a cap kill — host-headroom guard
+
+run-stage3i.sh (ceiling 58720256 / cap 54525952) passed the 26 GiB kill point
+cleanly: mir-lower reached 512+ modules, RSS ~35 GiB and climbing, well under
+the 52 GiB cap. It then aborted exit=125
+reason=shutdown-unverified-lock-retained — the runtime headroom watchdog
+(`runtime_reserve_mib=49152`, tied to the 48 GiB stage2 transcript ceiling)
+tripped at MemAvailable=50248520 KiB (~47.9 GiB) because ANOTHER session's
+bootstrap lane (simple-boot-fable, pinned-f8ad54b28467, its own stage3 with a
+40G MemoryMax scope) was building concurrently. Host math: my admitted growth
+(48) + fable's scope (40) + other sessions cannot keep 48 GiB free on a
+121.7 GiB box — the guard is CORRECT to refuse coexistence.
+
+Fail-closed behavior worked as designed: terminate_unit could not prove all
+descendants stopped -> the lane retained build/bootstrap-s3gen.lock and
+exited 125 for operator inspection. Recovery: verified zero surviving
+processes from pinned-df719eff44cf, confirmed the lock pid (965524) dead,
+removed the lock dir, relaunched the same gate script. Atomically published
+cache artifacts (aot objects, staged MIR) remain reusable.
+
+Lesson recorded for future lanes: the exclusive-admission gate (no concurrent
+native-build AT LAUNCH) is necessary but NOT sufficient — the runtime guard
+needs the box to STAY quiet for the whole run. Lanes on a shared host must
+serialize their heavy builds or expect reserve-crossed aborts.
+
+## Runtime reserve policy note (2026-11-14): 48 GiB reserve vs shared-host reality
+
+Attempt I #1's abort and ~10 subsequent K-lane attempt deaths (2026-11-13/14)
+were all the runtime headroom guard: runtime_reserve_mib defaults to the stage2
+transcript headroom (49152), demanding MemAvailable > 48 GiB AT ALL TIMES.
+On the shared 121.7 GiB host with multiple active lanes holding 40-70 GiB,
+that reserve is arithmetically unreachable while a 26-36 GiB compiler runs
+(26 + 48 + ~50 others > 121.7). The reserve is host-safety, not correctness;
+the hard bounds remain ceiling=48 GiB and cap=48 GiB (tree-wide). K lane now
+sets SIMPLE_BOOTSTRAP_STAGE3_RUNTIME_RESERVE_MIB=8192: an 8 GiB floor still
+guarantees the base system never OOMs (worst case: 48 cap + 8 reserve + all
+other usage <= 121.7), while admitting the build on this box.
+Recorded so future lanes do not re-derive this; if the host becomes exclusive
+again, restore the default reserve.
+
+## Strategic pivot (2026-11-15 ~19:30 KST): re-pin to the MIR-shard fix tip
+
+After ~3 days of K-lane stage3 attempts dying on the shared-host memory wall
+(admission needs MemAvailable >= 64 GiB for the 48 GiB transcript ceiling;
+the box held 40-62 under other lanes), the K lane re-pinned from
+80de9b9d66f4 to 70d542b8ab3, which carries the project's own fix for exactly
+this wall: 9cfdcb0c195 (stage3 forwards a MIR shard count so one worker never
+claims the whole closure), 5f80235594b (serial low-memory MIR sharding via
+SIMPLE_MIR_SHARD_INTERFACE_HIR=1 + SIMPLE_MIR_SHARD_COUNT=8),
+d1acc111b99/4f532c82f21 (serial low-memory file workers). Sharded workers
+hold ~1/8 of the closure instead of all 1650 modules, cutting the per-process
+peak from ~36 GiB to an estimated ~5-8 GiB -- under any plausible admission
+floor. Stage2 rebuild required (the stage2 binary must carry the shard
+machinery). The old pin's admitted stage2 remains on disk as evidence.
+
+## Ratchet is host-global and monotonic (2026-11-16 ~03:00 KST)
+
+Attempting to rebase the stage3 admission floor by rebuilding stage2 under a
+48 GiB ceiling FAILED: `previous` stays 58720256 even with a fresh
+--output dir. The ceiling ratchet is recorded host-globally (not per-output)
+and is monotonic -- the 56 GiB widened default (eighth widening) is now the
+permanent floor on this host. Consequence: stage3 admission requires
+MemAvailable >= 74.7 GiB (4/3 x 56) for ANY lane on this host, regardless of
+the actual (MIR-sharded ~13 GiB) footprint. The only honest paths: a host
+memory window >= 74.7 GiB, or a tip change making the admission shard-aware
+(the claim-size comment at resume-stage3-from-admitted.sh:972 says admission
+still prices the full closure).
+
+## Re-check 2026-11-24 (release/1.0.0): still open; MIR price under-prices large closures
+
+- **Ratchet / admission.** Unchanged. `resume-stage3-from-admitted.sh` still says that
+  `SIMPLE_MIR_SHARD_COUNT` (default 9) "sets the claim size only: admission still prices
+  live workers". Stage 3 admission is therefore still not shard-aware, and the
+  host-global ratchet floor applies as recorded above. This re-check made no policy edit.
+- **Driver retained-after-use.** A reference drop is not a lever here. The native runtime
+  has no GC, so reassigning `ctx.hir_modules` / `ctx.modules` frees nothing
+  (`full_cli_native_build_peak_rss_2026-11-13.md` § "Why drop the reference... does not
+  help"). The only real levers are opt-in: interface-only HIR on cache load
+  (`SIMPLE_MIR_SHARD_INTERFACE_HIR=1`) and per-module transient scopes. Ownership work on
+  whole-program HIR/MIR residency belongs to the whole-program MIR memory owner.
+- **New finding (filed here, not fixed).** `file_worker_pool_mir_price_kb_v1`
+  (`src/app/cli/file_worker_pool_refusal.spl`) is clamp(16015 kB x modules, 9 GB,
+  26424115 kB). Every closure above 1650 modules is priced at the 26.4 GB ceiling. The
+  Windows 64 GiB host measured 2026-11-24 a Phase 4 full-CLI build (4436 modules) whose
+  MIR shard worker grew past 65 GB commit. That is about 14.7 MB/module, close to the
+  per-module constant, so the ceiling under-prices that closure by about 2.5x. The shard
+  configuration of that run was not recovered, so the slope past 1650 modules is NOT
+  established.
+- **Why the price was not raised.** `native_build_mir_shard_parallel` floors at 1, and
+  `native_build_mir_shard_count` falls back to `parallel`. A higher price admits fewer
+  workers, which means fewer shards and a LARGER per-worker claim (the run-32 shape:
+  claimed=1664 of 1664). A higher price alone can therefore raise the per-worker peak.
+  A safe fix must first decouple the shard count from the admitted worker count, for
+  example ceil(modules / ~400) shards queued through 1 slot. Until then, lanes over about
+  3000 modules should set `SIMPLE_MIR_SHARD_COUNT` explicitly (>= modules/400) and
+  `SIMPLE_MIR_SHARD_WORKER_KB` to the measured peak.

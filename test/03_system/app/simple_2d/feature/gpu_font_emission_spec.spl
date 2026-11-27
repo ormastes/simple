@@ -17,7 +17,8 @@ no compiled-artifact, execution, readback, or presentation claim.
 
 use std.spec.*
 use std.io.{file_read}
-use std.common.gpu.font_atlas_composite.{font_atlas_composite_hip_source, font_atlas_composite_vulkan_glsl_source}
+use std.common.gpu.font_atlas_composite.{font_atlas_composite_cuda_source, font_atlas_composite_hip_source, font_atlas_composite_vulkan_glsl_source, font_atlas_composite_vulkan_legacy_glsl_source}
+use std.common.crypto.sha256.{sha256_text}
 use compiler.backend.gpu_portable_compute.{PortableComputeArtifact, PortableComputeTarget, emit_portable_font_atlas_composite_kernel, emit_vulkan_font_atlas_composite_source, emit_portable_2d_optimization_module, portable_compute_artifact_source_hash, portable_compute_artifact_version_hash, portable_compute_compile_plan, portable_compute_2d_optimization_backend_plan, portable_compute_backend_target_diagnostic}
 use compiler.backend.gpu_generated_2d_contract.{vulkan_font_atlas_compile_plan, vulkan_font_atlas_artifact_evidence}
 
@@ -115,7 +116,7 @@ describe "shared font GPU source emission and compile plans":
         expect(app).to_contain("unsupported target")
         expect(checker).to_contain("program=\"src/app/portable_compute_emit/main.spl\"")
         expect(checker).to_contain("run \"$program\" \"$target\"")
-        expect(checker).to_contain("run \"$program\" vulkan")
+        expect(checker).to_contain("run_portable_compute_emitter \"$program\" vulkan")
         expect(checker.contains("cat >\"$program\"")).to_be(false)
         expect(checker.contains("test \"$program\"")).to_be(false)
         expect(checker).to_contain("sha256_valid()")
@@ -212,12 +213,29 @@ describe "shared font GPU source emission and compile plans":
         step("should emit the dedicated Vulkan GLSL 15-input ABI without portable target planning")
         step("Emit two buffer bindings plus the contiguous 13-field Vulkan parameter block")
         val source = emit_vulkan_font_atlas_composite_source()
-        expect(source).to_contain("#version 450")
-        expect(source).to_contain("layout(std430, set = 0, binding = 0) readonly buffer AtlasBuffer")
-        expect(source).to_contain("layout(std430, set = 0, binding = 1) buffer DestinationBuffer")
-        expect(source).to_contain("layout(std430, set = 0, binding = 2) readonly buffer ParamsBuffer {\n    uint atlas_width;\n    uint atlas_height;\n    uint atlas_count;\n    uint atlas_x;\n    uint atlas_y;\n    uint quad_width;\n    uint quad_height;\n    uint dst_width;\n    uint dst_height;\n    uint dst_count;\n    int dst_x;\n    int dst_y;\n    uint color;\n} p;")
-        expect(source).to_contain("void main()")
+        # Production source is the packed multi-glyph shader since 63687490087
+        # (perf(vulkan): pack atlas text dispatches), pinned by the same sha256
+        # as PINNED_VULKAN_FONT_SOURCE_SHA256 in the toolchain checker. The
+        # single-glyph 13-field ABI was kept as
+        # font_atlas_composite_vulkan_legacy_glsl_source().
         expect(source).to_equal(font_atlas_composite_vulkan_glsl_source())
+        expect(sha256_text(source)).to_equal("8a5c542279bbd37d03be5b9a2fea636f3171bb68cf4072d87162b382541d4444")
+        expect(source).to_start_with("#version 450")
+        expect(source).to_contain("layout(std430, binding = 0) readonly buffer AtlasBuffer")
+        expect(source).to_contain("layout(std430, binding = 1) buffer DestinationBuffer")
+        expect(source).to_contain("layout(std430, binding = 2) readonly buffer ParamsBuffer { uint words[]; } p;")
+        expect(source).to_contain("if (p.words.length() < 8u || glyph >= p.words[6]) return;")
+        expect(source).to_contain("if (base + 6u >= p.words.length()) return;")
+        expect(source).to_contain("if (pixel >= count || aw*ah != ac || dw*dh != dc) return;")
+        expect(source).to_contain("if (si>=ac || dx<0 || dy<0 || dx>=int(dw) || dy>=int(dh)) return;")
+        expect(source).to_contain("void main()")
+        step("Keep the single-glyph 15-input ABI: two buffer bindings plus the contiguous 13-field parameter block")
+        val legacy = font_atlas_composite_vulkan_legacy_glsl_source()
+        expect(legacy).to_contain("#version 450")
+        expect(legacy).to_contain("layout(std430, set = 0, binding = 0) readonly buffer AtlasBuffer")
+        expect(legacy).to_contain("layout(std430, set = 0, binding = 1) buffer DestinationBuffer")
+        expect(legacy).to_contain("layout(std430, set = 0, binding = 2) readonly buffer ParamsBuffer {\n    uint atlas_width;\n    uint atlas_height;\n    uint atlas_count;\n    uint atlas_x;\n    uint atlas_y;\n    uint quad_width;\n    uint quad_height;\n    uint dst_width;\n    uint dst_height;\n    uint dst_count;\n    int dst_x;\n    int dst_y;\n    uint color;\n} p;")
+        expect(legacy).to_contain("void main()")
         val plan = vulkan_font_atlas_compile_plan("simple_font_atlas")
         expect(plan.source).to_equal(source)
         expect(plan.entry_name).to_equal("main")
@@ -257,12 +275,15 @@ describe "shared font GPU source emission and compile plans":
         val opencl = emit_portable_font_atlas_composite_kernel(PortableComputeTarget.OpenCl)
         val metal = emit_portable_font_atlas_composite_kernel(PortableComputeTarget.Metal)
         val webgpu = emit_portable_font_atlas_composite_kernel(PortableComputeTarget.WebGpu)
+        expect(cuda.source).to_equal(font_atlas_composite_cuda_source())
         expect(cuda.source).to_contain("atlas")
         expect(cuda.source).to_contain("dst")
         expect(cuda.source).to_contain("atlas_count")
         expect(cuda.source).to_contain("quad_width > atlas_width - atlas_x")
-        expect(cuda.source).to_contain("if (si >= atlas_count)")
-        expect(cuda.source).to_contain("if (di >= dst_count)")
+        expect(cuda.source).to_contain("if (sx < 0 || sy < 0 || sx >= atlas_width || sy >= atlas_height)")
+        expect(cuda.source).to_contain("if (si < 0 || si >= atlas_count)")
+        expect(cuda.source).to_contain("if (dx < 0 || dy < 0 || dx >= dst_width || dy >= dst_height)")
+        expect(cuda.source).to_contain("if (di < 0 || di >= dst_count)")
         expect(hip.source).to_equal(font_atlas_composite_hip_source())
         expect(hip.source).to_contain("quad_width > atlas_width - atlas_x")
         expect(hip.source).to_contain("out_a = sa +")
@@ -283,6 +304,9 @@ describe "shared font GPU source emission and compile plans":
         expect(webgpu.source).to_contain("arrayLength(&dst)")
         expect(webgpu.source).to_contain("arrayLength(&params) < 11u")
         expect(webgpu.source).to_contain("params[0] <= 0 || params[1] <= 0")
+        expect(webgpu.source).to_contain("params[0] > 2147483647 || params[1] > 2147483647")
+        expect(webgpu.source).to_contain("params[4] > 2147483647 || params[5] > 2147483647")
+        expect(webgpu.source).to_contain("params[6] > 2147483647 || params[7] > 2147483647")
         expect(webgpu.source).to_contain("params[2] < 0 || params[3] < 0")
         expect(webgpu.source).to_contain("atlas_width > 0xffffffffu / atlas_height")
         expect(webgpu.source).to_contain("quad_width > atlas_width - atlas_x")

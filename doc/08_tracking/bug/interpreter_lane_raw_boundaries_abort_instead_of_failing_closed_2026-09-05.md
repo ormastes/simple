@@ -1,7 +1,7 @@
 # Interpreter lane: three raw SFFI boundaries abort (or fabricate) instead of returning their documented failure sentinel
 
 Date: 2026-09-05
-Status: OPEN
+Status: SUPERSEDED
 Area: compiler/interpreter externs, SFFI
 Found by: `test/03_system/plan_acceptance/sffi_universal_admission_next_spec.spl`
 
@@ -52,3 +52,43 @@ The seed's interpreter extern dispatch must return the documented sentinel /
 nil for these three symbols instead of raising, and
 `rt_webgpu_create_surface_fn` must return `-1`, not `0`. Once that lands, the
 caller-side existence probes above can be removed.
+
+## 2026-11-10 p2fix-interp lane (work/p2fix-interp-20261110, base d8c0a761988c) — VERIFIED
+
+All three boundary fixes are present at this base and were executed against a
+fresh cargo build of the seed from this tree (the 2026-11-07 deployed seed
+bin/simple.exe predates them: its spl_dlopen still raised and
+rt_webgpu_create_surface still returned 0; rt_file_mmap_read_bytes already
+returned nil). Fresh-build probe on BOTH interpret and jit lanes:
+spl_dlopen(missing) -> 0, rt_file_mmap_read_bytes(missing) -> nil,
+rt_webgpu_create_surface(640,480) -> -1. Retained Rust unit tests all pass:
+wsffi::dlopen_load_failure_returns_zero_not_abort,
+file_io::mmap_named_text_and_bytes_match_read_contract,
+gpu::webgpu_create_surface_returns_invalid_handle_not_zero.
+New regression spec
+test/01_unit/compiler/95.interp/interpreter/raw_boundary_failure_sentinels_spec.spl
+(4/4 seed-smoke). Caller-side existence probes in nogc_sync_mut remain as
+defense in depth; removal is a separate cleanup.
+
+## Addendum 2026-11-11 — lane interp5 verdict: SUPERSEDED-by-prior-lane (spot-check confirms)
+
+Verdict: **SUPERSEDED** — the 2026-11-10 p2fix-interp lane addendum above is
+accepted; this lane re-verified on the 2026-11-11 refreshed tracked seed
+(`bin/simple.exe`, 2026-11-11 build) rather than redoing deep triage. Prior-lane
+base `d8c0a761988c` is an ancestor of this lane's base `b364745fdbf8`, so the
+verified fixes are in this tree; the seed refresh commit (`a104e85c3541`,
+tracked-seed refresh from the release tip) carries them into the deployed
+binary. The durable fix artifacts are the retained Rust unit tests
+`wsffi::dlopen_load_failure_returns_zero_not_abort` and
+`gpu::webgpu_create_surface_returns_invalid_handle_not_zero` plus the
+regression spec below.
+
+Seed-smoke spot-check (2026-11-11, lane interp5, refreshed seed
+`bin/simple.exe` 2026-11-11 build, `SIMPLE_LIB=src`, `--mode=interpreter
+--no-cache`): `test/01_unit/compiler/95.interp/interpreter/raw_boundary_failure_sentinels_spec.spl`
+→ 4 total / 4 passed. No further action; caller-side existence-probe removal
+remains the separate cleanup recorded by the prior lane.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — interp5: raw_boundary_failure_sentinels_spec 4/4 on the refreshed seed; retained Rust unit tests carry the fix.

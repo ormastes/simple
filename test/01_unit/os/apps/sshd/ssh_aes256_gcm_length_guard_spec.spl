@@ -1,0 +1,73 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# os.crypto.aes_gcm — the pure-Simple AES-256-GCM copy sshd imports
+# (src/os/apps/sshd/ssh_cipher.spl). Pins the fail-closed decrypt length
+# profile (bug aes_gcm_encrypt_length_unchecked_and_rewound_hardening_2026-11-13,
+# item 3): key 32 bytes, nonce 12 bytes, tag 16 bytes, checked before any
+# input byte is read (NIST SP 800-38D 7.2 step 1). Before the guards an empty
+# key or nonce zero-extended to the all-zero TC14 key/IV and decrypted to Ok.
+#
+# Source: NIST SP 800-38D (Nov 2007), Appendix B TC14.
+
+use std.spec.step
+
+use os.crypto.aes_gcm.{aes256_gcm_encrypt, aes256_gcm_decrypt, AesGcmResult}
+
+fn _zeros(n: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push(0x00u8)
+        i = i + 1
+    out
+
+fn _tc14_ct() -> [u8]:
+    [0xceu8, 0xa7u8, 0x40u8, 0x3du8, 0x4du8, 0x60u8, 0x6bu8, 0x6eu8,
+     0x07u8, 0x4eu8, 0xc5u8, 0xd3u8, 0xbau8, 0xf3u8, 0x9du8, 0x18u8]
+
+fn _tc14_tag() -> [u8]:
+    [0xd0u8, 0xd1u8, 0xc8u8, 0xa7u8, 0x99u8, 0x99u8, 0x6bu8, 0xf0u8,
+     0x26u8, 0x5bu8, 0x98u8, 0xb5u8, 0xd4u8, 0x8au8, 0xb9u8, 0x19u8]
+
+fn _err_msg(r: AesGcmResult) -> text:
+    match r:
+        AesGcmResult.Ok(pt):
+            "Ok"
+        AesGcmResult.Err(msg):
+            msg
+
+describe "sshd AES-256-GCM copy: fail-closed decrypt length profile":
+    it "TC14 decrypt recovers the zero plaintext":
+        step("TC14 positive control")
+        match aes256_gcm_decrypt(_zeros(32), _zeros(12), _tc14_ct(), _zeros(0), _tc14_tag()):
+            AesGcmResult.Ok(pt):
+                expect(pt).to_equal(_zeros(16))
+            AesGcmResult.Err(msg):
+                fail("valid TC14 must decrypt: {msg}")
+
+    it "rejects an empty key that zero-extends to the TC14 key":
+        step("empty key")
+        expect(_err_msg(aes256_gcm_decrypt(_zeros(0), _zeros(12), _tc14_ct(), _zeros(0), _tc14_tag()))).to_equal("AES-256 key must be 32 bytes")
+
+    it "rejects a 16-byte key":
+        step("short key")
+        expect(_err_msg(aes256_gcm_decrypt(_zeros(16), _zeros(12), _tc14_ct(), _zeros(0), _tc14_tag()))).to_equal("AES-256 key must be 32 bytes")
+
+    it "rejects an empty nonce that zero-extends to the TC14 IV":
+        step("empty nonce")
+        expect(_err_msg(aes256_gcm_decrypt(_zeros(32), _zeros(0), _tc14_ct(), _zeros(0), _tc14_tag()))).to_equal("GCM nonce must be 12 bytes")
+
+    it "rejects a 13-byte nonce":
+        step("long nonce")
+        expect(_err_msg(aes256_gcm_decrypt(_zeros(32), _zeros(13), _tc14_ct(), _zeros(0), _tc14_tag()))).to_equal("GCM nonce must be 12 bytes")
+
+    it "rejects an empty tag before the tag comparison":
+        step("empty tag")
+        expect(_err_msg(aes256_gcm_decrypt(_zeros(32), _zeros(12), _tc14_ct(), _zeros(0), _zeros(0)))).to_equal("GCM tag must be 16 bytes")
+
+    it "rejects a corrupted tag (authentication failure is never Ok)":
+        step("corrupted tag")
+        var bad_tag = _tc14_tag()
+        bad_tag[0] = bad_tag[0] ^ 0x80u8
+        expect(_err_msg(aes256_gcm_decrypt(_zeros(32), _zeros(12), _tc14_ct(), _zeros(0), bad_tag))).to_equal("authentication tag mismatch")

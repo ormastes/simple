@@ -1,0 +1,114 @@
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl 80%
+"""
+# RV32 static ELF driver acceptance (lane sbm-rv32)
+
+Real clang RV32IMAC/ILP32 fixtures (test/fixtures/linker/riscv32/RECIPE.md)
+exercise the shared RISC-V static relocation path through elf_static_link
+with an ELFCLASS32 output: PCREL load/store pairs, HI20/LO12 absolute
+materialization, CALL_PLT, BRANCH, JAL and an R_RISCV_32 data word.
+ld.lld 18 --no-relax is the oracle; checks are layout-relative so the
+in-house base address may differ from LLD's.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes}
+use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
+use compiler.backend.linker.elf_parser.{elf_parse_object}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+fn rv32_read(bytes: [i64], offset: i64, width: i64) -> i64:
+    val valid = offset >= 0 and width > 0 and width <= 8 and offset + width <= bytes.len()
+    expect(valid).to_equal(true)
+    if not valid: return 0
+    var result: i64 = 0
+    var index: i64 = 0
+    while index < width:
+        result = result | (bytes[offset + index] << (8 * index))
+        index = index + 1
+    result
+
+fn rv32_load(name: text) -> [i64]:
+    val raw = file_read_bytes("test/fixtures/linker/riscv32/" + name)
+    expect(raw.len()).to_be_greater_than(0)
+    var bytes: [i64] = []
+    for byte in raw: bytes = bytes.push(byte as i64)
+    bytes
+
+fn rv32_symbol(image: [i64], name: text) -> i64:
+    val parsed = elf_parse_object(image)
+    expect(parsed.is_ok()).to_equal(true)
+    if parsed.is_err(): return 0
+    var matches: i64 = 0
+    var address: i64 = 0
+    for symbol in parsed.unwrap().symbols:
+        if symbol.name == name:
+            matches = matches + 1
+            address = symbol.st_value
+    expect(matches).to_equal(1)
+    address
+
+fn rv32_at(image: [i64], address: i64, width: i64) -> i64:
+    # Walk raw ELF32 section headers (40 bytes each) for vaddr -> file offset.
+    val shoff = rv32_read(image, 32, 4)
+    val shnum = rv32_read(image, 48, 2)
+    var index: i64 = 0
+    while index < shnum:
+        val header = shoff + index * 40
+        val stype = rv32_read(image, header + 4, 4)
+        val vaddr = rv32_read(image, header + 12, 4)
+        val offset = rv32_read(image, header + 16, 4)
+        val size = rv32_read(image, header + 20, 4)
+        if stype == 1 and vaddr != 0 and address >= vaddr and address + width <= vaddr + size:
+            return rv32_read(image, offset + address - vaddr, width)
+        index = index + 1
+    expect(false).to_equal(true)
+    0
+
+fn rv32_signed(value: i64, bits: i64) -> i64:
+    if value & (1 << (bits - 1)) != 0: value - (1 << bits) else: value
+
+fn rv32_pair(upper: i64, lower: i64, store: bool) -> i64:
+    val low = if store: ((lower >> 25) << 5) | ((lower >> 7) & 31) else: lower >> 20
+    rv32_signed(upper & 0xfffff000, 32) + rv32_signed(low, 12)
+
+fn rv32_branch_delta(insn: i64) -> i64:
+    val raw = ((insn >> 31) << 12) | (((insn >> 7) & 1) << 11) |
+        (((insn >> 25) & 63) << 5) | (((insn >> 8) & 15) << 1)
+    rv32_signed(raw, 13)
+
+fn rv32_jal_delta(insn: i64) -> i64:
+    val raw = ((insn >> 31) << 20) | (((insn >> 12) & 255) << 12) |
+        (((insn >> 20) & 1) << 11) | (((insn >> 21) & 1023) << 1)
+    rv32_signed(raw, 21)
+
+describe "RV32 real static ELF link":
+    it "links PCREL, absolute, call, branch and R_RISCV_32 into an ELFCLASS32 image":
+        step("Read the clang RV32 entry object with twelve relocations")
+        val start = rv32_load("start.o")
+        expect(elf_parse_object(start).unwrap().relocations.len()).to_equal(12)
+        step("Link entry and provider as RV32 static ET_EXEC")
+        val result = elf_static_link([start, rv32_load("provider.o")], [], "_start", RelocArch.Riscv32)
+        expect(result.is_ok()).to_equal(true)
+        if result.is_err():
+            print result.unwrap_err()
+            return
+        val image = result.unwrap()
+        step("Require ELFCLASS32, EM_RISCV, ET_EXEC and an entry at _start")
+        expect(image[4]).to_equal(1)
+        expect(rv32_read(image, 16, 2)).to_equal(2)
+        expect(rv32_read(image, 18, 2)).to_equal(243)
+        val entry = rv32_symbol(image, "_start")
+        val data = rv32_symbol(image, "data_value")
+        expect(rv32_read(image, 24, 4)).to_equal(entry)
+        step("Decode PCREL load and store pairs back to data_value")
+        expect(entry + rv32_pair(rv32_at(image, entry, 4), rv32_at(image, entry + 4, 4), false)).to_equal(data)
+        expect(entry + 8 + rv32_pair(rv32_at(image, entry + 8, 4), rv32_at(image, entry + 12, 4), true)).to_equal(data)
+        step("Decode the absolute LUI/LO12 load and store")
+        expect(rv32_pair(rv32_at(image, entry + 16, 4), rv32_at(image, entry + 20, 4), false) & 0xffffffff).to_equal(data)
+        expect(rv32_pair(rv32_at(image, entry + 16, 4), rv32_at(image, entry + 24, 4), true) & 0xffffffff).to_equal(data)
+        step("Decode the AUIPC+JALR call, BRANCH and JAL targets")
+        expect(entry + 28 + rv32_pair(rv32_at(image, entry + 28, 4), rv32_at(image, entry + 32, 4), false)).to_equal(rv32_symbol(image, "worker"))
+        expect(entry + 36 + rv32_branch_delta(rv32_at(image, entry + 36, 4))).to_equal(rv32_symbol(image, "fail_label"))
+        expect(entry + 40 + rv32_jal_delta(rv32_at(image, entry + 40, 4))).to_equal(rv32_symbol(image, "done_label"))
+        step("Require the R_RISCV_32 data word to hold data_value's address")
+        expect(rv32_at(image, rv32_symbol(image, "data_ptr"), 4)).to_equal(data)

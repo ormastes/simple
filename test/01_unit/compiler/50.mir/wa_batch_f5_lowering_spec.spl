@@ -1,0 +1,67 @@
+use std.spec.*
+
+enum MockOutcome:
+    Ok
+    CodegenError(message: text)
+
+enum MockBinOp:
+    Add
+    Eq
+    Ne
+
+fn opt_presence_pair(a: bool, b: bool) -> text:
+    if a and not b:
+        return "first"
+    if not a and b:
+        return "second"
+    if not a and not b:
+        return "neither"
+    "both"
+
+fn opt_err_to_outcome(err_opt: text?) -> MockOutcome:
+    if err_opt.is_some():
+        return MockOutcome.CodegenError(err_opt.unwrap())
+    MockOutcome.Ok
+
+fn bare_or_is_cmp(op: MockBinOp) -> bool:
+    match op:
+        case Eq | Ne: true
+        case _: false
+
+fn generic_err<T>(msg: text) -> Result<T, text>:
+    Err(msg)
+
+fn generic_err_caller(fail_now: bool) -> Result<[i64], text>:
+    if fail_now:
+        return generic_err("inferred")
+    Ok([1])
+
+describe "wa_batch_f5 lowering regressions":
+    it "passes .? presence values accurately as bool arguments":
+        val missing: text? = None
+        val present: text? = Some("/lld")
+        expect(opt_presence_pair(missing.?, present.?)).to_equal("second")
+        expect(opt_presence_pair(present.?, missing.?)).to_equal("first")
+
+    it "unwraps optional text directly into enum tuple payload":
+        val outcome = opt_err_to_outcome(Some("failed"))
+        val msg = match outcome:
+            case MockOutcome.CodegenError(m): m
+            case MockOutcome.Ok: ""
+        expect(msg).to_equal("failed")
+
+    it "dispatches array.concat cleanly on text lists":
+        val left: [text] = ["a", "b"]
+        val right: [text] = ["c"]
+        val merged = left.concat(right)
+        expect(merged.len()).to_equal(3)
+        expect(merged[2]).to_equal("c")
+
+    it "supports bare unit variants in OR match patterns":
+        expect(bare_or_is_cmp(MockBinOp.Eq)).to_equal(true)
+        expect(bare_or_is_cmp(MockBinOp.Add)).to_equal(false)
+
+    it "infers return type argument on generic Err helper":
+        match generic_err_caller(true):
+            case Ok(_): expect(false).to_equal(true)
+            case Err(e): expect(e).to_equal("inferred")

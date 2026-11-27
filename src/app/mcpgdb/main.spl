@@ -1,11 +1,14 @@
+use app.mcpgdb.windows_gdb_v1.{windows_gdb_handles_v1, windows_gdb_dispatch_v1, windows_gdb_shutdown_v1}
+use app.mcpgdb.runner_outcome_v1.{mcpgdb_runner_outcome_v1}
 # mcpgdb MCP production wrapper — cold frontend with repo-local heavy runners
 #
 # Migrated to McpServer facade (Wave C3).
 # Apps own only tool handlers + wiring (design rule D5).
 
-use std.io_runtime.{cwd, dir_create, file_delete, file_exists, file_write, env_get, process_run}
-use std.mcp_sdk.core.{unescape_json_string}
-use std.mcp_sdk.server.app.{mcp_server_init, mcp_server_tool, mcp_serve}
+use app.io.mod.{cwd, is_windows_platform}
+use app.mcpgdb.platform_v1.{mcpgdb_request_file_v1, mcpgdb_request_cleanup_v1, mcpgdb_run_native_v1, mcpgdb_windows_persistent_v1}
+use app.mcpgdb.native_runners_v1.{mcpgdb_bundle_path_v1, mcpgdb_bundle_validate_v1}
+use std.mcp_sdk.server.app.{mcp_server_init, mcp_server_tool_result, mcp_serve}
 use std.mcp_sdk.transport.transport.{StdioTransport}
 
 use std.cli.cli_util (get_cli_args)
@@ -190,126 +193,16 @@ fn schema_file_only() -> text:
 
 # ---- Runner dispatch helpers ----
 
-fn simple_binary() -> text:
-    val env_value = env_get("SIMPLE_BINARY") ?? ""
-    if env_value != "":
-        return env_value
-    "bin/simple"
-
-fn temp_request_path() -> text:
-    val (stdout, _stderr, code) = process_run(shell_bin(), ["-c", "mktemp /tmp/mcpgdb_request.XXXXXX"])
-    if code != 0:
-        return ""
-    stdout.trim()
-
-fn sanitize_segment(value: text) -> text:
-    if value == "":
-        return "_"
-    var out = ""
-    var i = 0
-    while i < value.len():
-        val ch = value.substring(i, i + 1)
-        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "." or ch == "-" or ch == "_":
-            out = out + ch
-        else:
-            out = out + "_"
-        i = i + 1
-    if out == "":
-        return "_"
-    out
-
-fn runner_cache_dir() -> text:
-    "/tmp/mcpgdb_compiled_" + sanitize_segment(cwd())
-
-fn runner_artifact_path(source: text) -> text:
-    var base = source.replace("/", "_")
-    base = base.replace(".spl", ".smf")
-    runner_cache_dir() + "/" + base
-
-fn ensure_runner_artifact(source: text) -> text:
-    val artifact = runner_artifact_path(source)
-    if file_exists(artifact):
-        return artifact
-    dir_create(runner_cache_dir(), true)
-    val (_stdout, _stderr, code) = process_run(simple_binary(), ["compile", source, "-o", artifact])
-    if code != 0:
-        return ""
-    artifact
-
-fn run_compiled_runner(artifact: text, request_path: text) -> (text, text, i64):
-    val cmd = "MCPGDB_REQUEST_PATH=" + shell_quote(request_path) + " " + shell_quote(simple_binary()) + " " + shell_quote(artifact)
-    process_run(shell_bin(), ["-c", cmd])
-
-fn run_source_runner(source: text, request_path: text) -> (text, text, i64):
-    val cmd = "MCPGDB_REQUEST_PATH=" + shell_quote(request_path) + " " + shell_quote(simple_binary()) + " " + shell_quote(source)
-    process_run(shell_bin(), ["-c", cmd])
-
 fn runner_source_for_name(name: text) -> text:
     if name == "debug_session_create" or name == "debug_session_close":
         return DEBUG_SESSION_RUNNER_SOURCE
-    if name == "debug_command_run":
+    if name == "debug_command_run" or name == "debug_backend_probe":
         return DEBUG_EXEC_RUNNER_SOURCE
     if name == "workspace_open" or name == "workspace_status" or name == "debug_session_list" or name == "debug_session_select":
         return DEBUG_STATE_RUNNER_SOURCE
     if name == "clangd_open" or name == "clangd_definition" or name == "clangd_references" or name == "clangd_hover" or name == "clangd_completion" or name == "clangd_type_definition" or name == "clangd_symbols" or name == "clangd_diagnostics":
         return CLANGD_RUNNER_SOURCE
     DEBUG_RUNNER_SOURCE
-
-# Read a JSON quoted string starting at `start` (index of the opening ").
-# Returns the unescaped string value, or "" on failure.
-fn _read_json_str(s: text, start: i64) -> text:
-    if start >= s.len():
-        return ""
-    if s.substring(start, start + 1) != "\"":
-        return ""
-    var pos = start + 1
-    var raw = ""
-    var esc = false
-    while pos < s.len():
-        val ch = s.substring(pos, pos + 1)
-        if esc:
-            raw = raw + ch
-            esc = false
-        elif ch == "\\":
-            raw = raw + ch
-            esc = true
-        elif ch == "\"":
-            return unescape_json_string(raw)
-        else:
-            raw = raw + ch
-        pos = pos + 1
-    ""
-
-# Find byte position of first occurrence of marker in s; returns -1 if absent.
-fn _marker_pos(s: text, marker: text) -> i64:
-    if not s.contains(marker):
-        return -1
-    val parts = s.split(marker)
-    parts[0].len()
-
-# Extract plain content text from a runner envelope.
-# Runners produce make_tool_result: {"content":[{"type":"text","text":"<escaped>"}]}
-# or jsonrpc_error: {"error":{"code":...,"message":"<msg>"}}
-fn extract_runner_content(envelope: text) -> text:
-    # ,"text":"<content>" — the comma skips the earlier "type":"text" value
-    val text_marker = ",\"text\":\""
-    if envelope.contains(text_marker):
-        val plen = _marker_pos(envelope, text_marker)
-        if plen >= 0:
-            val vstart = plen + text_marker.len() - 1
-            val result = _read_json_str(envelope, vstart)
-            if result != "":
-                return result
-    # error envelope: "message":"<msg>"
-    val msg_marker = "\"message\":\""
-    if envelope.contains(msg_marker):
-        val plen2 = _marker_pos(envelope, msg_marker)
-        if plen2 >= 0:
-            val vstart2 = plen2 + msg_marker.len() - 1
-            val msg = _read_json_str(envelope, vstart2)
-            if msg != "":
-                return "error: " + msg
-    envelope
 
 fn mcpgdb_service_action_v1(name: text) -> bool:
     mcpgdb_debug_action_v1(name, false).managed
@@ -368,19 +261,20 @@ fn mcpgdb_service_prepare_v1(name: text, args: text) -> Result<text, text>:
             )?
             Ok(active.session_id)
 
-fn mcpgdb_runner_succeeded_v1(content: text) -> bool:
-    not content.starts_with("error:") and not content.contains("\"status\":\"error\"") and not content.contains("\"status\":\"denied\"")
-
-# Run a tool via its sub-runner. Returns plain content text for the facade.
-fn run_runner_content(name: text, args: text) -> text:
+# Run a native tool and preserve its typed success/error outcome for MCP.
+fn run_runner_content(name: text, args: text) -> Result<text, text>:
+    match mcpgdb_bundle_validate_v1(false):
+        Ok(_): pass
+        Err(reason): return Err(reason)
+    if is_windows_platform() and windows_gdb_handles_v1(name):
+        return windows_gdb_dispatch_v1(name, args)
+    if mcpgdb_windows_persistent_v1(name):
+        return Err("resident Windows clangd provider is not implemented")
     var service_session_id = ""
     if mcpgdb_service_action_v1(name):
         match mcpgdb_service_prepare_v1(name, args):
-            case Err(reason): return "error: DebugServiceV1 denied " + name + ": " + reason
+            case Err(reason): return Err("DebugServiceV1 denied " + name + ": " + reason)
             case Ok(value): service_session_id = value
-    val request_path = temp_request_path()
-    if request_path == "":
-        return "error: failed to allocate temp request file"
     val full_body = LB()
         + jp("jsonrpc", js("2.0"))
         + "," + jp("id", js("1"))
@@ -390,32 +284,43 @@ fn run_runner_content(name: text, args: text) -> text:
             + "," + jp("arguments", args)
             + RB())
         + RB()
-    if not file_write(request_path, full_body):
-        file_delete(request_path)
-        return "error: failed to write temp request file"
+    val request_path = match mcpgdb_request_file_v1(full_body):
+        Ok(value): value
+        Err(reason): return Err(reason)
     val source = runner_source_for_name(name)
-    var stdout = ""
-    var stderr = ""
-    var code = 0
-    val artifact = ensure_runner_artifact(source)
-    if artifact != "":
-        (stdout, stderr, code) = run_compiled_runner(artifact, request_path)
-    if artifact == "" or code != 0 or stdout.trim() == "":
-        (stdout, stderr, code) = run_source_runner(source, request_path)
-    file_delete(request_path)
+    var role = "runner_debug"
+    if source == DEBUG_EXEC_RUNNER_SOURCE: role = "runner_exec"
+    elif source == DEBUG_SESSION_RUNNER_SOURCE: role = "runner_session"
+    elif source == DEBUG_STATE_RUNNER_SOURCE: role = "runner_state"
+    elif source == CLANGD_RUNNER_SOURCE: role = "runner_clangd"
+    val artifact = match mcpgdb_bundle_path_v1(role):
+        Ok(value): value
+        Err(reason):
+            mcpgdb_request_cleanup_v1(request_path)
+            return Err(reason)
+    val (stdout, stderr, code) = mcpgdb_run_native_v1(artifact, request_path)
+    mcpgdb_request_cleanup_v1(request_path)
+    match mcpgdb_bundle_validate_v1(false):
+        Ok(_): pass
+        Err(reason): return Err(reason)
     if code != 0:
         var message = stderr.trim()
         if message == "":
             message = stdout.trim()
         if message == "":
             message = "tool runner failed"
-        return "error: " + message
+        return Err("native runner exited with status " + str(code) + ": " + message)
     val envelope = stdout.trim()
     if envelope == "":
-        return "error: tool runner returned empty response"
-    val content = extract_runner_content(envelope)
+        return Err("tool runner returned empty response")
+    val outcome = mcpgdb_runner_outcome_v1(envelope)
+    val content = match outcome:
+        Ok(value): value
+        Err(reason): reason
     if service_session_id != "":
-        val succeeded = mcpgdb_runner_succeeded_v1(content)
+        val succeeded = match outcome:
+            Ok(_): true
+            Err(_): false
         val perturbation = mcpgdb_service_perturbation_v1(name, args)
         var reason = ""
         if not succeeded:
@@ -426,7 +331,7 @@ fn run_runner_content(name: text, args: text) -> text:
         )
         if succeeded and name == "debug_session_close":
             mcpgdb_debug_unbind_session_v1(service_session_id)
-    content
+    outcome
 
 fn main() -> i64:
     val raw_args = get_cli_args()
@@ -461,86 +366,103 @@ fn main() -> i64:
             print progress
         return 0
 
+    match mcpgdb_bundle_validate_v1(false):
+        Ok(_): pass
+        Err(reason):
+            error("mcpgdb", reason)
+            return 1
     mcp_server_init("mcpgdb", TOOL_VERSION)
+    mcp_server_tool_result("debug_backend_probe", "Run bounded real GDB MI2 version/configuration diagnostics without attaching or starting an inferior.",
+        fn() -> text: make_schema("", "[]"), fn(a: text) -> Result<text, text>: run_runner_content("debug_backend_probe", a))
 
-    mcp_server_tool("workspace_open", "Set the workspace root used by debug and clangd tools.",
-        fn() -> text: schema_workspace_open(), fn(a: text) -> text: run_runner_content("workspace_open", a))
-    mcp_server_tool("workspace_status", "Show current workspace and session status.",
-        fn() -> text: schema_workspace_status(), fn(a: text) -> text: run_runner_content("workspace_status", a))
-    mcp_server_tool("clangd_open", "Launch clangd for the current workspace.",
-        fn() -> text: schema_clangd_open(), fn(a: text) -> text: run_runner_content("clangd_open", a))
-    mcp_server_tool("debug_session_create", "Create a new debugger session using gdb, lldb, openocd_gdb, or t32_gdb backend.",
-        fn() -> text: schema_debug_session_create(), fn(a: text) -> text: run_runner_content("debug_session_create", a))
-    mcp_server_tool("debug_session_list", "List active debugger sessions.",
-        fn() -> text: schema_debug_session_list(), fn(a: text) -> text: run_runner_content("debug_session_list", a))
-    mcp_server_tool("debug_session_select", "Select the current debugger session.",
-        fn() -> text: schema_debug_session_select(), fn(a: text) -> text: run_runner_content("debug_session_select", a))
-    mcp_server_tool("debug_session_close", "Close a debugger session and terminate its backend process.",
-        fn() -> text: schema_debug_session_close(), fn(a: text) -> text: run_runner_content("debug_session_close", a))
-    mcp_server_tool("debug_launch", "Load a program into the current debugger session and run it.",
-        fn() -> text: schema_debug_launch(), fn(a: text) -> text: run_runner_content("debug_launch", a))
-    mcp_server_tool("debug_attach", "Attach to a running process.",
-        fn() -> text: schema_debug_attach(), fn(a: text) -> text: run_runner_content("debug_attach", a))
-    mcp_server_tool("debug_connect_remote", "Connect the current debugger session to a remote GDB target.",
-        fn() -> text: schema_debug_connect_remote(), fn(a: text) -> text: run_runner_content("debug_connect_remote", a))
-    mcp_server_tool("debug_disconnect", "Disconnect from the current target.",
-        fn() -> text: schema_debug_disconnect(), fn(a: text) -> text: run_runner_content("debug_disconnect", a))
-    mcp_server_tool("debug_restart", "Restart program execution in the current session.",
-        fn() -> text: schema_debug_restart(), fn(a: text) -> text: run_runner_content("debug_restart", a))
-    mcp_server_tool("debug_continue", "Continue execution.",
-        fn() -> text: schema_debug_continue(), fn(a: text) -> text: run_runner_content("debug_continue", a))
-    mcp_server_tool("debug_pause", "Interrupt execution.",
-        fn() -> text: schema_debug_pause(), fn(a: text) -> text: run_runner_content("debug_pause", a))
-    mcp_server_tool("debug_step_in", "Step into the next statement.",
-        fn() -> text: schema_debug_step_in(), fn(a: text) -> text: run_runner_content("debug_step_in", a))
-    mcp_server_tool("debug_step_over", "Step over the next statement.",
-        fn() -> text: schema_debug_step_over(), fn(a: text) -> text: run_runner_content("debug_step_over", a))
-    mcp_server_tool("debug_step_out", "Step out of the current frame.",
-        fn() -> text: schema_debug_step_out(), fn(a: text) -> text: run_runner_content("debug_step_out", a))
-    mcp_server_tool("breakpoint_set", "Set a breakpoint by file/line or symbol.",
-        fn() -> text: schema_breakpoint_set(), fn(a: text) -> text: run_runner_content("breakpoint_set", a))
-    mcp_server_tool("breakpoint_remove", "Remove a breakpoint by debugger breakpoint id.",
-        fn() -> text: schema_breakpoint_remove(), fn(a: text) -> text: run_runner_content("breakpoint_remove", a))
-    mcp_server_tool("breakpoint_list", "List breakpoints.",
-        fn() -> text: schema_breakpoint_list(), fn(a: text) -> text: run_runner_content("breakpoint_list", a))
-    mcp_server_tool("thread_list", "List threads.",
-        fn() -> text: schema_thread_list(), fn(a: text) -> text: run_runner_content("thread_list", a))
-    mcp_server_tool("frame_list", "List frames.",
-        fn() -> text: schema_frame_list(), fn(a: text) -> text: run_runner_content("frame_list", a))
-    mcp_server_tool("frame_select", "Select a frame by frame id.",
-        fn() -> text: schema_frame_select(), fn(a: text) -> text: run_runner_content("frame_select", a))
-    mcp_server_tool("variable_list", "List variables in the current frame.",
-        fn() -> text: schema_variable_list(), fn(a: text) -> text: run_runner_content("variable_list", a))
-    mcp_server_tool("evaluate", "Evaluate an expression in the current frame.",
-        fn() -> text: schema_evaluate(), fn(a: text) -> text: run_runner_content("evaluate", a))
-    mcp_server_tool("register_read", "Read one register or all registers.",
-        fn() -> text: schema_register_read(), fn(a: text) -> text: run_runner_content("register_read", a))
-    mcp_server_tool("register_write", "Write a register value.",
-        fn() -> text: schema_register_write(), fn(a: text) -> text: run_runner_content("register_write", a))
-    mcp_server_tool("memory_read", "Read target memory.",
-        fn() -> text: schema_memory_read(), fn(a: text) -> text: run_runner_content("memory_read", a))
-    mcp_server_tool("memory_write", "Write target memory.",
-        fn() -> text: schema_memory_write(), fn(a: text) -> text: run_runner_content("memory_write", a))
-    mcp_server_tool("debug_command_run", "Run a gated raw backend command.",
-        fn() -> text: schema_debug_command_run(), fn(a: text) -> text: run_runner_content("debug_command_run", a))
-    mcp_server_tool("clangd_definition", "Resolve definition location via clangd.",
-        fn() -> text: schema_pos(), fn(a: text) -> text: run_runner_content("clangd_definition", a))
-    mcp_server_tool("clangd_references", "Resolve references via clangd.",
-        fn() -> text: schema_pos(), fn(a: text) -> text: run_runner_content("clangd_references", a))
-    mcp_server_tool("clangd_hover", "Get hover details via clangd.",
-        fn() -> text: schema_pos(), fn(a: text) -> text: run_runner_content("clangd_hover", a))
-    mcp_server_tool("clangd_completion", "Get code completions via clangd.",
-        fn() -> text: schema_pos(), fn(a: text) -> text: run_runner_content("clangd_completion", a))
-    mcp_server_tool("clangd_type_definition", "Resolve type definition via clangd.",
-        fn() -> text: schema_pos(), fn(a: text) -> text: run_runner_content("clangd_type_definition", a))
-    mcp_server_tool("clangd_symbols", "List symbols in a source file via clangd.",
-        fn() -> text: schema_file_only(), fn(a: text) -> text: run_runner_content("clangd_symbols", a))
-    mcp_server_tool("clangd_diagnostics", "Run clangd --check diagnostics for a source file.",
-        fn() -> text: schema_file_only(), fn(a: text) -> text: run_runner_content("clangd_diagnostics", a))
+    mcp_server_tool_result("workspace_open", "Set the workspace root used by debug and clangd tools.",
+        fn() -> text: schema_workspace_open(), fn(a: text) -> Result<text, text>: run_runner_content("workspace_open", a))
+    mcp_server_tool_result("workspace_status", "Show current workspace and session status.",
+        fn() -> text: schema_workspace_status(), fn(a: text) -> Result<text, text>: run_runner_content("workspace_status", a))
+    mcp_server_tool_result("clangd_open", "Launch clangd for the current workspace.",
+        fn() -> text: schema_clangd_open(), fn(a: text) -> Result<text, text>: run_runner_content("clangd_open", a))
+    mcp_server_tool_result("debug_session_create", "Create a new debugger session using gdb, lldb, openocd_gdb, or t32_gdb backend.",
+        fn() -> text: schema_debug_session_create(), fn(a: text) -> Result<text, text>: run_runner_content("debug_session_create", a))
+    mcp_server_tool_result("debug_session_list", "List active debugger sessions.",
+        fn() -> text: schema_debug_session_list(), fn(a: text) -> Result<text, text>: run_runner_content("debug_session_list", a))
+    mcp_server_tool_result("debug_session_select", "Select the current debugger session.",
+        fn() -> text: schema_debug_session_select(), fn(a: text) -> Result<text, text>: run_runner_content("debug_session_select", a))
+    mcp_server_tool_result("debug_session_close", "Close a debugger session and terminate its backend process.",
+        fn() -> text: schema_debug_session_close(), fn(a: text) -> Result<text, text>: run_runner_content("debug_session_close", a))
+    mcp_server_tool_result("debug_launch", "Load a program into the current debugger session and run it.",
+        fn() -> text: schema_debug_launch(), fn(a: text) -> Result<text, text>: run_runner_content("debug_launch", a))
+    mcp_server_tool_result("debug_attach", "Attach to a running process.",
+        fn() -> text: schema_debug_attach(), fn(a: text) -> Result<text, text>: run_runner_content("debug_attach", a))
+    mcp_server_tool_result("debug_connect_remote", "Connect the current debugger session to a remote GDB target.",
+        fn() -> text: schema_debug_connect_remote(), fn(a: text) -> Result<text, text>: run_runner_content("debug_connect_remote", a))
+    mcp_server_tool_result("debug_disconnect", "Disconnect from the current target.",
+        fn() -> text: schema_debug_disconnect(), fn(a: text) -> Result<text, text>: run_runner_content("debug_disconnect", a))
+    mcp_server_tool_result("debug_restart", "Restart program execution in the current session.",
+        fn() -> text: schema_debug_restart(), fn(a: text) -> Result<text, text>: run_runner_content("debug_restart", a))
+    mcp_server_tool_result("debug_continue", "Continue execution.",
+        fn() -> text: schema_debug_continue(), fn(a: text) -> Result<text, text>: run_runner_content("debug_continue", a))
+    mcp_server_tool_result("debug_pause", "Interrupt execution.",
+        fn() -> text: schema_debug_pause(), fn(a: text) -> Result<text, text>: run_runner_content("debug_pause", a))
+    mcp_server_tool_result("debug_step_in", "Step into the next statement.",
+        fn() -> text: schema_debug_step_in(), fn(a: text) -> Result<text, text>: run_runner_content("debug_step_in", a))
+    mcp_server_tool_result("debug_step_over", "Step over the next statement.",
+        fn() -> text: schema_debug_step_over(), fn(a: text) -> Result<text, text>: run_runner_content("debug_step_over", a))
+    mcp_server_tool_result("debug_step_out", "Step out of the current frame.",
+        fn() -> text: schema_debug_step_out(), fn(a: text) -> Result<text, text>: run_runner_content("debug_step_out", a))
+    mcp_server_tool_result("breakpoint_set", "Set a breakpoint by file/line or symbol.",
+        fn() -> text: schema_breakpoint_set(), fn(a: text) -> Result<text, text>: run_runner_content("breakpoint_set", a))
+    mcp_server_tool_result("breakpoint_remove", "Remove a breakpoint by debugger breakpoint id.",
+        fn() -> text: schema_breakpoint_remove(), fn(a: text) -> Result<text, text>: run_runner_content("breakpoint_remove", a))
+    mcp_server_tool_result("breakpoint_list", "List breakpoints.",
+        fn() -> text: schema_breakpoint_list(), fn(a: text) -> Result<text, text>: run_runner_content("breakpoint_list", a))
+    mcp_server_tool_result("thread_list", "List threads.",
+        fn() -> text: schema_thread_list(), fn(a: text) -> Result<text, text>: run_runner_content("thread_list", a))
+    mcp_server_tool_result("frame_list", "List frames.",
+        fn() -> text: schema_frame_list(), fn(a: text) -> Result<text, text>: run_runner_content("frame_list", a))
+    mcp_server_tool_result("frame_select", "Select a frame by frame id.",
+        fn() -> text: schema_frame_select(), fn(a: text) -> Result<text, text>: run_runner_content("frame_select", a))
+    mcp_server_tool_result("variable_list", "List variables in the current frame.",
+        fn() -> text: schema_variable_list(), fn(a: text) -> Result<text, text>: run_runner_content("variable_list", a))
+    mcp_server_tool_result("evaluate", "Evaluate an expression in the current frame.",
+        fn() -> text: schema_evaluate(), fn(a: text) -> Result<text, text>: run_runner_content("evaluate", a))
+    mcp_server_tool_result("register_read", "Read one register or all registers.",
+        fn() -> text: schema_register_read(), fn(a: text) -> Result<text, text>: run_runner_content("register_read", a))
+    mcp_server_tool_result("register_write", "Write a register value.",
+        fn() -> text: schema_register_write(), fn(a: text) -> Result<text, text>: run_runner_content("register_write", a))
+    mcp_server_tool_result("memory_read", "Read target memory.",
+        fn() -> text: schema_memory_read(), fn(a: text) -> Result<text, text>: run_runner_content("memory_read", a))
+    mcp_server_tool_result("memory_write", "Write target memory.",
+        fn() -> text: schema_memory_write(), fn(a: text) -> Result<text, text>: run_runner_content("memory_write", a))
+    mcp_server_tool_result("debug_command_run", "Run a gated raw backend command.",
+        fn() -> text: schema_debug_command_run(), fn(a: text) -> Result<text, text>: run_runner_content("debug_command_run", a))
+    mcp_server_tool_result("clangd_definition", "Resolve definition location via clangd.",
+        fn() -> text: schema_pos(), fn(a: text) -> Result<text, text>: run_runner_content("clangd_definition", a))
+    mcp_server_tool_result("clangd_references", "Resolve references via clangd.",
+        fn() -> text: schema_pos(), fn(a: text) -> Result<text, text>: run_runner_content("clangd_references", a))
+    mcp_server_tool_result("clangd_hover", "Get hover details via clangd.",
+        fn() -> text: schema_pos(), fn(a: text) -> Result<text, text>: run_runner_content("clangd_hover", a))
+    mcp_server_tool_result("clangd_completion", "Get code completions via clangd.",
+        fn() -> text: schema_pos(), fn(a: text) -> Result<text, text>: run_runner_content("clangd_completion", a))
+    mcp_server_tool_result("clangd_type_definition", "Resolve type definition via clangd.",
+        fn() -> text: schema_pos(), fn(a: text) -> Result<text, text>: run_runner_content("clangd_type_definition", a))
+    mcp_server_tool_result("clangd_symbols", "List symbols in a source file via clangd.",
+        fn() -> text: schema_file_only(), fn(a: text) -> Result<text, text>: run_runner_content("clangd_symbols", a))
+    mcp_server_tool_result("clangd_diagnostics", "Run clangd --check diagnostics for a source file.",
+        fn() -> text: schema_file_only(), fn(a: text) -> Result<text, text>: run_runner_content("clangd_diagnostics", a))
 
     val t = StdioTransport.json_lines()
     mcp_serve(t)
-    0
+    if is_windows_platform():
+        match windows_gdb_shutdown_v1():
+            Ok(_): pass
+            Err(reason):
+                error("mcpgdb", reason)
+                return 1
+    match mcpgdb_bundle_validate_v1(true):
+        Ok(_): 0
+        Err(reason):
+            error("mcpgdb", reason)
+            1
 
 fn print_help():
     print "{TOOL_NAME}"

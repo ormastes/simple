@@ -1,0 +1,36 @@
+# Purpose and audience: provider hook -> JobHeartbeat mapping in provider_adapters, for the caret team.
+# @req CU-008
+
+use std.spec.*
+use app.llm_caret.observer.observation_builder.*
+use app.llm_caret.observer.provider_adapters.{provider_events, claude_hook_events}
+
+fn _kinds(events: [ObserverEvent]) -> [ObserverEventKind]:
+    var out: [ObserverEventKind] = []
+    for e in events:
+        out = out + [e.kind]
+    out
+
+describe "provider heartbeat mapping":
+    it "a finished Claude tool call is job-advancing evidence":
+        # @req CU-008
+        step("PostToolUse and PostToolUseFailure carry a heartbeat alongside ToolEnd")
+        for name in ["PostToolUse", "PostToolUseFailure"]:
+            val kinds = _kinds(claude_hook_events("s", 1, "op", 1, 100, name))
+            expect(kinds.contains(ObserverEventKind.ToolEnd)).to_equal(true)
+            expect(kinds.contains(ObserverEventKind.JobHeartbeat)).to_equal(true)
+
+    it "hooks that prove no progress map no heartbeat":
+        # @req CU-008
+        step("PreToolUse, permission, unknown hooks, codex")
+        expect(_kinds(claude_hook_events("s", 1, "op", 1, 100, "PreToolUse")).contains(ObserverEventKind.JobHeartbeat)).to_equal(false)
+        expect(_kinds(claude_hook_events("s", 1, "op", 1, 100, "PermissionRequest")).contains(ObserverEventKind.JobHeartbeat)).to_equal(false)
+        expect(provider_events("claude", "s", 1, "op", 1, 100, "Bogus").len()).to_equal(0)
+        expect(provider_events("codex", "s", 1, "op", 1, 100, "turn/waiting_input").len()).to_equal(1)
+
+    it "the mapped heartbeat reaches the observation facts":
+        # @req CU-008
+        step("fold PostToolUse events")
+        val events = provider_events("claude", "s", 1, "op", 1, 100, "PostToolUse")
+        val obs = fold_observation(events, "s", 1, 150)
+        expect(obs.facts.heartbeat_age.known).to_equal(true)

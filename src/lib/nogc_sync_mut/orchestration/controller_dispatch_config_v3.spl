@@ -1,0 +1,135 @@
+# Installed local Controller routing metadata. Decoding never opens a Host and
+# does not establish authority: the retained Controller root reads these bytes.
+use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.*
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.{HostLinuxServiceEnrollmentBindingV3,
+    host_linux_service_enrollment_encode_v3, host_linux_service_enrollment_decode_v3}
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.{ControllerDispatchConfigV1, ControllerDispatchContextV1}
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.*
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct ControllerDispatchConfigV3:
+    controller_id: text
+    controller_epoch: i64
+    authority_policy_digest: text
+    host_binding: HostServiceEnrollmentBindingV2
+    setup_credential_path: text
+    setup_credential_digest: text
+    host_deployment_root: text
+    # host_binding is the common metadata view. Linux authority comes from
+    # this canonical V3 binding, which also pins its helper templates.
+    linux_host_binding: Option<HostLinuxServiceEnrollmentBindingV3> = None
+
+fn controller_locator_valid_v3(value: text) -> bool:
+    value.byte_len() >= 4 and value.byte_len() <= 32760 and not value.contains("\0") and not value.contains("\n") and not value.contains("\r")
+
+pub fn controller_dispatch_linux_host_view_v3(binding: HostLinuxServiceEnrollmentBindingV3) -> HostServiceEnrollmentBindingV2:
+    HostServiceEnrollmentBindingV2(physical_host_id: binding.physical_host_id, service_scope_id: binding.service_scope_id,
+        config_digest: binding.config_digest, policy_digest: binding.policy_digest, policy_revision: binding.policy_revision,
+        native_machine_id: binding.native_machine_id, provider_identity_digest: binding.provider_identity_digest,
+        engine_policy_digest: binding.engine_policy_digest, machine_parent: binding.machine_parent, backend: "linux-service",
+        broker_policy_digest: binding.broker_policy_digest, physical_cpu_millis: binding.physical_cpu_millis,
+        physical_memory_bytes: binding.physical_memory_bytes, reserved_cpu_millis: binding.reserved_cpu_millis,
+        reserved_memory_bytes: binding.reserved_memory_bytes)
+
+fn controller_dispatch_host_enrollment_bytes_v3(config: ControllerDispatchConfigV3) -> Result<text, text>:
+    if val linux = config.linux_host_binding:
+        if config.host_binding != controller_dispatch_linux_host_view_v3(linux):
+            return Err("controller-local-config-linux-host-view-mismatch")
+        return host_linux_service_enrollment_encode_v3(linux)
+    host_service_enrollment_payload_bytes_v2(config.host_binding)
+
+pub fn controller_dispatch_host_enrollment_digest_v3(config: ControllerDispatchConfigV3) -> Result<text, text>:
+    Ok(sha256_text(controller_dispatch_host_enrollment_bytes_v3(config)?))
+
+# Same authority hash as the installed Host capacity writer. This is a
+# protected ready-selector pin, separate from the controller journal.
+pub fn controller_dispatch_host_ready_authority_v3(config: ControllerDispatchConfigV3) -> Result<text, text>:
+    val enrollment = controller_dispatch_host_enrollment_digest_v3(config)?
+    Ok(sha256_text("HOST-CAPACITY-AUTHORITY-V1\n" + config.host_binding.physical_host_id +
+        "\nhost-" + enrollment + "\n"))
+
+pub fn controller_dispatch_config_encode_v3(config: ControllerDispatchConfigV3) -> Result<text, text>:
+    if (not builder_identifier_valid_v1(config.controller_id) or config.controller_epoch <= 0 or
+            not builder_digest_valid_v1(config.authority_policy_digest) or
+            not builder_digest_valid_v1(config.setup_credential_digest)):
+        return Err("controller-local-config-identity")
+    if (not controller_locator_valid_v3(config.setup_credential_path) or
+            config.setup_credential_path.ends_with(".ready")):
+        return Err("controller-local-config-setup-locator")
+    if not controller_locator_valid_v3(config.host_deployment_root): return Err("controller-local-config-host-root-locator")
+    val binding = controller_dispatch_host_enrollment_bytes_v3(config)?
+    var fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3),
+        "kind": SdnValue.String("controller-dispatch-config"), "target": SdnValue.String("retained-host-service-v1"),
+        "controllerId": SdnValue.String(config.controller_id), "controllerEpoch": SdnValue.Int(config.controller_epoch),
+        "authorityPolicyDigest": SdnValue.String(config.authority_policy_digest),
+        "setupCredentialPath": SdnValue.String(config.setup_credential_path),
+        "setupCredentialDigest": SdnValue.String(config.setup_credential_digest),
+        "hostDeploymentRoot": SdnValue.String(config.host_deployment_root)}
+    val binding_key = if config.linux_host_binding.is_some(): "linuxHostEnrollment" else: "hostEnrollment"
+    fields[binding_key] = SdnValue.String(binding)
+    val encoded = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if encoded.byte_len() > 32768: return Err("controller-local-config-size")
+    Ok(encoded)
+
+fn controller_config_text_v3(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("controller-local-config-text:" + key)
+
+pub fn controller_dispatch_config_decode_v3(source: text) -> Result<ControllerDispatchConfigV3, text>:
+    if source.byte_len() == 0 or source.byte_len() > 32768: return Err("controller-local-config-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 32768,
+            max_depth: 2, max_nodes: 32, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value
+        case Err(issue): return Err("controller-local-config-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("controller-local-config-object")
+    val required = ["version", "kind", "target", "controllerId", "controllerEpoch", "authorityPolicyDigest",
+        "setupCredentialPath", "setupCredentialDigest", "hostDeploymentRoot"]
+    for key in fields.keys():
+        if not required.contains(key) and key != "hostEnrollment" and key != "linuxHostEnrollment":
+            return Err("controller-local-config-unknown:" + key)
+    for key in required:
+        if not fields.contains_key(key): return Err("controller-local-config-missing:" + key)
+    val windows = fields.contains_key("hostEnrollment")
+    if windows == fields.contains_key("linuxHostEnrollment"):
+        return Err("controller-local-config-exactly-one-host-enrollment")
+    match fields["version"]:
+        case SdnValue.Int(3): ()
+        case _: return Err("controller-local-config-version")
+    if (controller_config_text_v3(fields, "kind")? != "controller-dispatch-config" or
+            controller_config_text_v3(fields, "target")? != "retained-host-service-v1"):
+        return Err("controller-local-config-target")
+    val epoch = match fields["controllerEpoch"]:
+        case SdnValue.Int(value): value
+        case _: return Err("controller-local-config-epoch")
+    val linux: Option<HostLinuxServiceEnrollmentBindingV3> = if windows: None
+        else: Some(host_linux_service_enrollment_decode_v3(controller_config_text_v3(fields, "linuxHostEnrollment")?)?)
+    val binding = match linux:
+        case Some(value): controller_dispatch_linux_host_view_v3(value)
+        case None: host_service_enrollment_payload_decode_v2(controller_config_text_v3(fields, "hostEnrollment")?)?
+    val config = ControllerDispatchConfigV3(controller_config_text_v3(fields, "controllerId")?, epoch,
+        controller_config_text_v3(fields, "authorityPolicyDigest")?, binding,
+        controller_config_text_v3(fields, "setupCredentialPath")?, controller_config_text_v3(fields, "setupCredentialDigest")?,
+        controller_config_text_v3(fields, "hostDeploymentRoot")?, linux)
+    if controller_dispatch_config_encode_v3(config)? != source: return Err("controller-local-config-noncanonical")
+    Ok(config)
+
+# Reuse the existing four-signature verifier and assignment/response oracles.
+# host_root is diagnostic installed metadata here, never a Linux owner/path port.
+pub fn controller_dispatch_context_metadata_v3(config: ControllerDispatchConfigV3,
+        policy_bytes: text) -> Result<ControllerDispatchContextV1, text>:
+    val encoded = controller_dispatch_config_encode_v3(config)?
+    val policy = local_authority_policy_decode_v1(policy_bytes)?
+    if policy.source_digest != config.authority_policy_digest: return Err("controller-local-policy-pin")
+    val binding = config.host_binding
+    val authority = "host-" + controller_dispatch_host_enrollment_digest_v3(config)?
+    Ok(ControllerDispatchContextV1(ControllerDispatchConfigV1(config.controller_id, config.controller_epoch,
+        "retained-host-service-v1", binding.machine_parent, authority, binding.provider_identity_digest,
+        config.authority_policy_digest), policy))

@@ -45,6 +45,8 @@ fn is_condition_present(condition_expr: &Expr, val: &Value) -> bool {
 fn bind_lambda_param(captured: &Env, params: &[String], value: &Value) -> Env {
     let mut env = captured.clone();
     if let Some(param) = params.first() {
+        // Local, so a same-named imported fn (`error`) cannot win the lookup.
+        env.mark_local(param.clone());
         env.insert(param.clone(), value.clone());
     }
     env
@@ -61,6 +63,7 @@ where
         env: captured,
     } = func
     {
+        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
         process(&params, &body, &captured)
     } else {
         Err(crate::error::factory::expects_lambda(operation))
@@ -153,10 +156,14 @@ pub(crate) fn eval_array_reduce(
             body,
             env: captured,
         } => {
+            let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
             let mut acc = init;
             for item in arr {
                 crate::interpreter::check_execution_limit()?;
                 let mut local_env = Env::clone(&captured);
+                for p in params.iter().take(2) {
+                    local_env.mark_local(p.clone());
+                }
                 if params.len() >= 2 {
                     local_env.insert(params[0].clone(), acc);
                     local_env.insert(params[1].clone(), item.clone());
@@ -331,6 +338,7 @@ where
         env: captured,
     } = func
     {
+        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
         process(&params, &body, &captured)
     } else {
         Err(crate::error::factory::expects_lambda(operation))
@@ -339,7 +347,7 @@ where
 
 /// Dict map_values: apply lambda to each value
 pub(crate) fn eval_dict_map_values(
-    map: &HashMap<String, Value>,
+    map: &crate::value::DictMap,
     func: Value,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, Arc<ClassDef>>,
@@ -347,12 +355,12 @@ pub(crate) fn eval_dict_map_values(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     with_dict_lambda(func, "map_values", |params, body, captured| {
-        let mut new_map = HashMap::new();
+        let mut new_map = crate::value::DictMap::new();
         for (k, v) in map {
             crate::interpreter::check_execution_limit()?;
-            let mut local_env = bind_lambda_param(captured, params, v);
+            let mut local_env = bind_lambda_param(captured, params, Value::dict_entry_value_ref(v));
             let new_val = eval_lambda_body(body, &mut local_env, functions, classes, enums, impl_methods)?;
-            new_map.insert(k.clone(), new_val);
+            new_map.insert(k.clone(), Value::rewrap_dict_entry(v, new_val));
         }
         Ok(Value::Dict(Arc::new(new_map)))
     })
@@ -360,7 +368,7 @@ pub(crate) fn eval_dict_map_values(
 
 /// Dict filter: keep entries where lambda returns truthy
 pub(crate) fn eval_dict_filter(
-    map: &HashMap<String, Value>,
+    map: &crate::value::DictMap,
     func: Value,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, Arc<ClassDef>>,
@@ -368,15 +376,18 @@ pub(crate) fn eval_dict_filter(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     with_dict_lambda(func, "filter", |params, body, captured| {
-        let mut new_map = HashMap::new();
+        let mut new_map = crate::value::DictMap::new();
         for (k, v) in map {
             crate::interpreter::check_execution_limit()?;
             let mut local_env = captured.clone();
+            for p in params.iter().take(2) {
+                local_env.mark_local(p.clone());
+            }
             if params.len() >= 2 {
-                local_env.insert(params[0].clone(), Value::text(k.clone()));
-                local_env.insert(params[1].clone(), v.clone());
+                local_env.insert(params[0].clone(), Value::dict_entry_key_for_iteration(v, k));
+                local_env.insert(params[1].clone(), Value::dict_entry_value_for_iteration(v));
             } else if let Some(param) = params.first() {
-                local_env.insert(param.clone(), v.clone());
+                local_env.insert(param.clone(), Value::dict_entry_value_for_iteration(v));
             }
             let pred_val = eval_lambda_body(body, &mut local_env, functions, classes, enums, impl_methods)?;
             if is_condition_present(body, &pred_val) {
@@ -391,7 +402,7 @@ pub(crate) fn eval_dict_filter(
 /// effects, discarding the result. Returns the receiver unchanged so the call
 /// can sit in expression position.
 ///
-/// Visits entries in `dict_entries_sorted` order — the SAME order as
+/// Visits entries in `dict_entries_ordered` order — the SAME order as
 /// `for (k, v) in dict`, `keys()`, `values()` and `entries()` — so a traversal
 /// written with `for_each` and one written with a `for` loop agree. Keys are
 /// recovered through `dict_entry_key_for_iteration`, so a composite
@@ -409,7 +420,7 @@ pub(crate) fn eval_dict_filter(
 /// it. Captured names the caller's scope does not already define are layered
 /// in temporarily and removed again, so a capture cannot leak out of the call.
 pub(crate) fn eval_dict_for_each(
-    map: &HashMap<String, Value>,
+    map: &crate::value::DictMap,
     func: Value,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
@@ -421,6 +432,7 @@ pub(crate) fn eval_dict_for_each(
         Value::Lambda { params, body, env } => (params, body, env),
         _ => return Err(crate::error::factory::expects_lambda("for_each")),
     };
+    let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
 
     // Layer in captured names the caller's scope does not already bind, so the
     // body can still READ its closure environment. A name the caller already
@@ -446,7 +458,7 @@ pub(crate) fn eval_dict_for_each(
     let saved: Vec<(String, Option<Value>)> = bound.iter().map(|n| (n.clone(), env.get(n).cloned())).collect();
 
     let result = (|| -> Result<(), CompileError> {
-        for (k, stored) in crate::value::dict_entries_sorted(map) {
+        for (k, stored) in crate::value::dict_entries_ordered(map) {
             crate::interpreter::check_execution_limit()?;
             // A two-param lambda takes (key, value); a one-param lambda takes
             // the value alone, matching `filter`/`map_values` above.
@@ -505,6 +517,12 @@ pub(crate) use interpreter_helpers_option_result::*;
 
 /// Convert a value to an iterable vector (for comprehensions)
 pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
+    // `List<T>` is a plain class whose payload is the `items` array.
+    if val.aggregate_class() == Some("List") {
+        if let Some(items @ (Value::Array(_) | Value::FrozenArray(_))) = val.aggregate_field("items") {
+            return iter_to_vec(&items);
+        }
+    }
     match val {
         Value::Array(arr) => Ok(arr.to_vec()),
         Value::FrozenArray(arr) => Ok(arr.to_vec()),
@@ -527,9 +545,13 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
         // -- `for (k, v) in dict` must visit entries in the same order those do.
         Value::Dict(map) => {
             // A layered module value iterates its whole visible surface.
+            let is_namespace = crate::interpreter::is_module_namespace_dict(map);
             let flat = crate::interpreter::module_dict_flat(map);
             let map = flat.as_ref().unwrap_or(map);
-            Ok(crate::value::dict_entries_sorted(map)
+            if is_namespace {
+                crate::interpreter::interpreter_call::gate_namespace_private_entries(map)?;
+            }
+            Ok(crate::value::dict_entries_ordered(map)
             .into_iter()
             .map(|(k, v)| {
                 Value::Tuple(vec![
@@ -539,7 +561,7 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
             })
             .collect())
         }
-        Value::FrozenDict(map) => Ok(crate::value::dict_entries_sorted(map)
+        Value::FrozenDict(map) => Ok(crate::value::dict_entries_ordered(map)
             .into_iter()
             .map(|(k, v)| {
                 Value::Tuple(vec![
@@ -650,5 +672,42 @@ mod is_condition_present_tests {
         let cond = Expr::Integer(0);
         assert!(!is_condition_present(&cond, &Value::Int(0)));
         assert!(is_condition_present(&cond, &Value::Int(1)));
+    }
+}
+
+#[cfg(test)]
+mod iter_to_vec_list_tests {
+    use super::*;
+
+    // Regression for interp_for_over_list_generic_2026-07-02 after the
+    // 2026-11-04 ClassInstance storage flip: a `List<T>` value is a
+    // `Value::ClassInstance` (not `Value::Object`) whose payload is the plain
+    // `items` array. Iteration must yield those elements -- the defect raised
+    // "cannot iterate over this type: ClassInstance" on the interpreter lane.
+    // Acceptance spec: test/01_unit/compiler/interpreter/for_over_list_class_spec.spl.
+    #[test]
+    fn iter_to_vec_iterates_class_instance_list_items() {
+        let items = Value::array(vec![Value::Int(1), Value::Int(2), Value::Int(4)]);
+        let mut fields = HashMap::new();
+        fields.insert("items".to_string(), items);
+        let list = Value::aggregate("List".to_string(), fields, false);
+        assert!(
+            matches!(list, Value::ClassInstance(_)),
+            "List aggregate should use ClassInstance storage by default (2026-11-04 flip)"
+        );
+
+        let values = iter_to_vec(&list).expect("List<T> ClassInstance must be iterable");
+        assert_eq!(values, vec![Value::Int(1), Value::Int(2), Value::Int(4)]);
+    }
+
+    #[test]
+    fn iter_to_vec_rejects_non_list_class_instance() {
+        let mut fields = HashMap::new();
+        fields.insert("v".to_string(), Value::Int(1));
+        let other = Value::aggregate("Widget".to_string(), fields, false);
+        assert!(
+            iter_to_vec(&other).is_err(),
+            "an arbitrary ClassInstance is not iterable"
+        );
     }
 }

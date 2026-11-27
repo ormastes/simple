@@ -1,0 +1,125 @@
+# Neutral durable accounting records, never authenticated enrollment or grants.
+# Only an actual machine owner may commit them after verifying its proof/pins.
+# One immutable whole-scope delegation stays charged across expiry and restart.
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.contracts.orchestration.host_capacity_v1.{HostCapacityV1,
+    HostCapacityLedgerV1, HostReservationV1, HostReservationStateV1,
+    HostAvailableCapacityV1, host_available_capacity_v1}
+use std.nogc_sync_mut.database.wal.{WalEntry, WalEntryType}
+
+pub struct MachineManagedScopeRecordV1:
+    policy_digest: text
+    authority_policy_digest: text
+    issuer_id: text
+    enrollment_digest: text
+    credential_digest: text
+    physical_host_id: text
+    native_machine_id: text
+    service_scope_id: text
+    backend: text
+    provider_identity_digest: text
+    provider_generation: i64
+    cpu_millis: i64
+    memory_bytes: i64
+    expires_at: i64
+
+fn machine_claim_identity_v1(value: text) -> bool:
+    if value.byte_len() < 1 or value.byte_len() > 256: return false
+    for ch in value.chars():
+        val scalar = ch.char_code_at(0)
+        if scalar < 32 or (scalar >= 127 and scalar <= 159): return false
+    true
+
+pub fn machine_managed_scope_record_bytes_v1(record: MachineManagedScopeRecordV1) -> Result<text, text>:
+    for digest in [record.policy_digest, record.authority_policy_digest, record.enrollment_digest,
+            record.credential_digest, record.provider_identity_digest]:
+        if not builder_digest_valid_v1(digest): return Err("machine-managed-scope-record-digest")
+    if not builder_identifier_valid_v1(record.physical_host_id) or not builder_identifier_valid_v1(record.service_scope_id):
+        return Err("machine-managed-scope-record-identifier")
+    if not machine_claim_identity_v1(record.native_machine_id) or not machine_claim_identity_v1(record.issuer_id):
+        return Err("machine-managed-scope-record-identity")
+    if not ["linux-podman", "windows-docker-process"].contains(record.backend):
+        return Err("machine-managed-scope-record-backend")
+    if (record.provider_generation < 1 or record.cpu_millis < 1 or record.cpu_millis > 64000 or
+            record.memory_bytes < 1 or record.memory_bytes > 1125899906842624 or record.expires_at < 1):
+        return Err("machine-managed-scope-record-resource")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("machine-managed-scope"), "mode": SdnValue.String("managed"),
+        "policyDigest": SdnValue.String(record.policy_digest),
+        "authorityPolicyDigest": SdnValue.String(record.authority_policy_digest),
+        "issuerId": SdnValue.String(record.issuer_id),
+        "enrollmentDigest": SdnValue.String(record.enrollment_digest),
+        "credentialDigest": SdnValue.String(record.credential_digest),
+        "physicalHostId": SdnValue.String(record.physical_host_id),
+        "nativeMachineId": SdnValue.String(record.native_machine_id),
+        "serviceScopeId": SdnValue.String(record.service_scope_id),
+        "backend": SdnValue.String(record.backend),
+        "providerIdentityDigest": SdnValue.String(record.provider_identity_digest),
+        "providerGeneration": SdnValue.Int(record.provider_generation),
+        "cpuMillis": SdnValue.Int(record.cpu_millis), "memoryBytes": SdnValue.Int(record.memory_bytes),
+        "expiresAt": SdnValue.Int(record.expires_at)}
+    # Canonical dict values escape text newlines; WAL data itself has no LF.
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+pub fn machine_managed_scope_reservation_v1(record: MachineManagedScopeRecordV1) -> Result<HostReservationV1, text>:
+    val source = machine_managed_scope_record_bytes_v1(record)?
+    val digest = sha256_text(source)
+    Ok(HostReservationV1(id: "managed-" + record.enrollment_digest,
+        operation_id: "enrollment-" + record.credential_digest, payload_digest: digest,
+        service_scope_id: record.service_scope_id, assignment_generation: record.provider_generation,
+        nonce: digest, cpu_millis: record.cpu_millis, memory_bytes: record.memory_bytes,
+        exclusive_devices: [], prepare_deadline_ms: record.expires_at, state: HostReservationStateV1.Uncertain))
+
+pub fn machine_managed_scope_capacity_v1(capacity: HostCapacityV1,
+        record: MachineManagedScopeRecordV1) -> Result<HostAvailableCapacityV1, text>:
+    val reservation = machine_managed_scope_reservation_v1(record)?
+    if capacity.physical_host_id != record.physical_host_id or capacity.provider_generation != record.provider_generation:
+        return Err("machine-managed-scope-capacity-binding")
+    # Reuse the existing subtract-before-sum accounting validator. False means
+    # no native continuity/absence evidence is fabricated by this projection.
+    host_available_capacity_v1(HostCapacityLedgerV1(capacity: capacity, revision: 1,
+        continuity_proven: false, reservations: [reservation]))
+
+fn machine_managed_scope_reservation_bytes_v1(record: MachineManagedScopeRecordV1) -> Result<text, text>:
+    val row = machine_managed_scope_reservation_v1(record)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("machine-managed-reservation"), "state": SdnValue.String("uncertain"),
+        "id": SdnValue.String(row.id), "operationId": SdnValue.String(row.operation_id),
+        "payloadDigest": SdnValue.String(row.payload_digest), "serviceScopeId": SdnValue.String(row.service_scope_id),
+        "assignmentGeneration": SdnValue.Int(row.assignment_generation), "nonce": SdnValue.String(row.nonce),
+        "cpuMillis": SdnValue.Int(row.cpu_millis), "memoryBytes": SdnValue.Int(row.memory_bytes),
+        "prepareDeadlineMs": SdnValue.Int(row.prepare_deadline_ms), "exclusiveDevices": SdnValue.Array([])}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+pub fn machine_managed_scope_entries_v1(record: MachineManagedScopeRecordV1,
+        authorized_at: i64) -> Result<[WalEntry], text>:
+    if authorized_at < 1 or authorized_at >= record.expires_at:
+        return Err("machine-managed-scope-authorization-clock")
+    val scope = machine_managed_scope_record_bytes_v1(record)?
+    val reservation = machine_managed_scope_reservation_bytes_v1(record)?
+    Ok([WalEntry(0, WalEntryType.Insert, "machine-container-scope-v1", "physical-scope", scope, authorized_at),
+        WalEntry(0, WalEntryType.Insert, "machine-container-reservations-v1",
+            "managed-" + record.enrollment_digest, reservation, authorized_at)])
+
+pub fn machine_managed_scope_replay_v1(entries: [WalEntry],
+        record: MachineManagedScopeRecordV1) -> Result<bool, text>:
+    if entries.len() != 2: return Err("machine-managed-scope-unknown-record-count")
+    val scope = machine_managed_scope_record_bytes_v1(record)?
+    val reservation = machine_managed_scope_reservation_bytes_v1(record)?
+    for index in 0..2:
+        val row = entries[index]
+        if (row.sequence != index + 1 or row.entry_type != WalEntryType.Insert or
+                row.timestamp < 1 or row.timestamp >= record.expires_at):
+            return Err("machine-managed-scope-record-history")
+    if entries[0].timestamp != entries[1].timestamp:
+        return Err("machine-managed-scope-record-history")
+    if entries[0].table_name != "machine-container-scope-v1" or entries[0].row_key != "physical-scope" or entries[0].data != scope:
+        return Err("machine-managed-scope-binding-differs")
+    if (entries[1].table_name != "machine-container-reservations-v1" or
+            entries[1].row_key != "managed-" + record.enrollment_digest or entries[1].data != reservation):
+        return Err("machine-managed-scope-reservation-differs")
+    # This confirms exact committed accounting data, never a grant or absence.
+    Ok(true)

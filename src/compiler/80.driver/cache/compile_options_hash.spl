@@ -1,9 +1,11 @@
+use compiler.common.driver_compile_options.{TargetBuildProfileV1, TargetDebugRequestV1, TargetTraceResolutionV1, NormalizedTargetProfileV1, target_profile_identity_text_v1}
 # CompileOptionsHash — Backend + compile options hash for SMF validation
 #
 # Stored in SMF header reserved[0..16] bytes (backward-compatible).
 # Old readers ignore reserved bytes; new readers validate backend match.
 #
 # Hash includes: backend, opt_level, target_arch, debug_info, gc_off, release, profile, allowed_families
+# (+ optional collection/link/library-mode/xray components, appended only when non-default)
 # Combined hash = first 8 bytes of sha256 over a canonical, sorted,
 # length-prefixed encoding (see _coh_component). Old-format hashes
 # (rt_hash_text era) and the legacy all-zero hash simply mismatch and
@@ -102,14 +104,14 @@ fn _coh_sha256_prefix_i64(canonical: text) -> i64:
     var hash: i64 = 0
     var i = 0
     while i < 8:
-        hash = hash | (digest[i] << (8 * i))
+        hash = hash | ((digest[i] as i64) << (8 * i))
         i = i + 1
     # Never collide with the legacy "missing options" all-zero hash
     if hash == 0:
         hash = 1
     hash
 
-fn compile_options_hash_compute(backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool, profile: text, allowed_families: [text], native_libraries: [text] = [], native_library_paths: [text] = [], native_linker_flags: [text] = [], collection_policy: text = "moderate", collection_memory_budget_bytes: i64 = -1, native_target: text = "", representation_context_identity: text = "") -> CompileOptionsHash:
+fn compile_options_hash_compute(backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool, profile: text, allowed_families: [text], native_libraries: [text] = [], native_library_paths: [text] = [], native_linker_flags: [text] = [], collection_policy: text = "moderate", collection_memory_budget_bytes: i64 = -1, native_target: text = "", representation_context_identity: text = "", library_mode: text = "", xray_enabled: bool = false, target_profile_identity: text = "") -> CompileOptionsHash:
     # Build canonical string for hashing: fixed component order, each component
     # length-prefixed, set-valued inputs sorted lexicographically first.
     val bk = backend_text_to_kind(backend)
@@ -122,7 +124,13 @@ fn compile_options_hash_compute(backend: text, opt_level: i64, release: bool, de
     for family in sorted_families:
         families_str = families_str + "{family.len()}:{family}"
 
-    var canonical = _coh_component("backend", backend)
+    # Version the changed profile semantics; legacy optimization-implies-release
+    # keys cannot be reused under the independent target-profile contract.
+    val default_profile = if release: TargetBuildProfileV1.Release else: TargetBuildProfileV1.Development
+    val ordinary = NormalizedTargetProfileV1(default_profile, TargetDebugRequestV1.Default, TargetTraceResolutionV1.Disabled)
+    val profile_identity = if target_profile_identity == "": target_profile_identity_text_v1(ordinary) else: target_profile_identity
+    var canonical = _coh_component("target-profile-v1", profile_identity)
+    canonical = canonical + _coh_component("backend", backend)
     canonical = canonical + _coh_component("opt", "{opt}")
     canonical = canonical + _coh_component("release", rel_str)
     canonical = canonical + _coh_component("debug", dbg_str)
@@ -152,6 +160,13 @@ fn compile_options_hash_compute(backend: text, opt_level: i64, release: bool, de
         canonical = canonical + _coh_component("native-libraries", libraries)
         canonical = canonical + _coh_component("native-library-paths", paths)
         canonical = canonical + _coh_component("native-linker-flags", flags)
+    if library_mode != "":
+        canonical = canonical + _coh_component("library-mode-v1", library_mode)
+    # XRay static switch: appended last and only when on. Off adds no XRay
+    # component within this versioned target-profile encoding.
+    if xray_enabled:
+        canonical = canonical + _coh_component("xray-v1", "on")
+        canonical = canonical + _coh_component("xray-semantic-row", "v1")
     val hash = _coh_sha256_prefix_i64(canonical)
 
     # Build flags bitfield

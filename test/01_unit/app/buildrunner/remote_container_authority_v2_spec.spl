@@ -1,0 +1,144 @@
+"""
+## Purpose and audience
+Pins the shared remote-container completion authority body `remote_container_completion_authority_v2`
+(`src/app/buildrunner/remote_container_authority_v2.spl`), the checks the V3 completion verify and the Host-signed
+reset-failure receipt verify both run: original grant and approval, scoped execution-host key, separate roles, the exact
+task and request, assignment and controller fences, host and operation, authorization digests and time.
+Written for owners of the remote build route.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when rewritten, 2026-11-20).
+## Compatibility and limitations
+milestone_0060 retired the V2 completion record, codec and verify; the signature, observation-digest and wire cases
+those carried are pinned for V3 by `remote_container_authority_v3_spec.spl` and `remote_container_session_v3_spec.spl`.
+The claim is passed directly, so no case here needs a host signature.
+## Verification guidance and troubleshooting
+Each refusal names the exact error string; a changed string or a changed check order is a contract change.
+"""
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.sha256_text
+use app.buildrunner.remote_container_authority_v2.{RemoteContainerAuthorityClaimV2,
+    RemoteContainerAuthorityExpectedV2, remote_container_completion_authority_v2}
+use test.fixtures.buildrunner.remote_authority_v1.{RemoteAuthorityFixtureV1,
+    remote_authority_fixture_v1}
+
+struct ContainerAuthorityFixtureV2:
+    original: RemoteAuthorityFixtureV1
+    claim: RemoteContainerAuthorityClaimV2
+    expected: RemoteContainerAuthorityExpectedV2
+
+fn container_fixture_v2() -> ContainerAuthorityFixtureV2:
+    val original = remote_authority_fixture_v1()
+    val claim = RemoteContainerAuthorityClaimV2(task_identity: original.expected.task_identity,
+        host_id: original.expected.host_id, assignment_digest: original.expected.assignment_digest,
+        controller_epoch: original.expected.controller_epoch, operation_id: original.expected.operation_id,
+        request_digest: original.completion.request_digest, grant_digest: original.completion.grant_digest,
+        signer_id: original.host_key.identity, key_revision: original.host_key.revision, completed_at: 99)
+    val expected = RemoteContainerAuthorityExpectedV2(task_identity: original.expected.task_identity,
+        host_id: original.expected.host_id, assignment_digest: original.expected.assignment_digest,
+        controller_epoch: original.expected.controller_epoch, operation_id: original.expected.operation_id)
+    ContainerAuthorityFixtureV2(original, claim, expected)
+
+fn container_error_v2(fixture: ContainerAuthorityFixtureV2, now: i64 = 100,
+        policy_revision: i64 = 4, revocation_epoch: i64 = 2, session_generation: i64 = 3) -> text:
+    val original = fixture.original
+    match remote_container_completion_authority_v2(fixture.claim, original.signed, original.approval,
+            original.issuer, original.approver, original.host_key, original.request, original.task,
+            fixture.expected, now, policy_revision, revocation_epoch, session_generation):
+        case Ok(_): ""
+        case Err(reason): reason
+
+describe "Container completion shared authority body":
+    it "admits the exact original authority bindings":
+        expect(container_error_v2(container_fixture_v2())).to_equal("")
+
+    it "requires current scoped host credentials and separate host issuer approver roles":
+        val base = container_fixture_v2()
+        var revoked = base
+        revoked.original.host_key.revoked = true
+        expect(container_error_v2(revoked)).to_equal("AUTHORITY_KEY_REVOKED")
+        var role = base
+        role.original.host_key.role = "human-approver"
+        var rotated = base
+        rotated.original.host_key.revision = 2
+        var signer = base
+        signer.claim.signer_id = "host_other"
+        for fixture in [role, rotated, signer]:
+            expect(container_error_v2(fixture)).to_equal("AUTHORITY_KEY_MISMATCH")
+        var scoped = base
+        scoped.original.host_key.host_id = "another_worker"
+        expect(container_error_v2(scoped)).to_equal("AUTHORITY_SCOPE_DENIED")
+        for key in [base.original.issuer.public_key, base.original.approver.public_key]:
+            var fixture = base
+            fixture.original.host_key.public_key = key
+            expect(container_error_v2(fixture)).to_equal("CONTAINER_COMPLETION_ROLES_NOT_SEPARATE")
+
+    it "revalidates original issuer and approval signatures":
+        val base = container_fixture_v2()
+        var issuer = base
+        issuer.original.signed.signature[0] = issuer.original.signed.signature[0] ^ 1u8
+        expect(container_error_v2(issuer)).to_equal("ISSUER_SIGNATURE_INVALID")
+        var approval = base
+        approval.original.approval.signature[0] = approval.original.approval.signature[0] ^ 1u8
+        expect(container_error_v2(approval)).to_equal("APPROVAL_SIGNATURE_INVALID")
+
+    it "binds the exact original task and request rather than replacement claims":
+        val base = container_fixture_v2()
+        var args = base.original.task
+        args.args = ["compile", "different.spl"]
+        var source = base.original.task
+        source.source_digest = sha256_text("different source")
+        var toolchain = base.original.task
+        toolchain.toolchain_digest = sha256_text("different toolchain")
+        var attempt = base.original.task
+        attempt.attempt = 2
+        var inputs = base.original.task
+        inputs.inputs = []
+        var outputs = base.original.task
+        outputs.outputs = ["different.o"]
+        for task in [args, source, toolchain, attempt, inputs, outputs]:
+            var fixture = base
+            fixture.original.task = task
+            expect(container_error_v2(fixture)).to_equal("CONTAINER_COMPLETION_TASK_MISMATCH")
+        var claimed = base
+        claimed.claim.task_identity = sha256_text("replacement task identity")
+        expect(container_error_v2(claimed)).to_equal("CONTAINER_COMPLETION_TASK_MISMATCH")
+        var request = base
+        request.original.request.payload_digest = sha256_text("replacement request task")
+        expect(container_error_v2(request)).to_equal("APPROVAL_PAYLOAD_MISMATCH")
+        var digest = base
+        digest.claim.request_digest = sha256_text("replacement request digest")
+        expect(container_error_v2(digest)).to_equal("CONTAINER_COMPLETION_AUTHORIZATION_MISMATCH")
+        var grant = base
+        grant.claim.grant_digest = sha256_text("replacement grant digest")
+        expect(container_error_v2(grant)).to_equal("CONTAINER_COMPLETION_AUTHORIZATION_MISMATCH")
+
+    it "rejects stale assignment and controller fences or different host and operation":
+        val base = container_fixture_v2()
+        var epoch = base.expected
+        epoch.controller_epoch = 8
+        var assignment = base.expected
+        assignment.assignment_digest = sha256_text("replacement assignment")
+        for expected in [epoch, assignment]:
+            var fixture = base
+            fixture.expected = expected
+            expect(container_error_v2(fixture)).to_equal("CONTAINER_COMPLETION_ASSIGNMENT_STALE")
+        var host = base
+        host.claim.host_id = "worker_2"
+        expect(container_error_v2(host)).to_equal("CONTAINER_COMPLETION_HOST_MISMATCH")
+        var operation = base
+        operation.claim.operation_id = "operation_2"
+        expect(container_error_v2(operation)).to_equal("CONTAINER_COMPLETION_OPERATION_MISMATCH")
+
+    it "requires current time policy revocation and session context":
+        val base = container_fixture_v2()
+        var future = base
+        future.claim.completed_at = 101
+        expect(container_error_v2(future)).to_equal("CONTAINER_COMPLETION_TIME_INVALID")
+        expect(container_error_v2(base, 201)).to_equal("GRANT_EXPIRED")
+        var expired = base
+        expired.original.host_key.expires_at = 99
+        expect(container_error_v2(expired)).to_equal("AUTHORITY_KEY_EXPIRED")
+        expect(container_error_v2(base, 100, 5)).to_equal("POLICY_STALE")
+        expect(container_error_v2(base, 100, 4, 3)).to_equal("GRANT_REVOKED")
+        expect(container_error_v2(base, 100, 4, 2, 4)).to_equal("SESSION_STALE")

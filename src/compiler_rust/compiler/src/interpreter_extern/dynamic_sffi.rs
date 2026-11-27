@@ -1129,6 +1129,11 @@ fn call_fptr(fptr: usize, name: &str, evaluated_args: &[Value]) -> Result<Value,
             }
         }
     };
+    // Dynamically dispatched libc calls (link, unlink, fopen, ...) set the
+    // real errno; publish it to the interpreter's errno cell before any Rust
+    // work can clobber it, so `__error`/`__errno_location` readers see it.
+    #[cfg(unix)]
+    super::posix_abi::capture_errno();
 
     Ok(i64_to_value(result))
 }
@@ -1413,6 +1418,25 @@ mod tests {
         assert_eq!(
             bytes.byte_array_view().expect("packed storage"),
             &[0xAA, 0xAA, 0, 7, 14, 0xAA, 0xAA, 0xAA]
+        );
+    }
+
+    #[test]
+    fn bounded_out_buffer_from_zeroed_constructor_stays_packed() {
+        // `bytes_zeroed` (std.nogc_sync_mut.sffi.dynamic) is backed by
+        // `rt_byte_array_new_len`: the buffer must arrive packed and come back
+        // packed, never widened into a boxed element array.
+        let zeroed = super::super::sffi_array::rt_byte_array_new_len_fn(&[Value::Int(8)])
+            .expect("zeroed constructor");
+        assert!(matches!(zeroed, Value::ByteArray(_)), "constructor yields packed storage");
+        assert_eq!(zeroed.byte_array_view().expect("packed"), &[0u8; 8]);
+        let (rc, bytes, len) = into_bytes_case(zeroed, 0, 8);
+        assert_eq!(rc, Value::Int(0));
+        assert_eq!(len, Value::Int(4096));
+        assert!(matches!(bytes, Value::ByteArray(_)), "writeback keeps packed storage");
+        assert_eq!(
+            bytes.byte_array_view().expect("packed storage is preserved"),
+            &[0, 7, 14, 21, 28, 35, 42, 49]
         );
     }
 

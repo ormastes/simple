@@ -1,3 +1,12 @@
+# @platform: baremetal
+#
+# Bare-metal replay: a mode flag and the (kind, timestamp, val_a, val_b)
+# event ring. Value reads of its users (realtime random and io reads) run on
+# the portable semantic replay core std.replay.portable_replay (DHR P6), so
+# the log is this ring plus the realtime core session (PR_SCOPE_REALTIME);
+# init and completeness cover both, and leave other core sessions alone.
+
+use std.replay.portable_replay.{PR_SCOPE_REALTIME, portable_replay_reset_scope, portable_replay_complete}
 
 var g_bm_mode: i32 = 0
 
@@ -15,14 +24,21 @@ var ring_values_a: [i64] = []
 var ring_values_b: [i64] = []
 var ring_head: i32 = 0
 var ring_count: i32 = 0
+var ring_last: i32 = -1
+var ring_overwritten: i64 = 0
 
 fn bm_ring_init():
+    """Start a fresh log: the event ring and the core session holding the
+    value reads (both allocated here, never on replay)."""
+    portable_replay_reset_scope(PR_SCOPE_REALTIME)
     ring_kinds = []
     ring_timestamps = []
     ring_values_a = []
     ring_values_b = []
     ring_head = 0
     ring_count = 0
+    ring_last = -1
+    ring_overwritten = 0
     var i = 0
     while i < RING_CAP:
         ring_kinds.push(0)
@@ -35,6 +51,8 @@ fn bm_ring_push(kind: i64, timestamp: i64, val_a: i64, val_b: i64):
     if ring_kinds.len() == 0:
         bm_ring_init()
     val tail = (ring_head + ring_count) % RING_CAP
+    if tail == ring_last:
+        ring_last = -1
     ring_kinds[tail] = kind
     ring_timestamps[tail] = timestamp
     ring_values_a[tail] = val_a
@@ -43,32 +61,56 @@ fn bm_ring_push(kind: i64, timestamp: i64, val_a: i64, val_b: i64):
         ring_count = ring_count + 1
     else:
         ring_head = (ring_head + 1) % RING_CAP
+        ring_overwritten = ring_overwritten + 1
 
 fn bm_ring_pop_kind() -> i64:
     if ring_count == 0:
+        ring_last = -1
         return 0
+    ring_last = ring_head
     val v = ring_kinds[ring_head]
     ring_head = (ring_head + 1) % RING_CAP
     ring_count = ring_count - 1
     v
 
-fn bm_ring_pop_timestamp() -> i64:
+# Value readers return fields of the event consumed by the last pop_kind, so
+# kind and values always belong to ONE event (before this, pop_kind advanced
+# the head and the readers returned the NEXT event's data). With no pop yet
+# they peek at the head.
+fn bm_ring_current_slot() -> i32:
+    if ring_last >= 0:
+        return ring_last
     if ring_count == 0:
+        return -1
+    ring_head
+
+fn bm_ring_pop_timestamp() -> i64:
+    val slot = bm_ring_current_slot()
+    if slot < 0:
         return 0
-    val v = ring_timestamps[ring_head]
-    v
+    ring_timestamps[slot]
 
 fn bm_ring_pop_val_a() -> i64:
-    if ring_count == 0:
+    val slot = bm_ring_current_slot()
+    if slot < 0:
         return 0
-    val v = ring_values_a[ring_head]
-    v
+    ring_values_a[slot]
 
 fn bm_ring_pop_val_b() -> i64:
-    if ring_count == 0:
+    val slot = bm_ring_current_slot()
+    if slot < 0:
         return 0
-    val v = ring_values_b[ring_head]
-    v
+    ring_values_b[slot]
 
 fn bm_ring_count() -> i64:
     ring_count as i64
+
+# A full ring overwrites its oldest event; the surviving events are then a
+# suffix with the prefix missing, which must not be replayed as complete
+# (DHR RR-05). The bare-metal log is the ring plus the core-held value
+# reads, so completeness also requires the core log whole (no record drop).
+fn bm_ring_overwritten_count() -> i64:
+    ring_overwritten
+
+fn bm_ring_complete() -> bool:
+    ring_overwritten == 0 and portable_replay_complete(PR_SCOPE_REALTIME)

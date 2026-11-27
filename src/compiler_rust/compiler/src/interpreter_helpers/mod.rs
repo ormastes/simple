@@ -37,10 +37,11 @@ pub(crate) use collections::{
 
 pub(crate) use patterns::{
     bind_for_pattern, bind_for_pattern_value, bind_pattern, bind_pattern_value, handle_functional_update,
-    handle_method_call_with_self_update, restore_pattern_scope, save_pattern_scope, sync_flat_global,
+    handle_method_call_with_self_update, owns_global_binding, release_global_aliases, restore_pattern_scope,
+    save_pattern_scope, sync_flat_global,
 };
 
 pub(crate) use utilities::{
-    comprehension_iterate, control_to_value, normalize_index, slice_collection, spawn_future_with_callable,
-    spawn_future_with_callable_and_env, spawn_future_with_expr, with_effect_context,
+    comprehension_for_each, control_to_value, normalize_index, slice_collection, slice_collection_by,
+    spawn_future_with_callable, spawn_future_with_callable_and_env, spawn_future_with_expr, with_effect_context,
 };

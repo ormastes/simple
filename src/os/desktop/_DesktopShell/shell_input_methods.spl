@@ -3,6 +3,13 @@ use os.desktop.shell.*
 
 impl DesktopShell:
     me apply_wm_runtime_command_to_live_shell(command: WmRuntimeDispatchCommand):
+        self.apply_wm_runtime_command_at_pointer(
+            command, self.compositor.cursor.x, self.compositor.cursor.y
+        )
+
+    me apply_wm_runtime_command_at_pointer(
+        command: WmRuntimeDispatchCommand, pointer_x: i32, pointer_y: i32
+    ):
         if command.kind == "launcher_launch":
             val display_name = self.pinned_display_name(command.app_id)
             self.launch_app(
@@ -31,13 +38,25 @@ impl DesktopShell:
                     else:
                         next_compositor.focus_window(window_id.to_i32())
                     self.compositor = next_compositor
+                    if self.wm.initialized and self.wm.commit_focus(window_id.to_u64()):
+                        self.wm.send_focus_changed(window_id.to_u64(), true)
             return
         if command.kind == "window_drag_begin":
             val window_id = command.window_id.to_i64()
             if window_id > 0:
-                self.compositor.focus_window(window_id.to_i32())
-                self.compositor.dragging = true
-                self.compositor.drag_window_id = window_id.to_i32()
+                var next_compositor = self.compositor
+                val wid = window_id.to_i32()
+                next_compositor.focus_window(wid)
+                val focused_idx = next_compositor.surface_index(window_id.to_u64())
+                if focused_idx >= 0:
+                    val s = next_compositor.surfaces[focused_idx]
+                    next_compositor.drag_offset_x = pointer_x - s.x
+                    next_compositor.drag_offset_y = pointer_y - s.y
+                next_compositor.dragging = true
+                next_compositor.drag_window_id = wid
+                self.compositor = next_compositor
+                if self.wm.initialized and self.wm.commit_focus(window_id.to_u64()):
+                    self.wm.send_focus_changed(window_id.to_u64(), true)
             return
         if command.kind == "window_minimize":
             val window_id = command.window_id.to_i64()
@@ -49,7 +68,14 @@ impl DesktopShell:
                 var next_compositor = self.compositor
                 if next_compositor.surface_index(window_id.to_u64()) >= 0:
                     next_compositor.minimize_window(window_id.to_u64())
+                    val new_focused_idx = next_compositor.focused_idx
+                    var new_focused_id: u64 = 0u64
+                    if new_focused_idx >= 0 and new_focused_idx < next_compositor.surfaces.len():
+                        new_focused_id = next_compositor.surfaces[new_focused_idx].id.to_u64()
                     self.compositor = next_compositor
+                    if (new_focused_id > 0u64 and self.wm.initialized and
+                        self.wm.commit_focus(new_focused_id)):
+                        self.wm.send_focus_changed(new_focused_id, true)
             return
         if command.kind == "window_toggle_maximize":
             val window_id = command.window_id.to_i64()
@@ -64,6 +90,8 @@ impl DesktopShell:
                     else:
                         next_compositor.maximize_window(window_id.to_u64())
                     self.compositor = next_compositor
+                    if self.wm.initialized and self.wm.commit_focus(window_id.to_u64()):
+                        self.wm.send_focus_changed(window_id.to_u64(), true)
             return
         if command.kind == "window_close":
             val window_id = command.window_id.to_i64()
@@ -125,7 +153,7 @@ impl DesktopShell:
         val taskbar = self.runtime_taskbar_model()
         val command = simpleos_wm_pointer_runtime_command(scene, taskbar, x, y, button, kind, 1000, self.clock_text, 2)
         self.wm_runtime_state = simpleos_wm_apply_pointer(self.wm_runtime_state, scene, taskbar, x, y, button, kind, 1000, self.clock_text, 2)
-        self.apply_wm_runtime_command_to_live_shell(command)
+        self.apply_wm_runtime_command_at_pointer(command, x, y)
         var handled_text = "false"
         if command.handled:
             handled_text = "true"
@@ -183,7 +211,25 @@ impl DesktopShell:
         self.compositor = pending_compositor
         val button: text = wm_pointer_button_from_code(button_code)
         val kind: text = wm_pointer_kind_from_code(kind_code)
-        self.handle_wm_pointer_event_loop_step(x, y, button, kind)
+        val marker = self.handle_wm_pointer_event_loop_step(x, y, button, kind)
+        val wm_consumed_click = (
+            marker.contains("command=window_close ") or
+            marker.contains("command=window_minimize ") or
+            marker.contains("command=window_toggle_maximize ") or
+            marker.contains("command=window_drag_begin ") or
+            marker.contains("command=launcher_launch ") or
+            marker.contains("command=pin_app ") or
+            marker.contains("command=unpin_app ") or
+            marker.contains("command=command_lane") or
+            marker.contains("command=desktop_background ") or
+            (marker.contains("command=window_focus ") and marker.contains("target=taskbar"))
+        )
+        val allow_client_pointer = (
+            not wm_consumed_click or
+            (kind == "up" and self.compositor.gui_pointer_capture_window_id > 0)
+        )
+        if not allow_client_pointer:
+            return
         var routed_compositor = self.compositor
         val gui_handled = routed_compositor.dispatch_gui_pointer_event(
             target_window_id, x, y, button, kind
@@ -251,7 +297,9 @@ impl DesktopShell:
 
         val shortcut_key = self.compositor.consume_pending_shortcut()
         if shortcut_key != "":
-            self.handle_shortcut("Ctrl+Alt", shortcut_key.lower(), baremetal)
+            val key_lower = shortcut_key.lower()
+            if not self._dispatch_shortcut_match("Ctrl+Alt", key_lower, baremetal):
+                self._dispatch_shortcut_match("Meta", key_lower, baremetal)
 
     me select_next_process():
         val rows = _process_rows()

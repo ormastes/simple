@@ -28,7 +28,8 @@ use compiler.driver.driver_build.native_mir_shard.{
     native_mir_shard_count_of_v1, native_mir_shard_claim_cap_v1,
     native_mir_shard_claim_v1, native_mir_shard_publish_pass_v1,
     native_mir_shard_link_inputs_v1, native_mir_shard_lpt_order_v1,
-    native_mir_shard_outcome_v1}
+    native_mir_shard_outcome_v1, native_mir_shard_outcome_after_hir_errors_v1,
+    native_mir_shard_record_hir_compile_errors_v1, native_mir_shard_hir_compile_errors_recorded_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory}
 
 fn fresh_ledger(tag: text) -> text:
@@ -85,8 +86,8 @@ describe "MIR shard link admission":
         assert_true(hir_shard_recovery_inventory(queue, "src-id", ["mod.a", "mod.b"]))
         assert_equal(native_mir_shard_claim_v1(queue, "mod.a", "src-id"), 1)
         assert_equal(native_mir_shard_claim_v1(queue, "mod.b", "src-id"), 1)
-        assert_true(native_mir_shard_publish_pass_v1(queue, "mod.a", object_path, 3, 1))
-        assert_true(native_mir_shard_publish_pass_v1(queue, "mod.b", "", 0, 0))
+        assert_true(native_mir_shard_publish_pass_v1(queue, "mod.a", object_path, 3, 1, "cap-a"))
+        assert_true(native_mir_shard_publish_pass_v1(queue, "mod.b", "", 0, 0, ""))
         val admitted = native_mir_shard_link_inputs_v1(queue, "src-id")
         assert_true(admitted.is_ok())
         val inputs = admitted.unwrap()
@@ -94,6 +95,8 @@ describe "MIR shard link admission":
         assert_equal(inputs.object_files.len(), 1)
         assert_equal(inputs.objectless, 1)
         assert_equal(inputs.functions, 3)
+        assert_equal(inputs.capsule_identities[0], "cap-a")
+        assert_equal(inputs.objectless_modules[0], "mod.b")
         val _cleanup = dir_remove_all(queue)
 
     it "refuses a ledger with a module that did not PASS":
@@ -103,7 +106,7 @@ describe "MIR shard link admission":
         val _owner = env_set("SIMPLE_MIR_SHARD_OWNER", "0/1@0")
         assert_true(hir_shard_recovery_inventory(queue, "src-id", ["mod.a", "mod.b"]))
         assert_equal(native_mir_shard_claim_v1(queue, "mod.a", "src-id"), 1)
-        assert_true(native_mir_shard_publish_pass_v1(queue, "mod.a", "", 0, 0))
+        assert_true(native_mir_shard_publish_pass_v1(queue, "mod.a", "", 0, 0, ""))
         assert_false(native_mir_shard_link_inputs_v1(queue, "src-id").is_ok())
         val _cleanup = dir_remove_all(queue)
 
@@ -114,7 +117,7 @@ describe "MIR shard link admission":
         val _owner = env_set("SIMPLE_MIR_SHARD_OWNER", "0/1@0")
         assert_true(hir_shard_recovery_inventory(queue, "src-id", ["mod.a"]))
         assert_equal(native_mir_shard_claim_v1(queue, "mod.a", "src-id"), 1)
-        assert_true(native_mir_shard_publish_pass_v1(queue, "mod.a", "", 0, 0))
+        assert_true(native_mir_shard_publish_pass_v1(queue, "mod.a", "", 0, 0, ""))
         assert_false(native_mir_shard_link_inputs_v1(queue, "other-id").is_ok())
         val _cleanup = dir_remove_all(queue)
 
@@ -139,3 +142,28 @@ describe "MIR shard coordinator outcome":
         assert_equal(native_mir_shard_outcome_v1(1, 0, 3, true), "fail")
         assert_equal(native_mir_shard_outcome_v1(1, 0, -1, true), "fail")
         assert_equal(native_mir_shard_outcome_v1(1, 0, 0, false), "fail")
+
+describe "MIR shard HIR compile errors fail fast":
+    it "turns a fallback into fail only when the shard frontend recorded HIR compile errors":
+        step("deterministic HIR diagnostics recorded -> no in-process MIR retry")
+        assert_equal(native_mir_shard_outcome_after_hir_errors_v1("fallback", true), "fail")
+        step("no marker (transient/infra stop) keeps the in-process fallback")
+        assert_equal(native_mir_shard_outcome_after_hir_errors_v1("fallback", false), "fallback")
+        step("link and fail are unchanged")
+        assert_equal(native_mir_shard_outcome_after_hir_errors_v1("link", true), "link")
+        assert_equal(native_mir_shard_outcome_after_hir_errors_v1("fail", false), "fail")
+
+    it "records the marker beside the ledger only for a shard child with errors":
+        val ledger = fresh_ledger("hir_errors")
+        assert_false(native_mir_shard_hir_compile_errors_recorded_v1(ledger))
+        step("zero errors and an empty queue record nothing")
+        assert_false(native_mir_shard_record_hir_compile_errors_v1(ledger, 0, 0))
+        assert_false(native_mir_shard_record_hir_compile_errors_v1("", 13, 4))
+        assert_false(native_mir_shard_hir_compile_errors_recorded_v1(ledger))
+        step("HIR diagnostics record the marker; the coordinator sees it")
+        assert_true(native_mir_shard_record_hir_compile_errors_v1(ledger, 13, 4))
+        assert_true(native_mir_shard_hir_compile_errors_recorded_v1(ledger))
+        assert_equal(native_mir_shard_outcome_after_hir_errors_v1(
+            native_mir_shard_outcome_v1(1, 0, 0, true),
+            native_mir_shard_hir_compile_errors_recorded_v1(ledger)), "fail")
+        val _removed = dir_remove_all(ledger)

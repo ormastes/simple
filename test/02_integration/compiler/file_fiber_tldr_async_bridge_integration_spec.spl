@@ -1,0 +1,111 @@
+use std.spec
+use compiler.driver.driver_build.file_fiber_v1.{
+    FileFiberEntryV1, FileFiberRunV1, file_fiber_begin_tldr_async_v1,
+    file_fiber_end_v1}
+use compiler.driver.cache.reader.tldr_table_fill_v1.{tldr_table_fill_async_v1}
+use compiler.driver.cache.source_reader_v1.{file_source_reader_v1}
+use std.nogc_sync_mut.io_runtime.{file_write_exact, file_delete, file_exists, dir_create_all, dir_remove_all, getpid}
+
+fn _run(id: u64, body: text) -> FileFiberRunV1:
+    file_fiber_begin_tldr_async_v1([
+        FileFiberEntryV1(module_key: "consumer_a", path: "unused/a.spl", est_bytes: 8, content: body),
+        FileFiberEntryV1(module_key: "consumer_b", path: "unused/b.spl", est_bytes: 8, content: body)],
+        [0], 4096, 8, 8, (id << 32) | 1u64, id).unwrap()
+
+fn _imports(source: text) -> [text]:
+    var out: [text] = []
+    for line in source.split("\n"):
+        val t = line.trim()
+        if t.starts_with("use "): out = out.push(t.substring(4, t.len()))
+    out
+
+describe "FileFiber canonical TLDR SourceReader integration":
+    it "fills a real source with FileReader and completes both original ring tokens":
+        val suffix = getpid().to_text()
+        val path = ".ff_async_bridge_{suffix}.spl"
+        val tldr_root = "build/test_tmp/file_fiber_async_{suffix}"
+        expect(dir_create_all(tldr_root)).to_be(true)
+        expect(file_write_exact(path, "pub struct BridgeFixture:\n    value: i64\n")).to_be(true)
+        var run = _run(201u64, "use outside_real\n")
+        var waiting = false
+        for _round in 0..16:
+            run.advance(_imports)
+            for i in run.take_parse_requests():
+                run.parse_done(i, "tldr:{run.entries[i].module_key}", "")
+            unsafe(capabilities: [ffi]):
+                waiting = run.tldr_bridge.unwrap().waits.len() == 2
+            if waiting: break
+        expect(waiting).to_be(true)
+        unsafe(capabilities: [ffi]):
+            expect(run.tldr_bridge.unwrap().waits[0].fiber != run.tldr_bridge.unwrap().waits[1].fiber).to_be(true)
+        expect(run.tldr_bridge.unwrap().ring.occupancy()).to_equal(2u64)
+        val dispatched = run.take_fill_requests()
+        expect(dispatched).to_equal(["outside_real"])
+        expect(run.fills).to_equal(0)
+        unsafe(capabilities: [ffi]):
+            val bridge = run.tldr_bridge.unwrap()
+            val first_token = bridge.waits[0].token
+            val second_token = bridge.waits[1].token
+            expect(second_token.ring_id).to_equal(first_token.ring_id)
+            expect(second_token.slot).to_be_greater_than(first_token.slot)
+            val reader = file_source_reader_v1(tldr_root)
+            val error = tldr_table_fill_async_v1(run.table, reader, "outside_real", path)
+            expect(error).to_equal("")
+            run.module_filled("outside_real", error)
+        var completed = false
+        for _round in 0..16:
+            run.advance(_imports)
+            completed = run.sched.fiber_state[0] == 3 and run.sched.fiber_state[1] == 3
+            if completed: break
+        expect(completed).to_be(true)
+        expect(run.error[0]).to_equal("")
+        expect(run.error[1]).to_equal("")
+        expect(run.fills).to_equal(1)
+        expect(run.tldr_bridge.unwrap().waits.len()).to_equal(0)
+        expect(run.tldr_bridge.unwrap().ring.occupancy()).to_equal(0u64)
+        expect(run.table.entries["outside_real"].contains("BridgeFixture")).to_be(true)
+        expect(run.tldr_bridge.unwrap().quiescent()).to_be(true)
+        file_fiber_end_v1(run)
+        expect(run.closed).to_be(true)
+        file_delete(path)
+        dir_remove_all(tldr_root)
+
+    it "retains a real missing-file error for all subscribers":
+        val suffix = getpid().to_text()
+        val path = ".ff_async_missing_{suffix}.spl"
+        val tldr_root = "build/test_tmp/file_fiber_async_missing_{suffix}"
+        expect(dir_create_all(tldr_root)).to_be(true)
+        if file_exists(path): file_delete(path)
+        expect(file_exists(path)).to_be(false)
+        var run = _run(202u64, "use missing_real\n")
+        var waiting = false
+        for _round in 0..16:
+            run.advance(_imports)
+            for i in run.take_parse_requests():
+                run.parse_done(i, "tldr:{run.entries[i].module_key}", "")
+            unsafe(capabilities: [ffi]):
+                waiting = run.tldr_bridge.unwrap().waits.len() == 2
+            if waiting: break
+        expect(waiting).to_be(true)
+        expect(run.tldr_bridge.unwrap().ring.occupancy()).to_equal(2u64)
+        expect(run.take_fill_requests()).to_equal(["missing_real"])
+        var diagnostic = ""
+        unsafe(capabilities: [ffi]):
+            val reader = file_source_reader_v1(tldr_root)
+            diagnostic = tldr_table_fill_async_v1(run.table, reader, "missing_real", path)
+            run.module_filled("missing_real", diagnostic)
+        expect(diagnostic != "").to_be(true)
+        var completed = false
+        for _round in 0..16:
+            run.advance(_imports)
+            completed = run.sched.fiber_state[0] == 3 and run.sched.fiber_state[1] == 3
+            if completed: break
+        expect(completed).to_be(true)
+        expect(run.error[0]).to_equal(diagnostic)
+        expect(run.error[1]).to_equal(diagnostic)
+        expect(run.fills).to_equal(1)
+        expect(run.tldr_bridge.unwrap().waits.len()).to_equal(0)
+        expect(run.tldr_bridge.unwrap().ring.occupancy()).to_equal(0u64)
+        file_fiber_end_v1(run)
+        expect(run.closed).to_be(true)
+        dir_remove_all(tldr_root)

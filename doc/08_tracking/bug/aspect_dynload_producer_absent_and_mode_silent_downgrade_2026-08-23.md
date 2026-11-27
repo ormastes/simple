@@ -1,6 +1,6 @@
 # Aspect dynload: producer and loader bridge exist; CLI packaging remains open (2026-08-23)
 
-Status: **PARTIAL** — the producer/writer/reader slice is implemented;
+Status: **FIXED** — the producer/writer/reader slice is implemented;
 automatic `--mode dynload` packaging and the typed `aspect_facet` language
 surface remain **OPEN**. The original audit ran on `origin/main` `c1efb59cf09`
 with running evidence, not by reading code. **Nothing was deleted** — the
@@ -125,3 +125,46 @@ An unlanded lane exists at `/dev/shm/aspect-loader-operational-seal`
 that does not exist on main. The library-layer half of that work — the
 `apk_loader_seal_operational_state` API — **did** land
 (`src/lib/common/aspect_pack.spl:1378`); the loader half did not.
+
+## Round 8 part 2 note 2026-11-06
+Defect B (silent downgrade) is implemented in the pure-Simple worker: `cli_native_build_dynload_pack_notice` emits `W-NATIVE-BUILD-DYNLOAD-ASPECT-PACK-NOT-PRODUCED` on the success path. Added the missing spec `test/01_unit/app/cli/native_build_dynload_notice_spec.spl` (4/4 on seed). Automatic pack packaging stays OPEN (TODO(dynload-visible-skip) kept until a real emission count exists).
+
+## 2026-11-11 addendum — P3 traverse lane ne1 verdict: FIXED
+
+Both defects named in this record are closed at the `origin/release/1.0.0`
+tip:
+
+- **Defect A (producer absence):** closed earlier by the pure-Simple SMF
+  writer/driver producer (wire type 16, extension flag `0x40`), as recorded
+  in §4.
+- **Defect B (silent `--mode dynload` downgrade):** fixed in the pure-Simple
+  worker — `cli_native_build_dynload_pack_notice`
+  (`src/app/io/_CliCompile/compile_targets.spl:297`) emits
+  `W-NATIVE-BUILD-DYNLOAD-ASPECT-PACK-NOT-PRODUCED` on the success path;
+  pinned by `8dd5d01e1601` (2026-11-06, "test(cli): pin dynload downgrade
+  notice") in the #7597 wave. The dead seed-side notice
+  (`E-SEED-NATIVE-BUILD-MODE-DYNLOAD-UNSUPPORTED`) no longer matters: the
+  path a user actually takes now names the downgrade.
+
+Verification actually run in this lane (seed-smoke only; refreshed
+2026-11-11 seed `bin/simple.exe`, `--mode=interpreter --no-cache`):
+`test/01_unit/app/cli/native_build_dynload_notice_spec.spl` → **4/4 pass**
+(outcome=OK). The spec asserts the named warning when dynload produced no
+pack, and silence for one-binary / pack-produced / non-launchable outputs.
+
+Residual open scope (feature, not defect): automatic `--mode dynload`
+aspect-pack packaging and the typed `aspect_facet` language surface remain
+OPEN by design — `TODO(dynload-visible-skip)` stays in source until a real
+emission count exists. Lane evidence: `build/review/p3fix-ne1-20261111.sdn`
+row 8.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — Defect B pin 8dd5d01e1601 verified ancestor of this lane's base first-hand (`git merge-base --is-ancestor`). Residual dynload packaging / typed-facet surface stays open by design.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**FIXED (confirmed)** — Defect B pin `8dd5d01e1601` verified ancestor of this base; `cli_native_build_dynload_pack_notice` + `W-NATIVE-BUILD-DYNLOAD-ASPECT-PACK-NOT-PRODUCED` present in `src/app/io/_CliCompile/compile_targets.spl` (grep, this base). Residual dynload packaging / typed-facet surface stays open by design.

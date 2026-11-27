@@ -160,6 +160,20 @@ static heap_region *_region_for_address(uintptr_t address) {
     return NULL;
 }
 
+/* Check the physical block at `offset` of a region whose previous block had
+ * size `expected_prev_size`. Returns its size, or 0 when the chain is
+ * malformed. A valid size is always >= MIN_ALLOC, so 0 is unambiguous. */
+static size_t _well_formed_block(uintptr_t base, size_t region_size, size_t offset,
+                                 size_t expected_prev_size, block_header **out_hdr) {
+    if (region_size - offset < HEADER_SIZE) return 0;
+    block_header *hdr = (block_header *)(base + offset);
+    size_t size = BLOCK_SIZE(hdr);
+    if (!BLOCK_FLAGS_VALID(hdr) || hdr->prev_size != expected_prev_size || size < MIN_ALLOC ||
+        (size & 15U) != 0 || size > region_size - offset) return 0;
+    *out_hdr = hdr;
+    return size;
+}
+
 /* Validate a candidate header by walking only the registered region's
  * well-formed physical block chain. This rejects interior, forged and stale
  * pointers before any free-list pointer is read or written. */
@@ -172,11 +186,9 @@ static int _validated_block(block_header *candidate, heap_region **out_region) {
     size_t offset = 0;
     size_t expected_prev_size = 0;
     while (offset < region->size) {
-        if (region->size - offset < HEADER_SIZE) return 0;
-        block_header *current = (block_header *)(base + offset);
-        size_t size = BLOCK_SIZE(current);
-        if (!BLOCK_FLAGS_VALID(current) || current->prev_size != expected_prev_size || size < MIN_ALLOC ||
-            (size & 15U) != 0 || size > region->size - offset) return 0;
+        block_header *current;
+        size_t size = _well_formed_block(base, region->size, offset, expected_prev_size, &current);
+        if (!size) return 0;
         if ((uintptr_t)current == target) {
             *out_region = region;
             return 1;
@@ -196,11 +208,9 @@ static int _validated_region_chain(heap_region *region) {
     size_t offset = 0;
     size_t expected_prev_size = 0;
     while (offset < region->size) {
-        if (region->size - offset < HEADER_SIZE) return 0;
-        block_header *current = (block_header *)(base + offset);
-        size_t size = BLOCK_SIZE(current);
-        if (!BLOCK_FLAGS_VALID(current) || current->prev_size != expected_prev_size ||
-            size < MIN_ALLOC || (size & 15U) != 0 || size > region->size - offset) return 0;
+        block_header *current;
+        size_t size = _well_formed_block(base, region->size, offset, expected_prev_size, &current);
+        if (!size) return 0;
         expected_prev_size = size;
         offset += size;
     }
@@ -235,11 +245,9 @@ static int _known_free_node(free_node *candidate) {
         size_t offset = 0;
         size_t expected_prev_size = 0;
         while (offset < regions[i].size) {
-            if (regions[i].size - offset < HEADER_SIZE) return 0;
-            block_header *hdr = (block_header *)(base + offset);
-            size_t size = BLOCK_SIZE(hdr);
-            if (!BLOCK_FLAGS_VALID(hdr) || hdr->prev_size != expected_prev_size || size < MIN_ALLOC ||
-                (size & 15U) != 0 || size > regions[i].size - offset) return 0;
+            block_header *hdr;
+            size_t size = _well_formed_block(base, regions[i].size, offset, expected_prev_size, &hdr);
+            if (!size) return 0;
             if (!BLOCK_INUSE(hdr) && candidate == (free_node *)((char *)hdr + HEADER_SIZE)) return 1;
             expected_prev_size = size;
             offset += size;
@@ -267,11 +275,9 @@ static int _physical_free_node_count(size_t *out) {
         size_t offset = 0;
         size_t expected_prev_size = 0;
         while (offset < regions[i].size) {
-            if (regions[i].size - offset < HEADER_SIZE) return 0;
-            block_header *hdr = (block_header *)(base + offset);
-            size_t size = BLOCK_SIZE(hdr);
-            if (!BLOCK_FLAGS_VALID(hdr) || hdr->prev_size != expected_prev_size || size < MIN_ALLOC ||
-                (size & 15U) != 0 || size > regions[i].size - offset) return 0;
+            block_header *hdr;
+            size_t size = _well_formed_block(base, regions[i].size, offset, expected_prev_size, &hdr);
+            if (!size) return 0;
             if (!BLOCK_INUSE(hdr)) {
                 if (count == (size_t)-1) return 0;
                 count++;

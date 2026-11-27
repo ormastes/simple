@@ -488,27 +488,24 @@ fn tail_if_statement_merge_slot_stays_i64_for_text_arms() {
     );
 }
 
-/// Arms with disagreeing value types (`1.5` vs the int literal `2` in an
-/// f64-returning function) keep the historical I64 slot. This pins CURRENT
-/// behaviour, not correct behaviour: that shape is still wrong at runtime
-/// (`mixed(-1)` yields `0.0`, `mixed(1)` yields a denormal), exactly as it was
-/// before this fix — see
+/// Float + integer-literal arms (`1.5` vs `2` in an f64 fn) merge as f64 with the
+/// integer arm converted before its store; see
 /// `doc/08_tracking/bug/tail_if_mixed_int_float_arms_lose_the_float_2026-09-06.md`.
-/// Picking one arm's float type here would silently bitcast the OTHER arm's
-/// integer, which is a different wrong answer; the real repair is an HIR-level
-/// numeric coercion of the int arm and is out of this fix's scope. The test
-/// exists so that repair has to update it deliberately.
 #[test]
-fn tail_if_statement_merge_slot_stays_i64_when_arms_disagree() {
-    let mir = compile_to_mir("fn mixed(x: i64) -> f64:\n    if x < 0:\n        1.5\n    else:\n        2\n").unwrap();
+fn tail_if_statement_merge_slot_is_f64_when_float_and_int_arms_mix() {
+    let mir = compile_to_mir("fn mixed(x: i64) -> f64:
+    if x < 0:
+        1.5
+    else:
+        2
+").unwrap();
     let func = mir.functions.iter().find(|f| f.name == "mixed").expect("mixed fn");
 
-    assert_eq!(
-        if_merge_local_ty(func),
-        Some(TypeId::I64),
-        "arms with disagreeing value types keep the historical I64 slot rather than \
-         picking one arm's type and mis-storing the other"
-    );
+    assert_eq!(if_merge_local_ty(func), Some(TypeId::F64), "float+int arms must merge as f64");
+    let has_int_to_float_cast = func.blocks.iter().flat_map(|b| b.instructions.iter()).any(|i| {
+        matches!(i, crate::mir::MirInst::Cast { to_ty: TypeId::F64, from_ty, .. } if *from_ty != TypeId::F64)
+    });
+    assert!(has_int_to_float_cast, "the integer arm must be converted to f64 before the merge store");
 }
 
 #[test]
@@ -581,6 +578,75 @@ fn flattened_items(source: &str, owner: &str) -> Vec<simple_parser::Node> {
             item
         })
         .collect()
+}
+
+/// `flattened_items`, additionally tagging enum declarations with their owner
+/// the way `pipeline::module_loader::tag_node_function_owners` does.
+fn flattened_items_with_enums(source: &str, owner: &str) -> Vec<simple_parser::Node> {
+    flattened_items(source, owner)
+        .into_iter()
+        .map(|mut item| {
+            if let simple_parser::Node::Enum(definition) = &mut item {
+                definition.attributes.push(simple_parser::ast::Attribute {
+                    span: definition.span,
+                    name: format!("{}{owner}", crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX),
+                    value: None,
+                    args: None,
+                    named_args: None,
+                });
+            }
+            item
+        })
+        .collect()
+}
+
+/// Two co-compiled modules each declare `enum Status` with DIFFERENT variants.
+/// Each module's `Status.Variant` must resolve against its own declaration;
+/// the bare-name registry used to keep only the last one, so the other
+/// module failed with "unknown variant or method 'Ok' on enum Status".
+#[test]
+fn same_named_enums_of_different_modules_resolve_owner_exactly() {
+    let srv = "srv.spl";
+    let cli = "cli.spl";
+    let mut items = vec![
+        import_binding_marker("<entry>", "srv_from", srv, "srv_from"),
+        import_binding_marker("<entry>", "cli_from", cli, "cli_from"),
+    ];
+    items.extend(flattened_items_with_enums(
+        "enum Status:\n    Ok\n    NotFound\n\n\
+         fn srv_from(code: i64) -> Status:\n    if code == 200:\n        return Status.Ok\n    Status.NotFound\n",
+        srv,
+    ));
+    items.extend(flattened_items_with_enums(
+        "enum Status:\n    OK\n    Created\n    Missing\n\n\
+         fn cli_from(code: i64) -> Status:\n    if code == 200:\n        return Status.OK\n    Status.Missing\n",
+        cli,
+    ));
+    // A third module reaches srv's enum only through `use srv.*`.
+    items.push(import_binding_marker("<entry>", "glob_from", "globber.spl", "glob_from"));
+    items.push(import_binding_marker("globber.spl", "*", srv, "*"));
+    items.extend(flattened_items_with_enums(
+        "fn glob_from() -> Status:\n    Status.NotFound\n",
+        "globber.spl",
+    ));
+    let mir = lower_flattened_unit(items);
+
+    let srv_enum = crate::interpreter::flatten_owner_mangled_name(srv, "Status");
+    let glob_text = format!("{:?}", mir_fn(&mir, "glob_from"));
+    assert!(
+        glob_text.contains(&srv_enum),
+        "glob importer must build variants of the single glob source's enum: {glob_text}"
+    );
+    let srv_text = format!("{:?}", mir_fn(&mir, "srv_from"));
+    let cli_text = format!("{:?}", mir_fn(&mir, "cli_from"));
+    assert!(
+        srv_text.contains(&srv_enum),
+        "srv_from must build variants of srv's own enum ({srv_enum}): {srv_text}"
+    );
+    assert!(
+        !cli_text.contains(&srv_enum),
+        "cli_from must not name srv's enum: {cli_text}"
+    );
 }
 
 fn import_binding_marker(importer: &str, local: &str, source_owner: &str, source_name: &str) -> simple_parser::Node {
@@ -732,5 +798,213 @@ fn import_alias_of_colliding_name_does_not_bind_importers_own_function() {
     assert!(
         !has_call(shim_add_header, "add_header"),
         "shim's add_header must not call itself through the alias"
+    );
+}
+
+/// A VOID-typed (erased) receiver must not qualify a builtin-collection
+/// method as `void.contains_key`: backend suffix recovery binds such a name to
+/// an unrelated user method (`AdaptiveMap.contains_key` on a dict -> SEGV).
+/// doc/08_tracking/bug/stage2_lower_trait_alias_dict_dispatch_segv_2026-10-24.md
+#[test]
+fn void_receiver_builtin_collection_method_is_not_void_qualified() {
+    let mir = compile_to_mir(
+        "class AdaptiveMap:\n    profile: i64\n\nimpl AdaptiveMap:\n    fn contains_key(key: text) -> bool:\n        self.profile > 0\n\nfn nothing():\n    pass\n\nfn probe() -> bool:\n    nothing().contains_key(\"x\")\n",
+    )
+    .expect("compile");
+    let probe = mir.functions.iter().find(|f| f.name == "probe").expect("probe");
+    let insts: Vec<_> = probe.blocks.iter().flat_map(|b| &b.instructions).collect();
+    let dump = format!("{insts:?}");
+    assert!(
+        insts.iter().all(|i| !matches!(i, MirInst::MethodCallStatic { func_name, .. }
+            if func_name.contains('.') && func_name.ends_with("contains_key"))),
+        "erased receiver must stay bare: {dump}"
+    );
+}
+
+/// Entry-module callers (untagged, no flatten owner) record their `use`
+/// bindings under the `<entry>` importer. A bare call of a name defined by
+/// several co-compiled modules with DIFFERENT return types must follow the
+/// entry's own `use`, not the last-registered definition
+/// (env_get_cocompiled_signature_collision_2026_10_31).
+#[test]
+fn entry_module_use_binding_selects_import_among_differing_signature_duplicates() {
+    let text_mod = "mod_text.spl";
+    let int_mod = "mod_int.spl";
+    // int_mod is defined LAST, so bare-name last-write-wins picks it.
+    for import_from in [text_mod, int_mod] {
+        let ret = if import_from == text_mod { "text" } else { "i64" };
+        let src = format!(
+            "fn flatten_entry_anchor() -> i64:\n    return 0\n\nfn entry_caller() -> {ret}:\n    return env_get(\"x\")\n"
+        );
+        let mut module = simple_parser::Parser::new(&src).parse().expect("parse failed");
+        module
+            .items
+            .push(import_binding_marker("<entry>", "env_get", import_from, "env_get"));
+        module
+            .items
+            .extend(flattened_items("fn env_get(key: text) -> text:\n    return key\n", text_mod));
+        module
+            .items
+            .extend(flattened_items("fn env_get(key: text) -> i64:\n    return 7\n", int_mod));
+        let hir = crate::hir::lower(&module).expect("hir lower failed");
+        let mir = super::super::lower_to_mir(&hir).expect("mir lower failed");
+        let caller = mir_fn(&mir, "entry_caller");
+        let text_symbol = crate::interpreter::flatten_owner_mangled_name(text_mod, "env_get");
+        if import_from == text_mod {
+            assert!(
+                has_call(caller, &text_symbol),
+                "entry importing env_get from {text_mod} must call {text_symbol}"
+            );
+            assert!(!has_call(caller, "env_get"), "must not call the last-registered bare env_get");
+        } else {
+            assert!(has_call(caller, "env_get"), "entry importing from {int_mod} keeps the bare symbol");
+            assert!(!has_call(caller, &text_symbol), "must not call {text_mod}'s env_get");
+        }
+    }
+}
+
+/// Seed-5f (#4950): `Iterator.collect<C: FromIterator>` and const-generic
+/// collections (`FixedVec<T, const N>`, `StaticVec<T, const N>`) with
+/// `[T.default(); N]` and `vec:` field names must specialize through HIR->MIR
+/// via `$__spec_*` functions for both explicit `<C>` and `let` target types.
+#[test]
+fn iterator_collect_specializes_const_generic_and_vec_field_in_mir() {
+    let mir = compile_to_mir(
+        r#"trait Iterator:
+    type Item
+    fn next() -> Option<Self.Item>
+    fn collect<C: FromIterator<Self.Item>>(self) -> C:
+        return C.from_iter(self)
+
+trait FromIterator<T>:
+    fn from_iter<I: Iterator<Item=T>>(iter: I) -> Self
+
+struct FixedVec<T, const N: u64>:
+    data: [T; N]
+    len: u64
+
+impl FixedVec<T, const N: u64>:
+    static fn new() -> FixedVec<T, N>:
+        return FixedVec { data: [T.default(); N], len: 0 }
+
+    me push(self, value: T) -> bool:
+        if self.len >= N:
+            return false
+        self.data[self.len] = value
+        self.len = self.len + 1
+        return true
+
+struct FixedVecIter<T, const N: u64>:
+    vec: FixedVec<T, N>
+    index: u64
+
+impl Iterator for FixedVecIter<T, const N: u64>:
+    type Item = T
+    me next() -> Option<Self.Item>:
+        if self.index < self.vec.len:
+            val item = self.vec.data[self.index]
+            self.index = self.index + 1
+            return Some(item)
+        return None
+
+impl FromIterator<T> for FixedVec<T, const N: u64>:
+    fn from_iter<I: Iterator<Item=T>>(iter: I) -> Self:
+        var result = FixedVec.new()
+        loop:
+            match iter.next():
+                case Some(item):
+                    if not result.push(item):
+                        break
+                case None:
+                    break
+        return result
+
+struct RangeStep:
+    cur: i64
+    end: i64
+
+impl Iterator for RangeStep:
+    type Item = i64
+    me next() -> Option<Self.Item>:
+        if self.cur < self.end:
+            val v = self.cur
+            self.cur = self.cur + 1
+            return Some(v)
+        return None
+
+fn probe() -> i64:
+    val explicit_fv = RangeStep(cur: 0, end: 5).collect<FixedVec<i64, 4>>()
+    val inferred_fv: FixedVec<i64, 3> = RangeStep(cur: 1, end: 3).collect()
+    return explicit_fv.len + inferred_fv.len
+"#,
+    )
+    .expect("compile_to_mir should specialize Iterator.collect and FixedVec<T, N>");
+
+    let spec_names: Vec<&str> = mir
+        .functions
+        .iter()
+        .map(|f| f.name.as_str())
+        .filter(|name| name.contains("$__spec_"))
+        .collect();
+    assert!(
+        !spec_names.is_empty(),
+        "expected specialized $__spec_ functions in MIR, got: {:?}",
+        mir.functions.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+    assert!(
+        spec_names.iter().any(|n| n.contains("collect$__spec_")),
+        "expected collect specialization in {spec_names:?}"
+    );
+    assert!(
+        spec_names.iter().any(|n| n.contains("from_iter$__spec_")),
+        "expected from_iter specialization in {spec_names:?}"
+    );
+
+    let probe = mir_fn(&mir, "probe");
+    let calls: Vec<String> = probe
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .filter_map(|inst| match inst {
+            MirInst::Call { target, .. } => Some(target.name().to_string()),
+            MirInst::MethodCallStatic { func_name, .. } => Some(func_name.clone()),
+            _ => None,
+        })
+        .collect();
+    let collect_calls: Vec<&String> = calls.iter().filter(|n| n.contains("collect$__spec_")).collect();
+    assert!(
+        collect_calls.len() == 2 && collect_calls[0] != collect_calls[1],
+        "probe should call two distinct specialized collect instances (explicit & inferred): {calls:?}"
+    );
+    let new_specs: Vec<_> = mir
+        .functions
+        .iter()
+        .filter(|f| f.name.contains("FixedVec.new$__spec_"))
+        .collect();
+    assert!(
+        new_specs.len() >= 2,
+        "expected distinct FixedVec.new specializations for N=4 and N=3: {spec_names:?}"
+    );
+}
+
+/// Seed-5f (#4950): Primitive and fixed-array `.default()` lower to typed
+/// constants / zero-filled array initialization without unresolved calls.
+#[test]
+fn primitive_and_fixed_array_default_lower_in_mir() {
+    let mir = compile_to_mir(
+        r#"fn probe() -> i64:
+    val a = i64.default()
+    val b = [i64; 4].default()
+    if bool.default():
+        return a + 1
+    return a + b[0] + b[3]
+"#,
+    )
+    .expect("compile_to_mir should lower i64.default(), bool.default(), [i64; 4].default()");
+
+    let probe = mir_fn(&mir, "probe");
+    assert!(
+        !has_call(probe, "default") && !has_call(probe, "i64.default"),
+        "primitive .default() should lower without dynamic dispatch"
     );
 }

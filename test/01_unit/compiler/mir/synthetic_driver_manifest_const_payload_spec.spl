@@ -1,0 +1,54 @@
+# @req REQ-SSPEC-UNIT
+# @cover src/compiler/50.mir/synthetic_driver_codegen.spl
+#
+# Regression: Phase-3 census (run-19 Stage 2 compiler, 2026-11-13) failed MIR
+# on compiler.mir.synthetic_driver_codegen with
+# `enum construction 'MirConstValue.Str': payload type mismatch at 0` at
+# make_register_static_driver_call: `DriverManifestAttr.driver_class` and
+# `.vendor` are `i64` (decl_attrs.spl) but were wrapped in `MirConstValue.Str`.
+# The MIR payload check is right; the constant now carries them as
+# `MirConstValue.Int`. The interpreter never checks the payload type, so this
+# spec pins the constructor choice by inspecting the emitted constant.
+# Record: doc/08_tracking/bug/p3_census_mir_classes_2026-11-13.md
+use std.spec.*
+use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind}
+use compiler.mir.synthetic_driver_codegen.{make_register_static_driver_call}
+use compiler.mir.mir_instructions.{MirInstKind, MirOperandKind}
+use compiler.mir.mir_types.{MirConstValue}
+
+fn _manifest_fields() -> Dict<text, MirConstValue>:
+    val manifest = DriverManifestAttr(
+        kind: DriverManifestAttrKind.Driver, driver_class: 3, vendor: 4660,
+        device_ids: [1, 2], version: "1.0", abi: "simple-driver-v1")
+    val inst = make_register_static_driver_call(manifest, "ops_sym")
+    match inst.kind:
+        case MirInstKind.Call(_, _, args):
+            match args[0].kind:
+                case MirOperandKind.Const(value, _):
+                    match value:
+                        case MirConstValue.Struct(fields): return fields
+                        case _: ()
+                case _: ()
+        case _: ()
+    {}
+
+fn _int_of(value: MirConstValue) -> i64:
+    match value:
+        case MirConstValue.Int(n): n
+        case _: -1
+
+fn _str_of(value: MirConstValue) -> text:
+    match value:
+        case MirConstValue.Str(s): s
+        case _: ""
+
+describe "synthetic driver manifest constant payloads":
+    it "carries the i64 driver_class and vendor as Int constants":
+        val fields = _manifest_fields()
+        expect(_int_of(fields["driver_class"])).to_equal(3)
+        expect(_int_of(fields["vendor"])).to_equal(4660)
+
+    it "keeps the text version and abi as Str constants":
+        val fields = _manifest_fields()
+        expect(_str_of(fields["version"])).to_equal("1.0")
+        expect(_str_of(fields["abi"])).to_equal("simple-driver-v1")

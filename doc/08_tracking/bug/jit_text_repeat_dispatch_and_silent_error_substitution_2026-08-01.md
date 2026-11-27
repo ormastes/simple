@@ -1,9 +1,7 @@
 # JIT text-method dispatch gap silently substitutes the string `error`
 
 - **ID:** jit_text_repeat_dispatch_and_silent_error_substitution_2026-08-01
-- **Status:** partially fixed -- 49 of 51 sibling methods wired; **2 remain**
-  (`parse_i64`, `ptr`), both blocked on a decision rather than on transcription.
-  See the batch 5 section at the end for why.
+- **Status:** resolved -- 51/51 wired including `parse_i64` and `ptr`; silent `SPECIAL_ERROR` substitution replaced by exit 70 in `error_handling.rs`; JIT and runtime regression tests verified 2026-11-26 (BF-3).
 - **Severity:** critical — silent, zero-exit data corruption that can reach files on disk
 - **Engines affected:** Cranelift JIT (default engine). Tree-walking interpreter is correct.
 - **Measured against:** origin `main` tip `5ca84bcefe5`, built in an isolated scratch
@@ -690,3 +688,69 @@ source files reverted. Identical failure list, identical pass count:
 
 None of the three batches in this document adds a failure. They are recorded
 here so a later lane does not attribute them to this work.
+
+# Re-scope 2026-11-05 (mirp2-E premise check, base origin/release/1.0.0)
+
+- **`parse_i64` — FIXED on origin** by `0641097d685` ("fix(codegen,runtime): text
+  parse_* stopped silently erasing its Option"): `parse_int | parse_i32 | parse_i64`
+  now map to the Option-returning `rt_string_parse_int` in
+  `codegen/instr/calls.rs:3753`, `:4408` and `closures_structs.rs:2698`, pinned by
+  the unit assertions at `calls.rs:396-397`. Consistent with the nil-only-as-`T?`
+  policy.
+- **Residual A (new, same family):** `parse_float | parse_f64 | parse_f64_safe`
+  still map to raw `rt_string_to_float` (`calls.rs:3754`), so the float spellings
+  still erase the Option the interpreter returns. Next step: add an
+  Option-returning `rt_string_parse_float` in both runtimes and reroute, mirroring
+  `0641097d685`, with a JIT-vs-interpreter parity spec on `"x".parse_f64()`.
+- **Residual B: `ptr`** — unchanged; still needs the owner decision recorded in
+  batch 5 (pinned-copy vs `rt_string_data` lifetime). Not a transcription job.
+- Status stays open (P2) on residuals A and B only.
+
+## E2 premise check (2026-11-05) — parse_float residual is NOT a bug
+The "parse_float/parse_f64/parse_f64_safe drop the Option at calls.rs:3754"
+residual is a false premise. `rt_string_to_float`
+(runtime/src/value/collections.rs:6171) returns a TAGGED RuntimeValue —
+`from_float(f)` on success, `RuntimeValue::NIL` on failure — and HIR types
+these three names `TypeId::ANY` (hir/lower/expr/mod.rs:2326). That is exactly
+the Option-preserving shape 0641097d685 copied for parse_int. Remaining open
+item is only the ptr-lifetime owner decision. Note for a follow-up: `to_float`
+/`to_f64` share the same NIL-on-failure symbol, unlike total `to_int` (0) —
+check whether `to_float` is specified total before changing it.
+
+# Verification 2026-11-25 (p2w3-ah lane, release/1.0.0) — RESOLVED: both remaining items closed on origin
+
+Re-verified by source inspection on release/1.0.0 HEAD. The status line
+("partially fixed — 2 remain: `parse_i64`, `ptr`") is stale; both are now
+closed:
+
+- **`parse_i64` — FIXED** by `0641097d685` (in-tree, confirmed via
+  `git merge-base --is-ancestor`). `parse_int | parse_i32 | parse_i64` all
+  route to the Option-preserving `rt_string_parse_int`
+  (`codegen/instr/calls.rs:3890` and `:4623`; unit-pinned at `calls.rs:495-496`).
+  The 2026-11-05 "Residual A" (parse_float family) was itself re-classified as
+  a false premise in the E2 note above: `rt_string_to_float` already returns a
+  tagged `RuntimeValue` (NIL on failure) typed `TypeId::ANY`, i.e. the
+  Option-preserving shape.
+- **`ptr` — FIXED** by `74454b58b2f`. The string-receiver case is now wired to
+  the pre-existing `rt_string_data` with an explicit receiver-type guard
+  (`calls.rs:4694-4700`: `args.len() == 1 && vreg_types == STRING`; mirrored in
+  `closures_structs.rs:2645-2652` with the `text`/`String`/`str`/`string`
+  qualifier set), and array receivers route to `rt_array_data_ptr`
+  (`closures_structs.rs:2653-2658`). This is the `rt_string_data` outcome the
+  batch-5 note anticipated as the honest compiled equivalent; the guard means
+  non-string receivers no longer silently take a text answer. `rt_string_data`
+  is present in both runtimes and in `RUNTIME_SYMBOL_NAMES`.
+
+With batches 1-5 (49 of 51) plus these two, the tracked 51-method family is
+fully wired. Verification limit: code inspection only — the 102-probe sweep
+and JIT value comparisons were not re-run (seed rebuilds are out of scope for
+this lane, and `bin/simple test` is repo-wide blocked at this HEAD by the
+`@representation_boundary` seed rejection). The interpreter-side negative-count
+and loud-`not found` behaviors verified in earlier batches were not re-probed.
+
+## Executed Verification (2026-11-26, BF-3)
+
+Verified the wired Cranelift JIT dispatch and `error_handling.rs` loud-exit behavior directly with compiled tests (instead of code-inspection only):
+
+- `cargo test -p simple-compiler -j 2 --test jit_text_and_worklist_parity`: `bug4_text_repeat_parse_ptr_and_helpers_in_jit` passed via `lower_to_mir_jit` + `JitCompiler::new_static()`, exercising `" ".repeat(4)`, `"x".repeat(-2)`, `"42".parse_i64() ?? -1`, `"bad".parse_i64() ?? -99`, `unsafe: "hi".ptr()`, `capitalize()`, `is_digit()`, `pad_left()`, `substr(1, 3)` / `substr(2)`, `substring(1, 4)`, `partition("=")`, `sorted()`, and `char_count()`.
+- `cargo test -p simple-runtime -j 2 --features runtime-symbol-table error_handling`: `6 passed; 0 failed; 1497 filtered out` (confirming `not_found_exit_code_is_ex_software` and message diagnostics).

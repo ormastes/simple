@@ -1,7 +1,15 @@
 # Native V4 descendant retirement mechanism options
 
-Status: awaiting user selection. No option is selected or implemented.
-Baseline: origin/main `97020f7badf`; follows PR #1987 and gates #1995/#1997.
+Status as of 2026-10-29: historical mechanism comparison, superseded for current
+execution by the [V4 composition plan](../../04_architecture/sosix_v4_provider_composition_2026_10_29.md)
+and [end-to-end test plan](../../03_plan/sys_test/buildrunner_sosix_end_to_end_2026_10_29.md).
+The active acceptance scope remains all descendants; non-escaping process
+groups are not a substitute. Host primitives have been implemented and tested,
+but a qualified strict V4 group provider is still missing. Do not interpret this
+older options document as a requirement to stop authorized implementation and
+test work for another general permission question.
+
+Historical baseline: origin/main `97020f7badf`; follows PR #1987 and gates #1995/#1997.
 Effort estimates are engineering days including native and Pure Simple work,
 focused adversarial fixtures, receipt/ACK changes, and review; they are not
 delivery commitments.
@@ -50,5 +58,9 @@ ESRCH/EINTR, identity loss, unrelated groups, capture saturation, startup
 failure, failed cleanup, wrong ACK, and valid ACK. Escaping descendants must
 have explicit expected outcomes matching the selected scope.
 
-No runtime tests have been run and no capability or Stage 6A PASS is claimed.
-After user selection, delete unchosen options and write the final requirements.
+The original comparison had no runtime test evidence. Since then, Darwin bound
+image, direct-child admission, transport and coalition/UID fixtures and Linux
+group cleanup fixtures have landed; their actual scope and missing composition
+are recorded in the linked current plans. No strict capability or Stage 6A PASS
+follows from those component results. The table is retained as historical
+research, not a claim that all four alternatives remain acceptance candidates.

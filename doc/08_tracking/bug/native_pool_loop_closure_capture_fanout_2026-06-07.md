@@ -55,3 +55,24 @@ Native closure creation now uses runtime heap allocation instead of stack
 allocation, and outlined lambda functions materialize captured values as real
 capture locals hydrated from the closure context. The profile generator again
 uses compact loop submission, so checksum validation covers loop-local capture.
+
+## Verification 2026-11-25 — closure stands (code inspection; native re-run environment-blocked)
+
+Checked on Windows worktree `D:\wt-p3-bae` (branch `work/p3-bae-20261125`,
+base `origin/release/1.0.0`):
+
+- The recorded resolution is still present in current source:
+  `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:9035-9038`
+  documents and implements capturing lambdas using "the runtime closure handle
+  as a heap environment" with the lifted function receiving the handle as a
+  hidden first argument, and unsupported capture shapes failing loudly rather
+  than building a partial environment. This matches the "runtime heap
+  allocation + real capture locals hydrated from the closure context"
+  resolution above.
+- The native lane cannot be re-run on this host: `bin/simple.exe compile
+  --native` on a hello-world probe fails in `lld-link` (temp-path/argument
+  handling on Windows), so the fanout checksum evidence could not be
+  re-collected here. Verification is by code inspection plus the recorded
+  2026-09-13 fixed evidence; this limit is stated explicitly.
+
+Status remains closed.

@@ -1,7 +1,7 @@
 # SCV bookmark refs.
 
 use app.io.mod (file_exists, file_read, dir_create)
-use std.scv.core.{scv_bookmarks_path, scv_meta_dir}
+use std.scv.core.{scv_bookmarks_path, scv_meta_dir, scv_object_ref_safe}
 use std.scv.store.{scv_repo_exists, scv_current_op, scv_read_workspace_commit, scv_write_operation, scv_write_text, scv_object_path, scv_tag_name_valid}
 
 fn scv_bookmark_name_valid(name: text) -> bool:
@@ -61,10 +61,12 @@ fn scv_bookmark_set(root: text, name: text, commit: text) -> text:
             next = next + trimmed + "\n"
     if not replaced:
         next = next + "{name}|{target}\n"
-    scv_write_text(path, next)
+    if not scv_write_text(path, next):
+        return "ERROR cannot publish bookmark reference\n"
     val op = scv_write_operation(root, scv_current_op(root), target, "bookmark-set {name}")
     if op.starts_with("ERROR"):
-        scv_write_text(path, current)
+        if not scv_write_text(path, current):
+            return "ERROR cannot restore bookmark reference after operation failure\n"
         return op
     "bookmark {name} {target} {op}\n"
 
@@ -97,7 +99,8 @@ fn scv_tag_set(root: text, name: text, target_commit: text) -> text:
             next = next + trimmed + "\n"
     if not replaced:
         next = next + "{name}|{target_commit}\n"
-    scv_write_text(path, next)
+    if not scv_write_text(path, next):
+        return "ERROR cannot publish tag reference\n"
     "tag {name} {target_commit}\n"
 
 fn scv_tag_get(root: text, name: text) -> text:
@@ -131,10 +134,13 @@ fn scv_tag_annotated_id_path(root: text, name: text) -> text:
 fn scv_tag_annotated_set(root: text, name: text, object_id: text) -> text:
     if not scv_tag_name_valid(name):
         return "ERROR invalid tag name\n"
+    if not scv_object_ref_safe(object_id, "tag_") or not file_exists(scv_object_path(root, "tags", object_id)):
+        return "ERROR invalid annotated tag object\n"
     val dir = "{scv_meta_dir(root)}/tag_objects"
     dir_create(dir, true)
     val path = scv_tag_annotated_id_path(root, name)
-    scv_write_text(path, "{object_id}\n")
+    if not scv_write_text(path, "{object_id}\n"):
+        return "ERROR cannot publish annotated tag reference\n"
     "tag-annotated {name} {object_id}\n"
 
 fn scv_tag_annotated_get(root: text, name: text) -> text:

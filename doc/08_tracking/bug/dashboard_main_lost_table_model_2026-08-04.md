@@ -1,6 +1,6 @@
 # BUG: `app.dashboard.main` no longer defines the table model its own siblings import
 
-Status: OPEN (P2)
+Status: FIXED 2026-11-06 (table model restored in main.spl; see Resolution)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 is now 3,094 bytes (grown from the originally-reported 382-byte stub, so the
 CLI entry-point work continued), but still defines none of the ten table-model
@@ -126,3 +126,39 @@ development with a live session. The truncation may be deliberate localization
 rather than an accident. This entry deliberately stops at recording the
 recovery path; the decision to restore belongs to the owner of that lane.
 
+
+## Resolution (2026-11-06)
+
+Evidence: the stub in `main.spl` (`status=migrated target=simple-ide`) was a
+deliberate CLI-surface migration, but the sibling imports of the table model
+were never updated, so the model was LOST, not redesigned. Restored the
+table-model section (consts, `Table`, load/write helpers, aggregates, `itos`,
+`ensure_dirs`, `today_date`, `current_month`) from blob `2ee3fed7...` into
+`src/app/dashboard/main.spl`, reusing the current stdlib imports; unused
+cache helpers from the old blob were left out. New spec
+`test/01_unit/app/dashboard/dashboard_table_model_spec.spl`: RED 0/5 -> GREEN
+5/5. Regression: dashboard_serve 6/6, dashboard_framework_policy 9/9 unchanged.
+`dashboard_log_modes_spec` stays 0/5 (separate bug:
+`dashboard_cli_stub_no_log_mode_support_2026-07-20`; the stub has no log-mode CLI).
+
+## Verification note (2026-11-25, work/p2w2-aa-20261125)
+
+Confirmed the 2026-11-06 resolution is real at release/1.0.0 HEAD
+(`1861a186628`) by source inspection: `src/app/dashboard/main.spl` is 16,031
+bytes and defines the restored table model
+(`grep -c 'DASHBOARD_CACHE_PATH\s*=\|TABLE_NAMES\s*=\|fn load_table\|fn ensure_dirs'`
+= 5; the original repro count was 0), and
+`test/01_unit/app/dashboard/dashboard_table_model_spec.spl` exists.
+Behavioral re-run of the spec is environment-blocked on this host: the pinned
+tracked Rust seed rejects the `@representation_boundary` decorator used by
+test-runner infrastructure at HEAD (`test_runner_client.spl:9`), failing all
+spec runs repo-wide. Fix stands as verified by inspection; bug remains closed.
+
+## Verification note (2026-11-26, BF-5 lane, `origin/release/1.0.0`)
+
+Behaviorally re-verified on Windows using `wa3_shared_bin\simple.exe` (`89b32c2e80d`, `SIMPLE_LIB=C:\dev\wt\bf-5-app-mcp-cli\src`, `--mode=interpreter`):
+- `test/01_unit/app/dashboard/dashboard_table_model_spec.spl`: `5/5` passed (`outcome=OK`)
+- `test/01_unit/app/dashboard/dashboard_serve_spec.spl`: `6/6` passed (`outcome=OK`)
+- `test/01_unit/app/dashboard_framework_policy_spec.spl`: `9/9` passed (`outcome=OK`)
+
+Status remains `FIXED`.

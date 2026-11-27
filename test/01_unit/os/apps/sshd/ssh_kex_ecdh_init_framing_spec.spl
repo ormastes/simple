@@ -1,0 +1,82 @@
+# Spec-first regression: RFC 8731 section 3, curve25519-sha256 only.
+# Runtime UNRUN: no admitted self-hosted runner in this repair campaign.
+use std.spipe.*
+use os.apps.sshd.ssh_kex.{ssh_parse_kex_ecdh_init}
+use os.apps.sshd.ssh_session_helpers.{ssh_validate_kex_ecdh_init_payload}
+
+fn _framing_point() -> [u8]:
+    var point: [u8] = []
+    val bytes: [u8] = [0u8, 0x7fu8, 0x80u8, 0xffu8]
+    var index: i64 = 0
+    while index < 32:
+        point.push(bytes[index % 4])
+        index = index + 1
+    point
+
+fn _framing_packet() -> [u8]:
+    var packet: [u8] = [30u8, 0u8, 0u8, 0u8, 32u8]
+    for value in _framing_point():
+        packet.push(value)
+    packet
+
+fn _reject_framing(packet: [u8]):
+    expect(ssh_parse_kex_ecdh_init(packet).is_err()).to_equal(true)
+    expect(ssh_validate_kex_ecdh_init_payload(packet, false).is_err()).to_equal(true)
+    expect(ssh_validate_kex_ecdh_init_payload(packet, true).is_err()).to_equal(true)
+
+describe "Curve25519 KEX_ECDH_INIT exact framing":
+    it "accepts exactly32 binary bytes without changing their order":
+        val parsed = ssh_parse_kex_ecdh_init(_framing_packet())
+        expect(parsed.is_ok()).to_equal(true)
+        match parsed:
+            case Ok(point): expect(point).to_equal(_framing_point())
+            case Err(_): expect(false).to_equal(true)
+        expect(ssh_validate_kex_ecdh_init_payload(_framing_packet(), false).is_ok()).to_equal(true)
+        expect(ssh_validate_kex_ecdh_init_payload(_framing_packet(), true).is_ok()).to_equal(true)
+
+    it "rejects every truncation before the complete37 byte payload":
+        val valid = _framing_packet()
+        var length: i64 = 0
+        while length < 37:
+            var truncated: [u8] = []
+            var index: i64 = 0
+            while index < length:
+                truncated.push(valid[index])
+                index = index + 1
+            _reject_framing(truncated)
+            length = length + 1
+
+    it "rejects inconsistent and high-bit length prefixes on full payloads":
+        val lengths: [u8] = [0u8, 1u8, 31u8, 33u8, 0x80u8, 0xffu8]
+        for length in lengths:
+            var packet = _framing_packet()
+            packet[4] = length
+            _reject_framing(packet)
+        var position: i64 = 1
+        while position < 4:
+            var packet = _framing_packet()
+            packet[position] = 0x80u8
+            _reject_framing(packet)
+            position = position + 1
+
+    it "rejects complete but wrong-width key strings including33 and56":
+        val widths: [i64] = [0, 1, 31, 33, 56]
+        for width in widths:
+            var packet: [u8] = [30u8, 0u8, 0u8, 0u8, width.to_u8()]
+            var index: i64 = 0
+            while index < width:
+                packet.push(1u8)
+                index = index + 1
+            _reject_framing(packet)
+
+    it "rejects trailing bytes after an otherwise valid point":
+        var packet = _framing_packet()
+        packet.push(0u8)
+        _reject_framing(packet)
+
+    it "rejects wrong message types in both strict modes":
+        val opcodes: [u8] = [0u8, 2u8, 4u8, 20u8, 21u8, 31u8, 0xffu8]
+        for opcode in opcodes:
+            var packet = _framing_packet()
+            packet[0] = opcode
+            _reject_framing(packet)

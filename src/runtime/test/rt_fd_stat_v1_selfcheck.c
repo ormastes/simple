@@ -64,11 +64,22 @@ int main(void) {
     return 0;
 }
 #else
+#if defined(_MSC_VER) || defined(_UCRT)
+static void __cdecl prior_invalid_parameter_handler(
+    const wchar_t *expression, const wchar_t *function,
+    const wchar_t *file, unsigned int line, uintptr_t reserved) {
+    (void)expression; (void)function; (void)file; (void)line; (void)reserved;
+    assert(!"snapshot leaked invalid descriptor to the caller's handler");
+}
+#endif
+
 int main(void) {
     char path[MAX_PATH];
     char directory[MAX_PATH];
     DWORD written = 0;
     uint64_t observed[RT_FD_STAT_V1_WORDS];
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    _set_error_mode(_OUT_TO_STDERR);
     assert(GetTempPathA(MAX_PATH, directory) > 0);
     assert(GetTempFileNameA(directory, "sfd", 0, path) != 0);
     HANDLE handle = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL,
@@ -77,12 +88,27 @@ int main(void) {
     assert(WriteFile(handle, "windows", 7, &written, NULL) && written == 7);
     int fd = _open_osfhandle((intptr_t)handle, _O_BINARY | _O_RDONLY);
     assert(fd >= 0);
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) || defined(_UCRT)
+    _invalid_parameter_handler original_handler =
+        _set_thread_local_invalid_parameter_handler(prior_invalid_parameter_handler);
     assert(rt_fd_stat_snapshot_v1_impl(fd, observed, RT_FD_STAT_V1_BYTES) == 0);
     assert(observed[3] == 7 && observed[9] == RT_FD_STAT_KIND_V1_REGULAR);
     assert(observed[1] != 0 || observed[2] != 0);
+    assert(observed[6] > 0 && observed[7] > 0 && observed[8] > 0);
+    uint64_t repeated[RT_FD_STAT_V1_WORDS];
+    assert(rt_fd_stat_snapshot_v1_impl(fd, repeated, RT_FD_STAT_V1_BYTES) == 0);
+    assert(memcmp(observed, repeated, sizeof(observed)) == 0);
+    assert(rt_fd_stat_snapshot_v1_impl(fd, observed, RT_FD_STAT_V1_BYTES - 1) == -EINVAL);
+    assert(rt_fd_stat_snapshot_v1_impl(fd, NULL, RT_FD_STAT_V1_BYTES) == -EINVAL);
     assert(_close(fd) == 0);
+    for (int i = 0; i < RT_FD_STAT_V1_WORDS; ++i) observed[i] = UINT64_MAX;
     assert(rt_fd_stat_snapshot_v1_impl(fd, observed, RT_FD_STAT_V1_BYTES) == -EBADF);
+    for (int i = 0; i < RT_FD_STAT_V1_WORDS; ++i) assert(observed[i] == 0);
+    assert(rt_fd_stat_snapshot_v1_impl(INT32_MAX, observed, RT_FD_STAT_V1_BYTES) == -EBADF);
+    assert(rt_fd_stat_snapshot_v1_impl(-1, observed, RT_FD_STAT_V1_BYTES) == -EBADF);
+    assert(rt_fd_stat_snapshot_v1_impl(INT64_MAX, observed, RT_FD_STAT_V1_BYTES) == -EBADF);
+    assert(_set_thread_local_invalid_parameter_handler(original_handler) ==
+        prior_invalid_parameter_handler);
 #else
     assert(rt_fd_stat_snapshot_v1_impl(fd, observed, RT_FD_STAT_V1_BYTES) == -ENOTSUP);
     assert(_close(fd) == 0);

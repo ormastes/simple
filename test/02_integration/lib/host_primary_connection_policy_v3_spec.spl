@@ -1,0 +1,63 @@
+# @req HOST-01 MUX-02
+# NOT_RUN: requires installed private Windows deployment fixture, real Docker,
+# admitted native runtime and the Host V3 foundation. No skip or fake owner.
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.orchestration.host_windows_deployment_v2.*
+use std.nogc_sync_mut.orchestration.host_windows_local_root_v3.*
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_primary_connection_policy_v3.host_primary_connection_policy_bytes_v3
+use os.apps.smux.runtime_connection_policy_v5.smux_runtime_connection_policy_load_v5
+use os.apps.smux.runtime_control_policy_v1.smux_runtime_control_policy_decode_v1
+use test.fixtures.orchestration.host_windows_deployment_v2.windows_deployment_fixture_v2
+
+fn connection_policy_fixture_v3() -> Result<HostWindowsLocalRootV3, text>:
+    val fixture = windows_deployment_fixture_v2()
+    var deployment: Option<HostWindowsDeploymentOwnerV2> = nil
+    match host_windows_deployment_enroll_v2(fixture.anchor, fixture.binding, fixture.credential,
+            fixture.configuration, fixture.engine, fixture.broker):
+        case HostWindowsDeploymentOpenV2.Ready(owner): deployment = Some(owner)
+        case HostWindowsDeploymentOpenV2.Rejected(error): return Err(error)
+        case HostWindowsDeploymentOpenV2.RecoveryRequired(_, error): return Err(error)
+        case HostWindowsDeploymentOpenV2.CleanupRequired(cleanup, error):
+            assert(host_windows_deployment_cleanup_v2(cleanup).closed)
+            return Err(error)
+    match host_windows_local_open_v3(deployment.unwrap()):
+        case HostWindowsLocalOpenV3.Ready(owner): Ok(owner)
+        # Quarantine prevents workload admission, not current policy inspection.
+        case HostWindowsLocalOpenV3.Pending(owner, _): Ok(owner)
+        case HostWindowsLocalOpenV3.Rejected(error): Err(error)
+        case HostWindowsLocalOpenV3.CleanupRequired(cleanup, error):
+            assert(host_windows_local_cleanup_v3(cleanup).closed)
+            Err(error)
+
+describe "Enrolled primary connection policy authority":
+    it "loads the exact current enrolled policy through the existing strict decoder":
+        step("Open a real enrolled Host owner and compare its protected policy projection")
+        val owner = connection_policy_fixture_v3().unwrap()
+        val local = HostLocalRootV3.Windows(owner)
+        val metadata = owner.current_v3()
+        val bytes = host_primary_connection_policy_bytes_v3(local)
+        val loaded = smux_runtime_connection_policy_load_v5(local)
+        # Close native owners before assertions can abort this case.
+        val closed = host_windows_local_close_v3(owner)
+        assert(closed.closed)
+        assert(closed.cleanup.is_none())
+        val expected_bytes = metadata.unwrap().broker_policy_bytes
+        expect(bytes.unwrap()).to_equal(expected_bytes)
+        val expected = smux_runtime_control_policy_decode_v1(expected_bytes).unwrap()
+        val actual = loaded.unwrap()
+        expect(actual.principal_id).to_equal(expected.principal_id)
+        expect(actual.allowed).to_equal(expected.allowed)
+        expect(actual.max_lease_ms).to_equal(expected.max_lease_ms)
+
+    it "rejects a copied owner after its retained native deployment and writer close":
+        step("Close the actual owner then attempt policy loading through its stale copy")
+        val owner = connection_policy_fixture_v3().unwrap()
+        val stale = HostLocalRootV3.Windows(owner)
+        val before = host_primary_connection_policy_bytes_v3(stale)
+        val closed = host_windows_local_close_v3(owner)
+        assert(closed.closed)
+        assert(closed.cleanup.is_none())
+        assert(before.is_ok())
+        expect(host_primary_connection_policy_bytes_v3(stale).is_err()).to_equal(true)
+        expect(smux_runtime_connection_policy_load_v5(stale).is_err()).to_equal(true)

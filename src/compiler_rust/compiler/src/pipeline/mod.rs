@@ -30,7 +30,7 @@ mod parsing;
 pub use core::{CompilerPipeline, SimdMode};
 pub use execution::{
     generate_smf_bytes, generate_smf_bytes_for_target, generate_smf_from_object, generate_smf_from_object_for_target,
-    native_single_file_project_hint,
+    native_single_file_project_hint, seed_interpreter_from_smf_snapshot, INTERP_SNAPSHOT_SECTION_NAME,
 };
 
 // Re-export startup configuration types (#1979, #1986)
@@ -48,7 +48,6 @@ mod tests {
     use crate::import_loader::has_script_statements;
     use crate::lint::{LintConfig, LintLevel, LintName};
     use crate::mir::{self, ContractMode};
-    use crate::monomorphize::monomorphize_module;
     use crate::pipeline::SimdMode;
     use crate::CompileError;
     use simple_common::target::{Target, TargetArch, TargetOS};
@@ -474,8 +473,7 @@ main = 0
         let source = "let x: i32 = 2\nmatch x:\n    2 =>\n        main = 20\n    _ =>\n        main = 0";
         let mut parser = simple_parser::Parser::new(source);
         let ast = parser.parse().expect("parse ok");
-        let module = monomorphize_module(&ast);
-        let item_kinds: Vec<&str> = module
+        let item_kinds: Vec<&str> = ast
             .items
             .iter()
             .map(|n| match n {
@@ -1340,6 +1338,8 @@ main = 0
             is_ghost: false,
             is_sync: false,
             has_suspension: false,
+            generic_params: vec![],
+            generic_bounds: vec![],
         };
         module.functions.push(func);
 

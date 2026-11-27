@@ -1,11 +1,11 @@
 # Root cause: native `.get()` on nil Dict receiver returns phantom Some; `.len()` returns -1
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-25 — fix landed via `dict_get_preserve_flat_nil`; verified by code inspection
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+(Supersedes the 2026-09-16 normalization-pass "needs owner triage" note.)
 
 **Date:** 2026-07-27
-**Status:** Root-caused (analysis only — no src/ change in this lane)
+**Status:** FIXED (landed 2026-08-01, re-reachable 2026-08-17 via
+`as_option: true`; verified in source 2026-11-25 — see note at end)
 **Parent bug:** `doc/08_tracking/bug/hir_stub_module_nil_dict_get_phantom_some_2026-07-27.md`
 **Red spec:** `test/01_unit/compiler/hir/nil_dict_receiver_phantom_option_spec.spl`
 
@@ -167,3 +167,30 @@ Run: `bin/simple test test/01_unit/compiler/hir/nil_dict_receiver_phantom_option
 `functions.len() < 0` mitigation guards in `module_lowering.spl` become
 defense-in-depth and can be relaxed on their own schedule.
 
+
+## Verification 2026-11-25 (p2w4-al lane, Windows host)
+
+The "Proposed minimal fix (NOT applied)" section above is historical: the fix
+landed in a stronger form. At release/1.0.0 HEAD:
+
+- `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:3478`
+  `dict_get_preserve_flat_nil` routes `rt_dict_get`'s miss sentinel
+  (`RT_NIL == 3`) AROUND `decode_runtime_value` with an explicit nil/value
+  select, preserving the flat-Option nil for integer, bool, and str value
+  types (covering both the integer `>> 3` arm and the string
+  `rt_interp_cstr` arm this doc flags as follow-up work).
+- The `.get(key)` lowering calls it:
+  `method_calls_literals.spl:4640` calls
+  `lower_dict_runtime_read(receiver, receiver_local, key_local, true)` —
+  `as_option: true`, which reaches `dict_get_preserve_flat_nil` at
+  `expr_dispatch.spl:3787`. The comment block at
+  `method_calls_literals.spl:4621-4639` documents the 2026-08-17 repair that
+  made the guard reachable.
+- Red spec `test/01_unit/compiler/hir/nil_dict_receiver_phantom_option_spec.spl`
+  exists.
+
+Execution evidence is NOT claimed: the spec's authoritative lane is native,
+and on this host `bin/simple.exe test` cannot load the tree at all
+(`unknown decorator '@representation_boundary'` in
+`src/app/test_runner_new/test_runner_client.spl` — known release/1.0.0
+source/binary inconsistency). Closure rests on source inspection only.

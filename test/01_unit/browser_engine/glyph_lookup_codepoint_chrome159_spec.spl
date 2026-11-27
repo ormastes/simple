@@ -1,0 +1,77 @@
+"""
+## Purpose and audience
+Purpose: Pin that the shared 5x7 glyph lookup by TEXT (`glyph_index_for_char`,
+`glyph_rows_for_char`, and Engine2D's `glyph_data`) counts codepoints, not
+bytes, so the 3-byte U+2022 bullet -- Chrome 159's password mask glyph --
+resolves to its own cell instead of the unknown box.
+Audience: browser-engine and Engine2D glyph maintainers.
+
+The lookup gated on `ch.len() == 1`. `text.len()` counts BYTES, so `•`
+(E2 80 A2) failed the gate and fell through to the unknown box outline, while
+the browser paint path (`glyph_index_for_char_code` on decoded codepoints)
+already drew the disc. Chrome 159 masks a password with U+2022
+(`-webkit-text-security: disc`).
+
+No Vulkan row: the Vulkan bitmap-font atlas covers ASCII 32..126 only and
+rejects any run with another character, so there is no GPU glyph path for
+U+2022 to exercise. The device frame of a password field is pinned by
+`input_password_mask_chrome159_spec` AC-5 (device pixels equal the software
+raster).
+
+Filed in doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(`password_mask_glyph`, glyph lookup gate).
+"""
+
+"""
+Traceability: REQ-WEB-RENDER-001 — the glyph lookup uses codepoint semantics.
+"""
+# @cover src/lib/common/ui/glyph_bitmap_5x7.spl 1%
+use std.spec.*
+use common.ui.glyph_bitmap_5x7.{
+    glyph_index_for_char, glyph_rows_for_char, glyph_row_bits, glyph_index_for_char_code, FONT_CHARSET
+}
+use std.gc_async_mut.gpu.engine2d.glyph.{glyph_data}
+use std.common.encoding.utf8.{text_codepoints}
+
+val BULLET: text = "•"
+
+fn _cell_rows(gi: i32) -> [i32]:
+    [
+        glyph_row_bits(gi, 0), glyph_row_bits(gi, 1), glyph_row_bits(gi, 2),
+        glyph_row_bits(gi, 3), glyph_row_bits(gi, 4), glyph_row_bits(gi, 5),
+        glyph_row_bits(gi, 6)
+    ]
+
+describe "glyph lookup by text counts codepoints (U+2022)":
+    it "AC-1: the bullet resolves to its own cell":
+        step("U+2022 is cell 88, the same cell the codepoint path uses")
+        expect(glyph_index_for_char_code(8226)).to_equal(88)
+        expect(glyph_index_for_char(BULLET)).to_equal(88)
+
+    it "AC-2: the bullet rows are the disc, not the unknown box":
+        step("disc: rows 2..4 = 01110")
+        expect(glyph_rows_for_char(BULLET)).to_equal([0, 0, 14, 14, 14, 0, 0])
+        expect(glyph_rows_for_char(BULLET)).to_equal(_cell_rows(88))
+        expect(glyph_rows_for_char(BULLET) == _cell_rows(-1)).to_equal(false)
+
+    it "AC-3: Engine2D glyph_data returns the same disc":
+        expect(glyph_data(BULLET)).to_equal([0, 0, 14, 14, 14, 0, 0])
+
+    it "AC-4: ASCII and multi-codepoint texts keep their old answers":
+        step("A is cell 0, a is 62; two codepoints and an unknown codepoint are -1")
+        expect(glyph_index_for_char("A")).to_equal(0)
+        expect(glyph_index_for_char("a")).to_equal(62)
+        expect(glyph_index_for_char("AB")).to_equal(-1)
+        expect(glyph_index_for_char("é")).to_equal(-1)
+        expect(glyph_index_for_char("")).to_equal(-1)
+        expect(glyph_rows_for_char("é")).to_equal(_cell_rows(-1))
+
+    it "AC-5: the charset scan is byte-indexed only because FONT_CHARSET is ASCII":
+        step("owner rule: text offsets are BYTES; FONT_CHARSET byte_len equals its codepoint count")
+        expect(FONT_CHARSET.byte_len()).to_equal(text_codepoints(FONT_CHARSET).len())
+        step("the last charset entry resolves to its byte index")
+        expect(glyph_index_for_char("z")).to_equal(FONT_CHARSET.byte_len() - 1)
+        step("a non-ASCII codepoint never aliases an ASCII cell; a 4-byte codepoint and a bullet run are -1")
+        expect(glyph_index_for_char("Ł")).to_equal(-1)
+        expect(glyph_index_for_char("😀")).to_equal(-1)
+        expect(glyph_index_for_char(BULLET + "A")).to_equal(-1)

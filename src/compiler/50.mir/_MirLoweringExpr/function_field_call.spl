@@ -4,11 +4,11 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.MirOperand
 use compiler.mir.mir_instruction_support.mir_operand_copy
 use compiler.hir.hir_definitions.{HirExpr, HirCallArg}
-use compiler.hir.hir_types.{HirTypeKind, SymbolKind}
+use compiler.hir.hir_types.{HirTypeKind, SymbolId, SymbolKind}
 use compiler.mir._MirLoweringExpr.expr_dispatch.*
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir.mir_lowering_stmts.*
-use compiler.mir._MirLowering.provider_metadata.mir_class_identity
+use compiler.mir._MirLowering.provider_metadata.mir_class_identity_raw
 use compiler.mir.nominal_owner_diagnostics.{mir_nominal_profile_take_receipt}
 
 # This diagnostic bridge belongs to this module. Sibling private SFFI
@@ -16,11 +16,13 @@ use compiler.mir.nominal_owner_diagnostics.{mir_nominal_profile_take_receipt}
 @unsafe(reason: "raw tagged-enum discriminant projection ABI", capabilities: [ffi])
 extern fn rt_enum_discriminant<T>(value: T) -> i64
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _function_field_hir_enum_discriminant", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _function_field_hir_enum_discriminant(value: HirTypeKind) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_discriminant<HirTypeKind>(value)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _function_field_mir_enum_discriminant", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _function_field_mir_enum_discriminant(value: MirTypeKind) -> i64:
     unsafe(capabilities: [ffi]):
@@ -33,7 +35,7 @@ impl MirLowering:
         val owner = self.resolve_base_struct_name(receiver, receiver_local) ?? ""
         val layout = self.declared_struct_layout_key(owner)
         if not self.struct_field_order.has(layout) or not self.struct_field_hir_type.has(layout):
-            return nil
+            return None
         val names = self.struct_field_order[layout]
         val types = self.struct_field_hir_type[layout]
         var field_index = 0
@@ -42,7 +44,7 @@ impl MirLowering:
                 break
             field_index = field_index + 1
         if field_index >= names.len() or field_index >= types.len():
-            return nil
+            return None
         val field_type = self.declared_field_type_in_current_table(layout, field_index, types[field_index])
         match field_type.kind:
             case HirTypeKind.Error:
@@ -50,35 +52,34 @@ impl MirLowering:
                     case HirTypeKind.Function(_, _, _):
                         self.error_fatal("function field signature ownership is unavailable or unsupported in the consumer", Some(receiver.span))
                     case _: ()
-                return nil
+                return None
             case HirTypeKind.Function(params, ret, _):
                 if args.len() != params.len():
                     self.error_fatal("function field call argument count differs from its declaration", Some(receiver.span))
-                    return nil
+                    return None
                 match ret.kind:
                     case HirTypeKind.Error:
                         self.error_fatal("function field return owner is unavailable in the consumer", Some(receiver.span))
-                        return nil
+                        return None
                     case _: ()
-                var operands: [MirOperand] = []
                 var parameter_types: [MirType] = []
                 # Capture the callable before argument side effects can replace
                 # the field on this receiver.
                 var builder = self.builder
                 val callee = builder.emit_get_field(mir_operand_copy(receiver_local), field_index, MirType.i64())
                 self.builder = builder
+                val prev_field_hir_bindings = erased_callback_hir_bindings_swap_v1(
+                    self.method_receiver_erased_hir_bindings_v1(receiver_local, Some(receiver), []))
                 var index = 0
                 while index < args.len():
-                    if args[index].has_name:
-                        self.error_fatal("function field call requires positional arguments", Some(args[index].span))
-                        return nil
-                    val argument = self.lower_method_call_arg(args[index], params, index)
-                    operands = operands.push(mir_operand_copy(argument))
                     parameter_types = parameter_types.push(self.lower_type(params[index]))
                     index = index + 1
+                val field_call_pack = self.lower_explicit_call_args_with_writebacks_v1([], args, params, 0, SymbolId(id: -1))
+                val _restored_field_hir_bindings = erased_callback_hir_bindings_swap_v1(prev_field_hir_bindings)
                 val return_type = self.lower_type(ret)
                 val signature = MirSignature(params: parameter_types, return_type: return_type, is_variadic: false)
-                val result = self.emit_function_value_call(callee, operands, signature, return_type)
+                val result = self.emit_function_value_call(callee, field_call_pack.operands, signature, return_type)
+                self.emit_mut_ref_primitive_writebacks_v1(field_call_pack.writebacks)
                 if mir_nominal_profile_take_receipt():
                     val actual_mir = self.local_mir_type_of(result) ?? MirType.unit()
                     eprint("[nominal-owner] function-field-return field={field_name} layout={layout} local={result.id} hir_ret_disc={_function_field_hir_enum_discriminant(ret.kind)} mir_ret_disc={_function_field_mir_enum_discriminant(return_type.kind)} operand_mir_disc={_function_field_mir_enum_discriminant(actual_mir.kind)}\n")
@@ -106,7 +107,7 @@ impl MirLowering:
                                     if self.struct_field_order.has(result_layout):
                                         self.struct_value_syms[result.id] = result_layout
                                 case SymbolKind.Class:
-                                    self.struct_value_syms[result.id] = mir_class_identity(declaration)
+                                    self.struct_value_syms[result.id] = mir_class_identity_raw(self.symbols, return_symbol.id)
                                 case _: ()
                     case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
                         self.runtime_array_locals[result.id] = true
@@ -122,4 +123,4 @@ impl MirLowering:
                     val result_owner = self.struct_value_syms.get(result.id) ?? ""
                     eprint("[nominal-owner] function-field-recorded field={field_name} local={result.id} owner={result_owner}\n")
                 return Some(result)
-            case _: return nil
+            case _: return None

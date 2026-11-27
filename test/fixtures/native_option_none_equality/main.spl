@@ -1,0 +1,374 @@
+# Producer x consumer matrix for Option None-ness on the native lane.
+# Class: `opt == None` / `opt != None` (and `None == opt`) were a raw word Eq
+# against a fresh `rt_enum_new(1, None, 0)`; every None that is not that exact
+# box compared unequal. Stage-2 site: src/compiler/50.mir/mir_verify.spl
+# check_call (`val callee_opt: T? = fn_by_name[k]; if callee_opt == None`).
+# Spec: test/01_unit/compiler/mir/option_none_literal_presence_spec.spl
+#
+# Every consumer runs in the producer's own function on the producer's local.
+# Columns: eq `o == None`, ne `o != None`, req `None == o`, rne `None != o`,
+# nil `o == nil`, match `case None`, ifval `if val`, q `.?`, coalesce `??`.
+# Rows whose seed or native answer is wrong for a different reason live in
+# known_wrong/main.spl (cross-producer Option==Option, scalar control, i64
+# payload 3 / if-val, array .get, unbound `d[k] == None` on a record).
+#
+# Build + run (cranelift and llvm):
+#   sh /home/yoon/dev/boot-fable-lane-scripts/check_fx.sh <stage2> <workdir> \
+#     none_eq=test/fixtures/native_option_none_equality/main.spl
+#   (SIMPLE_BOOTSTRAP=1 native-build main.spl --backend=<be> --entry-closure)
+#
+# Red on stage2 s2probe-p3traittail3 (pinned e45e89468d3e), cranelift == llvm:
+# eq/ne/req/rne inverted on the hit=false rows dict_index, dict_get,
+# array_first, nil_into_opt, safe_nav, i64_dict_get (x2), i64_nil_into_opt
+# (x2), and erased param/generic (`fn f(o: F?): o == None` given a dict miss).
+# Every other cell already matched.
+#
+# Expected stdout (= seed `simple run main.spl`, banner lines removed):
+#   dict_index eq=true ne=false req=true rne=false nil=true match=none ifval=none q=n coalesce=-9
+#   dict_get eq=true ne=false req=true rne=false nil=true match=none ifval=none q=n coalesce=-9
+#   literal_none eq=true ne=false req=true rne=false nil=true match=none ifval=none q=n coalesce=-9
+#   option_none eq=true ne=false req=true rne=false nil=true match=none ifval=none q=n coalesce=-9
+#   ret_explicit eq=true ne=false req=true rne=false nil=true match=none ifval=none q=n coalesce=-9
+#   ret_tail eq=true ne=false req=true rne=false nil=true match=none ifval=none q=n coalesce=-9
+#   array_first eq=true ne=false req=true rne=false nil=true match=none ifval=none q=n coalesce=-9
+#   field_default eq=true ne=false req=true rne=false nil=true match=none ifval=none q=n coalesce=-9
+#   nil_into_opt eq=true ne=false req=true rne=false nil=true match=none ifval=none q=n coalesce=-9
+#   safe_nav eq=true ne=false req=true rne=false nil=true match=none ifval=none q=n coalesce=-9
+#   coalesce_opt eq=true ne=false req=true rne=false nil=true match=none ifval=none q=n coalesce=-9
+#   generic eq=true ne=false req=true rne=false nil=true match=none ifval=none q=n coalesce=-9
+#   trait eq=true ne=false req=true rne=false nil=true match=none ifval=none q=n coalesce=-9
+#   i64_literal_none eq=true ne=false req=true rne=false nil=true match=none q=n coalesce=-9
+#   i64_literal_none eq=true ne=false req=true rne=false nil=true match=none q=n coalesce=-9
+#   i64_ret eq=true ne=false req=true rne=false nil=true match=none q=n coalesce=-9
+#   i64_ret eq=true ne=false req=true rne=false nil=true match=none q=n coalesce=-9
+#   i64_dict_get eq=true ne=false req=true rne=false nil=true match=none q=n coalesce=-9
+#   i64_dict_get eq=true ne=false req=true rne=false nil=true match=none q=n coalesce=-9
+#   i64_nil_into_opt eq=true ne=false req=true rne=false nil=true match=none q=n coalesce=-9
+#   i64_nil_into_opt eq=true ne=false req=true rne=false nil=true match=none q=n coalesce=-9
+#   erased field=true param=true generic=true
+#   dict_index eq=false ne=true req=false rne=true nil=false match=some5 ifval=some5 q=y coalesce=5
+#   dict_get eq=false ne=true req=false rne=true nil=false match=some6 ifval=some6 q=y coalesce=6
+#   literal_none eq=false ne=true req=false rne=true nil=false match=some1 ifval=some1 q=y coalesce=1
+#   option_none eq=false ne=true req=false rne=true nil=false match=some2 ifval=some2 q=y coalesce=2
+#   ret_explicit eq=false ne=true req=false rne=true nil=false match=some3 ifval=some3 q=y coalesce=3
+#   ret_tail eq=false ne=true req=false rne=true nil=false match=some4 ifval=some4 q=y coalesce=4
+#   array_first eq=false ne=true req=false rne=true nil=false match=some7 ifval=some7 q=y coalesce=7
+#   field_default eq=false ne=true req=false rne=true nil=false match=some9 ifval=some9 q=y coalesce=9
+#   nil_into_opt eq=false ne=true req=false rne=true nil=false match=some10 ifval=some10 q=y coalesce=10
+#   safe_nav eq=false ne=true req=false rne=true nil=false match=some11 ifval=some11 q=y coalesce=11
+#   coalesce_opt eq=false ne=true req=false rne=true nil=false match=some12 ifval=some12 q=y coalesce=12
+#   generic eq=false ne=true req=false rne=true nil=false match=some13 ifval=some13 q=y coalesce=13
+#   trait eq=false ne=true req=false rne=true nil=false match=some14 ifval=some14 q=y coalesce=14
+#   i64_literal_none eq=false ne=true req=false rne=true nil=false match=some0 q=y coalesce=0
+#   i64_literal_none eq=false ne=true req=false rne=true nil=false match=some42 q=y coalesce=42
+#   i64_ret eq=false ne=true req=false rne=true nil=false match=some0 q=y coalesce=0
+#   i64_ret eq=false ne=true req=false rne=true nil=false match=some42 q=y coalesce=42
+#   i64_dict_get eq=false ne=true req=false rne=true nil=false match=some0 q=y coalesce=0
+#   i64_dict_get eq=false ne=true req=false rne=true nil=false match=some42 q=y coalesce=42
+#   i64_nil_into_opt eq=false ne=true req=false rne=true nil=false match=some0 q=y coalesce=0
+#   i64_nil_into_opt eq=false ne=true req=false rne=true nil=false match=some42 q=y coalesce=42
+#   erased field=false param=false generic=false
+
+struct F:
+    id: i64
+    name: text
+
+struct Holder:
+    inner: F?
+
+struct Slot:
+    id: i64
+    pick: F? = None
+
+trait Finder:
+    fn find(hit: bool) -> F?
+
+struct Box1:
+    tag: i64
+
+impl Finder for Box1:
+    fn find(hit: bool) -> F?:
+        if hit:
+            return Some(F(id: self.tag, name: "t"))
+        None
+
+fn mk(id: i64) -> F:
+    F(id: id, name: "f")
+
+fn ret_explicit(hit: bool) -> F?:
+    if hit:
+        return Some(mk(3))
+    return None
+
+fn ret_tail(hit: bool) -> F?:
+    if hit:
+        Some(mk(4))
+    else:
+        None
+
+fn gen_opt<T>(hit: bool, v: T) -> T?:
+    if hit:
+        return Some(v)
+    None
+
+fn via_trait(f: Finder, hit: bool) -> F?:
+    f.find(hit)
+
+fn i_ret(hit: bool, v: i64) -> i64?:
+    if hit:
+        return Some(v)
+    None
+
+fn is_none_generic<T>(o: T?) -> bool:
+    o == None
+
+fn is_none_param(o: F?) -> bool:
+    o == None
+
+fn p_dict_index(hit: bool):
+    var d: Dict<text, F> = {}
+    d["a"] = mk(5)
+    val k = if hit: "a" else: "zz"
+    val o: F? = d[k]
+    val m = match o:
+        case Some(f): "some{f.id}"
+        case None: "none"
+    var iv = "none"
+    if val f = o:
+        iv = "some{f.id}"
+    val q = if o.?: "y" else: "n"
+    val c = (o ?? F(id: -9, name: "d")).id
+    print "dict_index eq={o == None} ne={o != None} req={None == o} rne={None != o} nil={o == nil} match={m} ifval={iv} q={q} coalesce={c}"
+
+fn p_dict_get(hit: bool):
+    var d: Dict<text, F> = {}
+    d["a"] = mk(6)
+    val k = if hit: "a" else: "zz"
+    val o: F? = d.get(k)
+    val m = match o:
+        case Some(f): "some{f.id}"
+        case None: "none"
+    var iv = "none"
+    if val f = o:
+        iv = "some{f.id}"
+    val q = if o.?: "y" else: "n"
+    val c = (o ?? F(id: -9, name: "d")).id
+    print "dict_get eq={o == None} ne={o != None} req={None == o} rne={None != o} nil={o == nil} match={m} ifval={iv} q={q} coalesce={c}"
+
+fn p_literal_none(hit: bool):
+    val o: F? = if hit: Some(mk(1)) else: None
+    val m = match o:
+        case Some(f): "some{f.id}"
+        case None: "none"
+    var iv = "none"
+    if val f = o:
+        iv = "some{f.id}"
+    val q = if o.?: "y" else: "n"
+    val c = (o ?? F(id: -9, name: "d")).id
+    print "literal_none eq={o == None} ne={o != None} req={None == o} rne={None != o} nil={o == nil} match={m} ifval={iv} q={q} coalesce={c}"
+
+fn p_option_none(hit: bool):
+    val o: F? = if hit: Some(mk(2)) else: Option.None
+    val m = match o:
+        case Some(f): "some{f.id}"
+        case None: "none"
+    var iv = "none"
+    if val f = o:
+        iv = "some{f.id}"
+    val q = if o.?: "y" else: "n"
+    val c = (o ?? F(id: -9, name: "d")).id
+    print "option_none eq={o == None} ne={o != None} req={None == o} rne={None != o} nil={o == nil} match={m} ifval={iv} q={q} coalesce={c}"
+
+fn p_ret_explicit(hit: bool):
+    val o: F? = ret_explicit(hit)
+    val m = match o:
+        case Some(f): "some{f.id}"
+        case None: "none"
+    var iv = "none"
+    if val f = o:
+        iv = "some{f.id}"
+    val q = if o.?: "y" else: "n"
+    val c = (o ?? F(id: -9, name: "d")).id
+    print "ret_explicit eq={o == None} ne={o != None} req={None == o} rne={None != o} nil={o == nil} match={m} ifval={iv} q={q} coalesce={c}"
+
+fn p_ret_tail(hit: bool):
+    val o: F? = ret_tail(hit)
+    val m = match o:
+        case Some(f): "some{f.id}"
+        case None: "none"
+    var iv = "none"
+    if val f = o:
+        iv = "some{f.id}"
+    val q = if o.?: "y" else: "n"
+    val c = (o ?? F(id: -9, name: "d")).id
+    print "ret_tail eq={o == None} ne={o != None} req={None == o} rne={None != o} nil={o == nil} match={m} ifval={iv} q={q} coalesce={c}"
+
+fn p_array_first(hit: bool):
+    var xs: [F] = []
+    if hit:
+        xs.push(mk(7))
+    val o: F? = xs.first()
+    val m = match o:
+        case Some(f): "some{f.id}"
+        case None: "none"
+    var iv = "none"
+    if val f = o:
+        iv = "some{f.id}"
+    val q = if o.?: "y" else: "n"
+    val c = (o ?? F(id: -9, name: "d")).id
+    print "array_first eq={o == None} ne={o != None} req={None == o} rne={None != o} nil={o == nil} match={m} ifval={iv} q={q} coalesce={c}"
+
+fn p_field_default(hit: bool):
+    var s = Slot(id: 1)
+    if hit:
+        s.pick = Some(mk(9))
+    val o: F? = s.pick
+    val m = match o:
+        case Some(f): "some{f.id}"
+        case None: "none"
+    var iv = "none"
+    if val f = o:
+        iv = "some{f.id}"
+    val q = if o.?: "y" else: "n"
+    val c = (o ?? F(id: -9, name: "d")).id
+    print "field_default eq={o == None} ne={o != None} req={None == o} rne={None != o} nil={o == nil} match={m} ifval={iv} q={q} coalesce={c}"
+
+fn p_nil_into_opt(hit: bool):
+    val o: F? = if hit: Some(mk(10)) else: nil
+    val m = match o:
+        case Some(f): "some{f.id}"
+        case None: "none"
+    var iv = "none"
+    if val f = o:
+        iv = "some{f.id}"
+    val q = if o.?: "y" else: "n"
+    val c = (o ?? F(id: -9, name: "d")).id
+    print "nil_into_opt eq={o == None} ne={o != None} req={None == o} rne={None != o} nil={o == nil} match={m} ifval={iv} q={q} coalesce={c}"
+
+fn p_safe_nav(hit: bool):
+    val h: Holder? = if hit: Some(Holder(inner: Some(mk(11)))) else: None
+    val o: F? = h?.inner
+    val m = match o:
+        case Some(f): "some{f.id}"
+        case None: "none"
+    var iv = "none"
+    if val f = o:
+        iv = "some{f.id}"
+    val q = if o.?: "y" else: "n"
+    val c = (o ?? F(id: -9, name: "d")).id
+    print "safe_nav eq={o == None} ne={o != None} req={None == o} rne={None != o} nil={o == nil} match={m} ifval={iv} q={q} coalesce={c}"
+
+fn p_coalesce_opt(hit: bool):
+    val a: F? = None
+    val b: F? = if hit: Some(mk(12)) else: None
+    val o: F? = a ?? b
+    val m = match o:
+        case Some(f): "some{f.id}"
+        case None: "none"
+    var iv = "none"
+    if val f = o:
+        iv = "some{f.id}"
+    val q = if o.?: "y" else: "n"
+    val c = (o ?? F(id: -9, name: "d")).id
+    print "coalesce_opt eq={o == None} ne={o != None} req={None == o} rne={None != o} nil={o == nil} match={m} ifval={iv} q={q} coalesce={c}"
+
+fn p_generic(hit: bool):
+    val o: F? = gen_opt(hit, mk(13))
+    val m = match o:
+        case Some(f): "some{f.id}"
+        case None: "none"
+    var iv = "none"
+    if val f = o:
+        iv = "some{f.id}"
+    val q = if o.?: "y" else: "n"
+    val c = (o ?? F(id: -9, name: "d")).id
+    print "generic eq={o == None} ne={o != None} req={None == o} rne={None != o} nil={o == nil} match={m} ifval={iv} q={q} coalesce={c}"
+
+fn p_trait(hit: bool):
+    val o: F? = via_trait(Box1(tag: 14), hit)
+    val m = match o:
+        case Some(f): "some{f.id}"
+        case None: "none"
+    var iv = "none"
+    if val f = o:
+        iv = "some{f.id}"
+    val q = if o.?: "y" else: "n"
+    val c = (o ?? F(id: -9, name: "d")).id
+    print "trait eq={o == None} ne={o != None} req={None == o} rne={None != o} nil={o == nil} match={m} ifval={iv} q={q} coalesce={c}"
+
+fn q_i64_literal_none(hit: bool, v: i64):
+    val o: i64? = if hit: Some(v) else: None
+    val m = match o:
+        case Some(x): "some{x}"
+        case None: "none"
+    val q = if o.?: "y" else: "n"
+    val c = o ?? -9
+    print "i64_literal_none eq={o == None} ne={o != None} req={None == o} rne={None != o} nil={o == nil} match={m} q={q} coalesce={c}"
+
+fn q_i64_ret(hit: bool, v: i64):
+    val o: i64? = i_ret(hit, v)
+    val m = match o:
+        case Some(x): "some{x}"
+        case None: "none"
+    val q = if o.?: "y" else: "n"
+    val c = o ?? -9
+    print "i64_ret eq={o == None} ne={o != None} req={None == o} rne={None != o} nil={o == nil} match={m} q={q} coalesce={c}"
+
+fn q_i64_dict_get(hit: bool, v: i64):
+    var d: Dict<text, i64> = {}
+    d["a"] = v
+    val k = if hit: "a" else: "zz"
+    val o: i64? = d.get(k)
+    val m = match o:
+        case Some(x): "some{x}"
+        case None: "none"
+    val q = if o.?: "y" else: "n"
+    val c = o ?? -9
+    print "i64_dict_get eq={o == None} ne={o != None} req={None == o} rne={None != o} nil={o == nil} match={m} q={q} coalesce={c}"
+
+fn q_i64_nil_into_opt(hit: bool, v: i64):
+    val o: i64? = if hit: Some(v) else: nil
+    val m = match o:
+        case Some(x): "some{x}"
+        case None: "none"
+    val q = if o.?: "y" else: "n"
+    val c = o ?? -9
+    print "i64_nil_into_opt eq={o == None} ne={o != None} req={None == o} rne={None != o} nil={o == nil} match={m} q={q} coalesce={c}"
+
+fn erased_sites(hit: bool):
+    var d: Dict<text, F> = {}
+    d["a"] = mk(20)
+    val k = if hit: "a" else: "zz"
+    var s = Slot(id: 2)
+    if hit:
+        s.pick = Some(mk(21))
+    val g: F? = d[k]
+    print "erased field={s.pick == None} param={is_none_param(g)} generic={is_none_generic(g)}"
+
+fn run_all(hit: bool):
+    p_dict_index(hit)
+    p_dict_get(hit)
+    p_literal_none(hit)
+    p_option_none(hit)
+    p_ret_explicit(hit)
+    p_ret_tail(hit)
+    p_array_first(hit)
+    p_field_default(hit)
+    p_nil_into_opt(hit)
+    p_safe_nav(hit)
+    p_coalesce_opt(hit)
+    p_generic(hit)
+    p_trait(hit)
+    q_i64_literal_none(hit, 0)
+    q_i64_literal_none(hit, 42)
+    q_i64_ret(hit, 0)
+    q_i64_ret(hit, 42)
+    q_i64_dict_get(hit, 0)
+    q_i64_dict_get(hit, 42)
+    q_i64_nil_into_opt(hit, 0)
+    q_i64_nil_into_opt(hit, 42)
+    erased_sites(hit)
+
+fn main():
+    run_all(false)
+    run_all(true)

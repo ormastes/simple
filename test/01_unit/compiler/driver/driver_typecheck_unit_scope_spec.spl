@@ -1,0 +1,113 @@
+"""
+## Purpose and audience
+Regression spec for P0-3: ensures module-global unit diagnostic buffers
+(`_UNIT_PROFILE_NOTICES`, `unit_op_warnings`) and edition-warning caches
+(`_EDITION_UNKNOWN_WARN_COUNTS`) remain UAF-free across sequential
+`_typecheck_receipt_scoped_v1` / `unit_profile_drain_diagnostics` transient
+scopes.
+Audience: compiler engineers maintaining 80.driver and 30.types/units.
+
+## Operator workflow
+`SIMPLE_LIB=src bin/simple test test/01_unit/compiler/driver/driver_typecheck_unit_scope_spec.spl --mode=interpreter`
+"""
+# @req REQ-G4-DRV-UNIT-SCOPE
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_read}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{CompileOptions, CompileMode, driver_core_compile_options_default}
+use compiler.core.types.{reset_all_pools}
+use compiler.core.parser.{parser_init_with_path}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_hir_pipeline_passes.{run_typecheck_warn_pass}
+use compiler.driver.driver_unit_profile.{unit_profile_apply, unit_profile_drain_diagnostics}
+use compiler.types.units.unit_ops.{UnitOpVerdict, unit_op_verdict, unit_op_default_profile, unit_op_take_warnings}
+
+fn _build_unit_hir_module(src: text, path: text, mod_name: text) -> HirModule:
+    val parsed = parse_full_frontend(src, path, mod_name, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_module(parsed)
+
+describe "P0-3 unit diagnostic global buffer scope safety":
+    it "drains unit diagnostics across sequential transient scopes using in-place clear":
+        step("Reset unit pools and prepare two unit-op warning cycles inside transient scopes")
+        reset_all_pools()
+        unit_op_default_profile()
+        val _init_clear = unit_op_take_warnings()
+        parser_init_with_path("unit Hertz: f64 as hz\nunit Second: f64 as s\n", "unit_scope_world.spl")
+        parse_module_body()
+
+        step("Cycle 0: emit warning inside transient scope, drain, pause, promote, end")
+        expect(transient_scope_begin()).to_equal(true)
+        unit_profile_apply("", true)
+        val _stale0 = unit_profile_drain_diagnostics("mod0")
+        match unit_op_verdict("mul", "Hertz", "Second"):
+            case Allow(_): val _ok0 = 0
+            case _: expect(false).to_equal(true)
+        var d0 = unit_profile_drain_diagnostics("mod0")
+        expect(transient_scope_pause()).to_equal(true)
+        expect(transient_promote(d0)).to_equal(true)
+        expect(transient_scope_end()).to_equal(true)
+        expect(d0.len()).to_equal(1)
+        expect(d0[0]).to_contain("[unit SPL-UNIT-002] mod0:")
+
+        step("Cycle 1: emit warning in a second transient scope without UAF on global buffers")
+        expect(transient_scope_begin()).to_equal(true)
+        unit_profile_apply("", true)
+        val _stale1 = unit_profile_drain_diagnostics("mod1")
+        match unit_op_verdict("div", "Hertz", "Second"):
+            case Allow(_): val _ok1 = 0
+            case _: expect(false).to_equal(true)
+        var d1 = unit_profile_drain_diagnostics("mod1")
+        expect(transient_scope_pause()).to_equal(true)
+        expect(transient_promote(d1)).to_equal(true)
+        expect(transient_scope_end()).to_equal(true)
+        expect(d1.len()).to_equal(1)
+        expect(d1[0]).to_contain("[unit SPL-UNIT-002] mod1:")
+
+        step("Cycle 2: empty drain across a third transient scope leaves buffers intact")
+        expect(transient_scope_begin()).to_equal(true)
+        var d2 = unit_profile_drain_diagnostics("mod2")
+        expect(transient_scope_pause()).to_equal(true)
+        expect(transient_promote(d2)).to_equal(true)
+        expect(transient_scope_end()).to_equal(true)
+        expect(d2.len()).to_equal(0)
+
+    it "runs run_typecheck_warn_pass across multiple modules without leaking transient scope state":
+        step("Lower two modules and execute run_typecheck_warn_pass in Interpret and Check modes")
+        val m0 = _build_unit_hir_module("fn mod0_fn() -> i64:\n    1\n", "src/p03_m0.spl", "p03_m0")
+        val m1 = _build_unit_hir_module("fn mod1_fn() -> i64:\n    2\n", "src/p03_m1.spl", "p03_m1")
+        var modules: Dict<text, HirModule> = {}
+        modules["p03_m0"] = m0
+        modules["p03_m1"] = m1
+
+        var opts = driver_core_compile_options_default()
+        opts.mode = CompileMode.Interpret
+        val ctx_interp = CompileContext.create(opts)
+        val _out_interp = run_typecheck_warn_pass(ctx_interp, modules)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+
+        opts.mode = CompileMode.Check
+        val ctx_check = CompileContext.create(opts)
+        val _out_check = run_typecheck_warn_pass(ctx_check, modules)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+
+    it "clears global unit buffers in place and pre-resolves profile/edition before per-module scopes":
+        val profile_src = file_read("src/compiler/80.driver/driver_unit_profile.spl") ?? ""
+        val unit_ops_src = file_read("src/compiler/30.types/units/unit_ops.spl") ?? ""
+        val passes_src = file_read("src/compiler/80.driver/driver_hir_pipeline_passes.spl") ?? ""
+
+        expect(profile_src).to_contain("_UNIT_PROFILE_NOTICES.clear()")
+        expect(profile_src.contains("_UNIT_PROFILE_NOTICES = []")).to_equal(false)
+        expect(unit_ops_src).to_contain("unit_op_warnings.clear()")
+        expect(unit_ops_src.contains("unit_op_warnings = []")).to_equal(false)
+        expect(passes_src).to_contain("unit_profile_policy()")
+        expect(passes_src).to_contain("unit_profile_apply(")
+        expect(passes_src).to_contain("unit_profile_drain_diagnostics(")

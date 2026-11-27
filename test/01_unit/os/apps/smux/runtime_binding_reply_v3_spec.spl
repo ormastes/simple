@@ -1,0 +1,60 @@
+# AUTHORED_UNRUN. Codec data only, never positive provider/owner evidence.
+use std.spec.{describe, it, expect, step}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use os.apps.smux.runtime_binding_reply_v3.{SmuxRuntimeBindingReplyV3,
+    smux_runtime_binding_reply_encode_v3, smux_runtime_binding_reply_decode_v3}
+
+fn reply_fixture_v3() -> SmuxRuntimeBindingReplyV3:
+    SmuxRuntimeBindingReplyV3(binding_uid: "bind-a", service_incarnation: "b".repeat(32),
+        binding_digest: "a".repeat(64), workload_operation_id: "workload-a", helper_operation_id: "helper-a",
+        request_digest: "c".repeat(64), status: "planned", code: "planned", committed: false,
+        stream_owned: false, cleanup_retained: false, host_release_pending: false)
+
+fn reply_fields_fixture_v3() -> Dict<text, SdnValue>:
+    val bytes = smux_runtime_binding_reply_encode_v3(reply_fixture_v3()).unwrap()
+    val parsed = sdn_parse_strict_v1(bytes, SdnStrictLimitsV1(max_source_bytes: 4096,
+        max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 32)).unwrap()
+    match parsed.value:
+        case SdnValue.Dict(fields): fields
+        case _: panic("encoded binding reply must be a dictionary")
+
+describe "strict smux runtime binding reply codec":
+    it "round trips bounded canonical facts and permits only one terminal newline":
+        step("Retain separate binding and common plan digests without asserting runtime success")
+        val bytes = smux_runtime_binding_reply_encode_v3(reply_fixture_v3()).unwrap()
+        expect(smux_runtime_binding_reply_decode_v3(bytes).unwrap().request_digest).to_equal("c".repeat(64))
+        expect(smux_runtime_binding_reply_decode_v3(bytes + "\n").is_ok()).to_equal(true)
+        expect(smux_runtime_binding_reply_decode_v3(bytes + "\n\n").is_err()).to_equal(true)
+        expect(smux_runtime_binding_reply_decode_v3("x".repeat(4098)).is_err()).to_equal(true)
+
+    it "requires verified grant correlations for stream ownership and released facts":
+        step("Reject ownership or release assertions without complete grant and adoption correlations")
+        for status in ["cleanup-required", "unconfirmed", "released"]:
+            var reply = reply_fixture_v3()
+            reply.status = status
+            reply.committed = true
+            if status != "released":
+                reply.stream_owned = true
+                reply.cleanup_retained = true
+                reply.host_release_pending = true
+            expect(smux_runtime_binding_reply_encode_v3(reply).is_err()).to_equal(true)
+        var reply = reply_fixture_v3()
+        reply.helper_grant_id = "grant-a"
+        expect(smux_runtime_binding_reply_encode_v3(reply).is_err()).to_equal(true)
+
+    it "rejects unknown statuses extra fields wrong types and unsupported capability assertions":
+        step("Fail closed on malformed or escalated reply facts")
+        for key in ["inputSupported", "geometrySupported", "interactive", "completionObserved"]:
+            var fields = reply_fields_fixture_v3()
+            fields[key] = SdnValue.Bool(true)
+            expect(smux_runtime_binding_reply_decode_v3(sdn_encode_canonical(SdnValue.Dict(fields))).is_err()).to_equal(true)
+        for key in ["status", "committed", "requestDigest", "version"]:
+            var fields = reply_fields_fixture_v3()
+            fields[key] = SdnValue.String("unsupported")
+            expect(smux_runtime_binding_reply_decode_v3(sdn_encode_canonical(SdnValue.Dict(fields))).is_err()).to_equal(true)
+        var fields = reply_fields_fixture_v3()
+        fields["authority"] = SdnValue.Bool(true)
+        expect(smux_runtime_binding_reply_decode_v3(sdn_encode_canonical(SdnValue.Dict(fields))).is_err()).to_equal(true)

@@ -1,0 +1,280 @@
+# @cover src/lib/nogc_sync_mut/src/collections/adaptive_trace_observation.spl 80%
+# @cover src/lib/common/trace/data/data_observation_sink_v1.spl 80%
+"""
+## Purpose and audience
+Adaptive containers publish their workload through the trace data-observation
+pipeline (DataObservationV1 records into a DataObservationSinkV1 port) and the
+runtime switch for that profiling is the trace observer switch itself,
+derived from the `simple.trace/observer-v1` aspect extension. Readers are
+collection and trace-provider authors.
+## Operator workflow
+bin/simple test test/01_unit/lib/collections/adaptive_trace_observation_v1_spec.spl
+## Compatibility and limitations
+Interpreter lane. Maps are built with `with_profile` and never `put`: the Rust
+seed used in this lane lacks the `spl_ordered_key_cmp` and
+`spl_collection_capture_note_*` externs, so insertion and site-capture paths are
+covered by the sibling adaptive specs once a backed binary runs them.
+## Verification guidance and troubleshooting
+A RED that shows a non-zero counter on a profiling-off container means the
+early return in AdaptiveMap.get/contains_key was bypassed; fix the container.
+"""
+# @manual_section: Adaptive container trace observation
+
+use std.spec.*
+use std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap
+use std.nogc_sync_mut.src.collections.adaptive_set.AdaptiveSet
+use std.nogc_sync_mut.src.collections.ordered_map.OrderedMapEntry
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{
+    AdaptiveSetAlgorithm, AdaptiveSetObservation, AdaptiveSetProfile,
+    AdaptiveSetWorkloadProfile, adaptive_set_workload_profile_matches
+}
+use std.nogc_sync_mut.src.collections.adaptive_trace_observation.*
+use std.common.plugin.aspect_params.{AspectParamsV1, ASPECT_TRACE_OBSERVER_EXT_V1}
+use std.common.plugin.iface_id.{ParamExt}
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_config_v1.{TRACE_CONFIG_SCHEMA_HASH_V1}
+use std.common.trace.data.data_observation_contracts.*
+use std.common.trace.data.data_observation_aggregator_v1.*
+use std.common.trace.data.data_observation_sink_v1.*
+
+# Test double: the smallest DataObservationSinkV1 — keeps every admitted record.
+class BufferSink:
+    records: [DataObservationV1]
+    on: bool
+
+impl DataObservationSinkV1 for BufferSink:
+    me record(observation: DataObservationV1) -> bool:
+        if not self.on:
+            return false
+        self.records.push(observation)
+        true
+    fn enabled() -> bool:
+        self.on
+
+fn profile() -> AdaptiveSetProfile:
+    AdaptiveSetProfile(linear_size_limit: 2, lookup_promotion_count: 4, allow_hash: true)
+
+# A site is attached only to profiling-off containers here: a profiling-on
+# container with a site also notes into the spl_collection_capture_* externs,
+# which the seed in this lane does not back (see the header).
+# Two linear entries (size == linear_size_limit) are seeded directly so that
+# any switch below is lookup-driven, not size-driven, and no put runs.
+fn sited_map(on: bool) -> AdaptiveMap<i64, i64>:
+    var map: AdaptiveMap<i64, i64> = AdaptiveMap.with_profile(profile())
+    if not on:
+        map.site_id = "ast://spec/map"
+        map.target_profile_id = "spec-target"
+    map.linear_entries = [OrderedMapEntry(key: 0, value: 10), OrderedMapEntry(key: 1, value: 11)]
+    map.size = 2
+    map.observed_peak_size = 2
+    map.set_profiling(on)
+    map
+
+fn binding() -> AdaptiveTraceBindingV1:
+    AdaptiveTraceBindingV1(generation: 7, module_instance: 3, schema_index: 1,
+        lookup_site_id: 21, size_site_id: 22, transition_site_id: 23)
+
+fn config(mode: TraceInstrumentationV1) -> TraceConfigV1:
+    TraceConfigV1(instrumentation: mode, backend: TraceBackendV1.Simple,
+        consistency: TraceConsistencyV1.RawEdges, patch_mode: TracePatchModeV1.Quiescent,
+        abi_profile: "x86_64-sysv", event_mask: 7, buffer_bytes: 4096, max_contexts: 4,
+        max_depth: 8, max_resident_generations: 2)
+
+fn payload(instrumentation: text) -> text:
+    "trace:\n    schema: 1\n    instrumentation: {instrumentation}\n    backend: simple\n    consistency: raw_edges\n    patch_mode: quiescent\n    abi_profile: x86_64-sysv\n    events: [entry, exit, tail_exit]\n"
+
+fn params_with(instrumentation: text, schema_hash: text) -> AspectParamsV1:
+    var params = AspectParamsV1.defaults()
+    params.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1, payload(instrumentation).bytes(), schema_hash))
+    params
+
+fn find(records: [DataObservationV1], site: u32) -> DataObservationV1:
+    for r in records:
+        if r.site_id == site:
+            return r
+    fail("no record for site {site}")
+    records[0]
+
+fn measured(metric: DataMetricV1) -> i64:
+    data_metric_value_v1(metric).unwrap() as i64
+
+describe "Adaptive container observation through the trace data pipeline":
+    it "runs no counter and no lookup-driven switch when profiling is off":
+        # Three lookups: one below the promotion count, so the on side still
+        # answers from linear storage (a promoted auto map probes Map buckets
+        # through hash_key, which the seed's dict lowering lacks).
+        var off = sited_map(false)
+        var on = sited_map(true)
+        expect(off.get(0) == on.get(0)).to_equal(true)
+        expect(off.get(0) == Some(10)).to_equal(true)
+        expect(off.get(7) == on.get(7)).to_equal(true)
+        expect(off.get(7).is_none()).to_equal(true)
+        expect(off.contains_key(1)).to_equal(on.contains_key(1))
+        expect(off.profiling_enabled()).to_equal(false)
+        expect(off.observed_lookups).to_equal(0)
+        expect(off.observed_misses).to_equal(0)
+        expect(off.observed_hits).to_equal(0)
+        expect(off.lookups_since_switch).to_equal(0)
+        expect(off.last_linear_lookup_comparisons).to_equal(0)
+        expect(off.live_hash_lookups).to_equal(0)
+        expect(off.selected_algorithm() == AdaptiveSetAlgorithm.Linear).to_equal(true)
+        expect(on.observed_lookups).to_equal(3)
+        expect(on.observed_hits).to_equal(2)
+        expect(on.observed_misses).to_equal(1)
+        expect(on.lookups_since_switch).to_equal(3)
+        expect(on.last_linear_lookup_comparisons).to_equal(2)
+        var set: AdaptiveSet<i64> = AdaptiveSet.with_profile(profile())
+        set.set_profiling(false)
+        for i in 0..6:
+            expect(set.contains(i)).to_equal(false)
+        expect(set.profiling_enabled()).to_equal(false)
+        expect(set.observation().lookups).to_equal(0)
+        expect(set.selected_algorithm() == AdaptiveSetAlgorithm.Linear).to_equal(true)
+
+    it "publishes the lookup window, size and representation as valid observation records":
+        var map = sited_map(true)
+        for i in 0..3:
+            map.get(i)
+        val sink = BufferSink(records: [], on: true)
+        expect(adaptive_trace_publish_v1(map.observation(), binding(), sink)).to_equal(3)
+        expect(sink.records.len()).to_equal(3)
+        val lookup = find(sink.records, 21)
+        expect(lookup.kind == DataObservationKindV1.CollectionOp).to_equal(true)
+        expect(lookup.op == DataCollectionOpV1.Lookup).to_equal(true)
+        expect(measured(lookup.count)).to_equal(3)
+        expect(measured(lookup.aux)).to_equal(1)
+        expect(lookup.generation).to_equal(7)
+        expect(lookup.module_instance).to_equal(3)
+        expect(lookup.representation_epoch).to_equal(adaptive_trace_epoch_v1(AdaptiveSetAlgorithm.Linear))
+        val size = find(sink.records, 22)
+        expect(size.op == DataCollectionOpV1.Insert).to_equal(true)
+        expect(measured(size.count)).to_equal(2)
+        expect(measured(size.aux)).to_equal(2)
+        val transition = find(sink.records, 23)
+        expect(transition.kind == DataObservationKindV1.RepresentationTransition).to_equal(true)
+        expect(measured(transition.count)).to_equal(adaptive_trace_epoch_v1(AdaptiveSetAlgorithm.Linear) as i64)
+        expect(transition.aux.state == DataMetricStateV1.NotMeasured).to_equal(true)
+        for r in sink.records:
+            expect(data_observation_valid_v1(r)).to_equal(true)
+            val bytes = data_observation_encode_v1(r).unwrap()
+            expect(data_observation_decode_v1(bytes).unwrap().site_id).to_equal(r.site_id)
+        val closed = BufferSink(records: [], on: false)
+        expect(adaptive_trace_publish_v1(map.observation(), binding(), closed)).to_equal(0)
+        expect(closed.records.len()).to_equal(0)
+
+    it "feeds a DataObservationAggregatorV1 through the sink port and drains the same counts":
+        val sites = [
+            DataSiteV1(site_id: 21, kind: DataObservationKindV1.CollectionOp, schema_index: 0, attr_ordinal: 0, op: DataCollectionOpV1.Lookup),
+            DataSiteV1(site_id: 22, kind: DataObservationKindV1.CollectionOp, schema_index: 0, attr_ordinal: 0, op: DataCollectionOpV1.Insert),
+            DataSiteV1(site_id: 23, kind: DataObservationKindV1.RepresentationTransition, schema_index: 1, attr_ordinal: 0, op: DataCollectionOpV1.None)]
+        var agg = DataObservationAggregatorV1.create(DataSiteManifestV1(module_instance: 3, manifest_incarnation: 5, sites: sites)).unwrap()
+        val selection = TraceSelectionV1(manifest_incarnation: 5, sites: [
+            TraceSiteV1(module_instance: 3, site_id: 21), TraceSiteV1(module_instance: 3, site_id: 22),
+            TraceSiteV1(module_instance: 3, site_id: 23)])
+        agg.prepare(config(TraceInstrumentationV1.Dynamic), selection).unwrap()
+        val sink = DataObservationAggregatorSinkV1(aggregator: agg)
+        expect(sink.enabled()).to_equal(false)
+        agg.start(7).unwrap()
+        expect(sink.enabled()).to_equal(true)
+        var map = sited_map(true)
+        for i in 0..3:
+            map.contains_key(i)
+        expect(adaptive_trace_publish_v1(map.observation(), binding(), sink)).to_equal(3)
+        val drained = agg.drain().unwrap()
+        expect(measured(find(drained.records, 21).count)).to_equal(3)
+        expect(measured(find(drained.records, 21).aux)).to_equal(1)
+        expect(measured(find(drained.records, 22).count)).to_equal(2)
+        expect(measured(find(drained.records, 23).count)).to_equal(adaptive_trace_epoch_v1(AdaptiveSetAlgorithm.Linear) as i64)
+        expect(drained.complete).to_equal(true)
+
+    it "drives the switching decision from drained records exactly as the private counters do":
+        # Below the promotion count the live container stays linear; the fold
+        # of its records keeps the next instance linear as well.
+        var warm = sited_map(true)
+        for i in 0..3:
+            warm.get(i)
+        expect(warm.selected_algorithm() == AdaptiveSetAlgorithm.Linear).to_equal(true)
+        val sink = BufferSink(records: [], on: true)
+        adaptive_trace_publish_v1(warm.observation(), binding(), sink)
+        match adaptive_workload_profile_from_records_v1(sink.records, binding(), "ast://spec/map", "spec-target", profile()):
+            case Some(prior):
+                expect(adaptive_set_workload_profile_matches(prior, "ast://spec/map", "spec-target")).to_equal(true)
+                expect(prior.lookup_count_p95).to_equal(3)
+                expect(prior.hit_count_p95).to_equal(2)
+                expect(prior.miss_count_p95).to_equal(1)
+                expect(prior.size_p95).to_equal(2)
+                var cold = sited_map(false)
+                expect(cold.apply_workload_profile(prior)).to_equal(true)
+                expect(cold.selected_algorithm() == AdaptiveSetAlgorithm.Linear).to_equal(true)
+            case None:
+                fail("records did not fold into a workload profile")
+        # At the promotion count the private counters move an auto map to
+        # hash (lookups_since_switch >= lookup_promotion_count); the folded
+        # prior reproduces that on a profiling-off instance. Same for size.
+        val hot = AdaptiveSetObservation(site_id: "ast://spec/map", target_profile_id: "spec-target",
+            size: 2, peak_size: 2, lookups: 4, hits: 3, misses: 1, algorithm: AdaptiveSetAlgorithm.Linear)
+        val hot_sink = BufferSink(records: [], on: true)
+        adaptive_trace_publish_v1(hot, binding(), hot_sink)
+        match adaptive_workload_profile_from_records_v1(hot_sink.records, binding(), "ast://spec/map", "spec-target", profile()):
+            case Some(prior):
+                var next = sited_map(false)
+                expect(next.apply_workload_profile(prior)).to_equal(true)
+                expect(next.selected_algorithm() == AdaptiveSetAlgorithm.Hash).to_equal(true)
+                expect(next.observed_lookups).to_equal(0)
+            case None:
+                fail("hot records did not fold into a workload profile")
+        val wide = AdaptiveSetObservation(site_id: "ast://spec/map", target_profile_id: "spec-target",
+            size: 3, peak_size: 3, lookups: 1, hits: 1, misses: 0, algorithm: AdaptiveSetAlgorithm.Linear)
+        val wide_sink = BufferSink(records: [], on: true)
+        adaptive_trace_publish_v1(wide, binding(), wide_sink)
+        match adaptive_workload_profile_from_records_v1(wide_sink.records, binding(), "ast://spec/map", "spec-target", profile()):
+            case Some(prior):
+                var next = sited_map(false)
+                expect(next.apply_workload_profile(prior)).to_equal(true)
+                expect(next.selected_algorithm() == AdaptiveSetAlgorithm.Hash).to_equal(true)
+            case None:
+                fail("wide records did not fold into a workload profile")
+        # A container that reached ordered storage live reports it; the fold
+        # reproduces that choice on the next instance.
+        val ordered_live = AdaptiveSetObservation(site_id: "ast://spec/map", target_profile_id: "spec-target",
+            size: 1, peak_size: 1, lookups: 9, hits: 2, misses: 7, algorithm: AdaptiveSetAlgorithm.Ordered)
+        val ordered_sink = BufferSink(records: [], on: true)
+        adaptive_trace_publish_v1(ordered_live, binding(), ordered_sink)
+        match adaptive_workload_profile_from_records_v1(ordered_sink.records, binding(), "ast://spec/map", "spec-target", profile()):
+            case Some(prior):
+                expect(prior.hash_collision_count_p95 > prior.hash_probe_count_p95 / 4).to_equal(true)
+                # Empty: promote_to_ordered checks every present key through
+                # spl_ordered_key_cmp, which this lane's seed does not back.
+                var next: AdaptiveMap<i64, i64> = AdaptiveMap.with_profile(profile())
+                next.site_id = "ast://spec/map"
+                next.target_profile_id = "spec-target"
+                next.set_profiling(false)
+                expect(next.apply_workload_profile(prior)).to_equal(true)
+                expect(next.selected_algorithm() == AdaptiveSetAlgorithm.Ordered).to_equal(true)
+            case None:
+                fail("ordered records did not fold into a workload profile")
+        expect(adaptive_workload_profile_from_records_v1([], binding(), "ast://spec/map", "spec-target", profile()).is_none()).to_equal(true)
+
+    it "toggles profiling at runtime from the trace observer configuration":
+        expect(data_observation_profiling_enabled_v1(None)).to_equal(false)
+        expect(data_observation_profiling_enabled_v1(Some(config(TraceInstrumentationV1.Off)))).to_equal(false)
+        expect(data_observation_profiling_enabled_v1(Some(config(TraceInstrumentationV1.Dynamic)))).to_equal(true)
+        expect(data_observation_profiling_enabled_v1(Some(config(TraceInstrumentationV1.AlwaysOn)))).to_equal(true)
+        var map = sited_map(true)
+        map.set_profiling(data_observation_profiling_enabled_v1(Some(config(TraceInstrumentationV1.Off))))
+        for i in 0..3:
+            map.get(i)
+        expect(map.observed_lookups).to_equal(0)
+        map.set_profiling(data_observation_profiling_enabled_v1(Some(config(TraceInstrumentationV1.Dynamic))))
+        for i in 0..3:
+            map.get(i)
+        expect(map.observed_lookups).to_equal(3)
+        map.set_profiling(data_observation_profiling_enabled_v1(None))
+        map.get(0)
+        expect(map.observed_lookups).to_equal(3)
+
+    it "derives the switch from the aspect-dynload observer extension":
+        expect(data_observation_profiling_from_aspect_v1(AspectParamsV1.defaults())).to_equal(false)
+        expect(data_observation_profiling_from_aspect_v1(params_with("dynamic", TRACE_CONFIG_SCHEMA_HASH_V1))).to_equal(true)
+        expect(data_observation_profiling_from_aspect_v1(params_with("off", TRACE_CONFIG_SCHEMA_HASH_V1))).to_equal(false)
+        expect(data_observation_profiling_from_aspect_v1(params_with("dynamic", "not-the-schema-hash"))).to_equal(false)

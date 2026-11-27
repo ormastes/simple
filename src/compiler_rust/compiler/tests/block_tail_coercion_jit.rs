@@ -46,3 +46,12 @@ fn lambda_inside_block_uses_its_own_return_type() {
     let src = "fn main() -> i64:\n    val e = \"\"\n    val f = \\x: x * 3\n    val a = e.parse_int() ?? f(5)\n    a + f(1)\n";
     assert_eq!(run(src), 15 + 3);
 }
+
+/// `u64?` coalesce yields the RAW u64 (HeapUInt decoded), both for the flat
+/// tagged form returned from a function and for a boxed `Some(x)`.
+/// Bug: jit_u64_optional_coalesce_arith_invalid_heap_2026-11-03
+#[test]
+fn coalesce_u64_optional_then_arithmetic() {
+    let src = "fn mu(n: i64) -> u64?:\n    if n > 0:\n        return 7 as u64\n    nil\n\nfn main() -> i64:\n    val a = (mu(1) ?? 0) + 1\n    val b = (mu(0) ?? 5) + 1\n    val s: u64? = Some(40 as u64)\n    val c = (s ?? 0) + 2\n    (a as i64) * 10000 + (b as i64) * 100 + (c as i64)\n";
+    assert_eq!(run(src), 8 * 10000 + 6 * 100 + 42);
+}

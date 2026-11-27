@@ -255,23 +255,19 @@ fn test_config_resolve(entries: [ConfigEntry]) -> TestConfig:
 # Loading
 # =========================================================================
 
-fn load_test_config_from_path(config_path: text) -> TestConfig:
-    val config = TestConfig.defaults()
-    # Deterministic-startup gate (pre-existing policy, kept behaviour-identical):
-    # the runner boots on compiled defaults. The config_core-backed parse path
-    # below is unit-proven (test/01_unit/lib/test_runner/test_config_spec.spl);
-    # enabling it is a separate decision from this refactor because the checked-in
-    # config/simple.test.sdn would change live runner behaviour (parallel,
-    # timeout, throttling).
-    return config
-    if config_path == "":
-        return config
+pub fn load_test_config_from_path(config_path: text) -> TestConfig:
+    # The old app-local parser mutated a TestConfig through value parameters,
+    # which discarded workspace entries and motivated its defaults-only
+    # startup gate. Resolve a fresh config from entries here instead; file,
+    # malformed, missing, empty, and CI-only paths are covered by specs.
+    var entries: [ConfigEntry] = []
+    if config_path != "":
+        val content = file_read(config_path) ?? ""
+        if content != "":
+            entries = test_config_entries(content: content, layer: "workspace")
 
-    val content = file_read(config_path) ?? ""
-    if content == "":
-        return config
-
-    var entries = test_config_entries(content: content, layer: "workspace")
+    # Session policy applies over compiled defaults even when no workspace
+    # config exists or the file is empty.
     val env_entries = test_config_env_entries()
     var i = 0
     while i < env_entries.len():
@@ -287,14 +283,14 @@ impl TestConfig:
         # Compiled defaults come straight from the schema — no second table.
         test_config_resolve([])
 
-fn load_test_config() -> TestConfig:
+pub fn load_test_config() -> TestConfig:
     load_test_config_from_path(find_config_file())
 
 # =========================================================================
 # H1: Multi-level config file search
 # =========================================================================
 
-fn find_config_file() -> text:
+pub fn find_config_file() -> text:
     # Search current, parent, grandparent directories
     val candidates = [
         CONFIG_FILENAME,

@@ -195,3 +195,133 @@ pins the Simple side byte-for-byte and records `RUST_SEED_HEADER_SIZE = 96`,
 
 Record explicitly states this is architectural and confirmed out of scope for a unilateral fix (needs a dual-write migration, would invalidate cached artifacts). No change made.
 
+**Revalidated 2026-11-02: still plausible because OPEN — ARCHITECTURAL, confirmed genuinely out of scope for a unilateral fix; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-06 — writers converged on the 96-byte layout (fix-implemented, verification pending)
+
+Owner decision 2026-11-06: review whether shrinking the writers to the seed's 96-byte layout
+preserves extensibility and causes no problem; if so, implement. Verdict **SHRINK-OK**; implemented
+on `release/1.0.0` (this PR). Review basis, all re-read from source at `a39c685717b`:
+
+- **Dropped bytes:** `reserved[40]` @88..128 — 16 of them the compile-options slot, 24 never used.
+  No production writer ever populated the slot (`set_compile_options_bytes` had zero non-test
+  callers), so every on-disk artifact carried zeros and the three consumers already behaved as
+  "absent"; the options identity that actually invalidates caches is folded into the live object
+  cache key (`live_object_key.sdn` pos 16+). Nothing live is lost.
+- **Extensibility:** the header is never extended by policy (`smf_v1_2.sdn`, plan rule "allocate no
+  new fixed-header byte"). The 96-byte layout keeps version fields, 25 free flag bits and 7 free
+  reserved bytes; anything larger goes to the `.simple_meta` TLV section, now implemented
+  (`src/compiler/70.backend/linker/smf_meta.spl`). Padding bytes (20..24, 81, 93..96) carry no
+  meaning — the seed writes them by struct memcpy.
+- **Relocation:** compile-options hash = `.simple_meta` record kind 2 `compile_options_v1`
+  (16 bytes, the existing `compile_options_hash_to_bytes` encoding), emitted by both driver builder
+  paths from `SmfBuildOptions.compile_options_bytes`; consumed by `cache_validator`
+  (`SmfValidationSnapshot.compile_options_bytes`), `99.loader/smf_cache.validate_smf_options`
+  (mmap, section read) and `object_provider.prefer_backend`. Legacy packed bytes 88..104 remain a
+  read-only fallback for one release.
+- **Version bump:** writers stamp `version_minor = 3` (`SMF_VERSION_MINOR`); `>= 1.3` is an
+  unconditional layout discriminator in `smf_header_seed_shaped_at`, and the new shared locator
+  `smf_header_trailer_offset` applies one precedence (v1.3 @EOF-96, packed @EOF-128, Rust 1.1
+  @EOF-96) in every reader: `header_parser`, cache snapshot, `99.loader/smf_cache` (which #6928 had
+  missed and which decoded fields at offsets matching NEITHER layout), `launch_metadata`,
+  `aspect_pack_directory`, `smf_dynlib`. Five readers gated on exact minor values (`launch_metadata`,
+  `aspect_pack_directory`, `smf_dynlib` on `== 1`; `header_parser.read_relocations` and
+  `smf_group_batch_load` on `1|2`, the latter also hard-coding EOF-128); all now accept
+  `1..=SMF_VERSION_MINOR`. The minor doubles as the relocation-entry format (1 = reserved zero,
+  2 = `0xA2` source marker); v1.3 is a superset in which each reloc entry is self-describing by its
+  marker byte, so the `version_minor = 2` stamp is no longer needed.
+- **Writers:** `70.backend/linker/smf_writer.spl` (incl. the hand-rolled aspect-pack header, now
+  `SmfHeader.to_bytes()`), `80.driver/smf_writer.spl` (3 paths). The Rust seed is untouched and
+  reads v1.3 files byte-for-byte (it never gates on the minor version).
+- **Cache impact:** one-time supersession of packed-era artifacts; readers still accept them, so
+  nothing is misread. Native caches are already keyed by compiler fingerprint.
+- **Out of scope, recorded:** `src/os/kernel/loader/smf.spl` is a SimpleOS *envelope* reusing the
+  magic (role/arch/abi at 60..62 where the compiler header stores `module_hash`), produced by
+  `src/os/installer` / `src/os/port`; it gates on exactly 1.1 @EOF-128 and does not read
+  compiler-written SMFs. LSMF (`lib_smf*.spl`) and SWA are separate formats.
+- **Removal TODO (one release):** `SMF_PACKED_HEADER_SIZE`, `SmfHeader.to_packed_bytes`, the
+  heuristic branch of `smf_header_seed_shaped_at`, the packed fallbacks in
+  `smf_meta_compile_options_bytes` / `mapped_smf_compile_options_bytes`, and the packed fixtures in
+  the specs below.
+
+**Regression pin (TDD, red before the change — the spec could not even resolve `smf_meta`):**
+`src/compiler/70.backend/linker/test/smf_header_v1_3_default_layout_spec.spl` — 11 examples:
+size/version constants, repr(C) offsets, field round trip, v1.3 trailer location with zero
+sections, precedence over a coincidental packed magic, legacy packed read, both writers' output,
+and `.simple_meta` carriage/absence. Updated: `smf_layout_parity_spec.spl` (now pins identity),
+`smf_header_seed_layout_spec.spl`, `smf_header_writer_reader_roundtrip_spec.spl`,
+`smf_cache_validator_seed_layout_spec.spl`, `smf_integration_spec.spl`, and the three
+`test/01_unit` fixtures that spliced the hash into header bytes (`object_provider_spec`,
+`fixed_backend_success_spec`, `native_target_validation_spec`) now emit the section through
+`SmfBuildOptions`. Verification pending: a full `bin/simple test` run and a Rust-seed read of a
+Simple-written v1.3 artifact on a deployed binary.
+
+---
+
+## 2026-11-05 — premise re-checked; read-side compatibility landed (partial)
+
+Premise still current on `origin/release/1.0.0`: `header.rs` is still
+`#[repr(C)]` + raw `ptr::read`, and `smf_header_from_bytes` still read packed
+offsets. Not affected by later policy changes (nil/Any/mono).
+
+Fix, within the "Constraint on any fix" above (no layout changed, nothing new
+written): the canonical Simple decoders now accept the seed layout on read.
+
+- `src/compiler/70.backend/linker/smf_header.spl`: new `smf_header_field_shift`
+  (4 when bytes 20..24 are zero padding, `section_count > 0` and the u64 at 24
+  is non-zero; else 0), `SMF_SEED_HEADER_SIZE = 96`, seed trailer at EOF-96,
+  seed hint block (app_type@80, ww@82, wh@84, ph@86, pfc@87, reserved@88), and
+  a zero compile-options area for seed headers. Packed write path untouched.
+- `src/compiler/70.backend/linker/_SmfReaderMemory/header_parser.spl`: fields
+  20..59 read with the same shift.
+
+Evidence: new `src/compiler/70.backend/linker/test/smf_header_seed_layout_spec.spl`
+was RED first (2/9 passed), now 9/9; `smf_layout_parity_spec` 8/8,
+`smf_reader_memory_spec` 4/4, `lib_smf_reader_spec` 3/3.
+
+Still open (same packed-offset pattern, not changed here):
+`src/os/smf/smf_dynlib.spl:386-394` (also tracked by
+`seed_smf_header_padding_vs_pure_simple_reader_2026-10-19`),
+`src/app/startup/launch_metadata.spl:588`,
+`src/compiler/80.driver/cache/cache_validator.spl:300`,
+`src/os/smf/aspect_pack_directory.spl:222`. Writer convergence (dual-write,
+steps 2-5) is still owner work. Known heuristic limit: a seed header with
+`section_count == 0` decodes as packed.
+
+## 2026-11-05 — remaining 4 readers converged on read (p1w-smfhdr)
+
+`smf_dynlib.spl`, `launch_metadata.spl`, `cache_validator.spl`,
+`aspect_pack_directory.spl` (plus `_SmfReaderMemory/header_parser.spl`, which
+lacked the seed EOF-96 trailer) now locate the seed trailer and add
+`smf_header_field_shift` to every field offset >= 20, using the new exported
+`smf_header_size_at` / `smf_header_seed_trailer_offset` from `smf_header.spl`.
+`smf_header_seed_shaped_at` now rejects a header whose packed 128-byte extent
+ends exactly at EOF (packed trailer with section_table_offset 0 was misread).
+
+TDD (`bin/simple.exe test <spec>`), before -> after: smf_dynlib_seed_layout 2/3->3/3,
+launch_metadata_seed_layout 1/2->2/2, aspect_pack_directory_seed_layout 1/2->2/2,
+smf_cache_validator_seed_layout 1/3->3/3; prevention
+`smf_header_reader_parity_spec` 3/3 (all readers agree on seed + packed images).
+Regressions green: seed_layout 9/9, layout_parity 8/8, reader_memory 4/4,
+lib_smf_reader 3/3, smf_header 4/4, launch_metadata_section_index 13/13.
+`aspect_pack_directory_spec` 16/18 identical before/after (pre-existing facet
+load/reload failures). Writer convergence (dual-write) remains owner work.
+
+## 2026-11-05 writer convergence (r-smfhdr)
+
+- Added `SmfHeader.to_seed_bytes()` (`70.backend/linker/smf_header.spl`): serializes the
+  Rust seed `#[repr(C)]` 96-byte layout (4 pad bytes at 20..24, hints app_type@80
+  ww@82 wh@84 ph@86 pfc@87 res@88, zero tail pad). Readers and writer share the
+  locator helpers `smf_header_field_shift` / `smf_header_size_at` / `smf_header_seed_trailer_offset`.
+- DECISION: the default writers (`70.backend/linker/smf_writer.spl`, `80.driver/smf_writer.spl`)
+  still call `to_bytes()` (packed 128). Switching them drops the compile-options hash
+  (`reserved[0..16]`, absent in the seed layout), invalidates cached artifacts, and
+  breaks pinned specs (`smf_layout_parity_spec`, `smf_header_spec`). Default switch needs
+  the dual-write migration/owner decision; bug stays OPEN for that.
+- New spec `linker/test/smf_header_writer_reader_roundtrip_spec.spl`: byte-for-byte vs hand-built
+  seed header, readback via `smf_header_from_bytes` + cache validator, locator helper direct,
+  wrong-magic / truncated / zero-section rejection, trailing-pad check.
+- Discrimination (readers reverted to origin/release/1.0.0, header_parser, cache_validator,
+  launch_metadata, smf_dynlib, aspect_pack_directory):
+  parity `passed=2 failed=1`; roundtrip `passed=9 failed=1`.
+- Fixed: parity `passed=3 failed=0`; roundtrip `declared>=10 executed=10 passed=10 failed=0`.

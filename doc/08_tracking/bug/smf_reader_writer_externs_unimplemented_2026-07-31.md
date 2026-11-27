@@ -36,3 +36,10 @@ already verified), SMF-level parity cannot be gated. The L1 adapter therefore
 targets the writer-side `SmfWriterSymbol` structures, which are real and
 exercised.
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+open scaffolding blocking the LINK byte-identical oracle; owner: SMF extern lane.

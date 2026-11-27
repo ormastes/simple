@@ -2,7 +2,7 @@
 # snapshots. Provider selection stays in the compiler; this owner only binds
 # the selected files. Legacy calls never enter this module's strict APIs.
 use std.nogc_sync_mut.io.env_ops.{env_get}
-use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_hash_sha256}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_hash_sha256, file_exists, file_is_regular_no_follow}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{NativePinnedArtifactV1,
     native_pinned_artifact_open_v1, native_pinned_artifact_revalidate_v1,
     native_tool_absolute_v1, native_tool_digest_valid_v1, native_tool_strict_resolve_v1}
@@ -15,6 +15,21 @@ use std.common.encoding.utf8.{text_byte_len}
 pub struct NativeRuntimePinV1:
     relative: text
     digest: text
+
+pub fn native_runtime_capsule_archive_v1(root: text) -> Result<text, text>:
+    """Resolve the sole native-all leaf in an already selected runtime capsule."""
+    # Same layout contract as phase2-runtime-binding.shs: MSVC uses .lib;
+    # Linux, macOS, BSD and Windows GNU use .a. Never prefer one over both.
+    if not native_tool_absolute_v1(root): return Err("runtime capsule root must be absolute")
+    val msvc = root + "/simple_native_all.lib"
+    val gnu = root + "/libsimple_native_all.a"
+    val has_msvc = file_exists(msvc)
+    val has_gnu = file_exists(gnu)
+    if has_msvc and has_gnu: return Err("runtime capsule native-all archive is ambiguous")
+    if not has_msvc and not has_gnu: return Err("runtime capsule native-all archive is missing")
+    val selected = if has_msvc: msvc else: gnu
+    if not file_is_regular_no_follow(selected): return Err("runtime capsule archive must be a regular file")
+    Ok(selected)
 
 # Compact projection of the actual managed owner. Compiler bundle selection
 # supplies the ordered inputs; this owner admits each selected file. This is
@@ -44,11 +59,11 @@ var _native_runtime_failed_v1: bool = false
 var _native_runtime_generated_v1: [NativePinnedArtifactV1] = []
 
 fn native_runtime_hex_v1(encoded: text) -> Result<text, text>:
-    if encoded == "" or encoded.len() > 8192 or encoded.len() % 2 != 0:
+    if encoded == "" or encoded.byte_len() > 8192 or encoded.byte_len() % 2 != 0:
         return Err("managed runtime snapshot path encoding invalid")
     var bytes: [u8] = []
     var index = 0
-    while index < encoded.len():
+    while index < encoded.byte_len():
         var value: i64 = 0
         for offset in 0..2:
             val digit = encoded.byte_at(index + offset) as i64
@@ -336,7 +351,10 @@ fn native_runtime_generated_capture_in_owned_scope_v1(
     var bindings: [NativePinnedArtifactV1] = []
     for path in paths:
         val normalized = path.replace("\\", "/")
-        bindings.push(native_pinned_artifact_open_v1(normalized, file_hash_sha256(normalized))?)
+        val digest_opt = file_hash_sha256(normalized)
+        if digest_opt == nil:
+            return Err("managed generated runtime input cannot be hashed: {normalized}")
+        bindings.push(native_pinned_artifact_open_v1(normalized, digest_opt.unwrap())?)
     Ok(bindings)
 
 pub fn native_runtime_strict_generated_inputs_v1(inputs: [text]) -> Result<bool, text>:
@@ -356,7 +374,8 @@ pub fn native_runtime_strict_generated_inputs_v1(inputs: [text]) -> Result<bool,
             # admitted generated object IS the admitted object, byte for byte,
             # so the security property is unchanged -- only the spelling is.
             for input in inputs:
-                if file_hash_sha256(input) == binding.digest:
+                val input_digest = file_hash_sha256(input)
+                if input_digest != nil and input_digest.unwrap() == binding.digest:
                     found = true
         if not found:
             # DIAG (SIMPLE_MANAGED_AUTHORITY_DIAG=1): print lengths and a

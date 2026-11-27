@@ -1,0 +1,224 @@
+#![allow(REQC004)]
+# Strict P0 query options; validate before any filesystem or Git operation.
+use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1, trace_node_query_validate_v1}
+use std.common.traceability.query_refs_v1.{TraceReferenceQueryV1, trace_reference_query_validate_v1}
+use std.common.traceability.schema.{trace_path_parse_v1}
+use std.common.traceability.profile_v1.{TraceProfile, trace_profile_parse_v1, trace_profile_names_v1}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.common.traceability.query_missing_v1.{TraceRequirementCountV1}
+use app.traceability.cli_options_v1.{TraceCliFlagV1}
+use std.common.traceability.envelope_types_v1.*
+use std.common.traceability.trace_ids_v1.{TracePageLimitV1, TraceResultCountV1, TracePageCompletenessV1}
+
+# Closed set of native query output formats.
+pub enum TraceQueryFormatV1:
+    Table
+    Sdn
+
+pub fn trace_query_format_parse_v1(value: text) -> Result<TraceQueryFormatV1, text>:
+    match value:
+        case "table": Ok(TraceQueryFormatV1.Table)
+        case "sdn": Ok(TraceQueryFormatV1.Sdn)
+        case _("any other spelling is not a native format"): Err("TRACE-QUERY-INVALID: native formats are table and sdn")
+
+pub fn trace_query_format_name_v1(format: TraceQueryFormatV1) -> text:
+    match format:
+        case TraceQueryFormatV1.Table: "table"
+        case TraceQueryFormatV1.Sdn: "sdn"
+
+pub struct TraceQueryOptionsV1:
+    operation: text = "list"
+    kind: text = "features"
+    selected_id: text = ""
+    snapshot: text = "worktree"
+    format: text = "table"
+    limit: TraceRequirementCountV1 = TraceRequirementCountV1(value: 100)
+    id_prefix: text = ""
+    cursor: text = ""
+    paths: [text] = []
+    declarations: [text] = []
+    help: TraceCliFlagV1 = TraceCliFlagV1.Unset
+    # Legacy bug-DB sidecar: "none" disables; default path ingested only when present.
+    bug_db: text = "doc/08_tracking/bug/bug_db.sdn"
+    bug_db_explicit: TraceCliFlagV1 = TraceCliFlagV1.Unset
+    status: text = ""
+    severity: text = ""
+    file_prefix: text = ""
+    # Opt-in `# @req` header scan roots (worktree snapshots only).
+    spec_roots: [text] = []
+    # Enforcement profile for the exit verdict; worktree keeps the legacy preview behaviour.
+    profile: TraceProfile = TraceProfile.Worktree
+
+pub fn trace_query_options_parse_v1(args: [text]) -> Result<TraceQueryOptionsV1, text>:
+    if args.len() > 512: return Err("TRACE-QUERY-INVALID: too many arguments")
+    var bytes = 0
+    for arg in args:
+        bytes = bytes + arg.len()
+        if arg.len() > 4096 or bytes > 65536 or arg.bytes().contains(0u8):
+            return Err("TRACE-QUERY-INVALID: argument byte limit exceeded or NUL present")
+        validated_utf8_bytes_to_text_linear(arg.bytes())?
+    var options = TraceQueryOptionsV1()
+    if args.len() == 1 and (args[0] == "--help" or args[0] == "-h"):
+        options.help = TraceCliFlagV1.Set
+        return Ok(options)
+    if args.len() >= 1 and args[0] == "missing":
+        # `missing` takes no identity; the kind is optional and only requirements apply.
+        options.operation = "missing"
+        options.kind = "requirements"
+    elif args.len() < 2:
+        return Err("TRACE-QUERY-INVALID: expected list|show|refs|missing and a kind; use trace --help")
+    else:
+        options.operation = args[0]
+        options.kind = args[1]
+    var index = 2
+    if options.operation == "missing":
+        index = 1
+        if args.len() >= 2 and not args[1].starts_with("--"):
+            if args[1] != "requirements": return Err("TRACE-QUERY-INVALID: missing applies to requirements only")
+            index = 2
+    if options.operation == "show" or options.operation == "refs":
+        if args.len() < 3: return Err("TRACE-QUERY-INVALID: " + options.operation + " requires a canonical identity")
+        options.selected_id = args[2]
+        if options.kind == "feature": options.kind = "features"
+        elif options.kind == "requirement": options.kind = "requirements"
+        elif options.kind == "bug": options.kind = "bugs"
+        elif options.kind == "feature-group": options.kind = "feature-groups"
+        elif options.kind == "requirement-group": options.kind = "requirement-groups"
+        index = 3
+    var seen: Dict<text, bool> = {}
+    while index < args.len():
+        val arg = args[index]
+        val split = arg.index_of("=") ?? -1
+        if not arg.starts_with("--") or arg.len() < 3:
+            return Err("TRACE-QUERY-INVALID: expected a named option")
+        var name = arg
+        var value = ""
+        if split >= 0:
+            if split < 3: return Err("TRACE-QUERY-INVALID: option name is empty")
+            name = arg.substring(0, split)
+            value = arg.substring(split + 1, arg.byte_len())
+        else:
+            if index + 1 >= args.len() or args[index + 1].starts_with("--"):
+                return Err("TRACE-QUERY-INVALID: missing option value")
+            index = index + 1
+            value = args[index]
+        if value == "": return Err("TRACE-QUERY-INVALID: option value is empty")
+        if name != "--path" and name != "--declaration" and name != "--spec-root":
+            if seen.contains_key(name): return Err("TRACE-QUERY-INVALID: repeated option")
+            seen[name] = true
+        match name:
+            case "--snapshot": options.snapshot = value
+            case "--profile":
+                options.profile = match trace_profile_parse_v1(value):
+                    case Ok(parsed): parsed
+                    case Err(reason): return Err("TRACE-QUERY-INVALID: " + reason + "; use " + trace_profile_names_v1().join("|"))
+            case "--format": options.format = value
+            case "--prefix": options.id_prefix = value
+            case "--cursor": options.cursor = value
+            case "--limit":
+                if value.len() > 3: return Err("TRACE-QUERY-INVALID: limit must be 1..200")
+                for ch in value.chars():
+                    if not "0123456789".contains(ch): return Err("TRACE-QUERY-INVALID: limit must be numeric")
+                options.limit = TraceRequirementCountV1(value: value.to_int())
+            case "--path" | "--declaration":
+                if trace_path_parse_v1(value).is_none(): return Err("TRACE-QUERY-INVALID: select safe repository-relative files")
+                if name == "--path":
+                    if options.paths.contains(value): return Err("TRACE-QUERY-INVALID: duplicate selected path")
+                    options.paths.push(value)
+                else:
+                    if options.declarations.contains(value): return Err("TRACE-QUERY-INVALID: duplicate declaration path")
+                    options.declarations.push(value)
+            case "--spec-root":
+                val root = if value.ends_with("/") and value.len() > 1: value.substring(0, value.byte_len() - 1) else: value
+                if trace_path_parse_v1(root).is_none(): return Err("TRACE-QUERY-INVALID: spec-root must be a safe repository-relative directory")
+                if options.spec_roots.contains(root): return Err("TRACE-QUERY-INVALID: duplicate spec root")
+                if options.spec_roots.len() >= 8: return Err("TRACE-QUERY-BUDGET: at most 8 spec roots")
+                options.spec_roots.push(root)
+            case "--bug-db":
+                if value != "none" and trace_path_parse_v1(value).is_none(): return Err("TRACE-QUERY-INVALID: bug-db must be none or a safe repository-relative file")
+                options.bug_db = value
+                options.bug_db_explicit = if value != "none": TraceCliFlagV1.Set else: TraceCliFlagV1.Unset
+            case "--status" | "--severity" | "--file-prefix":
+                if value.len() > 256 or value.contains("\n") or value.contains("\t"):
+                    return Err("TRACE-QUERY-INVALID: filter value exceeds its bound")
+                if name == "--status": options.status = value
+                elif name == "--severity": options.severity = value
+                else:
+                    # A directory prefix may end with "/" (area filter); the path rules apply to the rest.
+                    val probe = if value.ends_with("/"): value.substring(0, value.byte_len() - 1) else: value
+                    if trace_path_parse_v1(probe).is_none(): return Err("TRACE-QUERY-INVALID: file-prefix must be a safe repository-relative prefix")
+                    options.file_prefix = value
+            case _: return Err("TRACE-QUERY-INVALID: unknown option " + name)
+        index = index + 1
+    if (options.status != "" or options.severity != "" or options.file_prefix != "") and
+        not (options.operation == "list" and options.kind == "bugs"):
+        return Err("TRACE-QUERY-INVALID: status, severity and file-prefix filters apply only to list bugs")
+    trace_query_format_parse_v1(options.format)?
+    if options.snapshot != "worktree" and options.snapshot != "index" and
+        not (options.snapshot.starts_with("git:") and options.snapshot.len() > 4):
+        return Err("TRACE-QUERY-INVALID: snapshot must be worktree, index or git:REV")
+    if options.paths.len() > 128 or options.declarations.len() > 32:
+        return Err("TRACE-QUERY-BUDGET: too many selected files or declarations")
+    if options.operation == "missing":
+        if options.id_prefix != "" or options.cursor != "":
+            return Err("TRACE-QUERY-INVALID: missing accepts no prefix or cursor")
+        if options.limit.value < 1 or options.limit.value > 200: return Err("TRACE-QUERY-INVALID: limit must be between 1 and 200")
+        return Ok(options)
+    if options.operation == "refs":
+        if options.id_prefix != "": return Err("TRACE-QUERY-INVALID: refs accepts no prefix")
+        if options.kind == "file":
+            # File-centred summary: the identity is a repository-relative path; no paging yet.
+            if trace_path_parse_v1(options.selected_id).is_none(): return Err("TRACE-QUERY-INVALID: refs file needs a safe repository-relative path")
+            if options.cursor != "": return Err("TRACE-QUERY-INVALID: refs file has no cursor continuation")
+            if options.limit.value < 1 or options.limit.value > 200: return Err("TRACE-QUERY-INVALID: limit must be between 1 and 200")
+            return Ok(options)
+        trace_reference_query_validate_v1(TraceReferenceQueryV1(snapshot_id: "", kind: options.kind,
+            selected_id: options.selected_id, limit: TracePageLimitV1(value: options.limit.value), cursor: options.cursor))?
+        return Ok(options)
+    trace_node_query_validate_v1(TraceNodeQueryV1(snapshot_id: "", operation: options.operation,
+        kind: options.kind, selected_id: options.selected_id, id_prefix: options.id_prefix,
+        limit: TracePageLimitV1(value: options.limit.value), cursor: options.cursor))?
+    Ok(options)
+
+pub fn trace_query_sdn_requested_v1(args: [text]) -> TraceQueryFormatV1:
+    # Error rendering must honor both supported forms even when validation fails.
+    # Inspect only the same bounded argv prefix as the strict parser, without I/O.
+    var index = 0
+    var bytes = 0
+    while index < args.len() and index < 512:
+        val arg = args[index]
+        bytes = bytes + arg.len()
+        if arg.len() > 4096 or bytes > 65536: return TraceQueryFormatV1.Table
+        if arg == "--format=sdn": return TraceQueryFormatV1.Sdn
+        if arg == "--format" and index + 1 < args.len() and index + 1 < 512:
+            if args[index + 1] == "sdn" and bytes + 3 <= 65536: return TraceQueryFormatV1.Sdn
+        index = index + 1
+    TraceQueryFormatV1.Table
+
+pub fn trace_query_help_v1() -> text:
+    "Usage: simple trace list features|requirements|bugs [options]\n" +
+    "       simple trace show feature|requirement|bug <canonical-id> [options]\n" +
+    "       simple trace refs feature|requirement|bug <canonical-id> [options]\n" +
+    "       simple trace refs file <repo-relative-path> [options]\n" +
+    "       simple trace missing [requirements] [options]\n" +
+    "  missing lists requirements with no implemented_by edge and/or no verified_by edge\n" +
+    "  (direct, via a decomposed criterion, or a --spec-root `# @req` row); in an incomplete\n" +
+    "  graph an absent link is reported unknown, not missing. --limit caps the rows shown.\n" +
+    "  refs file lists claims on the captured file node, entities declared there and\n" +
+    "  sidecar rows (bugs located_in/reproducible_by, @req verified_by) at that path.\n" +
+    "  refs lists every authored claim from/to the identity (direction, relation,\n" +
+    "  other id/kind/title, authority) plus where the identity is declared.\n" +
+    "  --snapshot=worktree|index|git:REV  Default: worktree preview\n" +
+    "  --format=table|sdn                Human table or structured SDN\n" +
+    "  --limit=1..200 --prefix=<id-prefix> --cursor=<continuation>\n" +
+    "  --declaration=<file>              Repeat to replace canonical defaults\n" +
+    "  --path=<file>                     Add selected files to locator closure\n" +
+    "  --bug-db=<file>|none              Legacy bug DB sidecar (default doc/08_tracking/bug/bug_db.sdn\n" +
+    "                                    when present; worktree snapshots only; read-only)\n" +
+    "  --status=<s> --severity=<p> --file-prefix=<path>  list bugs filters (exact; prefix)\n" +
+    "  --spec-root=<dir>                 Repeat (<=8): scan *_spec.spl headers for `# @req`\n" +
+    "                                    -> req:<id> verified_by <spec> sidecar rows (worktree only)\n" +
+    "Options accept --name=value or --name value. Plural show kinds are aliases.\n" +
+    "Registered declarations are indexed; bug DB rows are a labeled sidecar (nodes +\n" +
+    "attributes, no graph claims). No legacy feature DB ingestion.\n" +
+    "Groups require P1. All output is structural, unverified and admission-ineligible.\n"

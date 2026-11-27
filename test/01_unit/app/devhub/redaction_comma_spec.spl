@@ -1,3 +1,4 @@
+use std.spec.step
 use app.devhub.redaction.{redact_devhub_diagnostic}
 
 describe "DevHub comma-containing secret redaction":
@@ -37,3 +38,44 @@ describe "DevHub comma-containing secret redaction":
     it "masks a quoted secret with an escaped quote and comma":
         val rendered = redact_devhub_diagnostic("password: \"a\\\",b\" next")
         expect(rendered.contains("b\"")).to_equal(false)
+
+# REQ-001: Whole-header masking takes precedence over a leading value quote.
+describe "DevHub quoted-leading header redaction":
+    it "should mask a quoted-leading Cookie and its comma-separated suffix":
+        step("Redact a diagnostic Cookie value containing a quoted first segment")
+        val raw = "Cookie: \"sid=alpha,beta\", refresh=gamma"
+        expect(redact_devhub_diagnostic(raw)).to_equal("Cookie: ***")
+
+    it "should mask a single-quoted Set-Cookie and all following attributes":
+        step("Redact the entire Set-Cookie header despite a closing quote")
+        val raw = "Set-Cookie: 'sid=alpha,beta', refresh=gamma; Path=/"
+        expect(redact_devhub_diagnostic(raw)).to_equal("Set-Cookie: ***")
+
+    it "should mask an Authorization header after a quoted first segment":
+        step("Keep a quoted authentication segment from exposing later credentials")
+        val raw = "Authorization: \"alpha,beta\", credential=gamma"
+        expect(redact_devhub_diagnostic(raw)).to_equal("Authorization: ***")
+
+    it "should mask an empty quoted Cookie before a nonempty suffix":
+        step("Apply whole-header policy even when the first segment is empty")
+        expect(redact_devhub_diagnostic("Cookie: \"\", refresh=gamma")).to_equal("Cookie: ***")
+
+    it "should recognize mixed-case prefixed headers and preserve the next line":
+        step("Mask only the sensitive header line while retaining public trace text")
+        val raw = "> cOoKiE:\t\"sid=alpha,beta\", refresh=gamma\nX-Trace: keep"
+        expect(redact_devhub_diagnostic(raw)).to_equal("> cOoKiE: ***\nX-Trace: keep")
+
+    it "should preserve public fields after an ordinary double-quoted secret":
+        step("Keep quote-delimited field handling for token assignments")
+        val raw = "token: \"alpha,beta\", status: keep"
+        expect(redact_devhub_diagnostic(raw)).to_equal("token: ***, status: keep")
+
+    it "should preserve public fields after an escaped single-quoted secret":
+        step("Handle escaped quotes without broadening ordinary password masking")
+        val raw = "password: 'alpha\\',beta', status: keep"
+        expect(redact_devhub_diagnostic(raw)).to_equal("password: ***, status: keep")
+
+    it "should preserve nonsensitive quoted comma-containing diagnostics":
+        step("Leave ordinary public fields unchanged")
+        val raw = "status: \"alpha,beta\", detail: keep"
+        expect(redact_devhub_diagnostic(raw)).to_equal(raw)

@@ -1,0 +1,51 @@
+# Host-side owner evidence: the callback reads real raw bytes, not a guest syscall.
+use std.spec.{describe, it, expect}
+use os.userlib.spawn.{_user_spawn_invoke_v1}
+use os.kernel.types.syscall_types.{SYSCALL13_SPAWN_ARGV_ABI_V1}
+use std.nogc_sync_mut.ptr.raw.{rt_ptr_read_i64, rt_ptr_read_u8}
+use std.common.string_core.{bytes_to_text}
+
+var spawn_owner_calls_v1: i64 = 0
+
+fn _spawn_owner_bytes_v1(pointer: u64) -> [u8]:
+    var bytes: [u8] = []
+    var offset: i64 = 0
+    while offset < 4096:
+        val byte = unsafe(capabilities: [ffi, raw_ptr]): rt_ptr_read_u8(pointer as i64, offset)
+        if byte == 0:
+            return bytes
+        bytes.push(byte as u8)
+        offset = offset + 1
+    bytes
+
+fn _spawn_owner_probe_v1(id: u64, path: u64, length: u64, priority: u64, argv: u64, tag: u64) -> i64:
+    spawn_owner_calls_v1 = spawn_owner_calls_v1 + 1
+    expect(id).to_equal(13u64)
+    expect(length).to_equal(2u64)
+    expect(_spawn_owner_bytes_v1(path)).to_equal([47u8, 97u8])
+    expect(priority).to_equal(3u64)
+    expect(tag).to_equal(SYSCALL13_SPAWN_ARGV_ABI_V1)
+    val arg0 = unsafe(capabilities: [ffi, raw_ptr]): rt_ptr_read_i64(argv as i64, 0)
+    val arg1 = unsafe(capabilities: [ffi, raw_ptr]): rt_ptr_read_i64(argv as i64, 8)
+    val arg2 = unsafe(capabilities: [ffi, raw_ptr]): rt_ptr_read_i64(argv as i64, 16)
+    val end = unsafe(capabilities: [ffi, raw_ptr]): rt_ptr_read_i64(argv as i64, 24)
+    expect(_spawn_owner_bytes_v1(arg0 as u64)).to_equal([99u8, 117u8, 115u8, 116u8, 111u8, 109u8])
+    expect(_spawn_owner_bytes_v1(arg1 as u64)).to_equal([195u8, 169u8])
+    expect(_spawn_owner_bytes_v1(arg2 as u64)).to_equal([])
+    expect(end).to_equal(0)
+    -8
+
+describe "SOSIX spawn scoped raw argv owner":
+    it "preserves explicit argv zero, UTF-8, empty arguments, priority and returned errno":
+        spawn_owner_calls_v1 = 0
+        val result = _user_spawn_invoke_v1("/a", ["custom", "é", ""], 3u8, _spawn_owner_probe_v1)
+        expect(result).to_equal(-8)
+        expect(spawn_owner_calls_v1).to_equal(1)
+
+    it "rejects invalid input before allocation or syscall submission":
+        spawn_owner_calls_v1 = 0
+        expect(_user_spawn_invoke_v1("", ["custom"], 3u8, _spawn_owner_probe_v1)).to_equal(-22)
+        expect(_user_spawn_invoke_v1("/a", [""], 3u8, _spawn_owner_probe_v1)).to_equal(-22)
+        val nul = bytes_to_text([65u8, 0u8, 66u8])
+        expect(_user_spawn_invoke_v1("/a", ["custom", nul], 3u8, _spawn_owner_probe_v1)).to_equal(-22)
+        expect(spawn_owner_calls_v1).to_equal(0)

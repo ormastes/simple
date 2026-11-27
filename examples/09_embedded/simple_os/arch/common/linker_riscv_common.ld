@@ -56,10 +56,18 @@ SECTIONS {
         _stack_top = .;
     } > RAM
 
-    /* Kernel heap (64MB for bump allocator) */
+    /* Kernel heap for the bump allocator. 192 MiB, not 64: the runtime is
+     * split across THREE translation units that each carry a duplicate
+     * allocator (baremetal_stubs.c, baremetal_runtime_core.inc.c,
+     * ghdl_boot_info_runtime.c) and own a DISJOINT THIRD of this region
+     * (see the RV_HEAP_BASE comments in those files; the ghdl TU must never
+     * serve from a static .bss array again --
+     * doc/08_tracking/bug/riscv64_in_guest_parse_recursion_par_state_uninit_2026-11-05.md).
+     * Each third is therefore 64 MiB, the size the single-owner halves used
+     * to carry; 512 MiB of RAM backs it. NOLOAD: no flat-Image bytes. */
     .heap (NOLOAD) : ALIGN(4K) {
         __heap_start = .;
-        . += 64M;
+        . += 192M;
         __heap_end = .;
     } > RAM
 

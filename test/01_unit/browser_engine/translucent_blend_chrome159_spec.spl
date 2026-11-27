@@ -1,0 +1,159 @@
+"""
+## Purpose and audience
+Purpose: Pin Engine2D / web-raster source-over compositing to Chrome 159
+(Skia, arm64 software raster) on the CPU raster, cpu_simd and Vulkan lanes.
+Audience: browser-engine and Engine2D maintainers.
+
+Chrome's rule, fitted on 2026-11-17 from probe screenshots (see
+`doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md`):
+- solid colour fill (rgba background, opacity folded into the paint alpha):
+  `round(s*a/255) + ((d*(256-a)) >> 8)` (SkPMSrcOver), alpha = round(css*255);
+- shader / image composite (gradient layers, images):
+  `round(s*a/255) + div255r(d*(255-a))`, `div255r(v) = (v + 128 + ((v + 128) >> 8)) >> 8`.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-BLEND-CHROME159-001 — translucent source-over matches Chrome 159.
+"""
+use std.spec.*
+use std.io_runtime.{file_read_bytes_result}
+use std.common.image.png_decode.{PngImage, decode_png_to_argb}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{vulkan_readback_count}
+use std.gc_async_mut.gpu.engine2d.backend_metal_msl.{_engine2d_msl}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_resolved_engine2d_backend
+}
+
+fn blend_cell(n: i32, bg: text, inner: text) -> text:
+    val left = n * 8
+    "<div style=\"position:absolute;left:" + "{left}" + "px;top:0;width:8px;height:8px;background:" + bg + "\">" + inner + "</div>"
+
+fn blend_layer(bg: text) -> text:
+    "<div style=\"position:absolute;left:0;top:0;width:8px;height:8px;background:" + bg + "\"></div>"
+
+# Six 8x8 cells, each an opaque colour under translucent paint. Every cell is
+# chosen so the current truncating blend or a plain rounded blend differs from
+# Chrome by one level.
+fn blend_cells_page() -> text:
+    var body = ""
+    body = body + blend_cell(0, "rgb(128,128,128)", blend_layer("rgba(0,0,0,0.4)"))
+    body = body + blend_cell(1, "rgb(7,7,7)", blend_layer("rgba(0,0,0,0.2)"))
+    body = body + blend_cell(2, "rgb(255,255,255)", "<div style=\"position:absolute;left:0;top:0;width:8px;height:8px;opacity:0.5;background:rgb(255,0,0)\"></div>")
+    body = body + blend_cell(3, "rgb(128,128,128)", blend_layer("rgba(255,255,255,0.4)"))
+    body = body + blend_cell(4, "rgb(92,92,92)", "<div style=\"position:absolute;left:0;top:0;width:8px;height:8px;background:rgba(0,0,0,0.6)\">" + blend_layer("rgba(255,255,255,0.2)") + "</div>")
+    body = body + blend_cell(5, "rgb(128,229,7)", blend_layer("rgba(255,0,128,0.4)"))
+    "<html><body style=\"margin:0;background:#ffffff\">" + body + "</body></html>"
+
+# Chrome 159, `--force-device-scale-factor=4 --window-size=48,8`, cell centres
+# (device x = n*32+16, y = 16); every cell is one uniform colour in Chrome.
+val BLEND_CELLS_CHROME: [u32] = [0xFF4D4D4Du32, 0xFF050505u32, 0xFFFF7F7Fu32, 0xFFB3B3B3u32, 0xFF505050u32, 0xFFB38937u32]
+
+fn cell_mismatches(px: [u32], fw: i32, scale: i32) -> i32:
+    if px.len() < fw * 8 * scale:
+        return 999
+    var bad = 0
+    var n = 0
+    while n < BLEND_CELLS_CHROME.len():
+        val idx = (4 * scale) * fw + n * 8 * scale + 4 * scale
+        if px[idx] != BLEND_CELLS_CHROME[n]:
+            bad = bad + 1
+        n = n + 1
+    bad
+
+fn chan_dev(a: u32, b: u32, shift: u32) -> i32:
+    val x = ((a >> shift) & 255u32) as i32
+    val y = ((b >> shift) & 255u32) as i32
+    if x > y: x - y else: y - x
+
+fn frame_max_dev(got: [u32], want: [u32]) -> i32:
+    if got.len() != want.len() or want.len() == 0:
+        return 999
+    var worst = 0
+    var i = 0
+    while i < want.len():
+        for sh in [16u32, 8u32, 0u32]:
+            val d = chan_dev(got[i], want[i], sh)
+            if d > worst:
+                worst = d
+        i = i + 1
+    worst
+
+fn chrome_reference(path: text) -> [u32]:
+    var out: [u32] = []
+    match file_read_bytes_result(path):
+        Ok(bytes):
+            match decode_png_to_argb(bytes):
+                Ok(img):
+                    out = img.pixels
+                Err(msg):
+                    print "decode failed {path}: {msg}"
+        Err(msg):
+            print "read failed {path}: {msg}"
+    out
+
+fn gstack_doc(w: i32, h: i32, bg: text) -> text:
+    "<html><body style=\"margin:0;background:#fff\"><div style=\"width:" + "{w}" + "px;height:" + "{h}" + "px;" + bg + "\"></div></body></html>"
+
+# The #9970 two-layer gradient stacks (web_device_scale_spec GSTACK_S1/S2).
+val GSTACK_S1 = "background:radial-gradient(circle at 30% 40%, #ff0000, transparent 50%), linear-gradient(to bottom, #00ff00, #0000ff)"
+val GSTACK_S2 = "background-color:#ffff00;background-image:linear-gradient(90deg, rgba(255,0,0,0.8), transparent 60%), radial-gradient(circle, transparent 20%, #0000ff)"
+# Chrome 159 full frames, `--force-device-scale-factor=4 --window-size=40,32`
+# of gstack_doc(40, 32, ...): 160x128 device px.
+val GSTACK_S1_REF = "test/fixtures/browser_engine/blend_chrome159/gstack_s1_k4.png"
+val GSTACK_S2_REF = "test/fixtures/browser_engine/blend_chrome159/gstack_s2_k4.png"
+
+describe "translucent solid paint composites as Chrome 159 does":
+    it "composites single, stacked and opacity layers over opaque colours on cpu_simd as Chrome does":
+        val px = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(blend_cells_page(), 48, 8, "cpu_simd")
+        expect(cell_mismatches(px, 48, 1)).to_equal(0)
+
+    it "composites single, stacked and opacity layers over opaque colours on the CPU raster as Chrome does":
+        val px = simple_web_layout_render_html_software_pixels(blend_cells_page(), 48, 8)
+        expect(cell_mismatches(px, 48, 1)).to_equal(0)
+
+    it "composites single, stacked and opacity layers over opaque colours on Vulkan as Chrome and cpu_simd do":
+        val before = vulkan_readback_count()
+        val device = simple_web_layout_render_html_pixels_engine2d_at_device_scale(blend_cells_page(), 48, 8, 1, "vulkan")
+        val after = vulkan_readback_count()
+        expect(after - before >= 1).to_equal(true)
+        expect(cell_mismatches(device, 48, 1)).to_equal(0)
+        val cpu = simple_web_layout_render_html_pixels_engine2d_at_device_scale(blend_cells_page(), 48, 8, 1, "cpu_simd")
+        expect(frame_max_dev(device, cpu)).to_equal(0)
+
+describe "two-layer gradient stacks match Chrome 159 over the full frame at device scale 4":
+    it "keeps the radial-over-linear stack within +-2 of Chrome on every pixel, cpu_simd and raster":
+        val want = chrome_reference(GSTACK_S1_REF)
+        expect(want.len()).to_equal(160 * 128)
+        val cpu = simple_web_layout_render_html_pixels_engine2d_at_device_scale(gstack_doc(40, 32, GSTACK_S1), 40, 32, 4, "cpu_simd")
+        expect(frame_max_dev(cpu, want)).to_be_less_than(3)
+        val raster = simple_web_layout_render_html_software_pixels(gstack_doc(160, 128, GSTACK_S1), 160, 128, 600000)
+        expect(frame_max_dev(raster, want)).to_be_less_than(3)
+
+    it "keeps the linear-over-radial-over-colour stack within +-2 of Chrome on every pixel, cpu_simd and raster":
+        val want = chrome_reference(GSTACK_S2_REF)
+        expect(want.len()).to_equal(160 * 128)
+        val cpu = simple_web_layout_render_html_pixels_engine2d_at_device_scale(gstack_doc(40, 32, GSTACK_S2), 40, 32, 4, "cpu_simd")
+        expect(frame_max_dev(cpu, want)).to_be_less_than(3)
+        val raster = simple_web_layout_render_html_software_pixels(gstack_doc(160, 128, GSTACK_S2), 160, 128, 600000)
+        expect(frame_max_dev(raster, want)).to_be_less_than(3)
+
+describe "the Metal blend source carries the same Chrome 159 rules":
+    it "keeps solid fills on the solid rule, image composites on the image rule and rounds the opacity scale":
+        # Metal is static analysis on a Linux host, as the WM material row in
+        # simple_web_renderer_spec is: pin the MSL text that encodes each rule.
+        val msl = _engine2d_msl()
+        expect(msl.contains("uint dterm = solid ? (dc * (inv + 1u)) >> 8 : (v + (v >> 8)) >> 8;")).to_equal(true)
+        expect(msl.contains("out |= ((sc * sa + 127u) / 255u + dterm) << shift;")).to_equal(true)
+        expect(msl.contains("uint dw = (da * inv + 127u) / 255u;")).to_equal(true)
+        expect(msl.contains("    return blend_rule(src, dst, true);")).to_equal(true)
+        expect(msl.contains("    return blend_rule(src, dst, false);")).to_equal(true)
+        expect(msl.contains("uint scaled_alpha = (alpha * opacity + 500u) / 1000u;")).to_equal(true)
+        expect(msl.contains("fb[dst_idx] = blend_src_over_image(scaled, fb[dst_idx]);")).to_equal(true)
+        # The glass material keeps its own truncating twin (no Chrome equivalent).
+        expect(msl.contains("uint surface = glass_blend_over(glass_surface_tint(p), saturated);")).to_equal(true)

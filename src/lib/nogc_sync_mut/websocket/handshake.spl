@@ -1,4 +1,4 @@
-use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.nogc_sync_mut.crypto.entropy_platform.{entropy_platform_bytes}
 # WebSocket Handshake Module
 # Implements HTTP upgrade handshake, key generation, and validation
 
@@ -8,6 +8,7 @@ use std.common.string_core.{char_from_code}
 # This module used to carry a second, byte-identical-in-intent SHA-1; it was
 # deleted (duplicate implementation of the same algorithm).
 use std.crypto.sha1.{sha1_bytes}
+use std.common.crypto.types.{crypto_text_to_bytes}
 
 # ==============================================================================
 # Base64 Encoding
@@ -52,12 +53,12 @@ fn base64_encode_single(b1: i64) -> text:
     "{c1}{c2}=="
 
 fn ws_handshake_text_to_bytes(input: text) -> List<i64>:
-    val result = []
-    val len = input.length()
+    var result = []
+    # UTF-8 octets, not scalars: char_at(i).byte_at(0) dropped continuation bytes.
+    val len = input.byte_len()
     var i = 0
     while i < len:
-        val byte = input.char_at(i).byte_at(0)
-        result.push(byte)
+        result.push(input.byte_at(i))
         i = i + 1
     result
 
@@ -75,26 +76,31 @@ fn ws_bytes_to_text(bytes: List<i64>) -> text:
     result
 
 fn base64_encode(input: text) -> text:
-    val bytes = ws_handshake_text_to_bytes(input)
-    val len = bytes.length()
+    base64_encode_bytes(crypto_text_to_bytes(input))
+
+# Base64 over raw [u8] bytes. A SHA-1 digest MUST use this directly:
+# routing it through text UTF-8 re-encodes every byte >= 0x80 (bug
+# ws_accept_hash_sha1_bytes_reencoded_utf8_before_base64_2026_11_10).
+fn base64_encode_bytes(bytes: [u8]) -> text:
+    val len = bytes.len() as i64
     var parts: [text] = []
     var i = 0
 
     while i < len:
         val remaining = len - i
         if remaining >= 3:
-            val b1 = bytes[i]
-            val b2 = bytes[i + 1]
-            val b3 = bytes[i + 2]
+            val b1 = bytes[i] as i64
+            val b2 = bytes[i + 1] as i64
+            val b3 = bytes[i + 2] as i64
             parts.push(base64_encode_triple(b1: b1, b2: b2, b3: b3))
             i = i + 3
         else:
             if remaining == 2:
-                val b1 = bytes[i]
-                val b2 = bytes[i + 1]
+                val b1 = bytes[i] as i64
+                val b2 = bytes[i + 1] as i64
                 parts.push(base64_encode_pair(b1: b1, b2: b2))
             else:
-                val b1 = bytes[i]
+                val b1 = bytes[i] as i64
                 parts.push(base64_encode_single(b1))
             i = len
 
@@ -126,7 +132,7 @@ fn word_to_bytes(word: i64) -> List<i64>:
     [b0, b1, b2, b3]
 
 fn sha1_pad(bytes: List<i64>) -> List<i64>:
-    val result = []
+    var result = []
     val len = bytes.length()
     var i = 0
 
@@ -164,7 +170,7 @@ fn sha1_pad(bytes: List<i64>) -> List<i64>:
     result
 
 fn sha1_process_block(block: List<i64>, h0: i64, h1: i64, h2: i64, h3: i64, h4: i64) -> List<i64>:
-    val w = []
+    var w = []
     var i = 0
 
     # Prepare message schedule
@@ -246,26 +252,29 @@ fn sha1_process_block(block: List<i64>, h0: i64, h1: i64, h2: i64, h3: i64, h4: 
 # WebSocket Handshake Functions
 # ==============================================================================
 
-fn generate_websocket_key() -> text:
-    val bytes = []
-    # @workaround bug=websocket_timestamp_owner_and_entropy_2026_10_16 recover=c1f630e7a05d539852f53444231d4f90fd76d6a4 reason=undefined Platform timestamp owner; historical timestamp units unknown
-    val time = current_time_ms()
-    val seed = time % 256
-
+fn websocket_key_from_entropy(entropy: Result<[u8], text>) -> Result<text, text>:
+    # RFC 6455 section 4.1 requires a 16-byte random nonce. Preserve every
+    # octet directly: binary entropy must not pass through UTF-8 text.
+    if entropy.is_err():
+        return Err(entropy.unwrap_err())
+    val bytes = entropy.unwrap()
+    if bytes.len() != 16:
+        return Err("WebSocket nonce requires exactly 16 entropy bytes")
+    var encoded = ""
     var i = 0
-    while i < 16:
-        val value = ((seed * (i + 1) * 17) + (i * 23)) % 256
-        bytes.push(value)
-        i = i + 1
+    while i < 15:
+        encoded = encoded + base64_encode_triple(
+            bytes[i] as i64, bytes[i + 1] as i64, bytes[i + 2] as i64)
+        i = i + 3
+    Ok(encoded + base64_encode_single(bytes[15] as i64))
 
-    val text_bytes = ws_bytes_to_text(bytes)
-    base64_encode(text_bytes)
+fn generate_websocket_key() -> Result<text, text>:
+    # Never substitute a timestamp, zero nonce, or empty success on failure.
+    websocket_key_from_entropy(entropy_platform_bytes(16u64))
 
 fn compute_websocket_accept(key: text) -> text:
     val concatenated = key + WEBSOCKET_GUID
-    val hash = sha1_bytes(ws_handshake_text_to_bytes(concatenated))
-    val hash_text = ws_bytes_to_text(hash)
-    base64_encode(hash_text)
+    base64_encode_bytes(sha1_bytes(crypto_text_to_bytes(concatenated)))
 
 fn build_upgrade_request(host: text, path: text, key: text) -> text:
     val line1 = "GET {path} HTTP/1.1\r\n"

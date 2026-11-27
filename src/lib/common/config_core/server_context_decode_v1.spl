@@ -1,0 +1,79 @@
+# Strict SDN syntax first; existing schema-value helpers then reject unknown
+# fields and type coercion. No tolerant parser or local-default recovery.
+use std.common.config_core.server_context_types_v1.*
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.common.sdn.strict_v1.{sdn_parse_strict_v1}
+use std.common.contracts.orchestration.resource_v1.{
+    RejectionV1, as_dict, as_text, as_int, only_known, require, reject}
+
+fn server_optional_text_v1(fields: Dict<text, SdnValue>, key: text,
+        path: text, spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    if not fields.contains_key(key): return Ok("")
+    as_text(fields[key], path + "." + key, spans)
+
+fn server_decode_record_v1(name: text, value: SdnValue,
+        spans: Dict<text, SdnSpan>) -> Result<ServerRecordV1, RejectionV1>:
+    val path = "servers." + name
+    val fields = as_dict(value, path, spans)?
+    only_known(fields, ["transport", "host", "port", "containerHost", "authRef", "tlsRef", "remoteExecutable"], path, spans)?
+    val transport = as_text(require(fields, "transport", path, spans)?, path + ".transport", spans)?
+    var port: i64 = 0
+    if fields.contains_key("port"): port = as_int(fields["port"], path + ".port", spans)?
+    Ok(ServerRecordV1(name: name, transport: transport,
+        host: server_optional_text_v1(fields, "host", path, spans)?, port: port,
+        container_host: server_optional_text_v1(fields, "containerHost", path, spans)?,
+        auth_ref: server_optional_text_v1(fields, "authRef", path, spans)?,
+        tls_ref: server_optional_text_v1(fields, "tlsRef", path, spans)?,
+        remote_executable: server_optional_text_v1(fields, "remoteExecutable", path, spans)?))
+
+fn server_decode_context_v1(name: text, value: SdnValue,
+        spans: Dict<text, SdnSpan>) -> Result<ServerContextV1, RejectionV1>:
+    val path = "contexts." + name
+    val fields = as_dict(value, path, spans)?
+    only_known(fields, ["sharedServer", "consumers"], path, spans)?
+    val shared = as_text(require(fields, "sharedServer", path, spans)?, path + ".sharedServer", spans)?
+    var consumers: Dict<text, text> = {}
+    if fields.contains_key("consumers"):
+        val refs = as_dict(fields["consumers"], path + ".consumers", spans)?
+        only_known(refs, ["simple", "orchestrator", "caret", "agent"], path + ".consumers", spans)?
+        for consumer in refs.keys():
+            consumers[consumer] = as_text(refs[consumer], path + ".consumers." + consumer, spans)?
+    Ok(ServerContextV1(name: name, shared_server: shared, consumer_refs: consumers))
+
+fn server_decode_document_v1(value: SdnValue) -> Result<ServerConfigV1, RejectionV1>:
+    val spans: Dict<text, SdnSpan> = {}
+    val top = as_dict(value, "document", spans)?
+    only_known(top, ["version", "currentContext", "servers", "contexts"], "document", spans)?
+    val version = as_int(require(top, "version", "document", spans)?, "version", spans)?
+    if version != 1: return Err(reject("version", "version", "server-config-version-unsupported", spans))
+    val current = as_text(require(top, "currentContext", "document", spans)?, "currentContext", spans)?
+    val server_fields = as_dict(require(top, "servers", "document", spans)?, "servers", spans)?
+    val context_fields = as_dict(require(top, "contexts", "document", spans)?, "contexts", spans)?
+    if server_fields.len() < 1 or server_fields.len() > 16:
+        return Err(reject("limit", "servers", "server-record-limit", spans))
+    if context_fields.len() < 1 or context_fields.len() > 16:
+        return Err(reject("limit", "contexts", "server-context-limit", spans))
+    var servers: [ServerRecordV1] = []
+    for name in server_fields.keys(): servers.push(server_decode_record_v1(name, server_fields[name], spans)?)
+    var contexts: [ServerContextV1] = []
+    for name in context_fields.keys(): contexts.push(server_decode_context_v1(name, context_fields[name], spans)?)
+    Ok(ServerConfigV1(current_context: current, servers: servers, contexts: contexts))
+
+pub fn decode_server_config_v1(source: text) -> Result<ServerConfigV1, text>:
+    # byte_len matters for multibyte authored input; len may count characters.
+    if source.byte_len() > 65536: return Err("server-config-source-limit")
+    val limits = SdnStrictLimitsV1(max_source_bytes: 65536, max_depth: 6,
+        max_nodes: 512, max_rows: 0, max_cells: 0, max_columns: 0)
+    var value = SdnValue.Null
+    match sdn_parse_strict_v1(source, limits):
+        case Err(issue):
+            return Err("server-config-sdn:" + issue.code + ":" + issue.line.to_text() + ":" + issue.column.to_text())
+        case Ok(document): value = document.value
+    match server_decode_document_v1(value):
+        case Err(issue): return Err("server-config-schema:" + issue.path + ":" + issue.message)
+        case Ok(config):
+            server_config_validate_v1(config)?
+            Ok(config)
+
+export decode_server_config_v1

@@ -103,3 +103,5 @@ touching it must be sequenced after that lane. Status stays
 change per file (verified by total-byte-count non-decrease, per the warning
 above about a prior split that silently dropped 663 lines) — not something to
 attempt inside a mixed bug-sweep pass. No code changed by this note.
+
+**Revalidated 2026-11-02: still plausible because OPEN — pre-existing on origin/main, NOT introduced by the change; no merged fix commit with a passing regression is cited in this doc.**

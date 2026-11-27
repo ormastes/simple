@@ -1,5 +1,5 @@
 # `rt_file_is_char_device`: whole-repo de-JIT (stale seed) + dual-ABI wrong answer
-## Closed 2026-09-16 — Triage 2026-09-13 CLOSED; both defects resolved per doc body content checks
+## Closed 2026-09-16 — Triage 2026-09-13 CLOSED; both defects resolved per doc body content checks (re-verified 2026-11-25)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
@@ -163,3 +163,22 @@ been closed by the newer deployed seed.
 Recommend: close. No change was needed in `src/lib/nogc_sync_mut/io_runtime.spl`
 — its declaration at line 52 was always the correct one.
 
+
+## Re-verified 2026-11-25 (release/1.0.0) — closure confirmed by content
+
+Code inspection on the release/1.0.0 tree confirms both defects stay resolved:
+
+- **Defect B (dual ABI):** every definition now uses the two-argument
+  `(ptr, len)` ABI — `src/runtime/runtime.c:1093`,
+  `src/runtime/runtime_native.c:15439`, prototype
+  `src/runtime/runtime.h:1838`, Rust canonical
+  `src/compiler_rust/runtime/src/value/sffi/file_io/metadata.rs:271`. All
+  delegate to a single `rt_file_is_char_device_impl`. No NUL-terminated
+  `const char*` variant survives.
+- **Defect A (de-JIT):** `rt_file_is_char_device` is present in the JIT
+  symbol manifest (`src/compiler_rust/common/src/runtime_symbols.rs:1205`),
+  and the Simple-layer extern (`src/lib/nogc_sync_mut/io_runtime.spl:135`)
+  is unchanged.
+
+No runtime probe was run (no `/dev/*` character devices on this Windows
+host); the 2026-08-17 runtime evidence above stands. No change needed.

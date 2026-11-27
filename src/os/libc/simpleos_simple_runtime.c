@@ -163,24 +163,28 @@ spl_i64 rt_to_string(spl_i64 value) {
     return rt_string_new((spl_i64)(uintptr_t)"<value>", 7);
 }
 
-static void rt_write_value(spl_i64 value) {
+static RtString *rt_value_string_or_render(spl_i64 value) {
     RtString *string = rt_as_string(value);
-    spl_i64 rendered;
     if (!string) {
-        rendered = rt_to_string(value);
+        spl_i64 rendered = rt_to_string(value);
         string = rt_as_string(rendered);
     }
+    return string;
+}
+
+static void rt_write_value_fd(int fd, spl_i64 value) {
+    RtString *string = rt_value_string_or_render(value);
     if (string && string->len > 0) {
-        (void)write(1, string->data, (size_t)string->len);
+        (void)write(fd, string->data, (size_t)string->len);
     }
 }
 
 void rt_print_value(spl_i64 value) {
-    rt_write_value(value);
+    rt_write_value_fd(1, value);
 }
 
 void rt_println_value(spl_i64 value) {
-    rt_write_value(value);
+    rt_write_value_fd(1, value);
     (void)write(1, "\n", 1);
 }
 
@@ -205,15 +209,7 @@ void rt_println(const char *value) {
 }
 
 void rt_eprint_value(spl_i64 value) {
-    RtString *string = rt_as_string(value);
-    spl_i64 rendered;
-    if (!string) {
-        rendered = rt_to_string(value);
-        string = rt_as_string(rendered);
-    }
-    if (string && string->len > 0) {
-        (void)write(2, string->data, (size_t)string->len);
-    }
+    rt_write_value_fd(2, value);
 }
 
 void rt_eprintln_value(spl_i64 value) {
@@ -227,4 +223,8 @@ spl_i64 rt_pool_safepoint(void) {
 
 void __simple_runtime_init(void) {}
 void __simple_runtime_shutdown(void) {}
-void __simple_call_module_inits(void) {}
+/* WEAK: the native linker emits the strong aggregator (linker.rs generate_init_caller);
+ * a strong empty stub here either duplicate-symbol-fails that link or, when it
+ * wins, silently skips every module-global initializer
+ * (bug simpleos_freestanding_nil_array_init_optimizer_guard_fold). */
+__attribute__((weak)) void __simple_call_module_inits(void) {}

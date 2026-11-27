@@ -59,7 +59,7 @@ fn _ws_stat(path: text, io: ScvIoCounter) -> ((i64, i64), ScvIoCounter):
     ((size, mtime), next)
 
 # read: ONE FileBuffer read -> (content_id, size)
-fn _ws_read(path: text, io: ScvIoCounter) -> ((text, i64), ScvIoCounter):
+fn _ws_read(path: text, io: ScvIoCounter) -> ((Result<text, text>, i64), ScvIoCounter):
     var next = io
     next.content_reads = next.content_reads + 1
     val buf = scv_file_buffer_read(path)
@@ -71,6 +71,7 @@ fn scv_warm_index_build(root: text) -> ScvWarmStatusResult:
     var idx = scv_wtindex_new()
     var io = scv_io_counter_new()
     var clock: i64 = 1
+    var lines: [text] = []
     for path in dir_walk(root):
         if is_dir(path) or scv_warm_skip(root, path):
             continue
@@ -78,7 +79,12 @@ fn scv_warm_index_build(root: text) -> ScvWarmStatusResult:
         val (rd, io2) = _ws_read(path, io1)
         io = io2
         val (size, mtime) = st
-        val (cid, _n) = rd
+        val (read_id, _n) = rd
+        val cid = match read_id:
+            Ok(id): id
+            Err(error):
+                lines.push(error.trim())
+                continue
         idx = scv_wtindex_upsert(idx, ScvWtEntry(path: scv_rel_path(root, path), mode: 420,
                                                  size: size, mtime_ms: mtime, ctime_ms: mtime,
                                                  worktree_content_id: cid, repository_content_id: cid,
@@ -86,7 +92,7 @@ fn scv_warm_index_build(root: text) -> ScvWarmStatusResult:
                                                  dirty_gen: idx.dirty_generation,
                                                  ignore_gen: idx.ignore_generation))
         clock = clock + 1
-    ScvWarmStatusResult(index: idx, io: io, lines: [])
+    ScvWarmStatusResult(index: idx, io: io, lines: lines)
 
 # ---- warm path ----
 
@@ -149,7 +155,12 @@ fn scv_warm_status(root: text, idx: ScvWtIndex, events: [FsWatchEvent]) -> ScvWa
             continue
         val (rd, io2) = _ws_read(ev.path, io)
         io = io2
-        val (cid, read_size) = rd
+        val (read_id, read_size) = rd
+        val cid = match read_id:
+            Ok(id): id
+            Err(error):
+                lines.push(error.trim())
+                continue
         val (st2, io3) = _ws_stat(ev.path, io)
         io = io3
         val (size2, mtime2) = st2

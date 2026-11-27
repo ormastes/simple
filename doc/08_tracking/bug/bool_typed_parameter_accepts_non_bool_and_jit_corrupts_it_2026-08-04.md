@@ -292,3 +292,60 @@ compile-time checker after measuring 286 candidate sites and 336 enum names
 declared more than once. Any fix here deserves the same measurement first.
 `src/compiler/30.types/bidirectional_checking.spl` is where argument agreement
 lives; PR #1077 is open on the sibling `type_infer/*` files.
+
+## Re-scoped 2026-11-05 (HB2) — pure-Simple checker already rejects; remainder is seed-only
+
+New spec `test/01_unit/compiler/type_infer/bool_param_rejects_non_bool_spec.spl`
+drives the pure-Simple HM checker at the call-argument site
+(`inference_expr_calls.spl:44`, `InferMode.Check(param)`): `i64`, `text`, `i64?`,
+literal `42` and literal `0` against a `bool` parameter all yield `Mismatch`;
+`bool` is accepted. 7/7 pass. So half 1 is enforced by the self-hosted
+compiler's type checker, the default tooling.
+
+Still reproduces on the Rust seed (bootstrap-only): `take_bool(42)` and
+`take_bool(0)` both print `got=true` (`coerce_param` in
+`src/compiler_rust/compiler/src/interpreter_call/core/arg_binding.rs` coerces
+any value to bool). Not fixed here: seed rebuild is out of this lane, and the
+seed is not the normal tool. Native end-to-end confirmation is blocked —
+`s3_fable44.exe native-build` SEGVs (rc 139) on a 6-line probe after HIR, so
+whether HM runs as a gate in the native pipeline is unverified. Row stays
+OPEN, scoped to: seed `coerce_param` bool arm + native-pipeline gating proof.
+
+## 2026-11-06 skipped
+The interpreter deliberately coerces non-bool args to bool by presence (`present_value_as_bool_arg`, arg_binding.rs) because 2,174 spec sites pass `x.?` payloads to `bool` params; the runtime cannot tell `f(5)` from `f(x.?)`. A rejection needs a static check (literal/typed arg vs bool param) aligned with the pure-Simple checker. f(5) still returns 1.
+
+## 2026-11-10 p2fix-interp lane (work/p2fix-interp-20261110, base d8c0a761988c)
+
+Static bool-argument admission implemented in the seed on BOTH lanes:
+`bind_args_with_injected` (interpreter pre-scan before arg evaluation) and HIR
+`lower_call` (via new `fn_param_bool` table populated in
+`collect_fn_param_defaults`). Identical rule in both places: a literal
+non-bool argument (integer/float/text/nil literal) at a `bool`-declared
+parameter is rejected with "type mismatch: parameter 'X' is declared 'bool'
+but the argument is a <kind> literal". `x.?` existence probes, Option
+payloads, coalesces, spreads, and variadic calls keep the deliberate runtime
+PRESENCE contract (spreads/variadic keep pure runtime semantics on both
+lanes). Verified with a fresh cargo build from this tree: rejection identical
+on interpret and jit lanes (rc=1, same diagnostic); acceptance contract
+unchanged (`take_bool(true/false/opt.?/opt_nil().?)`, `if opt.?:` branch).
+Interpreter `interpreter_call` tests 46/46; specs
+`auto_comprehensive_10` (30/30, historically red from this bug),
+`bool_param_rejects_non_bool` (7/7), val-parity (2/2) all green. New
+regression spec `test/01_unit/compiler/95.interp/interpreter/bool_param_literal_admission_spec.spl`
+(6/6). REMAINING: typed non-bool identifier rejection needs the HM-parity
+call-argument checker (as this doc's 2026-08-10 re-investigation concluded);
+native (compile --native) gate shares the HIR lowering path but awaits an
+admitted producer for end-to-end proof. Seed-smoke evidence only.
+
+## 2026-11-26 BF-4 (work/bf-4-rust-interp-semantics-20261126, release/1.0.0) — FIXED (interpreter literal call paths enforced)
+
+Remaining gaps found and fixed in the Rust seed interpreter (`src/compiler_rust/compiler/src/`):
+
+- `interpreter_call/core/arg_binding.rs`: `bind_args_with_values_named` (used by overloaded calls `FUNCTION_OVERLOADS`, owned-receiver methods, and write-back calls) previously omitted `reject_bool_literal_args`; now enforced on both the positional fast path and the general named/default binding path, plus exported `reject_bool_literal_args_with_self` and `reject_bool_literal_args_for_slice`.
+- `interpreter_call/mod.rs`: extracted `eval_and_exec_static_overload` across both `Expr::FieldAccess` and `Expr::Path` static-method/impl/class-overload call sites (`Gate.make(...)`, `Gate::make(...)`, `ImplGate::make(...)`, `OvGate::make(...)`), rejecting non-bool literals before argument evaluation when a single matching-name static method exists and before callee execution for multi-candidate overload selection.
+- `interpreter_method/mod.rs` (`try_exec_ufcs_method` and `Map.new` static overload) and `interpreter_method/special/objects.rs` (`exec_static_method_candidates`): enforced `reject_bool_literal_args_for_slice`.
+- `interpreter_helpers/method_dispatch.rs` & `patterns.rs`: `call_method_on_value_with_args` now carries `arg_exprs: Option<&[Argument]>` from statement-level chained `MethodCall` dispatch and routes `Value::Object` (class/local-impl/`GLOBAL_IMPL_METHODS`), `Value::Enum` (impl/enum methods), `Value::ClassInstance`, and built-in `TRAIT_IMPLS` / `BLANKET_IMPL_METHODS` calls through shared `exec_method_with_values_and_self_checked` (`reject_bool_literal_args_with_self`), alongside UFCS.
+
+Covered by targeted debug cargo tests (`bf4_interpreter_bugs`: `bug1_rejects_literal_non_bool_across_all_call_paths` exercising direct/named, overloaded/named, immutable & `me` methods, static `Gate.make` & `Expr::Path` `Gate::make`/`ImplGate::make`/`OvGate::make`, direct UFCS, and statement-chained `patterns.rs -> method_dispatch.rs` `Object`/`Enum`/`Enum impl`/`TRAIT_IMPLS`/UFCS calls; `bug1_preserves_bool_and_presence_query_contract` verifying `true`/`false`/`.?` acceptance on regular, path static, enum, and trait calls plus pre-eval non-side-effect rejection on single-candidate `Gate::make(42, fail_if_eval())`; plus `bool_parameter_literal_admission`, `--lib interpreter_call::`, `--lib interpreter_helpers::method_dispatch`, and `--lib interpreter_method::`). Note: `Value::ClassInstance` and `BLANKET_IMPL_METHODS` arms share `exec_method_with_values_and_self_checked` by inspection rather than dedicated Simple fixtures.
+
+Note on remaining scope: `val x: i64 = 42; takes_bool(x)` (typed non-bool local/param identifiers) intentionally remains outside the runtime tree-walk interpreter because `opt.?` still passes payload values via `present_value_as_bool_arg` and `Env` does not enforce static variable types (`bool_param_rejects_non_bool_spec.spl` covers the HM checker).

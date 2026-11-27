@@ -13,3 +13,12 @@ Production code now uses `fullscreen_enabled`. Parser conformance should add a
 shared negative fixture so seed and self-hosted frontends reject reserved
 identifiers consistently with a source location.
 
+
+## 2026-11-25 triage (p3-bap lane, Windows worktree)
+
+Production fix confirmed at `origin/release/1.0.0` (47d6c5eddd5):
+`src/os/hosted/hosted_entry.spl:235` uses `fullscreen_enabled`; no
+`val on` binding remains in that file. The open remainder is a shared
+seed/self-hosted parser negative fixture so both frontends reject reserved
+identifiers consistently — Rust-seed parser conformance work, not actionable
+in this lane. Status header ("needs owner triage") stands.

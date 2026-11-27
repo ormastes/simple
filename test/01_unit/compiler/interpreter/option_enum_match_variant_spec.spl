@@ -1,0 +1,120 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Option<Enum> match through the user enum's own variant patterns — regression
+# spec for the seed interpreter fix 94bb1e16459.
+#
+# DEFECT (doc/08_tracking/bug/interpreter_match_on_option_of_enum_fires_no_arm_2026-08-06.md,
+# match_on_optional_enum_variant_falls_to_wildcard_2026-08-07.md,
+# enum_pattern_match_optional_value_silent_fallthrough_2026-07-20.md):
+# a `T?` value holding a user enum is `Option::Some(<enum>)` at runtime. A
+# variant pattern of the user enum (`Evt.Click(x)`) must look through the Some
+# wrapper. Before the fix, `pattern_matches` (seed
+# src/compiler_rust/compiler/src/interpreter_patterns.rs) compared the
+# WRAPPER's own tag ("Some") against "Click", no arm ever matched, and the
+# match silently took the wildcard arm — exit 0, no diagnostic:
+#
+#   fn opt_evt(v: Evt) -> Evt?: v
+#   match opt_evt(Evt.Click(x: 5)):
+#       case Evt.Click(x): ...     # never reached
+#       case _: ...                # always taken
+#
+# The pure-Simple interpreter was fixed separately on 2026-08-06
+# (src/compiler/10.frontend/core/interpreter/eval.spl `match_enum_variant_pattern`,
+# spec test/01_unit/compiler_core/interpreter/option_wrapped_enum_match_variant_spec.spl).
+# The SEED interpreter half landed 2026-11-03 as 94bb1e16459 and is what this
+# spec pins: `bin/simple test` executes spec bodies on the seed tree-walk
+# interpreter, so a spec asserting in-process could never see the seed engine
+# misbehave. The oracle is therefore the probe
+# probe_option_enum_match.spl run as a SUBPROCESS under both engines, exactly
+# like aliased_param_writeback_spec.spl does.
+#
+# WHY BOTH ENGINES: the JIT arm proves the expectations are achievable rather
+# than invented; both engines must now print ALL PASS. The nested
+# `Some(Evt.Click(x))` JIT residual was the `rt_enum_id >= 0` Some-slot guard
+# in payload_slot_expr (seed hir/lower/expr/control.rs), which took a bare
+# user enum for a Some box; it is now `== OPTION_ENUM_ID`.
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+
+val PROBE_PATH: text = "test/01_unit/compiler/interpreter/probe_option_enum_match.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate; the default
+    # is whatever bin/simple currently resolves to, which is what ships.
+    var bin = env_get("SIMPLE_TEST_BINARY")
+    if bin == "":
+        bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "match on Option<Enum> fires the user enum's variant arms":
+    # @manual scenario evidence
+    it "looks through the Some wrapper on the tree-walk interpreter (the fixed engine)":
+        # @req REQ-SSPEC-COMPILER
+        step("looks through the Some wrapper on the tree-walk interpreter (the fixed engine)")
+        step("Run the probe under SIMPLE_EXECUTION_MODE=interpreter — the engine the defect lived in")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("Implicit Some-wrap through a function return must match a bare variant pattern")
+        expect(interp).to_contain("PASS implicit_wrap_fn")
+
+        step("Explicit `Some(...)` returned through a `-> Evt?` function must match too")
+        expect(interp).to_contain("PASS explicit_some_fn")
+
+        step("Local explicit construction `val a = Some(Evt.Click(...))` must match")
+        expect(interp).to_contain("PASS local_explicit")
+
+        step("Local implicit binding `val b: Evt? = Evt.Click(...)` must keep matching")
+        expect(interp).to_contain("PASS local_implicit")
+
+        step("Match EXPRESSION form must behave like the statement form")
+        expect(interp).to_contain("PASS expression_form")
+
+        step("The aggregate verdict line is the authoritative result")
+        expect(interp).to_contain("OPTION_ENUM_MATCH PROBE: ALL PASS")
+
+    it "does not unwrap what must stay wrapped on the interpreter":
+        # @req REQ-SSPEC-COMPILER
+        step("does not unwrap what must stay wrapped on the interpreter")
+        step("The fix unwraps exactly one Option layer, only for non-Some/None patterns")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("A `Some(...)`-wrapped pattern must still match the wrapper itself")
+        expect(interp).to_contain("PASS wrapped_pattern")
+        expect(interp).to_contain("PASS wrapped_key_pattern")
+
+        step("nil must NOT match a user-variant arm — it falls to the wildcard")
+        expect(interp).to_contain("PASS nil_falls_through")
+
+        step("A literal `case nil:` arm still matches the nil scrutinee")
+        expect(interp).to_contain("PASS nil_arm")
+
+    it "binds explicit-Some and nested Some(variant) payloads under the JIT":
+        # @req REQ-SSPEC-COMPILER
+        step("binds explicit-Some and nested Some(variant) payloads under the JIT")
+        val jit = run_probe_in_mode("jit")
+
+        step("Explicit-Some shapes fire the variant arm AND bind the variant's payload, not the Some box")
+        expect(jit).to_contain("PASS explicit_some_fn")
+        expect(jit).to_contain("PASS local_explicit")
+
+        step("Nested Some(Evt.Click(x)) / Some(Evt.Key(code)) bind the inner payload, not nil")
+        expect(jit).to_contain("PASS wrapped_pattern")
+        expect(jit).to_contain("PASS wrapped_key_pattern")
+        expect(jit).to_contain("OPTION_ENUM_MATCH PROBE: ALL PASS")
+
+        step("The remaining shapes stay at parity with the interpreter")
+        expect(jit).to_contain("PASS implicit_wrap_fn")
+        expect(jit).to_contain("PASS local_implicit")
+        expect(jit).to_contain("PASS nil_falls_through")
+        expect(jit).to_contain("PASS nil_arm")

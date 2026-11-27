@@ -1,0 +1,45 @@
+use std.spec.*
+use std.spec.step
+use compiler.tools.sffi_gen._SffiGenMain.cli_and_generate.{sffi_gen_units, sffi_units_output_path}
+
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+
+val CLI_DIR = "build/test_tmp/sffi_gen_units_cli"
+val GOOD = "unit Port: i32 as Pt\n# @unit_range Port 1..65535\nextern fn rt_net_port(fd: i32) -> Port\nextern fn rt_plain(x: i64) -> i64\n"
+val BAD = "unit Port: i32 as Pt\n# @unit_range Port 1..99999999999\nextern fn rt_net_port(fd: i32) -> Port\n"
+
+fn _write_input(name: text, content: text) -> text:
+    rt_dir_create(CLI_DIR, true)
+    val path = "{CLI_DIR}/{name}"
+    rt_file_write_text(path, content)
+    path
+
+# @manual_section: constrained_unit_cli
+describe "simple sffi-gen --gen-units":
+    """The CLI scans an input file for constrained-unit declarations and writes facades."""
+
+    it "derives the output path from the input basename":
+        # @req: RB-SFFI-02
+        expect(sffi_units_output_path("src/lib/net.spl", "out")).to_equal("out/net_units.spl")
+
+    it "writes checked facades for a ranged unit":
+        # @req: RB-SFFI-02
+        step("Run the units mode on a file with one ranged unit extern")
+        val input = _write_input("good.spl", GOOD)
+        val rc = sffi_gen_units(input, CLI_DIR, false)
+        expect(rc).to_equal(0)
+        val out = rt_file_read_text(sffi_units_output_path(input, CLI_DIR)) ?? ""
+        expect(out).to_contain("pub fn rt_net_port(fd: i32) -> Result<Port, ConstraintError>:")
+        expect(out).to_contain("use std.common.constraint_error.")
+        expect(out.contains("rt_plain")).to_equal(false)
+
+    it "fails with exit 1 when a range does not fit the ABI type":
+        # @req: RB-SFFI-02
+        val input = _write_input("bad.spl", BAD)
+        expect(sffi_gen_units(input, CLI_DIR, true)).to_equal(1)
+
+    it "fails with exit 1 on a missing input file":
+        # @req: RB-SFFI-02
+        expect(sffi_gen_units("{CLI_DIR}/does_not_exist.spl", CLI_DIR, true)).to_equal(1)

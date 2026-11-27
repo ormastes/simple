@@ -130,3 +130,35 @@ fn main() -> i32:
 "#;
     assert_eq!(run_program(source), Ok(4));
 }
+
+/// Divergence A, owner decision 2026-11-09: the seed must evaluate
+/// `x.? == true` / `x.? == false` nil-safely, exactly like pure Simple
+/// (native stage2 probe, 2026-11-09: nil -> false/false, present text ->
+/// false/false, `bool?` false -> `== false` true, `bool?` true -> `== true`
+/// true). The seed used to answer false for every `bool?` receiver because
+/// the `Option::Some(bool)` payload never reached the comparison unwrapped.
+#[test]
+fn dot_query_bool_comparison_matches_pure_simple() {
+    let source = r#"
+fn main() -> i32:
+    val a: text? = nil
+    val b: text? = "x"
+    val c: bool? = false
+    val d: bool? = true
+    val e: bool? = nil
+    var bits = 0
+    if a.? == false: bits = bits + 1
+    if a.? == true: bits = bits + 2
+    if b.? == false: bits = bits + 4
+    if b.? == true: bits = bits + 8
+    if c.? == false: bits = bits + 16
+    if c.? == true: bits = bits + 32
+    if d.? == false: bits = bits + 64
+    if d.? == true: bits = bits + 128
+    if e.? == false: bits = bits + 256
+    if e.? == true: bits = bits + 512
+    return bits
+"#;
+    // pure Simple: only c.?==false (16) and d.?==true (128) fire
+    assert_eq!(run_program(source), Ok(16 + 128));
+}

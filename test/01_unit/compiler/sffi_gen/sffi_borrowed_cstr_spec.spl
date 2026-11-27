@@ -1,0 +1,59 @@
+# @req: RB-SFFI-03
+# Owner decision 2026-11-18: SFFI `char*` returns are borrowed. The generated
+# facade copies into `text` immediately and the caller frees nothing.
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_write, process_run, env_get}
+use compiler.tools.sffi_gen.constrained_unit_scan.{generate_constrained_unit_facades}
+
+val DECLS = "extern fn rt_version(major: i32) -> CStr\nextern fn rt_plain(x: i64) -> i64\n"
+
+fn run_cstr_facade(name: text, ptr: i64) -> text:
+    val gen = generate_constrained_unit_facades(DECLS)
+    var lines: [text] = []
+    for line in gen.source.split("\n"):
+        if line.starts_with("extern fn __raw_rt_version"):
+            lines.push("fn __raw_rt_version(major: i32) -> i64:\n    {ptr}")
+        elif line.starts_with("extern fn rt_cstring_to_text"):
+            lines.push("fn rt_cstring_to_text(ptr: i64) -> text:\n    \"copied-{ptr}\"")
+        else:
+            lines.push(line)
+    val main_src = "\nfn main():\n    match rt_version(1):\n        case Some(s):\n            print(\"GOT \" + s)\n        case None:\n            print(\"NULL\")\n"
+    val path = "build/test-artifacts/sffi_cstr_" + name + ".spl"
+    file_write(path, lines.join("\n") + main_src)
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    process_run("sh", ["-c", bin + " run " + path + " 2>&1"]).0
+
+describe "SFFI borrowed char* return":
+    it "copies the borrowed pointer into text inside the facade":
+        step("Generate a facade for a CStr return")
+        val r = generate_constrained_unit_facades(DECLS)
+        expect(r.diagnostic).to_equal("")
+        expect(r.source).to_contain("extern fn __raw_rt_version(major: i32) -> i64")
+        expect(r.source).to_contain("pub fn rt_version(major: i32) -> Option<text>:")
+        expect(r.source).to_contain("Some(rt_cstring_to_text(ptr))")
+
+    it "never frees the borrowed pointer":
+        step("Generate a facade and look for a free call")
+        val r = generate_constrained_unit_facades(DECLS)
+        expect(r.source.contains("free")).to_equal(false)
+
+    it "declares rt_cstring_to_text exactly once":
+        step("Generate two CStr facades")
+        val r = generate_constrained_unit_facades("extern fn rt_a() -> CStr\nextern fn rt_b() -> CStr\n")
+        expect(r.source.split("extern fn rt_cstring_to_text").len()).to_equal(2)
+
+    it "ignores non-CStr externs":
+        step("Generate facades for a plain extern")
+        val r = generate_constrained_unit_facades(DECLS)
+        expect(r.source.contains("rt_plain")).to_equal(false)
+
+    it "executes: non-null pointer becomes text":
+        step("Run generated facade with a non-null pointer")
+        expect(run_cstr_facade("some", 4096)).to_contain("GOT copied-4096")
+
+    it "executes: null pointer becomes None":
+        step("Run generated facade with a null pointer")
+        expect(run_cstr_facade("null", 0)).to_contain("NULL")

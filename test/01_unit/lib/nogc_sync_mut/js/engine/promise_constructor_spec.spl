@@ -1,0 +1,59 @@
+# `new Promise(executor)` in the nogc JS engine.
+# Bug: js_engine_missing_builtins_regex_promise_prototype_2026-07-11 (item 2).
+# `Promise` is a plain host object, so `new Promise(...)` fell through
+# `eval_new` to `undefined`, and the subset parser read
+# `new C(args).then(...)` as `new (C(args).then(...))`.
+
+use std.spec.*
+use std.js.engine.js_error.{JsLogger, LogLevel}
+use std.js.engine.parser.{JsParser}
+use std.js.types.js_types.{JsValue}
+use std.js.engine.interpreter_types.{js_to_string}
+use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
+use std.nogc_sync_mut.js.engine.interpreter_exec.*
+
+# Run `source`, drain the microtask queue, and return global `r` as text.
+fn run_js_drained(source: text) -> text:
+    val logger = JsLogger.new("promise-ctor-spec", LogLevel.Error)
+    val parser = JsParser.new(source, logger)
+    match parser.parse_program():
+        Ok(statements):
+            val interpreter = JsInterpreter.new(logger)
+            match interpreter.execute(statements):
+                Ok(value):
+                    var rounds = 0
+                    while rounds < 16 and interpreter.drain_pending_microtasks():
+                        rounds = rounds + 1
+                    match interpreter.lookup_global_value("r"):
+                        Some(v): js_to_string(v)
+                        nil: "<no r>"
+                Err(error): "ERR: {error.message}"
+        Err(error): "PARSE-ERR: {error.message}"
+
+describe "JS engine Promise constructor":
+    it "constructs a promise whose executor resolves it":
+        expect(run_js_drained("var r = 0; var p = new Promise((res, rej) => res(5)); r = typeof p.then;")).to_equal("function")
+        expect(run_js_drained("var r = 0; new Promise((res, rej) => res(5)).then(v => { r = v; });")).to_equal("5")
+        expect(run_js_drained("var r = 0; var p = new Promise(function(res) { res('a'); }); p.then(v => { r = v + '!'; });")).to_equal("a!")
+
+    it "parses a member chain after a new-expression":
+        expect(run_js_drained("var r = 0; r = new Promise(res => res(1)).then(v => v).then === undefined;")).to_equal("false")
+        expect(run_js_drained("var r = 0; function Box(v) { this.v = v; } r = new Box(4).v + new Box('x').v;")).to_equal("4x")
+
+    it "rejects through the executor and routes to onRejected / catch":
+        expect(run_js_drained("var r = 0; new Promise((res, rej) => rej('no')).then(v => { r = 1; }, e => { r = 'r:' + e; });")).to_equal("r:no")
+        expect(run_js_drained("var r = 0; new Promise((res, rej) => rej('no')).catch(e => { r = 'c:' + e; });")).to_equal("c:no")
+
+    it "settles only once and resolves asynchronously":
+        expect(run_js_drained("var r = 0; new Promise((res, rej) => { res(1); res(2); rej(3); }).then(v => { r = v; });")).to_equal("1")
+        expect(run_js_drained("var r = 'sync'; new Promise(res => res(1)).then(v => { r = 'async'; }); r = r + '!';")).to_equal("async")
+
+    it "adopts a promise passed to resolve":
+        expect(run_js_drained("var r = 0; new Promise(res => res(Promise.resolve(9))).then(v => { r = v; });")).to_equal("9")
+        expect(run_js_drained("var r = 0; var inner; var outer = new Promise(res => { inner = new Promise(ir => { ir(7); }); res(inner); }); outer.then(v => { r = v; });")).to_equal("7")
+        expect(run_js_drained("var r = 0; var ir; var inner = new Promise(x => { ir = x; }); new Promise(res => res(inner)).then(v => { r = v; }); ir(3);")).to_equal("3")
+        expect(run_js_drained("var r = 0; var rj; var inner = new Promise((x, y) => { rj = y; }); new Promise(res => res(inner)).catch(e => { r = 'c:' + e; }); rj('late');")).to_equal("c:late")
+
+    it "keeps the existing static helpers working":
+        expect(run_js_drained("var r = 0; Promise.resolve(1).then(v => v + 1).then(v => { r = v; });")).to_equal("2")
+        expect(run_js_drained("var r = 0; Promise.reject('x').catch(e => { r = e; });")).to_equal("x")

@@ -1,0 +1,249 @@
+# Internal source operations over the ORIGINAL canonical lifecycle capability.
+# No source/lease can leave a fallible acquisition without being retained here.
+use std.nogc_sync_mut.container.machine_fresh_workspace_source_custody_v3.*
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.LinuxFreshEpochSuccessorCustodyV1
+use std.nogc_sync_mut.container.machine_fresh_workload_dispatch_v3.{machine_fresh_record_command_v3, machine_fresh_record_workspace_v3}
+use std.nogc_sync_mut.container.machine_fresh_workload_native_dispatch_v3.{machine_fresh_workspace_native_binding_v3, machine_fresh_absence_observe_v3}
+use std.nogc_sync_mut.container.machine_fresh_workload_history_v2.{machine_fresh_workload_head_v2, machine_fresh_workload_history_verify_v2}
+use std.nogc_sync_mut.container.machine_fresh_workload_effects_v3.machine_fresh_workload_settle_workspace_v3
+use std.common.contracts.container.linux_fresh_workload_v2.LinuxFreshWorkloadActionV2
+use std.common.contracts.container.linux_fresh_workspace_v3.LinuxFreshWorkspaceCommandV3
+use std.common.contracts.storage.linux_workspace_retention_v3.linux_workspace_retained_metadata_encode_v3
+use std.nogc_sync_mut.container.machine_fresh_workload_lifecycle_v2.MachineFreshWorkloadLifecycleV2
+use std.nogc_async_mut.container.providers.linux.workspace_root_borrow_v3.LinuxWorkspaceRootBorrowV3
+use std.nogc_async_mut.container.providers.linux.workspace_source_loan_v3.LinuxWorkspaceSourceLoanV3
+use std.common.contracts.container.execution_v2.ContainerExecutionRequestV2
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.database.wal.{WalEntry, WalEntryType}
+use std.nogc_sync_mut.container.machine_fresh_workload_effects_v3.workload_publish_v3
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.machine_fresh_epoch_record_bytes_v1
+use std.nogc_sync_mut.io.machine_storage_owner_v1.MachineStorageOwnerV1
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure, time_sample_monotonic_nanos_or_failure}
+use std.common.contracts.container.workspace_preparation_window_v3.container_workspace_preparation_deadline_v3
+use std.nogc_sync_mut.io.linux_fresh_workspace_binding_v3.LinuxFreshWorkspaceBindingV3
+use std.common.contracts.orchestration.agent_workspace_invocation_v2.{agent_workspace_invocation_manifest_decode_v2, agent_workspace_invocation_manifest_encode_v2}
+use std.common.contracts.container.build_workspace_manifest_v1.{build_workspace_invocation_decode_v1, build_workspace_invocation_encode_v1}
+use std.common.contracts.container.linux_fresh_workspace_v3.{LinuxWorkspaceArmV3, linux_workspace_manifest_arm_v3}
+use std.common.contracts.container.settled_workspace_read_v3.{ContainerSettledWorkspaceBoundsV3, ContainerSettledWorkspaceReadV3}
+
+pub struct MachineWorkspaceSourceOpenTurnV3:
+    source: Option<LinuxWorkspaceSourceLoanV3> = None
+    error: text = ""
+
+pub(package) fn machine_workspace_source_open_v3(state: MachineFreshWorkloadLifecycleV2,
+        root: LinuxWorkspaceRootBorrowV3, request: ContainerExecutionRequestV2) -> MachineWorkspaceSourceOpenTurnV3:
+    val begun = state.source_begin_v3()
+    if begun.is_err(): return MachineWorkspaceSourceOpenTurnV3(error: begun.unwrap_err())
+    state.capture_source_custody_v3(machine_fresh_workspace_source_custody_v3(root, request))
+    val admitted = state.source_custody_v3().unwrap().admit_v3()
+    state.capture_source_custody_v3(admitted.owner.retain_diagnostic_v3(admitted.error))
+    if admitted.error != "": return MachineWorkspaceSourceOpenTurnV3(error: admitted.error)
+    val charged = state.source_lease_acquired_v3()
+    if charged.is_err(): return MachineWorkspaceSourceOpenTurnV3(error: charged.unwrap_err())
+    val opened = state.source_custody_v3().unwrap().open_v3()
+    state.capture_source_custody_v3(opened.owner.retain_diagnostic_v3(opened.error))
+    if opened.error != "": return MachineWorkspaceSourceOpenTurnV3(error: opened.error)
+    val observed = state.source_observed_v3()
+    if observed.is_err(): return MachineWorkspaceSourceOpenTurnV3(error: observed.unwrap_err())
+    val loan = opened.owner.loan_v3()
+    if loan.is_err(): return MachineWorkspaceSourceOpenTurnV3(error: loan.unwrap_err())
+    MachineWorkspaceSourceOpenTurnV3(source: Some(loan.unwrap()))
+
+# The actual native released receipt supplies all values. This is NOT a proof
+# constructor: only original-owner code accepts its internally obtained rows.
+pub(package) fn machine_workspace_source_release_rows_v3(state: MachineFreshWorkloadLifecycleV2,
+        epoch_digest: text, at: i64) -> Result<[WalEntry], text>:
+    val actual = (state.source_custody_v3()?).release_receipt_v3()?
+    if at <= 0: return Err("machine-fresh-workspace-source-release-clock")
+    val fields: Dict<text, SdnValue> = {"format": SdnValue.String("machine-workspace-acquisition-release-v3"),
+        "epochDigest": SdnValue.String(epoch_digest),
+        "requestDigest": SdnValue.String((state.source_custody_v3()?).request_digest_v3()), "bindingDigest": SdnValue.String(actual.binding_digest),
+        "policyDigest": SdnValue.String(actual.policy_digest), "kind": SdnValue.String(actual.kind),
+        "poolId": SdnValue.String(actual.pool_id), "workspaceId": SdnValue.String(actual.workspace_id),
+        "quotaId": SdnValue.Int(actual.quota_id), "hardBytes": SdnValue.Int(actual.hard_bytes),
+        "usedBytes": SdnValue.Int(actual.used_bytes), "usedInodes": SdnValue.Int(actual.used_inodes),
+        "state": SdnValue.String(actual.state)}
+    Ok([WalEntry(0, WalEntryType.Insert, "machine-workspace-acquisition-releases-v3",
+        sha256_text(epoch_digest + "\n" + actual.binding_digest), sdn_encode_canonical(SdnValue.Dict(fields)), at)])
+
+pub(package) fn machine_workspace_source_cleanup_v3(storage: MachineStorageOwnerV1,
+        state: MachineFreshWorkloadLifecycleV2) -> Result<bool, text>:
+    val safe = state.source_cleanup_preflight_v3()?
+    val closed = (state.source_custody_v3()?).cleanup_v3()
+    state.capture_source_custody_v3(closed.owner.retain_diagnostic_v3(closed.error))
+    if closed.owner.returned_v3():
+        val returned = state.source_returned_v3()?
+        return Ok(true)
+    if closed.error != "": return Err(closed.error)
+    val epoch = (state.history_v2()?).epoch
+    val rows = machine_workspace_source_release_rows_v3(state,
+        sha256_text(machine_fresh_epoch_record_bytes_v1(epoch)?), time_sample_unix_micros_or_failure() / 1000)?
+    val committed = workload_publish_v3(storage, state, rows)?
+    val published = (state.source_custody_v3()?).published_v3()?
+    state.capture_source_custody_v3(published)
+    val forgotten = published.cleanup_v3()
+    state.capture_source_custody_v3(forgotten.owner.retain_diagnostic_v3(forgotten.error))
+    if not forgotten.owner.returned_v3(): return Err(forgotten.error)
+    val returned = state.source_returned_v3()?
+    Ok(true)
+
+# T-01 (milestone_0021): returns a RESERVED, settled workspace source. The lc2 preflight replaces the
+# never-reserved one of machine_workspace_source_cleanup_v3 (which stays unchanged); the tail is that function's.
+pub(package) fn machine_workspace_source_return_settled_v3(storage: MachineStorageOwnerV1,
+        state: MachineFreshWorkloadLifecycleV2) -> Result<bool, text>:
+    val safe = state.source_return_settled_preflight_v3()?
+    # A staged (written) root is retained, never closed or released here (agent_workspace_retention_v3.md).
+    if (state.source_custody_v3()?).staging_effect_attempted_v3()?:
+        return machine_workspace_source_return_retained_v3(state)
+    val closed = (state.source_custody_v3()?).cleanup_v3()
+    state.capture_source_custody_v3(closed.owner.retain_diagnostic_v3(closed.error))
+    if closed.owner.returned_v3():
+        val returned = state.source_returned_v3()?
+        return Ok(true)
+    if closed.error != "": return Err(closed.error)
+    val epoch = (state.history_v2()?).epoch
+    val rows = machine_workspace_source_release_rows_v3(state,
+        sha256_text(machine_fresh_epoch_record_bytes_v1(epoch)?), time_sample_unix_micros_or_failure() / 1000)?
+    val committed = workload_publish_v3(storage, state, rows)?
+    val published = (state.source_custody_v3()?).published_v3()?
+    state.capture_source_custody_v3(published)
+    val forgotten = published.cleanup_v3()
+    state.capture_source_custody_v3(forgotten.owner.retain_diagnostic_v3(forgotten.error))
+    if not forgotten.owner.returned_v3(): return Err(forgotten.error)
+    val returned = state.source_returned_v3()?
+    Ok(true)
+
+# milestone_0030 op (ii): the bounded evidence read of the SETTLED source before it is returned
+# (DESIGN 13.3.7: return cleans up custody, so the read must precede it). Gate = the settled-return
+# preflight (settled, absence completed, no process, source still runtime-active/reserved).
+pub(package) fn machine_workspace_source_read_settled_v3(state: MachineFreshWorkloadLifecycleV2,
+        bounds: ContainerSettledWorkspaceBoundsV3) -> Result<ContainerSettledWorkspaceReadV3, text>:
+    val safe = state.source_return_settled_preflight_v3()?
+    (state.source_custody_v3()?).read_settled_v3(bounds)
+
+# The signed preparation window `(preparation_budget_ms, not_after)` carried by the full invocation
+# of the manifest-selected arm (milestone_0030 N6-a, DESIGN 14.3 item 5). The Agent arm decodes the
+# agent invocation exactly as before; the RemoteBuild arm decodes BuildWorkspaceInvocationV1.
+fn machine_workspace_enable_window_v3(manifest: text, digest: text, full_invocation_source: text) -> Result<(i64, i64), text>:
+    if sha256_text(full_invocation_source) != digest: return Err("linux-workspace-full-invocation-digest")
+    match linux_workspace_manifest_arm_v3(manifest)?:
+        case LinuxWorkspaceArmV3.Agent:
+            val full = agent_workspace_invocation_manifest_decode_v2(full_invocation_source)?
+            if agent_workspace_invocation_manifest_encode_v2(full)? != full_invocation_source or full.base.workspace_manifest != manifest:
+                return Err("linux-workspace-full-invocation-canonical-binding")
+            Ok((full.base.preparation_budget_ms, full.base.not_after))
+        case LinuxWorkspaceArmV3.RemoteBuild:
+            val full = build_workspace_invocation_decode_v1(full_invocation_source)?
+            if build_workspace_invocation_encode_v1(full)? != full_invocation_source or full.workspace_manifest != manifest:
+                return Err("linux-workspace-full-invocation-canonical-binding")
+            Ok((full.preparation_budget_ms, full.not_after))
+
+pub(package) fn machine_workspace_enable_context_v3(state: MachineFreshWorkloadLifecycleV2,
+        request: ContainerExecutionRequestV2, manifest: text, digest: text,
+        full_invocation_source: text) -> Result<LinuxFreshWorkspaceBindingV3, text>:
+    val (preparation_budget_ms, not_after) = machine_workspace_enable_window_v3(manifest, digest, full_invocation_source)?
+    val original = state.source_started_v3()?
+    val deadline = container_workspace_preparation_deadline_v3(original, preparation_budget_ms,
+        time_sample_monotonic_nanos_or_failure(), not_after, time_sample_unix_micros_or_failure() / 1000)?
+    val source = state.source_custody_v3()?
+    val binding = source.binding_v3(request, manifest, digest)?
+    val retained = source.retain_context_v3(full_invocation_source, deadline, not_after)?
+    state.capture_source_custody_v3(retained)
+    Ok(binding)
+
+# Terminal retention row: the actual source's canonical native-retired-retained
+# event. Storage stays charged; this row releases nothing (agent_workspace_retention_v3.md).
+fn machine_workspace_source_retention_rows_v3(state: MachineFreshWorkloadLifecycleV2,
+        epoch_digest: text, at: i64) -> Result<[WalEntry], text>:
+    val metadata = (state.source_custody_v3()?).retained_metadata_v3()?
+    if at <= 0: return Err("machine-fresh-workspace-source-retention-clock")
+    val fields: Dict<text, SdnValue> = {"format": SdnValue.String("machine-workspace-retained-return-v3"),
+        "epochDigest": SdnValue.String(epoch_digest),
+        "requestDigest": SdnValue.String((state.source_custody_v3()?).request_digest_v3()),
+        "retention": SdnValue.String(linux_workspace_retained_metadata_encode_v3(metadata))}
+    Ok([WalEntry(0, WalEntryType.Insert, "machine-workspace-retained-returns-v3",
+        machine_workspace_source_retention_key_v3(state, epoch_digest)?, sdn_encode_canonical(SdnValue.Dict(fields)), at)])
+
+# One retention row per epoch and original runtime binding.
+fn machine_workspace_source_retention_key_v3(state: MachineFreshWorkloadLifecycleV2, epoch_digest: text) -> Result<text, text>:
+    val metadata = (state.source_custody_v3()?).retained_metadata_v3()?
+    Ok(sha256_text(epoch_digest + "\n" + metadata.native_retirement.binding.binding_digest))
+
+# T-01 workspace settle. A staged (written) agent root settles through the
+# retention batch; every other workspace keeps the unchanged effects settle.
+pub(package) fn machine_workspace_settle_v3(storage: MachineStorageOwnerV1, native: LinuxFreshEpochSuccessorCustodyV1,
+        state: MachineFreshWorkloadLifecycleV2) -> Result<(), text>:
+    if state.settled_v2()?: return Ok(())
+    if (state.source_custody_v3()?).staging_effect_attempted_v3()?:
+        return machine_workspace_settle_retained_v3(storage, native, state)
+    machine_fresh_workload_settle_workspace_v3(storage, native, state)
+
+# Retention doc: the native token proves absence only; the source re-proves it and
+# commits native-retired-retained; the canonical metadata is then published in the
+# SAME batch as the execution-only CPU/memory settlement. Storage stays charged.
+fn machine_workspace_settle_retained_v3(storage: MachineStorageOwnerV1, native: LinuxFreshEpochSuccessorCustodyV1,
+        state: MachineFreshWorkloadLifecycleV2) -> Result<(), text>:
+    val epoch_digest = sha256_text(machine_fresh_epoch_record_bytes_v1((state.history_v2()?).epoch)?)
+    if state.settlement_publication_uncertain_v3()?:
+        if machine_workspace_settle_retained_resolve_v3(storage, state, epoch_digest)?:
+            return machine_workspace_settle_retained_finish_v3(state)
+    val record = state.record_v3()?
+    if machine_fresh_record_workspace_v3(record).is_err(): return Err("machine-fresh-workspace-settle-not-workspace")
+    val absence = state.action_state_v2("absence")?
+    if absence.state != "completed": return Err("machine-fresh-workload-absence-unproven")
+    val command = machine_fresh_record_command_v3(record, LinuxFreshWorkloadActionV2.Absence, state.native_id_v2()?)?
+    val binding = machine_fresh_workspace_native_binding_v3(record, state.workspace_binding_option_v3()?)?
+    val observed = machine_fresh_absence_observe_v3(native, record, Some(binding), command)?
+    val bound = state.validate_closure_v2(observed)?
+    val transport = state.source_retention_preflight_v3()?
+    if not (state.source_custody_v3()?).retirement_committed_v3():
+        val token = native.retire_workspace_native_v3(binding, LinuxFreshWorkspaceCommandV3(command: command))?
+        val retired = (state.source_custody_v3()?).return_retained_v3(token)
+        state.capture_source_custody_v3(retired.owner.retain_diagnostic_v3(retired.error))
+        if retired.error != "": return Err(retired.error)
+    val at = time_sample_unix_micros_or_failure() / 1000
+    val retention = machine_workspace_source_retention_rows_v3(state, epoch_digest, at)?
+    val settlement = state.prepare_settlement_v2(record, absence, at)?
+    val committed = workload_publish_v3(storage, state, settlement + retention)?
+    machine_workspace_settle_retained_finish_v3(state)
+
+# Store readback for a reserved settle batch whose commit outcome is unknown.
+# Ok(true): our batch is the store head (adopted exactly). Ok(false): nothing was
+# committed (reservation released; the batch is rebuilt). Anything else fails closed.
+fn machine_workspace_settle_retained_resolve_v3(storage: MachineStorageOwnerV1, state: MachineFreshWorkloadLifecycleV2,
+        epoch_digest: text) -> Result<bool, text>:
+    val known = machine_fresh_workload_head_v2(state.history_v2()?)
+    val head = storage.wal_head_v1()?
+    if head == known:
+        val reset = state.settlement_publication_abandoned_v3()?
+        return Ok(false)
+    val key = machine_workspace_source_retention_key_v3(state, epoch_digest)?
+    val revision = storage.wal_revision_v1(head)?
+    val actual = storage.wal_segment_v1(revision)?
+    var ours = false
+    for entry in actual:
+        if entry.table_name == "machine-workspace-retained-returns-v3" and entry.row_key == key: ours = true
+    if revision.parent != known or not ours: return Err("machine-fresh-workspace-settlement-publication-foreign")
+    val adopted = state.committed_v2(revision, actual)?
+    val replayed = machine_fresh_workload_history_verify_v2(storage, state.history_v2()?)?
+    val verified = state.publication_verified_v2()?
+    Ok(true)
+
+# The batch is committed: finalize the settlement permit, then the custody phase.
+fn machine_workspace_settle_retained_finish_v3(state: MachineFreshWorkloadLifecycleV2) -> Result<(), text>:
+    val settled = state.mark_settled_v2()?
+    val published = (state.source_custody_v3()?).retained_published_v3()?
+    state.capture_source_custody_v3(published)
+    Ok(())
+
+# Stage source-return for a staged agent root: settle already committed the
+# retention row with the settlement (the preflight proved `settled`), so this only
+# moves the source out of runtime-active. No effect, publication or close here.
+fn machine_workspace_source_return_retained_v3(state: MachineFreshWorkloadLifecycleV2) -> Result<bool, text>:
+    if (state.source_custody_v3()?).retirement_committed_v3():
+        val published = (state.source_custody_v3()?).retained_published_v3()?
+        state.capture_source_custody_v3(published)
+    val returned = state.source_retained_v3()?
+    Ok(true)

@@ -51,6 +51,7 @@ use super::module_cache::{
     is_module_loading, mark_module_loading, merge_cached_module_definitions, unmark_module_loading,
     record_module_visit, record_module_eval_time, record_sibling_preload, MAX_MODULE_DEPTH,
 };
+use super::module_cache::{cached_module_classes, cached_module_enums, unimported_def_collisions};
 use super::module_evaluator::{evaluate_module_exports, evaluate_module_exports_with_preloaded};
 use super::path_resolution::resolve_module_path;
 
@@ -146,6 +147,42 @@ fn runtime_family_from_path(path: &Path) -> Option<RuntimeFamily> {
     None
 }
 
+fn family_relative_subpath(path: &Path, family: RuntimeFamily) -> Option<String> {
+    let normalized = path.to_string_lossy();
+    // Backslashes are separators only on Windows; on POSIX they are filename bytes.
+    #[cfg(windows)]
+    let normalized = normalized.replace('\\', "/");
+    let components: Vec<&str> = normalized
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .collect();
+
+    for (index, pair) in components.windows(2).enumerate() {
+        if (pair[0] == "lib" || pair[0] == "std") && pair[1] == family.name() {
+            let relative = components[index + 2..].join("/");
+            return if relative.is_empty() { None } else { Some(relative) };
+        }
+    }
+
+    None
+}
+
+fn is_family_mirror_facade(
+    importer_path: &Path,
+    imported_path: &Path,
+    importer_family: RuntimeFamily,
+    imported_family: RuntimeFamily,
+) -> bool {
+    if importer_family == imported_family {
+        return false;
+    }
+
+    let Some(importer_subpath) = family_relative_subpath(importer_path, importer_family) else {
+        return false;
+    };
+    family_relative_subpath(imported_path, imported_family) == Some(importer_subpath)
+}
+
 fn runtime_family_import_violation_reason(
     importer_family: RuntimeFamily,
     imported_family: RuntimeFamily,
@@ -185,6 +222,12 @@ fn gc_boundary_warning_message(importer_path: &Path, imported_path: &Path, modul
     }
 
     let reason = runtime_family_import_violation_reason(importer_family, imported_family)?;
+    if reason == "higher_layer_runtime_family"
+        && is_family_mirror_facade(importer_path, imported_path, importer_family, imported_family)
+    {
+        return None;
+    }
+
     let label = if importer_family.is_noalloc() && imported_family.is_allocating() {
         "Allocating"
     } else if imported_family.is_gc() {
@@ -294,6 +337,16 @@ fn sibling_might_define_requested_names(path: &Path, requested_names: &[String])
     }
 }
 
+fn pattern_bound_names(pattern: &simple_parser::ast::Pattern, out: &mut Vec<String>) {
+    use simple_parser::ast::Pattern;
+    match pattern {
+        Pattern::Identifier(n) | Pattern::MutIdentifier(n) | Pattern::MoveIdentifier(n) => out.push(n.clone()),
+        Pattern::Typed { pattern, .. } => pattern_bound_names(pattern, out),
+        Pattern::Tuple(ps) | Pattern::Array(ps) => ps.iter().for_each(|p| pattern_bound_names(p, out)),
+        _ => {}
+    }
+}
+
 fn locally_defined_names(items: &[Node]) -> Vec<String> {
     let mut names = Vec::new();
     for item in items {
@@ -310,12 +363,26 @@ fn locally_defined_names(items: &[Node]) -> Vec<String> {
             // above, which likewise does not contribute its method names.
             Node::Extern(e) => names.push(e.name.clone()),
             Node::ExternClass(c) => names.push(c.name.clone()),
+            // Every other named declaration is importable surface too. Since an
+            // unprovided braced use name is a hard error, missing one here
+            // rejects a valid import (`pub unit SosixWindowsTokenV1: i64`).
+            Node::Unit(u) => names.push(u.name.clone()),
+            Node::UnitFamily(u) => names.push(u.name.clone()),
+            Node::CompoundUnit(u) => names.push(u.name.clone()),
+            Node::Trait(t) => names.push(t.name.clone()),
+            Node::Mixin(m) => names.push(m.name.clone()),
+            Node::Actor(a) => names.push(a.name.clone()),
+            Node::TypeAlias(t) => names.push(t.name.clone()),
+            Node::ClassAlias(c) => names.push(c.name.clone()),
+            Node::FunctionAlias(f) => names.push(f.name.clone()),
+            Node::Bitfield(b) => names.push(b.name.clone()),
+            Node::Macro(m) => names.push(m.name.clone()),
+            Node::Newtype(n) => names.push(n.name.clone()),
+            Node::Const(c) => names.push(c.name.clone()),
+            Node::Static(s) => names.push(s.name.clone()),
 
-            Node::Let(stmt) => {
-                if let simple_parser::ast::Pattern::Identifier(name) = &stmt.pattern {
-                    names.push(name.clone());
-                }
-            }
+            // `val X: T = ..` is `Pattern::Typed`; `val (a, b) = ..` binds several names.
+            Node::Let(stmt) => pattern_bound_names(&stmt.pattern, &mut names),
             _ => {}
         }
     }
@@ -345,6 +412,26 @@ fn bare_export_source_names(target: &ImportTarget) -> Vec<String> {
     match target {
         ImportTarget::Single(name) | ImportTarget::Aliased { name, .. } => vec![name.clone()],
         ImportTarget::Group(items) => items.iter().flat_map(bare_export_source_names).collect(),
+        ImportTarget::Glob => Vec::new(),
+    }
+}
+
+/// Names a braced `use m.{a, b as c}` explicitly imports; `None` for any
+/// other import form (those keep last-registration class merging).
+fn group_import_names(target: &ImportTarget) -> Option<Vec<String>> {
+    match target {
+        ImportTarget::Group(items) => Some(items.iter().flat_map(export_target_names).collect()),
+        _ => None,
+    }
+}
+
+/// Names an export list makes visible to importers: an `a as b` entry publishes
+/// only `b`; the source name `a` stays the source module's own symbol.
+fn published_target_names(target: &ImportTarget) -> Vec<String> {
+    match target {
+        ImportTarget::Single(name) => vec![name.clone()],
+        ImportTarget::Aliased { alias, .. } => vec![alias.clone()],
+        ImportTarget::Group(items) => items.iter().flat_map(published_target_names).collect(),
         ImportTarget::Glob => Vec::new(),
     }
 }
@@ -383,6 +470,10 @@ fn should_keep_selective_export(item: &Node, requested_names: &[String]) -> bool
                     .iter()
                     .any(|name| requested_names.iter().any(|wanted| wanted == name))
         }
+        Node::InternalExportDecl(decl) => decl
+            .symbols
+            .iter()
+            .any(|name| requested_names.iter().any(|wanted| wanted == name)),
         Node::UseStmt(_) => true,
         Node::Function(f) => requested_names.iter().any(|wanted| wanted == &f.name),
         _ => true,
@@ -404,7 +495,9 @@ fn should_keep_selective_export(item: &Node, requested_names: &[String]) -> bool
 // repo-wide and must be staged separately.
 //
 // Warning only, never fatal. Silenced by `SIMPLE_NO_DEPRECATED_WARNINGS`, the
-// same switch the sibling `[gc-warning]` check honours.
+// same switch the sibling `[gc-warning]` check honours. The baselined
+// `[visibility-warning]` is silenced only by the tool-closure quiet switch
+// (`simple_common::tool_closure_quiet`, set by the driver for `lint|fix|fmt`).
 
 /// Names a resolved module was observed to provide, keyed by resolved path, so
 /// the check also runs on module-cache hits (where the AST is long gone).
@@ -418,6 +511,11 @@ type ProvidedNames = Option<Arc<ProvidedSet>>;
 struct ProvidedSet {
     exports: Arc<ModuleTable>,
     extra: std::collections::HashSet<String>,
+    /// Top-level `fn`s declared without `pub` and not re-exported.
+    private_fns: std::collections::HashSet<String>,
+    /// Surface is incomplete: host-gated text (`@when(`/`@cfg(`, other-host items
+    /// stripped) or a plain glob `use x.*`. Unprovided check skipped; private rule runs.
+    surface_incomplete: bool,
 }
 
 impl ProvidedSet {
@@ -431,7 +529,380 @@ fn provided_names_registry() -> &'static std::sync::Mutex<HashMap<std::path::Pat
     REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+type PrivateFnNames = Arc<std::collections::HashSet<String>>;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct OwnerFriendPolicy {
+    /// Strictly private top-level `fn` names (not `pub`, not `pub(friend)`,
+    /// not re-exported, and not listed in `internal_export`).
+    private_fns: std::collections::HashSet<String>,
+    /// Friend-scoped top-level `fn` names (`pub(friend)` or listed in
+    /// `internal_export` and not publicly re-exported).
+    friend_fns: std::collections::HashSet<String>,
+    /// Package paths declared with `friend <pkg>` in this module or its
+    /// enclosing `__init__.spl`.
+    friends: Vec<Vec<String>>,
+}
+
+impl OwnerFriendPolicy {
+    fn is_restricted(&self, name: &str) -> bool {
+        self.private_fns.contains(name) || self.friend_fns.contains(name)
+    }
+}
+
+/// Normalize path separators and strip Windows verbatim `\\?\` / `//?/` prefix
+/// so path-based sibling and friend checks match uniformly across canonical
+/// and uncanonicalized paths.
+fn clean_visibility_path(raw: &str) -> String {
+    let normalized = raw.replace('\\', "/");
+    normalized
+        .strip_prefix("//?/")
+        .unwrap_or(&normalized)
+        .to_string()
+}
+
+fn clean_parent_dir(raw: &str) -> Option<String> {
+    let clean = clean_visibility_path(raw);
+    Path::new(&clean)
+        .parent()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+}
+
+fn canonical_pkg_segments(segs: &[String]) -> Vec<&str> {
+    segs.iter()
+        .enumerate()
+        .map(|(i, s)| if i == 0 && s == "std" { "lib" } else { s.as_str() })
+        .collect()
+}
+
+/// Non-inherited friend check: `caller_raw` belongs directly to a package
+/// (or module path) named in `friends`. Subpackages (`pkg/sub/...`) of a
+/// friend package are NOT inherited.
+fn is_declared_friend_path(friends: &[Vec<String>], caller_raw: &str) -> bool {
+    if friends.is_empty() {
+        return false;
+    }
+    let clean = clean_visibility_path(caller_raw);
+    let path = Path::new(&clean);
+    let components: Vec<String> = path
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => s.to_str().map(|st| st.to_string()),
+            _ => None,
+        })
+        .collect();
+    let parent_segs = if components.len() > 1 {
+        &components[..components.len() - 1]
+    } else {
+        &components[..0]
+    };
+    let file_stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| *s != "__init__" && *s != "mod");
+    let src_pos = parent_segs.iter().rposition(|s| s == "src");
+
+    for friend_pkg in friends {
+        if friend_pkg.is_empty() {
+            continue;
+        }
+        let norm_friend = canonical_pkg_segments(friend_pkg);
+        if let Some(idx) = src_pos {
+            let pkg_segs = canonical_pkg_segments(&parent_segs[idx + 1..]);
+            if pkg_segs == norm_friend {
+                return true;
+            }
+            if let Some(stem) = file_stem {
+                let mut mod_segs: Vec<String> = parent_segs[idx + 1..].to_vec();
+                mod_segs.push(stem.to_string());
+                if canonical_pkg_segments(&mod_segs) == norm_friend {
+                    return true;
+                }
+            }
+            continue;
+        }
+        if parent_segs.ends_with(friend_pkg.as_slice()) {
+            return true;
+        }
+        if norm_friend[0] == "lib" && parent_segs.len() >= norm_friend.len() {
+            let tail = &parent_segs[parent_segs.len() - norm_friend.len()..];
+            if tail.iter().map(|s| s.as_str()).eq(norm_friend.iter().copied()) {
+                return true;
+            }
+        }
+        if let Some(stem) = file_stem {
+            let mut with_stem = parent_segs.to_vec();
+            with_stem.push(stem.to_string());
+            if with_stem.ends_with(friend_pkg.as_slice()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Legacy BS-P2-2 exception from release commit `8157ad736a0` (protected broker
+/// IO <-> task_runner): allow ONLY the 6 un-marked `operation_health_*` helpers
+/// in `distributed_operation_owner_health_v2.spl` when called from its declared
+/// `friend` package (`lib.nogc_sync_mut.io`), while keeping non-friends rejected.
+fn is_bs_p2_2_friend_legacy(owner: &str, name: &str) -> bool {
+    let clean_owner = clean_visibility_path(owner);
+    clean_owner.ends_with("src/lib/common/task_runner/distributed_operation_owner_health_v2.spl")
+        && matches!(
+            name,
+            "operation_health_end_v2"
+                | "operation_health_linux_begin_v1"
+                | "operation_health_linux_bind_v1"
+                | "operation_health_linux_borrow_v1"
+                | "operation_health_linux_close_step_v1"
+                | "operation_health_linux_open_v1"
+        )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FnVisibilityOutcome {
+    Allowed,
+    FriendOnly,
+    Private,
+}
+
+fn dir_init_friend_metadata(module_path: &Path) -> (Vec<Vec<String>>, std::collections::HashSet<String>) {
+    static CACHE: OnceLock<
+        std::sync::Mutex<HashMap<std::path::PathBuf, Arc<(Vec<Vec<String>>, std::collections::HashSet<String>)>>>,
+    > = OnceLock::new();
+    if module_path.file_name().and_then(|s| s.to_str()) == Some("__init__.spl") {
+        return (Vec::new(), std::collections::HashSet::new());
+    }
+    let Some(parent) = module_path.parent() else {
+        return (Vec::new(), std::collections::HashSet::new());
+    };
+    let init_path = parent.join("__init__.spl");
+    if !init_path.is_file() {
+        return (Vec::new(), std::collections::HashSet::new());
+    }
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some(cached) = guard.get(&init_path) {
+            return (**cached).clone();
+        }
+    }
+    let parsed_meta = fs::read_to_string(&init_path)
+        .ok()
+        .filter(|src| src.contains("friend") || src.contains("internal_export"))
+        .and_then(|src| simple_parser::Parser::new(&src).parse().ok())
+        .map(|module| {
+            let mut friends = Vec::new();
+            let mut internal_exports = std::collections::HashSet::new();
+            for item in &module.items {
+                match item {
+                    Node::FriendDecl(decl) => friends.push(decl.package.segments.clone()),
+                    Node::InternalExportDecl(decl) => {
+                        internal_exports.extend(decl.symbols.iter().cloned());
+                    }
+                    _ => {}
+                }
+            }
+            (friends, internal_exports)
+        })
+        .unwrap_or_default();
+    let shared = Arc::new(parsed_meta.clone());
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(init_path, shared);
+    }
+    parsed_meta
+}
+
+fn owner_friend_policy_from_items(module_path: &Path, items: &[Node]) -> OwnerFriendPolicy {
+    let mut exported = std::collections::HashSet::new();
+    let mut internal_exports = std::collections::HashSet::new();
+    let mut friends = Vec::new();
+
+    let (init_friends, init_internal_exports) = dir_init_friend_metadata(module_path);
+    friends.extend(init_friends);
+    internal_exports.extend(init_internal_exports);
+
+    for item in items {
+        match item {
+            Node::ExportUseStmt(export_stmt) => {
+                exported.extend(export_target_names(&export_stmt.target));
+            }
+            Node::InternalExportDecl(decl) => {
+                internal_exports.extend(decl.symbols.iter().cloned());
+            }
+            Node::FriendDecl(decl) => {
+                friends.push(decl.package.segments.clone());
+            }
+            _ => {}
+        }
+    }
+
+    let mut private_fns = std::collections::HashSet::new();
+    let mut friend_fns = std::collections::HashSet::new();
+    for item in items {
+        if let Node::Function(f) = item {
+            if exported.contains(&f.name) {
+                continue;
+            }
+            match f.visibility {
+                simple_parser::ast::Visibility::Internal => {
+                    friend_fns.insert(f.name.clone());
+                }
+                simple_parser::ast::Visibility::Private => {
+                    if internal_exports.contains(&f.name) {
+                        friend_fns.insert(f.name.clone());
+                    } else {
+                        private_fns.insert(f.name.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    OwnerFriendPolicy {
+        private_fns,
+        friend_fns,
+        friends,
+    }
+}
+
+/// Private and friend-scoped top-level fn metadata per owning module,
+/// process-wide (a call made on another thread is judged by the same policy).
+fn private_fn_registry() -> &'static std::sync::RwLock<HashMap<Arc<str>, Arc<OwnerFriendPolicy>>> {
+    static REGISTRY: OnceLock<std::sync::RwLock<HashMap<Arc<str>, Arc<OwnerFriendPolicy>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
+}
+
+/// Bumped on every change to `private_fn_registry`; invalidates the
+/// per-thread cache below.
+static PRIVATE_FN_REGISTRY_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+thread_local! {
+    /// Per-thread cache of `private_fn_registry`: (generation, owner -> policy,
+    /// `None` = no entry), so the per-call check takes no lock once an owner
+    /// has been looked up.
+    static PRIVATE_FNS_BY_OWNER: std::cell::RefCell<(u64, HashMap<Arc<str>, Option<Arc<OwnerFriendPolicy>>>)> =
+        std::cell::RefCell::new((0, HashMap::new()));
+}
+
+fn lookup_owner_policy(owner: &Arc<str>) -> Option<Arc<OwnerFriendPolicy>> {
+    let generation = PRIVATE_FN_REGISTRY_GEN.load(std::sync::atomic::Ordering::Acquire);
+    PRIVATE_FNS_BY_OWNER.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.0 != generation {
+            cache.0 = generation;
+            cache.1.clear();
+        }
+        if let Some(policy) = cache.1.get(owner) {
+            return policy.clone();
+        }
+        let policy = private_fn_registry()
+            .read()
+            .ok()
+            .and_then(|registry| registry.get(owner).cloned());
+        cache.1.insert(Arc::clone(owner), policy.clone());
+        policy
+    })
+}
+
+fn register_owner_policy(owner: Arc<str>, policy: Arc<OwnerFriendPolicy>) {
+    let Ok(mut registry) = private_fn_registry().write() else {
+        return;
+    };
+    if registry.get(&owner).is_some_and(|known| **known == *policy) {
+        return;
+    }
+    registry.insert(owner, policy);
+    PRIVATE_FN_REGISTRY_GEN.fetch_add(1, std::sync::atomic::Ordering::Release);
+}
+
+#[cfg(test)]
+fn register_private_fns(owner: Arc<str>, names: PrivateFnNames) {
+    register_owner_policy(
+        owner,
+        Arc::new(OwnerFriendPolicy {
+            private_fns: (*names).clone(),
+            friend_fns: Default::default(),
+            friends: Default::default(),
+        }),
+    );
+}
+
+/// Is `name` a private or friend-scoped top-level fn of module `owner`?
+pub(crate) fn is_private_fn_of(owner: &Arc<str>, name: &str) -> bool {
+    lookup_owner_policy(owner).is_some_and(|policy| policy.is_restricted(name))
+}
+
+fn fn_visibility_outcome(name: &str, owner: &Arc<str>, current: &str) -> FnVisibilityOutcome {
+    if &**owner == current || current == "<entry>" || is_test_caller(current) {
+        return FnVisibilityOutcome::Allowed;
+    }
+    // A test-written closure run from a non-test frame: the caller is the test.
+    if CLOSURE_ORIGIN_IS_TEST.with(|c| c.get()) == Some(true) {
+        return FnVisibilityOutcome::Allowed;
+    }
+    let Some(policy) = lookup_owner_policy(owner) else {
+        return FnVisibilityOutcome::Allowed;
+    };
+    let in_private = policy.private_fns.contains(name);
+    let in_friend = policy.friend_fns.contains(name);
+    if !in_private && !in_friend {
+        return FnVisibilityOutcome::Allowed;
+    }
+    if clean_parent_dir(owner) == clean_parent_dir(current) {
+        return FnVisibilityOutcome::Allowed;
+    }
+    let owner_clean = clean_visibility_path(owner);
+    if private_import_is_baselined(Path::new(&owner_clean), name) {
+        return FnVisibilityOutcome::Allowed;
+    }
+    let is_friend = is_declared_friend_path(&policy.friends, current);
+    if in_friend && is_friend {
+        return FnVisibilityOutcome::Allowed;
+    }
+    if in_private && is_bs_p2_2_friend_legacy(owner, name) && is_friend {
+        return FnVisibilityOutcome::Allowed;
+    }
+    if in_friend {
+        FnVisibilityOutcome::FriendOnly
+    } else {
+        FnVisibilityOutcome::Private
+    }
+}
+
+pub(crate) fn is_fn_visible_to(name: &str, owner: &Arc<str>, current: &Arc<str>) -> bool {
+    matches!(fn_visibility_outcome(name, owner, current), FnVisibilityOutcome::Allowed)
+}
+
+/// Record the private and friend-scoped fns of a module the flattening loader
+/// just parsed (`items` = the module's own items, export statements included).
+pub(crate) fn register_module_private_fns(module_path: &Path, items: &[Node]) {
+    let policy = owner_friend_policy_from_items(module_path, items);
+    if !policy.private_fns.is_empty() || !policy.friend_fns.is_empty() || !policy.friends.is_empty() {
+        register_owner_policy(super::module_cache::module_owner_key(module_path), Arc::new(policy));
+    }
+}
+
 fn record_provided_names(module_path: &Path, provided: ProvidedNames) {
+    if let Some(p) = provided.as_ref() {
+        if !p.private_fns.is_empty() {
+            let owner = super::module_cache::module_owner_key(module_path);
+            let existing = lookup_owner_policy(&owner);
+            let merged = match existing {
+                Some(prev) => OwnerFriendPolicy {
+                    private_fns: p.private_fns.clone(),
+                    friend_fns: prev.friend_fns.clone(),
+                    friends: prev.friends.clone(),
+                },
+                None => OwnerFriendPolicy {
+                    private_fns: p.private_fns.clone(),
+                    friend_fns: Default::default(),
+                    friends: Default::default(),
+                },
+            };
+            register_owner_policy(owner, Arc::new(merged));
+        }
+    }
     if let Ok(mut registry) = provided_names_registry().lock() {
         registry.insert(module_path.to_path_buf(), provided);
     }
@@ -451,14 +922,8 @@ fn use_warning_seen(key: String) -> bool {
     }
 }
 
-fn use_list_warnings_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("SIMPLE_NO_DEPRECATED_WARNINGS").is_none())
-}
-
 /// A module whose surface cannot be enumerated statically: it re-exports via a
 /// glob (`export use x.*`) or a bare `export use {..}` that pulls from siblings.
-/// Checking such a module would produce false positives, so we skip it.
 fn module_surface_is_opaque(items: &[Node]) -> bool {
     items.iter().any(|item| match item {
         Node::ExportUseStmt(export_stmt) => {
@@ -475,10 +940,17 @@ fn collect_provided_names(
     module_functions: &HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
     module_classes: &HashMap<String, Arc<ClassDef>>,
     module_enums: &Enums,
+    host_gated: bool,
 ) -> ProvidedNames {
     if module_surface_is_opaque(items) {
         return None;
     }
+    // A plain glob `use x.*` publishes what it pulls in transitively
+    // (driver_source_pipeline_impl), so only the private rule is checkable.
+    let surface_incomplete = host_gated
+        || items
+            .iter()
+            .any(|item| matches!(item, Node::UseStmt(u) if matches!(u.target, ImportTarget::Glob)));
     // Export names are answered by the shared table itself; collecting them
     // here made this set as wide as the module's transitive import closure.
     let mut provided: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -496,40 +968,250 @@ fn collect_provided_names(
     for name in locally_defined_names(items) {
         provided.insert(name);
     }
-    // Explicit re-export lists (`export use other.{A, B}`) name real surface even
-    // when the re-exported target failed to evaluate into `exports`.
+    // Explicit re-export lists (`export use other.{A, B}`) and `internal_export`
+    // directives name real surface even when not yet evaluated into `exports`.
     for item in items {
-        if let Node::ExportUseStmt(export_stmt) = item {
-            for name in export_target_names(&export_stmt.target) {
-                provided.insert(name);
+        match item {
+            Node::ExportUseStmt(export_stmt) => {
+                for name in published_target_names(&export_stmt.target) {
+                    provided.insert(name);
+                }
             }
+            Node::InternalExportDecl(decl) => {
+                for name in &decl.symbols {
+                    provided.insert(name.clone());
+                }
+            }
+            _ => {}
         }
     }
     provided.retain(|name| !exports.contains_key(name));
     Some(Arc::new(ProvidedSet {
         exports: Arc::clone(exports),
         extra: provided,
+        private_fns: private_top_level_fn_names(items),
+        surface_incomplete,
     }))
 }
 
-/// Report braced `use` names the resolved module does not provide.
-///
-/// Reports only; the loader still registers the module's whole surface.
-fn warn_unprovided_use_names(
+/// Top-level `fn` names with private (default) visibility that no `export`
+/// or `internal_export` statement in the module re-exposes.
+fn private_top_level_fn_names(items: &[Node]) -> std::collections::HashSet<String> {
+    let mut exported: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for item in items {
+        match item {
+            Node::ExportUseStmt(export_stmt) => {
+                exported.extend(export_target_names(&export_stmt.target));
+            }
+            Node::InternalExportDecl(decl) => {
+                exported.extend(decl.symbols.iter().cloned());
+            }
+            _ => {}
+        }
+    }
+    items
+        .iter()
+        .filter_map(|item| match item {
+            Node::Function(f) if matches!(f.visibility, simple_parser::ast::Visibility::Private) => {
+                Some(f.name.clone())
+            }
+            _ => None,
+        })
+        .filter(|name| !exported.contains(name))
+        .collect()
+}
+
+/// Tail of every private-fn visibility rejection (import rule and call rule).
+/// The driver keys its "never fall back to the interpreter" decision on it, so
+/// both producers interpolate this constant rather than repeating the text.
+pub const PRIVATE_FN_VISIBILITY_HINT: &str = "mark it `pub` or `export` it";
+
+/// Tail of every friend-scoped visibility rejection (import rule and call rule).
+pub const FRIEND_SYMBOL_VISIBILITY_HINT: &str =
+    "only same package or declared `friend` packages may access `pub(friend)` / `internal_export` symbols";
+
+/// Visibility check (interp_private_names_leak_across_modules_2026-11-05):
+/// a braced `use m.{name}` that names a private `fn` of `m` (not re-exported by
+/// an `export`) from a file outside `m`'s directory is a hard error unless the pair is frozen in
+/// `scripts/check/private_import_baseline.txt` (legacy: warn only). Same-directory
+/// siblings stay in compatibility mode (bare `fn` is private to its file; sibling
+/// access is the documented compatibility exception).
+/// Test importers are exempt (owner decision 2026-11-13: "test is special, can
+/// access"), using the same `is_test_caller` definition as
+/// `check_private_call_visibility` so the import and call rules agree.
+fn check_private_use_names(
     use_stmt: &UseStmt,
     current_file: Option<&Path>,
     module_path: &Path,
     module_label: &str,
     provided: &ProvidedNames,
-) {
-    if !use_list_warnings_enabled() {
-        return;
-    }
-    let Some(provided) = provided.as_ref() else {
-        return; // opaque surface — not checkable
+) -> Result<(), CompileError> {
+    let (Some(provided), Some(importer)) = (provided.as_ref(), current_file) else {
+        return Ok(());
     };
+    if is_test_caller(&importer.to_string_lossy()) {
+        return Ok(());
+    }
+    let dir_of = |p: &Path| p.parent().map(|d| std::fs::canonicalize(d).unwrap_or_else(|_| d.to_path_buf()));
+    if dir_of(importer) == dir_of(module_path) {
+        return Ok(());
+    }
     let Some(requested) = requested_group_import_names(use_stmt) else {
-        return; // not a `{...}` group import
+        return Ok(());
+    };
+    let owner_key = super::module_cache::module_owner_key(module_path);
+    let has_policy = lookup_owner_policy(&owner_key).is_some();
+    let importer_str = importer.to_string_lossy();
+    for name in requested {
+        let outcome = if has_policy {
+            fn_visibility_outcome(&name, &owner_key, &importer_str)
+        } else if provided.private_fns.contains(&name) {
+            if private_import_is_baselined(module_path, &name) {
+                FnVisibilityOutcome::Allowed
+            } else {
+                FnVisibilityOutcome::Private
+            }
+        } else {
+            FnVisibilityOutcome::Allowed
+        };
+        if matches!(outcome, FnVisibilityOutcome::Allowed) {
+            if (provided.private_fns.contains(&name) || lookup_owner_policy(&owner_key).is_some_and(|p| p.private_fns.contains(&name)))
+                && private_import_is_baselined(module_path, &name)
+                && !simple_common::tool_closure_quiet::tool_closure_quiet()
+                && !use_warning_seen(format!("priv\u{1}{}\u{1}{}\u{1}{}", module_path.display(), name, importer.display()))
+            {
+                eprintln!(
+                    "[visibility-warning] '{name}' is a private fn of module '{module_label}' ({}); mark it `pub` or `export` it (imported from {})",
+                    module_path.display(),
+                    importer.display()
+                );
+            }
+            continue;
+        }
+        if matches!(outcome, FnVisibilityOutcome::FriendOnly) {
+            return Err(CompileError::semantic(format!(
+                "friend-scoped symbol `{name}` of module `{module_label}` ({}) is not visible to {} ({FRIEND_SYMBOL_VISIBILITY_HINT})",
+                module_path.display(),
+                importer.display()
+            )));
+        }
+        return Err(CompileError::semantic(format!(
+            "private fn `{name}` of module `{module_label}` ({}) is not visible to {}; {PRIVATE_FN_VISIBILITY_HINT}",
+            module_path.display(),
+            importer.display()
+        )));
+    }
+    Ok(())
+}
+
+const PRIVATE_IMPORT_BASELINE: &str = "scripts/check/private_import_baseline.txt";
+
+/// Repo-root-relative, `/`-separated form of `module_path` plus the baseline
+/// entries of the repo that contains it. Only the baseline at the repository
+/// root counts; a module outside any repo (a scratch fixture) has no baseline,
+/// so every private import of it is "new".
+fn private_import_baseline_for(module_path: &Path) -> Option<(String, Arc<std::collections::HashSet<String>>)> {
+    static CACHE: OnceLock<std::sync::Mutex<HashMap<std::path::PathBuf, Arc<std::collections::HashSet<String>>>>> =
+        OnceLock::new();
+    let abs = std::fs::canonicalize(module_path).unwrap_or_else(|_| module_path.to_path_buf());
+    let mut dir = abs.parent();
+    while let Some(d) = dir {
+        // Only the baseline at the REPOSITORY ROOT (the first ancestor holding a
+        // `.git` entry) counts; a nested copy cannot whitelist pairs.
+        if !d.join(".git").exists() {
+            dir = d.parent();
+            continue;
+        }
+        let candidate = d.join(PRIVATE_IMPORT_BASELINE);
+        if !candidate.is_file() {
+            return None;
+        }
+        {
+            let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+            let set = {
+                let mut guard = cache.lock().ok()?;
+                guard
+                    .entry(d.to_path_buf())
+                    .or_insert_with(|| {
+                        let text = fs::read_to_string(&candidate).unwrap_or_default();
+                        Arc::new(text.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+                    })
+                    .clone()
+            };
+            let rel = abs.strip_prefix(d).ok()?.to_string_lossy().replace('\\', "/");
+            return Some((rel, set));
+        }
+    }
+    None
+}
+
+fn private_import_is_baselined(module_path: &Path, name: &str) -> bool {
+    match private_import_baseline_for(module_path) {
+        Some((rel, set)) => set.contains(&format!("{rel}|{name}")),
+        None => false,
+    }
+}
+
+/// Message tail of every unprovided-use rejection; nested-load error arms key on it
+/// so the rejection propagates instead of degrading to an empty module dict.
+pub(crate) const UNPROVIDED_USE_MARKER: &str = "does not provide it (imported from";
+
+pub(crate) fn is_unprovided_use_error(e: &CompileError) -> bool {
+    e.to_string().contains(UNPROVIDED_USE_MARKER)
+}
+
+/// True when the module text carries a top-level host gate, so its parsed
+/// surface depends on the host and is not a complete provided set.
+fn source_is_host_gated(src: &str) -> bool {
+    src.lines().any(|l| l.starts_with("@when(") || l.starts_with("@cfg("))
+}
+
+fn use_list_warnings_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SIMPLE_NO_DEPRECATED_WARNINGS").is_none())
+}
+
+/// `SIMPLE_STRICT_USE=1` turns an unprovided braced use name into a hard error.
+fn strict_use_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SIMPLE_STRICT_USE").is_ok_and(|v| v == "1"))
+}
+
+/// Default (non-strict) lane: an unprovided-use rejection is reported once as a
+/// `[use-warning]` and loading continues. ponytail: warn-only until the
+/// tree-wide census of modules that re-expose braced imports is empty.
+fn unprovided_use_outcome(r: Result<(), CompileError>) -> Result<(), CompileError> {
+    match r {
+        Err(e) if !strict_use_enabled() => {
+            let msg = e.to_string();
+            if use_list_warnings_enabled() && !use_warning_seen(msg.clone()) {
+                eprintln!("[use-warning] {msg}");
+            }
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+/// Reject braced `use` names the resolved module does not provide. The loader
+/// registers the module's whole surface, so an unprovided name would otherwise
+/// resolve to whatever OTHER co-compiled module defines it (wrong owner,
+/// seed_export_use_as_alias_binds_wrong_owner_2026-11-26).
+fn check_unprovided_use_names(
+    use_stmt: &UseStmt,
+    current_file: Option<&Path>,
+    module_path: &Path,
+    module_label: &str,
+    provided: &ProvidedNames,
+) -> Result<(), CompileError> {
+    let Some(provided) = provided.as_ref() else {
+        return Ok(()); // opaque surface - not checkable
+    };
+    if provided.surface_incomplete {
+        return Ok(()); // host-gated or glob-use surface: not checkable
+    }
+    let Some(requested) = requested_group_import_names(use_stmt) else {
+        return Ok(()); // not a `{...}` group import
     };
     for name in requested {
         if provided.contains(&name) {
@@ -538,123 +1220,63 @@ fn warn_unprovided_use_names(
         let importer = current_file
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "<unknown>".to_string());
-        if use_warning_seen(format!("{}\u{1}{}\u{1}{}", module_path.display(), name, importer)) {
-            continue;
-        }
-        eprintln!(
-            "[use-warning] '{name}' is named in `use {module_label}.{{...}}` but module '{}' does not provide it (imported from {importer})",
+        return Err(CompileError::semantic(format!(
+            "`{name}` is named in `use {module_label}.{{...}}` but module `{module_label}` ({}) does not provide it (imported from {importer}); import it from the module that defines it",
             module_path.display()
-        );
+        )));
     }
+    Ok(())
 }
 
-/// Loose text probe: does `path`'s source plausibly provide any of `names` —
-/// either as a definition (`fn name(`, `class name`, ..., matched by
-/// [`sibling_might_define_requested_names`]) or as a member of an
-/// `export`/`use ... {.., name, ..}` re-export list (e.g. a thin shim like
-/// `export use std.nogc_sync_mut.spec.{.., print_summary, ..}`, which has no
-/// `fn print_summary(` of its own)? Returns the subset of `names` found.
-/// Tokenizes on non-identifier characters so a name must appear as a whole
-/// token, not merely as a substring of a longer identifier. Reads the file
-/// once regardless of how many names are probed. Deliberately loose/
-/// best-effort. `None` means the bounded probe could not inspect the source,
-/// not that the requested names are absent. Only `Some(empty)` proves that
-/// no requested token was found in a completely read source.
-fn file_plausibly_provides_names(path: &Path, names: &[String]) -> Option<std::collections::HashSet<String>> {
-    let max_check_bytes = crate::memory_guard::sibling_max_check_bytes();
-    let source = super::module_cache::probe_source_cached(path, max_check_bytes)?;
-    let tokens: std::collections::HashSet<&str> = source.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
-    Some(
-        names
-            .iter()
-            .filter(|name| tokens.contains(name.as_str()))
-            .cloned()
-            .collect(),
-    )
-}
-
-fn prefer_package_init_for_member_import(module_path: &Path, use_stmt: &UseStmt) -> std::path::PathBuf {
-    match &use_stmt.target {
-        ImportTarget::Group(_) | ImportTarget::Glob => {
-            if module_path.extension().is_some_and(|ext| ext == "spl")
-                && module_path.file_name().is_none_or(|name| name != "__init__.spl")
-            {
-                let package_init = module_path.with_extension("").join("__init__.spl");
-                if package_init.exists() && package_init.is_file() {
-                    // A `Group` import naming specific symbols must not redirect
-                    // away from a sibling FILE that provides those symbols into a
-                    // same-named PACKAGE that doesn't — that silently loses the
-                    // requested names (see
-                    // doc/08_tracking/bug/std_spec_package_shadows_file_print_summary_2026-07-17.md:
-                    // `use std.spec.{print_summary, ...}` resolved the FILE
-                    // `spec.spl`, which defines them, then got redirected here to
-                    // the sibling `spec/__init__.spl` PACKAGE, which doesn't).
-                    // The check must be PER-NAME, not "package has any match at
-                    // all": a re-export shim can list a large mixed group where
-                    // the package legitimately covers *some* names (e.g. a BDD
-                    // facade re-exporting both the framework's own `print_summary`
-                    // AND decorator/env-detect names like `is_windows`/`skip_it`
-                    // that genuinely live in the sibling package) while still
-                    // lacking others the file uniquely provides. A coarse "package
-                    // has ANY requested name" test still redirected in that mixed
-                    // case and re-lost `print_summary`. So: withhold the
-                    // (otherwise unconditional) package-init preference as soon as
-                    // ANY single requested name is positively confirmed on the
-                    // file but NOT on the package. An unavailable bounded probe
-                    // cannot justify redirecting the already-resolved file. When
-                    // both sources were inspected, a name absent from both keeps
-                    // the existing "package wins" default (see
-                    // `prefers_package_init_for_group_imports_when_both_exist`).
-                    if let ImportTarget::Group(_) = &use_stmt.target {
-                        if let Some(requested) = requested_group_import_names(use_stmt) {
-                            if !requested.is_empty() {
-                                let Some(file_names) = file_plausibly_provides_names(module_path, &requested) else {
-                                    return module_path.to_path_buf();
-                                };
-                                let Some(package_names) = file_plausibly_provides_names(&package_init, &requested) else {
-                                    return module_path.to_path_buf();
-                                };
-                                let file_has_unique_name = file_names.iter().any(|name| !package_names.contains(name));
-                                if file_has_unique_name {
-                                    return module_path.to_path_buf();
-                                }
-                            }
-                        }
-                    }
-                    return package_init;
-                }
-            }
-            module_path.to_path_buf()
+/// HIR/JIT-lane twin of the interpreter's unprovided-use check: the JIT import
+/// loader never runs `load_and_merge_module`, so the same rule, message and
+/// strict/warn outcome run here against the resolved module's parsed surface.
+/// The exports table is empty (nothing is evaluated), so names the module
+/// re-exposes through its own non-glob `use` lines are added explicitly, and
+/// any shape whose surface cannot be enumerated statically is left unchecked.
+pub(crate) fn check_unprovided_use_in_resolved_module(
+    use_stmt: &UseStmt,
+    importer: &Path,
+    resolved: &Path,
+) -> Result<(), CompileError> {
+    if requested_group_import_names(use_stmt).is_none()
+        || resolved.file_name().is_some_and(|n| n == "__init__.spl")
+    {
+        return Ok(()); // not a braced group, or a package surface merged from siblings
+    }
+    // Fail safe: the JIT resolver and the interpreter's resolver pick roots
+    // differently (e.g. `std.sffi.dynamic` from a nogc_sync_mut importer is a
+    // different file on each lane). Check only when both lanes agree on the file;
+    // otherwise this lane's surface is not the one the program actually uses.
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    match super::path_resolution::resolve_module_path(&use_stmt.path.segments, importer.parent().unwrap_or(Path::new("."))) {
+        Ok(p) if canon(&p) == canon(resolved) => {}
+        _ => return Ok(()),
+    }
+    let super::module_cache::SharedSource::Parsed { source, ast: Ok(ast) } = super::module_cache::shared_source(resolved)
+    else {
+        return Ok(());
+    };
+    let items = &ast.items;
+    let mut enums: Enums = HashMap::new();
+    for item in items {
+        if let Node::Enum(e) = item {
+            enums.insert(e.name.clone(), Arc::new(e.clone()));
         }
-        _ => module_path.to_path_buf(),
     }
-}
-
-/// Wraps `prefer_package_init_for_member_import` with a guard against
-/// self-referential redirect cycles (task #153).
-///
-/// A `Group`/`Glob` import from `X.spl` normally prefers a sibling
-/// `X/__init__.spl` package aggregator when one exists — many legitimate
-/// "thin file + real package" pairs rely on this (see
-/// `prefers_package_init_for_group_imports_when_both_exist`). But if `X/__init__.spl`
-/// itself re-exports from the very module path that led here (e.g. a stale
-/// duplicate `X/__init__.spl` doing `export use pkg.X.{...}`), the redirect
-/// sends us right back into a module already on the load stack. That hits
-/// the circular-import branch below, which returns empty/partial exports —
-/// silently dropping every symbol the redirect exists to serve. This is
-/// exactly how `compiler_driver_create` went missing for standalone
-/// `simple run` scripts when a stale `80.driver/driver/__init__.spl` shadowed
-/// the real `80.driver/driver.spl` (see
-/// doc/08_tracking/bug/selfhost_bootstrap_unresolved_symbols_2026-06-24.md).
-/// In that specific case, keep the already-resolved file — it has the real
-/// definitions instead of a stale/self-referential aggregator.
-fn resolve_member_import_target(module_path: &Path, use_stmt: &UseStmt) -> std::path::PathBuf {
-    let redirected = prefer_package_init_for_member_import(module_path, use_stmt);
-    if redirected != module_path && is_module_loading(&redirected) {
-        module_path.to_path_buf()
-    } else {
-        redirected
+    let incomplete = source_is_host_gated(&source)
+        || items.iter().any(|i| matches!(i, Node::MultiUse(_) | Node::CommonUseStmt(_)));
+    let exports: Arc<ModuleTable> = Arc::new(ModuleTable::leaf(Default::default()));
+    let mut provided = collect_provided_names(items, &exports, &HashMap::new(), &HashMap::new(), &enums, incomplete);
+    if let Some(set) = provided.as_mut().and_then(Arc::get_mut) {
+        for item in items {
+            if let Node::UseStmt(u) = item {
+                set.extra.extend(published_target_names(&u.target));
+            }
+        }
     }
+    let label = use_stmt.path.segments.join(".");
+    unprovided_use_outcome(check_unprovided_use_names(use_stmt, Some(importer), resolved, &label, &provided))
 }
 
 /// Validate that imported function effects are compatible with importer's capabilities.
@@ -769,14 +1391,14 @@ pub fn load_and_merge_module(
                 // Glob with empty path is invalid - can't do `import *` with no module
                 warn!("Glob import with empty path - skipping");
                 decrement_load_depth();
-                return Ok(Value::Dict(Arc::new(HashMap::new())));
+                return Ok(Value::Dict(Arc::new(crate::value::DictMap::new())));
             }
             ImportTarget::Group(items) => {
                 // Group import with empty path: import {X, Y, Z}
                 // This is invalid - need a module to import from
                 warn!("Group import with empty path - skipping");
                 decrement_load_depth();
-                return Ok(Value::Dict(Arc::new(HashMap::new())));
+                return Ok(Value::Dict(Arc::new(crate::value::DictMap::new())));
             }
         }
     } else {
@@ -822,7 +1444,7 @@ pub fn load_and_merge_module(
             if super::path_resolution::is_unit_opaque_sentinel(&p) {
                 debug!(path = %parts.join("."), "unit.* opaque soft-accept");
                 decrement_load_depth();
-                return Ok(Value::Dict(Arc::new(HashMap::new())));
+                return Ok(Value::Dict(Arc::new(crate::value::DictMap::new())));
             }
             p
         }
@@ -890,16 +1512,9 @@ pub fn load_and_merge_module(
             return Err(e);
         }
     };
-    let original_module_path = module_path.clone();
-    let module_path = resolve_member_import_target(&module_path, use_stmt);
-    if module_path != original_module_path {
-        loader_trace!(
-            "init-redirect",
-            "{} -> {}",
-            original_module_path.display(),
-            module_path.display()
-        );
-    }
+    // No `X.spl` -> `X/__init__.spl` redirect here: every loader resolves a
+    // file/package pair FILE-FIRST (doc/04_architecture/language/modules.md
+    // § "File vs package with the same name").
     loader_trace!("resolve", "{} -> {}", parts.join("."), module_path.display());
     debug!(module = %parts.join("."), path = ?module_path, "Resolved module path");
     if let Err(error) = emit_gc_boundary_warning(current_file, &module_path, &parts.join(".")) {
@@ -911,17 +1526,39 @@ pub fn load_and_merge_module(
     // Check cache first - if we've already loaded this module, return cached exports
     if let Some(cached_exports) = get_cached_module_exports(&module_path) {
         loader_trace!("cache-hit", "{}", module_path.display());
+        // Use-list check on the cache path BEFORE merging definitions into the
+        // caller's maps so a rejected import never leaks private definitions.
+        if let Some(provided) = lookup_provided_names(&module_path) {
+            if let Err(e) = check_private_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided) {
+                clear_partial_module_exports(&module_path);
+                unmark_module_loading(&module_path);
+                decrement_load_depth();
+                return Err(e);
+            }
+            if let Err(e) = unprovided_use_outcome(check_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided)) {
+                clear_partial_module_exports(&module_path);
+                unmark_module_loading(&module_path);
+                decrement_load_depth();
+                return Err(e);
+            }
+        }
+
         // Merge cached definitions (classes, functions, enums) into caller's HashMaps.
         // This ensures that static method calls work on imported classes.
         // Functions are Arc<FunctionDef> in the cache; we unwrap to raw FunctionDef for
         // the interpreter's working set, but the Arc clone from cache is cheap.
+        let explicit_names = group_import_names(&use_stmt.target);
+        let preserved = match cached_module_classes(&module_path) {
+            Some(incoming) => unimported_def_collisions(explicit_names.as_deref(), &incoming, classes),
+            None => Vec::new(),
+        };
+        let preserved_enums = match cached_module_enums(&module_path) {
+            Some(incoming) => unimported_def_collisions(explicit_names.as_deref(), &incoming, enums),
+            None => Vec::new(),
+        };
         merge_cached_module_definitions(&module_path, classes, functions, enums);
-
-        // Use-list check on the cache path: the AST is gone, so consult the
-        // surface recorded when this module was first loaded.
-        if let Some(provided) = lookup_provided_names(&module_path) {
-            warn_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided);
-        }
+        classes.extend(preserved);
+        enums.extend(preserved_enums);
 
         decrement_load_depth();
         // If importing a specific item, extract it from cached exports
@@ -951,7 +1588,7 @@ pub fn load_and_merge_module(
         // Fallback to empty dict if no partial exports yet (module hasn't completed register_definitions)
         warn!(path = ?module_path, "Circular import detected, returning empty dict (no partial exports yet)");
         decrement_load_depth();
-        return Ok(Value::Dict(Arc::new(HashMap::new())));
+        return Ok(Value::Dict(Arc::new(crate::value::DictMap::new())));
     }
 
     // Check total module count limit to prevent OOM from loading too many modules
@@ -1302,16 +1939,37 @@ pub fn load_and_merge_module(
     // Use-list check: the braced names in `use mod.{a, b}` are otherwise never
     // compared against what `mod` actually provides. Record the surface so
     // later cache hits can run the same check, then report any name the module
-    // does not provide. Reporting only — registration below is unchanged.
+    // does not provide as a hard error.
+    register_module_private_fns(&module_path, &filtered_items);
+    // A host-gated module (`@when(os=...)` / `@cfg(...)`) has its other-host
+    // items stripped before this point, so its surface here is only THIS
+    // host's; checking against it would reject valid cross-host imports.
     let provided_names = collect_provided_names(
         &filtered_items,
         &exports,
         &module_functions,
         &module_classes,
         &module_enums,
+        source_is_host_gated(&raw),
     );
     record_provided_names(&module_path, provided_names.clone());
-    warn_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names);
+    if let Err(e) = check_private_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names) {
+        // Release the loading mark exactly like the evaluation-error arm above.
+        // Leaking it made an in-process retry (the driver's JIT -> interpreter
+        // fallback) see this module as a circular import, return its partial
+        // exports WITHOUT re-running this check, and execute the program with
+        // rc 0 (visibility_error_jit_fallback_fail_open_2026-11-13).
+        clear_partial_module_exports(&module_path);
+        unmark_module_loading(&module_path);
+        decrement_load_depth();
+        return Err(e);
+    }
+    if let Err(e) = unprovided_use_outcome(check_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names)) {
+        clear_partial_module_exports(&module_path);
+        unmark_module_loading(&module_path);
+        decrement_load_depth();
+        return Err(e);
+    }
 
     // Cache the full module exports for future use
     cache_module_export_table(&module_path, Arc::clone(&exports));
@@ -1323,9 +1981,16 @@ pub fn load_and_merge_module(
 
     // Merge freshly loaded definitions into caller's scope (same as cache case above).
     // This ensures static method calls work on imported classes.
+    // A braced import must not let a same-named class it did not ask for
+    // replace the importer's binding (bug
+    // interp_class_name_collision_breaks_test_db_persistence_2026-08-10);
+    // the declaring module still resolves its own via `owner_module_class`.
+    let explicit_names = group_import_names(&use_stmt.target);
+    let preserved = unimported_def_collisions(explicit_names.as_deref(), &module_classes, classes);
     for (name, class_def) in &module_classes {
         classes.insert(name.clone(), class_def.clone());
     }
+    classes.extend(preserved);
     for (name, func_def) in &module_functions {
         if name != "main" {
             // Don't add "main" from imported modules.
@@ -1333,9 +1998,11 @@ pub fn load_and_merge_module(
             functions.insert(name.clone(), Arc::clone(func_def));
         }
     }
+    let preserved_enums = unimported_def_collisions(explicit_names.as_deref(), &module_enums, enums);
     for (name, enum_def) in &module_enums {
         enums.insert(name.clone(), enum_def.clone());
     }
+    enums.extend(preserved_enums);
 
     // Clear partial exports now that full exports are available
     clear_partial_module_exports(&module_path);
@@ -1377,8 +2044,8 @@ pub fn load_and_merge_module(
 mod tests {
     use super::{
         bare_export_source_names, enforce_gc_boundary_policy, export_target_names, gc_boundary_warning_message,
-        file_plausibly_provides_names, load_and_merge_module, loader_trace_enabled,
-        mark_module_loading, prefer_package_init_for_member_import, resolve_member_import_target,
+        load_and_merge_module, loader_trace_enabled,
+        mark_module_loading,
         should_keep_selective_export, unmark_module_loading,
     };
     use crate::value::Value;
@@ -1486,6 +2153,50 @@ mod tests {
     }
 
     #[test]
+    fn gc_boundary_warning_message_exempts_family_mirror_facades() {
+        let msg = gc_boundary_warning_message(
+            Path::new("/repo/src/lib/nogc_async_mut/test_runner/doctest_runner.spl"),
+            Path::new("/repo/src/lib/nogc_sync_mut/test_runner/doctest_runner.spl"),
+            "std.nogc_sync_mut.test_runner.doctest_runner",
+        );
+
+        assert!(msg.is_none(), "family-mirror re-export shims must not warn: {msg:?}");
+    }
+
+    #[test]
+    fn gc_boundary_warning_message_flags_non_mirror_async_to_sync_imports() {
+        let msg = gc_boundary_warning_message(
+            Path::new("/repo/src/lib/nogc_async_mut/app.spl"),
+            Path::new("/repo/src/lib/nogc_sync_mut/io.spl"),
+            "std.nogc_sync_mut.io",
+        )
+        .expect("a genuine async-to-sync crossing must still warn");
+
+        assert!(msg.contains("Higher-layer module 'std.nogc_sync_mut.io'"));
+        assert!(msg.contains("higher_layer_runtime_family"));
+        assert!(msg.contains("family: nogc_async_mut"));
+    }
+
+    #[test]
+    fn gc_boundary_warning_message_does_not_exempt_mirror_resource_violations() {
+        let noalloc = gc_boundary_warning_message(
+            Path::new("/repo/src/lib/nogc_async_mut_noalloc/task.spl"),
+            Path::new("/repo/src/lib/nogc_async_mut/task.spl"),
+            "std.nogc_async_mut.task",
+        )
+        .expect("mirroring must not exempt no-alloc restrictions");
+        assert!(noalloc.contains("noalloc_imports_allocating_family"));
+
+        let gc = gc_boundary_warning_message(
+            Path::new("/repo/src/lib/nogc_async_mut/task.spl"),
+            Path::new("/repo/src/lib/gc_async_mut/task.spl"),
+            "std.gc_async_mut.task",
+        )
+        .expect("mirroring must not exempt GC restrictions");
+        assert!(gc.contains("nogc_imports_gc_family"));
+    }
+
+    #[test]
     fn strict_gc_boundary_policy_returns_error() {
         let err = enforce_gc_boundary_policy(
             Some(Path::new("/repo/src/lib/nogc_sync_mut/app.spl")),
@@ -1523,173 +2234,44 @@ mod tests {
         assert!(msg.is_none());
     }
 
-    fn use_stmt_with_target(target: ImportTarget) -> UseStmt {
-        UseStmt {
-            span: Span::new(0, 0, 0, 0),
-            path: ModulePath {
-                segments: vec!["std".to_string(), "io".to_string()],
-            },
-            target,
-            is_type_only: false,
-            is_lazy: false,
+    /// A module name that is both `fx.spl` and `fx/__init__.spl` resolves
+    /// FILE-FIRST for group and glob imports too, matching the static
+    /// resolvers (doc/04_architecture/language/modules.md § "File vs package
+    /// with the same name"). The seed used to redirect these imports to the
+    /// package, so the interpreter and the compiler loaded different code.
+    #[test]
+    fn file_and_package_pair_resolves_file_first_for_every_import_form() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let main_file = root.join("main.spl");
+        fs::write(&main_file, "fn main(): 0\n").unwrap();
+        fs::write(root.join("fx.spl"), "fn file_only() -> i64:\n    1\n").unwrap();
+        fs::create_dir_all(root.join("fx")).unwrap();
+        fs::write(root.join("fx").join("__init__.spl"), "fn pkg_only() -> i64:\n    2\n").unwrap();
+
+        for target in [
+            ImportTarget::Glob,
+            ImportTarget::Group(vec![ImportTarget::Single("file_only".to_string())]),
+        ] {
+            clear_module_cache();
+            let mut functions = HashMap::new();
+            let mut classes = HashMap::new();
+            let mut enums = HashMap::new();
+            let value = load_and_merge_module(
+                &use_stmt_with_path(&["fx"], target),
+                Some(&main_file),
+                &mut functions,
+                &mut classes,
+                &mut enums,
+            )
+            .unwrap();
+            let exports = match value {
+                Value::Dict(exports) => exports,
+                other => panic!("expected module exports dict, got {:?}", other),
+            };
+            assert!(exports.get("file_only").is_some(), "file form must be loaded");
+            assert!(exports.get("pkg_only").is_none(), "package form must not be loaded");
         }
-    }
-
-    #[test]
-    fn prefers_package_init_for_group_imports_when_both_exist() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let file_path = root.join("io.spl");
-        let package_dir = root.join("io");
-        let init_path = package_dir.join("__init__.spl");
-        fs::write(&file_path, "# file module\n").unwrap();
-        fs::create_dir_all(&package_dir).unwrap();
-        fs::write(&init_path, "# package module\n").unwrap();
-
-        let resolved = prefer_package_init_for_member_import(
-            &file_path,
-            &use_stmt_with_target(ImportTarget::Group(vec![ImportTarget::Single("env_get".to_string())])),
-        );
-
-        assert_eq!(resolved, init_path);
-    }
-
-    // Build only slightly beyond the production probe budget. Do not relax the
-    // budget or read the oversized file through an uncapped fallback in tests.
-    fn oversized_member_probe_source(definition: &str) -> String {
-        let limit = crate::memory_guard::sibling_max_check_bytes();
-        assert!(limit <= 1024 * 1024, "member-import fixtures require a probe budget <= 1 MiB");
-        format!("#{}\n{}", " ".repeat(limit as usize), definition)
-    }
-
-    #[test]
-    fn member_probe_distinguishes_uninspected_source_from_known_absence() {
-        let temp = tempfile::tempdir().unwrap();
-        let small = temp.path().join("small.spl");
-        let large = temp.path().join("large.spl");
-        let names = vec!["file_only".to_string()];
-        fs::write(&small, "# no matching identifier\n").unwrap();
-        fs::write(&large, oversized_member_probe_source("fn file_only(): 41\n")).unwrap();
-        assert_eq!(file_plausibly_provides_names(&small, &names), Some(Default::default()));
-        assert_eq!(file_plausibly_provides_names(&large, &names), None);
-        assert_eq!(file_plausibly_provides_names(&temp.path().join("missing.spl"), &names), None);
-    }
-
-    #[test]
-    fn oversized_file_keeps_group_import_owner_and_aliased_member() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("spec.spl");
-        let package = temp.path().join("spec/__init__.spl");
-        fs::create_dir_all(package.parent().unwrap()).unwrap();
-        // Unique name lies after the probe budget, not in an inspectable prefix.
-        fs::write(&file, oversized_member_probe_source("fn shared(): 1\nfn file_only(): 41\n")).unwrap();
-        fs::write(&package, "fn shared(): 2\n").unwrap();
-        let requested = use_stmt_with_target(ImportTarget::Group(vec![
-            ImportTarget::Single("shared".into()),
-            ImportTarget::Aliased { name: "file_only".into(), alias: "selected".into() },
-        ]));
-        assert_eq!(resolve_member_import_target(&file, &requested), file);
-        // The same unknown result is memoized; repeated visits must not switch
-        // owners or make the file eligible for a full-source probe.
-        for _ in 0..8 {
-            assert_eq!(resolve_member_import_target(&file, &requested), file);
-            assert!(super::super::module_cache::probe_source_cached(
-                &file, crate::memory_guard::sibling_max_check_bytes()
-            ).is_none());
-        }
-    }
-
-    #[test]
-    fn oversized_package_does_not_supply_known_absence_for_group_redirect() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("spec.spl");
-        let package = temp.path().join("spec/__init__.spl");
-        fs::create_dir_all(package.parent().unwrap()).unwrap();
-        fs::write(&file, "fn shared(): 1\n").unwrap();
-        fs::write(&package, oversized_member_probe_source("fn shared(): 2\n")).unwrap();
-        let requested = use_stmt_with_target(ImportTarget::Group(vec![ImportTarget::Single("shared".into())]));
-        assert_eq!(resolve_member_import_target(&file, &requested), file);
-        // Glob imports retain their existing package preference.
-        assert_eq!(resolve_member_import_target(&file, &use_stmt_with_target(ImportTarget::Glob)), package);
-    }
-
-    #[test]
-    fn inspected_file_unique_name_preserves_mixed_group_but_shared_names_prefer_package() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("spec.spl");
-        let package = temp.path().join("spec/__init__.spl");
-        fs::create_dir_all(package.parent().unwrap()).unwrap();
-        fs::write(&file, "fn shared(): 1\nfn file_only(): 41\n").unwrap();
-        fs::write(&package, "fn shared(): 2\n").unwrap();
-        let mixed = use_stmt_with_target(ImportTarget::Group(vec![
-            ImportTarget::Single("shared".into()), ImportTarget::Single("file_only".into()),
-        ]));
-        assert_eq!(resolve_member_import_target(&file, &mixed), file);
-        let shared = use_stmt_with_target(ImportTarget::Group(vec![ImportTarget::Single("shared".into())]));
-        assert_eq!(resolve_member_import_target(&file, &shared), package);
-    }
-
-    #[test]
-    fn resolve_member_import_target_falls_back_to_file_on_self_referential_redirect_cycle() {
-        // task #153 shape: `driver.spl` (real definitions) sits next to a
-        // stale `driver/__init__.spl` that re-exports from the very module
-        // path that resolves back to it. `80.driver/driver/__init__.spl` did
-        // exactly this (`export use compiler.driver.driver.{compiler_driver_create, ...}`),
-        // which shadowed `compiler_driver_create` for every standalone
-        // `simple run` script that imported `compiler.driver.driver.{...}`.
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let file_path = root.join("driver.spl");
-        let package_dir = root.join("driver");
-        let init_path = package_dir.join("__init__.spl");
-        fs::write(&file_path, "fn compiler_driver_create(): 42\n").unwrap();
-        fs::create_dir_all(&package_dir).unwrap();
-        fs::write(&init_path, "export use driver.{compiler_driver_create}\n").unwrap();
-
-        let use_stmt = use_stmt_with_target(ImportTarget::Group(vec![ImportTarget::Single(
-            "compiler_driver_create".to_string(),
-        )]));
-
-        // Baseline (no cycle in progress): the package init is preferred,
-        // same as any other legitimate "thin file + real package" pair
-        // (`prefers_package_init_for_group_imports_when_both_exist`).
-        let resolved = resolve_member_import_target(&file_path, &use_stmt);
-        assert_eq!(resolved, init_path);
-
-        // Simulate the interpreter mid-way through loading `init_path` when
-        // its own self-referential re-export re-resolves the same import.
-        // Without the guard, `resolve_member_import_target` would collapse
-        // to `prefer_package_init_for_member_import` and redirect back into
-        // `init_path` — which the circular-import branch in
-        // `load_and_merge_module` then answers with empty/partial exports,
-        // silently dropping `compiler_driver_create`.
-        mark_module_loading(&init_path);
-        let resolved_during_cycle = resolve_member_import_target(&file_path, &use_stmt);
-        unmark_module_loading(&init_path);
-
-        assert_eq!(
-            resolved_during_cycle, file_path,
-            "must keep the already-resolved file instead of re-entering a package-init already on the load stack"
-        );
-    }
-
-    #[test]
-    fn keeps_file_module_for_single_imports() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let file_path = root.join("io.spl");
-        let package_dir = root.join("io");
-        let init_path = package_dir.join("__init__.spl");
-        fs::write(&file_path, "# file module\n").unwrap();
-        fs::create_dir_all(&package_dir).unwrap();
-        fs::write(&init_path, "# package module\n").unwrap();
-
-        let resolved = prefer_package_init_for_member_import(
-            &file_path,
-            &use_stmt_with_target(ImportTarget::Single("io".to_string())),
-        );
-
-        assert_eq!(resolved, file_path);
     }
 
     pub(super) fn use_stmt_with_path(path: &[&str], target: ImportTarget) -> UseStmt {
@@ -1701,6 +2283,7 @@ mod tests {
             target,
             is_type_only: false,
             is_lazy: false,
+            attributes: vec![],
         }
     }
 
@@ -1779,6 +2362,104 @@ mod tests {
         };
 
         assert!(matches!(exports.get("env_get"), Some(Value::Function { .. })));
+    }
+
+    #[test]
+    fn friend_internal_export_and_layer_are_not_opaque_and_unhide_internal_exports() {
+        let src = "friend lib.nogc_sync_mut.io\ninternal_export secret_helper\nlayer domain\nfn secret_helper() -> i64:\n    1\npub(friend) fn pub_friend_helper() -> i64:\n    3\nfn still_private() -> i64:\n    2\n";
+        let module = simple_parser::Parser::new(src).parse().unwrap();
+        assert!(!super::module_surface_is_opaque(&module.items));
+        let private_fns = super::private_top_level_fn_names(&module.items);
+        assert!(!private_fns.contains("secret_helper"));
+        assert!(private_fns.contains("still_private"));
+
+        let owner_path = std::path::PathBuf::from(r"\\?\C:\repo\src\lib\common\task_runner\health_mod_test.spl");
+        let owner_key = super::super::module_cache::module_owner_key(&owner_path);
+        super::register_module_private_fns(&owner_path, &module.items);
+
+        let friend_unc = std::sync::Arc::<str>::from(r"\\?\C:\repo\src\lib\nogc_sync_mut\io\reader.spl");
+        let non_friend = std::sync::Arc::<str>::from("C:/repo/src/app/other/main.spl");
+        let subpackage = std::sync::Arc::<str>::from("C:/repo/src/lib/nogc_sync_mut/io/sub/deep.spl");
+
+        assert!(super::check_private_call_visibility("secret_helper", &owner_key, &friend_unc).is_ok());
+        assert!(super::check_private_call_visibility("pub_friend_helper", &owner_key, &friend_unc).is_ok());
+        assert!(super::check_private_call_visibility("still_private", &owner_key, &friend_unc).is_err());
+
+        assert!(super::check_private_call_visibility("secret_helper", &owner_key, &non_friend).is_err());
+        assert!(super::check_private_call_visibility("pub_friend_helper", &owner_key, &non_friend).is_err());
+        assert!(super::check_private_call_visibility("secret_helper", &owner_key, &subpackage).is_err());
+        assert!(super::check_private_call_visibility("pub_friend_helper", &owner_key, &subpackage).is_err());
+
+        let bsp2_owner = std::path::PathBuf::from(
+            r"\\?\C:\repo\src\lib\common\task_runner\distributed_operation_owner_health_v2.spl",
+        );
+        let bsp2_src = "friend lib.nogc_sync_mut.io\nfn operation_health_end_v2() -> i64:\n    0\nfn unrelated_private() -> i64:\n    1\n";
+        let bsp2_mod = simple_parser::Parser::new(bsp2_src).parse().unwrap();
+        let bsp2_key = super::super::module_cache::module_owner_key(&bsp2_owner);
+        super::register_module_private_fns(&bsp2_owner, &bsp2_mod.items);
+        assert!(super::check_private_call_visibility("operation_health_end_v2", &bsp2_key, &friend_unc).is_ok());
+        assert!(super::check_private_call_visibility("unrelated_private", &bsp2_key, &friend_unc).is_err());
+        assert!(super::check_private_call_visibility("operation_health_end_v2", &bsp2_key, &non_friend).is_err());
+
+        // Runtime call and namespace handout gates must enforce Visibility::Internal (`pub(friend)`)
+        // as well as `Visibility::Private`, not only braced `use mod.{name}`.
+        let mut pub_friend_def = None;
+        let mut secret_def = None;
+        for item in &module.items {
+            if let simple_parser::ast::Node::Function(f) = item {
+                if f.name == "pub_friend_helper" {
+                    pub_friend_def = Some(std::sync::Arc::new(f.clone()));
+                } else if f.name == "secret_helper" {
+                    secret_def = Some(std::sync::Arc::new(f.clone()));
+                }
+            }
+        }
+        let pub_friend_def = pub_friend_def.expect("pub_friend_helper FunctionDef");
+        let secret_def = secret_def.expect("secret_helper FunctionDef");
+        crate::interpreter::FUNCTION_MODULE_OWNER.with(|cell| {
+            let mut map = cell.borrow_mut();
+            map.insert(std::sync::Arc::as_ptr(&pub_friend_def) as usize, std::sync::Arc::clone(&owner_key));
+            map.insert(std::sync::Arc::as_ptr(&secret_def) as usize, std::sync::Arc::clone(&owner_key));
+        });
+        let mut ns_entries = crate::value::DictMap::default();
+        ns_entries.insert(
+            "pub_friend_helper".to_string(),
+            crate::value::Value::Function {
+                name: "pub_friend_helper".to_string(),
+                def: std::sync::Arc::clone(&pub_friend_def),
+                captured_env: std::sync::Arc::new(crate::value::Env::new()),
+            },
+        );
+        ns_entries.insert(
+            "secret_helper".to_string(),
+            crate::value::Value::Function {
+                name: "secret_helper".to_string(),
+                def: std::sync::Arc::clone(&secret_def),
+                captured_env: std::sync::Arc::new(crate::value::Env::new()),
+            },
+        );
+
+        let saved_owner = crate::interpreter::CURRENT_EXEC_MODULE.with(|c| c.borrow().clone());
+        let saved_file = crate::interpreter::CURRENT_FILE.with(|c| c.borrow().clone());
+        let _src_guard = super::ClosureOriginGuard::enter(Some(false));
+
+        crate::interpreter::CURRENT_FILE.with(|c| *c.borrow_mut() = Some(std::path::PathBuf::from("C:/repo/src/app/other/main.spl")));
+        crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = Some(std::sync::Arc::clone(&non_friend)));
+        assert!(crate::interpreter::interpreter_call::gate_private_call("pub_friend_helper", &pub_friend_def).is_err());
+        assert!(crate::interpreter::interpreter_call::gate_private_call("secret_helper", &secret_def).is_err());
+        assert!(crate::interpreter::interpreter_call::gate_namespace_private_entries(&ns_entries).is_err());
+
+        crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = Some(std::sync::Arc::clone(&subpackage)));
+        assert!(crate::interpreter::interpreter_call::gate_private_call("pub_friend_helper", &pub_friend_def).is_err());
+        assert!(crate::interpreter::interpreter_call::gate_namespace_private_entries(&ns_entries).is_err());
+
+        crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = Some(std::sync::Arc::clone(&friend_unc)));
+        assert!(crate::interpreter::interpreter_call::gate_private_call("pub_friend_helper", &pub_friend_def).is_ok());
+        assert!(crate::interpreter::interpreter_call::gate_private_call("secret_helper", &secret_def).is_ok());
+        assert!(crate::interpreter::interpreter_call::gate_namespace_private_entries(&ns_entries).is_ok());
+
+        crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = saved_owner);
+        crate::interpreter::CURRENT_FILE.with(|c| *c.borrow_mut() = saved_file);
     }
 
     #[test]
@@ -2065,6 +2746,7 @@ export register_wiki_tool
             span: simple_parser::token::Span::new(0, 0, 0, 0),
             path: ModulePath { segments: vec![] },
             target: ImportTarget::Group(items),
+            attributes: vec![],
         })
     }
 
@@ -2079,6 +2761,7 @@ export register_wiki_tool
             target: ImportTarget::Group(items),
             is_type_only: false,
             is_lazy: false,
+            attributes: vec![],
         })
     }
 
@@ -2122,6 +2805,7 @@ export register_wiki_tool
             target: ImportTarget::Glob,
             is_type_only: false,
             is_lazy: false,
+            attributes: vec![],
         });
         let requested = vec!["compile_file".to_string()];
         assert!(should_keep_selective_export(&node, &requested));
@@ -2452,5 +3136,596 @@ mod cross_lane_parsed_source_tests {
         assert_eq!(bindings_retained(N - 1), bindings_retained(1));
         assert!(bindings_retained(N - 1) <= 1, "one layer, no per-name copies");
         clear_module_cache();
+    }
+}
+
+/// interp_private_names_leak_across_modules_2026-11-05 (warn-first step).
+#[cfg(test)]
+mod private_fn_visibility_tests {
+    use super::private_top_level_fn_names;
+    use simple_parser::Parser;
+
+    fn private_names(src: &str) -> Vec<String> {
+        let parsed = Parser::new(src).parse().expect("fixture");
+        let mut names: Vec<String> = private_top_level_fn_names(&parsed.items).into_iter().collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn bare_fn_is_private_pub_fn_is_not() {
+        let src = "fn secret_helper() -> i64:\n    42\npub fn open_api() -> i64:\n    secret_helper()\n";
+        assert_eq!(private_names(src), vec!["secret_helper".to_string()]);
+    }
+
+    #[test]
+    fn exported_bare_fn_is_not_private() {
+        let src = "fn helper() -> i64:\n    1\nfn hidden() -> i64:\n    2\nexport helper\n";
+        assert_eq!(private_names(src), vec!["hidden".to_string()]);
+    }
+
+    fn use_of(src: &str) -> simple_parser::ast::UseStmt {
+        let parsed = Parser::new(src).parse().expect("fixture");
+        parsed
+            .items
+            .into_iter()
+            .find_map(|n| match n {
+                simple_parser::ast::Node::UseStmt(u) => Some(u),
+                _ => None,
+            })
+            .expect("use stmt")
+    }
+
+    fn provided_with_private(names: &[&str]) -> super::ProvidedNames {
+        Some(std::sync::Arc::new(super::ProvidedSet {
+            exports: std::sync::Arc::new(crate::value::ModuleTable::leaf(Default::default())),
+            extra: Default::default(),
+            private_fns: names.iter().map(|s| s.to_string()).collect(),
+            surface_incomplete: false,
+        }))
+    }
+
+    #[test]
+    fn importing_private_fn_from_other_directory_is_an_error() {
+        let u = use_of("use app.sub.lib_mod.{secret_helper}
+");
+        let r = super::check_private_use_names(
+            &u,
+            Some(std::path::Path::new("app/main3.spl")),
+            std::path::Path::new("app/sub/lib_mod.spl"),
+            "app.sub.lib_mod",
+            &provided_with_private(&["secret_helper"]),
+        );
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_importer_is_exempt_but_src_importer_still_errors() {
+        // Owner decision 2026-11-13: tests may import private items. Same test-file
+        // definition as check_private_call_visibility (`is_test_caller`).
+        let u = use_of("use app.sub.lib_mod.{secret_helper}
+");
+        let check = |importer: &str| {
+            super::check_private_use_names(
+                &u,
+                Some(std::path::Path::new(importer)),
+                std::path::Path::new("zz_fx/src/app/sub/lib_mod.spl"),
+                "app.sub.lib_mod",
+                &provided_with_private(&["secret_helper"]),
+            )
+        };
+        assert!(check("test/01_unit/app/lib_mod_spec.spl").is_ok());
+        assert!(check("/repo/test/system/lib_mod_spec.spl").is_ok());
+        assert!(check("test\\01_unit\\app\\lib_mod_spec.spl").is_ok());
+        assert!(check("./test/01_unit/app/lib_mod_spec.spl").is_ok());
+        assert!(check("zz_fx/src/app/other/main.spl").is_err());
+        assert!(check("zz_fx/src/app/contest/main.spl").is_err());
+        assert!(check("scripts/check/tool.spl").is_err());
+    }
+
+    #[test]
+    fn same_directory_sibling_and_pub_names_are_allowed() {
+        let u = use_of("use app.lib_mod.{secret_helper}
+");
+        let sibling = super::check_private_use_names(
+            &u,
+            Some(std::path::Path::new("app/main3.spl")),
+            std::path::Path::new("app/lib_mod.spl"),
+            "app.lib_mod",
+            &provided_with_private(&["secret_helper"]),
+        );
+        assert!(sibling.is_ok());
+        let public = super::check_private_use_names(
+            &u,
+            Some(std::path::Path::new("other/main3.spl")),
+            std::path::Path::new("app/lib_mod.spl"),
+            "app.lib_mod",
+            &provided_with_private(&[]),
+        );
+        assert!(public.is_ok());
+    }
+}
+
+/// Call-time visibility check (interp_private_names_leak_across_modules_2026-11-05).
+/// The interpreter resolves unqualified calls through the process-wide function
+/// table, so a private top-level `fn` of module `owner` is reachable from any
+/// loaded module (glob import, or no import at all). Reject such a call when the
+/// caller lives in a different directory and the (module, name) pair is not a
+/// frozen legacy pair in `scripts/check/private_import_baseline.txt`.
+/// Same-directory siblings keep the documented compatibility exception.
+/// Callers under `test/` are exempt (owner decision: white-box tests may use
+/// private names of the module they test); `src/**` callers stay strict.
+///
+/// Thread scope: the private-name registry is process-wide, so a call made on
+/// another thread is judged by the same names. The owner of a definition is
+/// still thread-local (`FUNCTION_MODULE_OWNER`); a definition with no recorded
+/// owner is not judged.
+pub(crate) fn is_test_caller(current: &str) -> bool {
+    // `\` and `/` are both separators; leading `./` (or `.\`) runs are
+    // stripped. Allocation-free: closure creation calls this on hot paths.
+    let mut s = current;
+    while let Some(rest) = s.strip_prefix("./").or_else(|| s.strip_prefix(".\\")) {
+        s = rest;
+    }
+    let b = s.as_bytes();
+    let sep = |c: u8| c == b'/' || c == b'\\';
+    (b.len() >= 5 && &b[..4] == b"test" && sep(b[4]))
+        || b.windows(6).any(|w| sep(w[0]) && &w[1..5] == b"test" && sep(w[5]))
+}
+
+thread_local! {
+    /// Lexical origin of the closure body now executing, for the call rule:
+    /// `Some(true)` = a lambda / block closure written in a test file,
+    /// `Some(false)` = one written anywhere else, `None` = a named function
+    /// body (the caller is then `CURRENT_EXEC_MODULE`, the function's owner).
+    /// A closure body INHERITS `CURRENT_EXEC_MODULE` from whoever invokes it,
+    /// so a test's `\: private_fn()` handed to a `src/**` helper used to be
+    /// judged as a call from that helper
+    /// (test_private_access_closure_attribution_2026-11-14). Thread-local; set only through `ClosureOriginGuard`.
+    static CLOSURE_ORIGIN_IS_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    /// Caller override: owner key of the module whose TOP-LEVEL code is
+    /// running (an imported module's evaluation or a flattened global
+    /// initializer), or that wrote the closure body now running; cleared by
+    /// an owned named function frame. Neither has a `CURRENT_EXEC_MODULE` of
+    /// its own (top level: `None`/`<entry>`; a closure inherits its
+    /// invoker's), so the call rule needs it to name the caller
+    /// (private_call_gate_skips_import_bound_and_entry_calls_2026-11-14).
+    /// Set only through `ClosureOriginGuard`.
+    static TOP_LEVEL_MODULE: std::cell::RefCell<Option<Arc<str>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Scoped `CLOSURE_ORIGIN_IS_TEST` (and, for a named frame or a module top
+/// level, `TOP_LEVEL_MODULE`) value, restored on drop (early `?` returns
+/// included). `enter(None)` marks an owned named function frame.
+pub(crate) struct ClosureOriginGuard {
+    origin: Option<bool>,
+    top_level: Option<Option<Arc<str>>>,
+}
+
+impl ClosureOriginGuard {
+    pub(crate) fn enter(origin_is_test: Option<bool>) -> Self {
+        let origin = CLOSURE_ORIGIN_IS_TEST.with(|c| c.replace(origin_is_test));
+        // A named frame is its owner's code, never a module's top level.
+        let top_level = origin_is_test
+            .is_none()
+            .then(|| TOP_LEVEL_MODULE.with(|c| c.borrow_mut().take()));
+        ClosureOriginGuard { origin, top_level }
+    }
+
+    /// Top-level code of module `module_path` (an imported module's
+    /// evaluation, or a flattened global initializer) is lexically in that
+    /// module. It runs with no `CURRENT_EXEC_MODULE`, exactly like the entry
+    /// script's top level, and may be triggered from a test frame (a
+    /// block-scoped `use`), so its origin must be set explicitly.
+    pub(crate) fn enter_module_top_level(module_path: Option<&str>) -> Self {
+        let origin = CLOSURE_ORIGIN_IS_TEST.with(|c| c.replace(Some(module_path.is_some_and(is_test_caller))));
+        let key = module_path.map(|p| super::module_cache::module_owner_key(Path::new(p)));
+        let top_level = Some(TOP_LEVEL_MODULE.with(|c| c.replace(key)));
+        ClosureOriginGuard { origin, top_level }
+    }
+
+    /// A closure body (lambda, block closure, owner-less nested `fn`) runs as
+    /// the module that wrote it: its captured env's stamps (`stamp_closure_origin`).
+    /// An unstamped env leaves the caller to the invoking frame.
+    pub(crate) fn enter_closure(env: &Env) -> Self {
+        let origin = CLOSURE_ORIGIN_IS_TEST.with(|c| c.replace(Some(env.closure_in_test())));
+        let top_level = env
+            .closure_caller()
+            .map(|caller| TOP_LEVEL_MODULE.with(|c| c.replace(Some(Arc::clone(caller)))));
+        ClosureOriginGuard { origin, top_level }
+    }
+
+    /// An owned fn body run without a named frame (a decorator applied as a
+    /// value): the caller is its owner module.
+    pub(crate) fn enter_owned(owner: &str) -> Self {
+        let origin = CLOSURE_ORIGIN_IS_TEST.with(|c| c.replace(Some(owner_written_in_test(Some(owner)))));
+        // An entry-script fn (`<entry>`) is the entry file's code, never the
+        // exempt `<entry>` caller.
+        let caller: Arc<str> = if owner == "<entry>" {
+            crate::interpreter::CURRENT_FILE
+                .with(|c| c.borrow().as_deref().map(super::module_cache::module_owner_key))
+                .unwrap_or_else(|| Arc::from(owner))
+        } else {
+            Arc::from(owner)
+        };
+        let top_level = Some(TOP_LEVEL_MODULE.with(|c| c.replace(Some(caller))));
+        ClosureOriginGuard { origin, top_level }
+    }
+}
+
+impl Drop for ClosureOriginGuard {
+    fn drop(&mut self) {
+        CLOSURE_ORIGIN_IS_TEST.with(|c| c.set(self.origin));
+        if let Some(prev) = self.top_level.take() {
+            TOP_LEVEL_MODULE.with(|c| *c.borrow_mut() = prev);
+        }
+    }
+}
+
+/// The module a private-fn call is made FROM, for the call rule: the module
+/// whose top-level code is running, else the executing function's owner,
+/// else (an entry-script function `<entry>`, or the entry's own top level)
+/// the entry file's owner key. `<entry>` is returned only when the entry
+/// file is unknown; the rule keeps exempting that case as before.
+pub(crate) fn private_call_caller() -> Arc<str> {
+    if let Some(module) = TOP_LEVEL_MODULE.with(|c| c.borrow().clone()) {
+        return module;
+    }
+    let current = crate::interpreter::CURRENT_EXEC_MODULE.with(|c| c.borrow().clone());
+    match current {
+        Some(owner) if &*owner != "<entry>" => owner,
+        _ => crate::interpreter::CURRENT_FILE
+            .with(|c| c.borrow().as_deref().map(super::module_cache::module_owner_key))
+            .unwrap_or_else(|| Arc::from("<entry>")),
+    }
+}
+
+/// Is a closure (or nested `fn`) being created right now lexically inside a
+/// test file, by the same `is_test_caller` predicate as the import and call
+/// rules? Inside a closure body or module top level the answer is that
+/// scope's recorded origin; inside an owned named function it is the
+/// function's owner, where an entry-script function (`<entry>`) and the
+/// entry's own top level resolve to the entry file. Unknown -> false.
+pub(crate) fn closure_created_in_test() -> bool {
+    if let Some(origin) = CLOSURE_ORIGIN_IS_TEST.with(|c| c.get()) {
+        return origin;
+    }
+    crate::interpreter::CURRENT_EXEC_MODULE.with(|c| owner_written_in_test(c.borrow().as_deref()))
+}
+
+/// Is code owned by module `owner` written in a test file? An entry-script
+/// function (`<entry>`) and the entry's own top level (`None`) resolve to the
+/// entry file (`CURRENT_FILE`). Unknown -> false.
+pub(crate) fn owner_written_in_test(owner: Option<&str>) -> bool {
+    match owner {
+        Some("<entry>") | None => crate::interpreter::CURRENT_FILE.with(|c| {
+            c.borrow()
+                .as_ref()
+                .is_some_and(|p| is_test_caller(&p.to_string_lossy()))
+        }),
+        Some(owner) => is_test_caller(owner),
+    }
+}
+
+/// `env.clone()` stamped with `closure_created_in_test()`: the captured env of
+/// a nested `fn` value created now.
+pub(crate) fn capture_env_with_origin(env: &Env) -> Env {
+    let mut captured = env.clone();
+    stamp_closure_origin(&mut captured);
+    captured
+}
+
+/// Stamp a closure's captured env with where it is being written: test-ness
+/// and the writing module (read back by `ClosureOriginGuard::enter_closure`).
+pub(crate) fn stamp_closure_origin(captured: &mut Env) {
+    captured.set_closure_in_test(closure_created_in_test());
+    captured.set_closure_caller(Some(private_call_caller()));
+}
+
+pub(crate) fn check_private_call_visibility(
+    name: &str,
+    owner: &Arc<str>,
+    current: &Arc<str>,
+) -> Result<(), CompileError> {
+    match fn_visibility_outcome(name, owner, current) {
+        FnVisibilityOutcome::Allowed => Ok(()),
+        FnVisibilityOutcome::FriendOnly => Err(CompileError::semantic(format!(
+            "friend-scoped symbol `{name}` of module `{owner}` is not visible to {current} ({FRIEND_SYMBOL_VISIBILITY_HINT})"
+        ))),
+        FnVisibilityOutcome::Private => Err(CompileError::semantic(format!(
+            "private fn `{name}` of module `{owner}` is not visible to {current}; {PRIVATE_FN_VISIBILITY_HINT}"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod private_call_visibility_tests {
+    use super::*;
+
+    fn register(owner: &str, name: &str) -> Arc<str> {
+        let owner: Arc<str> = Arc::from(owner);
+        register_private_fns(owner.clone(), Arc::new([name.to_string()].into_iter().collect()));
+        owner
+    }
+
+    #[test]
+    fn cross_directory_private_call_is_an_error() {
+        let owner = register("zz_fx/app/sub/lib_mod.spl", "secret_helper");
+        let cur: Arc<str> = Arc::from("zz_fx/app/other/caller.spl");
+        assert!(check_private_call_visibility("secret_helper", &owner, &cur).is_err());
+    }
+
+    #[test]
+    fn test_caller_is_exempt_but_src_caller_still_errors() {
+        let owner = register("zz_fx/src/app/cli/arch.spl", "_str_trim");
+        let test_cur: Arc<str> = Arc::from("test\\01_unit\\app\\arch_spec.spl");
+        assert!(check_private_call_visibility("_str_trim", &owner, &test_cur).is_ok());
+        let test_cur2: Arc<str> = Arc::from("test/01_unit/app/arch_spec.spl");
+        assert!(check_private_call_visibility("_str_trim", &owner, &test_cur2).is_ok());
+        let src_cur: Arc<str> = Arc::from("zz_fx/src/app/other/caller.spl");
+        assert!(check_private_call_visibility("_str_trim", &owner, &src_cur).is_err());
+        let testlike: Arc<str> = Arc::from("zz_fx/src/app/contest/caller.spl");
+        assert!(check_private_call_visibility("_str_trim", &owner, &testlike).is_err());
+    }
+
+    #[test]
+    fn registry_is_process_wide_so_cross_thread_call_is_an_error() {
+        let owner = register("zz_fx/app/sub/xthread.spl", "secret_helper");
+        let cur: Arc<str> = Arc::from("zz_fx/app/other/caller.spl");
+        assert!(check_private_call_visibility("secret_helper", &owner, &cur).is_err());
+        let (o2, c2) = (owner.clone(), cur.clone());
+        let other_thread = std::thread::spawn(move || check_private_call_visibility("secret_helper", &o2, &c2).is_err());
+        assert!(other_thread.join().unwrap(), "a call on another thread sees the same private names");
+    }
+
+    #[test]
+    fn a_name_registered_after_a_cached_miss_is_seen() {
+        let owner: Arc<str> = Arc::from("zz_fx/app/sub/late.spl");
+        let cur: Arc<str> = Arc::from("zz_fx/app/other/caller.spl");
+        // Unknown owner: allowed, and the miss is cached on this thread.
+        assert!(check_private_call_visibility("late_helper", &owner, &cur).is_ok());
+        register_private_fns(owner.clone(), Arc::new(["late_helper".to_string()].into_iter().collect()));
+        assert!(check_private_call_visibility("late_helper", &owner, &cur).is_err());
+    }
+
+    #[test]
+    fn same_directory_owner_itself_and_public_names_are_allowed() {
+        let owner = register("zz_fx/app/sub/lib2.spl", "secret_helper");
+        let sibling: Arc<str> = Arc::from("zz_fx/app/sub/other.spl");
+        assert!(check_private_call_visibility("secret_helper", &owner, &sibling).is_ok());
+        assert!(check_private_call_visibility("secret_helper", &owner, &owner).is_ok());
+        let far: Arc<str> = Arc::from("zz_fx/app/other/caller.spl");
+        assert!(check_private_call_visibility("open_api", &owner, &far).is_ok());
+    }
+
+    #[test]
+    fn test_written_closure_body_is_exempt_only_until_a_named_frame() {
+        // test_private_access_closure_attribution_2026-11-14: a test's lambda run
+        // by a src helper inherits the helper's module as `current`.
+        let owner = register("zz_fx/src/app/sub/lib3.spl", "secret_helper");
+        let helper: Arc<str> = Arc::from("zz_fx/src/app/runner/run.spl");
+        assert!(check_private_call_visibility("secret_helper", &owner, &helper).is_err());
+        {
+            let _test_body = ClosureOriginGuard::enter(Some(true));
+            assert!(check_private_call_visibility("secret_helper", &owner, &helper).is_ok());
+            assert!(closure_created_in_test(), "a closure nested in a test closure body is test-written");
+            {
+                // The body calls an owned named fn: that frame is its own caller.
+                let _named = ClosureOriginGuard::enter(None);
+                assert!(check_private_call_visibility("secret_helper", &owner, &helper).is_err());
+            }
+            assert!(check_private_call_visibility("secret_helper", &owner, &helper).is_ok());
+        }
+        {
+            let _src_body = ClosureOriginGuard::enter(Some(false));
+            assert!(check_private_call_visibility("secret_helper", &owner, &helper).is_err());
+            assert!(!closure_created_in_test());
+        }
+        assert!(check_private_call_visibility("secret_helper", &owner, &helper).is_err());
+    }
+
+    #[test]
+    fn closure_origin_follows_owner_entry_file_and_module_evaluation() {
+        let set_owner = |o: Option<&str>| {
+            crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = o.map(Arc::from));
+        };
+        let set_file = |f: Option<&str>| {
+            crate::interpreter::CURRENT_FILE.with(|c| *c.borrow_mut() = f.map(std::path::PathBuf::from));
+        };
+        set_file(Some("/repo/test/01_unit/app/x_spec.spl"));
+        set_owner(None);
+        assert!(closure_created_in_test(), "test entry top level");
+        set_owner(Some("<entry>"));
+        assert!(closure_created_in_test(), "test entry function");
+        {
+            // Imported src module top level, even when loaded from a test frame
+            // (a block-scoped `use` inside an `it` body / test closure).
+            let _test_body = ClosureOriginGuard::enter(Some(true));
+            let _loading = ClosureOriginGuard::enter_module_top_level(Some("/repo/src/app/sub/lib.spl"));
+            set_owner(None);
+            assert!(!closure_created_in_test(), "imported src module top level is not the test");
+        }
+        {
+            let _loading = ClosureOriginGuard::enter_module_top_level(Some("/repo/test/helpers/fx.spl"));
+            assert!(closure_created_in_test(), "test-tree helper module top level is test-written");
+        }
+        {
+            let _loading = ClosureOriginGuard::enter_module_top_level(None);
+            assert!(!closure_created_in_test(), "unknown module path stays strict");
+        }
+        set_owner(Some("/repo/src/app/runner/run.spl"));
+        assert!(!closure_created_in_test(), "src function");
+        set_owner(Some("/repo/test/01_unit/app/helper.spl"));
+        assert!(closure_created_in_test(), "test-tree module function");
+        set_file(Some("/repo/src/app/main.spl"));
+        set_owner(None);
+        assert!(!closure_created_in_test(), "product entry top level");
+        set_owner(None);
+        set_file(None);
+    }
+
+    #[test]
+    fn owner_origin_resolves_entry_to_the_entry_file() {
+        // Decorator arms judge an owned fn body by where it is written: its
+        // owner, with `<entry>` / no owner meaning the entry file.
+        let set_file = |f: Option<&str>| {
+            crate::interpreter::CURRENT_FILE.with(|c| *c.borrow_mut() = f.map(std::path::PathBuf::from));
+        };
+        set_file(Some("/repo/test/01_unit/app/x_spec.spl"));
+        assert!(owner_written_in_test(Some("<entry>")));
+        assert!(owner_written_in_test(None));
+        assert!(!owner_written_in_test(Some("/repo/src/app/runner/deco.spl")));
+        assert!(owner_written_in_test(Some("/repo/test/helpers/fx.spl")));
+        set_file(Some("/repo/src/app/main.spl"));
+        assert!(!owner_written_in_test(Some("<entry>")));
+        assert!(!owner_written_in_test(None));
+        set_file(None);
+        assert!(!owner_written_in_test(Some("<entry>")), "unknown entry file stays strict");
+    }
+
+    #[test]
+    fn private_call_caller_names_module_top_level_owner_or_entry_file() {
+        // Owner keys keep the platform's separators (backslashes on Windows);
+        // compare them in '/' form so the expectations hold on every host.
+        let slashes = |s: &str| s.replace('\\', "/");
+        // private_call_gate_skips_import_bound_and_entry_calls_2026-11-14.
+        let set_owner = |o: Option<&str>| {
+            crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = o.map(Arc::from));
+        };
+        let set_file = |f: Option<&str>| {
+            crate::interpreter::CURRENT_FILE.with(|c| *c.borrow_mut() = f.map(std::path::PathBuf::from));
+        };
+        set_file(Some("/zz_fx_caller/src/app/main.spl"));
+        set_owner(None);
+        assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/main.spl", "entry top level");
+        set_owner(Some("<entry>"));
+        assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/main.spl", "entry fn");
+        set_owner(Some("/zz_fx_caller/src/app/runner/run.spl"));
+        assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/runner/run.spl", "owned fn");
+        {
+            // A module's top level wins over an inherited `<entry>` owner (a
+            // block-scoped `use` inside an entry fn) ...
+            set_owner(Some("<entry>"));
+            let _top = ClosureOriginGuard::enter_module_top_level(Some("/zz_fx_caller/src/app/other/topglob.spl"));
+            assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/other/topglob.spl");
+            {
+                // ... until a named frame runs: that frame is its owner's code.
+                set_owner(Some("/zz_fx_caller/src/app/runner/run.spl"));
+                let _named = ClosureOriginGuard::enter(None);
+                assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/runner/run.spl");
+                {
+                    // An unstamped closure body run there keeps the inherited caller.
+                    let _closure = ClosureOriginGuard::enter_closure(&Env::new());
+                    assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/runner/run.spl");
+                }
+                {
+                    // A stamped closure body runs as the module that wrote it ...
+                    let mut written = Env::new();
+                    written.set_closure_caller(Some(Arc::from("/zz_fx_caller/src/app/sub/lamlib.spl")));
+                    let _closure = ClosureOriginGuard::enter_closure(&written);
+                    assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/sub/lamlib.spl", "closure writer");
+                    {
+                        // ... and a named fn it calls is that fn's owner again.
+                        let _named = ClosureOriginGuard::enter(None);
+                        assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/runner/run.spl", "no leak");
+                    }
+                    let _owned = ClosureOriginGuard::enter_owned("/zz_fx_caller/src/app/sub/deco.spl");
+                    assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/sub/deco.spl", "decorator owner");
+                }
+                assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/runner/run.spl", "closure restored");
+            }
+            set_owner(Some("<entry>"));
+            assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/other/topglob.spl", "restored");
+        }
+        assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/main.spl", "top level restored");
+        set_file(None);
+        assert_eq!(slashes(&private_call_caller()), "<entry>", "unknown entry file keeps the old exemption");
+        set_owner(None);
+    }
+
+    #[test]
+    fn is_test_caller_is_component_exact_for_both_separators() {
+        for yes in ["test/a.spl", "./test/a.spl", ".\\test\\a.spl", "/r/test/a.spl", "r\\test\\a.spl", "././test/x"] {
+            assert!(is_test_caller(yes), "{yes}");
+        }
+        for no in ["src/app/contest/a.spl", "tests/a.spl", "src/test_runner/a.spl", "atest/a.spl", "test", "/r/test"] {
+            assert!(!is_test_caller(no), "{no}");
+        }
+    }
+
+    fn use_of(src: &str) -> simple_parser::ast::UseStmt {
+        let parsed = simple_parser::Parser::new(src).parse().expect("fixture");
+        parsed
+            .items
+            .into_iter()
+            .find_map(|n| match n {
+                simple_parser::ast::Node::UseStmt(u) => Some(u),
+                _ => None,
+            })
+            .expect("use stmt")
+    }
+
+    fn facade_provided(src: &str) -> super::ProvidedNames {
+        let parsed = simple_parser::Parser::new(src).parse().expect("fixture");
+        super::collect_provided_names(
+            &parsed.items,
+            &std::sync::Arc::new(crate::value::ModuleTable::leaf(Default::default())),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            false,
+        )
+    }
+
+    #[test]
+    fn aliased_reexport_does_not_provide_the_source_name() {
+        let provided = facade_provided("export use owner_a.{is_dir as fa_is_dir}\n");
+        let u = use_of("use facade.{is_dir}\n");
+        let r = super::check_unprovided_use_names(&u, None, std::path::Path::new("facade.spl"), "facade", &provided);
+        let e = r.expect_err("unprovided name must be rejected");
+        let msg = format!("{:?}", e);
+        assert!(msg.contains("is_dir") && msg.contains("facade"), "{msg}");
+        let ok = use_of("use facade.{fa_is_dir}\n");
+        assert!(super::check_unprovided_use_names(&ok, None, std::path::Path::new("facade.spl"), "facade", &provided).is_ok());
+        assert!(super::is_unprovided_use_error(&e));
+    }
+
+    #[test]
+    fn every_named_declaration_kind_is_provided() {
+        let provided = facade_provided(
+            "pub unit TokV1: i64\ntrait Tr:\n    fn t() -> i64\ntype Al = i64\nconst K = 1\nstatic S = 2\n",
+        );
+        for name in ["TokV1", "Tr", "Al", "K", "S"] {
+            let u = use_of(&format!("use m.{{{name}}}\n"));
+            let r = super::check_unprovided_use_names(&u, None, std::path::Path::new("m.spl"), "m", &provided);
+            assert!(r.is_ok(), "{name}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn typed_and_destructured_top_level_val_is_provided() {
+        let provided = facade_provided("pub val LIMIT_A: i64 = 7\nval (pa, pb) = (1, 2)\nval mut_plain = 3\n");
+        for name in ["LIMIT_A", "pa", "pb", "mut_plain"] {
+            let u = use_of(&format!("use m.{{{name}}}\n"));
+            let r = super::check_unprovided_use_names(&u, None, std::path::Path::new("m.spl"), "m", &provided);
+            assert!(r.is_ok(), "{name}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn glob_use_module_keeps_private_rule_and_skips_unprovided() {
+        let provided = facade_provided("use other.*\nfn priv_fn() -> i64:\n    1\n");
+        let set = provided.as_ref().expect("glob use is not opaque");
+        assert!(set.surface_incomplete);
+        assert!(set.private_fns.contains("priv_fn"));
+        let u = use_of("use m.{zzz_from_glob}\n");
+        assert!(super::check_unprovided_use_names(&u, None, std::path::Path::new("m.spl"), "m", &provided).is_ok());
+    }
+
+    #[test]
+    fn host_gated_source_is_detected() {
+        assert!(super::source_is_host_gated("# c\n@when(os=\"linux\"):\npub fn f():\n    pass\n"));
+        assert!(super::source_is_host_gated("@cfg(arch=\"x86_64\")\nfn g():\n    pass\n"));
+        assert!(!super::source_is_host_gated("fn h():\n    @when(x)\n"));
     }
 }

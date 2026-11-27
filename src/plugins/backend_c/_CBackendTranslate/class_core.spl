@@ -1,3 +1,4 @@
+#![allow(REQC004)]
 # Part 1 of src/plugins/backend_c/c_backend_translate.spl
 use plugins.backend_c.c_backend_translate.*
 # C Backend - MIR to C++20 Translation (MirToC class)
@@ -18,6 +19,8 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_types.{MirType}
 use compiler.mir.mir_instructions.{MirModule, MirBody, MirBlock, MirAsmOperand, MirOperand, MirUnaryOp, MirBinOp}
 use compiler.mir.mir_instruction_graph.{MirFunction}
+use compiler.mir.mir_instruction_support.{mir_call_origin_uses_local_symbols}
+use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name, mir_runtime_owned_local_symbol}
 use plugins.backend_c.c_type_mapper.{CTypeMapper}
 use plugins.backend_c.c_ir_builder.{CIRBuilder, escape_c_string}
 use compiler.backend.backend.backend_types.{CodegenTarget, BackendCompileOptions, CompiledModule}
@@ -31,7 +34,7 @@ use compiler.frontend.parser_types_expr.{AsmLocation}
 use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
 
 @unsafe(reason: "raw backend-policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
-extern fn rt_env_get(key: text) -> text
+extern fn rt_env_get(key: text) -> text?
 
 # ============================================================================
 # Utility
@@ -40,7 +43,7 @@ extern fn rt_env_get(key: text) -> text
 # Sanitize a SPL type name containing generics to a valid C identifier.
 # Examples: "Box<i64>" -> "Box_i64", "Dict<Text, i64>" -> "Dict_Text_i64"
 
-fn sanitize_c_name(name: text) -> text:
+pub fn sanitize_c_name(name: text) -> text:
     var s = name.split("<").join("_")
     s = s.split(">").join("")
     s = s.split(",").join("_")
@@ -61,6 +64,7 @@ class MirToC:
     stack_slots: Dict<i64, text>
     stack_slot_sizes: Dict<i64, i64>
     string_counter: i64
+    source_function_symbols: Dict<text, text> = {}
 
 impl MirToC:
     static fn create(module_name: text) -> MirToC:
@@ -71,7 +75,8 @@ impl MirToC:
             local_types: {},
             stack_slots: {},
             stack_slot_sizes: {},
-            string_counter: 0
+            string_counter: 0,
+            source_function_symbols: {}
         )
 
     static fn create_for_target(module_name: text, target: CodegenTarget) -> MirToC:
@@ -82,7 +87,8 @@ impl MirToC:
             local_types: {},
             stack_slots: {},
             stack_slot_sizes: {},
-            string_counter: 0
+            string_counter: 0,
+            source_function_symbols: {}
         )
 
     me emit_unsupported_panic(message: text):
@@ -96,7 +102,9 @@ impl MirToC:
         behaviour."""
         var allow_unlowered = ""
         unsafe(capabilities: [ffi]):
-            allow_unlowered = rt_env_get("SIMPLE_ALLOW_UNLOWERED_MIR") ?? ""
+            if val flag = rt_env_get("SIMPLE_ALLOW_UNLOWERED_MIR"):
+                allow_unlowered = flag
+        # absent: an unset escape hatch is off
         if allow_unlowered != "1":
             eprint("error: {message}")
             panic("compile error: {message}")
@@ -104,6 +112,14 @@ impl MirToC:
 
     me translate_module(module: MirModule) -> text:
         """Translate entire MIR module to C++20 source (implementation file)."""
+        self.source_function_symbols = {}
+        for key in module.functions.keys():
+            val source_function = module.functions[key]
+            if source_function.blocks.len() > 0:
+                self.source_function_symbols[source_function.name] = if mir_runtime_owned_call_name(source_function.name):
+                    mir_runtime_owned_local_symbol(source_function.name)
+                else:
+                    source_function.name
         # Emit header preamble
         self.builder.emit_header_file_header()
 
@@ -122,18 +138,18 @@ impl MirToC:
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
         for _sym in module.functions.keys():
             val func: MirFunction = module.functions[_sym]
-            val fn_name = func.name
+            val fn_name = self.source_function_symbol(func.name)
             val body = MirBody.from_function(func)
-            self.emit_forward_declaration(fn_name, body)
+            self.emit_forward_declaration(fn_name, body, func.is_comdat)
         self.builder.emit_header_raw("")
         self.builder.emit_blank()
 
         # Function definitions go to impl only
         for _sym in module.functions.keys():
             val func: MirFunction = module.functions[_sym]
-            val fn_name = func.name
+            val fn_name = self.source_function_symbol(func.name)
             val body = MirBody.from_function(func)
-            self.translate_function(fn_name, body)
+            self.translate_function(fn_name, body, func.is_comdat)
 
         # Emit extern "C" wrappers for @export("C") functions and classes
         self.emit_export_wrappers(module)
@@ -173,7 +189,7 @@ impl MirToC:
             val c_name = sanitize_c_name(type_def.name)
             match type_def.kind:
                 case Struct(fields):
-                    self.builder.emit_header_raw("struct " + c_name + "_s {")
+                    self.builder.emit_header_raw("struct " + c_name + "_s {{")
                     for field_raw in fields:
                         val field: MirFieldDef = field_raw
                         val field_c_type = self.type_mapper.map_type(field.type_)
@@ -190,9 +206,9 @@ impl MirToC:
                     self.builder.emit_header_raw("};")
                     self.builder.emit_header_raw("")
                 case Enum(variants):
-                    self.builder.emit_header_raw("struct " + c_name + "_s {")
+                    self.builder.emit_header_raw("struct " + c_name + "_s {{")
                     self.builder.emit_header_raw("    int64_t tag;")
-                    self.builder.emit_header_raw("    union {")
+                    self.builder.emit_header_raw("    union {{")
                     for variant in variants:
                         if variant.payload.?:
                             val payload_ty = self.type_mapper.map_type(variant.payload.unwrap())
@@ -203,18 +219,24 @@ impl MirToC:
                 case _:
                     eprint("Warning: [C-backend] unhandled type kind in emit_type_definitions full def, skipping")
 
-    me emit_forward_declaration(name: text, body: MirBody):
-        """Emit forward declaration for a function to both header and impl."""
+    me emit_forward_declaration(name: text, body: MirBody, is_comdat: bool = false):
+        """Emit forward declaration for a function to both header and impl.
+
+        A COMDAT instance is private to each requesting object (it is
+        re-instantiated wherever used), so it is declared in the impl only."""
         val ret_ty = self.type_mapper.map_return_type(body.return_ty)
         var params: [text] = []
         for i in 0..body.arg_count:
             val param_ty = self.get_local_type_from_body(body, i)
             params = params.push(param_ty + r" _l" + i)
         val params_str = if params.len() == 0: "void" else: params.join(", ")
+        if is_comdat:
+            self.builder.emit_forward_decl(r"SPL_COMDAT_INSTANCE " + ret_ty, name, params_str)
+            return
         self.builder.emit_forward_decl(ret_ty, name, params_str)
         self.builder.emit_header_raw(ret_ty + r" " + name + r"(" + params_str + r");")
 
-    me translate_function(name: text, body: MirBody):
+    me translate_function(name: text, body: MirBody, is_comdat: bool = false):
         """Translate a MIR function to C++."""
         # Build local type map
         self.local_types = {}
@@ -232,7 +254,7 @@ impl MirToC:
         val params_str = if params.len() == 0: "void" else: params.join(", ")
 
         val ret_ty = self.type_mapper.map_return_type(body.return_ty)
-        self.builder.start_function(ret_ty, name, params_str)
+        self.builder.start_function(if is_comdat: r"SPL_COMDAT_INSTANCE " + ret_ty else: ret_ty, name, params_str)
 
         # Declare all non-argument locals at function top
         for local in body.locals:
@@ -469,6 +491,8 @@ impl MirToC:
 
             case Offset:
                 self.builder.emit_assign(dest_name, r"(" + ty + r")((char*)(intptr_t)" + left_val + r" + " + right_val + r")")
+            case _:
+                todo("handle remaining cases")
 
     # === Unary Operations ===
 
@@ -486,6 +510,8 @@ impl MirToC:
                 self.builder.emit_unaryop(dest_name, ty, "~", operand_val)
             case Transpose:
                 self.builder.emit_assign(dest_name, r"(void*)__simple_runtime_transpose((void*)" + operand_val + r")")
+            case _:
+                todo("handle remaining cases")
 
     # === Helpers ===
 
@@ -582,6 +608,30 @@ impl MirToC:
             case _:
                 false
 
+    fn source_function_symbol(name: text) -> text:
+        if self.source_function_symbols.has(name):
+            return self.source_function_symbols[name]
+        name
+
+    me translate_call_target(operand: MirOperand) -> text:
+        # A symbol in a callable position is not a text literal. Data operands
+        # still use translate_operand, so ordinary strings keep their storage.
+        match operand.kind:
+            case Const(value, _):
+                match value:
+                    case Str(name):
+                        if mir_call_origin_uses_local_symbols(operand.call_origin):
+                            # Imported source functions may have their body in
+                            # another object. Never bind that source call to a
+                            # same-spelled runtime export when its body is absent.
+                            if mir_runtime_owned_call_name(name):
+                                return mir_runtime_owned_local_symbol(name)
+                            return self.source_function_symbol(name)
+                        return name
+                    case _: ()
+            case _: ()
+        self.translate_operand(operand)
+
     me translate_operand(operand: MirOperand) -> text:
         match operand.kind:
             case Copy(local):
@@ -590,6 +640,8 @@ impl MirToC:
                 self.get_local(local)
             case Const(value, type_):
                 self.translate_const_value(value)
+            case _:
+                todo("handle remaining cases")
 
     me translate_const_value(value: MirConstValue) -> text:
         match value:
@@ -624,6 +676,8 @@ impl MirToC:
                     for field_name, field_val in fields:
                         init_vals = init_vals.push(self.const_to_i64_expr(field_val))
                     r"([]() -> int64_t { static int64_t v[" + fields.len() + r"] = {" + init_vals.join(", ") + r"}; return (int64_t)(intptr_t)v; }())"
+            case _:
+                todo("handle remaining cases")
 
     me const_to_i64_expr(value: MirConstValue) -> text:
         match value:
@@ -666,6 +720,8 @@ impl MirToC:
                 val t: MirType = type_
                 val tm: CTypeMapper = self.type_mapper
                 tm.map_type(t)
+            case _:
+                todo("handle remaining cases")
 
     fn zero_value(ty: text) -> text:
         if ty == "void*":
@@ -688,10 +744,12 @@ impl MirToC:
             case AsmLocation.Reg: "r"
             case AsmLocation.Mem: "m"
             case AsmLocation.Imm: "i"
-            case AsmLocation.RegSpec(name): "{" + name + "}"
+            case AsmLocation.RegSpec(name): "{{" + name + "}"
 
         match kind:
             case AsmConstraintKind.In: loc_str
             case AsmConstraintKind.Out: "=" + loc_str
             case AsmConstraintKind.LateOut: "=&" + loc_str
             case AsmConstraintKind.InOut: "+" + loc_str
+            case _:
+                todo("handle remaining cases")

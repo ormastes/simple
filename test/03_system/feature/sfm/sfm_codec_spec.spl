@@ -226,3 +226,34 @@ describe "SFM codec edge cases":
                 expect(out.len()).to_equal(0)
             Err(e):
                 expect("decode-failed: " + e).to_equal("ok")
+
+
+use std.sfm.container.{write_sfm_file, read_sfm_file}
+use std.io_runtime.{file_read_bytes_result, file_write_bytes, file_delete, dir_create_all}
+use std.spec.step
+
+describe "SFM file byte ABI regression":
+    it "preserves zero and high bytes through the shared file boundary":
+        step("Reproduce the exact failure")
+        expect(dir_create_all("build/tmp")).to_equal(true)
+        val path = "build/tmp/p2-sfm-byte-abi.sfm"
+        val payload: [u8] = [0 as u8, 127 as u8, 128 as u8, 255 as u8]
+        expect(write_sfm_file(path, build_manifest(), payload)).to_equal(Ok(()))
+        match read_sfm_file(path):
+            Ok((manifest, bytes)):
+                expect(manifest.name).to_equal("sample-sfm")
+                expect(bytes).to_equal(payload)
+            Err(message):
+                fail(message)
+        expect(file_delete(path)).to_equal(true)
+
+    it "distinguishes empty successful reads from missing paths and retains SFM errors":
+        step("Reject the adjacent regression")
+        expect(dir_create_all("build/tmp")).to_equal(true)
+        val path = "build/tmp/p2-sfm-empty-abi.sfm"
+        expect(file_write_bytes(path, [])).to_equal(true)
+        expect(file_read_bytes_result(path)).to_equal(Ok([]))
+        expect(read_sfm_file(path)).to_equal(Err("sfm: empty or unreadable file " + path))
+        expect(file_delete(path)).to_equal(true)
+        expect(file_read_bytes_result(path)).to_equal(Err("file byte read failed: " + path))
+        expect(read_sfm_file(path)).to_equal(Err("sfm: empty or unreadable file " + path))

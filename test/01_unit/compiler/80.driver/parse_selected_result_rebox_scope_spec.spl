@@ -1,0 +1,59 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, driver, stage2, regression
+# Regression for s3_parse_selected_result_freed_by_transient_scope_2026-11-02.
+# The stage3 built by the frozen stage2 returned a Result from parse_full_frontend_selected_v1 whose discriminant
+# was neither Ok (0) nor Err (1) after driver_end_transient_parse_scope(), so callers' unwrap() panicked
+# (driver_parse_shard_entry.spl:293, driver_source_parse_retained.spl:242). The runtime freed box cannot be
+# reproduced on the seed. This spec instead pins the workaround order: the Result is re-boxed and its payload is
+# promoted after the scope pause and before the scope end, and the re-boxed value is returned.
+use std.spec
+use std.io_runtime.{file_read}
+
+fn selected_body() -> text:
+    val source = file_read("src/compiler/80.driver/driver_source_parse_selected.spl")
+    val start = source.find("pub me parse_full_frontend_selected_v1(") ?? -1
+    if start < 0:
+        return ""
+    val rest = source.substring(start, source.len())
+    val next = rest.find("\n    me ", 1) ?? -1
+    if next > 0: rest.substring(0, next) else: rest
+
+describe "parse_full_frontend_selected_v1 transient scope result":
+    it "re-boxes the Result between scope pause and scope end":
+        val body = selected_body()
+        val pause_pos = body.find("driver_parse_transient_scope_pause_v1()") ?? -1
+        val promote_pos = body.find("val result_ok = rt_transient_heap_promote(parsed)", pause_pos) ?? -1
+        val rebox_pos = body.find("var reboxed: Result<ParserModule, text>", promote_pos) ?? -1
+        val ok_pos = body.find("reboxed = Ok(m)", rebox_pos) ?? -1
+        val err_pos = body.find("reboxed = Err(e)", rebox_pos) ?? -1
+        val end_pos = body.find("val ended = driver_end_transient_parse_scope()", rebox_pos) ?? -1
+        expect(pause_pos).to_be_greater_than(0)
+        expect(promote_pos).to_be_greater_than(pause_pos)
+        expect(rebox_pos).to_be_greater_than(promote_pos)
+        expect(ok_pos).to_be_greater_than(rebox_pos)
+        expect(err_pos).to_be_greater_than(rebox_pos)
+        expect(end_pos).to_be_greater_than(ok_pos)
+        expect(end_pos).to_be_greater_than(err_pos)
+
+    it "returns the re-boxed Result, not the scope-owned one":
+        val body = selected_body()
+        val end_pos = body.find("val ended = driver_end_transient_parse_scope()") ?? -1
+        val tail = if end_pos >= 0: body.substring(end_pos, body.len()) else: ""
+        expect(tail).to_contain("\n        reboxed\n")
+        expect(tail.contains("\n        parsed\n")).to_equal(false)
+
+describe "parse-fibers TLDR summary after the transient scope ends":
+    # Windows parse-shard children crashed (0xC0000005) in flat_span_new /
+    # named_type_register: the public-summary validation parse ran after the
+    # AOT parse scope ended and pushed into unpromoted, reclaimed type/span
+    # pools. The fiber loop must hand that parse fresh pools first.
+    it "resets the flat pools between the scoped parse and the TLDR view":
+        val source = file_read("src/compiler/80.driver/driver_parse_shard_entry.spl")
+        val loop_pos = source.find("fn _driver_run_parse_fibers(") ?? -1
+        val parse_pos = source.find("driver.parse_full_frontend_selected_v1(", loop_pos) ?? -1
+        val reset_pos = source.find("reset_all_pools()", parse_pos) ?? -1
+        val view_pos = source.find("module_tldr_companion_view_sections_v1(selected.unwrap()", parse_pos) ?? -1
+        expect(loop_pos).to_be_greater_than(0)
+        expect(parse_pos).to_be_greater_than(loop_pos)
+        expect(reset_pos).to_be_greater_than(parse_pos)
+        expect(view_pos).to_be_greater_than(reset_pos)

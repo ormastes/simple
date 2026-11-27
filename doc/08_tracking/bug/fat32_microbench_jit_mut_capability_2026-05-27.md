@@ -189,3 +189,16 @@ Remaining environment-gated proof: rerun the full comparison after the VFAT
 mount is remounted writable/seeded or a polkit-authorized loop mount is
 available, and require both `c_fat_vfat_read4k` and `c_fat_vfat_write4k` to be
 measured rather than skipped.
+
+---
+
+## Verification note 2026-11-25 (release/1.0.0 ledger pass)
+
+Closure re-verified at release/1.0.0 HEAD on Windows x86_64 with the pinned
+seed: `SIMPLE_LIB=src bin/simple.exe run test/05_perf/bench/fat32_microbench.spl`
+runs to completion, exit 0, printing all four benchmark rows and
+`=== done ===` (file_create 1497 ops/s, seq_write_4096B 5686 KB/s,
+seq_read_4096B 58766 KB/s, readdir_10files 220264 ops/s). The residual
+VFAT/C-FAT same-device cross-check remains environment-gated on a Linux host
+with VFAT mount privileges — a verification-environment gap, not a defect, as
+recorded in the 2026-09-13 closure. Status: **CLOSED** (unchanged).

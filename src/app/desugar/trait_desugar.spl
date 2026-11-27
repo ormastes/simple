@@ -13,6 +13,8 @@
 
 use app.desugar.trait_scanner (scan_traits, parse_trait_group_members, ScannedTrait)
 
+export desugar_traits
+
 fn desugar_traits(source: text) -> text:
     """Transform trait declarations into struct-with-fn-fields.
 
@@ -67,7 +69,7 @@ fn desugar_traits(source: text) -> text:
 
     # Remove trailing newline added by loop
     if result.ends_with("\n"):
-        result = result.substring(0, result.len() - 1)
+        result = result.substring(0, result.byte_len() - 1)
     return result
 
 fn _group_name(trimmed: text) -> text:
@@ -171,24 +173,26 @@ fn _gen_group_froms(source: text) -> text:
         # acquired member values are checks ONLY -- they are deliberately not
         # used to build the group, because each is an independent COPY.
         var body = ""
-        var indent = "    "
         var k = 0
         while k < g.group_members.len():
             val m = g.group_members[k]
             val acc = _accessor_name(st, m)
             # `_fn` suffix: the accessor is a fn-FIELD after desugaring, not a
             # method. `src.{acc}()` does not compile ("method not found").
-            body = body + indent + "val __o{k} = src.{acc}_fn()\n"
-            body = body + indent + "if val __cap{k} = __o{k}:\n"
-            indent = indent + "    "
+            body = body + "    val __o{k} = src.{acc}_fn()\n"
+            body = body + "    match __o{k}:\n"
+            body = body + "        Some(_):\n"
+            body = body + "            pass_do_nothing\n"
+            body = body + "        _:\n"
+            body = body + "            return None\n"
             k = k + 1
 
         # Single-value acquisition: the group comes from ONE accessor, so both
         # capabilities live on the SAME value and cannot diverge.
-        body = body + indent + "return src.{gacc}_fn()\n"
+        body = body + "    return src.{gacc}_fn()\n"
         out = out + "\nfn {g.name}__from(src: {src_trait}) -> Option<{g.name}>:\n"
         out = out + body
-        out = out + "    nil\n"
+        out = out + "    None\n"
         gi = gi + 1
     return out
 
@@ -260,32 +264,32 @@ fn _method_to_fn_field(trimmed: text) -> text:
     var sig = trimmed
     # Strip leading fn/me keyword
     if sig.starts_with("fn "):
-        sig = sig.substring(3, sig.len())
+        sig = sig.substring(3, sig.byte_len())
     elif sig.starts_with("me "):
-        sig = sig.substring(3, sig.len())
+        sig = sig.substring(3, sig.byte_len())
 
     # Extract method name (everything before '(')
     val paren_idx = sig.index_of("(")
     if val idx = paren_idx:
         val method_name = sig.substring(0, idx)
-        val rest = sig.substring(idx, sig.len())
+        val rest = sig.substring(idx, sig.byte_len())
 
         # Extract params and return type
         val close_paren = rest.index_of(")")
         if val cp = close_paren:
             val params_str = rest.substring(1, cp)
-            val after_paren = rest.substring(cp + 1, rest.len()).trim()
+            val after_paren = rest.substring(cp + 1, rest.byte_len()).trim()
 
             # Extract just the types from params (strip names)
             val types_str = _extract_param_types(params_str)
 
             var field_type = "fn({types_str})"
             if after_paren.starts_with("-> "):
-                val ret_type = after_paren.substring(3, after_paren.len())
+                val ret_type = after_paren.substring(3, after_paren.byte_len())
                 # Strip trailing colon if present
                 var clean_ret = ret_type.trim()
                 if clean_ret.ends_with(":"):
-                    clean_ret = clean_ret.substring(0, clean_ret.len() - 1).trim()
+                    clean_ret = clean_ret.substring(0, clean_ret.byte_len() - 1).trim()
                 field_type = "fn({types_str}) -> {clean_ret}"
 
             return "{method_name}_fn: {field_type}"
@@ -307,7 +311,7 @@ fn _extract_param_types(params_str: text) -> text:
         val param = params[i].trim()
         val colon_idx = param.index_of(":")
         if val ci = colon_idx:
-            val type_part = param.substring(ci + 1, param.len()).trim()
+            val type_part = param.substring(ci + 1, param.byte_len()).trim()
             types = types.push(type_part)
         else:
             # No colon — treat whole thing as a type

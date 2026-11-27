@@ -1,4 +1,17 @@
 # u64 struct field >= 2^63 corrupts `if val` Option unwrap after JIT shared-pointer bail
+
+## Resolution 2026-11-25 — does not reproduce on the pinned seed
+
+- **verified fixed (STALE)**: the doc's minimal repro, run verbatim shape on
+  the pinned Rust seed (`bin/simple.exe` v1.0.0-rc.1, Windows, default `run`
+  lane), prints both lines correctly:
+  `small found checksum=9223372036854775807` and
+  `big found checksum=9223372036854775808` (the >= 2^63 case that previously
+  raised `unknown property or method 'checksum' on Option`), exit 0.
+- The `wm_content_frame_checksum` low-63-bit masking workaround in
+  `src/lib/common/ui/window_scene.spl` remains harmless and was left in place.
+- Status: OPEN -> **RESOLVED (does not reproduce on pinned seed)**.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

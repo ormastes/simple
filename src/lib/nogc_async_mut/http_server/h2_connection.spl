@@ -638,16 +638,22 @@ class H2Connection:
             else:
                 # Regular header — skip any remaining pseudo-headers defensively
                 if entry.name.len() > 0 and entry.name.byte_at(0) != 58:  # 58 = ':'
-                    req_headers.push((entry.name, entry.value))
+                    if authority.len() == 0 or entry.name.lower() != "host":
+                        req_headers.push((entry.name, entry.value))
             di = di + 1
 
-        # Synthesize Host header from :authority (RFC 7540 §8.1.2.3)
+        # When present, :authority is authoritative for downstream Host lookup.
+        # Drop incoming Host fields so first-match consumers see one value.
         if authority.len() > 0:
             req_headers.push(("Host", authority))
 
         # Assemble body from accumulated DATA frames
         val body_bytes = stream.combined_data()
-        val body = bytes_to_text(body_bytes)
+        val body: text = match bytes_to_text_checked(body_bytes):
+            case Ok(t): t
+            case Err(_):
+                self.queue_rst_stream(sid, H2_ERR_PROTOCOL_ERROR)
+                return false
 
         # Build HttpRequestData
         val request = HttpRequestData(
@@ -769,7 +775,7 @@ fn _append_to(dst: [u8], src: [u8]):
 fn _find_char(s: text, byte_val: i64) -> i64:
     """Return index of first occurrence of byte_val in s, or -1."""
     var i = 0
-    while i < s.len():
+    while i < s.byte_len():
         if s.byte_at(i) == byte_val:
             return i
         i = i + 1
@@ -779,15 +785,10 @@ fn _slice_text(s: text, start: i64, end: i64) -> text:
     """Return s[start..end) as a new text string."""
     var buf: [u8] = []
     var i = start
-    while i < end and i < s.len():
+    while i < end and i < s.byte_len():
         buf.push(s.byte_at(i))
         i = i + 1
     return bytes_to_text(buf)
 
-fn _byte_to_text(b: i64) -> text:
-    """Convert a single byte value to a one-character text string."""
-    var scratch: [u8] = []
-    scratch.push(b)
-    return bytes_to_text(scratch)
-
 use std.common.string_core.{bytes_to_text}
+use std.common.encoding.external_text.{bytes_to_text_checked}

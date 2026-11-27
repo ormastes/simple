@@ -47,6 +47,92 @@ fn test_lower_binary_op() {
 }
 
 #[test]
+fn typed_text_equality_uses_representation_aware_runtime_call() {
+    let mir = compile_to_mir(
+        r#"
+fn typed_eq(left: text, right: text) -> bool:
+    return left == right
+
+fn typed_ne(left: text, right: text) -> bool:
+    return left != right
+
+fn any_eq(left: Any, right: Any) -> bool:
+    return left == right
+
+fn numeric_eq(left: i64, right: i64) -> bool:
+    return left == right
+
+fn text_identity(left: text, right: text) -> bool:
+    return left is right
+"#,
+    )
+    .unwrap();
+
+    let instructions = |name: &str| {
+        mir.functions
+            .iter()
+            .find(|function| function.name.contains(name))
+            .unwrap_or_else(|| panic!("missing function {name}"))
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions.iter())
+            .collect::<Vec<_>>()
+    };
+
+    let typed_eq = instructions("typed_eq");
+    assert!(typed_eq.iter().any(|inst| matches!(
+        inst,
+        MirInst::Call { target, .. } if target.name() == "rt_text_eq_any"
+    )));
+    assert!(!typed_eq.iter().any(|inst| matches!(inst, MirInst::BinOp { op: BinOp::Eq, .. })));
+
+    let typed_ne = instructions("typed_ne");
+    let equality_result = typed_ne
+        .iter()
+        .find_map(|inst| match inst {
+            MirInst::Call { dest: Some(dest), target, .. } if target.name() == "rt_text_eq_any" => Some(*dest),
+            _ => None,
+        })
+        .expect("text != calls rt_text_eq_any");
+    let one_result = typed_ne
+        .iter()
+        .find_map(|inst| match inst {
+            MirInst::ConstInt { dest, value: 1 } => Some(*dest),
+            _ => None,
+        })
+        .expect("text != materializes the 1 bit used to invert equality");
+    assert!(typed_ne.iter().any(|inst| matches!(
+        inst,
+        MirInst::BinOp { op: BinOp::BitXor, left, right, .. }
+            if *left == equality_result && *right == one_result
+    )));
+
+    let any_eq = instructions("any_eq");
+    assert!(any_eq.iter().any(|inst| matches!(
+        inst,
+        MirInst::Call { target, .. } if target.name() == "rt_native_eq"
+    )));
+    assert!(!any_eq.iter().any(|inst| matches!(
+        inst,
+        MirInst::Call { target, .. } if target.name() == "rt_text_eq_any"
+    )));
+
+    let numeric_eq = instructions("numeric_eq");
+    assert!(numeric_eq.iter().any(|inst| matches!(inst, MirInst::BinOp { op: BinOp::Eq, .. })));
+    assert!(!numeric_eq.iter().any(|inst| matches!(
+        inst,
+        MirInst::Call { target, .. } if target.name() == "rt_text_eq_any"
+    )));
+
+    let identity = instructions("text_identity");
+    assert!(identity.iter().any(|inst| matches!(inst, MirInst::BinOp { op: BinOp::Is, .. })));
+    assert!(!identity.iter().any(|inst| matches!(
+        inst,
+        MirInst::Call { target, .. } if target.name() == "rt_text_eq_any"
+    )));
+}
+
+#[test]
 fn test_lower_array_add_to_runtime_concat() {
     let mir = compile_to_mir(
         "fn append(callbacks: [fn() -> i64], cb: fn() -> i64) -> [fn() -> i64]:\n    return callbacks + [cb]\n",

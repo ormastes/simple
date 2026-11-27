@@ -1,0 +1,139 @@
+# Purpose and audience: engineers who own the engine3d backends and the HIR
+# trait-impl completeness rule.
+# @req REQ-SSPEC-UNIT
+# Tracks: doc/08_tracking/bug/engine3d_ext_impl_blocks_never_imported_2026-07-02.md
+"""
+# Every engine3d backend must satisfy RenderBackend3D inside its trait impl
+
+`TraitImpl.validate_methods` (src/compiler/25.traits/trait_impl.spl) only sees
+the methods written in the `impl RenderBackend3D for X:` block, so a required
+method that lives in a plain `impl X:` block of a `backend_<x>_ext.spl` sibling
+does not count. HIR lowering additionally rejects a method written in BOTH a
+trait impl and an inherent impl of the same owner.
+
+This spec lowers each backend source through the pure-Simple HIR lowering API
+and asserts, per backend: (1) every required `RenderBackend3D` method is in the
+trait impl block, and (2) no `_ext.spl` inherent impl re-declares one of them.
+
+Run: bin/simple test test/01_unit/lib/gpu/engine3d/backend_trait_impl_completeness_hir_spec.spl
+"""
+# @tag:unit
+# @tag:lib
+# @tag:gpu
+# @tag:traits
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{read_file_text, file_exists}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{parser_has_errors}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+
+val ENGINE3D_DIR = "src/lib/gc_async_mut/gpu/engine3d/"
+val TRAIT_NAME = "RenderBackend3D"
+
+fn lower_file(path: text) -> HirModule:
+    val src = read_file_text(path)
+    val parsed = parse_full_frontend(src, path, "engine3d_probe", Logger(level: 0))
+    expect(parser_has_errors()).to_equal(false)
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_module(parsed)
+
+fn sym_name(hir: HirModule, sym: SymbolId) -> text:
+    val found = hir.symbols.get_symbol(sym)
+    if found == nil:
+        return ""
+    found.unwrap().name
+
+fn type_name(hir: HirModule, t: HirType) -> text:
+    match t.kind:
+        case HirTypeKind.Named(s, _): sym_name(hir, s)
+        case _: ""
+
+fn required_methods() -> [text]:
+    val hir = lower_file(ENGINE3D_DIR + "backend.spl")
+    var names: [text] = []
+    for t in hir.traits.values():
+        if t.name == TRAIT_NAME:
+            for m in t.methods:
+                names = names.push(m.name)
+    names
+
+fn trait_is_named_or_unresolved_import(hir: HirModule, t: HirType) -> bool:
+    """Single-file lowering leaves an imported trait as HirTypeKind.Error."""
+    match t.kind:
+        case HirTypeKind.Error: true
+        case _: type_name(hir, t) == TRAIT_NAME
+
+fn trait_impl_for(hir: HirModule, src: text, owner: text) -> HirImpl?:
+    # The trait is imported from backend.spl, so it lowers unresolved here;
+    # the source header pins which trait impl block is the RenderBackend3D one.
+    if not src.contains("impl " + TRAIT_NAME + " for " + owner + ":"):
+        return None
+    var hits: [HirImpl] = []
+    for i in hir.impls:
+        if i.has_trait_ and type_name(hir, i.type_) == owner and trait_is_named_or_unresolved_import(hir, i.trait_):
+            hits = hits.push(i)
+    if hits.len() != 1:
+        return None
+    Some(hits[0])
+
+fn missing_in_trait_impl(backend: text, owner: text, required: [text]) -> text:
+    """Required RenderBackend3D methods absent from the primary trait impl block."""
+    val path = ENGINE3D_DIR + "backend_" + backend + ".spl"
+    val hir = lower_file(path)
+    val found = trait_impl_for(hir, read_file_text(path), owner)
+    if found == nil:
+        return "no trait impl for " + owner
+    val impl_ = found.unwrap()
+    var missing = ""
+    for name in required:
+        if not impl_.methods.contains_key(name):
+            missing = missing + name + " "
+    missing
+
+fn ext_inherent_overlap(backend: text, owner: text, required: [text]) -> text:
+    """Required methods re-declared by an inherent impl in the _ext sibling."""
+    val path = ENGINE3D_DIR + "backend_" + backend + "_ext.spl"
+    if not file_exists(path):
+        return ""
+    val hir = lower_file(path)
+    var overlap = ""
+    for i in hir.impls:
+        if (not i.has_trait_) and type_name(hir, i.type_) == owner:
+            for name in required:
+                if i.methods.contains_key(name):
+                    overlap = overlap + name + " "
+    overlap
+
+val BACKENDS: [[text]] = [
+    ["software", "SoftwareBackend3D"],
+    ["vulkan", "VulkanBackend3D"],
+    ["cuda", "CudaBackend3D"],
+    ["rocm", "RocmBackend3D"],
+    ["intel", "IntelBackend3D"],
+    ["opengl", "OpenGLBackend3D"],
+    ["qualcomm", "QualcommBackend3D"],
+    ["virtio_gpu", "VirtioGpuBackend3D"],
+    ["baremetal", "BaremetalBackend3D"],
+    ["metal", "MetalBackend3D"],
+    ["webgpu", "WebGpuBackend3D"],
+    ["cpu", "CpuBackend3D"],
+]
+
+describe "engine3d backends satisfy RenderBackend3D inside the trait impl (HIR)":
+    val required = required_methods()
+
+    it "reads a non-empty required method set from the trait":
+        expect(required.len() > 0).to_equal(true)
+        expect(required.contains("create_texture_ex")).to_equal(true)
+
+    for pair in BACKENDS:
+        val backend = pair[0]
+        val owner = pair[1]
+        it "{backend}: trait impl block carries every required method":
+            expect(missing_in_trait_impl(backend, owner, required)).to_equal("")
+
+        it "{backend}: _ext sibling re-declares no required method inherently":
+            expect(ext_inherent_overlap(backend, owner, required)).to_equal("")

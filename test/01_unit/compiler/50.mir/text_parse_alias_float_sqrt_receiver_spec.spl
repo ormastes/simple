@@ -1,0 +1,94 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Stage2 MIR: interpreter text-parse aliases and float `sqrt`/`round`/`min` receivers
+
+Bootstrap run 13 rejected `s.parse_i64()` on a declared `text` (dom_color,
+dom_identity_index, timing), `value.parse_float()` (duplicate_check config),
+`(dx * dx + dy * dy).sqrt()` on `f64` fields (skia geometry), `total.round()`
+on a loop-carried `var total = 0.0` (skia gpos) and an int-binop `.min(..)`
+receiver (duplicate_check similarity). The interpreter accepts all of them
+(string.rs: "parse_int" | "parse_i32" | "parse_i64", "parse_float" | "parse_f64"
+| "parse_f64_safe"; float sqrt).
+
+Bug: doc/08_tracking/bug/stage2_untyped_receiver_builtin_methods_2026-11-07.md
+"""
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+
+val PARSE_INT_SRC = "fn p(s: text) -> i64:\n    val a = s.parse_i64()\n    val b = s.parse_i32()\n    if a == nil or b == nil:\n        return 0\n    1\n\nfn main() -> i64:\n    0\n"
+val PARSE_FLOAT_SRC = "fn q(s: text) -> bool:\n    val a = s.parse_float()\n    a.?\n\nfn main() -> i64:\n    0\n"
+val SQRT_SRC = "class Pt:\n    x: f64\n    y: f64\n\n    fn length() -> f64:\n        val dx = self.x\n        val dy = self.y\n        (dx * dx + dy * dy).sqrt()\n\nfn main() -> i64:\n    0\n"
+val ROUND_SRC = "fn r(n: i64) -> i64:\n    var total = 0.0\n    var i = 0\n    while i < n:\n        total = total + i as f64 * 0.5\n        i = i + 1\n    total.round() as i64\n\nfn main() -> i64:\n    0\n"
+val MIN_SRC = "fn m(xs: [i64], start: i64, count: i64) -> i64:\n    var s = 0\n    s = start\n    (s + count).min(xs.len())\n\nfn main() -> i64:\n    0\n"
+val INT_SQRT_SRC = "fn bad(n: i64) -> i64:\n    n.sqrt()\n\nfn main() -> i64:\n    0\n"
+
+struct Lowered:
+    errors: [text]
+    callees: [text]
+
+fn lower_source(src: text) -> Lowered:
+    val parsed = parse_full_frontend(src, "recv.spl", "recv", Logger(level: 0))
+    var hl = HirLowering.with_filename("recv.spl")
+    val hir = hl.lower_module(parsed)
+    expect(hl.errors.len()).to_equal(0)
+    var ml = MirLowering.new(hir.symbols)
+    val mir = ml.lower_module(hir)
+    var errors: [text] = []
+    for e in ml.errors:
+        if e.fatal:
+            errors = errors.push(e.message)
+    var callees: [text] = []
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                callees = callees.push(name)
+                            case _: pass
+                    case _: pass
+    Lowered(errors: errors, callees: callees)
+
+fn count_matching(names: [text], needle: text) -> i64:
+    var n = 0
+    for name in names:
+        if name == needle:
+            n = n + 1
+    n
+
+describe "stage2 MIR builtin receiver methods":
+    it "lowers parse_i64 / parse_i32 on text through the strict parse_int runtime":
+        val lowered = lower_source(PARSE_INT_SRC)
+        expect(lowered.errors).to_equal([])
+        expect(count_matching(lowered.callees, "rt_string_parse_int")).to_equal(2)
+
+    it "lowers parse_float on text through the parse_f64 runtime":
+        val lowered = lower_source(PARSE_FLOAT_SRC)
+        expect(lowered.errors).to_equal([])
+        expect(count_matching(lowered.callees, "rt_string_to_float")).to_equal(1)
+
+    it "lowers f64 sqrt on an arithmetic receiver":
+        val lowered = lower_source(SQRT_SRC)
+        expect(lowered.errors).to_equal([])
+        expect(count_matching(lowered.callees, "rt_math_sqrt")).to_equal(1)
+
+    it "lowers round on a loop-carried float var":
+        val lowered = lower_source(ROUND_SRC)
+        expect(lowered.errors).to_equal([])
+        expect(count_matching(lowered.callees, "rt_math_round")).to_equal(1)
+
+    it "lowers min on an int arithmetic receiver":
+        val lowered = lower_source(MIN_SRC)
+        expect(lowered.errors).to_equal([])
+
+    it "keeps sqrt float-only":
+        val lowered = lower_source(INT_SQRT_SRC)
+        expect(lowered.errors.len()).to_equal(1)
+        expect(lowered.errors[0]).to_contain("unresolved method call: sqrt")

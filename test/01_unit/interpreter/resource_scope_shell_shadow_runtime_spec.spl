@@ -1,0 +1,72 @@
+# Hosted runtime regression for bug phase2_resource_scope_shell_shadow_2026_10_28:
+# "Resource scope shell local resolves as function".
+#
+# The cached phase-2 producer resolved the local `shell` in
+# `std.nogc_sync_mut.io.resource_scope._run_with_unix_limits` (and the loop
+# variable `shell` in `_limit_shell`) to the global function
+# `std.nogc_sync_mut.io.process_ops.shell`, then passed the function's code
+# bytes as the child command. The sibling HIR/MIR structural pins live in
+# test/01_unit/compiler/20.hir/bootstrap_regressions/local_shadows_function_name_spec.spl;
+# this spec pins the same contract END TO END on the hosted route that
+# `bin/simple test` uses, where the failure mode is a SILENT wrong value
+# (the local's text comes back as a function pointer), not a loud error.
+#
+# Shapes are kept identical to the resource-scope producer:
+#   * `val shell` local carrying the selected shell path, used as command text
+#   * `for shell` loop local scanning candidate shell paths
+#   * a function-typed local named `shell` called as a callee
+#   * the global `shell` still callable by name inside and outside nested
+#     spec blocks
+#
+# The first-class-argument read of a same-named GLOBAL inside a spec block is
+# deliberately not pinned here: the spec harness transitively imports std's
+# own `shell`, and the bare-identifier value read prefers module globals, so
+# the spec module's own top-level `shell` loses that read. That is a separate
+# import-preference gap (module fn vs imported fn), not the local-vs-function
+# defect this bug tracks.
+
+use std.spec
+
+fn shell(cmd: text) -> text:
+    "ran:" + cmd
+
+# Mirrors `std.nogc_sync_mut.io.resource_scope._limit_shell`: loop-local
+# `shell` scans candidate paths and returns the executable. A producer that
+# resolves the loop local to the global function returns code bytes here.
+fn select_shell_path(candidates: [text]) -> text:
+    for shell in candidates:
+        if shell == "/bin/bash":
+            return shell
+    ""
+
+# Mirrors `_run_with_unix_limits`: `val shell` selects the path, then the
+# local is used as plain command text (the value that became the argv bug).
+fn scoped_command(limit: i64) -> text:
+    val shell = select_shell_path(["/bin/zsh", "/bin/bash"])
+    if limit > 0:
+        return shell + "#" + "{limit}"
+    shell
+
+describe "resource-scope shell shadow: hosted runtime contract":
+    it "uses the val local as command text, not the global function":
+        expect(scoped_command(3)).to_equal("/bin/bash#3")
+
+    it "uses the val local as command text inside a spec block":
+        # Same shape as the producer, but with the binding and the read both
+        # inside an `it` block closure: the read must still bind to the local.
+        val shell = select_shell_path(["/bin/zsh", "/bin/bash"])
+        expect(shell + "#3").to_equal("/bin/bash#3")
+
+    it "uses the for-loop local as the returned shell path":
+        expect(select_shell_path(["/bin/zsh", "/bin/bash"])).to_equal("/bin/bash")
+        expect(select_shell_path(["nope"])).to_equal("")
+
+    it "returns the bare local when the limit branch is not taken":
+        expect(scoped_command(0)).to_equal("/bin/bash")
+
+    it "still calls the global function by name inside a spec block":
+        expect(shell("ls")).to_equal("ran:ls")
+
+    it "calls a function-typed local named `shell` as the callee":
+        val shell: fn(text) -> text = fn(cmd: text) -> text: "local:" + cmd
+        expect(shell("ls")).to_equal("local:ls")

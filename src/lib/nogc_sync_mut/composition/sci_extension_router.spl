@@ -1,0 +1,44 @@
+# Bounded router from an admitted section-10 view to one extension route.
+#
+# The view is admitted once at decode time (cli_option_route_view.spl). Each
+# token costs one split and one hashed namespace lookup; no section re-read or
+# re-verification happens here.
+
+use std.nogc_sync_mut.composition.cli_option_route_view.{SciCliOptionRouteViewV1}
+use std.nogc_sync_mut.composition.cli_option_route.{split_cli_extension_token_v1, CLI_TOKEN_EXTENSION, SCI_ROUTE_KIND_EXTENSION_NAMESPACE_V1}
+use std.nogc_sync_mut.composition.sci_reader.{sci_lookup_route_v1}
+
+class SciExtensionRouteV1:
+    ok: bool
+    error: text            # typed code text, e.g. "CLI_EXTENSION_SECTION_UNVERIFIED"
+    namespace: text
+    key: text
+    value: text
+    has_value: bool
+    provider_id: text
+    flags: i64             # one-based binding index from the record
+    availability: i64
+    missing_policy: i64
+    records_examined: i64  # pass-through from SciRouteLookupV1
+
+fn _route_error(error: text, namespace: text, records_examined: i64) -> SciExtensionRouteV1:
+    SciExtensionRouteV1(ok: false, error: error, namespace: namespace, key: "", value: "", has_value: false,
+        provider_id: "", flags: 0, availability: 0, missing_policy: 0, records_examined: records_examined)
+
+pub fn sci_route_admitted_extension_token_v1(view: SciCliOptionRouteViewV1, token: text) -> SciExtensionRouteV1:
+    if not view.handle.ok or not view.integrity_verified:
+        return _route_error("CLI_EXTENSION_SECTION_UNVERIFIED", "", 0)
+    val tok = split_cli_extension_token_v1(token)
+    if tok.kind != CLI_TOKEN_EXTENSION:
+        return _route_error("CLI_EXTENSION_TOKEN_MALFORMED", "", 0)
+    val lookup = sci_lookup_route_v1(view.bytes, view.handle, tok.namespace)
+    if not lookup.ok:
+        return _route_error(lookup.error_code, tok.namespace, lookup.records_examined)
+    if not lookup.found:
+        return _route_error("CLI_EXTENSION_NAMESPACE_UNKNOWN", tok.namespace, lookup.records_examined)
+    if lookup.route_kind != SCI_ROUTE_KIND_EXTENSION_NAMESPACE_V1:
+        return _route_error("CLI_EXTENSION_ROUTE_KIND", tok.namespace, lookup.records_examined)
+    SciExtensionRouteV1(ok: true, error: "", namespace: tok.namespace, key: tok.key, value: tok.value,
+        has_value: tok.has_value, provider_id: lookup.target, flags: lookup.flags,
+        availability: lookup.component_count, missing_policy: lookup.command_id,
+        records_examined: lookup.records_examined)

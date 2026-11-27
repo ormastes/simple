@@ -425,6 +425,9 @@ impl ExecCore {
                 | N::StructuredExportStmt(_)
                 | N::AutoImportStmt(_)
                 | N::RequiresCapabilities(_)
+                | N::FriendDecl(_)
+                | N::InternalExportDecl(_)
+                | N::LayerDecl(_)
                 | N::AopAdvice(_)
                 | N::DiBinding(_)
                 | N::InjectGraph(_)
@@ -439,6 +442,76 @@ impl ExecCore {
                 | N::Extend(_)
                 | N::Pass(_)
         )
+    }
+
+    /// Count module-level statements the JIT entry path would silently skip.
+    ///
+    /// The JIT calls `main` and nothing else, while the interpreter (and the
+    /// language's module semantics) runs every top-level statement in source
+    /// order and then calls `main` once, unless a top-level `main()` call
+    /// already did. A file with `print "x"` before or after `main()` therefore
+    /// lost those statements under `simple run`. Bindings (`val`/`var`/`const`/
+    /// `static`) are module globals the JIT already lowers; a bare top-level
+    /// `main()` call is the entry invocation the JIT performs itself.
+    /// See doc/08_tracking/bug/seed_interp_module_var_mut_array_param_write_back_lost_2026-11-04.md.
+    pub(crate) fn jit_skipped_top_level_statements(items: &[simple_parser::ast::Node]) -> usize {
+        use simple_parser::ast::{Expr, Node as N};
+        items
+            .iter()
+            .filter(|item| match item {
+                N::Expression(Expr::Call { callee, args, .. }) => {
+                    !(args.is_empty() && matches!(callee.as_ref(), Expr::Identifier(name) if name == "main"))
+                }
+                // A bare string literal is a docstring, not a statement: no side
+                // effects, so the JIT skipping it loses nothing.
+                N::Expression(Expr::String(_)) => false,
+                N::Expression(Expr::FString { parts, .. })
+                    if parts.iter().all(|p| matches!(p, simple_parser::ast::FStringPart::Literal(_))) =>
+                {
+                    false
+                }
+                N::Expression(_)
+                | N::Assignment(_)
+                | N::If(_)
+                | N::Match(_)
+                | N::For(_)
+                | N::While(_)
+                | N::Loop(_)
+                | N::Guard(_)
+                | N::Assert(_)
+                | N::Defer(_)
+                | N::ErrDefer(_)
+                | N::Context(_)
+                | N::With(_) => true,
+                _ => false,
+            })
+            .count()
+    }
+
+    /// Top-level statements of the ENTRY file the JIT entry path would skip.
+    ///
+    /// `flattened` is the import closure and carries imported modules' own
+    /// top-level statements, so the entry file is re-parsed from disk and only
+    /// its statements are counted (`flattened` is the fallback when the
+    /// re-parse fails).
+    ///
+    /// The re-parse cannot see spec-entry synthesis: when `spec_entry` is set,
+    /// `synthesize_spec_main` has already moved every non-binding,
+    /// non-declaration item (a superset of what is counted here) into the
+    /// synthesized `main`, so nothing is skipped. Counting the on-disk
+    /// `describe` anyway demoted every spec run under SIMPLE_JIT_SPEC_ENTRY=1.
+    /// See doc/08_tracking/bug/seed_jit_spec_entry_demoted_by_entry_reparse_2026-11-14.md.
+    fn jit_entry_skipped_statements(path: &Path, flattened: &[simple_parser::ast::Node], spec_entry: bool) -> usize {
+        if spec_entry {
+            return 0;
+        }
+        match std::fs::read_to_string(path)
+            .ok()
+            .and_then(|src| simple_parser::Parser::new(&src).parse().ok())
+        {
+            Some(entry) => Self::jit_skipped_top_level_statements(&entry.items),
+            None => Self::jit_skipped_top_level_statements(flattened),
+        }
     }
 
     /// Guard the silent no-op run.
@@ -691,6 +764,16 @@ impl ExecCore {
         // must not be reported as either. Stamped here, immediately before the
         // module's own entry points are called.
         simple_common::engine_receipt::stamp(simple_common::engine_receipt::Engine::Native);
+        // An SMF whose hybrid transform routed functions to `rt_interp_call`
+        // carries their source in `.interp_snapshot`; seed the interpreter
+        // definitions from it BEFORE any compiled code can reach a routed
+        // call. Without this the bridge answered `function not found` (NIL).
+        // doc/08_tracking/bug/smf_standalone_interp_fallback_functions_unavailable_2026-06-14.md
+        if let Some(payload) = module.interp_snapshot.as_deref() {
+            simple_compiler::interpreter_sffi::init_interpreter_handlers();
+            simple_compiler::pipeline::seed_interpreter_from_smf_snapshot(payload)
+                .map_err(|e| format!("cannot run {}: {e}", module.path.display()))?;
+        }
         run_module_init(module)?;
         let exit = run_main(module)?;
         self.collect_gc();
@@ -733,7 +816,7 @@ impl ExecCore {
         use simple_compiler::codegen::JitCompiler;
         use simple_compiler::hir;
         use simple_compiler::interpreter::evaluate_module;
-        use simple_compiler::mir::lower_to_mir;
+        use simple_compiler::mir::lower_to_mir_jit as lower_to_mir;
         use simple_parser::Parser;
 
         // Parse the same cfg-filtered text used for diagnostics and lowering.
@@ -984,7 +1067,12 @@ impl ExecCore {
         // through the hosted runtime, rather than the interpreter argument
         // store. Initialize that runtime boundary before choosing a lane so
         // every execution mode observes the same supplied argv.
-        simple_runtime::value::rt_set_args_vec(&args);
+        // `set_interpreter_args` also fills the interpreter's thread-local
+        // store read by `rt_cli_get_args`/`rt_cli_arg_count`/`rt_cli_arg_at`:
+        // the JIT lane's no-main arm runs the module on the interpreter, which
+        // otherwise saw an empty argv there. See
+        // doc/08_tracking/bug/no_main_runtime_error_reruns_on_interpreter_2026-11-13.md.
+        simple_compiler::set_interpreter_args(args.clone());
 
         // The wasm lane is checked before the extension match so that it cannot
         // be reached by only one of the two run entry points. `run_file_with_args`
@@ -1006,9 +1094,15 @@ impl ExecCore {
                 }
                 if self.execution_mode.is_jit() {
                     // Try JIT first, fall back to interpreter on failure
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_file_jit(path))) {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_file_jit_outcome(path))) {
                         Ok(Ok(exit_code)) => Ok(exit_code),
-                        Ok(Err(jit_err)) => {
+                        // The program already ran (on the interpreter, in the
+                        // no-main arm) and failed: that is the program's own
+                        // verdict, not a JIT gap. Re-running it would repeat
+                        // its output and side effects.
+                        // See doc/08_tracking/bug/no_main_runtime_error_reruns_on_interpreter_2026-11-13.md.
+                        Ok(Err(JitRunError::AlreadyExecuted(run_err))) => Err(run_err),
+                        Ok(Err(JitRunError::Unsupported(jit_err))) => {
                             // SIMPLE_JIT_STRICT fail-open fix: `first_unresolved_import`
                             // in codegen/jit.rs already tags its error message with a
                             // "SIMPLE_JIT_STRICT:" prefix specifically when the strict
@@ -1085,10 +1179,24 @@ impl ExecCore {
     /// Loads with import resolution → HIR → MIR → JIT compile → execute.
     /// Falls back to interpreter for code without `fn main()`.
     pub fn run_file_jit(&self, path: &Path) -> Result<i32, String> {
+        self.run_file_jit_outcome(path).map_err(JitRunError::into_message)
+    }
+
+    /// `run_file_jit` with the failure classified: `AlreadyExecuted` when the
+    /// program itself ran (no-main interpreter arm) and failed, so the caller
+    /// must not run it again; `Unsupported` for every other failure.
+    fn run_file_jit_outcome(&self, path: &Path) -> Result<i32, JitRunError> {
+        self.run_file_jit_inner(path).map_err(JitRunError::Unsupported)?
+    }
+
+    /// Body of `run_file_jit`. The outer `Err(String)` is a JIT-side failure
+    /// (nothing of the program ran); the inner result is the outcome of a
+    /// program that did run.
+    fn run_file_jit_inner(&self, path: &Path) -> Result<Result<i32, JitRunError>, String> {
         use simple_compiler::codegen::{ExecutionManager, LocalExecutionManager, JitBackend};
         use simple_compiler::hir;
         use simple_compiler::interpreter::{evaluate_module, set_current_file};
-        use simple_compiler::mir::lower_to_mir;
+        use simple_compiler::mir::lower_to_mir_jit as lower_to_mir;
         use simple_compiler::pipeline::module_loader::load_module_with_imports;
         use std::collections::HashSet;
 
@@ -1100,15 +1208,85 @@ impl ExecCore {
         // Set current file for module resolution
         set_current_file(Some(path.to_path_buf()));
 
+        // Opt-in until JIT/interpreter spec verdict parity holds (see the
+        // spec-entry synthesis below).
+        let spec_entry_requested = std::env::var_os("SIMPLE_JIT_SPEC_ENTRY").is_some_and(|v| v != "0");
+
+        // The JIT links only what was flattened, so an unbraced symbol import
+        // into a package aggregator (`use std.spec.step`) must flatten like
+        // `use std.spec.{step}` or the call is an unresolved external. Scoped
+        // to opted-in spec entry only: widening it to every `fn main` program
+        // would change the JIT closure of programs that already JIT, with no
+        // parity evidence (an ordinary program still de-JITs on such an
+        // import, as before). A mainless non-spec module is handed to the
+        // interpreter below, which resolves the symbol lazily.
+        // See doc/08_tracking/bug/seed_jit_spec_entry_demoted_by_entry_reparse_2026-11-14.md.
+        let spec_entry_candidate = spec_entry_requested
+            && std::fs::read_to_string(path)
+                .ok()
+                .and_then(|src| simple_parser::Parser::new(&src).parse().ok())
+                .is_some_and(|entry| {
+                    !entry
+                        .items
+                        .iter()
+                        .any(|i| matches!(i, simple_parser::ast::Node::Function(f) if f.name == "main"))
+                        && simple_parser::test_analyzer::extract_file_test_meta(&entry.items, None).total_tests > 0
+                });
+        let package_symbol_scope = spec_entry_candidate
+            .then(simple_compiler::pipeline::module_loader::FlattenPackageSymbolImportsScope::enter);
+
         // Load with import resolution (handles `use` statements)
         let mut ast =
             load_module_with_imports(path, &mut HashSet::new()).map_err(|e| format!("module load error: {}", e))?;
+        drop(package_symbol_scope);
 
         // Drop wrong-arch @cfg(<arch>) fn variants: the JIT executes on the
         // HOST, and codegen's declare_functions is first-wins by source order,
         // so an unstripped wrong-arch variant declared first would be the one
         // that runs (bug x64_freestanding_cfg_multivariant_misdispatch).
         simple_compiler::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut ast);
+
+        // Spec files declare their examples at module level and have no `main`.
+        // Synthesize the spec entry (module statements in order, then the
+        // std.spec exit code) so the JIT executes the spec instead of bailing
+        // with `jit-bail:no-main-fn` to the interpreter.
+        // See doc/08_tracking/bug/seed_jit_spec_files_never_jit_2026-11-04.md.
+        // Opt-in until JIT/interpreter spec verdict parity holds: measured
+        // 2026-11-04, 4 of 6 sampled specs that pass on the interpreter fail on
+        // the compiled rt_bdd lane (value-encoding mismatches in
+        // rt_bdd_expect_eq_rv). Default-on would turn those green runs red
+        // for reasons unrelated to the code under test.
+        let spec_entry = spec_entry_requested && synthesize_spec_main(&mut ast.items);
+        if spec_entry {
+            simple_runtime::value::rt_bdd_clear_state();
+            if trace || std::env::var_os("SIMPLE_JIT_TRACE_SPEC_ENTRY").is_some() {
+                eprintln!("[jit-spec-entry] synthesized main for {}", path.display());
+            }
+        }
+
+        // HIR lowering has no list/dict comprehension form: under the lenient
+        // lowering used below it becomes `nil` (`[x*2 for x in xs].len()` prints
+        // -1). Only the interpreter evaluates comprehensions, so drop the whole
+        // module to it rather than miscompile.
+        // See doc/08_tracking/bug/seed_run_comprehension_empty_hybrid_splice_2026-11-04.md.
+        let comprehension_fn = simple_compiler::compilability::analyze_module(
+            &ast.items,
+            simple_compiler::compilability::CompilabilityMode::HybridJit,
+        )
+        .into_iter()
+        .find(|(_, status)| {
+            status
+                .reasons()
+                .contains(&simple_compiler::compilability::FallbackReason::Comprehension)
+        })
+        .map(|(name, _)| name);
+        if let Some(name) = comprehension_fn {
+            return Err(jit_strict_fallback_error_for(
+                "list/dict comprehension has no JIT lowering",
+                &format!("function `{name}`"),
+                Some(path),
+            ));
+        }
 
         // Lower to HIR with context so imported types (enums, classes) are resolved.
         // Lenient variant: aligns this lane's `Lowerer::with_module_resolver`
@@ -1161,15 +1339,30 @@ impl ExecCore {
         } else {
             std::collections::HashMap::new()
         };
-        let hir_module = match hir::lower_with_context_lenient_project_hint_and_duplicate_structs(
+        let _ = hir::take_dropped_unsupported_exprs();
+        let lowered = hir::lower_with_context_lenient_project_hint_and_duplicate_structs(
             &ast,
             path,
             project_hint.as_deref(),
             duplicate_structs,
-        ) {
+        );
+        // References to a private fn of another directory found in the
+        // lowered unit; judged below, once it is known the JIT will run it.
+        let private_refs = hir::take_private_ref_violations();
+        let hir_module = match lowered {
             Ok(m) => m,
             Err(e) => return Err(jit_strict_fallback_error_for("HIR lowering error", &e, Some(path))),
         };
+        // The lenient lowering turns expressions HIR cannot lower (list/dict
+        // comprehensions) into `nil`; running that would silently compute the
+        // wrong value (`[for x in xs: x]` -> `[]`). Fall back to the interpreter.
+        let dropped = hir::take_dropped_unsupported_exprs();
+        if !dropped.is_empty() {
+            return Err(format!(
+                "HIR has no lowering for {}; falling back to interpreter",
+                dropped.join(",")
+            ));
+        }
 
         // Lower to MIR
         let mut mir_module = match lower_to_mir(&hir_module) {
@@ -1184,14 +1377,54 @@ impl ExecCore {
             );
         }
 
+        // The module holds every imported `src/lib` body, reachable or not
+        // (caret `--help`: 9,639 lowered functions). Drop the ones no root
+        // reaches before anything below inspects the MIR, so an extern called
+        // only from dead code neither forces the interpreter splice nor costs
+        // codegen. Reachability is conservative (see mir/reachability.rs): a
+        // missed edge would leave a call to a dropped function, so every name
+        // spelling codegen can bind is kept. SIMPLE_JIT_NO_REACH_PRUNE=1
+        // disables the pruning for A/B comparison.
+        // A private-fn reference counts when the JIT can execute it: module
+        // level code, or a function `main` reaches. One held by a function
+        // the lowering emitted under no known name is kept (fail closed).
+        let live_private_refs: Vec<String> = if private_refs.is_empty() {
+            Vec::new()
+        } else {
+            let reachable = simple_compiler::mir::reachable_function_names(&mir_module);
+            private_refs
+                .into_iter()
+                .filter(|found| match &found.function {
+                    None => true,
+                    Some(name) => reachable.contains(name) || !mir_module.functions.iter().any(|f| &f.name == name),
+                })
+                .map(|found| found.message)
+                .collect()
+        };
+        if std::env::var_os("SIMPLE_JIT_NO_REACH_PRUNE").map_or(true, |v| v == "0") {
+            let (before, after) = simple_compiler::mir::retain_reachable_functions(&mut mir_module);
+            if trace {
+                eprintln!("[rust-jit] reachability functions={before} reachable={after}");
+            }
+        }
+
         // Extern declarations the JIT cannot resolve (e.g. rt_torch_* in a
         // torch-less build) would link as null pointers and SIGSEGV at call
         // time. Route them through the interpreter bridge, whose extern
         // dispatch has graceful unavailable-backend handlers.
+        //
+        // Only externs the MIR actually references count: src/lib declares
+        // platform-foreign externs unconditionally, and a declaration nothing
+        // calls or loads never reaches a NULL slot. The hybrid transform only
+        // rewrites exact `Call` targets, every one of which is in `referenced`,
+        // so filtering here leaves the transformed MIR unchanged; it only stops
+        // unused declarations from forcing (and being named in) the splice.
+        let referenced = simple_compiler::mir::referenced_function_names(&mir_module);
         let unresolvable_externs: HashSet<String> = mir_module
             .extern_fn_names
             .iter()
-            .filter(|name| self.symbol_provider.get_symbol(name.as_str()).is_none())
+            .filter(|name| referenced.contains(name.as_str()))
+            .filter(|name| !simple_compiler::codegen::jit::jit_import_resolves(self.symbol_provider.as_ref(), name.as_str()))
             // Byte/word accessors are lowered inline by codegen; they never
             // need a runtime symbol, so they must not be spliced through the
             // interpreter bridge.
@@ -1234,10 +1467,25 @@ impl ExecCore {
             simple_common::engine_receipt::record_demotion("jit-bail:no-main-fn", &path.display().to_string());
             // Never exit 0 silently — see `reject_silent_no_op_module`.
             Self::reject_silent_no_op_module(&ast.items)?;
-            let exit_code = evaluate_module(&ast.items).map_err(|e| format!("{}", e))?;
+            // The fallback must be VISIBLE, and fatal under strict mode.
+            if std::env::var_os("SIMPLE_JIT_STRICT").is_some_and(|v| v != "0") {
+                return Err(format!(
+                    "SIMPLE_JIT_STRICT: jit-bail:no-main-fn: {} has no `main` (spec entry synthesis is \
+                     opt-in: SIMPLE_JIT_SPEC_ENTRY=1); refusing to fall back to the interpreter",
+                    path.display()
+                ));
+            }
+            eprintln!(
+                "[jit-fallback] jit-bail:no-main-fn: {} has no `main`; running on the interpreter \
+                 (set SIMPLE_JIT_SPEC_ENTRY=1 to run a spec's module-level examples on the JIT)",
+                path.display()
+            );
+            // From here on the program itself runs: a failure is its verdict,
+            // never a reason to fall back and run it again.
+            let outcome = evaluate_module(&ast.items).map_err(|e| JitRunError::AlreadyExecuted(format!("{}", e)));
             set_current_file(None);
             self.collect_gc();
-            return Ok(exit_code);
+            return Ok(outcome);
         }
 
         // Module-level BDD example blocks are not reachable from the JIT entry
@@ -1258,6 +1506,20 @@ impl ExecCore {
         // not descend into function bodies, so total_tests counts module-level
         // examples only.
         let module_level_examples = simple_parser::test_analyzer::extract_file_test_meta(&ast.items, None).total_tests;
+
+        // Same gap for ordinary module-level statements (`print`, calls,
+        // assignments, control flow) before or after `main()`: the JIT would
+        // drop them, the interpreter runs them in order. Fall back.
+        // Count only the ENTRY file's own statements: `ast` is the flattened import
+        // closure, and imported modules carry top-level statements of their own
+        // that must not demote every JIT run.
+        let skipped_statements = Self::jit_entry_skipped_statements(path, &ast.items, spec_entry);
+        if skipped_statements > 0 {
+            return Err(format!(
+                "module has {skipped_statements} top-level statement(s) that the JIT entry path \
+                 would silently skip (it calls `main` only); falling back to interpreter"
+            ));
+        }
         if module_level_examples > 0 {
             return Err(format!(
                 "module declares {module_level_examples} top-level BDD example(s) that the JIT \
@@ -1299,6 +1561,17 @@ impl ExecCore {
             eprintln!("[rust-jit] compile start");
         }
         em.compile_module(&mir_module)?;
+        // The JIT is about to run this program (every demotion to the
+        // interpreter, which applies the same rule per call, is behind us).
+        // Product code reaching a private fn of another directory is rejected
+        // here as there; the error is never demoted (see
+        // `is_private_fn_visibility_error`).
+        if !live_private_refs.is_empty() {
+            let mut distinct = live_private_refs;
+            distinct.sort();
+            distinct.dedup();
+            return Err(distinct.join("\n"));
+        }
         if trace {
             eprintln!("[rust-jit] execute main start");
         }
@@ -1311,13 +1584,19 @@ impl ExecCore {
         simple_runtime::rt_set_jit_runtime(true);
         let exit_code = em.execute("main", &[]);
         simple_runtime::rt_set_jit_runtime(false);
-        let exit_code = exit_code?;
+        let mut exit_code = exit_code?;
         if trace {
             eprintln!("[rust-jit] execute main done exit={}", exit_code);
         }
+        if spec_entry {
+            // Compiled specs report through the rt_bdd_* runtime (HIR lowers
+            // describe/it/expect to it), not std.spec's counters: derive the
+            // exit code and the harness evidence file from that state.
+            exit_code = finish_jit_spec_entry(path) as i64;
+        }
         set_current_file(None);
         self.collect_gc();
-        Ok(exit_code as i32)
+        Ok(Ok(exit_code as i32))
     }
 
     /// Get the build path for a compiled SMF file
@@ -1407,8 +1686,126 @@ impl ExecCore {
 /// by the lowering/codegen paths. `SIMPLE_JIT_STRICT_ALL=1` is a separate,
 /// opt-in diagnostic switch for callers that need the raw first JIT failure;
 /// it never changes the default fallback behavior.
+/// Wrap module-level executable statements of a `main`-less spec module into a
+/// synthesized `fn main() -> i64`. Only fires when the module declares
+/// module-level BDD examples. Global bindings (`val`/`var`/`const`/`static`)
+/// stay at module level so functions and closures keep seeing them as
+/// globals. The exit code is derived afterwards by [`finish_jit_spec_entry`].
+/// Returns true if a `main` was synthesized.
+pub(crate) fn synthesize_spec_main(items: &mut Vec<simple_parser::ast::Node>) -> bool {
+    use simple_parser::ast::Node as N;
+    if items.iter().any(|i| matches!(i, N::Function(f) if f.name == "main")) {
+        return false;
+    }
+    if simple_parser::test_analyzer::extract_file_test_meta(items, None).total_tests == 0 {
+        return false;
+    }
+    let mut parser = simple_parser::Parser::new("fn main() -> i64:\n    0\n");
+    let Ok(stub) = parser.parse() else { return false };
+    let Some(N::Function(mut main_fn)) = stub.items.into_iter().next() else {
+        return false;
+    };
+    let mut kept = Vec::with_capacity(items.len());
+    let mut body = Vec::new();
+    for item in std::mem::take(items) {
+        let is_global_binding = matches!(item, N::Let(_) | N::Const(_) | N::Static(_));
+        if is_global_binding || ExecCore::is_pure_declaration(&item) {
+            kept.push(item);
+        } else {
+            body.push(item);
+        }
+    }
+    body.append(&mut main_fn.body.statements);
+    main_fn.body.statements = body;
+    kept.push(N::Function(main_fn));
+    *items = kept;
+    true
+}
+
+/// Summarise a JIT-executed spec from the rt_bdd_* runtime state: print the
+/// record each example in the shared BDD result table (verdict + evidence
+/// file), and return the exit code
+/// (1 when any example failed).
+fn finish_jit_spec_entry(path: &Path) -> i32 {
+    let results = simple_runtime::value::rt_bdd_snapshot_results();
+    let total: usize = results.iter().map(|(t, _)| *t).sum();
+    let failed: usize = results.iter().map(|(_, f)| *f).sum();
+    let passed = total.saturating_sub(failed);
+    // Feed the shared result table: it drives the `SPEC FILE VERDICT` drop
+    // check and writes the `simple-bdd-v1` evidence the test harness reads.
+    // rt_bdd keeps counts only, so examples are recorded by ordinal.
+    for i in 0..total {
+        simple_compiler::interpreter::record_external_test_result(
+            "jit".to_string(),
+            format!("example #{}", i + 1),
+            i < passed,
+            false,
+        );
+    }
+    let skipped = simple_runtime::value::rt_bdd_skipped_count();
+    for i in 0..skipped {
+        simple_compiler::interpreter::record_external_test_result(
+            "jit".to_string(),
+            format!("skipped #{}", i + 1),
+            false,
+            true,
+        );
+    }
+    eprintln!(
+        "[jit-spec-entry] {} executed on cranelift-jit: {passed} passed, {failed} failed, {skipped} skipped",
+        path.display()
+    );
+    if failed > 0 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Why the JIT lane of `run_file_with_args` did not finish with an exit code.
+#[derive(Debug)]
+enum JitRunError {
+    /// The JIT could not compile or run the program; none of it ran, so the
+    /// interpreter fallback is safe.
+    Unsupported(String),
+    /// The program already ran (the no-main arm hands the module to the
+    /// interpreter) and failed. Must propagate: a fallback would run it twice.
+    AlreadyExecuted(String),
+}
+
+impl JitRunError {
+    fn into_message(self) -> String {
+        match self {
+            JitRunError::Unsupported(msg) | JitRunError::AlreadyExecuted(msg) => msg,
+        }
+    }
+}
+
 fn jit_failure_must_propagate(jit_err: &str, strict_all: bool) -> bool {
-    strict_all || jit_err.contains("SIMPLE_JIT_STRICT:")
+    // error[SPL-PAT-001] (Option pattern shape) is a TYPE error, not a JIT capability gap:
+    // demoting it to the interpreter would run the ill-typed program silently.
+    // Same for a lowering type error (declared return type, float->int slot):
+    // the interpreter would run the ill-typed program and exit 0 (owner
+    // decision 2026-11-26, optional_return_into_scalar_fn_accepted_2026-11-26).
+    strict_all
+        || jit_err.contains("SIMPLE_JIT_STRICT:")
+        || jit_err.contains("error[SPL-PAT-001]")
+        || jit_err.contains(simple_compiler::hir::LOWERING_TYPE_ERROR_TAG)
+        || is_private_fn_visibility_error(jit_err)
+}
+
+/// A private-fn visibility rejection (import rule or call rule) is a
+/// compile-time verdict, not a JIT capability gap: re-running the program on
+/// the interpreter would execute code the language rejects. It used to do
+/// exactly that -- the retry reused the leaked "loading" mark, took the
+/// circular-import path, skipped the check, and exited 0.
+/// See doc/08_tracking/bug/visibility_error_jit_fallback_fail_open_2026-11-13.md.
+fn is_private_fn_visibility_error(jit_err: &str) -> bool {
+    jit_err.contains("is not visible to")
+        && ((jit_err.contains("private fn `")
+            && jit_err.contains(simple_compiler::interpreter::PRIVATE_FN_VISIBILITY_HINT))
+            || (jit_err.contains("friend-scoped symbol `")
+                && jit_err.contains(simple_compiler::interpreter::FRIEND_SYMBOL_VISIBILITY_HINT)))
 }
 
 /// Shared helper for the JIT-compile failure paths that represent a genuine
@@ -1523,6 +1920,12 @@ fn jit_strict_fallback_error_for(kind: &str, err: &impl std::fmt::Display, path:
         );
     }
 
+    // A lowering TYPE error is the program's verdict, not a JIT gap: the
+    // interpreter would run it and exit 0 (owner decision 2026-11-26).
+    if msg.contains(simple_compiler::hir::LOWERING_TYPE_ERROR_TAG) {
+        return format!("{kind}: {msg}{where_}");
+    }
+
     eprintln!(
         "[jit-fallback] {kind}: {msg}{where_}: whole module dropped to the interpreter \
          (expect ~100-1000x slowdown). Set SIMPLE_JIT_STRICT=1 to turn this into a hard error."
@@ -1599,9 +2002,10 @@ fn interpreter_preference_reason(path: &Path, extension: &str, cli_args_backed: 
     // 2026-08-21 on src/compiler/80.driver/driver_types.spl).
     //
     // The gate existed because the JIT lane had no argv hook. It does now:
-    // `run_file_with_args` calls `simple_runtime::value::rt_set_args_vec(&args)`
-    // for EVERY lane before choosing one, so the hosted runtime's argv store is
-    // populated identically for JIT and interpreter. `cli_args_backed` is the
+    // `run_file_with_args` calls `simple_compiler::set_interpreter_args(args)`
+    // (which also calls `rt_set_args_vec`) for EVERY lane before choosing one,
+    // so the hosted runtime's argv store is populated identically for JIT and
+    // interpreter. `cli_args_backed` is the
     // real capability check -- the caller asks the symbol provider whether that
     // store's accessor is actually linked into THIS build -- so the gate now
     // fires only when the capability is genuinely absent, instead of whenever a
@@ -1776,6 +2180,63 @@ mod tests {
         let mut parser = simple_parser::Parser::new(source);
         let ast = parser.parse().expect("fixture must parse");
         simple_parser::test_analyzer::extract_file_test_meta(&ast.items, None).total_tests
+    }
+
+    #[test]
+    fn synthesizes_spec_entry_main_for_mainless_spec_module() {
+        use simple_parser::ast::Node as N;
+        let source = "val k = 1\n\nfn helper() -> i64:\n    k\n\ndescribe \"g\":\n    it \"a\":\n        expect(helper()).to_equal(1)\n";
+        let mut ast = simple_parser::Parser::new(source).parse().expect("fixture must parse");
+        assert!(super::synthesize_spec_main(&mut ast.items));
+        let main = ast
+            .items
+            .iter()
+            .find_map(|i| match i {
+                N::Function(f) if f.name == "main" => Some(f),
+                _ => None,
+            })
+            .expect("main synthesized");
+        // describe moved into main (+ the `0` tail); the global and fn stay put.
+        assert_eq!(main.body.statements.len(), 2);
+        assert!(ast.items.iter().any(|i| matches!(i, N::Let(_))));
+        assert!(ast.items.iter().any(|i| matches!(i, N::Function(f) if f.name == "helper")));
+        assert_eq!(module_level_example_count_items(&ast.items), 0);
+        // Idempotent / never fires for a module that already has main or no examples.
+        assert!(!super::synthesize_spec_main(&mut ast.items));
+        let mut plain = simple_parser::Parser::new("print \"hi\"\n").parse().unwrap();
+        assert!(!super::synthesize_spec_main(&mut plain.items));
+    }
+
+    /// Regression: the skipped-statement demotion guard re-parses the entry
+    /// file from disk, so it never saw that `synthesize_spec_main` had already
+    /// moved the spec's `describe` into the synthesized `main`. Every spec run
+    /// under SIMPLE_JIT_SPEC_ENTRY=1 was demoted with "module has 1 top-level
+    /// statement(s) that the JIT entry path would silently skip".
+    /// See doc/08_tracking/bug/seed_jit_spec_entry_demoted_by_entry_reparse_2026-11-14.md.
+    #[test]
+    fn spec_entry_synthesis_leaves_no_skipped_entry_statements() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("cap_spec.spl");
+        let source = "val k = 1\n\nfn helper() -> i64:\n    k\n\ndescribe \"g\":\n    it \"a\":\n        expect(helper()).to_equal(1)\n";
+        fs::write(&path, source).expect("write fixture");
+        let mut ast = simple_parser::Parser::new(source).parse().expect("fixture must parse");
+        assert!(super::synthesize_spec_main(&mut ast.items));
+        assert_eq!(
+            super::ExecCore::jit_entry_skipped_statements(&path, &ast.items, true),
+            0,
+            "a synthesized spec main runs the entry's describe; nothing is skipped"
+        );
+        // Without synthesis the same describe IS skipped by a main-only entry.
+        assert_eq!(super::ExecCore::jit_entry_skipped_statements(&path, &ast.items, false), 1);
+        // The guard still fires for an ordinary program with a stray statement.
+        let prog = dir.path().join("prog.spl");
+        fs::write(&prog, "print \"x\"\n\nfn main():\n    print \"hi\"\n").expect("write fixture");
+        let prog_ast = simple_parser::Parser::new("fn main():\n    print \"hi\"\n").parse().unwrap();
+        assert_eq!(super::ExecCore::jit_entry_skipped_statements(&prog, &prog_ast.items, false), 1);
+    }
+
+    fn module_level_example_count_items(items: &[simple_parser::ast::Node]) -> usize {
+        simple_parser::test_analyzer::extract_file_test_meta(items, None).total_tests
     }
 
     #[test]
@@ -1991,6 +2452,155 @@ mod execution_mode_validation_tests {
         assert!(jit_failure_must_propagate(raw_codegen_error, true));
     }
 
+    /// visibility_error_jit_fallback_fail_open_2026-11-13: both producers of a
+    /// private-fn visibility rejection (import rule, call rule) must stop the
+    /// JIT -> interpreter fallback; an unrelated semantic error must not.
+    #[test]
+    fn private_fn_visibility_errors_never_fall_back() {
+        let import_rule = "semantic: private fn `secret_helper` of module `app.sub.lib_mod` (/r/app/sub/lib_mod.spl) \
+                           is not visible to /r/app/main.spl; mark it `pub` or `export` it";
+        let call_rule = "semantic: private fn `secret_helper` of module `/r/a/m.spl` is not visible to /r/b/c.spl; \
+                         mark it `pub` or `export` it";
+        let friend_rule = "semantic: friend-scoped symbol `secret_helper` of module `/r/a/m.spl` is not visible to /r/b/c.spl \
+                           (only same package or declared `friend` packages may access `pub(friend)` / `internal_export` symbols)";
+        assert!(jit_failure_must_propagate(import_rule, false));
+        assert!(jit_failure_must_propagate(call_rule, false));
+        assert!(jit_failure_must_propagate(friend_rule, false));
+        assert!(!jit_failure_must_propagate("semantic: function secret_helper not found", false));
+    }
+
+    /// optional_return_into_scalar_fn_accepted_2026-11-26: lowering type
+    /// errors (Option -> scalar return, float -> int slot, primitive return
+    /// mismatch) stop the fallback; a plain lowering gap still falls back.
+    #[test]
+    fn lowering_type_errors_never_fall_back() {
+        let option_return = "HIR lowering error: Unsupported feature: error[E1003] type mismatch: `value` is declared \
+                             to return `i64` but returns `i64?`";
+        let float_slot = "HIR lowering error: Unsupported feature: error[E1003] type mismatch: argument 1 of `f` is \
+                          declared as `i64` but receives `f64`";
+        let float_return = "HIR lowering error: Unsupported feature: error[E1003] type mismatch: `f` is declared \
+                            to return `i64` but returns `f64`";
+        // Other primitive return mismatches stay untagged and keep the fallback.
+        let return_pair = "HIR lowering error: Type mismatch: expected TypeId(5), found TypeId(12)";
+        assert!(jit_failure_must_propagate(option_return, false));
+        assert!(jit_failure_must_propagate(float_slot, false));
+        assert!(jit_failure_must_propagate(float_return, false));
+        assert!(!jit_failure_must_propagate(return_pair, false));
+        assert!(!jit_failure_must_propagate("HIR lowering error: Unknown variable: x", false));
+    }
+
+    /// End to end on the default (JIT) lane: a main-less product file that
+    /// imports a private fn from another directory must be rejected, not run on
+    /// the interpreter fallback. Red before the fix: Ok(0) after printing 42.
+    #[test]
+    fn private_import_from_other_dir_fails_closed_on_jit_lane() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sub = dir.path().join("app").join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            sub.join("lib_mod.spl"),
+            "fn secret_helper() -> i64:\n    42\npub fn open_api() -> i64:\n    secret_helper()\n",
+        )
+        .unwrap();
+        let entry = dir.path().join("app").join("main.spl");
+        std::fs::write(&entry, "use app.sub.lib_mod.{secret_helper}\nprint secret_helper()\n").unwrap();
+        let core = super::ExecCore::new();
+        if !core.execution_mode.is_jit() {
+            return; // SIMPLE_EXECUTION_MODE overrides the lane under test
+        }
+        let _env = jit_env_lock();
+        let result = core.run_file_with_args(&entry, vec![]);
+        let err = result.expect_err("private import must be rejected, not executed by the interpreter fallback");
+        assert!(err.contains("is not visible to"), "unexpected error: {err}");
+        // The loader half of the fix: a rejected import must not leave the
+        // module marked "loading", or any later in-process load of it takes
+        // the circular-import path, skips the check, and runs. Red before the
+        // fix: the second interpreted run returned Ok(0).
+        for attempt in 0..2 {
+            let again = core.run_file_interpreted(&entry);
+            assert!(
+                again.as_ref().is_err_and(|e| e.contains("is not visible to")),
+                "interpreted retry #{attempt} must still reject: {again:?}"
+            );
+        }
+    }
+
+    /// no_main_runtime_error_reruns_on_interpreter_2026-11-13: a main-less
+    /// script already runs on the interpreter inside `run_file_jit`; when it
+    /// fails at runtime the driver must propagate, not run it a second time.
+    /// Red before the fix: the side-effect file held two lines.
+    #[test]
+    fn no_main_runtime_error_runs_once_on_jit_lane() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let side = dir.path().join("side.txt");
+        let entry = dir.path().join("noman.spl");
+        std::fs::write(
+            &entry,
+            format!(
+                "extern fn rt_file_append_text(path: text, content: text) -> bool\n\
+                 val ok = rt_file_append_text(\"{}\", \"A\\n\")\n\
+                 print \"A\"\n\
+                 val xs = [1]\n\
+                 print xs[5]\n",
+                side.display()
+            ),
+        )
+        .unwrap();
+        let core = super::ExecCore::new();
+        if !core.execution_mode.is_jit() {
+            return; // SIMPLE_EXECUTION_MODE overrides the lane under test
+        }
+        let _env = jit_env_lock();
+        let result = core.run_file_with_args(&entry, vec![]);
+        let err = result.expect_err("a runtime error must fail the run");
+        assert!(err.contains("index out of bounds"), "unexpected error: {err}");
+        let written = std::fs::read_to_string(&side).expect("side-effect file");
+        assert_eq!(written.lines().count(), 1, "program ran more than once: {written:?}");
+    }
+
+    /// The JIT lane's no-main arm runs the module on the interpreter; the
+    /// interpreter's `rt_cli_*` argv store must hold the supplied args there,
+    /// as it does on the interpreted lane. Red before the fix: "0|".
+    #[test]
+    fn no_main_script_sees_cli_args_on_jit_lane() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let side = dir.path().join("side.txt");
+        let entry = dir.path().join("noman_args.spl");
+        std::fs::write(
+            &entry,
+            format!(
+                "extern fn rt_file_append_text(path: text, content: text) -> bool\n\
+                 extern fn rt_cli_arg_count() -> i64\n\
+                 extern fn rt_cli_get_args() -> [text]\n\
+                 val n = rt_cli_arg_count()\n\
+                 val joined = rt_cli_get_args().join(\",\")\n\
+                 val ok = rt_file_append_text(\"{}\", \"{{n}}|{{joined}}\")\n",
+                side.display().to_string().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        let core = super::ExecCore::new();
+        if !core.execution_mode.is_jit() {
+            return; // SIMPLE_EXECUTION_MODE overrides the lane under test
+        }
+        let args = vec!["noman_args.spl".to_string(), "x".to_string(), "y".to_string()];
+        let _env = jit_env_lock();
+        let result = core.run_file_with_args(&entry, args);
+        assert_eq!(result, Ok(0), "main-less script must run");
+        let written = std::fs::read_to_string(&side).expect("side-effect file");
+        assert_eq!(written, "3|noman_args.spl,x,y");
+    }
+
+    /// Serialises the tests that run the JIT lane against the one that sets
+    /// `SIMPLE_JIT_STRICT`: under strict mode the no-main arm and the
+    /// interpreter fallback refuse to run, so a concurrent setter flakes them.
+    /// Every test that sets `SIMPLE_JIT_STRICT` or runs a fallback-capable
+    /// JIT lane must hold this guard.
+    pub(super) fn jit_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Every documented spelling must parse, and must parse to the lane its
     /// name promises. The `interpret`/`interpreter` pair is the one that
     /// actually caused a mismeasurement, so it is asserted explicitly.
@@ -2079,5 +2689,122 @@ mod execution_mode_validation_tests {
             "match is case-sensitive"
         );
         assert!(ExecutionMode::parse_str_checked("native").is_err());
+    }
+}
+
+#[cfg(test)]
+mod jit_top_level_statement_tests {
+    use super::ExecCore;
+
+    fn skipped(src: &str) -> usize {
+        let mut parser = simple_parser::Parser::new(src);
+        let module = parser.parse().expect("parse fixture");
+        ExecCore::jit_skipped_top_level_statements(&module.items)
+    }
+
+    /// A file with `fn main` used to run only `main` under the JIT, silently
+    /// dropping module-level statements before/after the `main()` call.
+    #[test]
+    fn statements_around_main_call_force_interpreter_fallback() {
+        let src = "print \"before\"\nfn main():\n    print \"in main\"\nmain()\nprint \"after\"\n";
+        assert_eq!(skipped(src), 2);
+    }
+
+    /// The per-module JIT links a Simple function imported from another
+    /// module: the loader flattens the import into the same JIT module, so
+    /// strict mode (no interpreter fallback) still runs it. Pins the evidence
+    /// that the `unresolved external symbol 'fail'` refusal in
+    /// doc/08_tracking/bug/seed_jit_spec_files_never_jit_2026-11-04.md was an
+    /// interpreter-only builtin, not a cross-module link gap.
+    #[test]
+    fn imported_simple_function_links_under_strict_jit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("modb.spl"), "pub fn helper(x: i64) -> i64:\n    x + 41\n").unwrap();
+        let entry = dir.path().join("main.spl");
+        std::fs::write(&entry, "use modb.{helper}\n\nfn main() -> i64:\n    helper(1)\n").unwrap();
+        let rc = {
+            let _env = super::execution_mode_validation_tests::jit_env_lock();
+            std::env::set_var("SIMPLE_JIT_STRICT", "1");
+            let rc = ExecCore::new().run_file_jit(&entry);
+            std::env::remove_var("SIMPLE_JIT_STRICT");
+            rc
+        };
+        assert_eq!(rc, Ok(42), "imported helper must run on the JIT");
+    }
+
+    /// A docstring above a `pub fn` is a bare string-literal statement; it must
+    /// not demote the entry module to the interpreter.
+    #[test]
+    fn docstring_above_fn_is_not_a_skipped_statement() {
+        let src = "\"\"\"helper doc\"\"\"\npub fn helper():\n    print \"x\"\n\"one-line doc\"\nfn main():\n    helper()\n";
+        assert_eq!(skipped(src), 0);
+    }
+
+    /// Expressions with side effects stay counted.
+    #[test]
+    fn top_level_call_expression_is_counted() {
+        assert_eq!(skipped("fn f():\n    print \"x\"\nf()\nfn main():\n    f()\n"), 1);
+    }
+
+    #[test]
+    fn interpolated_top_level_string_is_counted() {
+        assert_eq!(skipped("fn f() -> i64:\n    1\n\"doc {f()}\"\nfn main():\n    f()\n"), 1);
+    }
+
+    #[test]
+    fn bindings_and_bare_main_call_stay_on_jit() {
+        let src = "val greeting = \"hi\"\nfn main():\n    print greeting\nmain()\n";
+        assert_eq!(skipped(src), 0);
+    }
+
+    /// Entry whose `present` is interpreter-only (`.?` existence check is a
+    /// `FallbackReason::TryOperator` under AotNative), so the hybrid transform
+    /// routes `main`'s call to it through `rt_interp_call`.
+    const INTERP_FALLBACK_ENTRY: &str =
+        "fn present(v: i64?) -> i64:\n    if v.?:\n        7\n    else:\n        3\n\nfn main() -> i64:\n    present(1)\n";
+
+    /// Reproducer for
+    /// doc/08_tracking/bug/smf_standalone_interp_fallback_functions_unavailable_2026-06-14.md:
+    /// a standalone SMF with an interp-routed function used to be refused at
+    /// compile time (and, before that gate, died with `rt_interp_call:
+    /// function not found`). The `.interp_snapshot` section now seeds the
+    /// interpreter before `main`, so the routed call resolves and the exit
+    /// code is the interpreter-computed 7.
+    #[test]
+    fn smf_with_interp_fallback_function_runs_through_embedded_snapshot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("fb.spl");
+        let out = dir.path().join("fb.smf");
+        std::fs::write(&src, INTERP_FALLBACK_ENTRY).unwrap();
+        let core = ExecCore::new();
+        core.compile_file(&src, &out)
+            .expect("a file-backed SMF with an interp-only function must compile");
+        let module = core.load_module(&out).expect("load");
+        assert!(module.interp_snapshot.is_some(), "SMF must carry .interp_snapshot");
+        assert_eq!(core.run_smf_with_args(&out, vec![]), Ok(7));
+    }
+
+    /// Prevention, general shape: the snapshot travels WITH the artifact. With
+    /// the pinned entry source deleted (artifact moved to another box), the
+    /// embedded text is materialised and the routed call still resolves; and a
+    /// module whose every function compiled natively carries no section at all.
+    #[test]
+    fn smf_interp_snapshot_survives_source_removal_and_is_absent_without_fallback() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("fb.spl");
+        let out = dir.path().join("fb.smf");
+        std::fs::write(&src, INTERP_FALLBACK_ENTRY).unwrap();
+        let core = ExecCore::new();
+        core.compile_file(&src, &out).expect("compile");
+        std::fs::remove_file(&src).expect("remove pinned entry");
+        assert_eq!(core.run_smf_with_args(&out, vec![]), Ok(7));
+
+        let plain_src = dir.path().join("plain.spl");
+        let plain_out = dir.path().join("plain.smf");
+        std::fs::write(&plain_src, "fn main() -> i64:\n    5\n").unwrap();
+        core.compile_file(&plain_src, &plain_out).expect("compile");
+        let module = core.load_module(&plain_out).expect("load");
+        assert!(module.interp_snapshot.is_none(), "natively compiled SMF must not carry a snapshot");
+        assert_eq!(core.run_smf_with_args(&plain_out, vec![]), Ok(5));
     }
 }

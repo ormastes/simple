@@ -1,0 +1,135 @@
+# MIR rejects inline `SdnValue.Dict({...})` literal: "enum payload dictionary key annotation mismatch"
+
+Bug ID: `mir_enum_payload_inline_dict_literal_key_annotation_mismatch_2026-11-14`
+Severity: P2. Status: RESOLVED (MIR fix verified in tree; `src/lib` workarounds retired in `1ce67b65c87`; native Phase 2 build verification remains pending). Layer: `50.mir` (pure-Simple MIR lowering).
+
+## Symptom
+
+The frozen Windows Phase 2 pure-Simple compiler fails MIR lowering for an enum
+constructor whose payload is a dict literal written inline:
+
+```simple
+SdnValue.Dict({"kind": SdnValue.String("x"), "version": SdnValue.Int(1)})
+```
+
+with `MIR lowering error: enum payload dictionary key annotation mismatch`
+(and a companion `enum construction 'lib.common.sdn.value.SdnValue.Dict':
+payload type mismatch at 0`). The declared payload is `Dict(Dict<text, SdnValue>)`
+(`src/lib/common/sdn/value.spl:35`) and every key is a plain `text` literal, so
+the construction is type-correct. The Rust seed accepts it.
+
+Observed in the llm_caret native-build (diag-phase4 lane, log
+`/c/dev/wt-lane2/build/diag-phase4/q_caret/build.log` and
+`.../crt1_caret/build.log`) for 5 modules.
+
+## Location
+
+`src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl:311-312`,
+`lower_declared_enum_payload_expression`, `HirTypeKind.Dict` arm:
+
+```simple
+if annotated_key != None and not enum_payload_types_alias_compatible(key_type, annotated_key, self.symbols):
+    self.error_fatal("enum payload dictionary key annotation mismatch", Some(expression.span))
+```
+
+The HIR `DictLit` key annotation is documented in that file as "nullable
+despite its historic non-optional field declaration". Inspection lead (not a
+demonstrated root cause): for an unannotated literal the synthesized key
+annotation, or the `!= None` test on a non-Option-typed field in the
+natively compiled compiler, is not the "no annotation" case, so a synthesized
+key type is compared against `text` and rejected.
+
+## Workaround (source, behaviour-preserving)
+
+Bind the literal to a typed local first, so the payload expression is a
+variable rather than a `DictLit`:
+
+```simple
+val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("x"), "version": SdnValue.Int(1)}
+SdnValue.Dict(fields)
+```
+
+Sites carrying `# @workaround bug=mir_enum_payload_inline_dict_literal_key_annotation_mismatch_2026-11-14`
+(landed in PR #9022):
+
+- `src/lib/nogc_async_mut/container/providers/linux/engine_policy_v1.spl` (3 sites)
+- `src/lib/nogc_async_mut/container/providers/linux/request_codec_v1.spl`
+- `src/lib/nogc_async_mut/container/providers/windows/docker_exec_control_probe_v3.spl`
+- `src/lib/nogc_async_mut/container/providers/linux/containment_observer_v1.spl`
+- `src/lib/nogc_async_mut/container/providers/linux/installed_containment_policy_v1.spl`
+
+Many other container provider files already use the typed-local shape
+(e.g. `user_mapping_v3.spl`, `docker_exec_claim_v3.spl`); they were written
+that way and are not tagged.
+
+Known untouched instance of the failing shape (not in the llm_caret closure,
+so it has not failed a build yet):
+`src/lib/nogc_sync_mut/orchestration/host_service_peer_policy_v2.spl:59`
+(`rules.push(SdnValue.Dict({"peerUid": ...}))`).
+
+## Fix / removal
+
+Fix the key-annotation check so an unannotated (or synthesized) `DictLit` key
+annotation is treated as absent, or compare by alias-equality against the
+declared `text`. Then remove the tagged workarounds and confirm the inline
+form lowers in a native-build of `src/app/llm_caret/main.spl`.
+
+## Root cause and fix (2026-11-14, seed-interpreted pure-Simple MIR; native proof pending)
+
+Demonstrated, not the `!= None` hypothesis above: since `9bb344bb1cf` (2026-10-21) HIR writes
+`HirType(kind: HirTypeKind.Infer(0, 0))` as the key type of EVERY dict literal
+(`src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl`, `ExprKind.DictLit`:
+"Infer(0, 0) denotes an unannotated type"). The MIR check predates that (`aad6de3fe10`,
+2026-10-10) and treated any non-None key as an ascription, so `text` was compared against
+`Infer` and every inline dict literal payload was refused.
+
+Fix: `enum_payload_dict_key_is_ascribed` in `enum_constructor_payload.spl` — an `Infer` key
+is no ascription. The literal then goes to `lower_dict_lit` with the declared key and value
+types, which still refuses a wrong key (`{1: 2}` into `Dict<text, i64>`: "enum payload
+dictionary key type mismatch") and a wrong value ("... value type mismatch").
+
+Evidence (seed, pure-Simple HIR + MIR): `contextual_enum_payload_spec.spl` 19 of 25 before,
+24 of 25 after (the five dict cases); `enum_payload_local_evidence_spec.spl` covers the
+accept / wrong-key / wrong-value cases and the settled-ascription refusals. NOT yet shown on
+a natively built compiler, so the tagged workarounds stay; remove them after a Phase 2
+binary built from this change lowers the inline form.
+
+## Review follow-up (2026-11-14): nil veto for dict entries
+
+Independent review found that the fix newly admitted `E.D({"a": nil})` into
+`Dict<text, i64>` in safe code (red on the seed above): `lower_dict_lit`'s per-entry check
+takes nil's I64 carrier as an integer. Before the fix every inline literal was refused, so
+this was new nil acceptance. Closed with `enum_payload_dict_entry_nil_vetoed`: a `nil` key or
+value is refused unless its declared entry type is optional or `Nil`; for an optional entry
+type the existing rule applies (`None` always, `nil` only inside `unsafe:`). Nested literals
+recurse through the same arm. The veto refuses nothing the merge-base accepted.
+
+Still refused (pinned in `enum_payload_local_evidence_spec.spl`, 42/42 on
+`simple-covexpr-20261114/build/seed-base/simple`): wrong key or value at any entry, a typed
+variable value of another type, a nested element of another type, `nil` key or value (also
+inside `unsafe:`) and `None` value in a non-optional entry, a dict literal in a scalar slot,
+and a `Dict<..>?` local in a `Dict<..>` slot. `contextual_enum_payload_spec.spl` is 25/25.
+The pre-existing top-level `E.N(nil)` acceptance is
+`enum_payload_nil_into_scalar_slot_accepted_2026-11-14.md`.
+
+## Verification 2026-11-26 (bf-2 lane, Windows host)
+
+- Verified root fix present on `release/1.0.0` in
+  `src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl:54-71, 417-438`
+  (`enum_payload_dict_key_is_ascribed`, `enum_payload_dict_entry_nil_vetoed`).
+- `test/01_unit/compiler/mir/contextual_enum_payload_spec.spl --mode=interpreter`
+  (via `wa3_shared_bin/simple.exe`): 25/25 passed.
+- `test/01_unit/compiler/mir/enum_payload_local_evidence_spec.spl --mode=interpreter`:
+  43/44 passed; all inline dict-literal, key/value mismatch, and nil-veto
+  examples passed (1 unrelated failure in `box_lowered_enum_tuple_payload`
+  owned by `switch_operators_calls.spl`).
+- `test/01_unit/compiler/backend/llvm_interp_logical_and_or_spec.spl --mode=interpreter`:
+  lowers `SdnValue.Dict({"kind": SdnValue.String("x"), "version": SdnValue.Int(1)})`
+  through frontend -> HIR -> MIR -> LLVM IR with 0 errors, and host
+  `clang version 23.1.2` (`clang.exe -x ir -c`) accepted the emitted IR (`exit=0`).
+- `@workaround bug=mir_enum_payload_inline_dict_literal_key_annotation_mismatch_2026-11-14`
+  sites across `src/lib/**` were already retired in commit `1ce67b65c87`
+  (2026-11-25, ancestor of `origin/release/1.0.0`; guarded by
+  `test/01_unit/lib/common/wa_batch_e12_retirement_spec.spl:37-63`).
+- Native Phase 2 compiler build verification of the inline dict lowering
+  remains pending (`native-build` excluded in this Windows interpreter BF-2 lane).

@@ -3,7 +3,8 @@
 # production generation nor rendering reads the old print program.
 
 use app.io.args_ops.{get_args}
-use app.io.mod.{file_exists, file_read, file_write}
+use app.io.mod.{file_exists, file_read}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use std.common.crypto.sha256.{sha256_text}
 use app.cli.command_registry.{
     cli_registry_command_names_v1,
@@ -76,14 +77,14 @@ fn _codegen_extract_dispatch_needle_v1(
             val at = rest.index_of(needle)
             if at < 0:
                 break
-            rest = rest.substring(at + needle.len(), rest.len())
+            rest = rest.substring(at + needle.len(), rest.byte_len())
             val close = rest.index_of("\"")
             if close < 0:
                 break
             val token = rest.substring(0, close)
             if _codegen_token_v1(token):
                 out = _codegen_push_unique_v1(out, token)
-            rest = rest.substring(close + 1, rest.len())
+            rest = rest.substring(close + 1, rest.byte_len())
     out
 
 fn cli_surface_codegen_extract_dispatch_v1(source: text) -> [text]:
@@ -99,7 +100,7 @@ fn cli_surface_codegen_extract_help_v1(source: text) -> [text]:
     for line in source.split("\n"):
         val stripped = line.trim()
         if stripped.starts_with(needle):
-            val rest = stripped.substring(needle.len(), stripped.len())
+            val rest = stripped.substring(needle.len(), stripped.byte_len())
             var token = rest
             val space = rest.index_of(" ")
             if space >= 0:
@@ -115,7 +116,7 @@ fn cli_surface_codegen_extract_table_v1(source: text) -> [text]:
     for line in source.split("\n"):
         val stripped = line.trim()
         if stripped.starts_with(needle):
-            val rest = stripped.substring(needle.len(), stripped.len())
+            val rest = stripped.substring(needle.len(), stripped.byte_len())
             val close = rest.index_of("\"")
             if close >= 0:
                 val token = rest.substring(0, close)
@@ -127,7 +128,7 @@ fn _codegen_between_v1(source: text, start: text, finish: text) -> text:
     val start_at = source.index_of(start)
     if start_at < 0:
         return ""
-    val rest = source.substring(start_at, source.len())
+    val rest = source.substring(start_at, source.byte_len())
     val finish_at = rest.index_of(finish)
     if finish_at < 0:
         return rest
@@ -142,16 +143,16 @@ fn _codegen_extract_flag_needle_v1(
             val at = rest.index_of(needle)
             if at < 0:
                 break
-            rest = rest.substring(at + needle.len(), rest.len())
+            rest = rest.substring(at + needle.len(), rest.byte_len())
             val close = rest.index_of("\"")
             if close < 0:
                 break
             var flag = rest.substring(0, close)
             if flag.ends_with("="):
-                flag = flag.substring(0, flag.len() - 1)
+                flag = flag.substring(0, flag.byte_len() - 1)
             if flag.starts_with("--"):
                 out = _codegen_push_unique_v1(out, flag)
-            rest = rest.substring(close + 1, rest.len())
+            rest = rest.substring(close + 1, rest.byte_len())
     out
 
 fn cli_surface_codegen_extract_log_flags_v1(source: text) -> [text]:
@@ -170,6 +171,16 @@ fn cli_surface_codegen_extract_internal_flags_v1(source: text) -> [text]:
     out = _codegen_extract_flag_needle_v1(body, "arg.starts_with(\"", out)
     _codegen_sorted_v1(out)
 
+fn _codegen_subset_v1(sub: [text], whole: [text]) -> bool:
+    for name in sub:
+        var found = false
+        for other in whole:
+            if other == name:
+                found = true
+        if not found:
+            return false
+    true
+
 fn _codegen_same_v1(left: [text], right: [text]) -> bool:
     if left.len() != right.len():
         return false
@@ -185,7 +196,7 @@ fn _codegen_generated_hash_v1(source: text, constant_name: text) -> text:
     val at = source.index_of(needle)
     if at < 0:
         return ""
-    val rest = source.substring(at + needle.len(), source.len())
+    val rest = source.substring(at + needle.len(), source.byte_len())
     val close = rest.index_of("\"")
     if close < 0:
         return ""
@@ -208,7 +219,10 @@ fn _codegen_validate_canonical_inputs_v1(dispatch_source: text,
     if dispatch.len() == 0 or registry.len() == 0 or log_flags.len() == 0 or
             internal_flags.len() == 0:
         return _codegen_result_v1(false, "extraction-empty")
-    if not _codegen_same_v1(dispatch, registry):
+    # Hardcoded str_eq handlers must all be registered; registry commands without
+    # one are dispatched through the dispatch table, whose parity with the registry
+    # is checked next (table-registry-drift).
+    if not _codegen_subset_v1(dispatch, registry):
         return _codegen_result_v1(false, "dispatch-registry-drift")
     if not _codegen_same_v1(table, registry):
         return _codegen_result_v1(false, "table-registry-drift")
@@ -298,7 +312,7 @@ fn cli_surface_codegen_write_v1() -> CliSurfaceCodegenCheckV1:
         return validated
     val rendered = cli_surface_codegen_render_v1(
         dispatch_source, registry_source, table_source, args_source)
-    if not file_write(CLI_SURFACE_GENERATED_OUTPUT_V1, rendered):
+    if not file_atomic_write(CLI_SURFACE_GENERATED_OUTPUT_V1, rendered):
         return _codegen_result_v1(false, "write-failed")
     _codegen_result_v1(true, "written")
 

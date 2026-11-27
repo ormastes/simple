@@ -5,8 +5,13 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 . "$root/scripts/bootstrap/phase-c-backend-commands.shs"
 unset native_internal_timeout
+# The tool build enters the tree RSS row-cap policy (scripts/bootstrap/lib/
+# tree-rss-policy.shs); the argv contract is independent of it, so the policy
+# owner is stubbed here.
+bootstrap_tree_rss_row_cap_enter() { return 0; }
+bootstrap_tree_rss_row_cap_leave() { return 0; }
 tmp=$(mktemp -d) || exit 1
-trap 'rm -f "$tmp"/argv "$tmp"/receipt "$tmp"/expected "$tmp"/command.argv; rmdir "$tmp"' EXIT HUP INT TERM
+trap 'rm -f "$tmp"/argv "$tmp"/env "$tmp"/receipt "$tmp"/expected "$tmp"/command.argv "$tmp"/policy.log; rmdir "$tmp"' EXIT HUP INT TERM
 
 hash_stream() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{ print $1 }'
@@ -17,14 +22,14 @@ manifest_key_count() { awk -F= -v key="$1" '$1 == key { n++ } END { print n+0 }'
 run_matrix_task() { printf '%s\n' "$@" >"$tmp/argv"; }
 run_task() { printf '%s\n' "$@" >"$tmp/argv"; }
 
-bootstrap_phase_c_run_tool_build llvm cli_build /p/compiler /p/cli.spl /p/cli 10
+bootstrap_phase_c_run_tool_build llvm cli_build /p/compiler /p/cli.spl /p/cli /p/cache-cli 10
 printf '%s\n' cli_build --verification-expect-executable=/p/cli /p/compiler native-build \
-  /p/cli.spl --backend=llvm --low-memory --threads 10 -o /p/cli >"$tmp/expected"
+  --entry /p/cli.spl --backend=llvm --low-memory --mode dynload --entry-closure --cache-dir /p/cache-cli --threads 10 -o /p/cli >"$tmp/expected"
 cmp -s "$tmp/argv" "$tmp/expected" || { echo 'LLVM tool argv mismatch' >&2; exit 1; }
 
-bootstrap_phase_c_run_tool_build cranelift runner_build /p/compiler /p/runner.spl /p/runner 10
+bootstrap_phase_c_run_tool_build cranelift runner_build /p/compiler /p/runner.spl /p/runner /p/cache-runner 10
 printf '%s\n' runner_build --verification-expect-executable=/p/runner /p/compiler native-build \
-  /p/runner.spl --backend=cranelift --low-memory --threads 10 -o /p/runner >"$tmp/expected"
+  --entry /p/runner.spl --backend=cranelift --low-memory --mode dynload --entry-closure --cache-dir /p/cache-runner --threads 10 -o /p/runner >"$tmp/expected"
 cmp -s "$tmp/argv" "$tmp/expected" || { echo 'Cranelift tool argv mismatch' >&2; exit 1; }
 
 bootstrap_phase_c_run_module_build cranelift /p/compiler /p/module.spl /p/module.o "$tmp" 20
@@ -57,8 +62,181 @@ printf 'verification_backend=llvm\n' >>"$tmp/receipt"
 if bootstrap_phase_c_validate_backend_receipt llvm "$tmp/receipt"; then
   echo 'duplicate backend receipt accepted' >&2; exit 1
 fi
-if bootstrap_phase_c_run_tool_build invalid cli_build /p/compiler /p/cli.spl /p/cli 1; then
+if bootstrap_phase_c_run_tool_build invalid cli_build /p/compiler /p/cli.spl /p/cli /p/cache-cli 1; then
   echo 'invalid backend accepted' >&2; exit 1
 fi
 
-echo 'PASS: Phase C commands, backend cache identity, and receipt validation'
+
+# Frontend-policy refusals must explain themselves. The policy runs inside the
+# row wrapper, whose stdout+stderr ARE the row log, and the wrapper maps any
+# failure to exit 88. Run 15 (bfe789dd411, 2026-11-12) recorded
+# compiler_cli_build status=88 after 0 s with a 0-byte log: the row's 60 GiB
+# elevated ceiling needs 3/4 of MemAvailable >= the ceiling, which co-resident
+# lanes had consumed, and the refusal was never printed.
+. "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+source_root=$root
+pure_tool_threads=2
+policy_status=0
+(
+  unset BOOTSTRAP_TREE_RSS_MEMINFO_PATH BOOTSTRAP_TREE_RSS_TEST_FIXTURE \
+    SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE
+  # A ceiling no real host can admit (Linux: above 3/4 of MemAvailable;
+  # hosts without /proc/meminfo: no real headroom evidence at all).
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=999999999999999
+  SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=999999999999999
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=cli-row-mir-shards
+  SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+  export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB \
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND \
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE
+  bootstrap_phase_c_apply_frontend_policy
+) >"$tmp/policy.log" 2>&1 || policy_status=$?
+[ "$policy_status" -ne 0 ] || { echo 'unadmittable elevated ceiling accepted' >&2; exit 1; }
+grep -Fq 'verification-frontend-policy-error: tree RSS policy: ' "$tmp/policy.log" || {
+  echo 'frontend-policy ceiling refusal left no reason in the row log' >&2; exit 1;
+}
+
+# A contradictory inherited scheduling request is refused by the product
+# frontend owner; that refusal must also name itself.
+policy_status=0
+(
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=4194304
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=budget
+  SIMPLE_HIR_SHARD_WORKER_KB=1
+  export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE \
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND SIMPLE_HIR_SHARD_WORKER_KB
+  unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
+  bootstrap_phase_c_apply_frontend_policy
+) >"$tmp/policy.log" 2>&1 || policy_status=$?
+[ "$policy_status" -ne 0 ] || { echo 'contradictory frontend request accepted' >&2; exit 1; }
+grep -Fq 'verification-frontend-policy-error: product frontend policy refused cap 4194304 KiB' "$tmp/policy.log" || {
+  echo 'product frontend refusal left no reason in the row log' >&2; exit 1;
+}
+
+
+# Exact tool-row launch environment (bootstrap-fable-17, 2026-11-12). The row
+# inherited the whole caller shell, and the HIR profile (reject-never-sanitize)
+# refused 111 keys in one line: GITHUB_TOKEN, TMUX, CLAUDE_CODE_*,
+# BOOTSTRAP_VERIFY_*, SIMPLE_BOOTSTRAP_*_ROOT, ... The row is launched through
+# `env -i` plus the keys bootstrap_phase_c_tool_row_environment_keys names,
+# the same shape as the Phase 4 direct product, and every listed key must be
+# one the HIR profile admits (src/app/cli/worker_hir_profile_v1.spl), so the
+# two lists cannot drift apart again.
+row_keys=$(bootstrap_phase_c_tool_row_environment_keys) || { echo 'tool-row key list unavailable' >&2; exit 1; }
+[ -n "$row_keys" ] || { echo 'tool-row key list is empty' >&2; exit 1; }
+profile=$root/src/app/cli/worker_hir_profile_v1.spl
+admitted=$(awk '
+  /^pub fn worker_hir_(base|stage3_capsule|tool_build)_environment_keys_v1/ { inlist = 1; next }
+  inlist && /^[^ \t#]/ { inlist = 0 }
+  inlist && /^[ \t]*#/ { next }
+  inlist { while (match($0, /"[A-Za-z_][A-Za-z0-9_]*"/)) { print substr($0, RSTART + 1, RLENGTH - 2); $0 = substr($0, RSTART + RLENGTH) } }
+' "$profile" | sort -u)
+[ -n "$admitted" ] || { echo 'could not read the HIR profile allowlists' >&2; exit 1; }
+for row_key in $row_keys; do
+  printf '%s\n' "$admitted" | grep -Fxq -- "$row_key" || {
+    echo "tool-row key is not admitted by the HIR profile: $row_key" >&2; exit 1;
+  }
+done
+# Campaign keys the row consumes below the launch and that have no other
+# carrier: the verifier strips --fail-fast from argv, so
+# SIMPLE_COMPILE_FAIL_FAST (bootstrap-cache-policy.shs) is the only one;
+# SIMPLE_KERNEL_K1_POLICY is a required campaign export read by
+# main_and_help.spl; SIMPLE_COMPILER_PHASE_PROFILE travels with its _FILE key;
+# SIMPLE_BUILD_MEMORY_RESERVE_BYTES is the caller's reserve override, which the
+# native-build start guard must see (it was dropped and the row refused at the
+# 16 GiB default, Windows DHR phase-3 run, 2026-11-19). Explicit MIR sharding
+# and provider-type retraction select and bound the serial focused-capsule route.
+# The interface-HIR pair selects its bounded-residency streaming route; dropping
+# either key silently restores full-body retention in every MIR worker.
+for required_key in SIMPLE_COMPILE_FAIL_FAST SIMPLE_KERNEL_K1_POLICY \
+    SIMPLE_COMPILER_PHASE_PROFILE SIMPLE_COMPILER_PHASE_PROFILE_FILE SIMPLE_PHASE_RSS \
+    SIMPLE_ICE_CRASH_RETRIES SIMPLE_BUILD_MEMORY_RESERVE_BYTES \
+    SIMPLE_HOST_MEM_RESERVE_FREE_MIB SIMPLE_HOST_WORKER_MEM_MIB SIMPLE_HOST_MAX_THREADS \
+    SIMPLE_BOOTSTRAP_WORKER_MEM_MIB SIMPLE_BUILD_MEMORY_ALLOW_COMMIT_WITNESS \
+    SIMPLE_PROCESS_TREE_RSS_CAP_KIB SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS \
+    SIMPLE_HIR_SHARDING SIMPLE_MIR_SHARDING SIMPLE_MIR_SHARD_COUNT SIMPLE_MIR_RETRACT_PROVIDER_TYPES \
+    SIMPLE_STAGE3_STREAMING_SURFACES SIMPLE_MIR_SHARD_INTERFACE_HIR; do
+  printf '%s\n' "$row_keys" | grep -Fxq -- "$required_key" || {
+    echo "tool-row key list drops a campaign key the row consumes: $required_key" >&2; exit 1;
+  }
+done
+for ambient_key in GITHUB_TOKEN GH_TOKEN TMUX CLAUDE_CODE_ENTRYPOINT SSH_CLIENT LD_LIBRARY_PATH \
+    BOOTSTRAP_VERIFY_TIMEOUT_SECONDS SIMPLE_BOOTSTRAP_HOME_ROOT CARGO_TARGET_DIR; do
+  if printf '%s\n' "$row_keys" | grep -Fxq -- "$ambient_key"; then
+    echo "tool-row key list forwards an ambient caller key: $ambient_key" >&2; exit 1;
+  fi
+done
+
+# The exec wrapper forwards exact values (spaces kept, empty kept), drops every
+# other key, and keeps the command argv untouched (argv[0]=compiler,
+# argv[1]=native-build is what every tree-RSS / timeout owner keys on).
+(
+  GITHUB_TOKEN=secret TMUX=/tmp/tmux-1 BOOTSTRAP_VERIFY_TIMEOUT_SECONDS=1 SIMPLE_BOOTSTRAP_HOME_ROOT=/p/home-root
+  SIMPLE_BINARY='/p/compiler tool' SIMPLE_RUNTIME_PATH=/p/rt TMPDIR=/p/tmp SIMPLE_MIR_SHARD_COUNT= SIMPLE_CC=/p/clang
+  SIMPLE_MIR_SHARDING=1 SIMPLE_MIR_RETRACT_PROVIDER_TYPES=1
+  SIMPLE_STAGE3_STREAMING_SURFACES=1 SIMPLE_MIR_SHARD_INTERFACE_HIR=1
+  SIMPLE_COMPILE_FAIL_FAST=1 SIMPLE_KERNEL_K1_POLICY=require SIMPLE_COMPILER_PHASE_PROFILE=1
+  SIMPLE_HIR_SHARDING=1 SIMPLE_PHASE_RSS=1 SIMPLE_ICE_CRASH_RETRIES=2
+  SIMPLE_HOST_MEM_RESERVE_FREE_MIB=8192 SIMPLE_HOST_WORKER_MEM_MIB=1200 SIMPLE_HOST_MAX_THREADS=4
+  SIMPLE_BOOTSTRAP_WORKER_MEM_MIB=1200 SIMPLE_BUILD_MEMORY_ALLOW_COMMIT_WITNESS=1
+  SIMPLE_PROCESS_TREE_RSS_CAP_KIB=16777216 SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS=100
+  export GITHUB_TOKEN TMUX BOOTSTRAP_VERIFY_TIMEOUT_SECONDS SIMPLE_BOOTSTRAP_HOME_ROOT \
+    SIMPLE_BINARY SIMPLE_RUNTIME_PATH TMPDIR SIMPLE_MIR_SHARD_COUNT SIMPLE_CC \
+    SIMPLE_MIR_SHARDING SIMPLE_MIR_RETRACT_PROVIDER_TYPES \
+    SIMPLE_STAGE3_STREAMING_SURFACES SIMPLE_MIR_SHARD_INTERFACE_HIR \
+    SIMPLE_COMPILE_FAIL_FAST SIMPLE_KERNEL_K1_POLICY SIMPLE_COMPILER_PHASE_PROFILE \
+    SIMPLE_HIR_SHARDING SIMPLE_PHASE_RSS SIMPLE_ICE_CRASH_RETRIES \
+    SIMPLE_HOST_MEM_RESERVE_FREE_MIB SIMPLE_HOST_WORKER_MEM_MIB SIMPLE_HOST_MAX_THREADS \
+    SIMPLE_BOOTSTRAP_WORKER_MEM_MIB SIMPLE_BUILD_MEMORY_ALLOW_COMMIT_WITNESS \
+    SIMPLE_PROCESS_TREE_RSS_CAP_KIB SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS
+  unset SIMPLE_BOOTSTRAP_SESSION_ID SIMPLE_BOOTSTRAP_SESSION_EXEC
+  sh "$root/scripts/bootstrap/phase-c-tool-row-exec.shs" sh -c 'printf "%s\n" "$0" "$@" >"$1"; env | LC_ALL=C sort >"$2"' \
+    '/p/compiler tool' "$tmp/argv" "$tmp/env" native-build
+) || { echo 'tool-row exec wrapper failed' >&2; exit 1; }
+printf '%s\n' '/p/compiler tool' "$tmp/argv" "$tmp/env" native-build >"$tmp/expected"
+cmp -s "$tmp/argv" "$tmp/expected" || { echo 'tool-row exec wrapper changed the command argv' >&2; exit 1; }
+grep -Fxq -- 'SIMPLE_BINARY=/p/compiler tool' "$tmp/env" || { echo 'exact value with a space was not forwarded' >&2; exit 1; }
+grep -Fxq -- 'SIMPLE_MIR_SHARD_COUNT=' "$tmp/env" || { echo 'present-but-empty value was not forwarded exactly' >&2; exit 1; }
+grep -Fxq -- 'SIMPLE_CC=/p/clang' "$tmp/env" || { echo 'chain toolchain pin was not forwarded' >&2; exit 1; }
+grep -Fxq -- 'TMPDIR=/p/tmp' "$tmp/env" || { echo 'TMPDIR was not forwarded' >&2; exit 1; }
+for campaign_pin in SIMPLE_COMPILE_FAIL_FAST=1 SIMPLE_KERNEL_K1_POLICY=require SIMPLE_COMPILER_PHASE_PROFILE=1 \
+    SIMPLE_HIR_SHARDING=1 SIMPLE_PHASE_RSS=1 SIMPLE_ICE_CRASH_RETRIES=2 \
+    SIMPLE_HOST_MEM_RESERVE_FREE_MIB=8192 SIMPLE_HOST_WORKER_MEM_MIB=1200 SIMPLE_HOST_MAX_THREADS=4 \
+    SIMPLE_BOOTSTRAP_WORKER_MEM_MIB=1200 SIMPLE_BUILD_MEMORY_ALLOW_COMMIT_WITNESS=1 \
+    SIMPLE_PROCESS_TREE_RSS_CAP_KIB=16777216 SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS=100 \
+    SIMPLE_MIR_SHARDING=1 SIMPLE_MIR_RETRACT_PROVIDER_TYPES=1 \
+    SIMPLE_STAGE3_STREAMING_SURFACES=1 SIMPLE_MIR_SHARD_INTERFACE_HIR=1; do
+  grep -Fxq -- "$campaign_pin" "$tmp/env" || { echo "campaign key was not forwarded: $campaign_pin" >&2; exit 1; }
+done
+if grep -Eq '^(GITHUB_TOKEN|TMUX|BOOTSTRAP_VERIFY_TIMEOUT_SECONDS|SIMPLE_BOOTSTRAP_HOME_ROOT)=' "$tmp/env"; then
+  echo 'ambient caller key leaked through the tool-row exec wrapper' >&2; exit 1;
+fi
+while IFS= read -r env_line; do
+  env_name=${env_line%%=*}
+  # Git Bash injects MSYSTEM even when the wrapper starts with env -i.
+  case "$env_name" in PWD|OLDPWD|SHLVL|_|MSYSTEM) continue ;; esac
+  printf '%s\n' "$row_keys" | grep -Fxq -- "$env_name" || {
+    echo "tool-row exec wrapper forwarded an unlisted key: $env_name" >&2; exit 1;
+  }
+done <"$tmp/env"
+
+# An incomplete session contract is refused, like Phase 4 direct.
+if ( SIMPLE_BOOTSTRAP_SESSION_ID=only; export SIMPLE_BOOTSTRAP_SESSION_ID; unset SIMPLE_BOOTSTRAP_SESSION_EXEC
+     sh "$root/scripts/bootstrap/phase-c-tool-row-exec.shs" true ) 2>/dev/null; then
+  echo 'incomplete session contract accepted' >&2; exit 1
+fi
+
+# The verifier routes the stage2/stage3 native-build tool rows through the
+# wrapper at the timeout owner (run_measured_timeout), never as an argv prefix.
+verifier=$root/scripts/bootstrap/bootstrap-phase-verification.shs
+grep -Fq 'measured_exact_env=phase-c-tool-row' "$verifier" || { echo 'verifier does not select the exact tool-row launch' >&2; exit 1; }
+grep -Fq 'phase-c-tool-row-exec.shs' "$verifier" || { echo 'verifier timeout owner is not wrapped by the exact tool-row launch' >&2; exit 1; }
+# c50 forced STAGE3=0 even with MIR sharding enabled, bypassing the bounded
+# dispatcher and repeating the unsharded native_staged OOM. Full-tool rows must
+# select the focused capsule and expose their route before compilation starts.
+grep -Fq 'if [ "${SIMPLE_MIR_SHARDING:-0}" = 1 ]; then' "$verifier" || { echo 'verifier does not gate the Stage 3 tool route on MIR sharding' >&2; exit 1; }
+grep -Fq 'SIMPLE_BOOTSTRAP_STAGE3=1' "$verifier" || { echo 'verifier never enables the Stage 3 tool route' >&2; exit 1; }
+grep -Fq 'verification_native_route=SIMPLE_BOOTSTRAP_STAGE3=%s SIMPLE_MIR_SHARDING=%s SIMPLE_MIR_SHARD_COUNT=%s' "$verifier" || { echo 'verifier does not log the native route' >&2; exit 1; }
+echo 'PASS: Phase C commands, backend cache identity, Stage 3 dynload routing, and receipt validation'

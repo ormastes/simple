@@ -62,9 +62,10 @@ fn _wm_theme_is_ws(c: text) -> bool:
 
 fn _wm_theme_skip_ws(css: text, pos: i64) -> i64:
     var i = pos
-    val n = css.len()
+    val n = css.byte_len()
     while i < n:
-        if _wm_theme_is_ws(css.char_at(i)):
+        val b = css.byte_at(i)
+        if b == 32u8 or b == 9u8 or b == 10u8 or b == 13u8:
             i = i + 1
         else:
             return i
@@ -72,11 +73,12 @@ fn _wm_theme_skip_ws(css: text, pos: i64) -> i64:
 
 fn _wm_theme_find_terminator(css: text, pos: i64) -> i64:
     # First of ';' or '}' at/after pos; end-of-text if neither appears.
-    val rest = css.substring(pos, css.len())
+    val css_len = css.byte_len()
+    val rest = css.substring(pos, css_len)
     val semi = rest.index_of(";")
     val brace = rest.index_of("}")
     if semi < 0 and brace < 0:
-        return css.len()
+        return css_len
     if semi < 0:
         return pos + brace
     if brace < 0:
@@ -92,16 +94,17 @@ fn _wm_theme_css_value(css: text, prop: text) -> text:
     # (not ':') right after the name and keeps searching past it, so it
     # never mismatches onto the longer property.
     var search_from = 0
-    val css_len = css.len()
+    val css_len = css.byte_len()
+    val prop_len = prop.byte_len()
     while search_from < css_len:
         val remaining = css.substring(search_from, css_len)
         val rel = remaining.index_of(prop)
         if rel < 0:
             return ""
         val name_start = search_from + rel
-        val after_name = name_start + prop.len()
+        val after_name = name_start + prop_len
         val colon_pos = _wm_theme_skip_ws(css, after_name)
-        if colon_pos < css_len and css.char_at(colon_pos) == ":":
+        if colon_pos < css_len and css.byte_at(colon_pos) == 58u8:
             val value_start = colon_pos + 1
             val term = _wm_theme_find_terminator(css, value_start)
             return css.substring(value_start, term).trim()
@@ -118,49 +121,111 @@ fn _wm_theme_strip_css_comments(css: text) -> text:
         if start < 0:
             return out + rest
         out = out + rest.substring(0, start)
-        val after = rest.substring(start + 2, rest.len())
+        val after = rest.substring(start + 2, rest.byte_len())
         val end = after.index_of("*/")
         if end < 0:
             return out
-        rest = after.substring(end + 2, after.len())
+        rest = after.substring(end + 2, after.byte_len())
     out
 
+fn _wm_theme_resolve_var(css: text, raw: text) -> text:
+    var current = raw.trim()
+    var depth = 0
+    while depth < 4:
+        depth = depth + 1
+        if not current.starts_with("var("):
+            return current
+        val tail = current.substring(4, current.byte_len())
+        val close = tail.index_of(")")
+        if close < 0:
+            return current
+        val inner = tail.substring(0, close).trim()
+        val comma = inner.index_of(",")
+        val ref_prop = if comma >= 0: inner.substring(0, comma).trim() else: inner
+        val fallback = if comma >= 0: inner.substring(comma + 1, inner.byte_len()).trim() else: ""
+        if not ref_prop.starts_with("--"):
+            return if fallback != "": fallback else: current
+        val looked = _wm_theme_css_value(css, ref_prop)
+        if looked == "":
+            if fallback != "":
+                current = fallback
+            else:
+                return ""
+        else:
+            current = looked
+    current
+
+fn _wm_theme_first_resolved(css: text, props: [text]) -> text:
+    var i = 0
+    while i < props.len():
+        val raw = _wm_theme_css_value(css, props[i])
+        if raw != "":
+            val resolved = _wm_theme_resolve_var(css, raw)
+            if resolved != "":
+                return resolved
+        i = i + 1
+    ""
+
 fn wm_theme_tokens_from_css(css: text) -> WmThemeCssTokens:
-    """Scan raw CSS text for the 6 --wm-* custom properties. Absent/garbage
-    tokens come back as "" — callers (wm_chrome_colors_from_gui_tokens) fall
-    back to the default color for that slot."""
+    """Scan raw CSS text for --wm-* custom properties, falling back to CSS
+    Liquid / SimpleTheme custom properties (--app-*, --ui-*, --glass-*).
+    Absent/garbage tokens come back as "" so callers keep default slots."""
     val clean = _wm_theme_strip_css_comments(css)
     WmThemeCssTokens(
-        wtc_bg: _wm_theme_css_value(clean, "--wm-bg"),
-        wtc_fg: _wm_theme_css_value(clean, "--wm-fg"),
-        wtc_accent: _wm_theme_css_value(clean, "--wm-accent"),
-        wtc_surface: _wm_theme_css_value(clean, "--wm-surface"),
-        wtc_surface_hover: _wm_theme_css_value(clean, "--wm-surface-hover"),
-        wtc_error: _wm_theme_css_value(clean, "--wm-error")
+        wtc_bg: _wm_theme_first_resolved(clean, ["--wm-bg", "--app-bg", "--ui-bg"]),
+        wtc_fg: _wm_theme_first_resolved(clean, ["--wm-fg", "--ui-fg"]),
+        wtc_accent: _wm_theme_first_resolved(clean, ["--wm-accent", "--ui-accent", "--glass-accent"]),
+        wtc_surface: _wm_theme_first_resolved(clean, ["--wm-surface", "--glass-surface", "--app-surface"]),
+        wtc_surface_hover: _wm_theme_first_resolved(clean, ["--wm-surface-hover", "--app-surface-hover", "--app-surface-elevated"]),
+        wtc_error: _wm_theme_first_resolved(clean, ["--wm-error", "--ui-traffic-close", "--ui-error"])
     )
 
+fn _wm_ascii_lower_byte(b: u8) -> u8:
+    if b >= 65u8 and b <= 90u8:
+        return b + 32u8
+    b
+
+fn _wm_find_ascii_ci(haystack: text, needle: text, start: i64) -> i64:
+    val hlen = haystack.byte_len()
+    val nlen = needle.byte_len()
+    if nlen == 0:
+        return start
+    val limit = hlen - nlen
+    var i = start
+    while i <= limit:
+        var matched = true
+        var j = 0
+        while j < nlen:
+            if _wm_ascii_lower_byte(haystack.byte_at(i + j)) != needle.byte_at(j):
+                matched = false
+                j = nlen
+            else:
+                j = j + 1
+        if matched:
+            return i
+        i = i + 1
+    -1
+
 fn _wm_theme_extract_style_blocks(html: text) -> text:
-    # Concatenates the contents of every <style>...</style> block. Simple
-    # lowercase tag match (no full HTML/XML parsing needed for this).
-    val lower = html.lower()
-    val n = html.len()
+    # Concatenates the contents of every <style>...</style> block using
+    # byte-exact ASCII case-insensitive tag matching so non-ASCII UTF-8
+    # characters (including Turkish I/i) never shift byte offsets.
+    val n = html.byte_len()
     var out = ""
     var search_from = 0
     while search_from < n:
-        val open_rel = lower.substring(search_from, n).index_of("<style")
-        if open_rel < 0:
+        val open_abs = _wm_find_ascii_ci(html, "<style", search_from)
+        if open_abs < 0:
             return out
-        val open_abs = search_from + open_rel
-        val gt_rel = lower.substring(open_abs, n).index_of(">")
+        val gt_rel = html.substring(open_abs, n).index_of(">")
         if gt_rel < 0:
             return out
         val content_start = open_abs + gt_rel + 1
-        val close_rel = lower.substring(content_start, n).index_of("</style")
-        if close_rel < 0:
+        val close_abs = _wm_find_ascii_ci(html, "</style", content_start)
+        if close_abs < 0:
             return out + html.substring(content_start, n)
-        val content_end = content_start + close_rel
-        out = out + html.substring(content_start, content_end) + "\n"
-        search_from = content_end
+        out = out + html.substring(content_start, close_abs) + "\n"
+        search_from = close_abs + 7
     out
 
 fn wm_theme_tokens_from_html(html: text) -> WmThemeCssTokens:

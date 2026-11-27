@@ -1,0 +1,38 @@
+use std.spec.{describe, it, expect}
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.eval.{eval_has_error}
+use compiler.core.interpreter.value.{val_get_int}
+
+val DECLS: text = "struct Inner:\n    v: i64\nstruct Route:\n    x: i64\n    inner: Inner\nclass Box:\n    x: i64\n" +
+    "fn f(mut r: Route):\n    r.x = 99\n" +
+    "fn g(r: Route):\n    r.x = 5\n" +
+    "fn h(mut r: Route):\n    r.inner.v = 7\n" +
+    "fn k(mut r: Route):\n    r = Route(x: 3, inner: Inner(v: 0))\n" +
+    "fn c(b: Box):\n    b.x = 8\n"
+val MK: text = "    var a = Route(x: 1, inner: Inner(v: 1))\n"
+
+fn run_main(body: text) -> i64:
+    val source = DECLS + "fn main() -> i64:\n" + MK + body
+    val result = core_interpret(source, "mut_param_alias_spec.spl")
+    if eval_has_error():
+        return -999
+    val_get_int(result)
+
+describe "core interpreter mut struct param aliasing":
+    it "mut param field write is visible to the caller":
+        expect(run_main("    f(a)\n    a.x")).to_equal(99)
+
+    it "plain by-value struct param stays a copy":
+        expect(run_main("    g(a)\n    a.x")).to_equal(1)
+
+    it "mut param nested field write is visible to the caller":
+        expect(run_main("    h(a)\n    a.inner.v")).to_equal(7)
+
+    it "mut param whole reassignment is visible to the caller (matches seed)":
+        expect(run_main("    k(a)\n    a.x")).to_equal(3)
+
+    it "class param stays a shared reference":
+        expect(run_main("    val b = Box(x: 1)\n    c(b)\n    b.x")).to_equal(8)
+
+    it "mut param whole reassignment through a named argument reaches the caller":
+        expect(run_main("    k(r: a)\n    a.x")).to_equal(3)

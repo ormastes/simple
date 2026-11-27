@@ -1,0 +1,46 @@
+# Ordinary executable diagnostic importing the actual production cast owner.
+# @req REQ-PURE-LLVM-FLOAT-UNSIGNED
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.mir.mir_data.*
+
+fn cast_require(condition: bool, message: text):
+    if not condition:
+        panic(message)
+
+fn cast_owner_ir(value: MirConstValue, source: MirTypeKind, target: MirTypeKind) -> text:
+    val translator = MirToLlvm.create("diagnostic.llvm.float_unsigned_cast", CodegenTarget.X86_64, nil)
+    val operand = MirOperand(kind: MirOperandKind.Const(value, MirType(kind: source)))
+    translator.translate_cast_dispatch(LocalId(id: 0), operand, MirType(kind: target))
+    translator.builder.build()
+
+fn cast_require_instruction(ir: text, instruction: text, rejected: text):
+    cast_require(ir.contains(instruction), "missing expected scalar conversion")
+    cast_require(not ir.contains(rejected), "unexpected scalar conversion signedness")
+
+fn main():
+    val u32_ir = cast_owner_ir(MirConstValue.Float(2147483648.0), MirTypeKind.F64, MirTypeKind.U32)
+    cast_require_instruction(u32_ir, " = fptoui double ", "fptosi")
+    cast_require(u32_ir.contains(" to i32"), "wrong U32 target width")
+    val u64_ir = cast_owner_ir(MirConstValue.Float(9223372036854775808.0), MirTypeKind.F64, MirTypeKind.U64)
+    cast_require_instruction(u64_ir, " = fptoui double ", "fptosi")
+    cast_require(u64_ir.contains(" to i64"), "wrong U64 target width")
+    cast_require_instruction(cast_owner_ir(MirConstValue.Float(-3.75), MirTypeKind.F64, MirTypeKind.I32), " = fptosi double ", "fptoui")
+    cast_require_instruction(cast_owner_ir(MirConstValue.Float(-3.75), MirTypeKind.F64, MirTypeKind.I64), " = fptosi double ", "fptoui")
+    cast_require_instruction(cast_owner_ir(MirConstValue.Int(4294967295), MirTypeKind.U32, MirTypeKind.F64), " = uitofp i32 ", "sitofp")
+    val high_bit = -9223372036854775807 - 1
+    cast_require_instruction(cast_owner_ir(MirConstValue.Int(high_bit), MirTypeKind.U64, MirTypeKind.F64), " = uitofp i64 ", "sitofp")
+    cast_require_instruction(cast_owner_ir(MirConstValue.Int(-3), MirTypeKind.I32, MirTypeKind.F64), " = sitofp i32 ", "uitofp")
+    cast_require_instruction(cast_owner_ir(MirConstValue.Int(-3), MirTypeKind.I64, MirTypeKind.F64), " = sitofp i64 ", "uitofp")
+    val overridden = MirToLlvm.create("diagnostic.llvm.cast_source_override", CodegenTarget.X86_64, nil)
+    overridden.value_types["%source"] = "double"
+    val override_result = overridden.value_as_type_signed("%source", "i64", "i32", false, true)
+    cast_require(override_result.starts_with("%"), "missing overridden source conversion result")
+    cast_require(overridden.builder.build().contains(" = fptoui double %source to i32"), "source type override was lost")
+    val compatible = MirToLlvm.create("diagnostic.llvm.cast_compatibility", CodegenTarget.X86_64, nil)
+    cast_require(compatible.value_as_type_signed("0", "double", "i32", false, true) == "0", "zero shortcut changed")
+    cast_require(not compatible.builder.build().contains("fptoui"), "zero shortcut emitted a conversion")
+    val signed_result = compatible.value_as_type_signed("%source", "double", "i32", false)
+    cast_require(signed_result.starts_with("%"), "missing default signed conversion result")
+    cast_require(compatible.builder.build().contains(" = fptosi double %source to i32"), "default destination signedness changed")
+    print "pure-llvm-float-unsigned-owner: PASS cases=10"

@@ -1,0 +1,76 @@
+"""
+# Standalone Trait Group Syntax & Desugar Specification
+
+Covers OtherFix-15 (#159) standalone group syntax parsing, method flattening,
+single-value acquisition `.from()` generation, and missing-accessor suppression
+without spawning external `bin/simple` subprocesses.
+"""
+use std.spec.*
+use std.spec.step
+use app.desugar.trait_scanner.{
+    scan_traits,
+    find_trait,
+    parse_trait_header,
+    parse_trait_group_members
+}
+use app.desugar.trait_desugar.{desugar_traits}
+
+fn _rw_fixture() -> text:
+    var src = "trait Read:" + "\n"
+    src = src + "    fn read_byte() -> i64" + "\n"
+    src = src + "\n"
+    src = src + "trait Write:" + "\n"
+    src = src + "    me write_byte(b: i64)" + "\n"
+    src = src + "\n"
+    src = src + "trait Stream:" + "\n"
+    src = src + "    fn reader() -> Option<Read>" + "\n"
+    src = src + "    fn writer() -> Option<Write>" + "\n"
+    src = src + "    fn read_write() -> Option<ReadWrite>" + "\n"
+    src = src + "\n"
+    src = src + "trait ReadWrite with Read, Write:" + "\n"
+    src = src + "    fn flush() -> bool" + "\n"
+    src
+
+describe "Standalone trait group syntax":
+    it "parses trait headers and group member lists with whitespace normalization":
+        step("Parse plain trait and trait-with-group headers")
+        expect(parse_trait_header("trait Read:")).to_equal("Read")
+        expect(parse_trait_header("trait ReadWrite with Read, Write:")).to_equal("ReadWrite")
+        val members = parse_trait_group_members("trait ReadWrite with Read, Write, Flush :")
+        expect(members.len()).to_equal(3)
+        expect(members[0]).to_equal("Read")
+        expect(members[1]).to_equal("Write")
+        expect(members[2]).to_equal("Flush")
+
+    it "lowers trait group to struct with flattened member fn-fields and own methods":
+        step("Scan and desugar trait ReadWrite with Read, Write plus own method")
+        val src = _rw_fixture()
+        val traits = scan_traits(src)
+        val found = find_trait("ReadWrite", traits)
+        expect(found.name).to_equal("ReadWrite")
+        expect(found.group_members.len()).to_equal(2)
+        val out = desugar_traits(src)
+        expect(out.contains("struct ReadWrite:")).to_equal(true)
+        expect(out.contains("read_byte_fn: fn() -> i64")).to_equal(true)
+        expect(out.contains("write_byte_fn: fn(i64)")).to_equal(true)
+        expect(out.contains("flush_fn: fn() -> bool")).to_equal(true)
+        expect(out.contains("fn ReadWrite__from(src: Stream) -> Option<ReadWrite>:")).to_equal(true)
+        expect(out.contains("if val")).to_equal(false)
+
+    it "suppresses G__from when a source trait lacks an Option<Group> accessor":
+        step("Verify partial source accessors do not synthesize invalid G__from")
+        var src = "trait Read:" + "\n"
+        src = src + "    fn read_byte() -> i64" + "\n"
+        src = src + "\n"
+        src = src + "trait Write:" + "\n"
+        src = src + "    fn write_byte(b: i64) -> bool" + "\n"
+        src = src + "\n"
+        src = src + "trait PartialStream:" + "\n"
+        src = src + "    fn reader() -> Option<Read>" + "\n"
+        src = src + "    fn writer() -> Option<Write>" + "\n"
+        src = src + "\n"
+        src = src + "trait ReadWrite with Read, Write:" + "\n"
+        src = src + "    pass_dn" + "\n"
+        val out = desugar_traits(src)
+        expect(out.contains("struct ReadWrite:")).to_equal(true)
+        expect(out.contains("ReadWrite__from")).to_equal(false)

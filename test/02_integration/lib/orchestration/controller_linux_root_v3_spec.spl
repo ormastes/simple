@@ -1,0 +1,88 @@
+# @req CONTROLLER-LINUX-STORAGE-01
+# Actual Linux protected-root fixture for the Controller local root. NOT_RUN; missing fixtures fail, not skip.
+# The private root (0700, owner uid) is provisioned out of band with the two byte-exact records
+# `controller-config-v3.sdn` and `authority-policy.sdn`; the config digest pin and the config's own policy digest bind them.
+use std.spec.{describe, it, expect, step, fail}
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v3.*
+use std.nogc_sync_mut.orchestration.controller_local_root_v3.*
+use std.nogc_sync_mut.io.env_ops.{host_os, env_get}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.common.crypto.sha256.sha256_text
+
+fn linux_controller_bytes_v3(name: text) -> text:
+    val path = env_get(name) ?? ""
+    assert(path != "")
+    file_read_regular_no_follow_bounded(path, 1048576).unwrap()
+
+fn linux_controller_close_v3(owner: ControllerLocalRootV3):
+    var pending = Some(owner)
+    var steps = 0
+    while pending.is_some() and steps < 8:
+        val closed = controller_local_root_close_v3(pending.unwrap())
+        pending = closed.owner
+        # A native error is retained, never retried as an ordinary progress step.
+        if closed.error != "": fail(closed.error)
+        if closed.closed:
+            assert(pending.is_none())
+            return
+        steps = steps + 1
+    fail("controller fixture cleanup did not confirm native release")
+
+describe "Protected Linux Controller root":
+    it "opens by the pinned digest, projects the real shared journal and invalidates a closed alias":
+        step("Open the provisioned private root by the exact config digest")
+        expect(host_os()).to_equal("linux")
+        val root = env_get("SIMPLE_LINUX_CONTROLLER_PRIVATE_ROOT") ?? ""
+        assert(root != "")
+        val config = linux_controller_bytes_v3("SIMPLE_LINUX_CONTROLLER_CONFIG_FILE")
+        val expected = controller_dispatch_config_decode_v3(config).unwrap()
+        val opened = controller_local_root_open_v3(root, sha256_text(config))
+        if not opened.ready or opened.owner.is_none():
+            if opened.owner.is_some(): linux_controller_close_v3(opened.owner.unwrap())
+            fail(opened.error)
+        val owner = opened.owner.unwrap()
+        val context = owner.current_v3()
+        val workload = owner.workload_v3()
+        linux_controller_close_v3(owner)
+        expect(context.unwrap().config.controller_id).to_equal(expected.controller_id)
+        expect(workload.unwrap().controller_id).to_equal(expected.controller_id)
+        assert(workload.unwrap().journal.linux_storage.is_some())
+        assert(workload.unwrap().journal.windows_store.is_none())
+        assert(owner.current_v3().is_err())
+        step("Reopen by the same digest")
+        val reopened = controller_local_root_open_v3(root, sha256_text(config))
+        if not reopened.ready or reopened.owner.is_none():
+            if reopened.owner.is_some(): linux_controller_close_v3(reopened.owner.unwrap())
+            fail(reopened.error)
+        linux_controller_close_v3(reopened.owner.unwrap())
+
+    it "refuses a wrong installed digest while returning actual acquired cleanup":
+        step("Open the provisioned private root with a different public configuration pin")
+        expect(host_os()).to_equal("linux")
+        val root = env_get("SIMPLE_LINUX_CONTROLLER_PRIVATE_ROOT") ?? ""
+        assert(root != "")
+        val config = linux_controller_bytes_v3("SIMPLE_LINUX_CONTROLLER_CONFIG_FILE")
+        val wrong = if sha256_text(config) == "a".repeat(64): "b".repeat(64) else: "a".repeat(64)
+        val opened = controller_local_root_open_v3(root, wrong)
+        val retained = opened.owner.is_some()
+        if retained: linux_controller_close_v3(opened.owner.unwrap())
+        assert(not opened.ready)
+        expect(opened.error).to_equal("controller-local-config-pin")
+        assert(retained)
+
+    it "refuses the Windows-style install because a Linux root is provisioned out of band":
+        step("Install names the out-of-band refusal and acquires nothing")
+        expect(host_os()).to_equal("linux")
+        val root = env_get("SIMPLE_LINUX_CONTROLLER_PRIVATE_ROOT") ?? ""
+        assert(root != "")
+        val config = linux_controller_bytes_v3("SIMPLE_LINUX_CONTROLLER_CONFIG_FILE")
+        val policy = linux_controller_bytes_v3("SIMPLE_LINUX_CONTROLLER_POLICY_FILE")
+        val refused = controller_local_root_install_v3(root, config, policy)
+        assert(not refused.ready)
+        assert(refused.owner.is_none())
+        expect(refused.error).to_equal("controller-local-install-linux-out-of-band")
+
+    it "admits the canonical origin on the process main thread":
+        step("The shared origin guard accepts the original main thread of a real Linux process")
+        expect(host_os()).to_equal("linux")
+        expect(controller_origin_check_v3().unwrap()).to_equal(true)

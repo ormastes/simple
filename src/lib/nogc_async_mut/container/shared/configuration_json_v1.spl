@@ -1,0 +1,85 @@
+# Private bounded Docker/Podman interoperability parsing. No native output,
+# environment values or parser diagnostics escape this module on failure.
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_get, json_value_keys}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub fn configuration_json_v1(raw: text) -> Result<JsonValue, text>:
+    if raw.byte_len() == 0 or raw.byte_len() > 1048576: return Err("configuration-native-size")
+    var quoted = false
+    var escaped = false
+    var depth = 0
+    for byte in raw.bytes():
+        if quoted:
+            if escaped: escaped = false
+            elif byte == 92: escaped = true
+            elif byte == 34: quoted = false
+        else:
+            if byte == 34: quoted = true
+            elif byte == 123 or byte == 91:
+                depth = depth + 1
+                if depth > 3: return Err("configuration-native-depth")
+            elif byte == 125 or byte == 93: depth = depth - 1
+    match json_parse_value_strict(raw):
+        case Ok(value): Ok(value)
+        case Err(_): Err("configuration-native-json")
+
+pub fn configuration_fields_v1(value: JsonValue, keys: [text]) -> Result<(), text>:
+    val found = json_value_keys(value)
+    if found.len() != keys.len(): return Err("configuration-native-fields")
+    for key in keys:
+        if not found.contains(key): return Err("configuration-native-fields")
+    Ok(())
+
+pub fn configuration_member_v1(value: JsonValue, key: text) -> Result<JsonValue, text>:
+    match json_value_get(value, key):
+        case Some(found): Ok(found)
+        case None: Err("configuration-native-field-missing")
+
+pub fn configuration_string_v1(value: JsonValue) -> Result<text, text>:
+    match value:
+        case JsonValue.Str(found):
+            if found.byte_len() > 65536 or found.contains("\0"): return Err("configuration-native-text-bound")
+            Ok(found)
+        case _: Err("configuration-native-text")
+
+pub fn configuration_text_v1(value: JsonValue, key: text) -> Result<text, text>:
+    configuration_string_v1(configuration_member_v1(value, key)?)
+
+pub fn configuration_bool_v1(value: JsonValue, key: text) -> Result<bool, text>:
+    match configuration_member_v1(value, key)?:
+        case JsonValue.Bool(found): Ok(found)
+        case _: Err("configuration-native-boolean")
+
+pub fn configuration_strings_v1(value: JsonValue, key: text, maximum: i64) -> Result<[text], text>:
+    val entries = match configuration_member_v1(value, key)?:
+        case JsonValue.Array(found): found
+        case JsonValue.Null: return Ok([])
+        case _: return Err("configuration-native-array")
+    if entries.len() > maximum: return Err("configuration-native-array-bound")
+    var strings: [text] = []
+    for entry in entries: strings.push(configuration_string_v1(entry)?)
+    Ok(strings)
+
+# Hash the complete ordered values, including duplicate names and empty values.
+# Names are public DATA; values remain private to this invocation.
+pub fn configuration_environment_v1(values: [text]) -> Result<(text, [text]), text>:
+    var names: [text] = []
+    var encoded: [SdnValue] = []
+    for value in values:
+        val parts = value.split("=")
+        if parts.len() < 2 or parts[0] == "": return Err("configuration-native-environment")
+        names.push(parts[0])
+        encoded.push(SdnValue.String(value))
+    Ok((sha256_text(sdn_encode_canonical(SdnValue.Array(encoded))), names))
+
+# Config IDs may be bare engine hex or the explicit sha256-prefixed form.
+# This normalization is NEVER applied to a repository manifest/index digest.
+pub fn configuration_image_key_v1(value: text) -> Result<text, text>:
+    val key = if value.starts_with("sha256:"): value.substring(7, value.byte_len()) else: value
+    if key.byte_len() != 64: return Err("configuration-native-image-id")
+    for byte in key.bytes():
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)):
+            return Err("configuration-native-image-id")
+    Ok(key)

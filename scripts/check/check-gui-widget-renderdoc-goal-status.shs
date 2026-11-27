@@ -34,48 +34,83 @@ ELECTRON_CAPTURE_COMMAND='RDOC_OUTPUT_DIR=build/renderdoc/electron-implicit-laye
 mkdir -p "$BUILD_DIR" "$WIDGET_BUILD_DIR" "$SIMPLE_BUILD_DIR" "$ELECTRON_BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$OUT_ENV" "$REPORT_PATH"
 
+_GWGS_CR=$(printf '\r')
+
+value_of_into() {
+    _gwi_var=$1
+    _gwi_prefix="$2="
+    _gwi_file=$3
+    _gwi_val=""
+    if [ -r "$_gwi_file" ]; then
+        while IFS= read -r _gwi_line || [ -n "$_gwi_line" ]; do
+            _gwi_line="${_gwi_line%$_GWGS_CR}"
+            case "$_gwi_line" in
+                "$_gwi_prefix"*) _gwi_val="${_gwi_line#"$_gwi_prefix"}" ;;
+            esac
+        done < "$_gwi_file"
+    fi
+    eval "$_gwi_var=\$_gwi_val"
+}
+
 value_of() {
-    key="$1"
-    file="$2"
-    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+    value_of_into _gw_res "$1" "$2"
+    printf '%s\n' "$_gw_res"
+}
+
+file_exists_into() {
+    _fei_var=$1
+    _fei_path=$2
+    if [ -n "$_fei_path" ] && [ -f "$_fei_path" ]; then
+        eval "$_fei_var=pass"
+    else
+        eval "$_fei_var=missing"
+    fi
 }
 
 file_exists_status() {
-    path="$1"
-    if [ -n "$path" ] && [ -f "$path" ]; then
-        echo "pass"
+    file_exists_into _fes_res "$1"
+    printf '%s\n' "$_fes_res"
+}
+
+artifact_file_into() {
+    _afi_var=$1
+    _afi_path=$2
+    if [ -z "$_afi_path" ]; then
+        eval "$_afi_var=missing"
+    elif [ -L "$_afi_path" ]; then
+        eval "$_afi_var=symlink"
+    elif [ -f "$_afi_path" ]; then
+        eval "$_afi_var=pass"
     else
-        echo "missing"
+        eval "$_afi_var=missing"
     fi
 }
 
 artifact_file_status() {
-    path="$1"
-    if [ -z "$path" ]; then
-        echo "missing"
-    elif [ -L "$path" ]; then
-        echo "symlink"
-    elif [ -f "$path" ]; then
-        echo "pass"
-    else
-        echo "missing"
-    fi
+    artifact_file_into _afs_res "$1"
+    printf '%s\n' "$_afs_res"
 }
 
-positive_int_status() {
-    value="$1"
-    case "${value:-}" in
+positive_int_into() {
+    _pii_var=$1
+    _pii_val=$2
+    case "${_pii_val:-}" in
         ""|*[!0-9]*)
-            echo "fail"
+            eval "$_pii_var=fail"
             ;;
         *)
-            if [ "$value" -gt 0 ]; then
-                echo "pass"
+            if [ "$_pii_val" -gt 0 ]; then
+                eval "$_pii_var=pass"
             else
-                echo "fail"
+                eval "$_pii_var=fail"
             fi
             ;;
     esac
+}
+
+positive_int_status() {
+    positive_int_into _pis_res "$1"
+    printf '%s\n' "$_pis_res"
 }
 
 append_blocked_gate() {
@@ -91,48 +126,81 @@ append_blocked_gate() {
     fi
 }
 
+configured_widget_env="${GUI_WIDGET_RENDERING_FIXTURE_ENV:-}"
+configured_simple_gate_env="${RDOC_WIDGET_SIMPLE_GATE_ENV:-${RDOC_SIMPLE_GATE_ENV:-}}"
+configured_electron_gate_env="${RDOC_ELECTRON_HTML_GATE_ENV:-}"
+WIDGET_ENV="${configured_widget_env:-$WIDGET_BUILD_DIR/evidence.env}"
+SIMPLE_ENV="${configured_simple_gate_env:-$SIMPLE_BUILD_DIR/evidence.env}"
+ELECTRON_ENV="${configured_electron_gate_env:-$ELECTRON_BUILD_DIR/evidence.env}"
+widget_code=127
+simple_code=127
+electron_code=127
+
 set +e
-BUILD_DIR="$WIDGET_BUILD_DIR" \
-REPORT_PATH="$WIDGET_BUILD_DIR/report.md" \
-sh scripts/check/check-gui-widget-rendering-fixture-coverage.shs >"$WIDGET_BUILD_DIR/stdout.txt" 2>"$WIDGET_BUILD_DIR/stderr.txt"
-widget_code=$?
+if [ -n "$configured_widget_env" ]; then
+    if [ -s "$WIDGET_ENV" ]; then
+        widget_code=0
+    else
+        widget_code=1
+    fi
+else
+    rm -f "$WIDGET_ENV"
+    BUILD_DIR="$WIDGET_BUILD_DIR" \
+    REPORT_PATH="$WIDGET_BUILD_DIR/report.md" \
+    sh scripts/check/check-gui-widget-rendering-fixture-coverage.shs >"$WIDGET_BUILD_DIR/stdout.txt" 2>"$WIDGET_BUILD_DIR/stderr.txt"
+    widget_code=$?
+fi
 
-RDOC_SIMPLE_EVIDENCE_ENV="$SIMPLE_SOURCE_ENV" \
-RDOC_SIMPLE_GATE_REQUIRED_PROGRAM="src/app/test/renderdoc_vulkan_widget_capture.spl" \
-BUILD_DIR="$SIMPLE_BUILD_DIR" \
-REPORT_PATH="$SIMPLE_BUILD_DIR/report.md" \
-sh scripts/check/check-renderdoc-simple-gate.shs >"$SIMPLE_BUILD_DIR/stdout.txt" 2>"$SIMPLE_BUILD_DIR/stderr.txt"
-simple_code=$?
+if [ -n "$configured_simple_gate_env" ]; then
+    if [ -s "$SIMPLE_ENV" ]; then
+        simple_code=0
+    else
+        simple_code=1
+    fi
+else
+    rm -f "$SIMPLE_ENV"
+    RDOC_SIMPLE_EVIDENCE_ENV="$SIMPLE_SOURCE_ENV" \
+    RDOC_SIMPLE_GATE_REQUIRED_PROGRAM="src/app/test/renderdoc_vulkan_widget_capture.spl" \
+    BUILD_DIR="$SIMPLE_BUILD_DIR" \
+    REPORT_PATH="$SIMPLE_BUILD_DIR/report.md" \
+    sh scripts/check/check-renderdoc-simple-gate.shs >"$SIMPLE_BUILD_DIR/stdout.txt" 2>"$SIMPLE_BUILD_DIR/stderr.txt"
+    simple_code=$?
+fi
 
-RDOC_ELECTRON_HTML_EVIDENCE_ENV="$ELECTRON_SOURCE_ENV" \
-BUILD_DIR="$ELECTRON_BUILD_DIR" \
-REPORT_PATH="$ELECTRON_BUILD_DIR/report.md" \
-sh scripts/check/check-renderdoc-electron-html-gate.shs >"$ELECTRON_BUILD_DIR/stdout.txt" 2>"$ELECTRON_BUILD_DIR/stderr.txt"
-electron_code=$?
+if [ -n "$configured_electron_gate_env" ]; then
+    if [ -s "$ELECTRON_ENV" ]; then
+        electron_code=0
+    else
+        electron_code=1
+    fi
+else
+    rm -f "$ELECTRON_ENV"
+    RDOC_ELECTRON_HTML_EVIDENCE_ENV="$ELECTRON_SOURCE_ENV" \
+    BUILD_DIR="$ELECTRON_BUILD_DIR" \
+    REPORT_PATH="$ELECTRON_BUILD_DIR/report.md" \
+    sh scripts/check/check-renderdoc-electron-html-gate.shs >"$ELECTRON_BUILD_DIR/stdout.txt" 2>"$ELECTRON_BUILD_DIR/stderr.txt"
+    electron_code=$?
+fi
 set -e
 
-WIDGET_ENV="$WIDGET_BUILD_DIR/evidence.env"
-SIMPLE_ENV="$SIMPLE_BUILD_DIR/evidence.env"
-ELECTRON_ENV="$ELECTRON_BUILD_DIR/evidence.env"
+value_of_into widget_status gui_widget_rendering_fixture_coverage_status "$WIDGET_ENV"
+value_of_into widget_reason gui_widget_rendering_fixture_coverage_reason "$WIDGET_ENV"
+value_of_into widget_count gui_widget_rendering_fixture_coverage_widget_kind_count "$WIDGET_ENV"
+value_of_into widget_feature_count gui_widget_rendering_fixture_coverage_renderdoc_fixture_feature_covered_count "$WIDGET_ENV"
+value_of_into widget_features gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_features "$WIDGET_ENV"
+value_of_into expected_widget_features gui_widget_rendering_fixture_coverage_expected_renderdoc_fixture_features "$WIDGET_ENV"
+value_of_into missing_widget_features gui_widget_rendering_fixture_coverage_missing_renderdoc_fixture_features "$WIDGET_ENV"
 
-widget_status="$(value_of gui_widget_rendering_fixture_coverage_status "$WIDGET_ENV")"
-widget_reason="$(value_of gui_widget_rendering_fixture_coverage_reason "$WIDGET_ENV")"
-widget_count="$(value_of gui_widget_rendering_fixture_coverage_widget_kind_count "$WIDGET_ENV")"
-widget_feature_count="$(value_of gui_widget_rendering_fixture_coverage_renderdoc_fixture_feature_covered_count "$WIDGET_ENV")"
-widget_features="$(value_of gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_features "$WIDGET_ENV")"
-expected_widget_features="$(value_of gui_widget_rendering_fixture_coverage_expected_renderdoc_fixture_features "$WIDGET_ENV")"
-missing_widget_features="$(value_of gui_widget_rendering_fixture_coverage_missing_renderdoc_fixture_features "$WIDGET_ENV")"
-
-simple_status="$(value_of rdoc_simple_gate_status "$SIMPLE_ENV")"
-simple_reason="$(value_of rdoc_simple_gate_reason "$SIMPLE_ENV")"
-simple_capture_file="$(value_of rdoc_simple_gate_capture_file "$SIMPLE_ENV")"
-simple_capture_file_magic="$(value_of rdoc_simple_gate_capture_file_magic "$SIMPLE_ENV")"
-simple_runtime_backend="$(value_of rdoc_simple_gate_runtime_backend "$SIMPLE_ENV")"
-simple_widget_html_path="$(value_of rdoc_simple_gate_widget_html_path "$SIMPLE_ENV")"
-simple_widget_html_bytes="$(value_of rdoc_simple_gate_widget_html_bytes "$SIMPLE_ENV")"
-simple_source_env_file_status="$(file_exists_status "$SIMPLE_SOURCE_ENV")"
-simple_capture_file_status="$(artifact_file_status "$simple_capture_file")"
-simple_widget_html_bytes_status="$(positive_int_status "$simple_widget_html_bytes")"
+value_of_into simple_status rdoc_simple_gate_status "$SIMPLE_ENV"
+value_of_into simple_reason rdoc_simple_gate_reason "$SIMPLE_ENV"
+value_of_into simple_capture_file rdoc_simple_gate_capture_file "$SIMPLE_ENV"
+value_of_into simple_capture_file_magic rdoc_simple_gate_capture_file_magic "$SIMPLE_ENV"
+value_of_into simple_runtime_backend rdoc_simple_gate_runtime_backend "$SIMPLE_ENV"
+value_of_into simple_widget_html_path rdoc_simple_gate_widget_html_path "$SIMPLE_ENV"
+value_of_into simple_widget_html_bytes rdoc_simple_gate_widget_html_bytes "$SIMPLE_ENV"
+file_exists_into simple_source_env_file_status "$SIMPLE_SOURCE_ENV"
+artifact_file_into simple_capture_file_status "$simple_capture_file"
+positive_int_into simple_widget_html_bytes_status "$simple_widget_html_bytes"
 simple_fixture_path_status="fail"
 case "$simple_widget_html_path" in
     *test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html)
@@ -140,41 +208,41 @@ case "$simple_widget_html_path" in
         ;;
 esac
 
-electron_status="$(value_of rdoc_electron_html_gate_status "$ELECTRON_ENV")"
-electron_reason="$(value_of rdoc_electron_html_gate_reason "$ELECTRON_ENV")"
-electron_html_path="$(value_of rdoc_electron_html_gate_html_path "$ELECTRON_ENV")"
-electron_capture_file="$(value_of rdoc_electron_html_gate_capture_file "$ELECTRON_ENV")"
-electron_capture_file_magic="$(value_of rdoc_electron_html_gate_capture_file_magic "$ELECTRON_ENV")"
-electron_argb_path="$(value_of rdoc_electron_html_gate_argb_path "$ELECTRON_ENV")"
-electron_argb_status="$(value_of rdoc_electron_html_gate_argb_status "$ELECTRON_ENV")"
-electron_argb_nonblank_pixel_count="$(value_of rdoc_electron_html_gate_argb_nonblank_pixel_count "$ELECTRON_ENV")"
-electron_requested_api="$(value_of rdoc_electron_html_gate_requested_api "$ELECTRON_ENV")"
-electron_requested_angle="$(value_of rdoc_electron_html_gate_requested_angle "$ELECTRON_ENV")"
-electron_requested_features="$(value_of rdoc_electron_html_gate_requested_features "$ELECTRON_ENV")"
-electron_launch_exit_code="$(value_of rdoc_electron_html_gate_launch_exit_code "$ELECTRON_ENV")"
-electron_launch_timed_out="$(value_of rdoc_electron_html_gate_launch_timed_out "$ELECTRON_ENV")"
-electron_launch_metadata_status="$(value_of rdoc_electron_html_gate_launch_metadata_status "$ELECTRON_ENV")"
-electron_launch_metadata_reason="$(value_of rdoc_electron_html_gate_launch_metadata_reason "$ELECTRON_ENV")"
-electron_vulkan_log_status="$(value_of rdoc_electron_html_gate_vulkan_log_status "$ELECTRON_ENV")"
-electron_gpu_process_exit_status="$(value_of rdoc_electron_html_gate_gpu_process_exit_status "$ELECTRON_ENV")"
-electron_gpu_process_exit_count="$(value_of rdoc_electron_html_gate_gpu_process_exit_count "$ELECTRON_ENV")"
-electron_gpu_process_exit_codes="$(value_of rdoc_electron_html_gate_gpu_process_exit_codes "$ELECTRON_ENV")"
-electron_gpu_process_exit_reason="$(value_of rdoc_electron_html_gate_gpu_process_exit_reason "$ELECTRON_ENV")"
-electron_source_env_file_status="$(file_exists_status "$ELECTRON_SOURCE_ENV")"
-electron_capture_file_status="$(artifact_file_status "$electron_capture_file")"
-electron_argb_file_status="$(artifact_file_status "$electron_argb_path")"
+value_of_into electron_status rdoc_electron_html_gate_status "$ELECTRON_ENV"
+value_of_into electron_reason rdoc_electron_html_gate_reason "$ELECTRON_ENV"
+value_of_into electron_html_path rdoc_electron_html_gate_html_path "$ELECTRON_ENV"
+value_of_into electron_capture_file rdoc_electron_html_gate_capture_file "$ELECTRON_ENV"
+value_of_into electron_capture_file_magic rdoc_electron_html_gate_capture_file_magic "$ELECTRON_ENV"
+value_of_into electron_argb_path rdoc_electron_html_gate_argb_path "$ELECTRON_ENV"
+value_of_into electron_argb_status rdoc_electron_html_gate_argb_status "$ELECTRON_ENV"
+value_of_into electron_argb_nonblank_pixel_count rdoc_electron_html_gate_argb_nonblank_pixel_count "$ELECTRON_ENV"
+value_of_into electron_requested_api rdoc_electron_html_gate_requested_api "$ELECTRON_ENV"
+value_of_into electron_requested_angle rdoc_electron_html_gate_requested_angle "$ELECTRON_ENV"
+value_of_into electron_requested_features rdoc_electron_html_gate_requested_features "$ELECTRON_ENV"
+value_of_into electron_launch_exit_code rdoc_electron_html_gate_launch_exit_code "$ELECTRON_ENV"
+value_of_into electron_launch_timed_out rdoc_electron_html_gate_launch_timed_out "$ELECTRON_ENV"
+value_of_into electron_launch_metadata_status rdoc_electron_html_gate_launch_metadata_status "$ELECTRON_ENV"
+value_of_into electron_launch_metadata_reason rdoc_electron_html_gate_launch_metadata_reason "$ELECTRON_ENV"
+value_of_into electron_vulkan_log_status rdoc_electron_html_gate_vulkan_log_status "$ELECTRON_ENV"
+value_of_into electron_gpu_process_exit_status rdoc_electron_html_gate_gpu_process_exit_status "$ELECTRON_ENV"
+value_of_into electron_gpu_process_exit_count rdoc_electron_html_gate_gpu_process_exit_count "$ELECTRON_ENV"
+value_of_into electron_gpu_process_exit_codes rdoc_electron_html_gate_gpu_process_exit_codes "$ELECTRON_ENV"
+value_of_into electron_gpu_process_exit_reason rdoc_electron_html_gate_gpu_process_exit_reason "$ELECTRON_ENV"
+file_exists_into electron_source_env_file_status "$ELECTRON_SOURCE_ENV"
+artifact_file_into electron_capture_file_status "$electron_capture_file"
+artifact_file_into electron_argb_file_status "$electron_argb_path"
 electron_gate_failure_class="pass"
-electron_direct_argb_env_file_status="$(file_exists_status "$ELECTRON_ARGB_SOURCE_ENV")"
-electron_direct_argb_path="$(value_of gui_web_2d_vulkan_electron_argb_path "$ELECTRON_ARGB_SOURCE_ENV")"
-electron_direct_argb_file_status="$(value_of gui_web_2d_vulkan_electron_argb_file_status "$ELECTRON_ARGB_SOURCE_ENV")"
+file_exists_into electron_direct_argb_env_file_status "$ELECTRON_ARGB_SOURCE_ENV"
+value_of_into electron_direct_argb_path gui_web_2d_vulkan_electron_argb_path "$ELECTRON_ARGB_SOURCE_ENV"
+value_of_into electron_direct_argb_file_status gui_web_2d_vulkan_electron_argb_file_status "$ELECTRON_ARGB_SOURCE_ENV"
 if [ "$electron_direct_argb_file_status" = "" ]; then
-    electron_direct_argb_file_status="$(artifact_file_status "$electron_direct_argb_path")"
+    artifact_file_into electron_direct_argb_file_status "$electron_direct_argb_path"
 fi
-electron_direct_argb_status="$(value_of gui_web_2d_vulkan_electron_argb_status "$ELECTRON_ARGB_SOURCE_ENV")"
-electron_direct_argb_nonblank_status="$(value_of gui_web_2d_vulkan_electron_argb_nonblank_status "$ELECTRON_ARGB_SOURCE_ENV")"
-electron_direct_argb_nonblank_pixel_count="$(value_of gui_web_2d_vulkan_electron_argb_nonblank_pixel_count "$ELECTRON_ARGB_SOURCE_ENV")"
+value_of_into electron_direct_argb_status gui_web_2d_vulkan_electron_argb_status "$ELECTRON_ARGB_SOURCE_ENV"
+value_of_into electron_direct_argb_nonblank_status gui_web_2d_vulkan_electron_argb_nonblank_status "$ELECTRON_ARGB_SOURCE_ENV"
+value_of_into electron_direct_argb_nonblank_pixel_count gui_web_2d_vulkan_electron_argb_nonblank_pixel_count "$ELECTRON_ARGB_SOURCE_ENV"
 if [ "$electron_direct_argb_nonblank_status" = "" ]; then
-    electron_direct_argb_nonblank_status="$(positive_int_status "$electron_direct_argb_nonblank_pixel_count")"
+    positive_int_into electron_direct_argb_nonblank_status "$electron_direct_argb_nonblank_pixel_count"
 fi
 electron_argb_proof_status="fail"
 if [ "$electron_argb_file_status" = "pass" ] && [ "$electron_argb_status" = "pass" ]; then
@@ -379,7 +447,10 @@ fi
     echo "- blocked gate list: $blocked_gates"
     echo
     echo "## Raw Evidence"
-    sed 's/^/- /' "$OUT_ENV"
+    while IFS= read -r _gwr_line || [ -n "$_gwr_line" ]; do
+        _gwr_line="${_gwr_line%$_GWGS_CR}"
+        printf -- '- %s\n' "$_gwr_line"
+    done < "$OUT_ENV"
 } >"$REPORT_PATH"
 
 cat "$OUT_ENV"

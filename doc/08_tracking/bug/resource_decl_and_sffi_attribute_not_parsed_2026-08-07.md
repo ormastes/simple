@@ -219,3 +219,15 @@ this exact paragraph as something "must be rewritten before any conclusion is
 drawn" and nobody had done it yet. No assertions changed; the spec is
 unchanged at `Results: 1 total, 0 passed, 1 failed` (verified by inspection —
 the change is docstring-only, non-executable). Leaving OPEN.
+
+## Triage 2026-11-25 (work/p2w4-ae-20261125, origin/release/1.0.0 HEAD ef6a94f8a03)
+
+WP-A remains landed at release/1.0.0 HEAD, verified by code inspection:
+`parse_resource_decl` is defined at
+`src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl:471` and
+wired at `:1009` (`finalize_decl_visibility(parse_resource_decl(...))`) and
+`:1927`. The pilot spec remains RED for the recorded harness reason (the
+seed parser reads spec-file module-level syntax), which is unchanged:
+re-running it at this HEAD is additionally blocked repo-wide because the
+pinned seed rejects `@representation_boundary` (cfd89933699). No code change;
+WP-B..WP-H remain open feature work. Status: still OPEN, accurately headed.

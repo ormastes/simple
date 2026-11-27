@@ -14,6 +14,117 @@ use super::super::{
     MODULE_GLOBALS,
 };
 
+/// The variable at the root of a receiver chain: `g` for `g`, `g.a`, `g[i]`,
+/// `g.a[i].b`. Method calls on any of those shapes read and write back `g`.
+pub(crate) fn receiver_root_identifier(receiver: &Expr) -> Option<&str> {
+    match receiver {
+        Expr::Identifier(name) => Some(name.as_str()),
+        Expr::FieldAccess { receiver, .. } | Expr::Index { receiver, .. } => receiver_root_identifier(receiver),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_eval_array_repeat_default(
+    receiver: &Expr,
+    method: &str,
+    args: &[Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    if method != "default" || !args.is_empty() {
+        return Ok(None);
+    }
+    let receiver_base = match receiver {
+        Expr::GenericInst { expr, .. } => expr.as_ref(),
+        other => other,
+    };
+    if let Expr::Identifier(name) = receiver_base {
+        if env.get(name).is_none() {
+            if let Some(val) = crate::interpreter::interpreter_method::special::primitive_default_value(name) {
+                return Ok(Some(val));
+            }
+            if let Some(bound_ty) =
+                crate::interpreter::GENERIC_TYPE_BINDINGS.with(|cell| cell.borrow().get(name).cloned())
+            {
+                if let simple_parser::ast::Type::Simple(prim) = &bound_ty {
+                    if let Some(val) = crate::interpreter::interpreter_method::special::primitive_default_value(prim) {
+                        return Ok(Some(val));
+                    }
+                } else if let simple_parser::ast::Type::Array { element, size: Some(count) } = &bound_ty {
+                    if let simple_parser::ast::Type::Simple(elem_name) = element.as_ref() {
+                        let count_val = evaluate_expr(count, env, functions, classes, enums, impl_methods)?;
+                        let n = count_val.as_int().unwrap_or(0).max(0) as usize;
+                        let elem_call = Expr::MethodCall {
+                            receiver: Box::new(Expr::Identifier(elem_name.clone())),
+                            method: "default".to_string(),
+                            args: Vec::new(),
+                            generic_args: Vec::new(),
+                        };
+                        let elem_default = evaluate_expr(&elem_call, env, functions, classes, enums, impl_methods)?;
+                        return Ok(Some(Value::array(vec![elem_default; n])));
+                    }
+                }
+            }
+        }
+        return Ok(None);
+    }
+    let Expr::ArrayRepeat { value, count } = receiver_base else {
+        return Ok(None);
+    };
+    let is_type_or_param = match value.as_ref() {
+        Expr::Identifier(name) if env.get(name).is_none() => {
+            classes.contains_key(name)
+                || crate::interpreter::GENERIC_TYPE_BINDINGS.with(|cell| cell.borrow().contains_key(name))
+                || crate::interpreter::interpreter_method::special::primitive_default_value(name).is_some()
+        }
+        _ => false,
+    };
+    if !is_type_or_param {
+        return Ok(None);
+    }
+    let count_val = evaluate_expr(count, env, functions, classes, enums, impl_methods)?;
+    let n = count_val.as_int().unwrap_or(0).max(0) as usize;
+    let elem_call = Expr::MethodCall {
+        receiver: value.clone(),
+        method: "default".to_string(),
+        args: Vec::new(),
+        generic_args: Vec::new(),
+    };
+    let elem_default = evaluate_expr(&elem_call, env, functions, classes, enums, impl_methods)?;
+    Ok(Some(Value::array(vec![elem_default; n])))
+}
+
+/// Refresh a stale same-file module `var` binding before a method call uses it
+/// as its receiver.
+///
+/// `interpreter/expr/literals.rs` already prefers `MODULE_GLOBALS` when an
+/// identifier is READ through a non-local binding, because a spec `it` body
+/// runs in a COPY of the caller env (`interpreter_call/bdd.rs`) and a helper's
+/// write to the module var lands only in `MODULE_GLOBALS`
+/// (doc/08_tracking/bug/spec_it_block_reads_stale_module_var_2026-08-04.md).
+/// The method-call receiver paths read `env` directly instead, so after a
+/// helper reassigned `g`, `g.f` saw the new value while `g.m()` ran on the old
+/// object and then wrote that stale object back over the live one
+/// (doc/08_tracking/bug/spec_it_method_receiver_stale_module_var_2026-10-30.md).
+/// Only bindings without owner provenance are refreshed; globals with owner
+/// provenance are left to the frame/block-boundary refresh. The refresh is an
+/// `env.insert`, so it is recorded as a frame write of the live value.
+pub(crate) fn refresh_stale_module_global_receiver(env: &mut Env, name: &str) {
+    if env.is_local(name) || env.live_owned_global(name).is_some() {
+        return;
+    }
+    if env.get(name).is_none() {
+        return;
+    }
+    if let Some(live) = MODULE_GLOBALS.with(|cell| cell.borrow().get(name).cloned()) {
+        env.insert(name.to_owned(), live);
+    }
+}
+
 fn write_back_identifier_receiver(env: &mut Env, name: &str, value: Value) {
     let owned_binding = if env.is_local(name) {
         None
@@ -151,8 +262,19 @@ pub(super) fn eval_call_expr(
             impl_methods,
         )?)),
         Expr::MethodCall {
-            receiver, method, args, ..
+            receiver,
+            method,
+            args,
+            generic_args,
         } => {
+            if let Some(default_arr) =
+                try_eval_array_repeat_default(receiver, method, args, env, functions, classes, enums, impl_methods)?
+            {
+                return Ok(Some(default_arr));
+            }
+            let _pending_generics =
+                crate::interpreter::push_method_call_generics_with_method(receiver, method, generic_args);
+            let _clear_expected_target = crate::interpreter::push_expected_target_type(None);
             // BDD negation link: `expect(x).not.to_contain(y)`. The receiver is
             // `FieldAccess { expect(x), "not" }`, which otherwise evaluates
             // `.not` as a field of the subject ("unknown property or method
@@ -173,6 +295,9 @@ pub(super) fn eval_call_expr(
             }
             // Check if receiver is an identifier - if so, we may need to update it
             // after calling a mutating (me) method
+            if let Some(root_name) = receiver_root_identifier(receiver) {
+                refresh_stale_module_global_receiver(env, root_name);
+            }
             if let Expr::Identifier(var_name) = receiver.as_ref() {
                 // MECALL-OWNED (2026-08-22): expression-context twin of the
                 // statement fast path in interpreter_helpers::patterns. When the
@@ -182,7 +307,7 @@ pub(super) fn eval_call_expr(
                 // of deep-copying the dict on every call (value semantics are
                 // kept: a second owner still forces the copy-on-write clone).
                 let owned_call = match env.get(var_name) {
-                    Some(Value::Object { class, .. }) => resolve_object_method(classes, impl_methods, class, method),
+                    Some(Value::Object { class, fields }) => resolve_object_method(classes, impl_methods, class, fields, method),
                     _ => None,
                 };
                 if let Some(resolved) = owned_call {
@@ -304,8 +429,8 @@ pub(super) fn eval_call_expr(
                         Some(Value::Object {
                             fields: parent_fields, ..
                         }) => match parent_fields.get(field) {
-                            Some(Value::Object { class: field_class, .. }) => {
-                                resolve_object_method(classes, impl_methods, field_class, method)
+                            Some(Value::Object { class: field_class, fields: field_fields }) => {
+                                resolve_object_method(classes, impl_methods, field_class, field_fields, method)
                             }
                             _ => None,
                         },
@@ -347,6 +472,42 @@ pub(super) fn eval_call_expr(
                     }
                     // Evaluate the outer receiver to get its current value
                     let outer_val = evaluate_expr(outer_receiver, env, functions, classes, enums, impl_methods)?;
+                    // Reference `class` receiver: the field lives behind the
+                    // instance's shared lock, so a mutating method on it
+                    // (`self.parts.push(x)`) must be written back in place.
+                    if let Value::ClassInstance(ref instance) = outer_val {
+                        // The field is CLONED out of the shared cell (an Arc
+                        // handle), never moved: another handle — or another
+                        // thread (`Barrier.wait` on an isolated worker) — may
+                        // read the field while this call runs, and a moved-out
+                        // `Nil` is a silent wrong answer there. In-place array
+                        // mutators never reach here (handled above under the
+                        // instance lock); a method that returns an updated
+                        // receiver is written back through `set_field`.
+                        if let Some(field_val) = instance.field(field) {
+                            let temp_var = format!("__nested_field_{}__", field);
+                            env.insert(temp_var.clone(), field_val);
+                            let temp_receiver = Box::new(Expr::Identifier(temp_var.clone()));
+                            let call = super::super::evaluate_method_call_with_self_update(
+                                &temp_receiver,
+                                method,
+                                args,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            );
+                            // An in-place mutator on the temp binding leaves its
+                            // result in the binding, not in `updated_field`.
+                            let after = env.remove(&temp_var);
+                            let (result, updated_field) = call?;
+                            if let Some(new_field_val) = updated_field.or(after) {
+                                instance.set_field(field.clone(), new_field_val);
+                            }
+                            return Ok(Some(result));
+                        }
+                    }
                     if let Value::Object { class, fields } = outer_val {
                         let mut fields = fields;
                         // Get the field value (can be Object, Array, Dict, String, etc.)
@@ -546,7 +707,11 @@ pub(super) fn eval_call_expr(
                 }
             }
             // Support module-style access (lib.foo) by resolving directly to functions/classes
-            if let Expr::Identifier(module_name) = receiver.as_ref() {
+            let receiver_base = match receiver.as_ref() {
+                Expr::GenericInst { expr, .. } => expr.as_ref(),
+                other => other,
+            };
+            if let Expr::Identifier(module_name) = receiver_base {
                 if env.get(module_name).is_none() {
                     if field == "new" {
                         let class_name = module_name.clone();
@@ -576,14 +741,48 @@ pub(super) fn eval_call_expr(
                         // Similar issue - Result variants need arguments, so field access doesn't work
                     }
 
-                    if let Some(func) = functions.get(field).cloned() {
-                        return Ok(Some(Value::Function {
-                            name: field.clone(),
-                            def: func,
-                            captured_env: Arc::new(Env::new()),
-                        }));
-                    }
-                    if classes.contains_key(field) {
+                    let shortcut_func = functions.get(field).cloned();
+                    if shortcut_func.is_some() || classes.contains_key(field) {
+                        // `Enum.Variant` is never a module path: when the
+                        // receiver names an enum that declares `field` as a
+                        // variant, build that variant here (same rules as the
+                        // Value::EnumType arm below). Without this, a variant
+                        // whose name is also a loaded class or function
+                        // (`MirTypeKind.Vec4f` vs the std SIMD `struct Vec4f`)
+                        // evaluated to `<constructor:Vec4f>` inside fn bodies,
+                        // and a `match` on it took the first arm. Only paid when
+                        // the shortcut would otherwise fire.
+                        let receiver_enum = crate::interpreter::owner_module_enum(module_name)
+                            .or_else(|| enums.get(module_name).cloned())
+                            .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(module_name).cloned()))
+                            .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(module_name).cloned()));
+                        if let Some(enum_def) = receiver_enum {
+                            if let Some(variant) = enum_def.variants.iter().find(|v| v.name == *field) {
+                                let has_fields = variant.fields.as_ref().is_some_and(|f| !f.is_empty());
+                                return Ok(Some(if has_fields {
+                                    Value::EnumVariantConstructor {
+                                        enum_name: module_name.clone(),
+                                        variant_name: field.clone(),
+                                    }
+                                } else {
+                                    Value::Enum {
+                                        enum_name: module_name.clone(),
+                                        variant: field.clone(),
+                                        payload: None,
+                                    }
+                                }));
+                            }
+                        }
+                        if let Some(func) = shortcut_func {
+                            // `m.f` read as a value where `m` is not bound
+                            // (inside `fn main`): a use of `f` by this caller.
+                            crate::interpreter::interpreter_call::gate_private_call(&func.name, &func)?;
+                            return Ok(Some(Value::Function {
+                                name: field.clone(),
+                                def: func,
+                                captured_env: Arc::new(Env::new()),
+                            }));
+                        }
                         return Ok(Some(Value::Constructor {
                             class_name: field.clone(),
                         }));
@@ -748,6 +947,41 @@ pub(super) fn eval_call_expr(
                         ctx = ctx.with_note(format!("available fields: {}", fields_list));
                     }
 
+                    // Discriminate stale-construction vs bare-name class collision: compare the
+                    // instance against the registry's CURRENT definition. Gated by the same
+                    // field-access debug switch as the value_impl.rs conversion hook
+                    // (SIMPLE_DEBUG_FIELD_ACCESS / SIMPLE_BOOTSTRAP_DIAG), so default E1012
+                    // output is unchanged.
+                    // bug: native_build_class_surface_misses_newly_added_field_2026-08-17
+                    if crate::interpreter::field_access_debug_enabled() {
+                        let registry_verdict = match classes.get(class.as_str()) {
+                            None => "registry has no class of this name".to_string(),
+                            Some(def) => {
+                                let def_has_field = def.fields.iter().any(|f| f.name == *field);
+                                let shared = def
+                                    .fields
+                                    .iter()
+                                    .filter(|f| fields.contains_key(f.name.as_str()))
+                                    .count();
+                                let kind = if def_has_field && shared + 1 >= def.fields.len() {
+                                    "stale-construction (registry def has the field; instance built from an older def)"
+                                } else if def_has_field {
+                                    "collision (registry def has the field but a different field set)"
+                                } else {
+                                    "registry def also lacks the field"
+                                };
+                                format!(
+                                    "{}: instance_fields={} registry_fields={} shared={}",
+                                    kind,
+                                    fields.len(),
+                                    def.fields.len(),
+                                    shared
+                                )
+                            }
+                        };
+                        ctx = ctx.with_note(format!("class registry: {}", registry_verdict));
+                    }
+
                     if std::env::var("SIMPLE_DBG_COLLISION").is_ok() {
                         let recv_desc = match receiver.as_ref() {
                             Expr::Identifier(n) => format!("Ident({})", n),
@@ -768,7 +1002,8 @@ pub(super) fn eval_call_expr(
                 }
                 Value::Constructor { ref class_name } => {
                     // Look up static method on class - check both class_def.methods and impl_methods
-                    if let Some(class_def) = classes.get(class_name).cloned() {
+                    // (module-qualified: the class this source module declares or imports).
+                    if let Some(class_def) = crate::interpreter::resolve_class_in_scope(classes, class_name)? {
                         // First check methods defined in class body
                         if let Some(method) = class_def.methods.iter().find(|m| &m.name == field) {
                             // Warn if using deprecated .new() pattern
@@ -810,9 +1045,7 @@ pub(super) fn eval_call_expr(
                         //   2. `BLOCK_SCOPED_ENUMS` (block-local definitions)
                         //   3. `GLOBAL_ENUMS` (cross-module enum registry)
                         {
-                            let enum_def = enums
-                                .get(class_name)
-                                .cloned()
+                            let enum_def = crate::interpreter::owner_module_enum(class_name).or_else(|| enums.get(class_name).cloned())
                                 .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(class_name).cloned()))
                                 .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(class_name).cloned()));
                             if let Some(enum_def) = enum_def {
@@ -897,9 +1130,7 @@ pub(super) fn eval_call_expr(
                     // `Architecture` from `os.kernel.arch.arch_context` when a spec
                     // only imports the `std.spec.arch.Architecture` struct) fails
                     // to resolve its variants.
-                    let enum_def = enums
-                        .get(enum_name)
-                        .cloned()
+                    let enum_def = crate::interpreter::owner_module_enum(enum_name).or_else(|| enums.get(enum_name).cloned())
                         .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))
                         .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
                     if let Some(enum_def) = enum_def {
@@ -986,7 +1217,7 @@ pub(super) fn eval_call_expr(
                 // String property access (e.g., str.len, str.is_empty)
                 // Also supports no-paren method calls (e.g., str.upper, str.trim)
                 Value::Str(ref s) => match field.as_str() {
-                    "len" => Ok(Value::Int(s.len() as i64)),
+                    "len" => Ok(Value::Int(crate::interpreter::text_cp_len(s) as i64)),
                     "byte_len" => Ok(Value::Int(s.len() as i64)),
                     "char_count" => Ok(Value::Int(s.chars().count() as i64)),
                     "is_empty" => Ok(Value::Bool(s.is_empty())),
@@ -1117,6 +1348,9 @@ pub(super) fn eval_call_expr(
                     _ => {
                         // Check if this is a key in the dict (module namespace access)
                         if let Some(value) = crate::interpreter::module_dict_get(map, field) {
+                            if let Value::Function { def, .. } = &value {
+                                crate::interpreter::interpreter_call::gate_private_call(&def.name, def)?;
+                            }
                             Ok(value)
                         } else {
                             // Try calling as a no-arg method (e.g., dict.keys, dict.values)
@@ -1151,6 +1385,9 @@ pub(super) fn eval_call_expr(
                         }
                     }
                 },
+                // `u.value` on a unit value: the record field form of `u.value()`
+                // (pure-Simple lowers a unit to a one-field `value` struct).
+                Value::Unit { ref value, .. } if field == "value" => Ok((**value).clone()),
                 // Enum property access (Option/Result properties)
                 // Also supports no-paren method calls
                 Value::Enum {
@@ -1176,6 +1413,20 @@ pub(super) fn eval_call_expr(
                                 // through to the error below, so nil stays caught.
                                 if let Some(Value::Object { fields, .. }) = payload.as_deref() {
                                     Ok(fields.get(field).cloned().unwrap_or(Value::Nil))
+                                } else {
+                                    Ok(Value::Nil)
+                                }
+                            }
+                            // Same forwarding for a reference-semantics `class`
+                            // payload (Value::ClassInstance).
+                            _ if variant == "Some"
+                                && matches!(
+                                    payload.as_deref(),
+                                    Some(Value::ClassInstance(instance)) if instance.field(field).is_some()
+                                ) =>
+                            {
+                                if let Some(Value::ClassInstance(instance)) = payload.as_deref() {
+                                    Ok(instance.field(field).unwrap_or(Value::Nil))
                                 } else {
                                     Ok(Value::Nil)
                                 }

@@ -1,10 +1,23 @@
+use compiler.driver.driver_source_parse_selected.*
+use compiler.common.cache_contract.directory_source_epoch_v2.{directory_source_epoch_advance_v2}
+use compiler.common.cache.visibility_manifest_policy_v1.{VisibilityManifestPolicyV1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use compiler.driver.driver_entry_closure_core.{DriverEntryResolverIndexV1,
+    DriverEntryResolverOutcomeV1, DriverEntryResolverSelectionKindV1,
+    driver_entry_resolver_index_prepare_v1, driver_resolve_relative_entry_import_indexed_v1}
+use compiler.common.cache.visibility_manifest_read_v1.{VisibilityManifestReadV1,
+    VisibilityManifestEvidenceV1, visibility_manifest_reads_v1,
+    visibility_manifest_roots_valid_v1, visibility_manifest_reads_prevalidated_v1}
+use compiler.common.driver_source_file.{source_file_with_manifest_evidence_v1}
+use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_visibility_maps_v1,
+    native_entry_closure_handoff_take_list_v1}
 # CompilerDriver phase-1 source loading.
 #
 # The main driver retains parsing, HIR, and later compilation phases.
 
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable, sosix_cwd}
 use std.io_runtime.{file_read_nullable, process_run}
-use std.common.text_bytes.{bytes_to_text}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use compiler.driver.driver_admitted_epoch.{driver_admitted_epoch_active_v1,
     driver_admitted_epoch_task_active_v1, driver_admitted_epoch_entry_v1,
     driver_admitted_epoch_error_v1}
@@ -17,7 +30,8 @@ use compiler.common.source_root_resolution.{SourceRootResolutionV1}
 use compiler.driver.driver_build.native_source_root_handoff.{
     native_source_root_paths_v1, native_source_root_loaded_owner_error_v1}
 use std.common.crypto.sha256.{sha256_text}
-use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.frontend.{parse_full_frontend, parse_full_frontend_stage4_streaming}
+use compiler.driver.driver_entry_closure_core.{_driver_collect_requested_entry_source}
 use compiler.driver.driver_source_loading.{
     driver_set_spec_prelude_entry,
     _driver_module_name_from_path,
@@ -36,11 +50,17 @@ use compiler.driver.driver_source_loading.{
     _driver_physical_source_key_strict_v1,
     _driver_cached_entry_source_scan,
     driver_entry_scan_cache_release,
+    driver_entry_sync_resolver_cwd_v1,
     _driver_module_name_collision,
     _driver_text_bucket_set_new,
     _driver_unique_physical_sources
 }
-use compiler.driver.driver_phase_gates.{driver_explicit_source_entry}
+use compiler.driver.driver_preclosed_source_aliases.{driver_preclosed_source_aliases_v1}
+use compiler.common.library_mode_policy_v1.{library_mode_closure_digest_v1,
+    library_mode_options_error_v1, library_mode_import_key_v1}
+use compiler.driver.driver_library_mode_resolution_v1.{driver_library_mode_selected_v1, driver_library_mode_resolve_v1,
+    driver_library_mode_native_owner_v1}
+use compiler.driver.driver_phase_gates.{driver_explicit_source_entry, driver_streaming_surface_enabled}
 use compiler.driver.driver_build.native_group_request.{native_group_request_path_v1,
     native_group_request_v1, native_group_source_paths_v1}
 use compiler.driver.driver_build.native_group_warm_route.{
@@ -48,10 +68,15 @@ use compiler.driver.driver_build.native_group_warm_route.{
 use compiler.driver.driver_build.native_full_inventory_sources.{
     native_full_inventory_source_paths_v1,
     native_full_inventory_requires_cold_index_v1,
-    native_cold_entry_snapshot_path_v1}
+    native_cold_entry_snapshot_path_v1, native_cold_source_roots_snapshot_v1}
 use compiler.driver.driver_build.native_entry_closure_owner.{
-    NativeEntryClosureRequestV1, native_entry_closure_request_open_v1}
-use compiler.driver.driver_build.native_entry_closure_receipt.{NativeEntryClosureSelectionV1}
+    NativeEntryClosureRequestV1, native_entry_closure_request_open_v1,
+    native_entry_closure_request_source_roots_v1,
+    native_entry_closure_request_snapshot_root_v1,
+    native_entry_closure_request_snapshot_id_v1}
+use compiler.driver.driver_build.native_entry_closure_receipt.{
+    NativeEntryClosureBindingV1, NativeEntryClosureSelectionV1}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1}
 use compiler.common.cache.phase_compatibility_path_io.{
     phase_compatibility_existing_artifact_io_v1}
 use compiler.driver.driver_log_helpers.{log_phase, log_build_progress}
@@ -112,7 +137,7 @@ extern fn rt_hash_text(data: text) -> i64
 fn _pipeline_source_read_raw(path: text) -> text?:
     if driver_admitted_epoch_active_v1():
         val (content, _, _, _) = _driver_cached_entry_source_scan(path)
-        if driver_admitted_epoch_error_v1() != "": return nil
+        if driver_admitted_epoch_error_v1() != "": return None
         return Some(content)
     file_read_nullable(path)
 
@@ -121,6 +146,20 @@ fn driver_source_owner_text_copy(value: text) -> text:
     # value.bytes() -> rt_bytes_to_text round-trip returned empty for a live
     # 51-byte source path, so it cannot establish the source owner inventory.
     rt_string_substr_from(value, 0)
+
+fn driver_visibility_evidence_copy_v1(source: VisibilityManifestEvidenceV1) -> VisibilityManifestEvidenceV1:
+    var rows: [VisibilityManifestReadV1] = []
+    for row in source.reads:
+        rows.push(VisibilityManifestReadV1(
+            driver_source_owner_text_copy(row.source_path),
+            driver_source_owner_text_copy(row.directory_path),
+            driver_source_owner_text_copy(row.manifest_path), row.exists,
+            driver_source_owner_text_copy(row.content_sha256),
+            driver_source_owner_text_copy(row.snapshot_id)))
+    VisibilityManifestEvidenceV1(root: driver_source_owner_text_copy(source.root),
+        snapshot_id: driver_source_owner_text_copy(source.snapshot_id),
+        complete: source.complete, reason: driver_source_owner_text_copy(source.reason),
+        reads: rows, policies: source.policies)
 
 fn _driver_source_has_rt_annotation(content: text) -> bool:
     # `@rt` is common in attribute documentation. Parse only a genuine
@@ -147,6 +186,60 @@ fn _driver_source_has_rt_annotation(content: text) -> bool:
     false
 
 impl CompilerDriver:
+    # Positive manifests are authenticated policy inputs, not implicit compile
+    # dependencies. Their ordinary imports are never walked by this producer.
+    me load_visibility_manifest_policy_v1(observation: VisibilityManifestReadV1,
+            coverage_root: text, index: DriverEntryResolverIndexV1, selected: Dict<text, text>
+    ) -> Result<VisibilityManifestPolicyV1, text>:
+        val path = observation.manifest_path
+        if not observation.exists or path != observation.directory_path + "/__init__.spl" or
+                not path.starts_with(coverage_root + "/") or observation.snapshot_id == "" or
+                observation.snapshot_id != index.snapshot_id or
+                not coverage_root.starts_with(index.snapshot_root + "/") or
+                not selected.contains_key(path) or selected[path] != observation.content_sha256:
+            return Err("manifest policy snapshot membership missing: " + path)
+        val read = file_read_regular_no_follow_bounded(path, 64 * 1024 * 1024)
+        if read.is_err(): return Err("manifest policy source unreadable: " + path)
+        val content = read.unwrap()
+        if sha256_text(content) != observation.content_sha256:
+            return Err("manifest policy source digest mismatch: " + path)
+        # Policy projection never reads alias/import owners; the existing lexical
+        # module label is only frontend context, never a permission target.
+        val module_name = _driver_module_name_from_path(path)
+        val parsed = self.parse_visibility_manifest_policy_v1(content, observation, coverage_root, module_name)
+        if parsed.is_err(): return Err(parsed.unwrap_err())
+        val policy = parsed.unwrap()
+        # The production planner observes only the admitted complete inventory.
+        # Exact winner path/digest must also belong to this selected snapshot.
+        for child in policy.child_names:
+            var target = ""
+            var digest = ""
+            var kind = ""
+            var outcome = "missing"
+            val resolved = driver_resolve_relative_entry_import_indexed_v1(
+                "." + child, observation.directory_path, index)
+            match resolved:
+                case Err(reason): outcome = "resolver-error:" + reason
+                case Ok(selection):
+                    match selection:
+                        case DriverEntryResolverOutcomeV1.Missing: ()
+                        case DriverEntryResolverOutcomeV1.Ambiguous(reason): outcome = "ambiguous:" + reason
+                        case DriverEntryResolverOutcomeV1.Found(found):
+                            if selected.contains_key(found.path) and selected[found.path] == found.digest:
+                                target = found.path
+                                digest = found.digest
+                                kind = match found.kind:
+                                    case DriverEntryResolverSelectionKindV1.SourceFile: "source-file"
+                                    case DriverEntryResolverSelectionKindV1.DirectoryInterface: "directory-interface"
+                                outcome = "snapshot-selected"
+                            else:
+                                outcome = "outside-snapshot"
+            policy.child_target_paths = policy.child_target_paths.push(target)
+            policy.child_target_sha256 = policy.child_target_sha256.push(digest)
+            policy.child_target_kinds = policy.child_target_kinds.push(kind)
+            policy.child_resolution_outcomes = policy.child_resolution_outcomes.push(outcome)
+        Ok(policy)
+
     # --------------------------------------------------------------------------
     # Phase 1: Load sources (with optional cache-aware skipping)
     # --------------------------------------------------------------------------
@@ -173,12 +266,18 @@ impl CompilerDriver:
             return true
         val module_name = _driver_module_name_from_path(path)
         print "[bootstrap_parse] {path} as {module_name}"
-        self.ctx.modules[module_name] = parse_full_frontend(content, path, module_name, self.ctx.logger)
+        # Streamed scope: the parse's pool strings are scope-owned and promoted
+        # with the module at scope end. The plain unscoped entry leaves them in
+        # the ambient scope, which the delegated frontend worker's transient
+        # reclaim frees before the cache dump (lane-52 capture-trace: the
+        # worker's first frontend-miss dump is the one that refuses with dead
+        # pools; the borrowed/streamed captures are clean).
+        self.ctx.modules[module_name] = parse_full_frontend_stage4_streaming(content, path, module_name, self.ctx.logger)
         self.ctx.sources = self.ctx.sources.push(SourceFile(path: path, content: content, module_name: module_name))
         if module_name.starts_with("compiler.10.frontend.core."):
             val core_alias = "compiler.core." + module_name.substring("compiler.10.frontend.core.".len())
             print "[bootstrap_parse] alias {core_alias}"
-            self.ctx.modules[core_alias] = parse_full_frontend(content, path, core_alias, self.ctx.logger)
+            self.ctx.modules[core_alias] = parse_full_frontend_stage4_streaming(content, path, core_alias, self.ctx.logger)
         true
 
     me parse_bootstrap_default_root(root: text) -> bool:
@@ -198,9 +297,40 @@ impl CompilerDriver:
                     return false
         true
 
-    me load_sources_impl(preclosed: NativeEntryClosureRequestV1? = nil) -> (CompileContext, bool):
+    me load_sources_impl(preclosed: NativeEntryClosureRequestV1? = None) -> (CompileContext, bool):
+        driver_entry_sync_resolver_cwd_v1()
+        # A previous compile's checked producer never authorizes a new lineage.
+        self.ctx.config["aop_snapshot_producer_v2"] = ""
+        self.ctx.aop_snapshot_captured_v2 = false
+        self.ctx.aop_directory_snapshots_v2 = []
+        self.ctx.directory_category_projections_v2 = {}
+        self.ctx.directory_aspect_objects_v2 = {}
+        self.ctx.directory_aspect_semantics_v2 = {}
+        self.ctx.directory_aspect_drafts_v2 = {}
+        self.ctx.directory_macro_drafts_v2 = {}
+        self.ctx.directory_macro_projections_v2 = {}
+        self.ctx.initializer_object_receipts_v1 = {}
+        self.ctx.initializer_build_receipt_v1 = None
+        self.ctx.directory_source_epoch_v2 = None
+        match directory_source_epoch_advance_v2(self.identity_id,
+                self.ctx.directory_source_generation_v2):
+            case Ok(epoch):
+                self.ctx.directory_source_generation_v2 = epoch.generation
+                self.ctx.directory_source_epoch_v2 = Some(epoch)
+            case Err(_): ()
+        val library_error = library_mode_options_error_v1(self.ctx.options.library_mode,
+            self.ctx.options.gc_off, self.ctx.options.allowed_families)
+        if library_error != "":
+            self.ctx.add_error(library_error)
+            log_phase(library_error)
+            return (self.ctx, false)
+        var handoff_list: [NativeEntryClosureRequestV1] = []
+        if val req_val = preclosed:
+            handoff_list = [req_val]
+        else:
+            handoff_list = native_entry_closure_handoff_take_list_v1()
         val admitted_task = driver_admitted_epoch_task_active_v1()
-        if preclosed != nil and driver_admitted_epoch_active_v1():
+        if handoff_list.len() > 0 and driver_admitted_epoch_active_v1():
             self.ctx.add_error("preclosed parse selection cannot compose with admitted source epoch")
             return (self.ctx, false)
         if driver_admitted_epoch_active_v1() and not admitted_task:
@@ -215,7 +345,7 @@ impl CompilerDriver:
         var i = 0
         var has_project_source = false
         var driver_inputs: [text] = []
-        if self.ctx.options.bootstrap_input_count > 0 and self.ctx.options.bootstrap_input_count <= 6:
+        if self.ctx.options.bootstrap_input_count > 0 and self.ctx.options.bootstrap_input_count <= 7:
             if self.ctx.options.bootstrap_input_count > 0:
                 driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_0]
             if self.ctx.options.bootstrap_input_count > 1:
@@ -228,6 +358,8 @@ impl CompilerDriver:
                 driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_4]
             if self.ctx.options.bootstrap_input_count > 5:
                 driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_5]
+            if self.ctx.options.bootstrap_input_count > 6:
+                driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_6]
         else:
             driver_inputs = self.ctx.options.input_files
         var closure_source_roots = driver_inputs
@@ -240,22 +372,53 @@ impl CompilerDriver:
                     self.ctx.add_error(reason)
                     driver_entry_scan_cache_release()
                     return (self.ctx, false)
-        var admitted_preclosed: NativeEntryClosureSelectionV1? = nil
+        var admitted_preclosed: NativeEntryClosureSelectionV1? = None
         var preclosed_snapshot_root = ""
+        var visibility_inventory: Dict<text, text> = {}
+        var visibility_snapshot_selected: Dict<text, text> = {}
+        var visibility_snapshot_id = ""
+        var visibility_resolver_index: DriverEntryResolverIndexV1? = None
         var preclosed_row_by_identity: Dict<text, i64> = {}
-        # Nil guard, not `if val`: binding a struct-payload optional that is nil
-        # copied a payload out of nil on the native lane (SEGV in
-        # native_entry_closure_request_open_v1, Stage 2 load_sources).
-        if preclosed != nil:
-            val request = preclosed!
+        # Array handoff, not `Option<Struct>`: binding a struct-payload optional
+        # across compiled Stage 2 frames caused SEGV in native_entry_closure_request_open_v1.
+        if handoff_list.len() > 0:
+            val request: NativeEntryClosureRequestV1 = handoff_list[0]
             val selected = native_entry_closure_request_open_v1(
-                request, self.ctx.environment_variant_policy_digest)
+                request, library_mode_closure_digest_v1(self.ctx.environment_variant_policy_digest,
+                    self.ctx.options.library_mode))
             if selected.is_err():
                 self.ctx.add_error("preclosed source request rejected: " + selected.unwrap_err())
                 driver_entry_scan_cache_release()
                 return (self.ctx, false)
+            match native_source_root_paths_v1(
+                    native_entry_closure_request_source_roots_v1(request),
+                    native_entry_closure_request_snapshot_root_v1(request)):
+                case Ok(roots):
+                    if roots != closure_source_roots:
+                        self.ctx.add_error("preclosed source root authority mismatch")
+                        driver_entry_scan_cache_release()
+                        return (self.ctx, false)
+                case Err(reason):
+                    self.ctx.add_error(reason)
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
             admitted_preclosed = Some(selected.unwrap())
-            preclosed_snapshot_root = request.snapshot.snapshot_root
+            preclosed_snapshot_root = native_entry_closure_request_snapshot_root_v1(request)
+            val manifest_maps = native_entry_closure_visibility_maps_v1(request)
+            if manifest_maps.is_err():
+                self.ctx.add_error(manifest_maps.unwrap_err())
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            visibility_inventory = manifest_maps.unwrap().0
+            visibility_snapshot_selected = manifest_maps.unwrap().1
+            visibility_snapshot_id = native_entry_closure_request_snapshot_id_v1(request)
+            val prepared_visibility_index = driver_entry_resolver_index_prepare_v1(
+                preclosed_snapshot_root, visibility_snapshot_id, visibility_inventory)
+            if prepared_visibility_index.is_err():
+                self.ctx.add_error(prepared_visibility_index.unwrap_err())
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            visibility_resolver_index = Some(prepared_visibility_index.unwrap())
             driver_inputs = []
             var selected_row = 0
             for identity in selected.unwrap().identities:
@@ -287,17 +450,22 @@ impl CompilerDriver:
         # load_sources total=1, 2026-09-25). Route it through the same
         # entry-closure walk native-build --entry uses; that walk loads only
         # the transitive imports, not the bulk trees.
+        val is_interpret_mode = (self.ctx.options.mode == CompileMode.Interpret or
+            self.ctx.options.cli_mode_text == "interpret")
         val interpret_single_entry =
-            if self.ctx.options.mode == CompileMode.Interpret and driver_inputs.len() == 1 and
+            if is_interpret_mode and driver_inputs.len() == 1 and
                     driver_inputs[0].ends_with(".spl"):
                 driver_inputs[0]
             else:
                 ""
         driver_set_spec_prelude_entry(interpret_single_entry)
+        val interpret_entry_closure = interpret_single_entry != ""
         val native_entry_env = sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
         val native_entry_input = if native_entry_env != "": native_entry_env else: interpret_single_entry
         val requested_entry_input = if explicit_entry_input != "":
             explicit_entry_input
+        elif interpret_entry_closure:
+            interpret_single_entry
         else:
             native_entry_input
         var native_group_inputs: [text] = []
@@ -316,14 +484,15 @@ impl CompilerDriver:
             self.ctx.add_error("full inventory mode cannot use an entry or native group request")
             driver_entry_scan_cache_release()
             return (self.ctx, false)
-        if admitted_preclosed != nil and (full_inventory_mode or native_group_inputs.len() > 0):
+        if admitted_preclosed.is_some() and (full_inventory_mode or native_group_inputs.len() > 0):
             self.ctx.add_error("preclosed entry selection is incompatible with full/group inventory")
             driver_entry_scan_cache_release()
             return (self.ctx, false)
         val native_entry_closure_pre = (sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         val explicit_entry_closure = explicit_entry_input != ""
-        val entry_closure_walk = admitted_preclosed == nil and not full_inventory_mode and (explicit_entry_closure or (
-            native_entry_input != "" and not native_entry_closure_pre) or
+        val entry_closure_walk = admitted_preclosed.is_none() and not full_inventory_mode and (
+            explicit_entry_closure or interpret_entry_closure or (
+                native_entry_input != "" and not native_entry_closure_pre) or
             native_group_inputs.len() > 0)
         # The persistent package index route (package_index_route_current_v1)
         # needs a producer/root-generation/variant-digest compatibility
@@ -373,15 +542,32 @@ impl CompilerDriver:
                 (sosix_env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1" or
                 (sosix_env_get_nullable("SIMPLE_SCV_STRICT_COLD_ENTRY") ?? "") == "1"
             var frozen_reason = ""
-            if selected.is_err():
-                frozen_reason = selected.unwrap_err()
-            else:
-                val admitted = phase_compatibility_existing_artifact_io_v1(
-                    cold_snapshot_root, selected.unwrap())
-                if admitted.valid:
-                    cold_entry_input = admitted.canonical_path
-                else:
-                    frozen_reason = admitted.reason
+            match selected:
+                case Ok(selected_path):
+                    val admitted = phase_compatibility_existing_artifact_io_v1(
+                        cold_snapshot_root, selected_path)
+                    if admitted.valid:
+                        cold_entry_input = admitted.canonical_path
+                        # Keep code generation aligned with the validated frozen entry.
+                        if not rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", admitted.canonical_path):
+                            self.ctx.add_error("frozen cold entry codegen identity unavailable")
+                            driver_entry_scan_cache_release()
+                            return (self.ctx, false)
+                        # The walk is seeded with the FROZEN entry; its
+                        # qualified imports must resolve in the same tree.
+                        # Without an explicit root handoff (a parse-shard
+                        # child gets only the raw `--source src/app` argv),
+                        # the live roots answered `app.mcp.api_tools` as
+                        # `src/app/...` while `.main_lazy_json` from the
+                        # frozen entry stayed frozen: one file, two spellings.
+                        if self.ctx.options.native_source_roots.len() == 0 and
+                                self.ctx.options.native_source_snapshot_root == "":
+                            closure_source_roots = native_cold_source_roots_snapshot_v1(
+                                cold_snapshot_root, cold_checkout_raw, closure_source_roots)
+                    else:
+                        frozen_reason = admitted.reason
+                case Err(reason):
+                    frozen_reason = reason
             if frozen_reason != "":
                 if strict_cold_entry:
                     self.ctx.add_error("frozen cold entry rejected: {frozen_reason}")
@@ -392,7 +578,7 @@ impl CompilerDriver:
             self.ctx.config["compiler_source_entry"] = cold_entry_input
         var package_index_routed = false
         var package_read_root = machine_cache_root()
-        if admitted_preclosed == nil and not package_index_cold_init:
+        if admitted_preclosed.is_none() and not package_index_cold_init:
             val package_resolution_started_ns = demand_compile_phase_begin_v1()
             val changed_text = sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_CHANGED_MODULES") ?? ""
             val changed_modules = match package_index_route_changed_modules_v1(changed_text):
@@ -445,6 +631,11 @@ impl CompilerDriver:
                             "native group route omitted member: {member.source_path}")
                         driver_entry_scan_cache_release()
                         return (self.ctx, false)
+                # Only this checked native-group route supplies compiler provenance.
+                self.ctx.config["aop_snapshot_producer_v2"] = admitted.producer_digest
+                self.ctx.config["aop_snapshot_inventory_v2"] = admitted.scv_source_inventory_digest
+                self.ctx.config["aop_snapshot_revision_v2"] = admitted.scv_revision_id
+                self.ctx.config["aop_snapshot_tree_v2"] = admitted.scv_tree_id
                 package_read_root = admitted.index_read_root
                 match native_group_warm_route_index_route_v1(admitted,
                         sosix_env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""):
@@ -575,7 +766,7 @@ impl CompilerDriver:
                     dirty.semantic_digest, dirty.producer_compatibility_id,
                     dirty.configuration_variant, demand_snapshot))
             for admission in route.archive_admissions:
-                if admission.load.receipt == nil:
+                if admission.load.receipt.is_none():
                     _ = route_capability_scope_close_all_v1(&capability_scope)
                     archive_transaction = route_archive_install_rollback_owned_v1(
                         archive_transaction)
@@ -796,7 +987,7 @@ impl CompilerDriver:
                 if virtual.status == VirtualSourceRegistrationStatusV1.Miss:
                     self.ctx.add_error("virtual summary missing from the installed exact snapshot: '{input_path}'")
                     return (self.ctx, false)
-                if virtual.status != VirtualSourceRegistrationStatusV1.Ready or virtual.value == nil:
+                if virtual.status != VirtualSourceRegistrationStatusV1.Ready or virtual.value.is_none():
                     self.ctx.add_error("virtual summary request rejected: '{input_path}'")
                     return (self.ctx, false)
                 val virtual_read = virtual.value.unwrap()
@@ -804,7 +995,12 @@ impl CompilerDriver:
                     self.ctx.add_error("virtual summary exceeds the compiler read bound: '{input_path}'")
                     return (self.ctx, false)
                 val module_name = _driver_module_name_from_path(input_path)
-                val virtual_source = SourceFile(path: input_path, content: bytes_to_text(virtual_read.bytes), module_name: module_name)
+                val virtual_text = match bytes_to_text_checked(virtual_read.bytes):
+                    case Ok(text_value): text_value
+                    case Err(_):
+                        self.ctx.add_error("virtual summary is not valid UTF-8: '{input_path}'")
+                        return (self.ctx, false)
+                val virtual_source = SourceFile(path: input_path, content: virtual_text, module_name: module_name)
                 val virtual_key = input_path + "::" + module_name
                 if not seen_sources.contains_key(virtual_key):
                     seen_sources[virtual_key] = true
@@ -819,7 +1015,7 @@ impl CompilerDriver:
             # then works only by evading the substring filter. Native-build
             # imports retain packaging exclusions; the compiler-owned explicit
             # API admits the exact authored source graph without those filters.
-            val loaded = if admitted_preclosed != nil:
+            val loaded = if admitted_preclosed.is_some():
                 val selected = admitted_preclosed.unwrap()
                 val identity = input_path.substring(preclosed_snapshot_root.len() + 1)
                 if not preclosed_row_by_identity.has(identity):
@@ -864,11 +1060,12 @@ impl CompilerDriver:
             elif package_index_routed:
                 _driver_collect_explicit_compiler_source(input_path)
             elif entry_closure_walk and (input_path == cold_entry_input or
+                    input_path == interpret_single_entry or
                     native_group_inputs.contains(input_path)):
-                if explicit_entry_closure or native_group_inputs.len() > 0:
+                if explicit_entry_closure or interpret_entry_closure or native_group_inputs.len() > 0:
                     _driver_collect_explicit_compiler_source(input_path)
                 else:
-                    _driver_collect_entry_import_source(input_path)
+                    _driver_collect_requested_entry_source(input_path)
             else:
                 _driver_collect_sources(input_path)
             if package_index_routed:
@@ -1052,11 +1249,17 @@ impl CompilerDriver:
                 if source_trace:
                     print "[load_sources] entry-closure scan {closure_src.path} imports {closure_imports.len()}"
                 for closure_mp_input in closure_imports:
-                    val closure_mp = if closure_mp_input.starts_with(".") and
+                    val authored_mp = if closure_mp_input.starts_with(".") and
                         not closure_mp_input.starts_with(".."):
                         closure_module + closure_mp_input
                     else:
                         closure_mp_input
+                    val closure_mp = library_mode_import_key_v1(authored_mp,
+                        self.ctx.options.library_mode, closure_src.module_name)
+                    if closure_mp == "":
+                        self.ctx.add_error("LIBRARY_MODE_IMPORT_CONTEXT_INVALID: " + closure_src.path)
+                        driver_entry_scan_cache_release()
+                        return (self.ctx, false)
                     # A bare spelling binds importer-relative (`use types` is
                     # the importer's sibling when one exists), so the same
                     # spelling from another directory must be resolved again.
@@ -1064,8 +1267,15 @@ impl CompilerDriver:
                     if closure_seen_mods.contains_key(closure_seen_key):
                         continue
                     closure_seen_mods[closure_seen_key] = true
-                    val selected_source = _driver_resolve_source_root_entry_import_from_v1(
-                        closure_mp_input, closure_source_roots, closure_dir)
+                    val selected_source = match driver_library_mode_selected_v1(
+                            closure_mp_input, closure_source_roots, closure_dir,
+                            self.ctx.options.library_mode, closure_src.module_name):
+                        case Ok(value): value
+                        case Err(reason):
+                            self.ctx.add_error(reason)
+                            log_phase(reason)
+                            driver_entry_scan_cache_release()
+                            return (self.ctx, false)
                     # An alias registered from ANOTHER directory is an
                     # importer-relative binding, not this importer's owner.
                     val alias_dir = closure_alias_dir.get(closure_mp) ?? ""
@@ -1111,7 +1321,8 @@ impl CompilerDriver:
                         log_phase(
                             "phase1:load_sources:closure:unresolved module={closure_mp} used_in={closure_src.path} dir={closure_dir}")
                         continue
-                    closure_file = driver_closure_native_owner_v1(closure_file, closure_mp, closure_dir)
+                    closure_file = driver_library_mode_native_owner_v1(closure_file, closure_mp_input, closure_dir,
+                        self.ctx.options.library_mode, closure_src.module_name)
                     val closure_edge_exempt = driver_closure_synthetic_spec_v1(closure_mp_input) or
                         driver_closure_parity_exempt_v1(closure_parity_exempt, closure_src.path)
                     # Dedup by physical file, never by spelling: a spelling
@@ -1196,8 +1407,24 @@ impl CompilerDriver:
             # loading create canonical aliases while parsing treated them as a
             # bulk build: numbered-directory spellings then survived into HIR,
             # produced thousands of invalid export origins, and eventually
-            # crashed the post-mono walker on poisoned statements.
+            # crashed the final walker on poisoned statements.
             rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+
+        # Preclosed source selection has already validated the complete entry
+        # closure, but the existing parser still needs closure mode to preserve
+        # its entry-source semantics.
+        if admitted_preclosed.is_some():
+            match driver_preclosed_source_aliases_v1(all_sources,
+                    closure_source_roots, preclosed_snapshot_root, self.ctx.options.library_mode):
+                case Ok(sources): all_sources = sources
+                case Err(reason):
+                    self.ctx.add_error(reason)
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+            if not rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1"):
+                self.ctx.add_error("preclosed entry parser mode unavailable")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
 
         # Add core source roots only when compiling project sources (self-hosted build).
         # native-build --entry-closure suppresses this implicit whole-src bulk-load
@@ -1206,14 +1433,14 @@ impl CompilerDriver:
         # module loader. Bulk-loading the four trees here defeats that contract:
         # even a one-file test or the native-build worker parses 600+ unrelated
         # modules before its entry can run, exceeding the normal CPU/RSS guard.
-        val nb_entry_closure = admitted_preclosed != nil or explicit_entry_closure or native_group_inputs.len() > 0 or (
+        val nb_entry_closure = admitted_preclosed.is_some() or explicit_entry_closure or native_group_inputs.len() > 0 or (
             sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         val compile_mode = self.ctx.options.mode
         val needs_bulk_project_sources = compile_mode != CompileMode.Check and compile_mode != CompileMode.Interpret
         if (has_project_source and needs_bulk_project_sources and
                 not nb_entry_closure and not package_index_routed and
                 not full_inventory_mode):
-            val paths = ["src/app", "src/lib", "src/compiler", "src/runtime"]
+            val paths: [text] = ["src/app", "src/lib", "src/compiler", "src/runtime"]
             val bulk_loaded = _driver_collect_sources_via_find(paths)
             if bulk_loaded.len() > 0:
                 for s in bulk_loaded:
@@ -1274,7 +1501,7 @@ impl CompilerDriver:
             owned_authored_paths = owned_authored_paths.push(
                 driver_source_owner_text_copy(source_file_authored_path(loaded_source)))
             owned_contents = owned_contents.push(owned_content)
-            owned_byte_lengths = owned_byte_lengths.push(owned_content.len())
+            owned_byte_lengths = owned_byte_lengths.push(owned_content.byte_len())
             val raw_content_hash = rt_hash_text(owned_content)
             owned_content_hashes = owned_content_hashes.push(
                 if raw_content_hash == 0: 1 else: raw_content_hash)
@@ -1294,6 +1521,10 @@ impl CompilerDriver:
                 driver_source_owner_text_copy(loaded_source.module_name))
         log_phase("phase1:load_sources:owner_copy:done n={all_sources.len()}")
         self.ctx.native_objectless_decl_proofs = {}
+        var owned_resolution_roots: [text] = []
+        for root in closure_source_roots:
+            owned_resolution_roots.push(driver_source_owner_text_copy(root))
+        self.ctx.source_resolution_roots_owner = owned_resolution_roots
         self.ctx.source_paths_owner = owned_paths
         self.ctx.source_authored_paths_owner = owned_authored_paths
         self.ctx.source_contents_owner = owned_contents
@@ -1301,21 +1532,113 @@ impl CompilerDriver:
         self.ctx.source_content_hashes_owner = owned_content_hashes
         self.ctx.source_identities_owner = owned_identities
         self.ctx.source_module_names_owner = owned_module_names
+        # The complete inventory proves negatives. Positive policy source
+        # bytes are bounded-read and SHA-checked independently of compile
+        # sources, then parsed once and shared through reference owners.
+        if visibility_snapshot_id != "":
+            for source_row in 0..owned_paths.len():
+                val path = owned_paths[source_row]
+                if not visibility_snapshot_selected.contains_key(path) or
+                        visibility_snapshot_selected[path] != owned_identities[source_row]:
+                    self.ctx.add_error("manifest observation source digest mismatch: " + path)
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+        var visibility_policies: Dict<text, VisibilityManifestPolicyV1> = {}
+        var visibility_evidence: [VisibilityManifestEvidenceV1] = []
+        val visibility_roots_prevalidated = visibility_snapshot_id != "" and
+            visibility_manifest_roots_valid_v1(preclosed_snapshot_root, owned_resolution_roots) == ""
+        for source_row in 0..owned_paths.len():
+            var evidence = VisibilityManifestEvidenceV1()
+            if visibility_snapshot_id != "":
+                val observed = if visibility_roots_prevalidated:
+                    visibility_manifest_reads_prevalidated_v1(owned_paths[source_row],
+                        preclosed_snapshot_root, visibility_snapshot_id,
+                        visibility_inventory, visibility_snapshot_selected)
+                else:
+                    visibility_manifest_reads_v1(owned_paths[source_row],
+                        preclosed_snapshot_root, owned_resolution_roots, visibility_snapshot_id,
+                        visibility_inventory, visibility_snapshot_selected)
+                if observed.is_err():
+                    self.ctx.add_error(observed.unwrap_err())
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                val observations = observed.unwrap()
+                for row in observations.reads:
+                    if not row.exists: continue
+                    if not visibility_policies.contains_key(row.manifest_path):
+                        if not visibility_resolver_index.?:
+                            self.ctx.add_error("manifest resolver index unavailable")
+                            driver_entry_scan_cache_release()
+                            return (self.ctx, false)
+                        val loaded = self.load_visibility_manifest_policy_v1(row,
+                            observations.root, visibility_resolver_index!, visibility_snapshot_selected)
+                        if loaded.is_err():
+                            self.ctx.add_error(loaded.unwrap_err())
+                            driver_entry_scan_cache_release()
+                            return (self.ctx, false)
+                        visibility_policies[row.manifest_path] = loaded.unwrap()
+                    val policy = visibility_policies[row.manifest_path]
+                    if policy.content_sha256 != row.content_sha256 or
+                            policy.snapshot_id != row.snapshot_id or policy.coverage_root != observations.root or
+                            policy.directory_path != row.directory_path:
+                        self.ctx.add_error("manifest policy observation join mismatch: " + row.manifest_path)
+                        driver_entry_scan_cache_release()
+                        return (self.ctx, false)
+                    observations.policies = observations.policies.push(policy)
+                evidence = driver_visibility_evidence_copy_v1(observations)
+            visibility_evidence.push(evidence)
+            all_sources[source_row] = source_file_with_manifest_evidence_v1(all_sources[source_row], evidence)
+        self.ctx.source_manifest_evidence_owner_v1 = visibility_evidence
+        self.ctx.sources = all_sources
         # Capture compact public facets from the actual admitted source list,
         # before either boxed or streaming source buffers are reclaimed. The
         # adapter validates raw alias ambiguity and reuses phase-1 SHA owners.
-        match native_source_interface_index_from_sources_with_digests_v1(
-                all_sources, owned_paths, owned_identities):
-            case Ok(index): self.ctx.native_source_interface_index_v1 = Some(index)
-            case Err(reason):
-                self.ctx.add_error("native source interface index refused: " + reason)
-                return (self.ctx, false)
+        # Pure --parse-shard and --hir-shard workers exit before MIR/codegen
+        # witness assembly, while the parent builds the whole-inventory index.
+        # A per-file unit child (SIMPLE_HIR_SHARD + SIMPLE_FILE_WORKER_UNIT=1)
+        # lowers MIR only for its picked batch, so phase 2 builds a unit-scoped
+        # index for those targets and their direct imports once the pick and
+        # surfaces are known (driver_source_parse_streaming.spl). Building it
+        # here sliced all ~7,000 inventory bodies in EVERY unit: ~45M retained
+        # allocations, ~5.7 GB footprint and ~25 s per unit, which drove the
+        # Stage 4 CLI past its 18 GiB cap. Bug:
+        # doc/08_tracking/bug/p4_unit_whole_inventory_interface_index_2026-11-25.md
+        val hir_shard_child = (sosix_env_get_nullable("SIMPLE_PARSE_SHARD") ?? "") != "" or
+            (sosix_env_get_nullable("SIMPLE_HIR_SHARD") ?? "") != ""
+        val unit_child = hir_shard_child and
+            (sosix_env_get_nullable("SIMPLE_FILE_WORKER_UNIT") ?? "") == "1"
+        # Only the streaming phase 2 owns the unit-scoped build; any other
+        # unit route keeps the whole-inventory index.
+        if (hir_shard_child and not unit_child) or
+                (unit_child and driver_streaming_surface_enabled(self.ctx)):
+            self.ctx.native_source_interface_index_v1 = None
+        else:
+            match native_source_interface_index_from_sources_with_digests_v1(
+                    all_sources, owned_paths, owned_identities):
+                case Ok(index): self.ctx.native_source_interface_index_v1 = Some(index)
+                case Err(reason):
+                    self.ctx.add_error("native source interface index refused: " + reason)
+                    return (self.ctx, false)
         self.ctx.native_module_input_fact_snapshots_v1 = {}
         # Canonical phase-1 owners now retain the source bodies. Drop the
         # duplicate scan payloads before parsing/lowering grows compiler RSS.
         driver_entry_scan_cache_release()
         if source_trace:
             print "[load_sources] total {all_sources.len()}"
+
+        # The authenticated preclosed route skips the entry walk that normally
+        # publishes this mode. Both the flat bridge and HIR import lowering
+        # require it to retain real non-entry declarations and function bodies.
+        # Publish only after all source admission checks have succeeded; keep it
+        # live through parse/HIR, as on the ordinary entry-walk route.
+        if admitted_preclosed.is_some() and self.ctx.error_count_value == 0:
+            if not rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1"):
+                self.ctx.add_error("preclosed source parser mode publication failed: {preclosed_snapshot_root}")
+                return (self.ctx, false)
+            val published_closure_mode = sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? ""
+            if published_closure_mode != "1":
+                self.ctx.add_error("preclosed source parser mode readback failed: {preclosed_snapshot_root}")
+                return (self.ctx, false)
 
         # Keep the scalar error verdict in this aggregate's owning frame.  The
         # self-hosted Stage2 ABI cannot safely pass the freshly copied

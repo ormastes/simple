@@ -1,4 +1,28 @@
 # async_spec: destructured Future from anon-tuple Promise.new() gives inconsistent poll() results
+
+## 2026-11-03 current-source triage: production behavior unverified
+
+The historical spec description below is no longer the current test source.
+`test/01_unit/lib/std/async_spec.spl` now declares `enum TaskState` and its
+local Future/Promise doubles use module-registry `state_id` handles. Those
+doubles no longer exercise the original embedded-state anonymous-tuple shape;
+their success cannot establish production `std.nogc_async_mut.async` behavior.
+The inventory's `async/task.spl` location is not evidence of a task-owner bug.
+
+Added `test/01_unit/lib/nogc_async_mut/async_promise_pair_persistence_spec.spl`
+imports the production Promise and Poll owners. It checks pending-to-ready
+completion followed by repeated polls, independent destructured pairs, and
+rejected second completion preserving the original payload. Current Poll's
+public payload helper is `poll_unwrap`; the removed `.unwrap()` method is not
+reintroduced merely to reproduce stale syntax.
+
+Execution is **TEST_BLOCKED**: no admitted pure-Simple test runtime is available
+on this Windows host. The tracked `bin/simple.exe` is a Rust seed and was not
+used as a substitute. No failure reproduction, repair, or PASS is claimed;
+this record remains OPEN. Resume once an admitted full CLI exists:
+`<qualified-selfhosted-runtime> test test/01_unit/lib/nogc_async_mut/async_promise_pair_persistence_spec.spl --mode=interpreter`.
+Record producer/source/backend/runtime hashes and actual scenario counts.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
@@ -119,3 +143,40 @@ applied locally for clarity; that fix is not present in the committed file.
   `Future.poll()` inconsistency, which still blocks full green even after
   fix (1) is applied.
 
+
+## Canonical database reconciliation — 2026-11-03
+
+OPEN; PR #6301 MERGED at 5cec7885187661e950f941045cdb6b8d522a4884 and contributes production-owner Promise/Future detectors only, not a production repair. TEST_BLOCKED: real anonymous-tuple readiness/value/second-completion scenarios UNRUN without a qualified self-hosted runtime. Await detector execution and triage; historical surrogate-spec repairs are not production-state proof.
+
+## 2026-11-04 triage (libbug-async): INTERPRETER-ROOT, lib is correct
+`async_promise_pair_spec.spl` under Rust-seed `run`: 0/4 pass. Not tuple-related and not Promise/Future: a class instance stored in another class's field is value-copied by the seed tree-walk interpreter when the entry is not `main` (JIT path under `fn main` aliases correctly). Lib-free repro: `class Fu: n:i64; me set(v)`, `class Pr: fu: Fu; fn complete(v): self.fu.set(v)`; `val f = Fu(n: 0); val p = Pr(fu: f); p.complete(42); print f.n` called from a non-`main` function prints 0 (expected 42); same code under `fn main` prints 42. No lib change made.
+
+## 2026-11-04 note (fix-classref lane): interpreter root fixed by default
+
+`SIMPLE_INTERP_CLASS_REF` is now ON by default (value.rs
+`class_instance_storage_enabled`). On the rebuilt seed, default run:
+`async_promise_pair_spec` 4/4 (was 0/4), `async_promise_pair_persistence_spec`
+3/3 (was 0/3), `host_promise_terminal_spec` 3/3 (was 0/3).
+`test/01_unit/lib/std/async_spec.spl` itself was already 46/0 on the fresh
+release seed default (measured 2026-11-04) and stays 46/0 — the "19 failures"
+in the record head predate that seed.
+Coordinator owns the bug_db status change.
+
+## Closed 2026-11-25 (p2w1-ah lane) — stale; interpreter root fixed 2026-11-04
+
+The "remains OPEN" header above is superseded by the 2026-11-04 notes: the
+root cause was the seed tree-walk interpreter value-copying class instances
+stored in fields outside `main`, and the fix (`SIMPLE_INTERP_CLASS_REF`
+default ON) landed with execution evidence (`async_promise_pair_spec` 4/4,
+`async_promise_pair_persistence_spec` 3/3,
+`test/01_unit/lib/std/async_spec.spl` 46/0). Source inspection on
+release/1.0.0 @ 602063b765f confirms the switch is present and default-ON:
+`src/compiler_rust/compiler/src/value.rs:3504-3507`
+(`class_instance_storage_enabled()` -> `unwrap_or(true)`). Execution
+re-verification on this Windows host is environment-blocked: release/1.0.0
+HEAD carries 940 `@representation_boundary` annotations (cfd89933699) that
+the pinned `bin/simple.exe` (Rust seed v1.0.0-rc.1) rejects, so every
+`bin/simple.exe test ... --mode=interpreter` run fails at
+`src/app/test_runner_new/test_runner_client.spl:9` before reaching any spec.
+Closure rests on the recorded 2026-11-04 execution evidence plus current
+source inspection. Status: CLOSED.

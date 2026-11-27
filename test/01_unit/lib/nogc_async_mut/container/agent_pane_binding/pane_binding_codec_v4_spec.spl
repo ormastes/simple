@@ -1,0 +1,82 @@
+# AUTHORED SOURCE-ONLY NOT_RUN. milestone_0022 N4 / milestone_0021 14B+14C: canonical encode/decode,
+# golden wire bytes, and exact decoder refusal reasons (review-n4-r1 P2-3/P3-2).
+use std.spec.*
+use std.common.contracts.container.primary_attach_v1.{HostAgentPaneBindingV4, host_agent_pane_binding_encode_v4,
+    host_agent_pane_binding_decode_v4, host_agent_pane_binding_digest_v4}
+
+# Golden wire bytes (P3-2): controller and agent must agree byte-for-byte.
+# Keys sorted bytewise, inline dict, bare scalars, one trailing newline.
+# `\{`/`\}` keep the braces literal (no interpolation).
+# Digest = lowercase hex sha256 of these exact bytes (computed off-line with
+# `printf '<golden>' | sha256sum`).
+val GOLDEN_V4: text = "\{bindingUid: binding-a, kind: host-agent-pane-binding, paneId: pane-a, serviceEpoch: 3, serviceIncarnation: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, sessionId: session-a, version: 4, windowId: window-a\}\n"
+val GOLDEN_DIGEST_V4: text = "d9a810378f7537f1b45eb9c4cc19b69d819ef68d5e52544b46f4cac30c0e7b50"
+
+fn base() -> HostAgentPaneBindingV4:
+    HostAgentPaneBindingV4(binding_uid: "binding-a", service_incarnation: "a".repeat(32), session_id: "session-a",
+        window_id: "window-a", pane_id: "pane-a", service_epoch: 3)
+
+describe "Host agent pane binding codec":
+    it "round-trips encode then decode byte-exactly":
+        step("Decode the canonical bytes and re-encode")
+        val source = host_agent_pane_binding_encode_v4(base()).unwrap()
+        val decoded = host_agent_pane_binding_decode_v4(source).unwrap()
+        expect(decoded.binding_uid).to_equal("binding-a")
+        expect(decoded.service_incarnation).to_equal("a".repeat(32))
+        expect(decoded.session_id).to_equal("session-a")
+        expect(decoded.window_id).to_equal("window-a")
+        expect(decoded.pane_id).to_equal("pane-a")
+        expect(decoded.service_epoch).to_equal(3)
+        expect(host_agent_pane_binding_encode_v4(decoded).unwrap()).to_equal(source)
+
+    it "encodes the golden canonical bytes and digest":
+        step("The encoder output and its digest are pinned, not only round-tripped")
+        expect(host_agent_pane_binding_encode_v4(base()).unwrap()).to_equal(GOLDEN_V4)
+        expect(host_agent_pane_binding_digest_v4(base()).unwrap()).to_equal(GOLDEN_DIGEST_V4)
+        expect(host_agent_pane_binding_decode_v4(GOLDEN_V4).unwrap().service_epoch).to_equal(3)
+
+    it "refuses non-canonical spellings of a valid binding":
+        step("Missing or extra trailing newline and a leading-zero integer parse but do not re-encode byte-exactly")
+        val trimmed = GOLDEN_V4.substring(0, GOLDEN_V4.len() - 1)
+        expect(host_agent_pane_binding_decode_v4(trimmed).unwrap_err()).to_equal("host-agent-pane-binding-noncanonical")
+        expect(host_agent_pane_binding_decode_v4(GOLDEN_V4 + "\n").unwrap_err()).to_equal("host-agent-pane-binding-noncanonical")
+        val leading_zero = GOLDEN_V4.replace("serviceEpoch: 3,", "serviceEpoch: 03,")
+        expect(host_agent_pane_binding_decode_v4(leading_zero).unwrap_err()).to_equal("host-agent-pane-binding-noncanonical")
+
+    it "refuses empty, oversize and malformed sources":
+        step("Size bounds and syntax are checked before fields")
+        expect(host_agent_pane_binding_decode_v4("").unwrap_err()).to_equal("host-agent-pane-binding-source-size")
+        expect(host_agent_pane_binding_decode_v4("x".repeat(4097)).unwrap_err()).to_equal("host-agent-pane-binding-source-size")
+        expect(host_agent_pane_binding_decode_v4("\{").unwrap_err()).to_equal("host-agent-pane-binding-syntax")
+
+    it "refuses a duplicate key at the strict parser":
+        step("Two paneId entries are a strict-parser duplicate_key, reported as syntax")
+        val duplicate = GOLDEN_V4.replace("windowId: window-a", "paneId: pane-b")
+        expect(host_agent_pane_binding_decode_v4(duplicate).unwrap_err()).to_equal("host-agent-pane-binding-syntax")
+
+    it "refuses an unknown or missing field":
+        step("Renaming a key names the unknown field; dropping a key names the missing one")
+        val unknown = GOLDEN_V4.replace("windowId:", "windowIx:")
+        expect(host_agent_pane_binding_decode_v4(unknown).unwrap_err()).to_equal("host-agent-pane-binding-unknown-field:windowIx")
+        val missing = GOLDEN_V4.replace(", windowId: window-a", "")
+        expect(host_agent_pane_binding_decode_v4(missing).unwrap_err()).to_equal("host-agent-pane-binding-missing-field:windowId")
+
+    it "refuses a wrong version or kind":
+        step("Version 4 and kind host-agent-pane-binding are both required")
+        val version = GOLDEN_V4.replace("version: 4", "version: 5")
+        expect(host_agent_pane_binding_decode_v4(version).unwrap_err()).to_equal("host-agent-pane-binding-version-kind")
+        val kind = GOLDEN_V4.replace("kind: host-agent-pane-binding", "kind: host-agent-pane-lease")
+        expect(host_agent_pane_binding_decode_v4(kind).unwrap_err()).to_equal("host-agent-pane-binding-version-kind")
+
+    it "refuses a string-typed epoch":
+        step("A quoted epoch decodes as a String and is refused by the integer reader")
+        val quoted = GOLDEN_V4.replace("serviceEpoch: 3,", "serviceEpoch: \"3\",")
+        expect(host_agent_pane_binding_decode_v4(quoted).unwrap_err()).to_equal("host-agent-pane-binding-integer-required:serviceEpoch")
+
+    it "refuses a binding whose fields break the field rules":
+        step("A decoded value is validated, so an empty pane id cannot be smuggled through the codec")
+        val tampered = GOLDEN_V4.replace("paneId: pane-a", "paneId: \"\"")
+        expect(host_agent_pane_binding_decode_v4(tampered).unwrap_err()).to_equal("host-agent-pane-binding-pane-name-invalid")
+        step("Epoch 0 is refused by the decoder too (14C)")
+        val zero = GOLDEN_V4.replace("serviceEpoch: 3,", "serviceEpoch: 0,")
+        expect(host_agent_pane_binding_decode_v4(zero).unwrap_err()).to_equal("host-agent-pane-binding-epoch-invalid")

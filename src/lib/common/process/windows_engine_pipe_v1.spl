@@ -1,0 +1,105 @@
+# Pure private-broker pipe values. No native HANDLE, process grant or registry.
+pub const WINDOWS_ENGINE_PIPE_ENDPOINT_V1 = r"\\.\pipe\docker_engine"
+pub const WINDOWS_ENGINE_PIPE_MAX_BYTES_V1: i64 = 65536
+
+pub struct WindowsEnginePipeLeaseV1:
+    slot: i32
+    generation: i64
+
+pub enum WindowsEnginePipeAdmissionV1:
+    Ready(lease: WindowsEnginePipeLeaseV1)
+    CleanupRequired(lease: WindowsEnginePipeLeaseV1, reason: text)
+    Rejected(reason: text)
+
+pub enum WindowsEnginePipeReadV1:
+    Data(bytes: [u8])
+    Pending
+    End
+    Failed(reason: text)
+
+pub struct WindowsEnginePipeObservationV1:
+    server_pid: i64
+    owner_class: text
+    dacl_protected: bool
+    untrusted_control_rights: bool
+
+pub struct WindowsEnginePipePollV1:
+    read_pending: bool
+    write_pending: bool
+    closing: bool
+    closed: bool
+    write_attempted: bool
+
+pub struct WindowsEnginePipeWriteContextV1:
+    action: text
+    request_digest: text
+    operation_id: text
+    expires_at_unix_ms: i64
+
+pub struct WindowsEnginePipeAceV1:
+    kind: i64
+    flags: i64
+    mask: i64
+    trustee_class: text
+
+# A completed pending read can exceed a later caller's bound. Keep the unread
+# suffix in the same owner buffer until this window reports it fully drained.
+pub struct WindowsEnginePipeReadWindowV1:
+    offset: i64
+    count: i64
+    next_offset: i64
+    drained: bool
+
+pub fn windows_engine_pipe_read_window_v1(ready: i64, offset: i64,
+        max_bytes: i64) -> Result<WindowsEnginePipeReadWindowV1, text>:
+    if ready < 0 or ready > WINDOWS_ENGINE_PIPE_MAX_BYTES_V1 or offset < 0 or offset > ready:
+        return Err("engine-pipe-read-window-invalid")
+    if max_bytes <= 0 or max_bytes > WINDOWS_ENGINE_PIPE_MAX_BYTES_V1:
+        return Err("engine-pipe-read-bound-invalid")
+    val remaining = ready - offset
+    val count = if remaining > max_bytes: max_bytes else: remaining
+    Ok(WindowsEnginePipeReadWindowV1(offset: offset, count: count,
+        next_offset: offset + count, drained: offset + count == ready))
+
+pub fn windows_engine_pipe_acl_reason_v1(owner_class: text, protected: bool,
+        present: bool, null_dacl: bool, aces: [WindowsEnginePipeAceV1]) -> text:
+    if owner_class != "system" and owner_class != "administrators": return "engine-pipe-owner-untrusted"
+    if not protected or not present or null_dacl: return "engine-pipe-protected-present-dacl-required"
+    if aces.len() > 256: return "engine-pipe-ace-bound"
+    for ace in aces:
+        if ace.kind != 0 and ace.kind != 1: return "engine-pipe-ace-kind-unsupported"
+        if ace.flags < 0 or ace.flags > 255 or ace.mask < 0 or ace.mask > 4294967295:
+            return "engine-pipe-ace-invalid"
+        if ace.kind == 0 and (ace.flags & 8) == 0:
+            val trusted = ace.trustee_class == "system" or ace.trustee_class == "administrators"
+            # FILE_CREATE_PIPE_INSTANCE shares FILE_APPEND_DATA's bit. Both
+            # GENERIC_WRITE and GENERIC_ALL map to instance-creation rights.
+            # Also refuse DELETE|WRITE_DAC|WRITE_OWNER even without generics.
+            if not trusted and ((ace.mask & 851972) != 0 or (ace.mask & 1342177280) != 0):
+                return "engine-pipe-untrusted-control-grant"
+    ""
+
+pub fn windows_engine_pipe_write_context_reason_v1(context: WindowsEnginePipeWriteContextV1) -> text:
+    if context.action != "create" and context.action != "start": return "engine-pipe-explicit-create-start-required"
+    # ContainerExecRequestV3/birth digests use canonical raw lowercase hex.
+    if context.request_digest.len() != 64:
+        return "engine-pipe-request-digest-invalid"
+    for ch in context.request_digest.chars():
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")): return "engine-pipe-request-digest-invalid"
+    if context.operation_id == "" or context.operation_id.len() > 128: return "engine-pipe-operation-invalid"
+    for ch in context.operation_id.chars():
+        if not ((ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+                (ch >= "0" and ch <= "9") or ch == "-" or ch == "_" or ch == "." or ch == ":"):
+            return "engine-pipe-operation-invalid"
+    if context.expires_at_unix_ms <= 0: return "engine-pipe-expiry-invalid"
+    ""
+
+# Completion errors are not interchangeable. Unknown query failures retain
+# pending storage; a cancellation request or invalid HANDLE is no discharge.
+pub fn windows_engine_pipe_completion_v1(error: i64, closing: bool, read: bool) -> text:
+    if error == 996: return "pending"
+    if error == 995 and closing: return "cancelled"
+    if read and (error == 109 or error == 233): return "end"
+    if error == 995 or error == 109 or error == 233 or error == 232 or error == 234 or error == 64:
+        return "failed-terminal"
+    "unknown"

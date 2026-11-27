@@ -11,7 +11,7 @@ use std.spec.step
 
 use std.spec.{describe, context, it, expect}
 use os.compositor.screenshot_compare.{
-    compare_pixel_buffers, print_comparison_report, compare_with_tolerance}
+    compare_pixel_buffers, print_comparison_report}
 use std.gc_async_mut.gpu.browser_engine.glass_pipeline_compare.{
     render_both_pipelines, PipelineOutput}
 use std.gc_async_mut.gpu.browser_engine.glass_demo_registry.{
@@ -19,6 +19,7 @@ use std.gc_async_mut.gpu.browser_engine.glass_demo_registry.{
 use std.gc_async_mut.gpu.browser_engine.backend_screenshot_capture.{
     BackendCapture, capture_with_backend}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.nogc_sync_mut.ui.compare_view_host.{compare_view_inspect}
 use common.ui.glass_test_page.{generate_glass_test_html}
 
 # ============================================================================
@@ -74,15 +75,26 @@ describe "Glass Pipeline Screenshot Comparison":
             val demos = list_core_glass_demos()
             if demos.len() > 0:
                 val demo = demos[0]
-                val output = render_both_pipelines(demo.path, "glass_dark", W, H)
+                val output = render_both_pipelines(demo.sdn_path, "glass_dark", W, H)
                 if output.error == "":
                     expect(output.web_pixels.len()).to_be_greater_than(0)
                     expect(output.engine_pixels.len()).to_be_greater_than(0)
+                    compare_view_inspect(
+                        "glass pipeline web vs engine " + demo.sdn_path,
+                        "web pipeline",
+                        output.web_pixels,
+                        W,
+                        H,
+                        "engine pipeline",
+                        output.engine_pixels,
+                        W,
+                        H
+                    )
                     val result = compare_pixel_buffers(
                         output.web_pixels, output.engine_pixels, W, H, THRESHOLD_PIPELINE)
                     expect(result.match_percentage).to_be_greater_than(MIN_PCT_PIPELINE - 1)
                     if result.match_percentage < 10000:
-                        print "Pipeline comparison for {demo.path}:"
+                        print "Pipeline comparison for {demo.sdn_path}:"
                         print_comparison_report(result)
 
     context "cross-backend rendering consistency":
@@ -96,6 +108,7 @@ describe "Glass Pipeline Screenshot Comparison":
             expect(first.success).to_equal(true)
             expect(second.success).to_equal(true)
             # Repeated renders must be deterministic
+            compare_view_inspect("glass pipeline repeated software glass_dark", "first render", first.pixels, W, H, "second render", second.pixels, W, H)
             val result = compare_pixel_buffers(first.pixels, second.pixels, W, H, 0)
             expect(result.match_percentage).to_equal(10000)
 
@@ -114,5 +127,6 @@ describe "Glass Pipeline Screenshot Comparison":
             val cuda = capture_with_backend(html, W, H, "cuda")
             expect(sw.success).to_equal(true)
             expect(cuda.success).to_equal(true)
+            compare_view_inspect("glass pipeline software vs cuda glass_dark", "software", sw.pixels, W, H, "cuda", cuda.pixels, W, H)
             val result = compare_pixel_buffers(sw.pixels, cuda.pixels, W, H, THRESHOLD_GPU)
             expect(result.match_percentage).to_be_greater_than(MIN_PCT_GPU - 1)

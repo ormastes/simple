@@ -1,6 +1,6 @@
 # Stage 2 link passes GNU driver flags to cl.exe (Windows/MSVC)
 
-- **Status:** RESOLVED (driver fix `db06afd50ccd`; rechecked 2026-09-22)
+- **Status:** RESOLVED (driver fix `db06afd50ccd`, ancestor of release/1.0.0 verified 2026-11-02; rechecked 2026-09-22); row closed 2026-11-02
 - **Severity:** P1 — blocks Stage 2 of the Windows/MSVC bootstrap
 - **Discovered:** 2026-09-12
 - **Lane:** `sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage2 --mode=dynload`

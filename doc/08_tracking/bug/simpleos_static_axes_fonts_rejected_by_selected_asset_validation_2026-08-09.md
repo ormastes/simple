@@ -274,3 +274,23 @@ then apply the readiness/diagnostic change on top of the reconciled file.
 TODO(deferred-environment): after the arm64 SimpleOS QEMU phase is available,
 boot this entry point with one invalid non-default face and verify that the
 loaded default face remains selected without a startup-time or RSS regression.
+
+## Triage note 2026-11-25 (p2w5-ag lane) — closure scope clarified; in-guest receipt still outstanding
+
+The "Closed 2026-09-16" header above covers the falsified validator
+hypothesis (both static faces validate cleanly host-side, pinned by
+`test/01_unit/lib/common/encoding/font_registry_static_axes_validation_spec.spl`)
+and the 2026-09-22 ARM64 readiness follow-up. What it does NOT cover: the
+original guest-side `Bungee=rejected / UnifrakturCook=rejected` serial receipt
+was never re-read after the falsification, so the true in-guest refusal reason
+(`runtime` vs `identity` vs a lane-specific `default-axes` answer) is still
+unestablished. The reason-threading receipt the fix recipe asked for exists at
+HEAD (`font_renderer_last_selected_registration_reason`,
+`src/lib/nogc_sync_mut/text_layout/font_renderer.spl:818-836`), and the
+static-branch workaround style is in place
+(`src/lib/common/encoding/sfnt.spl:220-232`, `_sfnt_has_table` +
+early `manifest == "static"` return). Reading the receipt requires the
+OVMF-pflash board-proxy lane plus a physical-board pass
+(`.claude/rules/board-runnable.md`) — not runnable on this Windows host, and
+this lane does not build kernels. Left as recorded: hypothesis falsified,
+guest receipt pending; no code change made.

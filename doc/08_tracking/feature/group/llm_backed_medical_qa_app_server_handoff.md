@@ -1,7 +1,5 @@
-# llm-backed_medical_qa_app/server_handoff
+# Feature Group: llm-backed_medical_qa_app/server_handoff
 
-## Features
-
-| ID | Feature | Description | Modes | Platforms | Spec |
-|----|---------|-------------|-------|-----------|------|
-| <a id="feature-FR-SPIPE-LLM-0003"></a>FR-SPIPE-LLM-0003 | Add medical safety and deployment evidence | Require safety, license, and deployment evidence | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | - |
+| ID | Status | Device | Component | Priority | Title | Pipeline Evidence |
+|----|--------|--------|-----------|----------|-------|-------------------|
+| FR-SPIPE-LLM-0003 | request | llm-backed_medical_qa_app/server_handoff | LLM-backed medical QA app/server handoff | P1 | Add medical safety and deployment evidence | - |

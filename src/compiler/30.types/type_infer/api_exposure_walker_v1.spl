@@ -1,0 +1,159 @@
+# Pure structural walk over retained signature facts. One O(n) pass; no HIR,
+# symbol table or substitution is consulted. Facts are trees by construction
+# (every node's parent precedes it), so no SCC/memo table is needed until
+# nominal members are projected. Every gap fails closed to Unknown.
+use compiler.common.api_signature_facts_v1.{ApiSignatureKindV1, ApiSignatureNodeV1,
+    ApiCallableFactV1, ApiSignatureFactsV1}
+use compiler.common.api_exposure_result_v1.{ApiExposureVerdictV1, ApiExposureFindingV1,
+    ApiCallableExposureV1, ApiModuleExposureV1}
+
+val API_EXPOSURE_NODE_BUDGET_V1: i64 = 16384
+val API_EXPOSURE_PATH_BUDGET_V1: i64 = 64
+val MALFORMED_REASON: text = "facts-malformed"
+
+fn with_unique(reasons: [text], reason: text) -> [text]:
+    var out: [text] = []
+    for existing in reasons:
+        if existing == reason: return reasons
+        out.push(existing)
+    out.push(reason)
+    out
+
+fn is_bare_builtin(kind: ApiSignatureKindV1) -> bool:
+    match kind:
+        case ApiSignatureKindV1.Integer | ApiSignatureKindV1.Float | ApiSignatureKindV1.Bool | ApiSignatureKindV1.Text | ApiSignatureKindV1.Char: true
+        case _: false
+
+fn finding_path(nodes: [ApiSignatureNodeV1], leaf: i64) -> [i64]:
+    var reversed: [i64] = []
+    var cursor = leaf
+    while cursor >= 0 and reversed.len() <= API_EXPOSURE_PATH_BUDGET_V1:
+        reversed.push(cursor)
+        cursor = nodes[cursor].parent
+    var path: [i64] = []
+    var index = reversed.len() - 1
+    while index >= 0:
+        path.push(reversed[index])
+        index = index - 1
+    path
+
+fn finding_ordinals(nodes: [ApiSignatureNodeV1], path: [i64]) -> [i64]:
+    var ordinals: [i64] = []
+    var index = 1
+    while index < path.len():
+        ordinals.push(nodes[path[index]].ordinal)
+        index = index + 1
+    ordinals
+
+fn callable_row(index: i64, fact: ApiCallableFactV1, verdict: ApiExposureVerdictV1,
+        violations: i64, unknowns: i64) -> ApiCallableExposureV1:
+    ApiCallableExposureV1(index, fact.local_symbol, fact.declaration_owner, fact.declaration_name,
+        fact.declared_visibility, verdict, violations, unknowns)
+
+pub fn walk_api_exposure_v1(facts: ApiSignatureFactsV1) -> ApiModuleExposureV1:
+    var result = ApiModuleExposureV1(facts.module_name, facts.module_path,
+        ApiExposureVerdictV1.Unknown, [], [], [], false)
+    for reason in facts.unknown_reasons:
+        result.unknown_reasons = with_unique(result.unknown_reasons, reason)
+    # Effective export closure is never collected by the observation slice, so a
+    # module can only be Violates or Unknown here. Record why, never imply Safe.
+    result.unknown_reasons = with_unique(result.unknown_reasons, "effective-export-closure-not-collected")
+    val nodes = facts.nodes
+    if nodes.len() > API_EXPOSURE_NODE_BUDGET_V1:
+        result.truncated = true
+        result.unknown_reasons = with_unique(result.unknown_reasons, "type-node-budget")
+        return result
+    # Structural invariants: a parent precedes its child and every non-root
+    # node belongs to exactly one callable root. Violations poison the walk.
+    var owner: [i64] = []
+    var depth: [i64] = []
+    var malformed = false
+    var index = 0
+    while index < nodes.len():
+        val parent = nodes[index].parent
+        if parent == -1:
+            owner.push(index)
+            depth.push(0)
+        elif parent < 0 or parent >= index:
+            malformed = true
+            owner.push(-1)
+            depth.push(0)
+        else:
+            owner.push(owner[parent])
+            depth.push(depth[parent] + 1)
+            if depth[index] > API_EXPOSURE_PATH_BUDGET_V1: malformed = true
+        index = index + 1
+    # Root -> callable binding; a shared or missing root is malformed.
+    var root_callable: Dict<i64, i64> = {}
+    var callable_index = 0
+    while callable_index < facts.callables.len():
+        val root = facts.callables[callable_index].signature_root
+        if root < 0 or root >= nodes.len() or nodes[root].parent != -1 or nodes[root].kind != ApiSignatureKindV1.Function or root_callable.has(root):
+            malformed = true
+        else:
+            root_callable[root] = callable_index
+        callable_index = callable_index + 1
+    # Every root must be claimed, and each callable has exactly one return slot.
+    var returns: [i64] = []
+    for fact in facts.callables: returns.push(0)
+    index = 0
+    while index < nodes.len():
+        if nodes[index].parent == -1 and not root_callable.has(index): malformed = true
+        if nodes[index].parent >= 0 and nodes[index].ordinal == -1 and owner[index] >= 0 and nodes[index].parent == owner[index] and root_callable.has(owner[index]):
+            val claimed = root_callable[owner[index]]
+            returns[claimed] = returns[claimed] + 1
+        index = index + 1
+    var violations: [i64] = []
+    var unknowns: [i64] = []
+    callable_index = 0
+    while callable_index < facts.callables.len():
+        violations.push(0)
+        unknowns.push(0)
+        if returns[callable_index] != 1: malformed = true
+        callable_index = callable_index + 1
+    if malformed: result.unknown_reasons = with_unique(result.unknown_reasons, MALFORMED_REASON)
+    # Leaf classification. Each node is visited once, so findings are already
+    # unique by (callable, leaf, path).
+    index = 0
+    while index < nodes.len():
+        val node_ = nodes[index]
+        val root = owner[index]
+        if not malformed and root >= 0 and root_callable.has(root):
+            val callable = root_callable[root]
+            var verdict = ApiExposureVerdictV1.Safe
+            var reason = node_.unknown_reason
+            if is_bare_builtin(node_.kind):
+                verdict = ApiExposureVerdictV1.Violates
+                reason = "bare-builtin-exposed"
+            elif reason.len() > 0:
+                verdict = ApiExposureVerdictV1.Unknown
+            elif node_.kind == ApiSignatureKindV1.Unknown or node_.kind == ApiSignatureKindV1.Pointer or node_.kind == ApiSignatureKindV1.Nominal:
+                # These kinds always carry a reason from the projector; a silent
+                # one is a malformed record, never Safe.
+                verdict = ApiExposureVerdictV1.Unknown
+                reason = MALFORMED_REASON
+            if verdict != ApiExposureVerdictV1.Safe:
+                val path = finding_path(nodes, index)
+                result.findings.push(ApiExposureFindingV1(callable, verdict, index, node_.kind,
+                    path, finding_ordinals(nodes, path), reason))
+                if verdict == ApiExposureVerdictV1.Violates:
+                    violations[callable] = violations[callable] + 1
+                else:
+                    unknowns[callable] = unknowns[callable] + 1
+        index = index + 1
+    var any_violation = false
+    callable_index = 0
+    while callable_index < facts.callables.len():
+        var verdict = ApiExposureVerdictV1.Safe
+        if malformed:
+            verdict = ApiExposureVerdictV1.Unknown
+        elif violations[callable_index] > 0:
+            verdict = ApiExposureVerdictV1.Violates
+            any_violation = true
+        elif unknowns[callable_index] > 0:
+            verdict = ApiExposureVerdictV1.Unknown
+        result.callables.push(callable_row(callable_index, facts.callables[callable_index], verdict,
+            violations[callable_index], unknowns[callable_index]))
+        callable_index = callable_index + 1
+    if any_violation: result.verdict = ApiExposureVerdictV1.Violates
+    result

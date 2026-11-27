@@ -257,3 +257,19 @@ FIXED 2026-08-06 above. No `src/lib` action remains from this doc.
 Status: CLOSED (2026-09-13) — all `src/lib` sites fixed; verified by content
 inspection against sha `f26970e9d93` (no test run needed, comment-fix
 correspondence is unambiguous and each site's docstring records its own fix).
+
+## Verification 2026-11-25 (worktree wt-p2w6-ah, release/1.0.0 HEAD f3fb8f24dc9)
+
+- **measured (source inspection)** — all four previously-broken sites remain
+  fixed at this HEAD: `aws_sigv4.spl:40,85` iterate `s.bytes()`;
+  `fat32_dir_ops.spl` has no `char_at(...) as u8` outside the fix-recording
+  comment; `doc_ops.spl:187` `_to_lower` iterates `s.bytes()`;
+  `theme_package_wire.spl:139,170` iterate `for ch in value:`.
+- **measured (live probe, Rust seed `bin/simple.exe run`, Windows)** — the two
+  seed root causes are fixed in the pinned binary too:
+  `"Café".char_at(3) as i64` → `233` (was a raw pointer on JIT),
+  `(97).chr()` → `"a"` (was `Function 'i64.chr' not found`),
+  `"aé€😀z".char_at(9) == ""` → `true` (was `nil`/fail-open).
+- **limitation** — spec harness (`bin/simple.exe test`) cannot run at this
+  HEAD (seed rejects `@representation_boundary`); verification is probe +
+  inspection only. Closure stands.

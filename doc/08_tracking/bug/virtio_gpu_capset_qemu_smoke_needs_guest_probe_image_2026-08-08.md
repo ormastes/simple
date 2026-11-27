@@ -1,4 +1,6 @@
 # V3 virtio-gpu QEMU capset smoke needs a guest probe image (2026-08-08)
+
+Status: fix-implemented-verification-pending
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
@@ -101,3 +103,14 @@ unchanged in scope; no code defect to grep for, since the gap is a missing
 BLOCKED on guest-kernel engineering, unchanged from doc. Not upgraded to
 resolved.
 
+
+
+## BF-10 Fix & Verification Status (2026-11-26)
+
+- **Code fix:**
+  - `src/os/drivers/virtio/virtio_gpu_capset.spl`: added `gpu_capset_venus_bit`, `gpu_capset_probe_report_line` (formats `VIRTIO_GPU_CAPSETS n=<count> venus=<0|1>` expected by `scripts/check/check-virtio-gpu-capset-qemu.shs`), `gpu_capset_probe_admitted` (`n >= 1`), and `gpu_probe_capset_summary`.
+  - `src/os/drivers/gpu/virtio_gpu_entry.spl`: added `gpu_capset_probe_main(capset_budget: u32 = 8u32)` scanning PCI (`0x03/0x80` and `0x03/0x00`), initializing `VirtioGpuDriver`, calling `gpu_query_capsets`, and printing the `VIRTIO_GPU_CAPSETS` line via `log_raw_println`.
+- **Host specs verified (`SIMPLE_LIB=src`, `--mode=interpreter`):**
+  - `test/01_unit/os/wm_bf10/bf10_virtio_capset_and_gpu_probe_spec.spl`: `3 passed, 0 failed` (`outcome=OK`)
+  - `test/01_unit/os/drivers/virtio/virtio_gpu_capset_spec.spl`: `46 passed, 0 failed` (`outcome=OK`)
+- **Pending QEMU verification:** Package an OVMF-bootable guest disk image invoking `gpu_capset_probe_main()` (`build/os/simpleos_x86_64_virtio_gpu_capset_probe.img`) and run `sh scripts/check/check-virtio-gpu-capset-qemu.shs` with `-device virtio-gpu-pci` on Linux/OVMF QEMU.

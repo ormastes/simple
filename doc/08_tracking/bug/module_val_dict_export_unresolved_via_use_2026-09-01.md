@@ -4,7 +4,10 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN (SIMPLE-CAPABILITY / compiler import resolution)
+**Status:** FIXED (2026-11-11, lane ne15) — dict-valued module `val` exports now
+resolve through named and wildcard `use`; 8/9 examples pass on the fresh seed.
+The 1 residual failure is a separate `dir.create`/`dir.exist` Windows issue, not
+this import gap. See addendum.
 **Filed:** 2026-09-01
 **Found by:** triage of `test/01_unit/lib/std/` failures on Windows
   (`test/01_unit/lib/std/shell/file_system_spec.spl`, 0/9 passing).
@@ -81,3 +84,76 @@ bin/simple test test/01_unit/lib/std/shell/file_system_spec.spl
 # Results: 9 total, 0 passed, 9 failed — all "variable `file` not found"
 ```
 
+
+
+## Addendum 2026-11-11 (lane ne15) — FIXED; dict-val export resolves via `use`; 1 residual example is a different defect
+
+**Verification actually run** (worktree simple-p3-ne15-20261111, tip
+f7640d20a458, fresh seed 46fe8f6b6def, seed-smoke):
+
+```
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe ./bin/simple.exe test \
+  test/01_unit/lib/std/shell/file_system_spec.spl --mode=interpreter --no-cache
+# Results: 9 total, 8 passed, 1 failed
+```
+
+(was: `9 total, 0 passed, 9 failed` — every example `variable 'file' not
+found`). All `file.*` namespace calls through the documented
+`use std.shell.{file}` pattern now resolve and behave correctly (exists,
+write/read text, append, copy, rename, recursive dir create, dir list all
+green). The compiler/import-resolution mechanism this doc filed is fixed.
+
+**Residual 1/9** — "should create and remove directory" fails at
+`assert_true(dir.exist(test_dir))` after `dir.create(test_dir)`, both with
+and without a pre-created `build/test_tmp` parent. That is a
+`dir.create` (= `dir_create(path, false)`, non-recursive) / `dir.exist`
+(= `dir_exists`) Windows fs-layer behavior issue in
+`src/lib/nogc_sync_mut/shell/dir.spl` — unrelated to the val-dict export
+gap. An isolated `use std.shell.{dir}` probe also surfaced a separate
+`dir_exist` resolution error inside the shell module graph on the seed.
+Lead for a new row (stdlib fs / seed), not fixed in this pass; out of scope
+for this doc.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — ne15: 8/9 on the fresh seed (was 0/9); all file.* namespace calls through use patterns resolve. Residual 1/9 is a separate dir.create/dir.exist Windows fs-layer issue (lead for a new stdlib-fs row; not chased in this doc).
+
+## Addendum 2026-11-15 — residual still red on Linux; one repro recorded
+
+`test/01_unit/lib/std/shell/file_system_spec.spl` is still 8/9 on a
+release/1.0.0 seed on Linux aarch64 ("should create and remove directory"),
+so the residual is not Windows-specific. The row stays open.
+
+Separate observation, not yet shown to be the cause of that failure: calling a
+function stored in a module-level dict by dot syntax fails on the default lane.
+
+```simple
+# lib_a.spl
+pub fn exist_pub(p: text) -> bool:
+    true
+# main.spl
+use lib_a.{exist_pub}
+val ns = {"q": exist_pub}
+fn main():
+    print "q={ns.q("x")}"   # Runtime error: Function 'q' not found
+```
+
+Observed on seeds built from release/1.0.0 on 2026-11-14 and 2026-11-15; the
+direct call `exist_pub("x")` works.
+
+## Addendum 2026-11-15 (second) — residual root-caused and fixed
+
+The last failing case was not a filesystem problem. `dir.remove(path)` on the
+`std.shell.dir` module ran the built-in dict mutator `remove` (returning the
+module itself) instead of the module's own `remove` function: the interpreter's
+in-place dict mutation fast paths pre-empted the member-function lookup that
+the ordinary method path already does. Those fast paths now step aside when
+the dict stores a function under the called name.
+
+- `test/01_unit/lib/std/shell/file_system_spec.spl`: 8/9 -> 9/9.
+- `test/01_unit/bugs/dict_member_fn_over_builtin_mutator_spec.spl`: 1/3 -> 3/3
+  (module member call, dict-stored function, and a plain dict still removing).
+- 56-spec sweep, before vs after: only those two change.
+
+The `Function 'q' not found` repro in the previous addendum is a different
+defect (dot-call on a module-level dict on the JIT lane) and is still open.

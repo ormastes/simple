@@ -3,7 +3,8 @@
 **Filed:** 2026-08-09 (stream P2, unified debug/profile capability feature)
 **Affects:** `doc/05_design/app/tools/unified_debug_profile_capability_architecture_2026-08-09.md` §3
 (and therefore streams P0, P3, P4, P9, P10, P11 which code against it)
-Status: OPEN (P2)
+Status: CLOSED 2026-11-09 (closed-obsolete — see the dated section at the
+end; header corrected 2026-11-25)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Symptom
@@ -97,3 +98,51 @@ Reconfirmed: design-level unsoundness (capability-group `.from()` assumes
 reference semantics on value-typed classes) affecting multiple downstream
 streams. Needs a design-level API change, not a quick fix. Left OPEN (P2),
 no code change attempted.
+
+## Triage 2026-11-04 (c28-w4)
+
+Triage 2026-11-04 on seed 0b2c3d015b7: debug_target_ref_spec 71/71 pass in 12.6s (library-side corrected single-value group shape holds). Remaining item is P0 desugar of .from() (lint detector dynamic_capability_acquire.spl only flags spellings). NOTE premise risk: the unsoundness rests on classes having value semantics; other lanes report an interpreter class-ref default flip (SIMPLE_INTERP_CLASS_REF=1) is pending - if it lands the premise changes and this row must be re-scoped. QUESTION: is class-ref flip the intended direction (then close as obsolete) or do value-class semantics stay?
+
+## Re-scoped 2026-11-05 (HB2) — premise is lane-dependent; remaining item is a feature
+
+Probe (`class Cell`, `var b = a; a.bump()`) on seed release/1.0.0: default JIT
+prints `a=1 b=1` (reference semantics), `SIMPLE_EXECUTION_MODE=interpreter`
+prints `a=1 b=0` (value semantics). The "classes are value types" premise
+therefore holds only on the interpreter lane; the lanes disagree (that
+divergence belongs to the class-ref flip work, not this row). The corrected
+single-value group shape is sound under BOTH semantics, so no library change
+is needed. What remains is the P0 `.from()` desugar (feature work, owner
+decision on class semantics). Left OPEN, no code change.
+
+## 2026-11-06 — owner decision answers the 2026-11-04 QUESTION
+
+Owner decision 2026-11-06: `class` values are reference types everywhere,
+`struct` values stay value types. The interpreter now agrees with the JIT
+(`6c7b4db3d39`, default since 2026-11-04; residual write-back shapes
+commit "fix(interp): argument write-back through class reference chains"): `var b = a; a.bump()` prints `a=1 b=1` on both lanes. The
+"classes are value types" premise of this row is therefore obsolete on every
+lane; a `.from()` group over a **class** acquisition is sound. The hazard
+survives only for a group shaped around a **struct** value. Remaining item is
+unchanged: the P0 `.from()` desugar (feature work). Coordinator owns the
+bug_db status change.
+
+## Closed 2026-11-09 (lane-p2-3) — closed-obsolete
+
+Checked against current policy/design: obsolete because owner decision
+2026-11-06 makes `class` a reference type on every lane. Release source
+`src/compiler_rust/compiler/src/value.rs:3469` defaults `SIMPLE_INTERP_CLASS_REF`
+to on. Probe (`var b = a; a.bump()`): JIT `a=1 b=1`; interpreter with the flag
+on `a=1 b=1`. (The shared `bin/simple.exe` was built 2026-11-04 16:58, before
+`6c7b4db3d39` landed at 17:49, so it still shows `b=0` with no flag set.) The
+remaining `.from()` single-accessor desugar is feature work. It is tracked by a
+`TODO` marker in `src/compiler/35.semantics/lint/dynamic_capability_acquire.spl`.
+
+## Verification 2026-11-25 (p2w1-ab lane, release/1.0.0 @ 38265c7f249) — closed-obsolete stands
+
+Confirmed at the release/1.0.0 tip: the 2026-11-09 closure is consistent
+with the tree — the owner decision 2026-11-06 (classes are reference types
+on every lane) obsoletes the value-semantics premise, and the remaining
+`.from()` single-accessor desugar is feature work tracked by the TODO
+marker at `src/compiler/35.semantics/lint/dynamic_capability_acquire.spl:39`.
+The status header still said OPEN; corrected to match the body's closure.
+No code change.

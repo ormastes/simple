@@ -372,6 +372,159 @@ fn test_untyped_empty_array_specializes_on_first_append() {
     ));
 }
 
+/// Collect every sub-expression of `expr` (including `expr` itself) by
+/// walking the few container variants these dict for-loop fixtures produce.
+fn collect_exprs<'a>(expr: &'a HirExpr, out: &mut Vec<&'a HirExpr>) {
+    out.push(expr);
+    match &expr.kind {
+        HirExprKind::Binary { left, right, .. } => {
+            collect_exprs(left, out);
+            collect_exprs(right, out);
+        }
+        HirExprKind::Index { receiver, index } => {
+            collect_exprs(receiver, out);
+            collect_exprs(index, out);
+        }
+        HirExprKind::FieldAccess { receiver, .. } => collect_exprs(receiver, out),
+        _ => {}
+    }
+}
+
+/// `for entry in dict` must bind the entry as the (K, V) tuple the runtime
+/// produces (rt_for_iterable -> rt_dict_entries -> rt_tuple pairs), not ANY —
+/// otherwise `entry[1]` carries no value type and native HIR hard-fails on any
+/// field access off it (bug: seed_native_hir_dict_for_loop_entry_any_2026_10_22).
+#[test]
+fn dict_for_loop_entry_is_typed_key_value_tuple() {
+    let module = parse_and_lower(
+        "fn probe(scores: Dict<text, i64>) -> i64:\n    var total = 0\n    for entry in scores:\n        total = total + entry[1]\n    return total\n",
+    )
+    .unwrap();
+
+    let func = &module.functions[0];
+    let HirStmt::For {
+        pattern_local,
+        body,
+        ..
+    } = func
+        .body
+        .iter()
+        .find(|stmt| matches!(stmt, HirStmt::For { .. }))
+        .expect("for loop statement")
+    else {
+        panic!("expected for loop statement")
+    };
+
+    let loop_local_index = pattern_local.expect("loop local should be recorded");
+    let loop_local = &func.locals[loop_local_index - func.params.len()];
+    assert_eq!(loop_local.name, "entry");
+    let entry_ty = module
+        .types
+        .get(loop_local.ty)
+        .unwrap_or_else(|| panic!("loop entry type {:?} not registered", loop_local.ty));
+    let HirType::Tuple(elems) = entry_ty else {
+        panic!("dict for-loop entry must lower as Tuple(K, V), not {entry_ty:?}");
+    };
+    assert_eq!(elems, &vec![TypeId::STRING, TypeId::I64]);
+
+    // `entry[1]` must type as the dict value type (i64), not ANY.
+    let mut exprs = Vec::new();
+    for stmt in body {
+        if let HirStmt::Assign { value, .. } = stmt {
+            collect_exprs(value, &mut exprs);
+        }
+    }
+    let index_on_entry = exprs
+        .iter()
+        .find(|expr| {
+            matches!(
+                &expr.kind,
+                HirExprKind::Index { receiver, .. }
+                    if matches!(receiver.kind, HirExprKind::Local(idx) if idx == loop_local_index)
+            )
+        })
+        .expect("entry[1] index expression in loop body");
+    assert_eq!(
+        index_on_entry.ty,
+        TypeId::I64,
+        "entry[1] must carry the dict value type"
+    );
+}
+
+/// Tuple destructuring `for (k, v) in dict` inherits the same ANY-entry bug:
+/// both pattern bindings must come out as K and V.
+#[test]
+fn dict_for_loop_tuple_destructure_binds_key_and_value_types() {
+    let module = parse_and_lower(
+        "fn probe(scores: Dict<text, i64>) -> i64:\n    var total = 0\n    for (k, v) in scores:\n        total = total + v\n    return total\n",
+    )
+    .unwrap();
+
+    let func = &module.functions[0];
+    let HirStmt::For { body, .. } = func
+        .body
+        .iter()
+        .find(|stmt| matches!(stmt, HirStmt::For { .. }))
+        .expect("for loop statement")
+    else {
+        panic!("expected for loop statement")
+    };
+
+    let mut binding_tys = Vec::new();
+    for stmt in body.iter().take(2) {
+        let HirStmt::Let { local_index, ty, .. } = stmt else {
+            panic!("expected destructuring let, got {stmt:?}");
+        };
+        binding_tys.push((
+            func.locals[*local_index - func.params.len()].name.clone(),
+            *ty,
+        ));
+    }
+    assert_eq!(binding_tys, vec![("k".to_string(), TypeId::STRING), ("v".to_string(), TypeId::I64)]);
+}
+
+/// Exact bug scenario: a field access on `entry[1]` over `Dict<text, S>` must
+/// lower (native HIR previously hard-failed with "cannot infer field type ...
+/// struct 'ANY'"). The field access must carry the field's declared type.
+#[test]
+fn dict_for_loop_entry_value_field_access_lowers() {
+    let module = parse_and_lower(
+        "class Alias:\n    owner_id: text\n\nfn probe(aliases: Dict<text, Alias>) -> text:\n    for entry in aliases:\n        val owner = entry[1].owner_id\n        return owner\n    return \"\"\n",
+    )
+    .unwrap();
+
+    let func = module.functions.iter().find(|f| f.name == "probe").expect("probe fn");
+    let HirStmt::For { body, .. } = func
+        .body
+        .iter()
+        .find(|stmt| matches!(stmt, HirStmt::For { .. }))
+        .expect("for loop statement")
+    else {
+        panic!("expected for loop statement")
+    };
+    let HirStmt::Let { value: Some(value), .. } = &body[0] else {
+        panic!("expected destructuring-free let, got {:?}", body[0]);
+    };
+    let mut exprs = Vec::new();
+    collect_exprs(value, &mut exprs);
+    // The `entry[1]` receiver of the field access must type as the dict VALUE
+    // type (struct Alias), not ANY — with ANY the field access only survives
+    // via blind single-candidate resolution and hard-fails in real modules
+    // with several same-field structs (safety_checker_places.spl).
+    let index_expr = exprs
+        .iter()
+        .find(|expr| matches!(expr.kind, HirExprKind::Index { .. }))
+        .expect("entry[1] index expression");
+    assert!(
+        matches!(
+            module.types.get(index_expr.ty),
+            Some(HirType::Struct { name, .. }) if name == "Alias"
+        ),
+        "entry[1] must carry the dict value struct type, got {:?}",
+        module.types.get(index_expr.ty)
+    );
+}
+
 /// A3 cranelift gap: positional class pattern `case ClassName(a, b, c)` must lower
 /// with Bool(true) condition (not rt_enum_check_discriminant) and FieldAccess
 /// bindings (not rt_enum_payload) so compiled/JIT mode matches correctly.
@@ -454,6 +607,91 @@ fn test_enum_variant_pattern_condition_uses_identity_and_discriminant() {
         repr.contains("rt_enum_check_variant") || repr.contains("rt_is_none") || repr.contains("rt_is_some"),
         "enum variant pattern condition should use rt_enum_check_variant; got: {repr}"
     );
+}
+
+/// A bare unit variant inside a tuple / array / enum-payload sub-pattern is a
+/// variant test (one `rt_enum_check_variant` per such element), not an
+/// irrefutable binder; lowercase names and names that are not variants of the
+/// slot's enum still bind (no test).
+/// Bug: doc/08_tracking/bug/seed_tuple_pattern_bare_fieldless_variant_binds_hir_types_equal_true_2026-11-12.md
+#[test]
+fn test_bare_unit_variant_in_sub_pattern_is_variant_test() {
+    let source = "enum Color:\n    Red\n    Green\n\nenum Mode:\n    Relaxed\n\nenum Wrap:\n    Box(c: Color)\n\n\
+fn both_red(a: Color, b: Color) -> i64:\n    match (a, b):\n        case (Red, Red):\n            return 1\n        case _:\n            return 0\n\n\
+fn bind_pair(a: Color, b: Color) -> i64:\n    match (a, b):\n        case (x, y):\n            return 1\n\n\
+fn other_name(a: Color, b: Color) -> i64:\n    match (a, b):\n        case (Red, Relaxed):\n            return 1\n        case _:\n            return 0\n\n\
+fn nested(a: Color, b: Color) -> i64:\n    match ((a, b), a):\n        case ((Red, Green), Red):\n            return 1\n        case _:\n            return 0\n\n\
+fn first_of(xs: [Color]) -> i64:\n    match xs:\n        case [Red, _]:\n            return 1\n        case _:\n            return 0\n\n\
+fn boxed(w: Wrap) -> i64:\n    match w:\n        case Box(Red):\n            return 1\n        case _:\n            return 0\n";
+    let module = parse_and_lower(source).unwrap();
+    let checks = |name: &str| -> usize {
+        let func = module
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("missing fn {name}"));
+        format!("{:?}", func.body).matches("rt_enum_check_variant").count()
+    };
+    assert_eq!(checks("both_red"), 2, "`case (Red, Red)` must test both elements");
+    assert_eq!(checks("bind_pair"), 0, "`case (x, y)` binds, it must not test");
+    assert_eq!(checks("other_name"), 1, "`Relaxed` is not a Color variant: it binds");
+    assert_eq!(checks("nested"), 3, "nested tuple elements are tested by their types");
+    assert_eq!(checks("first_of"), 1, "array element of an enum array is tested");
+    assert_eq!(checks("boxed"), 2, "outer tag + bare variant in the payload slot");
+}
+
+/// Only a UNIT variant name is a variant test in a sub-pattern slot; a bare
+/// payload-variant name there (`case (Int, _)` with `Int(bits)`) is a binder
+/// the arm body can read. At top level a bare payload-variant name stays the
+/// payload-ignoring variant test.
+#[test]
+fn test_bare_payload_variant_name_binds_in_slot_but_tests_at_top_level() {
+    let source = "enum Kind:\n    Int(bits: i64)\n    Str\n\n\
+fn slot(a: Kind, b: Kind) -> Kind:\n    match (a, b):\n        case (Int, _):\n            return Int\n\n\
+fn slot_unit(a: Kind, b: Kind) -> i64:\n    match (a, b):\n        case (Str, _):\n            return 1\n        case _:\n            return 0\n\n\
+fn top(k: Kind) -> i64:\n    match k:\n        case Int:\n            return 1\n        case _:\n            return 0\n";
+    let module = parse_and_lower(source).unwrap();
+    let body = |name: &str| -> String {
+        let func = module
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("missing fn {name}"));
+        format!("{:?}", func.body)
+    };
+    let slot = body("slot");
+    assert_eq!(
+        slot.matches("rt_enum_check_variant").count(),
+        0,
+        "payload name in a slot binds: {slot}"
+    );
+    assert!(slot.contains("Let"), "the slot binder must be emitted: {slot}");
+    assert_eq!(body("slot_unit").matches("rt_enum_check_variant").count(), 1);
+    assert_eq!(body("top").matches("rt_enum_check_variant").count(), 1);
+}
+
+/// A bare unit variant in a struct-field sub-pattern (named and positional
+/// spellings) is a variant test, like other slots; a lowercase field pattern
+/// still binds without a test.
+/// Bug: doc/08_tracking/bug/seed_struct_field_slot_bare_unit_variant_neither_tested_nor_bound_2026-11-12.md
+#[test]
+fn test_bare_unit_variant_in_struct_field_is_variant_test() {
+    let source = "enum Color:\n    Red\n    Green\n\nclass Holder:\n    c: Color\n    n: i64\n\n\
+fn named(h: Holder) -> i64:\n    match h:\n        case Holder { c: Red, n: n }:\n            return n\n        case _:\n            return 0\n\n\
+fn positional(h: Holder) -> i64:\n    match h:\n        case Holder(Red, n):\n            return n\n        case _:\n            return 0\n\n\
+fn binder(h: Holder) -> i64:\n    match h:\n        case Holder(c, n):\n            return n\n";
+    let module = parse_and_lower(source).unwrap();
+    let checks = |name: &str| -> usize {
+        let func = module
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("missing fn {name}"));
+        format!("{:?}", func.body).matches("rt_enum_check_variant").count()
+    };
+    assert_eq!(checks("named"), 1, "named field `c: Red` must test the variant");
+    assert_eq!(checks("positional"), 1, "positional field `Red` must test the variant");
+    assert_eq!(checks("binder"), 0, "lowercase field patterns bind, they must not test");
 }
 
 #[test]
@@ -1213,18 +1451,23 @@ fn test_placeholder_lambda_param_defaults_to_any_without_expected_type() {
     );
 }
 
-/// A NAMED unannotated lambda param is intentionally excluded from the
-/// class-3 fix and must keep its existing I64 default (no behavior change
-/// for already-typed/named code).
+/// A NAMED unannotated lambda param with no expected type is an erased
+/// `ANY` as well. It used to keep an I64 default, which made the lambda
+/// decode every argument as an integer: `val u = \x: x` handed a text, a
+/// float or a struct answered a garbage integer under the JIT with no
+/// fallback (`["a", "b"].map(u)`), and no call through a declared
+/// `fn(T) -> T` / `fn(any) -> any` boundary could be compiled. Integer
+/// behaviour is unchanged (operator sweep in
+/// doc/08_tracking/bug/seed_jit_any_operand_lowering_gaps_block_lambda_any_default_2026-11-12.md).
 #[test]
-fn test_named_unannotated_lambda_param_keeps_i64_default() {
+fn test_named_unannotated_lambda_param_defaults_to_any() {
     let module = parse_and_lower("fn apply() -> i64:\n    val f = \\x: x * 2\n    f(3)\n").unwrap();
     let function = module.functions.iter().find(|f| f.name == "apply").unwrap();
     let params = find_lambda_params(&function.body);
     assert_eq!(
         params,
-        vec![("x".to_string(), TypeId::I64)],
-        "a named unannotated lambda param must keep its I64 default: {params:?}"
+        vec![("x".to_string(), TypeId::ANY)],
+        "a named unannotated lambda param must default to ANY: {params:?}"
     );
 }
 
@@ -1243,5 +1486,234 @@ fn test_placeholder_lambda_param_uses_expected_type_when_available() {
         params.first().map(|(_, ty)| *ty),
         Some(TypeId::ANY),
         "a placeholder param with an available expected element type must not fall back to ANY: {params:?}"
+    );
+}
+
+/// `case nil:` on an optional text subject must test absence (rt_is_none),
+/// never text equality: rt_string_eq(nil, nil) is 0, so the arm never
+/// matched, the match fell through with a nil value, and stage2_next
+/// crashed dereferencing it in native_build_cache_scope_key (2026-11-02).
+#[test]
+fn test_nil_literal_pattern_on_optional_text_uses_is_none() {
+    let source = "fn pick(cpu: text?) -> text:\n    val v = match cpu:\n        case Some(c): c\n        case nil: \"native\"\n    return v\n";
+    let module = parse_and_lower(source).unwrap();
+    let func = module.functions.iter().find(|f| f.name == "pick").unwrap();
+    let repr = format!("{:?}", func.body);
+    assert!(
+        !repr.contains("rt_string_eq"),
+        "`case nil:` must not lower to text equality: {repr}"
+    );
+    assert!(
+        repr.contains("rt_is_none"),
+        "`case nil:` must lower to rt_is_none: {repr}"
+    );
+}
+
+/// A value-position match with no matching arm and no wildcard must fail
+/// closed at runtime (like the interpreter), not yield Nil: JIT/native code
+/// printed garbage for `val r = match n: case 1: 10` with n == 4
+/// (seed_value_match_no_arm_yields_nil_2026-11-02).
+#[test]
+fn test_value_match_without_wildcard_fails_closed() {
+    let source = "fn pick(n: i64) -> i64:\n    val r = match n:\n        case 1: 10\n    return r\n";
+    let module = parse_and_lower(source).unwrap();
+    let func = module.functions.iter().find(|f| f.name == "pick").unwrap();
+    let repr = format!("{:?}", func.body);
+    assert!(
+        repr.contains("rt_panic") && repr.contains("match expression exhausted"),
+        "exhausted match must lower to rt_panic, not Nil: {repr}"
+    );
+}
+
+/// A match with a wildcard arm never reaches the exhaustion path.
+#[test]
+fn test_value_match_with_wildcard_has_no_exhaustion_panic() {
+    let source = "fn pick(n: i64) -> i64:\n    val r = match n:\n        case 1: 10\n        case _: 0\n    return r\n";
+    let module = parse_and_lower(source).unwrap();
+    let func = module.functions.iter().find(|f| f.name == "pick").unwrap();
+    let repr = format!("{:?}", func.body);
+    assert!(
+        !repr.contains("match expression exhausted"),
+        "wildcard match must not carry an exhaustion panic: {repr}"
+    );
+}
+
+/// Statement-position matches (value discarded) with no matching arm and no
+/// wildcard fail closed too (owner decision 2026-11-14): no silent fall-through.
+#[test]
+fn test_statement_match_without_wildcard_fails_closed() {
+    let source = "fn run(n: i64):\n    match n:\n        case 1: print \"one\"\n    print \"done\"\n";
+    let module = parse_and_lower(source).unwrap();
+    let func = module.functions.iter().find(|f| f.name == "run").unwrap();
+    let repr = format!("{:?}", func.body);
+    assert!(
+        repr.contains("rt_panic") && repr.contains("match statement exhausted without matching any pattern"),
+        "statement-position match must lower to an exhaustion rt_panic: {repr}"
+    );
+}
+
+/// The implicit tail `match` of a function with a declared non-void return is
+/// its return value, so exhausting the arms fails closed like the `val` form
+/// (the doc's original repro, `fn pick(s: text) -> i64: match s: ..`,
+/// printed 0 rc=0). seed_value_match_no_arm_yields_nil_2026-11-02.
+#[test]
+fn test_tail_match_without_wildcard_fails_closed() {
+    let source = "fn pick(s: text) -> i64:\n    match s:\n        case \"a\": 1\n        case \"b\": 2\n";
+    let module = parse_and_lower(source).unwrap();
+    let func = module.functions.iter().find(|f| f.name == "pick").unwrap();
+    let repr = format!("{:?}", func.body);
+    assert!(
+        repr.contains("rt_panic") && repr.contains("match expression exhausted"),
+        "exhausted tail match must lower to rt_panic: {repr}"
+    );
+}
+
+/// A tail match with a wildcard never reaches the exhaustion path. A tail
+/// match of a function with no declared return is a plain statement match: it
+/// fails closed too (owner decision 2026-11-14), reported as the statement form.
+#[test]
+fn test_tail_match_with_wildcard_has_no_panic_and_void_tail_is_statement_form() {
+    let lower = |source: &str| {
+        let module = parse_and_lower(source).unwrap();
+        let func = module.functions.iter().find(|f| f.name == "pick" || f.name == "run").unwrap();
+        format!("{:?}", func.body)
+    };
+    let wildcard = lower("fn pick(s: text) -> i64:\n    match s:\n        case \"a\": 1\n        case _: 0\n");
+    assert!(
+        !wildcard.contains("exhausted without matching any pattern"),
+        "wildcard tail match must not carry an exhaustion panic: {wildcard}"
+    );
+    let void_tail = lower("fn run(n: i64):\n    match n:\n        case 1: print \"one\"\n");
+    assert!(
+        void_tail.contains("rt_panic") && void_tail.contains("match statement exhausted without matching any pattern"),
+        "void tail match must fail closed as a statement match: {void_tail}"
+    );
+    assert!(
+        !void_tail.contains("match expression exhausted"),
+        "void tail match is not value-position: {void_tail}"
+    );
+}
+
+/// `?.` used to fall through the lenient catch-all and lower to a bare `Nil`
+/// under the JIT, so every safe-navigation read answered nil. It must lower
+/// to a subject binding plus a presence-tested `If` whose else edge is nil.
+#[test]
+fn optional_chain_lowers_to_presence_tested_access() {
+    let module = parse_and_lower(
+        "class Node:\n    v: i64\n    fn get() -> i64:\n        self.v\n\nfn f(n: Node?) -> i64:\n    return n?.v ?? -1\n\nfn g(n: Node?) -> i64:\n    return n?.get() ?? -1\n",
+    )
+    .unwrap();
+    fn contains_chain_if(expr: &HirExpr) -> bool {
+        match &expr.kind {
+            HirExprKind::Block(stmts) => {
+                matches!(stmts.first(), Some(HirStmt::Let { .. }))
+                    && matches!(
+                        stmts.last(),
+                        Some(HirStmt::Expr(HirExpr { kind: HirExprKind::If { else_branch: Some(e), .. }, .. }))
+                            if matches!(e.kind, HirExprKind::Nil)
+                    )
+                    || stmts.iter().any(|s| match s {
+                        HirStmt::Let { value: Some(v), .. } | HirStmt::Expr(v) => contains_chain_if(v),
+                        _ => false,
+                    })
+            }
+            HirExprKind::If { condition, then_branch, else_branch } => {
+                contains_chain_if(condition)
+                    || contains_chain_if(then_branch)
+                    || else_branch.as_ref().is_some_and(|e| contains_chain_if(e))
+            }
+            HirExprKind::BuiltinCall { args, .. } => args.iter().any(contains_chain_if),
+            _ => false,
+        }
+    }
+    for name in ["f", "g"] {
+        let func = module.functions.iter().find(|f| f.name == name).expect("fn");
+        let HirStmt::Return(Some(expr)) = func.body.last().expect("return") else {
+            panic!("expected return in {name}: {:?}", func.body)
+        };
+        assert!(contains_chain_if(expr), "`?.` in {name} did not lower to a presence-tested access: {expr:?}");
+    }
+}
+
+#[test]
+fn positional_args_after_named_fill_lowest_unfilled_slots() {
+    // seed_jit_hir_positional_after_named_arg_2026-11-04: the JIT HIR used to
+    // advance the positional cursor blindly, colliding with an earlier named
+    // argument's slot ("parameter N more than once or beyond its arity") and
+    // dropping the whole module to the interpreter. The interpreter binds
+    // positionals to the lowest unfilled slots, in order; the JIT must match.
+    let module = parse_and_lower(
+        "fn combo(a: i64, b: i64, c: i64, d: i64) -> i64:\n    return a\n\nfn main() -> i64:\n    return combo(1, c: 3, 2, 4)\n",
+    )
+    .unwrap();
+
+    let func = module.functions.iter().find(|f| f.name == "main").expect("main fn");
+    let HirStmt::Return(Some(expr)) = func.body.last().expect("main return") else {
+        panic!("expected return: {:?}", func.body)
+    };
+    let HirExprKind::Call { args, .. } = &expr.kind else {
+        panic!("expected call: {expr:?}")
+    };
+    let slot_values: Vec<i64> = args
+        .iter()
+        .map(|a| match &a.kind {
+            HirExprKind::Integer(v) => *v,
+            other => panic!("non-literal slot in call order: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        slot_values,
+        vec![1, 2, 3, 4],
+        "positional-after-named must fill declared slot order a=1, b=2, c=3, d=4"
+    );
+}
+
+/// `opt.? == false` / `fn() -> i64? == 5` compare a tagged optional slot with a
+/// raw scalar. The JIT used to compare the tagged word against the raw one
+/// (always false); the lowering must box the raw side and use tagged equality
+/// so it agrees with the interpreter's `Some(x)` vs `x` bridge.
+/// Bug: doc/08_tracking/bug/seed_optional_query_comparison_divergence_2026-08-16.md
+#[test]
+fn optional_scalar_eq_raw_scalar_uses_tagged_equality() {
+    for body in ["bool_f().? == false", "bool_f() == false", "int_f() == 5", "int_f().? != 5"] {
+        let src = format!(
+            "fn bool_f() -> bool?:\n    return false\n\nfn int_f() -> i64?:\n    return 5\n\nfn t() -> bool:\n    return {body}\n"
+        );
+        let module = parse_and_lower(&src).unwrap();
+        let func = module.functions.iter().find(|f| f.name == "t").expect("t fn");
+        let repr = format!("{:?}", func.body);
+        assert!(
+            repr.contains("rt_unwrap_or_self") && repr.contains("rt_value_"),
+            "`{body}` must box the raw side and compare tagged: {repr}"
+        );
+    }
+}
+
+/// Two raw scalars, or an optional vs `nil`, keep the plain comparison.
+#[test]
+fn raw_scalar_and_nil_comparisons_keep_plain_binary() {
+    let module = parse_and_lower(
+        "fn bool_f() -> bool?:\n    return false\n\nfn t(a: bool) -> bool:\n    return a == false\n\nfn u() -> bool:\n    return bool_f() == nil\n",
+    )
+    .unwrap();
+    for name in ["t", "u"] {
+        let func = module.functions.iter().find(|f| f.name == name).expect("fn");
+        let repr = format!("{:?}", func.body);
+        assert!(!repr.contains("rt_value_bool"), "`{name}` must not box: {repr}");
+    }
+}
+
+/// `x!` on a NON-nullable raw scalar (`"20672".to_i64()` is bare `I64`) must
+/// be the identity. Routing it through `rt_unwrap_or_self` re-typed the raw
+/// word `ANY`, so the JIT decoded it as tagged: `d!` gave 2584 (= 20672 >> 3).
+/// Bug: seed_interp_local_to_i64_unwrap_shifts_by_tag_2026_11_09
+#[test]
+fn test_force_unwrap_on_raw_i64_local_is_identity() {
+    let module =
+        parse_and_lower("fn f() -> i64:\n    val d = \"20672\".to_i64()\n    return d!\n").unwrap();
+    let repr = format!("{:?}", module.functions[0].body);
+    assert!(
+        !repr.contains("rt_unwrap_or_self"),
+        "raw i64 force-unwrap must not re-tag via rt_unwrap_or_self: {repr}"
     );
 }

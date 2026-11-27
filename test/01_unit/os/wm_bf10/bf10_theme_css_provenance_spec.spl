@@ -1,0 +1,171 @@
+# BF-10: Theme CSS custom-property resolution & material/provenance gates
+# Covers Bugs #1 (wm_guest_css_var_unresolved_blocks_material_admission_2026-08-09)
+# and #5 (simpleos_wm_gate_provenance_reject_after_boot_chain_fixes_2026-08-04)
+
+use std.spec
+use common.ui.taskbar_model.{TaskbarModel, empty_taskbar_model}
+use common.ui.generated.aetheric_dark_theme_snapshot.{aetheric_dark_theme_render_snapshot}
+use common.ui.generated.fluid_light_theme_snapshot.{fluid_light_theme_render_snapshot}
+use common.ui.theme_render_snapshot.{ThemeMaterialSemantics, ThemeRenderSnapshot, ThemeSemanticColors}
+use common.ui.window_scene.{
+    SharedWmScene,
+    SharedWmWindow,
+    WM_CHROME_KIND_TITLED,
+    WM_CONTENT_ORIGIN_GUI,
+    WM_CONTENT_ORIGIN_SIMPLE_WEB,
+    WmContentFrame,
+    shared_wm_background_color,
+    wm_content_frame_checksum,
+    wm_content_frame_web_provenance_valid
+}
+use common.ui.wm_gui_content_frame.{wm_gui_content_frame_from_pixels}
+use os.compositor.engine2d_wm_frame_executor.{Engine2dWmFrameExecutor}
+use os.compositor.simple_web_window_renderer.{
+    simple_web_content_frame_cached,
+    simple_web_child_content_frame_cached,
+    simple_web_content_full_html_with_theme,
+    simple_web_content_render_request_with_theme,
+    simple_web_content_revision_with_theme,
+    simple_web_diskless_theme_fallback_snapshot
+}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_pixel_artifact_cache}
+
+describe "BF-10 guest theme CSS variable & provenance resolution":
+    it "emits :root custom properties for theme aliases and empty theme id":
+        val themes = ["", "dark", "obsidian_dark", "glass_dark", "glass_obsidian_dark", "light", "fluid", "fluid_light", "aetheric_dark"]
+        for theme_id in themes:
+            val req = simple_web_content_render_request_with_theme(
+                theme_id, "Shell", "<div>ready</div>", 120, 60
+            )
+            expect(req.css).to_contain("--app-surface")
+            expect(req.css).to_contain("--ui-fg")
+            expect(req.css).to_contain("--blur-surface")
+
+    it "produces valid 64-hex material and source manifest SHA-256 provenance":
+        val themes = ["", "dark", "glass_dark", "light", "fluid_light", "aetheric_dark"]
+        for theme_id in themes:
+            val cache = web_render_pixel_artifact_cache(80, 40, "software")
+            val rev = simple_web_content_revision_with_theme(theme_id, "App", "<p>hello</p>", 80, 40, 0)
+            val frame = simple_web_content_frame_cached(
+                cache, "win-1", 1, rev, theme_id, "App", "<p>hello</p>", 80, 40, 0
+            )
+            expect(frame.origin_kind).to_equal(WM_CONTENT_ORIGIN_SIMPLE_WEB)
+            expect(frame.theme_id.len()).to_be_greater_than(0)
+            expect(frame.theme_source_manifest_sha256.len()).to_equal(64)
+            expect(frame.material_fallback_sha256.len()).to_equal(64)
+            expect(wm_content_frame_web_provenance_valid(frame)).to_be(true)
+
+    it "rejects nested Simple Web child frames with missing provenance":
+        val cache = web_render_pixel_artifact_cache(64, 32, "software")
+        val rev = simple_web_content_revision_with_theme("aetheric_dark", "Child", "<span>ok</span>", 64, 32, 0)
+        var child = simple_web_child_content_frame_cached(
+            cache, "child-1", "1", 4, 4, 1, rev, "aetheric_dark", "Child", "<span>ok</span>", 64, 32, 0
+        )
+        expect(wm_content_frame_web_provenance_valid(child)).to_be(true)
+        child.material_fallback_sha256 = ""
+        expect(wm_content_frame_web_provenance_valid(child)).to_be(false)
+
+        var parent_px: [u32] = []
+        var pi = 0
+        while pi < 44 * 44:
+            parent_px.push(0xFF112233u32)
+            pi = pi + 1
+        val parent_frame = wm_gui_content_frame_from_pixels(
+            "1", "", 0, 0, 44, 44, parent_px, 1, 1, "aetheric_dark"
+        )
+        var bad_child = simple_web_child_content_frame_cached(
+            cache, "child-bad", "1", 4, 4, 1, rev, "aetheric_dark", "Child", "<span>bad</span>", 24, 16, 0
+        )
+        bad_child.material_fallback_sha256 = ""
+        val win = SharedWmWindow(
+            surface_id: "1", window_id: "1", surface_kind: "gui", process_id: 1u64,
+            app_id: "demo", title: "Demo", language: "simple",
+            x: 0, y: 0, width: 52, height: 80,
+            tree: None, html: "", minimized: false, focused: true, z_index: 1,
+            chrome_kind: WM_CHROME_KIND_TITLED, maximized: false
+        )
+        val scene = SharedWmScene(
+            width: 120, height: 120, backend: "cpu", windows: [win],
+            background: shared_wm_background_color(0xFF202020u32)
+        )
+        var exec = Engine2dWmFrameExecutor.create(
+            Engine2D.create_with_backend(120, 120, "cpu"),
+            FramebufferDriver.from_buffer(120, 120), 120, 120
+        )
+        expect(exec.render(scene, empty_taskbar_model(), [parent_frame, bad_child], 1, 1, "12:00")).to_equal(1)
+
+    it "falls back to embedded theme CSS, fingerprint, and light/dark colors when disk package is unbacked":
+        val icon_only_css = ":root {\n  --theme-icon-terminal: \"\";\n}\n"
+        val diskless_dark_material = ThemeMaterialSemantics(
+            desktop_fill_rgba: 0xFF131315u32,
+            window_fill_rgba: 0xCC1F1F21u32,
+            active_title_fill_rgba: 0xE02A2A2Cu32,
+            inactive_title_fill_rgba: 0xCC1F1F21u32,
+            surface_alpha_milli: 800,
+            backdrop_blur_px: 30,
+            backdrop_saturation_milli: 1700,
+            border_width_px: 1,
+            border_rgba: 0x338B90A0u32,
+            corner_radius_px: 18,
+            active_shadows: [],
+            inactive_shadows: [],
+            font_family: "system-ui, sans-serif",
+            font_size_px: 14,
+            font_weight: 400,
+            text_rgba: 0xFFE4E2E4u32,
+            secondary_text_rgba: 0xADC1C6D7u32,
+            solid_fallback_rgba: 0xFF1F1F21u32,
+            fallback_contrast_milli: 12000,
+            window_gradient_available: false,
+            window_gradient_start_rgba: 0u32,
+            window_gradient_end_rgba: 0u32,
+            window_gradient_source_css: ""
+        )
+        val unbacked_light = ThemeRenderSnapshot(
+            id: "fluid_light",
+            family_id: "",
+            source_reference: "",
+            source_manifest_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            material_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            composed_css: icon_only_css,
+            background_rgba: 0xFF131315u32,
+            foreground_rgba: 0xFFE4E2E4u32,
+            accent_rgba: 0xFF3B82F6u32,
+            material: diskless_dark_material,
+            semantic: ThemeSemanticColors(
+                info_rgba: 0xFF3B82F6u32, success_rgba: 0xFF22C55Eu32,
+                warning_rgba: 0xFFF59E0Bu32, error_rgba: 0xFFEF4444u32
+            )
+        )
+        val embedded_light = fluid_light_theme_render_snapshot()
+        val resolved_light = simple_web_diskless_theme_fallback_snapshot("light", unbacked_light)
+        expect(resolved_light.id).to_equal("fluid_light")
+        expect(resolved_light.composed_css).to_contain("--app-surface")
+        expect(resolved_light.composed_css).to_contain("--ui-fg")
+        expect(resolved_light.source_manifest_sha256).to_equal(embedded_light.source_manifest_sha256)
+        expect(resolved_light.material.solid_fallback_rgba).to_equal(embedded_light.material.solid_fallback_rgba)
+        expect(resolved_light.material.text_rgba).to_equal(embedded_light.material.text_rgba)
+        assert_not_equal(resolved_light.material.solid_fallback_rgba, 0xFF1F1F21u32)
+
+        val embedded_dark = aetheric_dark_theme_render_snapshot()
+        val resolved_dark = simple_web_diskless_theme_fallback_snapshot("dark", unbacked_light)
+        expect(resolved_dark.id).to_equal("aetheric_dark")
+        expect(resolved_dark.composed_css).to_contain("--app-surface")
+        expect(resolved_dark.source_manifest_sha256).to_equal(embedded_dark.source_manifest_sha256)
+        expect(resolved_dark.material.solid_fallback_rgba).to_equal(embedded_dark.material.solid_fallback_rgba)
+
+    it "canonicalizes bare light and dark theme names in HTML attrs and content frames":
+        val html_light = simple_web_content_full_html_with_theme("light", "L", "<p>x</p>", 80, 40)
+        val html_dark = simple_web_content_full_html_with_theme("dark", "D", "<p>y</p>", 80, 40)
+        expect(html_light).to_contain("data-wm-theme=\"fluid_light\"")
+        expect(html_dark).to_contain("data-wm-theme=\"aetheric_dark\"")
+
+        val cache = web_render_pixel_artifact_cache(64, 32, "software")
+        val rev_l = simple_web_content_revision_with_theme("light", "L", "<p>x</p>", 64, 32, 0)
+        val rev_d = simple_web_content_revision_with_theme("dark", "D", "<p>y</p>", 64, 32, 0)
+        val frame_l = simple_web_content_frame_cached(cache, "wl", 1, rev_l, "light", "L", "<p>x</p>", 64, 32, 0)
+        val frame_d = simple_web_content_frame_cached(cache, "wd", 1, rev_d, "dark", "D", "<p>y</p>", 64, 32, 0)
+        expect(frame_l.theme_id).to_equal("fluid_light")
+        expect(frame_d.theme_id).to_equal("aetheric_dark")

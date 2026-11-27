@@ -5,7 +5,7 @@ use compiler.common.assurance.representation_manifest_v1.{RepresentationManifest
 use compiler.common.diagnostics.span.{Span}
 use compiler.semantics.symbol_id.stable_id.{SymbolComponents, stable_symbol_id}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, parser_advance, parser_skip_newlines, parse_module_silent_checked}
-use compiler.frontend.core.lexer.{lex_token_start_get, lex_source_slice, lex_source_len}
+use compiler.frontend.core.lexer.{lex_token_start_get, lex_source_slice, lex_source_len, lex_source_byte_offset}
 use compiler.core.ast.{EXPR_STRING_LIT, EXPR_IDENT, EXPR_ARRAY_LIT, expr_get_tag, expr_get_str, expr_get_args}
 use compiler.frontend.core.parser_expr.{parse_expr}
 use compiler.frontend.core._Ast.decl_nodes.{decl_set_span}
@@ -19,7 +19,7 @@ struct RepresentationParseFrameV1:
 
 var representation_frames_v1: [RepresentationParseFrameV1] = []
 var representation_stack_v1: [i64] = []
-var representation_pending_v1: RepresentationManifestV1? = nil
+var representation_pending_v1: RepresentationManifestV1? = None
 var representation_pending_span_v1: Span = Span.empty()
 var representation_pending_errors_v1: [text] = []
 var representation_digest_v1: text = ""
@@ -30,9 +30,14 @@ var representation_checked_failed_v1: bool = false
 extern fn rt_transient_heap_promote<T>(value: T) -> bool
 
 pub fn representation_parser_promote_transient_owner_v1() -> bool:
+    # A nil pending manifest (every file without an @representation block)
+    # owns no transient state. Promote it only when present: the seed
+    # interpreter's rt_transient_heap_promote shim returned false for nil,
+    # unlike the C/Rust runtimes, and every retained parse there panicked
+    # "transient retained parser ownership failed (declaration=false)".
     rt_transient_heap_promote(representation_frames_v1) and
         rt_transient_heap_promote(representation_stack_v1) and
-        rt_transient_heap_promote(representation_pending_v1) and
+        (representation_pending_v1.is_none() or rt_transient_heap_promote(representation_pending_v1)) and
         rt_transient_heap_promote(representation_pending_span_v1) and
         rt_transient_heap_promote(representation_pending_errors_v1) and
         rt_transient_heap_promote(representation_digest_v1) and
@@ -41,7 +46,7 @@ pub fn representation_parser_promote_transient_owner_v1() -> bool:
 pub fn representation_parser_reset_v1(source: text, path: text):
     representation_frames_v1 = []
     representation_stack_v1 = []
-    representation_pending_v1 = nil
+    representation_pending_v1 = None
     representation_pending_span_v1 = Span.empty()
     representation_pending_errors_v1 = []
     representation_digest_v1 = sha256_text(source)
@@ -54,14 +59,16 @@ pub fn representation_parser_refuse_restored_metadata_v1():
     # even when a caller restores pools directly without parser_init.
     representation_frames_v1 = []
     representation_stack_v1 = []
-    representation_pending_v1 = nil
+    representation_pending_v1 = None
     representation_pending_span_v1 = Span.empty()
     representation_pending_errors_v1 = []
     representation_checked_complete_v1 = false
     representation_checked_failed_v1 = false
 
 fn representation_token_span_v1(start: i64, line: i64, col: i64) -> Span:
-    val ending = lex_token_start_get()
+    # start/ending are byte offsets: LexSpan and source slicing are
+    # byte-based; raw lexer positions are char-based and broke UTF-8 spans.
+    val ending = lex_source_byte_offset(lex_token_start_get())
     Span(start: start, end: ending, line: line, col: col,
         file: representation_path_v1, length: ending - start)
 
@@ -81,7 +88,7 @@ fn representation_literal_list_v1(expr: i64, field: text) -> [text]:
 # Called after the existing attribute dispatcher consumed the name. All
 # values use the existing expression parser; strings/comments cannot spoof it.
 pub fn representation_parse_attribute_v1(start: i64, line: i64, col: i64):
-    if representation_pending_v1 != nil:
+    if representation_pending_v1.is_some():
         representation_pending_errors_v1.push("duplicate @representation_boundary")
     var kind = ""
     var reason = ""
@@ -144,12 +151,12 @@ pub fn representation_parse_attribute_v1(start: i64, line: i64, col: i64):
     representation_pending_span_v1 = representation_token_span_v1(start, line, col)
 
 pub fn representation_declaration_begin_v1(kind: text) -> i64:
-    val start = lex_token_start_get()
+    val start = lex_source_byte_offset(lex_token_start_get())
     val span = representation_token_span_v1(start, par_line_get(), par_col_get())
     val parent = if representation_stack_v1.len() == 0: -1 else: representation_stack_v1[representation_stack_v1.len() - 1]
     if parent >= 0:
         var enclosing = representation_frames_v1[parent]
-        val child_start = if representation_pending_v1 != nil: representation_pending_span_v1.start else: start
+        val child_start = if representation_pending_v1.is_some(): representation_pending_span_v1.start else: start
         if enclosing.cursor < child_start:
             enclosing.declaration.owned_intervals.push(Span(
                 start: enclosing.cursor, end: child_start, line: enclosing.declaration.declaration_span.line,
@@ -166,31 +173,34 @@ pub fn representation_declaration_begin_v1(kind: text) -> i64:
     val position = representation_frames_v1.len()
     representation_frames_v1.push(RepresentationParseFrameV1(declaration: declaration, parent: parent, cursor: start))
     representation_stack_v1.push(position)
-    representation_pending_v1 = nil
+    representation_pending_v1 = None
     representation_pending_span_v1 = Span.empty()
     representation_pending_errors_v1 = []
     position
 
 pub fn representation_method_begin_v1() -> i64:
-    # A lexical type supplies an exact owner identity. Impl-only references
-    # without that owner remain exclusion barriers until owner resolution can
-    # bind them; they must never masquerade as top-level methods.
+    # A lexical type supplies an exact owner identity. An `impl T:` block
+    # pushes its own frame named after the impl target (parse_impl_decl), so
+    # its methods bind as methods owned by that impl frame. Any other parent
+    # (a fn/method body) is a genuinely nested callable and remains an
+    # exclusion barrier; it must never masquerade as a top-level method.
     var lexical_type = false
     if representation_stack_v1.len() > 0:
         val parent = representation_frames_v1[representation_stack_v1[representation_stack_v1.len() - 1]]
         lexical_type = parent.declaration.components.item_kind == "struct" or
-            parent.declaration.components.item_kind == "class"
+            parent.declaration.components.item_kind == "class" or
+            parent.declaration.components.item_kind == "impl"
     representation_declaration_begin_v1(if lexical_type: "method" else: "nested_callable")
 
 pub fn representation_declaration_header_v1(position: i64):
     var frame = representation_frames_v1[position]
-    frame.declaration.components.signature = lex_source_slice(frame.declaration.declaration_span.start, lex_token_start_get())
-    frame.cursor = lex_token_start_get()
+    frame.declaration.components.signature = lex_source_slice(frame.declaration.declaration_span.start, lex_source_byte_offset(lex_token_start_get()))
+    frame.cursor = lex_source_byte_offset(lex_token_start_get())
     representation_frames_v1[position] = frame
 
 pub fn representation_declaration_end_v1(position: i64, flat_decl: i64, name: text):
     var frame = representation_frames_v1[position]
-    val ending = lex_token_start_get()
+    val ending = lex_source_byte_offset(lex_token_start_get())
     frame.declaration.components.name = name
     frame.declaration.local_symbol_id = flat_decl
     if frame.declaration.components.item_kind == "nested_callable" or frame.declaration.components.item_kind == "nested_extern":
@@ -225,7 +235,7 @@ pub fn representation_record_region_v1(capabilities: [text]):
 # Unsupported/unattached targets become an invalid explicit row, never a
 # pending grant that can migrate onto the next named declaration.
 pub fn representation_reject_pending_v1():
-    if representation_pending_v1 == nil:
+    if representation_pending_v1.is_none():
         return
     val position = representation_declaration_begin_v1("unsupported")
     var frame = representation_frames_v1[position]
@@ -234,7 +244,7 @@ pub fn representation_reject_pending_v1():
     representation_declaration_end_v1(position, -1, "")
 
 pub fn representation_parser_has_metadata_v1() -> bool:
-    if representation_pending_v1 != nil:
+    if representation_pending_v1.is_some():
         return true
     for frame in representation_frames_v1:
         # Existing HIR already transports unsafe regions/caps. Observation-only
@@ -282,3 +292,54 @@ pub fn representation_parser_metadata_v1() -> [RepresentationDeclarationV1]:
     if not representation_parser_has_metadata_v1():
         return []
     representation_parser_declarations_v1("", "")
+
+# ===== RepresentationParseState snapshot (ParseContext stage 1) =====
+# See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
+# take moves this file's parse state out and installs fresh initial
+# owners; install makes a taken snapshot active again.
+pub struct RepresentationParseState:
+    representation_frames_v1: [RepresentationParseFrameV1]
+    representation_stack_v1: [i64]
+    representation_pending_v1: RepresentationManifestV1?
+    representation_pending_span_v1: Span
+    representation_pending_errors_v1: [text]
+    representation_digest_v1: text
+    representation_path_v1: text
+    representation_checked_complete_v1: bool
+    representation_checked_failed_v1: bool
+
+pub fn representation_parse_state_take() -> RepresentationParseState:
+    val s = RepresentationParseState(
+        representation_frames_v1: representation_frames_v1,
+        representation_stack_v1: representation_stack_v1,
+        representation_pending_v1: representation_pending_v1,
+        representation_pending_span_v1: representation_pending_span_v1,
+        representation_pending_errors_v1: representation_pending_errors_v1,
+        representation_digest_v1: representation_digest_v1,
+        representation_path_v1: representation_path_v1,
+        representation_checked_complete_v1: representation_checked_complete_v1,
+        representation_checked_failed_v1: representation_checked_failed_v1
+    )
+    representation_frames_v1 = []
+    representation_stack_v1 = []
+    representation_pending_v1 = None
+    representation_pending_span_v1 = Span.empty()
+    representation_pending_errors_v1 = []
+    representation_digest_v1 = ""
+    representation_path_v1 = ""
+    representation_checked_complete_v1 = false
+    representation_checked_failed_v1 = false
+    s
+
+pub fn representation_parse_state_install(s: RepresentationParseState):
+    representation_frames_v1 = s.representation_frames_v1
+    representation_stack_v1 = s.representation_stack_v1
+    representation_pending_v1 = s.representation_pending_v1
+    representation_pending_span_v1 = s.representation_pending_span_v1
+    representation_pending_errors_v1 = s.representation_pending_errors_v1
+    representation_digest_v1 = s.representation_digest_v1
+    representation_path_v1 = s.representation_path_v1
+    representation_checked_complete_v1 = s.representation_checked_complete_v1
+    representation_checked_failed_v1 = s.representation_checked_failed_v1
+
+export RepresentationParseState, representation_parse_state_take, representation_parse_state_install

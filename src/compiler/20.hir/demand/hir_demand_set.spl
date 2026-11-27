@@ -39,72 +39,175 @@ fn hir_demand_find_body_v1(
     for body in bodies:
         if body.identity == identity:
             return Some(body)
-    nil
+    None
+
+fn _hir_demand_body_map_v1(
+    bodies: [DeferredHirBodyV1]
+) -> Dict<text, DeferredHirBodyV1>:
+    var by_id: Dict<text, DeferredHirBodyV1> = {}
+    for body in bodies:
+        if not by_id.has(body.identity):
+            by_id[body.identity] = body
+    by_id
 
 fn hir_demand_reaches_v1(
     bodies: [DeferredHirBodyV1], selected: [text], from_identity: text,
     to_identity: text
 ) -> bool:
+    val by_id = _hir_demand_body_map_v1(bodies)
+    var selected_set: Dict<text, bool> = {}
+    for item in selected:
+        selected_set[item] = true
     var pending: [text] = [from_identity]
-    var visited: [text] = []
+    var visited: Dict<text, bool> = {}
     while pending.len() > 0:
         val current = pending[pending.len() - 1]
         pending.pop()
         if current == to_identity:
             return true
-        if visited.contains(current):
+        if visited.has(current):
             continue
-        visited.push(current)
-        val body = hir_demand_find_body_v1(bodies, current)
-        if body == nil:
+        visited[current] = true
+        if not by_id.has(current):
             continue
-        for dependency in body!.dependencies:
+        val body = by_id[current]
+        for dependency in body.dependencies:
             if (dependency.kind == HirDemandDependencyKindV1.body and
-                    selected.contains(dependency.identity) and
-                    not visited.contains(dependency.identity)):
+                    selected_set.has(dependency.identity) and
+                    not visited.has(dependency.identity)):
                 pending.push(dependency.identity)
     false
 
 fn hir_demand_scc_identity_v1(
     snapshot_revision: text, members: [text]
 ) -> text:
-    var encoded = "simple/hir-demand-scc/v1|{snapshot_revision}"
+    var parts: [text] = ["simple/hir-demand-scc/v1|", snapshot_revision]
     for member in members:
-        encoded = encoded + "|{member}"
-    sha256_text(encoded)
+        parts.push("|")
+        parts.push(member)
+    sha256_text(parts.join(""))
+
+fn _hir_demand_tarjan_v1(
+    selected: [text],
+    by_id: Dict<text, DeferredHirBodyV1>,
+    selected_set: Dict<text, bool>
+) -> [[text]]:
+    var idx_by_id: Dict<text, i64> = {}
+    var i = 0
+    while i < selected.len():
+        idx_by_id[selected[i]] = i
+        i = i + 1
+    var adj: [[i64]] = []
+    i = 0
+    while i < selected.len():
+        var edges: [i64] = []
+        val id = selected[i]
+        if by_id.has(id):
+            val body = by_id[id]
+            for dep in body.dependencies:
+                if dep.kind == HirDemandDependencyKindV1.body and selected_set.has(dep.identity):
+                    edges.push(idx_by_id[dep.identity])
+        adj.push(edges)
+        i = i + 1
+
+    val n = selected.len()
+    var disc: [i64] = []
+    var low: [i64] = []
+    var on_stack: [bool] = []
+    var edge_cursor: [i64] = []
+    i = 0
+    while i < n:
+        disc.push(-1)
+        low.push(0)
+        on_stack.push(false)
+        edge_cursor.push(0)
+        i = i + 1
+
+    var next_disc = 0
+    var tarjan_stack: [i64] = []
+    var call_stack: [i64] = []
+    var sccs: [[text]] = []
+
+    var root = 0
+    while root < n:
+        if disc[root] != -1:
+            root = root + 1
+            continue
+        disc[root] = next_disc
+        low[root] = next_disc
+        next_disc = next_disc + 1
+        tarjan_stack.push(root)
+        on_stack[root] = true
+        call_stack.push(root)
+
+        while call_stack.len() > 0:
+            val v = call_stack[call_stack.len() - 1]
+            val ei = edge_cursor[v]
+            if ei < adj[v].len():
+                edge_cursor[v] = ei + 1
+                val w = adj[v][ei]
+                if disc[w] == -1:
+                    disc[w] = next_disc
+                    low[w] = next_disc
+                    next_disc = next_disc + 1
+                    tarjan_stack.push(w)
+                    on_stack[w] = true
+                    call_stack.push(w)
+                elif on_stack[w]:
+                    if disc[w] < low[v]:
+                        low[v] = disc[w]
+            else:
+                call_stack.pop()
+                if call_stack.len() > 0:
+                    val parent = call_stack[call_stack.len() - 1]
+                    if low[v] < low[parent]:
+                        low[parent] = low[v]
+                if low[v] == disc[v]:
+                    var members: [text] = []
+                    while tarjan_stack.len() > 0:
+                        val w = tarjan_stack[tarjan_stack.len() - 1]
+                        tarjan_stack.pop()
+                        on_stack[w] = false
+                        members.push(selected[w])
+                        if w == v:
+                            break
+                    sccs.push(hir_demand_sorted_unique_text_v1(members)!)
+        root = root + 1
+    sccs
 
 fn hir_demand_sccs_v1(
     bodies: [DeferredHirBodyV1], selected: [text], snapshot_revision: text
 ) -> [HirDemandSccV1]:
-    var groups: [HirDemandSccV1] = []
+    val by_id = _hir_demand_body_map_v1(bodies)
+    var selected_set: Dict<text, bool> = {}
     for identity in selected:
-        var already_grouped = false
-        for group in groups:
-            if group.members.contains(identity):
-                already_grouped = true
-        if already_grouped:
-            continue
-        var members: [text] = []
-        for candidate in selected:
-            if (hir_demand_reaches_v1(bodies, selected, identity, candidate) and
-                    hir_demand_reaches_v1(bodies, selected, candidate, identity)):
-                members.push(candidate)
-        val canonical_members = hir_demand_sorted_unique_text_v1(members)!
-        groups.push(HirDemandSccV1(
-            hir_demand_scc_identity_v1(snapshot_revision, canonical_members),
-            canonical_members, []))
+        selected_set[identity] = true
+    val raw_sccs = _hir_demand_tarjan_v1(selected, by_id, selected_set)
+    var groups: [HirDemandSccV1] = []
+    var scc_id_by_member: Dict<text, text> = {}
+    for canonical_members in raw_sccs:
+        val group_id = hir_demand_scc_identity_v1(snapshot_revision, canonical_members)
+        for member in canonical_members:
+            scc_id_by_member[member] = group_id
+        groups.push(HirDemandSccV1(group_id, canonical_members, []))
+
     var completed: [HirDemandSccV1] = []
     for group in groups:
         var dependencies: [text] = []
+        var seen_deps: Dict<text, bool> = {}
         for member in group.members:
-            val body = hir_demand_find_body_v1(bodies, member)!
+            if not by_id.has(member):
+                continue
+            val body = by_id[member]
             for dependency in body.dependencies:
-                if (dependency.kind != HirDemandDependencyKindV1.body or
-                        group.members.contains(dependency.identity)):
+                if dependency.kind != HirDemandDependencyKindV1.body:
                     continue
-                for target_group in groups:
-                    if target_group.members.contains(dependency.identity):
-                        dependencies.push(target_group.identity)
+                if not scc_id_by_member.has(dependency.identity):
+                    continue
+                val target_scc = scc_id_by_member[dependency.identity]
+                if target_scc != group.identity and not seen_deps.has(target_scc):
+                    seen_deps[target_scc] = true
+                    dependencies.push(target_scc)
         completed.push(HirDemandSccV1(
             group.identity, group.members,
             hir_demand_sorted_unique_text_v1(dependencies)!))
@@ -142,23 +245,22 @@ fn hir_demand_sorted_reads_v1(reads: [HirDemandReadV1]) -> [HirDemandReadV1]:
     result
 
 fn hir_demand_digest_v1(demand: HirDemandSetV1) -> text:
-    var encoded = "simple/hir-demand-set/v1|{demand.snapshot_revision}"
+    var parts: [text] = ["simple/hir-demand-set/v1|", demand.snapshot_revision]
     for identity in demand.body_identities:
-        encoded = encoded + "|body:{identity}"
+        parts.push("|body:{identity}")
     for operation in demand.operations:
-        encoded = encoded + "|operation:{operation}"
+        parts.push("|operation:{operation}")
     for shape in demand.generic_shapes:
-        encoded = encoded + "|shape:{shape}"
+        parts.push("|shape:{shape}")
     for provider in demand.providers:
-        encoded = encoded + "|provider:{provider}"
+        parts.push("|provider:{provider}")
     for identity in demand.deferred_bodies:
-        encoded = encoded + "|deferred:{identity}"
+        parts.push("|deferred:{identity}")
     for read in demand.recorded_reads:
-        encoded = encoded + "|read:{read.owner_identity}:{read.dependency_identity}:" +
-            "{read.facet}:{read.digest}"
+        parts.push("|read:{read.owner_identity}:{read.dependency_identity}:{read.facet}:{read.digest}")
     for group in demand.sccs:
-        encoded = encoded + "|scc:{group.identity}"
-    sha256_text(encoded)
+        parts.push("|scc:{group.identity}")
+    sha256_text(parts.join(""))
 
 fn hir_demand_close_v1(
     snapshot_revision: text, bodies: [DeferredHirBodyV1],
@@ -166,25 +268,26 @@ fn hir_demand_close_v1(
 ) -> Result<HirDemandSetV1, HirDemandErrorV1>:
     if not hir_demand_identity_valid_v1(snapshot_revision):
         return Err(HirDemandErrorV1.invalid_snapshot)
-    var known: [text] = []
+    var known: Dict<text, DeferredHirBodyV1> = {}
     for body in bodies:
-        if known.contains(body.identity):
+        if known.has(body.identity):
             return Err(HirDemandErrorV1.duplicate_body)
-        known.push(body.identity)
+        known[body.identity] = body
         if deferred_hir_body_validate_v1(body, snapshot_revision) != "ok":
             return Err(HirDemandErrorV1.invalid_body)
     var pending_bodies: [text] = []
     var operations: [text] = []
     for request in requests:
-        val body = hir_demand_find_body_v1(bodies, request.body_identity)
-        if body == nil:
+        if not known.has(request.body_identity):
             return Err(HirDemandErrorV1.missing_root)
+        val body = known[request.body_identity]
         if (not hir_demand_identity_valid_v1(request.operation) or
-                not body!.operations.contains(request.operation)):
+                not body.operations.contains(request.operation)):
             return Err(HirDemandErrorV1.unsupported_operation)
         pending_bodies.push(request.body_identity)
         operations.push("{request.body_identity}:{request.operation}")
     var selected_bodies: [text] = []
+    var selected_set: Dict<text, bool> = {}
     var generic_shapes: [text] = []
     var providers: [text] = []
     var reads: [HirDemandReadV1] = []
@@ -193,25 +296,26 @@ fn hir_demand_close_v1(
     while cursor < pending_bodies.len():
         val identity = pending_bodies[cursor]
         cursor = cursor + 1
-        if selected_bodies.contains(identity):
+        if selected_set.has(identity):
             continue
-        val body = hir_demand_find_body_v1(bodies, identity)
-        if body == nil:
+        if not known.has(identity):
             return Err(HirDemandErrorV1.missing_dependency)
+        val body = known[identity]
+        selected_set[identity] = true
         selected_bodies.push(identity)
-        if not body!.materialized:
+        if not body.materialized:
             deferred.push(identity)
-        for read in body!.recorded_reads:
+        for read in body.recorded_reads:
             reads.push(read)
-        for dependency in body!.dependencies:
+        for dependency in body.dependencies:
             if dependency.kind == HirDemandDependencyKindV1.body:
                 pending_bodies.push(dependency.identity)
             elif dependency.kind == HirDemandDependencyKindV1.operation:
-                val target = hir_demand_find_body_v1(bodies, dependency.identity)
-                if target == nil:
+                if not known.has(dependency.identity):
                     return Err(HirDemandErrorV1.missing_dependency)
+                val target = known[dependency.identity]
                 if (dependency.required_operation == "" or
-                        not target!.operations.contains(dependency.required_operation)):
+                        not target.operations.contains(dependency.required_operation)):
                     return Err(HirDemandErrorV1.unsupported_operation)
                 pending_bodies.push(dependency.identity)
                 operations.push("{dependency.identity}:{dependency.required_operation}")

@@ -1,6 +1,45 @@
 # SimpleOS Simple Web `decode_string` Fault Storm
 ## Open 2026-09-16 — needs owner triage
 
+## 2026-11-05 — offline TDD fix: gradient decode/split index-space violation (worktree work/libbug-w6-decstr-20261105)
+
+Residual std-lib instance of this fault class, fixed at interpreter/spec level
+(aarch64 Linux host; the x86_64 baremetal lane cannot execute here). The
+canonical renderer's gradient decode chain in
+`simple_web_html_layout_renderer_foundation.spl` bounded its scanners with
+`len()` (BYTES) while probing with `char_at` (CHARACTERS):
+`split_top_level_commas_paren_aware` and `gradient_matching_close`. On any
+multi-byte gradient value, every split point after a multi-byte character
+shifted, `substring` cut parts mid-UTF-8-sequence, and the malformed parts
+(mangled to U+FFFD in the interpreter; a mistagged/untagged slice on the
+compiled lane, the same shape as the heap-like tagged values this bug is
+tracked for) were handed to the byte-level decode that follows. Reproduced
+behaviorally: `split_top_level_commas_paren_aware("red, café, blue")` returned
+`["red", "caf<U+FFFD>", ", blue"]` instead of `["red", "café", "blue"]`.
+
+Fix: both scanners now probe `s.bytes()` (ASCII `(`, `)`, `,` never occur
+inside a UTF-8 multi-byte sequence, so byte probing is answer-identical on
+ASCII and correct on multi-byte input — same reasoning as the HTML admission
+guard). The three gradient-decode `starts_with` receivers on split-part /
+`lower()` results now route through the tagged-text facade
+`text_starts_with_portable` per this doc's dispatch-hazard mitigation.
+
+Offline contract pinned by (new)
+`test/01_unit/runtime/baremetal_string_split_abi_spec.spl`: behavioral ABI
+pins (split parts are decodable tagged text: len/bytes/trim/starts_with/
+iterate/`[text]` round-trip, multi-byte documents, empty-delimiter
+engine-divergence note) plus source-contract pins on the scanner index space
+and facade routing. Regression sweep green: scan_index_space (20), foundation
+_gradient (13), computed_style_hot_split (4), background_gradient_over_color
+(5), gradient_stops_wiring (8), ABI spec (10). Pre-existing, unrelated:
+`simple_web_html_layout_renderer_module_split_spec.spl` size gate fails on
+pristine release/1.0.0 HEAD (`simple_web_html_layout_renderer.spl` 146240 and
+`..._decl_apply.spl` 133657 bytes, both over the 128 KiB parser-input budget;
+not touched by this change). Not closed: the live SimpleOS zero-exception
+three-content-frame gate still has not re-run; `is_gradient_angle_token`
+retains a benign char_at/len mismatch (multibyte angle tokens fail closed to
+"not an angle").
+
 ## 2026-09-22 — production-path text-owner cleanup (offline)
 
 The earlier live decode fault fix remains recorded below. The theme-package
@@ -190,3 +229,65 @@ run `sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs` in the
 SimpleOS QEMU phase and retain the production theme-parser, framebuffer, fault,
 and maximum-RSS receipts. The current production-path regression does not
 substitute for a fresh native guest run.
+
+## 2026-11-12 fix attempt (baremetal lane, work/fix-baremetal-20261112)
+
+Audited `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
+(the lane's in-scope renderer file) at 7a06b4aafd5:
+
+- **No decode-string fault-class receivers remain in this file.** No
+  `starts_with` on potentially type-erased split/trim receivers, no `char_at`;
+  the 2026-07-13 interpolation-forced dispatch and the 2026-11-05 gradient
+  byte-scan fixes are not in this file's current shape.
+- **Fixed a residual index-space mismatch in the degenerate-parse diagnostic
+  branch** (4 sites: the `lt_portable` '<' counter, the 96-element head dump,
+  the 96-element mid dump, the per-part 12-element prefix dump). These probed
+  with `char_code_at` — CODEPOINT-indexed on this lane
+  (`rt_string_char_code_at` walks UTF-8) — bounded by `len()`, which is BYTES.
+  On any multi-byte document the counter under-counted every '<' after a
+  non-ASCII character (misleading the split-vs-portable comparison) and each
+  dump element re-walked the string O(n). All four now use `byte_at` (byte
+  index space; 0x3C never occurs inside a UTF-8 multi-byte sequence), the same
+  idiom the foundation file already uses at
+  `simple_web_html_layout_renderer_foundation.spl:190`. Diagnostic-branch only;
+  no healthy-frame path changed.
+- **Out of lane scope, still open:** `is_gradient_angle_token`'s benign
+  char_at/len mismatch lives in `..._foundation.spl` (not in the allowed file
+  list), and the canonical SimpleOS zero-exception three-content-frame gate
+  still awaits an admitted compiler + QEMU run. The renderer file is ~146 KB,
+  over the 128 KiB stage3 parser-input budget, so a stage2/stage3 native probe
+  of it is not meaningful.
+
+**Status: fix-implemented-verification-pending** (static review + idiom
+parity only; native verification pending admitted compiler). DB row updated.
+
+## Verification 2026-11-25 (p2w5-ad lane, release/1.0.0)
+
+In-tree state of the offline fixes re-confirmed on current release/1.0.0 by
+code inspection:
+
+- The degenerate-parse diagnostic branch in
+  `simple_web_html_layout_renderer.spl` probes with `byte_at` (lines
+  1162-1185, with the index-space comments), not `char_code_at`/`len()`.
+- The foundation file routes gradient-decode `starts_with` receivers through
+  `text_starts_with_portable` and scans `s.bytes()` as recorded
+  (`simple_web_html_layout_renderer_foundation.spl:16,63,133,1872,2070`).
+- `test/01_unit/runtime/baremetal_string_split_abi_spec.spl` is in tree.
+
+Execution limits on this host: the ABI spec cannot run under the pinned seed
+at HEAD (rejects `@representation_boundary`), and the canonical SimpleOS
+zero-exception three-content-frame QEMU gate requires an admitted self-hosted
+compiler plus a QEMU guest — both outside this lane. The status header
+("fix-implemented-verification-pending") remains accurate and is unchanged.
+
+Status: fix-implemented-verification-pending (native/QEMU gate still open),
+unchanged.
+
+## BF-9 Update (2026-11-26) — verify waiting (`fix-implemented-verification-pending`)
+
+- **Verified OS web contract**: `src/os/services/web/web_service.spl` routes through `http_classify_request` and escapes reflected paths (including HTML metacharacters and multi-byte UTF-8) via canonical `html_escape_core`.
+- **Host spec**: `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel_bf9/bf9_web_utf8_and_vfs_bounds_spec.spl --mode=interpreter` -> `2 examples, 0 failures`.
+- **QEMU/baremetal verification pending**:
+  ```sh
+  sh scripts/os/simple_browser_board_gate.shs
+  ```

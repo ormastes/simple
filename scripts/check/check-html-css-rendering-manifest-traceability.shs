@@ -200,8 +200,28 @@ if status != "pass":
     sys.exit(1)
 PY
 
-status="$(sed -n 's/^html_css_rendering_manifest_traceability_status=//p' "$OUT_ENV" | tail -n 1)"
-reason="$(sed -n 's/^html_css_rendering_manifest_traceability_reason=//p' "$OUT_ENV" | tail -n 1)"
+_HCM_CR=$(printf '\r')
+status=""
+reason=""
+tag_count=""
+tag_covered=""
+css_count=""
+css_covered=""
+case_count=""
+tag_source=""
+while IFS= read -r _hcm_line || [ -n "$_hcm_line" ]; do
+    _hcm_line="${_hcm_line%$_HCM_CR}"
+    case "$_hcm_line" in
+        html_css_rendering_manifest_traceability_status=*) status="${_hcm_line#html_css_rendering_manifest_traceability_status=}" ;;
+        html_css_rendering_manifest_traceability_reason=*) reason="${_hcm_line#html_css_rendering_manifest_traceability_reason=}" ;;
+        html_css_rendering_manifest_traceability_html_tag_count=*) tag_count="${_hcm_line#html_css_rendering_manifest_traceability_html_tag_count=}" ;;
+        html_css_rendering_manifest_traceability_html_tag_covered_count=*) tag_covered="${_hcm_line#html_css_rendering_manifest_traceability_html_tag_covered_count=}" ;;
+        html_css_rendering_manifest_traceability_css_property_count=*) css_count="${_hcm_line#html_css_rendering_manifest_traceability_css_property_count=}" ;;
+        html_css_rendering_manifest_traceability_css_property_covered_count=*) css_covered="${_hcm_line#html_css_rendering_manifest_traceability_css_property_covered_count=}" ;;
+        html_css_rendering_manifest_traceability_manifest_case_count=*) case_count="${_hcm_line#html_css_rendering_manifest_traceability_manifest_case_count=}" ;;
+        html_css_rendering_manifest_traceability_tag_source=*) tag_source="${_hcm_line#html_css_rendering_manifest_traceability_tag_source=}" ;;
+    esac
+done < "$OUT_ENV"
 
 if [ -z "$status" ]; then
     cat "$OUT_ENV" 2>/dev/null || true
@@ -214,24 +234,31 @@ fi
     echo
     echo "- status: $status"
     echo "- reason: $reason"
-    echo "- HTML tags: $(sed -n 's/^html_css_rendering_manifest_traceability_html_tag_covered_count=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^html_css_rendering_manifest_traceability_html_tag_count=//p' "$OUT_ENV" | tail -n 1)"
-    echo "- implemented CSS properties: $(sed -n 's/^html_css_rendering_manifest_traceability_css_property_covered_count=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^html_css_rendering_manifest_traceability_css_property_count=//p' "$OUT_ENV" | tail -n 1)"
-    echo "- manifest cases: $(sed -n 's/^html_css_rendering_manifest_traceability_manifest_case_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- HTML tags: $tag_covered/$tag_count"
+    echo "- implemented CSS properties: $css_covered/$css_count"
+    echo "- manifest cases: $case_count"
     echo
     echo "## Raw Evidence"
-    sed 's/^/- /' "$OUT_ENV"
+    while IFS= read -r _hcm_line || [ -n "$_hcm_line" ]; do
+        _hcm_line="${_hcm_line%$_HCM_CR}"
+        printf -- '- %s\n' "$_hcm_line"
+    done < "$OUT_ENV"
 } >"$REPORT_PATH"
 
 cat "$OUT_ENV"
 
 env_value() {
-    sed -n "s/^html_css_rendering_manifest_traceability_$1=//p" "$OUT_ENV" | tail -n 1
+    _ev_prefix="html_css_rendering_manifest_traceability_$1="
+    _ev_val=""
+    while IFS= read -r _ev_line || [ -n "$_ev_line" ]; do
+        _ev_line="${_ev_line%$_HCM_CR}"
+        case "$_ev_line" in
+            "$_ev_prefix"*) _ev_val="${_ev_line#"$_ev_prefix"}" ;;
+        esac
+    done < "$OUT_ENV"
+    printf '%s\n' "$_ev_val"
 }
 
-tag_count="$(env_value html_tag_count)"
-css_count="$(env_value css_property_count)"
-case_count="$(env_value manifest_case_count)"
-tag_source="$(env_value tag_source)"
 checked=$(( ${tag_count:-0} + ${css_count:-0} ))
 
 if [ "$checked" -le 0 ] || [ "${case_count:-0}" -le 0 ]; then

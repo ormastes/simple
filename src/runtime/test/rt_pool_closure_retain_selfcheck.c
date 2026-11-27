@@ -18,12 +18,16 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdatomic.h>
+#include <stdlib.h>
 
 #include "../runtime.h"
 
 extern int64_t rt_pool_set_parallelism(int64_t workers);
 extern int64_t rt_pool_state_create_v1(int64_t capacity);
 extern int64_t rt_pool_state_try_submit_i64_v1(int64_t state, int64_t entry, int64_t input);
+extern int64_t rt_pool_state_try_submit_i64_kind_v1(int64_t state, int64_t kind, int64_t entry, int64_t input);
+#define POOL_KIND_ADDRESS 1 /* RT_WORKER_CLOSURE_ADDRESS: blocker is a machine address */
 extern int64_t rt_pool_task_join_i64_v1(int64_t task);
 extern int64_t rt_pool_task_release_i64_v1(int64_t task);
 extern int64_t rt_pool_state_close_v1(int64_t state);
@@ -32,6 +36,21 @@ extern int64_t rt_pool_state_pending_v1(int64_t state);
 extern int64_t rt_pool_state_running_v1(int64_t state);
 /* Weak so the pre-fix runtime still links; the fix must define it. */
 extern void spl_closure_pin_stats(int64_t* retains, int64_t* releases, int64_t* live) __attribute__((weak));
+
+/* This C-only fixture owns the optional providers normally supplied by the
+ * Rust array-packing runtime and Simple thread_pool.spl. Darwin executable
+ * links require concrete providers even for these weak imports. Count the
+ * packing notification so worker startup is checked; entering the unrelated
+ * Simple pool is a routing failure, never a successful no-op. */
+static _Atomic unsigned user_thread_notifications;
+void simple_note_user_threads_started(void) {
+    atomic_fetch_add_explicit(&user_thread_notifications, 1, memory_order_relaxed);
+}
+void worker_loop_entry(int64_t pool_id) {
+    fprintf(stderr, "FAIL: native PoolState routed to Simple worker pool %lld\n",
+            (long long)pool_id);
+    abort();
+}
 
 #define DIRECT_MARKER INT64_C(0x5344495245435446)
 
@@ -69,7 +88,7 @@ int main(void) {
     int64_t state = rt_pool_state_create_v1(2);
     CHECK(state != 0);
 
-    int64_t block_task = rt_pool_state_try_submit_i64_v1(state, (int64_t)(uintptr_t)blocker, 1);
+    int64_t block_task = rt_pool_state_try_submit_i64_kind_v1(state, POOL_KIND_ADDRESS, (int64_t)(uintptr_t)blocker, 1);
     CHECK(block_task > 0);
     /* Wait until the only worker is inside the blocker, so the closure task
      * cannot run before the submitter's scope ends. */
@@ -114,6 +133,7 @@ int main(void) {
 
     CHECK(rt_pool_state_close_v1(state) == 1);
     CHECK(rt_pool_state_destroy_v1(state) == 1);
+    CHECK(atomic_load_explicit(&user_thread_notifications, memory_order_relaxed) > 0);
     printf("SELFCHECK PASSED (0 failures)\n");
     return 0;
 }

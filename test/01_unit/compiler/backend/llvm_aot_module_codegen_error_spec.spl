@@ -1,0 +1,165 @@
+# @req REQ-SSPEC-COMPILER
+# A MIR construct the LLVM translator cannot lower is a compile error of THAT
+# MODULE (MirToLlvm.codegen_error: recorded with module + function, and
+# translate_module returns the error module, so no object is built), not a
+# `panic` of the compiler process.
+#
+# Stage 3 compiles ~186 modules per worker process; a panic kills the worker
+# and the whole claim is sealed CRASH. The Cranelift twin of this contract is
+# cl_module_codegen_error (cranelift_aot_module_codegen_error_spec).
+#
+# Two conditions still panicked in the LLVM translator:
+# - a callable operand whose MirCallOrigin is Unknown
+#   (mir_call_origin_uses_local_symbols_named, reached from four core_codegen
+#   sites: call target, call guard, operand list, single operand). The native
+#   driver's census (mir_unproven_call_origin_sites_v1) fails the module first
+#   for Call/PipeForward/Parallel positions only; a function VALUE stored
+#   through a pointer, and every route that translates without the census,
+#   still reached the panic.
+# - a text literal whose destination local has neither a ptr nor an i64 type.
+#
+# No source program is known to produce either today (both come from a MIR
+# producer defect, two of which were observed in Stage 3 for Unknown), so the
+# MIR is built directly; there is no native fixture.
+use std.spec.*
+use std.spec.step
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.llvm_ir_builder.{llvm_codegen_error_from_ir}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir.*
+
+fn lp_fn_ptr() -> MirType:
+    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+
+fn lp_callable(name: text, origin: MirCallOrigin) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name), lp_fn_ptr()), call_origin: origin)
+
+fn lp_local(id: i64, type_: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: type_, kind: LocalKind.Temp, is_ghost: false)
+
+fn lp_fn(id: i64, name: text, return_type: MirType, locals: [MirLocal], insts: [MirInst], ret: MirOperand?) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: id), name: name,
+        signature: MirSignature(params: [], return_type: return_type, is_variadic: false),
+        locals: locals,
+        blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: insts,
+            terminator: MirTerminator.Ret(ret))],
+        entry_block: BlockId.entry(), span: Span.empty(), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: false, export_name: "", has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false)
+
+fn lp_module(name: text, funcs: [MirFunction]) -> MirModule:
+    var functions: Dict<SymbolId, MirFunction> = {}
+    for func in funcs:
+        functions[func.symbol] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn lp_translate(module: MirModule, bootstrap: bool) -> text:
+    var generator = MirToLlvm.create(module.name, CodegenTarget.X86_64, nil)
+    generator.set_group_bootstrap_mode(bootstrap)
+    llvm_codegen_error_from_ir(generator.translate_module(module))
+
+fn lp_count(haystack: text, needle: text) -> i64:
+    haystack.split(needle).len() - 1
+
+fn lp_unknown_call_module(name: text) -> MirModule:
+    lp_module(name, [lp_fn(1, "lp_unknown_caller", MirType.unit(), [],
+        [MirInst(kind: MirInstKind.Call(nil, lp_callable("lp.unknown.callee", MirCallOrigin.Unknown), []), span: nil)],
+        nil)])
+
+fn lp_slot_type() -> MirType:
+    MirType(kind: MirTypeKind.Ref(lp_fn_ptr(), true))
+
+# A function VALUE stored through a pointer (translate_store ->
+# translate_operand): a position outside the driver census.
+fn lp_unknown_value_module(name: text) -> MirModule:
+    lp_module(name, [lp_fn(1, "lp_unknown_value", MirType.unit(), [lp_local(0, lp_slot_type())],
+        [MirInst(kind: MirInstKind.Store(mir_operand_copy(LocalId(id: 0)),
+            lp_callable("lp.unknown.value", MirCallOrigin.Unknown)), span: nil)],
+        nil)])
+
+fn lp_unknown_arg_module(name: text) -> MirModule:
+    val callee = lp_fn(2, "lp_known_sink", MirType.unit(), [], [], nil)
+    val caller = lp_fn(1, "lp_unknown_arg", MirType.unit(), [],
+        [MirInst(kind: MirInstKind.Call(nil, lp_callable("lp_known_sink", MirCallOrigin.Source),
+            [lp_callable("lp.unknown.arg", MirCallOrigin.Unknown)]), span: nil)],
+        nil)
+    lp_module(name, [caller, callee])
+
+fn lp_unknown_untyped_target_module(name: text) -> MirModule:
+    # A callee constant whose type is not FuncPtr (translate_call_target_at).
+    val target = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("lp.unknown.untyped"), MirType.i64()),
+        call_origin: MirCallOrigin.Unknown)
+    lp_module(name, [lp_fn(1, "lp_unknown_untyped", MirType.unit(), [],
+        [MirInst(kind: MirInstKind.Call(nil, target, []), span: nil)], nil)])
+
+# The callee is named like a runtime symbol, so a Source origin must resolve
+# to the local mangled symbol and a Runtime origin to the bare runtime name:
+# the authority answer is observable in the IR either way.
+fn lp_clean_module(name: text) -> MirModule:
+    val helper = lp_fn(2, "rt_lp_clean_owned", MirType.i64(), [], [], Some(mir_operand_const_int(7)))
+    val main_fn = lp_fn(1, "lp_clean_main", MirType.i64(),
+        [lp_local(0, MirType.i64()), lp_local(1, lp_slot_type()), lp_local(2, MirType.i64())],
+        [MirInst(kind: MirInstKind.Call(Some(LocalId(id: 0)), lp_callable("rt_lp_clean_owned", MirCallOrigin.Source), []), span: nil),
+            MirInst(kind: MirInstKind.Store(mir_operand_copy(LocalId(id: 1)),
+                lp_callable("rt_lp_clean_owned", MirCallOrigin.Source)), span: nil),
+            MirInst(kind: MirInstKind.Call(Some(LocalId(id: 2)), lp_callable("rt_lp_clean_runtime", MirCallOrigin.Runtime), []), span: nil)],
+        Some(mir_operand_copy(LocalId(id: 0))))
+    lp_module(name, [main_fn, helper])
+
+describe "LLVM AOT callable without a proven origin is a module compile error":
+    it "fails the module on a call whose origin is Unknown, once, naming module and function":
+        step("Call target guard (translate_call_at) records instead of panicking")
+        for bootstrap in [false, true]:
+            val errors = lp_translate(lp_unknown_call_module("lp.unknown.call"), bootstrap)
+            expect(errors).to_contain("E-BACKEND-LLVM-CALL-ORIGIN: lp.unknown.callee")
+            expect(errors).to_contain("module=lp.unknown.call")
+            expect(errors).to_contain("function=lp_unknown_caller")
+            expect(lp_count(errors, "E-BACKEND-LLVM-CALL-ORIGIN")).to_equal(1)
+
+    it "fails the module on a function value whose origin is Unknown":
+        step("Single-operand translation (translate_operand) records instead of panicking")
+        for bootstrap in [false, true]:
+            val errors = lp_translate(lp_unknown_value_module("lp.unknown.value.module"), bootstrap)
+            expect(errors).to_contain("E-BACKEND-LLVM-CALL-ORIGIN: lp.unknown.value")
+            expect(errors).to_contain("function=lp_unknown_value")
+
+    it "fails the module on a call argument whose origin is Unknown":
+        step("Operand-list translation (translate_operand_at) records instead of panicking")
+        for bootstrap in [false, true]:
+            val errors = lp_translate(lp_unknown_arg_module("lp.unknown.arg.module"), bootstrap)
+            expect(errors).to_contain("E-BACKEND-LLVM-CALL-ORIGIN: lp.unknown.arg")
+            expect(errors).to_contain("function=lp_unknown_arg")
+
+    it "fails the module on a non-FuncPtr call target whose origin is Unknown":
+        step("The translate_call_at guard records it before any target is translated")
+        val errors = lp_translate(lp_unknown_untyped_target_module("lp.unknown.untyped.module"), false)
+        expect(errors).to_contain("E-BACKEND-LLVM-CALL-ORIGIN: lp.unknown.untyped")
+
+describe "LLVM AOT text literal into an unsupported destination is a module compile error":
+    it "records the destination type instead of panicking":
+        step("emit_boxed_text_literal_into with a double destination")
+        var generator = MirToLlvm.create("lp.text.literal", CodegenTarget.X86_64, nil)
+        generator.set_group_bootstrap_mode(false)
+        generator.local_types[1] = "double"
+        generator.translate_const(LocalId(id: 1), MirConstValue.Str("hi"), MirType(kind: MirTypeKind.Opaque("str")))
+        expect(generator.codegen_errors.len()).to_equal(1)
+        expect(generator.codegen_errors.join("|")).to_contain("E-BACKEND-LLVM-TEXT-LITERAL: text literal has unsupported result type double")
+
+describe "LLVM AOT module codegen error leaves clean modules unchanged":
+    it "translates a clean module with a proven call and function value to real IR":
+        for bootstrap in [false, true]:
+            var generator = MirToLlvm.create("lp.clean", CodegenTarget.X86_64, nil)
+            generator.set_group_bootstrap_mode(bootstrap)
+            val ir = generator.translate_module(lp_clean_module("lp.clean"))
+            expect(llvm_codegen_error_from_ir(ir)).to_equal("")
+            expect(generator.codegen_errors.len()).to_equal(0)
+            expect(ir).to_contain("@__simple_local_rt_lp_clean_owned")
+            expect(ir).to_contain("@rt_lp_clean_runtime")
+            expect(ir.contains("@__simple_local_rt_lp_clean_runtime")).to_equal(false)

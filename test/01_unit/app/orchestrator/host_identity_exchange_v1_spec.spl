@@ -1,0 +1,181 @@
+# Public-only exchange regressions. NOT_RUN without an admitted runtime.
+use app.orchestrator.host_identity_exchange_v1.*
+use app.orchestrator.host_identity_public_v1.host_identity_known_hosts_validate_v1
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use app.orchestrator.controller_gateway_v1.{ControllerGatewayRequestV1,
+    controller_gateway_request_encode_v1, controller_gateway_response_v1}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+val EXCHANGE_CLIENT = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINdamAGCsQq31Uv+08lkBzoO4XLz2qYjJa8CGmj3B1Ea"
+val EXCHANGE_SERVER = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID1AF8PoQ4lakrcKp00bfrycmCzPLsSWjMDNVfEq9GYM"
+val EXCHANGE_CLIENT_FP = "SHA256:bbXpuKG6zhzdmnxq256TlqzFBzRl2f6OOg722cYNbU8"
+val EXCHANGE_SERVER_FP = "SHA256:F34nin7tcaYH6WR5LSWSfj6weFBPfBpuyUUoPFP9YjA"
+
+fn exchange_fixture_v1(action: text) -> Dict<text, SdnValue>:
+    val pending = action == "identity-register"
+    var fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("orchestration-host-identity"),
+        "status": SdnValue.String(if pending: "pending-registration" else: "server-key"),
+        "exchangeAction": SdnValue.String(action), "controllerId": SdnValue.String("controller-1"),
+        "requestUid": SdnValue.String("request-1"), "serverName": SdnValue.String("build"),
+        "keyType": SdnValue.String("ssh-host-ed25519"), "serverPublicKey": SdnValue.String(EXCHANGE_SERVER),
+        "fingerprint": SdnValue.String(EXCHANGE_SERVER_FP), "authorized": SdnValue.Bool(false),
+        "enrolled": SdnValue.Bool(false), "registered": SdnValue.Bool(false),
+        "pendingGrant": SdnValue.Bool(pending), "cleanupPending": SdnValue.Bool(false),
+        "uploadedKeyPossession": SdnValue.String(if pending: "not-proven" else: "not-applicable")}
+    if pending:
+        fields["clientPublicKey"] = SdnValue.String(EXCHANGE_CLIENT)
+        fields["clientFingerprint"] = SdnValue.String(EXCHANGE_CLIENT_FP)
+        fields["fileSynced"] = SdnValue.Bool(true)
+        fields["namespaceSynced"] = SdnValue.Bool(false)
+    fields
+
+fn exchange_encode_fixture_v1(fields: Dict<text, SdnValue>) -> text:
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+fn exchange_accept_upload_v1(source: text) -> OrchestratorValidationReplyV1:
+    expect(source).to_equal(EXCHANGE_CLIENT)
+    OrchestratorValidationReplyV1(exit_code: 0,
+        output: exchange_encode_fixture_v1(exchange_fixture_v1("identity-register")))
+
+fn exchange_wrong_upload_v1(source: text) -> OrchestratorValidationReplyV1:
+    expect(source).to_equal(EXCHANGE_CLIENT)
+    var fields = exchange_fixture_v1("identity-register")
+    fields["clientPublicKey"] = SdnValue.String(EXCHANGE_SERVER)
+    fields["clientFingerprint"] = SdnValue.String(EXCHANGE_SERVER_FP)
+    OrchestratorValidationReplyV1(exit_code: 0, output: exchange_encode_fixture_v1(fields))
+
+fn exchange_transport_failure_v1(source: text) -> OrchestratorValidationReplyV1:
+    OrchestratorValidationReplyV1(exit_code: 17, output: "bounded-transport-failure")
+
+# Exercise the same response normalization used after actual SSH collection.
+# This is a pure composed-codec fixture, not an observed transport receipt.
+fn exchange_composed_reply_v1(public_source: text) -> OrchestratorValidationReplyV1:
+    val request = ControllerGatewayRequestV1(action: "identity-register", controller_id: "controller-1",
+        request_uid: "request-1", source: public_source, ns: "", name: "build", source_digest: "")
+    val source = controller_gateway_request_encode_v1(request).unwrap()
+    val fixture = exchange_encode_fixture_v1(exchange_fixture_v1("identity-register"))
+    val validated = controller_gateway_response_v1(source, fixture).unwrap()
+    OrchestratorValidationReplyV1(exit_code: 0, output: validated)
+
+fn exchange_take_reply_v1(source: text) -> OrchestratorValidationReplyV1:
+    expect(source).to_equal("")
+    OrchestratorValidationReplyV1(exit_code: 0,
+        output: exchange_encode_fixture_v1(exchange_fixture_v1("identity-server")))
+
+fn exchange_must_not_call_v1(source: text) -> OrchestratorValidationReplyV1:
+    # Trap a validation-order regression; this callback must never be invoked.
+    assert(false)
+    OrchestratorValidationReplyV1(exit_code: 99, output: "unexpected-callback")
+
+describe "Correlated public SSH identity exchange receipts":
+    it "preserves the full typed receipt through gateway normalization and client validation":
+        val reply = host_identity_exchange_send_v1(EXCHANGE_CLIENT, "controller-1", "request-1", "build", exchange_composed_reply_v1)
+        expect(reply.exit_code).to_equal(0)
+        expect(reply.output).to_contain("pending-registration")
+        expect(reply.output).to_contain("pendingGrant: true")
+        expect(reply.output).to_contain("namespaceSynced: false")
+
+    it "binds a direct identity-register response to its original uploaded key":
+        val request = ControllerGatewayRequestV1(action: "identity-register", controller_id: "controller-1",
+            request_uid: "request-1", source: EXCHANGE_SERVER, ns: "", name: "build", source_digest: "")
+        val source = controller_gateway_request_encode_v1(request).unwrap()
+        val fixture = exchange_encode_fixture_v1(exchange_fixture_v1("identity-register"))
+        expect(controller_gateway_response_v1(source, fixture).unwrap_err()).to_equal("controller-identity-upload-mismatch")
+
+    it "accepts a server host key with exact controller request and server correlation":
+        val response = exchange_encode_fixture_v1(exchange_fixture_v1("identity-server"))
+        val decoded = host_identity_exchange_response_v1("identity-server", "controller-1", "request-1", "build", response)
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap()).to_equal(EXCHANGE_SERVER)
+
+    it "accepts only a pending unproven upload receipt":
+        val response = exchange_encode_fixture_v1(exchange_fixture_v1("identity-register"))
+        expect(host_identity_exchange_response_v1("identity-register", "controller-1", "request-1", "build", response).is_ok()).to_equal(true)
+
+    it "rejects mismatched controller request server and action":
+        val response = exchange_encode_fixture_v1(exchange_fixture_v1("identity-server"))
+        expect(host_identity_exchange_response_v1("identity-server", "other-controller", "request-1", "build", response).is_err()).to_equal(true)
+        expect(host_identity_exchange_response_v1("identity-server", "controller-1", "other-request", "build", response).is_err()).to_equal(true)
+        expect(host_identity_exchange_response_v1("identity-server", "controller-1", "request-1", "other-server", response).is_err()).to_equal(true)
+        expect(host_identity_exchange_response_v1("identity-register", "controller-1", "request-1", "build", response).is_err()).to_equal(true)
+
+    it "rejects private fields and application signing key conflation":
+        var fields = exchange_fixture_v1("identity-server")
+        fields["privateKey"] = SdnValue.String("must-not-escape")
+        expect(host_identity_exchange_response_v1("identity-server", "controller-1", "request-1", "build", exchange_encode_fixture_v1(fields)).is_err()).to_equal(true)
+        var wrong_type = exchange_fixture_v1("identity-server")
+        wrong_type["keyType"] = SdnValue.String("application-signing-key")
+        expect(host_identity_exchange_response_v1("identity-server", "controller-1", "request-1", "build", exchange_encode_fixture_v1(wrong_type)).is_err()).to_equal(true)
+
+    it "rejects false fingerprint or authority claims":
+        var fields = exchange_fixture_v1("identity-server")
+        fields["fingerprint"] = SdnValue.String(EXCHANGE_CLIENT_FP)
+        expect(host_identity_exchange_response_v1("identity-server", "controller-1", "request-1", "build", exchange_encode_fixture_v1(fields)).is_err()).to_equal(true)
+        var granted = exchange_fixture_v1("identity-register")
+        granted["authorized"] = SdnValue.Bool(true)
+        granted["enrolled"] = SdnValue.Bool(true)
+        granted["registered"] = SdnValue.Bool(true)
+        expect(host_identity_exchange_response_v1("identity-register", "controller-1", "request-1", "build", exchange_encode_fixture_v1(granted)).is_err()).to_equal(true)
+
+    it "rejects a receipt that claims uploaded-key possession or clears pending grant":
+        var fields = exchange_fixture_v1("identity-register")
+        fields["uploadedKeyPossession"] = SdnValue.String("proven-by-existing-login")
+        expect(host_identity_exchange_response_v1("identity-register", "controller-1", "request-1", "build", exchange_encode_fixture_v1(fields)).is_err()).to_equal(true)
+        var cleared = exchange_fixture_v1("identity-register")
+        cleared["pendingGrant"] = SdnValue.Bool(false)
+        expect(host_identity_exchange_response_v1("identity-register", "controller-1", "request-1", "build", exchange_encode_fixture_v1(cleared)).is_err()).to_equal(true)
+
+    it "rejects malformed duplicate and wrongly typed reply fields":
+        expect(host_identity_exchange_response_v1("identity-server", "controller-1", "request-1", "build", "version: 1\nversion: 1\n").is_err()).to_equal(true)
+        var fields = exchange_fixture_v1("identity-server")
+        fields["cleanupPending"] = SdnValue.String("false")
+        expect(host_identity_exchange_response_v1("identity-server", "controller-1", "request-1", "build", exchange_encode_fixture_v1(fields)).is_err()).to_equal(true)
+
+describe "Client callback sends public material and pins only expected server keys":
+    it "submits only canonical public material and checks the upload receipt":
+        val reply = host_identity_exchange_send_v1(EXCHANGE_CLIENT + " laptop", "controller-1", "request-1", "build", exchange_accept_upload_v1)
+        expect(reply.exit_code).to_equal(0)
+        expect(reply.output).to_contain("pending-registration")
+        expect(reply.output).to_contain("not-proven")
+
+    it "rejects a receipt for a different uploaded public key":
+        val reply = host_identity_exchange_send_v1(EXCHANGE_CLIENT, "controller-1", "request-1", "build", exchange_wrong_upload_v1)
+        expect(reply.exit_code).to_equal(1)
+        expect(reply.output).to_contain("host-identity-exchange-upload-mismatch")
+
+    it "preserves a nonzero transport reply unchanged":
+        val reply = host_identity_exchange_send_v1(EXCHANGE_CLIENT, "controller-1", "request-1", "build", exchange_transport_failure_v1)
+        expect(reply.exit_code).to_equal(17)
+        expect(reply.output).to_equal("bounded-transport-failure")
+
+    it "rejects private payloads before invoking the sender":
+        val reply = host_identity_exchange_send_v1("-----BEGIN PRIVATE KEY-----", "controller-1", "request-1", "build", exchange_must_not_call_v1)
+        expect(reply.exit_code).to_equal(2)
+        expect(reply.output.contains("BEGIN PRIVATE")).to_equal(false)
+
+    it "compares the independent expected fingerprint before pin storage":
+        val reply = host_identity_exchange_client_v1(["key-takeserver", "--store-root", "/unused",
+            "--trust-ref", "trust://build", "--server", "build", "--controller-id", "controller-1",
+            "--request-uid", "request-1", "--expected-fingerprint", EXCHANGE_CLIENT_FP], exchange_take_reply_v1)
+        expect(reply.exit_code).to_equal(1)
+        expect(reply.output).to_contain("host-identity-server-fingerprint-mismatch")
+
+    it "rejects invalid references and options before callback execution":
+        expect(host_identity_exchange_client_v1(["key-sendserver"], exchange_must_not_call_v1).exit_code).to_equal(2)
+        expect(host_identity_exchange_client_v1(["key-takeserver", "--store-root", "/unused",
+            "--trust-ref", "plaintext-key", "--server", "build", "--controller-id", "controller-1",
+            "--request-uid", "request-1", "--expected-fingerprint", EXCHANGE_SERVER_FP], exchange_must_not_call_v1).exit_code).to_equal(2)
+
+describe "Server gateway identity boundaries":
+    it "rejects unknown actions invalid upload sources and unused server source before IO":
+        expect(host_identity_gateway_v1("grant", "controller-1", "request-1", "build", "/unused", "/unused/server.pub", "").exit_code).to_equal(2)
+        expect(host_identity_gateway_v1("identity-register", "controller-1", "request-1", "build", "/unused", "/unused/server.pub", "private-material").exit_code).to_equal(2)
+        expect(host_identity_gateway_v1("identity-server", "controller-1", "request-1", "build", "/unused", "/unused/server.pub", EXCHANGE_CLIENT).exit_code).to_equal(2)
+
+    it "validates exactly one pinned alias and public key line":
+        expect(host_identity_known_hosts_validate_v1("build " + EXCHANGE_SERVER + "\n", "build").is_ok()).to_equal(true)
+        expect(host_identity_known_hosts_validate_v1("other " + EXCHANGE_SERVER + "\n", "build").is_err()).to_equal(true)
+        expect(host_identity_known_hosts_validate_v1("build " + EXCHANGE_SERVER + " comment\n", "build").is_err()).to_equal(true)
+        expect(host_identity_known_hosts_validate_v1("build " + EXCHANGE_SERVER + "\nother " + EXCHANGE_CLIENT + "\n", "build").is_err()).to_equal(true)

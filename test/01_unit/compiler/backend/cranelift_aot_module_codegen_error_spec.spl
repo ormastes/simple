@@ -1,0 +1,203 @@
+# A per-module code-generation failure on the Cranelift AOT lane is a compile
+# error of THAT MODULE, not a panic of the compiler process.
+#
+# Stage 3 compiles the compiler's closure in claims of ~186 modules per worker
+# process with SIMPLE_NATIVE_GO_TO_END=1. A `panic(...)` in the lowering kills
+# the worker (SIGABRT) and fails every module of its claim. PR #9300 moved the
+# refused call ABI onto the per-module refusal record; these examples pin the
+# remaining module-input conditions of cranelift_codegen_adapter.spl onto the
+# same record: a global with no declaration or no address, an instruction kind
+# the backend does not lower, and a function value with no address. Each must
+# come back from the AOT entry as the module's CompileError (naming the
+# function and the condition), before any object is emitted, and the next
+# module must compile normally.
+#
+# The MIR here is built directly, so bootstrap-mode lowering (SIMPLE_BOOTSTRAP)
+# does not apply: the backend sees exactly these instructions.
+use std.spec.*
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir.*
+use compiler.backend.backend.backend_types.{compileoptions_default_options}
+use compiler.backend.mir_target_context_provider.{backend_requested_aot_target_triple}
+use compiler.backend.cranelift_codegen_adapter.{CraneliftCodegenAdapter, cranelift_compile_module_direct, build_signature, cl_translate_instruction, cl_translate_terminator}
+use compiler.backend.cranelift_global_address.{CraneliftGlobalBinding}
+use compiler.backend.cranelift_runtime_imports.{cl_aot_call_abi_begin, cl_aot_call_abi_end}
+use std.nogc_sync_mut.sffi.codegen.*
+
+fn p3_local(id: i64, type_: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: type_, kind: LocalKind.Temp, is_ghost: false)
+
+fn p3_int(value: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(value), MirType.i64()))
+
+fn p3_copy(id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(LocalId(id: id)))
+
+fn p3_ptr() -> MirType:
+    MirType(kind: MirTypeKind.Ref(MirType.i64(), true))
+
+fn p3_fn_ptr() -> MirType:
+    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+
+fn p3_fn(id: i64, name: text, locals: [MirLocal], insts: [MirInst], ret: MirOperand) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: id), name: name,
+        signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+        locals: locals,
+        blocks: [MirBlock(id: BlockId(id: 0), label: nil, instructions: insts,
+            terminator: MirTerminator.Ret(Some(ret)))],
+        entry_block: BlockId(id: 0), span: Span.default(),
+        generic_params: [], is_generic_template: false, specialization_of: nil,
+        type_bindings: {}, layout_phase: nil, is_kernel: false, is_export_c: false,
+        export_name: "", has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false
+    )
+
+fn p3_inst(kind: MirInstKind) -> MirInst:
+    MirInst(kind: kind, span: nil)
+
+fn p3_module(name: text, func: MirFunction) -> MirModule:
+    MirModule(name: name, functions: {SymbolId(id: 1): func},
+        statics: {}, constants: {}, types: {})
+
+fn p3_message(module: MirModule) -> text:
+    match cranelift_compile_module_direct(compileoptions_default_options(), module):
+        case Ok(_): "compiled"
+        case Err(error): error.message
+
+fn p3_adapter_message(module: MirModule) -> text:
+    val adapter = CraneliftCodegenAdapter(options: compileoptions_default_options())
+    match adapter.compile_module(module):
+        case Ok(_): "compiled"
+        case Err(error): error.message
+
+# A clean module that exercises every converted site on its success path:
+# global address, global load and store, a binary op and a function value.
+fn p3_clean_module(name: text) -> MirModule:
+    val global_symbol = SymbolId(id: 101)
+    var statics: Dict<SymbolId, MirStatic> = {}
+    statics[global_symbol] = MirStatic(
+        symbol: global_symbol, name: "p3panic_clean_counter", type_: MirType.i64(),
+        init: Some(MirConstant(symbol: global_symbol, name: "p3panic_clean_counter",
+            type_: MirType.i64(), value: MirConstValue.Int(29))),
+        is_mutable: true)
+    val helper = p3_fn(2, "p3panic_clean_helper", [], [], p3_int(7))
+    val main_fn = p3_fn(1, "main",
+        [p3_local(0, p3_ptr()), p3_local(1, MirType.i64()), p3_local(2, MirType.i64()),
+            p3_local(3, MirType.i64()), p3_local(4, p3_fn_ptr())],
+        [p3_inst(MirInstKind.GlobalAddr(LocalId(id: 0), global_symbol, true)),
+            p3_inst(MirInstKind.Load(LocalId(id: 1), p3_copy(0))),
+            p3_inst(MirInstKind.StoreGlobal(global_symbol, p3_copy(1))),
+            p3_inst(MirInstKind.LoadGlobal(LocalId(id: 2), global_symbol)),
+            p3_inst(MirInstKind.BinOp(LocalId(id: 3), MirBinOp.Add, p3_copy(1), p3_copy(2))),
+            p3_inst(MirInstKind.Const(LocalId(id: 4), MirConstValue.Str("p3panic_clean_helper"), p3_fn_ptr()))],
+        p3_copy(3))
+    MirModule(name: name,
+        functions: {SymbolId(id: 1): main_fn, SymbolId(id: 2): helper},
+        statics: statics, constants: {}, types: {})
+
+describe "Cranelift AOT global without a declaration is a module compile error":
+    it "fails the module on a load of an undeclared global":
+        val func = p3_fn(1, "p3_global_reader", [p3_local(0, MirType.i64())],
+            [p3_inst(MirInstKind.LoadGlobal(LocalId(id: 0), SymbolId(id: 77)))], p3_copy(0))
+        val message = p3_message(p3_module("p3panic_global_load_probe", func))
+        expect(message).to_contain("E-BACKEND-CRANELIFT-GLOBAL-UNDECLARED: global 77: load in p3_global_reader")
+
+    it "fails the module on a store to an undeclared global":
+        val func = p3_fn(1, "p3_global_writer", [],
+            [p3_inst(MirInstKind.StoreGlobal(SymbolId(id: 78), p3_int(5)))], p3_int(0))
+        val message = p3_message(p3_module("p3panic_global_store_probe", func))
+        expect(message).to_contain("E-BACKEND-CRANELIFT-GLOBAL-UNDECLARED: global 78: store in p3_global_writer")
+
+    it "fails the module on the address of an undeclared global, through the adapter entry":
+        val func = p3_fn(1, "p3_global_addresser", [p3_local(0, p3_ptr())],
+            [p3_inst(MirInstKind.GlobalAddr(LocalId(id: 0), SymbolId(id: 79), true))], p3_int(0))
+        val message = p3_adapter_message(p3_module("p3panic_global_addr_probe", func))
+        expect(message).to_contain("E-BACKEND-CRANELIFT-GLOBAL-UNDECLARED: global 79: address in p3_global_addresser")
+
+describe "Cranelift AOT global without an address records into the open module record":
+    # declare_module_statics never stores a binding with neither handle, so
+    # this condition cannot be built through an entry; drive the instruction
+    # lowering directly with such a binding while a module record is open.
+    it "records the global and the function instead of panicking":
+        val triple = backend_requested_aot_target_triple(compileoptions_default_options().target.to_text())
+        val cl_module = cranelift_new_aot_module("p3panic_addr_unavailable_probe", triple)
+        expect(cl_module != 0).to_equal(true)
+        val func = p3_fn(1, "p3_bad_binding", [p3_local(0, p3_ptr())],
+            [p3_inst(MirInstKind.GlobalAddr(LocalId(id: 0), SymbolId(id: 90), true))], p3_int(0))
+        val ctx = cranelift_begin_function(cl_module, func.name, build_signature(func.signature, false))
+        expect(ctx != 0).to_equal(true)
+        val entry = cranelift_create_block(ctx)
+        cranelift_append_func_params(ctx, entry)
+        cranelift_switch_to_block(ctx, entry)
+        var value_map: Dict<i64, i64> = {}
+        var slot_map: Dict<i64, i64> = {}
+        var block_map: Dict<i64, i64> = {}
+        block_map[0] = entry
+        var globals: Dict<i64, CraneliftGlobalBinding> = {}
+        globals[90] = CraneliftGlobalBinding(data_handle: 0, accessor_handle: 0)
+        cl_aot_call_abi_begin(cl_module)
+        cl_translate_instruction(ctx, func.blocks[0].instructions[0], value_map, slot_map, block_map, cl_module, {}, globals, func)
+        val errors = cl_aot_call_abi_end()
+        cl_translate_terminator(ctx, cl_module, BlockId(id: 0), func.blocks[0].terminator, value_map, slot_map, block_map, func)
+        cranelift_seal_all_blocks(ctx)
+        cranelift_end_function(ctx)
+        cranelift_free_module(cl_module)
+        expect(errors.join("|")).to_contain("E-BACKEND-CRANELIFT-GLOBAL-ADDRESS: global 90: address in p3_bad_binding")
+
+describe "Cranelift AOT unlowered instruction is a module compile error":
+    it "fails the module on Yield, which real source reaches (a `yield` in a function)":
+        val func = p3_fn(1, "p3_yielder", [],
+            [p3_inst(MirInstKind.Yield(Some(p3_int(1))))], p3_int(0))
+        val message = p3_message(p3_module("p3panic_yield_probe", func))
+        expect(message).to_contain("E-BACKEND-CRANELIFT-INST-Yield: in p3_yielder: Cranelift backend does not lower Yield")
+
+    it "fails the module when the unlowered instruction's destination is used afterwards":
+        val func = p3_fn(1, "p3_piper", [p3_local(0, MirType.i64())],
+            [p3_inst(MirInstKind.PipeForward(LocalId(id: 0), p3_int(1), p3_int(2)))], p3_copy(0))
+        val message = p3_adapter_message(p3_module("p3panic_pipe_probe", func))
+        expect(message).to_contain("E-BACKEND-CRANELIFT-INST-PipeForward: in p3_piper")
+
+describe "Cranelift AOT function value without an address is a module compile error":
+    it "fails the module when the function value cannot be declared":
+        # The provider refuses an empty symbol, so neither the lookup nor the
+        # import declaration yields an address.
+        val func = p3_fn(1, "p3_addr_taker", [p3_local(0, p3_fn_ptr())],
+            [p3_inst(MirInstKind.Const(LocalId(id: 0), MirConstValue.Str(""), p3_fn_ptr()))], p3_int(0))
+        val message = p3_message(p3_module("p3panic_fn_addr_probe", func))
+        expect(message).to_contain("E-BACKEND-CRANELIFT-FUNCTION-ADDRESS: '': function value in p3_addr_taker")
+
+describe "Cranelift AOT callable without a proven origin is a module compile error":
+    # mir_call_origin_uses_local_symbols_named panics on MirCallOrigin.Unknown
+    # (unknown_call_origin_panics_codegen_worker_2026-11-12): an Unknown
+    # origin is a property of the module's MIR, so it fails that module.
+    it "fails the module on a call whose origin is Unknown":
+        val callee = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("p3panic.unknown.callee"), p3_fn_ptr()),
+            call_origin: MirCallOrigin.Unknown)
+        val func = p3_fn(1, "p3_unknown_caller", [],
+            [p3_inst(MirInstKind.Call(nil, callee, []))], p3_int(0))
+        val message = p3_message(p3_module("p3panic_unknown_call_probe", func))
+        expect(message).to_contain("E-BACKEND-CRANELIFT-CALL-ORIGIN: p3panic.unknown.callee: call in p3_unknown_caller")
+
+    it "fails the module on a function value whose origin is Unknown":
+        val value = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("p3panic.unknown.value"), p3_fn_ptr()),
+            call_origin: MirCallOrigin.Unknown)
+        val func = p3_fn(1, "p3_unknown_value", [], [], value)
+        val message = p3_adapter_message(p3_module("p3panic_unknown_value_probe", func))
+        expect(message).to_contain("E-BACKEND-CRANELIFT-CALL-ORIGIN: p3panic.unknown.value: function value in p3_unknown_value")
+
+describe "Cranelift AOT module codegen error leaves the next module intact":
+    it "compiles a clean module after a failed one":
+        val bad = p3_fn(1, "p3_global_reader", [p3_local(0, MirType.i64())],
+            [p3_inst(MirInstKind.LoadGlobal(LocalId(id: 0), SymbolId(id: 77)))], p3_copy(0))
+        expect(p3_message(p3_module("p3panic_first_probe", bad))).to_contain("E-BACKEND-CRANELIFT-GLOBAL-UNDECLARED")
+        # The entry closed the module record: nothing is left open or pending.
+        expect(cl_aot_call_abi_end().len()).to_equal(0)
+        expect(p3_message(p3_clean_module("p3panic_clean_after_probe"))).to_equal("compiled")
+
+    it "compiles the clean module through the adapter entry":
+        expect(p3_adapter_message(p3_clean_module("p3panic_clean_adapter_probe"))).to_equal("compiled")

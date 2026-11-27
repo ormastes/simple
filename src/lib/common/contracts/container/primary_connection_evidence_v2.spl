@@ -1,0 +1,81 @@
+# Canonical closed-connection metadata only. Decoding never establishes native
+# absence, cleanup, authentication, workload completion or control authority.
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct ContainerPrimaryConnectionClosedEvidenceV2:
+    request_digest: text
+    identity_digest: text
+    pipe_slot: i64
+    pipe_generation: i64
+
+fn closed_reason(evidence: ContainerPrimaryConnectionClosedEvidenceV2) -> text:
+    if not builder_digest_valid_v1(evidence.request_digest) or not builder_digest_valid_v1(evidence.identity_digest):
+        return "primary-connection-closed-digest"
+    if evidence.pipe_slot < 0 or evidence.pipe_slot > 2147483647: return "primary-connection-closed-slot"
+    if evidence.pipe_generation <= 0: return "primary-connection-closed-generation"
+    ""
+
+pub fn container_primary_connection_closed_encode_v2(evidence: ContainerPrimaryConnectionClosedEvidenceV2) -> Result<text, text>:
+    val reason = closed_reason(evidence)
+    if reason != "": return Err(reason)
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2),
+        "kind": SdnValue.String("container-primary-connection-closed"),
+        "resourceDomain": SdnValue.String("engine-attach-connection"),
+        "provider": SdnValue.String("windows-docker-process"),
+        "requestDigest": SdnValue.String(evidence.request_digest),
+        "identityDigest": SdnValue.String(evidence.identity_digest),
+        "pipeSlot": SdnValue.Int(evidence.pipe_slot), "pipeGeneration": SdnValue.Int(evidence.pipe_generation),
+        "closed": SdnValue.Bool(true), "readPending": SdnValue.Bool(false), "writePending": SdnValue.Bool(false)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn closed_text(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("primary-connection-closed-text:" + key)
+
+fn closed_integer(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("primary-connection-closed-integer:" + key)
+
+fn closed_boolean(fields: Dict<text, SdnValue>, key: text) -> Result<bool, text>:
+    match fields[key]:
+        case SdnValue.Bool(value): Ok(value)
+        case _: Err("primary-connection-closed-boolean:" + key)
+
+pub fn container_primary_connection_closed_decode_v2(source: text) -> Result<ContainerPrimaryConnectionClosedEvidenceV2, text>:
+    if source.byte_len() == 0 or source.byte_len() > 4096: return Err("primary-connection-closed-source-bound")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 4096,
+            max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value
+        case Err(_): return Err("primary-connection-closed-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("primary-connection-closed-object")
+    val keys = ["version", "kind", "resourceDomain", "provider", "requestDigest", "identityDigest",
+        "pipeSlot", "pipeGeneration", "closed", "readPending", "writePending"]
+    for key in fields.keys():
+        if not keys.contains(key): return Err("primary-connection-closed-unknown-field:" + key)
+    for key in keys:
+        if not fields.contains_key(key): return Err("primary-connection-closed-missing-field:" + key)
+    val version = closed_integer(fields, "version")?
+    val kind = closed_text(fields, "kind")?
+    val domain = closed_text(fields, "resourceDomain")?
+    val provider = closed_text(fields, "provider")?
+    if version != 2 or kind != "container-primary-connection-closed": return Err("primary-connection-closed-version-or-kind")
+    if domain != "engine-attach-connection" or provider != "windows-docker-process":
+        return Err("primary-connection-closed-domain-or-provider")
+    val closed = closed_boolean(fields, "closed")?
+    val read_pending = closed_boolean(fields, "readPending")?
+    val write_pending = closed_boolean(fields, "writePending")?
+    if not closed or read_pending or write_pending: return Err("primary-connection-closed-flags")
+    val evidence = ContainerPrimaryConnectionClosedEvidenceV2(
+        request_digest: closed_text(fields, "requestDigest")?, identity_digest: closed_text(fields, "identityDigest")?,
+        pipe_slot: closed_integer(fields, "pipeSlot")?, pipe_generation: closed_integer(fields, "pipeGeneration")?)
+    val canonical = container_primary_connection_closed_encode_v2(evidence)?
+    if canonical != source: return Err("primary-connection-closed-noncanonical")
+    Ok(evidence)

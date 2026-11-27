@@ -1,0 +1,489 @@
+# Purpose and audience: executable regression specification for generic `-> T` tail unwrap/if-val/match across scalars and records.
+# @req REQ-SSPEC-COMPILER
+"""
+# Generic `-> T` Tail Unwrap / `if val` / `match` Regression Guard
+
+Verifies `stage2_generic_tail_unwrap_reboxes_record_2026-11-19` root-cause and follow-up fixes in `50.mir`:
+1. Free erased generic functions unwrapping `Option` (`T?`) via `.unwrap()`, `!`, `if val`, or
+   `match Some(x)` preserve the tagged `T` word without emitting `rt_value_int_wide`, while
+   non-`Option` single-payload generic enums (`Result<T, E>`, `Wrap<T>`) keep `rt_value_int_wide`.
+2. Multi-field generic enum tuples (`Pair<A, B>`) encode concrete scalar slots (including literals,
+   calls, and fields under `SIMPLE_BOOTSTRAP=1`) and mark uninstantiated `TypeParam` match binders
+   as runtime values.
+3. Concrete callers encode scalar `T?` arguments (`i64`, `u64`, `f64`, `bool`, `char`, and
+   presence-word `T?` locals), scalar `fn() -> T?` callables, and multi-type-param turbofish
+   `f<K, V>`, and decode concrete `-> T` / turbofish `-> T?` scalar returns cleanly.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{env_get, env_set, env_remove_process}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir.*
+use compiler.mir.mir_instruction_graph.{mir_module_functions_sorted}
+use compiler.mir.mir_lowering.{MirLowering, bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+val PROBE_SOURCE: text =
+    "@unsafe(reason: \"probe raw tuple ABI\", capabilities: [ffi])\n" +
+    "extern fn rt_tuple_get<T>(tuple: i64, index: i64) -> T?\n" +
+    "@unsafe(reason: \"probe raw payload ABI\", capabilities: [ffi])\n" +
+    "extern fn rt_enum_payload<T, TPayload>(value: T) -> TPayload\n\n" +
+    "struct ProbeRec:\n" +
+    "    x: i64\n" +
+    "    y: i64\n\n" +
+    "struct Holder:\n" +
+    "    n: i64\n\n" +
+    "enum Wrap<T>:\n" +
+    "    Val(T)\n\n" +
+    "enum Pair<A, B>:\n" +
+    "    Mk(A, B)\n\n" +
+    "enum Node:\n" +
+    "    PairNum(i64, ProbeRec)\n" +
+    "    PairU64(u64, ProbeRec)\n" +
+    "    PairFlt(f64, ProbeRec)\n" +
+    "    PairBool(bool, ProbeRec)\n" +
+    "    Two(ProbeRec, ProbeRec)\n\n" +
+    "fn make_i64() -> i64:\n" +
+    "    77\n\n" +
+    "fn mk_opt_i64() -> i64?:\n" +
+    "    Some(42)\n\n" +
+    "fn tuple_at<TElement>(tuple: i64, index: i64) -> TElement?:\n" +
+    "    unsafe(capabilities: [ffi]):\n" +
+    "        rt_tuple_get<TElement>(tuple, index)\n\n" +
+    "fn payload_of<T>(value: T) -> i64:\n" +
+    "    unsafe(capabilities: [ffi]):\n" +
+    "        rt_enum_payload<T, i64>(value)\n\n" +
+    "fn first<T>(xs: [T]) -> T?:\n" +
+    "    if xs.len() == 0:\n" +
+    "        return None\n" +
+    "    Some(xs[0])\n\n" +
+    "fn req_unwrap<T>(v: T?) -> T:\n" +
+    "    v.unwrap()\n\n" +
+    "fn req_bang<T>(v: T?) -> T:\n" +
+    "    v!\n\n" +
+    "fn req_if<T>(v: T?) -> T:\n" +
+    "    if val p = v:\n" +
+    "        return p\n" +
+    "    panic(\"none\")\n\n" +
+    "fn req_match<T>(v: T?) -> T:\n" +
+    "    match v:\n" +
+    "        case Some(x): x\n" +
+    "        case None: panic(\"none\")\n\n" +
+    "fn get_unwrap_req<T>(tuple: i64, index: i64) -> T:\n" +
+    "    tuple_at<T>(tuple, index).unwrap()\n\n" +
+    "fn get_if_req<T>(tuple: i64, index: i64) -> T:\n" +
+    "    if val p = tuple_at<T>(tuple, index):\n" +
+    "        return p\n" +
+    "    panic(\"absent\")\n\n" +
+    "fn get_or_req<T>(f: fn() -> T?) -> T:\n" +
+    "    f().unwrap()\n\n" +
+    "fn head_var_unwrap<T>(xs: [T]) -> T:\n" +
+    "    val opt = first(xs)\n" +
+    "    opt.unwrap()\n\n" +
+    "fn head_match<T>(xs: [T]) -> T:\n" +
+    "    match first(xs):\n" +
+    "        case Some(x): x\n" +
+    "        case None: panic(\"empty\")\n\n" +
+    "fn res_ok_unwrap<T, E>(r: Result<T, E>) -> T:\n" +
+    "    match r:\n" +
+    "        case Ok(x): x\n" +
+    "        case Err(_): panic(\"err\")\n\n" +
+    "fn wrap_val<T>(w: Wrap<T>) -> T:\n" +
+    "    match w:\n" +
+    "        case Wrap.Val(x): x\n\n" +
+    "fn pair_first<A, B>(p: Pair<A, B>) -> A:\n" +
+    "    match p:\n" +
+    "        case Pair.Mk(a, _): a\n\n" +
+    "fn pick_second<K, V>(k: K, v: V?) -> V?:\n" +
+    "    v\n\n" +
+    "fn id_opt<T>(v: T?) -> T?:\n" +
+    "    v\n\n" +
+    "fn call_opt<T>(f: fn() -> T?) -> T?:\n" +
+    "    f()\n\n" +
+    "fn res_passthrough<T, E>(r: Result<T, E>) -> Result<T, E>:\n" +
+    "    r\n\n" +
+    "fn id_wrap<T>(w: Wrap<T>) -> Wrap<T>:\n" +
+    "    w\n\n" +
+    "fn call_req_unwrap_int() -> i64:\n" +
+    "    req_unwrap<i64>(Some(42))\n\n" +
+    "fn call_req_if_int() -> i64:\n" +
+    "    req_if<i64>(Some(77))\n\n" +
+    "fn call_req_match_int() -> i64:\n" +
+    "    req_match<i64>(Some(3))\n\n" +
+    "fn call_req_bang_int() -> i64:\n" +
+    "    req_bang<i64>(Some(9))\n\n" +
+    "fn call_req_unwrap_flt() -> f64:\n" +
+    "    req_unwrap<f64>(Some(0.1))\n\n" +
+    "fn call_req_if_flt() -> f64:\n" +
+    "    req_if<f64>(Some(3.5))\n\n" +
+    "fn call_req_unwrap_u64() -> u64:\n" +
+    "    val v: u64 = 1152921504606846981u64\n" +
+    "    req_unwrap<u64>(Some(v))\n\n" +
+    "fn call_req_unwrap_bool() -> bool:\n" +
+    "    req_unwrap<bool>(Some(true))\n\n" +
+    "fn call_req_unwrap_char(c: char) -> char:\n" +
+    "    req_unwrap<char>(Some(c))\n\n" +
+    "fn call_req_unwrap_rec() -> i64:\n" +
+    "    val r: ProbeRec = req_unwrap<ProbeRec>(Some(ProbeRec(x: 11, y: 22)))\n" +
+    "    r.x\n\n" +
+    "fn call_req_if_rec() -> i64:\n" +
+    "    val r: ProbeRec = req_if<ProbeRec>(Some(ProbeRec(x: 3, y: 4)))\n" +
+    "    r.y\n\n" +
+    "fn call_req_match_rec() -> i64:\n" +
+    "    val r: ProbeRec = req_match<ProbeRec>(Some(ProbeRec(x: 5, y: 6)))\n" +
+    "    r.x\n\n" +
+    "fn call_get_unwrap_rec(pl: i64) -> i64:\n" +
+    "    val r: ProbeRec = get_unwrap_req<ProbeRec>(pl, 0)\n" +
+    "    r.x\n\n" +
+    "fn call_get_unwrap_u64(pl: i64) -> u64:\n" +
+    "    get_unwrap_req<u64>(pl, 0)\n\n" +
+    "fn call_tuple_at_u64(pl: i64) -> u64:\n" +
+    "    tuple_at<u64>(pl, 0) ?? 0u64\n\n" +
+    "fn call_tuple_at_char(pl: i64, fallback: char) -> char:\n" +
+    "    tuple_at<char>(pl, 0) ?? fallback\n\n" +
+    "fn call_tuple_if_int(pl: i64) -> i64:\n" +
+    "    if val x = tuple_at<i64>(pl, 0):\n" +
+    "        return x\n" +
+    "    -1\n\n" +
+    "fn call_get_or_int() -> i64:\n" +
+    "    get_or_req<i64>(\\: Some(42))\n\n" +
+    "fn call_get_or_named_int() -> i64:\n" +
+    "    get_or_req<i64>(mk_opt_i64)\n\n" +
+    "fn call_get_or_rec() -> i64:\n" +
+    "    val r: ProbeRec = get_or_req<ProbeRec>(\\: Some(ProbeRec(x: 11, y: 22)))\n" +
+    "    r.x\n\n" +
+    "fn call_res_ok_int() -> i64:\n" +
+    "    val r: Result<i64, text> = Ok(77)\n" +
+    "    res_ok_unwrap<i64, text>(r)\n\n" +
+    "fn call_wrap_val_int() -> i64:\n" +
+    "    wrap_val<i64>(Wrap.Val(77))\n\n" +
+    "fn call_pair_mk_lit_int() -> i64:\n" +
+    "    val p = Pair.Mk(77, ProbeRec(x: 1, y: 2))\n" +
+    "    pair_first<i64, ProbeRec>(p)\n\n" +
+    "fn call_pair_mk_call_int() -> i64:\n" +
+    "    val p = Pair.Mk(make_i64(), ProbeRec(x: 1, y: 2))\n" +
+    "    pair_first<i64, ProbeRec>(p)\n\n" +
+    "fn call_pair_mk_field_int(h: Holder) -> i64:\n" +
+    "    val p = Pair.Mk(h.n, ProbeRec(x: 1, y: 2))\n" +
+    "    pair_first<i64, ProbeRec>(p)\n\n" +
+    "fn call_pair_match_rec() -> i64:\n" +
+    "    val p = Pair.Mk(ProbeRec(x: 19, y: 23), 77)\n" +
+    "    val r: ProbeRec = pair_first<ProbeRec, i64>(p)\n" +
+    "    r.x\n\n" +
+    "fn call_pair_match_two_recs() -> i64:\n" +
+    "    val p = Pair.Mk(ProbeRec(x: 19, y: 23), ProbeRec(x: 1, y: 2))\n" +
+    "    val r: ProbeRec = pair_first<ProbeRec, ProbeRec>(p)\n" +
+    "    r.x\n\n" +
+    "fn call_node_pair_u64_lit() -> i64:\n" +
+    "    val pu = Node.PairU64(77, ProbeRec(x: 3, y: 4))\n" +
+    "    match pu:\n" +
+    "        case Node.PairU64(77, r): r.x\n" +
+    "        case _: 0\n\n" +
+    "fn call_node_pair_flt_lit() -> i64:\n" +
+    "    val pf = Node.PairFlt(0.1, ProbeRec(x: 5, y: 6))\n" +
+    "    match pf:\n" +
+    "        case Node.PairFlt(0.1, r): r.x\n" +
+    "        case _: 0\n\n" +
+    "fn call_node_pair_bool_lit() -> i64:\n" +
+    "    val pb = Node.PairBool(true, ProbeRec(x: 7, y: 8))\n" +
+    "    match pb:\n" +
+    "        case Node.PairBool(true, r): r.x\n" +
+    "        case _: 0\n\n" +
+    "fn call_presence_flt_opt(c: bool) -> f64:\n" +
+    "    val src: f64? = if c: Some(0.1) else: None\n" +
+    "    req_unwrap<f64>(src)\n\n" +
+    "fn call_presence_bool_opt(c: bool) -> bool:\n" +
+    "    val src: bool? = if c: Some(true) else: None\n" +
+    "    req_unwrap<bool>(src)\n\n" +
+    "fn call_presence_i32_opt(c: bool) -> i32:\n" +
+    "    val src: i32? = if c: Some(7i32) else: None\n" +
+    "    req_unwrap<i32>(src)\n\n" +
+    "fn call_tuple_u64_exists(pl: i64) -> bool:\n" +
+    "    tuple_at<u64>(pl, 0).?\n\n" +
+    "fn call_multi_tp_kv_int() -> i64:\n" +
+    "    pick_second<text, i64>(\"k\", Some(77)) ?? -1\n\n" +
+    "fn call_multi_tp_kv_rec() -> i64:\n" +
+    "    val r: ProbeRec = pick_second<i64, ProbeRec>(1, Some(ProbeRec(x: 2, y: 3))) ?? ProbeRec(x: 0, y: 0)\n" +
+    "    r.x\n\n" +
+    "fn call_multi_tp_kv_text_rec() -> i64:\n" +
+    "    val r: ProbeRec = pick_second<text, ProbeRec>(\"k\", Some(ProbeRec(x: 2, y: 3))) ?? ProbeRec(x: 0, y: 0)\n" +
+    "    r.x\n\n" +
+    "fn call_res_passthrough_int() -> i64:\n" +
+    "    match res_passthrough<i64, text>(Ok(77)):\n" +
+    "        case Ok(x): x\n" +
+    "        case Err(_): -1\n\n" +
+    "fn call_res_passthrough_flt() -> f64:\n" +
+    "    match res_passthrough<f64, text>(Ok(3.5)):\n" +
+    "        case Ok(x): x\n" +
+    "        case Err(_): -1.0\n\n" +
+    "fn call_id_wrap_int() -> i64:\n" +
+    "    match id_wrap<i64>(Wrap.Val(77)):\n" +
+    "        case Wrap.Val(x): x\n\n" +
+    "fn call_id_opt_inferred_int() -> i64:\n" +
+    "    id_opt(Some(77)) ?? -1\n\n" +
+    "fn call_pick_second_inferred_int() -> i64:\n" +
+    "    pick_second(\"k\", Some(77)) ?? -1\n\n" +
+    "fn call_opt_lambda_inferred_int() -> i64:\n" +
+    "    call_opt(\\: Some(42)) ?? -1\n\n" +
+    "fn call_id_opt_u64_unwrap() -> u64:\n" +
+    "    val v: u64 = 1152921504606846981u64\n" +
+    "    id_opt(Some(v)).unwrap()\n\n" +
+    "fn call_tuple_at_u64_unwrap(pl: i64) -> u64:\n" +
+    "    tuple_at<u64>(pl, 0).unwrap()\n\n" +
+    "fn call_id_opt_u64_coalesce() -> u64:\n" +
+    "    val v: u64 = 1152921504606846981u64\n" +
+    "    id_opt(Some(v)) ?? 0u64\n\n" +
+    "fn call_id_opt_if_char(ch: char, fallback: char) -> char:\n" +
+    "    if val c = id_opt(Some(ch)):\n" +
+    "        return c\n" +
+    "    fallback\n\n" +
+    "fn call_id_opt_named_int() -> i64:\n" +
+    "    id_opt(v: Some(77)) ?? -1\n\n" +
+    "fn call_pick_second_named_int() -> i64:\n" +
+    "    pick_second(v: Some(77), k: \"k\") ?? -1\n\n" +
+    "fn call_opt_lambda_named_int() -> i64:\n" +
+    "    call_opt(f: \\: Some(42)) ?? -1\n\n" +
+    "fn call_opt_lambda_if_rec() -> i64:\n" +
+    "    if val r = call_opt(\\: Some(ProbeRec(x: 11, y: 22))):\n" +
+    "        return r.y\n" +
+    "    -1\n"
+
+fn _extract_mir_calls(function: MirFunction) -> text:
+    var calls: [text] = []
+    for block in function.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case Call(_, func, _):
+                    match func.kind:
+                        case Const(value, _):
+                            match value:
+                                case Str(s): calls = calls.push(s)
+                                case _: ()
+                        case _: ()
+                case Intrinsic(_, name, _):
+                    calls = calls.push(name)
+                case _: ()
+        match block.terminator:
+            case CallTerminator(_, func, _, _, _, _, _):
+                match func.kind:
+                    case Const(value, _):
+                        match value:
+                            case Str(s): calls = calls.push(s)
+                            case _: ()
+                    case _: ()
+            case _: ()
+    calls.join("|")
+
+struct LoweredProbe:
+    fns: Dict<text, text>
+    ir: text
+    errors: text
+
+var _cached_probe: LoweredProbe? = nil
+
+fn _restore_probe_env(name: text, old: text?):
+    if old.?:
+        env_set(name, old ?? "")
+    else:
+        env_remove_process(name)
+
+fn _restore_probe_envs(saved_bs: text?, saved_ec: text?):
+    _restore_probe_env("SIMPLE_BOOTSTRAP", saved_bs)
+    _restore_probe_env("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", saved_ec)
+
+fn lower_probe() -> LoweredProbe:
+    if val cached = _cached_probe:
+        return cached
+    val saved_bs = env_get("SIMPLE_BOOTSTRAP")
+    val saved_ec = env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+    defer _restore_probe_envs(saved_bs, saved_ec)
+    val module = parse_and_build_module(PROBE_SOURCE, "gtu_sr.spl")
+    var hir_lowering = HirLowering.with_filename("gtu_sr.spl")
+    env_set("SIMPLE_BOOTSTRAP", "1")
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+    val hir = hir_lowering.lower_module(module)
+    var errors = ""
+    for e in hir_lowering.errors:
+        errors = errors + "hir: " + e.message + "\n"
+    var mir_lowering = MirLowering.new(hir.symbols)
+    var hir_map: Dict<text, HirModule> = {}
+    hir_map[hir.name] = hir
+    mir_lowering.prescan_module_struct_names(hir_map, hir.name)
+    mir_lowering.preseed_canonical_type_symbols_v1([hir])
+    mir_lowering.register_module_enum_bootstrap_inventory_v1([hir])
+    val mir = mir_lowering.lower_module(hir, [], true, None, None, [])
+    for e in mir_lowering.errors:
+        errors = errors + "mir: " + e.message + "\n"
+    var fns: Dict<text, text> = {}
+    val bs_count = bootstrap_mir_function_count()
+    var bi = 0
+    while bi < bs_count:
+        val function = bootstrap_mir_function_at(bi)
+        val prefix = "gtu_sr."
+        var short = bootstrap_mir_function_name_at(bi)
+        if short.starts_with(prefix):
+            short = short.substring(prefix.len(), short.len())
+        elif short.starts_with("main."):
+            short = short.substring(5, short.len())
+        fns[short] = _extract_mir_calls(function)
+        bi = bi + 1
+    for function in mir_module_functions_sorted(mir):
+        val prefix = "gtu_sr."
+        var short = function.name
+        if short.starts_with(prefix):
+            short = short.substring(prefix.len(), short.len())
+        elif short.starts_with("main."):
+            short = short.substring(5, short.len())
+        if not fns.contains_key(short):
+            fns[short] = _extract_mir_calls(function)
+    val ir = MirToLlvm.create("gtu_sr", CodegenTarget.X86_64, None).translate_module(mir)
+    val lowered = LoweredProbe(fns: fns, ir: ir, errors: errors)
+    _cached_probe = Some(lowered)
+    lowered
+
+describe "erased generic -> T tail unwrap/if-val/match for scalars and records":
+    it "lowers all generic and concrete probe shapes without HIR or MIR errors":
+        val lowered = lower_probe()
+        expect(lowered.errors).to_equal("")
+        expect(lowered.ir).to_contain("req_unwrap(")
+
+    it "never emits rt_value_int_wide inside generic Option unwrap/bang/if-val/match or Pair<A, B> match bodies":
+        val fns = lower_probe().fns
+        for name in ["req_unwrap", "req_bang", "req_if", "req_match", "get_unwrap_req", "get_if_req", "get_or_req", "head_var_unwrap", "head_match"]:
+            val mir = fns[name] ?? "missing"
+            expect(mir).to_contain("rt_unwrap_or_self")
+            expect(mir.contains("rt_value_int_wide")).to_equal(false)
+        val pair_mir = fns["pair_first"] ?? "missing"
+        expect(pair_mir).to_contain("rt_tuple_get")
+        expect(pair_mir.contains("rt_value_int_wide")).to_equal(false)
+
+    it "keeps rt_value_int_wide inside non-Option single-payload generic Result/Wrap matches":
+        val fns = lower_probe().fns
+        expect(fns["res_ok_unwrap"] ?? "missing").to_contain("rt_value_int_wide")
+        expect(fns["wrap_val"] ?? "missing").to_contain("rt_value_int_wide")
+        expect(fns["call_res_ok_int"] ?? "missing").to_contain("rt_value_as_int_wide")
+        expect(fns["call_wrap_val_int"] ?? "missing").to_contain("rt_value_as_int_wide")
+
+    it "encodes and decodes scalar vs record Option calls per-function without cross-call masking":
+        val fns = lower_probe().fns
+        for name in ["call_req_unwrap_int", "call_req_if_int", "call_req_match_int", "call_req_bang_int"]:
+            val m = fns[name] ?? "missing"
+            expect(m).to_contain("rt_value_int_wide")
+            expect(m).to_contain("rt_value_as_int_wide")
+        for name in ["call_req_unwrap_flt", "call_req_if_flt", "call_presence_flt_opt"]:
+            val m = fns[name] ?? "missing"
+            expect(m).to_contain("rt_value_float")
+            expect(m).to_contain("rt_value_as_float")
+        for name in ["call_req_unwrap_rec", "call_req_if_rec", "call_req_match_rec", "call_get_unwrap_rec", "call_get_or_rec"]:
+            val m = fns[name] ?? "missing"
+            expect(m.contains("rt_value_int_wide")).to_equal(false)
+            expect(m.contains("rt_value_as_int_wide")).to_equal(false)
+
+    it "handles u64, bool, char, presence-word T? locals, concrete tuple_at if-val, and multi-type-param turbofish":
+        val fns = lower_probe().fns
+        val req_u64 = fns["call_req_unwrap_u64"] ?? "missing"
+        expect(req_u64).to_contain("rt_value_u64")
+        expect(req_u64).to_contain("rt_value_as_u64")
+        expect(req_u64.contains("rt_value_as_int_wide")).to_equal(false)
+        for name in ["call_get_unwrap_u64", "call_tuple_at_u64"]:
+            val m = fns[name] ?? "missing"
+            expect(m).to_contain("rt_value_as_u64")
+            expect(m.contains("rt_value_u64")).to_equal(false)
+            expect(m.contains("rt_value_as_int_wide")).to_equal(false)
+        val ex_u64 = fns["call_tuple_u64_exists"] ?? "missing"
+        expect(ex_u64).to_contain("rt_is_some")
+        expect(ex_u64.contains("rt_value_as_u64")).to_equal(false)
+        expect(ex_u64.contains("rt_value_u64")).to_equal(false)
+        expect(fns["call_req_unwrap_bool"] ?? "missing").to_contain("rt_enum_new")
+        expect(fns["call_presence_bool_opt"] ?? "missing").to_contain("rt_enum_new")
+        expect(fns["call_presence_i32_opt"] ?? "missing").to_contain("rt_enum_new")
+        expect((fns["call_req_unwrap_char"] ?? "missing").contains("rt_value_int_wide")).to_equal(false)
+        expect((fns["call_tuple_at_char"] ?? "missing").contains("rt_value_int_wide")).to_equal(false)
+        val tif = fns["call_tuple_if_int"] ?? "missing"
+        expect(tif).to_contain("rt_value_as_int_wide")
+        expect(tif.contains("rt_value_int_wide")).to_equal(false)
+        val mkv_int = fns["call_multi_tp_kv_int"] ?? "missing"
+        expect(mkv_int).to_contain("rt_value_int_wide")
+        expect(mkv_int).to_contain("rt_value_as_int_wide")
+        val mkv_rec = fns["call_multi_tp_kv_rec"] ?? "missing"
+        expect(mkv_rec).to_contain("rt_value_int_wide")
+        expect(mkv_rec.contains("rt_value_as_int_wide")).to_equal(false)
+        val mkv_text_rec = fns["call_multi_tp_kv_text_rec"] ?? "missing"
+        expect(mkv_text_rec.contains("rt_value_int_wide")).to_equal(false)
+        expect(mkv_text_rec.contains("rt_value_as_int_wide")).to_equal(false)
+
+    it "tags Pair<A, B> concrete int slots (lit, call, field) and decodes Node deep u64/f64/bool literals":
+        val fns = lower_probe().fns
+        for name in ["call_pair_mk_lit_int", "call_pair_mk_call_int", "call_pair_mk_field_int"]:
+            val m = fns[name] ?? "missing"
+            expect(m).to_contain("rt_value_int_wide")
+            expect(m).to_contain("rt_value_as_int_wide")
+        val prec = fns["call_pair_match_rec"] ?? "missing"
+        expect(prec.contains("rt_value_as_int_wide")).to_equal(false)
+        val prec2 = fns["call_pair_match_two_recs"] ?? "missing"
+        expect(prec2.contains("rt_value_int_wide")).to_equal(false)
+        expect(prec2.contains("rt_value_as_int_wide")).to_equal(false)
+        val pu64 = fns["call_node_pair_u64_lit"] ?? "missing"
+        expect(pu64).to_contain("rt_value_u64")
+        expect(pu64).to_contain("rt_value_as_u64")
+        val pflt = fns["call_node_pair_flt_lit"] ?? "missing"
+        expect(pflt).to_contain("rt_value_float")
+        expect(pflt).to_contain("rt_value_as_float")
+        expect(fns["call_node_pair_bool_lit"] ?? "missing").to_contain("rt_tuple_get")
+        expect(fns["call_get_or_int"] ?? "missing").to_contain("rt_value_as_int_wide")
+        expect(fns["call_get_or_named_int"] ?? "missing").to_contain("rt_value_as_int_wide")
+
+    it "never decodes explicit-turbofish Result/Wrap passthrough and decodes inferred -> T? calls":
+        val fns = lower_probe().fns
+        val r_int = fns["call_res_passthrough_int"] ?? "missing"
+        expect(r_int).to_contain("res_passthrough")
+        expect(r_int.contains("rt_value_as_int_wide")).to_equal(false)
+        expect(r_int.contains("rt_value_int_wide")).to_equal(false)
+        val r_flt = fns["call_res_passthrough_flt"] ?? "missing"
+        expect(r_flt).to_contain("res_passthrough")
+        expect(r_flt.contains("rt_value_as_float")).to_equal(false)
+        expect(r_flt.contains("rt_value_float")).to_equal(false)
+        val w_int = fns["call_id_wrap_int"] ?? "missing"
+        expect(w_int).to_contain("id_wrap")
+        expect(w_int.contains("rt_value_as_int_wide")).to_equal(false)
+        expect(w_int.contains("rt_value_int_wide")).to_equal(false)
+        for name in ["call_id_opt_inferred_int", "call_pick_second_inferred_int", "call_id_opt_named_int", "call_pick_second_named_int"]:
+            val m = fns[name] ?? "missing"
+            expect(m).to_contain("rt_value_int_wide")
+            expect(m).to_contain("rt_value_as_int_wide")
+        for name in ["call_opt_lambda_inferred_int", "call_opt_lambda_named_int"]:
+            val m = fns[name] ?? "missing"
+            expect(m).to_contain("call_opt")
+            expect(m).to_contain("rt_value_as_int_wide")
+        val u64_uw = fns["call_id_opt_u64_unwrap"] ?? "missing"
+        expect(u64_uw).to_contain("id_opt")
+        expect(u64_uw).to_contain("rt_value_u64")
+        expect(u64_uw.split("rt_value_as_u64").len()).to_equal(3)
+        expect(u64_uw.contains("rt_value_as_int_wide")).to_equal(false)
+        val tup_u64_uw = fns["call_tuple_at_u64_unwrap"] ?? "missing"
+        expect(tup_u64_uw).to_contain("tuple_at")
+        expect(tup_u64_uw.split("rt_value_as_u64").len()).to_equal(2)
+        expect(tup_u64_uw.contains("rt_value_u64")).to_equal(false)
+        expect(tup_u64_uw.contains("rt_value_as_int_wide")).to_equal(false)
+        val u64_nc = fns["call_id_opt_u64_coalesce"] ?? "missing"
+        expect(u64_nc).to_contain("id_opt")
+        expect(u64_nc).to_contain("rt_value_u64")
+        expect(u64_nc.split("rt_value_as_u64").len()).to_equal(3)
+        expect(u64_nc.contains("rt_value_as_int_wide")).to_equal(false)
+        val ch_if = fns["call_id_opt_if_char"] ?? "missing"
+        expect(ch_if).to_contain("id_opt")
+        expect(ch_if).to_contain("rt_is_some")
+        expect(ch_if).to_contain("rt_unwrap_or_self")
+        val rec_cb = fns["call_opt_lambda_if_rec"] ?? "missing"
+        expect(rec_cb).to_contain("call_opt")
+        expect(rec_cb).to_contain("rt_is_some")
+        expect(rec_cb.contains("rt_value_int_wide")).to_equal(false)
+        expect(rec_cb.contains("rt_value_as_int_wide")).to_equal(false)

@@ -20,6 +20,19 @@ trait, aspect, macro, and body owners emit dimension-specific absence witnesses
 instead of unconditional dependencies. Body dependency enumeration is exactly
 empty and canonical for the empty owner.
 
+Every dimension must report `Unknown`, `universe_complete: false`, and
+`gateway_install_available: false`. Creating the four optional owners does not
+run a complete compiler semantic traversal.
+
+## Reject an unobserved source as completion evidence
+
+The executable adds `unobserved.scope` to the requested source universe while
+parsing only `live.scope`. Declaration issuance rejects that mismatch with
+`WitnessIncomplete`. Empty trait, aspect, macro and body owners may retain
+diagnostic absence witnesses for the supplied context, but every resulting
+projection must remain unknown, incomplete and unavailable for installation.
+Their empty state proves no fact about the unobserved source.
+
 ## Preserve conditional dependencies
 
 The executable activates real trait state and a real introduced macro symbol.

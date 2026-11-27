@@ -1,0 +1,213 @@
+#!/bin/sh
+# Upstream-Skia web reference comparison: for each web scene, the pinned Skia
+# Ganesh/Vulkan provider rasterises the DrawIR that Simple's web renderer
+# produced from the scene's HTML, on a physical Vulkan device, and the readback
+# is compared byte-for-byte (by SHA-256) with the Simple web oracle for that
+# scene. Like the Chrome catalog check, but with Skia as the reference.
+#
+# Usage:
+#   sh scripts/check/check-skia-web-reference-compare.shs [--scene NAME]... [--out DIR] [--selftest]
+#
+# Scenes: web-box corpus-case01 corpus-case06 (default: all three), corpus-case02.
+#
+# Required env (a host without them is ERROR, never a pass):
+#   SKIA_QUAL_BIN      native build of src/app/test/vulkan_2d_qualification/main.spl
+#   SKIA_PROVIDER_SO   libsimple_upstream_skia_ganesh_vulkan.so (tools/upstream-skia-ganesh-vulkan)
+# Optional: SKIA_VK_ICD (default /usr/share/vulkan/icd.d/nvidia_icd.json),
+#           SKIA_WORKER_TRIES (default 3; vkCreateDevice is intermittent on the GB10).
+#
+# Scope: this checks the Skia leg against the Simple oracle. It does NOT read
+# Engine2D pixels back from the physical device; that leg is tracked in
+# doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md.
+#
+# Verdict is the LAST stdout line:
+#   PASS  — <n> scene(s) compared, ... 0 mismatching     exit 0
+#   FAIL  — ...                                           exit 1
+#   ERROR — nothing was checked (<reason>)                exit 2
+#
+# Receipt: <out>/receipt.env
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT"
+
+SCENES=""
+OUT_REL=""
+RUN_SELFTEST_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --scene) shift; [ $# -gt 0 ] || { echo "--scene needs a value" >&2; exit 2; }; SCENES="$SCENES $1" ;;
+        --out) shift; [ $# -gt 0 ] || { echo "--out needs a value" >&2; exit 2; }; OUT_REL="$1" ;;
+        --selftest) RUN_SELFTEST_ONLY=1 ;;
+        *) echo "usage: $0 [--scene NAME]... [--out DIR] [--selftest]" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+# ---------------------------------------------------------------- classifiers
+# Shell twin of src/app/ui/skia_reference_compare_receipt.spl (the authority,
+# pinned by test/01_unit/app/ui/skia_reference_compare_receipt_spec.spl).
+
+# scene_status <worker_rc> <receipt_sha> <file_sha> <oracle_sha>
+scene_status() {
+    if [ "$1" != 0 ] || [ -z "$2" ] || [ -z "$3" ] || [ -z "$4" ]; then echo blocked; return; fi
+    if [ "$2" != "$3" ]; then echo receipt-digest-mismatch; return; fi
+    if [ "$3" != "$4" ]; then echo mismatch; return; fi
+    echo match
+}
+
+# oracle_sha <scene> -> the *_RGBA_SHA256 constant from the Simple oracle source.
+oracle_sha() {
+    case "$1" in
+        web-box) f="src/lib/common/renderdoc/web_opaque_box_oracle.spl"; k="WEB_OPAQUE_BOX_RGBA_SHA256" ;;
+        corpus-case01) f="src/lib/common/renderdoc/corpus_case01_oracle.spl"; k="CORPUS_CASE01_RGBA_SHA256" ;;
+        corpus-case06) f="src/lib/common/renderdoc/corpus_case06_oracle.spl"; k="CORPUS_CASE06_RGBA_SHA256" ;;
+        corpus-case02) f="src/lib/common/renderdoc/corpus_case02_polygon_oracle.spl"; k="CORPUS_CASE02_RGBA_SHA256" ;;
+        *) return 0 ;;
+    esac
+    [ -f "$ROOT/$f" ] || return 0
+    grep -A1 "$k: text" "$ROOT/$f" | grep -o '[0-9a-f]\{64\}' | sed -n 1p
+}
+
+receipt_field() { sed -n "s/^$2: //p" "$1" 2>/dev/null | sed -n 1p; }
+
+selftest() {
+    fixtures=0
+    fails=0
+    t() {
+        fixtures=$((fixtures + 1))
+        if [ "$2" = "$3" ]; then return 0; fi
+        fails=$((fails + 1))
+        echo "selftest FAIL: $1 (expected '$3', got '$2')" >&2
+    }
+    a="204df3a7ca11c4633399761142e60ec5f3775aefe7e91a74863f107b9b647817"
+    b="8b59b0b26ab92d1a436639b9b65c1ab28388f4871c3b05890eae982189884d4d"
+    t all-agree "$(scene_status 0 "$a" "$a" "$a")" match
+    t pixel-mismatch "$(scene_status 0 "$b" "$b" "$a")" mismatch
+    t receipt-not-file "$(scene_status 0 "$a" "$b" "$a")" receipt-digest-mismatch
+    t worker-failed "$(scene_status 3 "$a" "$a" "$a")" blocked
+    t no-readback "$(scene_status 0 "" "" "$a")" blocked
+    t no-oracle "$(scene_status 0 "$a" "$a" "")" blocked
+    # The oracle constants must be readable from source, and unknown scenes empty.
+    t oracle-web-box "$(oracle_sha web-box)" "$a"
+    t oracle-unknown "$(oracle_sha no-such-scene)" ""
+    # Missing tools must ERROR (2), not pass.
+    lane_rc=0
+    SKIA_QUAL_BIN="" SKIA_PROVIDER_SO="" SIMPLE_SKIA_LANE_INNER=1 \
+        /bin/sh "$ROOT/scripts/check/check-skia-web-reference-compare.shs" --scene web-box >/dev/null 2>&1 || lane_rc=$?
+    t missing-tool-error "$lane_rc" 2
+    SELFTEST_FIXTURES="$fixtures"
+    if [ "$fails" -gt 0 ]; then
+        echo "SELFTEST FAILED — $fixtures fixture(s), $fails failure(s)" >&2
+        exit 2
+    fi
+    echo "selftest_fixtures=$fixtures selftest_failures=0"
+}
+
+SELFTEST_FIXTURES=0
+if [ "$RUN_SELFTEST_ONLY" = 1 ]; then
+    selftest
+    echo "PASS — $SELFTEST_FIXTURES selftest fixture(s) checked, 0 failures"
+    exit 0
+fi
+if [ "${SIMPLE_SKIA_LANE_INNER:-0}" != 1 ]; then
+    SIMPLE_SKIA_LANE_INNER=1
+    export SIMPLE_SKIA_LANE_INNER
+    selftest
+fi
+
+error_out() { echo "ERROR — nothing was checked ($1)"; exit 2; }
+
+QUAL="${SKIA_QUAL_BIN:-}"
+PROVIDER="${SKIA_PROVIDER_SO:-}"
+[ -n "$QUAL" ] && [ -x "$QUAL" ] || error_out "qualification-binary-unavailable"
+[ -n "$PROVIDER" ] && [ -f "$PROVIDER" ] || error_out "skia-provider-unavailable"
+command -v sha256sum >/dev/null 2>&1 || error_out "sha256sum-unavailable"
+ICD="${SKIA_VK_ICD:-/usr/share/vulkan/icd.d/nvidia_icd.json}"
+[ -f "$ICD" ] || error_out "vulkan-icd-unavailable:$ICD"
+TRIES="${SKIA_WORKER_TRIES:-3}"
+[ -n "$SCENES" ] || SCENES="web-box corpus-case01 corpus-case06"
+
+# The runner only writes to a direct child of build/test-artifacts/vulkan_2d
+# (relative to cwd, [A-Za-z0-9_-] only), so worker dirs are <out>-<scene>-try<n>
+# siblings of <out>, which holds the receipt and worker logs.
+[ -n "$OUT_REL" ] || OUT_REL="build/test-artifacts/vulkan_2d/skia-web-compare-$$"
+case "$OUT_REL" in
+    build/test-artifacts/vulkan_2d/*/*) error_out "out-dir-must-be-a-direct-child-of-build/test-artifacts/vulkan_2d" ;;
+    build/test-artifacts/vulkan_2d/*) ;;
+    *) error_out "out-dir-must-be-under-build/test-artifacts/vulkan_2d" ;;
+esac
+rm -rf "${OUT_REL:?}"
+mkdir -p "$OUT_REL"
+RECEIPT="$OUT_REL/receipt.env"
+provider_sha="$(sha256sum "$PROVIDER" | cut -c1-64)"
+{
+    echo "receipt_schema=skia-web-reference-compare-v1"
+    echo "qualification_bin=$QUAL"
+    echo "qualification_bin_sha256=$(sha256sum "$QUAL" | cut -c1-64)"
+    echo "provider_sha256=$provider_sha"
+    echo "vulkan_icd=$ICD"
+} > "$RECEIPT"
+
+checked=0
+matched=0
+failed=0
+for scene in $SCENES; do
+    checked=$((checked + 1))
+    oracle="$(oracle_sha "$scene")"
+    rc=1
+    try=1
+    dir=""
+    while [ "$try" -le "$TRIES" ]; do
+        dir="$OUT_REL-$scene-try$try"
+        rm -rf "${dir:?}"
+        nonce="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+        set +e
+        VK_DRIVER_FILES="$ICD" timeout 300 "$QUAL" "worker-skia-$scene" "$dir" "$QUAL" \
+            "$PROVIDER" "$provider_sha" "$nonce" > "$OUT_REL/$scene-try$try.log" 2>&1
+        rc=$?
+        set -e
+        [ "$rc" = 0 ] && break
+        try=$((try + 1))
+    done
+    sdn="$dir/upstream-skia-ganesh-vulkan.sdn"
+    rgba="$dir/upstream-skia-ganesh-vulkan.rgba"
+    receipt_sha="$(receipt_field "$sdn" pixel_sha256)"
+    file_sha=""
+    [ -s "$rgba" ] && file_sha="$(sha256sum "$rgba" | cut -c1-64)"
+    status="$(scene_status "$rc" "$receipt_sha" "$file_sha" "$oracle")"
+    reason=""
+    [ "$status" = blocked ] && reason="$(sed -n 's/^status=blocked reason=//p' "$OUT_REL/$scene-try$TRIES.log" 2>/dev/null | sed -n 1p)"
+    {
+        echo "scene_${scene}_status=$status"
+        echo "scene_${scene}_worker_rc=$rc"
+        echo "scene_${scene}_tries=$try"
+        echo "scene_${scene}_skia_pixel_sha256=$file_sha"
+        echo "scene_${scene}_oracle_sha256=$oracle"
+        echo "scene_${scene}_size=$(receipt_field "$sdn" width)x$(receipt_field "$sdn" height)"
+        echo "scene_${scene}_device_uuid=$(receipt_field "$sdn" physical_device_uuid)"
+        echo "scene_${scene}_device_type=$(receipt_field "$sdn" device_type)"
+        echo "scene_${scene}_blocked_reason=$reason"
+    } >> "$RECEIPT"
+    echo "scene=$scene status=$status tries=$try size=$(receipt_field "$sdn" width)x$(receipt_field "$sdn" height)${reason:+ reason=$reason}"
+    if [ "$status" = match ]; then matched=$((matched + 1)); else failed=$((failed + 1)); fi
+done
+
+{
+    echo "scenes_checked=$checked"
+    echo "scenes_matched=$matched"
+    echo "scenes_failed=$failed"
+} >> "$RECEIPT"
+if [ "$checked" -le 0 ]; then
+    echo "lane_status=error" >> "$RECEIPT"
+    echo "ERROR — nothing was checked (0 scenes examined)"
+    exit 2
+fi
+if [ "$failed" -gt 0 ] || [ "$matched" -le 0 ]; then
+    echo "lane_status=fail" >> "$RECEIPT"
+    echo "FAIL — $checked scene(s) checked, $failed failed, $matched matched the Simple web oracle"
+    exit 1
+fi
+echo "lane_status=pass" >> "$RECEIPT"
+echo "PASS — $matched scene(s) compared, upstream Skia readback equals the Simple web oracle, 0 mismatching"
+exit 0

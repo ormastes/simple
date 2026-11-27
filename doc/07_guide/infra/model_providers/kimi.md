@@ -102,6 +102,14 @@ common cause. A status of `connecting` is not PASS. Wait for every required
 server to report `connected`, and probe a real tool call when the server has a
 known compiled-vs-source behavior difference.
 
+On Linux/macOS the root `.mcp.json` is all Kimi needs. Windows additionally
+needs `<root>/.kimi-code/mcp.json` (Kimi spawns with `shell:false`, so the
+extensionless wrappers are ENOENT there); `config/mcp/install.ps1` installs it
+from `config/mcp/win/.kimi-code/mcp.json`. That file is deliberately not
+tracked at the root: Kimi merges `.kimi-code/mcp.json` over the root file by
+server name, so a tracked copy replaced all five POSIX servers with
+`simple.exe` paths.
+
 Inside tmux, `extended-keys` being off affects modified Enter combinations,
 not ordinary Enter. Enable it for the live server and persist it:
 

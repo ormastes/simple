@@ -1,6 +1,24 @@
 # core-C capsule gate is opted out of guard wiring on a false rationale
 ## Closed 2026-09-16 — Status: RESOLVED 2026-09-13; optout gone, check-guard-wiring passes
 
+> **Verification 2026-11-25 (release/1.0.0, `47d6c5eddd5`):** the situation
+> has evolved since the 2026-09-13 resolution note above. The optout entry
+> is BACK in `scripts/check/guard_wiring_optout.txt` (line 610), but with a
+> corrected rationale: `OWNER BUILD SCRIPT: builds the immutable core-C
+> runtime capsule with the host C compiler/archiver/nm; a bootstrap owner
+> build step, not a check. Invoked by the bootstrap lane that admits the
+> capsule.` That rationale is accurate by inspection — the original false
+> "needs QEMU/FPGA/dev-board" claim is gone, and the script IS genuinely
+> invoked by the bootstrap lane (`scripts/bootstrap/bootstrap-from-scratch.sh:7125`
+> runs `sh scripts/check/build-core-c-bootstrap-runtime-capsule.shs`), so the
+> gate is no longer RED-and-invisible: it runs, fail-closed with a preserved
+> failure manifest, inside the bootstrap lane. `check-guard-wiring.shs` did
+> not complete within a 25-minute budget on this Windows host (same
+> non-completion the 2026-09-13 pass observed at 60s), so its PASS was not
+> re-confirmed here — verification of the wiring claim is by inspection of
+> the invocation site. Substance of the resolution stands via the new
+> mechanism; the "optout gone" wording above is outdated.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
 fresh dated repro if the symptom returns.

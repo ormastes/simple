@@ -82,7 +82,7 @@ class HttpRequest:
             method: method,
             path: path,
             headers: {},
-            body: nil
+            body: None
         )
 
     me header(name: text, value: text) -> HttpRequest:
@@ -126,56 +126,54 @@ class HttpRequest:
 # HttpResponse - HTTP Response
 # ============================================================================
 
+enum StatusClass:
+    Success
+    Redirect
+    ClientError
+    ServerError
+    Other
+
+
+enum RedirectPolicy:
+    Follow
+    DoNotFollow
+
+
 class HttpResponse:
     """HTTP response.
 
     Example:
         val resp = client.get("https://api.example.com/users")?
         print "Status: {resp.status}"
-        print "Body: {resp.body_text()}"
+        print "Body: {resp.body_text()?}"
     """
     status: i64
     reason: text
     headers: {text: text}
     body: [u8]
 
-    fn is_success() -> bool:
-        """Check if response is successful (2xx).
+    fn status_class() -> StatusClass:
+        """Classify the response status (2xx..5xx).
 
         Returns:
-            true if status 200-299
+            StatusClass for the status code
         """
-        self.status >= 200 and self.status < 300
+        if self.status >= 200 and self.status < 300:
+            StatusClass.Success
+        elif self.status >= 300 and self.status < 400:
+            StatusClass.Redirect
+        elif self.status >= 400 and self.status < 500:
+            StatusClass.ClientError
+        elif self.status >= 500 and self.status < 600:
+            StatusClass.ServerError
+        else:
+            StatusClass.Other
 
-    fn is_redirect() -> bool:
-        """Check if response is redirect (3xx).
-
-        Returns:
-            true if status 300-399
-        """
-        self.status >= 300 and self.status < 400
-
-    fn is_client_error() -> bool:
-        """Check if response is client error (4xx).
-
-        Returns:
-            true if status 400-499
-        """
-        self.status >= 400 and self.status < 500
-
-    fn is_server_error() -> bool:
-        """Check if response is server error (5xx).
-
-        Returns:
-            true if status 500-599
-        """
-        self.status >= 500 and self.status < 600
-
-    fn body_text() -> text:
+    fn body_text() -> Result<text, text>:
         """Get body as text.
 
         Returns:
-            Body decoded as UTF-8
+            Body decoded as strict UTF-8, or Err when it is not valid UTF-8
         """
         bytes_to_string(self.body)
 
@@ -202,11 +200,11 @@ class HttpClient:
     Example:
         val client = HttpClient.new()
         val resp = client.get("https://api.example.com/users")?
-        if resp.is_success():
-            print resp.body_text()
+        if resp.status_class() == StatusClass.Success:
+            print resp.body_text()?
     """
     timeout_ms: i64?
-    follow_redirects: bool
+    follow_redirects: RedirectPolicy
     max_redirects: i64
 
     static fn new() -> HttpClient:
@@ -217,7 +215,7 @@ class HttpClient:
         """
         HttpClient(
             timeout_ms: Some(30000),  # 30 second default
-            follow_redirects: true,
+            follow_redirects: RedirectPolicy.Follow,
             max_redirects: 10
         )
 
@@ -233,11 +231,11 @@ class HttpClient:
         self.timeout_ms = timeout_ms
         self
 
-    me set_follow_redirects(follow: bool) -> HttpClient:
+    me set_follow_redirects(follow: RedirectPolicy) -> HttpClient:
         """Set redirect following.
 
         Args:
-            follow: true to follow redirects
+            follow: RedirectPolicy.Follow to follow redirects
 
         Returns:
             Self (for chaining)
@@ -310,12 +308,37 @@ class HttpClient:
         Returns:
             Result with HttpResponse or error
         """
+        # Compat facade: reject unparseable URLs before any transport work.
+        Url.parse(url)?
+        self._request_text(url, request)
+
+    fn get_url(url: Url) -> Result<HttpResponse, SimpleError>:
+        """Send GET request to a parsed Url."""
+        self.request_url(url, HttpRequest.new(NetHttpMethod.GET, "/"))
+
+    fn post_url(url: Url, body: [u8]) -> Result<HttpResponse, SimpleError>:
+        """Send POST request to a parsed Url."""
+        self.request_url(url, HttpRequest.new(NetHttpMethod.POST, "/").body_bytes(body))
+
+    fn put_url(url: Url, body: [u8]) -> Result<HttpResponse, SimpleError>:
+        """Send PUT request to a parsed Url."""
+        self.request_url(url, HttpRequest.new(NetHttpMethod.PUT, "/").body_bytes(body))
+
+    fn delete_url(url: Url) -> Result<HttpResponse, SimpleError>:
+        """Send DELETE request to a parsed Url."""
+        self.request_url(url, HttpRequest.new(NetHttpMethod.DELETE, "/"))
+
+    fn request_url(url: Url, request: HttpRequest) -> Result<HttpResponse, SimpleError>:
+        """Send custom request to a parsed Url."""
+        self._request_text(url.to_string(), request)
+
+    fn _request_text(url: text, request: HttpRequest) -> Result<HttpResponse, SimpleError>:
         var current_url = url
         var current_request = request
         var redirect_count = 0
         while true:
             val response = self._request_once(current_url, current_request)?
-            if not self.follow_redirects or not _http_redirect_status(response.status):
+            if self.follow_redirects == RedirectPolicy.DoNotFollow or not _http_redirect_status(response.status):
                 return Ok(response)
             match response.header("location"):
                 nil:
@@ -338,7 +361,7 @@ class HttpClient:
                                     method: NetHttpMethod.GET,
                                     path: current_request.path,
                                     headers: next_headers,
-                                    body: nil
+                                    body: None
                                 )
                             else:
                                 current_request = HttpRequest(
@@ -362,10 +385,10 @@ class HttpClient:
             raw_headers.push("{name}: {value}")
         val body = match request.body:
             case Some(bytes): bytes
-            case nil: []
+            case None: []
         val timeout = match self.timeout_ms:
             case Some(ms): ms
-            case nil: 0
+            case None: 0
         val result = http_request_v2_raw(
             request.method.to_string(), url, raw_headers, body, timeout)
         if result.0 < 0:
@@ -382,13 +405,13 @@ fn _parse_http_response_headers(raw: text) -> {text: text}:
     var headers: {text: text} = {}
     for raw_line in raw.split("\n"):
         val line = if raw_line.ends_with("\r"):
-            raw_line.substring(0, raw_line.len() - 1)
+            raw_line.substring(0, raw_line.byte_len() - 1)
         else:
             raw_line
         val separator = line.index_of(":")
         if separator > 0:
             val name = line.substring(0, separator).trim().lower()
-            val value = line.substring(separator + 1, line.len()).trim()
+            val value = line.substring(separator + 1, line.byte_len()).trim()
             if name.len() > 0:
                 headers[name] = value
     headers
@@ -420,13 +443,13 @@ fn _resolve_http_redirect(base_url: text, location: text) -> text?:
     if location.starts_with("http://") or location.starts_with("https://"):
         match Url.parse(location):
             case Ok(_): return Some(location)
-            case Err(_): return nil
+            case Err(_): return None
     match Url.parse(base_url):
         case Err(_): nil
         case Ok(base):
             val port_text = match base.port:
                 case Some(port): ":{port}"
-                case nil: ""
+                case None: ""
             val origin = "{base.scheme}://{base.host}{port_text}"
             if location.starts_with("//"):
                 val candidate = "{base.scheme}:{location}"
@@ -490,7 +513,7 @@ class Url:
             Some(parts):
                 if parts.opaque:
                     return Err(error("URL must use an authority"))
-                var port: i64? = nil
+                var port: i64? = None
                 if parts.port != 0 and parts.port != url_default_port(parts.scheme):
                     port = Some(parts.port)
                 val query = if parts.query.len() > 0: Some(parts.query) else: nil
@@ -628,10 +651,10 @@ class UrlBuilder:
         UrlBuilder(
             scheme: "http",
             host: "",
-            port: nil,
+            port: None,
             path: "/",
             query_params: [],
-            fragment: nil
+            fragment: None
         )
 
     me scheme(scheme: text) -> UrlBuilder:
@@ -764,6 +787,14 @@ fn post(url: text, body: [u8]) -> Result<HttpResponse, SimpleError>:
     """
     HttpClient.new().post(url, body)
 
+fn get_url(url: Url) -> Result<HttpResponse, SimpleError>:
+    """Send GET request to a parsed Url."""
+    HttpClient.new().get_url(url)
+
+fn post_url(url: Url, body: [u8]) -> Result<HttpResponse, SimpleError>:
+    """Send POST request to a parsed Url."""
+    HttpClient.new().post_url(url, body)
+
 fn download(url: text, path: text) -> Result<(), SimpleError>:
     """Download file from URL.
 
@@ -778,7 +809,7 @@ fn download(url: text, path: text) -> Result<(), SimpleError>:
         download("https://example.com/file.zip", "file.zip")?
     """
     val resp = get(url)?
-    if not resp.is_success():
+    if resp.status_class() != StatusClass.Success:
         return Err(error("HTTP {resp.status}: {resp.reason}"))
 
     file_write_bytes(path, resp.body)?
@@ -788,5 +819,5 @@ fn download(url: text, path: text) -> Result<(), SimpleError>:
 # Exports
 # ============================================================================
 
-export NetHttpMethod, HttpRequest, HttpResponse, HttpClient
-export Url, UrlBuilder, get, post, download
+export NetHttpMethod, HttpRequest, HttpResponse, HttpClient, StatusClass, RedirectPolicy
+export Url, UrlBuilder, get, post, get_url, post_url, download

@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# One bootstrap-owner Rust HIR unit; no Simple CLI or native phase invocation.
+set -euo pipefail
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+out=${1:?usage: check-llvm-pipeline-strict-hir.shs ABSOLUTE_EVIDENCE_DIRECTORY}
+case "$out" in /*) ;; *) echo 'absolute evidence directory required' >&2; exit 2 ;; esac
+mkdir -p "$out"
+for leaf in result.sdn discovery.log execution.log; do
+  [ ! -e "$out/$leaf" ] || { echo "evidence collision: $leaf" >&2; exit 2; }
+done
+test_name=hir::lower::tests::expression_tests::llvm_pipeline_optional_destination_keeps_narrow_unsafe_boundary
+deadline=${STRICT_HIR_UNIT_DEADLINE_SECONDS:-60}
+case "$deadline" in ''|*[!0-9]*) exit 2 ;; esac
+[ "$deadline" -ge 1 ] && [ "$deadline" -le 60 ] || exit 2
+status=FAIL
+reason=preflight
+verified_passed=0
+execution_attempted=0
+source_sha=unknown
+cargo_version=unknown
+rustc_version=unknown
+test_sha=unknown
+plugin_sha=unknown
+test_source=src/compiler_rust/compiler/src/hir/lower/tests/expression_tests.rs
+plugin_source=src/plugins/backend_llvm_lib/llvm_lib_translate_expr.spl
+finish() {
+  code=$?
+  {
+    printf 'schema: strict-hir-unit-evidence-v1\nstatus: %s\nreason: %s\n' "$status" "$reason"
+    printf 'source_sha: %s\ntest_name: %s\nverified_passed_tests: %s\nexecution_attempted: %s\nexit_status: %s\n' "$source_sha" "$test_name" "$verified_passed" "$execution_attempted" "$code"
+    printf 'command_timeout_seconds: %s\n' "$deadline"
+    printf 'github_run_id: %s\ngithub_run_attempt: %s\n' "${GITHUB_RUN_ID:-local-diagnostic}" "${GITHUB_RUN_ATTEMPT:-1}"
+    printf 'cargo_version: "%s"\nrustc_version: "%s"\n' "$cargo_version" "$rustc_version"
+    printf 'test_source_file: "%s"\ntest_source_sha256: %s\n' "$test_source" "$test_sha"
+    printf 'plugin_source_file: "%s"\nplugin_source_sha256: %s\n' "$plugin_source" "$plugin_sha"
+  } >"$out/result.sdn"
+  cat "$out/discovery.log" 2>/dev/null || true
+  cat "$out/execution.log" 2>/dev/null || true
+  cat "$out/result.sdn"
+}
+trap finish EXIT
+for tool in cargo rustc timeout git sha256sum; do command -v "$tool" >/dev/null; done
+source_sha=$(git -C "$root" rev-parse HEAD)
+reason=source-pin
+if [ -n "${GITHUB_SHA:-}" ] && [ "$GITHUB_SHA" != "$source_sha" ]; then
+  echo 'checkout differs from dispatched source SHA' >&2; exit 2
+fi
+reason=tool-identity
+cargo_version=$(cargo --version)
+rustc_version=$(rustc --version)
+[[ "$cargo_version" =~ ^cargo[[:space:]][1-9][0-9]*[.][0-9]+[.][0-9]+ ]]
+[[ "$rustc_version" =~ ^rustc[[:space:]][1-9][0-9]*[.][0-9]+[.][0-9]+ ]]
+test_sha=$(sha256sum "$root/$test_source" | cut -d' ' -f1)
+plugin_sha=$(sha256sum "$root/$plugin_source" | cut -d' ' -f1)
+cd "$root/src/compiler_rust"
+reason=discovery-command
+timeout --kill-after=5s "${deadline}s" cargo test -p simple-compiler --lib "$test_name" -- --exact --list >"$out/discovery.log" 2>&1
+reason=discovery-count
+[ "$(grep -Fxc "$test_name: test" "$out/discovery.log" || true)" = 1 ]
+[ "$(grep -Ec '^.+: test$' "$out/discovery.log" || true)" = 1 ]
+reason=execution-command
+execution_attempted=1
+timeout --kill-after=5s "${deadline}s" cargo test -p simple-compiler --lib "$test_name" -- --exact --nocapture --test-threads=1 >"$out/execution.log" 2>&1
+reason=executed-count
+[ "$(grep -c '^test result:' "$out/execution.log" || true)" = 1 ]
+[ "$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "$out/execution.log" || true)" = 1 ]
+verified_passed=1
+reason=exact-test-passed
+status=PASS

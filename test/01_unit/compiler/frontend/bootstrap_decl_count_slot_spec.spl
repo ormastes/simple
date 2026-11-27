@@ -8,10 +8,12 @@ use compiler.core.ast.{
     module_decl_at, module_decl_count_get
 }
 use compiler.frontend.flat_ast_bridge.{flat_ast_to_module, parse_and_build_module}
+use compiler.core.ast_expr.{expr_owner_len, asm_arm_owner_archs, expr_store_state_take, expr_store_state_install}
+use compiler.core.ast_stmt.{stmt_owner_len}
 
-extern fn rt_env_get(key: text) -> text
+extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_set(key: text, value: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 
 describe "bootstrap AST declaration count slots":
     it "defaults missing legacy declaration visibility without recursion":
@@ -28,14 +30,20 @@ describe "bootstrap AST declaration count slots":
         ast_reset()
 
     it "reuses AST arenas across file resets":
-        val decl_reset = rt_file_read_text("src/compiler/10.frontend/core/_Ast/module_state.spl") ?? ""
-        val expr_reset = rt_file_read_text("src/compiler/10.frontend/core/_AstExpr/nodes.spl") ?? ""
-        val stmt_reset = rt_file_read_text("src/compiler/10.frontend/core/ast_stmt.spl") ?? ""
+        val module_state_src = rt_file_read_text("src/compiler/10.frontend/core/_Ast/module_state.spl") ?? ""
+        val decl_src = rt_file_read_text("src/compiler/10.frontend/core/_Ast/decl_nodes.spl") ?? ""
+        val expr_src = rt_file_read_text("src/compiler/10.frontend/core/_AstExpr/nodes.spl") ?? ""
+        val stmt_src = rt_file_read_text("src/compiler/10.frontend/core/ast_stmt.spl") ?? ""
+        # Scope to the reset bodies: the ParseContext take() snapshots in the
+        # same files deliberately install fresh owners.
+        val decl_reset = fn_body(decl_src, "fn decl_pools_ensure_v1():") + fn_body(decl_src, "fn decl_pools_clear_v1():")
+        val expr_reset = fn_body(expr_src, "fn expr_reset():")
+        val stmt_reset = fn_body(stmt_src, "fn stmt_reset():")
 
         expect(decl_reset).to_contain("decl_tag.clear()")
         expect(decl_reset).to_contain("decl_impl_trait.clear()")
         expect(decl_reset).to_contain("decl_param_mut_text.clear()")
-        expect(decl_reset).to_contain("module_decl_slots.clear()")
+        expect(module_state_src).to_contain("ast_module_decl_slots_clear()")
         expect(decl_reset).to_not_contain("    decl_tag = []\n    decl_span = []")
         expect(expr_reset).to_contain("expr_tag.clear()")
         expect(expr_reset).to_contain("asm_arm_archs.clear()")
@@ -49,40 +57,36 @@ describe "bootstrap AST declaration count slots":
         val parser_init_start = parser_source.index_of("fn parser_init_with_path(source: text, path: text):") ?? -1
         val parser_advance_start = parser_source.index_of("fn parser_advance():") ?? -1
         val lexer_init_start = lexer_source.index_of("fn lex_init_with_path(source: text, source_path: text):") ?? -1
-        val lexer_state_start = lexer_source.index_of("fn lex_state_get(key: text, fallback: text)") ?? -1
         expect(parser_init_start).to_be_greater_than(-1)
         expect(parser_advance_start).to_be_greater_than(parser_init_start)
         expect(lexer_init_start).to_be_greater_than(-1)
-        expect(lexer_state_start).to_be_greater_than(lexer_init_start)
         val parser_init_body = parser_source.substring(parser_init_start, parser_advance_start)
-        val lexer_init_body = lexer_source.substring(lexer_init_start, lexer_state_start)
 
-        expect(parser_init_body).to_contain("par_errors.clear()")
-        expect(parser_init_body).to_contain("par_warnings.clear()")
-        expect(parser_init_body).to_contain("par_struct_names.clear()")
-        expect(parser_init_body).to_contain("par_kind_slot[0] = 0")
-        expect(parser_init_body).to_contain("par_text_slot[0] = \"\"")
-        expect(parser_init_body).to_contain("par_line_slot[0] = 0")
-        expect(parser_init_body).to_contain("par_col_slot[0] = 0")
-        for name in ["par_errors", "par_warnings", "par_struct_names", "par_kind_slot", "par_text_slot", "par_line_slot", "par_col_slot"]:
-            expect(parser_init_body).to_not_contain("\n    {name} =")
+        # Per-parse scratch lives on the context-owned `par_state` struct:
+        # diagnostic/name containers get fresh scope-local owners each parse,
+        # while the small scalar slots are reused in place behind nil guards.
+        expect(parser_init_body).to_contain("par_state.par_errors = []")
+        expect(parser_init_body).to_contain("par_state.par_warnings = []")
+        expect(parser_init_body).to_contain("par_state.par_struct_names = []")
+        expect(parser_init_body).to_contain("if par_state.par_kind_slot == nil:")
+        expect(parser_init_body).to_contain("par_state.par_kind_slot[0] = 0")
+        expect(parser_init_body).to_contain("par_state.par_text_slot[0] = \"\"")
+        expect(parser_init_body).to_contain("par_state.par_line_slot[0] = 0")
+        expect(parser_init_body).to_contain("par_state.par_col_slot[0] = 0")
         expect(parser_source).to_not_contain("parser_lex_source_cached")
         expect(parser_source).to_not_contain("par_src_cache")
         expect(parser_source).to_not_contain("SIMPLE_BOOTSTRAP_LEX_SOURCE_GEN")
         expect(lexer_source).to_not_contain("SIMPLE_BOOTSTRAP_LEX_SOURCE_GEN")
-        expect(bridge_source).to_not_contain("parser_lex_source_gen_bump")
-        # The direct module-owned lexer avoids retaining CoreLexer aggregates
-        # inside a reset-crossing one-element module array.
-        expect(lexer_source).to_contain("var current_core_lexer: CoreLexer = make_core_lexer(\"\")")
-        expect(lexer_source).to_contain("var current_core_lexer_live: bool = false")
-        expect(lexer_source).to_not_contain("current_core_lexer_slot")
-        expect(lexer_init_body).to_contain("current_core_lexer = make_core_lexer(core_source)")
-        expect(lexer_init_body).to_contain("current_core_lexer_live = true")
-        expect(lexer_init_body).to_not_contain("rt_array_free(")
+        expect(parser_source).to_not_contain("parser_lex_source_gen_bump")
+        # The active lexer crosses parses through a nil-guarded one-element
+        # slot array; the inline source owner is replaced whole per file.
+        expect(lexer_source).to_contain("var current_core_lexer_slot: [CoreLexer] = []")
+        expect(lexer_source).to_contain("if current_core_lexer_slot.len() == 0:")
+        expect(lexer_source).to_contain("lex_inline_source_slot = [core_source]")
 
         val large_module = parse_and_build_module("fn stale_large() -> i64:\n" + "    0\n".repeat(256), "large_state_probe.spl")
-        val large_expr_count = expr_tag.len()
-        val large_stmt_count = stmt_tag.len()
+        val large_expr_count = expr_owner_len()
+        val large_stmt_count = stmt_owner_len()
         expect(large_module.functions.contains("stale_large")).to_equal(true)
         expect(large_expr_count).to_be_greater_than(100)
         expect(large_stmt_count).to_be_greater_than(100)
@@ -92,8 +96,8 @@ describe "bootstrap AST declaration count slots":
         expect(small_module.functions.contains("stale_large")).to_equal(false)
         expect(small_module.functions.len()).to_equal(1)
         expect(decl_count()).to_equal(1)
-        expect(expr_tag.len()).to_be_less_than(large_expr_count)
-        expect(stmt_tag.len()).to_be_less_than(large_stmt_count)
+        expect(expr_owner_len()).to_be_less_than(large_expr_count)
+        expect(stmt_owner_len()).to_be_less_than(large_stmt_count)
 
     it "clears GPU and asm metadata between parses":
         ast_reset()
@@ -105,7 +109,9 @@ describe "bootstrap AST declaration count slots":
         ast_reset()
         expect(stmt_get_gpu_grid(0)).to_equal([])
         expect(stmt_get_gpu_block(0)).to_equal([])
-        val cleared_asm_fields = asm_arm_archs.len() + asm_arm_os.len() + asm_arm_abi.len() + asm_arm_backend.len() + asm_arm_ver_ops.len() + asm_arm_ver_vals.len() + asm_arm_asm_text.len() + asm_arm_is_compile_error.len() + asm_arm_error_msg.len() + asm_arm_is_wildcard.len()
+        val asm_snap = expr_store_state_take()
+        expr_store_state_install(asm_snap)
+        val cleared_asm_fields = asm_snap.asm_arm_archs.len() + asm_snap.asm_arm_os.len() + asm_snap.asm_arm_abi.len() + asm_snap.asm_arm_backend.len() + asm_snap.asm_arm_ver_ops.len() + asm_snap.asm_arm_ver_vals.len() + asm_snap.asm_arm_asm_text.len() + asm_snap.asm_arm_is_compile_error.len() + asm_snap.asm_arm_error_msg.len() + asm_snap.asm_arm_is_wildcard.len()
         expect(cleared_asm_fields).to_equal(0)
         val fresh_gpu = stmt_gpu_launch([3], [4], [], 0)
         val fresh_asm = asm_arm_new(["aarch64"], "macos", "", "llvm", [], [], "ret", false, "", false)
@@ -113,7 +119,7 @@ describe "bootstrap AST declaration count slots":
         expect(fresh_asm).to_equal(0)
         expect(stmt_get_gpu_grid(fresh_gpu)).to_equal([3])
         expect(stmt_get_gpu_block(fresh_gpu)).to_equal([4])
-        expect(asm_arm_archs[fresh_asm]).to_equal(["aarch64"])
+        expect(asm_arm_owner_archs(fresh_asm)).to_equal(["aarch64"])
 
         ast_reset()
 
@@ -191,10 +197,15 @@ describe "bootstrap AST declaration count slots":
         expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_TAG", "1")).to_equal(true)
         expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_COUNT", "1")).to_equal(true)
         expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_TAG", "1")).to_equal(true)
+        # Count mirrors are still consulted in interpreter bootstrap mode...
         expect(expr_count()).to_equal(1)
         expect(stmt_count()).to_equal(1)
-        expect(expr_get_tag(0)).to_equal(1)
-        expect(stmt_get_tag(0)).to_equal(1)
+        # ...but the per-index tag mirrors are legacy seed-bootstrap output
+        # with no remaining consumer, and tag getters are arena-authoritative:
+        # a stale mirror tag is never trusted for an arena slot that does not
+        # exist (fail-closed -1, mirroring module_decl_at).
+        expect(expr_get_tag(0)).to_equal(-1)
+        expect(stmt_get_tag(0)).to_equal(-1)
 
     it "ignores stale declaration mirrors in native arena mode":
         val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
@@ -281,3 +292,10 @@ describe "bootstrap AST declaration count slots":
         expect(rt_env_set("SIMPLE_BOOTSTRAP", old_bootstrap)).to_equal(true)
         expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena)).to_equal(true)
         expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_native_entry)).to_equal(true)
+
+fn fn_body(source: text, header: text) -> text:
+    val begin = source.index_of(header)
+    if begin < 0: return ""
+    val finish = source.index_of("\nfn ", begin + header.len())
+    if finish < 0: return source.substring(begin, source.len())
+    source.substring(begin, finish)

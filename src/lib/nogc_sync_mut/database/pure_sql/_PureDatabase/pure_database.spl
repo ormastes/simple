@@ -94,7 +94,7 @@ fn _pure_database_select_owned_v1(query: Result<[DbRow], DbError>,
             interface_identity: strategy.interface_identity(), abi_digest: strategy.abi_digest(),
             capability_bits: strategy.capability_bits(), reason: reason)
     _PureDatabaseSelectOwnedV1(
-        query: query, reducer: nil, provider_used: false, provider_and_calls: 0,
+        query: query, reducer: None, provider_used: false, provider_and_calls: 0,
         provider_identity: "", implementation_identity: "", interface_identity: "",
         abi_digest: "", capability_bits: 0u64, reason: reason)
 
@@ -353,7 +353,7 @@ class PureDatabase:
                 ci = ci + 1
         var avi: i32 = 0
         while avi < self._tbl_all_visible.len() as i32:
-            self._tbl_all_visible[avi] = true
+            self._tbl_all_visible[avi] = self._table_all_tuples_visible(avi)
             if avi < self._tbl_pk_dirty.len() as i32:
                 self._tbl_pk_dirty[avi] = true
             avi = avi + 1
@@ -363,6 +363,24 @@ class PureDatabase:
             self._tbl_mvcc_stale[msi] = false
             msi = msi + 1
         Ok(())
+
+    me _table_all_tuples_visible(ti: i32) -> bool:
+        if ti < 0 or ti >= self._tbl_data.len() as i32:
+            return false
+        if ti < self._tbl_mvcc_stale.len() as i32 and self._tbl_mvcc_stale[ti]:
+            return false
+        val tbl = self._tbl_data[ti]
+        val typed = self._tbl_typed[ti]
+        if typed.len() != tbl.tuples.len():
+            return false
+        val snap = self._txn.snapshot()
+        var ri: i32 = 0
+        while ri < tbl.tuples.len() as i32:
+            val tup = tbl.tuples[ri]
+            if tup.header.xmax != 0 or not mvcc_is_visible(tup, snap):
+                return false
+            ri = ri + 1
+        true
 
     me _mark_dirty() -> Result<(), DbError>:
         self._dirty = true
@@ -381,14 +399,29 @@ class PureDatabase:
             return
         var pkm: Dict<text, i32> = {}
         val typed = self._tbl_typed[ti]
+        val all_vis = ti < self._tbl_all_visible.len() as i32 and self._tbl_all_visible[ti]
+        val tbl = self._tbl_data[ti]
+        val snap = self._txn.snapshot()
         val prefix = "{ti}:"
+        if not all_vis:
+            var di: i32 = 0
+            while di < typed.len() as i32:
+                if di < tbl.tuples.len() as i32 and not mvcc_is_visible(tbl.tuples[di], snap):
+                    val dead_row = typed[di]
+                    if pk_ci < dead_row.len() as i32:
+                        self._pk_flat.remove(prefix + dead_row[pk_ci].to_text())
+                di = di + 1
         var ri: i32 = 0
         while ri < typed.len() as i32:
-            val row = typed[ri]
-            if pk_ci < row.len() as i32:
-                val pk_txt = row[pk_ci].to_text()
-                pkm[pk_txt] = ri
-                self._pk_flat[prefix + pk_txt] = ri
+            var row_visible = true
+            if not all_vis and ri < tbl.tuples.len() as i32:
+                row_visible = mvcc_is_visible(tbl.tuples[ri], snap)
+            if row_visible:
+                val row = typed[ri]
+                if pk_ci < row.len() as i32:
+                    val pk_txt = row[pk_ci].to_text()
+                    pkm[pk_txt] = ri
+                    self._pk_flat[prefix + pk_txt] = ri
             ri = ri + 1
         self._tbl_pk_map[ti] = pkm
         self._tbl_pk_dirty[ti] = false
@@ -508,7 +541,9 @@ class PureDatabase:
         if kci < 0:
             return Err(DbError.QueryFailed(sql: "COUNT_BY_KEY", message: "no such column: {key_col}"))
         val key_txt = key_val.to_text()
-        if kci == self._tbl_pk_col[ti]:
+        self._ensure_mvcc_sync(ti)
+        val pk_clean = ti >= self._tbl_pk_dirty.len() as i32 or not self._tbl_pk_dirty[ti]
+        if pk_clean and kci == self._tbl_pk_col[ti]:
             val flat_key = "{ti}:" + key_txt
             if self._pk_flat.has(flat_key):
                 return Ok(DbValue.Integer(value: 1))
@@ -519,12 +554,16 @@ class PureDatabase:
                 return Ok(DbValue.Integer(value: 1))
             return Ok(DbValue.Integer(value: 0))
         val typed = self._tbl_typed[ti]
+        val all_vis = ti < self._tbl_all_visible.len() as i32 and self._tbl_all_visible[ti]
+        val tbl = self._tbl_data[ti]
+        val snap = self._txn.snapshot()
         var count: i64 = 0
         var ri: i32 = 0
         while ri < typed.len() as i32:
-            val row = typed[ri]
-            if kci < row.len() as i32 and row[kci].to_text() == key_txt:
-                count = count + 1
+            if all_vis or (ri < tbl.tuples.len() as i32 and mvcc_is_visible(tbl.tuples[ri], snap)):
+                val row = typed[ri]
+                if kci < row.len() as i32 and row[kci].to_text() == key_txt:
+                    count = count + 1
             ri = ri + 1
         Ok(DbValue.Integer(value: count))
 
@@ -547,7 +586,9 @@ class PureDatabase:
         if kci < 0:
             return "0"
         val key_txt = key_val.to_text()
-        if kci == self._tbl_pk_col[ti]:
+        self._ensure_mvcc_sync(ti)
+        val pk_clean = ti >= self._tbl_pk_dirty.len() as i32 or not self._tbl_pk_dirty[ti]
+        if pk_clean and kci == self._tbl_pk_col[ti]:
             val flat_key = "{ti}:" + key_txt
             if self._pk_flat.has(flat_key):
                 return "1"
@@ -557,12 +598,16 @@ class PureDatabase:
                 return "1"
             return "0"
         val typed = self._tbl_typed[ti]
+        val all_vis = ti < self._tbl_all_visible.len() as i32 and self._tbl_all_visible[ti]
+        val tbl = self._tbl_data[ti]
+        val snap = self._txn.snapshot()
         var count: i64 = 0
         var ri: i32 = 0
         while ri < typed.len() as i32:
-            val row = typed[ri]
-            if kci < row.len() as i32 and row[kci].to_text() == key_txt:
-                count = count + 1
+            if all_vis or (ri < tbl.tuples.len() as i32 and mvcc_is_visible(tbl.tuples[ri], snap)):
+                val row = typed[ri]
+                if kci < row.len() as i32 and row[kci].to_text() == key_txt:
+                    count = count + 1
             ri = ri + 1
         count.to_text()
 
@@ -822,6 +867,14 @@ class PureDatabase:
             if tidx_fast >= 0 and tidx_fast < typed_fast.len() as i32:
                 val last_idx_fast = typed_fast.len() as i32 - 1
                 val pk_ci_fast = self._tbl_pk_col[ti]
+                self._ensure_mvcc_sync(ti)
+                var tbl_fast = self._tbl_data[ti]
+                if tidx_fast < tbl_fast.tuples.len() as i32:
+                    val last_tbl_idx = tbl_fast.tuples.len() as i32 - 1
+                    if tidx_fast != last_tbl_idx:
+                        tbl_fast.tuples[tidx_fast] = tbl_fast.tuples[last_tbl_idx]
+                    tbl_fast.tuples.pop()
+                    self._tbl_data[ti] = tbl_fast
                 self._pk_flat.remove(flat_key)
                 var pkm_new = self._tbl_pk_map[ti]
                 pkm_new.remove(key_txt_fast)
@@ -836,6 +889,13 @@ class PureDatabase:
                 self._pk_flat.remove(flat_key)
                 self._tbl_pk_map[ti] = pkm_new
                 self._tbl_typed[ti] = typed_fast
+                self._invalidate_fts(ti)
+                if ti < self._scan_cache_key.len() as i32:
+                    self._scan_cache_key[ti] = ""
+                if ti < self._sel_cache_key.len() as i32:
+                    self._sel_cache_key[ti] = ""
+                if ti < self._tbl_vis_xmax.len() as i32:
+                    self._tbl_vis_xmax[ti] = -1
                 self._last_changes = 1
                 self._mark_dirty()?
                 return Ok(1)
@@ -889,6 +949,13 @@ class PureDatabase:
                 var pkm2 = self._tbl_pk_map[ti]
                 pkm2.remove(key_txt)
                 self._tbl_pk_map[ti] = pkm2
+            self._tbl_pk_dirty[ti] = true
+            if ti < self._scan_cache_key.len() as i32:
+                self._scan_cache_key[ti] = ""
+            if ti < self._sel_cache_key.len() as i32:
+                self._sel_cache_key[ti] = ""
+            if ti < self._tbl_vis_xmax.len() as i32:
+                self._tbl_vis_xmax[ti] = -1
         self._last_changes = deleted
         if deleted > 0 and ti < self._tbl_all_visible.len() as i32:
             self._tbl_all_visible[ti] = false
@@ -917,6 +984,7 @@ class PureDatabase:
             return Err(DbError.QueryFailed(sql: "UPDATE_BY_KEY", message: "no such column: {key_col}"))
         val key_txt = key_val.to_text()
         val pk_ci = self._tbl_pk_col[ti]
+        self._ensure_mvcc_sync(ti)
         val all_vis = ti < self._tbl_all_visible.len() as i32 and self._tbl_all_visible[ti]
         self._ensure_pk_map(ti)
         if all_vis:
@@ -953,6 +1021,12 @@ class PureDatabase:
                 ci = ci + 1
             typed2[found_tidx] = new_vals
             self._tbl_typed[ti] = typed2
+            var tbl_u = self._tbl_data[ti]
+            if found_tidx < tbl_u.tuples.len() as i32:
+                var tup_u = tbl_u.tuples[found_tidx]
+                tup_u.data = _serialize_row(new_vals)
+                tbl_u.tuples[found_tidx] = tup_u
+                self._tbl_data[ti] = tbl_u
             if pk_ci >= 0 and pk_ci < new_vals.len() as i32:
                 val old_pk = row_vals[pk_ci].to_text()
                 val new_pk = new_vals[pk_ci].to_text()
@@ -964,10 +1038,15 @@ class PureDatabase:
                     pkm2[new_pk] = found_tidx
                     self._tbl_pk_map[ti] = pkm2
             self._invalidate_fts(ti)
+            if ti < self._scan_cache_key.len() as i32:
+                self._scan_cache_key[ti] = ""
+            if ti < self._sel_cache_key.len() as i32:
+                self._sel_cache_key[ti] = ""
+            if ti < self._tbl_vis_xmax.len() as i32:
+                self._tbl_vis_xmax[ti] = -1
             self._last_changes = 1
             self._mark_dirty()?
             return Ok(1)
-        self._ensure_mvcc_sync(ti)
         val handle = self._txn.begin()
         val tid = handle.txn_id
         val snap = self._txn.snapshot()
@@ -1004,36 +1083,38 @@ class PureDatabase:
             else:
                 new_vals.push(row_vals[ci])
             ci = ci + 1
-        if use_typed and found_tidx >= 0:
-            var typed2 = self._tbl_typed[ti]
-            typed2[found_tidx] = new_vals
-            self._tbl_typed[ti] = typed2
-            if pk_ci >= 0 and pk_ci < new_vals.len() as i32:
-                val old_pk = row_vals[pk_ci].to_text()
-                val new_pk = new_vals[pk_ci].to_text()
-                if old_pk != new_pk:
-                    var pkm2 = self._tbl_pk_map[ti]
-                    pkm2.remove(old_pk)
-                    pkm2[new_pk] = found_tidx
-                    self._tbl_pk_map[ti] = pkm2
-        else:
-            val old_data = tbl.tuples[found_tidx].data
-            tbl.delete_matching(tid, old_data)
-            val new_ser = _serialize_row(new_vals)
-            tbl.insert(tid, new_ser)
-            val new_pos = tbl.tuples.len() as i32 - 1
-            self._tbl_data[ti] = tbl
+        val old_data = tbl.tuples[found_tidx].data
+        tbl.delete_matching(tid, old_data)
+        val new_ser = _serialize_row(new_vals)
+        tbl.insert(tid, new_ser)
+        val new_pos = tbl.tuples.len() as i32 - 1
+        self._tbl_data[ti] = tbl
+        if use_typed:
             var typed2 = self._tbl_typed[ti]
             typed2.push(new_vals)
             self._tbl_typed[ti] = typed2
-            if pk_ci >= 0 and pk_ci < new_vals.len() as i32:
-                var pkm2 = self._tbl_pk_map[ti]
-                if pk_ci < row_vals.len() as i32:
-                    pkm2.remove(row_vals[pk_ci].to_text())
-                pkm2[new_vals[pk_ci].to_text()] = new_pos
-                self._tbl_pk_map[ti] = pkm2
+        if pk_ci >= 0 and pk_ci < new_vals.len() as i32:
+            var pkm2 = self._tbl_pk_map[ti]
+            if pk_ci < row_vals.len() as i32:
+                val old_pk = row_vals[pk_ci].to_text()
+                self._pk_flat.remove("{ti}:" + old_pk)
+                pkm2.remove(old_pk)
+            val new_pk = new_vals[pk_ci].to_text()
+            self._pk_flat["{ti}:" + new_pk] = new_pos
+            pkm2[new_pk] = new_pos
+            self._tbl_pk_map[ti] = pkm2
+            if ti < self._tbl_pk_dirty.len() as i32:
+                self._tbl_pk_dirty[ti] = true
         self._txn.commit(tid)
         self._invalidate_fts(ti)
+        if ti < self._tbl_all_visible.len() as i32:
+            self._tbl_all_visible[ti] = false
+        if ti < self._scan_cache_key.len() as i32:
+            self._scan_cache_key[ti] = ""
+        if ti < self._sel_cache_key.len() as i32:
+            self._sel_cache_key[ti] = ""
+        if ti < self._tbl_vis_xmax.len() as i32:
+            self._tbl_vis_xmax[ti] = -1
         self._last_changes = 1
         self._mark_dirty()?
         Ok(1)
@@ -1062,6 +1143,13 @@ class PureDatabase:
             var updates2: Dict<text, DbValue> = {}
             updates2[col] = value
             return self.update_by_key(table, key_col, key_val, updates2)
+        val ci = _find_idx(self._tbl_cols[ti], col)
+        if ci < 0:
+            return Err(DbError.QueryFailed(sql: "UPDATE_VALUE_BY_KEY", message: "no such column: {col}"))
+        if ci == pk_ci:
+            var updates_pk: Dict<text, DbValue> = {}
+            updates_pk[col] = value
+            return self.update_by_key(table, key_col, key_val, updates_pk)
         val flat_key = "{ti}:" + key_txt
         var tidx: i32 = -1
         if self._pk_flat.has(flat_key):
@@ -1075,14 +1163,25 @@ class PureDatabase:
         if tidx < 0 or tidx >= typed.len() as i32:
             self._last_changes = 0
             return Ok(0)
-        val ci = _find_idx(self._tbl_cols[ti], col)
-        if ci < 0:
-            return Err(DbError.QueryFailed(sql: "UPDATE_VALUE_BY_KEY", message: "no such column: {col}"))
+        self._ensure_mvcc_sync(ti)
         var row = typed[tidx]
         if ci < row.len() as i32:
             row[ci] = value
             typed[tidx] = row
             self._tbl_typed[ti] = typed
+            var tbl_uv = self._tbl_data[ti]
+            if tidx < tbl_uv.tuples.len() as i32:
+                var tup_uv = tbl_uv.tuples[tidx]
+                tup_uv.data = _serialize_row(row)
+                tbl_uv.tuples[tidx] = tup_uv
+                self._tbl_data[ti] = tbl_uv
+            self._invalidate_fts(ti)
+            if ti < self._scan_cache_key.len() as i32:
+                self._scan_cache_key[ti] = ""
+            if ti < self._sel_cache_key.len() as i32:
+                self._sel_cache_key[ti] = ""
+            if ti < self._tbl_vis_xmax.len() as i32:
+                self._tbl_vis_xmax[ti] = -1
             self._last_changes = 1
             self._mark_dirty()?
             return Ok(1)
@@ -1308,7 +1407,7 @@ class PureDatabase:
             self._tbl_data[ti] = tbl
             ti = ti + 1
         val payload = lines.join("\n")
-        Ok("simple-pure-db-v3\n" + payload.len().to_text() + "\n" +
+        Ok("simple-pure-db-v3\n" + payload.byte_len().to_text() + "\n" +
             sha256_text(payload) + "\n" + payload)
 
     me _persist() -> Result<(), DbError>:
@@ -1408,7 +1507,7 @@ class PureDatabase:
                 payload_lines.push(lines[payload_i])
                 payload_i = payload_i + 1
             val payload = payload_lines.join("\n")
-            if payload.len() as i32 != declared_length.unwrap() or sha256_text(payload) != lines[2]:
+            if payload.byte_len() as i32 != declared_length.unwrap() or sha256_text(payload) != lines[2]:
                 return Err(DbError.ConnectionFailed(path: self._path, message: "truncated or corrupt pure database payload"))
             i = 3
         elif format != "simple-pure-db-v1":
@@ -1726,12 +1825,12 @@ class PureDatabase:
         val trimmed_sql = sql.trim()
         val trimmed_upper = trimmed_sql.to_upper()
         if trimmed_upper.starts_with("INSERT OR REPLACE"):
-            val trimmed_len = trimmed_sql.len()
+            val trimmed_len = trimmed_sql.byte_len()
             val after_ior = trimmed_sql.slice(17, trimmed_len)
             actual_sql = "INSERT" + after_ior
             is_replace = true
         elif trimmed_upper.starts_with("REPLACE INTO"):
-            val trimmed_len2 = trimmed_sql.len()
+            val trimmed_len2 = trimmed_sql.byte_len()
             val after_rep = trimmed_sql.slice(7, trimmed_len2)
             actual_sql = "INSERT" + after_rep
             is_replace = true
@@ -1799,8 +1898,12 @@ class PureDatabase:
                 if pkm.has(key_txt):
                     val tidx = pkm[key_txt]
                     val typed = self._tbl_typed[ti]
+                    val all_vis_q = ti < self._tbl_all_visible.len() as i32 and self._tbl_all_visible[ti]
+                    val tbl_q = self._tbl_data[ti]
                     if tidx >= 0 and tidx < typed.len() as i32:
-                        rows.push(DbRow(columns: self._tbl_cols[ti], values: typed[tidx]))
+                        val row_vis_q = all_vis_q or (tidx < tbl_q.tuples.len() as i32 and mvcc_is_visible(tbl_q.tuples[tidx], self._txn.snapshot()))
+                        if row_vis_q:
+                            rows.push(DbRow(columns: self._tbl_cols[ti], values: typed[tidx]))
                 return Ok(rows)
         # ── SELECT result cache: skip parse+scan for repeated queries ──
         if params.len() == 0:
@@ -1873,7 +1976,7 @@ class PureDatabase:
         self._select_cache_store_v1(table_idx, sql, selected.query)
         val next_reducer = match selected.reducer:
             Some(value): value
-            nil: reducer
+            None: reducer
         PureDatabaseBitmapQueryOwnedV1(
             query: selected.query, reducer: next_reducer,
             provider_used: selected.provider_used,
@@ -3205,6 +3308,7 @@ class PureDatabase:
                 sql: "SELECT",
                 message: "no such table: {sel.from_table}"
             )), active_reducer, false, 0, "select-table-missing")
+        self._ensure_mvcc_sync(ti)
         var col_names = self._tbl_cols[ti]
         val snap = self._txn.snapshot()
         var tbl = self._tbl_data[ti]
@@ -3438,6 +3542,7 @@ class PureDatabase:
                         sql: "SELECT",
                         message: "no such table: {jn.table}"
                     )), active_reducer, provider_used, provider_and_calls, "join-table-missing")
+                self._ensure_mvcc_sync(jti)
                 val jcols = self._tbl_cols[jti]
                 val jsnap = self._txn.snapshot()
                 var jtbl = self._tbl_data[jti]
@@ -3667,11 +3772,13 @@ class PureDatabase:
                 oi = oi + 1
 
         # ── LIMIT / OFFSET ───────────────────────────────────────────
-        if sel.offset > 0 or sel.limit > 0:
+        # The parser's absent sentinel is -1; an explicit LIMIT 0 must
+        # return zero rows (SQL semantics), not fall through as "no limit".
+        if sel.offset > 0 or sel.limit >= 0:
             var limited: [DbRow] = []
             var off = sel.offset
             var lim = sel.limit
-            if lim == 0:
+            if lim < 0:
                 lim = rows.len()
             var lli: i32 = 0
             while lli < rows.len() as i32:
@@ -3696,6 +3803,7 @@ class PureDatabase:
                 sql: "UPDATE",
                 message: "no such table: {upd.table}"
             ))
+        self._ensure_mvcc_sync(ti)
         val col_names = self._tbl_cols[ti]
         val pk_ci = self._tbl_pk_col[ti]
         if pk_ci >= 0:
@@ -3706,7 +3814,9 @@ class PureDatabase:
                 if pkm.has(pk_eq):
                     val tidx = pkm[pk_eq]
                     val typed_rows = self._tbl_typed[ti]
-                    if tidx >= 0 and tidx < typed_rows.len() as i32:
+                    var tbl_f = self._tbl_data[ti]
+                    val snap_f = self._txn.snapshot()
+                    if tidx >= 0 and tidx < typed_rows.len() as i32 and tidx < tbl_f.tuples.len() as i32 and mvcc_is_visible(tbl_f.tuples[tidx], snap_f):
                         val row_vals = typed_rows[tidx]
                         var new_vals: [DbValue] = []
                         var ci: i32 = 0
@@ -3720,7 +3830,6 @@ class PureDatabase:
                             ci = ci + 1
                         val handle_f = self._txn.begin()
                         val tid_f = handle_f.txn_id
-                        var tbl_f = self._tbl_data[ti]
                         val old_data = tbl_f.tuples[tidx].data
                         tbl_f.delete_matching(tid_f, old_data)
                         tbl_f.insert(tid_f, _serialize_row(new_vals))
@@ -3731,14 +3840,28 @@ class PureDatabase:
                         self._tbl_typed[ti] = typed2
                         self._txn.commit(tid_f)
                         self._invalidate_fts(ti)
+                        self._pk_flat.remove("{ti}:" + pk_eq)
+                        var pkm_upd = self._tbl_pk_map[ti]
+                        pkm_upd.remove(pk_eq)
+                        if pk_ci < new_vals.len() as i32:
+                            val new_pk = new_vals[pk_ci].to_text()
+                            self._pk_flat["{ti}:" + new_pk] = new_pos
+                            pkm_upd[new_pk] = new_pos
+                        self._tbl_pk_map[ti] = pkm_upd
                         if ti < self._tbl_all_visible.len() as i32:
                             self._tbl_all_visible[ti] = false
                         self._tbl_pk_dirty[ti] = true
+                        if ti < self._scan_cache_key.len() as i32:
+                            self._scan_cache_key[ti] = ""
+                        if ti < self._sel_cache_key.len() as i32:
+                            self._sel_cache_key[ti] = ""
+                        if ti < self._tbl_vis_xmax.len() as i32:
+                            self._tbl_vis_xmax[ti] = -1
                         self._last_changes = 1
                         self._mark_dirty()?
                         return Ok(1)
+                self._last_changes = 0
                 return Ok(0)
-        self._ensure_mvcc_sync(ti)
         val handle = self._txn.begin()
         val tid = handle.txn_id
         val snap = self._txn.snapshot()
@@ -3746,9 +3869,10 @@ class PureDatabase:
         val typed = self._tbl_typed[ti]
         val use_typed = typed.len() == tbl.tuples.len()
         var updated: i64 = 0
+        val orig_len_u = tbl.tuples.len() as i32
         if use_typed:
             var ui: i32 = 0
-            while ui < tbl.tuples.len() as i32:
+            while ui < orig_len_u:
                 if mvcc_is_visible(tbl.tuples[ui], snap):
                     val row_vals = typed[ui]
                     if _check_where(upd.where_expr, col_names, row_vals, params):
@@ -3768,6 +3892,8 @@ class PureDatabase:
                         var typed2 = self._tbl_typed[ti]
                         typed2.push(new_vals)
                         self._tbl_typed[ti] = typed2
+                        if pk_ci >= 0 and pk_ci < row_vals.len() as i32:
+                            self._pk_flat.remove("{ti}:" + row_vals[pk_ci].to_text())
                         updated = updated + 1
                 ui = ui + 1
         else:
@@ -3789,6 +3915,8 @@ class PureDatabase:
                         ci = ci + 1
                     tbl.delete_matching(tid, old_data)
                     tbl.insert(tid, _serialize_row(new_vals))
+                    if pk_ci >= 0 and pk_ci < row_vals.len() as i32:
+                        self._pk_flat.remove("{ti}:" + row_vals[pk_ci].to_text())
                     updated = updated + 1
                 ri = ri + 1
         self._tbl_data[ti] = tbl
@@ -3797,6 +3925,14 @@ class PureDatabase:
             self._invalidate_fts(ti)
             if ti >= 0 and ti < self._tbl_all_visible.len() as i32:
                 self._tbl_all_visible[ti] = false
+            self._tbl_pk_map[ti] = {}
+            self._tbl_pk_dirty[ti] = true
+            if ti < self._scan_cache_key.len() as i32:
+                self._scan_cache_key[ti] = ""
+            if ti < self._sel_cache_key.len() as i32:
+                self._sel_cache_key[ti] = ""
+            if ti < self._tbl_vis_xmax.len() as i32:
+                self._tbl_vis_xmax[ti] = -1
         self._last_changes = updated
         self._mark_dirty()?
         Ok(updated)
@@ -3814,6 +3950,7 @@ class PureDatabase:
                 sql: "DELETE",
                 message: "no such table: {del.table}"
             ))
+        self._ensure_mvcc_sync(ti)
         val col_names = self._tbl_cols[ti]
         val pk_ci = self._tbl_pk_col[ti]
         if pk_ci >= 0:
@@ -3834,15 +3971,25 @@ class PureDatabase:
                             self._tbl_data[ti] = tbl_f
                             self._txn.commit(tid_f)
                             self._invalidate_fts(ti)
+                            self._pk_flat.remove("{ti}:" + pk_eq)
+                            var pkm_del = self._tbl_pk_map[ti]
+                            pkm_del.remove(pk_eq)
+                            self._tbl_pk_map[ti] = pkm_del
                             if ti < self._tbl_all_visible.len() as i32:
                                 self._tbl_all_visible[ti] = false
                             self._tbl_pk_dirty[ti] = true
+                            if ti < self._scan_cache_key.len() as i32:
+                                self._scan_cache_key[ti] = ""
+                            if ti < self._sel_cache_key.len() as i32:
+                                self._sel_cache_key[ti] = ""
+                            if ti < self._tbl_vis_xmax.len() as i32:
+                                self._tbl_vis_xmax[ti] = -1
                             self._last_changes = 1
                             self._mark_dirty()?
                             return Ok(1)
                         self._txn.commit(tid_f)
+                self._last_changes = 0
                 return Ok(0)
-        self._ensure_mvcc_sync(ti)
         val handle = self._txn.begin()
         val tid = handle.txn_id
         val snap = self._txn.snapshot()
@@ -3850,14 +3997,17 @@ class PureDatabase:
         val typed = self._tbl_typed[ti]
         val use_typed = typed.len() == tbl.tuples.len()
         var deleted: i64 = 0
+        val orig_len_d = tbl.tuples.len() as i32
         if use_typed:
             var di: i32 = 0
-            while di < tbl.tuples.len() as i32:
+            while di < orig_len_d:
                 if mvcc_is_visible(tbl.tuples[di], snap):
                     val row_vals = typed[di]
                     if _check_where(del.where_expr, col_names, row_vals, params):
                         val del_data_di = tbl.tuples[di].data
                         tbl.delete_matching(tid, del_data_di)
+                        if pk_ci >= 0 and pk_ci < row_vals.len() as i32:
+                            self._pk_flat.remove("{ti}:" + row_vals[pk_ci].to_text())
                         deleted = deleted + 1
                 di = di + 1
         else:
@@ -3868,6 +4018,8 @@ class PureDatabase:
                 val row_vals = _deserialize_row(row_data)
                 if _check_where(del.where_expr, col_names, row_vals, params):
                     tbl.delete_matching(tid, row_data)
+                    if pk_ci >= 0 and pk_ci < row_vals.len() as i32:
+                        self._pk_flat.remove("{ti}:" + row_vals[pk_ci].to_text())
                     deleted = deleted + 1
                 ri = ri + 1
         self._tbl_data[ti] = tbl
@@ -3876,6 +4028,13 @@ class PureDatabase:
             self._invalidate_fts(ti)
             if ti >= 0 and ti < self._tbl_all_visible.len() as i32:
                 self._tbl_all_visible[ti] = false
+            self._tbl_pk_dirty[ti] = true
+            if ti < self._scan_cache_key.len() as i32:
+                self._scan_cache_key[ti] = ""
+            if ti < self._sel_cache_key.len() as i32:
+                self._sel_cache_key[ti] = ""
+            if ti < self._tbl_vis_xmax.len() as i32:
+                self._tbl_vis_xmax[ti] = -1
         self._last_changes = deleted
         self._mark_dirty()?
         Ok(deleted)

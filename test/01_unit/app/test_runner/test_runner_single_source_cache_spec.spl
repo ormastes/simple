@@ -1,0 +1,115 @@
+"""Single-file test runner source-cache and infix-preprocess fast path tests.
+
+# @req REQ-TEST-RUNNER-SOURCE-CACHE
+
+Verifies that `test_runner_single` parses metadata (`@platform`, `slow_it`,
+`@timeout_secs`, `@jit_spec_entry`, `@exec_limit`, `@di_test`) and runs
+`preprocess_infix_from_source` purely from an already-loaded `spec_source`
+string, takes a zero-join fast path on modern specs, and reads `run.path`
+once in `run_single_target`.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_write, file_delete, file_exists, file_read, dir_create_all}
+use app.test_runner_new.test_runner_single.{
+    spec_platform_skip_from_source,
+    spec_has_slow_it_from_source,
+    spec_timeout_secs_from_source,
+    spec_jit_spec_entry_from_source,
+    spec_exec_limit_from_source,
+    file_has_di_test_tag_from_source,
+    preprocess_infix_from_source
+}
+
+val TEST_RUNNER_SINGLE_PATH: text = "src/app/test_runner_new/test_runner_single.spl"
+val FIXTURE_DIR: text = "build/test-artifacts/test_runner_single_source_cache"
+
+describe "test_runner_single pure source-cache helpers":
+    """Pure `*_from_source` metadata extraction and infix preprocessing."""
+
+    it "extracts @platform skip reason from source without disk I/O":
+        """Matching host OS proceeds; mismatched host OS yields skip reason."""
+        val linux_only = "# @platform: linux\ndescribe \"x\":\n    it \"y\":\n        expect(1).to_equal(1)\n"
+        expect(spec_platform_skip_from_source(linux_only, "linux")).to_equal("")
+        val win_skip = spec_platform_skip_from_source(linux_only, "windows")
+        expect(win_skip.byte_len()).to_be_greater_than(0)
+        val untagged = "describe \"plain\":\n    it \"y\":\n        expect(1).to_equal(1)\n"
+        expect(spec_platform_skip_from_source(untagged, "windows")).to_equal("")
+
+    it "detects slow_it and @di_test tags from source":
+        """Identifies slow_it example markers and # @di_test headers."""
+        val slow_src = "describe \"s\":\n    slow_it \"runs long\":\n        expect(1).to_equal(1)\n"
+        val fast_src = "describe \"f\":\n    it \"runs fast\":\n        expect(1).to_equal(1)\n"
+        expect(spec_has_slow_it_from_source(slow_src)).to_equal(true)
+        expect(spec_has_slow_it_from_source(fast_src)).to_equal(false)
+
+        val di_src = "# @di_test\ndescribe \"d\":\n    it \"x\":\n        expect(1).to_equal(1)\n"
+        expect(file_has_di_test_tag_from_source(di_src)).to_equal(true)
+        expect(file_has_di_test_tag_from_source(fast_src)).to_equal(false)
+
+    it "parses @timeout_secs and @exec_limit directives from source":
+        """Extracts integer directives and returns 0 when absent or non-numeric."""
+        val src = "# @timeout_secs 1800\n# @exec_limit 50000000\ndescribe \"d\":\n    it \"a\":\n        expect(1).to_equal(1)\n"
+        expect(spec_timeout_secs_from_source(src)).to_equal(1800)
+        expect(spec_exec_limit_from_source(src)).to_equal(50000000)
+
+        val bad_src = "# @timeout_secs fast\n# @exec_limit none\ndescribe \"d\":\n    pass\n"
+        expect(spec_timeout_secs_from_source(bad_src)).to_equal(0)
+        expect(spec_exec_limit_from_source(bad_src)).to_equal(0)
+
+    it "recognizes whole-line # @jit_spec_entry directives only":
+        """Matches leading or newline-prefixed directive lines, not inline prose."""
+        expect(spec_jit_spec_entry_from_source("# @jit_spec_entry\ndescribe \"j\":\n    pass\n")).to_equal(true)
+        expect(spec_jit_spec_entry_from_source("# header\n# @jit_spec_entry\ndescribe \"j\":\n    pass\n")).to_equal(true)
+        expect(spec_jit_spec_entry_from_source("# comment mentions # @jit_spec_entry in prose\n")).to_equal(false)
+
+    it "takes fast path without writing temp file on modern specs":
+        """Modern dot-chained expect specs return original path immediately."""
+        dir_create_all(FIXTURE_DIR)
+        val modern_path = "{FIXTURE_DIR}/modern_dummy_spec.spl"
+        val modern_src = "describe \"modern\":\n    it \"passes\":\n        expect(2 + 2).to_equal(4)\n        expect(\"hello\").to_contain(\"ell\")\n"
+        val out_path = preprocess_infix_from_source(modern_path, modern_src)
+        expect(out_path).to_equal(modern_path)
+        expect(preprocess_infix_from_source("plain_module.spl", "expect x to_equal 1")).to_equal("plain_module.spl")
+        expect(preprocess_infix_from_source(modern_path, "")).to_equal(modern_path)
+
+    it "skips temp file write when expect keyword appears only in prose or unchanged line":
+        """A spec with `expect ` inside a comment or string does not trigger rewrite."""
+        val path = "{FIXTURE_DIR}/comment_only_spec.spl"
+        val src = "# Note: expect value to_be something\ndescribe \"c\":\n    it \"ok\":\n        expect(1).to_equal(1)\n"
+        val out_path = preprocess_infix_from_source(path, src)
+        expect(out_path).to_equal(path)
+
+    it "rewrites legacy infix and paren-subject specs once and writes temp file":
+        """Legacy `expect a to_equal b` and `expect(a) to_equal b` rewrite cleanly."""
+        dir_create_all(FIXTURE_DIR)
+        val legacy_path = "{FIXTURE_DIR}/legacy_dummy_spec.spl"
+        val legacy_src = "describe \"legacy\":\n    it \"checks\":\n        expect total to_equal 3\n        expect(name) to_equal \"ok\"\n"
+        val rewritten_path = preprocess_infix_from_source(legacy_path, legacy_src)
+        expect(rewritten_path).to_contain(".spipe_matchers_")
+        expect(file_exists(rewritten_path)).to_equal(true)
+        val written = file_read(rewritten_path)
+        expect(written).to_contain("expect(total).to_equal(3)")
+        expect(written).to_contain("expect(name).to_equal(\"ok\")")
+        val _ = file_delete(rewritten_path)
+
+describe "run_single_target single-read contract":
+    """Verifies run_single_target caches spec_source and avoids repeated reads."""
+
+    it "reads run.path once and routes metadata and preprocess through spec_source":
+        """run_single_target has one spec_source read and zero file_read_nullable(run.path) calls."""
+        val full = file_read(TEST_RUNNER_SINGLE_PATH)
+        val idx = full.index_of("fn run_single_target(") ?? -1
+        expect(idx).to_be_greater_than(0)
+        val body = full.substring(idx)
+        expect(body).to_contain("val spec_source = unsafe(capabilities: [ffi]): rt_file_read_text(run.path)")
+        expect(body.contains("file_read_nullable(run.path)")).to_equal(false)
+        expect(body).to_contain("spec_platform_skip_from_source(spec_source")
+        expect(body).to_contain("spec_has_slow_it_from_source(spec_source)")
+        expect(body).to_contain("spec_timeout_secs_from_source(spec_source)")
+        expect(body).to_contain("spec_jit_spec_entry_from_source(spec_source)")
+        expect(body).to_contain("spec_exec_limit_from_source(spec_source)")
+        expect(body).to_contain("file_has_di_test_tag_from_source(spec_source)")
+        expect(body).to_contain("preprocess_infix_from_source(run.path, spec_source)")
+        expect(body).to_contain("spec_source_has_raw_assert(spec_source)")
+        expect(body).to_contain("source_is_in_development(spec_source)")

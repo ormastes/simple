@@ -50,17 +50,67 @@ impl Default for TypeIdAllocator {
     }
 }
 
+/// #6953 fallback for a lowering site that could NOT resolve the owning enum
+/// of `variant` (erased receiver, lost metadata, merged same-named enums).
+///
+/// The answer comes from the process-global name-keyed registry, so it is
+/// registration-order dependent and may disagree with the owner's declared
+/// index that every resolved site uses. That includes `Ok`/`Err`/`Some`/`None`:
+/// user enums declare those names at other indexes (`TraceLevel.None` = 0),
+/// so the builtin 0/1 is an owner answer (`builtin_owner_discriminant`), never
+/// a name-only one. Every variant reaching here is reported once per name
+/// (`warning[enum-discriminant-owner-unresolved]`). With
+/// `SIMPLE_ENUM_OWNER_STRICT=1` the report is fatal.
+pub fn name_only_variant_discriminant(site: &'static str, variant: &str) -> i64 {
+    static REPORTED: std::sync::OnceLock<dashmap::DashSet<String>> = std::sync::OnceLock::new();
+    let reported = REPORTED.get_or_init(dashmap::DashSet::new);
+    if !reported.contains(variant) && reported.insert(variant.to_string()) {
+        eprintln!(
+            "warning[enum-discriminant-owner-unresolved]: variant `{variant}` lowered by name only at {site}; \
+             its discriminant is not tied to its owning enum (see #6953)"
+        );
+        if std::env::var_os("SIMPLE_ENUM_OWNER_STRICT").is_some_and(|v| v == "1") {
+            panic!("SIMPLE_ENUM_OWNER_STRICT=1: unresolved enum owner for variant `{variant}` at {site}");
+        }
+    }
+    simple_runtime::value::hash_variant_discriminant(variant) as i64
+}
+
+/// The fixed ABI discriminant of a builtin `Option`/`Result` variant, when the
+/// owner IS that builtin (`enum_name` is `Option`/`Result`, or its last path
+/// segment is). A user enum's `None`/`Ok` is not answered here.
+pub fn builtin_owner_discriminant(enum_name: &str, variant: &str) -> Option<i64> {
+    let tail = enum_name.rsplit(['.', ':']).next().unwrap_or(enum_name);
+    match (tail, variant) {
+        ("Result", "Ok") | ("Option", "Some") => Some(0),
+        ("Result", "Err") | ("Option", "None") => Some(1),
+        _ => None,
+    }
+}
+
 /// Type registry that maps TypeId to HirType
 #[derive(Debug, Default, Clone)]
 pub struct TypeRegistry {
     types: std::collections::BTreeMap<TypeId, HirType>,
     allocator: TypeIdAllocator,
     name_to_id: HashMap<String, TypeId>,
+    /// TypeIds created from source-level `T?` annotations. Optional values
+    /// share the pointer representation with genuine references, so this
+    /// provenance cannot be recovered from `HirType::Pointer` alone.
+    optional_type_ids: std::collections::HashSet<TypeId>,
     /// Owner-scope overlay for same-named flattened structs/classes: bare
     /// name -> owner-exact registered name, as seen from the function being
     /// lowered. Empty outside HIR lowering of a flattened unit with a
     /// collision. See `hir/lower/module_lowering/flatten_struct_owner.rs`.
     scope_aliases: HashMap<String, String>,
+    /// Enum TypeIds whose variant list is NOT one owner's declaration: a bare
+    /// name declared by several modules, seeded from the merged global enum
+    /// table (`Lowerer::register_global_enums`). Their variant ORDER is the
+    /// union's, so it must never yield a discriminant (#6953).
+    merged_enum_ids: std::collections::HashSet<TypeId>,
+    /// Const generic integer arguments bound on instantiated generic struct TypeIds
+    /// (e.g., `FixedVec<i64, 4>` -> `{"N": 4}`).
+    const_generic_bindings: HashMap<TypeId, HashMap<String, i64>>,
 }
 
 impl TypeRegistry {
@@ -69,7 +119,10 @@ impl TypeRegistry {
             types: std::collections::BTreeMap::new(),
             allocator: TypeIdAllocator::new(),
             name_to_id: HashMap::new(),
+            optional_type_ids: std::collections::HashSet::new(),
             scope_aliases: HashMap::new(),
+            merged_enum_ids: std::collections::HashSet::new(),
+            const_generic_bindings: HashMap::new(),
         };
 
         // Register built-in types
@@ -127,10 +180,54 @@ impl TypeRegistry {
         registry
     }
 
+    /// Feed enum declarations to the runtime's positional discriminant
+    /// registry so variant-name-only sites use the declaration index.
+    fn note_enum_positions(ty: &HirType) {
+        if let HirType::Enum { name, variants, .. } = ty {
+            simple_runtime::value::register_enum_variants(variants.iter().map(|(name, _)| name.as_str()));
+            // Display names for string interpolation of runtime enum values.
+            let enum_id = crate::codegen::shared::enum_runtime_type_id(name);
+            for (index, (variant, fields)) in variants.iter().enumerate() {
+                let arity = fields.as_ref().map_or(0, |f| f.len() as u32);
+                simple_runtime::value::register_enum_display_name(enum_id, index as u32, name, variant, arity);
+            }
+        }
+    }
+
     pub fn register(&mut self, ty: HirType) -> TypeId {
+        Self::note_enum_positions(&ty);
         let id = self.allocator.alloc();
         self.types.insert(id, ty);
         id
+    }
+
+    /// Register the shared-pointer representation used for a source-level
+    /// optional and retain its provenance for guarded payload narrowing.
+    pub fn register_optional(&mut self, inner: TypeId) -> TypeId {
+        let id = self.register(HirType::Pointer {
+            kind: PointerKind::Shared,
+            capability: simple_parser::ast::ReferenceCapability::Shared,
+            inner,
+        });
+        self.optional_type_ids.insert(id);
+        id
+    }
+
+    /// Return the payload type only for a still-valid source Optional ID.
+    /// Aliases keep the same ID; genuine pointers and replaced named types do
+    /// not acquire Optional semantics from their representation.
+    pub fn optional_inner(&self, id: TypeId) -> Option<TypeId> {
+        if !self.optional_type_ids.contains(&id) {
+            return None;
+        }
+        match self.types.get(&id) {
+            Some(HirType::Pointer {
+                kind: PointerKind::Shared,
+                capability: simple_parser::ast::ReferenceCapability::Shared,
+                inner,
+            }) => Some(*inner),
+            _ => None,
+        }
     }
 
     /// Get the allocator for inspection (useful for verification).
@@ -162,12 +259,137 @@ impl TypeRegistry {
             if Self::is_canonical_builtin_name(&name) {
                 return self.register(ty);
             }
+            // The name is an alias onto a builtin (e.g. imported `unit Length: i64`
+            // then a local `struct Length`). Updating in place would rewrite the
+            // builtin itself (TypeId::I64 -> Struct Length{..: i64}), and every
+            // later i64 became a self-referential struct: MIR to_string recursed
+            // until stack overflow building src/app/cli (2026-11-18). Rebind the
+            // name to a fresh id instead.
+            if existing_id.0 <= TypeId::CHAR.0 || existing_id == TypeId::UNKNOWN {
+                let id = self.register(ty);
+                self.name_to_id.insert(name, id);
+                return id;
+            }
             // Update in place - keep the same TypeId
+            self.optional_type_ids.remove(&existing_id);
+            self.merged_enum_ids.remove(&existing_id);
+            Self::note_enum_positions(&ty);
             self.types.insert(existing_id, ty);
             existing_id
         } else {
             // No existing type, register as new
             self.register_named(name, ty)
+        }
+    }
+
+    /// Mark `id` as an enum whose variant list is a merge of several
+    /// same-named declarations (see `merged_enum_ids`).
+    pub fn mark_merged_enum(&mut self, id: TypeId) {
+        self.merged_enum_ids.insert(id);
+    }
+
+    /// #6953: discriminant of `variant` in its OWNING enum -- the enum `ty`
+    /// is (through shared/optional pointers), else the enum registered as
+    /// `enum_name` (or its last path segment). `None` when neither resolves to
+    /// one declaration that declares `variant`; the caller then has no owner
+    /// and must not guess positionally.
+    pub fn owned_variant_discriminant(&self, ty: TypeId, enum_name: Option<&str>, variant: &str) -> Option<i64> {
+        if let Some(index) = self.declared_index_through(ty, variant, 0) {
+            return Some(index);
+        }
+        let name = enum_name.filter(|name| !name.is_empty() && *name != "_")?;
+        let tail = name
+            .rsplit_once("::")
+            .map(|(_, tail)| tail)
+            .unwrap_or(name)
+            .rsplit('.')
+            .next()
+            .unwrap_or(name);
+        [name, tail]
+            .into_iter()
+            .filter_map(|candidate| self.lookup(candidate))
+            .find_map(|id| self.declared_index_through(id, variant, 0))
+            .or_else(|| builtin_owner_discriminant(name, variant))
+    }
+
+    /// Like `owned_variant_discriminant`, then -- for an erased subject and a
+    /// bare `case Variant:` -- the index every enum visible to THIS module
+    /// that declares `variant` agrees on. Visibility is a function of the
+    /// module's own imports, not of process registration order; enums that
+    /// disagree make the answer `None` (ambiguous, never a positional guess).
+    pub fn owned_or_unique_variant_discriminant(&self, ty: TypeId, enum_name: Option<&str>, variant: &str) -> Option<i64> {
+        if let Some(index) = self.owned_variant_discriminant(ty, enum_name, variant) {
+            return Some(index);
+        }
+        // An erased subject (ANY/NIL, no owner) carrying a builtin variant
+        // name is the builtin Option/Result: a user enum that also declares
+        // `Err`/`None` must not hand its index to `r.is_err()` / `case Err` on
+        // an untyped Result (UdpResult.Err=2 made builtin is_err always false).
+        let builtin = match variant {
+            "Ok" | "Err" => builtin_owner_discriminant("Result", variant),
+            "Some" | "None" => builtin_owner_discriminant("Option", variant),
+            _ => None,
+        };
+        if let Some(index) = builtin {
+            self.report_builtin_assumed_over_user_enum(variant, index);
+            return builtin;
+        }
+        let mut agreed: Option<i64> = None;
+        for (id, ty) in &self.types {
+            let HirType::Enum { variants, .. } = ty else {
+                continue;
+            };
+            let Some(index) =
+                simple_runtime::value::declared_variant_discriminant(variants.iter().map(|(name, _)| name.as_str()), variant)
+            else {
+                continue;
+            };
+            if self.merged_enum_ids.contains(id) {
+                return None;
+            }
+            match agreed {
+                Some(prior) if prior != i64::from(index) => return None,
+                _ => agreed = Some(i64::from(index)),
+            }
+        }
+        agreed
+    }
+
+    /// Non-fatal (strict-safe) note when an unresolved builtin variant name is
+    /// lowered as the builtin while a visible user enum declares it elsewhere,
+    /// e.g. a bare `case None:` beside `TraceLevel.None` = 0. Once per variant.
+    fn report_builtin_assumed_over_user_enum(&self, variant: &str, builtin: i64) {
+        static REPORTED: std::sync::OnceLock<dashmap::DashSet<String>> = std::sync::OnceLock::new();
+        let reported = REPORTED.get_or_init(dashmap::DashSet::new);
+        if reported.contains(variant) {
+            return;
+        }
+        let disagreeing = self.types.iter().find_map(|(id, ty)| match ty {
+            HirType::Enum { name, variants, .. } if !self.merged_enum_ids.contains(id) => {
+                simple_runtime::value::declared_variant_discriminant(variants.iter().map(|(n, _)| n.as_str()), variant)
+                    .filter(|&index| i64::from(index) != builtin)
+                    .map(|index| (name.clone(), index))
+            }
+            _ => None,
+        });
+        if let Some((enum_name, index)) = disagreeing {
+            if reported.insert(variant.to_string()) {
+                eprintln!(
+                    "warning[enum-discriminant-builtin-assumed]: variant `{variant}` with no resolvable owner lowered \
+                     as builtin ({builtin}); visible enum `{enum_name}` declares it at {index} (see #6953)"
+                );
+            }
+        }
+    }
+
+    fn declared_index_through(&self, ty: TypeId, variant: &str, depth: u8) -> Option<i64> {
+        match self.types.get(&ty)? {
+            HirType::Enum { variants, .. } if !self.merged_enum_ids.contains(&ty) => {
+                simple_runtime::value::declared_variant_discriminant(variants.iter().map(|(name, _)| name.as_str()), variant)
+                    .map(i64::from)
+            }
+            HirType::Pointer { inner, .. } if depth < 4 => self.declared_index_through(*inner, variant, depth + 1),
+            _ => None,
         }
     }
 
@@ -185,6 +407,11 @@ impl TypeRegistry {
     /// Iterate over all registered types
     pub fn iter(&self) -> impl Iterator<Item = (TypeId, &HirType)> {
         self.types.iter().map(|(id, ty)| (*id, ty))
+    }
+
+    /// Number of registered types (a cheap change detector for caches).
+    pub fn type_count(&self) -> usize {
+        self.types.len()
     }
 
     /// Get the element type of an array type
@@ -211,7 +438,32 @@ impl TypeRegistry {
     ///   `u8`-declared loop-variable slot — corrupting the loop variable
     ///   (see doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md).
     /// - Other types (Range, custom iterators) → None (caller should fallback)
-    pub fn get_iterable_element(&self, id: TypeId) -> Option<TypeId> {
+    pub fn get_iterable_element(&mut self, id: TypeId) -> Option<TypeId> {
+        // Dicts: iterate as (K, V) 2-tuples. This MUST be HirType::Tuple
+        // rather than a 2-element array or the bare value type, to match
+        // the runtime representation the For codegen consumes:
+        // `rt_for_iterable(dict)` -> `rt_dict_entries` (runtime/src/value/
+        // dict.rs) yields an ARRAY whose elements are `rt_tuple_new(2)`
+        // heap TUPLES — one tagged tuple handle per entry, exactly what
+        // the interpreter binds (`Value::Tuple([key, value])`,
+        // interpreter_call/block_execution.rs `get_iterator_values`). The
+        // pure-Simple MIR producer types the same entry as
+        // `Tuple(K, V)` (50.mir/mir_lowering_stmts.spl, dict entries
+        // lane), and the seed codegen stores every non-primitive TypeId —
+        // Tuple included — as ONE pointer-sized word (codegen/
+        // types_util.rs `type_id_to_cranelift`/`type_id_size`), so a
+        // Tuple-typed loop slot holds the tagged tuple handle verbatim
+        // with no aggregate-layout ABI risk. Field/index access on the
+        // entry then resolves through the existing tuple paths (HIR
+        // access.rs tuple index typing; MIR `rt_tuple_get`). Without this
+        // arm the entry lowered as ANY and native HIR hard-failed on any
+        // field access off it (bug:
+        // doc/08_tracking/bug/seed_native_hir_dict_for_loop_entry_any_2026_10_22.md).
+        if let Some(HirType::Dict { key, value }) = self.types.get(&id) {
+            let (key, value) = (*key, *value);
+            let entry = self.register(HirType::Tuple(vec![key, value]));
+            return Some(entry);
+        }
         match self.types.get(&id) {
             // Arrays: element type is T
             Some(HirType::Array { element, .. }) => Some(*element),
@@ -256,6 +508,18 @@ impl TypeRegistry {
     /// Install an owner-scope overlay, returning the previous one.
     pub(crate) fn replace_scope_aliases(&mut self, scope: HashMap<String, String>) -> HashMap<String, String> {
         std::mem::replace(&mut self.scope_aliases, scope)
+    }
+
+    /// Record const-generic integer bindings (`N -> 4`) on an instantiated struct TypeId.
+    pub(crate) fn record_const_generic_bindings(&mut self, ty: TypeId, bindings: HashMap<String, i64>) {
+        if !bindings.is_empty() {
+            self.const_generic_bindings.insert(ty, bindings);
+        }
+    }
+
+    /// Return const-generic integer bindings associated with `ty`, if any.
+    pub(crate) fn const_generic_bindings(&self, ty: TypeId) -> Option<&HashMap<String, i64>> {
+        self.const_generic_bindings.get(&ty)
     }
 
     /// Register a type alias - maps a name to an existing type ID

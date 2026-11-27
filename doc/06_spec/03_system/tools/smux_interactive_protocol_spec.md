@@ -18,7 +18,7 @@ an execution PASS.
 | Foreign ownership rejection | Wrong session/window/pane refused before capture metrics or I/O | TEST_BLOCKED |
 | Independent view selection | Listing, layout and frame on second window leave global focus unchanged | TEST_BLOCKED |
 | Input/history/layout/split refusal | Reject absent child, malformed UTF-8, invalid bounds/direction; retain pane count | TEST_BLOCKED |
-| Reattach preserves layout | `current` retains known named plan, choosing tiled only for initial manual window | TEST_BLOCKED |
+| Reattach preserves layout | `current` retains the named or manual plan; a fresh manual pane remains manual and renders at the requested canvas size | TEST_BLOCKED |
 
 Require positive executed assertion counts from a qualified rebuilt runner and
 regenerate this manual with docgen. Independent terminal processes, console

@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** open / fail-closed
+**Status:** fix-implemented-verification-pending (was: open / fail-closed)
 **Isolated reviewed base:** `a296e5f5a6`
 **Affected rows:** `FR-WM-GLASS-X86-QEMU-0001`,
 `FR-WM-GLASS-ARM-QEMU-0001`
@@ -179,3 +179,12 @@ sh scripts/check/check-simpleos-arm64-qmp-input-evidence.shs
 No bootstrap, Rust seed, stale artifact, direct-kernel shortcut, source-only
 contract, or screenshot alone may close either row.
 
+
+
+## BF-10 Fix & Verification Status (2026-11-26)
+
+- **Code/contract status:** Compositor CSS custom-property/provenance resolution and `Engine2dWmFrameExecutor` nested provenance gates repaired in `src/os/compositor/simple_web_window_renderer.spl` and `src/os/compositor/engine2d_wm_frame_executor.spl`; `baremetal_wm_present_owner` / `backend_render_receipt_producer` fail-closed acceptance gate re-verified on host (`bf10_wm_pin_and_evidence_gates_spec.spl`, `bf10_theme_css_provenance_spec.spl`). Host `posix_spawn`/fdset helper and `scripts/check/` wrapper remain outside BF-10 file ownership.
+- **Host specs verified (`SIMPLE_LIB=src`, `--mode=interpreter`):**
+  - `test/01_unit/os/wm_bf10/bf10_wm_pin_and_evidence_gates_spec.spl`: `4 passed, 0 failed` (`outcome=OK`)
+  - `test/01_unit/os/compositor/backend_render_receipt_producer_spec.spl`: `12 passed, 2 failed` (2 host-pixels FFI digest examples require native runtime).
+- **Pending QEMU / hardware verification:** Run `BUILD_DIR=build/simpleos_wm_fullscreen_evidence SIMPLE_BIN=<admitted> sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs` on x86_64 OVMF and `sh scripts/check/check-simpleos-arm64-qmp-input-evidence.shs` on ARM64 QEMU with signed/frozen manifest and correlated `pmemsave`/RAMFB readback.

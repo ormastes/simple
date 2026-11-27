@@ -1,0 +1,19 @@
+use std.spec.*
+use app.buildrunner.runner.{build_runner_decode_v1, build_runner_host_slots, build_runner_ready}
+use test.support.buildrunner_recovery_capacity.{recovery_capacity_run, recovery_capacity_journal}
+
+describe "BuildRunner uses common recovery capacity validation":
+    it "rejects overbooking through the production build adapter":
+        val run = recovery_capacity_run()
+        val journal = recovery_capacity_journal(run, ["RUNNING", "UNRESOLVED"], ["local", "local"])
+        val decoded = build_runner_decode_v1(run, journal)
+        expect(decoded.is_err()).to_equal(true)
+        expect(decoded.unwrap_err()).to_equal("manager journal reservations exceed host slots: local")
+
+    it "preserves valid occupied slots and leaves pending work undispatched":
+        val run = recovery_capacity_run()
+        val journal = recovery_capacity_journal(run, ["RUNNING", "PENDING"], ["local", ""])
+        val state = build_runner_decode_v1(run, journal).unwrap()
+        expect(build_runner_host_slots(state, "local")).to_equal(0)
+        expect(build_runner_ready(state)).to_equal([])
+        expect(state.statuses).to_equal(["RUNNING", "PENDING"])

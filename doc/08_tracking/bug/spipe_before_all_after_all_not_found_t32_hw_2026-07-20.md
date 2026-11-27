@@ -1,5 +1,5 @@
 # `before_all`/`after_all` unresolved when imported from `std.spipe` (t32_hw specs)
-## Open 2026-09-16 — needs owner triage
+## RESOLVED 2026-11-25 — hooks implemented in `std.spec` and re-exported by the `std.spipe` alias; verified by code inspection (see note at bottom)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -66,3 +66,29 @@ guide — needs a rebuild). This doc is filed for follow-up; do not re-file for
 the same "function `before_all` not found" signature in other t32_hw specs —
 reference this doc instead.
 
+
+## Verification 2026-11-25 (release/1.0.0 HEAD 4bc2c986375, work/p2w5-aa lane)
+
+The root-cause hypothesis in this doc was exactly right, and the fix matching
+it is in tree:
+
+- `src/lib/nogc_sync_mut/spec.spl:1301` defines `pub fn before_all(hook: fn())`
+  (runs the block immediately at its declaration point) and `:1314` defines
+  `pub fn after_all(hook: fn())` (deferred, drained by the enclosing `describe`
+  via `_drain_after_all`, `:1319`). The implementation comment at `:1280-1300`
+  cites this bug doc by name.
+- `src/lib/nogc_sync_mut/spipe.spl:13-16` explicitly imports and re-exports
+  both hooks (`use std.spec.{before_all, after_all}` + `export`), with a
+  comment explaining why a bare `use std.spec` did not re-export them —
+  also citing this bug doc. `src/lib/nogc_async_mut/spipe.spl` and
+  `src/lib/gc_async_mut/spipe.spl` carry the same fix.
+
+So `use std.spipe.{describe, context, it, expect, before_all, after_all}`
+now resolves every name. Live spec execution is environment-blocked on this
+host: the pinned v1.0.0-rc.1 seed rejects the `@representation_boundary`
+decorator at release/1.0.0 HEAD, so `bin/simple.exe test` fails repo-wide at
+semantic analysis before any spec (including the t32_hw specs, which also
+need real T32 hardware) can load. Verification is by code inspection; the
+symbols, the re-export chain, and the hook semantics all exist as described.
+Closing as STALE (fixed in tree; the "Open 2026-09-16" header came from the
+2026-09 tree-transplant normalization, not from a live defect).

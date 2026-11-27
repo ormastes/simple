@@ -20,6 +20,19 @@ Executed on the interpreter test lane; asserts observable values only and makes 
 use std.spec
 use compiler.35.semantics.lint.semantic_api.alias_registry.{alias_registry_clear, alias_registry_resolve}
 use std.spec.step
+use compiler.dependency.macro_import.{
+    SymKind, MacroSymbol, AutoImport, MacroExports, MacroDirManifest,
+    is_auto_imported, auto_imported_macros, glob_import, explicit_import, combine_exports
+}
+
+# Helper to create standard exports
+fn make_exports() -> MacroExports:
+    var exports = MacroExports.new()
+    exports.add_non_macro(MacroSymbol.value_sym("mod", "foo"))
+    exports.add_non_macro(MacroSymbol.value_sym("mod", "bar"))
+    exports.add_macro(MacroSymbol.macro_sym("mod", "my_macro"))
+    exports.add_macro(MacroSymbol.macro_sym("mod", "other_macro"))
+    exports
 
 describe "Compiler alias analysis registry":
     it "resolving an unregistered alias reports nothing":
@@ -34,3 +47,31 @@ describe "Compiler alias analysis registry":
         alias_registry_clear()
         expect(alias_registry_resolve("anything")).to_equal("")  # oracle: after clear no alias remains registered
 
+describe "Lean Theorem 1: glob_doesnt_leak_macros_wf":
+
+    it "macro not in auto-import is excluded from glob":
+        val exports = make_exports()
+        expect exports.is_well_formed()
+
+        var manifest = MacroDirManifest.new("test")
+        manifest.add_auto_import(AutoImport.new("mod", "my_macro"))
+
+        val result = glob_import(manifest, exports)
+
+        # other_macro should NOT be in result
+        var found_other = false
+        for sym in result:
+            val sym_name = sym.get_name()
+            if sym_name == "other_macro":
+                found_other = true
+
+        expect not found_other
+
+        # my_macro SHOULD be in result
+        var found_my = false
+        for sym in result:
+            val sym_name = sym.get_name()
+            if sym_name == "my_macro":
+                found_my = true
+
+        expect found_my

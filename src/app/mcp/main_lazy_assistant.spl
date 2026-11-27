@@ -39,7 +39,7 @@ fn _assistant_notifications_path(session_id: text) -> text:
     ASSIST_NOTIFICATIONS + "/" + session_id + ".jsonl"
 
 fn _assistant_session_exists(session_id: text) -> bool:
-    assistant_store_load_session(ASSIST_ROOT, session_id) != nil
+    assistant_store_load_session(ASSIST_ROOT, session_id).is_some()
 
 fn _assistant_make_session_id(now_ms: i64) -> text:
     "assistant-" + str(now_ms)
@@ -233,7 +233,7 @@ fn _assistant_list_session_ids() -> [text]:
     val files = list_dir(ASSIST_SESSIONS)
     for fname in files:
         if fname.ends_with(".json"):
-            ids.push(fname.slice(0, fname.len() - 5))
+            ids.push(fname.slice(0, fname.byte_len() - 5))
     ids
 
 fn _assistant_session_task_json(session_json: text) -> text:
@@ -449,7 +449,7 @@ fn handle_assistant_start(id: text, body: text) -> text:
         warnings: []
     )
     val created = assistant_store_create_session_record(ASSIST_ROOT, session_obj)
-    if created == nil:
+    if created.is_none():
         return make_tool_error(id, -32603, "Failed to create assistant session")
     val event_obj = AssistantTimelineRecord(
         event_id: "",
@@ -470,7 +470,7 @@ fn handle_assistant_start(id: text, body: text) -> text:
     match assistant_store_load_session(ASSIST_ROOT, session_id):
         case Some(session):
             return make_tool_result(id, _assistant_session_detail_json(session))
-        case nil:
+        case None:
             return make_tool_error(id, -32603, "Failed to record assistant start event")
 
 fn handle_assistant_spawn_task(id: text, body: text) -> text:
@@ -521,7 +521,7 @@ fn handle_assistant_spawn_task(id: text, body: text) -> text:
         warnings: []
     )
     val created = assistant_store_create_session_record(ASSIST_ROOT, session_obj)
-    if created == nil:
+    if created.is_none():
         return make_tool_error(id, -32603, "Failed to create assistant child session")
     val event_obj = AssistantTimelineRecord(
         event_id: "",
@@ -539,7 +539,7 @@ fn handle_assistant_spawn_task(id: text, body: text) -> text:
         correlation_id: ""
     )
     val appended = assistant_store_append_event_record(ASSIST_ROOT, event_obj)
-    if appended == nil:
+    if appended.is_none():
         return make_tool_error(id, -32603, "Failed to append spawn event: " + session_id)
     if parent_session_id != "":
         val child_task_obj = AssistantChildTaskRecord(
@@ -558,12 +558,12 @@ fn handle_assistant_spawn_task(id: text, body: text) -> text:
             started_at_ms: now,
             ended_at_ms: 0
         )
-        if assistant_store_create_child_task_record(ASSIST_ROOT, child_task_obj) == nil:
+        if assistant_store_create_child_task_record(ASSIST_ROOT, child_task_obj).is_none():
             return make_tool_error(id, -32603, "Failed to record parent child-task state")
     match assistant_store_load_session(ASSIST_ROOT, session_id):
         case Some(session):
             return make_tool_result(id, _assistant_session_detail_json(session))
-        case nil:
+        case None:
             return make_tool_error(id, -32603, "Failed to record assistant spawn event")
 
 fn handle_assistant_pause(id: text, body: text) -> text:
@@ -573,7 +573,7 @@ fn handle_assistant_pause(id: text, body: text) -> text:
     if not _assistant_session_exists(session_id):
         return make_tool_error(id, -32602, "Session not found: " + session_id)
     val updated = assistant_store_update_state(ASSIST_ROOT, session_id, "paused", "pause")
-    if updated == nil:
+    if updated.is_none():
         return make_tool_error(id, -32603, "Failed to pause session: " + session_id)
     val event_obj = AssistantTimelineRecord(
         event_id: "",
@@ -594,7 +594,7 @@ fn handle_assistant_pause(id: text, body: text) -> text:
     match assistant_store_load_session(ASSIST_ROOT, session_id):
         case Some(session):
             return make_tool_result(id, _assistant_session_detail_json(session))
-        case nil:
+        case None:
             return make_tool_error(id, -32603, "Failed to record assistant pause event")
 
 fn handle_assistant_resume(id: text, body: text) -> text:
@@ -604,7 +604,7 @@ fn handle_assistant_resume(id: text, body: text) -> text:
     if not _assistant_session_exists(session_id):
         return make_tool_error(id, -32602, "Session not found: " + session_id)
     val updated = assistant_store_update_state(ASSIST_ROOT, session_id, "running", "resume")
-    if updated == nil:
+    if updated.is_none():
         return make_tool_error(id, -32603, "Failed to resume session: " + session_id)
     val event_obj = AssistantTimelineRecord(
         event_id: "",
@@ -625,7 +625,7 @@ fn handle_assistant_resume(id: text, body: text) -> text:
     match assistant_store_load_session(ASSIST_ROOT, session_id):
         case Some(session):
             return make_tool_result(id, _assistant_session_detail_json(session))
-        case nil:
+        case None:
             return make_tool_error(id, -32603, "Failed to record assistant resume event")
 
 fn handle_assistant_brief(id: text, body: text) -> text:
@@ -653,7 +653,7 @@ fn handle_assistant_get_session(id: text, body: text) -> text:
     match assistant_store_load_session(ASSIST_ROOT, session_id):
         case Some(session):
             return make_tool_result(id, _assistant_session_detail_json(session))
-        case nil:
+        case None:
             return make_tool_error(id, -32602, "Session not found: " + session_id)
 
 fn handle_assistant_get_timeline(id: text, body: text) -> text:
@@ -696,13 +696,13 @@ fn handle_assistant_push_signal(id: text, body: text) -> text:
         correlation_id: ""
     )
     val appended = assistant_store_append_event_record(ASSIST_ROOT, event_obj)
-    if appended == nil:
+    if appended.is_none():
         return make_tool_error(id, -32603, "Failed to append signal event: " + signal)
     val current_state = match assistant_store_load_session(ASSIST_ROOT, session_id):
         case Some(session): session.state
-        case nil: ""
+        case None: ""
     val updated = assistant_store_update_state(ASSIST_ROOT, session_id, current_state, signal)
-    if updated == nil:
+    if updated.is_none():
         return make_tool_error(id, -32603, "Failed to record signal: " + signal)
     make_tool_result(id, jo4(jp("session_id", js(session_id)), jp("signal", js(signal)), jp("message", js(message)), jp("status", js("ok"))))
 
@@ -729,7 +729,7 @@ fn handle_assistant_list_tasks(id: text, body: text) -> text:
                             task.created_at_ms,
                             task.updated_at_ms
                         ))
-                case nil:
+                case None:
                     pass
         else:
             for session in assistant_store_list_sessions(ASSIST_ROOT):

@@ -1,0 +1,159 @@
+# @req REQ-AARCH64-FLOAT-REJECT-002
+# Executable evidence for native_aarch64_scalar_float_silent_integer_lowering_2026_11_03:
+# representative scalar float operations (add/sub/mul/div and float constant
+# materialization, including constants carried as binop operands) must be
+# rejected with an explicit diagnostic by the direct AArch64 backend's
+# pre-lowering scan, while the same integer operations keep lowering.
+use std.spec.*
+use std.spec.step
+
+use compiler.mir.mir_data.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.backend.native.isel_aarch64.{isel_module_aarch64, a64_module_float_rejections}
+
+val I64_T = MirType(kind: MirTypeKind.I64)
+val F64_T = MirType(kind: MirTypeKind.F64)
+
+fn ret_local() -> MirLocal:
+    MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: I64_T, kind: LocalKind.Return)
+
+fn ret_local_f64() -> MirLocal:
+    MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: F64_T, kind: LocalKind.Return)
+
+fn mir_function(name: text, sig: MirSignature, locals: [MirLocal], insts: [MirInst]) -> MirFunction:
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: insts,
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
+    )
+    MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: sig,
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+
+fn wrap_module(func: MirFunction) -> MirModule:
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: func.name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn int_binop_module(name: text, op: MirBinOp) -> MirModule:
+    val sig = MirSignature(params: [], return_type: I64_T, is_variadic: false)
+    val a = MirLocal(id: LocalId(id: 1), name: Some("a"), type_: I64_T, kind: LocalKind.Temp)
+    val b = MirLocal(id: LocalId(id: 2), name: Some("b"), type_: I64_T, kind: LocalKind.Temp)
+    val insts = [
+        MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(6), I64_T), span: nil),
+        MirInst(kind: MirInstKind.Const(LocalId(id: 2), MirConstValue.Int(3), I64_T), span: nil),
+        MirInst(kind: MirInstKind.BinOp(
+            LocalId(id: 0), op,
+            MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+            MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil)
+    ]
+    wrap_module(mir_function(name, sig, [ret_local(), a, b], insts))
+
+fn float_binop_module(name: text, op: MirBinOp) -> MirModule:
+    # Representative float op: F64-typed locals feeding an integer-path binop.
+    val sig = MirSignature(params: [], return_type: F64_T, is_variadic: false)
+    val a = MirLocal(id: LocalId(id: 1), name: Some("a"), type_: F64_T, kind: LocalKind.Temp)
+    val b = MirLocal(id: LocalId(id: 2), name: Some("b"), type_: F64_T, kind: LocalKind.Temp)
+    val insts = [
+        MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Float(1.5), F64_T), span: nil),
+        MirInst(kind: MirInstKind.Const(LocalId(id: 2), MirConstValue.Float(2.5), F64_T), span: nil),
+        MirInst(kind: MirInstKind.BinOp(
+            LocalId(id: 0), op,
+            MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+            MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil)
+    ]
+    wrap_module(mir_function(name, sig, [ret_local_f64(), a, b], insts))
+
+fn float_operand_const_module(name: text, op: MirBinOp) -> MirModule:
+    # Float constant carried as a binop operand (not as a standalone Const
+    # instruction): all locals stay integer so only the operand scan rejects.
+    val sig = MirSignature(params: [], return_type: I64_T, is_variadic: false)
+    val a = MirLocal(id: LocalId(id: 1), name: Some("a"), type_: I64_T, kind: LocalKind.Temp)
+    val insts = [
+        MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(3), I64_T), span: nil),
+        MirInst(kind: MirInstKind.BinOp(
+            LocalId(id: 0), op,
+            MirOperand(kind: MirOperandKind.Const(MirConstValue.Float(1.5), F64_T)),
+            MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))), span: nil)
+    ]
+    wrap_module(mir_function(name, sig, [ret_local(), a], insts))
+
+fn float_const_module() -> MirModule:
+    # Float constant materialization into a local (MOVZ #0 before the fix).
+    val sig = MirSignature(params: [], return_type: I64_T, is_variadic: false)
+    val insts = [
+        MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Float(1.5), F64_T), span: nil)
+    ]
+    wrap_module(mir_function("float_const", sig, [ret_local()], insts))
+
+describe "AArch64 direct backend float op rejection":
+    it "keeps integer add/sub/mul/div lowering without rejections":
+        step("integer ops accepted")
+        for op in [MirBinOp.Add, MirBinOp.Sub, MirBinOp.Mul, MirBinOp.Div]:
+            val module = int_binop_module("int_op", op)
+            expect(a64_module_float_rejections(module).len()).to_equal(0)
+            val mach = isel_module_aarch64(module)
+            expect(mach.functions.len()).to_equal(1)
+
+    it "rejects float add with a diagnostic naming the function":
+        step("float add rejection")
+        val rejections = a64_module_float_rejections(float_binop_module("float_add", MirBinOp.Add))
+        expect(rejections.len()).to_be_greater_than(0)
+        expect(rejections[0]).to_contain("float_add")
+        expect(rejections[0]).to_contain("floating-point")
+
+    it "rejects float sub with a diagnostic naming the function":
+        step("float sub rejection")
+        val rejections = a64_module_float_rejections(float_binop_module("float_sub", MirBinOp.Sub))
+        expect(rejections.len()).to_be_greater_than(0)
+        expect(rejections[0]).to_contain("float_sub")
+        expect(rejections[0]).to_contain("floating-point")
+
+    it "rejects float mul with a diagnostic naming the function":
+        step("float mul rejection")
+        val rejections = a64_module_float_rejections(float_binop_module("float_mul", MirBinOp.Mul))
+        expect(rejections.len()).to_be_greater_than(0)
+        expect(rejections[0]).to_contain("float_mul")
+        expect(rejections[0]).to_contain("floating-point")
+
+    it "rejects float div with a diagnostic naming the function":
+        step("float div rejection")
+        val rejections = a64_module_float_rejections(float_binop_module("float_div", MirBinOp.Div))
+        expect(rejections.len()).to_be_greater_than(0)
+        expect(rejections[0]).to_contain("float_div")
+        expect(rejections[0]).to_contain("floating-point")
+
+    it "rejects a float constant carried as an add operand, naming the operation":
+        step("operand-carried float const add rejection")
+        val rejections = a64_module_float_rejections(float_operand_const_module("float_op_add", MirBinOp.Add))
+        expect(rejections.len()).to_equal(1)
+        expect(rejections[0]).to_contain("float_op_add")
+        expect(rejections[0]).to_contain("Add")
+        expect(rejections[0]).to_contain("floating-point constant operand")
+
+    it "rejects a float constant carried as a div operand, naming the operation":
+        step("operand-carried float const div rejection")
+        val rejections = a64_module_float_rejections(float_operand_const_module("float_op_div", MirBinOp.Div))
+        expect(rejections.len()).to_equal(1)
+        expect(rejections[0]).to_contain("float_op_div")
+        expect(rejections[0]).to_contain("Div")
+        expect(rejections[0]).to_contain("floating-point constant operand")
+
+    it "rejects float constant materialization with a diagnostic":
+        step("float const materialization rejection")
+        val rejections = a64_module_float_rejections(float_const_module())
+        expect(rejections.len()).to_equal(1)
+        expect(rejections[0]).to_contain("float_const")
+        expect(rejections[0]).to_contain("floating-point constant")

@@ -7,3 +7,37 @@ Actual native_noop_admission failure canonical-batch81/unit2 reports native issu
 The optional-array pattern binding must retain the array and element types. Negative scalar iterator diagnostics remain required. Related nested array iteration failures are not assumed to have the same exact lowering owner.
 
 Compatibility workaround: explicitly type the bound entries/dependencies/outputs arrays as [SdnValue] inside their existing present branches, preserving missing/wrong-type behavior, order and all cache identity checks. No cast or Any. Removal condition: a rebuilt pure-Simple producer compiles and runs the equivalent unannotated if-val iteration and actual BuildCache.load/native_noop entry without issue143; remove annotation workarounds and rerun real cache load caller checks.
+
+## Workaround pinned only (n88_b, 2026-11-04) - real fix still open
+
+Source repair/workaround is pinned by `bin/simple.exe test test/01_unit/compiler/80.driver/n88b_native_workaround_shapes_spec.spl` (8/8 pass on the seed).
+Native repro fixture: `test/fixtures/compiler/n88b_native_producer_idioms_native.spl` (+ `.expected`); covers the BINDER_ line.
+
+Stage3 repro (expected: no diff output, exit 0; then remove the matching `@workaround` tags):
+
+```
+bin/simple native-build --entry test/fixtures/compiler/n88b_native_producer_idioms_native.spl -o build/n88b_idioms.exe && build/n88b_idioms.exe | diff - test/fixtures/compiler/n88b_native_producer_idioms_native.spl.expected
+```
+
+## Fixed in source (bd2af2006a0) - native evidence 2026-11-09
+`lower_for_iterator` peels `Optional(Array|Slice)` for the binder (#143,
+`fix(mir): for-in iterates Optional-array payload binders`, bd2af2006a0; spec
+`test/01_unit/compiler/50.mir/for_in_optional_array_payload_binder_spec.spl`).
+Native repro on the self-hosted stage2 `C:/dev/p3new/stage2new/stage2_new4.exe`
+(native-build of the fixture's `sum_binder`/`opt_array` idiom, unannotated
+`if val arr = a: for x in arr:`) prints `BINDER_6_0` (expected `BINDER_6_0`).
+Status fix-implemented-verification-pending; the `@workaround` annotation in
+incremental.spl is removed after a stage3 producer rebuild re-runs BuildCache.load.
+
+## 2026-11-10 P2 triage (lane p2-compiler-triage-20261110)
+
+VERDICT: SUPERSEDED on source. Root fix present: mir_lowering_stmts.spl:4870-4878
+Optional(Array|Slice) peel in lower_for_iterator (#143 comment), commit
+bd2af2006a0, ancestor of release/1.0.0 d7a430cc2baf. Qualified on the deployed
+seed (interpreter): for_in_optional_array_payload_binder_spec.spl 1/1;
+workaround pin n88b_native_workaround_shapes_spec.spl 8/8. Native BINDER_6_0
+already recorded on self-hosted stage2_new4 in this document. @workaround tag
+at incremental.spl:1412 intentionally retained until a stage3 rebuilt producer
+reruns BuildCache.load/native_noop with the original unannotated caller
+(command shared with native_method_result_overwrites_receiver_slot row in
+build/review/p2fix-compiler-20261110.sdn). Cycles: 1.

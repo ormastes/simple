@@ -1,0 +1,33 @@
+# @req REQ-TEST-DB-REPORT-001
+use std.database.test_extended.{create_test_database_extended, TestSourceRevision, test_source_revision_of}
+
+val SHA1 = "0123456789abcdef0123456789abcdef01234567"
+val SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+fn _value_of(revision: TestSourceRevision?) -> text:
+    match revision:
+        case Some(found): found.value
+        case None: "<none>"
+
+describe "test run source revision":
+    it "accepts a clean tree with a well-formed SHA-1 or SHA-256 head":
+        expect(_value_of(test_source_revision_of(Some(SHA1 + "\n"), Some("")))).to_equal(SHA1)
+        expect(_value_of(test_source_revision_of(Some(SHA256), Some("  \n")))).to_equal(SHA256)
+
+    it "records no revision when the tracked tree has local modifications":
+        expect(_value_of(test_source_revision_of(Some(SHA1), Some(" M src/a.spl\n")))).to_equal("<none>")
+
+    it "records no revision when git failed or the head is malformed":
+        expect(_value_of(test_source_revision_of(None, Some("")))).to_equal("<none>")
+        expect(_value_of(test_source_revision_of(Some(SHA1), None))).to_equal("<none>")
+        expect(_value_of(test_source_revision_of(Some("not-a-commit"), Some("")))).to_equal("<none>")
+        expect(_value_of(test_source_revision_of(Some("0123456789ABCDEF0123456789abcdef01234567"), Some("")))).to_equal("<none>")
+
+    it "stores the revision on the run row and reads it back":
+        var db = create_test_database_extended("/tmp/test_run_source_revision_spec.sdn")
+        val with_source = db.start_run(Some(TestSourceRevision(value: SHA1)))
+        expect(_value_of(db.run_source_revision(with_source))).to_equal(SHA1)
+        var other = create_test_database_extended("/tmp/test_run_source_revision_none_spec.sdn")
+        val without_source = other.start_run()
+        expect(_value_of(other.run_source_revision(without_source))).to_equal("<none>")
+        expect(_value_of(db.run_source_revision("run_unknown"))).to_equal("<none>")

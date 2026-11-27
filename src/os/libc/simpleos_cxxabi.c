@@ -221,12 +221,17 @@ unsigned long __stack_chk_guard = 0;
 
 static unsigned long simpleos_fallback_stack_seed(void) {
     unsigned long seed = (unsigned long)&__stack_chk_guard;
+    /* Preserve the historical 64-bit mixer; a 33-bit shift is undefined
+     * for the 32-bit unsigned long used by all ELF32 SimpleOS targets.
+     * Keep the entropy provider and exported guard at their native ABI width.
+     * Pure-Simple twin: simpleos_cxxabi_mix_stack_seed in simpleos_cxxabi.spl. */
+    const unsigned int shift = sizeof(unsigned long) > 4 ? 33 : 16;
     seed ^= (unsigned long)&__libc_init_array;
     seed ^= (unsigned long)&simpleos_fallback_stack_seed;
     seed ^= 0x9E3779B9UL;
-    seed ^= seed >> 33;
+    seed ^= seed >> shift;
     seed *= 0x85EBCA6BUL;
-    seed ^= seed >> 33;
+    seed ^= seed >> shift;
     return seed ? seed : 0xA5A55A5AUL;
 }
 

@@ -1,0 +1,162 @@
+# A bounded semantic read-set check, never a full artifact admission receipt.
+# The caller chooses a trusted concrete provider; request data cannot supply one.
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.scv.snapshot_v2.{ScvSnapshotV2, scv_snapshot_valid_v2, scv_snapshot_file_index_v2}
+use std.scv.source_witness_v1.{ScvSourceWitnessV1, VerificationReceiptV1, scv_verify_source_witnesses_v1}
+use compiler.common.cache_contract.physical_tld_v1.{three_payload_contract_digest_valid_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1, SemanticQueryReadManifestV1,
+    semantic_query_read_manifest_valid_v1, semantic_query_read_manifest_encode_v1,
+    semantic_query_kind_known_v1}
+
+pub enum ScvSemanticValidationStatusV1:
+    Verified
+    Changed
+    Unavailable
+
+pub struct ScvSemanticValidationRequestV1:
+    requested_snapshot: ScvSnapshotV2
+    source_witnesses: [ScvSourceWitnessV1]
+    source_receipt: VerificationReceiptV1
+    source_path: text
+    source_content_digest: text
+    action_digest: text
+    recorded_manifest: SemanticQueryReadManifestV1
+    recorded_manifest_digest: text
+    semantic_generation_digest: text
+    semantic_profile_digest: text
+    max_reads: i64
+    max_bytes: i64
+
+pub struct ScvSemanticValidationResultV1:
+    status: ScvSemanticValidationStatusV1
+    reason: text
+    requested_snapshot_id: text
+    action_digest: text
+    recorded_manifest_digest: text
+    semantic_generation_digest: text
+    semantic_profile_digest: text
+    checked_reads: i64
+    full_artifact_authorized: bool
+
+pub trait ScvSemanticValidationProviderV1:
+    me validate_recorded_reads(request: ScvSemanticValidationRequestV1) -> ScvSemanticValidationResultV1
+
+pub fn scv_semantic_outcome_v1(request: ScvSemanticValidationRequestV1,
+        status: ScvSemanticValidationStatusV1, reason: text, checked_reads: i64) -> ScvSemanticValidationResultV1:
+    ScvSemanticValidationResultV1(status: status, reason: reason,
+        requested_snapshot_id: request.requested_snapshot.snapshot_id,
+        action_digest: request.action_digest,
+        recorded_manifest_digest: request.recorded_manifest_digest,
+        semantic_generation_digest: request.semantic_generation_digest,
+        semantic_profile_digest: request.semantic_profile_digest,
+        checked_reads: checked_reads, full_artifact_authorized: false)
+
+fn _scv_semantic_take_v1(remaining: i64, count: i64) -> i64:
+    if remaining < 0 or count < 0 or count > remaining: return -1
+    remaining - count
+
+fn _scv_semantic_texts_v1(remaining: i64, values: [text]) -> i64:
+    var current = remaining
+    for value in values:
+        if value.len() > 4096: return -1
+        current = _scv_semantic_take_v1(current, 64)
+        current = _scv_semantic_take_v1(current, value.len())
+        if current < 0: return -1
+    current
+
+# Account all caller-controlled bytes before snapshot validation, UTF conversion,
+# canonical manifest encoding or SHA. No arithmetic adds unbounded input lengths.
+pub fn scv_semantic_request_remaining_bytes_v1(request: ScvSemanticValidationRequestV1) -> i64:
+    if (request.max_reads <= 0 or request.max_reads > 4096 or
+            request.max_bytes <= 0 or request.max_bytes > 16777216): return -1
+    val snapshot = request.requested_snapshot
+    if (snapshot.files.len() > 4096 or snapshot.complete_scopes.len() > 4096 or
+            snapshot.unsupported_inputs.len() > 4096 or
+            request.source_witnesses.len() > request.max_reads or
+            request.source_receipt.unsupported_inputs.len() > 4096 or
+            request.recorded_manifest.ordered_reads.len() > request.max_reads): return -1
+    var remaining = _scv_semantic_texts_v1(request.max_bytes,
+        [snapshot.snapshot_id, snapshot.namespace, snapshot.path_policy,
+         request.source_path, request.source_content_digest, request.action_digest,
+         request.recorded_manifest_digest, request.semantic_generation_digest,
+         request.semantic_profile_digest, request.source_receipt.requested_snapshot_id,
+         request.source_receipt.action_digest, request.source_receipt.source_witness_digest,
+         request.source_receipt.verifier, request.source_receipt.receipt_id])
+    remaining = _scv_semantic_texts_v1(remaining, snapshot.complete_scopes)
+    remaining = _scv_semantic_texts_v1(remaining, snapshot.unsupported_inputs)
+    remaining = _scv_semantic_texts_v1(remaining, request.source_receipt.unsupported_inputs)
+    for file in snapshot.files:
+        remaining = _scv_semantic_texts_v1(remaining, [file.path, file.kind, file.mode, file.content_id])
+        remaining = _scv_semantic_take_v1(remaining, file.bytes.len())
+        if remaining < 0: return -1
+    for witness in request.source_witnesses:
+        remaining = _scv_semantic_texts_v1(remaining,
+            [witness.snapshot_id, witness.namespace, witness.path_policy,
+             witness.query_kind, witness.path, witness.observation_digest, witness.coverage])
+        if remaining < 0: return -1
+    val consumer = request.recorded_manifest.consumer
+    remaining = _scv_semantic_texts_v1(remaining,
+        [consumer.kind, consumer.stable_entity_id, consumer.semantic_profile_digest, consumer.parameter_digest])
+    for read in request.recorded_manifest.ordered_reads:
+        remaining = _scv_semantic_texts_v1(remaining,
+            [read.producer.kind, read.producer.stable_entity_id,
+             read.producer.semantic_profile_digest, read.producer.parameter_digest,
+             read.consumer.kind, read.consumer.stable_entity_id,
+             read.consumer.semantic_profile_digest, read.consumer.parameter_digest,
+             read.facet, read.consumed_fingerprint, read.witness_digest, read.partition_id])
+        if remaining < 0: return -1
+    remaining
+
+pub fn scv_semantic_request_bounded_v1(request: ScvSemanticValidationRequestV1) -> bool:
+    scv_semantic_request_remaining_bytes_v1(request) >= 0
+
+# Returns a miss reason, never infers semantic completeness from source facts.
+pub fn scv_semantic_request_reason_v1(request: ScvSemanticValidationRequestV1) -> text:
+    if not scv_semantic_request_bounded_v1(request): return "semantic-request-bounds"
+    if not scv_snapshot_valid_v2(request.requested_snapshot): return "source-snapshot-invalid"
+    if request.requested_snapshot.source_coverage != "complete": return "source-coverage-incomplete"
+    if request.requested_snapshot.unsupported_inputs.len() > 0: return "source-inputs-unsupported"
+    for digest in [request.action_digest, request.source_content_digest,
+            request.recorded_manifest_digest, request.semantic_generation_digest, request.semantic_profile_digest]:
+        if not three_payload_contract_digest_valid_v1(digest): return "semantic-subject-invalid"
+    val observed = scv_verify_source_witnesses_v1(request.requested_snapshot,
+        request.action_digest, request.source_witnesses)
+    if observed.is_err(): return "source-witness-changed-or-unavailable"
+    val receipt = observed.unwrap()
+    val supplied = request.source_receipt
+    if (supplied.schema != receipt.schema or supplied.requested_snapshot_id != receipt.requested_snapshot_id or
+            supplied.action_digest != receipt.action_digest or supplied.source_witness_digest != receipt.source_witness_digest or
+            supplied.verifier != receipt.verifier or supplied.receipt_id != receipt.receipt_id or
+            not supplied.source_only or supplied.unsupported_inputs.len() > 0): return "source-receipt-mismatch"
+    val source_index = scv_snapshot_file_index_v2(request.requested_snapshot, request.source_path)
+    if source_index < 0: return "semantic-source-path-unavailable"
+    val file = request.requested_snapshot.files[source_index]
+    if file.kind != "regular" or sha256_u8_hex(file.bytes) != request.source_content_digest: return "semantic-source-bytes-mismatch"
+    val manifest = request.recorded_manifest
+    if not semantic_query_read_manifest_valid_v1(manifest): return "semantic-manifest-invalid"
+    if manifest.ordered_reads.len() == 0: return "semantic-empty-read-coverage-unproven"
+    if manifest.consumer.semantic_profile_digest != request.semantic_profile_digest: return "semantic-profile-mismatch"
+    for read in manifest.ordered_reads:
+        if read.completeness != SemanticCoverageV1.Complete: return "semantic-read-coverage-incomplete"
+        if not semantic_query_kind_known_v1(read.producer.kind) or not semantic_query_kind_known_v1(read.consumer.kind): return "semantic-read-kind-unsupported"
+        if read.producer.semantic_profile_digest != request.semantic_profile_digest: return "semantic-producer-profile-unsupported"
+    if sha256_u8_hex(semantic_query_read_manifest_encode_v1(manifest)) != request.recorded_manifest_digest: return "semantic-manifest-digest-mismatch"
+    ""
+
+pub fn scv_semantic_validation_v1<P: ScvSemanticValidationProviderV1>(
+        request: ScvSemanticValidationRequestV1, provider: P) -> ScvSemanticValidationResultV1:
+    val reason = scv_semantic_request_reason_v1(request)
+    if reason != "": return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, reason, 0)
+    val result = provider.validate_recorded_reads(request)
+    if (result.requested_snapshot_id != request.requested_snapshot.snapshot_id or
+            result.action_digest != request.action_digest or
+            result.recorded_manifest_digest != request.recorded_manifest_digest or
+            result.semantic_generation_digest != request.semantic_generation_digest or
+            result.semantic_profile_digest != request.semantic_profile_digest or
+            result.full_artifact_authorized or result.checked_reads < 0 or
+            result.checked_reads > request.recorded_manifest.ordered_reads.len()):
+        return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-provider-subject-mismatch", 0)
+    if result.status == ScvSemanticValidationStatusV1.Verified and result.checked_reads != request.recorded_manifest.ordered_reads.len():
+        return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-provider-coverage-incomplete", 0)
+    result

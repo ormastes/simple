@@ -1,0 +1,317 @@
+#!/bin/sh
+# check-bootstrap-path-matrix-unix.shs
+#
+# Forward-compatible superset `--path-check` verification harness for Unix
+# bootstrap targets (Linux, macOS/Darwin, FreeBSD) and bootstrap-from-scratch.sh.
+#
+# Rules:
+#   - Never asserts exact line counts or full-stdout equality.
+#   - Validates every `PATH_ACTION|...` line for schema completeness and
+#     `status=ALIVE` (0 `DEAD` or `ERROR` rows).
+#   - Asserts `RequiredSteps` subset / phase-milestone inclusion so newly added
+#     future steps (e.g., `p3c`, `p4-pgo`, `p5-sign`) remain valid.
+#   - Prepends a poisoned heavy-tool PATH shim (`cargo`, `rustc`, `clang`,
+#     `clang++`, `clang-cl`, `lld`, `ld.lld`, `lld-link`, `llvm-ar` -> exit 99)
+#     proving `--path-check` never invokes real compilation.
+#
+# Verdict (last stdout line):
+#   PASS — unix bootstrap path-alive matrix verified (<n> checks)    exit 0
+#   FAIL — unix bootstrap path-alive matrix failed (<k>/<n> failed)  exit 1
+#   ERROR — nothing was checked (<reason>)                           exit 2
+
+set -u
+
+ROOT_DIR=""
+FAST_MODE=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --fast) FAST_MODE=1; shift ;;
+    --root)
+      [ "$#" -ge 2 ] || { echo "ERROR — nothing was checked (--root requires a directory)"; exit 2; }
+      ROOT_DIR=$2; shift 2 ;;
+    --root=*) ROOT_DIR=${1#*=}; shift ;;
+    --help|-h)
+      echo "usage: sh scripts/check/check-bootstrap-path-matrix-unix.shs [--fast] [--root DIR]"
+      exit 0 ;;
+    *)
+      echo "ERROR — nothing was checked (unknown option '$1')"
+      exit 2 ;;
+  esac
+done
+
+if [ -z "$ROOT_DIR" ]; then
+  ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." 2>/dev/null && pwd -P) || {
+    echo "ERROR — nothing was checked (cannot resolve repo root)"
+    exit 2
+  }
+fi
+
+TARGET_SCRIPT="$ROOT_DIR/scripts/bootstrap/build-phase3-phase4.sh"
+if [ ! -f "$TARGET_SCRIPT" ]; then
+  echo "ERROR — nothing was checked (missing $TARGET_SCRIPT)"
+  exit 2
+fi
+
+WORK_DIR=$(mktemp -d) || {
+  echo "ERROR — nothing was checked (mktemp failed)"
+  exit 2
+}
+trap 'rm -rf "$WORK_DIR"' EXIT INT TERM
+
+POISON_BIN="$WORK_DIR/poison-bin"
+mkdir -p "$POISON_BIN"
+for _tool in cargo rustc clang clang++ clang-cl lld ld.lld lld-link llvm-ar; do
+  cat > "$POISON_BIN/$_tool" <<'EOF_SHIM'
+#!/bin/sh
+echo "FATAL: heavy tool invoked during --path-check ($0 $*)" >&2
+exit 99
+EOF_SHIM
+  chmod +x "$POISON_BIN/$_tool"
+done
+
+ORIG_PATH="$PATH"
+PATH="$POISON_BIN:$ORIG_PATH"
+export PATH
+
+validate_path_actions() {
+  _out_file=$1
+  _exp_plat=$2
+  _exp_cpu=$3
+  _exp_cmode=$4
+  _req_p4_xr=$5
+  _req_steps=$6
+  _forbid_steps=$7
+
+  awk \
+    -v exp_plat="$_exp_plat" \
+    -v exp_cpu="$_exp_cpu" \
+    -v exp_cmode="$_exp_cmode" \
+    -v req_p4_xr="$_req_p4_xr" \
+    -v req_steps="$_req_steps" \
+    -v forbid_steps="$_forbid_steps" '
+    BEGIN {
+      n_req = split(req_steps, req_arr, " ")
+      n_forbid = split(forbid_steps, forbid_arr, " ")
+      pa_count = 0
+      bad = 0
+      p4_xray = 0
+      p4_rel = 0
+      first_p3a = 0
+      first_p3b = 0
+      first_p4 = 0
+    }
+    {
+      sub(/\r$/, "", $0)
+      if (index($0, "FATAL: heavy tool invoked during --path-check") > 0) {
+        printf "  heavy tool shim triggered: %s\n", $0
+        bad++
+      }
+      if (substr($0, 1, 12) != "PATH_ACTION|") next
+      pa_count++
+      delete kv
+      n_fields = split($0, fields, "|")
+      for (i = 2; i <= n_fields; i++) {
+        eq = index(fields[i], "=")
+        if (eq > 1) {
+          k = substr(fields[i], 1, eq - 1)
+          v = substr(fields[i], eq + 1)
+          kv[k] = v
+        }
+      }
+      if (kv["script"] == "" || kv["platform"] == "" || kv["cpu"] == "" || kv["phase"] == "" || kv["step"] == "") {
+        printf "  malformed PATH_ACTION schema on line %d: %s\n", NR, $0
+        bad++
+        next
+      }
+      if (kv["status"] == "DEAD" || kv["status"] == "ERROR" || kv["status"] != "ALIVE") {
+        printf "  non-ALIVE PATH_ACTION status (%s) on line %d: %s\n", kv["status"], NR, $0
+        bad++
+      }
+      if (exp_plat != "" && kv["platform"] != exp_plat) {
+        printf "  platform mismatch (expected %s, got %s): %s\n", exp_plat, kv["platform"], $0
+        bad++
+      }
+      if (exp_cpu != "" && kv["cpu"] != exp_cpu) {
+        printf "  cpu mismatch (expected %s, got %s): %s\n", exp_cpu, kv["cpu"], $0
+        bad++
+      }
+      ps = kv["phase"] ":" kv["step"]
+      seen_ps[ps] = 1
+      seen_step[kv["step"]] = 1
+
+      if (kv["phase"] == "p3a" && first_p3a == 0) first_p3a = pa_count
+      if (kv["phase"] == "p3b" && first_p3b == 0) first_p3b = pa_count
+      if (kv["phase"] == "p4"  && first_p4  == 0) first_p4  = pa_count
+
+      if (exp_cmode != "" && (ps == "p3a:compile-bootstrap-stage3" || ps == "p3b:compile-bootstrap-stage3-selfhost")) {
+        if (kv["compile_mode"] != exp_cmode) {
+          printf "  compile_mode mismatch on %s (expected %s, got %s)\n", ps, exp_cmode, kv["compile_mode"]
+          bad++
+        }
+      }
+      if (kv["phase"] == "p4" && kv["status"] == "ALIVE") {
+        if (kv["xray"] == "1") p4_xray = 1
+        if (kv["release"] == "1") p4_rel = 1
+      }
+    }
+    END {
+      if (pa_count == 0) {
+        print "  zero PATH_ACTION lines emitted"
+        bad++
+      }
+      for (i = 1; i <= n_req; i++) {
+        tok = req_arr[i]
+        if (tok == "") continue
+        if (index(tok, ":") > 0) {
+          if (!(tok in seen_ps)) {
+            printf "  missing required milestone %s\n", tok
+            bad++
+          }
+        } else {
+          if (!(tok in seen_step)) {
+            printf "  missing required step %s\n", tok
+            bad++
+          }
+        }
+      }
+      for (i = 1; i <= n_forbid; i++) {
+        tok = forbid_arr[i]
+        if (tok == "") continue
+        if (index(tok, ":") > 0) {
+          if (tok in seen_ps) {
+            printf "  forbidden milestone present: %s\n", tok
+            bad++
+          }
+        } else {
+          if (tok in seen_step) {
+            printf "  forbidden step present: %s\n", tok
+            bad++
+          }
+        }
+      }
+      if (first_p3a > 0 && first_p3b > 0 && first_p3a >= first_p3b) {
+        print "  phase order violation: p3a must precede p3b"
+        bad++
+      }
+      if (first_p3b > 0 && first_p4 > 0 && first_p3b >= first_p4) {
+        print "  phase order violation: p3b must precede p4"
+        bad++
+      }
+      if (req_p4_xr == "1") {
+        if (p4_xray != 1) {
+          print "  missing p4 action with xray=1"
+          bad++
+        }
+        if (p4_rel != 1) {
+          print "  missing p4 action with release=1"
+          bad++
+        }
+      }
+      exit (bad > 0 ? 1 : 0)
+    }
+  ' "$_out_file"
+}
+
+FULL_PHASE_REQ="init:native-host-match-check p3a:compile-bootstrap-stage3 p3a:hello-smoke p3b:compile-bootstrap-stage3-selfhost p3b:hello-smoke p4:cli-release p4:cli-debug-xray p4:stage5-simple_test_runner p4:stage5-simple_build_runner p4:stage5-simple_mcp_server p4:stage5-simple_lsp_mcp_server p4:smoke-gates"
+
+UNIX_HOSTS="linux-x86_64 linux-aarch64 linux-riscv64 darwin-aarch64 darwin-x86_64 freebsd-x86_64 freebsd-aarch64"
+
+CHECKS=0
+FAILS=0
+
+run_unix_case() {
+  _label=$1
+  _host=$2
+  _plat=${_host%-*}
+  _cpu=${_host#*-}
+  _cmode_arg=$3
+  _exp_cmode=$4
+
+  CHECKS=$((CHECKS + 1))
+  _out="$WORK_DIR/out_${CHECKS}.txt"
+  if [ -n "$_cmode_arg" ]; then
+    (unset SIMPLE_P3_COMPILE_MODE SIMPLE_WIN_CONFIG; sh "$TARGET_SCRIPT" --simulate-host="$_host" --phase=all "$_cmode_arg" --path-check) >"$_out" 2>&1
+    _rc=$?
+  else
+    (unset SIMPLE_P3_COMPILE_MODE SIMPLE_WIN_CONFIG; sh "$TARGET_SCRIPT" --simulate-host="$_host" --phase=all --path-check) >"$_out" 2>&1
+    _rc=$?
+  fi
+  if [ "$_rc" -ne 0 ]; then
+    echo "FAIL [$_label]: exited $_rc"
+    sed 's/^/  /' "$_out"
+    FAILS=$((FAILS + 1))
+    return
+  fi
+  if ! validate_path_actions "$_out" "$_plat" "$_cpu" "$_exp_cmode" "1" "$FULL_PHASE_REQ" ""; then
+    echo "FAIL [$_label]: PATH_ACTION validation failed"
+    FAILS=$((FAILS + 1))
+  fi
+}
+
+for _h in $UNIX_HOSTS; do
+  # Default compile mode (omitted flag must default to shard)
+  run_unix_case "$_h:default-shard" "$_h" "" "shard"
+  if [ "$FAST_MODE" -eq 0 ] || [ "$_h" = "linux-x86_64" ] || [ "$_h" = "darwin-aarch64" ]; then
+    run_unix_case "$_h:explicit-shard" "$_h" "--compile-mode=shard" "shard"
+    run_unix_case "$_h:file-mode" "$_h" "--compile-mode=file" "file"
+  fi
+done
+
+# Negative native_host_match mismatch guard: must fail closed with STAGE3-E-NATIVE-HOST-MISMATCH
+CHECKS=$((CHECKS + 1))
+_neg_out="$WORK_DIR/neg_mismatch.txt"
+sh "$TARGET_SCRIPT" --path-check --simulate-host=darwin-aarch64 --target=x86_64-unknown-linux-gnu >"$_neg_out" 2>&1
+_neg_rc=$?
+if [ "$_neg_rc" -eq 0 ]; then
+  echo "FAIL [negative-native-host-mismatch]: expected non-zero exit, got 0"
+  FAILS=$((FAILS + 1))
+elif ! grep -q "STAGE3-E-NATIVE-HOST-MISMATCH" "$_neg_out"; then
+  echo "FAIL [negative-native-host-mismatch]: missing STAGE3-E-NATIVE-HOST-MISMATCH diagnostic (rc=$_neg_rc)"
+  sed 's/^/  /' "$_neg_out"
+  FAILS=$((FAILS + 1))
+fi
+
+# Optional bootstrap-from-scratch.sh --path-check integration (when supported)
+SCRATCH_SCRIPT="$ROOT_DIR/scripts/bootstrap/bootstrap-from-scratch.sh"
+if [ -f "$SCRATCH_SCRIPT" ] && grep -q -- '--path-check' "$SCRATCH_SCRIPT" 2>/dev/null; then
+  CHECKS=$((CHECKS + 1))
+  _bfs_p3="$WORK_DIR/bfs_has_p3.txt"
+  SIMPLE_BOOTSTRAP_LIVE_TREE=1 SIMPLE_PATH_CHECK_HAS_PHASE3=1 \
+    sh "$SCRATCH_SCRIPT" --path-check >"$_bfs_p3" 2>&1
+  _bfs_p3_rc=$?
+  if [ "$_bfs_p3_rc" -ne 0 ]; then
+    echo "FAIL [bootstrap-from-scratch:has-phase3]: exited $_bfs_p3_rc"
+    sed 's/^/  /' "$_bfs_p3"
+    FAILS=$((FAILS + 1))
+  elif ! validate_path_actions "$_bfs_p3" "" "" "" "0" "skip-phase1-phase2" "cargo-seed-build"; then
+    echo "FAIL [bootstrap-from-scratch:has-phase3]: expected skip-phase1-phase2 ALIVE and no cargo-seed-build"
+    FAILS=$((FAILS + 1))
+  fi
+
+  CHECKS=$((CHECKS + 1))
+  _bfs_seed="$WORK_DIR/bfs_from_seed.txt"
+  (unset SIMPLE_PATH_CHECK_HAS_PHASE3; SIMPLE_BOOTSTRAP_LIVE_TREE=1 sh "$SCRATCH_SCRIPT" --from-seed --path-check) >"$_bfs_seed" 2>&1
+  _bfs_seed_rc=$?
+  if [ "$_bfs_seed_rc" -ne 0 ]; then
+    echo "FAIL [bootstrap-from-scratch:from-seed]: exited $_bfs_seed_rc"
+    sed 's/^/  /' "$_bfs_seed"
+    FAILS=$((FAILS + 1))
+  elif ! validate_path_actions "$_bfs_seed" "" "" "" "0" "cargo-seed-build seed-to-stage2" ""; then
+    echo "FAIL [bootstrap-from-scratch:from-seed]: expected cargo-seed-build + seed-to-stage2 ALIVE"
+    FAILS=$((FAILS + 1))
+  fi
+fi
+
+if [ "$CHECKS" -eq 0 ]; then
+  echo "ERROR — nothing was checked (0 unix path-check cases executed)"
+  exit 2
+fi
+
+if [ "$FAILS" -gt 0 ]; then
+  echo "FAIL — unix bootstrap path-alive matrix failed ($FAILS/$CHECKS failed)"
+  exit 1
+fi
+
+echo "PASS — unix bootstrap path-alive matrix verified ($CHECKS checks)"
+exit 0

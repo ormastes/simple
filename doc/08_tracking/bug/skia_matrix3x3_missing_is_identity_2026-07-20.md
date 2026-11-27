@@ -1,4 +1,28 @@
 # Skia Matrix3x3 missing `is_identity()` method
+
+## Closed 2026-11-25 — `is_identity()` exists and covers every element; verified by inspection
+
+- **measured (source)** `Matrix3x3.is_identity()` is defined at
+  `src/lib/common/drawing/vector.spl:224` (the class moved there from
+  `src/lib/skia/entity/matrix.spl` on 2026-08-09; `matrix.spl` now re-exports
+  it). The implementation compares all nine elements against the identity with
+  a small f64 tolerance, so `translate`/`scale(1,1)`-via-rounding/`rotate(0)`
+  cases the spec exercises are all handled. This is exactly the method the
+  2026-07-20 entry reported missing.
+- **measured (source)** a dedicated regression spec exists:
+  `test/01_unit/lib/skia/matrix_is_identity_spec.spl` ("reproducing spec" +
+  "detection spec" generalising the class), alongside the original
+  `test/01_unit/lib/skia/matrix_spec.spl`.
+- **limit** the spec could not be executed in this lane:
+  `SIMPLE_LIB=src bin/simple.exe test test/01_unit/lib/skia/matrix_spec.spl
+  --mode=interpreter` fails before any example runs with
+  `unknown decorator '@representation_boundary'` inside the pinned rc.1 seed's
+  own test-runner closure (`src/app/test_runner_new/test_runner_client.spl`) —
+  the known release/1.0.0 HEAD source/binary inconsistency, unrelated to this
+  bug. Verification is therefore by code inspection plus the presence of the
+  dedicated regression spec, not a fresh green run.
+- Status: **CLOSED (fixed)**.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

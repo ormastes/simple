@@ -4,7 +4,17 @@
 # (same pattern as json_helpers.spl / lsp_transport.spl).
 
 use std.common.markdown
+use std.common.json.tokenizer.{json_unescape_string}
+use app.md_lsp.md_lsp_markdown.{split_lines, parse_blocks_with_ranges, compute_folding_ranges}
 use .md_lsp_workspace.{MdWorkspace, MdDocument}
+use std.editor.services.md_diagnostics.{md_diagnose_batch}
+use std.common.diagnostics.{DiagnosticBatchV1, DiagnosticV1, LineStartTable, span_to_range, DiagnosticFixConfidence, FixCandidate, DiagnosticActionIndex, ranked_candidates_for, EditTransaction, DocumentSnapshot}
+use std.common.string_core.{string_to_byte_array, string_from_byte_array}
+
+# One outbound `textDocument/publishDiagnostics` notification, ready to frame.
+pub struct MdLspPublish:
+    uri: text
+    json: text
 
 # ---------------------------------------------------------------------------
 # JSON building helpers (inline, identical pattern to json_helpers.spl)
@@ -52,52 +62,71 @@ fn _mh_is_ws(ch: text) -> bool:
 
 fn _lsp_find_field(json: text, field: text) -> i64:
     var i = 0
-    while i < json.len():
-        if json.slice(i, json.len()).starts_with(field):
+    while i < json.byte_len():
+        if json.slice(i, json.byte_len()).starts_with(field):
             var j = i + field.len()
-            while j < json.len() and (_mh_char_at(json, j) == " " or _mh_char_at(json, j) == ":"):
+            while j < json.byte_len() and (_mh_char_at(json, j) == " " or _mh_char_at(json, j) == ":"):
                 j = j + 1
             return j
         i = i + 1
     -1
 
 fn _lsp_extract_number(json: text, start: i64) -> i64:
-    var num_str = ""
+    var value: i64 = 0
     var i = start
-    while i < json.len():
-        val ch = _mh_char_at(json, i)
-        if ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9":
-            num_str = num_str + ch
-        else:
+    while i < json.byte_len():
+        val digit = json.byte_at(i) - 48
+        if digit < 0 or digit > 9:
             break
+        if value > 922337203685477580 or (value == 922337203685477580 and digit > 7):
+            return -1
+        value = value * 10 + digit
         i = i + 1
-    num_str.to_i64() ?? -1
+    if i == start: -1 else: value
 
 fn _lsp_extract_string(json: text, start: i64) -> text:
-    if start >= json.len() or _mh_char_at(json, start) != "\"":
+    if start >= json.byte_len() or json.byte_at(start) != 34:
         return ""
-    var result = ""
     var i = start + 1
-    while i < json.len():
-        val ch = _mh_char_at(json, i)
-        if ch == "\"":
-            return result
-        if ch == "\\":
+    while i < json.byte_len():
+        val byte = json.byte_at(i)
+        if byte == 34:
+            return json_unescape_string(json.slice(start + 1, i))
+        if byte == 92:
             i = i + 1
-            if i < json.len():
-                val next = _mh_char_at(json, i)
-                if next == "n":
-                    result = result + "\n"
-                elif next == "r":
-                    result = result + "\r"
-                elif next == "t":
-                    result = result + "\t"
-                else:
-                    result = result + next
-        else:
-            result = result + ch
         i = i + 1
-    result
+    ""
+
+# Internal text is valid UTF-8; LSP's default position unit is UTF-16.
+fn md_lsp_utf16_length(value: text) -> i64:
+    var units: i64 = 0
+    var i = 0
+    while i < value.byte_len():
+        val byte = value.byte_at(i)
+        if byte < 128:
+            i = i + 1
+        elif byte < 224:
+            i = i + 2
+        elif byte < 240:
+            i = i + 3
+        else:
+            i = i + 4
+            units = units + 1
+        units = units + 1
+    units
+
+fn md_lsp_utf16_byte_offset(value: text, character: i64) -> i64:
+    var units: i64 = 0
+    var i = 0
+    while i < value.byte_len() and units < character:
+        val byte = value.byte_at(i)
+        val width = if byte < 128: 1 elif byte < 224: 2 elif byte < 240: 3 else: 4
+        val step_units = if width == 4: 2 else: 1
+        if units + step_units > character:
+            break
+        i = i + width
+        units = units + step_units
+    i
 
 fn _lsp_extract_balanced(json: text, start: i64, open_ch: text) -> text:
     val close_ch = if open_ch == "{" then "}" else "]"
@@ -121,7 +150,7 @@ fn _lsp_extract_balanced(json: text, start: i64, open_ch: text) -> text:
                 if depth == 0:
                     return json.slice(start, i + 1)
         i = i + 1
-    json.slice(start, json.len())
+    json.slice(start, json.byte_len())
 
 fn _lsp_extract_value(json: text, start: i64) -> text:
     if start >= json.len():
@@ -143,19 +172,19 @@ fn _lsp_extract_value(json: text, start: i64) -> text:
 
 fn lsp_uri_to_path(uri: text) -> text:
     if uri.starts_with("file://"):
-        return uri.slice(7, uri.len())
+        return uri.slice(7, uri.byte_len())
     uri
 
 # ---------------------------------------------------------------------------
 # Response builders
 # ---------------------------------------------------------------------------
 
-fn _md_lsp_ok_response(req_id: i64, result_json: text) -> text:
-    "{" + _jp("jsonrpc", _js("2.0")) + "," + _jp("id", str(req_id)) + "," + _jp("result", result_json) + "}"
+fn _md_lsp_ok_response(req_id: text, result_json: text) -> text:
+    "{" + _jp("jsonrpc", _js("2.0")) + "," + _jp("id", req_id) + "," + _jp("result", result_json) + "}"
 
-fn _md_lsp_error_response(req_id: i64, code: i64, message: text) -> text:
+fn _md_lsp_error_response(req_id: text, code: i64, message: text) -> text:
     val err = "{" + _jp("code", str(code)) + "," + _jp("message", _js(message)) + "}"
-    "{" + _jp("jsonrpc", _js("2.0")) + "," + _jp("id", str(req_id)) + "," + _jp("error", err) + "}"
+    "{" + _jp("jsonrpc", _js("2.0")) + "," + _jp("id", req_id) + "," + _jp("error", err) + "}"
 
 # ---------------------------------------------------------------------------
 # Params extraction helpers
@@ -223,13 +252,19 @@ fn _md_lsp_get_line(content: text, line_num: i64) -> text:
     val lines = split_lines(content)
     if line_num < 0 or line_num >= lines.length():
         return ""
-    lines.get(line_num)
+    lines[line_num]
+
+fn _md_lsp_line_is_code(doc: MdDocument, line_num: i64) -> bool:
+    for block in doc.ast:
+        if block.kind == "code" and line_num >= block.from_line and line_num <= block.to_line:
+            return true
+    false
 
 # ---------------------------------------------------------------------------
 # Capability response
 # ---------------------------------------------------------------------------
 
-fn md_lsp_initialize(req_id: i64) -> text:
+fn md_lsp_initialize_raw(req_id: text) -> text:
     val trigger_chars = "[" + _js("[") + "," + _js("#") + "," + _js("(") + "]"
     val completion_provider = "{" + _jp("triggerCharacters", trigger_chars) + "}"
     var caps = "{"
@@ -248,14 +283,14 @@ fn md_lsp_initialize(req_id: i64) -> text:
 # Completion
 # ---------------------------------------------------------------------------
 
-fn md_lsp_completion(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+fn md_lsp_completion_raw(params_json: text, req_id: text, workspace: MdWorkspace) -> text:
     val uri = _md_lsp_extract_uri(params_json)
     val pos = _md_lsp_extract_position(params_json)
     val line_num = pos.0
     val char_num = pos.1
     val doc = workspace.get_document(uri)
     val current_line = _md_lsp_get_line(doc.content, line_num)
-    val prefix = if char_num <= current_line.len() then current_line.substring(0, char_num) else current_line
+    val prefix = current_line.slice(0, md_lsp_utf16_byte_offset(current_line, char_num))
 
     var items = "["
     var first = true
@@ -266,7 +301,7 @@ fn md_lsp_completion(params_json: text, req_id: i64, workspace: MdWorkspace) -> 
         var i = 0
         val count = headings.length()
         while i < count:
-            val heading = headings.get(i)
+            val heading = headings[i]
             val heading_text = heading.1
             val slug = markdown_slugify(heading_text)
             val label = "#" + slug
@@ -282,7 +317,7 @@ fn md_lsp_completion(params_json: text, req_id: i64, workspace: MdWorkspace) -> 
         var i = 0
         val count = all_uris.length()
         while i < count:
-            val doc_uri = all_uris.get(i)
+            val doc_uri = all_uris[i]
             val label = lsp_uri_to_path(doc_uri)
             val item = "{" + _jp("label", _js(label)) + "," + _jp("kind", "17") + "}"
             if not first:
@@ -296,7 +331,7 @@ fn md_lsp_completion(params_json: text, req_id: i64, workspace: MdWorkspace) -> 
         var i = 0
         val count = headings.length()
         while i < count:
-            val heading = headings.get(i)
+            val heading = headings[i]
             val heading_text = heading.1
             val anchor = "#" + markdown_slugify(heading_text)
             val item = "{" + _jp("label", _js(anchor)) + "," + _jp("kind", "15") + "," + _jp("detail", _js(heading_text)) + "}"
@@ -314,11 +349,13 @@ fn md_lsp_completion(params_json: text, req_id: i64, workspace: MdWorkspace) -> 
 # Hover
 # ---------------------------------------------------------------------------
 
-fn md_lsp_hover(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+fn md_lsp_hover_raw(params_json: text, req_id: text, workspace: MdWorkspace) -> text:
     val uri = _md_lsp_extract_uri(params_json)
     val pos = _md_lsp_extract_position(params_json)
     val line_num = pos.0
     val doc = workspace.get_document(uri)
+    if _md_lsp_line_is_code(doc, line_num):
+        return _md_lsp_ok_response(req_id, "null")
     val line = _md_lsp_get_line(doc.content, line_num)
 
     var hover_text = ""
@@ -352,11 +389,13 @@ fn md_lsp_hover(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
 # Definition
 # ---------------------------------------------------------------------------
 
-fn md_lsp_definition(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+fn md_lsp_definition_raw(params_json: text, req_id: text, workspace: MdWorkspace) -> text:
     val uri = _md_lsp_extract_uri(params_json)
     val pos = _md_lsp_extract_position(params_json)
     val line_num = pos.0
     val doc = workspace.get_document(uri)
+    if _md_lsp_line_is_code(doc, line_num):
+        return _md_lsp_ok_response(req_id, "null")
     val line = _md_lsp_get_line(doc.content, line_num)
 
     # Only handle [text](#anchor) links
@@ -374,21 +413,22 @@ fn md_lsp_definition(params_json: text, req_id: i64, workspace: MdWorkspace) -> 
     val anchor = line.substring(anchor_start, anchor_end)
 
     # Find the line number of the heading whose slug matches
-    val doc_lines = split_lines(doc.content)
+    val heading_blocks = doc.ast
     var found_line: i64 = -1
     var j = 0
-    val line_count = doc_lines.length()
+    val line_count = heading_blocks.length()
     while j < line_count:
-        val l = doc_lines.get(j)
-        if l.starts_with("#"):
+        val block = heading_blocks[j]
+        val l = block.content
+        if block.kind == "heading":
             var k = 0
             while k < l.len() and l.char_at(k) == "#":
                 k = k + 1
             while k < l.len() and l.char_at(k) == " ":
                 k = k + 1
-            val heading_text = l.substring(k, l.len())
+            val heading_text = l.substring(k, l.byte_len())
             if markdown_slugify(heading_text) == anchor:
-                found_line = j
+                found_line = block.from_line
                 j = line_count
         j = j + 1
 
@@ -405,26 +445,27 @@ fn md_lsp_definition(params_json: text, req_id: i64, workspace: MdWorkspace) -> 
 # Document Symbol
 # ---------------------------------------------------------------------------
 
-fn md_lsp_document_symbol(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+fn md_lsp_document_symbol_raw(params_json: text, req_id: text, workspace: MdWorkspace) -> text:
     val uri = _md_lsp_extract_uri(params_json)
     val doc = workspace.get_document(uri)
-    val doc_lines = split_lines(doc.content)
+    val heading_blocks = doc.ast
 
     var symbols = "["
     var first = true
     var j = 0
-    val line_count = doc_lines.length()
+    val line_count = heading_blocks.length()
     while j < line_count:
-        val l = doc_lines.get(j)
-        if l.starts_with("#"):
+        val block = heading_blocks[j]
+        val l = block.content
+        if block.kind == "heading":
             var k = 0
             while k < l.len() and l.char_at(k) == "#":
                 k = k + 1
             while k < l.len() and l.char_at(k) == " ":
                 k = k + 1
-            val heading_text = l.substring(k, l.len())
-            val start_pos = "{" + _jp("line", str(j)) + "," + _jp("character", "0") + "}"
-            val end_pos = "{" + _jp("line", str(j)) + "," + _jp("character", str(l.len())) + "}"
+            val heading_text = l.substring(k, l.byte_len())
+            val start_pos = "{" + _jp("line", str(block.from_line)) + "," + _jp("character", "0") + "}"
+            val end_pos = "{" + _jp("line", str(block.from_line)) + "," + _jp("character", str(md_lsp_utf16_length(l))) + "}"
             val range = "{" + _jp("start", start_pos) + "," + _jp("end", end_pos) + "}"
             val location = "{" + _jp("uri", _js(uri)) + "," + _jp("range", range) + "}"
             # LSP SymbolKind 25 = "key" — used for headings/sections per spec
@@ -442,7 +483,7 @@ fn md_lsp_document_symbol(params_json: text, req_id: i64, workspace: MdWorkspace
 # Folding Range
 # ---------------------------------------------------------------------------
 
-fn md_lsp_folding_range(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+fn md_lsp_folding_range_raw(params_json: text, req_id: text, workspace: MdWorkspace) -> text:
     val uri = _md_lsp_extract_uri(params_json)
     val doc = workspace.get_document(uri)
     val lines = split_lines(doc.content)
@@ -454,7 +495,7 @@ fn md_lsp_folding_range(params_json: text, req_id: i64, workspace: MdWorkspace) 
     var i = 0
     val count = fold_ranges.length()
     while i < count:
-        val fr = fold_ranges.get(i)
+        val fr = fold_ranges[i]
         var item = "{" + _jp("startLine", str(fr.from_line)) + "," + _jp("endLine", str(fr.to_line))
         if fr.kind != "":
             item = item + "," + _jp("kind", _js(fr.kind))
@@ -471,17 +512,65 @@ fn md_lsp_folding_range(params_json: text, req_id: i64, workspace: MdWorkspace) 
 # Code Actions
 # ---------------------------------------------------------------------------
 
-fn md_lsp_code_action(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+fn md_lsp_code_action_raw(params_json: text, req_id: text, workspace: MdWorkspace) -> text:
     val uri = _md_lsp_extract_uri(params_json)
     val pos = _md_lsp_extract_position_from_range(params_json)
     val line_num = pos.0
     val doc = workspace.get_document(uri)
-    val line = _md_lsp_get_line(doc.content, line_num)
-    val fixed = _md_lsp_quickfix_line(line)
-    if fixed == line:
+    if _md_lsp_line_is_code(doc, line_num):
         return _md_lsp_ok_response(req_id, "[]")
-    val action = _md_lsp_build_line_replace_action(uri, line_num, line, fixed)
-    _md_lsp_ok_response(req_id, "[" + action + "]")
+    val batch = md_diagnose_batch(doc.content, doc.path, doc.version, workspace.link_context(uri))
+    val table = LineStartTable.build(doc.content)
+    # Candidates are keyed by stable diagnostic id (MD1103 trailing space /
+    # list marker, MD1105 heading space, MD1106 empty link).
+    var index = DiagnosticActionIndex.new()
+    var ids: [text] = []
+    for bd in batch.diagnostics:
+        val d = bd.diagnostic
+        if d.fix.? and d.span.? and d.span.unwrap().line - 1 == line_num:
+            val fix = d.fix.unwrap()
+            var c = FixCandidate.new(fix.id, fix.description, d.message, fix.confidence, doc.version)
+            for r in fix.replacements:
+                c = c.with_replacement(r.file, r.span, r.new_text, _md_lsp_byte_slice(doc.content, r.span.start, r.span.end))
+            index = index.add(bd.id, c)
+            if not ids.contains(bd.id):
+                ids.push(bd.id)
+    # Only advertise candidates the shared transaction would actually apply.
+    val tx = EditTransaction.new(".", batch.source_hash).with_document(DocumentSnapshot.new(_md_lsp_tx_file(doc.path), doc.version, batch.source_hash, doc.content))
+    var actions: [text] = []
+    for id in ids:
+        for c in ranked_candidates_for(index, id):
+            if tx.apply(_md_lsp_tx_candidate(c, doc.path)).applied():
+                actions.push(_md_lsp_build_candidate_action(uri, doc.content, table, c))
+    _md_lsp_ok_response(req_id, "[" + actions.join(",") + "]")
+
+# EditTransaction confines edits to its root; the document's workspace-relative
+# path is presented under "./" for that check only.
+fn _md_lsp_tx_file(path: text) -> text:
+    "./" + path
+
+fn _md_lsp_tx_candidate(c: FixCandidate, path: text) -> FixCandidate:
+    var out = FixCandidate.new(c.id, c.title, c.explanation, c.confidence, c.required_document_version)
+    var i = 0
+    while i < c.replacements.len():
+        val r = c.replacements[i]
+        val f = if r.file == path then _md_lsp_tx_file(path) else: r.file
+        out = out.with_replacement(f, r.span, r.new_text, c.preconditions[i].expected_text)
+        i = i + 1
+    out
+
+fn _md_lsp_build_candidate_action(uri: text, content: text, table: LineStartTable, c: FixCandidate) -> text:
+    var edits: [text] = []
+    for r in c.replacements:
+        val mapped = span_to_range(content, table, r.span.start, r.span.end)
+        if mapped.?:
+            val m = mapped.unwrap()
+            val start_pos = "{" + _jp("line", str(m.start.line)) + "," + _jp("character", str(m.start.character)) + "}"
+            val end_pos = "{" + _jp("line", str(m.end.line)) + "," + _jp("character", str(m.end.character)) + "}"
+            edits.push("{" + _jp("range", "{" + _jp("start", start_pos) + "," + _jp("end", end_pos) + "}") + "," + _jp("newText", _js(r.new_text)) + "}")
+    val changes = "{" + _jp(uri, "[" + edits.join(",") + "]") + "}"
+    val preferred = if c.confidence.name() == "safe" then "true" else: "false"
+    "{" + _jp("title", _js(c.title)) + "," + _jp("kind", _js("quickfix")) + "," + _jp("isPreferred", preferred) + "," + _jp("edit", "{" + _jp("changes", changes) + "}") + "}"
 
 fn _md_lsp_extract_position_from_range(params_json: text) -> (i64, i64):
     val range_start = _lsp_find_field(params_json, "\"range\"")
@@ -498,74 +587,152 @@ fn _md_lsp_extract_position_from_range(params_json: text) -> (i64, i64):
     val char_num = if char_start >= 0 then _lsp_extract_number(start_obj, char_start) else 0
     (line_num, char_num)
 
-fn _md_lsp_quickfix_line(line: text) -> text:
-    val trimmed = line.trim()
-    if trimmed.starts_with("#"):
-        var level = 0
-        while level < trimmed.len() and trimmed.char_at(level) == "#":
-            level = level + 1
-        if level < trimmed.len() and trimmed.char_at(level) != " ":
-            return trimmed.slice(0, level) + " " + trimmed.slice(level, trimmed.len())
-    if line.contains("[]()"):
-        return line.replace("[]()", "[text](url)")
-    if line.ends_with(" ") or line.ends_with("\t"):
-        return line.trim()
-    line
-
-fn _md_lsp_build_line_replace_action(uri: text, line_num: i64, old_line: text, new_line: text) -> text:
-    val start_pos = "{" + _jp("line", str(line_num)) + "," + _jp("character", "0") + "}"
-    val end_pos = "{" + _jp("line", str(line_num)) + "," + _jp("character", str(old_line.len())) + "}"
-    val range = "{" + _jp("start", start_pos) + "," + _jp("end", end_pos) + "}"
-    val edit = "{" + _jp("range", range) + "," + _jp("newText", _js(new_line)) + "}"
-    val text_edits = "[" + edit + "]"
-    val changes = "{" + _jp(uri, text_edits) + "}"
-    val workspace_edit = "{" + _jp("changes", changes) + "}"
-    "{" + _jp("title", _js("Apply Markdown quick fix")) + "," + _jp("kind", _js("quickfix")) + "," + _jp("edit", workspace_edit) + "}"
-
 # ---------------------------------------------------------------------------
 # Notification handler (no response)
 # ---------------------------------------------------------------------------
 
-fn md_lsp_handle_notification(method: text, params_json: text, workspace: MdWorkspace):
-    if method == "initialized":
-        return
-    if method == "textDocument/didOpen":
+fn _md_lsp_severity_code(d: DiagnosticV1) -> text:
+    val name = d.severity.name()
+    if name == "error":
+        return "1"
+    if name == "warning":
+        return "2"
+    if name == "help":
+        return "4"
+    "3"
+
+# Renders one shared DiagnosticV1 as an LSP Diagnostic. Byte span -> UTF-16
+# range through the snapshot's LineStartTable; a span that cannot be mapped
+# (should not happen for producer-made spans) collapses to the line start.
+fn _md_lsp_diagnostic_json(content: text, table: LineStartTable, d: DiagnosticV1, id: text) -> text:
+    var range_json = "{" + _jp("start", "{" + _jp("line", "0") + "," + _jp("character", "0") + "}") + "," + _jp("end", "{" + _jp("line", "0") + "," + _jp("character", "0") + "}") + "}"
+    if d.span.is_some():
+        val sp = d.span.unwrap()
+        val mapped = span_to_range(content, table, sp.start, sp.end)
+        if mapped.is_some():
+            val r = mapped.unwrap()
+            val start_pos = "{" + _jp("line", str(r.start.line)) + "," + _jp("character", str(r.start.character)) + "}"
+            val end_pos = "{" + _jp("line", str(r.end.line)) + "," + _jp("character", str(r.end.character)) + "}"
+            range_json = "{" + _jp("start", start_pos) + "," + _jp("end", end_pos) + "}"
+    "{" + _jp("range", range_json) + "," + _jp("severity", _md_lsp_severity_code(d)) + "," + _jp("code", _js(d.code)) + "," + _jp("source", _js("markdown")) + "," + _jp("message", _js(d.message)) + "," + _jp("data", "{" + _jp("id", _js(id)) + "}") + "}"
+
+fn _md_lsp_publish_notification(uri: text, version: i64, status: text, diagnostics_json: text) -> text:
+    val params = "{" + _jp("uri", _js(uri)) + "," + _jp("version", str(version)) + "," + _jp("diagnostics", diagnostics_json) + "," + _jp("status", _js(status)) + "}"
+    "{" + _jp("jsonrpc", _js("2.0")) + "," + _jp("method", _js("textDocument/publishDiagnostics")) + "," + _jp("params", params) + "}"
+
+# Diagnoses the open document at `uri` against the workspace graph and renders
+# the publishDiagnostics notification for it.
+pub fn md_lsp_publish_json(uri: text, workspace: MdWorkspace) -> text:
+    val doc = workspace.get_document(uri)
+    val batch = md_diagnose_batch(doc.content, doc.path, doc.version, workspace.link_context(uri))
+    val table = LineStartTable.build(doc.content)
+    var items: [text] = []
+    for bd in batch.diagnostics:
+        items.push(_md_lsp_diagnostic_json(doc.content, table, bd.diagnostic, bd.id))
+    _md_lsp_publish_notification(uri, doc.version, batch.status.name(), "[" + items.join(",") + "]")
+
+fn _md_lsp_publish_set(primary: text, dependents: [text], workspace: MdWorkspace) -> [MdLspPublish]:
+    var out: [MdLspPublish] = []
+    if workspace.has_document(primary):
+        out.push(MdLspPublish(uri: primary, json: md_lsp_publish_json(primary, workspace)))
+    var seen: [text] = [primary]
+    for dep in dependents:
+        if not seen.contains(dep) and workspace.has_document(dep):
+            seen.push(dep)
+            out.push(MdLspPublish(uri: dep, json: md_lsp_publish_json(dep, workspace)))
+    out
+
+fn _md_lsp_union(a: [text], b: [text]) -> [text]:
+    var out = a
+    for t in b:
+        if not out.contains(t):
+            out.push(t)
+    out
+
+# Applies a notification to the workspace and returns the publishDiagnostics
+# notifications it implies: the edited document plus exactly the open
+# documents whose inbound edges changed (targets before and after the edit).
+pub fn md_lsp_handle_notification_publishing(method: text, params_json: text, workspace: MdWorkspace) -> [MdLspPublish]:
+    if method == "textDocument/didOpen" or method == "textDocument/didChange":
         val uri = _md_lsp_extract_uri(params_json)
         val content = _md_lsp_extract_content(params_json)
         val version = _md_lsp_extract_version(params_json)
+        val before = workspace.get_document(uri).targets
         workspace.open_document(uri, content, version)
-        return
-    if method == "textDocument/didChange":
-        val uri = _md_lsp_extract_uri(params_json)
-        val content = _md_lsp_extract_content(params_json)
-        val version = _md_lsp_extract_version(params_json)
-        workspace.update_document(uri, content, version)
-        return
+        val after = workspace.get_document(uri).targets
+        return _md_lsp_publish_set(uri, workspace.dependents(_md_lsp_union(before, after), uri), workspace)
     if method == "textDocument/didClose":
         val uri = _md_lsp_extract_uri(params_json)
+        val doc = workspace.get_document(uri)
         workspace.close_document(uri)
-        return
-    # "exit" and all other notifications: no-op
+        var out: [MdLspPublish] = [MdLspPublish(uri: uri, json: _md_lsp_publish_notification(uri, doc.version, "complete", "[]"))]
+        for p in _md_lsp_publish_set("", workspace.dependents(doc.targets, uri), workspace):
+            out.push(p)
+        return out
+    # "initialized", "exit" and all other notifications: nothing to publish
+    []
+
+fn md_lsp_handle_notification(method: text, params_json: text, workspace: MdWorkspace):
+    md_lsp_handle_notification_publishing(method, params_json, workspace)
 
 # ---------------------------------------------------------------------------
 # Main request dispatcher
 # ---------------------------------------------------------------------------
 
-fn md_lsp_handle_request(method: text, params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+fn md_lsp_handle_request_raw(method: text, params_json: text, req_id: text, workspace: MdWorkspace) -> text:
     if method == "initialize":
-        return md_lsp_initialize(req_id)
+        val root_start = _lsp_find_field(params_json, "\"rootUri\"")
+        if root_start >= 0:
+            workspace.set_root(lsp_uri_to_path(_lsp_extract_string(params_json, root_start)))
+        return md_lsp_initialize_raw(req_id)
     if method == "textDocument/completion":
-        return md_lsp_completion(params_json, req_id, workspace)
+        return md_lsp_completion_raw(params_json, req_id, workspace)
     if method == "textDocument/hover":
-        return md_lsp_hover(params_json, req_id, workspace)
+        return md_lsp_hover_raw(params_json, req_id, workspace)
     if method == "textDocument/definition":
-        return md_lsp_definition(params_json, req_id, workspace)
+        return md_lsp_definition_raw(params_json, req_id, workspace)
     if method == "textDocument/documentSymbol":
-        return md_lsp_document_symbol(params_json, req_id, workspace)
+        return md_lsp_document_symbol_raw(params_json, req_id, workspace)
     if method == "textDocument/foldingRange":
-        return md_lsp_folding_range(params_json, req_id, workspace)
+        return md_lsp_folding_range_raw(params_json, req_id, workspace)
     if method == "textDocument/codeAction":
-        return md_lsp_code_action(params_json, req_id, workspace)
+        return md_lsp_code_action_raw(params_json, req_id, workspace)
     if method == "shutdown":
         return _md_lsp_ok_response(req_id, "null")
     _md_lsp_error_response(req_id, -32601, "Method not found: " + method)
+
+# Integer adapters preserve existing in-process callers; wire IDs stay lexical.
+fn md_lsp_initialize(req_id: i64) -> text:
+    md_lsp_initialize_raw(str(req_id))
+
+fn md_lsp_completion(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+    md_lsp_completion_raw(params_json, str(req_id), workspace)
+
+fn md_lsp_hover(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+    md_lsp_hover_raw(params_json, str(req_id), workspace)
+
+fn md_lsp_definition(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+    md_lsp_definition_raw(params_json, str(req_id), workspace)
+
+fn md_lsp_document_symbol(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+    md_lsp_document_symbol_raw(params_json, str(req_id), workspace)
+
+fn md_lsp_folding_range(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+    md_lsp_folding_range_raw(params_json, str(req_id), workspace)
+
+fn md_lsp_code_action(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+    md_lsp_code_action_raw(params_json, str(req_id), workspace)
+
+fn md_lsp_handle_request(method: text, params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+    md_lsp_handle_request_raw(method, params_json, str(req_id), workspace)
+
+# Spans are BYTE offsets; text.substring indexes code points, so slice bytes
+# (matches EditTransaction's byte-sliced precondition check).
+fn _md_lsp_byte_slice(s: text, start: i64, end: i64) -> text:
+    val bytes = string_to_byte_array(s)
+    var out: [u8] = []
+    var i = start
+    while i < end:
+        out.push(bytes[i])
+        i = i + 1
+    string_from_byte_array(out)

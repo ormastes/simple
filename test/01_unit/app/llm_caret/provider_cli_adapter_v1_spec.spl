@@ -1,0 +1,111 @@
+# AUTHORED_NOT_RUN. Tests exercise production DATA planners, never an installed
+# capability or a real provider invocation. Version strings were observed in
+# actual read-only local research; constructing this data grants no execution.
+use std.spec.{describe, it, expect, step}
+use app.llm_caret.provider_cli_adapter_types_v1.*
+use app.llm_caret.provider_cli_adapter_v1.*
+
+fn observed_data_version_v1(provider: ProviderCliProviderV1) -> ProviderCliVersionDataV1:
+    val output = match provider:
+        case ProviderCliProviderV1.Codex: "codex-cli 0.169.0\n"
+        case ProviderCliProviderV1.Claude: "2.1.325 (Claude Code)\n"
+        case ProviderCliProviderV1.Gemini: "0.68.0\n"
+        case ProviderCliProviderV1.Kimi: "2.5.3\n"
+    decode_provider_cli_version_v1(provider, output).unwrap()
+
+describe "Versioned provider CLI production planning data":
+    it "uses the observed Codex exec resume subcommand and stdin prompt without Claude flags":
+        step("Decode the observed Codex version as data and keep prompt text on stdin")
+        val version = observed_data_version_v1(ProviderCliProviderV1.Codex)
+        val start = plan_provider_cli_action_v1(version, ProviderCliRequestDataV1(
+            action: ProviderCliActionV1.Start, prompt: "--config=malicious\n$(do-not-run)", model: "gpt-test",
+            extra_args: ["--color=never"])).unwrap()
+        expect(start.argv).to_equal(["exec", "--json", "--model", "gpt-test", "--color", "never", "-"])
+        expect(start.stdin_text).to_equal("--config=malicious\n$(do-not-run)")
+        expect(start.output).to_equal(ProviderCliOutputDataV1.JsonLines)
+        expect(start.requires_external_containment).to_equal(true)
+        val resume = plan_provider_cli_action_v1(version, ProviderCliRequestDataV1(
+            action: ProviderCliActionV1.Resume, prompt: "continue exactly", session_id: "session-abc")).unwrap()
+        expect(resume.argv).to_equal(["exec", "resume", "--json", "session-abc", "-"])
+        expect(resume.stdin_text).to_equal("continue exactly")
+
+    it "builds Claude print/json resume with an explicit positional delimiter":
+        step("Plan the exact Claude resume command with a flag-like prompt after the delimiter")
+        val plan = plan_provider_cli_action_v1(observed_data_version_v1(ProviderCliProviderV1.Claude),
+            ProviderCliRequestDataV1(action: ProviderCliActionV1.Resume,
+                prompt: "--dangerously-skip-permissions", model: "claude-test", session_id: "session-abc",
+                extra_args: ["--verbose"])).unwrap()
+        expect(plan.argv).to_equal(["--print", "--output-format", "json", "--model", "claude-test",
+            "--resume", "session-abc", "--verbose", "--", "--dangerously-skip-permissions"])
+        expect(plan.stdin_text).to_equal("")
+        expect(plan.output).to_equal(ProviderCliOutputDataV1.JsonDocument)
+        expect(plan.requires_external_containment).to_equal(true)
+
+    it "uses Gemini resume and Kimi session with value-bound prompts and fixed distinct output":
+        step("Keep Gemini resume and Kimi session syntax distinct while preserving prompt bytes")
+        val request = ProviderCliRequestDataV1(action: ProviderCliActionV1.Resume,
+            prompt: "--resume latest\n`not-a-shell`", session_id: "12345678-1234-4234-8234-123456789abc", model: "model-test")
+        val gemini = plan_provider_cli_action_v1(observed_data_version_v1(ProviderCliProviderV1.Gemini), request).unwrap()
+        expect(gemini.argv).to_equal(["--prompt=--resume latest\n`not-a-shell`", "--output-format", "json",
+            "--model", "model-test", "--resume", "12345678-1234-4234-8234-123456789abc"])
+        expect(gemini.requires_external_containment).to_equal(true)
+        val kimi = plan_provider_cli_action_v1(observed_data_version_v1(ProviderCliProviderV1.Kimi),
+            ProviderCliRequestDataV1(action: ProviderCliActionV1.Resume,
+                prompt: request.prompt, session_id: "01JABCDEF0123456789ABCDEFGH", model: request.model)).unwrap()
+        expect(kimi.argv).to_equal(["--prompt=--resume latest\n`not-a-shell`", "--output-format", "stream-json",
+            "--model", "model-test", "--session", "01JABCDEF0123456789ABCDEFGH"])
+        expect(kimi.requires_external_containment).to_equal(true)
+
+    it "refuses unsupported versions, family mismatch, unknown aliases and implicit resume selectors":
+        step("Reject unsupported versions and selectors without inventing an installed capability")
+        expect(decode_provider_cli_version_v1(ProviderCliProviderV1.Codex, "codex-cli 0.170.0\n").is_err()).to_equal(true)
+        expect(decode_provider_cli_version_v1(ProviderCliProviderV1.Claude, "codex-cli 0.169.0\n").is_err()).to_equal(true)
+        expect(decode_provider_cli_provider_v1("unknown-cli").is_err()).to_equal(true)
+        expect(decode_provider_cli_provider_v1("").is_err()).to_equal(true)
+        val forged_data = ProviderCliVersionDataV1(provider: ProviderCliProviderV1.Gemini, version: "2.1.325")
+        expect(plan_provider_cli_action_v1(forged_data, ProviderCliRequestDataV1(
+            action: ProviderCliActionV1.Start, prompt: "task")).is_err()).to_equal(true)
+        for session in ["12345678", "session-abc", "12345678-1234-4234-8234-123456789abz"]:
+            expect(plan_provider_cli_action_v1(observed_data_version_v1(ProviderCliProviderV1.Gemini),
+                ProviderCliRequestDataV1(action: ProviderCliActionV1.Resume, prompt: "task", session_id: session)).is_err()).to_equal(true)
+        for session in ["", "latest", "LAST", "123", "--last", "../other-project", "session\nother"]:
+            expect(plan_provider_cli_action_v1(observed_data_version_v1(ProviderCliProviderV1.Codex),
+                ProviderCliRequestDataV1(action: ProviderCliActionV1.Resume, prompt: "task", session_id: session)).is_err()).to_equal(true)
+
+    it "rejects protocol, model, scope, session, auth and permission overrides in both option spellings":
+        step("Apply the production allowlist to split and equals-spelled override attempts")
+        val denied: [[text]] = [["--output-format=json"], ["--output-format", "text"],
+            ["--resume=other"], ["--session", "other"], ["--model=other"], ["--json=false"],
+            ["--dangerously-bypass-approvals-and-sandbox"], ["--permission-mode", "bypassPermissions"],
+            ["--approval-mode=yolo"], ["--yolo"], ["--auto"], ["--sandbox", "off"],
+            ["--config", "credential=value"], ["--cwd=/outside"], ["--"], ["login"]]
+        for provider in [ProviderCliProviderV1.Codex, ProviderCliProviderV1.Claude,
+                ProviderCliProviderV1.Gemini, ProviderCliProviderV1.Kimi]:
+            for extra in denied:
+                expect(plan_provider_cli_action_v1(observed_data_version_v1(provider),
+                    ProviderCliRequestDataV1(action: ProviderCliActionV1.Start, prompt: "task", extra_args: extra)).is_err()).to_equal(true)
+            expect(plan_provider_cli_action_v1(observed_data_version_v1(provider),
+                ProviderCliRequestDataV1(action: ProviderCliActionV1.Start, prompt: "task", model: "--other")).is_err()).to_equal(true)
+            expect(plan_provider_cli_action_v1(observed_data_version_v1(provider),
+                ProviderCliRequestDataV1(action: ProviderCliActionV1.Start, prompt: "task", session_id: "session-abc")).is_err()).to_equal(true)
+
+    it "plans only real read-only authentication commands and neutral owned interruption":
+        step("Distinguish read-only auth inspection from missing status commands and contained interruption")
+        val codex = plan_provider_cli_action_v1(observed_data_version_v1(ProviderCliProviderV1.Codex),
+            ProviderCliRequestDataV1(action: ProviderCliActionV1.AuthInspect)).unwrap()
+        expect(codex.argv).to_equal(["login", "status"])
+        val claude = plan_provider_cli_action_v1(observed_data_version_v1(ProviderCliProviderV1.Claude),
+            ProviderCliRequestDataV1(action: ProviderCliActionV1.AuthInspect)).unwrap()
+        expect(claude.argv).to_equal(["auth", "status", "--json"])
+        for provider in [ProviderCliProviderV1.Gemini, ProviderCliProviderV1.Kimi]:
+            val auth = plan_provider_cli_action_v1(observed_data_version_v1(provider),
+                ProviderCliRequestDataV1(action: ProviderCliActionV1.AuthInspect)).unwrap()
+            expect(auth.control).to_equal(ProviderCliControlDataV1.ExternalCredentialInspectionRequired)
+            expect(auth.argv.len()).to_equal(0)
+        val interrupt = plan_provider_cli_action_v1(observed_data_version_v1(ProviderCliProviderV1.Codex),
+            ProviderCliRequestDataV1(action: ProviderCliActionV1.Interrupt)).unwrap()
+        expect(interrupt.control).to_equal(ProviderCliControlDataV1.OwnedCancel)
+        expect(interrupt.argv.len()).to_equal(0)
+        expect(interrupt.stdin_text).to_equal("")
+        expect(plan_provider_cli_action_v1(observed_data_version_v1(ProviderCliProviderV1.Codex),
+            ProviderCliRequestDataV1(action: ProviderCliActionV1.AuthInspect, extra_args: ["--json"])).is_err()).to_equal(true)

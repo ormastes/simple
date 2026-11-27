@@ -1,0 +1,77 @@
+#!/bin/sh
+# Exercise the public SDN aliases against the real runner on a host where its
+# V4 scoped-environment provider is unavailable. This is a manual native
+# qualification: it needs a runner binary built from the selected source.
+set -eu
+if [ "$#" -ne 4 ] || [ "$1" != --binary ] || [ "$3" != --binary-sha256 ] || [ ! -x "$2" ]; then
+    echo "usage: $0 --binary <native-test-runner> --binary-sha256 <expected-sha256>" >&2
+    exit 2
+fi
+runner=$(CDPATH= cd -- "$(dirname -- "$2")" && pwd -P)/$(basename -- "$2")
+expected_runner_sha256=$4
+case "$expected_runner_sha256" in
+    *[!0-9a-f]*|'') echo "FAIL invalid expected runner SHA-256" >&2; exit 2 ;;
+esac
+if [ "${#expected_runner_sha256}" -ne 64 ]; then
+    echo "FAIL expected runner SHA-256 must contain 64 lowercase hex digits" >&2
+    exit 2
+fi
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+fixture=$repo/test/fixtures/test_runner_source_routes/calibration/public_sdn_guard_marker_spec.spl
+fixture_sha256=41bc17c60bccc4ddb31bff3a297ada97e45d2f1529a96fd8ba7d214beef26fc3
+sha256_file() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v sha256 >/dev/null 2>&1; then
+        sha256 -q "$1"
+    else
+        echo "FAIL no SHA-256 utility found (need shasum, sha256sum, or sha256)" >&2
+        return 1
+    fi
+}
+actual_fixture_sha256=$(sha256_file "$fixture")
+if [ "$actual_fixture_sha256" != "$fixture_sha256" ]; then
+    echo "FAIL fixture identity: expected $fixture_sha256, got $actual_fixture_sha256" >&2
+    exit 1
+fi
+runner_sha256=$(sha256_file "$runner")
+if [ "$runner_sha256" != "$expected_runner_sha256" ]; then
+    echo "FAIL runner identity: expected $expected_runner_sha256, got $runner_sha256" >&2
+    exit 1
+fi
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-public-sdn-guard.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+check_alias() {
+    name=$1
+    shift
+    marker=$work/$name.body-ran
+    set +e
+    SIMPLE_PUBLIC_SDN_GUARD_MARKER=$marker \
+        sh "$repo/scripts/bootstrap/run-process-group-timeout.shs" 30 2 \
+        "$runner" "$fixture" "$@" >"$work/$name.stdout" 2>"$work/$name.stderr"
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL $name: expected guarded exit 1, got $status" >&2
+        cat "$work/$name.stdout" "$work/$name.stderr" >&2
+        exit 1
+    fi
+    if ! grep -Fx '{error: "SDN worker scoped-environment process provider is unavailable or insufficient", schema: simple.test-runner.failure/v1, success: false, worker_exit_code: -1}' "$work/$name.stdout" >/dev/null; then
+        echo "FAIL $name: missing structured provider refusal" >&2
+        cat "$work/$name.stdout" "$work/$name.stderr" >&2
+        exit 1
+    fi
+    if [ -e "$marker" ]; then
+        echo "FAIL $name: test body wrote its execution marker despite provider refusal" >&2
+        exit 1
+    fi
+    echo "PASS $name: structured refusal; body marker absent"
+}
+
+check_alias public-sdn --sdn
+check_alias public-split --format sdn
+check_alias public-equals --format=sdn
+echo "PUBLIC_SDN_PROVIDER_GUARD_REGRESSION PASS aliases=3 runner_sha256=$runner_sha256 fixture_sha256=$actual_fixture_sha256"

@@ -122,3 +122,10 @@ Re-run the cluster with a symbol-presence pre-filter: for each row, extract the
 unresolved name from the message and record `grep -rl <name> src/ | wc -l`.
 Rows with count > 0 are export/import defects; only rows with count 0 are
 candidates for the stale category, and each still needs its own reason recorded.
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+reclassification recorded in-file; no spec deleted or weakened per rules. Left as recorded.

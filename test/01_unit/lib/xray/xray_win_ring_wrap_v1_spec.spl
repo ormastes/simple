@@ -1,0 +1,212 @@
+# @cover src/lib/nogc_sync_mut/trace/xray_win_flag_leaf_v1.spl
+# @req REQ-XRAY-V1-API-01
+"""
+# Windows XRay ring: wrap mode drain
+
+A `--xray` module built with `MirModule.xray_ring_wrap` exports
+`__simple_xray_ring_wrap_v2` and its edge keeps the most recent `capacity`
+edges: claim = atomicrmw add on the write index, slot = claim mod capacity,
+seq := 0, payload, then seq := claim + 1 (release). The drain reads claims in
+order, starting at most `capacity` behind the write index, and skips a slot
+whose seq is not `claim + 1` before AND after the payload read (overwritten or
+torn). Without the wrap symbol the drain is the drop-mode drain, unchanged.
+The writer protocol is replayed here in Simple over resident memory.
+"""
+use std.spec.*
+use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_ptr_read_i64, rt_ptr_write_i64, rt_ptr_write_u8}
+use std.nogc_sync_mut.trace.observer_native_channel_v1.*
+use std.nogc_sync_mut.trace.xray_win_flag_leaf_v1.*
+use std.nogc_sync_mut.concurrent.thread.{thread_spawn_with_i64_args_id, thread_join_by_id}
+
+@unsafe(reason: "atomic add on resident ring memory", capabilities: [ffi])
+extern fn rt_par_atomic_add_i64(addr: i64, value: i64) -> i64
+
+class FakeRingDll:
+    descriptor: i64
+    hook: i64
+    ring: i64
+    wrap: i64
+
+impl XrayWinModulePortV1 for FakeRingDll:
+    fn symbol(name: text) -> i64:
+        if name == XRAY_WIN_DESCRIPTOR_SYMBOL_V1: return self.descriptor
+        if name == XRAY_WIN_HOOK_SYMBOL_V1: return self.hook
+        if name == XRAY_WIN_RING_SYMBOL_V1: return self.ring
+        if name == XRAY_WIN_RING_WRAP_SYMBOL_V1: return self.wrap
+        0
+    fn handler_address() -> i64:
+        0
+
+fn fake_ring_dll(capacity: i64, wrap: bool) -> FakeRingDll:
+    val descriptor = rt_alloc(16)
+    val hook = rt_alloc(8)
+    val ring = rt_alloc(24 + capacity * 32)
+    val marker = if wrap: rt_alloc(8) else: 0
+    unsafe(capabilities: [ffi]):
+        val slot = rt_alloc(8)
+        rt_ptr_write_u8(slot, 0, 0)
+        rt_ptr_write_i64(descriptor, 0, 1)
+        rt_ptr_write_i64(descriptor, 8, slot)
+        rt_ptr_write_i64(hook, 0, 0)
+        rt_ptr_write_i64(ring, 0, capacity)
+        for i in 0..(2 + capacity * 4):
+            rt_ptr_write_i64(ring, 8 + i * 8, 0)
+        if wrap: rt_ptr_write_i64(marker, 0, 1)
+    FakeRingDll(descriptor: descriptor, hook: hook, ring: ring, wrap: marker)
+
+# Replays the emitted wrap-mode edge for one claim.
+fn wrap_store(ring: i64, claim: i64, site: i64, kind: i64):
+    unsafe(capabilities: [ffi]):
+        val rec = 24 + (claim % rt_ptr_read_i64(ring, 0)) * 32
+        rt_ptr_write_i64(ring, rec + 16, 0)
+        rt_ptr_write_i64(ring, rec, site)
+        rt_ptr_write_i64(ring, rec + 8, kind)
+        rt_ptr_write_i64(ring, rec + 24, claim * 10)
+        rt_ptr_write_i64(ring, rec + 16, claim + 1)
+
+fn wrap_edge(ring: i64, site: i64, kind: i64):
+    val claim = unsafe(capabilities: [ffi]): rt_par_atomic_add_i64(ring + 8, 1)
+    wrap_store(ring, claim, site, kind)
+
+# Replays the emitted drop-mode edge.
+fn drop_edge(ring: i64, site: i64, kind: i64):
+    unsafe(capabilities: [ffi]):
+        val i = rt_ptr_read_i64(ring, 8)
+        rt_ptr_write_i64(ring, 8, i + 1)
+        if i >= rt_ptr_read_i64(ring, 0):
+            rt_ptr_write_i64(ring, 16, rt_ptr_read_i64(ring, 16) + 1)
+        else:
+            rt_ptr_write_i64(ring, 24 + i * 32, site)
+            rt_ptr_write_i64(ring, 32 + i * 32, kind)
+            rt_ptr_write_i64(ring, 40 + i * 32, i + 1)
+
+fn channel(capacity: i64) -> i64:
+    val bytes = trace_native_channel_bytes_v1(capacity)
+    val arena = rt_alloc(bytes)
+    unsafe(capabilities: [ffi]):
+        expect(trace_native_channel_initialize_v1(arena, bytes, capacity, 7, 9)).to_equal(1)
+    arena
+
+# Adapter ids (site + 1) of every polled record, in channel order.
+fn polled_ids(arena: i64) -> [i64]:
+    var ids: [i64] = []
+    val out = rt_alloc(96)
+    unsafe(capabilities: [ffi]):
+        while trace_native_channel_poll_into_v1(arena, out, 96) == 1:
+            ids.push(rt_ptr_read_i64(out, 24) & 4294967295)
+    ids
+
+fn bound_leaf(dll: FakeRingDll, arena: i64) -> XrayWinFlagLeafV1:
+    var leaf = XrayWinFlagLeafV1.bind(dll)
+    expect(leaf.install(arena, 7u64, 9u64, 1u64)).to_equal(1)
+    leaf
+
+# One writer thread: `count` edges whose site encodes (thread, i).
+fn stress_writer(ring: i64, tid: i64) -> i64:
+    var i = 0
+    while i < 2000:
+        wrap_edge(ring, tid * 100000 + i, 0)
+        i = i + 1
+    0
+
+describe "XRay Windows ring wrap mode":
+    # @req REQ-XRAY-V1-API-01
+    it "keeps the last N edges once the ring wraps":
+        step("Capacity 4, ten edges with sites 0..9")
+        val dll = fake_ring_dll(4, true)
+        val arena = channel(32)
+        var leaf = bound_leaf(dll, arena)
+        for s in 0..10:
+            wrap_edge(dll.ring, s, 0)
+        step("Drain yields claims 6..9 in order; 6 older edges counted as skipped")
+        expect(leaf.drain()).to_equal(4)
+        expect(polled_ids(arena)).to_equal([7, 8, 9, 10])
+        expect(leaf.ring_skipped()).to_equal(6)
+        expect(leaf.ring_dropped()).to_equal(0)
+        step("Further edges continue from the read cursor")
+        wrap_edge(dll.ring, 10, 1)
+        expect(leaf.drain()).to_equal(1)
+        expect(polled_ids(arena)).to_equal([11])
+
+    it "skips a slot overwritten by a later lap and a torn slot":
+        val dll = fake_ring_dll(4, true)
+        val arena = channel(32)
+        var leaf = bound_leaf(dll, arena)
+        step("Claims 0..3 published, write index 4")
+        for s in 0..4:
+            wrap_edge(dll.ring, s, 0)
+        step("Claim 4 is mid-write in slot 0 (seq invalidated): claim 0 is gone, drain stops at 4")
+        unsafe(capabilities: [ffi]):
+            rt_ptr_write_i64(dll.ring, 8, 5)
+            rt_ptr_write_i64(dll.ring, 24 + 16, 0)
+        expect(leaf.drain()).to_equal(3)
+        expect(polled_ids(arena)).to_equal([2, 3, 4])
+        step("Claim 4 lapped by claim 8 before the reader saw it: skipped, not emitted")
+        unsafe(capabilities: [ffi]): rt_ptr_write_i64(dll.ring, 8, 9)
+        wrap_store(dll.ring, 8, 80, 0)
+        wrap_store(dll.ring, 5, 5, 0)
+        wrap_store(dll.ring, 6, 6, 0)
+        wrap_store(dll.ring, 7, 7, 0)
+        expect(leaf.drain()).to_equal(4)
+        expect(polled_ids(arena)).to_equal([6, 7, 8, 81])
+        step("Skipped: claim 0 (overwritten by in-flight claim 4) and claim 4 (lapped)")
+        expect(leaf.ring_skipped()).to_equal(2)
+
+    it "skips a claim a slow older-lap writer published over, on the next drain":
+        """Claim 4 (slot 0) is published, then the stalled writer of claim 0
+        stores seq 1 over it. The first drain waits; the second skips it."""
+        val dll = fake_ring_dll(4, true)
+        val arena = channel(32)
+        var leaf = bound_leaf(dll, arena)
+        unsafe(capabilities: [ffi]): rt_ptr_write_i64(dll.ring, 8, 6)
+        for c in 1..6:
+            wrap_store(dll.ring, c, c, 0)
+        wrap_store(dll.ring, 0, 0, 0)
+        step("Cursor starts at claim 2; claims 2, 3 emitted, claim 4 stalls")
+        expect(leaf.drain()).to_equal(2)
+        expect(polled_ids(arena)).to_equal([3, 4])
+        step("Still stuck: claim 4 skipped, claim 5 emitted")
+        expect(leaf.drain()).to_equal(1)
+        expect(polled_ids(arena)).to_equal([6])
+        expect(leaf.ring_skipped()).to_equal(3)
+
+    it "leaves a drop-mode ring (no wrap symbol) on the drop drain":
+        step("Capacity 2, three edges: first two kept, one dropped, none skipped")
+        val dll = fake_ring_dll(2, false)
+        val arena = channel(32)
+        var leaf = bound_leaf(dll, arena)
+        drop_edge(dll.ring, 0, 0)
+        drop_edge(dll.ring, 1, 0)
+        drop_edge(dll.ring, 2, 0)
+        expect(leaf.drain()).to_equal(2)
+        expect(polled_ids(arena)).to_equal([1, 2])
+        expect(leaf.ring_dropped()).to_equal(1)
+        expect(leaf.ring_skipped()).to_equal(0)
+
+    it "stays consistent under concurrent writer threads":
+        """Four threads claim with a real atomic add on the shared write index.
+        Every drained record must be a genuine (thread, i) edge, each emitted at
+        most once, and drained + skipped must account for every claim."""
+        val dll = fake_ring_dll(256, true)
+        val arena = channel(1024)
+        var leaf = bound_leaf(dll, arena)
+        var handles: [i64] = []
+        for t in 0..4:
+            handles.push(thread_spawn_with_i64_args_id(dll.ring, t + 1, \r, tid: stress_writer(r, tid)))
+        var drained = 0
+        for h in handles:
+            drained = drained + leaf.drain()
+            thread_join_by_id(h)
+        drained = drained + leaf.drain()
+        val total = unsafe(capabilities: [ffi]): rt_ptr_read_i64(dll.ring, 8)
+        expect(total).to_equal(8000)
+        expect(drained + leaf.ring_skipped()).to_equal(total)
+        var seen: Dict<i64, bool> = {}
+        for id in polled_ids(arena):
+            val site = id - 1
+            val tid = site / 100000
+            expect(tid >= 1 and tid <= 4).to_equal(true)
+            expect(site % 100000 < 2000).to_equal(true)
+            expect(seen.has(site)).to_equal(false)
+            seen[site] = true
+        expect(seen.len()).to_equal(drained)

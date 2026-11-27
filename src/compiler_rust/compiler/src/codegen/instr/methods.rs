@@ -1,16 +1,71 @@
 // Builtin method compilation for codegen.
 
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, Signature};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
 
 use super::helpers::{
+    string_cp_len_ref, tuple_len_ref,
     adapted_call, call_runtime_1, call_runtime_2, call_runtime_2_void, call_runtime_3, declare_named_bytes,
-    get_vreg_or_default, inline_runtime_array_len_value, inline_runtime_len_value,
+    float_to_int_saturating, get_vreg_or_default, inline_runtime_array_len_value, inline_runtime_len_value,
 };
 use super::{InstrContext, InstrResult};
 use crate::hir::TypeId;
 use crate::mir::VReg;
+
+/// Integer `max`/`min`/`clamp`/`abs` on a raw (unboxed) integer receiver,
+/// lowered to native Cranelift `smax`/`smin` (`umax`/`umin` when `unsigned`).
+/// Arguments are coerced to the receiver's width. Returns `None` when the
+/// receiver is not a raw integer or the method/arity does not match, so the
+/// caller falls through to its normal dispatch.
+/// See doc/08_tracking/bug/int_max_min_method_unresolved_in_jit_2026-11-13.md.
+pub(super) fn emit_int_min_max(
+    builder: &mut FunctionBuilder,
+    method: &str,
+    receiver_val: cranelift_codegen::ir::Value,
+    arg_vals: &[cranelift_codegen::ir::Value],
+    unsigned: bool,
+) -> Option<cranelift_codegen::ir::Value> {
+    let recv_ty = builder.func.dfg.value_type(receiver_val);
+    if !recv_ty.is_int() {
+        return None;
+    }
+    let mut fit = |builder: &mut FunctionBuilder, v: cranelift_codegen::ir::Value| {
+        let ty = builder.func.dfg.value_type(v);
+        if ty == recv_ty {
+            Some(v)
+        } else if !ty.is_int() {
+            None
+        } else if ty.bits() > recv_ty.bits() {
+            Some(builder.ins().ireduce(recv_ty, v))
+        } else if unsigned {
+            Some(builder.ins().uextend(recv_ty, v))
+        } else {
+            Some(builder.ins().sextend(recv_ty, v))
+        }
+    };
+    let max = |b: &mut FunctionBuilder, x, y| if unsigned { b.ins().umax(x, y) } else { b.ins().smax(x, y) };
+    let min = |b: &mut FunctionBuilder, x, y| if unsigned { b.ins().umin(x, y) } else { b.ins().smin(x, y) };
+    match (method, arg_vals.len()) {
+        ("abs", 0) => Some(if unsigned { receiver_val } else { builder.ins().iabs(receiver_val) }),
+        ("max", 1) => {
+            let a = fit(builder, arg_vals[0])?;
+            Some(max(builder, receiver_val, a))
+        }
+        ("min", 1) => {
+            let a = fit(builder, arg_vals[0])?;
+            Some(min(builder, receiver_val, a))
+        }
+        ("clamp", 2) => {
+            let lo = fit(builder, arg_vals[0])?;
+            let hi = fit(builder, arg_vals[1])?;
+            let lower_bounded = max(builder, receiver_val, lo);
+            Some(min(builder, lower_bounded, hi))
+        }
+        _ => None,
+    }
+}
 
 /// Pass value through for array/dict operations.
 /// Values that are already RuntimeValue (strings, arrays, objects) should be passed directly.
@@ -85,7 +140,9 @@ fn call_len_method<M: Module>(
         return inline_runtime_array_len_value(builder, receiver, ctx.fam_arrays);
     }
     if func_name == "rt_len" {
-        return inline_runtime_len_value(builder, receiver, ctx.baremetal, ctx.fam_arrays);
+        let cp_len = string_cp_len_ref(ctx, builder);
+        let tuple_len = tuple_len_ref(ctx, builder);
+        return inline_runtime_len_value(builder, receiver, ctx.baremetal, ctx.fam_arrays, cp_len, tuple_len);
     }
     if let Some(&len_id) = ctx.runtime_funcs.get(func_name) {
         let len_ref = ctx.module.declare_func_in_func(len_id, builder.func);
@@ -94,6 +151,267 @@ fn call_len_method<M: Module>(
     } else {
         builder.ins().iconst(types::I64, 0)
     }
+}
+
+pub(super) fn numeric_cast_target(method: &str) -> Option<TypeId> {
+    match method {
+        "to_u8" => Some(TypeId::U8),
+        "to_u16" => Some(TypeId::U16),
+        "to_u32" => Some(TypeId::U32),
+        "to_u64" => Some(TypeId::U64),
+        "to_i8" => Some(TypeId::I8),
+        "to_i16" => Some(TypeId::I16),
+        "to_i32" => Some(TypeId::I32),
+        "to_i64" | "to_int" => Some(TypeId::I64),
+        "to_f32" => Some(TypeId::F32),
+        "to_f64" | "to_float" => Some(TypeId::F64),
+        _ => None,
+    }
+}
+
+fn int_target_type(ty: TypeId) -> types::Type {
+    match ty {
+        TypeId::U8 | TypeId::I8 => types::I8,
+        TypeId::U16 | TypeId::I16 => types::I16,
+        TypeId::U32 | TypeId::I32 => types::I32,
+        _ => types::I64,
+    }
+}
+
+fn resize_int(
+    builder: &mut FunctionBuilder,
+    val: cranelift_codegen::ir::Value,
+    target_ty: types::Type,
+    from_signed: bool,
+) -> cranelift_codegen::ir::Value {
+    let src_ty = builder.func.dfg.value_type(val);
+    if src_ty == target_ty {
+        val
+    } else if src_ty.bits() > target_ty.bits() {
+        builder.ins().ireduce(target_ty, val)
+    } else if from_signed {
+        builder.ins().sextend(target_ty, val)
+    } else {
+        builder.ins().uextend(target_ty, val)
+    }
+}
+
+/// Lower a numeric cast method (`to_i8`..`to_u64`, `to_int`, `to_f32`,
+/// `to_f64`, `to_float`) uniformly for both `MirInst::BuiltinMethod` and
+/// `MirInst::MethodCallStatic`.
+pub(super) fn compile_numeric_cast_method<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    receiver: VReg,
+    receiver_val: cranelift_codegen::ir::Value,
+    method: &str,
+    erased_receiver: bool,
+) -> InstrResult<Option<(cranelift_codegen::ir::Value, TypeId)>> {
+    let Some(to_ty) = numeric_cast_target(method) else {
+        return Ok(None);
+    };
+    let src_ty = builder.func.dfg.value_type(receiver_val);
+    let recv_ty_known = ctx.vreg_types.get(&receiver).copied();
+    // Cranelift float type wins over a missing/int vreg type
+    // (float_method_chain_to_i64_returns_bits_2026-11-24.md).
+    let from_ty = match src_ty {
+        types::F64 => TypeId::F64,
+        types::F32 => TypeId::F32,
+        _ => recv_ty_known.unwrap_or(TypeId::I64),
+    };
+    let from_signed = matches!(from_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
+    let actual_is_float = src_ty == types::F32 || src_ty == types::F64;
+    let to_is_int = matches!(
+        to_ty,
+        TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+    );
+
+    if from_ty == TypeId::STRING && (to_is_int || matches!(to_ty, TypeId::F32 | TypeId::F64)) {
+        let helper = if to_is_int {
+            "rt_string_to_int"
+        } else {
+            "rt_string_to_float"
+        };
+        let parsed = call_runtime_1(ctx, builder, helper, receiver_val);
+        let converted = if to_is_int {
+            resize_int(builder, parsed, int_target_type(to_ty), true)
+        } else {
+            // rt_string_to_float returns a heap-boxed RuntimeValue, so unbox to raw f64.
+            let raw = call_runtime_1(ctx, builder, "rt_value_as_float", parsed);
+            if to_ty == TypeId::F32 {
+                builder.ins().fdemote(types::F32, raw)
+            } else {
+                raw
+            }
+        };
+        return Ok(Some((converted, to_ty)));
+    }
+
+    // Erased receiver (`list` element, `any` slot): `receiver_val` is a tagged
+    // `RuntimeValue` (I64). Dispatch by runtime tag rather than bit-casting,
+    // treating tagged ints (`n << 3`) as raw bits, or leaking `NIL` (3).
+    if erased_receiver
+        && src_ty == types::I64
+        && matches!(recv_ty_known, None | Some(TypeId::ANY))
+        && !matches!(from_ty, TypeId::F32 | TypeId::F64 | TypeId::STRING)
+    {
+        if to_is_int {
+            let width = int_target_type(to_ty);
+            let to_signed = matches!(to_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
+
+            let is_float_block = builder.create_block();
+            let check_int_block = builder.create_block();
+            let is_int_block = builder.create_block();
+            let is_str_block = builder.create_block();
+            let merge_block = builder.create_block();
+            builder.append_block_param(merge_block, width);
+
+            let is_float = call_runtime_1(ctx, builder, "rt_value_is_float", receiver_val);
+            builder.ins().brif(is_float, is_float_block, &[], check_int_block, &[]);
+
+            builder.switch_to_block(is_float_block);
+            builder.seal_block(is_float_block);
+            let f_val = call_runtime_1(ctx, builder, "rt_value_as_float", receiver_val);
+            let sat_int = float_to_int_saturating(builder, f_val, width, to_signed);
+            builder.ins().jump(merge_block, &[sat_int]);
+
+            builder.switch_to_block(check_int_block);
+            builder.seal_block(check_int_block);
+            let is_int = call_runtime_1(ctx, builder, "rt_value_is_int", receiver_val);
+            let is_bool = call_runtime_1(ctx, builder, "rt_value_is_bool", receiver_val);
+            let is_int_or_bool = builder.ins().bor(is_int, is_bool);
+            builder.ins().brif(is_int_or_bool, is_int_block, &[], is_str_block, &[]);
+
+            builder.switch_to_block(is_int_block);
+            builder.seal_block(is_int_block);
+            let decoded = call_runtime_1(ctx, builder, "rt_any_to_int", receiver_val);
+            let narrowed = resize_int(builder, decoded, width, true);
+            builder.ins().jump(merge_block, &[narrowed]);
+
+            builder.switch_to_block(is_str_block);
+            builder.seal_block(is_str_block);
+            // `rt_string_to_int` parses strings and safely returns 0 for NIL and
+            // any non-string heap value (never leaking NIL's 3 or a heap address).
+            let parsed = call_runtime_1(ctx, builder, "rt_string_to_int", receiver_val);
+            let parsed_width = resize_int(builder, parsed, width, true);
+            builder.ins().jump(merge_block, &[parsed_width]);
+
+            builder.switch_to_block(merge_block);
+            builder.seal_block(merge_block);
+            let converted = builder.block_params(merge_block)[0];
+            return Ok(Some((converted, to_ty)));
+        }
+        if matches!(to_ty, TypeId::F32 | TypeId::F64) {
+            let is_float_block = builder.create_block();
+            let check_int_block = builder.create_block();
+            let is_int_block = builder.create_block();
+            let sint_block = builder.create_block();
+            let heap_sign_check_block = builder.create_block();
+            let uint_block = builder.create_block();
+            let is_str_block = builder.create_block();
+            let merge_block = builder.create_block();
+            builder.append_block_param(merge_block, types::F64);
+
+            let is_float = call_runtime_1(ctx, builder, "rt_value_is_float", receiver_val);
+            builder.ins().brif(is_float, is_float_block, &[], check_int_block, &[]);
+
+            builder.switch_to_block(is_float_block);
+            builder.seal_block(is_float_block);
+            let f_from_float = call_runtime_1(ctx, builder, "rt_value_as_float", receiver_val);
+            builder.ins().jump(merge_block, &[f_from_float]);
+
+            builder.switch_to_block(check_int_block);
+            builder.seal_block(check_int_block);
+            let is_int = call_runtime_1(ctx, builder, "rt_value_is_int", receiver_val);
+            let is_bool = call_runtime_1(ctx, builder, "rt_value_is_bool", receiver_val);
+            let is_int_or_bool = builder.ins().bor(is_int, is_bool);
+            builder.ins().brif(is_int_or_bool, is_int_block, &[], is_str_block, &[]);
+
+            builder.switch_to_block(is_int_block);
+            builder.seal_block(is_int_block);
+            let iv = call_runtime_1(ctx, builder, "rt_any_to_int", receiver_val);
+            // Non-negative or non-heap (TAG_INT / TAG_SPECIAL bool) uses sint;
+            // only a heap-boxed word (`tag == 1`) with `iv < 0` can be either a
+            // negative wide HeapInt or an unsigned HeapUInt >= 2^63.
+            let is_neg = builder.ins().icmp_imm(IntCC::SignedLessThan, iv, 0);
+            let tag = builder.ins().band_imm(receiver_val, 7);
+            let is_heap = builder.ins().icmp_imm(IntCC::Equal, tag, 1);
+            let need_heap_sign_check = builder.ins().band(is_neg, is_heap);
+            builder
+                .ins()
+                .brif(need_heap_sign_check, heap_sign_check_block, &[], sint_block, &[]);
+
+            builder.switch_to_block(heap_sign_check_block);
+            builder.seal_block(heap_sign_check_block);
+            let signed_box = call_runtime_1(ctx, builder, "rt_value_int", iv);
+            let eq_signed = call_runtime_2(ctx, builder, "rt_value_eq", receiver_val, signed_box);
+            let is_signed_int = builder.ins().icmp_imm(IntCC::NotEqual, eq_signed, 0);
+            builder.ins().brif(is_signed_int, sint_block, &[], uint_block, &[]);
+
+            builder.switch_to_block(sint_block);
+            builder.seal_block(sint_block);
+            let f_from_sint = builder.ins().fcvt_from_sint(types::F64, iv);
+            builder.ins().jump(merge_block, &[f_from_sint]);
+
+            builder.switch_to_block(uint_block);
+            builder.seal_block(uint_block);
+            let f_from_uint = builder.ins().fcvt_from_uint(types::F64, iv);
+            builder.ins().jump(merge_block, &[f_from_uint]);
+
+            builder.switch_to_block(is_str_block);
+            builder.seal_block(is_str_block);
+            let parsed = call_runtime_1(ctx, builder, "rt_string_to_float", receiver_val);
+            let f_from_str = call_runtime_1(ctx, builder, "rt_value_as_float", parsed);
+            builder.ins().jump(merge_block, &[f_from_str]);
+
+            builder.switch_to_block(merge_block);
+            builder.seal_block(merge_block);
+            let raw_f64 = builder.block_params(merge_block)[0];
+            let converted = if to_ty == TypeId::F32 {
+                builder.ins().fdemote(types::F32, raw_f64)
+            } else {
+                raw_f64
+            };
+            return Ok(Some((converted, to_ty)));
+        }
+    }
+
+    if matches!(method, "to_i64" | "to_int") && super::int_cast_needs_runtime_dispatch(from_ty) {
+        let converted = call_runtime_1(ctx, builder, "rt_to_int_dynamic", receiver_val);
+        return Ok(Some((converted, TypeId::I64)));
+    }
+
+    let converted = if from_ty == to_ty {
+        receiver_val
+    } else if actual_is_float && to_is_int {
+        // Saturating, like the interpreter: `(-5.5).to_u8()` = 0, not SIGILL.
+        let to_signed = matches!(to_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
+        float_to_int_saturating(builder, receiver_val, int_target_type(to_ty), to_signed)
+    } else if actual_is_float && matches!(to_ty, TypeId::F32 | TypeId::F64) {
+        if src_ty == types::F32 && to_ty == TypeId::F64 {
+            builder.ins().fpromote(types::F64, receiver_val)
+        } else if src_ty == types::F64 && to_ty == TypeId::F32 {
+            builder.ins().fdemote(types::F32, receiver_val)
+        } else {
+            receiver_val
+        }
+    } else if to_is_int {
+        resize_int(builder, receiver_val, int_target_type(to_ty), from_signed)
+    } else if matches!(to_ty, TypeId::F32 | TypeId::F64) {
+        let float_val = if from_signed {
+            builder.ins().fcvt_from_sint(types::F64, receiver_val)
+        } else {
+            builder.ins().fcvt_from_uint(types::F64, receiver_val)
+        };
+        if to_ty == TypeId::F32 {
+            builder.ins().fdemote(types::F32, float_val)
+        } else {
+            float_val
+        }
+    } else {
+        receiver_val
+    };
+    Ok(Some((converted, to_ty)))
 }
 
 pub(crate) fn compile_builtin_method<M: Module>(
@@ -113,141 +431,42 @@ pub(crate) fn compile_builtin_method<M: Module>(
     // (`_ => from_ty`), which made `to_ty == from_ty` and emitted the receiver
     // UNCHANGED -- a silent no-op that still exited 0. Non-cast names must fall
     // through to the regular builtin dispatch further down.
-    let numeric_cast_target = match method {
-        "to_u8" => Some(TypeId::U8),
-        "to_u16" => Some(TypeId::U16),
-        "to_u32" => Some(TypeId::U32),
-        "to_u64" => Some(TypeId::U64),
-        "to_i8" => Some(TypeId::I8),
-        "to_i16" => Some(TypeId::I16),
-        "to_i32" => Some(TypeId::I32),
-        "to_i64" | "to_int" => Some(TypeId::I64),
-        "to_f32" => Some(TypeId::F32),
-        "to_f64" | "to_float" => Some(TypeId::F64),
-        _ => None,
-    };
-    if let Some(to_ty) = numeric_cast_target {
-        let from_ty = ctx.vreg_types.get(&receiver).copied().unwrap_or(TypeId::I64);
-        let src_ty = builder.func.dfg.value_type(receiver_val);
-        let from_signed = matches!(from_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
-        let actual_is_float = src_ty == types::F32 || src_ty == types::F64;
-        let to_is_int = matches!(
-            to_ty,
-            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
-        );
-        // A STRING receiver must be PARSED, never bit-converted. Without this,
-        // `text.to_int()` fell through to the generic conversion below, which
-        // assumes `receiver_val` is already a raw numeric register and simply
-        // handed back the string's HEAP POINTER as a "successful" integer --
-        // a large, run-varying value, exit 0, no warning, and `?? -1` could not
-        // rescue it because the cast never reported failure. The sibling
-        // dispatch in `closures_structs.rs::try_compile_builtin_method_call`
-        // has had this branch for a while; this one did not, so which of the
-        // two compiled a given call decided whether it was correct.
-        // See doc/08_tracking/bug/jit_substring_chained_to_int_returns_pointer_2026-08-04.md
-        if from_ty == TypeId::STRING && (to_is_int || matches!(to_ty, TypeId::F32 | TypeId::F64)) {
-            let helper = if to_is_int {
-                "rt_string_to_int"
-            } else {
-                "rt_string_to_float"
-            };
-            let parsed = call_runtime_1(ctx, builder, helper, receiver_val);
-            let converted = if to_is_int {
-                match to_ty {
-                    TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, parsed),
-                    TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, parsed),
-                    TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, parsed),
-                    _ => parsed,
-                }
-            } else {
-                // rt_string_to_float returns a heap-boxed RuntimeValue (like
-                // rt_value_float), so it must be unboxed to a genuine raw f64
-                // register rather than used as-is.
-                let raw = call_runtime_1(ctx, builder, "rt_value_as_float", parsed);
-                if to_ty == TypeId::F32 {
-                    builder.ins().fdemote(types::F32, raw)
-                } else {
-                    raw
-                }
-            };
-            if let Some(d) = dest {
-                ctx.vreg_values.insert(*d, converted);
-                ctx.vreg_types.insert(*d, to_ty);
-            }
-            return Ok(());
-        }
-        // A nullable text value can retain Pointer<text> after `??`.
-        // Runtime dispatch parses its string handle and preserves genuine
-        // integer receivers; known primitive casts keep their width rules.
-        if matches!(method, "to_i64" | "to_int") && super::int_cast_needs_runtime_dispatch(from_ty) {
-            let converted = call_runtime_1(ctx, builder, "rt_to_int_dynamic", receiver_val);
-            if let Some(d) = dest {
-                ctx.vreg_values.insert(*d, converted);
-                ctx.vreg_types.insert(*d, TypeId::I64);
-            }
-            return Ok(());
-        }
-        let converted = if from_ty == to_ty {
-            receiver_val
-        } else if actual_is_float && to_is_int {
-            let to_signed = matches!(to_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
-            let widened = if to_signed {
-                builder.ins().fcvt_to_sint(types::I64, receiver_val)
-            } else {
-                builder.ins().fcvt_to_uint(types::I64, receiver_val)
-            };
-            match to_ty {
-                TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, widened),
-                TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, widened),
-                TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, widened),
-                _ => widened,
-            }
-        } else if actual_is_float && matches!(to_ty, TypeId::F32 | TypeId::F64) {
-            if src_ty == types::F32 && to_ty == TypeId::F64 {
-                builder.ins().fpromote(types::F64, receiver_val)
-            } else if src_ty == types::F64 && to_ty == TypeId::F32 {
-                builder.ins().fdemote(types::F32, receiver_val)
-            } else {
-                receiver_val
-            }
-        } else {
-            match to_ty {
-                TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, receiver_val),
-                TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, receiver_val),
-                TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, receiver_val),
-                TypeId::U64 | TypeId::I64 => match src_ty {
-                    types::I8 | types::I16 | types::I32 => {
-                        if from_signed {
-                            builder.ins().sextend(types::I64, receiver_val)
-                        } else {
-                            builder.ins().uextend(types::I64, receiver_val)
-                        }
-                    }
-                    _ => receiver_val,
-                },
-                TypeId::F32 | TypeId::F64 => {
-                    let float_val = if from_signed {
-                        builder.ins().fcvt_from_sint(types::F64, receiver_val)
-                    } else {
-                        builder.ins().fcvt_from_uint(types::F64, receiver_val)
-                    };
-                    if to_ty == TypeId::F32 {
-                        builder.ins().fdemote(types::F32, float_val)
-                    } else {
-                        float_val
-                    }
-                }
-                _ => receiver_val,
-            }
-        };
+    let erased_receiver = receiver_type.is_empty() || matches!(receiver_type, "Any" | "any" | "?");
+    if let Some((converted, to_ty)) =
+        compile_numeric_cast_method(ctx, builder, receiver, receiver_val, method, erased_receiver)?
+    {
         if let Some(d) = dest {
             ctx.vreg_values.insert(*d, converted);
+            ctx.vreg_types.insert(*d, to_ty);
         }
         return Ok(());
     }
+    // Integer max/min/clamp/abs (see emit_int_min_max).
+    // Only a receiver PROVEN to be an integer: an untyped vreg may be a tagged
+    // handle whose own `max` must not be replaced by an integer compare.
+    if matches!(method, "max" | "min" | "clamp" | "abs") && ctx.vreg_types.contains_key(&receiver) {
+        let recv_ty_id = ctx.vreg_types.get(&receiver).copied().unwrap_or(TypeId::I64);
+        if matches!(
+            recv_ty_id,
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+        ) {
+            let unsigned = matches!(recv_ty_id, TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64);
+            let mut arg_vals = Vec::with_capacity(args.len());
+            for a in args {
+                arg_vals.push(ctx.get_vreg(a)?);
+            }
+            if let Some(result_val) = emit_int_min_max(builder, method, receiver_val, &arg_vals, unsigned) {
+                if let Some(d) = dest {
+                    ctx.vreg_values.insert(*d, result_val);
+                    ctx.vreg_types.insert(*d, recv_ty_id);
+                }
+                return Ok(());
+            }
+        }
+    }
     // FR-COMPILER-012: scalar float intrinsics — sqrt, abs, floor, ceil, round
     // These are first-class Cranelift instructions for IEEE 754 floats.
-    if (crate::codegen::scalar_float_methods::is_native_unary(method) && !matches!(method, "trunc" | "round")) {
+    if crate::codegen::scalar_float_methods::is_native_unary(method) && !matches!(method, "trunc" | "round") {
         let src_ty = builder.func.dfg.value_type(receiver_val);
         let is_float = src_ty == types::F32 || src_ty == types::F64;
         if is_float {
@@ -348,6 +567,20 @@ pub(crate) fn compile_builtin_method<M: Module>(
             }
         }
     }
+    // Integer predicates / sign / pow and float classification — inline
+    // Cranelift, matching the interpreter's `handle_int_methods` and float
+    // handlers. doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md
+    {
+        if let Some((val, ty)) = compile_scalar_parity_method(ctx, builder, receiver_type, method, receiver_val, args)? {
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, val);
+                if ty == TypeId::BOOL {
+                    ctx.vreg_types.insert(*d, TypeId::BOOL);
+                }
+            }
+            return Ok(());
+        }
+    }
     let result = match (receiver_type, method) {
         ("Array", "push") | ("array", "push") => {
             let arg_val = ctx.get_vreg(&args[0])?;
@@ -368,7 +601,7 @@ pub(crate) fn compile_builtin_method<M: Module>(
         ("Array", "get") | ("array", "get") => {
             let idx_val = ctx.get_vreg(&args[0])?;
             let wrapped_idx = wrap_value(ctx, builder, args[0], idx_val);
-            Some(call_runtime_2(ctx, builder, "rt_index_get", receiver_val, wrapped_idx))
+            Some(call_runtime_2(ctx, builder, "rt_get", receiver_val, wrapped_idx))
         }
         ("Array", "set") | ("array", "set") => {
             let idx_val = ctx.get_vreg(&args[0])?;
@@ -383,6 +616,15 @@ pub(crate) fn compile_builtin_method<M: Module>(
             let result_i8 = call_runtime_1(ctx, builder, "rt_array_clear", receiver_val);
             Some(super::helpers::safe_extend_to_i64(builder, result_i8))
         }
+        // `[T].reserve(additional)` — capacity hint; contents and `len` are
+        // untouched and the array header never moves, so the receiver vreg
+        // stays valid. Compiled as a no-op (no runtime call): reserve has no
+        // observable effect. See the matching arm in closures_structs.rs and
+        // doc/08_tracking/bug/compiler_seed_missing_array_reserve_2026-11-12.md.
+        ("Array", "reserve") | ("array", "reserve") => {
+            let _arg_val = ctx.get_vreg(&args[0])?;
+            Some(receiver_val)
+        }
         ("Array", "merge") | ("array", "merge") => {
             let other_val = ctx.get_vreg(&args[0])?;
             let count = call_len_method(ctx, builder, "rt_array_len", other_val);
@@ -390,7 +632,8 @@ pub(crate) fn compile_builtin_method<M: Module>(
             Some(receiver_val)
         }
         ("String", "len") | ("string", "len") | ("String", "length") | ("string", "length") => {
-            Some(call_len_method(ctx, builder, "rt_string_len", receiver_val))
+            // Code points (ADR-005 item 5); `byte_len` is the rt_string_len route.
+            Some(call_len_method(ctx, builder, "rt_string_char_count", receiver_val))
         }
         ("String", "concat") | ("string", "concat") => {
             let arg_val = ctx.get_vreg(&args[0])?;
@@ -491,8 +734,32 @@ pub(crate) fn compile_builtin_method<M: Module>(
         | ("string", "to_float")
         | ("String", "to_f64")
         | ("string", "to_f64") => Some(call_runtime_1(ctx, builder, "rt_string_to_float", receiver_val)),
+        ("String", "to_int") | ("string", "to_int") | ("String", "to_i64") | ("string", "to_i64") => {
+            Some(call_runtime_1(ctx, builder, "rt_string_to_int", receiver_val))
+        }
+        ("String", "parse_int")
+        | ("string", "parse_int")
+        | ("String", "parse_i32")
+        | ("string", "parse_i32")
+        | ("String", "parse_i64")
+        | ("string", "parse_i64") => Some(call_runtime_1(ctx, builder, "rt_string_parse_int", receiver_val)),
+        ("String", "ptr") | ("string", "ptr") => Some(call_runtime_1(ctx, builder, "rt_string_data", receiver_val)),
+        ("Array", "ptr") | ("array", "ptr") | ("Array", "data_ptr") | ("array", "data_ptr") => {
+            Some(call_runtime_1(ctx, builder, "rt_array_data_ptr", receiver_val))
+        }
+        ("Array", "rev")
+        | ("array", "rev")
+        | ("Array", "reversed")
+        | ("array", "reversed")
+        | ("String", "rev")
+        | ("string", "rev")
+        | ("String", "reversed")
+        | ("string", "reversed") => Some(call_runtime_1(ctx, builder, "rt_reverse", receiver_val)),
+        ("Array", "reverse") | ("array", "reverse") | ("String", "reverse") | ("string", "reverse") => {
+            Some(call_runtime_1(ctx, builder, "rt_reverse_mut", receiver_val))
+        }
         ("Array", "slice") | ("array", "slice") | ("String", "slice") | ("string", "slice") => {
-            let slice_id = ctx.runtime_funcs["rt_slice"];
+            let slice_id = ctx.runtime_funcs["rt_slice_text_bytes"];
             let slice_ref = ctx.module.declare_func_in_func(slice_id, builder.func);
             let start = ctx.get_vreg(&args[0])?;
             let end = if args.len() > 1 {
@@ -596,4 +863,134 @@ pub(crate) fn compile_builtin_method<M: Module>(
         ctx.vreg_values.insert(*d, val);
     }
     Ok(())
+}
+
+/// Integer predicates (`is_even`/`is_odd`/`is_zero`/`is_positive`/
+/// `is_negative`), integer `sign`/`signum`/`pow`, and float
+/// `is_nan`/`is_finite`/`is_infinite`, lowered inline. Mirrors the
+/// interpreter's `handle_int_methods` / float handlers
+/// (`interpreter_method/primitives.rs`). Returns the value and its type
+/// (`BOOL` for predicates), or `None` when `method` is not one of these.
+/// Shared by `compile_builtin_method` and the static method-call path in
+/// `closures_structs.rs` so the two JIT routes cannot drift.
+/// doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md
+pub(crate) fn compile_scalar_parity_method<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    receiver_type: &str,
+    method: &str,
+    receiver_val: cranelift_codegen::ir::Value,
+    args: &[VReg],
+) -> InstrResult<Option<(cranelift_codegen::ir::Value, TypeId)>> {
+    let src_ty = builder.func.dfg.value_type(receiver_val);
+    let is_float = src_ty == types::F32 || src_ty == types::F64;
+    let unsigned = receiver_type.starts_with('u') || receiver_type.starts_with('U');
+    Ok(if src_ty.is_int() && crate::codegen::scalar_float_methods::is_int_predicate(method) {
+        let zero = builder.ins().iconst(src_ty, 0);
+        let flag = match method {
+            "is_even" | "is_odd" => {
+                let bit = builder.ins().band_imm(receiver_val, 1);
+                let cc = if method == "is_even" { IntCC::Equal } else { IntCC::NotEqual };
+                builder.ins().icmp(cc, bit, zero)
+            }
+            "is_zero" => builder.ins().icmp(IntCC::Equal, receiver_val, zero),
+            "is_positive" => {
+                let cc = if unsigned { IntCC::UnsignedGreaterThan } else { IntCC::SignedGreaterThan };
+                builder.ins().icmp(cc, receiver_val, zero)
+            }
+            _ => {
+                if unsigned {
+                    builder.ins().iconst(types::I8, 0)
+                } else {
+                    builder.ins().icmp(IntCC::SignedLessThan, receiver_val, zero)
+                }
+            }
+        };
+        Some((flag, TypeId::BOOL))
+    } else if src_ty.is_int() && method == "to_hex" && args.is_empty() {
+        // `rt_i64_to_hex` (C twin in runtime_native.c) formats the 64-bit
+        // two's-complement pattern, matching the interpreter's `{:x}`.
+        let wide = if src_ty == types::I64 {
+            receiver_val
+        } else if unsigned {
+            builder.ins().uextend(types::I64, receiver_val)
+        } else {
+            builder.ins().sextend(types::I64, receiver_val)
+        };
+        let func_id = ctx.runtime_funcs["rt_i64_to_hex"];
+        let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+        let call = adapted_call(builder, func_ref, &[wide]);
+        Some((builder.inst_results(call)[0], TypeId::STRING))
+    } else if src_ty.is_int() && matches!(method, "sign" | "signum") {
+        let zero = builder.ins().iconst(src_ty, 0);
+        let gt_cc = if unsigned { IntCC::UnsignedGreaterThan } else { IntCC::SignedGreaterThan };
+        let gt = builder.ins().icmp(gt_cc, receiver_val, zero);
+        let gt_w = builder.ins().uextend(src_ty, gt);
+        let lt_w = if unsigned {
+            builder.ins().iconst(src_ty, 0)
+        } else {
+            let lt = builder.ins().icmp(IntCC::SignedLessThan, receiver_val, zero);
+            builder.ins().uextend(src_ty, lt)
+        };
+        Some((builder.ins().isub(gt_w, lt_w), TypeId::ANY))
+    } else if src_ty.is_int() && method == "pow" && args.len() == 1 {
+        // Square-and-multiply; a negative exponent yields 1 (empty loop).
+        let exp_raw = ctx.get_vreg(&args[0])?;
+        let exp_ty = builder.func.dfg.value_type(exp_raw);
+        let exp = if exp_ty == src_ty {
+            exp_raw
+        } else if exp_ty.bits() < src_ty.bits() {
+            builder.ins().sextend(src_ty, exp_raw)
+        } else {
+            builder.ins().ireduce(src_ty, exp_raw)
+        };
+        let header = builder.create_block();
+        let body = builder.create_block();
+        let exit = builder.create_block();
+        for _ in 0..3 {
+            builder.append_block_param(header, src_ty);
+        }
+        builder.append_block_param(exit, src_ty);
+        let one = builder.ins().iconst(src_ty, 1);
+        builder.ins().jump(header, &[one, receiver_val, exp]);
+        builder.switch_to_block(header);
+        let acc = builder.block_params(header)[0];
+        let base = builder.block_params(header)[1];
+        let e = builder.block_params(header)[2];
+        let zero = builder.ins().iconst(src_ty, 0);
+        let more = builder.ins().icmp(IntCC::SignedGreaterThan, e, zero);
+        builder.ins().brif(more, body, &[], exit, &[acc]);
+        builder.switch_to_block(body);
+        let bit = builder.ins().band_imm(e, 1);
+        let prod = builder.ins().imul(acc, base);
+        let next_acc = builder.ins().select(bit, prod, acc);
+        let next_base = builder.ins().imul(base, base);
+        let next_e = builder.ins().sshr_imm(e, 1);
+        builder.ins().jump(header, &[next_acc, next_base, next_e]);
+        builder.seal_block(body);
+        builder.seal_block(header);
+        builder.switch_to_block(exit);
+        builder.seal_block(exit);
+        Some((builder.block_params(exit)[0], TypeId::ANY))
+    } else if is_float && matches!(method, "is_nan" | "is_finite" | "is_infinite") {
+        let flag = match method {
+            "is_nan" => builder.ins().fcmp(FloatCC::Unordered, receiver_val, receiver_val),
+            _ => {
+                let abs = builder.ins().fabs(receiver_val);
+                let inf = if src_ty == types::F32 {
+                    builder.ins().f32const(f32::INFINITY)
+                } else {
+                    builder.ins().f64const(f64::INFINITY)
+                };
+                if method == "is_finite" {
+                    builder.ins().fcmp(FloatCC::LessThan, abs, inf)
+                } else {
+                    builder.ins().fcmp(FloatCC::Equal, abs, inf)
+                }
+            }
+        };
+        Some((flag, TypeId::BOOL))
+    } else {
+        None
+    })
 }

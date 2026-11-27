@@ -1,7 +1,8 @@
 # SCV quarantine GC command (MIG-21, stabilization §9).
 #
 # `scv gc` is a DRY RUN by default: it lists would-delete unreachable objects
-# and deletes nothing. Real pruning requires `scv gc --prune --checkpoint <id>`
+# and deletes nothing (it does write `.scv/store` pins, even without --prune,
+# when that store exists). Real pruning requires `scv gc --prune --checkpoint <id>`
 # and only proceeds when ALL of the following hold, otherwise it FAILs naming
 # the unmet condition:
 #   - fsck is clean
@@ -13,8 +14,10 @@
 use std.scv.store.{scv_repo_exists}
 use std.scv.integrity.{scv_fsck}
 use std.scv.stabilize.{scv_checkpoint_verify}
-use std.scv.maintenance.{SCV_GC_QUARANTINE_DAYS, scv_gc_roots_reachable, scv_gc_unreachable_rows, scv_gc_quarantine}
+use std.scv.maintenance.{SCV_GC_QUARANTINE_DAYS, scv_gc_roots_reachable_checked, scv_gc_unreachable_rows, scv_gc_quarantine}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.nogc_sync_mut.io.dir_ops.{is_dir}
+use std.nogc_sync_mut.storage.scv_adapter_v1.{scv_adapter_v1_store_root, scv_adapter_v1_pin_reachable, scv_adapter_v1_run_owner}
 
 fn scv_gc_command(root: text, args: [text]) -> text:
     if not scv_repo_exists(root):
@@ -34,7 +37,18 @@ fn scv_gc_command(root: text, args: [text]) -> text:
         else:
             return "FAIL — unknown gc option: {arg}\n"
         i = i + 1
-    val reachable = scv_gc_roots_reachable(root)
+    val reachable = match scv_gc_roots_reachable_checked(root):
+        Ok(value): value
+        Err(error): return error
+    # Repos without .scv/store behave exactly as before; with one, reachable
+    # chunks are imported and pinned for the shared store (fail closed).
+    if is_dir(scv_adapter_v1_store_root(root)):
+        val run_owner = scv_adapter_v1_run_owner(root)
+        if run_owner == "":
+            return "FAIL — scv store pin failed: pin-owner-invalid\n"
+        val pinned = scv_adapter_v1_pin_reachable(root, reachable, run_owner)
+        if pinned.status != "ok":
+            return "FAIL — scv store pin failed: {pinned.reason}\n"
     val rows = scv_gc_unreachable_rows(root, reachable)
     var out_rows: [text] = []
     for row in rows:
@@ -53,7 +67,9 @@ fn scv_gc_command(root: text, args: [text]) -> text:
     val verify = scv_checkpoint_verify(root, checkpoint)
     if not verify.starts_with("OK"):
         return out + verify + "FAIL — checkpoint {checkpoint} did not verify, refusing to prune\n"
-    val (moved, young, qdir) = scv_gc_quarantine(root, reachable, SCV_GC_QUARANTINE_DAYS, current_time_ms())
+    val (moved, young, qdir) = match scv_gc_quarantine(root, reachable, SCV_GC_QUARANTINE_DAYS, current_time_ms()):
+        Ok(value): value
+        Err(error): return error
     out = out + "quarantined={moved} kept_young={young} quarantine_dir={qdir}\n"
     if rows.len() > 0 and moved == 0:
         return out + "FAIL — retention age not met (SCV_GC_QUARANTINE_DAYS={SCV_GC_QUARANTINE_DAYS}): 0 of {rows.len()} unreachable object(s) past quarantine age\n"

@@ -1,0 +1,85 @@
+# Primary terminal metadata and native-owner adoption dispatch only. These
+# values issue no Input/Geometry grants and never reconstruct a process owner.
+use std.common.contracts.container.execution_v2.ContainerExecutionPlanV2
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.stream_v2.ContainerOutputIdentityV2
+use std.common.contracts.container.primary_input_v1.container_primary_input_plan_match_v1
+use std.common.contracts.mux.session_runtime_control_v1.SessionRuntimeControlTargetV1
+use std.nogc_async_mut.container.terminal_session_v1.{ContainerOwnedTerminalSessionV1,
+    ContainerPrimaryAttachAdoptionV1, container_primary_attach_plan_v1,
+    container_primary_attach_identity_v1, container_primary_attach_adoption_v1,
+    container_primary_attach_adopt_v1}
+use std.nogc_async_mut.container.terminal_session_v2.ContainerOwnedTerminalSessionV2
+use std.nogc_async_mut.container.providers.windows.primary_connection_v2.{
+    windows_primary_connection_plan_v2, windows_primary_connection_identity_v2,
+    windows_primary_connection_adoption_v2, windows_primary_connection_adopt_v2,
+    windows_primary_connection_closed_bytes_v2}
+
+pub struct ContainerPrimaryTerminalViewV2:
+    workload: ContainerExecutionPlanV2
+    runtime: RuntimeIdentityV1
+    identity: ContainerOutputIdentityV2
+    terminal_mode: text
+    request_digest: text
+    fingerprint: text
+    adoption: ContainerPrimaryAttachAdoptionV1?
+
+pub struct ContainerPrimaryTerminalAdoptionTurnV2:
+    session: ContainerOwnedTerminalSessionV2
+    error: text
+
+pub fn container_primary_connection_closed_bytes_v2(session: ContainerOwnedTerminalSessionV2) -> Result<text, text>:
+    match session:
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(connection): windows_primary_connection_closed_bytes_v2(connection)
+        case _: Err("container-primary-connection-evidence-domain-required")
+
+# Metadata remains available after native cleanup for exact retained-owner
+# correlation. Reading this view neither validates liveness nor grants effects.
+pub fn container_primary_terminal_view_v2(session: ContainerOwnedTerminalSessionV2) -> Result<ContainerPrimaryTerminalViewV2, text>:
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.PrimaryAttach(primary)):
+            val plan = container_primary_attach_plan_v1(primary)
+            Ok(ContainerPrimaryTerminalViewV2(workload: plan.workload, runtime: plan.runtime,
+                identity: plan.identity, terminal_mode: plan.terminal_mode, request_digest: plan.request_digest,
+                fingerprint: container_primary_attach_identity_v1(primary),
+                adoption: container_primary_attach_adoption_v1(primary)))
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(connection):
+            val plan = windows_primary_connection_plan_v2(connection)
+            Ok(ContainerPrimaryTerminalViewV2(workload: plan.workload, runtime: plan.runtime,
+                identity: plan.identity, terminal_mode: plan.terminal_mode, request_digest: plan.request_digest,
+                fingerprint: windows_primary_connection_identity_v2(connection),
+                adoption: windows_primary_connection_adoption_v2(connection)))
+        case _: Err("container-primary-terminal-required")
+
+fn adoption_target_matches(adoption: ContainerPrimaryAttachAdoptionV1,
+        target: SessionRuntimeControlTargetV1) -> bool:
+    (adoption.binding_uid == target.binding_uid and
+        adoption.service_incarnation == target.service_incarnation and
+        adoption.session_id == target.session_id and adoption.window_id == target.window_id and
+        adoption.pane_id == target.pane_id and adoption.service_epoch == target.service_epoch and
+        adoption.child_incarnation == target.child_incarnation)
+
+pub fn container_primary_terminal_adopt_v2(session: ContainerOwnedTerminalSessionV2,
+        adoption: ContainerPrimaryAttachAdoptionV1,
+        target: SessionRuntimeControlTargetV1) -> ContainerPrimaryTerminalAdoptionTurnV2:
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.PrimaryAttach(primary)):
+            val matched = container_primary_input_plan_match_v1(container_primary_attach_plan_v1(primary), target)
+            if matched.is_err():
+                return ContainerPrimaryTerminalAdoptionTurnV2(session: session, error: matched.unwrap_err())
+            if not adoption_target_matches(adoption, target):
+                return ContainerPrimaryTerminalAdoptionTurnV2(session: session, error: "container-primary-terminal-adoption-target")
+            # The actual V1 adopter validates the live native session before
+            # committing adoption; no copied view or target can replace it.
+            val turn = container_primary_attach_adopt_v1(primary, adoption)
+            ContainerPrimaryTerminalAdoptionTurnV2(
+                session: ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.PrimaryAttach(turn.session)),
+                error: turn.error)
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(connection):
+            # The native connection adopter validates its retained lease, exact
+            # target/plan and adoption tuple before establishing its binding.
+            val turn = windows_primary_connection_adopt_v2(connection, adoption, target)
+            ContainerPrimaryTerminalAdoptionTurnV2(
+                session: ContainerOwnedTerminalSessionV2.WindowsConnection(turn.session), error: turn.error)
+        case _:
+            ContainerPrimaryTerminalAdoptionTurnV2(session: session, error: "container-primary-terminal-required")

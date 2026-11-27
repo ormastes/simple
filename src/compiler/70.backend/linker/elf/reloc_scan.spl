@@ -50,19 +50,21 @@ val SYMREF_ABS: i64 = 3        # SHN_ABS or no symbol: a position-independent co
 # Relocation classes
 # ============================================================================
 
-val RC_NONE: i64 = 0
+pub val RC_NONE: i64 = 0
 val RC_ABS64: i64 = 1        # 64-bit absolute word
 val RC_ABS_NARROW: i64 = 2   # absolute value truncated to < 64 bits (not PIC)
 val RC_PCREL: i64 = 3        # PC-/page-relative (incl. the :lo12: half of ADRP pairs)
-val RC_BRANCH: i64 = 4       # call/jump that may go through a PLT
-val RC_GOT: i64 = 5          # GOT-indirect, not relaxable
-val RC_GOT_RELAX: i64 = 6    # x86_64 GOTPCRELX / REX_GOTPCRELX
-val RC_TLS_LE: i64 = 7       # local-exec offset from the thread pointer
-val RC_TLS_IE: i64 = 8       # initial-exec GOT slot containing a TPOFF
-val RC_SIZE: i64 = 9         # link-time symbol extent plus addend
-val RC_TLS_LD: i64 = 10      # local-dynamic offset from the PT_TLS block start
-val RC_TLS_MOD: i64 = 11     # statically known TLS module identifier
+pub val RC_BRANCH: i64 = 4       # call/jump that may go through a PLT
+pub val RC_GOT: i64 = 5          # GOT-indirect, not relaxable
+pub val RC_GOT_RELAX: i64 = 6    # x86_64 GOTPCRELX / REX_GOTPCRELX
+pub val RC_TLS_LE: i64 = 7       # local-exec offset from the thread pointer
+pub val RC_TLS_IE: i64 = 8       # initial-exec GOT slot containing a TPOFF
+pub val RC_SIZE: i64 = 9         # link-time symbol extent plus addend
+pub val RC_TLS_LD: i64 = 10      # local-dynamic offset from the PT_TLS block start
+pub val RC_TLS_MOD: i64 = 11     # statically known TLS module identifier
 val RC_PLTOFF: i64 = 12      # function/PLT address relative to the GOT base
+pub val RC_TLS_GD: i64 = 13       # general-dynamic GOT pair (DTPMOD, DTPOFF) for one symbol
+pub val RC_TLS_LDM: i64 = 14      # local-dynamic GOT pair (DTPMOD, 0) for the executable's module
 
 fn elf_reloc_class(target: RelocArch, rtype: i64) -> i64:
     if target == RelocArch.Riscv64 or target == RelocArch.Riscv32:
@@ -74,6 +76,28 @@ fn elf_reloc_class(target: RelocArch, rtype: i64) -> i64:
         if rtype == 16 or rtype == 17 or rtype == 18 or rtype == 19 or rtype == 44 or rtype == 45 or rtype == 59:
             return RC_BRANCH
         if rtype == 1 or (rtype >= 26 and rtype <= 28): return RC_ABS_NARROW
+        return RC_PCREL
+    if target == RelocArch.I386:
+        if rtype == 0: return RC_NONE
+        if rtype == 1 or rtype == 20 or rtype == 22: return RC_ABS_NARROW
+        if rtype == 4: return RC_BRANCH
+        if rtype == 3 or rtype == 43: return RC_GOT
+        if rtype == 17: return RC_TLS_LE   # R_386_TLS_LE: S - TP (variant II)
+        if rtype == 16: return RC_TLS_IE   # R_386_TLS_GOTIE: G + A - GOT (slot holds TPOFF)
+        return RC_PCREL   # PC32/PC16/PC8, and GOTPC/GOTOFF (GOT-base relative, no slot)
+    if target == RelocArch.Arm32:
+        if rtype == 0 or rtype == 40: return RC_NONE
+        if rtype == 26 or rtype == 96: return RC_GOT  # GOT_BREL: G + A - GOT_ORG; GOT_PREL: G + A - P
+        if rtype == 108: return RC_TLS_LE  # R_ARM_TLS_LE32: S + A - TP (variant I)
+        if rtype == 107: return RC_TLS_IE  # R_ARM_TLS_IE32: GOT(S) + A - P
+        if rtype == 104: return RC_TLS_GD  # R_ARM_TLS_GD32: GOT pair(S) + A - P
+        if rtype == 105: return RC_TLS_LDM # R_ARM_TLS_LDM32: module GOT pair + A - P
+        if rtype == 106: return RC_TLS_LD  # R_ARM_TLS_LDO32: S + A - TLS block start
+        if rtype == 2 or rtype == 5 or rtype == 8 or rtype == 38 or rtype == 43 or rtype == 44 or
+                rtype == 47 or rtype == 48:
+            return RC_ABS_NARROW
+        if rtype == 1 or rtype == 10 or rtype == 28 or rtype == 29 or rtype == 30 or rtype == 51:
+            return RC_BRANCH
         return RC_PCREL
     match target:
         case X86_64:
@@ -139,12 +163,6 @@ fn elf_reloc_class(target: RelocArch, rtype: i64) -> i64:
                 return RC_TLS_LE
             RC_PCREL
 
-fn elf_x86_can_relax(bytes: [u8], place: i64) -> bool:
-    """`mov foo@GOTPCREL(%rip), %reg` (opcode 0x8b two bytes before the
-    displacement) can become `lea foo(%rip), %reg` — the only GOTPCRELX
-    form relaxed here (ld.lld also rewrites call/jmp/test/binop forms)."""
-    place >= 2 and bytes[place - 2] == 0x8b
-
 # ============================================================================
 # Types
 # ============================================================================
@@ -185,6 +203,7 @@ struct ElfScan:
     copy_size: [i64]
     copy_align: [i64]
     copy_idx: {text: i64}
+    exports: [text] = []   # executable definitions a DSO references (hashed .dynsym tail)
 
 fn elf_reloc_what(r: ElfScanRef) -> text:
     "relocation type {r.rtype} against '{r.name}'"
@@ -204,6 +223,8 @@ fn elf_got_key(reference: ElfScanRef) -> text:
     # Both domains are tagged, so arbitrary symbol names cannot impersonate
     # another relocation domain. Address and TP-offset slots never alias.
     if reference.rclass == RC_TLS_IE: return "tls-ie:" + reference.key
+    if reference.rclass == RC_TLS_GD: return "tls-gd:" + reference.key
+    if reference.rclass == RC_TLS_LDM: return "tls-ldm:"
     "address:" + reference.key
 
 fn elf_raw_dynamic_tls_relocation(target: RelocArch, rtype: i64) -> bool:
@@ -214,6 +235,14 @@ fn elf_raw_dynamic_tls_relocation(target: RelocArch, rtype: i64) -> bool:
             rtype == 1028 or rtype == 1029 or rtype == 1030
         case _:
             false
+
+fn elf_reloc_word_abs(target: RelocArch, rclass: i64, rtype: i64) -> bool:
+    """A pointer-width absolute word: R_*_64 on ELF64, R_386_32 and
+    R_ARM_ABS32/TARGET1 on ELF32 (these classify RC_ABS_NARROW by width)."""
+    if rclass == RC_ABS64: return true
+    if target == RelocArch.I386: return rtype == 1
+    if target == RelocArch.Arm32: return rtype == 2 or rtype == 38
+    false
 
 fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<ElfScan, text>:
     val pie = elf_mode_pie(mode)
@@ -254,11 +283,28 @@ fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<El
     while j < refs.len():
         val r = refs[j]
         val c = r.rclass
-        val got_key = if c == RC_GOT or c == RC_GOT_RELAX or c == RC_TLS_IE:
+        val got_key = if c == RC_GOT or c == RC_GOT_RELAX or c == RC_TLS_IE or c == RC_TLS_GD or c == RC_TLS_LDM:
             elf_got_key(r)
         else:
             ""
         if c == RC_NONE:
+            j = j + 1
+            continue
+        if c == RC_TLS_GD or c == RC_TLS_LDM:
+            # Two adjacent slots: [DTPMOD, DTPOFF]; the second key is "<key>#2".
+            if c == RC_TLS_LDM and r.kind == SYMREF_IMPORT:
+                return Err("{elf_reloc_what(r)}: local-dynamic TLS needs a local definition")
+            if r.kind == SYMREF_IMPORT and not import_idx.has(r.name):
+                imports = imports.push(r.name)
+                import_idx[r.name] = imports.len()
+                import_weak = import_weak.push(r.weak)
+                import_type = import_type.push(r.stype)
+            if not got_idx.has(got_key):
+                got_idx[got_key] = got_keys.len()
+                got_keys = got_keys.push(got_key)
+                got_ref = got_ref.push(j)
+                got_keys = got_keys.push(got_key + "#2")
+                got_ref = got_ref.push(j)
             j = j + 1
             continue
         if r.kind == SYMREF_IMPORT:
@@ -307,7 +353,7 @@ fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<El
                     got_idx[got_key] = got_keys.len()
                     got_keys = got_keys.push(got_key)
                     got_ref = got_ref.push(j)
-            else if c == RC_ABS64:
+            else if elf_reloc_word_abs(target, c, r.rtype):
                 if not r.writable:
                     return Err("UnsupportedFeature: text relocation: {elf_reloc_what(r)} in a read-only section")
                 sym_abs = sym_abs.push(j)
@@ -325,7 +371,7 @@ fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<El
                     got_idx[got_key] = got_keys.len()
                     got_keys = got_keys.push(got_key)
                     got_ref = got_ref.push(j)
-            else if c == RC_ABS64 and pie and r.kind == SYMREF_DEFINED:
+            else if elf_reloc_word_abs(target, c, r.rtype) and pie and r.kind == SYMREF_DEFINED:
                 if mode == ELF_LINK_STATIC_PIE:
                     return Err("{elf_reloc_what(r)}: absolute address needs an R_*_RELATIVE dynamic relocation, which a static PIE without a self-relocating startup cannot apply")
                 if not r.writable:
@@ -366,8 +412,53 @@ fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<El
 # ============================================================================
 
 export ElfScanRef, ElfScan
-export elf_reloc_scan, elf_reloc_class, elf_target_is_a64, elf_x86_can_relax
+export elf_reloc_scan, elf_scan_add_exports, elf_reloc_class, elf_target_is_a64
 export elf_raw_dynamic_tls_relocation, elf_mode_pie, elf_mode_dynamic, elf_got_key
 export ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
 export SYMREF_DEFINED, SYMREF_IMPORT, SYMREF_WEAK_ZERO, SYMREF_ABS
-export RC_NONE, RC_ABS64, RC_ABS_NARROW, RC_PCREL, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_SIZE, RC_TLS_LD, RC_TLS_MOD, RC_PLTOFF
+export RC_NONE, RC_ABS64, RC_ABS_NARROW, RC_PCREL, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_SIZE, RC_TLS_LD, RC_TLS_MOD, RC_PLTOFF, RC_TLS_GD, RC_TLS_LDM
+
+fn elf_scan_add_exports(sc: ElfScan, names: [text], weak: [bool], types: [i64]) -> ElfScan:
+    """Append executable-defined symbols that a shared object references (e.g.
+    FreeBSD libc's `environ`) to .dynsym, as ld.lld does. They join the COPY
+    names in the GNU-hashed tail, so that tail is re-sorted and import_idx
+    rebuilt; undefined imports keep their order and indices."""
+    if names.len() == 0: return sc
+    var weak_of: {text: bool} = {}
+    var type_of: {text: i64} = {}
+    var ordered: [text] = []
+    var ordered_weak: [bool] = []
+    var ordered_type: [i64] = []
+    var tail: [text] = []
+    var i: i64 = 0
+    while i < sc.imports.len():
+        val n = sc.imports[i]
+        weak_of[n] = sc.import_weak[i]
+        type_of[n] = sc.import_type[i]
+        if sc.copy_idx.has(n):
+            tail = tail.push(n)
+        else:
+            ordered = ordered.push(n)
+            ordered_weak = ordered_weak.push(sc.import_weak[i])
+            ordered_type = ordered_type.push(sc.import_type[i])
+        i = i + 1
+    i = 0
+    while i < names.len():
+        weak_of[names[i]] = weak[i]
+        type_of[names[i]] = types[i]
+        tail = tail.push(names[i])
+        i = i + 1
+    for n in elf_gnu_hash_sort(tail):
+        ordered = ordered.push(n)
+        ordered_weak = ordered_weak.push(weak_of[n])
+        ordered_type = ordered_type.push(type_of[n])
+    var import_idx: {text: i64} = {}
+    i = 0
+    while i < ordered.len():
+        import_idx[ordered[i]] = i + 1
+        i = i + 1
+    ElfScan(got_keys: sc.got_keys, got_ref: sc.got_ref, got_idx: sc.got_idx, plt_names: sc.plt_names, plt_idx: sc.plt_idx,
+        imports: ordered, import_idx: import_idx, import_weak: ordered_weak, import_type: ordered_type,
+        sym_abs: sc.sym_abs, tls_dynamic: sc.tls_dynamic, relative: sc.relative,
+        copy_names: sc.copy_names, copy_size: sc.copy_size,
+        copy_align: sc.copy_align, copy_idx: sc.copy_idx, exports: names)

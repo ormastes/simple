@@ -1,0 +1,280 @@
+#!/bin/sh
+# Bind each phase-ladder prerelease package to the exact numbered RC tag,
+# source revision, successful lane receipt, and package checksum. Missing/failed
+# lanes remain explicit; zero qualified packages or integrity/provenance failure
+# blocks publication. The attempt receipt is diagnostic provenance only; the
+# Hello-owned PHASE handoff remains the compiler admission evidence.
+set -eu
+
+usage() {
+    echo "usage: $0 <rc-tag> <source-revision> <selected-lanes|all> <handoffs-dir> <receipts-dir> <packages-dir> <package-failures-file> <manifest.sdn>" >&2
+    exit 2
+}
+[ "$#" -eq 8 ] || usage
+tag=$1 source_revision=$2 selected=$3 handoffs_root=$4 receipts_root=$5 packages_root=$6 package_failures=$7 manifest=$8
+
+all_lanes="linux-x86_64 linux-riscv64 darwin-arm64 darwin-x86_64 windows-x86_64 freebsd-x86_64"
+printf '%s\n' "$tag" | grep -Eq '^rc-[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*$' || {
+    echo "phase-ladder-release: tag must be a lowercase numbered RC" >&2
+    exit 2
+}
+version=$(printf '%s\n' "$tag" | sed 's/^rc-//')
+printf '%s\n' "$source_revision" | grep -Eq '^[0-9a-f]{40}$' || {
+    echo "phase-ladder-release: source revision must be a full commit SHA" >&2
+    exit 2
+}
+
+if [ "$selected" != all ]; then
+    case "$selected" in ''|,*|*,|*,,*) echo "phase-ladder-release: invalid selected lane list" >&2; exit 2 ;; esac
+    for token in $(printf '%s' "$selected" | tr ',' ' '); do
+        case " $all_lanes " in *" $token "*) ;; *) echo "phase-ladder-release: unknown lane: $token" >&2; exit 2 ;; esac
+    done
+fi
+
+manifest_dir=$(dirname -- "$manifest")
+mkdir -p "$manifest_dir"
+rows="$manifest.rows.$$"
+tmp="$manifest.tmp.$$"
+allowed="$manifest.allowed.$$"
+: > "$rows"
+: > "$allowed"
+cleanup() { rm -f "$rows" "$tmp" "$allowed"; }
+trap cleanup EXIT HUP INT TERM
+
+qualified=0
+fatal=0
+has_lane() {
+    [ "$selected" = all ] && return 0
+    case ",$selected," in *",$1,"*) return 0 ;; *) return 1 ;; esac
+}
+line_value() {
+    sed -n "s/^$2: //p" "$1" | tail -1
+}
+for platform in $all_lanes; do
+    package_name="simple-bootstrap-$version-$platform.spk"
+    checksum_name="$package_name.sha256"
+    package="$packages_root/$package_name"
+    checksum="$packages_root/$checksum_name"
+    if ! has_lane "$platform"; then
+        if [ -e "$package" ] || [ -L "$package" ] || [ -e "$checksum" ] || [ -L "$checksum" ]; then
+            fatal=1
+            status=failed_integrity
+        else
+            status=not_selected
+        fi
+        {
+            echo "  - platform: $platform"
+            echo "    selection: not_selected"
+            echo "    status: $status"
+            echo "    highest_phase: none"
+            echo "    handoff_rung: none"
+            echo "    package: none"
+            echo "    sha256: none"
+            echo "    latest_attempt: none"
+        } >> "$rows"
+        continue
+    fi
+
+    attempt_seen=0
+    success_receipt=0
+    latest_rung=0
+    latest_exit=none
+    provenance_error=0
+    for rung in 1 2 3 4; do
+        receipt="$receipts_root/bootstrap-ladder-receipts-$platform-r$rung/attempt.sdn"
+        [ -e "$receipt" ] || continue
+        attempt_seen=1
+        if [ -L "$receipt" ] || [ ! -f "$receipt" ]; then
+            provenance_error=1
+            continue
+        fi
+        schema=$(line_value "$receipt" schema)
+        receipt_sha=$(line_value "$receipt" source_revision)
+        receipt_platform=$(line_value "$receipt" platform)
+        exit_status=$(line_value "$receipt" exit_status)
+        if [ "$schema" != phase-ladder-attempt-v1 ] ||
+           [ "$receipt_sha" != "$source_revision" ] ||
+           [ "$receipt_platform" != "$platform" ] ||
+           ! printf '%s\n' "$exit_status" | grep -Eq '^[0-9]+$'; then
+            provenance_error=1
+            continue
+        fi
+        latest_rung=$rung
+        latest_exit=$exit_status
+        if [ "$exit_status" -eq 0 ]; then
+            success_receipt=1
+        fi
+    done
+
+    highest=0
+    handoff_rung=0
+    handoff_present=0
+    handoff_error=0
+    for phase in 1 2 3 4; do
+        for rung in 1 2 3 4; do
+            dir="$handoffs_root/ladder-$platform-r$rung/$platform-p$phase"
+            [ -e "$dir" ] || [ -L "$dir" ] || continue
+            handoff_present=1
+            binary=simple
+            case "$platform" in windows-*) binary=simple.exe ;; esac
+            if [ -L "$dir" ] || [ ! -d "$dir" ] ||
+               [ -L "$dir/PHASE" ] || [ ! -f "$dir/PHASE" ] ||
+               [ "$(cat "$dir/PHASE" 2>/dev/null || true)" != "$phase" ] ||
+               [ -L "$dir/$binary" ] || [ ! -f "$dir/$binary" ] ||
+               [ ! -s "$dir/$binary" ]; then
+                handoff_error=1
+                continue
+            fi
+            highest=$phase
+            handoff_rung=$rung
+        done
+    done
+
+    handoff_receipt_ok=0
+    if [ "$handoff_rung" -gt 0 ]; then
+        receipt="$receipts_root/bootstrap-ladder-receipts-$platform-r$handoff_rung/attempt.sdn"
+        if [ -L "$receipt" ] || [ ! -f "$receipt" ] ||
+           [ "$(line_value "$receipt" schema)" != phase-ladder-attempt-v1 ] ||
+           [ "$(line_value "$receipt" source_revision)" != "$source_revision" ] ||
+           [ "$(line_value "$receipt" platform)" != "$platform" ] ||
+           [ "$(line_value "$receipt" exit_status)" != 0 ]; then
+            provenance_error=1
+        else
+            handoff_receipt_ok=1
+        fi
+    fi
+
+    package_error=0
+    hash=none
+    if [ "$highest" -gt 0 ]; then
+        if [ "$provenance_error" -ne 0 ] || [ "$handoff_receipt_ok" -ne 1 ]; then
+            package_error=1
+            status=failed_provenance
+        elif [ -f "$package_failures" ] && grep -Fxq "$platform" "$package_failures"; then
+            package_error=1
+            status=failed_integrity
+        elif [ -L "$package" ] || [ ! -f "$package" ] || [ ! -s "$package" ] ||
+             [ -L "$checksum" ] || [ ! -f "$checksum" ] || [ ! -s "$checksum" ]; then
+            package_error=1
+            status=failed_integrity
+        else
+            hash=$(awk 'NR == 1 { print $1 }' "$checksum")
+            checksum_asset=$(awk 'NR == 1 { sub(/^[^ ]+[ ]+[*]?/, ""); print }' "$checksum")
+            if ! printf '%s\n' "$hash" | grep -Eq '^[0-9a-f]{64}$' ||
+               [ "$checksum_asset" != "$package_name" ] ||
+               ! (cd "$packages_root" && sha256sum -c "$checksum_name" >/dev/null 2>&1); then
+                package_error=1
+                status=failed_integrity
+                hash=none
+            else
+                status=qualified
+            fi
+        fi
+        if [ "$handoff_error" -ne 0 ]; then
+            package_error=1
+            status=failed_integrity
+        fi
+        if [ "$package_error" -ne 0 ]; then
+            fatal=1
+            hash=none
+        elif [ "$status" = qualified ]; then
+            qualified=$((qualified + 1))
+            printf '%s\n' "$package_name" "$checksum_name" >> "$allowed"
+        fi
+    else
+        if [ -e "$package" ] || [ -L "$package" ] ||
+           [ -e "$checksum" ] || [ -L "$checksum" ]; then
+            status=failed_integrity
+            package_error=1
+            fatal=1
+        elif [ "$handoff_error" -ne 0 ]; then
+            status=failed_integrity
+            package_error=1
+            fatal=1
+        elif [ "$provenance_error" -ne 0 ] || [ "$handoff_present" -eq 1 ]; then
+            status=failed_provenance
+            package_error=1
+            fatal=1
+        elif [ "$attempt_seen" -eq 1 ] && [ "$latest_exit" != none ] && [ "$latest_exit" -ne 0 ]; then
+            status=failed
+        elif [ "$attempt_seen" -eq 1 ] && [ "$success_receipt" -eq 1 ]; then
+            status=missing
+        elif [ "$attempt_seen" -eq 1 ]; then
+            status=failed
+        else
+            status=missing
+        fi
+    fi
+
+    if [ "$status" = qualified ]; then
+        case "$latest_exit" in
+            0) latest_attempt=passed ;;
+            none) latest_attempt=unknown ;;
+            *) latest_attempt=failed ;;
+        esac
+    else
+        case "$latest_exit" in
+            0) latest_attempt=passed_without_handoff ;;
+            none) latest_attempt=not_recorded ;;
+            *) latest_attempt=failed ;;
+        esac
+    fi
+    highest_text=$highest
+    [ "$highest" -gt 0 ] || highest_text=none
+    handoff_rung_text=$handoff_rung
+    [ "$handoff_rung" -gt 0 ] || handoff_rung_text=none
+    latest_rung_text=$latest_rung
+    [ "$latest_rung" -gt 0 ] || latest_rung_text=none
+    {
+        echo "  - platform: $platform"
+        echo "    selection: selected"
+        echo "    status: $status"
+        echo "    highest_phase: $highest_text"
+        echo "    handoff_rung: $handoff_rung_text"
+        echo "    source_revision: $source_revision"
+        echo "    latest_attempt: $latest_attempt"
+        echo "    latest_attempt_rung: $latest_rung_text"
+        if [ "$status" = qualified ]; then
+            echo "    package: $package_name"
+            echo "    sha256: $hash"
+        else
+            echo "    package: none"
+            echo "    sha256: none"
+        fi
+    } >> "$rows"
+done
+
+unqualified_assets=0
+for asset in "$packages_root"/simple-bootstrap-*.spk "$packages_root"/simple-bootstrap-*.spk.sha256; do
+    [ -e "$asset" ] || [ -L "$asset" ] || continue
+    asset_name=$(basename "$asset")
+    if ! grep -Fxq "$asset_name" "$allowed"; then
+        unqualified_assets=$((unqualified_assets + 1))
+        fatal=1
+    fi
+done
+
+release_status=ready
+if [ "$qualified" -lt 1 ] || [ "$fatal" -ne 0 ]; then
+    release_status=blocked
+fi
+{
+    echo "schema: simple-phase-ladder-prerelease-manifest-v1"
+    echo "channel: rc"
+    echo "tag: $tag"
+    echo "version: $version"
+    echo "source_revision: $source_revision"
+    echo "platform_policy: partial-qualified-platforms"
+    echo "minimum_qualified_platforms: 1"
+    echo "qualified_platform_count: $qualified"
+    echo "unqualified_asset_count: $unqualified_assets"
+    echo "release_status: $release_status"
+    echo "platforms:"
+    cat "$rows"
+} > "$tmp"
+mv "$tmp" "$manifest"
+cat "$manifest"
+if [ "$release_status" != ready ]; then
+    echo "phase-ladder-release: blocked (qualified=$qualified, integrity_or_provenance_failure=$fatal)" >&2
+    exit 1
+fi

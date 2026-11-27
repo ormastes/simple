@@ -1,0 +1,576 @@
+"""
+## Purpose and audience
+Executable specification for Wave F4: 3-way PERF-* cost-tier isolation (`D12`,
+`I10`), canonical Safe Edit Service (`perf_safe_edit_service_v1`, section 10,
+`I01`, `I02`, `I05`, `I07`), and Lint Profiles / CLI surface (`perf-fast`,
+`perf`, `perf-deep`, `--changed`, `--format json`, `--explain`, `--fix-safe`,
+section 11.3).
+Audience: compiler, diagnostics, lint, and refactoring maintainers.
+"""
+# @cover src/compiler/90.tools/lint/_LintMain/config_and_model.spl
+# @cover src/compiler/90.tools/lint/_LintMain/rule_cost_tier.spl
+# @cover src/compiler/90.tools/lint/rules/perf_analysis_rule.spl
+# @cover src/compiler/90.tools/fix/perf_safe_edit_service_v1.spl
+# @cover src/app/io/cli_lint_commands.spl
+# @req REQ-DIAG-POLICY-001
+# @req REQ-DIAG-011
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.common.diagnostics.severity.{Severity}
+use std.common.diagnostics.span.{Span}
+use std.common.diagnostics.diagnostic_v1.{FixApplicability}
+use std.common.diagnostics.diagnostic_batch.{BatchStatus}
+use std.common.diagnostics.fix_transaction.{DocumentSnapshot, ExpectedDocumentRevision}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_write, file_delete, file_exists}
+use compiler.semantics.perf.perf_analysis_contracts_v1.{
+    AnalysisResultStatus, BoundEvidenceV1, BoundOrigin, BoundRegime, BoundRelation,
+    CostExprV1, LoopIdiomCandidateV1, LoopIdiomFamily, PerfAnalysisTier,
+    PerfFindingRecordV1, PerfFixApplicability, PerfFixKind, PerfResourceDimension,
+    ProvenanceEdgeV1, SafetyObligationKind, SafetyObligationStatusV1, SizeMeasureKind
+}
+use compiler.tools.lint.main.{
+    LintCliPolicy, LintConfig, Linter, PerfLintProfile, all_lint_names,
+    lint_cli_source, map_lint_code_to_config_name, parse_perf_lint_profile
+}
+use compiler.tools.lint._LintMain.rule_cost_tier.{
+    LintCostTier, LintTierProfile, lint_apply_fast_profile,
+    lint_apply_perf_profile, lint_perf_rule_names, lint_reset_invocation_counts_v1,
+    lint_rule_cost_tier, lint_rule_invocation_count_v1, lint_rules_for_profile
+}
+use compiler.tools.lint.rules.perf_analysis_rule.{
+    PerfProfileScanRequestV1, clear_perf_finding_providers_v1,
+    collect_perf_profile_findings_v1, format_perf_rule_explanation_json_v1,
+    format_perf_rule_explanation_text_v1, parse_git_status_changed_spl_files_v1,
+    perf_rule_explanation_v1, register_perf_finding_provider_v1
+}
+use compiler.tools.fix.perf_safe_edit_service_v1.{
+    PerfEditLifecycleStage, PerfSafeEditRequestV1, PerfSafeEditStatus,
+    apply_perf_safe_edits_in_memory_v1, build_perf_diagnostic_batch_v1,
+    discover_perf_edit_candidates_v1, preview_perf_edit_candidate_v1,
+    project_perf_finding_to_diagnostic_v1
+}
+use app.io.cli_lint_commands.{lint_option_error, run_lint_command}
+
+fn all_thirteen_discharged() -> [SafetyObligationStatusV1]:
+    [
+        SafetyObligationStatusV1(kind: SafetyObligationKind.CollectionIdentity, discharged: true, reason: "fresh local builder"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.Aliasing, discharged: true, reason: "distinct input and output"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.Mutation, discharged: true, reason: "pure transform"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.EvaluationOrder, discharged: true, reason: "sequential left-to-right"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.TimingEagerness, discharged: true, reason: "eager materialization preserved"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.FailurePrefixCleanup, discharged: true, reason: "infallible scalar op"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.ControlFlowExits, discharged: true, reason: "no early return/break/continue"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.CaptureLifetime, discharged: true, reason: "value capture only"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.NumericSemantics, discharged: true, reason: "identical arithmetic order"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.OutputShapeDuplicates, discharged: true, reason: "1-to-1 element order preserved"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.RuntimeEffects, discharged: true, reason: "zero I/O or volatile effects"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.ResourceRestrictions, discharged: true, reason: "no extra auxiliary container"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.RevisionCurrency, discharged: true, reason: "bound to active snapshot")
+    ]
+
+fn make_loop_candidate(
+    action_id: text,
+    fn_id: text,
+    dep_fp: text,
+    file: text,
+    source: text,
+    old_snippet: text,
+    new_snippet: text,
+    applicability: PerfFixApplicability,
+    fix_kind: PerfFixKind,
+    obligations: [SafetyObligationStatusV1],
+    disabled_reason: Option<text>
+) -> LoopIdiomCandidateV1:
+    val start = source.find(old_snippet)
+    val end = start + old_snippet.byte_len()
+    val span = Span.new(start, end, 2, 5)
+    LoopIdiomCandidateV1(
+        rule_id: "PERF-STYLE-001",
+        action_id: action_id,
+        function_id: fn_id,
+        semantic_revision: "rev-1",
+        dependency_fingerprint: dep_fp,
+        file: file,
+        source_span: span,
+        family: LoopIdiomFamily.Map,
+        replacement_preview: new_snippet,
+        expected_old_text: old_snippet,
+        applicability: applicability,
+        fix_kind: fix_kind,
+        obligations: obligations,
+        resource_tradeoff_note: "Equivalent collection refactor available. Modeled traversal cost: unchanged.",
+        disabled_reason: disabled_reason
+    )
+
+fn deep_stub_provider(req: PerfProfileScanRequestV1) -> [PerfFindingRecordV1]:
+    if req.max_tier.name() != "T3":
+        return []
+    [PerfFindingRecordV1(
+        rule_code: "PERF-COST-002",
+        stable_occurrence_id: "PERF-COST-002@" + req.path + "#deep/0",
+        function_id: "deep_fn",
+        file: req.path,
+        primary_span: Span.new(0, 4, 1, 1),
+        related_locations: [],
+        message: "Inferred work upper bound increased from O(n) to O(n*m) under T3 recurrence check.",
+        evidence: None,
+        tier: PerfAnalysisTier.T3DeepOptional,
+        semantic_fingerprint: "fp-deep",
+        fix_candidates: []
+    )]
+
+# @manual_section: perf_safe_edit_and_cli
+describe "PERF-* cost-tier registry and NormalBuild isolation (D12, I10)":
+    """Verifies T1->Medium, T2->High, and zero PERF-* admission under NormalBuild."""
+
+    it "assigns T1 PERF-* rules to Medium, T2 PERF-* rules to High, and admits zero PERF-* rules in NormalBuild":
+        """Checks all 9 PERF-* rules are excluded from _low_cost_rules and NormalBuild."""
+        val medium_rules = [
+            "perf_loop_idiom_style",
+            "perf_avoidable_materialization",
+            "perf_analysis_coverage_note",
+            "perf_fix_blocked_precondition"
+        ]
+        val high_rules = [
+            "perf_repeated_scan_cost",
+            "perf_complexity_bound_increase",
+            "perf_algorithm_redesign",
+            "perf_resource_contract_refuted",
+            "perf_resource_contract_unproved"
+        ]
+        for r in medium_rules:
+            expect(lint_rule_cost_tier(r) == LintCostTier.Medium).to_be(true)
+        for r in high_rules:
+            expect(lint_rule_cost_tier(r) == LintCostTier.High).to_be(true)
+
+        val normal_build_rules = lint_rules_for_profile(LintTierProfile.NormalBuild, all_lint_names())
+        for perf_name in lint_perf_rule_names():
+            expect(normal_build_rules.contains(perf_name)).to_be(false)
+
+        expect(map_lint_code_to_config_name("PERF-STYLE-001")).to_equal("perf_loop_idiom_style")
+        expect(map_lint_code_to_config_name("PERF-COST-001")).to_equal("perf_repeated_scan_cost")
+        expect(map_lint_code_to_config_name("PERF-CONTRACT-001")).to_equal("perf_resource_contract_refuted")
+        expect(map_lint_code_to_config_name("PERF-FIX-001")).to_equal("perf_fix_blocked_precondition")
+
+    it "executes zero PERF-* rule invocations when lint runs under NormalBuild (--fast)":
+        """Proves I10: feature-off / fast normal-build path never invokes PERF-* rules."""
+        lint_reset_invocation_counts_v1()
+        val src = "fn demo(keys: [i64], records: [i64]) -> [i64]:\n    var out: [i64] = []\n    for k in keys:\n        if records.contains(k):\n            out.push(k)\n    out\n"
+        val linter = Linter.new(false)
+        lint_apply_fast_profile(linter.config)
+        val findings = lint_cli_source(linter, "/tmp/perf_fast_gate.spl", src)
+        for item in findings:
+            expect(item.lint.code.starts_with("PERF-")).to_be(false)
+        for perf_name in lint_perf_rule_names():
+            expect(lint_rule_invocation_count_v1(perf_name)).to_equal(0)
+
+describe "Perf Safe Edit Service lifecycle and invariants (section 10, I01, I02, I05, I07)":
+    """Verifies canonical EditTransaction projection, staleness, dep fingerprints, parse gates, and overlap handling."""
+
+    it "projects PerfFindingRecordV1 onto canonical DiagnosticV1 and applies a VerifiedSafe edit through all 8 stages":
+        """Verifies Discover -> Resolve -> Validate -> Preview -> Apply -> Check -> Record on a valid candidate."""
+        val file = "/workspace/src/demo.spl"
+        val body = "fn inc_all(items: [i64]) -> [i64]:\n    var out: [i64] = []\n    for x in items:\n        out.push(x + 1)\n    out\n"
+        val old_loop = "var out: [i64] = []\n    for x in items:\n        out.push(x + 1)"
+        val new_loop = "var out: [i64] = items.map(\\x: x + 1)"
+        val cand = make_loop_candidate(
+            "act-1", "inc_all", "dep-v1", file, body, old_loop, new_loop,
+            PerfFixApplicability.VerifiedSafe, PerfFixKind.Refactor, all_thirteen_discharged(), None)
+        val ev = BoundEvidenceV1(
+            resource: PerfResourceDimension.Work,
+            expression: CostExprV1.Size(param_name: "items", measure: SizeMeasureKind.Length),
+            rendered_expression: "n",
+            relation: BoundRelation.Exact,
+            regime: BoundRegime.WorstCase,
+            model_id: "collection_v1",
+            assumptions: ["finite slice"],
+            status: AnalysisResultStatus.Complete,
+            origin: BoundOrigin.Inferred,
+            provenance_id: "prov-1"
+        )
+        val finding = PerfFindingRecordV1(
+            rule_code: "PERF-STYLE-001",
+            stable_occurrence_id: "PERF-STYLE-001@demo#loop0/0",
+            function_id: "inc_all",
+            file: file,
+            primary_span: cand.source_span,
+            related_locations: [ProvenanceEdgeV1(
+                node_id: "prov-1", role: "loop", file: file,
+                span: cand.source_span, summary_line: "single-pass builder loop", child_ids: [])],
+            message: "Equivalent collection refactor available; runtime improvement has not been established.",
+            evidence: Some(ev),
+            tier: PerfAnalysisTier.T1FastLocal,
+            semantic_fingerprint: "sem-1",
+            fix_candidates: [cand]
+        )
+
+        val discovered = discover_perf_edit_candidates_v1([finding])
+        expect(discovered.len()).to_equal(1)
+        val preview = preview_perf_edit_candidate_v1(cand)
+        expect(preview.unified_diff).to_contain("-var out: [i64] = []")
+        expect(preview.unified_diff).to_contain("+var out: [i64] = items.map(\\x: x + 1)")
+
+        val (diag, fix_cands) = project_perf_finding_to_diagnostic_v1(finding, Severity.Info, 3, false)
+        expect(diag.code).to_equal("PERF-STYLE-001")
+        expect(diag.fixes.len()).to_equal(1)
+        expect(diag.fixes[0].applicability == FixApplicability.Automatic).to_be(true)
+        expect(fix_cands.len()).to_equal(1)
+
+        val hash = sha256_text(body)
+        var deps: Dict<text, text> = {}
+        deps["inc_all"] = "dep-v1"
+        val req = PerfSafeEditRequestV1(
+            workspace_root: "/workspace",
+            documents: [DocumentSnapshot.new(file, 3, hash, body)],
+            expected_revisions: [ExpectedDocumentRevision(file: file, expected_version: 3, expected_source_hash: hash)],
+            findings: [finding],
+            current_dep_fingerprints: deps,
+            has_parse_or_type_errors: false
+        )
+        val res = apply_perf_safe_edits_in_memory_v1(req)
+        expect(res.applied_action_ids.len()).to_equal(1)
+        expect(res.applied_action_ids[0]).to_equal("act-1")
+        expect(res.changed_files).to_contain(file)
+        expect(res.records[0].status == PerfSafeEditStatus.Applied).to_be(true)
+        expect(res.records[0].reached_stage == PerfEditLifecycleStage.Record).to_be(true)
+        expect(res.final_documents[0].body).to_contain("items.map(\\x: x + 1)")
+
+    it "rejects stale document version or source hash via EditTransaction (I01)":
+        """Proves I01: source edit after discovery rejects stale candidates without mutating text."""
+        val file = "/workspace/src/stale.spl"
+        val body = "fn f(xs: [i64]) -> [i64]:\n    var out: [i64] = []\n    for x in xs:\n        out.push(x)\n    out\n"
+        val old_loop = "var out: [i64] = []\n    for x in xs:\n        out.push(x)"
+        val new_loop = "var out: [i64] = xs.map(\\x: x)"
+        val cand = make_loop_candidate(
+            "act-stale", "f", "dep-1", file, body, old_loop, new_loop,
+            PerfFixApplicability.VerifiedSafe, PerfFixKind.Refactor, all_thirteen_discharged(), None)
+        val finding = PerfFindingRecordV1(
+            rule_code: "PERF-STYLE-001", stable_occurrence_id: "occ-stale",
+            function_id: "f", file: file, primary_span: cand.source_span,
+            related_locations: [], message: "refactor", evidence: None,
+            tier: PerfAnalysisTier.T1FastLocal, semantic_fingerprint: "s1", fix_candidates: [cand]
+        )
+        val orig_hash = sha256_text(body)
+        var deps: Dict<text, text> = {}
+        deps["f"] = "dep-1"
+
+        val edited_body = body + "# user edit\n"
+        val stale_ver_req = PerfSafeEditRequestV1(
+            workspace_root: "/workspace",
+            documents: [DocumentSnapshot.new(file, 2, sha256_text(edited_body), edited_body)],
+            expected_revisions: [ExpectedDocumentRevision(file: file, expected_version: 1, expected_source_hash: orig_hash)],
+            findings: [finding],
+            current_dep_fingerprints: deps,
+            has_parse_or_type_errors: false
+        )
+        val ver_res = apply_perf_safe_edits_in_memory_v1(stale_ver_req)
+        expect(ver_res.applied_action_ids.len()).to_equal(0)
+        expect(ver_res.records[0].status == PerfSafeEditStatus.StaleVersion).to_be(true)
+        expect(ver_res.final_documents[0].body).to_equal(edited_body)
+
+        val stale_hash_req = PerfSafeEditRequestV1(
+            workspace_root: "/workspace",
+            documents: [DocumentSnapshot.new(file, 1, sha256_text(edited_body), edited_body)],
+            expected_revisions: [ExpectedDocumentRevision(file: file, expected_version: 1, expected_source_hash: orig_hash)],
+            findings: [finding],
+            current_dep_fingerprints: deps,
+            has_parse_or_type_errors: false
+        )
+        val hash_res = apply_perf_safe_edits_in_memory_v1(stale_hash_req)
+        expect(hash_res.applied_action_ids.len()).to_equal(0)
+        expect(hash_res.records[0].status == PerfSafeEditStatus.StaleHash).to_be(true)
+        expect(hash_res.final_documents[0].body).to_equal(edited_body)
+
+    it "invalidates safety proof when callee dependency fingerprint changes without caller text change (I02)":
+        """Proves I02: unchanged caller document is still blocked when callee effect/semantic fingerprint drifted."""
+        val file = "/workspace/src/caller.spl"
+        val body = "fn caller(xs: [i64]) -> [i64]:\n    var out: [i64] = []\n    for x in xs:\n        out.push(step_fn(x))\n    out\n"
+        val old_loop = "var out: [i64] = []\n    for x in xs:\n        out.push(step_fn(x))"
+        val new_loop = "var out: [i64] = xs.map(\\x: step_fn(x))"
+        val cand = make_loop_candidate(
+            "act-dep", "caller", "callee-pure-v1", file, body, old_loop, new_loop,
+            PerfFixApplicability.VerifiedSafe, PerfFixKind.Refactor, all_thirteen_discharged(), None)
+        val finding = PerfFindingRecordV1(
+            rule_code: "PERF-STYLE-001", stable_occurrence_id: "occ-dep",
+            function_id: "caller", file: file, primary_span: cand.source_span,
+            related_locations: [], message: "refactor", evidence: None,
+            tier: PerfAnalysisTier.T1FastLocal, semantic_fingerprint: "s2", fix_candidates: [cand]
+        )
+        val hash = sha256_text(body)
+        var drifted_deps: Dict<text, text> = {}
+        drifted_deps["caller"] = "callee-mutates-io-v2"
+        val req = PerfSafeEditRequestV1(
+            workspace_root: "/workspace",
+            documents: [DocumentSnapshot.new(file, 5, hash, body)],
+            expected_revisions: [ExpectedDocumentRevision(file: file, expected_version: 5, expected_source_hash: hash)],
+            findings: [finding],
+            current_dep_fingerprints: drifted_deps,
+            has_parse_or_type_errors: false
+        )
+        val res = apply_perf_safe_edits_in_memory_v1(req)
+        expect(res.applied_action_ids.len()).to_equal(0)
+        expect(res.records[0].status == PerfSafeEditStatus.SemanticDependencyChanged).to_be(true)
+        expect(res.final_documents[0].body).to_equal(body)
+
+    it "emits partial diagnostics with zero false VerifiedSafe fixes on parse/type errors and rolls back invalid post-edit syntax (I05)":
+        """Proves I05: pre-existing parse/type failure blocks VerifiedSafe fixes and post-edit parse failure recovers."""
+        val file = "/workspace/src/broken.spl"
+        val good_body = "fn demo(xs: [i64]) -> [i64]:\n    var out: [i64] = []\n    for x in xs:\n        out.push(x)\n    out\n"
+        val old_loop = "var out: [i64] = []\n    for x in xs:\n        out.push(x)"
+        val cand_good = make_loop_candidate(
+            "act-i05-pre", "demo", "dep-1", file, good_body, old_loop, "var out: [i64] = xs.map(\\x: x)",
+            PerfFixApplicability.VerifiedSafe, PerfFixKind.Refactor, all_thirteen_discharged(), None)
+        val finding_pre = PerfFindingRecordV1(
+            rule_code: "PERF-STYLE-001", stable_occurrence_id: "occ-i05-pre",
+            function_id: "demo", file: file, primary_span: cand_good.source_span,
+            related_locations: [], message: "refactor", evidence: None,
+            tier: PerfAnalysisTier.T1FastLocal, semantic_fingerprint: "s3", fix_candidates: [cand_good]
+        )
+
+        val (batch, action_idx) = build_perf_diagnostic_batch_v1(
+            "simple-perf-lint", file, "file:///workspace/src/broken.spl", 1, sha256_text(good_body), [finding_pre], true)
+        expect(batch.status == BatchStatus.PartialRecovery).to_be(true)
+        expect(batch.diagnostics[0].diagnostic.fixes[0].applicability == FixApplicability.Unavailable).to_be(true)
+        expect(action_idx.compat_fix_for("PERF-STYLE-001@occ-i05-pre")).to_be_nil()
+
+        var deps: Dict<text, text> = {}
+        deps["demo"] = "dep-1"
+        val pre_req = PerfSafeEditRequestV1(
+            workspace_root: "/workspace",
+            documents: [DocumentSnapshot.new(file, 1, sha256_text(good_body), good_body)],
+            expected_revisions: [ExpectedDocumentRevision(file: file, expected_version: 1, expected_source_hash: sha256_text(good_body))],
+            findings: [finding_pre],
+            current_dep_fingerprints: deps,
+            has_parse_or_type_errors: true
+        )
+        val pre_res = apply_perf_safe_edits_in_memory_v1(pre_req)
+        expect(pre_res.applied_action_ids.len()).to_equal(0)
+        expect(pre_res.records[0].status == PerfSafeEditStatus.ParseOrTypeFailure).to_be(true)
+
+        val cand_bad_syntax = make_loop_candidate(
+            "act-i05-post", "demo", "dep-1", file, good_body, old_loop, "var out: [i64] = xs.map(((",
+            PerfFixApplicability.VerifiedSafe, PerfFixKind.Refactor, all_thirteen_discharged(), None)
+        val finding_post = PerfFindingRecordV1(
+            rule_code: "PERF-STYLE-001", stable_occurrence_id: "occ-i05-post",
+            function_id: "demo", file: file, primary_span: cand_bad_syntax.source_span,
+            related_locations: [], message: "refactor", evidence: None,
+            tier: PerfAnalysisTier.T1FastLocal, semantic_fingerprint: "s4", fix_candidates: [cand_bad_syntax]
+        )
+        val post_req = PerfSafeEditRequestV1(
+            workspace_root: "/workspace",
+            documents: [DocumentSnapshot.new(file, 1, sha256_text(good_body), good_body)],
+            expected_revisions: [ExpectedDocumentRevision(file: file, expected_version: 1, expected_source_hash: sha256_text(good_body))],
+            findings: [finding_post],
+            current_dep_fingerprints: deps,
+            has_parse_or_type_errors: false
+        )
+        val post_res = apply_perf_safe_edits_in_memory_v1(post_req)
+        expect(post_res.applied_action_ids.len()).to_equal(0)
+        expect(post_res.rolled_back_count).to_equal(1)
+        expect(post_res.records[0].status == PerfSafeEditStatus.PostApplyCheckFailed).to_be(true)
+        expect(post_res.records[0].reached_stage == PerfEditLifecycleStage.Recover).to_be(true)
+        expect(post_res.records[0].rolled_back).to_be(true)
+        expect(post_res.final_documents[0].body).to_equal(good_body)
+
+    it "applies non-overlapping VerifiedSafe edits deterministically while skipping overlaps, ReviewRequired, Unavailable, and @allow insertions (I07)":
+        """Proves I07: deterministic batch handling, overlap rejection, review-required preservation, and zero suppression injection."""
+        val file = "/workspace/src/batch.spl"
+        val body = "fn batch(xs: [i64], ys: [i64]) -> i64:\n    var a: [i64] = []\n    for x in xs:\n        a.push(x + 1)\n    var b: [i64] = []\n    for y in ys:\n        b.push(y * 2)\n    a.len() + b.len()\n"
+        val loop_a = "var a: [i64] = []\n    for x in xs:\n        a.push(x + 1)"
+        val overlap_a = "for x in xs:\n        a.push(x + 1)"
+        val loop_b = "var b: [i64] = []\n    for y in ys:\n        b.push(y * 2)"
+
+        val c_valid_a = make_loop_candidate(
+            "act-a", "batch", "dep-b", file, body, loop_a, "var a: [i64] = xs.map(\\x: x + 1)",
+            PerfFixApplicability.VerifiedSafe, PerfFixKind.Refactor, all_thirteen_discharged(), None)
+        val c_overlap = make_loop_candidate(
+            "act-overlap", "batch", "dep-b", file, body, overlap_a, "val _ = xs",
+            PerfFixApplicability.VerifiedSafe, PerfFixKind.Refactor, all_thirteen_discharged(), None)
+        val c_valid_b = make_loop_candidate(
+            "act-b", "batch", "dep-b", file, body, loop_b, "var b: [i64] = ys.map(\\y: y * 2)",
+            PerfFixApplicability.VerifiedSafe, PerfFixKind.Refactor, all_thirteen_discharged(), None)
+        val c_review = make_loop_candidate(
+            "act-review", "batch", "dep-b", file, body, loop_b, "var b: [i64] = build_index(ys)",
+            PerfFixApplicability.ReviewRequired, PerfFixKind.AlgorithmChange, all_thirteen_discharged(), None)
+        val c_unavail = make_loop_candidate(
+            "act-unavail", "batch", "dep-b", file, body, loop_b, "var b: [i64] = ys",
+            PerfFixApplicability.Unavailable, PerfFixKind.Refactor, all_thirteen_discharged(), Some("aliasing unknown"))
+        val c_allow = make_loop_candidate(
+            "act-allow", "batch", "dep-b", file, body, loop_b, "@allow(perf_repeated_scan_cost)\n    " + loop_b,
+            PerfFixApplicability.VerifiedSafe, PerfFixKind.Refactor, all_thirteen_discharged(), None)
+
+        val finding = PerfFindingRecordV1(
+            rule_code: "PERF-STYLE-001", stable_occurrence_id: "occ-batch",
+            function_id: "batch", file: file, primary_span: c_valid_a.source_span,
+            related_locations: [], message: "batch", evidence: None,
+            tier: PerfAnalysisTier.T1FastLocal, semantic_fingerprint: "sb",
+            fix_candidates: [c_valid_b, c_review, c_overlap, c_valid_a, c_unavail, c_allow]
+        )
+        val hash = sha256_text(body)
+        var deps: Dict<text, text> = {}
+        deps["batch"] = "dep-b"
+        val req = PerfSafeEditRequestV1(
+            workspace_root: "/workspace",
+            documents: [DocumentSnapshot.new(file, 1, hash, body)],
+            expected_revisions: [ExpectedDocumentRevision(file: file, expected_version: 1, expected_source_hash: hash)],
+            findings: [finding],
+            current_dep_fingerprints: deps,
+            has_parse_or_type_errors: false
+        )
+        val res = apply_perf_safe_edits_in_memory_v1(req)
+        expect(res.applied_action_ids.len()).to_equal(2)
+        expect(res.applied_action_ids[0]).to_equal("act-a")
+        expect(res.applied_action_ids[1]).to_equal("act-b")
+        expect(res.skipped_action_ids).to_contain("act-overlap")
+        expect(res.skipped_action_ids).to_contain("act-review")
+        expect(res.skipped_action_ids).to_contain("act-unavail")
+        expect(res.skipped_action_ids).to_contain("act-allow")
+        val updated = res.final_documents[0].body
+        expect(updated).to_contain("var a: [i64] = xs.map(\\x: x + 1)")
+        expect(updated).to_contain("var b: [i64] = ys.map(\\y: y * 2)")
+        expect(updated.contains("@allow(")).to_be(false)
+
+describe "Perf lint profiles and CLI surface (section 11.3)":
+    """Verifies perf-fast/perf/perf-deep profiles, --changed, --format json, --explain, and --fix-safe."""
+
+    it "parses perf profiles and new CLI options cleanly while rejecting malformed flags":
+        """Checks option validation and LintCliPolicy parsing for all section 11.3 flags."""
+        expect(lint_option_error(["lint", "--profile", "perf-fast", "a.spl"])).to_equal("")
+        expect(lint_option_error(["lint", "--profile=perf", "--changed"])).to_equal("")
+        expect(lint_option_error(["lint", "--profile", "perf-deep", "--format", "json", "a.spl"])).to_equal("")
+        expect(lint_option_error(["lint", "--format=json", "--fix-safe", "a.spl"])).to_equal("")
+        expect(lint_option_error(["lint", "--profile", "perf", "--explain", "PERF-COST-001"])).to_equal("")
+        expect(lint_option_error(["lint", "--explain=PERF-CONTRACT-001"])).to_equal("")
+        expect(lint_option_error(["lint", "--format", "xml", "a.spl"]).contains("format")).to_be(true)
+        expect(lint_option_error(["lint", "--explain"]).contains("--explain")).to_be(true)
+
+        expect(parse_perf_lint_profile("perf-fast") == Some(PerfLintProfile.PerfFast)).to_be(true)
+        expect(parse_perf_lint_profile("perf") == Some(PerfLintProfile.Perf)).to_be(true)
+        expect(parse_perf_lint_profile("perf-deep") == Some(PerfLintProfile.PerfDeep)).to_be(true)
+
+        val p_fast = LintCliPolicy.from_args(["--profile=perf-fast", "--format", "json"])
+        expect(p_fast.perf_profile == Some(PerfLintProfile.PerfFast)).to_be(true)
+        expect(p_fast.json_output).to_be(true)
+
+        val p_safe = LintCliPolicy.from_args(["--profile", "perf", "--changed", "--fix-safe", "--explain", "PERF-COST-001"])
+        expect(p_safe.perf_profile == Some(PerfLintProfile.Perf)).to_be(true)
+        expect(p_safe.changed_only).to_be(true)
+        expect(p_safe.fix_safe).to_be(true)
+        expect(p_safe.explain_code).to_equal("PERF-COST-001")
+
+    it "separates T1 (perf-fast), T1+T2 (perf), and T1+T2+T3 (perf-deep) findings and keeps PERF-FIX-001 silent":
+        """Verifies tier gating across perf-fast, perf, and perf-deep profiles."""
+        clear_perf_finding_providers_v1()
+        register_perf_finding_provider_v1(deep_stub_provider)
+        val src = "fn demo(keys: [i64], records: [i64]) -> [i64]:\n    var out: [i64] = []\n    for k in keys:\n        out.push(k + 1)\n    for k2 in keys:\n        if records.contains(k2):\n            val _ = k2\n    var self_obs: [i64] = []\n    for k3 in keys:\n        self_obs.push(self_obs.len())\n    out\n"
+
+        val fast_findings = collect_perf_profile_findings_v1("/tmp/t.spl", src, PerfLintProfile.PerfFast)
+        var fast_codes: [text] = []
+        for f in fast_findings:
+            fast_codes.push(f.rule_code)
+        expect(fast_codes).to_contain("PERF-STYLE-001")
+        expect(fast_codes.contains("PERF-COST-001")).to_be(false)
+        expect(fast_codes.contains("PERF-COST-002")).to_be(false)
+
+        val std_findings = collect_perf_profile_findings_v1("/tmp/t.spl", src, PerfLintProfile.Perf)
+        var std_codes: [text] = []
+        for f in std_findings:
+            std_codes.push(f.rule_code)
+        expect(std_codes).to_contain("PERF-STYLE-001")
+        expect(std_codes).to_contain("PERF-COST-001")
+        expect(std_codes).to_contain("PERF-FIX-001")
+        expect(std_codes.contains("PERF-COST-002")).to_be(false)
+
+        val deep_findings = collect_perf_profile_findings_v1("/tmp/t.spl", src, PerfLintProfile.PerfDeep)
+        var deep_codes: [text] = []
+        for f in deep_findings:
+            deep_codes.push(f.rule_code)
+        expect(deep_codes).to_contain("PERF-COST-002")
+        clear_perf_finding_providers_v1()
+
+        val linter = Linter.new(false)
+        lint_apply_perf_profile(linter.config, PerfLintProfile.Perf)
+        val lint_results = lint_cli_source(linter, "/tmp/t.spl", src)
+        var emitted_codes: [text] = []
+        for r in lint_results:
+            emitted_codes.push(r.lint.code)
+        expect(emitted_codes).to_contain("PERF-STYLE-001")
+        expect(emitted_codes).to_contain("PERF-COST-001")
+        expect(emitted_codes.contains("PERF-FIX-001")).to_be(false)
+
+    it "formats structured --explain output for PERF-* codes and parses git porcelain for --changed":
+        """Verifies --explain rationale/evidence/safe-fix fields and git status --porcelain .spl extraction."""
+        val exp_opt = perf_rule_explanation_v1("PERF-COST-001")
+        expect(exp_opt.?).to_be(true)
+        val exp = exp_opt.unwrap()
+        val rendered_txt = format_perf_rule_explanation_text_v1(exp)
+        val rendered_json = format_perf_rule_explanation_json_v1(exp)
+        expect(rendered_txt).to_contain("PERF-COST-001")
+        expect(rendered_txt).to_contain("perf_repeated_scan_cost")
+        expect(rendered_txt).to_contain("Evidence")
+        expect(rendered_txt).to_contain("Safe-fix")
+        expect(rendered_json).to_contain("\"code\":\"PERF-COST-001\"")
+        expect(run_lint_command(["lint", "--profile", "perf", "--explain", "PERF-COST-001"])).to_equal(0)
+        expect(run_lint_command(["lint", "--format", "json", "--explain", "PERF-CONTRACT-002"])).to_equal(0)
+
+        val porcelain = " M src/app/a.spl\n?? src/compiler/b.spl\n D src/old/deleted.spl\nR  src/old.spl -> src/new.spl\n M README.md\n"
+        val changed = parse_git_status_changed_spl_files_v1(porcelain)
+        expect(changed.len()).to_equal(3)
+        expect(changed).to_contain("src/app/a.spl")
+        expect(changed).to_contain("src/compiler/b.spl")
+        expect(changed).to_contain("src/new.spl")
+
+    it "never writes source on plain simple lint --profile perf and applies VerifiedSafe fixes only under --fix-safe":
+        """Verifies plain lint is strictly read-only while --fix-safe rewrites VerifiedSafe loops on disk."""
+        val tmp_path = "build/perf_safe_cli_fixture_f4.spl"
+        val original = "fn map_demo(items: [i64]) -> [i64]:\n    var out: [i64] = []\n    for x in items:\n        out.push(x + 2)\n    out\n"
+        val _ = file_write(tmp_path, original)
+        expect(file_exists(tmp_path)).to_be(true)
+
+        val lint_rc = run_lint_command(["lint", "--profile", "perf", "--jobs", "1", tmp_path])
+        expect(lint_rc).to_equal(0)
+        expect(file_read(tmp_path)).to_equal(original)
+
+        val fix_rc = run_lint_command(["lint", "--profile", "perf", "--fix-safe", "--jobs", "1", tmp_path])
+        expect(fix_rc).to_equal(0)
+        val rewritten = file_read(tmp_path)
+        expect(rewritten).to_contain("items.iter().map(\\x: x + 2).collect()")
+        val _ = file_delete(tmp_path)
+
+    it "refuses VerifiedSafe for impure calls, fallible ? expressions, @nogc functions, non-array iterables, and user-defined .push lookalikes (D06, S04, S05, S11, S13, S18)":
+        """Proves typed HIR + 13-point safety gates reject unsound spelling-only builder rewrites and leave files untouched under --fix-safe."""
+        val unsafe_cases_src = "struct CustomSink:\n    buf: [i64]\n\nimpl CustomSink:\n    me push(v: i64):\n        self.buf.push(v)\n\nfn mutating_fn(x: i64) -> i64:\n    x + 1\n\nfn fallible(x: i64) -> Result<i64, text>:\n    Ok(x + 1)\n\nfn case_impure_call(items: [i64]) -> [i64]:\n    var out: [i64] = []\n    for x in items:\n        out.push(mutating_fn(x))\n    out\n\nfn case_fallible_try(items: [i64]) -> Result<[i64], text>:\n    var out: [i64] = []\n    for x in items:\n        out.push(fallible(x)?)\n    Ok(out)\n\n@nogc\nfn case_nogc(items: [i64]) -> [i64]:\n    var out: [i64] = []\n    for x in items:\n        out.push(x + 1)\n    out\n\nfn case_range_iter(n: i64) -> [i64]:\n    var out: [i64] = []\n    for i in 0..n:\n        out.push(i + 1)\n    out\n\nfn case_dict_iter(d: Dict<i64, i64>) -> [i64]:\n    var out: [i64] = []\n    for k in d:\n        out.push(k + 1)\n    out\n\nfn case_post_mutation(items: [i64]) -> [i64]:\n    var out: [i64] = []\n    for x in items:\n        out.push(x + 1)\n    out.push(99)\n    out\n\nfn case_lookalike_push(items: [i64], mut sink: CustomSink):\n    for x in items:\n        sink.push(x + 1)\n"
+        val findings = collect_perf_profile_findings_v1("build/perf_unsound_guard_f4.spl", unsafe_cases_src, PerfLintProfile.Perf)
+        var verified_safe_count = 0
+        for f in findings:
+            for c in f.fix_candidates:
+                if c.applicability == PerfFixApplicability.VerifiedSafe:
+                    verified_safe_count = verified_safe_count + 1
+        expect(verified_safe_count).to_equal(0)
+
+        val tmp_guard_path = "build/perf_unsound_guard_cli_f4.spl"
+        val _ = file_write(tmp_guard_path, unsafe_cases_src)
+        val rc = run_lint_command(["lint", "--profile", "perf", "--fix-safe", "--jobs", "1", tmp_guard_path])
+        val after_disk = file_read(tmp_guard_path)
+        val _ = file_delete(tmp_guard_path)
+        expect(rc).to_equal(0)
+        expect(after_disk).to_equal(unsafe_cases_src)
+
+    it "withholds PERF-COST-001 on Dict, HashSet, and custom nominal .contains(k) inside a loop while emitting PERF-COST-001 on [i64] linear scans (D02, S13)":
+        """Proves T2 repeated-lookup detection checks resolved HIR receiver types rather than method spelling alone."""
+        val indexed_src = "struct HashSet<T>:\n    items: [T]\n\nimpl<T> HashSet<T>:\n    fn contains(v: T) -> bool:\n        false\n\nstruct CustomIndex:\n    tag: i64\n\nimpl CustomIndex:\n    fn contains(k: i64) -> bool:\n        self.tag == k\n\nfn lookup_indexed(keys: [i64], dict_rec: Dict<i64, bool>, set_rec: HashSet<i64>, custom_rec: CustomIndex) -> i64:\n    var hits = 0\n    for k in keys:\n        if dict_rec.contains(k):\n            hits = hits + 1\n        if set_rec.contains(k):\n            hits = hits + 1\n        if custom_rec.contains(k):\n            hits = hits + 1\n    hits\n"
+        val indexed_findings = collect_perf_profile_findings_v1("/tmp/indexed_lookup.spl", indexed_src, PerfLintProfile.Perf)
+        var indexed_cost_hits = 0
+        for f in indexed_findings:
+            if f.rule_code == "PERF-COST-001":
+                indexed_cost_hits = indexed_cost_hits + 1
+        expect(indexed_cost_hits).to_equal(0)
+
+        val linear_src = "fn lookup_linear(keys: [i64], records: [i64]) -> i64:\n    var hits = 0\n    for k in keys:\n        if records.contains(k):\n            hits = hits + 1\n    hits\n"
+        val linear_findings = collect_perf_profile_findings_v1("/tmp/linear_lookup.spl", linear_src, PerfLintProfile.Perf)
+        var linear_cost_hits = 0
+        for f in linear_findings:
+            if f.rule_code == "PERF-COST-001":
+                linear_cost_hits = linear_cost_hits + 1
+        expect(linear_cost_hits).to_be_greater_than(0)

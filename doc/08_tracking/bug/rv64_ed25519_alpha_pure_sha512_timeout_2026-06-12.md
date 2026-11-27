@@ -1,10 +1,18 @@
 # RV64 SSH alpha Ed25519 runtime/pure mismatch
 
 Date: 2026-06-12
-Status: open
+Status: fix-implemented-verification-pending (2026-11-26 BF-7: fixed `rt_byte_array_new_len`/`rt_array_get` tagged-vs-raw ABI bug across 5 RV64 boot C crypto helpers + restored `ed25519_probe_entry.spl`; live RV64 QEMU/SSH lane pending Linux self-hosted build)
 Area: SimpleOS RV64 SSH, crypto dual-backend alpha
 
 ## Summary
+
+**Re-scope 2026-11-07:** neither half of the title is a pure-Simple logic bug.
+The SHA-512 timeout stopped being the blocker in 2026-06 (host KAT spec: 3.3 s
+wall). The Ed25519 mismatch does not reproduce on host (RFC 8032 T1/T2/T3 +
+SHA(abc) byte-match). The open item is RV64 *native* execution of the pure
+path (indexed `[u64]`/`[u8]` stores / SHA-512 core under cranelift on
+`riscv64-unknown-none`), and the RV64 repro lane cannot currently be built.
+See the 2026-11-07 section at the end.
 
 The RV64 live OpenSSH gate reaches SSH KEXINIT parsing, Curve25519 ECDH, shared
 secret generation, exchange-hash generation, and now completes the pure-Simple
@@ -633,3 +641,108 @@ seed vector in addition to empty and `abc`.
 - **inferred**: the only reproduction is `SIMPLEOS_RV64_SSH_LIVE=1 ... test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl`, a live RISC-V QEMU SimpleOS+OpenSSH lane. This triage host is Windows with no riscv64 QEMU lane and no `src/compiler_rust/target/release/simple`; nothing here can execute it.
 - **measured**: 14 of the 16 repo paths this entry cites still exist, so it is not stale-by-removal. The two missing (`examples/09_embedded/simple_os/arch/riscv64/ed25519_probe_entry.spl`, `src/os/qemu_runner_part5.spl`) are the focused probe and a since-refactored runner split, not the subject code.
 - Verdict: still OPEN — a real runtime/pure Ed25519 signature mismatch, needing the Linux RV64 QEMU lane to confirm or clear.
+
+## Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105)
+
+Host-side dual-backend oracles re-run on `origin/release/1.0.0` @ `bc3e9b48cb4`
+(aarch64 Rust seed):
+
+```text
+ed25519_rfc8032_spec.spl          15/15 passed
+curve25519_rfc7748_spec.spl       10/10 passed
+dual_backend_alpha_spec.spl        4/4 passed
+sha512_direct_kat_spec.spl         3/3 passed
+```
+
+The pure-Simple crypto paths are clean on host. The recorded blocker is RV64
+*native execution* of the pure paths inside the live SSH lane; the live gate
+(`rv64_ssh_live_login_in_qemu_spec.spl` with `SIMPLEOS_RV64_SSH_LIVE=1`) was
+not re-run this pass (multi-minute RV64 native-build + QEMU + OpenSSH lane).
+Status: OPEN; host-side oracles green, live RV64 lane still required to close.
+
+## Host repro 2026-11-06 (work/fx-rv64-ed25519-20261106, aarch64 Rust seed)
+
+Same pure-Simple path (`os.crypto.ed25519` + `os.crypto.sha512`), host interpreter:
+
+```text
+test/01_unit/lib/crypto/ed25519_rfc8032_spec.spl      15/15 passed (RFC 8032 TV1..)
+test/01_unit/os/crypto/sha512_direct_kat_spec.spl      3/3 passed
+```
+
+Host signature and SHA-512 are correct, so there is no pure-Simple logic bug:
+the zero signature is RV64 native codegen/runtime only. The record's own
+evidence (X25519 serializer fixed by replacing indexed `[u64]` stores with
+locals; `r_enc`/`sig` arrays reading back zero or partial after push/copy;
+SHA-512 seed hash wrong in the live lane) points at array element store/read
+and u64 arithmetic lowering on RV64, not at the algorithm. No RV64 codegen fix
+attempted in this lane.
+
+Added `test/01_unit/os/crypto/ed25519_rv64_primitives_spec.spl` (5/5 on host):
+pins `[u64]` indexed store round-trip, 51-bit shift/mask carry, u64 wrap
+multiply, sparse 32-byte element-wise copy, and R||S 64-byte signature
+assembly. Run the same spec under RV64 native to localise the failing
+primitive. Status: OPEN (target-specific).
+
+## Re-scope 2026-11-07 (work/rv64-ed25519-20261107, aarch64 Linux host)
+
+Binary: `/home/yoon/dev/seed-try-target/release/simple` (Rust seed, sha256
+`87693d9e927f9bd5...`). The requested `/home/yoon/dev/cargo-rel100/simple-ref`
+does not exist on this host. Base `origin/release/1.0.0` @ `1965f658d45`.
+
+Host (interpreter, `systemd-run MemoryMax=16G timeout 900`):
+
+```text
+ed25519_rfc8032_spec.spl        outcome=OK passed=15 failed=0   wall 18.8 s
+sha512_direct_kat_spec.spl      outcome=OK passed=3  failed=0   wall  3.3 s
+ed25519_rv64_primitives_spec    outcome=OK passed=5  failed=0   wall  3.1 s
+```
+
+No host red exists, so no pure-Simple algorithm fix was made (third lane to
+confirm this). Timeout half: not reproduced; SHA-512 KATs run in 3.3 s.
+
+RV64 repro attempt (no bootstrap run):
+
+1. `os build --scenario rv64-x25519-probe` -> `phase=compiler-admission
+   FAILED: no admitted self-hosted compiler for cranelift`
+   (`src/os/_QemuRunner/os_build_run.spl:186`; `qemu_compiler_select_v1`
+   refuses the Rust seed by design and no deployed pure-Simple compiler exists
+   here).
+2. Direct seed `native-build --target riscv64-unknown-none` (June recipe):
+   - clang 23 / the local LLVM install have no RISC-V target; only
+     `/usr/lib/llvm-18/bin/clang` does.
+   - `examples/09_embedded/simple_os/arch/riscv64/boot/full_networking_runtime.c:1`
+     `#include`d an absolute path from another machine
+     (`/home/ormastes/dev/pub/simple/...`). **Fixed** to a repo-relative include.
+   - Still fails: `freestanding_runtime.c:3010-3013` calls undeclared
+     `rt_boot_tcp_registry_lookup` (and siblings); link has undefined
+     `rt_typed_words_u64_push`, `rt_array_new_with_cap_u64`, `rt_byte_array_new`,
+     `rt_string_new_literal`, `rt_to_int_dynamic`, `rt_pool_safepoint`, and the
+     entry symbol `m_09_embedded__simple_os__arch__riscv64__x25519_probe_entry__rv64_x25519_probe_boot_main`
+     (entry-name mangling mismatch).
+   - The Ed25519 probe entry (`ed25519_probe_entry.spl`) no longer exists.
+
+Needed to close: a deployed admitted self-hosted compiler (or a sanctioned seed
+lane) that links the riscv64 freestanding runtime, then an Ed25519 probe entry
+mirroring `ed25519_rv64_primitives_spec` (5 primitives) + RFC 8032 TV1 run under
+`qemu-system-riscv64 -bios default`, then the live SSH gate. Whether the fault
+is cranelift riscv64 lowering vs freestanding-runtime array helpers is
+UNVERIFIED; disassembling the indexed `[u64]` store site needs a built object.
+
+## Fix Implemented 2026-11-26 (BF-7 lane, work/bf-7-riscv32-fpga-20261126)
+
+- **Status:** `fix-implemented-verification-pending`
+- **Root-cause fixes landed:**
+  - Fixed the multi-runtime C array/index ABI mismatch across all 5 RV64 boot crypto helpers (`ed25519_sha512_helper.c`, `ed25519_scalar_helper.c`, `curve25519_ring_helper.c`, `tls13_aes256_gcm_helper.c`, `tls13_sha256_helper.c`) via shared header `examples/09_embedded/simple_os/arch/riscv64/boot/rv64_crypto_array_abi.h`: probes `rt_byte_array_new_len(rt_int(2))` once at runtime so `freestanding_runtime.c` and `x86_64/boot/tls13_aes256_gcm_helper.c` (`>> 3`) receive tagged `rt_int` lengths/indices, while `baremetal_stubs.c` / `baremetal_runtime_core.inc.c` / `runtime_native.c` receive raw lengths/indices.
+  - Added RFC 7748 scalar clamping (`scalar[0] &= 248; scalar[31] = (scalar[31] & 127) | 64`) and peer u-coordinate MSB masking (`point[31] &= 127`) in `examples/09_embedded/simple_os/arch/riscv64/boot/curve25519_ring_helper.c` before `x25519_scalar_mult_generic_masked` (preserving `k_live_bootstrap_private_key`).
+  - Restored `examples/09_embedded/simple_os/arch/riscv64/ed25519_probe_entry.spl` and fixed its 3-argument `ed25519_sign(seed, pk, empty_msg)` call matching `src/os/crypto/ed25519.spl:188`. (Note: isolated single-file `simple check` reports `missing module surface` for `os.*` identically to sibling `x25519_probe_entry.spl`; full resolution occurs in project OS builds.)
+  - Expanded host C harness `test/01_unit/os/riscv_bf7/rv64_crypto_helpers_host_harness.c` + `verify_rv64_crypto_helpers.shs` to verify all 5 RV64 C helpers + `x86_64/boot/tls13_aes256_gcm_helper.c` (`X86_GC_BYTE_PACKED`) across BOTH raw and tagged ABIs using NIST FIPS 180-4, RFC 8032, RFC 7748, and NIST SP 800-38D Test Case 16 vectors.
+- **Host verification evidence (Windows host):**
+  - `sh test/01_unit/os/riscv_bf7/verify_rv64_crypto_helpers.shs` -> `STATUS: PASS verify_rv64_crypto_helpers binaries=5 all_helpers=5` (exit `0`).
+  - `simple.exe test test/01_unit/os/riscv_bf7/riscv_bf7_firmware_and_gates_spec.spl --mode=interpreter` -> `4 total, 4 passed, 0 failed` (`outcome=OK`, exit `0`).
+  - `simple.exe test test/01_unit/os/crypto/ed25519_rv64_primitives_spec.spl --mode=interpreter` -> `5 total, 5 passed, 0 failed` (`outcome=OK`, exit `0`).
+  - `simple.exe lint examples/09_embedded/simple_os/arch/riscv64/ed25519_probe_entry.spl --fast --jobs=1` -> `0 error(s), 6 warning(s)` (exit `0`).
+- **Target RV64 native + QEMU verification command:**
+  ```sh
+  SIMPLE_LIB=src bin/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl
+  ```
+

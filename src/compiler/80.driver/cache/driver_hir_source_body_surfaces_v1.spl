@@ -1,6 +1,9 @@
 # Real declaration replay for the private source-body lowerer. No caller surface
 # bag is adopted. Complete ordinary ParserModules remain in per-file leases.
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+# Split impl provider of CompilerDriver.add_streaming_module_surface (called below);
+# native entry-closure discovery follows import edges only.
+use compiler.driver.driver_source_parse_selected.*
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceBuilder, ModuleSurfacesByName,
     module_surface_canonical_path, module_surfaces_promote_reason,
     module_surfaces_retained_alignment_error}
@@ -22,7 +25,7 @@ fn driver_hir_source_body_row_in_owned_scope_v1(driver: CompilerDriver, index: i
     val coverage = source_file_coverage_identity(path, raw)
     if coverage.0 != ctx.source_authored_paths_owner[index] or
             coverage.1 != ctx.source_contents_owner[index] or
-            coverage.1.len() != ctx.source_byte_lengths_owner[index] or
+            coverage.1.byte_len() != ctx.source_byte_lengths_owner[index] or
             sha256_text(coverage.1) != ctx.source_identities_owner[index]:
         return Err("private source surface replay selected physical snapshot changed")
     Ok(true)
@@ -57,6 +60,8 @@ fn driver_hir_source_body_finish_surfaces_v1(builder: ModuleSurfaceBuilder) -> R
 
 fn driver_hir_source_body_verify_surfaces_v1(driver: CompilerDriver,
         surfaces: ModuleSurfacesByName) -> Result<bool, text>:
+    if surfaces.library_mode != driver.ctx.options.library_mode or surfaces.library_mode != driver.streaming_module_surfaces_owner.library_mode:
+        return Err("LIBRARY_MODE_REPLAY_MISMATCH: replayed, requested and retained surface modes differ")
     if not transient_scope_begin(): return Err("private source surface verification lease unavailable")
     val alignment = module_surfaces_retained_alignment_error(surfaces)
     var result: Result<bool, text> = if alignment == "": Ok(true) else: Err(alignment)
@@ -74,7 +79,7 @@ fn driver_hir_source_body_replay_surfaces_inner_v1(driver: CompilerDriver) -> Re
     if count == 0 or ctx.source_paths_owner.len() != count or ctx.source_authored_paths_owner.len() != count or
             ctx.source_contents_owner.len() != count or ctx.source_identities_owner.len() != count or
             ctx.source_byte_lengths_owner.len() != count: return Err("private source surface replay inventory incomplete")
-    var builder = ModuleSurfaceBuilder.new()
+    var builder = ModuleSurfaceBuilder.new(ctx.options.library_mode)
     var index = 0
     while index < count:
         val _row = driver_hir_source_body_verify_row_v1(driver, index)?
@@ -101,6 +106,10 @@ fn driver_hir_source_body_replay_surfaces_inner_v1(driver: CompilerDriver) -> Re
 fn driver_hir_source_body_replay_surfaces_v1(driver: CompilerDriver) -> Result<ModuleSurfacesByName, text>:
     if transient_array_scope_state_v1() != 0 or not driver.streaming_surface_owner_ready:
         return Err("private source surface replay requires actual closed driver")
+    # Compare the pre-existing frozen authority before rebuilding any surfaces
+    # or opening scratch. A new builder derived from ctx is not provenance.
+    if driver.streaming_module_surfaces_owner.library_mode != driver.ctx.options.library_mode:
+        return Err("LIBRARY_MODE_REPLAY_MISMATCH: requested mode differs from retained frozen surface owner")
     # Re-parsing must not append a second set of advice/claims. Restore the
     # original owners on every Result edge after all per-file leases close.
     val layer = layer_eq_registry_owner_snapshot_v1()

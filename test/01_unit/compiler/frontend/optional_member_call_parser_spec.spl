@@ -1,0 +1,78 @@
+"""
+## Purpose and audience
+Purpose: `?.` is safe navigation (optional chaining) on BOTH compilers, as
+documented in syntax_quick_reference.md "Safe Navigation (`?.`)":
+`x?.field` and `x?.method(args)` are nil/None-safe and never propagate.
+Try-then-access is spelled `(x?).field` / `(x?).method(args)`. The self-hosted
+parser must emit OptionalChain (not a plain field access, and not Try) so the
+`?` is never silently dropped or reinterpreted.
+Audience: compiler frontend engineers.
+"""
+# @req: REQ-COMPILER-FRONTEND-001 — stable requirement identity for this spec.
+
+use std.spec.*
+use compiler.core.ast.{ast_reset, module_get_decls, decl_get_name, decl_get_body}
+use compiler.core.ast_expr.{expr_get_tag, expr_get_str, expr_get_left, expr_get_args,
+    EXPR_METHOD_CALL, EXPR_TRY, EXPR_FIELD_ACCESS, EXPR_CALL, EXPR_OPTIONAL_CHAIN}
+use compiler.core.ast_stmt.{stmt_get_expr}
+use compiler.core.parser.{parse_module, parser_has_errors}
+
+fn first_body_expr(source: text, path: text, wanted: text) -> i64:
+    ast_reset()
+    parse_module(source, path)
+    if parser_has_errors():
+        fail("unexpected parser errors for {path}")
+        return -1
+    for decl in module_get_decls():
+        if decl_get_name(decl) == wanted:
+            val body = decl_get_body(decl)
+            if body.len() < 1:
+                fail("empty body for {wanted}")
+                return -1
+            return stmt_get_expr(body[0])
+    fail("missing function {wanted}")
+    -1
+
+struct OptProbe:
+    path: text
+
+fn opt_probe_ok() -> Result<text, text>: Ok("  v  ")
+fn opt_probe_err() -> Result<text, text>: Err("boom")
+fn opt_probe_some() -> OptProbe?: Some(OptProbe(path: "p"))
+fn opt_probe_none() -> OptProbe?: None
+
+fn opt_probe_try_call(ok: bool) -> Result<text, text>:
+    val r = if ok: opt_probe_ok() else: opt_probe_err()
+    val trimmed = (r?).trim()
+    Ok("[" + trimmed + "]")
+
+describe "safe navigation parsing (self-hosted parser)":
+    it "parses x?.field as OptionalChain":
+        val e = first_body_expr("fn f(p: Point?) -> i64:\n    p?.x\n", "opt_chain_field.spl", "f")
+        if e < 0: return
+        expect(expr_get_tag(e)).to_equal(EXPR_OPTIONAL_CHAIN)
+        expect(expr_get_str(e)).to_equal("x")
+
+    it "parses x?.method(args) as a call on an OptionalChain, never a Try":
+        val e = first_body_expr("fn f(x: text?) -> bool:\n    x?.contains(\"a\")\n", "opt_chain_call.spl", "f")
+        if e < 0: return
+        expect(expr_get_tag(e) == EXPR_TRY).to_equal(false)
+        val callee = expr_get_left(e)
+        expect(expr_get_tag(callee)).to_equal(EXPR_OPTIONAL_CHAIN)
+        expect(expr_get_str(callee)).to_equal("contains")
+
+    it "parses (x?).method() as MethodCall(Try(x))":
+        val e = first_body_expr("fn f() -> Result<text, text>:\n    (g()?).trim()\n", "try_then_call.spl", "f")
+        if e < 0: return
+        expect(expr_get_tag(e)).to_equal(EXPR_METHOD_CALL)
+        expect(expr_get_str(e)).to_equal("trim")
+        expect(expr_get_tag(expr_get_left(e))).to_equal(EXPR_TRY)
+
+describe "safe navigation vs try-then-access (runtime)":
+    it "(r?).trim() propagates Err and calls on the Ok payload":
+        expect(opt_probe_try_call(true)).to_equal(Ok("[v]"))
+        expect(opt_probe_try_call(false)).to_equal(Err("boom"))
+
+    it "x?.field ?? default is nil-safe":
+        expect(opt_probe_some()?.path ?? "none").to_equal("p")
+        expect(opt_probe_none()?.path ?? "none").to_equal("none")

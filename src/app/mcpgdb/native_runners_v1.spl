@@ -1,0 +1,96 @@
+# Strict invocation-scoped native bundle; hash admission and metadata lookups.
+use app.io.minimal_runtime_ops.{env_get}
+use std.common.sdn.strict_v1.{sdn_parse_strict_v1}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.common.sdn.value.{SdnValue}
+use app.io.cli_ops.{cli_kernel_executable_path}
+use std.nogc_sync_mut.fs.host_path.{host_path_canonical}
+use std.common.contracts.sosix.descriptor_stat_v1.{descriptor_file_identity_equal_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{NativePinnedArtifactV1, native_pinned_artifact_open_v1, native_pinned_artifact_revalidate_v1}
+
+var _mcpgdb_pins_v1: [NativePinnedArtifactV1] = []
+var _mcpgdb_roles_v1: [text] = []
+var _mcpgdb_paths_v1: [text] = []
+var _mcpgdb_failed_v1: bool = false
+
+pub fn mcpgdb_bundle_prepare_v1() -> Result<bool, text>:
+    if _mcpgdb_failed_v1: return Err("native MCPGDB admission invalidated")
+    if _mcpgdb_pins_v1.len() != 0: return Ok(true)
+    val manifest = native_pinned_artifact_open_v1(env_get("MCPGDB_NATIVE_MANIFEST"), env_get("MCPGDB_NATIVE_MANIFEST_SHA256"))?
+    val payload = file_read_regular_no_follow_bounded(manifest.path, 1048576)?
+    val limits = SdnStrictLimitsV1(max_source_bytes: 1048576, max_depth: 4, max_nodes: 2048, max_rows: 128, max_cells: 1024, max_columns: 6)
+    val document = match sdn_parse_strict_v1(payload, limits):
+        Ok(value): value
+        Err(reason): return Err("MCPGDB manifest malformed: " + reason.message)
+    var headers: [text] = []
+    var rows: [[SdnValue]] = []
+    match document.value:
+        SdnValue.Dict(tables):
+            if tables.len() != 1: return Err("MCPGDB manifest requires one table")
+            match tables.get("mcpgdb_native_bundle_v1") ?? SdnValue.Null:
+                SdnValue.Table(columns, values):
+                    headers = columns
+                    rows = values
+                _: return Err("MCPGDB manifest table missing")
+        _: return Err("MCPGDB manifest root invalid")
+    if headers != ["role", "path", "sha256", "target", "abi", "root"]: return Err("MCPGDB manifest schema invalid")
+    if rows.len() < 14 or rows.len() > 128: return Err("MCPGDB artifact bound invalid")
+    if env_get("MCPGDB_PRIVATE_ROOT") == "": return Err("MCPGDB_PRIVATE_ROOT is required")
+    val target = env_get("MCPGDB_NATIVE_TARGET")
+    val abi = env_get("MCPGDB_NATIVE_ABI")
+    val root = env_get("MCPGDB_NATIVE_ROOT")
+    if target == "" or abi == "" or root == "": return Err("MCPGDB bundle context missing")
+    val actual = host_path_canonical(cli_kernel_executable_path())
+    if actual == "": return Err("MCPGDB actual image unavailable")
+    var actual_bound = false
+    var pins = [manifest]
+    var roles: [text] = []
+    var paths: [text] = []
+    for row in rows:
+        if row.len() != 6: return Err("MCPGDB row width invalid")
+        var fields: [text] = []
+        for cell in row:
+            match cell:
+                SdnValue.String(value): fields = fields.push(value)
+                _: return Err("MCPGDB manifest cells must be text")
+        val role = fields[0]
+        val path = fields[1]
+        if roles.contains(role) or paths.contains(path): return Err("MCPGDB duplicate role/path")
+        if not ["server", "producer", "runtime_input", "gdb", "runner_debug", "runner_exec", "runner_session", "runner_state", "runner_clangd", "entry_debug", "entry_exec", "entry_session", "entry_state", "entry_clangd"].contains(role) and not role.starts_with("dll_"): return Err("MCPGDB role invalid")
+        if fields[3] != target or fields[4] != abi or fields[5] != root: return Err("MCPGDB target/ABI/root mismatch")
+        if (role == "server" or role == "gdb" or role.starts_with("runner_")) and target.contains("windows") and not path.lower().ends_with(".exe"):
+            return Err("MCPGDB native executable role requires an EXE path")
+        val pin = native_pinned_artifact_open_v1(path, fields[2])?
+        if host_path_canonical(path) == actual and (role == "server" or role.starts_with("runner_")):
+            val running = native_pinned_artifact_open_v1(actual, fields[2])?
+            actual_bound = descriptor_file_identity_equal_v1(pin.metadata.identity, running.metadata.identity)
+        pins = pins.push(pin)
+        roles = roles.push(role)
+        paths = paths.push(path)
+    for required in ["server", "producer", "runtime_input", "gdb", "runner_debug", "runner_exec", "runner_session", "runner_state", "runner_clangd", "entry_debug", "entry_exec", "entry_session", "entry_state", "entry_clangd"]:
+        if not roles.contains(required): return Err("MCPGDB manifest incomplete: " + required)
+    if not actual_bound: return Err("MCPGDB running image not in admitted bundle")
+    val unchanged = native_pinned_artifact_revalidate_v1(manifest, true)?
+    _mcpgdb_pins_v1 = pins
+    _mcpgdb_roles_v1 = roles
+    _mcpgdb_paths_v1 = paths
+    Ok(true)
+
+pub fn mcpgdb_bundle_validate_v1(terminal: bool) -> Result<bool, text>:
+    mcpgdb_bundle_prepare_v1()?
+    for pin in _mcpgdb_pins_v1:
+        match native_pinned_artifact_revalidate_v1(pin, terminal):
+            Ok(_): pass
+            Err(reason):
+                _mcpgdb_failed_v1 = true
+                return Err(reason)
+    Ok(true)
+
+pub fn mcpgdb_bundle_path_v1(role: text) -> Result<text, text>:
+    mcpgdb_bundle_validate_v1(false)?
+    var index = 0
+    while index < _mcpgdb_roles_v1.len():
+        if _mcpgdb_roles_v1[index] == role: return Ok(_mcpgdb_paths_v1[index])
+        index = index + 1
+    Err("MCPGDB native role unavailable: " + role)

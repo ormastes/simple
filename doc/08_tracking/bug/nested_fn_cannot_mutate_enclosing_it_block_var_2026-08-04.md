@@ -23,12 +23,13 @@ returned "", Mailbox.drop_stale always reported 0, ...), and 100 test sites
 were migrated to module-level recorders. Gate:
 `test/01_unit/compiler/interpreter/nested_fn_enclosing_var_mutation_spec.spl`
 (retargeted to assert the diagnostic on both seed engines and in pure-Simple).
-## Open 2026-09-16 — needs owner triage
+## Superseded normalization note (2026-09-16) — resolution above is authoritative
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+The 2026-09-16 normalization pass appended "needs owner triage / Status: OPEN"
+below the resolution section; that note predates the 2026-09-27 owner ruling
+recorded at the top of this file and is superseded by it.
 
-**Status:** OPEN
+**Status:** RESOLVED by owner ruling 2026-09-27 (see top section)
 **Found:** 2026-08-04
 
 ## Symptom
@@ -214,3 +215,24 @@ origin/main `1d4aafe3914` the R5 repros do not fire the hook at all (no
 `HOOK RAN`, final len=1 in both variants) — R5 is only observable atop the
 unlanded after_all drain fix referenced in its record.
 
+
+## Verification 2026-11-25 (p2w4-al lane, Windows host)
+
+The resolution machinery described in the top section is present at
+release/1.0.0 HEAD:
+
+- Rust seed: `simple_parser::capture_write_check` enforced via
+  `reject_captured_local_writes` (`src/compiler_rust/compiler/src/pipeline/module_loader.rs:1798`,
+  called at `:2867`).
+- Pure-Simple: `capture_write_check_module` in
+  `src/compiler/10.frontend/core/capture_write_check.spl:268` (documented as
+  the twin of the seed check).
+- Gate spec `test/01_unit/compiler/interpreter/nested_fn_enclosing_var_mutation_spec.spl`
+  exists.
+
+Execution evidence is NOT claimed: `bin/simple.exe test` cannot load the tree
+on this host (`unknown decorator '@representation_boundary'` in
+`src/app/test_runner_new/test_runner_client.spl` — known release/1.0.0
+source/binary inconsistency). Closure rests on source inspection; the stale
+"Status: OPEN" line left over from the 2026-09-16 normalization pass was
+corrected above.

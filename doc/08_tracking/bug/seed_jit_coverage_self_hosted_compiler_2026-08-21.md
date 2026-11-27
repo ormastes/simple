@@ -428,3 +428,96 @@ passed / 52 failed — the same failure set as baseline (3 more tests pass).
 3. Scalar-boxing of a closure handle (refusal 3 above): `BoxInt` needs to see
    that its operand is a heap handle.
 
+---
+
+## Addendum 2026-11-11 — lane runner5: LIVE; one whole-module de-JIT fixed, next blocker is seed-side
+
+State on the refreshed seed (build-commit 0791c2b7f4a7, this worktree at
+origin/release/1.0.0 tip): the pinned acceptance gate
+`scripts/check/check-lint-runs-on-jit.shs` **FAILS**.
+
+Measured chain (`SIMPLE_EXECUTION_MODE=jit bin/simple.exe lint
+src/compiler/80.driver/driver_types.spl`, reproduced twice before any
+change):
+
+1. **First blocker (FIXED this lane):** HIR lowering failed with
+   `ambiguous call to 'check_short_grammar_refactor': 2 co-compiled
+   definitions (src/compiler/90.tools/fix/rules/impl_/lint_short_grammar.spl,
+   src/lib/nogc_sync_mut/tooling/easy_fix/rules.spl)` — exactly the
+   duplicate-name landmine this doc's "Still-open duplicate-name census"
+   section predicts. The cli caller
+   (`src/app/io/cli_lint_commands.spl:15`,
+   `src/app/io/_CliCommands/run_commands.spl:13`) already imports the
+   compiler variant selectively; the seed's ambiguity checker still refused
+   (changing `use lazy` to `use` made no difference — reverted). Fix:
+   renamed the stdlib copy to `easy_fix_check_short_grammar_refactor`
+   (commit `47a812b49475`; definition `easy_fix/rules.spl:490`, internal call
+   `:1311`, re-exports `easy_fix/__init__.spl:13,30` and `easy_fix.spl:20`).
+   No external by-name or wildcard user of the old easy_fix name exists
+   (tree-grepped; the wildcard `use std.tooling.easy_fix.*` compiler files
+   never reference the name). **Verified effect:** lint now clears HIR
+   lowering entirely and reaches Cranelift codegen.
+2. **Second blocker (seed-side, NOT fixed):** codegen now refuses
+   `function 'Future.map' creates a lambda/closure the JIT closure ABI cannot
+   compile (the call boundary types [ANY] -> ANY are not carryable across the
+   closure ABI …)` and the whole module still drops to the interpreter.
+   `Future.map` (`src/lib/nogc_async_mut/async/future.spl:80`) is
+   `fn map<U>(f: fn(T) -> U)`; in lint's closure it monomorphizes to
+   ANY→ANY. This is the doc's own "What is still refused, and why" item 1
+   (an ANY-typed boundary has no sound encoding) plus "Remaining, in order"
+   item 1 (undeclared/generic lambda typing) — both documented as seed-side
+   work. Chasing it in `.spl` means pinning generic std types for one entry
+   point's closure (open-ended, other-lane-owned surface), so it is recorded
+   here per the cap rule rather than worked around.
+
+Verdict: **LIVE** — `check-lint-runs-on-jit.shs` remains red on the
+refreshed seed. Progress landed: the `check_short_grammar_refactor`
+whole-module de-JIT is fixed (47a812b49475). Exact remaining command for the
+owning (seed/compiler) lane:
+
+```
+SIMPLE_LIB=src SIMPLE_BIN=$PWD/bin/simple.exe sh scripts/check/check-lint-runs-on-jit.shs
+# current failure: Future.map ANY→ANY closure boundary (seed-side)
+```
+
+
+## Addendum 2026-11-11 — lane seedB: gate re-run CONFIRMS LIVE; SUPERSEDED/STALE rejected
+
+`SIMPLE_LIB=src SIMPLE_BIN=$PWD/bin/simple.exe sh scripts/check/check-lint-runs-on-jit.shs`
+at base 79d5af6723f6 (worktree simple-p3-seedB-20261111, tracked seed
+bin/simple.exe 2026-11-11), ~5 min wall:
+
+```
+FAIL — 1 invocation(s) executed, de-JIT detected: whole-module-de-jit
+no-lint-verdict; [INFO] JIT compilation failed, falling back to interpreter:
+Cranelift JIT compile: Module error: function 'Future.map' creates a
+lambda/closure the JIT closure ABI cannot compile (the call boundary types
+[TypeId(14)] -> TypeId(14) are not carryable across the closure ABI (ANY
+means no encoding is correct for both an integer and a float)); JIT would
+return wrong values or crash; deferring to interpreter
+```
+
+Identical to runner5's recorded blocker (`Future.map` monomorphized
+ANY→ANY in lint's closure). Disposition question posed to this lane —
+"verify whether SUPERSEDED/STALE is the right disposition": **no**. The
+original per-function-census *premise* was already refuted and redirected
+inside the 2026-08-21 body, but the row as the tracker of self-hosted
+compiler JIT coverage is LIVE: the pinned acceptance gate is RED at this
+base with a named seed-side blocker. Remaining work is the documented
+seed-side structural sequence (generic/undeclared lambda typing at the
+ANY boundary; BOOL sub-register across closure boundaries; closure-handle
+scalar boxing) — NOT a `.spl` surface change (open-ended, other-lane-owned)
+and not admittable as-is (an ANY boundary has no sound unboxed encoding).
+
+Verdict: **LIVE + BLOCKED** (seed-side structural; owning lane command
+verbatim in runner5's addendum above).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded status: OPEN — the census landed and both blockers were filed as follow-ups (runner5 addendum verbatim). No in-lane change.
+
+---
+
+## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
+
+Concurs with runner5/seedB/p3-comp1: LIVE + BLOCKED, seed-side structural. The pinned gate `check-lint-runs-on-jit.shs` remains red with the named `Future.map` ANY→ANY closure-boundary refusal (monomorphized generic lambda typing), per the seedB 2026-11-11 re-run at this base family. The remaining sequence (generic/undeclared lambda typing at the ANY boundary, BOOL sub-register across closure boundaries, closure-handle scalar boxing) is seed compiler work, explicitly not a `.spl` surface change. One related new data point from this lane: the seed JIT also boxes the tagged results of `rt_string_parse_int`/`rt_string_to_float` into `Some(nil)` on success (see pure_sql_reopen_checkpointed_file_stack_overflow_2026-08-25.md 2026-11-13 addendum, measured differentially interpreter-vs-JIT on this host) — another instance of the JIT value-boxing defect family; worth folding into the same seed-side audit. No in-lane change. Owner: seed/compiler lane with cargo grant + bootstrap replay.

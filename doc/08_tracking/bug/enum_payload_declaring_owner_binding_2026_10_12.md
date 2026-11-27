@@ -83,3 +83,5 @@ exit -9, peak tree RSS 1,986,396,160 bytes, object bytes 0. MIR emitted unresolv
 method calls lowered to const-0 placeholders, so no native closure behavior or
 admission is claimed. The owner HIR criterion is complete and must not be
 rerun without new changes; the downstream MIR boundary remains separate.
+
+**Revalidated 2026-11-02: still plausible because focused HIR repair verified; full qualification remains OPEN; no merged fix commit with a passing regression is cited in this doc.**

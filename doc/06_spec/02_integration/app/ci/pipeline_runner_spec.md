@@ -332,7 +332,7 @@ for r in run.jobs:
 - Confirm an unavailable lane claims no engine and no privilege
    - Expected: probe.engine equals ``
    - Expected: probe.privilege equals `PRIVILEGE_UNKNOWN`
-- Confirm an available lane names one of the supported engines
+- Confirm the default available lane names Podman
 - Confirm an available lane states root or rootless, never unknown
 - Confirm a rootless claim is never made for docker's root daemon
    - Expected: probe.privilege equals `PRIVILEGE_ROOT`
@@ -354,9 +354,9 @@ if not probe.available:
     expect(probe.privilege).to_equal(PRIVILEGE_UNKNOWN)
     expect(probe.reason.len()).to_be_greater_than(0)
 
-step("Confirm an available lane names one of the supported engines")
+step("Confirm the default available lane names Podman")
 if probe.available:
-    expect([ENGINE_PODMAN, ENGINE_DOCKER, ENGINE_RUNC].contains(probe.engine)).to_be(true)
+    expect([ENGINE_PODMAN].contains(probe.engine)).to_be(true)
 
 step("Confirm an available lane states root or rootless, never unknown")
 if probe.available:

@@ -69,6 +69,9 @@ pub struct LlvmBackend {
     pub(super) use_map: std::collections::HashMap<String, String>,
     /// Return types for functions declared in the current MIR module.
     pub(super) function_return_types: RefCell<std::collections::HashMap<String, crate::hir::TypeId>>,
+    /// `@abi("system")` externs declared stdcall on Windows x86: name -> return TypeId
+    /// (used to pick sext/zext when widening narrow integer returns).
+    pub(super) system_abi_rets: RefCell<std::collections::HashMap<String, crate::hir::TypeId>>,
     /// Module symbol prefix, used to name the per-module `__module_init_<prefix>`
     /// function so the linker's init-caller aggregator can discover it. Mirrors
     /// the cranelift backend's `module_prefix` (common_backend.rs).
@@ -107,61 +110,47 @@ static LLVM_MEMPROF_ENABLED: OnceLock<bool> = OnceLock::new();
 pub(super) fn llvm_memprof_enabled() -> bool {
     *LLVM_MEMPROF_ENABLED.get_or_init(|| std::env::var("SIMPLE_MEM_MEMPROF").map(|v| v == "1").unwrap_or(false))
 }
+/// LLVM OS/env triple suffix for a Windows target.
+///
+/// The env component must follow the target's linker flavor: a `-msvc` triple
+/// makes LLVM emit references to the MSVC CRT float marker `_fltused` in any
+/// function that touches floating point, which the mingw CRT does not define,
+/// so gnu-lane (ld.lld + llvm-mingw) links failed with `undefined symbol: _fltused`.
+fn windows_os_suffix(target: Target) -> &'static str {
+    match target.linker_flavor() {
+        simple_common::target::LinkerFlavor::Gnu => "pc-windows-gnu",
+        _ => "pc-windows-msvc",
+    }
+}
+
 
 // Manual Debug implementation since Context/Module/Builder don't implement Debug
 
-/// Default x86-64 CPU profile for LLVM codegen.
+/// Default x86-64 CPU profile for LLVM codegen: always the `x86-64` (v1)
+/// baseline, so the base binary runs on any x86_64 machine. Wider code
+/// (x86-64-v2..v4) ships as CPU-tier artifacts selected at runtime
+/// (doc/05_design/compiler/simd/cpu_tier_multibuild.md), never by widening
+/// from the builder's CPUID, which proves nothing about the target machine.
 ///
-/// This is the knob that decides whether LLVM's loop and SLP vectorizers --
-/// both enabled in `optimize_module_ir` -- are allowed to emit AVX-512. It was
-/// pinned to `x86-64-v3`, i.e. AVX2, so on a host with full AVX-512 support
-/// every natively built binary (the DB server, the HTTP server, the software
-/// renderer) was vectorized at 256 bits and never 512, with nothing in the
-/// build output saying so.
-///
-/// Widening follows the same discipline as the pure-Simple auto-vectorizer's
-/// planning level (`auto_vectorize_target.spl`), for the same reason: a CPU
-/// name is a REQUEST, not proof about the execution domain.
-///
-///   * the output must target the host -- a cross-compiled artifact must never
-///     be widened from the builder's CPUID, or it will fault on the machine it
-///     was built for;
-///   * AVX-512 F, VL and BW must all be present, VL because LLVM still emits
-///     128/256-bit forms for short trips and BW because byte/word lanes are
-///     otherwise unencodable;
-///   * anything short of that returns the previous `x86-64-v3` baseline, so
-///     this can only widen, never narrow.
-///
-/// `SIMPLE_X86_64_DEFAULT_CPU` overrides the choice outright, which is the
-/// escape hatch for reproducible builds that must not vary with the builder.
+/// `SIMPLE_X86_64_DEFAULT_CPU` overrides the choice outright (each level name
+/// maps to itself; unknown values fall back to the baseline).
 fn default_x86_64_cpu_name(triple: &str) -> &'static str {
-    const BASELINE: &str = "x86-64-v3";
-    const WIDE: &str = "x86-64-v4";
+    const BASELINE: &str = "x86-64";
 
+    // Return the default x86_64 baseline (v1, 2003+) for maximum compatibility.
+    // Under the CPU tier design, v2-v4 builds come from tier artifacts via
+    // native cache scope tier canonicalization, not host feature detection.
+    // Explicit SIMPLE_X86_64_DEFAULT_CPU env var overrides allow per-build selection.
     if let Ok(forced) = std::env::var("SIMPLE_X86_64_DEFAULT_CPU") {
         return match forced.trim() {
-            "x86-64-v4" => WIDE,
-            "x86-64-v3" => BASELINE,
+            "x86-64-v4" => "x86-64-v4",
+            "x86-64-v3" => "x86-64-v3",
             "x86-64-v2" => "x86-64-v2",
-            "x86-64" => "x86-64",
+            "x86-64" | "x86-64-v1" => "x86-64",
             _ => BASELINE,
         };
     }
 
-    #[cfg(target_arch = "x86_64")]
-    {
-        // Host-targeting only. `triple` is the requested output triple; if it
-        // is not an x86_64 triple the caller is cross-compiling and the host
-        // receipt proves nothing about the target.
-        let targets_host = triple.starts_with("x86_64") || triple.starts_with("amd64");
-        if targets_host
-            && std::is_x86_feature_detected!("avx512f")
-            && std::is_x86_feature_detected!("avx512vl")
-            && std::is_x86_feature_detected!("avx512bw")
-        {
-            return WIDE;
-        }
-    }
     let _ = triple;
     BASELINE
 }
@@ -375,6 +364,7 @@ impl LlvmBackend {
                 data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
                 use_map: std::collections::HashMap::new(),
                 function_return_types: RefCell::new(std::collections::HashMap::new()),
+                system_abi_rets: RefCell::new(std::collections::HashMap::new()),
                 module_prefix: None,
             })
         }
@@ -473,8 +463,146 @@ impl LlvmBackend {
         }
     }
 
+    /// True when `@abi("system")` means stdcall: Windows on 32-bit x86.
+    /// Everywhere else `system` is plain C and nothing changes.
+    pub(super) fn system_abi_is_stdcall(&self) -> bool {
+        self.target.os == TargetOS::Windows && self.target.arch == TargetArch::X86
+    }
+
+    /// Call a stdcall (`@abi("system")`) function: coerce every argument to its
+    /// declared parameter type (word -> i32 truncation etc.), refuse any arity
+    /// mismatch (a stdcall callee pops its declared byte count, so a call built
+    /// from the actual argument types would corrupt the stack), and put the
+    /// callee's convention on the call site.
     #[cfg(feature = "llvm")]
-    fn declare_globals(&self, module_ir: &MirModule) {
+    pub(super) fn build_system_abi_call(
+        &self,
+        func: inkwell::values::FunctionValue<'static>,
+        args: &[inkwell::values::BasicMetadataValueEnum<'static>],
+        builder: &Builder<'static>,
+        label: &str,
+    ) -> Result<inkwell::values::CallSiteValue<'static>, CompileError> {
+        let declared = func.get_type().get_param_types();
+        let name = func.get_name().to_string_lossy().into_owned();
+        if declared.len() != args.len() {
+            return Err(CompileError::semantic(format!(
+                "stdcall extern `{name}` (@abi(\"system\")) expects {} argument(s) ({declared:?}) but the call passes {}",
+                declared.len(),
+                args.len()
+            )));
+        }
+        let mut coerced = Vec::with_capacity(args.len());
+        for (arg, ty) in args.iter().zip(declared) {
+            let value = inkwell::values::BasicValueEnum::try_from(*arg)
+                .map_err(|_| CompileError::semantic("metadata value used as a stdcall call argument"))?;
+            let ty = inkwell::types::BasicTypeEnum::try_from(ty)
+                .map_err(|_| CompileError::semantic("metadata type used as a stdcall call parameter"))?;
+            coerced.push(self.coerce_value_to_type(value, Some(ty), builder)?.into());
+        }
+        let call = builder
+            .build_call(func, &coerced, label)
+            .map_err(|e| crate::error::factory::llvm_build_failed("stdcall call", &e))?;
+        call.set_call_convention(func.get_call_conventions());
+        Ok(call)
+    }
+
+    /// Widen a narrow integer return of a stdcall `@abi("system")` extern to
+    /// the runtime word (sext for signed Simple types, zext otherwise). Any
+    /// other callee/value is returned unchanged.
+    #[cfg(feature = "llvm")]
+    pub(super) fn widen_system_abi_return(
+        &self,
+        callee: &inkwell::values::FunctionValue<'static>,
+        ret_val: inkwell::values::BasicValueEnum<'static>,
+        builder: &Builder<'static>,
+    ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
+        use crate::hir::TypeId as T;
+        let inkwell::values::BasicValueEnum::IntValue(iv) = ret_val else {
+            return Ok(ret_val);
+        };
+        let word = self.runtime_int_type();
+        if callee.get_call_conventions() != 64 || iv.get_type().get_bit_width() >= word.get_bit_width() {
+            return Ok(ret_val);
+        }
+        let name = callee.get_name().to_string_lossy().into_owned();
+        let signed = matches!(
+            self.system_abi_rets.borrow().get(&name),
+            Some(&T::I8) | Some(&T::I16) | Some(&T::I32)
+        );
+        let wide = if signed {
+            builder.build_int_s_extend(iv, word, "sys_ret_sext")
+        } else {
+            builder.build_int_z_extend(iv, word, "sys_ret_zext")
+        }
+        .map_err(|e| crate::error::factory::llvm_build_failed("widen system abi return", &e))?;
+        Ok(wide.into())
+    }
+
+    /// Declare every `@abi("system")` extern up front with its real parameter
+    /// and return types and the LLVM `X86_StdCall` convention (64), so the COFF
+    /// x86 mangler emits `_Name@N`. Must run before anything can `add_function`
+    /// the same name (LLVM would rename ours to `Name.1`). No-op off Windows x86.
+    #[cfg(feature = "llvm")]
+    pub(super) fn declare_system_abi_externs(&self, module_ir: &MirModule) -> Result<(), CompileError> {
+        use inkwell::types::{BasicMetadataTypeEnum, BasicType};
+        use crate::hir::TypeId as T;
+        if !self.system_abi_is_stdcall() || module_ir.extern_system_abi.is_empty() {
+            return Ok(());
+        }
+        let m = self.module.borrow();
+        let Some(m) = m.as_ref() else { return Ok(()) };
+        let ctx = self.context_ref();
+        // Only primitive scalars have a C layout. Anything else (`text`,
+        // structs, `Any`, ...) is a runtime word, not a C buffer/struct.
+        let to_basic = |ty: T| -> Option<inkwell::types::BasicTypeEnum<'static>> {
+            Some(match ty {
+                T::BOOL | T::I8 | T::U8 => ctx.i8_type().into(),
+                T::I16 | T::U16 => ctx.i16_type().into(),
+                T::I32 | T::U32 | T::CHAR => ctx.i32_type().into(),
+                T::I64 | T::U64 => ctx.i64_type().into(),
+                T::F32 => ctx.f32_type().into(),
+                T::F64 => ctx.f64_type().into(),
+                _ => return None,
+            })
+        };
+        let mut names: Vec<&String> = module_ir.extern_system_abi.keys().collect();
+        names.sort();
+        for name in names {
+            let (params, ret) = &module_ir.extern_system_abi[name];
+            let mut param_types: Vec<BasicMetadataTypeEnum> = Vec::with_capacity(params.len());
+            for (i, p) in params.iter().enumerate() {
+                let ty = to_basic(*p).ok_or_else(|| {
+                    CompileError::semantic(format!(
+                        "@abi(\"system\") extern `{name}`: parameter {i} has type {p:?}, which has no C layout; use bool, i8-i64, u8-u64, char, f32 or f64"
+                    ))
+                })?;
+                param_types.push(ty.into());
+            }
+            let fn_type = if *ret == T::VOID {
+                ctx.void_type().fn_type(&param_types, false)
+            } else {
+                to_basic(*ret)
+                    .ok_or_else(|| {
+                        CompileError::semantic(format!(
+                            "@abi(\"system\") extern `{name}`: return type {ret:?} has no C layout; use void, bool, i8-i64, u8-u64, char, f32 or f64"
+                        ))
+                    })?
+                    .fn_type(&param_types, false)
+            };
+            if m.get_function(name).is_some() {
+                continue;
+            }
+            let f = m.add_function(name, fn_type, None);
+            f.set_linkage(inkwell::module::Linkage::External);
+            // LLVMX86_StdCall
+            f.set_call_conventions(64);
+            self.system_abi_rets.borrow_mut().insert(name.clone(), *ret);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn declare_globals(&self, module_ir: &MirModule) {
         let m = self.module.borrow();
         let Some(m) = m.as_ref() else {
             return;
@@ -694,10 +822,10 @@ impl LlvmBackend {
             })
         };
 
-        // Build a static i8 data global for `bytes`, return its i64 pointer value.
+        // Build a static i8 data global for `bytes`, return its pointer.
         let mut str_const_counter: u32 = 0;
         let make_str_ptr =
-            |bytes: &[u8], counter: &mut u32| -> Result<inkwell::values::IntValue<'static>, CompileError> {
+            |bytes: &[u8], counter: &mut u32| -> Result<inkwell::values::PointerValue<'static>, CompileError> {
                 let cval = ctx.const_string(bytes, false);
                 let name = format!("{}.str.{}", init_name, *counter);
                 *counter += 1;
@@ -705,13 +833,26 @@ impl LlvmBackend {
                 g.set_initializer(&cval);
                 g.set_constant(true);
                 g.set_linkage(inkwell::module::Linkage::Private);
-                let p = builder
-                    .build_pointer_cast(g.as_pointer_value(), ptr_type, "str_p")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("str ptr cast", &e))?;
                 builder
-                    .build_ptr_to_int(p, i64_type, "str_pi")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("str ptrtoint", &e))
+                    .build_pointer_cast(g.as_pointer_value(), ptr_type, "str_p")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("str ptr cast", &e))
             };
+        // rt_string_new(bytes: ptr, len) — the pointer is never ptrtoint'd.
+        let call_string_new = |ptr: inkwell::values::PointerValue<'static>,
+                               len: inkwell::values::IntValue<'static>,
+                               tag: &str|
+         -> Result<inkwell::values::IntValue<'static>, CompileError> {
+            let f = self.declare_rt_string_new(m);
+            f.set_linkage(inkwell::module::Linkage::External);
+            let cs = builder
+                .build_call(f, &[ptr.into(), len.into()], tag)
+                .map_err(|e| crate::error::factory::llvm_build_failed(tag, &e))?;
+            Ok(cs
+                .try_as_basic_value()
+                .basic()
+                .map(|v| v.into_int_value())
+                .unwrap_or_else(|| i64_type.const_int(0, false)))
+        };
 
         // Resolve the global symbol for `global_name`, trying the direct key then
         // the `<prefix>__<name>` mangled form (struct keys are not pre-mangled).
@@ -827,12 +968,11 @@ impl LlvmBackend {
         let mut sorted_strings: Vec<_> = module_ir.global_init_strings.iter().collect();
         sorted_strings.sort_by_key(|(name, _)| (*name).clone());
         if !sorted_strings.is_empty() {
-            let string_new = get_rt("rt_string_new", 2);
             for (global_name, string_val) in sorted_strings {
                 let bytes = string_val.as_bytes();
                 let ptr = make_str_ptr(bytes, &mut str_const_counter)?;
                 let len = i64_type.const_int(bytes.len() as u64, false);
-                let rv = call_i64(string_new, &[ptr, len], "init_str")?;
+                let rv = call_string_new(ptr, len, "init_str")?;
                 store_to_global(global_name, rv)?;
             }
         }
@@ -858,13 +998,12 @@ impl LlvmBackend {
             let array_rv = if let Some(strings) = &init.string_values {
                 let array_new = get_rt("rt_array_new", 1);
                 let array_push = get_rt("rt_array_push", 2);
-                let string_new = get_rt("rt_string_new", 2);
                 let mut array = call_i64(array_new, &[capacity], "init_arr")?;
                 for string_val in strings {
                     let bytes = string_val.as_bytes();
                     let ptr = make_str_ptr(bytes, &mut str_const_counter)?;
                     let len = i64_type.const_int(bytes.len() as u64, false);
-                    let s = call_i64(string_new, &[ptr, len], "init_arr_str")?;
+                    let s = call_string_new(ptr, len, "init_arr_str")?;
                     let pushed = call_i64(array_push, &[array, s], "init_arr_push")?;
                     if fam_push {
                         array = pushed;
@@ -931,63 +1070,84 @@ impl LlvmBackend {
         let mut sorted_functions: Vec<_> = module_ir.global_init_functions.iter().collect();
         sorted_functions.sort_by_key(|(name, _)| (*name).clone());
         if !sorted_functions.is_empty() {
-            let alloc = get_rt("rt_alloc", 1);
             for (global_name, func_name) in sorted_functions {
-                let callee = m
-                    .get_function(func_name)
-                    .or_else(|| {
-                        let sanitized = func_name.replace('.', "_dot_");
-                        m.get_function(&sanitized)
-                    })
-                    .or_else(|| {
-                        // Imported and named only by this initializer: declare
-                        // the import with the uniform all-`i64` user-function
-                        // signature, its arity from the global's function type.
-                        let arity = module_ir
-                            .globals
-                            .iter()
-                            .find(|(name, _, _)| name == global_name)
-                            .and_then(|(_, ty, _)| match module_ir.type_registry.get(*ty) {
-                                Some(crate::hir::HirType::Function { params, .. }) => Some(params.len()),
-                                _ => None,
-                            })?;
-                        let params: Vec<inkwell::types::BasicMetadataTypeEnum> =
-                            (0..arity).map(|_| i64_type.into()).collect();
-                        let sanitized = func_name.replace('.', "_dot_");
-                        Some(m.add_function(
-                            &sanitized,
-                            i64_type.fn_type(&params, false),
-                            Some(inkwell::module::Linkage::External),
-                        ))
-                    })
-                    .ok_or_else(|| {
-                        CompileError::Codegen(format!(
-                            "function global initializer '{}' references unknown function '{}'",
-                            global_name, func_name
-                        ))
-                    })?;
-                let closure_size = i64_type.const_int(16, false);
-                let closure_pi = call_i64(alloc, &[closure_size], "init_closure")?;
-                let closure_ptr = builder
-                    .build_int_to_ptr(closure_pi, ptr_type, "closure_ptr")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("closure inttoptr", &e))?;
-                let fn_addr = callee.as_global_value().as_pointer_value();
-                let fn_addr_i = builder
-                    .build_ptr_to_int(fn_addr, i64_type, "fn_addr")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("fn ptrtoint", &e))?;
-                let direct_marker = i64_type.const_int(0x5344_4952_4543_5446, false);
-                builder
-                    .build_store(closure_ptr, fn_addr_i)
-                    .map_err(|e| crate::error::factory::llvm_build_failed("closure store fn", &e))?;
-                let marker_slot = unsafe {
-                    builder
-                        .build_gep(i64_type, closure_ptr, &[i64_type.const_int(1, false)], "marker_slot")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("closure gep", &e))?
+                let is_extern = module_ir.extern_fn_names.contains(func_name.as_str());
+                let boxed_fn = if is_extern {
+                    None
+                } else {
+                    let boxed_name = crate::codegen::boxed_entry_name(func_name);
+                    let sanitized_boxed = crate::codegen::boxed_entry_name(&func_name.replace('.', "_dot_"));
+                    m.get_function(&boxed_name).or_else(|| m.get_function(&sanitized_boxed))
                 };
-                builder
-                    .build_store(marker_slot, direct_marker)
-                    .map_err(|e| crate::error::factory::llvm_build_failed("closure store marker", &e))?;
-                store_to_global(global_name, closure_pi)?;
+                if let Some(boxed_fn) = boxed_fn {
+                    let closure_rv = self.build_zero_capture_boxed_closure(boxed_fn, &builder, m)?;
+                    let closure_int = self
+                        .coerce_value_to_type(closure_rv, Some(i64_type.into()), &builder)?
+                        .into_int_value();
+                    store_to_global(global_name, closure_int)?;
+                } else {
+                    let alloc = get_rt("rt_alloc", 1);
+                    let callee = m
+                        .get_function(func_name)
+                        .or_else(|| {
+                            let sanitized = func_name.replace('.', "_dot_");
+                            m.get_function(&sanitized)
+                        })
+                        .or_else(|| {
+                            // Imported and named only by this initializer: declare
+                            // the import with the uniform all-`i64` user-function
+                            // signature, its arity from the global's function type.
+                            let arity = module_ir
+                                .globals
+                                .iter()
+                                .find(|(name, _, _)| name == global_name)
+                                .and_then(|(_, ty, _)| match module_ir.type_registry.get(*ty) {
+                                    Some(crate::hir::HirType::Function { params, .. }) => Some(params.len()),
+                                    _ => None,
+                                })?;
+                            let params: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                                (0..arity).map(|_| i64_type.into()).collect();
+                            let sanitized = func_name.replace('.', "_dot_");
+                            Some(m.add_function(
+                                &sanitized,
+                                i64_type.fn_type(&params, false),
+                                Some(inkwell::module::Linkage::External),
+                            ))
+                        })
+                        .ok_or_else(|| {
+                            CompileError::Codegen(format!(
+                                "function global initializer '{}' references unknown function '{}'",
+                                global_name, func_name
+                            ))
+                        })?;
+                    let closure_size = i64_type.const_int(16, false);
+                    let closure_pi = call_i64(alloc, &[closure_size], "init_closure")?;
+                    let closure_ptr = builder
+                        .build_int_to_ptr(closure_pi, ptr_type, "closure_ptr")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("closure inttoptr", &e))?;
+                    let fn_addr = callee.as_global_value().as_pointer_value();
+                    let fn_addr_i = builder
+                        .build_ptr_to_int(fn_addr, i64_type, "fn_addr")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("fn ptrtoint", &e))?;
+                    let direct_marker = i64_type.const_int(0x5344_4952_4543_5446, false);
+                    builder
+                        .build_store(closure_ptr, fn_addr_i)
+                        .map_err(|e| crate::error::factory::llvm_build_failed("closure store fn", &e))?;
+                    let marker_slot = unsafe {
+                        builder
+                            .build_gep(
+                                ctx.i8_type(),
+                                closure_ptr,
+                                &[ctx.i32_type().const_int(8, false)],
+                                "marker_slot",
+                            )
+                            .map_err(|e| crate::error::factory::llvm_build_failed("closure gep", &e))?
+                    };
+                    builder
+                        .build_store(marker_slot, direct_marker)
+                        .map_err(|e| crate::error::factory::llvm_build_failed("closure store marker", &e))?;
+                    store_to_global(global_name, closure_pi)?;
+                }
             }
         }
 
@@ -1006,11 +1166,10 @@ impl LlvmBackend {
                     let field_val = match field {
                         crate::hir::HirGlobalFieldInit::Value(v) => i64_type.const_int(*v as u64, true),
                         crate::hir::HirGlobalFieldInit::Str(string_val) => {
-                            let string_new = get_rt("rt_string_new", 2);
                             let bytes = string_val.as_bytes();
                             let ptr = make_str_ptr(bytes, &mut str_const_counter)?;
                             let len = i64_type.const_int(bytes.len() as u64, false);
-                            call_i64(string_new, &[ptr, len], "init_struct_str")?
+                            call_string_new(ptr, len, "init_struct_str")?
                         }
                         crate::hir::HirGlobalFieldInit::EmptyArray => {
                             let array_new = get_rt("rt_array_new", 1);
@@ -1020,9 +1179,9 @@ impl LlvmBackend {
                     let slot = unsafe {
                         builder
                             .build_gep(
-                                i64_type,
+                                ctx.i8_type(),
                                 struct_ptr,
-                                &[i64_type.const_int(idx as u64, false)],
+                                &[ctx.i32_type().const_int((idx * 8) as u64, false)],
                                 "field_slot",
                             )
                             .map_err(|e| crate::error::factory::llvm_build_failed("struct gep", &e))?
@@ -1162,7 +1321,7 @@ impl LlvmBackend {
         let os_str = match self.target.os {
             TargetOS::Linux => "unknown-linux-gnu",
             TargetOS::MacOS => "apple-darwin",
-            TargetOS::Windows => "pc-windows-msvc",
+            TargetOS::Windows => windows_os_suffix(self.target),
             TargetOS::FreeBSD => "unknown-freebsd",
             TargetOS::SimpleOS => "unknown-none-elf",
             TargetOS::Any | TargetOS::None => "unknown-unknown",
@@ -1182,17 +1341,165 @@ impl LlvmBackend {
 
     /// Get the LLVM integer type used for RuntimeValue on this target.
     ///
-    /// On 64-bit targets, RuntimeValue is i64 (tagged 64-bit value).
-    /// On 32-bit targets, RuntimeValue is i32 (tagged 32-bit value).
-    /// The C runtime defines `typedef int32_t RuntimeValue` on RV32 and
-    /// `typedef int64_t RuntimeValue` on 64-bit, so this must match.
+    /// - Freestanding / bare-metal 32-bit targets (`x86_32`, `arm32`, `riscv32`
+    ///   with `TargetOS::SimpleOS | TargetOS::None`) use `i32` to match their
+    ///   32-bit bare-metal C stubs (`typedef int32_t RuntimeValue` / `intptr_t`)
+    ///   and pure-Simple kernel value shims.
+    /// - Hosted 32-bit targets (`i686` Windows/Linux, `armv7` Linux, `wasm32`)
+    ///   and all 64-bit targets link the standard runtime (`typedef uint64_t
+    ///   RuntimeValue` in `src/runtime/runtime_value.h` / `RuntimeValue(u64)`)
+    ///   and therefore use `i64`.
     #[cfg(feature = "llvm")]
     pub fn runtime_int_type(&self) -> inkwell::types::IntType<'static> {
-        if self.pointer_width() == 32 {
+        use simple_common::target::{TargetArch, TargetOS};
+        if matches!(
+            (self.target.arch, self.target.os),
+            (
+                TargetArch::X86 | TargetArch::Arm | TargetArch::Riscv32,
+                TargetOS::SimpleOS | TargetOS::None
+            )
+        ) {
             self.context_ref().i32_type()
         } else {
             self.context_ref().i64_type()
         }
+    }
+
+    /// Get or declare `rt_interp_call` with the C runtime prototype
+    /// (`src/runtime/runtime.h`): `int64_t rt_interp_call(const uint8_t* name,
+    /// uint64_t len, int64_t argc, const uint64_t* argv)`, matching the Rust
+    /// runtime's `argv: *const RuntimeValue`. `name` and `argv` are real C
+    /// pointers (pointer-width on 32-bit targets). The pre-declare pass in
+    /// `compile()` and both InterpCall emitters share this so the declaration
+    /// and the call sites cannot disagree.
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn declare_rt_interp_call(
+        &self,
+        module: &inkwell::module::Module<'static>,
+    ) -> inkwell::values::FunctionValue<'static> {
+        module.get_function("rt_interp_call").unwrap_or_else(|| {
+            let word = self.runtime_int_type();
+            let ptr = self.context_ref().ptr_type(inkwell::AddressSpace::default());
+            let fn_type = word.fn_type(&[ptr.into(), word.into(), word.into(), ptr.into()], false);
+            module.add_function("rt_interp_call", fn_type, None)
+        })
+    }
+
+    /// Get or declare `rt_string_data(string: RuntimeValue) -> *const u8`.
+    /// The return is a real pointer: declaring it as a 64-bit word makes an
+    /// i686 caller read the garbage EDX half of the return.
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn declare_rt_string_data(
+        &self,
+        module: &inkwell::module::Module<'static>,
+    ) -> inkwell::values::FunctionValue<'static> {
+        module.get_function("rt_string_data").unwrap_or_else(|| {
+            let ptr = self.context_ref().ptr_type(inkwell::AddressSpace::default());
+            let fn_type = ptr.fn_type(&[self.runtime_int_type().into()], false);
+            module.add_function("rt_string_data", fn_type, None)
+        })
+    }
+
+    /// Get or declare `rt_string_new(bytes: *const u8, len: u64) -> RuntimeValue`.
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn declare_rt_string_new(
+        &self,
+        module: &inkwell::module::Module<'static>,
+    ) -> inkwell::values::FunctionValue<'static> {
+        module.get_function("rt_string_new").unwrap_or_else(|| {
+            let word = self.runtime_int_type();
+            let ptr = self.context_ref().ptr_type(inkwell::AddressSpace::default());
+            let fn_type = word.fn_type(&[ptr.into(), word.into()], false);
+            module.add_function("rt_string_new", fn_type, None)
+        })
+    }
+
+    /// Function type for calling a runtime symbol with exactly `args`: return
+    /// type from `ret_from`, params from the args' own types. Used when a text
+    /// argument expanded to a real `ptr` but the symbol was declared from the
+    /// all-word Cranelift spec, so the pointer is not widened to 8 bytes.
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn call_type_from_args(
+        &self,
+        ret_from: inkwell::types::FunctionType<'static>,
+        args: &[inkwell::values::BasicMetadataValueEnum<'static>],
+    ) -> inkwell::types::FunctionType<'static> {
+        use inkwell::types::BasicType;
+        let params: Vec<inkwell::types::BasicMetadataTypeEnum<'static>> = args
+            .iter()
+            .map(|a| match inkwell::values::BasicValueEnum::try_from(*a) {
+                Ok(v) => v.get_type().into(),
+                Err(_) => self.runtime_int_type().into(),
+            })
+            .collect();
+        match ret_from.get_return_type() {
+            Some(ret) => ret.fn_type(&params, false),
+            None => self.context_ref().void_type().fn_type(&params, false),
+        }
+    }
+
+    /// True when some `args[i]` is a pointer but the declared param is not.
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn ptr_arg_needs_typed_call(
+        declared: &[inkwell::types::BasicMetadataTypeEnum<'static>],
+        args: &[inkwell::values::BasicMetadataValueEnum<'static>],
+    ) -> bool {
+        args.iter()
+            .zip(declared)
+            .any(|(a, t)| a.is_pointer_value() && !t.is_pointer_type())
+    }
+
+    /// `inttoptr` any word arg sitting in a declared `ptr` param slot (a Simple
+    /// extern call to e.g. `rt_string_new` hands the pointer over as a word).
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn words_to_declared_ptrs(
+        &self,
+        declared: &[inkwell::types::BasicMetadataTypeEnum<'static>],
+        args: &mut [inkwell::values::BasicMetadataValueEnum<'static>],
+        builder: &inkwell::builder::Builder<'static>,
+    ) -> Result<(), CompileError> {
+        for (a, t) in args.iter_mut().zip(declared) {
+            if t.is_pointer_type() && a.is_int_value() {
+                let p = builder
+                    .build_int_to_ptr(a.into_int_value(), t.into_pointer_type(), "word_to_ptr")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("word inttoptr", &e))?;
+                *a = p.into();
+            }
+        }
+        Ok(())
+    }
+
+    /// A runtime `ptr` return stored into a vreg becomes a word.
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn ptr_result_to_word(
+        &self,
+        v: inkwell::values::BasicValueEnum<'static>,
+        builder: &inkwell::builder::Builder<'static>,
+    ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
+        if !v.is_pointer_value() {
+            return Ok(v);
+        }
+        Ok(builder
+            .build_ptr_to_int(v.into_pointer_value(), self.runtime_int_type(), "ptr_ret_word")
+            .map_err(|e| crate::error::factory::llvm_build_failed("ptr return ptrtoint", &e))?
+            .into())
+    }
+
+    /// Get or declare `rt_string_new_literal` with the runtime prototype
+    /// `rt_string_new_literal(bytes: *const u8, len: u64) -> RuntimeValue`.
+    /// `bytes` is a real pointer: passing it as a 64-bit word shifts `len`
+    /// on 32-bit targets (i686 printed an empty string).
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn declare_rt_string_new_literal(
+        &self,
+        module: &inkwell::module::Module<'static>,
+    ) -> inkwell::values::FunctionValue<'static> {
+        module.get_function("rt_string_new_literal").unwrap_or_else(|| {
+            let word = self.runtime_int_type();
+            let ptr = self.context_ref().ptr_type(inkwell::AddressSpace::default());
+            let fn_type = word.fn_type(&[ptr.into(), word.into()], false);
+            module.add_function("rt_string_new_literal", fn_type, None)
+        })
     }
 
     #[cfg(feature = "llvm")]
@@ -1453,6 +1760,11 @@ impl LlvmBackend {
     /// Emit object code from the module (feature-gated)
     #[cfg(feature = "llvm")]
     pub fn emit_object(&self, _module: &MirModule) -> Result<Vec<u8>, CompileError> {
+        self.emit_object_inner()
+    }
+
+    #[cfg(feature = "llvm")]
+    fn emit_object_inner(&self) -> Result<Vec<u8>, CompileError> {
         // Initialize LLVM targets
         LlvmTarget::initialize_all(&InitializationConfig::default());
 
@@ -1480,6 +1792,11 @@ impl LlvmBackend {
 
     #[cfg(not(feature = "llvm"))]
     pub fn emit_object(&self, _module: &MirModule) -> Result<Vec<u8>, CompileError> {
+        self.emit_object_inner()
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    fn emit_object_inner(&self) -> Result<Vec<u8>, CompileError> {
         Err(crate::error::factory::llvm_feature_not_enabled())
     }
 
@@ -1841,6 +2158,30 @@ impl NativeBackend for LlvmBackend {
                         continue;
                     }
 
+                    if spec.name == "rt_interp_call" {
+                        // Not an all-word signature: `name` is a real pointer.
+                        self.declare_rt_interp_call(m)
+                            .set_linkage(inkwell::module::Linkage::External);
+                        continue;
+                    }
+
+                    if spec.name == "rt_string_new_literal" {
+                        // `bytes` is a real pointer, not a RuntimeValue word.
+                        self.declare_rt_string_new_literal(m)
+                            .set_linkage(inkwell::module::Linkage::External);
+                        continue;
+                    }
+                    if spec.name == "rt_string_data" {
+                        self.declare_rt_string_data(m)
+                            .set_linkage(inkwell::module::Linkage::External);
+                        continue;
+                    }
+                    if spec.name == "rt_string_new" {
+                        self.declare_rt_string_new(m)
+                            .set_linkage(inkwell::module::Linkage::External);
+                        continue;
+                    }
+
                     if spec.name == "text_dot_from_char_code" {
                         let fn_type = rv_type.fn_type(&[self.context_ref().i64_type().into()], false);
                         let f = m.add_function(spec.name, fn_type, None);
@@ -1878,6 +2219,8 @@ impl NativeBackend for LlvmBackend {
             }
         }
 
+        #[cfg(feature = "llvm")]
+        self.declare_system_abi_externs(module)?;
         #[cfg(feature = "llvm")]
         self.declare_globals(module);
         #[cfg(feature = "llvm")]
@@ -1939,6 +2282,8 @@ impl NativeBackend for LlvmBackend {
         self.declare_dot_aliases_for_methods();
         #[cfg(feature = "llvm")]
         self.emit_vtables(module);
+        #[cfg(feature = "llvm")]
+        self.emit_boxed_closure_entries(module)?;
 
         // Second pass: compile all function bodies
         for func in &module.functions {
@@ -1952,6 +2297,10 @@ impl NativeBackend for LlvmBackend {
         // `__module_init_*` into `__simple_call_module_inits`, run before entry.
         #[cfg(feature = "llvm")]
         self.generate_module_init(module)?;
+        // Drop the cloned MirModule before LLVM IR verification, optimization,
+        // and object emission so the MIR structures do not stay live alongside
+        // LLVM's optimization passes.
+        drop(owned_module);
 
         // Fix linkage after compilation:
         // 1. Declarations (no body) must have External linkage, not WeakAny.
@@ -1994,7 +2343,7 @@ impl NativeBackend for LlvmBackend {
         }
 
         self.verify()?;
-        self.emit_object(module)
+        self.emit_object_inner()
     }
 
     fn name(&self) -> &'static str {
@@ -2043,47 +2392,9 @@ mod default_x86_64_cpu_tests {
         // The builder's CPUID says nothing about the machine the artifact will
         // run on. Widening here produces a binary that faults on its target.
         with_forced(None, || {
-            assert_eq!(default_x86_64_cpu_name("aarch64-unknown-linux-gnu"), "x86-64-v3");
-            assert_eq!(default_x86_64_cpu_name("riscv64-unknown-elf"), "x86-64-v3");
-            assert_eq!(default_x86_64_cpu_name("wasm32-unknown-unknown"), "x86-64-v3");
-        });
-    }
-
-    #[test]
-    fn never_narrows_below_the_previous_baseline() {
-        // Whatever the host reports, the answer must be at least the v3 that
-        // was hardcoded before, or this is a regression rather than an upgrade.
-        with_forced(None, || {
-            for triple in ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu", "amd64-foo"] {
-                let got = default_x86_64_cpu_name(triple);
-                assert!(
-                    got == "x86-64-v3" || got == "x86-64-v4",
-                    "{triple} resolved to {got}, which is below the v3 baseline"
-                );
-            }
-        });
-    }
-
-    #[test]
-    fn host_targeting_widens_exactly_when_the_host_admits_avx512() {
-        // The decision must track the real capability probe, not a guess.
-        with_forced(None, || {
-            // `cfg!` is a VALUE, not a compilation gate: on aarch64 the
-            // `is_x86_feature_detected!` arms still had to compile and the
-            // macro rejects the target outright ("This macro cannot be used
-            // on the current target"), so the whole `simple-compiler` lib
-            // TEST target failed to build on every non-x86 host -- no Rust
-            // unit test in this crate could run on an arm64 macOS box. A real
-            // `#[cfg]` on the binding keeps the x86_64 probe byte-identical
-            // and gives other architectures the only answer they can have.
-            #[cfg(target_arch = "x86_64")]
-            let expected_wide = std::is_x86_feature_detected!("avx512f")
-                && std::is_x86_feature_detected!("avx512vl")
-                && std::is_x86_feature_detected!("avx512bw");
-            #[cfg(not(target_arch = "x86_64"))]
-            let expected_wide = false;
-            let got = default_x86_64_cpu_name("x86_64-unknown-linux-gnu");
-            assert_eq!(got == "x86-64-v4", expected_wide, "got {got}");
+            assert_eq!(default_x86_64_cpu_name("aarch64-unknown-linux-gnu"), "x86-64");
+            assert_eq!(default_x86_64_cpu_name("riscv64-unknown-elf"), "x86-64");
+            assert_eq!(default_x86_64_cpu_name("wasm32-unknown-unknown"), "x86-64");
         });
     }
 
@@ -2104,7 +2415,112 @@ mod default_x86_64_cpu_tests {
     #[test]
     fn an_unrecognised_override_falls_back_to_the_baseline() {
         with_forced(Some("znver9-turbo"), || {
-            assert_eq!(default_x86_64_cpu_name("x86_64-unknown-linux-gnu"), "x86-64-v3");
+            assert_eq!(default_x86_64_cpu_name("x86_64-unknown-linux-gnu"), "x86-64");
         });
+    }
+}
+
+#[cfg(test)]
+mod windows_triple_env_tests {
+    use super::windows_os_suffix;
+    use simple_common::target::Target;
+
+    #[test]
+    fn gnu_windows_target_emits_gnu_triple() {
+        let gnu = Target::parse("x86_64-pc-windows-gnu").unwrap();
+        assert_eq!(windows_os_suffix(gnu), "pc-windows-gnu");
+    }
+
+    #[test]
+    fn msvc_windows_target_keeps_msvc_triple() {
+        let msvc = Target::parse("x86_64-pc-windows-msvc").unwrap();
+        assert_eq!(windows_os_suffix(msvc), "pc-windows-msvc");
+    }
+}
+
+#[cfg(all(test, feature = "llvm"))]
+mod module_init_layout_tests {
+    use super::LlvmBackend;
+    use crate::codegen::backend_trait::NativeBackend;
+    use crate::hir::{HirGlobalFieldInit, HirGlobalStructInit, TypeId as T};
+    use crate::mir::{MirFunction, MirInst, MirModule, Terminator, VReg};
+    use simple_common::target::{Target, TargetArch, TargetOS};
+    use simple_parser::ast::Visibility;
+
+    #[test]
+    fn rv32_module_init_closure_and_struct_slots_use_8_byte_stride() {
+        let mut backend = LlvmBackend::new(Target::new(TargetArch::Riscv32, TargetOS::SimpleOS)).unwrap();
+        let mut mir = MirModule::new();
+        mir.name = Some("rv32_modinit".to_string());
+
+        let mut target_fn = MirFunction::new("my_fn".to_string(), T::I64, Visibility::Public);
+        target_fn.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(0), value: 7 });
+        target_fn.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+        mir.functions.push(target_fn);
+
+        mir.globals.push(("G_FN".to_string(), T::ANY, false));
+        mir.globals.push(("G_EXT".to_string(), T::ANY, false));
+        mir.globals.push(("G_STRUCT".to_string(), T::ANY, false));
+        mir.local_globals.insert("G_FN".to_string());
+        mir.local_globals.insert("G_EXT".to_string());
+        mir.local_globals.insert("G_STRUCT".to_string());
+        mir.extern_fn_names.insert("ext_fn".to_string());
+        let mut ext_fn = MirFunction::new("ext_fn".to_string(), T::I64, Visibility::Public);
+        ext_fn.blocks.clear();
+        mir.functions.push(ext_fn);
+        mir.global_init_functions.insert("G_FN".to_string(), "my_fn".to_string());
+        mir.global_init_functions.insert("G_EXT".to_string(), "ext_fn".to_string());
+        mir.global_init_structs.insert(
+            "G_STRUCT".to_string(),
+            HirGlobalStructInit {
+                fields: vec![
+                    HirGlobalFieldInit::Value(11),
+                    HirGlobalFieldInit::Value(22),
+                    HirGlobalFieldInit::Value(33),
+                ],
+            },
+        );
+
+        backend.compile(&mir).unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(
+            ir.contains("@rt_closure_new(") && ir.contains("@\"my_fn$boxed\""),
+            "user function global initializer must register a RuntimeClosure over $boxed:\n{ir}"
+        );
+        assert!(
+            ir.contains("%marker_slot = getelementptr i8, ptr %closure_ptr, i32 8"),
+            "extern direct closure marker slot must be at byte offset 8 on freestanding 32-bit:\n{ir}"
+        );
+        assert!(
+            ir.contains("store i32 11, ptr %struct_ptr")
+                && ir.contains("getelementptr i8, ptr %struct_ptr, i32 8")
+                && ir.contains("getelementptr i8, ptr %struct_ptr, i32 16"),
+            "struct initializer slots must use 8-byte stride on freestanding 32-bit:\n{ir}"
+        );
+        assert!(!ir.contains("getelementptr i32"), "must not use 4-byte i32 GEP stride:\n{ir}");
+        backend.verify().unwrap();
+    }
+
+    #[test]
+    fn runtime_value_width_distinguishes_hosted_and_freestanding_32bit_targets() {
+        for triple in ["i686-pc-windows-gnu", "i686-unknown-linux-gnu", "wasm32-unknown-unknown"] {
+            let target = Target::parse(triple).unwrap();
+            let backend = LlvmBackend::new(target).unwrap();
+            assert_eq!(backend.pointer_width(), 32, "{triple}");
+            assert_eq!(backend.runtime_int_type().get_bit_width(), 64, "{triple}");
+        }
+        for arch in [TargetArch::Riscv32, TargetArch::Arm, TargetArch::X86] {
+            for os in [TargetOS::SimpleOS, TargetOS::None] {
+                let target = Target::new(arch, os);
+                let backend = LlvmBackend::new(target).unwrap();
+                assert_eq!(backend.pointer_width(), 32, "{arch}-{os}");
+                assert_eq!(backend.runtime_int_type().get_bit_width(), 32, "{arch}-{os}");
+            }
+        }
+        for arch in [TargetArch::Riscv64, TargetArch::Aarch64, TargetArch::X86_64] {
+            let target = Target::new(arch, TargetOS::SimpleOS);
+            let backend = LlvmBackend::new(target).unwrap();
+            assert_eq!(backend.runtime_int_type().get_bit_width(), 64, "{arch}-simpleos");
+        }
     }
 }

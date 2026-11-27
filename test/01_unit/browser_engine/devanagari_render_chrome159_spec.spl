@@ -1,0 +1,156 @@
+"""
+## Purpose and audience
+Purpose: Pin how shaped Devanagari words reach pixels against Chrome 159: the
+glyph run the layout emits (glyph ids, pen x, mark y) and the ink box the
+Engine2D lane paints from it. Positioning (GPOS) and glyph placement are one
+lane; syllable shaping (which words get a shaped run at all) is another.
+Audience: web renderer text maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--force-device-scale-factor=1 --window-size=400,300`, `<html lang="hi">`, body
+`margin:0;background:#fff;font:16px Liberation Sans, <bundled Noto Sans
+Devanagari via @font-face>;color:#000`, `<div style="position:absolute;
+left:20px;top:30px;white-space:nowrap">WORD</div>`). Same face on both sides:
+Simple resolves `lang="hi"` to the bundled Noto Sans Devanagari.
+- Ink: a pixel with any channel under 200, from the screenshot.
+- Glyph ids / pen positions: `--print-to-pdf`; Skia's PDF Type3 fonts name each
+  glyph by id, one positioned `Tj` per glyph (px at 16 px, y up).
+
+| word   | Range w  | ink x      | ink y  | glyph id @ pen x px (, y px up)                          |
+|--------|----------|------------|--------|----------------------------------------------------------|
+| हिन्दी   | 30.234   | 19..50     | 30..45 | 544@0 88@4.144 245@12.640 73@17.584 33@26.080            |
+| हिंदी    | 25.281   | 19..45     | 30..45 | 559@0 88@4.144 785@12.640 73@12.640 33@21.136            |
+| नहीं    | 21.531   | 19..42     | 30..45 | 75@0 88@8.880 635@17.376                                 |
+| कुछ    | 23.516   | 19..43     | 34..47 | 56@0 34@8.752 62@12.288                                  |
+| कर्म    | 21.859   | 19..42     | 29..43 | 56@0 80@12.288 506@21.856                                |
+| र्कं     | 12.297   | 19..32     | 29..43 | 56@0 510@8.752                                           |
+| टुँ     | 8.078    | 19..28     | 30..47 | 66@0 34@7.360 101@8.032                                  |
+| ट्टु    | 7.828    | 19..28     | 34..50 | 431@0 702@6.944,-3.088                                   |
+| द्धू    | 12.797   | 19..35     | 34..50 | 448@0 35@13.552,-1.952                                   |
+| ड़ुँ    | 8.563    | 19..29     | 30..50 | 68@0 672@8.928 702@6.976,-2.880 101@8.768                |
+
+Rules read off the table:
+- A glyph's run x is its pen px truncated (हिन्दी 12.640 -> 12, 17.584 -> 17:
+  the columns equal Chrome's).
+- A glyph's run y is its y offset ROUNDED to the nearest px, down positive:
+  ड़ुँ's low u (-2.880) paints 3 px lower (ink bottom 50 where ऴु's -2.032
+  gives 49), द्धू's uu (-1.952) 2 px lower (bottom 50 against पूरा's 48).
+  Skia snaps the cross axis to whole pixels; truncating would lose a row.
+
+## The other nine words
+Since the general dev2 shaper (PR #10934) every word has a shaped run: AC-2..
+AC-10 pin each glyph run (ids, pen x, mark y) live. Their ink edges, still red
+on a 1x raster detail, are in the in-development
+`devanagari_mark_position_chrome159_spec.spl`.
+
+## Known gap (separate in-development spec)
+Simple's ink for हिन्दी starts at row 28 where Chrome's starts at 30: the
+face's glyphs are y-hinted with LATIN blue zones (FreeType uses its Devanagari
+zones), a raster defect, not positioning. This spec pins what positioning
+decides (run, right and bottom ink edges); the top edge is held red in
+`devanagari_glyph_hint_chrome159_spec.spl`
+(doc/08_tracking/bug/web_render_devanagari_latin_blue_zone_hint_2026-11-22.md).
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-DEVANAGARI-GPOS-001 — dev2 marks are positioned as Chrome 159 positions them.
+"""
+# @tag: unit, browser_engine, text, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_draw_ir.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir
+}
+
+val W: i32 = 400
+val H: i32 = 120
+
+fn _page(txt: text) -> text:
+    "<!doctype html><html lang=\"hi\"><body style=\"margin:0;background:#fff;font:16px Liberation Sans;color:#000\"><div style=\"position:absolute;left:20px;top:30px;white-space:nowrap;\">" + txt + "</div></body></html>"
+
+fn _chan(px: u32, shift: u32) -> i32:
+    ((px >> shift) & 0xFFu32).to_i32()
+
+# `x0..x1 y0..y1` of the ink (any channel under 200).
+fn _ink(txt: text, backend: text) -> text:
+    val px = simple_web_render_html_to_pixels_with_engine2d_backend(_page(txt), W, H, backend)
+    var x0 = W
+    var y0 = H
+    var x1 = -1
+    var y1 = -1
+    var y = 0
+    while y < H:
+        var x = 0
+        while x < W:
+            val p = px[y * W + x]
+            if _chan(p, 16u32) < 200 or _chan(p, 8u32) < 200 or _chan(p, 0u32) < 200:
+                if x < x0: x0 = x
+                if x > x1: x1 = x
+                if y < y0: y0 = y
+                if y > y1: y1 = y
+            x = x + 1
+        y = y + 1
+    "{x0}..{x1} {y0}..{y1}"
+
+fn _edges(box: text) -> text:
+    # right and bottom ink edge: `x1 y1`
+    val parts = box.split(" ")
+    val xs = parts[0].split("..")
+    val ys = parts[1].split("..")
+    xs[1] + " " + ys[1]
+
+# `ids | xs | ys` of the word's shaped glyph run, or "" when it has none.
+fn _run(txt: text) -> text:
+    val c = simple_web_layout_render_html_draw_ir(_page(txt), W, H)
+    var out = ""
+    for b in c.batches:
+        for cmd in b.commands:
+            if cmd.text_value != "" and cmd.glyph_run.valid:
+                out = "{cmd.glyph_run.glyph_ids} | {cmd.glyph_run.xs} | {cmd.glyph_run.ys}"
+    out
+
+describe "shaped Devanagari words against Chrome 159":
+    it "AC-1: हिन्दी keeps Chrome's glyph run and right/bottom ink edges on both lanes":
+        step("Chrome 544 88 245 73 33 at pen 0 4.144 12.640 17.584 26.080; ink x1 50, y1 45")
+        expect(_run("हिन्दी")).to_equal("[544, 88, 245, 73, 33] | [0, 4, 12, 17, 26] | [0, 0, 0, 0, 0]")
+        expect(_edges(_ink("हिन्दी", "cpu_simd"))).to_equal("50 45")
+        expect(_edges(_ink("हिन्दी", "vulkan"))).to_equal("50 45")
+
+    it "AC-2: हिंदी (anusvara over ha behind the i-matra) glyph run":
+        step("Chrome 559 88 785 73 33 at 0 4.144 12.640 12.640 21.136; ink x 19..45 y 30..45")
+        expect(_run("हिंदी")).to_equal("[559, 88, 785, 73, 33] | [0, 4, 12, 12, 21] | [0, 0, 0, 0, 0]")
+
+    it "AC-3: नहीं (ii-matra + anusvara ligature) glyph run":
+        step("Chrome 75 88 635 at 0 8.880 17.376; ink x 19..42 y 30..45")
+        expect(_run("नहीं")).to_equal("[75, 88, 635] | [0, 8, 17] | [0, 0, 0]")
+
+    it "AC-4: कुछ (u-matra on the ka stem: blwm mark-to-base, pen 12.288 - 3.536) glyph run":
+        step("Chrome 56 34 62 at 0 8.752 12.288; ink x 19..43 y 34..47")
+        expect(_run("कुछ")).to_equal("[56, 34, 62] | [0, 8, 12] | [0, 0, 0]")
+
+    it "AC-5: कर्म (reph after the syllable, no offset) glyph run":
+        step("Chrome 56 80 506 at 0 12.288 21.856; ink x 19..42 y 29..43")
+        expect(_run("कर्म")).to_equal("[56, 80, 506] | [0, 12, 21] | [0, 0, 0]")
+
+    it "AC-6: र्कं (reph+anusvara ligature on the ka stem: abvm mark-to-base) glyph run":
+        step("Chrome 56 510 at 0 8.752; ink x 19..32 y 29..43")
+        expect(_run("र्कं")).to_equal("[56, 510] | [0, 8] | [0, 0]")
+
+    it "AC-7: टुँ (candrabindu behind a below-base matra still reaches the base) glyph run":
+        step("Chrome 66 34 101 at 0 7.360 8.032; ink x 19..28 y 30..47")
+        expect(_run("टुँ")).to_equal("[66, 34, 101] | [0, 7, 8] | [0, 0, 0]")
+
+    it "AC-8: ट्टु (low u-matra 3.088 px down: y rounds to 3) glyph run":
+        step("Chrome 431 702 at 0 6.944,-3.088; ink x 19..28 y 34..50")
+        expect(_run("ट्टु")).to_equal("[431, 702] | [0, 6] | [0, 3]")
+
+    it "AC-9: द्धू (uu-matra 1.952 px down: y rounds to 2, not 1) glyph run":
+        step("Chrome 448 35 at 0 13.552,-1.952; ink x 19..35 y 34..50")
+        expect(_run("द्धू")).to_equal("[448, 35] | [0, 13] | [0, 2]")
+
+    it "AC-10: ड़ुँ (u under a nukta: mark-to-mark, 2.880 px down rounds to 3) glyph run":
+        step("Chrome 68 672 702 101 at 0 8.928 6.976,-2.880 8.768; ink x 19..29 y 30..50")
+        expect(_run("ड़ुँ")).to_equal("[68, 672, 702, 101] | [0, 8, 6, 8] | [0, 0, 3, 0]")

@@ -1,0 +1,129 @@
+# Windowed-host request pump for remote application presentation.
+# Tracks: wm_host_external_content_owner_2026-07-29
+#
+# Drives the exact function hosted_entry.spl calls once per frame, against
+# the production HostCompositor built the way hosted_entry builds it
+# (new_headless 1024x720). Requests travel through the real daemon_sdk
+# request/response directories; the pump holds the existing daemon singleton
+# lock.
+
+use std.spec.{describe, it, expect}
+use std.daemon_sdk.types.{DaemonConfig, DaemonRequest, DaemonResponse, daemon_config_new, daemon_request_new}
+use std.daemon_sdk.protocol.{write_daemon_request, read_daemon_response}
+use std.daemon_sdk.lock.{is_daemon_running}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_wait}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.io_runtime.{file_exists}
+use common.window_protocol.geometry.{Size}
+use os.compositor.host_compositor_core.{HostCompositor}
+use app.play.wm_daemon_client.{WMD_FRAME_PROBE}
+use app.play.wm_remote_app_client.{wm_remote_app_open_request, wm_remote_app_window_from_response, wm_remote_app_present_request}
+use os.hosted.hosted_remote_app_pump.{
+    HostedRemoteAppPump,
+    hosted_remote_app_pump_open_with,
+    hosted_remote_app_pump_step,
+    hosted_remote_app_pump_close,
+}
+
+val KNOWN: u32 = 0xFF12AB34u32
+
+fn solid(width: i32, height: i32, color: u32) -> [u32]:
+    var pixels: [u32] = []
+    var i: i64 = 0
+    while i < width.to_i64() * height.to_i64():
+        pixels.push(color)
+        i = i + 1
+    pixels
+
+fn base_dir() -> text:
+    "/tmp/hosted_remote_app_pump_spec_{getpid()}"
+
+fn spec_config() -> DaemonConfig:
+    daemon_config_new("{base_dir()}/daemon.lock", "{base_dir()}/requests", "{base_dir()}/responses")
+
+fn submit(config: DaemonConfig, req: DaemonRequest) -> text:
+    write_daemon_request(req, config.request_dir)
+    req.id
+
+fn answer(config: DaemonConfig, id: text) -> DaemonResponse:
+    read_daemon_response(id, config.response_dir)
+
+describe "windowed host remote application pump":
+    it "is off unless enabled and never takes the lock or touches the request directory":
+        val config = spec_config()
+        var comp = HostCompositor.new_headless(Size(width: 1024 as u64, height: 720 as u64))
+        var pump = hosted_remote_app_pump_open_with(false, config, "{base_dir()}/surfaces")
+        expect(pump.enabled).to_equal(false)
+        expect(is_daemon_running(config.lock_path)).to_equal(false)
+        val out = hosted_remote_app_pump_step(comp, pump, 1000000)
+        expect(out.handled).to_equal(0)
+        expect(out.pump.polls).to_equal(0)
+        expect(file_exists(config.request_dir)).to_equal(false)
+
+    it "serves open, present and frame-probe through the request directory on a poll cadence":
+        val config = spec_config()
+        var comp = HostCompositor.new_headless(Size(width: 1024 as u64, height: 720 as u64))
+        var pump = hosted_remote_app_pump_open_with(true, config, "{base_dir()}/surfaces")
+        expect(pump.enabled).to_equal(true)
+        expect(is_daemon_running(config.lock_path)).to_equal(true)
+        # A second window manager on the same directory is refused, so the
+        # windowed host never fights a resident daemon for its requests.
+        val rival = hosted_remote_app_pump_open_with(true, config, "{base_dir()}/surfaces")
+        expect(rival.enabled).to_equal(false)
+
+        val t0: i64 = 5000000
+        val open_id = submit(config, wm_remote_app_open_request("Remote", 200, 120, getpid()))
+        var out = hosted_remote_app_pump_step(comp, pump, t0)
+        comp = out.comp
+        pump = out.pump
+        expect(out.handled).to_equal(1)
+        expect(pump.polls).to_equal(1)
+        val window = wm_remote_app_window_from_response(answer(config, open_id))
+        expect(window.ok).to_equal(true)
+
+        val present_id = submit(config, wm_remote_app_present_request(window, solid(200, 120, KNOWN), 1, getpid()))
+        # Inside the poll interval: no directory read, the request waits.
+        var i: i64 = 0
+        while i < 100:
+            out = hosted_remote_app_pump_step(comp, pump, t0 + 1000 + i * 100)
+            comp = out.comp
+            pump = out.pump
+            expect(out.handled).to_equal(0)
+            i = i + 1
+        expect(pump.polls).to_equal(1)
+        out = hosted_remote_app_pump_step(comp, pump, t0 + 40000)
+        comp = out.comp
+        pump = out.pump
+        expect(out.handled).to_equal(1)
+        expect(pump.polls).to_equal(2)
+        expect(answer(config, present_id).get_field("accepted")).to_equal("true")
+
+        var probe = daemon_request_new(WMD_FRAME_PROBE)
+        probe.set_field("color", "{KNOWN.to_i64()}")
+        probe.set_field("id", "{window.window_id}")
+        val probe_id = submit(config, probe)
+        out = hosted_remote_app_pump_step(comp, pump, t0 + 80000)
+        comp = out.comp
+        pump = out.pump
+        val shown = answer(config, probe_id)
+        print "evidence hosted-pump pixels={shown.get_field("pixels")} count={shown.get_field("count")} content_count={shown.get_field("content_count")} polls={pump.polls}"
+        expect(shown.get_field("pixels")).to_equal("{1024 * 720}")
+        expect(shown.get_field("content_count")).to_equal("{200 * 120}")
+        expect(shown.get_field("count")).to_equal("{200 * 120}")
+
+        # Idle cost: an enabled pump inside its interval, and a disabled pump.
+        val idle_start = time_now_unix_micros()
+        i = 0
+        while i < 1000:
+            out = hosted_remote_app_pump_step(comp, pump, t0 + 80001)
+            pump = out.pump
+            i = i + 1
+        val idle_us = time_now_unix_micros() - idle_start
+        print "evidence hosted-pump idle_1000_steps_us={idle_us} polls={pump.polls}"
+        expect(pump.polls).to_equal(3)
+
+        expect(hosted_remote_app_pump_close(pump)).to_equal(true)
+        expect(is_daemon_running(config.lock_path)).to_equal(false)
+        val rm_pid = process_spawn_async("rm", ["-rf", base_dir()])
+        process_wait(rm_pid, 10000)

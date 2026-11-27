@@ -1,0 +1,40 @@
+#!/bin/sh
+# Regression for simple_cli_invocation_attempts_user_gitconfig_lock_2026-09-09.
+# Runs the CLI and the setup script that used to default to `git config --global`
+# with HOME/GIT_CONFIG_GLOBAL pointed at a scratch dir holding a .gitconfig and
+# a pre-existing .gitconfig.lock, then asserts both files are byte-identical
+# afterwards and no new lock appeared. Verdict (last line): PASS / FAIL / ERROR.
+#   sh scripts/check/check-gitconfig-lock-untouched.shs [--simple PATH]
+set -u
+export LC_ALL=C
+SELF_DIR=$(cd "$(dirname "$0")" && pwd)
+REPO=$(cd "$SELF_DIR/../.." && pwd)
+SIMPLE=$REPO/bin/simple.exe
+[ -x "$SIMPLE" ] || SIMPLE=$REPO/bin/simple
+while [ $# -gt 0 ]; do
+    case "$1" in --simple) shift; SIMPLE=$1 ;; *) echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;; esac
+    shift
+done
+command -v ssh-keygen >/dev/null 2>&1 || { echo "ERROR — nothing was checked (ssh-keygen missing)"; exit 2; }
+T=$(mktemp -d) || { echo "ERROR — nothing was checked (no temp dir)"; exit 2; }
+trap 'rm -rf "$T"' EXIT
+H=$T/home; mkdir -p "$H/.ssh" "$T/repo"
+printf '[user]\n\tname = locked\n' > "$H/.gitconfig"
+printf 'held-by-someone-else\n' > "$H/.gitconfig.lock"
+chmod 444 "$H/.gitconfig" 2>/dev/null
+(cd "$T/repo" && git init -q .) || { echo "ERROR — nothing was checked (git init failed)"; exit 2; }
+sum() { cksum "$H/.gitconfig" "$H/.gitconfig.lock" | tr '\n' ' '; }
+BEFORE=$(sum)
+export HOME=$H USERPROFILE=$H GIT_CONFIG_GLOBAL=$H/.gitconfig GIT_CONFIG_NOSYSTEM=1
+N=0
+if [ -x "$SIMPLE" ]; then
+    for a in --version --help; do "$SIMPLE" $a >/dev/null 2>&1; N=$((N+1)); done
+fi
+sh "$REPO/scripts/setup/setup-ci-receipt-key.shs" init --principal fx@fixture --root "$T/repo" >"$T/setup.out" 2>&1
+setup_rc=$?; N=$((N+1))
+AFTER=$(sum)
+[ "$N" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+if [ "$setup_rc" -ne 0 ]; then echo "FAIL — setup-ci-receipt-key init exited $setup_rc: $(tail -1 "$T/setup.out")"; exit 1; fi
+if [ "$BEFORE" != "$AFTER" ] || [ ! -f "$H/.gitconfig.lock" ]; then echo "FAIL — .gitconfig or its lock changed ($N invocation(s))"; exit 1; fi
+echo "PASS — $N invocation(s), .gitconfig and .gitconfig.lock unchanged"
+exit 0

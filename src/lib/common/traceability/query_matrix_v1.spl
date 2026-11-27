@@ -1,0 +1,152 @@
+# `trace matrix`: requirement status counts per cell of two orthogonal axes
+# (layer, component, feature). Pure; reads one graph.
+# Membership: a requirement belongs to a feature through specifies
+# (feature -> requirement) or belongs_to (requirement -> feature), and to a
+# component or layer through belongs_to (requirement -> component|layer).
+# An empty cell is not a complete cell: requirements with no entity on an axis
+# are counted as unassigned, and an incomplete graph yields unknown, not missing.
+# @req REQ-TRC-021
+use std.common.traceability.model.*
+use std.common.traceability.sidecar_v1.{TraceSidecarReferenceV1}
+use std.common.traceability.profile_v1.{TraceProfile}
+use std.common.traceability.query_missing_v1.{TraceLinkStatus, TraceRequirementCountV1,
+    TraceGraphCompletenessV1}
+use std.common.traceability.trace_ids_v1.{TraceEntityIdV1, TraceSnapshotIdV1}
+use std.common.traceability.query_status_v1.{TracePassingEvidenceV1, TraceCommandVerdictV1,
+    trace_requirement_statuses_v1, trace_requirement_overall_v1, trace_graph_completeness_v1, trace_command_verdict_v1}
+
+pub enum TraceMatrixAxisV1:
+    Feature
+    Component
+    Layer
+
+pub struct TraceMatrixCellV1:
+    row: TraceEntityIdV1
+    col: TraceEntityIdV1
+    linked: TraceRequirementCountV1
+    verified: TraceRequirementCountV1
+    missing: TraceRequirementCountV1
+    unknown: TraceRequirementCountV1
+
+pub struct TraceMatrixResultV1:
+    snapshot_id: TraceSnapshotIdV1
+    rows: [TraceEntityIdV1]
+    cols: [TraceEntityIdV1]
+    cells: [TraceMatrixCellV1]    # non-empty cells only, sorted by (row, col)
+    unassigned: TraceRequirementCountV1
+    completeness: TraceGraphCompletenessV1
+    verdict: TraceCommandVerdictV1
+
+pub fn trace_matrix_axis_parse_v1(name: text) -> Result<TraceMatrixAxisV1, text>:
+    match name:
+        case "feature": Ok(TraceMatrixAxisV1.Feature)
+        case "component": Ok(TraceMatrixAxisV1.Component)
+        case "layer": Ok(TraceMatrixAxisV1.Layer)
+        case _: Err("TRACE-QUERY-INVALID: matrix axis must be feature, component or layer")
+
+pub fn trace_matrix_axis_name_v1(axis: TraceMatrixAxisV1) -> text:
+    match axis:
+        case TraceMatrixAxisV1.Feature: "feature"
+        case TraceMatrixAxisV1.Component: "component"
+        case TraceMatrixAxisV1.Layer: "layer"
+
+fn matrix_axis_kind_v1(axis: TraceMatrixAxisV1) -> TraceNodeKind:
+    match axis:
+        case TraceMatrixAxisV1.Feature: TraceNodeKind.Feature
+        case TraceMatrixAxisV1.Component: TraceNodeKind.Component
+        case TraceMatrixAxisV1.Layer: TraceNodeKind.Layer
+
+# requirement id -> sorted unique entity ids of one axis
+fn matrix_membership_v1(graph: TraceGraph, axis: TraceMatrixAxisV1) -> Dict<text, [text]>:
+    val kind = matrix_axis_kind_v1(axis)
+    var kinds: Dict<text, TraceNodeKind> = {}
+    for node in graph.nodes:
+        kinds[node.id] = node.kind
+    var members: Dict<text, [text]> = {}
+    for edge in graph.edges:
+        var requirement = ""
+        var entity = ""
+        if edge.relation == TraceRelation.Specifies:
+            requirement = edge.to_id
+            entity = edge.from_id
+        elif edge.relation == TraceRelation.BelongsTo:
+            requirement = edge.from_id
+            entity = edge.to_id
+        else:
+            continue
+        if not kinds.contains_key(requirement) or not kinds.contains_key(entity):
+            continue
+        if kinds[requirement] != TraceNodeKind.Requirement or kinds[entity] != kind:
+            continue
+        var current: [text] = []
+        if members.contains_key(requirement):
+            current = members[requirement]
+        if not current.contains(entity):
+            current.push(entity)
+        members[requirement] = current
+    members
+
+fn matrix_entities_v1(graph: TraceGraph, axis: TraceMatrixAxisV1) -> [TraceEntityIdV1]:
+    val kind = matrix_axis_kind_v1(axis)
+    var ids: [text] = []
+    for node in graph.nodes:
+        if node.kind == kind:
+            ids.push(node.id)
+    var out: [TraceEntityIdV1] = []
+    for id in trace_sorted_ids(ids):
+        out.push(TraceEntityIdV1(value: id))
+    out
+
+fn matrix_count_v1(value: i64) -> TraceRequirementCountV1:
+    TraceRequirementCountV1(value: value)
+
+pub fn trace_matrix_v1(graph: TraceGraph, sidecar: [TraceSidecarReferenceV1], evidence: [TracePassingEvidenceV1],
+    rows: TraceMatrixAxisV1, cols: TraceMatrixAxisV1, profile: TraceProfile) -> TraceMatrixResultV1:
+    """Count requirements per (row entity, column entity) by overall status.
+
+    A requirement lands in every cell its memberships span. A requirement missing
+    from either axis is counted once in `unassigned` and in no cell. Linked and
+    Verified are separate counts: a structural link never raises a cell to Verified.
+    """
+    val row_members = matrix_membership_v1(graph, rows)
+    val col_members = matrix_membership_v1(graph, cols)
+    var tally: Dict<text, [i64]> = {}    # "row\tcol" -> [linked, verified, missing, unknown]
+    var keys: [text] = []
+    var unassigned = 0
+    for status in trace_requirement_statuses_v1(graph, sidecar, evidence):
+        val id = status.requirement_id.value
+        if not row_members.contains_key(id) or not col_members.contains_key(id):
+            unassigned = unassigned + 1
+            continue
+        val overall = trace_requirement_overall_v1(status)
+        var slot = 0
+        if overall == TraceLinkStatus.Verified: slot = 1
+        elif overall == TraceLinkStatus.Missing: slot = 2
+        elif overall == TraceLinkStatus.Unknown: slot = 3
+        for row_id in row_members[id]:
+            for col_id in col_members[id]:
+                val key = row_id + "\t" + col_id
+                var counts: [i64] = [0, 0, 0, 0]
+                if tally.contains_key(key):
+                    counts = tally[key]
+                else:
+                    keys.push(key)
+                counts[slot] = counts[slot] + 1
+                tally[key] = counts
+    var cells: [TraceMatrixCellV1] = []
+    for key in trace_sorted_ids(keys):
+        val parts = key.split("\t")
+        val counts = tally[key]
+        cells.push(TraceMatrixCellV1(row: TraceEntityIdV1(value: parts[0]), col: TraceEntityIdV1(value: parts[1]),
+            linked: matrix_count_v1(counts[0]), verified: matrix_count_v1(counts[1]),
+            missing: matrix_count_v1(counts[2]), unknown: matrix_count_v1(counts[3])))
+    val completeness = trace_graph_completeness_v1(graph)
+    TraceMatrixResultV1(snapshot_id: TraceSnapshotIdV1(value: graph.subject.snapshot_id),
+        rows: matrix_entities_v1(graph, rows), cols: matrix_entities_v1(graph, cols), cells: cells,
+        unassigned: matrix_count_v1(unassigned), completeness: completeness,
+        verdict: trace_command_verdict_v1(completeness, profile))
+
+pub fn trace_matrix_cell_text_v1(cell: TraceMatrixCellV1) -> text:
+    "linked=" + cell.linked.value.to_text() + " verified=" + cell.verified.value.to_text() +
+        " missing=" + cell.missing.value.to_text() + " unknown=" + cell.unknown.value.to_text()
+

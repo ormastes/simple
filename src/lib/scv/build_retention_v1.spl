@@ -1,0 +1,273 @@
+"""Bounded immutable build-cache retention authority.
+
+Plans bind the complete state root and generation. Reader expiry is advisory:
+only an explicit owner release permits eviction. Filesystem authority and the
+checked snapshot-store callback live in build_retention_store_v1.
+"""
+use std.common.crypto.sha256.{sha256_text}
+
+struct BuildRetentionNodeV1:
+    namespace: text
+    id: text
+    dependencies: [text]
+    authoritative: bool
+    rebuildable: bool
+    bytes: i64
+    last_used: i64
+
+struct BuildRetentionPinV1:
+    ref: text
+    root: text
+
+struct BuildRetentionLeaseV1:
+    owner: text
+    root: text
+    expires_at: i64
+
+struct BuildRetentionStateV1:
+    generation: i64
+    nodes: [BuildRetentionNodeV1]
+    pins: [BuildRetentionPinV1]
+    leases: [BuildRetentionLeaseV1]
+
+struct BuildRetentionLimitsV1:
+    max_nodes: i64
+    max_edges: i64
+    max_work: i64
+    max_bytes: i64
+    max_retained: i64
+    max_remove: i64
+
+struct BuildRetentionPlanV1:
+    generation: i64
+    root: text
+    protected: [text]
+    deletions: [text]
+    remaining_bytes: i64
+    remaining_nodes: i64
+    status: text
+
+fn build_retention_token_v1(value: text) -> bool:
+    if value.len() == 0 or value.len() > 256 or value == "." or value == "..": return false
+    for byte in value.bytes():
+        if not ((byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or
+                (byte >= 97 and byte <= 122) or byte == 45 or byte == 46 or byte == 58 or byte == 95):
+            return false
+    true
+
+fn build_retention_key_v1(node: BuildRetentionNodeV1) -> text:
+    node.namespace + "/" + node.id
+
+fn build_retention_key_valid_v1(key: text) -> bool:
+    val parts = key.split("/")
+    parts.len() == 2 and build_retention_token_v1(parts[0]) and build_retention_token_v1(parts[1])
+
+fn build_retention_pin_ref_v1(ref: text) -> bool:
+    val parts = ref.split("/")
+    if parts.len() < 2 or parts.len() > 8: return false
+    if not ["branches", "selected_releases", "worktrees", "drafts", "active_builds",
+            "user_pins", "old_clients", "snapshot_dependents"].contains(parts[0]): return false
+    for part in parts:
+        if not build_retention_token_v1(part): return false
+    true
+
+# Canonical SDN uses a deliberately restricted identity alphabet, so quoted
+# identity strings never require escaping and cannot introduce paths/fields.
+fn build_retention_sdn_v1(state: BuildRetentionStateV1) -> text:
+    var rows: [text] = []
+    for node in state.nodes:
+        var dependencies: [text] = []
+        for dependency in node.dependencies: dependencies.push("\"{dependency}\"")
+        val dependency_body = dependencies.join(", ")
+        rows.push("  {{namespace: \"{node.namespace}\", id: \"{node.id}\", authoritative: {node.authoritative}, rebuildable: {node.rebuildable}, bytes: {node.bytes}, last_used: {node.last_used}, dependencies: [{dependency_body}]}}")
+    var body = "version: 1\ngeneration: {state.generation}\nnodes: [\n" + rows.join(",\n") + "\n]\npins: [\n"
+    rows = []
+    for pin in state.pins: rows.push("  {{ref: \"{pin.ref}\", root: \"{pin.root}\"}}")
+    body = body + rows.join(",\n") + "\n]\nleases: [\n"
+    rows = []
+    for lease in state.leases:
+        rows.push("  {{owner: \"{lease.owner}\", root: \"{lease.root}\", expires_at: {lease.expires_at}}}")
+    body + rows.join(",\n") + "\n]\n"
+
+fn build_retention_root_v1(state: BuildRetentionStateV1) -> text:
+    sha256_text("scv.build-retention.v1\n" + build_retention_sdn_v1(state))
+
+fn build_retention_index_v1(state: BuildRetentionStateV1) -> Result<Dict<text, i64>, text>:
+    var by: Dict<text, i64> = {}
+    for index in 0..state.nodes.len():
+        val node = state.nodes[index]
+        val key = build_retention_key_v1(node)
+        if not build_retention_key_valid_v1(key) or by.contains_key(key): return Err("retention_identity")
+        if node.bytes < 0 or node.last_used < 0: return Err("retention_negative_accounting")
+        by[key] = index
+    Ok(by)
+
+fn build_retention_cas_v1(state: BuildRetentionStateV1, expected: i64) -> Result<bool, text>:
+    if state.generation < 1 or state.generation != expected: return Err("retention_stale_generation")
+    if expected == 9223372036854775807: return Err("retention_generation_exhausted")
+    Ok(true)
+
+fn build_retention_pin_v1(state: BuildRetentionStateV1, expected: i64, ref: text, root: text) -> Result<BuildRetentionStateV1, text>:
+    build_retention_cas_v1(state, expected)?
+    if not build_retention_pin_ref_v1(ref): return Err("retention_pin_ref")
+    val by = build_retention_index_v1(state)?
+    if not by.contains_key(root): return Err("retention_pin_missing")
+    var next = state
+    var pins: [BuildRetentionPinV1] = []
+    var found = false
+    for pin in state.pins:
+        if pin.ref == ref:
+            if pin.root == root: return Ok(state)
+            pins.push(BuildRetentionPinV1(ref: ref, root: root))
+            found = true
+        else: pins.push(pin)
+    if not found: pins.push(BuildRetentionPinV1(ref: ref, root: root))
+    next.pins = pins
+    next.generation = expected + 1
+    Ok(next)
+
+fn build_retention_unpin_v1(state: BuildRetentionStateV1, expected: i64, ref: text) -> Result<BuildRetentionStateV1, text>:
+    build_retention_cas_v1(state, expected)?
+    if not build_retention_pin_ref_v1(ref): return Err("retention_pin_ref")
+    var next = state
+    var pins: [BuildRetentionPinV1] = []
+    for pin in state.pins:
+        if pin.ref != ref: pins.push(pin)
+    if pins.len() == state.pins.len(): return Ok(state)
+    next.pins = pins
+    next.generation = expected + 1
+    Ok(next)
+
+fn build_retention_lease_v1(state: BuildRetentionStateV1, expected: i64, owner: text, root: text, expires_at: i64) -> Result<BuildRetentionStateV1, text>:
+    build_retention_cas_v1(state, expected)?
+    if not build_retention_token_v1(owner) or expires_at < 0: return Err("retention_lease")
+    val by = build_retention_index_v1(state)?
+    if not by.contains_key(root): return Err("retention_lease_missing")
+    var next = state
+    var leases: [BuildRetentionLeaseV1] = []
+    for lease in state.leases:
+        if lease.owner == owner:
+            if lease.root != root: return Err("retention_lease_owner_collision")
+            if lease.expires_at == expires_at: return Ok(state)
+        else: leases.push(lease)
+    leases.push(BuildRetentionLeaseV1(owner: owner, root: root, expires_at: expires_at))
+    next.leases = leases
+    next.generation = expected + 1
+    Ok(next)
+
+fn build_retention_release_v1(state: BuildRetentionStateV1, expected: i64, owner: text) -> Result<BuildRetentionStateV1, text>:
+    build_retention_cas_v1(state, expected)?
+    if not build_retention_token_v1(owner): return Err("retention_lease")
+    var next = state
+    var leases: [BuildRetentionLeaseV1] = []
+    for lease in state.leases:
+        if lease.owner != owner: leases.push(lease)
+    if leases.len() == state.leases.len(): return Ok(state)
+    next.leases = leases
+    next.generation = expected + 1
+    Ok(next)
+
+fn build_retention_plan_v1(state: BuildRetentionStateV1, limits: BuildRetentionLimitsV1, now: i64) -> Result<BuildRetentionPlanV1, text>:
+    if (state.generation < 1 or now < 0 or limits.max_nodes < 1 or limits.max_nodes > 4096 or
+            limits.max_edges < 0 or limits.max_edges > 65536 or limits.max_work < 1 or
+            limits.max_work > 16777216 or limits.max_bytes < 0 or limits.max_retained < 0 or
+            limits.max_remove < 0 or state.nodes.len() > limits.max_nodes or
+            state.pins.len() > limits.max_nodes or state.leases.len() > limits.max_nodes):
+        return Err("retention_limits")
+    val by = build_retention_index_v1(state)?
+    var total: i64 = 0
+    var work: i64 = state.nodes.len()
+    var edges: i64 = 0
+    var roots: [text] = []
+    var resolved: Dict<text, bool> = {}
+    for node in state.nodes:
+        if node.bytes > 9223372036854775807 - total: return Err("retention_bytes_overflow")
+        total = total + node.bytes
+        edges = edges + node.dependencies.len()
+        if edges > limits.max_edges: return Err("retention_edges_budget")
+        var seen: Dict<text, bool> = {}
+        for dependency in node.dependencies:
+            work = work + 1
+            if work > limits.max_work: return Err("retention_work_budget")
+            if not build_retention_key_valid_v1(dependency) or not by.contains_key(dependency): return Err("retention_dependency_missing")
+            if seen.contains_key(dependency): return Err("retention_dependency_duplicate")
+            seen[dependency] = true
+        if node.authoritative or not node.rebuildable: roots.push(build_retention_key_v1(node))
+    # Iterative topological validation covers unpinned nodes as well. A missing
+    # edge, cycle or exhausted work budget never yields a partial success.
+    while resolved.len() < state.nodes.len():
+        val before = resolved.len()
+        for node in state.nodes:
+            work = work + 1
+            if work > limits.max_work: return Err("retention_work_budget")
+            val key = build_retention_key_v1(node)
+            if resolved.contains_key(key): continue
+            var ready = true
+            for dependency in node.dependencies:
+                work = work + 1
+                if work > limits.max_work: return Err("retention_work_budget")
+                if not resolved.contains_key(dependency): ready = false
+            if ready: resolved[key] = true
+        if before == resolved.len(): return Err("retention_cycle")
+    var refs: Dict<text, bool> = {}
+    for pin in state.pins:
+        if not build_retention_pin_ref_v1(pin.ref) or refs.contains_key(pin.ref): return Err("retention_pin_ref")
+        if not build_retention_key_valid_v1(pin.root): return Err("retention_pin_root")
+        refs[pin.ref] = true
+        roots.push(pin.root)
+    var owners: Dict<text, bool> = {}
+    for lease in state.leases:
+        if not build_retention_token_v1(lease.owner) or owners.contains_key(lease.owner) or lease.expires_at < 0:
+            return Err("retention_lease")
+        if not build_retention_key_valid_v1(lease.root): return Err("retention_lease_root")
+        owners[lease.owner] = true
+        roots.push(lease.root)
+    var protected: [text] = []
+    var marked: Dict<text, bool> = {}
+    var cursor = 0
+    while cursor < roots.len():
+        work = work + 1
+        if work > limits.max_work: return Err("retention_work_budget")
+        val key = roots[cursor]
+        cursor = cursor + 1
+        if not by.contains_key(key): return Err("retention_root_missing")
+        if marked.contains_key(key): continue
+        marked[key] = true
+        protected.push(key)
+        for dependency in state.nodes[by[key]].dependencies: roots.push(dependency)
+    var deletions: [text] = []
+    var removed: Dict<text, bool> = {}
+    var remaining = state.nodes.len()
+    while (total > limits.max_bytes or remaining > limits.max_retained) and deletions.len() < limits.max_remove:
+        var victim = -1
+        for index in 0..state.nodes.len():
+            work = work + 1
+            if work > limits.max_work: return Err("retention_work_budget")
+            val node = state.nodes[index]
+            val key = build_retention_key_v1(node)
+            if marked.contains_key(key) or removed.contains_key(key): continue
+            var incoming = false
+            for owner in state.nodes:
+                work = work + 1 + owner.dependencies.len()
+                if work > limits.max_work: return Err("retention_work_budget")
+                if not removed.contains_key(build_retention_key_v1(owner)) and owner.dependencies.contains(key): incoming = true
+            if not incoming and (victim < 0 or node.last_used < state.nodes[victim].last_used): victim = index
+        if victim < 0: break
+        val node = state.nodes[victim]
+        val key = build_retention_key_v1(node)
+        removed[key] = true
+        deletions.push(key)
+        remaining = remaining - 1
+        total = total - node.bytes
+    var status = "within_budget"
+    if total > limits.max_bytes or remaining > limits.max_retained:
+        status = if remaining == protected.len(): "protected_over_budget" else: "throttled"
+    Ok(BuildRetentionPlanV1(generation: state.generation, root: build_retention_root_v1(state),
+        protected: protected, deletions: deletions, remaining_bytes: total,
+        remaining_nodes: remaining, status: status))
+
+export BuildRetentionNodeV1, BuildRetentionPinV1, BuildRetentionLeaseV1
+export BuildRetentionStateV1, BuildRetentionLimitsV1, BuildRetentionPlanV1
+export build_retention_key_v1, build_retention_root_v1, build_retention_sdn_v1
+export build_retention_pin_v1, build_retention_unpin_v1, build_retention_lease_v1
+export build_retention_release_v1, build_retention_plan_v1

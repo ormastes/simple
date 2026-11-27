@@ -1,0 +1,314 @@
+"""
+## Purpose and audience
+Purpose: Pin (1) `align-items: normal` / stretch in IMPLICIT and content
+sized grid rows (the row size is only known after every item, so items are
+re-laid in a second pass), with `center` / `end` alignment and a row-spanning
+item sharing its extra height; (2) `grid-auto-rows` (fixed length, track list
+cycle, `minmax(<length>, auto)`, `fr`, em, content keywords); (3) paint-side
+content-box readers (`background-clip` / `background-origin: content-box`)
+seeing the percent padding layout resolved; (4) percent padding rounded to
+the nearest px; (5) a grid container keeping its grid through a resolved
+percent padding / max-width.
+Audience: browser-engine layout and paint maintainers.
+
+Chrome oracle (Chrome 159 headless, `--dump-dom` + getBoundingClientRect(),
+900x2000, `body{margin:0}`, `.w{width:400px;margin-bottom:10px}`,
+`.f{display:flex}`, `.g{display:grid}`, 2026-11-19). Every expected rect is
+"x y w h" relative to its `.w` container and is quoted in the `step` of its
+example. Each example lays out only its own container. Paint examples are
+Chrome `--screenshot` frames (400x160, device scale 1): the whole frame is
+pixel-identical to Chrome on head (0 of 64000 px), and the pinned points are
+Chrome's colours.
+
+Base (release/1.0.0 3a1e31ad9b0, 0/31): only items in explicit rows stretched;
+`grid-auto-rows` was not parsed; no `center` / `end` alignment; a spanning
+item put its whole height in its first row; paint read the authored style
+(percent padding 0); a percent padding was floored; resolving a percent
+padding / margin / min-max dropped the Grid fields of the style.
+Not covered (open, see doc/08_tracking/bug/
+web_percent_padding_unparsed_and_grid_bare_span_2026-11-18.md):
+`grid-auto-columns`, an empty auto-height item (1 px here, 0 in Chrome),
+fractional layout units.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-GRID-AUTO-ROWS-001 — implicit grid rows size from `grid-auto-rows` and stretch their items; REQ-BROWSER-ENGINE-PERCENT-PADDING-001 — percent padding resolves against the containing block inline size, in layout and in paint.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id,
+    simple_web_layout_render_html_software_pixels
+}
+
+val PRE: text = "<html><head><style>body{{margin:0}} .w{{width:400px;margin-bottom:10px}} .f{{display:flex}} .g{{display:grid}}</style></head><body>"
+val POST: text = "</body></html>"
+val PAGE_R1: text = PRE + "<div class=\"w g\" id=r1 style=\"grid-template-columns:100px 300px\"><div id=r1a style=\"padding:10%\"></div><div id=r1b style=\"padding:5%\"></div></div>" + POST
+val PAGE_R2: text = PRE + "<div class=\"w g\" id=r2 style=\"grid-template-columns:100px 300px\"><div id=r2a style=\"padding:11px\"></div><div id=r2b style=\"padding:6px\"></div></div>" + POST
+val PAGE_R3: text = PRE + "<div class=\"w g\" id=r3 style=\"grid-template-columns:200px 200px\"><div id=r3a style=\"height:40px\"></div><div id=r3b></div><div id=r3c><div id=r3k style=\"height:10px\"></div></div><div id=r3d style=\"height:20px\"></div></div>" + POST
+val PAGE_R5: text = PRE + "<div class=\"w g\" id=r5 style=\"grid-template-columns:200px 200px\"><div id=r5a style=\"height:40px\"></div><div id=r5b style=\"border:3px solid;padding:2px;margin:5px\"></div></div>" + POST
+val PAGE_R6: text = PRE + "<div class=\"w g\" id=r6 style=\"grid-template-columns:200px 200px;grid-template-rows:30px;row-gap:4px\"><div id=r6a></div><div id=r6b></div><div id=r6c style=\"height:25px\"></div><div id=r6d></div></div>" + POST
+val PAGE_R7: text = PRE + "<div class=\"w g\" id=r7 style=\"grid-template-columns:200px 200px;align-items:center\"><div id=r7a style=\"height:40px\"></div><div id=r7b style=\"height:10px\"></div></div>" + POST
+val PAGE_R8: text = PRE + "<div class=\"w g\" id=r8 style=\"grid-template-columns:200px 200px\"><div id=r8a style=\"height:40px\"></div><div id=r8b style=\"box-sizing:border-box;padding:5px\"><div id=r8k style=\"height:50%\"></div></div></div>" + POST
+val PAGE_R9: text = PRE + "<div class=\"w g\" id=r9 style=\"grid-template-columns:100px 100px 100px\"><div id=r9a style=\"grid-column:2;grid-row:2;height:30px\"></div><div id=r9b style=\"height:12px\"></div><div id=r9c></div><div id=r9d></div><div id=r9e></div></div>" + POST
+val PAGE_Q1: text = PRE + "<div class=\"w g\" id=q1 style=\"grid-template-columns:100px 100px;grid-auto-rows:50px\"><div id=q1a></div><div id=q1b></div><div id=q1c></div></div>" + POST
+val PAGE_Q2: text = PRE + "<div class=\"w g\" id=q2 style=\"grid-template-columns:100px 100px;grid-auto-rows:50px\"><div id=q2a><div id=q2k style=\"height:80px\"></div></div><div id=q2b></div></div>" + POST
+val PAGE_Q3: text = PRE + "<div class=\"w g\" id=q3 style=\"grid-template-columns:400px;grid-auto-rows:20px 40px\"><div id=q3a></div><div id=q3b></div><div id=q3c></div></div>" + POST
+val PAGE_Q4: text = PRE + "<div class=\"w g\" id=q4 style=\"grid-template-columns:200px 200px;grid-template-rows:30px;grid-auto-rows:50px;row-gap:6px\"><div id=q4a></div><div id=q4b></div><div id=q4c></div></div>" + POST
+val PAGE_Q5: text = PRE + "<div class=\"w g\" id=q5 style=\"grid-template-columns:200px 200px;grid-auto-rows:minmax(40px,auto)\"><div id=q5a></div><div id=q5b></div><div id=q5c style=\"height:60px\"></div><div id=q5d></div></div>" + POST
+val PAGE_Q6: text = PRE + "<div class=\"w g\" id=q6 style=\"grid-template-columns:200px 200px;grid-auto-rows:50px\"><div id=q6a style=\"grid-row:span 2\"></div><div id=q6b></div><div id=q6c></div></div>" + POST
+val PAGE_Q7: text = PRE + "<div class=\"w g\" id=q7 style=\"grid-template-columns:200px 200px\"><div id=q7a style=\"grid-row:span 2;height:60px\"></div><div id=q7b style=\"height:10px\"></div><div id=q7c style=\"height:10px\"></div></div>" + POST
+val PAGE_Q8: text = PRE + "<div class=\"w g\" id=q8 style=\"grid-template-columns:200px 200px;grid-auto-rows:1fr\"><div id=q8a style=\"height:60px\"></div><div id=q8b></div><div id=q8c style=\"height:20px\"></div><div id=q8d></div></div>" + POST
+val PAGE_Q9: text = PRE + "<div class=\"w g\" id=q9 style=\"grid-template-columns:200px 200px;grid-auto-rows:2em;font-size:10px\"><div id=q9a></div><div id=q9b style=\"height:5px\"></div></div>" + POST
+val PAGE_Q10: text = PRE + "<div class=\"w g\" id=q10 style=\"grid-template-columns:200px 200px;grid-auto-rows:min-content\"><div id=q10a style=\"height:15px\"></div><div id=q10b></div></div>" + POST
+val PAGE_R10: text = PRE + "<div class=\"w g\" id=r10 style=\"grid-template-columns:200px 200px;grid-template-rows:40px;align-items:center\"><div id=r10a style=\"height:10px\"></div><div id=r10b style=\"height:20px;align-self:end\"></div></div>" + POST
+val PAGE_R11: text = PRE + "<div class=\"w g\" id=r11 style=\"grid-template-columns:200px 200px\"><div id=r11a style=\"height:40px\"></div><div id=r11b style=\"align-self:end;margin:3px\"><div style=\"height:10px\"></div></div><div id=r11c style=\"grid-column:span 2;height:7px\"></div></div>" + POST
+val PAGE_R12: text = PRE + "<div class=\"w g\" id=r12 style=\"grid-template-columns:200px 200px\"><div id=r12a>one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen</div><div id=r12b style=\"padding:4px\">x</div><div id=r12c style=\"height:5px\"></div></div>" + POST
+val PAGE_Q12: text = PRE + "<div class=\"w g\" id=q12 style=\"grid-template-columns:200px 200px;grid-auto-rows:50px bogus\"><div id=q12a style=\"height:10px\"></div><div id=q12b></div></div>" + POST
+val PAGE_F6: text = PRE + "<div class=w id=f6><div id=f6a class=g style=\"padding:5%;grid-template-columns:100px 100px\"><div id=f6b style=\"height:10px\"></div><div id=f6c style=\"height:10px\"></div></div></div>" + POST
+val PAGE_F8: text = PRE + "<div class=w id=f8><div id=f8a class=g style=\"max-width:75%;grid-template-columns:100px 100px\"><div id=f8b style=\"height:10px\"></div><div id=f8c style=\"height:10px\"></div></div></div>" + POST
+val PAGE_K1: text = PRE + "<div class=\"w g\" id=k1 style=\"grid-template-columns:100px 100px 100px\"><div id=k1a style=\"height:40px\"></div><div id=k1b style=\"grid-column:span 2\"><div style=\"height:10px\"></div></div></div>" + POST
+val PAGE_K2: text = PRE + "<div class=\"w g\" id=k2 style=\"grid-template-columns:100px 100px 100px;grid-template-rows:40px\"><div id=k2a></div><div id=k2b style=\"grid-column:span 2\"><div style=\"height:10px\"></div></div></div>" + POST
+val PAGE_S2: text = PRE + "<div class=w id=s2 style=\"width:333px\"><div id=s2a style=\"padding:1.7% 0.4%\"><div id=s2k style=\"height:10px\"></div></div></div>" + POST
+val PAINT_PRE: text = "<!DOCTYPE html><html><head><style>body{{margin:0;background:#fff}} .w{{width:400px}}</style></head><body>"
+val PAINT_CLIP: text = PAINT_PRE + "<div class=w><div style=\"padding:10%;background:#f00;background-clip:content-box;height:20px\"></div></div>" + POST
+val PAINT_ORIGIN: text = PAINT_PRE + "<div class=w><div style=\"padding:10%;height:20px;background-color:#ff0;background-image:linear-gradient(#00f,#00f);background-repeat:no-repeat;background-origin:content-box\"></div></div>" + POST
+val PAINT_GRID: text = PAINT_PRE + "<div class=w style=\"display:grid;grid-template-columns:300px 100px\"><div style=\"height:20px;background:#0a0\"></div><div style=\"padding:10%;background:#f00;background-clip:content-box;height:20px\"></div></div>" + POST
+val PAINT_ABS: text = PAINT_PRE + "<div class=w style=\"position:relative;width:360px;padding:20px;height:100px\"><div style=\"position:absolute;left:0;top:0;width:50px;height:10px;padding:10%;background:#f00;background-clip:content-box\"></div></div>" + POST
+
+fn _g(page: text, id: text, field: text) -> i32:
+    simple_web_layout_debug_layout_by_id(page, 900, 2000, id, field).to_i32()
+
+fn _size(page: text, id: text) -> text:
+    val w = _g(page, id, "w")
+    val h = _g(page, id, "h")
+    "{w} {h}"
+
+# "x y w h" of `id` relative to its container `box`.
+fn _rect(page: text, id: text, box: text) -> text:
+    val x = _g(page, id, "x") - _g(page, box, "x")
+    val y = _g(page, id, "y") - _g(page, box, "y")
+    val w = _g(page, id, "w")
+    val h = _g(page, id, "h")
+    "{x} {y} {w} {h}"
+
+# 0xRRGGBB at each "x,y" of a 400x160 software frame, space joined.
+fn _colours(page: text, points: [i32]) -> text:
+    val px = simple_web_layout_render_html_software_pixels(page, 400, 160)
+    var out = ""
+    var i = 0
+    while i + 1 < points.len():
+        val c = (px[points[i + 1] * 400 + points[i]] & 0xFFFFFFu32) as i64
+        if out != "":
+            out = out + " "
+        out = out + "{c}"
+        i = i + 2
+    out
+
+val RED: i64 = 16711680
+val WHITE: i64 = 16777215
+val BLUE: i64 = 255
+val YELLOW: i64 = 16776960
+val GREEN: i64 = 43520
+
+describe "grid implicit rows, grid-auto-rows and painted percent padding (Chrome 159)":
+    it "implicit row: percent-padded items stretch to the tallest (30 px) item":
+        step("Chrome 159: r1 400 x 30, r1a 0 0 100 30, r1b 100 0 300 30")
+        expect(_size(PAGE_R1, "r1")).to_equal("400 30")
+        expect(_rect(PAGE_R1, "r1a", "r1")).to_equal("0 0 100 30")
+        expect(_rect(PAGE_R1, "r1b", "r1")).to_equal("100 0 300 30")
+
+    it "implicit row: px-padded items stretch to the tallest (22 px) item":
+        step("Chrome 159: r2 400 x 22, r2a 0 0 100 22, r2b 100 0 300 22")
+        expect(_size(PAGE_R2, "r2")).to_equal("400 22")
+        expect(_rect(PAGE_R2, "r2a", "r2")).to_equal("0 0 100 22")
+        expect(_rect(PAGE_R2, "r2b", "r2")).to_equal("100 0 300 22")
+
+    it "two implicit rows: every auto-height item stretches to its own row":
+        step("Chrome 159: r3 400 x 60, r3a 0 0 200 40, r3b 200 0 200 40, r3c 0 40 200 20, r3k 0 40 200 10, r3d 200 40 200 20")
+        expect(_size(PAGE_R3, "r3")).to_equal("400 60")
+        expect(_rect(PAGE_R3, "r3a", "r3")).to_equal("0 0 200 40")
+        expect(_rect(PAGE_R3, "r3b", "r3")).to_equal("200 0 200 40")
+        expect(_rect(PAGE_R3, "r3c", "r3")).to_equal("0 40 200 20")
+        expect(_rect(PAGE_R3, "r3k", "r3")).to_equal("0 40 200 10")
+        expect(_rect(PAGE_R3, "r3d", "r3")).to_equal("200 40 200 20")
+
+    it "implicit row: a stretched item keeps its margin, border and padding inside the row":
+        step("Chrome 159: r5 400 x 40, r5a 0 0 200 40, r5b 205 5 190 30")
+        expect(_size(PAGE_R5, "r5")).to_equal("400 40")
+        expect(_rect(PAGE_R5, "r5a", "r5")).to_equal("0 0 200 40")
+        expect(_rect(PAGE_R5, "r5b", "r5")).to_equal("205 5 190 30")
+
+    it "implicit row after an explicit one, with a row gap":
+        step("Chrome 159: r6 400 x 59, r6a 0 0 200 30, r6b 200 0 200 30, r6c 0 34 200 25, r6d 200 34 200 25")
+        expect(_size(PAGE_R6, "r6")).to_equal("400 59")
+        expect(_rect(PAGE_R6, "r6a", "r6")).to_equal("0 0 200 30")
+        expect(_rect(PAGE_R6, "r6b", "r6")).to_equal("200 0 200 30")
+        expect(_rect(PAGE_R6, "r6c", "r6")).to_equal("0 34 200 25")
+        expect(_rect(PAGE_R6, "r6d", "r6")).to_equal("200 34 200 25")
+
+    it "implicit row: align-items center centres a shorter item":
+        step("Chrome 159: r7 400 x 40, r7a 0 0 200 40, r7b 200 15 200 10")
+        expect(_size(PAGE_R7, "r7")).to_equal("400 40")
+        expect(_rect(PAGE_R7, "r7a", "r7")).to_equal("0 0 200 40")
+        expect(_rect(PAGE_R7, "r7b", "r7")).to_equal("200 15 200 10")
+
+    it "implicit row: a stretched border-box item gives its child a definite percent height":
+        step("Chrome 159: r8 400 x 40, r8a 0 0 200 40, r8b 200 0 200 40, r8k 205 5 190 15")
+        expect(_size(PAGE_R8, "r8")).to_equal("400 40")
+        expect(_rect(PAGE_R8, "r8a", "r8")).to_equal("0 0 200 40")
+        expect(_rect(PAGE_R8, "r8b", "r8")).to_equal("200 0 200 40")
+        expect(_rect(PAGE_R8, "r8k", "r8")).to_equal("205 5 190 15")
+
+    it "a definite-row item laid out before its row offset is known moves with it":
+        step("Chrome 159: r9 400 x 42, r9a 100 12 100 30, r9b 0 0 100 12, r9c 100 0 100 12, r9d 200 0 100 12, r9e 0 12 100 30")
+        expect(_size(PAGE_R9, "r9")).to_equal("400 42")
+        expect(_rect(PAGE_R9, "r9a", "r9")).to_equal("100 12 100 30")
+        expect(_rect(PAGE_R9, "r9b", "r9")).to_equal("0 0 100 12")
+        expect(_rect(PAGE_R9, "r9c", "r9")).to_equal("100 0 100 12")
+        expect(_rect(PAGE_R9, "r9d", "r9")).to_equal("200 0 100 12")
+        expect(_rect(PAGE_R9, "r9e", "r9")).to_equal("0 12 100 30")
+
+    it "grid-auto-rows: a fixed length sizes and stretches every implicit row":
+        step("Chrome 159: q1 400 x 100, q1a 0 0 100 50, q1b 100 0 100 50, q1c 0 50 100 50")
+        expect(_size(PAGE_Q1, "q1")).to_equal("400 100")
+        expect(_rect(PAGE_Q1, "q1a", "q1")).to_equal("0 0 100 50")
+        expect(_rect(PAGE_Q1, "q1b", "q1")).to_equal("100 0 100 50")
+        expect(_rect(PAGE_Q1, "q1c", "q1")).to_equal("0 50 100 50")
+
+    it "grid-auto-rows: a fixed row does not grow with taller content":
+        step("Chrome 159: q2 400 x 50, q2a 0 0 100 50, q2k 0 0 100 80, q2b 100 0 100 50")
+        expect(_size(PAGE_Q2, "q2")).to_equal("400 50")
+        expect(_rect(PAGE_Q2, "q2a", "q2")).to_equal("0 0 100 50")
+        expect(_rect(PAGE_Q2, "q2k", "q2")).to_equal("0 0 100 80")
+        expect(_rect(PAGE_Q2, "q2b", "q2")).to_equal("100 0 100 50")
+
+    it "grid-auto-rows: a track list cycles over the implicit rows":
+        step("Chrome 159: q3 400 x 80, q3a 0 0 400 20, q3b 0 20 400 40, q3c 0 60 400 20")
+        expect(_size(PAGE_Q3, "q3")).to_equal("400 80")
+        expect(_rect(PAGE_Q3, "q3a", "q3")).to_equal("0 0 400 20")
+        expect(_rect(PAGE_Q3, "q3b", "q3")).to_equal("0 20 400 40")
+        expect(_rect(PAGE_Q3, "q3c", "q3")).to_equal("0 60 400 20")
+
+    it "grid-auto-rows applies only after the explicit rows":
+        step("Chrome 159: q4 400 x 86, q4a 0 0 200 30, q4b 200 0 200 30, q4c 0 36 200 50")
+        expect(_size(PAGE_Q4, "q4")).to_equal("400 86")
+        expect(_rect(PAGE_Q4, "q4a", "q4")).to_equal("0 0 200 30")
+        expect(_rect(PAGE_Q4, "q4b", "q4")).to_equal("200 0 200 30")
+        expect(_rect(PAGE_Q4, "q4c", "q4")).to_equal("0 36 200 50")
+
+    it "grid-auto-rows minmax(length, auto): a floor that still grows with content":
+        step("Chrome 159: q5 400 x 100, q5a 0 0 200 40, q5b 200 0 200 40, q5c 0 40 200 60, q5d 200 40 200 60")
+        expect(_size(PAGE_Q5, "q5")).to_equal("400 100")
+        expect(_rect(PAGE_Q5, "q5a", "q5")).to_equal("0 0 200 40")
+        expect(_rect(PAGE_Q5, "q5b", "q5")).to_equal("200 0 200 40")
+        expect(_rect(PAGE_Q5, "q5c", "q5")).to_equal("0 40 200 60")
+        expect(_rect(PAGE_Q5, "q5d", "q5")).to_equal("200 40 200 60")
+
+    it "grid-auto-rows: a row-spanning item covers both fixed implicit rows":
+        step("Chrome 159: q6 400 x 100, q6a 0 0 200 100, q6b 200 0 200 50, q6c 200 50 200 50")
+        expect(_size(PAGE_Q6, "q6")).to_equal("400 100")
+        expect(_rect(PAGE_Q6, "q6a", "q6")).to_equal("0 0 200 100")
+        expect(_rect(PAGE_Q6, "q6b", "q6")).to_equal("200 0 200 50")
+        expect(_rect(PAGE_Q6, "q6c", "q6")).to_equal("200 50 200 50")
+
+    it "content-sized rows: a row-spanning item shares its extra height equally":
+        step("Chrome 159: q7 400 x 60, q7a 0 0 200 60, q7b 200 0 200 10, q7c 200 30 200 10")
+        expect(_size(PAGE_Q7, "q7")).to_equal("400 60")
+        expect(_rect(PAGE_Q7, "q7a", "q7")).to_equal("0 0 200 60")
+        expect(_rect(PAGE_Q7, "q7b", "q7")).to_equal("200 0 200 10")
+        expect(_rect(PAGE_Q7, "q7c", "q7")).to_equal("200 30 200 10")
+
+    it "grid-auto-rows 1fr: implicit rows equalize to the tallest content":
+        step("Chrome 159: q8 400 x 120, q8a 0 0 200 60, q8b 200 0 200 60, q8c 0 60 200 20, q8d 200 60 200 60")
+        expect(_size(PAGE_Q8, "q8")).to_equal("400 120")
+        expect(_rect(PAGE_Q8, "q8a", "q8")).to_equal("0 0 200 60")
+        expect(_rect(PAGE_Q8, "q8b", "q8")).to_equal("200 0 200 60")
+        expect(_rect(PAGE_Q8, "q8c", "q8")).to_equal("0 60 200 20")
+        expect(_rect(PAGE_Q8, "q8d", "q8")).to_equal("200 60 200 60")
+
+    it "grid-auto-rows in em resolves against the container font size":
+        step("Chrome 159: q9 400 x 20, q9a 0 0 200 20, q9b 200 0 200 5")
+        expect(_size(PAGE_Q9, "q9")).to_equal("400 20")
+        expect(_rect(PAGE_Q9, "q9a", "q9")).to_equal("0 0 200 20")
+        expect(_rect(PAGE_Q9, "q9b", "q9")).to_equal("200 0 200 5")
+
+    it "grid-auto-rows min-content is content sized":
+        step("Chrome 159: q10 400 x 15, q10a 0 0 200 15, q10b 200 0 200 15")
+        expect(_size(PAGE_Q10, "q10")).to_equal("400 15")
+        expect(_rect(PAGE_Q10, "q10a", "q10")).to_equal("0 0 200 15")
+        expect(_rect(PAGE_Q10, "q10b", "q10")).to_equal("200 0 200 15")
+
+    it "explicit row: align-items center and align-self end":
+        step("Chrome 159: r10 400 x 40, r10a 0 15 200 10, r10b 200 20 200 20")
+        expect(_size(PAGE_R10, "r10")).to_equal("400 40")
+        expect(_rect(PAGE_R10, "r10a", "r10")).to_equal("0 15 200 10")
+        expect(_rect(PAGE_R10, "r10b", "r10")).to_equal("200 20 200 20")
+
+    it "implicit row: align-self end with margins, and a full-row span below":
+        step("Chrome 159: r11 400 x 47, r11a 0 0 200 40, r11b 203 27 194 10, r11c 0 40 400 7")
+        expect(_size(PAGE_R11, "r11")).to_equal("400 47")
+        expect(_rect(PAGE_R11, "r11a", "r11")).to_equal("0 0 200 40")
+        expect(_rect(PAGE_R11, "r11b", "r11")).to_equal("203 27 194 10")
+        expect(_rect(PAGE_R11, "r11c", "r11")).to_equal("0 40 400 7")
+
+    it "implicit row: an item stretches to a wrapped-text neighbour":
+        step("Chrome 159: r12 400 x 77, r12a 0 0 200 72, r12b 200 0 200 72, r12c 0 72 200 5")
+        expect(_size(PAGE_R12, "r12")).to_equal("400 77")
+        expect(_rect(PAGE_R12, "r12a", "r12")).to_equal("0 0 200 72")
+        expect(_rect(PAGE_R12, "r12b", "r12")).to_equal("200 0 200 72")
+        expect(_rect(PAGE_R12, "r12c", "r12")).to_equal("0 72 200 5")
+
+    it "grid-auto-rows with an invalid track is dropped (content-sized rows)":
+        step("Chrome 159: q12 400 x 10, q12a 0 0 200 10, q12b 200 0 200 10")
+        expect(_size(PAGE_Q12, "q12")).to_equal("400 10")
+        expect(_rect(PAGE_Q12, "q12a", "q12")).to_equal("0 0 200 10")
+        expect(_rect(PAGE_Q12, "q12b", "q12")).to_equal("200 0 200 10")
+
+    it "a grid container with percent padding stays a grid":
+        step("Chrome 159: f6 400 x 50, f6a 0 0 400 50, f6b 20 20 100 10, f6c 120 20 100 10")
+        expect(_size(PAGE_F6, "f6")).to_equal("400 50")
+        expect(_rect(PAGE_F6, "f6a", "f6")).to_equal("0 0 400 50")
+        expect(_rect(PAGE_F6, "f6b", "f6")).to_equal("20 20 100 10")
+        expect(_rect(PAGE_F6, "f6c", "f6")).to_equal("120 20 100 10")
+
+    it "a grid container with a percent max-width stays a grid":
+        step("Chrome 159: f8 400 x 10, f8a 0 0 300 10, f8b 0 0 100 10, f8c 100 0 100 10")
+        expect(_size(PAGE_F8, "f8")).to_equal("400 10")
+        expect(_rect(PAGE_F8, "f8a", "f8")).to_equal("0 0 300 10")
+        expect(_rect(PAGE_F8, "f8b", "f8")).to_equal("0 0 100 10")
+        expect(_rect(PAGE_F8, "f8c", "f8")).to_equal("100 0 100 10")
+
+    it "implicit row: a column-spanning item stretches too":
+        step("Chrome 159: k1 400 x 40, k1a 0 0 100 40, k1b 100 0 200 40")
+        expect(_size(PAGE_K1, "k1")).to_equal("400 40")
+        expect(_rect(PAGE_K1, "k1a", "k1")).to_equal("0 0 100 40")
+        expect(_rect(PAGE_K1, "k1b", "k1")).to_equal("100 0 200 40")
+
+    it "explicit row: a column-spanning item stretches too":
+        step("Chrome 159: k2 400 x 40, k2a 0 0 100 40, k2b 100 0 200 40")
+        expect(_size(PAGE_K2, "k2")).to_equal("400 40")
+        expect(_rect(PAGE_K2, "k2a", "k2")).to_equal("0 0 100 40")
+        expect(_rect(PAGE_K2, "k2b", "k2")).to_equal("100 0 200 40")
+
+    it "percent padding rounds to the nearest px":
+        step("Chrome 159: s2a 333 x 21.3125, s2k 1.328 5.656 330.34 10; base 333 x 20, s2k 1 5 331 10")
+        # 1.7% of 333 = 5.661 (Chrome 5.65625, painted on row 6); 0.4% = 1.33.
+        expect(_rect(PAGE_S2, "s2k", "s2")).to_equal("1 6 331 10")
+        expect(_size(PAGE_S2, "s2a")).to_equal("333 22")
+
+    it "paint: background-clip content-box is inset by the percent padding":
+        step("Chrome 159: red only in 40..359 x 40..59 of the 400 x 100 box")
+        expect(_colours(PAINT_CLIP, [39, 50, 40, 40, 359, 59, 360, 50, 200, 39, 200, 60])).to_equal("{WHITE} {RED} {RED} {WHITE} {WHITE} {WHITE}")
+
+    it "paint: background-origin content-box positions a no-repeat image inside the percent padding":
+        step("Chrome 159: blue in 40..359 x 40..59, yellow over the rest of the box")
+        expect(_colours(PAINT_ORIGIN, [39, 50, 40, 40, 359, 59, 360, 50, 200, 39, 200, 60, 200, 100])).to_equal("{YELLOW} {BLUE} {BLUE} {YELLOW} {YELLOW} {YELLOW} {WHITE}")
+
+    it "paint: a grid item's percent padding is of its 100 px grid area":
+        step("Chrome 159: red in 310..389 x 10..29, green in 0..299 x 0..19 (definite height)")
+        expect(_colours(PAINT_GRID, [309, 20, 310, 10, 389, 29, 390, 20, 350, 9, 350, 30, 150, 19, 150, 20])).to_equal("{WHITE} {RED} {RED} {WHITE} {WHITE} {WHITE} {GREEN} {WHITE}")
+
+    it "paint: an absolutely positioned box's percent padding is of the padding box":
+        step("Chrome 159: red in 40..89 x 40..49 (padding 10% of 400)")
+        expect(_colours(PAINT_ABS, [39, 45, 40, 40, 89, 49, 90, 45, 60, 39, 60, 50])).to_equal("{WHITE} {RED} {RED} {WHITE} {WHITE} {WHITE}")

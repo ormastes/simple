@@ -792,11 +792,11 @@ mod unix {
         if libc::fstat(fd, &mut stat) != 0
             || (stat.st_mode & libc::S_IFMT) != libc::S_IFREG
             || stat.st_size < 0
-            || stat.st_size > maximum
+            || stat.st_size as i64 > maximum
         {
             INVALID
         } else {
-            stat.st_size
+            stat.st_size as i64
         }
     }
 
@@ -815,7 +815,7 @@ mod unix {
         if libc::fstat(fd, &mut before) != 0 || (before.st_mode & libc::S_IFMT) != libc::S_IFREG {
             return INVALID;
         }
-        if before.st_size < 0 || before.st_size > cap {
+        if before.st_size < 0 || before.st_size as i64 > cap {
             return INVALID;
         }
         let expected = before.st_size as usize;
@@ -1156,7 +1156,7 @@ mod unix {
                 assert!(sealed > 0 && sealed != t);
                 let retained = match handles().lock().unwrap().get(&sealed) { Some(Entry::Sealed { fd, .. }) => *fd, _ => panic!() };
                 assert_eq!(retained, fd);
-                assert_eq!(fs::metadata(dir.path().join("object")).unwrap().ino(), before.st_ino);
+                assert_eq!(fs::metadata(dir.path().join("object")).unwrap().ino(), before.st_ino as u64);
                 assert_eq!(rt_cache_host_write_temp_v1(t, 0, b"x".as_ptr(), 1), INVALID);
                 assert_eq!(rt_cache_host_write_temp_v1(sealed, 0, b"x".as_ptr(), 1), INVALID);
                 assert_eq!(rt_cache_host_close_v1(t), INVALID);

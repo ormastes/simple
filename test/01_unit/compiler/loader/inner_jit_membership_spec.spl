@@ -131,3 +131,31 @@ describe "inner loader JIT membership":
         expect(jit.in_progress.len()).to_equal(1)
         expect(jit.in_progress.has("outer")).to_be(true)
         expect(jit.compiler_ctx_handle).to_equal(0)
+
+    it "maps compiled template code and stores empty byte vector in jit_cache":
+        var jit = JitInstantiator.new(inner_membership_config())
+        jit.set_metadata_for_test("vec_mem.smf", LoadedMetadata(possible: [PossibleInstantiation(
+            template_name: "Vec", type_args: "i64", mangled_name: "Vec$i64"
+        )], instantiations: []))
+        val compiled = jit.try_jit_instantiate("Vec$i64")
+        match compiled:
+            case JitInstantiationResult.Success(code, symbol, address):
+                expect(symbol).to_equal("Vec$i64")
+                expect(code.len()).to_be_greater_than(0)
+                expect(address.?).to_be(true)
+            case _: expect(false).to_be(true)
+        expect(jit.jit_cache.has("Vec$i64")).to_be(true)
+        var cached_addr: i64 = 0
+        match jit.jit_cache["Vec$i64"]:
+            case (cached_bytes, addr):
+                expect(cached_bytes.len()).to_equal(0)
+                expect(addr).to_be_greater_than(0)
+                cached_addr = addr
+        val hit = jit.try_jit_instantiate("Vec$i64")
+        match hit:
+            case JitInstantiationResult.Success(hit_code, hit_symbol, hit_address):
+                expect(hit_symbol).to_equal("Vec$i64")
+                expect(hit_code.len()).to_equal(0)
+                expect(hit_address).to_equal(Some(cached_addr))
+            case _: expect(false).to_be(true)
+        jit.destroy()

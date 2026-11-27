@@ -1,0 +1,53 @@
+# Explicit prompt transport DATA only. No installed capability or container
+# input/EOF authority is created from these public values.
+use app.llm_caret.provider_cli_adapter_types_v1.*
+use app.llm_caret.provider_cli_adapter_v1.plan_provider_cli_action_v1
+use std.common.text_bytes.utf8_bytes_valid
+
+pub enum ProviderCliCodexPromptModeV1:
+    Stdin
+    Argv
+
+pub struct ProviderCliCodexPromptPlanDataV1:
+    plan: ProviderCliPlanDataV1
+    input_mode: ProviderCliCodexPromptModeV1
+    prompt_bytes: i64
+    argv_bytes: i64
+    requires_closed_stdin_non_tty: bool
+
+pub fn plan_provider_cli_codex_prompt_mode_v1(version: ProviderCliVersionDataV1,
+        request: ProviderCliRequestDataV1, mode: ProviderCliCodexPromptModeV1) -> Result<ProviderCliCodexPromptPlanDataV1, text>:
+    if version.provider != ProviderCliProviderV1.Codex or version.version != "0.169.0":
+        return Err("codex-prompt-mode-exact-version-required")
+    if request.action != ProviderCliActionV1.Start and request.action != ProviderCliActionV1.Resume:
+        return Err("codex-prompt-mode-task-action-required")
+    val original = plan_provider_cli_action_v1(version, request)?
+    if (request.prompt.byte_len() < 1 or request.prompt.byte_len() > 4096 or
+            not utf8_bytes_valid(request.prompt.bytes())):
+        return Err("codex-prompt-mode-utf8-byte-bound")
+    var argv: [text] = []
+    if mode == ProviderCliCodexPromptModeV1.Argv:
+        # '-' remains a forced-stdin sentinel even after option termination.
+        if request.prompt == "-": return Err("codex-argv-dash-requires-stdin")
+        if original.argv.len() == 0 or original.argv[original.argv.len() - 1] != "-":
+            return Err("codex-prompt-mode-base-plan-mismatch")
+        val sentinel = original.argv.len() - 1
+        for at in 0..sentinel: argv.push(original.argv[at])
+        argv.push("--")
+        argv.push(request.prompt)
+    else:
+        for argument in original.argv: argv.push(argument)
+    var bytes = 0
+    for argument in argv:
+        bytes = bytes + argument.byte_len()
+        if bytes > 8192: return Err("codex-prompt-mode-argv-byte-bound")
+    var credentials: [text] = []
+    for name in original.credential_environment_names: credentials.push(name)
+    val planned = ProviderCliPlanDataV1(provider: original.provider, version: original.version,
+        action: original.action, control: original.control, argv: argv,
+        stdin_text: if mode == ProviderCliCodexPromptModeV1.Stdin: original.stdin_text else: "",
+        output: original.output, requires_external_containment: original.requires_external_containment,
+        auth_mechanism: original.auth_mechanism, credential_environment_names: credentials)
+    Ok(ProviderCliCodexPromptPlanDataV1(plan: planned, input_mode: mode,
+        prompt_bytes: request.prompt.byte_len(), argv_bytes: bytes,
+        requires_closed_stdin_non_tty: mode == ProviderCliCodexPromptModeV1.Argv))

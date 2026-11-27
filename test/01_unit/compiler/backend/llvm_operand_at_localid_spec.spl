@@ -1,0 +1,40 @@
+# Regression: on the stage-native lane the or-pattern binding `Copy(local) | Move(local)`
+# plus `local.id` returned a packed word, so `Opts(paths: [], path: "x")` stored the same
+# undefined `%l85899345924` (0x14_0000_0004) for every struct field (llc: use of undefined
+# value). translate_operand_at / get_operand_type_at must use split arms and
+# local_id_value (the form translate_operand uses).
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+struct Opts:
+    paths: [text]
+    path: text
+
+fn _body_of(src: text, header: text) -> text:
+    val start = src.index_of(header) ?? -1
+    if start < 0:
+        return ""
+    val rest = src.substring(start + header.len())
+    val next = rest.index_of("\n    me ") ?? rest.len()
+    rest.substring(0, next)
+
+describe "LLVM operand_at local id access":
+    it "uses split Copy/Move arms with local_id_value":
+        val src = rt_file_read_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl"
+        ) ?? ""
+        expect(src.len() > 0).to_equal(true)
+        val a = _body_of(src, "me translate_operand_at(")
+        val b = _body_of(src, "me get_operand_type_at(")
+        expect(a.len() > 0).to_equal(true)
+        expect(b.len() > 0).to_equal(true)
+        expect(a.contains("Copy(local) | Move(local)")).to_equal(false)
+        expect(b.contains("Copy(local) | Move(local)")).to_equal(false)
+        expect(a).to_contain("self.local_id_value(local)")
+        expect(b).to_contain("self.local_id_value(local)")
+
+    it "constructs a struct with an empty array and a text field":
+        val o = Opts(paths: [], path: "x")
+        expect(o.path == "x").to_equal(true)
+        expect(o.paths.len() == 0).to_equal(true)

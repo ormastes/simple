@@ -10,7 +10,7 @@ use std.nogc_sync_mut.sffi.dynlib_exact_admission_v1.{
 use std.nogc_sync_mut.io_runtime.{
     file_copy, file_hash_sha256_or_empty, dir_remove_all
 }
-use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
 
 val DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1 = "simple_backend_plugin_v1"
 
@@ -51,21 +51,22 @@ impl DynamicBackendPluginStagedArtifact:
 fn dynamic_backend_staging_fail_v1(
     staging_dir: text, detail: text
 ) -> Result<DynamicBackendPluginStagedArtifact, DynamicBackendPluginLoadError>:
-    if staging_dir != "":
+    if staging_dir.len() > 0:
         dir_remove_all(staging_dir)
     Err(DynamicBackendPluginLoadError.LoadFailed(detail))
 
-fn stage_dynamic_backend_plugin_artifact_v1(
-    provider_path: text
+fn stage_dynamic_backend_plugin_artifact_at_parent_v1(
+    provider_path: text, staging_parent: text
 ) -> Result<DynamicBackendPluginStagedArtifact, DynamicBackendPluginLoadError>:
     """Copy once into a private directory, then identify the copied bytes."""
     if provider_path == "":
         return Err(DynamicBackendPluginLoadError.LoadFailed(
             "dynamic backend provider path is required"))
-    val staging_dir = secure_temp_dir_raw(".", "simple-backend-plugin")
-    if staging_dir == "":
-        return Err(DynamicBackendPluginLoadError.LoadFailed(
-            "dynamic backend provider staging directory creation failed"))
+    val staging_dir = match secure_temp_dir(staging_parent, "simple-backend-plugin"):
+        case Ok(path): path
+        case Err(_):
+            return Err(DynamicBackendPluginLoadError.LoadFailed(
+                "dynamic backend provider staging directory creation failed"))
     # Keep an explicit suffix because Windows LoadLibrary appends ".dll" when
     # a supplied path has no extension. Other hosts load this exact path.
     val staged_path = staging_dir + "/provider.dll"
@@ -78,6 +79,11 @@ fn stage_dynamic_backend_plugin_artifact_v1(
             staging_dir, "dynamic backend staged provider digest is unavailable")
     Ok(DynamicBackendPluginStagedArtifact(
         staged_path, staging_dir, build_id, false))
+
+fn stage_dynamic_backend_plugin_artifact_v1(
+    provider_path: text
+) -> Result<DynamicBackendPluginStagedArtifact, DynamicBackendPluginLoadError>:
+    stage_dynamic_backend_plugin_artifact_at_parent_v1(provider_path, ".")
 
 class DynamicBackendPluginLease:
     """Loaded provider library pinned around one resolved v1 entry symbol.
@@ -109,6 +115,7 @@ impl DynamicBackendPluginLease:
     fn end_admitted_call():
         self.library.end_raw_call()
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in close", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     me close() -> bool:
         """Unload once, then retry private staging cleanup until it succeeds."""
         if self.closed:
@@ -127,6 +134,7 @@ impl DynamicBackendPluginLease:
             self.closed = true
         cleanup_ok
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in load_dynamic_backend_plugin_lease", reviewers: ["ormastes", "opus-review"], capabilities: ["raw_ptr", "ffi"])
 @unsafe(
     reason: "loads an unverified backend provider and resolves one raw symbol without invoking it",
     capabilities: [ffi, raw_ptr],
@@ -136,7 +144,7 @@ fn load_dynamic_backend_plugin_lease(
 ) -> Result<DynamicBackendPluginLease, DynamicBackendPluginLoadError>:
     """Load a provider and retain its exact v1 symbol, failing closed."""
     val staged_result = stage_dynamic_backend_plugin_artifact_v1(provider_path)
-    var staged = match staged_result:
+    var staged: DynamicBackendPluginStagedArtifact = match staged_result:
         case Ok(value): value
         case Err(error): return Err(error)
 
@@ -158,9 +166,6 @@ fn load_dynamic_backend_plugin_lease(
         return Err(DynamicBackendPluginLoadError.LoadFailed(
             "dynamic backend staged provider changed while loading"))
 
-    # The checked `*mut i64` resolver loses out-parameter writeback on older
-    # bootstrap seeds and its direct fallback raises on a normal symbol miss.
-    # This owner returns 0 for a miss, so rejection can close both resources.
     val entry_symbol = unsafe(capabilities: [ffi, raw_ptr]):
         dynlib_symbol_address_v1(
             library.handle, DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1)
@@ -195,4 +200,5 @@ fn dynamic_backend_plugin_admission_status(
 export DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1
 export DynamicBackendPluginLoadError, DynamicBackendPluginStagedArtifact
 export DynamicBackendPluginLease, stage_dynamic_backend_plugin_artifact_v1
+export stage_dynamic_backend_plugin_artifact_at_parent_v1
 export load_dynamic_backend_plugin_lease, dynamic_backend_plugin_admission_status

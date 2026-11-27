@@ -7,7 +7,7 @@
 
 use std.nogc_sync_mut.db.accel.{RowBitmap}
 use std.nogc_sync_mut.ptr.raw.{
-    raw_alloc, raw_free, raw_read_i32, rt_write_u32s_to_raw
+    raw_alloc, raw_free, raw_read_u32s, rt_write_u32s_to_raw
 }
 use std.nogc_sync_mut.composition.provider_contract.{
     SIMPLE_PROVIDER_QUERY_V1_SIZE, SIMPLE_PROVIDER_OK,
@@ -210,8 +210,10 @@ fn _row_bitmap_provider_words_owned_v1(session: RowBitmapVectorSessionV1,
             status: ROW_BITMAP_VECTOR_STAGE_FAILED_V1,
             reason: "bitmap-provider-staging-limit", loader_session: session.loader_session)
 
-    val staged_left: [u32] = [for i in 0..limit: if i < lhs.len(): lhs[i as i32] else: 0u32]
-    val staged_right: [u32] = [for i in 0..limit: if i < rhs.len(): rhs[i as i32] else: 0u32]
+    # rt_write_u32s_to_raw writes values.len() words, so only an exact-length
+    # input may skip the padded copy (longer would overrun the staging buffer).
+    val staged_left: [u32] = if lhs.len() == limit: lhs else: [for i in 0..limit: if i < lhs.len(): lhs[i as i32] else: 0u32]
+    val staged_right: [u32] = if rhs.len() == limit: rhs else: [for i in 0..limit: if i < rhs.len(): rhs[i as i32] else: 0u32]
     val byte_count = limit * 4
     val left_ptr = raw_alloc(byte_count)
     val right_ptr = raw_alloc(byte_count)
@@ -253,12 +255,7 @@ fn _row_bitmap_provider_words_owned_v1(session: RowBitmapVectorSessionV1,
     if status == PROVIDER_SESSION_OK and
             invoked.vector_call.call.response.status == SIMPLE_VECTOR_STATUS_OK and
             invoked.vector_call.call.response.bytes_written == byte_count as u64:
-        var provider_words: [u32] = [0u32; limit]
-        var i = 0
-        while i < limit:
-            provider_words[i as i32] = raw_read_i32(output_ptr, i * 4) as u32
-            i = i + 1
-        result_words = provider_words
+        result_words = raw_read_u32s(output_ptr, limit)
         used = true
         reason = "provider-invoked"
     else:

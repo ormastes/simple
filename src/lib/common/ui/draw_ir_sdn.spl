@@ -76,13 +76,14 @@ fn _draw_ir_sdn_byte_slice(source_bytes: [i64], start: i64, end: i64) -> text:
 fn _draw_ir_sdn_field(line: text, key: text) -> text:
     val prefix = "{key}="
     val line_bytes = line.bytes()
+    val line_len = line_bytes.len()
     val prefix_bytes = prefix.bytes()
     var start: i64 = 0
-    while start < line.len():
-        while start < line.len() and line_bytes[start] == 32:
+    while start < line_len:
+        while start < line_len and line_bytes[start] == 32:
             start = start + 1
         var end = start
-        while end < line.len() and line_bytes[end] != 32:
+        while end < line_len and line_bytes[end] != 32:
             end = end + 1
         if _draw_ir_sdn_token_starts_with(line_bytes, start, end, prefix_bytes):
             return _draw_ir_sdn_unescape(_draw_ir_sdn_byte_slice(line_bytes, start + prefix_bytes.len(), end))
@@ -95,6 +96,14 @@ fn _draw_ir_sdn_has_field(line: text, key: text) -> bool:
         if part.starts_with(prefix):
             return true
     false
+
+fn _draw_ir_sdn_field_count(line: text, key: text) -> i64:
+    val prefix = "{key}="
+    var count: i64 = 0
+    for part in line.split(" "):
+        if part.starts_with(prefix):
+            count = count + 1
+    count
 
 fn _draw_ir_sdn_i32(line: text, key: text) -> i32:
     val value = _draw_ir_sdn_field(line, key)
@@ -218,7 +227,7 @@ fn _draw_ir_sdn_f64(line: text, key: text) -> f64:
 fn _draw_ir_sdn_parse_fractional_geometry(line: text) -> DrawIrFractionalGeometry?:
     val present = _draw_ir_sdn_field(line, "fractional_present")
     if present == "" or present == "false":
-        return nil
+        return None
     if present != "true":
         panic("invalid Draw IR fractional presence")
     draw_ir_fractional_geometry(
@@ -234,9 +243,9 @@ fn _draw_ir_sdn_parse_affine(line: text, source_schema: text) -> DrawIrAffine2D?
         if _draw_ir_sdn_has_field(line, "affine_present") or
                 _draw_ir_sdn_has_field(line, "raster_policy"):
             panic("affine Draw IR fields require v4 schema")
-        return nil
+        return None
     if present == "false":
-        return nil
+        return None
     if present != "true":
         panic("invalid v4 affine presence field")
     draw_ir_affine2d(
@@ -265,6 +274,10 @@ fn _draw_ir_sdn_valid_f64_field(line: text, key: text) -> bool:
         (value != 0.0 or not _draw_ir_sdn_decimal_has_nonzero_digit(raw))
 
 fn _draw_ir_sdn_v4_command_error(line: text) -> text:
+    if (_draw_ir_sdn_field_count(line, "fractional_present") > 1 or
+            _draw_ir_sdn_field_count(line, "affine_present") > 1 or
+            _draw_ir_sdn_field_count(line, "raster_policy") > 1):
+        return "v4 state field declared more than once"
     val fractional_present = _draw_ir_sdn_field(line, "fractional_present")
     val affine_present = _draw_ir_sdn_field(line, "affine_present")
     val policy = _draw_ir_sdn_field(line, "raster_policy")
@@ -399,19 +412,19 @@ fn _draw_ir_sdn_emit_command(command: DrawIrCommand, schema: text) -> text:
     parts.push(_draw_ir_sdn_emit_points("", "point", command.points))
     parts.push(_draw_ir_sdn_emit_advances("", command.advance_widths))
     parts.push(_draw_ir_sdn_emit_glyph_run("", command.glyph_run))
-    parts.push(" fractional_present={command.fractional_geometry != nil}")
+    parts.push(" fractional_present={command.fractional_geometry.is_some()}")
     if val fractional = command.fractional_geometry:
         parts.push(" fractional_x={fractional.x} fractional_y={fractional.y} fractional_width={fractional.width} fractional_height={fractional.height}")
     if schema == DRAW_IR_SCHEMA_VERSION_V4:
         if command.raster_policy != DRAW_IR_RASTER_ALIASED_PIXEL_CENTER and command.raster_policy != DRAW_IR_RASTER_COVERAGE_AA:
             panic("invalid v4 raster policy")
-        if command.affine_transform != nil and command.fractional_geometry == nil:
+        if command.affine_transform.is_some() and command.fractional_geometry.is_none():
             panic("v4 affine command requires fractional local geometry")
-        parts.push(" affine_present={command.affine_transform != nil}")
+        parts.push(" affine_present={command.affine_transform.is_some()}")
         if val affine = command.affine_transform:
             parts.push(" affine_a={affine.a} affine_b={affine.b} affine_c={affine.c} affine_d={affine.d} affine_tx={affine.tx} affine_ty={affine.ty}")
         parts.push(" raster_policy={command.raster_policy}")
-    elif command.affine_transform != nil or command.raster_policy != DRAW_IR_RASTER_ALIASED_PIXEL_CENTER:
+    elif command.affine_transform.is_some() or command.raster_policy != DRAW_IR_RASTER_ALIASED_PIXEL_CENTER:
         panic("v4 affine Draw IR command requires v4 composition")
     parts.push(" edge_present={command.edge != nil}")
     if val edge = command.edge:
@@ -456,7 +469,7 @@ fn draw_ir_to_sdn(composition: DrawIrComposition) -> text:
             panic("Draw IR composition/batch schema mismatch")
         if composition.schema == DRAW_IR_SCHEMA_VERSION_V2:
             for command in batch.commands:
-                if command.fractional_geometry != nil:
+                if command.fractional_geometry.is_some():
                     panic("v2 Draw IR cannot encode fractional geometry")
     val batch_count = composition.batches.len()
     var lines: [text] = [""; batch_count + 2]
@@ -497,10 +510,10 @@ fn _draw_ir_sdn_parse_styles(line: text, key: text) -> [DrawIrStyleProp]:
     for part in parts:
         val separator = part.find("=")
         if part.starts_with(prefix) and separator >= 0 and part.substring(0, separator).ends_with("_key"):
-            pending_key = _draw_ir_sdn_unescape(part.substring(separator + 1, part.len()))
+            pending_key = _draw_ir_sdn_unescape(part.substring(separator + 1, part.byte_len()))
             have_key = true
         elif have_key and part.starts_with(prefix) and separator >= 0 and part.substring(0, separator).ends_with("_value"):
-            styles.push(draw_ir_style_prop(pending_key, _draw_ir_sdn_unescape(part.substring(separator + 1, part.len()))))
+            styles.push(draw_ir_style_prop(pending_key, _draw_ir_sdn_unescape(part.substring(separator + 1, part.byte_len()))))
             have_key = false
     if styles.len() != count:
         return []
@@ -518,10 +531,10 @@ fn _draw_ir_sdn_parse_points(line: text, key: text) -> [DrawIrPoint]:
     for part in parts:
         val separator = part.find("=")
         if part.starts_with(prefix) and separator >= 0 and part.substring(0, separator).ends_with("_x"):
-            pending_x = _draw_ir_sdn_parse_i32(part.substring(separator + 1, part.len()))
+            pending_x = _draw_ir_sdn_parse_i32(part.substring(separator + 1, part.byte_len()))
             have_x = true
         elif have_x and part.starts_with(prefix) and separator >= 0 and part.substring(0, separator).ends_with("_y"):
-            points.push(draw_ir_point(pending_x, _draw_ir_sdn_parse_i32(part.substring(separator + 1, part.len()))))
+            points.push(draw_ir_point(pending_x, _draw_ir_sdn_parse_i32(part.substring(separator + 1, part.byte_len()))))
             have_x = false
     if points.len() != count:
         return []
@@ -546,7 +559,7 @@ fn _draw_ir_sdn_parse_glyph_run(line: text) -> DrawIrGlyphRunPayload:
         if separator <= 0:
             continue
         val key = part.substring(0, separator)
-        val value = part.substring(separator + 1, part.len())
+        val value = part.substring(separator + 1, part.byte_len())
         if field == 0 and key == "glyph_{index}_id":
             glyph_ids.push(_draw_ir_sdn_parse_u32(value))
             field = 1
@@ -575,7 +588,7 @@ fn _draw_ir_sdn_parse_advances(line: text) -> [i32]:
             break
         val separator = part.find("=")
         if separator > 0 and part.substring(0, separator) == "advance_{index}":
-            val advance = _draw_ir_sdn_parse_i32(part.substring(separator + 1, part.len()))
+            val advance = _draw_ir_sdn_parse_i32(part.substring(separator + 1, part.byte_len()))
             if advance < 0:
                 return []
             advances.push(advance)

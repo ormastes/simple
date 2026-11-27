@@ -40,6 +40,57 @@ class InterpreterTypeMapper:
         """Create interpreter type mapper."""
         InterpreterTypeMapper()
 
+impl InterpreterTypeMapper:
+    # === Custom Interpreter-specific methods ===
+
+    fn map_function_signature(params: [MirType], ret: MirType) -> text:
+        """
+        Map function signature (for interpreter function declarations).
+
+        Same as map_function, since interpreter doesn't distinguish.
+
+        Returns: "Function<params -> ret>"
+        """
+        self.map_function(params, ret)
+
+    fn is_primitive_value(ty: MirType) -> bool:
+        """
+        Check if type maps to primitive RuntimeValue variant.
+
+        Primitives: Int, Float, Bool, Nil, String
+        Non-primitives: Array, Tuple, Dict, Struct
+        """
+        match ty.kind:
+            case I64 | I32 | I16 | I8 | F64 | F32 | Bool | Unit:
+                true
+            case _:
+                false
+
+    fn runtime_variant_name(ty: MirType) -> text:
+        """
+        Get RuntimeValue variant name for this type.
+
+        Used for error messages and debugging.
+
+        Examples:
+            I64 → "Int"
+            [I64] → "Array"
+            (I64, F64) → "Tuple"
+        """
+        match ty.kind:
+            case I64 | I32 | I16 | I8: "Int"
+            case F64 | F32: "Float"
+            case Bool: "Bool"
+            case Unit: "Nil"
+            case Nil: "Nil"
+            case Struct(_): "Dict"  # Structs are dicts at runtime
+            case Array(_, _): "Array"
+            case Tuple(_): "Tuple"
+            case Ptr(_, _): "Ptr"
+            case Function(_, _): "Function"
+            case Union(_): "Union"
+            case _: "Unknown"
+
 impl TypeMapper for InterpreterTypeMapper:
     fn map_primitive(ty: PrimitiveType) -> text:
         """
@@ -72,9 +123,6 @@ impl TypeMapper for InterpreterTypeMapper:
     fn backend_name() -> text:
         "Interpreter"
 
-impl InterpreterTypeMapper:
-    # === Custom Interpreter-specific methods ===
-
     fn map_type(ty: MirType) -> text:
         """
         Map any MIR type to Interpreter runtime representation.
@@ -102,6 +150,11 @@ impl InterpreterTypeMapper:
                 self.map_primitive(ty.kind)
             case Unit:
                 self.map_primitive(ty.kind)
+            case Nil:
+                # The nil singleton's runtime representation is the tagged nil
+                # word (constant 3); the interpreter's runtime names it "Nil",
+                # the same runtime class Unit has always mapped to.
+                "Nil"
             case Ptr(t_inner, t_mutability):
                 val inner_ty = self.map_type(t_inner)
                 self.map_pointer(inner_ty, t_mutability)
@@ -199,55 +252,6 @@ impl InterpreterTypeMapper:
         val param_types = params.map(self.map_type(_))
         val ret_type = self.map_type(ret)
         "Function<({param_types.join(', ')}) -> {ret_type}>"
-
-    fn map_function_signature(params: [MirType], ret: MirType) -> text:
-        """
-        Map function signature (for interpreter function declarations).
-
-        Same as map_function, since interpreter doesn't distinguish.
-
-        Returns: "Function<params -> ret>"
-        """
-        self.map_function(params, ret)
-
-    fn is_primitive_value(ty: MirType) -> bool:
-        """
-        Check if type maps to primitive RuntimeValue variant.
-
-        Primitives: Int, Float, Bool, Nil, String
-        Non-primitives: Array, Tuple, Dict, Struct
-        """
-        match ty.kind:
-            case I64 | I32 | I16 | I8 | F64 | F32 | Bool | Unit:
-                true
-            case _:
-                false
-
-    fn runtime_variant_name(ty: MirType) -> text:
-        """
-        Get RuntimeValue variant name for this type.
-
-        Used for error messages and debugging.
-
-        Examples:
-            I64 → "Int"
-            [I64] → "Array"
-            (I64, F64) → "Tuple"
-        """
-        match ty.kind:
-            case I64 | I32 | I16 | I8: "Int"
-            case F64 | F32: "Float"
-            case Bool: "Bool"
-            case Unit: "Nil"
-            case Struct(_): "Dict"  # Structs are dicts at runtime
-            case Array(_, _): "Array"
-            case Tuple(_): "Tuple"
-            case Ptr(_, _): "Ptr"
-            case Function(_, _): "Function"
-            case Union(_): "Union"
-            case _: "Unknown"
-
-    # === Size and alignment (not critical for interpreter) ===
 
     fn size_of(ty: MirType) -> i64:
         """

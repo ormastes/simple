@@ -1,6 +1,6 @@
 # web_render_file_gui: window presents small pages but stalls on google.com page
 
-- **Status:** Fixed (CPU busy-spin) + open blockers (renderer degradation, cli_get_args)
+- **Status:** Resolved for the filed symptom (2026-11-25 — busy-spin loop gone; example since rewritten, see final section). Open blockers (renderer degradation, cli_get_args) remain separate, out-of-scope items.
 - **Date:** 2026-07-11
 - **Area:** examples / ui (web_render_file_gui.spl present loop) + web software renderer
 - **Severity:** P2 (live-window lane unusable for real-world pages)
@@ -121,3 +121,23 @@ every ~15 frames keeps the surface alive at ~15% CPU.
 - Trace-vs-untraced timing discrepancy seen during diagnosis (traced render
   >300s vs untraced ~20s on identical work) is attributed to shared-machine load
   during the traced run, not a code path difference.
+
+## Re-verification 2026-11-25 (p2w6-ak lane, release/1.0.0 tip ef77d4bd6ec)
+
+The defect this bug was filed for — the size-independent busy-spin present
+loop (`while running and iters < 2000000` with no sleep) — no longer exists.
+`examples/06_io/ui/web_render_file_gui.spl` has since been rewritten as the
+web-standards showcase entry (verified via `git show HEAD:...` on the tip;
+the path is sparse-excluded in this worktree): it presents the rendered frame
+once, enforces a first-frame budget, and hands off to
+`run_showcase_input(...)`; there is no unbounded poll/re-present loop and no
+`iters` counter anywhere in the file. The 2026-07-11 busy-spin fix therefore
+did not regress — the code it fixed was later replaced wholesale.
+
+The two "Open blockers" above are unchanged in scope and remain separately
+tracked, not closed here: (a) the renderer's wall-clock budget degradation on
+huge minified-CSS pages (plus the `str.ord` interpreter gap on the
+full-budget path), and (b) the GUI-driver `cli_get_args` stub. Both are
+feature-gap items, not the filed present-stall/CPU-burn symptom, and (a)'s
+live-window lane is additionally macOS-GUI-only, unverifiable on this
+Windows host. Marking the filed symptom RESOLVED.

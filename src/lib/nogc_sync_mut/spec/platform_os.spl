@@ -1,0 +1,81 @@
+"""
+# Host-OS `# @platform:` tags — run a spec only on the OS it targets
+
+@tag:stdlib
+@tag:testing
+
+A spec header line `# @platform: <tag>` already selects by execution MODE
+(`interpreter`, `smf`, `native`, `composite`, `host`, `all`, arch names).
+This module adds HOST-OS tags:
+
+| tag | matches host |
+|---|---|
+| `windows` | Windows |
+| `macos` | macOS |
+| `linux` | Linux |
+| `freebsd` | FreeBSD |
+| `unix` | any host that is not Windows |
+
+Rules:
+- One or more OS tags: the spec runs when ANY of them matches the host.
+- No OS tag: OS does not restrict the spec.
+- OS and mode tags mixed: BOTH dimensions must match (OS here, mode in the
+  discovery filter, which ignores OS tags).
+- A mismatch is never silent: the runner records a counted, reasoned
+  platform skip (`PLATFORM SKIP` line + `Platform-skipped:` summary row).
+
+PURE: text in, verdict out. The caller supplies the host name
+(`std.io_runtime.host_os()`), so this module adds no extern.
+"""
+
+val PLATFORM_SKIP_MARKER: text = "PLATFORM SKIP"
+val PLATFORM_SKIP_SUMMARY_MARKER: text = "Platform-skipped:"
+# Prefix of the reason stored in TestFileResult.feature_gated so result
+# consumers can tell a platform skip from a build-feature skip.
+val PLATFORM_SKIP_REASON_PREFIX: text = "platform:"
+
+fn is_os_platform_tag(tag: text) -> bool:
+    """True for tags that select by host OS rather than execution mode."""
+    val t = tag.trim().lower()
+    t == "windows" or t == "macos" or t == "linux" or t == "freebsd" or t == "unix"
+
+fn os_platform_tag_matches(tag: text, host_os: text) -> bool:
+    """Does one OS tag match the host OS name (as returned by host_os())?"""
+    val t = tag.trim().lower()
+    val h = host_os.trim().lower()
+    if t == "unix":
+        return h != "windows" and h != ""
+    t == h
+
+fn platform_os_tags(tags: [text]) -> [text]:
+    """The OS-selecting subset of a file's `@platform` tags."""
+    var out: [text] = []
+    for line_tag in tags:
+        for tag in line_tag.split(","):
+            if is_os_platform_tag(tag):
+                out.push(tag.trim().lower())
+    out
+
+fn platform_os_skip_reason(tags: [text], host_os: text) -> text:
+    """Empty text when the spec may run on this host; otherwise the skip reason."""
+    val os_tags = platform_os_tags(tags)
+    if os_tags.len() == 0:
+        return ""
+    for t in os_tags:
+        if os_platform_tag_matches(t, host_os):
+            return ""
+    val wanted = os_tags.join(",")
+    "{PLATFORM_SKIP_REASON_PREFIX} requires os={wanted}, host={host_os}"
+
+fn platform_skip_line(path: text, reason: text) -> text:
+    "{PLATFORM_SKIP_MARKER} {path} ({reason}; @platform)"
+
+fn platform_skip_summary_line(files: i64) -> text:
+    "{PLATFORM_SKIP_SUMMARY_MARKER} {files} file(s) not run on this host OS (@platform OS tag)"
+
+fn is_platform_skip_reason(reason: text) -> bool:
+    reason.starts_with(PLATFORM_SKIP_REASON_PREFIX)
+
+export PLATFORM_SKIP_MARKER, PLATFORM_SKIP_SUMMARY_MARKER, PLATFORM_SKIP_REASON_PREFIX
+export is_os_platform_tag, os_platform_tag_matches, platform_os_tags, platform_os_skip_reason
+export platform_skip_line, platform_skip_summary_line, is_platform_skip_reason

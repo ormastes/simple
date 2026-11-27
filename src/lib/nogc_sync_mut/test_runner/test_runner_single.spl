@@ -5,7 +5,7 @@
 # import discovery, cache, fork, composite, QEMU, or daemon modules.
 
 use std.sffi.cli_args.{cli_get_args}
-use app.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_run_bounded_spec_child, SIMPLE_TEST_CHILD_ENV_SCRUB_ENV}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
 use std.test_runner.child_cwd.{spec_child_launch_plan, child_cwd_absolute}
 use std.sffi.env.{env_cwd_raw, env_set_cwd_raw}
@@ -14,6 +14,7 @@ use std.io_runtime.{file_exists}
 use std.nogc_sync_mut.io.file_ops.{file_read_text}
 use std.io_runtime.{env_get}
 use std.io_runtime.{env_set}
+use std.io_runtime.{env_remove_process}
 use std.io_runtime.{time_now_unix_micros}
 
 struct ChildRun:
@@ -41,7 +42,14 @@ fn clean_args() -> [text]:
 
 fn parse_child_run(args: [text]) -> ChildRun:
     var path = ""
-    var timeout_secs = 120
+    # 2026-11-05: default raised 120 -> 900, in sync with
+    # CLIENT_DEFAULT_TIMEOUT_SECS (app.test_runner_new.timeout_budget) and the
+    # std TestOptions default in test_runner_args.spl. 120s sat below the honest
+    # runtime of long specs (browser_session_fetch_wasm_chain_spec needs ~590s
+    # under the seed), so the single-file lane killed healthy children
+    # deterministically at the budget with no BDD summary. Bug:
+    # doc/08_tracking/bug/fetch_wasm_chain_spec_runner_premature_child_termination_2026-06-30.md
+    var timeout_secs = 900
     var list_only = false
     var i = 0
     while i < args.len():
@@ -86,7 +94,7 @@ fn file_has_di_test_tag(file_path: text) -> bool:
     val content = file_read_text(file_path)
     content.contains("# @di_test")
 
-fn print_summary(path: text, passed: i64, failed: i64, skipped: i64, pending: i64, duration_ms: i64):
+fn print_file_summary(path: text, passed: i64, failed: i64, skipped: i64, pending: i64, duration_ms: i64):
     print ""
     print "========================================="
     print "Test Summary"
@@ -198,7 +206,15 @@ fn main() -> i64:
     val child_moved = child_dir != "" and env_set_cwd_raw(child_dir)
     val child_binary = if child_moved: child_cwd_absolute(binary, runner_cwd) else: binary
     val child_spec = if child_moved: child_path else: run.path
-    val (stdout, stderr, code) = process_run_bounded(child_binary, ["run", child_spec], timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
+    # The spec child keeps the pinned modes (its engine is chosen at its own
+    # process start) but marks itself so the process facade strips the pins
+    # from the environment of any process its examples spawn. The spawn goes
+    # through process_run_bounded_spec_child so the scrub does not strip the pins from the
+    # spec child itself. See std/nogc_sync_mut/io/process_ops.spl
+    # (SIMPLE_TEST_CHILD_ENV_SCRUB_ENV).
+    val _ = env_set(SIMPLE_TEST_CHILD_ENV_SCRUB_ENV, "1")
+    val (stdout, stderr, code) = process_run_bounded_spec_child(child_binary, ["run", child_spec], timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
+    val _ = env_remove_process(SIMPLE_TEST_CHILD_ENV_SCRUB_ENV)
     if child_moved and not env_set_cwd_raw(runner_cwd):
         print "error: test-runner: cannot restore working directory {runner_cwd}"
         return 1
@@ -224,15 +240,15 @@ fn main() -> i64:
     # Fail closed instead, and always name the reason.
     if output_shows_timeout(stderr, code):
         print "error: test-runner: TIMEOUT after {run.timeout_secs}s (run cut short; verdict withheld)"
-        print_summary(run.path, 0, 1, 0, 0, duration_ms)
+        print_file_summary(run.path, 0, 1, 0, 0, duration_ms)
         return 1
     if bdd_failed < 0:
         print "error: test-runner: no examples executed (no 'N examples, M failures' summary in child output; child exit {code})"
-        print_summary(run.path, 0, 1, 0, 0, duration_ms)
+        print_file_summary(run.path, 0, 1, 0, 0, duration_ms)
         return 1
     if bdd_examples == 0:
         print "error: test-runner: no examples executed (child reported 0 examples)"
-        print_summary(run.path, 0, 1, 0, 0, duration_ms)
+        print_file_summary(run.path, 0, 1, 0, 0, duration_ms)
         return 1
 
     val passed = bdd_passed
@@ -242,7 +258,7 @@ fn main() -> i64:
     if code != 0 and failed == 0:
         print "error: test-runner: child exited {code} after reporting 0 failures"
         failed = 1
-    print_summary(run.path, passed, failed, 0, 0, duration_ms)
+    print_file_summary(run.path, passed, failed, 0, 0, duration_ms)
     if failed == 0:
         return 0
     1

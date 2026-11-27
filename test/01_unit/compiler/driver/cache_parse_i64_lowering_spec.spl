@@ -1,0 +1,49 @@
+# @req REQ-CACHE-PARSE-I64
+# Regression spec: cache & scv callers that inspect `.is_none()` / `== nil` / `!= nil` / `.?`
+# must use `text.parse_i64()` -> `i64?`, because `text.to_i64()` lowers in MIR as raw `i64`.
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_serialization.{serialize_mir_module}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.driver.cache.reverse_reference_receipt.{
+    reverse_reference_receipt_encode_v1,
+    reverse_reference_receipt_decode_v1
+}
+
+fn lower_parse_i64_module(src: text, name: text) -> (text, [text]):
+    val module = parse_full_frontend(src, name + ".spl", name, Logger(level: 0))
+    var hir_owner = HirLowering.with_filename(name + ".spl")
+    val hir = hir_owner.lower_module(module)
+    expect(hir_owner.errors.len()).to_equal(0)
+    var mir_owner = MirLowering.new(hir.symbols)
+    val mir = mir_owner.lower_module(hir)
+    var errs: [text] = []
+    for err in mir_owner.errors:
+        errs = errs.push(err.message)
+    (serialize_mir_module(mir), errs)
+
+describe "cache parse_i64 optional checking":
+    it "lowers .parse_i64() with .is_none(), == nil, .?, and ! in MIR without unresolved method errors":
+        val src = """fn parse_opt_pair(a: text, b: text) -> (i64, i64)?:
+    val pa = a.parse_i64()
+    if pa.is_none() or pa! < 0 or "{pa!}" != a:
+        return None
+    val pb = b.parse_i64()
+    if not pb.? or pb == nil:
+        return None
+    Some((pa!, pb!))
+"""
+        val (mir, errs) = lower_parse_i64_module(src, "parse_i64_probe")
+        expect(errs.len()).to_equal(0)
+        expect(mir).to_contain("rt_string_parse_int")
+
+    it "rejects non-numeric and leading-zero headers in reverse_reference_receipt_decode_v1":
+        val bad_header = "simple-reverse-reference-generation-receipt-v1\nschema=1\nowner=gen0\nroot=root0\ncount=abc\n"
+        val res = reverse_reference_receipt_decode_v1(bad_header)
+        expect(res.valid).to_equal(false)
+        expect(res.reason).to_equal("corrupt-count")

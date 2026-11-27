@@ -1,0 +1,136 @@
+# Source-authored controls; native execution remains NOT_RUN until producer admission.
+use std.spec.*
+use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_error}
+use std.test_runner.test_runner_types.{execution_mode_to_string}
+use std.test_runner.test_executor_parsing.{build_child_args}
+use std.test_runner.native_compile_contract.{native_test_compile_args_with_threads,
+    native_test_library_mode_error, native_test_library_lanes_error, native_test_library_resume_error,
+    native_test_source_roots_identity, native_test_source_identity_v1, native_test_artifact_path_v1}
+use compiler.common.library_mode_policy_v1.{library_mode_policy_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+describe "canonical test library-mode transport":
+    it "preserves the unset command bytes and empty request default":
+        val options = parse_test_args(["test/probe_spec.spl"])
+        expect(options.library_mode).to_equal("")
+        expect(execution_mode_to_string(options.mode)).to_equal("interpreter")
+        expect(build_child_args("test/probe_spec.spl", options)).to_equal(["run", "test/probe_spec.spl"])
+        expect(native_test_compile_args_with_threads("spec.spl", "out.exe", "llvm", 2)).to_equal([
+            "native-build", "--backend", "llvm", "--refresh-source-authority", "--entry-closure",
+            "--entry", "spec.spl", "--runtime-bundle", "core-c-bootstrap", "--threads", "2",
+            "--cache-dir", "out.exe.cache", "--output", "out.exe"])
+
+    it "consumes the two-token mode without adding a positional test path":
+        val args = ["--library-mode", "nogc-sync-mut", "--native-backend", "llvm", "test/probe_spec.spl"]
+        expect(test_args_validation_error(args)).to_equal("")
+        val options = parse_test_args(args)
+        expect(options.library_mode).to_equal("nogc-sync-mut")
+        expect(options.paths).to_equal(["test/probe_spec.spl"])
+        expect(options.gc_off).to_equal(false)
+        expect(options.no_cache).to_equal(true)
+        expect(options.session_daemon).to_equal(false)
+        expect(options.session_share).to_equal(false)
+
+    it "uses the same compiler policy for every accepted semantic token":
+        for mode in ["gc-sync-mut", "gc-sync-immut", "gc-async-mut", "gc-async-immut",
+                     "nogc-sync-mut", "nogc-sync-immut", "nogc-async-mut", "nogc-async-immut", "noalloc-async-mut"]:
+            val args = ["--library-mode=" + mode, "--native-backend=cranelift"]
+            expect(library_mode_policy_v1(mode).is_ok()).to_equal(true)
+            expect(test_args_validation_error(args)).to_equal("")
+            expect(parse_test_args(args).library_mode).to_equal(mode)
+
+    it "forwards one exact token through parallel child and native argv":
+        val options = parse_test_args(["--library-mode=gc-sync-mut", "--native-backend=llvm"])
+        val child = build_child_args("test/probe_spec.spl", options)
+        expect(child).to_equal(["test", "test/probe_spec.spl", "--native-backend=llvm",
+            "--sequential", "--no-cache", "--no-db", "--no-session-daemon", "--assert-ran",
+            "--library-mode", "gc-sync-mut", "--timeout", "120"])
+        expect(test_args_validation_error(child)).to_equal("")
+        val nested = parse_test_args(child)
+        val compile = native_test_compile_args_with_threads("spec.spl", "out.exe", nested.native_backend, 3, [], nested.library_mode)
+        expect(compile).to_equal(["native-build", "--backend", "llvm", "--refresh-source-authority", "--entry-closure",
+            "--library-mode", "gc-sync-mut", "--entry", "spec.spl", "--runtime-bundle", "core-c-bootstrap",
+            "--threads", "3", "--cache-dir", "out.exe.cache", "--output", "out.exe"])
+
+    it "does not leak an earlier NoGC request into later GC or unset requests":
+        val first = parse_test_args(["--native-backend=llvm", "--library-mode=nogc-sync-mut"])
+        val middle = parse_test_args(["--native-backend=llvm", "--library-mode=gc-sync-mut"])
+        val last = parse_test_args(["--native-backend=llvm"])
+        expect(first.library_mode).to_equal("nogc-sync-mut")
+        expect(middle.library_mode).to_equal("gc-sync-mut")
+        expect(last.library_mode).to_equal("")
+        expect(build_child_args("probe.spl", last).contains("--library-mode")).to_equal(false)
+        expect(native_test_compile_args_with_threads("spec.spl", "out.exe", "llvm", 1, [], first.library_mode)[6]).to_equal("nogc-sync-mut")
+        expect(native_test_compile_args_with_threads("spec.spl", "out.exe", "llvm", 1, [], middle.library_mode)[6]).to_equal("gc-sync-mut")
+
+    it "preserves legacy artifact namespace exactly when mode is unset":
+        val producer = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val roots = ["src/compiler", "src/app", "src/lib"]
+        val legacy = "tmp/native-" + sha256_text("probe.spl")[0:16] + "-llvm-0123456789abcdef-" +
+            sha256_text(native_test_source_roots_identity(roots))[0:16] + "-17.exe"
+        expect(native_test_artifact_path_v1("tmp", "probe.spl", "llvm", producer, 17, roots)).to_equal(legacy)
+        expect(native_test_source_identity_v1(roots)).to_equal(native_test_source_roots_identity(roots))
+
+    it "isolates executable and private cache paths under interleaved modes":
+        val producer = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val nogc = native_test_artifact_path_v1("tmp", "probe.spl", "llvm", producer, 17, [], "nogc-sync-mut")
+        val gc = native_test_artifact_path_v1("tmp", "probe.spl", "llvm", producer, 17, [], "gc-sync-mut")
+        val again = native_test_artifact_path_v1("tmp", "probe.spl", "llvm", producer, 17, [], "nogc-sync-mut")
+        expect(nogc == gc).to_equal(false)
+        expect(nogc + ".cache" == gc + ".cache").to_equal(false)
+        expect(again).to_equal(nogc)
+        expect(native_test_source_identity_v1([], "gc-sync-mut") == native_test_source_identity_v1([], "nogc-sync-mut")).to_equal(false)
+
+    it "refuses malformed mode tokens using the canonical compiler diagnostic":
+        for mode in ["nogc", "nogc_sync_mut", "GC-sync-mut", "gc-sync", "../gc-sync-mut"]:
+            val expected = library_mode_policy_v1(mode).unwrap_err()
+            expect(test_args_validation_error(["--native-backend=llvm", "--library-mode=" + mode])).to_equal(expected)
+
+    it "refuses missing and duplicate selections":
+        expect(test_args_validation_error(["--library-mode"])).to_start_with("LIBRARY_MODE_MISSING:")
+        expect(test_args_validation_error(["--library-mode="])).to_start_with("LIBRARY_MODE_MISSING:")
+        expect(test_args_validation_error(["--library-mode=gc-sync-mut", "--library-mode", "nogc-sync-mut"])).to_start_with("LIBRARY_MODE_DUPLICATE:")
+
+    it "refuses implicit interpreter and legacy native SMF routes":
+        expect(test_args_validation_error(["--library-mode=gc-sync-mut"])).to_start_with("TEST_LIBRARY_MODE_ROUTE:")
+        expect(test_args_validation_error(["--library-mode=gc-sync-mut", "--mode=native"])).to_start_with("TEST_LIBRARY_MODE_ROUTE:")
+        expect(test_args_validation_error(["--library-mode=gc-sync-mut", "--compile"])).to_start_with("TEST_LIBRARY_MODE_ROUTE:")
+
+    it "refuses contradictory explicit execution modes in either order":
+        for mode in ["interpreter", "smf", "auto", "compile", "jit"]:
+            expect(test_args_validation_error(["--library-mode=gc-sync-mut", "--native-backend=llvm", "--mode=" + mode])).to_start_with("TEST_LIBRARY_MODE_ROUTE:")
+            expect(test_args_validation_error(["--mode", mode, "--native-backend=llvm", "--library-mode=gc-sync-mut"])).to_start_with("TEST_LIBRARY_MODE_ROUTE:")
+        expect(test_args_validation_error(["--mode=native", "--native-backend=llvm", "--library-mode=gc-sync-mut"])).to_equal("")
+
+    it "retains historical backend precedence without a library mode":
+        expect(test_args_validation_error(["--mode=interpreter", "--native-backend=llvm"])).to_equal("")
+        expect(execution_mode_to_string(parse_test_args(["--mode=interpreter", "--native-backend=llvm"]).mode)).to_equal("native")
+
+    it "refuses unsafe and composite transport routes instead of dropping selection":
+        for option in ["--safe", "--execution-mode=container-seq"]:
+            expect(test_args_validation_error(["--native-backend=llvm", "--library-mode=gc-sync-mut", option])).to_start_with("TEST_LIBRARY_MODE_ROUTE:")
+        expect(native_test_library_mode_error("gc-sync-mut", "llvm", false)).to_start_with("TEST_LIBRARY_MODE_ROUTE:")
+
+    it "refuses unsupported doctest flags and configured lanes only when selected":
+        for option in ["--sdoctest", "--spl-doctest", "--whole"]:
+            expect(test_args_validation_error(["--native-backend=llvm", "--library-mode=gc-sync-mut", option])).to_start_with("TEST_LIBRARY_MODE_ROUTE:")
+        expect(native_test_library_lanes_error("gc-sync-mut", true, false)).to_start_with("TEST_LIBRARY_MODE_ROUTE:")
+        expect(native_test_library_lanes_error("gc-sync-mut", false, true)).to_start_with("TEST_LIBRARY_MODE_ROUTE:")
+        expect(native_test_library_lanes_error("gc-sync-mut", false, false)).to_equal("")
+        expect(native_test_library_lanes_error("", true, true)).to_equal("")
+
+    it "refuses profile-unbound resume totals in both flag orders and spellings":
+        for profile_args in [["--library-mode=gc-sync-mut"], ["--library-mode", "nogc-sync-mut"]]:
+            expect(test_args_validation_error(["--resume", "--native-backend=llvm"] + profile_args)).to_start_with("TEST_LIBRARY_MODE_RESUME:")
+            expect(test_args_validation_error(profile_args + ["--native-backend=llvm", "--resume"])).to_start_with("TEST_LIBRARY_MODE_RESUME:")
+
+    it "checks final effective resume settings while preserving legacy resume":
+        var effective = parse_test_args(["--native-backend=llvm", "--library-mode=gc-sync-mut"])
+        expect(native_test_library_resume_error(effective.library_mode, effective.resume)).to_equal("")
+        # Model a later effective-options merge, independent of raw argv order.
+        effective.resume = true
+        expect(native_test_library_resume_error(effective.library_mode, effective.resume)).to_start_with("TEST_LIBRARY_MODE_RESUME:")
+        effective.library_mode = ""
+        expect(native_test_library_resume_error(effective.library_mode, effective.resume)).to_equal("")
+        expect(test_args_validation_error(["--resume", "--native-backend=llvm"])).to_equal("")
+        expect(parse_test_args(["--resume"]).resume).to_equal(true)

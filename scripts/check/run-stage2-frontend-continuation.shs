@@ -1,0 +1,179 @@
+#!/bin/sh
+# Continue only the missing frontend groups of the reviewed Windows 88f3
+# candidate. Never rebuild it or overwrite its original failed evidence.
+set -eu
+[ "$#" = 7 ] || { echo 'usage: run-stage2-frontend-continuation.shs OWNER_ROOT FROZEN_ROOT PRIOR_STAGE CANDIDATE NEW_RUN_DIRECTORY RUNTIME_AUTHORITY HELLO_WITNESS_DIRECTORY' >&2; exit 64; }
+owner=$1 root=$2 prior=$3 candidate=$4 run=$5 runtime_authority=$6 hello=$7
+for path in "$owner" "$root" "$prior" "$runtime_authority" "$hello"; do
+    [ -d "$path" ] && [ ! -L "$path" ] && [ "$(CDPATH= cd -- "$path" && pwd -P)" = "$path" ] || exit 64
+done
+[ ! -e "$run" ] && [ ! -L "$run" ] || exit 64
+BOOTSTRAP_STAGE3_FACADE_PATH=$owner/scripts/check/lib/bootstrap-stage3-provenance.shs
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$owner/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
+bootstrap_stage3_normalized_absolute "$run" || exit 64
+[ "$(CDPATH= cd -- "${run%/*}" && pwd -P)" = "${run%/*}" ] || exit 64
+case "${run##*/}" in ''|.|..|*[!A-Za-z0-9_.-]*) exit 64 ;; esac
+bootstrap_stage3_sanity_safe_regular "$candidate" || exit 64
+candidate_sha=$(bootstrap_stage3_hash_file "$candidate")
+bootstrap_stage3_verify_frontend_continuation_controls "$prior/stage2-sanity.env" \
+    "$candidate_sha" "$(bootstrap_stage3_canonical_version "$root")" || exit 126
+bootstrap_stage3_frontend_continuation_anchor command "$prior/stage2-command.transcript" || exit 126
+for role in source runtime tool; do
+    case "$role" in source) name=source-inputs-before.txt ;; runtime) name=runtime-admitted.txt ;; tool) name=tool-authority-before.txt ;; esac
+    bootstrap_stage3_frontend_continuation_anchor "$role" "$prior/$name" || exit 126
+done
+owner_sanity_before=$(bootstrap_stage3_hash_file "$bootstrap_stage3_sanity_module")
+owner_runner_before=$(bootstrap_stage3_hash_file "$owner/scripts/check/run-stage2-frontend-continuation.shs")
+owner_frontend_before=$(bootstrap_stage3_hash_file "$owner/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs")
+owner_closure_before=$(bootstrap_stage3_frontend_continuation_owner_identity \
+    "$owner/scripts/check/run-stage2-frontend-continuation.shs" \
+    "$owner/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs")
+bootstrap_stage3_sanity_expect parent_sha256 "$hello/identity.env" "$candidate_sha" || exit 126
+bootstrap_stage3_sanity_expect source "$hello/identity.env" a3ea4530e3ad9347fd8c735b01d27d951d01afc3 || exit 126
+bootstrap_stage3_sanity_expect exit "$hello/owner.exit" 0 || exit 126
+current=$root/build/scv/source-inventory/CURRENT
+bootstrap_stage3_sanity_safe_regular "$current" || exit 126
+current_before=$(bootstrap_stage3_hash_file "$current")
+mkdir "$run"
+chmod 700 "$run"
+cp -p "$prior/stage2-sanity.env" "$run/prior-sanity.env"
+cp -p "$prior/stage2-command.transcript" "$run/stage2-command.transcript"
+for witness in identity.env build.rss.env run.rss.env run.stdout owner.exit; do
+    bootstrap_stage3_sanity_safe_regular "$hello/$witness" || exit 126
+    cp -p "$hello/$witness" "$run/hello-$witness"
+done
+snapshot() {
+    boundary=$1
+    bootstrap_stage3_source_snapshot "$run/source-$boundary.txt" "$root" || {
+        echo "frontend-continuation-error: phase=$boundary role=source failure=snapshot" >&2; return 126;
+    }
+    bootstrap_stage3_directory_snapshot "$run/runtime-$boundary.txt" "$runtime_authority" || {
+        echo "frontend-continuation-error: phase=$boundary role=runtime failure=snapshot" >&2; return 126;
+    }
+    bootstrap_stage3_tool_authority_snapshot "$run/tool-$boundary.txt" "$PATH" "$root" || {
+        echo "frontend-continuation-error: phase=$boundary role=tool failure=snapshot" >&2; return 126;
+    }
+    for role in source runtime tool; do
+        bootstrap_stage3_frontend_continuation_anchor "$role" "$run/$role-$boundary.txt" || {
+            echo "frontend-continuation-error: phase=$boundary role=$role failure=anchor" >&2; return 126;
+        }
+    done
+}
+snapshot before || exit 126
+cd "$root"
+CANDIDATE_FRONTEND_ROOT=$root
+CANDIDATE_FRONTEND_BACKEND=llvm
+CANDIDATE_FRONTEND_BUILD_THREADS=24
+COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-1800}
+COMPILER_SCV_PRIME_TIMEOUT_SECONDS=${COMPILER_SCV_PRIME_TIMEOUT_SECONDS:-1800}
+COMPILER_EXEC_TIMEOUT_SECONDS=${COMPILER_EXEC_TIMEOUT_SECONDS:-30}
+COMPILER_CHECK_KILL_GRACE_SECONDS=5
+CANDIDATE_FRONTEND_MAX_LOG_BYTES=67108864
+# Both groups use the canonical capture owner and the original frozen source's
+# collector. There is no worker/cache/snapshot guard exception.
+candidate_frontend_capture_setup "$run" || exit 126
+fresh=$run/frontend-sanity.env
+frontend_status=0
+bootstrap1_ran=false
+: > "$fresh.frontend-driver.log"
+for mode in 0 1; do
+    [ "$frontend_status" = 0 ] || break
+    [ "$mode" = 0 ] || bootstrap1_ran=true
+    CANDIDATE_FRONTEND_BOOTSTRAP=$mode \
+    CANDIDATE_FRONTEND_LOG_PATH=$run/frontend-sanity.env.frontend-bootstrap-$mode.log \
+    CANDIDATE_FRONTEND_LOG_DISPLAY_PATH=$run/frontend-sanity.env.frontend-bootstrap-$mode.log \
+    CANDIDATE_FRONTEND_STATUS_PATH=$run/frontend-sanity.env.frontend-bootstrap-$mode.status.env \
+        candidate_frontend_pinned_smoke "$candidate" "$fresh.frontend-driver.log" || frontend_status=$?
+done
+snapshot after || exit 126
+owner_closure_after=$(bootstrap_stage3_frontend_continuation_owner_identity \
+    "$owner/scripts/check/run-stage2-frontend-continuation.shs" \
+    "$owner/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs")
+[ "$owner_closure_before" = "$owner_closure_after" ] || {
+    echo 'frontend-continuation-error: phase=after role=owner-closure failure=changed' >&2; exit 126;
+}
+bootstrap_stage3_sanity_safe_regular "$current" || exit 126
+{
+    echo schema=simple-bootstrap-frontend-continuation-context-v1
+    echo context_only=true
+    echo "parent_sha256=$candidate_sha"
+    echo source=a3ea4530e3ad9347fd8c735b01d27d951d01afc3
+    echo "source_inventory_current_before_sha256=$current_before"
+    echo "source_inventory_current_after_sha256=$(bootstrap_stage3_hash_file "$current")"
+    for witness in identity.env build.rss.env run.rss.env run.stdout owner.exit; do
+        echo "hello_${witness}_sha256=$(bootstrap_stage3_hash_file "$run/hello-$witness")"
+    done
+} > "$run/context-witnesses.env"
+[ "$(bootstrap_stage3_hash_file "$candidate")" = "$candidate_sha" ] || exit 126
+# Preserve an explicit terminal failure, but never synthesize a success receipt
+# when either real group failed or stopped before the second group.
+if [ "$frontend_status" != 0 ] || [ "$bootstrap1_ran" != true ]; then
+    printf 'schema=simple-bootstrap-frontend-continuation-failure-v1\nstatus=fail\nraw_status=%s\n' "$frontend_status" > "$run/continuation-failure.env"
+    exit "${frontend_status:-1}"
+fi
+hash() { bootstrap_stage3_hash_file "$1"; }
+{
+    echo schema=simple-bootstrap-sanity-evidence-v1
+    echo status=pass
+    echo base_control_profile=windows-msvc-88f3-retained-controls-v1
+    echo "base_control_snapshot_sha256=$(hash "$run/prior-sanity.env")"
+    for key in version_status version_output version_expected version_expect_status version_match_status \
+        unsupported_status unsupported_output_sha256 unsupported_match_status; do
+        printf '%s=%s\n' "$key" "$(bootstrap_stage3_manifest_value "$key" "$run/prior-sanity.env")"
+    done
+    echo "candidate_sha256_before=$candidate_sha"
+    echo "candidate_sha256_after=$candidate_sha"
+    echo frontend_smoke_status=0
+    echo frontend_smoke_bootstrap_mode_status=0
+    echo frontend_smoke_bootstrap1_ran=true
+    echo frontend_smoke_backend=llvm
+    echo sha_stable_status=0
+    echo checks_run=5
+    for mode in 0 1; do
+        log=$fresh.frontend-bootstrap-$mode.log
+        status=$fresh.frontend-bootstrap-$mode.status.env
+        echo "frontend_smoke_bootstrap${mode}_raw_status=$(bootstrap_stage3_manifest_value raw_status "$status")"
+        echo "frontend_smoke_bootstrap${mode}_log_path=$log"
+        echo "frontend_smoke_bootstrap${mode}_log_sha256=$(hash "$log")"
+        echo "frontend_smoke_bootstrap${mode}_status_path=$status"
+        echo "frontend_smoke_bootstrap${mode}_status_sha256=$(hash "$status")"
+    done
+    echo "frontend_smoke_output_sha256=$(hash "$fresh.frontend-driver.log")"
+    echo "frontend_smoke_driver_log_path=$fresh.frontend-driver.log"
+    echo "frontend_smoke_driver_log_sha256=$(hash "$fresh.frontend-driver.log")"
+} > "$fresh"
+# Full artifact and execution verification precedes publication of the new
+# composition. The ordinary reader refuses the fresh reused-controls record.
+_bootstrap_stage3_verify_sanity_evidence_receipt_legacy "$fresh" "$fresh" "$run" "$candidate" "$root" || exit 126
+composition=$run/continuation.env
+{
+    echo schema=simple-bootstrap-sanity-frontend-continuation-v1
+    echo profile=windows-msvc-88f3-frontend-continuation-v1
+    echo status=pass
+    echo retained_checks=3
+    echo remaining_checks=2
+    echo checks_run=5
+    echo "candidate_sha256=$candidate_sha"
+    echo "owner_sanity_sha256=$owner_sanity_before"
+    echo "owner_runner_sha256=$owner_runner_before"
+    echo "owner_frontend_sha256=$owner_frontend_before"
+    echo "owner_closure_sha256_before=$owner_closure_before"
+    echo "owner_closure_sha256_after=$owner_closure_after"
+    echo "prior-sanity_sha256=$(hash "$run/prior-sanity.env")"
+    echo "frontend-sanity_sha256=$(hash "$fresh")"
+    echo "context_witness_sha256=$(hash "$run/context-witnesses.env")"
+    echo build_args_sha256=275c002e1098f522475501ed440ed705ffab499727c1e33ddab863f2c88de317
+    for boundary in before after; do
+        for role in source runtime tool; do
+            echo "${role}_snapshot_sha256_${boundary}=$(hash "$run/$role-$boundary.txt")"
+        done
+    done
+} > "$run/.continuation.tmp"
+bootstrap_stage3_verify_sanity_evidence_receipt "$run/.continuation.tmp" "$composition" "$run" "$candidate" "$root" || exit 126
+# Exclusive, immutable successor; original failure stays in its original owner.
+ln "$run/.continuation.tmp" "$composition"
+rm "$run/.continuation.tmp"
+chmod 400 "$composition" "$fresh" "$run/prior-sanity.env" "$run/stage2-command.transcript"
+echo "frontend-continuation: sanity-only PASS; receiver/admission/publication remain separate mandatory gates: $composition"

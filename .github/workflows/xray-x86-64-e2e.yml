@@ -1,0 +1,89 @@
+name: XRay x86-64 In-Process E2E
+
+# Manual lane: executes patched x86-64 XRay sleds on a real x86-64 Linux
+# runner (no PR trigger; dispatch with `gh workflow run xray-x86-64-e2e.yml
+# --ref <branch>`). Builds the Rust seed on the runner (the check needs an
+# x86-64 Simple binary), then runs
+# scripts/check/check-xray-native-x86-64-inprocess-e2e.shs.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  xray-x86-64-inprocess-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install clang, lld and LLVM tools (never GCC for the link)
+        run: |
+          sudo -n apt-get update
+          sudo -n apt-get install -y clang lld llvm
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/compiler_rust/target
+          key: seed-linux-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          restore-keys: |
+            seed-linux-
+
+      - name: Invalidate stale workspace-crate fingerprints
+        shell: bash
+        run: |
+          find src/compiler_rust -maxdepth 3 \( -name lib.rs -o -name main.rs \) \
+            -not -path "*/vendor/*" -exec touch {} +
+
+      - name: Build seed
+        working-directory: src/compiler_rust
+        env:
+          # Repo rule: clang + lld, never GCC (cargo would link with `cc`).
+          # A wrapper, not RUSTFLAGS, so .cargo/config.toml's rustflags stay.
+          CC: clang
+          CXX: clang++
+        run: |
+          printf '#!/bin/sh\nexec clang -fuse-ld=lld "$@"\n' > "$RUNNER_TEMP/clang-lld"
+          chmod +x "$RUNNER_TEMP/clang-lld"
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$RUNNER_TEMP/clang-lld" \
+            cargo +nightly build --profile bootstrap -p simple-driver
+
+      - name: Host identity
+        run: |
+          uname -a
+          grep -m1 'model name' /proc/cpuinfo
+          src/compiler_rust/target/bootstrap/simple --version
+          readelf -p .comment src/compiler_rust/target/bootstrap/simple | grep -iE 'lld|clang|gcc' | head -5
+          clang --version | head -1
+
+      - name: XRay x86-64 in-process e2e
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/xr"
+          set +e
+          TMPDIR="$RUNNER_TEMP/xr" sh scripts/check/check-xray-native-x86-64-inprocess-e2e.shs \
+            --simple "$GITHUB_WORKSPACE/src/compiler_rust/target/bootstrap/simple" --keep \
+            > "$RUNNER_TEMP/xr/check.log" 2>&1
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/xr/check.log"
+          for f in "$RUNNER_TEMP"/xr/*/host.e2e; do [ -f "$f" ] && cat "$f"; done
+          exit $rc
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xray-x86-64-inprocess-e2e-${{ github.sha }}
+          path: ${{ runner.temp }}/xr
+          if-no-files-found: warn
+          retention-days: 14

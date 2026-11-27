@@ -2,15 +2,20 @@
 
 use std.cli.cli_util.{get_cli_args}
 use std.test_runner.test_db_compat.{RunnerTestDb, load_test_db_compat}
+use std.database.test_extended.{TestDurationMs, TestTimingOutcome}
 use std.common.perf.execution_metrics.{
     ApprovedBaseline, AnomalyPolicy, BaselineState, DecisionStatus,
     compare_approved_baseline, decision_status_name
 }
+use app.perf.static_complexity_cli.{
+    is_static_complexity_compare_args, run_static_complexity_compare_cli
+}
 
 fn _usage() -> i64:
-    print "Usage: simple perf <record|compare|explain|baseline promote> ..."
+    print "Usage: simple perf <record|compare|static-compare|explain|baseline promote> ..."
     print "  record <test-path> <cohort-id> <duration-ms>"
     print "  compare <test-path> <cohort-id> <candidate-ms> [--confirmed]"
+    print "  compare --baseline <baseline-file> --current <current-file> [--format sdn|json|text]"
     print "  explain <test-path>"
     print "  baseline promote <test-path> <cohort-id>"
     2
@@ -31,7 +36,7 @@ fn _samples(encoded: text) -> [f64]?:
         if item.trim() != "":
             match item.trim().parse_float():
                 case Some(value): values.push(value)
-                case nil: return nil
+                case None: return nil
     Some(values)
 
 fn _positive_ms(raw: text) -> f64?:
@@ -39,7 +44,7 @@ fn _positive_ms(raw: text) -> f64?:
         case Some(value):
             if value > 0.0: Some(value)
             else: nil
-        case nil: nil
+        case None: nil
 
 fn _default_policy() -> AnomalyPolicy:
     AnomalyPolicy(
@@ -58,7 +63,7 @@ fn _record(args: [text]) -> i64:
         return _usage()
     val duration_ms = match _positive_ms(args[2]):
         case Some(value): value
-        case nil:
+        case None:
             print "perf-error: subject, cohort, and positive duration are required"
             return 2
     if args[0].trim() == "" or args[1].trim() == "":
@@ -66,8 +71,8 @@ fn _record(args: [text]) -> i64:
         return 2
     var db = match _load_db():
         case Some(value): value
-        case nil: return 2
-    if not db.record_timing_observation(args[0], args[1], duration_ms):
+        case None: return 2
+    if db.record_timing_observation(args[0], args[1], TestDurationMs(value: duration_ms)) == TestTimingOutcome.Refused:
         print "perf-error: stable test subject not found: {args[0]}"
         return 2
     match db.save():
@@ -83,17 +88,17 @@ fn _explain(args: [text]) -> i64:
         return _usage()
     val db = match _load_db():
         case Some(value): value
-        case nil: return 2
+        case None: return 2
     match db.timing_summary_for_test(args[0]):
         case Some(summary):
             print "subject={args[0]}"
             print "baseline_state={summary.baseline_state}"
-            print "baseline_generation={summary.baseline_generation}"
+            print "baseline_generation={summary.baseline_generation.value}"
             print "baseline_cohort_id={summary.baseline_cohort_id}"
             print "baseline_samples={summary.baseline_samples}"
-            print "provisional_p50={summary.provisional_p50}"
+            print "provisional_p50={summary.provisional_p50.value}"
             0
-        case nil:
+        case None:
             print "perf-error: timing subject not found: {args[0]}"
             2
 
@@ -102,7 +107,7 @@ fn _compare(args: [text]) -> i64:
         return _usage()
     val candidate_ms = match _positive_ms(args[2]):
         case Some(value): value
-        case nil:
+        case None:
             print "perf-error: subject, cohort, and positive candidate duration are required"
             return 2
     if args[0].trim() == "" or args[1].trim() == "":
@@ -110,22 +115,22 @@ fn _compare(args: [text]) -> i64:
         return 2
     val db = match _load_db():
         case Some(value): value
-        case nil: return 2
+        case None: return 2
     val summary = match db.timing_summary_for_test(args[0]):
         case Some(value): value
-        case nil:
+        case None:
             print "perf-incomplete: timing subject not found"
             return 2
     val baseline_samples = match _samples(summary.baseline_samples):
         case Some(values): values
-        case nil:
+        case None:
             print "perf-error: malformed baseline samples for {args[0]}"
             return 2
     val baseline = ApprovedBaseline(
         cohort_id: summary.baseline_cohort_id,
         state: _baseline_state(summary.baseline_state),
         samples: baseline_samples,
-        generation: summary.baseline_generation)
+        generation: summary.baseline_generation.value)
     val decision = compare_approved_baseline(
         baseline, [candidate_ms], args[1], args.contains("--confirmed"), _default_policy())
     print "status={decision_status_name(decision.status)}"
@@ -144,8 +149,8 @@ fn _promote(args: [text]) -> i64:
         return 2
     var db = match _load_db():
         case Some(value): value
-        case nil: return 2
-    if not db.promote_timing_baseline(args[0], args[1]):
+        case None: return 2
+    if db.promote_timing_baseline(args[0], args[1]) == TestTimingOutcome.Refused:
         print "perf-error: no provisional timing samples for {args[0]}"
         return 2
     match db.save():
@@ -162,7 +167,11 @@ fn run_perf_cli(args: [text]) -> i64:
     if args[0] == "record":
         return _record(args[1:])
     if args[0] == "compare":
+        if is_static_complexity_compare_args(args[1:]):
+            return run_static_complexity_compare_cli(args[1:])
         return _compare(args[1:])
+    if args[0] == "static-compare":
+        return run_static_complexity_compare_cli(args[1:])
     if args[0] == "explain":
         return _explain(args[1:])
     if args[0] == "baseline" and args.len() > 1 and args[1] == "promote":

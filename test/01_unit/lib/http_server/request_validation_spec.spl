@@ -9,7 +9,56 @@
 # Tests for request path validation and URI safety checks.
 # Validates rejection of path traversal, null bytes, and overly long URIs.
 
-use std.http_server.request_validation.{validate_request_path, validate_uri_length, default_max_uri_length}
+use std.http_server.request_validation.{request_validation_handler, contains_null_byte, MAX_URI_SIZE}
+use std.http_server.types.{HttpRequestData, ServerConfig, PhaseResult}
+
+# Helpers: drive the real Read-phase handler. rejection_status is 0 when the
+# request is accepted, otherwise the rejection status code.
+fn _rv_server_config() -> ServerConfig:
+    ServerConfig(
+        listen_addr: "0.0.0.0:8080",
+        worker_count: 1,
+        max_connections: 100,
+        keepalive_timeout_ms: 65000,
+        read_timeout_ms: 60000,
+        write_timeout_ms: 60000,
+        idle_timeout_ms: 120000,
+        client_max_body_size: 1048576,
+        server_name: "TestServer",
+        locations: [],
+        upstreams: [],
+        access_log: "",
+        error_log: "",
+        tls_enabled: false,
+        tls_cert_path: "",
+        tls_key_path: "",
+        tls_min_version: "1.2",
+        drain_timeout_ms: 30000
+    )
+
+fn _rv_status(path: text, query: text) -> i64:
+    val request = HttpRequestData(
+        method: "GET",
+        path: path,
+        query: query,
+        version: "HTTP/1.1",
+        headers: [],
+        body: "",
+        params: {},
+        peer_addr: "127.0.0.1:1234"
+    )
+    match request_validation_handler(request, _rv_server_config()):
+        case PhaseResult.Error(code, _): code
+        case _: 0
+
+fn rejection_status(path: text) -> i64:
+    _rv_status(path, "")
+
+fn path_accepted(path: text) -> bool:
+    _rv_status(path, "") == 0
+
+fn uri_accepted(path: text, query: text) -> bool:
+    _rv_status(path, query) == 0
 
 # ============================================================================
 # Test Group 1: Path traversal detection

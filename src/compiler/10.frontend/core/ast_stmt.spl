@@ -60,6 +60,7 @@ var stmt_if_val_marker: [bool] = []
 var stmt_count_slot: [i64] = [0]
 var stmt_mode_ready: bool = false
 var stmt_env_mirror_cached: bool = false
+var stmt_trace_tags_cached: bool = false
 
 # High-water mark of the largest stmt index ever mirrored into the environment
 # since the last stmt_reset(). stmt_count_set(0) inside stmt_reset() would
@@ -127,9 +128,18 @@ fn stmt_env_mirror_enabled() -> bool:
     # compatibility mirror while compiled Stage4 uses the cached fast path.
     (env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_nullable("SIMPLE_NATIVE_ARENA_DECLS") ?? "") != "1"
 
+fn stmt_trace_tags_enabled() -> bool:
+    if stmt_mode_ready:
+        if not stmt_trace_tags_cached:
+            return false
+        return not frontend_trace_suppressed()
+    ((env_get_nullable("SIMPLE_TRACE_STMT_TAGS") ?? "") != "" and
+     not frontend_trace_suppressed())
+
 fn stmt_mode_slots_refresh():
     val native_arena = (env_get_nullable("SIMPLE_NATIVE_ARENA_DECLS") ?? "") == "1"
     stmt_env_mirror_cached = (env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1" and not native_arena
+    stmt_trace_tags_cached = (env_get_nullable("SIMPLE_TRACE_STMT_TAGS") ?? "") != ""
     stmt_mode_ready = true
 
 fn stmt_count_slot_ensure():
@@ -220,6 +230,12 @@ fn stmt_body_store(idx: i64, values: [i64]):
     stmt_body_offsets[idx] = offset
     stmt_body_counts[idx] = values.len()
 
+fn stmt_body_store_one(idx: i64, item: i64):
+    val offset = stmt_body_flat.len()
+    stmt_body_flat.push(item)
+    stmt_body_offsets[idx] = offset
+    stmt_body_counts[idx] = 1
+
 fn stmt_count() -> i64:
     val env_count = stmt_count_env()
     if env_count > 0:
@@ -234,45 +250,58 @@ fn stmt_reset():
     stmt_env_mirror_clear()
     if stmt_tag == nil:
         stmt_tag = []
+    else:
+        stmt_tag.clear()
     if stmt_span == nil:
         stmt_span = []
+    else:
+        stmt_span.clear()
     if stmt_expr == nil:
         stmt_expr = []
+    else:
+        stmt_expr.clear()
     if stmt_name == nil:
         stmt_name = []
+    else:
+        stmt_name.clear()
     if stmt_type_tag == nil:
         stmt_type_tag = []
+    else:
+        stmt_type_tag.clear()
     if stmt_body == nil:
         stmt_body = []
+    else:
+        stmt_body.clear()
     if stmt_body_offsets == nil:
         stmt_body_offsets = []
+    else:
+        stmt_body_offsets.clear()
     if stmt_body_counts == nil:
         stmt_body_counts = []
+    else:
+        stmt_body_counts.clear()
     if stmt_body_flat == nil:
         stmt_body_flat = []
+    else:
+        stmt_body_flat.clear()
     if stmt_if_single_else == nil:
         stmt_if_single_else = []
+    else:
+        stmt_if_single_else.clear()
     if stmt_empty_i64 == nil:
         stmt_empty_i64 = []
     if stmt_if_val_marker == nil:
         stmt_if_val_marker = []
+    else:
+        stmt_if_val_marker.clear()
     if stmt_gpu_grid_exprs == nil:
         stmt_gpu_grid_exprs = []
+    else:
+        stmt_gpu_grid_exprs.clear()
     if stmt_gpu_block_exprs == nil:
         stmt_gpu_block_exprs = []
-    stmt_tag.clear()
-    stmt_span.clear()
-    stmt_expr.clear()
-    stmt_name.clear()
-    stmt_type_tag.clear()
-    stmt_body.clear()
-    stmt_body_offsets.clear()
-    stmt_body_counts.clear()
-    stmt_body_flat.clear()
-    stmt_if_single_else.clear()
-    stmt_if_val_marker.clear()
-    stmt_gpu_grid_exprs.clear()
-    stmt_gpu_block_exprs.clear()
+    else:
+        stmt_gpu_block_exprs.clear()
     stmt_count_set(0)
 
 fn stmt_alloc(tag: i64, span_id: i64) -> i64:
@@ -283,21 +312,21 @@ fn stmt_alloc(tag: i64, span_id: i64) -> i64:
     stmt_expr.push(-1)
     stmt_name.push("")
     stmt_type_tag.push(0)
-    stmt_body.push(stmt_empty_i64)
+    # `stmt_body` pool slot is retained at length 0 for .spab dump-ordinal
+    # compatibility; all statement bodies live in `stmt_body_flat` + offsets/counts.
     stmt_body_offsets.push(stmt_body_flat.len())
     stmt_body_counts.push(0)
     stmt_if_single_else.push(-1)
     stmt_if_val_marker.push(false)
-    stmt_i64_set(idx, "TAG", tag)
-    stmt_i64_set(idx, "SPAN", span_id)
-    stmt_i64_set(idx, "EXPR", -1)
-    stmt_text_set(idx, "NAME", "")
-    stmt_i64_set(idx, "TYPE", 0)
-    stmt_list_set(idx, "BODY", [])
-    stmt_i64_set(idx, "IF_ELSE_SINGLE", -1)
-    val trace_stmt_tags = env_get_nullable("SIMPLE_TRACE_STMT_TAGS") ?? ""
-    if (trace_stmt_tags != "" and not frontend_trace_suppressed() and
-        (idx < 8 or tag <= 0)):
+    if stmt_env_mirror_enabled():
+        stmt_i64_set(idx, "TAG", tag)
+        stmt_i64_set(idx, "SPAN", span_id)
+        stmt_i64_set(idx, "EXPR", -1)
+        stmt_text_set(idx, "NAME", "")
+        stmt_i64_set(idx, "TYPE", 0)
+        stmt_text_set(idx, "BODY", "")
+        stmt_i64_set(idx, "IF_ELSE_SINGLE", -1)
+    if stmt_trace_tags_enabled() and (idx < 8 or tag <= 0):
         print "[stmt_alloc] idx={idx} tag={tag} span={span_id}"
     idx
 
@@ -334,7 +363,7 @@ fn stmt_if_val_decl(name: text, init_expr: i64, span_id: i64) -> i64:
     stmt_i64_set(idx, "IF_VAL", 1)
     idx
 
-fn stmt_is_if_val_decl(idx: i64) -> bool:
+pub fn stmt_is_if_val_decl(idx: i64) -> bool:
     idx >= 0 and idx < stmt_if_val_marker.len() and stmt_if_val_marker[idx]
 
 fn stmt_lazy_val_decl(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
@@ -361,10 +390,8 @@ fn stmt_assign_stmt(target_expr: i64, value_expr: i64, span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_ASSIGN, span_id)
     stmt_expr[idx] = target_expr
     stmt_i64_set(idx, "EXPR", target_expr)
-    var body: [i64] = []
-    body.push(value_expr)
-    stmt_body_store(idx, body)
-    stmt_list_set(idx, "BODY", body)
+    stmt_body_store_one(idx, value_expr)
+    stmt_i64_set(idx, "BODY", value_expr)
     idx
 
 fn stmt_return_stmt(value_expr: i64, span_id: i64) -> i64:
@@ -481,10 +508,8 @@ fn stmt_compound_assign_stmt(op: i64, target_expr: i64, value_expr: i64, span_id
     stmt_i64_set(idx, "EXPR", target_expr)
     stmt_type_tag[idx] = op
     stmt_i64_set(idx, "TYPE", op)
-    var body: [i64] = []
-    body.push(value_expr)
-    stmt_body_store(idx, body)
-    stmt_list_set(idx, "BODY", body)
+    stmt_body_store_one(idx, value_expr)
+    stmt_i64_set(idx, "BODY", value_expr)
     idx
 
 fn stmt_defer_stmt(deferred_expr: i64, span_id: i64) -> i64:
@@ -524,10 +549,8 @@ fn stmt_labeled_loop(label: text, inner_stmt: i64, span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_LABELED_LOOP, span_id)
     stmt_name[idx] = label
     stmt_text_set(idx, "NAME", label)
-    var body: [i64] = []
-    body.push(inner_stmt)
-    stmt_body_store(idx, body)
-    stmt_list_set(idx, "BODY", body)
+    stmt_body_store_one(idx, inner_stmt)
+    stmt_i64_set(idx, "BODY", inner_stmt)
     idx
 
 # GPU launch dimension storage (parallel to stmt arrays)
@@ -558,12 +581,12 @@ fn stmt_contract_clause(tag: i64, binding: text, clause_stmts: [i64], span_id: i
 # These two already band the upper bound but not the lower one: `idx = -1`, the
 # very sentinel `stmt_get_tag`/`decl_get` return for a stale index, passed the
 # `idx < len` test and indexed the array negatively.
-fn stmt_get_gpu_grid(idx: i64) -> [i64]:
+pub fn stmt_get_gpu_grid(idx: i64) -> [i64]:
     if idx >= 0 and idx < stmt_gpu_grid_exprs.len():
         return stmt_gpu_grid_exprs[idx]
     []
 
-fn stmt_get_gpu_block(idx: i64) -> [i64]:
+pub fn stmt_get_gpu_block(idx: i64) -> [i64]:
     if idx >= 0 and idx < stmt_gpu_block_exprs.len():
         return stmt_gpu_block_exprs[idx]
     []
@@ -641,7 +664,7 @@ fn stmt_oob_trace(accessor: text, idx: i64, arena_len: i64):
 fn stmt_idx_is_live(idx: i64, arena_len: i64) -> bool:
     idx >= 0 and idx < arena_len
 
-fn stmt_get_span(idx: i64) -> i64:
+pub fn stmt_get_span(idx: i64) -> i64:
     if not stmt_idx_is_live(idx, stmt_span.len()):
         stmt_oob_trace("stmt_get_span", idx, stmt_span.len())
         return -1
@@ -652,6 +675,25 @@ fn stmt_get_expr(idx: i64) -> i64:
         stmt_oob_trace("stmt_get_expr", idx, stmt_expr.len())
         return -1
     stmt_expr[idx]
+
+# Owner write path (ParseContext stage 2): a cross-module `stmt_expr[i] = v`
+# mutates a copy in the seed and is silently dropped.
+fn stmt_set_expr(idx: i64, value: i64):
+    if not stmt_idx_is_live(idx, stmt_expr.len()):
+        stmt_oob_trace("stmt_set_expr", idx, stmt_expr.len())
+        return
+    stmt_expr[idx] = value
+
+# Mutate a statement tag through its owner arena (cross-module array writes
+# mutate copies in interpreter mode). Used by statement-level desugar passes.
+pub fn stmt_set_tag(idx: i64, tag: i64):
+    if not stmt_idx_is_live(idx, stmt_tag.len()):
+        stmt_oob_trace("stmt_set_tag", idx, stmt_tag.len())
+        return
+    stmt_tag[idx] = tag
+
+fn stmt_owner_len() -> i64:
+    stmt_tag.len()
 
 fn stmt_get_name(idx: i64) -> text:
     if not stmt_idx_is_live(idx, stmt_name.len()):
@@ -665,7 +707,7 @@ fn stmt_get_type(idx: i64) -> i64:
         return -1
     stmt_type_tag[idx]
 
-fn stmt_get_if_single_else(idx: i64) -> i64:
+pub fn stmt_get_if_single_else(idx: i64) -> i64:
     if idx < 0 or idx >= stmt_if_single_else.len():
         return -1
     stmt_if_single_else[idx]
@@ -693,10 +735,11 @@ export STMT_LABELED_LOOP, STMT_STATIC_FOR, STMT_COMPTIME, STMT_RECEIVE, STMT_BIN
 export STMT_LAZY_VAL_DECL, STMT_GPU_LAUNCH
 export STMT_CONTRACT_IN, STMT_CONTRACT_INVARIANT, STMT_CONTRACT_OUT
 export STMT_CONTRACT_OUT_ERR, STMT_CONTRACT_DECREASES, STMT_CONTRACT_PROOF_USES
-export stmt_tag, stmt_span, stmt_expr, stmt_name, stmt_type_tag, stmt_body, stmt_count
+export stmt_count, stmt_set_expr, stmt_set_tag, stmt_owner_len
 export stmt_parse_i64, stmt_i64_list_join, stmt_i64_list_split
 export stmt_count_env, stmt_count_set, stmt_key
 export stmt_i64_set, stmt_text_set, stmt_list_set
+export stmt_body_store, stmt_body_store_one
 export stmt_reset, stmt_alloc
 export stmt_contract_clause
 
@@ -725,6 +768,7 @@ pub fn flat_stmt_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_i64(stmt_body_offsets))
     parts = parts.push(flat_pool_enc_i64(stmt_count_slot))
     parts = parts.push(flat_pool_enc_i64(stmt_empty_i64))
+    flat_pool_type_trace_clear_next_v1()
     parts = parts.push(flat_pool_enc_i64(stmt_env_mirror_high_slot))
     parts = parts.push(flat_pool_enc_i64(stmt_expr))
     parts = parts.push(flat_pool_enc_i64_list(stmt_gpu_block_exprs))
@@ -758,6 +802,87 @@ pub fn flat_stmt_pools_restore(r: FlatPoolReader) -> bool:
     stmt_type_tag = flat_pool_dec_i64_into(stmt_type_tag, r)
     r.ok
 
-export flat_stmt_pools_dump, flat_stmt_pools_restore
+# Live line chunks of this family's CLEAR pools, in dump order, for the
+# packed-blob line adapter (flat_pool_packed_v1.spl): process-local values are
+# never read back from a blob.
+pub fn flat_stmt_pools_clear_chunks_v1() -> [text]:
+    [ flat_pool_enc_i64(stmt_env_mirror_high_slot)]
+
+export flat_stmt_pools_dump, flat_stmt_pools_restore, flat_stmt_pools_clear_chunks_v1
 
 export STMT_USE_IMPORT, stmt_use_import
+
+# ===== StmtStoreState snapshot (ParseContext stage 1) =====
+# See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
+# take moves this file's parse state out and installs fresh initial
+# owners; install makes a taken snapshot active again.
+pub struct StmtStoreState:
+    stmt_env_mirror_high_slot: [i64]
+    stmt_tag: [i64]
+    stmt_span: [i64]
+    stmt_expr: [i64]
+    stmt_name: [text]
+    stmt_type_tag: [i64]
+    stmt_body: [[i64]]
+    stmt_body_offsets: [i64]
+    stmt_body_counts: [i64]
+    stmt_body_flat: [i64]
+    stmt_if_single_else: [i64]
+    stmt_if_val_marker: [bool]
+    stmt_count_slot: [i64]
+    stmt_gpu_grid_exprs: [[i64]]
+    stmt_gpu_block_exprs: [[i64]]
+
+pub fn stmt_store_state_take() -> StmtStoreState:
+    val s = StmtStoreState(
+        stmt_env_mirror_high_slot: stmt_env_mirror_high_slot,
+        stmt_tag: stmt_tag,
+        stmt_span: stmt_span,
+        stmt_expr: stmt_expr,
+        stmt_name: stmt_name,
+        stmt_type_tag: stmt_type_tag,
+        stmt_body: stmt_body,
+        stmt_body_offsets: stmt_body_offsets,
+        stmt_body_counts: stmt_body_counts,
+        stmt_body_flat: stmt_body_flat,
+        stmt_if_single_else: stmt_if_single_else,
+        stmt_if_val_marker: stmt_if_val_marker,
+        stmt_count_slot: stmt_count_slot,
+        stmt_gpu_grid_exprs: stmt_gpu_grid_exprs,
+        stmt_gpu_block_exprs: stmt_gpu_block_exprs
+    )
+    stmt_tag = []
+    stmt_span = []
+    stmt_expr = []
+    stmt_name = []
+    stmt_type_tag = []
+    stmt_body = []
+    stmt_body_offsets = []
+    stmt_body_counts = []
+    stmt_body_flat = []
+    stmt_if_single_else = []
+    stmt_if_val_marker = []
+    stmt_count_slot = [0]
+    stmt_gpu_grid_exprs = []
+    stmt_gpu_block_exprs = []
+    stmt_env_mirror_high_slot = [0]
+    s
+
+pub fn stmt_store_state_install(s: StmtStoreState):
+    stmt_env_mirror_high_slot = s.stmt_env_mirror_high_slot
+    stmt_tag = s.stmt_tag
+    stmt_span = s.stmt_span
+    stmt_expr = s.stmt_expr
+    stmt_name = s.stmt_name
+    stmt_type_tag = s.stmt_type_tag
+    stmt_body = s.stmt_body
+    stmt_body_offsets = s.stmt_body_offsets
+    stmt_body_counts = s.stmt_body_counts
+    stmt_body_flat = s.stmt_body_flat
+    stmt_if_single_else = s.stmt_if_single_else
+    stmt_if_val_marker = s.stmt_if_val_marker
+    stmt_count_slot = s.stmt_count_slot
+    stmt_gpu_grid_exprs = s.stmt_gpu_grid_exprs
+    stmt_gpu_block_exprs = s.stmt_gpu_block_exprs
+
+export StmtStoreState, stmt_store_state_take, stmt_store_state_install

@@ -1,4 +1,3 @@
-# @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
 use compiler.traits.trait_impl.{ImplBlock}
 use compiler.hir.hir_types.{SymbolKind, HirTypeKind}
 # Method Resolver Lookup Helpers
@@ -9,6 +8,26 @@ use compiler.hir.hir_types.{SymbolKind, HirTypeKind}
 use compiler.hir.hir.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.semantics.resolve.{MethodResolver}
+
+fn _inferred_int_literal_type(suffix: text?, span: Span) -> HirType:
+    """Infer integer literal type from an optional width/sign suffix."""
+    var bits = 64
+    var signed = true
+    if val s = suffix:
+        if s.starts_with("u"):
+            signed = false
+        if s == "i8" or s == "u8": bits = 8
+        elif s == "i16" or s == "u16": bits = 16
+        elif s == "i32" or s == "u32": bits = 32
+    HirType(kind: HirTypeKind.Int(bits, signed), span: span)
+
+fn _inferred_float_literal_type(suffix: text?, span: Span) -> HirType:
+    """Infer float literal type from an optional width suffix."""
+    var bits = 64
+    if val s = suffix:
+        if s == "f32":
+            bits = 32
+    HirType(kind: HirTypeKind.Float(bits), span: span)
 
 impl MethodResolver:
     me resolve_verification_contract(contract: HirContractBlock?) -> HirContractBlock?:
@@ -23,7 +42,7 @@ impl MethodResolver:
                     span: clause.span
                 ))
             return Some(HirContractBlock(clauses: clauses, proof_uses: present.proof_uses, outcome: present.outcome))
-        nil
+        None
 
     me attach_inferred_type(expr: HirExpr) -> HirExpr:
         if expr.has_type_ and expr.type_ != nil:
@@ -31,8 +50,9 @@ impl MethodResolver:
         val maybe_inferred = self.infer_expr_type(expr)
         match maybe_inferred:
             case Some(inferred):
-                HirExpr(kind: expr.kind, has_type_: true, type_: inferred, span: expr.span)
-            case nil:
+                HirExpr(kind: expr.kind, has_type_: true, type_: inferred, span: expr.span,
+                    bracket_slice: expr.bracket_slice, arrow_update: expr.arrow_update)
+            case None:
                 expr
 
     me infer_symbol_value_type(raw_symbol_id: i64, span: Span) -> HirType?:
@@ -44,22 +64,27 @@ impl MethodResolver:
         # SymbolId into a helper is miscompiled on the staged native lane; the
         # SymbolTable owner exposes get_symbol_raw for the same reason.
         if val symbol = self.symbols.get_symbol_raw(raw_symbol_id):
-            if symbol.type_ != nil:
+            if symbol.type_.is_some():
                 val symbol_type = symbol.type_ ?? HirType(kind: HirTypeKind.Error, span: span)
                 return symbol_type
             match symbol.kind:
-                case SymbolKind.Class | SymbolKind.Struct | SymbolKind.Enum:
+                case Class | Struct | Enum:
                     return HirType(kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []), span: span)
                 case _: ()
-        nil
+        None
 
     me infer_expr_type(expr: HirExpr) -> HirType?:
         if expr.has_type_ and expr.type_ != nil:
             val known_type = expr.type_ ?? HirType(kind: HirTypeKind.Error, span: expr.span)
             match known_type.kind:
-                case HirTypeKind.Error | Infer(_, _): ()
+                case Error | Infer(_, _): ()
                 case _: return known_type
         match expr.kind:
+            case IntLit(_, suffix): _inferred_int_literal_type(suffix, expr.span)
+            case FloatLit(_, suffix) | FloatLexeme(_, suffix): _inferred_float_literal_type(suffix, expr.span)
+            case StringLit(_, _): HirType(kind: HirTypeKind.Str, span: expr.span)
+            case BoolLit(_): HirType(kind: HirTypeKind.Bool, span: expr.span)
+            case CharLit(_): HirType(kind: HirTypeKind.Char, span: expr.span)
             case Var(symbol): self.infer_symbol_value_type(symbol.id, expr.span)
             case NamedVar(symbol, _): self.infer_symbol_value_type(symbol.id, expr.span)
             case Call(callee, _, _):
@@ -69,7 +94,7 @@ impl MethodResolver:
                         case Function(_, return_type, _): return return_type
                         case Named(_, _): return found_type
                         case _: ()
-                nil
+                None
             case StructLit(type_, _): type_
             case Index(base, _):
                 if val base_type = self.infer_expr_type(base):
@@ -77,8 +102,8 @@ impl MethodResolver:
                         case Array(element, _) | Slice(element): return element
                         case Dict(_, value): return value
                         case _: ()
-                nil
-            case _: nil
+                None
+            case _: None
 
     me resolve_call_result_type_raw(raw_symbol_id: i64?, fallback: HirType?) -> HirType?:
         """Use the resolved callee's return type when available."""
@@ -186,8 +211,8 @@ impl MethodResolver:
             case TraitMethod(_, method): Some(method)
             case StaticMethod(_, method): Some(method)
             case FreeFunction(function): Some(function)
-            case Unresolved: nil
-            case BuiltinCollection(_): nil
+            case Unresolved: None
+            case BuiltinCollection(_): None
         if not target.?: return args
         val symbol = target ?? SymbolId(id: -1)
         if not self.module_functions.contains_key(symbol): return args

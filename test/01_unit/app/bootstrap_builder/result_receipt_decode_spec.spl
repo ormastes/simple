@@ -1,0 +1,115 @@
+"""
+## Purpose and audience
+
+Purpose: pin the Simple-side decode and validation of the BuildRunner result
+receipt for the hello-world compile task. A worker result is accepted only when
+its wire framing is canonical, it binds the exact task identity and attempt,
+and its output set matches the declared outputs.
+
+Audience: engineers changing the result wire format or the manager's result
+validation who need the exact refusal string for each malformed receipt.
+
+## Operator workflow
+
+1. Run `SIMPLE_LIB=$PWD/src bin/simple test test/01_unit/app/bootstrap_builder/result_receipt_decode_spec.spl`.
+2. Every scenario must pass. The Python receipt parser is covered separately by
+   scripts/bootstrap/tests/hello-sanity-buildrunner-receipt-test.py.
+
+## Compatibility and limitations
+
+Pure codec and validation. Identical on macOS, Linux, Windows, FreeBSD and
+SimpleOS; no worker is started and no output file is read.
+"""
+
+use std.spec.{describe, it, expect, fail}
+use std.common.build_manager.contracts.{
+    BuildTaskV1, BuildInputV1, BuildResultV1,
+    builder_validate_result_v1, builder_task_identity_v1
+}
+use std.common.build_manager.codec.{builder_encode_result_v1, builder_decode_result_v1}
+
+val HELLO_RESULT_DIGEST = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+fn hello_result_task_v1() -> BuildTaskV1:
+    BuildTaskV1(id: "hello", attempt: 1, phase: "compile",
+        producer_digest: HELLO_RESULT_DIGEST, source_digest: HELLO_RESULT_DIGEST,
+        toolchain_digest: HELLO_RESULT_DIGEST, dependencies: [], program: "bin/simple",
+        args: ["native-build", "src/hello.spl"],
+        inputs: [BuildInputV1(path: "src/hello.spl", digest: HELLO_RESULT_DIGEST)],
+        outputs: ["out/hello"], cache_key: HELLO_RESULT_DIGEST, timeout_ms: 1000,
+        memory_limit_bytes: 1048576, links: [])
+
+fn hello_result_ok_v1(task: BuildTaskV1, attempt: i64, output: text) -> BuildResultV1:
+    BuildResultV1(task_id: "hello", attempt: attempt, identity_digest: builder_task_identity_v1(task),
+        host_id: "local", status: "OK", exit_code: 0,
+        outputs: [BuildInputV1(path: output, digest: HELLO_RESULT_DIGEST)],
+        cache_hits: -1, cache_misses: -1, cache_stores: -1)
+
+fn hello_result_payload_v1() -> text:
+    builder_encode_result_v1(hello_result_ok_v1(hello_result_task_v1(), 1, "out/hello"))
+
+fn hello_result_decode_error_v1(payload: text) -> text:
+    match builder_decode_result_v1(payload):
+        case Ok(_): ""
+        case Err(reason): reason
+
+describe "BuildRunner hello result receipt decode":
+    it "round trips a valid hello result and validates it against the task":
+        # @req REQ-HBR-005
+        val task = hello_result_task_v1()
+        step("Decode the encoded hello result and require its fields back")
+        match builder_decode_result_v1(hello_result_payload_v1()):
+            case Ok(decoded):
+                expect(decoded.task_id).to_equal("hello")
+                expect(decoded.attempt).to_equal(1)
+                expect(decoded.status).to_equal("OK")
+                expect(decoded.exit_code).to_equal(0)
+                expect(decoded.outputs[0].path).to_equal("out/hello")
+                expect(decoded.identity_digest).to_equal(builder_task_identity_v1(task))
+                step("Validate the decoded result against the hello task")
+                expect(builder_validate_result_v1(task, decoded)).to_equal("")
+            case Err(reason): fail(reason)
+
+    it "refuses a result with the wrong header and reports the exact reason":
+        # @req REQ-HBR-005
+        val payload = hello_result_payload_v1()
+        step("Positive control: the canonical payload decodes")
+        expect(hello_result_decode_error_v1(payload)).to_equal("")
+        step("Refuse a result whose header names version 2")
+        val wrong = payload.replace("SIMPLE-BUILD-RESULT-1", "SIMPLE-BUILD-RESULT-2")
+        expect(hello_result_decode_error_v1(wrong)).to_equal("invalid result wire header")
+
+    it "refuses a result with a trailing extra line":
+        # @req REQ-HBR-005
+        val payload = hello_result_payload_v1()
+        step("Append an extra wire field after the declared outputs")
+        expect(hello_result_decode_error_v1(payload + "extra\n")).to_equal("trailing wire fields")
+
+    it "refuses a truncated result that drops a declared output record":
+        # @req REQ-HBR-005
+        val payload = hello_result_payload_v1()
+        step("Remove the output path and digest while the output count still says one")
+        val truncated = payload.replace("out/hello\n" + HELLO_RESULT_DIGEST + "\n", "")
+        expect(hello_result_decode_error_v1(truncated)).to_equal("truncated wire record")
+
+    it "refuses a result for attempt 2 when the task is attempt 1":
+        # @req REQ-HBR-005
+        val task = hello_result_task_v1()
+        step("Positive control: attempt 1 result validates against attempt 1 task")
+        expect(builder_validate_result_v1(task, hello_result_ok_v1(task, 1, "out/hello"))).to_equal("")
+        step("Decode and validate an attempt 2 result against the attempt 1 task")
+        match builder_decode_result_v1(builder_encode_result_v1(hello_result_ok_v1(task, 2, "out/hello"))):
+            case Ok(decoded):
+                expect(builder_validate_result_v1(task, decoded)).to_equal("stale or mismatched result identity")
+            case Err(reason): fail(reason)
+
+    it "refuses an OK result whose output set does not contain the declared output":
+        # @req REQ-HBR-005
+        val task = hello_result_task_v1()
+        step("Positive control: the declared out/hello output validates")
+        expect(builder_validate_result_v1(task, hello_result_ok_v1(task, 1, "out/hello"))).to_equal("")
+        step("Decode and validate an OK result that reports out/other instead of out/hello")
+        match builder_decode_result_v1(builder_encode_result_v1(hello_result_ok_v1(task, 1, "out/other"))):
+            case Ok(decoded):
+                expect(builder_validate_result_v1(task, decoded)).to_equal("undeclared or missing output")
+            case Err(reason): fail(reason)

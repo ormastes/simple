@@ -1,0 +1,135 @@
+# Logical-line selection and bounded UTF-8/SGR byte windows. Pure snapshot read.
+# Each physical row preserves its cells, including spaces. Only soft wraps may
+# suppress a newline; ANSI controls in child output are never replayed.
+use os.apps.smux.vt_types.{VtScreen}
+use std.common.contracts.mux.observation_v1.{MuxCaptureRangeV1}
+use std.common.text_bytes.{text_to_bytes}
+use os.apps.smux.vt_history.{vt_grid_styled_text}
+
+pub struct VtCapturePage:
+    bytes: [u8]
+    next_offset: i64
+    more: bool
+    content_lost: bool
+
+struct CaptureRows:
+    history: [[text]]
+    history_attrs: [[text]]
+    history_wrapped: [bool]
+    cells: [[text]]
+    attrs: [[text]]
+    wrapped: [bool]
+    history_loss: [[i64]]
+    cell_loss: [[i64]]
+
+struct ByteWindow:
+    offset: i64
+    limit: i64
+    seen: i64
+    bytes: [u8]
+    more: bool
+
+fn rows_from(screen: VtScreen) -> CaptureRows:
+    if screen.frozen.len() > 0:
+        return CaptureRows(history: screen.frozen_history, history_attrs: screen.frozen_history_attrs,
+            history_wrapped: screen.frozen_history_wrapped, cells: screen.frozen,
+            attrs: screen.frozen_attrs, wrapped: screen.frozen_wrapped,
+            history_loss: screen.frozen_history_loss, cell_loss: screen.frozen_loss)
+    return CaptureRows(history: if screen.alt.on: [] else: screen.history,
+        history_attrs: if screen.alt.on: [] else: screen.history_attrs,
+        history_wrapped: if screen.alt.on: [] else: screen.history_wrapped,
+        cells: screen.cells, attrs: screen.attrs, wrapped: screen.wrapped,
+        history_loss: if screen.alt.on: [] else: screen.history_loss, cell_loss: screen.cell_loss)
+
+fn row_cells(rows: CaptureRows, index: i64) -> [text]:
+    if index < rows.history.len(): return rows.history[index]
+    rows.cells[index - rows.history.len()]
+
+fn row_attrs(rows: CaptureRows, index: i64) -> [text]:
+    if index < rows.history.len(): return rows.history_attrs[index]
+    rows.attrs[index - rows.history.len()]
+
+fn row_wrap(rows: CaptureRows, index: i64) -> bool:
+    if index < rows.history.len(): return rows.history_wrapped[index]
+    rows.wrapped[index - rows.history.len()]
+
+# Legacy capture has physical-row limits and drops empty trailing rows.
+# This mirrors its selected rows, without making unrelated history loss fatal.
+pub fn vt_legacy_capture_lost(screen: VtScreen, maximum: i64, styled: bool, history: bool) -> bool:
+    val rows = rows_from(screen)
+    val beginning = if history: 0 else: rows.history.len()
+    var end = rows.history.len() + rows.cells.len()
+    var trimming = true
+    while end > beginning and trimming:
+        val cells = row_cells(rows, end - 1)
+        val empty = if styled: vt_grid_styled_text([cells], [row_attrs(rows, end - 1)]) == "" else: cells.join("").trim_end() == ""
+        if empty: end = end - 1
+        else: trimming = false
+    val first = if maximum > 0 and end - beginning > maximum: end - maximum else: beginning
+    for i in first..end:
+        val losses = if i < rows.history.len(): rows.history_loss[i] else: rows.cell_loss[i - rows.history.len()]
+        if losses.len() > 0: return true
+    false
+
+fn emit(window: ByteWindow, value: text) -> ByteWindow:
+    var out = window
+    # Encode at most one cell or SGR token at a time; never encode the history.
+    for scalar in value.chars():
+        for byte in text_to_bytes(scalar):
+            if out.seen >= out.offset:
+                if out.bytes.len() == out.limit:
+                    out.more = true
+                    return out
+                out.bytes.push(byte)
+            out.seen = out.seen + 1
+    out
+
+# Offsets in Lines are logical lines relative to the logical line intersecting
+# screen row zero. Negative numbers select retained history. Inclusive ends;
+# out-of-retention offsets clip, inverted ends are rejected by the owner.
+pub fn vt_capture_page(screen: VtScreen, range: MuxCaptureRangeV1, join_wrapped: bool,
+    styled: bool, offset: i64, maximum: i64) -> VtCapturePage:
+    val rows = rows_from(screen)
+    val count = rows.history.len() + rows.cells.len()
+    var anchor = 0
+    for i in 0..rows.history.len():
+        if not row_wrap(rows, i): anchor = anchor + 1
+    var first = 0
+    var last = count
+    var screen_only = false
+    match range:
+        case MuxCaptureRangeV1.Screen:
+            screen_only = true
+        case MuxCaptureRangeV1.AllHistory:
+            first = 0
+        case MuxCaptureRangeV1.Lines(start, end):
+            first = anchor + start
+            last = anchor + end
+    var window = ByteWindow(offset: offset, limit: maximum, seen: 0, bytes: [], more: false)
+    var logical = 0
+    var started = false
+    var previous_wrap = false
+    var style = ""
+    var content_lost = false
+    for i in 0..count:
+        val selected = if screen_only: i >= rows.history.len() else: logical >= first and logical <= last
+        if selected:
+            val losses = if i < rows.history.len(): rows.history_loss[i] else: rows.cell_loss[i - rows.history.len()]
+            if losses.len() > 0: content_lost = true
+        if selected and not window.more:
+            if started and not (join_wrapped and previous_wrap):
+                window = emit(window, "\n")
+            val cells = row_cells(rows, i)
+            val attrs = row_attrs(rows, i)
+            for c in 0..cells.len():
+                if window.more: break
+                if styled and attrs[c] != style:
+                    style = attrs[c]
+                    window = emit(window, if style == "": "\x1b[0m" else: "\x1b[0;" + style + "m")
+                if not window.more: window = emit(window, cells[c])
+            started = true
+            previous_wrap = row_wrap(rows, i)
+        if not row_wrap(rows, i): logical = logical + 1
+    if styled and style != "" and not window.more:
+        window = emit(window, "\x1b[0m")
+    VtCapturePage(bytes: window.bytes, next_offset: offset + window.bytes.len(), more: window.more, content_lost: content_lost)

@@ -85,3 +85,10 @@ safety_checker.spl:290, 300, 336        safety_lookup_iter
 safety_checker_expr.spl:145, 162        sffi_method_resolution_symbol
 safety_checker_transfer.spl:168         safety_transfer_lookup
 ```
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+diagnosed, deliberately NOT fixed in the filing lane (see in-file rationale). Owner: safety-checker lane.

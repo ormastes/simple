@@ -1,0 +1,75 @@
+"""
+# ES2015 Subset Parser & Interpreter Prevention Spec
+
+Prevention coverage for `js_engine_es2015_parser_gaps_2026-07-05`:
+verifies `js_parse_program_subset` AST node production (`LetDecl`, `ConstDecl`,
+`DestructVarDecl`, `ClassDecl`, `ForOf`) and `JsInterpreter.execute` evaluation
+for ES2015 constructs.
+"""
+
+use std.spec.*
+use std.js.types.js_types.{JsValue}
+use std.js.types.ast_types.{JsStatement}
+use std.js.engine.js_error.{JsLogger, LogLevel}
+use std.js.engine.parser.{js_parse_program_subset}
+use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
+
+fn run_js_number(source: text) -> f64:
+    val stmts = js_parse_program_subset(source)
+    var interp = JsInterpreter.new(JsLogger.new("es2015-prev", LogLevel.Error))
+    val res = interp.execute(stmts)
+    expect(res.is_ok()).to_equal(true)
+    var out = -999.0
+    match res.unwrap():
+        case JsValue.Number(n): out = n
+        case _: out = -999.0
+    out
+
+fn run_js_text(source: text) -> text:
+    val stmts = js_parse_program_subset(source)
+    var interp = JsInterpreter.new(JsLogger.new("es2015-prev", LogLevel.Error))
+    val res = interp.execute(stmts)
+    expect(res.is_ok()).to_equal(true)
+    var out = ""
+    match res.unwrap():
+        case JsValue.String(s): out = s
+        case _: out = ""
+    out
+
+describe "ES2015 parser AST construction":
+    """Verifies subset parser emits LetDecl, ConstDecl, DestructVarDecl, and ClassDecl."""
+
+    it "parses let, const, array/object destructuring, and class declarations into AST nodes":
+        val stmts = js_parse_program_subset("let a = 1; const b = 2; const [x, y] = [3, 4]; class Box {{ constructor(v) {{ this.v = v; }} }}")
+        expect(stmts.len()).to_equal(4)
+        var s0 = false
+        var s1 = false
+        var s2 = false
+        var s3 = false
+        match stmts[0]:
+            case JsStatement.LetDecl(name, _): s0 = name == "a"
+            case _: s0 = false
+        match stmts[1]:
+            case JsStatement.ConstDecl(name, _): s1 = name == "b"
+            case _: s1 = false
+        match stmts[2]:
+            case JsStatement.DestructVarDecl(_, _, kind): s2 = kind == "const"
+            case _: s2 = false
+        match stmts[3]:
+            case JsStatement.ClassDecl(name, _, _, _): s3 = name == "Box"
+            case _: s3 = false
+        expect(s0).to_equal(true)
+        expect(s1).to_equal(true)
+        expect(s2).to_equal(true)
+        expect(s3).to_equal(true)
+
+describe "ES2015 interpreter end-to-end evaluation":
+    """Prevents silent AST-drop regressions on destructuring, spread, template strings, classes, and for-of."""
+
+    it "evaluates destructuring with spread and for-of accumulation":
+        val sum = run_js_number("const base = [1, 2]; const arr = [...base, 3, 4]; const [first, ...rest] = arr; let total = first; for (const n of rest) {{ total = total + n; }} total;")
+        expect(sum).to_equal(10.0)
+
+    it "evaluates class inheritance and template literal interpolation":
+        val label = run_js_text("class Animal {{ speak() {{ return this.name; }} }} class Dog extends Animal {{ constructor(name) {{ this.name = name; }} greet() {{ return `hi ${{this.speak()}}`; }} }} const d = new Dog('rex'); d.greet();")
+        expect(label).to_equal("hi rex")

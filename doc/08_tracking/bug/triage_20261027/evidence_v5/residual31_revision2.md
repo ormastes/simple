@@ -1,0 +1,499 @@
+# Residual31 revision 2 evidence and classification updates
+
+These 31 rows supersede the V4 residual classification in V5 only. The revision 2 CSV and Markdown are copied byte-for-byte below; this page gives a direct row-oriented view. Revision 1 is withdrawn and not admitted. All reproducibility remains untested.
+
+## `native_build_parser_rejects_module_level_var_init_2026-08-17`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/native_build_parser_rejects_module_level_var_init_2026-08-17.md:14-33,43-68; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/native_build_entry_module_loses_own_class_methods_multimodule_2026-08-17.md:54-67; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler/10.frontend/core/parser_decls_use.spl:444-474; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/check/check-native-trailing-default-param.shs (report-named guard); finite receipt check: no exact transcript path named or retained in either report; residual31_review_outputs/research_A.md; residual31_review_outputs/adjudication_overlay.md#case-1; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-1</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The original report quotes a parse failure and a same-binary ablation, while the sibling denies the quoted text in its different, unbound 2,153-line log. Independently reading both complete reports confirms that their run identities are not joined. The target parser accepts initialized declarations, which cannot refute a historical compiler. This supports uncertainty about the reported divergence, not an invalidity or repair claim. Unresolved fact: Original guard transcript with command, fixture/tree, compiler digest, backend and environment, plus sibling log identity proving same or distinct execution. Root can conservatively retain uncertain/untested; root-cause attribution remains unresolved. Admission remains incomplete: Material documentary conflict remains: same-binary ablation and sibling log denial are not bound to the same or distinct executions. Guide specifically says preserve this attribution conflict. Unknown validity is honest; accepted review state is premature.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete material documentary conflict requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `ora_batch_aa_pre_existing_red_specs_2026-08-26`
+
+Classification: `needs_more_evidence`; validity `valid`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/ora_batch_aa_pre_existing_red_specs_2026-08-26.md:1-92; frozen input/open_bugs_05.tsv (raw P3 registration and source path); /tmp/sspec_census/ora_batch_aa (absent); /tmp/sspec_aa/pipeline.log (absent); c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:test/01_unit/os/dma_driver_spec.spl:147-178; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:test/01_unit/os/scheduler_isolation_spec.spl:137-168; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:test/01_unit/lib/nogc_sync_mut/js/engine/js_vm_reclamation_spec.spl:44-158; residual31_review_outputs/research_C.md; residual31_review_outputs/adjudication_overlay.md#case-2; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-2</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The complete report is explicitly an appended pre-edit baseline ledger, with platform-dependent, scaffold and assertion-failure entries. Named receipts are unavailable at their exact paths here; reviewed DMA/scheduler versus deliberate JS RED scenarios have different meanings. Retain the historical ledger as valid and its aggregate cause/remedy unknown. This investigation does not certify every historical result or any current spec population. Unresolved fact: Need retained per-spec pre-edit blobs and runner/binary/host receipts for all 40 entries, plus a c0 assertion-to-owner audit for the uninspected specs. Explicitly classify intentional RED scaffolds, platform-blocked rows, and unexpected failures; do not infer from DMA/scheduler/JS samples. Admission remains incomplete: Only DMA/scheduler/JS owners were inspected; the rest of the 40-entry baseline ledger has no target assertion/owner assessment. Historical valid ledger does not complete the family review.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete family coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `pre_push_hook_selftest_commits_fixtures_into_invoking_repo_2026-08-21`
+
+Classification: `needs_more_evidence`; validity `valid`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/pre_push_hook_selftest_commits_fixtures_into_invoking_repo_2026-08-21.md#L1-L85; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/check/pre-push-conflict-tree-guard.shs#L74-L105,129-L168; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/check/check-guard-selftests-isolated.shs#L18-L28,71-L81; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/check/check-guard-selftest-repo-isolation.shs#L113-L165; history dec68f5173f; residual31_review_outputs/research_B.md; residual31_review_outputs/adjudication_overlay.md#case-3; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-3</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The current hook delegates to check-hook-installation and check-push-must-pass. The inspected static isolation checker exempts scripts containing git init, while the separate HEAD/status checker covers three named guards. Those mechanisms do not establish isolation of every actual child or inherited Git environment. The documented historical incident remains valid; present whole-hook containment and a root remedy remain unknown. Unresolved fact: Need trace the complete wired guard set and inherited GIT_DIR/GIT_WORK_TREE behavior through check-hook-installation and check-push-must-pass execution, then bind every selftest mutation to an isolated repo. Runtime isolation remains untested. Admission remains incomplete: Hook entry and two isolation checkers were read, but successor execution, all wired mutating selftests, and inherited GIT_DIR/GIT_WORK_TREE are untraced. Assigned containment scope remains unexamined.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete active/compound owner coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `release_cli_dispatch_functions_missing_2026-09-07`
+
+Classification: `accepted`; validity `valid`; reproducibility `untested`; solution `known`; structural change `no`; action `fixed_pending_verification`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/release_cli_dispatch_functions_missing_2026-09-07.md#L1-L73; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/app/release/main.spl#L6-L35,221-L234,330-L881,930-L983; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:test/02_integration/app/release/release_cli_spec.spl#L44-L82; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:test/03_system/app/release/feature/release_process_hardening_spec.spl#L47-L51; history 0bfef5664ee; residual31_review_outputs/research_B.md; residual31_review_outputs/adjudication_overlay.md#case-4; 1bd13da61259696f7b5fef5d1e2f396043c0cd45:src/app/release/main.spl:1-254; b76f796235031ed116a175527df50ae1e1bab1c1:src/app/release/main.spl; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/app/release/main.spl:221-234,330-893,940-983; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-4</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The report identifies source snapshot 1bd13da61259696f7b5fef5d1e2f396043c0cd45. Independent exact-object inspection confirms this c0 ancestor has the 254-line main with all 21 calls but none of their definitions or authority imports. c0 defines all 21 adapters, imports the authorities and dispatches to them; inspected bodies validate arguments, call authority logic and render results. This establishes a valid historical missing-adapter defect with its bounded source remedy present. No all-command execution or release qualification is claimed. Unresolved fact: Current all-command dispatch/runtime qualification remains unperformed; this admission covers the missing-wrapper source defect, not every release authority behavior or the secondary projection-drift history. b76 introduced adapters before the incident snapshot and is NOT asserted to be the later restoration commit.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>validity: uncertain -&gt; valid; solution: unknown -&gt; known; structural_change: unknown -&gt; no; recommended_action: keep_open -&gt; fixed_pending_verification; review_state: needs_more_evidence -&gt; accepted. Independent admission review supports this scoped classification; unresolved facts remain explicit and all reproduction is untested. Prior review and revision1 bytes remain immutable.</pre>
+
+## `render_lane_specs_import_nonexistent_modules_2026-08-08`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/render_lane_specs_import_nonexistent_modules_2026-08-08.md:1-244; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/lib/blink/entity/paint_artifact.spl:53-71; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/lib/cc/entity/layer_tree_host.spl:12-60; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:test/01_unit/lib/cc/layer_tree_host_spec.spl:95-150; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:test/01_unit/lib/content/web_contents_spec.spl:55-73; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/lib/blink/layout/block_flow.spl:208-224; residual31_review_outputs/research_C.md; residual31_review_outputs/adjudication_overlay.md#case-5; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-5</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The report describes two repaired specs followed by 25 remaining red specs: that is consistent with the original 27-spec cohort, not a count contradiction. Current selected providers and WebContents assertions changed, and the layer-tree test documents value-copy semantics that prevent clone-versus-assignment discrimination. The full target import/API population remains unqualified, so validity and aggregate remedy remain uncertain/unknown; historical counts are not current measurements. Unresolved fact: The historical 27-spec cohort consists of two repaired plus 25 remaining red; reconcile its target imports/providers and alias/clone behavior. No current all-green result or exhaustive API matrix exists in this review. Admission remains incomplete: Two repaired plus 25 remaining is the 27-spec cohort, correctly interpreted. Selected providers/specs do not cover the historical module-to-spec/API family; full assigned mapping remains unexamined.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete family coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Render cohort correction retained: two repaired plus25 remaining equals27 total, not a discrepancy. Prior review and revision1 bytes remain immutable.</pre>
+
+## `riscv64_qemu_release_lineage_and_nonce_gap_2026-08-11`
+
+Classification: `accepted`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/riscv64_qemu_release_lineage_and_nonce_gap_2026-08-11.md:11-32; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/check/check-sosix-qemu-matrix.shs:326-354,452-479; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/check/produce-sosix-qemu-native-pass-bundle.shs:79-90,141-205; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/check/lib/sosix-qemu-lineage.shs:18-58; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/os/build-simpleos-riscv64-interpreter-kernel.shs:55-78; receipt path named by report absent: /mnt/data/.simple/qemu/artifacts/sosix-qemu/linux/riscv64/20260811T054000Z; residual31_review_outputs/research_A.md; residual31_review_outputs/adjudication_overlay.md#case-6; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-6</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The report explicitly distinguishes diagnostic FAT32 execution from admitted compiler lineage and runner nonce. New producer source has a nonce check and writes source/compiler/artifact/transcript identities; this is policy, not evidence that the old run met it. The named historical bundle is unavailable here. Neither adjacent interpreter nonce support nor current admission code establishes this run qualification; uncertain/unknown is supported. Unresolved fact: Retained run bundle/evidence.env/transcript plus admitted producer/source/compiler/artifact digest and expected/emitted nonce for the canonical FAT32 lane. Bounded current policy inspection is enough for conservative uncertain/untested; historical lineage remains unknown.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>inspection_level: report_reviewed -&gt; source_reviewed; review_state: needs_more_evidence -&gt; accepted. Independent admission review supports this scoped classification; unresolved facts remain explicit and all reproduction is untested. Prior review and revision1 bytes remain immutable.</pre>
+
+## `runtime_bundle_duplicate_gate_baseline_drift_2026-08-24`
+
+Classification: `needs_more_evidence`; validity `valid`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/runtime_bundle_duplicate_gate_baseline_drift_2026-08-24.md; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/check/check-runtime-bundle-duplicate-symbols.shs:103; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/check/runtime_bundle_duplicate_symbols_baseline.txt:88; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/runtime/runtime_native.c:1111; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/runtime/runtime_thread.c:733; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/check/check-runtime-bundle-duplicate-symbols.shs:35-75,103-128,252-261; residual31_review_outputs/research_D.md; residual31_review_outputs/adjudication_overlay.md#case-7; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-7</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The short report labels twelve new pairs as review candidates and a separate stale sleep row. The inspected gate is lexical and expressly does not model preprocessor/link profiles. The stale-row finding supports the historical baseline-drift concern, but no complete twelve-pair owner/profile mapping was established. Keep the historical defect valid with unknown aggregate remedy; do not certify a current duplicate count. Unresolved fact: One named stale row inspected; 12 historical candidate rows not individually mapped to target bodies, owners, profiles, or linker outcomes. No c0 candidate set was recomputed; aggregate remains unknown. Admission remains incomplete: One stale baseline row does not assess the 12 historical duplicate candidates by body/owner/link profile. The guide explicitly requires family coverage; validity of historical drift does not admit the unexamined cohort.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete family coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `seed_interp_ecs_lower_and_freefn_closure_byref`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/seed_interp_ecs_lower_and_freefn_closure_byref.md#L1-L41; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/os/services/devfs_service.spl#L7-L10,47-L80; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs#L174-L200; residual31_review_outputs/research_B.md; residual31_review_outputs/adjudication_overlay.md#case-8; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-8</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The complete report distinguishes seed ECS type lowering from mutation through a free function inside an it closure; it records adapters/direct-method workarounds, not root fixes. Current ECS declarations and captured-environment entry logic do not establish the generic resolver or captured argument writeback. These are concretely identified unknown mechanisms, so the supported classification is uncertain and keep_open, not known or invalid. Unresolved fact: Locate/recover both original fixtures; trace active seed ECS generic import/type resolver for Entity and ComponentStore&lt;T&gt;; separately trace mutable argument aliasing and publication to captured class slots. Runtime remains untested. Admission remains incomplete: Two separate claims remain without their active causal source assessment: ECS generic import/type resolver and mutable-argument publication to captured class slots. Service declarations and environment-entry copying are adjacent context, not the assigned two owner traces.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete active/compound owner coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `seed_interp_explicit_i64_default_arg_poisons_render_backgrounds_2026-07-11`
+
+Classification: `accepted`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/seed_interp_explicit_i64_default_arg_poisons_render_backgrounds_2026-07-11.md:39-78,91-117; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler_rust/compiler/src/interpreter_method/special/execution.rs:521-541; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler_rust/compiler/src/interpreter_call/core/arg_binding.rs:307-388,501-542; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler_rust/compiler/src/interpreter_call/mod.rs:848-865; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2322-2323; report-named budget spec exists at c0 but is a test source, not a retained receipt; residual31_review_outputs/research_A.md; residual31_review_outputs/adjudication_overlay.md#case-9; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-9</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The report itself labels argument marshalling a hypothesis and calls for a value-sensitive reduced control. New regular-function source shows explicit expression evaluation and omitted-default evaluation/coercion, without a demonstrated corrupt receiving value. The missing equal-value, callee-budget/pixel receipt prevents attributing the observation to marshalling rather than another path. Accept this bounded uncertainty, not the hypothesized root cause. Unresolved fact: Retained default-versus-explicit-EQUAL-i64 receipt with callee-observed budget and pixel counts, bound to seed binary/source and execution mode. Conservative uncertain/unknown/untested is supported; marshalling cause remains unproved.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>review_state: needs_more_evidence -&gt; accepted. Independent admission review supports this scoped classification; unresolved facts remain explicit and all reproduction is untested. Prior review and revision1 bytes remain immutable.</pre>
+
+## `seed_segv_calling_newly_added_stdlib_function_2026-09-02`
+
+Classification: `accepted`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/seed_segv_calling_newly_added_stdlib_function_2026-09-02.md:1-44; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler_rust/compiler/src/pipeline/module_loader.rs:606-650; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler_rust/compiler/src/interpreter_eval.rs:580-606; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler_rust/compiler/src/interpreter_call/mod.rs:848-865; exact Windows seed digest/fixture/dispatch receipt not named or retained in report; residual31_review_outputs/research_A.md; residual31_review_outputs/adjudication_overlay.md#case-10; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-10</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The complete Windows report contains a reverted helper/control table but no binary digest or execution-mode identity. Current owner tagging and named-function dispatch have been traced to exec_function; they cannot be bound to that historical crash. The exact faulting target and remedy remain unknown, despite a concrete historical symptom report. No current SEGV or repair is asserted. Unresolved fact: Reverted os_from_uname fixture/control plus original Windows binary digest, source identity, and mode selection; then correlate crash receipt with selected call target. Conservative unknown diagnosis is supported; causal attribution is unresolved.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>review_state: needs_more_evidence -&gt; accepted. Independent admission review supports this scoped classification; unresolved facts remain explicit and all reproduction is untested. Prior review and revision1 bytes remain immutable.</pre>
+
+## `sffi_authority_baseline_stale_after_gpu_bootstrap_2026-08-24`
+
+Classification: `accepted`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/sffi_authority_baseline_stale_after_gpu_bootstrap_2026-08-24.md; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/audit/sffi-call-authority-census.shs:1; Target-ancestry history: 4edef8fab8e; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/sffi_authority_baseline_stale_after_gpu_bootstrap_2026-08-24.md:12-45; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/audit/sffi-call-authority-census.shs:21-55,80-97; residual31_review_outputs/research_D.md; residual31_review_outputs/adjudication_overlay.md#case-11; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-11</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The report retracts earlier +1 attributions and explicitly requires the historical scanner/tree row-table comparison. The current scanner and larger ceiling measure a different state; no historical differing row was recovered. This is a supported provenance uncertainty, not a basis for raising the ceiling or asserting baseline repair. Historical 19,504/19,503 values remain report claims. Unresolved fact: No retained historical row tables or old-vs-new single-row identity were recovered. Current threshold/source cannot prove the 19,504-minus-19,503 row or that the prior baseline repair is complete; current aggregate not measured.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>review_state: needs_more_evidence -&gt; accepted. Independent admission review supports this scoped classification; unresolved facts remain explicit and all reproduction is untested. Prior review and revision1 bytes remain immutable.</pre>
+
+## `simpleos_native_build_entry_closure_codegen_defects_2026-07-17`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/simpleos_native_build_entry_closure_codegen_defects_2026-07-17.md:1-78,285-373,374-805,806-1009,1010-1488,1489-1583; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler_rust/compiler/src/pipeline/native_project/compiler.rs:355-384; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler_rust/compiler/src/pipeline/native_project/module_global_init.rs:188-227; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl:400-419 (report anchor); c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:test/01_unit/compiler/hir/alias_static_call_resolution_spec.spl:74-115; residual31_review_outputs/research_C.md; residual31_review_outputs/adjudication_overlay.md#case-12; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-12</pre>
+
+Review rationale (captured verbatim):
+
+<pre>Completed report chronology separates C1 library/entry initialization, rejected C8 vtable/relocation diagnoses, the later alias-resolution finding, DMA changes and a distinct FS-trait sentinel. Independent report/source checks confirm those distinctions and the freestanding entry lifting path. C2-C7 and all artifact identities were not fully reconciled at c0. Retain aggregate uncertainty and unknown remedy; do not generalize selected present fixes to all eight claims. Unresolved fact: Produce C1-C8 rows: corrected premise, exact c0 owner and history, remedy presence, and matching regression oracle/receipt. In particular reconcile C2-C7 individually and c0 C8 deployed artifact identity; keep entry wrapper/library init, aliasing, DMA, and FS-trait sentinel separate. Admission remains incomplete: Full chronology is now read, but C2-C7 target owner/remedy/oracle coverage remains explicitly unexamined. C1/C8 and later DMA/sentinel distinctions cannot admit the entire eight-claim family.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>inspection_level: report_reviewed -&gt; source_reviewed. Revision1 accepted state withdrawn: incomplete family coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `simpleos_stage3_native_ast_mode_cache_segfault_2026-08-20`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/simpleos_stage3_native_ast_mode_cache_segfault_2026-08-20.md:1-673,674-780; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler/50.mir/_MirLowering/module_lowering.spl:1140-1150,1370-1395,2178-2193; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler/50.mir/mir_lowering_types.spl:443-456; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:test/01_unit/compiler/mir/enum_variant_owner_inverse_index_spec.spl:57-109; residual31_review_outputs/research_C.md; residual31_review_outputs/adjudication_overlay.md#case-13; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-13</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The earlier chronology and final addenda describe distinct parser, storage, handoff, HIR-lifetime and MIR-cost mechanisms. The inverse-index source/spec supports one present mechanism, while the report explicitly withholds HIR slope acceptance and before/after runtime qualification. Other target owner/phase claims remain unjoined. An unknown aggregate diagnosis is supported; one index does not close the compound report. Unresolved fact: Tie the parser/source inventory, all phase handoffs, HIR scope/promotion fix, persistent HIR state and inverse-index lookup to exact c0 callers/history and retained artifact-bound slope/receipt. Report’s historical cycles and reported RSS are not current reproduction; source index insertion alone cannot validate performance. Admission remains incomplete: Full chronology is now read, but parser, HIR lifetime, persistent HIR state and phase handoff owners are not traced at c0. One inverse-index mechanism cannot substitute for that compound-source coverage.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete family coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `simpleos_target_native_image_continuity_2026-08-20`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/simpleos_target_native_image_continuity_2026-08-20.md#L1-L48; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/os/port/disk_image_bake.spl#L100-L115,117-L124,192-L205; history e274cd33719,4b88aebf00b; residual31_review_outputs/research_B.md; residual31_review_outputs/adjudication_overlay.md#case-14; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-14</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The target baker loads each role alias from the same simple_path, whereas the report describes distinct role bytes and admission. Canonical production caller/installer ownership was not established, and no role-bound guest artifact was supplied. This concrete mismatch supports uncertainty about current continuity, not proof that every production image is defective or that the report is invalid. Unresolved fact: Trace build/installer callers to decide which image producer is canonical; map each role through its actual load, admission, manifest/digest and FAT32/initramfs write paths; obtain role-bound guest artifact/receipt. Admission remains incomplete: Inspected baker aliases role bytes, but canonical producer/build/installer ownership is unjoined. A conditional mismatch in an unbound producer does not complete the requested role/admission/manifest path assessment.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete active/compound owner coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `simpleos_x86_64_baremetal_link_ud2_fault_symbol_2026-07-17`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/simpleos_x86_64_baremetal_link_ud2_fault_symbol_2026-07-17.md#L1-L167; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c#L14585-L14647; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/os/kernel/arch/x86_64/interrupt.spl#L375-L393; history ae55a746719,88aac2ffe28; residual31_review_outputs/research_B.md; residual31_review_outputs/adjudication_overlay.md#case-15; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-15</pre>
+
+Review rationale (captured verbatim):
+
+<pre>Independent target C inspection finds saved-RIP +2 recovery in both frame branches, inconsistent with the report claim of fatal UD2 dispatch and the separate SPL export. Actual production translation-unit/link selection remains unjoined. The missing old undefined-symbol symptom cannot establish safe fatal semantics. Keep the report uncertain and the remedy unknown; do not call this inspected C file the proven installed handler. Unresolved fact: Trace production C/SPL compilation and linker roots, compare actual ae55 and 88aac handler bodies, resolve strong/weak symbol selection, and retain a target link/fault receipt. Admission remains incomplete: Inspected C saved-RIP recovery materially conflicts with report/SPL fatal semantics; actual C/SPL production link roots and symbol selection were not determined. Keep unresolved material ownership conflict.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete active/compound owner coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Actual production C/link ownership remains unproved. Prior review and revision1 bytes remain immutable.</pre>
+
+## `sosix_qemu_matrix_remaining_owners_2026-08-14`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/sosix_qemu_matrix_remaining_owners_2026-08-14.md:1-44; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:test/03_system/os/qemu/sosix_qemu_remaining_owners_spec.spl:8-18,50-80; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/os/kernel/abi/syscall_shim_positioned.spl:37-85; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/os/kernel/boot/boot_fs.spl:383-405; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/check/check-sosix-qemu-matrix.shs:153-225 (queue anchor); residual31_review_outputs/research_C.md; residual31_review_outputs/adjudication_overlay.md#case-16; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-16</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The report enumerates distinct architecture, host, positioned-I/O and importer owners. The handoff spec explicitly states that BLOCKED/POSTPONED success is not live QEMU PASS, and current NVFS source has a real route-install caller. This narrows the old blanket missing-install wording without qualifying FAT32, other targets or the matrix. Current aggregate behavior and remedy remain unknown. Unresolved fact: Trace each matrix owner/architecture separately: FAT32 and NVFS dispatch/install contracts, authenticated service owner, RV64/x86_32/ARM32 symbols and exit-37/reap, Windows nonce/listing/program/reap contracts, FreeBSD/macOS bundles, media admission, importer fd-pinning. Join only retained receipts matching exact artifact/backend; handoff SSpec is not runtime evidence. Admission remains incomplete: NVFS caller and handoff oracle are inspected; other architecture, host, service, media and importer owners remain unexamined. No aggregate current matrix assessment is complete.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete family coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `spec_imports_declared_nowhere_2026-08-04`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/spec_imports_declared_nowhere_2026-08-04.md; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler/10.frontend/core/interpreter/module_loader_core.spl:650-680,920-942; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler/10.frontend/core/interpreter/module_loader_resolve.spl:1-16; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/spec_imports_declared_nowhere_2026-08-04.md:96-203,231-697; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler/10.frontend/core/interpreter/module_loader_core.spl:650-680,902-942; residual31_review_outputs/research_D.md; residual31_review_outputs/adjudication_overlay.md#case-17; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-17</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The expanded inventory remains a historical cohort, and no full per-name target provider/reexport mapping was produced. Independently inspected selective loading registers caller-owner bindings and invokes a warning-only missing-name path with documented surface/enablement limits. That mechanism is concrete, but does not validate 1,003 names or 782 modules at c0. Retain uncertainty about the aggregate and retain the exact population gap. Unresolved fact: Historical report scope is 1,003 names across 782 modules; 0 per-name target provider/reexport/symlink joins completed in this pass. Full family inventory and removed/ambiguous-name reconciliation remain unreviewed. Admission remains incomplete: Zero per-name provider/reexport/symlink joins for the historical 1,003-name/782-module inventory. Warning implementation is not a review of that family.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete family coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `stage3_numeric_interpolation_slot_corruption_2026-08-13`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/stage3_numeric_interpolation_slot_corruption_2026-08-13.md:14-27,162-185; report-named receipt absent: /mnt/data/bs2/packed-memory-build9/gdb-replay/gdb.txt; report names no matching native LLVM IR/emitted-call artifact path; residual31_review_outputs/research_A.md; residual31_review_outputs/adjudication_overlay.md#case-18; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-18</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The report contains incompatible interpretations of the same ASCII-valued pointer: overwritten AST storage versus dropped literal segments. It expressly separates Rust Cranelift changes from unqualified pure-Simple LLVM behavior. The exact named Build9 GDB file is unavailable here; no matching emitted store chain settles the conflict. Retain uncertainty about the causal claim, with no invalidity, known fix or reproduction inference. Unresolved fact: Build9 GDB transcript, matching native LLVM IR/emitted call/store chain, binary/source identity and raw corrupted pointer. Conservative uncertain/unknown/untested is supported; causal mechanism remains unresolved. Admission remains incomplete: Material causal conflict remains between overwritten AST storage and dropped interpolation segments for the same pointer. Missing Build9 transcript/emitted native chain leaves the assigned conflict unresolved; retain needs.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete material documentary conflict requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `stage3_parse_stalls_at_tail_43_files_2026-08-17`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/stage3_parse_stalls_at_tail_43_files_2026-08-17.md:100-112,148-180,192-233; report-named worktree receipts absent: /mnt/data/worktrees/simple-boot-snap/build/bootstrap/runtime-after-stage3.txt, stage3-native-build.log, stage3-sanity.env; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/bootstrap/bootstrap-from-scratch.sh:5602-5606; residual31_review_outputs/research_A.md; residual31_review_outputs/adjudication_overlay.md#case-19; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-19</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The report retracts its stall inference using a post-build file and missing sanity record, but those observations alone do not prove parse completion or identify the failed phase. The same text preserves an unattributable compile failure. The exact named run artifacts are unavailable here. The correct bounded classification is uncertain, not acceptance of either the original stall or the retraction causal inference. Unresolved fact: Same-run runtime-after contents, wrapper/wait status and final phase markers remain unavailable; neither tail-stall nor parse-completed inference is admitted. Admission remains incomplete: Original stall and report retraction infer incompatible phase conclusions from insufficient run artifacts. No same-run wrapper/wait/final-phase identity settles them. Keep explicit material phase-attribution conflict.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete material documentary conflict requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Report retraction is not proof parse completed. Prior review and revision1 bytes remain immutable.</pre>
+
+## `test_only_functions_family_census_2026-08-04`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/test_only_functions_family_census_2026-08-04.md; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/test_only_functions_family_census_2026-08-04.md:245-289,365-400,421-457; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler_rust/wasm-runtime/src/wasi_env.rs:251-278,331-334; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler_rust/driver/src/exec_core.rs:836-853,891-911; residual31_review_outputs/research_D.md; residual31_review_outputs/adjudication_overlay.md#case-20; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-20</pre>
+
+Review rationale (captured verbatim):
+
+<pre>New production Rust/WASI source joins source sandbox manifest to with_sandbox_policy and passes the configured grants into WasmRunner; validation consumes the capability table. This refutes continued lack of wiring for that member in the inspected feature path, without qualifying execution or the other class-(ii) members. Historical survivor/current-family populations and aggregate remedy remain unknown. Unresolved fact: One of 34 reported class-(ii) candidates has a target production wiring path inspected; 33 remain unreviewed. The broader 197 Rust-survivor census and later Simple population are not reconciled; no runtime verification performed. Admission remains incomplete: Only one of 34 class-(ii) members is traced; 33 remain unreviewed, and broader survivor/current populations remain unreconciled. WASI wiring cannot admit the family.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>inspection_level: report_reviewed -&gt; source_reviewed. Revision1 accepted state withdrawn: incomplete family coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `theme_ipc_k2_review_hard_stop_2026-07-27`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/theme_ipc_k2_review_hard_stop_2026-07-27.md#L1-L86; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/os/kernel/ipc/syscall.spl#L252-L324; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/os/kernel/abi/syscall_shim_ipc.spl#L21-L40; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/os/kernel/ipc/syscall_ipc.spl#L1-L170; residual31_review_outputs/research_B.md; residual31_review_outputs/adjudication_overlay.md#case-21; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-21</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The complete K2 report explicitly scopes its five failures to rejected, unintegrated candidates and names unavailable payloads. Current Simple dispatch has stateful IPC handlers, but architecture/C-userlib compatibility and admission are not fully traced. Candidate facts cannot be projected onto all installed paths. Retain uncertainty about current status; neither an obsolete heading nor absent candidate objects establishes invalidity. Unresolved fact: Map installed x86, C, RV32 and compatibility dispatch/callers for all five claims, including syscall 6 and direct helper preemption guarantees; establish whether any K2 payload was admitted. Admission remains incomplete: Five K2 claims require x86 compatibility, direct-helper stability, C userlib and RV32 ownership. Current Simple dispatch and candidate rejection are concrete, but those specified claim owners remain unexamined.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>inspection_level: report_reviewed -&gt; source_reviewed. Revision1 accepted state withdrawn: incomplete active/compound owner coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `theme_snapshot_catalog_review_hard_stop_2026-07-27`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/theme_snapshot_catalog_review_hard_stop_2026-07-27.md#L1-L87; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/lib/common/ui/wm_chrome_theme.spl#L68-L136,233-L235; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/app/ui.browser/backend.spl#L56-L67; residual31_review_outputs/research_B.md; residual31_review_outputs/adjudication_overlay.md#case-22; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-22</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The full catalog report distinguishes candidate-only static facts from rejected/unintegrated source and absent runtime admission. Current snapshot installation/selection is not a demonstrated hosted-bootstrap or external-frame-acceptance authority check. The status of those current consumers remains unknown. This is a supported candidate-versus-production distinction, not acceptance of the rejected fix or invalidity. Unresolved fact: Trace hosted catalog/bootstrap caller and installation, then external frame registration and accept consumers across theme switch; inspect positive/negative authorization assertions and candidate admission state. Admission remains incomplete: Current snapshot storage/selection does not assess either hosted bootstrap installation or external-frame acceptance-time authority. Both report-named consumer paths remain untraced.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete active/compound owner coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `theme_snapshot_catalog_review_hard_stop_2026-07-27_tldr`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/theme_snapshot_catalog_review_hard_stop_2026-07-27_tldr.md#L1-L21; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/theme_snapshot_catalog_review_hard_stop_2026-07-27.md#L1-L87; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/lib/common/ui/wm_chrome_theme.spl#L68-L136,233-L235; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/app/ui.browser/backend.spl#L56-L67; residual31_review_outputs/research_B.md; residual31_review_outputs/adjudication_overlay.md#case-23; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-23</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The TLDR states the same rejected-candidate scope as the full catalog report and supplies no independent admission/runtime evidence. Shared target snapshot evidence does not resolve bootstrap or acceptance-time authority. Retain the same explicit uncertainty for this separately tracked summary; duplication is not invalidity and no second execution claim is created. Unresolved fact: Same remaining source/candidate gap as companion: trace actual catalog bootstrap and external-frame acceptance on theme switch, then inspect admission and targeted assertions. No independent runtime receipt. Admission remains incomplete: Same unresolved two-consumer assessment as full companion. A faithful TLDR remains a separate tracked row; duplication is not invalidity and does not waive the companion coverage gap.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete active/compound owner coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `tree_wipe_module_damage_census_2026-08-04`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/tree_wipe_module_damage_census_2026-08-04.md; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/lib/common/format_utils.spl:1-155; historical ae55a746719 inspected via git log bound to c0b3ad911f4cb00c0f3550b05baa8d06347d17d0; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/tree_wipe_module_damage_census_2026-08-04.md:113-246,248-350,395-434; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/lib/common/format_utils.spl:1-35; Target-ancestry history bounded at c0: ae55a746719 (restore tree wiped by 6f86ff32a7d); c0 path history includes restoration of src/lib/common/format_utils.spl; residual31_review_outputs/research_D.md; residual31_review_outputs/adjudication_overlay.md#case-24; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-24</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The report itself calls the remaining truncations and divergent rewrites open historical leads, requiring history/consumer agreement rather than restoration by size. Current formatter source and restoration ancestry establish only one evolved member, not canonical tier ownership or every damaged blob. The target aggregate remains uncertain; no corpus restoration or invalid closure is inferred. Unresolved fact: One target successor/restoration member examined. The report lists 39 truncation candidates and 27 divergent rewrites and explicitly leaves 38 truncations for per-file proof; no full blob-to-successor, exported-consumer, or restoration ledger was reconstructed. Admission remains incomplete: One formatter successor/restoration member is inspected; remaining truncation/divergent-rewrite blobs and consumers are not mapped. Historical 39/27 counts remain claims and do not support family admission.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete family coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `twelve_verification_assurance_specs_broken_not_flaky_2026-08-21`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/twelve_verification_assurance_specs_broken_not_flaky_2026-08-21.md:1-109; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:test/01_unit/compiler/assurance/formal_delivery_gates_spec.spl:11-24; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler/00.common/assurance/formal_delivery_gates.spl:118-138; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/lib/common/crypto/sha512.spl:510-522; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:test/01_unit/compiler/assurance/sha512_integrity_receipt_spec.spl:20-35; residual31_review_outputs/research_C.md; residual31_review_outputs/adjudication_overlay.md#case-25; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-25</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The full report separates twelve repeated historical seed failures and warns that several depend on the compiler. At c0 the formal-gate source form persists while SHA512 has changed; source text alone cannot establish the current parser verdict. The remaining spec/provider identities and source histories are incomplete. Retain current aggregate uncertainty, keeping the old runs historical and the root remedy unknown. Unresolved fact: Create twelve rows matching each report spec to c0 assertion and true implementation owner, retain report-era seed/source/error identity, inspect parser continuation grammar and SHA512 history, and classify each as historical-only, current source divergence, or persistent defect. No c0 execution was performed; ten current subclaims remain unmapped. Admission remains incomplete: Two target owners inspected; ten of twelve current spec/provider subclaims remain unmapped. Historical repeatability is separate from completing the assigned family source assessment.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete family coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `u64_collections_clobber_recurrence_engine_2026-08-11`
+
+Classification: `accepted`; validity `valid`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `report_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/u64_collections_clobber_recurrence_engine_2026-08-11.md:45-92,126-175,187-194; report-named original clone absent: /home/ormastes/dev/pub/simple-u64-runtimevalue-v2-wt; target report explicitly names owner/clone cleanup as external work; residual31_review_outputs/research_A.md; residual31_review_outputs/adjudication_overlay.md#case-26; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-26</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The complete report retains six historical replays while explicitly retracting the seventh shared-clone threat. Its remaining hygiene obligation belongs to originating clones; the exact named original path is unavailable in this environment. Retain historical validity and unknown external cleanup/remedy status. Local path absence or later shared guard source cannot certify another clone safe. Unresolved fact: Request to root: originating clone identity/status, responsible owner attestation, and retained hook-enforcement receipt bound to that clone and source. Conservative valid historical diagnosis is supported; external cleanup status remains unknown.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>review_state: needs_more_evidence -&gt; accepted. Independent admission review supports this scoped classification; unresolved facts remain explicit and all reproduction is untested. Prior review and revision1 bytes remain immutable.</pre>
+
+## `undeclared_imported_symbols_census`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/app/dashboard/dashboard_collectors.spl:8; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler_rust/compiler/src/interpreter_module/module_loader.rs:518; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/undeclared_imported_symbols_census.md:10-26,49-90,690-904; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/app/dashboard/dashboard_collectors.spl:7-9; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler/10.frontend/core/interpreter/module_loader_core.spl:902-942; residual31_review_outputs/research_D.md; residual31_review_outputs/adjudication_overlay.md#case-27; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-27</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The recovered report explicitly labels its instrument ephemeral and totals last-measured, with spot-check and twin-tree limits. Current importer/warning-source inspection is narrower than the historical 1,226-name cohort, and no complete provider/negative-fixture join was made. Retain uncertainty about the population; the report path exists, while instrument loss is a documented historical limit rather than proof of invalidity. Unresolved fact: Historical 1,226-name target provider/reexport/negative-fixture joins and instrument reconstruction remain unavailable; source/report evidence supports uncertainty, not a current count. Admission remains incomplete: Zero historical imported-name entries have complete provider/negative-fixture/twin-tree joins. One importer cluster and warning owner do not assess the 1,226-name family; ephemeral instrument loss remains a limit.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>inspection_level: report_reviewed -&gt; source_reviewed. Revision1 accepted state withdrawn: incomplete family coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `unregistered_extern_backlog_enumeration_2026-08-01`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/check/check-extern-registration.shs; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/check/check-extern-registration.shs:85; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/unregistered_extern_backlog_enumeration_2026-08-01.md:12-24,52-123; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/check/check-extern-registration.shs:73-105,160-197; residual31_review_outputs/research_D.md; residual31_review_outputs/adjudication_overlay.md#case-28; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-28</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The inspected extractor handles decorator and bare-keyword extern forms and separates explicit bare ABI from registration requirements. That explains measurement expansion, not provider availability. No declaration-to-provider/link-profile ledger establishes the current size of the historical 1,308-symbol cohort. Retain uncertain validity and unknown remedy; matching names or exemptions are not proof of working providers. Unresolved fact: 0 of 1,308 historical declaration entries mapped here to exact ABI, module/link profile, provider, and reachability. Same-name matches or directory exemption cannot establish current backlog size; c0 total unknown. Admission remains incomplete: Zero of 1,308 historical declarations mapped to ABI/module/link profile/provider/reachability. Extractor grammar inspection is concrete but not declaration-family assessment.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete family coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `vacuous_spec_corpus_census_and_inert_assertion_forms_2026-08-02`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler_rust/compiler/src/interpreter/node_exec.rs:368; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/vacuous_spec_corpus_census_and_inert_assertion_forms_2026-08-02.md:1-105,128-165,2790-2792; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/compiler_rust/compiler/src/interpreter/node_exec.rs:368-379; residual31_review_outputs/research_D.md; residual31_review_outputs/adjudication_overlay.md#case-29; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-29</pre>
+
+Review rationale (captured verbatim):
+
+<pre>The report documents substantial false positives in its own samples and an indentation-based instrument. Current Node::Assert evaluates its condition and returns failure, so continued inertness of that executor form is not supported. No target per-file corpus ledger or retained control qualification validates the historical 5,095-file count. Retain aggregate uncertainty without deleting specs or claiming execution. Unresolved fact: One assertion executor form inspected; 0 of the 5,095 historical files reconciled against a target ledger and retained controls. No current checker population or corpus counts measured; all reproduction remains untested. Admission remains incomplete: One assertion executor form inspected; zero historical corpus files reconciled with a target ledger/retained controls. False-positive awareness and active Node::Assert do not admit the 5,095-file family.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete family coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `verification_layer_orphans_and_dangling_refs_2026-08-02`
+
+Classification: `needs_more_evidence`; validity `uncertain`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/check/check-guard-wiring.shs:157; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/check/check-guard-wiring.shs:205; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/check/check-dangling-references.shs:345; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/verification_layer_orphans_and_dangling_refs_2026-08-02.md:183-260,332-485; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/check/check-guard-wiring.shs:205-216,423-435,547-610; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:scripts/check/check-dangling-references.shs:35-90,378-403,483-515; residual31_review_outputs/research_D.md; residual31_review_outputs/adjudication_overlay.md#case-30; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-30</pre>
+
+Review rationale (captured verbatim):
+
+<pre>Current wiring source traverses roots/edges with a bounded BFS and current dangling-reference parsing recognizes changed declaration forms. The report includes later corrections to its original measurement. Without an exact target reachability/opt-out/name ledger, historical 7/360/188 values cannot establish present totals. Retain uncertainty about the aggregate; scanner source is not an executed verdict. Unresolved fact: No complete c0 BFS/opt-out/unresolved-name ledger or per-entry comparison was built. The report’s historical 7/360/188 counts predate further rule changes and are not current reachability totals; execution receipts were not inspected or run. Admission remains incomplete: No target root/edge/BFS/opt-out/unresolved-name ledger or per-entry mapping. Scanner-rule inspection cannot complete historical 7/360/188 population assessment.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete family coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>
+
+## `wm_action_applier_window_surface_session_and_web_window_request_2026-08-10`
+
+Classification: `needs_more_evidence`; validity `valid`; reproducibility `untested`; solution `unknown`; structural change `unknown`; action `keep_open`; inspection `source_reviewed`.
+
+Evidence references (captured verbatim):
+
+<pre>c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:doc/08_tracking/bug/wm_action_applier_window_surface_session_and_web_window_request_2026-08-10.md#L1-L65; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/os/compositor/wm_action_applier.spl#L54-L91; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:src/os/compositor/compositor.spl#L237-L258,339-L344,495-L510,1081-L1110,1147-L1161; c0b3ad911f4cb00c0f3550b05baa8d06347d17d0:test/01_unit/os/compositor/wm_action_applier_spec.spl#L80-L110; residual31_review_outputs/research_B.md; residual31_review_outputs/adjudication_overlay.md#case-31; reviews/residual31_independent_review.md; residual31_review_outputs/adjudication_overlay_v2.md#case-31</pre>
+
+Review rationale (captured verbatim):
+
+<pre>Current compositor source stores GUI trees/focus by content handle and reconstructs/adopts UISession state during input; the missing direct session field therefore does not alone prove absent session behavior. The web action stores HTML, while the old helper/spec and current consumer/design contract remain unreconciled. Retain historical validity but an unknown present remedy/structural need; do not add a field or rewrite a spec from absence alone. Unresolved fact: Trace registry ownership/focus/session observables and adopted design/history; trace actual web-window renderer/request consumers and compare them with both assertions. No API or spec change and no repro run. Admission remains incomplete: GUI registry/input ownership is partly traced, but web renderer/request consumers, adopted contract/history and remaining observables are not reconciled against both assertions. Preserve compound review as incomplete.</pre>
+
+Revision correction (captured verbatim):
+
+<pre>No category or admission-state change from original residual queue. Revision1 accepted state withdrawn: incomplete active/compound owner coverage requires needs_more_evidence. Preserve the substantive source/report findings and unknown category values; no family-coverage waiver was granted. Prior review and revision1 bytes remain immutable.</pre>

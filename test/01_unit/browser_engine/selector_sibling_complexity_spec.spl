@@ -1,0 +1,222 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core_selectors.spl 1%
+# @tag: unit, browser_engine, css, selectors, complexity
+#
+# CSS is untrusted input: a selector must not be able to hang the style pass.
+# Chained subsequent-sibling combinators used to backtrack combinatorially
+# (about C(W, m+1) compound matches for m `~` over W siblings) and a single
+# `~` was quadratic per rule. Measured on the seed interpreter before the fix
+# (one style pass, same binary):
+#   a~b~b~b~b~b~b       over   22 <b>   10.4 s   (100 <b> would be ~1.6e10 steps)
+#   .x ~ div ~ div ~ div over  50 <div>  7.6 s   (2,000 would be ~6.7e11 steps)
+#   i ~ b               over  600 <b>    4.9 s   (quadratic)
+# The rows below run the same selectors at 100 / 2,000 siblings and must
+# finish inside WALL_MS each. None of them matches in Chrome either (there is
+# no <a>, .x or <i>), so the expected width is the 200px base.
+#
+# The step budget is the safety net behind the algorithmic fix: a selector
+# that still needs more than the budget in ONE match stops, does not match,
+# and bumps a diagnostic counter instead of hanging.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.{
+    simple_web_layout_debug_style_by_id, simple_web_layout_debug_selector_parse_equivalence
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core_selectors.{
+    simple_web_selector_budget_exhausted_count, simple_match_ctx, simple_match_ctx_parsed,
+    parse_selector_part
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
+    HNode, mk_node, build_child_index, build_selector_context
+}
+
+extern fn rt_time_now_unix_millis() -> i64
+
+val WALL_MS: i64 = 60000
+
+fn _page(tag: text, count: i32, lead: text, css: text) -> text:
+    var items = ""
+    var i = 0
+    while i < count:
+        items = items + "<" + tag + "></" + tag + ">"
+        i = i + 1
+    "<html><head><style>" + tag + " {{ width:200px }} " + css + "</style></head><body><section id=\"s\">" + lead + items + "<" + tag + " id=\"last\"></" + tag + "></section></body></html>"
+
+# <div id="o"> wrapping `depth` nested <div>s with one <span> innermost.
+fn _nested(depth: i32, css: text) -> text:
+    var open = ""
+    var close = ""
+    var i = 0
+    while i < depth:
+        open = open + "<div>"
+        close = close + "</div>"
+        i = i + 1
+    "<html><head><style>div {{ width:200px }} " + css + "</style></head><body><div id=\"o\">" + open + "<span></span>" + close + "</div></body></html>"
+
+# A selector list of `count` copies of `b` joined by `~`.
+fn _sibling_chain(count: i32) -> text:
+    var sel = "b"
+    var i = 1
+    while i < count:
+        sel = sel + "~b"
+        i = i + 1
+    sel
+
+# Arena for the direct (depth-0) matcher entry: #root, div#o, `depth` nested
+# divs, one span innermost. Node 1 is #o.
+fn _nested_nodes(depth: i32) -> [HNode]:
+    var nodes: [HNode] = [mk_node("#root", -1)]
+    var o = mk_node("div", 0)
+    o.id_attr = "o"
+    nodes.push(o)
+    var i = 0
+    while i < depth:
+        nodes.push(mk_node("div", i + 1))
+        i = i + 1
+    nodes.push(mk_node("span", depth + 1))
+    nodes
+
+fn _direct_text(nodes: [HNode], selector: text) -> bool:
+    val ctx = build_selector_context(nodes, build_child_index(nodes))
+    val nd = nodes[1]
+    simple_match_ctx(selector, nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw, nodes, ctx, 1)
+
+fn _direct_parsed(nodes: [HNode], selector: text) -> bool:
+    val ctx = build_selector_context(nodes, build_child_index(nodes))
+    val nd = nodes[1]
+    simple_match_ctx_parsed(parse_selector_part(selector), nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw, nodes, ctx, 1)
+
+describe "Sibling combinator complexity":
+
+    context "pathological chains finish and do not match":
+
+        it "a~b~b~b~b~b~b over 100 siblings":
+            val html = _page("b", 100, "", "a~b~b~b~b~b~b {{ width:50px }}")
+            val t0 = rt_time_now_unix_millis()
+            expect(simple_web_layout_debug_style_by_id(html, "last", "width")).to_equal("200")
+            expect(rt_time_now_unix_millis() - t0 < WALL_MS).to_equal(true)
+
+        it ".x ~ div ~ div ~ div over 2000 siblings":
+            val html = _page("div", 2000, "", ".x ~ div ~ div ~ div {{ width:50px }}")
+            val t0 = rt_time_now_unix_millis()
+            expect(simple_web_layout_debug_style_by_id(html, "last", "width")).to_equal("200")
+            expect(rt_time_now_unix_millis() - t0 < WALL_MS).to_equal(true)
+
+        it "i ~ b over 2000 siblings":
+            val html = _page("b", 2000, "", "i ~ b {{ width:50px }}")
+            val t0 = rt_time_now_unix_millis()
+            expect(simple_web_layout_debug_style_by_id(html, "last", "width")).to_equal("200")
+            expect(rt_time_now_unix_millis() - t0 < WALL_MS).to_equal(true)
+
+    context "the same chains still match when the left side exists":
+
+        it "a~b~b~b~b~b~b matches the sixth and later <b> after an <a>":
+            val html = _page("b", 100, "<a></a>", "a~b~b~b~b~b~b {{ width:50px }}")
+            expect(simple_web_layout_debug_style_by_id(html, "last", "width")).to_equal("50")
+
+        it "i ~ b matches every <b> after the <i>":
+            val html = _page("b", 2000, "<i></i>", "i ~ b {{ width:50px }}")
+            expect(simple_web_layout_debug_style_by_id(html, "last", "width")).to_equal("50")
+
+        it "a~b~b needs two <b> before it":
+            val html = "<html><head><style>b {{ width:200px }} a~b~b {{ width:50px }}</style></head><body><section><a></a><b id=\"one\"></b><b id=\"two\"></b></section></body></html>"
+            expect(simple_web_layout_debug_style_by_id(html, "one", "width")).to_equal("200")
+            expect(simple_web_layout_debug_style_by_id(html, "two", "width")).to_equal("50")
+
+    context "step budget":
+
+        it "stops a nested :has() chain, does not match, and counts it":
+            val before = simple_web_selector_budget_exhausted_count()
+            val html = _page("b", 400, "", "section:has(b:has(~ b:has(~ b:has(~ i)))) {{ width:50px }} section {{ height:7px }}")
+            val t0 = rt_time_now_unix_millis()
+            expect(simple_web_layout_debug_style_by_id(html, "s", "width") == "50").to_equal(false)
+            expect(rt_time_now_unix_millis() - t0 < WALL_MS).to_equal(true)
+            expect(simple_web_selector_budget_exhausted_count() > before).to_equal(true)
+
+        it "does not count an ordinary selector":
+            val before = simple_web_selector_budget_exhausted_count()
+            val html = _page("b", 50, "<i></i>", "i ~ b {{ width:50px }}")
+            expect(simple_web_layout_debug_style_by_id(html, "last", "width")).to_equal("50")
+            expect(simple_web_selector_budget_exhausted_count()).to_equal(before)
+
+    # Exhaustion must fail CLOSED. `:has(:has(:has(zz)))` over 100 nested
+    # <div>s needs far more than the budget. Wrapped in a negation, an
+    # exhausted (false) :has() used to turn into a MATCH:
+    #   #o:not(:has(:has(:has(zz))), span)   Chrome 159: no match (#o has a span... it is not a span,
+    #                                        and Chrome evaluates the :has() fully)
+    # Once the budget is blown the whole top-level match is "no match",
+    # whatever negation or list surrounds the exhausted part. (For the two
+    # rows without the `span` option Chrome DOES match, because no <zz>
+    # exists; refusing the rule is the documented cost of the safety net.)
+    context "budget exhaustion fails closed":
+
+        it "does not match through :not() around an exhausted :has()":
+            val before = simple_web_selector_budget_exhausted_count()
+            val html = _nested(100, "#o:not(:has(:has(:has(zz))), :has(span)) {{ width:50px }}")
+            expect(simple_web_layout_debug_style_by_id(html, "o", "width")).to_equal("200")
+            expect(simple_web_selector_budget_exhausted_count() > before).to_equal(true)
+
+        it "does not match :not(:has(...)) with a budget-blowing argument":
+            val before = simple_web_selector_budget_exhausted_count()
+            val html = _nested(100, "#o:not(:has(:has(:has(zz)))) {{ width:50px }}")
+            expect(simple_web_layout_debug_style_by_id(html, "o", "width")).to_equal("200")
+            expect(simple_web_selector_budget_exhausted_count() > before).to_equal(true)
+
+        it "does not match :is(:not(:has(...)), x) with a budget-blowing argument":
+            val before = simple_web_selector_budget_exhausted_count()
+            val html = _nested(100, "#o:is(:not(:has(:has(:has(zz)))), x) {{ width:50px }}")
+            expect(simple_web_layout_debug_style_by_id(html, "o", "width")).to_equal("200")
+            expect(simple_web_selector_budget_exhausted_count() > before).to_equal(true)
+
+        it "gives no match on BOTH paths, not merely the same answer":
+            val html = _nested(100, "#o:not(:has(:has(:has(zz))), :has(span)) {{ width:50px }} #o:not(:has(:has(:has(zz)))) {{ width:50px }} #o:is(:not(:has(:has(:has(zz)))), x) {{ width:50px }}")
+            expect(simple_web_layout_debug_selector_parse_equivalence(html, 0 - 1).starts_with("ok ")).to_equal(true)
+            expect(simple_web_layout_debug_style_by_id(html, "o", "width")).to_equal("200")
+
+        it "fails closed when a compound is matched directly, outside a group match":
+            # The compound-level entry (used by the text/pre-parsed oracle)
+            # is a top-level match of its own: an exhausted :has() inside a
+            # negation must not come back as a match there either.
+            val before = simple_web_selector_budget_exhausted_count()
+            val nodes = _nested_nodes(100)
+            expect(_direct_text(nodes, "#o:not(:has(:has(:has(zz))))")).to_equal(false)
+            expect(_direct_parsed(nodes, "#o:not(:has(:has(:has(zz))))")).to_equal(false)
+            expect(_direct_text(nodes, "#o:is(:not(:has(:has(:has(zz)))), x)")).to_equal(false)
+            expect(_direct_parsed(nodes, "#o:is(:not(:has(:has(:has(zz)))), x)")).to_equal(false)
+            expect(simple_web_selector_budget_exhausted_count() > before).to_equal(true)
+
+        it "matches directly when the same shape is cheap":
+            val nodes = _nested_nodes(3)
+            expect(_direct_text(nodes, "#o:not(:has(:has(:has(zz))))")).to_equal(true)
+            expect(_direct_parsed(nodes, "#o:not(:has(:has(:has(zz))))")).to_equal(true)
+            expect(_direct_text(nodes, "#o:not(:has(span))")).to_equal(false)
+            expect(_direct_parsed(nodes, "#o:not(:has(span))")).to_equal(false)
+
+        it "still matches the same shapes when the argument is cheap":
+            val html = _nested(3, "#o:not(:has(:has(:has(zz)))) {{ width:50px }}")
+            expect(simple_web_layout_debug_style_by_id(html, "o", "width")).to_equal("50")
+            val html2 = _nested(3, "#o:not(:has(:has(:has(zz))), :has(span)) {{ width:50px }}")
+            expect(simple_web_layout_debug_style_by_id(html2, "o", "width")).to_equal("200")
+
+        it "does not let an exhausted match poison a later rule's cached answer":
+            # Rule 1 exhausts the budget in its first :has() and then reaches
+            # `:nth-child(1 of :has(span))`. Rule 2 asks the SAME `of S`
+            # question for the same parent afterwards, with a fresh budget:
+            # it must compute the real answer (#o is the first child of body
+            # that has a span), not read back what rule 1 left behind.
+            val html = _nested(100, "#o:has(:has(:has(zz))):nth-child(1 of :has(span)) {{ height:9px }} #o:nth-child(1 of :has(span)) {{ width:50px }}")
+            expect(simple_web_layout_debug_style_by_id(html, "o", "width")).to_equal("50")
+
+    context "selector size cap":
+
+        it "a 10,000-compound sibling chain matches nothing and does not crash":
+            val html = _page("b", 20, "", _sibling_chain(10000) + " {{ width:50px }}")
+            val t0 = rt_time_now_unix_millis()
+            expect(simple_web_layout_debug_style_by_id(html, "last", "width")).to_equal("200")
+            expect(rt_time_now_unix_millis() - t0 < WALL_MS).to_equal(true)
+
+        it "a 100-compound sibling chain still matches":
+            val html = _page("b", 150, "", _sibling_chain(100) + " {{ width:50px }}")
+            expect(simple_web_layout_debug_style_by_id(html, "last", "width")).to_equal("50")
+

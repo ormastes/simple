@@ -1,0 +1,87 @@
+# @cover src/compiler/50.mir/mir_target_hir_symbol_writes.spl
+# P6 symbol-writer overlay wiring: for each migration-matrix writer row,
+# legacy/shadow/typed agree on a fixture write sequence; divergence is fatal.
+
+use std.spec.*
+use compiler.mir.mir_target_hir_symbol_writes.{MirSymbolWriteLedger, mir_symbol_writer_names, mir_symbol_write_ledger_open, mir_symbol_write_record, mir_symbol_write_ledger_child, mir_symbol_write_ledger_adopt, mir_symbol_write_ledger_resolve}
+
+fn open(mode: text) -> MirSymbolWriteLedger:
+    mir_symbol_write_ledger_open(mode, "app.demo", 3, 100).unwrap()
+
+# Fixture: two writes by `writer`, the second repeated (dedup by define()/lookup).
+fn run(mode: text, writer: text) -> Result<[text], text>:
+    var l = open(mode)
+    l = mir_symbol_write_record(l, writer, "a_" + writer, 100)
+    l = mir_symbol_write_record(l, writer, "b_" + writer, 101)
+    l = mir_symbol_write_record(l, writer, "b_" + writer, 101)
+    mir_symbol_write_ledger_resolve(l)
+
+fn joined(r: Result<[text], text>) -> text:
+    var s = ""
+    for x in r.unwrap():
+        s = s + x + ";"
+    s
+
+fn agrees(writer: text) -> bool:
+    val legacy = run("legacy", writer)
+    val shadow = run("shadow", writer)
+    val typed = run("typed", writer)
+    if legacy.is_err() or shadow.is_err() or typed.is_err():
+        return false
+    legacy.unwrap().len() == 0 and joined(shadow) == joined(typed) and joined(typed) == writer + ":a_" + writer + "=100;" + writer + ":b_" + writer + "=101;"
+
+describe "MirLowering symbol writes through TaskOverlay":
+    it "legacy/shadow/typed agree for symbols_alias":
+        expect(agrees("symbols_alias")).to_equal(true)
+    it "legacy/shadow/typed agree for provider_symbol_writes":
+        expect(agrees("provider_symbol_writes")).to_equal(true)
+    it "legacy/shadow/typed agree for default_binding_writes":
+        expect(agrees("default_binding_writes")).to_equal(true)
+    it "legacy/shadow/typed agree for default_rewrite_writes":
+        expect(agrees("default_rewrite_writes")).to_equal(true)
+    it "legacy/shadow/typed agree for resident_global_writes":
+        expect(agrees("resident_global_writes")).to_equal(true)
+    it "legacy/shadow/typed agree for trait_conversion_writes":
+        expect(agrees("trait_conversion_writes")).to_equal(true)
+    it "legacy/shadow/typed agree for trait_thunk_writes":
+        expect(agrees("trait_thunk_writes")).to_equal(true)
+    it "nested_lowerer: child owner merges into parent in all modes":
+        var results: [text] = []
+        for mode in ["legacy", "shadow", "typed"]:
+            var p = open(mode)
+            p = mir_symbol_write_record(p, "trait_thunk_writes", "outer", 100)
+            var c = mir_symbol_write_ledger_child(p, "lambda0")
+            c = mir_symbol_write_record(c, "default_binding_writes", "inner", 101)
+            p = mir_symbol_write_ledger_adopt(p, c)
+            val r = mir_symbol_write_ledger_resolve(p)
+            expect(r.is_ok()).to_equal(true)
+            results.push(joined(r))
+        expect(results[0]).to_equal("")
+        expect(results[1]).to_equal(results[2])
+        expect(results[2]).to_equal("trait_thunk_writes:outer=100;default_binding_writes:inner=101;")
+    it "nested_lowerer: same key from parent and child is a fatal conflict naming both":
+        var p = open("typed")
+        p = mir_symbol_write_record(p, "trait_thunk_writes", "k", 100)
+        var c = mir_symbol_write_ledger_child(p, "lambda1")
+        c = mir_symbol_write_record(c, "trait_thunk_writes", "k", 101)
+        val r = mir_symbol_write_ledger_resolve(mir_symbol_write_ledger_adopt(p, c))
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("app.demo/lambda1")).to_equal(true)
+    it "shadow: a key re-written with a different id is a fatal mismatch":
+        var l = open("shadow")
+        l = mir_symbol_write_record(l, "default_rewrite_writes", "x", 100)
+        l = mir_symbol_write_record(l, "default_rewrite_writes", "x", 105)
+        val r = mir_symbol_write_ledger_resolve(l)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("target_hir_symbol_writes_shadow_mismatch")).to_equal(true)
+    it "legacy ignores the same divergence (byte-identical legacy path)":
+        var l = open("legacy")
+        l = mir_symbol_write_record(l, "default_rewrite_writes", "x", 100)
+        l = mir_symbol_write_record(l, "default_rewrite_writes", "x", 105)
+        expect(l.entry_keys.len()).to_equal(0)
+        expect(mir_symbol_write_ledger_resolve(l).is_ok()).to_equal(true)
+    it "unknown writer is fatal outside legacy":
+        val l = mir_symbol_write_record(open("shadow"), "bogus", "x", 1)
+        expect(mir_symbol_write_ledger_resolve(l).is_err()).to_equal(true)
+    it "covers exactly the eight matrix rows":
+        expect(mir_symbol_writer_names().len()).to_equal(8)

@@ -1,0 +1,65 @@
+"""
+## Purpose and audience
+Purpose: Pin `<img>` painting on the CPU raster (software) lane to Chrome 159
+when decoded image resources are supplied. The 2x2 test image is uniform
+(RGBA 30,60,240,160), so Chrome paints 0xFF7285F6 over white at any size.
+Audience: browser-engine maintainers.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-IMG-RASTER-CHROME159-001 — the raster lane paints <img> from supplied resources as Chrome 159 does.
+"""
+use std.spec.*
+use std.common.image.png_decode.{decode_png_to_argb}
+use std.common.base_encoding.base64.{base64_decode_bytes}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource, simpleos_host_gpu_image_resource}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels, simple_web_layout_render_html_software_pixels_with_images
+}
+
+val IR_IMG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4nGOUs/mwgIGBgYGJAQoAHMQB7tXVXUgAAAAASUVORK5CYII="
+val IR_WHITE = 0xFFFFFFFFu32
+val IR_CHROME = 0xFF7285F6u32
+
+fn ir_resources() -> [SimpleOsHostGpuImageResource]:
+    val png = decode_png_to_argb(base64_decode_bytes(IR_IMG.substring(22, IR_IMG.len())))
+    if val Err(reason) = png:
+        print "decode failed: {reason}"
+        return []
+    val img = png.unwrap()
+    [simpleos_host_gpu_image_resource(IR_IMG, img.width, img.height, img.pixels)]
+
+fn ir_page(style: text) -> text:
+    "<!DOCTYPE html><html><body style=\"margin:0;background:#fff\"><img src=\"" + IR_IMG + "\" style=\"" + style + "\"></body></html>"
+
+# Count pixels of a 16x12 frame that are `want` inside the box and white outside.
+fn ir_mismatches(px: [u32], bw: i32, bh: i32) -> i32:
+    if px.len() < 16 * 12:
+        return 999
+    var bad = 0
+    var y = 0
+    while y < 12:
+        var x = 0
+        while x < 16:
+            val want = if x < bw and y < bh: IR_CHROME else: IR_WHITE
+            if px[y * 16 + x] != want:
+                bad = bad + 1
+            x = x + 1
+        y = y + 1
+    bad
+
+describe "img raster Chrome 159":
+    it "paints a 2x2 (natural-size) <img> from the supplied resource":
+        val res = ir_resources()
+        expect(res.len()).to_equal(1)
+        val px = simple_web_layout_render_html_software_pixels_with_images(ir_page("display:block;width:2px;height:2px"), 16, 12, res)
+        expect(ir_mismatches(px, 2, 2)).to_equal(0)
+
+    it "paints a stretched <img> over its width and height box":
+        val res = ir_resources()
+        val px = simple_web_layout_render_html_software_pixels_with_images(ir_page("display:block;width:6px;height:4px"), 16, 12, res)
+        expect(ir_mismatches(px, 6, 4)).to_equal(0)
+
+    it "paints nothing for <img> when no resource is supplied":
+        val px = simple_web_layout_render_html_software_pixels(ir_page("display:block;width:6px;height:4px"), 16, 12)
+        expect(ir_mismatches(px, 0, 0)).to_equal(0)

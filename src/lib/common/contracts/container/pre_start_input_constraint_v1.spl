@@ -1,0 +1,39 @@
+# Restrictive DATA only. Actual signed Host admission, current-create custody
+# and the genuine owner-produced input observation remain mandatory.
+use std.common.contracts.container.pre_start_constraint_v1.{ContainerPreStartConstraintV1,
+    container_pre_start_constraint_copy_v1, container_pre_start_constraint_validate_v1,
+    container_pre_start_constraint_check_v1}
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerHostScopeV2}
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.execution_input_configuration_v1.ContainerExecutionInputConfigurationObservationV1
+use std.common.build_manager.contracts.builder_digest_valid_v1
+
+pub enum ContainerPreStartInputProfileV1:
+    ClosedStdinNonTty
+
+pub struct ContainerPreStartInputConstraintV1:
+    base: ContainerPreStartConstraintV1
+    profile: ContainerPreStartInputProfileV1
+
+pub fn container_pre_start_input_constraint_copy_v1(value: ContainerPreStartInputConstraintV1) -> ContainerPreStartInputConstraintV1:
+    ContainerPreStartInputConstraintV1(base: container_pre_start_constraint_copy_v1(value.base), profile: value.profile)
+
+pub fn container_pre_start_input_constraint_validate_v1(value: ContainerPreStartInputConstraintV1,
+        request: ContainerExecutionRequestV2, scope: ContainerHostScopeV2) -> Result<(), text>:
+    match value.profile:
+        case ContainerPreStartInputProfileV1.ClosedStdinNonTty: pass
+        case _: return Err("pre-start-input-profile-unsupported")
+    container_pre_start_constraint_validate_v1(value.base, request, scope)
+
+pub fn container_pre_start_input_constraint_check_v1(value: ContainerPreStartInputConstraintV1,
+        request: ContainerExecutionRequestV2, scope: ContainerHostScopeV2, created: RuntimeIdentityV1,
+        observed: ContainerExecutionInputConfigurationObservationV1) -> Result<(), text>:
+    container_pre_start_input_constraint_validate_v1(value, request, scope)?
+    container_pre_start_constraint_check_v1(value.base, request, scope, created, observed.configuration)?
+    if not builder_digest_valid_v1(observed.input_configuration_digest):
+        return Err("pre-start-input-configuration-digest-invalid")
+    if observed.open_stdin or observed.tty:
+        return Err("pre-start-input-closed-stdin-nontty-required")
+    # StdinOnce is actual recorded DATA, bound by the producer's outer digest.
+    # Its value is not a future child-EOF or provider-consumption receipt.
+    Ok(())

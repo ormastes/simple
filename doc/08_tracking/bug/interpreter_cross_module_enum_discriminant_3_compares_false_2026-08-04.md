@@ -1,4 +1,27 @@
 # Interpreter: cross-module enum variant with discriminant 3 compares FALSE
+
+## Resolution 2026-11-25 — FIXED on the pinned seed
+
+- **verified fixed (STALE)**: a self-contained two-module repro (payload-less
+  enum `DT: F32, F64, I64, Bool` + `struct Holder` + `make()` in an imported
+  module, `==` comparison against the enum literal in the importer) run on the
+  pinned Rust seed (`bin/simple.exe` v1.0.0-rc.1, Windows) under
+  `SIMPLE_EXECUTION_MODE=interpreter` prints all four rows `true`, including
+  `disc3 == Bool: true` — the sentinel-3 collision is gone. The JIT lane
+  agrees.
+- **fix family (source)**: the seed enum-registry repairs landed in the #6953
+  series, e.g. `3bd97410ba2` (interpreter bridge + builtin variant names use
+  the owning enum's index), `bb00ddcc262` (erased Ok/Err/Some/None resolve to
+  builtin Result/Option, not a user enum's index), `95ea4e6a6b7` (unwrap/expect
+  read Ok/Err only under the Result enum id).
+- **limit**: the doc's exact `std.ndarray` `DType` reproducer cannot run under
+  the interpreter at release/1.0.0 HEAD — the ndarray import chain pulls
+  `src/lib/nogc_sync_mut/simd/profile.spl` (`detect_profile`), which carries
+  `@representation_boundary`, rejected by the pinned seed repo-wide. (The JIT
+  lane runs it and prints all four rows `true`.) The two-module repro above
+  exercises the same cross-module field-read + literal-compare path.
+- Status: OPEN / ARCHITECTURAL -> **RESOLVED 2026-11-25**.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

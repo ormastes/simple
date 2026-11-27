@@ -1,0 +1,60 @@
+# Structural data only: no native handles, host signature verification or
+# installation readiness is inferred from these values.
+use std.common.contracts.container.exec_v3.*
+use std.common.contracts.container.exec_admission_v3.*
+use std.common.contracts.container.exec_installed_v3.*
+use std.common.contracts.container.exec_control_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.effect_deadline_v1.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.orchestration.host_runtime_exec_v3.*
+use std.common.contracts.orchestration.host_exec_control_installation_v3.*
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.nogc_async_mut.container.providers.linux.installed_policy_v3.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+
+pub fn linux_engine_exec_parent_fixture_v3() -> ContainerExecutionRequestV2:
+    linux_container_request_fixture_v2(linux_container_leaf_fixture_v2())
+
+pub fn linux_engine_exec_policy_fixture_v3() -> LinuxOciInstalledPolicyV3:
+    LinuxOciInstalledPolicyV3(cli_policy: linux_container_policy_fixture_v2(), socket_path: "/run/user/1000/podman/podman.sock",
+        expected_service_uid: 1000, api_version: "5.2.5")
+
+pub fn linux_engine_exec_request_fixture_v3() -> ContainerExecRequestV3:
+    val parent = linux_engine_exec_parent_fixture_v3().plan
+    ContainerExecRequestV3(parent: parent, parent_runtime: RuntimeIdentityV1(pod_uid: parent.workload_uid,
+        attempt: parent.attempt, provider_generation: parent.provider_generation, operation_id: parent.operation_id,
+        engine: "podman", native_id: "b".repeat(64), node_boot_id: container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap()),
+        operation_id: "exec-api", nonce: "d".repeat(64), argv: ["/agent", "literal"], environment: [],
+        working_directory: "/work", selected_user: "1000:1001", terminal_mode: "none", stdin_requested: false, timeout_ms: 5000)
+
+pub fn linux_engine_exec_installation_fixture_v3() -> ContainerExecInstalledV3:
+    val policy = linux_engine_exec_policy_fixture_v3()
+    val intent = HostExecControlInstallationIntentV3(operation_id: "install-api",
+        enrollment_binding_digest: "a".repeat(64), scope: linux_container_scope_fixture_v2(),
+        provider_identity_digest: "e".repeat(64), control_policy_bytes: linux_oci_installed_policy_encode_v3(policy).unwrap(),
+        control_policy_digest: linux_oci_installed_policy_digest_v3(policy).unwrap())
+    ContainerExecInstalledV3(intent: intent, artifact_digest: host_exec_control_installation_intent_digest_v3(intent).unwrap())
+
+pub fn linux_engine_exec_admission_fixture_v3() -> ContainerExecAdmissionV3:
+    val request = linux_engine_exec_request_fixture_v3()
+    val intent = HostRuntimeExecIntentV3(request: request, parent_operation_digest: "a".repeat(64),
+        parent_assignment_digest: "b".repeat(64), parent_controller_operation_digest: "c".repeat(64),
+        parent_provider_identity_digest: "e".repeat(64), exec_control_identity_digest: "f".repeat(64))
+    val operation = OperationEnvelopeV2(version: 2, id: request.operation_id,
+        payload_digest: host_runtime_exec_intent_digest_v3(intent).unwrap(), principal: "user_1", project: "project_1",
+        host_id: request.parent.physical_host_id, operation: "host_runtime_exec_v3", environment_digest: "e".repeat(64),
+        policy_revision: 4, revocation_epoch: 2, session_generation: 3, memory_bytes: 1024, duration_ms: 5000)
+    ContainerExecAdmissionV3(intent: intent, request: request, operation: operation,
+        parent_operation_digest: intent.parent_operation_digest, parent_assignment_digest: intent.parent_assignment_digest,
+        provider_identity_digest: intent.exec_control_identity_digest,
+        deadline: container_effect_deadline_v1(container_exec_request_digest_v3(request).unwrap(), request.operation_id, ["exec"], 1000).unwrap(),
+        grant_id: "grant-api", issuer_id: "issuer-api", approver_id: "approver-api", execution_proof_digest: "a".repeat(64))
+
+pub fn linux_engine_exec_observation_fixture_v3() -> ContainerExecControlObservationV3:
+    val request = linux_engine_exec_request_fixture_v3()
+    ContainerExecControlObservationV3(backend: "linux-podman", scope: linux_container_scope_fixture_v2(),
+        parent_runtime: request.parent_runtime, parent_request_digest: request.parent.request_digest,
+        parent_provider_identity_digest: "e".repeat(64), exec_control_identity_digest: "f".repeat(64),
+        installed_policy_digest: linux_oci_installed_policy_digest_v3(linux_engine_exec_policy_fixture_v3()).unwrap(),
+        api_version: "5.2.5", observed_unix_ms: 100, query_digest: "a".repeat(64), evidence_digest: "b".repeat(64))

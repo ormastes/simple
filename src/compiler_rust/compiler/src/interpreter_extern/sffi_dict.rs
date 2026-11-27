@@ -9,6 +9,8 @@ use simple_runtime::value::RuntimeValue;
 // Import actual SFFI functions from runtime
 use simple_runtime::value::{
     rt_dict_clear, rt_dict_contains, rt_dict_get, rt_dict_keys, rt_dict_len, rt_dict_new, rt_dict_set, rt_dict_values,
+    rt_dict_scope_read_bound_v1, rt_dict_scope_read_owner_v1, rt_dict_scope_read_epoch_v1, rt_dict_scope_read_meta_v1,
+    rt_dict_scope_read_slot_v1,
 };
 
 // ============================================================================
@@ -88,11 +90,17 @@ pub fn rt_dict_get_fn(args: &[Value]) -> Result<Value, CompileError> {
     })?;
 
     if let Value::Dict(map) | Value::FrozenDict(map) = dict_value {
-        return Ok(key_value
-            .as_text_str()
-            .and_then(|key| map.get(key))
-            .cloned()
-            .unwrap_or(Value::Nil));
+        let stored = key_value.as_text_str().and_then(|key| map.get(key));
+        // Names `f` like `m.get("f")` on a module namespace.
+        if let Some(Value::Function { def, .. }) = stored {
+            if matches!(def.visibility, simple_parser::ast::Visibility::Private)
+                && key_value.as_text_str() == Some(def.name.as_str())
+                && crate::interpreter::is_module_namespace_dict(map)
+            {
+                crate::interpreter::interpreter_call::gate_private_call(&def.name, def)?;
+            }
+        }
+        return Ok(stored.map(Value::dict_entry_value_for_iteration).unwrap_or(Value::Nil));
     }
 
     let dict = RuntimeValue::from_raw(dict_value.as_int()? as u64);
@@ -171,9 +179,11 @@ pub fn rt_dict_keys_fn(args: &[Value]) -> Result<Value, CompileError> {
         )
     })?;
     if let Value::Dict(map) | Value::FrozenDict(map) = dict_value {
-        let mut keys: Vec<_> = map.keys().cloned().collect();
-        keys.sort();
-        return Ok(Value::array(keys.into_iter().map(Value::text).collect::<Vec<Value>>()));
+        return Ok(Value::array(
+            crate::value::dict_entries_ordered(map)
+                .into_iter()
+                .map(|(key, stored)| Value::dict_entry_key_for_iteration(stored, key))
+                .collect::<Vec<Value>>()));
     }
 
     let dict = RuntimeValue::from_raw(dict_value.as_int()? as u64);
@@ -190,16 +200,95 @@ pub fn rt_dict_values_fn(args: &[Value]) -> Result<Value, CompileError> {
         )
     })?;
     if let Value::Dict(map) | Value::FrozenDict(map) = dict_value {
-        let mut entries: Vec<_> = map.iter().collect();
-        entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+        crate::interpreter::interpreter_call::gate_module_namespace_handout(map)?;
         return Ok(Value::array(
-            entries.into_iter().map(|(_, value)| value.clone()).collect::<Vec<Value>>(),
+            crate::value::dict_entries_ordered(map).into_iter().map(|(_, value)| Value::dict_entry_value_for_iteration(value)).collect::<Vec<Value>>(),
         ));
     }
 
     let dict = RuntimeValue::from_raw(dict_value.as_int()? as u64);
     let rv = rt_dict_values(dict);
     Ok(Value::Int(rv.to_raw() as i64))
+}
+
+/// The scope reader accepts raw hosted handles encoded as exactly Value::Int.
+/// Interpreter Dict/FrozenDict backing is unsupported: never bridge/copy it or
+/// invent an owner generation. Other non-Int arguments also fail closed rather
+/// than using as_int(), which would coerce floats, booleans and rich wrappers.
+fn scope_read_scalars<const N: usize>(args: &[Value], name: &str) -> Result<Option<[i64; N]>, CompileError> {
+    if args.len() != N {
+        return Err(CompileError::semantic_with_context(
+            format!("{name} expects {N} arguments"),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        ));
+    }
+    if matches!(args.first(), Some(Value::Dict(_) | Value::FrozenDict(_))) {
+        return Ok(None);
+    }
+    let mut scalars = [0; N];
+    for (index, value) in args.iter().enumerate() {
+        let Value::Int(value) = value else {
+            return Ok(None);
+        };
+        scalars[index] = *value;
+    }
+    Ok(Some(scalars))
+}
+
+pub fn rt_dict_scope_read_bound_v1_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _ = scope_read_scalars::<0>(args, "rt_dict_scope_read_bound_v1")?;
+    Ok(Value::Int(rt_dict_scope_read_bound_v1()))
+}
+
+pub fn rt_dict_scope_read_owner_v1_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some([dict, fuel]) = scope_read_scalars::<2>(args, "rt_dict_scope_read_owner_v1")? else {
+        return Ok(Value::Int(-1));
+    };
+    Ok(Value::Int(rt_dict_scope_read_owner_v1(
+        RuntimeValue::from_raw(dict as u64),
+        fuel,
+    )))
+}
+
+pub fn rt_dict_scope_read_epoch_v1_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some([dict, owner, fuel]) = scope_read_scalars::<3>(args, "rt_dict_scope_read_epoch_v1")? else {
+        return Ok(Value::Int(-1));
+    };
+    Ok(Value::Int(rt_dict_scope_read_epoch_v1(
+        RuntimeValue::from_raw(dict as u64),
+        owner,
+        fuel,
+    )))
+}
+
+pub fn rt_dict_scope_read_meta_v1_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some([dict, owner, epoch, field, fuel]) = scope_read_scalars::<5>(args, "rt_dict_scope_read_meta_v1")? else {
+        return Ok(Value::Int(-1));
+    };
+    Ok(Value::Int(rt_dict_scope_read_meta_v1(
+        RuntimeValue::from_raw(dict as u64),
+        owner,
+        epoch,
+        field,
+        fuel,
+    )))
+}
+
+pub fn rt_dict_scope_read_slot_v1_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some([dict, owner, epoch, slot, field, byte_index, fuel]) =
+        scope_read_scalars::<7>(args, "rt_dict_scope_read_slot_v1")?
+    else {
+        return Ok(Value::Int(-1));
+    };
+    Ok(Value::Int(rt_dict_scope_read_slot_v1(
+        RuntimeValue::from_raw(dict as u64),
+        owner,
+        epoch,
+        slot,
+        field,
+        byte_index,
+        fuel,
+    )))
 }
 
 #[cfg(test)]
@@ -209,7 +298,7 @@ mod tests {
     use std::sync::Arc;
 
     fn interpreter_dict() -> Value {
-        Value::Dict(Arc::new(HashMap::from([
+        Value::Dict(Arc::new(crate::value::DictMap::from([
             ("beta".to_string(), Value::Int(2)),
             ("alpha".to_string(), Value::Int(1)),
         ])))
@@ -230,11 +319,15 @@ mod tests {
         );
         assert_eq!(
             rt_dict_keys_fn(std::slice::from_ref(&dict)).unwrap(),
-            Value::array(vec![Value::text("alpha"), Value::text("beta")])
+            Value::array(vec![Value::text("beta"), Value::text("alpha")])
         );
         assert_eq!(
             rt_dict_values_fn(std::slice::from_ref(&dict)).unwrap(),
-            Value::array(vec![Value::Int(1), Value::Int(2)])
+            Value::array(vec![Value::Int(2), Value::Int(1)])
         );
     }
 }
+
+#[cfg(test)]
+#[path = "sffi_dict_scope_read_tests.rs"]
+mod scope_read_tests;

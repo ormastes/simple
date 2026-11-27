@@ -14,6 +14,9 @@ use compiler.backend.linker.object_emitter.{assemble_code_units}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.nogc_sync_mut.io.process_ops.{shell}
 use std.nogc_sync_mut.io.env_ops.{cwd}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.io_runtime.{dir_remove_all}
 use compiler.backend.runtime_compiler.{_get_temp_dir}
 
 fn detect_preferred_backend(extra_flags: [text]) -> text:
@@ -90,9 +93,10 @@ fn scan_libraries_with_provider(library_paths: [text], verbose: bool, provider: 
                     print "[linker-lib] Warning: Could not read library {trimmed}: {add_result.unwrap_err()}"
                 continue
 
-            val getter_modules = SmfGetter.new()
+            var getter_modules = SmfGetter.new()
             _ = getter_modules.add_library(trimmed)
             val modules = getter_modules.list_modules()
+            getter_modules.close()
             lib_info = LibraryInfo(path: trimmed, name: lib_name, modules: modules)
             libraries.push(lib_info)
 
@@ -152,86 +156,101 @@ fn resolve_symbols_from_libraries(
     var resolved_modules: [ResolvedModule] = []
     var resolved_count = 0
 
-    for undef_sym in undefined_symbols:
-        val sym_name = undef_sym.name
+    if undefined_symbols.len() == 0 or libraries.len() == 0:
+        if verbose:
+            print "[linker-lib] Resolved 0 symbols from 0 modules"
+        return Ok(resolved_modules)
 
-        # Try to find this symbol in any library module
-        var found = false
-        for lib in libraries:
-            if found:
+    # Index only the requested undefined symbols in a single pass over libraries
+    # so each SMF module is parsed at most once instead of once per symbol.
+    var wanted: Dict<text, bool> = {}
+    for undef_sym in undefined_symbols:
+        wanted[undef_sym.name] = true
+
+    var sym_owner_slot: Dict<text, i64> = {}
+    var slot_module_names: [text] = []
+    var slot_lib_paths: [text] = []
+    var slot_lib_names: [text] = []
+    var slot_smf_data: [[u8]] = []
+
+    for lib in libraries:
+        if sym_owner_slot.len() == wanted.len():
+            break
+
+        # Ensure library indexed in shared provider
+        val add_result = provider.add_library(lib.path)
+        if add_result.is_err():
+            continue
+
+        # Check each module in this library once
+        for module_name in lib.modules:
+            if sym_owner_slot.len() == wanted.len():
                 break
 
-            # Ensure library indexed in shared provider
-            val add_result = provider.add_library(lib.path)
-            if add_result.is_err():
+            val smf_result = provider.get_module_bytes(module_name)
+            if smf_result.is_err():
                 continue
 
-            # Check each module in this library
-            for module_name in lib.modules:
-                # Get module SMF data
-                val smf_result = provider.get_module_bytes(module_name)
-                if smf_result.is_err():
-                    continue
+            val smf_data = smf_result.unwrap()
+            val reader_result = SmfReaderMemory.from_data(smf_data)
+            if reader_result.is_err():
+                continue
 
-                val smf_data = smf_result.unwrap()
+            val reader = reader_result.unwrap()
+            val exported = reader.exported_symbols()
+            var module_slot: i64 = -1
+            for exp_sym in exported:
+                if wanted.has(exp_sym.name) and not sym_owner_slot.has(exp_sym.name):
+                    if module_slot < 0:
+                        module_slot = slot_module_names.len()
+                        slot_module_names.push(module_name)
+                        slot_lib_paths.push(lib.path)
+                        slot_lib_names.push(lib.name)
+                        slot_smf_data.push(smf_data)
+                    sym_owner_slot[exp_sym.name] = module_slot
 
-                # Parse module to check for exported symbol
-                val reader_result = SmfReaderMemory.from_data(smf_data)
-                if reader_result.is_err():
-                    continue
+    var added_slots: Dict<i64, bool> = {}
+    for undef_sym in undefined_symbols:
+        val sym_name = undef_sym.name
+        if not sym_owner_slot.has(sym_name):
+            continue
 
-                val reader = reader_result.unwrap()
+        val slot = sym_owner_slot[sym_name]
+        val module_name = slot_module_names[slot]
+        val lib_path = slot_lib_paths[slot]
+        val lib_name = slot_lib_names[slot]
 
-                # Check if this module exports the symbol
-                val exported = reader.exported_symbols()
-                for exp_sym in exported:
-                    if exp_sym.name == sym_name:
-                        # Found it!
-                        if verbose:
-                            print "[linker-lib] Resolved '{sym_name}' from {lib.name}:{module_name}"
+        if verbose:
+            print "[linker-lib] Resolved '{sym_name}' from {lib_name}:{module_name}"
 
-                        # Add this module to resolved list (avoid duplicates)
-                        var already_added = false
-                        for rm in resolved_modules:
-                            val check1 = rm.module_name == module_name
-                            val check2 = rm.library_path == lib.path
-                            if check1 and check2:
-                                already_added = true
-                                break
+        if not added_slots.has(slot):
+            added_slots[slot] = true
+            var obj_data: [u8] = []
+            var has_obj = false
+            var has_units = false
+            var code_units: [ObjectCodeUnit] = []
+            val obj_result = provider.get_object(module_name)
+            if obj_result.is_ok():
+                obj_data = obj_result.unwrap()
+                has_obj = true
+            else:
+                val code_res = provider.get_exported_code(module_name)
+                if code_res.is_ok():
+                    code_units = code_res.unwrap()
+                    has_units = true
 
-                        if not already_added:
-                            # Try to get object file data
-                            var obj_data: [u8] = []
-                            var has_obj = false
-                            var has_units = false
-                            var code_units: [ObjectCodeUnit] = []
-                            val obj_result = provider.get_object(module_name)
-                            if obj_result.is_ok():
-                                obj_data = obj_result.unwrap()
-                                has_obj = true
-                            else:
-                                val code_res = provider.get_exported_code(module_name)
-                                if code_res.is_ok():
-                                    code_units = code_res.unwrap()
-                                    has_units = true
+            val resolved = ResolvedModule(
+                module_name: module_name,
+                library_path: lib_path,
+                smf_data: slot_smf_data[slot],
+                has_object: has_obj,
+                obj_data: obj_data,
+                has_code_units: has_units,
+                code_units: code_units
+            )
+            resolved_modules.push(resolved)
 
-                            val resolved = ResolvedModule(
-                                module_name: module_name,
-                                library_path: lib.path,
-                                smf_data: smf_data,
-                                has_object: has_obj,
-                                obj_data: obj_data,
-                                has_code_units: has_units,
-                                code_units: code_units
-                            )
-                            resolved_modules.push(resolved)
-
-                        resolved_count = resolved_count + 1
-                        found = true
-                        break
-
-                if found:
-                    break
+        resolved_count = resolved_count + 1
 
     if verbose:
         print "[linker-lib] Resolved {resolved_count} symbols from {resolved_modules.len()} modules"
@@ -390,8 +409,10 @@ fn link_with_libraries(
     if verbose:
         print "[linker-lib] Extracting object files for {resolved.len()} modules"
 
-    val extract_result = extract_objects_from_resolved(resolved, "{_get_temp_dir()}/simple_lib_obj", verbose)
+    val lib_temp_dir = "{_get_temp_dir()}/simple_lib_obj_{getpid()}_{time_now_unix_micros()}"
+    val extract_result = extract_objects_from_resolved(resolved, lib_temp_dir, verbose)
     if extract_result.is_err():
+        val _clean_err = dir_remove_all(lib_temp_dir)
         return Err(extract_result.unwrap_err())
 
     val library_objects = extract_result.unwrap()
@@ -406,6 +427,7 @@ fn link_with_libraries(
 
     # Step 6: Link all objects together
     val link_result = link_to_native(all_objects, output, config)
+    val _clean_done = dir_remove_all(lib_temp_dir)
     link_result
 
 fn extract_objects_from_resolved(
@@ -461,15 +483,17 @@ fn write_bytes_to_file(path: text, data: [u8]) -> bool:
         val result = shell("touch '{path}'")
         return result.exit_code == 0
 
-    # Convert to hex and write
-    var hex_str = ""
+    # Convert to hex in O(N) via array join instead of quadratic string concat.
+    val hex_digits = "0123456789abcdef"
+    var hex_parts: [text] = []
     for byte in data:
         val b = byte as i64
         val hi_idx = (b >> 4) & 0xF
         val lo_idx = b & 0xF
-        val hi = "0123456789abcdef"[hi_idx:hi_idx + 1]
-        val lo = "0123456789abcdef"[lo_idx:lo_idx + 1]
-        hex_str = hex_str + hi + lo
+        val hi = hex_digits[hi_idx:hi_idx + 1]
+        val lo = hex_digits[lo_idx:lo_idx + 1]
+        hex_parts.push(hi + lo)
+    val hex_str = hex_parts.join("")
 
     val result = shell("echo '{hex_str}' | xxd -r -p > '{path}'")
     result.exit_code == 0

@@ -1,11 +1,33 @@
+# Browser Demo — widget UI plus a raw browser-engine render path.
+# Part B (create_demo_dom / render_demo_to_pixels) was lost in the 2026-08 tree
+# wipe and restored from 5ff78c36804~1, adapted to the current BrowserRenderer
+# API (render_dom returns a RenderScene; execute_scene_to_buffer returns pixels).
+
 use common.ui.widget.{WidgetNode, UITree}
 use nogc_sync_mut.ui.session.{UISession}
 use common.ui.builder.{column, row, panel, text_widget, button, label, statusbar, build_tree_with_title}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
+use common.render_scene.executor.{execute_scene_to_buffer}
+
+val DEMO_BG_COLOR: u32 = 0xFFF0F0F0
 
 class BrowserDemoApp:
+    pixel_count: i32
+    node_count: i32
+    render_done: bool
 
     static fn new() -> BrowserDemoApp:
-        BrowserDemoApp()
+        var app = BrowserDemoApp(pixel_count: 0, node_count: 0, render_done: false)
+        app.run_browser_render()
+        app
+
+    me run_browser_render():
+        """Execute the browser rendering pipeline and store stats."""
+        val (node_count, pixel_count) = render_demo_stats(600, 400)
+        self.node_count = node_count
+        self.pixel_count = pixel_count
+        self.render_done = true
 
     me build_ui() -> UISession:
         val nav_buttons = row("nav_buttons", [
@@ -41,3 +63,120 @@ class BrowserDemoApp:
 
         val tree = build_tree_with_title(root, "SimpleOS Browser", "dark")
         UISession.new(tree)
+
+# =========================================================================
+# Browser Render Pipeline (Part B)
+# =========================================================================
+
+fn create_demo_dom() -> BeDomNode:
+    """Build a DOM tree manually showing browser engine features.
+
+    Creates: root div, header, flex row with 3 colored boxes,
+    text paragraph, and footer — exercising the full CSS property set.
+    """
+    # Root div with light gray background
+    var root = BeDomNode.element("div")
+    root.set_style("background-color", "#f0f0f0")
+    root.set_style("padding", "16")
+    root.set_style("width", "600")
+    root.set_style("height", "400")
+
+    # Header — blue background, white text
+    var header = BeDomNode.element("div")
+    header.set_style("background-color", "#007acc")
+    header.set_style("color", "#ffffff")
+    header.set_style("padding", "12")
+    header.set_style("font-size", "16")
+    var header_text = BeDomNode.text("Browser Rendering Demo")
+    header.add_child(header_text)
+    root.add_child(header)
+
+    # Flexbox row with 3 colored boxes
+    var flex_row = BeDomNode.element("div")
+    flex_row.set_style("display", "flex")
+    flex_row.set_style("flex-direction", "row")
+    flex_row.set_style("gap", "8")
+    flex_row.set_style("padding", "8")
+
+    var box1 = BeDomNode.element("div")
+    box1.set_style("width", "120")
+    box1.set_style("height", "80")
+    box1.set_style("background-color", "#ff6b6b")
+    box1.set_style("border-radius", "4")
+    var box1_text = BeDomNode.text("Red Box")
+    box1.add_child(box1_text)
+
+    var box2 = BeDomNode.element("div")
+    box2.set_style("width", "120")
+    box2.set_style("height", "80")
+    box2.set_style("background-color", "#51cf66")
+    box2.set_style("border-radius", "4")
+    var box2_text = BeDomNode.text("Green Box")
+    box2.add_child(box2_text)
+
+    var box3 = BeDomNode.element("div")
+    box3.set_style("width", "120")
+    box3.set_style("height", "80")
+    box3.set_style("background-color", "#339af0")
+    box3.set_style("border-radius", "4")
+    var box3_text = BeDomNode.text("Blue Box")
+    box3.add_child(box3_text)
+
+    flex_row.add_child(box1)
+    flex_row.add_child(box2)
+    flex_row.add_child(box3)
+    root.add_child(flex_row)
+
+    # Wrapped text paragraph
+    var para = BeDomNode.element("p")
+    para.set_style("padding", "8")
+    para.set_style("color", "#333333")
+    para.set_style("font-size", "14")
+    var para_text = BeDomNode.text("This paragraph demonstrates text wrapping in the browser rendering engine. The layout engine handles word-level wrapping at container boundaries using VGA bitmap font metrics.")
+    para.add_child(para_text)
+    root.add_child(para)
+
+    # Footer with dark background
+    var footer = BeDomNode.element("div")
+    footer.set_style("background-color", "#2d2d2d")
+    footer.set_style("color", "#cccccc")
+    footer.set_style("padding", "8")
+    var footer_text = BeDomNode.text("SimpleOS Browser Engine v0.1")
+    footer.add_child(footer_text)
+    root.add_child(footer)
+
+    return root
+
+fn count_visible_pixels(buffer: [u32], bg_color: u32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < buffer.len():
+        if buffer[idx] != bg_color:
+            count = count + 1
+        idx = idx + 1
+    count
+fn render_demo_stats(width: i32, height: i32) -> (i32, i32):
+    """Return (node_count, visible_pixel_count) for the demo DOM render."""
+    val pixels = render_demo_to_pixels(width, height)
+    (demo_node_count(), count_visible_pixels(pixels, DEMO_BG_COLOR))
+
+fn render_demo_to_pixels(width: i32, height: i32) -> [u32]:
+    """Full pipeline: DOM -> layout -> paint -> scene -> pixels."""
+    val renderer = BrowserRenderer.create(width, height)
+    val scene = renderer.render_dom(create_demo_dom())
+    var buffer: [u32] = []
+    var i: i32 = 0
+    while i < width * height:
+        buffer.push(DEMO_BG_COLOR)
+        i = i + 1
+    execute_scene_to_buffer(scene, buffer, width, height)
+
+fn demo_node_count() -> i32:
+    """Return the number of DOM nodes in the demo tree (for testing)."""
+    _count_nodes(create_demo_dom())
+
+fn _count_nodes(node: BeDomNode) -> i32:
+    var count: i32 = 1
+    for child in node.children:
+        count = count + _count_nodes(child)
+    count

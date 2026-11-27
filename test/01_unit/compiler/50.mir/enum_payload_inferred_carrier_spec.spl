@@ -1,0 +1,59 @@
+use std.spec
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn carrier_diagnostics(source: text) -> text:
+    val filename = "enum_payload_inferred_carrier.spl"
+    val parsed = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var errors: [text] = []
+    for error in hir_lowering.errors:
+        errors = errors.push("HIR: " + error.message)
+    for error in lowering.errors:
+        errors = errors.push("MIR: " + error.message)
+    if mir.functions.len() == 0:
+        errors = errors.push("no lowered functions")
+    errors.join("\n")
+
+describe "null coalesce with an optional default":
+    # bug mir_null_coalesce_optional_fallback_payload_2026-11-07: Stage 2
+    # (run 15) rejected lower_enum_construct_named, whose
+    # `option_payload_type ?? self.some_witness_inner_hir_type(..)` merges two
+    # `HirType?` values, with "payload type mismatch at 0" on every
+    # `HirTypeKind.Optional(inner_type)` built from the `if val` binder.
+    it "keeps an optional-or-optional merge optional for an if-val binder":
+        step("A method default returning T? merges to T?; the binder is T")
+        val source = "struct T:\n    id: i64\nenum K:\n    Opt(inner: T)\n    Nope\nclass L:\n    n: i64\nimpl L:\n    fn wit(t: T) -> T?:\n        Some(t)\n    me go(t: T, flag: bool) -> K:\n        var p: T? = nil\n        if flag:\n            p = self.wit(t)\n        val w = p ?? self.wit(t)\n        if val inner = w:\n            return K.Opt(inner)\n        K.Nope\n"
+        expect(carrier_diagnostics(source)).to_equal("")
+    it "accepts a free-function optional default":
+        val source = "struct T:\n    id: i64\nenum K:\n    Opt(inner: T)\n    Nope\nfn helper(t: T) -> T?:\n    Some(t)\nfn go(a: T?, t: T) -> K:\n    val w = a ?? helper(t)\n    if val inner = w:\n        return K.Opt(inner)\n    K.Nope\n"
+        expect(carrier_diagnostics(source)).to_equal("")
+    it "accepts an annotated optional merge of two optional parameters":
+        val source = "struct T:\n    id: i64\nenum K:\n    Opt(inner: T)\n    Nope\nfn go(a: T?, b: T?) -> K:\n    val w: T? = a ?? b\n    if val inner = w:\n        return K.Opt(inner)\n    K.Nope\n"
+        expect(carrier_diagnostics(source)).to_equal("")
+    it "still accepts a plain record default":
+        val source = "struct T:\n    id: i64\nenum K:\n    Opt(inner: T)\nfn go(a: T?, t: T) -> K:\n    val w = a ?? t\n    K.Opt(w)\n"
+        expect(carrier_diagnostics(source)).to_equal("")
+    it "rejects an optional default of another record owner":
+        step("A U? default for a T? left is not widened into T?")
+        val source = "struct T:\n    id: i64\nstruct U:\n    id: i64\nenum K:\n    Opt(inner: T)\n    Nope\nfn other(u: U) -> U?:\n    Some(u)\nfn go(a: T?, u: U) -> K:\n    val w = a ?? other(u)\n    if val inner = w:\n        return K.Opt(inner)\n    K.Nope\n"
+        expect(carrier_diagnostics(source)).to_contain("null coalesce fallback does not match declared record owner")
+    it "does not admit the optional merge in a mandatory record slot":
+        step("`a ?? b` with b: T? is T?, never a bare T payload")
+        val source = "struct T:\n    id: i64\nenum K:\n    Opt(inner: T)\nfn go(a: T?, b: T?) -> K:\n    val w = a ?? b\n    K.Opt(w)\n"
+        expect(carrier_diagnostics(source)).to_contain("payload type mismatch")
+    it "rejects an optional default under a bare record annotation":
+        step("`val w: T = a ?? b` with b: T? is still rejected (T? is not T)")
+        val source = "struct T:\n    id: i64\nenum K:\n    Opt(inner: T)\nfn go(a: T?, b: T?) -> K:\n    val w: T = a ?? b\n    K.Opt(w)\n"
+        expect(carrier_diagnostics(source)).to_not_equal("")
+    it "keeps an enum optional-or-optional merge optional":
+        val source = "enum E:\n    A(i64)\nenum K:\n    Opt(inner: E)\n    Nope\nfn mk(n: i64) -> E?:\n    Some(E.A(n))\nfn go(a: E?, n: i64) -> K:\n    val w = a ?? mk(n)\n    if val inner = w:\n        return K.Opt(inner)\n    K.Nope\n"
+        expect(carrier_diagnostics(source)).to_equal("")

@@ -1,0 +1,96 @@
+# @cover src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs
+"""
+## Purpose and audience
+The same assignment evaluation order as `attr_eval_order_parity_spec.spl`,
+with only inline cases so the spec runner may compile it through the seed JIT
+(Cranelift via HIR/MIR) rather than the tree-walking interpreter. Readers are
+seed and backend authors. Owner decision 2026-11-06 (option b): the
+right-hand side first, then the place once, outer to inner.
+Plan: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md
+(W2a; ATTR-16, ATTR-18). Category: Language.
+## Operator workflow
+bin/simple test test/02_integration/compiler/data/attr_eval_order_inline_spec.spl
+## Compatibility and limitations
+Which seed engine runs the file is the runner's choice (`[route] mode=`);
+the order must be the same on either.
+## Verification guidance and troubleshooting
+A repeated `i` or `r` in a compound case means the place was evaluated twice.
+"""
+# Lifecycle: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md
+# @manual_section: Assignment evaluation order on the seed engines
+
+use std.spec.*
+
+class Trace:
+    entries: [text]
+
+val log = Trace(entries: [])
+
+class Box:
+    items: [i64]
+    x: i64
+
+fn idx(tag: text, i: i64) -> i64:
+    log.entries.push(tag)
+    i
+
+fn rhs(v: i64) -> i64:
+    log.entries.push("rhs")
+    v
+
+fn bump(b: Box) -> i64:
+    log.entries.push("rhs")
+    b.items[0] = 100
+    1
+
+fn take_log() -> text:
+    val joined = log.entries.join(",")
+    log.entries = []
+    joined
+
+describe "Assignment evaluation order on the seed engines":
+    it "evaluates the right-hand side and then the place, outer to inner":
+        # @req REQ-ATTR-16
+        step("Assign through an index, a nested index and a field of an indexed element")
+        var arr = [0, 0]
+        var grid = [[0, 0], [0, 0]]
+        var boxes = [Box(items: [0, 0], x: 0)]
+        arr[idx("i", 1)] = rhs(5)
+        val a = take_log()
+        grid[idx("r", 1)][idx("i", 0)] = rhs(7)
+        val d = take_log()
+        boxes[idx("r", 0)].items[idx("i", 1)] = rhs(5)
+        val c = take_log()
+        # @capture(exec): side-effect logs
+        step("Verify the order and the stored values")
+        expect(a).to_equal("rhs,i")
+        expect(d).to_equal("rhs,r,i")
+        expect(c).to_equal("rhs,r,i")
+        expect(grid[1][0]).to_equal(7)  # oracle: value written above
+        expect(boxes[0].items[1]).to_equal(5)  # oracle: value written above
+
+    it "evaluates the place of a compound assignment once, after the right-hand side":
+        # @req REQ-ATTR-16
+        step("Compound-assign an indexed element, a field of an indexed element and a nested index")
+        var arr = [10, 20]
+        var grid = [[0, 0], [7, 0]]
+        var boxes = [Box(items: [0, 0], x: 5)]
+        arr[idx("i", 0)] += rhs(2)
+        val e = take_log()
+        boxes[idx("r", 0)].x += rhs(3)
+        val f = take_log()
+        grid[idx("r", 1)][idx("i", 0)] -= rhs(4)
+        val g = take_log()
+        # @capture(exec): side-effect logs and results
+        step("Verify each place name appears once, after the right-hand side, and the update lands")
+        expect(e).to_equal("rhs,i")
+        expect(f).to_equal("rhs,r")
+        expect(g).to_equal("rhs,r,i")
+        expect(arr[0]).to_equal(12)  # oracle: 10 + 2
+        expect(boxes[0].x).to_equal(8)  # oracle: 5 + 3
+        expect(grid[1][0]).to_equal(3)  # oracle: 7 - 4
+        step("Compound-assign an element that the right-hand side itself overwrites")
+        val holder = Box(items: [0, 0], x: 0)
+        holder.items[idx("i", 0)] += bump(holder)
+        expect(take_log()).to_equal("rhs,i")
+        expect(holder.items[0]).to_equal(101)  # oracle: RHS sets 100 first, then 100 + 1

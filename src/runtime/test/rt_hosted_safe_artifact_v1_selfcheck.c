@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_hosted_safe_artifact_v1_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 /* Build with runtime_native.c and SIMPLE_HOSTED_SAFE_ARTIFACT_TEST_V1. */
 #include "../runtime.h"
 #include "../runtime_hosted_safe_artifact_v1.h"
@@ -344,3 +349,5 @@ int main(void) {
     puts("PASS: hosted-safe-artifact native retained-root/read/publish ABI and failure cleanup");
     return 0;
 }
+
+#endif /* !_WIN32 */

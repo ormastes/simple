@@ -1,0 +1,115 @@
+# AUTHORED_NOT_RUN. Run only as the MainPID of the administrator-installed
+# disposable supervisor fixture. This invokes real masks/reload/stop operations.
+# It deliberately retains masks and ownership; administrator teardown is needed.
+# No self-installation, environment/path override, synthetic bus or unsupported skip.
+# @req REQ-LINUX-SUPERVISOR-FENCE-001
+# @req REQ-LINUX-SUPERVISOR-FENCE-002
+# @req REQ-LINUX-SUPERVISOR-FENCE-003
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.linux_installed_supervisor_owner_v1.*
+use std.nogc_sync_mut.io.linux_installed_supervisor_profile_v1.*
+
+var supervisor_fixture_owners_v1: [LinuxInstalledSupervisorOwnerV1] = []
+var supervisor_fixture_profiles_v1: [LinuxInstalledSupervisorProfileV1] = []
+
+fn supervisor_fixture_profile_v1() -> Result<LinuxInstalledSupervisorProfileV1, text>:
+    match linux_installed_supervisor_profile_open_v1():
+        case LinuxInstalledSupervisorProfileOpenV1.Ready(owner):
+            supervisor_fixture_profiles_v1.push(owner)
+            Ok(owner)
+        case LinuxInstalledSupervisorProfileOpenV1.CleanupRequired(owner, reason):
+            supervisor_fixture_profiles_v1.push(owner)
+            val cleanup = owner.close_v1()
+            Err("actual installed profile fixture refused: " + reason + "; cleanup=" + cleanup)
+        case LinuxInstalledSupervisorProfileOpenV1.Rejected(reason): Err(reason)
+
+fn supervisor_fixture_open_v1() -> Result<LinuxInstalledSupervisorOwnerV1, text>:
+    match linux_installed_supervisor_open_v1():
+        case LinuxInstalledSupervisorOpenV1.Ready(owner):
+            supervisor_fixture_owners_v1.push(owner)
+            Ok(owner)
+        case LinuxInstalledSupervisorOpenV1.CleanupRequired(owner, reason):
+            supervisor_fixture_owners_v1.push(owner)
+            val cleanup = owner.close_v1()
+            Err("actual installed supervisor fixture refused: " + reason + "; cleanup=" + cleanup)
+        case LinuxInstalledSupervisorOpenV1.Rejected(reason):
+            Err("actual installed supervisor fixture required: " + reason)
+
+fn supervisor_fixture_competing_v1() -> Result<(bool, text), text>:
+    match linux_installed_supervisor_open_v1():
+        case LinuxInstalledSupervisorOpenV1.Rejected(reason): Ok((true, reason))
+        case LinuxInstalledSupervisorOpenV1.CleanupRequired(owner, reason):
+            supervisor_fixture_owners_v1.push(owner)
+            val cleanup = owner.close_v1()
+            if cleanup != "released": return Err("competing actual capsule retained cleanup: " + cleanup)
+            Ok((true, reason))
+        case LinuxInstalledSupervisorOpenV1.Ready(owner):
+            supervisor_fixture_owners_v1.push(owner)
+            val retained = owner.close_v1()
+            Err("competing actual supervisor acquired exclusion; cleanup=" + retained)
+
+describe "Actual installed Linux supervisor producer exclusion component":
+    it "records actual profile close consumption once across copied ownership":
+        step("Read the actual root-installed profile through its retained opaque reader")
+        val owner = supervisor_fixture_profile_v1().unwrap()
+        val copied = owner
+        val before = owner.current_v1()
+        step("Consume the actual reader once and keep canonical close progress for its copy")
+        val first = owner.close_v1()
+        val diagnostic = owner.close_diagnostic_v1()
+        val second = copied.close_v1()
+        val repeated_diagnostic = copied.close_diagnostic_v1()
+        val after = copied.current_v1()
+        expect(before.is_ok()).to_equal(true)
+        expect(first).to_equal("released")
+        expect(second).to_equal(first)
+        expect(diagnostic).to_equal("")
+        expect(repeated_diagnostic).to_equal(diagnostic)
+        expect(after.is_err()).to_equal(true)
+
+    it "stops only the installed activation closure and retains exclusion without admitting machine genesis":
+        step("Open actual protected installation and exclude its legacy producer activation routes")
+        val owner = supervisor_fixture_open_v1().unwrap()
+        val copied = owner
+        step("Observe actual masked, completed and empty producer groups under one authenticated manager")
+        val observed = owner.current_v1()
+        if observed.is_err():
+            # Fail AND return before opening another mutating factory after
+            # actual exclusion loss. The native owner stays retained above.
+            assert(false)
+            return
+        val installed = owner.installed_snapshot_v1()
+        if installed.is_err():
+            assert(false)
+            return
+        step("Refuse a second actual exclusion owner in the same global lock namespace")
+        val competing = supervisor_fixture_competing_v1()
+        step("Retain inhibition when close lacks an actual successor and keep copied ownership canonical")
+        val close_result = owner.close_v1()
+        val still_owned = copied.current_v1()
+        expect(observed.is_ok()).to_equal(true)
+        expect(installed.is_ok()).to_equal(true)
+        expect(competing.is_ok()).to_equal(true)
+        expect(competing.unwrap().0).to_equal(true)
+        val first = observed.unwrap()
+        expect(first.profile_digest.len()).to_equal(64)
+        expect(first.machine_policy_digest.len()).to_equal(64)
+        expect(first.owner_generation).to_be_greater_than(0)
+        expect(first.process_identity_digest.len()).to_equal(64)
+        expect(first.provider_process_id).to_be_greater_than(0)
+        expect(first.provider_incarnation.len()).to_equal(64)
+        val profile = installed.unwrap()
+        expect(profile.digest).to_equal(first.profile_digest)
+        expect(profile.machine_policy_digest).to_equal(first.machine_policy_digest)
+        expect(profile.provider_policy.len()).to_be_greater_than(0)
+        expect(first.manager_unique_name).to_start_with(":")
+        expect(first.stopped_units.len()).to_be_greater_than(0)
+        expect(first.mutation_attempted).to_equal(true)
+        expect(first.exclusion_component_live).to_equal(true)
+        expect(first.phase).to_equal("exclusion-component-only")
+        expect(profile.closed_provider_model).to_equal("single-rootless-uid-all-stores-pinned-v1")
+        expect(close_result).to_equal("retained-supervisor-inhibition-successor-handoff-required")
+        expect(still_owned.is_ok()).to_equal(true)
+        expect(still_owned.unwrap().profile_digest).to_equal(first.profile_digest)
+        expect(still_owned.unwrap().manager_unique_name).to_equal(first.manager_unique_name)
+        expect(still_owned.unwrap().provider_incarnation).to_equal(first.provider_incarnation)

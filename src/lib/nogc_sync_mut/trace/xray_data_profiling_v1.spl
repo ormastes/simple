@@ -1,0 +1,71 @@
+# MDSOC: feature dimension (trace host policy).
+# The ONE data-profiling policy an in-process XRay host applies to adaptive
+# containers, derived once from the `simple.trace/observer-v1` aspect
+# extension:
+#
+#   extension            initial()   after(adapter state)
+#   absent               true        true   (legacy: the trace controller does
+#                                            not own the switch, containers
+#                                            profile exactly as before)
+#   malformed            false       false  (fail closed)
+#   instrumentation off  false       false
+#   always_on            true        true
+#   dynamic              false       true only while Active, i.e. between a
+#                                    successful start and request_stop
+#
+# `dynamic` starts OFF on purpose: the aspect says profiling is switched by
+# the session, and no session is running when a container is constructed.
+#
+# Ownership: a plain value, held by the same caller that owns the
+# XrayLlvmAdapterV1 (the serialized control-plane owner). The host calls
+# `container.set_profiling(policy.after(adapter.state_code()))` right after
+# `start` and right after `request_stop`; containers keep their own bool, so
+# a container read costs one bool whether profiling is on or off. No lock,
+# no shared mutable state, never called from a hook.
+use std.common.plugin.aspect_params.AspectParamsV1
+use std.common.trace.observer_contract_v1.{TraceConfigV1, TraceInstrumentationV1}
+use std.common.trace.observer_aspect_config_v1.trace_aspect_config_v1
+use std.common.trace.data.data_observation_sink_v1.data_observation_profiling_while_v1
+use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.{XRAY_LLVM_STATE_ACTIVE_V1}
+
+pub enum XrayDataProfilingModeV1:
+    Legacy
+    Never
+    Session
+    Always
+
+pub struct XrayDataProfilingV1:
+    mode: XrayDataProfilingModeV1
+    # The admitted observer config (None when absent or malformed).
+    config: TraceConfigV1?
+
+impl XrayDataProfilingV1:
+    static fn from_aspect(params: AspectParamsV1) -> XrayDataProfilingV1:
+        match trace_aspect_config_v1(params):
+            case Ok(Some(config)):
+                val mode = match config.instrumentation:
+                    case TraceInstrumentationV1.Off: XrayDataProfilingModeV1.Never
+                    case TraceInstrumentationV1.Dynamic: XrayDataProfilingModeV1.Session
+                    case TraceInstrumentationV1.AlwaysOn: XrayDataProfilingModeV1.Always
+                XrayDataProfilingV1(mode: mode, config: Some(config))
+            case Ok(None): XrayDataProfilingV1(mode: XrayDataProfilingModeV1.Legacy, config: None)
+            case Err(_): XrayDataProfilingV1(mode: XrayDataProfilingModeV1.Never, config: None)
+
+    # The value a container is constructed with (before any session).
+    fn initial() -> bool:
+        self.after_active(false)
+
+    # The value to flip containers to after a control-plane transition;
+    # `adapter_state` is XrayLlvmAdapterV1.state_code().
+    fn after(adapter_state: i64) -> bool:
+        self.after_active(adapter_state == XRAY_LLVM_STATE_ACTIVE_V1)
+
+    fn after_active(active: bool) -> bool:
+        match self.mode:
+            case XrayDataProfilingModeV1.Legacy: true
+            case XrayDataProfilingModeV1.Never: false
+            case XrayDataProfilingModeV1.Always: true
+            case XrayDataProfilingModeV1.Session:
+                data_observation_profiling_while_v1(self.config, active)
+
+export XrayDataProfilingModeV1, XrayDataProfilingV1

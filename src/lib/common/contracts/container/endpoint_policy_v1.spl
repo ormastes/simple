@@ -1,0 +1,135 @@
+# Portable endpoint network policy (design simple_container_macos_seatbelt §7.1, §11.1, §13.3-13.5).
+#
+# `endpoint-v1` is an EMULATED private network: logical addresses and virtual
+# ports understood by the broker and participating clients, never assigned to
+# a host interface. A CIDR here allocates broker addresses only; nothing in
+# this module may trigger ifconfig, routes, PF or a VPN. `pod-ip-v1` decodes
+# so it can be REFUSED with a precise code (SCMAC-NET-001), never translated.
+
+pub const ENDPOINT_PROFILE_ENDPOINT_V1 = "endpoint-v1"
+pub const ENDPOINT_PROFILE_POD_IP_V1 = "pod-ip-v1"
+
+pub enum EndpointPermissionV1:
+    Deny
+    Allow
+
+pub fn endpoint_permission_allows_v1(p: EndpointPermissionV1) -> bool:
+    match p:
+        EndpointPermissionV1.Deny: false
+        EndpointPermissionV1.Allow: true
+
+pub enum EndpointClientModeV1:
+    SimpleNative
+    Proxy
+    SimpleOrProxy
+
+# The `network:` section of a seatbelt policy document, validated.
+pub struct EndpointPolicyV1:
+    profile: text
+    network_ref: text
+    client_mode: EndpointClientModeV1
+    direct_ip: EndpointPermissionV1
+    host_listen: EndpointPermissionV1
+    udp: EndpointPermissionV1
+    publish: text
+
+# Broker resource bounds from the `limits:` section.
+pub struct EndpointLimitsV1:
+    max_streams: i64
+    max_queued_bytes: i64
+    max_frame_bytes: i64
+    connect_timeout_ms: i64
+    idle_timeout_ms: i64
+
+# Canonical logical IPv4 prefix: `base` has no host bits set.
+pub struct LogicalCidrV1:
+    base: i64
+    prefix_len: i64
+
+pub fn logical_cidr_size_v1(c: LogicalCidrV1) -> i64:
+    var size = 1
+    var i = c.prefix_len
+    while i < 32:
+        size = size * 2
+        i = i + 1
+    size
+
+pub fn logical_ipv4_text_v1(addr: i64) -> text:
+    val a = (addr / 16777216) % 256
+    val b = (addr / 65536) % 256
+    val c = (addr / 256) % 256
+    val d = addr % 256
+    a.to_text() + "." + b.to_text() + "." + c.to_text() + "." + d.to_text()
+
+pub fn logical_cidr_text_v1(c: LogicalCidrV1) -> text:
+    logical_ipv4_text_v1(c.base) + "/" + c.prefix_len.to_text()
+
+fn cidr_digits_v1(s: text) -> i64:
+    if s.len() == 0 or s.len() > 3:
+        return -1
+    var acc = 0
+    for i in 0..s.len():
+        val ch = s.byte_at(i) as i64
+        if ch < 48 or ch > 57:
+            return -1
+        acc = acc * 10 + (ch - 48)
+    # Reject leading zeros ("010") so the spelling is canonical.
+    if s.len() > 1 and s.byte_at(0) as i64 == 48:
+        return -1
+    acc
+
+# Parse `a.b.c.d/n`. Every octet 0..255, prefix 8..30 (a usable broker
+# range), host bits zero. Arithmetic stays within 32 bits: no overflow.
+pub fn logical_cidr_parse_v1(s: text) -> Result<LogicalCidrV1, text>:
+    val slash = s.split("/")
+    if slash.len() != 2:
+        return Err("cidr-shape")
+    val octets = slash[0].split(".")
+    if octets.len() != 4:
+        return Err("cidr-shape")
+    var base = 0
+    for o in octets:
+        val n = cidr_digits_v1(o)
+        if n < 0 or n > 255:
+            return Err("cidr-octet")
+        base = base * 256 + n
+    val p = cidr_digits_v1(slash[1])
+    if p < 8 or p > 30:
+        return Err("cidr-prefix-range")
+    val c = LogicalCidrV1(base: base, prefix_len: p)
+    if base % logical_cidr_size_v1(c) != 0:
+        return Err("cidr-host-bits-set")
+    Ok(c)
+
+pub enum EndpointDestinationV1:
+    Service(text)
+    Host(text)
+
+pub fn endpoint_destination_text_v1(d: EndpointDestinationV1) -> text:
+    match d:
+        EndpointDestinationV1.Service(s): "service:" + s
+        EndpointDestinationV1.Host(h): "host:" + h
+
+pub fn endpoint_destination_name_v1(d: EndpointDestinationV1) -> text:
+    match d:
+        EndpointDestinationV1.Service(s): s
+        EndpointDestinationV1.Host(h): h
+
+# `source_role` and the destination name may be "*" (any). Protocol is "tcp"
+# only in v1; UDP is a later explicit phase (§11.10).
+pub struct EndpointRuleV1:
+    source_role: text
+    destination: EndpointDestinationV1
+    protocol: text
+    port: i64
+    action: EndpointPermissionV1
+
+pub struct EndpointNetworkV1:
+    name: text
+    ns: text
+    generation: i64
+    cidr: LogicalCidrV1
+    discovery_suffix: text
+    default_ingress: EndpointPermissionV1
+    default_egress: EndpointPermissionV1
+    rules: [EndpointRuleV1]

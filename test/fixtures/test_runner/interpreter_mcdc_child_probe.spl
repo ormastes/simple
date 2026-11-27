@@ -1,0 +1,60 @@
+# Real runner boundary probe. Invoked in a separate process by the integration
+# spec so MC/DC mode selection cannot change the parent test environment.
+use std.nogc_sync_mut.io.env_ops.{env_set}
+use std.sffi.cli_args.{cli_get_args}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_read_text, secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.test_runner.test_executor_parsing.{_tp_get_temp_dir}
+use std.test_runner.test_runner_args.{parse_test_args}
+use std.test_runner.test_runner_execute.{run_test_file_interpreter}
+use std.test_runner.test_executor_parsing.{find_simple_binary}
+use std.io_runtime.{file_hash_sha256_or_empty}
+use test.fixtures.test_runner.interpreter_mcdc_verdict.{interpreter_mcdc_verdict_valid}
+
+var mode = ""
+var failure = ""
+var binary = ""
+var digest = ""
+for argument in cli_get_args():
+    if argument.starts_with("--mcdc-probe-mode="):
+        mode = argument.replace("--mcdc-probe-mode=", "")
+    elif argument.starts_with("--mcdc-probe-failure="):
+        failure = argument.replace("--mcdc-probe-failure=", "")
+    elif argument.starts_with("--mcdc-probe-binary="):
+        binary = argument.replace("--mcdc-probe-binary=", "")
+    elif argument.starts_with("--mcdc-probe-sha256="):
+        digest = argument.replace("--mcdc-probe-sha256=", "")
+if mode != "on" and mode != "dynamic":
+    panic("probe requires explicit MC/DC mode")
+if binary == "" or digest.len() != 64 or (failure != "0" and failure != "1"):
+    panic("probe requires explicit child binary and expected verdict")
+if not env_set("SIMPLE_MCDC_MODE", mode) or not env_set("SIMPLE_BINARY", binary):
+    panic("probe could not configure isolated child environment")
+if find_simple_binary() != binary or file_hash_sha256_or_empty(binary) != digest:
+    panic("probe grandchild binary differs from requested pin")
+val expected_failure = failure == "1"
+val root = secure_temp_dir(_tp_get_temp_dir(), "mcdc-interpreter-").unwrap()
+val source = root + "/one_spec.spl"
+val marker = root + "/authored-execution.txt"
+val identity = "mcdc_child_authored_assertion:" + mode + ":" + failure
+if not env_set("SIMPLE_MCDC_PROBE_MARKER", marker):
+    dir_remove_all(root)
+    panic("probe could not configure execution marker")
+val expected = if expected_failure: "MCDC_EXPECTED_SENTINEL_B73" else: "MCDC_ACTUAL_SENTINEL_A17"
+if not file_write(source, "use std.spec.*\nuse std.nogc_sync_mut.io.env_ops.{{env_get}}\nuse std.nogc_sync_mut.io.file_ops.{{file_write}}\ndescribe \"one example\":\n    it \"mcdc_child_authored_assertion\":\n        if not file_write(env_get(\"SIMPLE_MCDC_PROBE_MARKER\"), \"" + identity + "\"):\n            panic(\"authored execution marker write failed\")\n        expect(\"MCDC_ACTUAL_SENTINEL_A17\").to_equal(\"" + expected + "\")\n"):
+    dir_remove_all(root)
+    panic("probe could not write spec")
+val options = parse_test_args([source, "--mode=interpreter", "--no-fork", "--assert-ran", "--timeout=120"])
+if options.fork_mode or options.coverage or not options.assert_ran or options.timeout != 120:
+    panic("probe did not select the authenticated interpreter subprocess route")
+val result = run_test_file_interpreter(source, options)
+val executed_marker_matches = file_read_text(marker) == identity
+file_delete(source)
+dir_remove_all(root)
+if file_hash_sha256_or_empty(binary) != digest:
+    panic("probe grandchild binary changed during execution")
+if not interpreter_mcdc_verdict_valid(result.passed, result.failed, result.skipped,
+        result.pending, result.blocked, result.unsupported, result.timed_out,
+        result.error, result.mcdc_evidence_v1, executed_marker_matches, expected_failure):
+    panic("interpreter did not preserve authenticated authored verdict: " + result.error)
+print "MCDC_INTERPRETER_REAL_VERDICT " + mode + " " + (if expected_failure: "FAIL" else: "PASS")

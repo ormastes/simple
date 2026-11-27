@@ -1,3 +1,6 @@
+use compiler.common.cache_contract.native_initializer_result_v2.{NativeInitializerStartupV2, NativeEntryObjectV2, native_initializer_startup_observe_v2}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
 # LLVM Native Link Orchestrator
 #
 # Orchestrates the full native executable linking pipeline for LLVM backend:
@@ -13,10 +16,10 @@ use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
 use compiler.backend.entry_point.{generate_entry_point_ir}
 use compiler.backend.llvm_target.{LlvmTargetConfig}
-use compiler.backend.llvm_backend_tools.{compile_ir_to_object, extract_symbols_nm, llc_available}
+use compiler.backend.llvm_backend_tools.{compile_ir_to_object, extract_symbols_nm, llc_available, xray_startup_require_export_v1}
 use compiler.backend.llvm_capability.{find_archive_portable, find_nm_portable, find_objcopy_portable, find_objdump_portable}
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
-use compiler.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
+use compiler.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, hosted_mingw_clang_target, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
 use compiler.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_contracts_provider_archive_file, stage4_contracts_provider_object_format, stage4_validate_contracts_provider_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
 use std.platform.{host_arch, host_os, is_macos}
@@ -27,7 +30,7 @@ use compiler.backend.verify.allocator_symbol_scan.{flight_allocator_scan_for_pro
 # Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
 # facade already used by the sibling llvm_backend_tools.spl for process_run);
 # resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
-use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
+use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256_or_shell, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
 use compiler.backend.simpleos_native_guards.{simpleos_module_init_symbols, simpleos_module_init_symbols_checked_v1}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1, native_tool_strict_resolve_v1}
 # ============================================================================
@@ -50,6 +53,11 @@ struct NativeLinkOptions:
     libraries: [text] = []
     library_paths: [text] = []
     linker_flags: [text] = []
+    unit_dynlibs: [text] = []
+    retained_symbols: [text] = []
+    unit_init_symbols: [text] = []
+    xray_thread_context_v1: bool = false
+    xray_startup_consumer_v1: bool = false
 
 impl NativeLinkOptions:
     static fn default() -> NativeLinkOptions:
@@ -74,6 +82,11 @@ fn llvm_apply_explicit_link_options(config: NativeLinkConfig, options: NativeLin
     result.libraries = options.libraries
     result.library_paths = options.library_paths
     result.extra_flags = config.extra_flags + options.linker_flags
+    var merged_retained = config.retained_symbols
+    for sym in options.retained_symbols:
+        if sym != "" and not merged_retained.contains(sym):
+            merged_retained = merged_retained.push(sym)
+    result.retained_symbols = merged_retained
     result
 
 export llvm_apply_explicit_link_options
@@ -106,7 +119,8 @@ fn hosted_c_target_matches_host(target: text, host_os_name: text, host_arch_name
         case _: ""
     if canonical_suffix == "":
         return false
-    target.substring(target_arch_text.len()) == canonical_suffix
+    val suffix = target.substring(target_arch_text.len())
+    suffix == canonical_suffix or (host_os_name == "windows" and suffix == "-pc-windows-gnu")
 
 # ============================================================================
 # C-Based Entry Point Compiler (no llc needed)
@@ -115,22 +129,52 @@ fn hosted_c_target_matches_host(target: text, host_os_name: text, host_arch_name
 pub fn entry_point_c_target_args(target_triple: text) -> [text]:
     if target_triple == "":
         return []
+    if target_triple.ends_with("-pc-windows-gnu") or target_triple.ends_with("-w64-mingw32") or target_triple.ends_with("-w64-windows-gnu"):
+        # Hosted mingw entry shim: retarget only, keep the hosted CRT.
+        return ["--target=" + hosted_mingw_clang_target(target_triple)]
     var args = ["--target={target_triple}", "-ffreestanding", "-nostdlib"]
-    if target_triple == "riscv64-unknown-simpleos":
+    # SimpleOS RV64 user/kernel objects are rv64gc/lp64d; medany keeps the
+    # shim linkable at the 0x100000000 user base (medlow HI20 overflows).
+    if target_triple == "riscv64-unknown-simpleos" or target_triple == "riscv64-unknown-elf":
         args.push("-march=rv64gc")
         args.push("-mabi=lp64d")
+        args.push("-mcmodel=medany")
+    if target_triple == "riscv32-unknown-elf":
+        args.push("-march=rv32imac")
+        args.push("-mabi=ilp32")
+        args.push("-mno-relax")
+        args.push("-fno-pic")
+    if target_triple == "i686-unknown-none-elf":
+        args.push("-march=i686")
+        args.push("-fno-pic")
+    if target_triple == "armv7a-none-eabi":
+        args.push("-marm")
+        args.push("-mfloat-abi=soft")
+        args.push("-fno-pic")
     args
 
-fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_level: i64, compiler: text = "", target_triple: text = "") -> Result<text, text>:
+pub fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_level: i64, compiler: text = "", target_triple: text = "", xray_thread_context_v1: bool = false, xray_startup_consumer_v1: bool = false) -> Result<text, text>:
+    match compile_entry_point_c_with_receipt_v2(user_objects, pid, verbose, opt_level, compiler, target_triple, xray_thread_context_v1, xray_startup_consumer_v1):
+        case Ok(value): Ok(value.object_path)
+        case Err(message): Err(message)
+
+# @allow(primitive_api) cache-contract predicate/scalar: bool validity verdicts and i64 epochs/limits/pids match the sibling v1 cache API surface
+pub fn compile_entry_point_c_with_receipt_v2(user_objects: [text], pid: i64, verbose: bool, opt_level: i64, compiler: text = "", target_triple: text = "", xray_thread_context_v1: bool = false, xray_startup_consumer_v1: bool = false, extra_init_symbols: [text] = []) -> Result<NativeEntryObjectV2, text>:
     """Compile entry point as C source (no llc needed)."""
     val cc = if native_tool_strict_requested_v1():
         native_tool_strict_resolve_v1("cc")?
-    elif compiler != "": compiler
-    else: find_c_compiler()
+    elif compiler != "":
+        compiler
+    else:
+        find_c_compiler()
     if native_tool_strict_requested_v1() and compiler != "" and compiler != cc:
         return Err("entry C compiler differs from admitted tool")
     if cc == "":
         return Err("No C compiler found")
+    if xray_startup_consumer_v1:
+        if not xray_thread_context_v1:
+            return Err("XRAY-E-STARTUP: consumer requires source-built LLVM thread context")
+        xray_startup_require_export_v1(user_objects)?
     val tmp_dir = _get_temp_dir()
     val ext = _obj_ext()
     # Deterministic entry-shim basename for reproducible builds: the C compiler
@@ -141,9 +185,27 @@ fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_leve
     dir_create_all(entry_dir)
     val entry_c = "{entry_dir}/simple_entry.c"
     val entry_o = "{entry_dir}/simple_entry{ext}"
-    val init_names = if native_tool_strict_requested_v1():
-        simpleos_module_init_symbols_checked_v1(user_objects)?
+    # Trace readiness requires successful symbol discovery, including a valid
+    # empty result; tool failures must not masquerade as no initializers.
+    val startup_discovery_complete = xray_thread_context_v1 or native_tool_strict_requested_v1()
+    val discovered_init_names = if startup_discovery_complete:
+        match simpleos_module_init_symbols_checked_v1(user_objects):
+            case Ok(names): names
+            case Err(err):
+                val _clean_entry = cleanup_entry_object_v1(entry_o)
+                return Err(err)
     else: simpleos_module_init_symbols(user_objects)
+    var init_names: [text] = []
+    for extra_init in extra_init_symbols:
+        var normalized_init = extra_init
+        if normalized_init.starts_with("___module_init"):
+            normalized_init = normalized_init.substring(1)
+        if (normalized_init == "__module_init" or normalized_init.starts_with("__module_init_")) and
+                not init_names.contains(normalized_init):
+            init_names = init_names.push(normalized_init)
+    for disc_init in discovered_init_names:
+        if not init_names.contains(disc_init):
+            init_names = init_names.push(disc_init)
     var c_source = "extern void spl_init_args(int argc, char** argv);\n"
     # The startup owner is optional until a native artifact carries a decoded
     # manifest.  Keeping this a weak ABI lets ordinary native binaries retain
@@ -165,25 +227,74 @@ fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_leve
     c_source = c_source + "extern int __simple_startup_before_main(int argc, char** argv) __attribute__((weak));\n"
     c_source = c_source + "#endif\n"
     c_source = c_source + "extern void __simple_runtime_init(void);\n"
+    if xray_thread_context_v1:
+        c_source = c_source + "extern void simple_xray_resident_runtime_ready_v1(void);\n"
+        c_source = c_source + "extern void simple_xray_startup_window_seal_v1(void);\n"
+    if xray_startup_consumer_v1:
+        c_source = c_source + "#include <stdint.h>\n#include <stdio.h>\n"
+        c_source = c_source + "extern int64_t __simple_xray_resident_startup_v1(void);\n"
+        c_source = c_source + "extern int64_t simple_xray_resident_control_enter_v1(void);\n"
+        c_source = c_source + "extern void simple_xray_resident_control_leave_v1(void);\n"
+        c_source = c_source + "extern int64_t simple_xray_startup_no_owned_threads_begin_v1(void);\n"
+        c_source = c_source + "extern int64_t simple_xray_startup_no_owned_threads_end_v1(void);\n"
     c_source = c_source + "extern long long __simple_main(void);\n"
     c_source = c_source + "extern void __simple_runtime_shutdown(void);\n"
     for name in init_names:
         c_source = c_source + "extern void {name}(void);\n"
     c_source = c_source + "int main(int argc, char** argv) {\n"
+    # The renderer worker's jail must be entered before any runtime init,
+    # matching the .preinit_array ordering on lanes that keep constructors.
+    # Lanes that compile the registration out (core-C standalone archive;
+    # the Stage4 capsule forbids constructor sections) get the jail from
+    # this explicit call instead -- doc/08_tracking/bug/
+    # core_c_lane_cannot_host_browser_renderer_preinit_2026-08-22.md.
+    # The callee refuses any argv[0] that is not the worker marker and is
+    # idempotent once the jail is up, so ordinary binaries and
+    # constructor-hosted lanes are unaffected.
+    c_source = c_source + "#if !defined(_WIN32)\n"
+    c_source = c_source + "    { extern char** environ; extern void rt_browser_renderer_preinit_enter(int, char**, char**); rt_browser_renderer_preinit_enter(argc, argv, environ); }\n"
+    c_source = c_source + "#endif\n"
     c_source = c_source + "    spl_init_args(argc, argv);\n"
     c_source = c_source + "#if defined(__ELF__)\n"
-    c_source = c_source + "    if (__simple_startup_before_main && __simple_startup_before_main(argc, argv) != 0) return 125;\n"
+    if xray_thread_context_v1:
+        c_source = c_source + "    if (__simple_startup_before_main && __simple_startup_before_main(argc, argv) != 0) { simple_xray_startup_window_seal_v1(); return 125; }\n"
+    else:
+        c_source = c_source + "    if (__simple_startup_before_main && __simple_startup_before_main(argc, argv) != 0) return 125;\n"
     c_source = c_source + "#else\n"
-    c_source = c_source + "    if (__simple_startup_before_main(argc, argv) != 0) return 125;\n"
+    if xray_thread_context_v1:
+        c_source = c_source + "    if (__simple_startup_before_main(argc, argv) != 0) { simple_xray_startup_window_seal_v1(); return 125; }\n"
+    else:
+        c_source = c_source + "    if (__simple_startup_before_main(argc, argv) != 0) return 125;\n"
     c_source = c_source + "#endif\n"
     c_source = c_source + "    __simple_runtime_init();\n"
     for name in init_names:
         c_source = c_source + "    {name}();\n"
+    # Readiness follows runtime/TLS and all mandatory initializer calls.
+    # It grants neither observer capability nor quiescence.
+    if xray_thread_context_v1:
+        c_source = c_source + "    simple_xray_resident_runtime_ready_v1();\n"
+    if xray_startup_consumer_v1:
+        c_source = c_source + "    if (simple_xray_resident_control_enter_v1() != 1) { simple_xray_startup_window_seal_v1(); return 125; }\n"
+        c_source = c_source + "    int64_t trace_window = simple_xray_startup_no_owned_threads_begin_v1();\n"
+        c_source = c_source + "    simple_xray_resident_control_leave_v1();\n"
+        c_source = c_source + "    if (trace_window != 1) { simple_xray_startup_window_seal_v1(); return 125; }\n"
+        c_source = c_source + "    int64_t trace_status = __simple_xray_resident_startup_v1();\n"
+        c_source = c_source + "    if (simple_xray_resident_control_enter_v1() != 1) { simple_xray_startup_window_seal_v1(); return 125; }\n"
+        c_source = c_source + "    int64_t trace_ended = simple_xray_startup_no_owned_threads_end_v1();\n"
+        c_source = c_source + "    simple_xray_resident_control_leave_v1();\n"
+        c_source = c_source + "    simple_xray_startup_window_seal_v1();\n"
+        c_source = c_source + "    if (trace_status != 0 || trace_ended != 1) { fprintf(stderr, \"Simple XRay startup refused: status=%lld window=%lld\\n\", (long long)trace_status, (long long)trace_ended); return 125; }\n"
+    if xray_thread_context_v1:
+        c_source = c_source + "    simple_xray_startup_window_seal_v1();\n"
     c_source = c_source + "    long long result = __simple_main();\n"
     c_source = c_source + "    __simple_runtime_shutdown();\n"
     c_source = c_source + "    return (int)result;\n"
     c_source = c_source + "}\n"
-    file_write(entry_c, c_source)
+    val entry_source_written = file_write(entry_c, c_source)
+    val expected_source_digest = if startup_discovery_complete: sha256_text(c_source) else: ""
+    val written_source_digest = if startup_discovery_complete and entry_source_written:
+        file_hash_sha256(entry_c)
+    else: None
 
     val use_msvc = _is_msvc_cc(cc)
     var comp_args: [text] = []
@@ -217,14 +328,40 @@ fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_leve
         comp_args.push(entry_c)
 
     val (ep_out, ep_err, ep_code) = process_run(cc, comp_args)
+    val compiled_source_digest = if startup_discovery_complete and entry_source_written:
+        file_hash_sha256(entry_c)
+    else: None
     file_delete(entry_c)
     if ep_code != 0:
+        val _clean_entry = cleanup_entry_object_v1(entry_o)
         return Err("Entry point compilation failed: {ep_out}{ep_err}")
-    Ok(entry_o)
+    val object_digest = if startup_discovery_complete and entry_source_written:
+        file_hash_sha256(entry_o) ?? ""
+    else: ""
+    val startup = native_initializer_startup_observe_v2(startup_discovery_complete,
+        entry_source_written, expected_source_digest, written_source_digest ?? "",
+        compiled_source_digest ?? "", object_digest, init_names)
+    Ok(NativeEntryObjectV2(object_path: entry_o, startup: startup))
+
+@allow(primitive_api)  # matches remove_file_if_exists(path: text) -> bool cleanup helper contract
+pub fn cleanup_entry_object_v1(entry_obj_path: text) -> bool:
+    """Remove entry object file and its per-PID simple_entry_<pid> temp directory."""
+    if entry_obj_path == "":
+        return true
+    val removed_obj = remove_file_if_exists(entry_obj_path)
+    val slash = entry_obj_path.rfind("/")
+    if slash > 0:
+        val entry_dir = entry_obj_path.substring(0, slash)
+        val parent_slash = entry_dir.rfind("/")
+        val dir_name = if parent_slash >= 0: entry_dir.substring(parent_slash + 1) else: entry_dir
+        if dir_name.starts_with("simple_entry_"):
+            val removed_dir = dir_remove_all(entry_dir)
+            return removed_obj and removed_dir
+    removed_obj
 
 # Narrow core runtime lanes must never acquire the Rust hosted archive merely
 # because SIMPLE_RUNTIME_PATH points at the bootstrap directory.
-fn native_all_allowed_for_runtime_bundle(bundle: text) -> bool:
+pub fn native_all_allowed_for_runtime_bundle(bundle: text) -> bool:
     match bundle:
         case "core-c-alloc-observer-v1": false
         case "simple-core": false

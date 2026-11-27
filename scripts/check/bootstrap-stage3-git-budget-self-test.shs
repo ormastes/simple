@@ -1,0 +1,29 @@
+#!/bin/sh
+# Stage3 git-state time budget: when /proc/loadavg is unavailable (Windows
+# Git Bash), the budget must be the host-independent worst-case default, not
+# the bare 300 s that fails a full-checkout walk (bound.time).
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+. "$repo/scripts/check/lib/bootstrap-stage3/authority.shs"
+
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/stage3-git-budget.XXXXXX")
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+
+unset BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS
+
+# No loadavg file: load is unknown, so the 4x cap applies.
+missing=$(STAGE3_LOADAVG_FILE="$scratch/absent" bootstrap_stage3_git_budget_ms)
+[ "$missing" = 1200000 ] || { echo "FAIL no-loadavg budget=$missing want 1200000" >&2; exit 1; }
+
+# Idle host with a readable loadavg keeps the base budget.
+printf '0.00 0.00 0.00 1/1 1\n' >"$scratch/idle"
+idle=$(STAGE3_LOADAVG_FILE="$scratch/idle" STAGE3_NCPU=8 bootstrap_stage3_git_budget_ms)
+[ "$idle" = 300000 ] || { echo "FAIL idle budget=$idle want 300000" >&2; exit 1; }
+
+# Loaded host scales by load/ncpu.
+printf '16.00 0.00 0.00 1/1 1\n' >"$scratch/busy"
+busy=$(STAGE3_LOADAVG_FILE="$scratch/busy" STAGE3_NCPU=8 bootstrap_stage3_git_budget_ms)
+[ "$busy" = 900000 ] || { echo "FAIL busy budget=$busy want 900000" >&2; exit 1; }
+
+echo "PASS stage3 git budget: no-loadavg=$missing idle=$idle busy=$busy"

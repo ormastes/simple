@@ -1,0 +1,51 @@
+# Devanagari pair positioning for the pinned `selected_devanagari` witness.
+# Moved out of selected_devanagari.spl so GPOS reading lives beside
+# ot_layout_gpos*.spl; the general dev2 lane positions through `gpos_apply`.
+
+use std.skia.feature.glyph.ot_parser.{OtFont, read_u16_be, read_i16_be}
+use std.skia.feature.glyph.ot_parser_layout.{GposLookup}
+use std.skia.feature.shaper.ot_layout_gpos_data.{GposDataBudget, gpos_data_coverage, gpos_data_class}
+
+fn _record_size(format: u32) -> i64:
+    var size: i64 = 0
+    var bit = 1u32
+    while bit <= 32768u32:
+        if (format & bit) != 0u32: size = size + 2
+        bit = bit << 1
+    size
+
+fn _x_advance(blob: [u8], offset: i64, format: u32) -> i64:
+    var cursor = offset
+    if (format & 1u32) != 0u32: cursor = cursor + 2
+    if (format & 2u32) != 0u32: cursor = cursor + 2
+    if (format & 4u32) != 0u32: return read_i16_be(blob, cursor) as i64
+    0
+
+# First non-zero PairPos format 2 (class pair) x-advance adjustment of `first`
+# before `second` among the active lookups, in font units. `(0, false)` when no
+# active class pair moves the first glyph.
+fn devanagari_pair_adjustment(font: OtFont, active: [GposLookup], first: u32, second: u32) -> (i64, bool):
+    val budget = GposDataBudget(remaining: 1048576)
+    for lookup in active:
+        if lookup.lookup_type != 2u32: continue
+        val limit = lookup.table_end as i64
+        for offset in lookup.subtable_offsets:
+            val subtable = offset as i64
+            if subtable + 16 > limit or read_u16_be(font.blob, subtable) != 2u32: continue
+            val coverage = subtable + read_u16_be(font.blob, subtable + 2) as i64
+            val covered = gpos_data_coverage(font.blob, coverage, limit, first, budget)
+            if not covered.valid or not covered.found: continue
+            val format_1 = read_u16_be(font.blob, subtable + 4)
+            val format_2 = read_u16_be(font.blob, subtable + 6)
+            val class_1 = gpos_data_class(font.blob, subtable + read_u16_be(font.blob, subtable + 8) as i64, limit, first, budget)
+            val class_2 = gpos_data_class(font.blob, subtable + read_u16_be(font.blob, subtable + 10) as i64, limit, second, budget)
+            val count_1 = read_u16_be(font.blob, subtable + 12) as i64
+            val count_2 = read_u16_be(font.blob, subtable + 14) as i64
+            val size = _record_size(format_1) + _record_size(format_2)
+            if (not class_1.valid or not class_2.valid or class_1.index >= count_1 or class_2.index >= count_2 or
+                subtable + 16 + count_1 * count_2 * size > limit): continue
+            val adjustment = _x_advance(font.blob, subtable + 16 + (class_1.index * count_2 + class_2.index) * size, format_1)
+            if adjustment != 0: return (adjustment, true)
+    (0, false)
+
+export devanagari_pair_adjustment

@@ -7,6 +7,9 @@ use app.test_cache_shared.{TestCacheEntry}
 use std.nogc_sync_mut.io.sysinfo_ops.{path_basename}
 use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
 use std.io_runtime.{dir_walk}
+use std.spec.platform_os.{is_os_platform_tag}
+use std.nogc_sync_mut.path.{normalize_path}
+use std.common.path_pure.{to_slash}
 use std.test_runner.test_manifest.{
     TestManifest, TestManifestEntry,
     MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh, manifest_covers
@@ -14,7 +17,7 @@ use std.test_runner.test_manifest.{
 use std.test_runner.test_manifest_scanner.{manifest_full_scan, manifest_incremental_update}
 use std.test_runner.test_level_detect.{
     test_level_matches,
-    TEST_LEVEL_UNIT, TEST_LEVEL_INTEGRATION, TEST_LEVEL_SYSTEM
+    TEST_LEVEL_UNIT, TEST_LEVEL_INTEGRATION, TEST_LEVEL_SYSTEM, TEST_LEVEL_SMOKE
 }
 use std.test_runner.test_runner_coverage.{extract_cover_annotations_for_coverage}
 
@@ -76,10 +79,16 @@ fn targets_legacy_mirror(base_path: text) -> bool:
 # ANSI Stripping
 # =========================================================================
 
-fn strip_ansi(s: text) -> text:
+pub fn strip_ansi(s: text) -> text:
     # Strip ANSI escape sequences by scanning for ESC[ ... m patterns.
     # ESC character is \x1b (27). We detect it by checking for the two-char
     # sequence that starts ANSI codes: ESC followed by '['.
+    # Fast path: the per-character scan below costs ~0.5 us/char in the
+    # interpreter, and callers strip every line of a captured output several
+    # times (extract_error_message and friends). Most lines carry no ESC, so
+    # return them unchanged with one native search instead of the scan.
+    if not s.contains("\u{1b}"):
+        return s
     var parts: [text] = []
     var i = 0
     var in_escape = false
@@ -120,7 +129,7 @@ fn strip_ansi(s: text) -> text:
 # File Type Checking
 # =========================================================================
 
-fn is_test_file(path: text) -> bool:
+pub fn is_test_file(path: text) -> bool:
     val name = path_basename(path)
     if name.starts_with("."):
         return false
@@ -128,11 +137,42 @@ fn is_test_file(path: text) -> bool:
         return false
     name.contains("_spec.") or name.contains("_test.")
 
-fn is_skip_marker_file(path: text) -> bool:
+# An explicitly named source file is an owner-requested target. Keep this
+# separate from `is_test_file`: directory and manifest discovery must retain
+# the conventional `_spec.spl` / `_test.spl` boundary.
+fn is_explicit_spl_target(path: text) -> bool:
+    val name = path_basename(path)
+    not name.starts_with(".") and path.ends_with(".spl") and file_exists(path)
+
+# True only when a manifest path is inside the requested directory. A plain
+# string-prefix check also admits siblings such as `target-shadow/` when the
+# caller requests `target/`.
+pub fn path_is_within_directory(path: text, directory: text) -> bool:
+    # Historically the empty directory prefix admitted every manifest entry;
+    # keep that public behavior while canonicalizing non-empty paths.
+    if directory == "":
+        return true
+    if has_parent_path_component(path) or has_parent_path_component(directory):
+        return false
+    val normalized_path = normalize_path(path)
+    val normalized_directory = normalize_path(directory)
+    if normalized_directory == ".":
+        return normalized_path != ".." and not normalized_path.starts_with("../") and not normalized_path.starts_with("/")
+    if normalized_directory == "/":
+        return normalized_path.starts_with("/")
+    normalized_path.starts_with(normalized_directory + "/")
+
+fn has_parent_path_component(path: text) -> bool:
+    for part in path.replace("\\", "/").split("/"):
+        if part == "..":
+            return true
+    false
+
+pub fn is_skip_marker_file(path: text) -> bool:
     val name = path_basename(path)
     name.ends_with(".spl.skip") and (name.contains("_spec.") or name.contains("_test."))
 
-fn count_skip_marker_cases(path: text) -> i64:
+pub fn count_skip_marker_cases(path: text) -> i64:
     val content = read_file_content(path)
     var count = 0
     val lines = content.split("\n")
@@ -218,7 +258,7 @@ fn find_symlink_placeholders(all_files: [text], include_spl: bool) -> [text]:
             found.push(f)
     found
 
-fn matches_level(path: text, level: TestLevel) -> bool:
+pub fn matches_level(path: text, level: TestLevel) -> bool:
     # Segment-based classification: matches BOTH the maintained numbered tree
     # (`test/01_unit/`, `test/02_integration/`, `test/03_system/`) and the
     # legacy bare mirror (`test/unit/`, ...). See std.test_runner.test_level_detect.
@@ -231,30 +271,32 @@ fn matches_level(path: text, level: TestLevel) -> bool:
             test_level_matches(path, TEST_LEVEL_INTEGRATION)
         case TestLevel.System:
             test_level_matches(path, TEST_LEVEL_SYSTEM)
+        case TestLevel.Smoke:
+            test_level_matches(path, TEST_LEVEL_SMOKE)
 
 # =========================================================================
 # File Content Utilities
 # =========================================================================
 
-fn read_file_content(file_path: text) -> text:
+pub fn read_file_content(file_path: text) -> text:
     val result = file_read(file_path)
     result ?? ""
 
-fn file_has_slow_test(file_path: text) -> bool:
+pub fn file_has_slow_test(file_path: text) -> bool:
     val content = read_file_content(file_path)
     content.contains("slow_it ")
 
-fn file_has_skip_tag(file_path: text) -> bool:
+pub fn file_has_skip_tag(file_path: text) -> bool:
     if is_skip_marker_file(file_path):
         return true
     val content = read_file_content(file_path)
     content.contains("tag: \"skip\"") or content.contains("tag: 'skip'")
 
-fn file_has_pending_tag(file_path: text) -> bool:
+pub fn file_has_pending_tag(file_path: text) -> bool:
     val content = read_file_content(file_path)
     content.contains("# @pending") or content.contains("tag: \"pending\"") or content.contains("tag: 'pending'")
 
-fn file_has_ignored_test(file_path: text) -> bool:
+pub fn file_has_ignored_test(file_path: text) -> bool:
     # slow_it now runs (session sharing), so not ignored
     val content = read_file_content(file_path)
     content.contains("tag: \"skip\"") or content.contains("tag: 'skip'") or content.contains("# @pending") or content.contains("tag: \"pending\"") or content.contains("tag: 'pending'")
@@ -272,28 +314,60 @@ fn content_has_tag(content: text, tag: text) -> bool:
             return true
     false
 
-fn file_has_tag(file_path: text, tag: text) -> bool:
+pub fn file_has_tag(file_path: text, tag: text) -> bool:
     if tag == "":
         return true
     content_has_tag(read_file_content(file_path), tag)
 
-fn file_has_di_test_tag(file_path: text) -> bool:
+pub fn file_has_di_test_tag(file_path: text) -> bool:
     """Check if file has # @di_test tag, allowing DI modifications in system tests."""
     val content = read_file_content(file_path)
     content.contains("# @di_test")
 
-fn extract_cover_annotations(file_path: text) -> [text]:
+pub fn extract_cover_annotations(file_path: text) -> [text]:
     """Extract # @cover annotations from a spec's header (everything before
     the first `use`/`describe` line -- see extract_cover_annotations_for_coverage)."""
     extract_cover_annotations_for_coverage(file_path)
 
-fn validate_system_test_covers(files: [text]) -> [text]:
-    """Return system test files missing required # @cover annotations."""
+# Legacy exemption list: checked-in, reviewed, sorted, shrink-only. Specs on it
+# run without a header `# @cover`; every other system spec still needs one.
+val COVER_EXEMPTIONS_PATH = "config/test/cover_exemptions.txt"
+
+fn cover_exemption_key(norm: text) -> text:
+    """Repo-relative `test/...` key for a normalized spec path."""
+    if norm.starts_with("test/"):
+        return norm
+    val parts = norm.split("/test/")
+    if parts.len() < 2:
+        return norm
+    var key = "test"
+    var i = 1
+    while i < parts.len():
+        key = key + "/" + parts[i]
+        i = i + 1
+    key
+
+fn load_cover_exemptions() -> Dict<text, bool>:
+    var set: Dict<text, bool> = {}
+    val content = file_read(COVER_EXEMPTIONS_PATH) ?? ""
+    for line in content.split("\n"):
+        val t = line.trim()
+        if t != "" and not t.starts_with("#"):
+            set[t] = true
+    set
+
+pub fn validate_system_test_covers(files: [text]) -> [text]:
+    """Return system test files missing required # @cover annotations,
+    excluding the legacy exemption list (config/test/cover_exemptions.txt)."""
     var missing: [text] = []
+    val exempt = load_cover_exemptions()
     for f in files:
-        if not f.contains("/system/") and not f.contains("/03_system/"):
+        val norm = f.replace("\\", "/")
+        if not norm.contains("/system/") and not norm.contains("/03_system/"):
             continue
-        if f.contains("/helpers/") or f.contains("/fixtures/"):
+        if norm.contains("/helpers/") or norm.contains("/fixtures/"):
+            continue
+        if exempt.contains_key(cover_exemption_key(norm)):
             continue
         val covers = extract_cover_annotations(f)
         if covers.len() == 0:
@@ -304,7 +378,7 @@ fn validate_system_test_covers(files: [text]) -> [text]:
 # Platform Tag Functions
 # =========================================================================
 
-fn file_get_platform_tags(content: text) -> [text]:
+pub fn file_get_platform_tags(content: text) -> [text]:
     """Extract # @platform: tags from file content."""
     val lines = content.split("\n")
     var tags: [text] = []
@@ -333,7 +407,7 @@ fn has_skip_directive(content: text) -> bool:
             return true
     false
 
-fn platform_tag_matches(tag: text, mode: TestExecutionMode) -> bool:
+pub fn platform_tag_matches(tag: text, mode: TestExecutionMode) -> bool:
     """Check if a single platform tag matches the current mode."""
     if tag == "host" or tag == "all":
         return true
@@ -341,6 +415,7 @@ fn platform_tag_matches(tag: text, mode: TestExecutionMode) -> bool:
         case TestExecutionMode.Interpreter: tag == "interpreter"
         case TestExecutionMode.Smf: tag == "smf"
         case TestExecutionMode.Native: tag == "native"
+        case TestExecutionMode.Compile: tag == "compile"
         case TestExecutionMode.Composite(spec):
             spec.contains(tag) or tag == "composite"
 
@@ -374,12 +449,19 @@ fn print_convention_exclusions(fuzz: i64, chaos: i64, deploy: i64, security: i64
         parts.push("baremetal={baremetal} (name the .../baremetal directory or use a baremetal mode)")
     print "  Excluded by directory convention, NOT run: {total} file(s): {parts.join(', ')}"
 
-fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bool) -> [text]:
+pub fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bool) -> [text]:
+    discover_test_files_fast_with_manifest_path(base_path, options, use_cache, MANIFEST_PATH)
+
+# Narrow injection point for isolated callers and tests. The public runner keeps
+# using `MANIFEST_PATH` through `discover_test_files_fast` above.
+pub fn discover_test_files_fast_with_manifest_path(
+    base_path: text, options: TestOptions, use_cache: bool, manifest_path: text
+) -> [text]:
     # Normalize path separators for Windows compatibility
     var base_path = base_path.replace("\\", "/")
     # Single file — no manifest needed
     if base_path.ends_with(".spl"):
-        if file_exists(base_path) and is_test_file(base_path):
+        if is_explicit_spl_target(base_path):
             if not options.only_skipped and file_has_pending_tag(base_path):
                 return []
             # --tag applies to an explicit path too: a file that does not carry
@@ -389,12 +471,17 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
             return [base_path]
         return []
 
+    # Keep filesystem `..` resolution intact; the fast manifest branch uses
+    # lexical matching, which cannot distinguish paths crossing symlinks.
+    if has_parent_path_component(base_path):
+        return discover_test_files_slow(base_path, options)
+
     # The manifest does not record spec tags, so a tag filter must scan content.
     if not use_cache or options.tag != "":
         return discover_test_files_slow(base_path, options)
 
     # Try loading manifest
-    val manifest = manifest_load(MANIFEST_PATH)
+    val manifest = manifest_load(manifest_path)
     if not manifest_is_fresh(manifest) or not manifest_covers(manifest, base_path):
         # Manifest missing, stale, or built from a walk that never visited
         # `base_path` — fall back to a full scan, then save. Filtering an index
@@ -406,7 +493,7 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
         # the fast branch below and silently return the under-collected set.
         if result.len() > 0:
             # Build manifest in background for next run
-            save_manifest_from_discovery(base_path)
+            save_manifest_to_path(base_path, manifest_path)
         return result
 
     # An already-fresh manifest skips the walk entirely, so the slow path's
@@ -431,7 +518,7 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
 
     for entry in manifest.entries:
         # Path prefix filter
-        if not entry.path.starts_with(base_path):
+        if not path_is_within_directory(entry.path, base_path):
             continue
 
         # Legacy mirror is excluded from directory discovery (see above).
@@ -476,10 +563,15 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
         if not explicit_target and entry.platform_tags != "":
             val ptags = entry.platform_tags.split(",")
             var tag_matched = false
+            var mode_tag_seen = false
+            # OS tags (windows/macos/linux/freebsd/unix) are NOT filtered here: a
+            # host-OS mismatch is a counted platform skip in the runner, never silent.
             for ptag in ptags:
-                if platform_tag_matches(ptag, options.mode):
-                    tag_matched = true
-            if not tag_matched:
+                if not is_os_platform_tag(ptag):
+                    mode_tag_seen = true
+                    if platform_tag_matches(ptag, options.mode):
+                        tag_matched = true
+            if mode_tag_seen and not tag_matched:
                 continue
 
         # Content-based filters (from manifest metadata, no file I/O)
@@ -517,7 +609,7 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
     # next run is fast again.
     if test_files.len() == 0:
         val verified = discover_test_files_slow(base_path, options)
-        save_manifest_from_discovery(base_path)
+        save_manifest_to_path(base_path, manifest_path)
         return verified
 
     print "  Discovery: {elapsed_ms}ms (from manifest, {manifest.entries.len()} indexed)"
@@ -525,14 +617,15 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
 
     test_files
 
-fn manifest_entry_matches_level(entry: TestManifestEntry, level: TestLevel) -> bool:
+pub fn manifest_entry_matches_level(entry: TestManifestEntry, level: TestLevel) -> bool:
     match level:
         case TestLevel.All: true
         case TestLevel.Unit: entry.test_level == 1
         case TestLevel.Integration: entry.test_level == 2
         case TestLevel.System: entry.test_level == 3
+        case TestLevel.Smoke: entry.test_level == 4
 
-fn save_manifest_from_discovery(base_path: text):
+fn save_manifest_to_path(base_path: text, manifest_path: text):
     # Determine scan directories based on base_path
     var dirs: [text] = []
     if base_path == "test/" or base_path == "test":
@@ -541,27 +634,41 @@ fn save_manifest_from_discovery(base_path: text):
         dirs = [base_path]
     # Use incremental update when an existing manifest is available —
     # only re-reads files whose size or mtime changed.
-    val old = manifest_load(MANIFEST_PATH)
+    val old = manifest_load(manifest_path)
     var manifest = old
     if old.entries.len() > 0:
         manifest = manifest_incremental_update(old, dirs)
     else:
         manifest = manifest_full_scan(dirs)
-    manifest_save(manifest, MANIFEST_PATH)
+    manifest_save(manifest, manifest_path)
+
+pub fn save_manifest_from_discovery(base_path: text):
+    save_manifest_to_path(base_path, MANIFEST_PATH)
 
 # =========================================================================
 # Test File Discovery (original full-scan path)
 # =========================================================================
 
-fn discover_test_files(base_path: text, options: TestOptions) -> [text]:
+pub fn discover_test_files(base_path: text, options: TestOptions) -> [text]:
     return discover_test_files_fast(base_path, options, true)
 
-fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]:
+# The walker returns host-native paths (backslashes on Windows) while every
+# convention filter in discover_test_files_slow tests forward-slash segments
+# ("/fuzz/", "/deploy/", "/baremetal/", "/test/unit/", ...). Unnormalized, none
+# of them matched on Windows, so --fuzz/--chaos/--deploy/--security gated
+# nothing. Each walked path is normalized once through this function, as the
+# manifest scanner already does for its entries.
+# reason: a walked path is opaque host path text in, canonical path text out.
+@allow(primitive_api)
+pub fn discovery_walked_path(walked_path: text) -> text:
+    to_slash(walked_path)
+
+pub fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]:
     # Normalize path separators for Windows compatibility
     var base_path = base_path.replace("\\", "/")
     # If path is a single file, use it directly
     if base_path.ends_with(".spl"):
-        if file_exists(base_path) and is_test_file(base_path):
+        if is_explicit_spl_target(base_path):
             return [base_path]
         return []
     val all_files = dir_walk(base_path)
@@ -585,7 +692,8 @@ fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]:
     var ex_security = 0
     var ex_remote = 0
     var ex_baremetal = 0
-    for f in all_files:
+    for raw_f in all_files:
+        val f = discovery_walked_path(raw_f)
         if not is_test_file(f):
             continue
         # Legacy mirror is excluded from directory discovery (see above).
@@ -638,10 +746,15 @@ fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]:
             val ptags = file_get_platform_tags(content)
             if ptags.len() > 0:
                 var tag_matched = false
+                var mode_tag_seen = false
+                # OS tags (windows/macos/linux/freebsd/unix) are NOT filtered here: a
+                # host-OS mismatch is a counted platform skip in the runner, never silent.
                 for ptag in ptags:
-                    if platform_tag_matches(ptag, options.mode):
-                        tag_matched = true
-                if not tag_matched:
+                    if not is_os_platform_tag(ptag):
+                        mode_tag_seen = true
+                        if platform_tag_matches(ptag, options.mode):
+                            tag_matched = true
+                if mode_tag_seen and not tag_matched:
                     continue
         # Content-based filters
         if needs_content:
@@ -678,7 +791,7 @@ fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]:
 # Deterministic Shuffle (hash-based, matches Rust runner)
 # =========================================================================
 
-fn simple_hash(s: text, seed: i64) -> i64:
+pub fn simple_hash(s: text, seed: i64) -> i64:
     # Simple hash using small multipliers to avoid overflow
     var hash = seed * 31 + 7
     var i = 0
@@ -703,7 +816,7 @@ fn simple_hash(s: text, seed: i64) -> i64:
         i = i + 1
     hash
 
-fn shuffle_files(files: [text], seed: i64) -> [text]:
+pub fn shuffle_files(files: [text], seed: i64) -> [text]:
     # Compute hashes for each file
     var hashes: [i64] = []
     for f in files:
@@ -743,7 +856,7 @@ fn shuffle_files(files: [text], seed: i64) -> [text]:
 # Skip Features
 # =========================================================================
 
-fn extract_skip_feature_info(file_path: text) -> SkipFeatureInfo:
+pub fn extract_skip_feature_info(file_path: text) -> SkipFeatureInfo:
     val content = read_file_content(file_path)
     val lines = content.split("\n")
     var title = ""
@@ -770,7 +883,7 @@ fn extract_skip_feature_info(file_path: text) -> SkipFeatureInfo:
         status: status
     )
 
-fn print_skip_features(files: [text], planned_only: bool):
+pub fn print_skip_features(files: [text], planned_only: bool):
     var features: [SkipFeatureInfo] = []
     for f in files:
         # Annotated binding: an unannotated local holding an imported-struct
@@ -809,7 +922,7 @@ fn print_skip_features(files: [text], planned_only: bool):
 # Smart Test Ordering (Longest-First)
 # =========================================================================
 
-fn order_tests_by_duration(files: [text], entries: {text: TestCacheEntry}) -> [text]:
+pub fn order_tests_by_duration(files: [text], entries: {text: TestCacheEntry}) -> [text]:
     """Sort test files by last known duration (longest first).
     Files with no cached duration get median estimated duration.
     This prevents a single slow test from being a tail blocker in parallel mode."""
@@ -873,7 +986,7 @@ fn order_tests_by_duration(files: [text], entries: {text: TestCacheEntry}) -> [t
         k = k + 1
     result
 
-fn _sort_i64(arr: [i64]) -> [i64]:
+pub fn _sort_i64(arr: [i64]) -> [i64]:
     """Simple shell sort for i64 array (ascending)."""
     var n = arr.len()
     var result = arr
@@ -895,7 +1008,7 @@ fn _sort_i64(arr: [i64]) -> [i64]:
 # Discovery Summary / List Mode
 # =========================================================================
 
-fn print_discovery_summary(files: [text], options: TestOptions):
+pub fn print_discovery_summary(files: [text], options: TestOptions):
     if options.list_skip_features:
         print_skip_features(files, options.planned_only)
         return

@@ -1,4 +1,4 @@
-use compiler.common.cache_contract.errors_v1 (SummaryErrorV1)
+use compiler.common.cache_contract.errors_v1.{SummaryErrorV1, SummaryErrorCodeV1, RetryClassV1, ErrorSeverityV1, RejectTelemetryV1}
 use compiler.common.cache_contract.snapshot_contract_v1 (LogicalSourcePathV1)
 
 pub enum SummaryVisibilityV1:
@@ -70,3 +70,30 @@ pub trait VirtualSourceStoreV1:
     fn stat(auth: SummaryAuthV1, snapshot: text, virtual_uri: text) -> Result<SummaryLookupV1<VirtualSourceStatV1>, SummaryErrorV1>
     fn read(auth: SummaryAuthV1, snapshot: text, virtual_uri: text, offset: i64, max_bytes: i64) -> Result<SummaryLookupV1<VirtualSourceReadV1>, SummaryErrorV1>
     fn page(auth: SummaryAuthV1, snapshot: text, virtual_uri: text, continuation: text?, max_bytes: i64, max_entries: i64) -> Result<SummaryLookupV1<SummaryPageV1>, SummaryErrorV1>
+
+# Null-object implementor. Never constructed by production code; it exists so
+# every compilation unit that holds the trait also holds an `impl` (and so a
+# vtable): without one the native/JIT lane lowers trait-field calls such as
+# `VirtualSourceConsumerAdapterV1.read` to an erased bare-name call that the
+# codegen refuses ([CODEGEN-AMBIGUOUS-METHOD]) and demotes the whole CLI to the
+# interpreter. See doc/08_tracking/bug/native_codegen_trait_field_receiver_erased_ambiguous_2026_10_26.md.
+pub class UnavailableVirtualSourceStoreV1:
+    static fn new() -> UnavailableVirtualSourceStoreV1:
+        UnavailableVirtualSourceStoreV1()
+
+fn _unavailable_virtual_source_error_v1(operation: text) -> SummaryErrorV1:
+    SummaryErrorV1(code: SummaryErrorCodeV1.SummaryAccessDenied, retry: RetryClassV1.Never,
+        severity: ErrorSeverityV1.Error,
+        reject: RejectTelemetryV1(telemetry_class: "availability_fallback",
+            safe_context: "virtual source store unavailable: " + operation,
+            reason_digest: "", bounded_detail: operation))
+
+impl VirtualSourceStoreV1 for UnavailableVirtualSourceStoreV1:
+    fn list(auth: SummaryAuthV1, snapshot: text, logical_directory: text, max_entries: i64, continuation: text?) -> Result<VirtualSourceListPageV1, SummaryErrorV1>:
+        Err(_unavailable_virtual_source_error_v1("list"))
+    fn stat(auth: SummaryAuthV1, snapshot: text, virtual_uri: text) -> Result<SummaryLookupV1<VirtualSourceStatV1>, SummaryErrorV1>:
+        Err(_unavailable_virtual_source_error_v1("stat"))
+    fn read(auth: SummaryAuthV1, snapshot: text, virtual_uri: text, offset: i64, max_bytes: i64) -> Result<SummaryLookupV1<VirtualSourceReadV1>, SummaryErrorV1>:
+        Err(_unavailable_virtual_source_error_v1("read"))
+    fn page(auth: SummaryAuthV1, snapshot: text, virtual_uri: text, continuation: text?, max_bytes: i64, max_entries: i64) -> Result<SummaryLookupV1<SummaryPageV1>, SummaryErrorV1>:
+        Err(_unavailable_virtual_source_error_v1("page"))

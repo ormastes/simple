@@ -1,0 +1,95 @@
+# Regression specs for Stage 3 full-closure HIR/MIR lowering fixes:
+# - `case None:` on Optional / Option<T> match subjects
+# - unannotated dict literal HIR type retention (`var fields = {...}`)
+# - untyped `if` expression joining string literal and record `text` field
+# - nested `Some(dest)` record binding inside multi-arity enum pattern
+# - bare `-> tuple` return value indexing
+# @cover src/compiler/20.hir/hir_lowering/_Expressions/expression_components.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl
+
+use std.spec.*
+use compiler.backend.{MirToLlvm}
+use compiler.backend.llvm_ir_builder.{llvm_codegen_error_from_ir}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir_lowering_types.{MirLowering}
+
+fn lower_src_to_llvm_ir(source: text, name: text) -> text:
+    val ast = parse_full_frontend(source, name, name, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(name)
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errors = ""
+    for err in hir_lowering.errors:
+        errors = errors + err.message + "\n"
+    for err in mir_lowering.errors:
+        errors = errors + err.message + "\n"
+    if errors != "":
+        return "LOWERING_ERRORS:\n" + errors
+    MirToLlvm.create("test.llvm." + name, CodegenTarget.X86_64, None).translate_module(mir)
+
+describe "Stage 3 full-closure HIR/MIR lowering regressions":
+    it "treats `case None:` on an Optional subject as Option::None without shadowing builtin None":
+        val source = "struct SessionA:\n    fd: i64\n\n" +
+            "struct SessionB:\n    pid: i64\n\n" +
+            "enum Outcome:\n    Cleanup(b: SessionB?, code: i64)\n\n" +
+            "fn settle(existing: SessionA?) -> Outcome:\n" +
+            "    match existing:\n" +
+            "        case Some(s): Outcome.Cleanup(None, s.fd)\n" +
+            "        case None: Outcome.Cleanup(None, 0)\n"
+        val ir = lower_src_to_llvm_ir(source, "optional_case_none_shadow_check")
+        expect(ir.starts_with("LOWERING_ERRORS:")).to_equal(false)
+        expect(llvm_codegen_error_from_ir(ir)).to_equal("")
+
+    it "retains Dict<K, V> HIR type on unannotated var dict literals passed to enum constructors":
+        val source = "enum SdnVal:\n" +
+            "    Str(v: text)\n" +
+            "    Num(n: i64)\n" +
+            "    Map(entries: Dict<text, SdnVal>)\n\n" +
+            "fn build_header(kind_name: text) -> SdnVal:\n" +
+            "    var fields = {\"kind\": SdnVal.Str(kind_name), \"version\": SdnVal.Num(1)}\n" +
+            "    fields[\"extra\"] = SdnVal.Str(\"ok\")\n" +
+            "    SdnVal.Map(fields)\n"
+        val ir = lower_src_to_llvm_ir(source, "unannotated_dict_lit_enum_payload")
+        expect(ir.starts_with("LOWERING_ERRORS:")).to_equal(false)
+        expect(llvm_codegen_error_from_ir(ir)).to_equal("")
+
+    it "joins untyped if-else arms mixing empty string literal and struct text field as Str":
+        val source = "struct GeoRec:\n    request_digest: text\n\n" +
+            "enum SdnVal:\n    Str(v: text)\n\n" +
+            "fn encode_digest(records: [GeoRec], index: i64) -> SdnVal:\n" +
+            "    SdnVal.Str(if index < 0: \"\" else: records[index].request_digest)\n"
+        val ir = lower_src_to_llvm_ir(source, "untyped_if_str_arm_join")
+        expect(ir.starts_with("LOWERING_ERRORS:")).to_equal(false)
+        expect(llvm_codegen_error_from_ir(ir)).to_equal("")
+
+    it "decodes nested Some(dest) record binding inside a multi-arity enum pattern":
+        val source = "struct RegId:\n    id: i64\n\n" +
+            "enum InstKind:\n" +
+            "    Call(dest: RegId?, callee: text, args: [i64])\n" +
+            "    Nop\n\n" +
+            "fn matches_target(inst: InstKind, target_id: i64) -> bool:\n" +
+            "    match inst:\n" +
+            "        case Call(Some(dest), callee, args):\n" +
+            "            dest.id == target_id and args.len() >= 0\n" +
+            "        case _: false\n"
+        val ir = lower_src_to_llvm_ir(source, "nested_some_record_in_enum_pattern")
+        expect(ir.starts_with("LOWERING_ERRORS:")).to_equal(false)
+        expect(llvm_codegen_error_from_ir(ir)).to_equal("")
+
+    it "allows indexing a bare `-> tuple` return value":
+        val source = "fn parse_pair(line: text) -> tuple:\n" +
+            "    (line, 101, \"Switching\")\n\n" +
+            "fn is_switching(line: text) -> bool:\n" +
+            "    val parsed = parse_pair(line)\n" +
+            "    parsed[1] == 101\n"
+        val ir = lower_src_to_llvm_ir(source, "bare_tuple_return_indexing")
+        expect(ir.starts_with("LOWERING_ERRORS:")).to_equal(false)
+        expect(llvm_codegen_error_from_ir(ir)).to_equal("")

@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN — root cause characterised, fix not yet identified
+**Status:** FIX-IMPLEMENTED-VERIFICATION-PENDING — seed fix `2c89727c11c` is in release/1.0.0; awaiting an aarch64 Stage-3 run (see "Verification 2026-11-02")
 **Filed:** 2026-09-03
 **Severity:** P0 — sole remaining blocker for Stage-3 self-host on aarch64-apple-darwin
 
@@ -494,3 +494,53 @@ specified rather than assumed away.
   `--threads 20` and runs at `cpu_pct=100`; see
   `doc/08_tracking/bug/native_build_step5_serial_threads_ignored_2026-09-04.md`.
 
+
+Revalidated 2026-11-02: still plausible because doc says root cause characterised but fix not identified.
+
+## Analysis (2026-11-02, p0f-3)
+
+Not reproducible on the Windows x86_64 host; analysed by source reading.
+
+- **Platform-specific?** Yes, the observed symptom. Section 3a measured
+  `Optional<struct> = nil` materialising as a non-nil zeroed aggregate only in
+  seed-built code on aarch64 (AAPCS64 by-value aggregate handling); x86_64
+  self-hosts. The count law (1 report per nil `HirType?` slot) is
+  platform-independent, so Windows x86_64 would only be affected if its codegen
+  had the same nil-Optional-aggregate defect; the new spec checks it does not.
+- **Already fixed?** Yes: `2c89727c11c` "fix(codegen): stop turning a nil
+  Optional<aggregate> into a zeroed aggregate" (`emit_aggregate_block_copy` in
+  `src/compiler_rust/compiler/src/codegen/llvm/functions/objects.rs`), an
+  ancestor of `release/1.0.0`. This record's own "After the fix" section
+  reports `E-MIR-TYPE-ZeroKind: 0 (was 3)`. The follow-up failure
+  (`unresolved name: _is_decimal_digit`) is a different bug; see `9e99c3345c9`
+  and the `f859550a42c` note "ZeroKind class is cleared".
+- **Variance (2..6):** explained in 3a as the discriminant byte of the zeroed
+  block, not distinct source sites.
+- **Windows impact:** none known; no bounded Windows fix to make.
+- **Regression guard added:**
+  `test/01_unit/compiler/bootstrap/zerokind_nil_optional_aggregate_invariant_spec.spl`
+  (4 examples, 0 failures on Windows x86_64) asserts nil Optional-of-struct
+  locals, enum payloads and array elements read back nil.
+- **Needed to close:** a Stage 3 run on aarch64-apple-darwin with a seed built
+  after `2c89727c11c` reaching `phase5:mode_dispatch` with zero
+  `E-MIR-TYPE-ZeroKind`. Suggested status: `fixed_pending_verification`.
+
+TODO(p0f-3): confirm on aarch64-apple-darwin with a post-`2c89727c11c` seed that
+the class stays at 0, then close this record.
+
+## Verification 2026-11-02 (release/1.0.0, Windows x86_64)
+
+- Fix in source: `2c89727c11c` (`emit_aggregate_block_copy`, seed codegen)
+  is an ancestor of `origin/release/1.0.0`; the misleading "PRODUCER that left
+  kind unset" diagnostic wording is no longer present in `src/compiler`.
+- Regression guards present: `src/compiler_rust/compiler/tests/optional_aggregate_copy_jit.rs`
+  and `test/01_unit/compiler/bootstrap/zerokind_nil_optional_aggregate_invariant_spec.spl`.
+- Spec run: `bin/simple run test/01_unit/compiler/bootstrap/zerokind_nil_optional_aggregate_invariant_spec.spl`
+  -> `4 examples, 0 failures`, wall 8.9 s, peak RSS 270 MB. No code changed by
+  this pass, so there is no before/after delta.
+- Not reproducible on x86_64 (symptom was AAPCS64-only). Close only after:
+  build the seed at a commit containing `2c89727c11c` on aarch64-apple-darwin
+  (or aarch64-unknown-linux-gnu), rebuild Stage 2 with it, run Stage 3 via
+  `scripts/bootstrap/bootstrap-from-scratch.sh`, and confirm
+  `grep -c E-MIR-TYPE-ZeroKind` = 0 and `[post-mono-verify]` = 0 in the worker
+  stderr, with `phase5:mode_dispatch` reached.

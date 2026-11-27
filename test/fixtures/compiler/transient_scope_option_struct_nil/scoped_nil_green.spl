@@ -1,0 +1,47 @@
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+struct Box:
+    v: i64
+    path: text
+
+fn load_in_scope(flag: bool) -> Box?:
+    val p = "probe/" + "path.spl"
+    if not flag:
+        return nil
+    Some(Box(v: 1, path: p))
+
+fn load(flag: bool) -> Box?:
+    if not transient_scope_begin():
+        return nil
+    val decoded = load_in_scope(flag)
+    val paused = transient_scope_pause()
+    var promoted = true
+    val hit = decoded != nil
+    if paused and hit:
+        promoted = transient_promote(decoded)
+    val ended = transient_scope_end()
+    if not paused or not promoted or not ended:
+        panic("scope ownership failed")
+    if not hit:
+        return nil
+    decoded
+
+fn load_parsed(flag: bool, source_path: text) -> Box?:
+    val loaded = load(flag)
+    if source_path == "" or loaded == nil:
+        return loaded
+    var m = loaded.unwrap()
+    m.path = source_path
+    Some(m)
+
+fn main() -> i64:
+    val r = load_parsed(false, "x")
+    val hit = r != nil
+    print "miss-case hit={hit}"
+    val r2 = load_parsed(true, "y")
+    print "hit-case hit={r2 != nil}"
+    val k = "after"
+    print "alloc-after-ok {k}"
+    if hit:
+        return 1
+    0

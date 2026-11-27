@@ -6,6 +6,7 @@ use app.build.clang_policy.native_rebuild_barrier.{
     parse_clang_native_object_map_v1,
     begin_clang_native_rebuild_barrier_v1,
     close_clang_native_rebuild_barrier_v1}
+use app.build.host_path_policy.{build_host_abs_path_valid_v1}
 use app.build.clang_policy.native_ninja_graph.{observe_clang_ninja_graph_v1}
 use app.io.mod.{file_is_regular_no_follow, file_hash_sha256,
     file_read_regular_no_follow_bounded,
@@ -39,14 +40,7 @@ fn _ninja_sha256_v1(value: text) -> bool:
     true
 
 fn _ninja_absolute_path_v1(path: text) -> bool:
-    if not path.starts_with("/") or path.len() < 2 or
-       path.len() > 4096 or path.ends_with("/") or
-       path.contains("//") or path.contains("\n") or
-       path.contains("\r") or path.contains("\x00"):
-        return false
-    for part in path.split("/"):
-        if part == "." or part == "..": return false
-    true
+    build_host_abs_path_valid_v1(path, false, false, 4096, 4096)
 
 fn run_clang_ninja_policy_build_v1(
         decision: ClangNativeNoopDecisionV1,
@@ -72,7 +66,7 @@ fn run_clang_ninja_policy_build_v1(
        not file_is_regular_no_follow(ninja_path) or
        not _ninja_sha256_v1(protected_ninja_digest) or
        not _ninja_sha256_v1(protected_graph_digest) or
-       file_hash_sha256(ninja_path) != protected_ninja_digest or
+       not _file_sha256_matches_v1(ninja_path, protected_ninja_digest) or
        timeout_ms < 1 or timeout_ms > 3600000 or
        output_max_bytes < 1 or
        output_max_bytes > CLANG_NINJA_OUTPUT_MAX_BYTES_V1:
@@ -131,7 +125,7 @@ fn run_clang_ninja_policy_build_v1(
     val final_graph = observe_clang_ninja_graph_v1(build_root)
     if not final_graph.valid or
        final_graph.graph_digest != protected_graph_digest or
-       file_hash_sha256(ninja_path) != protected_ninja_digest:
+       not _file_sha256_matches_v1(ninja_path, protected_ninja_digest):
         close_clang_native_rebuild_barrier_v1(lease)
         return _ninja_reject_v1("native-graph-or-tool-changed", stdout,
             stderr, exit_code)
@@ -144,3 +138,9 @@ fn run_clang_ninja_policy_build_v1(
 
 export CLANG_NINJA_OUTPUT_MAX_BYTES_V1, CLANG_NINJA_LOG_MAX_BYTES_V1
 export ClangNinjaBuildResultV1, run_clang_ninja_policy_build_v1
+
+# Absent/unreadable file == mismatch: a missing digest never matches.
+fn _file_sha256_matches_v1(path: text, expected: text) -> bool:
+    if val digest = file_hash_sha256(path):
+        return digest == expected
+    false

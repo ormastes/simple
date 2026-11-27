@@ -1,0 +1,183 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/dom_accessors.spl 1%
+# @tag: unit, browser_engine, dom, forms
+#
+# DOM behaviours that had no executing spec: HTML form-owner resolution (a
+# control belongs to its nearest ancestor <form>, or to the form named by its
+# `form` attribute when that id is a <form>; only submit/reset controls resolve
+# a submit/reset owner), the default-action state changes (checkbox toggle,
+# radio select, details toggle, navigation), the checked radio of a group, and
+# child list mutation (remove by node id, insert before a reference node).
+# Trees are parsed from HTML so node ids are whatever the builder assigned.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{html_tree_builder_build}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_find_by_id, be_dom_get_attr, be_dom_has_attr, be_dom_get_children,
+    be_dom_remove_child, be_dom_child_count_except, be_dom_insert_before,
+    be_dom_set_children, be_dom_apply_default_action,
+    be_dom_form_owner_id, be_dom_submit_form_owner_id, be_dom_reset_form_owner_id,
+    be_dom_checked_radio_id_for_target, be_dom_focused_route_id, be_dom_find_by_tag,
+    be_dom_route_identity, be_dom_route_node_id
+}
+
+fn _page() -> BeDomNode:
+    html_tree_builder_build("<html><body>" +
+        "<form id=\"f1\"><input id=\"name\" type=\"text\">" +
+        "<input id=\"go\" type=\"submit\"><input id=\"clear\" type=\"reset\">" +
+        "<button id=\"plain\" type=\"button\">b</button>" +
+        "<input id=\"r1\" type=\"radio\" name=\"g\"><input id=\"r2\" type=\"radio\" name=\"g\" checked>" +
+        "</form>" +
+        "<form id=\"f2\"></form>" +
+        "<input id=\"outside\" type=\"submit\" form=\"f2\">" +
+        "<input id=\"dangling\" type=\"submit\" form=\"nope\">" +
+        "<input id=\"orphan\" type=\"submit\">" +
+        "<div id=\"notcontrol\">x</div>" +
+        "<ul id=\"list\"><li id=\"a\">A</li><li id=\"b\">B</li><li id=\"c\">C</li></ul>" +
+        "</body></html>")
+
+fn _node(root: BeDomNode, id: text) -> BeDomNode:
+    be_dom_find_by_id(root, id).unwrap()
+
+fn _child_ids(node: BeDomNode) -> text:
+    var out = ""
+    for child in be_dom_get_children(node):
+        out = out + be_dom_get_attr(child, "id") + ","
+    out
+
+describe "DOM form owners, default actions and child mutation":
+
+    context "form owner":
+
+        it "is the nearest ancestor form":
+            expect(be_dom_form_owner_id(_page(), "name")).to_equal("f1")
+            expect(be_dom_form_owner_id(_page(), "go")).to_equal("f1")
+
+        it "follows an explicit form attribute that names a form":
+            expect(be_dom_form_owner_id(_page(), "outside")).to_equal("f2")
+
+        it "is empty when the form attribute names nothing":
+            expect(be_dom_form_owner_id(_page(), "dangling")).to_equal("")
+
+        it "is empty for a control outside any form":
+            expect(be_dom_form_owner_id(_page(), "orphan")).to_equal("")
+
+        it "is empty for a non-control element and an unknown id":
+            expect(be_dom_form_owner_id(_page(), "notcontrol")).to_equal("")
+            expect(be_dom_form_owner_id(_page(), "missing")).to_equal("")
+
+    context "submit and reset owners":
+
+        it "resolves a submit owner only for submit controls":
+            expect(be_dom_submit_form_owner_id(_page(), "go")).to_equal("f1")
+            expect(be_dom_submit_form_owner_id(_page(), "clear")).to_equal("")
+            expect(be_dom_submit_form_owner_id(_page(), "name")).to_equal("")
+            expect(be_dom_submit_form_owner_id(_page(), "plain")).to_equal("")
+            expect(be_dom_submit_form_owner_id(_page(), "notcontrol")).to_equal("")
+
+        it "resolves a reset owner only for reset controls":
+            expect(be_dom_reset_form_owner_id(_page(), "clear")).to_equal("f1")
+            expect(be_dom_reset_form_owner_id(_page(), "go")).to_equal("")
+            expect(be_dom_reset_form_owner_id(_page(), "plain")).to_equal("")
+            expect(be_dom_reset_form_owner_id(_page(), "missing")).to_equal("")
+
+        it "submits through an explicit form attribute":
+            expect(be_dom_submit_form_owner_id(_page(), "outside")).to_equal("f2")
+
+    context "default actions":
+
+        it "toggles a checkbox on and off":
+            val root = _page()
+            val on = be_dom_apply_default_action(_node(root, "name"), "input-checkbox-toggle")
+            expect(be_dom_has_attr(on, "checked")).to_equal(true)
+            val off = be_dom_apply_default_action(on, "input-checkbox-toggle")
+            expect(be_dom_has_attr(off, "checked")).to_equal(false)
+
+        it "selects a radio and leaves it selected when applied again":
+            val root = _page()
+            val once = be_dom_apply_default_action(_node(root, "r1"), "input-radio-select")
+            expect(be_dom_has_attr(once, "checked")).to_equal(true)
+            expect(be_dom_has_attr(be_dom_apply_default_action(once, "input-radio-select"), "checked")).to_equal(true)
+
+        it "toggles details open":
+            val root = _page()
+            val opened = be_dom_apply_default_action(_node(root, "notcontrol"), "details-toggle")
+            expect(be_dom_get_attr(opened, "open")).to_equal("open")
+            expect(be_dom_has_attr(be_dom_apply_default_action(opened, "details-toggle"), "open")).to_equal(false)
+
+        it "records focus, activation, submission and the navigation target":
+            val n = _node(_page(), "plain")
+            expect(be_dom_get_attr(be_dom_apply_default_action(n, "focus-element"), "data-focused")).to_equal("true")
+            expect(be_dom_get_attr(be_dom_apply_default_action(n, "button-activate"), "data-activated")).to_equal("true")
+            expect(be_dom_get_attr(be_dom_apply_default_action(n, "form-submit"), "data-submitted")).to_equal("true")
+            expect(be_dom_get_attr(be_dom_apply_default_action(n, "navigate:/next?x=1"), "data-navigation")).to_equal("/next?x=1")
+
+        it "ignores an unknown action":
+            val n = _node(_page(), "plain")
+            val same = be_dom_apply_default_action(n, "no-such-action")
+            expect(be_dom_has_attr(same, "data-activated")).to_equal(false)
+            expect(be_dom_get_attr(same, "id")).to_equal("plain")
+
+    context "radio groups and focus":
+
+        it "finds the checked radio of the target's group":
+            val root = _page()
+            expect(be_dom_checked_radio_id_for_target(root, "r1")).to_equal(be_dom_route_identity(_node(root, "r2")))
+            expect(be_dom_route_node_id(be_dom_checked_radio_id_for_target(root, "r1"))).to_equal(_node(root, "r2").node_id)
+
+        it "is empty for a control without a name":
+            expect(be_dom_checked_radio_id_for_target(_page(), "name")).to_equal("")
+            expect(be_dom_checked_radio_id_for_target(_page(), "missing")).to_equal("")
+
+        it "reports no focused element on a fresh page":
+            expect(be_dom_focused_route_id(_page())).to_equal("")
+
+    context "child list mutation":
+
+        it "parses the list in source order":
+            expect(_child_ids(_node(_page(), "list"))).to_equal("a,b,c,")
+            expect(be_dom_find_by_tag(_page(), "li").len()).to_equal(3)
+
+        it "removes one child by node id and keeps the others in order":
+            var list = _node(_page(), "list")
+            val b = _node(list, "b")
+            expect(be_dom_child_count_except(list, b.node_id)).to_equal(2)
+            be_dom_remove_child(list, b.node_id)
+            expect(_child_ids(list)).to_equal("a,c,")
+
+        it "leaves the list alone when the id is not a child":
+            var list = _node(_page(), "list")
+            be_dom_remove_child(list, -12345)
+            expect(_child_ids(list)).to_equal("a,b,c,")
+
+        it "empties the list when its only child is removed":
+            var list = _node(_page(), "list")
+            val a = _node(list, "a")
+            list = be_dom_set_children(list, [a])
+            expect(_child_ids(list)).to_equal("a,")
+            be_dom_remove_child(list, a.node_id)
+            expect(be_dom_get_children(list).len()).to_equal(0)
+
+        it "inserts before the reference child and reparents the new node":
+            val root = _page()
+            var list = _node(root, "list")
+            val moved = _node(root, "notcontrol")
+            be_dom_insert_before(list, moved, _node(list, "b").node_id)
+            expect(_child_ids(list)).to_equal("a,notcontrol,b,c,")
+            expect(be_dom_get_children(list)[1].parent_id).to_equal(list.node_id)
+
+        it "appends when the reference id is not a child":
+            val root = _page()
+            var list = _node(root, "list")
+            be_dom_insert_before(list, _node(root, "notcontrol"), -12345)
+            expect(_child_ids(list)).to_equal("a,b,c,notcontrol,")
+
+        it "replaces the child list and keeps the node's own identity":
+            val root = _page()
+            val list = _node(root, "list")
+            val swapped = be_dom_set_children(list, [_node(list, "c"), _node(list, "a")])
+            expect(_child_ids(swapped)).to_equal("c,a,")
+            expect(swapped.node_id).to_equal(list.node_id)
+            expect(be_dom_get_attr(swapped, "id")).to_equal("list")

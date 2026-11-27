@@ -4,7 +4,6 @@ use std.io_runtime.{read_file_text}
 use std.spec.{describe, it, expect, fail, step}
 use compiler.core.frontend.{ParserProviderV1}
 use compiler.core.parser.{parser_error_count, parser_get_errors, parser_has_errors}
-use compiler.frontend.frontend.{frontend_parse_or_restore_for_provider}
 use compiler.frontend.frontend_parse_cache.{
     frontend_parse_cache_hits,
     frontend_parse_cache_misses,
@@ -33,7 +32,7 @@ fn expect_flat_candidate_rejected(
     val hits_before = frontend_parse_cache_hits()
     val misses_before = frontend_parse_cache_misses()
     val stores_before = frontend_parse_cache_stores()
-    match frontend_parse_or_restore_for_provider(
+    match parse_and_build_module_scoped_for_provider(
         provider,
         FLAT_PROVIDER_SOURCE,
         "flat_provider_reject.spl",
@@ -131,7 +130,7 @@ describe "FlatAstBridge ParserProviderV1 route":
         val source = read_file_text(
             "src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl")
         val route = source.split(
-            "pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: bool) -> ParserModule:")[1]
+            "fn parse_and_build_module_with_scope_owner(source: text, path: text,")[1]
         val admission_at = route.index_of("parser_provider_v1_admit(parser_provider_v1_default())")
         val trace_at = route.index_of("frontend_compiler_trace_scope_enter()")
         val reset_at = route.index_of("reset_all_pools()")
@@ -144,14 +143,13 @@ describe "FlatAstBridge ParserProviderV1 route":
         step("Require admission ahead of the complete cache restore/capture route")
         val frontend = read_file_text("src/compiler/10.frontend/frontend.spl")
         val cache_route = frontend.split(
-            "pub fn frontend_parse_or_restore_for_provider(")[1]
-        val cache_admission_at = cache_route.index_of("parser_provider_v1_admit(provider)?")
-        val cache_delegate_at = cache_route.index_of("frontend_parse_or_restore_admitted(")
-        expect(cache_admission_at).to_be_greater_than(-1)
-        expect(cache_admission_at).to_be_less_than(cache_delegate_at)
-        val admitted_route = frontend.split(
-            "fn frontend_parse_or_restore_admitted(")[1].split(
-            "pub fn frontend_parse_or_restore_for_provider(")[0]
-        expect(admitted_route).to_contain("frontend_parse_cache_key(")
-        expect(admitted_route).to_contain("build_module_from_flat_pool_blob(")
-        expect(admitted_route).to_contain("flat_pool_capture_arm()")
+            "fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scope: bool,")[1]
+        expect(cache_route).to_contain("build_module_from_flat_pool_blob(")
+        expect(cache_route).to_contain("flat_pool_capture_arm()")
+        val core_frontend = read_file_text("src/compiler/10.frontend/core/frontend.spl")
+        val execute_route = core_frontend.split(
+            "fn parser_provider_v1_execute(")[1]
+        val execute_admission_at = execute_route.index_of("parser_provider_v1_admit(provider)?")
+        val execute_body_at = execute_route.index_of("core_frontend_parse_legacy_reference(")
+        expect(execute_admission_at).to_be_greater_than(-1)
+        expect(execute_admission_at).to_be_less_than(execute_body_at)

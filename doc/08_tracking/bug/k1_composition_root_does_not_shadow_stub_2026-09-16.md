@@ -1,6 +1,6 @@
 # K1 composition root does not shadow bootstrap_k1_selected stub — static K1 backend table is dormant
 
-**Status:** OPEN (loader/composition redesign pending)
+**Status:** SUPERSEDED (triage 2026-11-11, lane boot21; first triaged 2026-11-10 lane boot5) — composition-shadowing fix `21bbc08f73a` re-verified ancestor of HEAD `d552f63f67f8`; stub at `src/compiler/80.driver/bootstrap_k1_selected.spl`; precedence spec 13/13 on the tracked seed (see 2026-11-11 addendum below)
 
 Update (2026-09-29): the exact standalone Stage4 entry built with the
 committed `src/compositions/kernel_llvm_cranelift` root contains the real
@@ -64,3 +64,42 @@ composition root deterministically shadows the in-tree stub for the K1
 selected-module path (or the stub needs to be produced by a pre-pass that the
 gate can verify). Until then, receipts carry `stub-fallback` and the runtime
 `install_selected_k1_backend_table_v1()` keeps returning `false`.
+
+## 2026-11-10 P3-boot5 triage (row 34) — SUPERSEDED
+
+Premise outdated. The stub now lives at
+`src/compiler/80.driver/bootstrap_k1_selected.spl` (894-byte fail-closed stub;
+the old `src/compiler/driver/` logical path no longer exists as a directory),
+and the composition-shadowing mechanism was fixed by `21bbc08f73a`
+(source_root_resolution: selected composition roots win over numbered layers),
+ancestor of HEAD. The gate (`scripts/bootstrap/write-k1-composition-receipt.shs`
+:395-425) keys binding on the scanned content length under either spelling and
+uniqueness-checks the selection witness. Corroborates bugdb close
+`1591de5a5e58` (2026-11-09). seed-smoke (worktree seed bin/simple.exe,
+2026-11-10): `test/01_unit/compiler/driver/source_root_composition_precedence_spec.spl`
+--mode=interpret -> "All tests passed!".
+
+
+## 2026-11-11 P3-boot21 triage — SUPERSEDED (header flip)
+
+Fresh re-verification of the 2026-11-10 boot5 disposition (not flipped then):
+
+- `git merge-base --is-ancestor 21bbc08f73a HEAD` (HEAD `d552f63f67f8`):
+  ANCESTOR — "source_root_resolution: selected composition roots win over
+  numbered layers" is in this tree.
+- The stub lives at `src/compiler/80.driver/bootstrap_k1_selected.spl`
+  (894-byte fail-closed stub, single `install_selected_k1_backend_table_v1`
+  symbol) — the old `src/compiler/driver/` logical path is gone.
+- Seed-smoke on the tracked seed (build 46fe8f6b6def):
+  `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe ./bin/simple.exe test
+  test/01_unit/compiler/driver/source_root_composition_precedence_spec.spl
+  --mode=interpreter --no-cache` → SPEC FILE VERDICT outcome=OK,
+  executed=13 passed=13 failed=0.
+
+The full-CLI binding/receipt contract this record sequenced into is closed by
+the same mechanism plus the content-length-keyed gate. No code change this
+lane; header flipped to match the verified disposition.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED (confirmed)** — boot21: composition-shadowing fix 21bbc08f73a verified ancestor; stub lives at 80.driver/bootstrap_k1_selected.spl; precedence spec 13/13 on the tracked seed.

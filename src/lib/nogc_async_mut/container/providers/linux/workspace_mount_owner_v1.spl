@@ -1,0 +1,917 @@
+use std.common.contracts.container.agent_executable_profile_v1.{AgentExecutableProfileV1, agent_executable_profile_encode_v1, agent_executable_profile_minimum_memory_v1}
+use std.common.contracts.orchestration.agent_workspace_invocation_v2.agent_workspace_invocation_manifest_decode_v2
+use std.common.contracts.storage.linux_workspace_retention_v3.*
+use std.nogc_async_mut.container.providers.linux.agent_workspace_retention_v3.*
+use std.nogc_sync_mut.io.linux_fresh_workload_subject_v2.LinuxFreshWorkspaceNativeRetirementV3
+use std.common.contracts.container.execution_v2.container_execution_request_decode_v2
+use std.common.contracts.container.linux_agent_workspace_profile_v2.{linux_agent_workspace_profile_decode_v2, linux_agent_workspace_profile_match_v2}
+use std.nogc_sync_mut.io.linux_fresh_workspace_binding_v3.{LinuxFreshWorkspaceBindingV3, linux_fresh_workspace_binding_open_v3}
+use std.common.contracts.storage.linux_workspace_identity_v1.linux_workspace_retained_native_match_v1
+use std.nogc_async_mut.container.providers.linux.agent_workspace_profile_v1.*
+use std.nogc_async_mut.container.providers.linux.agent_workspace_stage_v1.{linux_agent_workspace_stage_bytes_v1,
+    linux_agent_workspace_creation_plan_v1, LinuxAgentWorkspaceCreationV1}
+use std.common.contracts.container.agent_workspace_manifest_v1.{AgentWorkspaceManifestV1, agent_workspace_manifest_decode_v1}
+use std.common.contracts.container.execution_v2.{ContainerRequestProjectionV2, ContainerExecutionRequestV2, container_execution_request_encode_v2}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+# Supporting source observations only. No source/lock sample is a charge,
+# migration fence, cleanup grant, target namespace proof or mount launch owner.
+# The native quota lease is borrowed from its original durable owner; this
+# module never admits a new lease or closes one (only the lease's admitter drops its hold).
+use std.nogc_async_mut.container.providers.linux.workspace_installed_profile_v1.*
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_decode_v1
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{LinuxOciEnginePolicyV1,
+    linux_oci_engine_policy_decode_v1, linux_oci_engine_policy_digest_v1}
+use std.nogc_async_mut.container.providers.linux.workspace_mount_inspect_v1.{LinuxWorkspaceMountInspectV1,
+    linux_workspace_mount_inspect_observation_v1}
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeOperationV1}
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.{LinuxMachinePolicyOwnerV1, LinuxMachineProcessContextV1}
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.LinuxMachineStorageV1
+use std.nogc_sync_mut.io.linux_machine_workspace_exclusion_v1.{LinuxMachineWorkspaceExclusionV1,
+    LinuxMachineWorkspaceExclusionOpenV1, linux_machine_workspace_exclusion_open_v1}
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+use std.nogc_sync_mut.io.retained_file.{RetainedDirectoryOwnerV1, retained_directory_open_trusted_v1}
+use std.nogc_sync_mut.storage_roots.workspace_storage_owner_v1.{WorkspaceStorageLeaseV1, workspace_storage_observe_v1}
+use std.common.contracts.storage.workspace_storage_v1.{WorkspaceStorageReceiptV1, workspace_storage_binding_v1}
+use std.common.contracts.container.machine_policy_v1.machine_container_policy_decode_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.encoding.external_text.{bytes_to_text_checked}
+use std.common.contracts.container.build_workspace_profile_v1.{LinuxBuildWorkspaceProfileV1, linux_build_workspace_profile_decode_v1}
+use std.common.contracts.container.build_workspace_manifest_v1.{BuildWorkspaceManifestV1, build_workspace_invocation_decode_v1}
+use std.common.contracts.container.linux_fresh_workspace_v3.{LinuxWorkspaceArmV3, linux_workspace_manifest_arm_v3}
+use std.common.contracts.container.settled_workspace_read_v3.{ContainerSettledWorkspaceBoundsV3, ContainerSettledWorkspaceReadV3}
+use std.nogc_async_mut.container.providers.linux.remote_build_workspace_stage_v1.{LinuxRemoteBuildStageFileV3,
+    linux_remote_build_stage_admit_v1, linux_remote_build_stage_bytes_v1, linux_remote_build_read_v1,
+    linux_remote_build_stage_file_cap_v1}
+
+pub struct LinuxWorkspaceSourceSampleV1:
+    profile: LinuxWorkspaceInstalledProfileV1
+    profile_digest: text
+    storage: WorkspaceStorageReceiptV1
+    process: LinuxMachineProcessContextV1
+    request_digest: text
+    request: LinuxOciRequestV1
+
+pub struct LinuxWorkspaceSourceSampleTurnV1:
+    # Returned on success and refusal. The original durable owner retains
+    # release/recovery responsibility; a copied token is not a release receipt.
+    reader: LinuxMachinePolicyOwnerV1
+    lease: WorkspaceStorageLeaseV1
+    sample: LinuxWorkspaceSourceSampleV1?
+    error: text
+
+pub fn linux_workspace_source_request_match_v1(profile: LinuxWorkspaceInstalledProfileV1,
+        request: LinuxOciRequestV1, actual_uid: i64) -> Result<text, text>:
+    linux_workspace_installed_profile_validate_v1(profile)?
+    val digest = linux_oci_request_digest_v1(request)?
+    if request.mounts.len() != 1: return Err("workspace-source-one-exact-root-required")
+    val mount = request.mounts[0]
+    # milestone_0047: the run's own child of the provisioned leaf, never the shared leaf or another run's child.
+    if (mount.host_root != linux_workspace_run_root_v1(profile, request.operation_id) or mount.guest_root != profile.guest_root or
+            mount.read_only != profile.read_only): return Err("workspace-source-request-mapping-mismatch")
+    if request.containment_profile_digest != profile.containment_profile_digest:
+        return Err("workspace-source-containment-binding-mismatch")
+    if request.working_directory != profile.guest_root: return Err("workspace-source-working-directory-mismatch")
+    if (request.network_policy != "none" or request.filesystem_policy != "read-only" or
+            actual_uid <= 0 or request.user_uid != actual_uid or request.user_namespace_mode != "keep-id"):
+        return Err("workspace-source-request-profile-unsupported")
+    if not request.replace_entrypoint: return Err("workspace-source-exact-command-required")
+    Ok(digest)
+
+fn workspace_source_utf8_v1(bytes: [u8]) -> Result<text, text>:
+    if bytes.len() == 0 or bytes.len() > 1048576:
+        return Err("workspace-source-policy-utf8")
+    match bytes_to_text_checked(bytes):
+        case Ok(decoded): Ok(decoded)
+        case Err(_): Err("workspace-source-policy-utf8")
+
+fn workspace_source_sample_v1(reader: LinuxMachinePolicyOwnerV1, lease: WorkspaceStorageLeaseV1,
+        request_bytes: text) -> Result<LinuxWorkspaceSourceSampleV1, text>:
+    val request = linux_oci_retained_request_decode_v1(request_bytes)?
+    val machine_bytes = workspace_source_utf8_v1(reader.read_policy_v1()?)?
+    val profile_bytes = workspace_source_utf8_v1(reader.read_workspace_profile_v1()?)?
+    val profile = linux_workspace_installed_profile_decode_v1(profile_bytes)?
+    if profile.machine_policy_digest != sha256_text(machine_bytes): return Err("workspace-source-machine-policy-mismatch")
+    val machine = machine_container_policy_decode_v1(machine_bytes)?
+    var provider_bytes = ""
+    for provider in machine.providers:
+        if provider.backend == "linux-podman": provider_bytes = provider.policy_bytes
+    if provider_bytes == "" or sha256_text(provider_bytes) != profile.provider_policy_digest:
+        return Err("workspace-source-provider-policy-mismatch")
+    val engine = linux_oci_engine_policy_decode_v1(provider_bytes)?
+    val context = reader.actual_process_context_v1()?
+    if engine.expected_uid != context.effective_uid: return Err("workspace-source-provider-uid-mismatch")
+    val root = linux_workspace_source_root_v1(profile)
+    for forbidden in [engine.expected_graph_root, engine.expected_run_root]:
+        if linux_workspace_paths_overlap_v1(root, forbidden): return Err("workspace-source-engine-root-overlap")
+    if workspace_storage_binding_v1(lease.request)? != workspace_storage_binding_v1(linux_workspace_storage_request_v1(profile))?:
+        return Err("workspace-source-storage-binding-mismatch")
+    val storage = workspace_storage_observe_v1(lease)?
+    if storage.state != "retained": return Err("workspace-source-storage-not-retained")
+    val digest = linux_workspace_source_request_match_v1(profile, request, context.effective_uid)?
+    # Recheck the actual reader after the native lease observation. This is
+    # same-turn provenance, not a promise about future Host/path mutations.
+    val after = reader.actual_process_context_v1()?
+    if (after.real_uid != context.real_uid or after.effective_uid != context.effective_uid or
+            after.process_id != context.process_id or after.thread_id != context.thread_id or
+            after.authority_namespace_id != context.authority_namespace_id or after.generation != context.generation):
+        return Err("workspace-source-process-context-changed")
+    if workspace_source_utf8_v1(reader.read_workspace_profile_v1()?)? != profile_bytes:
+        return Err("workspace-source-profile-changed")
+    Ok(LinuxWorkspaceSourceSampleV1(profile: profile, profile_digest: sha256_text(profile_bytes),
+        storage: storage, process: after, request_digest: digest, request: request))
+
+# Real installed-file/process/quota observations with unconditional custody
+# return. This cannot mint LinuxWorkspaceSourceOwnerV1 or mount authority.
+pub fn linux_workspace_source_sample_borrowed_v1(reader: LinuxMachinePolicyOwnerV1,
+        lease: WorkspaceStorageLeaseV1, request_bytes: text) -> LinuxWorkspaceSourceSampleTurnV1:
+    match workspace_source_sample_v1(reader, lease, request_bytes):
+        case Ok(sample): LinuxWorkspaceSourceSampleTurnV1(reader: reader, lease: lease, sample: Some(sample), error: "")
+        case Err(reason): LinuxWorkspaceSourceSampleTurnV1(reader: reader, lease: lease, sample: None, error: reason)
+
+pub enum LinuxWorkspaceSourceOpenV1:
+    Observed(owner: LinuxWorkspaceSourceOwnerV1)
+    Rejected(reader: LinuxMachinePolicyOwnerV1, storage: LinuxMachineStorageV1,
+        lease: WorkspaceStorageLeaseV1, reason: text)
+    CleanupRequired(owner: LinuxWorkspaceSourceOwnerV1, reason: text)
+
+pub struct LinuxWorkspaceSourceCloseV1:
+    reader: LinuxMachinePolicyOwnerV1
+    storage: LinuxMachineStorageV1
+    lease: WorkspaceStorageLeaseV1
+    owner: LinuxWorkspaceSourceOwnerV1?
+    closed: bool
+    error: text
+
+# One canonical resource record per generation. Public values contain no raw
+# descriptors or copied close progress. Closed tombstones are never reused.
+struct LinuxWorkspaceSourceStateV1:
+    generation: i64
+    reader: LinuxMachinePolicyOwnerV1
+    storage: LinuxMachineStorageV1
+    lease: WorkspaceStorageLeaseV1
+    request_digest: text
+    profile_digest: text
+    var workspace_identity_digest: text = ""
+    var exclusion: LinuxMachineWorkspaceExclusionV1? = None
+    var parent_directory: RetainedDirectoryOwnerV1? = None
+    var root_directory: RetainedDirectoryOwnerV1? = None
+    # milestone_0047: this run's own child of the provisioned leaf (root_directory), created at staging AFTER the
+    # effect is recorded (workspace_run_directory_create_v1). The leaf stays the native quota root.
+    var run_directory: Option<RetainedDirectoryOwnerV1> = None
+    var phase: text = "opening"
+    var cleanup_error: text = ""
+    # NEW writable staging mode: actual installed profile plus exact Host-admitted invocation.
+    # Original reader/storage/exclusion/root remain in THIS canonical slot.
+    var agent_manifest_digest: text = ""
+    var agent_invocation_digest: text = ""
+    var agent_profile_source: text = ""
+    var agent_stage_phase: text = ""
+    var agent_stage_error: text = ""
+    var agent_effect_attempted: bool = false
+    var agent_creation_plan: [text] = []
+    var agent_creations: [LinuxAgentWorkspaceCreationV1] = []
+    var agent_runtime_binding: LinuxFreshWorkspaceBindingV3? = None
+    var agent_runtime_request: text = ""
+    var agent_request_bytes: text = ""
+    var agent_dedicated_empty_observed: bool = false
+    var agent_retained_metadata: LinuxWorkspaceRetainedMetadataV3? = None
+    # milestone_0030 op (i): remote-build staging in the SAME canonical slot. Disjoint from the
+    # agent fields so the agent arm is unchanged; a source carries at most one staged primary.
+    var build_profile_source: text = ""
+    var build_manifest_digest: text = ""
+    var build_invocation_digest: text = ""
+    var build_request_bytes: text = ""
+    var build_stage_phase: text = ""
+    var build_stage_error: text = ""
+    var build_effect_attempted: bool = false
+    var build_creations: [text] = []
+    var build_runtime_binding: Option<LinuxFreshWorkspaceBindingV3> = None
+    var build_runtime_request: text = ""
+    var build_dedicated_empty_observed: bool = false
+    var build_retained_metadata: Option<LinuxWorkspaceRetainedMetadataV3> = None
+
+var workspace_source_states_v1: [LinuxWorkspaceSourceStateV1] = []
+var workspace_source_active_v1: i64 = 0
+
+fn workspace_source_state_v1(slot: i64, generation: i64) -> Result<LinuxWorkspaceSourceStateV1, text>:
+    linux_machine_process_origin_check_v1()?
+    if slot < 0 or slot >= workspace_source_states_v1.len(): return Err("workspace-source-owner-stale")
+    val state = workspace_source_states_v1[slot]
+    if state.generation != generation: return Err("workspace-source-owner-stale")
+    Ok(state)
+
+pub struct LinuxAgentWorkspaceStageTurnV1:
+    owner: LinuxWorkspaceSourceOwnerV1
+    error: text
+    effect_attempted: bool
+    # Staged bytes ONLY. Never container birth, worktree validity or AgentReady.
+    ready: bool
+
+# milestone_0030 op (i) turn: staged bytes ONLY, never container birth or a build result.
+pub struct LinuxRemoteBuildStageTurnV1:
+    owner: LinuxWorkspaceSourceOwnerV1
+    error: text
+    effect_attempted: bool
+    ready: bool
+
+pub struct LinuxWorkspaceRetirementTurnV3:
+    owner: LinuxWorkspaceSourceOwnerV1
+    metadata: LinuxWorkspaceRetainedMetadataV3?
+    retired: bool
+    error: text
+
+pub class LinuxWorkspaceSourceOwnerV1:
+    slot: i64
+    generation: i64
+    # Immutable BORROWED custody only. No owned descriptors/progress here.
+    reader: LinuxMachinePolicyOwnerV1
+    storage: LinuxMachineStorageV1
+    lease: WorkspaceStorageLeaseV1
+
+    pub fn current_v1(request_bytes: text) -> Result<LinuxWorkspaceSourceSampleV1, text>:
+        val state = workspace_source_state_v1(self.slot, self.generation)?
+        if state.phase != "opening" and state.phase != "observed": return Err("workspace-source-owner-not-current")
+        val caller = state.reader.actual_process_context_v1()?
+        if not state.exclusion.? or not state.parent_directory.? or not state.root_directory.?:
+            return Err("workspace-source-owner-incomplete")
+        val exclusion = state.exclusion.unwrap()
+        val excluded = exclusion.current_v1()?
+        val sample = workspace_source_sample_v1(state.reader, state.lease, request_bytes)?
+        if (sample.request_digest != state.request_digest or sample.profile_digest != state.profile_digest or
+                excluded.machine_policy_digest != sample.profile.machine_policy_digest or
+                excluded.lease_binding_digest != sample.storage.binding_digest or
+                excluded.workspace_identity_digest != state.workspace_identity_digest):
+            return Err("workspace-source-owner-binding-changed")
+        val policy = workspace_source_utf8_v1(state.storage.policy_bytes_v1()?)?
+        if sha256_text(policy) != sample.profile.machine_policy_digest:
+            return Err("workspace-source-storage-policy-changed")
+        Ok(sample)
+
+    # Read-only projection from genuine original source custody. DATA never enables effects.
+    pub fn agent_invocation_projection_v1(request_bytes: text, manifest_bytes: text,
+            invocation_digest: text) -> Result<ContainerRequestProjectionV2, text>:
+        val admitted = workspace_agent_installed_v1(self, request_bytes, manifest_bytes, invocation_digest)?
+        val sample = self.current_v1(request_bytes)?
+        val request = sample.request
+        Ok(ContainerRequestProjectionV2(workload_uid: request.pod_uid, attempt: request.attempt,
+            operation_id: request.operation_id, request_digest: sample.request_digest,
+            cpu_millis: request.cpu_limit_millis, memory_bytes: request.memory_limit_bytes,
+            timeout_ms: request.timeout_ms, has_devices: false, has_workspace: true))
+
+    pub fn agent_invocation_program_match_v1(request_bytes: text, manifest_bytes: text,
+            invocation_digest: text, agent_program: text, image_config_id: text) -> Result<bool, text>:
+        val admitted = workspace_agent_installed_v1(self, request_bytes, manifest_bytes, invocation_digest)?
+        val (profile, manifest, profile_source) = admitted
+        if profile.agent_program != agent_program or profile.image_config_id != image_config_id:
+            return Err("agent-stage-installed-agent-program-binding")
+        Ok(true)
+
+    # Host invokes ONLY inside same-domain signature/archive/capacity-begin chain.
+    # Lower installed writable policy is real mechanism authority, not a caller bool.
+    pub fn stage_agent_invocation_v1(request_bytes: text, manifest_bytes: text,
+            invocation_digest: text, invocation_bytes: text) -> LinuxAgentWorkspaceStageTurnV1:
+        val admitted = workspace_agent_installed_v1(self, request_bytes, manifest_bytes, invocation_digest)
+        self.stage_agent_installed_v1(request_bytes, manifest_bytes, invocation_digest, invocation_bytes, admitted, 1)
+
+    # Explicit protectedV2 bootstrap opt-in; V1 strict staging is unchanged.
+    pub fn stage_agent_invocation_v2(request_bytes: text, manifest_bytes: text,
+            invocation_digest: text, invocation_bytes: text) -> LinuxAgentWorkspaceStageTurnV1:
+        val admitted = workspace_agent_installed_v2(self, request_bytes, manifest_bytes, invocation_digest)
+        self.stage_agent_installed_v1(request_bytes, manifest_bytes, invocation_digest, invocation_bytes, admitted, 2)
+
+    fn stage_agent_installed_v1(request_bytes: text, manifest_bytes: text, invocation_digest: text,
+            invocation_bytes: text, admitted: Result<(LinuxAgentWorkspaceProfileV1, AgentWorkspaceManifestV1, text), text>,
+            version: i64) -> LinuxAgentWorkspaceStageTurnV1:
+        if admitted.is_err(): return workspace_agent_turn_v1(self, admitted.unwrap_err(), false)
+        val state = workspace_source_state_v1(self.slot, self.generation).unwrap()
+        if (invocation_bytes.byte_len() < 1 or invocation_bytes.byte_len() > 1048576 or
+                sha256_text(invocation_bytes) != invocation_digest):
+            return workspace_agent_turn_v1(self, "agent-stage-invocation-bytes", false)
+        if state.agent_stage_phase == "staged":
+            return workspace_agent_turn_v1(self, "agent-stage-already-retained-revalidation-required", false)
+        if state.agent_stage_phase != "": return workspace_agent_turn_v1(self, "agent-stage-retained-or-in-progress", false)
+        if state.build_effect_attempted: return workspace_agent_turn_v1(self, "agent-stage-source-holds-remote-build-staging", false)
+        val (profile, manifest, profile_source) = admitted.unwrap()
+        if version == 2:
+            val decoded = agent_workspace_invocation_manifest_decode_v2(invocation_bytes)
+            if decoded.is_err(): return workspace_agent_turn_v1(self, decoded.unwrap_err(), false)
+            val invocation = decoded.unwrap()
+            val executable = self.agent_executable_profile_v2(request_bytes, manifest_bytes, invocation_digest)
+            if executable.is_err(): return workspace_agent_turn_v1(self, executable.unwrap_err(), false)
+            if (invocation.base.workspace_manifest != manifest_bytes or
+                    agent_executable_profile_encode_v1(invocation.executable_profile).unwrap() !=
+                    agent_executable_profile_encode_v1(executable.unwrap()).unwrap()):
+                return workspace_agent_turn_v1(self, "agent-stage-full-v2-profile-differs", false)
+        # Actual protected asset root is separate from guest-writable storage.
+        val opened = retained_directory_open_trusted_v1(profile.assets_root)
+        if opened.is_err(): return workspace_agent_turn_v1(self, opened.unwrap_err(), false)
+        var assets = opened.unwrap()
+        workspace_source_states_v1[self.slot].agent_manifest_digest = sha256_text(manifest_bytes)
+        workspace_source_states_v1[self.slot].agent_invocation_digest = invocation_digest
+        workspace_source_states_v1[self.slot].agent_profile_source = profile_source
+        workspace_source_states_v1[self.slot].agent_stage_phase = "staging"
+        workspace_source_states_v1[self.slot].agent_request_bytes = request_bytes
+        # Record potential effect BEFORE exclusive mkdir/write or fallible post-effect observation.
+        workspace_source_states_v1[self.slot].agent_creation_plan = linux_agent_workspace_creation_plan_v1(manifest)
+        workspace_source_states_v1[self.slot].agent_effect_attempted = true
+        # milestone_0047: the run's own child of the provisioned leaf, created exclusive after the effect is recorded.
+        val created = workspace_run_directory_create_v1(self, request_bytes)
+        if created.is_err():
+            var create_failure = created.unwrap_err()
+            if not assets.close(): create_failure = create_failure + ";agent-stage-assets-close-consumed-error"
+            workspace_source_states_v1[self.slot].agent_stage_phase = "retained-failed"
+            workspace_source_states_v1[self.slot].agent_stage_error = create_failure
+            return workspace_agent_turn_v1(self, create_failure, false)
+        val run = created.unwrap()
+        if version == 2: workspace_source_states_v1[self.slot].agent_dedicated_empty_observed = true
+        val staged = linux_agent_workspace_stage_bytes_v1(run, assets, manifest, invocation_bytes)
+        val asset_closed = assets.close()
+        workspace_source_states_v1[self.slot].agent_creations = staged.creations
+        var failure = staged.error
+        if not asset_closed: failure = "agent-stage-assets-close-consumed-error"
+        if failure == "":
+            # Policy/exclusion/current request remain live after actual staging.
+            val current = if version == 2: workspace_agent_installed_v2(self, request_bytes, manifest_bytes, invocation_digest) else: workspace_agent_installed_v1(self, request_bytes, manifest_bytes, invocation_digest)
+            if current.is_err(): failure = current.unwrap_err()
+        workspace_source_states_v1[self.slot].agent_stage_phase = if failure == "": "staged" else: "retained-failed"
+        workspace_source_states_v1[self.slot].agent_stage_error = failure
+        workspace_agent_turn_v1(self, failure, failure == "")
+
+    # milestone_0030 op (i): stage exactly the task-pinned producer and inputs (by digest) into the
+    # EMPTY dedicated root. Admission (workspace_build_installed_v1) refuses before any write; the
+    # effect is recorded BEFORE the first exclusive mkdir/write. A phase marker blocks restaging.
+    pub fn stage_remote_build_v3(request_bytes: text, manifest_bytes: text, invocation_bytes: text,
+            files: [LinuxRemoteBuildStageFileV3]) -> LinuxRemoteBuildStageTurnV1:
+        val admitted = workspace_build_installed_v1(self, request_bytes, manifest_bytes, invocation_bytes, files)
+        if admitted.is_err(): return workspace_build_turn_v1(self, admitted.unwrap_err(), false)
+        val state = workspace_source_state_v1(self.slot, self.generation).unwrap()
+        if state.build_stage_phase == "staged": return workspace_build_turn_v1(self, "remote-build-stage-already-retained", false)
+        if state.build_stage_phase != "": return workspace_build_turn_v1(self, "remote-build-stage-retained-or-in-progress", false)
+        if state.agent_stage_phase != "" or state.agent_effect_attempted:
+            return workspace_build_turn_v1(self, "remote-build-stage-source-holds-agent-staging", false)
+        val (profile, manifest, profile_source) = admitted.unwrap()
+        workspace_source_states_v1[self.slot].build_profile_source = profile_source
+        workspace_source_states_v1[self.slot].build_manifest_digest = sha256_text(manifest_bytes)
+        workspace_source_states_v1[self.slot].build_invocation_digest = sha256_text(invocation_bytes)
+        workspace_source_states_v1[self.slot].build_request_bytes = request_bytes
+        workspace_source_states_v1[self.slot].build_stage_phase = "staging"
+        # Record potential effect BEFORE exclusive mkdir/write or fallible post-effect observation.
+        workspace_source_states_v1[self.slot].build_effect_attempted = true
+        # milestone_0047: the run's own EMPTY child of the provisioned leaf, created exclusive after the effect is recorded.
+        val created = workspace_run_directory_create_v1(self, request_bytes)
+        if created.is_err():
+            workspace_source_states_v1[self.slot].build_stage_phase = "retained-failed"
+            workspace_source_states_v1[self.slot].build_stage_error = created.unwrap_err()
+            return workspace_build_turn_v1(self, created.unwrap_err(), false)
+        val run = created.unwrap()
+        workspace_source_states_v1[self.slot].build_dedicated_empty_observed = true
+        val staged = linux_remote_build_stage_bytes_v1(run, files)
+        workspace_source_states_v1[self.slot].build_creations = staged.creations
+        var failure = staged.error
+        if failure == "":
+            # Policy/exclusion/current request remain live after actual staging.
+            val current = workspace_build_installed_v1(self, request_bytes, manifest_bytes, invocation_bytes, files)
+            if current.is_err(): failure = current.unwrap_err()
+        workspace_source_states_v1[self.slot].build_stage_phase = if failure == "": "staged" else: "retained-failed"
+        workspace_source_states_v1[self.slot].build_stage_error = failure
+        workspace_build_turn_v1(self, failure, failure == "")
+
+    # milestone_0030 op (ii) leaf: bounded read of a staged build source. The settled/reserved/not-
+    # returned gate is the lifecycle's (machine_workspace_source_read_settled_v3); this checks the
+    # staged build binding and the installed profile are still the ones admitted.
+    pub fn read_settled_build_v3(bounds: ContainerSettledWorkspaceBoundsV3) -> Result<ContainerSettledWorkspaceReadV3, text>:
+        val state = workspace_source_state_v1(self.slot, self.generation)?
+        if (not state.build_effect_attempted or
+                (state.build_stage_phase != "staged" and state.build_stage_phase != "native-retired-retained") or
+                state.build_stage_error != "" or state.build_runtime_binding.is_none() or state.run_directory.is_none()):
+            return Err("remote-build-read-no-staged-runtime-binding")
+        val source = self.reader.read_build_workspace_profile_v1()?
+        if source != state.build_profile_source: return Err("remote-build-read-profile-changed")
+        val profile = linux_build_workspace_profile_decode_v1(source)?
+        # The binding observation re-proves the run child beneath the leaf before the read.
+        val binding = state.build_runtime_binding.unwrap().current_v3()?
+        linux_remote_build_read_v1(state.run_directory.unwrap(), profile, bounds, binding.binding_digest)
+
+    pub fn agent_invocation_projection_v2(request_bytes: text, manifest_bytes: text,
+            invocation_digest: text) -> Result<ContainerRequestProjectionV2, text>:
+        val admitted = workspace_agent_installed_v2(self, request_bytes, manifest_bytes, invocation_digest)?
+        val sample = self.current_v1(request_bytes)?
+        val request = sample.request
+        Ok(ContainerRequestProjectionV2(workload_uid: request.pod_uid, attempt: request.attempt,
+            operation_id: request.operation_id, request_digest: sample.request_digest,
+            cpu_millis: request.cpu_limit_millis, memory_bytes: request.memory_limit_bytes,
+            timeout_ms: request.timeout_ms, has_devices: false, has_workspace: true))
+
+    pub fn agent_invocation_program_match_v2(request_bytes: text, manifest_bytes: text,
+            invocation_digest: text, agent_program: text, image_config_id: text) -> Result<bool, text>:
+        val (profile, manifest, profile_source) = workspace_agent_installed_v2(self, request_bytes, manifest_bytes, invocation_digest)?
+        if profile.agent_program != agent_program or profile.image_config_id != image_config_id:
+            return Err("agent-stage-installed-agent-program-binding")
+        Ok(true)
+
+    # Actual immutable borrowed capsule; never accepts a caller binding DTO.
+    # The SAME source slot retains original quota/exclusion/root through runtime.
+    pub fn begin_binding_v3(request: ContainerExecutionRequestV2, manifest_bytes: text,
+            invocation_digest: text) -> Result<LinuxFreshWorkspaceBindingV3, text>:
+        # milestone_0030 N6-a: the manifest kind selects the arm; the agent lines below are unchanged.
+        if linux_workspace_manifest_arm_v3(manifest_bytes)? == LinuxWorkspaceArmV3.RemoteBuild:
+            return workspace_begin_build_binding_v3(self, request, manifest_bytes, invocation_digest)
+        val installed = workspace_agent_installed_v2(self, request.request_bytes, manifest_bytes, invocation_digest)?
+        val projection = self.agent_invocation_projection_v2(request.request_bytes, manifest_bytes, invocation_digest)?
+        if (request.plan.backend != "linux-podman" or request.plan.workload_uid != projection.workload_uid or
+                request.plan.attempt != projection.attempt or request.plan.operation_id != projection.operation_id or
+                request.plan.request_digest != projection.request_digest): return Err("agent-binding-full-request-differs")
+        val state = workspace_source_state_v1(self.slot, self.generation)?
+        if (not state.agent_effect_attempted or state.agent_stage_phase != "staged" or state.agent_stage_error != "" or
+                state.agent_manifest_digest != sha256_text(manifest_bytes) or state.agent_invocation_digest != invocation_digest):
+            return Err("agent-binding-actual-staging-not-retained")
+        val request_source = container_execution_request_encode_v2(request)?
+        if state.agent_runtime_binding.is_some():
+            if state.agent_runtime_request != request_source: return Err("agent-binding-existing-request-differs")
+            val binding = state.agent_runtime_binding.unwrap()
+            val observed = binding.current_v3()?
+            return Ok(binding)
+        val binding = linux_fresh_workspace_binding_open_v3(state.reader, state.storage, state.lease,
+            state.exclusion.unwrap(), state.parent_directory.unwrap(), state.root_directory.unwrap(), state.run_directory.unwrap(),
+            request, manifest_bytes, invocation_digest)?
+        workspace_source_states_v1[self.slot].agent_runtime_binding = Some(binding)
+        workspace_source_states_v1[self.slot].agent_runtime_request = request_source
+        Ok(binding)
+
+    # Actual installed profile observation; numeric fields alone grant nothing.
+    pub fn agent_executable_profile_v2(request_bytes: text, manifest_bytes: text,
+            invocation_digest: text) -> Result<AgentExecutableProfileV1, text>:
+        val (_, _, source) = workspace_agent_installed_v2(self, request_bytes, manifest_bytes, invocation_digest)?
+        val approved = linux_agent_workspace_profile_decode_v2(source)?
+        Ok(approved.executable_profile)
+
+    # Pre-subject failures have no native-absence receipt. This projection keeps
+    # the whole epoch charged and exposes only actual retained source identity.
+    pub fn creation_retained_metadata_v3() -> Result<LinuxWorkspaceCreationRetainedMetadataV3, text>:
+        val state = workspace_source_state_v1(self.slot, self.generation)?
+        if not state.agent_effect_attempted: return Err("agent-creation-no-effects-recorded")
+        if state.agent_retained_metadata.is_some(): return Err("agent-creation-already-native-retired")
+        val identities = workspace_retained_identities_v3(self)?
+        val (parent_identity, root_identity) = identities
+        Ok(LinuxWorkspaceCreationRetainedMetadataV3(parent_identity: parent_identity, root_identity: root_identity,
+            invocation_digest: state.agent_invocation_digest,
+            creation_plan_digest: linux_agent_creation_plan_digest_v3(state.agent_creation_plan),
+            creation_receipts_digest: linux_agent_creation_receipts_digest_v3(state.agent_creations),
+            uncertain_creation: state.agent_stage_phase != "staged" or state.agent_stage_error != ""))
+
+    # Trusted coordinator calls only after separate actual OCI/helper/transport
+    # retirement and original WAL/Host gates. This token proves native absence ONLY.
+    pub fn retire_native_v3(token: LinuxFreshWorkspaceNativeRetirementV3,
+            invocation_source: text) -> LinuxWorkspaceRetirementTurnV3:
+        val result = if workspace_source_build_arm_v3(self): workspace_retire_build_native_v3(self, token, invocation_source)
+            else: workspace_retire_native_v3(self, token, invocation_source)
+        match result:
+            case Err(reason): LinuxWorkspaceRetirementTurnV3(owner: self, metadata: None, retired: false, error: reason)
+            case Ok(metadata): LinuxWorkspaceRetirementTurnV3(owner: self, metadata: Some(metadata), retired: true, error: "")
+
+    # Historical event survives lower observer closure. Actual source/root/quota
+    # must still be current. Returned DATA is never a transition/relaunch proof.
+    pub fn retained_metadata_v3() -> Result<LinuxWorkspaceRetainedMetadataV3, text>:
+        val state = workspace_source_state_v1(self.slot, self.generation)?
+        if state.build_effect_attempted: return workspace_build_retained_metadata_v3(self)
+        if state.agent_stage_phase != "native-retired-retained" or state.agent_retained_metadata.is_none():
+            return Err("agent-workspace-not-native-retired-retained")
+        val (parent, root) = workspace_retained_identities_v3(self)?
+        val metadata = state.agent_retained_metadata.unwrap()
+        if parent != metadata.parent_identity or root != metadata.root_identity: return Err("agent-retention-root-changed")
+        Ok(linux_workspace_retained_metadata_copy_v3(metadata))
+
+    # Read-only retention trigger: staging recorded a potential write, so the
+    # root is retained (agent_workspace_retention_v3.md). Grants no authority.
+    pub fn staging_effect_attempted_v3() -> Result<bool, text>:
+        val state = workspace_source_state_v1(self.slot, self.generation)?
+        Ok(state.agent_effect_attempted or state.build_effect_attempted)
+
+    # Engine-declared configuration correspondence, not namespace/launch proof.
+    pub fn match_engine_projection_v1(request_bytes: text, observed: RuntimeOperationV1,
+            expected: RuntimeIdentityV1, policy: LinuxOciEnginePolicyV1) -> Result<LinuxWorkspaceMountInspectV1, text>:
+        val sample = self.current_v1(request_bytes)?
+        if linux_oci_engine_policy_digest_v1(policy)? != sample.profile.provider_policy_digest:
+            return Err("workspace-source-inspect-provider-policy-mismatch")
+        linux_workspace_mount_inspect_observation_v1(observed, policy, expected, sample.request)
+
+    # milestone_0047: whether the archived request's run child is absent beneath the held provisioned leaf (no-follow).
+    pub fn retained_run_absent_v1(request_bytes: text) -> Result<bool, text>:
+        val sample = self.current_v1(request_bytes)?
+        val state = workspace_source_state_v1(self.slot, self.generation)?
+        state.root_directory.unwrap().child_absent_v1(linux_workspace_run_leaf_v1(sample.request.operation_id))
+
+    # milestone_0045 retention release (owner decision 2), per run since milestone_0047 (owner decision 1): deletes the
+    # retained RUN CHILD of the provisioned leaf INSIDE the run's own user-namespace mapping. The current sample re-proves
+    # the archived request is keep-id with user_uid == this process's euid, so every guest-created inode carries that uid
+    # and the owner removes it with no new privilege. Only a FRESH observed source (no staging effect) may remove; the walk
+    # is no-follow and fd-relative beneath the held leaf, never crosses a mount, and removes ONLY the child named from the
+    # archived request's operation id: the leaf, its quota and every other run's child stay. The phase then forbids
+    # any further use; close_v1 still releases every descriptor and the exclusion. Returns entries removed (child included).
+    # allow(primitive_api): reviewed removed-entry count of the fd-level walk (milestone_0045)
+    pub fn remove_retained_tree_v1(request_bytes: text) -> Result<i64, text>:
+        val sample = self.current_v1(request_bytes)?
+        val state = workspace_source_state_v1(self.slot, self.generation)?
+        if state.phase != "observed": return Err("workspace-source-owner-not-current")
+        if state.agent_effect_attempted or state.build_effect_attempted:
+            return Err("workspace-retention-release-fresh-source-required")
+        val request = sample.request
+        if request.user_namespace_mode != "keep-id" or sample.request.user_uid != sample.process.effective_uid:
+            return Err("workspace-retention-release-mapping")
+        val leaf = state.root_directory.unwrap()
+        workspace_source_states_v1[self.slot].phase = "retention-removing"
+        val removed = leaf.remove_child_tree_v1(linux_workspace_run_leaf_v1(sample.request.operation_id), sample.process.effective_uid)?
+        workspace_source_states_v1[self.slot].phase = "retention-removed"
+        Ok(removed)
+
+    # Borrowed capabilities stay available even before safe registry access.
+    pub fn close_v1() -> LinuxWorkspaceSourceCloseV1:
+        val loaded = workspace_source_state_v1(self.slot, self.generation)
+        if loaded.is_err():
+            return LinuxWorkspaceSourceCloseV1(reader: self.reader, storage: self.storage,
+                lease: self.lease, owner: Some(self), closed: false, error: loaded.unwrap_err())
+        val state = loaded.unwrap()
+        if state.phase == "closed":
+            return LinuxWorkspaceSourceCloseV1(reader: state.reader, storage: state.storage,
+                lease: state.lease, owner: None, closed: true, error: state.cleanup_error)
+        # NEW writable attempts retain exclusion/root and charged data. A generic
+        # descriptor close cannot authorize workspace cleanup or storage release.
+        if state.agent_effect_attempted:
+            return LinuxWorkspaceSourceCloseV1(reader: state.reader, storage: state.storage,
+                lease: state.lease, owner: Some(self), closed: false,
+                error: "agent-workspace-retention-requires-authorized-cleanup")
+        # milestone_0030: a remote-build staged root is retained exactly like an agent one.
+        if state.build_effect_attempted:
+            return LinuxWorkspaceSourceCloseV1(reader: state.reader, storage: state.storage,
+                lease: state.lease, owner: Some(self), closed: false,
+                error: "remote-build-workspace-retention-requires-authorized-cleanup")
+        # The independent genuine process-origin guard already ran before the
+        # registry lookup. Borrowed-reader closure must not strand our owned
+        # directories/lock; cleanup does not borrow launch/policy authority.
+        workspace_source_states_v1[self.slot].phase = "closing"
+        # Clear canonical custody BEFORE native close. Descriptor consumption
+        # and a close diagnostic are distinct from a retained native resource.
+        if workspace_source_states_v1[self.slot].root_directory.?:
+            var root = workspace_source_states_v1[self.slot].root_directory.unwrap()
+            workspace_source_states_v1[self.slot].root_directory = None
+            if not root.close() and workspace_source_states_v1[self.slot].cleanup_error == "":
+                workspace_source_states_v1[self.slot].cleanup_error = "workspace-source-root-close-consumed-with-error"
+        if workspace_source_states_v1[self.slot].parent_directory.?:
+            var parent = workspace_source_states_v1[self.slot].parent_directory.unwrap()
+            workspace_source_states_v1[self.slot].parent_directory = None
+            if not parent.close() and workspace_source_states_v1[self.slot].cleanup_error == "":
+                workspace_source_states_v1[self.slot].cleanup_error = "workspace-source-parent-close-consumed-with-error"
+        if workspace_source_states_v1[self.slot].exclusion.?:
+            val exclusion = workspace_source_states_v1[self.slot].exclusion.unwrap()
+            val released = exclusion.close_v1()
+            # A contradictory closed=false/no-owner outcome cannot prove
+            # consumption: keep the last exact generation rather than lose it.
+            if released.owner.?: workspace_source_states_v1[self.slot].exclusion = released.owner
+            elif released.closed: workspace_source_states_v1[self.slot].exclusion = None
+            if released.error != "" and workspace_source_states_v1[self.slot].cleanup_error == "":
+                workspace_source_states_v1[self.slot].cleanup_error = released.error
+            if workspace_source_states_v1[self.slot].exclusion.?:
+                if workspace_source_states_v1[self.slot].cleanup_error == "":
+                    workspace_source_states_v1[self.slot].cleanup_error = "workspace-source-exclusion-close-unconfirmed"
+                return LinuxWorkspaceSourceCloseV1(reader: state.reader, storage: state.storage,
+                    lease: state.lease, owner: Some(self), closed: false,
+                    error: workspace_source_states_v1[self.slot].cleanup_error)
+        workspace_source_states_v1[self.slot].phase = "closed"
+        workspace_source_active_v1 = workspace_source_active_v1 - 1
+        LinuxWorkspaceSourceCloseV1(reader: state.reader, storage: state.storage,
+            lease: state.lease, owner: None, closed: true,
+            error: workspace_source_states_v1[self.slot].cleanup_error)
+
+# This acquires source observations/exclusion only. It never creates/releases
+# a quota lease, charges capacity, grants launch or mutates workspace contents.
+pub fn linux_workspace_source_open_v1(reader: LinuxMachinePolicyOwnerV1,
+        storage: LinuxMachineStorageV1, lease: WorkspaceStorageLeaseV1,
+        request_bytes: text) -> LinuxWorkspaceSourceOpenV1:
+    match linux_machine_process_origin_check_v1():
+        case Err(reason): return LinuxWorkspaceSourceOpenV1.Rejected(reader, storage, lease, reason)
+        case Ok(_): pass
+    if workspace_source_active_v1 >= 32 or workspace_source_states_v1.len() >= 4096:
+        return LinuxWorkspaceSourceOpenV1.Rejected(reader, storage, lease, "workspace-source-owner-limit")
+    val sample = match workspace_source_sample_v1(reader, lease, request_bytes):
+        case Ok(value): value
+        case Err(reason): return LinuxWorkspaceSourceOpenV1.Rejected(reader, storage, lease, reason)
+    val slot = workspace_source_states_v1.len()
+    val generation = slot + 1
+    workspace_source_states_v1.push(LinuxWorkspaceSourceStateV1(generation: generation,
+        reader: reader, storage: storage, lease: lease, request_digest: sample.request_digest,
+        profile_digest: sample.profile_digest))
+    workspace_source_active_v1 = workspace_source_active_v1 + 1
+    val owner = LinuxWorkspaceSourceOwnerV1(slot: slot, generation: generation, reader: reader, storage: storage, lease: lease)
+    match linux_machine_workspace_exclusion_open_v1(storage, lease):
+        case LinuxMachineWorkspaceExclusionOpenV1.Rejected(reason):
+            workspace_source_states_v1[slot].phase = "closed"
+            workspace_source_active_v1 = workspace_source_active_v1 - 1
+            return LinuxWorkspaceSourceOpenV1.Rejected(reader, storage, lease, reason)
+        case LinuxMachineWorkspaceExclusionOpenV1.CleanupRequired(exclusion, reason):
+            workspace_source_states_v1[slot].exclusion = Some(exclusion)
+            return LinuxWorkspaceSourceOpenV1.CleanupRequired(owner, reason)
+        case LinuxMachineWorkspaceExclusionOpenV1.Ready(exclusion):
+            workspace_source_states_v1[slot].exclusion = Some(exclusion)
+    val exclusion = workspace_source_states_v1[slot].exclusion.unwrap()
+    val excluded = match exclusion.current_v1():
+        case Err(reason): return LinuxWorkspaceSourceOpenV1.CleanupRequired(owner, reason)
+        case Ok(value): value
+    if excluded.workspace_identity_digest == "":
+        return LinuxWorkspaceSourceOpenV1.CleanupRequired(owner, "workspace-source-native-identity-missing")
+    workspace_source_states_v1[slot].workspace_identity_digest = excluded.workspace_identity_digest
+    match retained_directory_open_trusted_v1(sample.profile.protected_parent):
+        case Err(reason): return LinuxWorkspaceSourceOpenV1.CleanupRequired(owner, reason)
+        case Ok(parent): workspace_source_states_v1[slot].parent_directory = Some(parent)
+    match retained_directory_open_trusted_v1(linux_workspace_source_root_v1(sample.profile)):
+        case Err(reason): return LinuxWorkspaceSourceOpenV1.CleanupRequired(owner, reason)
+        case Ok(root): workspace_source_states_v1[slot].root_directory = Some(root)
+    match owner.current_v1(request_bytes):
+        case Err(reason): LinuxWorkspaceSourceOpenV1.CleanupRequired(owner, reason)
+        case Ok(_):
+            workspace_source_states_v1[slot].phase = "observed"
+            LinuxWorkspaceSourceOpenV1.Observed(owner)
+
+# No orchestration dependency or caller-supplied authority snapshot enters this mechanism.
+fn workspace_agent_installed_v1(owner: LinuxWorkspaceSourceOwnerV1, request_bytes: text,
+        manifest_bytes: text, invocation_digest: text) -> Result<(LinuxAgentWorkspaceProfileV1, AgentWorkspaceManifestV1, text), text>:
+    if not builder_digest_valid_v1(invocation_digest): return Err("agent-stage-invocation-digest")
+    val sample = owner.current_v1(request_bytes)?
+    if sample.profile.read_only: return Err("agent-stage-read-only-profile")
+    val source = owner.reader.read_agent_workspace_profile_v1()?
+    val profile = linux_agent_workspace_profile_decode_v1(source)?
+    workspace_agent_installed_body_v1(owner, sample, profile, source, manifest_bytes, invocation_digest)
+
+fn workspace_agent_installed_v2(owner: LinuxWorkspaceSourceOwnerV1, request_bytes: text,
+        manifest_bytes: text, invocation_digest: text) -> Result<(LinuxAgentWorkspaceProfileV1, AgentWorkspaceManifestV1, text), text>:
+    if not builder_digest_valid_v1(invocation_digest): return Err("agent-stage-invocation-digest")
+    val sample = owner.current_v1(request_bytes)?
+    if sample.profile.read_only: return Err("agent-stage-read-only-profile")
+    val source = owner.reader.read_agent_workspace_profile_v1()?
+    val approved = linux_agent_workspace_profile_decode_v2(source)?
+    val memory_bytes = sample.request.memory_limit_bytes
+    val bound = workspace_agent_installed_body_v1(owner, sample, approved.base, source, manifest_bytes, invocation_digest)?
+    val (profile, manifest, original_source) = bound
+    linux_agent_workspace_profile_match_v2(approved, manifest)?
+    val minimum = agent_executable_profile_minimum_memory_v1(approved.executable_profile)?
+    if memory_bytes < minimum: return Err("agent-stage-executable-memory-not-admitted")
+    Ok(bound)
+
+fn workspace_agent_installed_body_v1(owner: LinuxWorkspaceSourceOwnerV1, sample: LinuxWorkspaceSourceSampleV1,
+        profile: LinuxAgentWorkspaceProfileV1, source: text, manifest_bytes: text,
+        invocation_digest: text) -> Result<(LinuxAgentWorkspaceProfileV1, AgentWorkspaceManifestV1, text), text>:
+    val manifest = agent_workspace_manifest_decode_v1(manifest_bytes)?
+    if (sha256_text(source) != manifest.profile_digest or profile.workspace_profile_digest != sample.profile_digest or
+            profile.machine_policy_digest != sample.profile.machine_policy_digest):
+        return Err("agent-stage-installed-profile-binding")
+    linux_agent_workspace_profile_match_v1(profile, manifest)?
+    if manifest.slot_binding_digest != sample.storage.binding_digest: return Err("agent-stage-slot-binding")
+    if linux_workspace_paths_overlap_v1(profile.assets_root, linux_workspace_source_root_v1(sample.profile)):
+        return Err("agent-stage-source-destination-overlap")
+    workspace_retained_root_current_v1(owner, sample, "agent-stage-native-retained-root-changed")?
+    val request = sample.request
+    if (request.command != [profile.bootstrap_program] or request.args != ["--invocation-manifest-sha256", invocation_digest] or
+            request.image != profile.image): return Err("agent-stage-bootstrap-request")
+    val state = workspace_source_state_v1(owner.slot, owner.generation)?
+    if (state.agent_manifest_digest != "" and (state.agent_manifest_digest != sha256_text(manifest_bytes) or
+            state.agent_invocation_digest != invocation_digest or state.agent_profile_source != source)):
+        return Err("agent-stage-existing-invocation-differs")
+    Ok((profile, manifest, source))
+
+# New mutation authority must bind the actual retained inode to the LIVE
+# native quota root, not two independently successful pathname samples.
+# Shared by agent and remote-build staging admission; `changed_error` keeps each arm's reason.
+fn workspace_retained_root_current_v1(owner: LinuxWorkspaceSourceOwnerV1, sample: LinuxWorkspaceSourceSampleV1,
+        changed_error: text) -> Result<(), text>:
+    val current_state = workspace_source_state_v1(owner.slot, owner.generation)?
+    val root = current_state.root_directory.unwrap()
+    val parent = current_state.parent_directory.unwrap()
+    val native_before = workspace_storage_observe_v1(current_state.lease)?
+    parent.stage_child_match_v1(sample.profile.leaf_name, root)?
+    val retained_identity = root.stage_identity_v1()?
+    linux_workspace_retained_native_match_v1(retained_identity, native_before.workspace_id)?
+    val native_after = workspace_storage_observe_v1(current_state.lease)?
+    parent.stage_child_match_v1(sample.profile.leaf_name, root)?
+    val retained_after = root.stage_identity_v1()?
+    linux_workspace_retained_native_match_v1(retained_after, native_after.workspace_id)?
+    if (native_before.state != "retained" or native_after.state != "retained" or
+            native_before.binding_digest != sample.storage.binding_digest or native_before.workspace_id != native_after.workspace_id or
+            retained_identity != retained_after): return Err(changed_error)
+    Ok(())
+
+# milestone_0047 (owner decision 1, 2026-11-19, "use worktree"): the run's OWN child of the provisioned leaf, named from
+# the request's operation id. Callers record their staging effect FIRST (a failure here still leaves an effect: the
+# child may exist). Created exclusive (EEXIST is never adoption) and opened no-follow RELATIVE to the held leaf fd; the
+# stage primitive proves it private (0700), owned by this euid (the keep-id build user) and the named inode; the leaf's
+# XFS project inherits onto it. It must be empty. Retained in the slot for staging, binding and the settled read.
+fn workspace_run_directory_create_v1(owner: LinuxWorkspaceSourceOwnerV1, request_bytes: text) -> Result<RetainedDirectoryOwnerV1, text>:
+    val sample = owner.current_v1(request_bytes)?
+    val state = workspace_source_state_v1(owner.slot, owner.generation)?
+    if state.run_directory.is_some(): return Err("workspace-run-directory-already-created")
+    workspace_retained_root_current_v1(owner, sample, "workspace-run-directory-leaf-changed")?
+    val run = state.root_directory.unwrap().stage_directory_v1(linux_workspace_run_leaf_v1(sample.request.operation_id), true)?
+    workspace_source_states_v1[owner.slot].run_directory = Some(run)
+    val empty = run.directory_is_empty_v1()?
+    if not empty: return Err("workspace-run-directory-not-empty")
+    Ok(run)
+
+# milestone_0030 op (i) admission (DESIGN 13.3.4 / 12a): the ADMIN-INSTALLED build workspace
+# profile read through the lent reader, the live source sample and the retained root.
+fn workspace_build_installed_v1(owner: LinuxWorkspaceSourceOwnerV1, request_bytes: text, manifest_bytes: text,
+        invocation_bytes: text, files: [LinuxRemoteBuildStageFileV3]) -> Result<(LinuxBuildWorkspaceProfileV1, BuildWorkspaceManifestV1, text), text>:
+    val sample = owner.current_v1(request_bytes)?
+    if sample.profile.read_only: return Err("remote-build-stage-read-only-profile")
+    val source = owner.reader.read_build_workspace_profile_v1()?
+    val profile = linux_build_workspace_profile_decode_v1(source)?
+    val manifest = linux_remote_build_stage_admit_v1(profile, source, sample.profile.machine_policy_digest, sample.profile_digest,
+        sample.storage.binding_digest, sample.request, manifest_bytes, invocation_bytes, files)?
+    workspace_retained_root_current_v1(owner, sample, "remote-build-stage-native-retained-root-changed")?
+    val state = workspace_source_state_v1(owner.slot, owner.generation)?
+    if (state.build_manifest_digest != "" and (state.build_manifest_digest != sha256_text(manifest_bytes) or
+            state.build_invocation_digest != sha256_text(invocation_bytes) or state.build_profile_source != source)):
+        return Err("remote-build-stage-existing-invocation-differs")
+    Ok((profile, manifest, source))
+
+fn workspace_build_turn_v1(owner: LinuxWorkspaceSourceOwnerV1, reason: text, staged: bool) -> LinuxRemoteBuildStageTurnV1:
+    val loaded = workspace_source_state_v1(owner.slot, owner.generation)
+    # Inaccessible custody can never prove absence of effects.
+    val attempted = if loaded.is_err(): true else: loaded.unwrap().build_effect_attempted
+    LinuxRemoteBuildStageTurnV1(owner: owner, error: reason, effect_attempted: attempted, ready: staged)
+
+# The enable-time binding for a staged remote-build source (the begin_binding_v3 build arm).
+fn workspace_begin_build_binding_v3(owner: LinuxWorkspaceSourceOwnerV1, request: ContainerExecutionRequestV2,
+        manifest_bytes: text, invocation_digest: text) -> Result<LinuxFreshWorkspaceBindingV3, text>:
+    val state = workspace_source_state_v1(owner.slot, owner.generation)?
+    if (not state.build_effect_attempted or state.build_stage_phase != "staged" or state.build_stage_error != "" or
+            state.build_manifest_digest != sha256_text(manifest_bytes) or state.build_invocation_digest != invocation_digest or
+            state.build_request_bytes != request.request_bytes):
+        return Err("remote-build-binding-actual-staging-not-retained")
+    val sample = owner.current_v1(request.request_bytes)?
+    val req = sample.request
+    if (request.plan.backend != "linux-podman" or request.plan.workload_uid != req.pod_uid or request.plan.attempt != req.attempt or
+            request.plan.operation_id != req.operation_id or request.plan.request_digest != sample.request_digest):
+        return Err("remote-build-binding-full-request-differs")
+    if owner.reader.read_build_workspace_profile_v1()? != state.build_profile_source: return Err("remote-build-binding-profile-changed")
+    val request_source = container_execution_request_encode_v2(request)?
+    if state.build_runtime_binding.is_some():
+        if state.build_runtime_request != request_source: return Err("remote-build-binding-existing-request-differs")
+        val binding = state.build_runtime_binding.unwrap()
+        val observed = binding.current_v3()?
+        return Ok(binding)
+    val binding = linux_fresh_workspace_binding_open_v3(state.reader, state.storage, state.lease,
+        state.exclusion.unwrap(), state.parent_directory.unwrap(), state.root_directory.unwrap(), state.run_directory.unwrap(),
+        request, manifest_bytes, invocation_digest)?
+    workspace_source_states_v1[owner.slot].build_runtime_binding = Some(binding)
+    workspace_source_states_v1[owner.slot].build_runtime_request = request_source
+    Ok(binding)
+
+fn workspace_agent_turn_v1(owner: LinuxWorkspaceSourceOwnerV1, reason: text, staged: bool) -> LinuxAgentWorkspaceStageTurnV1:
+    val loaded = workspace_source_state_v1(owner.slot, owner.generation)
+    # Inaccessible custody can never prove absence of effects.
+    val attempted = if loaded.is_err(): true else: loaded.unwrap().agent_effect_attempted
+    LinuxAgentWorkspaceStageTurnV1(owner: owner, error: reason, effect_attempted: attempted, ready: staged)
+
+# Same original source, exclusion and live quota root; no native observer is
+# needed for this diagnostic after retirement. Never follows guest descendants.
+fn workspace_retained_identities_v3(owner: LinuxWorkspaceSourceOwnerV1) -> Result<([u8], [u8]), text>:
+    val state = workspace_source_state_v1(owner.slot, owner.generation)?
+    if not state.agent_effect_attempted or state.agent_request_bytes == "": return Err("agent-retention-no-original-request")
+    val sample = owner.current_v1(state.agent_request_bytes)?
+    val root = state.root_directory.unwrap()
+    val parent = state.parent_directory.unwrap()
+    parent.stage_child_match_v1(sample.profile.leaf_name, root)?
+    val parent_identity = parent.stage_identity_v1()?
+    val root_identity = root.stage_identity_v1()?
+    val native = workspace_storage_observe_v1(state.lease)?
+    linux_workspace_retained_native_match_v1(root_identity, native.workspace_id)?
+    if native.state != "retained" or native.binding_digest != sample.storage.binding_digest:
+        return Err("agent-retention-live-quota-changed")
+    parent.stage_child_match_v1(sample.profile.leaf_name, root)?
+    if parent.stage_identity_v1()? != parent_identity or root.stage_identity_v1()? != root_identity:
+        return Err("agent-retention-identity-changed")
+    Ok((linux_workspace_identity_copy_v3(parent_identity), linux_workspace_identity_copy_v3(root_identity)))
+
+fn workspace_retire_native_v3(owner: LinuxWorkspaceSourceOwnerV1, token: LinuxFreshWorkspaceNativeRetirementV3,
+        invocation_source: text) -> Result<LinuxWorkspaceRetainedMetadataV3, text>:
+    val state = workspace_source_state_v1(owner.slot, owner.generation)?
+    if (not state.agent_effect_attempted or not state.agent_dedicated_empty_observed or state.agent_runtime_binding.is_none() or
+            state.agent_runtime_request == "" or state.agent_stage_error != "" or
+            (state.agent_stage_phase != "staged" and state.agent_stage_phase != "native-retired-retained")):
+        return Err("agent-retirement-no-staged-runtime-binding")
+    if invocation_source.byte_len() > 1048576 or sha256_text(invocation_source) != state.agent_invocation_digest:
+        return Err("agent-retirement-invocation-differs")
+    val full = agent_workspace_invocation_manifest_decode_v2(invocation_source)?
+    if sha256_text(full.base.workspace_manifest) != state.agent_manifest_digest:
+        return Err("agent-retirement-workspace-manifest-differs")
+    val executable = owner.agent_executable_profile_v2(state.agent_request_bytes, full.base.workspace_manifest, state.agent_invocation_digest)?
+    if agent_executable_profile_encode_v1(executable)? != agent_executable_profile_encode_v1(full.executable_profile)?:
+        return Err("agent-retirement-executable-profile-differs")
+    val retention = linux_agent_invocation_retention_v3(invocation_source)?
+    val binding = state.agent_runtime_binding.unwrap().current_v3()?
+    val actual = token.current_v3()?
+    val request = container_execution_request_decode_v2(state.agent_runtime_request)?
+    if (actual.binding.binding_digest != binding.binding_digest or actual.binding.invocation_digest != state.agent_invocation_digest or
+            actual.binding.manifest_digest != state.agent_manifest_digest or actual.binding.request_digest != state.request_digest or
+            actual.binding.agent_profile_digest != sha256_text(state.agent_profile_source) or
+            actual.provider_generation != request.plan.provider_generation or actual.subject_generation <= 0 or
+            actual.native.owner_generation != actual.subject_generation): return Err("agent-retirement-original-binding-differs")
+    val (parent, root) = workspace_retained_identities_v3(owner)?
+    val metadata = LinuxWorkspaceRetainedMetadataV3(native_retirement: actual, parent_identity: parent, root_identity: root,
+        retention: retention, creation_plan_digest: linux_agent_creation_plan_digest_v3(state.agent_creation_plan),
+        creation_receipts_digest: linux_agent_creation_receipts_digest_v3(state.agent_creations), uncertain_creation: false)
+    # Reprove genuine lower absence after source observations, before committing
+    # the canonical irreversible terminal state. Failed checks preserve ALL caps.
+    val after = token.current_v3()?
+    val after_metadata = LinuxWorkspaceRetainedMetadataV3(native_retirement: after, parent_identity: parent, root_identity: root,
+        retention: retention, creation_plan_digest: metadata.creation_plan_digest,
+        creation_receipts_digest: metadata.creation_receipts_digest, uncertain_creation: false)
+    if linux_workspace_retained_metadata_encode_v3(metadata) != linux_workspace_retained_metadata_encode_v3(after_metadata):
+        return Err("agent-retirement-observation-changed")
+    if state.agent_retained_metadata.is_some():
+        if linux_workspace_retained_metadata_encode_v3(state.agent_retained_metadata.unwrap()) != linux_workspace_retained_metadata_encode_v3(metadata):
+            return Err("agent-retirement-existing-event-differs")
+        return owner.retained_metadata_v3()
+    workspace_source_states_v1[owner.slot].agent_retained_metadata = Some(linux_workspace_retained_metadata_copy_v3(metadata))
+    workspace_source_states_v1[owner.slot].agent_stage_phase = "native-retired-retained"
+    owner.retained_metadata_v3()
+
+# milestone_0030 integration item 1: the remote-build arm of the retained source-return
+# (IMPL_LANE_C "what lane A must mirror"). Arm selection is the staged effect itself.
+fn workspace_source_build_arm_v3(owner: LinuxWorkspaceSourceOwnerV1) -> bool:
+    val loaded = workspace_source_state_v1(owner.slot, owner.generation)
+    loaded.is_ok() and loaded.unwrap().build_effect_attempted
+
+# Same live parent/root/quota re-proof as the agent arm, over the build's original request.
+fn workspace_build_retained_identities_v3(owner: LinuxWorkspaceSourceOwnerV1) -> Result<([u8], [u8]), text>:
+    val state = workspace_source_state_v1(owner.slot, owner.generation)?
+    if not state.build_effect_attempted or state.build_request_bytes == "": return Err("remote-build-retention-no-original-request")
+    val sample = owner.current_v1(state.build_request_bytes)?
+    val root = state.root_directory.unwrap()
+    val parent = state.parent_directory.unwrap()
+    parent.stage_child_match_v1(sample.profile.leaf_name, root)?
+    val parent_identity = parent.stage_identity_v1()?
+    val root_identity = root.stage_identity_v1()?
+    val native = workspace_storage_observe_v1(state.lease)?
+    linux_workspace_retained_native_match_v1(root_identity, native.workspace_id)?
+    if native.state != "retained" or native.binding_digest != sample.storage.binding_digest:
+        return Err("remote-build-retention-live-quota-changed")
+    parent.stage_child_match_v1(sample.profile.leaf_name, root)?
+    if parent.stage_identity_v1()? != parent_identity or root.stage_identity_v1()? != root_identity:
+        return Err("remote-build-retention-identity-changed")
+    Ok((linux_workspace_identity_copy_v3(parent_identity), linux_workspace_identity_copy_v3(root_identity)))
+
+# The build analogue of workspace_retire_native_v3: the token proves native absence ONLY; the source
+# re-proves the staged build binding (gap (m) slot mapping: build profile -> agent_profile_digest) and
+# commits native-retired-retained. Root, exclusion and quota stay held. A build root has no retention
+# policy field, so it is always `retain` (the retain-on-effect rule). The manifest is the creation plan
+# (files == manifest exactly); the receipts are the paths staging actually created.
+fn workspace_retire_build_native_v3(owner: LinuxWorkspaceSourceOwnerV1, token: LinuxFreshWorkspaceNativeRetirementV3,
+        invocation_source: text) -> Result<LinuxWorkspaceRetainedMetadataV3, text>:
+    val state = workspace_source_state_v1(owner.slot, owner.generation)?
+    if (not state.build_effect_attempted or not state.build_dedicated_empty_observed or state.build_runtime_binding.is_none() or
+            state.build_runtime_request == "" or state.build_stage_error != "" or
+            (state.build_stage_phase != "staged" and state.build_stage_phase != "native-retired-retained")):
+        return Err("remote-build-retirement-no-staged-runtime-binding")
+    if invocation_source.byte_len() > linux_remote_build_stage_file_cap_v1() or sha256_text(invocation_source) != state.build_invocation_digest:
+        return Err("remote-build-retirement-invocation-differs")
+    val full = build_workspace_invocation_decode_v1(invocation_source)?
+    if sha256_text(full.workspace_manifest) != state.build_manifest_digest:
+        return Err("remote-build-retirement-workspace-manifest-differs")
+    if owner.reader.read_build_workspace_profile_v1()? != state.build_profile_source:
+        return Err("remote-build-retirement-profile-changed")
+    val binding = state.build_runtime_binding.unwrap().current_v3()?
+    val actual = token.current_v3()?
+    val request = container_execution_request_decode_v2(state.build_runtime_request)?
+    if (actual.binding.binding_digest != binding.binding_digest or actual.binding.invocation_digest != state.build_invocation_digest or
+            actual.binding.manifest_digest != state.build_manifest_digest or actual.binding.request_digest != state.request_digest or
+            actual.binding.agent_profile_digest != sha256_text(state.build_profile_source) or
+            actual.provider_generation != request.plan.provider_generation or actual.subject_generation <= 0 or
+            actual.native.owner_generation != actual.subject_generation): return Err("remote-build-retirement-original-binding-differs")
+    val (parent, root) = workspace_build_retained_identities_v3(owner)?
+    val receipts = linux_agent_creation_plan_digest_v3(state.build_creations)
+    val metadata = LinuxWorkspaceRetainedMetadataV3(native_retirement: actual, parent_identity: parent, root_identity: root,
+        retention: "retain", creation_plan_digest: state.build_manifest_digest, creation_receipts_digest: receipts,
+        uncertain_creation: false)
+    # Reprove genuine lower absence after the source observations, before the irreversible commit.
+    val after = token.current_v3()?
+    val after_metadata = LinuxWorkspaceRetainedMetadataV3(native_retirement: after, parent_identity: parent, root_identity: root,
+        retention: "retain", creation_plan_digest: state.build_manifest_digest, creation_receipts_digest: receipts,
+        uncertain_creation: false)
+    if linux_workspace_retained_metadata_encode_v3(metadata) != linux_workspace_retained_metadata_encode_v3(after_metadata):
+        return Err("remote-build-retirement-observation-changed")
+    if state.build_retained_metadata.is_some():
+        if linux_workspace_retained_metadata_encode_v3(state.build_retained_metadata.unwrap()) != linux_workspace_retained_metadata_encode_v3(metadata):
+            return Err("remote-build-retirement-existing-event-differs")
+        return workspace_build_retained_metadata_v3(owner)
+    workspace_source_states_v1[owner.slot].build_retained_metadata = Some(linux_workspace_retained_metadata_copy_v3(metadata))
+    workspace_source_states_v1[owner.slot].build_stage_phase = "native-retired-retained"
+    Ok(linux_workspace_retained_metadata_copy_v3(metadata))
+
+fn workspace_build_retained_metadata_v3(owner: LinuxWorkspaceSourceOwnerV1) -> Result<LinuxWorkspaceRetainedMetadataV3, text>:
+    val state = workspace_source_state_v1(owner.slot, owner.generation)?
+    if state.build_stage_phase != "native-retired-retained" or state.build_retained_metadata.is_none():
+        return Err("remote-build-workspace-not-native-retired-retained")
+    val (parent, root) = workspace_build_retained_identities_v3(owner)?
+    val metadata = state.build_retained_metadata.unwrap()
+    if parent != metadata.parent_identity or root != metadata.root_identity: return Err("remote-build-retention-root-changed")
+    Ok(linux_workspace_retained_metadata_copy_v3(metadata))

@@ -73,3 +73,10 @@ the undeclared `memmem` failure. Clang 14 and GCC 11 both passed the release
 source's strict C99 compile and all 200 scalar/selected SIMD cases. The same
 three evidence logs are retained in the isolated release worktree. Both env
 guards passed, and a tracked-tree scan found zero misplaced executable specs.
+
+## Re-verification — 2026-11-05
+
+test/01_unit/lib/common/search/exact_spec.spl (memmem + Two-Way +
+Boyer-Moore-Horspool + find_all contract): 31/31 PASS under the seed
+interpreter on an aarch64 Linux host. The "full Linux bootstrap pending"
+acceptance remains with the bootstrap lane.

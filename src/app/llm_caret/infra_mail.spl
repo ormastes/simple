@@ -93,7 +93,7 @@ fn _schema(name: text, desc: text, props: [text], required: [text]) -> text:
         _LB() + "\"type\": \"object\", \"properties\": " + _LB() + props.join(", ") + _RB() +
         ", \"required\": [" + req.join(", ") + "]" + _RB() + _RB()
 
-fn mail_tool_schemas() -> [text]:
+pub fn mail_tool_schemas() -> [text]:
     [
         _schema("mail_list", "List recent messages in a mailbox (read-only). One line per message: uid, date, from, subject.",
             [_prop("mailbox", "string", "IMAP mailbox name (default INBOX)"),
@@ -178,7 +178,7 @@ fn _close(link: MailLink):
 fn _strip_crlf(line: text) -> text:
     var s = line
     while s.ends_with("\n") or s.ends_with("\r"):
-        s = s.substring(0, s.length() - 1)
+        s = s.substring(0, s.byte_len() - 1)
     s
 
 fn _timeout_error() -> text:
@@ -195,7 +195,7 @@ fn _read_chunk(link: MailLink, budget_ms: i64) -> text:
 # SMTP reply is complete when the last full line is "NNN text" (space after
 # the code) or a bare 3-digit code.
 fn _smtp_reply_complete(buf: text) -> bool:
-    val n = buf.length()
+    val n = buf.byte_len()
     if n == 0 or buf.substring(n - 1, n) != "\n":
         return false
     val lines = buf.split("\n")
@@ -246,7 +246,12 @@ fn _read_reply(link: MailLink, tag: text, smtp: bool) -> MailReply:
             return MailReply(lines: _lines_of(buf), raw: buf, error: _timeout_error())
         val chunk = _read_chunk(link, remaining)
         if chunk == "":
-            if time_now_monotonic_ms() >= deadline:
+            # Windows socket reads can surface the deadline as an empty read a
+            # scheduling quantum BEFORE the monotonic clock crosses `deadline`,
+            # which used to misclassify a timeout as "closed the connection".
+            # Within the tolerance band the distinction timeout-vs-EOF is the
+            # clock's, and the honest report is the timeout.
+            if time_now_monotonic_ms() + 100 >= deadline:
                 return MailReply(lines: _lines_of(buf), raw: buf, error: _timeout_error())
             return MailReply(lines: _lines_of(buf), raw: buf, error: "mail server closed the connection before replying")
         chunks.push(chunk)
@@ -499,6 +504,6 @@ fn mail_send(to: text, subject: text, body: text) -> (bool, text):
 # return in non-unit function 'mime_type_text_plain'" (measured 2026-08-25
 # against greenmail/standalone). It also terminated the DATA section twice
 # (message_build_simple + message_terminate), sending a stray "." command.
-fn mail_build_message(sender: text, to: text, subject: text, body: text) -> text:
+pub fn mail_build_message(sender: text, to: text, subject: text, body: text) -> text:
     header_from(sender) + header_to(to) + header_subject(subject) +
         header_content_type("text/plain; charset=utf-8") + "\r\n" + smtp_dot_stuff(body)

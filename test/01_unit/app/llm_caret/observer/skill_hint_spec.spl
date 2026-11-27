@@ -1,0 +1,58 @@
+# Purpose and audience: CU-020 first-use skill hints that decay after N uses, for the caret team.
+# @req CU-020
+
+use std.spec.*
+use app.llm_caret.messaging.adapter.store.pure_sql_store.{PureSqlMessagingStore, StoredHookCorrelation}
+use app.llm_caret.messaging.adapter.agent.hook_bridge.{drain_hook_events}
+use app.llm_caret.observer.observer_log.{observer_reset, observer_skill_uses}
+use app.llm_caret.observer.skill_hint.{SKILL_HINT_DECAY_USES, skill_hint_visible}
+use app.llm_caret.observer.session_status.{session_skill_hint_text}
+use app.llm_caret.workbench.session_contract.{SessionId, SessionView, InputMode, new_session_view, new_draft}
+use app.llm_caret.workbench.tui_layout.{compute_layout, CompactView}
+use app.llm_caret.workbench.tui_view.{new_render_input, render_workbench}
+
+fn _view() -> SessionView:
+    new_session_view(SessionId(value: "builder", generation: 1), "builder", "claude")
+
+fn _payload(name: text) -> text:
+    "{\"tool_name\":\"Skill\",\"tool_input\":{\"skill\":\"" + name + "\"}}"
+
+fn _use_skill(store: PureSqlMessagingStore, id: text, name: text):
+    store.enqueue_hook_event(id, "claude", "PreToolUse", _payload(name), 5)
+    store.put_hook_correlation(StoredHookCorrelation(event_id: id, task_id: "t", room_id: "r", agent_id: "builder"))
+    drain_hook_events(store, 10)
+
+fn _tui_text() -> text:
+    val v = _view()
+    val layout = compute_layout(200, 40, CompactView.Session, 1)
+    val input = new_render_input([v], v.id, new_draft(v.id, InputMode.Message), "roster")
+    render_workbench(layout, input).join("\n")
+
+describe "skill hint decay (CU-020)":
+    it "visible for the first N uses only":
+        # @req CU-020
+        step("decision boundary")
+        expect(skill_hint_visible(0)).to_equal(false)
+        expect(skill_hint_visible(1)).to_equal(true)
+        expect(skill_hint_visible(SKILL_HINT_DECAY_USES)).to_equal(true)
+        expect(skill_hint_visible(SKILL_HINT_DECAY_USES + 1)).to_equal(false)
+
+    it "drained Skill hooks show the hint on the TUI and then decay it":
+        # @req CU-020
+        step("first use shows the hint")
+        observer_reset()
+        var store = PureSqlMessagingStore.open_memory().unwrap()
+        _use_skill(store, "h1", "spipe")
+        expect(observer_skill_uses("builder", "spipe")).to_equal(1)
+        expect(session_skill_hint_text(_view())).to_contain("spipe")
+        expect(_tui_text()).to_contain("hint: spipe")
+        step("uses beyond N decay it")
+        var i = 2
+        while i <= SKILL_HINT_DECAY_USES + 1:
+            _use_skill(store, "h" + i.to_text(), "spipe")
+            i = i + 1
+        expect(session_skill_hint_text(_view())).to_equal("")
+        expect(_tui_text().contains("hint: spipe")).to_equal(false)
+        step("a different skill still gets its own first-use hint")
+        _use_skill(store, "v1", "verify")
+        expect(session_skill_hint_text(_view())).to_contain("verify")

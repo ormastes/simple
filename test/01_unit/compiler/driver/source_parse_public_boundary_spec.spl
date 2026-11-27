@@ -1,0 +1,30 @@
+# Authored regression for the actual Phase 2 cross-owner helper link failure.
+# Compile retry belongs to the parent; no runtime evidence is claimed here.
+use std.spec
+use std.io_runtime.{file_read}
+
+describe "phase-two parser support boundary":
+    it "admits public helper names explicitly without consumer SFFI aliases":
+        val prefix = "src/compiler/80.driver/driver_source_parse_"
+        val support = file_read(prefix + "support.spl")
+        val public_names = ["driver_parse_env_get_v1", "driver_parse_env_set_v1",
+            "driver_parse_exit_v1", "driver_parse_stdout_flush_v1",
+            "driver_parse_transient_scope_begin_v1", "driver_parse_transient_scope_pause_v1",
+            "driver_parse_transient_scope_end_v1"]
+        for name in public_names:
+            expect(support).to_contain("pub fn " + name + "(")
+        for kind in ["selected", "streaming", "retained"]:
+            val consumer = file_read(prefix + kind + ".spl")
+            val body_at = consumer.index_of("impl CompilerDriver:\n")
+            expect(body_at).to_be_greater_than(0)
+            val body = consumer.substring(body_at)
+            expect(body.contains("_sffi_")).to_equal(false)
+            expect(consumer.contains("use compiler.driver.driver_source_parse_support.*")).to_equal(false)
+            expect(consumer.contains("extern fn ")).to_equal(false)
+            val import_at = consumer.index_of("use compiler.driver.driver_source_parse_support.{")
+            expect(import_at).to_be_greater_than(0)
+            val import_end = consumer.index_of("\n}", import_at)
+            expect(import_end).to_be_greater_than(import_at)
+            val imports = consumer.substring(import_at, import_end)
+            for name in public_names:
+                if body.contains(name + "("): expect(imports).to_contain(name)

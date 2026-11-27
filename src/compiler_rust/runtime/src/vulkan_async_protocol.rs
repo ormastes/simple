@@ -1,7 +1,27 @@
+//! Device-independent protocol of the bounded Vulkan async submission ring:
+//! status values, slot state machine, admission window and receipt publication.
+//!
+//! Shared by the two ring owners so they cannot drift: the compiled runtime
+//! (`vulkan_graphics_runtime_async*.rs`, over the ash `STATE`) and the
+//! interpreter's dlopen bridge (`compiler/src/interpreter_extern/
+//! gpu_vulkan_async_ring.rs`, over `VK_STATE`).
+
 use std::collections::HashSet;
 
+/// A completed slot has been proven signaled but remains reserved until the
+/// owner explicitly calls retire.  `UNKNOWN` is terminal for admission and
+/// keeps the runtime owners quarantined until device recovery/teardown.
+pub const ASYNC_RETIRED: i64 = 1;
+pub const ASYNC_PENDING: i64 = 0;
+pub const ASYNC_INVALID: i64 = -1;
+pub const ASYNC_UNKNOWN: i64 = -2;
+pub const ASYNC_WOULD_BLOCK: i64 = -3;
+pub const ASYNC_CLOSED: i64 = -4;
+/// Device generation detached into bounded quarantine; this is NOT completion.
+pub const ASYNC_QUARANTINED: i64 = 2;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SlotState {
+pub enum SlotState {
     Free,
     Recording,
     Submitting,
@@ -11,19 +31,19 @@ pub(crate) enum SlotState {
     Unknown,
 }
 
-pub(crate) struct AsyncSlot {
-    pub(crate) generation: u64,
-    pub(crate) token: i64,
-    pub(crate) command: i64,
-    pub(crate) fence: i64,
-    pub(crate) sequence: i64,
-    pub(crate) offered_ns: i64,
-    pub(crate) retained_bytes: i64,
-    pub(crate) state: SlotState,
+pub struct AsyncSlot {
+    pub generation: u64,
+    pub token: i64,
+    pub command: i64,
+    pub fence: i64,
+    pub sequence: i64,
+    pub offered_ns: i64,
+    pub retained_bytes: i64,
+    pub state: SlotState,
 }
 
 impl AsyncSlot {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             generation: 1,
             token: 0,
@@ -36,7 +56,7 @@ impl AsyncSlot {
         }
     }
 
-    pub(crate) fn reset_for_reuse(&mut self) -> bool {
+    pub fn reset_for_reuse(&mut self) -> bool {
         // Called only after physical release. Clear resolved identities even
         // on exhaustion; the caller closes admission when this returns false.
         let next_generation = self.generation.checked_add(1);
@@ -54,7 +74,7 @@ impl AsyncSlot {
     }
 }
 
-pub(crate) fn publish_contiguous(published: &mut i64, retired: &mut HashSet<i64>, sequence: i64) {
+pub fn publish_contiguous(published: &mut i64, retired: &mut HashSet<i64>, sequence: i64) {
     if sequence <= *published {
         return;
     }
@@ -68,7 +88,7 @@ pub(crate) fn publish_contiguous(published: &mut i64, retired: &mut HashSet<i64>
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum Metric {
+pub enum Metric {
     Offer = 0,
     Poll = 1,
     Wait = 2,
@@ -77,10 +97,10 @@ pub(crate) enum Metric {
 }
 
 #[derive(Clone)]
-pub(crate) struct Latency {
-    pub(crate) count: i64,
-    pub(crate) last: i64,
-    pub(crate) total: i64,
+pub struct Latency {
+    pub count: i64,
+    pub last: i64,
+    pub total: i64,
     samples: [i64; 64],
     cursor: usize,
 }
@@ -98,14 +118,14 @@ impl Default for Latency {
 }
 
 impl Latency {
-    pub(crate) fn record(&mut self, ns: i64) {
+    pub fn record(&mut self, ns: i64) {
         self.last = ns.max(0);
         self.count = self.count.saturating_add(1);
         self.total = self.total.saturating_add(self.last);
         self.samples[self.cursor] = self.last;
         self.cursor = (self.cursor + 1) % self.samples.len();
     }
-    pub(crate) fn percentile(&self, percentile: usize) -> i64 {
+    pub fn percentile(&self, percentile: usize) -> i64 {
         let used = self.count.min(self.samples.len() as i64) as usize;
         if used == 0 {
             return 0;
@@ -117,29 +137,29 @@ impl Latency {
 }
 
 #[derive(Default)]
-pub(crate) struct AsyncTelemetry {
-    pub(crate) attempted: i64,
-    pub(crate) accepted: i64,
-    pub(crate) rejected: i64,
-    pub(crate) ambiguous: i64,
-    pub(crate) polls: i64,
-    pub(crate) poll_pending: i64,
-    pub(crate) poll_complete: i64,
-    pub(crate) poll_failed: i64,
-    pub(crate) retirements: i64,
-    pub(crate) cancellations: i64,
-    pub(crate) retained_bytes: i64,
-    pub(crate) released_bytes: i64,
-    pub(crate) recovery_attempts: i64,
-    pub(crate) recoveries: i64,
-    pub(crate) quarantined: i64,
-    pub(crate) unknown_transitions: i64,
-    pub(crate) peak_retained_bytes: i64,
-    pub(crate) latencies: [Latency; 5],
+pub struct AsyncTelemetry {
+    pub attempted: i64,
+    pub accepted: i64,
+    pub rejected: i64,
+    pub ambiguous: i64,
+    pub polls: i64,
+    pub poll_pending: i64,
+    pub poll_complete: i64,
+    pub poll_failed: i64,
+    pub retirements: i64,
+    pub cancellations: i64,
+    pub retained_bytes: i64,
+    pub released_bytes: i64,
+    pub recovery_attempts: i64,
+    pub recoveries: i64,
+    pub quarantined: i64,
+    pub unknown_transitions: i64,
+    pub peak_retained_bytes: i64,
+    pub latencies: [Latency; 5],
 }
 
 /// Reserve a bounded sequence window as well as physical slot storage.
-pub(crate) fn admission_index(slots: &[AsyncSlot], next: i64, published: i64) -> Option<usize> {
+pub fn admission_index(slots: &[AsyncSlot], next: i64, published: i64) -> Option<usize> {
     let reserved = slots.iter().filter(|s| s.state == SlotState::Recording).count() as i64;
     if next <= 0
         || published < 0

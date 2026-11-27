@@ -1,6 +1,6 @@
 # Bitfield "coverage" is vacuous, and `custom_primitive_bitfield.spl` is unreachable code
 
-- **Status:** OPEN
+- **Status:** RESOLVED 2026-11-11 (bug_db row closed 2026-11-13; live red->green recorded below) — both findings verified fixed on release/1.0.0 (P3 runner6 lane; Finding 1 via squash-merge 839e59ffa7dc of 93a6de8b95ee, Finding 2 deletion confirmed)
 - **Date:** 2026-08-18
 - **Area:** `test/01_unit/compiler/mir/bitfield_mir_spec.spl`,
   `src/compiler/50.mir/custom_primitive_bitfield.spl`
@@ -219,3 +219,93 @@ cannot be closed in this lane until the Rust seed compiles again. The existing
 evidence (compiler modules still load; `custom_primitive_sffi_spec.spl` 20/20;
 `bitfield_mir_spec.spl` 14/14) stands unchanged and is still the limit of what
 has been proven.
+
+## Re-probe 2026-11-03 (tr-sspec lane)
+Finding 2 RESOLVED: `src/compiler/50.mir/custom_primitive_bitfield.spl` no longer exists and no
+`BitfieldValidator` references remain outside an unrelated census scanner. Finding 1 still OPEN:
+`test/01_unit/compiler/mir/bitfield_mir_spec.spl` still has 31 `contains(` assertions on literals.
+
+## 2026-11-10 triage (P3 runner lane, work/p3-runner-20261110): Finding 1 LIVE -> FIXED (93a6de8b95ee)
+
+Live state confirmed by direct grep (31 `check(code.contains(...))`
+assertions on string literals) — the 2026-11-03 re-probe still held. Root
+cause of the regression: consolidation commit f1509b5947e7
+(test/unit/compiler -> test/01_unit/compiler, 2026-11-09) kept the legacy
+vacuous copy at test/01_unit/compiler/mir/bitfield_mir_spec.spl and spliced
+the migrated genuine copy below it, trapping the genuine copy's two `use`
+import lines inside a triple-quoted string literal (so even the genuine
+section could not resolve `BitLayout`/`bits_needed`/`would_straddle_word`).
+
+Fix: restored the pre-consolidation genuine spec verbatim (14 examples, all
+assertions compare COMPUTED values to expected constants, explicit
+positive-control example that fails if the import resolves to nothing).
+
+Finding 2 remains RESOLVED (custom_primitive_bitfield.spl deleted earlier;
+verified absent in this worktree).
+
+Seed-smoke evidence (Rust seed `bin/simple.exe`, this worktree):
+`bin/simple.exe test test/01_unit/compiler/mir/bitfield_mir_spec.spl`
+-> SPEC FILE VERDICT outcome=OK declared>=14 executed=14 passed=14 failed=0.
+
+## 2026-11-11 triage (P3 runner lane, work/p3-runner6-20261111): verified FIXED on this base
+
+- Finding 1: `test/01_unit/compiler/mir/bitfield_mir_spec.spl` measured
+  non-vacuous on this tree — zero `check(code.contains(...))` assertions,
+  real import of `compiler.backend.bitfield.{BitLayout, bits_needed,
+  would_straddle_word}` at line 8, explicit positive-control describe block.
+  The fixing change is present as squash-merge `839e59ffa7dc` ("test(std.spec):
+  restore genuine bitfield MIR spec, drop vacuous literal-contains examples";
+  the 2026-11-10 lane's SHA `93a6de8b95ee` is not itself an ancestor — branch
+  squash-merged — but its content is verbatim in the tree). Companion commit
+  `c4ea35e05394` de-vacuified the legacy twin.
+- Finding 2: `src/compiler/50.mir/custom_primitive_bitfield.spl` confirmed
+  absent (`ls` rc=2); no `BitfieldValidator` references remain in src/.
+- The from-scratch-rebuild evidence gap this doc recorded is bootstrap-lane
+  territory and does not reopen either finding.
+
+No live rerun (prior lane's seed-smoke 14/14 on this same spec stands; per
+the lane's no-green-rerun rule). Verdict: FIXED / RESOLVED.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**RESOLVED (confirmed)** — Squash-merge 839e59ffa7dc verified ancestor first-hand; `custom_primitive_bitfield.spl` confirmed absent (`BitfieldValidator` zero refs in src/).
+
+## 2026-11-13 closure (P3 bitfield lane, work/p3-bitfield-20261113) — row closed `open` -> `fixed`
+
+Both findings were already fixed in source on `release/1.0.0`; the only open
+item was the `bug_db.sdn` status row, still `open`. This lane re-measured live
+and closed it.
+
+- **Finding 1 (live, red -> green).** `test/01_unit/compiler/mir/bitfield_mir_spec.spl`
+  has 14 examples, 0 `check(code.contains(...))` assertions, and imports
+  `compiler.backend.bitfield`. The legacy `test/unit/compiler/mir/` twin no
+  longer exists. Deliberate red: temporarily changed `BitLayout.mask()` in
+  `src/compiler/70.backend/bitfield.spl:94` from `(1 << self.bit_width) - 1`
+  to `- 2` (module under test, NOT the spec), ran the seed, restored the file
+  (`git status --porcelain` empty afterwards):
+  ```
+  red:   Results: 14 total, 7 passed, 7 failed   (outcome=ERROR, rc=1)
+  green: Results: 14 total, 14 passed, 0 failed  (outcome=OK, rc=0)
+  ```
+  The spec therefore fails on a compiler defect, which the original
+  literal-`contains` spec could not.
+- **Finding 2 (unreachability re-confirmed).** `src/compiler/50.mir/custom_primitive_bitfield.spl`
+  is absent. `grep -rln 'custom_primitive_bitfield\|BitfieldBackingCheck\|BitfieldFieldCheck\|BitfieldValidator' src test examples tools`
+  returns only `src/compiler/90.tools/verify/aorte_obligation_census_scan.spl:58`,
+  a comment; it now says the file was deleted.
+- `doc/08_tracking/bug/bug_db.sdn` row set to `fixed` (updated 2026-11-13),
+  and the file resealed.
+
+No spec pins were missing for the spec this bug names. Its 14 examples
+already cover mask/shift, round-trip, truncation, multi-field packing, signed
+range, and word-straddle behaviour.
+
+A wider scan (`/usr/bin/grep -rli bitfield test --include='*_spec.spl'`, 109
+files) found no other spec that asserts `contains` on a string literal it
+declares itself. Some specs, such as `test/01_unit/compiler/native/bitfield_codegen_spec.spl`,
+`test/03_system/compiler/bitfield_reorder_spec.spl`, and
+`test/01_unit/compiler/packed_struct_bitfield_spec.spl`, are source-text pins.
+They call `rt_file_read_text` on real compiler source and assert `contains` on
+the result. That is weaker than a behavioural test, but these specs can fail,
+so they are not the vacuous class this bug describes. They are out of scope
+here.

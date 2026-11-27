@@ -106,6 +106,21 @@ struct HirFunction:
     # partial named constructions POSITIONALLY, so a trailing field is the
     # only addition that cannot shift an existing named field's slot.
     is_generic_template: bool
+    # Decl-level cfg guard (design hir_cfg_decl_select_design.md Option B); empty/0 = unguarded.
+    cfg: [text] = []
+    cfg_group: i64 = 0
+    cfg_arm: i64 = -1
+    # Mono-only declaration provenance; never inferred from a concrete C name.
+    # 0: raw C ABI, 1: semantic dictionary key, 2: identity-preserving root.
+    extern_runtime_value_abi: i64 = 0
+    # Declaration-level `@unsafe(reason: "...", capabilities: [...])`. Empty
+    # when the function carries no such annotation. Trailing defaulted fields
+    # (same LAST-field rule as HirBlock.unsafe_caps) so construction sites that
+    # do not name them stay unchanged.
+    unsafe_reason: text = ""
+    unsafe_caps: [text] = []
+    # ROB-EFF-03: "pure" | "nogc" | "nonblocking" from the declaration attribute, "" otherwise.
+    effect_region: text = ""
 
 enum HirContractClauseKind:
     Requires
@@ -186,6 +201,10 @@ struct HirClass:
     has_specialization_of: bool
     specialization_of: text
     type_bindings: HirTypeBindings
+    # Decl-level cfg guard (design hir_cfg_decl_select_design.md Option B); empty/0 = unguarded.
+    cfg: [text] = []
+    cfg_group: i64 = 0
+    cfg_arm: i64 = -1
 
 struct HirStruct:
     """Struct definition in HIR."""
@@ -214,6 +233,10 @@ struct HirStruct:
     has_specialization_of: bool
     specialization_of: text
     type_bindings: HirTypeBindings
+    # Decl-level cfg guard (design hir_cfg_decl_select_design.md Option B); empty/0 = unguarded.
+    cfg: [text] = []
+    cfg_group: i64 = 0
+    cfg_arm: i64 = -1
 
 struct HirField:
     """Struct/class field."""
@@ -277,6 +300,10 @@ struct HirEnum:
     # `HirEnum(...)` construction sites compiling unchanged.
     complete_open: bool = false
     dyn_open: bool = false
+    # Decl-level cfg guard (design hir_cfg_decl_select_design.md Option B); empty/0 = unguarded.
+    cfg: [text] = []
+    cfg_group: i64 = 0
+    cfg_arm: i64 = -1
 
 fn hir_enum_has_attribute(e: HirEnum, name: text) -> bool:
     """True when `e` carries the decorator `@name` (arguments ignored)."""
@@ -292,7 +319,7 @@ fn hir_enum_attribute_args(e: HirEnum, name: text) -> text:
             return a.args
     ""
 
-fn hir_attribute_from_raw(raw: text) -> HirAttribute:
+pub fn hir_attribute_from_raw(raw: text) -> HirAttribute:
     """Split a parser attribute spelling ("evolving(repr:u16)") into name+args."""
     if raw.ends_with(")") and raw.contains("("):
         var head = ""
@@ -302,7 +329,7 @@ fn hir_attribute_from_raw(raw: text) -> HirAttribute:
                 break
             head = head + ch
             idx = idx + 1
-        return HirAttribute(name: head, args: raw.substring(idx + 1, raw.len() - 1))
+        return HirAttribute(name: head, args: raw.substring(idx + 1, raw.byte_len() - 1))
     HirAttribute(name: raw, args: "")
 
 struct HirVariant:
@@ -433,6 +460,10 @@ struct HirTrait:
     has_specialization_of: bool
     specialization_of: text
     type_bindings: HirTypeBindings
+    # Decl-level cfg guard (design hir_cfg_decl_select_design.md Option B); empty/0 = unguarded.
+    cfg: [text] = []
+    cfg_group: i64 = 0
+    cfg_arm: i64 = -1
 
 struct HirImpl:
     """Impl block in HIR.
@@ -483,6 +514,10 @@ struct HirImpl:
     # Method name -> true when the declared return type is Optional(T)
     method_return_is_optional: Dict<text, bool>
     assoc_type_impls: [HirAssocTypeImpl]  # Associated type implementations
+    # Decl-level cfg guard (design hir_cfg_decl_select_design.md Option B); empty/0 = unguarded.
+    cfg: [text] = []
+    cfg_group: i64 = 0
+    cfg_arm: i64 = -1
     span: Span
 
 struct HirConst:
@@ -498,6 +533,10 @@ struct HirConst:
     # # DESUGARED: fixed_address: i64
     has_fixed_address: bool
     fixed_address: i64
+    # Decl-level cfg guard (design hir_cfg_decl_select_design.md Option B); empty/0 = unguarded.
+    cfg: [text] = []
+    cfg_group: i64 = 0
+    cfg_arm: i64 = -1
     span: Span
 
 struct HirStaticAssert:
@@ -523,6 +562,8 @@ struct HirAopAdvice:
     form: text                 # "before" | "after_success" | "after_error" | "around"
     priority: i64
     span: Span
+    aspect_name: text = ""
+    aspect_module: text = ""
 
 struct HirDiBinding:
     """HIR DI binding (lowered from DiBinding)."""
@@ -560,6 +601,21 @@ struct HirExpr:
     has_type_: bool
     type_: HirType
     span: Span
+    # True only on the NilLit that lowering synthesizes for a binding declared
+    # without an initializer (`var x: T`); a source-written `nil` leaves it false.
+    # Defaulted: ~200 HirExpr(...) constructors omit the field; without a
+    # default it was nil and the HIR cache codec refused every module holding
+    # one (nil_in_non_optional_scalar:HirExpr.is_uninit_marker), so MIR shard
+    # workers re-lowered the whole closure. See
+    # doc/08_tracking/bug/full_cli_native_build_peak_rss_2026-11-13.md.
+    is_uninit_marker: bool = false
+    # True only on the `.slice` MethodCall lowered from the bracket slice
+    # `x[a:b]`: MIR cuts a TEXT receiver by code point for it, while a
+    # written `.slice(a, b)` stays a byte cut. Persisted by the HIR codec.
+    bracket_slice: bool = false
+    # True only on the MethodCall lowered from the arrow update `x->m()`; the
+    # checker reports E-ARROW-UPDATE-MISMATCH for it. Persisted by the HIR codec.
+    arrow_update: bool = false
 
 """Expression kind."""
 enum HirExprKind:
@@ -677,6 +733,12 @@ enum HirExprKind:
     TryCatch(body: HirBlock, clauses: [HirCatchClause], finally_: HirBlock?)
     FloatLexeme(value: text, suffix: text?)
 
+    # Target-neutral @cfg/@when select: every arm is kept with its condition
+    # text; MIR picks one via mir_cfg_select_arm (HIR never selects). Appended
+    # LAST: ordinals are positional.
+    # Plan: doc/03_plan/compiler/hir_target_neutral_mir_target_plan.md
+    CfgSelect(conds: [text], arms: [HirBlock], else_: HirBlock?)
+
 struct HirInterpolation:
     """String interpolation."""
     expr: HirExpr
@@ -746,10 +808,14 @@ enum HirCompClauseKind:
 # ============================================================================
 
 struct HirPattern:
-    """Pattern in HIR."""
+    """Pattern in HIR. Only an explicit true presence bit admits type_.
+
+    Untyped constructors must store false, never the native nil word in a
+    Boolean slot: a native conditional treats that nonzero word as true.
+    """
     kind: HirPatternKind
     # # DESUGARED: type_: HirType
-    has_type_: bool
+    has_type_: bool = false
     type_: HirType
     span: Span
 

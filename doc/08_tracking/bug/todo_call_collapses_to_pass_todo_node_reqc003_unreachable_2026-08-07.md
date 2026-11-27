@@ -1,5 +1,5 @@
 # `todo(...)` parses into the same AST node as `pass_todo(...)`; REQC003's dedicated branch is unreachable from real source
-## Open 2026-09-16 — needs owner triage
+## RESOLVED 2026-09-13 (fix b5a8b492fce) — re-verified 2026-11-25, see Resolution section at bottom
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -103,3 +103,83 @@ applied unilaterally here.
 **Verdict: BLOCKED (real fix is in `10.frontend`, out of scope for this worker).**
 No code change made in this pass.
 
+## Resolution 2026-11-25 (re-verification; original resolution 2026-09-13 lost in tree transplant)
+
+**Status: RESOLVED.** The code fix landed on release/1.0.0 as commit
+`b5a8b492fce` (2026-09-13, "fix(compiler): make real todo(...) calls
+reachable by REQC003") with the doc-resolution commit `72273f89975`. A later
+rebase/tree-transplant (`88aac2ffe28`) restored this document to its
+2026-08-17 open state while keeping the code fix, so the resolution text is
+re-recorded here with fresh 2026-11-25 verification evidence.
+
+**Option chosen:** a runtime-identical variant of option 1. Instead of
+emitting a real `expr_call(expr_ident("todo", ...), ...)` node (which would
+change what the interpreter and MIR lowering see for every existing
+`todo(...)` in the tree), the parser keeps the shared tag-40
+(`EXPR_PASS_TODO`) node but routes real `todo(...)` calls through a new
+constructor `expr_pass_todo_call()` (`_AstExpr/accessors.spl`), which marks
+the node's `int` field with `1`. `check_required_comment`
+(`required_comment.spl`, `is_any_pass` branch) reads that marker and applies
+the REQC003 two-string (`"what | hint"` split) check instead of REQC001's
+single-string check. The `int` field was used, not `extra`, because several
+generic AST walkers (`unused_vars.spl`, `closure_analysis.spl`,
+`call_edge_utils.spl`, `alloc_inference.spl`) recurse into `extra` as an
+optional child-expression index whenever it is >= 0.
+
+**Runtime-semantics evidence (unchanged):**
+
+- Both `pass_todo(...)` and `todo(...)` still produce tag 40; the marker is
+  metadata only. Interpreter: `interpreter/eval.spl:610`
+  `if tag == EXPR_PASS_TODO: return val_make_nil()` — no branch on the
+  marker. Flat-AST/MIR bridge: `_FlatAstBridge/convert_nodes.spl:1324`
+  handles tag 40 uniformly with the other pass variants.
+- Live run 2026-11-25 (`SIMPLE_LIB=src bin/simple.exe run --mode=interpreter`):
+  `fn f() -> i64:` with body `todo("fix")` then `7`, `print f()` prints `7`
+  — `todo(...)` is still an evaluation no-op.
+
+**Blast radius (grep 2026-11-25):** ~38 hits in `src/`, ~25 in `test/` for a
+bare `todo(` call shape. Most are string literals inside lint/fix-rule
+sources; real statement-position calls exist (e.g.
+`todo("handle remaining cases")` in `src/lib/common/spec/evidence/model.spl`,
+`src/plugins/backend_c/**`). All keep identical AST tag and runtime
+semantics; the only observable change is the lint diagnostic code
+(REQC001 -> REQC003, both severity `warn`) for weak single-string `todo(...)`.
+
+**Before/after lint output** (repro `fn f():` / `todo("fix")`):
+
+- Before (pinned by the pre-fix regression probe and this doc's Reproduction
+  section): `warning[REQC001]: pass_* used without a comment string`.
+- After (live 2026-11-25, `SIMPLE_LIB=src bin/simple.exe lint repro.spl`):
+  `warning[REQC003]: todo used without what-remains and next-step strings in
+  \`f\`` / `hint: Use todo("what remains", "hint or issue")`.
+- Well-formed `todo("add validation", "see issue 42")`: no REQC warning.
+- Bare `pass_todo("later")` keyword: still REQC001, not REQC003 (plus the
+  unrelated pre-existing STUB003 placeholder error).
+
+**Spec results 2026-11-25** (`SIMPLE_LIB=src bin/simple.exe test <spec>
+--mode=interpreter`):
+
+- `test/01_unit/compiler/lint/required_comment_cli_spec.spl`: 11 total,
+  8 passed, 3 failed, 2 skipped. ALL REQC003 probes pass, including "emits
+  REQC003 (not REQC001) through lint_cli_source for a weak bare todo(...)",
+  the well-formed-todo negative case, and the pass_todo-keyword-still-REQC001
+  case. The 3 failures are the `Linter.lint_source` describe block
+  (REQC001/REQC003/REQC004) — pre-existing on the unmodified base and
+  unrelated to this fix: after WP-7 the REQC00x loop lives only in
+  `lint_cli_source`, so `Linter.lint_source` (no AST decls) no longer emits
+  REQC codes, contradicting those older examples.
+- `test/01_unit/compiler/semantics/lint/required_comment_lint_spec.spl`:
+  FAILS AT LOAD (0 examples executed), pre-existing and unrelated:
+  `Module "compiler.frontend.core" does not export 'if_chain_nodes'`. The
+  spec imports `flat_if_stmt_chain_new` / `ARM_VALUE_BIND` / etc. from an
+  `if_chain_nodes` module that no longer exists anywhere under
+  `src/compiler/10.frontend/` (its API survives only in this spec, used by
+  the REQC004 if-chain tests ~lines 363-410). Same error was already noted
+  as pre-existing in the 2026-09-13 resolution. Repairing it means rewriting
+  those REQC004 if-binding examples against the current AST API — tracked
+  separately under
+  `doc/08_tracking/bug/reqc004_if_binding_wildcard_unimplemented_2026-10-30.md`,
+  out of scope for this bug.
+
+- Status: RESOLVED (code fix 2026-09-13 `b5a8b492fce`; re-verified and
+  resolution re-recorded 2026-11-25)

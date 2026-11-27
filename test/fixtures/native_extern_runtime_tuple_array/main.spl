@@ -1,0 +1,94 @@
+# RED for the stage2 "for-loop tuple destructure" class: an extern returning
+# `[(text, text)]?` (rt_env_vars) hands back RUNTIME tuples built by
+# rt_tuple_new (headered RtCoreArray); compiled code read them with GetField
+# as bare native blocks, so pattern, .0, xs[i], passing and interpolation all
+# saw the header (native_build_environment_snapshot_fingerprint_v1 bound every
+# name as "" -> environment-field-duplicate). Output is environment-
+# independent as long as HOME is set.
+# Build with SIMPLE_BOOTSTRAP=1: `native-build main.spl --backend=cranelift
+# --entry-closure` (and --backend=llvm) from a directory outside test/
+# (boot-fable-lane-scripts/check_fx.sh). Expected stdout (seed interpreter):
+#   X1 nonzero_count=true empty_names=0 home_rows=1 home_value_ok=true
+#   X2 positional_empty_names=0
+#   X3 index_empty_names=0
+#   X4 passed_home=1
+#   X5 interp_home=1
+#   X6 for_pattern_home=HOME
+#   X7 array_elem=HOME
+#   X8 dict_value=HOME
+#   X9 struct_field=HOME
+# Stage 2 e45e89468d3e (before the fix), cranelift and llvm alike:
+#   X1 nonzero_count=true empty_names=56 home_rows=0 home_value_ok=false
+#   X2 positional_empty_names=56
+#   X3 index_empty_names=56
+#   X4 passed_home=0
+#   X5 interp_home=0
+#   X6 for_pattern_home=
+#   then exit 1: `PANIC: bounds_check intrinsic index=0 len=0` (no HOME pair
+#   was found, so `kept` is empty at X7).
+
+@unsafe(reason: "raw nullable environment snapshot", capabilities: [ffi])
+extern fn rt_env_vars() -> [(text, text)]?
+
+fn snapshot() -> [(text, text)]:
+    val raw = unsafe(capabilities: [ffi]): rt_env_vars()
+    raw ?? []
+
+struct Slot:
+    p: (text, text)
+
+fn first_of(p: (text, text)) -> text:
+    p.0
+
+fn main():
+    val snap = snapshot()
+    var empty_names = 0
+    var home_rows = 0
+    var home_value_ok = false
+    var proj_empty = 0
+    var passed_home = 0
+    var interp_home = 0
+    for pair in snap:
+        val (name, value) = pair
+        if name.len() <= 0:
+            empty_names = empty_names + 1
+        if name == "HOME":
+            home_rows = home_rows + 1
+            home_value_ok = value.len() > 0
+            if "{pair}" == "(HOME, {value})":
+                interp_home = interp_home + 1
+        if pair.0.len() <= 0:
+            proj_empty = proj_empty + 1
+        if first_of(pair) == "HOME":
+            passed_home = passed_home + 1
+    print "X1 nonzero_count={snap.len() > 0} empty_names={empty_names} home_rows={home_rows} home_value_ok={home_value_ok}"
+    print "X2 positional_empty_names={proj_empty}"
+    var i = 0
+    var idx_empty = 0
+    while i < snap.len():
+        val (iname, _) = snap[i]
+        if iname.len() <= 0:
+            idx_empty = idx_empty + 1
+        i = i + 1
+    print "X3 index_empty_names={idx_empty}"
+    print "X4 passed_home={passed_home}"
+    print "X5 interp_home={interp_home}"
+    # X6-X9: a HOME pair moved into other containers, then read back
+    var home: (text, text) = ("", "")
+    for (hk, hv) in snap:
+        if hk == "HOME":
+            home = (hk, hv)
+    print "X6 for_pattern_home={home.0}"
+    var kept: [(text, text)] = []
+    var held: {text: (text, text)} = {}
+    var slot = Slot(p: ("", ""))
+    for pair in snap:
+        if pair.0 == "HOME":
+            kept.push(pair)
+            held["h"] = pair
+            slot = Slot(p: pair)
+    val (ak, _) = kept[0]
+    print "X7 array_elem={ak}"
+    val (dk, _) = held["h"]
+    print "X8 dict_value={dk}"
+    print "X9 struct_field={slot.p.0}"

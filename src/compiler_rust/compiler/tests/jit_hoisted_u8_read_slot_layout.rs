@@ -82,3 +82,43 @@ const LE_SRC: &str = "extern fn rt_typed_bytes_u32_le_at(buf: [u8], off: u64) ->
 fn le_word_reads_are_pinned_on_cranelift() {
     assert_eq!(run(LE_SRC), 33);
 }
+
+/// Every runtime call the hoisted loop's MIR emits must resolve for the JIT
+/// the way `jit_import_resolves` sees it in the seed binary (no dlsym there):
+/// a `RUNTIME_SYMBOL_NAMES` entry, a compiler-owned symbol, or an accessor the
+/// backend always lowers inline. `rt_array_is_byte_packed` was none of these
+/// after b52cbe7a2b7, so every module with a hoisted `[u8]` loop dropped to
+/// the interpreter: pixel_diff.spl, one 4x page, 1.2 s -> 714 s and 5.4 GB.
+#[test]
+fn hoisted_u8_loop_runtime_calls_resolve_without_dlsym() {
+    let src = format!(
+        "{PRELUDE}fn tail_sum(data: [u8]) -> u64:\n    val total_len: u64 = data.len().to_u64()\n    var pos: u64 = 0\n    var s: u64 = 0\n    while pos < total_len:\n        s = s + data[pos].to_u64()\n        pos = pos + 1\n    s\n\nfn main() -> i64:\n    tail_sum(packed_bytes()).to_i64()\n"
+    );
+    let ast = Parser::new(&src).parse().expect("source must parse");
+    let hir_module = hir::lower(&ast).expect("source must lower to HIR");
+    let mir_module = mir::lower_to_mir(&hir_module).expect("source must lower to MIR");
+    assert_eq!(
+        call_count(&mir_module, "rt_array_is_byte_packed"),
+        1,
+        "fixture must take the hoisted path"
+    );
+    let unresolved: Vec<String> = mir_module
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flat_map(|b| b.instructions.iter())
+        .filter_map(|i| match i {
+            mir::MirInst::Call { target, .. } if target.name().starts_with("rt_") => Some(target.name().to_string()),
+            _ => None,
+        })
+        .filter(|name| {
+            !simple_common::RUNTIME_SYMBOL_NAMES.contains(&name.as_str())
+                && !simple_compiler::codegen::jit::compiler_owned_symbol_resolves(name)
+                && !simple_compiler::codegen::instr::calls::is_inline_lowered_byte_accessor(name)
+        })
+        .collect();
+    assert!(
+        unresolved.is_empty(),
+        "MIR emits runtime calls the seed JIT cannot resolve: {unresolved:?}"
+    );
+}

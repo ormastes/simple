@@ -1,0 +1,829 @@
+# File System
+#
+# File and directory operations with path manipulation.
+# Provides cross-platform file system access.
+#
+# Components:
+# - Path: Path manipulation (join, normalize, parent, etc.)
+# - File: File operations (read, write, append, metadata)
+# - Dir: Directory operations (create, delete, read_dir)
+# - Walk: Directory tree traversal
+# - Glob: Pattern matching for file paths
+#
+# Usage:
+#   val path = Path(path:"/home/user/file.txt")
+#   val content = File.read(path.to_string())
+#
+# Architecture:
+# - Cross-platform path handling (Unix/Windows)
+# - Lazy directory traversal
+# - Pattern matching with glob syntax
+
+use std.nogc_sync_mut.platform (is_windows, dir_sep, normalize_path as platform_normalize, is_absolute_path as platform_is_absolute, join_path)
+
+# ============================================================================
+# Path - Path Manipulation
+# ============================================================================
+
+class Path:
+    """Cross-platform path manipulation.
+
+    Handles path operations for Unix and Windows.
+
+    Example:
+        val path = Path(path:"/home/user/file.txt")
+        val parent = path.parent()  # "/home/user"
+        val name = path.filename()  # "file.txt"
+        val ext = path.extension()  # "txt"
+    """
+    path: text  # Path string
+
+    static fn new(path: text) -> Path:
+        """Create path from string.
+
+        Args:
+            path: Path string
+
+        Returns:
+            Path object
+        """
+        Path(path: path)
+
+    fn to_string() -> text:
+        """Convert path to string.
+
+        Returns:
+            Path string
+        """
+        self.path
+
+    fn join(other: text) -> Path:
+        """Join path with another component.
+
+        Args:
+            other: Path component to append
+
+        Returns:
+            New path
+
+        Example:
+            Path(path:"/home").join("user")  # "/home/user"
+        """
+        val joined = join_path(self.path, other)
+        Path(path: joined)
+
+    fn normalize() -> Path:
+        """Normalize path (resolve . and ..).
+
+        Returns:
+            Normalized path
+
+        Example:
+            Path(path:"/a/b/../c").normalize()  # "/a/c"
+            Path(path:"C:/Users/Name").normalize()  # "C:\Users\Name" (Windows)
+        """
+        val normalized = platform_normalize(self.path)
+        Path(path: normalized)
+
+    fn parent() -> Path?:
+        """Get parent directory.
+
+        Returns:
+            Some(parent path) or nil if at root
+
+        Example:
+            Path(path:"/home/user").parent()  # Some("/home")
+        """
+        if val parent_path = path_parent(self.path):
+            return Some(Path(path: parent_path))
+        nil
+
+    fn filename() -> text?:
+        """Get filename (last component).
+
+        Returns:
+            Some(filename) or nil if directory
+
+        Example:
+            Path(path:"/home/file.txt").filename()  # Some("file.txt")
+        """
+        path_filename(self.path)
+
+    fn extension() -> text?:
+        """Get file extension.
+
+        Returns:
+            Some(extension) or nil if no extension
+
+        Example:
+            Path(path:"file.txt").extension()  # Some("txt")
+        """
+        path_extension(self.path)
+
+    fn stem() -> text?:
+        """Get filename without extension.
+
+        Returns:
+            Some(stem) or nil
+
+        Example:
+            Path(path:"file.txt").stem()  # Some("file")
+        """
+        path_stem(self.path)
+
+    fn components() -> [text]:
+        """Get path components.
+
+        Returns:
+            Array of path components
+
+        Example:
+            Path(path:"/home/user/file").components()
+            # ["/", "home", "user", "file"]
+        """
+        path_components(self.path)
+
+    fn is_absolute() -> bool:
+        """Check if path is absolute.
+
+        Returns:
+            true if absolute, false if relative
+
+        Example:
+            Path(path:"/home/user").is_absolute()     # true (Unix)
+            Path(path:"C:\\Users\\Name").is_absolute()  # true (Windows)
+            Path(path:"./relative").is_absolute()     # false
+        """
+        platform_is_absolute(self.path)
+
+    fn is_relative() -> bool:
+        """Check if path is relative."""
+        not self.is_absolute()
+
+    fn with_extension(ext: text) -> Path:
+        """Replace file extension.
+
+        Args:
+            ext: New extension
+
+        Returns:
+            Path with new extension
+
+        Example:
+            Path(path:"file.txt").with_extension("md")  # "file.md"
+        """
+        val new_path = path_with_extension(self.path, ext)
+        Path(path: new_path)
+
+# ============================================================================
+# FileMetadata - File Information
+# ============================================================================
+
+struct FileMetadata:
+    """File metadata information.
+
+    Example:
+        val metadata = File.metadata("file.txt")?
+        print "Size: {metadata.size} bytes"
+        print "Is file: {metadata.is_file}"
+    """
+    size: usize         # File size in bytes
+    is_file: bool       # Is regular file
+    is_dir: bool        # Is directory
+    is_symlink: bool    # Is symbolic link
+    readonly: bool      # Is read-only
+    modified: usize     # Last modified time (Unix timestamp)
+    created: usize      # Creation time (Unix timestamp)
+
+# ============================================================================
+# File - File Operations
+# ============================================================================
+
+class File:
+    """File operations (read, write, metadata, etc.).
+
+    Static methods for file manipulation.
+
+    Example:
+        val content = File.read("data.txt")?
+        File.write("output.txt", content)?
+    """
+
+    static fn read(path: text) -> text?:
+        """Read entire file as text.
+
+        Args:
+            path: File path
+
+        Returns:
+            Some(content) or nil on error
+        """
+        rt_file_read_text(path)
+
+    static fn read_bytes(path: text) -> [u8]?:
+        """Read entire file as bytes.
+
+        Args:
+            path: File path
+
+        Returns:
+            Some(bytes) or nil on error
+        """
+        rt_file_read_bytes(path)
+
+    static fn write(path: text, content: text) -> bool:
+        """Write text to file (overwrite).
+
+        Args:
+            path: File path
+            content: Text to write
+
+        Returns:
+            true on success, false on error
+        """
+        file_write(path, content)
+
+    static fn write_bytes(path: text, data: [u8]) -> bool:
+        """Write bytes to file (overwrite).
+
+        Args:
+            path: File path
+            data: Bytes to write
+
+        Returns:
+            true on success, false on error
+        """
+        file_write_bytes(path, data)
+
+    static fn append(path: text, content: text) -> bool:
+        """Append text to file.
+
+        Args:
+            path: File path
+            content: Text to append
+
+        Returns:
+            true on success, false on error
+        """
+        file_append_text(path, content)
+
+    static fn exists(path: text) -> bool:
+        """Check if file exists.
+
+        Args:
+            path: File path
+
+        Returns:
+            true if exists, false otherwise
+        """
+        file_exists(path)
+
+    static fn delete(path: text) -> bool:
+        """Delete file.
+
+        Args:
+            path: File path
+
+        Returns:
+            true on success, false on error
+        """
+        file_delete(path)
+
+    static fn rename(old_path: text, new_path: text) -> bool:
+        """Rename/move file.
+
+        Args:
+            old_path: Current path
+            new_path: New path
+
+        Returns:
+            true on success, false on error
+        """
+        file_rename(old_path, new_path)
+
+    static fn copy(src: text, dest: text) -> bool:
+        """Copy file.
+
+        Args:
+            src: Source path
+            dest: Destination path
+
+        Returns:
+            true on success, false on error
+        """
+        file_copy(src, dest)
+
+    static fn metadata(path: text) -> FileMetadata?:
+        """Get file metadata.
+
+        Args:
+            path: File path
+
+        Returns:
+            Some(metadata) or nil on error
+        """
+        file_metadata(path)
+
+    static fn size(path: text) -> usize?:
+        """Get file size in bytes.
+
+        Args:
+            path: File path
+
+        Returns:
+            Some(size) or nil on error
+
+        The runtime reports failure as -1, not as an absent value, so the
+        Optional is built HERE rather than by declaring the extern as `usize?`
+        -- see the note on the `rt_file_size` declaration below.
+        """
+        val bytes = rt_file_size(path)
+        if bytes < 0: nil else: Some(bytes as usize)
+
+# ============================================================================
+# Dir - Directory Operations
+# ============================================================================
+
+class Dir:
+    """Directory operations.
+
+    Example:
+        Dir.create("new_dir")?
+        val entries = Dir.read(".")?
+        for entry in entries:
+            print entry
+    """
+
+    static fn create(path: text) -> bool:
+        """Create directory.
+
+        Args:
+            path: Directory path
+
+        Returns:
+            true on success, false on error
+        """
+        dir_create(path)
+
+    static fn create_all(path: text) -> bool:
+        """Create directory and all parent directories.
+
+        Args:
+            path: Directory path
+
+        Returns:
+            true on success, false on error
+        """
+        dir_create_all(path)
+
+    static fn delete(path: text) -> bool:
+        """Delete empty directory.
+
+        Args:
+            path: Directory path
+
+        Returns:
+            true on success, false on error
+        """
+        rt_dir_delete(path)
+
+    static fn delete_all(path: text) -> bool:
+        """Delete directory and all contents.
+
+        Args:
+            path: Directory path
+
+        Returns:
+            true on success, false on error
+
+        WARNING: Recursive deletion, use with caution.
+        """
+        dir_delete_all(path)
+
+    static fn read(path: text) -> [text]?:
+        """Read directory entries.
+
+        Args:
+            path: Directory path
+
+        Returns:
+            Some(entries) or nil on error
+        """
+        dir_read(path)
+
+    static fn exists(path: text) -> bool:
+        """Check if directory exists.
+
+        Args:
+            path: Directory path
+
+        Returns:
+            true if exists and is directory
+        """
+        dir_exists(path)
+
+    static fn is_empty(path: text) -> bool:
+        """Check if directory is empty.
+
+        Args:
+            path: Directory path
+
+        Returns:
+            true if empty, false otherwise
+        """
+        dir_is_empty(path)
+
+# ============================================================================
+# Walk - Directory Tree Traversal
+# ============================================================================
+
+struct DirEntry:
+    """Directory entry information.
+
+    Example:
+        for entry in Walk.new("./src"):
+            if entry.is_file:
+                print entry.path
+    """
+    path: text          # Full path
+    name: text          # Entry name
+    is_file: bool       # Is regular file
+    is_dir: bool        # Is directory
+
+class Walk:
+    """Directory tree traversal.
+
+    Recursively walks directory tree.
+
+    Example:
+        for entry in Walk.new("./src"):
+            if entry.path.ends_with(".spl"):
+                process_file(entry.path)
+    """
+    root: text          # Root directory
+    entries: [DirEntry] # Collected entries
+
+    static fn new(root: text) -> Walk:
+        """Create directory walker.
+
+        Args:
+            root: Root directory
+
+        Returns:
+            Walk iterator
+        """
+        val entries = walk_dir(root)
+        Walk(root: root, entries: entries)
+
+    fn filter(predicate: fn(DirEntry) -> bool) -> Walk:
+        """Filter entries by predicate.
+
+        Args:
+            predicate: Filter function
+
+        Returns:
+            Filtered walk
+        """
+        val filtered = self.entries.filter(predicate)
+        Walk(root: self.root, entries: filtered)
+
+    fn files_only() -> Walk:
+        """Filter to files only.
+
+        Returns:
+            Walk with only files
+        """
+        self.filter(fn(e: DirEntry): e.is_file)
+
+    fn dirs_only() -> Walk:
+        """Filter to directories only.
+
+        Returns:
+            Walk with only directories
+        """
+        self.filter(fn(e: DirEntry): e.is_dir)
+
+    fn to_list() -> [DirEntry]:
+        """Convert to list of entries.
+
+        Returns:
+            List of directory entries
+        """
+        self.entries
+
+# ============================================================================
+# Glob - Pattern Matching
+# ============================================================================
+
+class Glob:
+    """Glob pattern matching for file paths.
+
+    Supports wildcards: *, ?, [abc], **
+
+    Example:
+        val files = Glob.new("src/**/*.spl").matches()
+        for file in files:
+            print file
+    """
+    pattern: text       # Glob pattern
+
+    static fn new(pattern: text) -> Glob:
+        """Create glob matcher.
+
+        Args:
+            pattern: Glob pattern
+
+        Returns:
+            Glob matcher
+
+        Patterns:
+        - * : Match any string (excluding /)
+        - ? : Match single character
+        - [abc] : Match one of abc
+        - ** : Match any path (including /)
+        """
+        Glob(pattern: pattern)
+
+    fn matches() -> [text]:
+        """Find all matching paths.
+
+        Returns:
+            Array of matching paths
+        """
+        glob_find(self.pattern)
+
+    fn matches_path(path: text) -> bool:
+        """Check if path matches pattern.
+
+        Args:
+            path: Path to check
+
+        Returns:
+            true if matches, false otherwise
+        """
+        glob_matches(self.pattern, path)
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+fn read_to_string(path: text) -> text?:
+    """Convenience function to read file as text.
+
+    Args:
+        path: File path
+
+    Returns:
+        Some(content) or nil on error
+    """
+    File.read(path)
+
+fn write_string(path: text, content: text) -> bool:
+    """Convenience function to write text to file.
+
+    Args:
+        path: File path
+        content: Text to write
+
+    Returns:
+        true on success, false on error
+    """
+    File.write(path, content)
+
+fn list_dir(path: text) -> [text]?:
+    """Convenience function to list directory.
+
+    Args:
+        path: Directory path
+
+    Returns:
+        Some(entries) or nil on error
+    """
+    Dir.read(path)
+
+# ============================================================================
+# SFFI Functions
+# ============================================================================
+
+# Path operations — these used to be bare `extern fn` with no `rt_path_*`
+# runtime symbol anywhere in src/runtime (that part of the old NOTE was
+# correct), but a real pure-Simple implementation already existed at
+# std.nogc_sync_mut.path (src/lib/nogc_sync_mut/path.spl) and was simply
+# never wired up here. This was a wrong-import bug, not a missing-capability
+# gap — see doc/08_tracking/bug (stage2_cli_link_undefined P4).
+use std.nogc_sync_mut.path.{join2 as _fs_path_join2, normalize as _fs_path_normalize, dirname as _fs_path_dirname, basename as _fs_path_basename, extension as _fs_path_extension, stem as _fs_path_stem, split_path as _fs_path_split, is_absolute as _fs_path_is_absolute, parent_dir_option as _fs_path_parent_option}
+
+fn path_join(path: text, other: text) -> text:
+    _fs_path_join2(path, other)
+
+fn path_normalize(path: text) -> text:
+    _fs_path_normalize(path)
+
+fn path_parent(path: text) -> text?:
+    _fs_path_parent_option(path)
+
+fn path_filename(path: text) -> text?:
+    val name = _fs_path_basename(path)
+    if name == "":
+        nil
+    else:
+        Some(name)
+
+fn path_extension(path: text) -> text?:
+    val ext = _fs_path_extension(path)
+    if ext == "":
+        nil
+    else:
+        Some(ext)
+
+fn path_stem(path: text) -> text?:
+    val s = _fs_path_stem(path)
+    if s == "":
+        nil
+    else:
+        Some(s)
+
+fn path_components(path: text) -> [text]:
+    _fs_path_split(path)
+
+fn path_is_absolute(path: text) -> bool:
+    _fs_path_is_absolute(path)
+
+fn path_with_extension(path: text, ext: text) -> text:
+    val dir = _fs_path_dirname(path)
+    val new_name = _fs_path_stem(path) + "." + ext
+    if dir == ".":
+        new_name
+    else:
+        _fs_path_join2(dir, new_name)
+
+# File operations — renamed to the real rt_-prefixed runtime symbols
+# (src/runtime/runtime.h + runtime_native.c).
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_file_read_bytes(path: text) -> [u8]?
+use std.io_runtime.{file_write}
+use std.io_runtime.{file_write_bytes}
+use std.io_runtime.{file_append_text}
+export use std.io_runtime.{file_exists}
+use std.io_runtime.{file_delete}
+extern fn rt_file_move(old_path: text, new_path: text) -> bool
+use std.io_runtime.{file_copy}
+# `rt_file_size` returns a plain `int64_t` (`src/runtime/runtime_native.c` and
+# `src/runtime/runtime.c`): the byte count, or -1 when the file cannot be
+# stat'd. It must be DECLARED that way. This module used to declare it as
+# `-> usize?`, i.e. a boxed Optional, while the other six declarations in the
+# tree (io_runtime.spl, io/file_ops.spl, dual_fs, enterprise_store,
+# storage_roots/publisher, and the compiler's own
+# 80.driver/driver_build/incremental.spl) all say `-> i64`. Two incompatible
+# signatures for one extern symbol is a defect on its own, and under native
+# Stage-2 codegen the boxed spelling won: `FileFingerprint.size` came back as a
+# heap ADDRESS instead of a byte count, so the native capsule receipt recorded
+# `54090898177` for a 632-byte object file. Because an address differs between
+# processes, the receipt written by the compile and the receipt recomputed by
+# the sanity gate disagreed while being the same LENGTH -- the
+# `receipt-content-mismatch:expected-bytes=1648:actual-bytes=1648` that blocked
+# every macOS Stage 2. See
+# doc/08_tracking/bug/bootstrap_stage2_native_capsule_receipt_mismatch_equal_byte_counts_2026-09-12.md
+extern fn rt_file_size(path: text) -> i64
+
+# file_metadata: pure-Simple composition of the scalar probes the C runtime
+# exports (no rt_ symbol returns a whole FileMetadata). `is_symlink`,
+# `readonly` and `created` are not observable through those probes and are
+# reported as false/false/0 — see
+# doc/08_tracking/bug/full_cli_native_link_missing_symbols_2026-11-15.md.
+use std.io_runtime.{file_size as _fs_meta_file_size}
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow as _fs_meta_is_regular, file_modified_time as _fs_meta_mtime}
+
+fn file_metadata(path: text) -> FileMetadata?:
+    val is_dir = dir_exists(path)
+    if not is_dir and not file_exists(path):
+        return None
+    val mtime = _fs_meta_mtime(path)
+    var size: i64 = 0
+    if not is_dir:
+        size = _fs_meta_file_size(path)
+    var modified: i64 = 0
+    if mtime > 0:
+        modified = mtime
+    Some(FileMetadata(
+        size: size as usize,
+        is_file: _fs_meta_is_regular(path),
+        is_dir: is_dir,
+        is_symlink: false,
+        readonly: false,
+        modified: modified as usize,
+        created: 0
+    ))
+
+# file_rename has no rt_file_rename runtime symbol; the real symbol is
+# rt_file_move (runtime_native.c:2546, same (src,dst)->bool contract) —
+# thin wrapper so call sites keep the original name.
+fn file_rename(old_path: text, new_path: text) -> bool:
+    rt_file_move(old_path, new_path)
+
+# Directory operations
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+use std.io_runtime.{dir_create_all}
+extern fn rt_dir_delete(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+use std.io_runtime.{dir_list_or_empty}
+use std.io_runtime.{dir_exists}
+
+# dir_create had no 1-arg rt_ match — the real symbol rt_dir_create takes an
+# extra `recursive` flag; thin wrapper preserves the original non-recursive
+# (mkdir, not mkdir -p) semantics.
+fn dir_create(path: text) -> bool:
+    rt_dir_create(path, false)
+
+# dir_delete_all has no rt_dir_delete_all symbol; the real (recursive)
+# removal symbol is rt_dir_remove_all — thin wrapper preserves the name.
+fn dir_delete_all(path: text) -> bool:
+    rt_dir_remove_all(path)
+
+# dir_read had no [text]?-returning rt_ symbol; the real listing symbol is
+# dir_list_or_empty(path) -> [text] (non-optional, same pattern already used
+# correctly in nogc_sync_mut/io_runtime.spl, shell/dir.spl,
+# io/file_discovery.spl) — thin wrapper restores the Option-returning shape.
+fn dir_read(path: text) -> [text]?:
+    Some(dir_list_or_empty(path))
+
+# dir_is_empty has no rt_dir_is_empty symbol; composed from the now-fixed
+# rt_dir_list rather than inventing a new runtime symbol.
+fn dir_is_empty(path: text) -> bool:
+    dir_list_or_empty(path).len() == 0
+
+# Directory traversal
+use std.io_runtime.{dir_walk}
+
+fn walk_dir(root: text) -> [DirEntry]:
+    var entries: [DirEntry] = []
+    for path in dir_walk(root):
+        val parts = path.split(dir_sep())
+        val name = parts.last() ?? path
+        val is_dir = dir_exists(path)
+        entries.push(DirEntry(path: path, name: name, is_file: not is_dir, is_dir: is_dir))
+    entries
+
+# Glob pattern matching — no rt_glob_* runtime symbol exists, but a real
+# pure-Simple glob matcher already exists at std.nogc_sync_mut.glob
+# (src/lib/nogc_sync_mut/glob.spl). Wrong-import bug, same as the path
+# operations above.
+use std.nogc_sync_mut.glob.{glob_match as _fs_glob_match}
+
+fn glob_matches(pattern: text, path: text) -> bool:
+    _fs_glob_match(path, pattern)
+
+fn glob_find(pattern: text) -> [text]:
+    """Find files under the current directory matching a glob pattern."""
+    var matches: [text] = []
+    for path in dir_walk("."):
+        if _fs_glob_match(path, pattern):
+            matches.push(path)
+    matches
+
+# read_file — alias for read_to_string (returns text? or "" on nil)
+fn read_file(path: text) -> text:
+    val result = File.read(path)
+    result ?? ""
+
+# write_file — alias for write_string
+fn write_file(path: text, content: text) -> bool:
+    File.write(path, content)
+
+# ----------------------------------------------------------------------------
+# Short-name surface
+#
+# `use std.fs` binds `fs` to the module namespace, so call sites spell these as
+# `fs.exists(...)` / `fs.read_to_text(...)`. Before these existed the calls died
+# with "method `X` not found on type `dict`", which reads like a module
+# resolution failure but is really a missing member.
+# ----------------------------------------------------------------------------
+
+fn exists(path: text) -> bool:
+    # True when path names an existing file or directory.
+    file_exists(path) or dir_exists(path)
+
+fn read_to_text(path: text) -> text:
+    # Read a whole file as text; empty text when unreadable.
+    read_file(path)
+
+fn read_text(path: text) -> text:
+    # Alias for read_to_text.
+    read_file(path)
+
+fn write_text(path: text, content: text) -> bool:
+    # Write text to a file, truncating it; true on success.
+    File.write(path, content)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Path, FileMetadata, File, Dir, DirEntry, Walk, Glob
+export read_to_string, write_string, list_dir, read_file, write_file
+export exists, read_to_text, read_text, write_text
+export use std.nogc_sync_mut.io_runtime.{is_file}
+
+# `std.fs` text helpers: one body in nogc_sync_mut/fs/text_io.spl.
+export use std.nogc_sync_mut.fs.text_io.{file_read_text, file_write_text, dir_children}
+export use std.nogc_sync_mut.io_runtime.{mkdir_p, is_dir}

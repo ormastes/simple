@@ -1,0 +1,95 @@
+# System test: native devhub binary over a CONFIGURED messenger.sdn naming a
+# non-default sqlcipher4 target (`cfgdense`) over the committed dense fixture.
+# Binary comes from env DEVHUB_NATIVE_BIN; HOME/USERPROFILE point at build/tmp.
+# @manual_section: messenger-native-configured-target
+
+"""
+## Purpose and audience
+Purpose: with a user-written messenger.sdn declaring a named sqlcipher4 target, the native devhub binary lists exactly the ground-truth rooms, echoes the requested target, returns ground-truth history, and never prints the passphrase.
+Audience: DevHub release reviewers. The passphrase is public synthetic data from dense_ground_truth.json.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get_opt, file_write}
+use std.env.{env_set}
+use std.common.json.value.{JsonValue, json_value_field, json_value_items, json_value_len}
+use test.support.devhub_messenger_dense.*
+use test.support.devhub_messenger_cli.*
+
+fn cfg_bin() -> text:
+    match env_get_opt("DEVHUB_NATIVE_BIN"):
+        case Some(v): v
+        case None: ""
+
+# Two sqlcipher4 targets: the DEFAULT `decoy` names a store that does not exist,
+# and the non-default `cfgdense` names the committed dense fixture.
+# Target selection is observable: only cfgdense can yield ground-truth rooms.
+fn cfg_sdn(db_path: text) -> text:
+    val header = "messenger:\n    schema_version: 1\n    default_target: dense\n\n"
+    val decoy_db = db_path.replace(DENSE_BASE, "missing_decoy.sqlcipher4")
+    val decoy = cli_sdn_text(decoy_db).replace(header, "").replace("messenger.dense", "messenger.decoy")
+    val cfg = cli_sdn_text(db_path).replace(header, "").replace("messenger.dense", "messenger.cfgdense")
+    header.replace("default_target: dense", "default_target: decoy") + decoy + "\n" + cfg
+
+fn cfg_prepare(home: text) -> bool:
+    val _mk = process_run("mkdir", ["-p", home + "/.config/devhub"])
+    val cwd = process_run("pwd", []).0.trim()
+    val _f = file_write(home + "/.config/devhub/messenger.sdn", cfg_sdn(cwd + "/" + dense_path(DENSE_BASE)))
+    val _h = env_set("HOME", cwd + "/" + home)
+    val _p = env_set("USERPROFILE", cwd + "/" + home)
+    true
+
+val cf_bin = cfg_bin()
+val cf_truth = dense_truth()
+val cf_pass = truth_passphrase(cf_truth)
+val _home = cfg_prepare("build/tmp/devhub_cfg_home")
+val _s = env_set(DENSE_ENV, cf_pass)
+val cf_rooms = if cf_bin == "": ("", "", -1) else: process_run(cf_bin, ["messenger", "rooms", "--target", "cfgdense", "--json"])
+val cf_msgs = if cf_bin == "": ("", "", -1) else: process_run(cf_bin, ["messenger", "messages", "--target", "cfgdense", "--room", "1", "--limit", "2", "--json"])
+val cf_default = if cf_bin == "": ("", "", -1) else: process_run(cf_bin, ["messenger", "rooms", "--json"])
+val cf_wrong = "wrong-" + cf_pass
+val _w = env_set(DENSE_ENV, cf_wrong)
+val cf_bad = if cf_bin == "": ("", "", -1) else: process_run(cf_bin, ["messenger", "rooms", "--target", "cfgdense", "--json"])
+
+describe "native devhub binary over a configured sqlcipher4 target":
+    it "lists exactly the ground-truth rooms for the configured target":
+        # @req REQ-MSGR-NATIVE-CFG-001
+        step("Run `devhub messenger rooms --target cfgdense --json` with HOME pointing at the temp config")
+        expect(cf_bin != "").to_equal(true)
+        expect(cf_rooms.2).to_equal(0)
+        expect(cf_rooms.0.contains(tf(cf_truth, "rooms_payload"))).to_equal(true)
+        step("Parse the JSON and compare count, ids and names with the ground truth")
+        val parsed = payload_json(cf_rooms.0)
+        val rooms = json_value_items(json_value_field(parsed, "rooms"))
+        val want = json_value_field(json_value_field(cf_truth, "tables"), "room")
+        expect(tn(parsed, "count")).to_equal(rows_in(want))
+        expect(json_value_len(json_value_field(parsed, "rooms"))).to_equal(rows_in(want))
+        expect(tf(rooms[0], "id")).to_equal(cell_at(want, 0, 0))
+        expect(tf(rooms[0], "name")).to_equal(cell_at(want, 0, 1))
+        expect(tf(rooms[1], "id")).to_equal(cell_at(want, 1, 0))
+        expect(tf(rooms[1], "name")).to_equal(cell_at(want, 1, 1))
+
+    it "uses the configured default target, not cfgdense, when --target is omitted":
+        # @req REQ-MSGR-NATIVE-CFG-005
+        step("Run `devhub messenger rooms --json` with no --target; the default `decoy` names a missing store")
+        expect(cf_default.2 != 0).to_equal(true)
+        expect(tf(payload_json(cf_default.0), "target")).to_equal("decoy")
+        expect(cf_default.0.contains(tf(cf_truth, "rooms_payload"))).to_equal(false)
+
+    it "names the configured target in the error envelope when the passphrase is wrong":
+        # @req REQ-MSGR-NATIVE-CFG-002
+        step("Run rooms with a wrong passphrase (the success payload is the bare adapter payload; the envelope carries the target)")
+        expect(cf_bad.2 != 0).to_equal(true)
+        expect(tf(payload_json(cf_bad.0), "target")).to_equal("cfgdense")
+        expect(tf(payload_json(cf_bad.0), "status")).to_equal("error")
+
+    it "never prints either passphrase on stdout or stderr":
+        # @req REQ-MSGR-NATIVE-CFG-003
+        step("Search both streams of every run for the correct and the wrong passphrase")
+        expect(leaks_none(cf_rooms.0 + cf_rooms.1 + cf_msgs.0 + cf_msgs.1 + cf_bad.0 + cf_bad.1, [cf_pass, cf_wrong])).to_equal(true)
+
+    it "returns the ground-truth history of room 1 for limit 2":
+        # @req REQ-MSGR-NATIVE-CFG-004
+        step("Run `devhub messenger messages --target cfgdense --room 1 --limit 2 --json`")
+        expect(cf_msgs.2).to_equal(0)
+        expect(cf_msgs.0.contains(expected_history(cf_truth, "1", 2))).to_equal(true)

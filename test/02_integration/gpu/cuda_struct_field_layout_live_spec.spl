@@ -1,0 +1,267 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# Tracks: mir_declaration_field_offset_identity_mismatch_2026_11_14
+"""Live CUDA struct field layout: real MIR type table, real device run.
+
+The struct type table comes from the real MIR lowerer, so field offsets are the
+production layout (`small: u8, wide: u64` -> physical `wide@0 small@8`, stride
+16). The kernels address that struct through a global pointer with GEP,
+SetField and GetField; device bytes are compared with host-computed values,
+including untouched padding.
+
+@tag: integration, gpu, cuda, hardware
+"""
+
+use std.spec.{describe, it, expect}
+use std.common.test_env_gate.{test_env_cuda_available, test_env_gate_skip}
+use compiler.common.config.{Logger}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_data.{MirFunction, MirModule, MirSignature, BlockId, LocalId}
+use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand}
+use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, LocalKind, MirTypeDef, MirTypeDefKind}
+use plugins.backend_cuda.cuda_backend.{CudaBackend}
+use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
+use std.gc_async_mut.cuda.{cuda_memcpy_dtoh, cuda_memcpy_htod, CUDA_SUCCESS}
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+
+val PAIR_COUNT: i64 = 64
+val PAIR_STRIDE: i64 = 16
+val PAD_BYTE: i64 = 238
+
+fn u8_ty() -> MirType: MirType(kind: MirTypeKind.U8)
+fn u64_ty() -> MirType: MirType(kind: MirTypeKind.U64)
+
+fn arg_local(id: i64, index: i64, name: text, ty: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: Some(name), type_: ty, kind: LocalKind.Arg(index), is_ghost: false)
+
+fn temp_local(id: i64, ty: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: None, type_: ty, kind: LocalKind.Temp, is_ghost: false)
+
+fn inst(kind: MirInstKind) -> MirInst:
+    MirInst(kind: kind, span: None)
+
+fn kernel(id: i64, name: text, params: [MirType], locals: [MirLocal], insts: [MirInst]) -> MirFunction:
+    val block = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: insts, terminator: MirTerminator.Ret(None))
+    MirFunction(
+        symbol: SymbolId(id: id), name: name,
+        signature: MirSignature(params: params, return_type: MirType.unit(), is_variadic: false),
+        locals: locals, blocks: [block], entry_block: BlockId.entry(), span: Span.empty(),
+        generic_params: [], is_generic_template: false, specialization_of: None,
+        type_bindings: {}, layout_phase: None, is_kernel: true,
+        gpu_target: "cuda", gpu_backend_order: "cuda", is_export_c: false,
+        export_name: "", has_driver_manifest_attr: false, driver_manifest_attr: None,
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false
+    )
+
+# Three declarations of the same two fields; the production layout places all
+# of them as wide@0 small@8 with stride 16.
+fn lowered_pair_types() -> Dict<SymbolId, MirTypeDef>:
+    val source = "struct Pair:\n    small: u8\n    wide: u64\n\n" +
+        "struct RevPair:\n    wide: u64\n    small: u8\n\n" +
+        "class PairBox:\n    small: u8\n    wide: u64\n"
+    val parsed = parse_full_frontend(source, "cuda_struct_layout_live.spl", "cuda_struct_layout_live", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("cuda_struct_layout_live.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    expect(mir_lowering.errors.len()).to_equal(0)
+    mir.types
+
+fn type_symbol(types: Dict<SymbolId, MirTypeDef>, name: text) -> SymbolId:
+    var found = SymbolId(id: -1)
+    for key in types.keys():
+        if types[key].name == name: found = key
+    found
+
+# Declaration index of a field name; the kernels address fields by it.
+fn field_index(types: Dict<SymbolId, MirTypeDef>, symbol: SymbolId, name: text) -> i64:
+    var found: i64 = -1
+    match types[symbol].kind:
+        case MirTypeDefKind.Struct(fields):
+            var index: i64 = 0
+            for field in fields:
+                if field.name == name:
+                    expect(field.offset).to_equal(if name == "wide": 0 else: 8)
+                    found = index
+                index = index + 1
+        case _:
+            expect("{types[symbol].name} kind").to_equal("struct")
+    expect(found).to_be_greater_than(-1)
+    found
+
+fn pair_kernels(pair: SymbolId, small: i64, wide: i64) -> [MirFunction]:
+    val pair_ptr = MirType.ptr(MirType(kind: MirTypeKind.Struct(pair)), true)
+    val u64_ptr = MirType.ptr(u64_ty(), true)
+    val u8_ptr = MirType.ptr(u8_ty(), true)
+    val write = kernel(9101, "write_pairs", [pair_ptr], [
+        arg_local(0, 0, "out", pair_ptr), temp_local(1, u64_ty()), temp_local(2, pair_ptr), temp_local(3, u8_ty())
+    ], [
+        inst(MirInstKind.GpuGlobalId(LocalId(id: 1), 0)),
+        inst(MirInstKind.GetElementPtr(LocalId(id: 2), MirOperand.copy(LocalId(id: 0)), [MirOperand.copy(LocalId(id: 1))])),
+        inst(MirInstKind.Cast(LocalId(id: 3), MirOperand.copy(LocalId(id: 1)), u8_ty())),
+        inst(MirInstKind.SetField(MirOperand.copy(LocalId(id: 2)), wide, MirOperand.copy(LocalId(id: 1)))),
+        inst(MirInstKind.SetField(MirOperand.copy(LocalId(id: 2)), small, MirOperand.copy(LocalId(id: 3))))
+    ])
+    val read = kernel(9102, "read_pairs", [pair_ptr, u64_ptr, u8_ptr], [
+        arg_local(0, 0, "input", pair_ptr), arg_local(1, 1, "wide_out", u64_ptr), arg_local(2, 2, "small_out", u8_ptr),
+        temp_local(3, u64_ty()), temp_local(4, pair_ptr), temp_local(5, u64_ty()), temp_local(6, u8_ty()),
+        temp_local(7, u64_ptr), temp_local(8, u8_ptr)
+    ], [
+        inst(MirInstKind.GpuGlobalId(LocalId(id: 3), 0)),
+        inst(MirInstKind.GetElementPtr(LocalId(id: 4), MirOperand.copy(LocalId(id: 0)), [MirOperand.copy(LocalId(id: 3))])),
+        inst(MirInstKind.GetField(LocalId(id: 5), MirOperand.copy(LocalId(id: 4)), wide)),
+        inst(MirInstKind.GetField(LocalId(id: 6), MirOperand.copy(LocalId(id: 4)), small)),
+        inst(MirInstKind.GetElementPtr(LocalId(id: 7), MirOperand.copy(LocalId(id: 1)), [MirOperand.copy(LocalId(id: 3))])),
+        inst(MirInstKind.Store(MirOperand.copy(LocalId(id: 7)), MirOperand.copy(LocalId(id: 5)))),
+        inst(MirInstKind.GetElementPtr(LocalId(id: 8), MirOperand.copy(LocalId(id: 2)), [MirOperand.copy(LocalId(id: 3))])),
+        inst(MirInstKind.Store(MirOperand.copy(LocalId(id: 8)), MirOperand.copy(LocalId(id: 6))))
+    ])
+    [write, read]
+
+fn compile_pair_ptx(name: text) -> text:
+    val types = lowered_pair_types()
+    val symbol = type_symbol(types, name)
+    expect(symbol.id).to_be_greater_than(-1)
+    if symbol.id < 0: return ""
+    val small = field_index(types, symbol, "small")
+    val wide = field_index(types, symbol, "wide")
+    var functions: Dict<SymbolId, MirFunction> = {}
+    for fn_ in pair_kernels(symbol, small, wide): functions[fn_.symbol] = fn_
+    val module = MirModule(name: "cuda_struct_layout_live", functions: functions, statics: {}, constants: {}, types: types)
+    val compiled = CudaBackend.create((8, 6)).compile(module)
+    expect(compiled.is_ok()).to_equal(true)
+    if compiled.is_ok(): compiled.unwrap().ptx else: ""
+
+fn fill_bytes(ptr: i64, count: i64, value: i64):
+    var index: i64 = 0
+    while index < count:
+        rt_ptr_write_u8(ptr, index, value)
+        index = index + 1
+
+fn expected_wide(i: i64) -> i64: i * 3 + 1000000007
+fn expected_small(i: i64) -> i64: (i * 7 + 5) % 256
+
+# Returns the number of device bytes/values that differ from the host oracle.
+# One context for every layout: on seeds before the dlopen ctx_destroy shim
+# (cuda_gpu_gated_spec_defects_2026-08-09 item 3) every extra context leaked
+# until cuCtxCreate failed with OUT_OF_MEMORY.
+fn run_all_pairs_on_device(names: [text]) -> text:
+    var session = CudaSession.create()
+    val init_status = session.init()
+    expect(init_status).to_equal(CUDA_SUCCESS)
+    expect(session.ctx).to_be_greater_than(0)
+    if init_status != CUDA_SUCCESS or session.ctx <= 0:
+        return "no-context ctx={session.ctx}"
+    var summary = ""
+    for name in names:
+        summary = summary + "{name}={run_pair_kernels_on_device(session, name)} "
+    session.shutdown()
+    summary
+
+fn run_pair_kernels_on_device(shared: CudaSession, name: text) -> i64:
+    var session = shared
+    val ptx = compile_pair_ptx(name)
+    if ptx == "":
+        return -1
+    var mismatches: i64 = 0
+    expect(session.load_module(ptx)).to_be_greater_than(0)
+    val bytes = PAIR_COUNT * PAIR_STRIDE
+    val host = rt_alloc(bytes)
+    val host_wide = rt_alloc(PAIR_COUNT * 8)
+    val host_small = rt_alloc(PAIR_COUNT)
+    val values = rt_alloc(24)
+    val args = rt_alloc(24)
+    val pairs = session.alloc(bytes)
+    val wide_out = session.alloc(PAIR_COUNT * 8)
+    val small_out = session.alloc(PAIR_COUNT)
+    expect(pairs).to_be_greater_than(0)
+    expect(wide_out).to_be_greater_than(0)
+    expect(small_out).to_be_greater_than(0)
+    if pairs > 0 and wide_out > 0 and small_out > 0:
+        # Device write: padding must survive, fields land at wide@0 small@8.
+        fill_bytes(host, bytes, PAD_BYTE)
+        expect(cuda_memcpy_htod(pairs, host, bytes)).to_equal(CUDA_SUCCESS)
+        rt_ptr_write_i64(values, 0, pairs)
+        rt_ptr_write_i64(args, 0, values)
+        expect(session.launch_kernel_args("write_pairs", 1, 1, 1, PAIR_COUNT, 1, 1, args)).to_equal(CUDA_SUCCESS)
+        expect(session.sync()).to_equal(CUDA_SUCCESS)
+        fill_bytes(host, bytes, 0)
+        expect(cuda_memcpy_dtoh(host, pairs, bytes)).to_equal(CUDA_SUCCESS)
+        var i: i64 = 0
+        while i < PAIR_COUNT:
+            val base = i * PAIR_STRIDE
+            if rt_ptr_read_i64(host, base) != i: mismatches = mismatches + 1
+            if rt_ptr_read_u8(host, base + 8) != i: mismatches = mismatches + 1
+            var pad: i64 = 9
+            while pad < PAIR_STRIDE:
+                if rt_ptr_read_u8(host, base + pad) != PAD_BYTE: mismatches = mismatches + 1
+                pad = pad + 1
+            i = i + 1
+
+        # Device read: host places values at physical offsets.
+        fill_bytes(host, bytes, PAD_BYTE)
+        i = 0
+        while i < PAIR_COUNT:
+            rt_ptr_write_i64(host, i * PAIR_STRIDE, expected_wide(i))
+            rt_ptr_write_u8(host, i * PAIR_STRIDE + 8, expected_small(i))
+            i = i + 1
+        expect(cuda_memcpy_htod(pairs, host, bytes)).to_equal(CUDA_SUCCESS)
+        rt_ptr_write_i64(values, 0, pairs)
+        rt_ptr_write_i64(values, 8, wide_out)
+        rt_ptr_write_i64(values, 16, small_out)
+        rt_ptr_write_i64(args, 0, values)
+        rt_ptr_write_i64(args, 8, values + 8)
+        rt_ptr_write_i64(args, 16, values + 16)
+        expect(session.launch_kernel_args("read_pairs", 1, 1, 1, PAIR_COUNT, 1, 1, args)).to_equal(CUDA_SUCCESS)
+        expect(session.sync()).to_equal(CUDA_SUCCESS)
+        expect(cuda_memcpy_dtoh(host_wide, wide_out, PAIR_COUNT * 8)).to_equal(CUDA_SUCCESS)
+        expect(cuda_memcpy_dtoh(host_small, small_out, PAIR_COUNT)).to_equal(CUDA_SUCCESS)
+        i = 0
+        while i < PAIR_COUNT:
+            if rt_ptr_read_i64(host_wide, i * 8) != expected_wide(i): mismatches = mismatches + 1
+            if rt_ptr_read_u8(host_small, i) != expected_small(i): mismatches = mismatches + 1
+            i = i + 1
+    if pairs > 0: session.free(pairs)
+    if wide_out > 0: session.free(wide_out)
+    if small_out > 0: session.free(small_out)
+    rt_free(host)
+    rt_free(host_wide)
+    rt_free(host_small)
+    rt_free(values)
+    rt_free(args)
+    mismatches
+
+describe "CUDA struct field layout on the device":
+    if not test_env_cuda_available():
+        it "env_skip: CUDA device run not requested or unavailable":
+            expect(test_env_gate_skip("SIMPLE_CUDA_TEST")).to_contain("Skipped")
+        return
+
+    it "compiles global struct field access with physical offsets and global state space":
+        val ptx = compile_pair_ptx("Pair")
+        expect(ptx).to_contain("st.global.u64 [")
+        expect(ptx).to_contain("st.global.u8 [")
+        expect(ptx).to_contain("ld.global.u64 ")
+        expect(ptx).to_contain("ld.global.u8 ")
+        expect(ptx).to_contain("+8], ")
+        expect(ptx).to_contain(", 16;")
+        expect(ptx.contains("ld.local")).to_equal(false)
+        expect(ptx.contains("st.local")).to_equal(false)
+
+    it "writes and reads struct, reversed struct and class fields at physical offsets on the GPU":
+        # One summary assertion names every mismatching layout at once.
+        expect(run_all_pairs_on_device(["Pair", "RevPair", "PairBox"])).to_equal("Pair=0 RevPair=0 PairBox=0 ")

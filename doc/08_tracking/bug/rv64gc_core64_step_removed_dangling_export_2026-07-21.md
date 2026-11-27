@@ -76,3 +76,30 @@ behavior.
 Deliberately NOT fixed inline here: the owning session is actively pushing
 this lane; a blind fix risks the next reland clobbering or double-defining
 the symbol.
+
+## Closed 2026-11-03 (verified fixed)
+Already fixed on release/1.0.0: facade restored by e72ff56c06e / core64_step defined in core.spl (88aac2ffe28). Specs pass: gc_async_mut compression_facade_spec 6/6, sql_facade_spec 4/4, core64_integration_spec 35/35.
+
+## Re-verified 2026-11-05 (RTL lane, PR #6979 — wait verification)
+
+Confirmed still fixed at the release/1.0.0 tip: `core64_step` is defined at
+`src/lib/hardware/rv64gc_rtl/core.spl:777` (with `Core64StepResult` at :772);
+no dangling re-export remains in `__init__.spl`. Ran the cited spec with the
+seed interpreter:
+`test/01_unit/lib/hardware/rv64gc_rtl/core64_integration_spec.spl` — 35/35
+PASS (MC/DC-degraded banner only, expected for the seed). No code change was
+required for this bug; it was already fixed by e72ff56c06e / 88aac2ffe28.
+
+## Re-verified 2026-11-25 (release/1.0.0 tip, worktree wt-p2w4-aj)
+
+STALE-CLOSED confirmed by code inspection: `core64_step` is defined at
+`src/lib/hardware/rv64gc_rtl/core.spl:777` (with the `Core64StepResult`
+docstring at `:772`), and no dangling `core64_step` export remains in
+`src/lib/hardware/rv64gc_rtl/__init__.spl` (grep for `core64_step` under
+`src/lib/hardware/rv64gc_rtl/` hits only `core.spl`). Live re-execution of
+the 35/35 spec is environment-blocked on this Windows host: the pinned
+`bin/simple.exe` (Rust seed v1.0.0-rc.1) rejects the
+`@representation_boundary` decorator added tree-wide by cfd89933699 — the
+spec file itself carries the decorator at line 25 — so the run errors before
+executing any example, independent of this bug. The 2026-11-05 35/35 PASS
+stands; verified by inspection here, limit stated.

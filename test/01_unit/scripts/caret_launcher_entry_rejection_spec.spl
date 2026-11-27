@@ -1,0 +1,40 @@
+"""
+# Caret Launcher Entry Fail-Closed Rejection Prevention Spec
+
+Prevention coverage for `caret_launcher_ignores_caret_entry_2026-11-14`:
+ensures invalid, out-of-tree, and traversal `CARET_ENTRY` overrides fail
+closed with exit code 127 instead of silently falling back to `main.spl`.
+"""
+
+use std.spec.*
+use app.io.process_ops.{process_run}
+
+fn run_rejected_entry(entry_expr: text) -> text:
+    val script =
+        "set -u; " +
+        "T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; " +
+        "printf '#!/bin/sh\\nexit 0\\n' > \"$T/stub_simple\"; " +
+        "chmod +x \"$T/stub_simple\"; " +
+        "err=$(CARET_ENTRY=\"" + entry_expr + "\" SIMPLE_CARET_ALLOW_SOURCE_FALLBACK=1 SIMPLE_BINARY=\"$T/stub_simple\" sh bin/caret 2>&1 >/dev/null); " +
+        "rc=$?; " +
+        "printf 'RC=%s ERR=%s' \"$rc\" \"$err\""
+    val res = process_run("sh", ["-c", script])
+    res.0
+
+describe "bin/caret invalid CARET_ENTRY fail-closed guards":
+    """Rejects missing files, external paths, and parent-directory traversal."""
+
+    it "exits 127 when CARET_ENTRY points to a missing file under src/app/llm_caret":
+        val out = run_rejected_entry("src/app/llm_caret/nonexistent_entry_2026.spl")
+        expect(out).to_contain("RC=127")
+        expect(out).to_contain("CARET_ENTRY must be an existing file under")
+
+    it "exits 127 when CARET_ENTRY points outside src/app/llm_caret":
+        val out = run_rejected_entry("src/app/cli/main.spl")
+        expect(out).to_contain("RC=127")
+        expect(out).to_contain("CARET_ENTRY must be an existing file under")
+
+    it "exits 127 when CARET_ENTRY attempts parent-directory traversal":
+        val out = run_rejected_entry("src/app/llm_caret/../cli/main.spl")
+        expect(out).to_contain("RC=127")
+        expect(out).to_contain("CARET_ENTRY must be an existing file under")

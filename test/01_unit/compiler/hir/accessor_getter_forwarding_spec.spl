@@ -1,0 +1,131 @@
+# Purpose and audience: executable evidence for self-hosted compiler engineers
+# that HIR lowering forwards a field read `recv.x` with no real field `x` to
+# get_x() / is_x() / x(), that a real field wins, and that an undefined field
+# on a known owner is an unconditional hard error with a "did you mean" hint
+# (REQ-SELFHOST-ACCESSOR-002).
+# @req REQ-SELFHOST-ACCESSOR-001
+# requirements: doc/02_requirements/compiler/mdsoc_matrix_visibility_requirements.md
+
+use std.spec
+use std.spec.step
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+
+val DECLS = "class Temp:\n" +
+    "    level: i64\n" +
+    "    me get_celsius() -> i64:\n" +
+    "        1\n" +
+    "    me is_hot() -> bool:\n" +
+    "        true\n" +
+    "    me get_level() -> i64:\n" +
+    "        99\n" +
+    "    bad: NoSuchTypeAnywhere\n" +
+    "    me get_bad() -> i64:\n" +
+    "        5\n" +
+    "    me get__hidden() -> i64:\n" +
+    "        6\n" +
+    "    static fn get_stat() -> i64:\n" +
+    "        7\n" +
+    "    me size() -> i64:\n" +
+    "        3\n"
+
+fn expr_tag(e: HirExpr) -> text:
+    match e.kind:
+        case HirExprKind.MethodCall(_, method, args, _): "method:{method}/{args.len()}"
+        case HirExprKind.Field(_, name, _): "field:{name}"
+        case _: "other"
+
+fn probe_tail(probe_body: text) -> [text]:
+    # Returns [tail tag, error count, joined messages, hard error count].
+    val src = DECLS + "\nfn probe(t: Temp) -> i64:\n    " + probe_body + "\n"
+    val parsed = parse_full_frontend(src, "testdata/accessor_fwd.spl", "accessor_fwd", Logger(level: 0))
+    var lowering = HirLowering.with_filename("testdata/accessor_fwd.spl")
+    val hir = lowering.lower_module(parsed)
+    var tag = "missing"
+    for fn_ in hir.functions.values():
+        if fn_.name == "probe":
+            tag = "other"
+            if fn_.body.has:
+                tag = expr_tag(fn_.body.value)
+            else:
+                val n = fn_.body.stmts.len()
+                if n > 0:
+                    match fn_.body.stmts[n - 1].kind:
+                        case HirStmtKind.Expr(ex): tag = expr_tag(ex)
+                        case _: ()
+    var msgs = ""
+    for m in lowering.diagnostic_messages:
+        msgs = msgs + m + "\n"
+    var hard = 0
+    for rec in lowering.diagnostic_recovered:
+        if not rec:
+            hard = hard + 1
+    [tag, "{lowering.errors.len()}", msgs, "{hard}"]
+
+describe "HIR accessor forwarding for field reads":
+    it "forwards recv.celsius to get_celsius()":
+        step("given no field celsius but get_celsius when reading t.celsius then a get_celsius call is lowered")
+        val r = probe_tail("t.celsius")
+        expect(r[0]).to_equal("method:get_celsius/0")
+
+    it "forwards recv.hot to is_hot()":
+        step("given no field hot but is_hot when reading t.hot then an is_hot call is lowered")
+        val r = probe_tail("t.hot")
+        expect(r[0]).to_equal("method:is_hot/0")
+
+    it "forwards recv.size to the no-paren method size()":
+        step("given no field size but method size when reading t.size then a size call is lowered")
+        val r = probe_tail("t.size")
+        expect(r[0]).to_equal("method:size/0")
+
+    it "lets a real field win over get_level":
+        step("given field level and get_level when reading t.level then the field is read")
+        val r = probe_tail("t.level")
+        expect(r[0]).to_equal("field:level")
+
+    it "reports an unknown field as an error unconditionally":
+        step("given unknown field t.nope then a hard no-field error is reported and no warning")
+        val r = probe_tail("t.nope")
+        expect(r[0]).to_equal("field:nope")
+        expect(r[2].contains("no field `nope` on type and no get_/is_ accessor")).to_equal(true)
+        expect(r[2].contains("W-HIR-FIELD-001")).to_equal(false)
+        expect(r[3]).to_equal("{(probe_tail("t.level")[3]).to_i64() + 1}")
+
+    it "keeps a real field whose type fails to lower as a field read":
+        step("given field bad with unresolvable type and get_bad when reading t.bad then the field read stays")
+        val r = probe_tail("t.bad")
+        expect(r[0]).to_equal("field:bad")
+
+    it "never forwards an underscore-prefixed member":
+        step("given get__hidden but no field _hidden when reading t._hidden then no forwarding and no strict error")
+        val r = probe_tail("t._hidden")
+        expect(r[0]).to_equal("field:_hidden")
+        expect(r[2].contains("no field `_hidden`")).to_equal(false)
+
+    it "does not use a static get_x":
+        step("given static get_stat only when reading t.stat then no method call is lowered")
+        val r = probe_tail("t.stat")
+        expect(r[0]).to_equal("field:stat")
+
+# @req REQ-SELFHOST-ACCESSOR-002
+# Unconditional strict check: an undefined field that falls through forwarding
+# produces a hard error with a "did you mean" hint; real fields and forwarded
+# getters never error or warn.
+describe "HIR undefined-field error and hint (REQ-SELFHOST-ACCESSOR-002)":
+    it "suggests the closest field and its accessor on error":
+        step("given typo levl then the hard error suggests field level and method get_level")
+        val r = probe_tail("t.levl")
+        expect(r[2].contains("no field `levl` on type and no get_/is_ accessor")).to_equal(true)
+        expect(r[2].contains("did you mean field `level` / method `get_level`")).to_equal(true)
+        expect(r[2].contains("W-HIR-FIELD-001")).to_equal(false)
+        expect(r[3]).to_equal("{(probe_tail("t.level")[3]).to_i64() + 1}")
+
+    it "does not error or warn for a real field or a forwarded getter":
+        step("given real field level and forwarded celsius then no error or warning is emitted")
+        val base_hard = probe_tail("t.level")[3]
+        expect(probe_tail("t.level")[2].contains("W-HIR-FIELD-001")).to_equal(false)
+        expect(probe_tail("t.celsius")[2].contains("W-HIR-FIELD-001")).to_equal(false)
+        expect(probe_tail("t.celsius")[3]).to_equal(base_hard)

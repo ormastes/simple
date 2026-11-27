@@ -1,0 +1,530 @@
+# Shared unbound application source-view service. No protocol envelopes.
+# Local MCP captures cwd; this slice supplies no authenticated host entrypoint.
+# File admission is not an atomic sandbox against hostile ancestor replacement.
+use std.common.source.service_contracts.{SourceOpenResultV1}
+use app.io.mod.{cwd, dir_is_real_no_follow, file_read_regular_no_follow_bounded_bytes}
+use app.io.file_ops.{path_absolute}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.common.encoding.external_text.{bytes_to_text_checked}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.string_core.{str_len}
+use std.common.source.contracts.{SourceSnapshotV1, SourceRangeV1, SourceProjectionV1,
+    SourceOutlineV1, SourceOutlineNodeV1, SourceStructuredViewV1, SourceIntentResolutionV1}
+use std.nogc_sync_mut.source.projection.{source_project_raw_v1}
+# Module-level on purpose: a function-local `use` loads only the named function
+# and leaves the TreeSitter impl blocks unloaded (method parse_outline /
+# parse_top_level_item not found on every structural source_open).
+use compiler.tools.source_outline_v1.{source_native_outline_v1}
+use std.nogc_sync_mut.source.structure.{source_project_structure_v1, source_view_node_expanded_v1,
+    source_outline_intent_v1, source_outline_without_nodes_v1}
+# MDSOC+ public view (REQ-PUBVIEW-001/006): the classifier seam lives with the
+# query_visibility CLI; the projection is the shared std library.
+use std.nogc_sync_mut.source.visibility_view.{SourceVisibleSymbolV1, SourceHiddenSummaryV1,
+    source_visibility_admits_v1, source_hidden_summary_v1, source_hidden_hint_v1, source_hidden_summary_json_v1}
+use app.cli._QueryVisibility.symbol_views.{visibility_level_or_error, visibility_default_reason}
+use app.cli._QueryVisibility.query_commands.{visibility_class_of, nearest_boundary_dir}
+
+# A hidden top-level node: its full range, qualified name and class.
+struct SourceHiddenNodeV1:
+    span: SourceRangeV1
+    name: text
+    visibility_class: text
+
+fn source_node_classifiable_v1(node: SourceOutlineNodeV1) -> bool:
+    # Structural nodes carry no visibility of their own and are never hidden.
+    node.parent_index < 0 and node.kind != "import" and node.kind != "export" and
+        node.kind != "impl" and node.kind != "static_assert"
+
+fn source_visible_symbols_v1(outline: SourceOutlineV1, file: text) -> [SourceVisibleSymbolV1]:
+    var symbols: [SourceVisibleSymbolV1] = []
+    for node in outline.nodes:
+        if source_node_classifiable_v1(node):
+            symbols.push(SourceVisibleSymbolV1(node.name, node.kind, visibility_class_of(node.name, file), "", ""))
+    symbols
+
+fn source_hidden_nodes_v1(outline: SourceOutlineV1, symbols: [SourceVisibleSymbolV1], level: text) -> ([i64], [SourceHiddenNodeV1]):
+    var indices: [i64] = []
+    var hidden: [SourceHiddenNodeV1] = []
+    var symbol_index = 0
+    var index = 0
+    for node in outline.nodes:
+        if source_node_classifiable_v1(node):
+            val symbol = symbols[symbol_index]
+            symbol_index = symbol_index + 1
+            if not source_visibility_admits_v1(symbol.visibility_class, level):
+                indices.push(index)
+                hidden.push(SourceHiddenNodeV1(node.full_range, node.qualified_name, symbol.visibility_class))
+        index = index + 1
+    (indices, hidden)
+
+# Compact help is returned only on demand (`help: "ess"`), never pushed.
+val SOURCE_ESSENTIAL_HELP_V1 = "Essential: open <symbol> (target=) | intent=<text> | raw | outline\nFold: outline closes all bodies; focused/intent opens one block\nMore: cursor+snapshot_id page; max_bytes/max_nodes bound every view"
+
+fn source_help_category_v1(available: [text], unsupported: [(text, text)]) -> JsonValue:
+    var ready: [JsonValue] = []
+    for item in available: ready.push(JsonValue.Str(item))
+    var missing: [JsonValue] = []
+    for (operation, reason) in unsupported:
+        missing.push(json_value_object_from([("operation", JsonValue.Str(operation)), ("reason", JsonValue.Str(reason))]))
+    json_value_object_from([("available", JsonValue.Array(ready)), ("unsupported", JsonValue.Array(missing))])
+
+fn source_advanced_help_v1() -> JsonValue:
+    # Advanced help (`help: "adv"`) is returned only on demand. Every category
+    # states what this slice can do; unsupported operations carry a reason.
+    val semantic = "semantic provider unavailable in this slice; syntax outline only"
+    val session = "no authenticated agent session binding; per-agent state unavailable"
+    val debugger = "no debugger bridge in the source_open tool"
+    val history = "no VCS or edit-history provider bound to source_open"
+    val fixes = "no code-action provider bound to source_open"
+    json_value_object_from([
+        ("display", source_help_category_v1(["outline", "raw", "focused", "intent", "depth", "cursor"],
+            [("num", session), ("info", session), ("hint", session)])),
+        ("analyze", source_help_category_v1([],
+            [("callers", semantic), ("callees", semantic), ("refs", semantic), ("writes", semantic),
+             ("type", semantic), ("flow", semantic), ("cfg", semantic), ("slice", semantic)])),
+        ("debug", source_help_category_v1([],
+            [("stack", debugger), ("locals", debugger), ("watch", debugger), ("frame", debugger),
+             ("repl", debugger), ("capabilities", debugger)])),
+        ("history", source_help_category_v1([], [("changes", history), ("diff", history), ("impact", history)])),
+        ("config", source_help_category_v1([], [("env", session), ("config", session), ("explain", session)])),
+        ("fix", source_help_category_v1([], [("actions", fixes), ("preview", fixes), ("apply", fixes)])),
+        ("navigation", source_help_category_v1(["target=<symbol>", "omission_ledger[].reopen", "next_cursor"],
+            [("view_handle", session), ("diagnostic_id", semantic), ("back_forward", session)]))])
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field,
+    json_value_text_or, json_value_items, json_value_object_from,
+    json_value_serialize}
+
+fn source_result_error_v1(status: text, reason: text) -> SourceOpenResultV1:
+    val result = json_value_object_from([
+        ("status", JsonValue.Str(status)),
+        ("completeness", JsonValue.Str("not_evaluated")),
+        ("reason", JsonValue.Str(reason))])
+    SourceOpenResultV1(json_value_serialize(result), true)
+
+fn source_integer_argument_v1(arguments: JsonValue, key: text, fallback: i64) -> Result<i64, text>:
+    match json_value_field(arguments, key):
+        JsonValue.Null: Ok(fallback)
+        JsonValue.Int(value): Ok(value)
+        _: Err("integer_required: " + key)
+
+pub fn source_relative_path_valid_v1(path: text) -> bool:
+    if path == "" or str_len(path) > 512 or path.starts_with("/"):
+        return false
+    if path.contains("\\") or path.contains(":"): return false
+    for byte in text_to_utf8_bytes(path):
+        if byte < 32 or byte == 127: return false
+    for component in path.split("/"):
+        if component == "" or component == "." or component == "..": return false
+    true
+
+fn source_workspace_file_v1(path: text, root: text) -> Result<text, text>:
+    if not source_relative_path_valid_v1(path): return Err("workspace_relative_path_required")
+    if root == "": return Err("workspace_root_unavailable")
+    if not dir_is_real_no_follow(root): return Err("workspace_root_not_real_directory")
+    val components = path.split("/")
+    var parent = root
+    var index = 0
+    while index + 1 < components.len():
+        parent = parent + "/" + components[index]
+        if not dir_is_real_no_follow(parent): return Err("symlink_or_non_directory_parent")
+        index = index + 1
+    Ok(root + "/" + path)
+
+fn source_range_json_v1(span: SourceRangeV1) -> JsonValue:
+    json_value_object_from([("start_byte", JsonValue.Int(span.start_byte)),
+        ("end_byte", JsonValue.Int(span.end_byte))])
+
+fn source_safe_json_v1(serialized: text) -> text:
+    # JSON escapes preserve authoritative decoded source while preventing bidi
+    # controls from rearranging the visible JSON evidence presented to agents.
+    var safe = serialized
+    val controls = ["\u061C", "\u200E", "\u200F", "\u202A", "\u202B", "\u202C", "\u202D", "\u202E", "\u2066", "\u2067", "\u2068", "\u2069"]
+    val escapes = [r"\u061C", r"\u200E", r"\u200F", r"\u202A", r"\u202B", r"\u202C", r"\u202D", r"\u202E", r"\u2066", r"\u2067", r"\u2068", r"\u2069"]
+    var index = 0
+    while index < controls.len():
+        safe = safe.replace(controls[index], escapes[index])
+        index = index + 1
+    safe
+
+pub fn source_projection_payload_v1(path: text, projection: SourceProjectionV1) -> text:
+    var selected: [JsonValue] = []
+    for span in projection.selected: selected.push(source_range_json_v1(span))
+    var omitted: [JsonValue] = []
+    for span in projection.omitted: omitted.push(source_range_json_v1(span))
+    val result = json_value_object_from([
+        ("schema_version", JsonValue.Int(1)),
+        ("status", JsonValue.Str("ok")),
+        ("mode", JsonValue.Str("raw")),
+        ("path", JsonValue.Str(path)),
+        ("snapshot_id", JsonValue.Str(projection.snapshot_id)),
+        ("completeness", JsonValue.Str(projection.completeness)),
+        ("evidence_kind", JsonValue.Str(projection.evidence_kind)),
+        ("provider_level", JsonValue.Str("L0")),
+        ("source_text", JsonValue.Str(projection.source_text)),
+        ("selected_ranges", JsonValue.Array(selected)),
+        ("omitted_ranges", JsonValue.Array(omitted)),
+        ("next_byte", JsonValue.Int(projection.next_byte)),
+        ("limitations", JsonValue.Array([
+            JsonValue.Str("disk_snapshot_not_editor_overlay"),
+            JsonValue.Str("outline_and_semantics_unavailable"),
+            JsonValue.Str("authenticated_agent_session_binding_unavailable"),
+            JsonValue.Str("workspace_ancestor_checks_not_race_proof_sandbox")]))])
+    source_safe_json_v1(json_value_serialize(result))
+
+fn source_bounded_payload_v1(payload: text) -> SourceOpenResultV1:
+    # The MCP adapter enforces its final envelope cap separately.
+    if str_len(payload) > 12288:
+        return source_result_error_v1("error", "source_payload_exceeds_budget; reduce max_bytes or max_nodes")
+    SourceOpenResultV1(payload, false)
+
+fn source_load_native_outline_v1(snapshot: SourceSnapshotV1) -> Result<SourceOutlineV1, text>:
+    source_native_outline_v1(snapshot)
+
+pub fn source_outline_result_identity_v1(outline: SourceOutlineV1) -> text:
+    # Canonical ordered arrays are unambiguous; this binds produced syntax
+    # facts, not an unavailable compiler build/admission identity.
+    var nodes: [JsonValue] = []
+    for node in outline.nodes:
+        nodes.push(JsonValue.Array([JsonValue.Str(node.name), JsonValue.Str(node.qualified_name),
+            JsonValue.Str(node.kind), JsonValue.Int(node.parent_index),
+            source_range_json_v1(node.full_range), source_range_json_v1(node.header_range),
+            source_range_json_v1(node.body_range)]))
+    var issues: [JsonValue] = []
+    for issue in outline.issues:
+        issues.push(JsonValue.Array([JsonValue.Str(issue.message), JsonValue.Str(issue.severity), source_range_json_v1(issue.span)]))
+    val identity = JsonValue.Array([JsonValue.Str("source-outline-result-v1"),
+        JsonValue.Str(outline.snapshot_id), JsonValue.Str(outline.provider_id),
+        JsonValue.Str(outline.provider_level), JsonValue.Str(outline.syntax_status),
+        JsonValue.Array(nodes), JsonValue.Array(issues), JsonValue.Int(outline.total_issues)])
+    sha256_text(json_value_serialize(identity))
+
+pub fn source_structure_cursor_v1(cursor: text, query_key: text,
+        expected_snapshot: text) -> Result<i64, text>:
+    if cursor == "": return Ok(0)
+    if expected_snapshot == "": return Err("continuation_requires_snapshot_id")
+    val fields = cursor.split(":")
+    if fields.len() != 2 or fields[0] != query_key: return Err("source_cursor_query_changed")
+    val start_index = fields[1].to_i64() ?? -1
+    if start_index < 0 or str(start_index) != fields[1]: return Err("invalid_source_cursor")
+    Ok(start_index)
+
+fn source_display_lines_v1(source: text, first_line: i64, numbers: bool) -> text:
+    if not numbers: return source
+    var parts: [text] = []
+    var line = first_line
+    val rows = source.split("\n")
+    var index = 0
+    while index < rows.len():
+        if index + 1 == rows.len() and rows[index] == "": break
+        parts.push(str(line) + " | " + rows[index])
+        if index + 1 < rows.len(): parts.push("\n")
+        line = line + 1
+        index = index + 1
+    parts.join("")
+
+fn source_issues_within_v1(outline: SourceOutlineV1, span: SourceRangeV1) -> i64:
+    # Syntax issues whose span starts inside `span`; aggregate for folded nodes.
+    var count = 0
+    for issue in outline.issues:
+        if issue.span.start_byte >= span.start_byte and issue.span.start_byte < span.end_byte:
+            count = count + 1
+    count
+
+fn source_fold_marker_v1(outline: SourceOutlineV1, view: SourceStructuredViewV1, node_index: i64) -> text:
+    # Synthetic row text after the `|` boundary for a folded node; "" when open.
+    # A folded body with syntax issues shows their count so closing a body never
+    # hides that something is wrong inside it.
+    var folded = false
+    for fold in view.folds:
+        if fold.node_index == node_index: folded = true
+    if not folded: return ""
+    var members = 0
+    for node in outline.nodes:
+        if node.parent_index == node_index: members = members + 1
+    val hidden = source_issues_within_v1(outline, outline.nodes[node_index].body_range)
+    val suffix = if hidden > 0: "  syntax_issues:" + str(hidden) else: ""
+    if members > 0: return "| + " + str(members) + " members" + suffix
+    "| + body" + suffix
+
+fn source_omission_ledger_v1(outline: SourceOutlineV1, view: SourceStructuredViewV1,
+        next_cursor: text, hidden: [SourceHiddenNodeV1]) -> JsonValue:
+    # One row per omitted range: why it is absent and how to retrieve it. An
+    # omitted gap is attributed to the fold it overlaps (the gap also carries
+    # the line break after a folded body); otherwise it is `not_selected`.
+    # A visibility-hidden declaration is attributed first (REQ-PUBVIEW-006):
+    # nothing is hidden without a row naming its class and the reveal level.
+    var rows: [JsonValue] = []
+    for span in view.projection.omitted:
+        var reason = "not_selected"
+        var node_name = ""
+        var reopen: [(text, JsonValue)] = [("mode", JsonValue.Str("raw")), ("start_byte", JsonValue.Int(span.start_byte)),
+            ("max_bytes", JsonValue.Int(span.end_byte - span.start_byte))]
+        # One adjacent gap may cover several hidden declarations: one row each.
+        var hidden_rows = 0
+        for node in hidden:
+            if node.span.start_byte < span.end_byte and node.span.end_byte > span.start_byte:
+                hidden_rows = hidden_rows + 1
+                rows.push(json_value_object_from([
+                    ("range", source_range_json_v1(node.span)), ("reason", JsonValue.Str("visibility_hidden")),
+                    ("node_name", JsonValue.Str(node.name)), ("visibility_class", JsonValue.Str(node.visibility_class)),
+                    ("reopen", json_value_object_from([("visibility", JsonValue.Str(node.visibility_class)),
+                        ("mode", JsonValue.Str("focused")), ("target", JsonValue.Str(node.name))]))]))
+        if hidden_rows > 0: continue
+        for fold in view.folds:
+            for range in fold.ranges:
+                if range.start_byte < span.end_byte and range.end_byte > span.start_byte and reason == "not_selected":
+                    if fold.node_index < 0:
+                        reason = "import_group"
+                    else:
+                        reason = "folded_body"
+                        node_name = outline.nodes[fold.node_index].qualified_name
+                        reopen = [("mode", JsonValue.Str("focused")), ("target", JsonValue.Str(node_name))]
+        if reason == "not_selected" and next_cursor != "":
+            reason = "budget_page"
+            reopen = [("cursor", JsonValue.Str(next_cursor))]
+        elif reason == "not_selected" and view.mode == "exhaustive":
+            # Exhaustive never deselects: a remaining gap (inter-node bytes or
+            # a body larger than one page) reopens through raw paging.
+            reason = "budget_page"
+        rows.push(json_value_object_from([
+            ("range", source_range_json_v1(span)), ("reason", JsonValue.Str(reason)),
+            ("node_name", JsonValue.Str(node_name)), ("reopen", json_value_object_from(reopen))]))
+    JsonValue.Array(rows)
+
+fn source_rendered_append_v1(rendered: [text], source: text, marker: text) -> [text]:
+    # Decorations live only after the complete source line; never inside it.
+    var rows = rendered
+    val lines = source.split("\n")
+    var index = 0
+    while index < lines.len():
+        if index + 1 == lines.len() and lines[index] == "": break
+        val last = index + 1 == lines.len() or (index + 2 == lines.len() and lines[index + 1] == "")
+        if last and marker != "": rows.push(lines[index] + "  " + marker)
+        else: rows.push(lines[index])
+        index = index + 1
+    rows
+
+fn source_intent_json_v1(resolution: SourceIntentResolutionV1) -> JsonValue:
+    var candidates: [JsonValue] = []
+    for candidate in resolution.candidates: candidates.push(JsonValue.Str(candidate))
+    json_value_object_from([
+        ("status", JsonValue.Str(resolution.status)),
+        ("target", JsonValue.Str(resolution.target)),
+        ("reason", JsonValue.Str(resolution.reason)),
+        ("candidates", JsonValue.Array(candidates))])
+
+fn source_structure_payload_v1(path: text, snapshot: SourceSnapshotV1,
+        outline: SourceOutlineV1, view: SourceStructuredViewV1,
+        query_key: text, result_identity: text, numbers: bool,
+        intent: SourceIntentResolutionV1, help: text,
+        hidden: [SourceHiddenNodeV1], summary: SourceHiddenSummaryV1, has_boundary: bool) -> Result<text, text>:
+    val bytes = text_to_utf8_bytes(view.projection.source_text)
+    val original = text_to_utf8_bytes(snapshot.source)
+    var segments: [JsonValue] = []
+    var rendered: [text] = []
+    for fold in view.folds:
+        if fold.node_index < 0: rendered.push("| + " + fold.label + " (" + str(fold.ranges.len()) + ")")
+    var position = 0
+    var original_position = 0
+    var line = 1
+    var index = 0
+    for span in view.projection.selected:
+        while original_position < span.start_byte:
+            if original[original_position] == 10: line = line + 1
+            original_position = original_position + 1
+        var selected: [u8] = []
+        val count = span.end_byte - span.start_byte
+        var copied = 0
+        while copied < count:
+            selected.push(bytes[position])
+            position = position + 1
+            copied = copied + 1
+        val source = match bytes_to_text_checked(selected):
+            case Ok(t): t
+            case Err(_): return Err("source_span_is_not_utf8")
+        val node_index = view.visible_nodes[index]
+        val node = outline.nodes[node_index]
+        segments.push(json_value_object_from([
+            ("node", JsonValue.Int(node_index)), ("name", JsonValue.Str(node.qualified_name)),
+            ("kind", JsonValue.Str(node.kind)), ("range", source_range_json_v1(span)),
+            ("first_line", JsonValue.Int(line)), ("source_text", JsonValue.Str(source)),
+            ("display_text", JsonValue.Str(source_display_lines_v1(source, line, numbers))),
+            ("expanded", JsonValue.Bool(source_view_node_expanded_v1(outline, view, node_index)))]))
+        rendered = source_rendered_append_v1(rendered, source, source_fold_marker_v1(outline, view, node_index))
+        index = index + 1
+    # Summary names what ran (syntax) and what is hidden in folds; it never
+    # claims "0 errors" for analysis that did not run.
+    var hidden_issues = 0
+    for fold in view.folds:
+        for span in fold.ranges: hidden_issues = hidden_issues + source_issues_within_v1(outline, span)
+    rendered.push("| syntax_issues:" + str(outline.total_issues) + " hidden:" + str(hidden_issues) + " (semantics not evaluated)")
+    # The in-band visibility hint: what the public view hides and the exact
+    # argument that reveals it (REQ-PUBVIEW-004).
+    if summary.hidden > 0: rendered.push("| " + source_hidden_hint_v1(summary, "source_open"))
+    rendered.push("| [ess] [adv]")
+    var folds: [JsonValue] = []
+    for fold in view.folds:
+        var ranges: [JsonValue] = []
+        for span in fold.ranges: ranges.push(source_range_json_v1(span))
+        folds.push(json_value_object_from([("label", JsonValue.Str(fold.label)),
+            ("node", JsonValue.Int(fold.node_index)), ("ranges", JsonValue.Array(ranges))]))
+    var omitted: [JsonValue] = []
+    for span in view.projection.omitted: omitted.push(source_range_json_v1(span))
+    var issues: [JsonValue] = []
+    for issue in outline.issues:
+        issues.push(json_value_object_from([("message", JsonValue.Str(issue.message)),
+            ("severity", JsonValue.Str(issue.severity)), ("range", source_range_json_v1(issue.span))]))
+    var limitations: [JsonValue] = []
+    for reason in outline.limitations: limitations.push(JsonValue.Str(reason))
+    limitations.push(JsonValue.Str("disk_snapshot_not_editor_overlay"))
+    limitations.push(JsonValue.Str("authenticated_agent_session_binding_unavailable"))
+    limitations.push(JsonValue.Str("workspace_ancestor_checks_not_race_proof_sandbox"))
+    limitations.push(JsonValue.Str("relevant_import_semantics_not_evaluated"))
+    limitations.push(JsonValue.Str("provider_build_provenance_unavailable; outline_result_identity_bound"))
+    val next_cursor = if view.next_index >= 0: query_key + ":" + str(view.next_index) else: ""
+    val intent_requested = intent.status != ""
+    # An intent that did not resolve to one block leaves the view partial by definition.
+    val partial = view.projection.completeness != "complete" or outline.syntax_status != "parsed" or
+        (intent_requested and intent.status != "resolved" and view.mode != "exhaustive")
+    var fields: [(text, JsonValue)] = [
+        ("schema_version", JsonValue.Int(1)), ("status", JsonValue.Str("ok")),
+        ("mode", JsonValue.Str(view.mode)), ("path", JsonValue.Str(path)),
+        ("snapshot_id", JsonValue.Str(snapshot.snapshot_id)),
+        ("provider_id", JsonValue.Str(outline.provider_id)),
+        ("provider_level", JsonValue.Str(outline.provider_level)),
+        ("outline_result_id", JsonValue.Str(result_identity)),
+        ("syntax_status", JsonValue.Str(outline.syntax_status)),
+        ("completeness", JsonValue.Str(view.projection.completeness)),
+        ("partial_context", JsonValue.Bool(partial)),
+        ("segments", JsonValue.Array(segments)), ("folds", JsonValue.Array(folds)),
+        ("omitted_ranges", JsonValue.Array(omitted)),
+        ("omission_ledger", source_omission_ledger_v1(outline, view, next_cursor, hidden)),
+        ("visibility", JsonValue.Str(summary.visibility)),
+        ("visibility_default", JsonValue.Str(visibility_default_reason(has_boundary))),
+        ("hidden_summary", source_hidden_summary_json_v1(summary, "source_open")),
+        ("selection_coverage", json_value_object_from([
+            ("selected_bytes", JsonValue.Int(bytes.len())), ("source_bytes", JsonValue.Int(original.len())),
+            ("analysis", JsonValue.Str("syntax_only"))])),
+        ("diagnostics", JsonValue.Array(issues)),
+        ("total_diagnostics", JsonValue.Int(outline.total_issues)),
+        ("next_cursor", JsonValue.Str(next_cursor)),
+        ("rendered", JsonValue.Str(rendered.join("\n"))),
+        ("limitations", JsonValue.Array(limitations)),
+        ("footer", JsonValue.Str("[ess] [adv]"))]
+    if view.mode == "exhaustive":
+        fields.push(("exhaustive_page_cap", json_value_object_from([
+            ("max_nodes", JsonValue.Int(64)), ("max_payload_bytes", JsonValue.Int(12288))])))
+    if intent_requested: fields.push(("intent_resolution", source_intent_json_v1(intent)))
+    if help == "ess": fields.push(("essential_help", JsonValue.Str(SOURCE_ESSENTIAL_HELP_V1)))
+    if help == "adv": fields.push(("advanced_help", source_advanced_help_v1()))
+    Ok(source_safe_json_v1(json_value_serialize(json_value_object_from(fields))))
+
+fn source_open_context_v1(body: text, numbers: bool, workspace_root: text, session_level: text) -> SourceOpenResultV1:
+    if str_len(body) > 4096: return source_result_error_v1("error", "request_too_large")
+    val arguments = match json_parse_value_strict(body):
+        Ok(value): value
+        Err(_): return source_result_error_v1("error", "invalid_json_arguments")
+    var mode = json_value_text_or(json_value_field(arguments, "mode"), "outline")
+    if mode != "raw" and mode != "outline" and mode != "focused" and mode != "exhaustive":
+        return source_result_error_v1("unsupported", "unsupported_source_mode")
+    val help = json_value_text_or(json_value_field(arguments, "help"), "")
+    if help != "" and help != "ess" and help != "adv":
+        return source_result_error_v1("unsupported", "unsupported_help_topic; only ess and adv are available")
+    val intent_text = json_value_text_or(json_value_field(arguments, "intent"), "")
+    if str_len(intent_text) > 512: return source_result_error_v1("error", "intent_too_long")
+    if intent_text != "" and mode == "raw":
+        return source_result_error_v1("unsupported", "intent_requires_structured_mode")
+    val path = json_value_text_or(json_value_field(arguments, "path"), "")
+    val file = match source_workspace_file_v1(path, workspace_root):
+        Ok(value): value
+        Err(reason): return source_result_error_v1("denied", reason)
+    val start_byte = match source_integer_argument_v1(arguments, "start_byte", 0):
+        Ok(value): value
+        Err(reason): return source_result_error_v1("error", reason)
+    val max_bytes = match source_integer_argument_v1(arguments, "max_bytes", 4096):
+        Ok(value): value
+        Err(reason): return source_result_error_v1("error", reason)
+    if max_bytes <= 0 or max_bytes > 8192:
+        return source_result_error_v1("error", "max_bytes_must_be_1_to_8192")
+    val expected = json_value_text_or(json_value_field(arguments, "snapshot_id"), "")
+    if start_byte > 0 and expected == "":
+        return source_result_error_v1("stale", "continuation_requires_snapshot_id")
+    val bytes = match file_read_regular_no_follow_bounded_bytes(file, 1048576):
+        Ok(value): value
+        Err(_): return source_result_error_v1("error", "bounded_regular_file_read_failed")
+    val source = match bytes_to_text_checked(bytes):
+        case Ok(t): t
+        case Err(_): return source_result_error_v1("unsupported", "source_is_not_utf8")
+    # Bind URI and full content identity independently, without ambiguous joins.
+    val snapshot_id = "sha256:" + sha256_text(file) + ":" + sha256_text(source)
+    if expected != "" and expected != snapshot_id:
+        return source_result_error_v1("stale", "source_snapshot_changed")
+    val snapshot = SourceSnapshotV1(snapshot_id, file, source)
+    if mode != "raw":
+        if not path.ends_with(".spl"):
+            return source_result_error_v1("unsupported", "native_structure_provider_unavailable_for_language; explicit raw mode remains available")
+        val full_outline = match source_load_native_outline_v1(snapshot):
+            Ok(value): value
+            Err(reason): return source_result_error_v1("error", reason)
+        # Public view: default `public` inside an __init__.spl boundary, `all`
+        # for an open module; hidden top-level nodes leave the outline and
+        # get an omission-ledger row each (REQ-PUBVIEW-001/006).
+        val has_boundary = nearest_boundary_dir(file) != ""
+        val requested_level = if session_level != "": session_level else: json_value_text_or(json_value_field(arguments, "visibility"), "")
+        val level = match visibility_level_or_error(requested_level, has_boundary):
+            Ok(value): value
+            Err(reason): return source_result_error_v1("unsupported", reason)
+        val symbols = source_visible_symbols_v1(full_outline, file)
+        val (hidden_indices, hidden_nodes) = source_hidden_nodes_v1(full_outline, symbols, level)
+        val summary = source_hidden_summary_v1(symbols, level, "", "")
+        val outline = source_outline_without_nodes_v1(full_outline, hidden_indices)
+        val depth = match source_integer_argument_v1(arguments, "depth", 1):
+            Ok(value): value
+            Err(reason): return source_result_error_v1("error", reason)
+        # Exhaustive keeps the same per-page caps (<=64 nodes, max_bytes, and the
+        # 12288-byte payload cap); it removes selection, not bounds.
+        val max_nodes = match source_integer_argument_v1(arguments, "max_nodes", 32):
+            Ok(value): value
+            Err(reason): return source_result_error_v1("error", reason)
+        var target = json_value_text_or(json_value_field(arguments, "target"), "")
+        for node in hidden_nodes:
+            if target != "" and (node.name == target or node.name.ends_with("." + target)):
+                return source_result_error_v1("unsupported", "target_hidden_by_visibility; reopen with visibility=\"" + node.visibility_class + "\"")
+        var intent = SourceIntentResolutionV1("", -1, "", "", [])
+        if intent_text != "":
+            if target != "": return source_result_error_v1("error", "intent_and_target_are_exclusive")
+            intent = source_outline_intent_v1(outline, intent_text)
+            # Exhaustive + intent: the intent is resolved and reported in
+            # intent_resolution, but never narrows the exhaustive walk.
+            if intent.status == "resolved" and mode != "exhaustive":
+                mode = "focused"
+                target = intent.target
+        val result_identity = source_outline_result_identity_v1(outline)
+        val query_key = sha256_text(json_value_serialize(JsonValue.Array([
+            JsonValue.Str(snapshot_id), JsonValue.Str(mode), JsonValue.Str(target),
+            JsonValue.Str(result_identity), JsonValue.Str(level),
+            JsonValue.Int(depth), JsonValue.Int(max_nodes), JsonValue.Int(max_bytes)])))
+        val cursor = json_value_text_or(json_value_field(arguments, "cursor"), "")
+        val start_index = match source_structure_cursor_v1(cursor, query_key, expected):
+            Ok(value): value
+            Err(reason): return source_result_error_v1("stale", reason)
+        val view = match source_project_structure_v1(snapshot, outline, mode, target, depth, start_index, max_nodes, max_bytes):
+            Ok(value): value
+            Err(reason): return source_result_error_v1("error", reason)
+        return match source_structure_payload_v1(path, snapshot, outline, view, query_key, result_identity, numbers, intent, help, hidden_nodes, summary, has_boundary):
+            Ok(payload): source_bounded_payload_v1(payload)
+            Err(reason): source_result_error_v1("unsupported", reason)
+    val projection = match source_project_raw_v1(snapshot, start_byte, max_bytes):
+        Ok(value): value
+        Err(reason): return source_result_error_v1("error", reason)
+    val payload = source_projection_payload_v1(path, projection)
+    # No second full raw source is hidden in structuredContent.
+    source_bounded_payload_v1(payload)
+
+pub fn source_open_result_v1(body: text) -> SourceOpenResultV1:
+    source_open_context_v1(body, false, path_absolute(cwd()), "")
+
+# source_open under a session view: `level` is the effective session or
+# per-request level ("" = the boundary default); it replaces `visibility`.
+pub fn source_open_level_result_v1(body: text, level: text) -> SourceOpenResultV1:
+    source_open_context_v1(body, false, path_absolute(cwd()), level)

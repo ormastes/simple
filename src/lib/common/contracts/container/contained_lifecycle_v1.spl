@@ -1,0 +1,50 @@
+# Host-neutral contained-workload lifecycle machine (extracted from the macOS
+# Seatbelt leaf; S0 of the pure-Simple container plan). Pure: no I/O, no host
+# names. A provider maps its own error prefix and facade actions onto these
+# semantic states and events.
+
+use std.common.contracts.container.runtime_v1.{RUNTIME_PHASE_PREPARED, RUNTIME_PHASE_CREATED,
+    RUNTIME_PHASE_RUNNING, RUNTIME_PHASE_EXITED, RUNTIME_PHASE_DESTROYED, RUNTIME_PHASE_UNKNOWN}
+
+pub const CONTAINED_STATE_VALIDATED_V1 = "validated"
+pub const CONTAINED_STATE_PREPARED_V1 = "prepared"
+pub const CONTAINED_STATE_LAUNCH_PENDING_V1 = "launch-pending"
+pub const CONTAINED_STATE_RUNNING_V1 = "running"
+pub const CONTAINED_STATE_STOPPING_V1 = "stopping"
+pub const CONTAINED_STATE_RETIRING_V1 = "retiring"
+pub const CONTAINED_STATE_ABSENT_V1 = "absent"
+pub const CONTAINED_STATE_CLOSED_V1 = "closed"
+pub const CONTAINED_STATE_OUTCOME_UNKNOWN_V1 = "outcome-unknown"
+pub const CONTAINED_STATE_QUARANTINED_V1 = "quarantined"
+
+# Returns the next semantic state or `invalid-transition-<state>-<event>`;
+# never invents an edge.
+pub fn contained_lifecycle_next_v1(state: text, event: text) -> Result<text, text>:
+    if state == CONTAINED_STATE_VALIDATED_V1 and event == "prepare": return Ok(CONTAINED_STATE_PREPARED_V1)
+    if state == CONTAINED_STATE_PREPARED_V1 and event == "launch": return Ok(CONTAINED_STATE_LAUNCH_PENDING_V1)
+    if state == CONTAINED_STATE_LAUNCH_PENDING_V1 and event == "admitted": return Ok(CONTAINED_STATE_RUNNING_V1)
+    if state == CONTAINED_STATE_LAUNCH_PENDING_V1 and event == "interrupted": return Ok(CONTAINED_STATE_OUTCOME_UNKNOWN_V1)
+    if state == CONTAINED_STATE_RUNNING_V1 and event == "stop": return Ok(CONTAINED_STATE_STOPPING_V1)
+    if state == CONTAINED_STATE_RUNNING_V1 and event == "leader-exit": return Ok(CONTAINED_STATE_RETIRING_V1)
+    if state == CONTAINED_STATE_STOPPING_V1 and event == "retire": return Ok(CONTAINED_STATE_RETIRING_V1)
+    if state == CONTAINED_STATE_RETIRING_V1 and event == "absence-proven": return Ok(CONTAINED_STATE_ABSENT_V1)
+    if state == CONTAINED_STATE_RETIRING_V1 and event == "uncertain": return Ok(CONTAINED_STATE_OUTCOME_UNKNOWN_V1)
+    if state == CONTAINED_STATE_OUTCOME_UNKNOWN_V1 and event == "exact-recovery": return Ok(CONTAINED_STATE_RETIRING_V1)
+    if state == CONTAINED_STATE_OUTCOME_UNKNOWN_V1 and event == "quarantine": return Ok(CONTAINED_STATE_QUARANTINED_V1)
+    if state == CONTAINED_STATE_ABSENT_V1 and event == "close": return Ok(CONTAINED_STATE_CLOSED_V1)
+    Err("invalid-transition-" + state + "-" + event)
+
+# Leader exit with unresolved descendants is EXITED, never DESTROYED.
+pub fn contained_runtime_phase_v1(state: text) -> text:
+    if state == CONTAINED_STATE_VALIDATED_V1 or state == CONTAINED_STATE_PREPARED_V1: return RUNTIME_PHASE_PREPARED
+    if state == CONTAINED_STATE_LAUNCH_PENDING_V1: return RUNTIME_PHASE_CREATED
+    if state == CONTAINED_STATE_RUNNING_V1 or state == CONTAINED_STATE_STOPPING_V1: return RUNTIME_PHASE_RUNNING
+    if state == CONTAINED_STATE_RETIRING_V1: return RUNTIME_PHASE_EXITED
+    if state == CONTAINED_STATE_ABSENT_V1 or state == CONTAINED_STATE_CLOSED_V1: return RUNTIME_PHASE_DESTROYED
+    RUNTIME_PHASE_UNKNOWN
+
+export contained_lifecycle_next_v1, contained_runtime_phase_v1
+export CONTAINED_STATE_VALIDATED_V1, CONTAINED_STATE_PREPARED_V1, CONTAINED_STATE_LAUNCH_PENDING_V1
+export CONTAINED_STATE_RUNNING_V1, CONTAINED_STATE_STOPPING_V1, CONTAINED_STATE_RETIRING_V1
+export CONTAINED_STATE_ABSENT_V1, CONTAINED_STATE_CLOSED_V1, CONTAINED_STATE_OUTCOME_UNKNOWN_V1
+export CONTAINED_STATE_QUARANTINED_V1

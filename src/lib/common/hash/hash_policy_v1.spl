@@ -1,0 +1,76 @@
+# Hash policy dispatch v1: named, fail-closed digest selection for the
+# container object store identity (doc/05_design/platform/container/simple_container_improvement.md,
+# architecture doc/04_architecture/platform/container/simple_container_improvement.md).
+#
+# A policy tag selects exactly one backend; a known policy never falls back
+# to a different algorithm, and an unknown tag returns status "unsupported"
+# with a precise reason. Every digest echoes the policy tag and the pinned
+# algorithm profile ("" when not applicable) so stored aliases can record
+# exactly what produced them.
+#
+# Backends (all pure-Simple, in-tree):
+#   xxh3-128   std.common.hash.xxh3.xxh3_128_hex      (16-byte digest, non-cryptographic)
+#   gxhash-128 std.common.hash.gxhash.gxhash128       (16 LE bytes, scalar port of gxHash 4.0.0, seed 0)
+#   blake3-256 std.common.crypto.blake3.blake3_hash   (32-byte digest)
+#   sha256     std.common.crypto.sha256.sha256_u8_fast_hex (32-byte digest, legacy SCV alias form)
+
+use std.common.hash.xxh3.{xxh3_128_hex}
+use std.common.hash.gxhash.{gxhash128}
+use std.common.crypto.blake3.{blake3_hash, blake3_hex}
+use std.common.crypto.sha256.{sha256_u8_fast_hex}
+use std.common.binary_inspect.{bytes_to_hex_canonical}
+
+pub const HASH_POLICY_V1_XXH3_128 = "xxh3-128"
+pub const HASH_POLICY_V1_GXHASH_128 = "gxhash-128"
+pub const HASH_POLICY_V1_BLAKE3_256 = "blake3-256"
+pub const HASH_POLICY_V1_SHA256_LEGACY = "sha256"
+pub const HASH_POLICY_V1_GXHASH_PROFILE = "gxhash-4.0.0-scalar"
+
+# GxHash seed is pinned to 0: the policy tag names one deterministic digest,
+# and callers cannot supply a seed through this interface.
+val _HASH_POLICY_V1_GXHASH_SEED: i64 = 0
+
+unit HashByteLenV1: i64
+unit HashPolicySupportedV1: bool
+export HashByteLenV1, HashPolicySupportedV1
+
+pub struct HashDigestV1:
+    policy: text        # echoed policy tag actually used
+    profile: text       # algorithm profile (e.g. gxhash pin), "" when not applicable
+    status: text        # "ok" | "unsupported"
+    reason: text        # fail-closed reason, "" on ok
+    hex: text           # lowercase digest hex; "" unless ok
+    byte_len: HashByteLenV1   # digest width in bytes; 0 unless ok
+
+fn _hash_policy_v1_ok(policy: text, profile: text, hex: text, byte_len: i64) -> HashDigestV1:
+    HashDigestV1(policy: policy, profile: profile, status: "ok", reason: "", hex: hex, byte_len: HashByteLenV1(byte_len))
+
+fn _hash_policy_v1_unsupported(policy: text, reason: text) -> HashDigestV1:
+    HashDigestV1(policy: policy, profile: "", status: "unsupported", reason: reason, hex: "", byte_len: HashByteLenV1(0))
+
+# gxhash128 yields 16 little-endian bytes; the digest identity is their
+# lowercase hex via the canonical owner (std.common.binary_inspect).
+fn _hash_policy_v1_u8s_to_i64s(data: [u8]) -> [i64]:
+    var out: [i64] = []
+    for x in data:
+        out.push(x.to_i64())
+    out
+
+pub fn hash_policy_v1_default() -> text:
+    HASH_POLICY_V1_XXH3_128
+
+pub fn hash_policy_v1_supported(policy: text) -> HashPolicySupportedV1:
+    val known = policy == HASH_POLICY_V1_XXH3_128 or policy == HASH_POLICY_V1_GXHASH_128 or policy == HASH_POLICY_V1_BLAKE3_256 or policy == HASH_POLICY_V1_SHA256_LEGACY
+    HashPolicySupportedV1(known)
+
+pub fn hash_policy_v1_digest(policy: text, bytes: [u8]) -> HashDigestV1:
+    if policy == HASH_POLICY_V1_XXH3_128:
+        return _hash_policy_v1_ok(policy, "", xxh3_128_hex(bytes), 16)
+    if policy == HASH_POLICY_V1_GXHASH_128:
+        val digest = gxhash128(bytes, _HASH_POLICY_V1_GXHASH_SEED)
+        return _hash_policy_v1_ok(policy, HASH_POLICY_V1_GXHASH_PROFILE, bytes_to_hex_canonical(_hash_policy_v1_u8s_to_i64s(digest)), 16)
+    if policy == HASH_POLICY_V1_BLAKE3_256:
+        return _hash_policy_v1_ok(policy, "", blake3_hex(blake3_hash(bytes)), 32)
+    if policy == HASH_POLICY_V1_SHA256_LEGACY:
+        return _hash_policy_v1_ok(policy, "", sha256_u8_fast_hex(bytes), 32)
+    _hash_policy_v1_unsupported(policy, "unknown hash policy '" + policy + "'; supported policies: xxh3-128, gxhash-128, blake3-256, sha256")

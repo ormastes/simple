@@ -1,4 +1,4 @@
-use std.common.bytes.concat_copy_v1.{bytes_concat_copy_v1}
+use compiler.backend.linker.smf_header.{smf_header_field_shift, smf_header_trailer_offset, SMF_SEED_HEADER_SIZE, SMF_VERSION_MINOR}
 # Simple App Startup Launch Metadata
 #
 # Pure policy helpers shared by CLI, build metadata checks, and SimpleOS launch
@@ -292,7 +292,7 @@ pub fn render_launch_metadata_sidecar(metadata: LaunchMetadata) -> text:
 fn _strip_metadata_quotes(value: text) -> text:
     val trimmed = value.trim()
     if trimmed.len() >= 2 and trimmed.starts_with("\"") and trimmed.ends_with("\""):
-        return trimmed.slice(1, trimmed.len() - 1)
+        return trimmed.slice(1, trimmed.byte_len() - 1)
     trimmed
 
 fn _metadata_value(line: text, key: text) -> text:
@@ -300,7 +300,7 @@ fn _metadata_value(line: text, key: text) -> text:
     val prefix = key + ":"
     if not trimmed.starts_with(prefix):
         return ""
-    _strip_metadata_quotes(trimmed.slice(prefix.len(), trimmed.len()))
+    _strip_metadata_quotes(trimmed.slice(prefix.len(), trimmed.byte_len()))
 
 pub fn parse_launch_metadata_sidecar(content: text, fallback_kind: text) -> LaunchMetadata:
     var metadata = launch_metadata_default(fallback_kind)
@@ -405,7 +405,7 @@ fn _strict_retained_metadata_text(value: text) -> [text]:
         return invalid
     # The renderer emits scalar quoted strings, not a second escaping grammar.
     # Refuse embedded quotes rather than accepting a different wire language.
-    val inner = value.slice(1, value.len() - 1)
+    val inner = value.slice(1, value.byte_len() - 1)
     if inner.contains("\""):
         return invalid
     [inner]
@@ -447,13 +447,13 @@ fn _strict_retained_payload(content: text, fallback_kind: text) -> StrictRetaine
         if not line.starts_with("  ") or line.starts_with("   "):
             return StrictRetainedLaunchPayload(ok: false, metadata: fallback,
                 reason: "launch_metadata_structure_invalid")
-        val body = line.slice(2, line.len())
+        val body = line.slice(2, line.byte_len())
         val colon = body.index_of(":")
         if colon <= 0 or colon + 2 > body.len() or body.slice(colon, colon + 2) != ": ":
             return StrictRetainedLaunchPayload(ok: false, metadata: fallback,
                 reason: "launch_metadata_structure_invalid")
         val key = body.slice(0, colon)
-        val value = body.slice(colon + 2, body.len())
+        val value = body.slice(colon + 2, body.byte_len())
         if key == "entry_kind":
             val parsed = _strict_retained_metadata_text(value)
             if saw_entry_kind or parsed.len() != 1 or
@@ -553,12 +553,21 @@ pub struct RetainedSmfLaunchMetadataV1:
 
 pub fn retained_smf_launch_metadata_v1(bytes: [u8], fallback_kind: text) -> RetainedSmfLaunchMetadataV1:
     val fallback = launch_metadata_default(fallback_kind)
-    if bytes.len() < 128:
+    if bytes.len() < SMF_SEED_HEADER_SIZE:
         return RetainedSmfLaunchMetadataV1(
             present: false, ok: false, metadata: fallback,
             reason: "smf_header_missing")
 
-    val header = bytes.len() - 128
+    # Trailer precedence shared with every reader: v1.3 96-byte header at
+    # EOF-96, legacy packed at EOF-128, Rust seed 1.1 at EOF-96; fields from
+    # offset 20 on carry the layout's shift (canonical decoder:
+    # compiler.backend.linker.smf_header).
+    val header = smf_header_trailer_offset(bytes)
+    if header < 0:
+        return RetainedSmfLaunchMetadataV1(
+            present: false, ok: false, metadata: fallback,
+            reason: "smf_header_missing")
+    val shift = smf_header_field_shift(bytes, header)
     if bytes[header] != 83 or bytes[header + 1] != 77 or bytes[header + 2] != 70 or bytes[header + 3] != 0:
         return RetainedSmfLaunchMetadataV1(
             present: false, ok: false, metadata: fallback,
@@ -570,7 +579,8 @@ pub fn retained_smf_launch_metadata_v1(bytes: [u8], fallback_kind: text) -> Reta
         return RetainedSmfLaunchMetadataV1(
             present: true, ok: false, metadata: fallback,
             reason: "smf_header_ambiguous")
-    if bytes[header + 4] != 1 or bytes[header + 5] != 1:
+    # v1.1 (packed or Rust seed), v1.2 (relocations), v1.3 (96-byte default).
+    if bytes[header + 4] != 1 or bytes[header + 5] < 1 or bytes[header + 5] > SMF_VERSION_MINOR:
         return RetainedSmfLaunchMetadataV1(
             present: false, ok: false, metadata: fallback,
             reason: "smf_version_unsupported")
@@ -578,16 +588,16 @@ pub fn retained_smf_launch_metadata_v1(bytes: [u8], fallback_kind: text) -> Reta
     # Raw table/section offsets are payload-relative in v1.1.  Keep the
     # conversion explicit so a wrapper stub cannot shift one table while the
     # section payload is checked against another coordinate system.
-    val stub_size = _launch_meta_le_u32(bytes, header + 52)
-    val data_offset = _launch_meta_le_u32(bytes, header + 56)
+    val stub_size = _launch_meta_le_u32(bytes, header + 52 + shift)
+    val data_offset = _launch_meta_le_u32(bytes, header + 56 + shift)
     if stub_size < 0 or data_offset < 0 or stub_size != data_offset or data_offset > header:
         return RetainedSmfLaunchMetadataV1(
             present: false, ok: false, metadata: fallback,
             reason: "smf_data_offset_invalid")
     val section_count = _launch_meta_le_u32(bytes, header + 16)
-    val section_table_raw = _launch_meta_le_u64(bytes, header + 20)
-    val symbol_table_raw = _launch_meta_le_u64(bytes, header + 28)
-    val symbol_count = _launch_meta_le_u32(bytes, header + 36)
+    val section_table_raw = _launch_meta_le_u64(bytes, header + 20 + shift)
+    val symbol_table_raw = _launch_meta_le_u64(bytes, header + 28 + shift)
+    val symbol_count = _launch_meta_le_u32(bytes, header + 36 + shift)
     val section_entry_size = 64
     if section_count <= 0:
         return RetainedSmfLaunchMetadataV1(
@@ -705,10 +715,8 @@ pub fn render_native_launch_metadata_trailer(metadata: LaunchMetadata) -> [u8]:
     val payload: [u8] = render_launch_metadata_sidecar(metadata).bytes()
     val payload_len: i64 = payload.len()
     var out: [u8] = []
-    # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-    out = bytes_concat_copy_v1(out, payload)
-    # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-    out = bytes_concat_copy_v1(out, [
+    out = out.concat(payload)
+    out = out.concat([
         _launch_meta_u64_byte(payload_len, 0),
         _launch_meta_u64_byte(payload_len, 8),
         _launch_meta_u64_byte(payload_len, 16),
@@ -718,8 +726,7 @@ pub fn render_native_launch_metadata_trailer(metadata: LaunchMetadata) -> [u8]:
         _launch_meta_u64_byte(payload_len, 48),
         _launch_meta_u64_byte(payload_len, 56)
     ])
-    # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-    out = bytes_concat_copy_v1(out, native_launch_metadata_trailer_magic())
+    out = out.concat(native_launch_metadata_trailer_magic())
     out
 
 pub fn has_native_launch_metadata_trailer(bytes: [u8]) -> bool:

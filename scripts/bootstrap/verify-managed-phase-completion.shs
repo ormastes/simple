@@ -66,6 +66,19 @@ case "$excluded_count" in ''|*[!0-9]*|0[0-9]*) die "excluded inventory count inv
   [ "$(field excluded_inventory_count)" = "$excluded_count" ] &&
   [ "$(field module_role_policy_sha256)" = "$(hash_file "$module_role_policy")" ] \
   || die "V3 module role ledger or policy differs"
+phase4_profile=${PHASE4_PROFILE:-prod}
+case "$phase4_profile" in
+  prod) phase4_suffix= ;;
+  dev) phase4_suffix=-dev ;;
+  *) die "invalid PHASE4_PROFILE: $phase4_profile (expected prod or dev)" ;;
+esac
+phase_namespace() {
+  if [ "$1" = phase4 ]; then
+    printf '%s\n' "phase4$phase4_suffix"
+  else
+    printf '%s\n' "$1"
+  fi
+}
 case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exe_suffix=.exe ;; *) exe_suffix= ;; esac
 for backend in llvm cranelift; do
   for binary in bootstrap full-cli interpreter mcp lsp test-runner phase3-bootstrap; do
@@ -78,7 +91,8 @@ for backend in llvm cranelift; do
       test-runner) task_phase=phase4; output="bin/simple_test_runner$exe_suffix" ;;
       phase3-bootstrap) task_phase=phase3; output="bin/simple$exe_suffix" ;;
     esac
-    job_root="$root/$task_phase/binaries/$backend/$binary"
+    task_phase_ns=$(phase_namespace "$task_phase")
+    job_root="$root/$task_phase_ns/binaries/$backend/$binary"
     published="$job_root/$output"
     manager_receipt="$job_root/state/receipts/$binary-$backend.sdn"
     manifest="$job_root/manifest.sdn"
@@ -96,7 +110,7 @@ for backend in llvm cranelift; do
       || die "$key compiled manager verification failed"
   done
 done
-aggregate_evidence=$(sh "$(dirname -- "$0")/lib/managed-phase-evidence.shs" \
+aggregate_evidence=$(PHASE4_PROFILE="$phase4_profile" sh "$(dirname -- "$0")/lib/managed-phase-evidence.shs" \
   "$root" "$builder_program" "$(field phase_admission_poll_ms)" "$(field phase_admission_lifetime_ms)") || die "aggregate phase authority rejected"
 while IFS='=' read -r key value; do
   [ "$(field "$key")" = "$value" ] || die "aggregate phase evidence differs: $key"
@@ -107,9 +121,10 @@ for key in source_authority_sha256 runtime_snapshot_sha256 tool_authority_sha256
   expected=$(field "$key") || die "$key absent"
   digest "$expected" && [ "$expected" = "$(image_field "$key")" ] || die "$key differs from manager image authority"
 done
+phase4_ns=$(phase_namespace phase4)
 for backend in llvm cranelift; do
   for suite in compiler loader interpreter; do
-    job="$root/phase4/tests/$backend/$suite"
+    job="$root/$phase4_ns/tests/$backend/$suite"
     result="$job/suite/result.env"
     manager_receipt="$job/state/receipts/test-$suite-$backend.sdn"
     regular "$result" && regular "$manager_receipt" && regular "$job/manifest.sdn" || die "$backend/$suite evidence missing"
@@ -135,12 +150,13 @@ for backend in llvm cranelift; do
   done
 done
 for task_phase in phase3 phase4; do
+  task_phase_ns=$(phase_namespace "$task_phase")
   for backend in llvm cranelift; do
-    index_job="$root/$task_phase/index/$backend"
+    index_job="$root/$task_phase_ns/index/$backend"
     index_receipt="$index_job/output/index-output/receipt.sdn"
     index_handoff="$index_job/handoff.sdn"
     index_manager_receipt="$index_job/state/receipts/index-$task_phase-$backend.sdn"
-    group_state="$root/$task_phase/modules/$backend/state"
+    group_state="$root/$task_phase_ns/modules/$backend/state"
     group_manifest="$group_state/manifest.sdn"
     group_ledger="$group_state/ledger.sdn"
     group_completion="$group_state/completion.json"

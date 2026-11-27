@@ -1,0 +1,114 @@
+# @req REQ-PUBVIEW-002 REQ-PUBVIEW-003 REQ-PUBVIEW-004 REQ-PUBVIEW-005 REQ-PUBVIEW-007
+# Pure projection shared by MCP source_open, the LSP server and the lsp-mcp
+# bridge: cumulative reveal levels, feature/layer selectors, and the hidden
+# summary whose counts equal what the next reveal level adds.
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.source.visibility_view.{SourceVisibleSymbolV1, SourceHiddenSummaryV1,
+    source_visibility_level_valid_v1, source_visibility_admits_v1, source_symbol_kind_group_v1,
+    source_selector_admits_v1, source_hidden_summary_v1, source_hidden_hint_v1,
+    source_hidden_summary_json_v1}
+use std.common.json.value.{JsonValue, json_value_field, json_value_text_or, json_value_items, json_value_serialize}
+
+fn fixture() -> [SourceVisibleSymbolV1]:
+    [SourceVisibleSymbolV1("x_core_api", "fn", "public", "feature_x", "10.core"),
+     SourceVisibleSymbolV1("x_core_shared", "fn", "feature_private", "feature_x", "10.core"),
+     SourceVisibleSymbolV1("XCoreType", "struct", "layer_private", "feature_x", "10.core"),
+     SourceVisibleSymbolV1("x_core_secret", "fn", "module_private", "feature_x", "10.core"),
+     SourceVisibleSymbolV1("y_app_api", "fn", "public", "feature_y", "20.app"),
+     SourceVisibleSymbolV1("Y_LIMIT", "binding", "layer_private", "feature_y", "20.app")]
+
+fn visible(symbols: [SourceVisibleSymbolV1], level: text, feature: text, layer: text) -> [text]:
+    var names: [text] = []
+    for symbol in symbols:
+        if source_visibility_admits_v1(symbol.visibility_class, level) and source_selector_admits_v1(symbol, feature, layer):
+            names.push(symbol.name)
+    names
+
+describe "visibility reveal levels":
+    it "accepts exactly the four cumulative levels":
+        step("valid levels")
+        expect(source_visibility_level_valid_v1("public")).to_equal(true)
+        expect(source_visibility_level_valid_v1("feature_private")).to_equal(true)
+        expect(source_visibility_level_valid_v1("layer_private")).to_equal(true)
+        expect(source_visibility_level_valid_v1("all")).to_equal(true)
+        step("declared classes are not reveal levels")
+        expect(source_visibility_level_valid_v1("module_private")).to_equal(false)
+        expect(source_visibility_level_valid_v1("")).to_equal(false)
+
+    it "each level adds exactly one class":
+        # @capture(names): visible names per level on the two-feature fixture
+        step("public shows only public")
+        expect(visible(fixture(), "public", "", "")).to_equal(["x_core_api", "y_app_api"])
+        step("feature_private adds the feature-private symbol")
+        expect(visible(fixture(), "feature_private", "", "")).to_equal(["x_core_api", "x_core_shared", "y_app_api"])
+        step("layer_private adds the layer-private symbols")
+        expect(visible(fixture(), "layer_private", "", "")).to_equal(["x_core_api", "x_core_shared", "XCoreType", "y_app_api", "Y_LIMIT"])
+        step("all adds the module-private symbol")
+        expect(visible(fixture(), "all", "", "").len()).to_equal(6)
+
+    it "groups declaration kinds into fn, method, type, field, const":
+        expect(source_symbol_kind_group_v1("function")).to_equal("fn")
+        expect(source_symbol_kind_group_v1("struct")).to_equal("type")
+        expect(source_symbol_kind_group_v1("enum")).to_equal("type")
+        expect(source_symbol_kind_group_v1("binding")).to_equal("const")
+        expect(source_symbol_kind_group_v1("method")).to_equal("method")
+        expect(source_symbol_kind_group_v1("field")).to_equal("field")
+
+describe "feature and layer selectors":
+    it "by-feature view keeps one feature across its layers":
+        expect(visible(fixture(), "all", "feature_x", "")).to_equal(["x_core_api", "x_core_shared", "XCoreType", "x_core_secret"])
+    it "by-layer view keeps one layer across features":
+        expect(visible(fixture(), "all", "", "20.app")).to_equal(["y_app_api", "Y_LIMIT"])
+    it "both selectors intersect":
+        expect(visible(fixture(), "all", "feature_y", "10.core")).to_equal([])
+
+describe "hidden summary":
+    it "counts match what the next reveal level returns":
+        # @capture(summary): by_class and by_kind for the public view
+        val summary = source_hidden_summary_v1(fixture(), "public", "", "")
+        expect(summary.visibility).to_equal("public")
+        expect(summary.hidden).to_equal(4)
+        val all_names = visible(fixture(), "all", "", "")
+        expect(summary.hidden).to_equal(all_names.len() - visible(fixture(), "public", "", "").len())
+        step("by class: 1 feature_private, 2 layer_private, 1 module_private")
+        expect(summary.by_class).to_equal([("feature_private", 1), ("layer_private", 2), ("module_private", 1)])
+        step("by kind")
+        expect(summary.by_kind).to_equal([("fn", 2), ("type", 1), ("const", 1)])
+        step("top names are the hidden names in order, capped at 5")
+        expect(summary.top_names).to_equal(["x_core_shared", "XCoreType", "x_core_secret", "Y_LIMIT"])
+        step("the next level that reveals something is feature_private")
+        expect(summary.next_level).to_equal("feature_private")
+
+    it "is empty but explicit when nothing is hidden":
+        val summary = source_hidden_summary_v1(fixture(), "all", "", "")
+        expect(summary.hidden).to_equal(0)
+        expect(summary.by_class.len()).to_equal(0)
+        expect(summary.next_level).to_equal("")
+
+    it "hint text names counts, classes, kinds and the exact reveal handles":
+        # @capture(hint): hint text for the lsp surface
+        val hint = source_hidden_hint_v1(source_hidden_summary_v1(fixture(), "public", "", ""), "lsp")
+        expect(hint.starts_with("⋯ 4 hidden (1 feature_private fn, 1 layer_private type, 1 module_private fn, 1 layer_private const)")).to_equal(true)
+        expect(hint.contains("lsp_symbols visibility=\"feature_private\"")).to_equal(true)
+        expect(hint.contains("initializationOptions.simple.visibility")).to_equal(true)
+        expect(hint.contains("workspace/executeCommand simple.setVisibility [\"feature_private\"]")).to_equal(true)
+        expect(hint.contains("visibility=\"all\"")).to_equal(true)
+        step("the source_open surface names its own argument")
+        val mcp = source_hidden_hint_v1(source_hidden_summary_v1(fixture(), "public", "", ""), "source_open")
+        expect(mcp.contains("source_open visibility=\"feature_private\"")).to_equal(true)
+        step("a layer_private view's next step is all")
+        val deeper = source_hidden_hint_v1(source_hidden_summary_v1(fixture(), "layer_private", "", ""), "lsp")
+        expect(deeper.starts_with("⋯ 1 hidden (1 module_private fn)")).to_equal(true)
+        expect(deeper.contains("visibility=\"all\"")).to_equal(true)
+
+    it "serializes the summary with structured reveal handles":
+        val json = source_hidden_summary_json_v1(source_hidden_summary_v1(fixture(), "public", "feature_x", ""), "lsp")
+        expect(json_value_field(json, "hidden")).to_equal(JsonValue.Int(3))
+        expect(json_value_text_or(json_value_field(json, "visibility"), "")).to_equal("public")
+        val reveal = json_value_field(json, "reveal")
+        expect(json_value_text_or(json_value_field(json_value_field(reveal, "mcp"), "visibility"), "")).to_equal("feature_private")
+        expect(json_value_text_or(json_value_field(json_value_field(reveal, "mcp"), "feature"), "")).to_equal("feature_x")
+        expect(json_value_text_or(json_value_field(json_value_field(reveal, "lsp"), "command"), "")).to_equal("simple.setVisibility")
+        expect(json_value_text_or(json_value_field(json, "hint"), "").starts_with("⋯ 3 hidden")).to_equal(true)
+        expect(json_value_items(json_value_field(json, "top_names")).len()).to_equal(3)

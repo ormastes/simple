@@ -1,0 +1,55 @@
+# Platform-independent invariant behind
+# doc/08_tracking/bug/zerokind_is_a_corrupt_aggregate_2026-09-03.md
+#
+# On aarch64-apple-darwin a seed-generated `Optional<struct> = nil` read back as
+# a NON-NIL zeroed aggregate (kind raw 0, disc=-1). Fixed in the Rust seed by
+# 2c89727c11c (emit_aggregate_block_copy). These assertions hold on every host,
+# including Windows x86_64; they must never regress.
+# TODO(p0f-3): the aarch64 repro itself needs a symbolized run on
+# aarch64-apple-darwin (Stage 3 reaching phase5:mode_dispatch with 0
+# E-MIR-TYPE-ZeroKind); it cannot be exercised on this host.
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+
+enum ZkSlot:
+    Let(name: text, ty: HirType?)
+
+fn zk_kind_bits(t: HirType) -> i64:
+    match t.kind:
+        case Int(bits, _): bits
+        case _: -1
+
+fn zk_make_none() -> HirType?:
+    None
+
+describe "ZeroKind: aggregate kind is never zero after construction":
+    it "keeps the constructed kind and span readable":
+        val t = HirType(kind: HirTypeKind.Int(bits: 32, signed: true), span: Span.empty())
+        expect(zk_kind_bits(t)).to_equal(32)
+        expect(t.span.line).to_equal(0)
+
+    it "reads a local Optional<HirType> = None back as None":
+        val direct: HirType? = None
+        expect(direct.is_none()).to_equal(true)
+        expect(zk_make_none().is_none()).to_equal(true)
+
+    it "reads a None Optional payload inside an enum variant back as None":
+        val slot = ZkSlot.Let(name: "x", ty: None)
+        var seen_none = false
+        match slot:
+            case Let(_, ty):
+                seen_none = ty.is_none()
+        expect(seen_none).to_equal(true)
+
+    it "reads None elements of [HirType?] back as None and a present one as valid":
+        val real = HirType(kind: HirTypeKind.Bool, span: Span.empty())
+        val xs: [HirType?] = [None, Some(real), None]
+        expect(xs[0].is_none()).to_equal(true)
+        expect(xs[2].is_none()).to_equal(true)
+        expect(xs[1].is_some()).to_equal(true)
+        match xs[1]:
+            case Some(v):
+                expect(zk_kind_bits(v)).to_equal(-1)
+            case _:
+                expect(false).to_equal(true)

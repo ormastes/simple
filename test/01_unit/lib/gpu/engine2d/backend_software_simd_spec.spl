@@ -33,14 +33,16 @@ describe "SoftwareBackend SIMD integration":
         it "AC-6: clear uses simd_fill_row when available":
             # @req REQ-SSPEC-LIB
             step("AC-6: clear uses simd_fill_row when available")
-            var backend = SoftwareBackend.create()
+            var backend = SoftwareBackend.create_cpu_simd()
             reset_simd_hits()
             if backend.init(64, 64):
                 backend.clear(0xFFFF0000)
                 val pixels = backend.read_pixels()
                 expect(pixels[0]).to_equal(0xFFFF0000)
                 expect(pixels[63]).to_equal(0xFFFF0000)
+                expect(pixels[4095]).to_equal(0xFFFF0000)
                 expect(simd_hit_counts().fill_hits).to_be_greater_than(0)
+                expect(simd_hit_counts().fill_hits).to_equal(1)
                 backend.shutdown()
 
         it "AC-6: clear produces same result with and without SIMD":
@@ -67,7 +69,7 @@ describe "SoftwareBackend SIMD integration":
         it "AC-6: blit uses simd_blit_row for row copies":
             # @req REQ-SSPEC-LIB
             step("AC-6: blit uses simd_blit_row for row copies")
-            var backend = SoftwareBackend.create()
+            var backend = SoftwareBackend.create_cpu_simd()
             reset_simd_hits()
             val src_pixels: [u32] = [0xFFFF0000; 16]
             if backend.init(64, 64):
@@ -178,7 +180,7 @@ describe "SoftwareBackend SIMD integration":
         it "AC-6: draw_rect_filled opaque spans record simd fill hits":
             # @req REQ-SSPEC-LIB
             step("AC-6: draw_rect_filled opaque spans record simd fill hits")
-            var backend = SoftwareBackend.create()
+            var backend = SoftwareBackend.create_cpu_simd()
             reset_simd_hits()
             if backend.init(64, 64):
                 backend.draw_rect_filled(4, 5, 16, 8, 0xFFFF0000)
@@ -190,7 +192,7 @@ describe "SoftwareBackend SIMD integration":
         it "AC-6: draw_rect_filled with alpha uses simd_blend_row":
             # @req REQ-SSPEC-LIB
             step("AC-6: draw_rect_filled with alpha uses simd_blend_row")
-            var backend = SoftwareBackend.create()
+            var backend = SoftwareBackend.create_cpu_simd()
             reset_simd_hits()
             if backend.init(64, 64):
                 backend.clear(0xFF0000FF)
@@ -230,10 +232,106 @@ describe "SoftwareBackend SIMD integration":
                 backend.shutdown()
 
 # ============================================================================
+# Contiguous chunked SIMD span fills (Wave C6)
+# ============================================================================
+
+    describe "contiguous chunked span fills":
+        it "collapses clear() at 512x512 (262144 px) to one SIMD fill dispatch":
+            var simd = SoftwareBackend.create_cpu_simd()
+            expect(simd.init(512, 512)).to_equal(true)
+            reset_simd_hits()
+            simd.clear(0xFF13579Bu32)
+            expect(simd_hit_counts().fill_hits).to_equal(1)
+            expect(simd.kernel_table.lookups).to_equal(1)
+            val pixels = simd.read_pixels()
+            expect(pixels[0]).to_equal(0xFF13579Bu32)
+            expect(pixels[131072]).to_equal(0xFF13579Bu32)
+            expect(pixels[262143]).to_equal(0xFF13579Bu32)
+            expect(simd.damage_rects(16)).to_equal([0, 0, 512, 512])
+            simd.shutdown()
+
+        it "bounds clear() and full-width draw_rect_filled() dispatches to ceil(pixels / 262144) across chunk seams":
+            var simd = SoftwareBackend.create_cpu_simd()
+            expect(simd.init(600, 500)).to_equal(true)
+            reset_simd_hits()
+            # 300,000 pixels -> ceil(300000 / 262144) = 2 chunks (not 500 row dispatches).
+            simd.clear(0xFF112233u32)
+            expect(simd_hit_counts().fill_hits).to_equal(2)
+            expect(simd.kernel_table.lookups).to_equal(2)
+            simd.present()
+            reset_simd_hits()
+            # Full-width unmasked band [y=10 .. y=490): 288,000 pixels -> 2 chunks (not 480).
+            simd.draw_rect_filled(0, 10, 600, 480, 0xFF445566u32)
+            expect(simd_hit_counts().fill_hits).to_equal(2)
+            expect(simd.kernel_table.lookups).to_equal(4)
+            val pixels = simd.read_pixels()
+            expect(pixels[0]).to_equal(0xFF112233u32)
+            expect(pixels[10 * 600 - 1]).to_equal(0xFF112233u32)
+            expect(pixels[10 * 600]).to_equal(0xFF445566u32)
+            expect(pixels[10 * 600 + 262143]).to_equal(0xFF445566u32)
+            expect(pixels[10 * 600 + 262144]).to_equal(0xFF445566u32)
+            expect(pixels[490 * 600 - 1]).to_equal(0xFF445566u32)
+            expect(pixels[490 * 600]).to_equal(0xFF112233u32)
+            expect(pixels[300000 - 1]).to_equal(0xFF112233u32)
+            simd.shutdown()
+
+        it "preserves exact pixels and sparse tile damage on partial-height full-width draw_rect_filled":
+            var scalar = SoftwareBackend.create()
+            var simd = SoftwareBackend.create_cpu_simd()
+            expect(scalar.init(128, 256)).to_equal(true)
+            expect(simd.init(128, 256)).to_equal(true)
+            scalar.clear(0xFF0A0B0Cu32)
+            simd.clear(0xFF0A0B0Cu32)
+            scalar.present()
+            simd.present()
+            reset_simd_hits()
+            # Negative x / excess w clamp to [0 .. 128), touching tile rows 1..=2 (<60% surface).
+            scalar.draw_rect_filled(-4, 70, 140, 60, 0xFF99AA00u32)
+            simd.draw_rect_filled(-4, 70, 140, 60, 0xFF99AA00u32)
+            expect(simd_hit_counts().fill_hits).to_equal(1)
+            expect(simd.read_pixels()).to_equal(scalar.read_pixels())
+            expect(simd.damage_rects(16)).to_equal(scalar.damage_rects(16))
+            scalar.shutdown()
+            simd.shutdown()
+
+        it "keeps x-clipped and masked draw_rect_filled pixel-exact against scalar":
+            var scalar = SoftwareBackend.create()
+            var simd = SoftwareBackend.create_cpu_simd()
+            expect(scalar.init(16, 6)).to_equal(true)
+            expect(simd.init(16, 6)).to_equal(true)
+            scalar.clear(0xFF102030u32)
+            simd.clear(0xFF102030u32)
+            scalar.present()
+            simd.present()
+            scalar.set_clip(3, 1, 10, 4)
+            simd.set_clip(3, 1, 10, 4)
+            reset_simd_hits()
+            scalar.draw_rect_filled(0, 0, 16, 6, 0xFFAA5533u32)
+            simd.draw_rect_filled(0, 0, 16, 6, 0xFFAA5533u32)
+            expect(simd_hit_counts().fill_hits).to_equal(4)
+            expect(simd.read_pixels()).to_equal(scalar.read_pixels())
+            expect(simd.damage_rects(16)).to_equal(scalar.damage_rects(16))
+            scalar.clear_clip()
+            simd.clear_clip()
+            var mask: [u8] = [255u8; 96]
+            mask[0] = 0u8
+            mask[17] = 0u8
+            mask[95] = 0u8
+            scalar.set_mask(mask, 16, 6)
+            simd.set_mask(mask, 16, 6)
+            scalar.draw_rect_filled(0, 0, 16, 6, 0xFF33AA55u32)
+            simd.draw_rect_filled(0, 0, 16, 6, 0xFF33AA55u32)
+            expect(simd.read_pixels()).to_equal(scalar.read_pixels())
+            expect(simd.damage_rects(16)).to_equal(scalar.damage_rects(16))
+            scalar.shutdown()
+            simd.shutdown()
+
+# ============================================================================
 # simd_span_batch_execute wiring (kernel_registry dispatcher, real call path)
 # ============================================================================
 #
-# clear() -> sw_fill_raw_span() -> simd_span_batch_execute() with a
+# clear() -> sw_fill_contiguous_range() -> sw_fill_raw_span() ->
+# simd_span_batch_execute() with a
 # CpuKernelTable that is honestly registered (bit-exact AND measured faster)
 # at ensure_kernel_table() time. `simd_batch_hits` accumulates
 # SpanOpBatch.non_scalar_lookups, which only increments inside
@@ -250,12 +348,14 @@ describe "SoftwareBackend SIMD integration":
             expect(pixels[0]).to_equal(0xFF224466u32)
             expect(pixels[63]).to_equal(0xFF224466u32)
             # `kernel_table.lookups` increments every time simd_span_batch_execute
-            # calls kernel_table_lookup — once per row cleared here — regardless of
+            # calls kernel_table_lookup — once per <=262144-pixel contiguous chunk
+            # cleared here (1 lookup for 64x64) — regardless of
             # which provider a slot resolves to. A nonzero count is proof the
             # dispatcher built in simd_isa_provider.spl was genuinely consulted by
             # a public-API Engine2D-level draw call, not just unit-tested in
             # isolation.
             expect(backend.kernel_table.lookups).to_be_greater_than(0)
+            expect(backend.kernel_table.lookups).to_equal(1)
             print("simd_batch_hits=" + backend.simd_batch_hits.to_text() +
                   " lookups=" + backend.kernel_table.lookups.to_text() +
                   " registrations=" + backend.kernel_table.registrations.to_text())

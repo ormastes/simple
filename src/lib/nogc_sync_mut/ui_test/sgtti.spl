@@ -5,7 +5,9 @@
 
 use common.ui.access.{ui_access_snapshot_from_state}
 use common.ui.access_types.{UiAccessNode, UiAccessProp, UiAccessSurface}
+use common.types.{Millis}
 use common.ui.draw_ir.{DrawIrBatch, DrawIrComposition, DrawIrCommand, DrawIrRect}
+use common.ui.id_suggest.{ui_id_suggestions, ui_id_suggestion_hint}
 use common.ui.widget.{UIState}
 use common.ui.win_text_access.{
     WinTextSnapshot,
@@ -19,11 +21,12 @@ use common.ui.win_text_access.{
 use os.compositor.compositor.{Compositor}
 use os.compositor.gtti.{gtti_snapshot_from_compositor}
 use os.compositor.host_compositor_entry.{HeadlessHostCompositorBackend}
+use std.common.types.{Count}
 val WM_MODE_HIDDEN: i32 = 1  # matches os.compositor.wm_core.WM_MODE_HIDDEN
 
-val UI_TEST_TARGET_TUI: text = "tui"
-val UI_TEST_TARGET_GUI: text = "gui"
-val UI_TEST_TARGET_BOTH: text = "both"
+pub val UI_TEST_TARGET_TUI: text = "tui"
+pub val UI_TEST_TARGET_GUI: text = "gui"
+pub val UI_TEST_TARGET_BOTH: text = "both"
 
 pub struct SgttiParityResult:
     ok: bool
@@ -59,12 +62,12 @@ fn _sgtti_parity_result(ok: bool, id: text, message: text, tui_found: bool, gui_
     )
 
 fn sgtti_snapshot_from_tui_state(state: UIState, captured_at_ms: i64, max_age_ms: i64, now_ms: i64) -> WinTextSnapshot:
-    win_text_simple_ui_snapshot(ui_access_snapshot_from_state(state, []), captured_at_ms, max_age_ms, now_ms)
+    win_text_simple_ui_snapshot(ui_access_snapshot_from_state(state, []), Millis(value: captured_at_ms), Millis(value: max_age_ms), Millis(value: now_ms))
 
 fn gui_test_snapshot(title: text, x: i32, y: i32, width: i32, height: i32, captured_at_ms: i64, now_ms: i64) -> WinTextSnapshot:
     var comp = Compositor.with_backends(HeadlessHostCompositorBackend.new(width, height), nil, width, height)
     comp.create_window(title, x, y, width, height)
-    gtti_snapshot_from_compositor(comp, WM_MODE_HIDDEN, captured_at_ms, now_ms)
+    gtti_snapshot_from_compositor(comp, WM_MODE_HIDDEN, Millis(value: captured_at_ms), Millis(value: now_ms))
 
 fn gui_test_snapshot_default(title: text) -> WinTextSnapshot:
     gui_test_snapshot(title, 0, 0, 640, 480, 1000, 1000)
@@ -84,9 +87,9 @@ fn sgtti_snapshot_from_draw_ir_batch(batch: DrawIrBatch, captured_at_ms: i64, ma
         source_kind: "in_process_semantic",
         confidence: "high",
         capabilities: ["query_text", "layout_read"],
-        captured_at_ms: captured_at_ms,
-        max_age_ms: max_age_ms,
-        now_ms: now_ms
+        captured_at_ms: Millis(value: captured_at_ms),
+        max_age_ms: Millis(value: max_age_ms),
+        now_ms: Millis(value: now_ms)
     )
     win_text_snapshot_from_parts(
         mode: "draw_ir",
@@ -111,9 +114,9 @@ fn sgtti_snapshot_from_draw_ir_composition(composition: DrawIrComposition, captu
         source_kind: "in_process_semantic",
         confidence: "high",
         capabilities: ["query_text", "layout_read"],
-        captured_at_ms: captured_at_ms,
-        max_age_ms: max_age_ms,
-        now_ms: now_ms
+        captured_at_ms: Millis(value: captured_at_ms),
+        max_age_ms: Millis(value: max_age_ms),
+        now_ms: Millis(value: now_ms)
     )
     var nodes: [UiAccessNode] = []
     for batch in composition.batches:
@@ -194,7 +197,7 @@ pub class SgttiTestDriver:
         Ok(self.snapshot.access.nodes)
 
     fn find_nodes(surface_id: text, kind: text, text_query: text, limit: i32) -> Result<[UiAccessNode], text>:
-        Ok(win_text_find_nodes(self.snapshot, surface_id, kind, text_query, limit))
+        Ok(win_text_find_nodes(self.snapshot, surface_id, kind, text_query, Count(value: limit)))
 
     fn click(id: text) -> Result<bool, text>:
         self._route_action(id, "click", "")
@@ -203,7 +206,7 @@ pub class SgttiTestDriver:
         self._route_action(id, "type_text", content)
 
     fn check_exists(id: text) -> Result<bool, text>:
-        Ok(self._find_node(id) != nil)
+        Ok(self._find_node(id).is_some())
 
     fn check_visible(id: text) -> Result<bool, text>:
         val node = self.get_element(id)?
@@ -247,6 +250,10 @@ pub class SgttiTestDriver:
             return Ok(true)
         Err(result.message)
 
+    # Legacy first-match lookup kept for compatibility only.
+    # It silently returns the FIRST node whose canonical_id (then widget_id)
+    # matches, hiding duplicates. New code must use resolve_strict(id),
+    # which errors on unknown ids (with suggestions) and on ambiguity.
     fn _find_node(id: text) -> UiAccessNode?:
         for node in self.snapshot.access.nodes:
             if node.canonical_id == id:
@@ -256,8 +263,78 @@ pub class SgttiTestDriver:
                 return node
         nil
 
+    # See _find_node comment: prefer resolve_strict(id) in new code.
     fn find_element(id: text) -> UiAccessNode?:
         self._find_node(id)
+
+    # Strict resolution over the UNION of both id tiers: a node matches when
+    # its canonical_id OR its widget_id equals `id`. The tiers are unioned
+    # BEFORE the cardinality decision, so a widget id that collides with a
+    # different node's canonical id is reported ambiguous rather than silently
+    # resolving — the arch doc's exactly-one-or-error law is absolute and
+    # tier-blind. 0 matches -> unknown-id error with <=3 suggestions.
+    # >1 matches -> ambiguity error listing all canonical ids. Never first-match.
+    fn resolve_strict(id: text) -> Result<UiAccessNode, text>:
+        var matches: [UiAccessNode] = []
+        for node in self.snapshot.access.nodes:
+            if node.canonical_id == id or node.widget_id == id:
+                matches = matches.push(node)
+        if matches.len() == 1:
+            return Ok(matches[0])
+        if matches.len() == 0:
+            return Err(_sgtti_unknown_id_message(id, self.snapshot.access.nodes))
+        var ids: text = ""
+        for m in matches:
+            if ids != "":
+                ids = ids + ", "
+            ids = ids + m.canonical_id
+        Err("ambiguous ui id: {id} ({matches.len()} matches: {ids})")
+
+    # Layout rect + center-point pointer anchor for a resolved node, read from
+    # the node's x/y/width/height props (present on draw_ir-sourced nodes).
+    # Nodes without those props return has_geometry=false — no invented geometry.
+    fn geometry(id: text) -> Result<SgttiGeometry, text>:
+        val node = self.resolve_strict(id)?
+        Ok(sgtti_node_geometry(node))
+
+# UIE1001 unknown-id text. Suggestions come from the ONE shared algorithm in
+# std.common.ui.id_suggest (edit distance <= 2, containment fallback, deduped,
+# sorted, <= 3) so this diagnostic and the manifest-side resolver's UIE1001
+# never disagree. Candidates are both id tiers: widget ids and canonical ids.
+fn _sgtti_unknown_id_message(id: text, nodes: [UiAccessNode]) -> text:
+    var candidates: [text] = []
+    for node in nodes:
+        candidates = candidates.push(node.widget_id)
+        candidates = candidates.push(node.canonical_id)
+    val suggestions = ui_id_suggestions(id, candidates)
+    val hint = ui_id_suggestion_hint(suggestions)
+    if nodes.len() == 0:
+        return "unknown ui id: {id} (snapshot has no nodes)"
+    if hint == "":
+        return "unknown ui id: {id} (no similar id in snapshot)"
+    "unknown ui id: {id}; did you mean: {hint}"
+
+pub struct SgttiGeometry:
+    has_geometry: bool
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    center_x: i32
+    center_y: i32
+
+fn sgtti_node_geometry(node: UiAccessNode) -> SgttiGeometry:
+    val xs = _sgtti_prop_value(node, "x")
+    val ys = _sgtti_prop_value(node, "y")
+    val ws = _sgtti_prop_value(node, "width")
+    val hs = _sgtti_prop_value(node, "height")
+    if xs == "" or ys == "" or ws == "" or hs == "":
+        return SgttiGeometry(has_geometry: false, x: 0, y: 0, width: 0, height: 0, center_x: 0, center_y: 0)
+    val x = xs.to_i32()
+    val y = ys.to_i32()
+    val w = ws.to_i32()
+    val h = hs.to_i32()
+    SgttiGeometry(has_geometry: true, x: x, y: y, width: w, height: h, center_x: x + w / 2, center_y: y + h / 2)
 
 fn expect_draw(driver: SgttiTestDriver, id: text, assertion: text) -> Result<bool, text>:
     driver.expect_draw(id, assertion)

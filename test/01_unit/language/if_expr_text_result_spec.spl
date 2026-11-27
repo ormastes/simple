@@ -1,0 +1,78 @@
+# Purpose and audience: language engineers owning if/match expression results
+# whose arms mix a `?` payload with plain text.
+# @req REQ-SSPEC-COMPILER
+"""
+# An if expression yielding text interpolates as text, never as a handle
+
+Bug if_expression_text_result_erased_to_i64_2026-10-25: the merge slot of a
+nested if whose inner arm is `strict_dir()?` was typed i64, so `"{d}/x.c"`
+rendered the text handle as a decimal. Each case evaluates the
+runtime_compiler shape and its siblings and checks the interpolated text.
+"""
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl
+# @tag:unit
+# @tag:language
+use std.spec.{describe, it, expect}
+
+fn strict_dir() -> Result<text, text>:
+    Ok("strict")
+
+fn find() -> text:
+    "found"
+
+fn maybe_dir() -> text?:
+    Some("maybe")
+
+fn pick_nested(strict: bool, env: bool) -> Result<text, text>:
+    val d = if strict:
+        (if env: strict_dir()? else: find())
+    else:
+        find()
+    Ok("{d}/runtime_native.c")
+
+fn pick_flat(env: bool) -> Result<text, text>:
+    val d = if env: strict_dir()? else: find()
+    Ok("{d}/runtime_native.c")
+
+fn pick_match(k: i64) -> Result<text, text>:
+    val d = match k:
+        case 0: strict_dir()?
+        case _: find()
+    Ok("{d}/runtime_native.c")
+
+fn pick_elif(k: i64) -> Result<text, text>:
+    val d = if k == 0:
+        find()
+    elif k == 1:
+        strict_dir()?
+    else:
+        return Err("none")
+    Ok("{d}/runtime_native.c")
+
+fn pick_option(env: bool) -> text?:
+    val d = if env: maybe_dir()? else: find()
+    Some("{d}/runtime_native.c")
+
+describe "if expression text result (runtime_compiler rt_dir shape)":
+    it "nested if with inner `?` arm keeps text in every branch":
+        expect(pick_nested(true, true).unwrap()).to_equal("strict/runtime_native.c")
+        expect(pick_nested(true, false).unwrap()).to_equal("found/runtime_native.c")
+        expect(pick_nested(false, true).unwrap()).to_equal("found/runtime_native.c")
+
+    it "flat if with a `?` arm keeps text":
+        expect(pick_flat(true).unwrap()).to_equal("strict/runtime_native.c")
+        expect(pick_flat(false).unwrap()).to_equal("found/runtime_native.c")
+
+describe "sibling expression shapes (prevention)":
+    it "match expression with a `?` arm keeps text":
+        expect(pick_match(0).unwrap()).to_equal("strict/runtime_native.c")
+        expect(pick_match(7).unwrap()).to_equal("found/runtime_native.c")
+
+    it "elif chain with a `?` arm and an early return keeps text":
+        expect(pick_elif(0).unwrap()).to_equal("found/runtime_native.c")
+        expect(pick_elif(1).unwrap()).to_equal("strict/runtime_native.c")
+        expect(pick_elif(2).is_err()).to_equal(true)
+
+    it "Option `?` arm merged with text keeps text":
+        expect(pick_option(true).unwrap()).to_equal("maybe/runtime_native.c")
+        expect(pick_option(false).unwrap()).to_equal("found/runtime_native.c")

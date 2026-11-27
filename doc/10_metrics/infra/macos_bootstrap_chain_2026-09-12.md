@@ -2119,3 +2119,20 @@ rather than 139 under the Stage 3 binary; and the F78 spec
 `test/01_unit/compiler/option_none_runtime_discriminant_spec.spl` green under
 the same binary. Any failure is reported verbatim, and a MIR/Option frame is
 explicitly not grounds to revert #987.
+
+
+## 2026-11-09 — process sentinel model contract correction
+
+The September 13 entry above records historical `process-rust-twin` feature
+checks. The current Cargo manifest does not declare that feature, and the
+runtime build always includes the C process provider. The C implementation is
+the sole owner of the eleven Process Owned V3 / Process Observation V4
+SplArray/scalar ABI exports in all supported feature configurations.
+
+The Rust unavailable-sentinel helpers now compile only as private, Rust-mangled
+`cfg(test)` models. Their existing sentinel test runs in ordinary test builds;
+it checks documented unavailable values, not the C provider or process behavior.
+The three existing exported signal-injection hooks remain unchanged. No new
+runtime feature or alternative ABI provider is introduced. The source-based
+dual-implementation census still sees the helper names, which does not prove
+linked provider parity or two executable implementations.

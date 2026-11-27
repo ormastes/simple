@@ -1,0 +1,69 @@
+# Imported record return declarations disagree at MIR match ownership
+
+Status: TARGETED NATIVE PASS after the final owner-proof repair. Exact changed-producer Hello and all three retained record-owner regressions pass. Broader CLI/unit verification remains open; this is not general compiler admission.
+
+The phase2 compiler `/tmp/scv-phase2-current-rebase-20261027/phase2/simple` (SHA-256 `9d202a662186f5e478381465ca357f259a84a5910285256a0945c2577fb2f73f`, compiler source `5b04d099c7891b4ed0396e80e5c3e56f4310e741`) rejects a two-module imported Optional record match. The same compiler compiles and executes a local Optional i64 control, printing `42` and exiting zero. The original RR publication fixture reaches 71 MIR modules, with 59 successful and 12 failed; this report does not claim that one repair clears all independent owner-graph diagnostics.
+
+Evidence root: `/tmp/retained-enum-owner-20261027`. `primitive/result.sdn` is the successful control; `imported/compile.log` retains the minimal failing operation. Both use the recorded bootstrap hosted runtime authority and bounded process-tree supervision (300 seconds, 4 GiB). The guard reports `enum match expression and retained Result/Optional declarations conflict` at the imported fixture's direct `match maybe()`.
+
+The final debugger observation (`owner-keys-complete/gdb.log`) records the retained key as `optional(struct(<exact provider>::Payload)[])` and the expression key as `i64`. The earlier two debugger configurations stopped on shell helper termination before MIR and are diagnostic harness attempts, not compiler-test results.
+
+The initial source hypothesis was a missing native integration path. `enum_match_expr_type` queries the return-type interface before raw callee metadata. Full HIR prescan publishes provider RTI rows, but native compilation uses body-free `MirHirModuleDeclarationsV1` providers. `prescan_declaration_callables_v1` had an explicit TODO for their RTI registration. This missing hook is a source defect, but the fresh-producer trace below shows that the minimal failing native path uses full HIR rows instead. It does not establish that the hook is the root cause of this failure. Call lowering separately retains the exact Optional record owner. The existing conflict guard correctly refuses those incompatible declarations.
+
+The proposed repair adds a shared body-free callable-signature API in the HIR RTI owner and publishes compact provider rows before consumer MIR. It keeps provider-owned SymbolIds on the provider side, transports stable DeclRef identity, and binds into the consumer table through the existing RTI binder. Full HIR and compact declarations share the same row conversion. It preserves generic parameter ordering, explicit annotation rules, and the existing mismatch/ambiguity guards. No RR consumer workaround or guard relaxation is included.
+
+Authored regressions cover body-free/full-HIR Optional record row equality and symbolic generic preservation; `test/fixtures/compiler/retained_optional_owner/imported.spl` is the actual executable regression. The local primitive control is retained and must not be rerun unchanged. These new source regressions have not been executed against the repair: the currently frozen compiler predates it. Qualification requires a new producer, its exact Hello compile/run gate, then the failing imported fixture with expected output `42` and zero exit. Only after that should the RR owner attempt one changed producer-bound fixture build. Preserve all original failed receipts.
+
+## TDD evidence and remaining green gate
+
+The original `imported.spl` Optional record regression failed on the old exact compiler before the repair was written; its successful local primitive control is retained without a rerun. Additional independently executed old-producer cases now live under `/tmp/retained-enum-owner-tdd-red-20261027`:
+
+- `result_record`: RED with the same imported Result/retained declaration conflict.
+- `duplicate_owners`: RED at both calls; two distinct provider modules each declare `Payload`.
+- `generic_owner`: RED earlier at method lookup, `E-RTI-004: no local symbol for id 1125899906842624`. This independent generic nominal-ID boundary is not claimed repaired by the compact registration change.
+
+`test/01_unit/compiler/mir/declaration_return_types_v1_spec.spl` adds three direct compact-prescan integration examples. It projects actual encoded HIR bytes through the existing transient owner and calls the production compact callable prescan. It covers Optional/Result rows, same-named provider declarations in separate symbol tables, and owner generic method parameter retention. These are authored, not executed; they are distinct from the converter-only tests.
+
+Green qualification remains OPEN. Freeze the reviewed source into a new producer; verify that exact producer with real Hello execution; then execute the previously red imported Optional, Result, and duplicate-owner fixtures and collect the generic case's actual new boundary. Each fixture expects `42\n` and exit zero. Record raw process results and exact producer/runtime/fixture hashes. No old compiler rerun, helper row equality, source review, or existing unrelated Hello receipt establishes green for this change.
+
+## Fresh producer and falsified hypothesis
+
+Reviewed source `6398a9267990d4b0aefaef0657c17c6f880a1c5b`, including landed cache-host ABI repair, produced a fresh bootstrap-only seed `71572589a7bdf2a08b3c9fcd38e5b3b91fca525f011c7612dab556fdddb167ea` and phase2 compiler `c70346b83ee5e101c9721f9943591cd2b5852f99fef64c65b7882d5eb43dbecd`. The exact phase2 Hello compile/run passed. All four retained imported regressions still failed at the same boundaries, including the separate generic synthetic-ID failure. Evidence is under `/tmp/simple-retained-rti-producer-20261027/{phase2,qualification}`. This producer is diagnostic, not admitted; the patch is not ready to land.
+
+The finite `diagnose-row-origin` observation is terminal and quiescent. It records zero compact-prescan hits, four full signature-row publications in total, and two RTI query entries inside the failing match-subject owner. Therefore the early explicit-expression-type bypass is not the observed path. Retained owner remains Optional<provider::Payload>, while expression ownership remains i64. The attempted expression field decode assumed a runtime-object header, whereas native HirExpr is headerless; it does not prove the presence bit. The existing trace cannot distinguish a wrong RTI row from transport or missing-row fallback.
+
+A new, distinct local ABI control `rti_transport_control.spl` passed on that exact c703 compiler, printing `direct=42\ntuple=42\n` and exiting zero. It checks Result<Record> extraction followed by `(bool, Optional<Record>)` transport with an enum payload. This narrows a universal carrier failure; it does not qualify the RTI implementation. Evidence is `transport-control/result.sdn`.
+
+The next producer changes diagnostics only: opt-in `SIMPLE_RTI_DIAGNOSTICS=1` retains bounded canonical resolved RTI term and bound HirType key before tuple transport, then includes caller expression/retained keys on the existing conflict. The ordinary diagnostic and rejecting condition remain unchanged. No fallback override is justified before those facts are available.
+
+## Qualified NamedVar identity repair
+
+The reviewed diagnostic snapshot `512fce93f5f` rebuilt three modules and reused 1601 with unchanged content/compiler/target/interface-slice cache keys. Its compiler `ba3a8b2cf6597338e0219a1b4cf4be052fdc3751afceb23a089b37489f2afcab` passed exact Hello execution, then retained the imported failure with `resolved=b:i64; bound_before_tuple=i64`. Thus the wrong scalar exists before the RTI binder and tuple transport. Evidence is `phase2-diagnostic` and `diagnostic-qualification/imported` under the same producer evidence root.
+
+HIR `expression_core.spl` deliberately carries the qualified callable name in NamedVar because symbol-table renames do not reliably survive the pass boundary; native call lowering already honors that name. RTI `fn_return` instead ignored the carried name whenever a nonnegative raw module-local symbol id existed. This can select an unrelated local callable row such as main's i64 return. The retained text HIR artifact contains the exact provider-qualified maybe name.
+
+The next narrow repair gives a fully qualified carried free-call identity an exact canonical module/decl lookup before raw ids. It does not let consumer aliases rewrite an exact carried declaration and never scans suffix matches. A missing exact qualified row permits the existing unknown-row behavior only when the raw Function proves the identical canonical defining module and declared name; otherwise it is a loud missing-interface error rather than permission to select a different raw symbol. Local Var and unqualified/wildcard behavior remain on their existing route. New authored unit regressions cover a deliberate raw-id collision, missing owner with a matching sibling leaf, alias conflicts, and wildcard ambiguity. They are not yet runtime-qualified. The original imported native RED remains the end-to-end test; the guard stays enabled.
+
+## Semantic declaration versus physical bootstrap ABI
+
+The qualified-name snapshot `cacd82cf0ec` produced compiler `6defea35245364eaed967591d8c3b4c6d40a38d94d3ef8fd9709ac7a19e3c676` with three rebuilt and 1601 reused modules. Its exact Hello passed. The generic-owner regression now passed with `42\n` and exit zero; preserve that new green. Imported Optional, Result, and duplicate-owner regressions still failed with the scalar term already present before bind/tuple. No admission or landing was claimed.
+
+Offline schema-aligned inspection found that the provider's retained HirFunction `maybe` itself encodes Int(64,true), despite source `-> Payload?`. The symbol's declared Function type retains Optional<Payload>. Proof is `qualified-name-qualification/semantic-abi-split.sdn`, bound to the exact cached HIR hash. This is not a guessed debugger layout.
+
+The producer is `hir_lowering/_Items/declaration_lowering.spl`: in ambient bootstrap mode, its annotation branch preserves only text, bool, float, and unit in the physical HirFunction return; other types use the legacy i64 ABI fallback. Its comment cites an earlier array/strlen crash when this physical convention was widened indiscriminately. `module_callable_types.spl::declared_callable_type` separately preserves the semantic annotation. The codec faithfully writes the already-erased field, so changing its decoder is unjustified.
+
+The next narrow source repair keeps the physical ABI intact. RTI obtains a semantic return from the provider-owned Function symbol when its callable identity is verified; unresolved declared types stay unresolved, and generic signatures without a typed symbol retain their existing signature fallback. Full HIR and compact declaration publication share this policy. Regressions reproduce the observed physical-i64/semantic-Optional or Result split and assert publication does not mutate the physical field. Actual green still requires the changed producer and the three retained red native cases. The successful generic control will not be rerun unchanged.
+
+## Ownerless qualified predeclaration clone
+
+The semantic-selector snapshot `1c8132a5952` produced compiler `33578986328037c38923d3e4dd2a7f8bb68807c9ace7edba5b4eba670a7ecce8`, with four rebuilt and 1600 reused modules. Exact Hello passed; all three remaining red cases still failed with resolved i64. No unchanged green was rerun.
+
+Independent schema-aligned inspection explains why the selector did not apply: HirFunction.symbol is 2; that qualified predeclaration symbol has the correct semantic Function return but no defining_module. The original bare symbol 1 retains the provider path. `module_build.spl` creates this qualified clone with a nil owner, then renames it; this is a known representation, not codec corruption. The selector's nonempty-owner precondition rejected it and kept the physical return.
+
+The final permitted repair attempt passes enclosing provider identity into semantic selection. An explicit defining_module remains authoritative. An ownerless clone must carry an exact qualified free-call prefix equal to the enclosing provider's canonical module, with the same declaration leaf; a mismatch produces an error, never a borrowed declaration. Full HIR and actual compact-projection regressions now reproduce the qualified-name/nil-owner state, plus a wrong-enclosing-provider rejection. No physical ABI or match guard changes are made. Preserve the feature iteration cap: no further retry after this attempt.
+
+## Final targeted red-to-green result
+
+Frozen source `aeae829519e` produced phase2 compiler `8d21317328ccb2b32ba707d2485c3c8ca6c4d02592952537e7754a6d006cb116`; four modules rebuilt, 1600 reused, zero failures, with previous outputs and caches preserved. That exact compiler passed real Hello and the three still-red native regressions: imported Optional record, Result record, and duplicate nominal owners. Each regression executed its actual emitted program, printed `42\n`, produced empty stderr, and exited zero. The final runner ended successfully and no further repair cycle is permitted.
+
+Machine-readable provenance and actual artifact/receipt hashes are in `retained_return_owner_tdd_2026_10_27.sdn`; raw evidence remains under `/tmp/simple-retained-rti-producer-20261027/owner-proof-qualification`. The earlier generic-owner green belongs to compiler 6def and was not rerun or used to admit the final compiler. Full CLI check/test gates and authored unit-spec execution remain open because the expected self-hosted CLI runtime is absent. No seed substitution, physical ABI widening, guard relaxation, or unrelated qualification is claimed.

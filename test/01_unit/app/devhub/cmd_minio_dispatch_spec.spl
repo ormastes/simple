@@ -1,0 +1,51 @@
+# @req REQ-SSPEC-UNIT
+# devhub minio command dispatch: usage/auth failures only, never reaches a server.
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use app.devhub.cmd_minio.{handle_minio, _require_transport, _require_auth}
+use app.devhub.adapter_minio.{MinioConfig}
+
+describe "handle_minio dispatch":
+    it "returns 0 for no arguments":
+        step("dispatch empty args")
+        expect(handle_minio([])).to_equal(0)
+
+    it "returns 0 for help spellings":
+        step("dispatch help, --help, -h")
+        expect(handle_minio(["help"])).to_equal(0)
+        expect(handle_minio(["--help"])).to_equal(0)
+        expect(handle_minio(["-h"])).to_equal(0)
+
+    it "returns 1 for an unknown subcommand":
+        step("dispatch bogus")
+        expect(handle_minio(["bogus"])).to_equal(1)
+
+    it "returns 1 for subcommands lacking operands or auth":
+        step("dispatch each subcommand with no operands")
+        for sub in ["get", "put", "stat", "presign", "presign-put", "mb", "rb", "rm"]:
+            expect(handle_minio([sub])).to_equal(1)
+
+describe "minio config guards":
+    it "rejects tls_skip_verify in the transport guard":
+        step("build config with tls_skip_verify")
+        val cfg = MinioConfig(url: "http://x", region: "r", access_key: "a", secret_key: "s", tls_skip_verify: true)
+        expect(_require_transport(cfg)).to_equal(false)
+
+    it "accepts a normal config in the transport guard":
+        step("default config")
+        expect(_require_transport(MinioConfig.default())).to_equal(true)
+
+    it "rejects an unconfigured config in the auth guard":
+        step("default config lacks credentials")
+        expect(_require_auth(MinioConfig.default())).to_equal(false)
+
+    it "rejects tls_skip_verify even with credentials":
+        step("full creds plus skip verify")
+        val cfg = MinioConfig(url: "http://x", region: "r", access_key: "a", secret_key: "s", tls_skip_verify: true)
+        expect(_require_auth(cfg)).to_equal(false)
+
+    it "accepts a fully credentialed config in the auth guard":
+        step("full creds")
+        val cfg = MinioConfig(url: "http://x", region: "r", access_key: "a", secret_key: "s", tls_skip_verify: false)
+        expect(_require_auth(cfg)).to_equal(true)

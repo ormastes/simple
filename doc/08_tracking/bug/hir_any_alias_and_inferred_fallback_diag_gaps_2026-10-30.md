@@ -1,0 +1,156 @@
+# HIR frontend diagnostics: Any-alias message and cross-module inferred fallback (2026-10-30)
+
+Status: open
+Area: compiler/35.semantics/lint/hir_frontend_diagnostics.spl
+
+## 2026-11-07 source investigation and narrow repair
+
+Any-alias repair authored; runtime qualification **NOT_RUN**. The current
+`hir_lowering/statements.spl` transports initializer types through
+`binding_payload_type` into the non-optional `HirStmtKind.Let` type slot even
+without a source annotation. Consequently `any_note_let` took its `Any` branch
+and returned before recording the alias. It now retains immediate alias origin
+when the written-Any scanner does not identify an explicit annotation. Typed
+use reporting prefers that specific alias origin over a generic pending reason.
+The original alias regression is enabled, with chained-alias and explicit-Any
+negative cases. This does not establish an executed PASS or close this issue.
+
+Cross-module fallback remains open and its pending cases are unchanged.
+`note_let` likewise treats every non-`Infer` binding payload as an annotation;
+the canonical direct-call binding transport can supply `Any`, `Error`, or a
+named return type without an annotation. Independently, imported callable
+projection now resolves qualified type symbols in
+`hir_lowering/_Items/module_callable_types.spl`; older assumptions about a
+third-module type necessarily being erased must be checked against actual HIR
+layout authority. A follow-up needs explicit source-annotation provenance (or
+another canonical annotation receipt), plus resolved versus genuinely missing
+foreign-layout controls. Removing the annotation guard alone would regress
+the annotated-binding exclusion. No HIR schema or codec change is included in
+this narrow repair.
+
+### Annotation provenance follow-up (authored, NOT_RUN)
+
+The approved follow-up retains `local_annotation_provenance: Dict<i64, bool>`
+on `HirModule`, keyed by the canonical local `SymbolId.id`. True means an
+explicit AST annotation, false means an inferred declaration, and absence is
+unknown. `hir_local_annotation_state` returns 1/0/-1 respectively. No module
+completeness flag is asserted. The four ordinary val/var lowering branches
+record their actual `has_annotation` decision after symbol definition;
+synthetic and destructured binders without a proven receipt remain unknown.
+The map resets at module lowering entry, is copied into both module-build
+outputs, and is copied independently by method resolution and the finite HM
+typed-module owner. Synthetic empty/layout-only modules default to unknown.
+The codec owner separately updates both formats and their cache admission
+versions; old-cache absence is not evidence of an inferred declaration.
+
+`note_let` now classifies only proven inferred declarations, and local Any
+alias handling uses the same exact metadata. The pre-existing written-Any
+scanner remains a presentation/suggestion input, not local binding authority.
+Qualified retained struct/class/enum layouts now establish known return types
+even when the caller does not directly import the type's defining module.
+
+Enabled tests cover the exact foreign return symbol/layout, genuine Any-return
+fallback, explicit annotations, shadowed same-name locals, var producers,
+unknown legacy metadata, and independent map copies. Historical pending
+third-module warning cases are left intact pending executable confirmation of
+their now-conflicting expectations; they are not counted as passing evidence.
+This source repair and its metadata/codec integration require the admitted
+runner before the bug can be closed.
+
+### Producer coverage repair, cycle 2 (authored, NOT_RUN)
+
+The follow-up producer audit found 14 Let emission sites: four ordinary
+val/var sites, four user tuple component sites, one source-pattern binding
+helper, and five compiler-temporary sites. The user tuple producers (literal
+val/var, nonliteral tuple components, and for-tuple components) now record
+inferred provenance at the exact symbol definition. The parser's tuple
+declaration path requires `=` after the names and carries no annotation.
+`match_binding_statement` records the original source Binding symbol as
+inferred. Compiler tuple-assignment/destructure, match/range scrutinee, and
+accessor temporaries remain unknown. No name-based production classification
+is used. Regression controls exercise literal tuple Any aliases, empty
+collection receivers, and tuple-pattern Any receivers; the pattern control
+also checks that the generated scrutinee remains unknown.
+
+## Symptom
+
+- `test/01_unit/compiler/lint/frontend_diag/any_warn_rules_acceptance_spec.spl`, example "flags an
+  unannotated alias of an Any value": exactly one W-HIR-INFER-003 is emitted, but its message lacks
+  "it is initialised from `b`". The alias branch at `hir_frontend_diagnostics.spl:687` is not taken
+  for `val c = b` when `b` is an `Any` parameter.
+- `test/01_unit/compiler/lint/frontend_diag/inferred_type_fallback_use_spec.spl`:
+  - two examples fail with `array index out of bounds: index is 0 but length is 0` (imported fn
+    returning a third-module struct)
+  - "still fires when only the facade FUNCTION is imported..." finds 0 instead of 1
+
+## Root cause
+
+Not isolated. The parameter-symbol registration in `any_syms` does not seem to cover `Any`
+parameters, and the cross-module return-type fallback path finds no findings and indexes an empty
+list. Both need a debugging pass on the HIR diagnostics walker.
+
+## Unblock
+
+Fix the walker. Then remove the `pending` markers that link here.
+
+
+## 2026-11-07: replace obsolete nominal-return pending controls
+
+The three skipped W-HIR-INFER-001 expectations used explicit `-> Node`
+contracts. They contradict the active controls that require imported and facade
+nominal return layouts to survive with zero warnings. They are replaced with
+real parsed provider/facade `-> Any` contracts, retaining declaration message,
+source line, function, family, and once-per-binding assertions. The original
+nominal owner-layout positives remain unchanged. No production signature is invented or changed.
+
+Omitted-return inference is a separate open investigation: the imported surface
+callable builder returns nil for a non-extern callable without an explicit return
+type. Before this repair, the diagnostic did not classify a call whose return
+signature was unknown. These explicit-Any controls do not qualify that path.
+
+Validation: authored source assertions only; semantic tests NOT_RUN pending an
+admitted full CLI. Removal of the obsolete pending markers is not a runtime PASS.
+
+The narrow diagnostic repair now recognizes an exact imported Function symbol
+with no available signature, only when it has a nonlocal defining module and
+zero generic parameters. Generic imports intentionally defer their signatures
+and are excluded. Genuine omitted-return provider/facade controls assert one
+declaration warning across multiple receiver uses. Broader imported return
+inference remains OPEN; this repair diagnoses absence rather than inferring
+a return type or transporting a nominal owner. Runtime remains NOT_RUN.
+
+Source-review cycle 2 also restricts the new missing-signature warning when
+retained inferred binding metadata or a present initializer type already
+resolves. This does not change the exact annotation-provenance gate. A
+source-produced nominal-owner fixture deliberately removes only the callable
+signature to exercise that phase contract; this mutation control is not a
+claim that the natural pipeline currently performs such removal.
+
+
+### Astra follow-up: independent retained-metadata prevention controls
+
+Replaced the overlapping resolved-owner fixture with independent binding-only,
+initializer-only, and both-unresolved cases. All start from real parsed omitted
+return imports, assert exact symbol/provenance/signature identity, and inspect
+the stored rewritten carriers. The ordinary provider/facade source reproduction
+remains unchanged. No production policy changed. Authored manual:
+`doc/06_spec/01_unit/compiler/lint/frontend_diag/inferred_type_fallback_use_spec.md`.
+
+Runtime and mutation execution remain NOT_RUN. The ordinary `simple check`
+path lacks the frozen import surfaces needed to reproduce this cross-module
+condition; external full-driver reproduction remains OPEN rather than treating
+a missing warning on that different route as success.
+
+
+### Supported external driver reproduction authored
+
+`test/02_integration/compiler/hir/inferred_return_diagnostic_cli_spec.spl`
+uses the actual `native-build` multi-module route with typecheck warnings
+enabled, pinned SIMPLE_BIN, four isolated fixture/cache/output directories,
+120-second/4-MiB child bounds and retained logs/status. Provider/facade omitted
+returns require exactly one missing-signature diagnostic; completed exit 0 or 1
+qualifies only warning emission, never successful compilation. Worker failure
+markers and abnormal child statuses cannot pass. Explicit Node negatives
+require successful compilation and no warning. Source path confirmed through
+`native_build_compile_with_collection_profile` -> `compiler_driver_run_compile`.
+No production changes. All four external examples remain NOT_RUN.

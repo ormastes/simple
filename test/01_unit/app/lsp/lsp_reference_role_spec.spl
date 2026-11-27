@@ -1,0 +1,100 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+#
+# Reference roles (traceability design §15.1): declaration / call / type_use /
+# write / read, derived from the printed source line. `textDocument/references`
+# used to ignore `context.includeDeclaration`; now the declaration line is
+# dropped when the client sets it to false.
+
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.types.{json_to_number}
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.nogc_sync_mut.lsp.lsp_reference_role.{lsp_reference_role_v1, lsp_references_include_declaration_v1}
+use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_handle_references}
+
+fn fixture_source_v1() -> text:
+    """fn lsp_rr_fixture_target_v1(value: i64) -> i64:
+    value
+
+fn lsp_rr_fixture_caller_v1() -> i64:
+    val x = lsp_rr_fixture_target_v1(7)
+    x
+"""
+
+fn fixture_uri_v1(path: text) -> text:
+    val p = path.replace("\\", "/")
+    if p.starts_with("/"): return "file://" + p
+    "file:///" + p
+
+fn references_body_v1(path: text, include_decl: bool) -> text:
+    val close = "}"
+    var flag = "false"
+    if include_decl:
+        flag = "true"
+    "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"textDocument/references\",\"params\":{\"textDocument\":{\"uri\":\"" +
+        fixture_uri_v1(path) + "\"},\"position\":{\"line\":0,\"character\":3},\"context\":{\"includeDeclaration\":" +
+        flag + close + close + close
+
+# 0-based lines of the returned Locations.
+fn result_lines_v1(reply: text) -> [i64]:
+    val response = json_parse(reply)
+    expect(json_object_get(response, "error")).to_be_nil()
+    val result = json_object_get(response, "result")
+    var lines: [i64] = []
+    var i = 0
+    while i < json_array_length(result):
+        val start = json_object_get(json_object_get(json_array_get(result, i), "range"), "start")
+        lines.push(json_to_number(json_object_get(start, "line")).to_int())
+        i = i + 1
+    lines
+
+describe "lsp_reference_role classification":
+    it "labels declarations, calls, type uses, writes and reads":
+        # @req REQ-SSPEC-UNIT
+        step("declaration forms")
+        expect(lsp_reference_role_v1("fn foo(a: i64) -> i64:", "foo")).to_equal("declaration")
+        expect(lsp_reference_role_v1("    pub static fn foo():", "foo")).to_equal("declaration")
+        expect(lsp_reference_role_v1("struct Foo:", "Foo")).to_equal("declaration")
+        expect(lsp_reference_role_v1("val foo = 1", "foo")).to_equal("declaration")
+        step("use forms")
+        expect(lsp_reference_role_v1("    val x = foo(1)", "foo")).to_equal("call")
+        expect(lsp_reference_role_v1("    if check(foo):", "foo")).to_equal("read")
+        expect(lsp_reference_role_v1("    foo = foo + 1", "foo")).to_equal("write")
+        expect(lsp_reference_role_v1("    if foo == 1:", "foo")).to_equal("read")
+        expect(lsp_reference_role_v1("fn bar(a: Foo) -> Foo:", "Foo")).to_equal("type_use")
+        expect(lsp_reference_role_v1("    val m: Dict<text, Foo> = {}", "Foo")).to_equal("type_use")
+        step("whole-word only")
+        expect(lsp_reference_role_v1("    val food = foobar(1)", "foo")).to_equal("none")
+        expect(lsp_reference_role_v1("", "foo")).to_equal("none")
+
+    it "reads context.includeDeclaration with the protocol default true":
+        # @req REQ-SSPEC-UNIT
+        step("absent, true, false")
+        val close = "}"
+        val base = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"textDocument/references\",\"params\":{\"textDocument\":{\"uri\":\"file:///a.spl\"}"
+        expect(lsp_references_include_declaration_v1(base + close + close)).to_equal(true)
+        expect(lsp_references_include_declaration_v1(base + ",\"context\":{\"includeDeclaration\":true" + close + close + close)).to_equal(true)
+        expect(lsp_references_include_declaration_v1(base + ",\"context\":{\"includeDeclaration\":false" + close + close + close)).to_equal(false)
+        expect(lsp_references_include_declaration_v1("not json")).to_equal(true)
+
+describe "textDocument/references handler":
+    it "drops the declaration line only when includeDeclaration is false":
+        # @req REQ-SSPEC-UNIT
+        step("fixture through the query child")
+        val root = secure_temp_dir("/tmp", "simple-lsp-refrole-v1-").unwrap()
+        val path = root + "/fixture.spl"
+        expect(file_write(path, fixture_source_v1())).to_equal(true)
+        val with_decl = result_lines_v1(lsp_handle_references("5", references_body_v1(path, true)))
+        val without_decl = result_lines_v1(lsp_handle_references("6", references_body_v1(path, false)))
+        dir_remove_all(root)
+        step("call site always present; declaration only when asked")
+        expect(with_decl.contains(4)).to_equal(true)
+        expect(with_decl.contains(0)).to_equal(true)
+        expect(without_decl.contains(4)).to_equal(true)
+        expect(without_decl.contains(0)).to_equal(false)

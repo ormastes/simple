@@ -1,0 +1,73 @@
+"""
+Purpose: Pin that an imported, immutable, non-`pub` module `val` whose
+initializer is literal-only arithmetic (`val MAX: i64 = 512 * 1024 * 1024`
+plus a separate `export MAX`) is imported as its folded value, exactly like a
+bare private literal. The provider gives such a folded binding no static, so
+declaring an external static for it made every Cranelift importer fail with
+"imported non-public module static ... requires visibility-preserving accessor
+support" (stage2 run 15: RUNTIME_STD_COMPILED_PACKAGE_MAX_BYTES_V1,
+RUNTIME_STD_MIR_MODULE_MAX_BYTES_V1). A `pub val` keeps its external storage.
+Audience: compiler engineers maintaining _MirLowering/provider_globals.
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.{SymbolTable, HirModule}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_globals.*
+
+val IMPORTED_SYMBOL_ID = 777
+
+fn lower_provider(src: text) -> HirModule:
+    val filename = "provmod.spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    hir_lowering.lower_module(module)
+
+fn bind(src: text, name: text) -> MirLowering:
+    val hir = lower_provider(src)
+    var lowering = MirLowering.new(SymbolTable.new())
+    var demanded: Dict<text, [i64]> = {}
+    demanded[mir_global_declaration_key("provmod", name)] = [IMPORTED_SYMBOL_ID]
+    val _found = lowering.register_provider_global_bindings(
+        "provmod", hir.symbols, hir.constants.values(), demanded, {})
+    lowering
+
+fn has_external_static(lowering: MirLowering) -> bool:
+    for declaration in lowering.builder.module.statics.values():
+        if declaration.symbol.id == IMPORTED_SYMBOL_ID:
+            return true
+    false
+
+fn inline_int(lowering: MirLowering) -> i64:
+    if not lowering.global_constants_by_id.contains_key(IMPORTED_SYMBOL_ID):
+        return -1
+    match lowering.global_constants_by_id[IMPORTED_SYMBOL_ID].value:
+        case MirConstValue.Int(v): v
+        case _: -2
+
+describe "imported exported folded val":
+    it "inlines literal arithmetic exported by an export statement":
+        val lowering = bind("val MAX: i64 = 512 * 1024 * 1024\nexport MAX\n", "MAX")
+        expect(lowering.errors.len()).to_equal(0)
+        expect(has_external_static(lowering)).to_be(false)
+        expect(inline_int(lowering)).to_equal(536870912)
+
+    it "still inlines a bare exported integer literal":
+        val lowering = bind("val LIMIT: i64 = 42\nexport LIMIT\n", "LIMIT")
+        expect(lowering.errors.len()).to_equal(0)
+        expect(has_external_static(lowering)).to_be(false)
+        expect(inline_int(lowering)).to_equal(42)
+
+    it "keeps external storage for a pub val":
+        val lowering = bind("pub val MAX: i64 = 512 * 1024 * 1024\n", "MAX")
+        expect(lowering.errors.len()).to_equal(0)
+        expect(has_external_static(lowering)).to_be(true)
+
+    it "keeps external storage for a mutable var":
+        val lowering = bind("var COUNT: i64 = 2 * 3\nexport COUNT\n", "COUNT")
+        expect(has_external_static(lowering)).to_be(true)

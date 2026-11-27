@@ -1,0 +1,140 @@
+# Finite authorized filesystem claim, not a native observer or runtime owner.
+# Caller supplies actual native machine/boot/provider observations and an
+# installed administrator-owned private parent tree. Mode bits/digests alone
+# do not authenticate arbitrary roots. No descriptor-relative race claim.
+# Any error after exclusive claim publication retains all authority artifacts.
+use std.nogc_sync_mut.orchestration.host_enrollment_v1.*
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.{LocalAuthorityPolicyV1, local_authority_policy_load_v1}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.common.contracts.orchestration.host_config_v1.{HostConfigV1, decode_host_config}
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.distributed_control_v2.distributed_grant_authorize_v2
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_create_exclusive, secure_temp_dir, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.file_system.permissions.file_set_mode
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+use std.nogc_sync_mut.sosix.time.sosix_time_now_unix_micros
+use std.common.string_core.str_len
+
+pub struct HostEnrollmentClaimV1:
+    root: text
+    claim_path: text
+    claim_digest: text
+    operation_id: text
+    binding_digest: text
+
+fn host_enrollment_unix_ms_v1() -> i64:
+    sosix_time_now_unix_micros() / 1000
+
+fn host_claim_verify_v1(binding: HostEnrollmentBindingV1, credential: HostEnrollmentCredentialV1,
+        config: HostConfigV1, policy: LocalAuthorityPolicyV1, now: i64) -> Result<bool, text>:
+    if now <= 0: return Err("host-claim-clock-invalid")
+    val context = HostReservationAuthorizationContextV1(grant_clock: now, monotonic_ms: 0,
+        policy_revision: policy.snapshot.policy_revision, revocation_epoch: policy.snapshot.revocation_epoch,
+        session_generation: policy.session_generation)
+    val authorized = host_enrollment_authorize_v1(binding, credential, policy,
+        config.physical_host_id, config.memory_ceiling_bytes, context)?
+    Ok(true)
+
+fn host_claim_record_v1(binding: HostEnrollmentBindingV1, operation_id: text,
+        binding_digest: text, nonce: text, state: text, root: text) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-enrollment-claim"),
+        "operationId": SdnValue.String(operation_id), "bindingDigest": SdnValue.String(binding_digest),
+        "nativeMachineId": SdnValue.String(binding.native_machine_id), "nonce": SdnValue.String(nonce),
+        "state": SdnValue.String(state), "root": SdnValue.String(root)}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn host_claim_publish_v1(path: text, bytes: text) -> Result<bool, text>:
+    if not file_atomic_write_mode(path, bytes, 0o600): return Err("host-claim-object-publication-failed:" + path)
+    if file_read_regular_no_follow_bounded(path, 1048576)? != bytes:
+        return Err("host-claim-object-readback-mismatch:" + path)
+    Ok(true)
+
+fn host_claim_locked_v1(binding: HostEnrollmentBindingV1, credential: HostEnrollmentCredentialV1,
+        configuration_bytes: text, config: HostConfigV1, first_clock: i64,
+        clock: fn() -> i64) -> Result<HostEnrollmentClaimV1, text>:
+    val policy = local_authority_policy_load_v1(binding.machine_parent, binding.policy_digest)?
+    val now = clock()
+    if now < first_clock: return Err("host-claim-clock-regressed")
+    val verified = host_claim_verify_v1(binding, credential, config, policy, now)?
+    val policy_bytes = file_read_regular_no_follow_bounded(binding.machine_parent + "/authority-policy.sdn", 1048576)?
+    if sha256_text(policy_bytes) != binding.policy_digest: return Err("host-claim-policy-changed")
+    # Complete all deterministic serialization and entropy acquisition before
+    # publishing the exclusive claim. An existing/pending claim is never adopted.
+    val binding_bytes = host_enrollment_payload_bytes_v1(binding)?
+    val binding_digest = sha256_text(binding_bytes)
+    val credential_bytes = host_enrollment_credential_encode_v1(credential)?
+    val nonce = sosix_random_hex(32) ?? ""
+    if str_len(nonce) != 64: return Err("host-claim-entropy-unavailable")
+    val claim_path = binding.machine_parent + "/host-claim-" + sha256_text(binding.native_machine_id) + ".sdn"
+    val pending = host_claim_record_v1(binding, credential.operation.id, binding_digest, nonce, "creating", "")
+    # Signature checks/serialization/entropy may consume the remaining lifetime.
+    # Refresh at the actual claim boundary; immutable signed bytes were already
+    # cryptographically verified, so only freshness/scope needs checking again.
+    val commit_now = clock()
+    if commit_now <= 0: return Err("host-claim-clock-invalid")
+    if commit_now < now: return Err("host-claim-clock-regressed")
+    if credential.approval.expires_at <= commit_now: return Err("APPROVAL_EXPIRED")
+    val commit_scope = distributed_grant_authorize_v2(credential.signed.grant, credential.operation,
+        commit_now, policy.snapshot.policy_revision, policy.snapshot.revocation_epoch, policy.session_generation)
+    if commit_scope != "": return Err(commit_scope)
+    if not file_create_exclusive(claim_path, pending): return Err("host-claim-already-present-or-unavailable")
+    # No rollback from here: publication failure or unknown state keeps the
+    # machine claimed; a later invocation must not allocate a second root.
+    if not file_set_mode(claim_path, 0o600): return Err("host-claim-mode-failed")
+    if file_read_regular_no_follow_bounded(claim_path, 1048576)? != pending: return Err("host-claim-pending-readback-mismatch")
+    val root = secure_temp_dir(binding.machine_parent, "host-root-")?
+    # Publish the partial root immediately. A crash/write failure before this
+    # publication can orphan this private child; retain the original claim and
+    # require manual reconciliation, never scan/delete or allocate a replacement.
+    if file_read_regular_no_follow_bounded(claim_path, 1048576)? != pending: return Err("host-claim-pending-changed")
+    val pending_root = host_claim_record_v1(binding, credential.operation.id, binding_digest, nonce, "creating", root)
+    val pending_root_written = host_claim_publish_v1(claim_path, pending_root)?
+    val config_written = host_claim_publish_v1(root + "/host-config.sdn", configuration_bytes)?
+    val policy_written = host_claim_publish_v1(root + "/authority-policy.sdn", policy_bytes)?
+    val credential_written = host_claim_publish_v1(root + "/enrollment-credential.sdn", credential_bytes)?
+    val binding_written = host_claim_publish_v1(root + "/enrollment-binding.sdn", binding_bytes)?
+    val manifest_fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-enrollment-root"),
+        "claimPath": SdnValue.String(claim_path), "bindingDigest": SdnValue.String(binding_digest),
+        "operationId": SdnValue.String(credential.operation.id), "nonce": SdnValue.String(nonce),
+        "root": SdnValue.String(root), "configDigest": SdnValue.String(binding.config_digest),
+        "policyDigest": SdnValue.String(binding.policy_digest), "nativeBootId": SdnValue.String(binding.native_boot_id),
+        "providerIdentityDigest": SdnValue.String(binding.provider_identity_digest)}
+    val manifest = sdn_encode_canonical(SdnValue.Dict(manifest_fields)) + "\n"
+    val manifest_written = host_claim_publish_v1(root + "/host-root.sdn", manifest)?
+    if file_read_regular_no_follow_bounded(claim_path, 1048576)? != pending_root: return Err("host-claim-pending-changed")
+    val enrolled = host_claim_record_v1(binding, credential.operation.id, binding_digest, nonce, "enrolled", root)
+    val claim_written = host_claim_publish_v1(claim_path, enrolled)?
+    Ok(HostEnrollmentClaimV1(root: root, claim_path: claim_path, claim_digest: sha256_text(enrolled),
+        operation_id: credential.operation.id, binding_digest: binding_digest))
+
+# Explicit clock seam is for deterministic local tests, never a CLI authority
+# option. This function does not observe native identity or launch a provider.
+pub fn host_enrollment_claim_with_clock_v1(binding: HostEnrollmentBindingV1,
+        credential: HostEnrollmentCredentialV1, configuration_bytes: text,
+        clock: fn() -> i64) -> Result<HostEnrollmentClaimV1, text>:
+    if str_len(configuration_bytes) > 1048576: return Err("host-claim-config-size")
+    if sha256_text(configuration_bytes) != binding.config_digest: return Err("host-claim-config-digest-mismatch")
+    val config = match decode_host_config(configuration_bytes):
+        case Ok(value): value
+        case Err(issue): return Err("host-claim-config-invalid:" + issue.kind)
+    if config.exclusive_device_ids.len() != 0: return Err("host-claim-cpu-only")
+    if config.controller_ref != credential.signed.issuer_id: return Err("host-claim-controller-mismatch")
+    if config.journal_root != "journal": return Err("host-claim-journal-child-required")
+    val policy = local_authority_policy_load_v1(binding.machine_parent, binding.policy_digest)?
+    val now = clock()
+    val verified = host_claim_verify_v1(binding, credential, config, policy, now)?
+    # Lock creation is the first filesystem mutation, after full authorization.
+    val handle = file_lock(binding.machine_parent + "/.host-enrollment.lock", 1)
+    if handle < 0: return Err("host-claim-lock-unavailable")
+    val result = host_claim_locked_v1(binding, credential, configuration_bytes, config, now, clock)
+    # Exactly one release per acquired lock, including every helper error.
+    if not file_unlock(handle): return Err("host-claim-unlock-failed")
+    result
+
+pub fn host_enrollment_claim_v1(binding: HostEnrollmentBindingV1,
+        credential: HostEnrollmentCredentialV1, configuration_bytes: text) -> Result<HostEnrollmentClaimV1, text>:
+    """Claim once using actual Unix milliseconds; this creates no journal or workload."""
+    host_enrollment_claim_with_clock_v1(binding, credential, configuration_bytes, host_enrollment_unix_ms_v1)

@@ -1,0 +1,122 @@
+# @req BUG-int_max_min_method_unresolved_in_jit_2026-11-13
+"""Integer `max` / `min` / `clamp` / `abs` agree across all three lanes:
+
+1. the lane running this spec (seed JIT by default, interpreter with
+   `--mode interpreter`) -- the in-process cases;
+2. the seed JIT under `simple run` -- a subprocess over a fixture;
+3. the pure-Simple MIR lowering (`try_lower_numeric_builtin`) -- i64 / i32 /
+   u64 receivers lower to compare blocks, never to an unresolved `i64.max`.
+
+See doc/08_tracking/bug/int_max_min_method_unresolved_in_jit_2026-11-13.md."""
+use std.spec
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+use app.io.cli_ops.{cli_current_exe_path}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+struct IntLowered:
+    messages: [text]
+    labels: [text]
+
+fn int_lower(src: text) -> IntLowered:
+    val file = "testdata/fixture_int_min_max.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_int_min_max", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push("hir: " + e.message)
+    for e in lowering.errors:
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        messages = messages.push("mir: " + e.message)
+    var labels: [text] = []
+    for function in mir.functions.values():
+        for block in function.blocks:
+            labels = labels.push(block.label ?? "")
+    for m in messages:
+        print "diagnostic: {m}"
+    IntLowered(messages: messages, labels: labels)
+
+fn has_label(low: IntLowered, wanted: text) -> bool:
+    for item in low.labels:
+        if item == wanted:
+            return true
+    false
+
+fn neg_four() -> i64:
+    -4
+
+describe "integer max/min/clamp/abs: in-process lane":
+    it "i64 receivers return the integer result":
+        step("evaluate i64 max/min/clamp/abs in the running lane")
+        val y = 5
+        val n: i64 = -7
+        expect(y.max(9)).to_equal(9)
+        expect(y.min(2)).to_equal(2)
+        expect(y.clamp(0, 3)).to_equal(3)
+        expect(n.abs()).to_equal(7)
+        expect(neg_four().max(0)).to_equal(0)
+
+    it "i32 receivers return the integer result":
+        step("evaluate i32 max/min/clamp/abs in the running lane")
+        val a: i32 = -7
+        expect(a.max(-2)).to_equal(-2)
+        expect(a.min(-9)).to_equal(-9)
+        expect(a.clamp(-5, 5)).to_equal(-5)
+        expect(a.abs()).to_equal(7)
+
+    it "u64 receivers order unsigned":
+        step("evaluate u64 max/min/clamp in the running lane")
+        val u: u64 = 3
+        expect(u.min(8)).to_equal(3)
+        expect(u.max(8)).to_equal(8)
+        expect(u.clamp(4, 6)).to_equal(4)
+        expect(u.abs()).to_equal(3)
+
+describe "integer max/min/clamp/abs: seed JIT under simple run":
+    it "prints the same values as the in-process lane":
+        step("run the fixture through `simple run`")
+        val (out, err, code) = process_run_timeout(cli_current_exe_path(),
+            ["run", "test/fixtures/compiler/int_min_max/run_main.spl"], 120000)
+        print "run stdout: {out}"
+        print "run stderr: {err}"
+        expect(code).to_equal(0)
+        expect(out.contains("i64 9 2 3 7 0")).to_equal(true)
+        expect(out.contains("i32 -2 -9 -5 7")).to_equal(true)
+        expect(out.contains("u64 18446744073709551615 3 10 18446744073709551615 3 8")).to_equal(true)
+        expect((out + err).contains("not found")).to_equal(false)
+
+describe "integer max/min/clamp/abs: pure-Simple MIR lowering":
+    it "i64 max/min/clamp/abs lower to compare blocks":
+        val low = int_lower("fn f(x: i64, y: i64) -> i64:\n" +
+            "    x.max(y) + x.min(3) + x.clamp(0, y) + x.abs()\n")
+        expect(low.messages.len()).to_equal(0)
+        expect(has_label(low, "max_pick")).to_equal(true)
+        expect(has_label(low, "min_pick")).to_equal(true)
+        expect(has_label(low, "clamp_lo_pick")).to_equal(true)
+        expect(has_label(low, "clamp_hi_pick")).to_equal(true)
+        expect(has_label(low, "abs_pick")).to_equal(true)
+
+    it "i32 max/min/clamp lower to compare blocks":
+        val low = int_lower("fn f(a: i32, b: i32) -> i32:\n" +
+            "    a.max(b) + a.min(b) + a.clamp(b, b)\n")
+        expect(low.messages.len()).to_equal(0)
+        expect(has_label(low, "max_pick")).to_equal(true)
+        expect(has_label(low, "min_pick")).to_equal(true)
+        expect(has_label(low, "clamp_hi_pick")).to_equal(true)
+
+    it "u64 max/min/clamp lower to compare blocks and accept literal bounds":
+        val low = int_lower("fn f(u: u64, v: u64) -> u64:\n" +
+            "    u.max(v) + u.min(8) + u.clamp(1, 10)\n")
+        expect(low.messages.len()).to_equal(0)
+        expect(has_label(low, "max_pick")).to_equal(true)
+        expect(has_label(low, "min_pick")).to_equal(true)
+        expect(has_label(low, "clamp_lo_pick")).to_equal(true)

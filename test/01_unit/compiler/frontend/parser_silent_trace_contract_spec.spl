@@ -35,8 +35,14 @@ describe "silent parser trace channel":
             "src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl")
         expect(assembly).to_contain(
             "val saved_compiler_trace_scope = frontend_compiler_trace_scope_enter()")
+        # Pin refreshed 2026-11-05 (provenance 65b0304d3a2/5c2daf5a01b, the
+        # cache scope-owner refactor): the provider admission match moved out
+        # of parse_and_build_module_scoped into
+        # parse_and_build_module_with_scope_owner; scoped() now delegates.
         expect(assembly).to_contain(
-            "pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: bool) -> ParserModule:\n    val admission: ParserProviderAdmissionV1 = match parser_provider_v1_admit(parser_provider_v1_default())")
+            "pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: bool) -> ParserModule:\n    val receipt = parse_and_build_module_with_scope_owner(source, path, streaming_scope, false, false)")
+        expect(assembly).to_contain(
+            "val admission: ParserProviderAdmissionV1 = match parser_provider_v1_admit(parser_provider_v1_default())")
         expect(assembly).to_contain(
             "frontend_compiler_trace_scope_exit(saved_compiler_trace_scope)")
         expect(assembly).to_not_contain(
@@ -99,7 +105,17 @@ describe "silent parser trace channel":
         expect(stdout).to_end_with("}")
         expect(stdout.contains("\n")).to_equal(false)
         expect(stdout).to_contain("\"structuredContent\"")
-        expect(stdout).to_contain("\"source\":\"simple-lint\"")
+        # Pin refreshed 2026-11-05 (provenance 436af0ed5e5 "harden query lint
+        # parse boundary" + 81074966b86 "scope silent trace output"): the lint
+        # pipeline parses through parse_module_silent_checked and runs under a
+        # scoped trace policy, so this fixture's 0-diagnostic JSON has no
+        # diagnostic entry carrying the source marker. The equivalent current
+        # contract is pinned at the producer: every structured lint diagnostic
+        # entry is emitted with \"source\":\"simple-lint\".
+        val lint_producer = file_read("src/app/cli/query_lint.spl") ?? ""
+        # N.B.: pinned against the file's literal text, where the JSON quotes
+        # appear as escaped sequences (\\\" = backslash + quote).
+        expect(lint_producer).to_contain("\\\"source\\\":\\\"simple-lint\\\"")
         expect(stdout).to_not_contain("[parser_init_with_path]")
         expect(stdout).to_not_contain("[ast_reset]")
         expect(stdout).to_not_contain("[parser_warning]")
@@ -107,12 +123,18 @@ describe "silent parser trace channel":
         expect(stdout).to_not_contain("[expr_")
         expect(stdout).to_not_contain("[debug:pass]")
 
+        # Pin refreshed 2026-11-05 (same provenance): the lint parse is
+        # silent-scoped in BOTH modes, so the parser-init/reset/warning and
+        # call-alloc traces the old pins expected in ordinary mode are gone;
+        # the current equivalent contract is that ordinary mode still emits
+        # the lint pass's own AST tag traces while every parser trace stays
+        # suppressed on stdout and stderr.
         val ordinary = run_lint_trace_probe("ordinary")
         expect(ordinary.2).to_equal(0)
-        expect(ordinary.0).to_contain("[parser_init_with_path]")
-        expect(ordinary.0).to_contain("[ast_reset]")
-        expect(ordinary.0).to_contain("[parser_warning]")
         expect(ordinary.0).to_contain("[stmt_")
         expect(ordinary.0).to_contain("[expr_")
-        expect(ordinary.0).to_contain("[debug:pass]")
-        expect(ordinary.1).to_contain("[ast-expr]")
+        expect(ordinary.0).to_not_contain("[parser_init_with_path]")
+        expect(ordinary.0).to_not_contain("[ast_reset]")
+        expect(ordinary.0).to_not_contain("[parser_warning]")
+        expect(ordinary.0).to_not_contain("[debug:pass]")
+        expect(ordinary.1).to_not_contain("[ast-expr]")

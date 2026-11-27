@@ -38,6 +38,49 @@ struct WmChromeColors:
     close_button: u32        # window close control
     background_hex: text     # chrome background as css hex ("#5A7FB5")
 
+# Shared Simple Aqua window chrome geometry & color constants (single source of
+# truth across Chrome HTML, Pure-Simple DrawIR, and compositor effects).
+pub val WM_AQUA_TITLEBAR_HEIGHT: i32 = 28
+pub val WM_AQUA_TRAFFIC_RADIUS: i32 = 6
+pub val WM_AQUA_TRAFFIC_SIZE: i32 = 12
+pub val WM_AQUA_TRAFFIC_Y: i32 = 8
+pub val WM_AQUA_TRAFFIC_CLOSE_X: i32 = 12
+pub val WM_AQUA_TRAFFIC_MIN_X: i32 = 32
+pub val WM_AQUA_TRAFFIC_MAX_X: i32 = 52
+pub val WM_AQUA_TITLE_X: i32 = 74
+
+pub val WM_AQUA_TRAFFIC_CLOSE: u32 = 0xFFFF5F56u32
+pub val WM_AQUA_TRAFFIC_MIN: u32 = 0xFFFFBD2Eu32
+pub val WM_AQUA_TRAFFIC_MAX: u32 = 0xFF27C93Fu32
+pub val WM_AQUA_TRAFFIC_UNFOCUSED: u32 = 0xFFC2C4CAu32
+
+pub val WM_AQUA_FOCUSED_TITLE_GLASS: u32 = 0xCCDCEAFBu32
+pub val WM_AQUA_FOCUSED_TITLE_SHEEN: u32 = 0x40FFFFFFu32
+pub val WM_AQUA_FOCUSED_TOP_HIGHLIGHT: u32 = 0xCCFFFFFFu32
+pub val WM_AQUA_FOCUSED_TITLE_BORDER: u32 = 0xFFB4C2D3u32
+
+pub val WM_AQUA_UNFOCUSED_TOP_EDGE: u32 = 0xFFEAEAEFu32
+pub val WM_AQUA_UNFOCUSED_TITLE_BORDER: u32 = 0xFFBABABEu32
+pub val WM_AQUA_UNFOCUSED_TEXT: u32 = 0xFF6E6E73u32
+
+pub val WM_AQUA_DOCK_GLASS_BG: u32 = 0xCCE8E8ECu32
+pub val WM_AQUA_DOCK_TOP_HIGHLIGHT: u32 = 0x99FFFFFFu32
+pub val WM_AQUA_DOCK_ITEM_FOCUSED: u32 = 0xE6DCEAFBu32
+pub val WM_AQUA_DOCK_ITEM_UNFOCUSED: u32 = 0xCCE2E2E6u32
+pub val WM_AQUA_DOCK_ITEM_MINIMIZED: u32 = 0xCCE8E8E8u32
+pub val WM_AQUA_DOCK_RADIUS: i32 = 14
+pub val WM_AQUA_DOCK_ITEM_RADIUS: i32 = 10
+
+# @allow(primitive_api): Aqua traffic-light ARGB u32 color selector
+pub fn wm_aqua_traffic_color(focused: bool, kind: text) -> u32:
+    if not focused:
+        return WM_AQUA_TRAFFIC_UNFOCUSED
+    if kind == "close":
+        return WM_AQUA_TRAFFIC_CLOSE
+    if kind == "min":
+        return WM_AQUA_TRAFFIC_MIN
+    WM_AQUA_TRAFFIC_MAX
+
 fn wm_chrome_theme_defaults() -> WmChromeColors:
     # Classic Aqua light glass palette (mirrors AQUA_LIGHT_* in
     # glass/numeric_tokens.spl). title_focused is the pale aqua-blue
@@ -56,7 +99,7 @@ fn wm_chrome_theme_defaults() -> WmChromeColors:
         window_body: 0xfff2f2f2u32,
         host_window_body: 0xffe8e8e8u32,
         accent: 0xff2c6fefu32,
-        close_button: 0xffff5f57u32,
+        close_button: 0xffff5f56u32,
         background_hex: "#5A7FB5"
     )
 
@@ -99,7 +142,7 @@ fn active_wm_theme_render_snapshot() -> ThemeRenderSnapshot?:
     border, shadow, and backdrop requests), but must not attach renderer
     handles, atlases, caches, or other transient backend material."""
     if _active_theme_render_snapshot.len() == 0:
-        return nil
+        return None
     _active_theme_render_snapshot[0]
 
 fn active_wm_theme_id() -> text:
@@ -169,7 +212,7 @@ fn _wm_argb_to_rgb_hex(value: u32) -> text:
     val b = value & 0xFF
     "#{_wm_hex_digit_upper(r >> 4)}{_wm_hex_digit_upper(r & 0xF)}{_wm_hex_digit_upper(g >> 4)}{_wm_hex_digit_upper(g & 0xF)}{_wm_hex_digit_upper(b >> 4)}{_wm_hex_digit_upper(b & 0xF)}"
 
-fn wm_chrome_colors_css_override(colors: WmChromeColors) -> text:
+pub fn wm_chrome_colors_css_override(colors: WmChromeColors) -> text:
     """Canonical CSS projection of an effective WM palette.
 
     Keep this serializer beside the snapshot projection: CSS-loaded overrides
@@ -186,7 +229,7 @@ fn wm_chrome_colors_css_override(colors: WmChromeColors) -> text:
     val surface = _wm_argb_to_rgb_hex(colors.window_body)
     val hover = _wm_argb_to_rgb_hex(colors.title_unfocused)
     val error = _wm_argb_to_rgb_hex(colors.close_button)
-    "\n:root {\n" +
+    "\n:root {{\n" +
         "  --wm-bg: {desktop};\n" +
         "  --wm-fg: {foreground};\n" +
         "  --wm-accent: {accent};\n" +
@@ -226,7 +269,7 @@ fn wm_chrome_colors_from_render_snapshot(snapshot: ThemeRenderSnapshot) -> WmChr
         window_body: material.window_fill_rgba,
         host_window_body: material.window_fill_rgba,
         accent: snapshot.accent_rgba,
-        close_button: snapshot.accent_rgba,
+        close_button: if snapshot.semantic.error_rgba != 0u32: snapshot.semantic.error_rgba else: snapshot.accent_rgba,
         background_hex: _wm_argb_to_rgb_hex(material.desktop_fill_rgba)
     )
 
@@ -356,8 +399,9 @@ fn _wm_parse_i64_or(value: text, fallback: i64) -> i64:
     val t = value.trim()
     if t.len() == 0:
         return fallback
-    val digits = if t.starts_with("-"): t.substring(1, t.len()) else: t
-    if digits.len() == 0 or not digits.is_numeric():
+    # WA-MIR-UNRESOLVED-is_numeric: native MIR has no text is_numeric builtin; digit loop instead (see doc/08_tracking/bug/mir_unresolved_method_nonstatic_new_and_array_call_elem_2026-10-25.md)
+    val digits: text = if t.starts_with("-"): t.substring(1, t.byte_len()) else: t
+    if digits.len() == 0 or not _wm_all_ascii_digits(digits):
         return fallback
     t.to_int()
 
@@ -404,7 +448,7 @@ fn _wm_css_function_to_argb(css: text, with_alpha: bool) -> u32:
     val open_len = if with_alpha: 5 else: 4
     if css.len() <= open_len or not css.ends_with(")"):
         return 0
-    val inner = css.substring(open_len, css.len() - 1)
+    val inner = css.substring(open_len, css.byte_len() - 1)
     val parts = inner.split(",")
     val expected = if with_alpha: 4 else: 3
     if parts.len() != expected:
@@ -492,3 +536,36 @@ fn wm_chrome_colors_from_gui_tokens(bg_hex: text, fg_hex: text, accent_hex: text
         close_button: _wm_pick(error_c, d.close_button),
         background_hex: if bg != 0: bg_hex.trim() else: d.background_hex
     )
+
+# WA-MIR-UNRESOLVED-is_numeric: see doc/08_tracking/bug/mir_unresolved_method_nonstatic_new_and_array_call_elem_2026-10-25.md
+fn _wm_all_ascii_digits(s: text) -> bool:
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch < "0" or ch > "9":
+            return false
+        i = i + 1
+    true
+
+export WmChromeColors,
+    wm_aqua_traffic_color,
+    wm_chrome_theme_defaults,
+    wm_chrome_theme,
+    register_wm_chrome_theme,
+    reset_wm_chrome_theme,
+    active_theme_composed_css,
+    active_wm_theme_render_snapshot,
+    active_wm_theme_id,
+    active_wm_theme_material_sha256,
+    active_wm_theme_snapshot_present,
+    active_wm_theme_snapshot_unchecked,
+    active_theme_source_fingerprint,
+    active_theme_solid_fallback_rgba,
+    active_theme_text_rgba,
+    wm_chrome_colors_css_override,
+    theme_render_snapshot_composed_css_with_wm_colors,
+    wm_chrome_colors_from_render_snapshot,
+    apply_theme_render_snapshot_to_wm_chrome,
+    theme_render_snapshot_with_wm_colors,
+    wm_css_color_to_argb,
+    wm_chrome_colors_from_gui_tokens

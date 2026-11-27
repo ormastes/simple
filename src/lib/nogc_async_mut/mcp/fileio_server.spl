@@ -5,7 +5,8 @@
 
 use std.nogc_async_mut.mcp.fileio_protection (ProtectionEngine, RuleType, RuleAction, ProtectionResult, create_engine)
 use std.nogc_async_mut.mcp.fileio_temp (TempManager, create_temp_manager)
-use std.nogc_sync_mut.io.process_ops.{shell}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_copy, file_delete, file_read_nullable, file_write}
+use std.nogc_async_mut.io_runtime.{file_append_text, file_rename}
 use std.nogc_async_mut.mcp.fileio_json (LB, RB, Q, jp, js, jo2, make_prop, make_tool_schema_multi)
 
 # MCP Server state
@@ -18,17 +19,20 @@ class FileIOServer:
     # Initialize server with lazy engine/temp creation to keep startup fast
     static fn init(config_path: text) -> FileIOServer:
         FileIOServer(
-            engine: nil,
-            temp_manager: nil,
+            engine: None,
+            temp_manager: None,
             config_path: config_path,
-            temp_base: "/tmp/fileio_temp"
+            # Relative temp base: the fileio_main_spec contract (REQ-SSPEC-APP)
+            # redirects under CWD-relative tmp/fileio_temp, and an absolute
+            # /tmp default is not portable to Windows hosts.
+            temp_base: "tmp/fileio_temp"
         )
 
     # Lazily construct the protection engine
     me ensure_engine() -> ProtectionEngine:
         match self.engine:
             case Some(e): e
-            case nil:
+            case None:
                 val eng = create_engine(self.config_path, self.temp_base)
                 self.engine = Some(eng)
                 eng
@@ -37,7 +41,7 @@ class FileIOServer:
     me ensure_temp_manager() -> TempManager:
         match self.temp_manager:
             case Some(t): t
-            case nil:
+            case None:
                 val tm = create_temp_manager(self.temp_base, "session_", true, 24)
                 self.temp_manager = Some(tm)
                 tm
@@ -376,32 +380,30 @@ class FileIOServer:
             parts.push("\"" + files[i] + "\"")
         "[" + parts.join("") + "]"
 
-    # File operations
+    # File operations -- portable runtime facades, not POSIX shell one-liners:
+    # cmd.exe (the Windows shell) has no cat/rm/cp/mv, so the shell form broke
+    # every allowed-path operation on Windows while config-string denials
+    # (matched before any FS touch) kept passing.
     fn read_file(path: text) -> text:
-        shell("cat '{path}' 2>/dev/null || echo ''")
+        file_read_nullable(path) ?? ""
 
     fn write_file(path: text, content: text):
-        # Escape content for shell
-        val escaped = content.replace("'", "'\\''")
-        shell("echo '{escaped}' > '{path}'")
+        file_write(path, content)
 
     fn delete_file(path: text):
-        shell("rm -f '{path}'")
+        file_delete(path)
 
     fn copy_file(src: text, dest: text):
-        shell("cp '{src}' '{dest}'")
+        file_copy(src, dest)
 
     fn move_file(src: text, dest: text):
-        shell("mv '{src}' '{dest}'")
+        file_rename(src, dest)
 
     fn atomic_write_file(path: text, content: text):
-        val temp_path = path + ".tmp"
-        self.write_file(temp_path, content)
-        self.move_file(temp_path, path)
+        file_atomic_write(path, content)
 
     fn append_file(path: text, content: text):
-        val escaped = content.replace("'", "'\\''")
-        shell("echo '{escaped}' >> '{path}'")
+        file_append_text(path, content)
 
     # Response helpers
     fn success_response(data: text) -> text:
@@ -412,7 +414,7 @@ class FileIOServer:
 
 # --- Tool schema definitions ---
 
-fn get_all_tools() -> [String]:
+pub fn get_all_tools() -> [String]:
     [
         schema_safe_read(),
         schema_safe_write(),

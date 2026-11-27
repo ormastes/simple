@@ -57,13 +57,29 @@ struct UiSceneRouteReceipt:
     action_owner_id: u32       # NO_ID if no owner in the chain carries an action
     action_binding_id: u32     # NO_ID if no owner in the chain carries an action
 
-fn _ui_scene_find_owner_by_semantic_id(owners: [UiOwnerRecord], semantic_id: u32) -> i64:
+pub val UI_SCENE_ROUTE_REFUSE_AMBIGUOUS_OWNER: u16 = 4u16
+
+# `semantic_id` is producer-PRIVATE (ui_scene_owner_table.spl), so two producers
+# routinely mint the same id. With a known producer (>= 0) the match is on
+# (producer_kind, semantic_id). Unscoped (producer < 0), a match that spans
+# more than one producer is ambiguous: returns -2 so the caller refuses
+# instead of routing to whichever row came first
+# (bug ui_scene_route_owner_lookup_ignores_producer_scope_2026-08-08).
+fn _ui_scene_find_owner_by_semantic_id(owners: [UiOwnerRecord], semantic_id: u32, producer: i64) -> i64:
+    var found: i64 = -1
     var i = 0
     while i < owners.len():
-        if owners[i].semantic_id == semantic_id:
-            return i.to_i64()
+        val o = owners[i]
+        if o.semantic_id == semantic_id:
+            if producer >= 0:
+                if o.producer_kind.to_i64() == producer:
+                    return i.to_i64()
+            elif found < 0:
+                found = i.to_i64()
+            elif owners[found].producer_kind != o.producer_kind:
+                return -2
         i = i + 1
-    -1
+    found
 
 struct _UiSceneChainAction:
     owner_id: u32
@@ -97,11 +113,26 @@ fn _ui_scene_route_refused(reason: u16, hit_component_id: u32) -> UiSceneRouteRe
 fn ui_scene_route_event(
     scene: DrawIrV3Scene, resolved: DrawIrV3GroupResolveResult, owners: [UiOwnerRecord], px: i32, py: i32
 ) -> UiSceneRouteReceipt:
+    ui_scene_route_event_scoped(scene, resolved, owners, [], px, py)
+
+# `command_producers[i]` is the producer_kind that emitted `scene.commands[i]`;
+# the scene assembler knows this because it concatenates each producer's
+# command range. Commands past the end of the list are routed unscoped, so
+# `[]` is the old behaviour except that a cross-producer id collision is
+# refused as AMBIGUOUS_OWNER rather than misrouted or reported as stale.
+fn ui_scene_route_event_scoped(
+    scene: DrawIrV3Scene, resolved: DrawIrV3GroupResolveResult, owners: [UiOwnerRecord],
+    command_producers: [u16], px: i32, py: i32
+) -> UiSceneRouteReceipt:
     val hit = draw_ir_v3_group_resolve_hit_test(scene, resolved, px, py)
     if not hit.hit:
         return _ui_scene_route_refused(UI_SCENE_ROUTE_REFUSE_NO_HIT, DRAW_IR_V3_NO_ID)
 
-    val owner_idx = _ui_scene_find_owner_by_semantic_id(owners, hit.component_id)
+    val ci = hit.command_index.to_i64()
+    val producer: i64 = if ci >= 0 and ci < command_producers.len().to_i64(): command_producers[ci].to_i64() else: -1
+    val owner_idx = _ui_scene_find_owner_by_semantic_id(owners, hit.component_id, producer)
+    if owner_idx == -2:
+        return _ui_scene_route_refused(UI_SCENE_ROUTE_REFUSE_AMBIGUOUS_OWNER, hit.component_id)
     if owner_idx < 0:
         return _ui_scene_route_refused(UI_SCENE_ROUTE_REFUSE_NO_OWNER, hit.component_id)
 
@@ -125,4 +156,4 @@ fn ui_scene_route_event(
     )
 
 export UI_SCENE_ROUTE_OK, UI_SCENE_ROUTE_REFUSE_NO_HIT, UI_SCENE_ROUTE_REFUSE_NO_OWNER, UI_SCENE_ROUTE_REFUSE_STALE_GENERATION,
-    UiSceneRouteReceipt, ui_scene_route_event
+    UI_SCENE_ROUTE_REFUSE_AMBIGUOUS_OWNER, UiSceneRouteReceipt, ui_scene_route_event, ui_scene_route_event_scoped

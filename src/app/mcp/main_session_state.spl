@@ -6,6 +6,8 @@
 # the cross-process /tmp editor-state file is never consulted, and a query's
 # own target file never becomes its requester. Mutated only via these accessors.
 
+use std.common.llm.hint_policy.{HintState, new_hint_state}
+
 var _MCP_LAST_READ_PATH: text = ""
 
 fn mcp_record_last_read(path: text):
@@ -25,3 +27,75 @@ fn mcp_resolve_requester(explicit: text) -> (text, text):
     if _MCP_LAST_READ_PATH != "":
         return (_MCP_LAST_READ_PATH, "last_read")
     ("", "none")
+
+# ----------------------------------------------------------------------------
+# Progressive-hint state (plan 2026-11-14 section 7.2)
+#
+# One `HintState` per (session id, capability). The policy itself is pure
+# (`decide_hint`); this map only stores its values. In-process, no file I/O.
+# ----------------------------------------------------------------------------
+
+"""Identifier of one MCP client session; hint state is never shared across ids."""
+pub struct McpSessionId:
+    value: text
+
+"""Closed set of capabilities a hint can describe."""
+pub enum HintCapability:
+    Quickstart
+    Testing
+    Debug
+    Traceability
+    Skills
+
+"""One stored hint state for a session and capability."""
+pub struct HintSlot:
+    session: McpSessionId
+    capability: HintCapability
+    state: HintState
+
+var _MCP_HINT_SLOTS: [HintSlot] = []
+
+# Getter-mediated read, same pattern as the tool-table cache in
+# main_static_tools.spl (native read+assign local-shadow bug).
+fn _mcp_hint_slots_value() -> [HintSlot]:
+    _MCP_HINT_SLOTS
+
+fn _hint_capability_key(capability: HintCapability) -> text:
+    match capability:
+        case HintCapability.Quickstart: "quickstart"
+        case HintCapability.Testing: "testing"
+        case HintCapability.Debug: "debug"
+        case HintCapability.Traceability: "traceability"
+        case HintCapability.Skills: "skills"
+
+fn _hint_slot_index(session: McpSessionId, capability: HintCapability) -> i64:
+    val slots = _mcp_hint_slots_value()
+    val key = _hint_capability_key(capability)
+    var i = 0
+    while i < slots.len():
+        if slots[i].session.value == session.value and _hint_capability_key(slots[i].capability) == key:
+            return i
+        i = i + 1
+    -1
+
+"""Stored state for the session and capability, or a fresh state when never used."""
+pub fn mcp_hint_state(session: McpSessionId, capability: HintCapability) -> HintState:
+    val idx = _hint_slot_index(session, capability)
+    if idx < 0:
+        return new_hint_state()
+    _mcp_hint_slots_value()[idx].state
+
+"""Store the state for the session and capability, replacing any earlier value."""
+pub fn mcp_hint_store(session: McpSessionId, capability: HintCapability, state: HintState):
+    val idx = _hint_slot_index(session, capability)
+    var slots = _mcp_hint_slots_value()
+    val slot = HintSlot(session: session, capability: capability, state: state)
+    if idx < 0:
+        slots.push(slot)
+    else:
+        slots[idx] = slot
+    _MCP_HINT_SLOTS = slots
+
+"""Forget every stored hint state."""
+pub fn mcp_hint_reset():
+    _MCP_HINT_SLOTS = []

@@ -1,0 +1,43 @@
+# Purpose and audience: regression evidence for the JS engine and seed JIT owners.
+#
+# Bug gui_window_caller_frame_silent_interp_fallback_2026-08-06. `JsError` is
+# declared with two layouts (common: message/source; nogc_sync_mut:
+# message/name/stack). The seed's flattened-module lowering owner-qualifies a
+# colliding class, but a type alias has no owner, so
+# `type JsBrowserError = JsError` in the common lane made every program that
+# co-compiles both lanes fail HIR lowering and run whole-module interpreted
+# (flatten_struct_owner.rs, `Node::TypeAlias(alias) if type_names_any(...)`).
+#
+# Source-contract evidence plus one value example. It cannot observe which
+# engine executes it; the strict-JIT transcript is in the bug document.
+use std.spec
+use std.spec.step
+use std.io_runtime.{file_read}
+use std.common.js.engine.js_error.{JsError, js_script_error}
+
+fn _alias_lines_naming_js_error(source: text) -> i64:
+    var count: i64 = 0
+    for line in source.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("type ") and trimmed.ends_with("= JsError"):
+            count = count + 1
+    count
+
+describe "common JS engine error module":
+    it "declares no ownerless alias of the two-layout JsError class":
+        step("Scan the common-lane js_error module for aliases of JsError")
+        val source = file_read("src/lib/common/js/engine/js_error.spl")
+        expect(source).to_contain("class JsError:")
+        expect(_alias_lines_naming_js_error(source)).to_equal(0)
+        expect(source.contains("JsBrowserError")).to_equal(false)
+
+    it "counts an alias of JsError when one is present":
+        step("Negative control for the scanner")
+        val fixture = "class JsError:\n    message: text\n\ntype JsOther = JsError\ntype JsResult = Result\n"
+        expect(_alias_lines_naming_js_error(fixture)).to_equal(1)
+
+    it "still builds the common-lane script error":
+        step("Construct the common JsError through its public helper")
+        val failure: JsError = js_script_error("boom")
+        expect(failure.message).to_equal("boom")
+        expect(failure.source).to_equal("script")

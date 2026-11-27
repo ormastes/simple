@@ -1,0 +1,194 @@
+# @req REQ-WORKSPACE-AUTH REQ-WORKSPACE-BIND REQ-WORKSPACE-RETENTION
+# AUTHORED/NOT_RUN. Pure codecs + real signature verifier + actual owned journal
+# archives only. No opaque probe/source owner, staging or launch is fabricated.
+use test.fixtures.orchestration.agent_workspace_invocation_fixture_v1.*
+use std.common.contracts.orchestration.agent_workspace_invocation_v1.*
+use std.common.contracts.orchestration.agent_workspace_invocation_packet_v1.*
+use std.nogc_sync_mut.orchestration.host_agent_workspace_execution_v1.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.common.contracts.orchestration.host_capacity_v1.HostCapacityV1
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.common.contracts.distributed_control_v2.ExecutionGrantV2
+use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_open_cleanup_v2
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+
+fn invocation_wire_field_v1(source: text, key: text, value: SdnValue) -> text:
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 2097152,
+        max_depth: 8, max_nodes: 8192, max_rows: 0, max_cells: 0, max_columns: 64)).unwrap()
+    var fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: fail("fixture object required")
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn invocation_verify_fixture_v1(fixture: AgentWorkspaceInvocationFixtureV1) -> Result<ExecutionGrantV2, text>:
+    val operation = host_agent_workspace_invocation_operation_v1(fixture.packet.manifest, fixture.packet.host.operation,
+        fixture.policy, fixture.scope, fixture.context)?
+    distributed_verify_grant_approval_from_snapshot_v2(fixture.policy.snapshot, fixture.packet.signed, fixture.packet.approval,
+        operation, fixture.context.grant_clock, fixture.policy.snapshot.generation, fixture.context.policy_revision,
+        fixture.context.revocation_epoch, fixture.context.session_generation)
+
+fn invocation_archive_owner_v1(root: text, fixture: AgentWorkspaceInvocationFixtureV1) -> HostCapacityOwnerV1:
+    val capacity = HostCapacityV1(physical_host_id: fixture.scope.physical_host_id, authority_id: "authority",
+        boot_id: container_scope_fence_id_v2(fixture.scope).unwrap(), provider_generation: fixture.scope.provider_generation,
+        cpu_millis: 2000, memory_bytes: 2048, exclusive_devices: [])
+    match host_capacity_owner_open_owned_v2(root, capacity, "a".repeat(64), 64, true):
+        case HostCapacityOpenV2.Ready(owner): owner
+        case HostCapacityOpenV2.Rejected(reason): fail("unexpected actual journal rejection:" + reason)
+        case HostCapacityOpenV2.CleanupRequired(cleanup, reason):
+            val released = distributed_operation_journal_open_cleanup_v2(cleanup)
+            expect(released.cleanup.is_none()).to_equal(true)
+            expect(released.closed).to_equal(true)
+            expect(released.error).to_equal("")
+            fail("actual journal retained cleanup:" + reason)
+
+describe "full signed workspace invocation binding":
+    it "round trips exact raw task inner argv workspace and lifetime without normalization":
+        step("Preserve complete immutable invocation input")
+        val fixture = agent_workspace_invocation_fixture_v1()
+        val bytes = agent_workspace_invocation_manifest_encode_v1(fixture.packet.manifest).unwrap()
+        val decoded = agent_workspace_invocation_manifest_decode_v1(bytes).unwrap()
+        expect(decoded.task.content).to_equal("Review literal -\r\n")
+        expect(decoded.inner_argv[2]).to_equal(decoded.task.content)
+        expect(decoded.task_use.task_digest).to_equal(sha256_text(decoded.task.content))
+        expect(decoded.workspace_manifest).to_equal(fixture.packet.manifest.workspace_manifest)
+        expect(decoded.not_after).to_equal(170)
+        expect(agent_workspace_invocation_manifest_encode_v1(decoded).unwrap()).to_equal(bytes)
+        val packet_bytes = agent_workspace_invocation_packet_encode_v1(fixture.packet).unwrap()
+        expect(agent_workspace_invocation_packet_encode_v1(agent_workspace_invocation_packet_decode_v1(packet_bytes).unwrap()).unwrap()).to_equal(packet_bytes)
+
+    it "rejects strict schema and bootstrap-only or altered authority profiles":
+        step("Reject permissive or partial invocation descriptions")
+        val fixture = agent_workspace_invocation_fixture_v1()
+        val bytes = agent_workspace_invocation_manifest_encode_v1(fixture.packet.manifest).unwrap()
+        for key in ["intent", "innerExecAuthority", "clockPolicy", "terminalPolicy", "kind"]:
+            expect(agent_workspace_invocation_manifest_decode_v1(invocation_wire_field_v1(bytes, key, SdnValue.String("bootstrap-only"))).is_err()).to_equal(true)
+        expect(agent_workspace_invocation_manifest_decode_v1(invocation_wire_field_v1(bytes, "preparationActions", SdnValue.Array([SdnValue.String("stage-approved-loose-objects")]))).is_err()).to_equal(true)
+        expect(agent_workspace_invocation_manifest_decode_v1(invocation_wire_field_v1(bytes, "version", SdnValue.Int(2))).is_err()).to_equal(true)
+        expect(agent_workspace_invocation_manifest_decode_v1(invocation_wire_field_v1(bytes, "extra", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(agent_workspace_invocation_manifest_decode_v1(invocation_wire_field_v1(bytes, "notAfter", SdnValue.String("170"))).is_err()).to_equal(true)
+        expect(agent_workspace_invocation_manifest_decode_v1(bytes + "\n").is_err()).to_equal(true)
+        expect(agent_workspace_invocation_manifest_decode_v1(bytes + "version: 1\n").is_err()).to_equal(true)
+        expect(agent_workspace_invocation_manifest_decode_v1("{kind: agent-workspace-invocation, version: 1}\n").is_err()).to_equal(true)
+
+    it "rejects mismatched task use source catalog and changed outer session attempt":
+        step("Bind task version and source selection to the Host request")
+        val fixture = agent_workspace_invocation_fixture_v1()
+        var changed = fixture.packet
+        changed.manifest.task_use.ns = "other"
+        expect(agent_workspace_invocation_packet_encode_v1(changed).is_err()).to_equal(true)
+        changed = fixture.packet
+        changed.manifest.task_use.task_digest = "d".repeat(64)
+        expect(agent_workspace_invocation_packet_encode_v1(changed).is_err()).to_equal(true)
+        changed = fixture.packet
+        changed.manifest.task_use.source_digest = "e".repeat(64)
+        expect(agent_workspace_invocation_packet_encode_v1(changed).is_err()).to_equal(true)
+        changed = fixture.packet
+        changed.manifest.catalog = "another catalog"
+        expect(agent_workspace_invocation_packet_encode_v1(changed).is_err()).to_equal(true)
+        changed = fixture.packet
+        changed.manifest.task_use.attempt = 2
+        expect(agent_workspace_invocation_packet_encode_v1(changed).unwrap_err()).to_equal("agent-workspace-invocation-host-mismatch")
+
+    it "binds model inner argv workspace selection and fixed deadlines to invocation approval":
+        step("Reject changed invocation bytes under an earlier approval")
+        val fixture = agent_workspace_invocation_fixture_v1()
+        expect(invocation_verify_fixture_v1(fixture).is_ok()).to_equal(true)
+        var changed = fixture
+        changed.packet.manifest.task_use.model = "other-model"
+        expect(invocation_verify_fixture_v1(changed).is_err()).to_equal(true)
+        changed = fixture
+        changed.packet.manifest.inner_argv = ["/usr/bin/codex", "--", "different prompt"]
+        expect(invocation_verify_fixture_v1(changed).is_err()).to_equal(true)
+        changed = fixture
+        changed.packet.manifest.selection_binding_digest = "e".repeat(64)
+        expect(invocation_verify_fixture_v1(changed).is_err()).to_equal(true)
+        changed = fixture
+        changed.packet.manifest.workspace_manifest = invocation_wire_field_v1(changed.packet.manifest.workspace_manifest, "slotBindingDigest", SdnValue.String("f".repeat(64)))
+        expect(invocation_verify_fixture_v1(changed).is_err()).to_equal(true)
+        changed = fixture
+        changed.packet.manifest.not_after = 171
+        expect(invocation_verify_fixture_v1(changed).is_err()).to_equal(true)
+
+    it "requires explicit invoke roles and independent grant plus approval signatures":
+        step("Do not infer invocation permission from ordinary Host execution")
+        val denied = agent_workspace_invocation_fixture_v1(false)
+        expect(invocation_verify_fixture_v1(denied).is_err()).to_equal(true)
+        val fixture = agent_workspace_invocation_fixture_v1()
+        var changed = fixture
+        changed.packet.signed = fixture.packet.host.signed
+        changed.packet.approval = fixture.packet.host.approval
+        expect(invocation_verify_fixture_v1(changed).is_err()).to_equal(true)
+        changed = fixture
+        changed.packet.approval.signature[0] = ((changed.packet.approval.signature[0] as i64 + 1) % 256) as u8
+        expect(invocation_verify_fixture_v1(changed).is_err()).to_equal(true)
+        changed = fixture
+        changed.packet.signed.signature[0] = ((changed.packet.signed.signature[0] as i64 + 1) % 256) as u8
+        expect(invocation_verify_fixture_v1(changed).is_err()).to_equal(true)
+
+    it "binds exact Host operation installed policy scope revocation and expiry":
+        step("Reject changed or expired authority context")
+        val fixture = agent_workspace_invocation_fixture_v1()
+        var changed = fixture
+        changed.packet.host.operation.environment_digest = "c".repeat(64)
+        expect(invocation_verify_fixture_v1(changed).is_err()).to_equal(true)
+        changed = fixture
+        changed.policy.source_digest = "d".repeat(64)
+        expect(invocation_verify_fixture_v1(changed).is_err()).to_equal(true)
+        changed = fixture
+        changed.scope.boot_id = "another-boot"
+        changed.scope.continuity_id = "another-boot"
+        expect(invocation_verify_fixture_v1(changed).is_err()).to_equal(true)
+        changed = fixture
+        changed.context.grant_clock = 1000000
+        expect(invocation_verify_fixture_v1(changed).is_err()).to_equal(true)
+        changed = fixture
+        changed.context.revocation_epoch = 3
+        expect(invocation_verify_fixture_v1(changed).is_err()).to_equal(true)
+
+    it "bounds inner argv credentials and preparation budget without granting their production":
+        step("Reject oversized argv and invalid bounded continuation fields")
+        val fixture = agent_workspace_invocation_fixture_v1()
+        var changed = fixture.packet.manifest
+        changed.inner_argv = ["/usr/bin/codex", "a".repeat(8193)]
+        expect(agent_workspace_invocation_manifest_encode_v1(changed).is_err()).to_equal(true)
+        changed = fixture.packet.manifest
+        changed.preparation_budget_ms = changed.workload_duration_ms + 1
+        expect(agent_workspace_invocation_manifest_encode_v1(changed).is_err()).to_equal(true)
+        changed = fixture.packet.manifest
+        changed.credential_refs = ["credential", "credential"]
+        expect(agent_workspace_invocation_manifest_encode_v1(changed).is_err()).to_equal(true)
+        changed = fixture.packet.manifest
+        changed.inner_argv = ["/usr/bin/codex", "bad\0argument"]
+        expect(agent_workspace_invocation_manifest_encode_v1(changed).is_err()).to_equal(true)
+
+    it "archives exact full signed inputs under an actual owned Host journal and rejects replacement":
+        step("Retain both complete signed inputs before any workspace effects")
+        val fixture = agent_workspace_invocation_fixture_v1()
+        val root = secure_temp_dir("/tmp", "agent-invocation-archive-").unwrap()
+        val owner = invocation_archive_owner_v1(root, fixture)
+        expect(host_agent_workspace_archive_v1(owner, fixture.packet).unwrap()).to_equal(true)
+        expect(host_agent_workspace_archive_v1(owner, fixture.packet).unwrap()).to_equal(true)
+        val suffix = sha256_text(fixture.packet.host.operation.id)
+        val packet_path = root + "/host-execute-packets/" + sha256_text("agent-invoke-" + suffix) + ".sdn"
+        val manifest_path = root + "/host-execute-packets/" + sha256_text("agent-manifest-" + suffix) + ".sdn"
+        expect(file_read_regular_no_follow_bounded(packet_path, 2097152).unwrap()).to_equal(agent_workspace_invocation_packet_encode_v1(fixture.packet).unwrap())
+        expect(file_read_regular_no_follow_bounded(manifest_path, 524288).unwrap()).to_equal(agent_workspace_invocation_manifest_encode_v1(fixture.packet.manifest).unwrap())
+        var changed = fixture.packet
+        changed.manifest.task_use.model = "other-model"
+        expect(host_agent_workspace_archive_v1(owner, changed).is_err()).to_equal(true)
+        val closed = host_capacity_owner_close_owned_v2(owner)
+        expect(closed.cleanup.is_none()).to_equal(true)
+        expect(closed.closed).to_equal(true)
+        expect(closed.error).to_equal("")
+        expect(closed.state).to_equal(FileLockReleaseStateV2.Released)
+        expect(dir_remove(root, true)).to_equal(true)

@@ -68,6 +68,15 @@ struct MirSignature:
     # Cranelift import signature is built from it.
     declared_params: [MirType] = []
     declared_params_known: bool = false
+    # Per-parameter provenance, index-aligned with `declared_params`: true
+    # when the CALL argument at that index was an unsuffixed integer literal
+    # (or its negation) that MIR lowering coerced into this declared float
+    # slot (lower_int_literal_for_float_slot). Same-module calls ignore it;
+    # the Cranelift adapter's import check uses it to keep the cross-module
+    # contract "there is no implicit coercion" (bug p4p2_cranelift_verifier_
+    # types_2026-10-20) even though the coercion happens before the module
+    # split hides the int->float crossing from operand types.
+    int_literal_coerced_params: [bool] = []
 
 fn mir_signature_params(sig: MirSignature) -> [MirType]:
     """Return signature parameters through a typed accessor."""
@@ -129,6 +138,10 @@ struct MirTypeDef:
     kind: MirTypeDefKind
     is_export_c: bool      # @export("C") — generate C ABI wrappers + headers
     export_name: text      # Custom C symbol prefix, empty = use default
+    # Aggregate alignment from the target-aware layout producer (TypeLayout.align).
+    # 0 = not transported (enum typedefs, projected/rebuilt rows); consumers fall
+    # back to their own natural alignment for 0.
+    alignment: i64 = 0
 
 """Type definition kind."""
 enum MirTypeDefKind:
@@ -214,6 +227,13 @@ enum MirTypeKind:
     Promise(inner: MirType)    # Promise<T> - async computation result
     Generator(yield_: MirType, return_: MirType)  # Generator yielding and returning types
     ActorType(message: MirType)    # Actor handling message type
+    # Explicit nil singleton type: the semantic identity of the source `nil`
+    # annotation (HIR HirTypeKind.Nil). ABI: one 64-bit word carrying the
+    # tagged SplValue nil constant 3 — the same representation NilLit has
+    # always materialized (expr_dispatch.spl `case NilLit`), now named at the
+    # type level instead of laundering the annotation into Unit or a source
+    # integer. Appended to preserve discriminants.
+    Nil
 
 impl MirType:
     static fn i64() -> MirType:
@@ -221,6 +241,9 @@ impl MirType:
 
     static fn f64() -> MirType:
         MirType(kind: MirTypeKind.F64)
+
+    static fn f32() -> MirType:
+        MirType(kind: MirTypeKind.F32)
 
     static fn bool() -> MirType:
         MirType(kind: MirTypeKind.Bool)
@@ -268,8 +291,10 @@ impl MirType:
             case I8 | U8 | Bool: Some(1)
             case I16 | U16 | Char: Some(2)
             case I32 | U32 | F32: Some(4)
-            case I64 | U64 | F64 | Ptr(_, _) | Ref(_, _) | FuncPtr(_) | Result(_, _): Some(8)
-            case _: nil
+            # Nil is the tagged SplValue word (constant 3 at runtime): one
+            # 64-bit word, same class as the other word-sized primitives.
+            case I64 | U64 | F64 | Ptr(_, _) | Ref(_, _) | FuncPtr(_) | Result(_, _) | Nil: Some(8)
+            case _: None
 
     fn size_bytes() -> i64:
         """Get size in bytes."""
@@ -277,7 +302,7 @@ impl MirType:
         match prim:
             Some(size):
                 return size
-            nil:
+            None:
                 pass_do_nothing("non-primitive type size uses structural fallback")
 
         match self.kind:
@@ -285,19 +310,19 @@ impl MirType:
             case Vec4f | Vec4i: 16
             case Vec8f | Vec4d | Vec8i: 32
             case Vec16f | Vec8d | Vec16i: 64
-            case Array(elem, size): elem.size_bytes() * size
+            case Array(elem, size): wa_mir_type_size_bytes(elem) * size
             case Dict(_, _): 8
             case Bits(width, _): (width + 7) / 8
             case Tuple(elements):
                 var total = 0
                 for e in elements:
-                    total = total + e.size_bytes()
+                    total = total + wa_mir_type_size_bytes(e)
                 total
             case Union(members):
                 # Tagged union: discriminant (8 bytes) + max member size
                 var max_size = 0
                 for m in members:
-                    val s = m.size_bytes()
+                    val s = wa_mir_type_size_bytes(m)
                     if s > max_size:
                         max_size = s
                 8 + max_size
@@ -309,7 +334,7 @@ impl MirType:
         match prim:
             Some(align):
                 return align
-            nil:
+            None:
                 pass_do_nothing("non-primitive type alignment uses structural fallback")
 
         match self.kind:
@@ -317,12 +342,12 @@ impl MirType:
             case Vec4f | Vec4i: 16
             case Vec8f | Vec4d | Vec8i: 32
             case Vec16f | Vec8d | Vec16i: 64
-            case Array(elem, _): elem.alignment()
+            case Array(elem, _): wa_mir_type_alignment(elem)
             case Dict(_, _): 8
             case Tuple(elements):
                 var max_align = 1
                 for e in elements:
-                    val align = e.alignment()
+                    val align = wa_mir_type_alignment(e)
                     if align > max_align:
                         max_align = align
                 max_align
@@ -330,11 +355,21 @@ impl MirType:
                 # Alignment is max of discriminant (8) and all members
                 var max_align = 8
                 for m in members:
-                    val align = m.alignment()
+                    val align = wa_mir_type_alignment(m)
                     if align > max_align:
                         max_align = align
                 max_align
             case _: 8
+
+# WA-MIR-UNRESOLVED-size_bytes / -alignment: `elem.size_bytes()` on an enum
+# payload binding (and on a `for` element over a payload array) lowered to a
+# const-0 placeholder in MIR. A typed parameter resolves. Bug:
+# doc/08_tracking/bug/mir_unresolved_method_on_enum_payload_binding_2026-10-25.md
+fn wa_mir_type_size_bytes(t: MirType) -> i64:
+    t.size_bytes()
+
+fn wa_mir_type_alignment(t: MirType) -> i64:
+    t.alignment()
 
 # ============================================================================
 # Factory Functions (workaround for interpreter struct construction limitation)
@@ -355,7 +390,7 @@ fn mir_type_is_text(t: MirType) -> bool:
     Written without a nested enum pattern binding on purpose -- the pointee is
     matched in a second, separate `match` so the pattern stays one level deep."""
     val kind: MirTypeKind = t.kind
-    var pointee: MirType = nil
+    var pointee: MirType = None
     match kind:
         case MirTypeKind.Ptr(inner, _):
             pointee = inner

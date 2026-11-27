@@ -645,22 +645,36 @@ fn apply_plan(func: &mut MirFunction, plan: Plan) -> StringAccumStats {
     let push_dest = func.new_vreg();
     {
         let block = func.block_mut(plan.site_block).expect("site block exists");
+        // A FRESH piece (`s = s + (t + "!")`) is `Drop`ped right after the
+        // concat (lowering_expr_ops.rs `right_fresh`). The push lands at the
+        // store's slot, after that Drop, so the Drop must move behind the
+        // push -- left in place it freed the piece before the push read it
+        // (integ24 Stage 2: empty `__module_init_*` lines in simple_entry.c).
+        let piece_drops: Vec<usize> = (plan.site_call + 1..plan.site_store)
+            .filter(|&i| matches!(&block.instructions[i], MirInst::Drop { value, .. } if *value == plan.piece))
+            .collect();
         // Remove high index first so the lower indices stay valid.
-        let mut kill = [plan.site_load, plan.site_call, plan.site_store];
+        let mut kill = vec![plan.site_load, plan.site_call, plan.site_store];
+        kill.extend(piece_drops.iter().copied());
         kill.sort_unstable();
+        let mut moved_drops = Vec::new();
         for i in kill.iter().rev() {
-            block.instructions.remove(*i);
+            let removed = block.instructions.remove(*i);
+            if piece_drops.contains(i) {
+                moved_drops.push(removed);
+            }
         }
+        moved_drops.reverse();
         // Insert where the STORE was, not where the Load was. The concat's
         // right operand is usually defined BETWEEN the load and the call (a
         // `ConstString`, say), so inserting at the load's index put the push
         // before its own argument was defined -- the JIT then read a stale
         // `vreg_values` entry carried over from the previous iteration and the
         // accumulation came out exactly one push short on every input.
-        // `kill[2]` is the store's original index; two instructions below it
-        // were removed, so it lands at `kill[2] - 2`.
-        let at = kill[2] - 2;
-        let replacement = vec![
+        // The store has the highest original index; every other removed
+        // instruction sat below it, so it lands at `store - (kill.len() - 1)`.
+        let at = plan.site_store - (kill.len() - 1);
+        let mut replacement = vec![
             MirInst::LocalAddr {
                 dest: site_h_addr,
                 local_index: handle_local,
@@ -672,6 +686,7 @@ fn apply_plan(func: &mut MirFunction, plan: Plan) -> StringAccumStats {
             },
             call_builder("rt_string_builder_push", vec![site_h, plan.piece], Some(push_dest)),
         ];
+        replacement.extend(moved_drops);
         for (off, inst) in replacement.into_iter().enumerate() {
             block.instructions.insert(at + off, inst);
         }
@@ -918,5 +933,60 @@ fn build(a: str, b: str) -> str:
             )),
             "the handle must use the slot that resolves to the local we pushed"
         );
+    }
+
+    /// A FRESH right operand (`s = s + (t + "!")`) is `Drop`ped right after
+    /// the concat by the lowering (`lowering_expr_ops.rs`, `right_fresh`).
+    /// The push replaces the concat at the STORE's slot, i.e. after that
+    /// Drop, so the piece was freed before it was pushed: the push read a
+    /// dead string and appended nothing. The integ24 Stage 2 built this way
+    /// emitted no `__module_init_*` calls into simple_entry.c, so no module
+    /// global was ever initialized. The Drop must follow the push.
+    #[test]
+    fn fresh_piece_is_dropped_after_its_push_not_before() {
+        let src = r#"
+fn build(n: i32, t: str) -> str:
+    var s = ""
+    var i = 0
+    while i < n:
+        s = s + (t + "!")
+        i = i + 1
+    return s
+"#;
+        let (new_, push, finish, concat) = counts(src, "build");
+        assert_eq!((new_, push, finish), (1, 2, 1), "the accumulation is still rewritten");
+        assert_eq!(concat, 1, "only the piece's own concat remains");
+
+        let hir = parse_and_lower(src);
+        let mir = crate::mir::lower_to_mir(&hir).expect("mir lowering");
+        let func = mir.functions.iter().find(|f| f.name.ends_with("build")).expect("build");
+        let mut checked = 0;
+        for block in &func.blocks {
+            for (i, inst) in block.instructions.iter().enumerate() {
+                let MirInst::Call { target, args, .. } = inst else {
+                    continue;
+                };
+                if target.name() != "rt_string_builder_push" || args.len() != 2 {
+                    continue;
+                }
+                let piece = args[1];
+                let is_piece_concat = block.instructions.iter().any(|d| {
+                    d.dest() == Some(piece)
+                        && matches!(d, MirInst::Call { target, .. } if target.name() == "rt_string_concat")
+                });
+                if !is_piece_concat {
+                    continue;
+                }
+                for (j, other) in block.instructions.iter().enumerate() {
+                    if let MirInst::Drop { value, .. } = other {
+                        if *value == piece {
+                            assert!(j > i, "piece {piece:?} dropped at {j}, before its push at {i}");
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 1, "the fresh piece is dropped exactly once, after the push");
     }
 }

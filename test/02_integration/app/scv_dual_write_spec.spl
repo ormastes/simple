@@ -17,11 +17,19 @@ use std.spec.{describe, it, expect, step}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+
+# Fixture roots must live where BOTH the POSIX fixture shell and the Simple
+# filesystem APIs can address them: the runtime does not translate a POSIX
+# "/tmp" prefix on Windows, so anchor under the host temp dir instead.
+fn _fixture_base() -> text:
+    get_temp_dir().replace("\\", "/")
+
 fn _prelude(tag: text) -> [text]:
     [
         "set -eu",
         "REPO=$(pwd)",
-        "TMP=$(mktemp -d /tmp/scv-dw-{tag}.XXXXXX)",
+        "TMP=$(mktemp -d {_fixture_base()}/scv-dw-{tag}.XXXXXX)",
         "scv() { SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" \"$@\"; }",
         "cd \"$TMP\"",
         "mkdir work && cd work",
@@ -31,7 +39,15 @@ fn _prelude(tag: text) -> [text]:
         "scv snapshot >/dev/null",
         # Driver: unquoted heredoc bakes $TMP in as literal paths before Simple
         # sees the source (main.spl takes no argv; library funcs take roots).
-        "cat > \"$TMP/drv.spl\" <<EOF",
+        # The driver must live INSIDE the repository tree: `use std.scv.*`
+        # resolves from the project stdlib roots, and private fns of std.scv.*
+        # are a hard semantic error for files outside the tree. Written under
+        # the gitignored build/ dir and removed on exit — same convention as
+        # scv_jj_mutating_adapter_spec.
+        "DRV=\"$REPO/build/scv-dw-drv-$$\"",
+        "mkdir -p \"$DRV\"",
+        "trap 'rm -rf \"$DRV\"' EXIT",
+        "cat > \"$DRV/drv.spl\" <<EOF",
         "use std.scv.native_shadow.{scv_dual_write_verify, scv_dual_write_fsck}",
         "fn main() -> i64:",
         "    print(scv_dual_write_verify(\"$TMP/work\", \"$TMP/shadow\"))",
@@ -39,9 +55,8 @@ fn _prelude(tag: text) -> [text]:
         "    0",
         "EOF",
         # cwd must be the Simple project root: std.* resolves from the
-        # project stdlib roots, derived from cwd/importing file — a /tmp
-        # driver run from inside the temp repo cannot resolve std.scv.*.
-        "drv() { (cd \"$REPO\" && SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$TMP/drv.spl\"); }"
+        # project stdlib roots, derived from cwd/importing file.
+        "drv() { (cd \"$REPO\" && SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$DRV/drv.spl\"); }"
     ]
 
 fn _run(lines: [text]) -> text:

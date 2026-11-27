@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-13, FULLTEST lane (`work/fulltest-phase2-2026-09-13`).
-**Status:** OPEN — this is the SAME class as
+**Status:** SUPERSEDED — this is the SAME class as
 `full_cli_selfhosted_native_build_blockers_2026-08-27.md` Blocker A and
 `mcp_stdio_smoke_seed_flat_registry_len_i64_2026-07-17.md`, re-confirmed here
 on a different arch/OS (aarch64 Linux vs. that record's x86_64) and at a
@@ -126,3 +126,123 @@ number of probes was affordable in this session; not completed here.
 and `origin/main` (990 commits touching those paths) with the above
 matched-pair probe as the bisect script is the mechanical next step.
 
+
+## No longer reproducible at current source — 2026-11-05
+
+Two independent verifications at current release/1.0.0:
+
+1. The trust-root bootstrap built Stage 2 itself on this host (aarch64
+   Linux): 1567 modules compiled and linked by the seed, sanity gate PASS.
+   This is the exact operation this doc records as impossible (the blocking
+   closure was the compiler's own graph, which the bootstrap compiles
+   end-to-end).
+2. The doc's precise recipe — deployed seed running native-build of a
+   2-line hello world, forcing the seed to load/interpret its own
+   ~1800-module source graph — ran for 900s (hit the probe timeout, still
+   compiling) with ZERO occurrences of `method 'len' not found on type
+   'i64'`; bootstrap error counts at every recorded point were 0. On
+   2026-09-13 this failure was immediate and deterministic.
+
+The registry-corruption defect does not reproduce at current source. Not
+claimed: the probe build did not complete within the window (it is slow, not
+failed); the stage2 compiler-test matrix end-to-end result remains the
+final acceptance for running the suite under stage 2.
+
+## 2026-11-09 — location diagnostic landed (fix-implemented-verification-pending)
+
+`bail_unknown_method!` (`src/compiler_rust/compiler/src/interpreter/error_macros.rs`)
+now attaches `while evaluating module: <file>` (and sets the error's file) on
+every unknown-method error, and with `SIMPLE_BOOTSTRAP_DIAG=1` adds the 12
+innermost interpreted functions as a note plus an `[unknown-method]` stderr
+line. Next aarch64 Linux run: rerun the failing `native-build` with
+`SIMPLE_BOOTSTRAP_DIAG=1` and record the module + call stack here. cargo not
+run on Windows (disk < 30 GB); needs a seed rebuild to take effect.
+
+---
+
+## Addendum 2026-11-11 (lane boot7) — SUPERSEDED-by-prior-lane; spot-check found the 2026-11-09 diagnostic incomplete for this row's exact error shape
+
+This doc already carries verified addenda from earlier lanes: 2026-11-05 (defect
+no longer reproducible at current source — trust-root bootstrap built Stage 2 on
+aarch64 Linux, 1567 modules, sanity gate PASS; 900 s hello-world probe with zero
+`len`-on-`i64` occurrences) and 2026-11-09 (location diagnostic landed,
+fix-implemented-verification-pending). Spot-checks at tip b364745fdbf8:
+
+1. **Headline defect** (native-build blocked by `method 'len' not found on type
+   'i64'` under the compiler's own closure): accepted as SUPERSEDED per the
+   2026-11-05 verified addendum. Not re-run here: the repro needs the aarch64
+   Linux bootstrap (Windows host, and native/entry-closure builds are forbidden
+   in this lane).
+
+2. **2026-11-09 location diagnostic — spot-check: INCOMPLETE for this row's
+   error shape.** The landed fix (cf52b105306b, "diag(seed): unknown-method
+   errors carry module file + interpreted call stack", an ancestor of the
+   2026-11-11 seed build 0791c2b7f4a7) attaches `while evaluating module:
+   <file>` only inside the `bail_unknown_method!` macro
+   (src/compiler_rust/compiler/src/interpreter/error_macros.rs:89-91). This
+   row's exact error text — `method 'len' not found on type 'i64' (receiver
+   value: N)` — is raised from a DIFFERENT site, the primitive dispatch tail at
+   src/compiler_rust/compiler/src/interpreter_method/mod.rs:2050-2075, which
+   builds its `ErrorContext` manually and does NOT carry the module note.
+   Seed-smoke (2026-11-11, refreshed seed 0791c2b7f4a7): `val x: i64 = 5;
+   print(x.len())` under SIMPLE_EXECUTION_MODE=interpret, with and without
+   SIMPLE_BOOTSTRAP_DIAG=1, prints the bare
+   `error: semantic: method 'len' not found on type 'i64' (receiver value: 5)`
+   with NO module file, NO note, NO call stack. This is exactly the gap the
+   pinning test 51954450aa61 documents ("the primitive dispatch tail builds its
+   ErrorContext manually and does NOT yet carry the module note (follow-up on
+   the tracking bug)").
+
+Residual follow-up (recorded, not fixable in-lane): extend the module-note
+attachment to the manual-ctx dispatch tail in interpreter_method/mod.rs so this
+row's error shape is locatable too. Fix is seed-side Rust and only takes effect
+after a seed rebuild (cargo not runnable on this Windows host per the 2026-11-09
+note: disk < 30 GB), so no in-lane fix attempted.
+
+## 2026-11-26: verified at tip on aarch64 Linux
+
+**Compiler under test: an admitted Stage 2 built on this host** (aarch64 Linux,
+DGX GB10), using
+`COMPILER_BUILD_TIMEOUT_SECONDS=900 scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage2 --backend=cranelift`.
+It ran detached under `systemd-run -p MemoryMax=40G`, with no other job of
+this lane running.
+
+- **Source and seed.** The tree was pinned at `4995f23e7ccd`, which is
+  origin/release/1.0.0 57e92cb68fc7 plus a docs and tests commit only. The
+  pinned seed's sha256 prefix is `27cfa68556a374c9`.
+- **Build.** The seed native-built the compiler:
+  `Build complete: 1620 compiled, 0 cached, 0 failed` (210.4s compile + 5.7s link).
+- **Admission.** `stage2-sanity.receipt` says `stage2-sanity: pass`, and both
+  frontend legs (`SIMPLE_BOOTSTRAP=0` and `=1`) report `status=complete raw_status=0`.
+  The admitted binary
+  (`stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`) has sha256
+  `53e9e2e7513658f1...` and is 58,552,816 bytes.
+- **Earlier run.** A first run at 57e92cb68fc7 compiled identically but its
+  admission sanity timed out (rc=124, 180s default) on the 1-module
+  `stage2-module-path-naming` smoke. That was the only difference. Probe
+  results were the same on both binaries.
+
+Probes were built with
+`SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_GO_TO_END=1 SIMPLE_FILE_WORKERS=0 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 <stage2> native-build main.spl --backend=<cranelift|llvm> --entry-closure`.
+They were run and compared byte for byte with hand-checked expected output,
+which is identical to the 11-26 seed interpreter output. Scope: the probes
+themselves ran on the `SIMPLE_BOOTSTRAP=1` native-build leg only.
+
+This record said a Phase-2 native-build of the compiler's own closure could
+not complete. It completed with 0 failures. The wrapper log and every
+per-stage log under the output dir have **0** occurrences of
+`not found on type` + `i64` and **0** of `SCV-E-SNAPSHOT`.
+A supplementary probe also passed on cranelift and llvm. It has
+Stage-2-compiled code call `.len()` on a text literal, empty text, text
+returned from a fn, `[i64]`, `[text]`, element text, a pushed array and
+interpolated text.
+
+The residual is unchanged (seed-side Rust, not in this lane). The location
+diagnostic gap from the 2026-11-11 addendum still holds on the 11-26 seed:
+`val x: i64 = 5` then `print(x.len())` under `SIMPLE_BOOTSTRAP_DIAG=1` prints
+only `error: semantic: method 'len' not found on type 'i64' (receiver value: 5)`,
+with no module and no stack. The gap is in the primitive dispatch tail in
+`interpreter_method/mod.rs`. The headline defect does not reproduce; status
+-> verified.
+
+Not rerun: the 2026-09-13 recipe of the seed native-building a 2-line hello world. The admitted Stage 2 above is the operation in this row's title, and it completed.

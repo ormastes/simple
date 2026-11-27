@@ -1,7 +1,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-typedef intptr_t RuntimeValue;
+typedef int64_t RuntimeValue; /* 64-bit on every arch (PR #10816) */
 
 #define UART_BASE 0x10000000UL
 #include "../../common/baremetal_16550_serial.h"

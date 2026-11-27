@@ -1,0 +1,50 @@
+# Direct unit tests for the shared provider helpers extracted from the Windows
+# Docker and Linux OCI leaf adapters. Pure data only.
+use std.spec.*
+use std.nogc_async_mut.container.shared.request_record_v1.*
+use std.nogc_async_mut.container.shared.request_digest_v1.*
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.{SdnValue, SdnSpan}
+
+fn spans() -> Dict<text, SdnSpan>:
+    {}
+
+describe "shared request record readers":
+    it "reads typed text, integer and bounded text-vector fields":
+        val fields: Dict<text, SdnValue> = {"name": SdnValue.String("a"), "count": SdnValue.Int(3),
+            "argv": container_record_text_array_v1(["x", "y"])}
+        expect(container_record_text_v1(fields, "name", spans())).to_equal(Ok("a"))
+        expect(container_record_integer_v1(fields, "count", spans())).to_equal(Ok(3))
+        expect(container_record_texts_v1(fields, "argv", spans(), 2, "limit")).to_equal(Ok(["x", "y"]))
+
+    it "rejects wrong types with the element path and over-limit vectors with the caller limit":
+        val fields: Dict<text, SdnValue> = {"name": SdnValue.Int(1),
+            "argv": SdnValue.Array([SdnValue.String("x"), SdnValue.Int(2)])}
+        match container_record_text_v1(fields, "name", spans()):
+            case Err(rejection):
+                expect(rejection.kind).to_equal("type")
+                expect(rejection.path).to_equal("name")
+            case Ok(_): fail("integer must not read as text")
+        match container_record_texts_v1(fields, "argv", spans(), 8, "limit"):
+            case Err(rejection): expect(rejection.path).to_equal("argv.1")
+            case Ok(_): fail("non-text element must reject")
+        match container_record_texts_v1(fields, "argv", spans(), 1, "argument count exceeded"):
+            case Err(rejection):
+                expect(rejection.kind).to_equal("limit")
+                expect(rejection.path).to_equal("argv")
+            case Ok(_): fail("over-limit vector must reject")
+        match container_record_integer_v1(fields, "missing", spans()):
+            case Err(rejection): expect(rejection.kind).to_equal("missing_field")
+            case Ok(_): fail("missing field must reject")
+
+describe "shared request digest fragments":
+    it "hashes each scalar on its own line and counts every vector":
+        expect(container_digest_lines_v1(["a"])).to_equal("    - \"" + sha256_text("a") + "\"\n")
+        expect(container_digest_vector_v1("argumentCount", "arguments", [])).to_equal("argumentCount: 0\narguments:\n")
+        expect(container_digest_vector_v1("commandCount", "command", ["ab", "c"]) ==
+            container_digest_vector_v1("commandCount", "command", ["a", "bc"])).to_equal(false)
+
+    it "compares argv exactly and in order":
+        expect(container_args_equal_v1(["a", "b"], ["a", "b"])).to_equal(true)
+        expect(container_args_equal_v1(["a", "b"], ["b", "a"])).to_equal(false)
+        expect(container_args_equal_v1(["a"], ["a", ""])).to_equal(false)

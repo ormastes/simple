@@ -1,0 +1,65 @@
+# @cover src/lib/common/trace/xray_native_trampoline_aarch64_v1.spl
+# @req REQ-XRAY-PR5B-TRAMPOLINE
+"""
+# XRay PR5b — Simple twin of the AArch64 resident trampoline
+
+`__simple_xray_trampoline_v1` is asm in
+src/runtime/xray/xray_native_runtime_aarch64.c (the irreplaceable register
+save/restore). This twin encodes the same instruction words in pure Simple.
+The golden words below are the clang 23 assembly of that TU;
+scripts/check/check-xray-native-inprocess-e2e.shs re-checks the twin against
+the freshly built object every run.
+"""
+use std.spec.*
+use std.common.trace.xray_native_trampoline_aarch64_v1.*
+
+describe "XRay native AArch64 trampoline twin":
+    it "saves the AAPCS64 caller-saved set in a 16-byte aligned frame":
+        expect(XRAY_NATIVE_TRAMPOLINE_FRAME_BYTES_V1).to_equal(672)
+        expect((XRAY_NATIVE_TRAMPOLINE_FRAME_BYTES_V1 + 16) % 16).to_equal(0)
+        val saved = xray_native_trampoline_saved_registers_v1()
+        for name in ["x1", "x15", "x18", "x29", "x30", "nzcv", "fpcr", "fpsr", "q0", "q7", "q31"]:
+            expect(saved.contains(name)).to_equal(true)
+        # x0/x30 and x16/x17 are pushed by the sled itself.
+        expect(saved.contains("x16")).to_equal(false)
+        expect(saved.contains("x19")).to_equal(false)
+
+    it "encodes the prologue, FP/flags save and handler call word for word":
+        val words = xray_native_trampoline_words_aarch64_v1(-1)
+        expect(words.len()).to_equal(69)
+        expect(words[0]).to_equal(0xA9BF7BFD)
+        expect(words[1]).to_equal(0x910003FD)
+        expect(words[2]).to_equal(0xD10A83FF)
+        expect(words[3]).to_equal(0xA9000BE1)
+        expect(words[10]).to_equal(0xA9074BEF)
+        expect(words[11]).to_equal(0xD53B4209)
+        expect(words[12]).to_equal(0xD53B440A)
+        expect(words[13]).to_equal(0xD53B442B)
+        expect(words[14]).to_equal(0xA9082BE9)
+        expect(words[15]).to_equal(0xF9004BEB)
+        expect(words[16]).to_equal(0x910283E9)
+        expect(words[17]).to_equal(0xAD000520)
+        expect(words[32]).to_equal(0xAD0F7D3E)
+        expect(words[33]).to_equal(0x2A0003E0)
+        expect(words[34]).to_equal(0xAA1E03E1)
+        expect(words[XRAY_NATIVE_TRAMPOLINE_BL_INDEX_V1]).to_equal(0x97FFFFFF)
+
+    it "restores in reverse and returns":
+        val words = xray_native_trampoline_words_aarch64_v1(34)
+        expect(words[35]).to_equal(0x94000022)
+        expect(words[37]).to_equal(0xAD400520)
+        expect(words[52]).to_equal(0xAD4F7D3E)
+        expect(words[53]).to_equal(0xA9482BE9)
+        expect(words[54]).to_equal(0xF9404BEB)
+        expect(words[55]).to_equal(0xD51B4209)
+        expect(words[56]).to_equal(0xD51B440A)
+        expect(words[57]).to_equal(0xD51B442B)
+        expect(words[58]).to_equal(0xA9400BE1)
+        expect(words[65]).to_equal(0xA9474BEF)
+        expect(words[66]).to_equal(0x910003BF)
+        expect(words[67]).to_equal(0xA8C17BFD)
+        expect(words[68]).to_equal(0xD65F03C0)
+
+    it "rejects a handler displacement a BL cannot encode":
+        expect(xray_native_trampoline_words_aarch64_v1(33554432).len()).to_equal(0)
+        expect(xray_native_trampoline_words_aarch64_v1(-33554433).len()).to_equal(0)

@@ -19,7 +19,7 @@
 # truncated sequences) and a CR byte scan; only on failure is each file
 # re-checked to name the offenders.
 #
-# SELFTEST: fatal; runs (8 in-process fixtures asserting verdict AND exit code)
+# SELFTEST: fatal; runs (9 in-process fixtures asserting verdict AND exit code)
 # on the first scan after any change to this script, then its PASS is cached
 # (see the bottom of the file); `--selftest` always runs it.
 #
@@ -40,13 +40,25 @@ in_scope() {
     return 1
 }
 
-# bad_reason <file>: prints reason(s) for a file, empty when clean.
+# bad_reason <file> <converted-output>: fills BAD_REASON and BAD_REASON_ERROR.
+BAD_REASON=""
+BAD_REASON_ERROR=""
 bad_reason() {
     _r=""
-    iconv -f UTF-8 -t UTF-8 < "$1" > /dev/null 2>&1 || _r="invalid-utf8"
+    BAD_REASON_ERROR=""
+    # Write converted bytes to a regular file, not /dev/null. macOS /usr/bin/iconv
+    # can return EIO for a valid multibyte sequence split across its 1024-byte
+    # input buffer when the output descriptor is /dev/null (repro: 1022 ASCII
+    # bytes followed by U+2014). The batch stream's git cat-file header makes
+    # this boundary reachable in ordinary multi-blob scans.
+    if ! : > "$2" 2>/dev/null; then
+        BAD_REASON_ERROR="cannot create converter output"
+    else
+        iconv -f UTF-8 -t UTF-8 < "$1" > "$2" 2>/dev/null || _r="invalid-utf8"
+    fi
     # Byte scans (here and the -z record split): BSD tr in a UTF-8 locale aborts on invalid bytes.
     if ! LC_ALL=C tr -d '\015' < "$1" | cmp -s - "$1"; then _r="${_r:+$_r+}CR"; fi
-    printf '%s' "$_r"
+    BAD_REASON="$_r"
 }
 
 run_scan() {
@@ -87,11 +99,18 @@ run_scan() {
         echo "PASS — 0 file(s) checked in $_range ($_ncommits commit(s)): no in-scope (*.spl *.sdn *.shs *.sdl) file added or modified, nothing to validate"
         return 0
     fi
-    # One git process for all blobs; the `<oid> blob <size>` header lines are
-    # ASCII, so they cannot turn a clean stream into a failing one.
+    # One git process for all blobs. Its `<oid> blob <size>` ASCII headers shift
+    # byte offsets, so validation must not depend on where a multibyte sequence
+    # lands in iconv's input buffer.
     cut -f1 "$_list" | git cat-file --batch > "$_all" 2>/dev/null \
         || { rm -rf "$_tmp"; echo "ERROR — nothing was checked (git cat-file --batch failed)"; return 2; }
-    if [ -z "$(bad_reason "$_all")" ]; then
+    bad_reason "$_all" "$_tmp/converted"
+    if [ -n "$BAD_REASON_ERROR" ]; then
+        rm -rf "$_tmp"
+        echo "ERROR — nothing was checked ($BAD_REASON_ERROR)"
+        return 2
+    fi
+    if [ -z "$BAD_REASON" ]; then
         rm -rf "$_tmp"
         echo "PASS — $_n file(s) checked in $_range ($_ncommits commit(s)), all valid UTF-8 with LF line endings"
         return 0
@@ -99,7 +118,13 @@ run_scan() {
     _off=""; _k=0
     while IFS='	' read -r _oid _path; do
         git cat-file blob "$_oid" > "$_tmp/blob"
-        _why=$(bad_reason "$_tmp/blob")
+        bad_reason "$_tmp/blob" "$_tmp/converted"
+        if [ -n "$BAD_REASON_ERROR" ]; then
+            rm -rf "$_tmp"
+            echo "ERROR — nothing was checked ($BAD_REASON_ERROR)"
+            return 2
+        fi
+        _why=$BAD_REASON
         if [ -n "$_why" ]; then _off="$_off $_path($_why)"; _k=$((_k + 1)); fi
     done < "$_list"
     rm -rf "$_tmp"
@@ -159,6 +184,14 @@ selftest() {
         _fi_file crlf2.spl 'p\r\nq\n'
     } | git fast-import --quiet || { cd "$_here"; echo "ERROR — nothing was checked (selftest fast-import 2 failed)"; return 2; }
     B5=$(git rev-parse main); SIDE=$(git rev-parse side); SIDE_BAD=$(git rev-parse side_bad)
+    {
+        _fi_commit_on main c6 "$B5"
+        _boundary=$(printf '%972s' '' | tr ' ' 'a')
+        _boundary_len=$(printf '%s—\n' "$_boundary" | wc -c | tr -d ' ')
+        printf 'M 100644 inline boundary.spl\ndata %s\n' "$_boundary_len"
+        printf '%s—\n' "$_boundary"
+    } | git fast-import --quiet || { cd "$_here"; echo "ERROR — nothing was checked (selftest fast-import 3 failed)"; return 2; }
+    B6=$(git rev-parse main)
     _stcheck "clean multibyte utf8 + exempt bat/vendor" "$B0..$B1" 0 "PASS — 1 file(s) checked"
     _stcheck "CRLF in .spl" "$B1..$B2" 1 "crlf.spl(CR)"
     _stcheck "truncated utf8 + surrogate" "$B2..$B3" 1 "bad.sdn(invalid-utf8) sur.shs(invalid-utf8)"
@@ -167,10 +200,11 @@ selftest() {
     _stcheck "bare rev rejected" "$B4" 2 "must contain"
     _stcheck "unrebased branch judged from merge-base, not base tip" "$B5..$SIDE" 0 "PASS — 1 file(s) checked"
     _stcheck "unrebased branch's own CRLF still fails, sibling's stale file not named" "$B5..$SIDE_BAD" 1 "1 offender(s): crlf2.spl(CR)"
+    _stcheck "valid multibyte split at cat-file batch buffer boundary" "$B5..$B6" 0 "PASS — 1 file(s) checked"
     cd "$_here" || return 2
     rm -rf "$_st"
     [ "$_stfail" -eq 0 ] || { echo "ERROR — nothing was checked (selftest failed)"; return 2; }
-    echo "selftest: all 8 fixtures passed"
+    echo "selftest: all 9 fixtures passed"
     return 0
 }
 
@@ -188,6 +222,6 @@ if [ "${1:-}" = --selftest ] || [ -z "$_marker" ] || [ ! -f "$_marker" ]; then
     selftest || exit 2
     [ -z "$_marker" ] || : > "$_marker" 2>/dev/null || :
 fi
-[ "${1:-}" = --selftest ] && { echo "PASS — selftest only, 8 fixtures"; exit 0; }
+[ "${1:-}" = --selftest ] && { echo "PASS — selftest only, 9 fixtures"; exit 0; }
 run_scan "${1:-origin/main..HEAD}"
 exit $?

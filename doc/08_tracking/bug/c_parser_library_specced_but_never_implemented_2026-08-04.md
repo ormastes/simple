@@ -94,3 +94,11 @@ Two smaller follow-ups worth doing independently of the feature:
   there and their extra assertions (`array_size`, the preprocessor, the name
   matcher) filed as the real feature gaps — rather than a second parallel
   library being written under `src/lib/common/`.
+
+## Triage 2026-11-25 (p2w1-ab lane, release/1.0.0 @ 38265c7f249) — still absent, unchanged
+
+Re-confirmed at the release/1.0.0 tip: `ls src/lib/common/c_parser/` ->
+`No such file or directory`. Implementing the C type model, the
+`#define`/preprocessor pass, and the C-name matcher remains feature work,
+exactly as scoped in "Why not fixed now" above. No code change; status
+correctly remains OPEN.

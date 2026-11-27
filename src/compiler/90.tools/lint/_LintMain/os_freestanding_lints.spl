@@ -3,11 +3,11 @@
 # are heuristic, non-type-checked line patterns that avoid known miscompiles
 # in the freestanding cranelift backend until the compiler fixes land. See
 # doc/08_tracking/bug/simpleos_native_build_entry_closure_codegen_defects_2026-07-17.md
-use compiler.tools.lint.main.*
+use compiler.tools.lint._LintMain.traceability_and_assertions.{indent_width}
 
 class OsFreestandingWarning:
     code: String
-    line: Int
+    line: i64
     message: String
     hint: String
 
@@ -17,10 +17,10 @@ fn _fsk_doc_ref() -> String:
 # True when `path` is inside a freestanding/kernel-risk build tree where the
 # entry-closure codegen defects apply. Kept narrow so these heuristic rules
 # never fire across the rest of the repo.
-fn os_freestanding_lint_in_scope(path: String) -> Bool:
+fn os_freestanding_lint_in_scope(path: String) -> bool:
     path.contains("src/os/") or path.contains("examples/09_embedded/")
 
-fn _fsk_is_ident_char(ch: String) -> Bool:
+fn _fsk_is_ident_char(ch: String) -> bool:
     (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
 
 # Longest suffix of `s` made of identifier/dot characters (stops at "(", " ",
@@ -55,7 +55,7 @@ fn _fsk_leading_ident_token(raw: String) -> String:
 
 # A token looks like a bare enum-variant literal ("Type.Variant") when it has
 # exactly one dot and the part before it starts with an uppercase letter.
-fn _fsk_looks_like_enum_literal(token: String) -> Bool:
+fn _fsk_looks_like_enum_literal(token: String) -> bool:
     if not token.contains("."):
         return false
     val parts = token.split(".")
@@ -71,18 +71,18 @@ fn _fsk_looks_like_enum_literal(token: String) -> Bool:
 # C5: enum `==`/`!=` comparison miscompiles under freestanding codegen (a
 # match-based predicate works). Heuristic: one side of the operator is a bare
 # `Type.Variant` token.
-fn _fsk_check_enum_eq(trimmed: String, line_num: Int) -> Option<OsFreestandingWarning>:
+fn _fsk_check_enum_eq(trimmed: String, line_num: i64) -> Option<OsFreestandingWarning>:
     if trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn "):
-        return nil
+        return None
     var op_idx = trimmed.find("==")
     if op_idx < 0:
         op_idx = trimmed.find("!=")
     if op_idx < 0:
-        return nil
+        return None
     val left_token = _fsk_trailing_ident_token(trimmed.slice(0, op_idx))
     val right_token = _fsk_leading_ident_token(trimmed.slice(op_idx + 2))
     if not (_fsk_looks_like_enum_literal(left_token) or _fsk_looks_like_enum_literal(right_token)):
-        return nil
+        return None
     Some(OsFreestandingWarning(
         code: "FSK001",
         line: line_num,
@@ -93,15 +93,15 @@ fn _fsk_check_enum_eq(trimmed: String, line_num: Int) -> Option<OsFreestandingWa
 # C4: anonymous tuple RETURN types have swapped positional reads under
 # freestanding codegen. Heuristic: `fn ... -> (A, B, ...)` with a top-level
 # comma inside the return-type parens.
-fn _fsk_check_anon_tuple_return(trimmed: String, line_num: Int) -> Option<OsFreestandingWarning>:
+fn _fsk_check_anon_tuple_return(trimmed: String, line_num: i64) -> Option<OsFreestandingWarning>:
     if not (trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn ")):
-        return nil
+        return None
     val arrow_idx = trimmed.find("->")
     if arrow_idx < 0:
-        return nil
+        return None
     val after = trimmed.slice(arrow_idx + 2).trim()
     if not after.starts_with("("):
-        return nil
+        return None
     var depth = 0
     var i = 0
     var comma_at_top = false
@@ -117,7 +117,7 @@ fn _fsk_check_anon_tuple_return(trimmed: String, line_num: Int) -> Option<OsFree
             comma_at_top = true
         i = i + 1
     if not comma_at_top:
-        return nil
+        return None
     Some(OsFreestandingWarning(
         code: "FSK002",
         line: line_num,
@@ -133,9 +133,9 @@ fn _fsk_conversion_methods() -> [text]:
 # dispatch to the wrong struct's method via the freestanding alias bridge.
 # Heuristic only: method name is in a small conversion allowlist and is
 # called with no arguments; no receiver type inference is attempted.
-fn _fsk_check_bare_conversion(trimmed: String, line_num: Int) -> Option<OsFreestandingWarning>:
+fn _fsk_check_bare_conversion(trimmed: String, line_num: i64) -> Option<OsFreestandingWarning>:
     if trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn "):
-        return nil
+        return None
     for method in _fsk_conversion_methods():
         val pattern = ".{method}()"
         if trimmed.contains(pattern):
@@ -145,7 +145,7 @@ fn _fsk_check_bare_conversion(trimmed: String, line_num: Int) -> Option<OsFreest
                 message: "entry-closure defect C7: bare .{method}() scalar conversion can dispatch to the wrong struct's method under the freestanding alias bridge — use an `as` cast; {_fsk_doc_ref()}",
                 hint: "Replace .{method}() with an `as` cast (e.g. `x as {method.slice(3)}`); suppress a false positive with @allow(freestanding_bare_conversion)"
             ))
-    nil
+    None
 
 # C1: module-global `val`/`var X = <call-expr>` initializers are never
 # emitted under freestanding codegen (the global stays nil). Heuristic:
@@ -159,17 +159,17 @@ fn _fsk_global_decl_body(trimmed: String) -> String:
         rest = rest.slice(7)
     rest
 
-fn _fsk_check_global_call_init(line: String, trimmed: String, line_num: Int) -> Option<OsFreestandingWarning>:
+fn _fsk_check_global_call_init(line: String, trimmed: String, line_num: i64) -> Option<OsFreestandingWarning>:
     if indent_width(line) != 0:
-        return nil
+        return None
     val decl = _fsk_global_decl_body(trimmed)
     if not (decl.starts_with("val ") or decl.starts_with("var ")):
-        return nil
+        return None
     val eq_idx = decl.find("=")
     if eq_idx < 0:
-        return nil
+        return None
     if eq_idx + 1 < decl.len() and decl.substring(eq_idx, eq_idx + 2) == "==":
-        return nil
+        return None
     var rhs = decl.slice(eq_idx + 1).trim()
     # Strip a trailing "# comment" before checking for a call paren — a
     # paren inside a trailing comment (e.g. "= 0x10   # bit (4)") is not a
@@ -178,7 +178,7 @@ fn _fsk_check_global_call_init(line: String, trimmed: String, line_num: Int) -> 
     if comment_idx >= 0:
         rhs = rhs.slice(0, comment_idx).trim()
     if not rhs.contains("("):
-        return nil
+        return None
     Some(OsFreestandingWarning(
         code: "FSK004",
         line: line_num,
@@ -202,22 +202,22 @@ fn lint_os_freestanding_patterns_lines(
             match _fsk_check_enum_eq(trimmed, line_num):
                 case Some(w):
                     warnings.push(w)
-                case nil:
+                case None:
                     val _ = 0
             match _fsk_check_anon_tuple_return(trimmed, line_num):
                 case Some(w):
                     warnings.push(w)
-                case nil:
+                case None:
                     val _ = 0
             match _fsk_check_bare_conversion(trimmed, line_num):
                 case Some(w):
                     warnings.push(w)
-                case nil:
+                case None:
                     val _ = 0
             match _fsk_check_global_call_init(line, trimmed, line_num):
                 case Some(w):
                     warnings.push(w)
-                case nil:
+                case None:
                     val _ = 0
         line_num = line_num + 1
     warnings

@@ -18,114 +18,116 @@ fn glob_match(path: text, pattern: text) -> bool:
 # the note in js/builtins/string.spl's string_charAt for why aggregate
 # returns across a call boundary are avoided on this seed.
 fn _glob_codepoint_len_at(s: text, si: i64) -> i64:
-    val bytes = s.bytes()
-    if si < 0 or si >= bytes.len():
+    val slen = s.byte_len()
+    if si < 0 or si >= slen:
         return 1
-    val lead = bytes[si]
+    val lead = s.byte_at(si)
     val seqlen = utf8_seq_len(lead)
     if seqlen <= 0:
         return 1
     seqlen
 
 fn _glob_at(s: text, si: i64, p: text, pi: i64) -> bool:
-    if pi >= p.len():
-        return si >= s.len()
+    val plen = p.byte_len()
+    val slen = s.byte_len()
+    if pi >= plen:
+        return si >= slen
 
-    val pc = p[pi:pi + 1]
+    val pstep = _glob_codepoint_len_at(p, pi)
+    var pend = pi + pstep
+    if pend > plen:
+        pend = plen
+    val pc = p.substring(pi, pend)
 
     if pc == "*":
-        # Star: try matching 0..N characters from current position. Steps
-        # by whole codepoints of `s` between attempts -- stepping by raw
-        # byte would additionally try every mid-character continuation-
-        # byte offset inside a multi-byte character in `s`. Those extra
-        # attempts can never produce a false match (a continuation byte,
-        # 0x80-0xBF, can never equal an ASCII pattern byte or a valid
-        # UTF-8 lead byte, 0xC2+), so this is a performance cleanup, not a
-        # correctness fix, for this branch specifically.
+        # Star: try matching 0..N characters from current position, stepping by
+        # whole UTF-8 codepoints in byte units.
         var i = si
-        while i <= s.len():
-            if _glob_at(s: s, si: i, p: p, pi: pi + 1):
+        while i <= slen:
+            if _glob_at(s: s, si: i, p: p, pi: pend):
                 return true
-            if i >= s.len():
+            if i >= slen:
                 break
             val step = _glob_codepoint_len_at(s, i)
             i = i + step
+            if i > slen:
+                i = slen
         return false
 
-    if si >= s.len():
+    if si >= slen:
         return false
 
     if pc == "?":
-        # '?' matches exactly one *character*, not one byte -- advance by
-        # the full byte length of the codepoint at `si`. The old
-        # `si + 1` step left `si` pointing at a UTF-8 continuation byte
-        # for any multi-byte character, which then could never compare
-        # equal to a subsequent ASCII pattern byte, so a pattern like
-        # "ab?d" would never match "abéd" even though '?' should consume
-        # "é" as one character and the match should succeed. This IS a
-        # genuine correctness bug (unlike the '*' cleanup above): '?'
-        # only ever tries exactly one si value, so there is no
-        # backtracking to eventually land on the right byte offset.
+        # '?' matches exactly one character (full UTF-8 byte sequence at `si`).
         val step = _glob_codepoint_len_at(s, si)
-        val next_si = si + step
-        return _glob_at(s: s, si: next_si, p: p, pi: pi + 1)
+        var next_si = si + step
+        if next_si > slen:
+            next_si = slen
+        return _glob_at(s: s, si: next_si, p: p, pi: pend)
 
     if pc == "[":
-        # Character class: find first closing ]
+        # Character class: find first closing ] in byte units
         var close = -1
-        for ci in (pi + 1)..p.len():
-            if close == -1 and p[ci:ci + 1] == "]":
+        var ci = pend
+        while ci < plen:
+            val cstep = _glob_codepoint_len_at(p, ci)
+            var cend = ci + cstep
+            if cend > plen:
+                cend = plen
+            if close == -1 and p.substring(ci, cend) == "]":
                 close = ci
-        if close > pi + 1:
-            val class_str = p[pi + 1:close]
-            # Pass the WHOLE character at si (not just its lead byte) and
-            # consume its full byte length. The old `s[si:si+1]`/`si + 1`
-            # only ever looked at (and consumed) one byte: a multi-byte
-            # character's lead byte can't equal or range-match any ASCII
-            # class member, so a plain `[abc]` class correctly rejected it
-            # either way -- but a *negated* class like `[!abc]` (common
-            # for "anything but a path separator") incorrectly matched on
-            # just the lead byte and then left `si` pointing at a
-            # continuation byte, corrupting every subsequent match step
-            # for that path.
+            ci = cend
+        if close > pend:
+            val class_str = p.substring(pend, close)
             val seqlen = _glob_codepoint_len_at(s, si)
             var end = si + seqlen
-            if end > s.len():
-                end = s.len()
-            if _char_in_class(ch: s[si:end], class_str: class_str):
+            if end > slen:
+                end = slen
+            if _char_in_class(ch: s.substring(si, end), class_str: class_str):
                 return _glob_at(s: s, si: end, p: p, pi: close + 1)
         return false
 
-    # Literal match
-    if s[si:si + 1] == pc:
-        return _glob_at(s: s, si: si + 1, p: p, pi: pi + 1)
+    # Literal match (whole codepoint at `si` vs whole codepoint `pc`)
+    val sstep = _glob_codepoint_len_at(s, si)
+    var send = si + sstep
+    if send > slen:
+        send = slen
+    if s.substring(si, send) == pc:
+        return _glob_at(s: s, si: send, p: p, pi: pend)
 
     false
 
 fn _char_in_class(ch: text, class_str: text) -> bool:
     # Match character against class: abc, a-z, !abc
+    val clen = class_str.byte_len()
     var negate = false
-    var check_start = 0
-    if class_str.len() > 0 and class_str[0:1] == "!":
+    var i = 0
+    if clen > 0 and class_str.substring(0, 1) == "!":
         negate = true
-        check_start = 1
+        i = 1
 
     var found = false
-    var skip_count = 0
-    for i in check_start..class_str.len():
-        if skip_count > 0:
-            skip_count = skip_count - 1
-            continue
-        val c = class_str[i:i + 1]
-        val has_dash = i + 1 < class_str.len() and class_str[i + 1:i + 2] == "-"
-        val has_end = i + 2 < class_str.len()
+    while i < clen:
+        val step1 = _glob_codepoint_len_at(class_str, i)
+        var end1 = i + step1
+        if end1 > clen:
+            end1 = clen
+        val c = class_str.substring(i, end1)
+        val has_dash = end1 + 1 <= clen and class_str.substring(end1, end1 + 1) == "-"
+        val has_end = end1 + 1 < clen
         if has_dash and has_end:
-            val range_end = class_str[i + 2:i + 3]
+            val rstart = end1 + 1
+            val step2 = _glob_codepoint_len_at(class_str, rstart)
+            var end2 = rstart + step2
+            if end2 > clen:
+                end2 = clen
+            val range_end = class_str.substring(rstart, end2)
             if ch >= c and ch <= range_end:
                 found = true
-            skip_count = 2
+            i = end2
         else:
             if c == ch:
                 found = true
+            i = end1
 
     if negate: not found else: found

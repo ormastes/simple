@@ -1,0 +1,91 @@
+# Purpose and audience: compiler engineers who own enum payload typing across
+# HIR and MIR lowering.
+# @req REQ-SSPEC-COMPILER
+# Tracks: doc/08_tracking/bug/positional_brace_dict_payload_parsed_as_struct_field_2026-10-20.md
+"""
+# A positional `{K: V}` payload binding stays a Dict through MIR lowering
+
+The 2026-11-06 verify sweep (fixture
+`test/fixtures/repro/verify_sweep2/b05_a2.spl`) declared `M({text: i64})` and
+then matched `case E.M(d): d.len()`. It failed MIR lowering with
+`unresolved method call: len` because the payload slot was typed `i64` (the
+brace read as a named field `text: i64`). The sibling HIR spec
+`test/01_unit/compiler/20.hir/bootstrap_regressions/positional_payload_brace_dict_spec.spl`
+pins the variant shape; this spec pins the layer the sweep failed in: the match
+binding's type must reach MIR method resolution as a Dict.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+# @tag:enum_payload
+
+use std.spec
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn payload_diagnostics(source: text) -> text:
+    val filename = "positional_brace_dict_payload_match.spl"
+    val parsed = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var errors: [text] = []
+    for error in hir_lowering.errors:
+        errors = errors.push("HIR: " + error.message)
+    for error in lowering.errors:
+        errors = errors.push("MIR: " + error.message)
+    if mir.functions.len() == 0:
+        errors = errors.push("no lowered functions")
+    errors.join("\n")
+
+fn match_source(payload: text, arm: text) -> text:
+    "enum E:\n" +
+        "    M(" + payload + ")\n" +
+        "    N(i64)\n" +
+        "fn dsize(e: E) -> i64:\n" +
+        "    match e:\n" +
+        "        case E.M(d): d.len()\n" +
+        "        case E.N(n): " + arm + "\n" +
+        "fn go() -> i64:\n" +
+        "    var d: Dict<text, i64> = \{\}\n" +
+        "    d[\"a\"] = 1\n" +
+        "    d[\"b\"] = 2\n" +
+        "    dsize(E.M(d))\n"
+
+describe "positional brace dict payload through MIR lowering":
+    it "lowers the verify-sweep b05_a2 shape: M({text: i64}) matched as d.len()":
+        step("The binding d is a Dict<text, i64>, so .len() resolves")
+        expect(payload_diagnostics(match_source("\{text: i64\}", "n"))).to_equal("")
+
+    it "lowers the Dict<text, i64> spelling identically":
+        expect(payload_diagnostics(match_source("Dict<text, i64>", "n"))).to_equal("")
+
+    it "flags .len() on an i64 payload binding, so the harness discriminates":
+        step("The pre-repair i64 slot shape must be reported, not silently accepted")
+        expect(payload_diagnostics(match_source("\{text: i64\}", "n.len()"))).to_contain("unresolved method call")
+
+    it "keeps a named dict field in a struct-style variant":
+        val source = "enum E:\n" +
+            "    Named(map: \{text: i64\}, count: i64)\n" +
+            "    N(i64)\n" +
+            "fn go(d: Dict<text, i64>) -> i64:\n" +
+            "    val e = E.Named(map: d, count: 3)\n" +
+            "    match e:\n" +
+            "        case E.Named(m, c): m.len() + c\n" +
+            "        case E.N(n): n\n"
+        expect(payload_diagnostics(source)).to_equal("")
+
+    it "keeps a named dict field in a struct literal":
+        val source = "struct S:\n" +
+            "    m: \{text: i64\}\n" +
+            "fn go(d: Dict<text, i64>) -> i64:\n" +
+            "    val s = S(m: d)\n" +
+            "    s.m.len()\n"
+        expect(payload_diagnostics(source)).to_equal("")

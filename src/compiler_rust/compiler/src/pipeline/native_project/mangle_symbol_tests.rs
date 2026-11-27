@@ -195,3 +195,152 @@ fn actual_callback_fixture_function_metadata_does_not_shadow_lexical_owners() {
         );
     }
 }
+
+// ---- Sibling split-part facade calls (bug mangler_bare_extern_sibling_split_part) ----
+//
+// A free helper defined in one `_CamelCase/` split-part file and called from a
+// sibling split-part file reaches the caller only through the parent facade's
+// wildcard re-export, so use_map/import_map carry no entry for it. The only
+// resolution path is the closure-wide suffix index; when the name is defined
+// several times in the closure the mangler must pick the definition whose module
+// path shares the longest prefix with the caller, and must never emit it bare.
+
+const SIMD_CALLER: &str = "semantics__lint___SimdOpportunityLint__arithmetic_checks";
+const SIMD_SIBLING: &str = "semantics__lint___SimdOpportunityLint__loop_analysis";
+
+fn call(name: &str) -> MirInst {
+    MirInst::Call {
+        dest: None,
+        target: crate::mir::CallTarget::Pure(name.to_string()),
+        args: vec![],
+    }
+}
+
+fn called_name(instruction: &MirInst) -> &str {
+    match instruction {
+        MirInst::Call { target, .. } => target.name(),
+        _ => panic!("expected call"),
+    }
+}
+
+/// Run `mangle_mir` for a caller in `prefix` that calls each of `callees`.
+/// Returns (resolved call names, unresolved count).
+fn mangle_calls(
+    prefix: &str,
+    callees: &[&str],
+    ambiguous: &[&str],
+    suffixes: &[(&str, Vec<&str>)],
+) -> (Vec<String>, usize) {
+    let mut module = MirModule::new();
+    let mut caller = function("lint_simd_elementwise_add");
+    caller.blocks[0].instructions = callees.iter().map(|c| call(c)).collect();
+    module.functions = vec![caller];
+    let ambiguous: HashSet<String> = ambiguous.iter().map(|s| s.to_string()).collect();
+    let suffix_index: HashMap<String, Vec<String>> = suffixes
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.iter().map(|s| s.to_string()).collect()))
+        .collect();
+    let unresolved = mangle_mir(
+        &mut module,
+        prefix,
+        false,
+        &HashMap::new(),
+        &ambiguous,
+        &HashMap::new(),
+        &suffix_index,
+    );
+    let names = module.functions[0].blocks[0]
+        .instructions
+        .iter()
+        .map(|i| called_name(i).to_string())
+        .collect();
+    (names, unresolved)
+}
+
+#[test]
+fn ambiguous_private_helper_resolves_to_sibling_split_part() {
+    let sibling = format!("{SIMD_SIBLING}___find_substr");
+    let (names, unresolved) = mangle_calls(
+        SIMD_CALLER,
+        &["_find_substr"],
+        &["_find_substr"],
+        &[(
+            "_find_substr",
+            vec![
+                "gc_async_mut__gpu__browser_engine__html_tokenizer___find_substr",
+                sibling.as_str(),
+                "tools__duplicate_check__math_utils___find_substr",
+            ],
+        )],
+    );
+    assert_eq!(names, vec![sibling]);
+    assert_eq!(unresolved, 0);
+}
+
+#[test]
+fn ambiguous_public_helper_resolves_to_sibling_split_part() {
+    // Same shape as the private case but without the leading underscore: the
+    // facade-crossing defect is not specific to `_`-prefixed names
+    // (`run_test_api_server_with_inject` failed the same way).
+    let sibling = format!("{SIMD_SIBLING}__strip_manifest_blocks");
+    let (names, unresolved) = mangle_calls(
+        SIMD_CALLER,
+        &["strip_manifest_blocks"],
+        &["strip_manifest_blocks"],
+        &[(
+            "strip_manifest_blocks",
+            vec!["tools__coverage__manifest__strip_manifest_blocks", sibling.as_str()],
+        )],
+    );
+    assert_eq!(names, vec![sibling]);
+    assert_eq!(unresolved, 0);
+}
+
+#[test]
+fn unique_sibling_helper_resolves_through_suffix_index() {
+    let sibling = format!("{SIMD_SIBLING}__only_here");
+    let (names, unresolved) = mangle_calls(
+        SIMD_CALLER,
+        &["only_here"],
+        &[],
+        &[("only_here", vec![sibling.as_str()])],
+    );
+    assert_eq!(names, vec![sibling]);
+    assert_eq!(unresolved, 0);
+}
+
+#[test]
+fn ambiguous_helper_without_a_closer_sibling_is_not_guessed() {
+    // Two unrelated definitions, neither sharing a module prefix with the
+    // caller: there is no sound pick, so the call must stay unresolved (and be
+    // counted) rather than bind to an arbitrary owner.
+    let (names, unresolved) = mangle_calls(
+        "app__cli__main",
+        &["_find_substr"],
+        &["_find_substr"],
+        &[(
+            "_find_substr",
+            vec!["lib__text___find_substr", "tools__dup__math___find_substr"],
+        )],
+    );
+    assert_eq!(names, vec!["_find_substr".to_string()]);
+    assert_eq!(unresolved, 1);
+}
+
+#[test]
+fn ambiguous_helper_with_tied_siblings_is_not_guessed() {
+    let (names, unresolved) = mangle_calls(
+        SIMD_CALLER,
+        &["_find_substr"],
+        &["_find_substr"],
+        &[(
+            "_find_substr",
+            vec![
+                "semantics__lint___SimdOpportunityLint__loop_analysis___find_substr",
+                "semantics__lint___SimdOpportunityLint__byte_checks___find_substr",
+            ],
+        )],
+    );
+    assert_eq!(names, vec!["_find_substr".to_string()]);
+    assert_eq!(unresolved, 1);
+}

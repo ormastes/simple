@@ -6,7 +6,7 @@ use std.scv.db_canonical.*
 use std.scv.db_patch.*
 use std.scv.distributed_identity.{EntityRef, entity_ref_canonical}
 use std.common.crypto.sha256.{sha256_u8_hex}
-use std.common.crypto.chacha20_poly1305.{chacha20_poly1305_encrypt, chacha20_poly1305_decrypt, Chacha20Poly1305Result}
+use std.common.crypto.chacha20_poly1305.{chacha20_poly1305_encrypt_checked, chacha20_poly1305_decrypt, Chacha20Poly1305Result}
 
 struct DbMetadataRule:
     kind: text
@@ -151,7 +151,9 @@ fn db_restricted_seal(key: [u8], nonce: [u8], plaintext: [u8], context: DbRestri
     if key.len() != 32 or nonce.len() != 12: return Err("SCVDB_RESTRICTED_KEY_NONCE")
     if plaintext.len() < 0 or plaintext.len() > 1073741824: return Err("SCVDB_RESTRICTED_QUOTA")
     val aad = _restricted_aad(context)?
-    val sealed = chacha20_poly1305_encrypt(key, nonce, plaintext, aad)
+    val sealed = match chacha20_poly1305_encrypt_checked(key, nonce, plaintext, aad):
+        case Chacha20Poly1305Result.Ok(data): data
+        case Chacha20Poly1305Result.Err(message): return Err("SCVDB_RESTRICTED_CRYPTO")
     if sealed.len() != plaintext.len() + 16: return Err("SCVDB_RESTRICTED_CRYPTO")
     Ok(DbRestrictedEnvelope(nonce: nonce, ciphertext_and_tag: sealed))
 

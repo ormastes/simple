@@ -110,3 +110,16 @@ The build now exits normally with 135 unique HIR semantic diagnostics later in
 the pipeline. Those errors are a separate Stage-3 closure/import-surface
 frontier and remain recorded in the session handoff. Final evidence is in
 `build/bootstrap/stage4-spdev-current/manual-stage3-cycle3/stage3-cycle3.log`.
+
+## Verification 2026-11-25 (release/1.0.0, Windows x86_64)
+
+Closed status re-verified by source inspection on `origin/release/1.0.0`
+(`0819b116ecb`). The confirmed root fix is present in
+`src/compiler/80.driver/driver_source_parse_retained.spl` (`parse_all_impl`):
+the physical-path cache is an open-addressed table over parallel arrays with
+capacity `unique_entry_sources.len() * 2 + 1`, and parsed modules are retained
+behind class boxes (`ParserModule` values behind heap boxes) — the exact shape
+the "Root cause confirmed" section above prescribes, replacing the faulty
+`Dict<text, i64>` bracket lookup. No fresh Stage 2/3 bootstrap was run on this
+host (full-bootstrap lane, out of scope here); closure rests on source
+inspection plus the retained 2026-09 historical evidence.

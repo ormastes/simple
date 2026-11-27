@@ -159,6 +159,7 @@ pub fn rt_ast_expr_tag(args: &[Value]) -> Result<Value, CompileError> {
             Expr::Nil => "Nil",
             Expr::Symbol(_) => "Symbol",
             Expr::Identifier(_) => "Identifier",
+            Expr::GenericInst { .. } => "GenericInst",
             Expr::Path(_) => "Path",
             Expr::Binary { .. } => "Binary",
             Expr::Unary { .. } => "Unary",

@@ -1,0 +1,17 @@
+#!/bin/sh
+# Native launchd transport evidence only, not generic V4 qualification.
+set -eu
+if [ "$(uname -s)" != Darwin ]; then
+    echo 'SKIP: Darwin broker transport requires macOS'
+    exit 77
+fi
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+scratch=$(mktemp -d /tmp/sosix-broker.XXXXXXXX)
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+"${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Wno-deprecated-declarations -Wno-unused-function \
+    "$root/src/runtime/test/rt_sosix_darwin_broker_transport_selfcheck.c" -o "$scratch/check"
+codesign --force --sign - --options hard,kill "$scratch/check" 2>/dev/null
+cp "$scratch/check" "$scratch/replaced"
+codesign --force --sign - --options hard,kill --identifier org.simple.sosix.impostor "$scratch/replaced" 2>/dev/null
+hash=$(codesign -dvvv "$scratch/check" 2>&1 | sed -n 's/^CDHash=//p')
+"$scratch/check" "$hash" "$scratch" "$scratch/replaced"

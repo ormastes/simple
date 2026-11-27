@@ -1,0 +1,98 @@
+"""
+# Native `--entry-closure`: `d[k] ?? default` on a dict miss and hit
+
+**Category:** Codegen / MIR dict read lowering
+**Bug:** doc/08_tracking/bug/dict_index_coalesce_decodes_before_nil_test_2026-10-25.md
+
+`??` lowered a `d[k]` operand with the plain index reader, which decodes the
+raw word BEFORE the nil test. On a miss `rt_dict_get` returns the nil word 3,
+`rt_interp_cstr(3)` is NULL, and `rt_is_some(NULL)` is true, so
+`d["miss"] ?? "dflt"` returned an empty/NULL text. The fix hands the `??`
+present branch the UNDECODED word, so a miss is tested on the raw word and a
+hit is decoded exactly once.
+
+Measured red on Stage 2 (2026-10-25), same fixture shape:
+`dt["miss"] ?? "dflt"` printed an empty line and `di["miss"] ?? -77` printed `0`.
+
+Every miss probe has hit probes, including a stored EMPTY string, a stored `0`,
+a small non-zero `5` and a heap-boxed i64 (2^62, beyond the 61-bit immediate). A decode applied twice turns
+5 into 0 and shifts the wide value, and a fix that returns nil too eagerly
+loses the empty string and the 0.
+
+`d.get(k) ?? x` is deliberately NOT probed for i64 hits here: on Stage 2 it
+decodes a hit twice (5 -> 0), a separate open defect recorded in the bug doc.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+# No `{...}` interpolation in the embedded source: the spec's own lexer would
+# resolve it.
+val COALESCE_SOURCE: text = ("struct Ctx:\n" +
+    "    config: Dict<text, text>\n" +
+    "\n" +
+    "fn mk_ctx() -> Ctx:\n" +
+    "    var c: Dict<text, text> = {}\n" +
+    "    c[\"mode\"] = \"on\"\n" +
+    "    Ctx(config: c)\n" +
+    "\n" +
+    "fn main():\n" +
+    "    var dt: Dict<text, text> = {}\n" +
+    "    dt[\"have\"] = \"yes\"\n" +
+    "    dt[\"empty\"] = \"\"\n" +
+    "    print(\"TEXT\")\n" +
+    "    print(dt[\"miss\"] ?? \"dflt\")\n" +
+    "    print(dt.get(\"miss\") ?? \"dflt\")\n" +
+    "    print(dt[\"have\"] ?? \"dflt\")\n" +
+    "    print(\"[\" + (dt[\"empty\"] ?? \"dflt\") + \"]\")\n" +
+    "    var di: Dict<text, i64> = {}\n" +
+    "    di[\"zero\"] = 0\n" +
+    "    di[\"five\"] = 5\n" +
+    "    di[\"wide\"] = 4611686018427387904\n" +
+    "    print(\"I64\")\n" +
+    "    print(di[\"miss\"] ?? -77)\n" +
+    "    print(di[\"zero\"] ?? -77)\n" +
+    "    print(di[\"five\"] ?? -77)\n" +
+    "    print(di[\"wide\"] ?? -77)\n" +
+    "    val ctx = mk_ctx()\n" +
+    "    print(\"FIELD\")\n" +
+    "    print(ctx.config[\"compiler_source_entry\"] ?? \"dflt\")\n" +
+    "    print(ctx.config[\"mode\"] ?? \"dflt\")\n" +
+    "    print(\"END\")\n")
+
+fn native_build_and_run_coalesce() -> text:
+    val dir = "build/test-artifacts/native_dict_index_coalesce_miss"
+    val src = dir + "/coalesce_repro.spl"
+    val bin_out = dir + "/coalesce_repro.bin"
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    process_run("sh", ["-c", "mkdir -p " + dir + " && rm -f " + bin_out])
+    file_write(src, COALESCE_SOURCE)
+    val build_cmd = ("SIMPLE_BOOTSTRAP=1 nice -n 19 " + bin +
+        " native-build --source " + dir + " --entry " + src +
+        " --entry-closure -o " + bin_out + " >/dev/null 2>&1; " +
+        "test -x " + bin_out + " && ./" + bin_out + " 2>&1 || echo BUILD-FAILED")
+    val out = process_run("sh", ["-c", build_cmd])
+    out.0
+
+describe "a dict index read keeps its miss sentinel through ?? (native)":
+
+    it "yields the default on a miss and the stored value, decoded once, on a hit":
+        # One example = one native-build; spec globals do not persist.
+        step("Build the fixture once and run it")
+        val out = native_build_and_run_coalesce()
+
+        step("Refuse to pass on a build that produced nothing")
+        expect(out.contains("BUILD-FAILED")).to_equal(false)
+        expect(out).to_contain("TEXT")
+        expect(out).to_contain("END")
+
+        step("text: miss -> default; .get control; hit; stored empty string stays present")
+        expect(out).to_contain("TEXT\ndflt\ndflt\nyes\n[]\n")
+
+        step("i64: miss -> default; stored 0, 5 and a wide value come back unchanged")
+        expect(out).to_contain("I64\n-77\n0\n5\n4611686018427387904\n")
+
+        step("struct-field dict (the driver ctx.config[k] ?? \"\" shape): miss and hit")
+        expect(out).to_contain("FIELD\ndflt\non\nEND")

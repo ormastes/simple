@@ -1,0 +1,36 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Bare-identifier catch-all next to `case None` is flagged
+
+In a match over an Option, `case value:` binds the whole Option, not the
+inner value, so `Option::Some(x)` text leaks out (summary digests). The
+OPT-CATCHALL-001 lint flags such an arm; `case Some(value):` is clean.
+"""
+
+# @tag: unit, compiler, lint
+
+use std.spec.*
+use compiler.tools.lint.static_rules.{LintParamsV1, LintUnit, StaticLintFinding, static_lint_rule_table, run_static_lint_rule_table}
+use compiler.tools.lint.rules.option_catchall_rule.{option_catchall_lint_rule}
+
+val BAD_FIXTURE = "fn f(opt: text?) -> text:\n    match opt:\n        case None: return \"\"\n        case value: value\n\nfn g(opt: i64?) -> i64:\n    match opt:\n        case v: v\n        case None: 0\n"
+
+val GOOD_FIXTURE = "fn f(opt: text?) -> text:\n    match opt:\n        case None: return \"\"\n        case Some(value): value\n\nfn g(opt: i64?) -> i64:\n    match opt:\n        case Some(v): v\n        case _: 0\n\nfn h(k: i64) -> i64:\n    match k:\n        case n: n\n"
+
+fn catchall_findings(src: text) -> [StaticLintFinding]:
+    run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("fixture.spl", src), [option_catchall_lint_rule()]).findings
+
+describe "option_catchall lint":
+    it "flags a bare-identifier arm after or before case None":
+        val found = catchall_findings(BAD_FIXTURE)
+        expect(found.len()).to_equal(2)
+        expect(found[0].code).to_equal("OPT-CATCHALL-001")
+        expect(found[0].line_num).to_equal(4)
+        expect(found[1].line_num).to_equal(8)
+        expect(found[0].hint.contains("Some(value)")).to_equal(true)
+
+    it "accepts Some(x), _ and a catch-all in a match without None":
+        expect(catchall_findings(GOOD_FIXTURE).len()).to_equal(0)
+
+    it "is registered in the static lint table":
+        expect([r.id() for r in static_lint_rule_table()]).to_contain("option_catchall")

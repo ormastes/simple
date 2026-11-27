@@ -10,15 +10,21 @@ use std.cli.cli_util.{get_cli_args, get_flag_value}
 class MessagingDatabaseWorker:
     store: PureSqlMessagingStore
 
-    static fn open(path: text) -> MessagingDatabaseWorker:
-        MessagingDatabaseWorker(store: PureSqlMessagingStore.open(path))
+    static fn open(path: text) -> Result<MessagingDatabaseWorker, text>:
+        val store = match PureSqlMessagingStore.open(path):
+            case Ok(opened): opened
+            case Err(reason): return Err(reason)
+        Ok(MessagingDatabaseWorker(store: store))
 
-    static fn memory() -> MessagingDatabaseWorker:
-        MessagingDatabaseWorker(store: PureSqlMessagingStore.open_memory())
+    static fn memory() -> Result<MessagingDatabaseWorker, text>:
+        val store = match PureSqlMessagingStore.open_memory():
+            case Ok(opened): opened
+            case Err(reason): return Err(reason)
+        Ok(MessagingDatabaseWorker(store: store))
 
     fn ready() -> bool: self.store.ready()
-    fn room_count() -> i64: self.store.room_count()
-    fn message_count() -> i64: self.store.message_count()
+    fn room_count() -> Result<i64, text>: self.store.room_count()
+    fn message_count() -> Result<i64, text>: self.store.message_count()
     me close() -> bool: self.store.close()
 
 export MessagingDatabaseWorker
@@ -27,17 +33,37 @@ fn main() -> i64:
     val args = get_cli_args()
     val database = get_flag_value(args, "--db") ?? ".simple/state/llm-caret-messaging.db"
     val operation = get_flag_value(args, "--operation") ?? "probe"
-    var worker = MessagingDatabaseWorker.open(database)
+    var worker = match MessagingDatabaseWorker.open(database):
+        case Ok(opened): opened
+        case Err(reason):
+            print "{\"ok\":false,\"error\":\"database_open_failed\",\"detail\":\"" + reason.replace("\"", "'") + "\"}"
+            return 1
     if not worker.ready():
+        val metadata_rows = match worker.store.metadata_count():
+            case Ok(n): n.to_text()
+            case Err(reason): "\"" + reason.replace("\"", "'") + "\""
+        val metadata_value = worker.store.metadata_schema_value().unwrap_or("")
         print "{\"ok\":false,\"error\":\"database_not_ready\",\"detail\":\"" +
             worker.store.initialization_error.replace("\"", "'") + "\",\"metadata_rows\":" +
-            worker.store.metadata_count().to_text() + ",\"metadata_value\":\"" +
-            worker.store.metadata_schema_value() + "\"}"
+            metadata_rows + ",\"metadata_value\":\"" +
+            metadata_value + "\"}"
         worker.close()
         return 1
     if operation == "probe":
+        val rooms = match worker.room_count():
+            case Ok(n): n
+            case Err(reason):
+                print "{\"ok\":false,\"error\":\"database_probe_failed\",\"detail\":\"" + reason.replace("\"", "'") + "\"}"
+                worker.close()
+                return 1
+        val messages = match worker.message_count():
+            case Ok(n): n
+            case Err(reason):
+                print "{\"ok\":false,\"error\":\"database_probe_failed\",\"detail\":\"" + reason.replace("\"", "'") + "\"}"
+                worker.close()
+                return 1
         print "{\"ok\":true,\"engine\":\"PureDatabase\",\"carrier\":\"compiled\",\"rooms\":" +
-            worker.room_count().to_text() + ",\"messages\":" + worker.message_count().to_text() + "}"
+            rooms.to_text() + ",\"messages\":" + messages.to_text() + "}"
         worker.close()
         return 0
     print "{\"ok\":false,\"error\":\"unsupported_database_operation\"}"

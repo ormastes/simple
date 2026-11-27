@@ -4,8 +4,9 @@
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
-use compiler.mir.mir_types.{MirType}
+use compiler.mir.mir_types.{MirType, LocalKind}
 use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
+use compiler.mir.mir_instruction_support.{mir_call_origin_text}
 use compiler.common.diagnostics.span.{Span}
 use compiler.mir.mir_enum_semantic_types.{MirEnumPatternKindV1, MirEnumPatternNodeV1,
     MirEnumSiteKindV1, MirEnumSiteV1, MirEnumArmSemanticV1, MirEnumMatchSemanticV1,
@@ -29,7 +30,7 @@ fn serialize_switch_case(switch_case: SwitchCase) -> text:
 # Type Serialization
 # ============================================================================
 
-fn serialize_mir_type(t: MirType) -> text:
+pub fn serialize_mir_type(t: MirType) -> text:
     """Serialize MIR type to JSON."""
     val k = t.kind
 
@@ -49,6 +50,7 @@ fn serialize_mir_type(t: MirType) -> text:
         case Bool: "\"Bool\""
         case Char: "\"Char\""
         case Unit: "\"Unit\""
+        case Nil: "\"Nil\""
         case Never: "\"Never\""
         case Vec4f: "\"Vec4f\""
         case Vec8f: "\"Vec8f\""
@@ -63,12 +65,12 @@ fn serialize_mir_type(t: MirType) -> text:
         case Ptr(pointee, mutable):
             val p = serialize_mir_type(pointee)
             val m = if mutable: "true" else: "false"
-            "{\"Ptr\":{\"pointee\":{p},\"mutable\":{m}}}"
+            "{\"Ptr\":{\"pointee\":{p},\"mutable\":{m}}}}}"
 
         case Ref(referent, mutable):
             val r = serialize_mir_type(referent)
             val m = if mutable: "true" else: "false"
-            "{\"Ref\":{\"referent\":{r},\"mutable\":{m}}}"
+            "{\"Ref\":{\"referent\":{r},\"mutable\":{m}}}}}"
 
         case FuncPtr(signature):
             val sig = serialize_mir_signature(signature)
@@ -77,12 +79,12 @@ fn serialize_mir_type(t: MirType) -> text:
         # Aggregates
         case Array(element, size):
             val e = serialize_mir_type(element)
-            "{\"Array\":{\"element\":{e},\"size\":{size}}}"
+            "{\"Array\":{\"element\":{e},\"size\":{size}}}}}"
 
         case Dict(key, value):
             val k = serialize_mir_type(key)
             val v = serialize_mir_type(value)
-            "{\"Dict\":{\"key\":{k},\"value\":{v}}}"
+            "{\"Dict\":{\"key\":{k},\"value\":{v}}}}}"
 
         case Slice(element):
             val e = serialize_mir_type(element)
@@ -108,10 +110,10 @@ fn serialize_mir_type(t: MirType) -> text:
         case Result(ok_type, err_type):
             val ok_json = serialize_mir_type(ok_type)
             val err_json = serialize_mir_type(err_type)
-            "{\"Result\":{\"ok\":{ok_json},\"err\":{err_json}}}"
+            "{\"Result\":{\"ok\":{ok_json},\"err\":{err_json}}}}}"
 
         case Bits(width, signed):
-            "{\"Bits\":{\"width\":{width},\"signed\":{signed}}}"
+            "{\"Bits\":{\"width\":{width},\"signed\":{signed}}}}}"
 
         # Special types
         case Opaque(name):
@@ -125,7 +127,7 @@ fn serialize_mir_type(t: MirType) -> text:
         case Generator(yieldType, returnType):
             val y = serialize_mir_type(yieldType)
             val r = serialize_mir_type(returnType)
-            "{\"Generator\":{\"yield\":{y},\"return\":{r}}}"
+            "{\"Generator\":{\"yield\":{y},\"return\":{r}}}}}"
 
         case ActorType(message):
             val m = serialize_mir_type(message)
@@ -144,7 +146,7 @@ fn serialize_mir_type(t: MirType) -> text:
             "{\"Union\":{elems}}"
 
         case ScalableVec(element, min_lanes):
-            "{\"ScalableVec\":{\"element\":{serialize_mir_type(element)},\"min_lanes\":{min_lanes}}}"
+            "{\"ScalableVec\":{\"element\":{serialize_mir_type(element)},\"min_lanes\":{min_lanes}}}}}"
 
 # ============================================================================
 # Constant Value Serialization
@@ -177,7 +179,7 @@ fn serialize_const_value(c: MirConstValue) -> text:
             var values: [text] = []
             for name in fields.keys().sorted():
                 values.push("\"{escape_json_string(name)}\":{serialize_const_value(fields[name])}")
-            "{\"Struct\":{" + values.join(",") + "}}"
+            "{{\"Struct\":{{" + values.join(",") + "}}}}"
         case Zero:
             "\"Zero\""
 
@@ -232,14 +234,20 @@ fn serialize_aggregate_kind(kind: AggregateKind) -> text:
         case Struct(symbol):
             "{\"Struct\":{symbol_id_value(symbol)}}"
         case Enum(symbol, variant):
-            "{\"Enum\":{\"symbol\":{symbol_id_value(symbol)},\"variant\":{variant}}}"
+            "{\"Enum\":{\"symbol\":{symbol_id_value(symbol)},\"variant\":{variant}}}}}"
 
 # ============================================================================
 # Operand Serialization
 # ============================================================================
 
 fn serialize_operand(op: MirOperand) -> text:
-    """Serialize operand to JSON."""
+    """Include callable authority in the serialized operand and fingerprint."""
+    val payload = serialize_operand_kind(op)
+    val origin = mir_call_origin_text(op.call_origin)
+    "{\"kind\":{payload},\"call_origin\":\"{origin}\"}"
+
+fn serialize_operand_kind(op: MirOperand) -> text:
+    """Serialize the operand value separately from its callable authority."""
     val k = op.kind
 
     match k:
@@ -250,7 +258,7 @@ fn serialize_operand(op: MirOperand) -> text:
         case Const(value, mtype):
             val vj = serialize_const_value(value)
             val tj = serialize_mir_type(mtype)
-            "{\"Const\":{\"value\":{vj},\"type\":{tj}}}"
+            "{\"Const\":{\"value\":{vj},\"type\":{tj}}}}}"
 
 fn serialize_execution_domain(domain: MirExecutionDomain) -> text:
     match domain:
@@ -298,7 +306,7 @@ fn serialize_mir_terminator(term: MirTerminator) -> text:
 
         case If(cond, thenBlock, elseBlock):
             val c = serialize_operand(cond)
-            "{\"If\":{\"cond\":{c},\"then\":{block_id_value(thenBlock)},\"else\":{block_id_value(elseBlock)}}}"
+            "{\"If\":{\"cond\":{c},\"then\":{block_id_value(thenBlock)},\"else\":{block_id_value(elseBlock)}}}}}"
 
         case Switch(value, targets, defaultBlock):
             val v = serialize_operand(value)
@@ -310,7 +318,7 @@ fn serialize_mir_terminator(term: MirTerminator) -> text:
                 cases = "{cases}{serialize_switch_case(switchCase)}"
                 first = false
             cases = "{cases}]"
-            "{\"Switch\":{\"value\":{v},\"targets\":{cases},\"default\":{block_id_value(defaultBlock)}}}"
+            "{\"Switch\":{\"value\":{v},\"targets\":{cases},\"default\":{block_id_value(defaultBlock)}}}}}"
 
         case CallTerminator(maybeDest, func, args, normal, maybeUnwind,
                             maybePayloadDest, maybeTypeTagDest):
@@ -337,7 +345,7 @@ fn serialize_mir_terminator(term: MirTerminator) -> text:
             if val typeTagDest = maybeTypeTagDest:
                 typeTagDestStr = "{local_id_value(typeTagDest)}"
 
-            "{\"CallTerminator\":{\"dest\":{destStr},\"func\":{f},\"args\":{argsStr},\"normal\":{block_id_value(normal)},\"unwind\":{unwindStr},\"unwind_payload_dest\":{payloadDestStr},\"unwind_type_tag_dest\":{typeTagDestStr}}}"
+            "{\"CallTerminator\":{\"dest\":{destStr},\"func\":{f},\"args\":{argsStr},\"normal\":{block_id_value(normal)},\"unwind\":{unwindStr},\"unwind_payload_dest\":{payloadDestStr},\"unwind_type_tag_dest\":{typeTagDestStr}}}}}"
 
         case Unreachable:
             "\"Unreachable\""
@@ -346,10 +354,10 @@ fn serialize_mir_terminator(term: MirTerminator) -> text:
             "{\"Abort\":\"{escape_json_string(msg)}\"}"
 
         case Throw(payload, type_tag):
-            "{\"Throw\":{\"payload\":{serialize_operand(payload)},\"type_tag\":{serialize_operand(type_tag)}}}"
+            "{\"Throw\":{\"payload\":{serialize_operand(payload)},\"type_tag\":{serialize_operand(type_tag)}}}}}"
 
         case Resume(payload, type_tag):
-            "{\"Resume\":{\"payload\":{serialize_operand(payload)},\"type_tag\":{serialize_operand(type_tag)}}}"
+            "{\"Resume\":{\"payload\":{serialize_operand(payload)},\"type_tag\":{serialize_operand(type_tag)}}}}}"
 
         case _:
             "\"UnknownTerminator\""
@@ -364,31 +372,31 @@ fn serialize_mir_inst_kind(inst: MirInstKind) -> text:
         case Const(dest, value, mtype):
             val v = serialize_const_value(value)
             val t = serialize_mir_type(mtype)
-            "{\"Const\":{\"dest\":{local_id_value(dest)},\"value\":{v},\"type\":{t}}}"
+            "{\"Const\":{\"dest\":{local_id_value(dest)},\"value\":{v},\"type\":{t}}}}}"
 
         case Copy(dest, src):
-            "{\"Copy\":{\"dest\":{local_id_value(dest)},\"src\":{local_id_value(src)}}}"
+            "{\"Copy\":{\"dest\":{local_id_value(dest)},\"src\":{local_id_value(src)}}}}}"
 
         case Move(dest, src):
-            "{\"Move\":{\"dest\":{local_id_value(dest)},\"src\":{local_id_value(src)}}}"
+            "{\"Move\":{\"dest\":{local_id_value(dest)},\"src\":{local_id_value(src)}}}}}"
 
         case TransferOut(dest, source, destination, mode, payload, runtime_classify):
-            "{\"TransferOut\":{\"dest\":{local_id_value(dest)},\"source\":{local_id_value(source)},\"destination\":\"{serialize_execution_domain(destination)}\",\"mode\":\"{serialize_transfer_mode(mode)}\",\"payload\":\"{serialize_transfer_payload(payload)}\",\"runtime_classify\":{runtime_classify}}}"
+            "{\"TransferOut\":{\"dest\":{local_id_value(dest)},\"source\":{local_id_value(source)},\"destination\":\"{serialize_execution_domain(destination)}\",\"mode\":\"{serialize_transfer_mode(mode)}\",\"payload\":\"{serialize_transfer_payload(payload)}\",\"runtime_classify\":{runtime_classify}}}}}"
 
         case TransferIn(dest, source, mode, payload):
-            "{\"TransferIn\":{\"dest\":{local_id_value(dest)},\"source\":\"{serialize_execution_domain(source)}\",\"mode\":\"{serialize_transfer_mode(mode)}\",\"payload\":\"{serialize_transfer_payload(payload)}\"}}"
+            "{\"TransferIn\":{\"dest\":{local_id_value(dest)},\"source\":\"{serialize_execution_domain(source)}\",\"mode\":\"{serialize_transfer_mode(mode)}\",\"payload\":\"{serialize_transfer_payload(payload)}\"}}}}"
 
         case FreezeRegion(local):
             "{\"FreezeRegion\":{local_id_value(local)}}"
 
         case AcquireSnapshot(dest, source):
-            "{\"AcquireSnapshot\":{\"dest\":{local_id_value(dest)},\"source\":{local_id_value(source)}}}"
+            "{\"AcquireSnapshot\":{\"dest\":{local_id_value(dest)},\"source\":{local_id_value(source)}}}}}"
 
         case CommitUpdates(dest, base, updates):
             val dest_text = match dest:
                 case Some(local): "{local_id_value(local)}"
-                case nil: "null"
-            "{\"CommitUpdates\":{\"dest\":{dest_text},\"base\":{local_id_value(base)},\"updates\":{local_id_value(updates)}}}"
+                case None: "null"
+            "{\"CommitUpdates\":{\"dest\":{dest_text},\"base\":{local_id_value(base)},\"updates\":{local_id_value(updates)}}}}}"
 
         case Drop(local):
             "{\"Drop\":{local_id_value(local)}}"
@@ -397,34 +405,34 @@ fn serialize_mir_inst_kind(inst: MirInstKind) -> text:
             val opstr = serialize_binop(op)
             val l = serialize_operand(left)
             val r = serialize_operand(right)
-            "{\"BinOp\":{\"dest\":{local_id_value(dest)},\"op\":{opstr},\"left\":{l},\"right\":{r}}}"
+            "{\"BinOp\":{\"dest\":{local_id_value(dest)},\"op\":{opstr},\"left\":{l},\"right\":{r}}}}}"
 
         case UnaryOp(dest, op, operand):
             val opstr = serialize_unaryop(op)
             val o = serialize_operand(operand)
-            "{\"UnaryOp\":{\"dest\":{local_id_value(dest)},\"op\":{opstr},\"operand\":{o}}}"
+            "{\"UnaryOp\":{\"dest\":{local_id_value(dest)},\"op\":{opstr},\"operand\":{o}}}}}"
 
         case Alloc(dest, mtype):
             val t = serialize_mir_type(mtype)
-            "{\"Alloc\":{\"dest\":{local_id_value(dest)},\"type\":{t}}}"
+            "{\"Alloc\":{\"dest\":{local_id_value(dest)},\"type\":{t}}}}}"
 
         case Load(dest, ptr):
             val p = serialize_operand(ptr)
-            "{\"Load\":{\"dest\":{local_id_value(dest)},\"ptr\":{p}}}"
+            "{\"Load\":{\"dest\":{local_id_value(dest)},\"ptr\":{p}}}}}"
 
         case Store(ptr, value):
             val p = serialize_operand(ptr)
             val v = serialize_operand(value)
-            "{\"Store\":{\"ptr\":{p},\"value\":{v}}}"
+            "{\"Store\":{\"ptr\":{p},\"value\":{v}}}}}"
 
         case GlobalAddr(dest, symbol, mutable):
-            "{\"GlobalAddr\":{\"dest\":{local_id_value(dest)},\"symbol\":{symbol.id},\"mutable\":{mutable}}}"
+            "{\"GlobalAddr\":{\"dest\":{local_id_value(dest)},\"symbol\":{symbol.id},\"mutable\":{mutable}}}}}"
 
         case LoadGlobal(dest, symbol):
-            "{\"LoadGlobal\":{\"dest\":{local_id_value(dest)},\"symbol\":{symbol.id}}}"
+            "{\"LoadGlobal\":{\"dest\":{local_id_value(dest)},\"symbol\":{symbol.id}}}}}"
 
         case StoreGlobal(symbol, value):
-            "{\"StoreGlobal\":{\"symbol\":{symbol.id},\"value\":{serialize_operand(value)}}}"
+            "{\"StoreGlobal\":{\"symbol\":{symbol.id},\"value\":{serialize_operand(value)}}}}}"
 
         case Call(maybeDest, func, args):
             val f = serialize_operand(func)
@@ -438,18 +446,18 @@ fn serialize_mir_inst_kind(inst: MirInstKind) -> text:
             argsStr = "{argsStr}]"
 
             if val dest = maybeDest:
-                "{\"Call\":{\"dest\":{local_id_value(dest)},\"func\":{f},\"args\":{argsStr}}}"
+                "{\"Call\":{\"dest\":{local_id_value(dest)},\"func\":{f},\"args\":{argsStr}}}}}"
             else:
-                "{\"Call\":{\"dest\":null,\"func\":{f},\"args\":{argsStr}}}"
+                "{\"Call\":{\"dest\":null,\"func\":{f},\"args\":{argsStr}}}}}"
 
         case GetField(dest, base, field):
             val b = serialize_operand(base)
-            "{\"GetField\":{\"dest\":{local_id_value(dest)},\"base\":{b},\"field\":{field}}}"
+            "{\"GetField\":{\"dest\":{local_id_value(dest)},\"base\":{b},\"field\":{field}}}}}"
 
         case SetField(base, field, value):
             val b = serialize_operand(base)
             val v = serialize_operand(value)
-            "{\"SetField\":{\"base\":{b},\"field\":{field},\"value\":{v}}}"
+            "{\"SetField\":{\"base\":{b},\"field\":{field},\"value\":{v}}}}}"
 
         case Aggregate(dest, kind, operands):
             val k = serialize_aggregate_kind(kind)
@@ -461,17 +469,17 @@ fn serialize_mir_inst_kind(inst: MirInstKind) -> text:
                 ops = "{ops}{serialize_operand(op)}"
                 first = false
             ops = "{ops}]"
-            "{\"Aggregate\":{\"dest\":{local_id_value(dest)},\"kind\":{k},\"operands\":{ops}}}"
+            "{\"Aggregate\":{\"dest\":{local_id_value(dest)},\"kind\":{k},\"operands\":{ops}}}}}"
 
         case Cast(dest, operand, targetType):
             val o = serialize_operand(operand)
             val t = serialize_mir_type(targetType)
-            "{\"Cast\":{\"dest\":{local_id_value(dest)},\"operand\":{o},\"target\":{t}}}"
+            "{\"Cast\":{\"dest\":{local_id_value(dest)},\"operand\":{o},\"target\":{t}}}}}"
 
         case Bitcast(dest, operand, targetType):
             val o = serialize_operand(operand)
             val t = serialize_mir_type(targetType)
-            "{\"Bitcast\":{\"dest\":{local_id_value(dest)},\"operand\":{o},\"target\":{t}}}"
+            "{\"Bitcast\":{\"dest\":{local_id_value(dest)},\"operand\":{o},\"target\":{t}}}}}"
 
         case CallIndirect(maybeDest, ptr, args, signature):
             val p = serialize_operand(ptr)
@@ -486,9 +494,9 @@ fn serialize_mir_inst_kind(inst: MirInstKind) -> text:
             argsStr = "{argsStr}]"
 
             if val dest = maybeDest:
-                "{\"CallIndirect\":{\"dest\":{local_id_value(dest)},\"ptr\":{p},\"args\":{argsStr},\"signature\":{sig}}}"
+                "{\"CallIndirect\":{\"dest\":{local_id_value(dest)},\"ptr\":{p},\"args\":{argsStr},\"signature\":{sig}}}}}"
             else:
-                "{\"CallIndirect\":{\"dest\":null,\"ptr\":{p},\"args\":{argsStr},\"signature\":{sig}}}"
+                "{\"CallIndirect\":{\"dest\":null,\"ptr\":{p},\"args\":{argsStr},\"signature\":{sig}}}}}"
 
         case Intrinsic(maybeDest, name, args):
             var argsStr = "["
@@ -501,17 +509,17 @@ fn serialize_mir_inst_kind(inst: MirInstKind) -> text:
             argsStr = "{argsStr}]"
 
             if val dest = maybeDest:
-                "{\"Intrinsic\":{\"dest\":{local_id_value(dest)},\"name\":\"{escape_json_string(name)}\",\"args\":{argsStr}}}"
+                "{\"Intrinsic\":{\"dest\":{local_id_value(dest)},\"name\":\"{escape_json_string(name)}\",\"args\":{argsStr}}}}}"
             else:
-                "{\"Intrinsic\":{\"dest\":null,\"name\":\"{escape_json_string(name)}\",\"args\":{argsStr}}}"
+                "{\"Intrinsic\":{\"dest\":null,\"name\":\"{escape_json_string(name)}\",\"args\":{argsStr}}}}}"
 
         case DecisionProbe(runtime_id, semantic_id, result, authored_path, line, column):
             val result_json = serialize_operand(result)
-            "{\"DecisionProbe\":{\"runtime_id\":{runtime_id},\"semantic_id\":\"{escape_json_string(semantic_id)}\",\"result\":{result_json},\"authored_path\":\"{escape_json_string(authored_path)}\",\"line\":{line},\"column\":{column}}}"
+            "{\"DecisionProbe\":{\"runtime_id\":{runtime_id},\"semantic_id\":\"{escape_json_string(semantic_id)}\",\"result\":{result_json},\"authored_path\":\"{escape_json_string(authored_path)}\",\"line\":{line},\"column\":{column}}}}}"
 
         case ConditionProbe(runtime_id, semantic_id, parent_runtime_id, parent_semantic_id, result, authored_path, line, column):
             val result_json = serialize_operand(result)
-            "{\"ConditionProbe\":{\"runtime_id\":{runtime_id},\"semantic_id\":\"{escape_json_string(semantic_id)}\",\"parent_runtime_id\":{parent_runtime_id},\"parent_semantic_id\":\"{escape_json_string(parent_semantic_id)}\",\"result\":{result_json},\"authored_path\":\"{escape_json_string(authored_path)}\",\"line\":{line},\"column\":{column}}}"
+            "{\"ConditionProbe\":{\"runtime_id\":{runtime_id},\"semantic_id\":\"{escape_json_string(semantic_id)}\",\"parent_runtime_id\":{parent_runtime_id},\"parent_semantic_id\":\"{escape_json_string(parent_semantic_id)}\",\"result\":{result_json},\"authored_path\":\"{escape_json_string(authored_path)}\",\"line\":{line},\"column\":{column}}}}}"
 
         case GetElementPtr(dest, base, indices):
             val b = serialize_operand(base)
@@ -523,21 +531,21 @@ fn serialize_mir_inst_kind(inst: MirInstKind) -> text:
                 idxs = "{idxs}{serialize_operand(idx)}"
                 first = false
             idxs = "{idxs}]"
-            "{\"GetElementPtr\":{\"dest\":{local_id_value(dest)},\"base\":{b},\"indices\":{idxs}}}"
+            "{\"GetElementPtr\":{\"dest\":{local_id_value(dest)},\"base\":{b},\"indices\":{idxs}}}}}"
 
         case CheckedBinOp(dest, op, left, right):
             val opstr = serialize_binop(op)
             val l = serialize_operand(left)
             val r = serialize_operand(right)
-            "{\"CheckedBinOp\":{\"dest\":{local_id_value(dest)},\"op\":{opstr},\"left\":{l},\"right\":{r}}}"
+            "{\"CheckedBinOp\":{\"dest\":{local_id_value(dest)},\"op\":{opstr},\"left\":{l},\"right\":{r}}}}}"
 
         case VhdlResize(dest, operand, new_width, signed):
             val opnd = serialize_operand(operand)
-            "{\"VhdlResize\":{\"dest\":{local_id_value(dest)},\"operand\":{opnd},\"new_width\":{new_width},\"signed\":{signed}}}"
+            "{\"VhdlResize\":{\"dest\":{local_id_value(dest)},\"operand\":{opnd},\"new_width\":{new_width},\"signed\":{signed}}}}}"
 
         case VhdlSlice(dest, signal, hi, lo):
             val sig = serialize_operand(signal)
-            "{\"VhdlSlice\":{\"dest\":{local_id_value(dest)},\"signal\":{sig},\"hi\":{hi},\"lo\":{lo}}}"
+            "{\"VhdlSlice\":{\"dest\":{local_id_value(dest)},\"signal\":{sig},\"hi\":{hi},\"lo\":{lo}}}}}"
 
         case VhdlConcat(dest, parts):
             var partsStr = "["
@@ -548,16 +556,16 @@ fn serialize_mir_inst_kind(inst: MirInstKind) -> text:
                 partsStr = "{partsStr}{serialize_operand(part)}"
                 firstPart = false
             partsStr = "{partsStr}]"
-            "{\"VhdlConcat\":{\"dest\":{local_id_value(dest)},\"parts\":{partsStr}}}"
+            "{\"VhdlConcat\":{\"dest\":{local_id_value(dest)},\"parts\":{partsStr}}}}}"
 
         case Nop:
             "\"Nop\""
 
         case DebugValue(local, name):
-            "{\"DebugValue\":{\"local\":{local_id_value(local)},\"name\":\"{escape_json_string(name)}\"}}"
+            "{\"DebugValue\":{\"local\":{local_id_value(local)},\"name\":\"{escape_json_string(name)}\"}}}}"
 
         case ResultMatchSemantic(scrutinee, destination, ok_block, err_block, merge_block, ok_payload, err_payload):
-            "{\"ResultMatchSemantic\":{\"scrutinee\":{local_id_value(scrutinee)},\"destination\":{local_id_value(destination)},\"ok_block\":{block_id_value(ok_block)},\"err_block\":{block_id_value(err_block)},\"merge_block\":{block_id_value(merge_block)},\"ok_payload\":{local_id_value(ok_payload)},\"err_payload\":{local_id_value(err_payload)}}}"
+            "{\"ResultMatchSemantic\":{\"scrutinee\":{local_id_value(scrutinee)},\"destination\":{local_id_value(destination)},\"ok_block\":{block_id_value(ok_block)},\"err_block\":{block_id_value(err_block)},\"merge_block\":{block_id_value(merge_block)},\"ok_payload\":{local_id_value(ok_payload)},\"err_payload\":{local_id_value(err_payload)}}}}}"
 
         case _:
             "\"UnsupportedInst\""
@@ -612,7 +620,7 @@ fn serialize_mir_signature(sig: MirSignature) -> text:
     json = "{json}],"
 
     # Return type
-    if sig.return_type == nil:
+    if sig.return_type == None:
         json = "{json}\"return_type\":null,"
     else:
         json = "{json}\"return_type\":{serialize_mir_type(sig.return_type)},"
@@ -647,9 +655,9 @@ fn serialize_mir_local(local: MirLocal) -> text:
             # Kind
             val kindJson = match kind:
                 case Arg(index): "{\"Arg\":{index}}"
-                case Var: "\"Var\""
-                case Temp: "\"Temp\""
-                case Return: "\"Return\""
+                case LocalKind.Var: "\"Var\""
+                case LocalKind.Temp: "\"Temp\""
+                case LocalKind.Return: "\"Return\""
 
             json = "{json}\"kind\":{kindJson}"
             # Preserve legacy bytes for locals without short provenance, but
@@ -666,7 +674,7 @@ fn serialize_mir_local(local: MirLocal) -> text:
 # Function Serialization
 # ============================================================================
 
-fn serialize_mir_function(func: MirFunction) -> text:
+pub fn serialize_mir_function(func: MirFunction) -> text:
     """Serialize canonical MIR, including versioned nonempty enum metadata."""
     serialize_mir_function_canonical_v1(func, true)
 
@@ -700,10 +708,7 @@ fn serialize_mir_function_canonical_v1(func: MirFunction, include_enum_metadata:
 
     parts = parts.push("\"entry_block\":{block_id_value(func.entry_block)}")
     if include_enum_metadata and func.enum_matches.len() > 0:
-        # @workaround bug=seed_list_comprehension_join_and_empty_native_2026_10_21 recover=400bd5d1983 reason=preserve nonempty array values and a known join receiver
-        var matches: [text] = []
-        for record in func.enum_matches:
-            matches.push(serialize_mir_enum_match_v1(record))
+        val matches = [for record in func.enum_matches: serialize_mir_enum_match_v1(record)]
         parts.push(",\"enum_matches\":{\"schema\":\"MirEnumMatches-v1\",\"matches\":[")
         parts.push(matches.join(","))
         parts.push("]}")
@@ -714,20 +719,17 @@ fn serialize_mir_enum_span_v1(span: Span) -> text:
     "{\"start\":{span.start},\"end\":{span.end},\"line\":{span.line},\"col\":{span.col},\"file\":\"{escape_json_string(span.file)}\",\"length\":{span.length}}"
 
 fn serialize_mir_enum_indexes_v1(indexes: [i64]) -> text:
-    # @workaround bug=seed_list_comprehension_join_and_empty_native_2026_10_21 recover=400bd5d1983 reason=preserve nonempty array values and a known join receiver
-    var parts: [text] = []
-    for index in indexes:
-        parts.push("{index}")
+    val parts = [for index in indexes: "{index}"]
     "[" + parts.join(",") + "]"
 
 fn serialize_mir_enum_pattern_v1(node: MirEnumPatternNodeV1) -> text:
     val kind = match node.kind:
         case MirEnumPatternKindV1.Wildcard: "\"Wildcard\""
-        case MirEnumPatternKindV1.Bind(symbol, local): "{\"Bind\":{\"source_symbol\":{symbol.id},\"destination_local\":{local.id}}}"
-        case MirEnumPatternKindV1.Variant(owner, discriminant, children): "{\"Variant\":{\"owner_symbol\":{owner.id},\"discriminant\":{discriminant},\"children\":{serialize_mir_enum_indexes_v1(children)}}}"
-        case MirEnumPatternKindV1.Tuple(children): "{\"Tuple\":{serialize_mir_enum_indexes_v1(children)}}"
-        case MirEnumPatternKindV1.Literal(value, exact_type): "{\"Literal\":{\"value\":{serialize_const_value(value)},\"exact_type\":{serialize_mir_type(exact_type)}}}"
-        case MirEnumPatternKindV1.Or(alternatives): "{\"Or\":{serialize_mir_enum_indexes_v1(alternatives)}}"
+        case MirEnumPatternKindV1.Bind(symbol, local): "{\"Bind\":{\"source_symbol\":{symbol.id},\"destination_local\":{local.id}" + "}" + "}"
+        case MirEnumPatternKindV1.Variant(owner, discriminant, children): "{\"Variant\":{\"owner_symbol\":{owner.id},\"discriminant\":{discriminant},\"children\":{serialize_mir_enum_indexes_v1(children)}" + "}" + "}"
+        case MirEnumPatternKindV1.Tuple(children): "{\"Tuple\":{serialize_mir_enum_indexes_v1(children)}" + "}"
+        case MirEnumPatternKindV1.Literal(value, exact_type): "{\"Literal\":{\"value\":{serialize_const_value(value)},\"exact_type\":{serialize_mir_type(exact_type)}" + "}" + "}"
+        case MirEnumPatternKindV1.Or(alternatives): "{\"Or\":{serialize_mir_enum_indexes_v1(alternatives)}" + "}"
     "{\"kind\":{kind},\"expected_type\":{serialize_mir_type(node.expected_type)},\"source_span\":{serialize_mir_enum_span_v1(node.source_span)}}"
 
 fn serialize_mir_enum_site_v1(site: MirEnumSiteV1) -> text:
@@ -748,24 +750,14 @@ fn serialize_mir_enum_arm_v1(arm: MirEnumArmSemanticV1) -> text:
     if val entry = arm.guard_entry: guard_entry = "{entry.id}"
     var guard_result = "null"
     if val result = arm.guard_result: guard_result = serialize_operand(result)
-    # @workaround bug=seed_list_comprehension_join_and_empty_native_2026_10_21 recover=400bd5d1983 reason=native comprehension must preserve exit block identities
-    var exits: [i64] = []
-    for block in arm.body_exit_blocks:
-        exits.push(block.id)
+    val exits = [for block in arm.body_exit_blocks: block.id]
     "{\"source_arm_id\":{arm.source_arm_id},\"expanded_alternative_index\":{arm.expanded_alternative_index},\"pattern_root\":{arm.pattern_root},\"pattern_entry_block\":{arm.pattern_entry_block.id},\"pattern_entry_instruction_index\":{arm.pattern_entry_instruction_index},\"guard_entry\":{guard_entry},\"guard_entry_instruction_index\":{arm.guard_entry_instruction_index},\"guard_result\":{guard_result},\"body_entry\":{arm.body_entry.id},\"body_entry_instruction_index\":{arm.body_entry_instruction_index},\"body_exit_blocks\":{serialize_mir_enum_indexes_v1(exits)},\"pattern_failure_entry\":{arm.pattern_failure_entry.id},\"guard_failure_entry\":{arm.guard_failure_entry.id},\"source_span\":{serialize_mir_enum_span_v1(arm.source_span)}}"
 
 fn serialize_mir_enum_match_v1(record: MirEnumMatchSemanticV1) -> text:
     # Stable field/vector order is part of the v1 canonical transport.
-    # @workaround bug=seed_list_comprehension_join_and_empty_native_2026_10_21 recover=400bd5d1983 reason=preserve nonempty enum metadata and known join receivers
-    var patterns: [text] = []
-    for node in record.pattern_nodes:
-        patterns.push(serialize_mir_enum_pattern_v1(node))
-    var arms: [text] = []
-    for arm in record.arms:
-        arms.push(serialize_mir_enum_arm_v1(arm))
-    var sites: [text] = []
-    for site in record.sites:
-        sites.push(serialize_mir_enum_site_v1(site))
+    val patterns = [for node in record.pattern_nodes: serialize_mir_enum_pattern_v1(node)]
+    val arms = [for arm in record.arms: serialize_mir_enum_arm_v1(arm)]
+    val sites = [for site in record.sites: serialize_mir_enum_site_v1(site)]
     var parts: [text] = ["{\"schema\":\"{escape_json_string(record.schema)}\",\"match_id\":{record.match_id},\"enum_owner\":{record.enum_owner.id},"]
     parts.push("\"scrutinee_operand\":{serialize_operand(record.scrutinee_operand)},\"scrutinee_semantic_type\":{serialize_mir_type(record.scrutinee_semantic_type)},")
     parts.push("\"entry_block\":{record.entry_block.id},\"entry_instruction_index\":{record.entry_instruction_index},\"result_local\":{record.result_local.id},\"merge_block\":{record.merge_block.id},")
@@ -774,20 +766,12 @@ fn serialize_mir_enum_match_v1(record: MirEnumMatchSemanticV1) -> text:
     parts.join("")
 
 fn serialize_mir_enum_variant_slots_v1(variant: MirEnumVariantSlotsV1) -> text:
-    # @workaround bug=seed_list_comprehension_join_and_empty_native_2026_10_21 recover=400bd5d1983 reason=preserve variant slots and known join receivers
-    var types: [text] = []
-    for type_ in variant.slot_types:
-        types.push(serialize_mir_type(type_))
-    var names: [text] = []
-    for name in variant.slot_names:
-        names.push("\"" + escape_json_string(name) + "\"")
+    val types = [for type_ in variant.slot_types: serialize_mir_type(type_)]
+    val names = [for name in variant.slot_names: "\"" + escape_json_string(name) + "\""]
     "{\"discriminant\":{variant.discriminant},\"source_variant\":{variant.source_variant.id},\"slot_types\":[" + types.join(",") + "],\"slot_names\":[" + names.join(",") + "]}"
 
 fn serialize_mir_enum_declaration_v1(record: MirEnumDeclarationIdentityV1) -> text:
-    # @workaround bug=seed_list_comprehension_join_and_empty_native_2026_10_21 recover=400bd5d1983 reason=preserve declarations and a known join receiver
-    var variants: [text] = []
-    for variant in record.variants:
-        variants.push(serialize_mir_enum_variant_slots_v1(variant))
+    val variants = [for variant in record.variants: serialize_mir_enum_variant_slots_v1(variant)]
     "{\"schema\":\"MirEnumDeclarationIdentity-v1\",\"owner\":{record.owner.id},\"source_owner\":{record.source_owner.id},\"runtime_name\":\"{escape_json_string(record.runtime_name)}\",\"runtime_identity\":{record.runtime_identity},\"variants\":[" + variants.join(",") + "]}"
 
 fn escape_json_string(s: text) -> text:

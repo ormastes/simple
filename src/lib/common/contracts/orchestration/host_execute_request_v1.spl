@@ -1,0 +1,112 @@
+# Execute envelope shape and identity only; signed values remain UNTRUSTED.
+# The host MUST decode request_bytes using linux_oci_retained_request_decode_v1
+# and recompute linux_oci_request_digest_v1 before authorization/effects. That
+# semantic digest is NOT sha256(raw retained bytes). Common imports no provider
+# schema, and neither interprets nor trusts an embedded requestDigest field.
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
+use std.common.contracts.distributed_authority_codec_v2.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.orchestration.host_prepare_response_v1.{host_prepare_response_encode_v1, host_prepare_response_decode_v1}
+use std.common.contracts.orchestration.linux_launch_plan_v1.*
+use std.common.contracts.orchestration.linux_launch_plan_codec_v1.host_linux_launch_plan_decode_v1
+use std.common.contracts.orchestration.resource_v1.{as_dict, as_text, as_int, only_known}
+use std.common.string_core.str_len
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct HostExecuteRequestV1:
+    intent: HostReservationIntentV1
+    operation: OperationEnvelopeV2
+    receipt: HostPreparedReservationReceiptV1
+    plan: HostLinuxLaunchPlanV1
+    request_bytes: text
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+
+fn execute_request_opaque_valid_v1(source: text) -> Result<bool, text>:
+    if str_len(source) == 0 or str_len(source) > 1048576: return Err("host-execute-request-body-size")
+    val limits = SdnStrictLimitsV1(max_source_bytes: 1048576, max_depth: 16,
+        max_nodes: 65536, max_rows: 0, max_cells: 0, max_columns: 256)
+    val parsed = match sdn_parse_strict_v1(source, limits):
+        case Ok(value): value
+        case Err(issue): return Err("host-execute-request-body-invalid:" + issue.code)
+    if sdn_encode_canonical(parsed.value) + "\n" != source:
+        return Err("host-execute-request-body-not-canonical")
+    Ok(true)
+
+pub fn host_execute_request_encode_v1(request: HostExecuteRequestV1) -> Result<text, text>:
+    val matching = host_reservation_match_operation_v1(request.intent, request.operation)?
+    val receipt = host_prepare_response_encode_v1(request.receipt, request.intent, request.operation)?
+    val plan = request.plan
+    # Legacy blank scope is valid for older local APIs, never for this boundary.
+    if plan.physical_host_id == "" or plan.boot_id == "" or plan.provider_generation <= 0:
+        return Err("host-execute-plan-scope-required")
+    val plan_bytes = host_linux_launch_plan_bytes_v1(plan)?
+    val scope = host_linux_launch_scope_match_v1(plan, request.intent.physical_host_id,
+        request.intent.fence.boot_id, request.intent.fence.provider_generation)?
+    if plan.service_scope_id != request.intent.reservation.service_scope_id:
+        return Err("host-execute-service-scope-mismatch")
+    if host_linux_launch_plan_digest_v1(plan)? != request.intent.plan_digest:
+        return Err("host-execute-plan-digest-mismatch")
+    val bounded = execute_request_opaque_valid_v1(request.request_bytes)?
+    val intent = host_reservation_encode_intent_v1(request.intent)?
+    val operation = distributed_encode_operation_v2(request.operation)?
+    val signed = distributed_encode_signed_grant_v2(request.signed)?
+    val approval = distributed_encode_signed_approval_v2(request.approval)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("host-execute-request"), "reservation": SdnValue.String(intent),
+        "operation": SdnValue.String(operation), "receipt": SdnValue.String(receipt),
+        "launchPlan": SdnValue.String(plan_bytes), "requestBytes": SdnValue.String(request.request_bytes),
+        "signedGrant": SdnValue.String(signed), "signedApproval": SdnValue.String(approval)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    # Escaping may exceed the aggregate budget even for individually valid
+    # inputs. Refuse the whole envelope; never truncate a retained request.
+    if str_len(source) > 2097152: return Err("host-execute-request-too-large")
+    Ok(source)
+
+fn execute_request_fields_v1(source: text) -> Result<[text], text>:
+    val limits = SdnStrictLimitsV1(max_source_bytes: 2097152, max_depth: 2,
+        max_nodes: 24, max_rows: 0, max_cells: 0, max_columns: 12)
+    val parsed = match sdn_parse_strict_v1(source, limits):
+        case Ok(value): value
+        case Err(issue): return Err("host-execute-request-invalid:" + issue.code)
+    val spans: Dict<text, SdnSpan> = {}
+    val fields = match as_dict(parsed.value, "", spans):
+        case Ok(value): value
+        case Err(reason): return Err("host-execute-request-invalid:" + reason.kind)
+    val known = only_known(fields, ["version", "kind", "reservation", "operation", "receipt",
+        "launchPlan", "requestBytes", "signedGrant", "signedApproval"], "", spans)
+    if known.is_err(): return Err("host-execute-request-unknown-field")
+    if not fields.contains_key("version") or not fields.contains_key("kind"):
+        return Err("host-execute-request-envelope-required")
+    val version = as_int(fields["version"], "version", spans)
+    val kind = as_text(fields["kind"], "kind", spans)
+    if version.is_err() or kind.is_err(): return Err("host-execute-request-envelope-invalid")
+    if version.unwrap() != 1 or kind.unwrap() != "host-execute-request":
+        return Err("host-execute-request-version")
+    var values: [text] = []
+    for key in ["reservation", "operation", "receipt", "launchPlan", "requestBytes", "signedGrant", "signedApproval"]:
+        if not fields.contains_key(key): return Err("host-execute-request-missing:" + key)
+        match fields[key]:
+            case SdnValue.String(value): values.push(value)
+            case _: return Err("host-execute-request-text-required:" + key)
+    Ok(values)
+
+pub fn host_execute_request_decode_v1(source: text) -> Result<HostExecuteRequestV1, text>:
+    if str_len(source) > 2097152: return Err("host-execute-request-too-large")
+    val fields = execute_request_fields_v1(source)?
+    val intent = host_reservation_decode_intent_v1(fields[0])?
+    val operation = distributed_decode_operation_v2(fields[1])?
+    val receipt = host_prepare_response_decode_v1(fields[2], intent, operation)?
+    val plan = host_linux_launch_plan_decode_v1(fields[3])?
+    val signed = distributed_decode_signed_grant_v2(fields[5])?
+    val approval = distributed_decode_signed_approval_v2(fields[6])?
+    val request = HostExecuteRequestV1(intent: intent, operation: operation, receipt: receipt,
+        plan: plan, request_bytes: fields[4], signed: signed, approval: approval)
+    if host_execute_request_encode_v1(request)? != source:
+        return Err("host-execute-request-not-canonical")
+    Ok(request)

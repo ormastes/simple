@@ -1,0 +1,70 @@
+# @cover src/compiler/10.frontend/core/_ParserPrimary/primary_expr.spl 1%
+"""
+## Purpose and audience
+`async <expr>` as a constructor argument (immutable-views plan section 3.1,
+ASY-02): the P0 probe showed the argument form did not parse
+(`expected Comma, found Identifier`). Readers are compiler authors.
+Plan: doc/03_plan/compiler/data/immutable_views_async_init_revisions_2026-11-13.md
+## Operator workflow
+bin/simple test test/01_unit/compiler/hir/async_ctor_arg_parse_spec.spl
+## Compatibility and limitations
+Only the pure-Simple frontend parser is judged here; the Rust seed parser is
+probed separately (see the PR).
+## Verification guidance and troubleshooting
+RED "ctor argument" cases mean `async` is not accepted in argument position.
+"""
+# @manual_section: Async ctor argument
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.core.parser.{parser_has_errors}
+
+fn parses(source: text, name: text) -> bool:
+    val filename = "async_ctor_arg_" + name + ".spl"
+    parse_full_frontend(source, filename, filename, Logger(level: 0))
+    not parser_has_errors()
+
+describe "ASY-02 async <expr> as a constructor argument":
+    it "parses a named ctor argument bound to async <call>":
+        val src = "class Node:\n" +
+            "    id: i64\n" +
+            "    kind: i64\n" +
+            "\n" +
+            "fn infer(x: i64) -> i64:\n" +
+            "    x\n" +
+            "\n" +
+            "fn make() -> Node:\n" +
+            "    Node(id: 2, kind: async infer(2))\n"
+        expect(parses(src, "named")).to_equal(true)
+
+    it "parses a positional ctor argument bound to async <call>":
+        val src = "class Node:\n" +
+            "    id: i64\n" +
+            "    kind: i64\n" +
+            "\n" +
+            "fn infer(x: i64) -> i64:\n" +
+            "    x\n" +
+            "\n" +
+            "fn make() -> Node:\n" +
+            "    Node(2, async infer(2))\n"
+        expect(parses(src, "positional")).to_equal(true)
+
+    it "parses async <expr> in a call argument list after a plain argument":
+        val src = "fn infer(x: i64) -> i64:\n" +
+            "    x\n" +
+            "\n" +
+            "fn use_it(a: i64, b: i64) -> i64:\n" +
+            "    a + b\n" +
+            "\n" +
+            "fn make() -> i64:\n" +
+            "    use_it(1, async infer(2))\n"
+        expect(parses(src, "mixed")).to_equal(true)
+
+    it "still parses a plain async fn":
+        val src = "async fn compute(x: i64) -> i64:\n" +
+            "    x\n" +
+            "\n" +
+            "fn run() -> i64:\n" +
+            "    val f = compute(3)\n" +
+            "    1\n"
+        expect(parses(src, "plain")).to_equal(true)

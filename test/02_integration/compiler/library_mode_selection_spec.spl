@@ -1,0 +1,100 @@
+use std.spec.*
+use compiler.common.source_root_resolution.{SourceRootResolutionV1}
+use compiler.driver.driver_library_mode_resolution_v1.{driver_library_mode_selected_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_key, hir_cache_header, hir_cache_parser_binding_v1}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.driver_source_loading.{driver_closure_importer_module_v1, _driver_entry_import_dirname}
+use compiler.driver.driver_preclosed_source_aliases.{driver_preclosed_source_aliases_v1}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.library_mode_policy_v1.{library_mode_import_key_v1}
+use compiler.hir.hir_lowering.module_surface.{module_surface_canonical_path}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+
+fn library_mode_selected_fixture(module_path: text, mode: text, importer: text, importer_owner: text = "app.entry") -> text:
+    val selected = driver_library_mode_selected_v1(module_path,
+        ["test/fixtures/compiler/library_mode_selection/src/lib"], importer, mode, importer_owner).unwrap()
+    match selected:
+        case SourceRootResolutionV1.Found(path): path.replace("\\", "/")
+        case _: panic("fixture owner was not resolved uniquely")
+
+describe "configured real filesystem owner selection":
+    it "selects distinct physical owners for the same generic import":
+        step("selects distinct physical owners for the same generic import")
+        val importer = "test/fixtures/compiler/library_mode_selection/src/app/entry.spl"
+        for row in [["nogc-sync-mut", "nogc_sync_mut"], ["gc-sync-mut", "gc_sync_mut"], ["nogc-async-mut", "nogc_async_mut"]]:
+            val path = library_mode_selected_fixture("std.library_mode_probe", row[0], importer)
+            expect(path.ends_with("/" + row[1] + "/library_mode_probe.spl")).to_equal(true)
+        expect(library_mode_selected_fixture("lib.library_mode_probe", "nogc-sync-mut", importer)).to_equal(library_mode_selected_fixture("std.library_mode_probe", "nogc-sync-mut", importer))
+        expect(library_mode_selected_fixture("std.library_shared_probe", "nogc-sync-mut", importer).ends_with("/common/library_shared_probe.spl")).to_equal(true)
+
+    it "rejects a leaf that exists only in an unselected family":
+        step("rejects a leaf that exists only in an unselected family")
+        val selected = driver_library_mode_selected_v1("std.library_async_only",
+            ["test/fixtures/compiler/library_mode_selection/src/lib"],
+            "test/fixtures/compiler/library_mode_selection/src/app/missing_owner.spl", "nogc-sync-mut", "app.missing_owner")
+        expect(selected.is_err()).to_equal(true)
+        match selected:
+            case Err(reason): expect(reason).to_contain("LIBRARY_MODE_OWNER_MISSING")
+            case Ok(_): panic("unselected family supplied a missing configured owner")
+
+    it "keeps an explicitly imported internal owner's generic dependency coherent":
+        step("keeps an explicitly imported internal owner's generic dependency coherent")
+        val importer = "test/fixtures/compiler/library_mode_selection/src/lib/nogc_async_mut/library_internal.spl"
+        expect(library_mode_selected_fixture("std.library_mode_probe", "nogc-sync-mut", importer, driver_closure_importer_module_v1(importer)).ends_with("/nogc_async_mut/library_mode_probe.spl")).to_equal(true)
+
+    it "keeps the unconfigured legacy family order":
+        step("keeps the unconfigured legacy family order")
+        expect(library_mode_selected_fixture("std.library_mode_probe", "", "entry.spl").ends_with("/nogc_async_mut/library_mode_probe.spl")).to_equal(true)
+
+    it "interleaves real source cache keys and parser bindings without ambient mode":
+        step("interleaves real source cache keys and parser bindings without ambient mode")
+        val source = "test/fixtures/compiler/library_mode_selection/src/app/entry.spl"
+        val closure = sha256_text("same admitted test closure")
+        val identity = sha256_text("same parser input identity")
+        val legacy = hir_cache_key(source, closure, true)
+        val sync = hir_cache_key(source, closure, true, "nogc-sync-mut")
+        val gc = hir_cache_key(source, closure, true, "gc-sync-mut")
+        expect(legacy.len()).to_equal(64)
+        expect(sync.len()).to_equal(64)
+        expect(gc.len()).to_equal(64)
+        expect(sync != gc and sync != legacy and gc != legacy).to_equal(true)
+        val sync_binding = hir_cache_parser_binding_v1(sync, "entry", source, identity, "nogc-sync-mut")
+        val gc_binding = hir_cache_parser_binding_v1(gc, "entry", source, identity, "gc-sync-mut")
+        expect(gc_binding != sync_binding).to_equal(true)
+        expect(hir_cache_key(source, closure, true, "nogc-sync-mut")).to_equal(sync)
+        expect(hir_cache_parser_binding_v1(sync, "entry", source, identity, "nogc-sync-mut")).to_equal(sync_binding)
+        expect(hir_cache_key(source, closure, true, "")).to_equal(legacy)
+        expect(hir_cache_header("")).to_equal(hir_cache_header())
+        expect(hir_cache_header("nogc-sync-mut") != hir_cache_header("gc-sync-mut")).to_equal(true)
+
+    it "keeps application selection beneath an unrelated lib family ancestor":
+        step("keep application selection beneath an unrelated lib family ancestor")
+        val root = module_surface_canonical_path("test/fixtures/compiler/library_mode_selection")
+        val app_path = root + "/lib/gc_sync_mut/project/src/app/ancestor_entry.spl"
+        val app_owner = driver_closure_importer_module_v1(app_path)
+        expect(app_owner).to_equal("app.ancestor_entry")
+        val library_root = root + "/src/lib"
+        val provider_path = library_root + "/nogc_sync_mut/library_mode_probe.spl"
+        val selected = driver_library_mode_selected_v1("std.library_mode_probe", [library_root],
+            _driver_entry_import_dirname(app_path), "nogc-sync-mut", app_owner).unwrap()
+        match selected:
+            case SourceRootResolutionV1.Found(path): expect(path.replace("\\", "/")).to_equal(provider_path)
+            case _: panic("configured application did not select its NoGC provider")
+        expect(driver_library_mode_selected_v1("std.library_mode_probe", [library_root],
+            _driver_entry_import_dirname(app_path), "nogc-sync-mut").is_err()).to_equal(true)
+        expect(driver_library_mode_selected_v1("std.library_mode_probe", [library_root],
+            _driver_entry_import_dirname(app_path), "nogc-sync-mut", app_path).is_err()).to_equal(true)
+        val app_source = SourceFile(path: app_path,
+            content: file_read_regular_no_follow_bounded(app_path, 65536).unwrap(), module_name: app_owner)
+        val provider_source = SourceFile(path: provider_path,
+            content: file_read_regular_no_follow_bounded(provider_path, 65536).unwrap(),
+            module_name: driver_closure_importer_module_v1(provider_path))
+        val aliases = driver_preclosed_source_aliases_v1([app_source, provider_source],
+            [library_root], root, "nogc-sync-mut").unwrap()
+        val expected_key = library_mode_import_key_v1("std.library_mode_probe", "nogc-sync-mut", app_owner)
+        var matches = 0
+        for source in aliases:
+            if source.module_name == expected_key:
+                expect(source.path).to_equal(provider_path)
+                matches = matches + 1
+        expect(matches).to_equal(1)

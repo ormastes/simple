@@ -32,10 +32,18 @@ sub hash_file {
 hash_file($compiler) eq $producer_sha or fail('producer bytes changed before evidence validation');
 
 open my $fh, '<:raw', $log or fail('cannot read runner log');
-my (@terminal_json, @invocations, %running, @results);
+my (@files, @invocations, %running, @results);
 while (my $line = <$fh>) {
     $line =~ s/\r?\n\z//;
-    push @terminal_json, $line if $line =~ /^\{"success":/;
+    # The runner retired terminal JSON. Match its supported text file verdicts
+    # exactly; pending/skipped/cached suffixes cannot become executed evidence.
+    $line !~ /^\{"success":/ or fail('retired terminal JSON result');
+    if ($line =~ /^  PASS  (.+) \(([0-9]+) passed, [0-9]+ms\)(?: \[setup: [0-9]+ms\])?\z/) {
+        push @files, { path => $1, passed => $2, failed => 0, skipped => 0, pending => 0 };
+    } elsif ($line =~ /^  (?:PASS|FAIL|CRASH|TERM|TOUT|NRUN|VACU|SKIP|PEND)  / ||
+             $line =~ /^        Error:/) {
+        fail('nonpassing, cached or malformed text file verdict');
+    }
     if ($line =~ /^native-aot-invocation\|(\{.*\})\z/) {
         my $item = eval { JSON::PP::decode_json($1) };
         !$@ && ref($item) eq 'HASH' or fail('malformed native invocation JSON');
@@ -47,18 +55,11 @@ while (my $line = <$fh>) {
         fail('native row used a fallback');
 }
 close $fh or fail('cannot close runner log');
-@terminal_json == 1 or fail('expected exactly one terminal JSON result');
 @results == 1 or fail('expected exactly one Results receipt');
-my $row = eval { JSON::PP::decode_json($terminal_json[0]) };
-!$@ && ref($row) eq 'HASH' && ref($row->{spec}) eq 'HASH' or fail('invalid terminal JSON result');
-my $spec_result = $row->{spec};
-$row->{success} && $spec_result->{success} or fail('test runner reported failure');
-ref($spec_result->{files}) eq 'ARRAY' or fail('terminal JSON has no file inventory');
-my @files = @{$spec_result->{files}};
 @files > 0 or fail('empty file inventory');
 @invocations == @files or fail('native invocation count differs from test file count');
 my ($results_total, $results_passed, $results_failed) =
-    $results[0] =~ /^Results: ([0-9]+) total, ([0-9]+) passed, ([0-9]+) failed/;
+    $results[0] =~ /^Results: ([0-9]+) total, ([0-9]+) passed, ([0-9]+) failed\z/;
 defined $results_total && $results_total > 0 && $results_failed == 0 &&
     $results_passed == $results_total or fail('nonpassing or malformed Results receipt');
 
@@ -89,7 +90,7 @@ for my $file (@files) {
         !defined($file->{error}) or fail("file has no executed passing assertions: $path");
     $sum_passed += $file->{passed};
 }
-$sum_passed == $results_total && $sum_passed == ($spec_result->{total_passed} // -1) or
+$sum_passed == $results_total or
     fail('per-file assertions disagree with aggregate Results');
 
 my $tmp_real = realpath($tmp) // fail('cannot resolve private TMPDIR');

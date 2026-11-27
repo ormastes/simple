@@ -28,35 +28,48 @@
 // Module declarations
 pub mod metadata;
 pub mod file_ops;
+pub mod under_root;
 pub mod directory;
 pub mod descriptor;
 pub mod io_file;
 pub mod mmap;
 pub mod path;
+pub mod workspace_storage_v1;
+pub mod win_object;
+pub use win_object::rt_win_compare_object_handles;
+pub use workspace_storage_v1::{rt_workspace_storage_open_v1,
+    rt_workspace_storage_observe_v1, rt_workspace_storage_release_if_absent_v1,
+    rt_workspace_storage_forget_released_v1,rt_workspace_storage_close_retained_v1,rt_linux_container_user_open_v1,
+    rt_linux_container_user_observe_v1,rt_linux_container_user_close_v1,
+    rt_workspace_storage_prepare_executable_v1, rt_linux_container_containment_capture_v1,
+    rt_linux_container_containment_observe_v1, rt_linux_container_containment_close_v1,
+    rt_linux_container_containment_kernel_observe_v1};
 
 // Re-export all public functions for compatibility
 pub use metadata::{
     rt_dir_exists, rt_file_exists, rt_file_exists_probe_begin, rt_file_exists_probe_end, rt_file_is_char_device,
-    rt_file_is_regular_no_follow, rt_file_stat,
+    rt_file_is_regular_no_follow, rt_file_modified, rt_file_modified_time, rt_file_stat,
 };
 pub use file_ops::{
-    rt_file_canonicalize, rt_file_read_text, rt_file_read_regular_no_follow_bounded, rt_file_read_regular_no_follow_last_failure, rt_file_read_text_rv,
-    rt_file_write_text, rt_file_copy, rt_file_remove, rt_file_size, rt_file_hash_sha256, rt_file_fsync,
+    rt_file_canonicalize, rt_file_read_text, rt_file_read_regular_no_follow_bounded, rt_file_read_regular_no_follow_bounded_raw, rt_file_read_text_raw, rt_file_read_regular_no_follow_last_failure, rt_file_read_text_rv,
+    rt_file_write_text, rt_file_copy, rt_file_remove, rt_file_size, rt_file_hash_sha256, rt_file_fsync, rt_dir_sync, rt_file_read_under_root_bytes, rt_file_write_under_root_bytes,
     rt_file_fsync_cached, rt_file_rename, rt_file_read_lines, rt_file_append_text, rt_file_read_bytes,
-    rt_file_write_bytes, rt_file_write_bytes_array, rt_file_wrap_smf_dynlib, rt_file_extract_smf_dynlib, rt_file_move,
+    rt_file_write_bytes, rt_file_write_bytes_array, rt_file_atomic_write, rt_file_atomic_write_mode,
+    rt_file_atomic_write_bytes_array, rt_file_wrap_smf_dynlib, rt_file_extract_smf_dynlib, rt_file_move,
     rt_file_lock, rt_file_unlock, rt_file_mmap_read_text, rt_file_mmap_len, rt_file_mmap_read_text_rv,
     rt_file_mmap_read_bytes, rt_file_mmap_read_bytes_rv, rt_file_read_text_at, rt_file_read_text_at_checked,
-    rt_file_write_text_at, rt_file_write_text_at_cached, rt_file_write_text_at_cached_repeat, rt_mmap, rt_munmap,
+    rt_file_write_text_at, rt_file_write_text_at_cached, rt_file_write_text_at_cached_repeat, rt_mmap, rt_mmap_create, rt_munmap,
     rt_madvise, rt_msync, rt_getpid, rt_bytes_from_raw, rt_write_u32s_to_raw, rt_write_u32s_strided_to_raw,
     rt_write_u32s_to_raw_checksum, rt_write_fill_u32s_to_raw_checksum, rt_bytes_to_text, rt_text_to_bytes,
+    rt_tls_wire_from_bytes,
 };
 pub use directory::{
     rt_dir_create, rt_dir_list, rt_dir_remove, rt_file_find, rt_dir_glob, rt_dir_create_all, rt_dir_walk,
-    rt_current_dir, rt_set_current_dir, rt_dir_remove_all, rt_mkdir_p,
+    rt_current_dir, rt_set_current_dir, rt_dir_remove_all, rt_mkdir, rt_mkdir_p,
 };
 pub use descriptor::{rt_close_fd, rt_file_open, rt_file_get_size, rt_file_close, rt_open_fd};
 pub use mmap::{rt_file_mmap, rt_file_munmap, rt_file_madvise, rt_file_msync, native_msync};
 pub use path::{
     rt_path_basename, rt_path_dirname, rt_path_ext, rt_path_absolute, rt_path_separator, rt_path_stem,
-    rt_path_relative, rt_path_join, rt_path_parent,
+    rt_path_relative, rt_path_join, rt_path_parent, rt_path_normalize, normalize_lexical_path,
 };

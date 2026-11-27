@@ -1,0 +1,74 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl
+# @tag: unit, engine2d, draw_ir, perf
+#
+# A plain rect (no computed style) must not pay the full box-effect pipeline
+# (typed/legacy shadows, corners, backdrop, glass, borders, outline style
+# scans): a Chrome-exact dashed border emits ~3 such rects per dash. Measured
+# on base 0285176e3a7..677dd8fc9cd: ~0.5 ms per 3x1 rect in
+# `_engine2d_draw_ir_render_box` alone (interpreter, cpu path).
+
+use std.spec
+use std.gpu.engine2d.engine.Engine2D
+use common.ui.draw_ir.{draw_ir_rect, draw_ir_rect_clipped, draw_ir_rect_bounds, draw_ir_batch, draw_ir_composition, draw_ir_embedding_config, DRAW_IR_BACKEND_CPU, DrawIrCommand}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dResolvedDrawIrImage, engine2d_draw_ir_adv_composition_with_images}
+use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
+
+val OV_W = 820
+val OV_H = 8
+val OV_N = 1500
+
+fn ov_color(i: i32) -> u32:
+    # Opaque and translucent runs, as a dashed side's full and partial pixels.
+    if i % 3 == 0: 0x7F64748Bu32 else: (if i % 2 == 0: 0xFF64748Bu32 else: 0xFF334155u32)
+
+fn ov_commands() -> [DrawIrCommand]:
+    var cmds: [DrawIrCommand] = [draw_ir_rect("bg", 0, 0, OV_W, OV_H, 0xFFFFFFFFu32)]
+    val clip = draw_ir_rect_bounds(0, 0, OV_W, OV_H)
+    var i = 0
+    while i < OV_N:
+        # 3x1 runs 5 px apart on 8 rows: never adjacent, so nothing coalesces.
+        cmds.push(draw_ir_rect_clipped("d{i}", (i % 163) * 5, i / 163, 3, 1, ov_color(i), clip))
+        i = i + 1
+    cmds
+
+fn ov_images() -> [Engine2dResolvedDrawIrImage]:
+    []
+
+describe "DrawIR plain rect per-command overhead":
+    it "paints N plain rects byte-identically to direct fills within a per-command budget":
+        val clock = default_frame_clock()
+        val direct = Engine2D.create_with_backend(OV_W, OV_H, "software")
+        val d0 = clock.now_micros()
+        direct.draw_rect_filled(0, 0, OV_W, OV_H, 0xFFFFFFFFu32)
+        var i = 0
+        while i < OV_N:
+            direct.draw_rect_filled((i % 163) * 5, i / 163, 3, 1, ov_color(i))
+            i = i + 1
+        val direct_us = clock.now_micros() - d0
+        val want = direct.read_pixels()
+        direct.shutdown()
+        val engine = Engine2D.create_with_backend(OV_W, OV_H, "software")
+        val composition = draw_ir_composition("ov", "scene", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("root", DRAW_IR_BACKEND_CPU,
+                draw_ir_embedding_config("", "", 0, 0, 0, 0, 0, 1000, false), ov_commands())
+        ])
+        val t0 = clock.now_micros()
+        val result = engine2d_draw_ir_adv_composition_with_images(engine, composition, false, ov_images())
+        val us = clock.now_micros() - t0
+        val per_rect = (us - direct_us) / (OV_N as i64)
+        print "plain-rect overhead: {OV_N} rects in {us} us via DrawIR, {direct_us} us direct; {per_rect} us/rect DrawIR overhead"
+        print "plain-rect overhead: skipped={result.skipped_command_count} rendered={result.rendered_command_count} fallback={result.fallback_required}"
+        assert_true(result.skipped_command_count == 0)
+        val got = engine.read_pixels()
+        assert_true(got.len() == want.len())
+        var diff = 0
+        var p = 0
+        while p < got.len():
+            if got[p] != want[p]:
+                diff = diff + 1
+            p = p + 1
+        print "plain-rect overhead: {diff} pixel(s) differ from direct fills"
+        assert_true(diff == 0)
+        # DrawIR cost per rect ABOVE the same direct fill (machine-relative).
+        # Base 677dd8fc9cd: ~460 us/rect (render_box style pipeline per rect).
+        assert_true(per_rect < 150)

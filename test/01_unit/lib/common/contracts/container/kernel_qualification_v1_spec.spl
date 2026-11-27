@@ -1,0 +1,68 @@
+# AUTHORED_UNRUN: strict policy metadata, no installed/native qualification.
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.container.kernel_qualification_v1.*
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+fn kernel_profile_fixture_v1() -> ContainerKernelQualificationProfileV1:
+    ContainerKernelQualificationProfileV1(kernel_release: "6.12.0-installed", kernel_build_id: "0123456789abcdef",
+        source_manifest_digest: "a".repeat(64), config_digest: "b".repeat(64), patch_manifest_digest: "c".repeat(64),
+        rule_id: "linux-v6.12-core-events-deactivation-v1")
+
+fn kernel_profile_fields_v1() -> Dict<text, SdnValue>:
+    {"version": SdnValue.Int(1), "kind": SdnValue.String("container-kernel-qualification-profile"),
+        "kernelRelease": SdnValue.String("6.12.0-installed"), "kernelBuildId": SdnValue.String("0123456789abcdef"),
+        "sourceManifestDigest": SdnValue.String("a".repeat(64)), "configDigest": SdnValue.String("b".repeat(64)),
+        "patchManifestDigest": SdnValue.String("c".repeat(64)), "ruleId": SdnValue.String("linux-v6.12-core-events-deactivation-v1")}
+
+describe "kernel qualification profile metadata":
+    it "preserves the independently specified canonical fields and variable GNU build ID":
+        step("Encode exact policy fields without assuming a SHA256 build ID")
+        val expected = sdn_encode_canonical(SdnValue.Dict(kernel_profile_fields_v1()))
+        val encoded = container_kernel_qualification_profile_encode_v1(kernel_profile_fixture_v1()).unwrap()
+        expect(encoded).to_equal(expected)
+        expect(container_kernel_qualification_profile_decode_v1(expected).unwrap().kernel_build_id).to_equal("0123456789abcdef")
+        for id in ["ab", "ab".repeat(64)]:
+            var profile = kernel_profile_fixture_v1()
+            profile.kernel_build_id = id
+            expect(container_kernel_qualification_profile_decode_v1(container_kernel_qualification_profile_encode_v1(profile).unwrap()).unwrap().kernel_build_id).to_equal(id)
+
+    it "rejects malformed build IDs and release paths before observation":
+        step("Reject odd uppercase oversized and nonhex GNU note identities")
+        for id in ["", "a", "ABCDEF", "ab".repeat(65), "ag", "a\u{0}"]:
+            var profile = kernel_profile_fixture_v1()
+            profile.kernel_build_id = id
+            expect(container_kernel_qualification_profile_encode_v1(profile).is_err()).to_equal(true)
+        for release in ["", "6.12/source", "6.12\n", "r".repeat(257), "rélease"]:
+            var profile = kernel_profile_fixture_v1()
+            profile.kernel_release = release
+            expect(container_kernel_qualification_profile_encode_v1(profile).is_err()).to_equal(true)
+
+    it "refuses authority flags unknown fields wrong types and noncanonical policy bytes":
+        step("Decode only the frozen metadata schema")
+        var fields = kernel_profile_fields_v1()
+        fields["qualified"] = SdnValue.Bool(true)
+        expect(container_kernel_qualification_profile_decode_v1(sdn_encode_canonical(SdnValue.Dict(fields))).is_err()).to_equal(true)
+        fields = kernel_profile_fields_v1()
+        fields["kernelBuildId"] = SdnValue.Int(42)
+        expect(container_kernel_qualification_profile_decode_v1(sdn_encode_canonical(SdnValue.Dict(fields))).is_err()).to_equal(true)
+        val bytes = container_kernel_qualification_profile_encode_v1(kernel_profile_fixture_v1()).unwrap()
+        expect(container_kernel_qualification_profile_decode_v1(bytes + "\n").is_err()).to_equal(true)
+        val duplicate = bytes.replace("version: 1", "version: 1, version: 1")
+        expect(duplicate != bytes).to_equal(true)
+        expect(container_kernel_qualification_profile_decode_v1(duplicate).is_err()).to_equal(true)
+
+    it "binds every approved manifest and rejects unsupported rules":
+        step("Keep source config patch and rule provenance distinct")
+        val baseline = container_kernel_qualification_profile_digest_v1(kernel_profile_fixture_v1()).unwrap()
+        for field in ["sourceManifestDigest", "configDigest", "patchManifestDigest", "kernelBuildId", "kernelRelease"]:
+            var fields = kernel_profile_fields_v1()
+            fields[field] = if field == "kernelRelease": SdnValue.String("6.12.1-installed") else: SdnValue.String("d".repeat(64))
+            val changed = container_kernel_qualification_profile_decode_v1(sdn_encode_canonical(SdnValue.Dict(fields))).unwrap()
+            expect(container_kernel_qualification_profile_digest_v1(changed).unwrap() != baseline).to_equal(true)
+        var profile = kernel_profile_fixture_v1()
+        profile.rule_id = "generic-enodev-is-empty"
+        expect(container_kernel_qualification_profile_encode_v1(profile).is_err()).to_equal(true)
+        profile = kernel_profile_fixture_v1()
+        profile.config_digest = "B".repeat(64)
+        expect(container_kernel_qualification_profile_encode_v1(profile).is_err()).to_equal(true)

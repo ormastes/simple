@@ -1,0 +1,65 @@
+"""
+## Purpose and audience
+Purpose: Pin that `min-width` wins over a smaller `max-width` (CSS 2.1 10.4:
+max-width is applied first, then min-width), for percentage, px and auto
+widths, with padding/border, and with auto margins.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159, 900x2000, `body{margin:0}`,
+getBoundingClientRect, 2026-11-16):
+
+| style                                                              | x,y,w,h      |
+|--------------------------------------------------------------------|--------------|
+| `width:50%;max-width:300px;min-width:500px`                        | 0,0,500,10   |
+| `width:100px;max-width:300px;min-width:500px`                      | 0,10,500,10  |
+| `max-width:300px;min-width:500px`                                  | 0,20,500,10  |
+| `width:50%;max-width:300px;min-width:500px;padding:0 10px;border 5px` | 0,30,530,10 |
+| `max-width:300px;min-width:500px;margin:0 auto`                    | 200,40,500,10 |
+
+Filed as `block_min_max` in
+doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-MIN-WIDTH-BEATS-MAX-WIDTH-001 — min-width overrides a smaller max-width.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val PAGE: text = "<html><head><style>body{margin:0;font:16px/1 sans-serif}</style></head><body>" +
+    "<div id=a style=\"width:50%;max-width:300px;min-width:500px;height:10px\"></div>" +
+    "<div id=b style=\"width:100px;max-width:300px;min-width:500px;height:10px\"></div>" +
+    "<div id=c style=\"max-width:300px;min-width:500px;height:10px\"></div>" +
+    "<div id=d style=\"width:50%;max-width:300px;min-width:500px;padding:0 10px;border:0 solid;border-width:0 5px;height:10px\"></div>" +
+    "<div id=e style=\"max-width:300px;min-width:500px;margin:0 auto;height:10px\"></div>" +
+    "</body></html>"
+
+fn _box(id: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "x") + "," +
+        simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "y") + "," +
+        simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "w") + "," +
+        simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "h")
+
+describe "min-width beats a smaller max-width":
+    it "AC-1: percentage width":
+        step("Chrome 159: 50% of 900 = 450, max 300, min 500 -> 500")
+        expect(_box("a")).to_equal("0,0,500,10")
+
+    it "AC-2: px width":
+        step("Chrome 159: 100px, max 300, min 500 -> 500")
+        expect(_box("b")).to_equal("0,10,500,10")
+
+    it "AC-3: auto width":
+        step("Chrome 159: auto fills 900, max 300, min 500 -> 500")
+        expect(_box("c")).to_equal("0,20,500,10")
+
+    it "AC-4: content-box min plus padding and border":
+        step("Chrome 159: 500 content + 2x10 padding + 2x5 border = 530")
+        expect(_box("d")).to_equal("0,30,530,10")
+
+    it "AC-5: auto margins centre the min-width box":
+        step("Chrome 159: (900 - 500) / 2 = 200")
+        expect(_box("e")).to_equal("200,40,500,10")

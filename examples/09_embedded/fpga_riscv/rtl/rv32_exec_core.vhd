@@ -29,7 +29,18 @@ entity rv32_exec_core is
     -- regs_q / pc_q and cannot perturb execution.
     dbg_reg_addr : in std_logic_vector(4 downto 0) := (others => '0');
     dbg_reg_data : out std_logic_vector(31 downto 0);
-    dbg_pc : out std_logic_vector(31 downto 0)
+    dbg_pc : out std_logic_vector(31 downto 0);
+    -- External debug halt / clock-enable (Gap 1) and IMEM / SBA read-write
+    -- port (Gap 2). Inputs have inactive defaults so existing callers stay
+    -- cycle- and bit-identical while debuggers can gate execution cleanly at
+    -- instruction boundaries and inspect/patch code BRAM without core surgery.
+    clk_en_i         : in  std_logic := '1';
+    halt_i           : in  std_logic := '0';
+    halted_o         : out std_logic;
+    dbg_imem_we_i    : in  std_logic := '0';
+    dbg_imem_addr_i  : in  std_logic_vector(31 downto 0) := (others => '0');
+    dbg_imem_wdata_i : in  std_logic_vector(31 downto 0) := (others => '0');
+    dbg_imem_rdata_o : out std_logic_vector(31 downto 0)
   );
 end entity rv32_exec_core;
 
@@ -93,11 +104,15 @@ architecture rtl of rv32_exec_core is
   signal rom_b : rom_t := init_rom;
   signal data_rom : data_rom_t := init_data_rom;
   -- CSR file: minimal set for zicsr (mhartid=0, mstatus, mtvec, mie, mip)
+  -- plus trap-entry bookkeeping (mcause/mepc) so ecall/ebreak, illegal
+  -- instructions and the reserved all-zero halfword enter mtvec visibly.
   signal csr_mhartid : unsigned(31 downto 0) := x"00000000";
   signal csr_mstatus : unsigned(31 downto 0) := x"00000000";
   signal csr_mtvec : unsigned(31 downto 0) := x"00000000";
   signal csr_mie : unsigned(31 downto 0) := x"00000000";
   signal csr_mip : unsigned(31 downto 0) := x"00000000";
+  signal csr_mcause : unsigned(31 downto 0) := x"00000000";
+  signal csr_mepc : unsigned(31 downto 0) := x"00000000";
   -- Divider FSM state (multi-cycle for div/divu/rem/remu)
   signal div_op_q : std_logic_vector(2 downto 0) := (others => '0');
   signal div_running_q : std_logic := '0';
@@ -145,6 +160,7 @@ architecture rtl of rv32_exec_core is
   signal debug_ra_q : std_logic_vector(15 downto 0) := (others => '0');
   signal debug_sp_q : std_logic_vector(15 downto 0) := (others => '0');
   signal debug_phase_q : std_logic_vector(3 downto 0) := (others => '0');
+  signal halted_q : std_logic := '0';
 
   function sext(v : std_logic_vector) return unsigned is
   begin
@@ -275,6 +291,8 @@ begin
   -- Lane KK: additive read-only debug taps (combinational, no state added).
   dbg_reg_data <= std_logic_vector(regs_q(to_integer(unsigned(dbg_reg_addr))));
   dbg_pc <= std_logic_vector(pc_q);
+  halted_o <= halted_q;
+  dbg_imem_rdata_o <= rom_b_q;
 
   process(clk)
     variable r : regs_t;
@@ -309,6 +327,7 @@ begin
     variable rom_wd : std_logic_vector(31 downto 0);
     variable idxp1 : natural;
     variable ld_w : std_logic_vector(31 downto 0);
+    variable trap_taken : boolean;
   begin
     if rising_edge(clk) then
       -- Default memory port addressing: prefetch current pc words. States
@@ -327,22 +346,24 @@ begin
         rom_ra_b := ROM_WORDS - 1;
       end if;
       dr_ra := 0;
-      debug_uart_valid_q <= debug_uart_valid_next_q;
-      debug_uart_valid_next_q <= '0';
-      if uart_busy_q = '1' then
-        if uart_baud_q >= BAUD_DIV - 1 then
-          uart_baud_q <= 0;
-          if uart_bits_q > 1 then
-            uart_tx_q <= uart_shift_q(1);
-            uart_shift_q <= '1' & uart_shift_q(9 downto 1);
-            uart_bits_q <= uart_bits_q - 1;
+      if clk_en_i = '1' then
+        debug_uart_valid_q <= debug_uart_valid_next_q;
+        debug_uart_valid_next_q <= '0';
+        if uart_busy_q = '1' then
+          if uart_baud_q >= BAUD_DIV - 1 then
+            uart_baud_q <= 0;
+            if uart_bits_q > 1 then
+              uart_tx_q <= uart_shift_q(1);
+              uart_shift_q <= '1' & uart_shift_q(9 downto 1);
+              uart_bits_q <= uart_bits_q - 1;
+            else
+              uart_tx_q <= '1';
+              uart_busy_q <= '0';
+              uart_bits_q <= 0;
+            end if;
           else
-            uart_tx_q <= '1';
-            uart_busy_q <= '0';
-            uart_bits_q <= 0;
+            uart_baud_q <= uart_baud_q + 1;
           end if;
-        else
-          uart_baud_q <= uart_baud_q + 1;
         end if;
       end if;
 
@@ -377,6 +398,8 @@ begin
         csr_mtvec <= (others => '0');
         csr_mie <= (others => '0');
         csr_mip <= (others => '0');
+        csr_mcause <= (others => '0');
+        csr_mepc <= (others => '0');
         div_running_q <= '0';
         div_op_q <= (others => '0');
         div_sign_q <= '0';
@@ -388,6 +411,10 @@ begin
         div_count_q <= (others => '0');
         div_rd_q <= 0;
         div_result_q <= (others => '0');
+        halted_q <= halt_i;
+      elsif clk_en_i = '0' then
+        -- Gap 1: clock-enable freeze holds architectural state, FSM, and halted_q steady.
+        null;
       elsif state_q = S_UART then
         if uart_busy_q = '0' then
           pc_q <= next_pc_q;
@@ -437,10 +464,16 @@ begin
           div_rd_q <= 0;
         end if;
       elsif state_q = S_FETCH then
-        -- Fetch cycle: registered BRAM reads at the bottom of this process
-        -- latch rom_a(pc_idx) / rom_b(pc_idx + 1) this edge (default
-        -- addressing above); decode + execute happens next cycle in S_EXEC.
-        state_q <= S_EXEC;
+        if halt_i = '1' then
+          -- Gap 1: halt cleanly at instruction boundary without advancing state_q or pc_q.
+          halted_q <= '1';
+        else
+          halted_q <= '0';
+          -- Fetch cycle: registered BRAM reads at the bottom of this process
+          -- latch rom_a(pc_idx) / rom_b(pc_idx + 1) this edge (default
+          -- addressing above); decode + execute happens next cycle in S_EXEC.
+          state_q <= S_EXEC;
+        end if;
       elsif state_q = S_LOAD then
         -- Complete a deferred rom/data_rom load using the data registered on
         -- the previous edge.
@@ -476,6 +509,7 @@ begin
         -- DIVIDE / deferred LOAD / deferred STORE transitions).
         state_q <= S_FETCH;
         pc_next := pc_q + 4;
+        trap_taken := false;
         -- pc_idx was set in the per-cycle defaults; instruction words were
         -- registered from the replicated BRAMs during S_FETCH.
         if pc_idx < ROM_WORDS then
@@ -558,7 +592,14 @@ begin
           end if;
 
           if h(1 downto 0) = "00" then
-            if h(15 downto 13) = "000" then
+            if h = "0000000000000000" then
+              -- All-zero compressed halfword: permanently illegal encoding
+              -- (C extension reserved). Trap so it is observable.
+              trap_taken := true;
+              csr_mcause <= x"00000002";
+              csr_mepc <= pc_q;
+              pc_q <= csr_mtvec;
+            elsif h(15 downto 13) = "000" then
               rd := 8 + to_integer(unsigned(h(4 downto 2)));
               r(rd) := r(2) + c_addi4spn_imm(h);
             elsif h(15 downto 13) = "010" then
@@ -634,9 +675,15 @@ begin
                   r(rd) := r(rs2);
                 end if;
               else
-                -- c.jalr rs1 (rs2=0): ra=pc+2, pc=rs1  /  c.add rd,rs2 (rs2/=0): rd+=rs2
+                -- c.ebreak (rs2=0, rd=0): breakpoint trap. c.jalr rs1 (rs2=0,
+                -- rd/=0): ra=pc+2, pc=rs1  /  c.add rd,rs2 (rs2/=0): rd+=rs2
                 if rs2 = 0 then
-                  if rd /= 0 then
+                  if rd = 0 then
+                    trap_taken := true;
+                    csr_mcause <= x"00000003";
+                    csr_mepc <= pc_q;
+                    pc_q <= csr_mtvec;
+                  elsif rd /= 0 then
                     pc_next := r(rd);
                     r(1) := pc_q + 2;
                   end if;
@@ -956,15 +1003,17 @@ begin
                 when "000" =>
                   -- ecall (funct7=0000000) / ebreak (funct7=0000001)
                   if ins(31 downto 20) = "000000000000" then
-                    -- ecall: halt cleanly
-                    state_q <= S_FETCH;
-                    pc_q <= pc_q;
-                    null;
+                    -- ecall: enter the M-mode trap vector
+                    trap_taken := true;
+                    csr_mcause <= x"0000000B";
+                    csr_mepc <= pc_q;
+                    pc_q <= csr_mtvec;
                   elsif ins(31 downto 20) = "000000000001" then
-                    -- ebreak: halt cleanly
-                    state_q <= S_FETCH;
-                    pc_q <= pc_q;
-                    null;
+                    -- ebreak: breakpoint trap
+                    trap_taken := true;
+                    csr_mcause <= x"00000003";
+                    csr_mepc <= pc_q;
+                    pc_q <= csr_mtvec;
                   end if;
                 when "001" =>
                   -- csrrw
@@ -1050,9 +1099,19 @@ begin
                 when others => null;
               end case;
             when "0101111" =>
-              null;
+              -- A extension not implemented: trap (illegal instruction) so
+              -- atomics are observable instead of silently retiring.
+              trap_taken := true;
+              csr_mcause <= x"00000002";
+              csr_mepc <= pc_q;
+              pc_q <= csr_mtvec;
             when others =>
-              null;
+              -- Unknown opcode: trap (illegal instruction) so a runaway pc
+              -- is observable instead of silently retiring.
+              trap_taken := true;
+              csr_mcause <= x"00000002";
+              csr_mepc <= pc_q;
+              pc_q <= csr_mtvec;
           end case;
         end if;
 
@@ -1081,8 +1140,23 @@ begin
           div_rd_q <= 0;
         end if;
         regs_q <= r;
-        if state_q = S_EXEC then
+        -- A taken trap redirects pc to mtvec inside the decode arm; the
+        -- sequential pc_next commit must not override it.
+        if state_q = S_EXEC and not trap_taken then
           pc_q <= pc_next;
+        end if;
+      end if;
+
+      -- Gap 2: External IMEM / SBA-into-fetch read-write access when halted at
+      -- an instruction boundary (halted_q = '1' in S_FETCH), excluding the resume
+      -- clock edge (halt_i = '0' and clk_en_i = '1') so port B fetches pc_idx + 1
+      -- into rom_b_q cleanly for S_EXEC, and preventing mid-instruction write races.
+      if rst = '0' and halted_q = '1' and (halt_i = '1' or clk_en_i = '0') then
+        rom_ra_b := word_index(unsigned(dbg_imem_addr_i));
+        if dbg_imem_we_i = '1' then
+          rom_we := true;
+          rom_wa := rom_ra_b;
+          rom_wd := dbg_imem_wdata_i;
         end if;
       end if;
 

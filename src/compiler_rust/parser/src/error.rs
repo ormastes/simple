@@ -70,7 +70,7 @@ pub enum ParseError {
         context: Option<Box<ParseContext>>,
     },
 
-    #[error("Unexpected token: expected {expected}, found {found}")]
+    #[error("Unexpected token: expected {expected}, found {found} at line {0}, column {1}", span.line, span.column)]
     UnexpectedToken {
         expected: String,
         found: String,
@@ -519,6 +519,7 @@ mod tests {
         let output = err.format_with_source(source, false);
         assert!(output.contains("error[E0002]"));
         assert!(output.contains("unexpected token"));
+        assert!(err.to_string().contains("at line 2, column 13"));
         assert!(output.contains("let x = + 42"));
         assert!(output.contains("^"));
     }

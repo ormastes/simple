@@ -2,6 +2,19 @@
 
 Statistical performance measurement and test optimization for Simple.
 
+### ctype native comparison admission
+
+Run `bash test/05_perf/ctype/run_ctype_benchmarks.shs` for the ctype comparison.
+With `SIMPLE_CTYPE_BENCH_ENFORCE=1`, native compilation must succeed before the
+native/C ratio floor can be evaluated; a failed native build exits nonzero and
+retains its diagnostic in `build/perf/ctype/native_compile.log`. The default
+non-enforcing mode retains interpreter-only comparison when native compilation
+is unavailable. Checksum mismatches remain errors in both modes.
+
+`bash scripts/check/check-ctype-benchmark-enforcement.shs` tests the production
+harness with controlled fixture commands. Its output proves dispatch and
+failure handling only, not compiler correctness or native throughput.
+
 ---
 
 ## Table of Contents

@@ -35,6 +35,54 @@ pub fn apply_hybrid_transform(
     }
 }
 
+/// Every function name the module can reach by name: `Call` targets (raw,
+/// module-prefix-stripped and SFFI alias), `InterpCall`, function values
+/// (`GlobalLoad`/`GlobalStore` — an extern fn name is a global), closures,
+/// static method calls, global function-pointer initializers and vtable slots.
+///
+/// Callers use it to drop extern DECLARATIONS nothing references (src/lib
+/// declares platform-foreign externs unconditionally) from the splice set.
+/// [`apply_hybrid_transform`] only rewrites exact `Call` targets, all of which
+/// are included, so filtering by this set never changes the transformed MIR.
+/// The non-`Call` names are a deliberate over-approximation that keeps the
+/// splice receipt naming function-value uses (which `first_named_fn_value_load`
+/// in the JIT rejects module-wide).
+pub fn referenced_function_names(module: &MirModule) -> HashSet<String> {
+    use crate::codegen::instr::calls::{sffi_alias_target, strip_call_module_prefix};
+    let mut names = HashSet::new();
+    for func in &module.functions {
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst {
+                    MirInst::Call { target, .. } => {
+                        let raw = target.name();
+                        names.insert(raw.to_string());
+                        let base = strip_call_module_prefix(raw);
+                        names.insert(base.to_string());
+                        if let Some(alias) = sffi_alias_target(base) {
+                            names.insert(alias.to_string());
+                        }
+                    }
+                    MirInst::InterpCall { func_name, .. }
+                    | MirInst::ClosureCreate { func_name, .. }
+                    | MirInst::MethodCallStatic { func_name, .. } => {
+                        names.insert(func_name.clone());
+                    }
+                    MirInst::GlobalLoad { global_name, .. } | MirInst::GlobalStore { global_name, .. } => {
+                        names.insert(global_name.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    names.extend(module.global_init_functions.values().cloned());
+    for (_, _, _, slots, _) in &module.vtable_impls {
+        names.extend(slots.iter().flatten().cloned());
+    }
+    names
+}
+
 /// Transform a single function for hybrid execution.
 fn transform_function(func: &mut MirFunction, non_compilable: &HashSet<String>, boxed_returns: &HashSet<String>) {
     for block in &mut func.blocks {
@@ -182,6 +230,31 @@ mod tests {
         if let MirInst::InterpCall { func_name, .. } = &instructions[1] {
             assert_eq!(func_name, "non_compilable_fn");
         }
+    }
+
+    #[test]
+    fn referenced_function_names_covers_calls_and_function_values() {
+        let mut module = MirModule::new();
+        module.functions.push(make_test_function(
+            "main",
+            vec![
+                make_call(0, "called_extern"),
+                MirInst::GlobalLoad {
+                    dest: VReg(1),
+                    global_name: "fn_value_extern".to_string(),
+                    ty: TypeId::I64,
+                },
+            ],
+        ));
+        module
+            .global_init_functions
+            .insert("g".to_string(), "init_fn_extern".to_string());
+        let names = referenced_function_names(&module);
+        for name in ["called_extern", "fn_value_extern", "init_fn_extern"] {
+            assert!(names.contains(name), "{name} missing from {names:?}");
+        }
+        module.extern_fn_names.insert("declared_only_extern".to_string());
+        assert!(!referenced_function_names(&module).contains("declared_only_extern"));
     }
 
     #[test]

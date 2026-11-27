@@ -4,8 +4,10 @@
 # Same protocol as OpenAI but configurable base URL and optional API key.
 
 use app.llm_caret.json_helpers.{json_find, json_parse_int}
+use std.common.json.tokenizer.{json_unescape_string}
 
-use std.nogc_sync_mut.io.http_client_core.{http_request_raw}
+use std.nogc_sync_mut.io.http_client_core.{http_request_raw_timeout}
+use app.llm_caret.retry.{retry_policy_from_env}
 
 # ============================================================================
 # JSON helpers (inlined)
@@ -149,7 +151,7 @@ fn build_compat_headers(api_key: text) -> text:
 fn compat_endpoint_url(base_url: text) -> text:
     var base = base_url
     while base.len() > 0 and base.ends_with("/"):
-        base = base.substring(0, base.len() - 1)
+        base = base.substring(0, base.byte_len() - 1)
     # A base URL that already names its API version (OpenAI "/v1", Zhipu GLM
     # "/api/paas/v4") must not have a second "/v1" appended -- that is what
     # made Moonshot answer url.not_found.
@@ -240,7 +242,12 @@ fn parse_compat_response(raw: text) -> CompatResponse:
             is_error: true,
             raw: raw
         )
-    val content_text = _extract_json_string(raw, "content")
+    # The extractor preserves wire escapes verbatim (\" stays two chars), so
+    # the content must be unescaped here: otherwise every quote/newline in a
+    # reply arrives corrupted and <tool_use> JSON embedded in the content
+    # fails parse_tool_use_tags (measured: 0 tool calls from a model that
+    # did emit a well-formed tag).
+    val content_text = json_unescape_string(_extract_json_string(raw, "content"))
     val model_val = _extract_json_string(raw, "model")
     val finish = _extract_json_string(raw, "finish_reason")
     val p_tok = _extract_json_int(raw, "prompt_tokens")
@@ -267,7 +274,7 @@ fn _has_json_string_value(json: text, key: text) -> bool:
     val index = json_find(json, marker)
     if index < 0:
         return false
-    json.substring(index + marker.len()).trim().starts_with(_Q())
+    json.substring(index + marker.byte_len()).trim().starts_with(_Q())
 
 fn complete_compat_exchange(resp_body: text, http_error: text) -> CompatResponse:
     if http_error != "":
@@ -287,9 +294,15 @@ fn complete_compat_exchange(resp_body: text, http_error: text) -> CompatResponse
 # Send request
 # ============================================================================
 
+fn compat_transport(request: CompatRequest, timeout_ms: i64) -> (i64, text, text):
+    http_request_raw_timeout(request.method, request.url, request.headers, request.body, timeout_ms)
+
 fn compat_send(base_url: text, api_key: text, model: text, messages_json: text, max_tokens: i64, temperature: f64) -> CompatResponse:
     val request = build_compat_request(base_url, api_key, model, messages_json, max_tokens, temperature)
-    val result = http_request_raw(request.method, request.url, request.headers, request.body)
+    # Keep compatible endpoints single-shot, bounded by the common configured
+    # timeout (default 600000ms); do not introduce automatic POST retries.
+    val policy = retry_policy_from_env()
+    val result = compat_transport(request, policy.timeout_ms)
     val resp_body = result.1 ?? ""
     val http_error = result.2 ?? ""
     complete_compat_exchange(resp_body, http_error)

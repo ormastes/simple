@@ -1,0 +1,63 @@
+#!/bin/sh
+# arm64 (aarch64) fs-exec user-ELF kernel gate (link stage).
+#
+# Builds examples/09_embedded/simple_os/arch/arm64/fs_exec_entry.spl as a
+# freestanding aarch64 kernel (seed native-build, LLVM backend,
+# SIMPLE_BOOT_MINIMAL=1) and reports every undefined symbol at link.
+# Boot stage (EDK2/AAVMF pflash, never -kernel) is
+# scripts/check/check-simpleos-arm64-efi-real-firmware-boot.shs.
+#
+#   sh scripts/check/check-simpleos-arm64-user-elf-link.shs --link-only
+#
+# Env: SIMPLE_BIN (seed with --features llvm, required),
+#      OUT (default build/verify/simpleos-arm64-user-elf).
+#
+# Last stdout line is the verdict:
+#   PASS - kernel linked (<bytes> bytes), 0 undefined symbols      (exit 0)
+#   FAIL - <n> undefined symbol(s): <names>                        (exit 1)
+#   ERROR - nothing was checked (<reason>)                         (exit 2)
+set -eu
+
+verdict_error() { echo "ERROR - nothing was checked ($*)"; exit 2; }
+
+MODE=${1:-}
+[ "$MODE" = "--link-only" ] || verdict_error "only --link-only is implemented; boot stage is check-simpleos-arm64-efi-real-firmware-boot.shs"
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+SIMPLE_BIN=${SIMPLE_BIN:-}
+[ -n "$SIMPLE_BIN" ] && [ -x "$SIMPLE_BIN" ] || verdict_error "SIMPLE_BIN not set to an executable seed"
+for tool in od tail grep sort; do
+    command -v "$tool" >/dev/null 2>&1 || verdict_error "missing tool: $tool"
+done
+
+ENTRY=examples/09_embedded/simple_os/arch/arm64/fs_exec_entry.spl
+LDS=examples/09_embedded/simple_os/arch/arm64/fs_exec_linker.ld
+[ -f "$ENTRY" ] && [ -f "$LDS" ] || verdict_error "missing entry or linker script"
+OUT=${OUT:-$ROOT/build/verify/simpleos-arm64-user-elf}
+mkdir -p "$OUT"
+
+KERNEL=$OUT/kernel.elf
+LOG=$OUT/kernel-build.log
+rm -f "$KERNEL"
+set +e
+SIMPLE_BOOT_MINIMAL=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT/src" \
+"$SIMPLE_BIN" native-build --cache-dir "$OUT/native-cache" --source src/os \
+    --source src/lib --source examples/09_embedded/simple_os --backend llvm \
+    --opt-level=aggressive --log off --timeout 1200 --entry-closure --entry "$ENTRY" \
+    --target aarch64-unknown-none --linker-script "$LDS" --output "$KERNEL" \
+    >"$LOG" 2>&1
+rc=$?
+set -e
+
+undef=$(grep -o 'undefined symbol: [A-Za-z0-9_.$]*' "$LOG" | sed 's/undefined symbol: //' | sort -u)
+if [ -n "$undef" ]; then
+    n=$(printf '%s\n' "$undef" | wc -l | tr -d ' ')
+    printf '%s\n' "$undef" > "$OUT/undefined.txt"
+    echo "FAIL - $n undefined symbol(s): $(printf '%s' "$undef" | tr '\n' ' ')"
+    exit 1
+fi
+[ "$rc" -eq 0 ] && [ -s "$KERNEL" ] || { tail -20 "$LOG" >&2; verdict_error "kernel native-build failed (rc=$rc), log $LOG"; }
+magic=$(od -An -tx1 -N4 "$KERNEL" | tr -d ' \n')
+[ "$magic" = "7f454c46" ] || verdict_error "kernel output is not an ELF (magic $magic)"
+echo "PASS - kernel linked ($(wc -c < "$KERNEL") bytes), 0 undefined symbols"

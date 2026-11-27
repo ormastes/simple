@@ -1,0 +1,50 @@
+"""
+## Purpose and audience
+Purpose: Prove the minimal C provider entry (`provider_entry_v1.c`) implements
+the `simple_backend_plugin_v1` header entry point, that `provider_shim` builds it
+with clang, emits the provider's OWN `.provider.sdn` sidecar (provider side, never
+the executor), and loads it back through the checked dynamic loader.
+Audience: backend-plugin and build-system maintainers.
+"""
+# @req: REQ-APP-BUILD-001 — provider shim and entry (provider ABI completion).
+
+use app.build.targets.provider_shim.{PROVIDER_ENTRY_C_PATH, provider_shim_build, provider_shim_probe}
+use app.build.targets.provider_gate.{provider_sidecar_path, parse_provider_descriptor}
+use app.build.targets.build_targets.{BACKEND_PROVIDER_ABI_VERSION}
+use std.nogc_sync_mut.io_runtime.{file_read, file_exists, file_delete, dir_create_all}
+use std.spec.step
+
+val HOST = "x86_64-unknown-linux-gnu"
+val ROOT = "build/tmp/provider_shim_spec"
+
+fn _artifact(case_name: text) -> text:
+    val dir = ROOT + "/" + case_name
+    dir_create_all(dir)
+    val art = dir + "/provider_v1.dll"
+    file_delete(art)
+    file_delete(provider_sidecar_path(art))
+    art
+
+describe "provider shim and C entry":
+    it "ships a C entry implementing the header entry point":
+        val src = file_read(PROVIDER_ENTRY_C_PATH)
+        expect(src).to_contain("simple_backend_plugin_v1.h")
+        expect(src).to_contain("const simple_backend_descriptor_v1 *simple_backend_plugin_v1(void)")
+
+    it "builds the provider and emits its own sidecar":
+        val art = _artifact("build")
+        val err = provider_shim_build("backends_c", art, HOST)
+        expect(err).to_equal("")
+        expect(file_exists(art)).to_equal(true)
+        val d = parse_provider_descriptor(file_read(provider_sidecar_path(art))).unwrap()
+        expect(d.group).to_equal("backends_c")
+        expect(d.abi_version).to_equal(BACKEND_PROVIDER_ABI_VERSION)
+
+    it "loads the built provider and resolves the v1 entry":
+        val art = _artifact("load")
+        expect(provider_shim_build("backends_c", art, HOST)).to_equal("")
+        expect(provider_shim_probe(art)).to_equal("")
+
+    it "refuses to probe a missing artifact":
+        val art = _artifact("missing")
+        expect(provider_shim_probe(art).len() > 0).to_equal(true)

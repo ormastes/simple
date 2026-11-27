@@ -1,0 +1,20 @@
+use std.spec.{describe, it, expect}
+use compiler.core.interpreter.mod.core_jit_interpret
+use compiler.core.interpreter.eval.eval_has_error
+use compiler.core.interpreter.value.{val_get_int, val_is_int}
+
+fn traits_cow_check(source: text):
+    val result = core_jit_interpret(source, "core_array_cow_traits_guest.spl", 999999)
+    expect(eval_has_error()).to_equal(false)
+    expect(val_is_int(result)).to_equal(true)
+    if val_is_int(result): expect(val_get_int(result)).to_equal(0)
+
+describe "core reflective field array value boundaries":
+    it "snapshots incoming arrays while preserving the class receiver identity":
+        traits_cow_check("class Holder:\n    items: [i64]\nfn main() -> i64:\n    var input = [1]\n    val holder = Holder(items: [0])\n    val same = holder\n    __traits(\"set_member\", holder, \"items\", input)\n    input[0] = 9\n    if holder.items[0] != 1: return 1\n    holder.items[0] = 8\n    if input[0] != 9: return 2\n    if same.items[0] != 8: return 3\n    0\n")
+
+    it "detaches a value-struct receiver inside a shared array":
+        traits_cow_check("struct Cell:\n    items: [i64]\nfn main() -> i64:\n    var rows = [Cell(items: [1])]\n    var saved = rows\n    var input = [9]\n    __traits(\"set_member\", rows[0], \"items\", input)\n    input[0] = 8\n    if rows[0].items[0] != 9: return 1\n    if saved[0].items[0] != 1: return 2\n    saved[0].items[0] = 7\n    if rows[0].items[0] != 9: return 3\n    0\n")
+
+    it "runs receiver field and incoming callbacks once before ancestor detachment":
+        traits_cow_check("struct Cell:\n    items: [i64]\nvar rows = [Cell(items: [1])]\nvar saved = [Cell(items: [0])]\nvar effects = 0\nfn index() -> i64:\n    effects += 1\n    0\nfn field() -> text:\n    effects += 10\n    \"items\"\nfn incoming() -> [i64]:\n    effects += 100\n    saved = rows\n    [9]\nfn main() -> i64:\n    __traits(\"set_member\", rows[index()], field(), incoming())\n    if effects != 111: return 1\n    if saved[0].items[0] != 1: return 2\n    if rows[0].items[0] != 9: return 3\n    0\n")

@@ -1,3 +1,8 @@
+/* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
+#if defined(_WIN32)
+#include <stdio.h>
+int main(void) { puts("SKIP: rt_dict_registry_selfcheck is POSIX-only; no Windows build"); return 77; }
+#else
 /* Self-check for the RtCoreDict registry and the rt_core_as_dict safety gate.
  *
  * rt_core_as_dict used to trust the RT_VALUE_TAG_HEAP tag bits alone and read
@@ -181,3 +186,5 @@ int main(void) {
            failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }
+
+#endif /* !_WIN32 */

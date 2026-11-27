@@ -1,0 +1,175 @@
+# Actual production API calls; authored/unexecuted until an admitted runtime.
+# The initial profile is a probe fixture, not the complete semantic compiler.
+use std.spec.*
+use compiler.driver.driver.{CompilerDriver, compiler_driver_diagnose_frozen_semantic_prerequisites_v1}
+use compiler.driver.semantic_prerequisite_types_v1.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default, SourceFile}
+use compiler.common.driver_core_modes.{CompileMode}
+use std.common.string_core.{text_to_bytes}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use compiler.common.cache_contract.three_payload_execution_v3.{three_payload_compiled_execution_available_v3}
+use compiler.semantics.semantic_scope_issuers_v2.{semantic_scope_issuer_gateway_install_available_v2}
+
+fn frozen_prerequisite_fixture_request_v1(source: text) -> FrozenSemanticPrerequisiteRequestV1:
+    FrozenSemanticPrerequisiteRequestV1(source_bytes: text_to_bytes(source),
+        source_path: "src/answer.spl", module_name: "answer", expected_source_sha256: sha256_text(source),
+        target_triple: "x86_64-unknown-linux-gnu",
+        limits: FrozenSemanticPrerequisiteLimitsV1(max_source_bytes: 65536,
+            max_functions: 64, max_ast_nodes: 4096, max_depth: 32))
+
+fn frozen_prerequisite_fixture_driver_v1() -> CompilerDriver:
+    var options = driver_core_compile_options_default()
+    options.mode = CompileMode.Check
+    CompilerDriver.create(options)
+
+describe "Actual frozen semantic prerequisite diagnostics":
+    it "lowers the known answer to an actual i64 literal and runs real HM checking":
+        step("setup")
+        val request = frozen_prerequisite_fixture_request_v1("fn answer() -> i64:\n    42\n")
+        val driver = frozen_prerequisite_fixture_driver_v1()
+        step("exercise")
+        val result = compiler_driver_diagnose_frozen_semantic_prerequisites_v1(driver, request)
+        step("assert")
+        expect(result.status).to_equal("diagnosed")
+        expect(result.source_sha256).to_equal(request.expected_source_sha256)
+        expect(result.target_triple).to_equal(request.target_triple)
+        expect(result.preprocessed_sha256.len()).to_equal(64)
+        expect(result.target_decision_digest.len()).to_equal(64)
+        expect(result.parsed_functions).to_equal(1)
+        expect(result.visited_ast_nodes).to_be_greater_than(4)
+        expect(result.lowered_functions).to_equal(1)
+        expect(result.hm_checked_functions).to_equal(1)
+        expect(result.errors.len()).to_equal(0)
+        expect(result.observations.len()).to_equal(1)
+        expect(result.observations[0].function_name).to_equal("answer")
+        expect(result.observations[0].declared_type).to_equal("i64")
+        expect(result.observations[0].literal_kind).to_equal("i64")
+        expect(result.observations[0].integer_literal).to_equal(42)
+        expect(result.semantic_authorized).to_equal(false)
+        expect(result.full_artifact_authorized).to_equal(false)
+        expect(driver.ctx.sources.len()).to_equal(0)
+        expect(driver.ctx.hir_modules.len()).to_equal(0)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+
+    it "reports the actual HM error for parse-valid i64 returning bool":
+        step("setup")
+        val request = frozen_prerequisite_fixture_request_v1("fn answer() -> i64:\n    true\n")
+        step("exercise")
+        val result = compiler_driver_diagnose_frozen_semantic_prerequisites_v1(frozen_prerequisite_fixture_driver_v1(), request)
+        step("assert")
+        expect(result.status).to_equal("rejected")
+        expect(result.reason).to_equal("hm-typecheck-rejected")
+        expect(result.parsed_functions).to_equal(1)
+        expect(result.lowered_functions).to_equal(1)
+        expect(result.hm_checked_functions).to_equal(1)
+        expect(result.errors.len()).to_be_greater_than(0)
+        expect(result.errors.join("\n")).to_contain("type")
+        expect(result.observations.len()).to_equal(0)
+        expect(result.full_artifact_authorized).to_equal(false)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+
+    it "observes true from actual bool HIR and keeps driver output unchanged":
+        step("setup")
+        val request = frozen_prerequisite_fixture_request_v1("fn answer() -> bool:\n    true\n")
+        val driver = frozen_prerequisite_fixture_driver_v1()
+        step("exercise")
+        val result = compiler_driver_diagnose_frozen_semantic_prerequisites_v1(driver, request)
+        step("assert")
+        expect(result.status).to_equal("diagnosed")
+        expect(result.observations[0].declared_type).to_equal("bool")
+        expect(result.observations[0].literal_kind).to_equal("bool")
+        expect(result.observations[0].boolean_literal).to_equal(true)
+        expect(driver.ctx.modules.len()).to_equal(0)
+        expect(driver.ctx.mir_modules.len()).to_equal(0)
+
+    it "derives counts from two actual function owners and keeps values after another scratch run":
+        step("setup")
+        val source = "fn first() -> i64:\n    17\n\nfn second() -> bool:\n    false\n"
+        val driver = frozen_prerequisite_fixture_driver_v1()
+        step("exercise")
+        val result = compiler_driver_diagnose_frozen_semantic_prerequisites_v1(driver,
+            frozen_prerequisite_fixture_request_v1(source))
+        val later = compiler_driver_diagnose_frozen_semantic_prerequisites_v1(driver,
+            frozen_prerequisite_fixture_request_v1("fn later() -> i64:\n    99\n"))
+        step("assert")
+        expect(result.status).to_equal("diagnosed")
+        expect(result.parsed_functions).to_equal(2)
+        expect(result.lowered_functions).to_equal(2)
+        expect(result.hm_checked_functions).to_equal(2)
+        expect(result.observations.len()).to_equal(2)
+        var names: [text] = []
+        for observed in result.observations:
+            names.push(observed.function_name)
+            if observed.function_name == "first": expect(observed.integer_literal).to_equal(17)
+            if observed.function_name == "second": expect(observed.boolean_literal).to_equal(false)
+        expect(names).to_contain("first")
+        expect(names).to_contain("second")
+        expect(later.observations[0].integer_literal).to_equal(99)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+
+    it "rejects nested body default attribute generic and external input opportunities outside the initial profile":
+        step("setup")
+        val controls = ["use std.io\nfn answer() -> i64:\n    42\n",
+            "@inline\nfn answer() -> i64:\n    42\n",
+            "fn answer<T>() -> i64:\n    42\n",
+            "fn answer(x: i64 = 1) -> i64:\n    42\n",
+            "fn answer() -> i64:\n    if true:\n        42\n",
+            "extern fn outside() -> i64\nfn answer() -> i64:\n    42\n",
+            "fn answer() -> i64:\n    outside()\n",
+            "fn answer() -> i64:\n    val hidden = 1\n    42\n"]
+        for source in controls:
+            val result = compiler_driver_diagnose_frozen_semantic_prerequisites_v1(
+                frozen_prerequisite_fixture_driver_v1(), frozen_prerequisite_fixture_request_v1(source))
+            step("assert")
+            expect(result.status).to_equal("unsupported")
+            expect(result.hm_checked_functions).to_equal(0)
+            expect(result.semantic_authorized).to_equal(false)
+            expect(transient_array_scope_state_v1()).to_equal(0)
+
+    it "refuses stale source bytes limits invalid target and oversized metadata before parsing":
+        step("setup")
+        for control in ["digest", "limit", "target", "metadata"]:
+            var request = frozen_prerequisite_fixture_request_v1("fn answer() -> i64:\n    42\n")
+            if control == "digest": request.source_bytes = [0u8]
+            elif control == "limit": request.limits.max_source_bytes = 0
+            elif control == "target": request.target_triple = "unknown-target"
+            else: request.source_path = "p".repeat(257)
+            step("assert")
+            val result = compiler_driver_diagnose_frozen_semantic_prerequisites_v1(frozen_prerequisite_fixture_driver_v1(), request)
+            expect(result.status).to_equal("unsupported")
+            expect(result.parsed_functions).to_equal(0)
+            expect(result.hm_checked_functions).to_equal(0)
+            expect(result.source_path.len()).to_be_less_than(257)
+
+    it "does not steal another source or scratch owner":
+        step("setup")
+        val request = frozen_prerequisite_fixture_request_v1("fn answer() -> i64:\n    42\n")
+        val driver = frozen_prerequisite_fixture_driver_v1()
+        driver.ctx.sources = [SourceFile(path: "src/owned.spl", content: "owned", module_name: "owned")]
+        val occupied = compiler_driver_diagnose_frozen_semantic_prerequisites_v1(driver, request)
+        expect(occupied.reason).to_equal("idle-driver-required")
+        expect(driver.ctx.sources[0].content).to_equal("owned")
+        val idle = frozen_prerequisite_fixture_driver_v1()
+        expect(transient_scope_begin()).to_equal(true)
+        val foreign = compiler_driver_diagnose_frozen_semantic_prerequisites_v1(idle, request)
+        # Only scalar verdict inspected while the foreign scratch is live.
+        val refused = foreign.reason == "foreign-scratch-scope-active"
+        val still_active = transient_array_scope_state_v1() == 1
+        val ended = transient_scope_end()
+        step("assert")
+        expect(refused).to_equal(true)
+        expect(still_active).to_equal(true)
+        expect(ended).to_equal(true)
+
+    it "cannot open compiled execution or any of the five issuer admission gates":
+        step("exercise")
+        val result = compiler_driver_diagnose_frozen_semantic_prerequisites_v1(
+            frozen_prerequisite_fixture_driver_v1(), frozen_prerequisite_fixture_request_v1("fn answer() -> i64:\n    42\n"))
+        step("assert")
+        expect(result.supported_profile_id).to_equal(FROZEN_SEMANTIC_LITERAL_PROFILE_V1)
+        expect(result.semantic_authorized).to_equal(false)
+        expect(result.full_artifact_authorized).to_equal(false)
+        expect(three_payload_compiled_execution_available_v3()).to_equal(false)
+        expect(semantic_scope_issuer_gateway_install_available_v2()).to_equal(false)

@@ -5,6 +5,7 @@
 use std.common.sdn.structural_scalar_value_v1.{
     sdn_unescape_scalar_v1, sdn_integer_from_span_v1, sdn_decode_quoted_scalar_v1}
 use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.text_bytes.{text_to_bytes}
 
 # A non-fatal problem found while parsing (e.g. a duplicate dict key).
 # `kind` is a stable machine-readable tag; `path` is the dotted path of the
@@ -28,8 +29,9 @@ struct SdnPartOffset:
     offset: i64
 
 # Parse SDN source text. Returns Ok(SdnValue) or Err(error message).
-fn parse(source: text) -> Result<SdnValue, text>:
-    val trimmed = source.trim()
+pub fn parse(source: text) -> Result<SdnValue, text>:
+    # @workaround bug=mir_text_bytes_unresolved_inferred_trim_receiver_2026-10-23 reason=explicit text annotation keeps `.bytes()` resolvable on the inferred trim receiver until the MIR fix is confirmed natively; this did NOT cause the 00.common `project.name is missing` failure (see stage2_test_runner_libunit_project_name_missing_2026-11-27)
+    val trimmed: text = _sdn_strip_leading_comment_lines(source).trim()
     if trimmed == "" or trimmed == "null":
         return Ok(SdnValue.Null)
     if trimmed == "true":
@@ -41,11 +43,20 @@ fn parse(source: text) -> Result<SdnValue, text>:
         match sdn_decode_quoted_scalar_v1(trimmed):
             case Ok(inner): return Ok(SdnValue.String(inner))
             case Err(reason): return Err(reason)
+    # Validate delimiters before the inline readers remove their outer pair.
+    # Otherwise a missing nested closer can make the reader discard a scalar's
+    # final byte and silently turn e.g. 10000 into 1000.
+    if trimmed.starts_with("[") or trimmed.starts_with("{{"):
+        match _sdn_collection_depth(trimmed, complete: true):
+            case Err(reason): return Err(reason)
+            case Ok(depth):
+                if depth != 0:
+                    return Err("unterminated collection")
     # Inline array: [a, b, c]
     if trimmed.starts_with("["):
         return Ok(_sdn_parse_inline_array(trimmed))
     # Inline dict: {key: value, ...}
-    if trimmed.starts_with("{"):
+    if trimmed.starts_with("{{"):
         return Ok(_sdn_parse_inline_dict(trimmed))
     # Table: first line `|h1, h2|`, following lines are comma-separated rows.
     # Falls through to bare-string handling when the header is malformed.
@@ -55,7 +66,7 @@ fn parse(source: text) -> Result<SdnValue, text>:
         if nl >= 0:
             first_line = trimmed.slice(0, nl)
         val fl = first_line.trim()
-        if fl.len() >= 2 and fl.slice(fl.len() - 1, fl.len()) == "|":
+        if fl.byte_len() >= 2 and fl.slice(fl.byte_len() - 1, fl.byte_len()) == "|":
             return _sdn_parse_table(trimmed)
     # Block mapping: one or more "key: value" / "key = value" lines. Route on a
     # top-level separator so collection entries like `items = [1, 2, 3]` (which
@@ -64,7 +75,7 @@ fn parse(source: text) -> Result<SdnValue, text>:
         return _sdn_parse_mapping(trimmed)
     # Integer
     if _looks_like_int(trimmed):
-        val bytes = trimmed.bytes()
+        val bytes = text_to_bytes(trimmed)
         match sdn_integer_from_span_v1(bytes, 0, bytes.len()):
             case Ok(value): return Ok(SdnValue.Int(value))
             case Err(reason): return Err(reason)
@@ -74,18 +85,47 @@ fn parse(source: text) -> Result<SdnValue, text>:
     # Bare string / identifier
     Ok(SdnValue.String(trimmed))
 
+# Leading full-line `#` comments (and blank lines) carry no value. Only the
+# block-mapping route skipped them; a document whose first line was a comment
+# and whose body was an inline dict/array/table/scalar fell through to the
+# shape heuristics with `#` as its first byte and parsed as one bare String.
+fn _sdn_strip_leading_comment_lines(source: text) -> text:
+    val n = source.byte_len()
+    var pos = 0
+    while pos < n:
+        val line_start = pos
+        var line_end = pos
+        while line_end < n and source.byte_at(line_end) != 10:
+            line_end = line_end + 1
+        var k = line_start
+        while k < line_end:
+            val b = source.byte_at(k)
+            if b == 32 or b == 9 or b == 13 or b == 11 or b == 12:
+                k = k + 1
+            else:
+                break
+        if k < line_end and source.byte_at(k) != 35:
+            if line_start == 0:
+                return source
+            return source.slice(line_start, n)
+        if line_end < n:
+            pos = line_end + 1
+        else:
+            pos = n
+    ""
+
 fn _looks_like_float(s: text) -> bool:
     if s.len() == 0:
         return false
     var i = 0
     if s.substring(0, 1) == "-":
         i = 1
-    if i >= s.len():
+    if i >= s.byte_len():
         return false
     val digits = "0123456789"
     var dots = 0
     var seen_digit = false
-    while i < s.len():
+    while i < s.byte_len():
         val ch = s.substring(i, i + 1)
         if ch == ".":
             dots = dots + 1
@@ -103,10 +143,10 @@ fn _looks_like_int(s: text) -> bool:
     var i = 0
     if s.substring(0, 1) == "-":
         i = 1
-    if i >= s.len():
+    if i >= s.byte_len():
         return false
     val digits = "0123456789"
-    while i < s.len():
+    while i < s.byte_len():
         if not digits.contains(s.substring(i, i + 1)):
             return false
         i = i + 1
@@ -116,9 +156,9 @@ fn _looks_like_int(s: text) -> bool:
 # Returns Ok((SdnValue, Dict<text, SdnSpan>)) or Err(error message).
 # The span map keys are dotted paths ("extension.id", "contributes.commands.0")
 # and the SdnSpan carries the 1-based line/column where that key (or array
-# element) starts. Dict keys are always covered for block mappings and
-# single-line inline collections; array elements are best-effort (single-line
-# inline collections only).
+# element) starts. Block mappings and indexed block-sequence entries retain
+# original rows and columns, including nested single-line inline collections.
+# Multiline inline collection interiors remain best-effort.
 fn parse_with_spans(source: text) -> Result<(SdnValue, Dict<text, SdnSpan>), text>:
     val result = parse(source)
     match result:
@@ -160,7 +200,7 @@ pub fn parse_with_spans_and_issues(source: text) -> Result<(SdnValue, Dict<text,
 
 fn _sdn_index_of(s: text, ch: text) -> i64:
     var i = 0
-    while i < s.len():
+    while i < s.byte_len():
         if s.substring(i, i + 1) == ch:
             return i
         i = i + 1
@@ -173,7 +213,7 @@ fn _sdn_split_lines(s: text) -> [text]:
     var out: [text] = []
     var start = 0
     var i = 0
-    val n = s.len()
+    val n = s.byte_len()
     while i < n:
         if s.byte_at(i) == 10:
             out.push(s.slice(start, i))
@@ -187,9 +227,7 @@ fn _sdn_parse_mapping(source: text) -> Result<SdnValue, text>:
     if _sdn_next_is_seq(lines, 0, 0):
         match _sdn_parse_seq(lines, 0, 0):
             case Ok(sq):
-                # @workaround bug=native_sdn_empty_payload_owner_2026_10_11 reason=retain array element owner after tuple projection
-                val seq_items: [SdnValue] = sq.0
-                return Ok(SdnValue.Array(seq_items))
+                return Ok(SdnValue.Array(sq.0))
             case Err(e): return Err(e)
     match _sdn_parse_block(lines, 0, 0):
         case Ok(result): Ok(result.0)
@@ -197,15 +235,10 @@ fn _sdn_parse_mapping(source: text) -> Result<SdnValue, text>:
 
 # Count leading-space indentation of a line.
 fn _sdn_indent(line: text) -> i64:
-    val b = line.bytes()
+    val n = line.byte_len()
     var i = 0
-    var counting = true
-    while counting and i < b.len():
-        # @workaround bug=native_byte_to_i64_text_dispatch_2026_10_21 reason=old645 dispatches numeric byte methods as text; remove after rebuilt producer passes byte and SDN regressions
-        if (b[i] as i64) == 32:
-            i = i + 1
-        else:
-            counting = false
+    while i < n and line.byte_at(i) == 32:
+        i = i + 1
     i
 
 # Parse a block of `key: value` / `key = value` lines whose indentation is
@@ -213,7 +246,6 @@ fn _sdn_indent(line: text) -> i64:
 # lines nests those lines as its value (indent-based hierarchy). Returns the
 # Dict and the index of the first line NOT consumed by this block.
 fn _sdn_parse_block(lines: [text], start: i64, indent: i64) -> Result<(SdnValue, i64), text>:
-    # @workaround bug=native_sdn_empty_payload_owner_2026_10_11 reason=retain dictionary key and value owners for enum payload validation
     var m: Dict<text, SdnValue> = {}
     var i = start
     var running = true
@@ -250,7 +282,7 @@ fn _sdn_parse_block(lines: [text], start: i64, indent: i64) -> Result<(SdnValue,
                         i = tbl.1
                 else:
                     val key = t.slice(0, ci).trim()
-                    val valstr = t.slice(ci + 1, t.len()).trim()
+                    val valstr = t.slice(ci + 1, t.byte_len()).trim()
                     if valstr == "":
                         # Nested block. A deeper-indented run of `- ` lines is a
                         # block SEQUENCE, not a mapping whose keys start with a
@@ -258,43 +290,32 @@ fn _sdn_parse_block(lines: [text], start: i64, indent: i64) -> Result<(SdnValue,
                         if _sdn_next_is_seq(lines, i + 1, ind + 1):
                             match _sdn_parse_seq(lines, i + 1, ind + 1):
                                 case Ok(sq):
-                                    # @workaround bug=native_sdn_empty_payload_owner_2026_10_11 reason=retain array element owner after tuple projection
-                                    val seq_items: [SdnValue] = sq.0
-                                    m[key] = SdnValue.Array(seq_items)
+                                    m[key] = SdnValue.Array(sq.0)
                                     i = sq.1
                                 case Err(e):
                                     return Err(e)
                         else:
                             match _sdn_parse_block(lines, i + 1, ind + 1):
                                 case Ok(child):
-                                    m[key] = child.0
-                                    i = child.1
+                                    val child_value: SdnValue = child.0
+                                    val child_next: i64 = child.1
+                                    m[key] = child_value
+                                    i = child_next
                                 case Err(e):
                                     return Err(e)
                     else:
-                        var value_source = valstr
-                        if valstr.starts_with("[") or valstr.starts_with("{"):
-                            match _sdn_collection_depth(value_source):
-                                case Err(e):
-                                    return Err(e)
-                                case Ok(initial_depth):
-                                    var depth = initial_depth
-                                    while depth > 0:
-                                        i = i + 1
-                                        if i >= lines.len():
-                                            return Err("unterminated collection for key '" + key + "'")
-                                        value_source = value_source + "\n" + lines[i].trim()
-                                        match _sdn_collection_depth(value_source):
-                                            case Err(e):
-                                                return Err(e)
-                                            case Ok(next_depth):
-                                                depth = next_depth
-                        match parse(value_source):
-                            case Ok(v):
-                                m[key] = v
+                        match _sdn_value_span_lines(lines, i, valstr, key):
                             case Err(e):
                                 return Err(e)
-                        i = i + 1
+                            case Ok(sp):
+                                val value_source = sp.0
+                                i = sp.1
+                                match parse(value_source):
+                                    case Ok(v):
+                                        m[key] = v
+                                    case Err(e):
+                                        return Err(e)
+                                i = i + 1
     Ok((SdnValue.Dict(m), i))
 
 # True when the first non-blank line at or beyond `start` is indented >= `indent`
@@ -339,8 +360,8 @@ fn _sdn_parse_seq(lines: [text], start: i64, indent: i64) -> Result<([SdnValue],
                 running = false
             else:
                 var rest = ""
-                if t.len() > 1:
-                    rest = t.slice(2, t.len()).trim()
+                if t.byte_len() > 1:
+                    rest = t.slice(2, t.byte_len()).trim()
                 # Item body: the dash line rewritten as a plain line at the
                 # item's own column, followed by its deeper-indented children.
                 var body: [text] = []
@@ -375,15 +396,21 @@ fn _sdn_parse_seq(lines: [text], start: i64, indent: i64) -> Result<([SdnValue],
 # Return the number of unclosed collection delimiters, rejecting mismatched
 # closers. Delimiters inside quoted strings, including after escaped quotes,
 # are data rather than structure.
-fn _sdn_collection_depth(s: text) -> Result<i64, text>:
-    val b = s.bytes()
-    var stack: [i64] = []
-    var in_str = false
-    var escaped = false
+struct _SdnScanState:
+    stack: [i64]
+    in_str: bool
+    escaped: bool
+    root_end: i64
+
+fn _sdn_scan_collection_segment(s: text, state: _SdnScanState, base_offset: i64, complete: bool) -> Result<_SdnScanState, text>:
+    val n = s.byte_len()
+    var stack: [i64] = state.stack
+    var in_str = state.in_str
+    var escaped = state.escaped
+    var root_end = state.root_end
     var i = 0
-    while i < b.len():
-        # @workaround bug=native_byte_to_i64_text_dispatch_2026_10_21 reason=old645 dispatches numeric byte methods as text; remove after rebuilt producer passes byte and SDN regressions
-        val c = (b[i] as i64)
+    while i < n:
+        val c = s.byte_at(i)
         if in_str:
             if escaped:
                 escaped = false
@@ -407,21 +434,34 @@ fn _sdn_collection_depth(s: text) -> Result<i64, text>:
                         if (c == 125 and opener != 123) or (c == 93 and opener != 91):
                             return Err("mismatched collection closer")
                         stack.pop()
+                        if complete and stack.len() == 0 and root_end < 0:
+                            root_end = base_offset + i
         i = i + 1
-    Ok(stack.len())
+    Ok(_SdnScanState(stack: stack, in_str: in_str, escaped: escaped, root_end: root_end))
+
+fn _sdn_collection_depth(s: text, complete: bool = false) -> Result<i64, text>:
+    val init = _SdnScanState(stack: [], in_str: false, escaped: false, root_end: -1)
+    match _sdn_scan_collection_segment(s, init, 0, complete):
+        case Err(e):
+            return Err(e)
+        case Ok(st):
+            val depth = st.stack.len()
+            val expected_end = s.byte_len() - 1
+            if complete and depth == 0 and st.root_end != expected_end:
+                return Err("text after collection")
+            Ok(depth)
 
 # Index of the first top-level `=` or `:` separator, skipping any that sit
 # inside an inline {}/[] collection or a "" string. Returns -1 if none.
 # ponytail: byte-scan assumes ASCII structural chars (SDN keys/seps are ASCII).
 fn _sdn_top_sep(s: text) -> i64:
-    val b = s.bytes()
+    val b = text_to_bytes(s)
     var depth = 0
     var in_str = false
     var escaped = false
     var i = 0
     while i < b.len():
-        # @workaround bug=native_byte_to_i64_text_dispatch_2026_10_21 reason=old645 dispatches numeric byte methods as text; remove after rebuilt producer passes byte and SDN regressions
-        val c = (b[i] as i64)
+        val c = b[i].to_i64()
         if in_str:
             if escaped:
                 escaped = false
@@ -442,6 +482,10 @@ fn _sdn_top_sep(s: text) -> i64:
                         depth = depth - 1
                     else:
                         if depth == 0 and (c == 61 or c == 58):  # = or :
+                            # `scheme://` starts a bare URI scalar, so neither
+                            # this colon nor a later `:port` is a separator.
+                            if c == 58 and i + 2 < b.len() and (b[i + 1] as i64) == 47 and (b[i + 2] as i64) == 47:
+                                return -1
                             return i
         i = i + 1
     -1
@@ -453,15 +497,14 @@ fn _sdn_top_sep(s: text) -> i64:
 # ponytail: ASCII structural chars only.
 fn _sdn_split_top_commas(s: text) -> [text]:
     var out: [text] = []
-    val b = s.bytes()
+    val b = text_to_bytes(s)
     var depth = 0
     var in_str = false
     var escaped = false
     var start = 0
     var i = 0
     while i < b.len():
-        # @workaround bug=native_byte_to_i64_text_dispatch_2026_10_21 reason=old645 dispatches numeric byte methods as text; remove after rebuilt producer passes byte and SDN regressions
-        val c = (b[i] as i64)
+        val c = b[i].to_i64()
         if in_str:
             if escaped:
                 escaped = false
@@ -487,14 +530,14 @@ fn _sdn_split_top_commas(s: text) -> [text]:
                                 out.push(part)
                             start = i + 1
         i = i + 1
-    val last = s.slice(start, s.len()).trim()
+    val last = s.slice(start, s.byte_len()).trim()
     if last != "":
         out.push(last)
     out
 
 # Parse an inline array `[a, b, c]` into SdnValue.Array, recursing on elements.
 fn _sdn_parse_inline_array(s: text) -> SdnValue:
-    val inner = s.slice(1, s.len() - 1).trim()
+    val inner = s.slice(1, s.byte_len() - 1).trim()
     var items: [SdnValue] = []
     if inner != "":
         for part in _sdn_split_top_commas(inner):
@@ -507,15 +550,14 @@ fn _sdn_parse_inline_array(s: text) -> SdnValue:
 
 # Parse an inline dict `{key: value, ...}` into SdnValue.Dict, recursing on values.
 fn _sdn_parse_inline_dict(s: text) -> SdnValue:
-    val inner = s.slice(1, s.len() - 1).trim()
-    # @workaround bug=native_sdn_empty_payload_owner_2026_10_11 reason=retain dictionary key and value owners for enum payload validation
+    val inner = s.slice(1, s.byte_len() - 1).trim()
     var m: Dict<text, SdnValue> = {}
     if inner != "":
         for pair in _sdn_split_top_commas(inner):
             val ci = _sdn_top_sep(pair)
             if ci >= 0:
                 val key = pair.slice(0, ci).trim()
-                val valstr = pair.slice(ci + 1, pair.len()).trim()
+                val valstr = pair.slice(ci + 1, pair.byte_len()).trim()
                 match parse(valstr):
                     case Ok(v):
                         m[key] = v
@@ -534,9 +576,9 @@ fn _sdn_unescape(s: text) -> text:
     # was O(n^2) on every escaped string (each concat re-copied the prefix).
     var parts: [text] = []
     var i = 0
-    while i < s.len():
+    while i < s.byte_len():
         val ch = s.substring(i, i + 1)
-        if ch == "\\" and i + 1 < s.len():
+        if ch == "\\" and i + 1 < s.byte_len():
             val nx = s.substring(i + 1, i + 2)
             if nx == "n":
                 parts.push("\n")
@@ -569,7 +611,7 @@ fn _sdn_has_named_table(source: text) -> bool:
     for line in _sdn_split_lines(source):
         val t = line.trim()
         if t.len() >= 3 and not t.starts_with("#") and not t.starts_with("|"):
-            if t.slice(t.len() - 1, t.len()) == "|":
+            if t.slice(t.byte_len() - 1, t.byte_len()) == "|":
                 val bar = _sdn_index_of(t, "|")
                 if bar > 0:
                     val name = t.slice(0, bar).trim()
@@ -590,12 +632,12 @@ fn _sdn_block_table(lines: [text], start: i64, indent: i64, header: text) -> (Sd
     val bar = _sdn_index_of(header, "|")
     if bar <= 0:
         return none_result
-    if header.slice(header.len() - 1, header.len()) != "|":
+    if header.slice(header.byte_len() - 1, header.byte_len()) != "|":
         return none_result
     val name = header.slice(0, bar).trim()
     if name == "":
         return none_result
-    var src = header.slice(bar, header.len())
+    val table_header = header.slice(bar, header.byte_len())
     var j = start + 1
     var running = true
     while running and j < lines.len():
@@ -603,28 +645,26 @@ fn _sdn_block_table(lines: [text], start: i64, indent: i64, header: text) -> (Sd
             running = false
         else:
             if _sdn_indent(lines[j]) > indent:
-                src = src + "\n" + lines[j].trim()
                 j = j + 1
             else:
                 running = false
-    match _sdn_parse_table(src):
+    match _sdn_parse_table_lines(table_header, lines, start + 1, j):
         case Ok(v): (v, j, name)
         case Err(_): none_result
 
-# Parse a table: first line `|h1, h2|`, each following non-empty line is a
-# comma-separated row of scalar values.
-fn _sdn_parse_table(source: text) -> Result<SdnValue, text>:
-    val lines = _sdn_split_lines(source)
-    val first = lines[0].trim()
-    if first.len() < 2:
+# Parse a table: header line `|h1, h2|` plus rows[row_start..row_end], each
+# non-empty line a comma-separated row of scalar values.
+fn _sdn_parse_table_lines(header_line: text, lines: [text], row_start: i64, row_end: i64) -> Result<SdnValue, text>:
+    val first = header_line.trim()
+    if first.byte_len() < 2:
         return Err("malformed table header")
-    val header_inner = first.slice(1, first.len() - 1)
+    val header_inner = first.slice(1, first.byte_len() - 1)
     var headers: [text] = []
     for part in _sdn_split_top_commas(header_inner):
         headers.push(part)
     var rows: [[SdnValue]] = []
-    var i = 1
-    while i < lines.len():
+    var i = row_start
+    while i < row_end:
         val t = lines[i].trim()
         if t != "":
             var row: [SdnValue] = []
@@ -637,6 +677,10 @@ fn _sdn_parse_table(source: text) -> Result<SdnValue, text>:
             rows.push(row)
         i = i + 1
     Ok(SdnValue.Table(headers, rows))
+
+fn _sdn_parse_table(source: text) -> Result<SdnValue, text>:
+    val lines = _sdn_split_lines(source)
+    _sdn_parse_table_lines(lines[0], lines, 1, lines.len())
 
 # ---- span / issue walkers ----
 
@@ -652,30 +696,43 @@ fn _sdn_list_has(xs: [text], k: text) -> bool:
 # Collect a multi-line inline collection value starting at lines[start].
 # Returns (full value source, index of the last consumed line).
 fn _sdn_value_span_lines(lines: [text], start: i64, first: text, key: text) -> Result<(text, i64), text>:
-    var value_source = first
     var i = start
-    if first.starts_with("[") or first.starts_with("{"):
-        match _sdn_collection_depth(value_source):
+    if not (first.starts_with("[") or first.starts_with("{{")):
+        return Ok((first, i))
+    val init = _SdnScanState(stack: [], in_str: false, escaped: false, root_end: -1)
+    var state = init
+    match _sdn_scan_collection_segment(first, init, 0, false):
+        case Err(e):
+            return Err(e)
+        case Ok(st):
+            state = st
+    if state.stack.len() == 0:
+        return Ok((first, i))
+    var parts: [text] = [first]
+    while state.stack.len() > 0:
+        i = i + 1
+        if i >= lines.len():
+            return Err("unterminated collection for key '" + key + "'")
+        val line = lines[i].trim()
+        parts.push(line)
+        # Newline separator consumes any trailing backslash escape before the next line.
+        val next_init = _SdnScanState(
+            stack: state.stack,
+            in_str: state.in_str,
+            escaped: false,
+            root_end: state.root_end
+        )
+        match _sdn_scan_collection_segment(line, next_init, 0, false):
             case Err(e):
                 return Err(e)
-            case Ok(initial_depth):
-                var depth = initial_depth
-                while depth > 0:
-                    i = i + 1
-                    if i >= lines.len():
-                        return Err("unterminated collection for key '" + key + "'")
-                    value_source = value_source + "\n" + lines[i].trim()
-                    match _sdn_collection_depth(value_source):
-                        case Err(e):
-                            return Err(e)
-                        case Ok(next_depth):
-                            depth = next_depth
-    Ok((value_source, i))
+            case Ok(st):
+                state = st
+    Ok((parts.join("\n"), i))
 
 # 1-based column at which the value part of a `key: value` line begins.
 fn _sdn_value_col(line: text, ind: i64, ci: i64) -> i64:
     var j = ind + ci + 1
-    while j < line.len() and line.substring(j, j + 1) == " ":
+    while j < line.byte_len() and line.substring(j, j + 1) == " ":
         j = j + 1
     j + 1
 
@@ -683,15 +740,14 @@ fn _sdn_value_col(line: text, ind: i64, ci: i64) -> i64:
 # within `s` (offset of the part's first non-space character).
 fn _sdn_split_top_commas_offsets(s: text) -> [SdnPartOffset]:
     var out: [SdnPartOffset] = []
-    val b = s.bytes()
+    val b = text_to_bytes(s)
     var depth = 0
     var in_str = false
     var escaped = false
     var start = 0
     var i = 0
     while i < b.len():
-        # @workaround bug=native_byte_to_i64_text_dispatch_2026_10_21 reason=old645 dispatches numeric byte methods as text; remove after rebuilt producer passes byte and SDN regressions
-        val c = (b[i] as i64)
+        val c = b[i].to_i64()
         if in_str:
             if escaped:
                 escaped = false
@@ -718,7 +774,7 @@ fn _sdn_split_top_commas_offsets(s: text) -> [SdnPartOffset]:
                                 out.push(SdnPartOffset(part: part, offset: start + _sdn_indent(raw)))
                             start = i + 1
         i = i + 1
-    val raw_last = s.slice(start, s.len())
+    val raw_last = s.slice(start, s.byte_len())
     val last = raw_last.trim()
     if last != "":
         out.push(SdnPartOffset(part: last, offset: start + _sdn_indent(raw_last)))
@@ -728,10 +784,10 @@ fn _sdn_split_top_commas_offsets(s: text) -> [SdnPartOffset]:
 # `colbase` is the 1-based column of the opening bracket.
 fn _sdn_inline_spans(s: text, prefix: text, line: i64, colbase: i64) -> [SdnSpanEntry]:
     var out: [SdnSpanEntry] = []
-    if s.len() < 2:
+    if s.byte_len() < 2:
         return out
-    val is_dict = s.starts_with("{")
-    val inner = s.slice(1, s.len() - 1)
+    val is_dict = s.starts_with("{{")
+    val inner = s.slice(1, s.byte_len() - 1)
     var idx = 0
     for p in _sdn_split_top_commas_offsets(inner):
         val pcol = colbase + 1 + p.offset
@@ -741,25 +797,83 @@ fn _sdn_inline_spans(s: text, prefix: text, line: i64, colbase: i64) -> [SdnSpan
                 val key = p.part.slice(0, ci).trim()
                 val path = _sdn_join_path(prefix, key)
                 out.push(SdnSpanEntry(path: path, line: line, col: pcol))
-                val vs = p.part.slice(ci + 1, p.part.len()).trim()
-                if vs.starts_with("[") or vs.starts_with("{"):
+                val vs = p.part.slice(ci + 1, p.part.byte_len()).trim()
+                if vs.starts_with("[") or vs.starts_with("{{"):
                     var j = ci + 1
-                    while j < p.part.len() and p.part.substring(j, j + 1) == " ":
+                    while j < p.part.byte_len() and p.part.substring(j, j + 1) == " ":
                         j = j + 1
                     for e in _sdn_inline_spans(vs, path, line, pcol + j):
                         out.push(e)
         else:
             val path = _sdn_join_path(prefix, idx.to_text())
             out.push(SdnSpanEntry(path: path, line: line, col: pcol))
-            if p.part.starts_with("[") or p.part.starts_with("{"):
+            if p.part.starts_with("[") or p.part.starts_with("{{"):
                 for e in _sdn_inline_spans(p.part, path, line, pcol):
                     out.push(e)
         idx = idx + 1
     out
 
-# Walk a block mapping recording a span for every dict key. Mirrors
-# _sdn_parse_block's consumption logic. Returns (entries, next line index).
-fn _sdn_span_block(lines: [text], start: i64, indent: i64, prefix: text) -> ([SdnSpanEntry], i64):
+# Mirror _sdn_parse_seq's item boundary without reparsing values. Each item
+# owns its own mapping scope; copied body lines retain their original row and
+# first-key column even when more than one space follows the dash.
+fn _sdn_span_seq(lines: [text], start: i64, indent: i64, prefix: text, line_base: i64) -> ([SdnSpanEntry], i64):
+    var out: [SdnSpanEntry] = []
+    var i = start
+    var index = 0
+    var running = true
+    while running and i < lines.len():
+        val line = lines[i]
+        if line.trim() == "":
+            i = i + 1
+        else:
+            val ind = _sdn_indent(line)
+            val trimmed = line.trim()
+            if ind < indent or not (trimmed.starts_with("- ") or trimmed == "-"):
+                running = false
+            else:
+                var content_start = ind + 1
+                while content_start < line.byte_len() and line.substring(content_start, content_start + 1) == " ":
+                    content_start = content_start + 1
+                val rest = line.slice(content_start, line.byte_len()).trim()
+                val path = _sdn_join_path(prefix, index.to_text())
+                var body: [text] = [_sdn_spaces(ind + 2) + rest]
+                var j = i + 1
+                var inner = true
+                while inner and j < lines.len():
+                    if lines[j].trim() == "":
+                        body.push(lines[j])
+                        j = j + 1
+                    elif _sdn_indent(lines[j]) > ind:
+                        body.push(lines[j])
+                        j = j + 1
+                    else:
+                        inner = false
+                out.push(SdnSpanEntry(path: path, line: line_base + i + 1, col: content_start + 1))
+                if _sdn_top_sep(rest) >= 0:
+                    val child = _sdn_span_block(body, 0, ind + 2, path, line_base + i)
+                    for entry in child.0:
+                        # Parse using the same normalized dash head as the
+                        # value parser; restore only first-line coordinates.
+                        if entry.line == line_base + i + 1:
+                            out.push(SdnSpanEntry(path: entry.path, line: entry.line, col: entry.col + content_start - (ind + 2)))
+                        else:
+                            out.push(entry)
+                elif rest.starts_with("[") or rest.starts_with("{{"):
+                    for entry in _sdn_inline_spans(rest, path, line_base + i + 1, content_start + 1):
+                        out.push(entry)
+                index = index + 1
+                i = j
+    (out, i)
+
+# Only root mapping admission and empty-valued mapping children select a
+# sequence. An item body itself must stay a mapping, like _sdn_parse_seq.
+fn _sdn_span_nested(lines: [text], start: i64, indent: i64, prefix: text, line_base: i64) -> ([SdnSpanEntry], i64):
+    if _sdn_next_is_seq(lines, start, indent):
+        return _sdn_span_seq(lines, start, indent, prefix, line_base)
+    _sdn_span_block(lines, start, indent, prefix, line_base)
+
+# Walk a mapping using the same boundaries as _sdn_parse_block.
+fn _sdn_span_block(lines: [text], start: i64, indent: i64, prefix: text, line_base: i64 = 0) -> ([SdnSpanEntry], i64):
     var out: [SdnSpanEntry] = []
     var i = start
     var running = true
@@ -774,15 +888,15 @@ fn _sdn_span_block(lines: [text], start: i64, indent: i64, prefix: text) -> ([Sd
             else:
                 val t = line.trim()
                 val ci = _sdn_top_sep(t)
-                if ci < 0:
+                if t.starts_with("#") or ci < 0:
                     i = i + 1
                 else:
                     val key = t.slice(0, ci).trim()
-                    val valstr = t.slice(ci + 1, t.len()).trim()
+                    val valstr = t.slice(ci + 1, t.byte_len()).trim()
                     val path = _sdn_join_path(prefix, key)
-                    out.push(SdnSpanEntry(path: path, line: i + 1, col: ind + 1))
+                    out.push(SdnSpanEntry(path: path, line: line_base + i + 1, col: ind + 1))
                     if valstr == "":
-                        val child = _sdn_span_block(lines, i + 1, ind + 1, path)
+                        val child = _sdn_span_nested(lines, i + 1, ind + 1, path, line_base)
                         for e in child.0:
                             out.push(e)
                         i = child.1
@@ -791,8 +905,8 @@ fn _sdn_span_block(lines: [text], start: i64, indent: i64, prefix: text) -> ([Sd
                             case Err(_):
                                 i = i + 1
                             case Ok(consumed):
-                                if consumed.1 == i and (valstr.starts_with("[") or valstr.starts_with("{")):
-                                    for e in _sdn_inline_spans(valstr, path, i + 1, _sdn_value_col(line, ind, ci)):
+                                if consumed.1 == i and (valstr.starts_with("[") or valstr.starts_with("{{")):
+                                    for e in _sdn_inline_spans(valstr, path, line_base + i + 1, _sdn_value_col(line, ind, ci)):
                                         out.push(e)
                                 i = consumed.1 + 1
     (out, i)
@@ -803,22 +917,22 @@ fn _sdn_collect_span_entries(source: text) -> [SdnSpanEntry]:
         return []
     if trimmed.starts_with("\"") or trimmed.starts_with("|"):
         return []
-    if trimmed.starts_with("[") or trimmed.starts_with("{"):
+    if trimmed.starts_with("[") or trimmed.starts_with("{{"):
         if not trimmed.contains("\n"):
             return _sdn_inline_spans(trimmed, "", 1, _sdn_indent(source) + 1)
         return []
     if _sdn_top_sep(trimmed) >= 0:
-        val r = _sdn_span_block(_sdn_split_lines(source), 0, 0, "")
+        val r = _sdn_span_nested(_sdn_split_lines(source), 0, 0, "", 0)
         return r.0
     []
 
 # Duplicate-key issues within a SINGLE-LINE inline collection.
 fn _sdn_inline_dup_issues(s: text, prefix: text, line: i64, colbase: i64) -> [SdnIssue]:
     var out: [SdnIssue] = []
-    if s.len() < 2:
+    if s.byte_len() < 2:
         return out
-    val is_dict = s.starts_with("{")
-    val inner = s.slice(1, s.len() - 1)
+    val is_dict = s.starts_with("{{")
+    val inner = s.slice(1, s.byte_len() - 1)
     var seen: [text] = []
     var idx = 0
     for p in _sdn_split_top_commas_offsets(inner):
@@ -832,22 +946,80 @@ fn _sdn_inline_dup_issues(s: text, prefix: text, line: i64, colbase: i64) -> [Sd
                     out.push(SdnIssue(kind: "duplicate_key", path: path, message: "duplicate key '" + key + "'", line: line, col: pcol))
                 else:
                     seen.push(key)
-                val vs = p.part.slice(ci + 1, p.part.len()).trim()
-                if vs.starts_with("[") or vs.starts_with("{"):
+                val vs = p.part.slice(ci + 1, p.part.byte_len()).trim()
+                if vs.starts_with("[") or vs.starts_with("{{"):
                     var j = ci + 1
-                    while j < p.part.len() and p.part.substring(j, j + 1) == " ":
+                    while j < p.part.byte_len() and p.part.substring(j, j + 1) == " ":
                         j = j + 1
                     for e in _sdn_inline_dup_issues(vs, path, line, pcol + j):
                         out.push(e)
         else:
-            if p.part.starts_with("[") or p.part.starts_with("{"):
+            if p.part.starts_with("[") or p.part.starts_with("{{"):
                 for e in _sdn_inline_dup_issues(p.part, _sdn_join_path(prefix, idx.to_text()), line, pcol):
                     out.push(e)
         idx = idx + 1
     out
 
-# Walk a block mapping collecting duplicate-key issues per nesting level.
-fn _sdn_issue_block(lines: [text], start: i64, indent: i64, prefix: text) -> ([SdnIssue], i64):
+# Mirror _sdn_parse_seq's item boundary without reparsing values. Each item
+# owns its own mapping scope; copied body lines retain their original row and
+# first-key column even when more than one space follows the dash.
+fn _sdn_issue_seq(lines: [text], start: i64, indent: i64, prefix: text, line_base: i64) -> ([SdnIssue], i64):
+    var out: [SdnIssue] = []
+    var i = start
+    var index = 0
+    var running = true
+    while running and i < lines.len():
+        val line = lines[i]
+        if line.trim() == "":
+            i = i + 1
+        else:
+            val ind = _sdn_indent(line)
+            val trimmed = line.trim()
+            if ind < indent or not (trimmed.starts_with("- ") or trimmed == "-"):
+                running = false
+            else:
+                var content_start = ind + 1
+                while content_start < line.byte_len() and line.substring(content_start, content_start + 1) == " ":
+                    content_start = content_start + 1
+                val rest = line.slice(content_start, line.byte_len()).trim()
+                val path = _sdn_join_path(prefix, index.to_text())
+                var body: [text] = [_sdn_spaces(ind + 2) + rest]
+                var j = i + 1
+                var inner = true
+                while inner and j < lines.len():
+                    if lines[j].trim() == "":
+                        body.push(lines[j])
+                        j = j + 1
+                    elif _sdn_indent(lines[j]) > ind:
+                        body.push(lines[j])
+                        j = j + 1
+                    else:
+                        inner = false
+                if _sdn_top_sep(rest) >= 0:
+                    val child = _sdn_issue_block(body, 0, ind + 2, path, line_base + i)
+                    for entry in child.0:
+                        # Parse using the same normalized dash head as the
+                        # value parser; restore only first-line coordinates.
+                        if entry.line == line_base + i + 1:
+                            out.push(SdnIssue(kind: entry.kind, path: entry.path, message: entry.message, line: entry.line, col: entry.col + content_start - (ind + 2)))
+                        else:
+                            out.push(entry)
+                elif rest.starts_with("[") or rest.starts_with("{{"):
+                    for entry in _sdn_inline_dup_issues(rest, path, line_base + i + 1, content_start + 1):
+                        out.push(entry)
+                index = index + 1
+                i = j
+    (out, i)
+
+# Only root mapping admission and empty-valued mapping children select a
+# sequence. An item body itself must stay a mapping, like _sdn_parse_seq.
+fn _sdn_issue_nested(lines: [text], start: i64, indent: i64, prefix: text, line_base: i64) -> ([SdnIssue], i64):
+    if _sdn_next_is_seq(lines, start, indent):
+        return _sdn_issue_seq(lines, start, indent, prefix, line_base)
+    _sdn_issue_block(lines, start, indent, prefix, line_base)
+
+# Walk one mapping duplicate-key scope; sequence dispatch stays explicit.
+fn _sdn_issue_block(lines: [text], start: i64, indent: i64, prefix: text, line_base: i64 = 0) -> ([SdnIssue], i64):
     var out: [SdnIssue] = []
     var seen: [text] = []
     var i = start
@@ -861,31 +1033,20 @@ fn _sdn_issue_block(lines: [text], start: i64, indent: i64, prefix: text) -> ([S
             if ind < indent:
                 running = false
             else:
-                var t = line.trim()
-                # A `- ` line opens a new BLOCK SEQUENCE ENTRY. Its keys live in
-                # that entry's own scope, so the seen-key set restarts here and
-                # the marker is stripped before the key is read. Without this,
-                # `- name: a` / `- name: b` — two distinct entries — were
-                # reported as a duplicate `- name` key, and any strict consumer
-                # refused every multi-entry sequence.
-                var key_indent = ind
-                if t.starts_with("- "):
-                    seen = []
-                    t = t.slice(2, t.len()).trim()
-                    key_indent = ind + 2
+                val t = line.trim()
                 val ci = _sdn_top_sep(t)
-                if ci < 0:
+                if t.starts_with("#") or ci < 0:
                     i = i + 1
                 else:
                     val key = t.slice(0, ci).trim()
-                    val valstr = t.slice(ci + 1, t.len()).trim()
+                    val valstr = t.slice(ci + 1, t.byte_len()).trim()
                     val path = _sdn_join_path(prefix, key)
                     if _sdn_list_has(seen, key):
-                        out.push(SdnIssue(kind: "duplicate_key", path: path, message: "duplicate key '" + key + "'", line: i + 1, col: ind + 1))
+                        out.push(SdnIssue(kind: "duplicate_key", path: path, message: "duplicate key '" + key + "'", line: line_base + i + 1, col: ind + 1))
                     else:
                         seen.push(key)
                     if valstr == "":
-                        val child = _sdn_issue_block(lines, i + 1, key_indent + 1, path)
+                        val child = _sdn_issue_nested(lines, i + 1, ind + 1, path, line_base)
                         for e in child.0:
                             out.push(e)
                         i = child.1
@@ -894,8 +1055,8 @@ fn _sdn_issue_block(lines: [text], start: i64, indent: i64, prefix: text) -> ([S
                             case Err(_):
                                 i = i + 1
                             case Ok(consumed):
-                                if consumed.1 == i and (valstr.starts_with("[") or valstr.starts_with("{")):
-                                    for e in _sdn_inline_dup_issues(valstr, path, i + 1, _sdn_value_col(line, ind, ci)):
+                                if consumed.1 == i and (valstr.starts_with("[") or valstr.starts_with("{{")):
+                                    for e in _sdn_inline_dup_issues(valstr, path, line_base + i + 1, _sdn_value_col(line, ind, ci)):
                                         out.push(e)
                                 i = consumed.1 + 1
     (out, i)
@@ -906,12 +1067,12 @@ fn _sdn_collect_issues(source: text) -> [SdnIssue]:
         return []
     if trimmed.starts_with("\"") or trimmed.starts_with("|"):
         return []
-    if trimmed.starts_with("[") or trimmed.starts_with("{"):
+    if trimmed.starts_with("[") or trimmed.starts_with("{{"):
         if not trimmed.contains("\n"):
             return _sdn_inline_dup_issues(trimmed, "", 1, _sdn_indent(source) + 1)
         return []
     if _sdn_top_sep(trimmed) >= 0:
-        val r = _sdn_issue_block(_sdn_split_lines(source), 0, 0, "")
+        val r = _sdn_issue_nested(_sdn_split_lines(source), 0, 0, "", 0)
         return r.0
     []
 
@@ -925,7 +1086,7 @@ fn _sdn_collect_issues(source: text) -> [SdnIssue]:
 # where rejecting BEFORE the expensive parse is the goal. The exact
 # post-parse check (_sdn_check_limits) remains the authority.
 fn _sdn_scan_depth_entries(s: text) -> (i64, i64):
-    val b = s.bytes()
+    val b = text_to_bytes(s)
     var stack: [i64] = []
     var max_depth = 0
     var max_entries = 0
@@ -933,8 +1094,7 @@ fn _sdn_scan_depth_entries(s: text) -> (i64, i64):
     var escaped = false
     var i = 0
     while i < b.len():
-        # @workaround bug=native_byte_to_i64_text_dispatch_2026_10_21 reason=old645 dispatches numeric byte methods as text; remove after rebuilt producer passes byte and SDN regressions
-        val c = (b[i] as i64)
+        val c = b[i].to_i64()
         if in_str:
             if escaped:
                 escaped = false
@@ -1031,7 +1191,7 @@ fn _sdn_check_limits(v: SdnValue, depth: i64) -> Result<bool, text>:
 
 # Parse untrusted input with structural limits: 1 MiB total size, max nesting
 # depth 64, max 65536 entries per collection. Violations are errors.
-fn parse_untrusted(source: text) -> Result<SdnValue, text>:
+pub fn parse_untrusted(source: text) -> Result<SdnValue, text>:
     if source.len() > 1048576:
         return Err("input exceeds size limit")
     # Pre-parse guards reject structural bombs before the parser runs.

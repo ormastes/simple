@@ -1,0 +1,74 @@
+# Purpose and audience: compiler engineers who own the pure-Simple parser and
+# the flat AST bridge.
+# @req REQ-SSPEC-COMPILER
+# Tracks: doc/08_tracking/bug/toplevel_for_and_val_underscore_parse_2026-11-26.md
+"""
+# Top-level loops and `val _` parse through parse_full_frontend
+
+A module-scope `for x in ...:` reached the flat AST bridge as EXPR_FOR (tag 16)
+with no conversion arm and reported `unhandled expr node kind (tag=16)`.
+A module-scope `val _ = expr` failed with `expected Ident, got _` although the
+same line parses inside a fn body.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:parser
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{parser_has_errors, parser_get_errors}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+
+fn toplevel_errors(source: text) -> text:
+    val file = "testdata/toplevel_for_val.spl"
+    val parsed = parse_full_frontend(source, file, "toplevel_for_val", Logger(level: 0))
+    if parser_has_errors():
+        var perrs = "PARSE:"
+        for e in parser_get_errors():
+            perrs = perrs + e + "\n"
+        return perrs
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir: HirModule = hir_lowering.lower_module(parsed)
+    var errs = ""
+    for e in hir_lowering.errors:
+        errs = errs + e.message + "\n"
+    errs
+
+describe "module-scope loops":
+    it "accepts a top-level for loop":
+        expect(toplevel_errors("var total = 0\nfor x in [1, 2, 3]:\n    total = total + x\nprint(total)\n")).to_equal("")
+
+    it "accepts a top-level for loop over a range":
+        expect(toplevel_errors("for i in 0..3:\n    print(i)\n")).to_equal("")
+
+    it "accepts a top-level while loop":
+        expect(toplevel_errors("var n = 0\nwhile n < 3:\n    n = n + 1\nprint(n)\n")).to_equal("")
+
+    it "accepts a top-level for loop in a module that has fn main":
+        expect(toplevel_errors("fn main():\n    print(1)\nfor x in [1]:\n    print(x)\n")).to_equal("")
+
+describe "module-scope val _ discard":
+    it "accepts a top-level val _ binding":
+        expect(toplevel_errors("fn f() -> i64:\n    7\nval _ = f()\n")).to_equal("")
+
+    it "accepts a typed top-level val _ binding":
+        expect(toplevel_errors("val _: i64 = 3\n")).to_equal("")
+
+    it "still accepts val _ inside a fn body":
+        expect(toplevel_errors("fn main():\n    val _ = 1\n")).to_equal("")
+
+    it "accepts _ inside a fn-body tuple pattern":
+        expect(toplevel_errors("fn main():\n    val (a, _) = (1, 2)\n    print(a)\n")).to_equal("")
+
+    it "keeps two top-level val _ discards as separate statements":
+        expect(toplevel_errors("fn f(n: i64) -> i64:\n    n\nval _ = f(1)\nval _ = f(2)\n")).to_equal("")
+
+    it "parses a real lint contract-check repro file":
+        val p = "test/01_unit/compiler/lint/lint_cli_argument_count_contract_check.spl"
+        val parsed = parse_full_frontend(file_read(p), p, "repro", Logger(level: 0))
+        expect(parser_has_errors()).to_equal(false)

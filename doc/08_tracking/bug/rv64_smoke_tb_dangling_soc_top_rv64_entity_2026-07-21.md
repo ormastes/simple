@@ -1,7 +1,7 @@
 # rv64 smoke testbench instantiates dangling entity `soc_top_rv64`
 
 - **Date:** 2026-07-21
-- **Status:** open
+- **Status:** FIXED 2026-11-05 (PR #6939) — validation script fails closed
 - **Severity:** medium (clean-checkout reproducibility failure; blocks honest
   rv64 smoke evidence)
 - **Area:** `examples/09_embedded/fpga_riscv/rtl/tb_rv64_wb_soc_smoke.vhd`
@@ -45,3 +45,13 @@ Either:
 
 The checker staying RED on the current tree is correct fail-closed behavior;
 this doc is the tracked justification, not an excuse to exclude the file.
+
+## Resolution 2026-11-05 (PR #6939, merged to release/1.0.0)
+
+- `scripts/fpga/ghdl_validate_rv64.shs` now requires every generated artifact in
+  `ANALYSIS_ORDER` to exist and be non-empty before analysis (no silent SKIP),
+  aborts after any analysis failure or partial pass so stale work-library
+  units cannot hide a missing generated source, and propagates real ghdl exit
+  codes instead of grepping output. The dangling `soc_top_rv64` entity can no
+  longer pass the gate via stale or skipped units.
+- Contract coverage: `test/01_unit/scripts/rv64_generated_smoke_validation_contract_test.shs`.

@@ -36,3 +36,10 @@ wm_glass_qemu:
   missing_any_gate -> fail_closed
 ```
 
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the record's gaps stand — Darwin lacks a reviewed
+fexecve path, the helper candidate e98275fca0 remains unintegrated (not
+evidence), and truthful helper-build provenance plus pre-spawn supervision
+are still missing. Resume conditions are recorded in this doc; the work is
+the SimpleOS/WM evidence lane's, not a P3 tools patch.

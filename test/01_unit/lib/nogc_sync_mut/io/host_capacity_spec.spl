@@ -1,0 +1,174 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/lib/nogc_sync_mut/io/host_capacity.spl 0%
+"""
+# Live host capacity drives build worker scheduling
+
+**Category:** Library / io
+
+## Purpose and Audience
+
+Build worker pools (parse/HIR shards, MIR fork children) size themselves from
+the host's idle CPU slots and memory headroom instead of a fixed count.
+
+## Expected Outcome
+
+Idle CPU is the CPU limit (online CPUs tightened by cgroup cpu.max) minus the
+larger of the instant runnable count and the 1-minute load, never less than
+the caller's own live workers. Memory admission charges live workers their
+unconsumed estimate.
+
+UNEXECUTED: written without running the spec (no full-CLI test binary is
+deployed in this lane).
+"""
+use std.spec.step
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.nogc_sync_mut.io.host_capacity.{host_cpu_quota_of_v1, host_runnable_of_v1,
+    host_load1_of_v1, host_idle_cpu_slots_of_v1, host_cgroup_dirs_of_v1,
+    host_cgroup_v1_memory_dirs_of_v1,
+    host_cgroup_headroom_kib_of_v1, host_cgroup_cpu_quota_of_v1, host_headroom_kib_of_v1,
+    host_memory_admit_v1, host_memory_reserve_kib_of_v1, host_memory_reserve_kib_for_v1,
+    host_live_charge_kib_v1, host_memory_admit_charged_v1, host_live_worker_slots_v1,
+    host_headroom_after_reserve_kib_of_v1}
+
+describe "host CPU capacity":
+    it "parses cgroup cpu.max and /proc/loadavg":
+        # @req REQ-SSPEC-COMPILER
+        step("parses cgroup cpu.max and /proc/loadavg")
+        assert_equal(host_cpu_quota_of_v1("max 100000\n"), -1)
+        assert_equal(host_cpu_quota_of_v1("200000 100000\n"), 2)
+        assert_equal(host_cpu_quota_of_v1("150000 100000"), 2)
+        assert_equal(host_cpu_quota_of_v1(""), -1)
+        assert_equal(host_cgroup_cpu_quota_of_v1(["max 100000", "800000 100000", ""]), 8)
+        assert_equal(host_cgroup_cpu_quota_of_v1(["", "max 100000"]), -1)
+        val loadavg = "5.23 4.10 3.02 7/1234 98765\n"
+        assert_equal(host_runnable_of_v1(loadavg), 7)
+        assert_equal(host_load1_of_v1(loadavg), 5)
+        assert_equal(host_runnable_of_v1(""), -1)
+        assert_equal(host_load1_of_v1(""), -1)
+
+    it "counts idle slots from the larger of runnable and load":
+        # @req REQ-SSPEC-COMPILER
+        step("counts idle slots from the larger of runnable and load")
+        # 20 CPUs, load ~5 (the measured half-idle build): 15 idle.
+        assert_equal(host_idle_cpu_slots_of_v1(20, -1, 6, 5, 0), 15)
+        # Load average high while the instant count is low (work blocked in
+        # page faults or I/O): the larger reading wins.
+        assert_equal(host_idle_cpu_slots_of_v1(20, -1, 3, 18, 0), 2)
+        # A burst the load average has not seen yet: the instant count wins.
+        assert_equal(host_idle_cpu_slots_of_v1(20, -1, 17, 2, 0), 4)
+        # Own just-started workers count busy before the kernel figures catch up.
+        assert_equal(host_idle_cpu_slots_of_v1(20, -1, 1, 0, 6), 14)
+        # cgroup quota tightens the limit.
+        assert_equal(host_idle_cpu_slots_of_v1(20, 4, 1, 0, 0), 4)
+        # Saturated host: 0, never negative.
+        assert_equal(host_idle_cpu_slots_of_v1(20, -1, 40, 40, 0), 0)
+        # Nothing known: the whole limit.
+        assert_equal(host_idle_cpu_slots_of_v1(8, -1, -1, -1, 0), 8)
+
+describe "host memory capacity":
+    it "takes the tightest cgroup level, then the smaller of cgroup and MemAvailable":
+        # @req REQ-SSPEC-COMPILER
+        step("takes the tightest cgroup level, then the smaller of cgroup and MemAvailable")
+        val dirs = host_cgroup_dirs_of_v1("0::/user.slice/run-p4.scope\n")
+        assert_equal(dirs.len(), 3)
+        assert_equal(dirs[0], "/sys/fs/cgroup/user.slice/run-p4.scope")
+        assert_equal(dirs[1], "/sys/fs/cgroup/user.slice")
+        assert_equal(dirs[2], "/sys/fs/cgroup")
+        assert_equal(host_cgroup_dirs_of_v1("12:memory:/x\n").len(), 0)
+        # cgroup v1 / hybrid: the memory controller row, leaf to root.
+        val v1 = host_cgroup_v1_memory_dirs_of_v1("12:cpu,cpuacct:/a\n4:memory:/user.slice/job\n0::/\n")
+        assert_equal(v1.len(), 3)
+        assert_equal(v1[0], "/sys/fs/cgroup/memory/user.slice/job")
+        assert_equal(v1[1], "/sys/fs/cgroup/memory/user.slice")
+        assert_equal(v1[2], "/sys/fs/cgroup/memory")
+        assert_equal(host_cgroup_v1_memory_dirs_of_v1("4:memory:/\n").len(), 1)
+        # Pure v2: no v1 memory row, so no v1 limit (not unknown).
+        assert_equal(host_cgroup_v1_memory_dirs_of_v1("0::/user.slice\n").len(), 0)
+        # v1 limit/usage bodies feed the same tightest-level rule.
+        assert_equal(host_cgroup_headroom_kib_of_v1(["4294967296\n", "9223372036854771712\n"],
+            ["1073741824\n", "1073741824\n"]), 3145728)
+        val hundred_g = 107374182400
+        val charged = 46170898432
+        assert_equal(host_cgroup_headroom_kib_of_v1(["{hundred_g}\n", "max\n", ""],
+            ["{charged}\n", "90000000000\n", ""]), 59768832)
+        assert_equal(host_cgroup_headroom_kib_of_v1(["max", "max"], ["1", "1"]), -1)
+        assert_equal(host_cgroup_headroom_kib_of_v1(["1024"], ["4096"]), 0)
+        assert_equal(host_headroom_kib_of_v1(59768832, 100000000), 59768832)
+        assert_equal(host_headroom_kib_of_v1(59768832, 20000000), 20000000)
+        assert_equal(host_headroom_kib_of_v1(-1, 20000000), 20000000)
+        assert_equal(host_headroom_kib_of_v1(-1, -1), -1)
+
+    it "charges live workers their unconsumed estimate":
+        # @req REQ-SSPEC-COMPILER
+        step("charges live workers their unconsumed estimate")
+        assert_true(host_memory_admit_v1(-1, 0, 100, [0, 0]))
+        assert_true(host_memory_admit_v1(10, 0, 100, []))
+        assert_true(host_memory_admit_v1(300, 0, 100, [0, 100]))
+        assert_false(host_memory_admit_v1(299, 0, 100, [0, 100]))
+        assert_false(host_memory_admit_v1(300, 1, 100, [0, 100]))
+        assert_false(host_memory_admit_v1(250, 0, 100, [-1, 50]))
+
+describe "host memory reserve":
+    it "keeps max(8 GiB, 10% of MemTotal) free, overridable":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps max(8 GiB, 10% of MemTotal) free, overridable")
+        # 121G host: 10% (~12.1G) beats the 8 GiB floor.
+        assert_equal(host_memory_reserve_kib_of_v1(126877696), 12687769)
+        # 32G host: the 8 GiB floor.
+        assert_equal(host_memory_reserve_kib_of_v1(33554432), 8388608)
+        assert_equal(host_memory_reserve_kib_of_v1(-1), 8388608)
+        # SIMPLE_WORKER_MEMORY_RESERVE_KB wins (0 allowed); junk keeps the default.
+        assert_equal(host_memory_reserve_kib_for_v1("4000000", 126877696), 4000000)
+        assert_equal(host_memory_reserve_kib_for_v1("0", 126877696), 0)
+        assert_equal(host_memory_reserve_kib_for_v1("", 126877696), 12687769)
+        assert_equal(host_memory_reserve_kib_for_v1("lots", 33554432), 8388608)
+        assert_equal(host_memory_reserve_kib_for_v1("-5", 33554432), 8388608)
+
+    it "charges each live worker what it may still grow to, never zero":
+        # @req REQ-SSPEC-COMPILER
+        step("charges each live worker what it may still grow to, never zero")
+        # (estimate, current, peak)
+        assert_equal(host_live_charge_kib_v1(12000000, 0, 0), 12000000)
+        assert_equal(host_live_charge_kib_v1(12000000, 6000000, 6000000), 6000000)
+        # Peak above the estimate raises the ceiling.
+        assert_equal(host_live_charge_kib_v1(12000000, 6000000, 45900000), 39900000)
+        # At or over the estimate: a quarter estimate floor, never 0.
+        assert_equal(host_live_charge_kib_v1(12000000, 12000000, 12000000), 3000000)
+        assert_equal(host_live_charge_kib_v1(12000000, 30000000, 30000000), 3000000)
+        # Unreadable: charged in full.
+        assert_equal(host_live_charge_kib_v1(12000000, -1, 20000000), 20000000)
+        # Admission over net headroom; unknown headroom refuses.
+        assert_true(host_memory_admit_charged_v1(18000000, 12000000, [6000000], [6000000]))
+        assert_false(host_memory_admit_charged_v1(17999999, 12000000, [6000000], [6000000]))
+        assert_false(host_memory_admit_charged_v1(-1, 12000000, [], []))
+
+    it "sizes an opt-in live pool by idle CPU and net headroom":
+        # @req REQ-SSPEC-COMPILER
+        step("sizes an opt-in live pool by idle CPU and net headroom")
+        # (idle_cpu, headroom net of the reserve, per_worker)
+        assert_equal(host_live_worker_slots_v1(15, 65000000, 7000000), 9)
+        assert_equal(host_live_worker_slots_v1(4, 65000000, 7000000), 4)
+        # Low memory: one worker (progress floor).
+        assert_equal(host_live_worker_slots_v1(15, 0, 7000000), 1)
+        # Unknown headroom or price: one (fail closed).
+        assert_equal(host_live_worker_slots_v1(15, -1, 7000000), 1)
+        assert_equal(host_live_worker_slots_v1(15, 65000000, 0), 1)
+
+    it "takes the reserve off MemAvailable only, never off the cgroup cap":
+        # @req REQ-SSPEC-COMPILER
+        step("takes the reserve off MemAvailable only, never off the cgroup cap")
+        # (cgroup headroom, MemAvailable, reserve)
+        # f25 shape: 100G scope with 57G left, host MemAvailable 77G, 12G
+        # reserve: the scope's own 57G is usable whole (not 45G).
+        assert_equal(host_headroom_after_reserve_kib_of_v1(59768832, 80740352, 12687769), 59768832)
+        # Host tighter than the scope: MemAvailable minus the reserve.
+        assert_equal(host_headroom_after_reserve_kib_of_v1(59768832, 40000000, 12687769), 27312231)
+        # No cgroup cap: MemAvailable minus the reserve.
+        assert_equal(host_headroom_after_reserve_kib_of_v1(-1, 40000000, 8388608), 31611392)
+        # MemAvailable at or below the reserve reads 0, not negative.
+        assert_equal(host_headroom_after_reserve_kib_of_v1(-1, 5000000, 8388608), 0)
+        assert_equal(host_headroom_after_reserve_kib_of_v1(59768832, 5000000, 8388608), 0)
+        # Unknown MemAvailable: the cgroup figure alone; neither known: -1.
+        assert_equal(host_headroom_after_reserve_kib_of_v1(59768832, -1, 8388608), 59768832)
+        assert_equal(host_headroom_after_reserve_kib_of_v1(-1, -1, 8388608), -1)

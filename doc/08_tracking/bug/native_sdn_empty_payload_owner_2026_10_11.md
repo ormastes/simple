@@ -1,6 +1,6 @@
 # Empty SDN enum containers lose payload type
 
-Status: OPEN. Canonical bug ID: `native_sdn_empty_payload_owner_2026_10_11`. GitHub: https://github.com/ormastes/simple/issues/2982
+Status: FIX-IMPLEMENTED-VERIFICATION-PENDING (2026-11-03; workarounds kept). Canonical bug ID: `native_sdn_empty_payload_owner_2026_10_11`. GitHub: https://github.com/ormastes/simple/issues/2982
 
 Original failure: C35 runner MIR rejects SdnValue.Dict and Array payload0 type mismatches for untyped empty literals.
 
@@ -31,3 +31,9 @@ Additional actual-consumer source workaround: Additional temporary SDN parser pa
 Actual C36 env_access_host closure HIR/MIR PASS and 59 of74 native objects retained; aggregate FAIL on15 declaration-only dependencies. Changed lib.common.sdn.parser object ELF64 ET_REL EM183,99584bytes SHA25663c21ea6f26d31db33483c69b0b603d4e4eff8eceaa859f03fc4dd69a82bc641;39 module-owned symbols. Producer 5315b60ff617fd4595390609e89bcd8530204c4595fc7b2f28b32e5b7a40f235; source a9b5343d9dfbb9e6a38e074d7162092c58191b34; source SHA2568f92aacf23303d19e8ce525fe3f06004301f7d3271d3712b5c56d796267e3e3c. Evidence /home/yoon/dev/simple-bootstrap-c06-20261011/build/native_probe/phase3-whole-20261011-c06/manual-affected-source-objects-c36-sdn-frontend/consumer-env-access-host/retained-object-inventory.json. Capsule has missing-witness-facts: diagnostic object emission only, not cache/admission or runtime qualification. New parser fixture and RISC-V remain unrun; prior732 narrow ARM runtime proof is separate.
 
 Removal additionally requires original tuple payload/dictionary forms and parser payload fixture controls on the repaired producer; keep OPEN.
+
+## 2026-11-03 triage (stage3-free)
+
+Compiler side is already fixed: `lower_declared_enum_payload_expression` (enum_constructor_payload.spl) threads the declared slot type into untyped `[]`/`{}` payloads (d918d7b9afe, 8b0ed18649e; `contextual_enum_payload_spec.spl`). Verified 2026-11-03 on the seed: `enum Value: Dict(Dict<text, Value>)` with `Value.Dict({})` lowers with 0 HIR/MIR errors standalone. In-spec, 6 of 25 examples (dictionary cases) fail identically with and without this change (expected 2 errors, likely cross-example enum-name state in one process); that residue is unrelated to payload inference.
+
+Stage3 verify: native-build `test/fixtures/compiler/sdn_empty_container_workaround/main.spl` with the typed empty locals reverted to original `SdnValue.Dict({})` / `SdnValue.Array([])` forms.

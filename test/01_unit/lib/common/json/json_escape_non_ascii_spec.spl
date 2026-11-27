@@ -1,0 +1,59 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# Non-ASCII text must pass through the JSON string escapers as raw UTF-8 with
+# the tail after every multi-byte character intact (RFC 8259 permits unescaped
+# non-ASCII; the canonical std escaper documents passthrough).
+
+use std.spec.*
+use std.common.json.serializer.{json_escape_string}
+use std.common.json.value.{json_value_escape_string}
+use std.common.search.query_exec.{query_exec_json_quote_v1}
+use std.common.json.value.{JsonValue, json_parse_value_strict}
+use app.spipe.model.canonical.{CanonicalValue, canonical_json}
+
+fn _decoded(quoted: text) -> text:
+    match json_parse_value_strict(quoted):
+        case Ok(JsonValue.Str(v)): v
+        case Ok(_): "<not a string>"
+        case Err(e): "<parse error: " + e + ">"
+
+describe "JSON string escaping of non-ASCII text":
+    it "keeps the tail after a 2-byte character in the canonical escaper":
+        # @req REQ-SSPEC-UNIT
+        step("escape café au lait and é")
+        expect(json_escape_string("café au lait")).to_equal("café au lait")
+        expect(json_escape_string("é")).to_equal("é")
+
+    it "still escapes quote, backslash and newline after a 2-byte character":
+        # @req REQ-SSPEC-UNIT
+        step("escape aé\"b\\c and a newline")
+        expect(json_escape_string("aé\"b\\c\n")).to_equal("aé\\\"b\\\\c\\n")
+        expect(json_value_escape_string("aé\"b\\c\n")).to_equal("aé\\\"b\\\\c\\n")
+
+    it "keeps 3-byte and 4-byte characters and their tails":
+        # @req REQ-SSPEC-UNIT
+        step("escape Hangul and an emoji")
+        expect(json_escape_string("한글 ok")).to_equal("한글 ok")
+        expect(json_value_escape_string("x😀y\"z")).to_equal("x😀y\\\"z")
+
+    it "quotes non-ASCII search terms with the tail intact":
+        # @req REQ-SSPEC-UNIT
+        step("quote café au lait, 한글 ok and an emoji term")
+        expect(query_exec_json_quote_v1("café au lait")).to_equal("\"café au lait\"")
+        expect(query_exec_json_quote_v1("한글 ok")).to_equal("\"한글 ok\"")
+        expect(query_exec_json_quote_v1("x😀y\"z")).to_equal("\"x😀y\\\"z\"")
+
+    it "round-trips every case through a strict JSON parse":
+        # @req REQ-SSPEC-UNIT
+        step("quote each case with the search and spipe quoters and parse it back")
+        val cases = ["café au lait", "é", "aé\"b\\c\n", "한글 ok", "x😀y\"z"]
+        for c in cases:
+            expect(_decoded(query_exec_json_quote_v1(c))).to_equal(c)
+            expect(_decoded(canonical_json(CanonicalValue.CText(c)))).to_equal(c)
+            expect(_decoded("\"" + json_escape_string(c) + "\"")).to_equal(c)
+
+    it "keeps the spipe canonical tail after a multi-byte character":
+        # @req REQ-SSPEC-UNIT
+        step("canonicalize café au lait and an emoji string")
+        expect(canonical_json(CanonicalValue.CText("café au lait"))).to_equal("\"café au lait\"")
+        expect(canonical_json(CanonicalValue.CText("x😀y\"z"))).to_equal("\"x😀y\\\"z\"")

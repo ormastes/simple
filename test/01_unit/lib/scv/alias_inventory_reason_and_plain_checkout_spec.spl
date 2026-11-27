@@ -1,0 +1,297 @@
+use std.spec.*
+use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1}
+use app.compiler_entrypoint.inventory_aliases.{
+    CompilerInventoryAliasesV1,
+    compiler_inventory_aliases_checked_v1,
+    compiler_inventory_aliases_v1,
+    compiler_alias_git_paths_checked_v1,
+    compiler_alias_present_checked_v1
+}
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+use app.io.mod.{process_run_bounded}
+use app.io.file_ops.{path_absolute}
+use app.io.time_ops.{time_now_unix_micros}
+use std.io_runtime.{dir_create_all, dir_remove_all, file_write, file_delete}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+
+fn _runtime_join(parts: [text], sep: text) -> text:
+    parts.join(sep)
+
+fn _run_git(root: text, args: [text]) -> (text, text, i64):
+    process_run_bounded("git",
+        ["-C", root, "-c", "core.hooksPath=", "-c", "commit.gpgsign=false"] + args,
+        30000, 1048576)
+
+fn _create_directory_alias(target: text, link_path: text) -> bool:
+    val win_link = link_path.replace("/", "\\")
+    val win_target = target.replace("/", "\\")
+    val (_cmd_out, _cmd_err, cmd_code) = process_run_bounded("cmd", ["/c", "mklink", "/J", win_link, win_target], 10000, 65536)
+    if cmd_code == 0:
+        return true
+    val (_ln_out, _ln_err, ln_code) = process_run_bounded("ln", ["-s", "--", target, link_path], 10000, 65536)
+    ln_code == 0
+
+fn _remove_directory_alias(link_path: text):
+    if not file_delete(link_path):
+        val win_link = link_path.replace("/", "\\")
+        val (_o, _e, _c) = process_run_bounded("cmd", ["/c", "rmdir", win_link], 10000, 65536)
+
+fn _cleanup_scratch_dir(path: text):
+    val _rm = dir_remove_all(path)
+    if host_is_windows_host():
+        val win_path = path.replace("/", "\\")
+        val (_o, _e, _c) = process_run_bounded("cmd", ["/c", "rmdir", "/s", "/q", win_path], 30000, 65536)
+    else:
+        val (_o, _e, _c) = process_run_bounded("rm", ["-rf", "--", path], 30000, 65536)
+
+fn _is_none_aliases(value: CompilerInventoryAliasesV1?) -> bool:
+    match value:
+        case Some(_): false
+        case None: true
+
+fn _is_some_aliases(value: CompilerInventoryAliasesV1?) -> bool:
+    match value:
+        case Some(_): true
+        case None: false
+
+describe "compile_source_inventory_plain_checkout_v1 val-only trailing slash trim":
+    it "preserves root and drive-root edge cases without var text reassignment":
+        expect(compile_source_inventory_plain_checkout_v1("/")).to_equal("/")
+        expect(compile_source_inventory_plain_checkout_v1("///")).to_equal("/")
+        expect(compile_source_inventory_plain_checkout_v1("C:/")).to_equal("C:")
+        expect(compile_source_inventory_plain_checkout_v1("//?/C:/")).to_equal("C:")
+        expect(compile_source_inventory_plain_checkout_v1("\\\\?\\C:\\")).to_equal("C:")
+        expect(compile_source_inventory_plain_checkout_v1("C:/dev/")).to_equal("C:/dev")
+        expect(compile_source_inventory_plain_checkout_v1("C:/dev///")).to_equal("C:/dev")
+        expect(compile_source_inventory_plain_checkout_v1("//?/C:/dev/")).to_equal("C:/dev")
+
+    it "normalizes runtime-built verbatim, UNC, and UTF-8 paths":
+        val rt_drive = _runtime_join(["//?", "C:", "dev", "sub", ""], "/")
+        expect(compile_source_inventory_plain_checkout_v1(rt_drive)).to_equal("C:/dev/sub")
+        val rt_unc = _runtime_join(["//?", "UNC", "host", "share", ""], "/")
+        expect(compile_source_inventory_plain_checkout_v1(rt_unc)).to_equal("//host/share")
+        val rt_bs = "\\\\?\\C:\\" + _runtime_join(["dev", "한글", ""], "\\")
+        expect(compile_source_inventory_plain_checkout_v1(rt_bs)).to_equal("C:/dev/한글")
+        expect(compile_source_inventory_plain_checkout_v1("C:/dev/한글/")).to_equal("C:/dev/한글")
+        expect(compile_source_inventory_plain_checkout_v1("/한/")).to_equal("/한")
+        expect(compile_source_inventory_plain_checkout_v1("/work/a\\b/")).to_equal("/work/a\\b")
+
+    it "rejects empty, relative, and dot-traversal inputs":
+        expect(compile_source_inventory_plain_checkout_v1("")).to_equal("")
+        expect(compile_source_inventory_plain_checkout_v1("//?/")).to_equal("")
+        expect(compile_source_inventory_plain_checkout_v1("relative/path")).to_equal("")
+        expect(compile_source_inventory_plain_checkout_v1("C:/dev/../sub")).to_equal("")
+        expect(compile_source_inventory_plain_checkout_v1("C:/dev/./sub")).to_equal("")
+
+describe "compiler_inventory_aliases_checked_v1 failure reasons":
+    it "reports specific stage details for root, scope, non-git, and presence failures":
+        val missing_root = compile_source_inventory_plain_checkout_v1(
+            path_absolute("build/tests/missing-alias-root-{time_now_unix_micros()}"))
+        val missing_res = compiler_inventory_aliases_checked_v1(missing_root, ["src"])
+        val missing_reason = match missing_res:
+            case Ok(_): "unexpected-ok"
+            case Err(reason): reason
+        expect(missing_reason).to_start_with("path_final_existing:")
+        expect(_is_none_aliases(compiler_inventory_aliases_v1(missing_root, ["src"]))).to_equal(true)
+
+        val current_root = compile_source_inventory_plain_checkout_v1(path_absolute("."))
+        val unsafe_res = compiler_inventory_aliases_checked_v1(current_root, ["../escape"])
+        val unsafe_reason = match unsafe_res:
+            case Ok(_): "unexpected-ok"
+            case Err(reason): reason
+        expect(unsafe_reason).to_start_with("scv_worktree_path_safe:")
+        expect(_is_none_aliases(compiler_inventory_aliases_v1(current_root, ["../escape"]))).to_equal(true)
+
+        val gp_unsafe = compiler_alias_git_paths_checked_v1(current_root, ["../escape"])
+        val gp_reason = match gp_unsafe:
+            case Ok(_): "unexpected-ok"
+            case Err(reason): reason
+        expect(gp_reason).to_start_with("scv_worktree_path_safe:")
+
+        val scratch = compile_source_inventory_plain_checkout_v1(
+            path_absolute("build/tests/alias-nongit-{time_now_unix_micros()}"))
+        expect(dir_create_all(scratch)).to_equal(true)
+        expect(file_write(scratch + "/.git", "gitdir: ./missing-gitdir\n")).to_equal(true)
+        expect(file_write(scratch + "/marker.spl", "fn marker() -> i64: 1\n")).to_equal(true)
+        val git_fail = compiler_inventory_aliases_checked_v1(scratch, ["src"])
+        val git_reason = match git_fail:
+            case Ok(_): "unexpected-ok"
+            case Err(reason): reason
+        expect(git_reason).to_start_with("git ls-files:")
+        expect(_is_none_aliases(compiler_inventory_aliases_v1(scratch, ["src"]))).to_equal(true)
+
+        val ok_present = match compiler_alias_present_checked_v1(scratch, "marker.spl"):
+            case Ok(flag): flag
+            case Err(_): false
+        expect(ok_present).to_equal(true)
+
+        val invalid_leaf_err = match compiler_alias_present_checked_v1(scratch, "marker.spl/."):
+            case Ok(_): "unexpected-ok"
+            case Err(reason): reason
+        expect(invalid_leaf_err).to_start_with("alias_present:")
+        expect(invalid_leaf_err).to_contain("PATH_ENTRY_LEAF")
+
+        val missing_res = compiler_alias_present_checked_v1(scratch, "missing_file.spl")
+        val nested_missing_res = compiler_alias_present_checked_v1(scratch, "missing_dir/file.spl")
+        val child_under_file_res = compiler_alias_present_checked_v1(scratch, "marker.spl/child.spl")
+        if not host_is_windows_host():
+            val missing_detail = match missing_res:
+                case Ok(flag): "ok:{flag}"
+                case Err(err): "err:{err}"
+            val nested_detail = match nested_missing_res:
+                case Ok(flag): "ok:{flag}"
+                case Err(err): "err:{err}"
+            val child_detail = match child_under_file_res:
+                case Ok(flag): "ok:{flag}"
+                case Err(err): err
+            expect(missing_detail).to_equal("ok:false")
+            expect(nested_detail).to_equal("ok:false")
+            expect(child_detail).to_start_with("alias_present:")
+        else:
+            # Compiled/pure-Simple Windows runtimes observe ERROR_FILE_NOT_FOUND/ERROR_PATH_NOT_FOUND -> Ok(false);
+            # the frozen Rust bootstrap seed interpreter does not preserve GetLastError() across FFI calls -> Err(PATH_ENTRY_INDETERMINATE).
+            val seed_indeterminate = match missing_res:
+                case Ok(_): false
+                case Err(reason): reason.contains("PATH_ENTRY_INDETERMINATE")
+            if seed_indeterminate:
+                val m_err = match missing_res:
+                    case Ok(flag): "ok:{flag}"
+                    case Err(reason): reason
+                val n_err = match nested_missing_res:
+                    case Ok(flag): "ok:{flag}"
+                    case Err(reason): reason
+                val c_err = match child_under_file_res:
+                    case Ok(flag): "ok:{flag}"
+                    case Err(reason): reason
+                expect(m_err).to_start_with("alias_present:")
+                expect(m_err).to_contain("PATH_ENTRY_INDETERMINATE")
+                expect(n_err).to_start_with("alias_present:")
+                expect(n_err).to_contain("PATH_ENTRY_INDETERMINATE")
+                expect(c_err).to_start_with("alias_present:")
+                expect(c_err).to_contain("PATH_ENTRY_INDETERMINATE")
+            else:
+                val m_ok = match missing_res:
+                    case Ok(flag): "ok:{flag}"
+                    case Err(reason): "err:{reason}"
+                val n_ok = match nested_missing_res:
+                    case Ok(flag): "ok:{flag}"
+                    case Err(reason): "err:{reason}"
+                val c_ok = match child_under_file_res:
+                    case Ok(flag): "ok:{flag}"
+                    case Err(reason): "err:{reason}"
+                expect(m_ok).to_equal("ok:false")
+                expect(n_ok).to_equal("ok:false")
+                expect(c_ok).to_equal("ok:false")
+        val _del_git = file_delete(scratch + "/.git")
+        val _del_marker = file_delete(scratch + "/marker.spl")
+        _cleanup_scratch_dir(scratch)
+
+    it "surfaces alias failure reason through inventory_events refresh with preserved prefix":
+        val base = compile_source_inventory_plain_checkout_v1(
+            path_absolute("build/tests/alias-refresh-{time_now_unix_micros()}"))
+        val outside = base + "/outside"
+        expect(dir_create_all(outside)).to_equal(true)
+        expect(file_write(outside + "/ext.spl", "fn ext() -> i64: 9\n")).to_equal(true)
+
+        val repo = base + "/repo"
+        expect(dir_create_all(repo + "/src")).to_equal(true)
+        expect(dir_create_all(repo + "/build")).to_equal(true)
+        expect(file_write(repo + "/.gitignore", "build/\n")).to_equal(true)
+        expect(file_write(repo + "/src/ok.spl", "fn ok() -> i64: 1\n")).to_equal(true)
+
+        val (_init_o, _init_e, init_c) = _run_git(repo, ["init", "-q"])
+        expect(init_c).to_equal(0)
+        val (_add_o, _add_e, add_c) = _run_git(repo, ["add", ".gitignore", "src/ok.spl"])
+        expect(add_c).to_equal(0)
+        val (_com_o, _com_e, com_c) = _run_git(repo,
+            ["-c", "user.name=Alias Probe", "-c", "user.email=alias@example.invalid", "commit", "-qm", "init"])
+        expect(com_c).to_equal(0)
+
+        val valid_checked = compiler_inventory_aliases_checked_v1(repo, ["src"])
+        val valid_count = match valid_checked:
+            case Ok(v): v.paths.len()
+            case Err(_): -1
+        expect(valid_count).to_equal(0)
+        expect(_is_some_aliases(compiler_inventory_aliases_v1(repo, ["src"]))).to_equal(true)
+
+        # Verify directory-alias escape failure in an isolated repo when symlink/junction is available.
+        val repo_escape = base + "/repo_escape"
+        expect(dir_create_all(repo_escape + "/src")).to_equal(true)
+        expect(dir_create_all(repo_escape + "/build")).to_equal(true)
+        expect(file_write(repo_escape + "/.gitignore", "build/\n")).to_equal(true)
+        expect(file_write(repo_escape + "/src/ok.spl", "fn ok() -> i64: 1\n")).to_equal(true)
+        val (_ei_o, _ei_e, ei_c) = _run_git(repo_escape, ["init", "-q"])
+        expect(ei_c).to_equal(0)
+        val (_ea_o, _ea_e, ea_c) = _run_git(repo_escape, ["add", ".gitignore", "src/ok.spl"])
+        expect(ea_c).to_equal(0)
+        val (_ec_o, _ec_e, ec_c) = _run_git(repo_escape,
+            ["-c", "user.name=Alias Probe", "-c", "user.email=alias@example.invalid", "commit", "-qm", "init"])
+        expect(ec_c).to_equal(0)
+        if _create_directory_alias(outside, repo_escape + "/src/escape_alias"):
+            val (esc_hash_out, _eh_e, eh_c) = _run_git(repo_escape, ["hash-object", "-w", ".gitignore"])
+            expect(eh_c).to_equal(0)
+            val esc_sha = esc_hash_out.trim()
+            val (_es_o, _es_e, es_c) = _run_git(repo_escape, ["update-index", "--add", "--cacheinfo", "120000,{esc_sha},src/escape_alias"])
+            expect(es_c).to_equal(0)
+            val escape_checked = compiler_inventory_aliases_checked_v1(repo_escape, ["src"])
+            val escape_reason = match escape_checked:
+                case Ok(_): "unexpected-ok"
+                case Err(reason): reason
+            expect(escape_reason).to_start_with("path_identity_contains:")
+            val escape_refresh = compiler_inventory_refresh_v1(repo_escape, repo_escape + "/build/scv", ["src"], true)
+            expect(escape_refresh.valid).to_equal(false)
+            expect(escape_refresh.reason).to_start_with("directory-alias-inventory-invalid (path_identity_contains:")
+            val emitted_escape = "SCV-E-ADMISSION: " + escape_refresh.reason
+            expect(emitted_escape).to_start_with("SCV-E-ADMISSION: directory-alias-inventory-invalid (path_identity_contains:")
+            _remove_directory_alias(repo_escape + "/src/escape_alias")
+
+        # Verify reserved-owner failure (`build/`) when symlink/junction is available.
+        val repo_reserved = base + "/repo_reserved"
+        expect(dir_create_all(repo_reserved + "/src")).to_equal(true)
+        expect(dir_create_all(repo_reserved + "/build")).to_equal(true)
+        expect(file_write(repo_reserved + "/.gitignore", "build/\n")).to_equal(true)
+        expect(file_write(repo_reserved + "/src/ok.spl", "fn ok() -> i64: 1\n")).to_equal(true)
+        val (_ri_o, _ri_e, ri_c) = _run_git(repo_reserved, ["init", "-q"])
+        expect(ri_c).to_equal(0)
+        val (_ra_o, _ra_e, ra_c) = _run_git(repo_reserved, ["add", ".gitignore", "src/ok.spl"])
+        expect(ra_c).to_equal(0)
+        val (_rc_o, _rc_e, rc_c) = _run_git(repo_reserved,
+            ["-c", "user.name=Alias Probe", "-c", "user.email=alias@example.invalid", "commit", "-qm", "init"])
+        expect(rc_c).to_equal(0)
+        if _create_directory_alias(repo_reserved + "/build", repo_reserved + "/src/build_alias"):
+            val (res_hash_out, _rh_e, rh_c) = _run_git(repo_reserved, ["hash-object", "-w", ".gitignore"])
+            expect(rh_c).to_equal(0)
+            val res_sha = res_hash_out.trim()
+            val (_rs_o, _rs_e, rs_c) = _run_git(repo_reserved, ["update-index", "--add", "--cacheinfo", "120000,{res_sha},src/build_alias"])
+            expect(rs_c).to_equal(0)
+            val reserved_checked = compiler_inventory_aliases_checked_v1(repo_reserved, ["src"])
+            val reserved_reason = match reserved_checked:
+                case Ok(_): "unexpected-ok"
+                case Err(reason): reason
+            expect(reserved_reason).to_start_with("owner:")
+            expect(reserved_reason).to_contain("reserved")
+            val reserved_refresh = compiler_inventory_refresh_v1(repo_reserved, repo_reserved + "/build/scv", ["src"], true)
+            expect(reserved_refresh.valid).to_equal(false)
+            expect(reserved_refresh.reason).to_start_with("directory-alias-inventory-invalid (owner:")
+            _remove_directory_alias(repo_reserved + "/src/build_alias")
+
+        # Tracked 120000 entry whose working-tree path is a directory triggers fail-closed owner check.
+        expect(file_write(repo + "/src/dangling_target.txt", "../outside")).to_equal(true)
+        val (lnk_hash_out, _lh_e, lh_c) = _run_git(repo, ["hash-object", "-w", "src/dangling_target.txt"])
+        expect(lh_c).to_equal(0)
+        val lnk_sha = lnk_hash_out.trim()
+        val (_lnk_o, _lnk_e, lnk_c) = _run_git(repo, ["update-index", "--add", "--cacheinfo", "120000,{lnk_sha},src/bad_alias"])
+        expect(lnk_c).to_equal(0)
+        expect(dir_create_all(repo + "/src/bad_alias")).to_equal(true)
+        val bad_checked = compiler_inventory_aliases_checked_v1(repo, ["src"])
+        val bad_reason = match bad_checked:
+            case Ok(_): "unexpected-ok"
+            case Err(reason): reason
+        expect(bad_reason).to_start_with("owner:")
+        val refresh = compiler_inventory_refresh_v1(repo, repo + "/build/scv", ["src"], true)
+        expect(refresh.valid).to_equal(false)
+        expect(refresh.reason).to_start_with("directory-alias-inventory-invalid (")
+        val emitted = "SCV-E-ADMISSION: " + refresh.reason
+        expect(emitted).to_start_with("SCV-E-ADMISSION: directory-alias-inventory-invalid (")
+        expect(emitted).to_contain("owner:")
+        _cleanup_scratch_dir(base)

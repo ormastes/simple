@@ -67,3 +67,35 @@ mismatches on x86_64 AVX2.
 Make stage4 deploy finish again before rechecking the direct release-path guard.
 The likely first target is the stage3 exit 139 / stage4 seed fallback path; the
 stage4 worker gives no useful diagnostics before timing out.
+
+## 2026-11-11 addendum — P3 traverse lane ne1 verdict: BLOCKED (OPEN)
+
+Source-side guard lineage verified present at the `origin/release/1.0.0` tip:
+`_cli_is_current_exe()` / `_cli_driver_binary()` in `src/app/io/cli_ops.spl`
+(:307, :351), with the in-process identity fix `0531ca8ce266`
+(2026-07-25, "fix(cli): resolve exe identity in-process"), the self-delegation
+guard `988368c9df12` (2026-08-17), and the plan record `a69881f3a8de`
+confirming the restored in-process fix supersedes the original `$PPID`
+shell-out this doc describes. The bug_db row note of 2026-11-09 agrees: the
+source fix is present; what remains is a deploy/bootstrap run owned by the
+phase runner.
+
+Not verifiable in this lane: the defect is the stale DEPLOYED
+`release/x86_64-unknown-linux-gnu/simple` binary, and this Windows worktree
+carries no Linux release binary (`release/` holds only manifests). A swap
+requires a full sanctioned bootstrap deploy (Linux host, cargo-built seed
+rebuild + stage4), which is outside this lane's grant (no cargo/rustc) — and
+per the 2026-11-03 perf-g01 note, stage4 gates now carry explicit
+`run_timeout_kill` budgets (180..7200 s), so the 30-minute wall that caused
+this timeout should no longer bite the same way.
+
+Exact grant command (Linux host, fresh worktree on `origin/release/1.0.0`):
+
+```sh
+SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --deploy --no-mcp --jobs=half
+# then re-run the direct release-path probe:
+SIMPLE_LIB=src release/x86_64-unknown-linux-gnu/simple run /tmp/simple_native_row_probe.spl --mode=interpreter --clean
+```
+
+Status stays OPEN until that deploy completes and the direct release-path
+probe exits 0. Lane evidence: `build/review/p3fix-ne1-20261111.sdn` row 1.

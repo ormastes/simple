@@ -1,0 +1,39 @@
+# @cover src/lib/nogc_sync_mut/test_runner/test_runner_config.spl
+# The line-scan simple.sdn readers must ignore trailing inline comments
+# (outside quotes) and keep `#` inside quoted values.
+
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.test_runner.test_runner_config.{resolve_edition_from_sdn, read_sdn_lints_profile, EDITION_DEFAULT}
+
+fn _edition_of(body: text) -> text:
+    val dir = secure_temp_dir(".", "edition-sdn-comment-spec").unwrap()
+    val path = dir + "/simple.sdn"
+    file_write(path, body)
+    val got = resolve_edition_from_sdn(path)
+    dir_remove_all(dir)
+    got
+
+describe "simple.sdn edition reader -- inline comments":
+    it "reads project: edition: with no comment":
+        expect(_edition_of("project:\n  edition: 2027.2\n")).to_equal("2027.2")
+
+    it "strips a trailing comment after the value":
+        expect(_edition_of("project:\n  edition: 2027.2  # why\n")).to_equal("2027.2")
+
+    it "accepts a trailing comment on the block header":
+        expect(_edition_of("project:  # x\n  edition: 2027.2\n")).to_equal("2027.2")
+
+    it "preserves # inside a quoted value (unknown edition falls back)":
+        expect(_edition_of("project:\n  edition: \"2027.2#x\"  # c\n")).to_equal(EDITION_DEFAULT)
+
+    it "strips a comment after a quoted value":
+        expect(_edition_of("project:\n  edition: \"2027.2\" # c\n")).to_equal("2027.2")
+
+describe "simple.sdn lints profile reader -- inline comments":
+    it "strips comments on header and value":
+        val dir = secure_temp_dir(".", "lints-sdn-comment-spec").unwrap()
+        val path = dir + "/simple.sdn"
+        file_write(path, "lints:  # h\n  profile: critical  # why\n")
+        expect(read_sdn_lints_profile(path)).to_equal("critical")
+        dir_remove_all(dir)

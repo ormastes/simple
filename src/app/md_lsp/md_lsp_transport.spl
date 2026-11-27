@@ -1,0 +1,55 @@
+# Markdown LSP transport: Content-Length framing, import-safe.
+#
+# Pure functions only: no externs, no top-level execution, so specs import
+# the real code instead of copying a helper body (the copied body in the old
+# `md_lsp_extract_field_multibyte_spec` had drifted from production). The
+# stdio loop in `md_lsp_main.spl` owns stdin/stdout and calls these.
+
+# Parsed header block of one JSON-RPC frame. `valid` is false when the
+# Content-Length header is missing, duplicated, non-numeric, zero or would
+# overflow i64.
+pub struct MdLspFrameHeader:
+    valid: bool
+    content_length: i64
+
+# Parses "Content-Length: N". Returns -1 for a malformed value and 0 when the
+# line is not a Content-Length header at all.
+fn md_lsp_parse_content_length(header_line: text) -> i64:
+    val prefix = "Content-Length:"
+    if not header_line.starts_with(prefix):
+        return 0
+    val trimmed = header_line.substring(prefix.len()).trim()
+    if trimmed.len() == 0:
+        return -1
+    var result: i64 = 0
+    var i = 0
+    while i < trimmed.byte_len():
+        val digit = trimmed.byte_at(i) - 48
+        if digit < 0 or digit > 9:
+            return -1
+        if result > 922337203685477580 or (result == 922337203685477580 and digit > 7):
+            return -1
+        result = result * 10 + digit
+        i = i + 1
+    result
+
+# Interprets the non-blank header lines of one frame. Exactly one well-formed
+# Content-Length header is required; other headers (Content-Type) are ignored.
+pub fn md_lsp_frame_header(header_lines: [text]) -> MdLspFrameHeader:
+    var found = false
+    var length: i64 = 0
+    for raw in header_lines:
+        val header = raw.trim()
+        if header.starts_with("Content-Length:"):
+            if found:
+                return MdLspFrameHeader(valid: false, content_length: 0)
+            length = md_lsp_parse_content_length(header)
+            found = true
+    if not found or length <= 0:
+        return MdLspFrameHeader(valid: false, content_length: 0)
+    MdLspFrameHeader(valid: true, content_length: length)
+
+# Frames a JSON body. Content-Length is the UTF-8 BYTE length, not the
+# codepoint count, so multibyte payloads round-trip.
+pub fn md_lsp_frame(json: text) -> text:
+    "Content-Length: " + str(json.byte_len()) + "\r\n\r\n" + json

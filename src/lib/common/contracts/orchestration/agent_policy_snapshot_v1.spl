@@ -1,0 +1,37 @@
+# Immutable snapshot identity, not an executable plan or authorization grant.
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict, as_text, as_int, only_known}
+
+pub struct AgentPolicySnapshotV1:
+    input_digest: text
+    catalog_digest: text
+
+pub fn agent_policy_snapshot_encode_v1(snapshot: AgentPolicySnapshotV1) -> Result<text, text>:
+    if not builder_digest_valid_v1(snapshot.input_digest) or not builder_digest_valid_v1(snapshot.catalog_digest):
+        return Err("policy-snapshot-digest-invalid")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "inputDigest": SdnValue.String(snapshot.input_digest), "catalogDigest": SdnValue.String(snapshot.catalog_digest)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn agent_policy_snapshot_decode_v1(bytes: text) -> Result<AgentPolicySnapshotV1, text>:
+    if bytes.len() > 1024: return Err("policy-snapshot-too-large")
+    val parsed = parse_resource_document(bytes)
+    if parsed.is_err(): return Err("policy-snapshot-invalid")
+    val spans = parsed.unwrap().1
+    val decoded = as_dict(parsed.unwrap().0, "", spans)
+    if decoded.is_err(): return Err("policy-snapshot-invalid")
+    val fields = decoded.unwrap()
+    if only_known(fields, ["version", "inputDigest", "catalogDigest"], "", spans).is_err(): return Err("policy-snapshot-invalid")
+    for key in ["version", "inputDigest", "catalogDigest"]:
+        if not fields.contains_key(key): return Err("policy-snapshot-invalid")
+    val version = as_int(fields["version"], "version", spans)
+    if version.is_err(): return Err("policy-snapshot-invalid")
+    if version.unwrap() != 1: return Err("policy-snapshot-version-invalid")
+    val input = as_text(fields["inputDigest"], "inputDigest", spans)
+    val catalog = as_text(fields["catalogDigest"], "catalogDigest", spans)
+    if input.is_err() or catalog.is_err(): return Err("policy-snapshot-invalid")
+    val snapshot = AgentPolicySnapshotV1(input_digest: input.unwrap(), catalog_digest: catalog.unwrap())
+    if agent_policy_snapshot_encode_v1(snapshot)? != bytes: return Err("policy-snapshot-not-canonical")
+    Ok(snapshot)

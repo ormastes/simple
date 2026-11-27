@@ -3,6 +3,8 @@
 ## Tiered Local/Global Cache, Main-Branch Promotion, AOP-Aware Invalidation, Block Reuse, Storage GC, and Lean 4 Verification
 
 **Status:** Proposed integrated architecture and parallel implementation plan
+
+> **Partly superseded (2026-10-24)** by [`incremental_build/src_based_tldr_build_v1.md`](incremental_build/src_based_tldr_build_v1.md): §14.2 split `.simple/build-cache/` + `$SIMPLE_CACHE` roots → one `$SIMPLE_CACHE` root (`cache_root.spl`); §15.4 mutable workspace store wording → daemon `CacheWriterV1` for shared state, atomic workspace-local stores; §18.3 process leases and any lock-based coordination → immutable generation pins and single-flight futures (no locks); §18.6 queue/skip under storage pressure → **reject** over-limit writes. Block reuse (§17) and the formal gate (§19) stand, with object reuse shadow-only until admitted.
 **Date:** 2026-08-09 (updated 2026-08-10)
 **Relationship to the prior document:** Appends after Section 10 of
 `doc/03_plan/compiler/cache/global_cas_interpreter_cache_option_c_plan_2026-07-24.md`.

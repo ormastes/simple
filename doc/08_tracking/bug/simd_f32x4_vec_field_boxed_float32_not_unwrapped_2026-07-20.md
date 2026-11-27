@@ -1,5 +1,5 @@
 # `Vec4f` f32 SIMD externs receive a boxed `Float32` instead of a raw `f32`
-## Open 2026-09-16 — needs owner triage
+## Status: FIXED (source fix `06c37c33347`, 2026-11-06; pinned by Rust tests 2026-11-06) — see "Resolution" below
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -132,3 +132,50 @@ but has NO remaining runtime dependency on the boxed-`Float32` SIMD path
 after the suffix fix, so it goes fully green and IS in the triage pass's
 FIXED list: `test/feature/scilib/ndarray_dtype_spec.spl`.
 
+
+## Resolution (2026-11-06)
+
+Root cause: `require_f64_field` in
+`src/compiler_rust/compiler/src/interpreter_extern/simd.rs` (~line 524), the
+lane extractor behind `unpack_vec4f`/`unpack_vec8f`/`unpack_vec4d`, matched
+`Value::Float` and `Value::Int` but not `Value::Float32`, so a lane holding an
+`f32` value (`x as f32`, a `Float32.value` field) was rejected with
+"field x must be a float, got Float32(1.0)". The "boxed Float32 struct"
+reading in the original record was the `Debug` print of `Value::Float32`, not
+a wrapper object.
+
+The `Value::Float32(n) => Ok(*n as f64)` arm was first added in `45a0e1636ad`
+(2026-08-23), was lost again before `release/1.0.0`, and was re-added in
+`06c37c33347` (2026-11-06). This lane added Rust regression tests so it
+cannot silently regress a third time:
+`interpreter_extern::simd::f32_lane_value_tests::f32x4_lane_ops_accept_float32_fields`
+and `f32x8_lane_ops_accept_float32_fields` — FAILED with the arm removed
+(`Runtime("rt_simd_mul_f32x4: field x must be a float, got Float32(1.0)")`,
+`... rt_simd_fma_f32x8: field e0 ...`), ok with it.
+
+Repro `test/fixtures/seed_interp/simd_f32x4_float32_repro.spl` (interpreter):
+before (seed `bin/simple.exe`, 2026-10-05): `error: runtime:
+rt_simd_mul_f32x4: field x must be a float, got Float32(1.0)`; after (seed
+built from `work/seed-interp-correctness-20261106`): `simd_mul_f32x4 2.0 4.0`.
+
+## Verification 2026-11-25 (work/p2w5-ac-20261125)
+
+The source fix is confirmed present at release/1.0.0 HEAD by inspection:
+`require_f64_field` in `src/compiler_rust/compiler/src/interpreter_extern/simd.rs:527`
+matches `Value::Float32(n) => Ok(*n as f64)`, and the Rust regression tests
+`f32x4_lane_ops_accept_float32_fields` / `f32x8_lane_ops_accept_float32_fields`
+(`simd.rs:3471`, `:3480`) pin it. The FIXED status stands.
+
+Runtime re-verification on this host is blocked, with a limit worth recording:
+the pinned worktree seed (v1.0.0-rc.1) no longer produces the documented
+`field x must be a float, got Float32(1.0)` error on the repro fixture, but
+the fixture still does not go green here — pure-interpreter mode fails at load
+with the repo-wide `unknown decorator '@representation_boundary'`
+seed/HEAD inconsistency, and default hybrid mode demotes at the extern
+(`[engine-demotion] reason=hybrid-interp-splice detail=rt_simd_mul_f32x4`) and
+then fails with `rt_simd_mul_f32x4: expected Vec4f Object, got Nil` — a
+distinct JIT→interp splice marshalling gap in the seed, not the lane-typing
+bug this record covers. A minimal `Vec4f` construction probe without the
+extern call passes (`constructed: 1.0`). The splice-marshalling gap is
+Rust-seed-only and out of scope for this lane (no Rust rebuilds); file it
+fresh if it still reproduces on a current seed.

@@ -1,0 +1,117 @@
+#![allow(primitive_api)]
+# primitive_api: reviewed Linux fd/statx/dirent mechanism keeps raw fds, mode bits and byte offsets as integers; no
+# raw descriptor crosses this module's boundary (milestone_0021 PR2).
+# Adopt-empty half of the helper action directory (DESIGN milestone_0021 3.4 step 4, r7 X-01, r8 Y-01, r9 Z-01..Z-05).
+# SOURCE_AUTHORED_NOT_RUN. Pure Simple over LANDED libc externs only (imported, never redeclared): no new rt_* symbol.
+# dir_entry_ops is cross-platform and declares only rt_*, so its EEXIST branch calls this file.
+# One no-follow descriptor carries every check, so the directory observed is the one enumerated (no path re-open).
+use std.common.contracts.container.linux_fresh_probe_cohort_data_v3.linux_fresh_probe_native_security_v3
+@when(os="linux"):
+use std.nogc_sync_mut.io.retained_file_abi.{openat, statx, geteuid, close, malloc, free}
+use std.nogc_sync_mut.io.host_identity_store_abi_v1.__errno_location
+use std.nogc_sync_mut.io.retained_directory_empty_v1.{fdopendir, readdir, closedir}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32, volatile_write_u8,
+    volatile_write_u32}
+@end
+
+# P2R1-F4: the directory open-flag word of linux_fresh_workload_abi_v2.linux_workload_flags_v2(true), inlined so
+# this module (and dir_entry_ops, which imports it) does not pull linux_installed_supervisor_abi_v1 (sd-bus).
+# The values must equal that function's directory arm; the structure spec pins both.
+# allow(primitive_api): reviewed kernel open-flag word (milestone_0021 PR2)
+fn linux_helper_root_directory_flags_v1() -> i32:
+    @when(arch="x86_64"):
+    720896
+    @elif(arch="aarch64"):
+    573440
+    @else:
+    0
+    @end
+
+# Refusal reason for every adopt failure: a used root (it always holds broker.claim), a non-empty, shared,
+# special-bit, foreign or linked directory. The caller turns it into a pre-row begin Err (nothing published).
+pub fn linux_helper_root_refusal_v1() -> text:
+    "machine-fresh-helper-root-exists"
+
+@unsafe(reason: "one owned no-follow directory fd, owned NUL path and statx buffers, exact close on every path", capabilities: [ffi, raw_ptr])
+pub fn linux_helper_root_adopt_v1(path: text) -> Result<(), text>:
+    @when(os="linux"):
+    # (a) r9 Z-01: refuse before any openat on an arch whose flag word is unknown (as linux_fresh_epoch_native_v1:674).
+    val flags = linux_helper_root_directory_flags_v1()
+    if flags == 0: return Err("machine-fresh-helper-root-arch-unsupported")
+    if path.byte_len() == 0 or path.byte_len() > 4095 or path.contains("\0"): return Err(linux_helper_root_refusal_v1())
+    val name = malloc((path.byte_len() + 1) as u64)
+    if name == 0: return Err(linux_helper_root_refusal_v1())
+    val empty = malloc(1u64)
+    val buffer = malloc(256u64)
+    if empty == 0 or buffer == 0:
+        if empty != 0: free(empty)
+        if buffer != 0: free(buffer)
+        free(name)
+        return Err(linux_helper_root_refusal_v1())
+    for at in 0..path.byte_len(): volatile_write_u8(name + at, path.byte_at(at) as i64)
+    volatile_write_u8(name + path.byte_len(), 0)
+    volatile_write_u8(empty, 0)
+    val result = linux_helper_root_adopt_fd_v1(name, empty, buffer, flags)
+    # Z-05: the statx buffer and both NUL path buffers are freed on every path.
+    free(buffer)
+    free(empty)
+    free(name)
+    result
+    @else:
+    Err("machine-fresh-helper-root-arch-unsupported")
+    @end
+
+@unsafe(reason: "consumes exactly one descriptor: close before fdopendir, closedir after it, never both", capabilities: [ffi, raw_ptr])
+fn linux_helper_root_adopt_fd_v1(name: i64, empty: i64, buffer: i64, flags: i32) -> Result<(), text>:
+    @when(os="linux"):
+    # -100 = AT_FDCWD; flags = O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC (the runtime_process.c:2832 set).
+    val fd = openat(-100 as i32, name, flags, 0u32)
+    # (d) openat < 0: nothing to close (a symlink fails here with ELOOP).
+    if fd < 0: return Err(linux_helper_root_refusal_v1())
+    for at in 0..256: volatile_write_u8(buffer + at, 0)
+    # (b) 4096 = AT_EMPTY_PATH on the held fd; 6143 = the statx request mask used by linux_fresh_epoch_native_v1.
+    if statx(fd, empty, 4096 as i32, 6143u32, buffer) != 0 or (volatile_read_u32(buffer) & 11) != 11:
+        val consumed = close(fd)
+        return Err(linux_helper_root_refusal_v1())
+    val uid = volatile_read_u32(buffer + 20)
+    val mode = volatile_read_u16(buffer + 28)
+    # The shared "private-dir" predicate: owner == euid and mode exactly 040700 (no group/other or special bits).
+    if linux_fresh_probe_native_security_v3(("", uid, mode, 0), "private-dir", geteuid() as i64).is_err():
+        val consumed = close(fd)
+        return Err(linux_helper_root_refusal_v1())
+    # (c) fdopendir takes ownership of fd; from here only closedir releases it.
+    val stream = fdopendir(fd)
+    if stream == 0:
+        val consumed = close(fd)
+        return Err(linux_helper_root_refusal_v1())
+    var failure = ""
+    var count = 0
+    while failure == "":
+        volatile_write_u32(__errno_location(), 0)
+        val entry = readdir(stream)
+        if entry == 0:
+            if volatile_read_u32(__errno_location()) != 0: failure = "read"
+            break
+        # Linux LP64 dirent: reclen@16, name@19 (as retained_directory_empty_v1 and linux_fresh_epoch_native_v1).
+        val length = volatile_read_u16(entry + 16)
+        if length < 21 or length > 280:
+            failure = "layout"
+            break
+        val first = volatile_read_u8(entry + 19)
+        val second = volatile_read_u8(entry + 20)
+        val dot = first == 46 and second == 0
+        val dotdot = first == 46 and second == 46 and length >= 22 and volatile_read_u8(entry + 21) == 0
+        if not dot and not dotdot:
+            failure = "nonempty"
+            break
+        count = count + 1
+        if count > 4: failure = "bound"
+    # Exactly one closedir after fdopendir, on every exit; a failing closedir on the success path refuses.
+    if closedir(stream) != 0 and failure == "": failure = "close"
+    if failure != "": return Err(linux_helper_root_refusal_v1())
+    Ok(())
+    @else:
+    Err("machine-fresh-helper-root-arch-unsupported")
+    @end
+
+export linux_helper_root_adopt_v1, linux_helper_root_refusal_v1

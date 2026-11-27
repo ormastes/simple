@@ -34,9 +34,10 @@
 use std.io_runtime.{get_args, exit}
 use app.cli.query_helpers.{_has_flag}
 
-use app.cli.cli_helpers.{cli_generated_completion_candidates_v1}
 use app.cli.query_engine.{engine_find_definition, engine_find_references, engine_hover, engine_completions, engine_type_at, engine_signature_help, engine_document_symbols}
 use app.cli.query_sanitize.{sanitize_path, sanitize_symbol, safe_grep, safe_grep_file, safe_process}
+use app.cli.query_diagnostics.{_find_simple_binary}
+use app.cli.query_rich_common.{query_process_run}
 use app.cli.query_lsp_extras.{query_document_highlight, query_type_definition, query_implementation, query_folding_range}
 use app.cli.query_visibility.{
     query_visibility_hover, query_visibility_completions,
@@ -66,6 +67,17 @@ fn query_main() -> i64:
     var skip_count = 2
     if all_args.len() > 2 and all_args[1] == "run":
         skip_count = 3
+    # Direct `simple src/app/cli/query.spl <subcmd> ...` (the LSP heavy-query
+    # child): some launchers omit the program name, so anchor on this script.
+    # Only the launcher positions are inspected, so a query TARGET file whose
+    # name ends in query.spl is never mistaken for the script.
+    var k = 0
+    while k < all_args.len() and k < 3:
+        val a = all_args[k].replace("\\", "/")
+        if a == "query.spl" or a.ends_with("/cli/query.spl"):
+            skip_count = k + 1
+            break
+        k = k + 1
     for arg in all_args:
         if i >= skip_count:
             args.push(arg)
@@ -215,16 +227,14 @@ fn run_query(args: [text]) -> i64:
     if subcmd == "query-schema":
         return query_query_schema(cmd_args)
     if subcmd == "cli-completions":
-        val prefix = if cmd_args.len() > 1: cmd_args[1] else: ""
-        var extensions: [text] = []
-        var completion_arg = 2
-        while completion_arg < cmd_args.len():
-            extensions.push(cmd_args[completion_arg])
-            completion_arg = completion_arg + 1
-        for candidate in cli_generated_completion_candidates_v1(
-                prefix, extensions):
-            print candidate
-        return 0
+        var sub_args: [text] = ["run", "src/app/cli/query_cli_completions.spl", "--"]
+        var ci = 1
+        while ci < cmd_args.len():
+            sub_args.push(cmd_args[ci])
+            ci = ci + 1
+        val comp = query_process_run(_find_simple_binary(), sub_args)
+        print comp.0
+        return comp.2
     if subcmd == "workspace-symbols":
         return query_workspace_symbols(cmd_args)
     if subcmd == "document-formatting" and cmd_args.len() >= 2:
@@ -235,11 +245,11 @@ fn run_query(args: [text]) -> i64:
             print "[]"
             return 1
         val requester = _extract_flag(cmd_args, "--requester", sym_file)
-        return query_visibility_symbols(sym_file, requester)
+        return query_visibility_symbols(sym_file, requester, level: "", feature: "", layer: "")
     if subcmd == "lsp-workspace-symbols-json":
         val query = _extract_flag(cmd_args, "--query", "")
         val requester = _extract_flag(cmd_args, "--requester", "")
-        return query_visibility_workspace_symbols(query, requester)
+        return query_visibility_workspace_symbols(query, requester, level: "", feature: "", layer: "", root: "src")
     if subcmd == "semantic-tokens" and cmd_args.len() >= 2:
         return query_semantic_tokens(cmd_args[1], cmd_args)
     if subcmd == "lsp-semantic-tokens-json" and cmd_args.len() >= 2:
@@ -303,7 +313,7 @@ fn run_query(args: [text]) -> i64:
     elif subcmd == "hover":
         return query_hover(symbol, file, line_num)
     elif subcmd == "lsp-hover-json":
-        return query_visibility_hover(file, line_num, col)
+        return query_visibility_hover(file, line_num, col, requester_file: file)
     elif subcmd == "completions":
         var prefix = symbol
         # Check for --prefix flag

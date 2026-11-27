@@ -1,0 +1,131 @@
+# @cover src/compiler/80.driver/driver_aot_native_output.spl
+# @cover src/compiler/80.driver/driver_build/parallel.spl
+# stage2 workaround: numbered-placeholder partial application (`f(a, ..., _1)`)
+# passed as a callback delivers garbage args under stage2. Every such site was
+# rewritten to an explicit typed closure; these specs pin the closure form.
+
+use std.spec
+use compiler.driver.driver_build.parallel.{ParallelBuilder, ParallelBuildConfig}
+
+class MiniBuilder:
+    units: [text]
+
+    static fn create() -> MiniBuilder:
+        MiniBuilder(units: [])
+
+    me add(name: text):
+        self.units = self.units.push(name)
+
+    fn build(compile_fn: fn(text) -> Result<text, text>) -> [text]:
+        var out: [text] = []
+        for u in self.units:
+            match compile_fn(u):
+                case Ok(v): out = out.push(v)
+                case Err(e): out = out.push("ERR:{e}")
+        out
+
+fn compile8(a: text, b: text, c: i64, d: bool, e: text, f: i64, g: text, h: text, unit: text) -> Result<text, text>:
+    Ok("{a}|{b}|{c}|{d}|{e}|{f}|{g}|{h}|{unit}")
+
+fn compile1(a: text, unit: text) -> Result<text, text>:
+    Ok("{a}|{unit}")
+
+fn compile2(a: text, b: i64, unit: text) -> Result<text, text>:
+    Ok("{a}|{b}|{unit}")
+
+fn compile9(a: text, b: text, c: text, d: text, e: text, f: text, g: text, h: text, i: text, unit: text) -> Result<text, text>:
+    Ok("{a}{b}{c}{d}{e}{f}{g}{h}{i}|{unit}")
+
+fn record_cfg(threads: i64, threshold: i64, det: bool) -> ParallelBuildConfig:
+    ParallelBuildConfig(num_threads: threads, parallel_threshold: threshold,
+        deterministic: det, verbose: false)
+
+fn names_of(errors: [(text, text)]) -> [text]:
+    var out: [text] = []
+    for e in errors:
+        out = out.push(e.1)
+    out.sort()
+    out
+
+describe "explicit closure callbacks replacing _N placeholders":
+    it "REPRO: 8 captures + unit name arrive exactly (builder-like build)":
+        var b = MiniBuilder.create()
+        b.add("mod_a")
+        b.add("mod_b")
+        val r = b.build(fn(unit_name: text) -> Result<text, text>: compile8("a", "b", 3, true, "e", 6, "g", "h", unit_name))
+        expect(r.len()).to_equal(2)
+        expect(r[0]).to_equal("a|b|3|true|e|6|g|h|mod_a")
+        expect(r[1]).to_equal("a|b|3|true|e|6|g|h|mod_b")
+
+    it "1 capture":
+        var b = MiniBuilder.create()
+        b.add("u1")
+        val r = b.build(fn(unit_name: text) -> Result<text, text>: compile1("x", unit_name))
+        expect(r[0]).to_equal("x|u1")
+
+    it "2 captures":
+        var b = MiniBuilder.create()
+        b.add("u2")
+        val r = b.build(fn(unit_name: text) -> Result<text, text>: compile2("x", 42, unit_name))
+        expect(r[0]).to_equal("x|42|u2")
+
+    it "9 captures":
+        var b = MiniBuilder.create()
+        b.add("u9")
+        val r = b.build(fn(unit_name: text) -> Result<text, text>: compile9("1", "2", "3", "4", "5", "6", "7", "8", "9", unit_name))
+        expect(r[0]).to_equal("123456789|u9")
+
+    it "closure passed through array map":
+        val prefix = "p"
+        val n = 7
+        val mapped = ["a", "b", "c"].map(fn(s: text) -> text: "{prefix}{n}{s}")
+        expect(mapped.len()).to_equal(3)
+        expect(mapped[0]).to_equal("p7a")
+        expect(mapped[2]).to_equal("p7c")
+
+    it "closure over method-style value through array map":
+        val ids = [1, 2, 3].map(fn(i: i64) -> i64: i * 10)
+        expect(ids[1]).to_equal(20)
+
+    it "closure stored then called":
+        val cap = "stored"
+        val f = fn(unit_name: text) -> Result<text, text>: compile1(cap, unit_name)
+        match f("later"):
+            case Ok(v): expect(v).to_equal("stored|later")
+            case Err(e): expect(e).to_equal("unexpected")
+
+    it "three-arg closure keeps argument order":
+        val f = fn(i: i64, a: text, b: text) -> text: "{i}:{a}:{b}"
+        expect(f(1, "x", "y")).to_equal("1:x:y")
+
+describe "ParallelBuilder.build callback paths":
+    it "sequential path (deterministic) delivers every unit name once":
+        var b = ParallelBuilder.create(record_cfg(1, 4, true))
+        b.add_unit("s1", [])
+        b.add_unit("s2", [])
+        b.add_unit("s3", [])
+        val r = b.build(fn(unit_name: text) -> Result<text, text>: Err("seen:{unit_name}"))
+        expect(names_of(r.errors)).to_equal(["seen:s1", "seen:s2", "seen:s3"])
+
+    it "below threshold (non-deterministic) takes the sequential path with exact names":
+        var b = ParallelBuilder.create(record_cfg(0, 4, false))
+        b.add_unit("t1", [])
+        b.add_unit("t2", [])
+        val r = b.build(fn(unit_name: text) -> Result<text, text>: Err("seen:{unit_name}"))
+        expect(names_of(r.errors)).to_equal(["seen:t1", "seen:t2"])
+
+    it "at/above threshold takes the parallel path with exact names":
+        var b = ParallelBuilder.create(record_cfg(2, 4, false))
+        b.add_unit("p1", [])
+        b.add_unit("p2", [])
+        b.add_unit("p3", [])
+        b.add_unit("p4", [])
+        b.add_unit("p5", [])
+        val r = b.build(fn(unit_name: text) -> Result<text, text>: Err("seen:{unit_name}"))
+        expect(names_of(r.errors)).to_equal(["seen:p1", "seen:p2", "seen:p3", "seen:p4", "seen:p5"])
+
+    it "8-capture closure through ParallelBuilder.build delivers captures and name":
+        var b = ParallelBuilder.create(record_cfg(1, 4, true))
+        b.add_unit("m1", [])
+        val r = b.build(fn(unit_name: text) -> Result<text, text>: Err(compile8("a", "b", 3, true, "e", 6, "g", "h", unit_name).unwrap()))
+        expect(r.errors[0].1).to_equal("a|b|3|true|e|6|g|h|m1")

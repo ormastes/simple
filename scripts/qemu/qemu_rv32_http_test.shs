@@ -7,7 +7,7 @@
 # server to come up, then runs nc/openssl smoke tests against it.
 #
 # Usage:
-#   sh scripts/qemu/qemu_rv32_http_test.shs [--elf <path>] [--expect-deferred]
+#   sh scripts/qemu/qemu_rv32_http_test.shs [--elf <path>] [--expect-deferred] [--expect-http-only]
 #
 # Defaults:
 #   --elf build/simpleos-rv32.elf
@@ -26,6 +26,7 @@ HTTPS_PORT=8443
 BOOT_TIMEOUT=60
 SERIAL_LOG="build/qemu-rv32-serial.log"
 EXPECT_DEFERRED=false
+EXPECT_HTTP_ONLY=false
 
 # ---- parse args ----
 while [ "$#" -gt 0 ]; do
@@ -40,11 +41,15 @@ while [ "$#" -gt 0 ]; do
     --expect-deferred)
       EXPECT_DEFERRED=true
       ;;
+    --expect-http-only)
+      EXPECT_HTTP_ONLY=true
+      ;;
     --help|-h)
-      echo "Usage: sh scripts/qemu/qemu_rv32_http_test.shs [--elf <path>] [--expect-deferred]"
+      echo "Usage: sh scripts/qemu/qemu_rv32_http_test.shs [--elf <path>] [--expect-deferred] [--expect-http-only]"
       echo ""
       echo "  --elf <path>        Path to SimpleOS RV32 ELF (default: build/simpleos-rv32.elf)"
       echo "  --expect-deferred   Pass when virtio is detected but packet RX is unavailable"
+      echo "  --expect-http-only  Pass the live HTTP gate while HTTPS/TLS remains blocked"
       exit 0
       ;;
     *)
@@ -123,8 +128,11 @@ while [ "$WAITED" -lt "$BOOT_TIMEOUT" ]; do
   fi
   if [ "$EXPECT_DEFERRED" = "true" ] &&
     [ -f "$SERIAL_LOG" ] &&
+    grep -q "PMM OK" "$SERIAL_LOG" 2>/dev/null &&
+    grep -q "HEAP OK" "$SERIAL_LOG" 2>/dev/null &&
     grep -q "PCI network device index" "$SERIAL_LOG" 2>/dev/null &&
-    grep -q "Network packet TX unavailable" "$SERIAL_LOG" 2>/dev/null &&
+    grep -q "Network packet TX ready" "$SERIAL_LOG" 2>/dev/null &&
+    grep -q "Network packet RX unavailable" "$SERIAL_LOG" 2>/dev/null &&
     grep -q "HTTP server deferred" "$SERIAL_LOG" 2>/dev/null &&
     grep -q "Entering boot idle loop" "$SERIAL_LOG" 2>/dev/null; then
     echo "  Deferred network gate verified after ${WAITED}s"
@@ -229,7 +237,9 @@ fi
 # Test 3: HTTPS health check (skip TLS verification for self-signed cert)
 printf '%s' "  GET /health (HTTPS)... "
 HTTP_CODE=$(https_status_code)
-if [ "$HTTP_CODE" = "skip" ]; then
+if [ "$EXPECT_HTTP_ONLY" = "true" ]; then
+  echo "SKIP (HTTP-only gate; RISC-V TLS not production-ready)"
+elif [ "$HTTP_CODE" = "skip" ]; then
   echo "SKIP (openssl or timeout unavailable)"
 elif [ "$HTTP_CODE" = "200" ]; then
   echo "PASS (${HTTP_CODE})"

@@ -32,21 +32,25 @@ use os.apps.smux.api.{
     smux_capture
 }
 use std.nogc_sync_mut.io.{thread_sleep_ms}
+use std.io_runtime.{time_now_unix_micros}
 use std.nogc_async_mut.sosix.{sosix_platform}
 
 fn _windows() -> bool:
     sosix_platform() == "windows"
 
 # _await_capture — the service is non-blocking, so the wait loop lives here.
+# The budget is wall-clock, not a poll count: each poll also pays a capture,
+# and under a parallel suite run `mode con` was measured answering after up to
+# 104 polls (~8 s), so the old 60-poll (~3 s nominal) cap failed a correct
+# child. The loop still returns as soon as the needle appears.
 fn _await_capture(sid: text, wid: text, pid: text, needle: text) -> text:
-    var i = 0
+    val deadline = time_now_unix_micros() + 30000000
     var seen = ""
-    while i < 60 and not seen.contains(needle):
+    while time_now_unix_micros() < deadline and not seen.contains(needle):
         thread_sleep_ms(50)
         val cap = smux_capture(sid, wid, pid, 20)
         if cap.is_ok():
             seen = cap.unwrap().content
-        i = i + 1
     return seen
 
 # `mode con` pads its values with runs of spaces; compare on single spaces.

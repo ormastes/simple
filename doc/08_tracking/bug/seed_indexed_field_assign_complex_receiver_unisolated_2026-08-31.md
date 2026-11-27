@@ -4,7 +4,8 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN. **Not a new defect** — a new occurrence site of the language
+**Status:** FIXED 2026-11-11 (lane p3-comp10) — interpreter gap closed by c249680becc4 (in tracked seed); FAT32 spec 16/16 green.
+**Was:** not a new defect — a new occurrence site of the language
 limitation already tracked by
 `pool_linked_list_push_fails_complex_indexed_field_receiver_2026-08-07.md`
 ("the underlying language limitation stays OPEN"), of which
@@ -92,3 +93,32 @@ established workaround), or close the limitation properly by extending Case 2 in
 place-resolution the `self` field path uses. The latter would retire all three
 records above; re-run the spec and expect 16/16.
 
+
+## Triage 2026-11-11 (lane p3-comp10)
+
+Verdict: FIXED. Fresh re-verification at lane base 79d5af6723f6 against the
+tracked seed bin/simple.exe (build 46fe8f6b6def, 2026-11-10):
+
+- Root-cause fix: c249680becc4 ("fix(interpreter): route indexed-field
+  assignment through the general place model", 2026-08-23) IS an ancestor of
+  both the lane base and the tracked seed binary. It closed the language gap
+  the doc's "Fix direction" prefers (extend the interpreter's assignment
+  lowering to resolve a FieldAccess-based indexed receiver through the general
+  place model) rather than restructuring the FAT32 arrays. The literal
+  "invalid assignment: complex indexed field receiver is not supported" is gone
+  from the interpreter (only doc-comment history remains,
+  src/compiler_rust/compiler/src/interpreter/node_exec.rs:4188-4195).
+- In-tree regression: `mod indexed_field_receiver_tests` in node_exec.rs covers
+  `self.rows[i].f = v`, `a.b[i].c = v`, `grid[i][j].c = v` — "one seed gap, six
+  unrelated specs across five areas".
+- Acceptance (the doc's own): "re-run the spec and expect 16/16" — fresh run of
+  test/01_unit/lib/driver/fat32_file_io_spec.spl on the tracked seed
+  (interpreter, --no-cache): outcome=OK executed=16 passed=16 failed=0 rc=0.
+- The three original FAT32 sites (src/lib/nogc_async_mut/fs_driver/
+  fat32_file_ops.spl:80,148,157) are unchanged in source — the language gap
+  closed under them, no restructure needed.
+- Companion records (pool_linked_list_push_fails_complex_indexed_field_receiver
+  _2026-08-07, indexed_element_field_assignment_unsupported_2026-07-11) are the
+  same gap from other occurrence sites; their headers were not flipped by this
+  lane (not its rows), but this fix is the shared absorber — whoever owns those
+  rows should re-run their pins against the same seed.

@@ -1,0 +1,24 @@
+#!/bin/sh
+# Run build.rs unit tests explicitly: Cargo does not test build scripts.
+# Deferred until active bootstrap/build jobs finish:
+#   sh scripts/check/check-runtime-symbol-declarations.shs
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+work=$(mktemp -d "${TMPDIR:-/tmp}/simple-runtime-declarations.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+trap 'exit 1' HUP INT TERM
+
+# cfg(test) excludes production C compilation, so this uses only the Rust stdlib
+# and the two in-tree scanner modules. It never runs the build-script main.
+"${RUSTC:-rustc}" --edition=2021 --test -A dead_code -A unused_imports \
+    "$root/src/compiler_rust/runtime/build.rs" -o "$work/declaration-tests"
+
+regression=declaration_tests::struct_allocator_i64_machine_signature_keeps_pointer_return
+"$work/declaration-tests" --list >"$work/test-list"
+grep -Fx "$regression: test" "$work/test-list" >/dev/null || {
+    echo "FAIL: missing runtime declaration regression: $regression" >&2
+    exit 1
+}
+"$work/declaration-tests" --exact "$regression" --nocapture
+echo 'STATUS: PASS runtime struct allocator pointer declaration'

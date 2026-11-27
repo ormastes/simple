@@ -17,6 +17,7 @@
 extern fn rt_process_spawn_piped(cmd: text, args: [text]) -> i64
 extern fn rt_process_write_stdin(pid: i64, data: text) -> bool
 extern fn rt_process_read_stdout(pid: i64) -> text
+extern fn rt_thread_sleep(ms: i64)
 extern fn rt_process_is_alive(pid: i64) -> bool
 extern fn rt_process_close_piped(pid: i64) -> bool
 
@@ -45,12 +46,15 @@ fn main():
     check("write_stdin_succeeds", rt_process_write_stdin(pid, payload))
 
     # read_stdout is non-blocking by contract, so poll rather than assume the
-    # first read already has the bytes.
+    # first read already has the bytes. Back off between polls: 200 tight
+    # non-blocking reads can finish before `cat` is even scheduled, which
+    # failed this check on a correct runtime (a timing race, not a bad extern).
     var seen: text = ""
     var tries: i64 = 0
     while tries < 200 and not seen.has("hello-piped-42"):
         seen = seen + rt_process_read_stdout(pid)
         tries = tries + 1
+        rt_thread_sleep(5)
 
     check("read_stdout_returns_exactly_what_was_written", seen.has("hello-piped-42"))
     check("read_stdout_did_not_fabricate_data", not seen.has("goodbye"))

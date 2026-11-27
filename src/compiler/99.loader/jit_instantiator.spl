@@ -1,7 +1,8 @@
 # Compatibility JIT instantiator surface for interpreter/test runner.
 
 use std.env.{env_get_or}
-use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable, file_write_exact}
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 
 class JitInstantiatorConfig:
     update_smf: bool
@@ -80,7 +81,7 @@ fn _global_set(symbol: text, owner_id: text, address: i64):
 fn _global_get(symbol: text) -> MappedRecord?:
     if _g_records.has(symbol):
         return Some(_g_records[symbol])
-    nil
+    None
 
 fn _global_remove(symbol: text):
     if _g_records.has(symbol):
@@ -101,7 +102,7 @@ fn _jit_key_list_contains(keys: [text], key: text) -> bool:
 
 
 class JitExecMapper:
-    records: Dict
+    records: Dict<text, MappedRecord>
     symbols: [text]
     owners: [text]
     addresses: [i64]
@@ -135,12 +136,12 @@ class JitExecMapper:
         for i in 0..self.symbols.len():
             if self.symbols[i] == symbol:
                 return Some(MappedRecord(owner_id: self.owners[i], address: self.addresses[i]))
-        nil
+        None
 
     fn get_record(symbol: text):
         self.lookup(symbol)
 
-class JitMapper:
+class JitInstantiatorMapper:
     fn map(exec_mapper: JitExecMapper, owner_id: text, symbol: text, code: [u8]):
         _global_set(symbol, owner_id, 1)
         if not exec_mapper.records.has(symbol):
@@ -153,7 +154,7 @@ class JitInstantiator:
     jit_semantic_keys: Dict<text, [text]>
     smf_semantic_keys: Dict<text, [text]>
     exec_mapper: JitExecMapper
-    jit_mapper: JitMapper
+    jit_mapper: JitInstantiatorMapper
     loaded_metadata: Dict<text, LoadedMetadata>
     in_progress: [text]
     depth: i64
@@ -168,7 +169,7 @@ class JitInstantiator:
             jit_semantic_keys: {},
             smf_semantic_keys: {},
             exec_mapper: JitExecMapper(records: {}, symbols: [], owners: [], addresses: []),
-            jit_mapper: JitMapper(),
+            jit_mapper: JitInstantiatorMapper(),
             loaded_metadata: {},
             in_progress: [],
             depth: 0,
@@ -198,7 +199,7 @@ class JitInstantiator:
     fn can_jit_instantiate(symbol: text) -> bool:
         if not self.config.enabled:
             return false
-        self.find_possible(symbol) != nil
+        self.find_possible(symbol).is_some()
 
     fn find_possible(symbol: text) -> (text, PossibleInstantiation)?:
         for path in self.loaded_metadata.keys():
@@ -216,7 +217,7 @@ class JitInstantiator:
                             mangled_name: inst.mangled_name
                         )
                     ))
-        nil
+        None
 
     me set_cache_for_test(name: text, code: [u8], addr: i64):
         var owner = "__jit__"
@@ -271,7 +272,7 @@ class JitInstantiator:
             # natively (rt_dict_remove); assigning it back destroys the map on the
             # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
             # dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
-            var _kept_self_exec_mapper_records: Dict = {}
+            var _kept_self_exec_mapper_records: Dict<text, MappedRecord> = {}
             for _k in self.exec_mapper.records.keys():
                 if _k != name:
                     _kept_self_exec_mapper_records[_k] = self.exec_mapper.records[_k]
@@ -321,7 +322,7 @@ class JitInstantiator:
 
         val (path, entry) = match found:
             case Some(found_entry): found_entry
-            case nil: return JitInstantiationResult.NotFound(symbol: name)
+            case None: return JitInstantiationResult.NotFound(symbol: name)
 
         self.depth = self.depth + 1
         self.in_progress = self.in_progress.push(name)
@@ -374,12 +375,12 @@ class JitInstantiator:
             from_loc: path + ":0:0",
             to_obj: "jit_obj",
             status: "jit_compiled",
-            output_file: nil
+            output_file: None
         )
         metadata.possible = remaining
         metadata.instantiations.push(inst)
         self.loaded_metadata[path] = metadata
-        val persisted = file_write_exact(_metadata_sidecar_path(path), _metadata_to_text(metadata))
+        val persisted = file_atomic_write(_metadata_sidecar_path(path), _metadata_to_text(metadata))
         if not persisted:
             return Err("failed to persist JIT metadata for " + path)
         Ok(())
@@ -413,10 +414,10 @@ class JitSymbolResolver:
                     case Some(resolved_address):
                         self.symbols[resolved_symbol] = resolved_address
                         return address
-                    case nil:
-                        nil
+                    case None:
+                        None
             case _:
-                nil
+                None
 
     me load_smf(path: text) -> Result<(), text>:
         self.jit.load_smf_metadata(path)
@@ -429,7 +430,7 @@ fn _default_config() -> JitInstantiatorConfig:
         verbose: false
     )
 
-fn jitinstantiator_new(config: Dict) -> JitInstantiator:
+fn jitinstantiator_new(config: Dict<text, text>) -> JitInstantiator:
     JitInstantiator.new(_default_config())
 
 fn jitinstantiator_stats(self: JitInstantiator) -> JitStats:
@@ -496,7 +497,7 @@ fn _metadata_from_text(content: text) -> LoadedMetadata:
                 from_loc: parts[6],
                 to_obj: parts[7],
                 status: parts[8],
-                output_file: nil
+                output_file: None
             ))
     LoadedMetadata(possible: possible, instantiations: instantiations)
 
@@ -508,7 +509,7 @@ fn _fake_compile_bytes(entry: PossibleInstantiation) -> [u8]:
     # managed text representation before byte_at. Avoid materializing a second
     # full byte array: stream the normalized buffer directly into the result.
     val framed = entry.template_name + ":" + entry.type_args + ":" + entry.mangled_name
-    val framed_len = framed.len()
+    val framed_len = framed.byte_len()
     var out: [u8] = []
     var index: i64 = 0
     while index < framed_len:

@@ -95,3 +95,27 @@ weaving genuinely only run under compiled mode, this bug's practical severity
 is "expected interpreter limitation, needs an explicit diagnostic" rather than
 "feature broken everywhere" — flagging for whoever verifies against a real
 compiled build.
+
+## Triage 2026-11-25 (Windows host, pinned seed `bin/simple.exe` v1.0.0-rc.1)
+
+- Reproduced live against the pinned seed on release/1.0.0 HEAD: the
+  module-scope repro above prints `add_one(5) = 6` (undecorated; expected 12).
+- Full spec runs (`test/feature/usage/decorators_spec.spl`) are
+  environment-blocked at HEAD: the pinned binary rejects the
+  `@representation_boundary` annotations added by cfd89933699
+  (`unknown decorator '@representation_boundary'` in
+  `src/app/test_runner_new/test_runner_client.spl`). Verified by code
+  inspection instead.
+- Code inspection of the pure-Simple compiler shows user-defined function
+  decorators are not expanded anywhere: the frontend only recognizes a fixed
+  set of built-in metadata attributes (`@derive`, `@layer_eq`, `@layer_field`,
+  `@bits`, `@representation_boundary`, ...) in
+  `src/compiler/10.frontend/core/_ParserDecls/fn_struct_decls.spl`, and the
+  interpreter (`src/compiler/10.frontend/core/interpreter/`) has no decorator
+  application pass. So this is a language-wide feature gap, not only an
+  interpreter-fallback gap.
+- **Classification: SKIP.** Fix direction (a) — implementing user-defined
+  decorator expansion / AOP weaving — is a large feature program, out of scope
+  for a bounded bug fix. Fix direction (b) — a loud diagnostic — belongs to
+  the Rust seed path, which is bootstrap-only and must not be patched.
+  Remains open as a feature-gap entry.

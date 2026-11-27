@@ -1,0 +1,107 @@
+# elf_boot_link - SHF_MERGE|SHF_STRINGS pooling, byte-compared with ld.lld.
+#
+# Fixtures and the exact clang/ld.lld command lines are in
+# test/fixtures/linker/elf/RECIPE.md (boot_merge_* and merge_strings_*).
+# The lld references are the .text/.rodata slices of the ld.lld output
+# (llvm-objcopy -O binary --only-section); specs cannot assume ld.lld.
+#
+# @cover src/compiler/70.backend/linker/elf/elf_boot_link.spl
+# @cover src/compiler/70.backend/linker/elf/merge_strings.spl
+
+use compiler.backend.linker.elf.elf_boot_link.{ElfBootImage, elf_boot_link_image}
+use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes}
+
+val FIX: text = "test/fixtures/linker/elf"
+
+fn load_fixture(name: text) -> [i64]:
+    val raw = file_read_bytes("{FIX}/{name}")
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn script_of(name: text) -> text:
+    val raw = file_read_bytes("{FIX}/{name}")
+    var s = ""
+    var i: i64 = 0
+    while i < raw.len():
+        s = s + ((raw[i] as i64) as char).to_string()
+        i = i + 1
+    s
+
+fn u64_at(b: [i64], off: i64) -> i64:
+    var v: i64 = 0
+    var i: i64 = 7
+    while i >= 0:
+        v = (v << 8) | (b[off + i] & 0xff)
+        i = i - 1
+    v
+
+fn sec_idx(im: ElfBootImage, name: text) -> i64:
+    var i: i64 = 0
+    while i < im.sec_names.len():
+        if im.sec_names[i] == name:
+            return i
+        i = i + 1
+    -1
+
+fn sec_bytes(im: ElfBootImage, name: text) -> [i64]:
+    val i = sec_idx(im, name)
+    val shoff = u64_at(im.bytes, 40)
+    val off = u64_at(im.bytes, shoff + (i + 1) * 64 + 24)
+    var out: [i64] = []
+    var k: i64 = 0
+    while k < im.sec_sizes[i]:
+        out = out.push(im.bytes[off + k] & 0xff)
+        k = k + 1
+    out
+
+fn sym(im: ElfBootImage, name: text) -> i64:
+    var i: i64 = 0
+    while i < im.sym_names.len():
+        if im.sym_names[i] == name:
+            return im.sym_values[i]
+        i = i + 1
+    -1
+
+fn link_a64() -> ElfBootImage:
+    elf_boot_link_image([load_fixture("boot_merge_a_a64.o"), load_fixture("boot_merge_b_a64.o")],
+        boot_layout_from_text(script_of("boot_merge_a64.ld")).unwrap(), RelocArch.AArch64).unwrap()
+
+fn link_x64() -> ElfBootImage:
+    elf_boot_link_image([load_fixture("boot_merge_a_x64.o"), load_fixture("boot_merge_b_x64.o")],
+        boot_layout_from_text(script_of("boot_merge_x64.ld")).unwrap(), RelocArch.X86_64).unwrap()
+
+describe "elf_boot_link - SHF_MERGE strings":
+    it "aarch64: duplicate strings are pooled (45 bytes, not 70)":
+        expect(sec_bytes(link_a64(), ".rodata").len()).to_equal(45)
+
+    it "aarch64: .rodata bytes equal ld.lld":
+        expect(sec_bytes(link_a64(), ".rodata")).to_equal(load_fixture("boot_merge_a64.lld.rodata.bin"))
+
+    it "aarch64: relocated .text bytes equal ld.lld":
+        expect(sec_bytes(link_a64(), ".text")).to_equal(load_fixture("boot_merge_a64.lld.text.bin"))
+
+    it "aarch64: symbol addresses equal ld.lld":
+        val im = link_a64()
+        expect(sym(im, "first_message")).to_equal(0x40000000)
+        expect(sym(im, "_start")).to_equal(0x4000000c)
+        expect(sym(im, "other_message")).to_equal(0x4000004c)
+        expect(sym(im, "tail_message")).to_equal(0x40000058)
+        expect(sym(im, "string_sink")).to_equal(0x40000098)
+
+    it "x86_64: pooled .rodata and relocated .text equal ld.lld":
+        val im = link_x64()
+        expect(sec_bytes(im, ".rodata")).to_equal(load_fixture("boot_merge_x64.lld.rodata.bin"))
+        expect(sec_bytes(im, ".text")).to_equal(load_fixture("boot_merge_x64.lld.text.bin"))
+
+    it "x86_64: symbol addresses equal ld.lld":
+        val im = link_x64()
+        expect(sym(im, "long_message")).to_equal(0x400000)
+        expect(sym(im, "_start")).to_equal(0x400010)
+        expect(sym(im, "short_message")).to_equal(0x400030)
+        expect(sym(im, "string_sink")).to_equal(0x400048)

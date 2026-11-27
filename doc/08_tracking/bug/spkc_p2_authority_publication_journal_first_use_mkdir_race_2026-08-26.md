@@ -1,6 +1,6 @@
 # SPKC P2 authority-publication journal first-use mkdir race
 
-Status: OPEN (P1)
+Status: FIXED 2026-11-03 (P1). Journal now builds its ledger via mkdirDurable (EEXIST-tolerant, every created ancestor + parent entry fsynced); stress spec: examples/05_stdlib/spipe/test/unit/authority_publication_journal_first_use_test.js
 
 ## Defect
 
@@ -80,3 +80,5 @@ is authorized in the capped session" and requires a two-independent-process
 barrier reproducer plus an independent highest-capability review before any
 fix lands — well beyond this lane's per-bug budget and outside the pure-Simple
 fix path this lane is scoped to. Left OPEN, no change made.
+
+**Revalidated 2026-11-02: still plausible because OPEN (P1); no merged fix commit with a passing regression is cited in this doc.**

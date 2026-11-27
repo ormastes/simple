@@ -6,6 +6,7 @@
 use compiler.traits.trait_impl.{ImplBlock}
 use std.platform (is_windows, normalize_path, join_path)
 use std.io_runtime.{process_run, file_exists, env_get_opt, file_write}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use compiler.backend.linker._LinkerWrapper.link_command_record.{record_link_command}
 use compiler.backend.linker.msvc_response_file.{msvc_response_body}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1, native_tool_strict_environment_v1}
@@ -72,7 +73,7 @@ fn msvc_run_response(output: text, exe: text, args: [text]) -> MsvcShellResult:
 val MSVC_DEFAULT_STACK_RESERVE: i64 = 67108864
 
 fn default_windows_libs_with_suffix() -> [text]:
-    ["kernel32.lib", "user32.lib", "ws2_32.lib", "bcrypt.lib", "advapi32.lib", "userenv.lib", "ntdll.lib", "msvcrt.lib"]
+    ["kernel32.lib", "user32.lib", "ws2_32.lib", "winhttp.lib", "mswsock.lib", "bcrypt.lib", "advapi32.lib", "userenv.lib", "ntdll.lib", "shell32.lib", "ole32.lib", "msvcrt.lib"]
 
 pub fn msvc_strip_unix_rpath_args(extra_args: [text]) -> [text]:
     """Drop Unix rpath options before they reach an MSVC/COFF linker argv.
@@ -100,6 +101,18 @@ pub fn msvc_strip_unix_rpath_args(extra_args: [text]) -> [text]:
             result.push(flag)
             index = index + 1
     result
+
+pub fn msvc_opt_noref_flags(extra_args: [text]) -> [text]:
+    """Return any extra_args flags that explicitly disable /OPT:REF dead-stripping."""
+    var matched: [text] = []
+    for arg in extra_args:
+        val upper = arg.replace("\"", "").trim().to_upper()
+        if upper.starts_with("/OPT:") or upper.starts_with("-OPT:"):
+            for opt_part in upper.substring(5).split(","):
+                if opt_part == "NOREF":
+                    matched.push(arg)
+                    break
+    matched
 
 # ===========================================================================
 # MSVC Linker Configuration
@@ -157,11 +170,21 @@ impl MsvcConfig:
         # built by a Simple compiler overflows that lowering a ~40-term `or`
         # chain (rb5 W51: P3 stack overflow in MirLowering.lower_expr on
         # lib/common/process/observation_v4.spl). 64 MiB matches the internal
-        # COFF linker's PeImagePolicy default; an explicit /STACK in extra_args wins.
+        # COFF linker's PeImagePolicy default; an explicit /STACK or -STACK
+        # in extra_args wins (case-insensitive).
+        val filtered_extra = msvc_strip_unix_rpath_args(self.extra_args)
+        val has_opt_noref = msvc_opt_noref_flags(filtered_extra).len() > 0
         var has_stack = false
-        for arg in self.extra_args:
-            if arg.starts_with("/STACK:"):
+        var has_debug_flag = false
+        var has_opt_ref_icf = false
+        for arg in filtered_extra:
+            val upper = arg.replace("\"", "").trim().to_upper()
+            if upper.starts_with("/STACK:") or upper.starts_with("-STACK:"):
                 has_stack = true
+            elif upper == "/DEBUG" or upper == "-DEBUG" or upper.starts_with("/DEBUG:") or upper.starts_with("-DEBUG:"):
+                has_debug_flag = true
+            elif upper == "/OPT:REF,ICF" or upper == "-OPT:REF,ICF":
+                has_opt_ref_icf = true
         if not has_stack:
             args.push("/STACK:{MSVC_DEFAULT_STACK_RESERVE}")
 
@@ -170,11 +193,14 @@ impl MsvcConfig:
 
         # Debug info
         if self.debug:
-            args.push("/DEBUG")
+            if not has_debug_flag:
+                args.push("/DEBUG")
         else:
-            args.push("/DEBUG:NONE")
+            if not has_debug_flag:
+                args.push("/DEBUG:NONE")
             # Remove unreferenced functions/data and fold identical COMDATs
-            args.push("/OPT:REF,ICF")
+            if not has_opt_noref and not has_opt_ref_icf:
+                args.push("/OPT:REF,ICF")
 
         # No logo
         args.push("/NOLOGO")
@@ -192,7 +218,7 @@ impl MsvcConfig:
         # native_linking.spl's `native_msvc_extra_args`, kept local here
         # (import direction: native_linking.spl imports this module, not the
         # reverse) so this boundary cannot be bypassed by a future caller.
-        for arg in msvc_strip_unix_rpath_args(self.extra_args):
+        for arg in filtered_extra:
             args.push(arg)
 
         args
@@ -217,8 +243,8 @@ impl MsvcLinker:
             match found:
                 case Some(path):
                     link_exe = path
-                case nil:
-                    return Err(LinkError(kind: LinkErrorKind.InternalError, message: LLD_LINK_INSTALL_HINT, symbol: nil, location: nil))
+                case None:
+                    return Err(LinkError(kind: LinkErrorKind.InternalError, message: LLD_LINK_INSTALL_HINT, symbol: None, location: None))
 
         # Build arguments
         val args = self.config.build_args(output, object_files)
@@ -252,7 +278,7 @@ impl MsvcLinker:
             # still diagnosable after the build log is rotated.
             val log_body = "{result.stdout}{result.stderr}"
             val link_log = "{output}.link.log"
-            file_write(link_log, log_body)
+            file_atomic_write(link_log, log_body)
             print "[msvc-link] FAILED exit={result.exit_code}"
             print "[msvc-link] command: {cmd}"
             print "[msvc-link] log: {link_log}"
@@ -260,7 +286,7 @@ impl MsvcLinker:
             print log_body
             print "[msvc-link] output-end"
             val diag = "linker exited {result.exit_code} | command: {cmd} | log: {link_log} | output: {log_body}"
-            return Err(LinkError(kind: LinkErrorKind.OutputFailed, message: diag, symbol: nil, location: nil))
+            return Err(LinkError(kind: LinkErrorKind.OutputFailed, message: diag, symbol: None, location: None))
 
         Ok(())
 
@@ -289,7 +315,7 @@ impl MsvcLinker:
         for lib in config.libraries:
             # Convert .a to .lib extension
             val lib_name = if lib.ends_with(".a"):
-                lib.substring(0, lib.len() - 2) + ".lib"
+                lib.substring(0, lib.byte_len() - 2) + ".lib"
             else:
                 lib
             msvc_config.libs.push(lib_name)
@@ -319,20 +345,20 @@ fn find_visual_studio() -> text?:
                 vswhere = derived_vswhere
 
     if vswhere == "":
-        return nil
+        return None
 
     # Query for latest Visual Studio installation
     val cmd = "\"{vswhere}\" -latest -property installationPath"
     val result = msvc_shell(cmd)
 
     if result.exit_code != 0 or result.stdout.trim() == "":
-        return nil
+        return None
 
     Some(result.stdout.trim())
 
 # The Windows COFF linker. Toolchain policy (2026-09-24) is clang/LLD only:
 # never MSVC link.exe, and fail fast (no fallback) when lld-link is missing.
-val LLD_LINK_INSTALL_HINT = "lld-link not found on PATH (clang/LLD-only toolchain policy; MSVC link.exe is not used). Install LLVM with: sh scripts/setup/bootstrap-prereqs.shs install"
+pub val LLD_LINK_INSTALL_HINT = "lld-link not found on PATH (clang/LLD-only toolchain policy; MSVC link.exe is not used). Install LLVM with: sh scripts/setup/bootstrap-prereqs.shs install"
 
 fn is_lld_link_candidate(path: text) -> bool:
     val normalized = path.trim().replace("\\", "/").lower()
@@ -357,7 +383,7 @@ fn find_link_exe() -> text?:
             val candidate = lld_line.trim()
             if is_lld_link_candidate(candidate) and file_exists(candidate):
                 return Some(candidate)
-    nil
+    None
 
 # ===========================================================================
 # MSVC CRT Library Path Discovery
@@ -366,7 +392,9 @@ fn find_link_exe() -> text?:
 fn msvc_lib_arch_dir(arch: text) -> text:
     """MSVC/Windows SDK library subdirectory for a target architecture."""
     val lowered = arch.lower()
-    if lowered == "aarch64" or lowered == "arm64": "arm64" else: "x64"
+    if lowered == "aarch64" or lowered == "arm64": "arm64"
+    elif lowered == "i686" or lowered == "i386" or lowered == "x86": "x86"
+    else: "x64"
 
 fn find_msvc_crt_paths() -> [text]:
     """Discover MSVC CRT, UCRT, and Windows SDK library paths for x64."""
@@ -404,7 +432,7 @@ fn find_msvc_crt_paths_for_arch(lib_arch: text) -> [text]:
                         val lib_dir = "{msvc_base}/{ver}/lib/{lib_arch}"
                         if file_exists(lib_dir):
                             paths.push(lib_dir)
-        case nil:
+        case None:
             pass
 
     # 2. Windows SDK: Windows Kits\10\Lib\<ver>\ucrt\<arch> and um\<arch>
@@ -428,7 +456,7 @@ fn find_msvc_crt_paths_for_arch(lib_arch: text) -> [text]:
 fn is_msvc_available() -> bool:
     match find_link_exe():
         case Some(_): true
-        case nil: false
+        case None: false
 
 # ===========================================================================
 # LLD-Link Support (LLVM's MSVC-compatible linker)
@@ -445,7 +473,7 @@ impl LldLinkLinker:
         # Find lld-link
         val lld_result = msvc_shell("where lld-link 2>nul")
         if lld_result.exit_code != 0:
-            return Err(LinkError(kind: LinkErrorKind.InternalError, message: LLD_LINK_INSTALL_HINT, symbol: nil, location: nil))
+            return Err(LinkError(kind: LinkErrorKind.InternalError, message: LLD_LINK_INSTALL_HINT, symbol: None, location: None))
 
         val lld_link = lld_result.stdout.trim()
 
@@ -466,7 +494,7 @@ impl LldLinkLinker:
             # diagnosable after the build log is rotated.
             val log_body = "{result.stdout}{result.stderr}"
             val link_log = "{output}.link.log"
-            file_write(link_log, log_body)
+            file_atomic_write(link_log, log_body)
             print "[msvc-link] FAILED exit={result.exit_code}"
             print "[msvc-link] command: {cmd}"
             print "[msvc-link] log: {link_log}"
@@ -474,7 +502,7 @@ impl LldLinkLinker:
             print log_body
             print "[msvc-link] output-end"
             val diag = "linker exited {result.exit_code} | command: {cmd} | log: {link_log} | output: {log_body}"
-            return Err(LinkError(kind: LinkErrorKind.OutputFailed, message: diag, symbol: nil, location: nil))
+            return Err(LinkError(kind: LinkErrorKind.OutputFailed, message: diag, symbol: None, location: None))
 
         Ok(())
 
@@ -532,12 +560,12 @@ fn convert_library_name(lib: text) -> text:
 
     # libfoo.a → foo.lib
     if lib.starts_with("lib") and lib.ends_with(".a"):
-        val name = lib.substring(3, lib.len() - 2)
+        val name = lib.substring(3, lib.byte_len() - 2)
         return "{name}.lib"
 
     # foo.a → foo.lib
     if lib.ends_with(".a"):
-        return lib.substring(0, lib.len() - 2) + ".lib"
+        return lib.substring(0, lib.byte_len() - 2) + ".lib"
 
     # Already .lib or other
     lib

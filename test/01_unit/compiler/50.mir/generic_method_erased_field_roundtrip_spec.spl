@@ -1,0 +1,145 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, mir, generics
+#
+# Prevention for doc/08_tracking/bug/native_erased_generic_optional_return_2026-11-15.md:
+# a generic-class method that stores its bare `T` param (field store, Dict
+# value) and the matching read must agree on ONE representation for i64
+# values such as 8, -1 and i64 max. Shape-level (HIR -> MIR -> LLVM text).
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+val MODULE = "gmef_probe"
+
+fn lower_ir(src: text) -> text:
+    val file = "testdata/gmef_probe.spl"
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(parse_full_frontend(src, file, MODULE, Logger(level: 0)))
+    val m: HirModule = hir
+    var lowering = MirLowering.new_for_target(m.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(m)
+    MirToLlvm.create(MODULE, CodegenTarget.X86_64, nil).translate_module(mir).to_string()
+
+fn function_body(ir: text, fn_name: text) -> [text]:
+    var out: [text] = []
+    var inside = false
+    for line in ir.split("\n"):
+        val l: text = line
+        if l.starts_with("define ") and (l.contains("." + fn_name + "(") or l.contains("@" + fn_name + "(")):
+            inside = true
+        if inside:
+            out = out.push(l)
+            if l.len() == 1:
+                inside = false
+    out
+
+fn count_calls(lines: [text], callee: text) -> i64:
+    var n = 0
+    for line in lines:
+        val l: text = line
+        if l.contains("call ") and l.contains("@" + callee + "("):
+            n = n + 1
+    n
+
+fn dict_src(taker: text, probe_body: text, value_type: text) -> text:
+    "class Bag<T>:\n" +
+        "    hash: Dict<i64, T>\n" +
+        "\n" +
+        "impl Bag<T>:\n" +
+        "    me put(k: i64, value: T):\n" +
+        "        self.hash[k] = value\n" +
+        "\n" +
+        taker +
+        "\n" +
+        "fn probe() -> i64:\n" +
+        "    val h: Dict<i64, " + value_type + "> = {}\n" +
+        "    var b = Bag(hash: h)\n" +
+        probe_body
+
+val RESULT_TAKER = "    fn take(k: i64) -> Result<T, text>:\n" +
+    "        if self.hash.contains_key(k):\n" +
+    "            return Ok(self.hash[k])\n" +
+    "        Err(\"absent\")\n"
+
+val BARE_TAKER = "    fn take(k: i64) -> T:\n" +
+    "        self.hash[k]\n"
+
+val INT_PROBE = "    b.put(1, 8)\n" +
+    "    b.put(2, -1)\n" +
+    "    b.put(3, 9223372036854775807)\n" +
+    "    match b.take(1):\n" +
+    "        case Ok(x): x\n" +
+    "        case Err(_): -1\n"
+
+describe "generic-class Dict<K, T> store: i64 8, -1, i64 max cross the erased boundary balanced":
+    it "caller encodes each i64 value once and the Result read decodes once":
+        val ir = lower_ir(dict_src(RESULT_TAKER, INT_PROBE, "i64"))
+        # 3 values encoded by the caller; Bag.put encodes only its KEY (value arrives encoded)
+        expect(count_calls(function_body(ir, "probe"), "rt_value_int_wide")).to_equal(3)
+        expect(count_calls(function_body(ir, "Bag.put"), "rt_value_int_wide")).to_equal(1)
+        # Bag.take: one decode, and no re-encode of the decoded value (2 key encodes only)
+        expect(count_calls(function_body(ir, "Bag.take"), "rt_value_as_int_wide")).to_equal(1)
+        expect(count_calls(function_body(ir, "Bag.take"), "rt_value_int_wide")).to_equal(2)
+        expect(count_calls(function_body(ir, "probe"), "rt_value_as_int_wide")).to_equal(0)
+
+    it "a class with a bare -> T method balances rt_value_int_wide in put and rt_value_as_int_wide at take (scope item 2)":
+        # Item 2 fix: take() returns raw dict slot from Dict<K, T> while
+        # concrete caller encodes put() once and decodes take() once.
+        val ir = lower_ir(dict_src(BARE_TAKER, "    b.put(1, 8)\n    b.take(1)\n", "i64"))
+        val probe = function_body(ir, "probe")
+        expect(count_calls(probe, "rt_value_int_wide")).to_equal(1)
+        expect(count_calls(probe, "rt_value_as_int_wide")).to_equal(1)
+
+    it "a text value is not touched by the integer encode":
+        val ir = lower_ir(dict_src(RESULT_TAKER, "    b.put(1, \"x\")\n    0\n", "text"))
+        expect(count_calls(function_body(ir, "probe"), "rt_value_int_wide")).to_equal(0)
+
+val CELL_SRC = "class Cell<T>:\n" +
+    "    v: T\n" +
+    "\n" +
+    "impl Cell<T>:\n" +
+    "    me set(x: T):\n" +
+    "        self.v = x\n" +
+    "\n" +
+    "fn probe_cell() -> i64:\n" +
+    "    var c = Cell(v: 0)\n" +
+    "    c.set(8)\n" +
+    "    c.v\n"
+
+val CELL_F64_SRC = "class CellF<T>:\n" +
+    "    v: T\n" +
+    "\n" +
+    "impl CellF<T>:\n" +
+    "    me set(x: T):\n" +
+    "        self.v = x\n" +
+    "    fn get() -> T:\n" +
+    "        self.v\n" +
+    "\n" +
+    "fn probe_cell_f64() -> f64:\n" +
+    "    var c: CellF<f64> = CellF(v: 1.5)\n" +
+    "    c.set(2.5)\n" +
+    "    c.get() + c.v\n"
+
+describe "generic-class bare T field stays raw-word/bitcast coherent across construct, method, and field read":
+    it "keeps i64 bare T field raw in, raw out without rt_value_int_wide":
+        # Non-Dict generic classes use raw i64 words (or bitcast f64) across
+        # construct, bare-T method params/returns, and concrete field reads.
+        val ir = lower_ir(CELL_SRC)
+        expect(count_calls(function_body(ir, "probe_cell"), "rt_value_int_wide")).to_equal(0)
+
+    it "bitcasts f64 across construct, set(x: T), get() -> T, and c.v field read":
+        val ir = lower_ir(CELL_F64_SRC)
+        val body = function_body(ir, "probe_cell_f64").join("\n")
+        expect(body.contains("bitcast double")).to_equal(true)
+        expect(body.contains("bitcast i64")).to_equal(true)
+        expect(body.contains("fptosi")).to_equal(false)
+        expect(body.contains("sitofp")).to_equal(false)
+        expect(count_calls(function_body(ir, "CellF.get"), "rt_value_int_wide")).to_equal(0)

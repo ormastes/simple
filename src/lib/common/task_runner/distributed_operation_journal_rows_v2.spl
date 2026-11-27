@@ -1,0 +1,33 @@
+use std.common.contracts.distributed_operation_state_v2.*
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
+use std.common.task_runner.index.{task_runner_storage_escape_v1, task_runner_storage_unescape_v1}
+
+fn operation_event_encode_v2(row: DistributedOperationStateV2) -> text:
+    task_runner_storage_escape_v1(row.state + "\n" + row.outcome_digest + "\n" + row.envelope)
+
+fn operation_event_decode_v2(data: text) -> Result<DistributedOperationStateV2, text>:
+    val decoded = task_runner_storage_unescape_v1(data)
+    if task_runner_storage_escape_v1(decoded) != data: return Err("OPERATION_WAL_ENCODING_INVALID")
+    val lines = decoded.split("\n")
+    if lines.len() < 3: return Err("OPERATION_WAL_TRUNCATED")
+    val prefix = lines[0].len() + lines[1].len() + 2
+    val initial = distributed_operation_initial_v2(decoded[prefix:decoded.len()])?
+    Ok(DistributedOperationStateV2(initial.operation_id, initial.envelope_digest,
+        initial.envelope, lines[0], lines[1]))
+
+fn operation_event_validate_v2(rows: {text: DistributedOperationStateV2},
+        row: DistributedOperationStateV2) -> Result<bool, text>:
+    if not rows.contains_key(row.operation_id):
+        if row.state != "admitted" or row.outcome_digest != "": return Err("OPERATION_WAL_ADMISSION_MISSING")
+    else:
+        val prior = rows[row.operation_id]
+        if prior.envelope != row.envelope: return Err("OPERATION_WAL_REQUEST_CHANGED")
+        val checked = distributed_operation_transition_v2(prior, row.state, row.outcome_digest)?
+    Ok(true)
+
+fn operation_event_apply_v2(rows: {text: DistributedOperationStateV2},
+        row: DistributedOperationStateV2) -> Result<{text: DistributedOperationStateV2}, text>:
+    val checked = operation_event_validate_v2(rows, row)?
+    var updated = rows
+    updated[row.operation_id] = row
+    Ok(updated)

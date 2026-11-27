@@ -45,15 +45,33 @@ describe "strict scalar RISC-V product emission":
             expect(result.vhdl).to_contain("retire_order : out std_logic_vector(63 downto 0)")
             expect(result.vhdl).to_contain("dispatch_valid=>wire_retirement_owner_dispatch_valid")
             expect(result.vhdl).to_contain("in_valid=>wire_trap_in_valid")
-            expect(result.vhdl).to_contain("execute_trap_valid=>'0'")
+            # Landed bindings route the trap execute_trap_valid through the
+            # typed completion skid (8a27fa62644), not an inline '0' actual.
+            expect(result.vhdl).to_contain("execute_trap_valid=>wire_trap_execute_trap_valid")
+            expect(result.vhdl).to_contain(
+                "wire_trap_execute_trap_valid <= source_completion_skid_completion_execute_trap_valid;")
             expect(strict_riscv_scalar_product_rtl_sha256(result).len()).to_equal(64)
 
-    it "keeps load/store products fail closed at the disabled LSU seam":
+    it "emits load/store products through the enabled typed LSU seam":
+        # Landed owner 8a27fa62644 enabled the LSU seam (the composition spec
+        # asserts the typed memory handshakes), so load/store products emit
+        # instead of failing closed at a disabled seam.
         val result = compile_strict_riscv_scalar_product("scalar_load_product",
             CoreConfig.rv32_zca_mission_critical(), 0x00012083,
             LsuConfig.rv32_product_default())
-        expect(result.is_success()).to_equal(false)
-        expect(result.diagnostic).to_contain("LSU remains a disabled seam")
+        expect(result.is_success()).to_equal(true)
+        if result.is_success():
+            expect(result.vhdl).to_contain("memory_request_valid : out std_logic")
+            expect(result.vhdl).to_contain("memory_response_ready : out std_logic")
+            expect(result.vhdl).to_contain("entity scalar_load_product_provider_access_projection is")
+            expect(result.vhdl).to_contain("child: entity work.scalar_load_product_provider_access_projection")
+        # The seam still fails closed: an access wider than the explicit bus
+        # is rejected (HWIR-E-LSU-PROJECTION-BUS).
+        val rejected = compile_strict_riscv_scalar_product("scalar_load_product_narrow",
+            CoreConfig.rv64_zca_mission_critical(), 0x0000B083,
+            LsuConfig.explicit(32, 4).unwrap())
+        expect(rejected.is_success()).to_equal(false)
+        expect(rejected.diagnostic).to_contain("LSU-PROJECTION-BUS")
 
     it "rejects a product root that is a reserved VHDL identifier":
         val result = compile_strict_riscv_scalar_product("architecture",
@@ -135,4 +153,9 @@ describe "strict scalar RISC-V product emission":
         expect(absent.is_success()).to_equal(true)
         if base.is_success() and absent.is_success():
             expect(absent.hwir_graph_sha256).to_equal(base.hwir_graph_sha256)
-            expect(absent.vhdl).to_equal(base.vhdl)
+            # Landed renderer tags the route in the top banner (8a27fa62644);
+            # the absent route is structurally zero cost and differs only in
+            # that banner.
+            expect(absent.vhdl).to_equal(base.vhdl.replace(
+                "-- simple-hwir route=hwir-gen2-scalar-product-v2",
+                "-- simple-hwir route=hwir-gen2-scalar-product-aspect-v1"))

@@ -55,3 +55,28 @@ mirror for correct clipped output.
 `scripts/check/check-macos-wm-fullscreen-metal-evidence.shs` web-engine phase now
 renders a 3-window WM desktop via HTML/CSS on the Metal GPU at physical fullscreen
 dims and reads back the full framebuffer (`web_engine=render ... pixels=<w*h>`).
+
+## 2026-11-12 fix attempt (release/1.0.0 source verification)
+
+Re-checked the fix on `release/1.0.0` (worktree at 7a06b4aafd5). The fix is
+present and has since been strengthened:
+
+- `MetalBackend.set_clip` / `clear_clip`
+  (`src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl:771-788`) no longer
+  reset `gpu_frame_complete` at all. They record the clip rect in
+  `clip_x/clip_y/clip_w/clip_h/clip_enabled` and keep the 1x1 CPU mirror's clip
+  state in lockstep, so the CPU fallback lane still honors the clip without
+  disarming the GPU frame.
+- `_gpu_only_mode()` (`backend_metal.spl:905`) is present and gates the
+  GPU-only readback path.
+- The GPU-only clip regression scene (`clip_gpu_only`) that pins this behavior
+  in `test/02_integration/rendering/engine2d_cpu_metal_parity_run.spl` had
+  been accidentally dropped by transplant `88aac2ffe28` and is restored by the
+  2026-11-12 parity-harness restoration (see
+  `engine2d_metal_draw_image_parity_coverage_gap_2026-07-07.md`).
+
+Verification status: **fixed-unverified** — the mechanism is confirmed in
+source, but no Metal-native run was possible on this host (no admitted
+compiler; the in-flight bootstrap must complete before
+`check-macos-wm-fullscreen-metal-evidence.shs` /
+`check-engine2d-cpu-metal-parity-evidence.shs` can re-execute).

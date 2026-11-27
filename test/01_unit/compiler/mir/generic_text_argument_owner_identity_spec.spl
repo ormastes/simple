@@ -1,0 +1,83 @@
+# Bug stage3_selfbuild_raw_text_strict_extern_2026-11-18, defect 2.
+# A text argument of an erased `T` / `Any` parameter may be a RAW char*: the
+# data buffer of a heap string (a `for` binder or `a[i]` over `[text]`). The
+# boundary copied it through rt_string_new, so
+# `rt_transient_heap_promote<T>(answer)` retained the copy and the caller's
+# original was freed at scope end. The generic-argument boxer must resolve the
+# owning string (`generic_arg_text_owner_*` blocks) and copy only a char* that
+# has no heap owner.
+# Fixture: test/fixtures/native_transient_scope_raw_text_escape/main.spl
+
+use std.spec.*
+use compiler.hir.hir_types.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_instruction_graph.{MirModule, MirFunction}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+val GT_SOURCE = "extern fn rt_transient_heap_promote<T>(value: T) -> bool\n\nfn promote_text(answer: text) -> bool:\n    rt_transient_heap_promote(answer)\n\nfn promote_wrapper<T>(value: T) -> bool:\n    rt_transient_heap_promote(value)\n\nfn promote_via_wrapper(answer: text) -> bool:\n    promote_wrapper(answer)\n\nfn promote_loop(names: [text]) -> bool:\n    var ok = true\n    for name in names:\n        ok = ok and rt_transient_heap_promote(name)\n    ok\n\nfn promote_count(count: i64) -> bool:\n    rt_transient_heap_promote(count)\n\nfn key_lookup(table: Dict<text, i64>, key: text) -> bool:\n    table.contains_key(key)\n"
+
+class GtLowered:
+    mir: MirModule
+    errors: text
+
+fn gt_lower() -> GtLowered:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(GT_SOURCE, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: GT_SOURCE, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["main_hir"] = hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "main_hir")
+    val mir = mir_lowering.lower_module(hir, [hir])
+    var out = ""
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    GtLowered(mir: mir, errors: out)
+
+fn gt_function_text(mir: MirModule, name: text) -> text:
+    for fid in mir.functions.keys():
+        val f = mir.functions[fid]
+        if f.name == name or f.name.ends_with("." + name):
+            return "{f.blocks}"
+    ""
+
+describe "Generic text argument keeps its owner":
+    it "lowers the probe without MIR errors":
+        val lowered = gt_lower()
+        expect(lowered.errors).to_equal("")
+        expect(gt_function_text(lowered.mir, "promote_text").contains("rt_transient_heap_promote")).to_equal(true)
+
+    it "resolves the owning string of a raw text passed to the promote extern":
+        step("a data pointer becomes its owner's handle; only an ownerless char* is copied")
+        val body = gt_function_text(gt_lower().mir, "promote_text")
+        expect(body.contains("generic_arg_text_owner_probe")).to_equal(true)
+        expect(body.contains("generic_arg_text_owner_keep")).to_equal(true)
+        expect(body.contains("generic_arg_text_owner_copy")).to_equal(true)
+
+    it "resolves the owner at a generic Simple wrapper boundary":
+        val body = gt_function_text(gt_lower().mir, "promote_via_wrapper")
+        expect(body.contains("generic_arg_text_owner_keep")).to_equal(true)
+
+    it "resolves the owner of a for-loop text binder":
+        val body = gt_function_text(gt_lower().mir, "promote_loop")
+        expect(body.contains("generic_arg_text_owner_keep")).to_equal(true)
+
+    it "adds no owner probe for a scalar argument or a dict key (control)":
+        val lowered = gt_lower()
+        expect(gt_function_text(lowered.mir, "promote_count").contains("generic_arg_text_owner")).to_equal(false)
+        val key_body = gt_function_text(lowered.mir, "key_lookup")
+        expect(key_body.contains("generic_arg_text_owner")).to_equal(false)
+        expect(key_body.contains("rt_dict_contains")).to_equal(true)

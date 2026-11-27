@@ -1,0 +1,239 @@
+# Scalar fallback for AVX-512 frame vectors.
+#
+# The AVX-512 selector keeps every 512-bit MIR value in its own frame slot, so
+# a host without AVX-512 can execute the same plan lane by lane: GPR moves and
+# integer ops, SSE scalar float ops on XMM0/XMM1, and no EVEX, VEX-ZMM or mask
+# register at all. Each helper here returns the exact bytes of one fallback
+# pseudo operation. Frame operands are signed RBP displacements; memory
+# operands always use mod=10 + disp32. Every instruction carries a REX byte so
+# byte registers name SPL/BPL/SIL/DIL rather than AH/CH/DH/BH.
+#
+# Shape codes match avx512_shape_code: 1 f32x16, 2 f64x8, 3 i32x16, 4 i32x8,
+# 5 mask16, 6 mask8.
+use compiler.backend.native.x86_64_avx512_ops.{avx512_bytes32, avx512_mem_tail, avx512_lanes, avx512_lane_bytes}
+
+# Fallback machine operations. They share the AVX-512 frame band (400..450)
+# so the register allocator applies the frame-vector spill discipline to them.
+pub val X86_OP_V512S_COPY: i64 = 437
+pub val X86_OP_V512S_SPLAT: i64 = 438
+pub val X86_OP_V512S_FBIN: i64 = 439
+pub val X86_OP_V512S_IBIN: i64 = 440
+pub val X86_OP_V512S_UNARY: i64 = 441
+pub val X86_OP_V512S_CMP: i64 = 442
+pub val X86_OP_V512S_SELECT: i64 = 443
+pub val X86_OP_V512S_MASK: i64 = 444
+pub val X86_OP_V512S_PERMUTE: i64 = 445
+pub val X86_OP_V512S_BROADCAST: i64 = 446
+
+val X86S_RBP: i64 = 5
+val X86S_RCX: i64 = 1
+
+fn x86s_rex(wide: bool, reg: i64, index: i64, base: i64) -> i64:
+    0x40 + (if wide: 8 else: 0) + (if reg >= 8: 4 else: 0) + (if index >= 8: 2 else: 0) + (if base >= 8: 1 else: 0)
+
+fn x86s_mem(prefix: [i64], wide: bool, opcode: [i64], reg: i64, base: i64, offset: i64) -> [i64]:
+    # [base + disp32]; `reg` is a GPR/XMM number or an opcode extension digit.
+    prefix + [x86s_rex(wide, reg, 0, base)] + opcode + avx512_mem_tail(reg, base, offset)
+
+fn x86s_rr(prefix: [i64], wide: bool, opcode: [i64], reg: i64, rm: i64) -> [i64]:
+    if reg < 0 or reg > 15 or rm < 0 or rm > 15: panic("invalid AVX-512 scalar fallback register")
+    prefix + [x86s_rex(wide, reg, 0, rm)] + opcode + [0xC0 + (reg % 8) * 8 + rm % 8]
+
+fn x86s_indexed(wide: bool, opcode: [i64], reg: i64, base: i64, index: i64, scale: i64, offset: i64) -> [i64]:
+    # [base + index * scale + disp32]
+    if index == 4 or index < 0 or index > 15: panic("invalid AVX-512 scalar fallback index register")
+    val ss = if scale == 8: 3 elif scale == 4: 2 elif scale == 2: 1 else: 0
+    [x86s_rex(wide, reg, index, base)] + opcode + [0x84 + (reg % 8) * 8, ss * 64 + (index % 8) * 8 + base % 8] + avx512_bytes32(offset)
+
+fn x86s_load(reg: i64, base: i64, offset: i64, width: i64) -> [i64]:
+    if width == 2: return x86s_mem([], false, [0x0F, 0xB7], reg, base, offset)
+    x86s_mem([], width == 8, [0x8B], reg, base, offset)
+
+fn x86s_store(reg: i64, base: i64, offset: i64, width: i64) -> [i64]:
+    if width == 2: return x86s_mem([0x66], false, [0x89], reg, base, offset)
+    x86s_mem([], width == 8, [0x89], reg, base, offset)
+
+fn x86s_float_prefix(shape: i64) -> [i64]:
+    if shape == 2: [0xF2] else: [0xF3]
+
+fn x86s_require_float(shape: i64):
+    if shape != 1 and shape != 2: panic("AVX-512 scalar fallback floating operation requires f32x16 or f64x8")
+
+fn avx512_scalar_copy_bytes(data: i64, dst_base: i64, dst_offset: i64, src_base: i64, src_offset: i64, bytes: i64) -> [i64]:
+    # Masks are the 16-bit KMOVW image; data vectors move in 8-byte chunks.
+    if bytes == 2: return x86s_load(data, src_base, src_offset, 2) + x86s_store(data, dst_base, dst_offset, 2)
+    if bytes <= 0 or bytes % 8 != 0: panic("AVX-512 scalar fallback copy size must be 2 or a multiple of 8")
+    var out: [i64] = []
+    for chunk in 0..(bytes / 8):
+        out = out + x86s_load(data, src_base, src_offset + chunk * 8, 8) + x86s_store(data, dst_base, dst_offset + chunk * 8, 8)
+    out
+
+fn avx512_scalar_splat_bytes(scalar: i64, dst: i64, lane_bytes: i64, lanes: i64) -> [i64]:
+    var out: [i64] = []
+    for lane in 0..lanes:
+        out = out + x86s_store(scalar, X86S_RBP, dst + lane * lane_bytes, lane_bytes)
+    out
+
+fn avx512_scalar_fbin_bytes(dst: i64, lhs: i64, rhs: i64, shape: i64, op: i64) -> [i64]:
+    # VADDPS..VMAXPS lane semantics equal ADDSS..MAXSS: MIN/MAX return the
+    # second (right) operand for NaN or equal-zero inputs in both forms.
+    x86s_require_float(shape)
+    val codes = [0x58, 0x5C, 0x59, 0x5E, 0x5D, 0x5F]
+    if op < 1 or op > 6: panic("invalid AVX-512 scalar fallback floating binary operation")
+    val prefix = x86s_float_prefix(shape)
+    val width = avx512_lane_bytes(shape)
+    var out: [i64] = []
+    for lane in 0..avx512_lanes(shape):
+        out = out + x86s_mem(prefix, false, [0x0F, 0x10], 0, X86S_RBP, lhs + lane * width)
+        out = out + x86s_mem(prefix, false, [0x0F, codes[op - 1]], 0, X86S_RBP, rhs + lane * width)
+        out = out + x86s_mem(prefix, false, [0x0F, 0x11], 0, X86S_RBP, dst + lane * width)
+    out
+
+fn avx512_scalar_ibin_bytes(data: i64, dst: i64, lhs: i64, rhs: i64, op: i64, scratch: i64) -> [i64]:
+    # i32x16 lanes. Shift counts were bounds-checked (< 32) by the selector,
+    # exactly as on the VPSLLVD/VPSRLVD/VPSRAVD path. Shifts need CL: RCX is
+    # saved around the memory-destination shift and `data` is not live then.
+    var out: [i64] = []
+    for lane in 0..16:
+        val l = lhs + lane * 4
+        val r = rhs + lane * 4
+        out = out + x86s_load(data, X86S_RBP, l, 4)
+        if op == 1: out = out + x86s_mem([], false, [0x03], data, X86S_RBP, r)
+        elif op == 2: out = out + x86s_mem([], false, [0x2B], data, X86S_RBP, r)
+        elif op == 3: out = out + x86s_mem([], false, [0x0F, 0xAF], data, X86S_RBP, r)
+        elif op == 5 or op == 6:
+            out = out + x86s_mem([], false, [0x3B], data, X86S_RBP, r)
+            out = out + x86s_mem([], false, [0x0F, if op == 5: 0x4F else: 0x4C], data, X86S_RBP, r)
+        elif op == 7: out = out + x86s_mem([], false, [0x23], data, X86S_RBP, r)
+        elif op == 8: out = out + x86s_mem([], false, [0x0B], data, X86S_RBP, r)
+        elif op == 9: out = out + x86s_mem([], false, [0x33], data, X86S_RBP, r)
+        elif op == 10:
+            out = out + x86s_rr([], false, [0xF7], 2, data)
+            out = out + x86s_mem([], false, [0x23], data, X86S_RBP, r)
+        elif op >= 11 and op <= 13:
+            val digit = if op == 11: 4 elif op == 12: 5 else: 7
+            out = out + x86s_store(data, X86S_RBP, scratch, 4) + [0x51]
+            out = out + x86s_load(X86S_RCX, X86S_RBP, r, 4)
+            out = out + x86s_mem([], false, [0xD3], digit, X86S_RBP, scratch) + [0x59]
+            out = out + x86s_load(data, X86S_RBP, scratch, 4)
+        else:
+            panic("invalid AVX-512 scalar fallback integer binary operation")
+        out = out + x86s_store(data, X86S_RBP, dst + lane * 4, 4)
+    out
+
+fn avx512_scalar_unary_bytes(data: i64, dst: i64, src: i64, shape: i64, op: i64) -> [i64]:
+    var out: [i64] = []
+    if shape == 3:
+        if op != 1 and op != 3: panic("invalid AVX-512 scalar fallback integer unary operation")
+        for lane in 0..16:
+            out = out + x86s_load(data, X86S_RBP, src + lane * 4, 4)
+            out = out + x86s_rr([], false, [0xF7], if op == 1: 3 else: 2, data)
+            out = out + x86s_store(data, X86S_RBP, dst + lane * 4, 4)
+        return out
+    x86s_require_float(shape)
+    val wide = shape == 2
+    val width = avx512_lane_bytes(shape)
+    val prefix = x86s_float_prefix(shape)
+    if op == 1 or op == 2:
+        # Sign-bit flip (BTC) / clear (BTR): the same bits VPXORD/VPANDD with
+        # the generated sign masks produce, NaN payloads included.
+        for lane in 0..avx512_lanes(shape):
+            out = out + x86s_load(data, X86S_RBP, src + lane * width, width)
+            out = out + x86s_rr([], wide, [0x0F, 0xBA], if op == 1: 7 else: 6, data) + [if wide: 63 else: 31]
+            out = out + x86s_store(data, X86S_RBP, dst + lane * width, width)
+        return out
+    if op != 4 and op != 5 and op != 6: panic("invalid AVX-512 scalar fallback floating unary operation")
+    if op != 5:
+        # Exact 1.0 divisor numerator, as the vector path builds it.
+        if wide: out = [x86s_rex(true, 0, 0, data), 0xB8 + data % 8, 0, 0, 0, 0, 0, 0, 0xF0, 0x3F]
+        else: out = [x86s_rex(false, 0, 0, data), 0xB8 + data % 8] + avx512_bytes32(0x3F800000)
+    for lane in 0..avx512_lanes(shape):
+        val s = src + lane * width
+        if op == 5:
+            out = out + x86s_mem(prefix, false, [0x0F, 0x51], 0, X86S_RBP, s)
+        elif op == 4:
+            out = out + x86s_rr([0x66], wide, [0x0F, 0x6E], 0, data)
+            out = out + x86s_mem(prefix, false, [0x0F, 0x5E], 0, X86S_RBP, s)
+        else:
+            out = out + x86s_mem(prefix, false, [0x0F, 0x51], 1, X86S_RBP, s)
+            out = out + x86s_rr([0x66], wide, [0x0F, 0x6E], 0, data)
+            out = out + x86s_rr(prefix, false, [0x0F, 0x5E], 0, 1)
+        out = out + x86s_mem(prefix, false, [0x0F, 0x11], 0, X86S_RBP, dst + lane * width)
+    out
+
+fn avx512_scalar_cmp_bytes(acc: i64, lane_reg: i64, dst: i64, lhs: i64, rhs: i64, shape: i64, op: i64) -> [i64]:
+    # Builds the KMOVW image: bit i = predicate(lhs[i], rhs[i]); upper bits 0.
+    if op < 0 or op > 5: panic("invalid AVX-512 scalar fallback comparison predicate")
+    if shape != 1 and shape != 2 and shape != 3: panic("AVX-512 scalar fallback comparison requires a data vector")
+    val width = avx512_lane_bytes(shape)
+    var out = x86s_rr([], false, [0x31], acc, acc)
+    for lane in 0..avx512_lanes(shape):
+        val l = lhs + lane * width
+        val r = rhs + lane * width
+        if shape == 3:
+            # VPCMPD predicates EQ, NE, LT, LE, NLE, NLT are signed compares.
+            val setcc = [0x94, 0x95, 0x9C, 0x9E, 0x9F, 0x9D]
+            out = out + x86s_load(lane_reg, X86S_RBP, l, 4)
+            out = out + x86s_mem([], false, [0x3B], lane_reg, X86S_RBP, r)
+            out = out + x86s_rr([], false, [0x0F, setcc[op]], 0, lane_reg)
+            out = out + x86s_rr([], false, [0x0F, 0xB6], lane_reg, lane_reg)
+        else:
+            # EQ_OQ, NEQ_UQ, LT_OS, LE_OS; GT_OS/GE_OS are LT_OS/LE_OS with
+            # swapped operands, which keeps the unordered result false.
+            val prefix = x86s_float_prefix(shape)
+            val swapped = op == 4 or op == 5
+            val predicates = [0, 4, 1, 2, 1, 2]
+            out = out + x86s_mem(prefix, false, [0x0F, 0x10], 0, X86S_RBP, if swapped: r else: l)
+            out = out + x86s_mem(prefix, false, [0x0F, 0xC2], 0, X86S_RBP, if swapped: l else: r) + [predicates[op]]
+            out = out + x86s_rr([0x66], false, [0x0F, 0x7E], 0, lane_reg)
+            out = out + x86s_rr([], false, [0x83], 4, lane_reg) + [1]
+        # SHL by one uses the canonical D1 /4 form, as assemblers emit it.
+        if lane == 1: out = out + x86s_rr([], false, [0xD1], 4, lane_reg)
+        else: out = out + x86s_rr([], false, [0xC1], 4, lane_reg) + [lane]
+        out = out + x86s_rr([], false, [0x09], lane_reg, acc)
+    out + x86s_store(acc, X86S_RBP, dst, 2)
+
+fn avx512_scalar_select_bytes(bits: i64, lane_reg: i64, dst: i64, mask: i64, yes: i64, no: i64, shape: i64) -> [i64]:
+    # VPBLENDMD/VBLENDMPS/VBLENDMPD: a set mask bit takes `yes`.
+    if shape != 1 and shape != 2 and shape != 3: panic("AVX-512 scalar fallback select requires a data vector")
+    val wide = shape == 2
+    val width = avx512_lane_bytes(shape)
+    var out = x86s_load(bits, X86S_RBP, mask, 2)
+    for lane in 0..avx512_lanes(shape):
+        out = out + x86s_load(lane_reg, X86S_RBP, no + lane * width, width)
+        out = out + x86s_rr([], false, [0xF7], 0, bits) + avx512_bytes32(1 << lane)
+        out = out + x86s_mem([], wide, [0x0F, 0x45], lane_reg, X86S_RBP, yes + lane * width)
+        out = out + x86s_store(lane_reg, X86S_RBP, dst + lane * width, width)
+    out
+
+fn avx512_scalar_mask_bytes(data: i64, dst: i64, lhs: i64, rhs: i64, op: i64) -> [i64]:
+    # KANDW/KORW/KXORW/KANDNW/KNOTW over the 16-bit mask image.
+    var out = x86s_load(data, X86S_RBP, lhs, 2)
+    if op == 7: out = out + x86s_mem([0x66], false, [0x23], data, X86S_RBP, rhs)
+    elif op == 8: out = out + x86s_mem([0x66], false, [0x0B], data, X86S_RBP, rhs)
+    elif op == 9: out = out + x86s_mem([0x66], false, [0x33], data, X86S_RBP, rhs)
+    elif op == 10: out = out + x86s_rr([], false, [0xF7], 2, data) + x86s_mem([0x66], false, [0x23], data, X86S_RBP, rhs)
+    elif op == 14: out = out + x86s_rr([], false, [0xF7], 2, data)
+    else: panic("invalid AVX-512 scalar fallback mask operation")
+    out + x86s_store(data, X86S_RBP, dst, 2)
+
+fn avx512_scalar_permute_bytes(index: i64, data: i64, dst: i64, src: i64, indices: i64, shape: i64) -> [i64]:
+    # Indices were bounds-checked by the selector; `src` is a private copy.
+    if shape != 1 and shape != 2 and shape != 3: panic("AVX-512 scalar fallback permute requires a data vector")
+    val width = avx512_lane_bytes(shape)
+    var out: [i64] = []
+    for lane in 0..avx512_lanes(shape):
+        out = out + x86s_mem([], true, [0x63], index, X86S_RBP, indices + lane * 4)
+        out = out + x86s_indexed(width == 8, [0x8B], data, X86S_RBP, index, width, src)
+        out = out + x86s_store(data, X86S_RBP, dst + lane * width, width)
+    out
+
+fn avx512_scalar_broadcast_bytes(index: i64, data: i64, dst: i64, src: i64, shape: i64) -> [i64]:
+    # Unsigned comparison rejects negative i64 indices as well as N and larger.
+    if shape != 1 and shape != 2 and shape != 3: panic("AVX-512 scalar fallback broadcast requires a data vector")
+    val width = avx512_lane_bytes(shape)
+    var out = x86s_rr([], true, [0x83], 7, index) + [avx512_lanes(shape), 0x72, 2, 0x0F, 0x0B]
+    out = out + x86s_indexed(width == 8, [0x8B], data, X86S_RBP, index, width, src)
+    for lane in 0..avx512_lanes(shape):
+        out = out + x86s_store(data, X86S_RBP, dst + lane * width, width)
+    out

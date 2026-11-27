@@ -5,7 +5,8 @@ use os.compositor.simple_web_window_renderer.{simple_web_content_render_request_
 use common.ui.window_scene.{SharedWmScene, shared_wm_scene_chrome}
 use os.compositor.wm_action_lifecycle.{WmLifecycleWindowState, wm_lifecycle_motion_contract}
 use os.compositor.web_render_surface.{compositor_render_html_pixels}
-use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use common.ui.wm_chrome_theme.{wm_chrome_theme, active_wm_theme_snapshot_present}
+use common.ui.glyph_bitmap_5x7.{glyph_rows_for_char}
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d, engine2d_fast_metal_available}
 
 class SceneElement:
@@ -191,31 +192,38 @@ fn _wm_fit_dim(available: i32, preferred: i32) -> i32:
 fn standard_wm_scene(width: i32, height: i32) -> WmSceneSpec:
     val panel_w = if width > 180: width - 160 else: width
     val panel_h = if height > 160: height - 140 else: height
+    val theme = wm_chrome_theme()
+    val has_snap = active_wm_theme_snapshot_present()
+    val dec_color = if has_snap: theme.title_focused else: 0xFF334155u32
+    val panel_color = if has_snap: theme.window_body else: 0xCCCBD5E1u32
+    val label_color = if has_snap: theme.text_primary else: 0xFFFFFFFFu32
     WmSceneSpec(
         name: "standard_wm_scene",
         width: width,
         height: height,
         elements: [
-            SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: width, h: height, color: wm_chrome_theme().compositor_bg, text: ""),
-            SceneElement(kind: "decoration", x: 48, y: 42, w: panel_w, h: 34, color: 0xFF334155u32, text: ""),
-            SceneElement(kind: "glass_panel", x: 48, y: 76, w: panel_w, h: panel_h, color: 0xCCCBD5E1u32, text: ""),
-            SceneElement(kind: "text_label", x: 68, y: 60, w: 180, h: 20, color: 0xFFFFFFFFu32, text: "Simple Web WM")
+            SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: width, h: height, color: theme.compositor_bg, text: ""),
+            SceneElement(kind: "decoration", x: 48, y: 42, w: panel_w, h: 34, color: dec_color, text: ""),
+            SceneElement(kind: "glass_panel", x: 48, y: 76, w: panel_w, h: panel_h, color: panel_color, text: ""),
+            SceneElement(kind: "text_label", x: 68, y: 60, w: 180, h: 20, color: label_color, text: "Simple Web WM")
         ]
     )
 
 fn shared_wm_scene_to_wm_scene(scene: SharedWmScene) -> WmSceneSpec:
+    val theme = wm_chrome_theme()
     var elements: [SceneElement] = [
-        SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: scene.width, h: scene.height, color: wm_chrome_theme().compositor_bg, text: "")
+        SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: scene.width, h: scene.height, color: theme.compositor_bg, text: "")
     ]
     for window in scene.windows:
         if not window.minimized:
+            val title_color = if window.focused: theme.title_focused else: theme.title_unfocused
             elements = elements.push(SceneElement(
                 kind: "decoration",
                 x: window.x,
                 y: window.y,
                 w: window.width,
                 h: 32,
-                color: 0xFF334155u32,
+                color: title_color,
                 text: if window.focused: "{window.title}|focused" else: "{window.title}|idle"
             ))
             elements = elements.push(SceneElement(
@@ -224,7 +232,7 @@ fn shared_wm_scene_to_wm_scene(scene: SharedWmScene) -> WmSceneSpec:
                 y: window.y + 32,
                 w: window.width,
                 h: window.height - 32,
-                color: 0xCCCBD5E1u32,
+                color: theme.window_body,
                 text: if window.focused: "{window.surface_id}|focused" else: "{window.surface_id}|idle"
             ))
             elements = elements.push(SceneElement(
@@ -233,14 +241,15 @@ fn shared_wm_scene_to_wm_scene(scene: SharedWmScene) -> WmSceneSpec:
                 y: window.y + 9,
                 w: window.width - 24,
                 h: 16,
-                color: 0xFFFFFFFFu32,
+                color: theme.text_primary,
                 text: window.title
             ))
     WmSceneSpec(name: "shared_wm_scene", width: scene.width, height: scene.height, elements: elements)
 
 fn lifecycle_windows_to_motion_wm_scene(windows: [WmLifecycleWindowState], action_kind: text, width: i32, height: i32) -> WmSceneSpec:
+    val theme = wm_chrome_theme()
     var elements: [SceneElement] = [
-        SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: width, h: height, color: wm_chrome_theme().compositor_bg, text: "")
+        SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: width, h: height, color: theme.compositor_bg, text: "")
     ]
     for window in windows:
         val motion = wm_lifecycle_motion_contract(action_kind, window)
@@ -251,7 +260,7 @@ fn lifecycle_windows_to_motion_wm_scene(windows: [WmLifecycleWindowState], actio
                 y: window.y,
                 w: window.w,
                 h: window.h,
-                color: 0xCCCBD5E1u32,
+                color: theme.window_body,
                 text: "{window.title}|{motion.phase}|{motion.class_name}|{motion.duration_ms}|{motion.reduced_duration_ms}|{motion.can_disable}|{motion.easing}|{motion.transform_origin}|{motion.dock_origin_x}|{motion.dock_origin_y}"
             ))
     WmSceneSpec(name: "lifecycle_motion_wm_scene", width: width, height: height, elements: elements)
@@ -366,41 +375,49 @@ fn shared_wm_scene_to_chromed_wm_scene(scene: SharedWmScene, taskbar: TaskbarMod
     val widget_gallery_h = _wm_fit_dim(_wm_max_i32(0, scene.height - chrome.command_lane.height - chrome.taskbar.height - 24), 214)
     val widget_gallery_x = _wm_max_i32(0, (scene.width - widget_gallery_w) / 2)
     val widget_gallery_y = _wm_min_i32(chrome.command_lane.height + 54, _wm_max_i32(0, chrome.taskbar.y - widget_gallery_h - 14))
+    val theme = wm_chrome_theme()
+    val has_snap = active_wm_theme_snapshot_present()
+    val bg_col = if has_snap: theme.compositor_bg else: 0xFF101418u32
+    val cmd_col = if has_snap: theme.command_lane else: 0xFF111827u32
+    val fg_col = if has_snap: theme.text_primary else: 0xFFFFFFFFu32
+    val bar_col = if has_snap: theme.taskbar else: 0xCC111827u32
+    val panel_col = if has_snap: theme.window_body else: 0xCC111827u32
+    val idle_col = if has_snap: theme.title_unfocused else: 0xFF475569u32
     var elements: [SceneElement] = [
-        SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: scene.width, h: scene.height, color: 0xFF101418u32, text: ""),
-        SceneElement(kind: "command_lane", x: chrome.command_lane.x, y: chrome.command_lane.y, w: chrome.command_lane.width, h: chrome.command_lane.height, color: 0xFF111827u32, text: ""),
-        SceneElement(kind: "command_clock", x: clock_x, y: chrome.command_lane.y, w: 72, h: chrome.command_lane.height, color: 0xFFFFFFFFu32, text: clock_label),
-        SceneElement(kind: "taskbar", x: chrome.taskbar.x, y: chrome.taskbar.y, w: chrome.taskbar.width, h: chrome.taskbar.height, color: 0xCC111827u32, text: ""),
-        SceneElement(kind: "command_palette", x: palette_x, y: palette_y, w: palette_w, h: palette_h, color: 0xEE020617u32, text: "Run command|Open Simple IDE|Show window overview"),
-        SceneElement(kind: "desktop_widgets", x: widget_x, y: side_panel_y, w: widget_w, h: widget_h, color: 0xCC111827u32, text: "Clock|Motion|Workspace"),
-        SceneElement(kind: "control_center", x: control_x, y: side_panel_y, w: control_w, h: control_h, color: 0xDD111827u32, text: "Motion|Widgets|Overview"),
-        SceneElement(kind: "window_overview", x: overview_x, y: overview_y, w: overview_w, h: overview_h, color: 0xDD020617u32, text: "Window overview"),
+        SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: scene.width, h: scene.height, color: bg_col, text: ""),
+        SceneElement(kind: "command_lane", x: chrome.command_lane.x, y: chrome.command_lane.y, w: chrome.command_lane.width, h: chrome.command_lane.height, color: cmd_col, text: ""),
+        SceneElement(kind: "command_clock", x: clock_x, y: chrome.command_lane.y, w: 72, h: chrome.command_lane.height, color: fg_col, text: clock_label),
+        SceneElement(kind: "taskbar", x: chrome.taskbar.x, y: chrome.taskbar.y, w: chrome.taskbar.width, h: chrome.taskbar.height, color: bar_col, text: ""),
+        SceneElement(kind: "command_palette", x: palette_x, y: palette_y, w: palette_w, h: palette_h, color: panel_col, text: "Run command|Open Simple IDE|Show window overview"),
+        SceneElement(kind: "desktop_widgets", x: widget_x, y: side_panel_y, w: widget_w, h: widget_h, color: bar_col, text: "Clock|Motion|Workspace"),
+        SceneElement(kind: "control_center", x: control_x, y: side_panel_y, w: control_w, h: control_h, color: panel_col, text: "Motion|Widgets|Overview"),
+        SceneElement(kind: "window_overview", x: overview_x, y: overview_y, w: overview_w, h: overview_h, color: panel_col, text: "Window overview"),
         SceneElement(kind: "snap_preview", x: snap_x, y: snap_y, w: snap_w, h: snap_h, color: 0x552563EBu32, text: "right"),
-        SceneElement(kind: "snap_layouts", x: snap_layouts_x, y: snap_layouts_y, w: snap_layouts_w, h: snap_layouts_h, color: 0xEE020617u32, text: "Left half|Right half|Fullscreen|Quarter grid"),
-        SceneElement(kind: "window_switcher", x: switcher_x, y: switcher_y, w: switcher_w, h: switcher_h, color: 0xEE020617u32, text: "Terminal|Browser|Settings"),
-        SceneElement(kind: "quick_settings", x: quick_settings_x, y: quick_settings_y, w: quick_settings_w, h: quick_settings_h, color: 0xEE020617u32, text: "Wi-Fi|Audio|Battery|Brightness"),
-        SceneElement(kind: "notification_center", x: notification_center_x, y: notification_center_y, w: notification_center_w, h: notification_center_h, color: 0xEE020617u32, text: "Window snapped|Build finished|Calendar"),
-        SceneElement(kind: "live_activity", x: live_activity_x, y: live_activity_y, w: live_activity_w, h: live_activity_h, color: 0xEE020617u32, text: "Build indexing|72|Pause|Cancel"),
-        SceneElement(kind: "notification_toast", x: toast_x, y: toast_y, w: toast_w, h: toast_h, color: 0xEE0F172Au32, text: "Window snapped|Right half|Undo"),
-        SceneElement(kind: "workspace_switcher", x: workspace_x, y: workspace_y, w: workspace_w, h: workspace_h, color: 0xDD0F172Au32, text: "1|2|3"),
-        SceneElement(kind: "shortcut_overlay", x: shortcut_x, y: shortcut_y, w: shortcut_w, h: shortcut_h, color: 0xEE020617u32, text: "Keyboard shortcuts"),
-        SceneElement(kind: "app_launcher", x: launcher_x, y: launcher_y, w: launcher_w, h: launcher_h, color: 0xEE020617u32, text: "Terminal|Browser|Simple IDE|Settings"),
-        SceneElement(kind: "context_menu", x: context_x, y: context_y, w: context_w, h: context_h, color: 0xEE020617u32, text: "Open|Pin to taskbar|Move to workspace|Close"),
+        SceneElement(kind: "snap_layouts", x: snap_layouts_x, y: snap_layouts_y, w: snap_layouts_w, h: snap_layouts_h, color: panel_col, text: "Left half|Right half|Fullscreen|Quarter grid"),
+        SceneElement(kind: "window_switcher", x: switcher_x, y: switcher_y, w: switcher_w, h: switcher_h, color: panel_col, text: "Terminal|Browser|Settings"),
+        SceneElement(kind: "quick_settings", x: quick_settings_x, y: quick_settings_y, w: quick_settings_w, h: quick_settings_h, color: panel_col, text: "Wi-Fi|Audio|Battery|Brightness"),
+        SceneElement(kind: "notification_center", x: notification_center_x, y: notification_center_y, w: notification_center_w, h: notification_center_h, color: panel_col, text: "Window snapped|Build finished|Calendar"),
+        SceneElement(kind: "live_activity", x: live_activity_x, y: live_activity_y, w: live_activity_w, h: live_activity_h, color: panel_col, text: "Build indexing|72|Pause|Cancel"),
+        SceneElement(kind: "notification_toast", x: toast_x, y: toast_y, w: toast_w, h: toast_h, color: panel_col, text: "Window snapped|Right half|Undo"),
+        SceneElement(kind: "workspace_switcher", x: workspace_x, y: workspace_y, w: workspace_w, h: workspace_h, color: panel_col, text: "1|2|3"),
+        SceneElement(kind: "shortcut_overlay", x: shortcut_x, y: shortcut_y, w: shortcut_w, h: shortcut_h, color: panel_col, text: "Keyboard shortcuts"),
+        SceneElement(kind: "app_launcher", x: launcher_x, y: launcher_y, w: launcher_w, h: launcher_h, color: panel_col, text: "Terminal|Browser|Simple IDE|Settings"),
+        SceneElement(kind: "context_menu", x: context_x, y: context_y, w: context_w, h: context_h, color: panel_col, text: "Open|Pin to taskbar|Move to workspace|Close"),
         SceneElement(kind: "hot_corner_zone", x: 0, y: chrome.command_lane.height, w: 44, h: 44, color: 0x552563EBu32, text: "overview"),
         SceneElement(kind: "hot_corner_zone", x: _wm_max_i32(0, scene.width - 44), y: chrome.command_lane.height, w: 44, h: 44, color: 0x552563EBu32, text: "launcher"),
         SceneElement(kind: "hot_corner_zone", x: 0, y: _wm_max_i32(0, chrome.taskbar.y - 44), w: 44, h: 44, color: 0x552563EBu32, text: "desktop"),
         SceneElement(kind: "hot_corner_zone", x: _wm_max_i32(0, scene.width - 44), y: _wm_max_i32(0, chrome.taskbar.y - 44), w: 44, h: 44, color: 0x552563EBu32, text: "control-center"),
-        SceneElement(kind: "resize_hud", x: resize_hud_x, y: resize_hud_y, w: resize_hud_w, h: resize_hud_h, color: 0xEE020617u32, text: "300 x 200|20,40|Snap ready"),
-        SceneElement(kind: "gesture_hints", x: gesture_x, y: gesture_y, w: gesture_w, h: gesture_h, color: 0xDD0F172Au32, text: "Swipe up|Pinch out|Swipe left"),
-        SceneElement(kind: "taskbar_preview", x: preview_x, y: preview_y, w: preview_w, h: preview_h, color: 0xEE020617u32, text: "Terminal|simple.terminal|win1"),
-        SceneElement(kind: "stage_rail", x: stage_rail_x, y: stage_rail_y, w: stage_rail_w, h: stage_rail_h, color: 0xDD020617u32, text: "Terminal|Browser|Settings"),
+        SceneElement(kind: "resize_hud", x: resize_hud_x, y: resize_hud_y, w: resize_hud_w, h: resize_hud_h, color: panel_col, text: "300 x 200|20,40|Snap ready"),
+        SceneElement(kind: "gesture_hints", x: gesture_x, y: gesture_y, w: gesture_w, h: gesture_h, color: panel_col, text: "Swipe up|Pinch out|Swipe left"),
+        SceneElement(kind: "taskbar_preview", x: preview_x, y: preview_y, w: preview_w, h: preview_h, color: panel_col, text: "Terminal|simple.terminal|win1"),
+        SceneElement(kind: "stage_rail", x: stage_rail_x, y: stage_rail_y, w: stage_rail_w, h: stage_rail_h, color: panel_col, text: "Terminal|Browser|Settings"),
         SceneElement(kind: "screen_capture_overlay", x: capture_x, y: capture_y, w: capture_w, h: capture_h, color: 0x99020617u32, text: "Selection|Window|Screen|Capture"),
-        SceneElement(kind: "clipboard_history", x: clipboard_x, y: clipboard_y, w: clipboard_w, h: clipboard_h, color: 0xEE020617u32, text: "Command|Code|Link|Paste|Pin|Clear"),
-        SceneElement(kind: "privacy_indicator", x: privacy_x, y: privacy_y, w: privacy_w, h: privacy_h, color: 0xEE020617u32, text: "Camera|Mic|Screen|Allow|Block"),
-        SceneElement(kind: "system_hud", x: system_hud_x, y: system_hud_y, w: system_hud_w, h: system_hud_h, color: 0xEE020617u32, text: "Volume|Brightness|68|Mute"),
-        SceneElement(kind: "wallpaper_picker", x: wallpaper_x, y: wallpaper_y, w: wallpaper_w, h: wallpaper_h, color: 0xEE020617u32, text: "Aurora|Dawn|Graphite"),
-        SceneElement(kind: "dock_stack", x: dock_stack_x, y: dock_stack_y, w: dock_stack_w, h: dock_stack_h, color: 0xEE020617u32, text: "Downloads|Screenshot|Report|Archive"),
-        SceneElement(kind: "widget_gallery", x: widget_gallery_x, y: widget_gallery_y, w: widget_gallery_w, h: widget_gallery_h, color: 0xEE020617u32, text: "Clock|Weather|Build|Small|Medium|Large")
+        SceneElement(kind: "clipboard_history", x: clipboard_x, y: clipboard_y, w: clipboard_w, h: clipboard_h, color: panel_col, text: "Command|Code|Link|Paste|Pin|Clear"),
+        SceneElement(kind: "privacy_indicator", x: privacy_x, y: privacy_y, w: privacy_w, h: privacy_h, color: panel_col, text: "Camera|Mic|Screen|Allow|Block"),
+        SceneElement(kind: "system_hud", x: system_hud_x, y: system_hud_y, w: system_hud_w, h: system_hud_h, color: panel_col, text: "Volume|Brightness|68|Mute"),
+        SceneElement(kind: "wallpaper_picker", x: wallpaper_x, y: wallpaper_y, w: wallpaper_w, h: wallpaper_h, color: panel_col, text: "Aurora|Dawn|Graphite"),
+        SceneElement(kind: "dock_stack", x: dock_stack_x, y: dock_stack_y, w: dock_stack_w, h: dock_stack_h, color: panel_col, text: "Downloads|Screenshot|Report|Archive"),
+        SceneElement(kind: "widget_gallery", x: widget_gallery_x, y: widget_gallery_y, w: widget_gallery_w, h: widget_gallery_h, color: panel_col, text: "Clock|Weather|Build|Small|Medium|Large")
     ]
     var icon_i = 0
     while icon_i < right_icon_count:
@@ -413,7 +430,7 @@ fn shared_wm_scene_to_chromed_wm_scene(scene: SharedWmScene, taskbar: TaskbarMod
             y: chrome.command_lane.y,
             w: 32,
             h: chrome.command_lane.height,
-            color: 0xFFE5E7EBu32,
+            color: fg_col,
             text: "right_icon_{icon_i}"
         ))
         icon_i = icon_i + 1
@@ -439,7 +456,7 @@ fn shared_wm_scene_to_chromed_wm_scene(scene: SharedWmScene, taskbar: TaskbarMod
             y: chrome.taskbar.y,
             w: 56,
             h: chrome.taskbar.height,
-            color: 0xFF475569u32,
+            color: idle_col,
             text: "{running.window_id}|{running.app_id}"
         ))
         run_i = run_i + 1
@@ -486,8 +503,106 @@ fn render_scene_to_backend(scene: WmSceneSpec, backend) -> [u32]:
     # chrome still appears when the CSS engine is skipped for cost.
     wm_scene_direct_rect_pixels(scene)
 
+fn _wm_scene_blend_pixel(fg: u32, bg: u32) -> u32:
+    val alpha = (fg >> 24) & 0xFFu32
+    if alpha == 0u32:
+        return bg
+    if alpha >= 255u32:
+        return fg
+    val inv = 255u32 - alpha
+    val fr = (fg >> 16) & 0xFFu32
+    val fgg = (fg >> 8) & 0xFFu32
+    val fb = fg & 0xFFu32
+    val br = (bg >> 16) & 0xFFu32
+    val bgg = (bg >> 8) & 0xFFu32
+    val bb = bg & 0xFFu32
+    val r = (fr * alpha + br * inv + 127u32) / 255u32
+    val g = (fgg * alpha + bgg * inv + 127u32) / 255u32
+    val b = (fb * alpha + bb * inv + 127u32) / 255u32
+    0xFF000000u32 | (r << 16) | (g << 8) | b
+
+fn _wm_scene_blurred_backdrop_at(pixels: [u32], width: i32, height: i32, px: i32, py: i32) -> u32:
+    val xm = if px >= 3: px - 3 else: 0
+    val xp = if px + 3 < width: px + 3 else: width - 1
+    val ym = if py >= 3: py - 3 else: 0
+    val yp = if py + 3 < height: py + 3 else: height - 1
+    val c0 = pixels[py * width + px]
+    val c1 = pixels[py * width + xm]
+    val c2 = pixels[py * width + xp]
+    val c3 = pixels[ym * width + px]
+    val c4 = pixels[yp * width + px]
+    val r = (((c0 >> 16) & 0xFFu32) + ((c1 >> 16) & 0xFFu32) + ((c2 >> 16) & 0xFFu32) + ((c3 >> 16) & 0xFFu32) + ((c4 >> 16) & 0xFFu32)) / 5u32
+    val g = (((c0 >> 8) & 0xFFu32) + ((c1 >> 8) & 0xFFu32) + ((c2 >> 8) & 0xFFu32) + ((c3 >> 8) & 0xFFu32) + ((c4 >> 8) & 0xFFu32)) / 5u32
+    val b = ((c0 & 0xFFu32) + (c1 & 0xFFu32) + (c2 & 0xFFu32) + (c3 & 0xFFu32) + (c4 & 0xFFu32)) / 5u32
+    0xFF000000u32 | (r << 16) | (g << 8) | b
+
+fn _wm_scene_inside_corner(lx: i32, ly: i32, w: i32, h: i32, r: i32) -> bool:
+    if r <= 0:
+        return true
+    var dx = 0
+    var dy = 0
+    if lx < r:
+        dx = r - lx - 1
+    elif lx >= w - r:
+        dx = lx - (w - r)
+    else:
+        return true
+    if ly < r:
+        dy = r - ly - 1
+    elif ly >= h - r:
+        dy = ly - (h - r)
+    else:
+        return true
+    (dx * dx + dy * dy) <= (r * r)
+
+fn _wm_scene_element_radius(kind: text, w: i32, h: i32) -> i32:
+    if w < 16 or h < 16:
+        return 0
+    var r = 0
+    if kind == "taskbar" or kind == "workspace_switcher" or kind == "live_activity":
+        r = h / 2
+        if r > 16:
+            r = 16
+    elif kind == "glass_panel" or kind == "motion_window" or kind == "command_palette" or kind == "control_center" or kind == "desktop_widgets" or kind == "window_overview":
+        r = 10
+    elif kind == "decoration":
+        r = 0
+    if r * 2 > w:
+        r = w / 2
+    if r * 2 > h:
+        r = h / 2
+    r
+
+fn _wm_scene_is_frosted_kind(kind: text) -> bool:
+    kind == "glass_panel" or kind == "taskbar" or kind == "command_lane" or kind == "motion_window" or kind == "command_palette" or kind == "control_center" or kind == "desktop_widgets" or kind == "window_overview" or kind == "notification_toast" or kind == "notification_center" or kind == "quick_settings" or kind == "app_launcher" or kind == "context_menu"
+
+fn _wm_scene_draw_text(pixels: [u32], width: i32, height: i32, start_x: i32, start_y: i32, max_w: i32, label_text: text, fg: u32) -> [u32]:
+    if label_text == "" or width <= 0 or height <= 0:
+        return pixels
+    var out = pixels
+    var pen_x = start_x
+    val max_x = if start_x + max_w < width: start_x + max_w else: width
+    for ch in label_text.chars():
+        if pen_x + 5 > max_x:
+            break
+        val rows = glyph_rows_for_char(ch)
+        var r = 0
+        while r < rows.len():
+            val py = start_y + r
+            if py >= 0 and py < height:
+                val bits = rows[r]
+                var c = 0
+                while c < 5:
+                    val px = pen_x + c
+                    if px >= 0 and px < max_x and ((bits >> (4 - c)) & 1) != 0:
+                        out[py * width + px] = _wm_scene_blend_pixel(fg, out[py * width + px])
+                    c = c + 1
+            r = r + 1
+        pen_x = pen_x + 6
+    out
+
 fn wm_scene_direct_rect_pixels(scene: WmSceneSpec) -> [u32]:
-    """Themed direct-rect rasterizer (the non-CSS fallback lane). Public so
+    """Themed liquid-glass direct rasterizer (the non-CSS fallback lane). Public so
     the theme contract spec can pin it deterministically — whether
     render_scene_to_backend reaches it depends on Metal availability and
     the CSS pixel cap, which vary by environment."""
@@ -497,8 +612,15 @@ fn wm_scene_direct_rect_pixels(scene: WmSceneSpec) -> [u32]:
     if total == 0:
         return pixels
     val stride = scene.width
+    val frosted_active = active_wm_theme_snapshot_present()
     for elem in scene.elements:
-        if not _wm_scene_element_is_text(elem.kind):
+        if _wm_scene_element_is_text(elem.kind):
+            val ty = elem.y + (if elem.h > 7: (elem.h - 7) / 2 else: 0)
+            pixels = _wm_scene_draw_text(pixels, stride, scene.height, elem.x, ty, elem.w, elem.text, elem.color)
+        else:
+            val alpha = (elem.color >> 24) & 0xFFu32
+            if alpha == 0u32:
+                continue
             val x_start = if elem.x < 0: 0 else: elem.x
             val y_start = if elem.y < 0: 0 else: elem.y
             var x_end = elem.x + elem.w
@@ -507,12 +629,33 @@ fn wm_scene_direct_rect_pixels(scene: WmSceneSpec) -> [u32]:
             var y_end = elem.y + elem.h
             if y_end > scene.height:
                 y_end = scene.height
+            val rad = if frosted_active or alpha < 255u32: _wm_scene_element_radius(elem.kind, elem.w, elem.h) else: 0
+            val do_frost = alpha < 255u32 and _wm_scene_is_frosted_kind(elem.kind)
             var yy = y_start
             while yy < y_end:
                 val row = yy * stride
+                val ly = yy - elem.y
+                val in_corner_y = rad > 0 and (ly < rad or ly >= elem.h - rad)
+                val sheen_row = do_frost and ly == 0
                 var xx = x_start
                 while xx < x_end:
-                    pixels[row + xx] = elem.color
+                    val lx = xx - elem.x
+                    var inside = true
+                    if in_corner_y and (lx < rad or lx >= elem.w - rad):
+                        inside = _wm_scene_inside_corner(lx, ly, elem.w, elem.h, rad)
+                    if inside:
+                        val idx = row + xx
+                        if alpha >= 255u32:
+                            pixels[idx] = elem.color
+                        else:
+                            val backdrop = if do_frost:
+                                _wm_scene_blurred_backdrop_at(pixels, stride, scene.height, xx, yy)
+                            else:
+                                pixels[idx]
+                            var blended = _wm_scene_blend_pixel(elem.color, backdrop)
+                            if sheen_row:
+                                blended = _wm_scene_blend_pixel(0x28FFFFFFu32, blended)
+                            pixels[idx] = blended
                     xx = xx + 1
                 yy = yy + 1
     pixels
@@ -555,7 +698,10 @@ fn wm_scene_visual_quality_report(scene: WmSceneSpec) -> WmSceneVisualQualityRep
     val wallpaper_picker_ready = _scene_wallpaper_picker_configured(html)
     val dock_stack_ready = _scene_dock_stack_configured(html)
     val widget_gallery_ready = _scene_widget_gallery_configured(html)
-    val contrast_ratio_x100 = _scene_contrast_ratio_x100(_scene_background_color(scene), 0xFFFFFFFFu32)
+    val bg_color = _scene_background_color(scene)
+    val theme_fg = wm_chrome_theme().text_primary
+    val target_fg = if _scene_relative_luminance_x1000(bg_color) > 400 and theme_fg != 0u32: theme_fg else: 0xFFFFFFFFu32
+    val contrast_ratio_x100 = _scene_contrast_ratio_x100(bg_color, target_fg)
     val color_checked = contrast_ratio_x100 >= 450 and html.contains("color:white")
     var bounded_layout = scene.width > 0 and scene.height > 0
     var max_command_palette_width_px = 0

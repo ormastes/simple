@@ -48,3 +48,32 @@ decoder-correctness task, not a guard-ordering one.
 the "requires at least one weight of 1" check ran before the oversubscription
 (power-of-two sum) check, so oversubscribed sets reported the wrong error.
 Reordered so oversubscribed/incomplete is detected first.
+
+## 2026-11-25 resolution (release/1.0.0 @ f09280e5969, worktree D:\wt-p2w7-aa)
+
+Both parts of this bug are resolved at HEAD:
+
+1. **Contradictory specs — reconciled.** Both specs now demand the SAME
+   outcome for the host-rejected direct-weight single-stream candidate:
+   `zstd_compressed_block_spec.spl:122` expects
+   `CorruptStream` / "Huffman literal stream has trailing bits" and
+   `zstd_single_sequence_compress_spec.spl:229` expects
+   `CorruptStream` / "trailing bits". Both helpers match via
+   `expect(message).to_contain(message_part)`, so the single decoder error
+   `CorruptStream("zstd Huffman literal stream has trailing bits")`
+   satisfies both. The old `UnsupportedFeature("zstd fresh-table compressed
+   literals are not host-validated")` expectation is gone from both specs.
+2. **Fresh-table literal decoder gap — closed.** The blanket fail-closed
+   guard no longer exists in `src/lib/common/compress/zstd_literals.spl`
+   (no "host-validated" string at HEAD); the type-2 path is implemented with
+   the standard MSB-first backward reader
+   (`_zstd_decode_huffman_stream_msb`, `zstd_literals.spl:47`) including the
+   4-stream jump-table split (`zstd_literals.spl:96-132`). The companion
+   sequence-side migration is recorded as closed in
+   `zstd_fse_sequence_lsb_reader_blocks_host_frames_2026-06-30.md`.
+
+Not re-executed: the pinned `bin/simple.exe` seed rejects the
+`@representation_boundary` decorator present at HEAD, so no spec can run on
+this host; verified by code inspection only.
+
+**Status: RESOLVED** 2026-11-25.

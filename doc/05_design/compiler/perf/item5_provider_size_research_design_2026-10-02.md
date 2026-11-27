@@ -9,6 +9,8 @@ Reuse existing environment variants, resolver, target profiles and SOSIX lifecyc
 This supplements existing optional-provider and executable-size designs.
 Status: researched design; implementation and host admission remain unproven.
 
+Superseded 2026-10-25: implementation remains PARTIAL (admission hardening `4efd8885ded`, pending acceptance scaffold `9a970f7051d`); member authority, dependency exclusion and size cohorts are OPEN. Status table: `doc/03_plan/evidence/item5_tdd_progress_2026-10-02.md`.
+
 ## Current-source findings
 
 provider_admission/state.spl and admission.spl provide metadata single-flight,

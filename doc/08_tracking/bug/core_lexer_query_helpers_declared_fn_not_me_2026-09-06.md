@@ -1,7 +1,12 @@
 # CoreLexer query helpers declared `fn`, not the `me` receiver the spec expects; a documenting comment is missing
 
 - **Filed:** 2026-09-06
-- **Status:** OPEN
+- **Status:** FIXED, 2026-11-08 using Reading B. The `fn` value-copy receiver
+  is the tighter intended capability for all 13 query helpers; the spec now
+  asserts `fn` rather than `me`. The scratch comment explicitly documents the
+  caller's value copy, and the facade assertion follows the current
+  `core_lexer_char_slice` wrapper. An independent source-contract check passes
+  all 13 receiver assertions plus every snapshot/tuple/scratch assertion.
 - **Area:** compiler / frontend lexer — `src/compiler/10.frontend/core/lexer_struct.spl`
 - **Spec:** `test/01_unit/compiler/lexer/core_lexer_receiver_capability_source_spec.spl`
 
@@ -60,3 +65,40 @@ unrequested behavior change).
   the value copy"` near the `slice_parts` scratch-buffer code, or update the
   spec's expected substring to match the current (or a newly authored)
   comment.
+
+
+---
+
+## 2026-11-10 (p3-compiler lane, rows 1-8, Windows worktree, seed-smoke) — SUPERSEDED ON release/1.0.0
+
+Lane: `work/p3-compiler-20261110` on `origin/release/1.0.0` (base `dfc7da8523f4`).
+Runtime: worktree Rust seed `bin/simple.exe` (built 2026-11-10). Seed-smoke only.
+
+**Disposition: SUPERSEDED.** The 2026-11-08 Reading B resolution is merged and verified:
+the 13 query helpers remain `fn` (value-copy receiver) in
+`src/compiler/10.frontend/core/lexer_struct.spl`, the caller's-copy rationale comment is
+restored at the scratch slicing site, and the spec now asserts `fn`.
+
+Seed-smoke: `bin/simple.exe test
+test/01_unit/compiler/lexer/core_lexer_receiver_capability_source_spec.spl` →
+`outcome=OK declared>=3 executed=3 passed=3 failed=0`.
+
+---
+
+## 2026-11-11 (lane p3-comp11) — re-verified FIXED, header stands
+
+Lane: `work/p3-comp11-20261111` on `origin/release/1.0.0` (base `41935a5f61860`).
+Runtime: tracked seed `bin/simple.exe` (build commit `46fe8f6b6def`). Seed-smoke only.
+
+The 2026-11-08 Reading B resolution and the 2026-11-10 lane addendum were
+re-verified fresh rather than re-litigated: the spec
+`test/01_unit/compiler/lexer/core_lexer_receiver_capability_source_spec.spl`
+now asserts the `fn` (value-copy) receiver for the 13 query helpers and passes
+clean on the tracked seed —
+`outcome=OK declared>=3 executed=3 passed=3 failed=0`
+(`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe bin/simple.exe test
+test/01_unit/compiler/lexer/core_lexer_receiver_capability_source_spec.spl
+--mode=interpreter --no-cache`). Source spot-check: the 13 helpers remain
+plain `fn` in `src/compiler/10.frontend/core/lexer_struct.spl` and the
+caller's-copy rationale comment is present at the scratch-slicing site.
+No header change needed; this addendum records the fresh re-verification.

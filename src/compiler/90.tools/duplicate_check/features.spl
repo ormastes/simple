@@ -12,6 +12,10 @@ struct TokenFeature:
 struct FeatureVec:
     block_id: i64
     features: {text: f64}
+    # Key list computed once at build time: calling features.keys() per scored
+    # pair allocated a fresh array every comparison (12 GB native cosine peak,
+    # doc/08_tracking/bug/2026-11-18_dupcheck_cosine_native_peak_12gb.md).
+    tokens: [text]
     magnitude: f64
 
 fn extract_token_frequencies(tokens: [SimpleToken], start: i64, end: i64) -> {text: i64}:
@@ -37,7 +41,7 @@ fn build_feature_vector(block_id: i64, freq_map: {text: i64}) -> FeatureVec:
         total = total + freq_map[token_str]
 
     if total == 0:
-        return FeatureVec(block_id: block_id, features: {}, magnitude: 0.0)
+        return FeatureVec(block_id: block_id, features: {}, tokens: [], magnitude: 0.0)
 
     var features = {}
     var sum_squares = 0.0
@@ -51,6 +55,7 @@ fn build_feature_vector(block_id: i64, freq_map: {text: i64}) -> FeatureVec:
     FeatureVec(
         block_id: block_id,
         features: features,
+        tokens: keys,
         magnitude: math_sqrt(sum_squares)
     )
 
@@ -58,7 +63,7 @@ fn cosine_similarity(vector1: FeatureVec, vector2: FeatureVec) -> f64:
     """Compute cosine similarity between two feature vectors."""
     var dot_product = 0.0
 
-    for token in vector1.features.keys():
+    for token in vector1.tokens:
         if vector2.features.has(token):
             val w1 = vector1.features[token]
             val w2 = vector2.features[token]

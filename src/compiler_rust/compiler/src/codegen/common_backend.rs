@@ -20,6 +20,7 @@ use simple_common::target::{Target, TargetArch, TargetCpu, TargetOS};
 use crate::hir::TypeId;
 use crate::mir::{MirFunction, MirInst, MirModule};
 
+use super::func_id_table::FuncIdTable;
 use super::instr::compile_function_body;
 use super::mir_inline::inline_small_pure_functions;
 use super::runtime_sffi::runtime_funcs_for_target;
@@ -49,6 +50,10 @@ pub type BackendResult<T> = Result<T, BackendError>;
 /// Generated module initialization is normally silent.  This gate is opt-in
 /// because a compiler-scale module can have thousands of runtime-backed
 /// initializers.
+fn is_windows_arm64(target: Target) -> bool {
+    target.os == TargetOS::Windows && target.arch == TargetArch::Aarch64
+}
+
 fn module_init_trace_enabled_for(value: Option<&str>) -> bool {
     value.is_some_and(|value| value != "0")
 }
@@ -81,6 +86,24 @@ fn emit_module_init_trace<M: Module>(
     let trace_ref = module.declare_func_in_func(trace_id, builder.func);
     builder.ins().call(trace_ref, &[pointer, length]);
     Ok(())
+}
+
+/// Names of globals the given functions load or store.
+pub(crate) fn referenced_global_names(functions: &[MirFunction]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for func in functions {
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst {
+                    MirInst::GlobalLoad { global_name, .. } | MirInst::GlobalStore { global_name, .. } => {
+                        names.insert(global_name.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    names
 }
 
 pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String> {
@@ -138,6 +161,11 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                         let base = super::instr::calls::strip_call_module_prefix(raw);
                         if let Some(alias) = super::instr::calls::sffi_alias_target(base) {
                             names.insert(alias.to_string());
+                        }
+                        // The inlined `[u32]` set traps on a byte-packed `[u8]`
+                        // through this cold-branch symbol, never named in MIR.
+                        if base == "rt_typed_words_u32_set" {
+                            names.insert("rt_typed_words_byte_write_trap".to_string());
                         }
                     }
                     MirInst::InterpCall { func_name, .. } => {
@@ -230,6 +258,13 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                                 }
                                 .to_string(),
                             );
+                        }
+                    }
+                    MirInst::Drop { ty, .. } => {
+                        if *ty == TypeId::STRING {
+                            names.insert("rt_string_free".to_string());
+                        } else if !super::instr::is_drop_scalar_type(*ty) {
+                            names.insert("rt_rc_release".to_string());
                         }
                     }
                     MirInst::Yield { .. } => {
@@ -406,10 +441,12 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                     MirInst::BuiltinMethod { .. } => {
                         for n in [
                             "rt_array_clear",
+                            "rt_array_data_ptr",
                             "rt_array_extend_i64",
                             "rt_array_len",
                             "rt_array_pop",
                             "rt_array_push",
+                            "rt_array_reserve",
                             // Real tagging helpers used by methods.rs
                             // `wrap_value`. The former "rt_box_float"/
                             // "rt_box_int" entries here named symbols that
@@ -423,21 +460,33 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                             "rt_dict_set",
                             "rt_dict_values",
                             "rt_index_get",
+                            "rt_get",
                             "rt_index_set",
                             "rt_len",
                             "rt_method_not_found",
+                            "rt_reverse",
+                            "rt_reverse_mut",
                             "rt_slice",
+                            "rt_slice_text_bytes",
                             "rt_string_concat",
+                            "rt_string_data",
                             "rt_string_ends_with",
                             "rt_string_len",
+                            "rt_string_char_count",
                             "rt_string_starts_with",
                             "rt_string_parse_int",
                             "rt_string_to_float",
                             // methods.rs parses a STRING receiver rather than
-                            // bit-converting its pointer; both helpers must be
+                            // bit-converting its pointer and runtime-dispatches
+                            // erased numeric conversions; all helpers must be
                             // pre-declared or the emit fails to resolve them.
                             "rt_string_to_int",
+                            "rt_any_to_int",
                             "rt_value_as_float",
+                            "rt_value_eq",
+                            "rt_value_is_bool",
+                            "rt_value_is_float",
+                            "rt_value_is_int",
                             "rt_tuple_get",
                             "rt_tuple_len",
                             "rt_tuple_set",
@@ -455,6 +504,12 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                     // `BuiltinMethod` above. Gate on the func_name's method
                     // suffix so this family is only pulled in for programs
                     // that actually use one of these methods.
+                    // compile_method_call_virtual's JIT receiver guard
+                    // (closures_structs.rs) aborts through rt_method_not_found
+                    // when the receiver carries no known vtable.
+                    MirInst::MethodCallVirtual { .. } => {
+                        names.insert("rt_method_not_found".to_string());
+                    }
                     MirInst::MethodCallStatic { func_name, .. } => {
                         // try_emit_vtable_type_switch (closures_structs.rs)
                         // falls back to rt_method_not_found on a vtable miss.
@@ -605,16 +660,32 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_string_new"
             // Emitted by codegen itself, never named in Simple source: the
             // decode wrapper `calls.rs` inserts around runtime entry points
-            // that return `*const c_char` (see C_STRING_RETURNING_RUNTIME_FNS).
+            // that return `*const c_char` (see C_STRING_RETURNING_RUNTIME_FNS)
+            // or tagged `RuntimeValue` booleans (see TAGGED_BOOL_RETURNING_RUNTIME_FNS).
             | "rt_cstring_to_text"
+            | "rt_value_as_bool"
             | "rt_string_new_literal"
             | "rt_string_data"
             | "rt_string_len"
+            // Emitted by `inline_runtime_len_value` for the text arm of a
+            // user-facing `.len()` (code points, ADR-005 item 5).
+            | "rt_string_char_count"
+            // `inline_runtime_len_value` calls it for heap tag 4 (a Rust
+            // RuntimeTuple) on an erased `.len()` receiver.
+            | "rt_tuple_len"
             | "rt_string_bytes"
-            // Erased `.to_i64()`/`.to_int()` receivers synthesize this call
-            // during Cranelift lowering, so it is absent from MIR call names.
+            // Erased numeric conversions synthesize these calls during
+            // Cranelift lowering, so they can be absent from MIR call names.
+            // `rt_any_cast_int` is the MIR call for `any as <int>`.
             | "rt_to_int_dynamic"
             | "rt_any_to_int"
+            | "rt_any_cast_int"
+            | "rt_string_to_float"
+            | "rt_string_to_int"
+            | "rt_value_eq"
+            | "rt_value_is_bool"
+            | "rt_value_is_float"
+            | "rt_value_is_int"
             | "rt_string_builder_new"
             | "rt_string_builder_push"
             | "rt_string_builder_finish"
@@ -631,6 +702,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_contains"
             | "rt_len"
             | "rt_slice"
+            | "rt_slice_text_bytes"
             | "rt_alloc"
             | "rt_struct_alloc"
             | "rt_struct_receiver_valid"
@@ -650,6 +722,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_tuple_get"
             | "rt_tuple_set"
             | "rt_enum_new"
+            | "rt_enum_register_name"
             | "rt_enum_discriminant"
             | "rt_enum_id"
             | "rt_enum_payload"
@@ -703,6 +776,8 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             // entry is likely redundant with referenced_call_names, but kept
             // for parity/safety with the explicit call-site pattern.
             | "rt_opt_i64_to_string"
+            | "rt_i64_to_hex"
+            | "rt_opt_value_to_string"
             | "rt_opt_bool_to_string"
             | "rt_opt_f64_to_string"
             | "rt_hash_text"
@@ -781,7 +856,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
 pub struct CodegenBackend<M: Module> {
     pub module: M,
     pub ctx: Context,
-    pub func_ids: BTreeMap<String, cranelift_module::FuncId>,
+    pub func_ids: FuncIdTable,
     pub runtime_funcs: HashMap<&'static str, cranelift_module::FuncId>,
     pub global_ids: BTreeMap<String, cranelift_module::DataId>,
     pub body_stub: Option<cranelift_module::FuncId>,
@@ -803,6 +878,14 @@ pub struct CodegenBackend<M: Module> {
     /// These names keep their raw (unmangled) symbol name to avoid breaking
     /// cross-module resolution when the import map can't disambiguate.
     pub ambiguous_names: std::sync::Arc<std::collections::HashSet<String>>,
+    /// Global names this module's code actually loads or stores (set by
+    /// compile_all). An imported global that resolves through neither
+    /// use_map nor import_map and is not in this set is NOT declared: the
+    /// own-prefix fallback would name a symbol nothing defines, and COFF
+    /// links fail on every undefined external even when unreferenced
+    /// (doc/08_tracking/bug/windows_stage2_imported_a64_consts_undefined_2026-11-19.md).
+    /// `None` keeps the old declare-everything behaviour.
+    pub referenced_globals: Option<std::collections::HashSet<String>>,
     /// Per-module use map: local imported name → mangled name.
     /// Built from the current file's `use` statements. Used to resolve
     /// ambiguous cross-module imports that the global import map can't handle.
@@ -832,7 +915,365 @@ pub struct CodegenBackend<M: Module> {
     /// Vtable data object IDs by TypeId (HIR TypeId -> DataId).
     /// Used by MirInst::StructInit dispatch which has type_id, not struct_name.
     pub vtable_type_ids: BTreeMap<crate::hir::TypeId, cranelift_module::DataId>,
+    /// Worker threads for Cranelift codegen in `compile_all_functions` (0/1 =
+    /// serial). MIR->CLIF translation stays on the calling thread (it needs
+    /// `&mut module`); each translated `Context` is compiled on a worker and
+    /// defined back on the calling thread in submission order, so code layout is
+    /// identical to the serial path. Requires `codegen_isa`.
+    pub codegen_workers: usize,
+    /// The module's ISA, for codegen workers (`module.isa()` borrows the module).
+    pub codegen_isa: Option<OwnedTargetIsa>,
+    /// Counters for the most recent `compile_all_functions` body loop.
+    pub body_loop_stats: BodyLoopStats,
+    /// When `Some`, every defined body is appended here (name, final CLIF,
+    /// machine code) in define order. Tests use it to compare the serial and
+    /// parallel paths byte for byte.
+    pub capture_code: Option<Vec<CapturedFunction>>,
 }
+
+/// Body-loop counters for the most recent `compile_all_functions`.
+#[derive(Debug, Default, Clone)]
+pub struct BodyLoopStats {
+    /// Nanoseconds the calling thread spent translating MIR to CLIF.
+    pub main_translate_ns: u64,
+    /// Bodies translated on the calling thread.
+    pub main_translated: usize,
+    /// Bodies translated on worker threads and accepted.
+    pub worker_translated: usize,
+    /// Worker translations discarded because a name they read changed after
+    /// their snapshot (translated again on the calling thread).
+    pub stale: usize,
+    /// Declaration snapshots built for the workers.
+    pub snapshots: usize,
+    /// Nanoseconds the calling thread spent building them.
+    pub snapshot_ns: u64,
+    /// Nanoseconds the calling thread spent compiling stale bodies itself.
+    pub main_codegen_ns: u64,
+    /// Worker nanoseconds in translation / codegen (summed over workers).
+    pub worker_translate_ns: u64,
+    pub worker_codegen_ns: u64,
+    /// Nanoseconds the calling thread waited for worker results.
+    pub wait_ns: u64,
+    /// Wall nanoseconds of the whole body loop.
+    pub loop_ns: u64,
+}
+
+/// One defined body, recorded when `CodegenBackend::capture_code` is on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedFunction {
+    pub name: String,
+    pub clif: String,
+    pub code: Vec<u8>,
+}
+
+fn capture_defined(capture: &mut Option<Vec<CapturedFunction>>, name: &str, ctx: &Context) {
+    if let Some(out) = capture.as_mut() {
+        out.push(CapturedFunction {
+            name: name.to_string(),
+            clif: ctx.func.display().to_string(),
+            code: ctx.compiled_code().map(|c| c.code_buffer().to_vec()).unwrap_or_default(),
+        });
+    }
+}
+
+/// Verify a translated function once (fail closed) and run Cranelift codegen
+/// on it. Needs only the ISA, so `compile_all_functions` runs it on worker
+/// threads. `define_function` would reject bad IR too while Cranelift's own
+/// verifier is on, but the JIT turns that repeat off (`BackendSettings::verifier`).
+fn codegen_translated(
+    isa: &dyn cranelift_codegen::isa::TargetIsa,
+    ctx: &mut Context,
+    name: &str,
+) -> BackendResult<u64> {
+    if let Err(errors) = cranelift_codegen::verify_function(&ctx.func, isa) {
+        eprintln!("[CODEGEN VERIFY] Function '{}' has verifier errors: {}", name, errors);
+        return Err(BackendError::ModuleError(format!(
+            "Compilation error in '{}': Compilation error: Verifier errors",
+            name
+        )));
+    }
+    crate::codegen::shared::compile_aligned(isa, ctx)
+        .map_err(|e| BackendError::ModuleError(format!("Compilation error in '{}': {}", name, e)))
+}
+
+/// What `compile_function_body` reads besides the module and `func_ids`;
+/// none of it changes during the body loop, so workers share it.
+struct XlateInputs<'a> {
+    runtime_funcs: &'a HashMap<&'static str, cranelift_module::FuncId>,
+    global_ids: &'a BTreeMap<String, cranelift_module::DataId>,
+    import_map: &'a Arc<HashMap<String, String>>,
+    use_map: &'a HashMap<String, String>,
+    ambiguous_names: &'a Arc<HashSet<String>>,
+    data_exports: &'a Arc<HashSet<String>>,
+    vtable_data_ids: &'a BTreeMap<String, cranelift_module::DataId>,
+    vtable_type_ids: &'a BTreeMap<crate::hir::TypeId, cranelift_module::DataId>,
+    fn_arities: &'a Arc<HashMap<String, usize>>,
+    function_return_types: &'a HashMap<String, TypeId>,
+    enum_defs: &'a Arc<HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>>,
+    tag_runtime_pool_join_result: bool,
+    baremetal: bool,
+    fam_arrays: bool,
+}
+
+/// Why a translation failed. The caller prints it ([`XlateFailure::report`]):
+/// a worker's failed translation is redone on the calling thread, which is
+/// the one that reports, in function order.
+enum XlateFailure {
+    UnknownFunction,
+    Body(String),
+    Panic(String),
+}
+
+impl XlateFailure {
+    fn report(&self, name: &str) {
+        match self {
+            XlateFailure::UnknownFunction => {}
+            XlateFailure::Body(e) => eprintln!("[CODEGEN BODY] Function '{}' body compilation failed: {}", name, e),
+            XlateFailure::Panic(msg) => eprintln!(
+                "[CODEGEN PANIC] Function '{}' panicked during body compilation/finalize: {}",
+                name, msg
+            ),
+        }
+    }
+
+    fn into_error(self, name: &str) -> BackendError {
+        match self {
+            XlateFailure::UnknownFunction => BackendError::UnknownFunction(name.to_string()),
+            XlateFailure::Body(e) => BackendError::ModuleError(e),
+            XlateFailure::Panic(msg) => {
+                BackendError::ModuleError(format!("panic while compiling function '{}': {}", name, msg))
+            }
+        }
+    }
+}
+
+/// Translate one MIR function into `cl_func` (no verify, no codegen).
+/// `Ok(None)` for an imported function, which has no body. Generic over the
+/// module so a translation worker can run it on an `XlateModule` view.
+fn translate_body<M: Module>(
+    module: &mut M,
+    func_ids: &mut FuncIdTable,
+    cl_func: &mut cranelift_codegen::ir::Function,
+    func: &MirFunction,
+    inputs: &XlateInputs<'_>,
+    live_ins: Option<HashMap<crate::mir::BlockId, HashSet<crate::mir::VReg>>>,
+) -> Result<Option<cranelift_module::FuncId>, XlateFailure> {
+    let func_id = *func_ids.get(&func.name).ok_or(XlateFailure::UnknownFunction)?;
+
+    // Skip extern/imported functions (no body expected; provided by runtime/SFFI).
+    if super::xlate_view::func_decl_linkage_params(&*module, func_id).0 == cranelift_module::Linkage::Import {
+        return Ok(None);
+    }
+
+    cl_func.signature = build_mir_signature(func, module.isa().default_call_conv());
+    cl_func.name = UserFuncName::user(0, func_id.as_u32());
+
+    // Use the shared function body compilation
+    let body_result = catch_unwind(AssertUnwindSafe(|| {
+        compile_function_body(
+            module,
+            cl_func,
+            func,
+            func_ids,
+            inputs.runtime_funcs,
+            inputs.global_ids,
+            inputs.import_map,
+            inputs.use_map,
+            inputs.ambiguous_names,
+            inputs.data_exports,
+            inputs.vtable_data_ids,
+            inputs.vtable_type_ids,
+            inputs.fn_arities,
+            inputs.function_return_types,
+            inputs.enum_defs,
+            inputs.tag_runtime_pool_join_result,
+            inputs.baremetal,
+            inputs.fam_arrays,
+            live_ins,
+        )
+    }));
+    match body_result {
+        Ok(Ok(())) => Ok(Some(func_id)),
+        Ok(Err(e)) => Err(XlateFailure::Body(e)),
+        Err(payload) => {
+            let panic_msg = if let Some(msg) = payload.downcast_ref::<&str>() {
+                (*msg).to_string()
+            } else if let Some(msg) = payload.downcast_ref::<String>() {
+                msg.clone()
+            } else {
+                "unknown panic payload".to_string()
+            };
+            Err(XlateFailure::Panic(panic_msg))
+        }
+    }
+}
+
+/// A body handed to a translation worker: its position among the bodies, its
+/// index in the function list, the snapshot to translate against, and a
+/// cleared context to translate into.
+struct XlateJob {
+    pos: usize,
+    idx: usize,
+    snapshot: Arc<super::xlate_view::Snapshot>,
+    ctx: Context,
+}
+
+/// A worker's translation (plus codegen when it translated cleanly).
+struct XlateDone {
+    worker: usize,
+    pos: usize,
+    idx: usize,
+    epoch: usize,
+    ctx: Context,
+    translated: Result<Option<cranelift_module::FuncId>, XlateFailure>,
+    log: super::xlate_view::XlateLog,
+    module_cmds: Vec<super::xlate_view::ModuleCmd>,
+    func_id_cmds: Vec<(String, cranelift_module::FuncId, bool)>,
+    codegen: Option<std::thread::Result<BackendResult<u64>>>,
+    /// Worker time in translation and in codegen.
+    translate_ns: u64,
+    codegen_ns: u64,
+}
+
+/// Translate (and, when clean, compile) one body on a worker thread against
+/// `job.snapshot`. Nothing here touches the live module.
+fn xlate_worker_run(
+    worker: usize,
+    isa: &dyn cranelift_codegen::isa::TargetIsa,
+    functions: &[MirFunction],
+    inputs: &XlateInputs<'_>,
+    job: XlateJob,
+) -> XlateDone {
+    let XlateJob {
+        pos,
+        idx,
+        snapshot,
+        mut ctx,
+    } = job;
+    let func = &functions[idx];
+    let start = std::time::Instant::now();
+    super::xlate_view::begin();
+    let mut module = super::xlate_view::XlateModule::new(isa, &snapshot.decls);
+    let mut ids = FuncIdTable::view_of(snapshot.func_ids.clone());
+    let translated = translate_body(&mut module, &mut ids, &mut ctx.func, func, inputs, None);
+    let module_cmds = std::mem::take(&mut module.cmds);
+    drop(module);
+    let func_id_cmds = ids.take_view_log();
+    drop(ids);
+    let log = super::xlate_view::end();
+    let translate_ns = start.elapsed().as_nanos() as u64;
+    let start = std::time::Instant::now();
+    let codegen = match &translated {
+        Ok(Some(_)) if log.unsupported.is_none() => Some(catch_unwind(AssertUnwindSafe(|| {
+            codegen_translated(isa, &mut ctx, &func.name)
+        }))),
+        _ => None,
+    };
+    XlateDone {
+        worker,
+        pos,
+        idx,
+        epoch: snapshot.epoch,
+        ctx,
+        translated,
+        log,
+        module_cmds,
+        func_id_cmds,
+        codegen,
+        translate_ns,
+        codegen_ns: start.elapsed().as_nanos() as u64,
+    }
+}
+
+/// Define the code `ctx` was compiled to by [`codegen_translated`].
+fn define_translated<M: Module>(
+    module: &mut M,
+    func_id: cranelift_module::FuncId,
+    ctx: &Context,
+    name: &str,
+    alignment: u64,
+) -> BackendResult<()> {
+    crate::codegen::shared::define_compiled(module, func_id, ctx, alignment)
+        .map_err(|e| BackendError::ModuleError(format!("Compilation error in '{}': {}", name, e)))
+}
+
+/// Progress and `SIMPLE_DUMP_MIR` output before a function body is compiled.
+fn trace_before_compile(idx: usize, total: usize, func: &MirFunction, native_trace: bool, dump_mir_filter: Option<&str>) {
+    if native_trace && (idx == 0 || idx % 250 == 0) {
+        eprintln!("[rust-jit] compile function {}/{} {}", idx + 1, total, func.name);
+    }
+    if let Some(filter) = dump_mir_filter {
+        if filter == "1" || func.name.contains(filter) {
+            eprintln!("[MIR-DUMP] function: {}", func.name);
+            dump_function_blocks(func);
+        }
+    }
+}
+
+fn dump_function_blocks(func: &MirFunction) {
+    for block in &func.blocks {
+        eprintln!("  block {:?} (entry={})", block.id, block.id == func.entry_block);
+        for inst in &block.instructions {
+            eprintln!("    {:?}", inst);
+        }
+        eprintln!("    terminator: {:?}", block.terminator);
+    }
+}
+
+/// Loud, distinctive marker for a function body that failed to compile, so
+/// missing-body bugs cannot hide in normal log noise. Includes the func name so
+/// methods like "DesktopShell.init" surface immediately (an earlier workaround
+/// inlined launcher_init() into DesktopShell.new() because `me init()` silently
+/// became a stub via this exact path). A "Copy: source vreg not found" error
+/// auto-dumps the failing function's MIR so the cross-block VReg root cause is
+/// visible without an extra env var or a seed rebuild.
+fn report_codegen_failure(func: &MirFunction, e: &BackendError) {
+    let err_str = format!("{:?}", e);
+    if err_str.contains("source vreg") {
+        eprintln!(
+            "[CODEGEN-STUB-FALLBACK] undefined-vreg in '{}': {} \
+             — auto-dumping post-inline MIR:",
+            func.name, err_str
+        );
+        dump_function_blocks(func);
+    } else if std::env::var_os("SIMPLE_ALLOW_STUB_FALLBACK").is_some() {
+        // Escape hatch: allow stub emission but always warn so callers
+        // can see which functions were silently replaced.
+        eprintln!(
+            "[CODEGEN-STUB-FALLBACK] body compilation failed for '{}': {:?} \
+             — replacing with empty stub (SIMPLE_ALLOW_STUB_FALLBACK is set).",
+            func.name, e
+        );
+    } else {
+        eprintln!("[CODEGEN-STUB-FALLBACK] body compilation failed for '{}': {:?}", func.name, e);
+    }
+}
+
+/// Fewest functions for which `compile_all_functions` uses codegen workers.
+const PARALLEL_CODEGEN_MIN_FUNCTIONS: usize = 64;
+/// Fewest workers for which translation moves onto them (`compile_bodies_xlate_parallel`).
+const XLATE_PARALLEL_MIN_WORKERS: usize = 6;
+
+/// A translated function handed to a codegen worker: (submission seq, index
+/// into the function list, its id, the translated context).
+type CodegenJob = (usize, usize, cranelift_module::FuncId, Context);
+/// A worker's answer: (worker, seq, index, id, context, codegen result). A
+/// worker panic travels back as `Err` and is resumed on the calling thread,
+/// exactly where the serial path would have panicked.
+type CodegenDone = (
+    usize,
+    usize,
+    usize,
+    cranelift_module::FuncId,
+    Context,
+    std::thread::Result<BackendResult<u64>>,
+);
+
+const _: fn() = || {
+    fn send<T: Send>() {}
+    send::<Context>();
+    send::<OwnedTargetIsa>();
+};
 
 /// Toggle individual ISA extensions on or off.
 /// `None` = use Cranelift default (detect from host CPU or target CPU profile).
@@ -985,6 +1426,11 @@ pub struct BackendSettings {
     /// Populated from `SIMPLE_CPU_FEATURES` env var when calling `aot()`, `jit()`,
     /// or `aot_for_target()`.
     pub cpu_features: CpuFeatureConfig,
+    /// Cranelift's own verifier, run inside `define_function` (after each
+    /// pass). `compile_function` always verifies the translated IR once and
+    /// fails closed, so the JIT turns this repeat off (~0.7 s of the web
+    /// catalog's per-run compile).
+    pub verifier: bool,
 }
 
 impl Default for BackendSettings {
@@ -995,6 +1441,7 @@ impl Default for BackendSettings {
             target: Target::host(),
             cpu: TargetCpu::builtin_default_for_arch(Target::host().arch),
             cpu_features: CpuFeatureConfig::default(),
+            verifier: true,
         }
     }
 }
@@ -1009,6 +1456,7 @@ impl BackendSettings {
             target: Target::host(),
             cpu: TargetCpu::builtin_default_for_arch(Target::host().arch),
             cpu_features: CpuFeatureConfig::from_env(),
+            verifier: true,
         }
     }
 
@@ -1018,10 +1466,11 @@ impl BackendSettings {
             opt_level: "speed",
             // Enable PIC for hosted targets (PIE executables, shared libraries).
             // Disable PIC for baremetal/freestanding targets — no GOT, no dynamic linker.
-            is_pic: !target.is_baremetal(),
+            is_pic: !target.is_baremetal() && !is_windows_arm64(target),
             target,
             cpu: TargetCpu::builtin_default_for_arch(target.arch),
             cpu_features: CpuFeatureConfig::from_env(),
+            verifier: true,
         }
     }
 
@@ -1055,6 +1504,7 @@ impl BackendSettings {
             target: Target::host(),
             cpu: TargetCpu::builtin_default_for_arch(Target::host().arch),
             cpu_features: CpuFeatureConfig::from_env(),
+            verifier: false,
         }
     }
 
@@ -1097,6 +1547,7 @@ type IsaCacheKey = (
     &'static str, // opt_level
     bool,         // is_pic
     String,       // cpu_features — Debug-stringified (no Hash impl)
+    bool,         // verifier
 );
 
 /// Process-wide ISA cache. ISA construction (especially `cranelift_native::builder_with_options`
@@ -1115,6 +1566,7 @@ pub fn create_isa_and_flags(
         settings.opt_level,
         settings.is_pic,
         format!("{:?}", settings.cpu_features),
+        settings.verifier,
     );
 
     // Fast path: return cached ISA.
@@ -1129,6 +1581,9 @@ pub fn create_isa_and_flags(
     let mut settings_builder = settings::builder();
     settings_builder
         .set("opt_level", settings.opt_level)
+        .map_err(|e| BackendError::Compilation(e.to_string()))?;
+    settings_builder
+        .set("enable_verifier", if settings.verifier { "true" } else { "false" })
         .map_err(|e| BackendError::Compilation(e.to_string()))?;
 
     if settings.is_pic {
@@ -1335,7 +1790,7 @@ impl<M: Module> CodegenBackend<M> {
         Ok(Self {
             module,
             ctx,
-            func_ids: BTreeMap::new(),
+            func_ids: FuncIdTable::new(),
             runtime_funcs: HashMap::new(),
             global_ids: BTreeMap::new(),
             body_stub: None,
@@ -1344,6 +1799,7 @@ impl<M: Module> CodegenBackend<M> {
             is_entry_module: false,
             import_map: std::sync::Arc::new(std::collections::HashMap::new()),
             ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
+            referenced_globals: None,
             use_map: std::collections::HashMap::new(),
             data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
             fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1352,6 +1808,10 @@ impl<M: Module> CodegenBackend<M> {
             tag_runtime_pool_join_result: false,
             vtable_data_ids: BTreeMap::new(),
             vtable_type_ids: BTreeMap::new(),
+            codegen_workers: 0,
+            codegen_isa: None,
+            body_loop_stats: BodyLoopStats::default(),
+            capture_code: None,
         })
     }
 
@@ -1554,7 +2014,7 @@ impl<M: Module> CodegenBackend<M> {
         // Runtime IDs are fallback name-resolution entries. Never let a later
         // compilation unit replace an existing local raw-name mapping.
         for (name, id) in &self.runtime_funcs {
-            self.func_ids.entry((*name).to_string()).or_insert(*id);
+            self.func_ids.or_insert((*name).to_string(), *id);
         }
 
         let _total_mir_functions = functions.len();
@@ -1591,6 +2051,10 @@ impl<M: Module> CodegenBackend<M> {
                     continue;
                 }
                 (self.sanitize_symbol(&func.name), cranelift_module::Linkage::Import)
+            } else if let Some(export_c) = func.attributes.iter().find_map(|a| a.strip_prefix("export_c_name=")) {
+                (self.sanitize_symbol(export_c), cranelift_module::Linkage::Export)
+            } else if func.attributes.iter().any(|a| a == "export" || a == "global") {
+                (self.sanitize_symbol(&func.name), cranelift_module::Linkage::Export)
             } else {
                 // Export (STB_GLOBAL) so symbols override weak crt0 boot-stubs and
                 // are visible to the freestanding --defsym linker mechanism.
@@ -1614,9 +2078,9 @@ impl<M: Module> CodegenBackend<M> {
                 self.function_return_types.insert(symbol_name, func.return_type);
             } else {
                 // Imports never displace an already-known local body.
-                self.func_ids.entry(func.name.clone()).or_insert(func_id);
+                self.func_ids.or_insert(func.name.clone(), func_id);
                 if symbol_name != func.name {
-                    self.func_ids.entry(symbol_name.clone()).or_insert(func_id);
+                    self.func_ids.or_insert(symbol_name.clone(), func_id);
                 }
                 self.function_return_types
                     .entry(func.name.clone())
@@ -1754,7 +2218,7 @@ impl<M: Module> CodegenBackend<M> {
                                     name, sanitized
                                 );
                             }
-                            self.func_ids.entry(name.clone()).or_insert(fid);
+                            self.func_ids.or_insert(name.clone(), fid);
                             continue;
                         }
                     }
@@ -1787,6 +2251,18 @@ impl<M: Module> CodegenBackend<M> {
                     return Err(BackendError::ModuleError(format!(
                         "ambiguous private global `{name}` must be imported explicitly"
                     )));
+                }
+                if use_hit.is_none()
+                    && import_hit.is_none()
+                    && self
+                        .referenced_globals
+                        .as_ref()
+                        .is_some_and(|referenced| !referenced.contains(name.as_str()))
+                {
+                    if trace_global {
+                        eprintln!("[declare-globals] skip unresolved unreferenced import name={}", name);
+                    }
+                    continue;
                 }
                 // Level-gated developer probe, DEFAULT OFF. Opt in with
                 // SIMPLE_TRACE_DECLARE_GLOBALS=1, the same knob that governs the
@@ -1890,75 +2366,473 @@ impl<M: Module> CodegenBackend<M> {
 
     /// Compile a single MIR function
     pub fn compile_function(&mut self, func: &MirFunction) -> BackendResult<()> {
-        let func_id = *self
-            .func_ids
-            .get(&func.name)
-            .ok_or_else(|| BackendError::UnknownFunction(func.name.clone()))?;
-
-        // Skip extern/imported functions (no body expected; provided by runtime/SFFI).
-        let decl = self.module.declarations().get_function_decl(func_id);
-        if decl.linkage == cranelift_module::Linkage::Import {
+        let start = std::time::Instant::now();
+        let translated = self.translate_function(func, None);
+        self.body_loop_stats.main_translate_ns += start.elapsed().as_nanos() as u64;
+        self.body_loop_stats.main_translated += 1;
+        let Some(func_id) = translated? else {
             return Ok(());
+        };
+        let result = codegen_translated(self.module.isa(), &mut self.ctx, &func.name)
+            .and_then(|alignment| define_translated(&mut self.module, func_id, &self.ctx, &func.name, alignment));
+        if result.is_ok() {
+            capture_defined(&mut self.capture_code, &func.name, &self.ctx);
         }
+        self.module.clear_context(&mut self.ctx);
+        result
+    }
 
-        let sig = build_mir_signature(func, self.module.isa().default_call_conv());
-        self.ctx.func.signature = sig;
-        self.ctx.func.name = UserFuncName::user(0, func_id.as_u32());
-
-        // Use the shared function body compilation
-        let body_result = catch_unwind(AssertUnwindSafe(|| {
-            compile_function_body(
-                &mut self.module,
-                &mut self.ctx.func,
-                func,
-                &mut self.func_ids,
-                &self.runtime_funcs,
-                &self.global_ids,
-                &self.import_map,
-                &self.use_map,
-                &self.data_exports,
-                &self.vtable_data_ids,
-                &self.vtable_type_ids,
-                &self.fn_arities,
-                &self.function_return_types,
-                &self.enum_defs,
-                self.tag_runtime_pool_join_result,
-                self.target.is_baremetal(),
-                self.target.uses_fam_array_abi(),
-            )
-        }));
-        match body_result {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                eprintln!("[CODEGEN BODY] Function '{}' body compilation failed: {}", func.name, e);
-                return Err(BackendError::ModuleError(e));
+    /// `compile_all_functions`' body loop with Cranelift codegen on `workers`
+    /// threads. Translation stays here (it needs `&mut module`); each
+    /// translated `Context` goes to the least-loaded worker over its own
+    /// channel (message passing, no shared queue) and comes back to be defined
+    /// in submission order, so the module sees the same define sequence as the
+    /// serial loop. Up to 1,024 contexts may be in flight: a window of 16 stalled
+    /// translation behind bursts of large functions (190 ms on tab-bar), and the
+    /// wide window costs ~50 MB RSS there.
+    fn compile_bodies_parallel(
+        &mut self,
+        functions: &[MirFunction],
+        workers: usize,
+        dump_mir_filter: Option<&str>,
+        native_trace: bool,
+        failed: &mut Vec<(usize, BackendError)>,
+    ) {
+        let isa = self.codegen_isa.clone().expect("parallel codegen needs codegen_isa");
+        let names: Vec<&str> = functions.iter().map(|f| f.name.as_str()).collect();
+        let names = &names;
+        std::thread::scope(|scope| {
+            let (done_tx, done_rx) = std::sync::mpsc::channel::<CodegenDone>();
+            let mut job_txs = Vec::with_capacity(workers);
+            for worker in 0..workers {
+                let (job_tx, job_rx) = std::sync::mpsc::channel::<CodegenJob>();
+                let done_tx = done_tx.clone();
+                let isa = isa.clone();
+                scope.spawn(move || {
+                    for (seq, idx, func_id, mut ctx) in job_rx {
+                        let result = catch_unwind(AssertUnwindSafe(|| codegen_translated(&*isa, &mut ctx, names[idx])));
+                        if done_tx.send((worker, seq, idx, func_id, ctx, result)).is_err() {
+                            break;
+                        }
+                    }
+                });
+                job_txs.push(job_tx);
             }
-            Err(payload) => {
-                let panic_msg = if let Some(msg) = payload.downcast_ref::<&str>() {
-                    (*msg).to_string()
-                } else if let Some(msg) = payload.downcast_ref::<String>() {
-                    msg.clone()
-                } else {
-                    "unknown panic payload".to_string()
-                };
-                eprintln!(
-                    "[CODEGEN PANIC] Function '{}' panicked during body compilation/finalize: {}",
-                    func.name, panic_msg
-                );
-                return Err(BackendError::ModuleError(format!(
-                    "panic while compiling function '{}': {}",
-                    func.name, panic_msg
-                )));
-            }
-        }
+            drop(done_tx);
 
-        // Verify the function before defining - log errors but try to compile anyway
-        if let Err(errors) = cranelift_codegen::verify_function(&self.ctx.func, self.module.isa()) {
-            eprintln!(
-                "[CODEGEN VERIFY] Function '{}' has verifier errors: {}",
-                func.name, errors
-            );
+            // Liveness is a pure function of the MIR body and was ~150 ms of the
+            // serial translation path on tab-bar: compute it one function ahead
+            // on its own thread, in loop order. A dropped receiver (the loop
+            // unwinding) ends the producer.
+            let (live_tx, live_rx) = std::sync::mpsc::sync_channel(256);
+            scope.spawn(move || {
+                for (idx, func) in functions.iter().enumerate() {
+                    if !func.blocks.is_empty() && live_tx.send((idx, func.compute_live_ins())).is_err() {
+                        break;
+                    }
+                }
+            });
+
+            let cap = 1024;
+            let mut in_flight = vec![0usize; workers];
+            let mut pending: BTreeMap<usize, CodegenDone> = BTreeMap::new();
+            let mut spare: Vec<Context> = Vec::new();
+            let (mut next_seq, mut next_define) = (0usize, 0usize);
+            for (idx, func) in functions.iter().enumerate() {
+                if func.blocks.is_empty() {
+                    continue;
+                }
+                trace_before_compile(idx, functions.len(), func, native_trace, dump_mir_filter);
+                let (live_idx, live_ins) = live_rx.recv().expect("liveness thread exited early");
+                debug_assert_eq!(live_idx, idx);
+                let start = std::time::Instant::now();
+                let translated = self.translate_function(func, Some(live_ins));
+                self.body_loop_stats.main_translate_ns += start.elapsed().as_nanos() as u64;
+                self.body_loop_stats.main_translated += 1;
+                match translated {
+                    Ok(None) => {}
+                    Ok(Some(func_id)) => {
+                        let fresh = spare.pop().unwrap_or_else(|| self.module.make_context());
+                        let ctx = std::mem::replace(&mut self.ctx, fresh);
+                        let worker = (0..workers).min_by_key(|&w| in_flight[w]).unwrap_or(0);
+                        in_flight[worker] += 1;
+                        job_txs[worker]
+                            .send((next_seq, idx, func_id, ctx))
+                            .expect("codegen worker exited early");
+                        next_seq += 1;
+                    }
+                    Err(e) => {
+                        failed.push((idx, e));
+                        self.module.clear_context(&mut self.ctx);
+                    }
+                }
+                loop {
+                    let done = if in_flight.iter().sum::<usize>() >= cap {
+                        done_rx.recv().ok()
+                    } else {
+                        done_rx.try_recv().ok()
+                    };
+                    let Some(done) = done else { break };
+                    in_flight[done.0] -= 1;
+                    pending.insert(done.1, done);
+                    self.define_in_order(&mut pending, &mut next_define, &mut spare, names, failed);
+                }
+            }
+            drop(job_txs);
+            for done in done_rx {
+                pending.insert(done.1, done);
+                self.define_in_order(&mut pending, &mut next_define, &mut spare, names, failed);
+            }
+        });
+    }
+
+    /// `compile_all_functions`' body loop with MIR->CLIF translation AND
+    /// codegen on `workers` threads (`codegen/xlate_view.rs` has the design).
+    ///
+    /// Each worker translates against an immutable snapshot of the
+    /// declarations and `func_ids`, logging what it read and the declarations
+    /// it would make. The calling thread takes results in function order. A
+    /// result none of whose reads changed after its snapshot is accepted: its
+    /// declarations are replayed on the live module in the logged order (so
+    /// every id equals the serial loop's), provisional ids in its CLIF are
+    /// renamed, and the compiled code is defined. Otherwise the function is
+    /// translated again here, against the live state. No locks: snapshots are
+    /// shared read-only and results come back over channels.
+    fn compile_bodies_xlate_parallel(
+        &mut self,
+        functions: &[MirFunction],
+        workers: usize,
+        failed: &mut Vec<(usize, BackendError)>,
+    ) {
+        use super::xlate_view::{self as xv, Snapshot};
+        let env_usize = |name: &str| std::env::var(name).ok().and_then(|v| v.trim().parse::<usize>().ok());
+        // Test knob: discard every Nth worker translation as if stale.
+        let stale_every = env_usize("SIMPLE_JIT_XLATE_STALE_EVERY").unwrap_or(0);
+        let window = env_usize("SIMPLE_JIT_XLATE_WINDOW").filter(|&w| w > 0).unwrap_or(128);
+        let snapshot_every = env_usize("SIMPLE_JIT_XLATE_SNAPSHOT_EVERY").filter(|&n| n > 0).unwrap_or(512);
+        let isa = self.codegen_isa.clone().expect("parallel translation needs codegen_isa");
+        let isa_ref: &dyn cranelift_codegen::isa::TargetIsa = &*isa;
+        let bodies: Vec<usize> = functions
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| !f.blocks.is_empty())
+            .map(|(i, _)| i)
+            .collect();
+        let CodegenBackend {
+            module,
+            func_ids,
+            runtime_funcs,
+            global_ids,
+            import_map,
+            use_map,
+            ambiguous_names,
+            data_exports,
+            vtable_data_ids,
+            vtable_type_ids,
+            fn_arities,
+            function_return_types,
+            enum_defs,
+            tag_runtime_pool_join_result,
+            target,
+            body_loop_stats: stats,
+            capture_code,
+            ..
+        } = self;
+        let inputs = XlateInputs {
+            runtime_funcs,
+            global_ids,
+            import_map,
+            use_map,
+            ambiguous_names,
+            data_exports,
+            vtable_data_ids,
+            vtable_type_ids,
+            fn_arities,
+            function_return_types,
+            enum_defs,
+            tag_runtime_pool_join_result: *tag_runtime_pool_join_result,
+            baremetal: target.is_baremetal(),
+            fam_arrays: target.uses_fam_array_abi(),
+        };
+        let inputs = &inputs;
+        std::thread::scope(|scope| {
+            let (done_tx, done_rx) = std::sync::mpsc::channel::<XlateDone>();
+            let mut job_txs = Vec::with_capacity(workers);
+            for worker in 0..workers {
+                let (job_tx, job_rx) = std::sync::mpsc::channel::<XlateJob>();
+                let done_tx = done_tx.clone();
+                scope.spawn(move || {
+                    for job in job_rx {
+                        if done_tx.send(xlate_worker_run(worker, isa_ref, functions, inputs, job)).is_err() {
+                            break;
+                        }
+                    }
+                });
+                job_txs.push(job_tx);
+            }
+            drop(done_tx);
+
+            let take_snapshot = |module: &M, func_ids: &FuncIdTable, epoch: usize, stats: &mut BodyLoopStats| {
+                let start = std::time::Instant::now();
+                let snapshot = Arc::new(Snapshot::capture(module.declarations(), func_ids, epoch));
+                stats.snapshots += 1;
+                stats.snapshot_ns += start.elapsed().as_nanos() as u64;
+                snapshot
+            };
+            let mut snapshot = take_snapshot(module, func_ids, 0, stats);
+            // Read hash -> last body position whose replay changed it.
+            let mut touched: HashMap<u64, usize> = HashMap::new();
+            // SIMPLE_JIT_XLATE_DEBUG=1: say why each worker result was discarded.
+            let debug = std::env::var_os("SIMPLE_JIT_XLATE_DEBUG").is_some();
+            let mut debug_names: HashMap<u64, String> = HashMap::new();
+            let mut touched_since_snapshot = false;
+            // Results translated against a snapshot older than this are void.
+            let mut barrier = 0usize;
+            let mut in_flight = vec![0usize; workers];
+            let mut pending: BTreeMap<usize, XlateDone> = BTreeMap::new();
+            let mut spare: Vec<Context> = Vec::new();
+            let (mut next_dispatch, mut next_define) = (0usize, 0usize);
+            while next_define < bodies.len() {
+                while next_dispatch < bodies.len() && in_flight.iter().sum::<usize>() < window {
+                    let ctx = spare.pop().unwrap_or_else(|| module.make_context());
+                    let worker = (0..workers).min_by_key(|&w| in_flight[w]).unwrap_or(0);
+                    in_flight[worker] += 1;
+                    job_txs[worker]
+                        .send(XlateJob {
+                            pos: next_dispatch,
+                            idx: bodies[next_dispatch],
+                            snapshot: snapshot.clone(),
+                            ctx,
+                        })
+                        .expect("translation worker exited early");
+                    next_dispatch += 1;
+                }
+                let wait_start = std::time::Instant::now();
+                let done = done_rx.recv().expect("translation worker exited early");
+                stats.wait_ns += wait_start.elapsed().as_nanos() as u64;
+                stats.worker_translate_ns += done.translate_ns;
+                stats.worker_codegen_ns += done.codegen_ns;
+                in_flight[done.worker] -= 1;
+                pending.insert(done.pos, done);
+                while let Some(done) = pending.remove(&next_define) {
+                    let pos = next_define;
+                    next_define += 1;
+                    let XlateDone {
+                        idx,
+                        epoch,
+                        mut ctx,
+                        translated,
+                        log,
+                        module_cmds,
+                        func_id_cmds,
+                        codegen,
+                        ..
+                    } = done;
+                    let func = &functions[idx];
+                    let forced_stale = stale_every > 0 && pos % stale_every == stale_every - 1;
+                    let fresh = log.unsupported.is_none()
+                        && translated.is_ok()
+                        && epoch >= barrier
+                        && !forced_stale
+                        && log.reads.iter().all(|h| touched.get(h).map_or(true, |&p| p < epoch))
+                        && xv::replay_applies_cleanly(&*module, &module_cmds);
+                    if debug && !fresh && translated.is_ok() {
+                        let why: Vec<&str> = log
+                            .reads
+                            .iter()
+                            .filter(|h| touched.get(*h).is_some_and(|&p| p >= epoch))
+                            .filter_map(|h| debug_names.get(h).map(String::as_str))
+                            .take(4)
+                            .collect();
+                        eprintln!(
+                            "[xlate-stale] {} epoch={} pos={} unsupported={:?} reads={:?} applies_cleanly={}",
+                            func.name,
+                            epoch,
+                            pos,
+                            log.unsupported,
+                            why,
+                            xv::replay_applies_cleanly(&*module, &module_cmds)
+                        );
+                    }
+                    let mut hits: Vec<u64> = Vec::new();
+                    if fresh {
+                        stats.worker_translated += 1;
+                        let ids = xv::replay(&mut *module, module_cmds, |h, name| {
+                            if debug {
+                                debug_names.insert(h, name.to_string());
+                            }
+                            hits.push(h)
+                        });
+                        xv::replay_func_ids(func_ids, func_id_cmds, &ids, |h, name| {
+                            if debug {
+                                debug_names.insert(h, name.to_string());
+                            }
+                            hits.push(h)
+                        });
+                        if let Ok(Some(func_id)) = translated {
+                            xv::remap_provisional(&mut ctx.func, &ids);
+                            let result = match codegen.expect("a clean translation is compiled on the worker") {
+                                Ok(result) => result,
+                                Err(panic) => std::panic::resume_unwind(panic),
+                            };
+                            let result = result
+                                .and_then(|alignment| define_translated(&mut *module, func_id, &ctx, &func.name, alignment));
+                            match result {
+                                Ok(()) => capture_defined(capture_code, &func.name, &ctx),
+                                Err(e) => failed.push((idx, e)),
+                            }
+                        }
+                    } else {
+                        if translated.is_ok() {
+                            stats.stale += 1;
+                        }
+                        module.clear_context(&mut ctx);
+                        let start = std::time::Instant::now();
+                        // Translate here through a view over the live state, so
+                        // the declarations it makes are tracked like a worker's.
+                        let live = Arc::new(std::mem::take(&mut *func_ids));
+                        xv::begin();
+                        let (translated, module_cmds, func_id_cmds) = {
+                            let mut view = xv::XlateModule::new(isa_ref, module.declarations());
+                            let mut ids = FuncIdTable::view_of(live.clone());
+                            let t = translate_body(&mut view, &mut ids, &mut ctx.func, func, inputs, None);
+                            (t, std::mem::take(&mut view.cmds), ids.take_view_log())
+                        };
+                        let log = xv::end();
+                        *func_ids = Arc::try_unwrap(live).expect("translation view released its base");
+                        let translated = if log.unsupported.is_some() || translated.is_err() {
+                            // The view cannot express this translation, or it
+                            // failed (a view-only artifact must not become a
+                            // reported failure): run it on the live state, which
+                            // is exactly the serial loop. Its changes are
+                            // untracked, so every outstanding worker result is void.
+                            module.clear_context(&mut ctx);
+                            barrier = pos + 1;
+                            touched_since_snapshot = true;
+                            translate_body(&mut *module, &mut *func_ids, &mut ctx.func, func, inputs, None)
+                        } else {
+                            let ids = xv::replay(&mut *module, module_cmds, |h, name| {
+                            if debug {
+                                debug_names.insert(h, name.to_string());
+                            }
+                            hits.push(h)
+                        });
+                            xv::replay_func_ids(func_ids, func_id_cmds, &ids, |h, name| {
+                            if debug {
+                                debug_names.insert(h, name.to_string());
+                            }
+                            hits.push(h)
+                        });
+                            if let Ok(Some(_)) = &translated {
+                                xv::remap_provisional(&mut ctx.func, &ids);
+                            }
+                            translated
+                        };
+                        stats.main_translate_ns += start.elapsed().as_nanos() as u64;
+                        stats.main_translated += 1;
+                        match translated {
+                            Ok(None) => {}
+                            Ok(Some(func_id)) => {
+                                let codegen_start = std::time::Instant::now();
+                                let result = codegen_translated(isa_ref, &mut ctx, &func.name);
+                                stats.main_codegen_ns += codegen_start.elapsed().as_nanos() as u64;
+                                let result = result.and_then(|alignment| {
+                                    define_translated(&mut *module, func_id, &ctx, &func.name, alignment)
+                                });
+                                match result {
+                                    Ok(()) => capture_defined(capture_code, &func.name, &ctx),
+                                    Err(e) => failed.push((idx, e)),
+                                }
+                            }
+                            Err(failure) => {
+                                failure.report(&func.name);
+                                failed.push((idx, failure.into_error(&func.name)));
+                            }
+                        }
+                    }
+                    if !hits.is_empty() {
+                        touched_since_snapshot = true;
+                        for h in hits {
+                            touched.insert(h, pos);
+                        }
+                    }
+                    module.clear_context(&mut ctx);
+                    spare.push(ctx);
+                    if touched_since_snapshot && (barrier > snapshot.epoch || next_define - snapshot.epoch >= snapshot_every)
+                    {
+                        snapshot = take_snapshot(module, func_ids, next_define, stats);
+                        touched_since_snapshot = false;
+                    }
+                }
+            }
+            drop(job_txs);
+        });
+    }
+
+    /// Define every finished context whose turn has come (submission order).
+    fn define_in_order(
+        &mut self,
+        pending: &mut BTreeMap<usize, CodegenDone>,
+        next_define: &mut usize,
+        spare: &mut Vec<Context>,
+        names: &[&str],
+        failed: &mut Vec<(usize, BackendError)>,
+    ) {
+        while let Some((_, _, idx, func_id, mut ctx, result)) = pending.remove(next_define) {
+            *next_define += 1;
+            let result = match result {
+                Ok(result) => result,
+                Err(panic) => std::panic::resume_unwind(panic),
+            };
+            let result =
+                result.and_then(|alignment| define_translated(&mut self.module, func_id, &ctx, names[idx], alignment));
+            match result {
+                Ok(()) => capture_defined(&mut self.capture_code, names[idx], &ctx),
+                Err(e) => failed.push((idx, e)),
+            }
+            self.module.clear_context(&mut ctx);
+            spare.push(ctx);
         }
+    }
+
+    /// Translate one MIR function to Cranelift IR in `self.ctx` (no verify, no
+    /// codegen). `Ok(None)` for an imported function, which has no body.
+    fn translate_function(
+        &mut self,
+        func: &MirFunction,
+        live_ins: Option<HashMap<crate::mir::BlockId, HashSet<crate::mir::VReg>>>,
+    ) -> BackendResult<Option<cranelift_module::FuncId>> {
+        let inputs = XlateInputs {
+            runtime_funcs: &self.runtime_funcs,
+            global_ids: &self.global_ids,
+            import_map: &self.import_map,
+            use_map: &self.use_map,
+            ambiguous_names: &self.ambiguous_names,
+            data_exports: &self.data_exports,
+            vtable_data_ids: &self.vtable_data_ids,
+            vtable_type_ids: &self.vtable_type_ids,
+            fn_arities: &self.fn_arities,
+            function_return_types: &self.function_return_types,
+            enum_defs: &self.enum_defs,
+            tag_runtime_pool_join_result: self.tag_runtime_pool_join_result,
+            baremetal: self.target.is_baremetal(),
+            fam_arrays: self.target.uses_fam_array_abi(),
+        };
+        let func_id = match translate_body(
+            &mut self.module,
+            &mut self.func_ids,
+            &mut self.ctx.func,
+            func,
+            &inputs,
+            live_ins,
+        ) {
+            Ok(Some(func_id)) => func_id,
+            Ok(None) => return Ok(None),
+            Err(failure) => {
+                failure.report(&func.name);
+                return Err(failure.into_error(&func.name));
+            }
+        };
 
         // SIMPLE_DUMP_CLIF=<function name> prints that function's Cranelift IR
         // (the codegen-level twin of SIMPLE_DUMP_MIR).
@@ -1986,20 +2860,7 @@ impl<M: Module> CodegenBackend<M> {
             }
         }
 
-        // Define the function (may fail if verifier errors are critical)
-        match self.module.define_function(func_id, &mut self.ctx) {
-            Ok(()) => {}
-            Err(e) => {
-                return Err(BackendError::ModuleError(format!(
-                    "Compilation error in '{}': {}",
-                    func.name, e
-                )));
-            }
-        }
-
-        self.module.clear_context(&mut self.ctx);
-
-        Ok(())
+        Ok(Some(func_id))
     }
 
     /// Emit one static vtable data object per `impl Trait for Struct` entry.
@@ -2212,6 +3073,7 @@ impl<M: Module> CodegenBackend<M> {
         runtime_init_globals.extend(mir.global_init_functions.keys().cloned());
         runtime_init_globals.extend(mir.global_init_structs.keys().cloned());
         runtime_init_globals.extend(mir.dynamic_init_globals.iter().cloned());
+        self.referenced_globals = Some(referenced_global_names(&functions));
         self.declare_globals(
             &mir.globals,
             &mir.extern_fn_names,
@@ -2252,93 +3114,64 @@ impl<M: Module> CodegenBackend<M> {
         // SIMPLE_DUMP_MIR=<filter>: dump post-inline MIR for functions whose
         // name contains <filter> (or all functions when filter is "1").
         let dump_mir_filter: Option<String> = std::env::var("SIMPLE_DUMP_MIR").ok();
-        let mut failed_functions: Vec<&MirFunction> = Vec::new();
-        for (idx, func) in functions.iter().enumerate() {
-            if func.blocks.is_empty() {
-                continue;
+        let mut failed: Vec<(usize, BackendError)> = Vec::new();
+        self.body_loop_stats = BodyLoopStats::default();
+        let loop_start = std::time::Instant::now();
+        // Small modules stay serial: spawning workers costs more than it saves.
+        let workers = if self.codegen_isa.is_some() { self.codegen_workers } else { 0 };
+        if workers > 1 && functions.len() >= PARALLEL_CODEGEN_MIN_FUNCTIONS {
+            // Per-function traces and dumps print from the translation; keep
+            // them on the calling thread, in order.
+            let debug_output = native_trace
+                || dump_mir_filter.is_some()
+                || std::env::var_os("SIMPLE_DUMP_CLIF").is_some()
+                || std::env::var_os("SIMPLE_DUMP_STACK_SLOTS").is_some();
+            // Below 6 workers, translating on workers loses to translating on
+            // the calling thread (tab-bar 1x: 4 workers 3.29 s vs 3.09 s; 6 at
+            // par), so it keeps the serial-translate loop.
+            if debug_output || workers < XLATE_PARALLEL_MIN_WORKERS {
+                self.compile_bodies_parallel(&functions, workers, dump_mir_filter.as_deref(), native_trace, &mut failed);
+            } else {
+                self.compile_bodies_xlate_parallel(&functions, workers, &mut failed);
             }
-            if native_trace && (idx == 0 || idx % 250 == 0) {
-                eprintln!(
-                    "[rust-jit] compile function {}/{} {}",
-                    idx + 1,
-                    functions.len(),
-                    func.name
-                );
-            }
-            if let Some(ref filter) = dump_mir_filter {
-                if filter == "1" || func.name.contains(filter.as_str()) {
-                    eprintln!("[MIR-DUMP] function: {}", func.name);
-                    for block in &func.blocks {
-                        eprintln!("  block {:?} (entry={})", block.id, block.id == func.entry_block);
-                        for inst in &block.instructions {
-                            eprintln!("    {:?}", inst);
-                        }
-                        eprintln!("    terminator: {:?}", block.terminator);
+        } else {
+            for (idx, func) in functions.iter().enumerate() {
+                if func.blocks.is_empty() {
+                    continue;
+                }
+                trace_before_compile(idx, functions.len(), func, native_trace, dump_mir_filter.as_deref());
+                let fn_compile_start = if native_trace { Some(std::time::Instant::now()) } else { None };
+                let compiled = self.compile_function(func);
+                if let Some(start) = fn_compile_start {
+                    let elapsed = start.elapsed();
+                    if elapsed.as_millis() >= 500 {
+                        let insts: usize = func.blocks.iter().map(|b| b.instructions.len()).sum();
+                        eprintln!(
+                            "[rust-jit] slow function {} took {} ms (blocks={} insts={})",
+                            func.name,
+                            elapsed.as_millis(),
+                            func.blocks.len(),
+                            insts
+                        );
                     }
                 }
-            }
-            let fn_compile_start = if native_trace { Some(std::time::Instant::now()) } else { None };
-            let compiled = self.compile_function(func);
-            if let Some(start) = fn_compile_start {
-                let elapsed = start.elapsed();
-                if elapsed.as_millis() >= 500 {
-                    let insts: usize = func.blocks.iter().map(|b| b.instructions.len()).sum();
-                    eprintln!(
-                        "[rust-jit] slow function {} took {} ms (blocks={} insts={})",
-                        func.name,
-                        elapsed.as_millis(),
-                        func.blocks.len(),
-                        insts
-                    );
-                }
-            }
-            match compiled {
-                Ok(()) => {}
-                Err(_e) => {
-                    // Loud, distinctive marker so missing-body bugs cannot hide
-                    // in normal log noise. Includes the func name so methods
-                    // like "DesktopShell.init" surface immediately. The
-                    // previous Agent V workaround inlined launcher_init() into
-                    // DesktopShell.new() because `me init()` silently became a
-                    // stub via this exact path.
-                    //
-                    // If this looks like a "Copy: source vreg not found" error,
-                    // auto-dump the failing function's MIR so the cross-block
-                    // VReg root cause is visible without requiring an extra env
-                    // var or a seed rebuild.
-                    let err_str = format!("{:?}", _e);
-                    if err_str.contains("source vreg") {
-                        eprintln!(
-                            "[CODEGEN-STUB-FALLBACK] undefined-vreg in '{}': {} \
-                             — auto-dumping post-inline MIR:",
-                            func.name, err_str
-                        );
-                        for block in &func.blocks {
-                            eprintln!("  block {:?} (entry={})", block.id, block.id == func.entry_block);
-                            for inst in &block.instructions {
-                                eprintln!("    {:?}", inst);
-                            }
-                            eprintln!("    terminator: {:?}", block.terminator);
-                        }
-                    } else if std::env::var_os("SIMPLE_ALLOW_STUB_FALLBACK").is_some() {
-                        // Escape hatch: allow stub emission but always warn so callers
-                        // can see which functions were silently replaced.
-                        eprintln!(
-                            "[CODEGEN-STUB-FALLBACK] body compilation failed for '{}': {:?} \
-                             — replacing with empty stub (SIMPLE_ALLOW_STUB_FALLBACK is set).",
-                            func.name, _e
-                        );
-                    } else {
-                        eprintln!(
-                            "[CODEGEN-STUB-FALLBACK] body compilation failed for '{}': {:?}",
-                            func.name, _e
-                        );
-                    }
-                    failed_functions.push(func);
+                if let Err(e) = compiled {
+                    failed.push((idx, e));
                     // IMPORTANT: Clear context to prevent state from leaking to next function
                     self.module.clear_context(&mut self.ctx);
                 }
             }
+        }
+        self.body_loop_stats.loop_ns = loop_start.elapsed().as_nanos() as u64;
+        // Parallel codegen finishes out of order; report in function order.
+        failed.sort_by_key(|(idx, _)| *idx);
+        let mut failed_functions: Vec<&MirFunction> = Vec::new();
+        let mut failure_causes: Vec<String> = Vec::new();
+        for (idx, e) in failed {
+            let func = &functions[idx];
+            report_codegen_failure(func, &e);
+            failure_causes.push(format!("{}: {}", func.name, e));
+            failed_functions.push(func);
         }
         if native_trace {
             eprintln!("[rust-jit] compile functions done failed={}", failed_functions.len());
@@ -2352,7 +3185,7 @@ impl<M: Module> CodegenBackend<M> {
         // restore the old stub-emission path. A warning is printed per stubbed
         // function regardless (see the match arm above).
         if !failed_functions.is_empty() && std::env::var_os("SIMPLE_ALLOW_STUB_FALLBACK").is_none() {
-            let names: Vec<&str> = failed_functions.iter().map(|f| f.name.as_str()).collect();
+            let names = &failure_causes;
             return Err(BackendError::ModuleError(format!(
                 "codegen: {} function body/bodies failed to compile: [{}]; \
                  set SIMPLE_ALLOW_STUB_FALLBACK to emit empty stubs instead (unsafe — binary will silently misbehave)",
@@ -2415,7 +3248,7 @@ impl<M: Module> CodegenBackend<M> {
                 builder.finalize();
 
                 // Try to define the stub
-                if let Err(e) = self.module.define_function(func_id, &mut self.ctx) {
+                if let Err(e) = crate::codegen::shared::define_function_aligned(&mut self.module, func_id, &mut self.ctx) {
                     eprintln!("[ERROR] Failed to create stub for '{}': {}", func.name, e);
                 }
                 self.module.clear_context(&mut self.ctx);
@@ -3068,8 +3901,7 @@ impl<M: Module> CodegenBackend<M> {
         builder.finalize();
 
         // Define the function
-        self.module
-            .define_function(func_id, &mut self.ctx)
+        crate::codegen::shared::define_function_aligned(&mut self.module, func_id, &mut self.ctx)
             .map_err(|e| BackendError::ModuleError(format!("define __module_init: {e}")))?;
         self.module.clear_context(&mut self.ctx);
 
@@ -3195,6 +4027,16 @@ mod tests {
     use cranelift_object::{ObjectBuilder, ObjectModule};
     use simple_parser::ast::Visibility;
 
+    #[test]
+    fn aot_windows_arm64_is_not_pic() {
+        // cranelift-object cannot emit Aarch64AdrGotPage21 for COFF (panics
+        // "not supported for this file format"); PE has no GOT either.
+        let win_a64 = BackendSettings::aot_for_target(Target::parse("aarch64-pc-windows-gnullvm").unwrap());
+        assert!(!win_a64.is_pic);
+        let lin_a64 = BackendSettings::aot_for_target(Target::parse("aarch64-unknown-linux-gnu").unwrap());
+        assert!(lin_a64.is_pic);
+    }
+
     fn test_backend() -> CodegenBackend<ObjectModule> {
         let settings = BackendSettings::aot();
         let (_flags, isa) = create_isa_and_flags(&settings).expect("isa");
@@ -3271,6 +4113,29 @@ mod tests {
         assert!(!backend
             .global_ids
             .contains_key("frontend__core__interpreter__module_loader_core___yield_cache"));
+    }
+
+    #[test]
+    fn unresolved_unreferenced_import_is_not_declared() {
+        // COFF fails on every undefined external, referenced or not; an
+        // unresolved import must only be declared when code uses it.
+        let mut backend = test_backend();
+        backend.set_module_prefix("app__cli__bootstrap_main".to_string());
+        backend.referenced_globals = Some(std::collections::HashSet::from(["USED_K".to_string()]));
+        backend
+            .declare_globals(
+                &[
+                    ("A64_OP_ADD".to_string(), TypeId::I64, false),
+                    ("USED_K".to_string(), TypeId::I64, false),
+                ],
+                &std::collections::HashSet::new(),
+                &std::collections::HashMap::new(),
+                &std::collections::HashSet::new(),
+                &std::collections::HashSet::new(),
+            )
+            .unwrap();
+        assert!(!backend.global_ids.contains_key("A64_OP_ADD"));
+        assert!(backend.global_ids.contains_key("USED_K"));
     }
 
     #[test]

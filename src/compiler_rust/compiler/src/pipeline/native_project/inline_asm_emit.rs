@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use super::{effective_target, tools::{find_c_compiler, windows_gnu_target_flag}};
+use super::{effective_target, tools::{find_c_compiler, target_c_compiler, windows_gnu_target_flag}};
 
 fn escape_c_asm_string(s: &str) -> String {
     let mut out = String::new();
@@ -145,8 +145,8 @@ fn has_unresolved_simple_operand(instruction: &str) -> bool {
         });
 
     // `$N` is the LLVM operand reference the MIR lowering rewrites `{name}`
-    // into (mir/asm_operands.rs); the C sidecar cannot bind operands, so such
-    // a line is skipped here exactly like the `{name}` form was.
+    // into (mir/asm_operands.rs); the C sidecar cannot bind operands, so it
+    // must reject this line instead of silently turning it into a no-op.
     let has_llvm_operand_ref = instruction
         .char_indices()
         .any(|(i, c)| c == '$' && instruction[i + 1..].starts_with(|d: char| d.is_ascii_digit()));
@@ -158,9 +158,8 @@ fn has_unresolved_simple_operand(instruction: &str) -> bool {
         // Unresolved Simple asm operands leak as the Rust `{:?}` of the AST
         // operand node, e.g. `li t0, Identifier("mstatus_mie")` or
         // `csrr Integer(0), mhartid` (seen in the riscv/riscv32 baremetal startup
-        // blocks). These are never valid assembler tokens, and the host bootstrap
-        // binary never executes those baremetal blocks, so skip them instead of
-        // emitting invalid asm that fails the clang assemble step.
+        // blocks). These are never valid assembler tokens. Reject them instead
+        // of emitting invalid asm or silently omitting the instruction.
         || instruction.contains("Identifier(")
         || instruction.contains("Integer(")
 }
@@ -174,24 +173,35 @@ pub(crate) fn write_inline_asm_c_for_target(
         return Ok(None);
     }
 
-    let use_intel_syntax = target_uses_x86_intel_asm(target);
+    let default_intel_syntax = target_uses_x86_intel_asm(target);
+    let explicit_intel_supported = target.is_some_and(|(triple, _, _)| target_asm_arch(triple) == AsmArch::X86);
     let path = temp_dir.join("simple_asm_blocks.c");
     let mut code = String::from("/* Auto-generated Simple raw asm blocks. */\n\n");
     for block in blocks {
         if !block_matches_target(&block.instructions, target) {
             continue;
         }
-        code.push_str(&format!("__attribute__((used)) void {}(void) {{\n", block.symbol));
+        if block.dialect == crate::hir::AsmDialect::Intel && !explicit_intel_supported {
+            return Err("E-ASM-DIALECT: explicit Intel syntax requires an x86 sidecar target".to_string());
+        }
+        let use_intel_syntax = match block.dialect {
+            crate::hir::AsmDialect::Default => default_intel_syntax,
+            crate::hir::AsmDialect::Att => false,
+            crate::hir::AsmDialect::Intel => true,
+        };
+        let naked_attr = if block.naked { ", naked" } else { "" };
+        code.push_str(&format!("__attribute__((used{})) void {}(void) {{\n", naked_attr, block.symbol));
         code.push_str("    __asm__ volatile (\n");
         if use_intel_syntax {
             code.push_str("        \".intel_syntax noprefix\\n\"\n");
         }
         for instruction in &block.instructions {
             if has_unresolved_simple_operand(instruction) {
-                code.push_str("        \"# skipped Simple asm with unresolved operands\\n\"\n");
-            } else {
-                code.push_str(&format!("        \"{}\\n\"\n", escape_c_asm_string(instruction)));
+                return Err(format!(
+                    "E-ASM-UNRESOLVED: native C sidecar cannot bind inline asm operand or directive `{instruction}`; use a supported constraint or LLVM backend"
+                ));
             }
+            code.push_str(&format!("        \"{}\\n\"\n", escape_c_asm_string(instruction)));
         }
         if use_intel_syntax {
             code.push_str("        \".att_syntax prefix\\n\"\n");
@@ -223,7 +233,11 @@ pub(crate) fn compile_inline_asm_c(
         return Ok(None);
     };
     let out = temp_dir.join("simple_asm_blocks.o");
-    let cc = find_c_compiler();
+    let cc = if target.is_some() {
+        find_c_compiler()
+    } else {
+        target_c_compiler(effective_target())
+    };
     let mut cmd = std::process::Command::new(&cc);
     cmd.arg("-c").arg("-o").arg(&out).arg(&c_path);
     if let Some((triple, march, mabi)) = target {

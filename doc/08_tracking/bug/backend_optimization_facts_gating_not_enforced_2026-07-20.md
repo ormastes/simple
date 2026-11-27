@@ -1,6 +1,8 @@
 # Bug: backend optimization skip reasons retain optional fact wrappers (8 failures)
 
-- **Status:** SOURCE-FIXED — focused self-hosted rerun pending
+- **Status:** RESOLVED 2026-11-25 (7/8 already source-fixed; the 8th —
+  `simple-predicate-promote` — was missing from the recommendation catalog
+  entirely and is now added; verified by run-path probe, see below)
 - **Filed:** 2026-07-20
 - **Affected specs:** `test/{01_unit,unit}/compiler/mir_opt/general_patterns_backend_recommendation_spec.spl`
 - **Command:**
@@ -77,3 +79,42 @@ The mirrored recommendation specs also use explicit `reason != nil` for their
 presence assertion. A focused rerun with a usable self-hosted test runner is
 still required; the currently deployed bootstrap-only binary cannot execute
 the test command.
+
+## 2026-11-25 verification + residual fix (P3 ledger sweep)
+
+Re-verified on Windows worktree against `origin/release/1.0.0` with the tracked
+`bin/simple.exe` via the run path (`bin/simple.exe run`, `SIMPLE_LIB=src`),
+replicating every assertion of
+`test/01_unit/compiler/mir_opt/general_patterns_backend_recommendation_spec.spl`
+in a probe. (The `simple test` entrypoint itself is currently blocked on this
+host: the pinned binary predates seed commit `14a34acbe1e` and rejects the
+`@representation_boundary` annotations that PR #11545 applied to the test
+runner's own import closure — an environment limit, not a spec failure.)
+
+**BEFORE:** 7 of the 8 historically failing missing-fact assertions already
+passed (the `text?` unwrap fix described above is real). The 8th,
+`gates Simple predicate promotion on candidate and safety facts`, still failed:
+`backend_optimization_plan_for_budget_with_facts("cranelift", "high",
+["typed_mir", "predication_candidate"])` emitted **no** `simple-predicate-promote`
+decision at all — not in `recommendation_names`, not in `skipped_decisions`.
+
+**Root cause (residual):** `simple-predicate-promote` was absent from
+`all_backend_optimization_recommendations()` and from the hardcoded
+`backend_optimization_plan_for_budget` entry list in
+`src/compiler/60.mir_opt/general_patterns.spl`. The spec contract (added with
+the gate tests) requires it: required facts
+`["typed_mir", "predication_candidate", "predicate_safe"]`, cost class `high`,
+LLVM skipped with `llvm_runs_if_conversion_and_select_promotion`, non-low-tier
+backends skipped with `backend_not_simple_low_tier_jit`. The JIT fact producer
+(`tiered_jit.spl`) already emits `predication_candidate`/`predicate_safe`; only
+the catalog entry was missing.
+
+**Fix:** added `simple_predicate_promote_recommendation()` to the catalog, to
+`all_backend_optimization_recommendations()`, and to the hardcoded
+`backend_optimization_plan_for_budget` list (same file, three small additions
+mirroring the sibling `simple-*` entries). No assertion was weakened; the spec
+is unchanged.
+
+**AFTER:** the probe (12 checks: all 8 missing-fact assertions plus the
+predicate-promote cost-budget, ready, LLVM-skip, and wasm non-facts-plan
+contract points) prints `BACKEND FACTS PROBE: ALL PASS`.

@@ -1,0 +1,105 @@
+# Pure DATA checks for the fresh route's bounded `wait` and `logs` reads. No
+# installed owner, custody, process or podman effect is constructed here; the
+# live proof is test/03_system/app/container/feature/podman_shared_api_live_spec.spl.
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.container.linux_fresh_workload_probe_v3.*
+use std.common.contracts.container.linux_fresh_workload_v2.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.linux_fresh_epoch_v1.LinuxFreshEpochProfileV1
+use std.common.build_manager.group_process_stream_protocol_v2.*
+use std.common.build_manager.group_process_stream_profile_v3.*
+use std.nogc_sync_mut.io.linux_fresh_workload_launch_v2.linux_fresh_workload_argv_v2
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
+use std.common.sdn.value.SdnValue
+
+fn read_inspect_data_v3() -> LinuxFreshWorkloadProbeCommandV3:
+    val native = LinuxOciRequestV1(pod_uid: "probe_1", attempt: 1, operation_id: "operation_1",
+        image: "registry.example/image@sha256:" + "2".repeat(64), bundle_path: "", command: ["/bin/true"],
+        args: [], timeout_ms: 30000, cpu_limit_millis: 1000, memory_limit_bytes: 67108864,
+        pid_limit: 64, network_policy: "none", filesystem_policy: "read-only", replace_entrypoint: true)
+    val scope = ContainerHostScopeV2(physical_host_id: "host_1", service_scope_id: "epoch-" + "a".repeat(64),
+        boot_id: "boot_1", provider_generation: 7, native_machine_id: "linux-machine-id-v1:1234",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot_1")
+    val plan = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: native.pod_uid,
+        attempt: native.attempt, operation_id: native.operation_id, request_digest: linux_oci_request_digest_v1(native).unwrap(),
+        physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id, boot_id: scope.boot_id,
+        provider_generation: scope.provider_generation, native_machine_id: scope.native_machine_id,
+        continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id)
+    LinuxFreshWorkloadProbeCommandV3(workload: LinuxFreshWorkloadCommandV2(
+        request: ContainerExecutionRequestV2(plan, linux_oci_retained_request_encode_v1(native).unwrap()), scope: scope,
+        action: LinuxFreshWorkloadActionV2.Inspect, native_id: "3".repeat(64), image: native.image,
+        entrypoint: native.command, args: native.args, cpu_millis: native.cpu_limit_millis, memory_bytes: native.memory_limit_bytes,
+        pid_limit: native.pid_limit, timeout_ms: native.timeout_ms, helper_cpu_millis: 500, helper_memory_bytes: 33554432),
+        action: LinuxFreshWorkloadProbeActionV3.Wait)
+
+fn read_bound_inspect_data_v3(command: LinuxFreshWorkloadProbeCommandV3) -> GroupProcessStreamLaunchV2:
+    # DATA-only projection fixture; no actual installed/custody owner supplied.
+    val profile = LinuxFreshEpochProfileV1(fields: {"graphRoot": SdnValue.String("/srv/provider/graph"),
+        "runRoot": SdnValue.String("/srv/provider/run"), "delegatedCgroup": SdnValue.String("/simple/epoch/containers")})
+    val args = linux_fresh_workload_argv_v2(profile, command.workload).unwrap()
+    val request = GroupProcessStreamRequestV2(program: "/usr/bin/podman", producer_digest: "b".repeat(64), args: args,
+        environment: [], directory: "/", inputs: [], timeout_ms: 30000, broker_program: "/opt/simple/broker",
+        broker_digest: "c".repeat(64), child_argv_digest: group_process_child_argv_digest_v2("/usr/bin/podman", args),
+        launch_deadline_unix_ms: 1)
+    val resources = GroupProcessStreamProfileV3(helper_cpu: GroupProcessCpuQuotaV3(500, 50000, 100000),
+        broker: GroupProcessBrokerBudgetV3("/sys/fs/cgroup/service/broker", 11, 22, 7, "d".repeat(64),
+            250000, 1000000, 250, 67108864, 134217728), child_image_mode: "trusted-local-admin-image-fd-v1")
+    GroupProcessStreamLaunchV2(root: "/srv/broker/probe", worker_id: "operation_1", generation: 7,
+        snapshot_digest: "e".repeat(64), cache_identity: "f".repeat(64), memory_limit_bytes: command.workload.helper_memory_bytes,
+        request: request, delegated_cgroup_path: "/sys/fs/cgroup/service", transport_generation: 0, profile_v3: Some(resources))
+
+
+describe "Fresh route bounded wait and logs reads":
+    it "admits exactly the two read names and refuses every other action":
+        step("The shared API read names map onto the existing closed probe enum")
+        expect(linux_fresh_workload_read_action_v3("wait").unwrap()).to_equal(LinuxFreshWorkloadProbeActionV3.Wait)
+        expect(linux_fresh_workload_read_action_v3("logs").unwrap()).to_equal(LinuxFreshWorkloadProbeActionV3.Logs)
+        for name in ["", "inspect", "exec", "attach", "wait-1", "logs --follow", "Wait", "probe-wait"]:
+            expect(linux_fresh_workload_read_action_v3(name).unwrap_err()).to_equal("fresh-workload-read-action-unsupported")
+
+    it "orders wait after the confirmed start and logs only after a completed wait":
+        step("Logs is never a read of a still running workload")
+        expect(linux_fresh_workload_read_prior_v3("wait").unwrap()).to_equal("inspect-confirm")
+        expect(linux_fresh_workload_read_prior_v3("logs").unwrap()).to_equal("wait")
+        expect(linux_fresh_workload_read_prior_v3("stop").unwrap_err()).to_equal("fresh-workload-read-action-unsupported")
+
+    it "parses only one canonical workload exit code in 0..255":
+        step("The helper exit is separate; this is the engine's printed payload exit")
+        expect(linux_fresh_workload_wait_exit_code_v3("0").unwrap()).to_equal(0)
+        expect(linux_fresh_workload_wait_exit_code_v3("7\n").unwrap()).to_equal(7)
+        expect(linux_fresh_workload_wait_exit_code_v3("255\r\n").unwrap()).to_equal(255)
+        expect(linux_fresh_workload_wait_exit_code_v3("137\n").unwrap()).to_equal(137)
+        for output in ["", "\n", "256", "-1", "07", "+7", " 7", "7 ", "7\n\n", "7\n8", "seven", "0x7", "1e2", "7\r", "9999999999999999999"]:
+            expect(linux_fresh_workload_wait_exit_code_v3(output).unwrap_err()).to_equal("fresh-workload-wait-exit-code-invalid")
+
+    it "builds the read command only over the owner's own inspect identity":
+        step("Any other closed action, a short native id or a changed scope is refused")
+        val inspect = read_inspect_data_v3().workload
+        val wait = linux_fresh_workload_read_command_v3(inspect, "wait").unwrap()
+        expect(wait.action).to_equal(LinuxFreshWorkloadProbeActionV3.Wait)
+        expect(wait.workload).to_equal(inspect)
+        expect(linux_fresh_workload_read_command_v3(inspect, "logs").unwrap().action).to_equal(LinuxFreshWorkloadProbeActionV3.Logs)
+        expect(linux_fresh_workload_read_command_v3(inspect, "exec").unwrap_err()).to_equal("fresh-workload-read-action-unsupported")
+        var changed = inspect
+        changed.action = LinuxFreshWorkloadActionV2.Stop
+        expect(linux_fresh_workload_read_command_v3(changed, "wait").unwrap_err()).to_equal("fresh-probe-closed-inspect-identity-required")
+        changed = inspect
+        changed.native_id = "short"
+        expect(linux_fresh_workload_read_command_v3(changed, "logs").unwrap_err()).to_equal("fresh-workload-full-native-id-required")
+        changed = inspect
+        changed.scope.provider_generation = 8
+        expect(linux_fresh_workload_read_command_v3(changed, "wait").unwrap_err()).to_equal("fresh-workload-command-scope")
+
+    it "projects a fixed three-argument tail with no caller flag":
+        step("No --follow, --latest, --tail, --since or format can be selected")
+        val inspect = read_inspect_data_v3()
+        val base = read_bound_inspect_data_v3(inspect)
+        for name in ["wait", "logs"]:
+            val command = linux_fresh_workload_read_command_v3(inspect.workload, name).unwrap()
+            val launch = linux_fresh_workload_probe_project_v3(base, command).unwrap()
+            expect(launch.request.args).to_equal(["--remote=false", "--log-level=error", "--cgroup-manager=cgroupfs", "--root", "/srv/provider/graph",
+                "--runroot", "/srv/provider/run", "--storage-driver", "vfs", "--tmpdir", "/srv/provider/run/tmp", name, "--", "3".repeat(64)])
+            expect(launch.request.timeout_ms).to_equal(30000)
+            expect(launch.request.program).to_equal(base.request.program)
+            expect(launch.memory_limit_bytes).to_equal(base.memory_limit_bytes)

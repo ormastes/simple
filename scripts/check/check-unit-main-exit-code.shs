@@ -1,0 +1,58 @@
+#!/bin/sh
+# check-unit-main-exit-code.shs -- a `fn main() -> ()` program must exit 0.
+#
+# Bug: doc/08_tracking/bug/seed_unit_main_leaks_tail_value_as_exit_code_2026-11-16.md
+# The seed interpreter (reached whenever the JIT demotes, e.g. a spec with a
+# module docstring) used the implicit tail-expression value of a unit-typed
+# `main` as the process exit code: a tail `describe(...)` / `f()` returning
+# `true` exited 1, so `simple test` reported "child exited 1 after an
+# authenticated BDD pass" on fully green specs.
+#
+# Usage: sh scripts/check/check-unit-main-exit-code.shs [SIMPLE_BINARY]
+# Verdict (last line): PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+bin="${1:-${SIMPLE_BINARY:-bin/simple}}"
+if [ ! -x "$bin" ] && [ ! -x "$bin.exe" ]; then
+    echo "ERROR — nothing was checked (no binary: $bin)"; exit 2
+fi
+tmp=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp)"; exit 2; }
+trap 'rm -rf "$tmp"' EXIT
+checked=0; bad=""
+# case <name> <expected rc> <source>
+probe() {
+    printf '%b' "$3" > "$tmp/$1.spl"
+    SIMPLE_RUST_SEED_WARNING=0 "$bin" run "$tmp/$1.spl" >"$tmp/$1.log" 2>&1
+    rc=$?
+    checked=$((checked + 1))
+    if [ "$rc" != "$2" ]; then bad="$bad $1(rc=$rc want=$2)"; fi
+}
+doc='"""\ndoc\n"""\n'
+# Docstring forces the interpreter path (JIT demotion); these are the defect.
+probe unit_tail_bool 0 "${doc}fn f() -> bool:\n    true\nfn main() -> ():\n    f()\n"
+probe unit_tail_int 0 "${doc}fn f() -> i64:\n    7\nfn main() -> ():\n    f()\n"
+probe nil_tail_int 0 "${doc}fn f() -> i64:\n    7\nfn main() -> Nil:\n    f()\n"
+probe unit_spec 0 "${doc}use std.spec.*\nfn main() -> ():\n    describe(\"t\", fn() -> ():\n        it(\"x\", fn() -> ():\n            expect(1).to_equal(1)\n        )\n    )\n"
+# `simple test` verdict: all-pass spec exits 0, failing spec exits nonzero.
+probe_test() {
+    printf '%b' "$3" > "$tmp/$1_spec.spl"
+    SIMPLE_RUST_SEED_WARNING=0 "$bin" test "$tmp/$1_spec.spl" >"$tmp/$1.log" 2>&1
+    rc=$?
+    checked=$((checked + 1))
+    if [ "$2" = 0 ] && [ "$rc" != 0 ]; then bad="$bad $1(rc=$rc want=0)"; fi
+    if [ "$2" != 0 ] && [ "$rc" = 0 ]; then bad="$bad $1(rc=0 want=nonzero)"; fi
+}
+spec='use std.spec.*
+describe("t", fn() -> ():
+    it("x", fn() -> ():
+        expect(1).to_equal(%s)
+    )
+)
+'
+probe_test test_allpass 0 "${doc}$(printf "$spec" 1)"
+probe_test test_failing 1 "${doc}$(printf "$spec" 2)"
+# Controls: an int-typed main still propagates its value; JIT path unaffected.
+probe int_main 7 "${doc}fn main() -> i64:\n    7\n"
+probe unit_tail_jit 0 "fn f() -> bool:\n    true\nfn main() -> ():\n    f()\n"
+if [ "$checked" -eq 0 ]; then echo "ERROR — nothing was checked"; exit 2; fi
+if [ -n "$bad" ]; then echo "FAIL — $checked program(s) run, wrong exit code:$bad"; exit 1; fi
+echo "PASS — $checked program(s) run, all exit codes correct"
+exit 0

@@ -6,8 +6,9 @@ evidence found in the body. This is bookkeeping, not verification.
 "emits diagnostic comment" specs call `.unwrap()` unconditionally, crashing
 on the `Err` the backend now correctly returns
 
-**Status:** OPEN — filed, not fixed (classification needs a product-design
-decision: see below)
+**Status:** SUPERSEDED 2026-11-11 (lane p3fix-comp6-20261111) — hard-Err bad-arity
+contract confirmed correct; CUDA rejection scenarios rewritten 2026-11-07 and verified
+PASS on fresh seed 2026-11-10/11 (see addenda)
 
 **Date:** 2026-07-20
 **Campaign:** whole-suite 01_unit triage (fix_guide.md)
@@ -93,3 +94,89 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 "$BIN" test \
 3. If embedded comment is correct: file a product bug against the
    CUDA/OpenCL intrinsic arity-check path for returning Err instead.
 
+
+## 2026-11-07: stale arity oracles aligned; execution pending
+
+Reviewed against exact release `38207beccac49dd63b6316ad81f807cd84b9e58a`.
+The actual executable imports `plugins.backend_cuda.cuda_backend`, whose
+`validate_intrinsic` returns a structured CUDA error naming the intrinsic and
+exact argument count. The existing manual already documented rejection for
+these two CUDA cases while the executable still demanded successful PTX. The
+OpenCL vec emitters instead return diagnostic comments for missing arguments;
+those comments do not have the unsupported-source prefix its validator rejects.
+That is a different current contract, not evidence for replacing its Ok oracle
+with Err. Both backend contracts are retained unchanged.
+
+The two CUDA vec4 bad-arity scenarios now assert rejection, backend phase and
+the actual diagnostic (intrinsic plus exact count).
+Unexpected Ok fails the assertion without unwrapping the wrong Result variant.
+All valid-input controls and OpenCL diagnostic-comment scenarios remain
+byte-for-byte unchanged. Manual visibility metadata and the two corresponding
+manual flows are aligned. No production
+validator or device feature is weakened or changed.
+
+No compiler/spec/docgen/sspec-maintain execution was performed; status remains
+OPEN/WAIT_VERIFY. Other historically listed contract files were inspected by
+name at this pin. Their `spec_constants_contract_spec` diagnostic-comment cases
+use different OpenCL emitter comments not rejected by validate_generated_source
+and are not automatically the same Err/unwrap defect. Do not mechanically
+rewrite them to reject without a separate canonical contract.
+
+The vec manual also already rejects unsupported CUDA vector-result loads while
+the executable has older positive expectations. That pre-existing feature/oracle
+divergence is outside this arity correction; do not claim the entire vec suite
+green, invent vector support, or weaken those positive controls in this change.
+Actual execution plus the separate feature contract must resolve it.
+
+
+---
+
+## 2026-11-10 (p3-compiler lane, rows 1-8, Windows worktree, seed-smoke) — ARITY DEFECT VERIFIED FIXED; SEPARATE VEC DIVERGENCE REMAINS
+
+Lane: `work/p3-compiler-20261110` on `origin/release/1.0.0` (base `dfc7da8523f4`).
+Runtime: worktree Rust seed `bin/simple.exe` (built 2026-11-10). Seed-smoke only.
+
+**The row's arity defect: SUPERSEDED — and the 2026-11-07 rewrite is now EXECUTED**
+(it landed as OPEN/WAIT_VERIFY with no execution). Seed-smoke of
+`test/01_unit/compiler/codegen/vec_types_contract_spec.spl`:
+
+- "rejects gpu_vec4_load_f32 with bad arity (CUDA)" — PASS (asserts `is_err()`, CUDA
+  phase, `"requires exactly 2 arguments"`).
+- "rejects gpu_vec4_store_f32 with bad arity (CUDA)" — PASS (same shape, 6 arguments).
+- No `.unwrap()` on the bad-arity path remains.
+
+**Still red, deliberately out of this row's scope:** the 4 POSITIVE CUDA vec scenarios
+("emits ld/st.global.v4/v2.f32 ...") fail with
+`called unwrap on Err: CompileError(... CUDA memory operation requires a pointer operand ...)`
+— the backend now rejects CUDA vector-result memory ops. That is exactly the
+feature/oracle divergence this doc's 2026-11-07 note quarantined ("do not claim the entire
+vec suite green ... Actual execution plus the separate feature contract must resolve it").
+It needs its own feature-contract row; the positive controls were correctly left
+unweakened.
+
+
+---
+
+## 2026-11-11 (lane p3fix-comp6-20261111) — Status flipped SUPERSEDED
+
+Independent re-verification on this lane's fresh worktree (base
+`bf946163122f`, tracked seed `bin/simple.exe`):
+
+`bin/simple.exe test test/01_unit/compiler/codegen/vec_types_contract_spec.spl
+--mode=interpreter --no-cache` → **18/22 PASS**; both CUDA bad-arity
+scenarios PASS ("rejects gpu_vec4_load_f32 with bad arity (CUDA)",
+"rejects gpu_vec4_store_f32 with bad arity (CUDA)"), the OpenCL
+diagnostic-comment bad-arity scenarios PASS, and no `.unwrap()` on a
+bad-arity path remains. The 4 failures are exactly the quarantined
+POSITIVE CUDA vec scenarios (`emits ld/st.global.v4/v2.f32`) — the
+separate feature/oracle divergence this doc's 2026-11-07 note
+quarantined, not this row's arity defect. Absorber: the 2026-11-07
+arity-oracle rewrite (executed and verified per the 2026-11-10 addendum
+above). Status line flipped from OPEN.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**SUPERSEDED (confirmed)** — Arity defect absorbed by the 2026-11-07 oracle rewrite, executed and verified by two lanes (p3-compiler, comp6: bad-arity scenarios PASS, no `.unwrap()` on the bad-arity path). The 4 positive CUDA vec failures are the quarantined separate feature/oracle divergence, not this row's defect.

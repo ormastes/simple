@@ -1,0 +1,255 @@
+# Structural parent binding diagnostic only; no ledger/signature-authority PASS.
+# Pure retained-parent budget binding and real-signed wire fixtures only.
+# No authority verification, new reservation, helper process or host effect.
+use std.common.contracts.orchestration.controller_parent_budget_v1.*
+use std.common.contracts.orchestration.assignment_v1.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionGrantV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_grant_digest_v2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.string_core.str_len
+
+struct ParentBudgetFixtureV1:
+    budget: ControllerParentBudgetV1
+    operation: OperationEnvelopeV2
+    binding: ControllerAssignmentBindingV1
+    controller_operation: OperationEnvelopeV2
+
+fn parent_budget_fixture_v1() -> ParentBudgetFixtureV1:
+    val scope = ContainerHostScopeV2(physical_host_id: "authorized-host-alias", service_scope_id: "service",
+        boot_id: "", provider_generation: 3, native_machine_id: "windows-machine-guid-v1:00112233-4455",
+        continuity_mode: "service-incarnation-v1", continuity_id: "windows-service-incarnation-v1:abcd")
+    val row = HostReservationV1(id: "parent-reservation", operation_id: "parent-operation", payload_digest: "0".repeat(64),
+        service_scope_id: "service", assignment_generation: 1, nonce: "parent-nonce", cpu_millis: 2000,
+        memory_bytes: 4000, exclusive_devices: [], prepare_deadline_ms: 1000, state: HostReservationStateV1.Prepared)
+    val intent = host_reservation_bind_intent_v1(HostReservationIntentV1(physical_host_id: scope.physical_host_id,
+        fence: HostLedgerFenceV1(authority_id: "host-authority", boot_id: container_scope_fence_id_v2(scope).unwrap(),
+            provider_generation: 3, revision: 5), plan_digest: "a".repeat(64), reservation: row)).unwrap()
+    val host = OperationEnvelopeV2(version: 2, id: "parent-operation", payload_digest: intent.reservation.payload_digest,
+        principal: "user", project: "project", host_id: scope.physical_host_id, operation: "host_reservation_v1",
+        environment_digest: "b".repeat(64), policy_revision: 1, revocation_epoch: 0, session_generation: 3,
+        memory_bytes: 4000, duration_ms: 200)
+    val binding = ControllerAssignmentBindingV1(controller_id: "controller", controller_epoch: 1,
+        workload_uid: "parent-workload", desired_revision: 1, host_intent: intent, host_operation: host)
+    var controller = host
+    controller.id = "parent-controller-operation"
+    controller.host_id = "controller"
+    controller.operation = "controller_assignment_v1"
+    controller.payload_digest = sha256_text(controller_assignment_bytes_v1(binding).unwrap())
+    val budget = ControllerParentBudgetV1(parent_operation_id: host.id,
+        parent_operation_digest: sha256_text(distributed_encode_operation_v2(host).unwrap()),
+        parent_assignment_digest: sha256_text(controller_assignment_bytes_v1(binding).unwrap()),
+        maximum_cpu_millis: 6000, maximum_memory_bytes: 12000, scope: scope)
+    var operation = controller
+    operation.id = "parent-budget-operation"
+    operation.operation = "controller_helper_budget_v1"
+    operation.payload_digest = controller_parent_budget_digest_v1(budget).unwrap()
+    operation.memory_bytes = budget.maximum_memory_bytes
+    operation.duration_ms = 100
+    ParentBudgetFixtureV1(budget: budget, operation: operation, binding: binding, controller_operation: controller)
+
+fn parent_budget_rebind_v1(original: ParentBudgetFixtureV1) -> ParentBudgetFixtureV1:
+    var fixture = original
+    fixture.operation.payload_digest = controller_parent_budget_digest_v1(fixture.budget).unwrap()
+    fixture.operation.memory_bytes = fixture.budget.maximum_memory_bytes
+    fixture
+
+fn parent_budget_fixture_matches_v1(fixture: ParentBudgetFixtureV1) -> Result<bool, text>:
+    controller_parent_budget_match_v1(fixture.budget, fixture.operation, fixture.binding, fixture.controller_operation)
+
+fn parent_budget_seed_v1(offset: i64) -> [u8]:
+    var bytes: [u8] = []
+    for index in 0..32: bytes.push((offset + index) as u8)
+    bytes
+
+fn parent_budget_proof_fixture_v1(fixture: ParentBudgetFixtureV1) -> ControllerParentBudgetProofV1:
+    val grant = ExecutionGrantV2(id: "budget-grant", principal: "user", project: "project", host_id: "controller",
+        operations: ["controller_helper_budget_v1"], environment_digest: "b".repeat(64), policy_revision: 1,
+        revocation_epoch: 0, expires_at: 1000, maximum_memory_bytes: 16000, maximum_duration_ms: 200)
+    var signed = DistributedSignedGrantV2(grant: grant, issuer_id: "budget-issuer", key_revision: 1, signature: [])
+    val issuer = pure_ed25519_sign_from_seed_v1(parent_budget_seed_v1(7), distributed_grant_signature_message_v2(signed).unwrap())
+    signed.signature = issuer.signature
+    var approval = DistributedSignedApprovalV2(approver_id: "budget-approver", key_revision: 1,
+        grant_digest: distributed_grant_digest_v2(grant).unwrap(), request_digest: sha256_text(distributed_encode_operation_v2(fixture.operation).unwrap()),
+        policy_revision: 1, session_generation: 3, expires_at: 900, signature: [])
+    val approver = pure_ed25519_sign_from_seed_v1(parent_budget_seed_v1(79), distributed_approval_signature_message_v2(approval).unwrap())
+    approval.signature = approver.signature
+    ControllerParentBudgetProofV1(budget: fixture.budget, operation: fixture.operation, signed: signed, approval: approval)
+
+fn parent_budget_wire_field_v1(source: text, key: text, value: SdnValue) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    var fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn main() -> i64:
+    parent_budget_case_1_v1()
+    parent_budget_case_2_v1()
+    parent_budget_case_3_v1()
+    parent_budget_case_4_v1()
+    parent_budget_case_5_v1()
+    parent_budget_case_6_v1()
+    parent_budget_case_7_v1()
+    parent_budget_case_8_v1()
+    print "controller-parent-budget: structural binding assertions passed"
+    0
+
+fn parent_budget_case_1_v1():
+    val fixture = parent_budget_fixture_v1()
+    assert(parent_budget_fixture_matches_v1(fixture).unwrap())
+    val bytes = controller_parent_budget_bytes_v1(fixture.budget).unwrap()
+    val decoded = controller_parent_budget_decode_v1(bytes).unwrap()
+    assert(controller_parent_budget_bytes_v1(decoded).unwrap() == bytes)
+    assert(controller_parent_budget_digest_v1(decoded).unwrap() == sha256_text(bytes))
+    assert(decoded.maximum_cpu_millis == 6000)
+    assert(decoded.maximum_memory_bytes == 12000)
+    assert(decoded.scope.physical_host_id != decoded.scope.native_machine_id)
+    assert(decoded.scope.boot_id == "")
+    val proof = parent_budget_proof_fixture_v1(fixture)
+    val wire = controller_parent_budget_proof_encode_v1(proof).unwrap()
+    val restored = controller_parent_budget_proof_decode_v1(wire).unwrap()
+    assert(controller_parent_budget_proof_encode_v1(restored).unwrap() == wire)
+    assert(restored.operation.operation == "controller_helper_budget_v1")
+    assert(restored.signed.signature.len() == 64)
+
+fn parent_budget_case_2_v1():
+    val original = parent_budget_fixture_v1()
+    var changed = original
+    changed.budget.parent_operation_id = "other-parent"
+    assert(parent_budget_fixture_matches_v1(parent_budget_rebind_v1(changed)).unwrap_err() == "parent-budget-parent-reference-mismatch")
+    changed = original
+    changed.budget.parent_operation_digest = "c".repeat(64)
+    assert(parent_budget_fixture_matches_v1(parent_budget_rebind_v1(changed)).unwrap_err() == "parent-budget-parent-reference-mismatch")
+    changed = original
+    changed.budget.parent_assignment_digest = "d".repeat(64)
+    assert(parent_budget_fixture_matches_v1(parent_budget_rebind_v1(changed)).unwrap_err() == "parent-budget-parent-reference-mismatch")
+    changed = original
+    changed.controller_operation.payload_digest = "f".repeat(64)
+    assert(parent_budget_fixture_matches_v1(changed).is_err())
+
+fn parent_budget_case_3_v1():
+    val original = parent_budget_fixture_v1()
+    var changed = original
+    changed.budget.scope.physical_host_id = "other-alias"
+    assert(parent_budget_fixture_matches_v1(parent_budget_rebind_v1(changed)).unwrap_err() == "parent-budget-scope-mismatch")
+    changed = original
+    changed.budget.scope.native_machine_id = "windows-machine-guid-v1:other"
+    assert(parent_budget_fixture_matches_v1(parent_budget_rebind_v1(changed)).unwrap_err() == "parent-budget-scope-mismatch")
+    changed = original
+    changed.budget.scope.continuity_id = "windows-service-incarnation-v1:other"
+    assert(parent_budget_fixture_matches_v1(parent_budget_rebind_v1(changed)).unwrap_err() == "parent-budget-scope-mismatch")
+    changed = original
+    changed.budget.scope.continuity_mode = "native-boot-incarnation-v1"
+    changed.budget.scope.boot_id = "same-id"
+    changed.budget.scope.continuity_id = "same-id"
+    assert(parent_budget_fixture_matches_v1(parent_budget_rebind_v1(changed)).unwrap_err() == "parent-budget-scope-mismatch")
+    var service = original.budget.scope
+    service.continuity_id = "same-id"
+    var native = service
+    native.continuity_mode = "native-boot-incarnation-v1"
+    native.boot_id = "same-id"
+    assert(container_scope_fence_id_v2(service).unwrap() != container_scope_fence_id_v2(native).unwrap())
+
+fn parent_budget_case_4_v1():
+    val original = parent_budget_fixture_v1()
+    var changed = original
+    changed.budget.maximum_cpu_millis = 1999
+    assert(parent_budget_fixture_matches_v1(parent_budget_rebind_v1(changed)).unwrap_err() == "parent-budget-below-retained-parent")
+    changed = original
+    changed.budget.maximum_memory_bytes = 3999
+    assert(parent_budget_fixture_matches_v1(parent_budget_rebind_v1(changed)).unwrap_err() == "parent-budget-below-retained-parent")
+    changed = original
+    changed.budget.maximum_cpu_millis = 0
+    assert(controller_parent_budget_bytes_v1(changed.budget).is_err())
+    changed = original
+    changed.budget.maximum_memory_bytes = -1
+    assert(controller_parent_budget_bytes_v1(changed.budget).is_err())
+
+fn parent_budget_case_5_v1():
+    val original = parent_budget_fixture_v1()
+    var changed = original
+    changed.operation.host_id = original.binding.host_operation.host_id
+    assert(parent_budget_fixture_matches_v1(changed).is_err())
+    changed = original
+    changed.operation.operation = "host_execute_v1"
+    assert(parent_budget_fixture_matches_v1(changed).is_err())
+    changed = original
+    changed.operation.memory_bytes = 11999
+    assert(parent_budget_fixture_matches_v1(changed).is_err())
+    changed = original
+    changed.operation.duration_ms = 201
+    assert(parent_budget_fixture_matches_v1(changed).is_err())
+    changed = original
+    changed.operation.duration_ms = 0
+    assert(parent_budget_fixture_matches_v1(changed).is_err())
+    changed = original
+    changed.operation.principal = "other-user"
+    assert(parent_budget_fixture_matches_v1(changed).is_err())
+    changed = original
+    changed.operation.project = "other-project"
+    assert(parent_budget_fixture_matches_v1(changed).is_err())
+    changed = original
+    changed.operation.environment_digest = "e".repeat(64)
+    assert(parent_budget_fixture_matches_v1(changed).is_err())
+    changed = original
+    changed.operation.policy_revision = 2
+    assert(parent_budget_fixture_matches_v1(changed).is_err())
+    changed = original
+    changed.operation.revocation_epoch = 1
+    assert(parent_budget_fixture_matches_v1(changed).is_err())
+    changed = original
+    changed.operation.session_generation = 4
+    assert(parent_budget_fixture_matches_v1(changed).is_err())
+
+fn parent_budget_case_6_v1():
+    val original = parent_budget_fixture_v1()
+    val proof = parent_budget_proof_fixture_v1(original)
+    var changed = proof
+    changed.budget.maximum_cpu_millis = 8000
+    assert(controller_parent_budget_proof_encode_v1(changed).unwrap_err() == "parent-budget-operation-mismatch")
+    var rebound = original
+    rebound.budget.maximum_cpu_millis = 8000
+    rebound = parent_budget_rebind_v1(rebound)
+    assert(parent_budget_fixture_matches_v1(rebound).unwrap())
+    val resigned = parent_budget_proof_fixture_v1(rebound)
+    assert(resigned.operation.payload_digest != proof.operation.payload_digest)
+    assert(resigned.approval.signature != proof.approval.signature)
+    assert(controller_parent_budget_proof_decode_v1(controller_parent_budget_proof_encode_v1(resigned).unwrap()).unwrap().budget.maximum_cpu_millis == 8000)
+
+fn parent_budget_case_7_v1():
+    val fixture = parent_budget_fixture_v1()
+    val bytes = controller_parent_budget_bytes_v1(fixture.budget).unwrap()
+    assert(controller_parent_budget_decode_v1(bytes + "\n").is_err())
+    assert(controller_parent_budget_decode_v1(parent_budget_wire_field_v1(bytes, "authenticated", SdnValue.Bool(true))).is_err())
+    assert(controller_parent_budget_decode_v1(parent_budget_wire_field_v1(bytes, "maximumCpuMillis", SdnValue.String("6000"))).is_err())
+    val head = bytes.slice(0, bytes.len() - 2)
+    assert(controller_parent_budget_decode_v1(head + ", maximumCpuMillis: 6000" + "}\n").is_err())
+    assert(controller_parent_budget_decode_v1(bytes.replace("maximumCpuMillis: 6000", "maximumCpuMillis: 9223372036854775808")).is_err())
+    var maximum = fixture.budget
+    maximum.maximum_cpu_millis = 9223372036854775807
+    maximum.maximum_memory_bytes = 9223372036854775807
+    val maximum_bytes = controller_parent_budget_bytes_v1(maximum).unwrap()
+    assert(controller_parent_budget_decode_v1(maximum_bytes).unwrap().maximum_cpu_millis == 9223372036854775807)
+    val oversized = "é".repeat(8193)
+    assert(str_len(oversized) == 16386)
+    assert(controller_parent_budget_decode_v1(oversized).unwrap_err() == "parent-budget-source-size")
+
+fn parent_budget_case_8_v1():
+    val fixture = parent_budget_fixture_v1()
+    val proof = parent_budget_proof_fixture_v1(fixture)
+    val wire = controller_parent_budget_proof_encode_v1(proof).unwrap()
+    assert(controller_parent_budget_proof_decode_v1(parent_budget_wire_field_v1(wire, "authenticated", SdnValue.Bool(true))).is_err())
+    assert(controller_parent_budget_proof_decode_v1(parent_budget_wire_field_v1(wire, "budget", SdnValue.String(controller_parent_budget_bytes_v1(fixture.budget).unwrap() + "\n"))).is_err())
+    assert(controller_parent_budget_proof_decode_v1(parent_budget_wire_field_v1(wire, "operation", SdnValue.String("changed"))).is_err())
+    assert(controller_parent_budget_proof_decode_v1(parent_budget_wire_field_v1(wire, "signedApproval", SdnValue.String(""))).is_err())
+    assert(controller_parent_budget_proof_decode_v1(parent_budget_wire_field_v1(wire, "budget", SdnValue.String("x".repeat(16385)))).is_err())
+    assert(controller_parent_budget_proof_decode_v1("é".repeat(131073)).unwrap_err() == "parent-budget-proof-size")
+    assert(controller_parent_budget_proof_decode_v1(wire + "\n").is_err())

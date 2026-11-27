@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-09-13
 - **Area:** ui / web renderer showcase (`std.gc_async_mut.gpu.browser_engine.simple_web_renderer`)
-- **Status:** open, recorded during test authoring; NOT fixed here
+- **Status:** FIXED 2026-09-13 (see RESOLVED below); re-verified and closed 2026-11-13
 
 ## What was measured
 
@@ -95,3 +95,29 @@ The budget this record asked for is now pinned in
 device-free formula pin in
 `test/01_unit/lib/gpu/engine2d_shadow_rect_twin_formula_spec.spl`. Full
 measurement record: `doc/10_metrics/ui/engine2d_twin_parity_2026-09-13.md`.
+
+## 2026-11-13 closure (UI batch B, Linux aarch64, release/1.0.0 @ 35144b7f5e93)
+
+Re-run on this host (Rust seed, 16G cgroup cap):
+
+- `test/01_unit/lib/gpu/engine2d_shadow_rect_twin_formula_spec.spl`:
+  `outcome=OK declared>=3 executed=3 passed=3 failed=0`, rc=0.
+- `test/02_integration/ui/web_showcase/catalog_vulkan_twin_spec.spl`:
+  `outcome=OK declared>=3 executed=3 passed=3 failed=0`, rc=0. Twin diff at
+  320x180: `DiffResult(pixels: 57600, mismatch: 0, mismatch_pct_x100: 0,
+  max_delta: 0)`; Vulkan digests `ad9bd0c6` twice.
+- Source: `backend_vulkan.spl:3119` delegates to `emu_draw_shadow_rect`; the
+  budget is pinned at `catalog_vulkan_twin_spec.spl:130-131`
+  (`mismatch_pct_x100 <= 50`, `max_delta <= 8`).
+
+Limit of this host's evidence, stated plainly: the census reported
+`cpu_fallback=false` for the seven non-overview tabs but `dispatches_frame=0`
+(the 2026-09-13 measurement had `dispatches_frame=1`), and the `overview` row
+came back with empty census fields. So this run confirms the two lanes agree
+pixel for pixel and that the spec's fallback guard did not trip; it does not
+independently prove a GPU dispatch on this machine. The 0.00% GPU-dispatch
+measurement remains the 2026-09-13 one in
+`doc/10_metrics/ui/engine2d_twin_parity_2026-09-13.md`.
+
+Both asks of this record are met (the divergence is fixed and a budget is
+pinned and gated). `bug_db.sdn` row moved open -> fixed.

@@ -1,0 +1,108 @@
+# Purpose and audience: executable evidence for self-hosted compiler engineers
+# that the strict undefined-field check in HIR accessor forwarding is
+# unconditional: a read `recv.x` on a fully-known owner (same-file OR imported,
+# via full module surfaces) with no field `x` and no get_x/is_x/x() accessor is
+# always a hard lowering error (bug strict-field-forwarding-opt-in-20261027
+# retired). Real fields, forwarded accessors and underscore members never error.
+# @req REQ-SELFHOST-ACCESSOR-001
+# @req REQ-SELFHOST-ACCESSOR-002
+# requirements: doc/02_requirements/compiler/mdsoc_matrix_visibility_requirements.md
+
+
+use std.spec
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+val DECLS = "class Temp:\n" +
+    "    level: i64\n" +
+    "    me get_celsius() -> i64:\n" +
+    "        1\n" +
+    "    me is_hot() -> bool:\n" +
+    "        true\n" +
+    "    me get__hidden() -> i64:\n" +
+    "        6\n" +
+    "    me size() -> i64:\n" +
+    "        3\n"
+
+# Returns [hard error count, joined diagnostic messages] for a one-line probe
+# body, lowering the module alone (same-file owner).
+fn lower_probe(probe_body: text) -> [text]:
+    val src = DECLS + "\nfn probe(t: Temp) -> i64:\n    " + probe_body + "\n"
+    val parsed = parse_full_frontend(src, "testdata/accessor_strict.spl", "accessor_strict", Logger(level: 0))
+    var lowering = HirLowering.with_filename("testdata/accessor_strict.spl")
+    lowering.lower_module(parsed)
+    var msgs = ""
+    for m in lowering.diagnostic_messages:
+        msgs = msgs + m + "\n"
+    var hard = 0
+    for rec in lowering.diagnostic_recovered:
+        if not rec:
+            hard = hard + 1
+    ["{hard}", msgs]
+
+# Lowers `cfb` against the full module surfaces of [cfa, cfb] (imported owner).
+# Returns [hard error count, joined diagnostic messages] for cfb.
+fn lower_imported(reader_body: text) -> [text]:
+    val a = "pub struct CfPoint:\n    x: i64\n    me get_len() -> i64:\n        1\n"
+    val b = 'use app.cfa.{CfPoint}' + "\nfn read(p: CfPoint) -> i64:\n    " + reader_body + "\n"
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    val paths = ["app/cfa.spl", "app/cfb.spl"]
+    val names = ["app.cfa", "app.cfb"]
+    val contents = [a, b]
+    var i = 0
+    while i < 2:
+        modules[names[i]] = parse_full_frontend(contents[i], paths[i], names[i], log)
+        sources.push(SourceFile(path: paths[i], content: contents[i], module_name: names[i]))
+        i = i + 1
+    val surfaces = module_surfaces_from_modules(modules, sources)
+    expect(surfaces.is_err()).to_equal(false)
+    var lowering = hirlowering_for_module("app.cfb", surfaces.unwrap())
+    lowering.lower_module(modules["app.cfb"])
+    var msgs = ""
+    for m in lowering.diagnostic_messages:
+        msgs = msgs + m + "\n"
+    var hard = 0
+    for rec in lowering.diagnostic_recovered:
+        if not rec:
+            hard = hard + 1
+    ["{hard}", msgs]
+
+describe "HIR strict undefined-field check (unconditional)":
+    it "rejects an unknown field on a same-file owner unconditionally":
+        step("given t.nope on a same-file owner then one hard no-field error and no warning")
+        val r = lower_probe("t.nope")
+        expect(r[0]).to_equal("1")
+        expect(r[1].contains("no field `nope` on type and no get_/is_ accessor")).to_equal(true)
+        expect(r[1].contains("W-HIR-FIELD-001")).to_equal(false)
+
+    it "rejects an unknown field on an IMPORTED owner unconditionally":
+        step("given p.nope on CfPoint imported from app.cfa then one hard no-field error and no warning")
+        val r = lower_imported("p.nope")
+        expect(r[0]).to_equal("1")
+        expect(r[1].contains("no field `nope` on type and no get_/is_ accessor")).to_equal(true)
+        expect(r[1].contains("W-HIR-FIELD-001")).to_equal(false)
+
+    it "accepts a real field, forwarded getters and a no-paren method under strict":
+        step("given t.level / t.celsius / t.hot / t.size then zero hard errors")
+        for body in ["t.level", "t.celsius", "if t.hot: 1 else: 0", "t.size"]:
+            val r = lower_probe(body)
+            expect(r[0]).to_equal("0")
+
+    it "accepts a real field and a forwarded getter on an IMPORTED owner under strict":
+        step("given p.x / p.len on imported CfPoint then zero hard errors")
+        for body in ["p.x", "p.len"]:
+            val r = lower_imported(body)
+            expect(r[0]).to_equal("0")
+
+    it "never errors for an underscore-prefixed member under strict":
+        step("given get__hidden but no field _hidden when reading t._hidden then no strict error")
+        val r = lower_probe("t._hidden")
+        expect(r[1].contains("no field")).to_equal(false)

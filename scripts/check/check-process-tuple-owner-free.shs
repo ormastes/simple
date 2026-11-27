@@ -1,0 +1,53 @@
+#!/bin/sh
+# rt_process_run_tuple & friends must free the owner result array they copy
+# their slots out of (see test/runtime/process_result_tuple_owner_free_test.c).
+#
+# macOS-only: the test counts live malloc blocks with malloc_zone_statistics.
+# Builds runtime_native.c + runtime_legacy_core.c (for spl_str_concat) against
+# the test with unresolved SFFI symbols left dynamic (never reached here).
+#
+# Verdict is the last line of stdout:
+#   PASS  — ...   exit 0
+#   FAIL  — ...   exit 1
+#   ERROR — nothing was checked (...)   exit 2
+set -u
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+TEST="$ROOT/test/runtime/process_result_tuple_owner_free_test.c"
+WORK=${TMPDIR:-/tmp}/process-tuple-owner-free.$$
+
+cleanup() { rm -rf "$WORK"; }
+trap cleanup EXIT INT TERM
+
+if [ "$(uname -s)" != "Darwin" ]; then
+    printf 'ERROR — nothing was checked (test is macOS-only: malloc_zone_statistics)\n'
+    exit 2
+fi
+CC=
+for candidate in clang cc; do
+    if command -v "$candidate" >/dev/null 2>&1; then CC=$candidate; break; fi
+done
+if [ -z "$CC" ]; then
+    printf 'ERROR — nothing was checked (no C compiler)\n'
+    exit 2
+fi
+
+mkdir -p "$WORK"
+"$CC" -O0 -I"$ROOT/src/runtime" -w -o "$WORK/test" "$TEST" \
+    "$ROOT/src/runtime/runtime_native.c" "$ROOT/src/runtime/runtime_legacy_core.c" \
+    -Wl,-undefined,dynamic_lookup >"$WORK/build.log" 2>&1
+build_rc=$?
+if [ "$build_rc" -ne 0 ]; then
+    printf 'ERROR — nothing was checked (test build failed, rc=%s)\n' "$build_rc"
+    cat "$WORK/build.log"
+    exit 2
+fi
+
+"$WORK/test"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+    printf 'PASS  — process tuple facades free their owner result array\n'
+    exit 0
+fi
+printf 'FAIL  — process tuple facades leak their owner result array (rc=%s)\n' "$rc"
+exit 1

@@ -1,5 +1,5 @@
 # Phase-1 entry closure never loads a facade's re-export OWNER modules
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-11 — fix verified at tip by p3-boot12 (was: Open 2026-09-16 — needs owner triage)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -121,3 +121,79 @@ data fixes are stdlib content with no platform code, and the interpreter lane
 was re-verified after each (`bin/simple run src/app/devhub/main.spl --version`
 -> `devhub 0.1.0`).
 
+
+## See also (2026-10-30)
+
+The Rust seed's `simple run` lane had a facade-shaped defect of its own,
+in different code: `pipeline::module_loader::resolve_numbered_parts_from_root`
+never resolved a plain package `__init__.spl` as the LAST segment under a
+numbered layer dir, so `use compiler.semantics.any_escape.{any_escape_check}`
+flattened nothing and the JIT dropped the whole compiler worker to the
+interpreter. FIXED in
+`jit_pipeline_loader_skips_plain_package_init_under_numbered_layer_2026-10-30.md`.
+The Simple-written driver's phase-1 closure walk described above is separate
+and still open.
+
+## Re-verified 2026-11-09 (never-touched-p3 lane) — premise fixed in source
+
+Both dropped edges are now followed by the phase-1 driver walk:
+`driver_source_pipeline_loading.spl:1070` calls `driver_closure_import_specs_v1`,
+which (`driver_entry_closure_core.spl` `driver_closure_import_specs_finish_v1`)
+appends every `.sibling` edge from `_driver_entry_sibling_module_paths` — both
+`export X.*` and `# Re-exported from X.spl` — and only when the owner file
+exists (the mandatory "hint, never add_error" guard). Landed via
+`7d8820319a2`, `5334d6c7b3d`, `4a5b072e594`.
+
+Evidence:
+- `test/01_unit/compiler/driver/generated_facade_origin_closure_spec.spl`:
+  `Results: 6 total, 6 passed, 0 failed` (seed, worktree at origin/release/1.0.0).
+- Native repro with the self-hosted stage2 (`stage2_new4.exe`, `native-build
+  --entry-closure`) on the exact 7-line `std.json` program above: phase-1 now
+  loads 44 sources / parses 20 (was `parse 2/2`), including all 11
+  `src/lib/common/json/*.spl` owners; zero `unresolved name` and zero
+  `invalid export origin` errors; HIR passes. The build still fails later, in
+  MIR, on an unrelated defect in `lib.common.json.utilities` (`for-in over
+  non-array iterables` / `unresolved method call: keys` on an `Any`-typed
+  dict) — a different bug, not a closure defect.
+
+Status: fix-implemented-verification-pending.
+
+
+## Triage 2026-11-10 (p3-boot4 lane, assignment row 32)
+
+**Verdict: SUPERSEDED (fix verified — status advances to verified).**
+
+Corroborates and closes out the 2026-11-09 never-touched-p3 note
+("fix-implemented-verification-pending") at this lane's base
+(origin/release/1.0.0):
+
+- Fix commits `7d8820319a2`, `5334d6c7b3d`, `4a5b072e594` are all ancestors
+  of this base.
+- Fresh seed-smoke (worktree Rust seed `bin/simple.exe`, label seed-smoke,
+  2026-11-10): `bin/simple.exe test
+  test/01_unit/compiler/driver/generated_facade_origin_closure_spec.spl
+  --mode=interpret` → "All tests passed!" — the closure spec guarding both
+  dropped edge classes (`export X.*` and `# Re-exported from`) passes.
+
+No change made in this lane.
+
+
+## Triage 2026-11-11 (P3 boot12 lane, work/p3-boot12-20261111)
+
+**Verdict: SUPERSEDED — fix verified live; confirms the 2026-11-09
+never-touched-p3 note and the 2026-11-10 p3-boot4 verdict at this base.**
+
+- Fix commits 7d8820319a2, 5334d6c7b3d, 4a5b072e594 verified ancestors of
+  this base (`git merge-base --is-ancestor` → YES for all three).
+- Seed-smoke (fresh seed 46fe8f6b6def, label seed-smoke, 2026-11-11):
+  `SIMPLE_LIB=src bin/simple.exe test
+  test/01_unit/compiler/driver/generated_facade_origin_closure_spec.spl
+  --mode=interpreter --no-cache` → `Results: 6 total, 6 passed, 0 failed`.
+  The closure spec guarding both dropped edge classes (`export X.*` and
+  `# Re-exported from X.spl`) passes on current source.
+
+No change made in this lane.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**SUPERSEDED/FIXED (confirmed)** — boot12: fix commits 7d8820319a2/5334d6c7b3d/4a5b072e594 verified ancestors; generated_facade_origin_closure_spec 6/6 on the tracked seed.

@@ -18,7 +18,7 @@ fn formatter_collapse_ascii_space_runs(value: String) -> String:
     var previous_space = false
     var changed = false
     var i = 0
-    while i < value.len():
+    while i < value.byte_len():
         val is_space = value.byte_at(i) == 32
         if is_space and previous_space:
             changed = true
@@ -30,8 +30,8 @@ fn formatter_collapse_ascii_space_runs(value: String) -> String:
 
     if not changed:
         return value
-    if segment_start < value.len():
-        parts.push(value.substring(segment_start, value.len()))
+    if segment_start < value.byte_len():
+        parts.push(value.substring(segment_start, value.byte_len()))
     parts.join("")
 
 fn formatter_gap_fingerprint(gap: String, preserve_whitespace: bool) -> String:
@@ -48,7 +48,7 @@ fn formatter_gap_fingerprint(gap: String, preserve_whitespace: bool) -> String:
         val marker = line.find("#")
         # substring, not line[marker:]: a find result is a tag-boxed raw i64 and
         # slicing uses the tagged word raw, yielding the wrong cut.
-        val comment = line.substring(marker, line.len())
+        val comment = line.substring(marker, line.byte_len())
         parts.push("comment:{comment.len()}:{comment}\n")
     parts.join("")
 
@@ -99,7 +99,7 @@ fn formatter_require_lexical_equivalence(original: String, formatted: String) ->
                         Ok(formatted)
 
 # Synchronous file I/O wrappers (runtime functions are synchronous)
-fn fmt_read_file(path: String) -> Result<String, String>:
+pub fn fmt_read_file(path: String) -> Result<String, String>:
     if not file_exists(path):
         return Err("Failed to read file: {path}")
     val content = file_read(path)
@@ -125,10 +125,10 @@ fn fmt_last_index_of(s: String, pattern: String) -> Option<Int>:
         fmt_last_index_of("test", "x") -> nil
     """
     if pattern.is_empty():
-        return nil
+        return None
 
     if s.len() < pattern.len():
-        return nil
+        return None
 
     # Search from end to beginning
     var i = s.len() - pattern.len()
@@ -147,7 +147,7 @@ fn fmt_last_index_of(s: String, pattern: String) -> Option<Int>:
 
         i = i - 1
 
-    nil
+    None
 
 class FormatConfig:
     indent_size: Int
@@ -424,7 +424,7 @@ class Formatter:
             val last_line = lines[last_idx]
             if last_line.ends_with(","):
                 var result = lines
-                result[last_idx] = last_line.substring(0, last_line.len() - 1)
+                result[last_idx] = last_line.substring(0, last_line.byte_len() - 1)
                 return result
         lines
 
@@ -440,45 +440,36 @@ class Formatter:
         if not line.contains(open_delim):
             return [indent_str + line]
 
-        val delim_start_opt = line.index_of(open_delim)
-        val delim_end_opt = line.index_of(close_delim)
+        val delim_start = line.index_of(open_delim)
+        val delim_end = line.index_of(close_delim)
+        if delim_start < 0 or delim_end < 0 or delim_end < delim_start:
+            return [indent_str + line]
 
-        match delim_start_opt:
-            case nil:
-                return [indent_str + line]
-            case Some(delim_start):
-                match delim_end_opt:
-                    case nil:
-                        return [indent_str + line]
-                    case Some(delim_end):
-                        if delim_end < delim_start:
-                            return [indent_str + line]
+        val before = line.substring(0, delim_start + 1)
+        val content = line.substring(delim_start + 1, delim_end)
+        val after = line.substring(delim_end, line.byte_len())
 
-                        val before = line.substring(0, delim_start + 1)
-                        val content = line.substring(delim_start + 1, delim_end)
-                        val after = line.substring(delim_end, line.len())
+        # Check if it fits on one line
+        val one_line = indent_str + before + content + after
+        if one_line.len() <= self.config.max_line_length:
+            return [one_line]
 
-                        # Check if it fits on one line
-                        val one_line = indent_str + before + content + after
-                        if one_line.len() <= self.config.max_line_length:
-                            return [one_line]
+        # Break items across multiple lines
+        var result = []
+        result.push(indent_str + before)
 
-                        # Break items across multiple lines
-                        var result = []
-                        result.push(indent_str + before)
+        val items = content.split(",")
+        for item in items:
+            val trimmed = item.trim()
+            if skip_empty and trimmed.is_empty():
+                pass
+            else:
+                result.push(continuation_str + trimmed + ",")
 
-                        val items = content.split(",")
-                        for item in items:
-                            val trimmed = item.trim()
-                            if skip_empty and trimmed.is_empty():
-                                pass
-                            else:
-                                result.push(continuation_str + trimmed + ",")
-
-                        # Remove trailing comma from last item
-                        result = self.remove_trailing_comma(result)
-                        result.push(indent_str + after)
-                        return result
+        # Remove trailing comma from last item
+        result = self.remove_trailing_comma(result)
+        result.push(indent_str + after)
+        return result
 
     fn break_function_signature(line: String, indent_str: String, continuation_str: String) -> [String]:
         """Break function signature at parameter list."""
@@ -505,18 +496,14 @@ class Formatter:
 
         for op in operators:
             if line.contains(op):
-                val idx_opt = line.index_of(op)
-                match idx_opt:
-                    case Some(idx):
-                        if idx > best_break:
-                            best_break = idx
-                            best_op = op
-                    case nil:
-                        pass
+                val idx = line.index_of(op)
+                if idx > best_break:
+                    best_break = idx
+                    best_op = op
 
         if best_break > 0:
             val first_part = line.substring(0, best_break)
-            val second_part = line.substring(best_break + best_op.len(), line.len())
+            val second_part = line.substring(best_break + best_op.byte_len(), line.byte_len())
 
             return [
                 indent_str + first_part + best_op,
@@ -545,7 +532,7 @@ class Formatter:
         var parts: [String] = []
         var segment_start = 0
         var i = 0
-        val line_len = line.len()
+        val line_len = line.byte_len()
         while i < line_len:
             if line.byte_at(i) == 34:
                 if i > segment_start:
@@ -581,7 +568,7 @@ class Formatter:
 
         val spaced = parts.join("").trim()
         if spaced.starts_with("- "):
-            return "-" + spaced.substring(2, spaced.len())
+            return "-" + spaced.substring(2, spaced.byte_len())
         return spaced
 
     fn space_code_segment(line: String) -> String:
@@ -654,7 +641,7 @@ class Formatter:
         result = " " + result
         for lead in ["(", "[", ", ", "= ", "+ ", "- ", "* ", "/ ", "% ", "< ", "> ", ": ", " return ", " and ", " or ", " not ", " in ", " if ", " elif ", " while "]:
             result = result.replace(lead + "- ", lead + "-")
-        result = result.substring(1, result.len())
+        result = result.substring(1, result.byte_len())
 
         return result
 
@@ -688,7 +675,7 @@ class Formatter:
             return true
         return false
 
-fn format_file_inplace(path: String) -> Result<String, String>:
+pub fn format_file_inplace(path: String) -> Result<String, String>:
     val fmt_instance = make_formatter()
 
     val format_output = fmt_instance.format_file(path)
@@ -703,7 +690,7 @@ fn format_file_inplace(path: String) -> Result<String, String>:
                 case Err(e):
                     return Err(e)
 
-fn check_formatting(path: String) -> Result<Bool, String>:
+pub fn check_formatting(path: String) -> Result<Bool, String>:
     val check_formatter = make_formatter()
 
     val original_content = fmt_read_file(path)
@@ -718,7 +705,7 @@ fn check_formatting(path: String) -> Result<Bool, String>:
                 case Ok(formatted):
                     return Ok(original == formatted)
 
-fn print_diff(original: String, formatted: String, file_path: String):
+pub fn print_diff(original: String, formatted: String, file_path: String):
     """Print unified diff between original and formatted code"""
     print("--- " + file_path + " (original)")
     print("+++ " + file_path + " (formatted)")

@@ -75,3 +75,5 @@ real-tool identity, discovery receipts, and candidate patch. Historical logs:
 `/home/ormastes/dev/simple-platform-ci-failures-20261012/linux-cranelift-stage2.log`
 and `linux-cranelift.log`; archive
 `/mnt/c/Temp/simple-linux-cranelift-failure-20261012.zip`.
+
+**Revalidated 2026-11-02: still plausible because OPEN — diagnostic repair candidate; original CI cause not conclusively identified; no merged fix commit with a passing regression is cited in this doc.**

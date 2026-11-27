@@ -1,0 +1,82 @@
+# @cover src/app/llm_caret/provider.spl 60%
+# @cover src/lib/gc_async_mut/slang/entrypoints/llm.spl 80%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# design: doc/00_llm_process/feature_expert/slang_local_inference/skill.md
+
+"""
+## Purpose and audience
+Purpose: prove that a real consumer of slang, caret's `slang_local` provider,
+gets a completion from a real GGUF model. The spec calls caret's own dispatch
+entry point (`app.llm_caret.provider.dispatch_send`), not slang directly, so a
+break anywhere between caret and the ggml backend is a failure here.
+Audience: maintainers of `src/app/llm_caret/` and `src/lib/gc_async_mut/slang/`.
+
+## What is checked
+- the reply is non-empty text and is not flagged as an error;
+- the provider identity caret reports is `slang_local/ggml` (the backend slang
+  actually ran) and the model id echoes the requested model;
+- a second, independent request (different prompt) also succeeds, which also
+  exercises caret's per-dispatch release and reload of the model.
+
+## Compatibility and limitations
+Runs only with SLANG_LIVE=1, SLANG_MODEL_ROOT naming the model root and a built
+ggml shim (SLANG_GGML_LIB or the per-OS default under build/sffi/). The model id
+comes from CARET_SLANG_MODEL, default `Qwen2.5-1.5B-Instruct-Q4_K_M` (the
+directory name on this host). A missing prerequisite is a skip that names it.
+"""
+
+use std.spec.{describe, it, expect, step, skip}
+use std.io_runtime.{env_get, is_dir, time_now_monotonic_ms}
+use app.llm_caret.provider.{dispatch_send}
+use std.gc_async_mut.slang.entrypoints.llm.{engine_backend_available}
+
+val DEFAULT_MODEL = "Qwen2.5-1.5B-Instruct-Q4_K_M"
+val MAX_TOKENS: i64 = 24
+
+fn _model() -> text:
+    val m = env_get("CARET_SLANG_MODEL") ?? ""
+    if m == "":
+        return DEFAULT_MODEL
+    m
+
+fn _root() -> text:
+    env_get("SLANG_MODEL_ROOT") ?? ""
+
+fn _missing() -> text:
+    if (env_get("SLANG_LIVE") ?? "") != "1":
+        return "SLANG_LIVE=1 not set"
+    if _root() == "" or not is_dir(_root() + "/" + _model()):
+        return "model '" + _model() + "' not under SLANG_MODEL_ROOT '" + _root() + "'"
+    if not engine_backend_available():
+        return "ggml backend not built (build/sffi/slang_ggml.dll)"
+    ""
+
+# caret's slang_local contract: base_url carries the model root, cli_path the lib.
+fn _ask(prompt: text) -> app.llm_caret.provider.LLMResponse:
+    dispatch_send("slang_local", prompt, _model(), "", _root(),
+        env_get("SLANG_GGML_LIB") ?? "", "", "", 1, MAX_TOKENS, "")
+
+describe "caret's slang_local provider answers from a real local model":
+
+    it "returns non-empty text with slang_local/ggml identity, twice":
+        val gate = _missing()
+        if gate != "":
+            skip("returns non-empty text with slang_local/ggml identity, twice", gate)
+        else:
+            step("First request through caret dispatch_send")
+            val t0 = time_now_monotonic_ms()
+            val a = _ask("Say exactly: hello")
+            val t1 = time_now_monotonic_ms()
+            print "SLANG_CARET_LIVE first_ms=" + (t1 - t0).to_text() + " provider=" + a.provider + " model=" + a.model + " text=[" + a.content + "]"
+            expect(a.is_error).to_equal(false)
+            expect(a.content.trim() != "").to_equal(true)
+            expect(a.provider).to_equal("slang_local/ggml")
+            expect(a.model).to_equal(_model())
+
+            step("Second independent request with a different prompt")
+            val b = _ask("What is the capital of France? Answer in one word.")
+            val t2 = time_now_monotonic_ms()
+            print "SLANG_CARET_LIVE second_ms=" + (t2 - t1).to_text() + " provider=" + b.provider + " text=[" + b.content + "]"
+            expect(b.is_error).to_equal(false)
+            expect(b.content.trim() != "").to_equal(true)
+            expect(b.provider).to_equal("slang_local/ggml")

@@ -190,6 +190,52 @@ static void free_op(iocp_op* op) {
     free(op);
 }
 
+static void discard_op(iocp_driver* id, iocp_op* op) {
+    remove_op_table(id, op->op_id);
+    free_op(op);
+}
+
+static int64_t fail_op(iocp_driver* id, iocp_op* op, int64_t rc) {
+    discard_op(id, op);
+    return rc;
+}
+
+/* Completion check shared by the overlapped submitters: a failed submit that
+ * is not "I/O pending" discards the op and reports -err; otherwise the op id
+ * is returned. WSA_IO_PENDING and ERROR_IO_PENDING are both 997. */
+static int64_t iocp_submit_result(iocp_driver* id, iocp_op* op, BOOL failed, DWORD err) {
+    if (failed && err != ERROR_IO_PENDING) return fail_op(id, op, -(int64_t)err);
+    return op->op_id;
+}
+
+/* Allocate an op owning a malloc(len) buffer that the WSABUF also describes.
+ * Returns NULL (op already discarded) on allocation failure; callers return
+ * -ENOMEM. */
+static iocp_op* alloc_buf_op(iocp_driver* id, int op_type, int64_t len) {
+    iocp_op* op = alloc_op(id, op_type);
+    if (!op) return NULL;
+    op->buf = (char*)malloc((size_t)len);
+    if (!op->buf) { discard_op(id, op); return NULL; }
+    op->buf_len = len;
+    op->wsa_buf.buf = op->buf;
+    op->wsa_buf.len = (ULONG)len;
+    return op;
+}
+
+/* Record the file offset in both the op and its OVERLAPPED. */
+static void set_file_offset(iocp_op* op, int64_t offset) {
+    op->offset = offset;
+    op->overlapped.Offset = (DWORD)(offset & 0xFFFFFFFF);
+    op->overlapped.OffsetHigh = (DWORD)((offset >> 32) & 0xFFFFFFFF);
+}
+
+/* Finish a synchronous op (close/fsync): result is 0 or -GetLastError(). */
+static int64_t iocp_complete_sync(iocp_op* op, BOOL ok) {
+    op->result = ok ? 0 : -(int64_t)GetLastError();
+    op->completed = 1;
+    return op->op_id;
+}
+
 static void load_extension_functions(iocp_driver* id) {
     SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET) return;
@@ -264,10 +310,7 @@ static int64_t iocp_submit_accept(spl_driver* d, int64_t listen_fd) {
     /* Create accept socket */
     op->accept_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (op->accept_sock == INVALID_SOCKET) {
-        int64_t oid = op->op_id;
-        remove_op_table(id, oid);
-        free_op(op);
-        return -EMFILE;
+        return fail_op(id, op, -EMFILE);
     }
 
     DWORD bytes = 0;
@@ -281,10 +324,7 @@ static int64_t iocp_submit_accept(spl_driver* d, int64_t listen_fd) {
     if (!ok && WSAGetLastError() != ERROR_IO_PENDING) {
         int err = WSAGetLastError();
         closesocket(op->accept_sock);
-        int64_t oid = op->op_id;
-        remove_op_table(id, oid);
-        free_op(op);
-        return -err;
+        return fail_op(id, op, -err);
     }
 
     return op->op_id;
@@ -323,33 +363,15 @@ static int64_t iocp_submit_connect(spl_driver* d, int64_t fd,
         op->fd, (struct sockaddr*)&sa, sizeof(sa),
         NULL, 0, &bytes, &op->overlapped);
 
-    if (!ok && WSAGetLastError() != ERROR_IO_PENDING) {
-        int err = WSAGetLastError();
-        int64_t oid = op->op_id;
-        remove_op_table(id, oid);
-        free_op(op);
-        return -err;
-    }
-
-    return op->op_id;
+    return iocp_submit_result(id, op, !ok, WSAGetLastError());
 }
 
 static int64_t iocp_submit_recv(spl_driver* d, int64_t fd, int64_t buf_size) {
     iocp_driver* id = (iocp_driver*)d;
 
-    iocp_op* op = alloc_op(id, OP_RECV);
+    iocp_op* op = alloc_buf_op(id, OP_RECV, buf_size);
     if (!op) return -ENOMEM;
     op->fd = (SOCKET)fd;
-    op->buf = (char*)malloc((size_t)buf_size);
-    if (!op->buf) {
-        int64_t oid = op->op_id;
-        remove_op_table(id, oid);
-        free_op(op);
-        return -ENOMEM;
-    }
-    op->buf_len = buf_size;
-    op->wsa_buf.buf = op->buf;
-    op->wsa_buf.len = (ULONG)buf_size;
 
     associate_socket(id, op->fd);
 
@@ -357,50 +379,24 @@ static int64_t iocp_submit_recv(spl_driver* d, int64_t fd, int64_t buf_size) {
     int rc = WSARecv(op->fd, &op->wsa_buf, 1, NULL, &flags,
                      &op->overlapped, NULL);
 
-    if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-        int err = WSAGetLastError();
-        int64_t oid = op->op_id;
-        remove_op_table(id, oid);
-        free_op(op);
-        return -err;
-    }
-
-    return op->op_id;
+    return iocp_submit_result(id, op, rc == SOCKET_ERROR, WSAGetLastError());
 }
 
 static int64_t iocp_submit_send(spl_driver* d, int64_t fd,
                                  const char* data, int64_t len) {
     iocp_driver* id = (iocp_driver*)d;
 
-    iocp_op* op = alloc_op(id, OP_SEND);
+    iocp_op* op = alloc_buf_op(id, OP_SEND, len);
     if (!op) return -ENOMEM;
     op->fd = (SOCKET)fd;
-    op->buf = (char*)malloc((size_t)len);
-    if (!op->buf) {
-        int64_t oid = op->op_id;
-        remove_op_table(id, oid);
-        free_op(op);
-        return -ENOMEM;
-    }
     memcpy(op->buf, data, (size_t)len);
-    op->buf_len = len;
-    op->wsa_buf.buf = op->buf;
-    op->wsa_buf.len = (ULONG)len;
 
     associate_socket(id, op->fd);
 
     int rc = WSASend(op->fd, &op->wsa_buf, 1, NULL, 0,
                      &op->overlapped, NULL);
 
-    if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-        int err = WSAGetLastError();
-        int64_t oid = op->op_id;
-        remove_op_table(id, oid);
-        free_op(op);
-        return -err;
-    }
-
-    return op->op_id;
+    return iocp_submit_result(id, op, rc == SOCKET_ERROR, WSAGetLastError());
 }
 
 static int64_t iocp_submit_sendfile(spl_driver* d, int64_t sock_fd,
@@ -412,65 +408,34 @@ static int64_t iocp_submit_sendfile(spl_driver* d, int64_t sock_fd,
     if (!op) return -ENOMEM;
     op->fd = (SOCKET)sock_fd;
     op->file_handle = (HANDLE)(intptr_t)file_fd;
-    op->offset = offset;
     op->sendfile_len = len;
 
     associate_socket(id, op->fd);
-
-    /* Set file offset in OVERLAPPED */
-    op->overlapped.Offset = (DWORD)(offset & 0xFFFFFFFF);
-    op->overlapped.OffsetHigh = (DWORD)((offset >> 32) & 0xFFFFFFFF);
+    set_file_offset(op, offset);
 
     BOOL ok = TransmitFile(
         op->fd, op->file_handle,
         (DWORD)len, 0,
         &op->overlapped, NULL, TF_USE_KERNEL_APC);
 
-    if (!ok && WSAGetLastError() != WSA_IO_PENDING) {
-        int err = WSAGetLastError();
-        int64_t oid = op->op_id;
-        remove_op_table(id, oid);
-        free_op(op);
-        return -err;
-    }
-
-    return op->op_id;
+    return iocp_submit_result(id, op, !ok, WSAGetLastError());
 }
 
 static int64_t iocp_submit_read(spl_driver* d, int64_t fd,
                                  int64_t buf_size, int64_t offset) {
     iocp_driver* id = (iocp_driver*)d;
 
-    iocp_op* op = alloc_op(id, OP_READ);
+    iocp_op* op = alloc_buf_op(id, OP_READ, buf_size);
     if (!op) return -ENOMEM;
     op->file_handle = (HANDLE)(intptr_t)fd;
-    op->buf = (char*)malloc((size_t)buf_size);
-    if (!op->buf) {
-        int64_t oid = op->op_id;
-        remove_op_table(id, oid);
-        free_op(op);
-        return -ENOMEM;
-    }
-    op->buf_len = buf_size;
-    op->offset = offset;
 
     associate_handle(id, op->file_handle);
-
-    op->overlapped.Offset = (DWORD)(offset & 0xFFFFFFFF);
-    op->overlapped.OffsetHigh = (DWORD)((offset >> 32) & 0xFFFFFFFF);
+    set_file_offset(op, offset);
 
     BOOL ok = ReadFile(op->file_handle, op->buf, (DWORD)buf_size,
                        NULL, &op->overlapped);
 
-    if (!ok && GetLastError() != ERROR_IO_PENDING) {
-        DWORD err = GetLastError();
-        int64_t oid = op->op_id;
-        remove_op_table(id, oid);
-        free_op(op);
-        return -(int64_t)err;
-    }
-
-    return op->op_id;
+    return iocp_submit_result(id, op, !ok, GetLastError());
 }
 
 static int64_t iocp_submit_write(spl_driver* d, int64_t fd,
@@ -478,37 +443,18 @@ static int64_t iocp_submit_write(spl_driver* d, int64_t fd,
                                   int64_t offset) {
     iocp_driver* id = (iocp_driver*)d;
 
-    iocp_op* op = alloc_op(id, OP_WRITE);
+    iocp_op* op = alloc_buf_op(id, OP_WRITE, len);
     if (!op) return -ENOMEM;
-    op->file_handle = (HANDLE)(intptr_t)fd;
-    op->buf = (char*)malloc((size_t)len);
-    if (!op->buf) {
-        int64_t oid = op->op_id;
-        remove_op_table(id, oid);
-        free_op(op);
-        return -ENOMEM;
-    }
     memcpy(op->buf, data, (size_t)len);
-    op->buf_len = len;
-    op->offset = offset;
+    op->file_handle = (HANDLE)(intptr_t)fd;
 
     associate_handle(id, op->file_handle);
-
-    op->overlapped.Offset = (DWORD)(offset & 0xFFFFFFFF);
-    op->overlapped.OffsetHigh = (DWORD)((offset >> 32) & 0xFFFFFFFF);
+    set_file_offset(op, offset);
 
     BOOL ok = WriteFile(op->file_handle, op->buf, (DWORD)len,
                         NULL, &op->overlapped);
 
-    if (!ok && GetLastError() != ERROR_IO_PENDING) {
-        DWORD err = GetLastError();
-        int64_t oid = op->op_id;
-        remove_op_table(id, oid);
-        free_op(op);
-        return -(int64_t)err;
-    }
-
-    return op->op_id;
+    return iocp_submit_result(id, op, !ok, GetLastError());
 }
 
 static int64_t iocp_submit_open(spl_driver* d, const char* path,
@@ -566,11 +512,7 @@ static int64_t iocp_submit_close(spl_driver* d, int64_t fd) {
     op->file_handle = (HANDLE)(intptr_t)fd;
 
     /* Close is synchronous */
-    BOOL ok = CloseHandle(op->file_handle);
-    op->result = ok ? 0 : -(int64_t)GetLastError();
-    op->completed = 1;
-
-    return op->op_id;
+    return iocp_complete_sync(op, CloseHandle(op->file_handle));
 }
 
 static int64_t iocp_submit_fsync(spl_driver* d, int64_t fd) {
@@ -581,11 +523,7 @@ static int64_t iocp_submit_fsync(spl_driver* d, int64_t fd) {
     op->file_handle = (HANDLE)(intptr_t)fd;
 
     /* FlushFileBuffers is synchronous */
-    BOOL ok = FlushFileBuffers(op->file_handle);
-    op->result = ok ? 0 : -(int64_t)GetLastError();
-    op->completed = 1;
-
-    return op->op_id;
+    return iocp_complete_sync(op, FlushFileBuffers(op->file_handle));
 }
 
 static int64_t iocp_submit_timeout(spl_driver* d, int64_t timeout_ms) {
@@ -612,10 +550,7 @@ static int64_t iocp_submit_timeout(spl_driver* d, int64_t timeout_ms) {
         iocp_op** new_timers = (iocp_op**)realloc(
             id->timers, sizeof(iocp_op*) * (size_t)new_cap);
         if (!new_timers) {
-            int64_t oid = op->op_id;
-            remove_op_table(id, oid);
-            free_op(op);
-            return -ENOMEM;
+            return fail_op(id, op, -ENOMEM);
         }
         id->timers = new_timers;
         id->timer_cap = new_cap;
@@ -671,9 +606,7 @@ static int64_t iocp_poll(spl_driver* d, spl_completion* out, int64_t max,
             out[count++] = (spl_completion){
                 .id = t->op_id, .result = 0, .flags = 0
             };
-            int64_t oid = t->op_id;
-            remove_op_table(id, oid);
-            free_op(t);
+            discard_op(id, t);
             /* swap-remove from timer array */
             id->timers[i] = id->timers[--id->timer_count];
         } else {
@@ -766,9 +699,7 @@ static int64_t iocp_poll(spl_driver* d, spl_completion* out, int64_t max,
                 op->buf     = NULL;
             }
             out[count++] = sc;
-            int64_t oid = op->op_id;
-            remove_op_table(id, oid);
-            free_op(op);
+            discard_op(id, op);
         }
     }
 
@@ -783,9 +714,7 @@ static int64_t iocp_poll(spl_driver* d, spl_completion* out, int64_t max,
                 out[count++] = (spl_completion){
                     .id = t->op_id, .result = 0, .flags = 0
                 };
-                int64_t oid = t->op_id;
-                remove_op_table(id, oid);
-                free_op(t);
+                discard_op(id, t);
                 id->timers[i] = id->timers[--id->timer_count];
             } else {
                 i++;

@@ -21,10 +21,10 @@ class WineKernel32FileIoResult:
     file_type: i64
     operations: text
 
-fn _result(ok: bool, error: text, table: WineNtFileTable, handle: i64, data: text, bytes_read: i64, file_type: i64, operations: text) -> WineKernel32FileIoResult:
+fn _wine_kernel32_file_io_result(ok: bool, error: text, table: WineNtFileTable, handle: i64, data: text, bytes_read: i64, file_type: i64, operations: text) -> WineKernel32FileIoResult:
     WineKernel32FileIoResult(ok: ok, error: error, table: table, handle: handle, data: data, bytes_read: bytes_read, file_type: file_type, operations: operations)
 
-fn _sequence_gate(symbols: [text]) -> text:
+fn _wine_kernel32_file_io_sequence_gate(symbols: [text]) -> text:
     val dispatch_state = wine_nt_api_kernel32_file_io_dispatch_gate(symbols)
     if dispatch_state != "ready":
         return dispatch_state
@@ -40,24 +40,24 @@ fn _sequence_gate(symbols: [text]) -> text:
         return "kernel32-file-io-sequence-expected:CloseHandle"
     "ready"
 
-fn _failure(symbol: text, step: WineNtFileIoResult, operations: text) -> WineKernel32FileIoResult:
-    _result(false, symbol + ":" + step.state, step.table, step.handle, step.data, step.bytes_read, 0, operations)
+fn _wine_kernel32_file_io_failure(symbol: text, step: WineNtFileIoResult, operations: text) -> WineKernel32FileIoResult:
+    _wine_kernel32_file_io_result(false, symbol + ":" + step.state, step.table, step.handle, step.data, step.bytes_read, 0, operations)
 
 fn _metadata_failure(symbol: text, step: WineNtFileMetadataResult, operations: text) -> WineKernel32FileIoResult:
-    _result(false, symbol + ":" + step.state, step.table, step.handle, "", 0, step.value, operations)
+    _wine_kernel32_file_io_result(false, symbol + ":" + step.state, step.table, step.handle, "", 0, step.value, operations)
 
 pub fn wine_kernel32_execute_file_io(symbols: [text], table: WineNtFileTable, path: text, requested_len: i64) -> WineKernel32FileIoResult:
-    val sequence_state = _sequence_gate(symbols)
+    val sequence_state = _wine_kernel32_file_io_sequence_gate(symbols)
     if sequence_state != "ready":
-        return _result(false, sequence_state, table, 0, "", 0, 0, "")
+        return _wine_kernel32_file_io_result(false, sequence_state, table, 0, "", 0, 0, "")
 
     val opened = wine_nt_file_create_w(table, path)
     if not opened.ok:
-        return _failure("CreateFileW", opened, "")
+        return _wine_kernel32_file_io_failure("CreateFileW", opened, "")
 
     val read = wine_nt_file_read(opened.table, opened.handle, requested_len)
     if not read.ok:
-        return _failure("ReadFile", read, "CreateFileW")
+        return _wine_kernel32_file_io_failure("ReadFile", read, "CreateFileW")
 
     val file_type = wine_nt_file_get_type(read.table, opened.handle)
     if not file_type.ok:
@@ -65,6 +65,6 @@ pub fn wine_kernel32_execute_file_io(symbols: [text], table: WineNtFileTable, pa
 
     val closed = wine_nt_file_close(file_type.table, opened.handle)
     if not closed.ok:
-        return _failure("CloseHandle", closed, "CreateFileW ReadFile GetFileType")
+        return _wine_kernel32_file_io_failure("CloseHandle", closed, "CreateFileW ReadFile GetFileType")
 
-    _result(true, "", closed.table, opened.handle, read.data, read.bytes_read, file_type.value, "CreateFileW ReadFile GetFileType CloseHandle")
+    _wine_kernel32_file_io_result(true, "", closed.table, opened.handle, read.data, read.bytes_read, file_type.value, "CreateFileW ReadFile GetFileType CloseHandle")

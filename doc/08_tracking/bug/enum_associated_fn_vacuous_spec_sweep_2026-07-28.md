@@ -308,3 +308,18 @@ would be work aimed at a defect they do not have.
   `src/compiler/00.common/config.spl`) were re-inspected afterwards and still
   carry the parallel session's Dict-pitfall fixes, not mutation text.
 
+
+---
+
+## Triage note 2026-11-25 (release/1.0.0 ledger pass)
+
+The "Open — needs owner triage" header is stale for this document: the sweep is
+a completed measurement with a delivered verdict (8 GENUINE, 0 VACUOUS, 5
+UNMEASURED — no spec rewrites warranted) and explicit recommendations. There is
+no remaining work item owned by *this* file. The live defect it measured is the
+parent bug `enum_associated_fn_never_called_on_jit_2026-07-28.md` (JIT enum
+associated-fn hijack — Rust-seed/JIT compiler work, outside a bounded P2 fix),
+and the structural recommendation (a JIT lane for the spec runner,
+`TestExecutionMode` has no JIT variant) is a design-level program tracked with
+`run_vs_test_harness_divergence_2026-07-28.md`. This sweep doc can be treated
+as CLOSED-as-measurement; residual engineering is owned by the parent bug.

@@ -454,6 +454,14 @@ jobs:
               exit 1
           fi
 
+      # .csm seals (xxh3) are verified with the native `xxhsum -H3` on a runner
+      # (no deployed bin/simple here). sdn-seal-lib.shs checks the tool against
+      # the published empty-input digest before it trusts it; with no hasher the
+      # gate ERRORS (fail closed), so install it best-effort here.
+      - name: Install xxhsum for .csm seal verification
+        run: |
+          command -v xxhsum >/dev/null 2>&1 || sudo -n apt-get install -y --no-install-recommends xxhash || echo "xxhsum unavailable: the .csm gate will fail closed"
+
       # Push-tier core classes, re-run here because the push tier is bypassable
       # by design (a `--no-verify` push, or a push from a host whose hook is
       # not installed) while this job is what the ruleset enforces. Same range
@@ -491,6 +499,11 @@ jobs:
           # rt_* debt stays a red verdict (non-required job: it cannot block a
           # PR, it reports).
           run_gate scripts/check/check-rt-dual-implementation-ratchet.shs --rev "$head"
+          # Option slots read with `== nil` (None == nil is false in compiled
+          # code). FROZEN here for the same reason: fast-gates runs the delta
+          # vs the merge base, so a reader that slipped in through a branch cut
+          # before the gate would otherwise never be reported again.
+          run_gate scripts/check/check-nil-option-reader-mix.shs --rev "$head"
           run_gate scripts/check/check-runtime-api-regression-push.shs --scan-only "$RANGE"
           # The stale-snapshot rewind class itself. `push-no-stale-snapshot-rewind`
           # was DEMOTED from push-blocking on 2026-09-24 (goal item 2: it cost
@@ -502,12 +515,49 @@ jobs:
           # no working tree is needed.
           run_gate scripts/check/check-no-stale-snapshot-rewind.shs --range "$RANGE"
           run_gate scripts/check/check-c-runtime-compiles-push.shs --rev "$head"
+          # The runner scopes itself to the stdin leaf/fixture/runner paths.
+          # It exercises actual signal interruptions on Linux when those change.
+          run_gate scripts/check/check-rt-stdin-read-timeout-eintr.shs --range "$RANGE"
           # Exit-status hygiene (cmd | tail; rc=$?, dropped timeout status,
           # $? after echo). Advisory by construction: this job is non-required,
           # and the required range gate only prints these as a stderr NOTE. The
           # library's fixtures run HERE, not in the range gate's pre-scan selftest.
           run_gate scripts/check/lib/shs-pipe-exit-hygiene.shs --selftest
           run_gate scripts/check/check-range-shs-hygiene-push.shs --tree --rev "$head"
+          [ "$rc_total" -eq 0 ] || exit 1
+
+      # Cache formal-verification gates (plan:
+      # doc/05_design/compiler/incremental_build/cache_invalidation_formal_verification_2026-10-24.md
+      # §4.4). Same commands as the bootstrap-tier rows cache-protocol-formal,
+      # cache-identity-formal, build-cache-lean, aop-weaver-lean in
+      # config/check/must_check_gates.sdn. lake is not on push hosts, so these
+      # cannot be push rows; here elan is installed when absent. If lake is
+      # still missing every gate answers ERROR (exit 2) and this step is RED —
+      # absence of the prover is never a PASS.
+      - name: Cache formal-verification Lean gates
+        if: ${{ !cancelled() && steps.receipt.outputs.mode != 'sanity' }}
+        timeout-minutes: 45
+        run: |
+          set +e
+          if ! command -v lake >/dev/null 2>&1 && [ ! -x "$HOME/.elan/bin/lake" ]; then
+              curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh |
+                  sh -s -- -y --default-toolchain none || echo "elan install failed; gates will ERROR"
+          fi
+          export PATH="$HOME/.elan/bin:$PATH"
+          rc_total=0
+          for gate in \
+              "scripts/check/check-cache-protocol-formal.shs" \
+              "scripts/check/check-cache-identity-formal-proofs.shs" \
+              "scripts/check/check-lean-proofs.shs --project src/verification/build_cache verification/build_cache" \
+              "scripts/check/check-lean-proofs.shs --project src/verification/aop_weaver verification/aop_weaver" \
+              "scripts/check/check-cache-formal-source-binding.shs"; do
+              echo "::group::$gate"
+              sh $gate
+              rc=$?
+              echo "::endgroup::"
+              echo "cache-formal: $gate exit=$rc"
+              [ "$rc" -eq 0 ] || rc_total=1
+          done
           [ "$rc_total" -eq 0 ] || exit 1
 
       # Most gates below hard-depend on ripgrep; install once for the job.
@@ -664,6 +714,21 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           sh scripts/check/check-lifecycle-reachability.shs
+
+      - name: Item5 native provider-path staging regression
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.classify.outputs.docs_only != 'true' }}
+        timeout-minutes: 3
+        env:
+          CC: cc
+          TMPDIR: ${{ runner.temp }}
+        run: sh scripts/check/test-item5-app-provider-path.shs
+
+      - name: Bootstrap generation storage capability regression
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.classify.outputs.docs_only != 'true' }}
+        timeout-minutes: 2
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: sh scripts/check/test-bootstrap-generation-storage.shs
 
       - name: Guard-wiring ratchet gate
         if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-guard-wiring|')) }}
@@ -903,6 +968,36 @@ jobs:
         run: |
           sh scripts/check/check-runtime-file-view.shs
 
+      - name: Native task-pool characterization (both C lanes)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 3
+        run: |
+          sh scripts/check/check-rt-pool-characterization.shs
+
+      - name: Win32/POSIX lock shim selfcheck (plain + ASan/UBSan + TSan)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 8
+        run: |
+          sh scripts/check/check-spl-lock-shim-selfcheck.shs
+
+      - name: Struct-allocation registry selfcheck (shared impl header, plain + ASan/UBSan)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          sh scripts/check/check-struct-alloc-registry-selfcheck.shs
+
+      - name: runtime.c / runtime_native.c file-io impl headers selfcheck (both providers)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          sh scripts/check/check-runtime-file-io-impl-selfcheck.shs
+
+      - name: Misc runtime C dedup selfcheck (hosted-backend stubs, dynload snapshot, scilib bits; plain + ASan/UBSan)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          sh scripts/check/check-runtime-misc-dedup-selfcheck.shs
+
       # rt_free ABI: pure-Simple declarations and calls must pass exactly ONE
       # pointer. rt_free is defined in five places (native runtime, hosted
       # runtime, SimpleOS libc, the Cranelift RuntimeFuncSpec table, and the
@@ -913,6 +1008,21 @@ jobs:
         if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-rt-free-abi|')) && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-rt-free-abi.shs
+
+      # Non-optional nil-return contract (E-SFFI-016): an `extern fn rt_x(..) -> T`
+      # (or rt_alias_map.sdn decl) with T non-optional while rt_x has a
+      # Value::Nil path in the interpreter; thin Simple wrappers forwarding such
+      # an extern; hand-written `return nil` under `-> T`. All three are
+      # ratcheted against scripts/check/non_optional_nil_return_class{a,b,c}_baseline.txt
+      # (raw-ABI opt-outs carry written reasons). Needs src/, so it lives in this
+      # full-checkout job and not in the sparse fast-gates job. ~25s.
+      # See doc/08_tracking/bug/nil_return_non_optional_deferred_2026-10-31.md.
+      - name: Non-optional nil-return contract gate
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-non-optional-nil-return|')) && steps.classify.outputs.docs_only != 'true' }}
+        run: |
+          sh scripts/check/check-non-optional-nil-return.shs
+          python3 -I scripts/check/check-rt-pointer-ref-map.py --selftest && python3 -I scripts/check/check-rt-pointer-ref-map.py
+          python3 -I scripts/check/check-rt-host-map.py --selftest && python3 -I scripts/check/check-rt-host-map.py
 
       # Stage-4 generated-facade hint-scan fast path: the exact-marker guard
       # must precede the empty return, which must precede the line split, and
@@ -1153,6 +1263,14 @@ jobs:
         run: |
           sh scripts/check/check-rv64-rt-contains-has-dict-arm.shs
 
+      # Linux epoll/io_uring driver + spawn-argv characterization selfchecks
+      # (ASan+UBSan, TSan, -Werror). Pins the dedup refactor in PR #11259.
+      # Without liburing headers on the runner the uring runs SKIP visibly.
+      - name: Linux async driver + spawn argv characterization
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-linux-dedup-characterization.shs "$RUNNER_TEMP/linux-dedup-char"
+
       # SOSIX host file mapping: both C owners of rt_mmap (runtime.c and the
       # core-C runtime_native.c) must satisfy the read + prefetch + bounds
       # contract. The core-C lane once shipped with no rt_mmap at all.
@@ -1216,3 +1334,29 @@ jobs:
       - name: SimpleOS browser QEMU fixture build contract
         if: ${{ !cancelled() }}
         run: sh scripts/check/check-simpleos-browser-qemu-build-contract.shs
+
+      # Enum-discriminant convention fence. The Rust seed/runtime HASH enum
+      # discriminants while pure-Simple codegen and the C runtime use the
+      # POSITIONAL index; a mix is silent. Static source scan, host-only, seconds.
+      - name: Enum discriminant convention fence
+        if: ${{ !cancelled() }}
+        run: sh scripts/check/check-enum-discriminant-convention-fence.shs
+      # Platform variant directory rule (doc/04_architecture/platform/
+      # platform_variant_directory_rule.md): names, OS->ABI->arch order, skeleton,
+      # sibling API parity, mingw/msvc extern signatures, level-0 conditionals.
+      # Baseline-relative; advisory push row push-platform-variant-dirs.
+      - name: Platform variant directory rule
+        if: ${{ !cancelled() }}
+        run: sh scripts/check/check-platform-variant-dirs.shs
+
+      # Robust library-unit gates (plan section 4.2/7): manifest dependency
+      # closure drift (library_unit_drift_v1) and SPL-BUILD-SRC-001 source
+      # ownership under --robust. Extended lane only, never the push tier;
+      # advisory push rows push-library-unit-drift / push-source-ownership
+      # (MUST_CHECK_ADVISORY=1) run the same selftests.
+      - name: Library unit drift gate (selftest)
+        if: ${{ !cancelled() }}
+        run: sh scripts/check/check-library-unit-drift.shs --selftest
+      - name: Library unit source ownership gate (selftest)
+        if: ${{ !cancelled() }}
+        run: sh scripts/check/check-source-ownership.shs --selftest

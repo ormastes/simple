@@ -1,0 +1,726 @@
+# Symbolic Cost Domain and Orthogonal Bound Evidence (V1)
+#
+# Implements bounded symbolic cost normalization, multi-parameter rendering,
+# asymptotic Big-O projection, and orthogonal BoundEvidenceV1 composition
+# across independent PerfResourceDimension axes (D03, D04, C01..C06, C13).
+
+use compiler.semantics.perf.perf_analysis_contracts_v1.{
+    PerfResourceDimension, BoundRelation, BoundRegime, AnalysisResultStatus,
+    BoundOrigin, SizeMeasureKind, CostExprV1, BoundEvidenceV1,
+    SizeParameterV1, SizeRelationV1
+}
+
+pub val PERF_MAX_COST_DEPTH_V1: i64 = 16
+pub val PERF_MAX_COST_TERMS_V1: i64 = 64
+
+struct AsymptoticFactorV1:
+    label: text
+    exponent: i64
+    is_size_factor: bool
+
+struct AsymptoticMonomialV1:
+    factors: [AsymptoticFactorV1]
+    has_unknown: bool
+
+fn _dedup_texts(items: [text]) -> [text]:
+    var out: [text] = []
+    for item in items:
+        if item != "" and not out.contains(item):
+            out.push(item)
+    out
+
+fn _resolve_var_alias(raw_var: text, relations: [SizeRelationV1]) -> text:
+    var current = raw_var
+    var hops = 0
+    while hops < 8:
+        var moved = false
+        for rel in relations:
+            if (rel.relation_op == "==" or rel.relation_op == "=") and rel.lhs_var == current and rel.rhs_var != current:
+                current = rel.rhs_var
+                moved = true
+                break
+        if not moved: break
+        hops = hops + 1
+    current
+
+fn _size_var_label(param_name: text, measure: SizeMeasureKind, params: [SizeParameterV1], relations: [SizeRelationV1]) -> text:
+    var base = ""
+    for p in params:
+        if p.param_name == param_name and p.measure.name() == measure.name() and p.canonical_var != "":
+            base = p.canonical_var
+            break
+    if base == "":
+        for p in params:
+            if p.canonical_var == param_name and p.measure.name() == measure.name() and p.canonical_var != "":
+                base = p.canonical_var
+                break
+    if base == "":
+        match measure:
+            case SizeMeasureKind.Length:
+                base = if param_name == "n" or param_name == "m" or param_name == "k" or param_name == "N": param_name else: param_name + ".length"
+            case SizeMeasureKind.ByteLength: base = "bytes(" + param_name + ")"
+            case SizeMeasureKind.CharCount: base = "chars(" + param_name + ")"
+            case SizeMeasureKind.NodeCount: base = "nodes(" + param_name + ")"
+            case SizeMeasureKind.TreeDepth: base = "depth(" + param_name + ")"
+            case SizeMeasureKind.VertexCount: base = "vertices(" + param_name + ")"
+            case SizeMeasureKind.EdgeCount: base = "edges(" + param_name + ")"
+            case SizeMeasureKind.GroupCount:
+                base = if param_name == "group_count": "group_count" else: param_name + ".group_count"
+            case SizeMeasureKind.TotalElements:
+                base = if param_name == "N" or param_name == "total_elements": param_name else: param_name + ".total_elements"
+            case SizeMeasureKind.DistinctKeys: base = "distinct_keys(" + param_name + ")"
+            case SizeMeasureKind.OutputMatches:
+                base = if param_name == "k": "k" else: "matches(" + param_name + ")"
+    _resolve_var_alias(base, relations)
+
+# reason: boolean predicate over symbolic CostExprV1 AST for fail-closed checks
+@allow(primitive_api)
+pub fn cost_expr_has_unknown_v1(expr: CostExprV1) -> bool:
+    match expr:
+        case CostExprV1.UnknownTerm(_): true
+        case CostExprV1.Const(_): false
+        case CostExprV1.Size(_, _): false
+        case CostExprV1.Add(terms):
+            for t in terms:
+                if cost_expr_has_unknown_v1(t): return true
+            false
+        case CostExprV1.Multiply(factors):
+            for f in factors:
+                if cost_expr_has_unknown_v1(f): return true
+            false
+        case CostExprV1.Maximum(branches):
+            for b in branches:
+                if cost_expr_has_unknown_v1(b): return true
+            false
+        case CostExprV1.LogBound(inner): cost_expr_has_unknown_v1(inner)
+        case CostExprV1.TriangularSum(outer): cost_expr_has_unknown_v1(outer)
+        case CostExprV1.AggregateSize(g, total): cost_expr_has_unknown_v1(g) or cost_expr_has_unknown_v1(total)
+        case CostExprV1.KnownCalleeCost(_, sub): cost_expr_has_unknown_v1(sub)
+        case CostExprV1.CallbackTerm(_, inv, body): cost_expr_has_unknown_v1(inv) or cost_expr_has_unknown_v1(body)
+
+# reason: collects unknown term reason tags from CostExprV1 for summary coverage diagnostics
+@allow(primitive_api)
+pub fn collect_unknown_reasons_v1(expr: CostExprV1) -> [text]:
+    var reasons: [text] = []
+    match expr:
+        case CostExprV1.UnknownTerm(r):
+            if r != "": reasons.push(r)
+        case CostExprV1.Add(terms):
+            for t in terms:
+                for r in collect_unknown_reasons_v1(t): reasons.push(r)
+        case CostExprV1.Multiply(factors):
+            for f in factors:
+                for r in collect_unknown_reasons_v1(f): reasons.push(r)
+        case CostExprV1.Maximum(branches):
+            for b in branches:
+                for r in collect_unknown_reasons_v1(b): reasons.push(r)
+        case CostExprV1.LogBound(inner):
+            for r in collect_unknown_reasons_v1(inner): reasons.push(r)
+        case CostExprV1.TriangularSum(outer):
+            for r in collect_unknown_reasons_v1(outer): reasons.push(r)
+        case CostExprV1.AggregateSize(g, total):
+            for r in collect_unknown_reasons_v1(g): reasons.push(r)
+            for r in collect_unknown_reasons_v1(total): reasons.push(r)
+        case CostExprV1.KnownCalleeCost(_, sub):
+            for r in collect_unknown_reasons_v1(sub): reasons.push(r)
+        case CostExprV1.CallbackTerm(_, inv, body):
+            for r in collect_unknown_reasons_v1(inv): reasons.push(r)
+            for r in collect_unknown_reasons_v1(body): reasons.push(r)
+        case _: pass_do_nothing
+    _dedup_texts(reasons)
+
+fn _split_coeff_and_body(term: CostExprV1) -> (i64, CostExprV1):
+    match term:
+        case CostExprV1.Multiply(factors):
+            if factors.len() >= 2:
+                match factors[0]:
+                    case CostExprV1.Const(c):
+                        var rest: [CostExprV1] = []
+                        var idx = 1
+                        while idx < factors.len():
+                            rest.push(factors[idx])
+                            idx = idx + 1
+                        if rest.len() == 1: return (c, rest[0])
+                        return (c, CostExprV1.Multiply(rest))
+                    case _: return (1, term)
+            (1, term)
+        case _: (1, term)
+
+fn _normalize_depth(expr: CostExprV1, params: [SizeParameterV1], relations: [SizeRelationV1], depth: i64) -> CostExprV1:
+    if depth > PERF_MAX_COST_DEPTH_V1:
+        return CostExprV1.UnknownTerm("expression_budget_exceeded")
+    match expr:
+        case CostExprV1.Const(v):
+            if v < 0: return CostExprV1.UnknownTerm("negative_cost_constant")
+            CostExprV1.Const(v)
+        case CostExprV1.Size(param_name, measure):
+            if relations.len() == 0: return CostExprV1.Size(param_name, measure)
+            val resolved = _size_var_label(param_name, measure, params, relations)
+            for p in params:
+                if p.canonical_var == resolved:
+                    return CostExprV1.Size(p.param_name, p.measure)
+            CostExprV1.Size(param_name, measure)
+        case CostExprV1.KnownCalleeCost(_, sub):
+            _normalize_depth(sub, params, relations, depth + 1)
+        case CostExprV1.CallbackTerm(_, inv, body):
+            _normalize_depth(CostExprV1.Multiply([inv, body]), params, relations, depth + 1)
+        case CostExprV1.LogBound(inner):
+            val norm_inner = _normalize_depth(inner, params, relations, depth + 1)
+            match norm_inner:
+                case CostExprV1.Const(v):
+                    if v <= 1: CostExprV1.Const(1) else: CostExprV1.LogBound(norm_inner)
+                case CostExprV1.UnknownTerm(r): CostExprV1.UnknownTerm(r)
+                case _: CostExprV1.LogBound(norm_inner)
+        case CostExprV1.TriangularSum(outer):
+            val norm_outer = _normalize_depth(outer, params, relations, depth + 1)
+            match norm_outer:
+                case CostExprV1.Const(v):
+                    if v <= 0: CostExprV1.Const(0) else: CostExprV1.Const((v * (v + 1)) / 2)
+                case CostExprV1.UnknownTerm(r): CostExprV1.UnknownTerm(r)
+                case _: CostExprV1.TriangularSum(norm_outer)
+        case CostExprV1.AggregateSize(g, total):
+            CostExprV1.AggregateSize(
+                _normalize_depth(g, params, relations, depth + 1),
+                _normalize_depth(total, params, relations, depth + 1))
+        case CostExprV1.UnknownTerm(r): CostExprV1.UnknownTerm(r)
+        case CostExprV1.Add(raw_terms):
+            if raw_terms.len() > PERF_MAX_COST_TERMS_V1:
+                return CostExprV1.UnknownTerm("expression_budget_exceeded")
+            var flat: [CostExprV1] = []
+            for t in raw_terms:
+                val nt = _normalize_depth(t, params, relations, depth + 1)
+                match nt:
+                    case CostExprV1.Add(sub_terms):
+                        for st in sub_terms: flat.push(st)
+                    case _: flat.push(nt)
+            if flat.len() > PERF_MAX_COST_TERMS_V1:
+                return CostExprV1.UnknownTerm("expression_budget_exceeded")
+            var const_sum = 0
+            var bodies: [CostExprV1] = []
+            var body_keys: [text] = []
+            var body_coeffs: [i64] = []
+            for item in flat:
+                match item:
+                    case CostExprV1.Const(c): const_sum = const_sum + c
+                    case _:
+                        val pair = _split_coeff_and_body(item)
+                        val coeff = pair.0
+                        val body = pair.1
+                        val key = _render_raw(body, params, relations)
+                        var found_idx = -1
+                        var k_idx = 0
+                        while k_idx < body_keys.len():
+                            if body_keys[k_idx] == key:
+                                found_idx = k_idx
+                                break
+                            k_idx = k_idx + 1
+                        if found_idx >= 0 and not cost_expr_has_unknown_v1(body):
+                            body_coeffs[found_idx] = body_coeffs[found_idx] + coeff
+                        else:
+                            bodies.push(body)
+                            body_keys.push(key)
+                            body_coeffs.push(coeff)
+            var out_terms: [CostExprV1] = []
+            var b_idx = 0
+            while b_idx < bodies.len():
+                val c = body_coeffs[b_idx]
+                val b = bodies[b_idx]
+                if c == 1: out_terms.push(b)
+                elif c > 1:
+                    out_terms.push(_normalize_depth(CostExprV1.Multiply([CostExprV1.Const(c), b]), params, relations, depth + 1))
+                b_idx = b_idx + 1
+            if const_sum > 0 or out_terms.len() == 0:
+                if out_terms.len() == 0: return CostExprV1.Const(const_sum)
+                out_terms.push(CostExprV1.Const(const_sum))
+            if out_terms.len() == 1: return out_terms[0]
+            CostExprV1.Add(out_terms)
+        case CostExprV1.Multiply(raw_factors):
+            if raw_factors.len() > PERF_MAX_COST_TERMS_V1:
+                return CostExprV1.UnknownTerm("expression_budget_exceeded")
+            var flat_f: [CostExprV1] = []
+            for f in raw_factors:
+                val nf = _normalize_depth(f, params, relations, depth + 1)
+                match nf:
+                    case CostExprV1.Multiply(sub_f):
+                        for sf in sub_f: flat_f.push(sf)
+                    case _: flat_f.push(nf)
+            if flat_f.len() > PERF_MAX_COST_TERMS_V1:
+                return CostExprV1.UnknownTerm("expression_budget_exceeded")
+            var const_prod = 1
+            var has_zero = false
+            var has_unk = false
+            var sym_factors: [CostExprV1] = []
+            for item in flat_f:
+                if cost_expr_has_unknown_v1(item): has_unk = true
+                match item:
+                    case CostExprV1.Const(c):
+                        if c == 0: has_zero = true
+                        else: const_prod = const_prod * c
+                    case _: sym_factors.push(item)
+            if has_zero and not has_unk: return CostExprV1.Const(0)
+            if sym_factors.len() == 0:
+                return if has_zero: CostExprV1.Const(0) else: CostExprV1.Const(const_prod)
+            var out_factors: [CostExprV1] = []
+            if const_prod != 1: out_factors.push(CostExprV1.Const(const_prod))
+            for sf in sym_factors: out_factors.push(sf)
+            if out_factors.len() == 1: return out_factors[0]
+            CostExprV1.Multiply(out_factors)
+        case CostExprV1.Maximum(raw_branches):
+            if raw_branches.len() == 0: return CostExprV1.Const(0)
+            if raw_branches.len() > PERF_MAX_COST_TERMS_V1:
+                return CostExprV1.UnknownTerm("expression_budget_exceeded")
+            var flat_b: [CostExprV1] = []
+            for b in raw_branches:
+                val nb = _normalize_depth(b, params, relations, depth + 1)
+                match nb:
+                    case CostExprV1.Maximum(sub_b):
+                        for sb in sub_b: flat_b.push(sb)
+                    case _: flat_b.push(nb)
+            var max_const = -1
+            var seen_keys: [text] = []
+            var unique_b: [CostExprV1] = []
+            for item in flat_b:
+                match item:
+                    case CostExprV1.Const(c):
+                        if c > max_const: max_const = c
+                    case _:
+                        val k = _render_raw(item, params, relations)
+                        if not seen_keys.contains(k):
+                            seen_keys.push(k)
+                            unique_b.push(item)
+            if max_const >= 0:
+                if unique_b.len() == 0: return CostExprV1.Const(max_const)
+                if max_const > 0: unique_b.push(CostExprV1.Const(max_const))
+            if unique_b.len() == 1: return unique_b[0]
+            CostExprV1.Maximum(unique_b)
+
+pub fn normalize_cost_expr_with_relations_v1(
+    expr: CostExprV1, params: [SizeParameterV1], relations: [SizeRelationV1]
+) -> CostExprV1:
+    _normalize_depth(expr, params, relations, 0)
+
+pub fn normalize_cost_expr_v1(expr: CostExprV1) -> CostExprV1:
+    _normalize_depth(expr, [], [], 0)
+
+fn _needs_mul_parens(expr: CostExprV1) -> bool:
+    match expr:
+        case CostExprV1.Add(_): true
+        case CostExprV1.AggregateSize(_, _): true
+        case _: false
+
+fn _render_raw(expr: CostExprV1, params: [SizeParameterV1], relations: [SizeRelationV1]) -> text:
+    match expr:
+        case CostExprV1.Const(v): v.to_text()
+        case CostExprV1.Size(param_name, measure): _size_var_label(param_name, measure, params, relations)
+        case CostExprV1.Add(terms):
+            if terms.len() == 0: return "0"
+            var parts: [text] = []
+            for t in terms: parts.push(_render_raw(t, params, relations))
+            parts.join(" + ")
+        case CostExprV1.Multiply(factors):
+            if factors.len() == 0: return "1"
+            var parts: [text] = []
+            for f in factors:
+                val rendered = _render_raw(f, params, relations)
+                parts.push(if _needs_mul_parens(f): "(" + rendered + ")" else: rendered)
+            parts.join("*")
+        case CostExprV1.Maximum(branches):
+            var parts: [text] = []
+            for b in branches: parts.push(_render_raw(b, params, relations))
+            "max(" + parts.join(", ") + ")"
+        case CostExprV1.LogBound(inner): "log(" + _render_raw(inner, params, relations) + ")"
+        case CostExprV1.TriangularSum(outer): "triangular(" + _render_raw(outer, params, relations) + ")"
+        case CostExprV1.AggregateSize(g, total):
+            _render_raw(g, params, relations) + " + " + _render_raw(total, params, relations)
+        case CostExprV1.KnownCalleeCost(_, sub): _render_raw(sub, params, relations)
+        case CostExprV1.CallbackTerm(_, inv, body):
+            val inv_txt = _render_raw(inv, params, relations)
+            val body_txt = _render_raw(body, params, relations)
+            if inv_txt == "1": body_txt
+            elif _needs_mul_parens(body): inv_txt + "*(" + body_txt + ")"
+            else: inv_txt + "*" + body_txt
+        case CostExprV1.UnknownTerm(reason): "unknown(" + reason + ")"
+
+# reason: formats symbolic CostExprV1 with explicit SizeParameterV1 and SizeRelationV1 bindings for diagnostics
+@allow(primitive_api)
+pub fn render_cost_expr_with_params_v1(
+    expr: CostExprV1, params: [SizeParameterV1], relations: [SizeRelationV1]
+) -> text:
+    val norm = normalize_cost_expr_with_relations_v1(expr, params, relations)
+    _render_raw(norm, params, relations)
+
+# reason: formats normalized symbolic CostExprV1 into readable text
+@allow(primitive_api)
+pub fn render_cost_expr_v1(expr: CostExprV1) -> text:
+    render_cost_expr_with_params_v1(expr, [], [])
+
+fn _merge_factor_into(factors: [AsymptoticFactorV1], label: text, exp: i64, is_size: bool) -> [AsymptoticFactorV1]:
+    var out: [AsymptoticFactorV1] = []
+    var merged = false
+    for f in factors:
+        if f.label == label:
+            out.push(AsymptoticFactorV1(
+                label: f.label, exponent: f.exponent + exp, is_size_factor: f.is_size_factor or is_size))
+            merged = true
+        else:
+            out.push(f)
+    if not merged:
+        out.push(AsymptoticFactorV1(label: label, exponent: exp, is_size_factor: is_size))
+    out
+
+fn _multiply_monomials(left: AsymptoticMonomialV1, right: AsymptoticMonomialV1) -> AsymptoticMonomialV1:
+    var combined = left.factors
+    for rf in right.factors:
+        combined = _merge_factor_into(combined, rf.label, rf.exponent, rf.is_size_factor)
+    AsymptoticMonomialV1(factors: combined, has_unknown: left.has_unknown or right.has_unknown)
+
+fn _monomial_key(m: AsymptoticMonomialV1) -> text:
+    if m.factors.len() == 0: return "1"
+    var parts: [text] = []
+    for f in m.factors:
+        parts.push(if f.exponent == 1: f.label else: f.label + "^" + f.exponent.to_text())
+    parts.join("*")
+
+fn _factor_exp_in(m: AsymptoticMonomialV1, label: text) -> i64:
+    for f in m.factors:
+        if f.label == label: return f.exponent
+    0
+
+fn _monomial_dominated_by(small: AsymptoticMonomialV1, big: AsymptoticMonomialV1) -> bool:
+    if small.has_unknown or big.has_unknown: return false
+    if small.factors.len() == 0: return big.factors.len() > 0
+    for sf in small.factors:
+        if _factor_exp_in(big, sf.label) < sf.exponent: return false
+    if big.factors.len() > small.factors.len(): return true
+    for bf in big.factors:
+        if bf.exponent > _factor_exp_in(small, bf.label): return true
+    false
+
+fn _prune_monomials(items: [AsymptoticMonomialV1]) -> [AsymptoticMonomialV1]:
+    var dedup: [AsymptoticMonomialV1] = []
+    var seen: [text] = []
+    for item in items:
+        val k = _monomial_key(item)
+        if not seen.contains(k):
+            seen.push(k)
+            dedup.push(item)
+    var kept: [AsymptoticMonomialV1] = []
+    var i = 0
+    while i < dedup.len():
+        val candidate = dedup[i]
+        var dominated = false
+        var j = 0
+        while j < dedup.len():
+            if i != j and _monomial_dominated_by(candidate, dedup[j]):
+                dominated = true
+                break
+            j = j + 1
+        if not dominated: kept.push(candidate)
+        i = i + 1
+    if kept.len() == 0:
+        return [AsymptoticMonomialV1(factors: [], has_unknown: false)]
+    kept
+
+fn _extract_monomials(
+    expr: CostExprV1, params: [SizeParameterV1], relations: [SizeRelationV1], depth: i64
+) -> [AsymptoticMonomialV1]:
+    if depth > PERF_MAX_COST_DEPTH_V1:
+        return [AsymptoticMonomialV1(
+            factors: [AsymptoticFactorV1(label: "unknown(expression_budget_exceeded)", exponent: 1, is_size_factor: false)],
+            has_unknown: true)]
+    match expr:
+        case CostExprV1.Const(_):
+            [AsymptoticMonomialV1(factors: [], has_unknown: false)]
+        case CostExprV1.Size(param_name, measure):
+            val lbl = _size_var_label(param_name, measure, params, relations)
+            [AsymptoticMonomialV1(
+                factors: [AsymptoticFactorV1(label: lbl, exponent: 1, is_size_factor: true)], has_unknown: false)]
+        case CostExprV1.UnknownTerm(reason):
+            [AsymptoticMonomialV1(
+                factors: [AsymptoticFactorV1(label: "unknown(" + reason + ")", exponent: 1, is_size_factor: false)],
+                has_unknown: true)]
+        case CostExprV1.LogBound(inner):
+            val inner_body = _render_big_o_body(inner, params, relations, depth + 1)
+            if inner_body == "1": return [AsymptoticMonomialV1(factors: [], has_unknown: false)]
+            [AsymptoticMonomialV1(
+                factors: [AsymptoticFactorV1(label: "log(" + inner_body + ")", exponent: 1, is_size_factor: false)],
+                has_unknown: cost_expr_has_unknown_v1(inner))]
+        case CostExprV1.TriangularSum(outer):
+            var squared: [AsymptoticMonomialV1] = []
+            for m in _extract_monomials(outer, params, relations, depth + 1):
+                squared.push(_multiply_monomials(m, m))
+            _prune_monomials(squared)
+        case CostExprV1.AggregateSize(g, total):
+            var all_m: [AsymptoticMonomialV1] = []
+            for gm in _extract_monomials(g, params, relations, depth + 1): all_m.push(gm)
+            for tm in _extract_monomials(total, params, relations, depth + 1): all_m.push(tm)
+            _prune_monomials(all_m)
+        case CostExprV1.KnownCalleeCost(_, sub):
+            _extract_monomials(sub, params, relations, depth + 1)
+        case CostExprV1.CallbackTerm(_, inv, body):
+            _extract_monomials(CostExprV1.Multiply([inv, body]), params, relations, depth + 1)
+        case CostExprV1.Add(terms):
+            var all_m: [AsymptoticMonomialV1] = []
+            for t in terms:
+                for tm in _extract_monomials(t, params, relations, depth + 1): all_m.push(tm)
+            _prune_monomials(all_m)
+        case CostExprV1.Maximum(branches):
+            var all_m: [AsymptoticMonomialV1] = []
+            for b in branches:
+                for bm in _extract_monomials(b, params, relations, depth + 1): all_m.push(bm)
+            _prune_monomials(all_m)
+        case CostExprV1.Multiply(factors):
+            var acc: [AsymptoticMonomialV1] = [AsymptoticMonomialV1(factors: [], has_unknown: false)]
+            for f in factors:
+                val f_mons = _extract_monomials(f, params, relations, depth + 1)
+                var next_acc: [AsymptoticMonomialV1] = []
+                for left_m in acc:
+                    for right_m in f_mons:
+                        if next_acc.len() < PERF_MAX_COST_TERMS_V1:
+                            next_acc.push(_multiply_monomials(left_m, right_m))
+                acc = _prune_monomials(next_acc)
+            acc
+
+fn _render_big_o_body(
+    expr: CostExprV1, params: [SizeParameterV1], relations: [SizeRelationV1], depth: i64
+) -> text:
+    val norm = _normalize_depth(expr, params, relations, depth)
+    var parts: [text] = []
+    for m in _extract_monomials(norm, params, relations, depth):
+        parts.push(_monomial_key(m))
+    parts.join(" + ")
+
+# reason: renders multivariate Big-O notation with explicit parameter aliases and size relations
+@allow(primitive_api)
+pub fn render_big_o_with_params_v1(
+    expr: CostExprV1, params: [SizeParameterV1], relations: [SizeRelationV1]
+) -> text:
+    "O(" + _render_big_o_body(expr, params, relations, 0) + ")"
+
+# reason: renders multivariate Big-O notation from a symbolic CostExprV1
+@allow(primitive_api)
+pub fn render_big_o_v1(expr: CostExprV1) -> text:
+    render_big_o_with_params_v1(expr, [], [])
+
+fn _combine_status(a: AnalysisResultStatus, b: AnalysisResultStatus) -> AnalysisResultStatus:
+    if a.name() == "Cancelled" or b.name() == "Cancelled": return AnalysisResultStatus.Cancelled
+    if a.name() == "Unknown" or b.name() == "Unknown": return AnalysisResultStatus.Unknown
+    if a.name() == "Partial" or b.name() == "Partial": return AnalysisResultStatus.Partial
+    AnalysisResultStatus.Complete
+
+fn _combine_relation(a: BoundRelation, b: BoundRelation) -> BoundRelation:
+    if a.name() == "Estimate" or b.name() == "Estimate": return BoundRelation.Estimate
+    if a.name() == "Exact" and b.name() == "Exact": return BoundRelation.Exact
+    if (a.name() == "Exact" or a.name() == "TightBound") and (b.name() == "Exact" or b.name() == "TightBound"):
+        return BoundRelation.TightBound
+    if a.name() == "LowerBound" and b.name() == "LowerBound": return BoundRelation.LowerBound
+    BoundRelation.UpperBound
+
+fn _combine_regime(a: BoundRegime, b: BoundRegime) -> BoundRegime:
+    if a.name() == "WorstCase": return b
+    if b.name() == "WorstCase": return a
+    if a.name() == b.name(): return a
+    BoundRegime.ExpectedAmortized
+
+fn _combine_origin(a: BoundOrigin, b: BoundOrigin) -> BoundOrigin:
+    if a.name() == "Heuristic" or b.name() == "Heuristic": return BoundOrigin.Heuristic
+    if a.name() == "Measured" or b.name() == "Measured": return BoundOrigin.Measured
+    if a.name() == "ImportedContract" or b.name() == "ImportedContract": return BoundOrigin.ImportedContract
+    BoundOrigin.Inferred
+
+# reason: factory accepts model_id, assumption labels, and provenance_id text metadata for BoundEvidenceV1
+@allow(primitive_api)
+pub fn make_inferred_bound_v1(
+    resource: PerfResourceDimension, expr: CostExprV1, relation: BoundRelation,
+    regime: BoundRegime, model_id: text, assumptions: [text], provenance_id: text
+) -> BoundEvidenceV1:
+    val norm = normalize_cost_expr_v1(expr)
+    val status = if cost_expr_has_unknown_v1(norm): AnalysisResultStatus.Unknown else: AnalysisResultStatus.Complete
+    BoundEvidenceV1(
+        resource: resource, expression: norm, rendered_expression: render_cost_expr_v1(norm),
+        relation: relation, regime: regime, model_id: model_id,
+        assumptions: _dedup_texts(assumptions), status: status,
+        origin: BoundOrigin.Inferred, provenance_id: provenance_id)
+
+pub fn compose_sequential_v1(first: BoundEvidenceV1, second: BoundEvidenceV1) -> BoundEvidenceV1:
+    val combined_raw = match first.resource:
+        case PerfResourceDimension.AuxPeakBytes: CostExprV1.Maximum([first.expression, second.expression])
+        case _: CostExprV1.Add([first.expression, second.expression])
+    val norm = normalize_cost_expr_v1(combined_raw)
+    var rel = _combine_relation(first.relation, second.relation)
+    match first.resource:
+        case PerfResourceDimension.AuxPeakBytes:
+            if rel.name() == "Exact": rel = BoundRelation.TightBound
+        case _: pass_do_nothing
+    var status = _combine_status(first.status, second.status)
+    if cost_expr_has_unknown_v1(norm) and status.name() == "Complete":
+        status = AnalysisResultStatus.Unknown
+    BoundEvidenceV1(
+        resource: first.resource, expression: norm, rendered_expression: render_cost_expr_v1(norm),
+        relation: rel, regime: _combine_regime(first.regime, second.regime),
+        model_id: first.model_id, assumptions: _dedup_texts(first.assumptions + second.assumptions),
+        status: status, origin: _combine_origin(first.origin, second.origin),
+        provenance_id: first.provenance_id + "+" + second.provenance_id)
+
+pub fn compose_branch_max_v1(
+    cond_cost: CostExprV1, left: BoundEvidenceV1, right: BoundEvidenceV1
+) -> BoundEvidenceV1:
+    val norm = normalize_cost_expr_v1(CostExprV1.Add([cond_cost, CostExprV1.Maximum([left.expression, right.expression])]))
+    val same_branch = render_cost_expr_v1(left.expression) == render_cost_expr_v1(right.expression)
+    val rel = if same_branch: _combine_relation(left.relation, right.relation) else: BoundRelation.UpperBound
+    var status = _combine_status(left.status, right.status)
+    if cost_expr_has_unknown_v1(norm) and status.name() == "Complete":
+        status = AnalysisResultStatus.Unknown
+    BoundEvidenceV1(
+        resource: left.resource, expression: norm, rendered_expression: render_cost_expr_v1(norm),
+        relation: rel, regime: _combine_regime(left.regime, right.regime),
+        model_id: left.model_id, assumptions: _dedup_texts(left.assumptions + right.assumptions),
+        status: status, origin: _combine_origin(left.origin, right.origin),
+        provenance_id: "branch(" + left.provenance_id + "|" + right.provenance_id + ")")
+
+# reason: constant loop trip count is an integer constant k >= 0
+@allow(primitive_api)
+pub fn compose_loop_constant_bound_v1(trip_count: i64, body: BoundEvidenceV1) -> BoundEvidenceV1:
+    if trip_count < 0:
+        return make_inferred_bound_v1(
+            body.resource, CostExprV1.UnknownTerm("negative_trip_count"),
+            BoundRelation.UpperBound, body.regime, body.model_id, body.assumptions, body.provenance_id)
+    val raw = match body.resource:
+        case PerfResourceDimension.AuxPeakBytes: body.expression
+        case _: CostExprV1.Multiply([CostExprV1.Const(trip_count), body.expression])
+    val norm = normalize_cost_expr_v1(raw)
+    BoundEvidenceV1(
+        resource: body.resource, expression: norm, rendered_expression: render_cost_expr_v1(norm),
+        relation: body.relation, regime: body.regime, model_id: body.model_id,
+        assumptions: body.assumptions, status: body.status, origin: body.origin,
+        provenance_id: "const_loop(" + trip_count.to_text() + "," + body.provenance_id + ")")
+
+# reason: body_holds_every_iteration flag distinguishes TightBound/Exact from loose UpperBound per §3.4
+@allow(primitive_api)
+pub fn compose_loop_independent_v1(
+    iterations: CostExprV1, body: BoundEvidenceV1, body_holds_every_iteration: bool
+) -> BoundEvidenceV1:
+    val raw = match body.resource:
+        case PerfResourceDimension.AuxPeakBytes: body.expression
+        case _: CostExprV1.Multiply([iterations, body.expression])
+    val norm = normalize_cost_expr_v1(raw)
+    val rel = if body_holds_every_iteration and not cost_expr_has_unknown_v1(norm): body.relation else: BoundRelation.UpperBound
+    var status = body.status
+    if cost_expr_has_unknown_v1(norm):
+        status = if cost_expr_has_unknown_v1(iterations): AnalysisResultStatus.Unknown else: AnalysisResultStatus.Partial
+    BoundEvidenceV1(
+        resource: body.resource, expression: norm, rendered_expression: render_cost_expr_v1(norm),
+        relation: rel, regime: body.regime, model_id: body.model_id,
+        assumptions: body.assumptions, status: status, origin: body.origin,
+        provenance_id: "loop(" + body.provenance_id + ")")
+
+pub fn compose_triangular_loop_v1(outer_size: CostExprV1, step_body: BoundEvidenceV1) -> BoundEvidenceV1:
+    val raw = match step_body.resource:
+        case PerfResourceDimension.AuxPeakBytes: step_body.expression
+        case _: CostExprV1.Multiply([CostExprV1.TriangularSum(outer_size), step_body.expression])
+    val norm = normalize_cost_expr_v1(raw)
+    val rel = if step_body.relation.name() == "Exact" or step_body.relation.name() == "TightBound":
+        BoundRelation.TightBound
+    else:
+        BoundRelation.UpperBound
+    BoundEvidenceV1(
+        resource: step_body.resource, expression: norm, rendered_expression: render_cost_expr_v1(norm),
+        relation: rel, regime: step_body.regime, model_id: step_body.model_id,
+        assumptions: _dedup_texts(step_body.assumptions + ["dependent_triangular_range_0_to_i"]),
+        status: step_body.status, origin: step_body.origin,
+        provenance_id: "triangular(" + step_body.provenance_id + ")")
+
+# reason: monotone_invariant_established selects proven linear amortized bound vs qualified loose UpperBound (C05)
+@allow(primitive_api)
+pub fn compose_monotone_two_pointer_v1(
+    outer_size: CostExprV1, inner_limit: CostExprV1, step_cost: CostExprV1,
+    monotone_invariant_established: bool, provenance_id: text
+) -> BoundEvidenceV1:
+    if monotone_invariant_established:
+        val linear_expr = normalize_cost_expr_v1(
+            CostExprV1.Add([outer_size, CostExprV1.Multiply([inner_limit, step_cost])]))
+        return BoundEvidenceV1(
+            resource: PerfResourceDimension.Work, expression: linear_expr,
+            rendered_expression: render_cost_expr_v1(linear_expr),
+            relation: BoundRelation.TightBound, regime: BoundRegime.Amortized,
+            model_id: "perf-model-v1", assumptions: ["monotone_inner_pointer_non_resetting"],
+            status: AnalysisResultStatus.Complete, origin: BoundOrigin.Inferred, provenance_id: provenance_id)
+    val loose_expr = normalize_cost_expr_v1(CostExprV1.Multiply([outer_size, inner_limit, step_cost]))
+    BoundEvidenceV1(
+        resource: PerfResourceDimension.Work, expression: loose_expr,
+        rendered_expression: render_cost_expr_v1(loose_expr),
+        relation: BoundRelation.UpperBound, regime: BoundRegime.WorstCase,
+        model_id: "perf-model-v1",
+        assumptions: ["two_pointer_monotone_invariant_unproved_loose_upper_bound"],
+        status: AnalysisResultStatus.Partial, origin: BoundOrigin.Inferred, provenance_id: provenance_id)
+
+# reason: provenance_id binds grouped aggregate bound evidence to its HIR/model node
+@allow(primitive_api)
+pub fn compose_grouped_traversal_v1(
+    group_count: CostExprV1, total_elements: CostExprV1,
+    per_group_overhead: CostExprV1, per_element_cost: CostExprV1, provenance_id: text
+) -> BoundEvidenceV1:
+    val agg = normalize_cost_expr_v1(CostExprV1.AggregateSize(
+        CostExprV1.Multiply([group_count, per_group_overhead]),
+        CostExprV1.Multiply([total_elements, per_element_cost])))
+    BoundEvidenceV1(
+        resource: PerfResourceDimension.Work, expression: agg,
+        rendered_expression: render_cost_expr_v1(agg),
+        relation: BoundRelation.TightBound, regime: BoundRegime.WorstCase,
+        model_id: "perf-model-v1", assumptions: ["partitioned_groups_sum_to_total_elements"],
+        status: AnalysisResultStatus.Complete, origin: BoundOrigin.Inferred, provenance_id: provenance_id)
+
+# reason: provenance_id identifies binary-search call site in cost provenance DAG
+@allow(primitive_api)
+pub fn compose_log_search_with_key_cost_v1(
+    collection_size: CostExprV1, key_compare_cost: CostExprV1, provenance_id: text
+) -> BoundEvidenceV1:
+    val expr = normalize_cost_expr_v1(CostExprV1.Multiply([CostExprV1.LogBound(collection_size), key_compare_cost]))
+    BoundEvidenceV1(
+        resource: PerfResourceDimension.Work, expression: expr,
+        rendered_expression: render_cost_expr_v1(expr),
+        relation: BoundRelation.UpperBound, regime: BoundRegime.WorstCase,
+        model_id: "perf-model-v1", assumptions: ["sorted_random_access_sequence", "modeled_key_comparison_cost"],
+        status: AnalysisResultStatus.Complete, origin: BoundOrigin.Inferred, provenance_id: provenance_id)
+
+# reason: provenance_id identifies hash-lookup call site in cost provenance DAG
+@allow(primitive_api)
+pub fn compose_hash_lookup_with_key_cost_v1(
+    key_hash_cost: CostExprV1, key_eq_cost: CostExprV1, provenance_id: text
+) -> BoundEvidenceV1:
+    val expr = normalize_cost_expr_v1(CostExprV1.Add([key_hash_cost, key_eq_cost]))
+    BoundEvidenceV1(
+        resource: PerfResourceDimension.Work, expression: expr,
+        rendered_expression: render_cost_expr_v1(expr),
+        relation: BoundRelation.UpperBound, regime: BoundRegime.Expected,
+        model_id: "perf-model-v1", assumptions: ["uniform_hashing_distribution", "equality_consistent_with_hash"],
+        status: AnalysisResultStatus.Complete, origin: BoundOrigin.Inferred, provenance_id: provenance_id)
+
+# reason: checks whether BoundEvidenceV1 represents a grounded superlinear risk (excluding unproved loose bounds C05)
+@allow(primitive_api)
+pub fn bound_is_confirmed_superlinear_risk_v1(
+    evidence: BoundEvidenceV1, params: [SizeParameterV1], relations: [SizeRelationV1]
+) -> bool:
+    if evidence.status.name() == "Unknown" or evidence.status.name() == "Cancelled": return false
+    if evidence.assumptions.contains("two_pointer_monotone_invariant_unproved_loose_upper_bound"): return false
+    val norm = normalize_cost_expr_with_relations_v1(evidence.expression, params, relations)
+    for m in _extract_monomials(norm, params, relations, 0):
+        if m.has_unknown: continue
+        var size_degree = 0
+        for f in m.factors:
+            if f.is_size_factor: size_degree = size_degree + f.exponent
+        if size_degree >= 2: return true
+    false
+
+export PERF_MAX_COST_DEPTH_V1, PERF_MAX_COST_TERMS_V1
+export cost_expr_has_unknown_v1, collect_unknown_reasons_v1
+export normalize_cost_expr_with_relations_v1, normalize_cost_expr_v1
+export render_cost_expr_with_params_v1, render_cost_expr_v1
+export render_big_o_with_params_v1, render_big_o_v1
+export make_inferred_bound_v1
+export compose_sequential_v1, compose_branch_max_v1
+export compose_loop_constant_bound_v1, compose_loop_independent_v1
+export compose_triangular_loop_v1, compose_monotone_two_pointer_v1
+export compose_grouped_traversal_v1
+export compose_log_search_with_key_cost_v1, compose_hash_lookup_with_key_cost_v1
+export bound_is_confirmed_superlinear_risk_v1

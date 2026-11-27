@@ -1,0 +1,94 @@
+# AUTHORED_NOT_RUN. Requires an actual installed standalone policy, actual
+# process principal membership and actual selected provider observer. No install,
+# path override, injected owner, fake grant, unsupported skip or provider create.
+# @req REQ-LOCAL-PROCESS-ADMISSION-001
+# @req REQ-LOCAL-PROCESS-ADMISSION-002
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.container.local_session_v1.LocalContainerRequestV1
+use std.nogc_sync_mut.io.machine_local_process_principal_v1.*
+use std.nogc_sync_mut.container.machine_authority_v1.{MachineContainerAuthorityCleanupV1, machine_container_authority_cleanup_v1}
+use std.nogc_async_mut.container.service_domain_v1.*
+
+var local_admission_principals_v1: [MachineLocalProcessPrincipalV1] = []
+var local_admission_domains_v1: [LocalContainerServiceDomainV1] = []
+var local_admission_cleanups_v1: [MachineContainerAuthorityCleanupV1] = []
+
+fn local_admission_principal_fixture_v1() -> Result<MachineLocalProcessPrincipalV1, text>:
+    match machine_local_process_principal_open_v1():
+        case MachineLocalProcessPrincipalOpenV1.Ready(owner):
+            local_admission_principals_v1.push(owner)
+            Ok(owner)
+        case MachineLocalProcessPrincipalOpenV1.CleanupRequired(owner, reason):
+            local_admission_principals_v1.push(owner)
+            val closed = owner.close_v1()
+            Err("actual principal refused:" + reason + "; cleanup=" + closed)
+        case MachineLocalProcessPrincipalOpenV1.Rejected(reason): Err("actual principal fixture required:" + reason)
+
+fn local_admission_domain_fixture_v1() -> Result<LocalContainerServiceDomainV1, text>:
+    match local_container_service_open_v1():
+        case LocalContainerServiceOpenV1.Ready(owner):
+            local_admission_domains_v1.push(owner)
+            Ok(owner)
+        case LocalContainerServiceOpenV1.DomainCleanupRequired(owner, reason):
+            local_admission_domains_v1.push(owner)
+            val closed = owner.close_v1()
+            Err("actual local foundation refused:" + reason + "; cleanup=" + closed)
+        case LocalContainerServiceOpenV1.CleanupRequired(owner, reason):
+            local_admission_cleanups_v1.push(owner)
+            val closed = machine_container_authority_cleanup_v1(owner)
+            Err("actual local foundation cleanup:" + reason + "; cleanup=" + closed)
+        case LocalContainerServiceOpenV1.Rejected(reason): Err("actual installed standalone fixture required:" + reason)
+
+fn local_admission_request_fixture_v1() -> LocalContainerRequestV1:
+    LocalContainerRequestV1(image: "installed-fixture:exact", executable: "/bin/true", argv: [],
+        working_directory: "/work", mounts: [], environment: [], network: "none",
+        cpu_millis: 1, memory_bytes: 1, terminal_mode: "stdin", cols: 80, rows: 24)
+
+describe "Actual direct local process admission refusal V1":
+    it "authenticates actual installed membership then refuses unfenced genesis without changing WAL head":
+        step("Acquire actual native process capability and standalone machine foundation")
+        val principal = local_admission_principal_fixture_v1().unwrap()
+        val domain_result = local_admission_domain_fixture_v1()
+        if domain_result.is_err():
+            val closed = principal.close_v1()
+            expect(closed).to_equal("released")
+            expect(domain_result.is_ok()).to_equal(true)
+            return
+        val domain = domain_result.unwrap()
+        val copied_domain = domain
+        val before = domain.journal_head_v1()
+        step("Admit exact request metadata through the real process capability")
+        val refused = domain.process_admit_v1(local_admission_request_fixture_v1(), principal)
+        val after = domain.journal_head_v1()
+        val domain_closed = domain.close_v1()
+        val copied_closed = copied_domain.close_v1()
+        val principal_closed = principal.close_v1()
+        expect(domain_closed).to_equal("released")
+        expect(copied_closed).to_equal("released")
+        expect(principal_closed).to_equal("released")
+        expect(before.unwrap()).to_equal("")
+        expect(refused.unwrap_err()).to_equal("local-container-migration-fence-unavailable")
+        expect(after.unwrap()).to_equal("")
+
+    it "rejects a stale real principal before malformed request metadata and retains the domain":
+        step("Acquire genuine independent owners for the same actual process")
+        val principal = local_admission_principal_fixture_v1().unwrap()
+        val domain_result = local_admission_domain_fixture_v1()
+        if domain_result.is_err():
+            val closed = principal.close_v1()
+            expect(closed).to_equal("released")
+            expect(domain_result.is_ok()).to_equal(true)
+            return
+        val domain = domain_result.unwrap()
+        val copied = principal
+        val principal_closed = principal.close_v1()
+        var malformed = local_admission_request_fixture_v1()
+        malformed.image = ""
+        step("The public diagnostic snapshot cannot replace the closed native owner")
+        val refused = domain.process_admit_v1(malformed, copied)
+        val retained_head = domain.journal_head_v1()
+        val domain_closed = domain.close_v1()
+        expect(principal_closed).to_equal("released")
+        expect(refused.unwrap_err()).to_contain("stale")
+        expect(retained_head.is_ok()).to_equal(true)
+        expect(domain_closed).to_equal("released")

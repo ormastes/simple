@@ -2,6 +2,7 @@
  * ABI. Focused C selfchecks cover provider and receipt failure paths; deployed
  * qualification still requires source-matched Stage2/native facade evidence. */
 #include "runtime.h"
+#include "runtime_nonnull.h"
 
 /* The `*_value` wrappers answer the Simple facade's `-> (text, text, [i64])`.
  * Native codegen destructures that result with rt_tuple_get, which requires a
@@ -38,7 +39,14 @@ static int64_t* owned_tuple3_value(int64_t stdout_value, int64_t stderr_value, S
 #define RT_OWNED_FREE_VALUE(v) rt_free_deep(v)
 #endif
 
-#if !defined(_WIN32) && defined(__unix__)
+/* Darwin compiles the POSIX owner below. Only the observation V4 family has
+ * Darwin arms there (`RT_OWNED_DARWIN_V4`); every other owned-process family
+ * keeps its explicit ENOTSUP answer on Darwin. */
+#if defined(__APPLE__) && !defined(_WIN32)
+#define RT_OWNED_DARWIN_V4 1
+#endif
+
+#if !defined(_WIN32) && (defined(__unix__) || defined(__APPLE__))
 
 #include <errno.h>
 #include <fcntl.h>
@@ -55,12 +63,29 @@ static int64_t* owned_tuple3_value(int64_t stdout_value, int64_t stderr_value, S
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
+#include "runtime_process_submission_admission_v5.h"
 #include <unistd.h>
 #ifdef __linux__
 #include <dirent.h>
 #include <ctype.h>
 #include <sys/ptrace.h>
 #include <sys/syscall.h>
+#endif
+#ifdef RT_OWNED_DARWIN_V4
+#include <CommonCrypto/CommonDigest.h>
+#include <libproc.h>
+#include <spawn.h>
+#include <sys/proc_info.h>
+#include <sys/sysctl.h>
+#endif
+#if defined(__GNUC__) || defined(__clang__)
+#define RT_OWNED_MAYBE_UNUSED __attribute__((unused))
+#else
+#define RT_OWNED_MAYBE_UNUSED
+#endif
+#ifdef RT_OWNED_DARWIN_V4
+static uint64_t owned_darwin_pin_retain(int fd, char *const *environment);
+static void owned_darwin_pin_release(uint64_t ref);
 #endif
 
 #define RT_OWNED_PROCESS_SLOTS 16
@@ -139,6 +164,8 @@ typedef struct RtOwnedCapturedByte {
 #ifndef RT_OWNED_TOKEN_FILL
 #if defined(__linux__) && defined(SYS_getrandom)
 #define RT_OWNED_TOKEN_FILL(dst, len) syscall(SYS_getrandom, (dst), (len), 0)
+#elif defined(__APPLE__)
+#define RT_OWNED_TOKEN_FILL(dst, len) (arc4random_buf((dst), (len)), (ssize_t)(len))
 #endif
 #endif
 #ifndef RT_OWNED_SIGNAL_GROUP
@@ -172,6 +199,10 @@ typedef struct RtOwnedSlot {
     int64_t prepared_ns;
     int64_t process_started_ns;
     int64_t exec_confirmed_ns;
+    /* V6 only: native-owned unresolved ptrace launch, never exposed as V4. */
+    int launch_exec_fd, launch_phase, launch_failure, launch_failure_class;
+    int launch_error_count; uint8_t launch_error_bytes[sizeof(int)];
+    int64_t launch_confirm_deadline_ns, launch_event_ns;
     int64_t leader_waited_ns;
     int64_t tree_empty_ns;
     int64_t execution_deadline_ns;
@@ -219,36 +250,16 @@ typedef struct RtOwnedSlot {
     int retired;
     int op_refs;
     int collecting;
+    /* V4 ProcessGroup policy (Darwin only): the leader is reaped only after a
+     * zero-live sample of its still-pinned process group. */
+    int group_retire;
+    int group_incomplete;    /* cleanup deadline passed with live members */
+    int group_sample_error;  /* transient sampling error owned by retirement */
+    uint64_t darwin_pin_ref; /* executable snapshot kept alive for this child */
     pthread_mutex_t* state_lock;
 } RtOwnedSlot;
 
-static uint32_t owned_sha256_rotr(uint32_t v, unsigned s) { return (v >> s) | (v << (32 - s)); }
-static void owned_sha256_block(uint32_t st[8], const uint8_t b[64]) {
-    static const uint32_t k[64] = {
-        0x428a2f98u,0x71374491u,0xb5c0fbcfu,0xe9b5dba5u,0x3956c25bu,0x59f111f1u,0x923f82a4u,0xab1c5ed5u,
-        0xd807aa98u,0x12835b01u,0x243185beu,0x550c7dc3u,0x72be5d74u,0x80deb1feu,0x9bdc06a7u,0xc19bf174u,
-        0xe49b69c1u,0xefbe4786u,0x0fc19dc6u,0x240ca1ccu,0x2de92c6fu,0x4a7484aau,0x5cb0a9dcu,0x76f988dau,
-        0x983e5152u,0xa831c66du,0xb00327c8u,0xbf597fc7u,0xc6e00bf3u,0xd5a79147u,0x06ca6351u,0x14292967u,
-        0x27b70a85u,0x2e1b2138u,0x4d2c6dfcu,0x53380d13u,0x650a7354u,0x766a0abbu,0x81c2c92eu,0x92722c85u,
-        0xa2bfe8a1u,0xa81a664bu,0xc24b8b70u,0xc76c51a3u,0xd192e819u,0xd6990624u,0xf40e3585u,0x106aa070u,
-        0x19a4c116u,0x1e376c08u,0x2748774cu,0x34b0bcb5u,0x391c0cb3u,0x4ed8aa4au,0x5b9cca4fu,0x682e6ff3u,
-        0x748f82eeu,0x78a5636fu,0x84c87814u,0x8cc70208u,0x90befffau,0xa4506cebu,0xbef9a3f7u,0xc67178f2u };
-    uint32_t w[64];
-    for (int i=0;i<16;i++) w[i]=((uint32_t)b[i*4]<<24)|((uint32_t)b[i*4+1]<<16)|((uint32_t)b[i*4+2]<<8)|b[i*4+3];
-    for (int i=16;i<64;i++) { uint32_t a=owned_sha256_rotr(w[i-15],7)^owned_sha256_rotr(w[i-15],18)^(w[i-15]>>3); uint32_t z=owned_sha256_rotr(w[i-2],17)^owned_sha256_rotr(w[i-2],19)^(w[i-2]>>10); w[i]=w[i-16]+a+w[i-7]+z; }
-    uint32_t a=st[0],bb=st[1],c=st[2],d=st[3],e=st[4],f=st[5],g=st[6],h=st[7];
-    for (int i=0;i<64;i++) { uint32_t s1=owned_sha256_rotr(e,6)^owned_sha256_rotr(e,11)^owned_sha256_rotr(e,25); uint32_t t1=h+s1+((e&f)^((~e)&g))+k[i]+w[i]; uint32_t s0=owned_sha256_rotr(a,2)^owned_sha256_rotr(a,13)^owned_sha256_rotr(a,22); uint32_t t2=s0+((a&bb)^(a&c)^(bb&c)); h=g;g=f;f=e;e=d+t1;d=c;c=bb;bb=a;a=t1+t2; }
-    st[0]+=a;st[1]+=bb;st[2]+=c;st[3]+=d;st[4]+=e;st[5]+=f;st[6]+=g;st[7]+=h;
-}
-static void owned_sha256(const uint8_t* msg, size_t len, uint8_t out[32]) {
-    uint32_t st[8]={0x6a09e667u,0xbb67ae85u,0x3c6ef372u,0xa54ff53au,0x510e527fu,0x9b05688cu,0x1f83d9abu,0x5be0cd19u}; size_t i=0;
-    for (;i+64<=len;i+=64) owned_sha256_block(st,msg+i);
-    uint8_t tail[128]={0}; size_t rem=len-i; if(rem) memcpy(tail,msg+i,rem); tail[rem]=0x80; size_t total=rem+9<=64?64:128; uint64_t bits=(uint64_t)len*8u;
-    for(int j=0;j<8;j++) tail[total-1-j]=(uint8_t)(bits>>(8*j));
-    owned_sha256_block(st,tail);
-    if(total==128) owned_sha256_block(st,tail+64);
-    for(int j=0;j<8;j++){out[j*4]=(uint8_t)(st[j]>>24);out[j*4+1]=(uint8_t)(st[j]>>16);out[j*4+2]=(uint8_t)(st[j]>>8);out[j*4+3]=(uint8_t)st[j];}
-}
+#include "runtime_process_owned_sha256_private.h"
 
 typedef struct RtOwnedCleanup {
     uint32_t slot;
@@ -299,29 +310,33 @@ static void owned_state_locks_init(void) {
         (void)pthread_mutex_init(&rt_owned_state_locks[i], NULL);
 }
 
+/* Saturating seconds*per_sec + nsec/nsec_div; per_sec/nsec_div select ms or ns. */
+static int64_t owned_timespec_scaled(const struct timespec* ts, int64_t per_sec,
+                                     int64_t nsec_div) {
+    if (ts->tv_sec > INT64_MAX / per_sec) return INT64_MAX;
+    return (int64_t)ts->tv_sec * per_sec + ts->tv_nsec / nsec_div;
+}
+
 static int64_t owned_now_ms(void) {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return -1;
-    if (ts.tv_sec > INT64_MAX / 1000) return INT64_MAX;
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return owned_timespec_scaled(&ts, 1000, 1000000);
 }
 
 static int64_t owned_now_ns(void) {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return -1;
-    if (ts.tv_sec > INT64_MAX / 1000000000LL) return INT64_MAX;
-    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    return owned_timespec_scaled(&ts, 1000000000LL, 1);
 }
 
 static int64_t owned_clock_resolution_ns(clockid_t clock_id) {
     struct timespec ts;
     if (clock_getres(clock_id, &ts) != 0 || ts.tv_sec < 0 || ts.tv_nsec < 0)
         return -1;
-    if (ts.tv_sec > INT64_MAX / 1000000000LL) return INT64_MAX;
-    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    return owned_timespec_scaled(&ts, 1000000000LL, 1);
 }
 
-static int owned_deadline_reached_ns(int64_t deadline_ns) {
+RT_OWNED_MAYBE_UNUSED static int owned_deadline_reached_ns(int64_t deadline_ns) {
     int64_t now = owned_now_ns();
     return now < 0 || now >= deadline_ns;
 }
@@ -344,7 +359,7 @@ static uint64_t owned_add_sat(uint64_t a, uint64_t b) {
     return UINT64_MAX - a < b ? UINT64_MAX : a + b;
 }
 
-static int64_t owned_timeval_ms(struct timeval value) {
+RT_OWNED_MAYBE_UNUSED static int64_t owned_timeval_ms(struct timeval value) {
     if (value.tv_sec > INT64_MAX / 1000) return INT64_MAX;
     return (int64_t)value.tv_sec * 1000 + value.tv_usec / 1000;
 }
@@ -359,33 +374,15 @@ static int64_t owned_direct_child_rss_bytes(const struct rusage* usage) {
 #endif
 }
 
+/* Birth identity for the pid-reuse guard. The per-OS arms are owned by
+ * rt_proc_start_time (runtime_process_tree.c), shared with
+ * rt_process_start_identity in runtime_process.c. 0 means "cannot verify". */
 static uint64_t owned_start_identity(pid_t pid) {
-#ifdef __linux__
-    char path[64], line[2048];
-    snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
-    FILE* file = fopen(path, "r");
-    if (!file) return 0;
-    if (!fgets(line, sizeof(line), file)) { fclose(file); return 0; }
-    fclose(file);
-    char* cursor = strrchr(line, ')');
-    if (!cursor || cursor[1] != ' ') return 0;
-    cursor += 2;
-    for (int field = 3; field < 22; field++) {
-        cursor = strchr(cursor, ' ');
-        if (!cursor) return 0;
-        cursor++;
-    }
-    errno = 0;
-    char* end = NULL;
-    unsigned long long value = strtoull(cursor, &end, 10);
-    return errno == 0 && end != cursor ? (uint64_t)value : 0;
-#else
-    (void)pid;
-    return 0;
-#endif
+    int64_t identity = rt_proc_start_time((int64_t)pid);
+    return identity > 0 ? (uint64_t)identity : 0;
 }
 
-static int owned_pidfd_open(pid_t pid) {
+RT_OWNED_MAYBE_UNUSED static int owned_pidfd_open(pid_t pid) {
 #if defined(__linux__) && defined(SYS_pidfd_open)
     return (int)syscall(SYS_pidfd_open, pid, 0);
 #else
@@ -423,7 +420,7 @@ static int owned_pipe_cloexec(int fds[2]) {
     return 0;
 }
 
-static int owned_child_close_inherited_except2(int keep_a, int keep_b) {
+RT_OWNED_MAYBE_UNUSED static int owned_child_close_inherited_except2(int keep_a, int keep_b) {
 #if defined(__linux__) && defined(SYS_close_range)
     int low = keep_a < keep_b ? keep_a : keep_b;
     int high = keep_a < keep_b ? keep_b : keep_a;
@@ -442,7 +439,7 @@ static int owned_child_close_inherited_except2(int keep_a, int keep_b) {
 #endif
 }
 
-static void owned_child_exec_failed(int error_fd, int error) {
+RT_OWNED_MAYBE_UNUSED static void owned_child_exec_failed(int error_fd, int error) {
     ssize_t written;
     do written = write(error_fd, &error, sizeof(error));
     while (written < 0 && errno == EINTR);
@@ -472,6 +469,8 @@ static int owned_reserve(uint32_t* index, uint64_t* generation) {
             if (next == 0) { rt_owned_slots[i].retired = 1; continue; }
             rt_owned_slots[i].pid = -1;
             rt_owned_slots[i].pidfd = -1;
+            rt_owned_slots[i].launch_exec_fd = -1;
+            rt_owned_slots[i].launch_phase = 0;
             rt_owned_slots[i].generation = next;
             rt_owned_slots[i].state_lock = &rt_owned_state_locks[i];
             *index = i;
@@ -523,7 +522,7 @@ static int owned_signal_group_pinned(pid_t pid, pid_t pgid, int pidfd, int sig) 
     return 0;
 }
 
-static int owned_signal_leader_pinned(pid_t pid, int pidfd, int sig) {
+RT_OWNED_MAYBE_UNUSED static int owned_signal_leader_pinned(pid_t pid, int pidfd, int sig) {
 #ifdef __linux__
     if (pid <= 0 || pidfd < 0 || !owned_pidfd_valid(pidfd)) {
         errno = ESTALE; return 0;
@@ -540,6 +539,7 @@ static int owned_signal_leader_pinned(pid_t pid, int pidfd, int sig) {
     return 0;
 }
 
+#ifndef RT_OWNED_DARWIN_V4 /* Darwin: shared ENOTSUP stubs below. */
 bool rt_process_owned_cancel(uint64_t requested_slot, uint64_t requested_generation,
                              int64_t requested_pid, uint64_t identity,
                              RtOwnedProcessCancelReceipt* receipt) {
@@ -585,6 +585,8 @@ bool rt_process_owned_cancel_value(uint64_t slot, uint64_t generation,
     return rt_process_owned_cancel(slot, generation, pid, identity, &receipt);
 }
 
+#endif /* !RT_OWNED_DARWIN_V4 */
+
 static int owned_set_nonblocking(int fd) {
     int flags;
     do flags = fcntl(fd, F_GETFL); while (flags < 0 && errno == EINTR);
@@ -594,7 +596,7 @@ static int owned_set_nonblocking(int fd) {
     return rc == 0;
 }
 
-static void owned_capture(int fd, char* dst, uint64_t capacity, uint64_t limit,
+RT_OWNED_MAYBE_UNUSED static void owned_capture(int fd, char* dst, uint64_t capacity, uint64_t limit,
                           uint64_t* seen, uint64_t* kept, int32_t* truncated,
                           int* open_flag) {
     char chunk[4096];
@@ -622,7 +624,7 @@ static void owned_capture(int fd, char* dst, uint64_t capacity, uint64_t limit,
     }
 }
 
-static void owned_cleanup(void* opaque) {
+RT_OWNED_MAYBE_UNUSED static void owned_cleanup(void* opaque) {
     RtOwnedCleanup* c = (RtOwnedCleanup*)opaque;
     if (c->pid > 0 && !c->reaped) {
         (void)owned_signal_group_pinned(c->pid, c->pgid, c->pidfd, SIGKILL);
@@ -660,6 +662,9 @@ static int owned_token_random(RtOwnedProcessTokenV2* token) {
         if (n < 0 && errno == EINTR) continue;
         return 0;
     }
+    return token->high != 0 || token->low != 0;
+#elif defined(RT_OWNED_DARWIN_V4)
+    arc4random_buf(token, sizeof(*token));
     return token->high != 0 || token->low != 0;
 #else
     (void)token;
@@ -736,12 +741,23 @@ static ssize_t owned_write_no_sigpipe(int fd, const uint8_t* data, size_t len) {
     sigset_t block, prior;
     sigemptyset(&block); sigaddset(&block, SIGPIPE);
     if (pthread_sigmask(SIG_BLOCK, &block, &prior) != 0) { errno = EIO; return -1; }
+#ifdef __APPLE__
+    /* Darwin has no sigtimedwait. F_SETNOSIGPIPE makes this descriptor report
+     * EPIPE without generating SIGPIPE, so no pending signal must be consumed. */
+    if (fcntl(fd, F_SETNOSIGPIPE, 1) != 0) {
+        int failed = errno; (void)pthread_sigmask(SIG_SETMASK, &prior, NULL);
+        errno = failed; return -1;
+    }
+    ssize_t result = write(fd, data, len);
+    int saved = errno;
+#else
     ssize_t result = write(fd, data, len);
     int saved = errno;
     if (result < 0 && saved == EPIPE && !sigismember(&prior, SIGPIPE)) {
         struct timespec zero = {0, 0};
         while (sigtimedwait(&block, NULL, &zero) < 0 && errno == EINTR) {}
     }
+#endif
     (void)pthread_sigmask(SIG_SETMASK, &prior, NULL);
     errno = saved;
     return result;
@@ -1135,7 +1151,7 @@ static int owned_confirm_exec_v4(pid_t pid, int exec_error_fd,
     }
 }
 #else
-static int owned_confirm_exec_v4(pid_t pid, int exec_error_fd,
+RT_OWNED_MAYBE_UNUSED static int owned_confirm_exec_v4(pid_t pid, int exec_error_fd,
                                  int64_t deadline_ns, int64_t* confirmed_ns,
                                  uint64_t* eintr_retries, int* child_reaped,
                                  int* exec_error, int* failure_class,
@@ -1149,7 +1165,25 @@ static int owned_confirm_exec_v4(pid_t pid, int exec_error_fd,
 }
 #endif
 
-static bool owned_process_start(const char* cmd, const char* const* argv,
+/* A Linux pin may hold a system-loader dynamic image (runtime_process.c
+ * hal_pinnable_elf_fd): its libraries resolve from the system loader paths
+ * only. Any LD_* variable moves that resolution (LD_PRELOAD, LD_LIBRARY_PATH,
+ * LD_AUDIT, ...), so a pinned launch environment carrying one is refused
+ * before any slot or child exists, on every path that fexecve()s a pin. The
+ * prefix rule is deliberate: glibc honours more than the three well-known
+ * names. */
+RT_OWNED_MAYBE_UNUSED static int pov4_environment_steers_loader(char* const* environment) {
+    for (size_t i = 0; environment && environment[i]; i++)
+        if (strncmp(environment[i], "LD_", 3) == 0) return 1;
+    return 0;
+}
+
+static void owned_close_start_fds(int pinned_executable_fd, int configured_cwd_fd) {
+    if (pinned_executable_fd >= 0) close(pinned_executable_fd);
+    if (configured_cwd_fd >= 0) close(configured_cwd_fd);
+}
+
+RT_OWNED_MAYBE_UNUSED static bool owned_process_start(const char* cmd, const char* const* argv,
                                const uint8_t* input, uint64_t input_len, int pipe_stdin,
                                int pinned_executable_fd,
                                const RtOwnedProcessStartConfigV4* v4,
@@ -1159,31 +1193,34 @@ static bool owned_process_start(const char* cmd, const char* const* argv,
                                RtOwnedProcessStartReceiptV2* receipt) {
     int configured_cwd_fd = v4 ? v4->cwd_fd : -1;
     if (!token || !receipt) {
-        if (pinned_executable_fd >= 0) close(pinned_executable_fd);
+        owned_close_start_fds(pinned_executable_fd, configured_cwd_fd);
+        return false;
+    }
+    if (pinned_executable_fd >= 0 && v4 && pov4_environment_steers_loader(v4->environment)) {
+        close(pinned_executable_fd);
         if (configured_cwd_fd >= 0) close(configured_cwd_fd);
+        errno = EPERM;
         return false;
     }
     memset(token, 0, sizeof(*token)); memset(receipt, 0, sizeof(*receipt));
     receipt->version = RT_OWNED_PROCESS_ASYNC_VERSION;
 #ifndef __linux__
     (void)cmd; (void)argv; (void)timeout_ms; (void)term_grace_ms; (void)max_output_bytes;
-    if (pinned_executable_fd >= 0) close(pinned_executable_fd);
-    if (configured_cwd_fd >= 0) close(configured_cwd_fd);
+    (void)input; (void)input_len; (void)pipe_stdin;
+    owned_close_start_fds(pinned_executable_fd, configured_cwd_fd);
     receipt->runtime_error = ENOTSUP; return false;
 #else
     int64_t started = owned_now_ms();
     if (started < 0) {
         receipt->runtime_error = errno ? errno : EIO;
-        if (pinned_executable_fd >= 0) close(pinned_executable_fd);
-        if (configured_cwd_fd >= 0) close(configured_cwd_fd);
+        owned_close_start_fds(pinned_executable_fd, configured_cwd_fd);
         return false;
     }
     if (!cmd || !argv || !argv[0] || timeout_ms < 0 ||
         timeout_ms > RT_OWNED_ABI_MAX_TIMEOUT_MS || term_grace_ms < 0 ||
         term_grace_ms > 30000 || max_output_bytes > RT_OWNED_ABI_MAX_OUTPUT_BYTES) {
         receipt->runtime_error = EINVAL;
-        if (pinned_executable_fd >= 0) close(pinned_executable_fd);
-        if (configured_cwd_fd >= 0) close(configured_cwd_fd);
+        owned_close_start_fds(pinned_executable_fd, configured_cwd_fd);
         return false;
     }
     if (v4 && (!v4->environment || !v4->require_ptrace_exec ||
@@ -1192,25 +1229,24 @@ static bool owned_process_start(const char* cmd, const char* const* argv,
         v4->prepared_ns < v4->request_started_ns ||
         owned_deadline_reached_ns(v4->execution_deadline_ns))) {
         receipt->runtime_error = EINVAL;
-        if (pinned_executable_fd >= 0) close(pinned_executable_fd);
-        if (configured_cwd_fd >= 0) close(configured_cwd_fd);
+        owned_close_start_fds(pinned_executable_fd, configured_cwd_fd);
         return false;
     }
     uint8_t* input_copy = NULL; uint8_t input_sha256[32] = {0};
     if (pipe_stdin && input_len) {
-        if (input_len > RT_OWNED_PROCESS_MAX_INPUT_BYTES || !input) { receipt->runtime_error = EINVAL; if (pinned_executable_fd >= 0) close(pinned_executable_fd); if (configured_cwd_fd >= 0) close(configured_cwd_fd); return false; }
+        if (input_len > RT_OWNED_PROCESS_MAX_INPUT_BYTES || !input) { receipt->runtime_error = EINVAL; owned_close_start_fds(pinned_executable_fd, configured_cwd_fd); return false; }
         input_copy = (uint8_t*)RT_OWNED_HOST_MALLOC((size_t)input_len);
-        if (!input_copy) { receipt->runtime_error = ENOMEM; if (pinned_executable_fd >= 0) close(pinned_executable_fd); if (configured_cwd_fd >= 0) close(configured_cwd_fd); return false; }
+        if (!input_copy) { receipt->runtime_error = ENOMEM; owned_close_start_fds(pinned_executable_fd, configured_cwd_fd); return false; }
         memcpy(input_copy, input, (size_t)input_len);
     }
     if (pipe_stdin) owned_sha256(input_copy, (size_t)input_len, input_sha256);
     uint32_t index = 0; uint64_t generation = 0;
     if (!owned_reserve(&index, &generation)) {
-        receipt->runtime_error = errno == EOVERFLOW ? EOVERFLOW : EAGAIN; RT_OWNED_HOST_FREE(input_copy); if (pinned_executable_fd >= 0) close(pinned_executable_fd); if (configured_cwd_fd >= 0) close(configured_cwd_fd); return false;
+        receipt->runtime_error = errno == EOVERFLOW ? EOVERFLOW : EAGAIN; RT_OWNED_HOST_FREE(input_copy); owned_close_start_fds(pinned_executable_fd, configured_cwd_fd); return false;
     }
     RtOwnedProcessTokenV2 minted = {0, 0};
     if (!owned_token_mint_install_reserved(index, generation, &minted)) {
-        receipt->runtime_error = errno; owned_release(index, generation); RT_OWNED_HOST_FREE(input_copy); if (pinned_executable_fd >= 0) close(pinned_executable_fd); if (configured_cwd_fd >= 0) close(configured_cwd_fd); return false;
+        receipt->runtime_error = errno; owned_release(index, generation); RT_OWNED_HOST_FREE(input_copy); owned_close_start_fds(pinned_executable_fd, configured_cwd_fd); return false;
     }
     int out_pipe[2] = {-1, -1}, err_pipe[2] = {-1, -1};
     int in_pipe[2] = {-1, -1}, exec_pipe[2] = {-1, -1};
@@ -1223,7 +1259,7 @@ static bool owned_process_start(const char* cmd, const char* const* argv,
         if (err_pipe[0] >= 0) { close(err_pipe[0]); close(err_pipe[1]); }
         if (in_pipe[0] >= 0) { close(in_pipe[0]); close(in_pipe[1]); }
         if (exec_pipe[0] >= 0) { close(exec_pipe[0]); close(exec_pipe[1]); }
-        receipt->runtime_error = saved; owned_release(index, generation); RT_OWNED_HOST_FREE(input_copy); if (pinned_executable_fd >= 0) close(pinned_executable_fd); if (configured_cwd_fd >= 0) close(configured_cwd_fd); return false;
+        receipt->runtime_error = saved; owned_release(index, generation); RT_OWNED_HOST_FREE(input_copy); owned_close_start_fds(pinned_executable_fd, configured_cwd_fd); return false;
     }
     pid_t pid = fork();
     if (pid == 0) {
@@ -1413,6 +1449,7 @@ static bool owned_process_start(const char* cmd, const char* const* argv,
 #endif
 }
 
+#ifndef RT_OWNED_DARWIN_V4 /* Darwin: shared ENOTSUP stubs below. */
 bool rt_process_owned_start_v2(const char* cmd, const char* const* argv,
                                int64_t timeout_ms, int64_t term_grace_ms,
                                uint64_t max_output_bytes, RtOwnedProcessTokenV2* token,
@@ -1457,13 +1494,155 @@ bool rt_process_owned_start_pinned_v3(int64_t executable_handle,
     return ok;
 }
 
-bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
-                              char* out, uint64_t out_cap, char* err,
-                              uint64_t err_cap,
-                              RtOwnedProcessPollReceiptV2* receipt) {
+#endif /* !RT_OWNED_DARWIN_V4 */
+
+#ifdef RT_OWNED_DARWIN_V4
+/* Live members of `group`, excluding zombies (they cannot run or hold capture
+ * descriptors). Same rule as sosix_darwin_process_group_live, which lives in a
+ * header this translation unit includes only after the owner. A sampling
+ * failure never means absence. */
+static int owned_darwin_group_live(pid_t group, size_t* live) {
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PGRP, group};
+    for (int attempt = 0; attempt < 3; attempt++) {
+        size_t bytes = 0;
+        if (sysctl(mib, 4, NULL, &bytes, NULL, 0) != 0) return errno ? errno : EIO;
+        if (bytes > 16U * 1024U * 1024U) return EOVERFLOW;
+        size_t capacity = bytes + 32 * sizeof(struct kinfo_proc);
+        struct kinfo_proc* processes = (struct kinfo_proc*)RT_OWNED_HOST_MALLOC(capacity);
+        if (!processes) return ENOMEM;
+        bytes = capacity;
+        if (sysctl(mib, 4, processes, &bytes, NULL, 0) != 0) {
+            int error = errno ? errno : EIO;
+            RT_OWNED_HOST_FREE(processes);
+            if (error == ENOMEM) continue;
+            return error;
+        }
+        if (bytes % sizeof(*processes) != 0) { RT_OWNED_HOST_FREE(processes); return EPROTO; }
+        size_t count = 0;
+        for (size_t i = 0; i < bytes / sizeof(*processes); i++)
+            if (processes[i].kp_proc.p_stat != SZOMB) count++;
+        RT_OWNED_HOST_FREE(processes);
+        *live = count;
+        return 0;
+    }
+    return EAGAIN;
+}
+#endif
+
+#ifdef __linux__
+/* Live members of process group `group`, excluding zombies, from a /proc scan
+ * (Linux has no KERN_PROC_PGRP). Each /proc/<pid>/stat is split at the LAST
+ * ')' because comm may itself contain spaces and parentheses; the fields that
+ * follow are state, ppid, pgrp. A process that exits mid-scan (ENOENT/ESRCH)
+ * is absent; any other read failure is a sampling failure, never absence.
+ * Called only for an exited, still-unreaped group leader (the retire check)
+ * and at the cleanup deadline -- never on an ordinary poll tick. */
+static int owned_linux_group_live(pid_t group, size_t* live) {
+    DIR* proc = opendir("/proc");
+    if (!proc) return errno ? errno : EIO;
+    size_t count = 0;
+    int failure = 0;
+    struct dirent* entry;
+    while ((entry = readdir(proc)) != NULL) {
+        const char* name = entry->d_name;
+        if (name[0] < '1' || name[0] > '9') continue;
+        int numeric = 1;
+        for (const char* c = name; *c; c++) if (*c < '0' || *c > '9') { numeric = 0; break; }
+        if (!numeric) continue;
+        char path[64];
+        if (snprintf(path, sizeof(path), "/proc/%s/stat", name) >= (int)sizeof(path)) continue;
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            if (errno != ENOENT && errno != ESRCH && failure == 0) failure = errno;
+            continue;
+        }
+        char line[1024];
+        ssize_t length;
+        do length = read(fd, line, sizeof(line) - 1); while (length < 0 && errno == EINTR);
+        int read_error = length < 0 ? errno : 0;
+        close(fd);
+        if (length <= 0) {
+            if (read_error != 0 && read_error != ESRCH && read_error != ENOENT && failure == 0)
+                failure = read_error;
+            continue;
+        }
+        line[length] = 0;
+        char* close_paren = strrchr(line, ')');
+        if (!close_paren) { if (failure == 0) failure = EPROTO; continue; }
+        char state = 0; long parent = 0, pgrp = 0;
+        if (sscanf(close_paren + 1, " %c %ld %ld", &state, &parent, &pgrp) != 3) {
+            if (failure == 0) failure = EPROTO;
+            continue;
+        }
+        if ((pid_t)pgrp == group && state != 'Z' && state != 'X' && state != 'x') count++;
+    }
+    closedir(proc);
+    if (failure) return failure;
+    *live = count;
+    return 0;
+}
+
+/* Fail closed: ProcessGroup retirement is advertised and admitted on Linux
+ * only when this process can read and parse its own /proc stat entry. */
+static int owned_linux_group_retire_available(void) {
+    size_t live = 0;
+    return owned_linux_group_live(getpgrp(), &live) == 0 && live > 0;
+}
+#endif
+
+/* Called with the slot lock held, only after waitid(WNOWAIT) observed the
+ * exited but unreaped leader. Leader-only slots are always ready. A
+ * ProcessGroup slot is ready only when its pinned group has no live member;
+ * otherwise every remaining member is sent SIGKILL and the caller retries. */
+static int owned_group_retire_ready(RtOwnedSlot* slot) {
+    if (!slot->group_retire) return 1;
+#if defined(RT_OWNED_DARWIN_V4) || defined(__linux__)
+    int64_t now = owned_now_ns();
+    if (now < 0) { slot->clock_failed = 1; return 0; }
+    owned_arm_unlimited_cleanup(slot, now, 0);
+    /* Bounded: a member that cannot be killed or that joined the group must
+     * not strand the leader. Reap it, but never claim an empty tree. */
+    if (slot->cleanup_deadline_ns > 0 && now >= slot->cleanup_deadline_ns) {
+        slot->group_incomplete = 1;
+        if (slot->runtime_error == 0 || slot->runtime_error == slot->group_sample_error)
+            slot->runtime_error = ETIMEDOUT;
+        return 1;
+    }
+    size_t live = 1;
+    /* Scan first; signal only a group the scan found non-empty. The exited but
+     * unreaped leader pins pgid == its pid, so the id cannot be recycled
+     * between this scan and the kill below. */
+#ifdef RT_OWNED_DARWIN_V4
+    int error = owned_darwin_group_live(slot->pgid, &live);
+#else
+    int error = owned_linux_group_live(slot->pgid, &live);
+#endif
+    if (error) {
+        if (slot->runtime_error == 0) { slot->runtime_error = error; slot->group_sample_error = error; }
+        return 0;
+    }
+    if (slot->group_sample_error && slot->runtime_error == slot->group_sample_error)
+        slot->runtime_error = 0;
+    slot->group_sample_error = 0;
+    if (live == 0) return 1;
+    if (kill(-slot->pgid, SIGKILL) != 0 && errno != ESRCH && errno != EPERM &&
+        slot->runtime_error == 0)
+        slot->runtime_error = errno;
+    return 0;
+#else
+    return 0;
+#endif
+}
+
+/* The V2 poll engine. On Darwin only the observation V4 owner reaches it; the
+ * public V2 entry point below keeps its explicit ENOTSUP answer there. */
+static bool owned_poll_v2_core(RtOwnedProcessTokenV2 token, int64_t wait_ms,
+                               char* out, uint64_t out_cap, char* err,
+                               uint64_t err_cap,
+                               RtOwnedProcessPollReceiptV2* receipt) {
     if (!receipt || (out_cap && !out) || (err_cap && !err) || wait_ms < 0 || wait_ms > 1000) return false;
     memset(receipt, 0, sizeof(*receipt)); receipt->version = RT_OWNED_PROCESS_ASYNC_VERSION;
-#ifndef __linux__
+#if !defined(__linux__) && !defined(RT_OWNED_DARWIN_V4)
     (void)token; (void)wait_ms; (void)out; (void)out_cap; (void)err; (void)err_cap;
     receipt->runtime_error = ENOTSUP; return false;
 #else
@@ -1561,7 +1740,15 @@ bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
         slot->clock_failed = 1;
         now = before_poll;
     }
-    if (wr == 0 && info.si_pid == slot->pid && !slot->reaped) {
+    /* Side-effecting (may SIGKILL surviving group members); evaluated only
+     * for an exited, still-unreaped leader. */
+    int leader_retire_pending = wr == 0 && info.si_pid == slot->pid && !slot->reaped &&
+        !owned_group_retire_ready(slot);
+    if (leader_retire_pending) {
+        /* ProcessGroup policy: the exited but unreaped leader still pins the
+         * group id. Its surviving members were signalled; keep the leader
+         * unreaped until a zero-live sample, bounded by the cleanup deadline. */
+    } else if (wr == 0 && info.si_pid == slot->pid && !slot->reaped) {
         /* waitid observed the same pidfd-pinned leader before exact reap. */
         slot->identity_revalidated = 1;
         if (slot->request_started_ns < 0)
@@ -1628,8 +1815,17 @@ bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
 #endif
 }
 
-bool rt_process_owned_input_receipt_v3(RtOwnedProcessTokenV2 token,
-                                       RtOwnedProcessInputReceiptV3* receipt) {
+#ifndef RT_OWNED_DARWIN_V4 /* Darwin: shared ENOTSUP stubs below. */
+bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
+                              char* out, uint64_t out_cap, char* err,
+                              uint64_t err_cap,
+                              RtOwnedProcessPollReceiptV2* receipt) {
+    return owned_poll_v2_core(token, wait_ms, out, out_cap, err, err_cap, receipt);
+}
+#endif /* !RT_OWNED_DARWIN_V4 */
+
+static bool owned_input_receipt_v3_core(RtOwnedProcessTokenV2 token,
+                                        RtOwnedProcessInputReceiptV3* receipt) {
     if (!receipt) return false;
     memset(receipt, 0, sizeof(*receipt)); receipt->version = RT_OWNED_PROCESS_INPUT_VERSION;
     RtOwnedSlot* slot = owned_token_acquire(token, NULL);
@@ -1648,6 +1844,12 @@ bool rt_process_owned_input_receipt_v3(RtOwnedProcessTokenV2 token,
     receipt->runtime_error = slot->runtime_error;
     pthread_mutex_unlock(slot->state_lock); owned_token_release(slot);
     return receipt->runtime_error == 0;
+}
+
+#ifndef RT_OWNED_DARWIN_V4 /* Darwin: shared ENOTSUP stubs below. */
+bool rt_process_owned_input_receipt_v3(RtOwnedProcessTokenV2 token,
+                                       RtOwnedProcessInputReceiptV3* receipt) {
+    return owned_input_receipt_v3_core(token, receipt);
 }
 
 bool rt_process_owned_cancel_v2(RtOwnedProcessTokenV2 token,
@@ -1755,12 +1957,14 @@ bool rt_process_owned_observation_v1(RtOwnedProcessTokenV2 token,
 #endif
 }
 
-bool rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
-                                 RtOwnedProcessResultV2* result) {
+#endif /* !RT_OWNED_DARWIN_V4 */
+
+static bool owned_collect_v2_core(RtOwnedProcessTokenV2 token,
+                                  RtOwnedProcessResultV2* result) {
     if (!result) return false;
     memset(result, 0, sizeof(*result));
     result->version = RT_OWNED_PROCESS_ASYNC_VERSION;
-#ifndef __linux__
+#if !defined(__linux__) && !defined(RT_OWNED_DARWIN_V4)
     (void)token; result->runtime_error = ENOTSUP; return false;
 #else
     pthread_mutex_lock(&rt_owned_lock);
@@ -1777,7 +1981,7 @@ bool rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
      * release the capture, pidfd, and registry slot exactly as it does for a
      * clean exit; its false return and copied result preserve that error for
      * the caller. */
-    if (slot->state != 2 ||
+    if (slot->state != 2 || slot->launch_phase != 0 ||
         slot->stdout_delivered != slot->stdout_kept ||
         slot->stderr_delivered != slot->stderr_kept) {
         result->runtime_error = slot->state != 2 ? EAGAIN :
@@ -1788,6 +1992,7 @@ bool rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
     }
     owned_async_fill_result(slot, result);
     RT_OWNED_HOST_FREE(slot->retained); slot->retained = NULL;
+    if(slot->launch_exec_fd>=0){int fd=slot->launch_exec_fd;slot->launch_exec_fd=-1;close(fd);}
     int pidfd = slot->pidfd;
     if (pidfd >= 0) { close(pidfd); slot->pidfd = -1; }
     /* `collecting` was set under the registry before this slot lock.  Drop the
@@ -1795,18 +2000,32 @@ bool rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
      * registry -> slot, never the inverse.  Collecting excludes new tokens
      * and the earlier op-ref check excludes already-running operations. */
     pthread_mutex_t* keep_lock = slot->state_lock;
+#ifdef RT_OWNED_DARWIN_V4
+    uint64_t pin_ref = slot->darwin_pin_ref; slot->darwin_pin_ref = 0;
+#endif
     pthread_mutex_unlock(keep_lock);
     pthread_mutex_lock(&rt_owned_lock);
     uint64_t keep_generation = slot->generation; int keep_retired = slot->retired;
     memset(slot, 0, sizeof(*slot)); slot->generation = keep_generation;
     slot->retired = keep_retired; slot->state_lock = keep_lock;
     pthread_mutex_unlock(&rt_owned_lock);
+#ifdef RT_OWNED_DARWIN_V4
+    owned_darwin_pin_release(pin_ref);
+#endif
     (void)pidfd;
     (void)index;
     return result->runtime_error == 0;
 #endif
 }
 
+#ifndef RT_OWNED_DARWIN_V4 /* Darwin: shared ENOTSUP stubs below. */
+bool rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
+                                 RtOwnedProcessResultV2* result) {
+    return owned_collect_v2_core(token, result);
+}
+#endif /* !RT_OWNED_DARWIN_V4 */
+
+#ifndef RT_OWNED_DARWIN_V4 /* Darwin: shared ENOTSUP stubs below. */
 /* The language ABI never receives the V2 token.  This small registry maps a
  * separately minted random positive handle to that token and serializes the
  * one operation that can consume a core lease.  `closing` prevents a release
@@ -1827,6 +2046,8 @@ typedef struct RtOwnedAdapterSlot {
 static RtOwnedAdapterSlot rt_owned_adapter_slots[RT_OWNED_ADAPTER_SLOTS];
 static pthread_mutex_t rt_owned_adapter_lock = PTHREAD_MUTEX_INITIALIZER;
 
+#endif /* !RT_OWNED_DARWIN_V4 */
+
 static SplArray* owned_adapter_values(const int64_t* values, int64_t count) {
     SplArray* result = rt_array_new(count);
     if (!result) return NULL;
@@ -1839,7 +2060,7 @@ static SplArray* owned_adapter_values(const int64_t* values, int64_t count) {
     return result;
 }
 
-static int owned_adapter_fill_reserved_values(SplArray* result,
+RT_OWNED_MAYBE_UNUSED static int owned_adapter_fill_reserved_values(SplArray* result,
                                               const int64_t* values,
                                               int64_t count) {
     if (!result || rt_array_len(result) != 0) return 0;
@@ -1861,6 +2082,7 @@ static SplArray* owned_adapter_bytes(const char* bytes, uint64_t count) {
     return result;
 }
 
+#ifndef RT_OWNED_DARWIN_V4 /* Darwin: shared ENOTSUP stubs below. */
 static SplArray* owned_adapter_poll_error(int error) {
     const int64_t fields[] = { RT_OWNED_PROCESS_OPAQUE_V3_VERSION, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, error };
@@ -1932,15 +2154,18 @@ static int owned_adapter_publish(uint32_t index, RtOwnedProcessTokenV2 token) {
     return ok;
 }
 
-static int owned_adapter_acquire(int64_t raw_handle, RtOwnedProcessTokenV2* token,
-                                 uint32_t* index) {
+/* Claim a published adapter slot: consume=0 takes a reference, consume=1 marks an
+ * unreferenced slot closing. */
+static int owned_adapter_claim(int64_t raw_handle, int consume, RtOwnedProcessTokenV2* token,
+                               uint32_t* index) {
     uint64_t handle = (uint64_t)raw_handle;
     if (raw_handle <= 0 || pthread_mutex_lock(&rt_owned_adapter_lock) != 0) return 0;
     for (uint32_t i = 0; i < RT_OWNED_ADAPTER_SLOTS; i++) {
         RtOwnedAdapterSlot* slot = &rt_owned_adapter_slots[i];
-        if (slot->active && !slot->closing && slot->handle == handle &&
-            (slot->token.high || slot->token.low)) {
-            slot->refs++; *token = slot->token; *index = i;
+        if (slot->active && !slot->closing && (!consume || slot->refs == 0) &&
+            slot->handle == handle && (slot->token.high || slot->token.low)) {
+            if (consume) slot->closing = 1; else slot->refs++;
+            *token = slot->token; *index = i;
             pthread_mutex_unlock(&rt_owned_adapter_lock);
             return 1;
         }
@@ -1956,21 +2181,14 @@ static void owned_adapter_release_ref(uint32_t index) {
     pthread_mutex_unlock(&rt_owned_adapter_lock);
 }
 
+static int owned_adapter_acquire(int64_t raw_handle, RtOwnedProcessTokenV2* token,
+                                 uint32_t* index) {
+    return owned_adapter_claim(raw_handle, 0, token, index);
+}
+
 static int owned_adapter_begin_consume(int64_t raw_handle, RtOwnedProcessTokenV2* token,
                                        uint32_t* index) {
-    uint64_t handle = (uint64_t)raw_handle;
-    if (raw_handle <= 0 || pthread_mutex_lock(&rt_owned_adapter_lock) != 0) return 0;
-    for (uint32_t i = 0; i < RT_OWNED_ADAPTER_SLOTS; i++) {
-        RtOwnedAdapterSlot* slot = &rt_owned_adapter_slots[i];
-        if (slot->active && !slot->closing && slot->refs == 0 && slot->handle == handle &&
-            (slot->token.high || slot->token.low)) {
-            slot->closing = 1; *token = slot->token; *index = i;
-            pthread_mutex_unlock(&rt_owned_adapter_lock);
-            return 1;
-        }
-    }
-    pthread_mutex_unlock(&rt_owned_adapter_lock);
-    return 0;
+    return owned_adapter_claim(raw_handle, 1, token, index);
 }
 
 static void owned_adapter_end_consume(uint32_t index, int consumed) {
@@ -2046,7 +2264,7 @@ SplArray* rt_process_owned_v3_capabilities_value(void) {
         available,
         available ? (int64_t)RT_PROCESS_OBSERVATION_CAP_REQUIRED : 0,
     };
-    return owned_adapter_values(values, 3);
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_capabilities_value", owned_adapter_values(values, 3));
 }
 
 SplArray* rt_process_owned_v3_set_capture_limits_value(int64_t handle,
@@ -2097,11 +2315,11 @@ SplArray* rt_process_owned_v3_observation_value(int64_t handle) {
     RtOwnedProcessTokenV2 token;
     uint32_t adapter_index;
     if (!owned_adapter_acquire(handle, &token, &adapter_index))
-        return owned_adapter_values(values, 15);
+        return SIMPLE_RT_NONNULL("rt_process_owned_v3_observation_value", owned_adapter_values(values, 15));
     RtOwnedSlot* slot = owned_token_acquire(token, NULL);
     if (!slot) {
         owned_adapter_release_ref(adapter_index);
-        return owned_adapter_values(values, 15);
+        return SIMPLE_RT_NONNULL("rt_process_owned_v3_observation_value", owned_adapter_values(values, 15));
     }
     pthread_mutex_lock(slot->state_lock);
     values[1] = slot->pid;
@@ -2129,7 +2347,23 @@ SplArray* rt_process_owned_v3_observation_value(int64_t handle) {
     pthread_mutex_unlock(slot->state_lock);
     owned_token_release(slot);
     owned_adapter_release_ref(adapter_index);
-    return owned_adapter_values(values, 15);
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_observation_value", owned_adapter_values(values, 15));
+}
+
+/* Validate and copy the byte-array input.  Returns 0 on failure; *error is
+ * overwritten only for ENOMEM (callers preset it to EINVAL). */
+static int owned_adapter_copy_input(SplArray* input, int64_t max_output_bytes,
+                                    int64_t* input_len, uint8_t** input_copy, int64_t* error) {
+    *input_len = input ? rt_array_len(input) : -1;
+    if (*input_len < 0 || (uint64_t)*input_len > RT_OWNED_PROCESS_MAX_INPUT_BYTES ||
+        max_output_bytes < 0 || (uint64_t)max_output_bytes > RT_OWNED_ABI_MAX_OUTPUT_BYTES ||
+        rt_array_bytes_validate((int64_t)(uintptr_t)input) != *input_len) return 0;
+    if (*input_len) {
+        *input_copy = (uint8_t*)RT_OWNED_HOST_MALLOC((size_t)*input_len);
+        if (!*input_copy) { *error = ENOMEM; return 0; }
+        if (rt_array_bytes_copy_checked((int64_t)(uintptr_t)input, *input_copy, *input_len) != *input_len) return 0;
+    }
+    return 1;
 }
 
 /* Start publishes no authority until the adapter token map is installed.  A
@@ -2154,7 +2388,7 @@ SplArray* rt_process_owned_v3_start_value(const char* command_data, uint64_t com
                                           int64_t max_output_bytes) {
     int64_t values[4] = {0, RT_OWNED_PROCESS_OPAQUE_V3_VERSION, 0, EINVAL};
     SplArray* projected = rt_array_new(4);
-    if (!projected) return NULL;
+    if (!projected) return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_value", NULL);
     int64_t argc = -1, input_len = -1; int copy_error = EINVAL;
     char** argv = owned_adapter_copy_argv(command_data, command_len, args, &argc, &copy_error);
     uint8_t* input_copy = NULL;
@@ -2163,19 +2397,9 @@ SplArray* rt_process_owned_v3_start_value(const char* command_data, uint64_t com
     if (!argv) {
         values[3] = copy_error;
         (void)owned_adapter_fill_reserved_values(projected, values, 4);
-        return projected;
+        return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_value", projected);
     }
-    input_len = input ? rt_array_len(input) : -1;
-    if (input_len < 0 || (uint64_t)input_len > RT_OWNED_PROCESS_MAX_INPUT_BYTES ||
-        max_output_bytes < 0 || (uint64_t)max_output_bytes > RT_OWNED_ABI_MAX_OUTPUT_BYTES) goto done;
-    if (rt_array_bytes_validate((int64_t)(uintptr_t)input) != input_len) goto done;
-    if (input_len) {
-        input_copy = (uint8_t*)RT_OWNED_HOST_MALLOC((size_t)input_len);
-        if (!input_copy) { values[3] = ENOMEM; goto done; }
-        if (rt_array_bytes_copy_checked((int64_t)(uintptr_t)input, input_copy, input_len) != input_len) {
-            values[3] = EINVAL; goto done;
-        }
-    }
+    if (!owned_adapter_copy_input(input, max_output_bytes, &input_len, &input_copy, &values[3])) goto done;
     if (!owned_adapter_reserve(&adapter_index, &handle)) { values[3] = errno ? errno : EAGAIN; goto done; }
     if (!rt_process_owned_start_v3(argv[0], (const char* const*)argv, input_copy,
                                    (uint64_t)input_len, timeout_ms, term_grace_ms,
@@ -2195,9 +2419,9 @@ done:
         /* The fixed-size projection was fully allocated before any authority
          * existed, so replacement cannot require allocation. */
         rt_array_free(projected);
-        return NULL;
+        return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_value", NULL);
     }
-    return projected;
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_value", projected);
 }
 
 SplArray* rt_process_owned_v3_start_pinned_value(int64_t executable_handle,
@@ -2212,18 +2436,10 @@ SplArray* rt_process_owned_v3_start_pinned_value(int64_t executable_handle,
     uint8_t* input_copy = NULL; char** argv = NULL;
     uint32_t adapter_index = 0; uint64_t handle = 0;
     RtOwnedProcessTokenV2 token = {0, 0}; RtOwnedProcessStartReceiptV2 receipt;
-    if (!projected) return NULL;
+    if (!projected) return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_pinned_value", NULL);
     argv = owned_adapter_copy_argv(argv0, sizeof(argv0) - 1, args, &argc, &copy_error);
     if (!argv) { values[3] = copy_error; goto done; }
-    input_len = input ? rt_array_len(input) : -1;
-    if (input_len < 0 || (uint64_t)input_len > RT_OWNED_PROCESS_MAX_INPUT_BYTES ||
-        max_output_bytes < 0 || (uint64_t)max_output_bytes > RT_OWNED_ABI_MAX_OUTPUT_BYTES ||
-        rt_array_bytes_validate((int64_t)(uintptr_t)input) != input_len) goto done;
-    if (input_len) {
-        input_copy = (uint8_t*)RT_OWNED_HOST_MALLOC((size_t)input_len);
-        if (!input_copy) { values[3] = ENOMEM; goto done; }
-        if (rt_array_bytes_copy_checked((int64_t)(uintptr_t)input, input_copy, input_len) != input_len) goto done;
-    }
+    if (!owned_adapter_copy_input(input, max_output_bytes, &input_len, &input_copy, &values[3])) goto done;
     if (!owned_adapter_reserve(&adapter_index, &handle)) { values[3] = errno ? errno : EAGAIN; goto done; }
     if (!rt_process_owned_start_pinned_v3(executable_handle, (const char* const*)argv,
                                           input_copy, (uint64_t)input_len, timeout_ms,
@@ -2238,18 +2454,18 @@ SplArray* rt_process_owned_v3_start_pinned_value(int64_t executable_handle,
     values[0] = (int64_t)handle; values[2] = 1; values[3] = 0;
 done:
     RT_OWNED_HOST_FREE(input_copy); owned_adapter_free_argv(argv, argc);
-    if (!owned_adapter_fill_reserved_values(projected, values, 4)) { rt_array_free(projected); return NULL; }
-    return projected;
+    if (!owned_adapter_fill_reserved_values(projected, values, 4)) { rt_array_free(projected); return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_pinned_value", NULL); }
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_pinned_value", projected);
 }
 
 SplArray* rt_process_owned_v3_poll_value(int64_t handle, int64_t wait_ms,
                                          int64_t stdout_capacity, int64_t stderr_capacity) {
     RtOwnedProcessTokenV2 token; uint32_t index;
-    if (wait_ms < 0 || wait_ms > 1000) return owned_adapter_poll_error(EINVAL);
-    if (!owned_adapter_acquire(handle, &token, &index)) return owned_adapter_poll_error(ESTALE);
+    if (wait_ms < 0 || wait_ms > 1000) return SIMPLE_RT_NONNULL("rt_process_owned_v3_poll_value", owned_adapter_poll_error(EINVAL));
+    if (!owned_adapter_acquire(handle, &token, &index)) return SIMPLE_RT_NONNULL("rt_process_owned_v3_poll_value", owned_adapter_poll_error(ESTALE));
     if (stdout_capacity < 0 || stderr_capacity < 0 || stdout_capacity > RT_OWNED_ADAPTER_MAX_POLL_BYTES ||
         stderr_capacity > RT_OWNED_ADAPTER_MAX_POLL_BYTES) {
-        owned_adapter_release_ref(index); return owned_adapter_poll_error(EINVAL);
+        owned_adapter_release_ref(index); return SIMPLE_RT_NONNULL("rt_process_owned_v3_poll_value", owned_adapter_poll_error(EINVAL));
     }
     char* out = NULL; char* err = NULL;
     if (stdout_capacity) { out = (char*)RT_OWNED_HOST_MALLOC((size_t)stdout_capacity + 1); if (!out) goto oom; }
@@ -2291,13 +2507,13 @@ SplArray* rt_process_owned_v3_poll_value(int64_t handle, int64_t wait_ms,
     for (int i = 0; i < 17; i++)
         projection_ok = projection_ok && rt_array_push(field_value, rt_value_int(fields[i]));
     if (projection_ok) {
-        RT_OWNED_HOST_FREE(out); RT_OWNED_HOST_FREE(err); owned_adapter_release_ref(index); return tuple;
+        RT_OWNED_HOST_FREE(out); RT_OWNED_HOST_FREE(err); owned_adapter_release_ref(index); return SIMPLE_RT_NONNULL("rt_process_owned_v3_poll_value", tuple);
     }
     rt_array_free(tuple); rt_array_free(out_value); rt_array_free(err_value); rt_array_free(field_value);
-    RT_OWNED_HOST_FREE(out); RT_OWNED_HOST_FREE(err); owned_adapter_release_ref(index); return NULL;
+    RT_OWNED_HOST_FREE(out); RT_OWNED_HOST_FREE(err); owned_adapter_release_ref(index); return SIMPLE_RT_NONNULL("rt_process_owned_v3_poll_value", NULL);
 oom:
     RT_OWNED_HOST_FREE(out); RT_OWNED_HOST_FREE(err); owned_adapter_release_ref(index);
-    return owned_adapter_poll_error(ENOMEM);
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_poll_value", owned_adapter_poll_error(ENOMEM));
 }
 
 SplArray* rt_process_owned_v3_input_value(int64_t handle) {
@@ -2351,7 +2567,7 @@ SplArray* rt_process_owned_v3_collect_value(int64_t handle) {
     return owned_adapter_result_values(&result);
 }
 
-int rt_process_owned_v3_release_value(int64_t handle) {
+bool rt_process_owned_v3_release_value(int64_t handle) {
     RtOwnedProcessTokenV2 token; uint32_t index; RtOwnedProcessResultV2 result;
     if (!owned_adapter_begin_consume(handle, &token, &index)) return 0;
     int consumed = rt_process_owned_collect_v2(token, &result) ? 1 : 0;
@@ -2360,6 +2576,8 @@ int rt_process_owned_v3_release_value(int64_t handle) {
     owned_adapter_end_consume(index, consumed);
     return consumed;
 }
+
+#endif /* !RT_OWNED_DARWIN_V4 */
 
 /* ===== Process observation V4 Linux host =====
  *
@@ -2437,10 +2655,11 @@ enum {
     POV4_STREAM_ERROR = 3, POV4_STREAM_DEADLINE = 4,
     POV4_TREE_CHILD_DIRECT = 1, POV4_ENFORCEMENT_NONE = 1,
     POV4_ENFORCEMENT_CGROUP = 2, POV4_ENFORCEMENT_RLIMIT_AS = 3,
-    POV4_DESCENDANT_LEADER = 1,
+    POV4_DESCENDANT_LEADER = 1, POV4_DESCENDANT_PROCESS_GROUP = 2,
     POV4_CLOCK_MONOTONIC = 1,
     POV4_VALID_REQUEST = 1, POV4_VALID_EXEC = 2, POV4_VALID_CLOCK = 4,
-    POV4_VALID_DIRECT_RSS = 8, POV4_VALID_FROZEN = 128
+    POV4_VALID_DIRECT_RSS = 8, POV4_VALID_TREE_CONTROL = 64,
+    POV4_VALID_FROZEN = 128
 };
 
 enum {
@@ -2448,12 +2667,32 @@ enum {
     POV4_CAP_PTRACE_EXEC = 1 << 2, POV4_CAP_EXACT_ENV = 1 << 3,
     POV4_CAP_ABSOLUTE_DEADLINE = 1 << 4, POV4_CAP_WAIT4 = 1 << 5,
     POV4_CAP_RLIMIT_AS = 1 << 6, POV4_CAP_TWO_PHASE_COLLECT = 1 << 7,
-    POV4_CAP_LEADER_ONLY = 1 << 8
+    POV4_CAP_LEADER_ONLY = 1 << 8,
+    /* Darwin-only, weaker than PINNED_EXEC: a private snapshot (0700 dir,
+     * 0500 file, caller-owned) launched by pathname. Same-UID processes are
+     * trusted not to rewrite it; there is no kernel seal. */
+    POV4_CAP_DARWIN_SNAPSHOT_EXEC = 1 << 9,
+    /* Darwin-only exec proof: posix_spawn returned success for a
+     * START_SUSPENDED child, and before it ran an instruction its main image
+     * vnode (PROC_PIDREGIONPATHINFO) matched the snapshot dev/ino and the
+     * snapshot bytes still matched the bound digest. Not PTRACE_EXEC.
+     * Owner-accepted Darwin exec proof (2026-10-31): kqueue NOTE_EXEC cannot
+     * observe a posix_spawn exec, whose pid exists only afterwards. */
+    POV4_CAP_DARWIN_SPAWN_EXEC_PROOF = 1 << 10,
+    /* ProcessGroup descendant policy: the unreaped leader pins its group; the
+     * leader is reaped only after a zero-live (non-zombie) group sample.
+     * Members that leave the group (setsid/setpgid) are not contained. */
+    POV4_CAP_PROCESS_GROUP_RETIRE = 1 << 11
 };
 #define POV4_CAPABILITIES (POV4_CAP_PINNED_EXEC | POV4_CAP_PINNED_CWD | \
     POV4_CAP_PTRACE_EXEC | POV4_CAP_EXACT_ENV | POV4_CAP_ABSOLUTE_DEADLINE | \
     POV4_CAP_WAIT4 | POV4_CAP_RLIMIT_AS | POV4_CAP_TWO_PHASE_COLLECT | \
     POV4_CAP_LEADER_ONLY)
+/* Darwin clears PINNED_EXEC, PTRACE_EXEC and RLIMIT_AS (no memory cap). */
+#define POV4_DARWIN_CAPABILITIES (POV4_CAP_PINNED_CWD | POV4_CAP_EXACT_ENV | \
+    POV4_CAP_ABSOLUTE_DEADLINE | POV4_CAP_WAIT4 | POV4_CAP_TWO_PHASE_COLLECT | \
+    POV4_CAP_LEADER_ONLY | POV4_CAP_DARWIN_SNAPSHOT_EXEC | \
+    POV4_CAP_DARWIN_SPAWN_EXEC_PROOF | POV4_CAP_PROCESS_GROUP_RETIRE)
 
 typedef struct Pov4Request {
     uint64_t capability_bits;
@@ -2472,6 +2711,9 @@ typedef struct Pov4Request {
     uint64_t atomic_input_len;
     uint8_t atomic_input_digest[32];
     int atomic_input_bound;
+    int64_t submission_expires_unix_ms;
+    int submission_admission_error;
+    int deferred_launch; /* native V6 selection only; never request wire data */
 } Pov4Request;
 
 typedef struct Pov4Cursor {
@@ -2480,158 +2722,7 @@ typedef struct Pov4Cursor {
     uint64_t offset;
 } Pov4Cursor;
 
-static int pov4_canonical_directory(const char* value);
-
-typedef struct Pov4CwdPin {
-    uint64_t handle;
-    int fd;
-    char* canonical_path;
-    uint8_t digest[POV4_DIGEST_BYTES];
-} Pov4CwdPin;
-
-static Pov4CwdPin pov4_cwd_pins[POV4_CWD_PINS];
-static pthread_mutex_t pov4_cwd_lock = PTHREAD_MUTEX_INITIALIZER;
-
-static void pov4_store_u64_le(uint8_t* out, uint64_t value) {
-    for (unsigned i = 0; i < 8; i++) out[i] = (uint8_t)(value >> (8 * i));
-}
-
-static int pov4_directory_digest(int fd, uint8_t digest[POV4_DIGEST_BYTES]) {
-    struct stat info;
-    if (fstat(fd, &info) != 0 || !S_ISDIR(info.st_mode)) {
-        if (errno == 0) errno = ENOTDIR;
-        return 0;
-    }
-    uint8_t identity[32] = {'P','O','V','4','C','W','D',0};
-    pov4_store_u64_le(identity + 8, (uint64_t)info.st_dev);
-    pov4_store_u64_le(identity + 16, (uint64_t)info.st_ino);
-    pov4_store_u64_le(identity + 24, (uint64_t)info.st_mode);
-    owned_sha256(identity, sizeof(identity), digest);
-    return 1;
-}
-
-static int pov4_mint_positive(uint64_t* value) {
-#if defined(__linux__) && defined(SYS_getrandom)
-    for (int attempt = 0; attempt < 32; attempt++) {
-        uint64_t candidate = 0;
-        ssize_t got = RT_OWNED_TOKEN_FILL(&candidate, sizeof(candidate));
-        candidate &= (uint64_t)INT64_MAX;
-        if (got == (ssize_t)sizeof(candidate) && candidate != 0) {
-            *value = candidate;
-            return 1;
-        }
-    }
-    errno = EAGAIN;
-    return 0;
-#else
-    (void)value;
-    errno = ENOTSUP;
-    return 0;
-#endif
-}
-
-int64_t rt_process_observation_v4_pin_cwd_value(const char* path_data,
-                                                 uint64_t path_len) {
-#ifndef __linux__
-    (void)path_data; (void)path_len; errno = ENOTSUP; return 0;
-#else
-    if (!path_data || path_len == 0 || path_len > POV4_MAX_TEXT_BYTES ||
-        path_len > SIZE_MAX - 1) { errno = EINVAL; return 0; }
-    char* path = (char*)RT_OWNED_HOST_MALLOC((size_t)path_len + 1);
-    if (!path) { errno = ENOMEM; return 0; }
-    memcpy(path, path_data, (size_t)path_len); path[path_len] = '\0';
-    if (memchr(path, '\0', (size_t)path_len) || !pov4_canonical_directory(path)) {
-        RT_OWNED_HOST_FREE(path); errno = EINVAL; return 0;
-    }
-    char resolved[PATH_MAX];
-    if (!realpath(path, resolved) || strcmp(path, resolved) != 0) {
-        int saved = errno ? errno : EINVAL;
-        RT_OWNED_HOST_FREE(path); errno = saved; return 0;
-    }
-    int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    uint8_t digest[POV4_DIGEST_BYTES];
-    if (fd < 0 || !pov4_directory_digest(fd, digest)) {
-        int saved = errno ? errno : EIO;
-        if (fd >= 0) close(fd);
-        RT_OWNED_HOST_FREE(path); errno = saved; return 0;
-    }
-    if (pthread_mutex_lock(&pov4_cwd_lock) != 0) {
-        close(fd); RT_OWNED_HOST_FREE(path); errno = EBUSY; return 0;
-    }
-    int free_index = -1;
-    for (int i = 0; i < POV4_CWD_PINS; i++)
-        if (pov4_cwd_pins[i].handle == 0) { free_index = i; break; }
-    uint64_t handle = 0;
-    if (free_index >= 0) {
-        for (int attempt = 0; attempt < 32 && handle == 0; attempt++) {
-            uint64_t candidate = 0;
-            if (!pov4_mint_positive(&candidate)) break;
-            int duplicate = 0;
-            for (int i = 0; i < POV4_CWD_PINS; i++)
-                if (pov4_cwd_pins[i].handle == candidate) duplicate = 1;
-            if (!duplicate) handle = candidate;
-        }
-    }
-    if (free_index < 0 || handle == 0) {
-        pthread_mutex_unlock(&pov4_cwd_lock);
-        close(fd); RT_OWNED_HOST_FREE(path);
-        errno = free_index < 0 ? EAGAIN : (errno ? errno : EAGAIN); return 0;
-    }
-    Pov4CwdPin* pin = &pov4_cwd_pins[free_index];
-    pin->handle = handle; pin->fd = fd; pin->canonical_path = path;
-    memcpy(pin->digest, digest, sizeof(pin->digest));
-    pthread_mutex_unlock(&pov4_cwd_lock);
-    return (int64_t)handle;
-#endif
-}
-
-static int pov4_acquire_cwd(uint64_t handle, const char* canonical_path,
-                            const uint8_t digest[POV4_DIGEST_BYTES]) {
-    if (handle == 0 || pthread_mutex_lock(&pov4_cwd_lock) != 0) {
-        errno = handle == 0 ? ESTALE : EBUSY; return -1;
-    }
-    int duplicate = -1;
-    for (int i = 0; i < POV4_CWD_PINS; i++) {
-        Pov4CwdPin* pin = &pov4_cwd_pins[i];
-        if (pin->handle == handle && canonical_path &&
-            strcmp(pin->canonical_path, canonical_path) == 0 &&
-            memcmp(pin->digest, digest, POV4_DIGEST_BYTES) == 0) {
-            duplicate = fcntl(pin->fd, F_DUPFD_CLOEXEC, 3);
-            break;
-        }
-    }
-    pthread_mutex_unlock(&pov4_cwd_lock);
-    if (duplicate < 0) { if (errno == 0) errno = ESTALE; return -1; }
-    uint8_t current[POV4_DIGEST_BYTES];
-    if (!pov4_directory_digest(duplicate, current) ||
-        memcmp(current, digest, POV4_DIGEST_BYTES) != 0) {
-        int saved = errno ? errno : ESTALE; close(duplicate); errno = saved; return -1;
-    }
-    return duplicate;
-}
-
-SplArray* rt_process_observation_v4_cwd_digest_value(int64_t handle) {
-    uint8_t digest[POV4_DIGEST_BYTES]; int found = 0;
-    if (handle > 0 && pthread_mutex_lock(&pov4_cwd_lock) == 0) {
-        for (int i = 0; i < POV4_CWD_PINS; i++) if (pov4_cwd_pins[i].handle == (uint64_t)handle) {
-            memcpy(digest, pov4_cwd_pins[i].digest, sizeof(digest)); found = 1; break;
-        }
-        pthread_mutex_unlock(&pov4_cwd_lock);
-    }
-    return owned_adapter_bytes((const char*)digest, found ? sizeof(digest) : 0);
-}
-
-int rt_process_observation_v4_close_cwd_value(int64_t handle) {
-    int fd = -1; char* path = NULL;
-    if (handle <= 0 || pthread_mutex_lock(&pov4_cwd_lock) != 0) return 0;
-    for (int i = 0; i < POV4_CWD_PINS; i++) if (pov4_cwd_pins[i].handle == (uint64_t)handle) {
-        fd = pov4_cwd_pins[i].fd; path = pov4_cwd_pins[i].canonical_path;
-        memset(&pov4_cwd_pins[i], 0, sizeof(pov4_cwd_pins[i])); break;
-    }
-    pthread_mutex_unlock(&pov4_cwd_lock);
-    if (fd < 0) return 0;
-    close(fd); RT_OWNED_HOST_FREE(path); return 1;
-}
+#include "runtime_process_owned_cwd_private.h"
 
 static int pov4_read_u64(Pov4Cursor* cursor, uint64_t* value) {
     if (!cursor || !value || cursor->offset > cursor->length ||
@@ -2680,19 +2771,6 @@ static int pov4_read_text(Pov4Cursor* cursor, char** value, uint64_t* length_out
     copy[length] = '\0'; cursor->offset += length;
     *value = copy;
     if (length_out) *length_out = length;
-    return 1;
-}
-
-static int pov4_canonical_directory(const char* value) {
-    size_t length;
-    if (!value || value[0] != '/' || (length = strlen(value)) <= 1 ||
-        value[length - 1] == '/') return 0;
-    for (size_t i = 0; i < length; i++) {
-        if (value[i] == '/' && i + 1 < length && value[i + 1] == '/') return 0;
-        if (value[i] == '/' && i + 2 < length && value[i + 1] == '.' &&
-            (value[i + 2] == '/' || (value[i + 2] == '.' &&
-             (i + 3 == length || value[i + 3] == '/')))) return 0;
-    }
     return 1;
 }
 
@@ -2858,7 +2936,8 @@ static int pov4_request_from_value(SplArray* binding, Pov4Request* request) {
 enum Pov4StartOutcome {
     POV4_START_NO_CHILD = 0,
     POV4_START_CONFIRMED = 1,
-    POV4_START_CLEANUP = 2
+    POV4_START_CLEANUP = 2,
+    POV6_START_PENDING = 3 /* private result, never a V4 receipt status */
 };
 
 enum Pov4SignalOutcome {
@@ -2867,9 +2946,20 @@ enum Pov4SignalOutcome {
     POV4_SIGNAL_SENT = 1
 };
 
+/* Callers hold the slot lock and signal only an unreaped leader, which pins
+ * both its PID and (ProcessGroup policy) its process-group id. */
 static enum Pov4SignalOutcome pov4_signal_owned_child(
-        pid_t pid, int pidfd, int sig) {
+        pid_t pid, int pidfd, int sig, int group) {
     if (pid <= 0) { errno = ESTALE; return POV4_SIGNAL_ERROR; }
+    if (group) {
+        (void)pidfd;
+        if (kill(-pid, sig) == 0) return POV4_SIGNAL_SENT;
+        /* EPERM: no remaining member accepted the signal (Darwin reports it
+         * for dying members). GONE only triggers the gated reconcile, which
+         * still requires a zero-live group sample before any reap. */
+        if (errno == ESRCH || errno == EPERM) return POV4_SIGNAL_GONE;
+        return POV4_SIGNAL_ERROR;
+    }
 #ifdef RT_PROCESS_OBSERVATION_V4_TESTING
     if (pov4_test_signal_gone_count > 0) {
         pov4_test_signal_gone_count--;
@@ -2899,6 +2989,14 @@ static enum Pov4SignalOutcome pov4_signal_owned_child(
  * nonblocking wait before any later signal decision. */
 static void pov4_reconcile_gone_child_locked(
         RtOwnedSlot* slot, pid_t pid, int64_t deadline_ns) {
+    if (slot->group_retire) {
+        /* Never consume the group-pinning leader before retirement. */
+        siginfo_t info; memset(&info, 0, sizeof(info));
+        int rc;
+        do rc = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT);
+        while (rc < 0 && errno == EINTR);
+        if (rc != 0 || info.si_pid != pid || !owned_group_retire_ready(slot)) return;
+    }
     for (int turn = 0; turn < 1000; turn++) {
         int status = 0;
         pid_t waited;
@@ -2916,6 +3014,7 @@ static void pov4_reconcile_gone_child_locked(
             slot->reaped = 1;
             slot->status = status;
             slot->leader_waited_ns = waited_ns;
+            if (slot->group_retire) slot->tree_empty_ns = waited_ns;
             slot->finished_ms = waited_ns >= 0 ? waited_ns / 1000000 : -1;
             owned_arm_unlimited_cleanup(slot, waited_ns, 0);
             if (slot->execution_deadline_ns == 0) deadline_ns = slot->cleanup_deadline_ns;
@@ -2930,6 +3029,285 @@ static void pov4_reconcile_gone_child_locked(
     }
 }
 
+#ifdef RT_OWNED_DARWIN_V4
+/* A launched child keeps its snapshot pathname alive: AMFI/syspolicyd evaluate
+ * the image asynchronously after exec, and an unlinked snapshot gets the child
+ * SIGKILLed (exec reason SECURITY_POLICY). Closing a pin with live children
+ * only retires its handle; the files go when the last child is collected. */
+static int pov4_darwin_hash_fd(int fd, uint8_t digest[32]) {
+    CC_SHA256_CTX context; uint8_t buffer[16384]; off_t offset = 0;
+    CC_SHA256_Init(&context);
+    for (;;) {
+        ssize_t count = pread(fd, buffer, sizeof(buffer), offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) return 0;
+        if (count == 0) break;
+        CC_SHA256_Update(&context, buffer, (CC_LONG)count);
+        offset += count;
+    }
+    CC_SHA256_Final(digest, &context);
+    return 1;
+}
+
+/* The snapshot descriptor still names the pinned inode, and its bytes still
+ * match the digest the request bound. Same-UID rewrite is a trusted-caller
+ * precondition; this check narrows, but does not close, that window. */
+static int pov4_darwin_snapshot_matches(int fd, const struct stat* pinned,
+                                        const uint8_t digest[32]) {
+    struct stat now; uint8_t actual[32];
+    if (fstat(fd, &now) != 0 || !S_ISREG(now.st_mode) ||
+        now.st_dev != pinned->st_dev || now.st_ino != pinned->st_ino ||
+        now.st_size != pinned->st_size || !pov4_darwin_hash_fd(fd, actual))
+        return 0;
+    unsigned different = 0;
+    for (int i = 0; i < 32; i++) different |= (unsigned)(actual[i] ^ digest[i]);
+    return different == 0;
+}
+
+/* The lowest file-backed mapping of a START_SUSPENDED child is its main image
+ * (dyld and the shared cache map above it). Compare its vnode identity. */
+static int pov4_darwin_main_image_is(pid_t pid, dev_t device, ino_t inode) {
+    uint64_t address = 0;
+    for (int turn = 0; turn < 64; turn++) {
+        struct proc_regionwithpathinfo region;
+        memset(&region, 0, sizeof(region));
+        int count = proc_pidinfo(pid, PROC_PIDREGIONPATHINFO, address,
+                                 &region, (int)sizeof(region));
+        if (count != (int)sizeof(region)) return 0;
+        if (region.prp_vip.vip_path[0] != '\0')
+            return (dev_t)region.prp_vip.vip_vi.vi_stat.vst_dev == device &&
+                   (ino_t)region.prp_vip.vip_vi.vi_stat.vst_ino == inode;
+        uint64_t next = region.prp_prinfo.pri_address + region.prp_prinfo.pri_size;
+        if (next <= address) return 0;
+        address = next;
+    }
+    return 0;
+}
+
+static int pov4_darwin_spawn_suspended(pid_t* pid, const char* image_path,
+        int cwd_fd, int stdin_fd, int stdout_fd, int stderr_fd,
+        char* const* argv, char* const* environment,
+        int64_t submission_expires_unix_ms, int* admission_error) {
+    posix_spawn_file_actions_t actions; posix_spawnattr_t attributes;
+    int actions_ready = 0, attributes_ready = 0;
+    int error = posix_spawn_file_actions_init(&actions);
+    actions_ready = error == 0;
+    if (!error) { error = posix_spawnattr_init(&attributes); attributes_ready = error == 0; }
+    if (!error) error = stdin_fd >= 0
+        ? posix_spawn_file_actions_adddup2(&actions, stdin_fd, STDIN_FILENO)
+        : posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    if (!error) error = posix_spawn_file_actions_adddup2(&actions, stdout_fd, STDOUT_FILENO);
+    if (!error) error = posix_spawn_file_actions_adddup2(&actions, stderr_fd, STDERR_FILENO);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    if (!error) error = posix_spawn_file_actions_addfchdir_np(&actions, cwd_fd);
+#pragma clang diagnostic pop
+    if (!error) error = posix_spawnattr_setpgroup(&attributes, 0);
+    sigset_t mask, defaults; sigemptyset(&mask); sigemptyset(&defaults);
+    static const int reset[] = {SIGHUP, SIGINT, SIGQUIT, SIGPIPE, SIGALRM, SIGTERM,
+        SIGCHLD, SIGUSR1, SIGUSR2, SIGTSTP, SIGTTIN, SIGTTOU};
+    for (size_t i = 0; i < sizeof(reset) / sizeof(reset[0]); i++) sigaddset(&defaults, reset[i]);
+    if (!error) error = posix_spawnattr_setsigmask(&attributes, &mask);
+    if (!error) error = posix_spawnattr_setsigdefault(&attributes, &defaults);
+    /* CLOEXEC_DEFAULT: only the three dup2/open targets reach the image. */
+    if (!error) error = posix_spawnattr_setflags(&attributes, (short)(
+        POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGMASK |
+        POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_START_SUSPENDED));
+    if (!error) {
+        *admission_error=pov5_submission_admission_check(submission_expires_unix_ms);
+        error=*admission_error;
+        if (!error) error = posix_spawn(pid, image_path, &actions, &attributes, argv, environment);
+    }
+    if (actions_ready) (void)posix_spawn_file_actions_destroy(&actions);
+    if (attributes_ready) (void)posix_spawnattr_destroy(&attributes);
+    return error;
+}
+
+/* Darwin arm of pov4_start_exact. Exec proof is posix_spawn success for a
+ * START_SUSPENDED child whose main image vnode is the pinned snapshot inode
+ * and whose snapshot bytes still match the bound digest; only then is it
+ * resumed. Weaker than Linux: the snapshot is launched by pathname and is not
+ * kernel-sealed, so same-UID processes are trusted (see the capability bits).
+ * There is no memory cap: memory_limit must be zero. */
+static enum Pov4StartOutcome pov4_start_exact_darwin(
+    int executable_fd, int cwd_fd, Pov4Request* request,
+    int64_t request_started_ns, int64_t prepared_ns,
+    int64_t execution_deadline_ns, int64_t kill_deadline_ns,
+    int64_t cleanup_deadline_ns, RtOwnedProcessTokenV2* token,
+    int* exec_error_out, int* exec_failure_class_out) {
+    struct stat pinned, named; char image_path[MAXPATHLEN];
+    if (request->memory_limit != 0) {
+        close(executable_fd); close(cwd_fd); errno = ENOTSUP; return POV4_START_NO_CHILD;
+    }
+    if (fstat(executable_fd, &pinned) != 0 || !S_ISREG(pinned.st_mode) ||
+        fcntl(executable_fd, F_GETPATH, image_path) != 0 ||
+        lstat(image_path, &named) != 0 || !S_ISREG(named.st_mode) ||
+        named.st_dev != pinned.st_dev || named.st_ino != pinned.st_ino ||
+        !pov4_darwin_snapshot_matches(executable_fd, &pinned, request->executable_digest)) {
+        close(executable_fd); close(cwd_fd); errno = ESTALE; return POV4_START_NO_CHILD;
+    }
+    uint64_t output_limit = request->stdout_limit + request->stderr_limit;
+    RtOwnedCapturedByte* retained = NULL;
+    if (output_limit) {
+        retained = (RtOwnedCapturedByte*)RT_OWNED_HOST_MALLOC(
+            (size_t)output_limit * sizeof(*retained));
+        if (!retained) { close(executable_fd); close(cwd_fd); errno = ENOMEM; return POV4_START_NO_CHILD; }
+    }
+    uint32_t index = 0; uint64_t generation = 0;
+    if (!owned_reserve(&index, &generation)) {
+        close(executable_fd); close(cwd_fd); RT_OWNED_HOST_FREE(retained);
+        errno = EAGAIN; return POV4_START_NO_CHILD;
+    }
+    RtOwnedProcessTokenV2 minted = {0, 0};
+    if (!owned_token_mint_install_reserved(index, generation, &minted)) {
+        int saved = errno; owned_release(index, generation);
+        close(executable_fd); close(cwd_fd); RT_OWNED_HOST_FREE(retained);
+        errno = saved; return POV4_START_NO_CHILD;
+    }
+    int out_pipe[2] = {-1, -1}, err_pipe[2] = {-1, -1}, in_pipe[2] = {-1, -1};
+    if (owned_pipe_cloexec(out_pipe) != 0 || owned_pipe_cloexec(err_pipe) != 0 ||
+        (request->atomic_input_bound && owned_pipe_cloexec(in_pipe) != 0) ||
+        !owned_set_nonblocking(out_pipe[0]) || !owned_set_nonblocking(err_pipe[0]) ||
+        (request->atomic_input_bound && !owned_set_nonblocking(in_pipe[1]))) {
+        int saved = errno;
+        if (out_pipe[0] >= 0) { close(out_pipe[0]); close(out_pipe[1]); }
+        if (err_pipe[0] >= 0) { close(err_pipe[0]); close(err_pipe[1]); }
+        if (in_pipe[0] >= 0) { close(in_pipe[0]); close(in_pipe[1]); }
+        close(executable_fd); close(cwd_fd); RT_OWNED_HOST_FREE(retained);
+        owned_release(index, generation); errno = saved; return POV4_START_NO_CHILD;
+    }
+    /* Take the snapshot reference before the child exists, so a concurrent
+     * close can only retire the pin, never unlink the image it launches. */
+    uint64_t pin_ref = owned_darwin_pin_retain(executable_fd, request->environment);
+#ifndef RT_OWNED_EXTERNAL_PIN
+    if (pin_ref == 0) {
+        close(out_pipe[0]); close(out_pipe[1]); close(err_pipe[0]); close(err_pipe[1]);
+        if (request->atomic_input_bound) { close(in_pipe[0]); close(in_pipe[1]); }
+        close(executable_fd); close(cwd_fd); RT_OWNED_HOST_FREE(retained);
+        owned_release(index, generation); errno = ESTALE; return POV4_START_NO_CHILD;
+    }
+#endif
+    pid_t pid = -1;
+    int spawn_error = pov4_darwin_spawn_suspended(&pid, image_path, cwd_fd,
+        request->atomic_input_bound ? in_pipe[0] : -1, out_pipe[1], err_pipe[1],
+        request->argv, request->environment, request->submission_expires_unix_ms,
+        &request->submission_admission_error);
+    close(out_pipe[1]); close(err_pipe[1]);
+    if (request->atomic_input_bound) close(in_pipe[0]);
+    close(cwd_fd);
+    if (spawn_error != 0) {
+        owned_darwin_pin_release(pin_ref);
+        close(out_pipe[0]); close(err_pipe[0]);
+        if (request->atomic_input_bound) close(in_pipe[1]);
+        close(executable_fd); RT_OWNED_HOST_FREE(retained);
+        owned_release(index, generation); errno = spawn_error;
+        return POV4_START_NO_CHILD;
+    }
+    /* From here the suspended child is owned by the slot and never dropped. */
+    int64_t process_started_ns = owned_now_ns();
+    pthread_mutex_lock(&rt_owned_lock);
+    RtOwnedSlot* slot = &rt_owned_slots[index];
+    slot->pid = pid; slot->pgid = pid; slot->pidfd = -1; slot->start_identity = 0;
+    slot->group_retire = request->descendant_policy == POV4_DESCENDANT_PROCESS_GROUP;
+    slot->token_high = minted.high; slot->token_low = minted.low; slot->state = 1;
+    slot->out_fd = out_pipe[0]; slot->err_fd = err_pipe[0]; slot->out_open = 1; slot->err_open = 1;
+    slot->in_fd = request->atomic_input_bound ? in_pipe[1] : -1;
+    slot->in_open = request->atomic_input_bound;
+    slot->input = request->atomic_input;
+    slot->input_len = request->atomic_input_len;
+    slot->input_written = 0;
+    slot->input_contract_v3 = request->atomic_input_bound;
+    if (request->atomic_input_bound)
+        memcpy(slot->input_sha256, request->atomic_input_digest, 32);
+    request->atomic_input = NULL;
+    if (slot->in_open && slot->input_len == 0) owned_async_close_input(slot);
+    slot->started_ms = request_started_ns / 1000000;
+    slot->finished_ms = -1; slot->request_started_ns = request_started_ns;
+    slot->prepared_ns = prepared_ns; slot->process_started_ns = process_started_ns;
+    slot->exec_confirmed_ns = -1; slot->leader_waited_ns = -1; slot->tree_empty_ns = -1;
+    slot->execution_deadline_ns = execution_deadline_ns;
+    slot->kill_deadline_ns = kill_deadline_ns; slot->cleanup_deadline_ns = cleanup_deadline_ns;
+    slot->unlimited_term_grace_ns = request->term_grace_ns;
+    slot->unlimited_cleanup_budget_ns = request->cleanup_budget_ns;
+    slot->timeout_ms = request->wall_budget_ns == 0 ? 0 : RT_OWNED_ABI_MAX_TIMEOUT_MS;
+    slot->term_grace_ms = 0;
+    slot->term_at_ms = -1; slot->drain_deadline_ms = -1;
+    slot->output_limit = output_limit; slot->stdout_limit = request->stdout_limit;
+    slot->stderr_limit = request->stderr_limit; slot->retained = retained;
+    pthread_mutex_unlock(&rt_owned_lock);
+    *token = minted;
+
+    int failure = 0, failure_class = RT_OWNED_EXEC_FAILURE_PROVIDER_V4;
+    if (process_started_ns < prepared_ns) {
+        failure = EIO; failure_class = RT_OWNED_EXEC_FAILURE_CLOCK_V4;
+    }
+    pthread_mutex_lock(slot->state_lock);
+    slot->darwin_pin_ref = pin_ref;
+    pthread_mutex_unlock(slot->state_lock);
+    if (!failure && getpgid(pid) != pid) failure = EPERM;
+    uint64_t identity = 0;
+    if (!failure && (identity = owned_start_identity(pid)) == 0) failure = errno ? errno : ESRCH;
+    if (!failure && (!pov4_darwin_main_image_is(pid, pinned.st_dev, pinned.st_ino) ||
+                     !pov4_darwin_snapshot_matches(executable_fd, &pinned,
+                                                   request->executable_digest)))
+        failure = ESTALE;
+    close(executable_fd);
+    int64_t confirm_deadline_ns = execution_deadline_ns > 0
+        ? execution_deadline_ns : request_started_ns + 30000000000LL;
+    int64_t confirmed_ns = -1;
+#ifdef RT_PROCESS_OBSERVATION_V4_TESTING
+    if (!failure && pov4_test_exec_failure_count > 0) {
+        pov4_test_exec_failure_count--;
+        failure = pov4_test_exec_failure_errno;
+    }
+#endif
+    if (!failure) {
+        confirmed_ns = owned_now_ns();
+        if (confirmed_ns < 0) { failure = EIO; failure_class = RT_OWNED_EXEC_FAILURE_CLOCK_V4; }
+        else if (confirmed_ns > confirm_deadline_ns) {
+            failure = ETIMEDOUT; failure_class = RT_OWNED_EXEC_FAILURE_DEADLINE_V4;
+        }
+    }
+    if (!failure) {
+        int admission=pov5_submission_admission_check(request->submission_expires_unix_ms);
+        if (admission) {
+            failure=admission;
+            failure_class=admission==ETIMEDOUT?RT_OWNED_EXEC_FAILURE_DEADLINE_V4:RT_OWNED_EXEC_FAILURE_CLOCK_V4;
+        }
+    }
+    if (!failure && kill(pid, SIGCONT) != 0) failure = errno ? errno : EIO;
+    pthread_mutex_lock(slot->state_lock);
+    slot->start_identity = identity;
+    if (!failure) {
+        slot->exec_confirmed_ns = confirmed_ns;
+        pthread_mutex_unlock(slot->state_lock);
+        return POV4_START_CONFIRMED;
+    }
+    slot->runtime_error = failure;
+    owned_arm_unlimited_cleanup(slot, owned_now_ns(), 1);
+    cleanup_deadline_ns = slot->cleanup_deadline_ns;
+    /* A suspended child cannot act on SIGTERM; KILL always follows. */
+    slot->term_attempted = 1;
+    enum Pov4SignalOutcome term =
+        pov4_signal_owned_child(pid, -1, SIGTERM, slot->group_retire);
+    if (term == POV4_SIGNAL_SENT) slot->term_sent = 1;
+    else if (term == POV4_SIGNAL_GONE)
+        pov4_reconcile_gone_child_locked(slot, pid, cleanup_deadline_ns);
+    if (!slot->reaped) {
+        slot->kill_attempted = 1;
+        enum Pov4SignalOutcome killed =
+            pov4_signal_owned_child(pid, -1, SIGKILL, slot->group_retire);
+        if (killed == POV4_SIGNAL_SENT) slot->kill_sent = 1;
+        else if (killed == POV4_SIGNAL_GONE)
+            pov4_reconcile_gone_child_locked(slot, pid, cleanup_deadline_ns);
+    }
+    pthread_mutex_unlock(slot->state_lock);
+    *exec_error_out = failure;
+    *exec_failure_class_out = failure_class;
+    return POV4_START_CLEANUP;
+}
+#endif
+
 static enum Pov4StartOutcome pov4_start_exact(
     int executable_fd, int cwd_fd, Pov4Request* request,
     int64_t request_started_ns, int64_t prepared_ns,
@@ -2939,7 +3317,12 @@ static enum Pov4StartOutcome pov4_start_exact(
     *exec_error_out = 0;
     *exec_failure_class_out = RT_OWNED_EXEC_FAILURE_PROVIDER_V4;
     memset(token, 0, sizeof(*token));
-#ifndef __linux__
+#if defined(RT_OWNED_DARWIN_V4)
+    return pov4_start_exact_darwin(executable_fd, cwd_fd, request,
+        request_started_ns, prepared_ns, execution_deadline_ns,
+        kill_deadline_ns, cleanup_deadline_ns, token,
+        exec_error_out, exec_failure_class_out);
+#elif !defined(__linux__)
     (void)request; (void)request_started_ns; (void)prepared_ns;
     (void)execution_deadline_ns; (void)kill_deadline_ns;
     (void)cleanup_deadline_ns;
@@ -2948,6 +3331,11 @@ static enum Pov4StartOutcome pov4_start_exact(
     errno = ENOTSUP;
     return POV4_START_NO_CHILD;
 #else
+    if (pov4_environment_steers_loader(request->environment)) {
+        close(executable_fd); close(cwd_fd);
+        *exec_error_out = EPERM;
+        errno = EPERM; return POV4_START_NO_CHILD;
+    }
     uint64_t output_limit = request->stdout_limit + request->stderr_limit;
     RtOwnedCapturedByte* retained = NULL;
     if (output_limit) {
@@ -2981,6 +3369,15 @@ static enum Pov4StartOutcome pov4_start_exact(
         close(executable_fd); close(cwd_fd); RT_OWNED_HOST_FREE(retained);
         owned_release(index,generation); errno=saved; return POV4_START_NO_CHILD;
     }
+    int admission=pov5_submission_admission_check(request->submission_expires_unix_ms);
+    if (admission) {
+        request->submission_admission_error=admission;
+        close(out_pipe[0]);close(out_pipe[1]);close(err_pipe[0]);close(err_pipe[1]);
+        close(exec_pipe[0]);close(exec_pipe[1]);
+        if (request->atomic_input_bound) {close(in_pipe[0]);close(in_pipe[1]);}
+        close(executable_fd);close(cwd_fd);RT_OWNED_HOST_FREE(retained);
+        owned_release(index,generation);errno=admission;return POV4_START_NO_CHILD;
+    }
     pid_t pid=fork();
     if(pid==0){
         close(exec_pipe[0]); close(out_pipe[0]); close(err_pipe[0]);
@@ -3011,6 +3408,8 @@ static enum Pov4StartOutcome pov4_start_exact(
             owned_child_exec_failed(exec_pipe[1],errno?errno:EIO);
         if(!owned_child_close_inherited_except2(executable_fd,exec_pipe[1]))
             owned_child_exec_failed(exec_pipe[1],errno?errno:EIO);
+        int exec_admission=pov5_submission_admission_check(request->submission_expires_unix_ms);
+        if(exec_admission) owned_child_exec_failed(exec_pipe[1],exec_admission);
         fexecve(executable_fd,request->argv,request->environment);
         owned_child_exec_failed(exec_pipe[1],errno);
     }
@@ -3027,6 +3426,11 @@ static enum Pov4StartOutcome pov4_start_exact(
     pthread_mutex_lock(&rt_owned_lock);
     RtOwnedSlot* slot=&rt_owned_slots[index];
     slot->pid=pid; slot->pgid=pid; slot->pidfd=-1; slot->start_identity=0;
+    /* The child ran setpgid(0,0) above; carry the admitted policy exactly as
+     * pov4_start_exact_darwin does. Without it a ProcessGroup request ran
+     * leader-only and every frozen receipt said tree_control=0 tree_empty=0
+     * (run-26 HIR worker retirement; runtime_process_group_retire_linux_selfcheck). */
+    slot->group_retire = request->descendant_policy == POV4_DESCENDANT_PROCESS_GROUP;
     slot->token_high=minted.high; slot->token_low=minted.low; slot->state=1;
     slot->out_fd=out_pipe[0]; slot->err_fd=err_pipe[0]; slot->out_open=1; slot->err_open=1;
     slot->in_fd=request->atomic_input_bound ? in_pipe[1] : -1;
@@ -3072,7 +3476,20 @@ static enum Pov4StartOutcome pov4_start_exact(
     int child_reaped=0, terminal_status=0; int64_t confirmed_ns=-1; uint64_t retries=0;
     /* Exec confirmation is a finite control lease even for unlimited work. */
     int64_t confirm_deadline_ns = execution_deadline_ns > 0
-        ? execution_deadline_ns : request_started_ns + 30000000000LL;
+        ? execution_deadline_ns : (request->deferred_launch&&request_started_ns>INT64_MAX-30000000000LL
+            ? INT64_MAX : request_started_ns+30000000000LL);
+    if(request->deferred_launch) {
+        pthread_mutex_lock(slot->state_lock);
+        slot->launch_exec_fd=exec_pipe[0];exec_pipe[0]=-1;
+        slot->launch_phase=failure?5:1; /* kill-needed or initial-stop wait */
+        slot->launch_failure=failure;slot->launch_failure_class=failure_class;
+        slot->launch_error_count=0;slot->launch_confirm_deadline_ns=confirm_deadline_ns;
+        slot->launch_event_ns=-1;
+        pthread_mutex_unlock(slot->state_lock);
+        /* Includes post-fork setup failure: NEVER enter synchronous kill/reap
+         * or exec-confirmation loops. The exact child and error FD remain owned. */
+        return POV6_START_PENDING;
+    }
     if(!failure && !owned_confirm_exec_v4(pid,exec_pipe[0],confirm_deadline_ns,
             &confirmed_ns,&retries,&child_reaped,&failure,&failure_class,
             &terminal_status)) {
@@ -3098,14 +3515,14 @@ static enum Pov4StartOutcome pov4_start_exact(
     if(!slot->reaped){
         slot->term_attempted=1;
         enum Pov4SignalOutcome term =
-            pov4_signal_owned_child(pid,pidfd,SIGTERM);
+            pov4_signal_owned_child(pid,pidfd,SIGTERM,slot->group_retire);
         if(term==POV4_SIGNAL_SENT) slot->term_sent=1;
         else if(term==POV4_SIGNAL_GONE)
             pov4_reconcile_gone_child_locked(slot,pid,cleanup_deadline_ns);
         if(!slot->reaped){
             slot->kill_attempted=1;
             enum Pov4SignalOutcome kill =
-                pov4_signal_owned_child(pid,pidfd,SIGKILL);
+                pov4_signal_owned_child(pid,pidfd,SIGKILL,slot->group_retire);
             if(kill==POV4_SIGNAL_SENT) slot->kill_sent=1;
             else if(kill==POV4_SIGNAL_GONE)
                 pov4_reconcile_gone_child_locked(slot,pid,cleanup_deadline_ns);
@@ -3123,6 +3540,7 @@ typedef struct Pov4Slot {
     int busy;
     int frozen;
     int cleanup_only;
+    int64_t reservation_token; /* Reserved owners reject legacy ticket access. */
     uint64_t request_high, request_low, ticket_high, ticket_low;
     RtOwnedProcessTokenV2 core;
     int64_t words[POV4_WORDS];
@@ -3140,6 +3558,75 @@ typedef struct Pov4Slot {
 
 static Pov4Slot pov4_slots[POV4_SLOTS];
 static pthread_mutex_t pov4_slots_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* All Linux reservation gates establish canonical origin before mint/lookup.
+ * V6 activation additionally fences ticket follow-ups; unrelated raw adapters
+ * retain their prior behavior. No origin is recreated. */
+#if defined(__linux__)
+#include <stdatomic.h>
+#include "runtime_local_unix_bridge_v1.h"
+_Static_assert(ATOMIC_INT_LOCK_FREE==2,"V6 admission atomics must be lock-free");
+static atomic_uint pov6_active;
+static atomic_uint pov6_thread_sequence;
+static _Thread_local unsigned pov6_thread_stamp;
+static int pov6_origin_activate(void) {
+    if(!simple_local_unix_origin_v1()){errno=EPERM;return 0;}
+    atomic_store_explicit(&pov6_active,1,memory_order_release);return 1;
+}
+/* Every Linux reservation is V6-eligible: establish origin before even a
+ * legacy reservation lookup/mint can first hold the shared gate. */
+static int pov6_reservation_origin(void) {
+    if(!simple_local_unix_origin_v1()){errno=EPERM;return 0;}return 1;
+}
+static int pov6_origin_if_active(void) {
+    if(!atomic_load_explicit(&pov6_active,memory_order_acquire))return 1;
+    if(!simple_local_unix_origin_v1()){errno=EPERM;return 0;}return 1;
+}
+/* Called only after canonical origin admission. A new OS thread starts at zero;
+ * even a recycled numeric TID cannot reuse a previously issued stamp. */
+static unsigned pov6_current_thread_stamp(void) {
+    if(pov6_thread_stamp)return pov6_thread_stamp;
+    unsigned before=atomic_load_explicit(&pov6_thread_sequence,memory_order_relaxed);
+    for(unsigned attempt=0;attempt<16;attempt++){
+        if(before==UINT_MAX){errno=EOVERFLOW;return 0;}
+        if(atomic_compare_exchange_weak_explicit(&pov6_thread_sequence,&before,before+1,
+                memory_order_relaxed,memory_order_relaxed)) {
+            pov6_thread_stamp=before+1;return pov6_thread_stamp;
+        }
+    }
+    errno=EBUSY;return 0;
+}
+#else
+static int pov6_origin_if_active(void){return 1;}
+static int pov6_reservation_origin(void){return 1;}
+#endif
+
+/* Reservation authority is delivered before any child side effect. Tokens are
+ * monotonically minted and never reused, including when a slot is recycled. */
+typedef struct Pov4Reservation {
+    int64_t token;
+    int busy;
+    int state; /* 1 reserved,2 attempting,3 no child,4 owned,5 acked,6 V6 launch pending */
+    int deferred_launch;
+    int submit_tid; /* V6 submitting Linux thread; checked before child locks */
+    unsigned submit_thread_stamp;
+    uint32_t owner_index;
+    int64_t executable_pin, cwd_pin;
+    int64_t submission_expires_unix_ms;
+    int submission_admission_error;
+    uint8_t request_digest[32];
+} Pov4Reservation;
+static Pov4Reservation pov4_reservations[POV4_SLOTS];
+static uint64_t pov4_reservation_sequence;
+static pthread_mutex_t pov4_reservations_lock = PTHREAD_MUTEX_INITIALIZER;
+#ifdef RT_PROCESS_OBSERVATION_V4_TESTING
+/* Compile-time-only controls; no production API/environment fault knob. */
+static int pov4_reservation_test_retry_collect;
+static int pov4_reservation_test_drop_start;
+static int pov4_reservation_test_corrupt_observe;
+static int pov4_reservation_test_corrupt_ack;
+#endif
+
 
 static void pov4_words_base(int64_t words[POV4_WORDS], int kind, int status,
                             int64_t request_started_ns, int64_t prepared_ns) {
@@ -3249,6 +3736,7 @@ static SplArray* pov4_rejected(int error, int failure_phase, int failure_reason,
 }
 
 static int pov4_reserve(uint32_t* index) {
+    if(!pov6_origin_if_active())return 0;
     if (pthread_mutex_lock(&pov4_slots_lock) != 0) { errno = EBUSY; return 0; }
     int found = -1;
     for (int i = 0; i < POV4_SLOTS; i++) if (!pov4_slots[i].active) { found = i; break; }
@@ -3263,6 +3751,7 @@ static int pov4_reserve(uint32_t* index) {
 }
 
 static Pov4Slot* pov4_acquire_ticket(SplArray* ticket, uint32_t* index) {
+    if(!pov6_origin_if_active())return NULL;
     if (!ticket || rt_array_len(ticket) != POV4_TICKET_WORDS ||
         rt_value_as_int(rt_array_get(ticket, 0)) != POV4_VERSION_VALUE) {
         errno = EPROTO; return NULL;
@@ -3276,7 +3765,7 @@ static Pov4Slot* pov4_acquire_ticket(SplArray* ticket, uint32_t* index) {
     Pov4Slot* found = NULL;
     for (uint32_t i = 0; i < POV4_SLOTS; i++) {
         Pov4Slot* slot = &pov4_slots[i];
-        if (slot->active && slot->request_high == (uint64_t)rh &&
+        if (slot->active && !slot->reservation_token && slot->request_high == (uint64_t)rh &&
             slot->request_low == (uint64_t)rl && slot->ticket_high == (uint64_t)th &&
             slot->ticket_low == (uint64_t)tl) {
             if (!slot->busy) { slot->busy = 1; found = slot; *index = i; }
@@ -3330,6 +3819,16 @@ static void pov4_snapshot(Pov4Slot* owner, const RtOwnedProcessPollReceiptV2* po
     w[POV4_TREE_EMPTY] = 0;
     w[POV4_LEADER_WAITED_NS] = core->leader_waited_ns;
     w[POV4_TREE_EMPTY_NS] = -1;
+    if (core->group_retire && !owner->cleanup_only) {
+        /* Group control is a promise of the admitted ProcessGroup lease;
+         * startup-cleanup receipts never carry tree authority. */
+        w[POV4_TREE_CONTROL_AVAILABLE] = 1;
+        w[POV4_VALIDITY] |= POV4_VALID_TREE_CONTROL;
+        if (core->reaped && core->tree_empty_ns >= 0 && !core->group_incomplete) {
+            w[POV4_TREE_EMPTY] = 1;
+            w[POV4_TREE_EMPTY_NS] = core->tree_empty_ns;
+        }
+    }
     if (core->clock_failed ||
             (owner->cleanup_only &&
              (w[POV4_PROCESS_STARTED_NS] < 0 ||
@@ -3404,7 +3903,7 @@ static int pov4_apply_deadlines(Pov4Slot* owner, int cancel_requested) {
     if (!core->reaped && due_term && !core->term_attempted) {
         core->term_attempted = 1;
         enum Pov4SignalOutcome signal_outcome =
-            pov4_signal_owned_child(core->pid, core->pidfd, SIGTERM);
+            pov4_signal_owned_child(core->pid, core->pidfd, SIGTERM, core->group_retire);
         if (signal_outcome == POV4_SIGNAL_SENT) {
             core->identity_revalidated = 1; core->term_sent = 1; core->term_at_ms = now_ms;
         } else if (signal_outcome == POV4_SIGNAL_GONE) {
@@ -3421,7 +3920,7 @@ static int pov4_apply_deadlines(Pov4Slot* owner, int cancel_requested) {
         now_ns >= core->kill_deadline_ns && !core->kill_attempted) {
         core->kill_attempted = 1;
         enum Pov4SignalOutcome signal_outcome =
-            pov4_signal_owned_child(core->pid, core->pidfd, SIGKILL);
+            pov4_signal_owned_child(core->pid, core->pidfd, SIGKILL, core->group_retire);
         if (signal_outcome == POV4_SIGNAL_SENT) {
             core->identity_revalidated = 1; core->kill_sent = 1;
         } else if (signal_outcome == POV4_SIGNAL_GONE) {
@@ -3459,7 +3958,7 @@ static SplArray* pov4_drive(Pov4Slot* owner, int64_t wait_ns, int cancel_request
     uint64_t err_cap = err_room < POV4_MAX_POLL_BYTES ? err_room : POV4_MAX_POLL_BYTES;
     uint8_t out[POV4_MAX_POLL_BYTES + 1], err[POV4_MAX_POLL_BYTES + 1];
     RtOwnedProcessPollReceiptV2 poll;
-    (void)rt_process_owned_poll_v2(owner->core, wait_ms,
+    (void)owned_poll_v2_core(owner->core, wait_ms,
         (char*)out, out_cap ? out_cap + 1 : 0,
         (char*)err, err_cap ? err_cap + 1 : 0, &poll);
     (void)pov4_apply_deadlines(owner, cancel_requested);
@@ -3538,7 +4037,7 @@ static SplArray* pov4_freeze_terminal(Pov4Slot* owner) {
         uint64_t out_cap = out_room < POV4_MAX_POLL_BYTES ? out_room : POV4_MAX_POLL_BYTES;
         uint64_t err_cap = err_room < POV4_MAX_POLL_BYTES ? err_room : POV4_MAX_POLL_BYTES;
         uint8_t out[POV4_MAX_POLL_BYTES + 1], err[POV4_MAX_POLL_BYTES + 1];
-        (void)rt_process_owned_poll_v2(owner->core, 0, (char*)out,
+        (void)owned_poll_v2_core(owner->core, 0, (char*)out,
             out_cap ? out_cap + 1 : 0, (char*)err,
             err_cap ? err_cap + 1 : 0, &poll);
         if (!pov4_append(owner->stdout_bytes, &owner->stdout_count, owner->stdout_limit,
@@ -3564,7 +4063,7 @@ static SplArray* pov4_freeze_terminal(Pov4Slot* owner) {
         errno = EAGAIN; return NULL;
     }
     if (owner->atomic_input_bound) {
-        (void)rt_process_owned_input_receipt_v3(
+        (void)owned_input_receipt_v3_core(
             owner->core, &owner->atomic_input_receipt);
         const RtOwnedProcessInputReceiptV3* input = &owner->atomic_input_receipt;
         if (input->input_bytes_accepted != owner->atomic_input_len ||
@@ -3602,7 +4101,16 @@ static SplArray* pov4_freeze_terminal(Pov4Slot* owner) {
         return NULL;
     }
     RtOwnedProcessResultV2 result;
-    int collected = rt_process_owned_collect_v2(owner->core, &result);
+#ifdef RT_PROCESS_OBSERVATION_V4_TESTING
+    if (owner->reservation_token && pov4_reservation_test_retry_collect > 0) {
+        --pov4_reservation_test_retry_collect;
+        pov4_tuple4_free(tuple);
+        memcpy(owner->words, prior_words, sizeof(prior_words));
+        errno = EAGAIN;
+        return NULL;
+    }
+#endif
+    int collected = owned_collect_v2_core(owner->core, &result);
     if (!collected && !(result.reaped && result.runtime_error != EAGAIN &&
                          result.runtime_error != EBUSY)) {
         pov4_tuple4_free(tuple);
@@ -3622,7 +4130,7 @@ static SplArray* pov4_freeze_terminal(Pov4Slot* owner) {
 }
 
 static void pov4_abandon_unpublished(uint32_t index) {
-    if (index >= POV4_SLOTS) return;
+    if (index >= POV4_SLOTS || pov4_slots[index].reservation_token) return;
     Pov4Slot* owner = &pov4_slots[index];
     RtOwnedSlot* core = owned_token_acquire(owner->core, NULL);
     if (core) {
@@ -3632,7 +4140,7 @@ static void pov4_abandon_unpublished(uint32_t index) {
         owner->words[POV4_CLEANUP_DEADLINE_NS] = core->cleanup_deadline_ns;
         core->kill_attempted = 1;
         enum Pov4SignalOutcome signal_outcome =
-            pov4_signal_owned_child(core->pid, core->pidfd, SIGKILL);
+            pov4_signal_owned_child(core->pid, core->pidfd, SIGKILL, core->group_retire);
         if (signal_outcome == POV4_SIGNAL_SENT)
             core->kill_sent = 1;
         else if (signal_outcome == POV4_SIGNAL_GONE)
@@ -3646,7 +4154,7 @@ static void pov4_abandon_unpublished(uint32_t index) {
         int64_t now = owned_now_ns();
         int64_t deadline = owner->words[POV4_CLEANUP_DEADLINE_NS];
         int64_t wait_ms = now >= 0 && deadline > now ? 1 : 0;
-        (void)rt_process_owned_poll_v2(owner->core, wait_ms, (char*)out, sizeof(out),
+        (void)owned_poll_v2_core(owner->core, wait_ms, (char*)out, sizeof(out),
             (char*)err, sizeof(err), &poll);
         if (poll.terminal && poll.stdout_bytes_delivered == 0 &&
             poll.stderr_bytes_delivered == 0) break;
@@ -3654,7 +4162,7 @@ static void pov4_abandon_unpublished(uint32_t index) {
         if (now < 0 || deadline < 0 || now >= deadline) break;
     }
     RtOwnedProcessResultV2 result;
-    int collected = rt_process_owned_collect_v2(owner->core, &result);
+    int collected = owned_collect_v2_core(owner->core, &result);
     if (!collected && !(result.reaped && result.runtime_error != EAGAIN &&
                          result.runtime_error != EBUSY)) {
         pthread_mutex_lock(&pov4_slots_lock);
@@ -3670,6 +4178,7 @@ static void pov4_abandon_unpublished(uint32_t index) {
 
 SplArray* rt_process_observation_v4_poll_value(SplArray* ticket,
                                                 int64_t caller_wait_ns) {
+    if(!pov6_origin_if_active())return NULL;
     uint32_t index = 0; Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
     if (!owner) return pov4_rejected(errno ? errno : ESTALE, POV4_FAIL_WAIT,
         POV4_REASON_BINDING, 0, 0, NULL);
@@ -3689,6 +4198,7 @@ SplArray* rt_process_observation_v4_poll_value(SplArray* ticket,
 
 SplArray* rt_process_observation_v4_cancel_value(SplArray* ticket,
                                                   int64_t caller_wait_ns) {
+    if(!pov6_origin_if_active())return NULL;
     uint32_t index = 0; Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
     if (!owner) return pov4_rejected(errno ? errno : ESTALE, POV4_FAIL_WAIT,
         POV4_REASON_BINDING, 0, 0, NULL);
@@ -3706,6 +4216,7 @@ SplArray* rt_process_observation_v4_cancel_value(SplArray* ticket,
 
 SplArray* rt_process_observation_v4_collect_value(SplArray* ticket,
                                                    int64_t caller_wait_ns) {
+    if(!pov6_origin_if_active())return NULL;
     uint32_t index = 0; Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
     if (!owner) return pov4_rejected(errno ? errno : ESTALE, POV4_FAIL_COLLECTION,
         POV4_REASON_BINDING, 0, 0, NULL);
@@ -3733,9 +4244,10 @@ SplArray* rt_process_observation_v4_collect_value(SplArray* ticket,
 
 SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket,
                                                        SplArray* digest_value) {
+    if(!pov6_origin_if_active())return NULL;
     uint32_t index = 0; Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
-    if (!owner) return pov4_rejected(errno ? errno : ESTALE, POV4_FAIL_ACK,
-        POV4_REASON_BINDING, 0, 0, NULL);
+    if (!owner) return SIMPLE_RT_NONNULL("rt_process_observation_v4_ack_collect_value",
+        pov4_rejected(errno ? errno : ESTALE, POV4_FAIL_ACK, POV4_REASON_BINDING, 0, 0, NULL));
     uint8_t digest[POV4_DIGEST_BYTES];
     int valid = owner->frozen && digest_value &&
         rt_array_bytes_copy_checked((int64_t)(uintptr_t)digest_value,
@@ -3745,8 +4257,8 @@ SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket,
         different |= (unsigned)(digest[i] ^ owner->frozen_digest[i]);
     if (!valid || different) {
         pov4_release_busy(index);
-        return pov4_rejected(ESTALE, POV4_FAIL_ACK, POV4_REASON_BINDING,
-            0, 0, NULL);
+        return SIMPLE_RT_NONNULL("rt_process_observation_v4_ack_collect_value",
+            pov4_rejected(ESTALE, POV4_FAIL_ACK, POV4_REASON_BINDING, 0, 0, NULL));
     }
     int64_t ack[POV4_WORDS]; memcpy(ack, owner->words, sizeof(ack));
     ack[POV4_PACKET_KIND] = owner->cleanup_only
@@ -3757,22 +4269,29 @@ SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket,
     ack[POV4_BINDING_LENGTH] = POV4_DIGEST_BYTES;
     SplArray* result = pov4_tuple4(NULL, 0, NULL, 0, owner->frozen_digest,
         POV4_DIGEST_BYTES, ack);
-    if (!result) { pov4_release_busy(index); return NULL; }
+    if (!result) pov4_release_busy(index);
     pthread_mutex_lock(&pov4_slots_lock);
     RT_OWNED_HOST_FREE(owner->stdout_bytes); RT_OWNED_HOST_FREE(owner->stderr_bytes);
     memset(owner, 0, sizeof(*owner));
     pthread_mutex_unlock(&pov4_slots_lock);
-    return result;
+    /* Allocation failure is the only way pov4_tuple4 yields NULL: abort, never NULL. */
+    return SIMPLE_RT_NONNULL("rt_process_observation_v4_ack_collect_value", result);
 }
 
 SplArray* rt_process_observation_v4_capabilities_value(void) {
 #ifdef __linux__
-    const int64_t values[8] = {POV4_VERSION_VALUE, 8, 1, POV4_CAPABILITIES,
+    /* ProcessGroup retirement only when the /proc group scan works here. */
+    const int64_t linux_capabilities = POV4_CAPABILITIES |
+        (owned_linux_group_retire_available() ? POV4_CAP_PROCESS_GROUP_RETIRE : 0);
+    const int64_t values[8] = {POV4_VERSION_VALUE, 8, 1, linux_capabilities,
+        POV4_SLOTS, RT_OWNED_ABI_MAX_OUTPUT_BYTES, POV4_MAX_WAIT_NS, 0};
+#elif defined(RT_OWNED_DARWIN_V4)
+    const int64_t values[8] = {POV4_VERSION_VALUE, 8, 1, POV4_DARWIN_CAPABILITIES,
         POV4_SLOTS, RT_OWNED_ABI_MAX_OUTPUT_BYTES, POV4_MAX_WAIT_NS, 0};
 #else
     const int64_t values[8] = {POV4_VERSION_VALUE, 8, 0, 0, 0, 0, 0, ENOTSUP};
 #endif
-    return owned_adapter_values(values, 8);
+    return SIMPLE_RT_NONNULL("rt_process_observation_v4_capabilities_value", owned_adapter_values(values, 8));
 }
 
 SplArray* rt_process_observation_v4_start_value(SplArray* binding) {
@@ -3787,7 +4306,7 @@ SplArray* rt_process_observation_v4_start_value(SplArray* binding) {
 static SplArray* pov4_start_pinned_impl(
     int64_t executable_handle, int64_t cwd_handle, SplArray* binding,
     SplArray* atomic_input, SplArray* expected_input_digest,
-    int atomic_input_mode) {
+    int atomic_input_mode, Pov4Reservation* reservation) {
     int64_t started = owned_now_ns(); Pov4Request request;
     if (started < 0)
         return pov4_rejected(EIO, POV4_FAIL_ADMISSION,
@@ -3795,6 +4314,15 @@ static SplArray* pov4_start_pinned_impl(
     if (!pov4_request_from_value(binding, &request))
         return pov4_rejected(errno ? errno : EPROTO, POV4_FAIL_ADMISSION,
             POV4_REASON_INVALID_SCHEMA, started, 0, NULL);
+    if (reservation && memcmp(reservation->request_digest, request.request_digest, 32) != 0) {
+        pov4_request_free(&request);
+        return pov4_rejected(ESTALE, POV4_FAIL_ADMISSION, POV4_REASON_BINDING,
+                            started, 0, NULL);
+    }
+    if (reservation) {
+        request.submission_expires_unix_ms=reservation->submission_expires_unix_ms;
+        request.deferred_launch=reservation->deferred_launch;
+    }
     if (atomic_input_mode) {
         uint8_t expected_digest[32];
         if (!expected_input_digest ||
@@ -3840,11 +4368,29 @@ static SplArray* pov4_start_pinned_impl(
         memcpy(bound + 48, request.atomic_input_digest, 32);
         owned_sha256(bound, sizeof(bound), request.request_digest);
     }
-    if (request.descendant_policy != POV4_DESCENDANT_LEADER ||
+#ifdef RT_OWNED_DARWIN_V4
+    /* Darwin has no memory cap (RLIMIT_AS is not enforced there): only the
+     * monitor policy (no enforcement, zero limit) is admitted. */
+    if ((request.descendant_policy != POV4_DESCENDANT_LEADER &&
+         request.descendant_policy != POV4_DESCENDANT_PROCESS_GROUP) ||
+        request.enforcement_kind != POV4_ENFORCEMENT_NONE ||
+        request.memory_limit != 0) {
+        int memory_unavailable = request.enforcement_kind != POV4_ENFORCEMENT_NONE ||
+            request.memory_limit != 0;
+#else
+    /* ProcessGroup is admitted on Linux exactly when it is advertised. */
+#ifdef __linux__
+    int group_policy_admitted = request.descendant_policy == POV4_DESCENDANT_PROCESS_GROUP &&
+        owned_linux_group_retire_available();
+#else
+    int group_policy_admitted = 0;
+#endif
+    if ((request.descendant_policy != POV4_DESCENDANT_LEADER && !group_policy_admitted) ||
         (request.enforcement_kind != POV4_ENFORCEMENT_NONE &&
          request.enforcement_kind != POV4_ENFORCEMENT_RLIMIT_AS)) {
         int memory_unavailable = request.enforcement_kind != POV4_ENFORCEMENT_NONE &&
             request.enforcement_kind != POV4_ENFORCEMENT_RLIMIT_AS;
+#endif
         SplArray* rejected = pov4_rejected(ENOTSUP, POV4_FAIL_ADMISSION,
             memory_unavailable ? POV4_REASON_MEMORY : POV4_REASON_PROVIDER,
             started, 1, &request);
@@ -3908,6 +4454,13 @@ static SplArray* pov4_start_pinned_impl(
         pov4_request_free(&request); return rejected;
     }
     Pov4Slot* owner = &pov4_slots[index];
+    if (reservation) {
+        /* Binding is installed before allocations and, critically, before spawn. */
+        pthread_mutex_lock(&pov4_slots_lock);
+        owner->reservation_token = reservation->token;
+        pthread_mutex_unlock(&pov4_slots_lock);
+        reservation->owner_index = index;
+    }
     owner->atomic_input_bound = atomic_input_mode;
     owner->atomic_input_len = request.atomic_input_len;
     if (atomic_input_mode)
@@ -3958,6 +4511,7 @@ static SplArray* pov4_start_pinned_impl(
         started,prepared,execution_deadline,kill_deadline,cleanup_deadline,
         &owner->core,&exec_error,&exec_failure_class);
     if(outcome==POV4_START_NO_CHILD){
+        if (reservation) reservation->submission_admission_error=request.submission_admission_error;
         int saved=errno?errno:EIO; pov4_tuple4_free(start_result);
         RT_OWNED_HOST_FREE(owner->stdout_bytes); RT_OWNED_HOST_FREE(owner->stderr_bytes);
         pthread_mutex_lock(&pov4_slots_lock); memset(owner,0,sizeof(*owner));
@@ -3966,6 +4520,7 @@ static SplArray* pov4_start_pinned_impl(
             POV4_REASON_PROVIDER,started,1,&request);
         pov4_request_free(&request); return rejected;
     }
+    if (reservation) reservation->state = outcome==POV6_START_PENDING?6:4;
     RtOwnedSlot* core = owned_token_acquire(owner->core, NULL);
     int64_t process_started=core?core->process_started_ns:-1;
     int64_t exec_confirmed=core?core->exec_confirmed_ns:-1;
@@ -3973,7 +4528,7 @@ static SplArray* pov4_start_pinned_impl(
     if(core) owned_token_release(core);
     memcpy(owner->request_digest, request.request_digest, POV4_DIGEST_BYTES);
     pov4_words_base(owner->words, POV4_KIND_POLL,
-        outcome==POV4_START_CONFIRMED?POV4_STATUS_RUNNING:POV4_STATUS_CLEANUP_PENDING,
+        outcome==POV6_START_PENDING?0:(outcome==POV4_START_CONFIRMED?POV4_STATUS_RUNNING:POV4_STATUS_CLEANUP_PENDING),
         started, prepared);
     owner->words[POV4_REQUEST_ID_HIGH]=(int64_t)request_high;
     owner->words[POV4_REQUEST_ID_LOW]=(int64_t)request_low;
@@ -3999,7 +4554,7 @@ static SplArray* pov4_start_pinned_impl(
     owner->words[POV4_STDOUT_STATE]=POV4_STREAM_OPEN;
     owner->words[POV4_STDERR_STATE]=POV4_STREAM_OPEN;
     if(outcome==POV4_START_CONFIRMED) owner->words[POV4_VALIDITY]|=POV4_VALID_EXEC;
-    else {
+    else if(outcome!=POV6_START_PENDING) {
         owner->cleanup_only=1;
         owner->words[POV4_PHASE]=POV4_PHASE_CLEANUP;
         owner->words[POV4_EXEC_ERRNO]=
@@ -4028,42 +4583,75 @@ static SplArray* pov4_start_pinned_impl(
     owner->ticket_high=ticket_high; owner->ticket_low=ticket_low;
     owner->busy=0;
     pthread_mutex_unlock(&pov4_slots_lock);
+    if(outcome==POV6_START_PENDING) {
+        /* State 6 owns a real child, but has NO V4 observation grammar yet. */
+        pov4_tuple4_free(start_result);pov4_request_free(&request);return NULL;
+    }
     if(!pov4_tuple4_replace_words(start_result,owner->words)) {
         pov4_tuple4_free(start_result); start_result=NULL;
     }
+#ifdef RT_PROCESS_OBSERVATION_V4_TESTING
+    if (reservation && start_result && pov4_reservation_test_drop_start > 0) {
+        --pov4_reservation_test_drop_start;
+        pov4_tuple4_free(start_result);
+        start_result = NULL;
+    }
+#endif
     pov4_request_free(&request);
-    if (!start_result) pov4_abandon_unpublished(index);
+    if (!start_result && !reservation) pov4_abandon_unpublished(index);
     return start_result;
 }
 
 SplArray* rt_process_observation_v4_start_pinned_value(
     int64_t executable_handle, int64_t cwd_handle, SplArray* binding) {
     return pov4_start_pinned_impl(executable_handle, cwd_handle,
-        binding, NULL, NULL, 0);
+        binding, NULL, NULL, 0, NULL);
 }
 
 SplArray* rt_process_inspection_v1_start_pinned_value(
     int64_t executable_handle, int64_t cwd_handle, SplArray* binding,
     SplArray* atomic_input, SplArray* expected_input_digest) {
+#ifdef RT_OWNED_DARWIN_V4
+    /* Inspection V1 (atomic stdin) is not part of the approved Darwin scope. */
+    (void)executable_handle; (void)cwd_handle; (void)binding;
+    (void)atomic_input; (void)expected_input_digest;
+    return pov4_rejected(ENOTSUP, POV4_FAIL_ADMISSION, POV4_REASON_PROVIDER,
+                         owned_now_ns(), 0, NULL);
+#endif
     return pov4_start_pinned_impl(
         executable_handle, cwd_handle, binding, atomic_input,
-        expected_input_digest, 1);
+        expected_input_digest, 1, NULL);
 }
+
+#include "runtime_process_observation_reserved_v4_impl.h"
+int64_t rt_process_observation_v6_reserved_start_deferred_admitted_value(
+        int64_t token,int64_t executable,int64_t cwd,SplArray* binding,int64_t expiry) {
+    return pov6_start_deferred_admitted_impl(token,executable,cwd,binding,expiry);
+}
+int64_t rt_process_observation_v6_reserved_poll_launch_value(int64_t token,int64_t retire) {
+    if(retire!=0&&retire!=1)return -EINVAL;
+    return pov6_poll_launch_impl(token,(int)retire);
+}
+
 
 /* This companion fact is issued only while the same opaque V4 ticket remains
  * live. Its request digest includes the V4 binding and copied input digest. */
 SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket) {
     int64_t values[75] = {1};
+#ifdef RT_OWNED_DARWIN_V4
+    (void)ticket; values[10] = ENOTSUP;
+    return SIMPLE_RT_NONNULL("rt_process_inspection_v1_input_receipt_value", owned_adapter_values(values, 75));
+#endif
     uint32_t index = 0;
     Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
-    if (!owner) { values[10] = errno ? errno : ESTALE; return owned_adapter_values(values, 75); }
+    if (!owner) { values[10] = errno ? errno : ESTALE; return SIMPLE_RT_NONNULL("rt_process_inspection_v1_input_receipt_value", owned_adapter_values(values, 75)); }
     if (!owner->atomic_input_bound) {
         values[10] = EPROTO;
-        pov4_release_busy(index); return owned_adapter_values(values, 75);
+        pov4_release_busy(index); return SIMPLE_RT_NONNULL("rt_process_inspection_v1_input_receipt_value", owned_adapter_values(values, 75));
     }
     RtOwnedProcessInputReceiptV3 receipt = owner->atomic_input_receipt;
     if (!owner->frozen)
-        (void)rt_process_owned_input_receipt_v3(owner->core, &receipt);
+        (void)owned_input_receipt_v3_core(owner->core, &receipt);
     values[1] = (int64_t)owner->request_high;
     values[2] = (int64_t)owner->request_low;
     values[3] = (int64_t)owner->ticket_high;
@@ -4079,9 +4667,10 @@ SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket) {
         values[43 + i] = owner->request_digest[i];
     }
     pov4_release_busy(index);
-    return owned_adapter_values(values, 75);
+    return SIMPLE_RT_NONNULL("rt_process_inspection_v1_input_receipt_value", owned_adapter_values(values, 75));
 }
 
+#ifndef RT_OWNED_DARWIN_V4 /* Darwin: shared ENOTSUP stubs below. */
 static bool owned_run_bounded_impl(const char* cmd, const char* const* argv,
                                    int64_t timeout_ms, uint64_t max_output_bytes,
                                    char* out, uint64_t out_cap,
@@ -4105,6 +4694,7 @@ static bool owned_run_bounded_impl(const char* cmd, const char* const* argv,
     if (out_cap) out[0] = '\0';
     if (err_cap) err[0] = '\0';
 #ifndef __linux__
+    (void)max_output_bytes;
     receipt->runtime_error = ENOTSUP;
     if (observation) observation->runtime_error = ENOTSUP;
     return false;
@@ -4425,12 +5015,678 @@ int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd_data, uint6
     return owned_run_bounded_value_impl(cmd_data, cmd_len, args, timeout_ms, max_output_bytes, 1);
 }
 #endif
+#endif /* !RT_OWNED_DARWIN_V4 */
 
-#else
+#if defined(RT_OWNED_DARWIN_V4) && !defined(RT_OWNED_EXTERNAL_PIN)
+/* Darwin executable pin for observation V4 (POV4_CAP_DARWIN_SNAPSHOT_EXEC).
+ * Darwin has no memfd, file seals or fexecve, so a pin is a private snapshot:
+ * a fresh mkdtemp directory (0700) holding a copy of the image (0500, one
+ * link, owned by the effective uid). The V4 owner launches it by pathname,
+ * re-checks dev/ino and digest, and proves the suspended child's main-image
+ * vnode. Weaker than the Linux sealed memfd: a same-UID process can still
+ * chmod and rewrite the snapshot, so same-UID processes are trusted. Every
+ * acquisition re-validates the snapshot identity and permissions. Rewriting a
+ * snapshot that already ran also invalidates its vnode's code-signing state,
+ * so the next exec is SIGKILLed: denial on tamper, not a seal. Lives here, not
+ * in runtime_process.c, so the seed runtime links the same C owner. */
+#define OWNED_DARWIN_PIN_SLOTS 16
+#define OWNED_DARWIN_PIN_MAX_BYTES ((off_t)512 * 1024 * 1024)
+#include "runtime_process_owned_darwin_bundle_private.h"
+typedef struct OwnedDarwinPin {
+    uint64_t handle;
+    uint64_t refs;    /* launched children not yet collected */
+    int retired;      /* closed by its owner; files kept for the children */
+    int fd;
+    dev_t device;
+    ino_t inode;
+    char directory[PATH_MAX];
+    char path[PATH_MAX];
+    OwnedDarwinBundle bundle;
+} OwnedDarwinPin;
+static OwnedDarwinPin owned_darwin_pins[OWNED_DARWIN_PIN_SLOTS];
+static pthread_mutex_t owned_darwin_pins_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* --- Win32 real implementation of the SYNCHRONOUS bounded family ------
- * Everything this branch does NOT implement (the async token-lease family,
- * the v3 opaque-handle surface, the observation-v4 family) is deliberately
+static int owned_darwin_pin_is_macho(int fd) {
+    uint32_t magic = 0;
+    if (pread(fd, &magic, sizeof(magic), 0) != (ssize_t)sizeof(magic)) return 0;
+    /* Thin 64-bit Mach-O, or a big-endian fat header (32/64-bit offsets). */
+    return magic == 0xfeedfacfU || magic == 0xbebafecaU || magic == 0xbfbafecaU;
+}
+
+static int owned_darwin_pin_valid(const OwnedDarwinPin* pin, int fd) {
+    struct stat held, named, directory;
+    return fstat(fd, &held) == 0 && S_ISREG(held.st_mode) &&
+        held.st_dev == pin->device && held.st_ino == pin->inode &&
+        held.st_uid == geteuid() && (held.st_mode & 07777) == 0500 &&
+        held.st_nlink == 1 && held.st_size > 0 &&
+        lstat(pin->path, &named) == 0 && S_ISREG(named.st_mode) &&
+        named.st_dev == pin->device && named.st_ino == pin->inode &&
+        lstat(pin->directory, &directory) == 0 && S_ISDIR(directory.st_mode) &&
+        directory.st_uid == geteuid() && (directory.st_mode & 07777) == 0700 &&
+        owned_darwin_check_bundle(pin->directory, &pin->bundle, 0);
+}
+
+static void owned_darwin_pin_discard(OwnedDarwinPin* pin) {
+    if (pin->fd >= 0) close(pin->fd);
+    if (pin->path[0]) (void)unlink(pin->path);
+    if (pin->directory[0]) {
+        (void)owned_darwin_check_bundle(pin->directory, &pin->bundle, 1);
+        (void)rmdir(pin->directory);
+    }
+    memset(pin, 0, sizeof(*pin));
+    pin->fd = -1;
+}
+
+/* Copies the image into a fresh snapshot. A source that changes size while
+ * copying is refused: the snapshot is exactly the bytes then digested. */
+static int64_t owned_darwin_pin_create(const char* canonical_path) {
+    if (!canonical_path || canonical_path[0] != '/') return -1;
+    OwnedDarwinPin pin;
+    memset(&pin, 0, sizeof(pin)); pin.fd = -1;
+    int source = open(canonical_path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (source < 0) return -1;
+    struct stat st;
+    if (fstat(source, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+        st.st_size > OWNED_DARWIN_PIN_MAX_BYTES ||
+        (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0 ||
+        !owned_darwin_pin_is_macho(source)) {
+        close(source); return -1;
+    }
+    const char* base = getenv("TMPDIR");
+    if (!base || !*base) base = "/tmp";
+    char physical[PATH_MAX];
+    if (!realpath(base, physical) ||
+        snprintf(pin.directory, sizeof(pin.directory), "%s/simple-pin-XXXXXXXX",
+                 physical) >= (int)sizeof(pin.directory) ||
+        !mkdtemp(pin.directory)) {
+        pin.directory[0] = '\0'; close(source); return -1;
+    }
+    if (snprintf(pin.path, sizeof(pin.path), "%s/image", pin.directory) >= (int)sizeof(pin.path)) {
+        pin.path[0] = '\0'; close(source); owned_darwin_pin_discard(&pin); return -1;
+    }
+    int writer = open(pin.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    int ok = writer >= 0;
+    uint8_t buffer[16384]; off_t copied = 0;
+    while (ok && copied < st.st_size) {
+        size_t want = (size_t)(st.st_size - copied);
+        if (want > sizeof(buffer)) want = sizeof(buffer);
+        ssize_t count = pread(source, buffer, want, copied);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) { ok = 0; break; }
+        ssize_t done = 0;
+        while (ok && done < count) {
+            ssize_t written = write(writer, buffer + done, (size_t)(count - done));
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) ok = 0; else done += written;
+        }
+        copied += count;
+    }
+    uint8_t probe;
+    if (ok && pread(source, &probe, 1, copied) != 0) ok = 0;
+    close(source);
+    if (ok && fchmod(writer, 0500) != 0) ok = 0;
+    if (writer >= 0 && close(writer) != 0) ok = 0;
+    if (ok) pin.fd = open(pin.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat snapshot;
+    if (!ok || pin.fd < 0 || fstat(pin.fd, &snapshot) != 0 || snapshot.st_size != copied) {
+        owned_darwin_pin_discard(&pin); return -1;
+    }
+    pin.device = snapshot.st_dev; pin.inode = snapshot.st_ino;
+    if (!owned_darwin_pin_is_macho(pin.fd) ||
+        !owned_darwin_stage_bundle(canonical_path, &st, pin.directory, pin.fd, &pin.bundle) ||
+        !owned_darwin_pin_valid(&pin, pin.fd)) {
+        owned_darwin_pin_discard(&pin); return -1;
+    }
+    if (pthread_mutex_lock(&owned_darwin_pins_lock) != 0) { owned_darwin_pin_discard(&pin); return -1; }
+    int free_slot = -1;
+    for (int i = 0; i < OWNED_DARWIN_PIN_SLOTS; i++)
+        if (owned_darwin_pins[i].handle == 0) { free_slot = i; break; }
+    uint64_t candidate = 0;
+    for (int attempt = 0; free_slot >= 0 && attempt < 16 && candidate == 0; attempt++) {
+        arc4random_buf(&candidate, sizeof(candidate));
+        candidate &= UINT64_C(0x0fffffffffffffff);
+        for (int i = 0; i < OWNED_DARWIN_PIN_SLOTS && candidate; i++)
+            if (owned_darwin_pins[i].handle == candidate) candidate = 0;
+    }
+    if (free_slot < 0 || candidate == 0) {
+        pthread_mutex_unlock(&owned_darwin_pins_lock);
+        owned_darwin_pin_discard(&pin); errno = EAGAIN; return -1;
+    }
+    pin.handle = candidate;
+    owned_darwin_pins[free_slot] = pin;
+    pthread_mutex_unlock(&owned_darwin_pins_lock);
+    return (int64_t)candidate;
+}
+
+int64_t rt_process_pin_executable_owned(const char* canonical_path) {
+    return owned_darwin_pin_create(canonical_path);
+}
+
+int64_t rt_process_pin_executable_owned_value(const uint8_t* path, uint64_t path_len) {
+    if (!path || path_len == 0 || path_len >= PATH_MAX || path[0] != '/' ||
+        memchr(path, '\0', (size_t)path_len)) return -1;
+    char copied[PATH_MAX];
+    memcpy(copied, path, (size_t)path_len); copied[path_len] = '\0';
+    return owned_darwin_pin_create(copied);
+}
+
+int64_t rt_process_acquire_pinned_executable(int64_t handle) {
+    if (handle <= 0 || pthread_mutex_lock(&owned_darwin_pins_lock) != 0) return -1;
+    int duplicate = -1;
+    OwnedDarwinPin copy;
+    memset(&copy, 0, sizeof(copy));
+    for (int i = 0; i < OWNED_DARWIN_PIN_SLOTS; i++) {
+        if (owned_darwin_pins[i].handle == (uint64_t)handle && !owned_darwin_pins[i].retired) {
+            duplicate = fcntl(owned_darwin_pins[i].fd, F_DUPFD_CLOEXEC, 3);
+            copy = owned_darwin_pins[i];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&owned_darwin_pins_lock);
+    if (duplicate < 0) return -1;
+    if (!owned_darwin_pin_valid(&copy, duplicate)) {
+        close(duplicate); errno = ESTALE; return -1;
+    }
+    return duplicate;
+}
+
+SplArray* rt_process_pinned_executable_sha256_value(int64_t handle) {
+    int fd = (int)rt_process_acquire_pinned_executable(handle);
+    if (fd < 0) return NULL;
+    uint8_t digest[32];
+    int hashed = pov4_darwin_hash_fd(fd, digest);
+    close(fd);
+    if (!hashed) return NULL;
+    SplArray* result = rt_array_new(32);
+    if (!result) return NULL;
+    for (int i = 0; i < 32; i++)
+        if (!rt_array_push(result, rt_value_int(digest[i]))) { rt_array_free(result); return NULL; }
+    return result;
+}
+
+bool rt_process_close_pinned_executable_owned(int64_t handle) {
+    if (handle <= 0 || pthread_mutex_lock(&owned_darwin_pins_lock) != 0) return false;
+    OwnedDarwinPin pin;
+    memset(&pin, 0, sizeof(pin)); pin.fd = -1;
+    for (int i = 0; i < OWNED_DARWIN_PIN_SLOTS; i++) {
+        if (owned_darwin_pins[i].handle == (uint64_t)handle && !owned_darwin_pins[i].retired) {
+            if (owned_darwin_pins[i].refs > 0) {
+                owned_darwin_pins[i].retired = 1;
+                pthread_mutex_unlock(&owned_darwin_pins_lock);
+                return true;
+            }
+            pin = owned_darwin_pins[i];
+            memset(&owned_darwin_pins[i], 0, sizeof(owned_darwin_pins[i]));
+            break;
+        }
+    }
+    pthread_mutex_unlock(&owned_darwin_pins_lock);
+    if (pin.handle == 0) return false;
+    int ok = close(pin.fd) == 0;
+    ok = unlink(pin.path) == 0 && ok;
+    ok = owned_darwin_check_bundle(pin.directory, &pin.bundle, 1) && ok;
+    ok = rmdir(pin.directory) == 0 && ok;
+    return ok;
+}
+
+int rt_process_close_pinned_executable_owned_value(int64_t handle) {
+    return rt_process_close_pinned_executable_owned(handle) ? 1 : 0;
+}
+
+static uint64_t owned_darwin_pin_retain(int fd, char *const *environment) {
+    struct stat held;
+    if (fd < 0 || fstat(fd, &held) != 0) return 0;
+    uint64_t ref = 0;
+    if (pthread_mutex_lock(&owned_darwin_pins_lock) != 0) return 0;
+    for (int i = 0; i < OWNED_DARWIN_PIN_SLOTS; i++) {
+        OwnedDarwinPin* pin = &owned_darwin_pins[i];
+        if (pin->handle && !pin->retired && pin->device == held.st_dev &&
+            pin->inode == held.st_ino) {
+            if (pin->bundle.present) {
+                int clean = owned_darwin_check_bundle(pin->directory, &pin->bundle, 0);
+                for (size_t j = 0; clean && environment && environment[j]; ++j)
+                    if (!strncmp(environment[j], "DYLD_", 5) ||
+                        !strncmp(environment[j], "LD_LIBRARY_PATH=", 16))
+                        clean = 0;
+                if (!clean) break;
+            }
+            pin->refs++; ref = pin->handle; break;
+        }
+    }
+    pthread_mutex_unlock(&owned_darwin_pins_lock);
+    return ref;
+}
+
+static void owned_darwin_pin_release(uint64_t ref) {
+    if (ref == 0 || pthread_mutex_lock(&owned_darwin_pins_lock) != 0) return;
+    OwnedDarwinPin pin;
+    memset(&pin, 0, sizeof(pin)); pin.fd = -1;
+    for (int i = 0; i < OWNED_DARWIN_PIN_SLOTS; i++) {
+        if (owned_darwin_pins[i].handle == ref && owned_darwin_pins[i].refs > 0) {
+            if (--owned_darwin_pins[i].refs == 0 && owned_darwin_pins[i].retired) {
+                pin = owned_darwin_pins[i];
+                memset(&owned_darwin_pins[i], 0, sizeof(owned_darwin_pins[i]));
+            }
+            break;
+        }
+    }
+    pthread_mutex_unlock(&owned_darwin_pins_lock);
+    if (pin.handle) owned_darwin_pin_discard(&pin);
+}
+#elif defined(RT_OWNED_DARWIN_V4)
+/* Harnesses with RT_OWNED_EXTERNAL_PIN own their snapshot lifetime. */
+static uint64_t owned_darwin_pin_retain(int fd, char *const *environment) { (void)fd; (void)environment; return 0; }
+static void owned_darwin_pin_release(uint64_t ref) { (void)ref; }
+#endif
+
+#if defined(__linux__) && !defined(RT_OWNED_EXTERNAL_PIN)
+/* Linux executable pin (sealed memfd + fexecve) and its owned-handle table.
+ * Lives here, not in runtime_process.c, for the same reason the Darwin pin
+ * above does: the Rust seed/Stage 2 runtime crate (compiler_rust/runtime/
+ * build.rs) compiles this file but never runtime_process.c, so until this move
+ * the crate exported fail-closed Rust stubs instead and every profile HIR
+ * worker on Linux reported "owned executable pin was rejected"
+ * (doc/08_tracking/bug/profile_hir_workers_linux_pin_rejects_dynamic_elf_2026-11-12.md).
+ * Harnesses that stub the pin define RT_OWNED_EXTERNAL_PIN. */
+#include <elf.h>
+#ifndef SYS_memfd_create
+#error "Linux executable pin requires SYS_memfd_create"
+#endif
+/* glibc exposes the seal ABI only under _GNU_SOURCE, which this translation
+ * unit does not define (the crate build passes no -D_GNU_SOURCE). Without
+ * these the pin used to compile to a silent `return -1`. Values are the stable
+ * Linux UAPI (include/uapi/linux/fcntl.h). */
+#ifndef F_ADD_SEALS
+#define F_ADD_SEALS (1024 + 9)
+#endif
+#ifndef F_GET_SEALS
+#define F_GET_SEALS (1024 + 10)
+#endif
+#ifndef F_SEAL_SEAL
+#define F_SEAL_SEAL 0x0001
+#endif
+#ifndef F_SEAL_SHRINK
+#define F_SEAL_SHRINK 0x0002
+#endif
+#ifndef F_SEAL_GROW
+#define F_SEAL_GROW 0x0004
+#endif
+#ifndef F_SEAL_WRITE
+#define F_SEAL_WRITE 0x0008
+#endif
+
+#define RT_PINNED_EXEC_MAX 16
+struct RtPinnedExecutable {
+    uint64_t handle;
+    int fd;
+};
+static struct RtPinnedExecutable s_pinned_executables[RT_PINNED_EXEC_MAX];
+static pthread_mutex_t s_pinned_executables_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Pinnable ELF image classes (Linux). The pin seals the file bytes in a memfd
+ * and later spawns execute exactly those bytes with fexecve.
+ *
+ *  static  — ET_EXEC with neither PT_INTERP nor PT_DYNAMIC. Everything that
+ *            runs is the pinned bytes. Admitted for ELFCLASS32 and ELFCLASS64.
+ *  system-loader dynamic (Darwin parity, 2026-11-13) — ELFCLASS64, ET_EXEC or
+ *            ET_DYN, with exactly one PT_INTERP and one PT_DYNAMIC. Only the
+ *            main image is pinned and digest-bound; the loader named by
+ *            PT_INTERP and its DT_NEEDED closure are resolved by the kernel
+ *            and the loader at exec and are NOT pinned — the same contract the
+ *            Darwin pin gives (Mach-O main image snapshot; dyld and every dylib
+ *            unpinned). It is admitted only when library resolution cannot be
+ *            steered away from the system loader paths: PT_INTERP is an
+ *            absolute path to a root-owned regular file that is not group- or
+ *            other-writable; the image carries no DT_RPATH/DT_RUNPATH; every
+ *            DT_NEEDED is a bare soname (no '/'). Loader-steering environment
+ *            (LD_*) is refused by the owned launch (runtime_process_owned.c).
+ *            Each admission prints one `[rt-pin]` line on stderr.
+ *  refused — PT_DYNAMIC without PT_INTERP (static PIE, shared objects),
+ *            PT_INTERP without PT_DYNAMIC, ELFCLASS32 dynamic images, any
+ *            image whose loader closure fails the rules above.
+ *
+ * `loader_out` (PATH_MAX bytes, may be NULL) receives the admitted PT_INTERP
+ * path, or "" for the static class. */
+/* Upper bound on a pinned main image (pin, acquire and digest all apply it).
+ * It was 64 MiB, which refused every statically LLVM-linked Stage 2 compiler
+ * (~177 MB), so every profile HIR worker reported "owned executable pin was
+ * rejected" (doc/08_tracking/bug/linux_owned_pin_rejects_images_over_64mib_2026-11-20.md).
+ * The bound only limits the sealed memfd copy; 1 GiB leaves headroom. */
+#define RT_HAL_PIN_IMAGE_MAX_BYTES ((off_t)1024 * 1024 * 1024)
+#define RT_HAL_ELF_MAX_LOADS 64
+#define RT_HAL_ELF_MAX_DYN_ENTRIES 4096
+#define RT_HAL_ELF_MAX_NEEDED 256
+#define RT_HAL_ELF_MAX_STRTAB (1024 * 1024)
+
+static bool hal_elf64_loader_closure_ok(int fd, off_t size, const Elf64_Ehdr* eh,
+                                           char* loader_out) {
+    Elf64_Phdr interp, dynamic, loads[RT_HAL_ELF_MAX_LOADS];
+    int interp_count = 0, dynamic_count = 0, load_count = 0;
+    memset(&interp, 0, sizeof(interp)); memset(&dynamic, 0, sizeof(dynamic));
+    for (Elf64_Half i = 0; i < eh->e_phnum; i++) {
+        Elf64_Phdr ph;
+        off_t at = (off_t)(eh->e_phoff + (Elf64_Off)i * sizeof(ph));
+        if (pread(fd, &ph, sizeof(ph), at) != (ssize_t)sizeof(ph)) return false;
+        if (ph.p_type == PT_INTERP) { interp = ph; interp_count++; }
+        else if (ph.p_type == PT_DYNAMIC) { dynamic = ph; dynamic_count++; }
+        else if (ph.p_type == PT_LOAD) {
+            if (load_count == RT_HAL_ELF_MAX_LOADS) return false;
+            loads[load_count++] = ph;
+        }
+    }
+    if (interp_count != 1 || dynamic_count != 1) return false;
+    /* Loader: the exact path the kernel will open at exec. */
+    if (interp.p_filesz < 2 || interp.p_filesz > PATH_MAX ||
+        interp.p_offset > (Elf64_Off)size || interp.p_filesz > (Elf64_Xword)size - interp.p_offset)
+        return false;
+    char loader[PATH_MAX];
+    if (pread(fd, loader, (size_t)interp.p_filesz, (off_t)interp.p_offset) != (ssize_t)interp.p_filesz)
+        return false;
+    if (loader[interp.p_filesz - 1] != '\0' || loader[0] != '/' ||
+        strlen(loader) != (size_t)interp.p_filesz - 1) return false;
+    struct stat ld;
+    if (stat(loader, &ld) != 0 || !S_ISREG(ld.st_mode) || ld.st_uid != 0 ||
+        (ld.st_mode & (S_IWGRP | S_IWOTH)) != 0) return false;
+    /* Dynamic section: no search-path steering; every NEEDED a bare soname. */
+    if (dynamic.p_filesz < sizeof(Elf64_Dyn) || dynamic.p_filesz % sizeof(Elf64_Dyn) != 0 ||
+        dynamic.p_offset > (Elf64_Off)size || dynamic.p_filesz > (Elf64_Xword)size - dynamic.p_offset ||
+        dynamic.p_filesz / sizeof(Elf64_Dyn) > RT_HAL_ELF_MAX_DYN_ENTRIES) return false;
+    Elf64_Addr strtab = 0; Elf64_Xword strsz = 0;
+    Elf64_Xword needed[RT_HAL_ELF_MAX_NEEDED]; size_t needed_count = 0;
+    for (Elf64_Xword off = 0; off < dynamic.p_filesz; off += sizeof(Elf64_Dyn)) {
+        Elf64_Dyn d;
+        if (pread(fd, &d, sizeof(d), (off_t)(dynamic.p_offset + off)) != (ssize_t)sizeof(d)) return false;
+        if (d.d_tag == DT_NULL) break;
+        if (d.d_tag == DT_RPATH || d.d_tag == DT_RUNPATH) return false;
+        if (d.d_tag == DT_STRTAB) strtab = d.d_un.d_ptr;
+        else if (d.d_tag == DT_STRSZ) strsz = d.d_un.d_val;
+        else if (d.d_tag == DT_NEEDED) {
+            if (needed_count == RT_HAL_ELF_MAX_NEEDED) return false;
+            needed[needed_count++] = d.d_un.d_val;
+        }
+    }
+    if (needed_count > 0) {
+        if (strtab == 0 || strsz == 0 || strsz > RT_HAL_ELF_MAX_STRTAB) return false;
+        off_t string_offset = -1;
+        for (int i = 0; i < load_count; i++) {
+            if (strtab >= loads[i].p_vaddr && strtab - loads[i].p_vaddr < loads[i].p_filesz &&
+                strsz <= loads[i].p_filesz - (strtab - loads[i].p_vaddr)) {
+                string_offset = (off_t)(loads[i].p_offset + (strtab - loads[i].p_vaddr));
+                break;
+            }
+        }
+        if (string_offset < 0 || string_offset > size || strsz > (Elf64_Xword)(size - string_offset))
+            return false;
+        char* strings = (char*)malloc((size_t)strsz);
+        if (!strings) return false;
+        if (pread(fd, strings, (size_t)strsz, string_offset) != (ssize_t)strsz) { free(strings); return false; }
+        for (size_t i = 0; i < needed_count; i++) {
+            if (needed[i] >= strsz) { free(strings); return false; }
+            const char* name = strings + needed[i];
+            size_t room = (size_t)(strsz - needed[i]);
+            size_t length = strnlen(name, room);
+            if (length == 0 || length == room || memchr(name, '/', length)) { free(strings); return false; }
+        }
+        free(strings);
+    }
+    if (loader_out) memcpy(loader_out, loader, (size_t)interp.p_filesz);
+    return true;
+}
+
+static bool hal_pinnable_elf_fd(int fd, off_t size, char* loader_out) {
+    if (loader_out) loader_out[0] = '\0';
+    unsigned char ident[EI_NIDENT];
+    if (pread(fd, ident, sizeof(ident), 0) != (ssize_t)sizeof(ident) ||
+        memcmp(ident, ELFMAG, SELFMAG) != 0 || ident[EI_DATA] != ELFDATA2LSB)
+        return false;
+    if (ident[EI_CLASS] == ELFCLASS64) {
+        Elf64_Ehdr eh;
+        if (pread(fd, &eh, sizeof(eh), 0) != (ssize_t)sizeof(eh) ||
+            (eh.e_type != ET_EXEC && eh.e_type != ET_DYN) ||
+            eh.e_phentsize != sizeof(Elf64_Phdr) ||
+            eh.e_phnum == 0 || eh.e_phoff > (Elf64_Off)size ||
+            (uint64_t)eh.e_phnum * sizeof(Elf64_Phdr) > (uint64_t)size - eh.e_phoff) return false;
+        bool has_interp = false, has_dynamic = false;
+        for (Elf64_Half i = 0; i < eh.e_phnum; i++) {
+            Elf64_Phdr ph;
+            off_t at = (off_t)(eh.e_phoff + (Elf64_Off)i * sizeof(ph));
+            if (pread(fd, &ph, sizeof(ph), at) != (ssize_t)sizeof(ph)) return false;
+            if (ph.p_type == PT_INTERP) has_interp = true;
+            if (ph.p_type == PT_DYNAMIC) has_dynamic = true;
+        }
+        if (!has_interp && !has_dynamic) return eh.e_type == ET_EXEC;
+        if (has_interp && has_dynamic) return hal_elf64_loader_closure_ok(fd, size, &eh, loader_out);
+        return false;
+    }
+    if (ident[EI_CLASS] == ELFCLASS32) {
+        Elf32_Ehdr eh;
+        if (pread(fd, &eh, sizeof(eh), 0) != (ssize_t)sizeof(eh) ||
+            eh.e_type != ET_EXEC || eh.e_phentsize != sizeof(Elf32_Phdr) ||
+            eh.e_phnum == 0 || eh.e_phoff > (Elf32_Off)size ||
+            (uint64_t)eh.e_phnum * sizeof(Elf32_Phdr) > (uint64_t)size - eh.e_phoff) return false;
+        for (Elf32_Half i = 0; i < eh.e_phnum; i++) {
+            Elf32_Phdr ph;
+            off_t at = (off_t)(eh.e_phoff + (Elf32_Off)i * sizeof(ph));
+            if (pread(fd, &ph, sizeof(ph), at) != (ssize_t)sizeof(ph)) return false;
+            if (ph.p_type == PT_INTERP || ph.p_type == PT_DYNAMIC) return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+static int64_t pinned_handle_install(int fd) {
+    if (pthread_mutex_lock(&s_pinned_executables_lock) != 0) return -1;
+    int free_slot = -1;
+    for (int i = 0; i < RT_PINNED_EXEC_MAX; i++) {
+        if (s_pinned_executables[i].handle == 0 && free_slot < 0) free_slot = i;
+    }
+    if (free_slot < 0) { pthread_mutex_unlock(&s_pinned_executables_lock); errno = EAGAIN; return -1; }
+    uint64_t candidate = 0;
+    for (int attempt = 0; attempt < 16 && candidate == 0; attempt++) {
+        uint64_t random = 0;
+        ssize_t count = syscall(SYS_getrandom, &random, sizeof(random), 0);
+        if (count == (ssize_t)sizeof(random))
+            candidate = random & UINT64_C(0x0fffffffffffffff);
+        else if (count < 0 && errno == EINTR) attempt--;
+        else break;
+        for (int i = 0; i < RT_PINNED_EXEC_MAX && candidate; i++)
+            if (s_pinned_executables[i].handle == candidate) candidate = 0;
+    }
+    if (!candidate) { pthread_mutex_unlock(&s_pinned_executables_lock); errno = EAGAIN; return -1; }
+    s_pinned_executables[free_slot].handle = candidate;
+    s_pinned_executables[free_slot].fd = fd;
+    pthread_mutex_unlock(&s_pinned_executables_lock);
+    return (int64_t)candidate;
+}
+
+int64_t rt_process_acquire_pinned_executable(int64_t handle) {
+    if (handle <= 0) return -1;
+    if (pthread_mutex_lock(&s_pinned_executables_lock) != 0) return -1;
+    int duplicate = -1;
+    for (int i = 0; i < RT_PINNED_EXEC_MAX; i++) {
+        if (s_pinned_executables[i].handle == (uint64_t)handle) {
+            duplicate = fcntl(s_pinned_executables[i].fd, F_DUPFD_CLOEXEC, 3);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&s_pinned_executables_lock);
+    if (duplicate < 0) return -1;
+    struct stat st;
+    int seals = fcntl(duplicate, F_GET_SEALS);
+    if (fstat(duplicate, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+        st.st_size > RT_HAL_PIN_IMAGE_MAX_BYTES || seals < 0 ||
+        (seals & (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) !=
+        (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) ||
+        !hal_pinnable_elf_fd(duplicate, st.st_size, NULL)) {
+        close(duplicate); errno = ESTALE; return -1;
+    }
+    return duplicate;
+}
+
+/* Streams the sealed image through the shared owned_sha256_block. Until
+ * 2026-11-13 this used a private copy whose round-constant table had 63 entries
+ * (0xc76c51a3 missing), so the "digest" was not SHA-256 and matched only
+ * itself. */
+SplArray* rt_process_pinned_executable_sha256_value(int64_t handle) {
+    int fd = (int)rt_process_acquire_pinned_executable(handle);
+    if (fd < 0) return NULL;
+    struct stat image;
+    if (fstat(fd, &image) != 0 || image.st_size <= 0 || image.st_size > RT_HAL_PIN_IMAGE_MAX_BYTES) {
+        close(fd); return NULL;
+    }
+    uint32_t state[8]={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
+    uint8_t block[64], buffer[4096]; uint64_t total = 0; off_t offset = 0; size_t used = 0; int failed = 0;
+    while (offset < image.st_size) {
+        size_t want = (size_t)(image.st_size - offset);
+        if (want > sizeof(buffer)) want = sizeof(buffer);
+        ssize_t n = pread(fd, buffer, want, offset);
+        if (n < 0) { if (errno == EINTR) continue; failed = 1; break; }
+        if (n == 0) { failed = 1; break; }
+        if (UINT64_MAX - total < (uint64_t)n) { failed = 1; break; }
+        total += (uint64_t)n; offset += n;
+        for (ssize_t i=0;i<n;i++) { block[used++] = buffer[i]; if (used == 64) { owned_sha256_block(state, block); used = 0; } }
+    }
+    if (!failed && total == (uint64_t)image.st_size && total <= UINT64_MAX / 8) {
+        block[used++] = 0x80;
+        if (used > 56) { while (used < 64) block[used++] = 0; owned_sha256_block(state, block); used = 0; }
+        while (used < 56) block[used++] = 0;
+        uint64_t bits = total * 8;
+        for (int i=7;i>=0;i--) block[used++] = (uint8_t)(bits >> (8*i));
+        owned_sha256_block(state, block);
+    } else failed = 1;
+    close(fd);
+    if (failed) return NULL;
+    SplArray* result = rt_array_new(32);
+    if (!result) return NULL;
+    for (int i=0;i<8;i++) for (int j=3;j>=0;j--)
+        if (!rt_array_push(result, rt_value_int((state[i] >> (8*j)) & 255))) { rt_array_free(result); return NULL; }
+    return result;
+}
+
+bool rt_process_close_pinned_executable_owned(int64_t handle) {
+    if (handle <= 0 || pthread_mutex_lock(&s_pinned_executables_lock) != 0)
+        return false;
+    int fd = -1;
+    for (int i = 0; i < RT_PINNED_EXEC_MAX; i++) {
+        if (s_pinned_executables[i].handle == (uint64_t)handle) {
+            fd = s_pinned_executables[i].fd;
+            memset(&s_pinned_executables[i], 0, sizeof(s_pinned_executables[i]));
+            break;
+        }
+    }
+    pthread_mutex_unlock(&s_pinned_executables_lock);
+    return fd >= 0 && close(fd) == 0;
+}
+
+/* Linux-only race-free executable pinning for the RT/HAL comparator host.
+ * The caller hashes /proc/self/fd/<returned-fd>; later spawns execute this same
+ * open file description with fexecve, so pathname replacement cannot change
+ * the admitted image. The descriptor remains caller-owned and reusable. */
+int64_t rt_process_pin_executable(const char* canonical_path) {
+    if (!canonical_path || canonical_path[0] != '/') return -1;
+    int source = open(canonical_path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (source < 0) return -1;
+    struct stat st;
+    memset(&st, 0, sizeof(st));
+    if (fstat(source, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_size <= 0 || st.st_size > RT_HAL_PIN_IMAGE_MAX_BYTES ||
+        (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0 ||
+        !hal_pinnable_elf_fd(source, st.st_size, NULL)) {
+        /* Say why, mirroring the admission line: a bare "pin was rejected"
+         * upstream gives no clue which rule refused the image. */
+        fprintf(stderr, "[rt-pin] refused: %s (size %lld, limit %lld, or not an admissible "
+                "executable ELF): %s\n",
+                (S_ISREG(st.st_mode) && st.st_size > RT_HAL_PIN_IMAGE_MAX_BYTES) ? "image too large"
+                                                                                  : "image not admissible",
+                (long long)st.st_size, (long long)RT_HAL_PIN_IMAGE_MAX_BYTES, canonical_path);
+        close(source);
+        return -1;
+    }
+    int pinned = (int)syscall(SYS_memfd_create, "simple-rthal", 0x0003U);
+    if (pinned < 0) { close(source); return -1; }
+    uint8_t buffer[65536];
+    off_t copied = 0;
+    for (;;) {
+        ssize_t count = read(source, buffer, sizeof(buffer));
+        if (count == 0) break;
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            close(source); close(pinned); return -1;
+        }
+        if (copied > st.st_size - count) {
+            close(source); close(pinned); errno = EFBIG; return -1;
+        }
+        ssize_t offset = 0;
+        while (offset < count) {
+            ssize_t written = write(
+                pinned, buffer + offset, (size_t)(count - offset));
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) {
+                close(source); close(pinned); return -1;
+            }
+            offset += written;
+        }
+        copied += count;
+    }
+    close(source);
+    struct stat pinned_stat;
+    char loader[PATH_MAX];
+    if (copied != st.st_size || lseek(pinned, 0, SEEK_SET) < 0 || fchmod(pinned, 0500) != 0 ||
+        fcntl(pinned, F_ADD_SEALS,
+              F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0 ||
+        fstat(pinned, &pinned_stat) != 0 || pinned_stat.st_size != copied ||
+        !hal_pinnable_elf_fd(pinned, pinned_stat.st_size, loader) ||
+        (fcntl(pinned, F_GET_SEALS) & (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) !=
+            (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) {
+        close(pinned);
+        return -1;
+    }
+    if (loader[0] != '\0') {
+        /* The weaker class is never admitted silently. */
+        fprintf(stderr, "[rt-pin] dynamic ELF admitted (system-loader class, Darwin parity): "
+                "main image sealed and digest-bound; loader %s and its DT_NEEDED libraries "
+                "are not pinned: %s\n", loader, canonical_path);
+    }
+    return (int64_t)pinned;
+}
+
+int64_t rt_process_pin_executable_owned(const char* canonical_path) {
+    int raw_fd = (int)rt_process_pin_executable(canonical_path);
+    if (raw_fd < 0) return -1;
+    int owner_fd = fcntl(raw_fd, F_DUPFD_CLOEXEC, 3);
+    if (owner_fd < 0) { close(raw_fd); return -1; }
+    int64_t handle = pinned_handle_install(owner_fd);
+    if (handle < 0) close(owner_fd);
+    close(raw_fd);
+    return handle;
+}
+
+int64_t rt_process_pin_executable_owned_value(const uint8_t* path, uint64_t path_len) {
+    if (!path || path_len == 0 || path_len > 4096 || path_len > SIZE_MAX - 1 ||
+        path[0] != '/' || memchr(path, '\0', (size_t)path_len)) return -1;
+    char* copied = (char*)malloc((size_t)path_len + 1);
+    if (!copied) return -1;
+    memcpy(copied, path, (size_t)path_len); copied[path_len] = '\0';
+    int64_t handle = rt_process_pin_executable_owned(copied);
+    free(copied);
+    return handle;
+}
+
+int rt_process_close_pinned_executable_owned_value(int64_t handle) {
+    return rt_process_close_pinned_executable_owned(handle) ? 1 : 0;
+}
+#endif /* __linux__ && !RT_OWNED_EXTERNAL_PIN */
+
+#endif /* POSIX owner */
+
+/* Non-POSIX hosts, plus Darwin for every family except observation V4. */
+#if !(!defined(_WIN32) && (defined(__unix__) || defined(__APPLE__))) || \
+    defined(RT_OWNED_DARWIN_V4)
+
+/* --- Win32 synchronous bounded and asynchronous V2 owned families ------
+ * Everything this branch does NOT implement (the V3 atomic-input family,
+ * the V3 opaque-handle surface, the observation-v4 family) is deliberately
  * left to the shared fallback stubs below, so a future family added there is
  * automatically covered on Windows too. Only the definitions Win32 really
  * implements are fenced out of that fallback, via
@@ -4448,12 +5704,12 @@ int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd_data, uint6
  * calls rt_process_run_owned_observed_bounded_value, which could never run a
  * child at all.
  *
- * Scope, stated plainly: this branch implements the SYNCHRONOUS bounded family
+ * This branch implements the SYNCHRONOUS bounded family
  * (`rt_process_run_owned_bounded`, `..._observed_bounded`, and the two
  * `*_value` ABI wrappers) — the family the failing specs actually reach. The
- * asynchronous token-lease family (`rt_process_owned_start_v2/v3`, `poll_v2`,
- * `cancel_v2`, `result_v2`, and the `rt_process_owned_v3_*` opaque-handle
- * surface) is NOT implemented here and keeps its honest ENOTSUP answer below.
+ * asynchronous V2 token leases are implemented in the private include below.
+ * The opaque V3 facade, sealed pins and observation V4 retain ENOTSUP until their
+ * stronger contracts have a Windows provider.
  *
  * Bounded semantics are provided by a job object rather than a process group:
  * JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE means the whole child tree dies with the
@@ -4468,6 +5724,7 @@ int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd_data, uint6
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "platform/spl_win_utf16_private.h"
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -4495,6 +5752,14 @@ typedef struct OwnedWinStream {
     int truncated;
 } OwnedWinStream;
 
+/* Writes `count` backslashes at dst[*w] (when dst is non-NULL) and advances *w. */
+static void owned_win_put_backslashes(char* dst, size_t* w, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        if (dst) dst[*w] = '\\';
+        (*w)++;
+    }
+}
+
 /* CommandLineToArgvW inverse. Returns the byte count written (or that WOULD be
  * written when dst is NULL). Getting this wrong is the classic Windows spawn
  * bug: a path containing a space silently splits into two arguments. */
@@ -4521,16 +5786,16 @@ static size_t owned_win_quote_arg(const char* arg, char* dst) {
         while (*p == '\\') { bs++; p++; }
         if (*p == '\0') {
             /* Backslashes immediately before the closing quote are doubled. */
-            for (size_t i = 0; i < bs * 2; i++) { if (dst) dst[w] = '\\'; w++; }
+            owned_win_put_backslashes(dst, &w, bs * 2);
             break;
         }
         if (*p == '"') {
-            for (size_t i = 0; i < bs * 2 + 1; i++) { if (dst) dst[w] = '\\'; w++; }
+            owned_win_put_backslashes(dst, &w, bs * 2 + 1);
             if (dst) dst[w] = '"';
             w++;
             p++;
         } else {
-            for (size_t i = 0; i < bs; i++) { if (dst) dst[w] = '\\'; w++; }
+            owned_win_put_backslashes(dst, &w, bs);
             if (dst) dst[w] = *p;
             w++;
             p++;
@@ -4560,15 +5825,7 @@ static char* owned_win_build_cmdline(const char* const* argv) {
 }
 
 static WCHAR* owned_win_widen(const char* s) {
-    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
-    if (n <= 0) return NULL;
-    WCHAR* w = (WCHAR*)RT_OWNED_HOST_MALLOC((size_t)n * sizeof(WCHAR));
-    if (!w) return NULL;
-    if (MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n) <= 0) {
-        RT_OWNED_HOST_FREE(w);
-        return NULL;
-    }
-    return w;
+    return spl_win_utf8_to_wide(s, -1, 0, RT_OWNED_HOST_MALLOC, RT_OWNED_HOST_FREE, NULL);
 }
 
 static int owned_win_is_file(const WCHAR* p) {
@@ -5101,11 +6358,13 @@ int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd_data, uint6
 #endif /* RT_PROCESS_OWNED_CORE_ONLY */
 
 #define RT_OWNED_WIN32_SYNC_IMPLEMENTED 1
+#include "runtime_process_owned_windows_async_private.h"
 #endif /* _WIN32 */
 
 #include <errno.h>
 #include <string.h>
 
+#ifndef RT_OWNED_WIN32_ASYNC_IMPLEMENTED
 bool rt_process_owned_start_v2(const char* cmd, const char* const* argv,
                                int64_t timeout_ms, int64_t term_grace_ms,
                                uint64_t max_output_bytes,
@@ -5117,7 +6376,9 @@ bool rt_process_owned_start_v2(const char* cmd, const char* const* argv,
     receipt->version = RT_OWNED_PROCESS_ASYNC_VERSION; receipt->runtime_error = ENOTSUP;
     return false;
 }
+#endif
 
+#ifndef RT_OWNED_WIN32_INPUT_IMPLEMENTED
 bool rt_process_owned_start_v3(const char* cmd, const char* const* argv,
                                const uint8_t* input, uint64_t input_len,
                                int64_t timeout_ms, int64_t term_grace_ms,
@@ -5131,6 +6392,8 @@ bool rt_process_owned_start_v3(const char* cmd, const char* const* argv,
     receipt->version = RT_OWNED_PROCESS_INPUT_VERSION; receipt->runtime_error = ENOTSUP;
     return false;
 }
+
+#endif
 
 bool rt_process_owned_start_pinned_v3(int64_t executable_handle,
                                       const char* const* argv,
@@ -5147,6 +6410,7 @@ bool rt_process_owned_start_pinned_v3(int64_t executable_handle,
     return false;
 }
 
+#ifndef RT_OWNED_WIN32_INPUT_IMPLEMENTED
 bool rt_process_owned_input_receipt_v3(RtOwnedProcessTokenV2 token,
                                        RtOwnedProcessInputReceiptV3* receipt) {
     (void)token;
@@ -5155,6 +6419,8 @@ bool rt_process_owned_input_receipt_v3(RtOwnedProcessTokenV2 token,
     receipt->runtime_error = ENOTSUP;
     return false;
 }
+
+#endif
 
 /* Win32 implements this for real above; only the non-unix fallback needs the
  * ENOTSUP answer. */
@@ -5173,6 +6439,7 @@ bool rt_process_run_owned_observed_bounded(const char* cmd, const char* const* a
 }
 #endif
 
+#ifndef RT_OWNED_WIN32_ASYNC_IMPLEMENTED
 bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
                               char* out, uint64_t out_cap, char* err,
                               uint64_t err_cap,
@@ -5216,6 +6483,7 @@ bool rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
                                  RtOwnedProcessResultV2* result) {
     return rt_process_owned_result_v2(token, result);
 }
+#endif
 
 #ifndef RT_OWNED_WIN32_SYNC_IMPLEMENTED
 bool rt_process_run_owned_bounded(const char* cmd, const char* const* argv,
@@ -5337,12 +6605,12 @@ SplArray* rt_process_owned_v3_capabilities_value(void) {
         RT_OWNED_PROCESS_OBSERVATION_ADAPTER_VERSION, 0, 0,
     };
     SplArray* values = rt_array_new(3);
-    if (!values) return NULL;
+    if (!values) return SIMPLE_RT_NONNULL("rt_process_owned_v3_capabilities_value", NULL);
     for (int i = 0; i < 3; i++)
         if (!rt_array_push(values, rt_value_int(fields[i]))) {
-            rt_array_free(values); return NULL;
+            rt_array_free(values); return SIMPLE_RT_NONNULL("rt_process_owned_v3_capabilities_value", NULL);
         }
-    return values;
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_capabilities_value", values);
 }
 
 SplArray* rt_process_owned_v3_set_capture_limits_value(int64_t handle,
@@ -5364,17 +6632,340 @@ SplArray* rt_process_owned_v3_observation_value(int64_t handle) {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ENOTSUP,
     };
     SplArray* values = rt_array_new(15);
-    if (!values) return NULL;
+    if (!values) return SIMPLE_RT_NONNULL("rt_process_owned_v3_observation_value", NULL);
     for (int i = 0; i < 15; i++)
         if (!rt_array_push(values, rt_value_int(fields[i]))) {
-            rt_array_free(values); return NULL;
+            rt_array_free(values); return SIMPLE_RT_NONNULL("rt_process_owned_v3_observation_value", NULL);
         }
-    return values;
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_observation_value", values);
 }
+
+#if defined(_WIN32) && defined(RT_OWNED_WIN32_ASYNC_IMPLEMENTED) && \
+    defined(RT_OWNED_WIN32_INPUT_IMPLEMENTED)
+/* ===== Windows opaque V3 adapter =====
+ * Maps a positive opaque handle to the private Windows V2/V3 core token.
+ * Mirrors the POSIX adapter (reserve -> start -> publish; shared ref for
+ * observation; exclusive consume for collect/release) under one SRWLOCK.
+ * The core token never leaves C; Simple only ever sees the opaque handle. */
+#define RT_OWNED_WIN32_V3_ADAPTER 1
+#define OWNED_WIN_V3_SLOTS OWNED_WIN_ASYNC_SLOTS
+#define OWNED_WIN_V3_MAX_ARGS 4096
+#define OWNED_WIN_V3_MAX_ARG_BYTES (1024U * 1024U)
+#define OWNED_WIN_V3_MAX_POLL_BYTES (64U * 1024U)
+
+typedef struct OwnedWinV3Slot {
+    uint64_t handle;
+    RtOwnedProcessTokenV2 token;
+    int active, closing, published;
+    uint32_t refs;
+} OwnedWinV3Slot;
+
+static OwnedWinV3Slot owned_win_v3_slots[OWNED_WIN_V3_SLOTS];
+static SRWLOCK owned_win_v3_lock = SRWLOCK_INIT;
+
+static SplArray* owned_win_v3_values(const int64_t* values, int64_t count) {
+    SplArray* result = rt_array_new(count);
+    if (!result) return NULL;
+    for (int64_t i = 0; i < count; i++)
+        if (!rt_array_push(result, rt_value_int(values[i]))) { rt_array_free(result); return NULL; }
+    return result;
+}
+
+static SplArray* owned_win_v3_poll_tuple(SplArray* out, SplArray* err, SplArray* receipt) {
+    SplArray* tuple = (out && err && receipt) ? rt_array_new(3) : NULL;
+    if (tuple && rt_array_push(tuple, (int64_t)(uintptr_t)out) &&
+        rt_array_push(tuple, (int64_t)(uintptr_t)err) &&
+        rt_array_push(tuple, (int64_t)(uintptr_t)receipt)) return tuple;
+    if (tuple) rt_array_free(tuple);
+    if (out) rt_array_free(out);
+    if (err) rt_array_free(err);
+    if (receipt) rt_array_free(receipt);
+    return NULL;
+}
+
+static SplArray* owned_win_v3_poll_error(int error) {
+    int64_t fields[17] = { RT_OWNED_PROCESS_OPAQUE_V3_VERSION };
+    fields[16] = error;
+    return owned_win_v3_poll_tuple(rt_array_new(0), rt_array_new(0), owned_win_v3_values(fields, 17));
+}
+
+static int owned_win_v3_reserve(uint32_t* index, uint64_t* handle) {
+    AcquireSRWLockExclusive(&owned_win_v3_lock);
+    uint32_t free_index = OWNED_WIN_V3_SLOTS;
+    for (uint32_t i = 0; i < OWNED_WIN_V3_SLOTS; i++)
+        if (!owned_win_v3_slots[i].active) { free_index = i; break; }
+    if (free_index == OWNED_WIN_V3_SLOTS) { ReleaseSRWLockExclusive(&owned_win_v3_lock); return 0; }
+    for (int attempt = 0; attempt < 16; attempt++) {
+        RtOwnedProcessTokenV2 entropy = {0, 0};
+        if (!owned_win_random_token(&entropy)) break;
+        /* Keep handles in Simple's immediate positive integer range. */
+        uint64_t candidate = entropy.low & UINT64_C(0x0fffffffffffffff);
+        int live = 0;
+        for (uint32_t i = 0; i < OWNED_WIN_V3_SLOTS; i++)
+            if (owned_win_v3_slots[i].active && owned_win_v3_slots[i].handle == candidate) live = 1;
+        if (candidate && !live) {
+            OwnedWinV3Slot* slot = &owned_win_v3_slots[free_index];
+            memset(slot, 0, sizeof(*slot));
+            slot->handle = candidate; slot->active = 1; /* reserved, not visible */
+            *index = free_index; *handle = candidate;
+            ReleaseSRWLockExclusive(&owned_win_v3_lock);
+            return 1;
+        }
+    }
+    ReleaseSRWLockExclusive(&owned_win_v3_lock);
+    return 0;
+}
+
+static void owned_win_v3_drop(uint32_t index) {
+    AcquireSRWLockExclusive(&owned_win_v3_lock);
+    if (index < OWNED_WIN_V3_SLOTS) memset(&owned_win_v3_slots[index], 0, sizeof(owned_win_v3_slots[index]));
+    ReleaseSRWLockExclusive(&owned_win_v3_lock);
+}
+
+static void owned_win_v3_publish(uint32_t index, RtOwnedProcessTokenV2 token) {
+    AcquireSRWLockExclusive(&owned_win_v3_lock);
+    owned_win_v3_slots[index].token = token;
+    owned_win_v3_slots[index].published = 1;
+    ReleaseSRWLockExclusive(&owned_win_v3_lock);
+}
+
+/* consume=0 takes a shared observation ref; consume=1 takes the slot
+ * exclusively (no outstanding refs) and marks it closing. */
+static int owned_win_v3_take(int64_t raw_handle, int consume, RtOwnedProcessTokenV2* token, uint32_t* index) {
+    if (raw_handle <= 0) return 0;
+    AcquireSRWLockExclusive(&owned_win_v3_lock);
+    for (uint32_t i = 0; i < OWNED_WIN_V3_SLOTS; i++) {
+        OwnedWinV3Slot* slot = &owned_win_v3_slots[i];
+        if (slot->active && slot->published && !slot->closing &&
+            slot->handle == (uint64_t)raw_handle && (!consume || slot->refs == 0)) {
+            if (consume) slot->closing = 1; else slot->refs++;
+            *token = slot->token; *index = i;
+            ReleaseSRWLockExclusive(&owned_win_v3_lock);
+            return 1;
+        }
+    }
+    ReleaseSRWLockExclusive(&owned_win_v3_lock);
+    return 0;
+}
+
+static void owned_win_v3_release_ref(uint32_t index) {
+    AcquireSRWLockExclusive(&owned_win_v3_lock);
+    if (owned_win_v3_slots[index].refs) owned_win_v3_slots[index].refs--;
+    ReleaseSRWLockExclusive(&owned_win_v3_lock);
+}
+
+static void owned_win_v3_end_consume(uint32_t index, int consumed) {
+    AcquireSRWLockExclusive(&owned_win_v3_lock);
+    if (consumed) memset(&owned_win_v3_slots[index], 0, sizeof(owned_win_v3_slots[index]));
+    else owned_win_v3_slots[index].closing = 0;
+    ReleaseSRWLockExclusive(&owned_win_v3_lock);
+}
+
+static void owned_win_v3_free_argv(char** argv, int64_t argc) {
+    if (!argv) return;
+    for (int64_t i = 0; i <= argc + 1; i++) free(argv[i]);
+    free(argv);
+}
+
+static char** owned_win_v3_copy_argv(const char* command_data, uint64_t command_len,
+                                     SplArray* args, int64_t* argc_out, int* error_out) {
+    *argc_out = -1; *error_out = EINVAL;
+    if (!command_data || !args || command_len == 0 || command_len > OWNED_WIN_V3_MAX_ARG_BYTES ||
+        memchr(command_data, '\0', (size_t)command_len)) return NULL;
+    int64_t argc = rt_array_len(args);
+    if (argc < 0 || argc > OWNED_WIN_V3_MAX_ARGS) return NULL;
+    char** argv = (char**)calloc((size_t)argc + 2, sizeof(char*));
+    if (!argv) { *error_out = ENOMEM; return NULL; }
+    argv[0] = (char*)malloc((size_t)command_len + 1);
+    if (!argv[0]) { owned_win_v3_free_argv(argv, argc); *error_out = ENOMEM; return NULL; }
+    memcpy(argv[0], command_data, (size_t)command_len); argv[0][command_len] = '\0';
+    for (int64_t i = 0; i < argc; i++) {
+        int64_t value = rt_array_get(args, i);
+        int64_t length = rt_string_len(value);
+        const uint8_t* data = rt_string_data(value);
+        if (length < 0 || !data || (uint64_t)length > OWNED_WIN_V3_MAX_ARG_BYTES ||
+            memchr(data, '\0', (size_t)length)) { owned_win_v3_free_argv(argv, argc); return NULL; }
+        argv[i + 1] = (char*)malloc((size_t)length + 1);
+        if (!argv[i + 1]) { owned_win_v3_free_argv(argv, argc); *error_out = ENOMEM; return NULL; }
+        memcpy(argv[i + 1], data, (size_t)length); argv[i + 1][length] = '\0';
+    }
+    *argc_out = argc; *error_out = 0;
+    return argv;
+}
+
+static SplArray* owned_win_v3_result_values(const RtOwnedProcessResultV2* result) {
+    const int64_t values[] = { RT_OWNED_PROCESS_OPAQUE_V3_VERSION, result->exit_code,
+        result->timed_out, result->cancel_requested, result->term_sent, result->kill_sent,
+        result->identity_revalidated, result->reaped, result->stdout_truncated,
+        result->stderr_truncated, (int64_t)result->stdout_bytes_seen,
+        (int64_t)result->stderr_bytes_seen, (int64_t)result->stdout_bytes_kept,
+        (int64_t)result->stderr_bytes_kept, result->runtime_error };
+    return owned_win_v3_values(values, 15);
+}
+
+/* A start whose receipt projection cannot be allocated must not orphan the
+ * child: cancel, drain and collect the core lease before reporting NULL. */
+static void owned_win_v3_discard(RtOwnedProcessTokenV2 token) {
+    RtOwnedProcessCancelReceipt cancel; RtOwnedProcessPollReceiptV2 poll; RtOwnedProcessResultV2 result;
+    char out[8192], err[8192];
+    (void)rt_process_owned_cancel_v2(token, &cancel);
+    for (int i = 0; i < 4096; i++) {
+        memset(&poll, 0, sizeof(poll));
+        (void)rt_process_owned_poll_v2(token, 50, out, sizeof(out), err, sizeof(err), &poll);
+        if (poll.terminal && poll.stdout_bytes_delivered == 0 && poll.stderr_bytes_delivered == 0) break;
+    }
+    (void)rt_process_owned_collect_v2(token, &result);
+}
+
+static SplArray* owned_win_v3_start(const char* command_data, uint64_t command_len,
+                                    SplArray* args, SplArray* input, int64_t timeout_ms,
+                                    int64_t term_grace_ms, int64_t max_output_bytes) {
+    int64_t values[4] = {0, RT_OWNED_PROCESS_OPAQUE_V3_VERSION, 0, EINVAL};
+    int64_t argc = -1, input_len = -1; int copy_error = EINVAL;
+    uint8_t* input_copy = NULL; uint32_t index = 0; uint64_t handle = 0;
+    RtOwnedProcessTokenV2 token = {0, 0}; RtOwnedProcessStartReceiptV2 receipt;
+    memset(&receipt, 0, sizeof(receipt));
+    /* Allocate the fixed projection before any authority exists. */
+    SplArray* projected = owned_win_v3_values(values, 4);
+    if (!projected) return NULL;
+    char** argv = owned_win_v3_copy_argv(command_data, command_len, args, &argc, &copy_error);
+    if (!argv) { values[3] = copy_error; goto done; }
+    input_len = input ? rt_array_len(input) : -1;
+    if (input_len < 0 || (uint64_t)input_len > RT_OWNED_PROCESS_MAX_INPUT_BYTES ||
+        max_output_bytes < 0 || (uint64_t)max_output_bytes > RT_OWNED_ABI_MAX_OUTPUT_BYTES) goto done;
+    if (rt_array_bytes_validate((int64_t)(uintptr_t)input) != input_len) goto done;
+    if (input_len) {
+        input_copy = (uint8_t*)malloc((size_t)input_len);
+        if (!input_copy) { values[3] = ENOMEM; goto done; }
+        if (rt_array_bytes_copy_checked((int64_t)(uintptr_t)input, input_copy, input_len) != input_len) goto done;
+    }
+    if (!owned_win_v3_reserve(&index, &handle)) { values[3] = EAGAIN; goto done; }
+    if (!rt_process_owned_start_v3(argv[0], (const char* const*)argv, input_copy,
+                                   (uint64_t)input_len, timeout_ms, term_grace_ms,
+                                   (uint64_t)max_output_bytes, &token, &receipt)) {
+        values[3] = receipt.runtime_error ? receipt.runtime_error : EIO;
+        owned_win_v3_drop(index); goto done;
+    }
+    owned_win_v3_publish(index, token);
+    values[0] = (int64_t)handle; values[2] = 1; values[3] = 0;
+done:
+    free(input_copy);
+    owned_win_v3_free_argv(argv, argc);
+    for (int i = 0; i < 4; i++) {
+        if (!rt_array_set(projected, i, rt_value_int(values[i]))) {
+            rt_array_free(projected);
+            if (values[2]) {
+                RtOwnedProcessTokenV2 owned; uint32_t slot;
+                if (owned_win_v3_take(values[0], 1, &owned, &slot)) {
+                    owned_win_v3_discard(owned); owned_win_v3_end_consume(slot, 1);
+                }
+            }
+            return NULL;
+        }
+    }
+    return projected;
+}
+
+static SplArray* owned_win_v3_poll(int64_t handle, int64_t wait_ms,
+                                   int64_t stdout_capacity, int64_t stderr_capacity) {
+    RtOwnedProcessTokenV2 token; uint32_t index;
+    if (wait_ms < 0 || wait_ms > 1000) return owned_win_v3_poll_error(EINVAL);
+    if (stdout_capacity < 0 || stderr_capacity < 0 || stdout_capacity > OWNED_WIN_V3_MAX_POLL_BYTES ||
+        stderr_capacity > OWNED_WIN_V3_MAX_POLL_BYTES) return owned_win_v3_poll_error(EINVAL);
+    if (!owned_win_v3_take(handle, 0, &token, &index)) return owned_win_v3_poll_error(RT_OWNED_PROCESS_WINDOWS_STALE_ERROR);
+    char* out = (char*)malloc((size_t)stdout_capacity + 1);
+    char* err = (char*)malloc((size_t)stderr_capacity + 1);
+    if (!out || !err) {
+        free(out); free(err); owned_win_v3_release_ref(index);
+        return owned_win_v3_poll_error(ENOMEM);
+    }
+    RtOwnedProcessPollReceiptV2 receipt;
+    memset(&receipt, 0, sizeof(receipt));
+    receipt.version = RT_OWNED_PROCESS_ASYNC_VERSION;
+    if (!rt_process_owned_poll_v2(token, wait_ms, out,
+            (uint64_t)stdout_capacity + (stdout_capacity ? 1 : 0), err,
+            (uint64_t)stderr_capacity + (stderr_capacity ? 1 : 0), &receipt) &&
+        receipt.runtime_error == 0)
+        receipt.runtime_error = EIO;
+    owned_win_v3_release_ref(index);
+    int64_t fields[] = { RT_OWNED_PROCESS_OPAQUE_V3_VERSION, receipt.live, receipt.terminal,
+        receipt.cancel_requested, receipt.timed_out, receipt.term_sent, receipt.kill_sent, receipt.reaped,
+        receipt.stdout_truncated, receipt.stderr_truncated, (int64_t)receipt.stdout_bytes_seen,
+        (int64_t)receipt.stderr_bytes_seen, (int64_t)receipt.stdout_bytes_kept,
+        (int64_t)receipt.stderr_bytes_kept, (int64_t)receipt.stdout_bytes_delivered,
+        (int64_t)receipt.stderr_bytes_delivered, receipt.runtime_error };
+    uint64_t out_count = receipt.stdout_bytes_delivered, err_count = receipt.stderr_bytes_delivered;
+    if (out_count > (uint64_t)stdout_capacity) out_count = (uint64_t)stdout_capacity;
+    if (err_count > (uint64_t)stderr_capacity) err_count = (uint64_t)stderr_capacity;
+    SplArray* out_value = rt_array_new((int64_t)out_count);
+    SplArray* err_value = rt_array_new((int64_t)err_count);
+    int ok = out_value && err_value;
+    for (uint64_t i = 0; ok && i < out_count; i++)
+        ok = rt_array_push(out_value, rt_value_int((unsigned char)out[i]));
+    for (uint64_t i = 0; ok && i < err_count; i++)
+        ok = rt_array_push(err_value, rt_value_int((unsigned char)err[i]));
+    free(out); free(err);
+    if (!ok) {
+        if (out_value) rt_array_free(out_value);
+        if (err_value) rt_array_free(err_value);
+        return NULL;
+    }
+    return owned_win_v3_poll_tuple(out_value, err_value, owned_win_v3_values(fields, 17));
+}
+
+static SplArray* owned_win_v3_input(int64_t handle) {
+    int64_t values[39] = { RT_OWNED_PROCESS_OPAQUE_V3_VERSION, 0, 0, 0, 0, 0, RT_OWNED_PROCESS_WINDOWS_STALE_ERROR };
+    RtOwnedProcessInputReceiptV3 receipt; RtOwnedProcessTokenV2 token; uint32_t index;
+    if (!owned_win_v3_take(handle, 0, &token, &index)) return owned_win_v3_values(values, 39);
+    (void)rt_process_owned_input_receipt_v3(token, &receipt); owned_win_v3_release_ref(index);
+    values[1] = (int64_t)receipt.input_bytes_accepted; values[2] = (int64_t)receipt.input_bytes_written;
+    values[3] = receipt.stdin_closed; values[4] = receipt.terminal; values[5] = receipt.reaped;
+    values[6] = receipt.runtime_error;
+    for (int i = 0; i < 32; i++) values[7 + i] = receipt.input_sha256[i];
+    return owned_win_v3_values(values, 39);
+}
+
+static SplArray* owned_win_v3_cancel(int64_t handle) {
+    int64_t values[4] = { RT_OWNED_PROCESS_OPAQUE_V3_VERSION, 0, 0, RT_OWNED_PROCESS_WINDOWS_STALE_ERROR };
+    RtOwnedProcessCancelReceipt receipt; RtOwnedProcessTokenV2 token; uint32_t index;
+    if (!owned_win_v3_take(handle, 0, &token, &index)) return owned_win_v3_values(values, 4);
+    (void)rt_process_owned_cancel_v2(token, &receipt); owned_win_v3_release_ref(index);
+    values[1] = receipt.accepted; values[2] = receipt.term_sent; values[3] = receipt.runtime_error;
+    return owned_win_v3_values(values, 4);
+}
+
+/* consume=0: result (observation). consume=1: collect/release, which ends the
+ * opaque lease once the core lease is consumed (or reaped with a terminal
+ * provider error, matching the POSIX adapter). */
+static SplArray* owned_win_v3_result(int64_t handle, int consume, int* consumed_out) {
+    RtOwnedProcessResultV2 result; RtOwnedProcessTokenV2 token; uint32_t index;
+    memset(&result, 0, sizeof(result));
+    if (consumed_out) *consumed_out = 0;
+    if (!owned_win_v3_take(handle, consume, &token, &index)) {
+        result.exit_code = -1; result.runtime_error = RT_OWNED_PROCESS_WINDOWS_STALE_ERROR;
+        return owned_win_v3_result_values(&result);
+    }
+    if (!consume) {
+        (void)rt_process_owned_result_v2(token, &result); owned_win_v3_release_ref(index);
+        return owned_win_v3_result_values(&result);
+    }
+    int consumed = rt_process_owned_collect_v2(token, &result) ? 1 : 0;
+    if (!consumed && result.reaped && result.runtime_error != EAGAIN && result.runtime_error != EBUSY)
+        consumed = 1;
+    owned_win_v3_end_consume(index, consumed);
+    if (consumed_out) *consumed_out = consumed;
+    return owned_win_v3_result_values(&result);
+}
+#endif /* Windows opaque V3 adapter */
 
 SplArray* rt_process_owned_v3_start_value(const char* command_data,
         uint64_t command_len, SplArray* args, SplArray* input,
         int64_t timeout_ms, int64_t term_grace_ms, int64_t max_output_bytes) {
+#ifdef RT_OWNED_WIN32_V3_ADAPTER
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_value",
+        owned_win_v3_start(command_data, command_len, args, input, timeout_ms,
+                           term_grace_ms, max_output_bytes));
+#else
     (void)command_data; (void)command_len; (void)args; (void)input;
     (void)timeout_ms; (void)term_grace_ms; (void)max_output_bytes;
     SplArray* values = owned_v3_unsupported_words(4, 3);
@@ -5383,7 +6974,8 @@ SplArray* rt_process_owned_v3_start_value(const char* command_data,
         (void)rt_array_set(values, 1,
             rt_value_int(RT_OWNED_PROCESS_OPAQUE_V3_VERSION));
     }
-    return values;
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_value", values);
+#endif
 }
 
 SplArray* rt_process_owned_v3_start_pinned_value(int64_t executable_handle,
@@ -5392,14 +6984,18 @@ SplArray* rt_process_owned_v3_start_pinned_value(int64_t executable_handle,
     (void)executable_handle; (void)args; (void)input; (void)timeout_ms;
     (void)term_grace_ms; (void)max_output_bytes;
     SplArray* values = rt_array_new(4);
-    if (!values) return NULL;
+    if (!values) return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_pinned_value", NULL);
     const int64_t fields[] = {0, RT_OWNED_PROCESS_OPAQUE_V3_VERSION, 0, ENOTSUP};
-    for (int i = 0; i < 4; i++) if (!rt_array_push(values, rt_value_int(fields[i]))) { rt_array_free(values); return NULL; }
-    return values;
+    for (int i = 0; i < 4; i++) if (!rt_array_push(values, rt_value_int(fields[i]))) { rt_array_free(values); return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_pinned_value", NULL); }
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_pinned_value", values);
 }
 
 SplArray* rt_process_owned_v3_poll_value(int64_t handle, int64_t wait_ms,
         int64_t stdout_capacity, int64_t stderr_capacity) {
+#ifdef RT_OWNED_WIN32_V3_ADAPTER
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_poll_value",
+        owned_win_v3_poll(handle, wait_ms, stdout_capacity, stderr_capacity));
+#else
     (void)handle; (void)wait_ms; (void)stdout_capacity; (void)stderr_capacity;
     SplArray* out = rt_array_new(0); SplArray* err = rt_array_new(0);
     SplArray* receipt = owned_v3_unsupported_words(17, 16);
@@ -5407,11 +7003,32 @@ SplArray* rt_process_owned_v3_poll_value(int64_t handle, int64_t wait_ms,
     if (out && err && receipt && tuple &&
         rt_array_push(tuple, (int64_t)(uintptr_t)out) &&
         rt_array_push(tuple, (int64_t)(uintptr_t)err) &&
-        rt_array_push(tuple, (int64_t)(uintptr_t)receipt)) return tuple;
+        rt_array_push(tuple, (int64_t)(uintptr_t)receipt)) return SIMPLE_RT_NONNULL("rt_process_owned_v3_poll_value", tuple);
     rt_array_free(tuple); rt_array_free(out); rt_array_free(err);
-    rt_array_free(receipt); return NULL;
+    rt_array_free(receipt); return SIMPLE_RT_NONNULL("rt_process_owned_v3_poll_value", NULL);
+#endif
 }
 
+#ifdef RT_OWNED_WIN32_V3_ADAPTER
+SplArray* rt_process_owned_v3_input_value(int64_t handle) {
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_input_value", owned_win_v3_input(handle));
+}
+SplArray* rt_process_owned_v3_cancel_value(int64_t handle) {
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_cancel_value", owned_win_v3_cancel(handle));
+}
+SplArray* rt_process_owned_v3_result_value(int64_t handle) {
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_result_value", owned_win_v3_result(handle, 0, NULL));
+}
+SplArray* rt_process_owned_v3_collect_value(int64_t handle) {
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_collect_value", owned_win_v3_result(handle, 1, NULL));
+}
+bool rt_process_owned_v3_release_value(int64_t handle) {
+    int consumed = 0;
+    SplArray* values = owned_win_v3_result(handle, 1, &consumed);
+    if (values) rt_array_free(values);
+    return consumed != 0;
+}
+#else
 SplArray* rt_process_owned_v3_input_value(int64_t handle) {
     (void)handle; return owned_v3_unsupported_words(39, 6);
 }
@@ -5424,10 +7041,12 @@ SplArray* rt_process_owned_v3_result_value(int64_t handle) {
 SplArray* rt_process_owned_v3_collect_value(int64_t handle) {
     (void)handle; return owned_v3_unsupported_words(15, 14);
 }
-int rt_process_owned_v3_release_value(int64_t handle) {
+bool rt_process_owned_v3_release_value(int64_t handle) {
     (void)handle; return 0;
 }
+#endif /* RT_OWNED_WIN32_V3_ADAPTER */
 
+#ifndef RT_OWNED_DARWIN_V4 /* Darwin implements V4 in the POSIX owner. */
 static SplArray* pov4_unavailable_tuple(void) {
     SplArray* out = rt_array_new(0), *err = rt_array_new(0), *binding = rt_array_new(0);
     SplArray* words = rt_array_new(64), *tuple = rt_array_new(4);
@@ -5461,54 +7080,93 @@ fail:
 
 SplArray* rt_process_observation_v4_capabilities_value(void) {
     const int64_t fields[8] = {4, 8, 0, 0, 0, 0, 0, ENOTSUP};
-    SplArray* values = rt_array_new(8); if (!values) return NULL;
+    SplArray* values = rt_array_new(8); if (!values) return SIMPLE_RT_NONNULL("rt_process_observation_v4_capabilities_value", NULL);
     for (int i=0;i<8;i++) if (!rt_array_push(values, rt_value_int(fields[i]))) {
-        rt_array_free(values); return NULL;
+        rt_array_free(values); return SIMPLE_RT_NONNULL("rt_process_observation_v4_capabilities_value", NULL);
     }
-    return values;
+    return SIMPLE_RT_NONNULL("rt_process_observation_v4_capabilities_value", values);
 }
+#if !defined(__APPLE__) || defined(__unix__)
 int64_t rt_process_observation_v4_pin_cwd_value(const char* path_data, uint64_t path_len) {
     (void)path_data; (void)path_len; return 0;
 }
 SplArray* rt_process_observation_v4_cwd_digest_value(int64_t handle) {
-    (void)handle; return rt_array_new(0);
+    (void)handle; return SIMPLE_RT_NONNULL("rt_process_observation_v4_cwd_digest_value", rt_array_new(0));
 }
 int rt_process_observation_v4_close_cwd_value(int64_t handle) { (void)handle; return 0; }
+#endif
+int64_t rt_process_observation_v4_reserve_value(void) { return -ENOTSUP; }
+int64_t rt_process_observation_v4_reserved_matches_value(int64_t token,
+    int64_t rh, int64_t rl, int64_t th, int64_t tl) {
+    (void)token; (void)rh; (void)rl; (void)th; (void)tl; return -ENOTSUP;
+}
+int64_t rt_process_observation_v4_reserved_state_value(int64_t token) {
+    (void)token; return -ENOTSUP;
+}
+int64_t rt_process_observation_v4_reserved_start_pinned_value(
+    int64_t token, int64_t executable, int64_t cwd, SplArray* binding) {
+    (void)token; (void)executable; (void)cwd; (void)binding; return -ENOTSUP;
+}
+int64_t rt_process_observation_v5_reserved_start_admitted_value(
+    int64_t token, int64_t executable, int64_t cwd, SplArray* binding,
+    int64_t expires_at_unix_ms) {
+    (void)token;(void)executable;(void)cwd;(void)binding;(void)expires_at_unix_ms;
+    return -ENOTSUP;
+}
+SplArray* rt_process_observation_v4_reserved_observe_value(
+    int64_t token, int64_t wait_ns, int64_t retire) {
+    (void)token; (void)wait_ns; (void)retire; return NULL;
+}
+SplArray* rt_process_observation_v4_reserved_ack_value(int64_t token, SplArray* digest) {
+    (void)token; (void)digest; return NULL;
+}
+int64_t rt_process_observation_v4_reserved_confirm_release_value(int64_t token) {
+    (void)token; return -ENOTSUP;
+}
+int64_t rt_process_observation_v6_reserved_start_deferred_admitted_value(
+        int64_t t,int64_t e,int64_t c,SplArray* b,int64_t expiry) {
+    (void)t;(void)e;(void)c;(void)b;(void)expiry;return -ENOTSUP;
+}
+int64_t rt_process_observation_v6_reserved_poll_launch_value(int64_t t,int64_t retire) {
+    (void)t;(void)retire;return -ENOTSUP;
+}
+
 SplArray* rt_process_observation_v4_start_value(SplArray* binding) {
-    (void)binding; return pov4_unavailable_tuple();
+    (void)binding; return SIMPLE_RT_NONNULL("rt_process_observation_v4_start_value", pov4_unavailable_tuple());
 }
 SplArray* rt_process_observation_v4_start_pinned_value(int64_t executable_handle,
         int64_t cwd_handle, SplArray* binding) {
-    (void)executable_handle; (void)cwd_handle; (void)binding; return pov4_unavailable_tuple();
+    (void)executable_handle; (void)cwd_handle; (void)binding; return SIMPLE_RT_NONNULL("rt_process_observation_v4_start_pinned_value", pov4_unavailable_tuple());
 }
 SplArray* rt_process_inspection_v1_start_pinned_value(int64_t executable_handle,
         int64_t cwd_handle, SplArray* binding, SplArray* atomic_input,
         SplArray* expected_input_digest) {
     (void)executable_handle; (void)cwd_handle; (void)binding;
     (void)atomic_input; (void)expected_input_digest;
-    return pov4_unavailable_tuple();
+    return SIMPLE_RT_NONNULL("rt_process_inspection_v1_start_pinned_value", pov4_unavailable_tuple());
 }
 SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket) {
     (void)ticket;
     SplArray* values = rt_array_new(75);
-    if (!values) return NULL;
+    if (!values) return SIMPLE_RT_NONNULL("rt_process_inspection_v1_input_receipt_value", NULL);
     for (int i=0;i<75;i++) if (!rt_array_push(values, rt_value_int(i==0 ? 1 : (i==10 ? ENOTSUP : 0)))) {
-        rt_array_free(values); return NULL;
+        rt_array_free(values); return SIMPLE_RT_NONNULL("rt_process_inspection_v1_input_receipt_value", NULL);
     }
-    return values;
+    return SIMPLE_RT_NONNULL("rt_process_inspection_v1_input_receipt_value", values);
 }
 SplArray* rt_process_observation_v4_poll_value(SplArray* ticket, int64_t wait_ns) {
-    (void)ticket; (void)wait_ns; return pov4_unavailable_tuple();
+    (void)ticket; (void)wait_ns; return SIMPLE_RT_NONNULL("rt_process_observation_v4_poll_value", pov4_unavailable_tuple());
 }
 SplArray* rt_process_observation_v4_cancel_value(SplArray* ticket, int64_t wait_ns) {
-    (void)ticket; (void)wait_ns; return pov4_unavailable_tuple();
+    (void)ticket; (void)wait_ns; return SIMPLE_RT_NONNULL("rt_process_observation_v4_cancel_value", pov4_unavailable_tuple());
 }
 SplArray* rt_process_observation_v4_collect_value(SplArray* ticket, int64_t wait_ns) {
-    (void)ticket; (void)wait_ns; return pov4_unavailable_tuple();
+    (void)ticket; (void)wait_ns; return SIMPLE_RT_NONNULL("rt_process_observation_v4_collect_value", pov4_unavailable_tuple());
 }
 SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket, SplArray* digest) {
-    (void)ticket; (void)digest; return pov4_unavailable_tuple();
+    (void)ticket; (void)digest; return SIMPLE_RT_NONNULL("rt_process_observation_v4_ack_collect_value", pov4_unavailable_tuple());
 }
+#endif
 #endif
 
 #endif
@@ -5518,4 +7176,111 @@ SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket, SplArray
  * cgroup/pidfd implementation as the existing owned-process ABI. */
 #if defined(__linux__) && !defined(RT_PROCESS_OWNED_CORE_ONLY)
 #include "runtime_linux_group_owner_impl.h"
+#endif
+
+#if !defined(RT_PROCESS_OWNED_CORE_ONLY)
+#include "runtime_sosix_darwin_snapshot_v1_impl.h"
+/* SOSIX Darwin Seatbelt activation leaf; unsupported receipt elsewhere. */
+#include "runtime_sosix_darwin_sandbox_v1.h"
+#endif
+
+/* Group-stream broker mode is explicitly unavailable outside its admitted
+ * Linux provider. Keep generic process/SOSIX facades link-complete without
+ * fabricating a lease or altering legacy Windows pipe ownership. */
+#if !defined(__linux__) || defined(RT_PROCESS_OWNED_CORE_ONLY)
+static SplArray* group_stream_unavailable_v2(int count) {
+    SplArray* values=rt_array_new((uint64_t)count);
+    if(!values)return NULL;
+    for(int i=0;i<count;i++) {
+        int64_t word=count==2?(i==1?ENOTSUP:0):(i==0?ENOTSUP:0);
+        if(!rt_array_push(values,rt_value_int(word))){rt_array_free(values);return NULL;}
+    }
+    return values;
+}
+SplArray* rt_linux_group_available_capacity_v1(const char* path, uint64_t path_len) {
+    (void)path; (void)path_len;
+    return group_stream_unavailable_v2(3);
+}
+SplArray* rt_linux_group_parent_acquire_v1(const char* attempt, uint64_t attempt_len,
+        const char* identity, uint64_t identity_len) {
+    (void)attempt; (void)attempt_len; (void)identity; (void)identity_len;
+    return group_stream_unavailable_v2(4);
+}
+SplArray* rt_linux_group_parent_acquire_at_v2(const char* path, uint64_t path_len,
+        const char* attempt, uint64_t attempt_len, const char* identity, uint64_t identity_len) {
+    (void)path; (void)path_len; (void)attempt; (void)attempt_len;
+    (void)identity; (void)identity_len;
+    return group_stream_unavailable_v2(4);
+}
+int64_t rt_linux_group_parent_release_v1(int64_t token) {
+    (void)token; return ENOTSUP;
+}
+SplArray* rt_linux_group_launch_broker_v1(const char* program, uint64_t program_len,
+        const char* digest, uint64_t digest_len, SplArray* args) {
+    (void)program; (void)program_len; (void)digest; (void)digest_len; (void)args;
+    return group_stream_unavailable_v2(2);
+}
+SplArray* rt_linux_group_start_v1(const char* program, uint64_t program_len,
+        const char* digest, uint64_t digest_len, SplArray* args, SplArray* environment,
+        const char* directory, uint64_t directory_len, const char* root, uint64_t root_len,
+        const char* identity, uint64_t identity_len, int64_t memory_limit, int64_t timeout_ms,
+        const char* stdout_path, uint64_t stdout_len, const char* stderr_path, uint64_t stderr_len) {
+    (void)program; (void)program_len; (void)digest; (void)digest_len; (void)args; (void)environment;
+    (void)directory; (void)directory_len; (void)root; (void)root_len; (void)identity; (void)identity_len;
+    (void)memory_limit; (void)timeout_ms; (void)stdout_path; (void)stdout_len;
+    (void)stderr_path; (void)stderr_len;
+    return group_stream_unavailable_v2(2);
+}
+SplArray* rt_linux_group_poll_v1(int64_t token) {
+    (void)token; return group_stream_unavailable_v2(10);
+}
+int64_t rt_linux_group_cancel_v1(int64_t token) {
+    (void)token; return ENOTSUP;
+}
+SplArray* rt_linux_group_collect_v1(int64_t token) {
+    (void)token; return group_stream_unavailable_v2(10);
+}
+int64_t rt_linux_group_stream_admit_profiled_v3(const char*d,int64_t dn,const char*b,int64_t bn,
+        const char*p,int64_t pn,SplArray*w) {
+    (void)d;(void)dn;(void)b;(void)bn;(void)p;(void)pn;(void)w;return ENOTSUP;
+}
+int64_t rt_linux_group_stream_verify_broker_profiled_v3(const char*d,int64_t dn,const char*b,int64_t bn,
+        const char*p,int64_t pn,SplArray*w) {
+    (void)d;(void)dn;(void)b;(void)bn;(void)p;(void)pn;(void)w;return ENOTSUP;
+}
+SplArray* rt_linux_group_parent_acquire_profiled_at_v3(const char*p,uint64_t pn,const char*a,uint64_t an,const char*i,uint64_t in) {
+    (void)p;(void)pn;(void)a;(void)an;(void)i;(void)in;return group_stream_unavailable_v2(4);
+}
+SplArray* rt_linux_group_launch_stream_broker_profiled_v3(const char*p,int64_t pn,const char*d,int64_t dn,
+        SplArray*a,int64_t g,const char*r,int64_t rn,const char*i,int64_t in,
+        const char*c,int64_t cn,int64_t deadline,const char*b,int64_t bn,const char*pd,int64_t pdn,SplArray*w) {
+    (void)p;(void)pn;(void)d;(void)dn;(void)a;(void)g;(void)r;(void)rn;(void)i;(void)in;
+    (void)c;(void)cn;(void)deadline;(void)b;(void)bn;(void)pd;(void)pdn;(void)w;return group_stream_unavailable_v2(2);
+}
+SplArray* rt_linux_group_start_stream_profiled_v3(const char*p,int64_t pn,const char*d,int64_t dn,
+        SplArray*a,SplArray*e,const char*c,int64_t cn,const char*r,int64_t rn,
+        const char*i,int64_t in,int64_t memory,int64_t timeout,int64_t deadline,
+        const char*b,int64_t bn,const char*pd,int64_t pdn,SplArray*w) {
+    (void)p;(void)pn;(void)d;(void)dn;(void)a;(void)e;(void)c;(void)cn;(void)r;(void)rn;
+    (void)i;(void)in;(void)memory;(void)timeout;(void)deadline;(void)b;(void)bn;(void)pd;(void)pdn;(void)w;
+    return group_stream_unavailable_v2(2);
+}
+int64_t rt_linux_group_stream_admit_v2(const char*p,int64_t n){(void)p;(void)n;return ENOTSUP;}
+SplArray* rt_linux_group_launch_stream_broker_v2(const char*p,int64_t pn,const char*d,int64_t dn,
+        SplArray*a,int64_t g,const char*r,int64_t rn,const char*i,int64_t in,
+        const char*c,int64_t cn,int64_t deadline) {
+    (void)p;(void)pn;(void)d;(void)dn;(void)a;(void)g;(void)r;(void)rn;(void)i;(void)in;
+    (void)c;(void)cn;(void)deadline;return group_stream_unavailable_v2(2);
+}
+SplArray* rt_linux_group_start_stream_v2(const char*p,int64_t pn,const char*d,int64_t dn,
+        SplArray*a,SplArray*e,const char*c,int64_t cn,const char*r,int64_t rn,
+        const char*i,int64_t in,int64_t memory,int64_t timeout,int64_t deadline) {
+    (void)p;(void)pn;(void)d;(void)dn;(void)a;(void)e;(void)c;(void)cn;(void)r;(void)rn;
+    (void)i;(void)in;(void)memory;(void)timeout;(void)deadline;return group_stream_unavailable_v2(2);
+}
+int64_t rt_linux_group_stream_recover_lease_v2(const char*r,int64_t n,const char*i,int64_t m){(void)r;(void)n;(void)i;(void)m;return -1;}
+int64_t rt_linux_group_stream_no_child_scope_v2(const char*r,int64_t n,const char*i,int64_t m){(void)r;(void)n;(void)i;(void)m;return -1;}
+int64_t rt_linux_group_stream_collect_no_child_v2(const char*r,int64_t n,const char*i,int64_t m){(void)r;(void)n;(void)i;(void)m;return ENOTSUP;}
+SplArray* rt_linux_group_collected_stream_v2(int64_t token){(void)token;return group_stream_unavailable_v2(10);}
+int64_t rt_linux_group_stream_release_inherited_v2(void){return ENOTSUP;}
 #endif

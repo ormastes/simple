@@ -1,0 +1,54 @@
+# P7 TargetHIR bench counters (PERF-TH-01). Pure, immutable counters for the
+# work a TargetHIR fan-out performs: one frozen HIR snapshot shared across N
+# explicit targets. decodes must stay 1 per snapshot regardless of N; every
+# other counter scales with N. Timing/RSS is captured by the bench harness
+# (scripts/bench/target_hir_bench.shs), never faked here.
+
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.target_hir.hir_freeze.{hir_snapshot_freeze, hir_snapshot_read}
+use compiler.hir.target_hir.target_hir.{target_hir_for_explicit}
+use compiler.hir.target_hir.target_hir_resolution.{target_hir_builder_new, target_hir_builder_resolve_required, target_hir_builder_freeze}
+
+struct TargetHirCounters:
+    resolutions: i64
+    probes: i64
+    decodes: i64
+    fresh_builds: i64
+
+fn target_hir_counters_zero() -> TargetHirCounters:
+    TargetHirCounters(resolutions: 0, probes: 0, decodes: 0, fresh_builds: 0)
+
+fn target_hir_counters_add(a: TargetHirCounters, b: TargetHirCounters) -> TargetHirCounters:
+    TargetHirCounters(resolutions: a.resolutions + b.resolutions, probes: a.probes + b.probes,
+        decodes: a.decodes + b.decodes, fresh_builds: a.fresh_builds + b.fresh_builds)
+
+fn target_hir_counters_text(c: TargetHirCounters) -> text:
+    "resolutions=" + c.resolutions.to_string() + " probes=" + c.probes.to_string() +
+        " decodes=" + c.decodes.to_string() + " fresh_builds=" + c.fresh_builds.to_string()
+
+# Freeze `module` once, decode it once, then resolve `required_types` for each
+# triple. Any unresolved target or type is a named Err, never a partial count.
+fn target_hir_bench_fanout(module: HirModule, triples: [text], required_types: [text]) -> Result<TargetHirCounters, text>:
+    if triples.len() == 0:
+        return Err("target_hir_bench_no_targets")
+    val snap = hir_snapshot_freeze(module, 0)
+    if snap.is_err():
+        return Err(snap.unwrap_err())
+    val frozen = snap.unwrap()
+    val decoded = hir_snapshot_read(frozen)
+    if decoded.is_err():
+        return Err(decoded.unwrap_err())
+    var c = TargetHirCounters(resolutions: 0, probes: 0, decodes: 1, fresh_builds: 0)
+    for triple in triples:
+        val view = target_hir_for_explicit(frozen.id, triple, "llvm", 23, "types")
+        if view.is_err():
+            return Err(view.unwrap_err())
+        val built = target_hir_builder_resolve_required(target_hir_builder_new(view.unwrap(), required_types))
+        if built.is_err():
+            return Err(built.unwrap_err())
+        val resolved = target_hir_builder_freeze(built.unwrap())
+        if resolved.is_err():
+            return Err(resolved.unwrap_err())
+        c = target_hir_counters_add(c, TargetHirCounters(resolutions: 1,
+            probes: required_types.len(), decodes: 0, fresh_builds: 1))
+    Ok(c)

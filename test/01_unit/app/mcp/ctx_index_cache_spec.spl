@@ -1,0 +1,148 @@
+"""
+# Context Index Generation Cache Specification
+
+**Requirements:** CTX-004 (repeated query hits cache), CTX-005 (modify/delete/rename invalidates), CTX-006 (stale cache cannot certify) — plan §3.4 / §9
+
+## Purpose
+
+Audience: maintainers of the repo-native context tools
+(`app.mcp.main_lazy_ctx_tools`) and anyone touching `.simple/ctx/chunks.sdn`.
+
+`simple_ctx_search` and `simple_ctx_batch_execute` used to re-read and
+re-parse the whole chunk store, and re-normalise every chunk body, on every
+call. The prepared index is now cached per process together with a typed
+generation key (store path + presence + byte length + SHA-256 digest) and is
+rebuilt only when that key changes.
+
+## Behavior
+
+- The pure decision (`ctx_cache_decide`) returns `hit` only for an identical
+  key; every other transition names why the index must be rebuilt.
+- A present store whose digest could not be computed is never a hit.
+- Two searches in one process over an unchanged store build the index once.
+- Append, delete and rename-replace of the store each force exactly one
+  rebuild, and the next search sees the new content.
+"""
+
+# @feature mcp_ctx_index_cache
+# tag: unit
+
+use std.spec
+use std.io_runtime.{env_set, env_get, dir_create, dir_remove_all, file_delete, time_now_unix_micros}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use app.mcp.ctx_index_cache.{CtxStorePath, CtxStoreLength, CtxStoreDigest, CtxGenerationKey, ctx_generation_key_missing, ctx_generation_key_present, ctx_cache_decide, ctx_cache_decision_label}
+use app.mcp.main_lazy_ctx_tools.{ctx_index_text, handle_simple_ctx_search, ctx_index_cache_rebuilds}
+
+const _DIGEST_A: text = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+const _DIGEST_B: text = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+fn _key(path: text, length: i64, digest: text) -> CtxGenerationKey:
+    ctx_generation_key_present(CtxStorePath(value: path), CtxStoreLength(bytes: length), CtxStoreDigest(sha256: digest))
+
+fn _decide(cached: CtxGenerationKey, current: CtxGenerationKey) -> text:
+    ctx_cache_decision_label(ctx_cache_decide(Some(cached), current))
+
+fn _fresh_store() -> text:
+    var base = env_get("SIMPLE_TEST_TMP") ?? ""
+    if base == "":
+        base = "build/tmp"
+    val dir = base + "/simple_ctx_cache_spec_" + str(time_now_unix_micros())
+    dir_remove_all(dir)
+    dir_create(dir, true)
+    env_set("SIMPLE_CTX_DIR", dir)
+    dir
+
+fn _rebuilds() -> i64:
+    ctx_index_cache_rebuilds().count
+
+describe "ctx index cache decision (pure)":
+    it "hits only for an identical generation key":
+        # @req CTX-004
+        step("an identical key is a hit")
+        assert_equal(_decide(_key("s/chunks.sdn", 100, _DIGEST_A), _key("s/chunks.sdn", 100, _DIGEST_A)), "hit")
+        step("no cached key is a cold start")
+        assert_equal(ctx_cache_decision_label(ctx_cache_decide(None, _key("s/chunks.sdn", 100, _DIGEST_A))), "cold_start")
+        step("an absent store seen twice is still a hit (empty index)")
+        val gone = ctx_generation_key_missing(CtxStorePath(value: "s/chunks.sdn"))
+        assert_equal(_decide(gone, gone), "hit")
+
+    it "names the reason for every rebuild: append, delete, create, move":
+        # @req CTX-005
+        val base = _key("s/chunks.sdn", 100, _DIGEST_A)
+        step("an append grows the store")
+        assert_equal(_decide(base, _key("s/chunks.sdn", 180, _DIGEST_B)), "store_grew")
+        step("a deleted store is not a hit")
+        assert_equal(_decide(base, ctx_generation_key_missing(CtxStorePath(value: "s/chunks.sdn"))), "store_deleted")
+        step("a store that appears after being absent is rebuilt")
+        assert_equal(_decide(ctx_generation_key_missing(CtxStorePath(value: "s/chunks.sdn")), base), "store_created")
+        step("a different store path never reuses the cached index")
+        assert_equal(_decide(base, _key("t/chunks.sdn", 100, _DIGEST_A)), "store_moved")
+
+    it "adverse: a shrunk store, a same-length rewrite and an unreadable digest all rebuild":
+        # @req CTX-006
+        val base = _key("s/chunks.sdn", 100, _DIGEST_A)
+        step("a store that shrank (truncated or upgraded) is rebuilt")
+        assert_equal(_decide(base, _key("s/chunks.sdn", 40, _DIGEST_B)), "store_shrank")
+        step("same length but a different digest is a rewrite, not a hit")
+        assert_equal(_decide(base, _key("s/chunks.sdn", 100, _DIGEST_B)), "store_rewritten")
+        step("a present store whose digest could not be computed is never a hit")
+        val no_digest = _key("s/chunks.sdn", 100, "")
+        assert_equal(_decide(no_digest, no_digest), "digest_unavailable")
+
+describe "ctx index cache wired into simple_ctx_search":
+    it "builds the index once for two searches over an unchanged store":
+        # @req CTX-004
+        step("index two documents into a fresh store")
+        _fresh_store()
+        assert_equal(ctx_index_text("the linker resolves symbols", "doc:linker").count, 1)
+        assert_equal(ctx_index_text("the parser builds an ast", "doc:parser").count, 1)
+        step("first search builds the index")
+        val before = _rebuilds()
+        val s1 = handle_simple_ctx_search("1", "{\"query\":\"linker\"}")
+        assert_contains(s1, "source=doc:linker")
+        assert_equal(_rebuilds(), before + 1)
+        step("second search reuses it without a rebuild")
+        val s2 = handle_simple_ctx_search("2", "{\"query\":\"parser\"}")
+        assert_contains(s2, "source=doc:parser")
+        assert_equal(_rebuilds(), before + 1)
+
+    it "rebuilds after an append and sees the new chunk":
+        # @req CTX-005
+        _fresh_store()
+        assert_equal(ctx_index_text("alpha bravo", "doc:a").count, 1)
+        handle_simple_ctx_search("3", "{\"query\":\"alpha\"}")
+        val before = _rebuilds()
+        step("append a new chunk to the store")
+        assert_equal(ctx_index_text("zulu yankee", "doc:z").count, 1)
+        step("the next search rebuilds once and finds it")
+        val s = handle_simple_ctx_search("4", "{\"query\":\"zulu\"}")
+        assert_contains(s, "source=doc:z")
+        assert_equal(_rebuilds(), before + 1)
+
+    it "adverse: a deleted store yields no stale hits":
+        # @req CTX-006
+        val dir = _fresh_store()
+        assert_equal(ctx_index_text("kilo lima", "doc:k").count, 1)
+        val s1 = handle_simple_ctx_search("5", "{\"query\":\"kilo\"}")
+        assert_contains(s1, "source=doc:k")
+        step("delete the store file")
+        file_delete(dir + "/chunks.sdn")
+        step("the cached index must not answer for the deleted store")
+        val s2 = handle_simple_ctx_search("6", "{\"query\":\"kilo\"}")
+        assert_contains(s2, "(0 hit(s))")
+        assert_false(s2.contains("source=doc:k"))
+
+    it "adverse: a store replaced by rename is re-read, not served from cache":
+        # @req CTX-005
+        val dir = _fresh_store()
+        assert_equal(ctx_index_text("mike november", "doc:old").count, 1)
+        handle_simple_ctx_search("7", "{\"query\":\"mike\"}")
+        val before = _rebuilds()
+        step("replace chunks.sdn through tmp-file + rename")
+        val replaced = "ctx_chunks | id, source, ts, bytes, text |\n    1, doc:new, 1, 13, oscar papa ok\n"
+        assert_true(file_atomic_write(dir + "/chunks.sdn", replaced))
+        step("the next search rebuilds and sees only the new content")
+        val s = handle_simple_ctx_search("8", "{\"query\":\"oscar mike\"}")
+        assert_contains(s, "source=doc:new")
+        assert_false(s.contains("source=doc:old"))
+        assert_equal(_rebuilds(), before + 1)

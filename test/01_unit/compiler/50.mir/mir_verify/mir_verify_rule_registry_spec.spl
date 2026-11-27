@@ -10,7 +10,8 @@ same lifecycle and promotion flag — every `"MIRV-…"` literal the verifier
 source reports must be a registered rule, and the reference baseline (a
 recorded measurement; it is not enforced as a ratchet)
 `config/compiler/mir_verify_baseline.sdn` must carry a count for every rule.
-Warn-first landing: every registry lifecycle is `warning`.
+Configurable rules retain their warn-first lifecycle. Missing type carriers
+are mandatory structural errors and are not represented in the historical baseline.
 """
 
 # @tag: unit, compiler, mir, verify
@@ -96,10 +97,11 @@ describe "MIR verify rule registry (std SDN parser)":
                 expect(bool_field(rows[i], "promotion_candidate")).to_equal(rules[i].promotion_candidate)
                 i = i + 1
 
-    it "warn-first landing: every rule's registry lifecycle is warning, and level resolution defaults to it":
+    it "keeps configurable rules warn-first and missing carriers mandatory":
         for rule in mir_verify_rules():
-            expect(rule.lifecycle).to_equal("warning")
-            expect(mir_verify_rule_level_from_spec(rule.id, "")).to_equal("warning")
+            val expected = if rule.id == "MIRV-001n": "error" else: "warning"
+            expect(rule.lifecycle).to_equal(expected)
+            expect(mir_verify_rule_level_from_spec(rule.id, "")).to_equal(expected)
 
     it "an unregistered rule id fails closed to error":
         expect(mir_verify_rule_lifecycle("MIRV-999")).to_equal("")
@@ -114,7 +116,7 @@ describe "MIR verify rule registry (std SDN parser)":
                 print "unregistered rule id reported by verifier: {id}"
             expect(found).to_equal(true)
 
-    it "the reference baseline parses and carries a count for every registered rule (shape only, not a ratchet)":
+    it "keeps historical baseline counts without fabricating evidence for the new structural rule":
         val doc = load_sdn(BASELINE_PATH)
         expect(doc != nil).to_equal(true)
         if val d = doc:
@@ -124,6 +126,9 @@ describe "MIR verify rule registry (std SDN parser)":
             if val c = counts:
                 for rule in mir_verify_rules():
                     val entry = c.get(rule.id)
-                    if entry == nil:
-                        print "baseline missing rule {rule.id}"
-                    expect(entry != nil).to_equal(true)
+                    if rule.id == "MIRV-001n":
+                        expect(entry == nil).to_equal(true)
+                    else:
+                        if entry == nil:
+                            print "baseline missing rule {rule.id}"
+                        expect(entry != nil).to_equal(true)

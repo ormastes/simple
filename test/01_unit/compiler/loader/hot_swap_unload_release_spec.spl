@@ -1,0 +1,89 @@
+# @req: REQ-BUILD-SRC-001
+# RB-LOAD-02: unloading a pinned module releases its hot-swap slot (one
+# lockless CAS on the slot generation plus refcount reclaim of every unpinned
+# image), so load/pin/unload cycles never accumulate live slots. A double
+# release and a release of an unknown path fail closed.
+# todo (remaining scope): doc/08_tracking/todo/rb_load_hot_swap_pinning_2026-11-22.md
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io_runtime.{file_write_bytes, dir_create_all}
+
+# Fixture paths live under build/test_tmp, absent on a fresh checkout:
+# create it so a write never silently fails and leaves nothing to load.
+fn write_fixture(path: text, bytes: [u8]) -> bool:
+    val _ = dir_create_all("build/test_tmp")
+    file_write_bytes(path, bytes)
+
+use compiler.driver.smf_writer.{SmfBuildOptions, Target, generate_smf_with_options}
+use compiler.driver.unit_identity.{UnitIdentity, unit_identity_encode}
+use compiler.driver.watcher.smf_manifest.{SmfManifestEntry, smf_manifest_entry_new_with_identity}
+use compiler.loader.module_loader_compat.{LoadResult, moduleloader_with_defaults, moduleloader_load, moduleloader_unload, moduleloader_pin_hot_swap, moduleloader_hot_swap_read_begin, moduleloader_release_hot_swap}
+use compiler.loader.hot_swap_pin.{hot_swap_slot_load, hot_swap_slot_release, hot_swap_read_begin, hot_swap_read_end}
+
+fn good_identity() -> UnitIdentity:
+    UnitIdentity(
+        iface_digest: "iface-v1-1111",
+        abi_digest: "abi-v1-aaaa",
+        target_triple: "x86_64-unknown-linux-gnu",
+        policy: "release",
+        capabilities: ["io"])
+
+fn image_with(code: u8) -> [u8]:
+    var opts = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+    opts.unit_identity_bytes = unit_identity_encode(good_identity()).bytes()
+    generate_smf_with_options([code, 0xC3], opts)
+
+fn pinned_row(path: text) -> SmfManifestEntry:
+    val id = good_identity()
+    smf_manifest_entry_new_with_identity(
+        "hs_unit.spl", path, 1, "cranelift", 0, true, false, false,
+        id.policy, id.capabilities, id.iface_digest, id.abi_digest, [], [], id.target_triple)
+
+fn is_success(r: LoadResult) -> bool:
+    match r:
+        case LoadResult.Success(_): true
+        case _: false
+
+describe "RB-LOAD-02: unload releases the hot-swap slot":
+    it "survives more load/pin/unload cycles than a slot has entries":
+        # @req: REQ-BUILD-SRC-001
+        val path = "build/test_tmp/hs_unload_cycle.smf"
+        expect(write_fixture(path, image_with(0x90))).to_equal(true)
+        var loader = moduleloader_with_defaults()
+        var i = 0
+        while i < 12:
+            step("cycle {i}: load, pin, read, unload")
+            expect(is_success(moduleloader_load(loader, path))).to_equal(true)
+            expect(moduleloader_pin_hot_swap(loader, path, pinned_row(path)).unwrap()).to_equal(0)
+            val read = moduleloader_hot_swap_read_begin(loader, path)
+            expect(read.is_ok()).to_equal(true)
+            hot_swap_read_end(read.unwrap())
+            moduleloader_unload(loader, path)
+            expect(moduleloader_hot_swap_read_begin(loader, path).is_err()).to_equal(true)
+            expect(loader.hot_swap_slots.len()).to_equal(0)
+            i = i + 1
+
+    it "fails closed on a double release and on an unknown path":
+        # @req: REQ-BUILD-SRC-001
+        val path = "build/test_tmp/hs_unload_double.smf"
+        expect(write_fixture(path, image_with(0x90))).to_equal(true)
+        var loader = moduleloader_with_defaults()
+        expect(is_success(moduleloader_load(loader, path))).to_equal(true)
+        expect(moduleloader_pin_hot_swap(loader, path, pinned_row(path)).is_ok()).to_equal(true)
+        step("first release succeeds, second is refused")
+        expect(moduleloader_release_hot_swap(loader, path).is_ok()).to_equal(true)
+        expect(moduleloader_release_hot_swap(loader, path).is_err()).to_equal(true)
+        step("unknown path is refused")
+        expect(moduleloader_release_hot_swap(loader, "build/test_tmp/never.smf").is_err()).to_equal(true)
+        moduleloader_unload(loader, path)
+
+    it "refuses readers and a second release on a released slot, but keeps a held pin":
+        # @req: REQ-BUILD-SRC-001
+        val slot = hot_swap_slot_load(pinned_row("x.smf"), image_with(0x90)).unwrap()
+        val held = hot_swap_read_begin(slot).unwrap()
+        expect(hot_swap_slot_release(slot).is_ok()).to_equal(true)
+        step("held pin keeps its image; new readers and re-release are refused")
+        expect(held.image().len() > 0).to_equal(true)
+        expect(hot_swap_read_begin(slot).is_err()).to_equal(true)
+        expect(hot_swap_slot_release(slot).is_err()).to_equal(true)
+        hot_swap_read_end(held)

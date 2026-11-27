@@ -262,3 +262,26 @@ make JIT networking work. `bin/simple test` under the interpreter passes
 `fix-implemented-verification-pending` status should not be read as "JIT
 sockets work" — they do not, on this host, today.
 
+
+## Verification 2026-11-25 (p2w3-al lane, Windows) — extern-resolution symptom gone; genuine JIT execution still unproven
+
+Runtime: committed `bin/simple.exe` (Rust bootstrap seed v1.0.0-rc.1,
+38,403,072 bytes), Windows Git Bash, worktree at release/1.0.0 @ 1457ddaa176.
+
+```
+SIMPLE_LIB=src SIMPLE_EXECUTION_MODE=jit bin/simple.exe run \
+    test/03_system/feature/usage/networking_jit_probe.spl
+```
+
+Result: `PROBE VERDICT: PASS` (all 11 socket checks ok), exit 0 — and **no**
+`unresolved external symbol 'native_tcp_bind'` line, so the original
+unresolved-extern symptom does not reproduce on this binary. However the JIT
+was still not genuinely exercised: the module demoted to the interpreter for a
+different, module-shape reason —
+`[engine-demotion] reason=jit-compile-error detail=module has 1 top-level
+statement(s) that the JIT entry path would silently skip (it calls 'main'
+only)` — before any extern resolution was attempted. So on Windows the 39-name
+manifest fix is confirmed to have removed the unresolved-symbol failure, while
+end-to-end JIT socket EXECUTION remains unproven, consistent with the
+2026-09-06 aarch64 note. Status unchanged: the remaining work is seed-side
+(`src/compiler_rust`), out of pure-Simple scope.

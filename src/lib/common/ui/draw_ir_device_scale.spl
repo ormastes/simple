@@ -1,0 +1,467 @@
+# Integer device-scale transform for a Draw IR composition.
+#
+# Layout runs in CSS px. A device-pixel-ratio render (e.g. k=4 = 384 dpi, the
+# >=300-dpi Chrome-parity gate) keeps that layout and multiplies every geometry
+# field and every LENGTH style prop Engine2D consumes by k, so Engine2D paints
+# into a (css_w*k)x(css_h*k) target. Text is NOT upscaled: `font-size`,
+# advances and glyph positions are multiplied, so Engine2D re-rasterizes the
+# real vector glyphs at k x the CSS size.
+#
+# Non-length props (colors, angles, permille gradient positions, counts,
+# identities, families, enum keywords) pass through unchanged. Raw CSS text
+# props (`box-shadow-raw`, `backdrop-filter`, `background-layers-raw`,
+# `box-geometry-raw-tokens`) are not rewritten: Engine2D reads their resolved
+# typed twins instead (`box-shadow-layer-*`, `backdrop-filter-realized-*`,
+# `background-tile-*`/`-shape-*`/`-radius-*`), which are scaled here. Layout
+# INPUT props (`width`, `margin-*`, `padding-*`, `left`, ...) are not consumed
+# by paint — the layout result is already in the command geometry — and may
+# carry sentinels, so they are left in CSS px.
+
+use common.ui.draw_ir.{
+    DrawEdge, DrawIrBatch, DrawIrCommand, DrawIrComposition, DrawIrPoint,
+    DrawIrRect, DrawIrStyleProp, draw_ir_next_composition_generation
+}
+use common.ui.draw_ir_v4_state.{DrawIrAffine2D, DrawIrFractionalGeometry}
+
+val _DIR_SCALE_I32_MIN: i64 = -2147483648
+val _DIR_SCALE_I32_MAX: i64 = 2147483647
+
+fn _dir_scale_i32(value: i32, k: i32) -> i32:
+    val scaled = (value as i64) * (k as i64)
+    if scaled < _DIR_SCALE_I32_MIN:
+        return _DIR_SCALE_I32_MIN as i32
+    if scaled > _DIR_SCALE_I32_MAX:
+        return _DIR_SCALE_I32_MAX as i32
+    scaled as i32
+
+fn _dir_scale_rect(rect: DrawIrRect, k: i32) -> DrawIrRect:
+    DrawIrRect(
+        present: rect.present,
+        x: _dir_scale_i32(rect.x, k),
+        y: _dir_scale_i32(rect.y, k),
+        width: _dir_scale_i32(rect.width, k),
+        height: _dir_scale_i32(rect.height, k)
+    )
+
+fn _dir_scale_points(points: [DrawIrPoint], k: i32) -> [DrawIrPoint]:
+    var out: [DrawIrPoint] = []
+    for point in points:
+        out.push(DrawIrPoint(x: _dir_scale_i32(point.x, k), y: _dir_scale_i32(point.y, k)))
+    out
+
+fn _dir_scale_i32_list(values: [i32], k: i32) -> [i32]:
+    var out: [i32] = []
+    for value in values:
+        out.push(_dir_scale_i32(value, k))
+    out
+
+# Strict decimal integer (optional leading "-"), at most 18 bytes.
+fn _dir_is_int(value: text) -> bool:
+    if value.byte_len() == 0 or value.byte_len() > 18:
+        return false
+    var index: i64 = 0
+    if value.char_code_at(0) == 45:
+        index = 1
+    if index >= value.byte_len():
+        return false
+    while index < value.byte_len():
+        val ch: i64 = value.char_code_at(index)
+        if ch < 48 or ch > 57:
+            return false
+        index = index + 1
+    true
+
+# Caller must check _dir_is_int first.
+fn _dir_parse_int(value: text) -> i64:
+    var index: i64 = 0
+    var negative = false
+    if value.char_code_at(0) == 45:
+        negative = true
+        index = 1
+    var parsed: i64 = 0
+    while index < value.byte_len():
+        val ch: i64 = value.char_code_at(index)
+        parsed = parsed * 10 + (ch - 48)
+        index = index + 1
+    if negative:
+        parsed = 0 - parsed
+    parsed
+
+fn _dir_scale_int_text(value: text, k: i32) -> text:
+    if not _dir_is_int(value):
+        return value
+    val scaled: i64 = _dir_parse_int(value) * (k as i64)
+    "{scaled}"
+
+# Scale the first `limit` integer tokens of a mixed value such as the legacy
+# `box-shadow` / `text-shadow` form `<x>px <y>px <color>`; later tokens (the
+# packed color) are not lengths.
+fn _dir_scale_leading_ints(value: text, limit: i32, k: i32) -> text:
+    val cs = value.chars()
+    var out = ""
+    var seen = 0
+    var index: i64 = 0
+    while index < cs.len():
+        val first: i64 = cs[index].char_code_at(0)
+        var starts = first >= 48 and first <= 57
+        if first == 45 and index + 1 < cs.len():
+            val next: i64 = cs[index + 1].char_code_at(0)
+            starts = next >= 48 and next <= 57
+        if starts and seen < limit:
+            var token = ""
+            if first == 45:
+                token = "-"
+                index = index + 1
+            while index < cs.len():
+                val ch: i64 = cs[index].char_code_at(0)
+                if ch < 48 or ch > 57:
+                    break
+                token = token + cs[index]
+                index = index + 1
+            out = out + _dir_scale_int_text(token, k)
+            seen = seen + 1
+        else:
+            out = out + cs[index]
+            index = index + 1
+    out
+
+fn _dir_scale_int_csv(value: text, k: i32) -> text:
+    if value == "":
+        return value
+    var out = ""
+    var first = true
+    for part in value.split(","):
+        if not first:
+            out = out + ","
+        out = out + _dir_scale_int_text(part, k)
+        first = false
+    out
+
+# Single-integer CSS px lengths that Engine2D (or the paint metadata it is
+# derived from) reads.
+fn _dir_is_scalar_length_key(key: text) -> bool:
+    if (key == "font-size" or key == "font-size-milli" or key == "line-height" or key == "letter-spacing" or
+        key == "word-spacing" or key == "letter-spacing-milli" or key == "word-spacing-milli" or key == "text-indent" or key == "stroke-width" or
+        key == "outline-width" or key == "outline-offset" or
+        key == "text-decoration-thickness" or key == "text-underline-offset" or
+        key == "box-shadow-blur-radius" or
+        key == "backdrop-filter-realized-blur-radius-px" or
+        key == "backdrop-filter-blur-milli" or
+        key == "border-radius"):
+        return true
+    if key.starts_with("border-") and (key.ends_with("-width") or key.ends_with("-radius")):
+        return true
+    if (key.starts_with("background-tile-") or key.starts_with("background-shape-") or
+        key.starts_with("background-radius-")):
+        return true
+    if key.starts_with("box-shadow-layer-"):
+        return (key.ends_with("-offset-x") or key.ends_with("-offset-y") or
+            key.ends_with("-blur-radius") or key.ends_with("-spread-radius"))
+    false
+
+# Nested CSS opacity groups (`css-opacity-group-nest`): `;`-separated
+# `root,x,y,w,h,opacity_milli` entries; x, y, w, h are lengths.
+fn _dir_scale_opacity_nest(value: text, k: i32) -> text:
+    var levels: [text] = []
+    for level in value.split(";"):
+        val f = level.split(",")
+        if f.len() != 6:
+            return value
+        levels.push(f[0] + "," + _dir_scale_int_text(f[1], k) + "," + _dir_scale_int_text(f[2], k) + "," + _dir_scale_int_text(f[3], k) + "," + _dir_scale_int_text(f[4], k) + "," + f[5])
+    levels.join(";")
+
+fn _dir_scale_style_prop(prop: DrawIrStyleProp, k: i32) -> DrawIrStyleProp:
+    val key = prop.key
+    if _dir_is_scalar_length_key(key):
+        return DrawIrStyleProp(key: key, value: _dir_scale_int_text(prop.value, k))
+    if key == "box-shadow" or key == "text-shadow":
+        return DrawIrStyleProp(key: key, value: _dir_scale_leading_ints(prop.value, 2, k))
+    # Radial gradient centre, radii and paint rect, and a gradient layer
+    # list's paint rect and per-layer ellipse / gradient line: Q10 px offsets
+    # from the command origin, every field a length, and the layers' tile
+    # rects and rounded clip radii. (Its stops,
+    # `background-gradient-layer-stops`, and repeat axes,
+    # `background-gradient-layer-repeat`, are not lengths: unscaled.)
+    if key == "font-advance-widths" or key == "background-gradient-radial-geometry" or key == "background-gradient-layer-geometry" or key == "background-gradient-layer-tiles" or key == "background-gradient-layer-clip-radii":
+        return DrawIrStyleProp(key: key, value: _dir_scale_int_csv(prop.value, k))
+    if key == "css-opacity-group-nest":
+        return DrawIrStyleProp(key: key, value: _dir_scale_opacity_nest(prop.value, k))
+    prop
+
+# A fractional font size scales from its milli value and is rounded in device
+# px, as the layout's device strut is: 14.4 px at k=4 is 58 (Chrome 57.6 px,
+# cap height 39 rows), not round(14.4) * 4 = 56. An exact .5 goes down as in
+# `font_milli_round_px`, which is the size layout assumes (`text_device_painter_dy`).
+fn _dir_scale_style(style: [DrawIrStyleProp], k: i32) -> [DrawIrStyleProp]:
+    var device_milli: i64 = 0
+    for prop in style:
+        if prop.key == "font-size-milli" and _dir_is_int(prop.value):
+            device_milli = _dir_parse_int(prop.value) * (k as i64)
+    var out: [DrawIrStyleProp] = []
+    for prop in style:
+        if prop.key == "font-size" and device_milli > 0:
+            val device_px: i64 = (device_milli + 499) / 1000
+            out.push(DrawIrStyleProp(key: prop.key, value: "{device_px}"))
+        else:
+            out.push(_dir_scale_style_prop(prop, k))
+    out
+
+# `device-y-offset`: device px a text command moves AFTER scaling, emitted only
+# by a layout that ran at this device scale (the browser engine's device-px
+# line metrics). It is not a CSS length: never scaled, always stripped here.
+# `device-x-offset`: the x twin, for a box Chrome places at a fractional
+# CSS x (the box after an auto-width button). Never scaled, always stripped.
+fn _dir_device_x_offset(style: [DrawIrStyleProp]) -> i32:
+    for prop in style:
+        if prop.key == "device-x-offset":
+            return _dir_parse_int(prop.value) as i32
+    0
+
+fn _dir_device_y_offset(style: [DrawIrStyleProp]) -> i32:
+    for prop in style:
+        if prop.key == "device-y-offset":
+            return _dir_parse_int(prop.value) as i32
+    0
+
+
+# `device-rect` = "dx,dy,w,h": a command painted on the DEVICE grid (the vector
+# parts of a native form control). Its x / y are the CSS origin of the control;
+# after scaling the rect is moved by (dx, dy) device px and takes the device
+# size (w, h). Never scaled, always stripped; [] when the command has none.
+fn _dir_device_rect(style: [DrawIrStyleProp]) -> [i32]:
+    for prop in style:
+        if prop.key == "device-rect":
+            var out: [i32] = []
+            for part in prop.value.split(","):
+                out.push(_dir_parse_int(part) as i32)
+            return out
+    []
+
+# `device-clip` = "dl,dt,dr,db": device px the clip's left, top, right and
+# bottom edges move AFTER scaling, each by the device offset of the box that
+# owns that edge (an overflow box, or the command's own box for an svg
+# viewport), not by the command's own offsets: a child shifted inside an
+# unshifted `overflow:hidden` box keeps that box's clip. Never scaled, always
+# stripped; [] when the command has none (the clip stays k x CSS).
+fn _dir_device_clip(style: [DrawIrStyleProp]) -> [i32]:
+    for prop in style:
+        if prop.key == "device-clip":
+            var out: [i32] = []
+            for part in prop.value.split(","):
+                out.push(_dir_parse_int(part) as i32)
+            return out
+    []
+
+# `device-extra-height` / `device-extra-width`: device px a box grows (or, if
+# negative, shrinks) AFTER scaling, for a form control
+# whose device-px size is not k x its CSS size. Never scaled, always stripped.
+fn _dir_device_extra(style: [DrawIrStyleProp], key: text) -> i32:
+    for prop in style:
+        if prop.key == key:
+            return _dir_parse_int(prop.value) as i32
+    0
+
+# `device-advance-widths`: the text run's per-codepoint advances measured at
+# k x the font size, device px: each pen is round(k x exact CSS pen), the
+# Chrome 159 model (a 16 px run at k=4 starts `of` at device 213, Chrome
+# 4 x 53.367 = 213.5; k x the whole-CSS-px pen says 212). They replace k x the
+# CSS advances so a glyph starts where Chrome puts it, not on a multiple of k.
+# Never scaled, always stripped; [] when the command has none.
+fn _dir_device_advances(style: [DrawIrStyleProp]) -> [i32]:
+    _dir_device_ints(style, "device-advance-widths")
+
+# `device-glyph-xs`: a shaped run's glyph pens shaped at k x the font size,
+# device px (floor of k x the exact CSS pen, Chrome's placement). They replace
+# k x the whole-CSS-px glyph xs. Never scaled, always stripped.
+fn _dir_device_ints(style: [DrawIrStyleProp], key: text) -> [i32]:
+    for prop in style:
+        if prop.key == key:
+            var out: [i32] = []
+            for part in prop.value.split(","):
+                out.push(_dir_parse_int(part) as i32)
+            return out
+    []
+
+# Device advances sum to round(k x exact run width), which can differ by a
+# few px from k x the whole-CSS-px command width; Engine2D rejects advances
+# that do not sum to the command width and repaints the run with the face's
+# own per-glyph advances, which drift (+11 device px over a 450 CSS px line).
+# The last advance moves no glyph, so it absorbs the difference; the width
+# never shrinks, so the clip band keeps the tail's ink. Returns the new width.
+fn _dir_anchor_device_advances(advances: [i32], width: i32) -> ([i32], i32):
+    var sum: i64 = 0
+    for advance in advances:
+        sum = sum + (advance as i64)
+    val target: i64 = if sum > (width as i64): sum else: width as i64
+    var out = advances
+    val n = out.len()
+    out[n - 1] = ((out[n - 1] as i64) + target - sum) as i32
+    (out, target as i32)
+
+# `pen-origin-milli`: a mid-line run's fractional start past its whole-CSS-px
+# command x (CSS milli-px before the device pass). With device advances present
+# the device pass moves the command x by the whole device px of k x origin and
+# keeps only the sub-device-px rest, now in DEVICE milli-px (0 drops the prop),
+# so the stager can start the run on Chrome's quarter device px and no later
+# stage applies the CSS-milli origin again.
+fn _dir_pen_origin_milli(style: [DrawIrStyleProp]) -> i64:
+    for prop in style:
+        if prop.key == "pen-origin-milli" and _dir_is_int(prop.value):
+            return _dir_parse_int(prop.value)
+    0
+
+fn _dir_round_div(value: i64, den: i64) -> i64:
+    if value >= 0:
+        return (value + den / 2) / den
+    0 - ((0 - value + den / 2) / den)
+
+fn _dir_without_key(style: [DrawIrStyleProp], key: text) -> [DrawIrStyleProp]:
+    var out: [DrawIrStyleProp] = []
+    for prop in style:
+        if prop.key != key:
+            out.push(prop)
+    out
+
+fn _dir_is_device_prop(key: text) -> bool:
+    key == "device-y-offset" or key == "device-x-offset" or key == "device-rect" or key == "device-extra-height" or key == "device-extra-width" or key == "device-advance-widths" or key == "device-clip" or key == "device-glyph-xs" or key == "glyph-pen-q4"
+
+fn _dir_grow_rect(rect: DrawIrRect, extra_width: i32, extra_height: i32) -> DrawIrRect:
+    if not rect.present:
+        return rect
+    DrawIrRect(present: true, x: rect.x, y: rect.y, width: rect.width + extra_width, height: rect.height + extra_height)
+
+fn _dir_without_device_props(style: [DrawIrStyleProp]) -> [DrawIrStyleProp]:
+    var out: [DrawIrStyleProp] = []
+    for prop in style:
+        if not _dir_is_device_prop(prop.key):
+            out.push(prop)
+    out
+
+fn _dir_has_device_prop(style: [DrawIrStyleProp]) -> bool:
+    for prop in style:
+        if _dir_is_device_prop(prop.key):
+            return true
+    false
+
+fn _dir_scale_command(command: DrawIrCommand, k: i32) -> DrawIrCommand:
+    var scaled = command
+    scaled.x = _dir_scale_i32(command.x, k) + _dir_device_x_offset(command.computed_style)
+    val device_dy = _dir_device_y_offset(command.computed_style)
+    scaled.y = _dir_scale_i32(command.y, k) + device_dy
+    scaled.width = _dir_scale_i32(command.width, k)
+    scaled.height = _dir_scale_i32(command.height, k)
+    scaled.advance_widths = _dir_scale_i32_list(command.advance_widths, k)
+    scaled.border_rect = _dir_scale_rect(command.border_rect, k)
+    scaled.content_rect = _dir_scale_rect(command.content_rect, k)
+    scaled.hit_rect = _dir_scale_rect(command.hit_rect, k)
+    scaled.clip_rect = _dir_scale_rect(command.clip_rect, k)
+    val has_device_prop = _dir_has_device_prop(command.computed_style)
+    var device_pen_origin_folded = false
+    var device_pen_residual: i64 = 0
+    if has_device_prop:
+        # The clip moves with the boxes that own its edges (`device-clip`):
+        # an svg snapped one device row up keeps its top row, an
+        # overflow:hidden box at a fractional left clips at its own column.
+        val device_clip = _dir_device_clip(command.computed_style)
+        if device_clip.len() == 4 and scaled.clip_rect.present:
+            scaled.clip_rect.x = scaled.clip_rect.x + device_clip[0]
+            scaled.clip_rect.y = scaled.clip_rect.y + device_clip[1]
+            scaled.clip_rect.width = scaled.clip_rect.width + device_clip[2] - device_clip[0]
+            scaled.clip_rect.height = scaled.clip_rect.height + device_clip[3] - device_clip[1]
+        val device_advances = _dir_device_advances(command.computed_style)
+        if device_advances.len() > 0 and device_advances.len() == command.advance_widths.len():
+            val anchored = _dir_anchor_device_advances(device_advances, scaled.width)
+            scaled.advance_widths = anchored.0
+            scaled.width = anchored.1
+            val origin = _dir_pen_origin_milli(command.computed_style)
+            if origin != 0:
+                val device_origin = origin * (k as i64)
+                val whole = _dir_round_div(device_origin, 1000)
+                scaled.x = scaled.x + (whole as i32)
+                device_pen_origin_folded = true
+                device_pen_residual = device_origin - whole * 1000
+        val device_rect = _dir_device_rect(command.computed_style)
+        if device_rect.len() == 4:
+            scaled.x = scaled.x + device_rect[0]
+            scaled.y = scaled.y + device_rect[1]
+            scaled.width = device_rect[2]
+            scaled.height = device_rect[3]
+        val extra_width = _dir_device_extra(command.computed_style, "device-extra-width")
+        val extra_height = _dir_device_extra(command.computed_style, "device-extra-height")
+        if extra_width != 0 or extra_height != 0:
+            scaled.width = scaled.width + extra_width
+            scaled.height = scaled.height + extra_height
+            scaled.border_rect = _dir_grow_rect(scaled.border_rect, extra_width, extra_height)
+            scaled.content_rect = _dir_grow_rect(scaled.content_rect, extra_width, extra_height)
+            scaled.hit_rect = _dir_grow_rect(scaled.hit_rect, extra_width, extra_height)
+    scaled.computed_style = _dir_scale_style(if has_device_prop: _dir_without_device_props(command.computed_style) else: command.computed_style, k)
+    if device_pen_origin_folded:
+        scaled.computed_style = _dir_without_key(scaled.computed_style, "pen-origin-milli")
+        # The sub-device-px rest of k x origin stays with the run, now in
+        # DEVICE milli-px: Chrome (subpixel positioning at k > 1) starts the
+        # glyphs on the quarter device px of the exact pen, which the stager's
+        # pen phases pick from origin + exact pen (`x<code>a</code>l` at k=4:
+        # the `l` inks 0.48 device px left of the whole-px start).
+        if device_pen_residual != 0:
+            scaled.computed_style.push(DrawIrStyleProp(key: "pen-origin-milli", value: device_pen_residual.to_text()))
+    scaled.points = _dir_scale_points(command.points, k)
+    var run = command.glyph_run
+    run.xs = _dir_scale_i32_list(command.glyph_run.xs, k)
+    if has_device_prop:
+        val device_xs = _dir_device_ints(command.computed_style, "device-glyph-xs")
+        if device_xs.len() > 0 and device_xs.len() == command.glyph_run.xs.len():
+            run.xs = device_xs
+    run.ys = _dir_scale_i32_list(command.glyph_run.ys, k)
+    scaled.glyph_run = run
+    if val edge = command.edge:
+        var scaled_edge: DrawEdge = edge
+        scaled_edge.points = _dir_scale_points(edge.points, k)
+        scaled_edge.style = _dir_scale_style(edge.style, k)
+        scaled.edge = scaled_edge
+    if val geometry = command.fractional_geometry:
+        val kf = k as f64
+        scaled.fractional_geometry = DrawIrFractionalGeometry(
+            x: geometry.x * kf, y: geometry.y * kf,
+            width: geometry.width * kf, height: geometry.height * kf)
+    if val affine = command.affine_transform:
+        # Device map = S * T * S^-1: the linear part is scale-invariant, only
+        # the translation is in px.
+        val kf = k as f64
+        scaled.affine_transform = DrawIrAffine2D(
+            a: affine.a, b: affine.b, c: affine.c, d: affine.d,
+            tx: affine.tx * kf, ty: affine.ty * kf)
+    scaled
+
+fn _dir_scale_batch(batch: DrawIrBatch, k: i32) -> DrawIrBatch:
+    var scaled = batch
+    var embedding = batch.embedding
+    embedding.x = _dir_scale_i32(batch.embedding.x, k)
+    embedding.y = _dir_scale_i32(batch.embedding.y, k)
+    embedding.width = _dir_scale_i32(batch.embedding.width, k)
+    embedding.height = _dir_scale_i32(batch.embedding.height, k)
+    scaled.embedding = embedding
+    var commands: [DrawIrCommand] = []
+    for command in batch.commands:
+        commands.push(_dir_scale_command(command, k))
+    scaled.commands = commands
+    scaled
+
+# Scale a CSS-px composition to device px by the integer factor k (k >= 1).
+# k == 1 returns the composition's batches unchanged; a scaled composition gets
+# a fresh generation because its content differs from the source.
+# reason: k is a dimensionless integer device-pixel ratio, not a unit-bearing quantity
+# @allow(primitive_api)
+pub fn draw_ir_composition_at_device_scale(composition: DrawIrComposition, k: i32) -> DrawIrComposition:
+    if k < 1:
+        panic("draw_ir_composition_at_device_scale: device scale must be >= 1")
+    if k == 1:
+        return composition
+    var batches: [DrawIrBatch] = []
+    for batch in composition.batches:
+        batches.push(_dir_scale_batch(batch, k))
+    var scaled = composition
+    scaled.batches = batches
+    scaled.generation = draw_ir_next_composition_generation()
+    scaled
+
+export draw_ir_composition_at_device_scale

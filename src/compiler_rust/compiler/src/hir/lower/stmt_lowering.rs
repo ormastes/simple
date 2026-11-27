@@ -97,6 +97,121 @@ pub(crate) fn is_known_asm_clobber(name: &str) -> bool {
         || name.starts_with("st")
 }
 
+/// True when evaluating the place twice could repeat user code: an index on
+/// the path that is not a local or a literal, or a root under a field/index
+/// that is not a variable (a call result). The top-level target itself is
+/// never treated as a value to hoist: a zero-argument `MethodCall` target is a
+/// property the backend writes back through its receiver.
+fn hir_place_index_has_effects(expr: &HirExpr) -> bool {
+    hir_place_effects_at(expr, true)
+}
+
+fn hir_index_is_effect_free(index: &HirExpr) -> bool {
+    matches!(
+        index.kind,
+        HirExprKind::Local(_) | HirExprKind::Integer(_) | HirExprKind::String(_) | HirExprKind::Bool(_)
+    )
+}
+
+fn hir_place_effects_at(expr: &HirExpr, top: bool) -> bool {
+    match &expr.kind {
+        HirExprKind::FieldAccess { receiver, .. } => hir_place_effects_at(receiver, false),
+        HirExprKind::Index { receiver, index } => !hir_index_is_effect_free(index) || hir_place_effects_at(receiver, false),
+        HirExprKind::MethodCall { receiver, args, .. } if args.is_empty() => hir_place_effects_at(receiver, false),
+        HirExprKind::Local(_) | HirExprKind::Global(_) => false,
+        _ => !top,
+    }
+}
+
+fn hir_expr_is_stable_operand(expr: &HirExpr) -> bool {
+    matches!(
+        expr.kind,
+        HirExprKind::Local(_)
+            | HirExprKind::Integer(_)
+            | HirExprKind::Float(_)
+            | HirExprKind::String(_)
+            | HirExprKind::Bool(_)
+            | HirExprKind::Nil
+    )
+}
+
+/// Rebuild the place with every effectful index (and a non-variable root
+/// under a field/index) bound to a temporary, receiver first so outer
+/// indexes are evaluated before inner ones.
+fn freeze_hir_place_indices(expr: HirExpr, ctx: &mut FunctionContext, prelude: &mut Vec<HirStmt>) -> HirExpr {
+    freeze_hir_place_at(expr, true, ctx, prelude)
+}
+
+fn freeze_hir_place_at(expr: HirExpr, top: bool, ctx: &mut FunctionContext, prelude: &mut Vec<HirStmt>) -> HirExpr {
+    let ty = expr.ty;
+    match expr.kind {
+        HirExprKind::FieldAccess { receiver, field_index } => HirExpr {
+            ty,
+            kind: HirExprKind::FieldAccess {
+                receiver: Box::new(freeze_hir_place_at(*receiver, false, ctx, prelude)),
+                field_index,
+            },
+        },
+        HirExprKind::Index { receiver, index } => {
+            let receiver = freeze_hir_place_at(*receiver, false, ctx, prelude);
+            let index = if hir_index_is_effect_free(&index) {
+                *index
+            } else {
+                let index_ty = index.ty;
+                let local = ctx.add_local(format!("$aug_idx_{}", ctx.locals.len()), index_ty, Mutability::Immutable);
+                prelude.push(HirStmt::Let { local_index: local, ty: index_ty, value: Some(*index) });
+                HirExpr { ty: index_ty, kind: HirExprKind::Local(local) }
+            };
+            HirExpr { ty, kind: HirExprKind::Index { receiver: Box::new(receiver), index: Box::new(index) } }
+        }
+        HirExprKind::MethodCall {
+            receiver,
+            method,
+            args,
+            dispatch,
+            generic_args,
+        } if args.is_empty() => HirExpr {
+            ty,
+            kind: HirExprKind::MethodCall {
+                receiver: Box::new(freeze_hir_place_at(*receiver, false, ctx, prelude)),
+                method,
+                args,
+                dispatch,
+                generic_args,
+            },
+        },
+        HirExprKind::Local(_) | HirExprKind::Global(_) => HirExpr { ty, kind: expr.kind },
+        other if top => HirExpr { ty, kind: other },
+        other => {
+            // A non-variable root (a call result) under a field/index is
+            // evaluated once into a temporary that the read and the write use.
+            let local = ctx.add_local(format!("$aug_root_{}", ctx.locals.len()), ty, Mutability::Immutable);
+            prelude.push(HirStmt::Let { local_index: local, ty, value: Some(HirExpr { ty, kind: other }) });
+            HirExpr { ty, kind: HirExprKind::Local(local) }
+        }
+    }
+}
+
+/// The surface (AST) operator of a compound assignment, for statements that
+/// are re-expressed as ordinary AST before lowering.
+fn compound_assign_ast_binop(op: ast::ast::AssignOp) -> Option<ast::ast::BinOp> {
+    match op {
+        ast::ast::AssignOp::AddAssign | ast::ast::AssignOp::SuspendAddAssign => Some(ast::ast::BinOp::Add),
+        ast::ast::AssignOp::SubAssign | ast::ast::AssignOp::SuspendSubAssign => Some(ast::ast::BinOp::Sub),
+        ast::ast::AssignOp::MulAssign | ast::ast::AssignOp::SuspendMulAssign => Some(ast::ast::BinOp::Mul),
+        ast::ast::AssignOp::DivAssign | ast::ast::AssignOp::SuspendDivAssign => Some(ast::ast::BinOp::Div),
+        ast::ast::AssignOp::ModAssign => Some(ast::ast::BinOp::Mod),
+        ast::ast::AssignOp::Assign | ast::ast::AssignOp::SuspendAssign => None,
+    }
+}
+
+/// A bare variable receiver: naming it twice runs no user code. A dotted
+/// path is not accepted, because a segment may itself be a forwarded getter
+/// that would then run twice.
+fn ast_receiver_is_variable_path(expr: &ast::ast::Expr) -> bool {
+    matches!(expr, ast::ast::Expr::Identifier(_))
+}
+
 fn compound_assign_binop(op: ast::ast::AssignOp) -> Option<BinOp> {
     match op {
         ast::ast::AssignOp::AddAssign | ast::ast::AssignOp::SuspendAddAssign => Some(BinOp::Add),
@@ -151,7 +266,10 @@ impl Lowerer {
     /// Preserve only an exact declared trait identity for a local receiver.
     /// This does not change the runtime value or DI/security type-name hints.
     pub(super) fn declared_trait_dispatch(&self, declared: &ast::Type) -> Option<HirTraitDispatch> {
-        let ast::Type::Simple(name) = declared else { return None; };
+        let name = match declared {
+            ast::Type::Simple(name) | ast::Type::Generic { name, .. } => name,
+            _ => return None,
+        };
         self.trait_declaration_for_current_owner(name)
     }
 
@@ -166,14 +284,23 @@ impl Lowerer {
         }
     }
 
-    /// The if-let / match subject temp inherits the payload trait of the
-    /// `Option<Trait>` local it was read from.
+    /// The subject temp inherits only its Optional payload's exact trait
+    /// identity. A field uses its authored type, never a method-name guess.
     pub(super) fn carry_optional_trait_subject(&self, subject: &Expr, subject_idx: usize, ctx: &mut FunctionContext) {
-        let Expr::Identifier(name) = subject else { return; };
-        let Some(dispatch) = ctx.lookup(name).and_then(|index| ctx.optional_trait_payloads.get(&index)).cloned() else {
-            return;
+        let dispatch = match subject {
+            Expr::Identifier(name) => ctx.lookup(name)
+                .and_then(|index| ctx.optional_trait_payloads.get(&index)).cloned(),
+            Expr::FieldAccess { receiver, field } => {
+                match self.receiver_field_declared_type(receiver, field, ctx) {
+                    Some((owner, ast::Type::Optional(inner))) => self.declared_trait_dispatch_in_owner(inner, owner),
+                    _ => None,
+                }
+            }
+            _ => None,
         };
-        ctx.optional_trait_payloads.insert(subject_idx, dispatch);
+        if let Some(dispatch) = dispatch {
+            ctx.optional_trait_payloads.insert(subject_idx, dispatch);
+        }
     }
 
     /// Give the PAYLOAD binding of an `Option<Trait>` subject its declared
@@ -200,7 +327,27 @@ impl Lowerer {
         }
     }
 
+    pub(super) fn declared_trait_dispatch_in_owner(&self, declared: &ast::Type, owner: &str) -> Option<HirTraitDispatch> {
+        let name = match declared {
+            ast::Type::Simple(name) | ast::Type::Generic { name, .. } => name,
+            _ => return None,
+        };
+        self.trait_declaration_for_owner(name, owner)
+    }
+
+    fn trait_declaration_for_owner(&self, authored_name: &str, owner: &str) -> Option<HirTraitDispatch> {
+        let declared_in = |owner: &str, name: &str| {
+            self.trait_declared_owners.get(std::path::Path::new(owner)).and_then(|traits| traits.get(name)).cloned()
+        };
+        if let Some(found) = declared_in(owner, authored_name) { return Some(found); }
+        let (source_owner, source_name) = self.flatten_owner_import_bindings.get(owner)?.get(authored_name)?;
+        declared_in(source_owner, source_name)
+    }
+
     pub(super) fn trait_declaration_for_current_owner(&self, authored_name: &str) -> Option<HirTraitDispatch> {
+        if let Some(owner) = self.current_function_owner.as_deref() {
+            if let Some(found) = self.trait_declaration_for_owner(authored_name, owner) { return Some(found); }
+        }
         self.trait_declaration_in_file(authored_name, self.current_file.as_deref())
     }
 
@@ -226,6 +373,9 @@ impl Lowerer {
                 Expr::Identifier(name) if ctx.lookup(name).is_none() => format!("{}.{}", name, method),
                 _ => return None,
             },
+            // `val s = base.field` where `field` is declared with a trait
+            // type: the same owner a direct `base.field.m()` call gets.
+            Expr::FieldAccess { receiver, field } => return self.trait_field_dispatch(receiver, field, ctx),
             _ => return None,
         };
         // A local declaration (including a None tombstone) wins over an alias.
@@ -369,8 +519,9 @@ impl Lowerer {
                     Expr::ExistsCheck(inner) => inner.as_ref(),
                     other => other,
                 };
-                let subject = self.lower_expr(condition_expr, ctx)?;
+                let subject = self.lower_subject_for_patterns(condition_expr, [pattern], true, ctx)?;
                 let subject_ty = subject.ty;
+                self.validate_result_presence_binding(subject_ty, pattern, condition)?;
                 let subject_idx = ctx.locals.len();
                 ctx.add_local("$if_let_subject_elif".to_string(), subject_ty, Mutability::Immutable);
                 self.carry_optional_trait_subject(condition_expr, subject_idx, ctx);
@@ -427,6 +578,9 @@ impl Lowerer {
     pub(super) fn lower_node(&mut self, node: &Node, ctx: &mut FunctionContext) -> LowerResult<Vec<HirStmt>> {
         match node {
             Node::Let(let_stmt) => {
+                if let Some(message) = crate::impl_duplicate_check::let_literal_mismatch(let_stmt) {
+                    return Err(LowerError::Unsupported(message));
+                }
                 // Check for tuple pattern destructuring: val (a, b) = expr
                 // Also handle Pattern::Typed wrapping a tuple pattern
                 let inner_pattern = match &let_stmt.pattern {
@@ -437,22 +591,35 @@ impl Lowerer {
                     return self.lower_tuple_destructuring(patterns, let_stmt, ctx);
                 }
 
+                // Extract type annotation from either let_stmt.ty OR Pattern::Typed
+                // BEFORE lowering the value so generic calls like `iter.collect()`
+                // can infer their target container type from `let x: List<i64> = ...`.
+                let pattern_type = Self::extract_pattern_type(&let_stmt.pattern);
+                let explicit_target_ty = if let Some(t) = &let_stmt.ty {
+                    self.resolve_type(t).ok()
+                } else if let Some(pt) = pattern_type {
+                    self.resolve_type(pt).ok()
+                } else {
+                    None
+                };
+
                 // Lower the value first (if present) to get the actual TypeId
                 // This avoids the issue where infer_type and lower_expr create
                 // different TypeIds for the same type (e.g., array types)
                 let mut value = if let Some(v) = &let_stmt.value {
-                    let lowered = self.lower_expr(v, ctx)?;
-                    Some(lowered)
+                    let prev_expected = std::mem::replace(
+                        &mut self.expected_target_type,
+                        explicit_target_ty.filter(|ty| *ty != TypeId::ANY && *ty != TypeId::VOID),
+                    );
+                    let lowered = self.lower_expr(v, ctx);
+                    self.expected_target_type = prev_expected;
+                    Some(lowered?)
                 } else {
                     None
                 };
                 if matches!(inner_pattern, Pattern::Wildcard) {
                     return Ok(value.map(HirStmt::Expr).into_iter().collect());
                 }
-
-                // Extract type annotation from either let_stmt.ty OR Pattern::Typed
-                // In Simple syntax, `var x: T = v` puts the type in Pattern::Typed
-                let pattern_type = Self::extract_pattern_type(&let_stmt.pattern);
 
                 // Use explicit type annotation if provided, otherwise use the
                 // type from the lowered value to ensure TypeId consistency
@@ -471,6 +638,15 @@ impl Lowerer {
                 } else {
                     return Err(LowerError::CannotInferType);
                 };
+                if has_explicit_type {
+                    if let Some(v) = value.as_ref() {
+                        let slot = format!(
+                            "binding `{}`",
+                            Self::extract_pattern_name(&let_stmt.pattern).unwrap_or_default()
+                        );
+                        self.reject_callable_for_enum_slot(ty, v, &slot)?;
+                    }
+                }
 
                 let name = Self::extract_pattern_name(&let_stmt.pattern).unwrap_or_else(|| {
                     if self.lenient_types {
@@ -623,8 +799,35 @@ impl Lowerer {
                 let trait_dispatch_owner = self.declared_local_trait_owner(
                     let_stmt.ty.as_ref().or(pattern_type), let_stmt.value.as_ref(), ctx,
                 );
+                let unit_kind = match (&let_stmt.ty, &let_stmt.value) {
+                    (Some(t), _) => Self::simple_type_name(t).and_then(|n| self.unit_kind_of_type_name(&n)),
+                    (None, Some(init)) => match self.unit_kind_of_expr(init, ctx) {
+                        super::type_registration::UnitKind::Unit(u) => Some(Some(u)),
+                        super::type_registration::UnitKind::Raw => Some(None),
+                        super::type_registration::UnitKind::Unknown => None,
+                    },
+                    _ => None,
+                };
+                let type_name = match (&let_stmt.ty, &let_stmt.value) {
+                    _ if unit_kind.is_some() => None,
+                    (Some(t), _) => Self::simple_type_name(t),
+                    (None, Some(init)) => self.type_name_of_expr(init, ctx),
+                    _ => None,
+                };
+                let lambda_sig = match (&let_stmt.ty, &let_stmt.value) {
+                    (None, Some(Expr::Lambda { params, body, .. })) => Some(self.lambda_unit_sig(params, body, ctx)),
+                    _ => None,
+                };
+                ctx.bind_local_unit_facts(&name, unit_kind, type_name, lambda_sig);
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
                 ctx.locals[local_index].trait_dispatch_owner = trait_dispatch_owner;
+                if let Some(HirExprKind::Lambda { params, body, .. }) = value.as_ref().map(|v| &v.kind) {
+                    let fn_ty = self.module.types.register(HirType::Function {
+                        params: params.iter().map(|(_, ty)| *ty).collect(),
+                        ret: body.ty,
+                    });
+                    ctx.lambda_local_fn_types.insert(local_index, fn_ty);
+                }
                 self.record_optional_trait_payload(let_stmt.ty.as_ref().or(pattern_type), local_index, ctx);
                 if let Some(result_payload_types) = result_projection_type {
                     ctx.result_projection_types.insert(local_index, result_payload_types);
@@ -637,12 +840,35 @@ impl Lowerer {
             }
 
             Node::Assignment(assign) => {
+                // A local named `vec` must win over the SIMD literal form:
+                // the parser reads `vec[...]` as Expr::VecLiteral without
+                // scope knowledge, so `vec[i] = x` reached MIR as a
+                // VecLiteral lvalue and failed with "complex lvalue".
+                // When a single-element literal's `vec` is bound, rewrite
+                // the target to an ordinary index assignment.
+                // Bug: local_named_vec_makes_index_assignment_a_vec_literal_lvalue_2026-09-05
+                let vec_index_target;
+                let assign_target = if let ast::ast::Expr::VecLiteral(elements) = &assign.target {
+                    if elements.len() == 1
+                        && (ctx.lookup("vec").is_some() || self.globals.contains_key("vec"))
+                    {
+                        vec_index_target = ast::ast::Expr::Index {
+                            receiver: Box::new(ast::ast::Expr::Identifier("vec".to_string())),
+                            index: Box::new(elements[0].clone()),
+                        };
+                        &vec_index_target
+                    } else {
+                        &assign.target
+                    }
+                } else {
+                    &assign.target
+                };
                 // MUST run BEFORE lowering the target: lowering a bare, unbound
                 // identifier in assignment position is exactly what mints the
                 // fresh local that shadows the receiver's field and swallows the
                 // write. Checking afterwards would inspect the already-created
                 // local and see nothing wrong.
-                if let ast::ast::Expr::Identifier(name) = &assign.target {
+                if let ast::ast::Expr::Identifier(name) = assign_target {
                     self.check_implicit_self_field_assignment(name, ctx)?;
 
                     // Implicit local declaration: a PLAIN `n = 5` whose target is a
@@ -682,7 +908,52 @@ impl Lowerer {
                     }
                 }
 
-                let target = self.lower_expr(&assign.target, ctx)?;
+                if let ast::ast::Expr::FieldAccess { receiver, field } = assign_target {
+                    if compound_assign_binop(assign.op).is_none() {
+                        if let Some(setter) = self.setter_forward_name(receiver, field, ctx) {
+                            let call = ast::ast::Expr::MethodCall {
+                                receiver: receiver.clone(),
+                                method: setter,
+                                args: vec![ast::ast::Argument::new(None, assign.value.clone())],
+                                generic_args: vec![],
+                            };
+                            return Ok(vec![HirStmt::Expr(self.lower_expr(&call, ctx)?)]);
+                        }
+                    } else if let Some(op) = compound_assign_ast_binop(assign.op) {
+                        // `recv.prop op= v` through a getter/setter pair: the
+                        // RHS into a temporary first, then one getter read and
+                        // one setter write (owner contract 2026-11-06). Only a
+                        // bare variable receiver qualifies, so naming it twice
+                        // evaluates nothing twice; the read re-uses the
+                        // ordinary get_/is_ forwarding of `recv.prop`.
+                        // Bug: doc/08_tracking/bug/compound_assign_through_property_setter_fails_seed_2026-11-06.md
+                        if ast_receiver_is_variable_path(receiver) {
+                            if let Some(setter) = self.setter_forward_name(receiver, field, ctx) {
+                                let value = self.lower_expr(&assign.value, ctx)?;
+                                let rhs_ty = value.ty;
+                                let rhs_name = format!("$aug_rhs_{}", ctx.locals.len());
+                                let rhs_local = ctx.add_local(rhs_name.clone(), rhs_ty, Mutability::Immutable);
+                                let mut stmts =
+                                    vec![HirStmt::Let { local_index: rhs_local, ty: rhs_ty, value: Some(value) }];
+                                let combined = ast::ast::Expr::Binary {
+                                    op,
+                                    left: Box::new(assign_target.clone()),
+                                    right: Box::new(ast::ast::Expr::Identifier(rhs_name)),
+                                };
+                                let call = ast::ast::Expr::MethodCall {
+                                    receiver: receiver.clone(),
+                                    method: setter,
+                                    args: vec![ast::ast::Argument::new(None, combined)],
+                                    generic_args: vec![],
+                                };
+                                stmts.push(HirStmt::Expr(self.lower_expr(&call, ctx)?));
+                                return Ok(stmts);
+                            }
+                        }
+                    }
+                }
+
+                let target = self.lower_expr(assign_target, ctx)?;
                 let value = self.lower_expr(&assign.value, ctx)?;
 
                 // E1052: Check for self mutation in immutable fn method
@@ -761,19 +1032,47 @@ impl Lowerer {
                 //
                 // Applied after the checks above so every existing diagnostic still sees
                 // the user-written right-hand side rather than the synthesized binary op.
-                let value = match compound_assign_binop(assign.op) {
-                    Some(op) => HirExpr {
-                        ty: target.ty,
-                        kind: HirExprKind::Binary {
-                            op,
-                            left: Box::new(target.clone()),
-                            right: Box::new(value),
-                        },
-                    },
-                    None => value,
+                // Evaluation order contract (owner decision 2026-11-06, data plan
+                // W2a): RHS first, then the place once, then one read and one
+                // write. A non-trivial RHS is hoisted into a temporary first;
+                // when the place's root or an index on its path may run user
+                // code, those are hoisted too (outer to inner) so the read and
+                // the write reuse them instead of re-evaluating the place.
+                let mut prelude: Vec<HirStmt> = Vec::new();
+                let (target, value) = match compound_assign_binop(assign.op) {
+                    Some(op) => {
+                        let value = if hir_expr_is_stable_operand(&value) {
+                            value
+                        } else {
+                            let rhs_ty = value.ty;
+                            let rhs_local = ctx.add_local(
+                                format!("$aug_rhs_{}", ctx.locals.len()),
+                                rhs_ty,
+                                Mutability::Immutable,
+                            );
+                            prelude.push(HirStmt::Let { local_index: rhs_local, ty: rhs_ty, value: Some(value) });
+                            HirExpr { ty: rhs_ty, kind: HirExprKind::Local(rhs_local) }
+                        };
+                        let target = if hir_place_index_has_effects(&target) {
+                            freeze_hir_place_indices(target, ctx, &mut prelude)
+                        } else {
+                            target
+                        };
+                        let combined = HirExpr {
+                            ty: target.ty,
+                            kind: HirExprKind::Binary {
+                                op,
+                                left: Box::new(target.clone()),
+                                right: Box::new(value),
+                            },
+                        };
+                        (target, combined)
+                    }
+                    None => (target, value),
                 };
 
-                Ok(vec![HirStmt::Assign { target, value }])
+                prelude.push(HirStmt::Assign { target, value });
+                Ok(prelude)
             }
 
             Node::Return(ret) => {
@@ -787,8 +1086,22 @@ impl Lowerer {
                     // `lower_condition` prevents at direct condition sites,
                     // just laundered through a return. 42 owned `-> bool`
                     // functions in this repo return a bare `.?`.
-                    let expr = self.lower_bool_return_expr(v, ctx)?;
-                    self.validate_declared_return_type(ctx.return_type, expr.ty)?;
+                    let prev_expected = std::mem::replace(
+                        &mut self.expected_target_type,
+                        (ctx.return_type != TypeId::ANY && ctx.return_type != TypeId::VOID).then_some(ctx.return_type),
+                    );
+                    let expr = self.lower_bool_return_expr(v, ctx);
+                    self.expected_target_type = prev_expected;
+                    let expr = expr?;
+                    // The verdict names the function but not where it is:
+                    // imported modules lower under the entry file's path.
+                    self.validate_declared_return_type(ctx.return_type, expr.ty)
+                        .map_err(|error| match error {
+                            LowerError::Unsupported(message) => {
+                                LowerError::Unsupported(format!("{message} (return at line {})", ret.span.line))
+                            }
+                            other => other,
+                        })?;
 
                     // Check for returning local reference (E2005)
                     // If the return expression is a variable reference, check its origin
@@ -833,8 +1146,9 @@ impl Lowerer {
                         Expr::ExistsCheck(inner) => inner.as_ref(),
                         other => other,
                     };
-                    let subject_hir = self.lower_expr(condition_expr, ctx)?;
+                    let subject_hir = self.lower_subject_for_patterns(condition_expr, if_stmt.let_pattern.iter(), true, ctx)?;
                     let subject_ty = subject_hir.ty;
+                    self.validate_result_presence_binding(subject_ty, pattern, &if_stmt.condition)?;
 
                     // 2. Create temp local for subject value
                     let subject_idx = ctx.locals.len();
@@ -981,8 +1295,9 @@ impl Lowerer {
                         Expr::ExistsCheck(inner) => inner.as_ref(),
                         other => other,
                     };
-                    let subject_hir = self.lower_expr(condition_expr, ctx)?;
+                    let subject_hir = self.lower_subject_for_patterns(condition_expr, while_stmt.let_pattern.iter(), true, ctx)?;
                     let subject_ty = subject_hir.ty;
+                    self.validate_result_presence_binding(subject_ty, pattern, &while_stmt.condition)?;
 
                     let subject_idx = ctx.locals.len();
                     ctx.add_local("$while_let_subject".to_string(), subject_ty, Mutability::Immutable);
@@ -1263,13 +1578,36 @@ impl Lowerer {
                         && self.resolve_import_alias("assert").is_none()
                         && self.named_callable_value_type("assert").is_none()
                         && !self.globals.contains_key("assert")
-                        && args.len() == 1
-                        && args[0].name.is_none()
+                        && (1..=2).contains(&args.len())
+                        && args.iter().all(|arg| arg.name.is_none())
                     {
+                        // `assert(COND[, MSG])`: the pure-Simple front end
+                        // desugars this to `__assert(cond[, msg])`
+                        // (parser_stmts.spl). `HirStmt::Assert.message` is a
+                        // plain string, so only a literal (or the literal parts
+                        // of an f-string, as `parse_string_message` does for the
+                        // keyword form) is carried; any other message expression
+                        // is dropped from the native diagnostic exactly as the
+                        // pure-Simple C backend drops it (cg_expr.spl,
+                        // `spl_assert` takes only the condition). The condition
+                        // is still checked either way.
                         let condition = self.lower_condition(&args[0].value, ctx)?;
+                        let message = args.get(1).and_then(|arg| match &arg.value {
+                            Expr::String(text) | Expr::TypedString(text, _) => Some(text.clone()),
+                            Expr::FString { parts, .. } => Some(
+                                parts
+                                    .iter()
+                                    .filter_map(|part| match part {
+                                        simple_parser::ast::FStringPart::Literal(text) => Some(text.as_str()),
+                                        _ => None,
+                                    })
+                                    .collect::<String>(),
+                            ),
+                            _ => None,
+                        });
                         return Ok(vec![HirStmt::Assert {
                             condition,
-                            message: None,
+                            message,
                             span: None,
                         }]);
                     }
@@ -1285,13 +1623,24 @@ impl Lowerer {
                 if let Some(stmts) = self.try_lower_bdd_statement(expr, ctx)? {
                     return Ok(stmts);
                 }
-                let hir_expr = self.lower_expr(expr, ctx)?;
+                // A match in statement position fails closed when no arm
+                // matches, exactly like a value-position one (owner decision
+                // 2026-11-14). The implicit tail of a non-void function IS the
+                // return value, so its failure is reported as the expression form.
+                let hir_expr = if let Expr::Match { subject, arms } = expr {
+                    let is_value_tail = self.value_tail_match == Some(node as *const Node as usize);
+                    let form = if is_value_tail { "expression" } else { "statement" };
+                    self.lower_match_with(subject, arms, form, ctx)?
+                } else {
+                    self.lower_expr(expr, ctx)?
+                };
                 Ok(vec![HirStmt::Expr(hir_expr)])
             }
 
             Node::Match(match_stmt) => {
                 // Lower match statement to a chain of If-Else statements
-                self.lower_match_stmt(match_stmt, ctx)
+                let is_value_tail = self.value_tail_match == Some(node as *const Node as usize);
+                self.lower_match_stmt(match_stmt, is_value_tail, ctx)
             }
 
             Node::Pass(_) => {
@@ -1370,10 +1719,31 @@ impl Lowerer {
                     move_mode: ast::MoveMode::Copy,
                     capture_all: false,
                 };
+                // Bind the closure at its DECLARED signature when the fn is
+                // fully annotated. HIR types a lambda as its BODY type, so an
+                // unannotated binding is not a function type, and a call to it
+                // from INSIDE another nested fn (where it is a capture, out of
+                // reach of the intraprocedural `propagate_closure_call_types`)
+                // got an `ANY` call boundary that the JIT closure ABI refuses --
+                // dropping the whole module to the interpreter. Partially
+                // annotated, generic or variadic fns keep the untyped binding.
+                // Bug: doc/08_tracking/bug/jit_lowering_clamp_f_engine_color_2026-07-02.md
+                let declared_fn_ty = match &f.return_type {
+                    Some(ret)
+                        if f.generic_params.is_empty()
+                            && f.params.iter().all(|p| p.ty.is_some() && !p.variadic) =>
+                    {
+                        Some(ast::Type::Function {
+                            params: f.params.iter().filter_map(|p| p.ty.clone()).collect(),
+                            ret: Some(Box::new(ret.clone())),
+                        })
+                    }
+                    _ => None,
+                };
                 let binding = ast::LetStmt {
                     span: f.span,
                     pattern: Pattern::Identifier(f.name.clone()),
-                    ty: None,
+                    ty: declared_fn_ty,
                     value: Some(lambda),
                     mutability: Mutability::Immutable,
                     storage_class: ast::StorageClass::Auto,
@@ -1394,7 +1764,10 @@ impl Lowerer {
             | Node::CommonUseStmt(_)
             | Node::ExportUseStmt(_)
             | Node::StructuredExportStmt(_)
-            | Node::AutoImportStmt(_) => Ok(vec![]),
+            | Node::AutoImportStmt(_)
+            | Node::FriendDecl(_)
+            | Node::InternalExportDecl(_)
+            | Node::LayerDecl(_) => Ok(vec![]),
 
             // Guard statement: ? condition -> result
             // Desugars to: if condition: return result
@@ -1464,6 +1837,7 @@ impl Lowerer {
                         method: "__enter__".to_string(),
                         args: vec![],
                         dispatch: DispatchMode::Dynamic,
+                        generic_args: vec![],
                     },
                     ty: resource_ty, // __enter__ returns self or similar type
                 };
@@ -1504,6 +1878,7 @@ impl Lowerer {
                             ty: TypeId::NIL,
                         }],
                         dispatch: DispatchMode::Dynamic,
+                        generic_args: vec![],
                     },
                     ty: TypeId::VOID,
                 };
@@ -1539,6 +1914,14 @@ impl Lowerer {
                     }
                 }
                 use simple_parser::ast::AsmConstraintKind;
+                let dialect = crate::hir::AsmDialect::from_options(
+                    asm_stmt.constraints.iter().filter_map(|constraint| {
+                        match &constraint.kind {
+                            AsmConstraintKind::Options(options) => Some(options.iter().map(String::as_str)),
+                            _ => None,
+                        }
+                    }).flatten(),
+                ).map_err(LowerError::Unsupported)?;
                 let mut operands = Vec::new();
                 let mut clobbers: Vec<String> = asm_stmt.clobbers.clone();
                 for c in &asm_stmt.constraints {
@@ -1552,7 +1935,8 @@ impl Lowerer {
                             }
                             continue;
                         }
-                        // clobber_abi / options: no codegen support yet; the
+                        // Dialect options were retained above. Other options and
+                        // clobber_abi have no codegen support yet; the
                         // block still lowers with a `memory` clobber, which is
                         // the conservative side.
                         AsmConstraintKind::ClobberAbi(_) | AsmConstraintKind::Options(_) => continue,
@@ -1577,6 +1961,7 @@ impl Lowerer {
                     }
                 }
                 Ok(vec![HirStmt::InlineAsm {
+                    dialect,
                     instructions: asm_stmt.instructions.clone(),
                     volatile: asm_stmt.volatile,
                     operands,
@@ -1600,6 +1985,16 @@ impl Lowerer {
                 self.globals.insert(e.name.clone(), ret_ty);
                 self.method_return_types.insert(e.name.clone(), ret_ty);
                 self.extern_fn_names.insert(e.name.clone());
+                // Same param-type recording as the module-level pass — see
+                // `HirModule::extern_param_types`.
+                let param_types = e
+                    .params
+                    .iter()
+                    .map(|p| self.resolve_type_opt(&p.ty))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.module
+                    .record_extern_system_abi(&e.name, &e.attributes, &param_types, ret_ty);
+                self.module.extern_param_types.insert(e.name.clone(), param_types);
                 Ok(vec![])
             }
 
@@ -1645,6 +2040,9 @@ impl Lowerer {
             | Node::LiteralFunction(_)
             | Node::ModDecl(_)
             | Node::RequiresCapabilities(_)
+            | Node::FriendDecl(_)
+            | Node::InternalExportDecl(_)
+            | Node::LayerDecl(_)
             | Node::AopAdvice(_)
             | Node::DiBinding(_)
             | Node::ArchitectureRule(_)
@@ -1668,9 +2066,14 @@ impl Lowerer {
     }
 
     /// Lower a match statement to a chain of If-Else statements
-    fn lower_match_stmt(&mut self, match_stmt: &MatchStmt, ctx: &mut FunctionContext) -> LowerResult<Vec<HirStmt>> {
+    fn lower_match_stmt(
+        &mut self,
+        match_stmt: &MatchStmt,
+        value_tail: bool,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Vec<HirStmt>> {
         // Lower the subject expression once
-        let subject_hir = self.lower_expr(&match_stmt.subject, ctx)?;
+        let subject_hir = self.lower_subject_for_patterns(&match_stmt.subject, match_stmt.arms.iter().map(|a| &a.pattern), false, ctx)?;
         let subject_ty = subject_hir.ty;
 
         // Create a temporary local to hold the subject value
@@ -1686,7 +2089,20 @@ impl Lowerer {
         };
 
         // Build the chain of If-Else statements from the arms
-        let if_chain = self.lower_match_arms_stmt(subject_idx, subject_ty, &match_stmt.arms, ctx)?;
+        // No arm matched and no unguarded wildcard: the chain ends in an
+        // `rt_panic` (owner decision 2026-11-14). For the implicit tail of a
+        // non-void function the match value IS the return value, so the panic
+        // is reported as the expression form and typed as the declared return:
+        // the tail merge type and `validate_implicit_return_type` then see the
+        // real arms' type.
+        let (form, exhaust_ty) = if value_tail {
+            ("expression", ctx.return_type)
+        } else {
+            ("statement", TypeId::NIL)
+        };
+        let exhaust_msg = super::expr::control::match_exhausted_message(form, Some(("match", match_stmt.span.line)));
+        let if_chain =
+            self.lower_match_arms_stmt(subject_idx, subject_ty, &match_stmt.arms, &exhaust_msg, exhaust_ty, ctx)?;
 
         let mut result = vec![store_stmt];
         result.extend(if_chain);
@@ -1780,13 +2196,46 @@ impl Lowerer {
                 // the JIT lane, silently). The local's declared type must
                 // agree, or the raw value would be stored into a tagged slot.
                 // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
+                //
+                // The subject may carry EITHER optional representation: the
+                // `T?` Pointer form (`register_optional`), or the generic-enum
+                // form `HirType::Enum { name: "Option", .. }` that an explicit
+                // `Option<T>` annotation on a local, class field or return
+                // type resolves to (`instantiate_builtin_generic_enum`). Both
+                // hold the same runtime value, so the binding must be typed
+                // as the payload in both cases. Only the Pointer form was
+                // handled, so `if val c = lt` with `val lt: Option<Class>`
+                // kept `c` typed as the Option enum: a field read on it was
+                // a wild load (SEGV rc=139), a method call dispatched to
+                // `Option.<method>` (not found), and a scalar payload stayed
+                // a tagged word (`c + 1` printed `<invalid-heap:0x29>`).
+                // Bug: seed_if_val_typed_option_class_binds_option_or_segv_2026-11-03 (bug_db.sdn);
+                // spec test/01_unit/language/if_val_typed_option_class_unwrap_spec.spl
                 let binding_ty = self.optional_boxint_scalar_inner(subject_ty).unwrap_or_else(|| {
                     match self.module.types.get(subject_ty) {
-                        // Presence guards the optional subject; a bound bool is
-                        // its value, not another optional-presence condition.
-                        Some(HirType::Pointer { kind: PointerKind::Shared, inner, .. })
-                            if *inner == TypeId::BOOL => TypeId::BOOL,
-                        _ => subject_ty,
+                        // Bool and u64 payloads use their dedicated tagged
+                        // representations, not BoxInt; decode them by inner type.
+                        Some(HirType::Pointer {
+                            kind: PointerKind::Shared,
+                            inner,
+                            ..
+                        }) if matches!(*inner, TypeId::BOOL | TypeId::U64 | TypeId::F32 | TypeId::F64) => *inner,
+                        // An erased `any?` (the type of a generic `T?` return
+                        // whose `T` is uninferred, e.g. `Channel.try_recv()`)
+                        // binds plain `any`, as `lower_coalesce` types
+                        // `any? ?? d`: the payload word IS the tagged
+                        // RuntimeValue an `any` slot holds and MIR does not
+                        // unbox an `any`-typed `rt_unwrap_or_self`, so no
+                        // representation changes. Left as `any?`, the binding
+                        // was still an optional source for `lower_cast`, so
+                        // `if val m = ch.try_recv(): m as i64` — the narrowing
+                        // ERR-01 itself recommends — was rejected.
+                        // Bug: doc/08_tracking/bug/if_val_binding_from_generic_optional_stays_optional_err01_2026-11-13.md
+                        _ if self.module.types.optional_inner(subject_ty) == Some(TypeId::ANY) => TypeId::ANY,
+                        _ => self
+                            .optional_reference_payload_inner(subject_ty)
+                            .or_else(|| self.optional_enum_payload_inner(subject_ty))
+                            .unwrap_or(subject_ty),
                     }
                 });
                 if binding_ty != subject_ty {
@@ -1812,6 +2261,66 @@ impl Lowerer {
             return binding_stmts;
         }
         self.build_pattern_binding_stmts(pattern, subject_idx, subject_ty, bindings, ctx)
+    }
+
+    /// Narrow only a guarded, explicitly declared Optional whose payload is
+    /// represented as an array, string, struct, or enum value. Raw pointers
+    /// can have the same HIR shape but are not source-level `T?` values.
+    fn optional_reference_payload_inner(&self, subject_ty: TypeId) -> Option<TypeId> {
+        let inner = self.module.types.optional_inner(subject_ty)?;
+        match self.module.types.get(inner) {
+            Some(HirType::Array { .. } | HirType::String | HirType::Struct { .. } | HirType::Enum { .. }) => {
+                Some(inner)
+            }
+            _ => None,
+        }
+    }
+
+    /// Payload type of the generic-enum optional form `Option<T>`
+    /// (`HirType::Enum { name: "Option", variants: [Some(T), None] }`), the
+    /// representation an explicit `Option<T>` annotation resolves to. Applies
+    /// the same payload policy as the `T?` Pointer form — BoxInt-family
+    /// scalars, `bool`, `f32`, `f64`, `u64` and reference payloads
+    /// (array/text/struct/enum) are bound as the raw inner (MIR decodes the
+    /// tagged word by name + type); anything else (an unresolved
+    /// `Option<ANY>`) keeps the subject type so the value is not retyped on a
+    /// guess. `None` for any subject that is not this Option form.
+    pub(crate) fn optional_enum_payload_inner(&self, subject_ty: TypeId) -> Option<TypeId> {
+        let Some(HirType::Enum { name, variants, .. }) = self.module.types.get(subject_ty) else {
+            return None;
+        };
+        if name.as_str() != "Option" {
+            return None;
+        }
+        let inner = variants.iter().find_map(|(variant, payload)| match (variant.as_str(), payload) {
+            ("Some", Some(payload)) if payload.len() == 1 => Some(payload[0]),
+            _ => None,
+        })?;
+        if inner == TypeId::ANY {
+            return None;
+        }
+        if matches!(
+            inner,
+            TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::BOOL
+                | TypeId::F32
+                | TypeId::F64
+                | TypeId::U64
+        ) {
+            return Some(inner);
+        }
+        match self.module.types.get(inner) {
+            Some(HirType::Array { .. } | HirType::String | HirType::Struct { .. } | HirType::Enum { .. }) => {
+                Some(inner)
+            }
+            _ => None,
+        }
     }
 
     pub(crate) fn build_pattern_binding_stmts(
@@ -2135,7 +2644,44 @@ impl Lowerer {
                                 },
                                 ty: payload_expr_ty,
                             };
-                            let payload_expr = if enum_variant == "Some" && payload_patterns.len() == 1 {
+                            // The dual-representation `Some` handling (boxed
+                            // Option enum vs the raw `T?` migration form) is only
+                            // valid when the subject IS an optional. A USER enum
+                            // with a variant merely NAMED `Some` (e.g.
+                            // `enum Opt: Some(i64) | None`) is a plain enum:
+                            // `rt_enum_id != OPTION_ENUM_ID`, so the branch below
+                            // took `rt_unwrap_or_self`, which hands back the whole
+                            // enum word for a non-optional, and the payload slot
+                            // was filled with a tagged enum pointer read as a raw
+                            // scalar (garbage, varying per run, no diagnostic).
+                            // Gate on the subject type so user enums keep the plain
+                            // `rt_enum_payload` extraction the other variants use.
+                            // Interpreter lane was always correct; this is the
+                            // compiled HIR/MIR/JIT path. See doc/08_tracking/bug/
+                            // elif_val_pattern_in_if_expression_fails_to_bind_2026-08-19.md
+                            // An erased (`any`) subject can hold a raw `T?` too
+                            // (`"12".parse_int()` passed to an untyped parameter),
+                            // where `rt_enum_payload` answered nil.
+                            // `rt_unwrap_or_self` is the whole Option-id test in
+                            // one call: payload for an Option enum, the word
+                            // itself for the raw form. A user enum declaring
+                            // `Some` reaches here only through that variant (the
+                            // arm test checks it), so it binds its own payload.
+                            // parse_family_strips_option_jit_native_2026-08-02,
+                            // seed_jit_any_match_bare_some_arm_takes_user_enum_unit_variant_2026-11-27
+                            let subject_is_optional = self.optional_enum_payload_inner(subject_ty).is_some()
+                                || self.module.types.optional_inner(subject_ty).is_some();
+                            let erased_option_some = subject_ty == TypeId::ANY
+                                && enum_variant == "Some"
+                                && payload_patterns.len() == 1
+                                && matches!(enum_name.as_str(), "_" | "Option");
+                            let payload_expr = if erased_option_some {
+                                let subject = HirExpr {
+                                    kind: HirExprKind::Local(subject_idx),
+                                    ty: subject_ty,
+                                };
+                                self.erased_some_arm_binding(&subject, payload_expr_ty, ctx)
+                            } else if enum_variant == "Some" && payload_patterns.len() == 1 && subject_is_optional {
                                 HirExpr {
                                     kind: HirExprKind::If {
                                         condition: Box::new(HirExpr {
@@ -2159,10 +2705,57 @@ impl Lowerer {
                                             ty: TypeId::BOOL,
                                         }),
                                         then_branch: Box::new(legacy_payload_expr),
+                                        // Raw-form optional: the subject word IS the
+                                        // payload, but a primitive `T?` is carried as
+                                        // a TAGGED word (`BoxInt` on return). Read it
+                                        // through `rt_unwrap_or_self` so the
+                                        // name-keyed `UnboxInt` fires for a scalar
+                                        // binding, exactly like plain `if val x = o`.
+                                        // A bare `Local` read bound the tagged word
+                                        // (`Some(a)` of 7 read back as 56). Bug:
+                                        // doc/08_tracking/bug/jit_some_pattern_payload_shifted_left_3_2026-09-13.md
                                         else_branch: Some(Box::new(HirExpr {
-                                            kind: HirExprKind::Local(subject_idx),
+                                            kind: HirExprKind::BuiltinCall {
+                                                name: "rt_unwrap_or_self".to_string(),
+                                                args: vec![HirExpr {
+                                                    kind: HirExprKind::Local(subject_idx),
+                                                    ty: subject_ty,
+                                                }],
+                                            },
                                             ty: payload_expr_ty,
                                         })),
+                                    },
+                                    ty: payload_expr_ty,
+                                }
+                            } else if subject_is_optional && enum_variant != "Some" && enum_variant != "None" {
+                                // User-enum variant pattern over an optional
+                                // subject (`match <Evt?>: case Evt.Click(x)`).
+                                // The arm test already looks through the Some
+                                // box, but the payload read did not: for a
+                                // boxed `Some(Evt.Click(5))`, `rt_enum_payload`
+                                // returned the inner Evt and bound its pointer
+                                // as `x`. Peel exactly one Option layer first
+                                // (`rt_unwrap_or_self` leaves the raw form and
+                                // user enums untouched). The peeled value is
+                                // typed as the optional's payload so no
+                                // scalar unbox fires on the enum pointer.
+                                let inner_ty = self
+                                    .optional_enum_payload_inner(subject_ty)
+                                    .or_else(|| self.module.types.optional_inner(subject_ty))
+                                    .unwrap_or(TypeId::ANY);
+                                HirExpr {
+                                    kind: HirExprKind::BuiltinCall {
+                                        name: "rt_enum_payload".to_string(),
+                                        args: vec![HirExpr {
+                                            kind: HirExprKind::BuiltinCall {
+                                                name: "rt_unwrap_or_self".to_string(),
+                                                args: vec![HirExpr {
+                                                    kind: HirExprKind::Local(subject_idx),
+                                                    ty: subject_ty,
+                                                }],
+                                            },
+                                            ty: inner_ty,
+                                        }],
                                     },
                                     ty: payload_expr_ty,
                                 }
@@ -2335,7 +2928,9 @@ impl Lowerer {
                                 value: Some(value),
                             });
                         }
-                    } else if self.is_real_enum_variant_name(nested_variant_name) {
+                    } else if self.is_real_enum_variant_name(nested_variant_name)
+                        || self.is_builtin_optional_variant_name(nested_variant_name)
+                    {
                         // Nested ENUM-variant pattern inside an enum payload:
                         // `case Const(MirConstValue.Str(name), _):`. The branch
                         // above only ever handled a nested *struct* pattern
@@ -2392,6 +2987,7 @@ impl Lowerer {
                         ty: subject_ty,
                     };
                     let slot_expr = Self::payload_slot_expr(enum_variant, &subject_ref, i, payload_patterns.len());
+                    let slot_expr = self.or_pattern_payload_slot(slot_expr, enum_name, enum_variant, subject_ty, i, p);
                     self.bind_subpattern(&slot_expr, p, &binding_type_map, ctx, &mut binding_stmts);
                 }
             }
@@ -2424,8 +3020,37 @@ impl Lowerer {
         let arity = payload_patterns.len();
         for (j, sub) in payload_patterns.iter().enumerate() {
             let slot = Self::payload_slot_expr(variant, enum_expr, j, arity);
+            let slot = if enum_expr.ty == TypeId::ANY {
+                slot
+            } else {
+                self.or_pattern_payload_slot(slot, "_", variant, enum_expr.ty, j, sub)
+            };
             self.bind_subpattern(&slot, sub, binding_type_map, ctx, out);
         }
+    }
+
+    /// #6953: a payload slot expression is ANY-typed. An or-pattern sitting in
+    /// it types its per-alternative binding guards by `slot.ty`, so give the
+    /// slot the variant's DECLARED field type -- the type
+    /// `nested_payload_condition` tests the same slot with. Other sub-pattern
+    /// kinds keep the ANY slot they always had.
+    fn or_pattern_payload_slot(
+        &self,
+        slot: HirExpr,
+        enum_name: &str,
+        variant: &str,
+        owner_ty: TypeId,
+        index: usize,
+        sub: &Pattern,
+    ) -> HirExpr {
+        if !matches!(sub, Pattern::Or(_)) {
+            return slot;
+        }
+        let ty = self
+            .get_enum_variant_field_types_with_hint(enum_name, variant, owner_ty)
+            .and_then(|types| types.get(index).copied())
+            .unwrap_or(TypeId::ANY);
+        HirExpr { ty, ..slot }
     }
 
     /// Emit the `Let` bindings for ONE sub-pattern whose value sits at `slot`.
@@ -2466,6 +3091,17 @@ impl Lowerer {
         }
         match pattern {
             Pattern::Identifier(bound_name) | Pattern::MutIdentifier(bound_name) => {
+                // Only names this arm actually binds. A bare unit variant
+                // (`case (Red, x):`) is excluded from the arm's bindings by
+                // `collect_pattern_bindings` and tested by
+                // `subpattern_condition_typed`; without this guard an OUTER
+                // local that happens to share the variant's name was found in
+                // `local_map` and overwritten with the slot value. Same rule
+                // as the top-level identifier binder in
+                // `build_pattern_binding_stmts`.
+                if !binding_type_map.contains_key(bound_name) {
+                    return;
+                }
                 let Some(&local_idx) = ctx.local_map.get(bound_name) else {
                     return;
                 };
@@ -2486,7 +3122,7 @@ impl Lowerer {
                 variant,
                 payload: Some(inner_patterns),
                 ..
-            } if self.is_real_enum_variant_name(variant) => {
+            } if self.is_real_enum_variant_name(variant) || self.is_builtin_optional_variant_name(variant) => {
                 self.bind_nested_payload(variant, slot, inner_patterns, binding_type_map, ctx, out);
             }
             // Positional struct spelling `Point(x, y)`. The parser cannot tell
@@ -2542,7 +3178,9 @@ impl Lowerer {
             Pattern::Or(alternatives) => {
                 let mut arms: Vec<(Option<HirExpr>, Vec<HirStmt>)> = Vec::new();
                 for alt in alternatives {
-                    let cond = self.subpattern_condition(slot, alt, ctx);
+                    // Typed by the slot's own type, as the arm test is: an
+                    // erased type resolves `Copy(d)` by name only (#6953).
+                    let cond = self.subpattern_condition_typed(slot, slot.ty, alt, ctx);
                     let mut alt_out: Vec<HirStmt> = Vec::new();
                     self.bind_subpattern(slot, alt, binding_type_map, ctx, &mut alt_out);
                     let irrefutable = cond.is_none();
@@ -2748,17 +3386,26 @@ impl Lowerer {
         subject_idx: usize,
         subject_ty: TypeId,
         arms: &[ast::MatchArm],
+        exhaust_msg: &str,
+        exhaust_ty: TypeId,
         ctx: &mut FunctionContext,
     ) -> LowerResult<Vec<HirStmt>> {
         if arms.is_empty() {
-            return Ok(Vec::new());
+            // No arm matched and no wildcard: fail closed at runtime, like the
+            // interpreter and value-position matches (owner decision 2026-11-14).
+            let mut panic = super::expr::control::match_exhausted_panic(exhaust_msg);
+            panic.ty = exhaust_ty;
+            return Ok(vec![HirStmt::Expr(panic)]);
         }
 
         let arm = &arms[0];
         let remaining_arms = &arms[1..];
 
-        // Check if this is a wildcard pattern (always matches)
-        if matches!(&arm.pattern, Pattern::Wildcard) {
+        // Only an UNGUARDED wildcard always matches (later arms are dead).
+        // `case _ if c:` must fall through to the remaining arms when `c` is
+        // false, so it takes the general path below (`true && guard`).
+        // doc/08_tracking/bug/seed_run_wildcard_arm_guard_ignored_2026-10-10.md
+        if matches!(&arm.pattern, Pattern::Wildcard) && arm.guard.is_none() {
             return self.lower_block(&arm.body, ctx);
         }
 
@@ -2789,7 +3436,7 @@ impl Lowerer {
         self.restore_match_bindings(previous_bindings, ctx);
 
         // Recursively build the else branch from remaining arms
-        let else_block = self.lower_match_arms_stmt(subject_idx, subject_ty, remaining_arms, ctx)?;
+        let else_block = self.lower_match_arms_stmt(subject_idx, subject_ty, remaining_arms, exhaust_msg, exhaust_ty, ctx)?;
 
         // Build an If statement
         let if_stmt = HirStmt::If {
@@ -2813,6 +3460,23 @@ impl Lowerer {
     /// `if val x = none_option:` always take the then-branch and bind nil).
     /// Constructor patterns (`Some(x)`, `Ok(v)`, …) still go through the shared
     /// pattern-condition logic (rt_is_some / discriminant checks).
+    pub(crate) fn validate_result_presence_binding(
+        &self,
+        subject_ty: TypeId,
+        pattern: &Pattern,
+        condition: &Expr,
+    ) -> LowerResult<()> {
+        if matches!(pattern, Pattern::Identifier(_) | Pattern::MutIdentifier(_) | Pattern::MoveIdentifier(_))
+            && !matches!(condition, Expr::ExistsCheck(_))
+            && matches!(self.module.types.get(subject_ty), Some(HirType::Enum { name, .. }) if name == "Result")
+        {
+            return Err(LowerError::Unsupported(
+                "cannot bind a Result with bare if val/while val; use match Ok/Err or Result.ok.?".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn if_let_pattern_condition(
         &mut self,
         subject_idx: usize,
@@ -2859,13 +3523,8 @@ impl Lowerer {
             Pattern::Identifier(name) => {
                 if self.subject_enum_has_variant(subject_ty, name) {
                     // Treat as an identity-aware enum variant pattern.
-                    let expected_disc: i64 = {
-                        use std::collections::hash_map::DefaultHasher;
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = DefaultHasher::new();
-                        name.hash(&mut hasher);
-                        (hasher.finish() & 0xFFFFFFFF) as i64
-                    };
+                    let expected_disc: i64 =
+                        self.owner_variant_discriminant(subject_ty, None, name, "hir match bare variant arm");
 
                     let expected_val = HirExpr {
                         kind: HirExprKind::Integer(expected_disc),
@@ -3068,7 +3727,7 @@ impl Lowerer {
                 let fields = fields.clone();
                 Ok(self.named_struct_pattern_condition(&subject_ref, &name, &fields, ctx))
             }
-            Pattern::Enum { name: _, variant, .. } => {
+            Pattern::Enum { name: pattern_enum, variant, .. } => {
                 // Warn-only, DEFAULT OFF. This is the statement-form half of the
                 // JIT's pattern decision -- proved by instrumentation to be the
                 // only site reached for `match x: case Some(v)` and for
@@ -3084,7 +3743,7 @@ impl Lowerer {
                         line: self.current_pattern_span.map(|(line, _)| line),
                         column: self.current_pattern_span.map(|(_, column)| column),
                     },
-                );
+                )?;
                 // Does the subject's own enum type declare this variant name?
                 // Decided BEFORE the `Some`/`None` fast paths: a user-defined
                 // enum may name its variants `Some`/`None`, and `rt_is_some` is
@@ -3130,15 +3789,12 @@ impl Lowerer {
                         ty: TypeId::BOOL,
                     });
                 }
-                // Special handling for Some - check not-none
+                // Special handling for Some - check not-none, AND the payload
+                // sub-patterns. Testing presence alone made `case Some(I8):`
+                // match every non-nil `Kind?` (the first `Some(...)` arm won).
+                // optional_enum_some_variant_match_engine_divergence_2026-11-14
                 if variant == "Some" && !subject_enum_owns_variant {
-                    return Ok(HirExpr {
-                        kind: HirExprKind::BuiltinCall {
-                            name: "rt_is_some".to_string(),
-                            args: vec![subject_ref],
-                        },
-                        ty: TypeId::BOOL,
-                    });
+                    return Ok(self.optional_some_condition(pattern, subject_ty, subject_ref, ctx));
                 }
 
                 // Positional class/struct pattern: `case ClassName(a, b, c)` where the
@@ -3185,14 +3841,10 @@ impl Lowerer {
                     return Ok(self.class_pattern_condition(&subject_ref, &variant, payload, ctx));
                 }
 
-                // Validate the stable enum identity and hashed variant tag.
-                let expected_disc: i64 = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    variant.hash(&mut hasher);
-                    (hasher.finish() & 0xFFFFFFFF) as i64
-                };
+                // Validate the stable enum identity and the OWNING enum's
+                // declared variant index (#6953).
+                let expected_disc: i64 =
+                    self.owner_variant_discriminant(subject_ty, Some(pattern_enum.as_str()), variant, "hir match statement arm");
 
                 let expected_val = HirExpr {
                     kind: HirExprKind::Integer(expected_disc),
@@ -3221,8 +3873,16 @@ impl Lowerer {
                 let nested = match pattern {
                     Pattern::Enum {
                         payload: Some(payload_patterns),
+                        name: outer_enum,
                         ..
-                    } => self.nested_payload_condition(variant, &subject_ref, payload_patterns, ctx),
+                    } => self.nested_payload_condition(
+                        outer_enum,
+                        variant,
+                        subject_ty,
+                        &subject_ref,
+                        payload_patterns,
+                        ctx,
+                    ),
                     _ => None,
                 };
 
@@ -3523,6 +4183,18 @@ impl Lowerer {
                 args: vec![simple_parser::Argument::new(None, e.clone())],
                 generic_args: vec![],
             }),
+            ("to_start_with", Some(e)) => Pred::Truthy(Expr::MethodCall {
+                receiver: Box::new(subject.clone()),
+                method: "starts_with".to_string(),
+                args: vec![simple_parser::Argument::new(None, e.clone())],
+                generic_args: vec![],
+            }),
+            ("to_end_with", Some(e)) => Pred::Truthy(Expr::MethodCall {
+                receiver: Box::new(subject.clone()),
+                method: "ends_with".to_string(),
+                args: vec![simple_parser::Argument::new(None, e.clone())],
+                generic_args: vec![],
+            }),
             _ => return Ok(None),
         };
 
@@ -3565,8 +4237,16 @@ impl Lowerer {
         let expected = &expected;
 
         if op == BinOp::Eq {
-            let left_hir = self.lower_expr(subject, ctx)?;
-            let right_hir = self.lower_expr(expected, ctx)?;
+            // `.?` in an assertion operand is the presence question (a bool),
+            // not the payload pass-through of value position — the
+            // interpreter's `eval_assertion_operand` rule. `lower_condition`
+            // emits exactly that predicate (`rt_is_present`).
+            let mut lower_operand = |this: &mut Self, e: &Expr| match e {
+                Expr::ExistsCheck(_) => this.lower_condition(e, ctx),
+                _ => this.lower_expr(e, ctx),
+            };
+            let left_hir = lower_operand(self, subject)?;
+            let right_hir = lower_operand(self, expected)?;
             return Ok(Some(vec![HirStmt::Expr(HirExpr {
                 kind: HirExprKind::BuiltinCall {
                     name: "rt_bdd_expect_eq_rv".to_string(),
@@ -3617,7 +4297,7 @@ impl Lowerer {
         };
 
         match name {
-            "describe" | "context" => {
+            "describe" | "context" | "feature" | "scenario" => {
                 // describe "name": body
                 // → rt_bdd_describe_start_rv(name), <body>, rt_bdd_describe_end()
                 let mut stmts = Vec::new();
@@ -3656,6 +4336,47 @@ impl Lowerer {
                 }));
 
                 Ok(Some(stmts))
+            }
+
+            // std.spec `skip`/`skip_it`/`pending`/`planned` only print a line, so
+            // the compiled lane never counted them (`skipped=0` on the JIT vs 1
+            // on the interpreter). Keep the call, and count the example.
+            "skip" | "skip_it" | "pending" | "planned" if !args.is_empty() && args.iter().all(|a| a.name.is_none()) => {
+                let call = self.lower_expr(expr, ctx)?;
+                Ok(Some(vec![
+                    HirStmt::Expr(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_bdd_note_skip".to_string(),
+                            args: vec![],
+                        },
+                        ty: TypeId::NIL,
+                    }),
+                    HirStmt::Expr(call),
+                ]))
+            }
+
+            // `fail`/`fail_assertion`/`fail_test` are interpreter builtins
+            // (interpreter_call/bdd.rs) that take precedence over any Simple
+            // definition, including std.spec's. `use std.spec.{fail}` resolves
+            // to `spec/__init__.spl`, which does not define them, so the
+            // compiled lane had no symbol (`unresolved external symbol 'fail'`
+            // under SIMPLE_JIT_STRICT). Lower them to the runtime twin so both
+            // engines record the same failure.
+            "fail" | "fail_assertion" | "fail_test" if args.len() <= 1 && args.iter().all(|a| a.name.is_none()) => {
+                let msg = match args.first() {
+                    Some(a) => self.lower_expr(&a.value, ctx)?,
+                    None => HirExpr {
+                        kind: HirExprKind::String("assertion failed".to_string()),
+                        ty: TypeId::STRING,
+                    },
+                };
+                Ok(Some(vec![HirStmt::Expr(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_bdd_fail_rv".to_string(),
+                        args: vec![msg],
+                    },
+                    ty: TypeId::NIL,
+                })]))
             }
 
             "it" | "test" | "example" | "specify" => {
@@ -4004,10 +4725,147 @@ mod nested_struct_pattern_in_enum_payload_tests {
 }
 
 #[cfg(test)]
+mod user_enum_some_variant_payload_binding_tests {
+    use super::super::lower;
+    use crate::hir::types::{HirExpr, HirExprKind, HirModule, HirStmt, LocalVar};
+    use simple_parser::Parser;
+
+    fn lower_source(source: &str) -> crate::hir::lower::LowerResult<HirModule> {
+        let mut parser = Parser::new(source);
+        let ast = parser.parse().expect("parse failed");
+        lower(&ast)
+    }
+
+    /// Find the initializer of the first `Let` binding local `name`, recursing
+    /// into `If` then/else blocks (a `match` lowers to an If-chain and the arm
+    /// payload `Let`s live inside the matching arm's `then_block`).
+    fn find_let_value<'a>(stmts: &'a [HirStmt], locals: &[LocalVar], name: &str) -> Option<&'a HirExpr> {
+        for stmt in stmts {
+            match stmt {
+                HirStmt::Let { local_index, value, .. } => {
+                    if locals.get(*local_index).map(|l| l.name.as_str()) == Some(name) {
+                        if let Some(v) = value {
+                            return Some(v);
+                        }
+                    }
+                }
+                HirStmt::If { then_block, else_block, .. } => {
+                    if let Some(v) = find_let_value(then_block, locals, name) {
+                        return Some(v);
+                    }
+                    if let Some(else_b) = else_block {
+                        if let Some(v) = find_let_value(else_b, locals, name) {
+                            return Some(v);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    // Regression for elif_val_pattern_in_if_expression_fails_to_bind_2026-08-19
+    // (compiled HIR/MIR/JIT lane). The dual-representation `Some` binder was
+    // emitted for ANY single-payload enum variant merely NAMED `Some`, but its
+    // else branch (`rt_unwrap_or_self`) is only correct for genuine optionals.
+    // A user enum such as `Opt.Some(i64)` is a plain enum, so the else branch
+    // handed the whole tagged enum word to the payload slot, read back as
+    // pointer garbage under the JIT. The fix gates the dual form on the subject
+    // actually being an optional, so user enums bind via `rt_enum_payload`
+    // exactly like every other variant. Reverting the gate turns this
+    // initializer back into an `If` and fails the match below.
+    #[test]
+    fn user_enum_some_variant_binds_payload_via_enum_payload() {
+        let module = lower_source(
+            "enum Opt:\n    Some(i64)\n    None\n\nfn main() -> i64:\n    val o = Opt.Some(7)\n    match o:\n        case Opt.Some(x): print(x)\n        case Opt.None: print(0)\n    return 0\n",
+        )
+        .expect("source should lower");
+
+        let func = module
+            .functions
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("main function should lower");
+
+        let x_value = find_let_value(&func.body, &func.locals, "x")
+            .expect("user-enum Some payload must emit a Let binding for x");
+        match &x_value.kind {
+            HirExprKind::BuiltinCall { name, .. } => {
+                assert_eq!(
+                    name, "rt_enum_payload",
+                    "user-enum Some payload must extract via rt_enum_payload, not the optional dual-form"
+                );
+            }
+            other => panic!(
+                "user-enum Some payload must be a direct rt_enum_payload call, got {:?} \
+                 (an If here means the optional-only dual-form leaked onto a plain enum)",
+                other
+            ),
+        }
+    }
+
+    // `case Some(Evt.Click(x))` over an `Evt?`: a `T?` may hold the bare
+    // user enum (implicit wrap), and that IS an enum, so the generic
+    // `rt_enum_id >= 0` dual-form guard took `rt_enum_payload` and handed
+    // Click's payload (8) to the inner Click binder, which then read nil.
+    // The Some slot guard must be `rt_enum_id == OPTION_ENUM_ID`, the rule the
+    // identifier binder and `rt_unwrap_or_self` already use.
+    #[test]
+    fn nested_user_variant_under_some_unwraps_only_the_option_box() {
+        let module = lower_source(
+            "enum Evt:\n    Click(x: i64)\n    Key(code: i64)\n\nfn opt_evt(v: Evt) -> Evt?:\n    v\n\nfn main() -> i64:\n    val c = opt_evt(Evt.Click(x: 8))\n    match c:\n        case Some(Evt.Click(x)): return x\n        case _: return 0\n    return 0\n",
+        )
+        .expect("source should lower");
+        let func = module.functions.iter().find(|f| f.name == "main").expect("main function should lower");
+        let x_value = find_let_value(&func.body, &func.locals, "x").expect("nested payload must bind x");
+        let shape = format!("{:?}", x_value);
+        assert!(
+            shape.contains("op: Eq, left: HirExpr { kind: BuiltinCall { name: \"rt_enum_id\"")
+                && shape.contains("Integer(1)"),
+            "Some slot must test rt_enum_id == OPTION_ENUM_ID, got {shape}"
+        );
+        assert!(
+            !shape.contains("op: GtEq"),
+            "an `rt_enum_id >= 0` guard misreads a bare user enum as a Some box, got {shape}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod optional_bool_binding_tests {
     use super::super::lower;
     use crate::hir::types::TypeId;
     use simple_parser::Parser;
+
+    #[test]
+    fn result_presence_binding_requires_an_optional_projection() {
+        for body in [
+            "    if val item = value: return 1\n    0\n",
+            "    while val item = value: return 1\n    0\n",
+            "    if false: return 2\n    elif val item = value: return 1\n    0\n",
+            "    val selected = if val item = value: 1 else: 0\n    selected\n",
+        ] {
+            let source = format!("fn inspect(value: Result<i64, text>) -> i64:\n{body}");
+            let ast = Parser::new(&source).parse().expect("Result binding fixture parses");
+            let error = lower(&ast).expect_err("Result is not an optional binding carrier");
+            assert!(error.to_string().contains("cannot bind a Result"), "{error}");
+        }
+    }
+
+    #[test]
+    fn result_optional_projection_and_explicit_patterns_still_lower() {
+        for source in [
+            "fn inspect(value: Result<i64, text>) -> i64:\n    if val item = value.ok.?: return item\n    0\n",
+            "fn inspect(value: Result<i64, text>) -> i64:\n    if val item = value.?: return 1\n    0\n",
+            "fn inspect(value: Result<i64, text>) -> i64:\n    while val item = value.?: return 1\n    0\n",
+            "fn inspect(value: Result<i64, text>?) -> i64:\n    if val item = value:\n        match item:\n            case Ok(number): return number\n            case Err(_): return 0\n    0\n",
+            "fn inspect(value: Result<i64, text>) -> i64:\n    if val Ok(item) = value: return item\n    0\n",
+        ] {
+            let ast = Parser::new(source).parse().expect("explicit Result fixture parses");
+            lower(&ast).expect("explicit projection or structural pattern remains supported");
+        }
+    }
 
     #[test]
     fn if_val_binds_bool_payload_as_bool_not_optional_presence() {
@@ -4019,5 +4877,73 @@ mod optional_bool_binding_tests {
         let binding = function.locals.iter().find(|local| local.name == "opened")
             .expect("if-val binding exists");
         assert_eq!(binding.ty, TypeId::BOOL, "payload condition must inspect bool value, not presence");
+    }
+
+    #[test]
+    fn if_val_binds_optional_array_inner_and_keeps_len_i64_inside_guard() {
+        let source = "fn inspect(values: [i64]?) -> i64:\n    if val items = values:\n        return items.len()\n    -1\n";
+        let ast = Parser::new(source).parse().expect("optional array fixture parses");
+        let module = lower(&ast).expect("optional array fixture lowers");
+        let function = module.functions.iter().find(|function| function.name == "inspect")
+            .expect("inspect function exists");
+        let binding = function.locals.iter().find(|local| local.name == "items")
+            .expect("if-val binding exists");
+        assert!(matches!(module.types.get(binding.ty), Some(crate::hir::types::HirType::Array { .. })));
+
+        let (condition, then_block) = function.body.iter().find_map(|stmt| match stmt {
+            crate::hir::types::HirStmt::If { condition, then_block, .. } => Some((condition, then_block)),
+            _ => None,
+        }).expect("optional payload must remain nested under its presence guard");
+        assert_eq!(condition.ty, TypeId::BOOL, "presence guard remains boolean");
+        let local_index = function.params.len() + function.locals.iter().position(|local| local.name == "items")
+            .expect("if-val binding has a local slot");
+        let (ty, value) = then_block.iter().find_map(|stmt| match stmt {
+            crate::hir::types::HirStmt::Let { local_index: idx, ty, value: Some(value) }
+                if *idx == local_index => Some((ty, value)),
+            _ => None,
+        }).expect("guard body binds the payload local");
+        assert_eq!(*ty, binding.ty, "binding statement uses the narrowed array type");
+        assert_eq!(value.ty, binding.ty, "unwrap expression uses the narrowed array type");
+        let call = then_block.iter().find_map(|stmt| match stmt {
+            crate::hir::types::HirStmt::Return(Some(expr)) => Some(expr),
+            _ => None,
+        }).expect("guard body returns the array length");
+        assert_eq!(call.ty, TypeId::I64, "array length retains its builtin i64 type");
+    }
+
+    #[test]
+    fn if_val_narrows_optional_struct_but_preserves_its_len_signature() {
+        let source = "struct Measure:\n    count: i64\n    fn len() -> text:\n        \"measurement\"\n\nfn inspect(value: Measure?) -> text:\n    if val measure = value:\n        return measure.len()\n    \"missing\"\n";
+        let ast = Parser::new(source).parse().expect("optional struct fixture parses");
+        let module = lower(&ast).expect("optional struct fixture lowers");
+        let function = module.functions.iter().find(|function| function.name == "inspect")
+            .expect("inspect function exists");
+        let binding = function.locals.iter().find(|local| local.name == "measure")
+            .expect("if-val binding exists");
+        assert!(matches!(module.types.get(binding.ty), Some(crate::hir::types::HirType::Struct { name, .. }) if name == "Measure"));
+        let then_block = function.body.iter().find_map(|stmt| match stmt {
+            crate::hir::types::HirStmt::If { then_block, .. } => Some(then_block),
+            _ => None,
+        }).expect("optional payload must remain nested under its presence guard");
+        let call = then_block.iter().find_map(|stmt| match stmt {
+            crate::hir::types::HirStmt::Return(Some(expr)) => Some(expr),
+            _ => None,
+        }).expect("guard body returns the declared method result");
+        assert_eq!(call.ty, TypeId::STRING, "custom Measure.len return signature is preserved");
+    }
+
+    #[test]
+    fn if_val_binds_nil_optional_array_only_inside_guard() {
+        let source = "fn inspect() -> i64:\n    val values: [i64]? = nil\n    if val items = values:\n        return items.len()\n    17\n";
+        let ast = Parser::new(source).parse().expect("nil optional fixture parses");
+        let module = lower(&ast).expect("nil optional fixture lowers");
+        let function = module.functions.iter().find(|function| function.name == "inspect")
+            .expect("inspect function exists");
+        let guards: Vec<_> = function.body.iter().filter_map(|stmt| match stmt {
+            crate::hir::types::HirStmt::If { then_block, .. } => Some(then_block),
+            _ => None,
+        }).collect();
+        assert_eq!(guards.len(), 1, "nil optional binding has one presence guard");
+        assert!(guards[0].iter().any(|stmt| matches!(stmt, crate::hir::types::HirStmt::Let { .. })));
     }
 }

@@ -1,0 +1,71 @@
+"""
+## Purpose and audience
+Purpose: Pin Engine2D dispatch predicates and font receipts that the engine2d
+coverage sweep (doc/10_metrics/gpu/render_coverage_2026-11-14.md) never
+reached: the Vulkan font-batch admission predicate, the typed-shutdown route
+table, the Vulkan-only text entry points on a non-Vulkan engine, the Vulkan
+diagnostics on an engine with no Vulkan target, and the staged-batch / glyph
+cache receipts around a resolved-advance text draw.
+Audience: Engine2D dispatch and font maintainers.
+"""
+
+"""
+Traceability: REQ-ENGINE2D-DISPATCH-RECEIPTS-001 — Engine2D admission predicates and font receipts report exactly what ran.
+"""
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 2%
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D, engine2d_vulkan_font_batch_admits, engine2d_shutdown_has_typed_route}
+
+describe "engine2d_vulkan_font_batch_admits":
+    it "admits only a successful status that covered every quad":
+        expect(engine2d_vulkan_font_batch_admits("executed", 4, 1, 4)).to_equal(true)
+        expect(engine2d_vulkan_font_batch_admits("recorded", 4, 1, 4)).to_equal(true)
+        expect(engine2d_vulkan_font_batch_admits("promoted", 4, 2, 4)).to_equal(true)
+        step("a failed status is never admitted, even with full coverage")
+        expect(engine2d_vulkan_font_batch_admits("failed", 4, 1, 4)).to_equal(false)
+        expect(engine2d_vulkan_font_batch_admits("rejected", 4, 1, 4)).to_equal(false)
+        step("partial coverage or zero dispatches is not admitted")
+        expect(engine2d_vulkan_font_batch_admits("executed", 3, 1, 4)).to_equal(false)
+        expect(engine2d_vulkan_font_batch_admits("executed", 4, 0, 4)).to_equal(false)
+        step("a clipped-out batch needs no dispatch but must still account for every quad")
+        expect(engine2d_vulkan_font_batch_admits("clipped-out", 4, 0, 4)).to_equal(true)
+        expect(engine2d_vulkan_font_batch_admits("clipped-out", 3, 0, 4)).to_equal(false)
+
+describe "engine2d_shutdown_has_typed_route":
+    it "names exactly the backends with a typed shutdown arm":
+        for name in ["vulkan", "vulkan-poisoned-software", "cuda", "metal", "opencl", "rocm", "software"]:
+            expect(engine2d_shutdown_has_typed_route(name)).to_equal(true)
+        for name in ["cpu", "cpu_simd", "webgpu", "directx", ""]:
+            expect(engine2d_shutdown_has_typed_route(name)).to_equal(false)
+
+describe "Engine2D on the software lane":
+    it "refuses the Vulkan-only text entry points and reports no Vulkan target":
+        var e = Engine2D.create_with_backend_fast(32, 16, "software")
+        expect(e.backend_name()).to_equal("software")
+        val advances: [i32] = [8, 8]
+        expect(e.draw_text_with_advances_vulkan_only(1, 1, "Hi", advances, 0xFF000000u32, 12)).to_equal(false)
+        expect(e.vulkan_driver_identity()).to_equal("")
+        expect(e.vulkan_last_frame_dispatch_count()).to_equal(0)
+        expect(e.vulkan_rect_batch_fallback_reason()).to_equal("no-vulkan-target")
+        expect(e.vulkan_accepted_compute_submit_count()).to_equal(0)
+        expect(e.vulkan_submission_generation()).to_equal(0)
+
+    it "reports a staged batch, rasterization, then a glyph cache hit across two draws":
+        var e = Engine2D.create_with_backend_fast(48, 24, "software")
+        e.clear(0xFFFFFFFFu32)
+        step("no text drawn yet: nothing is staged")
+        expect(e.font_receipt_staged_valid()).to_equal(false)
+        expect(e.font_receipt_staged_quads_nonempty()).to_equal(false)
+        val advances: [i32] = [9, 9]
+        expect(e.draw_text_with_advances(2, 2, "Hi", advances, 0xFF000000u32, 16)).to_equal(true)
+        step("the first draw staged a valid, inked batch and rasterized glyphs")
+        expect(e.font_receipt_staged_valid()).to_equal(true)
+        expect(e.font_receipt_staged_quads_nonempty()).to_equal(true)
+        expect(e.font_receipt_staged_atlas_nonempty()).to_equal(true)
+        expect(e.font_receipt_staged_atlas_has_alpha()).to_equal(true)
+        expect(e.font_receipt_cache_rasterizations_positive()).to_equal(true)
+        expect(e.font_receipt_cache_rasterizations_zero()).to_equal(false)
+        expect(e.font_execution_target()).to_equal("cpu")
+        expect(e.draw_text_with_advances(2, 2, "Hi", advances, 0xFF000000u32, 16)).to_equal(true)
+        step("the same glyphs again come from the cache")
+        expect(e.font_receipt_cache_hits_positive()).to_equal(true)

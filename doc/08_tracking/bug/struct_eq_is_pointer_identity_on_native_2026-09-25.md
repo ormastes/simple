@@ -62,3 +62,16 @@ field-wise comparisons when the layout is known (padding makes a blind memcmp
 unsound); or (b) teach both `rt_native_eq`s a registered-object content
 comparison keyed by type table. Until then: compare value-semantic IDs by
 their scalar fields.
+
+## Item-2 pure-Simple producer reproduction — 2026-10-20
+
+The budgeted-store native probe exposes a second native-engine failure mode:
+the admitted pure-Simple producer645e62a8 reports unresolved operator overloads
+for DbStoreView, DbPageQuota, DbPageEntry, DbPageRecord, DbPolicyConfig,
+DbPageContext and EntityRef during MIR lowering rather than executing value
+equality. The full native probe closure failed in9/197 modules after HIR
+succeeded. This is not evidence of the original pointer-identity execution
+behavior being fixed. Retained grouped commands, source identities, diagnostics
+and snapshot-origin caveats:
+`doc/03_plan/evidence/seven_plans/items247_store_compile_diagnostics_2026-10-20.md`.
+No equality semantics were weakened or rewritten merely to obtain PASS.

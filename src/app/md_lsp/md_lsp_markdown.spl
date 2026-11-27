@@ -1,0 +1,61 @@
+# Typed Markdown views shared by the workspace and request handlers.
+use std.common.markdown.block.{MarkdownBlock, markdown_block}
+use std.common.markdown.parse.{parse_markdown_blocks}
+use std.common.markdown.utilities.{markdown_heading_level, markdown_strip_heading_marker, markdown_is_code_fence}
+
+fn split_lines(content: text) -> [text]:
+    content.split("\n")
+
+fn parse_blocks(lines: [text]) -> [MarkdownBlock]:
+    parse_markdown_blocks(lines.join("\n"))
+
+fn extract_headings(blocks: [MarkdownBlock]) -> [(i64, text)]:
+    var headings: [(i64, text)] = []
+    for block in blocks:
+        if block.kind == "heading":
+            val level = markdown_heading_level(block.content)
+            val title = markdown_strip_heading_marker(block.content)
+            headings = headings.push((level, title))
+    headings
+
+fn parse_blocks_with_ranges(lines: [text]) -> [MarkdownBlock]:
+    parse_blocks(lines)
+
+# The common parser records each source line. Fold fenced runs as a unit and
+# sections through the line before the next heading of equal or lesser depth.
+# Code lines never become headings, including '# ...' inside fenced examples.
+fn compute_folding_ranges(blocks: [MarkdownBlock]) -> [MarkdownBlock]:
+    var ranges: [MarkdownBlock] = []
+    var i = 0
+    while i < blocks.len():
+        val block = blocks[i]
+        if block.kind == "code":
+            var end_line = block.to_line
+            var j = i + 1
+            while j < blocks.len():
+                val next = blocks[j]
+                if next.kind != "code" or next.from_line != end_line + 1:
+                    break
+                end_line = next.to_line
+                j = j + 1
+                if markdown_is_code_fence(next.content):
+                    break
+            if end_line > block.from_line:
+                ranges = ranges.push(markdown_block("region", "", block.from_line, end_line))
+            i = j
+        else:
+            if block.kind == "heading":
+                val level = markdown_heading_level(block.content)
+                var end_line = block.to_line
+                var j = i + 1
+                while j < blocks.len():
+                    val next = blocks[j]
+                    if next.kind == "heading" and markdown_heading_level(next.content) <= level:
+                        end_line = next.from_line - 1
+                        break
+                    end_line = next.to_line
+                    j = j + 1
+                if end_line > block.from_line:
+                    ranges = ranges.push(markdown_block("region", "", block.from_line, end_line))
+            i = i + 1
+    ranges

@@ -100,7 +100,7 @@ impl NarrowingContext:
                     return Some(fact.narrowed_type)
                 j = j + 1
             i = i - 1
-        nil
+        None
 
     me add_facts(facts: [NarrowingFact]):
         """Add multiple narrowing facts to the current scope."""
@@ -113,7 +113,7 @@ impl NarrowingContext:
 # Condition Analysis
 # ============================================================================
 
-fn analyze_condition(cond: HirExpr, type_lookup: fn(i64) -> HirType?) -> [NarrowingFact]:
+pub fn analyze_condition(cond: HirExpr, type_lookup: fn(i64) -> HirType?) -> [NarrowingFact]:
     """Analyze a condition expression to extract narrowing facts.
 
     Returns facts that are true when the condition evaluates to true.
@@ -214,9 +214,9 @@ fn _analyze_is(left: HirExpr, right: HirExpr, span: Span, type_lookup: fn(i64) -
                                 condition: NarrowingCondition.IsCheck(target),
                                 span: span
                             )]
-                        case nil:
+                        case None:
                             pass
-                case nil:
+                case None:
                     pass
             []
         case _: []
@@ -237,9 +237,9 @@ fn _analyze_is_not(left: HirExpr, right: HirExpr, span: Span, type_lookup: fn(i6
                                 condition: NarrowingCondition.IsNotCheck(target),
                                 span: span
                             )]
-                        case nil:
+                        case None:
                             pass
-                case nil:
+                case None:
                     pass
             []
         case _: []
@@ -261,7 +261,7 @@ fn _analyze_exists_check(base: HirExpr, span: Span, type_lookup: fn(i64) -> HirT
                                 span: span
                             )]
                         case _: pass
-                case nil:
+                case None:
                     pass
             []
         case _: []
@@ -281,7 +281,7 @@ fn _analyze_truthiness(sym_id: i64, span: Span, type_lookup: fn(i64) -> HirType?
                         span: span
                     )]
                 case _: pass
-        case nil:
+        case None:
             pass
     []
 
@@ -318,7 +318,7 @@ fn _make_nil_check_fact(sym_id: i64, span: Span, negated: bool, type_lookup: fn(
                             span: span
                         )]
                 case _: pass
-        case nil:
+        case None:
             pass
     []
 
@@ -337,7 +337,7 @@ fn _extract_type_from_expr(expr: HirExpr) -> HirType?:
             if expr.has_type_:
                 return Some(expr.type_)
         case _: pass
-    nil
+    None
 
 fn _combine_facts(left: [NarrowingFact], right: [NarrowingFact]) -> [NarrowingFact]:
     """Combine facts from two conditions joined by `and`."""
@@ -356,7 +356,7 @@ fn _combine_facts(left: [NarrowingFact], right: [NarrowingFact]) -> [NarrowingFa
 # Fact Negation
 # ============================================================================
 
-fn negate_facts(facts: [NarrowingFact]) -> [NarrowingFact]:
+pub fn negate_facts(facts: [NarrowingFact]) -> [NarrowingFact]:
     """Negate narrowing facts for else-branch.
 
     Each fact kind negates differently:
@@ -375,7 +375,7 @@ fn negate_facts(facts: [NarrowingFact]) -> [NarrowingFact]:
         match negated:
             case Some(value):
                 result = result.push(value)
-            case nil:
+            case None:
                 pass
         i = i + 1
     result
@@ -397,17 +397,17 @@ fn _negate_single_fact(fact: NarrowingFact) -> NarrowingFact?:
                             condition: NarrowingCondition.NilCheck(negated: false),
                             span: fact.span
                         ))
-                    case nil:
-                        nil
+                    case None:
+                        None
             else:
                 # Original: x != nil (then-branch: x is T)
                 # Negated (else-branch): x == nil, no useful narrowing
-                nil
+                None
 
         case ExistsCheck:
             # Original: x.? (then-branch: x is T)
             # Negated (else-branch): x is nil, no useful narrowing
-            nil
+            None
 
         case IsCheck(target_type):
             # Original: x is Type (then-branch: x is Type)
@@ -439,32 +439,130 @@ fn _negate_single_fact(fact: NarrowingFact) -> NarrowingFact?:
         case Truthiness:
             # Original: if x (then-branch: x is T)
             # Negated (else-branch): x is nil/falsy, no useful narrowing
-            nil
+            None
 
 fn _unwrap_optional(ty: HirType) -> HirType?:
     """Extract the inner type from an Optional type."""
     match ty.kind:
         case Optional(inner): Some(inner)
-        case _: nil
+        case _: None
 
 # ============================================================================
 # Definite Termination Analysis
 # ============================================================================
 
-fn definitely_terminates(block: HirBlock) -> bool:
+"""Conservative match arm coverage status for termination analysis."""
+pub enum MatchTerminationStatus:
+    Exhaustive
+    MayFallThrough
+
+struct _MatchCoverFlags:
+    has_true: bool
+    has_false: bool
+    has_some: bool
+    has_none_or_nil: bool
+
+fn _pattern_is_irrefutable(pat: HirPattern) -> bool:
+    match pat.kind:
+        case Wildcard: true
+        case Binding(_, _): true
+        case Tuple(elements):
+            for elem in elements:
+                if not _pattern_is_irrefutable(elem):
+                    return false
+            true
+        case Or(patterns):
+            for sub in patterns:
+                if _pattern_is_irrefutable(sub):
+                    return true
+            false
+        case _: false
+
+fn _enum_some_has_irrefutable_payload(payload: HirPatternPayload?) -> bool:
+    match payload:
+        case None: false
+        case Some(HirPatternPayload.Tuple(patterns)):
+            val payload_patterns: [HirPattern] = patterns
+            if payload_patterns.len() == 0:
+                return false
+            for pat in payload_patterns:
+                if not _pattern_is_irrefutable(pat):
+                    return false
+            true
+        case Some(HirPatternPayload.Struct(fields)):
+            val payload_fields: [(text, HirPattern)] = fields
+            for field_entry in payload_fields:
+                if not _pattern_is_irrefutable(field_entry.1):
+                    return false
+            true
+
+fn _enum_none_has_no_payload(payload: HirPatternPayload?) -> bool:
+    match payload:
+        case None: true
+        case _: false
+
+fn _enum_type_allows_option(enum_ty: HirType) -> bool:
+    """Return true for Option/unqualified-Option pattern types, excluding custom Named enums."""
+    match enum_ty.kind:
+        case Optional(_) | Error: true
+        case _: false
+
+fn _collect_match_cover_flags(pat: HirPattern, flags: _MatchCoverFlags) -> _MatchCoverFlags:
+    var out = flags
+    match pat.kind:
+        case Or(patterns):
+            for sub in patterns:
+                out = _collect_match_cover_flags(sub, out)
+        case Literal(value):
+            match value.kind:
+                case BoolLit(true):
+                    out.has_true = true
+                case BoolLit(false):
+                    out.has_false = true
+                case NilLit:
+                    out.has_none_or_nil = true
+                case _: ()
+        case Enum(enum_ty, variant, payload):
+            if _enum_type_allows_option(enum_ty):
+                if variant == "Some" and _enum_some_has_irrefutable_payload(payload):
+                    out.has_some = true
+                elif variant == "None" and _enum_none_has_no_payload(payload):
+                    out.has_none_or_nil = true
+        case _: ()
+    out
+
+pub fn classify_match_arm_coverage(arms: [HirMatchArm]) -> MatchTerminationStatus:
+    """Return Exhaustive iff unguarded arms provably cover all match values."""
+    if arms.len() == 0:
+        return MatchTerminationStatus.MayFallThrough
+    var flags = _MatchCoverFlags(has_true: false, has_false: false, has_some: false, has_none_or_nil: false)
+    for raw_arm in arms:
+        val typed_arm: HirMatchArm = raw_arm
+        if not typed_arm.has_guard:
+            if _pattern_is_irrefutable(typed_arm.pattern):
+                return MatchTerminationStatus.Exhaustive
+            flags = _collect_match_cover_flags(typed_arm.pattern, flags)
+    if (flags.has_true and flags.has_false) or (flags.has_some and flags.has_none_or_nil):
+        return MatchTerminationStatus.Exhaustive
+    MatchTerminationStatus.MayFallThrough
+
+pub fn definitely_terminates(block: HirBlock) -> bool:
     """Check if a block definitely does not fall through.
 
-    A block definitely terminates if its last statement is:
-    - return
-    - break (in a loop context)
-    - continue
-    - an if/match where ALL branches definitely terminate
+    A block definitely terminates if its tail value or any statement in it is:
+    - return / break / continue / throw
+    - an if / if-chain / match where ALL branches definitely terminate
+    - a nested block that definitely terminates
     """
-    if block.stmts.is_empty():
-        return false
+    if block.has:
+        if _expr_definitely_terminates(block.value):
+            return true
 
-    val last = block.stmts[block.stmts.len() - 1]
-    _stmt_definitely_terminates(last)
+    for stmt in block.stmts:
+        if _stmt_definitely_terminates(stmt):
+            return true
+
+    false
 
 fn _stmt_definitely_terminates(stmt: HirStmt) -> bool:
     """Check if a statement definitely terminates."""
@@ -488,16 +586,34 @@ fn _expr_definitely_terminates(expr: HirExpr) -> bool:
                     val then_term = definitely_terminates(then_block)
                     val else_term = definitely_terminates(block)
                     then_term and else_term
-                case nil:
+                case None:
                     false
         case IfChain(arms, else_block):
-            if arms.len() == 0 or not else_block.?:
+            if arms.len() == 0:
+                return false
+            match else_block:
+                case Some(block):
+                    for arm in arms:
+                        val typed_arm: HirIfArm = arm
+                        if not definitely_terminates(typed_arm.then_):
+                            return false
+                    definitely_terminates(block)
+                case None:
+                    false
+        case MatchCase(_, arms):
+            if arms.len() == 0:
                 return false
             for arm in arms:
-                val typed_arm: HirIfArm = arm
-                if not definitely_terminates(typed_arm.then_):
+                val typed_arm: HirMatchArm = arm
+                if not definitely_terminates(typed_arm.body):
                     return false
-            definitely_terminates(else_block.unwrap())
+            match classify_match_arm_coverage(arms):
+                case MatchTerminationStatus.Exhaustive: true
+                case MatchTerminationStatus.MayFallThrough: false
+        case Block(inner_block):
+            definitely_terminates(inner_block)
+        case UnsafeBlock(inner_block):
+            definitely_terminates(inner_block)
         case _: false
 
 # ============================================================================

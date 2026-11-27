@@ -1,0 +1,102 @@
+"""
+## Purpose and audience
+Purpose: Pin the 1x LCD text in and beside form controls against Chrome 159.
+Chrome keeps the line's fractional pen through a control: the label after a
+13 px checkbox, and the text inside an `<input>`, `<select>` or `<textarea>`
+that follows a label, all start from the exact pen, not the box's whole
+column. A text field's value is also drawn at the UA control font's real
+13.333px. This engine lost the pen past every atomic box, painted control
+text from the integer box x, and rasterised input values at 13px. On the
+catalog forms-media page (1x) those rows held ~1.5k of 7.6k mismatched px.
+Audience: web renderer layout (inline pen error) and Draw-IR text producers.
+
+Chrome oracle (Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=1`, window
+400x300), black 16px Liberation Sans on white, LCD (subpixel) text. Values
+are device (r,g,b) at the listed columns.
+
+| case | row | columns = Chrome rgb |
+|------|-----|----------------------|
+| label after checkbox | 13 | 35=(215,143,63) 36=(15,23,79) 38=(255,231,183) 39=(95,31,7) |
+| `<input value>` after `Name ` | 52 | 71=(151,215,247) 74=(151,215,247) 77=(151,215,247) 80=(151,215,247) |
+| `<select>` after `Choice ` | 94 | 78=(104,44,37) 79=(82,156,216) 81=(104,44,37) 82=(82,156,216) |
+| `<textarea>` after `Notes ` | 134 | 66=(159,71,15) 68=(0,0,7) 69=(63,151,215) 74=(159,71,15) |
+
+Base (75af6c0d7ba): label 35=(95,31,7) 36=(47,119,207) (stems 0.5 px left);
+input 71=(167,223,255); select 78=(59,29,67); textarea 66=(87,23,0).
+Tolerance: 8 per channel, the catalog's mismatch threshold.
+"""
+
+"""
+Traceability: REQ-WEB-FORM-CONTROL-TEXT-PEN-001 — text beside and inside a form control starts at the line's exact fractional pen and is drawn at the control font's computed size.
+"""
+# @tag: unit, browser_engine, text, form_controls, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+
+val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;color:#000;font:16px/1.5 'Liberation Sans'}} label{{display:block;margin:8px 0 8px 10px}} input,select,textarea{{padding:8px;border:1px solid #94a3b8;border-radius:5px}}</style></head><body><label><input type=\"checkbox\" checked> lllll</label><label>Name <input value=\"lllll\"></label><label>Choice <select><option>lllll</option></select></label><label>Notes <textarea>lllll</textarea></label></body></html>"
+
+fn _rgb(p: u32) -> [i32]:
+    [((p >> 16u32) & 0xFFu32) as i32, ((p >> 8u32) & 0xFFu32) as i32, (p & 0xFFu32) as i32]
+
+# "col=(r,g,b)" for each listed column: Chrome's value when every channel is
+# within 8, else ours.
+fn _row_text(px: [u32], y: i32, cols: [i32], chrome: [[i32]]) -> text:
+    var s = ""
+    var i = 0
+    while i < cols.len():
+        val got = _rgb(px[y * CSS_W + cols[i]])
+        var close = true
+        var ch = 0
+        while ch < 3:
+            val d = got[ch] - chrome[i][ch]
+            if d > 8 or d < -8:
+                close = false
+            ch = ch + 1
+        val shown = if close: chrome[i] else: got
+        s = s + "{cols[i]}=({shown[0]},{shown[1]},{shown[2]}) "
+        i = i + 1
+    s
+
+fn _want_text(cols: [i32], chrome: [[i32]]) -> text:
+    var s = ""
+    var i = 0
+    while i < cols.len():
+        s = s + "{cols[i]}=({chrome[i][0]},{chrome[i][1]},{chrome[i][2]}) "
+        i = i + 1
+    s
+
+fn _render() -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 1, "cpu_simd")
+
+describe "Form-control text keeps the line's exact pen and the control font size (Chrome 159, 1x)":
+    it "AC-1: the label after a checkbox starts at the fractional pen past the 13 px box":
+        val px = _render()
+        expect(px.len()).to_equal((CSS_W * CSS_H) as i64)
+        val cols: [i32] = [35, 36, 38, 39]
+        val chrome: [[i32]] = [[215, 143, 63], [15, 23, 79], [255, 231, 183], [95, 31, 7]]
+        expect(_row_text(px, 13, cols, chrome)).to_equal(_want_text(cols, chrome))
+
+    it "AC-2: an input value is drawn at 13.333px from the box's fractional pen":
+        val px = _render()
+        val cols: [i32] = [71, 74, 77, 80]
+        val chrome: [[i32]] = [[151, 215, 247], [151, 215, 247], [151, 215, 247], [151, 215, 247]]
+        expect(_row_text(px, 52, cols, chrome)).to_equal(_want_text(cols, chrome))
+
+    it "AC-3: a select's option text starts from the box's fractional pen":
+        val px = _render()
+        val cols: [i32] = [78, 79, 81, 82]
+        val chrome: [[i32]] = [[104, 44, 37], [82, 156, 216], [104, 44, 37], [82, 156, 216]]
+        expect(_row_text(px, 94, cols, chrome)).to_equal(_want_text(cols, chrome))
+
+    it "AC-4: a textarea's text starts from the box's fractional pen":
+        val px = _render()
+        val cols: [i32] = [66, 68, 69, 74]
+        val chrome: [[i32]] = [[159, 71, 15], [0, 0, 7], [63, 151, 215], [159, 71, 15]]
+        expect(_row_text(px, 134, cols, chrome)).to_equal(_want_text(cols, chrome))

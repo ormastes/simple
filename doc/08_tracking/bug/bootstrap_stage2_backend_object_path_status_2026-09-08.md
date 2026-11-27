@@ -437,3 +437,15 @@ build, already reported as deadlocking under load elsewhere), so it was not
 attempted here either. No code change made in this session; status left as
 `fix-implemented-verification-pending` for the owning lane to close once that
 differential lands.
+
+## 2026-11-10 status (P1 verify pass, branch work/p1verify-runtime-20261110)
+
+Windows x86_64 host, seed-only (`bin/simple.exe` Rust seed v1.0.0-rc.1; no
+self-hosted `bin/release/<triple>/simple` present). Fix re-verified on every
+lane runnable from this host; no source change, 0 fix cycles.
+
+- Focused source contract: `sh test/01_unit/compiler/backend/backend_plugin_failure_diagnostics_source_contract_test.shs` -> rc=0, `PASS backend plugin failure diagnostics source contract` (native bridge `runtime_backend_plugin.c:255-256` collects diagnostics after success or failure retaining primary status; Rust bridge `wsffi.rs:227-229` matches).
+- Seed-smoke probe: `PROBE_FIXTURE=build/p1verify-rt-20261110/probe-fixture.txt bin/simple.exe run test/02_integration/bootstrap/probe_stage2_object_path_diagnostic_read.spl` (cwd = worktree) -> rc=0, `PROBE-OK len=37` / `PROBE-CONTENT [AOT object destination already exists]`. Interpret lane over current `src/lib`; the missing-file arm is intentionally skipped on the seed lane (`rt_file_read_regular_no_follow_last_failure` is not registered there, per the probe header). Per the 2026-09-22 report, the already-green hello/recovery legs were not re-run.
+- Fix surfaces re-confirmed in current source: driver chain `src/compiler/80.driver/driver_aot_native_output.spl:4502-4508` ("diagnostic file empty" / "payload lost on read" / "diagnostic unreadable" before the bare status); C reader `src/runtime/runtime_native.c:15067-15097` (sentinel 100 on success, distinct arm codes via `RT_RNF_FAIL`); wrapper `src/lib/nogc_sync_mut/io/file_ops.spl:116-134` (arm-code discipline, extern-nil vs payload-lost distinction).
+- Host-limited, NOT run here: the retained-evidence checker (`scripts/check/check-stage2-object-path-diagnostic-evidence.shs` needs the `D:/wk-p1-stage2-object-path` evidence capsule and the stage2 `admission.env` receipt; neither exists on this host), and the native wrapper A/B differential (requires an admitted self-hosted compiler; the seed is bootstrap-only and no self-hosted qualification is claimed from it).
+- Verdict: implementation VERIFIED (host-limited). Full closure still requires the native wrapper A/B through an admitted self-hosted compiler; keep `fix-implemented-verification-pending`. Evidence: `build/review/p1verify-rt-20261110.sdn`.

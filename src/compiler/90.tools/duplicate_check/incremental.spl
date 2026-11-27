@@ -10,11 +10,10 @@ use compiler.tools.duplicate_check._Detector.interner_and_logging.{
     new_token_interner
 }
 use compiler.tools.duplicate_check.math_utils.{hash_string}
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_hash_sha256}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_hash_sha256, file_atomic_write}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
 use std.common.base_encoding.utilities.{base_encoding_text_to_bytes as text_to_bytes, base_encoding_bytes_to_text as bytes_to_text}
-use std.io_runtime.{file_write_exact}
 
 struct IncrementalCacheEntry:
     file_path: text
@@ -133,7 +132,7 @@ fn load_incremental_cache(cache_path: text, config: DuplicationConfig) -> Increm
         if line == "# format: 2":
             format_ok = true
         elif line.starts_with("# config_hash:"):
-            stored_config_hash = line.substring(14, line.len()).trim()
+            stored_config_hash = line.substring(14, line.byte_len()).trim()
         elif line.starts_with("#") or line.len() == 0:
             i = i + 1
             continue
@@ -161,7 +160,7 @@ fn load_incremental_cache(cache_path: text, config: DuplicationConfig) -> Increm
                 if not block_line.starts_with("  "):
                     malformed = true
                     break
-                val block_parts = block_line.substring(2, block_line.len()).split("|")
+                val block_parts = block_line.substring(2, block_line.byte_len()).split("|")
                 if block_parts.len() != 7:
                     malformed = true
                     break
@@ -244,7 +243,7 @@ fn save_incremental_cache(cache: IncrementalCache) -> bool:
 
         lines.push("")
 
-    file_write_exact(cache.cache_path, lines.join("\n"))
+    file_atomic_write(cache.cache_path, lines.join("\n"))
 
 fn needs_reprocessing(
     file_path: text,
@@ -256,8 +255,9 @@ fn needs_reprocessing(
 
     val entry = cache.entries[cache_key]
     val current_hash = file_hash_sha256(file_path)
-
-    current_hash != entry.source_hash
+    if current_hash.is_none():
+        return true  # Unhashable file: treat as changed
+    current_hash.unwrap() != entry.source_hash
 
 fn get_cached_blocks(
     file_path: text,
@@ -267,7 +267,7 @@ fn get_cached_blocks(
     if cache_key != "":
         val entry = cache.entries[cache_key]
         val current_hash = file_hash_sha256(file_path)
-        if current_hash == entry.source_hash:
+        if current_hash.is_some() and current_hash.unwrap() == entry.source_hash:
             return entry.blocks
 
     []
@@ -283,7 +283,11 @@ fn update_cache_entry(
     file_path: text,
     blocks: [DuplicateBlock]
 ) -> IncrementalCache:
-    val source_hash = file_hash_sha256(file_path)
+    val source_hash_opt = file_hash_sha256(file_path)
+    if source_hash_opt.is_none():
+        # Unhashable file: never record it as fresh.
+        return cache
+    val source_hash = source_hash_opt.unwrap()
     val timestamp = current_time_ms()
     var updated_cache = cache
 

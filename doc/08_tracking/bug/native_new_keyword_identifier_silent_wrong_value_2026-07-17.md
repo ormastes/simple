@@ -1,8 +1,12 @@
 # Native path: `new` used as a plain identifier silently evaluates to the wrong value (and crashes when used as a method arg)
-## Open 2026-09-16 — needs owner triage
+## Source-fixed; dual-backend execution evidence pending (re-confirmed 2026-11-25)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+Superseded 2026-11-25: the parser fix and the strict parity gate case are
+confirmed present at release/1.0.0 HEAD (see the dated note at the end);
+only the dual-backend execution run remains, per this bug's own closure
+criterion.
 
 **Date:** 2026-07-17
 **Severity:** High (silent wrong output with no diagnostic; escalates to SIGSEGV)
@@ -151,3 +155,31 @@ to pin down the mechanism to file this).
   passes on both oracle and native, isolating the defect to the `new`
   identifier specifically.
 
+
+## Verification 2026-11-25 (work/p2w4-ak-20261125, release/1.0.0)
+
+Source fix and regression gate confirmed at release/1.0.0 HEAD by inspection:
+
+- `src/compiler/10.frontend/core/_ParserPrimary/primary_expr.spl:650-664` —
+  the `TOK_KW_NEW` (211) primary arm resolves `new` to
+  `expr_ident("new", 0)` when the following token is an unambiguous
+  expression terminator (`g33_kw_ident_follow` minus the alloc-start
+  sigils, plus EOF/`}`/`]`/`;`), exactly the contextual-keyword shape this
+  bug's "Expected" section asked for. The generic `new expr` allocation
+  grammar is preserved for the ambiguous forms, matching the documented
+  design decision.
+- The strict dual-backend parity case `new_keyword_identifier` is wired
+  into the gate: `scripts/check/check-native-seed-parity.shs:2260`
+  (`run_strict_dual_backend_case new_keyword_identifier ... "interp=L;arg=L;replace=heLLo"`),
+  selected on the macOS/Windows/FreeBSD lanes
+  (`scripts/check/check-freebsd-bootstrap-qemu.shs:1514`) as well as the
+  full Linux gate.
+- Still not closed, per this bug's own criterion ("native dual-backend
+  execution is required before marking this bug closed"): the parity case
+  has not been executed in this lane. Execution on this Windows host is
+  blocked — the pinned seed rejects the tree-wide
+  `@representation_boundary` decorator (cfd89933699), and the pure-Simple
+  native path requires compiling `src/compiler`, which carries those
+  annotations. Next lane with a working self-hosted binary: run
+  `NATIVE_PARITY_CASES=new_keyword_identifier PARITY_WORK_DIR=... sh
+  scripts/check/check-native-seed-parity.shs` and close on PASS.

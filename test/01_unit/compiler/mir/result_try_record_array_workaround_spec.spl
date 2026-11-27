@@ -98,3 +98,19 @@ describe "REQ-MIR-TRY-RECORD-ARRAY-WA-001: temporary typed Result record binding
             if error.message.contains("for-in over non-array iterables"): rejected = true
         expect(rejected).to_be(true)
         expect(try_record_call_count(fixture.function, "rt_array_get")).to_equal(0)
+
+    it "should retain imported-call array iteration without explicit record annotation":
+        val unannotated_consumer = "use app.try_record.provider.\{produce\}\nstruct Bundle:\n    rows: i64\n    marker: text\nfn inspect(reject: bool) -> Result<i64, text>:\n    val record = produce(reject)?\n    var total = record.marker\n    for row in record.rows:\n        total = total + row.value\n    Ok(total)\n"
+        val fixture = try_record_array_fixture(try_record_provider, unannotated_consumer)
+        expect(fixture.lowering.errors.len()).to_equal(0)
+        expect(try_record_call_count(fixture.function, "produce")).to_equal(1)
+        expect(try_record_call_count(fixture.function, "rt_array_len")).to_be_greater_than(0)
+        expect(try_record_call_count(fixture.function, "rt_array_get")).to_be_greater_than(0)
+
+    it "should retain same-module-call array iteration without explicit record annotation":
+        val unannotated_local = "use app.try_record.provider.\{Bundle as ProviderBundle, Entry\}\nstruct Bundle:\n    rows: i64\n    marker: text\nfn produce_local(reject: bool) -> Result<ProviderBundle, text>:\n    if reject: return Err(\"local record rejected\")\n    Ok(ProviderBundle(marker: 23, rows: [Entry(code: 2, value: 5), Entry(code: 6, value: 13)]))\nfn inspect(reject: bool) -> Result<i64, text>:\n    val record = produce_local(reject)?\n    var total = record.marker\n    for row in record.rows:\n        total = total + row.value\n    Ok(total)\n"
+        val fixture = try_record_array_fixture(try_record_provider, unannotated_local, "produce_local")
+        expect(fixture.lowering.errors.len()).to_equal(0)
+        expect(try_record_call_count(fixture.function, "produce_local")).to_equal(1)
+        expect(try_record_call_count(fixture.function, "rt_array_len")).to_be_greater_than(0)
+        expect(try_record_call_count(fixture.function, "rt_array_get")).to_be_greater_than(0)

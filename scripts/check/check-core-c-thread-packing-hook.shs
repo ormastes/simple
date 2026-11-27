@@ -1,0 +1,47 @@
+#!/bin/sh
+# Native ABI regression: C-only links need no Rust packing provider; mixed
+# supplements must still notify that provider before starting user threads.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+cc=${CC:-clang}
+nm=${NM:-nm}
+out=$(mktemp -d "${TMPDIR:-/tmp}/simple-thread-packing-hook.XXXXXX")
+trap 'rc=$?; if [ "$rc" -eq 0 ]; then rm -rf "$out"; else echo "FAIL: evidence retained at $out" >&2; fi' EXIT
+cat > "$out/core.c" <<'C'
+#include "runtime_value.h"
+int main(void) { SPL_NOTE_USER_THREADS(); return 0; }
+C
+cat > "$out/mixed.c" <<'C'
+#include "runtime_value.h"
+static int calls;
+void simple_note_user_threads_started(void) { ++calls; }
+int main(void) {
+    SPL_NOTE_USER_THREADS();
+#if defined(__GNUC__) && !defined(_WIN32)
+    return calls == 1 ? 0 : 1;
+#else
+    return calls == 0 ? 0 : 1;
+#endif
+}
+C
+"$cc" -std=gnu11 -I "$root/src/runtime" -DSIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING=1 "$out/core.c" -o "$out/core"
+"$out/core"
+"$cc" -std=gnu11 -I "$root/src/runtime" -DSIMPLE_CORE_C_STANDALONE=1 "$out/mixed.c" -o "$out/mixed"
+"$out/mixed"
+case $(uname -s) in
+  Darwin|Linux|FreeBSD)
+    for lane in core mixed; do
+      set -- -c -Os -std=gnu11 -I "$root/src/runtime" -DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_MEMORY_OWNER=1
+      if [ "$lane" = core ]; then set -- "$@" -DSIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING=1; fi
+      "$cc" "$@" "$root/src/runtime/runtime_thread.c" -o "$out/thread.$lane.o"
+      "$nm" -u "$out/thread.$lane.o" > "$out/thread.$lane.undefined"
+    done
+    if grep -q simple_note_user_threads_started "$out/thread.core.undefined"; then
+      echo 'FAIL: C-only thread runtime still requires Rust packing' >&2; exit 1
+    fi
+    grep -q simple_note_user_threads_started "$out/thread.mixed.undefined" || {
+      echo 'FAIL: mixed thread runtime lost its Rust packing callback' >&2; exit 1;
+    }
+    ;;
+esac
+echo 'PASS: native C-only link/run and mixed packing callback; thread object ownership preserved'

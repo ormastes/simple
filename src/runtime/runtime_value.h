@@ -22,12 +22,30 @@ typedef uint64_t RuntimeValue;
 #define RT_FALSE ((SPECIAL_FALSE << 3) | TAG_SPECIAL)
 #define RT_ERROR ((SPECIAL_ERROR << 3) | TAG_SPECIAL)
 
+/* Char values (ADR-005): TAG_SPECIAL sub-kind, payload = SPECIAL_CHAR_BASE | code
+ * point. Parity with src/compiler_rust/runtime/src/value/tags.rs. Never TAG_INT. */
+#define SPECIAL_CHAR_BASE (1ULL << 40)
+#define SPECIAL_CHAR_MASK 0x1FFFFFULL
+#define RT_CHAR(cp) ((((SPECIAL_CHAR_BASE | ((uint64_t)(cp) & SPECIAL_CHAR_MASK))) << 3) | TAG_SPECIAL)
+#define RT_IS_CHAR(v) ((((v) & TAG_MASK) == TAG_SPECIAL) && ((((v) >> 3) & ~SPECIAL_CHAR_MASK) == SPECIAL_CHAR_BASE))
+#define RT_CHAR_CODE(v) ((uint32_t)(((v) >> 3) & SPECIAL_CHAR_MASK))
+/* Unicode scalar check, identical to Rust char::from_u32: rejects the UTF-16
+ * surrogate range and values above U+10FFFF. */
+#define RT_CHAR_CODE_VALID(cp) ((uint64_t)(cp) <= 0x10FFFFULL && !((uint64_t)(cp) >= 0xD800ULL && (uint64_t)(cp) <= 0xDFFFULL))
+/* C twin of RuntimeValue::from_char_code: a char value, or RT_NIL (Rust None)
+ * for a non-scalar code point. Use this for any untrusted code point; RT_CHAR
+ * is the unchecked constructor for known-valid scalars. */
+#define RT_CHAR_FROM_CODE(cp) (RT_CHAR_CODE_VALID(cp) ? RT_CHAR(cp) : RT_NIL)
+
 /* Starting any user-visible thread must tell the Rust seed runtime, which packs
  * `[i64]` arrays in place only while no other thread can see them. Weak, so
  * standalone C builds (no seed runtime, no packing) link without it. On
  * Windows the hook is a no-op, so the Rust runtime never packs there
  * (`pack_tagged_words_in_place` checks `cfg!(windows)`). */
-#if defined(__GNUC__) && !defined(_WIN32)
+/* Only the final C-only composition may omit this Rust packing callback.
+ * SIMPLE_CORE_C_STANDALONE is also used by mixed-runtime supplements, so it
+ * cannot establish that ownership. Keep the callback by default. */
+#if defined(__GNUC__) && !defined(_WIN32) && !defined(SIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING)
 extern void simple_note_user_threads_started(void) __attribute__((weak));
 #define SPL_NOTE_USER_THREADS() \
     do { if (simple_note_user_threads_started) simple_note_user_threads_started(); } while (0)
@@ -55,6 +73,48 @@ extern void simple_note_user_threads_started(void) __attribute__((weak));
 
 static inline int rt_native_word_exceeds_user_va(uint64_t word) {
     return (word & ~RT_NATIVE_PTR_TAG_BITS) > RT_NATIVE_USER_VA_MAX;
+}
+
+/* Explicit function-value ABI kind, chosen by the CALLER (thread spawner or
+ * pool submitter) from the static type of what it passes; never inferred
+ * from the word's value. Twin of executor.rs RT_WORKER_CLOSURE_* /
+ * native_worker_closure_word.
+ *   ADDRESS  machine address of a code entry or record; raw = 0.
+ *   VALUE    tagged Simple RuntimeValue, decoded by its own tag:
+ *            TAG_INT  (addr << 3) -> raw native record/entry, raw = 1;
+ *            TAG_HEAP (addr | 1)  -> heap record, raw = 0;
+ *            any other tag is rejected.
+ * Any other kind, and any decoded word below 4096, is rejected (returns 0).
+ * Pure: no shared state, no probe, so it is lockless by construction. */
+#define RT_WORKER_CLOSURE_ADDRESS 1
+#define RT_WORKER_CLOSURE_VALUE   2
+
+static inline int rt_native_function_word_decode(int64_t kind, int64_t word, int64_t* payload, int* raw) {
+    uint64_t value = (uint64_t)word;
+    uint64_t decoded;
+    int is_raw;
+    if (kind == RT_WORKER_CLOSURE_ADDRESS) {
+        /* Validity, not a guess: above the user-VA ceiling is no address. */
+        if (rt_native_word_exceeds_user_va(value)) return 0;
+        decoded = value;
+        is_raw = 0;
+    } else if (kind == RT_WORKER_CLOSURE_VALUE) {
+        if ((value & TAG_MASK) == TAG_INT) {
+            decoded = value >> 3;
+            is_raw = 1;
+        } else if ((value & TAG_MASK) == TAG_HEAP) {
+            decoded = value & ~(uint64_t)TAG_MASK;
+            is_raw = 0;
+        } else {
+            return 0;
+        }
+    } else {
+        return 0;
+    }
+    if (decoded < 4096ULL) return 0;
+    *payload = (int64_t)decoded;
+    *raw = is_raw;
+    return 1;
 }
 
 static inline uint64_t rv_tag(RuntimeValue v) { return v & TAG_MASK; }

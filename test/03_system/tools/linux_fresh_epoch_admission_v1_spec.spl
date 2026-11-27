@@ -1,0 +1,123 @@
+# AUTHORED_NOT_RUN. A disposable administrator-provisioned epoch B is required.
+# No profile installation, synthetic WAL seed, emulated provider or skip pass.
+# @req REQ-LINUX-FRESH-EPOCH-001
+# @req REQ-LINUX-FRESH-EPOCH-002
+# @req REQ-LINUX-FRESH-EPOCH-003
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.container.machine_authority_v1.*
+use std.nogc_sync_mut.container.machine_fresh_epoch_cleanup_v1.*
+use std.nogc_sync_mut.container.machine_fresh_epoch_history_v1.machine_fresh_epoch_read_initial_v1
+use std.nogc_async_mut.container.providers.linux.fresh_epoch_creator_v1.*
+use std.common.build_manager.group_process_stream_protocol_v2.group_process_stream_template_decode_v3
+use std.nogc_sync_mut.io.machine_storage_owner_v1.*
+use std.nogc_sync_mut.io.env_ops.env_get
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+
+var fresh_system_admission_v1: Option<MachineFreshEpochAdmissionTurnV1> = nil
+var fresh_system_provider_v1: Option<LinuxFreshEpochProviderCreatorV1> = nil
+var fresh_system_duplicate_v1: Option<MachineFreshEpochProviderStartTurnV1> = nil
+var fresh_system_storage_v1: Option<MachineContainerAuthorityCleanupV1> = nil
+
+fn fresh_system_admit_v1() -> Result<MachineFreshEpochAdmissionOwnerV1, text>:
+    val admitted = machine_container_authority_open_fresh_epoch_v1()
+    fresh_system_admission_v1 = Some(admitted)
+    if admitted.error != "" or admitted.owner.is_none():
+        val closed = machine_fresh_epoch_admission_turn_close_v1(admitted)
+        fresh_system_admission_v1 = closed.retained
+        return Err("actual fixed installed epoch required: " + admitted.error + "; cleanup=" + closed.error)
+    Ok(admitted.owner.unwrap())
+
+fn fresh_system_storage_open_v1() -> Result<MachineStorageOwnerV1, text>:
+    val reader = match machine_policy_open_v1():
+        case MachinePolicyOpenV1.Ready(owner): owner
+        case MachinePolicyOpenV1.Rejected(reason): return Err(reason)
+        case MachinePolicyOpenV1.CleanupRequired(owner, reason):
+            fresh_system_storage_v1 = Some(MachineContainerAuthorityCleanupV1.Reader(owner))
+            return Err(reason)
+    fresh_system_storage_v1 = Some(MachineContainerAuthorityCleanupV1.Reader(reader))
+    val bytes = reader.read_policy_v1()?
+    if not utf8_bytes_valid(bytes): return Err("actual installed machine policy must be exact UTF8")
+    val source = bytes_to_text(bytes)
+    val storage = match reader.open_storage_v1():
+        case MachineStorageOpenV1.Ready(owner): owner
+        case MachineStorageOpenV1.Rejected(reason): return Err(reason)
+        case MachineStorageOpenV1.CleanupRequired(owner, reason):
+            fresh_system_storage_v1 = Some(MachineContainerAuthorityCleanupV1.Storage(owner))
+            return Err(reason)
+    fresh_system_storage_v1 = Some(MachineContainerAuthorityCleanupV1.Storage(storage))
+    val bound = storage.bind_policy_v1(source)?
+    Ok(storage)
+
+describe "Actual fresh Linux epoch uses one durable writer and one profiled creator":
+    it "charges the real partition before startup, rejects a copied second launch and preserves charges after close":
+        step("Read an unsigned template as data while fixed installed native policy remains the authority")
+        val template_path = env_get("SIMPLE_LINUX_FRESH_EPOCH_TEMPLATE")
+        assert(template_path != "")
+        val template_bytes = file_read_regular_no_follow_bounded(template_path, 65536).unwrap()
+        val template = group_process_stream_template_decode_v3(template_bytes).unwrap()
+        step("Obtain genuine installed preparation, the original writer, the first charge and transferred custody")
+        val admission = fresh_system_admit_v1().unwrap()
+        val alias = admission
+        val record = admission.current_v1().unwrap()
+        val initial_commit = admission.initial_commit_v1().unwrap()
+        step("Consume a canonical persisted creator permit before actual profiled Podman process creation")
+        val provider = match linux_fresh_epoch_provider_start_v1(admission, template):
+            case LinuxFreshEpochProviderOpenV1.Started(owner): owner
+            case LinuxFreshEpochProviderOpenV1.Retained(owner, reason):
+                fresh_system_provider_v1 = Some(owner)
+                val closed = owner.close_v1()
+                fresh_system_provider_v1 = closed.owner
+                fail("actual profiled provider startup required: " + reason + "; cleanup=" + closed.error)
+                return
+        fresh_system_provider_v1 = Some(provider)
+        val actual_provider = provider.current_v1()
+        step("Reject a copied admission's second attempt without another native creator")
+        val duplicate = alias.start_provider_v1(template)
+        fresh_system_duplicate_v1 = Some(duplicate)
+        if val extra = duplicate.process:
+            if duplicate.fallback.is_none():
+                fail("unexpected duplicate native owner lacks canonical cleanup custody")
+                return
+            val fallback = duplicate.fallback.unwrap()
+            val closed = fallback.close_v1(extra, duplicate.reference)
+            if not closed.consumed:
+                fail("unexpected duplicate native owner retained: " + closed.error)
+                return
+        val still_current = provider.current_v1()
+        step("Close the actual owned provider before releasing machine and epoch custody")
+        val closed = provider.close_v1()
+        fresh_system_provider_v1 = closed.owner
+        if not closed.closed or closed.owner.is_some():
+            fail("actual provider cleanup remains retained: " + closed.error)
+            return
+        if closed.error != "":
+            fail("actual provider cleanup consumed resources with a diagnostic: " + closed.error)
+            return
+        fresh_system_admission_v1 = nil
+        fresh_system_duplicate_v1 = nil
+        val old_alias = alias.current_v1()
+        expect(closed.error).to_equal("")
+        expect(actual_provider.is_ok()).to_equal(true)
+        expect(still_current.is_ok()).to_equal(true)
+        expect(duplicate.started).to_equal(false)
+        expect(duplicate.error).to_equal("machine-fresh-epoch-creator-already-attempted")
+        expect(old_alias.is_err()).to_equal(true)
+        expect(initial_commit.byte_len()).to_equal(64)
+        step("Reopen the same actual storage namespace only after close and observe retained scope plus creator intent")
+        val storage = fresh_system_storage_open_v1().unwrap()
+        val head = storage.wal_head_v1().unwrap()
+        val creator = storage.wal_revision_v1(head).unwrap()
+        val rows = storage.wal_segment_v1(creator).unwrap()
+        val historical = machine_fresh_epoch_read_initial_v1(storage, initial_commit).unwrap()
+        val cleanup = fresh_system_storage_v1.unwrap()
+        val storage_closed = machine_container_authority_cleanup_v1(cleanup)
+        if storage_closed == "released" or storage_closed == "consumed-error": fresh_system_storage_v1 = nil
+        expect(storage_closed).to_equal("released")
+        expect(creator.parent).to_equal(initial_commit)
+        expect(creator.first_sequence).to_equal(5)
+        expect(creator.last_sequence).to_equal(6)
+        expect(rows.len()).to_equal(2)
+        expect(rows[0].data).to_contain("unknown")
+        expect(rows[1].data).to_contain("uncertain")
+        expect(historical).to_equal(record)

@@ -4,7 +4,7 @@ use app.devhub.gui.{devhub_gui_html, devhub_gui_status_json}
 use app.io.mod.{file_exists, process_spawn_async, process_spawn_async_env}
 use app.ui.electron.app_launcher.{resolve_workspace_electron_app_launch,
     electron_app_launch_args}
-use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.io.tcp.{TcpListener, TcpStream}
 
 fn _devhub_gui_open(host: text, port: i64, shell: text) -> bool:
     val url = "http://{host}:{port}/"
@@ -39,9 +39,10 @@ fn _devhub_gui_open(host: text, port: i64, shell: text) -> bool:
     print "DevHub GUI launched pid={pid} url={url} shell=browser"
     true
 
-fn _devhub_gui_status_text(status: i64) -> text:
+pub fn _devhub_gui_status_text(status: i64) -> text:
     if status == 200: return "OK"
     if status == 404: return "Not Found"
+    if status == 500: return "Internal Server Error"
     "Bad Request"
 
 fn _devhub_gui_write(stream: TcpStream, status: i64, content_type: text, body: text) -> bool:
@@ -59,7 +60,7 @@ fn _devhub_gui_write(stream: TcpStream, status: i64, content_type: text, body: t
 fn _devhub_gui_handle(stream: TcpStream):
     stream.set_read_timeout(1000)
     var path = ""
-    match stream.read_line():
+    match stream.read_line_bounded(8192):
         Err(_): pass_dn
         Ok(line):
             val parts = line.trim().split(" ")
@@ -68,7 +69,7 @@ fn _devhub_gui_handle(stream: TcpStream):
     var header_count = 0
     if path != "":
         loop:
-            match stream.read_line():
+            match stream.read_line_bounded(8192):
                 Err(_): break
                 Ok(line):
                     if line.trim() == "": break
@@ -82,7 +83,7 @@ fn _devhub_gui_handle(stream: TcpStream):
         val _written = _devhub_gui_write(stream, 404, "application/json; charset=utf-8", "{\"error\":\"not found\"}")
     val _closed = stream.close()
 
-fn devhub_gui_options(args: [text]) -> (i64, text):
+pub fn devhub_gui_options(args: [text]) -> (i64, text):
     var port: i64 = 8765
     var shell = "electron"
     var i = 0
@@ -97,7 +98,7 @@ fn devhub_gui_options(args: [text]) -> (i64, text):
         i = i + 1
     (port, shell)
 
-fn run_devhub_gui(args: [text]) -> i64:
+pub fn run_devhub_gui(args: [text]) -> i64:
     val options = devhub_gui_options(args)
     val port = options.0
     val shell = options.1

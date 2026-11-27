@@ -31,14 +31,24 @@ on:
       - 'scripts/check/fixtures/riscv64_boot_contract_probe.c'
       - '.github/workflows/riscv-hardware-gates.yml'
   workflow_dispatch:
+    inputs:
+      boot_only:
+        description: 'Run only the SimpleOS riscv64 OpenSBI boot contract'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
-  group: riscv-hw-gates-${{ github.ref }}
+  # Keep explicitly requested release evidence alive while the busy release
+  # branch advances. Automatic runs still supersede older automatic runs.
+  group: riscv-hw-gates-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'automatic' }}
   cancel-in-progress: true
 
 jobs:
   riscv-hw-gates:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    if: |
+      (github.event_name != 'workflow_dispatch' || inputs.boot_only != true) &&
+      (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     name: JTAG testbenches + soc/core probes
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -117,9 +127,20 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu \
-            qemu-system-misc opensbi build-essential
+            qemu-system-misc opensbi build-essential llvm
           riscv64-linux-gnu-gcc --version | head -n 1
+          llvm-nm --version | head -n 1
           qemu-system-riscv64 --version | head -n 1
+
+      - name: Setup Rust toolchain for Phase 1 hello payload
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-09-15
+          components: rustfmt, clippy
+
+      - name: Build Phase 1 bootstrap seed
+        working-directory: src/compiler_rust
+        run: cargo build --locked --release -p simple-driver --bin simple
 
       # Firmware-only proxy: proves OpenSBI itself boots on this runner.
       - name: OpenSBI real-firmware boot gate

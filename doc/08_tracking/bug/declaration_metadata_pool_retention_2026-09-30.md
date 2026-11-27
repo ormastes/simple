@@ -55,3 +55,27 @@ cross-function negative controls all passed in the checker's built-in selftest.
 The complete scan then passed all 171 pools; evidence is
 `pool-regression/codec-completeness-fixed.log`. This structural PASS does not
 qualify the pending production runtime regressions above.
+
+## Diagnosis append 2026-11-05 (release/1.0.0 re-run, agent00 timeout batch)
+
+The fourth example ("rejects mismatched metadata lengths and invalid active
+module references") still fails under `bin/simple test` with
+`expected true to equal false`. Diagnosed root cause: the example's negative
+controls inject corruption by pushing directly into the module-level arrays
+imported into the spec (`decl_memory_banks.push(123)`,
+`module_decl_slots[0] = 1`). Under the test runner's JIT co-compilation, those
+imported bindings do NOT alias the module instances that
+`flat_decl_pools_consistent` reads (duplicate co-compiled module state — the
+same interpreter struct-mutation-visibility family noted in
+convert_nodes_loud_fallback_spec.spl's HARNESS NOTE). Instrumented re-run:
+after `decl_memory_banks.push(123)` the spec sees `banks_len=2` while
+`flat_decl_pools_consistent()` still returns `true` (it reads the un-pushed
+owner instance). The identical sequence run standalone via
+`bin/simple run` (probe build/scratch/probe_meta2.spl) returns the correct
+false/true/true/false for all four controls, so `flat_decl_pools_consistent`
+itself and the retention fix are correct; only the cross-module mutation
+injection is invisible under the test harness. Not fixed here: per this
+doc's own instruction the negative fixture must not be replaced by a vacuous
+assertion; a real fix needs either loader/JIT module-instance dedup
+(99.loader lane) or an owner-module corruption-injection hook called instead
+of direct array mutation.

@@ -122,7 +122,7 @@ fn _validation_find_rule(rules: ValidationRules, cell_ref: text) -> ValidationRu
         if rules.keys[i] == col:
             return rules.specs[i]
         i = i + 1
-    nil
+    None
 
 fn _validation_extract_column(cell_ref: text) -> text:
     """Extract column letters from a cell ref (A1 -> A, AB12 -> AB)."""
@@ -159,11 +159,7 @@ fn _validation_is_integer(text_val: text) -> bool:
     """Check if text represents an integer (no decimal point)."""
     if text_val == "" or text_val.contains("."):
         return false
-    match text_val.to_i64():
-        _:
-            true
-        _:
-            false
+    _validation_parse_number(text_val).0
 
 fn validation_check(rules: ValidationRules, sheet: Sheet, cell_ref: text,
                     proposed_text: text) -> (bool, text):
@@ -172,7 +168,7 @@ fn validation_check(rules: ValidationRules, sheet: Sheet, cell_ref: text,
     Returns (true, "") if valid, or (false, error_message) if not.
     """
     val rule = _validation_find_rule(rules, cell_ref)
-    if rule != nil:
+    if rule.is_some():
         val spec = rule
         if spec.kind == "list":
             val allowed = spec.list_values.split(",")
@@ -221,7 +217,7 @@ fn validation_list_values(rules: ValidationRules, cell_ref: text) -> [text]:
     Returns empty array if no rule or rule is not a list kind.
     """
     val rule = _validation_find_rule(rules, cell_ref)
-    if rule != nil:
+    if rule.is_some():
         if rule.kind == "list":
             val items = rule.list_values.split(",")
             var result: [text] = []
@@ -232,13 +228,18 @@ fn validation_list_values(rules: ValidationRules, cell_ref: text) -> [text]:
             return result
     []
 
-fn validate_sheet(rules: ValidationRules, sheet: Sheet) -> [(ref: text, message: text)]:
+struct ValidationViolation:
+    """A cell that failed its validation rule."""
+    ref: text
+    message: text
+
+fn validate_sheet(rules: ValidationRules, sheet: Sheet) -> [ValidationViolation]:
     """Validate all cells in a sheet against applicable rules.
 
-    Iterates the sheet's used range and collects violations.
-    Returns a list of (cell_ref, error_message) tuples for failed cells.
+    Iterates the sheet's used range and collects one ValidationViolation
+    (cell ref + error message) per failed cell.
     """
-    var violations: [(ref: text, message: text)] = []
+    var violations: [ValidationViolation] = []
     val cell_keys = sheet.cells.keys()
     var i = 0
     while i < cell_keys.len():
@@ -246,10 +247,10 @@ fn validate_sheet(rules: ValidationRules, sheet: Sheet) -> [(ref: text, message:
         val cell = sheet.get_cell(cell_ref)
         val display_text = cell_display_text(cell)
         val check_result = validation_check(rules, sheet, cell_ref, display_text)
-        if not check_result.ok:
+        if not check_result.0:
             violations.push(ValidationViolation(
                 ref: cell_ref,
-                message: check_result.message
+                message: check_result.1
             ))
         i = i + 1
     violations

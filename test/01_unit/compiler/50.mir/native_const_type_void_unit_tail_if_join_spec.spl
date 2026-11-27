@@ -1,0 +1,149 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# A unit function's tail if/else join never takes a word def
+
+Bug native_const_type_void_unit_tail_if_join_2026-11-13 (P1). The frozen
+Windows Phase 2 compiler failed native-build of `app.cli.lint_entry` with
+E-BACKEND-LLVM-CONST-TYPE "integer constant cannot define void" in
+`print_command_help`: an unannotated unit fn whose TAIL is an if/elif/else of
+print arms. The tail join is lowered with expected Some(Unit), so its slot is
+Unit; every default `Const 0` def is now decided from that slot type value.
+Each case lowers `fn a` and counts Const/Copy defs into a Unit-typed MIR local
+(must be 0).
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val data_source = "pub fn spawn(s: text) -> i64:\n    s.len()\n"
+
+var last_void_word_defs = 0
+var last_fn_found = false
+var last_call_count = 0
+var last_value_ret_count = 0
+
+fn lower_errors(body: text) -> text:
+    val consumer_source = "use lib.data.*\n\n" + body
+    val log = Logger(level: 0)
+    val data_ast = parse_full_frontend(data_source, "lib/data.spl", "lib.data", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.data"] = data_ast
+    modules["app.main"] = consumer_ast
+    val sources = [
+        SourceFile(path: "lib/data.spl", content: data_source, module_name: "lib.data"),
+        SourceFile(path: "app/main.spl", content: consumer_source, module_name: "app.main")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var data_lowering = hirlowering_for_module(data_ast.name, surfaces)
+    var consumer_lowering = hirlowering_for_module(consumer_ast.name, surfaces)
+    val data_hir = data_lowering.lower_module(data_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["data_hir"] = data_hir
+    prescan_mods["consumer_hir"] = consumer_hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "data_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
+    val _mir = mir_lowering.lower_module(consumer_hir, [data_hir, consumer_hir])
+    last_void_word_defs = 0
+    last_fn_found = false
+    last_call_count = 0
+    last_value_ret_count = 0
+    for function in _mir.functions.values():
+        if function.name == "a" or function.name.ends_with(".a"):
+            last_fn_found = true
+            var unit_ids: Dict<i64, bool> = {}
+            for local in function.locals:
+                match local.type_.kind:
+                    case MirTypeKind.Unit: unit_ids[local.id.id] = true
+                    case _: pass
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Const(dest, _, _):
+                            if unit_ids.contains(dest.id): last_void_word_defs = last_void_word_defs + 1
+                        case MirInstKind.Copy(dest, _):
+                            if unit_ids.contains(dest.id): last_void_word_defs = last_void_word_defs + 1
+                        case MirInstKind.Call(_, _, _):
+                            last_call_count = last_call_count + 1
+                        case _: pass
+                match block.terminator:
+                    case MirTerminator.Ret(Some(_)):
+                        last_value_ret_count = last_value_ret_count + 1
+                    case _: pass
+    var out = ""
+    for e in consumer_lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    out
+
+fn void_word_defs(body: text) -> i64:
+    val errors = lower_errors(body)
+    if errors != "":
+        print("lower errors: " + errors)
+        return -1
+    last_void_word_defs
+
+describe "unit fn tail if join: no word defined into a void slot":
+    it "tail if/elif/else of print arms (print_command_help shape)":
+        expect(void_word_defs("fn a(c: text):\n    if c == \"lint\":\n        print \"l\"\n        print \"\"\n    elif c == \"fmt\":\n        print \"f\"\n    elif c == \"fix\":\n        print \"x\"\n    else:\n        print \"u\"\n")).to_equal(0)
+
+    it "tail if/else of print arms":
+        expect(void_word_defs("fn a(c: text):\n    if c == \"lint\":\n        print \"l\"\n    else:\n        print \"u\"\n")).to_equal(0)
+
+    it "tail else-less if of a print arm":
+        expect(void_word_defs("fn a(c: text):\n    if c == \"lint\":\n        print \"l\"\n")).to_equal(0)
+
+    it "tail if/else of discarded i64 call arms":
+        expect(void_word_defs("fn a(c: text):\n    if c == \"newunit\":\n        spawn(c)\n    else:\n        spawn(c + c)\n")).to_equal(0)
+
+    it "unit fn with a mid-body if/else of discarded i64 calls (parser_lower_unit_decl shape)":
+        expect(void_word_defs("fn u():\n    print \"r\"\n\nfn a(c: text, t: i64):\n    spawn(c)\n    if c == \"newunit\":\n        spawn(c)\n    else:\n        spawn(c + c)\n    val xs: [i64] = [-1]\n    spawn(c)\n    u()\n")).to_equal(0)
+
+    it "unit fn with early return guard and tail if/else mixing print and unit call (skip_on_* shape)":
+        expect(void_word_defs("fn active() -> bool:\n    false\n\nfn run_it(name: text):\n    print name\n\nfn a(name: text):\n    if active():\n        return\n    if name == \"linux\":\n        print \"skipped\"\n    else:\n        run_it(name)\n")).to_equal(0)
+        expect(last_fn_found).to_equal(true)
+
+    it "tail else-less if of discarded i64 call (v_a_help shape) preserves call with zero void defs":
+        expect(void_word_defs("fn a(c: text, flag: bool):\n    if flag:\n        spawn(c)\n")).to_equal(0)
+        expect(last_fn_found).to_equal(true)
+        expect(last_call_count > 0).to_equal(true)
+
+    it "tail if/else preceded by var init and statement if (p1_exact shape)":
+        expect(void_word_defs("fn a(c: text, cond: bool):\n    var z = 0\n    if cond:\n        z = 1\n    else:\n        z = 2\n    if cond:\n        spawn(c)\n    else:\n        spawn(c + c)\n")).to_equal(0)
+        expect(last_fn_found).to_equal(true)
+        expect(last_call_count >= 2).to_equal(true)
+
+    it "tail if/else mixing unit print arm and discarded i64 call arm":
+        expect(void_word_defs("fn a(c: text, cond: bool):\n    if cond:\n        print \"unit\"\n    else:\n        spawn(c)\n")).to_equal(0)
+        expect(last_fn_found).to_equal(true)
+        expect(last_call_count >= 1).to_equal(true)
+
+    it "tail if/elif/else mixing unit and discarded i64 call arms":
+        expect(void_word_defs("fn a(c: text, mode: i64):\n    if mode == 0:\n        spawn(c)\n    elif mode == 1:\n        print \"mid\"\n    else:\n        spawn(c + c)\n")).to_equal(0)
+        expect(last_fn_found).to_equal(true)
+        expect(last_call_count >= 2).to_equal(true)
+
+    it "tail match of discarded i64 calls in unit fn":
+        expect(void_word_defs("fn a(c: text, mode: i64):\n    match mode:\n        case 0:\n            spawn(c)\n        case _:\n            spawn(c + c)\n")).to_equal(0)
+        expect(last_fn_found).to_equal(true)
+        expect(last_call_count >= 2).to_equal(true)
+
+    it "positive control: non-Unit value-returning if/else still yields its value":
+        expect(void_word_defs("fn a(flag: bool, x: text) -> i64:\n    if flag:\n        spawn(x)\n    else:\n        spawn(x + x)\n")).to_equal(0)
+        expect(last_fn_found).to_equal(true)
+        expect(last_value_ret_count > 0).to_equal(true)
